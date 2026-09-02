@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x, 22.x]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+      # O-12 格式门禁：源码区（src/、web-admin/src/ 等）必须符合 .prettierrc，
+      # 本地用 `npm run format` 一键修复；check 失败即 CI 失败
+      - name: Run format check (prettier)
+        run: npm run format:check
+
+      - name: Run tests
+        run: npm test
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-secret
+          AES_SECRET_KEY: test-aes-key-32-chars-minimum!!
+          HMAC_SECRET: test-hmac-secret
+
+      - name: Run tests with coverage
+        run: npm run test:coverage --if-present
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-secret
+          AES_SECRET_KEY: test-aes-key-32-chars-minimum!!
+          HMAC_SECRET: test-hmac-secret
+
+      - name: Upload backend coverage
+        if: matrix.node-version == '18.x'
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage/lcov.info
+          # T-3 硬门禁：上传/解析失败即让 CI 失败（原软门禁 false 会让失效被静默吞掉）
+          fail_ci_if_error: true
+
+  security-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Use Node.js 20.x
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20.x
+
+      - name: Audit backend dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Audit web-admin dependencies
+        working-directory: web-admin
+        run: npm audit --omit=dev --audit-level=high
+
+  secret-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  frontend-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Use Node.js 20.x
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20.x
+
+      - name: Install dependencies
+        working-directory: web-admin
+        run: npm ci
+
+      # 七维终评（代码质量）补门禁：前端 ESLint 与后端 lint 同级硬门禁。
+      # 此前仅本地有 lint:web 脚本而 CI 未跑，前端代码风格/错误靠自觉；
+      # 放在测试与构建之前，尽早拦截（当前基线已验证可通过）
+      - name: Run frontend lint
+        working-directory: web-admin
+        run: npm run lint
+
+      # T-3：前端测试 + 覆盖率硬门禁（vitest coverage.thresholds 低于基线即非零退出）
+      - name: Run frontend tests with coverage
+        working-directory: web-admin
+        run: npm run test:coverage
+
+      - name: Build frontend
+        working-directory: web-admin
+        run: npm run build
+
+      - name: Upload frontend coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./web-admin/coverage/lcov.info
+          # T-3 硬门禁：上传/解析失败即让 CI 失败（与后端 coverage 同口径）
+          fail_ci_if_error: true
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    # main 分支推 latest；v* 标签发布版本镜像（R-7）
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write # GHCR 推送所需
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      # R-7：登录 GitHub Container Registry（使用工作流内置 GITHUB_TOKEN，
+      # 无需额外仓库密钥；镜像默认私有，按需在同仓库设置可见性）
+      - name: Login to GHCR
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 版本 tag 策略：
+      #   - 任意构建：:sha-<短哈希>（可精确回溯提交）
+      #   - main 分支：额外 :latest
+      #   - v* 标签：额外 :<标签名>（如 :v1.0.0）与 :latest
+      - name: Compute image tags
+        id: meta
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          TAGS="${IMAGE}:sha-${GITHUB_SHA::7}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAGS="${TAGS},${IMAGE}:${GITHUB_REF_NAME},${IMAGE}:latest"
+          elif [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${IMAGE}:latest"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

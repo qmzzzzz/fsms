@@ -1,0 +1,14 @@
+# Grafana 数据源预配置（G-2）：容器启动即可用，无需界面手配
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    # compose 网络内的服务名
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s

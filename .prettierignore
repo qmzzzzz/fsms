@@ -1,0 +1,11 @@
+node_modules/
+coverage/
+dist/
+logs/
+package-lock.json
+*.log
+# 前端构建期自动生成的声明文件（unplugin 产物，非手写源码）
+web-admin/src/auto-imports.d.ts
+web-admin/src/components.d.ts
+# 交付物报告（生成型 HTML 产物，重排只会产生巨量无意义 diff）
+deliverables/*.html

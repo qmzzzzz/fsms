@@ -1,0 +1,362 @@
+services:
+  app:
+    build: .
+    ports:
+      # 仅绑定本机回环地址，生产由宿主 nginx 反向代理对外提供服务
+      - '127.0.0.1:3000:3000'
+    # P3-48：密钥不走 environment。容器环境变量不是机密载体——
+    # `docker inspect` 完整回显 Config.Env、`docker compose config` 会把展开后的
+    # 值打印到 CI 日志、子进程无条件继承、/proc/<pid>/environ 同 uid 可读。
+    # 改用 secrets 挂载到 /run/secrets/<name>，应用侧由 config/secrets.js
+    # 读取 <NAME>_FILE 指向的文件并注入（Docker/K8s 通用约定）。
+    # 此处只保留非敏感配置项。
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+      # 与下方 deploy.resources.limits.memory=1g 对齐：
+      # V8 读不到 cgroup 限制，默认堆上限（约 1.5G）高于容器上限时，
+      # 进程会先被 OOM Killer 杀掉而非触发 GC —— 表现为无日志的突然重启
+      - NODE_OPTIONS=--max-old-space-size=768
+      - TRUST_PROXY_HOPS=${TRUST_PROXY_HOPS:-1}
+      - CORS_ORIGIN=${CORS_ORIGIN:?CORS_ORIGIN 必须显式配置（如 https://admin.example.com，多个用逗号分隔）}
+      # 审计留存天数（合规区间 90..3650，留空取默认 180）
+      - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-180}
+      # 指向挂载后的 secret 文件路径，本身不含敏感值
+      - JWT_SECRET_FILE=/run/secrets/jwt_secret
+      - JWT_REFRESH_SECRET_FILE=/run/secrets/jwt_refresh_secret
+      - AES_SECRET_KEY_FILE=/run/secrets/aes_secret_key
+      - HMAC_SECRET_FILE=/run/secrets/hmac_secret
+      - MONGODB_URI_FILE=/run/secrets/mongodb_uri
+      - ADMIN_INITIAL_PASSWORD_FILE=/run/secrets/admin_initial_password
+    secrets:
+      - jwt_secret
+      - jwt_refresh_secret
+      - aes_secret_key
+      - hmac_secret
+      - mongodb_uri
+      - admin_initial_password
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+    # ===== R-4 容器加固：资源上限 + 日志轮转 =====
+    #
+    # 资源上限的意义不在于省资源，而在于**故障隔离**：没有上限时，
+    # 一次内存泄漏或失控循环会把宿主机整台拖死（含 mongo 与宿主 nginx），
+    # 一个进程的 bug 升级成全站不可用。
+    #
+    # 用 deploy.resources.limits 而非旧的顶层 mem_limit/cpus：
+    # Compose V2 已把两者统一，deploy 段在 swarm 与 compose 下都生效。
+    deploy:
+      resources:
+        limits:
+          # Node 默认堆上限约 1.5G（64 位），容器给 1G 时 V8 感知不到限制，
+          # 会在 OOM Kill 前才发现——因此下方 NODE_OPTIONS 同步收紧 --max-old-space-size
+          memory: 1g
+          cpus: '1.5'
+        reservations:
+          memory: 256m
+    # 日志轮转：默认 json-file 驱动无上限，长跑容器的 stdout 会把磁盘写满，
+    # 而磁盘满在本系统上表现为审计落库失败（WAL 也写不下）——安全能力静默退化
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '5'
+    # 禁止通过 setuid 提权：容器内已是非 root（Dockerfile 的 USER nodejs），
+    # 本项封住「进程内漏洞 → setuid 二进制 → root」这条路径
+    security_opt:
+      - no-new-privileges:true
+    # 丢弃全部 Linux capability：本服务只监听 3000（非特权端口）、
+    # 读写自己的 logs 目录，不需要任何 capability。
+    # 保留一个不需要的 capability 就是给容器逃逸留一级台阶。
+    cap_drop:
+      - ALL
+    # C-1：只读根文件系统。镜像内所有路径不可写，写入被收敛到两处：
+    #   /app/logs —— 命名卷，winston 日志与审计 WAL（audit-buffer.wal）
+    #   /tmp      —— tmpfs，node/依赖的临时文件
+    # 任何「往镜像目录写文件」的漏洞利用（落地 webshell、篡改源码）
+    # 都会被只读挂载直接挡下，且不需要应用改代码。
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - app-logs:/app/logs
+    networks:
+      - fire-safety-net
+
+  mongo:
+    # R-5 基础镜像版本固定（digest 待部署机捕获）
+    #
+    # 为什么至少要钉到补丁号：只写 `mongo:6` 时，tag 会随上游滚动，
+    # 「同一份 compose 在两台机器上跑出不同的数据库版本」而无从察觉。
+    #
+    # 为什么这里没有直接写 digest：digest 必须由 `docker pull` 实际拉取后
+    # 从本地捕获，不能凭记忆或推测填写——填错的 digest 会让部署直接失败，
+    # 而这种失败往往在上线窗口才暴露。部署机执行：
+    #   docker pull mongo:6.0.20
+    #   docker inspect --format='{{index .RepoDigests 0}}' mongo:6.0.20
+    # 把输出追加为 `image: mongo:6.0.20@sha256:<捕获值>`（保留可读 tag：
+    # 纯 digest 看不出版本，排障时得先 inspect 才知道跑的是哪个大版本）。
+    image: mongo:6.0.20
+    # 不暴露到宿主机，仅容器间通信（如需本地调试可临时改为 "127.0.0.1:27017:27017"）
+    expose:
+      - '27017'
+    volumes:
+      - mongo-data:/data/db
+      - mongo-config:/data/configdb
+    # mongo 官方镜像原生支持 MONGO_INITDB_ROOT_PASSWORD_FILE，
+    # 用它代替明文 environment（同样为了不出现在 docker inspect 中）
+    environment:
+      - MONGO_INITDB_DATABASE=fire_safety_db
+      - MONGO_INITDB_ROOT_USERNAME_FILE=/run/secrets/mongo_root_username
+      - MONGO_INITDB_ROOT_PASSWORD_FILE=/run/secrets/mongo_root_password
+    secrets:
+      - mongo_root_username
+      - mongo_root_password
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    # R-4：mongo 同样加资源上限与日志轮转。
+    # mongo 不设上限的后果比 app 更重：WiredTiger 默认把内存缓存开到
+    # (宿主内存 - 1G) / 2，宿主内存越大它吃得越多，最终与 app 抢内存。
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2.0'
+        reservations:
+          memory: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '5'
+    security_opt:
+      - no-new-privileges:true
+    # C-1：只读根文件系统。数据与配置已各在命名卷（见上方 volumes），
+    # 其余写入点用 tmpfs 兜住：
+    #   /tmp            —— 常规临时文件
+    #   /home/mongodb   —— mongosh 历史/缓存（healthcheck 会调 mongosh），
+    #                      HOME 在镜像层，只读根下不给 tmpfs 会导致健康检查失败
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/mongodb
+    # 能力最小化：先 drop 全部，再精确补回官方镜像启动链必需的五项——
+    # 入口脚本以 root 启动后经 gosu 降权到 mongodb（需要 SETUID/SETGID），
+    # 首次初始化要对数据目录做属主调整（需要 CHOWN/DAC_OVERRIDE/FOWNER）。
+    # 这与「不 drop」有本质区别：NET_RAW/SYS_ADMIN 等逃逸常用能力都已剥夺。
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    networks:
+      - fire-safety-net
+
+  # ===== G-2 指标消费端：Prometheus 抓取 + Grafana 看板/告警 =====
+  #
+  # 后端 /metrics 已是 Prometheus 文本格式（src/utils/metrics.js），
+  # 此前「采了没人看」；这些容器把它接成正式消费链路：
+  #   - Prometheus：15s 抓取 + 告警规则求值（deployment/observability/alert-rules.yml）
+  #   - Alertmanager：按 severity 路由推送通知（deployment/observability/alertmanager.yml），
+  #     critical 即时触达、warning 低优先级，不再依赖人工盯 /alerts 页；
+  #     接收器 URL 为占位，生产用私有副本挂载覆盖（不入库，见其头注释）
+  #   - Grafana：预配置数据源与看板（deployment/observability/grafana/）
+  # 三者都只绑 127.0.0.1：监控面不对外，访问经宿主反代或直接本机。
+  prometheus:
+    # R-5 同口径：钉补丁号，digest 由部署机 docker pull 后捕获追加
+    image: prom/prometheus:v2.53.0
+    ports:
+      - '127.0.0.1:9090:9090'
+    volumes:
+      - ./deployment/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deployment/observability/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+    depends_on:
+      - app
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: '0.5'
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '5'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
+      - fire-safety-net
+
+  alertmanager:
+    # G-2：告警触达链路的路由中枢（配置见 deployment/observability/alertmanager.yml，
+    # 接收器 URL 为占位，生产以私有副本挂载覆盖，不入库）
+    # R-5 同口径：钉补丁号，digest 由部署机 docker pull 后捕获追加
+    image: prom/alertmanager:v0.27.0
+    ports:
+      # 仅本机访问 Web UI；Prometheus 经容器网络 9093 推送告警
+      - '127.0.0.1:9093:9093'
+    volumes:
+      - ./deployment/observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: '0.25'
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '5'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
+      - fire-safety-net
+
+  grafana:
+    # R-5 同口径：钉补丁号，digest 由部署机 docker pull 后捕获追加
+    image: grafana/grafana:11.1.0
+    ports:
+      # 宿主 3000 已被 app 占用，Grafana 用 3001
+      - '127.0.0.1:3001:3000'
+    environment:
+      # 初始管理员口令走宿主环境变量（同 CORS_ORIGIN 的强制显式约定）；
+      # 首次登录后应立即在界面内更换
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD 必须显式配置}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deployment/observability/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./deployment/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: '0.5'
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: '5'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      # 官方镜像启动链需要这两处可写（日志默认走 stdout，目录仍要存在）
+      - /var/log/grafana
+      - /run/grafana
+    networks:
+      - fire-safety-net
+
+  # 可选：Redis 用于缓存和 session
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   restart: unless-stopped
+  #   networks:
+  #     - fire-safety-net
+
+# ============================================================
+# 密钥文件（P3-48）
+#
+# 部署前准备（宿主机上执行一次，务必放在仓库之外的目录）：
+#   mkdir -p ./secrets && chmod 700 ./secrets
+#   openssl rand -base64 48 | tr -d '\n' > ./secrets/jwt_secret
+#   openssl rand -base64 48 | tr -d '\n' > ./secrets/jwt_refresh_secret
+#   openssl rand -hex 32     | tr -d '\n' > ./secrets/aes_secret_key
+#   openssl rand -hex 16     | tr -d '\n' > ./secrets/hmac_secret
+#   printf 'firesafety'  > ./secrets/mongo_root_username
+#   openssl rand -base64 32 | tr -d '\n' > ./secrets/mongo_root_password
+#   openssl rand -base64 24 | tr -d '\n' > ./secrets/admin_initial_password
+#   # mongodb_uri 需内嵌上面的用户名与口令：
+#   printf 'mongodb://%s:%s@mongo:27017/fire_safety_db?authSource=admin' \
+#     "$(cat ./secrets/mongo_root_username)" "$(cat ./secrets/mongo_root_password)" \
+#     > ./secrets/mongodb_uri
+#   chmod 600 ./secrets/*
+#
+# 为什么 mongodb_uri 单独成文件而不是在 compose 里拼接：
+# 拼接需要在 compose 中引用口令变量，那口令就又回到了 environment/CLI 上。
+#
+# 注意 ./secrets 必须加入 .gitignore 与 .dockerignore（已确认在列）。
+# 生产建议改用 docker swarm 的外部 secret 或云厂商 KMS：
+#   secrets:
+#     jwt_secret:
+#       external: true
+# ============================================================
+secrets:
+  jwt_secret:
+    file: ./secrets/jwt_secret
+  jwt_refresh_secret:
+    file: ./secrets/jwt_refresh_secret
+  aes_secret_key:
+    file: ./secrets/aes_secret_key
+  hmac_secret:
+    file: ./secrets/hmac_secret
+  mongodb_uri:
+    file: ./secrets/mongodb_uri
+  admin_initial_password:
+    file: ./secrets/admin_initial_password
+  mongo_root_username:
+    file: ./secrets/mongo_root_username
+  mongo_root_password:
+    file: ./secrets/mongo_root_password
+
+volumes:
+  mongo-data:
+  mongo-config:
+  # C-1：app 只读根下的日志卷（与 mongo 数据卷不同，日志可再生，
+  # 灾难恢复时不需要它，但正常运行期必须持久（审计 WAL 在此）
+  app-logs:
+  # G-2：监控栈数据卷。prometheus-data / grafana-data 此前被服务引用
+  # 却未在本段声明，docker compose config 会直接拒绝整个项目；
+  # alertmanager-data 同理（静默/通知状态，重启不丢静默记录）
+  prometheus-data:
+  grafana-data:
+  alertmanager-data:
+  # redis-data:
+
+networks:
+  fire-safety-net:
+    driver: bridge

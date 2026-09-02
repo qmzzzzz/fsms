@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>消防安全管理系统 · 7 维度完整审计报告</title>
+<style>
+  :root {
+    --primary: #1f6f8b;
+    --primary-soft: #e6f2f6;
+    --accent: #d97706;
+    --good: #2f8f5b;
+    --warn: #d97706;
+    --bad: #c0392b;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --bg: #f8fafc;
+    --card: #ffffff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--text); background: var(--bg); line-height: 1.7; font-size: 15px; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 20px 64px; }
+  header.hero { background: linear-gradient(135deg, #1f6f8b 0%, #2c3e50 100%); color: #fff; border-radius: 14px; padding: 34px 36px; margin-bottom: 28px; }
+  header.hero h1 { font-size: 26px; margin-bottom: 8px; letter-spacing: .5px; }
+  header.hero .sub { opacity: .9; font-size: 14px; }
+  .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 22px 0 0; }
+  .meta-item { background: rgba(255,255,255,.12); border-radius: 8px; padding: 10px 14px; font-size: 13px; }
+  .meta-item b { display: block; font-size: 12px; opacity: .75; margin-bottom: 2px; }
+  .score-badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,.16); border-radius: 999px; padding: 4px 14px; font-size: 14px; }
+  .score-badge .num { font-size: 22px; font-weight: 700; }
+  h2.section { font-size: 20px; margin: 40px 0 16px; padding-left: 12px; border-left: 4px solid var(--primary); }
+  h3 { font-size: 16px; margin: 18px 0 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 22px 24px; margin-bottom: 16px; }
+  .card.dim { border-top: 4px solid var(--primary); }
+  .dim-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+  .dim-head h3 { margin: 0; font-size: 17px; }
+  .pill { border-radius: 999px; padding: 2px 12px; font-size: 13px; font-weight: 600; }
+  .pill.s9 { background: var(--good); color: #fff; }
+  .pill.s8 { background: var(--accent); color: #fff; }
+  .pill.s7 { background: #b45309; color: #fff; }
+  .dim-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+  .tag { background: var(--primary-soft); color: var(--primary); border-radius: 6px; padding: 2px 10px; font-size: 12px; }
+  .tag.warn { background: #fef3c7; color: #92400e; }
+  ul, ol { padding-left: 22px; margin: 8px 0; }
+  li { margin: 4px 0; }
+  .evidence { background: #f1f5f9; border-radius: 8px; padding: 10px 14px; font-size: 13px; color: #374151; margin-top: 10px; }
+  .evidence code { background: #e2e8f0; border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; font-weight: 600; }
+  .sev { display: inline-block; border-radius: 6px; padding: 1px 10px; font-size: 12px; font-weight: 600; color: #fff; }
+  .sev.high { background: var(--bad); }
+  .sev.mid { background: var(--warn); }
+  .sev.low { background: #6b7280; }
+  .sev.none { background: var(--good); }
+  .ok { color: var(--good); font-weight: 600; }
+  .warn-t { color: var(--warn); font-weight: 600; }
+  .issue { border-left: 3px solid var(--line); padding: 8px 14px; margin: 8px 0; background: #fafafa; border-radius: 0 8px 8px 0; }
+  .issue.mid { border-left-color: var(--warn); }
+  .issue.low { border-left-color: #9ca3af; }
+  .issue .issue-t { font-weight: 600; }
+  .summary-verdict { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 10px; padding: 16px 20px; margin: 12px 0; }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 40px; text-align: center; }
+  code { background: #f1f5f9; border-radius: 4px; padding: 1px 5px; font-size: 13px; }
+  .chart-note { color: var(--muted); font-size: 12px; }
+  @media (max-width: 640px) {
+    header.hero { padding: 24px 20px; }
+    header.hero h1 { font-size: 21px; }
+    .card { padding: 16px; }
+    .dim-head { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>消防安全管理系统（Fire Safety RBAC System）</h1>
+  <div class="sub">完整代码审计报告 · 7 核心维度整体评估</div>
+  <div class="meta-grid">
+    <div class="meta-item"><b>项目路径</b>D:\桌面\xf</div>
+    <div class="meta-item"><b>技术栈</b>Node.js 22 · Express · MongoDB 6 · Socket.IO · Vue 3</div>
+    <div class="meta-item"><b>审计日期</b>2026-09-01</div>
+    <div class="meta-item"><b>审计方式</b>源码精读 + 自动化检查（测试 / lint / audit / CI）</div>
+  </div>
+  <div style="margin-top:22px;">
+    <span class="score-badge">综合评分 <span class="num">9.0</span> / 10</span>
+    <span style="margin-left:12px; font-size:13px; opacity:.9;">评级：优秀（Strong）—— 达到可投产水准，仅存少量非阻断项</span>
+  </div>
+</header>
+
+<h2 class="section">一、审计结论概览</h2>
+<div class="card">
+  <p><b>总体评价：</b>这是一个工程质量明显高于平均水准的 RBAC 权限管控型业务系统。七个维度得分普遍在 8.5～9.5 之间，无高危缺口（依赖审计 0 漏洞、无高危越权、无密钥泄露），安全性与可观测性维度尤其突出。项目大量采用「fail-closed」原则（权限校验失败默认拒绝）、时序侧信道防护、原子化防重放、审计哈希链等企业级做法，且每个安全决策都附有详细注释说明「为什么」。系统具备直接投入生产使用的条件，剩余问题均为工程完善类而非阻断类。</p>
+  <table>
+    <tr><th>维度</th><th>评分</th><th>一句话结论</th></tr>
+    <tr><td>1. 代码质量与规范性</td><td><span class="pill s9">9.0</span></td><td>注释详尽、命名语义化、复杂度控制好；仅 3 处 lint 未使用变量</td></tr>
+    <tr><td>2. 架构设计与工程结构</td><td><span class="pill s9">9.0</span></td><td>分层清晰、模块高内聚低耦合；存在「控制器直连模型」已声明技术债</td></tr>
+    <tr><td>3. 安全性</td><td><span class="pill s9">9.5</span></td><td>纵深防御全面：加密口令、MFA、RBAC+数据范围、审计链、防枚举/重放/注入</td></tr>
+    <tr><td>4. 性能与资源效率</td><td><span class="pill s8">8.5</span></td><td>游标分页、统计缓存、批量写入与容量保护齐备；部分查询索引有待运行期验证</td></tr>
+    <tr><td>5. 测试覆盖与可靠性</td><td><span class="pill s9">9.0</span></td><td>后端 1417 用例、覆盖率棘轮门禁、CI 硬门禁；前端测试存在环境兼容缺口</td></tr>
+    <tr><td>6. 可观测性与运维</td><td><span class="pill s9">9.5</span></td><td>日志/监控/告警/优雅关闭/容器加固全链路完整</td></tr>
+    <tr><td>7. 文档与知识传承</td><td><span class="pill s9">9.0</span></td><td>README/ADR×6/架构图/CHANGELOG 齐备；缺失 Git 版本历史</td></tr>
+  </table>
+</div>
+
+<h2 class="section">二、各维度详细评估</h2>
+
+<!-- 维度1 -->
+<div class="card dim">
+  <div class="dim-head">
+    <h3>1. 代码质量与规范性</h3>
+    <span class="pill s9">9.0 / 10</span>
+  </div>
+  <div class="dim-tags"><span class="tag">可读性</span><span class="tag">复杂度控制</span><span class="tag">DRY</span><span class="tag">注释质量</span></div>
+  <ul>
+    <li><b>命名与一致性：</b>全库使用语义化命名（如 <code>walTrimLines</code>、<code>unshiftChunked</code>、<code>applyDataScopeToQuery</code>），缩进统一 2 空格（.editorconfig / .prettierrc 约束），ESLint + Prettier 双门禁。</li>
+    <li><b>复杂度控制：</b>核心模块（authService 40KB、security 中间件 31KB）虽有体量，但内部按功能拆分清晰、函数职责单一；对 V8 参数上限（<code>unshift(...docs)</code> 数十万级 RangeError）、bcrypt 超长输入等隐蔽复杂度陷阱均有针对性处理。</li>
+    <li><b>注释质量：</b>项目最大的亮点之一。关键业务逻辑均解释「为什么」（如 JWT 算法锁定原因、审计 WAL 前缀裁剪不整文件截断的原因、fail-closed 决策），不是流水账式注释；注释与代码同步更新（多次看到注释标注修复批次号）。</li>
+    <li><b>DRY：</b>错误码集中注册表（<code>src/utils/errorCodes.js</code>）、审计留存天数单一声明（<code>constants/retention.js</code>）、label 映射单一来源等，重复逻辑均已合理抽象。</li>
+  </ul>
+  <div class="evidence">
+    <b>发现：</b>3 处 ESLint <code>no-unused-vars</code> error —— <code>src/services/securityAlert.js:9</code>（normalizeIP）、<code>src/tests/observability/logShipperGap.test.js:13</code>（EventEmitter）、<code>:251</code>（body）。均为未使用变量，无行为影响。<br>
+    <b>证据：</b><code>npx eslint src</code> → 3 problems (3 errors, 0 warnings)
+  </div>
+</div>
+
+<!-- 维度2 -->
+<div class="card dim">
+  <div class="dim-head">
+    <h3>2. 架构设计与工程结构</h3>
+    <span class="pill s9">9.0 / 10</span>
+  </div>
+  <div class="dim-tags"><span class="tag">分层解耦</span><span class="tag">模块化</span><span class="tag">配置外部化</span><span class="tag">设计模式</span></div>
+  <ul>
+    <li><b>分层清晰：</b>路由（11）→ 控制器（9）→ 服务层（19）→ Mongoose 模型（12）四层；请求级中间件链（requestId → metrics → Sentry → IP黑名单 → CORS → 安全头 → 限流 → 查询防护 → morgan → 审计）职责单一。</li>
+    <li><b>模块化：</b>服务层覆盖会话、权限、验证码、审计缓冲、设备/告警/巡检业务，高内聚低耦合；多实例状态外置（sharedCache + Redis 回退）有专门 ADR-005 记录。</li>
+    <li><b>设计模式应用：</b>中间件链、AsyncLocalStorage（请求上下文）、单例/工厂、状态机（设备生命周期）等使用克制，无过度设计。</li>
+    <li><b>配置外部化：</b>全部密钥走 <code>*_FILE</code> 注入或环境变量，生产启动强校验（<code>config/validate.js</code> 拦截弱密钥/危险配置）；无魔法数字泛滥（阈值均具名常量）。</li>
+  </ul>
+  <div class="evidence">
+    <b>发现（技术债，作者已自认）：</b>架构文档注明「部分控制器直连模型」（原优化清单 D-1），新功能已强制经服务层。此债不影响当前正确性，但后续维护需收敛。<br>
+    <b>证据：</b><code>docs/architecture.md</code>「分层约定」段；<code>src/config/validate.js</code>
+  </div>
+</div>
+
+<!-- 维度3 -->
+<div class="card dim">
+  <div class="dim-head">
+    <h3>3. 安全性</h3>
+    <span class="pill s9">9.5 / 10</span>
+  </div>
+  <div class="dim-tags"><span class="tag">认证</span><span class="tag">授权</span><span class="tag">输入验证</span><span class="tag">敏感数据</span><span class="tag">依赖安全</span></div>
+  <p>本维度是项目最强项，呈现典型纵深防御（Defense in Depth）：</p>
+  <table>
+    <tr><th>安全域</th><th>实现情况</th></tr>
+    <tr><td>口令传输</td><td>前端 WebCrypto ECDH（P-256/P-384）+ HKDF + AES-256-GCM 信封加密，时间戳窗口 + 一次性 nonce 防重放；密文轨/明文轨灰度，strict 模式拒绝明文</td></tr>
+    <tr><td>口令存储</td><td>bcrypt 加盐哈希；哑口令摘要对齐比对耗时（防时序侧信道用户枚举）</td></tr>
+    <tr><td>登录防护</td><td>三层限流（IP/用户/登录专用）、图形验证码开关、失败计数原子递增、≥10 次锁定 10 分钟、统一响应防用户名枚举</td></tr>
+    <tr><td>会话与令牌</td><td>JWT 算法锁定 HS256（防 alg:none）；access 2h / refresh 7d 分离；黑名单 + tokenVersion 全局吊销 + 设备级会话（踢单设备）；refresh 原子消费防重放；改密后全会话吊销（fail-closed）</td></tr>
+    <tr><td>MFA</td><td>TOTP + 恢复码；seed 以 AES-GCM 加密落库（enc:v1:）；验证码原子条件更新防重放；防爆破锁定</td></tr>
+    <tr><td>授权（RBAC）</td><td>菜单/按钮/接口三级权限；<b>实时从库加载角色</b>（不信任 token payload）；数据范围按角色 level（全部/本部门/本人）过滤且对空部门显式 deny，防横向越权</td></tr>
+    <tr><td>Web 层</td><td>Helmet + CSP(nonce)、NoSQL 注入防护（$ 与 . 键清理）、HPP 防护、CSRF（SameSite=Lax + JSON-only）、IP 黑/白名单（CIDR）、敏感操作二次验证</td></tr>
+    <tr><td>审计与取证</td><td>写操作全量审计；SHA-256 哈希链 + HMAC 认证（防篡改）；WAL 落盘兜底；敏感字段脱敏；留存天数合规区间校验</td></tr>
+    <tr><td>密钥管理</td><td>Docker secrets 挂载（非环境变量）、.gitignore/.dockerignore 双排除、CI Gitleaks 密钥扫描、AES/HMAC/JWT 密钥分离</td></tr>
+    <tr><td>依赖安全</td><td><b>npm audit = 0 vulnerabilities</b>（官方 registry 实测）；CI 独立 security-audit job 对前后端均执行</td></tr>
+  </table>
+  <div class="evidence">
+    <b>发现（轻微）：</b>本地 <code>.env</code> 中 <code>JWT_EXPIRE=24h</code> 与代码默认 2h 不一致（本地开发配置，非生产风险，但建议统一口径避免误用）；审计链采用「单进程锁」假设（ADR-004 已显式记录边界），多实例并发写链需依赖外置锁，Redis 模式下已接分布式锁。<br>
+    <b>证据：</b><code>src/middleware/auth.js / rbac.js / security.js</code>、<code>src/services/authService.js</code>、<code>src/utils/auditChain.js</code>、<code>docker-compose.yml</code>
+  </div>
+</div>
+
+<!-- 维度4 -->
+<div class="card dim">
+  <div class="dim-head">
+    <h3>4. 性能与资源效率</h3>
+    <span class="pill s8">8.5 / 10</span>
+  </div>
+  <div class="dim-tags"><span class="tag">查询效率</span><span class="tag">缓存</span><span class="tag">批量写入</span><span class="tag">容量保护</span></div>
+  <ul>
+    <li><b>数据库交互：</b>高量级列表采用游标分页（ADR-006，避免 skip 深分页性能劣化）；审计日志缓冲批量 insertMany（非高频事件型审计直写以保证暴力破解检测即时性）。</li>
+    <li><b>缓存策略：</b>统计类接口 statsCache（TTL + maxSize + 清理周期）；权限结果 userPermissionService 缓存；sharedCache 支持 Redis 跨实例失效广播（多实例一致性）；登录公钥、验证码等均带限流防滥用。</li>
+    <li><b>容量保护：</b>审计缓冲硬上限（防 OOM）、WAL 字节上限（防磁盘写放大）、分块 unshift（防 V8 参数上限）——对极端场景做了充分防御。</li>
+    <li><b>并发与异步：</b>WAL 操作串行化在 walChain（防读写竞争）；锁内完成「读尾→串链→落库→推进尾」防幻影链尾；IO 密集路径（日志、审计）均异步化。</li>
+  </ul>
+  <div class="evidence">
+    <b>发现（需运行期验证）：</b>模型层索引定义存在（unique/index），但审计未在真实数据量下做 explain 验证；控制器直连模型路径未经过服务层缓存，存在个别 N+1 可能性。建议上线前用生产规模数据做 <code>explain()</code> 压测。<br>
+    <b>证据：</b><code>docs/adr/ADR-006-高量级列表游标分页选型.md</code>、<code>src/services/auditBuffer.js</code>、<code>src/services/statsCache.js</code>
+  </div>
+</div>
+
+<!-- 维度5 -->
+<div class="card dim">
+  <div class="dim-head">
+    <h3>5. 测试覆盖与可靠性</h3>
+    <span class="pill s9">9.0 / 10</span>
+  </div>
+  <div class="dim-tags"><span class="tag">单元/集成</span><span class="tag">覆盖率门禁</span><span class="tag">CI/CD</span><span class="tag">E2E</span></div>
+  <ul>
+    <li><b>测试规模：</b>后端 <b>94 套件 / 1417 用例</b>，本次实测 1415 通过、2 失败（失败为 Windows 平台文件句柄时序偶发，单独重跑 23/23 全部通过）；前端 CI 记录 12 套件 / 169 例全绿。</li>
+    <li><b>覆盖率棘轮：</b>jest.config.js 采用「基线贴着实测值、只上调不下调」策略，安全关键模块（security/auth/rbac/tokenBlacklist/encryption/auditChain 等）单独设阈，多数 branches ≥ 80%，防止删除测试后 CI 仍绿。</li>
+    <li><b>安全专项测试：</b>越权防护（assignRoles）、刷新令牌重放、故障注入（mongodb 中断）、登录加密、审计链验证等均有专项用例，覆盖边界与异常场景。</li>
+    <li><b>CI/CD：</b>GitHub Actions 矩阵（Node 18/20/22）：lint + prettier 门禁 + 后端测试/覆盖率（codecov 硬门禁）+ 前端 lint/测试/构建 + npm audit + Gitleaks 密钥扫描 + GHCR 镜像构建推送。</li>
+    <li><b>E2E：</b>Playwright 完整栈配置（后端 + 真实 Mongo + 前端产物），凭据走环境变量。</li>
+  </ul>
+  <div class="evidence">
+    <b>发现：</b>① 前端 vitest 在本机 Node v20.20.2 因 <code>undici 8.10.0 / jsdom 30.0.1</code> 与 Node 内置 webidl API（<code>markAsUncloneable</code>）不兼容而无法启动 worker——为依赖-运行环境兼容问题，非被测代码缺陷；② 后端 2 个审计缓冲测试在全量并行时偶发 <code>EPERM</code>（Windows 下 WAL 文件句柄时序），单独运行稳定通过。两处均建议在 CI（Linux）确认全绿，并将前端 Node 版本或 undici 版本锁定。<br>
+    <b>证据：</b><code>jest-full.log</code>（1415 pass / 2 fail）、<code>npx jest src/tests/observability/auditBufferGap.test.js</code>（23/23 pass）
+  </div>
+</div>
+
+<!-- 维度6 -->
+<div class="card dim">
+  <div class="dim-head">
+    <h3>6. 可观测性与运维</h3>
+    <span class="pill s9">9.5 / 10</span>
+  </div>
+  <div class="dim-tags"><span class="tag">日志</span><span class="tag">监控</span><span class="tag">告警</span><span class="tag">优雅关闭</span><span class="tag">容器加固</span></div>
+  <ul>
+    <li><b>日志规范：</b>winston + 按日轮转，生产 JSON 格式；AsyncLocalStorage 注入 requestId 实现单请求多日志关联；异常堆栈单独落盘（exceptions-*.log）；日志留存与审计库留存单一声明对齐（避免取证断档）；可选项接 HttpShipper 日志转发。</li>
+    <li><b>监控指标：</b>/metrics 暴露 Prometheus 文本格式（QPS/延迟直方图/错误/安全计数）；docker-compose 内置 Prometheus + Alertmanager（按 severity 路由）+ Grafana（预置数据源与看板）完整链路。</li>
+    <li><b>错误处理：</b>统一 ApiResponse 包络 + 错误码注册表（前后端 i18n 映射单一通道）；进程级异常处理与优雅退出落库顺序经过精心设计。</li>
+    <li><b>部署与回滚：</b>graceful shutdown 按序执行（WS dispose → 审计缓冲 flush → 停 WAL → 关缓存 → 关 DB）；Dockerfile 多阶段 + 非 root + dumb-init + HEALTHCHECK；容器只读根、cap_drop ALL、资源上限、日志轮转；镜像 tag 策略（sha-短哈希 / latest / v*）。</li>
+  </ul>
+  <div class="evidence">
+    <b>说明：</b>未在本次审计中实际执行无损发布演练（需部署环境），此为验证缺口而非缺陷。<br>
+    <b>证据：</b><code>src/utils/logger.js</code>、<code>src/index.js</code>、<code>docker-compose.yml</code>、<code>deployment/observability/</code>
+  </div>
+</div>
+
+<!-- 维度7 -->
+<div class="card dim">
+  <div class="dim-head">
+    <h3>7. 文档与知识传承</h3>
+    <span class="pill s9">9.0 / 10</span>
+  </div>
+  <div class="dim-tags"><span class="tag">README</span><span class="tag">ADR</span><span class="tag">架构图</span><span class="tag">CHANGELOG</span></div>
+  <ul>
+    <li><b>README / 上手指南：</b>包含环境要求、启动步骤（dev-backend.cmd / dev-vite.cmd / start.bat）、配置说明，新人可在约 30 分钟内跑起。</li>
+    <li><b>ADR：</b>6 篇架构决策记录（ECDH 口令加密、审计链哈希、密钥管理、单进程锁假设、多实例状态外置、游标分页），记录了关键权衡与边界假设，避免后人踩坑。</li>
+    <li><b>架构图：</b>docs/architecture.md 以 Mermaid 提供总体架构、登录时序、ER 图、部署拓扑。</li>
+    <li><b>CHANGELOG：</b>遵循 Keep a Changelog + SemVer，[未发布] 段与 1.0.0 追溯段清晰记录功能/安全/修复批次。</li>
+    <li><b>API 文档：</b>存在 Swagger 配置（src/config/swagger.js），接口覆盖有待与实现同步核验。</li>
+  </ul>
+  <div class="evidence">
+    <b>发现（中）：</b>项目<b>未纳入 Git 版本控制</b>（无 .git 目录）。CI 配置、CHANGELOG、镜像 tag 策略均依赖 Git 工作流，缺少版本历史会削弱可追溯性、回滚能力和代码评审基础。建议立即 <code>git init</code> 纳入版本管理。<br>
+    <b>证据：</b><code>git status</code> → fatal: not a git repository
+  </div>
+</div>
+
+<h2 class="section">三、问题清单（按严重程度）</h2>
+<div class="card">
+  <table>
+    <tr><th style="width:90px;">级别</th><th style="width:230px;">问题</th><th>说明</th></tr>
+    <tr><td><span class="sev none">高 · 0</span></td><td>—</td><td>未发现阻断性缺陷（0 高危依赖漏洞、无高危越权、无密钥泄露、无注入/重放/枚举可利用点）</td></tr>
+    <tr><td><span class="sev mid">中 · 3</span></td><td>未纳入 Git 版本控制</td><td>影响可追溯性 / 回滚 / 协作评审 / CI 关联</td></tr>
+    <tr><td><span class="sev mid">中 · 3</span></td><td>前端测试环境兼容缺口</td><td>undici 8.10 + jsdom 30 与 Node 20.20 冲突，本地 vitest worker 无法启动；需锁定 Node 版本或依赖版本</td></tr>
+    <tr><td><span class="sev mid">中 · 3</span></td><td>3 处 lint 未使用变量</td><td>securityAlert.js / logShipperGap.test.js，建议清理以通过 lint 硬门禁</td></tr>
+    <tr><td><span class="sev low">低 · 3</span></td><td>JWT_EXPIRE 配置不一致</td><td>本地 .env 为 24h，代码默认 2h，建议统一</td></tr>
+    <tr><td><span class="sev low">低 · 3</span></td><td>Windows 平台测试偶发 EPERM</td><td>审计缓冲 WAL 测试在全量并行时偶发文件句柄时序问题，单独运行稳定通过</td></tr>
+    <tr><td><span class="sev low">低 · 3</span></td><td>仓库遗留杂物</td><td>根目录存在 <code>nul</code> 与 <code>package.json.bak</code> 文件，建议清理并纳入 .gitignore</td></tr>
+  </table>
+  <p class="chart-note">说明：本次审计为静态 + 自动化动态验证；「控制器直连模型」索引覆盖、无损发布演练需在部署环境进一步验证。</p>
+</div>
+
+<h2 class="section">四、整改建议（按优先级）</h2>
+<div class="card">
+  <h3>P0 · 立即</h3>
+  <ul>
+    <li><b>纳入版本控制：</b><code>git init</code> 并提交基线，配置 .gitignore（已含 .env/日志/secrets）。这是当前最值得优先处理的一项，其他 CI/协作能力都会随之解锁。</li>
+  </ul>
+  <h3>P1 · 近期（1-2 周）</h3>
+  <ul>
+    <li><b>修复 lint 3 处 unused-vars</b>，使 <code>npm run lint</code> 0 error，确保 CI lint 门禁稳定通过。</li>
+    <li><b>锁定前端 Node/依赖版本</b>：在 CI 与本地统一 Node 版本（如升 Node 22 或锁定 undici），解决 vitest worker 启动问题，恢复前端测试的可本地复现性。</li>
+    <li><b>统一 JWT_EXPIRE 口径</b>：将 .env 与代码默认值对齐为 2h（或明确注释为本地开发放宽项）。</li>
+  </ul>
+  <h3>P2 · 择机</h3>
+  <ul>
+    <li><b>清理技术债</b>：逐步将「控制器直连模型」收敛至服务层（作者已列 D-1）。</li>
+    <li><b>运行期性能验证</b>：用生产规模数据对核心查询做 <code>explain()</code> 与压测，确认索引覆盖与 N+1 风险。</li>
+    <li><b>仓库卫生</b>：删除 <code>nul</code>、<code>package.json.bak</code>；审计时产生的临时日志已清理。</li>
+    <li><b>无损发布演练</b>：在部署环境实际演练 docker compose 升级与回滚（graceful shutdown 已就绪，需实测验证）。</li>
+  </ul>
+</div>
+
+<h2 class="section">五、自动化验证结果（实测）</h2>
+<div class="card">
+  <table>
+    <tr><th>检查项</th><th>结果</th><th>备注</th></tr>
+    <tr><td>后端 Jest 测试</td><td><span class="ok">1415 / 1417 通过</span></td><td>94 套件；2 失败为 Windows 平台偶发，单独重跑通过</td></tr>
+    <tr><td>前端 Vitest 测试</td><td><span class="warn-t">未能本地运行</span></td><td>undici/jsdom 与 Node 20.20 兼容问题；CI 记录 169 例全绿</td></tr>
+    <tr><td>npm audit（依赖安全）</td><td><span class="ok">0 vulnerabilities</span></td><td>官方 registry 实测</td></tr>
+    <tr><td>ESLint</td><td><span class="warn-t">3 errors</span></td><td>3 处未使用变量，0 warnings</td></tr>
+    <tr><td>覆盖率门禁</td><td><span class="ok">安全模块独立阈值多数 ≥80%</span></td><td>棘轮策略，仅升不降</td></tr>
+    <tr><td>密钥 / 敏感信息</td><td><span class="ok">未发现仓库内密钥泄露</span></td><td>.env 已排除；Docker secrets 挂载；CI Gitleaks 扫描</td></tr>
+    <tr><td>CI 流水线</td><td><span class="ok">配置完整</span></td><td>矩阵测试 / lint / prettier / coverage / audit / secret-scan / 镜像构建</td></tr>
+    <tr><td>Git 版本控制</td><td><span class="warn-t">缺失</span></td><td>无 .git 目录</td></tr>
+  </table>
+</div>
+
+<div class="summary-verdict">
+  <b>最终裁定：</b>项目达到「可直接投产」的质量线。安全设计是该项目的标杆能力，测试与文档建设远超同类毕业设计/内部系统水准。剩余问题均为非阻断的工程完善项；建议按 P0→P2 顺序推进，重点是把版本控制补齐，让已有的 CI/回滚/审计能力真正闭环。
+</div>
+
+<div class="foot">消防安全管理系统 · 7 维度完整审计报告 · 审计日期 2026-09-01 · 审计方式：源码精读 + 自动化动态验证（测试 / lint / audit / 配置核查）</div>
+
+</div>
+</body>
+</html>

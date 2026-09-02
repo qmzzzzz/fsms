@@ -1,0 +1,17 @@
+# 编辑器统一基线（报告 O-12）：缩进/字符集/尾随空白跨编辑器一致
+# 说明：不强制 end_of_line——仓库以 Windows 开发为主，CRLF/LF 交由 git
+# autocrlf 与各文件现状决定，避免一次性格式化造成大面积无关 diff
+root = true
+
+[*]
+charset = utf-8
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{cmd,bat}]
+indent_size = 4

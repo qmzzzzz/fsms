@@ -1,0 +1,3480 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "消防巡检管理系统 API",
+    "description": "基于 Node.js + Express + MongoDB 的消防设备巡检、报警处理、安全管理系统 API 文档。\n\n## 认证方式\n所有私有接口需在请求头中携带 Authorization: Bearer <token>。\n\n## 数据范围\n部分接口受数据范围权限控制：all（全部）/ department（本部门）/ self（仅本人）/ none（无权限）。",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "开发环境"
+    },
+    {
+      "url": "/",
+      "description": "当前服务器"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "认证相关接口"
+    },
+    {
+      "name": "Users",
+      "description": "用户管理接口"
+    },
+    {
+      "name": "Roles",
+      "description": "角色管理接口"
+    },
+    {
+      "name": "Permissions",
+      "description": "权限管理接口"
+    },
+    {
+      "name": "Devices",
+      "description": "消防设备管理接口"
+    },
+    {
+      "name": "Alarms",
+      "description": "火警报警管理接口"
+    },
+    {
+      "name": "Inspections",
+      "description": "巡检计划与执行接口"
+    },
+    {
+      "name": "Reports",
+      "description": "报表统计与数据导出"
+    },
+    {
+      "name": "Security",
+      "description": "安全管理接口"
+    },
+    {
+      "name": "System",
+      "description": "系统接口"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "paths": {
+    "/api/auth/register": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "用户注册",
+        "description": "公开注册，受系统注册开关控制",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["username", "email", "password"],
+                "properties": {
+                  "username": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 30
+                  },
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "password": {
+                    "type": "string",
+                    "description": "至少8位，含大小写字母、数字、特殊字符"
+                  },
+                  "realName": {
+                    "type": "string"
+                  },
+                  "phone": {
+                    "type": "string"
+                  },
+                  "department": {
+                    "type": "string"
+                  },
+                  "encPassword": {
+                    "type": "string",
+                    "description": "口令密文（与 password 二选一）"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "注册成功"
+          },
+          "400": {
+            "description": "参数验证失败"
+          },
+          "403": {
+            "description": "系统已关闭公开注册"
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "用户登录",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["username", "password"],
+                "properties": {
+                  "username": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string"
+                  },
+                  "captchaId": {
+                    "type": "string"
+                  },
+                  "encPassword": {
+                    "type": "string",
+                    "description": "口令密文（ECDH+HKDF+AES-GCM 信封，经 GET /api/auth/login-public-key 公钥加密）；与 password 二选一"
+                  },
+                  "captchaText": {
+                    "type": "string",
+                    "description": "图形验证码答案（开启验证码时必填）"
+                  },
+                  "mfaCode": {
+                    "type": "string",
+                    "description": "MFA 动态口令（6 位 TOTP 或 XXXX-XXXX 恢复码）"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "登录成功，返回 token 和 refreshToken"
+          },
+          "401": {
+            "description": "用户名或密码错误"
+          },
+          "429": {
+            "description": "请求过于频繁"
+          }
+        }
+      }
+    },
+    "/api/auth/captcha": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "获取图形验证码",
+        "responses": {
+          "200": {
+            "description": "返回验证码图片和 captchaId"
+          }
+        }
+      }
+    },
+    "/api/auth/captcha-status": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "查询登录验证码开关状态",
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/auth/refresh": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "刷新 Token",
+        "description": "refreshToken 一次性使用，旧 token 自动加入黑名单",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["refreshToken"],
+                "properties": {
+                  "refreshToken": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "刷新成功"
+          },
+          "401": {
+            "description": "刷新令牌无效"
+          }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "获取当前用户信息（含权限、菜单、数据范围）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/auth/password": {
+      "put": {
+        "tags": ["Auth"],
+        "summary": "修改密码",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["currentPassword", "newPassword"],
+                "properties": {
+                  "currentPassword": {
+                    "type": "string"
+                  },
+                  "newPassword": {
+                    "type": "string"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "当前口令密文（与 currentPassword 二选一）"
+                  },
+                  "encNewPassword": {
+                    "type": "string",
+                    "description": "新口令密文（与 newPassword 二选一）"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "修改成功，需重新登录"
+          }
+        }
+      }
+    },
+    "/api/auth/profile": {
+      "put": {
+        "tags": ["Auth"],
+        "summary": "更新个人资料",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "realName": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  },
+                  "phone": {
+                    "type": "string"
+                  },
+                  "department": {
+                    "type": "string"
+                  },
+                  "avatar": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "用户登出",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "refreshToken": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/users": {
+      "get": {
+        "tags": ["Users"],
+        "summary": "获取用户列表（分页）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["active", "inactive", "locked"]
+            }
+          },
+          {
+            "name": "department",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Users"],
+        "summary": "创建用户",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["username", "email", "password"],
+                "properties": {
+                  "username": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string"
+                  },
+                  "realName": {
+                    "type": "string"
+                  },
+                  "phone": {
+                    "type": "string"
+                  },
+                  "department": {
+                    "type": "string"
+                  },
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功"
+          },
+          "400": {
+            "description": "参数错误"
+          }
+        }
+      }
+    },
+    "/api/users/stats": {
+      "get": {
+        "tags": ["Users"],
+        "summary": "获取用户统计信息",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回总数、活跃/禁用数、按部门/角色统计"
+          }
+        }
+      }
+    },
+    "/api/users/{id}": {
+      "get": {
+        "tags": ["Users"],
+        "summary": "获取用户详情",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "404": {
+            "description": "资源不存在"
+          }
+        }
+      },
+      "put": {
+        "tags": ["Users"],
+        "summary": "更新用户信息",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "无权限"
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Users"],
+        "summary": "删除用户",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "删除成功"
+          },
+          "400": {
+            "description": "不能删除自己"
+          }
+        }
+      }
+    },
+    "/api/users/{id}/roles": {
+      "put": {
+        "tags": ["Users"],
+        "summary": "分配角色给用户",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["roles"],
+                "properties": {
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/users/batch": {
+      "delete": {
+        "tags": ["Users"],
+        "summary": "批量删除用户",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["ids"],
+                "properties": {
+                  "ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 100
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/roles": {
+      "get": {
+        "tags": ["Roles"],
+        "summary": "获取角色列表（分页）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Roles"],
+        "summary": "创建角色",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "code"],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "code": {
+                    "type": "string",
+                    "pattern": "^[A-Z_]+$"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "level": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10
+                  },
+                  "permissions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功"
+          }
+        }
+      }
+    },
+    "/api/roles/all": {
+      "get": {
+        "tags": ["Roles"],
+        "summary": "获取所有可用角色（下拉选择）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/roles/permissions/tree": {
+      "get": {
+        "tags": ["Roles"],
+        "summary": "获取权限树形结构",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回按模块分组的权限树"
+          }
+        }
+      }
+    },
+    "/api/roles/{id}": {
+      "get": {
+        "tags": ["Roles"],
+        "summary": "获取角色详情",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "put": {
+        "tags": ["Roles"],
+        "summary": "更新角色信息",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Roles"],
+        "summary": "删除角色",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "删除成功"
+          },
+          "400": {
+            "description": "有用户正在使用该角色"
+          }
+        }
+      }
+    },
+    "/api/roles/{id}/permissions": {
+      "put": {
+        "tags": ["Roles"],
+        "summary": "为角色分配权限",
+        "description": "支持全局修改和单用户克隆两种模式",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["permissions"],
+                "properties": {
+                  "permissions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "targetUserId": {
+                    "type": "string",
+                    "description": "单用户克隆模式目标用户ID（可选）"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/permissions": {
+      "get": {
+        "tags": ["Permissions"],
+        "summary": "获取权限列表",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Permissions"],
+        "summary": "创建权限",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "code", "type", "module"],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "code": {
+                    "type": "string",
+                    "pattern": "^(\\*|[a-z]+):(\\*|[a-z_]+)$"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["menu", "button", "api", "data"]
+                  },
+                  "module": {
+                    "type": "string"
+                  },
+                  "parent": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "*"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功"
+          }
+        }
+      }
+    },
+    "/api/permissions/batch": {
+      "post": {
+        "tags": ["Permissions"],
+        "summary": "批量创建权限（系统初始化）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["permissions"],
+                "properties": {
+                  "permissions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    },
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功"
+          }
+        }
+      }
+    },
+    "/api/permissions/{id}": {
+      "get": {
+        "tags": ["Permissions"],
+        "summary": "获取权限详情",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "put": {
+        "tags": ["Permissions"],
+        "summary": "更新权限",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Permissions"],
+        "summary": "删除权限",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/devices": {
+      "get": {
+        "tags": ["Devices"],
+        "summary": "获取设备列表（分页）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "deviceType",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "fire_alarm",
+                "sprinkler",
+                "hydrant",
+                "extinguisher",
+                "smoke_detector",
+                "heat_detector",
+                "emergency_light",
+                "evacuation_sign",
+                "fire_door",
+                "other"
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["normal", "warning", "fault", "offline", "maintenance", "scrapped"]
+            }
+          },
+          {
+            "name": "building",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "floor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Devices"],
+        "summary": "创建设备",
+        "description": "设备编号自动生成，格式为 类型前缀-年份-序号（如 FA-2026-0001）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["deviceName", "deviceType"],
+                "properties": {
+                  "deviceName": {
+                    "type": "string"
+                  },
+                  "deviceType": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "manufacturer": {
+                    "type": "string"
+                  },
+                  "location": {
+                    "type": "object"
+                  },
+                  "installDate": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "expiryDate": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "checkCycle": {
+                    "type": "integer",
+                    "description": "检查周期（天）"
+                  },
+                  "remark": {
+                    "type": "string"
+                  },
+                  "images": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功"
+          }
+        }
+      }
+    },
+    "/api/devices/stats": {
+      "get": {
+        "tags": ["Devices"],
+        "summary": "获取设备统计信息",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回按类型/状态统计、待维护数、即将到期数、已过期数"
+          }
+        }
+      }
+    },
+    "/api/devices/expiring": {
+      "get": {
+        "tags": ["Devices"],
+        "summary": "获取即将到期设备列表",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 30,
+              "minimum": 1,
+              "maximum": 365
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/devices/reminders": {
+      "get": {
+        "tags": ["Devices"],
+        "summary": "获取设备到期/维护提醒汇总",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 30
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回到期、过期、待维护三类提醒"
+          }
+        }
+      }
+    },
+    "/api/devices/{id}": {
+      "get": {
+        "tags": ["Devices"],
+        "summary": "获取设备详情",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "404": {
+            "description": "资源不存在"
+          }
+        }
+      },
+      "put": {
+        "tags": ["Devices"],
+        "summary": "更新设备信息",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Devices"],
+        "summary": "删除设备",
+        "description": "自动清理关联的报警和巡检记录中的设备引用",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/devices/{id}/status": {
+      "put": {
+        "tags": ["Devices"],
+        "summary": "更新设备状态",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["status"],
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": ["normal", "warning", "fault", "offline", "maintenance"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/devices/{id}/maintenance": {
+      "post": {
+        "tags": ["Devices"],
+        "summary": "添加维护记录",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["content"],
+                "properties": {
+                  "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "添加成功，自动更新下次检查日期"
+          }
+        }
+      }
+    },
+    "/api/devices/{id}/scrap": {
+      "put": {
+        "tags": ["Devices"],
+        "summary": "设备报废",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string"
+                  },
+                  "scrapDate": {
+                    "type": "string",
+                    "format": "date"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/alarms": {
+      "get": {
+        "tags": ["Alarms"],
+        "summary": "获取报警列表（分页）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["pending", "processing", "resolved", "false_alarm", "cancelled"]
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["info", "warning", "critical", "emergency"]
+            }
+          },
+          {
+            "name": "alarmType",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/alarms/stats": {
+      "get": {
+        "tags": ["Alarms"],
+        "summary": "获取报警统计信息",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回按状态/级别/类型统计"
+          }
+        }
+      }
+    },
+    "/api/alarms/{id}": {
+      "get": {
+        "tags": ["Alarms"],
+        "summary": "获取报警详情",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/alarms/report": {
+      "post": {
+        "tags": ["Alarms"],
+        "summary": "上报火警（手动报警）",
+        "description": "上报人身份强制使用当前登录用户，不可伪造",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["alarmType", "description"],
+                "properties": {
+                  "alarmType": {
+                    "type": "string",
+                    "enum": [
+                      "smoke",
+                      "temp_abnormal",
+                      "manual_button",
+                      "phone_report",
+                      "patrol_find",
+                      "other"
+                    ]
+                  },
+                  "level": {
+                    "type": "string",
+                    "enum": ["info", "warning", "critical", "emergency"]
+                  },
+                  "location": {
+                    "type": "object"
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  "deviceId": {
+                    "type": "string"
+                  },
+                  "reporter": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "phone": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "报警接收成功"
+          }
+        }
+      }
+    },
+    "/api/alarms/{id}/dispatch": {
+      "put": {
+        "tags": ["Alarms"],
+        "summary": "指派处理人",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "handlerId": {
+                    "type": "string",
+                    "description": "不填则指派给当前用户"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "指派成功"
+          },
+          "409": {
+            "description": "报警已被处理"
+          }
+        }
+      }
+    },
+    "/api/alarms/{id}/arrive": {
+      "put": {
+        "tags": ["Alarms"],
+        "summary": "到达现场登记",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "登记成功"
+          },
+          "409": {
+            "description": "状态不允许此操作"
+          }
+        }
+      }
+    },
+    "/api/alarms/{id}/resolve": {
+      "put": {
+        "tags": ["Alarms"],
+        "summary": "处理完成",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["handleResult"],
+                "properties": {
+                  "handleResult": {
+                    "type": "string",
+                    "maxLength": 1000
+                  },
+                  "cause": {
+                    "type": "string",
+                    "enum": ["fire", "false_alarm", "equipment_fault", "test", "unknown"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/alarms/{id}/false-alarm": {
+      "put": {
+        "tags": ["Alarms"],
+        "summary": "标记为误报",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/alarms/{id}/cancel": {
+      "put": {
+        "tags": ["Alarms"],
+        "summary": "取消报警",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/inspections": {
+      "get": {
+        "tags": ["Inspections"],
+        "summary": "获取巡检列表（分页）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 10,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["pending", "in_progress", "completed", "cancelled"]
+            }
+          },
+          {
+            "name": "inspectionType",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "assignedTo",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Inspections"],
+        "summary": "创建巡检计划",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "title",
+                  "inspectionType",
+                  "planStartTime",
+                  "planEndTime",
+                  "checkItems"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "inspectionType": {
+                    "type": "string",
+                    "enum": ["daily", "weekly", "monthly", "quarterly", "annual", "special"]
+                  },
+                  "planStartTime": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "planEndTime": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "assignedTo": {
+                    "type": "string"
+                  },
+                  "devices": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "locations": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  },
+                  "checkItems": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    },
+                    "minItems": 1
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "remark": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功"
+          }
+        }
+      }
+    },
+    "/api/inspections/stats": {
+      "get": {
+        "tags": ["Inspections"],
+        "summary": "获取巡检统计",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回按状态/类型/结果统计"
+          }
+        }
+      }
+    },
+    "/api/inspections/{id}": {
+      "get": {
+        "tags": ["Inspections"],
+        "summary": "获取巡检详情",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "put": {
+        "tags": ["Inspections"],
+        "summary": "更新巡检计划",
+        "description": "仅 pending 状态可修改",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "400": {
+            "description": "已开始的巡检不能修改"
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Inspections"],
+        "summary": "删除巡检",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "删除成功"
+          },
+          "400": {
+            "description": "正在执行的巡检不能删除"
+          }
+        }
+      }
+    },
+    "/api/inspections/{id}/start": {
+      "put": {
+        "tags": ["Inspections"],
+        "summary": "开始执行巡检",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/inspections/{id}/complete": {
+      "put": {
+        "tags": ["Inspections"],
+        "summary": "提交巡检结果",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "result": {
+                    "type": "string",
+                    "enum": ["normal", "abnormal", "partial"]
+                  },
+                  "findings": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "remark": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/inspections/{id}/review": {
+      "put": {
+        "tags": ["Inspections"],
+        "summary": "审核巡检结果",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["reviewResult"],
+                "properties": {
+                  "reviewResult": {
+                    "type": "string",
+                    "enum": ["approved", "rejected"]
+                  },
+                  "reviewComment": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/inspections/{id}/cancel": {
+      "put": {
+        "tags": ["Inspections"],
+        "summary": "取消巡检",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/reports/dashboard": {
+      "get": {
+        "tags": ["Reports"],
+        "summary": "获取综合仪表盘统计",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回设备、报警、巡检综合统计"
+          }
+        }
+      }
+    },
+    "/api/reports/devices": {
+      "get": {
+        "tags": ["Reports"],
+        "summary": "获取设备报表",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/reports/alarms": {
+      "get": {
+        "tags": ["Reports"],
+        "summary": "获取报警报表",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/reports/inspections": {
+      "get": {
+        "tags": ["Reports"],
+        "summary": "获取巡检报表",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回按状态、结果、执行人统计"
+          }
+        }
+      }
+    },
+    "/api/reports/export": {
+      "get": {
+        "tags": ["Reports"],
+        "summary": "导出报表数据（Excel）",
+        "description": "支持 devices/alarms/inspections，受严格限流保护",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": ["devices", "alarms", "inspections"]
+            }
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 Excel 文件流"
+          },
+          "429": {
+            "description": "请求过于频繁"
+          }
+        }
+      }
+    },
+    "/api/security/my-info": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "获取当前用户安全信息",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回安全评分、近期登录记录、安全建议"
+          }
+        }
+      }
+    },
+    "/api/security/change-password": {
+      "put": {
+        "tags": ["Security"],
+        "summary": "修改密码（强化版，需确认密码）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["currentPassword", "newPassword", "confirmPassword"],
+                "properties": {
+                  "currentPassword": {
+                    "type": "string"
+                  },
+                  "newPassword": {
+                    "type": "string"
+                  },
+                  "confirmPassword": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "修改成功，需重新登录"
+          }
+        }
+      }
+    },
+    "/api/security/bindings": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "获取账户绑定信息",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回邮箱、手机、部门绑定状态（脱敏）"
+          }
+        }
+      }
+    },
+    "/api/security/view-sensitive": {
+      "post": {
+        "tags": ["Security"],
+        "summary": "查看敏感数据（需二次验证）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["dataType"],
+                "properties": {
+                  "dataType": {
+                    "type": "string",
+                    "enum": ["phone", "email"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回脱敏和完整数据"
+          }
+        }
+      }
+    },
+    "/api/security/stats": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "获取系统安全统计（管理员）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回今日登录数、失败登录数、高风险操作数、异常行为"
+          }
+        }
+      }
+    },
+    "/api/security/report": {
+      "post": {
+        "tags": ["Security"],
+        "summary": "举报异常行为",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["targetType", "reason"],
+                "properties": {
+                  "targetType": {
+                    "type": "string",
+                    "enum": ["user", "device", "alarm", "system"]
+                  },
+                  "targetId": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "举报已提交"
+          }
+        }
+      }
+    },
+    "/api/security/my-logs": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "获取个人操作日志",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 7
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/security/users/{userId}/lock": {
+      "put": {
+        "tags": ["Security"],
+        "summary": "锁定/解锁用户账户（管理员）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["locked"],
+                "properties": {
+                  "locked": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "无权限"
+          }
+        }
+      }
+    },
+    "/api/security/overview": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "获取安全概览（管理员）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回严重/高危告警数、失败登录数、风险评分"
+          }
+        }
+      }
+    },
+    "/api/security/alerts": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "获取最近安全告警",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回最近50条告警"
+          }
+        }
+      }
+    },
+    "/api/security/audit-logs": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "查询审计日志（多维度筛选）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "username",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ip",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "riskLevel",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["low", "medium", "high", "critical"]
+            }
+          },
+          {
+            "name": "success",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["true", "false"]
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["info", "warning", "error"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/security/config/allowPublicRegistration": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "获取注册开关状态",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 allowPublicRegistration"
+          }
+        }
+      },
+      "put": {
+        "tags": ["Security"],
+        "summary": "设置注册开关",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["allowPublicRegistration"],
+                "properties": {
+                  "allowPublicRegistration": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/security/config/loginCaptchaEnabled": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "获取登录验证码开关状态",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 loginCaptchaEnabled"
+          }
+        }
+      },
+      "put": {
+        "tags": ["Security"],
+        "summary": "设置登录验证码开关",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["loginCaptchaEnabled"],
+                "properties": {
+                  "loginCaptchaEnabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/security/ip-list": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "获取 IP 黑白名单列表",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["black", "white"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Security"],
+        "summary": "添加 IP 到黑/白名单",
+        "description": "白名单优先级高于黑名单；加入黑名单时若已在白名单则拒绝",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["ip"],
+                "properties": {
+                  "ip": {
+                    "type": "string",
+                    "description": "支持 IPv4/IPv6/CIDR"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["black", "white"],
+                    "default": "black"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "durationHours": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 8760,
+                    "description": "0=永久"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "添加成功"
+          },
+          "400": {
+            "description": "IP 已在白名单中"
+          }
+        }
+      }
+    },
+    "/api/security/ip-list/{id}": {
+      "delete": {
+        "tags": ["Security"],
+        "summary": "从名单中移除 IP 记录",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["System"],
+        "summary": "健康检查",
+        "responses": {
+          "200": {
+            "description": "系统运行正常，包含数据库连接状态"
+          }
+        }
+      }
+    },
+    "/api": {
+      "get": {
+        "tags": ["System"],
+        "summary": "API 根路径",
+        "responses": {
+          "200": {
+            "description": "返回 API 版本和可用端点列表"
+          }
+        }
+      }
+    },
+    "/api/auth/login-public-key": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "获取登录口令加密公钥（ECDH P-256，供前端加密口令上行）",
+        "responses": {
+          "200": {
+            "description": "返回 publicKey PEM / keyId / curve / 算法标识"
+          }
+        }
+      }
+    },
+    "/api/auth/session": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "轻量会话探测（返回是否已登录；始终 200，不触发令牌刷新链）",
+        "responses": {
+          "200": {
+            "description": "返回 { authenticated: boolean }"
+          }
+        }
+      }
+    },
+    "/api/auth/sessions": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "获取当前用户的活跃会话列表（设备级会话管理）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回会话列表（sid/设备/时间），可远程吊销其他设备"
+          }
+        }
+      }
+    },
+    "/api/auth/sessions/others": {
+      "delete": {
+        "tags": ["Auth"],
+        "summary": "吊销除当前设备外的全部会话",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "其余设备全部下线"
+          }
+        }
+      }
+    },
+    "/api/auth/sessions/{sid}": {
+      "delete": {
+        "tags": ["Auth"],
+        "summary": "吊销指定会话（踢除单台设备）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "该设备已下线"
+          },
+          "404": {
+            "description": "会话不存在"
+          }
+        }
+      }
+    },
+    "/api/auth/mfa/status": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "查询两步验证开启状态与剩余恢复码数量",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 { enabled, recoveryCodesRemaining }"
+          }
+        }
+      }
+    },
+    "/api/auth/mfa/enroll": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "生成两步验证密钥（第一步，返回 Base32 密钥与 otpauth URI）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 secret 与 otpauthUri"
+          },
+          "400": {
+            "description": "已开启两步验证"
+          }
+        }
+      }
+    },
+    "/api/auth/mfa/enable": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "确认开启两步验证（校验一次动态口令，生成备用恢复码）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["mfaCode"],
+                "properties": {
+                  "mfaCode": {
+                    "type": "string",
+                    "description": "6 位动态口令"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回 { enabled: true, recoveryCodes }（明文仅此一次）"
+          },
+          "400": {
+            "description": "验证码错误"
+          }
+        }
+      }
+    },
+    "/api/auth/mfa/disable": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "关闭两步验证（需动态口令或登录密码二次验证）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mfaCode": {
+                    "type": "string",
+                    "description": "6 位动态口令（与 currentPassword 二选一）"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "当前口令密文（与 currentPassword 二选一）"
+                  },
+                  "currentPassword": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回 { enabled: false }"
+          },
+          "403": {
+            "description": "验证失败"
+          }
+        }
+      }
+    },
+    "/api/auth/mfa/recovery-codes": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "重新生成备用恢复码（旧码全部作废；需当前动态口令）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["mfaCode"],
+                "properties": {
+                  "mfaCode": {
+                    "type": "string",
+                    "description": "6 位动态口令"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回新恢复码明文（仅此一次）"
+          },
+          "400": {
+            "description": "口令错误"
+          }
+        }
+      }
+    },
+    "/api/security/users/{userId}/mfa/reset": {
+      "put": {
+        "tags": ["Security"],
+        "summary": "管理员重置用户两步验证（清除密钥/恢复码并强制下线）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "两步验证已重置"
+          },
+          "400": {
+            "description": "未开启 MFA / 目标为自身"
+          },
+          "403": {
+            "description": "同级或更高层级 / 内置超管"
+          }
+        }
+      }
+    },
+    "/api/security/audit-logs/verify": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "校验审计日志哈希链完整性（hash 重算 + hmac + 链接性三层校验）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回校验报告（intact/breaks/byType）"
+          }
+        }
+      }
+    },
+    "/api/security/audit-logs/export": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "导出审计日志（CSV + sha256 签名 manifest，流式输出）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/csv 流式响应"
+          }
+        }
+      }
+    },
+    "/api/security/config/registerCaptchaEnabled": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "获取注册验证码开关状态",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 { registerCaptchaEnabled: boolean }"
+          }
+        }
+      },
+      "put": {
+        "tags": ["Security"],
+        "summary": "切换注册验证码开关",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["registerCaptchaEnabled"],
+                "properties": {
+                  "registerCaptchaEnabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "开关已更新"
+          }
+        }
+      }
+    },
+    "/api/security/ip-list/query": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "查询 IP 命中的黑/白名单记录（含 CIDR 网段，覆盖面最宽优先）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "ip",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回命中记录"
+          }
+        }
+      }
+    }
+  }
+}

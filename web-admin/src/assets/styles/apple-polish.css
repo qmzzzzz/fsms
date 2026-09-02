@@ -1,0 +1,120 @@
+/* ============================================================
+   Apple 风格 · 全局打磨层（fluid interfaces 交互手感）
+   原则：只叠加交互反馈与过渡质感，不改动任何布局/尺寸/颜色语义；
+   全部规则挂在交互状态上（:hover / :active / :focus-visible），
+   并提供 prefers-reduced-motion / prefers-reduced-transparency 降级。
+   须在 global.css 与 dark.css 之后引入，暗色变量自动生效。
+   ============================================================ */
+
+/* ---------- 1) 按压即时反馈（pointer-down，非松开） ---------- */
+.el-button:active {
+  transform: scale(0.97);
+  transition: transform 100ms ease-out;
+}
+.el-button--large:active {
+  transform: scale(0.98);
+}
+
+/* 链接式按钮/文字按钮同样给按压反馈，但不做位移动画 */
+.el-button.is-text:active,
+.el-button.is-link:active {
+  transform: scale(0.96);
+}
+
+/* ---------- 2) 顺滑过渡曲线（Apple 弹簧感：cubic-bezier(0.32,0.72,0,1)） ---------- */
+.el-button {
+  transition:
+    transform 300ms cubic-bezier(0.32, 0.72, 0, 1),
+    background-color 200ms ease,
+    border-color 200ms ease,
+    box-shadow 240ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.el-button--primary:not(.is-disabled):hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
+}
+
+/* ---------- 3) 输入聚焦：即时柔和外发光（无延迟） ---------- */
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  transition: box-shadow 180ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.el-input__wrapper.is-focus,
+.el-textarea__inner:focus,
+.el-select__wrapper.is-focused {
+  box-shadow:
+    0 0 0 1px var(--el-color-primary) inset,
+    0 0 0 4px var(--el-color-primary-light-8);
+}
+
+/* ---------- 4) 卡片/面板材质层次：hover 轻浮起（可中断的阴影过渡） ---------- */
+.el-card {
+  transition:
+    box-shadow 280ms cubic-bezier(0.32, 0.72, 0, 1),
+    transform 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.el-dialog {
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.18); /* 大表面 = 更厚材质更深阴影 */
+}
+
+/* ---------- 5) 下拉/弹层：材质化到来（blur+scale，非纯淡入） ---------- */
+.el-popper {
+  transition:
+    opacity 180ms cubic-bezier(0.32, 0.72, 0, 1),
+    transform 180ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* ---------- 6) 表格行 hover：轻微背景过渡而非跳变 ---------- */
+.el-table .el-table__row {
+  transition: background-color 150ms ease;
+}
+
+/* ---------- 7) 滚动条：细、半透明、hover 加深（macOS 感） ---------- */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(144, 147, 153, 0.35);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(144, 147, 153, 0.55);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- 8) 键盘可达性：focus-visible 统一外环 ---------- */
+.el-button:focus-visible,
+.el-input__wrapper:focus-within,
+.el-menu-item:focus-visible,
+.el-tabs__item:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+}
+
+/* ---------- 9) 无障碍降级 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .el-button:active {
+    transform: none !important;
+  }
+  .el-button,
+  .el-card,
+  .el-popper,
+  .el-input__wrapper,
+  .el-textarea__inner,
+  .el-select__wrapper,
+  .el-table .el-table__row {
+    transition: opacity 150ms ease !important;
+    animation: none !important;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .el-dialog {
+    box-shadow: 0 0 0 1px var(--el-border-color);
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--el-border-color-darker);
+  }
+}
