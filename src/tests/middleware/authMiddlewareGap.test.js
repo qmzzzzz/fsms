@@ -209,6 +209,37 @@ describe('auth 中间件分支补齐', () => {
     });
   });
 
+  describe('userId 自动注入日志上下文（报告 5.6 端到端接线）', () => {
+    // 必须排在「跨实例失效广播」用例之前：该用例会重置模块注册表
+    test('认证请求的 morgan finish 日志自动携带 userId 与 requestId', async () => {
+      const winston = require('winston');
+      const logger = require('../../utils/logger');
+      const captured = [];
+      class MemTransport extends winston.Transport {
+        log(info, callback) {
+          captured.push(info);
+          callback();
+        }
+      }
+      const mem = new MemTransport();
+      logger.add(mem);
+      try {
+        const res = await getMe(users.evict.token);
+        expect(res.status).toBe(200);
+        // morgan 在 res finish 时落日志，等待事件循环推进
+        await new Promise((r) => setTimeout(r, 100));
+        const line = captured.find(
+          (i) => typeof i.message === 'string' && i.message.includes('/api/auth/me')
+        );
+        expect(line).toBeTruthy();
+        expect(line.userId).toBe(String(users.evict._id));
+        expect(line.requestId).toBeTruthy();
+      } finally {
+        logger.remove(mem);
+      }
+    });
+  });
+
   describe('跨实例失效广播接收器（无 Redis 环境下直接驱动回调）', () => {
     test('仅对匹配前缀的字符串键执行本地失效，其余忽略', () => {
       let captured = null;

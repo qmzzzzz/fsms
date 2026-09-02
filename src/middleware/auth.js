@@ -14,6 +14,7 @@ const sessionService = require('../services/sessionService');
 const { isIPAllowed } = require('../utils/ipRange');
 const { userLimiter } = require('./rateLimit');
 const { getCookies, ACCESS_COOKIE_NAME } = require('../utils/cookie');
+const { extendLogContext } = require('../utils/logContext');
 
 /**
  * 提取访问令牌（I-01 双路径）：
@@ -317,6 +318,11 @@ const authenticate = async (req, res, next) => {
       iat: decoded.iat,
       exp: decoded.exp,
     };
+
+    // userId 自动注入日志上下文（报告 5.6）：认证成功即写入 ALS store，
+    // 本请求后续所有日志（morgan finish、审计、限流/业务告警）经 logger format
+    // 自动携带 userId——此前靠各控制器显式传 meta，遗漏即断链
+    extendLogContext({ userId: decoded.userId });
 
     logger.debug('用户认证成功', { username: req.user.username });
     // 用户维度限流：必须在 req.user 就绪后执行，才能按 userId 建键、按角色定配额

@@ -11,12 +11,17 @@ if (!fs.existsSync(logsDir)) {
 
 // 请求级日志关联（报告 O-5）：requestId 中间件把请求处理包进 AsyncLocalStorage，
 // 此 format 在每条日志序列化前读取上下文并合并 requestId——业务代码零改动，
-// 单请求的多条日志可通过 request id 一键关联；脱离请求上下文的日志行为不变
+// 单请求的多条日志可通过 request id 一键关联；脱离请求上下文的日志行为不变。
+// userId（报告 5.6）：authenticate 认证成功后经 extendLogContext 注入，
+// 此后同一请求的所有日志自动携带 userId，控制器无需显式传 meta
 const { getLogContext } = require('./logContext');
 const attachRequestContext = winston.format((info) => {
   const ctx = getLogContext();
   if (ctx && ctx.requestId) {
     info.requestId = ctx.requestId;
+  }
+  if (ctx && ctx.userId) {
+    info.userId = ctx.userId;
   }
   return info;
 });

@@ -26,4 +26,16 @@ const runWithLogContext = (store, callback) => logContextStorage.run(store, call
  */
 const getLogContext = () => logContextStorage.getStore() || null;
 
-module.exports = { runWithLogContext, getLogContext };
+/**
+ * 请求中途增量扩展当前日志上下文（报告 5.6：userId 自动注入）。
+ * ALS store 对象可变：认证完成后（authenticate）合并 userId，
+ * 请求后段的所有日志（morgan finish / 审计 / 业务告警）经 logger format
+ * 自动携带，控制器无需再显式传 meta。
+ * 脱离上下文（定时任务/启动期）为无操作，调用方无需判空。
+ */
+const extendLogContext = (patch) => {
+  const store = logContextStorage.getStore();
+  if (store && patch) Object.assign(store, patch);
+};
+
+module.exports = { runWithLogContext, getLogContext, extendLogContext };
