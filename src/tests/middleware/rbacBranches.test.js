@@ -175,8 +175,7 @@ describe('rbac.js 分支补齐', () => {
 
     beforeAll(async () => {
       // level 阈值：ALL=9 / DEPARTMENT=7 / SELF=4（与 initData 种子角色 10/8/6/4/1 的口径对应）
-      const mkRole = (name, code, level) =>
-        Role.create({ name, code, level, permissions: [] });
+      const mkRole = (name, code, level) => Role.create({ name, code, level, permissions: [] });
       const r9 = await mkRole(`RB边界9${stamp}`, `rbb9${stamp}`, 9);
       const r7 = await mkRole(`RB边界7${stamp}`, `rbb7${stamp}`, 7);
       const r4 = await mkRole(`RB边界4${stamp}`, `rbb4${stamp}`, 4);
@@ -248,24 +247,29 @@ describe('rbac.js 分支补齐', () => {
   describe('applyDataScopeToQuery（纯函数：冲突合并与 deny 信号）', () => {
     test('department 与用户筛选同字段冲突 → $and 交集，不覆盖任一方', () => {
       const query = { 'location.building': 'A栋' };
-      const ok = applyDataScopeToQuery(query, { type: 'department', department: 'B栋' }, {
-        ownerField: 'createdBy',
-        departmentField: 'location.building',
-      });
+      const ok = applyDataScopeToQuery(
+        query,
+        { type: 'department', department: 'B栋' },
+        {
+          ownerField: 'createdBy',
+          departmentField: 'location.building',
+        }
+      );
       expect(ok).toBe(true);
-      expect(query.$and).toEqual([
-        { 'location.building': 'A栋' },
-        { 'location.building': 'B栋' },
-      ]);
+      expect(query.$and).toEqual([{ 'location.building': 'A栋' }, { 'location.building': 'B栋' }]);
       expect(query['location.building']).toBeUndefined();
     });
 
     test('department 为空 → false 显式 deny（P1-3 零过滤越权入口的回归）', () => {
       const query = {};
-      const ok = applyDataScopeToQuery(query, { type: 'department', department: '' }, {
-        ownerField: 'createdBy',
-        departmentField: 'location.building',
-      });
+      const ok = applyDataScopeToQuery(
+        query,
+        { type: 'department', department: '' },
+        {
+          ownerField: 'createdBy',
+          departmentField: 'location.building',
+        }
+      );
       expect(ok).toBe(false);
       expect(query).toEqual({});
     });
@@ -283,34 +287,50 @@ describe('rbac.js 分支补齐', () => {
     test('department：命中与未命中（L260-263）', () => {
       const scope = { type: 'department', department: 'A栋' };
       expect(
-        isRecordInScope(scope, { location: { building: 'A栋' } }, {
-          ownerField: 'createdBy',
-          departmentField: 'location.building',
-        })
+        isRecordInScope(
+          scope,
+          { location: { building: 'A栋' } },
+          {
+            ownerField: 'createdBy',
+            departmentField: 'location.building',
+          }
+        )
       ).toBe(true);
       expect(
-        isRecordInScope(scope, { location: { building: 'B栋' } }, {
-          ownerField: 'createdBy',
-          departmentField: 'location.building',
-        })
+        isRecordInScope(
+          scope,
+          { location: { building: 'B栋' } },
+          {
+            ownerField: 'createdBy',
+            departmentField: 'location.building',
+          }
+        )
       ).toBe(false);
     });
 
     test('department 范围但 scope 无 department 值 → false（L261-262）', () => {
       expect(
-        isRecordInScope({ type: 'department' }, { location: { building: 'A栋' } }, {
-          ownerField: 'createdBy',
-          departmentField: 'location.building',
-        })
+        isRecordInScope(
+          { type: 'department' },
+          { location: { building: 'A栋' } },
+          {
+            ownerField: 'createdBy',
+            departmentField: 'location.building',
+          }
+        )
       ).toBe(false);
     });
 
     test('ownerField 数组：任一字段命中即在范围内（L266-268）', () => {
       const scope = { type: 'self' };
-      const ok = isRecordInScope(scope, { createdBy: 'u1', operator: 'u2' }, {
-        ownerField: ['createdBy', 'operator'],
-        userId: 'u2',
-      });
+      const ok = isRecordInScope(
+        scope,
+        { createdBy: 'u1', operator: 'u2' },
+        {
+          ownerField: ['createdBy', 'operator'],
+          userId: 'u2',
+        }
+      );
       expect(ok).toBe(true);
     });
 
@@ -330,7 +350,11 @@ describe('rbac.js 分支补齐', () => {
 
     test('none → false（L270-272）', () => {
       expect(
-        isRecordInScope({ type: 'none' }, { createdBy: 'u1' }, { ownerField: 'createdBy', userId: 'u1' })
+        isRecordInScope(
+          { type: 'none' },
+          { createdBy: 'u1' },
+          { ownerField: 'createdBy', userId: 'u1' }
+        )
       ).toBe(false);
     });
 
@@ -338,9 +362,9 @@ describe('rbac.js 分支补齐', () => {
       const oid = new mongoose.Types.ObjectId();
       const scope = { type: 'self' };
       const doc = { createdBy: oid };
-      expect(
-        isRecordInScope(scope, doc, { ownerField: 'createdBy', userId: oid.toString() })
-      ).toBe(true);
+      expect(isRecordInScope(scope, doc, { ownerField: 'createdBy', userId: oid.toString() })).toBe(
+        true
+      );
     });
   });
 });

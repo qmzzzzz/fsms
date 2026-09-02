@@ -147,10 +147,12 @@ describe('requireReAuthentication（敏感操作二次验证）', () => {
     const spy = jest.spyOn(User, 'findById').mockImplementationOnce(() => ({
       select: () => Promise.reject(new Error('db down')),
     }));
-    const res = await request(app).post('/sensitive').send({
-      __targetUserId: String(userNoMfa._id),
-      currentPassword: testPassword,
-    });
+    const res = await request(app)
+      .post('/sensitive')
+      .send({
+        __targetUserId: String(userNoMfa._id),
+        currentPassword: testPassword,
+      });
     spy.mockRestore();
     expect(res.status).toBe(500);
     expect(res.body.message).toContain('身份验证过程出错');

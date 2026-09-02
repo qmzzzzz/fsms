@@ -108,7 +108,11 @@ describe('P1-2 改密接口非字符串入参防护', () => {
       const res = await request(app)
         .put('/api/security/change-password')
         .set('Authorization', `Bearer ${token}`)
-        .send({ currentPassword: {}, newPassword: 'Nw9$Kd71bRx2', confirmPassword: 'Nw9$Kd71bRx2' });
+        .send({
+          currentPassword: {},
+          newPassword: 'Nw9$Kd71bRx2',
+          confirmPassword: 'Nw9$Kd71bRx2',
+        });
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
     });

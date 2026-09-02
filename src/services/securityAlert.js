@@ -319,7 +319,12 @@ const checkBruteForce = async (username, ip) => {
       ];
       const tierIndex = Math.min(priorBans, ESCALATION_TIERS.length - 1);
       const banDurationMs = ESCALATION_TIERS[tierIndex];
-      await addToBlacklist(normalizedIp, banDurationMs, `brute_force_auto_ban_tier${tierIndex + 1}`, 'auto');
+      await addToBlacklist(
+        normalizedIp,
+        banDurationMs,
+        `brute_force_auto_ban_tier${tierIndex + 1}`,
+        'auto'
+      );
       logger.warn(
         `渐进式封禁 IP ${normalizedIp}：第 ${priorBans + 1} 次，封禁 ${banDurationMs / 3600000} 小时`
       );

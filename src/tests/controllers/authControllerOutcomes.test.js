@@ -394,20 +394,32 @@ describe('logout fail-closed 与会话收敛', () => {
   test('令牌无 sid（旧令牌）时跳过会话收敛，不报错', async () => {
     authService.revokeTokensOnLogout.mockResolvedValue({ revokeFailed: false });
     const res = makeRes();
-    await invoke(controller.logout, makeReq({ user: { userId: 'u-1', username: 'a', sid: null } }), res);
+    await invoke(
+      controller.logout,
+      makeReq({ user: { userId: 'u-1', username: 'a', sid: null } }),
+      res
+    );
     expect(res.statusCode).toBe(200);
     expect(sessionService.revokeSessionSafe).not.toHaveBeenCalled();
   });
 
   test('token 来源优先 Bearer 头，回退 access_token cookie', async () => {
     authService.revokeTokensOnLogout.mockResolvedValue({ revokeFailed: false });
-    await invoke(controller.logout, makeReq({ headers: { authorization: 'Bearer hdr-token' } }), makeRes());
+    await invoke(
+      controller.logout,
+      makeReq({ headers: { authorization: 'Bearer hdr-token' } }),
+      makeRes()
+    );
     expect(authService.revokeTokensOnLogout).toHaveBeenCalledWith(
       expect.objectContaining({ accessToken: 'hdr-token' })
     );
 
     authService.revokeTokensOnLogout.mockClear();
-    await invoke(controller.logout, makeReq({ headers: { cookie: 'access_token=ck-token' } }), makeRes());
+    await invoke(
+      controller.logout,
+      makeReq({ headers: { cookie: 'access_token=ck-token' } }),
+      makeRes()
+    );
     expect(authService.revokeTokensOnLogout).toHaveBeenCalledWith(
       expect.objectContaining({ accessToken: 'ck-token' })
     );
@@ -444,7 +456,11 @@ describe('getMe 与 getSessionStatus', () => {
   test('getSessionStatus：access 有效 → authenticated=true（不查 refresh）', async () => {
     tokenService.isAccessTokenValid.mockResolvedValue(true);
     const res = makeRes();
-    await invoke(controller.getSessionStatus, makeReq({ headers: { cookie: 'access_token=a; refresh_token=r' } }), res);
+    await invoke(
+      controller.getSessionStatus,
+      makeReq({ headers: { cookie: 'access_token=a; refresh_token=r' } }),
+      res
+    );
     expect(res.body.data.authenticated).toBe(true);
     expect(tokenService.isRefreshTokenValid).not.toHaveBeenCalled();
   });
@@ -453,7 +469,11 @@ describe('getMe 与 getSessionStatus', () => {
     tokenService.isAccessTokenValid.mockResolvedValue(false);
     tokenService.isRefreshTokenValid.mockResolvedValue(true);
     const res = makeRes();
-    await invoke(controller.getSessionStatus, makeReq({ headers: { cookie: 'access_token=a; refresh_token=r' } }), res);
+    await invoke(
+      controller.getSessionStatus,
+      makeReq({ headers: { cookie: 'access_token=a; refresh_token=r' } }),
+      res
+    );
     expect(res.body.data.authenticated).toBe(true);
   });
 
@@ -514,7 +534,11 @@ describe('listSessions / revokeSession / revokeOtherSessions', () => {
   test('listSessions：旧令牌无 sid 时 currentSidPresent=false', async () => {
     sessionService.listSessions.mockResolvedValue([]);
     const res = makeRes();
-    await invoke(controller.listSessions, makeReq({ user: { userId: 'u-1', username: 'a', sid: null } }), res);
+    await invoke(
+      controller.listSessions,
+      makeReq({ user: { userId: 'u-1', username: 'a', sid: null } }),
+      res
+    );
     expect(res.body.data.currentSidPresent).toBe(false);
   });
 
