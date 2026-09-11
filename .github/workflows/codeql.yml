@@ -13,9 +13,16 @@ jobs:
     name: Analyze
     runs-on: ubuntu-latest
     permissions:
-      # 声明 permissions 会整体覆盖仓库默认令牌作用域，因此必须显式补回 contents: read，
-      # 否则 actions/checkout 会以 "Repository not found" 失败（2026-09-11 CI 实证）。
+      # 声明 permissions 会整体覆盖仓库默认令牌作用域，未列出的作用域一律变成 none，
+      # 因此必须显式补回本流程真正用到的每一项（2026-09-11 CI 逐项实证）：
+      #   contents: read        → 缺了 actions/checkout 报 "Repository not found"
+      #   actions: read         → 缺了 analyze 报 "Resource not accessible by integration"
+      #                           （其内部会调 GET /actions/runs/{id} 取运行元数据）
+      #   packages: read        → analyze 拉取依赖包所需（私有仓）
+      #   security-events: write → 上传 SARIF 到 code scanning
       contents: read
+      actions: read
+      packages: read
       security-events: write
 
     strategy:

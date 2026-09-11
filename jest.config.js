@@ -99,7 +99,7 @@ module.exports = {
     './src/middleware/errorHandler.js': { branches: 76, functions: 100 }, // (76.66/100)
     './src/controllers/deviceController.js': { branches: 52, functions: 92 }, // (52.94/92.85)
     './src/controllers/alarmController.js': { branches: 80, functions: 100 }, // (80.76/100)
-    './src/controllers/inspectionController.js': { branches: 77, functions: 100 }, // (77.14/100)
+    './src/controllers/inspectionController.js': { branches: 80, functions: 100 }, // (80.48/100) 2026-09-11 补齐六个写端点的控制器级数据范围 403 分支
     './src/controllers/roleController.js': { branches: 86, functions: 96 }, // (86.89/96.96) 2026-09-04 按实测下方一档
     './src/controllers/userController.js': { branches: 64, functions: 87 }, // (64.37/87.5)
     './src/controllers/permissionController.js': { branches: 60, functions: 88 }, // (61/88.88)

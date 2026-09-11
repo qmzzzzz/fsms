@@ -22,8 +22,10 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
   let Inspection;
   let adminToken;
   let scopedToken;
+  let writerToken;
   let adminId;
   let scopedUserId;
+  let writerId;
   let User;
   let Role;
   let Permission;
@@ -103,6 +105,53 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
       { expiresIn: '1h' }
     );
 
+    // ===== self 范围**且**具备巡检写权限的用户：专测「控制器级」数据范围拦截 =====
+    //
+    // 为什么必须单独造一个用户：上面的 scoped 用户只有 inspection:read/create，
+    // 打 /start（要 inspection:execute）时 403 是 **RBAC 中间件**返回的，
+    // 请求根本没走到控制器的 assertRecordInScope——断言虽然通过，但考的是另一条分支。
+    // 这正是 inspectionController 六个写端点的 403 分支长期未覆盖（分支覆盖率
+    // 77.14% → 73.17% 击穿门禁）的原因：测试看着在测越权，其实一个都没测到。
+    // 要真正覆盖控制器分支，用户必须**先有权限**，再被数据范围拒绝。
+    const writerPermCodes = [
+      'inspection:read',
+      'inspection:create',
+      'inspection:execute',
+      'inspection:review',
+      'inspection:delete',
+    ];
+    const writerPermIds = [];
+    for (const code of writerPermCodes) {
+      const existed = await Permission.findOne({ code });
+      if (existed) {
+        writerPermIds.push(existed._id);
+      } else {
+        const [module] = code.split(':');
+        const created = await Permission.create({ name: code, code, type: 'api', module });
+        writerPermIds.push(created._id);
+        createdPermIds.push(created._id);
+      }
+    }
+    const writerRole = await Role.create({
+      name: `消防员_写_${stamp}`,
+      code: `WRITER_SCOPE_${stamp}`,
+      level: 4, // level 4 → 数据范围 self
+      isBuiltIn: false,
+      permissions: writerPermIds,
+    });
+    const writerUser = await User.create({
+      username: `edgewriter${stamp}`,
+      email: `edgewriter${stamp}@example.com`,
+      password: randomPassword(),
+      roles: [writerRole._id],
+    });
+    writerId = String(writerUser._id);
+    writerToken = jwt.sign(
+      { userId: writerId, username: writerUser.username, tokenVersion: 0 },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
     const { createApp } = require('../../app');
     app = createApp();
   });
@@ -128,6 +177,7 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
   });
   const admin = () => as(adminToken);
   const scoped = () => as(scopedToken);
+  const writer = () => as(writerToken);
 
   // 直接调用导出的 handler（绕过路由），覆盖路由层拦不到的控制器防御分支
   const invoke = (handler, req) =>
@@ -414,7 +464,9 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
     expect(foreign.status).toBe(201);
     const foreignId = String(foreign.body.data._id || foreign.body.data.id);
     expect((await scoped().get(`/api/inspections/${foreignId}`)).status).toBe(403);
-    expect((await scoped().put(`/api/inspections/${foreignId}/start`).send({})).status).toBe(403);
+    // 注意用 writer（有 inspection:execute）而非 scoped：scoped 缺该权限，
+    // 403 会由 RBAC 中间件提前返回，控制器分支测不到（详见下方补齐用例的注释）
+    expect((await writer().put(`/api/inspections/${foreignId}/start`).send({})).status).toBe(403);
 
     // 自己参与的计划（正向对照）
     const own = await admin()
@@ -430,6 +482,49 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
     expect(own.status).toBe(201);
     const ownId = String(own.body.data._id || own.body.data.id);
     expect((await scoped().get(`/api/inspections/${ownId}`)).status).toBe(200);
+  });
+
+  test('巡检：有写权限但 self 范围的用户，六个写端点越权一律 403（控制器级拦截）', async () => {
+    // 他人的计划：超管创建并只指派给自己——既不在本用户 assignedTo 里，
+    // 也不落在其次区域（locations.building）内，两条范围判据都不满足。
+    const foreign = await admin()
+      .post('/api/inspections')
+      .send({
+        title: `越权载体_${stamp}`,
+        inspectionType: 'daily',
+        planStartTime: new Date(Date.now() + 1000).toISOString(),
+        planEndTime: new Date(Date.now() + 3600 * 1000).toISOString(),
+        checkItems: [{ name: 'x' }],
+        assignedTo: [adminId],
+      });
+    expect(foreign.status).toBe(201);
+    const id = String(foreign.body.data._id || foreign.body.data.id);
+
+    // 必须是 403，不能是 400/409：后两者意味着请求已越过范围校验进入服务层，
+    // 即「越权可达」——本用例钉死的不变量。六个端点逐一覆盖，
+    // 与 inspectionController 中六处 `if (!(await isInspectionInScope(...)))` 一一对应。
+    expect((await writer().put(`/api/inspections/${id}`).send({ description: 'x' })).status).toBe(
+      403
+    );
+    expect((await writer().put(`/api/inspections/${id}/start`).send({})).status).toBe(403);
+    expect(
+      (await writer().put(`/api/inspections/${id}/complete`).send({ result: 'normal' })).status
+    ).toBe(403);
+    expect(
+      (await writer().put(`/api/inspections/${id}/review`).send({ result: 'approved' })).status
+    ).toBe(403);
+    expect((await writer().put(`/api/inspections/${id}/cancel`).send({ reason: 'x' })).status).toBe(
+      403
+    );
+    expect((await writer().delete(`/api/inspections/${id}`)).status).toBe(403);
+
+    // 正向对照：六次越权全部被拒后，记录必须完好未被改动（越权不仅被拒，且无副作用）
+    const after = await admin().get(`/api/inspections/${id}`);
+    expect(after.status).toBe(200);
+    expect(after.body.data.status).toBe('pending');
+
+    // 收尾：由超管删除
+    expect((await admin().delete(`/api/inspections/${id}`)).status).toBe(200);
   });
 
   // ==================== 路由层拦不到的控制器防御分支（直接调用） ====================
