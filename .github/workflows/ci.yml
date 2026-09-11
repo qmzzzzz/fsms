@@ -313,7 +313,7 @@ jobs:
       # R-7：登录 GitHub Container Registry（使用工作流内置 GITHUB_TOKEN，
       # 无需额外仓库密钥；镜像默认私有，按需在同仓库设置可见性）
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
