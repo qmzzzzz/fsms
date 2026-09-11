@@ -308,7 +308,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # R-7：登录 GitHub Container Registry（使用工作流内置 GITHUB_TOKEN，
       # 无需额外仓库密钥；镜像默认私有，按需在同仓库设置可见性）
