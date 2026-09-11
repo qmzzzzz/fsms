@@ -28,9 +28,7 @@
 
 - CI 密钥扫描恢复可用：`gitleaks-action` v2 → v3（v2 目标运行时 Node 20 将于 2026-09-16 从 GitHub runner 移除后无条件失效），并修正 `.gitleaksignore` 指纹——原指纹绑定的提交哈希与当前仓库历史不匹配，导致 3 处测试常量（`src/tests/constants.js` 的假密钥、`src/tests/utils/totp.test.js` 的 RFC 4226 官方向量）被重复上报为泄漏；改绑首提交 `7f92537`，行号按该提交版本登记（AES 测试密钥在该版本为第 29 行，现行为 30）
 
-### 已知问题（待决策）
-
-- `validate.js:110` 的 M3 级 `ENABLE_HTTPS` fatal 校验与 `:43` 的 M-2 级告警重复，且语义与部署拓扑冲突：`ENABLE_HTTPS=true` 会使进程按 `index.js:209-230` 加载 `./certs/server.crt` 自起 HTTPS，而 README 与 `docker-compose.yml` 的生产形态是「TLS 由前置 Nginx 终结、应用明文 HTTP 反代」。当前实现下该拓扑无法通过生产校验（实证：`npm run test:prod-drill` 在缺 `ENABLE_HTTPS` 时报错、补上后因缺证书继续失败）；`ALLOWED_HOSTS` 无此问题
+- 生产 TLS 校验放宽为「二选一」（`src/config/validate.js`）：此前 M3 只认 `ENABLE_HTTPS=true`，与 README / `.env.example` / `docker-compose.yml` 的「TLS 由前置 Nginx 终结、应用明文 HTTP 反代」形态直接冲突——该形态下置 `ENABLE_HTTPS=true` 反而会让进程加载 `./certs` 证书自起 HTTPS（`src/index.js` 的 HTTPS 分支），证书缺失即拒绝启动。后果是文档推荐的生产拓扑无法启动，`npm run test:prod-drill` 与 CI e2e job 一并变红。现放宽为：`ENABLE_HTTPS=true`（进程自启）**或** `TRUST_PROXY_HOPS∈1..5 且 ALLOWED_HOSTS 已配置`（声明由前置反代终结）任一成立即通过；同时删除重复的 M-2 TLS 告警，并更正 `.env.example` 中「ALLOWED_HOSTS 未配置仅告警」的过时说明（实为致命）
 
 ## [1.0.0] - 2026-08-29
 

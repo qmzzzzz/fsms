@@ -36,18 +36,10 @@ function collectProductionWarnings() {
     );
   }
 
-  // M-2：TLS 必须在某一层终结。进程未自启 HTTPS（ENABLE_HTTPS=true）时，
-  // 只能依赖前置反代——本进程无从验证反代是否真的终结了 TLS，因此以告警
-  // 把责任显式交回部署侧。背景：登录口令的 ECDH 加密在纯 HTTP 下挡不住
-  // 主动 MITM（攻击者替换公钥即可），它只是纵深，不能替代 TLS。
-  if (process.env.ENABLE_HTTPS !== 'true') {
-    warnings.push(
-      'ENABLE_HTTPS 未启用：本进程将以明文 HTTP 提供服务。生产环境必须由前置 ' +
-        'Nginx 终结 TLS（TLSv1.2+、HSTS，配置参考 deployment/nginx.conf.example），' +
-        '并确认对外仅开放 443。若服务直接以 HTTP 暴露，登录口令 ECDH 加密' +
-        '无法抵御主动 MITM，属阻断级配置错误'
-    );
-  }
+  // M-2 的 TLS 告警已并入 validateConfig 的致命校验（M3，2026-09-11 放宽为
+  // 「进程自启 HTTPS 或声明由前置反代终结」二选一），此处不再重复告警——
+  // 保留会让 README / .env.example / docker-compose 的标准拓扑（TLS 由前置
+  // Nginx 终结、应用明文 HTTP 反代）每次启动都刷一条与本意相悖的告警。
 
   return warnings;
 }
@@ -103,16 +95,13 @@ function validateConfig() {
 
   // M3：生产环境必须配置 ALLOWED_HOSTS（Host 头白名单校验）
   if (!process.env.ALLOWED_HOSTS || !process.env.ALLOWED_HOSTS.trim()) {
-    errors.push('ALLOWED_HOSTS 必须配置：生产环境缺少 Host 头白名单，存在缓存投毒与密码重置链接投毒风险');
-  }
-
-  // M3：生产环境必须启用 HTTPS（前置反代或进程自启）
-  if (process.env.ENABLE_HTTPS !== 'true') {
     errors.push(
-      'ENABLE_HTTPS 未启用：生产环境必须由前置 Nginx 终结 TLS 或进程自启 HTTPS，' +
-        '否则登录口令 ECDH 加密无法抵御主动 MITM'
+      'ALLOWED_HOSTS 必须配置：生产环境缺少 Host 头白名单，存在缓存投毒与密码重置链接投毒风险'
     );
   }
+
+  // M3：TLS 终结校验（2026-09-11 放宽版）后置于 TRUST_PROXY_HOPS 校验之后——
+  // 判定需要 MAX_TRUST_PROXY_HOPS 与合法的 hops 值。
 
   // TRUST_PROXY_HOPS 必须是合法跳数，不能只验存在性（AUX-01 / P2-24）
   //
@@ -140,6 +129,35 @@ function validateConfig() {
           '过小会让 req.ip 恒为代理 IP，过大会允许客户端伪造 X-Forwarded-For 轮换 IP 绕过限流'
       );
     }
+  }
+
+  // M3（2026-09-11 放宽）：TLS 必须在某一层终结，但「哪一层」由部署形态决定。
+  //
+  // 原实现只认 ENABLE_HTTPS=true，与 README / .env.example / docker-compose 的目标
+  // 形态直接冲突——那里明确写着「TLS 由前置 Nginx 终结，应用进程本身不建议暴露 443」，
+  // 且该形态下 ENABLE_HTTPS 必须保持关闭：置 true 会让进程转而加载 ./certs 证书
+  // 自起 HTTPS（见 src/index.js 的 HTTPS 分支），证书缺失时直接拒绝启动。
+  // 结果是：文档推荐的生产拓扑无法通过生产校验（演练与 CI e2e 一并变红）。
+  //
+  // 放宽后的判定：以下二者之一成立即可，二者皆无才判致命——
+  //   a) 进程自启 HTTPS：ENABLE_HTTPS === 'true'（需自备证书）；
+  //   b) 声明由前置反代终结：TRUST_PROXY_HOPS 为 1..MAX_TRUST_PROXY_HOPS 的整数
+  //      且 ALLOWED_HOSTS 已配置（反代场景的基本前提，两者本身也已是生产必填）。
+  // 注意：这是「声明式」判定，应用无从验证反代是否真的终结了 TLS。若日后要收紧为
+  // 显式声明，可引入专用开关（如 TLS_TERMINATED_UPSTREAM=true）并在部署清单固化。
+  const tlsInProcess = process.env.ENABLE_HTTPS === 'true';
+  const hopsForTls = parseInt(String(process.env.TRUST_PROXY_HOPS || '').trim(), 10);
+  const tlsTerminatedUpstream =
+    Number.isInteger(hopsForTls) &&
+    hopsForTls >= 1 &&
+    hopsForTls <= MAX_TRUST_PROXY_HOPS &&
+    !!(process.env.ALLOWED_HOSTS || '').trim();
+  if (!tlsInProcess && !tlsTerminatedUpstream) {
+    errors.push(
+      'TLS 未在任一层终结：需 ENABLE_HTTPS=true（进程自启 HTTPS，需自备证书），' +
+        '或声明由前置反代终结（TRUST_PROXY_HOPS 取 1..5 且配置 ALLOWED_HOSTS）。' +
+        '二者皆无时，登录口令的 ECDH 加密无法抵御主动 MITM'
+    );
   }
 
   if (errors.length > 0) {

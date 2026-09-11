@@ -200,20 +200,15 @@ describe('Config Validation', () => {
       expect(warnings).toHaveLength(0);
     });
 
-    test('M-2：未启用 ENABLE_HTTPS 时告警（TLS 必须由某层终结）', () => {
+    test('TLS 告警已并入致命校验：仅缺 ENABLE_HTTPS 时不再产生 TLS 告警', () => {
       process.env.ALLOWED_HOSTS = 'api.example.com';
       const prevHttps = process.env.ENABLE_HTTPS;
-      const restoreHttps = () => {
-        if (prevHttps === undefined) delete process.env.ENABLE_HTTPS;
-        else process.env.ENABLE_HTTPS = prevHttps;
-      };
       delete process.env.ENABLE_HTTPS;
       const { collectProductionWarnings } = require('../../config/validate');
       const warnings = collectProductionWarnings();
-      restoreHttps();
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain('ENABLE_HTTPS');
-      expect(warnings[0]).toContain('TLS');
+      if (prevHttps !== undefined) process.env.ENABLE_HTTPS = prevHttps;
+      expect(warnings.some((w) => w.includes('ENABLE_HTTPS'))).toBe(false);
+      expect(warnings.some((w) => w.includes('TLS'))).toBe(false);
     });
 
     test('ALLOWED_HOSTS missing is now fatal in production (M3)', () => {
@@ -238,10 +233,74 @@ describe('Config Validation', () => {
 
       expect(() => validateConfig()).toThrow('process.exit called');
       expect(mockExit).toHaveBeenCalled();
-      
 
       mockWarn.mockRestore();
       mockExit.mockRestore();
+    });
+  });
+
+  describe('M3：TLS 终结校验（2026-09-11 放宽为二选一）', () => {
+    /** 生产环境下除 TLS 声明外全部配置合法 */
+    const setValidProdEnv = () => {
+      process.env.NODE_ENV = 'production';
+      process.env.JWT_SECRET = 'strong-random-jwt-secret-that-is-long-enough';
+      process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
+      process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
+      process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
+      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+      process.env.CORS_ORIGIN = 'https://example.com';
+      process.env.REDIS_URL = 'redis://redis.example.com:6379';
+    };
+
+    /** 跑一次生产校验，返回 { exited, messages } */
+    const runProd = () => {
+      const { validateConfig } = require('../../config/validate');
+      const logger = require('../../utils/logger');
+      const messages = [];
+      const mockError = jest
+        .spyOn(logger, 'error')
+        .mockImplementation((m) => messages.push(String(m)));
+      jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      let exited = false;
+      try {
+        validateConfig();
+      } catch (e) {
+        exited = e.message === 'process.exit called';
+      }
+
+      mockError.mockRestore();
+      mockExit.mockRestore();
+      return { exited, messages: messages.join('\n') };
+    };
+
+    test('a) 进程自启 HTTPS（ENABLE_HTTPS=true）→ 通过', () => {
+      setValidProdEnv();
+      process.env.ENABLE_HTTPS = 'true';
+      process.env.TRUST_PROXY_HOPS = '1';
+      process.env.ALLOWED_HOSTS = 'api.example.com';
+      expect(runProd().exited).toBe(false);
+    });
+
+    test('b) 声明由前置反代终结（TRUST_PROXY_HOPS=1 + ALLOWED_HOSTS）→ 通过', () => {
+      setValidProdEnv();
+      delete process.env.ENABLE_HTTPS;
+      process.env.TRUST_PROXY_HOPS = '1';
+      process.env.ALLOWED_HOSTS = 'api.example.com';
+      expect(runProd().exited).toBe(false);
+    });
+
+    test('c) 二者皆无（有 hops 但无 ALLOWED_HOSTS）→ 启动致命错误', () => {
+      setValidProdEnv();
+      delete process.env.ENABLE_HTTPS;
+      process.env.TRUST_PROXY_HOPS = '1';
+      delete process.env.ALLOWED_HOSTS;
+      const { exited, messages } = runProd();
+      expect(exited).toBe(true);
+      expect(messages).toContain('TLS 未在任一层终结');
     });
   });
 });
