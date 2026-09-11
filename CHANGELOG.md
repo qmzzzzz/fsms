@@ -24,6 +24,14 @@
 - 架构文档：`docs/architecture.md` 提供系统架构图、登录时序图、ER 图与部署拓扑图（Mermaid）（H-3）
 - 本 CHANGELOG 建档（H-1）
 
+### 修复
+
+- CI 密钥扫描恢复可用：`gitleaks-action` v2 → v3（v2 目标运行时 Node 20 将于 2026-09-16 从 GitHub runner 移除后无条件失效），并修正 `.gitleaksignore` 指纹——原指纹绑定的提交哈希与当前仓库历史不匹配，导致 3 处测试常量（`src/tests/constants.js` 的假密钥、`src/tests/utils/totp.test.js` 的 RFC 4226 官方向量）被重复上报为泄漏；改绑首提交 `7f92537`，行号按该提交版本登记（AES 测试密钥在该版本为第 29 行，现行为 30）
+
+### 已知问题（待决策）
+
+- `validate.js:110` 的 M3 级 `ENABLE_HTTPS` fatal 校验与 `:43` 的 M-2 级告警重复，且语义与部署拓扑冲突：`ENABLE_HTTPS=true` 会使进程按 `index.js:209-230` 加载 `./certs/server.crt` 自起 HTTPS，而 README 与 `docker-compose.yml` 的生产形态是「TLS 由前置 Nginx 终结、应用明文 HTTP 反代」。当前实现下该拓扑无法通过生产校验（实证：`npm run test:prod-drill` 在缺 `ENABLE_HTTPS` 时报错、补上后因缺证书继续失败）；`ALLOWED_HOSTS` 无此问题
+
 ## [1.0.0] - 2026-08-29
 
 > 本仓库此前无 CHANGELOG，本条为 1.0.0 的追溯性汇总，依据 README、代码现状与 2026-08-23 ~ 08-29 的修复批次留档整理。
