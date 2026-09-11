@@ -162,5 +162,4 @@ export const legacyEnUS = {
   未登录: 'Not logged in',
 }
 
-
 export default legacyEnUS

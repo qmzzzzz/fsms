@@ -181,7 +181,11 @@ const updateDeviceStatus = asyncHandler(async (req, res) => {
     const updated = await deviceService.updateDeviceStatus(device, status);
     return ApiResponse.success(res, updated, '状态更新成功');
   } catch (err) {
-    return ApiResponse.error(res, err.statusCode === 404 ? '记录不存在' : '操作失败', err.statusCode || 400);
+    return ApiResponse.error(
+      res,
+      err.statusCode === 404 ? '记录不存在' : '操作失败',
+      err.statusCode || 400
+    );
   }
 });
 

@@ -175,5 +175,4 @@ export const legacyZhCN = {
   未登录: '未登录',
 }
 
-
 export default legacyZhCN
