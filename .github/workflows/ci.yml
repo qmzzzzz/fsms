@@ -1,0 +1,307 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x, 22.x]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+      # O-3 体积棘轮：max-lines / max-lines-per-function 以 warn 级接入，
+      # 逐文件计数对照 eslint.ratchet.json 基线——任何文件 warn 计数只许降
+      # 不许升（瘦身生效后本地 --update-baseline 收紧并随提交评审）
+      - name: Run lint ratchet (size baseline)
+        run: npm run lint:ratchet
+
+      # O-12 格式门禁：源码区（src/、web-admin/src/ 等）必须符合 .prettierrc，
+      # 本地用 `npm run format` 一键修复；check 失败即 CI 失败
+      - name: Run format check (prettier)
+        run: npm run format:check
+
+      - name: Run tests
+        run: npm test
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-secret
+          AES_SECRET_KEY: test-aes-key-32-chars-minimum!!
+          HMAC_SECRET: test-hmac-secret
+
+      - name: Run tests with coverage
+        run: npm run test:coverage --if-present
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-secret
+          AES_SECRET_KEY: test-aes-key-32-chars-minimum!!
+          HMAC_SECRET: test-hmac-secret
+
+      - name: Upload backend coverage
+        if: matrix.node-version == '18.x'
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage/lcov.info
+          # 配置 CODECOV_TOKEN 后上传即生效；未配置时私有仓上传必然失败，
+          # 保持软门禁（覆盖率棘轮的真实门禁在上一步 jest --coverage 阈值）
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  security-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js 20.x
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20.x
+
+      - name: Audit backend dependencies
+        # I-M3：取消 continue-on-error——高危依赖告警直接让 job 失败（硬门禁）；
+        # 结果写入 Job Summary 留痕（此前软门禁会静默吞掉告警，事后无法追溯）
+        run: |
+          npm audit --omit=dev --audit-level=high | tee audit-backend.txt
+          echo "### Backend npm audit" >> "$GITHUB_STEP_SUMMARY"
+          tail -3 audit-backend.txt >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Audit web-admin dependencies
+        working-directory: web-admin
+        # I-M3：同上，硬门禁 + 留痕
+        run: |
+          npm audit --omit=dev --audit-level=high | tee ../audit-web.txt
+          echo "### Web-admin npm audit" >> "$GITHUB_STEP_SUMMARY"
+          tail -3 ../audit-web.txt >> "$GITHUB_STEP_SUMMARY" || true
+
+  secret-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        # v3 已发布但输入契约（env/配置发现方式）有变化，保守保留 v2；
+        # 升级前需单独验证（I-L7 仅要求脱离 2022 年代 node16 运行时的 v3，此项本就满足）
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  frontend-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Node 24：web-admin 锁定的 jsdom 30 依赖 undici 8.10.0，其内置 webidl
+      # 直接调用 worker_threads.markAsUncloneable（Node 22.10+ 才有），
+      # Node 20 下 jsdom 加载即崩、全部 worker 起不来（2026-09-05 CI 实证）
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.x
+
+      - name: Install dependencies
+        working-directory: web-admin
+        run: npm ci
+
+      # 七维终评（代码质量）补门禁：前端 ESLint 与后端 lint 同级硬门禁。
+      # 此前仅本地有 lint:web 脚本而 CI 未跑，前端代码风格/错误靠自觉；
+      # 放在测试与构建之前，尽早拦截（当前基线已验证可通过）
+      - name: Run frontend lint
+        working-directory: web-admin
+        run: npm run lint
+
+      # T-3：前端测试 + 覆盖率硬门禁（vitest coverage.thresholds 低于基线即非零退出）
+      - name: Run frontend tests with coverage
+        working-directory: web-admin
+        run: npm run test:coverage
+
+      - name: Build frontend
+        working-directory: web-admin
+        run: npm run build
+
+      - name: Upload frontend coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./web-admin/coverage/lcov.info
+          # 同后端口径：配置 CODECOV_TOKEN 后上传即生效，未配置时尽力而为；
+          # 真实覆盖率门禁在上一步 vitest coverage.thresholds
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  e2e:
+    # I-L6：E2E 冒烟 + 生产模式演练接入 CI。这一层走 index.js 完整启动序列
+    # （dotenv→强校验→密钥注入→播种→监听→WebSocket/调度器/审计缓冲），
+    # 是 supertest 套件测不到的接线层兜底；prod-drill 另验生产门禁。
+    # 两脚本自带随机强密钥与内存 Mongo，无需额外 service 容器。
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js 20.x
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20.x
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run E2E smoke（完整启动序列 14 步）
+        run: npm run test:e2e
+
+      - name: Run production drill（生产模式演练 9 步）
+        run: npm run test:prod-drill
+
+  e2e-browser:
+    # 评价报告 H1：浏览器旅程为发布镜像硬门禁。桌面与移动端旅程
+    # 已在本地真实栈稳定通过；MFA 旅程继续按环境能力跳过。
+    runs-on: ubuntu-latest
+
+    services:
+      mongo:
+        image: mongo:7.0.14
+        ports:
+          - 27017:27017
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js 20.x
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20.x
+
+      - name: Install backend dependencies
+        run: npm ci
+
+      - name: Install frontend dependencies and build
+        run: |
+          npm --prefix web-admin ci
+          npm --prefix web-admin run build
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Start full stack
+        id: full-stack
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/fsms_browser_e2e
+          LOGIN_CAPTCHA_ENABLED: 'false'
+          ALLOW_PUBLIC_REGISTRATION: 'false'
+        run: |
+          E2E_TEST_PASSWORD="E2e!$(openssl rand -hex 12)Aa1"
+          export E2E_TEST_PASSWORD
+          NODE_ENV=development \
+          PORT=3000 \
+          SERVE_FRONTEND=true \
+          MONGODB_URI="$MONGODB_URI" \
+          JWT_SECRET="$(openssl rand -hex 32)" \
+          JWT_REFRESH_SECRET="$(openssl rand -hex 32)" \
+          AES_SECRET_KEY="$(openssl rand -hex 32)" \
+          HMAC_SECRET="$(openssl rand -hex 32)" \
+          ADMIN_INITIAL_PASSWORD="$E2E_TEST_PASSWORD" \
+          LOGIN_CAPTCHA_ENABLED="$LOGIN_CAPTCHA_ENABLED" \
+          ALLOW_PUBLIC_REGISTRATION="$ALLOW_PUBLIC_REGISTRATION" \
+          CORS_ORIGIN=http://127.0.0.1:3000 \
+          LOG_LEVEL=warn \
+          node src/index.js > logs-browser-e2e-backend.log 2>&1 &
+          echo "$!" > browser-e2e-backend.pid
+          echo "password=$E2E_TEST_PASSWORD" >> "$GITHUB_OUTPUT"
+
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3000/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat logs-browser-e2e-backend.log
+          exit 1
+
+      - name: Run browser journeys
+        env:
+          E2E_BASE_URL: http://127.0.0.1:3000
+          E2E_USER: admin
+          E2E_PASS: ${{ steps.full-stack.outputs.password }}
+        run: npm run test:e2e:browser -- --workers=1 --project=desktop-chromium --project=mobile-chrome
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  build:
+    # I-M2：镜像构建/推送串联 e2e、secret-scan 与 security-audit——
+    # 此前仅 needs:test，gitleaks 检出泄漏时含泄漏内容的镜像仍会推上 GHCR
+    needs: [test, e2e, e2e-browser, secret-scan, security-audit]
+    runs-on: ubuntu-latest
+    # main 分支推 latest；v* 标签发布版本镜像（R-7）
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write # GHCR 推送所需
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # R-7：登录 GitHub Container Registry（使用工作流内置 GITHUB_TOKEN，
+      # 无需额外仓库密钥；镜像默认私有，按需在同仓库设置可见性）
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 版本 tag 策略：
+      #   - 任意构建：:sha-<短哈希>（可精确回溯提交）
+      #   - main 分支：额外 :latest
+      #   - v* 标签：额外 :<标签名>（如 :v1.0.0）与 :latest
+      - name: Compute image tags
+        id: meta
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          TAGS="${IMAGE}:sha-${GITHUB_SHA::7}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAGS="${TAGS},${IMAGE}:${GITHUB_REF_NAME},${IMAGE}:latest"
+          elif [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${IMAGE}:latest"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

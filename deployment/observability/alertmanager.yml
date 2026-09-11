@@ -1,0 +1,84 @@
+# ============================================================
+# Alertmanager 告警通知配置（G-2：告警触达链路）
+#
+# 背景：此前告警仅在 Prometheus /alerts 页可见（prometheus.yml 自认
+# 「未配 Alertmanager」），无人值守时 BackendDown / HighErrorRate 等
+# critical 告警无法主动触达运维——七维终评可观测性维度的明确扣分项。
+#
+# 触达路径：Prometheus（alert-rules.yml 求值）→ 本文件按 severity 路由
+# → 通知接收器。critical 即时通道 + 更快重复提醒；warning 低优先级通道。
+#
+# 占位符约定：webhook URL、SMTP 口令等敏感项均为占位，绝不入库。
+# 注意：Alertmanager 配置不支持 ${VAR} 环境变量展开，URL 中的
+# access_token 也不允许经 args 明文传入（会出现在 ps 与 inspect 里）。
+# 生产注入方式（与 ./secrets 同风格，文件不入库）：
+#   1. 复制本文件为私有副本并填入真实值（放入 .gitignore 覆盖的目录）；
+#   2. docker-compose 中以独立挂载覆盖 /etc/alertmanager/alertmanager.yml；
+#   3. 或部署侧用模板渲染（如 envsubst）后落盘再挂载。
+# 钉钉/企微适配说明：Alertmanager 的 webhook 载荷是 Prometheus 告警
+# JSON，钉钉机器人不能直接消费，需要适配器
+# （如 timonwong/prometheus-webhook-dingtalk，再由它转发钉钉）；
+# 企微/飞书的通用 JSON 机器人入口可直接试收后按需适配。
+# ============================================================
+
+global:
+  # 告警恢复通知的等待确认时长
+  resolve_timeout: 5m
+  # —— 邮件通道占位（需要邮件通知时取消注释并填入真实值）——
+  # smtp_smarthost: 'smtp.example.com:465'
+  # smtp_from: 'alertmanager@example.com'
+  # smtp_auth_username: 'alertmanager@example.com'
+  # smtp_auth_password: '<替换为SMTP口令或改用 auth_password_file>'
+
+route:
+  # 顶级路由兜底 receiver：任何未命中子路由的告警也必须有人收，
+  # 宁可多发到 critical 通道，也不允许告警静默丢失
+  receiver: ops-critical
+  group_by: ['alertname', 'severity']
+  # 首条通知前的聚合等待窗：把 30s 内的同名告警合并成一条，
+  # 抑制告警风暴（如后端重启瞬间 BackendDown 与 HighErrorRate 同时触发）
+  group_wait: 30s
+  # 同组有新告警加入时的再次通知间隔
+  group_interval: 5m
+  # 未恢复告警的重复提醒周期
+  repeat_interval: 4h
+  routes:
+    # critical：即时触达（BackendDown / HighErrorRate），30 分钟重复提醒
+    - matchers:
+        - severity="critical"
+      receiver: ops-critical
+      repeat_interval: 30m
+    # warning：低优先级通道（HighP95Latency / SecurityAlertBurst），
+    # 4h 重复提醒足够，避免打断值班
+    - matchers:
+        - severity="warning"
+      receiver: ops-warning
+      repeat_interval: 4h
+
+receivers:
+  # critical 接收器：通用 webhook（钉钉经适配器/企微飞书原生 JSON）+ 可选邮件
+  - name: ops-critical
+    webhook_configs:
+      # 占位：替换为真实通知通道入口（经上述私有副本注入，不入库）
+      - url: 'https://hooks.example.com/<替换为critical通知通道access_token>'
+        send_resolved: true
+    # 需要邮件触达时取消注释（global 段 SMTP 已配置的前提下）
+    # email_configs:
+    #   - to: 'ops@example.com'
+    #     send_resolved: true
+
+  # warning 接收器：低优先级 webhook（如日志群/看板群），不与 critical 混流
+  - name: ops-warning
+    webhook_configs:
+      - url: 'https://hooks.example.com/<替换为warning通知通道access_token>'
+        send_resolved: true
+
+# 可选：critical 告警触发时抑制同一实例的 warning，避免同源告警重复轰炸。
+# 当前规则集中 BackendDown(critical) 挂掉时 HighP95Latency(warning) 必然伴随，
+# 按实例维度抑制是安全的；如后续规则语义变化再按需收紧 equal 维度。
+inhibit_rules:
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
+    equal: ['instance']

@@ -1,0 +1,2041 @@
+/* ==========================================================================
+   全局样式 - 液态玻璃体系（消防安全管理系统 · 严肃红主题）
+   高科技·严肃·正式视觉风格 v2.0
+   所有类名与旧版保持兼容，色彩统一由 --xf-* 设计令牌驱动
+   ========================================================================== */
+
+/* ===== 高科技字体系统 ===== */
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ==========================================================================
+   设计令牌（Design Tokens）
+   ========================================================================== */
+:root {
+  /* ===== 高科技字体系统 ===== */
+  --xf-font-display: 'Sora', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --xf-font-body:
+    'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  --xf-font-mono: 'JetBrains Mono', 'SF Mono', 'Consolas', 'Fira Code', monospace;
+  --xf-font-family: var(--xf-font-body);
+  --xf-font-size-xs: 12px;
+  --xf-font-size-sm: 13px;
+  --xf-font-size-base: 14px;
+  --xf-font-size-md: 16px;
+  --xf-font-size-lg: 18px;
+  --xf-font-size-xl: 20px;
+  --xf-font-size-2xl: 28px;
+  --xf-font-size-3xl: 36px;
+  --xf-tracking-tight: -0.02em;
+  --xf-tracking-normal: 0em;
+  --xf-tracking-wide: 0.04em;
+  --xf-tracking-wider: 0.08em;
+  --xf-leading-tight: 1.3;
+  --xf-leading-normal: 1.6;
+  --xf-leading-relaxed: 1.8;
+
+  /* ===== 高科技装饰令牌 ===== */
+  --xf-tech-grid:
+    linear-gradient(rgba(15, 23, 42, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.03) 1px, transparent 1px);
+  --xf-tech-grid-size: 24px;
+  --xf-glow-primary: 0 0 20px rgba(193, 18, 31, 0.15);
+  --xf-glow-primary-strong: 0 0 40px rgba(193, 18, 31, 0.25);
+  --xf-glow-info: 0 0 20px rgba(71, 85, 105, 0.12);
+  --xf-gradient-surface: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.02) 0%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  --xf-gradient-tech: linear-gradient(
+    135deg,
+    rgba(71, 85, 105, 0.03) 0%,
+    rgba(193, 18, 31, 0.02) 100%
+  );
+
+  /* ===== 品牌主色 · 严肃红 ===== */
+  --xf-primary: #c1121f;
+  --xf-primary-strong: #a4161a;
+  --xf-primary-light: #e63946;
+  --xf-primary-deep: #7d0c14;
+  --xf-primary-alpha-8: rgba(193, 18, 31, 0.08);
+  --xf-primary-alpha-12: rgba(193, 18, 31, 0.12);
+  --xf-primary-alpha-15: rgba(193, 18, 31, 0.15);
+  --xf-primary-alpha-25: rgba(193, 18, 31, 0.25);
+  --xf-primary-alpha-35: rgba(193, 18, 31, 0.35);
+  --xf-primary-alpha-45: rgba(193, 18, 31, 0.45);
+  --xf-primary-alpha-55: rgba(193, 18, 31, 0.55);
+
+  /* ===== 语义色 · 成功 ===== */
+  --xf-success: #16a34a;
+  --xf-success-strong: #15803d;
+  --xf-success-alpha-8: rgba(22, 163, 74, 0.08);
+  --xf-success-alpha-15: rgba(22, 163, 74, 0.15);
+  --xf-success-alpha-30: rgba(22, 163, 74, 0.3);
+  --xf-success-alpha-45: rgba(22, 163, 74, 0.45);
+  --xf-success-alpha-55: rgba(22, 163, 74, 0.55);
+
+  /* ===== 语义色 · 警告 ===== */
+  --xf-warning: #d97706;
+  --xf-warning-strong: #b45309;
+  --xf-warning-alpha-8: rgba(217, 119, 6, 0.08);
+  --xf-warning-alpha-15: rgba(217, 119, 6, 0.15);
+  --xf-warning-alpha-30: rgba(217, 119, 6, 0.3);
+  --xf-warning-alpha-45: rgba(217, 119, 6, 0.45);
+  --xf-warning-alpha-55: rgba(217, 119, 6, 0.55);
+
+  /* ===== 语义色 · 危险 ===== */
+  --xf-danger: #b91c1c;
+  --xf-danger-strong: #991b1b;
+  --xf-danger-deep: #7f1d1d;
+  --xf-danger-alpha-8: rgba(185, 28, 28, 0.08);
+  --xf-danger-alpha-15: rgba(185, 28, 28, 0.15);
+  --xf-danger-alpha-30: rgba(185, 28, 28, 0.3);
+  --xf-danger-alpha-45: rgba(185, 28, 28, 0.45);
+  --xf-danger-alpha-55: rgba(185, 28, 28, 0.55);
+
+  /* ===== 语义色 · 信息（冷静灰蓝，避免靛蓝） ===== */
+  --xf-info: #475569;
+  --xf-info-strong: #334155;
+  --xf-info-alpha-8: rgba(71, 85, 105, 0.08);
+  --xf-info-alpha-15: rgba(71, 85, 105, 0.15);
+  --xf-info-alpha-30: rgba(71, 85, 105, 0.3);
+  --xf-info-alpha-45: rgba(71, 85, 105, 0.45);
+  --xf-info-alpha-55: rgba(71, 85, 105, 0.55);
+
+  /* ===== 中性灰阶 ===== */
+  --xf-gray-50: #f8fafc;
+  --xf-gray-100: #f1f5f9;
+  --xf-gray-200: #e2e8f0;
+  --xf-gray-300: #cbd5e1;
+  --xf-gray-400: #94a3b8;
+  --xf-gray-500: #64748b;
+  --xf-gray-600: #475569;
+  --xf-gray-700: #334155;
+  --xf-gray-800: #1e293b;
+  --xf-gray-900: #0f172a;
+
+  --xf-text-primary: var(--xf-gray-800);
+  --xf-text-regular: var(--xf-gray-700);
+  --xf-text-secondary: var(--xf-gray-600);
+  --xf-text-muted: var(--xf-gray-400);
+  --xf-border-color: var(--xf-gray-200);
+  --xf-border-color-strong: var(--xf-gray-300);
+  --xf-border-glass: rgba(203, 213, 225, 0.65);
+  --xf-border-glass-strong: rgba(148, 163, 184, 0.85);
+  --xf-bg-page: var(--xf-gray-50);
+  --xf-bg-glass: rgba(255, 255, 255, 0.2);
+  --xf-bg-glass-strong: rgba(255, 255, 255, 0.92);
+
+  /* ===== 间距阶 ===== */
+  --xf-spacing-xs: 4px;
+  --xf-spacing-sm: 6px;
+  --xf-spacing-md: 10px;
+  --xf-spacing-lg: 16px;
+  --xf-spacing-xl: 20px;
+  --xf-spacing-2xl: 24px;
+
+  /* ===== 圆角 ===== */
+  --xf-radius-sm: 10px;
+  --xf-radius-md: 12px;
+  --xf-radius-lg: 16px;
+  --xf-radius-xl: 20px;
+  --xf-radius-circle: 50%;
+
+  /* ===== 阴影 ===== */
+  --xf-shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --xf-shadow-sm: 0 2px 4px rgba(15, 23, 42, 0.05);
+  --xf-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+  --xf-shadow-lg: 0 8px 24px rgba(15, 23, 42, 0.1);
+  --xf-shadow-xl: 0 12px 40px rgba(15, 23, 42, 0.12);
+  --xf-shadow-xl-hover: 0 16px 48px rgba(15, 23, 42, 0.14);
+  --xf-shadow-primary: 0 6px 20px rgba(193, 18, 31, 0.3);
+  --xf-shadow-primary-strong: 0 10px 28px rgba(164, 22, 26, 0.4);
+  --xf-shadow-danger: 0 6px 20px rgba(185, 28, 28, 0.3);
+  --xf-shadow-danger-strong: 0 10px 28px rgba(153, 27, 27, 0.4);
+  --xf-shadow-warning: 0 6px 20px rgba(217, 119, 6, 0.26);
+  --xf-shadow-warning-strong: 0 10px 26px rgba(217, 119, 6, 0.38);
+  --xf-shadow-success: 0 6px 20px rgba(22, 163, 74, 0.26);
+  --xf-shadow-success-strong: 0 10px 26px rgba(22, 163, 74, 0.38);
+  --xf-shadow-info: 0 6px 20px rgba(71, 85, 105, 0.26);
+  --xf-shadow-info-strong: 0 10px 26px rgba(71, 85, 105, 0.38);
+  --xf-focus-ring: 0 0 0 3px var(--xf-primary-alpha-35);
+
+  /* ===== 动效（严肃调性：时长收敛、无弹跳过冲） ===== */
+  --xf-duration-fast: 0.12s;
+  --xf-duration-base: 0.2s;
+  --xf-duration-slow: 0.35s;
+  --xf-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --xf-ease-glass: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ===== 液态玻璃质感 ===== */
+  --xf-glass-blur: blur(18px) saturate(180%);
+  --xf-glass-border: rgba(255, 255, 255, 0.55);
+  --xf-glass-border-hover: rgba(255, 255, 255, 0.85);
+  --xf-glass-shine: linear-gradient(
+    115deg,
+    transparent 32%,
+    rgba(255, 255, 255, 0.32) 50%,
+    transparent 68%
+  );
+  --xf-glass-highlight: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.5) 0%,
+    rgba(255, 255, 255, 0.12) 42%,
+    transparent 62%
+  );
+  --xf-glass-inset-dark: rgba(15, 23, 42, 0.22);
+  --xf-glass-edge:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95), inset 0 -1px 0 rgba(255, 255, 255, 0.28),
+    inset 1px 0 0 rgba(255, 255, 255, 0.3), inset -1px 0 0 rgba(255, 255, 255, 0.3);
+  --xf-glass-edge-hover:
+    inset 0 1px 0 rgba(255, 255, 255, 1), inset 0 -1px 0 rgba(255, 255, 255, 0.35),
+    inset 1px 0 0 rgba(255, 255, 255, 0.4), inset -1px 0 0 rgba(255, 255, 255, 0.4);
+  --xf-glass-edge-color:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4), inset 0 -1px 0 var(--xf-glass-inset-dark);
+  --xf-glass-edge-color-hover:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5), inset 0 -1px 0 var(--xf-glass-inset-dark);
+  --xf-glass-press: inset 0 1px 0 rgba(255, 255, 255, 0.7), inset 0 -1px 0 rgba(255, 255, 255, 0.2);
+  --xf-text-shadow-dark: 0 1px 2px rgba(15, 23, 42, 0.25);
+
+  /* ===== 染色玻璃渐变（按钮变体） ===== */
+  --xf-gradient-default: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.7) 0%,
+    rgba(255, 255, 255, 0.4) 100%
+  );
+  --xf-gradient-default-hover: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.88) 0%,
+    rgba(255, 255, 255, 0.55) 100%
+  );
+  --xf-gradient-primary: linear-gradient(
+    180deg,
+    rgba(193, 18, 31, 0.94) 0%,
+    rgba(164, 22, 26, 0.86) 100%
+  );
+  --xf-gradient-primary-hover: linear-gradient(
+    180deg,
+    rgba(230, 57, 70, 0.95) 0%,
+    rgba(193, 18, 31, 0.9) 100%
+  );
+  --xf-gradient-danger: linear-gradient(
+    180deg,
+    rgba(185, 28, 28, 0.94) 0%,
+    rgba(153, 27, 27, 0.86) 100%
+  );
+  --xf-gradient-danger-hover: linear-gradient(
+    180deg,
+    rgba(220, 38, 38, 0.95) 0%,
+    rgba(185, 28, 28, 0.9) 100%
+  );
+  --xf-gradient-warning: linear-gradient(
+    180deg,
+    rgba(217, 119, 6, 0.94) 0%,
+    rgba(180, 83, 9, 0.86) 100%
+  );
+  --xf-gradient-warning-hover: linear-gradient(
+    180deg,
+    rgba(245, 158, 11, 0.95) 0%,
+    rgba(217, 119, 6, 0.9) 100%
+  );
+  --xf-gradient-info: linear-gradient(
+    180deg,
+    rgba(71, 85, 105, 0.94) 0%,
+    rgba(51, 65, 85, 0.88) 100%
+  );
+  --xf-gradient-info-hover: linear-gradient(
+    180deg,
+    rgba(100, 116, 139, 0.95) 0%,
+    rgba(71, 85, 105, 0.9) 100%
+  );
+  --xf-gradient-success: linear-gradient(
+    180deg,
+    rgba(22, 163, 74, 0.94) 0%,
+    rgba(21, 128, 61, 0.86) 100%
+  );
+  --xf-gradient-success-hover: linear-gradient(
+    180deg,
+    rgba(34, 197, 94, 0.95) 0%,
+    rgba(22, 163, 74, 0.9) 100%
+  );
+}
+
+/* ==========================================================================
+   基础
+   ========================================================================== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  /* 不使用 height: 100%，让内容自然流动，避免 Edge 最小化问题 */
+  min-height: 100vh;
+}
+
+body {
+  font-family: var(--xf-font-family);
+  line-height: 1.6;
+  color: var(--xf-text-regular);
+  background-color: var(--xf-bg-page);
+  /* 关键：overflow-y 自动，允许页面滚动，不影响窗口操作 */
+  overflow-y: auto;
+}
+
+#app {
+  width: 100%;
+}
+
+a {
+  color: var(--xf-primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Element Plus 兼容 */
+.el-card {
+  box-shadow: var(--xf-shadow-sm);
+}
+
+/* ==========================================================================
+   按钮组间距（全局）
+   ========================================================================== */
+.glass-btn-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--xf-spacing-md);
+  flex-wrap: wrap;
+}
+
+.glass-btn-group--tight {
+  gap: var(--xf-spacing-sm);
+}
+
+.glass-btn-group--loose {
+  gap: var(--xf-spacing-lg);
+}
+
+/* ==========================================================================
+   Apple Copy 药丸按钮（统一 · 低 AI 感）
+   - 实色/描边胶囊，简洁过渡
+   - 去玻璃、去流光、去复杂阴影
+   ========================================================================== */
+.glass-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--xf-spacing-sm);
+  padding: 9px 20px;
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+  color: var(--xf-text-regular);
+  background: var(--xf-gray-100);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease,
+    opacity 0.18s ease,
+    transform 0.12s ease;
+}
+
+.glass-btn:hover {
+  background: var(--xf-gray-200);
+}
+
+.glass-btn:active {
+  transform: scale(0.98);
+}
+
+.glass-btn:disabled,
+.glass-btn.is-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+  transform: none;
+}
+
+.glass-btn:focus-visible {
+  outline: 2px solid var(--xf-primary-alpha-45);
+  outline-offset: 2px;
+}
+
+.glass-btn.is-loading {
+  pointer-events: none;
+  opacity: 0.75;
+}
+
+.glass-btn.is-loading::after {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-left: var(--xf-spacing-sm);
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: glass-btn-spin 0.6s linear infinite;
+}
+
+@keyframes glass-btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 默认 */
+.glass-btn--default {
+  color: var(--xf-text-secondary);
+  background: transparent;
+  border-color: var(--xf-border-color);
+}
+
+.glass-btn--default:hover {
+  background: var(--xf-gray-100);
+  border-color: var(--xf-border-color-strong);
+}
+
+/* 主要 */
+.glass-btn--primary {
+  color: #ffffff;
+  background: var(--xf-primary);
+}
+
+.glass-btn--primary:hover {
+  background: var(--xf-primary-strong);
+}
+
+/* 危险 */
+.glass-btn--danger {
+  color: #ffffff;
+  background: var(--xf-danger);
+}
+
+.glass-btn--danger:hover {
+  background: var(--xf-danger-strong);
+}
+
+/* 警告 */
+.glass-btn--warning {
+  color: #ffffff;
+  background: var(--xf-warning);
+}
+
+.glass-btn--warning:hover {
+  background: var(--xf-warning-strong);
+}
+
+/* 信息 */
+.glass-btn--info {
+  color: #ffffff;
+  background: var(--xf-info);
+}
+
+.glass-btn--info:hover {
+  background: var(--xf-info-strong);
+}
+
+/* 成功 */
+.glass-btn--success {
+  color: #ffffff;
+  background: var(--xf-success);
+}
+
+.glass-btn--success:hover {
+  background: var(--xf-success-strong);
+}
+
+/* 链接风格（表格内操作） */
+.glass-btn--link {
+  padding: var(--xf-spacing-xs) var(--xf-spacing-md);
+  font-size: var(--xf-font-size-xs);
+  font-weight: 500;
+  background: transparent;
+  border: 1px solid transparent;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.glass-btn--link:hover,
+.glass-btn--link:active {
+  transform: none;
+}
+
+.glass-btn--link.glass-btn--default {
+  color: var(--xf-text-secondary);
+}
+
+.glass-btn--link.glass-btn--default:hover {
+  color: var(--xf-text-primary);
+  background: var(--xf-gray-100);
+  border-color: var(--xf-border-color);
+}
+
+.glass-btn--link.glass-btn--primary {
+  color: var(--xf-primary);
+  background: var(--xf-primary-alpha-8);
+}
+
+.glass-btn--link.glass-btn--primary:hover {
+  background: var(--xf-primary-alpha-15);
+}
+
+.glass-btn--link.glass-btn--danger {
+  color: var(--xf-danger);
+  background: var(--xf-danger-alpha-8);
+}
+
+.glass-btn--link.glass-btn--danger:hover {
+  background: var(--xf-danger-alpha-15);
+}
+
+.glass-btn--link.glass-btn--warning {
+  color: var(--xf-warning);
+  background: var(--xf-warning-alpha-8);
+}
+
+.glass-btn--link.glass-btn--warning:hover {
+  background: var(--xf-warning-alpha-15);
+}
+
+.glass-btn--link.glass-btn--info {
+  color: var(--xf-info);
+  background: var(--xf-info-alpha-8);
+}
+
+.glass-btn--link.glass-btn--info:hover {
+  background: var(--xf-info-alpha-15);
+}
+
+.glass-btn--link.glass-btn--success {
+  color: var(--xf-success);
+  background: var(--xf-success-alpha-8);
+}
+
+.glass-btn--link.glass-btn--success:hover {
+  background: var(--xf-success-alpha-15);
+}
+
+/* 小尺寸 */
+.glass-btn--sm {
+  padding: 6px 14px;
+  font-size: var(--xf-font-size-xs);
+}
+
+/* 图标按钮 */
+.glass-btn--icon {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+/* ==========================================================================
+   Element Plus el-button 全局覆盖（对齐同一令牌体系 · 半透明玻璃背景）
+   ========================================================================== */
+.el-button {
+  font-weight: 600;
+  color: var(--xf-text-regular);
+  border-color: var(--xf-border-color-strong);
+  background-color: rgba(255, 255, 255, 0.72);
+}
+
+.el-button:hover,
+.el-button:focus {
+  color: var(--xf-primary);
+  border-color: var(--xf-primary-alpha-35);
+  background-color: var(--xf-primary-alpha-8);
+}
+
+.el-button:active {
+  color: var(--xf-primary-strong);
+  border-color: var(--xf-primary-alpha-45);
+  background-color: var(--xf-primary-alpha-12);
+}
+
+.el-button:focus-visible {
+  outline: 2px solid var(--xf-primary-alpha-45);
+  outline-offset: 1px;
+}
+
+.el-button.is-disabled,
+.el-button.is-disabled:hover,
+.el-button.is-disabled:focus,
+.el-button.is-disabled:active {
+  color: var(--xf-text-muted);
+  border-color: var(--xf-border-color);
+  background-color: var(--xf-gray-100);
+  cursor: not-allowed;
+}
+
+.el-button.is-loading {
+  opacity: 0.75;
+}
+
+/* --- primary --- */
+.el-button--primary {
+  color: #ffffff;
+  background-color: var(--xf-primary);
+  border-color: var(--xf-primary);
+}
+
+.el-button--primary:hover,
+.el-button--primary:focus {
+  color: #ffffff;
+  background-color: var(--xf-primary-strong);
+  border-color: var(--xf-primary-strong);
+}
+
+.el-button--primary:active {
+  color: #ffffff;
+  background-color: var(--xf-primary-deep);
+  border-color: var(--xf-primary-deep);
+}
+
+.el-button--primary.is-disabled,
+.el-button--primary.is-disabled:hover,
+.el-button--primary.is-disabled:focus,
+.el-button--primary.is-disabled:active {
+  color: #ffffff;
+  background-color: var(--xf-primary-alpha-45);
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+.el-button--primary.is-loading {
+  color: #ffffff;
+  background-color: var(--xf-primary);
+  border-color: var(--xf-primary);
+  opacity: 0.75;
+}
+
+/* --- danger --- */
+.el-button--danger {
+  color: #ffffff;
+  background-color: var(--xf-danger);
+  border-color: var(--xf-danger);
+}
+
+.el-button--danger:hover,
+.el-button--danger:focus {
+  color: #ffffff;
+  background-color: var(--xf-danger-strong);
+  border-color: var(--xf-danger-strong);
+}
+
+.el-button--danger:active {
+  color: #ffffff;
+  background-color: var(--xf-danger-deep);
+  border-color: var(--xf-danger-deep);
+}
+
+.el-button--danger.is-disabled,
+.el-button--danger.is-disabled:hover,
+.el-button--danger.is-disabled:focus,
+.el-button--danger.is-disabled:active {
+  color: #ffffff;
+  background-color: var(--xf-danger-alpha-45);
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+.el-button--danger.is-loading {
+  color: #ffffff;
+  background-color: var(--xf-danger);
+  border-color: var(--xf-danger);
+  opacity: 0.75;
+}
+
+/* --- warning --- */
+.el-button--warning {
+  color: #ffffff;
+  background-color: var(--xf-warning);
+  border-color: var(--xf-warning);
+}
+
+.el-button--warning:hover,
+.el-button--warning:focus {
+  color: #ffffff;
+  background-color: var(--xf-warning-strong);
+  border-color: var(--xf-warning-strong);
+}
+
+.el-button--warning:active {
+  color: #ffffff;
+  background-color: var(--xf-warning-strong);
+  border-color: var(--xf-warning-strong);
+}
+
+.el-button--warning.is-disabled,
+.el-button--warning.is-disabled:hover,
+.el-button--warning.is-disabled:focus,
+.el-button--warning.is-disabled:active {
+  color: #ffffff;
+  background-color: var(--xf-warning-alpha-45);
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+.el-button--warning.is-loading {
+  color: #ffffff;
+  background-color: var(--xf-warning);
+  border-color: var(--xf-warning);
+  opacity: 0.75;
+}
+
+/* --- info --- */
+.el-button--info {
+  color: #ffffff;
+  background-color: var(--xf-info);
+  border-color: var(--xf-info);
+}
+
+.el-button--info:hover,
+.el-button--info:focus {
+  color: #ffffff;
+  background-color: var(--xf-info-strong);
+  border-color: var(--xf-info-strong);
+}
+
+.el-button--info:active {
+  color: #ffffff;
+  background-color: var(--xf-info-strong);
+  border-color: var(--xf-info-strong);
+}
+
+.el-button--info.is-disabled,
+.el-button--info.is-disabled:hover,
+.el-button--info.is-disabled:focus,
+.el-button--info.is-disabled:active {
+  color: #ffffff;
+  background-color: var(--xf-info-alpha-45);
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+.el-button--info.is-loading {
+  color: #ffffff;
+  background-color: var(--xf-info);
+  border-color: var(--xf-info);
+  opacity: 0.75;
+}
+
+/* --- success --- */
+.el-button--success {
+  color: #ffffff;
+  background-color: var(--xf-success);
+  border-color: var(--xf-success);
+}
+
+.el-button--success:hover,
+.el-button--success:focus {
+  color: #ffffff;
+  background-color: var(--xf-success-strong);
+  border-color: var(--xf-success-strong);
+}
+
+.el-button--success:active {
+  color: #ffffff;
+  background-color: var(--xf-success-strong);
+  border-color: var(--xf-success-strong);
+}
+
+.el-button--success.is-disabled,
+.el-button--success.is-disabled:hover,
+.el-button--success.is-disabled:focus,
+.el-button--success.is-disabled:active {
+  color: #ffffff;
+  background-color: var(--xf-success-alpha-45);
+  border-color: transparent;
+  cursor: not-allowed;
+}
+
+.el-button--success.is-loading {
+  color: #ffffff;
+  background-color: var(--xf-success);
+  border-color: var(--xf-success);
+  opacity: 0.75;
+}
+
+/* ==========================================================================
+   Apple 风格液态玻璃开关（GooseHyper Glass · 严肃红主题）
+   - 开：红色染色玻璃轨道（与主按钮同源），开/关状态一目了然
+   - 关：中性磨砂玻璃轨道
+   - spring 曲线位移 + 按压缩放/滑块拉伸回馈，动效连贯收敛
+   ========================================================================== */
+.glass-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 51px;
+  height: 31px;
+  border-radius: 999px;
+  cursor: pointer;
+  flex-shrink: 0;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  /* 关闭态：中性磨砂玻璃 */
+  background: linear-gradient(180deg, var(--xf-gray-300) 0%, var(--xf-gray-400) 100%);
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  box-shadow:
+    inset 0 1px 3px rgba(15, 23, 42, 0.14),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.4),
+    var(--xf-shadow-xs);
+  /* 仅过渡实际变化的属性，保证各动效同步连贯（避免 all 拖慢按压拉伸） */
+  transition:
+    background var(--xf-duration-slow) var(--xf-ease-glass),
+    border-color var(--xf-duration-base) var(--xf-ease-standard),
+    box-shadow var(--xf-duration-base) var(--xf-ease-standard),
+    transform var(--xf-duration-fast) var(--xf-ease-standard);
+}
+
+/* 开启态：红色染色玻璃，状态明确 */
+.glass-switch--checked {
+  background: linear-gradient(180deg, rgba(230, 57, 70, 0.95) 0%, rgba(164, 22, 26, 0.9) 100%);
+  border-color: rgba(125, 12, 20, 0.7);
+  box-shadow:
+    inset 0 1px 2px rgba(125, 12, 20, 0.4),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.28),
+    var(--xf-shadow-primary);
+}
+
+/* 轨道顶部 specular 高光，强化玻璃弧面质感 */
+.glass-switch::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.5) 0%, rgba(255, 255, 255, 0) 52%);
+  opacity: 0.65;
+  pointer-events: none;
+  transition: opacity var(--xf-duration-base) var(--xf-ease-standard);
+}
+
+.glass-switch--checked::before {
+  opacity: 0.9;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.42) 0%, rgba(255, 255, 255, 0.04) 55%);
+}
+
+/* 悬停：边缘与底棱微亮（触屏设备自动忽略 hover） */
+@media (hover: hover) {
+  .glass-switch:hover {
+    border-color: rgba(148, 163, 184, 0.85);
+    box-shadow:
+      inset 0 1px 3px rgba(15, 23, 42, 0.12),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.45),
+      var(--xf-shadow-sm);
+  }
+
+  .glass-switch--checked:hover {
+    border-color: rgba(125, 12, 20, 0.85);
+    box-shadow:
+      inset 0 1px 2px rgba(125, 12, 20, 0.35),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.3),
+      var(--xf-shadow-primary-strong);
+  }
+}
+
+/* 按压回馈：轨道整体微缩，模拟玻璃受力 */
+.glass-switch:active {
+  transform: scale(0.96);
+}
+
+/* 滑块：白玻璃圆珠 + specular 内光斑 */
+.glass-switch__handle {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 25px;
+  height: 25px;
+  border-radius: var(--xf-radius-circle);
+  background: linear-gradient(180deg, #ffffff 0%, var(--xf-gray-100) 100%);
+  box-shadow:
+    0 2px 6px rgba(15, 23, 42, 0.28),
+    0 0 0 0.5px rgba(15, 23, 42, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  transition:
+    transform var(--xf-duration-slow) var(--xf-ease-glass),
+    width var(--xf-duration-base) var(--xf-ease-glass),
+    box-shadow var(--xf-duration-base) var(--xf-ease-standard);
+  z-index: 1;
+}
+
+/* 滑块顶部弧形天光 */
+.glass-switch__handle::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 13px;
+  height: 6px;
+  border-radius: var(--xf-radius-circle);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0) 100%);
+}
+
+/* 开启：滑块右移，阴影带红晕呼应轨道染色 */
+.glass-switch--checked .glass-switch__handle {
+  transform: translateX(20px);
+  box-shadow:
+    0 2px 8px rgba(125, 12, 20, 0.35),
+    0 0 0 0.5px rgba(125, 12, 20, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+/* 按压时滑块朝移动方向轻微拉伸（iOS 开关标志性动效） */
+.glass-switch:active .glass-switch__handle {
+  width: 28px;
+}
+
+.glass-switch--checked:active .glass-switch__handle {
+  width: 28px;
+  /* 开启态向左拉伸，避免溢出轨道右缘 */
+  transform: translateX(17px);
+}
+
+/* 键盘可达性 */
+.glass-switch:focus-visible {
+  outline: 2px solid var(--xf-primary-alpha-45);
+  outline-offset: 2px;
+}
+
+/* loading 状态：禁止交互 + 滑块微光呼吸 */
+.glass-switch--loading {
+  pointer-events: none;
+  cursor: progress;
+}
+
+.glass-switch--loading .glass-switch__handle {
+  animation: switch-shimmer 1s ease-in-out infinite;
+}
+
+@keyframes switch-shimmer {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+
+/* 标签文字 */
+.glass-switch__label {
+  font-size: var(--xf-font-size-sm);
+  font-weight: 500;
+  color: var(--xf-text-muted);
+  margin-left: var(--xf-spacing-md);
+  user-select: none;
+  white-space: nowrap;
+  transition: color var(--xf-duration-base) var(--xf-ease-standard);
+}
+
+.glass-switch--checked ~ .glass-switch__label {
+  color: var(--xf-text-secondary);
+  font-weight: 600;
+}
+
+/* ==========================================================================
+   Apple Copy 药丸分段控件（低 AI 感）
+   - 浅色轨道，实色药丸滑块
+   - JS 驱动滑块 width + translateX 平滑滑动
+   ========================================================================== */
+.glass-segmented {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--xf-gray-100);
+  border: 1px solid var(--xf-border-color);
+}
+
+.glass-segmented__thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  border-radius: 999px;
+  background: var(--xf-primary);
+  box-shadow: var(--xf-shadow-sm);
+  transition:
+    transform 0.35s var(--xf-ease-glass),
+    width 0.35s var(--xf-ease-glass);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.glass-segmented__thumb.is-ready {
+  opacity: 1;
+}
+
+.glass-segmented__item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 16px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--xf-text-secondary);
+  font-size: var(--xf-font-size-sm);
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  z-index: 1;
+  transition:
+    color 0.18s ease,
+    transform 0.12s ease;
+}
+
+@media (hover: hover) {
+  .glass-segmented__item:hover {
+    color: var(--xf-text-primary);
+    background: rgba(255, 255, 255, 0.5);
+  }
+}
+
+.glass-segmented__item:active {
+  transform: scale(0.98);
+}
+
+.glass-segmented__item.is-active {
+  color: #ffffff;
+  font-weight: 600;
+  background: transparent;
+}
+
+@media (hover: hover) {
+  .glass-segmented__item.is-active:hover {
+    color: #ffffff;
+    background: transparent;
+  }
+}
+
+.glass-segmented__item:focus-visible {
+  outline: 2px solid var(--xf-primary-alpha-45);
+  outline-offset: 1px;
+}
+
+.glass-segmented__item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.glass-segmented__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--xf-gray-600);
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid var(--xf-border-color);
+  transition:
+    color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.glass-segmented__item.is-active .glass-segmented__count {
+  color: var(--xf-primary);
+  background: #ffffff;
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.glass-segmented--sm {
+  padding: 2px;
+}
+
+.glass-segmented--sm .glass-segmented__item {
+  padding: 4px 12px;
+  font-size: var(--xf-font-size-xs);
+}
+
+.glass-segmented--sm .glass-segmented__thumb {
+  top: 2px;
+  bottom: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glass-segmented__item,
+  .glass-segmented__thumb {
+    transition: none;
+  }
+}
+
+@media (hover: none) {
+  .glass-segmented__item:active {
+    transform: none;
+  }
+}
+
+/* ==========================================================================
+   液态玻璃卡片
+   ========================================================================== */
+.glass-card {
+  background: var(--xf-bg-glass);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--xf-glass-border);
+  border-radius: var(--xf-radius-xl);
+  box-shadow: var(--xf-glass-edge), var(--xf-shadow-xl);
+  padding: var(--xf-spacing-xl);
+  transition: all var(--xf-duration-base) var(--xf-ease-standard);
+}
+
+.glass-card:hover {
+  box-shadow: var(--xf-glass-edge-hover), var(--xf-shadow-xl-hover);
+}
+
+/* ==========================================================================
+   过滤卡片
+   ========================================================================== */
+.filter-card {
+  background: var(--xf-bg-glass);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--xf-glass-border);
+  border-radius: var(--xf-radius-xl);
+  box-shadow: var(--xf-glass-edge), var(--xf-shadow-md);
+  padding: 18px var(--xf-spacing-xl);
+  margin-bottom: var(--xf-spacing-lg);
+}
+
+/* ==========================================================================
+   兼容分支
+   ========================================================================== */
+
+/* 触摸设备：禁用 hover 位移与流光，避免粘滞 */
+@media (hover: none) {
+  .glass-btn:hover,
+  .glass-btn--default:hover {
+    transform: none;
+    background-position:
+      130% 0,
+      0 0;
+    box-shadow: var(--xf-glass-edge), var(--xf-shadow-lg);
+  }
+  .glass-btn--primary:hover {
+    transform: none;
+    background-position:
+      130% 0,
+      0 0;
+    box-shadow: var(--xf-glass-edge-color), var(--xf-shadow-primary);
+  }
+  .glass-btn--danger:hover {
+    transform: none;
+    background-position:
+      130% 0,
+      0 0;
+    box-shadow: var(--xf-glass-edge-color), var(--xf-shadow-danger);
+  }
+  .glass-btn--warning:hover {
+    transform: none;
+    background-position:
+      130% 0,
+      0 0;
+    box-shadow: var(--xf-glass-edge-color), var(--xf-shadow-warning);
+  }
+  .glass-btn--info:hover {
+    transform: none;
+    background-position:
+      130% 0,
+      0 0;
+    box-shadow: var(--xf-glass-edge-color), var(--xf-shadow-info);
+  }
+  .glass-btn--success:hover {
+    transform: none;
+    background-position:
+      130% 0,
+      0 0;
+    box-shadow: var(--xf-glass-edge-color), var(--xf-shadow-success);
+  }
+}
+
+/* 减少动态效果偏好：关闭流光、位移与过渡 */
+@media (prefers-reduced-motion: reduce) {
+  .glass-btn,
+  .glass-btn::before,
+  .glass-switch,
+  .glass-switch::before,
+  .glass-switch__handle,
+  .glass-switch__label,
+  .glass-card {
+    transition: none;
+  }
+  .glass-btn:hover {
+    transform: none;
+    background-position:
+      130% 0,
+      0 0;
+  }
+  .glass-btn:active {
+    transform: none;
+  }
+}
+
+/* 不支持 backdrop-filter 的浏览器（旧版 Firefox 等）回退为不透明底色 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-btn,
+  .glass-card,
+  .filter-card,
+  .glass-switch,
+  .tech-panel,
+  .glass-panel,
+  .glass-module-card,
+  .glass-perm-btn {
+    background-color: var(--xf-bg-glass-strong);
+  }
+
+  .navbar {
+    background-color: #fffffff5;
+  }
+
+  .mobile-overlay {
+    background-color: rgba(0, 0, 0, 0.72);
+  }
+}
+
+/* ==========================================================================
+   高科技 Element Plus 深度覆盖（表格·卡片·对话框·表单·分页·标签）
+   ========================================================================== */
+
+/* ===== el-card：高科技面板 ===== */
+.el-card {
+  border: 1px solid var(--xf-border-color);
+  border-radius: var(--xf-radius-lg);
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition:
+    box-shadow var(--xf-duration-base) var(--xf-ease-standard),
+    border-color var(--xf-duration-base) var(--xf-ease-standard);
+}
+
+.el-card:hover {
+  box-shadow: var(--xf-shadow-md);
+}
+
+.el-card__header {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--xf-border-color);
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  letter-spacing: var(--xf-tracking-wide);
+  font-size: var(--xf-font-size-base);
+  color: var(--xf-gray-800);
+}
+
+.el-card__body {
+  padding: 20px;
+}
+
+/* ===== el-table：高科技数据表格 ===== */
+.el-table {
+  --el-table-border-color: var(--xf-border-color);
+  --el-table-header-bg-color: var(--xf-gray-50);
+  --el-table-row-hover-bg-color: var(--xf-primary-alpha-8);
+  --el-table-current-row-bg-color: var(--xf-primary-alpha-12);
+  font-size: var(--xf-font-size-sm);
+  border-radius: var(--xf-radius-md);
+  overflow: hidden;
+}
+
+.el-table th.el-table__cell {
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  letter-spacing: var(--xf-tracking-wide);
+  font-size: var(--xf-font-size-xs);
+  text-transform: uppercase;
+  color: var(--xf-gray-600);
+  background: var(--xf-gray-50) !important;
+  border-bottom: 2px solid var(--xf-border-color-strong) !important;
+}
+
+.el-table td.el-table__cell {
+  border-bottom: 1px solid var(--xf-border-color) !important;
+}
+
+.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background: rgba(248, 250, 252, 0.5) !important;
+}
+
+.el-table--border .el-table__cell {
+  border-right: 1px solid var(--xf-border-color) !important;
+}
+
+/* ===== el-dialog：高科技对话框 ===== */
+.el-dialog {
+  border-radius: var(--xf-radius-xl);
+  box-shadow: var(--xf-shadow-2xl);
+  border: 1px solid var(--xf-border-color);
+  overflow: hidden;
+}
+
+.el-dialog__header {
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--xf-border-color);
+  margin-bottom: 0;
+}
+
+.el-dialog__title {
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  font-size: var(--xf-font-size-md);
+  letter-spacing: var(--xf-tracking-wide);
+  color: var(--xf-gray-800);
+}
+
+.el-dialog__body {
+  padding: 24px;
+  color: var(--xf-text-regular);
+}
+
+.el-dialog__footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--xf-border-color);
+}
+
+/* ===== el-form：高科技表单 ===== */
+.el-form-item__label {
+  font-family: var(--xf-font-body);
+  font-weight: 500;
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-gray-700);
+  letter-spacing: var(--xf-tracking-wide);
+}
+
+.el-input__wrapper {
+  border-radius: var(--xf-radius-sm) !important;
+  transition: box-shadow var(--xf-duration-base) var(--xf-ease-standard) !important;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow:
+    0 0 0 1px var(--xf-primary) inset,
+    var(--xf-glow-primary) !important;
+}
+
+.el-select__wrapper.is-focused {
+  box-shadow:
+    0 0 0 1px var(--xf-primary) inset,
+    var(--xf-glow-primary) !important;
+}
+
+.el-textarea__inner:focus {
+  box-shadow:
+    0 0 0 1px var(--xf-primary) inset,
+    var(--xf-glow-primary);
+}
+
+/* ===== el-pagination：高科技分页 ===== */
+.el-pagination {
+  --el-pagination-button-bg-color: transparent;
+  font-weight: 500;
+}
+
+.el-pagination .btn-prev,
+.el-pagination .btn-next,
+.el-pagination .el-pager li {
+  border-radius: var(--xf-radius-sm);
+  font-family: var(--xf-font-mono);
+  font-size: var(--xf-font-size-sm);
+  transition: all var(--xf-duration-fast) var(--xf-ease-standard);
+}
+
+.el-pagination .el-pager li.is-active {
+  background: var(--xf-primary) !important;
+  color: #fff !important;
+  box-shadow: var(--xf-shadow-primary);
+}
+
+/* ===== el-tag：高科技标签 ===== */
+.el-tag {
+  font-family: var(--xf-font-body);
+  font-weight: 600;
+  font-size: var(--xf-font-size-xs);
+  letter-spacing: var(--xf-tracking-wide);
+  border-radius: var(--xf-radius-sm);
+  padding: 0 10px;
+  height: 24px;
+  line-height: 22px;
+}
+
+.el-tag--small {
+  height: 20px;
+  line-height: 18px;
+  font-size: 11px;
+}
+
+/* ===== el-breadcrumb ===== */
+.el-breadcrumb {
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-sm);
+}
+
+.el-breadcrumb__item .el-breadcrumb__inner {
+  color: var(--xf-gray-500);
+  font-weight: 500;
+}
+
+.el-breadcrumb__item:last-child .el-breadcrumb__inner {
+  color: var(--xf-gray-800);
+  font-weight: 600;
+}
+
+/* ===== el-descriptions ===== */
+.el-descriptions__label {
+  font-family: var(--xf-font-body);
+  font-weight: 600;
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-gray-600);
+  background: var(--xf-gray-50) !important;
+}
+
+.el-descriptions__content {
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-gray-800);
+}
+
+/* ===== el-message / el-notification ===== */
+.el-message {
+  border-radius: var(--xf-radius-md);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--xf-shadow-lg);
+  font-family: var(--xf-font-body);
+  font-weight: 500;
+}
+
+.el-notification {
+  border-radius: var(--xf-radius-lg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--xf-shadow-xl);
+}
+
+/* ===== el-menu（侧边栏菜单） ===== */
+.el-menu {
+  border-right: none;
+}
+
+.el-menu-item,
+.el-sub-menu__title {
+  font-family: var(--xf-font-body);
+  font-weight: 500;
+  letter-spacing: var(--xf-tracking-wide);
+  transition: all var(--xf-duration-base) var(--xf-ease-standard);
+}
+
+.el-menu-item.is-active {
+  font-weight: 600;
+}
+
+/* ===== el-loading ===== */
+.el-loading-mask {
+  background: rgba(248, 250, 252, 0.8);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.el-loading-spinner .path {
+  stroke: var(--xf-primary);
+}
+
+/* ===== el-tooltip ===== */
+.el-popper {
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-xs);
+  border-radius: var(--xf-radius-sm);
+}
+
+/* ==========================================================================
+   高科技页面级动画与工具类
+   ========================================================================== */
+
+/* 页面入场动画 */
+/* 注意 fill-mode 用 backwards：若用 both，to 帧的 translateY(0) 会在动画结束后
+   永久驻留（transform 非 none），使 el-dialog 的 fixed 遮罩相对 .page 而非
+   视口定位，导致弹窗位置偏移、动画参照系错乱 */
+.page {
+  animation: page-enter 0.4s var(--xf-ease-glass) backwards;
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 路由切换增强 */
+.fade-enter-active {
+  animation: fade-in 0.3s var(--xf-ease-glass);
+}
+
+.fade-leave-active {
+  animation: fade-out 0.2s var(--xf-ease-standard);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* 数字闪烁动画（数据更新时） */
+@keyframes data-flash {
+  0% {
+    color: var(--xf-primary);
+  }
+  100% {
+    color: inherit;
+  }
+}
+
+.data-flash {
+  animation: data-flash 0.6s var(--xf-ease-standard);
+}
+
+/* 高科技标题样式 */
+.tech-title {
+  font-family: var(--xf-font-display);
+  font-weight: 700;
+  letter-spacing: var(--xf-tracking-tight);
+  color: var(--xf-gray-900);
+}
+
+.tech-subtitle {
+  font-family: var(--xf-font-body);
+  font-weight: 500;
+  letter-spacing: var(--xf-tracking-wide);
+  text-transform: uppercase;
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-500);
+}
+
+/* 高科技数据数字 */
+.tech-number {
+  font-family: var(--xf-font-display);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--xf-tracking-tight);
+}
+
+.tech-mono {
+  font-family: var(--xf-font-mono);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 高科技网格背景 */
+.tech-grid-bg {
+  background-image: var(--xf-tech-grid);
+  background-size: var(--xf-tech-grid-size) var(--xf-tech-grid-size);
+}
+
+/* 高科技面板 */
+.tech-panel {
+  position: relative;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid var(--xf-border-color);
+  border-radius: var(--xf-radius-xl);
+  box-shadow: var(--xf-shadow-md);
+  transition:
+    box-shadow var(--xf-duration-base) var(--xf-ease-standard),
+    border-color var(--xf-duration-base) var(--xf-ease-standard);
+}
+
+.tech-panel:hover {
+  box-shadow: var(--xf-shadow-lg);
+}
+
+/* 高科技状态指示器 */
+.tech-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  position: relative;
+}
+
+.tech-status-dot::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  opacity: 0.3;
+  animation: status-pulse 2s var(--xf-ease-standard) infinite;
+}
+
+.tech-status-dot--ok {
+  background: var(--xf-success);
+}
+.tech-status-dot--ok::after {
+  background: var(--xf-success);
+}
+.tech-status-dot--warn {
+  background: var(--xf-warning);
+}
+.tech-status-dot--warn::after {
+  background: var(--xf-warning);
+}
+.tech-status-dot--danger {
+  background: var(--xf-danger);
+}
+.tech-status-dot--danger::after {
+  background: var(--xf-danger);
+}
+.tech-status-dot--info {
+  background: var(--xf-info);
+}
+.tech-status-dot--info::after {
+  background: var(--xf-info);
+}
+
+@keyframes status-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.3;
+  }
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+
+/* 入场错位动画工具类 */
+.stagger-1 {
+  animation-delay: 0.05s;
+}
+.stagger-2 {
+  animation-delay: 0.1s;
+}
+.stagger-3 {
+  animation-delay: 0.15s;
+}
+.stagger-4 {
+  animation-delay: 0.2s;
+}
+.stagger-5 {
+  animation-delay: 0.25s;
+}
+.stagger-6 {
+  animation-delay: 0.3s;
+}
+
+/* ==========================================================================
+   骨架屏系统（Skeleton）
+   - 占位块几何恒定：自身无任何 transform/尺寸动画，绝不缩放或抖动
+   - 扫光为 ::after 伪元素上的柔和亮带，translateX 从左往右扫过
+     （仅合成层动画，零回流；块几何不受影响）
+   - 内容到达后直接替换（v-if / v-else 同构布局，零位移）
+   ========================================================================== */
+:root {
+  --xf-skeleton-bg: var(--xf-gray-200);
+  --xf-skeleton-bg-strong: var(--xf-gray-300);
+  --xf-skeleton-shine: rgba(255, 255, 255, 0.85);
+  --xf-skeleton-duration: 1.5s;
+}
+
+/* 基础占位块 */
+.sk-block {
+  position: relative;
+  overflow: hidden;
+  background: var(--xf-skeleton-bg);
+  border-radius: var(--xf-radius-sm);
+  flex-shrink: 0;
+}
+
+/* 柔和扫光：窄亮带从块左缘外扫至右缘外，全程只动伪元素，块几何恒定 */
+.sk-block::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 60%;
+  transform: translateX(-150%);
+  background: linear-gradient(
+    100deg,
+    transparent 0%,
+    var(--xf-skeleton-shine) 50%,
+    transparent 100%
+  );
+  animation: sk-sweep var(--xf-skeleton-duration) ease-in-out infinite;
+  pointer-events: none;
+  will-change: transform;
+}
+
+@keyframes sk-sweep {
+  0% {
+    transform: translateX(-150%);
+  }
+  100% {
+    transform: translateX(360%);
+  }
+}
+
+/* 基础占位块 */
+.sk-block {
+  position: relative;
+  overflow: hidden;
+  background: var(--xf-skeleton-bg);
+  border-radius: var(--xf-radius-sm);
+  flex-shrink: 0;
+}
+
+/* 柔和扫光：亮带从块左缘外扫至右缘外，全程只动伪元素 */
+.sk-block::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--xf-skeleton-shine) 50%,
+    transparent 100%
+  );
+  animation: sk-sweep var(--xf-skeleton-duration) var(--xf-ease-standard) infinite;
+  pointer-events: none;
+  will-change: transform;
+}
+
+@keyframes sk-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* 形状工具类 */
+.sk-avatar {
+  border-radius: 999px;
+}
+.sk-pill {
+  border-radius: 999px;
+  height: 22px;
+}
+.sk-title {
+  height: 20px;
+}
+.sk-text {
+  height: 14px;
+}
+
+/* 行容器 */
+.sk-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--xf-spacing-md);
+}
+
+/* ===== GlassSkeleton 组件布局（.gs-*） ===== */
+.glass-skeleton {
+  width: 100%;
+}
+
+/* -- detail：头像 + 标题 + 正文（个人资料卡等） -- */
+.gs-detail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.gs-detail__avatar {
+  margin: 10px 0;
+}
+
+.gs-detail__name {
+  width: 45%;
+  height: 20px;
+  margin: 8px 0 12px;
+}
+
+.gs-detail__role {
+  width: 96px;
+  height: 22px;
+  border-radius: 999px;
+}
+
+.gs-detail__meta {
+  width: 100%;
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+}
+
+.gs-detail__row {
+  display: flex;
+  align-items: center;
+  gap: var(--xf-spacing-md);
+  padding: 13px 0;
+  border-bottom: 1px solid var(--xf-border-color);
+}
+
+.gs-detail__row:last-child {
+  border-bottom: none;
+}
+
+.gs-detail__icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--xf-skeleton-bg-strong);
+}
+
+.gs-detail__field {
+  flex: 1;
+  max-width: 72%;
+}
+
+/* -- welcome：标题正文居左 + 头像居右（仪表盘欢迎卡） -- */
+.gs-welcome {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--xf-spacing-xl);
+}
+
+.gs-welcome__text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.gs-welcome__title {
+  width: 55%;
+  height: 28px;
+}
+.gs-welcome__sub {
+  width: 35%;
+  height: 14px;
+}
+.gs-welcome__avatar {
+  border-radius: 999px;
+}
+
+/* -- stat：统计卡（标签/数值/趋势 + 右侧图标块） -- */
+.gs-stat {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.gs-stat__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gs-stat__label {
+  width: 60%;
+  height: 12px;
+}
+.gs-stat__value {
+  width: 45%;
+  height: 28px;
+}
+.gs-stat__trend {
+  width: 30%;
+  height: 12px;
+}
+
+.gs-stat__icon {
+  width: 52px;
+  height: 52px;
+  border-radius: var(--xf-radius-md);
+  background: var(--xf-skeleton-bg-strong);
+}
+
+/* -- chart：图表区整块占位 -- */
+.gs-chart__block {
+  width: 100%;
+  min-height: 280px;
+}
+
+/* -- table：表头 + 数据行（列表页首屏） -- */
+.gs-table {
+  width: 100%;
+}
+
+.gs-table__row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 13px 12px;
+  border-bottom: 1px solid var(--xf-border-color);
+}
+
+.gs-table__row--head {
+  background: var(--xf-gray-50);
+  border-bottom: 2px solid var(--xf-border-color-strong);
+}
+
+.gs-table__row--head .gs-table__cell {
+  height: 12px;
+  width: 60%;
+}
+
+.gs-table__cell {
+  height: 14px;
+  flex-shrink: 1;
+  min-width: 3%;
+}
+
+/* 减少动态效果偏好：静态灰块，无扫光 */
+@media (prefers-reduced-motion: reduce) {
+  .sk-block::after {
+    animation: none;
+    opacity: 0;
+  }
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--xf-border-color-strong);
+  border-radius: 3px;
+  transition: background var(--xf-duration-base) var(--xf-ease-standard);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--xf-gray-400);
+}
+
+/* 文本选择高亮 */
+::selection {
+  background: var(--xf-primary-alpha-25);
+  color: var(--xf-primary-deep);
+}
+
+/* 响应式工具类 */
+@media (max-width: 768px) {
+  .tech-hide-mobile {
+    display: none !important;
+  }
+  .tech-full-mobile {
+    width: 100% !important;
+  }
+
+  /* 移动端表格横向滚动 */
+  .el-table {
+    font-size: 12px;
+  }
+
+  /* 移动端卡片内边距减小 */
+  .el-card__body {
+    padding: 14px;
+  }
+
+  .el-card__header {
+    padding: 12px 14px;
+  }
+
+  /* 移动端对话框全屏宽度 */
+  .el-dialog {
+    width: 95vw !important;
+    margin-top: 5vh !important;
+  }
+
+  .el-dialog__body {
+    padding: 16px;
+  }
+
+  /* 移动端表单标签 */
+  .el-form-item__label {
+    font-size: 13px;
+  }
+
+  /* 移动端分页 */
+  .el-pagination {
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* 移动端描述列表 */
+  .el-descriptions {
+    font-size: 12px;
+  }
+}
+
+/* 小屏手机 */
+@media (max-width: 480px) {
+  .glass-btn {
+    padding: 8px 14px;
+    font-size: 12px;
+  }
+
+  .el-button {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+}

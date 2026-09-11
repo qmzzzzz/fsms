@@ -1,0 +1,152 @@
+# 生产部署参考：Nginx TLS 终结 + 安全头
+#
+# 【M-2 为什么生产必须 TLS 终结】
+#   应用层的登录口令 ECDH 加密**不是 TLS 的替代品**：它只在「被动窃听」场景下
+#   增加一层纵深。纯 HTTP 部署时，主动 MITM 攻击者可以篡改页面下发的服务端公钥
+#   （首次公钥经明文 HTTP 送达，无指纹预置/固定），把客户端引到自己的密钥上，
+#   口令密文对他完全透明——ECDH 形同虚设。因此：
+#   - 生产一律由本层（或等价网关）做 TLS 终结，后端仅在内网走明文；
+#   - ECDH 的定位是纵深防御（例如 TLS 配置失误、内网嗅探时的额外一层），
+#     不得作为「可以不上 HTTPS」的理由。
+#
+# 审计整改说明（2026-08-20）：
+#   - 扫描器报告的"未使用HTTPS协议 / 未配置HSTS"属于传输层问题，应用代码无法在
+#     明文 HTTP 上安全地满足（浏览器按 RFC 6797 仅采纳经 HTTPS 送达的 HSTS）。
+#   - 正确做法是在反向代理层做 TLS 终结并下发 HSTS 与全套安全头，本文件即参考实现。
+#   - 后端已内置 Strict-Transport-Security 兜底下发（src/middleware/security.js ensureHsts），
+#     前端 dev/preview 已在 vite.config.js 下发安全头；此配置用于生产域名的最终落地。
+#
+# 使用：替换 your-domain.example、证书路径后启用，并将 80 端口重定向到 443。
+
+# HTTP -> HTTPS 强制跳转
+server {
+    listen 80;
+    listen [::]:80;
+    server_name your-domain.example;
+    return 301 https://$host$request_uri;
+}
+
+# HTTPS 主入口
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name your-domain.example;
+
+    # ===== TLS 证书（使用受信任 CA 签发，勿用自签名） =====
+    ssl_certificate     /etc/nginx/certs/your-domain.example.fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/your-domain.example.key.pem;
+
+    # ===== 强化 TLS 参数 =====
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+    # OCSP stapling（需 CA 签发证书且链中含 OCSP 地址；自签名证书请保持注释）
+    # ssl_stapling on;
+    # ssl_stapling_verify on;
+    # ssl_trusted_certificate /etc/nginx/certs/your-domain.example.chain.pem;
+    # resolver 223.5.5.5 119.29.29.29 valid=300s;
+    # resolver_timeout 5s;
+
+    # ===== HSTS（仅在 HTTPS 上下发才有意义；确认全站 HTTPS 后再启用 preload） =====
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+    # ===== 全套安全响应头 =====
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # 与后端 helmet xssFilter 口径一致：主动禁用有绕过历史的旧版 XSS Auditor（值 0），
+    # XSS 防护由 CSP + 框架转义承担；现代浏览器已忽略该头，仅为兼容性工具下发
+    add_header X-XSS-Protection "0" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()" always;
+    # 生产 CSP：由后端按每请求下发（src/middleware/security.js）——style-src 携带
+    # 每请求随机 nonce，仅 /api-docs(Swagger) 路径放行 'unsafe-inline'。
+    # **不要**在此再 add_header Content-Security-Policy：浏览器对同一响应携带的
+    # 多个 CSP 取交集，静态策略没有 nonce，会把后端放行的内联样式全部拦掉。
+
+    # ===== 传输压缩（gzip + 可选 brotli） =====
+    # element-plus / echarts chunk 体积较大，压缩后首屏传输量通常降低 60%–75%。
+    # gzip_static / brotli_static 优先使用构建期预压缩文件（.gz/.br），避免每次请求实时压缩。
+    gzip on;
+    gzip_vary on;
+    gzip_comp_level 6;
+    gzip_min_length 1024;
+    gzip_proxied any;
+    gzip_types
+        text/plain text/css text/xml text/javascript
+        application/javascript application/json application/xml
+        application/xml+rss application/manifest+json
+        image/svg+xml font/ttf font/otf;
+    gzip_static on;
+
+    # brotli 需 ngx_brotli 模块，未编译时注释掉以下三行即可
+    # brotli on;
+    # brotli_comp_level 5;
+    # brotli_types text/plain text/css text/javascript application/javascript application/json application/manifest+json image/svg+xml;
+    # brotli_static on;
+
+    # ===== 前端静态资源（web-admin/dist） =====
+    root /var/www/fire-safety/web-admin/dist;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # 构建产物带内容哈希，可长期强缓存；index.html 不缓存以保证发版即时生效
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # ===== Prometheus /metrics（无鉴权端点，必须限制抓取来源） =====
+    # 应用侧该端点不带认证（设计给 Prometheus 抓取），暴露公网等于泄露
+    # QPS/延迟/安全告警计数等运行情报。按实际监控主机/网段调整 allow 列表。
+    location = /metrics {
+        allow 127.0.0.1;
+        allow 10.0.0.0/8;        # ← 改成实际监控采集网段
+        deny all;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # ===== 无认证上报端点（根路径，静态托管不能吞掉）=====
+    # /csp-report（CSP 违规）、/client-errors（前端异常/Web Vitals，G-1）
+    # 均由浏览器自动发起、无法带认证；后端自带独立限流
+    location ~ ^/(csp-report|client-errors)$ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # ===== 后端 API 反向代理（TLS 在此终结，后端可走明文内网） =====
+    location /api/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /health {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # ===== WebSocket（wss，同源） =====
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+    }
+}

@@ -1,0 +1,35 @@
+# ============================================================
+# Prometheus 抓取配置（G-2：/metrics 消费端）
+#
+# 后端 /metrics 已是 Prometheus 文本格式（src/utils/metrics.js，
+# 零依赖自实现），本文件把它接入正式抓取链路：
+#   - app:3000 容器网络内直连，无需经宿主 nginx
+#   - route 标签是路由模板（低基数），不会撑爆时序库
+#
+# 告警规则见同目录 alert-rules.yml（由 rule_files 装载）。
+# 告警触达：已接入 Alertmanager（同目录 alertmanager.yml，docker-compose
+# 的 alertmanager 服务）——critical/warning 均按 severity 路由到通知
+# 通道，不再依赖人工盯 /alerts 页。接收器敏感项为占位，生产注入方式
+# 见 alertmanager.yml 头注释。
+# ============================================================
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+# 告警结果推送至 Alertmanager（compose 服务名即主机名，9093 为容器内端口）
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+scrape_configs:
+  - job_name: xf-app
+    metrics_path: /metrics
+    static_configs:
+      # compose 服务名即主机名；3000 为容器内端口
+      - targets: ['app:3000']
+        labels:
+          service: fire-safety-backend

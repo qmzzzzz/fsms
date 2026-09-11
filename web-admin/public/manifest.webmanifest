@@ -1,0 +1,19 @@
+{
+  "name": "消防安全管理系统",
+  "short_name": "消防管理",
+  "description": "消防设备巡检、报警处理、安全管理系统",
+  "theme_color": "#c1121f",
+  "background_color": "#0a0f1a",
+  "display": "standalone",
+  "start_url": "/",
+  "scope": "/",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "scripts/e2e-smoke.js": {
+    "max-lines-per-function": 1
+  },
+  "scripts/load-test.js": {
+    "max-lines-per-function": 1
+  },
+  "scripts/migrate-mfa-secret.js": {
+    "max-lines-per-function": 1
+  },
+  "scripts/sync-audit-indexes.js": {
+    "max-lines-per-function": 1
+  },
+  "src/app.js": {
+    "max-lines-per-function": 1
+  },
+  "src/controllers/authController.js": {
+    "max-lines": 1
+  },
+  "src/controllers/ipListController.js": {
+    "max-lines-per-function": 1
+  },
+  "src/controllers/securityController.js": {
+    "max-lines": 1
+  },
+  "src/controllers/userController.js": {
+    "max-lines": 1
+  },
+  "src/docs/generate.js": {
+    "max-lines": 1
+  },
+  "src/middleware/auth.js": {
+    "max-lines-per-function": 1
+  },
+  "src/middleware/security.js": {
+    "max-lines": 1,
+    "max-lines-per-function": 1
+  },
+  "src/services/auditChainVerify.js": {
+    "max-lines-per-function": 1
+  },
+  "src/services/authService.js": {
+    "max-lines": 1,
+    "max-lines-per-function": 1
+  },
+  "src/services/initData.js": {
+    "max-lines": 1
+  },
+  "src/services/websocketService.js": {
+    "max-lines": 1
+  }
+}

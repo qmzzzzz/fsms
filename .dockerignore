@@ -1,0 +1,30 @@
+node_modules
+npm-debug.log
+logs
+*.log
+.env
+.env.local
+.env.*
+!.env.example
+.git
+.gitignore
+README.md
+backup
+coverage
+.nyc_output
+web-admin/node_modules
+web-admin/dist
+.vscode
+.idea
+*.md
+*.txt
+
+# P3-48：密钥文件目录绝不进镜像。
+# secrets 由运行时挂载到 /run/secrets，构建期完全不需要；
+# 一旦被 COPY 进镜像层，任何能 docker pull 该镜像的人都能取出密钥，
+# 且即使后续层删除，历史层仍保留内容。
+secrets
+
+# 自签名 TLS 证书同理（仅本地开发使用）
+certs
+

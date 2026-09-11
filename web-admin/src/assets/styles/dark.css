@@ -1,0 +1,379 @@
+/* ==========================================================================
+   暗色主题 - 覆盖 :root 设计令牌
+   html.dark 时生效，与 Element Plus 暗色主题协同
+   ========================================================================== */
+
+html.dark {
+  /* 背景与表面 */
+  --xf-bg-page: #0a0f1a;
+  --xf-gray-50: #0f172a;
+  --xf-gray-100: #1e293b;
+  --xf-gray-200: #334155;
+  --xf-gray-300: #475569;
+  --xf-gray-400: #64748b;
+  --xf-gray-500: #94a3b8;
+  --xf-gray-600: #cbd5e1;
+  --xf-gray-700: #e2e8f0;
+  --xf-gray-800: #f1f5f9;
+  --xf-gray-900: #f8fafc;
+
+  /* 文本 */
+  --xf-text-primary: #f1f5f9;
+  --xf-text-regular: #e2e8f0;
+  --xf-text-secondary: #cbd5e1;
+  --xf-text-muted: #64748b;
+
+  /* 边框 */
+  --xf-border-color: #1e293b;
+  --xf-border-color-strong: #334155;
+  --xf-border-glass: rgba(71, 85, 105, 0.4);
+  --xf-border-glass-strong: rgba(100, 116, 139, 0.6);
+
+  /* 玻璃背景 */
+  --xf-bg-glass: rgba(30, 41, 59, 0.6);
+  --xf-bg-glass-strong: rgba(15, 23, 42, 0.92);
+
+  /* 科技网格 - 暗色下提高可见度 */
+  --xf-tech-grid:
+    linear-gradient(rgba(148, 163, 184, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.04) 1px, transparent 1px);
+
+  /* 阴影 - 暗色下阴影更柔和 */
+  --xf-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --xf-shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.3);
+  --xf-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --xf-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --xf-shadow-xl: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --xf-shadow-xl-hover: 0 16px 48px rgba(0, 0, 0, 0.6);
+
+  /* 玻璃边缘 - 暗色下内阴影减弱 */
+  --xf-glass-edge:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.3),
+    inset 1px 0 0 rgba(255, 255, 255, 0.03), inset -1px 0 0 rgba(255, 255, 255, 0.03);
+  --xf-glass-edge-hover: inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -1px 0 rgba(0, 0, 0, 0.3);
+  --xf-glass-inset-dark: rgba(0, 0, 0, 0.4);
+
+  /* 渐变表面 */
+  --xf-gradient-surface: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.01) 0%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  --xf-gradient-tech: linear-gradient(
+    135deg,
+    rgba(71, 85, 105, 0.06) 0%,
+    rgba(193, 18, 31, 0.04) 100%
+  );
+
+  /* 按钮默认态 - 暗色下用深灰 */
+  --xf-gradient-default: linear-gradient(
+    180deg,
+    rgba(51, 65, 85, 0.7) 0%,
+    rgba(30, 41, 59, 0.7) 100%
+  );
+  --xf-gradient-default-hover: linear-gradient(
+    180deg,
+    rgba(71, 85, 105, 0.8) 0%,
+    rgba(51, 65, 85, 0.8) 100%
+  );
+
+  color-scheme: dark;
+}
+
+/* 暗色下 body 背景 */
+html.dark body {
+  background-color: var(--xf-bg-page);
+  color: var(--xf-text-regular);
+}
+
+/* 暗色下 Element Plus 组件覆盖 */
+html.dark .el-card {
+  background: rgba(30, 41, 59, 0.85);
+  border-color: var(--xf-border-color);
+}
+
+html.dark .el-card__header {
+  border-bottom-color: var(--xf-border-color);
+  color: var(--xf-text-primary);
+}
+
+html.dark .el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: var(--xf-gray-50);
+  --el-table-row-hover-bg-color: rgba(193, 18, 31, 0.1);
+  --el-table-current-row-bg-color: rgba(193, 18, 31, 0.15);
+  --el-table-border-color: var(--xf-border-color);
+  --el-table-text-color: var(--xf-text-regular);
+  --el-table-header-text-color: var(--xf-text-secondary);
+}
+
+html.dark .el-table th.el-table__cell {
+  background: var(--xf-gray-50) !important;
+  color: var(--xf-text-secondary) !important;
+  border-bottom-color: var(--xf-border-color-strong) !important;
+}
+
+html.dark .el-table td.el-table__cell {
+  border-bottom-color: var(--xf-border-color) !important;
+}
+
+html.dark .el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background: rgba(15, 23, 42, 0.4) !important;
+}
+
+html.dark .el-dialog {
+  background: var(--xf-gray-50);
+  border-color: var(--xf-border-color);
+}
+
+html.dark .el-dialog__title {
+  color: var(--xf-text-primary);
+}
+
+html.dark .el-dialog__body {
+  color: var(--xf-text-regular);
+}
+
+html.dark .el-form-item__label {
+  color: var(--xf-text-secondary);
+}
+
+html.dark .el-input__wrapper {
+  background: var(--xf-gray-100) !important;
+  box-shadow: 0 0 0 1px var(--xf-border-color) inset !important;
+}
+
+html.dark .el-input__inner {
+  color: var(--xf-text-regular) !important;
+}
+
+html.dark .el-input__wrapper.is-focus {
+  box-shadow:
+    0 0 0 1px var(--xf-primary) inset,
+    var(--xf-glow-primary) !important;
+}
+
+html.dark .el-select__wrapper {
+  background: var(--xf-gray-100) !important;
+  box-shadow: 0 0 0 1px var(--xf-border-color) inset !important;
+}
+
+html.dark .el-select__placeholder,
+html.dark .el-select__selected-item {
+  color: var(--xf-text-regular) !important;
+}
+
+html.dark .el-textarea__inner {
+  background: var(--xf-gray-100);
+  color: var(--xf-text-regular);
+  border-color: var(--xf-border-color);
+}
+
+html.dark .el-pagination {
+  --el-pagination-button-bg-color: var(--xf-gray-100);
+  --el-pagination-button-text-color: var(--xf-text-regular);
+  --el-pagination-button-disabled-text-color: var(--xf-text-muted);
+}
+
+html.dark .el-pagination .btn-prev,
+html.dark .el-pagination .btn-next,
+html.dark .el-pagination .el-pager li {
+  background: var(--xf-gray-100);
+  color: var(--xf-text-regular);
+}
+
+html.dark .el-descriptions__label {
+  background: var(--xf-gray-100) !important;
+  color: var(--xf-text-secondary);
+}
+
+html.dark .el-descriptions__content {
+  color: var(--xf-text-regular);
+}
+
+html.dark .el-loading-mask {
+  background: rgba(10, 15, 26, 0.8);
+}
+
+html.dark .el-breadcrumb__item .el-breadcrumb__inner {
+  color: var(--xf-text-muted);
+}
+
+html.dark .el-breadcrumb__item:last-child .el-breadcrumb__inner {
+  color: var(--xf-text-primary);
+}
+
+html.dark .el-dropdown-menu {
+  background: var(--xf-gray-50);
+  border-color: var(--xf-border-color);
+}
+
+html.dark .el-dropdown-menu__item {
+  color: var(--xf-text-regular);
+}
+
+html.dark .el-dropdown-menu__item:hover {
+  background: var(--xf-gray-100);
+}
+
+html.dark .el-message {
+  background: var(--xf-gray-50);
+  border-color: var(--xf-border-color);
+  color: var(--xf-text-regular);
+}
+
+html.dark .el-notification {
+  background: var(--xf-gray-50);
+  border-color: var(--xf-border-color);
+}
+
+html.dark .el-notification__title {
+  color: var(--xf-text-primary);
+}
+
+html.dark .el-notification__content {
+  color: var(--xf-text-regular);
+}
+
+html.dark .el-popper {
+  background: var(--xf-gray-50) !important;
+  border-color: var(--xf-border-color) !important;
+  color: var(--xf-text-regular) !important;
+}
+
+/* 暗色下玻璃卡片 */
+html.dark .glass-card,
+html.dark .filter-card,
+html.dark .tech-panel {
+  background: rgba(30, 41, 59, 0.7);
+  border-color: var(--xf-border-glass);
+}
+
+/* 暗色下按钮 */
+html.dark .glass-btn {
+  background: var(--xf-gray-100);
+  color: var(--xf-text-regular);
+}
+
+html.dark .glass-btn:hover {
+  background: var(--xf-gray-200);
+}
+
+html.dark .glass-btn--default {
+  background: transparent;
+  border-color: var(--xf-border-color-strong);
+  color: var(--xf-text-secondary);
+}
+
+html.dark .glass-btn--default:hover {
+  background: var(--xf-gray-100);
+  border-color: var(--xf-gray-400);
+}
+
+/* 暗色下 el-button */
+html.dark .el-button {
+  background: var(--xf-gray-100);
+  border-color: var(--xf-border-color-strong);
+  color: var(--xf-text-regular);
+}
+
+html.dark .el-button:hover,
+html.dark .el-button:focus {
+  background: var(--xf-primary-alpha-15);
+  border-color: var(--xf-primary-alpha-35);
+  color: var(--xf-primary-light);
+}
+
+/* 暗色下分段控件 */
+html.dark .glass-segmented {
+  background: var(--xf-gray-100);
+  border-color: var(--xf-border-color);
+}
+
+html.dark .glass-segmented__item {
+  color: var(--xf-text-secondary);
+}
+
+html.dark .glass-segmented__item:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--xf-text-primary);
+}
+
+html.dark .glass-segmented__count {
+  background: var(--xf-gray-200);
+  color: var(--xf-text-secondary);
+  border-color: var(--xf-border-color);
+}
+
+/* 暗色下导航栏 */
+html.dark .navbar {
+  background: rgba(15, 23, 42, 0.85);
+  border-bottom-color: var(--xf-border-color);
+}
+
+html.dark .user-dropdown:hover {
+  background: var(--xf-gray-100);
+}
+
+html.dark .user-name {
+  color: var(--xf-text-regular);
+}
+
+/* 暗色下主内容区 */
+html.dark .main-content {
+  background: var(--xf-bg-page);
+}
+
+/* 暗色下 tech-title */
+html.dark .tech-title {
+  color: var(--xf-text-primary);
+}
+
+html.dark .tech-subtitle {
+  color: var(--xf-text-muted);
+}
+
+/* 暗色下文本选择 */
+html.dark ::selection {
+  background: var(--xf-primary-alpha-35);
+  color: #fff;
+}
+
+/* 暗色下滚动条 */
+html.dark ::-webkit-scrollbar-thumb {
+  background: var(--xf-gray-700);
+}
+
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: var(--xf-gray-600);
+}
+
+/* 暗色下 el-tag */
+html.dark .el-tag {
+  background: var(--xf-gray-100);
+  border-color: var(--xf-border-color);
+}
+
+/* 暗色下 el-menu (如果用在非侧边栏场景) */
+html.dark .el-menu {
+  background: transparent;
+}
+
+/* 暗色下 echarts 图表容器 - 提示文字 */
+html.dark .echarts-tooltip {
+  background: var(--xf-gray-50) !important;
+  border-color: var(--xf-border-color) !important;
+}
+
+/* 暗色下骨架屏 - 灰块用深色表面，扫光降为柔和微光避免刺眼 */
+html.dark {
+  --xf-skeleton-bg: #243044;
+  --xf-skeleton-bg-strong: #334155;
+  --xf-skeleton-shine: rgba(255, 255, 255, 0.1);
+}
+
+/* 暗色下表格骨架表头底色（令牌翻转后 gray-50 过深，改为半透明浅罩） */
+html.dark .gs-table__row--head {
+  background: rgba(255, 255, 255, 0.03);
+}

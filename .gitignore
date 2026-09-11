@@ -1,0 +1,72 @@
+# 环境变量（覆盖所有 .env 变体，模板文件 .env.example 除外）
+.env
+.env.*
+!.env.example
+
+# 依赖
+node_modules/
+web-admin/node_modules/
+
+# 全局 npm 包（按用户主目录生成，避免硬编码本机用户名）
+**/AppData/Roaming/npm/
+
+# 日志
+logs/
+*.log
+npm-debug.log*
+
+# 测试
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# 备份/编辑器残留
+*.bak
+
+# 构建
+web-admin/dist/
+dist/
+build/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Windows 快捷方式与回收站
+*.lnk
+$RECYCLE.BIN/
+
+# 临时文件
+*.tmp
+.temp/
+# 修复：匹配 .tmp- 前缀的临时脚本/日志文件（如 .tmp-e2e-captcha-off.js）
+.tmp-*
+
+# 后台任务输出（不硬编码本机用户名）
+**/AppData/Local/Temp/claude/*
+
+# 自签名 TLS 证书（scripts/generate-dev-cert.sh 生成目录）
+certs/
+
+# 密钥文件目录（P3-48：docker-compose secrets 的挂载源，含 JWT/AES/DB 口令）
+# 目录本身与其中任何文件都绝不能入库
+secrets/
+
+
+# 首次启动生成的管理员初始口令文件（initData 写入，绝不能入库）
+.admin-initial-password
+
+# 工具/会话内部状态（非项目代码，不入库）
+.mimosa/
+
+# 会话工具内部记忆（非项目代码）
+.workbuddy/
+# 设计参考资产副本（工具技能产物，如需入库可移除本行）
+.design_library/
+# 前端构建产物变体
+web-admin/dist-optimized/

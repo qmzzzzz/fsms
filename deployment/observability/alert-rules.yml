@@ -1,0 +1,60 @@
+# ============================================================
+# Prometheus 告警规则（G-2）
+#
+# 阈值依据：本项目暂无实测压测基线（E-1 待办），先以保守值起步——
+# 错误率 5%、P95 1s 都是「明显异常」而非「开始劣化」的线，
+# 待 E-1 压测基线落地后按实测分位数收紧。
+# ============================================================
+groups:
+  - name: xf-availability
+    rules:
+      # 抓取目标消失 = 后端进程挂了或容器网络断
+      - alert: BackendDown
+        expr: up{job="xf-app"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: '后端 /metrics 抓取失败（{{ $labels.instance }}）'
+          description: 'Prometheus 连续 1 分钟无法抓取后端指标，服务可能已不可用。'
+
+      # 5xx 错误率：5 分钟窗口内超过 5%
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+            /
+          sum(rate(http_requests_total[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: '5xx 错误率超过 5%'
+          description: '近 5 分钟 5xx 占比 {{ $value | humanizePercentage }}，持续 2 分钟。'
+
+  - name: xf-latency
+    rules:
+      # P95 延迟：5 分钟窗口超过 1s（直方图按全站聚合）
+      - alert: HighP95Latency
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: '全站 P95 延迟超过 1s'
+          description: '近 5 分钟 P95 = {{ $value | humanizeDuration }}，持续 5 分钟。'
+
+  - name: xf-security
+    rules:
+      # 安全告警事件：10 分钟内新增 ≥ 10 条即视为异常突发
+      # （零星探测属常态噪音，批量出现才是事件）
+      - alert: SecurityAlertBurst
+        expr: sum(increase(security_alerts_total[10m])) >= 10
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '安全告警事件突发'
+          description: '近 10 分钟累计安全告警 {{ $value }} 条，建议查看安全日志与 /api/metrics 面板。'
