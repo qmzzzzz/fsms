@@ -158,6 +158,8 @@ export const legacyEnUS = {
   问题序号: 'Finding {n}',
   请选择设备: 'Please select a device',
   请选择严重程度: 'Please select a severity',
+  全屏: 'Fullscreen',
+  未登录: 'Not logged in',
 }
 
 export default legacyEnUS

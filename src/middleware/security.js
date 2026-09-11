@@ -536,7 +536,7 @@ const auditLog = (options = {}) => {
     let logged = false;
 
     // 统一的审计日志记录逻辑
-    const doLog = (body) => {
+    const doLog = () => {
       if (logged) return; // 防止重复记录
       logged = true;
 
@@ -610,7 +610,7 @@ const auditLog = (options = {}) => {
               })(),
           statusCode: res.statusCode,
           success,
-          errorMessage: success ? undefined : stripControlChars(body?.message || body?.error, 512),
+          errorMessage: success ? undefined : stripControlChars(res.statusMessage, 512),
           ip: req.ip,
           userAgent: safeUserAgent,
           duration,

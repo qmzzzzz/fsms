@@ -209,6 +209,8 @@ export default {
     noData: '暂无数据',
     total: '共',
     items: '条',
+    全屏: '全屏',
+    未登录: '未登录',
     all: '全部',
     enabled: '启用',
     disabled: '禁用',
