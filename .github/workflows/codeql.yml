@@ -13,6 +13,9 @@ jobs:
     name: Analyze
     runs-on: ubuntu-latest
     permissions:
+      # 声明 permissions 会整体覆盖仓库默认令牌作用域，因此必须显式补回 contents: read，
+      # 否则 actions/checkout 会以 "Repository not found" 失败（2026-09-11 CI 实证）。
+      contents: read
       security-events: write
 
     strategy:
