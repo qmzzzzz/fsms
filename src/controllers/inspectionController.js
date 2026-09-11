@@ -164,7 +164,7 @@ const updateInspection = asyncHandler(async (req, res) => {
     const updated = await inspectionService.updateInspection(inspection, req.body);
     return ApiResponse.success(res, updated, '巡检计划更新成功');
   } catch (err) {
-    return ApiResponse.error(res, err.message, err.statusCode || 400);
+    return ApiResponse.error(res, err.statusCode === 404 ? '记录不存在' : '操作失败', err.statusCode || 400);
   }
 });
 
@@ -185,7 +185,7 @@ const startInspection = asyncHandler(async (req, res) => {
     const updated = await inspectionService.startInspection(inspection, req.user.userId);
     return ApiResponse.success(res, updated, '巡检开始执行');
   } catch (err) {
-    return ApiResponse.error(res, err.message, err.statusCode || 400);
+    return ApiResponse.error(res, err.statusCode === 404 ? '记录不存在' : '操作失败', err.statusCode || 400);
   }
 });
 
@@ -211,7 +211,7 @@ const completeInspection = asyncHandler(async (req, res) => {
     );
     return ApiResponse.success(res, updated, '巡检结果提交成功');
   } catch (err) {
-    return ApiResponse.error(res, err.message, err.statusCode || 400);
+    return ApiResponse.error(res, err.statusCode === 404 ? '记录不存在' : '操作失败', err.statusCode || 400);
   }
 });
 
@@ -237,7 +237,7 @@ const reviewInspection = asyncHandler(async (req, res) => {
     );
     return ApiResponse.success(res, updated, '巡检审核完成');
   } catch (err) {
-    return ApiResponse.error(res, err.message, err.statusCode || 400);
+    return ApiResponse.error(res, err.statusCode === 404 ? '记录不存在' : '操作失败', err.statusCode || 400);
   }
 });
 
@@ -259,7 +259,7 @@ const cancelInspection = asyncHandler(async (req, res) => {
     const updated = await inspectionService.cancelInspection(inspection, reason, req.user.userId);
     return ApiResponse.success(res, updated, '巡检已取消');
   } catch (err) {
-    return ApiResponse.error(res, err.message, err.statusCode || 400);
+    return ApiResponse.error(res, err.statusCode === 404 ? '记录不存在' : '操作失败', err.statusCode || 400);
   }
 });
 
@@ -280,7 +280,7 @@ const deleteInspection = asyncHandler(async (req, res) => {
     await inspectionService.deleteInspection(inspection);
     return ApiResponse.success(res, null, '巡检删除成功');
   } catch (err) {
-    return ApiResponse.error(res, err.message, err.statusCode || 400);
+    return ApiResponse.error(res, err.statusCode === 404 ? '记录不存在' : '操作失败', err.statusCode || 400);
   }
 });
 

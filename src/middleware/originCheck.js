@@ -79,13 +79,10 @@ const createOriginCheck = (allowedOrigins) => {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
-  } else {
+  } else if (config.nodeEnv === 'development') {
     whitelist = [...DEFAULT_DEV_ORIGINS];
-    if (config.nodeEnv !== 'development') {
-      logger.warn(
-        `originCheck 未配置 CORS_ORIGIN（NODE_ENV=${config.nodeEnv}），已回退到本地开发白名单，请显式配置以避免来源校验异常`
-      );
-    }
+  } else {
+    whitelist = [];
   }
 
   return (req, res, next) => {

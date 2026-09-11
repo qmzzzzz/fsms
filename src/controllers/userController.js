@@ -4,53 +4,20 @@
  */
 
 const { validationResult } = require('express-validator');
-const User = require('../models/User');
-const Role = require('../models/Role');
 const ApiResponse = require('../utils/apiResponse');
-const { getOperatorMaxLevel } = require('../utils/permissionHelper');
+const { getOperatorMaxLevel, matchesPermissionCodes } = require('../utils/permissionHelper');
+const { syncPermissionsToUsers } = require('../utils/permissionSync');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
-const {
-  getDataScope,
-  buildDataScopeFilter,
-  applyDataScopeToQuery,
-  assertRecordInScope,
-} = require('../middleware/rbac');
-const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
-const {
-  escapeRegExp,
-  validateSort,
-  normalizePagination,
-  isValidAvatar,
-} = require('../utils/helpers');
+const { getDataScope, buildDataScopeFilter, assertRecordInScope } = require('../middleware/rbac');
+const { validateSort, normalizePagination, isValidAvatar } = require('../utils/helpers');
 const { validateRules } = require('../utils/ipRange');
+const { decryptLoginCredential } = require('../utils/loginCipher');
+const { validatePasswordStrength } = require('../utils/helpers');
 const { checkSuperAdminMembership, isSuperAdminRole } = require('../utils/superAdmin');
 const statsCache = require('../services/statsCache');
 const { invalidateUserCache } = require('../middleware/auth');
-
-/**
- * 向指定用户定向推送权限同步（权限热生效）
- *
- * 用户角色变更（assignRoles）对该用户的有效权限影响最直接，却是此前
- * 唯一**完全没有**任何 WebSocket 通知的路径 —— 管理员改完角色，用户界面
- * 上的菜单与按钮纹丝不动，必须退出重登。缓存失效只解决了服务端鉴权，
- * 前端 store 里的 permissions 仍是登录时的快照。
- *
- * 失败不阻断：角色已落库，推送只为加速生效。
- *
- * @param {import('express').Request} req
- * @param {Array<string|object>} userIds
- * @param {object} meta
- */
-const syncPermissionsToUsers = async (req, userIds, meta) => {
-  const wsService = req.app.get('wsService');
-  if (!wsService || typeof wsService.emitPermissionSync !== 'function') return;
-  try {
-    await wsService.emitPermissionSync(userIds, meta);
-  } catch (err) {
-    logger.warn(`权限同步推送失败（不影响本次变更结果）：${err.message}`);
-  }
-};
+const userService = require('../services/userService');
 
 /**
  * 获取用户列表（支持分页、搜索、过滤）
@@ -74,61 +41,13 @@ const getUsers = asyncHandler(async (req, res) => {
     defaultSort: '-createdAt',
   });
 
-  // 构建查询条件
-  const query = {};
-
-  if (search) {
-    const escapedSearch = escapeRegExp(search.trim());
-    query.$or = [
-      { username: new RegExp(escapedSearch, 'i') },
-      { email: new RegExp(escapedSearch, 'i') },
-      { realName: new RegExp(escapedSearch, 'i') },
-    ];
-  }
-
-  // P3-4 修复：status 查询参数增加枚举白名单，拒绝操作符对象注入（?status[$ne]=active）
-  // 合法取值与 User.js 模型 status enum 一致：['active','inactive','locked']
-  const VALID_USER_STATUS = ['active', 'inactive', 'locked'];
-  if (typeof status === 'string' && VALID_USER_STATUS.includes(status)) {
-    query.status = status;
-  }
-
-  // P3-4 加固：department 必须为普通字符串，拒绝对象操作符注入（?department[]=x）
-  if (typeof department === 'string' && department !== '') {
-    query.department = department;
-  }
-
-  // 按角色过滤（role 参数为角色编码）
-  if (role) {
-    const roleDoc = await Role.findOne({ code: role });
-    if (roleDoc) {
-      query.roles = roleDoc._id;
-    } else {
-      // 角色不存在，返回空结果
-      return ApiResponse.paginated(
-        res,
-        [],
-        {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total: 0,
-          totalPages: 0,
-        },
-        '获取用户列表成功'
-      );
-    }
-  }
-
-  // 数据权限控制
-  //
-  // P2-9 修复：原实现只处理 self / department(且 department 非空) 两支，
-  // 其余情形（type='none'、department 为空串/null）顺流而下不加任何条件 →
-  // 低层级但持 user:read 的用户看到全组织用户；而详情接口（assertRecordInScope）
-  // 返回 403、统计接口（buildDataScopeFilter）返回空集，三处口径互相矛盾。
-  // 现统一走 applyDataScopeToQuery：deny 语义显式返回空集。
   const dataScope = await getDataScope(req.user.userId);
-  const scopeAllowed = applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.user);
-  if (!scopeAllowed) {
+  const { roleFound, scopeAllowed, query } = await userService.buildListQuery(
+    { search, status, department, role },
+    dataScope
+  );
+
+  if (!roleFound || !scopeAllowed) {
     return ApiResponse.paginated(
       res,
       [],
@@ -146,17 +65,7 @@ const getUsers = asyncHandler(async (req, res) => {
   const { page: pageNum, limit: limitNum } = normalizePagination(page, limit);
 
   // 执行查询
-  const users = await User.find(query)
-    .populate({
-      path: 'roles',
-      select: 'name code',
-    })
-    .select(User.RESPONSE_EXCLUDE)
-    .sort(safeSort)
-    .limit(limitNum)
-    .skip((pageNum - 1) * limitNum);
-
-  const count = await User.countDocuments(query);
+  const { users, count } = await userService.listUsers(query, safeSort, pageNum, limitNum);
 
   return ApiResponse.paginated(
     res,
@@ -176,13 +85,7 @@ const getUsers = asyncHandler(async (req, res) => {
  * GET /api/users/:id
  */
 const getUserById = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.params.id)
-    .populate({
-      path: 'roles',
-      select: 'name code description permissions',
-      populate: { path: 'permissions', select: 'name code' },
-    })
-    .select(User.RESPONSE_EXCLUDE);
+  const user = await userService.getUserDetail(req.params.id);
 
   if (!user) {
     return ApiResponse.notFound(res, '用户不存在');
@@ -208,7 +111,25 @@ const createUser = asyncHandler(async (req, res) => {
     return ApiResponse.error(res, '数据验证失败', 400, errors.array());
   }
 
-  const { username, email, password, realName, phone, department, roles, allowedIPs } = req.body;
+  const { username, email, realName, phone, department, roles, allowedIPs } = req.body;
+
+  // FE-M3：管理员建号口令密文轨（encPassword，与代设明文双轨）——
+  // 解密失败返回统一 400（不区分原因），解密后补做强度校验
+  let password;
+  if (typeof req.body.encPassword === 'string' && req.body.encPassword) {
+    try {
+      password = await decryptLoginCredential(req.body.encPassword);
+    } catch (err) {
+      logger.warn(`管理员建号口令密文无效：${username}（${err.code || err.message}）`);
+      return ApiResponse.codeError(res, 'AUTH_ENCRYPTED_CREDENTIAL_INVALID');
+    }
+    const strengthErr = validatePasswordStrength(password);
+    if (strengthErr) {
+      return ApiResponse.error(res, strengthErr, 400);
+    }
+  } else {
+    password = req.body.password;
+  }
 
   // IP 访问范围规则格式校验：非法片段直接回报，避免入库后规则静默失效
   if (allowedIPs !== undefined && allowedIPs !== '') {
@@ -222,8 +143,8 @@ const createUser = asyncHandler(async (req, res) => {
   // P3-30：username 判重走 collation（大小写不敏感），与唯一索引 username_ci 同口径；
   // 邮箱保持默认 collation 以命中 email_1 索引，故不能合并为一次 $or 查询
   const [dupName, dupEmail] = await Promise.all([
-    User.findByUsername(username).select('_id').lean(),
-    User.findOne({ email }).select('_id').lean(),
+    userService.findDuplicateUsername(username),
+    userService.findOneUser({ email }),
   ]);
   if (dupName || dupEmail) {
     return ApiResponse.error(res, dupName ? '用户名已存在' : '邮箱已被使用', 400);
@@ -232,9 +153,9 @@ const createUser = asyncHandler(async (req, res) => {
   // 先校验角色，再创建用户，避免角色校验失败后留下孤儿用户
   let validatedRoles = [];
   if (roles && roles.length > 0) {
-    const targetRoles = await Role.find({ _id: { $in: roles } })
-      .select('level code isBuiltIn')
-      .lean();
+    const targetRoles = await userService.findRolesByIds(roles, 'level code isBuiltIn', {
+      lean: true,
+    });
     if (targetRoles.length !== roles.length) {
       return ApiResponse.error(res, '包含不存在的角色', 400);
     }
@@ -256,7 +177,7 @@ const createUser = asyncHandler(async (req, res) => {
   }
 
   // 创建用户（带角色）
-  const user = await User.create({
+  const user = await userService.createUser({
     username,
     email,
     password,
@@ -273,9 +194,7 @@ const createUser = asyncHandler(async (req, res) => {
   // 用户数据变更，失效操作者数据范围下的统计缓存
   statsCache.invalidateByUserId(req.user.userId);
 
-  const createdUser = await User.findById(user._id)
-    .populate({ path: 'roles', select: 'name code' })
-    .select(User.RESPONSE_EXCLUDE);
+  const createdUser = await userService.getCreatedUser(user._id);
 
   return ApiResponse.success(res, createdUser, '用户创建成功', 201);
 });
@@ -292,14 +211,14 @@ const updateUser = asyncHandler(async (req, res) => {
 
   const { realName, email, phone, department, avatar, status, allowedIPs } = req.body;
 
-  const user = await User.findById(req.params.id);
+  const user = await userService.findUserForUpdate(req.params.id);
   if (!user) {
     return ApiResponse.notFound(res, '用户不存在');
   }
 
   // 层级保护：禁止修改等于或高于自身层级的用户（与删除/锁定/角色分配逻辑保持一致），
   // 防止低层级管理员篡改或禁用高层级账户（含 status 变更）；修改自身资料除外
-  const targetRoles = await Role.find({ _id: { $in: user.roles } }).select('level code isBuiltIn');
+  const targetRoles = await userService.findRolesByIds(user.roles, 'level code isBuiltIn');
   const targetMaxLevel =
     targetRoles.length > 0 ? Math.max(...targetRoles.map((r) => r.level || 0)) : 0;
 
@@ -330,7 +249,7 @@ const updateUser = asyncHandler(async (req, res) => {
   // 此前仅持 user:update 的操作者可直接改 status，绕过专用锁定接口
   // （PUT /api/security/users/:userId/lock）的 user:lock 权限门；*:* 通配视为持有全部权限
   if (!isSelf && status !== undefined && String(status) !== String(user.status)) {
-    const operatorPermCodes = await User.getPermissions(req.user.userId);
+    const operatorPermCodes = await userService.getPermissions(req.user.userId);
     if (!operatorPermCodes.includes('user:lock') && !operatorPermCodes.includes('*:*')) {
       return ApiResponse.forbidden(res, '无权变更用户状态（需要 user:lock 权限）');
     }
@@ -352,7 +271,7 @@ const updateUser = asyncHandler(async (req, res) => {
   // email 更新：前端用户编辑表单确实提交该字段，此前被静默丢弃；
   // 唯一性冲突处理与创建接口口径一致（先查重再写入）
   if (email !== undefined && email !== user.email) {
-    const existing = await User.findOne({ email, _id: { $ne: user._id } });
+    const existing = await userService.findOneUser({ email, _id: { $ne: user._id } });
     if (existing) {
       return ApiResponse.error(res, '邮箱已被使用', 400);
     }
@@ -367,7 +286,7 @@ const updateUser = asyncHandler(async (req, res) => {
   if (status !== undefined) user.status = status;
   if (allowedIPs !== undefined) user.allowedIPs = allowedIPs;
 
-  await user.save();
+  await userService.saveUser(user);
 
   // 用户状态变更时失效缓存（P3-3：解锁同样必须失效——
   // 原实现只对「变为非 active」失效，锁定/禁用解除后 authenticate 的
@@ -385,9 +304,7 @@ const updateUser = asyncHandler(async (req, res) => {
     invalidateUserCache(user._id);
   }
 
-  const updatedUser = await User.findById(user._id)
-    .populate({ path: 'roles', select: 'name code' })
-    .select(User.RESPONSE_EXCLUDE);
+  const updatedUser = await userService.getUpdatedUser(user._id);
 
   logger.info('用户信息已更新', { username: user.username });
 
@@ -412,7 +329,7 @@ const assignRoles = asyncHandler(async (req, res) => {
     return ApiResponse.error(res, '请提供有效的角色列表', 400);
   }
 
-  const user = await User.findById(req.params.id);
+  const user = await userService.findUserForUpdate(req.params.id);
   if (!user) {
     return ApiResponse.notFound(res, '用户不存在');
   }
@@ -420,16 +337,14 @@ const assignRoles = asyncHandler(async (req, res) => {
   // M-01 修复：目标用户层级保护（口径对齐 updateUser/deleteUser/toggleUserLock）
   // 此前仅校验"被分配角色"的层级，未校验"目标用户"的层级，
   // 导致低层级管理员可剥离同级/更高级用户（含内置超管）的角色
-  const targetUserRoles = await Role.find({ _id: { $in: user.roles } }).select(
-    'level code isBuiltIn'
-  );
+  const targetUserRoles = await userService.findRolesByIds(user.roles, 'level code isBuiltIn');
   const targetUserMaxLevel =
     targetUserRoles.length > 0 ? Math.max(...targetUserRoles.map((r) => r.level || 0)) : 0;
 
   // 验证新角色是否存在（同时取出 permissions 供权限子集校验）
-  const validRoles = await Role.find({ _id: { $in: roles } })
-    .select('level code permissions')
-    .populate({ path: 'permissions', select: 'code' });
+  const validRoles = await userService.findRolesByIds(roles, 'level code permissions', {
+    populate: { path: 'permissions', select: 'code' },
+  });
   if (validRoles.length !== roles.length) {
     return ApiResponse.error(res, '存在无效的角色 ID', 400);
   }
@@ -454,20 +369,15 @@ const assignRoles = asyncHandler(async (req, res) => {
   // 即可各自集齐双方全部权限，横向扩权且不触发任何层级告警。
   // isSelf 同样必须校验：给自己挂一个同级富权限角色是最直接的自我提权路径，
   // 而层级保护恰好对 isSelf 放行。
-  const operatorPermCodes = await User.getPermissions(req.user.userId);
+  const operatorPermCodes = await userService.getPermissions(req.user.userId);
   if (!operatorPermCodes.includes('*:*')) {
-    // 精确匹配或模块通配（与 assignPermissions 的 hasPerm 同口径）
-    const hasPerm = (code) =>
-      operatorPermCodes.includes(code) ||
-      operatorPermCodes.includes(`${String(code).split(':')[0]}:*`);
+    // 精确匹配或模块通配（O-3：与 createRole/assignPermissions 共用唯一实现）
+    const hasPerm = (code) => matchesPermissionCodes(operatorPermCodes, code);
 
     // 只校验「新增的」权限：目标用户已持有的权限不属于本次授予行为，
     // 否则操作者无法对权限比自己多的用户做任何角色调整（含收权）
     const currentPermCodes = new Set();
-    const currentRoleDocs = await Role.find({ _id: { $in: user.roles } })
-      .select('permissions')
-      .populate({ path: 'permissions', select: 'code' })
-      .lean();
+    const currentRoleDocs = await userService.findRolePermissionDocs(user.roles);
     for (const r of currentRoleDocs) {
       for (const p of r.permissions || []) {
         if (p?.code) currentPermCodes.add(p.code);
@@ -525,9 +435,7 @@ const assignRoles = asyncHandler(async (req, res) => {
   // 超管归属不可变更（含操作者本人）：剥离会造成不可恢复的自锁死
   // （超管是唯一 *:* 来源，剥离后无任何接口能修回），授予会破坏唯一性。
   // 归属只由启动期 reconcileSuperAdmin 决定，详见 utils/superAdmin.js
-  const nextRoleDocs = await Role.find({ _id: { $in: roles } })
-    .select('code isBuiltIn')
-    .lean();
+  const nextRoleDocs = await userService.findRolesByIds(roles, 'code isBuiltIn', { lean: true });
   const membershipError = checkSuperAdminMembership(targetUserRoles, nextRoleDocs);
   if (membershipError) {
     logger.warn(
@@ -539,7 +447,7 @@ const assignRoles = asyncHandler(async (req, res) => {
 
   // 原子更新替代读-改-save：user.save() 会把整个文档回写，并发窗口内的
   // 其他字段修改（如 status）会被本次内存快照覆盖；findByIdAndUpdate+$set 只写 roles
-  await User.findByIdAndUpdate(user._id, { $set: { roles } });
+  await userService.updateRoles(user._id, roles);
 
   // 角色变更后失效缓存
 
@@ -548,9 +456,7 @@ const assignRoles = asyncHandler(async (req, res) => {
   statsCache.invalidateByUserId(user._id);
   statsCache.invalidateByUserId(req.user.userId);
 
-  const updatedUser = await User.findById(user._id)
-    .populate({ path: 'roles', select: 'name code' })
-    .select(User.RESPONSE_EXCLUDE);
+  const updatedUser = await userService.getUpdatedUser(user._id);
 
   logger.info('用户角色已更新', { username: user.username });
 
@@ -568,7 +474,7 @@ const assignRoles = asyncHandler(async (req, res) => {
  * DELETE /api/users/:id
  */
 const deleteUser = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.params.id);
+  const user = await userService.findUserForUpdate(req.params.id);
   if (!user) {
     return ApiResponse.notFound(res, '用户不存在');
   }
@@ -580,7 +486,7 @@ const deleteUser = asyncHandler(async (req, res) => {
 
   // 层级保护：禁止删除等于或高于自身层级的用户（与锁定/角色分配逻辑保持一致）
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-  const targetRoles = await Role.find({ _id: { $in: user.roles } }).select('level code isBuiltIn');
+  const targetRoles = await userService.findRolesByIds(user.roles, 'level code isBuiltIn');
   const targetMaxLevel =
     targetRoles.length > 0 ? Math.max(...targetRoles.map((r) => r.level || 0)) : 0;
   if (targetMaxLevel >= operatorMaxLevel) {
@@ -599,7 +505,7 @@ const deleteUser = asyncHandler(async (req, res) => {
   }
 
   const userId = user._id;
-  await User.findByIdAndDelete(req.params.id);
+  await userService.deleteById(req.params.id);
 
   // 失效缓存
 
@@ -652,9 +558,7 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
 
   // 层级保护：批量目标中包含同级或更高级别用户时整体拒绝（与单个删除口径一致）
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-  const targets = await User.find({ _id: { $in: ids } })
-    .populate('roles', 'level code isBuiltIn')
-    .lean();
+  const targets = await userService.findBatchUsers(ids);
   if (targets.length !== ids.length) {
     return ApiResponse.error(res, '包含不存在的用户 ID', 400);
   }
@@ -679,7 +583,7 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
     });
   }
 
-  const result = await User.deleteMany({ _id: { $in: ids } });
+  const result = await userService.deleteMany({ _id: { $in: ids } });
 
   // 批量失效缓存
 
@@ -723,7 +627,7 @@ const getUserStats = asyncHandler(async (req, res) => {
   startOfMonth.setHours(0, 0, 0, 0);
 
   // $facet 单次聚合：冷缓存时 6 次串行 DB 往返合并为 1 次，降低冷启动/并发抖动
-  const [facetResult] = await User.aggregate([
+  const [facetResult] = await userService.aggregateStats([
     { $match: scopeFilter },
     {
       $facet: {

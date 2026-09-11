@@ -224,9 +224,19 @@ const loadMetrics = async () => {
   if (!canViewMetrics.value) return
   try {
     const { data: resp } = await api.reports.getMetrics()
-    if (resp?.success) metricsSnap.value = resp.data || null
+    if (!resp?.success || !resp.data) return
+    // FE-L2：形状归一化兜底——后端契约调整时卡片降级显示 0 值而非 NaN/渲染异常
+    const d = resp.data
+    metricsSnap.value = {
+      ...d,
+      summary: { totalRequests: 0, totalErrors: 0, errorRate: 0, ...(d.summary || {}) },
+      latency: { avgSeconds: 0, byRoute: {}, ...(d.latency || {}) },
+      routes: Array.isArray(d.routes) ? d.routes : [],
+      alerts: Array.isArray(d.alerts) ? d.alerts : [],
+      process: { uptimeSeconds: 0, rssMB: 0, heapUsedMB: 0, ...(d.process || {}) },
+    }
   } catch (_) {
-    // 静默
+    // 静默：保留上一次数据
   }
 }
 

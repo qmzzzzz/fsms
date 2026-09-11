@@ -338,7 +338,7 @@
         </el-descriptions-item>
         <el-descriptions-item :label="$t('操作结果')">
           <el-tag :type="detailDialog.data.success ? 'success' : 'danger'">
-            {{ detailDialog.data.success ? '成功' : '失败' }}
+            {{ detailDialog.data.success ? $t('成功') : $t('失败') }}
           </el-tag>
         </el-descriptions-item>
         <el-descriptions-item v-if="detailDialog.data.errorMessage" :label="$t('错误信息')">

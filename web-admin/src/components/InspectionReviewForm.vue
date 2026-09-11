@@ -10,16 +10,17 @@
         <template #title>
           {{ $t('巡检信息') }}
         </template>
-        <div>标题：{{ inspectionData.title }}</div>
-        <div>负责人：{{ inspectionAssignedNames }}</div>
+        <div>{{ $t('巡检标题') }}：{{ inspectionData.title }}</div>
+        <div>{{ $t('负责人') }}：{{ inspectionAssignedNames }}</div>
         <div>
-          巡检时间：{{ inspectionData.actualStartTime }} 至 {{ inspectionData.actualEndTime }}
+          {{ $t('inspection.actualStartTime') }}：{{ inspectionData.actualStartTime }} 至
+          {{ inspectionData.actualEndTime }}
         </div>
-        <div>巡检结果：{{ resultLabel }}</div>
+        <div>{{ $t('巡检结果') }}：{{ resultLabel }}</div>
       </el-alert>
 
       <el-alert v-if="hasFindings" type="warning" :closable="false" class="mb-4">
-        <template #title> 发现问题（{{ findingsCount }}个） </template>
+        <template #title> {{ $t('inspection.findingsCount', { count: findingsCount }) }} </template>
         <div v-for="(finding, index) in inspectionData.findings" :key="index" class="mb-2">
           <div class="finding-item">
             <span class="finding-device">{{ finding.deviceCode }} - {{ finding.deviceName }}</span>

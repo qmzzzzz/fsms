@@ -7,8 +7,8 @@
 node_modules/
 web-admin/node_modules/
 
-# 全局 npm 包
-C:/Users/青木/AppData/Roaming/npm/
+# 全局 npm 包（按用户主目录生成，避免硬编码本机用户名）
+**/AppData/Roaming/npm/
 
 # 日志
 logs/
@@ -18,6 +18,11 @@ npm-debug.log*
 # 测试
 coverage/
 .nyc_output/
+playwright-report/
+test-results/
+
+# 备份/编辑器残留
+*.bak
 
 # 构建
 web-admin/dist/
@@ -42,8 +47,8 @@ $RECYCLE.BIN/
 # 修复：匹配 .tmp- 前缀的临时脚本/日志文件（如 .tmp-e2e-captcha-off.js）
 .tmp-*
 
-# 后台任务输出
-C:/Users/青木/AppData/Local/Temp/claude/*
+# 后台任务输出（不硬编码本机用户名）
+**/AppData/Local/Temp/claude/*
 
 # 自签名 TLS 证书（scripts/generate-dev-cert.sh 生成目录）
 certs/

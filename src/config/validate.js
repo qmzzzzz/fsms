@@ -83,6 +83,36 @@ function validateConfig() {
   if (!process.env.CORS_ORIGIN) {
     errors.push('CORS_ORIGIN 必须设置（禁止通配符）');
   }
+  if ((process.env.CORS_ORIGIN || '').split(',').includes('*')) {
+    errors.push('CORS_ORIGIN 禁止使用通配符');
+  }
+
+  const redisUrl = (process.env.REDIS_URL || '').trim();
+  if (!redisUrl) {
+    errors.push('REDIS_URL 必须配置：生产环境限流、IP 黑名单广播与审计链锁不得退化为单实例内存态');
+  } else {
+    try {
+      const parsedRedisUrl = new URL(redisUrl);
+      if (!['redis:', 'rediss:'].includes(parsedRedisUrl.protocol)) {
+        errors.push('REDIS_URL 协议必须是 redis: 或 rediss:');
+      }
+    } catch (_) {
+      errors.push('REDIS_URL 必须是有效的 Redis 连接地址');
+    }
+  }
+
+  // M3：生产环境必须配置 ALLOWED_HOSTS（Host 头白名单校验）
+  if (!process.env.ALLOWED_HOSTS || !process.env.ALLOWED_HOSTS.trim()) {
+    errors.push('ALLOWED_HOSTS 必须配置：生产环境缺少 Host 头白名单，存在缓存投毒与密码重置链接投毒风险');
+  }
+
+  // M3：生产环境必须启用 HTTPS（前置反代或进程自启）
+  if (process.env.ENABLE_HTTPS !== 'true') {
+    errors.push(
+      'ENABLE_HTTPS 未启用：生产环境必须由前置 Nginx 终结 TLS 或进程自启 HTTPS，' +
+        '否则登录口令 ECDH 加密无法抵御主动 MITM'
+    );
+  }
 
   // TRUST_PROXY_HOPS 必须是合法跳数，不能只验存在性（AUX-01 / P2-24）
   //

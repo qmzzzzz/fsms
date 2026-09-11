@@ -5,6 +5,7 @@
 const express = require('express');
 const router = express.Router();
 const roleController = require('../controllers/roleController');
+const rolePermissionController = require('../controllers/rolePermissionController');
 const { authenticate, checkPermission } = require('../middleware');
 const { body, param, query } = require('express-validator');
 const { consumeValidation } = require('../middleware/validateQuery');
@@ -151,7 +152,7 @@ router.put(
   checkPermission('role:assign'),
   roleIdValidation,
   assignPermissionsValidation,
-  roleController.assignPermissions
+  rolePermissionController.assignPermissions
 );
 
 /**

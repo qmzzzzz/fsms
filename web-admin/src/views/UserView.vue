@@ -352,6 +352,7 @@ import { Search, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api } from '@/utils/api'
+import { encryptPassword } from '@/utils/loginCipher'
 import { passwordStrengthRule } from '@/utils/password'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
@@ -671,7 +672,15 @@ const submitForm = async () => {
       allowedIPs: dialog.form.allowedIPs,
     }
     if (!dialog.isEdit) {
-      payload.password = dialog.form.password
+      // FE-M3：管理员代设口令走密文轨——「可用但失败」阻断提交（用户重试成本为零）
+      const enc = await encryptPassword(dialog.form.password).catch((e) => {
+        console.warn('[loginCipher] 建号口令加密失败：', e?.message)
+        ElMessage.error(t('login.encryptionFailed'))
+        return 'BLOCKED'
+      })
+      if (enc === 'BLOCKED') return
+      if (enc) payload.encPassword = enc
+      else payload.password = dialog.form.password
       await api.users.create(payload)
       ElMessage.success(t('messages.createSuccess'))
     } else {

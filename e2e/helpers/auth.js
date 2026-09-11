@@ -13,12 +13,12 @@ async function loginViaUI(page, username, password) {
   await page.goto('/login');
   await page.getByPlaceholder('用户名').fill(username);
   await page.getByPlaceholder('密码').fill(password);
-  await page.getByRole('button', { name: '登录' }).click();
+  await page.getByRole('button', { name: /^登\s*录$/ }).click();
 }
 
 /** 等待进入已登录界面（侧边栏/仪表盘任一可见即认为登录成功） */
 async function expectLoggedIn(page) {
-  await page.waitForURL(/\/(dashboard)?(\?.*)?$/, { timeout: 20_000 });
+  await page.waitForURL(/\/dashboard(?:\?.*)?$/, { timeout: 20_000 });
 }
 
 module.exports = { loginViaUI, expectLoggedIn };

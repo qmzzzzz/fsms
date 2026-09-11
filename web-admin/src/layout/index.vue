@@ -115,7 +115,7 @@
           </el-tooltip>
           <el-tooltip
             v-if="canToggleFullScreen"
-            content="全屏"
+            :content="$t('全屏')"
             placement="bottom"
             class="tech-hide-mobile"
           >
@@ -127,7 +127,7 @@
             <span class="user-dropdown">
               <el-avatar :size="32" class="user-avatar">{{ avatarText }}</el-avatar>
               <span class="user-name tech-hide-mobile">{{
-                currentUser?.username || '未登录'
+                currentUser?.username || ('未登录')
               }}</span>
               <el-icon class="tech-hide-mobile"><ArrowDown /></el-icon>
             </span>

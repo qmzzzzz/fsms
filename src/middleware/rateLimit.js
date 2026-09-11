@@ -38,20 +38,40 @@ const skipIfWhitelisted = (req) => req.ipWhitelisted === true;
  */
 function makeSharedStore(prefix) {
   if (!(process.env.REDIS_URL || '').trim()) return undefined;
-  return (async () => {
+  // 同步返回一个符合 Store 接口的包装对象；后台异步初始化 Redis，
+  // 就绪后自动切到 RedisStore，未就绪或失败时走 MemoryStore。
+  // express-rate-limit v7.5.1 在 parseOptions 中同步校验
+  // store.increment/decrement/resetKey，不接受 Promise<Store>。
+  const fallback = new rateLimit.MemoryStore();
+  let active = fallback;
+  (async () => {
     const { initSharedCache, isRedisEnabled, getRedisClient } = require('../services/sharedCache');
     await initSharedCache();
-    if (!isRedisEnabled()) return new rateLimit.MemoryStore();
+    if (!isRedisEnabled()) return;
     const { RedisStore } = require('rate-limit-redis');
     const client = getRedisClient();
-    return new RedisStore({
+    active = new RedisStore({
       sendCommand: (...args) => client.call(...args),
       prefix: `rl:${prefix}:`,
     });
   })().catch((err) => {
     logger.warn(`限流共享存储初始化失败（${prefix}），回退进程内计数：${err.message}`);
-    return new rateLimit.MemoryStore();
   });
+  return {
+    async increment(...a) {
+      return active.increment(...a);
+    },
+    async decrement(...a) {
+      return active.decrement(...a);
+    },
+    async resetKey(...a) {
+      return active.resetKey(...a);
+    },
+    async resetAll() {
+      if (active.resetAll) return active.resetAll();
+    },
+    init: fallback.init, // 透传 init（如有）
+  };
 }
 
 /**
@@ -322,4 +342,6 @@ module.exports = {
   ipLimiter,
   userLimiter,
   registerIpLimiter,
+  // 仅供测试：makeSharedStore 的 Redis/MemoryStore 分支需直接驱动（rateLimitStore.test.js）
+  makeSharedStore,
 };

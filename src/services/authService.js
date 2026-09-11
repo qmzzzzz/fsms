@@ -41,6 +41,9 @@ const {
   resetMfaFailures,
   hashRecoveryCode,
 } = require('./mfaService');
+// O-2 下沉引入：管理员锁定/解锁的层级与内置超管校验（纯工具模块，无循环依赖）
+const { getOperatorMaxLevel } = require('../utils/permissionHelper');
+const { isSuperAdminRole } = require('../utils/superAdmin');
 
 /**
  * 哑口令摘要：用于抹平「用户不存在」与「用户存在但密码错误」的响应耗时差
@@ -296,7 +299,9 @@ async function loginUser(params, ctx) {
     await AuditLog.recordLogin(user._id, username, ip, false, userAgent, { fingerprint }).catch(
       () => {}
     );
-    await checkBruteForce(username, ip);
+    // B-L1：与上方 210/233 行同口径——checkBruteForce 内的 DB 查询/告警落库
+    // 若因 DB 瞬断 reject，异常上抛会把统一 401 变成 500（破坏 M-5 防枚举口径）
+    await checkBruteForce(username, ip).catch(() => {});
     // 原子递增失败计数（$inc）：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，
     // 丢失更新导致锁定阈值被推迟，利于爆破；$inc 由 DB 保证无丢失更新。
     // 返回更新后文档，据此判断是否跨过锁定阈值（阈值判定可能并发重复触发，
@@ -913,6 +918,110 @@ async function updateUserProfile(userId, body) {
 }
 
 /**
+ * 管理员锁定/解锁用户账户（O-2 自 securityController.toggleUserLock 下沉）
+ *
+ * 业务规则原样迁移：层级校验（同级及以上拦截，含 isSelf 豁免）、内置超管
+ * 锁定拒绝、inactive 双向状态机保护（禁用账户不可借解锁复活、亦不可重复
+ * 锁定）、成功后缓存失效与专用审计落库。控制器只保留参数校验与
+ * outcome → HTTP 响应映射，行为口径与迁移前逐项一致
+ * （securityCoverageGap.test.js 的 toggleUserLock 分支为安全网）。
+ *
+ * @param {string} userId 目标用户 ID
+ * @param {object} params { locked: boolean, reason?: string }
+ * @param {object} ctx { operatorId, operatorUsername, ip, userAgent }
+ * @returns {Promise<{outcome:'NOT_FOUND'|'FORBIDDEN_SAME_LEVEL'|'CANNOT_LOCK_SUPER_ADMIN'|'INACTIVE_UNLOCK'|'INACTIVE_LOCK'|'NOT_LOCKED'|'OK', ...}>}
+ */
+async function setUserLockStatus(userId, { locked, reason }, ctx) {
+  const { operatorId, operatorUsername, ip, userAgent } = ctx;
+
+  const user = await User.findById(userId);
+  if (!user) {
+    return { outcome: 'NOT_FOUND' };
+  }
+
+  // 层级校验：禁止锁定/解锁等于或高于自身层级的用户
+  // select 必须包含 isBuiltIn，否则下方内置超管保护判断恒为 false（死代码）
+  const targetUserRoles = await Role.find({ _id: { $in: user.roles } }).select(
+    'level code isBuiltIn'
+  );
+  const targetMaxLevel =
+    targetUserRoles.length > 0 ? Math.max(...targetUserRoles.map((r) => r.level || 0)) : 0;
+
+  // 按操作者 ID 重新查询角色层级（req.user.roles 存的是角色编码字符串，
+  // 直接用于 _id: {$in: ...} 会触发 CastError，导致整个接口 500）
+  const operatorMaxLevel = await getOperatorMaxLevel(operatorId);
+
+  // 禁止操作同级或更高级别的用户
+  if (targetMaxLevel >= operatorMaxLevel && String(user._id) !== String(operatorId)) {
+    return { outcome: 'FORBIDDEN_SAME_LEVEL' };
+  }
+
+  // 禁止锁定超级管理员（无 isSelf 例外：锁定后层级校验会拦下所有解锁尝试）
+  const isBuiltInSuperAdmin = targetUserRoles.some(isSuperAdminRole);
+  if (locked && isBuiltInSuperAdmin) {
+    return { outcome: 'CANNOT_LOCK_SUPER_ADMIN' };
+  }
+
+  // ===== 解锁/锁定状态保护 =====
+  // 仅当账户当前确实处于锁定态时才允许解锁并恢复为 active；
+  // 管理员禁用（inactive）的账户不允许借“解锁”复活，需先由管理员通过用户更新接口恢复启用
+  if (!locked && user.status === 'inactive') {
+    return { outcome: 'INACTIVE_UNLOCK' };
+  }
+  if (!locked && user.status !== 'locked') {
+    return { outcome: 'NOT_LOCKED' };
+  }
+  // 锁定方向同样拒绝已禁用账户：若允许 inactive → locked，
+  // 后续“锁定→解锁”链路会把禁用账户洗回 active，变相复活被禁用账户
+  if (locked && user.status === 'inactive') {
+    return { outcome: 'INACTIVE_LOCK' };
+  }
+
+  user.status = locked ? 'locked' : 'active';
+
+  if (locked && reason) {
+    user.remark = reason;
+  }
+
+  await user.save();
+
+  // 失效用户缓存（与原实现一致：惰性 require，规避 middleware ↔ service 潜在循环）
+  const { invalidateUserCache } = require('../middleware/auth');
+  invalidateUserCache(user._id);
+  // 锁定/解锁影响用户统计，目标用户与操作者（统计视角）的统计缓存均需失效
+  const statsCache = require('./statsCache');
+  statsCache.invalidateByUserId(user._id);
+  statsCache.invalidateByUserId(operatorId);
+
+  // 注意：不将用户级锁定关联到 IP 黑名单，避免误封 NAT 出口（原样保留）
+
+  // 记录审计日志
+  await AuditLog.create({
+    action: locked ? 'user_locked' : 'user_unlocked',
+    category: 'user',
+    userId: operatorId,
+    username: operatorUsername,
+    targetUserId: user._id,
+    targetUsername: user.username,
+    reason,
+    ip,
+    userAgent,
+    success: true,
+    riskLevel: 'high',
+  });
+
+  logger.info('用户锁定状态变更', { username: user.username, locked, operator: operatorUsername });
+
+  return {
+    outcome: 'OK',
+    userId: user._id,
+    username: user.username,
+    status: user.status,
+    locked,
+  };
+}
+
+/**
  * 登出令牌吊销（业务层）：把 access/refresh 令牌加入黑名单
  * @returns {Promise<{revokeFailed:boolean}>} revokeFailed=true 表示有令牌未能确认入库
  *
@@ -974,5 +1083,6 @@ module.exports = {
   refreshSession,
   changeUserPassword,
   updateUserProfile,
+  setUserLockStatus,
   revokeTokensOnLogout,
 };

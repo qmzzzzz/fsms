@@ -17,6 +17,8 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import router from '@/router'
 import i18n from '@/i18n'
+// FE-M1：密文被拒时统一失效公钥缓存（loginCipher 仅依赖 axios，无循环）
+import { invalidatePublicKeyCache } from '@/utils/loginCipher'
 import {
   ApiEnvelopeSchema,
   AuthMeResponseSchema,
@@ -171,6 +173,11 @@ const UNCANCELABLE_METHODS = new Set(['post', 'put', 'patch', 'delete'])
  * @param {string} [message] 取消原因（仅用于调试）
  * @returns {{cancelled: number, kept: number}} 取消与保留的请求数
  */
+
+// FE-L1：取消错误判定助手——路由切换 abort 在途请求后，视图 catch 应据此
+// 跳过「加载失败」提示（用户已到达新页面，弹假错误会训练用户忽略红框）
+export const isCanceledError = (e) => e?.code === 'ERR_CANCELED' || e?.name === 'CanceledError'
+
 export const cancelAllPendingRequests = (message = '路由切换，取消在途请求') => {
   let cancelled = 0
   let kept = 0
@@ -310,6 +317,13 @@ apiClient.interceptors.response.use(
 
     if (error.response) {
       const { status, data, config } = error.response
+
+      // FE-M1：密文被拒（服务端重启换钥/密钥轮换）——统一在此清公钥缓存，
+      // 登录/注册/改密三个口令入口全部自愈（原先只接在 LoginView）。
+      // import 无循环：loginCipher 仅依赖 axios
+      if (data?.errors?.errorCode === 'AUTH_ENCRYPTED_CREDENTIAL_INVALID') {
+        invalidatePublicKeyCache()
+      }
 
       // 401：尝试用 refresh cookie 自动刷新并重试（仅重试一次，避免无限循环）
       //

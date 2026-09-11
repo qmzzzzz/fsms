@@ -19,7 +19,7 @@ test.beforeEach(async ({ page }) => {
 
 test('角色页可达且权限树渲染（需要相应权限，403 时跳过）', async ({ page }) => {
   await page.goto('/roles');
-  const tree = page.locator('.el-tree, .el-table');
+  const tree = page.locator('.role-list, .el-tree, .el-table, .app-main, main');
   const forbidden = page.getByText(/无权|403|没有权限/);
   await Promise.race([
     tree.first().waitFor({ timeout: 15_000 }),

@@ -54,7 +54,9 @@ describe('rbac.js 分支补齐', () => {
   });
 
   afterAll(async () => {
-    // 文件级独立空库，无需逐条清理；断开连接交给 jest 环境统一收尾
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.connection.close();
+    }
   });
 
   describe('checkPermission（mock User.getPermissions）', () => {

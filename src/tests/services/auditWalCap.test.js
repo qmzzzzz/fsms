@@ -17,10 +17,13 @@ describe('审计 WAL 大小硬上限（R-6）', () => {
 
   beforeAll(() => {
     // AUDIT_WAL_PATH 在模块加载时求值，必须先于 require 设置；
-    // getWalMaxBytes 运行期读 env，测试注入 200 字节小阈值
+    // getWalMaxBytes / getWalStatInterval 运行期读 env，注入小阈值
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-wal-cap-'));
     process.env.AUDIT_WAL_PATH = path.join(tmpDir, 'test-audit.wal');
     process.env.AUDIT_WAL_MAX_BYTES = '200';
+    // B-I1：stat 节流默认每 32 次追加抽查一次——本套件只 push 10 条，
+    // 注入 1 恢复逐条检查，使上限裁剪在套件内可见
+    process.env.AUDIT_WAL_STAT_INTERVAL = '1';
     auditBuffer = require('../../services/auditBuffer');
   });
 

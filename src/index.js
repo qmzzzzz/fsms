@@ -98,8 +98,17 @@ const gracefulShutdown = async (signal) => {
   await runStep('关闭 HTTP 服务器', async () => {
     if (!httpServer) return;
     await new Promise((resolve) => {
+      // B-L3：立即关闭空闲 keep-alive 连接——浏览器长连接会让 close() 回调
+      // 拖满 10s 超时（Node ≥18.2 提供；活跃请求不受影响）。WS 已在步骤 1 断开
+      if (typeof httpServer.closeIdleConnections === 'function') {
+        httpServer.closeIdleConnections();
+      }
       const forceTimeout = setTimeout(() => {
         logger.warn('HTTP 服务器优雅关闭超时（10s），强制关闭剩余连接');
+        // 超时兜底：仍存活的连接（含极端情况下仍在写的响应）强制断开
+        if (typeof httpServer.closeAllConnections === 'function') {
+          httpServer.closeAllConnections();
+        }
         resolve();
       }, 10000);
       httpServer.close((err) => {
@@ -129,13 +138,12 @@ const gracefulShutdown = async (signal) => {
   await runStep('停止权限缓存清理定时器', () => userPermissionService.stopCleanup());
 
   // 3.5 审计日志缓冲清空落库 + 异常监控停止（必须在数据库连接关闭前完成）。
-  // 顺序关键：先 flush（此时 walEnabled 仍为 true，落库后按条数裁剪 WAL），
-  // 再 stop()——若先 stop，收尾 flush 不再裁剪，最后一批行残留文件，
-  // 下次启动重放会把已落库的整批审计跨重启重复插入
+  // 顺序关键：flush（walEnabled 仍为 true，落库后按条数裁剪 WAL）→ 等待
+  // walChain 排空（裁剪的原子 rename 落盘）→ stop。此前「await flush(); stop()」
+  // 不等裁剪，500ms 强制退出截断 rename → 重启重放把已落库批次重复插入（B-L2）
   await runStep('停止审计监控', () => auditMonitor.stop());
   await runStep('清空审计缓冲', async () => {
-    await auditBuffer.flush();
-    auditBuffer.stop();
+    await auditBuffer.flushAndStop();
     logger.info('审计日志缓冲已清空');
   });
 

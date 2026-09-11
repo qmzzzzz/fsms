@@ -24,8 +24,16 @@ const logger = require('../utils/logger');
 const BUFFER_LIMIT = 100;
 // 定时落库间隔（毫秒）
 const FLUSH_INTERVAL_MS = 2000;
-// WAL 文件路径（可配），存放尚未确认落库的审计文档（每行一条 JSON）
-const WAL_PATH = process.env.AUDIT_WAL_PATH || path.join(__dirname, '../../logs/audit-buffer.wal');
+// WAL 文件路径（可配），存放尚未确认落库的审计文档（每行一条 JSON）。
+//
+// 路径解析时机（T-1/auditBufferGap 抖动修复）：历史上是模块加载期 const——
+// Jest 并行 worker 里先 require 本模块的测试文件会锁死路径，后设
+// AUDIT_WAL_PATH 的套件被静默忽略，指向已清理目录或共享默认文件，
+// 造成跨套件 WAL 串写与断言抖动。现改为 start() 时重读 env（与
+// AUDIT_WAL_MAX_BYTES 的运行期读法同语义）：每次启动都可重指向，
+// 生产环境一次启动一个路径不受影响；测试套件按 worker 独立 mkdtemp。
+const DEFAULT_WAL_PATH = path.join(__dirname, '../../logs/audit-buffer.wal');
+let walPath = DEFAULT_WAL_PATH;
 
 // ================= 容量与重试保护（P2-21） =================
 // 缓冲硬上限：Mongo 中断期间每 2s flush 失败整批回退，高流量下缓冲无界增长会 OOM。
@@ -44,6 +52,11 @@ const MAX_BATCH_RETRY = 5;
 // 对应文档已被 BUFFER_HARD_LIMIT 丢弃的行，本就是纯取证残留。
 // 运行期读 env 便于测试注入小阈值；默认 50MB。
 const getWalMaxBytes = () => Number(process.env.AUDIT_WAL_MAX_BYTES) || 50 * 1024 * 1024;
+// B-I1：每条 append 都 stat 是串行 walChain 的吞吐瓶颈——改为每 N 次追加
+// 抽查一次大小（默认 32；N×单行 ≈ 数 KB 的滞后窗口，对 50MB 上限可忽略）。
+// 0/负值按 1 处理（恢复逐条检查，供测试注入）。
+const getWalStatInterval = () => Math.max(1, Number(process.env.AUDIT_WAL_STAT_INTERVAL) || 32);
+let walAppendCount = 0;
 
 const buffer = [];
 let flushTimer = null;
@@ -89,7 +102,7 @@ function enforceBufferLimit() {
 }
 
 function ensureLogsDir() {
-  const dir = path.dirname(WAL_PATH);
+  const dir = path.dirname(walPath);
   if (!fs.existsSync(dir)) {
     try {
       fs.mkdirSync(dir, { recursive: true });
@@ -100,12 +113,24 @@ function ensureLogsDir() {
 }
 
 /**
+ * 当前 WAL 文件路径（导出供测试断言与运维核对）
+ * start() 每次重读 AUDIT_WAL_PATH，此处返回的恒为下一次写入将使用的路径
+ */
+function getWalPath() {
+  return walPath;
+}
+
+/**
  * 追加一行到 WAL（非阻塞，串行化在 walChain 上）
  */
 function walAppendLine(line) {
   walChain = walChain
-    .then(() => fs.promises.appendFile(WAL_PATH, line, 'utf8'))
-    .then(() => enforceWalLimit())
+    .then(() => fs.promises.appendFile(walPath, line, 'utf8'))
+    .then(() => {
+      // B-I1：stat 节流——每 N 次追加抽查一次大小（详见 getWalStatInterval 注释）
+      walAppendCount += 1;
+      if (walAppendCount % getWalStatInterval() === 0) return enforceWalLimit();
+    })
     .catch((e) => logger.warn(`审计 WAL 追加失败：${e.message}`));
 }
 
@@ -117,7 +142,7 @@ function walAppendLine(line) {
 async function enforceWalLimit() {
   let stat;
   try {
-    stat = await fs.promises.stat(WAL_PATH);
+    stat = await fs.promises.stat(walPath);
   } catch (e) {
     if (e.code !== 'ENOENT') logger.warn(`审计 WAL 大小检查失败：${e.message}`);
     return;
@@ -125,7 +150,7 @@ async function enforceWalLimit() {
   const maxBytes = getWalMaxBytes();
   if (stat.size <= maxBytes) return;
 
-  const content = await fs.promises.readFile(WAL_PATH, 'utf8');
+  const content = await fs.promises.readFile(walPath, 'utf8');
   const parts = content.split('\n');
   const hasTrailingNewline = parts[parts.length - 1] === '';
   const records = hasTrailingNewline ? parts.slice(0, -1) : parts;
@@ -135,9 +160,9 @@ async function enforceWalLimit() {
   const dropped = keepFrom;
   const nextContent = `${records.slice(keepFrom).join('\n')}\n`;
 
-  const tmpPath = `${WAL_PATH}.tmp`;
+  const tmpPath = `${walPath}.tmp`;
   await fs.promises.writeFile(tmpPath, nextContent, 'utf8');
-  await fs.promises.rename(tmpPath, WAL_PATH);
+  await fs.promises.rename(tmpPath, walPath);
 
   walDroppedLines += dropped;
   logger.error(
@@ -157,7 +182,7 @@ function walTrimLines(n) {
     .then(async () => {
       let content;
       try {
-        content = await fs.promises.readFile(WAL_PATH, 'utf8');
+        content = await fs.promises.readFile(walPath, 'utf8');
       } catch (e) {
         if (e.code !== 'ENOENT') logger.warn(`审计 WAL 读取失败：${e.message}`);
         return;
@@ -178,9 +203,9 @@ function walTrimLines(n) {
       if (nextContent === content) return;
 
       // 临时文件 + 原子替换，避免写一半崩溃留下残缺 WAL
-      const tmpPath = `${WAL_PATH}.tmp`;
+      const tmpPath = `${walPath}.tmp`;
       await fs.promises.writeFile(tmpPath, nextContent, 'utf8');
-      await fs.promises.rename(tmpPath, WAL_PATH);
+      await fs.promises.rename(tmpPath, walPath);
     })
     .catch((e) => logger.warn(`审计 WAL 裁剪失败：${e.message}`));
 }
@@ -190,7 +215,7 @@ function walTrimLines(n) {
  */
 async function readWalLines() {
   try {
-    const content = await fs.promises.readFile(WAL_PATH, 'utf8');
+    const content = await fs.promises.readFile(walPath, 'utf8');
     return content.split('\n').filter(Boolean);
   } catch (e) {
     if (e.code !== 'ENOENT') logger.warn(`审计 WAL 读取失败：${e.message}`);
@@ -222,7 +247,7 @@ async function flush() {
       resyncChainTail,
     } = require('../utils/auditChain');
 
-    await withChainLock(async () => {
+    await withChainLock(async (gen) => {
       const startPrevHash = await getChainTail(AuditLog);
       let pendingTail = null;
       let chained = false;
@@ -235,8 +260,9 @@ async function flush() {
 
       try {
         await AuditLog.insertMany(docs, { ordered: false });
-        // 落库确认成功后才推进链尾（消除幻影链尾）；Redis 模式下需 await 落共享缓存
-        if (chained) await advanceChainTail(pendingTail);
+        // 落库确认成功后才推进链尾（消除幻影链尾）；Redis 模式下需 await 落共享缓存；
+        // B-L4：传 gen 代际——持锁超时后僵尸 flush 的推进被跳过
+        if (chained) await advanceChainTail(pendingTail, gen);
         if (walEnabled) walTrimLines(docs.length);
         consecutiveFailures = 0; // 成功即重置毒文档计数
       } catch (insertErr) {
@@ -270,7 +296,7 @@ async function flush() {
       logger.error(
         `审计批次连续失败 ${consecutiveFailures} 次，判定为毒文档批并丢弃 ${retryDocs.length} 条` +
           `（累计丢弃 ${droppedCount} 条）。最后一次错误：${err.message}。` +
-          `WAL 行仍保留在 ${WAL_PATH}，可人工取证`
+          `WAL 行仍保留在 ${walPath}，可人工取证`
       );
       consecutiveFailures = 0;
       return;
@@ -317,6 +343,8 @@ function push(doc) {
  */
 function start() {
   if (flushTimer) return;
+  // 路径重读（T-1/auditBufferGap 抖动修复）：见文件头注释。env 缺失时回退默认路径
+  walPath = process.env.AUDIT_WAL_PATH || DEFAULT_WAL_PATH;
   ensureLogsDir();
   walEnabled = true;
 
@@ -356,6 +384,20 @@ function stop() {
 }
 
 /**
+ * 收尾排空（B-L2，优雅关闭专用）：flush → 等待 walChain（裁剪/追加）排空 → stop。
+ *
+ * 此前 gracefulShutdown 的「await flush(); stop()」不等 walChain 上的裁剪完成，
+ * 500ms 强制退出可截断原子替换的 rename——已落库批次的 WAL 行残留文件，
+ * 重启重放把整批审计跨重启重复插入；in-flight 定时 flush 跳过裁剪同理。
+ * 本函数保证：flush 落库 → 裁剪 rename 完成 → 才停用。
+ */
+async function flushAndStop() {
+  await flush().catch((e) => logger.warn(`收尾 flush 失败：${e.message}`));
+  await walChain.catch(() => {}); // 等追加/裁剪链排空（rename 落盘）
+  stop();
+}
+
+/**
  * WAL 是否启用（合规仪表盘指标）
  */
 function isWalEnabled() {
@@ -388,9 +430,11 @@ function __resetForTest() {
 module.exports = {
   push,
   flush,
+  flushAndStop,
   start,
   stop,
   isWalEnabled,
   getStats,
+  getWalPath,
   __resetForTest,
 };

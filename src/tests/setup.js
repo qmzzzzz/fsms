@@ -4,18 +4,62 @@
 
 // 默认值取自 constants.js，与 globalSetup.js 同源。
 // 此前两处各写一套字面量，改一处忘一处就会出现「全局已设、单文件回退默认值」的漂移。
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
 const {
   TEST_JWT_SECRET,
+  TEST_JWT_REFRESH_SECRET,
   TEST_AES_SECRET_KEY,
   TEST_HMAC_SECRET,
   DEFAULT_CORS_ORIGIN,
 } = require('./constants');
 
 process.env.NODE_ENV = 'test';
-process.env.JWT_SECRET = process.env.JWT_SECRET || TEST_JWT_SECRET;
-process.env.AES_SECRET_KEY = process.env.AES_SECRET_KEY || TEST_AES_SECRET_KEY;
-process.env.HMAC_SECRET = process.env.HMAC_SECRET || TEST_HMAC_SECRET;
+process.env.JWT_SECRET = TEST_JWT_SECRET;
+process.env.JWT_REFRESH_SECRET = TEST_JWT_REFRESH_SECRET;
+process.env.AES_SECRET_KEY = TEST_AES_SECRET_KEY;
+process.env.HMAC_SECRET = TEST_HMAC_SECRET;
 process.env.CORS_ORIGIN = process.env.CORS_ORIGIN || DEFAULT_CORS_ORIGIN;
+
+// config 每个测试文件都会重新 require，并再次执行 dotenv + secrets 注入。
+// 这里预置与测试密钥同值的本地文件，让 *_FILE 指向测试副本；已设置的
+// 环境变量不会被 dotenv 覆盖，从而隔离开发者本机的生产密钥文件。
+const secretWorkerId = process.env.JEST_WORKER_ID || '1';
+const testSecretDir = fs.mkdtempSync(
+  path.join(os.tmpdir(), `xf-test-secrets-worker-${secretWorkerId}-`)
+);
+const testSecretFiles = {
+  JWT_SECRET_FILE: 'jwt',
+  JWT_REFRESH_SECRET_FILE: 'jwt_refresh',
+  AES_SECRET_KEY_FILE: 'aes',
+  HMAC_SECRET_FILE: 'hmac',
+};
+const testSecretValues = {
+  jwt: TEST_JWT_SECRET,
+  jwt_refresh: TEST_JWT_REFRESH_SECRET,
+  aes: TEST_AES_SECRET_KEY,
+  hmac: TEST_HMAC_SECRET,
+};
+for (const [envKey, fileName] of Object.entries(testSecretFiles)) {
+  const filePath = path.join(testSecretDir, fileName);
+  fs.writeFileSync(filePath, testSecretValues[fileName], 'utf8');
+  process.env[envKey] = filePath;
+}
+
+// setupFiles 对每个测试文件都会执行。使用独立的临时目录并登记到当前 worker，
+// 待 worker 退出时统一清理，避免 globalTeardown 在其他测试文件仍在 require
+// config 时删除共享目录，造成「密钥文件偶发不存在」。
+if (!globalThis.__XF_TEST_SECRET_DIRS__) {
+  globalThis.__XF_TEST_SECRET_DIRS__ = new Set();
+  process.on('exit', () => {
+    for (const dir of globalThis.__XF_TEST_SECRET_DIRS__) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+globalThis.__XF_TEST_SECRET_DIRS__.add(testSecretDir);
 
 /**
  * 测试数据库隔离（P3-51 → T-1 加强）

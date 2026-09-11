@@ -180,10 +180,20 @@ flowchart LR
 - **密钥注入**：全部经 Docker secrets 文件（`*_FILE`），`environment` 只留非敏感项（见 ADR-003）
 - **镜像钉版本**：`node:22.14.0-alpine`、`mongo:6.0.20`；digest 待部署机 `docker pull` 后捕获回填（优化清单 R-5）
 - **Redis** 已在 compose 中预留（注释态），规模化时启用并承接限流/缓存/分布式锁（R-3/A-1）
-- **待落地**：前端静态托管的生产闭环（L-1，P0）——Nginx 托管 dist 或后端 express.static 二选一，并复测无 `/src/` 与 sourcemap 泄露
+- **前端静态托管已落地**（L-1，P0）：由 `src/middleware/staticFrontend.js` 托管 `web-admin/dist`；通过 `SERVE_FRONTEND` 启用、`FRONTEND_DIST` 指定产物目录。内置 `/assets` 一年强缓存 immutable、`index.html` 与 `sw.js` no-cache、SPA history 回退、`.map`/`.ts` 显式拦截，并配套专项测试覆盖。
 
 ## 5. 前端结构速览
 
 - 路由：`Layout` 包裹 11 个业务子路由（`meta.permission` 控权）+ 独立登录/注册页；`beforeEach` 做会话恢复与权限校验
 - 实时推送场景：权限变更同步（`permission-sync` 定向投递）、告警实时推送、设备状态更新
 - 全局兜底：`utils/errorReporter.js` 收敛组件/资源/未处理 Promise 三路错误（G-1）
+
+## 6. 数据一致性与事务策略（第二轮审计 B-3）
+
+第二轮审计（2026-09-03）核对全仓 51 处写点后的结论：仅设备删除（`DeviceService.deleteDevice`）存在真实的跨集合多步写，其余均为单集合原子写。据此确立以下一致性策略：
+
+- **单集合写**：一律依赖 MongoDB 单文档原子性，不引入事务。
+- **跨集合多步写**：必须经 `src/utils/transaction.js` 的 `withTransaction` 包裹——副本集/分片拓扑走 session 事务（任一步失败整体回滚）；standalone 拓扑按能力探测**确定性降级**为顺序执行并告警一次（不靠「先写失败再重试」误判能力），此时多集合一致性依赖应用层写入顺序。
+- **生产部署**：按副本集部署（docker-compose 的 mongo 为单节点，扩容副本集后事务自动生效，无需改代码）。
+- **新增多步写决策顺序**：能否退化为单集合原子写 → 不能则 `withTransaction` → 仍不能则补偿逻辑，禁止裸的多步顺序写。
+- 现存多步写点位：设备删除（`deleteDevice`，告警引用 → 巡检引用×2 → 设备删除）。设备报废（`scrapDevice`）的 scrapDate 补录已合并进 `transitionTo` 单次原子写（B-2），不再是多步写。

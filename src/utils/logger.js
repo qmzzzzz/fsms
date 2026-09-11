@@ -26,25 +26,33 @@ const attachRequestContext = winston.format((info) => {
   return info;
 });
 
-const logFormat =
-  process.env.NODE_ENV === 'production'
-    ? winston.format.combine(
-        attachRequestContext(),
-        winston.format.timestamp(),
-        winston.format.json()
-      )
-    : winston.format.combine(
-        attachRequestContext(),
-        winston.format.timestamp(),
-        winston.format.colorize(),
-        winston.format.printf(({ timestamp, level, message, ...meta }) => {
-          let msg = `${timestamp} [${level}]: ${message}`;
-          if (Object.keys(meta).length > 0) {
-            msg += ` ${JSON.stringify(meta)}`;
-          }
-          return msg;
-        })
-      );
+const production = process.env.NODE_ENV === 'production';
+const jsonFormat = winston.format.combine(
+  attachRequestContext(),
+  winston.format.timestamp(),
+  winston.format.json()
+);
+// printf 版式一份定义、两条链复用（console 带 colorize / file 不带）
+const printfLayout = winston.format.printf(({ timestamp, level, message, ...meta }) => {
+  let msg = `${timestamp} [${level}]: ${message}`;
+  if (Object.keys(meta).length > 0) {
+    msg += ` ${JSON.stringify(meta)}`;
+  }
+  return msg;
+});
+// 颜色码只进 Console：dev/test 的 combined 文件此前被 colorize 污染，
+// ANSI 码随行落盘对 grep/ELK 等日志解析器不友好（2026-09-05 实证）
+const consoleFormat = production
+  ? jsonFormat
+  : winston.format.combine(
+      attachRequestContext(),
+      winston.format.timestamp(),
+      winston.format.colorize(),
+      printfLayout
+    );
+const fileFormat = production
+  ? jsonFormat
+  : winston.format.combine(attachRequestContext(), winston.format.timestamp(), printfLayout);
 
 // P3-46：与审计库 TTL 共用同一份留存声明。
 // 原实现 `parseInt(...) || 180` 与模型侧的钳制口径不一致：
@@ -101,7 +109,7 @@ const exceptionRotateTransport = new winston.transports.DailyRotateFile({
 const isTestEnv = process.env.NODE_ENV === 'test';
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
-  format: logFormat,
+  format: fileFormat,
   defaultMeta: {
     service: process.env.SERVICE_NAME || 'fire-safety-api',
     hostname: os.hostname(),
@@ -119,7 +127,7 @@ const logger = winston.createLogger({
 
 logger.add(
   new winston.transports.Console({
-    format: logFormat,
+    format: consoleFormat,
   })
 );
 

@@ -14,7 +14,14 @@ describe('批次E 架构与性能加固回归', () => {
       return require('../../constants/runtime');
     };
 
-    const ENV_KEYS = ['instances', 'NODE_APP_INSTANCE', 'WEB_CONCURRENCY', 'CLUSTER_WORKERS'];
+    const ENV_KEYS = [
+      'instances',
+      'NODE_APP_INSTANCE',
+      'WEB_CONCURRENCY',
+      'CLUSTER_WORKERS',
+      'INSTANCE_COUNT',
+      'REPLICAS',
+    ];
     const saved = {};
 
     beforeEach(() => {
@@ -61,6 +68,8 @@ describe('批次E 架构与性能加固回归', () => {
       ['非首实例编号', 'NODE_APP_INSTANCE', '2'],
       ['WEB_CONCURRENCY', 'WEB_CONCURRENCY', '3'],
       ['CLUSTER_WORKERS', 'CLUSTER_WORKERS', '2'],
+      ['显式实例数', 'INSTANCE_COUNT', '3'],
+      ['编排副本数', 'REPLICAS', '3'],
     ])('%s 被识别为多进程迹象', (_label, key, value) => {
       process.env[key] = value;
       const { detectMultiProcess } = load();

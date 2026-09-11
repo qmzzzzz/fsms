@@ -18,6 +18,7 @@ const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const ApiError = require('../utils/ApiError');
 const { DEVICE_STATUS } = require('../utils/constants');
+const { withTransaction } = require('../utils/transaction');
 
 const VALID_STATUSES = Object.values(DEVICE_STATUS);
 
@@ -215,18 +216,30 @@ class DeviceService {
 
   /**
    * 删除设备（清理关联引用）
+   *
+   * B-1：四步跨集合写（报警引用清理 → 巡检引用清理×2 → 设备删除）经
+   * withTransaction 包裹——副本集环境任一步失败整体回滚，不再残留
+   * 「引用已清但设备还在」或「设备已删但引用悬空」的幽灵数据；
+   * standalone（开发/测试）自动降级为原顺序执行
    */
   async deleteDevice(device) {
-    // 清理报警记录中的 deviceId 引用
-    await FireAlarm.updateMany({ deviceId: device._id }, { $unset: { deviceId: 1 } });
-    // 清理巡检记录中的设备引用
-    await Inspection.updateMany({ devices: device._id }, { $pull: { devices: device._id } });
-    await Inspection.updateMany(
-      { 'findings.deviceId': device._id },
-      { $unset: { 'findings.$[elem].deviceId': 1 } },
-      { arrayFilters: [{ 'elem.deviceId': device._id }] }
-    );
-    await FireDevice.findByIdAndDelete(device._id);
+    await withTransaction(async (session) => {
+      const opts = session ? { session } : {};
+      // 清理报警记录中的 deviceId 引用
+      await FireAlarm.updateMany({ deviceId: device._id }, { $unset: { deviceId: 1 } }, opts);
+      // 清理巡检记录中的设备引用
+      await Inspection.updateMany(
+        { devices: device._id },
+        { $pull: { devices: device._id } },
+        opts
+      );
+      await Inspection.updateMany(
+        { 'findings.deviceId': device._id },
+        { $unset: { 'findings.$[elem].deviceId': 1 } },
+        { arrayFilters: [{ 'elem.deviceId': device._id }], ...opts }
+      );
+      await FireDevice.findByIdAndDelete(device._id, opts);
+    });
     logger.info(`设备已删除：${device.deviceCode}`);
   }
 
@@ -244,23 +257,24 @@ class DeviceService {
       throw ApiError.badRequest('设备已报废，不能重复报废');
     }
 
+    // B-2：补录日期必须在任何写入之前校验——原实现先报废落库再校验日期，
+    // 非法日期返回 400 时设备其实已被报废（响应说失败、状态却变了）
+    let parsedScrapDate = null;
+    if (scrapDate) {
+      parsedScrapDate = new Date(scrapDate);
+      if (Number.isNaN(parsedScrapDate.getTime())) {
+        throw ApiError.badRequest('报废日期格式无效');
+      }
+    }
+
     device.status = 'scrapped';
     device.scrapReason = reason || '正常报废';
     try {
-      // transitionTo 内部设置 lifecycleStage + scrapDate 并 save
-      await device.transitionTo('scrapped');
+      // 单次原子写入：transitionTo 设置 lifecycleStage + scrapDate（补录值优先）并 save，
+      // 消除「先迁移后补录」两步写中途失败留下的矛盾记录
+      await device.transitionTo('scrapped', { scrapDate: parsedScrapDate });
     } catch (err) {
       throw ApiError.badRequest(`报废失败：${err.message}`);
-    }
-
-    // 允许业务补录历史报废日期（transitionTo 写的是当前时间）
-    if (scrapDate) {
-      const parsed = new Date(scrapDate);
-      if (Number.isNaN(parsed.getTime())) {
-        throw ApiError.badRequest('报废日期格式无效');
-      }
-      device.scrapDate = parsed;
-      await device.save();
     }
 
     logger.info(`设备已报废：${device.deviceCode}`);

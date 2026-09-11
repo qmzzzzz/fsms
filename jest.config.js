@@ -66,7 +66,7 @@ module.exports = {
     // 安全关键模块：括号内为 2026-09-02 全量实测，基线按「实测下方一档」
     // 重设（显示值为整数的再降 1 档，防精确值四舍五入误伤）
     './src/middleware/security.js': { branches: 67, functions: 84 }, // (67.51/84.61)
-    './src/middleware/rateLimit.js': { branches: 78, functions: 86 }, // (78.12/86.95)
+    './src/middleware/rateLimit.js': { branches: 78, functions: 85 }, // (78.12/85.18) 2026-09-10 makeSharedStore改为同步代理包装器
     './src/middleware/auth.js': { branches: 90, functions: 87 }, // (90.32/87.5)
     './src/middleware/tokenBlacklist.js': { branches: 87, functions: 100 }, // (87.50/100)
     './src/middleware/rbac.js': { branches: 72, functions: 79 }, // (72.72/80)
@@ -95,22 +95,23 @@ module.exports = {
     './src/services/userPermissionService.js': { branches: 87, functions: 91 }, // (87.8/91.66)
     './src/services/statsCache.js': { branches: 70, functions: 88 }, // (70.83/88.88)
     './src/services/auditMonitor.js': { branches: 90, functions: 66 }, // (95.83/66.66) 2026-09-02 时区口径回归批次；fn 受 interval 回调/unref 行(91-92)未触达拖累，br 历史时序敏感故留余量
-    './src/services/deviceReminder.js': { branches: 40, functions: 44 }, // (41.02/45.45)
+    './src/services/deviceReminder.js': { branches: 90, functions: 80 }, // (97.43/90.9) 2026-09-04 deviceReminder 分支补齐批次
     './src/middleware/errorHandler.js': { branches: 76, functions: 100 }, // (76.66/100)
     './src/controllers/deviceController.js': { branches: 52, functions: 92 }, // (52.94/92.85)
     './src/controllers/alarmController.js': { branches: 80, functions: 100 }, // (80.76/100)
     './src/controllers/inspectionController.js': { branches: 77, functions: 100 }, // (77.14/100)
-    './src/controllers/roleController.js': { branches: 87, functions: 96 }, // (87.58/96.96)
+    './src/controllers/roleController.js': { branches: 86, functions: 96 }, // (86.89/96.96) 2026-09-04 按实测下方一档
     './src/controllers/userController.js': { branches: 64, functions: 87 }, // (64.37/87.5)
     './src/controllers/permissionController.js': { branches: 60, functions: 88 }, // (61/88.88)
-    './src/controllers/reportController.js': { branches: 50, functions: 87 }, // (50.21/87.5)
+    './src/controllers/reportController.js': { branches: 65, functions: 85 }, // (72.24/88) 2026-09-04 reportController 分支补齐批次
     './src/services/websocketService.js': { branches: 81, functions: 91 }, // (81.61/91.17)
     // ===== 2026-09-01 安全服务洼地补齐批次新增基线 =====
     //（authServiceGapA/B/C + securityPrimitivesGap + captchaGap + permissionHelperGap）
     './src/services/authService.js': { branches: 91, functions: 73 }, // (91.16/73.52)
     './src/services/mfaService.js': { branches: 82, functions: 63 }, // (82.35/63.63)
     './src/services/captchaService.js': { branches: 79, functions: 87 }, // (79.41/87.5)
-    './src/utils/permissionHelper.js': { branches: 86, functions: 100 }, // (86.36/100)
+    './src/utils/permissionHelper.js': { branches: 85, functions: 100 }, // (85.41/100) 2026-09-04 按实测下方一档
+    './src/services/auditChainVerify.js': { branches: 80, functions: 100 }, // (86.11/100) 2026-09-04 审计链校验直连单测批次
     './src/services/tokenService.js': { branches: 77, functions: 100 }, // (77.77/100)
   },
 

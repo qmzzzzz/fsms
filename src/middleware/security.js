@@ -211,7 +211,9 @@ const sanitizeMongo = (req, res, next) => {
  */
 const hpp = require('hpp');
 const preventHPP = hpp({
-  whitelist: ['search', 'sort'], // 允许数组形式的参数
+  // 不保留数组白名单：所有接口都消费标量 query；重复 key 由 hpp 收敛，
+  // 对象/嵌套形态仍由 queryScalarGuard 拒绝，避免两道防线口径冲突。
+  whitelist: [],
 });
 
 /**
@@ -534,7 +536,7 @@ const auditLog = (options = {}) => {
     let logged = false;
 
     // 统一的审计日志记录逻辑
-    const doLog = (body) => {
+    const doLog = () => {
       if (logged) return; // 防止重复记录
       logged = true;
 
@@ -608,7 +610,7 @@ const auditLog = (options = {}) => {
               })(),
           statusCode: res.statusCode,
           success,
-          errorMessage: success ? undefined : stripControlChars(body?.message || body?.error, 512),
+          errorMessage: success ? undefined : stripControlChars(res.statusMessage, 512),
           ip: req.ip,
           userAgent: safeUserAgent,
           duration,

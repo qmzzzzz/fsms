@@ -417,13 +417,14 @@ export default defineConfig(({ command, mode }) => {
         include: ['src/**/*.{js,vue}'],
         exclude: ['src/tests/**', 'src/main.js', 'src/**/*.d.ts'],
         // 硬门禁（T-3 棘轮基线）：贴着实测值（st 10.79 / br 9.38 / fn 6.35 /
-        // ln 10.53）下方一档，防覆盖率退化。视图组件暂未纳入组件级测试，
-        // 故用**全局**阈值而非 perFile（否则未测视图会整体红灯）。
+        // ln 10.53）逐步上调。当前实测 st 11.10 / br 9.76 / fn 6.60 /
+        // ln 10.88，本轮按语句/行先各 +0.5pct 收紧。视图组件暂未纳入
+        // 组件级测试，故用**全局**阈值而非 perFile（否则未测视图会整体红灯）。
         thresholds: {
-          statements: 10,
+          statements: 10.5,
           branches: 8,
           functions: 5,
-          lines: 10,
+          lines: 10.5,
         },
       },
     },

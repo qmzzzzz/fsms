@@ -15,6 +15,8 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const roleController = require('../../controllers/roleController');
+const roleService = require('../../services/roleService');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 
 describe('roleController 覆盖率补齐', () => {
@@ -32,6 +34,9 @@ describe('roleController 覆盖率补齐', () => {
   let midUserId;
   let _lowToken; // level-2 operator with role:read only
   let lowUserId;
+  let deptToken; // level-8 operator whose data scope is department
+  let deptUserId;
+  let noneToken; // route-authorized but data scope is none
 
   // Reusable entity IDs
   let customRoleId; // a custom role created by superadmin for tests
@@ -181,6 +186,46 @@ describe('roleController 覆盖率补齐', () => {
       { expiresIn: '1h' }
     );
 
+    const deptRole = await Role.create({
+      name: '部门_RCG',
+      code: `DEPT_RCG_${stamp.toUpperCase()}`,
+      level: 8,
+      isBuiltIn: false,
+      permissions: [roleReadPerm._id, roleUpdatePerm._id, roleDeletePerm._id],
+    });
+    const deptUser = await User.create({
+      username: `rcgdept${stamp}`,
+      email: `rcgdept${stamp}@example.com`,
+      password: PASSWORD,
+      department: `RCG_DEPT_${stamp.toUpperCase()}`,
+      roles: [deptRole._id],
+    });
+    deptUserId = String(deptUser._id);
+    deptToken = jwt.sign(
+      { userId: deptUserId, username: deptUser.username, tokenVersion: 0 },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    const noneOperatorRole = await Role.create({
+      name: '无范围_RCG',
+      code: `NONE_RCG_${stamp.toUpperCase()}`,
+      level: 1,
+      isBuiltIn: false,
+      permissions: [roleReadPerm._id, roleUpdatePerm._id, roleDeletePerm._id],
+    });
+    const noneOperator = await User.create({
+      username: `rcgnone${stamp}`,
+      email: `rcgnone${stamp}@example.com`,
+      password: PASSWORD,
+      roles: [noneOperatorRole._id],
+    });
+    noneToken = jwt.sign(
+      { userId: String(noneOperator._id), username: noneOperator.username, tokenVersion: 0 },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
     // Create a custom role for manipulation
     const customRole = await Role.create({
       name: '自定义_RCG',
@@ -208,7 +253,7 @@ describe('roleController 覆盖率补齐', () => {
       await Role.deleteMany({ code: new RegExp(`_RCG_${stamp.toUpperCase()}$`) }).catch(() => {});
       await Permission.deleteMany({ code: new RegExp(`rcg${stamp}`) }).catch(() => {});
       await User.deleteMany({
-        username: new RegExp(`^rcg(super|mid|low|clone|target|victim)${stamp}$`),
+        username: new RegExp(`^rcg(super|mid|low|dept|none|clone|target|victim)${stamp}$`),
       }).catch(() => {});
       await mongoose.connection.close();
     }
@@ -227,6 +272,69 @@ describe('roleController 覆盖率补齐', () => {
     const res = await authed(superToken).get('/api/roles?search=RCG');
     expect(res.status).toBe(200);
     expect(res.body.data).toBeDefined();
+  });
+
+  test('role data scope filters list, detail, update and delete', async () => {
+    const emptyList = await authed(_lowToken).get('/api/roles');
+    expect(emptyList.status).toBe(200);
+    expect(emptyList.body.data).toHaveLength(0);
+
+    const emptyOptions = await authed(_lowToken).get('/api/roles/all');
+    expect(emptyOptions.status).toBe(200);
+    expect(emptyOptions.body.data).toHaveLength(0);
+
+    const forbiddenDetail = await authed(_lowToken).get(`/api/roles/${customRoleId}`);
+    expect(forbiddenDetail.status).toBe(403);
+    expect(forbiddenDetail.body.message).toBe('无权查看该角色');
+
+    const forbiddenUpdate = await authed(noneToken)
+      .put(`/api/roles/${customRoleId}`)
+      .send({ description: '不可变更' });
+    expect(forbiddenUpdate.status).toBe(403);
+    expect(forbiddenUpdate.body.message).toBe('无权变更该角色');
+
+    const forbiddenDelete = await authed(noneToken).delete(`/api/roles/${customRoleId}`);
+    expect(forbiddenDelete.status).toBe(403);
+    expect(forbiddenDelete.body.message).toBe('无权删除该角色');
+
+    const deptList = await authed(deptToken).get('/api/roles');
+    expect(deptList.status).toBe(200);
+    expect(deptList.body.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: `CUSTOM_RCG_${stamp.toUpperCase()}` }),
+      ])
+    );
+
+    const deptOptions = await authed(deptToken).get('/api/roles/all');
+    expect(deptOptions.status).toBe(200);
+    expect(deptOptions.body.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: `CUSTOM_RCG_${stamp.toUpperCase()}` }),
+      ])
+    );
+
+    const allowedDetail = await authed(deptToken).get(`/api/roles/${customRoleId}`);
+    expect(allowedDetail.status).toBe(200);
+    expect(allowedDetail.body.data.code).toBe(`CUSTOM_RCG_${stamp.toUpperCase()}`);
+
+    const highDetail = await authed(deptToken).get(`/api/roles/${builtinSuperId}`);
+    expect(highDetail.status).toBe(403);
+    expect(highDetail.body.message).toBe('无权查看该角色');
+
+    const allowedUpdate = await authed(deptToken)
+      .put(`/api/roles/${customRoleId}`)
+      .send({ description: '部门可更新' });
+    expect(allowedUpdate.status).toBe(200);
+
+    const highUpdate = await authed(deptToken)
+      .put(`/api/roles/${builtinSuperId}`)
+      .send({ description: '不可变更高层级' });
+    expect(highUpdate.status).toBe(403);
+    expect(highUpdate.body.message).toBe('无权变更高于自身层级的角色');
+
+    const highDelete = await authed(deptToken).delete(`/api/roles/${builtinSuperId}`);
+    expect(highDelete.status).toBe(403);
+    expect(highDelete.body.message).toBe('无权删除高于自身层级的角色');
   });
 
   // ===================== createRole non-superadmin branches =====================
@@ -256,6 +364,19 @@ describe('roleController 覆盖率补齐', () => {
       });
     expect(res.status).toBe(403);
     expect(res.body.message).toContain('无权授予以下权限');
+  });
+
+  test('createRole: non-superadmin empty permission set → 201', async () => {
+    const res = await authed(midToken)
+      .post('/api/roles')
+      .send({
+        name: '空权限_RCG',
+        code: `EMPTY_RCG_${stamp.toUpperCase()}`,
+        level: 3,
+        permissions: [],
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.data.permissions).toHaveLength(0);
   });
 
   // ===================== updateRole error branches =====================
@@ -618,6 +739,97 @@ describe('roleController 覆盖率补齐', () => {
 
     // Clean up
     await Permission.deleteMany({ code: new RegExp(`rcg${stamp}:(parent|child)`) }).catch(() => {});
+  });
+
+  test('getPermissionTree: ignores duplicate child mounts', async () => {
+    const parentObjectId = mongoose.Types.ObjectId.createFromHexString(
+      new mongoose.Types.ObjectId().toHexString()
+    );
+    const childObjectId = new mongoose.Types.ObjectId();
+    const duplicateChildObjectId = new mongoose.Types.ObjectId();
+    const permissions = [
+      {
+        _id: parentObjectId,
+        name: '重复挂载父级',
+        code: `${stamp}:duplicate-parent`,
+        type: 'menu',
+        module: 'duplicate',
+        parent: null,
+      },
+      {
+        _id: childObjectId,
+        name: '重复挂载子级',
+        code: `${stamp}:duplicate-child`,
+        type: 'button',
+        module: 'duplicate',
+        parent: {
+          _id: parentObjectId,
+          name: '重复挂载父级',
+          code: `${stamp}:duplicate-parent`,
+          module: 'duplicate',
+        },
+      },
+      {
+        _id: duplicateChildObjectId,
+        name: '重复挂载子级',
+        code: `${stamp}:duplicate-child`,
+        type: 'button',
+        module: 'duplicate',
+        parent: {
+          _id: parentObjectId,
+          name: '重复挂载父级',
+          code: `${stamp}:duplicate-parent`,
+          module: 'duplicate',
+        },
+      },
+    ];
+    const listSpy = jest
+      .spyOn(roleService, 'listActivePermissionTree')
+      .mockResolvedValueOnce(permissions);
+
+    const res = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn(),
+    };
+    await roleController.getPermissionTree({}, res);
+
+    const tree = res.json.mock.calls[0][0].data;
+    const moduleNode = tree.find((module) => module.module === 'duplicate');
+    expect(moduleNode.children).toHaveLength(1);
+
+    listSpy.mockRestore();
+  });
+
+  test('updateRole: rejects a blank name after route sanitization', async () => {
+    const res = await authed(superToken).put(`/api/roles/${customRoleId}`).send({ name: '   ' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('数据验证失败');
+  });
+
+  test('updateRole: keeps controller-level blank-name guard', async () => {
+    const next = jest.fn();
+    const res = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn(),
+    };
+    const findRoleForUpdateSpy = jest
+      .spyOn(roleService, 'findRoleForUpdate')
+      .mockResolvedValueOnce({ _id: customRoleId, isBuiltIn: false, code: 'GUARD' });
+
+    await roleController.updateRole(
+      {
+        params: { id: customRoleId },
+        body: { name: '' },
+        user: { userId: superUserId, username: 'rcg-super' },
+      },
+      res,
+      next
+    );
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ message: '角色名称不能为空' }));
+    expect(next).not.toHaveBeenCalled();
+    findRoleForUpdateSpy.mockRestore();
   });
 
   // ===================== emitWebSocketEvent with permissions-updated type (line 35) =====================

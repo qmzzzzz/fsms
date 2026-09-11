@@ -26,6 +26,7 @@ const DEFAULT_CLIENT_IP = '127.0.0.1';
 // 但仅为固定字面量，任何情况下都不得复用于生产环境。
 // 生产密钥请用 scripts/generate-secrets.js 生成。
 const TEST_JWT_SECRET = 'test-jwt-secret-12345678901234567890';
+const TEST_JWT_REFRESH_SECRET = 'test-jwt-refresh-secret-1234567890123456';
 const TEST_AES_SECRET_KEY = 'test-aes-key-12345678901234567890123456789012';
 const TEST_HMAC_SECRET = 'test-hmac-secret-1234';
 
@@ -33,6 +34,7 @@ module.exports = {
   DEFAULT_CORS_ORIGIN,
   DEFAULT_CLIENT_IP,
   TEST_JWT_SECRET,
+  TEST_JWT_REFRESH_SECRET,
   TEST_AES_SECRET_KEY,
   TEST_HMAC_SECRET,
 };

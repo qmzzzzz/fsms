@@ -70,7 +70,10 @@ module.exports = [
 
       // no-unused-vars 棘轮第一档（2026-08-26 已收敛）：
       // 清理了 13 处未使用的导入/参数（详见 git log），提为 error
-      'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' }],
+      'no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' },
+      ],
       // 棘轮第二档（2026-08-26 已收敛）：代码库已无 new Promise(async ...) 反模式，提为 error
       'no-async-promise-executor': 'error',
       // 棘轮第三档（2026-08-26 已收敛）：全部调用均为 Object.prototype.hasOwnProperty.call 写法，提为 error
@@ -83,6 +86,27 @@ module.exports = [
       'no-fallthrough': 'error',
       'no-redeclare': 'error',
       'no-global-assign': 'error',
+
+      // 棘轮第六档（O-3，2026-09-05）：体积棘轮，warn 级 + 基线锁死不增。
+      // 首次基线（eslint.ratchet.json）：94 个文件共 133 条 warn，集中在
+      // initData/authService/securityController 等大文件与长测试套件——
+      // 正是控制器瘦身与拆分的后续目标。与第五档「清零后提 error」不同，
+      // 体积债短期清不完，故走 warn + scripts/lint-ratchet.js 逐文件计数
+      // 基线：任何文件计数只许降不许升，降后以
+      // `npm run lint:ratchet -- --update-baseline` 收紧。
+      // 这与 O-1/O-2 的控制器瘦身直接互锁：新增胖 handler 会立刻顶爆基线。
+      'max-lines': ['warn', { max: 300, skipBlankLines: true, skipComments: true }],
+      'max-lines-per-function': [
+        'warn',
+        { max: 100, skipBlankLines: true, skipComments: true, IIFEs: true },
+      ],
+    },
+  },
+  {
+    files: ['src/tests/**/*.js'],
+    rules: {
+      'max-lines': 'off',
+      'max-lines-per-function': 'off',
     },
   },
 ];
@@ -94,6 +118,10 @@ module.exports = [
  * 3. no-prototype-builtins       —— 2026-08-26 已收敛（零违例，存量均已改为 Object.prototype.hasOwnProperty.call）
  * 4. no-useless-escape / no-regex-spaces / no-case-declarations —— 2026-08-26 已收敛（零违例，提为 error）
  * 5. no-fallthrough / no-redeclare / no-global-assign —— 2026-08-26 已收敛（零违例，提为 error）
+ * 6. max-lines / max-lines-per-function（体积棘轮，O-3 2026-09-05）—— warn 级 +
+ *    scripts/lint-ratchet.js 基线锁死不增（eslint.ratchet.json），降后手动收紧基线。
+ *    体积债与 linter 错误性质不同：后者清零即收，前者须随瘦身逐步消化，
+ *    故不适用「提 error」终点式收敛，而是永久随基线下行。
  *
  * 至此五档全部收敛：warn 存量清零，推荐规则集全量以 error 级锁死 CI 门禁。
  */

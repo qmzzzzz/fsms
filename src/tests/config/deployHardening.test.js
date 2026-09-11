@@ -204,6 +204,8 @@ describe('批次H 工程与部署加固回归', () => {
     const ENV_KEYS = [
       'JWT_SECRET',
       'JWT_SECRET_FILE',
+      'JWT_REFRESH_SECRET',
+      'JWT_REFRESH_SECRET_FILE',
       'AES_SECRET_KEY',
       'AES_SECRET_KEY_FILE',
       'HMAC_SECRET',

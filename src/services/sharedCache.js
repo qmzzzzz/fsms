@@ -20,6 +20,7 @@
  */
 
 const logger = require('../utils/logger');
+const { createLockOperations } = require('./sharedCacheLocks');
 
 /** 空结果哨兵：缓存「查无此物」防止同键反复打穿到数据库（穿透防护） */
 const EMPTY_SENTINEL = '__shared_cache_empty__';
@@ -38,14 +39,28 @@ const invalidationHandlers = new Set();
 const memStore = new Map();
 let memCleanupTimer = null;
 
-/** 是否启用 Redis 后端（供调用方做行为分支与启动日志） */
 function isRedisEnabled() {
   return redisClient !== null && redisReady;
 }
 
-/** 取底层 ioredis 客户端（供 rate-limit-redis 等需要直发命令的适配器） */
 function getRedisClient() {
   return redisClient;
+}
+
+const lockOperations = createLockOperations({ getRedisClient, isRedisEnabled });
+
+// S-L2（改后审计）：内存回退存储硬上限——Redis 未配置时 nonce 防重放表等
+// 可能被分布式来源推高（对照 alertRateLimit 的 P3-24 同类防护）。
+// 超限先清过期，仍超则按插入序淘汰最旧：淘汰命中限流计数器仅重置该键窗口，
+// 由 express-rate-limit 内存限流器兜底，可接受。env 可调，默认 2 万条。
+const getMemStoreMax = () => Math.max(1000, Number(process.env.SHARED_CACHE_MEM_MAX) || 20000);
+
+function enforceMemCap() {
+  if (memStore.size <= getMemStoreMax()) return;
+  memSweep();
+  while (memStore.size > getMemStoreMax()) {
+    memStore.delete(memStore.keys().next().value); // Map 插入序 = 最旧优先
+  }
 }
 
 /**
@@ -129,6 +144,7 @@ async function set(key, value, ttlMs) {
     }
   }
   ensureMemCleanup();
+  enforceMemCap();
   memStore.set(key, {
     value,
     expireAt: Number.isFinite(ttlMs) && ttlMs > 0 ? Date.now() + ttlMs : Infinity,
@@ -183,6 +199,7 @@ async function incrWithTtl(key, ttlMs) {
     }
   }
   ensureMemCleanup();
+  enforceMemCap();
   const entry = memStore.get(key);
   const now = Date.now();
   if (!entry || entry.expireAt <= now) {
@@ -196,142 +213,7 @@ async function incrWithTtl(key, ttlMs) {
   return entry.value;
 }
 
-/**
- * 分布式锁原子释放（compare-and-delete）：
- * 仅当锁仍由本 token 持有时才删除。避免「GET → DEL」两步之间锁恰好过期
- * 并被他人重新获取，导致误删他人之锁。对正确性关键路径（审计链互斥）必须原子。
- */
-const LOCK_RELEASE_SCRIPT = `
-if redis.call("get", KEYS[1]) == ARGV[1] then
-  return redis.call("del", KEYS[1])
-else
-  return 0
-end
-`;
-
-/**
- * 安全释放锁：token 匹配才删。释放失败不致命（锁会随 PX 到期）。
- * @param {string} lockKey
- * @param {string} token 获取时生成的持有者标识
- */
-async function releaseLockSafely(lockKey, token) {
-  try {
-    await redisClient.eval(LOCK_RELEASE_SCRIPT, 1, lockKey, token);
-  } catch (_) {
-    /* 锁会随 PX 到期，释放失败不致命 */
-  }
-}
-
-/**
- * 分布式互斥（A-1）：SET key token NX PX ttl。
- * 成功返回释放句柄；失败返回 null。释放用原子 CAS，防止误删他人之锁。
- * Redis 不可用时退化为「永远拿得到」——即调用方原有的进程内语义，
- * 不因缓存层故障把业务锁死。
- *
- * 注意：本函数**不阻塞等待**，锁被占用时立即返回 null。需要排队等待的
- * 调用方（如审计链串行化）请用 acquireLockBlocking。
- */
-async function acquireLock(lockKey, ttlMs) {
-  const token = Math.random().toString(36).slice(2) + Date.now().toString(36);
-  if (isRedisEnabled()) {
-    try {
-      const ok = await redisClient.set(lockKey, token, 'PX', ttlMs, 'NX');
-      if (ok !== 'OK') return null;
-      return {
-        release: () => releaseLockSafely(lockKey, token),
-      };
-    } catch (err) {
-      logger.debug(`共享缓存锁获取失败（退化为无锁语义）：${err.message}`);
-    }
-  }
-  // 回退：调用方自身保留进程内锁语义，这里返回可释放的哑句柄
-  return { async release() {} };
-}
-
-/**
- * 阻塞式分布式互斥（A-1 审计链专用）：在 waitTimeoutMs 内反复尝试
- * `SET key token NX PX ttl`，直到获取成功或超时。
- *
- * 与 acquireLock 的区别：锁被占用时**排队等待**而非立即放弃——
- * 审计链追加必须严格串行，拿不到锁时放行会造成链分叉，宁可等待。
- *
- * 返回值：
- *  - 获取成功：{ release }，release 用原子 CAS 防误删；
- *  - 超时未获取到：null（调用方应视为「临界区不可进入」，按超时路径处理）；
- *  - Redis 未启用：null（调用方应退回自身进程内锁语义）。
- *
- * @param {string} lockKey 锁键
- * @param {number} ttlMs 锁的自动过期（持有者崩溃后借此恢复，须大于临界区最坏耗时）
- * @param {number} waitTimeoutMs 获取等待上限，超时返回 null
- */
-async function acquireLockBlocking(lockKey, ttlMs, waitTimeoutMs) {
-  if (!isRedisEnabled()) return null;
-  const token = Math.random().toString(36).slice(2) + Date.now().toString(36);
-  const deadline = Date.now() + waitTimeoutMs;
-  const RETRY_DELAY_MS = 50;
-  // 循环内命令失败即放弃（返回 null）：Redis 抖动期不阻塞审计链排队，
-  // 交由调用方按超时/降级路径处理，避免无限重试拖住写入
-  for (;;) {
-    let ok;
-    try {
-      ok = await redisClient.set(lockKey, token, 'PX', ttlMs, 'NX');
-    } catch (err) {
-      logger.debug(`共享缓存阻塞锁获取失败：${err.message}`);
-      return null;
-    }
-    if (ok === 'OK') {
-      return { release: () => releaseLockSafely(lockKey, token) };
-    }
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return null;
-    await new Promise((r) => setTimeout(r, Math.min(RETRY_DELAY_MS, remaining)));
-  }
-}
-
-/**
- * 原子 compare-and-set 的 Lua 脚本（A-1）：仅当键当前值（JSON 序列化字节）
- * 等于 expected 时才写入 value。与 LOCK_RELEASE_SCRIPT 同类——用服务端脚本
- * 避免「GET → SET」两步之间被其他实例推进链尾的竞态。
- * 链尾是长期状态，写入不带 TTL（普通 set，非 PX）。
- */
-const CAS_SET_SCRIPT = `
-if redis.call("get", KEYS[1]) == ARGV[1] then
-  redis.call("set", KEYS[1], ARGV[2])
-  return 1
-else
-  return 0
-end
-`;
-
-/**
- * 原子 compare-and-set：仅当键当前值（JSON 序列化口径）等于 expected 时，
- * 才写入 value，返回是否写入成功。
- *
- * 用于审计链分布式模式下的链尾回滚（A-1）：回滚发生在锁外（save 失败钩子），
- * 若直接 SET 可能覆盖其他实例刚推进的链尾；CAS 保证「仍是期望尾才回滚」。
- * 与 set/get 同一 JSON 序列化口径，比较的是序列化后的字节。
- *
- * @param {string} key
- * @param {*} expected 期望的当前值（按 JSON 序列化后比较）
- * @param {*} value 新值
- * @returns {Promise<boolean>} 是否成功写入
- */
-async function casSet(key, expected, value) {
-  if (!isRedisEnabled()) return false;
-  try {
-    const r = await redisClient.eval(
-      CAS_SET_SCRIPT,
-      1,
-      key,
-      JSON.stringify(expected),
-      JSON.stringify(value)
-    );
-    return r === 1;
-  } catch (err) {
-    logger.debug(`共享缓存 casSet 失败：${err.message}`);
-    return false;
-  }
-}
+const { acquireLock, acquireLockBlocking, casSet } = lockOperations;
 
 /**
  * 原子占位（仅当键不存在时写入，带 TTL）。
@@ -353,6 +235,7 @@ async function setIfAbsent(key, value, ttlMs) {
     }
   }
   ensureMemCleanup();
+  enforceMemCap();
   const entry = memStore.get(key);
   if (entry && entry.expireAt > Date.now()) return false;
   memStore.set(key, {

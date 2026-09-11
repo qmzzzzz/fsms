@@ -23,11 +23,11 @@ const GRANDFATHERED = {
   'ipListController.js': 6,
   'securityController.js': 6,
   'reportController.js': 4,
-  'roleController.js': 3,
+  'roleController.js': 0,
   'authController.js': 2,
   'mfaController.js': 2,
-  'permissionController.js': 2,
-  'userController.js': 2,
+  'permissionController.js': 0,
+  'userController.js': 0,
   'auditController.js': 1,
 };
 

@@ -49,7 +49,16 @@ const createUserValidation = [
     .matches(/^[a-zA-Z0-9_]+$/)
     .withMessage('用户名只能包含字母、数字和下划线'),
   body('email').trim().isEmail().withMessage('请输入有效的邮箱地址').normalizeEmail(),
+  // FE-M3：管理员建号支持口令密文（encPassword，与代设明文双轨）——
+  // 密文轨走时明文校验器跳过，强度在控制器解密后补做
+  body('encPassword')
+    .optional({ values: 'falsy' })
+    .isString()
+    .withMessage('口令密文格式无效')
+    .isLength({ max: 1024 })
+    .withMessage('口令密文长度异常'),
   body('password')
+    .if((value, { req }) => !req.body.encPassword)
     .custom((value) => {
       const err = validatePasswordStrength(value);
       if (err) throw new Error(err);

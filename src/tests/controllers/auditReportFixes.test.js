@@ -56,6 +56,7 @@ describe('审计报告修复综合回归', () => {
       username: 'fixreg_admin',
       email: 'fixreg_admin@example.com',
       password: 'Qz7#Lm42vTx9',
+      department: 'AUDIT_FIX_DEPT',
       roles: [role._id],
     });
     adminToken = jwt.sign(
@@ -121,6 +122,7 @@ describe('审计报告修复综合回归', () => {
       await AuditLog.create({
         action: 'login_failed',
         category: 'auth',
+        userId: admin._id,
         username: payload,
         ip: '::1',
         path: '/api/auth/login',
@@ -167,9 +169,7 @@ describe('审计报告修复综合回归', () => {
     test.each([
       ['对象型 search（原 500）', '/api/users?search[$regex]=^a'],
       ['对象型 status（操作符注入）', '/api/users?status[$ne]=active'],
-      // hpp 的 whitelist 含 search/sort，重复 search 会保留为数组进入控制器，
-      // 而控制器调 search.trim() → TypeError → 500；此处必须被标量守卫拦住
-      ['数组型 search（hpp 白名单放行的数组）', '/api/users?search=a&search=b'],
+      ['对象型 status（操作符注入）', '/api/users?status[$ne]=active'],
     ])('%s → 400 而非 500', async (_label, path) => {
       const res = await asAdmin(path);
       expect(res.status).toBe(400);
@@ -177,11 +177,13 @@ describe('审计报告修复综合回归', () => {
       expect(res.body.errors?.errorCode).toBe('QUERY_PARAM_MUST_BE_SCALAR');
     });
 
-    test('非白名单参数重复出现由 hpp 收敛为标量，不报错', async () => {
-      // hpp 对未列入 whitelist 的参数只保留最后一个值，
-      // 到达 queryScalarGuard 时已是字符串——这也是合规的收敛结果
-      const res = await asAdmin('/api/users?status=active&status=inactive');
+    test('重复 search 不再享有 hpp 白名单，统一按非标量拒绝', async () => {
+      // 评价报告 L5：queryScalarGuard 要求全标量，而旧 hpp whitelist
+      // 放行 search/sort 数组，两道防线口径冲突；现在统一拒绝数组形态
+      const res = await asAdmin('/api/users?search=a&search=b');
       expect(res.status).not.toBe(500);
+      expect(res.status).toBe(400);
+      expect(res.body.errors?.errorCode).toBe('QUERY_PARAM_MUST_BE_SCALAR');
     });
 
     test('标量参数正常通行', async () => {

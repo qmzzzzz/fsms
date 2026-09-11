@@ -5,9 +5,9 @@
 
 const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
-const { incSecurityAlert } = require('../utils/metrics');
 const { normalizeIP } = require('../utils/ipUtils');
 const { businessHour, isOffHours } = require('../constants/timezone');
+const { sendNotification } = require('./securityAlertDelivery');
 
 // 告警阈值配置
 const THRESHOLDS = {
@@ -120,140 +120,6 @@ const shouldSendAlert = (alertKey) => {
 };
 
 /**
- * 发送告警通知
- * 始终写结构化日志；配置了 SECURITY_ALERT_WEBHOOK 时额外投递到 IM/告警平台
- * （钉钉/企业微信/Slack 等通用 JSON Webhook）。
- *
- * 成熟化（可观测性轮）：
- * - 出站前 SSRF 校验：协议仅 http/https、拒绝本机地址、IP 字面量拒绝
- *   私网/保留段；域名的内网指向风险由可选 SECURITY_ALERT_WEBHOOK_ALLOWLIST
- *   （主机名白名单，逗号分隔）承接，生产环境建议必配
- * - 投递通道走 utils/httpPostJson（node:https 显式传参）
- * - 失败自动重试 1 次（1s 退避），仍失败仅告警不阻断主流程
- * - 可选 SECURITY_ALERT_WEBHOOK_SECRET：HMAC-SHA256 签名经 X-Webhook-Signature
- *   下发，接收端验签防伪造告警
- * - 每次告警计入 security_alerts_total 指标
- */
-const sendNotification = async (alertType, level, message, data) => {
-  const logMethod = level === 'critical' ? 'error' : level === 'high' ? 'warn' : 'info';
-  const payload = {
-    type: alertType,
-    level,
-    message,
-    timestamp: new Date().toISOString(),
-    ...data,
-  };
-
-  logger[logMethod]('SECURITY_ALERT', payload);
-  incSecurityAlert(alertType, level);
-
-  const webhookUrl = process.env.SECURITY_ALERT_WEBHOOK;
-  if (!webhookUrl) return;
-
-  // 仅投递达到最低级别的告警（默认 high 及以上，避免低价值噪声）
-  const LEVEL_ORDER = { low: 1, medium: 2, high: 3, critical: 4 };
-  const minLevel = process.env.SECURITY_ALERT_MIN_LEVEL || 'high';
-  if ((LEVEL_ORDER[level] || 0) < (LEVEL_ORDER[minLevel] || 3)) return;
-
-  // ===== 出站目标校验（SSRF 防护）=====
-  let target;
-  try {
-    target = new URL(webhookUrl);
-  } catch (_) {
-    logger.warn('安全告警 webhook URL 无法解析，跳过投递');
-    return;
-  }
-  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
-    logger.warn('安全告警 webhook 仅允许 http/https，跳过投递');
-    return;
-  }
-  const targetHost = target.hostname.toLowerCase();
-  if (
-    targetHost === 'localhost' ||
-    targetHost.endsWith('.localhost') ||
-    targetHost.endsWith('.local')
-  ) {
-    logger.warn('安全告警 webhook 禁止指向本机地址，跳过投递');
-    return;
-  }
-  // 主机白名单：配置后仅放行名单内主机（域名的内网指向由该白名单承接）
-  const allowlist = (process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST || '')
-    .split(',')
-    .map((h) => h.trim().toLowerCase())
-    .filter(Boolean);
-  if (allowlist.length > 0 && !allowlist.includes(targetHost)) {
-    logger.warn('安全告警 webhook 主机不在 ALLOWLIST 白名单内，跳过投递');
-    return;
-  }
-  // IP 字面量：拒绝私网/保留段
-  if (/^[0-9a-f.:]+$/i.test(targetHost)) {
-    const ipaddr = require('ipaddr.js');
-    let parsedIp;
-    try {
-      parsedIp = ipaddr.parse(targetHost);
-    } catch (_) {
-      parsedIp = null;
-    }
-    const FORBIDDEN_RANGES = [
-      'loopback',
-      'private',
-      'linkLocal',
-      'uniqueLocal',
-      'reserved',
-      'unspecified',
-      'carrierGradeNat',
-    ];
-    if (parsedIp && FORBIDDEN_RANGES.includes(parsedIp.range())) {
-      logger.warn('安全告警 webhook 禁止指向 ' + parsedIp.range() + ' 地址，跳过投递');
-      return;
-    }
-  }
-  // ===== 校验完毕（全部通过才进入投递）=====
-
-  const body = JSON.stringify({
-    msgtype: 'text',
-    text: {
-      content:
-        '【安全告警·' +
-        level +
-        '】' +
-        message +
-        '\n类型：' +
-        alertType +
-        '\n时间：' +
-        payload.timestamp,
-    },
-    alert: payload,
-  });
-
-  // 可选签名：接收端以同密钥 HMAC-SHA256(body) 比对 X-Webhook-Signature
-  const headers = {};
-  const secret = process.env.SECURITY_ALERT_WEBHOOK_SECRET;
-  if (secret) {
-    const crypto = require('crypto');
-    headers['X-Webhook-Signature'] =
-      'sha256=' + crypto.createHmac('sha256', secret).update(body).digest('hex');
-  }
-
-  const { postJson } = require('../utils/httpPostJson');
-  const MAX_ATTEMPTS = 2;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      const res = await postJson(webhookUrl, headers, body, 5000);
-      if (res.ok) return;
-      logger.warn(
-        '安全告警投递失败：HTTP ' + res.status + '（第 ' + attempt + '/' + MAX_ATTEMPTS + ' 次）'
-      );
-    } catch (err) {
-      logger.warn('安全告警投递异常（第 ' + attempt + '/' + MAX_ATTEMPTS + ' 次）：' + err.message);
-    }
-    if (attempt < MAX_ATTEMPTS) {
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-};
-
-/**
  * 检测并记录暴力破解攻击
  */
 const checkBruteForce = async (username, ip) => {
@@ -292,12 +158,16 @@ const checkBruteForce = async (username, ip) => {
       body: { userAttempts: userFailures, ipAttempts: ipFailures, window: '5 分钟' },
     });
 
-    await sendNotification(
+    // B-M1：投递走 fire-and-forget——本函数被登录失败/导出路径 await，
+    // webhook 不可达时（2 次重试 × 5s 超时 + 退避 ≈ 11s）会把延迟放大到
+    // 认证/导出响应上，构成 DoS 放大器。告警已落库（上方 create 在 await 内，
+    // 即时性保留），这里只延迟网络投递；投递失败由内部重试+告警兜底
+    void sendNotification(
       ALERT_TYPES.BRUTE_FORCE,
       ALERT_LEVELS.CRITICAL,
       `检测到暴力破解攻击：用户 ${username}，IP ${ip}`,
       { username, ip, attempts: maxFailures }
-    );
+    ).catch(() => {});
 
     try {
       const IPBlacklist = require('../models/IPBlacklist');
@@ -353,12 +223,13 @@ const checkBulkExport = async (userId, username, count, operation) => {
     body: { operation, count },
   });
 
-  await sendNotification(
+  // B-M1：同上，导出路径不因 webhook 投递阻塞响应
+  void sendNotification(
     ALERT_TYPES.BULK_EXPORT,
     ALERT_LEVELS.HIGH,
     `检测到批量数据导出：用户 ${username}，数量 ${count}`,
     { userId, username, count, operation }
-  );
+  ).catch(() => {});
 };
 
 /**
@@ -378,10 +249,11 @@ const checkUnusualTime = (timestamp = new Date()) => {
  * 检测权限滥用
  */
 const checkPermissionAbuse = async (userId, ip) => {
-  // 使用 $in 替代无锚点正则，可走 action 字段索引
+  // B-L6 接线口径：信号取全局审计中间件落库的 403 响应（写路径 403 均有记录，
+  // 零新增写入），兼容显式写入的 permission_denied/forbidden 动作
   const recentFailures = await AuditLog.countDocuments({
     userId,
-    action: { $in: ['permission_denied', 'forbidden'] },
+    $or: [{ statusCode: 403 }, { action: { $in: ['permission_denied', 'forbidden'] } }],
     timestamp: { $gte: new Date(Date.now() - THRESHOLDS.permissionWindowMs) },
   });
 
@@ -406,12 +278,13 @@ const checkPermissionAbuse = async (userId, ip) => {
       body: { failures: recentFailures },
     });
 
-    await sendNotification(
+    // B-M1：同上，fire-and-forget
+    void sendNotification(
       ALERT_TYPES.PERMISSION_ABUSE,
       ALERT_LEVELS.HIGH,
       `检测到权限滥用：用户 ${userId}，失败 ${recentFailures} 次`,
       { userId, ip, failures: recentFailures }
-    );
+    ).catch(() => {});
   }
 };
 

@@ -38,6 +38,9 @@ const FILE_BACKED_SECRETS = Object.freeze([
   'DOCS_PASSWORD',
   'LOG_SHIPPING_TOKEN',
   'SENTRY_DSN',
+  // I-L2（改后审计）：运行期敏感值同样支持 *_FILE 注入
+  'METRICS_TOKEN',
+  'SECURITY_ALERT_WEBHOOK_SECRET',
 ]);
 
 /**

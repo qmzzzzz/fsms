@@ -12,13 +12,18 @@
  */
 
 const mongoose = require('mongoose');
-const { checkMongoReady } = require('../../utils/healthChecks');
+const { checkMongoReady, __resetReadyCacheForTest } = require('../../utils/healthChecks');
 
 describe('M-1 /readyz 错误信息脱敏（checkMongoReady reason 枚举）', () => {
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
       await mongoose.connect(process.env.MONGODB_URI);
     }
+  });
+
+  beforeEach(() => {
+    // S-M1 缓存会跨用例复用结果——本套件每用例 mock 不同状态，必须重置
+    __resetReadyCacheForTest();
   });
 
   afterAll(async () => {
@@ -78,6 +83,60 @@ describe('M-1 /readyz 错误信息脱敏（checkMongoReady reason 枚举）', ()
       expect(result.reason).toBe('timeout');
       expect(Date.now() - started).toBeLessThan(2000);
     } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // S-M1 回归：结果缓存防探测放大
+  describe('S-M1 结果缓存', () => {
+    afterEach(() => {
+      delete process.env.READYZ_CACHE_MS;
+      __resetReadyCacheForTest();
+    });
+
+    test('TTL 内二次调用不重发 ping（防探测放大为逐请求 DB 往返）', async () => {
+      process.env.READYZ_CACHE_MS = '5000';
+      const spy = jest
+        .spyOn(mongoose.connection.db, 'admin')
+        .mockReturnValue({ ping: () => Promise.resolve({ ok: 1 }) });
+
+      await checkMongoReady();
+      await checkMongoReady();
+      await checkMongoReady();
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      spy.mockRestore();
+    });
+
+    test('READYZ_CACHE_MS=0 关闭缓存：逐请求探测', async () => {
+      process.env.READYZ_CACHE_MS = '0';
+      const spy = jest
+        .spyOn(mongoose.connection.db, 'admin')
+        .mockReturnValue({ ping: () => Promise.resolve({ ok: 1 }) });
+
+      await checkMongoReady();
+      await checkMongoReady();
+
+      expect(spy).toHaveBeenCalledTimes(2);
+      spy.mockRestore();
+    });
+
+    test('失败结果同样进缓存（DB 悬挂期高频探测不放大为逐请求 ping）', async () => {
+      process.env.READYZ_CACHE_MS = '5000';
+      const pingSpy = jest
+        .spyOn(mongoose.connection.db, 'admin')
+        .mockReturnValue({ ping: () => Promise.reject(new Error('down')) });
+
+      const first = await checkMongoReady();
+      const second = await checkMongoReady();
+
+      expect(first.reason).toBe('unreachable');
+      expect(second.reason).toBe('unreachable');
+      expect(pingSpy).toHaveBeenCalledTimes(1);
+      spyCleanup(pingSpy);
+    });
+
+    function spyCleanup(spy) {
       spy.mockRestore();
     }
   });

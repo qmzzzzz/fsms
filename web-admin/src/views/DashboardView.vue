@@ -109,7 +109,7 @@ import { CaretTop, CaretBottom, Cpu, Bell, UserFilled } from '@element-plus/icon
 
 import { useAuthStore } from '@/store'
 import { usePermission } from '@/composables/usePermission'
-import { api } from '@/utils/api'
+import { api, isCanceledError } from '@/utils/api'
 // 类型/状态 → i18n 标签映射（O-1 抽取的单一事实来源，与 ReportView 共用）
 import { makeAlarmTypeLabels, makeAlarmStatusLabels } from '@/utils/labelMaps'
 // D-2：欢迎卡/图表区/最近报警拆为子组件（echarts 与图表数据加载随之迁出）
@@ -286,7 +286,9 @@ const loadDashboardData = async () => {
       ]
     }
   } catch (e) {
-    // B-3：失败给一次非阻断式提示，避免骨架屏消失后页面静默显示 0 值
+    // B-3：失败给一次非阻断式提示，避免骨架屏消失后页面静默显示 0 值；
+    // FE-L1：路由切换取消（abort）不提示——用户已到达新页面，假错误训练用户忽略红框
+    if (isCanceledError(e)) return
     ElMessage.error(t('messages.loadFailed'))
   }
 }
@@ -322,7 +324,8 @@ const loadRecentAlarms = async () => {
       }))
       .slice(0, 5)
   } catch (e) {
-    // B-3：失败给一次非阻断式提示，避免骨架屏消失后页面静默显示 0 值
+    // B-3：失败给一次非阻断式提示；FE-L1：取消不提示
+    if (isCanceledError(e)) return
     ElMessage.error(t('messages.loadFailed'))
   }
 }

@@ -34,6 +34,18 @@ const recentKeys = new Map()
 // WebVitals/BrowserTracing 启动——其 INP 采集（web-vitals InteractionManager）
 // 在浏览器性能条目时序竞争下会读 undefined.startTime 抛 TypeError。
 // 本项目性能指标由自研 utils/webVitals.js 走同一缓冲通道上报，不依赖 Sentry。
+//
+// 2026-09-03 排查备忘（该 TypeError 复发时的处置）：
+// - 报错函数 reportAllChanges 全仓唯一来源是 @sentry/browser-utils 的
+//   web-vitals INP 采集器（getINP.js 的 InteractionManager），触发点在其
+//   setTimeout 去抖回调（堆栈 n.timeout），无痕模式同样复现（非缓存问题）。
+// - 注意 vite 只在启动时读取 .env：DSN 若是 dev server 启动后才移除，
+//   运行中进程的 import.meta.env.VITE_SENTRY_DSN 仍是旧值，Sentry 仍会
+//   动态加载——处置：重启 vite dev server。
+// - 若项目配置过 vite-plugin-pwa，已注册的 Service Worker 可能缓存着
+//   修复前的旧构建（旧版 Sentry 用法），Chrome 隐身窗口同样会运行已注册
+//   的 SW——处置：DevTools → Application → Service Workers → Unregister
+//   后硬刷新（或 chrome://serviceworker-internals 注销）。
 let sentryLoading = null
 function getSentry() {
   if (!sentryDsn) return null

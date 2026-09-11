@@ -114,11 +114,32 @@ describe('批次B 业务规则加固回归', () => {
       expect(after.scrapReason).toBe('第一次');
     });
 
-    test('报废日期补录必须是合法日期', async () => {
+    test('报废日期补录必须是合法日期，且校验失败时设备不得已被报废（B-2）', async () => {
       const device = await makeDevice();
       await expect(DeviceService.scrapDevice(device, '原因', 'not-a-date')).rejects.toMatchObject({
         statusCode: 400,
       });
+      // 回归点：原实现先报废落库再校验日期，400 返回时设备已是 scrapped；
+      // 修复后校验前置，失败即零写入
+      const fresh = await FireDevice.findById(device._id);
+      expect(fresh.status).not.toBe('scrapped');
+      expect(fresh.lifecycleStage).not.toBe('scrapped');
+      expect(fresh.scrapDate).toBeFalsy();
+    });
+
+    test('补录报废日期与状态迁移在同一次原子写入完成（B-2）', async () => {
+      const device = await makeDevice();
+      const saveSpy = jest.spyOn(device, 'save');
+      const backfilled = new Date('2020-01-02T00:00:00.000Z');
+      await DeviceService.scrapDevice(device, '历史补录', backfilled.toISOString());
+      // 单次 save：不再有「先迁移后补录」的第二次写入
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+
+      const fresh = await FireDevice.findById(device._id);
+      expect(fresh.status).toBe('scrapped');
+      expect(fresh.lifecycleStage).toBe('scrapped');
+      expect(fresh.scrapReason).toBe('历史补录');
+      expect(fresh.scrapDate.getTime()).toBe(backfilled.getTime());
     });
 
     test('仅检查类维护记录顺延检查周期（维修不算完成一次检查）', async () => {
@@ -390,6 +411,43 @@ describe('批次B 业务规则加固回归', () => {
       expect(auditBuffer.getStats().bufferLength).toBe(1);
       spy.mockRestore();
       auditBuffer.__resetForTest();
+    });
+  });
+
+  // ================= B-1 设备删除跨集合写（withTransaction 接入回归） =================
+  describe('B-1 设备删除跨集合写', () => {
+    test('deleteDevice 清理告警与巡检引用后删除设备（standalone 降级为顺序写）', async () => {
+      const FireAlarm = require('../../models/FireAlarm');
+      const stamp = `b1${Date.now()}`;
+      const device = await makeDevice({ deviceCode: `${stamp}-DEV` });
+      await FireAlarm.create({
+        alarmCode: `${stamp}-ALM`,
+        alarmType: 'smoke',
+        description: 'B-1 引用清理验证',
+        deviceId: device._id,
+      });
+      const inspection = await Inspection.create({
+        inspectionType: 'daily',
+        title: 'B-1 引用清理验证',
+        devices: [device._id],
+        findings: [{ deviceId: device._id }],
+      });
+
+      await DeviceService.deleteDevice(device);
+
+      // 设备本体已删除
+      expect(await FireDevice.findById(device._id)).toBeNull();
+      // 告警 deviceId 被 $unset，无悬空引用
+      const alarm = await FireAlarm.findOne({ alarmCode: `${stamp}-ALM` });
+      expect(alarm).toBeTruthy();
+      expect(alarm.deviceId).toBeUndefined();
+      // 巡检 devices 被 $pull、findings[].deviceId 被按 arrayFilters $unset
+      const insp = await Inspection.findById(inspection._id);
+      expect(insp.devices.map(String)).not.toContain(String(device._id));
+      expect(insp.findings[0].deviceId).toBeUndefined();
+
+      await FireAlarm.deleteOne({ _id: alarm._id });
+      await Inspection.deleteOne({ _id: inspection._id });
     });
   });
 });

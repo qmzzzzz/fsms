@@ -171,6 +171,9 @@ export const legacyZhCN = {
   问题序号: '问题 {n}',
   请选择设备: '请选择设备',
   请选择严重程度: '请选择严重程度',
+  全屏: '全屏',
+  未登录: '未登录',
 }
+
 
 export default legacyZhCN

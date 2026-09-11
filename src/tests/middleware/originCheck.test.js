@@ -14,6 +14,7 @@ const {
   TEST_FRONTEND_ORIGIN_LOOPBACK,
   EVIL_ORIGIN,
 } = require('../fixtures');
+const AuditLog = require('../../models/AuditLog');
 
 const WHITELIST = [TEST_FRONTEND_ORIGIN_LOCALHOST, TEST_FRONTEND_ORIGIN_LOOPBACK];
 
@@ -33,6 +34,14 @@ const buildApp = (whitelist) => {
 };
 
 describe('createOriginCheck 中间件', () => {
+  beforeAll(() => {
+    jest.spyOn(AuditLog, 'record').mockResolvedValue(null);
+  });
+
+  afterAll(() => {
+    AuditLog.record.mockRestore();
+  });
+
   test('写方法携带白名单 Origin 放行', async () => {
     const res = await request(buildApp(WHITELIST))
       .post('/resource')
@@ -114,11 +123,38 @@ describe('createOriginCheck 中间件', () => {
     expect(res.status).toBe(200);
   });
 
-  test('无参调用时回退默认开发白名单：localhost:3001 放行、外部 Origin 403', async () => {
+  test('无参调用且当前为 development 时回退本地白名单：localhost:3001 放行、外部 Origin 403', async () => {
     const app = buildApp();
     const ok = await request(app).post('/resource').set('Origin', TEST_FRONTEND_ORIGIN_LOCALHOST);
     expect(ok.status).toBe(200);
     const bad = await request(app).post('/resource').set('Origin', EVIL_ORIGIN);
     expect(bad.status).toBe(403);
+  });
+
+  test('无参调用且当前为 staging 时不回退开发白名单：写来源 403', async () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevCorsOrigin = process.env.CORS_ORIGIN;
+    process.env.NODE_ENV = 'staging';
+    delete process.env.CORS_ORIGIN;
+    jest.resetModules();
+    const {
+      createOriginCheck: isolatedCreateOriginCheck,
+    } = require('../../middleware/originCheck');
+    try {
+      const app = express();
+      app.use(isolatedCreateOriginCheck());
+      app.post('/resource', (_req, res) => res.json({ success: true }));
+
+      const res = await request(app)
+        .post('/resource')
+        .set('Origin', TEST_FRONTEND_ORIGIN_LOCALHOST);
+      expect(res.status).toBe(403);
+    } finally {
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+      if (prevCorsOrigin === undefined) delete process.env.CORS_ORIGIN;
+      else process.env.CORS_ORIGIN = prevCorsOrigin;
+      jest.resetModules();
+    }
   });
 });

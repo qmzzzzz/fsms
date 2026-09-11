@@ -15,6 +15,7 @@ const { isSuperAdminRole } = require('../utils/superAdmin');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const sessionService = require('../services/sessionService');
+const authService = require('../services/authService');
 const { RETENTION_DAYS, wasAdjusted: retentionWasAdjusted } = require('../constants/retention');
 const { businessDayBounds } = require('../constants/timezone');
 
@@ -409,6 +410,10 @@ const getMyLogs = asyncHandler(async (req, res) => {
 /**
  * 账户锁定/解锁（管理员功能）
  * PUT /api/security/users/:userId/lock
+ *
+ * O-2 重构：业务规则（层级校验/内置超管保护/inactive 状态机/缓存失效/
+ * 专用审计）已整体下沉 services/authService.setUserLockStatus，
+ * 此处只保留参数校验与 outcome → HTTP 响应映射。
  */
 const toggleUserLock = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
@@ -419,96 +424,46 @@ const toggleUserLock = asyncHandler(async (req, res) => {
   const { userId } = req.params;
   const { locked, reason } = req.body;
 
-  const user = await User.findById(userId);
-  if (!user) {
-    return ApiResponse.notFound(res, '用户不存在');
-  }
-
-  // 层级校验：禁止锁定/解锁等于或高于自身层级的用户
-  const Role = require('../models/Role');
-  // select 必须包含 isBuiltIn，否则下方内置超管保护判断恒为 false（死代码）
-  const targetUserRoles = await Role.find({ _id: { $in: user.roles } }).select(
-    'level code isBuiltIn'
+  const result = await authService.setUserLockStatus(
+    userId,
+    { locked, reason },
+    {
+      operatorId: req.user.userId,
+      operatorUsername: req.user.username,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    }
   );
-  const targetMaxLevel =
-    targetUserRoles.length > 0 ? Math.max(...targetUserRoles.map((r) => r.level || 0)) : 0;
 
-  // 按操作者 ID 重新查询角色层级（req.user.roles 存的是角色编码字符串，
-  // 直接用于 _id: {$in: ...} 会触发 CastError，导致整个接口 500）
-  const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-
-  // 禁止操作同级或更高级别的用户
-  if (targetMaxLevel >= operatorMaxLevel && String(user._id) !== String(req.user.userId)) {
-    return ApiResponse.error(res, '无权操作同级或更高级别的用户', 403);
+  switch (result.outcome) {
+    case 'NOT_FOUND':
+      return ApiResponse.notFound(res, '用户不存在');
+    case 'FORBIDDEN_SAME_LEVEL':
+      return ApiResponse.error(res, '无权操作同级或更高级别的用户', 403);
+    case 'CANNOT_LOCK_SUPER_ADMIN':
+      return ApiResponse.codeError(res, 'CANNOT_LOCK_SUPER_ADMIN');
+    case 'INACTIVE_UNLOCK':
+      return ApiResponse.error(
+        res,
+        '该账户已被管理员禁用（inactive），不能通过解锁恢复；请先由管理员启用该账户',
+        400
+      );
+    case 'INACTIVE_LOCK':
+      return ApiResponse.error(res, '该账户已被管理员禁用，不能重复锁定', 400);
+    case 'NOT_LOCKED':
+      return ApiResponse.error(res, '该账户当前未处于锁定状态，无需解锁', 400);
+    default:
+      break;
   }
 
-  // 禁止锁定超级管理员（无 isSelf 例外：锁定后层级校验会拦下所有解锁尝试）
-  const isBuiltInSuperAdmin = targetUserRoles.some(isSuperAdminRole);
-  if (locked && isBuiltInSuperAdmin) {
-    return ApiResponse.codeError(res, 'CANNOT_LOCK_SUPER_ADMIN');
-  }
-
-  // ===== 解锁/锁定状态保护 =====
-  // 仅当账户当前确实处于锁定态时才允许解锁并恢复为 active；
-  // 管理员禁用（inactive）的账户不允许借“解锁”复活，需先由管理员通过用户更新接口恢复启用
-  if (!locked && user.status === 'inactive') {
-    return ApiResponse.error(
-      res,
-      '该账户已被管理员禁用（inactive），不能通过解锁恢复；请先由管理员启用该账户',
-      400
-    );
-  }
-  if (!locked && user.status !== 'locked') {
-    return ApiResponse.error(res, '该账户当前未处于锁定状态，无需解锁', 400);
-  }
-  // 锁定方向同样拒绝已禁用账户：若允许 inactive → locked，
-  // 后续“锁定→解锁”链路会把禁用账户洗回 active，变相复活被禁用账户
-  if (locked && user.status === 'inactive') {
-    return ApiResponse.error(res, '该账户已被管理员禁用，不能重复锁定', 400);
-  }
-
-  user.status = locked ? 'locked' : 'active';
-
-  if (locked && reason) {
-    user.remark = reason;
-  }
-
-  await user.save();
-
-  // 失效用户缓存
-  const { invalidateUserCache } = require('../middleware/auth');
-  invalidateUserCache(user._id);
-  // 锁定/解锁影响用户统计，目标用户与操作者（统计视角）的统计缓存均需失效
-  const statsCache = require('../services/statsCache');
-  statsCache.invalidateByUserId(user._id);
-  statsCache.invalidateByUserId(req.user.userId);
-
-  // 注意：不再将用户级锁定关联到 IP 黑名单，避免误封 NAT 出口
-
-  // 记录审计日志
+  // 成功路径才跳过全局审计（与原实现一致：专用审计已由服务层落库）
   res.locals.skipGlobalAudit = true;
-  await AuditLog.create({
-    action: locked ? 'user_locked' : 'user_unlocked',
-    category: 'user',
-    userId: req.user.userId,
-    username: req.user.username,
-    targetUserId: user._id,
-    targetUsername: user.username,
-    reason,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    riskLevel: 'high',
-  });
-
-  logger.info('用户锁定状态变更', { username: user.username, locked, operator: req.user.username });
-
   return ApiResponse.success(
     res,
     {
-      userId: user._id,
-      username: user.username,
-      status: user.status,
+      userId: result.userId,
+      username: result.username,
+      status: result.status,
     },
     `用户已${locked ? '锁定' : '解锁'}`
   );

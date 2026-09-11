@@ -33,6 +33,18 @@ const rejectPlaintextInStrict = () => {
   return true;
 };
 
+// S-L1：strict 模式下 enc 与明文字段并存视为协议违规——明文校验器挂在
+// `.if(!enc)` 条件内，并存时会被整体跳过（enc 优先、明文被静默忽略，
+// 不构成降级，但掩盖未完成加密改造的客户端）。此处补一条无条件的
+// 「enc 存在时明文必须缺席」断言；非 strict 双轨灰度期维持原兼容行为
+const rejectEncPlaintextCoexistence = (encField, plainField) =>
+  body(plainField).custom((value, { req }) => {
+    if (config.loginEncryptStrict && req.body[encField] && value !== undefined && value !== '') {
+      throw new Error(`已提供口令密文（${encField}），禁止同时携带明文字段（${plainField}）`);
+    }
+    return true;
+  });
+
 // 口令密文字段的统一格式约束（ECDH 信封 base64，实际约 600 字符，
 // 上限与 utils/loginCipher.js 的 ENVELOPE_MAX_B64_LEN 一致）
 const encPasswordField = (field) =>
@@ -61,6 +73,7 @@ const registerValidation = [
   body('email').trim().isEmail().withMessage('请输入有效的邮箱地址').normalizeEmail(),
   // 密文轨：ECDH 信封（优先）；强度校验在控制器解密后补做
   encPasswordField('encPassword'),
+  rejectEncPlaintextCoexistence('encPassword', 'password'),
   // 明文轨：仅未携带 encPassword 时校验强度（灰度兼容）
   body('password')
     .if((value, { req }) => !req.body.encPassword)
@@ -90,6 +103,7 @@ const loginValidation = [
     .withMessage('用户名长度异常'),
   // 密文轨：ECDH 信封（优先）
   encPasswordField('encPassword'),
+  rejectEncPlaintextCoexistence('encPassword', 'password'),
   // 明文轨：仅未携带 encPassword 时必填（灰度兼容）；strict 模式下直接拒绝
   body('password')
     .if((value, { req }) => !req.body.encPassword)
@@ -114,7 +128,9 @@ const loginValidation = [
 const changePasswordValidation = [
   // 密文轨：ECDH 信封（优先，两个字段各自独立信封）
   encPasswordField('encCurrentPassword'),
+  rejectEncPlaintextCoexistence('encCurrentPassword', 'currentPassword'),
   encPasswordField('encNewPassword'),
+  rejectEncPlaintextCoexistence('encNewPassword', 'newPassword'),
   // 明文轨：仅未携带对应密文字段时生效（灰度兼容）
   body('currentPassword')
     .if((value, { req }) => !req.body.encCurrentPassword)
@@ -159,6 +175,7 @@ const mfaDisableValidation = [
     .withMessage('两步验证码长度异常'),
   // 密文轨：ECDH 信封（优先）
   encPasswordField('encCurrentPassword'),
+  rejectEncPlaintextCoexistence('encCurrentPassword', 'currentPassword'),
   // 明文轨：仅未携带密文字段时生效（灰度兼容）
   body('currentPassword')
     .if((value, { req }) => !req.body.encCurrentPassword)

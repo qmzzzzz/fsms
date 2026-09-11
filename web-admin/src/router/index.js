@@ -136,7 +136,9 @@ router.onError(async (error, to) => {
     }
   }
 
-  window.location.replace(target)
+  // FE-L3：子路径部署（BASE_URL ≠ '/'）下必须带部署基路径，与 auth.js 同口径
+  const base = String(import.meta.env.BASE_URL || '/').replace(/\/+$/, '')
+  window.location.replace(base + target)
 })
 
 // 全局前置守卫 - 跨浏览器兼容

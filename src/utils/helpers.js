@@ -273,6 +273,19 @@ const parseDateBoundary = (dateStr, boundary) => {
 };
 
 /**
+ * 报表/导出日期参数合法性校验（与 buildDateRangeFilter 配套的统一口径）
+ *
+ * 空值（undefined / ''）视为未传、放行；其余值须能被 Date 解析为有效时间。
+ * O-1 迁移补全：该函数原为 reportController 内联实现，迁移时口径已在此处
+ * 注释中声明（buildDateRangeFilter 的前置契约），但函数体漏迁导致控制器
+ * require 到 undefined（reportExport*.test.js 三套件 16 用例 500）。
+ * @param {string|undefined} value 待校验的日期参数
+ * @returns {boolean} 合法（含空值）返回 true
+ */
+const isValidDateParam = (value) =>
+  value === undefined || value === '' || !isNaN(new Date(value).getTime());
+
+/**
  * 构造日期范围查询过滤器（报表/导出统一口径，七维终评「日期过滤样板 4 处重复」）
  *
  * 入参须先经 isValidDateParam 校验；本函数只负责把通过校验的入参
@@ -396,6 +409,7 @@ module.exports = {
   escapeRegExp,
   normalizePagination,
   parseDateBoundary,
+  isValidDateParam,
   buildDateRangeFilter,
   stripControlChars,
   stripControlCharsDeep,

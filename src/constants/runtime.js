@@ -96,6 +96,13 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
 function detectMultiProcess() {
   const reasons = [];
 
+  for (const key of ['INSTANCE_COUNT', 'REPLICAS']) {
+    const declared = Number(process.env[key]);
+    if (Number.isFinite(declared) && declared > 1) {
+      reasons.push(`${key}=${declared}`);
+    }
+  }
+
   // PM2 cluster 模式会注入 NODE_APP_INSTANCE（0..N-1）与 instances
   const pm2Instances = Number(process.env.instances);
   if (Number.isFinite(pm2Instances) && pm2Instances > 1) {

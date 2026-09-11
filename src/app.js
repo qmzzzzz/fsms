@@ -100,6 +100,11 @@ function createApp() {
     app.set('trust proxy', false);
   }
 
+  // Express 5 迁移（ADR-007）：v5 默认 query parser 收窄为 simple（嵌套查询
+  // 对象解析变化）。本仓列表接口入参虽全为扁平标量，仍显式固定为 extended
+  // 与 4.x 行为对齐，消除隐性行为差——该行删除前须重审全部 req.query 用法
+  app.set('query parser', 'extended');
+
   // 请求 ID 追踪（在所有中间件之前，确保日志可关联）
   app.use(requestId);
 
@@ -140,28 +145,25 @@ function createApp() {
   // ================= 中间件配置 =================
 
   // CORS 白名单配置
-  // credentials:true 时 origin 必须是明确白名单：未配置 CORS_ORIGIN 且非 development 时
-  // origin 会是 undefined，cors 将跳过整个 CORS 处理（不下发响应头），导致跨域请求静默失败。
-  // 此处兜底为开发白名单并告警，避免非 production/非 development 环境（如 staging）行为不可预期。
-  let corsOrigin;
-  if (config.corsOrigin) {
-    corsOrigin = config.corsOrigin
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-  } else {
-    corsOrigin = [
-      'http://localhost:3001',
-      'http://127.0.0.1:3001',
-      'http://localhost:5173',
-      'http://127.0.0.1:5173',
-    ];
-    if (config.nodeEnv !== 'development') {
-      logger.warn(
-        `未配置 CORS_ORIGIN（NODE_ENV=${config.nodeEnv}），已回退到本地开发白名单，请显式配置以避免跨域异常`
-      );
-    }
-  }
+  // credentials:true 时 origin 必须是明确白名单。开发环境允许 localhost 兜底；
+  // staging/production 必须显式配置，防止误部署后把本地开发源放进线上白名单。
+  const parsedCorsOrigin = config.corsOrigin
+    ? config.corsOrigin
+        .split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean)
+    : [];
+  const corsOrigin =
+    parsedCorsOrigin.length > 0
+      ? parsedCorsOrigin
+      : config.nodeEnv === 'development'
+        ? [
+            'http://localhost:3001',
+            'http://127.0.0.1:3001',
+            'http://localhost:5173',
+            'http://127.0.0.1:5173',
+          ]
+        : [];
 
   app.use(
     cors({

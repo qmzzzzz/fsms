@@ -180,6 +180,8 @@ const fireDeviceSchema = new mongoose.Schema(
 
 // 索引优化
 fireDeviceSchema.index({ deviceType: 1, status: 1 });
+fireDeviceSchema.index({ createdBy: 1 });
+fireDeviceSchema.index({ 'maintenanceRecord.operator': 1 });
 fireDeviceSchema.index({ 'location.building': 1, 'location.floor': 1 });
 fireDeviceSchema.index({ lifecycleStage: 1, status: 1 });
 fireDeviceSchema.index({ expiryDate: 1 });
@@ -255,7 +257,10 @@ fireDeviceSchema.methods.scrapped = function (reason) {
 };
 
 // 实例方法：设备状态转换
-fireDeviceSchema.methods.transitionTo = function (stage) {
+// B-2：overrides 允许调用方把补录字段（如历史报废日期）并入同一次原子写入——
+// 此前 scrapDevice 先 transitionTo 落库再二次 save 补 scrapDate，两步之间失败
+// 会留下「状态 scrapped 但报废日期矛盾」的半成品记录
+fireDeviceSchema.methods.transitionTo = function (stage, overrides = {}) {
   const transitions = {
     installed: ['in_use', 'scrapped'],
     in_use: ['maintenance', 'retired', 'scrapped'],
@@ -273,7 +278,7 @@ fireDeviceSchema.methods.transitionTo = function (stage) {
     this.commissionDate = new Date();
   }
   if (stage === 'scrapped') {
-    this.scrapDate = new Date();
+    this.scrapDate = overrides.scrapDate instanceof Date ? overrides.scrapDate : new Date();
   }
   return this.save();
 };

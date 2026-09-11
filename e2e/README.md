@@ -12,6 +12,7 @@
 | `journey-inspection-alarm.spec.js` | 巡检/告警/设备列表只读巡场（不白屏）                              |
 | `journey-permission-audit.spec.js` | 角色权限树可达 / 审计日志可追溯本次登录                           |
 | `journey-fault-injection.spec.js`  | 依赖故障注入：连接被拒/超时/500 的界面韧性 + 会话期宕机降级与自愈 |
+| `journey-mobile.spec.js`           | Pixel 7 登录、移动端抽屉导航与业务列表只读巡场                    |
 
 缺凭据时用例自动跳过（不计失败）——保证「未配置环境也能全绿」，
 配置齐全后自动升级为真实断言。

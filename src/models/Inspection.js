@@ -151,5 +151,6 @@ const inspectionSchema = new mongoose.Schema(
 inspectionSchema.index({ status: 1, planStartTime: -1 });
 inspectionSchema.index({ planStartTime: -1 });
 inspectionSchema.index({ assignedTo: 1 });
+inspectionSchema.index({ 'locations.building': 1 });
 
 module.exports = mongoose.model('Inspection', inspectionSchema);

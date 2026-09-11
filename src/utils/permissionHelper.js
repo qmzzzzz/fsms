@@ -193,6 +193,22 @@ const matchesPermission = (permCodeSet, permissionCode) => {
 };
 
 /**
+ * 权限码匹配的数组形态（O-3：授予守卫三处内联 hasPerm 闭包的唯一实现）。
+ * 语义与 matchesPermission 完全一致：精确 / `*:*` 全局通配 / `module:*` 模块通配；
+ * 入参为权限码数组（User.getPermissions 的返回形态），容忍非字符串码。
+ * @param {string[]} permCodes 操作者持有的权限码
+ * @param {string} permissionCode 待判定的权限码
+ * @returns {boolean}
+ */
+const matchesPermissionCodes = (permCodes, permissionCode) => {
+  const code = String(permissionCode);
+  if (permCodes.includes(code)) return true;
+  if (permCodes.includes('*:*')) return true;
+  const [module] = code.split(':');
+  return permCodes.includes(`${module}:*`);
+};
+
+/**
  * 取用户权限集（单次查询），供批量判定复用，避免 N+1 查询
  */
 const getUserPermissionSet = async (userId) => {
@@ -350,6 +366,7 @@ module.exports = {
   hasRole,
   getUserRoles,
   getDataScope,
+  matchesPermissionCodes,
   maxRoleLevel,
   getOperatorMaxLevel,
 };

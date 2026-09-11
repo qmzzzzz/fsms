@@ -46,12 +46,20 @@ async function ensurePublicKey(force = false) {
   if (cachedKey && !force) return cachedKey
   // 直接用 axios 裸调用（同 utils/api.js 的 doRefreshToken 先例）：
   // 公钥获取不需要认证/拦截器/取消链路，保持本模块零重依赖（不引入
-  // router/element-plus 导入链），便于单测
+  // router/element-plus 导入链），便于单测。
+  // FE-M2：必须显式 timeout——axios 默认永久等待，公钥接口悬挂时
+  // 登录/注册/改密提交全部无限期 pending
   const { data: resp } = await axios.get(
-    (import.meta.env.VITE_API_BASE_URL || '/api') + '/auth/login-public-key'
+    (import.meta.env.VITE_API_BASE_URL || '/api') + '/auth/login-public-key',
+    { timeout: 10000 }
   )
   const pem = resp?.data?.publicKey
+  // FE-I1：curve 白名单——非法值会让 importKey 抛错并入静默降级路径，
+  // 在源头拒绝（sharedBits 分支只认 P-256/P-384）
   const curve = resp?.data?.curve || 'P-256'
+  if (curve !== 'P-256' && curve !== 'P-384') {
+    throw new Error('unsupported curve: ' + curve)
+  }
   if (!pem) throw new Error('public key unavailable')
   const keyObj = await crypto.subtle.importKey(
     'spki',
@@ -70,8 +78,14 @@ export const invalidatePublicKeyCache = () => {
 }
 
 /**
- * 加密口令，返回 encPassword 字段值；
- * WebCrypto 不可用（非 secure context）时返回 null，由调用方走明文轨
+ * 加密口令，返回 encPassword 字段值。
+ *
+ * 失败语义（FE-H1）：
+ * - 返回 null：仅限 WebCrypto 不可用（非 secure context，如纯 HTTP 内网）——
+ *   调用方走明文轨（后端双轨兼容），属设计内降级；
+ * - 抛错：WebCrypto 可用但加密本应成功而失败（公钥网络故障/算法异常）——
+ *   **调用方不得降级明文**，应阻断提交并提示重试（用户重试成本为零），
+ *   并经 console.warn 留痕便于监控密文率。
  */
 export async function encryptPassword(password) {
   if (!isTransportCryptoAvailable()) return null

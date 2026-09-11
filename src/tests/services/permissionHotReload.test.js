@@ -141,7 +141,7 @@ describe('roleController.emitWebSocketEvent 按事件类型正确分派', () => 
    */
   const fs = require('fs');
   const source = fs.readFileSync(
-    path.join(__dirname, '../../controllers/roleController.js'),
+    path.join(__dirname, '../../controllers/rolePermissionController.js'),
     'utf8'
   );
 

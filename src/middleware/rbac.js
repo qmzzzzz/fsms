@@ -69,6 +69,15 @@ const checkPermission = (requiredPermissions, logic = 'OR') => {
         next();
       } else {
         logger.warn('用户缺少权限', { userId, requiredPermissions: permissions });
+        // B-L6 接线：权限滥用频控检测（此前 checkPermissionAbuse 为死代码）——
+        // 信号取全局审计中间件落库的 403 记录，fire-and-forget 不阻塞拒绝路径
+        try {
+          void require('../services/securityAlert')
+            .checkPermissionAbuse(userId, req.ip)
+            .catch(() => {});
+        } catch (_) {
+          /* 检测失败不影响拒绝主流程 */
+        }
         return ApiResponse.forbidden(res, '您没有执行此操作的权限');
       }
     } catch (error) {

@@ -13,6 +13,11 @@
  */
 
 const mongoose = require('mongoose');
+
+jest.mock('../../models/AuditLog', () => ({
+  record: jest.fn(() => Promise.resolve(null)),
+}));
+
 const {
   sanitizeMongo,
   ensureHsts,
@@ -61,6 +66,12 @@ describe('security.js 分支补齐', () => {
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
       await mongoose.connect(process.env.MONGODB_URI);
+    }
+  });
+
+  afterAll(async () => {
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.connection.close();
     }
   });
 

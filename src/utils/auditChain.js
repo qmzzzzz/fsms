@@ -1,9 +1,19 @@
 const crypto = require('crypto');
+const logger = require('./logger');
 
 // 共享缓存门面（A-1）：提供跨实例分布式锁与共享链尾指针的存取。
 // 仅依赖 logger，无循环依赖，可顶层引入。未配置 REDIS_URL 时
 // isRedisEnabled() 恒为 false，下列分布式路径全部回退为原进程内语义。
 const sharedCache = require('../services/sharedCache');
+const {
+  PAYLOAD_FIELDS_V1,
+  PAYLOAD_FIELDS_V2,
+  PAYLOAD_FIELDS_V3,
+  CURRENT_PAYLOAD_VERSION,
+  canonicalPayload,
+  canonicalPayloadV2LegacyBatch,
+  computeHash,
+} = require('./auditChainPayload');
 
 // A-1 共享态键名：配置 REDIS_URL 时，链尾与互斥锁外置到共享缓存，
 // 多实例在分布式锁内读写同一链尾，消除「各实例独立链尾 → 必然分叉」；
@@ -30,50 +40,6 @@ const EMPTY_SENTINEL = sharedCache.EMPTY_SENTINEL;
  *             校验端见到 v3 即可施加严格单一口径，不再需要「试两种」。
  * 新写入一律带 hashVersion=3；校验端按 doc.hashVersion 选择口径。
  */
-const PAYLOAD_FIELDS_V1 = [
-  'timestamp',
-  'action',
-  'category',
-  'userId',
-  'username',
-  'ip',
-  'path',
-  'statusCode',
-  'body',
-];
-
-const PAYLOAD_FIELDS_V2 = [
-  'timestamp',
-  'action',
-  'category',
-  'userId',
-  'username',
-  'targetUserId',
-  'targetUsername',
-  'reason',
-  'method',
-  'path',
-  'params',
-  'query',
-  'body',
-  'statusCode',
-  'success',
-  'errorMessage',
-  'ip',
-  'userAgent',
-  'clientInfo',
-  'location',
-  'riskLevel',
-  'riskFactors',
-  'sessionId',
-  'fingerprint',
-  'duration',
-];
-
-// v3 字段集与 v2 一致（差异仅在「算 hash 前是否补默认值」的语义保证上）
-const PAYLOAD_FIELDS_V3 = PAYLOAD_FIELDS_V2;
-
-const CURRENT_PAYLOAD_VERSION = 3;
 
 function getHmacSecret() {
   try {
@@ -92,108 +58,6 @@ function computeHmac(hash) {
 /** 是否配置了 HMAC 密钥（校验脚本据此决定是否执行 hmac 校验） */
 function isHmacConfigured() {
   return !!getHmacSecret();
-}
-
-/**
- * 确定性序列化：递归对对象键排序后序列化，
- * 消除嵌套对象键序漂移（如数字键名被驱动/工具重排）导致的校验误报。
- */
-function stableStringify(value) {
-  if (value === null || value === undefined) return 'null';
-  if (typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const keys = Object.keys(value).sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
-}
-
-/** 字段值归一：Date→ISO、ObjectId→hex、标量统一类型，保证同一逻辑值产出同一字节 */
-function normalizeValue(v) {
-  if (v === undefined || v === null) return null;
-  if (v instanceof Date) return v.toISOString();
-  if (typeof v === 'object') {
-    // ObjectId / Decimal128 等有 toHexString/toHexString 类方法的 BSON 包装
-    if (typeof v.toHexString === 'function') return v.toHexString();
-    return v; // 普通对象/数组交给 stableStringify 处理
-  }
-  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
-  if (typeof v === 'boolean') return v;
-  return String(v);
-}
-
-/** v1 口径：与历史实现逐字节一致（勿改动，否则存量数据全部误报） */
-function canonicalPayloadV1(doc) {
-  const ts = doc.timestamp;
-  let tsISO;
-  if (ts instanceof Date) {
-    tsISO = ts.toISOString();
-  } else if (ts !== null && ts !== undefined && ts !== '') {
-    tsISO = new Date(ts).toISOString();
-  } else {
-    tsISO = null;
-  }
-
-  const bodyVal = doc.body === undefined ? {} : doc.body;
-
-  const obj = {
-    timestamp: tsISO,
-    action: doc.action != null ? String(doc.action) : null,
-    category: doc.category != null ? String(doc.category) : null,
-    userId: doc.userId != null ? String(doc.userId) : null,
-    username: doc.username != null ? String(doc.username) : null,
-    ip: doc.ip != null ? String(doc.ip) : null,
-    path: doc.path != null ? String(doc.path) : null,
-    statusCode: doc.statusCode != null ? Number(doc.statusCode) : null,
-    body: bodyVal,
-  };
-
-  return JSON.stringify(obj);
-}
-
-/** v2/v3 口径：全字段白名单遍历 + 键排序确定性序列化 */
-function canonicalPayloadV2(doc) {
-  // 与 schema default 同口径：params/query/body 缺省视为空对象（而非 null）
-  const DEFAULT_EMPTY_OBJECT_FIELDS = new Set(['params', 'query', 'body']);
-  const obj = {};
-  for (const field of PAYLOAD_FIELDS_V2) {
-    obj[field] =
-      doc[field] === undefined && DEFAULT_EMPTY_OBJECT_FIELDS.has(field)
-        ? {}
-        : normalizeValue(doc[field]);
-  }
-  return stableStringify(obj);
-}
-
-/**
- * v2 批量路径的历史口径（仅供校验存量数据，**不得**用于新写入）
- *
- * 复现旧 chainBatch 的行为：算 hash 时 riskLevel/riskFactors 仍是 undefined
- * （落库后才被 Mongoose 填成 'low'/[]）。校验端用它把「历史默认值漂移」
- * 与「真实篡改」区分开——否则 4182 条存量记录会把真实告警彻底淹没。
- *
- * 必须明确的残余风险：这些 v2 记录的 riskLevel/riskFactors **从未真正受哈希保护**
- * （它们不参与当时的 hash 计算），事后无法追认。仅 v3 起这两个字段才纳入保护。
- */
-function canonicalPayloadV2LegacyBatch(doc) {
-  const probe = { ...doc };
-  delete probe.riskLevel;
-  delete probe.riskFactors;
-  return canonicalPayloadV2(probe);
-}
-
-/**
- * @param {object} doc 审计文档（lean 对象或 toObject() 结果）
- * @param {number} [version] payload 口径版本，默认当前版本；校验存量数据时传 doc.hashVersion||1
- */
-function canonicalPayload(doc, version = CURRENT_PAYLOAD_VERSION) {
-  return version >= 2 ? canonicalPayloadV2(doc) : canonicalPayloadV1(doc);
-}
-
-function computeHash(prevHash, payload) {
-  const prev = prevHash === undefined ? null : prevHash;
-  return crypto
-    .createHash('sha256')
-    .update(String(prev) + '|' + payload, 'utf8')
-    .digest('hex');
 }
 
 /**
@@ -226,6 +90,10 @@ async function getLatestHash(model) {
 let chainTail = null; // 内存中最新链尾 hash（含尚未落库的追加）
 let chainTailLoaded = false; // 是否已从 DB 初始化过链尾
 let chainLock = Promise.resolve();
+// B-L4/B-L5（改后审计）：链尾代际——锁超时（持有超时/前驱等待超时）递增代际，
+// 超时的「僵尸 fn」稍后调用 advanceChainTail 时因代际过期被跳过，
+// 不再用过期 hash 覆写已重同步的链尾；代价是下一次操作从 DB 重同步
+let chainGeneration = 0;
 
 // 锁持有超时（毫秒）：fn 悬挂时不能让整条审计链永久排队
 const CHAIN_LOCK_TIMEOUT_MS = Number(process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS) || 15000;
@@ -260,7 +128,17 @@ function withChainLock(fn) {
   // 上一持有者也受超时约束：prev 挂起时不能拖住本次调用
   const waitPrev = Promise.race([
     prev,
-    new Promise((resolve) => setTimeout(resolve, CHAIN_LOCK_TIMEOUT_MS).unref?.()),
+    new Promise((resolve) =>
+      setTimeout(() => {
+        // B-L5：前驱超时放行时同样标记链尾失效并递增代际——
+        // 重叠的后继与挂起的前驱，其 advanceChainTail 均因代际过期被跳过，
+        // 直到任一操作从 DB 重同步；代价是一次额外重同步
+        chainTailLoaded = false;
+        chainTail = null;
+        chainGeneration += 1;
+        resolve();
+      }, CHAIN_LOCK_TIMEOUT_MS).unref?.()
+    ),
   ]);
 
   return waitPrev
@@ -288,9 +166,11 @@ function withChainLock(fn) {
       let timer = null;
       const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => {
-          // 链尾可能已被 fn 部分推进，无法判断其状态 → 标记失效，下次从 DB 重同步
+          // 链尾可能已被 fn 部分推进，无法判断其状态 → 标记失效，下次从 DB 重同步；
+          // B-L4：同时递增代际——fn 的 advanceChainTail 因代际过期被跳过
           chainTailLoaded = false;
           chainTail = null;
+          chainGeneration += 1;
           if (sharedCache.isRedisEnabled()) {
             resyncChainTail(); // 永不 reject（内部吞错），尽力而为地清除共享链尾
           }
@@ -301,8 +181,12 @@ function withChainLock(fn) {
         if (timer.unref) timer.unref();
       });
 
+      // B-L4：fn 以当前代际调用——持锁超时递增代际后，僵尸 fn 稍后的
+      // advanceChainTail 因代际过期被跳过
+      const gen = chainGeneration;
+
       try {
-        return await Promise.race([Promise.resolve().then(fn), timeout]);
+        return await Promise.race([Promise.resolve().then(() => fn(gen)), timeout]);
       } finally {
         if (timer) clearTimeout(timer);
         if (distLock) {
@@ -354,7 +238,16 @@ async function getChainTail(model) {
  * 推进链尾（仅供锁内的追加路径调用）。
  * Redis 就绪时写共享缓存（链尾是长期状态，不带 TTL）；否则推进内存指针。
  */
-async function advanceChainTail(hash) {
+async function advanceChainTail(hash, gen = chainGeneration) {
+  // B-L4：代际守卫——持锁/前驱等待超时递增代际后，超时的「僵尸 fn」稍后
+  // 完成时的推进被跳过，避免用过期 hash 覆写已重同步的链尾（正常路径
+  // fn 运行期间无超时发生，gen 恒等于当前代际）
+  if (gen !== chainGeneration) {
+    logger.warn(
+      `审计链尾推进被跳过（代际 ${gen} 已过期，当前 ${chainGeneration}）：该批次的链尾状态不确定，已由 DB 重同步兜底`
+    );
+    return;
+  }
   if (sharedCache.isRedisEnabled()) {
     await sharedCache.set(CHAIN_TAIL_KEY, hash === null ? EMPTY_SENTINEL : hash);
     return;

@@ -374,4 +374,38 @@ describe('authService gap C - catch handler coverage', () => {
       capSpy.mockRestore();
     });
   });
+
+  // ===== loginUser - checkBruteForce / 锁定写入故障注入（B-L1，2026-09-05 CI 棘轮）=====
+
+  describe('loginUser - checkBruteForce / 锁定写入故障注入', () => {
+    test('口令错误 + AuditLog.countDocuments 失败 → checkBruteForce 的 catch 吞错，仍 401 口径（line 301）', async () => {
+      const user = await makeUser('bf1');
+      const spy = jest
+        .spyOn(AuditLog, 'countDocuments')
+        .mockRejectedValueOnce(new Error('db transient down'));
+      const result = await authService.loginUser(
+        { username: user.username, password: `${PASSWORD}x` },
+        defaultCtx()
+      );
+      spy.mockRestore();
+      expect(result.outcome).toBe('INVALID_CREDENTIALS');
+    });
+
+    test('失败计数达锁定阈值 + 锁定写入失败 → catch 吞错不阻断 401 口径（line 327）', async () => {
+      const user = await makeUser('bf2', { failedLoginCount: 9 });
+      const realFindByIdAndUpdate = User.findByIdAndUpdate.bind(User);
+      const spy = jest
+        .spyOn(User, 'findByIdAndUpdate')
+        // 第一次调用是 $inc 失败计数，保持真实写库
+        .mockImplementationOnce((...args) => realFindByIdAndUpdate(...args))
+        // 第二次调用是 lockUntil 锁定写入，注入故障
+        .mockRejectedValueOnce(new Error('db transient down'));
+      const result = await authService.loginUser(
+        { username: user.username, password: `${PASSWORD}x` },
+        defaultCtx()
+      );
+      spy.mockRestore();
+      expect(result.outcome).toBe('INVALID_CREDENTIALS');
+    });
+  });
 });

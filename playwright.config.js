@@ -8,7 +8,7 @@
  * - 凭据一律走环境变量（E2E_USER/E2E_PASS/E2E_MFA_*），用例里无字面量。
  */
 
-const { defineConfig } = require('@playwright/test');
+const { defineConfig, devices } = require('@playwright/test');
 
 module.exports = defineConfig({
   testDir: './e2e',
@@ -24,4 +24,14 @@ module.exports = defineConfig({
     locale: 'zh-CN',
     timezoneId: 'Asia/Shanghai',
   },
+  projects: [
+    {
+      name: 'desktop-chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'mobile-chrome',
+      use: { ...devices['Pixel 7'] },
+    },
+  ],
 });

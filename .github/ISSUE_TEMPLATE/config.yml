@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞（保密）
+    url: https://github.com/security/advisories
+    about: 请通过 GitHub 私密漏洞报告或维护者渠道提交，参见 SECURITY.md
+  - name: 使用问题
+    url: https://github.com/
+    about: 部署/配置问题请先查阅 README 与 docs/ADR

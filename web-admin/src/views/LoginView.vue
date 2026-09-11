@@ -164,7 +164,7 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { User, Lock, Key } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
-import { encryptPassword, invalidatePublicKeyCache } from '@/utils/loginCipher'
+import { encryptPassword } from '@/utils/loginCipher'
 import { useAuthStore } from '@/store'
 import LiquidGlassButtons from '@/components/LiquidGlassButtons.vue'
 import AuthPrefs from '@/components/AuthPrefs.vue'
@@ -298,13 +298,16 @@ const onLogin = async () => {
   loading.value = true
   try {
     const payload = { username: loginForm.username.trim() }
-    // 口令密文轨：secure context 下走密文上行，抓包不再出现明文口令；
-    // WebCrypto 不可用（纯 HTTP 内网）或公钥获取失败时降级明文轨（后端双轨兼容）
-    let enc = null
+    // 口令密文轨（FE-H1）：encryptPassword 返回 null 仅限 WebCrypto 不可用
+    // （纯 HTTP 内网设计内降级）；「可用但失败」会抛错——阻断提交并提示重试
+    // 而非静默明文上行（用户重试成本为零），console.warn 留痕监控密文率
+    let enc
     try {
       enc = await encryptPassword(loginForm.password)
-    } catch (_) {
-      enc = null
+    } catch (e) {
+      console.warn('[loginCipher] 口令加密失败，已阻断提交：', e?.message)
+      ElMessage.error(t('login.encryptionFailed'))
+      return
     }
     if (enc) payload.encPassword = enc
     else payload.password = loginForm.password
@@ -352,10 +355,7 @@ const onLogin = async () => {
     }
   } catch (error) {
     // 错误已在 axios 拦截器中统一提示
-    // 密文被拒（服务端重启换临时钥/密钥轮换）：清缓存，下次提交自动取新公钥
-    if (error?.response?.data?.errors?.errorCode === 'AUTH_ENCRYPTED_CREDENTIAL_INVALID') {
-      invalidatePublicKeyCache()
-    }
+    // 密文被拒的公钥缓存失效已统一收敛到 api.js 拦截器（FE-M1），此处不再重复
     // MFA 码错误时保留二期状态供用户直接重输；验证码一次性消费，失败后换新
     if (captchaEnabled.value) {
       loginForm.captchaText = ''

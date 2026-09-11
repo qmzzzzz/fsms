@@ -91,11 +91,20 @@ const changePwd = async () => {
     return
   }
   try {
-    // 口令密文轨：两个字段各自独立信封（每次随机 ECDH 临时密钥+nonce）；
-    // WebCrypto 不可用（纯 HTTP 内网）或加密失败时降级明文轨（后端双轨兼容）
+    // 口令密文轨（FE-H1）：两个字段各自独立信封（每次随机 ECDH 临时密钥+nonce）。
+    // null 仅限 WebCrypto 不可用（设计内降级）；「可用但失败」抛错时阻断提交
+    // 并提示重试，不静默明文上行（console.warn 留痕监控密文率）
     const payload = {}
-    const encCurrent = await encryptPassword(pwdForm.currentPassword).catch(() => null)
-    const encNew = await encryptPassword(pwdForm.newPassword).catch(() => null)
+    let encCurrent
+    let encNew
+    try {
+      encCurrent = await encryptPassword(pwdForm.currentPassword)
+      encNew = await encryptPassword(pwdForm.newPassword)
+    } catch (e) {
+      console.warn('[loginCipher] 口令加密失败，已阻断提交：', e?.message)
+      ElMessage.error(t('login.encryptionFailed'))
+      return
+    }
     if (encCurrent) payload.encCurrentPassword = encCurrent
     else payload.currentPassword = pwdForm.currentPassword
     if (encNew) payload.encNewPassword = encNew

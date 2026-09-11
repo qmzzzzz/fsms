@@ -21,7 +21,9 @@ test('正确凭据登录进入仪表盘', async ({ page }) => {
 
 test('错误口令被拒且有明确提示', async ({ page }) => {
   await loginViaUI(page, USER, 'Wrong-' + Date.now());
-  await expect(page.getByText(/用户名或密码错误|认证失败|登录失败/)).toBeVisible({
+  await expect(
+    page.getByText(/用户名或密码错误|认证失败|登录失败|请使用系统分配的账号/)
+  ).toBeVisible({
     timeout: 10_000,
   });
 });

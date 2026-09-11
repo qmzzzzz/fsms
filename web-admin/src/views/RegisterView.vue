@@ -538,8 +538,8 @@ const onRegister = async () => {
 
     loading.value = true
 
-    // 口令密文轨：secure context 下走密文上行，抓包不再出现明文口令；
-    // WebCrypto 不可用（纯 HTTP 内网）或公钥获取失败时降级明文轨（后端双轨兼容）
+    // 口令密文轨（FE-H1）：null 仅限 WebCrypto 不可用（设计内降级）；
+    // 「可用但失败」抛错时阻断提交并提示重试，不静默明文上行
     const payload = {
       username: registerForm.username,
       email: registerForm.email,
@@ -547,11 +547,13 @@ const onRegister = async () => {
       phone: registerForm.phone,
       department: registerForm.department,
     }
-    let enc = null
+    let enc
     try {
       enc = await encryptPassword(registerForm.password)
-    } catch (_) {
-      enc = null
+    } catch (e) {
+      console.warn('[loginCipher] 口令加密失败，已阻断提交：', e?.message)
+      ElMessage.error(t('login.encryptionFailed'))
+      return
     }
     if (enc) payload.encPassword = enc
     else payload.password = registerForm.password

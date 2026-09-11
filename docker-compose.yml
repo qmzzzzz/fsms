@@ -253,7 +253,8 @@ services:
     environment:
       # 初始管理员口令走宿主环境变量（同 CORS_ORIGIN 的强制显式约定）；
       # 首次登录后应立即在界面内更换
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD 必须显式配置}
+      # Grafana 官方镜像支持 Docker Secret 专用 __FILE 后缀，避免口令进入 environment
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_admin_password
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
@@ -261,6 +262,8 @@ services:
       - grafana-data:/var/lib/grafana
       - ./deployment/observability/grafana/datasources:/etc/grafana/provisioning/datasources:ro
       - ./deployment/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    secrets:
+      - grafana_admin_password
     depends_on:
       - prometheus
     restart: unless-stopped
@@ -310,6 +313,7 @@ services:
 #   printf 'firesafety'  > ./secrets/mongo_root_username
 #   openssl rand -base64 32 | tr -d '\n' > ./secrets/mongo_root_password
 #   openssl rand -base64 24 | tr -d '\n' > ./secrets/admin_initial_password
+#   openssl rand -base64 32 | tr -d '\n' > ./secrets/grafana_admin_password
 #   # mongodb_uri 需内嵌上面的用户名与口令：
 #   printf 'mongodb://%s:%s@mongo:27017/fire_safety_db?authSource=admin' \
 #     "$(cat ./secrets/mongo_root_username)" "$(cat ./secrets/mongo_root_password)" \
@@ -342,6 +346,8 @@ secrets:
     file: ./secrets/mongo_root_username
   mongo_root_password:
     file: ./secrets/mongo_root_password
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password
 
 volumes:
   mongo-data:

@@ -138,6 +138,9 @@ fireAlarmSchema.plugin(autoIncrement, {
 // 索引优化
 fireAlarmSchema.index({ occurredAt: -1 });
 fireAlarmSchema.index({ status: 1, occurredAt: -1 });
+fireAlarmSchema.index({ handler: 1, occurredAt: -1 });
+fireAlarmSchema.index({ 'reporter.userId': 1, occurredAt: -1 });
+fireAlarmSchema.index({ 'location.building': 1, occurredAt: -1 });
 fireAlarmSchema.index({ level: 1 });
 fireAlarmSchema.index({ alarmType: 1, occurredAt: -1 });
 

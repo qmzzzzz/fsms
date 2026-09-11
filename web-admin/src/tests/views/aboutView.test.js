@@ -83,7 +83,7 @@ describe('AboutView 指标卡展示逻辑', () => {
     // 以全站总请求数为基准会把所有条压成细线，图形失去对比作用
     const widthBlock = source.slice(
       source.indexOf('const routeBarWidth'),
-      source.indexOf('/**\n * 运行时长')
+      source.indexOf('const formatUptime')
     )
     expect(widthBlock).toContain('topRoutes.value.map((x) => x.requests)')
     expect(widthBlock).not.toContain('totalRequests')

@@ -29,6 +29,8 @@ describe('Config Validation', () => {
       process.env.HMAC_SECRET = 'test-hmac';
       process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
       process.env.CORS_ORIGIN = 'https://example.com';
+      process.env.ENABLE_HTTPS = 'true';
+      process.env.ALLOWED_HOSTS = 'api.example.com';
 
       const { validateConfig } = require('../../config/validate');
 
@@ -51,6 +53,8 @@ describe('Config Validation', () => {
       process.env.HMAC_SECRET = 'test-hmac';
       process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
       process.env.CORS_ORIGIN = 'https://example.com';
+      process.env.ENABLE_HTTPS = 'true';
+      process.env.ALLOWED_HOSTS = 'api.example.com';
 
       const { validateConfig } = require('../../config/validate');
 
@@ -74,6 +78,10 @@ describe('Config Validation', () => {
       process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
       process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
       process.env.CORS_ORIGIN = 'https://example.com';
+      process.env.ENABLE_HTTPS = 'true';
+      process.env.ALLOWED_HOSTS = 'api.example.com';
+      process.env.REDIS_URL = 'redis://redis.example.com:6379';
+      process.env.REDIS_URL = 'redis://redis.example.com:6379';
       process.env.TRUST_PROXY_HOPS = '1';
 
       const { validateConfig } = require('../../config/validate');
@@ -92,7 +100,9 @@ describe('Config Validation', () => {
       process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
       process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
       process.env.CORS_ORIGIN = 'https://example.com';
+      process.env.ENABLE_HTTPS = 'true';
       process.env.ALLOWED_HOSTS = 'api.example.com';
+      process.env.REDIS_URL = 'redis://redis.example.com:6379';
     };
 
     /** 以指定 TRUST_PROXY_HOPS 跑校验，返回收集到的错误消息 */
@@ -206,7 +216,7 @@ describe('Config Validation', () => {
       expect(warnings[0]).toContain('TLS');
     });
 
-    test('生产环境缺失加固项只告警不退出', () => {
+    test('ALLOWED_HOSTS missing is now fatal in production (M3)', () => {
       process.env.NODE_ENV = 'production';
       process.env.JWT_SECRET = 'strong-random-jwt-secret-that-is-long-enough';
       process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
@@ -214,6 +224,8 @@ describe('Config Validation', () => {
       process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
       process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
       process.env.CORS_ORIGIN = 'https://example.com';
+      process.env.ENABLE_HTTPS = 'true';
+      process.env.ALLOWED_HOSTS = 'api.example.com';
       process.env.TRUST_PROXY_HOPS = '1';
       delete process.env.ALLOWED_HOSTS;
 
@@ -224,9 +236,9 @@ describe('Config Validation', () => {
         throw new Error('process.exit called');
       });
 
-      expect(() => validateConfig()).not.toThrow();
-      expect(mockWarn).toHaveBeenCalledWith(expect.stringContaining('ALLOWED_HOSTS'));
-      expect(mockExit).not.toHaveBeenCalled();
+      expect(() => validateConfig()).toThrow('process.exit called');
+      expect(mockExit).toHaveBeenCalled();
+      
 
       mockWarn.mockRestore();
       mockExit.mockRestore();

@@ -36,7 +36,7 @@ async function skipIfAppUnavailable(page) {
 async function submitLogin(page) {
   await page.getByPlaceholder('用户名').fill('fault-probe');
   await page.getByPlaceholder('密码').fill('fault-probe-pass');
-  await page.getByRole('button', { name: '登录' }).click();
+  await page.getByRole('button', { name: /^登\s*录$/ }).click();
 }
 
 test.describe('依赖不可达：登录路径的界面韧性', () => {
@@ -49,7 +49,7 @@ test.describe('依赖不可达：登录路径的界面韧性', () => {
 
     await expect(page.getByText(NETWORK_ERROR_TEXT).first()).toBeVisible({ timeout: 15_000 });
     // 不卡死：登录按钮从 loading 恢复为可点击
-    await expect(page.getByRole('button', { name: '登录' })).toBeEnabled({ timeout: 10_000 });
+    await expect(page.getByRole('button', { name: /^登\s*录$/ })).toBeEnabled({ timeout: 10_000 });
     // 不白屏：登录表单仍在
     await expect(page.getByPlaceholder('用户名')).toBeVisible();
   });
@@ -71,7 +71,7 @@ test.describe('依赖不可达：登录路径的界面韧性', () => {
 
     // 超时会等满 15s，放宽等待窗口
     await expect(page.getByText(NETWORK_ERROR_TEXT).first()).toBeVisible({ timeout: 25_000 });
-    await expect(page.getByRole('button', { name: '登录' })).toBeEnabled({ timeout: 10_000 });
+    await expect(page.getByRole('button', { name: /^登\s*录$/ })).toBeEnabled({ timeout: 10_000 });
   });
 
   test('依赖返回 500：提示服务异常且不卡死', async ({ page }) => {
@@ -88,7 +88,7 @@ test.describe('依赖不可达：登录路径的界面韧性', () => {
 
     // message 为空串时拦截器回退到 messages.serverError
     await expect(page.getByText(SERVER_ERROR_TEXT).first()).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole('button', { name: '登录' })).toBeEnabled({ timeout: 10_000 });
+    await expect(page.getByRole('button', { name: /^登\s*录$/ })).toBeEnabled({ timeout: 10_000 });
   });
 });
 
