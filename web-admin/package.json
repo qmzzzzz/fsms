@@ -33,7 +33,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.8",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^5.0.0",
     "autoprefixer": "^10.5.4",
     "eslint": "^9.39.5",
     "eslint-config-prettier": "^10.1.8",
