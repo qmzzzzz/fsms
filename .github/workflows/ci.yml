@@ -101,9 +101,13 @@ jobs:
           fetch-depth: 0
 
       - name: Run Gitleaks
-        # v3 已发布但输入契约（env/配置发现方式）有变化，保守保留 v2；
-        # 升级前需单独验证（I-L7 仅要求脱离 2022 年代 node16 运行时的 v3，此项本就满足）
-        uses: gitleaks/gitleaks-action@v2
+        # v3（2026-05 发布）仅迁移运行时 Node 20 → 24，输入/输出/行为均无变化
+        # （官方 README「Migrating from v2 to v3」：no changes to inputs, outputs, or behavior），
+        # 当年保守保留 v2 的顾虑（输入契约变化）已不成立，一行升级即可。
+        # 时间线：2026-06-02 起 runner 默认 Node 24（v2 已报警告）；
+        # 2026-09-16 Node 20 从 runner 彻底移除，v2 无条件失效——必须升 v3。
+        # 个人账号仓库无需 GITLEAKS_LICENSE（仅组织仓库需要）。
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
