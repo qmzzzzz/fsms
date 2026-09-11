@@ -57,7 +57,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.0.3",
     "morgan": "^1.10.0",
-    "rate-limit-redis": "^4.3.1",
+    "rate-limit-redis": "^6.0.1",
     "socket.io": "^4.8.3",
     "svg-captcha": "^1.4.0",
     "swagger-ui-express": "^5.0.1",
