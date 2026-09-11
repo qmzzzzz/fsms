@@ -8,20 +8,14 @@
  * 2026-08-26 已完成全部五档收敛，当前为 flat/recommended 全量 vue3 推荐。
  * 收敛路径见文件末尾的棘轮清单。
  */
-import js from '@eslint/js';
-import pluginVue from 'eslint-plugin-vue';
-import eslintConfigPrettier from 'eslint-config-prettier';
-import globals from 'globals';
+import js from '@eslint/js'
+import pluginVue from 'eslint-plugin-vue'
+import eslintConfigPrettier from 'eslint-config-prettier'
+import globals from 'globals'
 
 export default [
   {
-    ignores: [
-      'node_modules/**',
-      'dist/**',
-      'coverage/**',
-      'dev-dist/**',
-      'public/**',
-    ],
+    ignores: ['node_modules/**', 'dist/**', 'coverage/**', 'dev-dist/**', 'public/**'],
   },
 
   js.configs.recommended,
@@ -37,10 +31,10 @@ export default [
             rules: Object.fromEntries(
               Object.entries(cfg.rules)
                 .filter(([, v]) => v === 'warn' || (Array.isArray(v) && v[0] === 'warn'))
-                .map(([k, v]) => [k, Array.isArray(v) ? ['error', ...v.slice(1)] : 'error']),
+                .map(([k, v]) => [k, Array.isArray(v) ? ['error', ...v.slice(1)] : 'error'])
             ),
           }
-        : null,
+        : null
     )
     .filter(Boolean),
 
@@ -102,11 +96,14 @@ export default [
       // ===== 存量较多的卫生类：warn（逐步收敛）=====
       // no-unused-vars 棘轮第一档（2026-08-25 已收敛）：
       // 清理了 14 处未使用的图标/工具函数导入（详见 git log），提为 error
-      'no-unused-vars': ['error', {
-        argsIgnorePattern: '^_',
-        varsIgnorePattern: '^_',
-        caughtErrors: 'none',
-      }],
+      'no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrors: 'none',
+        },
+      ],
       // no-console 棘轮第二档（2026-08-26 已收敛）：
       // 源码中已无 console.log/info/debug，仅保留 warn/error；构建/测试文件豁免
       'no-console': ['error', { allow: ['warn', 'error'] }],
@@ -152,7 +149,7 @@ export default [
   // （vue/max-attributes-per-line、vue/html-indent 等）——必须置于数组末尾，
   // 使其对前述棘轮提级的风格规则具有最终裁决权
   eslintConfigPrettier,
-];
+]
 
 /*
  * 棘轮收敛清单（每清完一档把对应规则从 warn 提到 error）：

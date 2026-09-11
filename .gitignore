@@ -70,3 +70,13 @@ secrets/
 .design_library/
 # 前端构建产物变体
 web-admin/dist-optimized/
+
+# 备份目录（run-rollback-drill / backup-mongo 默认产出路径）
+backups/
+
+# 审计/敏感导出（ndjson.gz 含用户哈希与审计日志）
+*.ndjson.gz
+
+# 私钥/证书文件（login_ecdh_private.pem 等）
+*.pem
+*.key

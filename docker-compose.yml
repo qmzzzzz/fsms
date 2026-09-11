@@ -21,6 +21,8 @@ services:
       - CORS_ORIGIN=${CORS_ORIGIN:?CORS_ORIGIN 必须显式配置（如 https://admin.example.com，多个用逗号分隔）}
       # 审计留存天数（合规区间 90..3650，留空取默认 180）
       - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-180}
+      # Fix #1: 生产强制校验 REDIS_URL（validate.js:90-92），compose 统一注入
+      - REDIS_URL=redis://redis:6379
       # 指向挂载后的 secret 文件路径，本身不含敏感值
       - JWT_SECRET_FILE=/run/secrets/jwt_secret
       - JWT_REFRESH_SECRET_FILE=/run/secrets/jwt_refresh_secret
@@ -290,16 +292,28 @@ services:
     networks:
       - fire-safety-net
 
-  # 可选：Redis 用于缓存和 session
-  # redis:
-  #   image: redis:7-alpine
-  #   ports:
-  #     - "6379:6379"
-  #   volumes:
-  #     - redis-data:/data
-  #   restart: unless-stopped
-  #   networks:
-  #     - fire-safety-net
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 192m
+          cpus: '0.5'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - fire-safety-net
 
 # ============================================================
 # 密钥文件（P3-48）
@@ -361,7 +375,7 @@ volumes:
   prometheus-data:
   grafana-data:
   alertmanager-data:
-  # redis-data:
+  redis-data:
 
 networks:
   fire-safety-net:
