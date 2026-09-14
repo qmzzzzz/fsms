@@ -1,34 +1,38 @@
 <template>
   <el-dialog
     v-model="visible"
-    :title="$t('提交巡检结果')"
+    :title="$t('inspectionResult.submitTitle')"
     width="600px"
     :before-close="handleClose"
   >
     <el-form ref="formRef" :model="form" :rules="rules" label-width="120px">
-      <el-form-item :label="$t('巡检结果')" prop="result">
+      <el-form-item :label="$t('inspection.result')" prop="result">
         <el-radio-group v-model="form.result">
           <el-radio value="normal">
-            {{ $t('正常') }}
+            {{ $t('inspection.normal') }}
           </el-radio>
           <el-radio value="abnormal">
-            {{ $t('异常') }}
+            {{ $t('inspection.abnormal') }}
           </el-radio>
           <el-radio value="partial">
-            {{ $t('部分异常') }}
+            {{ $t('inspection.partial') }}
           </el-radio>
         </el-radio-group>
       </el-form-item>
 
-      <el-form-item v-if="form.result !== 'normal'" :label="$t('发现问题')" prop="findings">
+      <el-form-item
+        v-if="form.result !== 'normal'"
+        :label="$t('inspection.issuesFound')"
+        prop="findings"
+      >
         <div v-for="(finding, index) in form.findings" :key="finding.__uid" class="finding-item">
           <el-card shadow="never" class="mb-2">
             <div class="finding-header">
-              <span class="title">{{ $t('问题序号', { n: index + 1 }) }}</span>
+              <span class="title">{{ $t('inspectionResult.issueNo', { n: index + 1 }) }}</span>
               <button
                 type="button"
                 class="glass-btn glass-btn--danger glass-btn--icon"
-                :title="$t('删除')"
+                :title="$t('common.delete')"
                 @click="removeFinding(index)"
               >
                 ×
@@ -37,13 +41,17 @@
             <el-row :gutter="16">
               <el-col :span="12">
                 <el-form-item
-                  :label="$t('选择设备')"
+                  :label="$t('inspection.selectDevices')"
                   :prop="'findings.' + index + '.deviceId'"
-                  :rules="{ required: true, message: $t('请选择设备'), trigger: 'change' }"
+                  :rules="{
+                    required: true,
+                    message: $t('inspectionResult.deviceRequiredMsg'),
+                    trigger: 'change',
+                  }"
                 >
                   <el-select
                     v-model="finding.deviceId"
-                    :placeholder="$t('选择问题设备')"
+                    :placeholder="$t('inspectionResult.issueDeviceLabel')"
                     style="width: 100%"
                     @change="(val) => selectDevice(val, index)"
                   >
@@ -58,15 +66,19 @@
               </el-col>
               <el-col :span="12">
                 <el-form-item
-                  :label="$t('问题描述')"
+                  :label="$t('inspectionResult.issueDescLabel')"
                   :prop="'findings.' + index + '.issue'"
-                  :rules="{ required: true, message: $t('请输入问题描述'), trigger: 'blur' }"
+                  :rules="{
+                    required: true,
+                    message: $t('inspectionResult.issueDescPlaceholder'),
+                    trigger: 'blur',
+                  }"
                 >
                   <el-input
                     v-model="finding.issue"
                     type="textarea"
                     :rows="2"
-                    :placeholder="$t('请输入问题描述')"
+                    :placeholder="$t('inspectionResult.issueDescPlaceholder')"
                     maxlength="500"
                     show-word-limit
                   />
@@ -76,34 +88,42 @@
             <el-row :gutter="16" class="mt-2">
               <el-col :span="8">
                 <el-form-item
-                  :label="$t('严重程度')"
+                  :label="$t('inspectionResult.severityLabel')"
                   :prop="'findings.' + index + '.severity'"
-                  :rules="{ required: true, message: $t('请选择严重程度'), trigger: 'change' }"
+                  :rules="{
+                    required: true,
+                    message: $t('inspectionResult.severityRequiredMsg'),
+                    trigger: 'change',
+                  }"
                 >
                   <el-select v-model="finding.severity" style="width: 100%">
-                    <el-option :label="$t('低')" value="low" />
-                    <el-option :label="$t('中')" value="medium" />
-                    <el-option :label="$t('高')" value="high" />
-                    <el-option :label="$t('紧急')" value="critical" />
+                    <el-option :label="$t('common.levelLow')" value="low" />
+                    <el-option :label="$t('common.levelMedium')" value="medium" />
+                    <el-option :label="$t('common.levelHigh')" value="high" />
+                    <el-option :label="$t('common.urgent')" value="critical" />
                   </el-select>
                 </el-form-item>
               </el-col>
               <el-col :span="8">
                 <el-form-item
-                  :label="$t('处理建议')"
+                  :label="$t('inspectionResult.suggestionLabel')"
                   :prop="'findings.' + index + '.suggestion'"
-                  :rules="{ required: true, message: $t('请输入处理建议'), trigger: 'blur' }"
+                  :rules="{
+                    required: true,
+                    message: $t('inspectionResult.suggestionPlaceholder'),
+                    trigger: 'blur',
+                  }"
                 >
                   <el-input
                     v-model="finding.suggestion"
-                    :placeholder="$t('请输入处理建议')"
+                    :placeholder="$t('inspectionResult.suggestionPlaceholder')"
                     maxlength="500"
                   />
                 </el-form-item>
               </el-col>
               <el-col :span="8">
                 <el-form-item
-                  :label="$t('照片')"
+                  :label="$t('inspectionResult.photosLabel')"
                   :prop="'findings.' + index + '.photo'"
                   :rules="photoRule"
                 >
@@ -140,25 +160,25 @@
             class="glass-btn glass-btn--primary glass-btn--sm"
             @click="addFinding"
           >
-            <span>+</span>{{ $t('添加问题') }}
+            <span>+</span>{{ $t('inspectionResult.addIssue') }}
           </button>
         </div>
       </el-form-item>
 
-      <el-form-item :label="$t('完成地点')">
+      <el-form-item :label="$t('inspectionResult.locationLabel')">
         <el-input
           v-model="form.location"
-          :placeholder="$t('请输入巡检完成地点（可选）')"
+          :placeholder="$t('inspectionResult.locationPlaceholder')"
           maxlength="100"
         />
       </el-form-item>
 
-      <el-form-item :label="$t('备注')">
+      <el-form-item :label="$t('inspection.remarkLabel')">
         <el-input
           v-model="form.remark"
           type="textarea"
           :rows="3"
-          :placeholder="$t('巡检备注（可选）')"
+          :placeholder="$t('inspectionResult.remarkPlaceholder')"
           maxlength="500"
           show-word-limit
         />
@@ -167,7 +187,7 @@
 
     <template #footer>
       <button type="button" class="glass-btn glass-btn--default" @click="handleClose">
-        {{ $t('取消') }}
+        {{ $t('common.cancel') }}
       </button>
       <button
         type="button"
@@ -176,7 +196,7 @@
         :disabled="loading"
         @click="handleSubmit"
       >
-        {{ $t('提交结果') }}
+        {{ $t('inspectionResult.submitBtn') }}
       </button>
     </template>
   </el-dialog>
@@ -256,7 +276,7 @@ const form = reactive({
 })
 
 const rules = {
-  result: [{ required: true, message: t('请选择巡检结果'), trigger: 'change' }],
+  result: [{ required: true, message: t('inspectionResult.resultRequiredMsg'), trigger: 'change' }],
   findings: [
     {
       validator: (rule, value, callback) => {
@@ -276,14 +296,14 @@ function validateFindings(rule, value, callback) {
   if (form.result === 'normal' && value.length === 0) {
     callback()
   } else if (form.result !== 'normal' && value.length === 0) {
-    callback(new Error(t('异常情况至少需要记录一个问题')))
+    callback(new Error(t('inspectionResult.issueRequiredMsg')))
   } else {
     // 检查每个问题是否完整
     const isValid = value.every((item) => item.deviceId && item.issue)
     if (isValid) {
       callback()
     } else {
-      callback(new Error(t('请完整填写问题信息')))
+      callback(new Error(t('inspectionResult.issueIncompleteMsg')))
     }
   }
 }
@@ -337,7 +357,7 @@ const handleSubmit = async () => {
     )
 
     if (hasEmptyField) {
-      ElMessage.warning(t('请完整填写所有问题信息'))
+      ElMessage.warning(t('inspectionResult.allIssuesIncompleteMsg'))
       return
     }
   }
@@ -368,11 +388,11 @@ const handleSubmit = async () => {
         }
 
         await api.inspections.complete(props.inspectionId, submitData)
-        ElMessage.success(t('巡检结果提交成功'))
+        ElMessage.success(t('inspectionResult.submitSuccessMsg'))
         visible.value = false
         emit('success')
       } catch (error) {
-        ElMessage.error(t('提交失败，请重试'))
+        ElMessage.error(t('common.submitFailedRetry'))
       } finally {
         loading.value = false
       }

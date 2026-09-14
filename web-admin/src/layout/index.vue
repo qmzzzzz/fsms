@@ -115,7 +115,7 @@
           </el-tooltip>
           <el-tooltip
             v-if="canToggleFullScreen"
-            :content="$t('全屏')"
+            :content="$t('layout.fullscreen')"
             placement="bottom"
             class="tech-hide-mobile"
           >

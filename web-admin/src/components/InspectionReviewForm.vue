@@ -1,22 +1,22 @@
 <template>
   <el-dialog
     v-model="visible"
-    :title="$t('审核巡检结果')"
+    :title="$t('inspectionReview.title')"
     width="500px"
     :before-close="handleClose"
   >
     <el-form ref="formRef" :model="form" :rules="rules" label-width="120px">
       <el-alert v-if="inspectionData" type="info" :closable="false" class="mb-4">
         <template #title>
-          {{ $t('巡检信息') }}
+          {{ $t('inspectionReview.infoLabel') }}
         </template>
-        <div>{{ $t('巡检标题') }}：{{ inspectionData.title }}</div>
-        <div>{{ $t('负责人') }}：{{ inspectionAssignedNames }}</div>
+        <div>{{ $t('inspection.inspectionTitle') }}：{{ inspectionData.title }}</div>
+        <div>{{ $t('inspection.ownerLabel') }}：{{ inspectionAssignedNames }}</div>
         <div>
           {{ $t('inspection.actualStartTime') }}：{{ inspectionData.actualStartTime }} 至
           {{ inspectionData.actualEndTime }}
         </div>
-        <div>{{ $t('巡检结果') }}：{{ resultLabel }}</div>
+        <div>{{ $t('inspection.result') }}：{{ resultLabel }}</div>
       </el-alert>
 
       <el-alert v-if="hasFindings" type="warning" :closable="false" class="mb-4">
@@ -34,24 +34,24 @@
         </div>
       </el-alert>
 
-      <el-form-item :label="$t('审核意见')" prop="reviewComment">
+      <el-form-item :label="$t('inspection.reviewComment')" prop="reviewComment">
         <el-input
           v-model="form.reviewComment"
           type="textarea"
           :rows="4"
-          :placeholder="$t('请输入审核意见')"
+          :placeholder="$t('inspection.reviewCommentPlaceholder')"
           maxlength="500"
           show-word-limit
         />
       </el-form-item>
 
-      <el-form-item :label="$t('审核结果')">
+      <el-form-item :label="$t('inspection.reviewResult')">
         <el-radio-group v-model="form.result">
           <el-radio label="approved">
-            {{ $t('通过') }}
+            {{ $t('inspection.approved') }}
           </el-radio>
           <el-radio label="rejected">
-            {{ $t('不通过') }}
+            {{ $t('inspection.rejected') }}
           </el-radio>
         </el-radio-group>
       </el-form-item>
@@ -59,7 +59,7 @@
 
     <template #footer>
       <button type="button" class="glass-btn glass-btn--default" @click="handleClose">
-        {{ $t('取消') }}
+        {{ $t('common.cancel') }}
       </button>
       <button
         type="button"
@@ -68,7 +68,7 @@
         :disabled="loading"
         @click="handleSubmit"
       >
-        {{ $t('提交审核') }}
+        {{ $t('inspection.submitReviewBtn') }}
       </button>
     </template>
   </el-dialog>
@@ -111,21 +111,25 @@ const form = reactive({
 
 const rules = {
   reviewComment: [
-    { required: true, message: t('请输入审核意见'), trigger: 'blur' },
-    { min: 10, message: t('审核意见至少需要10个字符'), trigger: 'blur' },
+    { required: true, message: t('inspection.reviewCommentPlaceholder'), trigger: 'blur' },
+    { min: 10, message: t('inspection.reviewCommentMinMsg'), trigger: 'blur' },
   ],
 }
 
 // 计算属性
 const inspectionAssignedNames = computed(() => {
-  if (!inspectionData.value?.assignedTo?.length) return t('未分配')
+  if (!inspectionData.value?.assignedTo?.length) return t('inspectionReview.unassigned')
   return inspectionData.value.assignedTo.map((u) => u.realName || u.username).join(', ')
 })
 
 const resultLabel = computed(() => {
-  if (!inspectionData.value.result) return t('未提交')
-  const map = { normal: t('正常'), abnormal: t('异常'), partial: t('部分异常') }
-  return map[inspectionData.value.result] || t('未知')
+  if (!inspectionData.value.result) return t('inspectionReview.notSubmitted')
+  const map = {
+    normal: t('inspection.normal'),
+    abnormal: t('inspection.abnormal'),
+    partial: t('inspection.partial'),
+  }
+  return map[inspectionData.value.result] || t('inspectionReview.unknown')
 })
 
 const hasFindings = computed(() => {
@@ -144,8 +148,13 @@ const severityType = (severity) => {
 
 // 严重程度标签
 const severityLabel = (severity) => {
-  const map = { low: t('低'), medium: t('中'), high: t('高'), critical: t('紧急') }
-  return map[severity] || t('未知')
+  const map = {
+    low: t('common.levelLow'),
+    medium: t('common.levelMedium'),
+    high: t('common.levelHigh'),
+    critical: t('common.urgent'),
+  }
+  return map[severity] || t('inspectionReview.unknown')
 }
 
 // 加载巡检详情
@@ -155,7 +164,7 @@ const loadInspectionDetail = async () => {
     inspectionData.value = res.data.data
     form.reviewComment = ''
   } catch (error) {
-    ElMessage.error(t('加载巡检详情失败'))
+    ElMessage.error(t('inspectionReview.loadFailedMsg'))
   }
 }
 
@@ -172,11 +181,11 @@ const handleSubmit = async () => {
           // 审核结论必须随载荷提交，否则后端无法得知通过/不通过
           reviewResult: form.result,
         })
-        ElMessage.success(t('审核提交成功'))
+        ElMessage.success(t('inspectionReview.submitSuccessMsg'))
         visible.value = false
         emit('success')
       } catch (error) {
-        ElMessage.error(t('提交失败，请重试'))
+        ElMessage.error(t('common.submitFailedRetry'))
       } finally {
         loading.value = false
       }

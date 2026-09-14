@@ -1,8 +1,6 @@
 import { createI18n } from 'vue-i18n'
 import zhCN from './locales/zh-CN'
 import enUS from './locales/en-US'
-import legacyZhCN from './locales/legacy-raw-zh'
-import legacyEnUS from './locales/legacy-raw-en'
 
 const savedLocale = (() => {
   try {
@@ -42,15 +40,12 @@ const messageCompiler = (message) => {
 }
 
 /**
- * P3-44：合并中文裸键兼容层。
- *
- * 展开顺序刻意让 legacy 在前、正式词表在后：正式键（common.xxx 等）是嵌套
- * 对象，legacy 是顶层平铺的中文键，两者本不冲突；但若日后出现同名，
- * 应当以正式词表为准。
+ * 消息词表（P3-44 收官）：中文裸键兼容层（legacy-raw-*.js）已随
+ * 143 个裸键全部迁移到规范点号键而删除，词表只保留正式键结构。
  */
 const messages = {
-  'zh-CN': { ...legacyZhCN, ...zhCN },
-  'en-US': { ...legacyEnUS, ...enUS },
+  'zh-CN': zhCN,
+  'en-US': enUS,
 }
 
 const i18n = createI18n({

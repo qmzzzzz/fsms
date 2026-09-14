@@ -8,27 +8,27 @@
   >
     <el-form ref="formRef" :model="form" :rules="rules" label-width="120px" label-position="right">
       <!-- 基本信息 -->
-      <el-card :header="$t('基本信息')" class="mb-4">
+      <el-card :header="$t('inspection.basicInfo')" class="mb-4">
         <el-row :gutter="16">
           <el-col :span="12">
-            <el-form-item :label="$t('巡检标题')" prop="title">
+            <el-form-item :label="$t('inspection.inspectionTitle')" prop="title">
               <el-input
                 v-model="form.title"
-                :placeholder="$t('请输入巡检标题')"
+                :placeholder="$t('inspection.titlePlaceholder')"
                 maxlength="200"
                 show-word-limit
               />
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item :label="$t('巡检类型')" prop="inspectionType">
+            <el-form-item :label="$t('inspection.inspectionType')" prop="inspectionType">
               <el-select v-model="form.inspectionType" style="width: 100%">
-                <el-option :label="$t('日常巡检')" value="daily" />
-                <el-option :label="$t('每周巡检')" value="weekly" />
-                <el-option :label="$t('每月巡检')" value="monthly" />
-                <el-option :label="$t('季度巡检')" value="quarterly" />
-                <el-option :label="$t('年度巡检')" value="annual" />
-                <el-option :label="$t('专项巡检')" value="special" />
+                <el-option :label="$t('inspection.typeDaily')" value="daily" />
+                <el-option :label="$t('inspection.typeWeekly')" value="weekly" />
+                <el-option :label="$t('inspection.typeMonthly')" value="monthly" />
+                <el-option :label="$t('inspection.typeQuarterly')" value="quarterly" />
+                <el-option :label="$t('inspection.typeAnnual')" value="annual" />
+                <el-option :label="$t('inspection.typeSpecial')" value="special" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -36,15 +36,15 @@
       </el-card>
 
       <!-- 巡检范围 -->
-      <el-card :header="$t('巡检范围')" class="mb-4">
-        <el-form-item :label="$t('选择设备')" prop="devices">
+      <el-card :header="$t('inspection.scopeLabel')" class="mb-4">
+        <el-form-item :label="$t('inspection.selectDevices')" prop="devices">
           <el-select
             v-model="form.devices"
             multiple
             filterable
             remote
             reserve-keyword
-            :placeholder="$t('请搜索并选择设备')"
+            :placeholder="$t('inspection.deviceSearchPlaceholder')"
             style="width: 100%"
             :remote-method="searchDevices"
             :loading="deviceLoading"
@@ -58,37 +58,57 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item :label="$t('位置范围')">
+        <el-form-item :label="$t('inspection.locationScope')">
           <el-row :gutter="16">
             <el-col :span="8">
-              <el-input v-model="form.building" :placeholder="$t('栋号')" maxlength="100" />
+              <el-input
+                v-model="form.building"
+                :placeholder="$t('inspection.buildingLabel')"
+                maxlength="100"
+              />
             </el-col>
             <el-col :span="8">
-              <el-input v-model="form.floor" :placeholder="$t('楼层')" maxlength="100" />
+              <el-input
+                v-model="form.floor"
+                :placeholder="$t('inspection.floorLabel')"
+                maxlength="100"
+              />
             </el-col>
             <el-col :span="8">
-              <el-input v-model="form.area" :placeholder="$t('区域')" maxlength="100" />
+              <el-input
+                v-model="form.area"
+                :placeholder="$t('inspection.areaLabel')"
+                maxlength="100"
+              />
             </el-col>
           </el-row>
         </el-form-item>
       </el-card>
 
       <!-- 检查项目 -->
-      <el-card :header="$t('检查项目')" class="mb-4">
+      <el-card :header="$t('inspection.checkItems')" class="mb-4">
         <div class="check-items-container">
           <div v-for="(item, index) in form.checkItems" :key="item.__uid" class="check-item">
             <el-row :gutter="16" align="middle">
               <el-col :span="8">
-                <el-input v-model="item.name" :placeholder="$t('检查项目名称')" maxlength="100" />
+                <el-input
+                  v-model="item.name"
+                  :placeholder="$t('inspection.checkItemNameLabel')"
+                  maxlength="100"
+                />
               </el-col>
               <el-col :span="10">
-                <el-input v-model="item.standard" :placeholder="$t('检查标准')" maxlength="200" />
+                <el-input
+                  v-model="item.standard"
+                  :placeholder="$t('inspection.standardLabel')"
+                  maxlength="200"
+                />
               </el-col>
               <el-col :span="4">
                 <el-switch
                   v-model="item.required"
-                  :active-text="$t('必检')"
-                  :inactive-text="$t('选检')"
+                  :active-text="$t('inspection.checkRequired')"
+                  :inactive-text="$t('inspection.checkOptional')"
                   size="small"
                 />
               </el-col>
@@ -96,7 +116,7 @@
                 <button
                   type="button"
                   class="glass-btn glass-btn--danger glass-btn--icon"
-                  :title="$t('删除')"
+                  :title="$t('common.delete')"
                   @click="removeCheckItem(index)"
                 >
                   ×
@@ -111,21 +131,21 @@
             class="glass-btn glass-btn--primary glass-btn--sm"
             @click="addCheckItem"
           >
-            <span>+</span>{{ $t('添加检查项目') }}
+            <span>+</span>{{ $t('inspection.addCheckItem') }}
           </button>
         </div>
       </el-card>
 
       <!-- 人员安排 -->
-      <el-card :header="$t('人员安排')" class="mb-4">
-        <el-form-item :label="$t('负责人')">
+      <el-card :header="$t('inspection.staffing')" class="mb-4">
+        <el-form-item :label="$t('inspection.ownerLabel')">
           <el-select
             v-model="form.assignedTo"
             multiple
             filterable
             remote
             reserve-keyword
-            :placeholder="$t('请搜索并选择负责人')"
+            :placeholder="$t('inspection.ownerSearchPlaceholder')"
             style="width: 100%"
             :remote-method="searchUsers"
             :loading="userLoading"
@@ -141,14 +161,14 @@
       </el-card>
 
       <!-- 时间计划 -->
-      <el-card :header="$t('时间计划')" class="mb-4">
+      <el-card :header="$t('inspection.scheduleLabel')" class="mb-4">
         <el-row :gutter="16">
           <el-col :span="12">
-            <el-form-item :label="$t('计划开始时间')" prop="planStartTime">
+            <el-form-item :label="$t('inspection.planStartTime')" prop="planStartTime">
               <el-date-picker
                 v-model="form.planStartTime"
                 type="datetime"
-                :placeholder="$t('选择开始时间')"
+                :placeholder="$t('inspection.startTimePlaceholder')"
                 style="width: 100%"
                 format="YYYY-MM-DD HH:mm:ss"
                 value-format="YYYY-MM-DD HH:mm:ss"
@@ -156,11 +176,11 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item :label="$t('计划结束时间')" prop="planEndTime">
+            <el-form-item :label="$t('inspection.planEndTime')" prop="planEndTime">
               <el-date-picker
                 v-model="form.planEndTime"
                 type="datetime"
-                :placeholder="$t('选择结束时间')"
+                :placeholder="$t('inspection.endTimePlaceholder')"
                 style="width: 100%"
                 format="YYYY-MM-DD HH:mm:ss"
                 value-format="YYYY-MM-DD HH:mm:ss"
@@ -169,17 +189,17 @@
           </el-col>
         </el-row>
         <div class="el-form-item__help">
-          {{ $t('请合理设置巡检时间避免任务过载') }}
+          {{ $t('inspection.scheduleHint') }}
         </div>
       </el-card>
 
       <!-- 备注 -->
-      <el-form-item :label="$t('备注')">
+      <el-form-item :label="$t('inspection.remarkLabel')">
         <el-input
           v-model="form.remark"
           type="textarea"
           :rows="3"
-          :placeholder="$t('巡检计划相关说明（可选）')"
+          :placeholder="$t('inspection.remarkPlaceholder')"
           maxlength="500"
           show-word-limit
         />
@@ -188,7 +208,7 @@
 
     <template #footer>
       <button type="button" class="glass-btn glass-btn--default" @click="handleClose">
-        {{ $t('取消') }}
+        {{ $t('common.cancel') }}
       </button>
       <button
         v-if="!disabled"
@@ -235,7 +255,9 @@ const visible = computed({
   set: (val) => emit('update:modelValue', val),
 })
 
-const title = computed(() => (props.editData ? t('编辑巡检计划') : t('新建巡检计划')))
+const title = computed(() =>
+  props.editData ? t('inspection.editPlanTitle') : t('inspection.createPlanTitle')
+)
 const isEdit = computed(() => !!props.editData)
 
 const loading = ref(false)
@@ -249,8 +271,18 @@ const formRef = ref()
 // 行级自增标识：v-for key 用稳定 uid，避免 splice 删除时 index key 引发的状态错位
 let uidSeq = 0
 const defaultCheckItems = () => [
-  { __uid: ++uidSeq, name: t('消防器材检查'), standard: t('完好率100%'), required: true },
-  { __uid: ++uidSeq, name: t('消防通道检查'), standard: t('畅通无阻'), required: true },
+  {
+    __uid: ++uidSeq,
+    name: t('inspection.sampleEquipmentCheck'),
+    standard: t('inspection.sampleEquipmentPass'),
+    required: true,
+  },
+  {
+    __uid: ++uidSeq,
+    name: t('inspection.samplePassageCheck'),
+    standard: t('inspection.samplePassagePass'),
+    required: true,
+  },
 ]
 
 const form = reactive({
@@ -269,17 +301,19 @@ const form = reactive({
 
 const rules = {
   title: [
-    { required: true, message: t('请输入巡检标题'), trigger: 'blur' },
-    { min: 2, max: 200, message: t('标题长度在 2 到 200 个字符'), trigger: 'blur' },
+    { required: true, message: t('inspection.titlePlaceholder'), trigger: 'blur' },
+    { min: 2, max: 200, message: t('inspection.titleLengthMsg'), trigger: 'blur' },
   ],
-  inspectionType: [{ required: true, message: t('请选择巡检类型'), trigger: 'change' }],
-  devices: [{ required: true, message: t('请至少选择一个设备'), trigger: 'change' }],
-  planStartTime: [{ required: true, message: t('请选择计划开始时间'), trigger: 'change' }],
+  inspectionType: [{ required: true, message: t('inspection.typeRequiredMsg'), trigger: 'change' }],
+  devices: [{ required: true, message: t('inspection.devicesRequiredMsg'), trigger: 'change' }],
+  planStartTime: [
+    { required: true, message: t('inspection.startTimeRequiredMsg'), trigger: 'change' },
+  ],
   planEndTime: [
-    { required: true, message: t('请选择计划结束时间'), trigger: 'change' },
+    { required: true, message: t('inspection.endTimeRequiredMsg'), trigger: 'change' },
     { validator: validateEndTime, trigger: 'change' },
   ],
-  checkItems: [{ required: true, message: t('至少添加一个检查项目'), trigger: 'blur' }],
+  checkItems: [{ required: true, message: t('inspection.checkItemsRequiredMsg'), trigger: 'blur' }],
 }
 
 // 手工解析 'YYYY-MM-DD HH:mm:ss' 为本地时间：Safari 对该格式 new Date 会返回 Invalid Date
@@ -298,7 +332,7 @@ function validateEndTime(rule, value, callback) {
     form.planStartTime &&
     parseLocalDateTime(value) <= parseLocalDateTime(form.planStartTime)
   ) {
-    callback(new Error(t('结束时间必须晚于开始时间')))
+    callback(new Error(t('inspection.endAfterStartMsg')))
   } else {
     callback()
   }
@@ -447,16 +481,16 @@ const handleSubmit = async () => {
 
         if (isEdit.value) {
           await api.inspections.update(props.editData._id, submitData)
-          ElMessage.success(t('巡检计划更新成功'))
+          ElMessage.success(t('inspection.planUpdateSuccessMsg'))
         } else {
           await api.inspections.create(submitData)
-          ElMessage.success(t('巡检计划创建成功'))
+          ElMessage.success(t('inspection.planCreateSuccessMsg'))
         }
 
         visible.value = false
         emit('success')
       } catch (error) {
-        ElMessage.error(t('提交失败，请重试'))
+        ElMessage.error(t('common.submitFailedRetry'))
       } finally {
         loading.value = false
       }
