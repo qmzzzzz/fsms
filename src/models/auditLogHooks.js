@@ -75,13 +75,21 @@ const applyHooks = (schema, logger) => {
     next(error);
   });
 
+  // #2（评价报告高危）：append-only 护栏此前漏掉 updateMany / bulkWrite /
+  // findOneAndReplace 三类批量写入口——与 updateOne/deleteMany 走同一前置钩子，
+  // 批量篡改审计日志的路径同样被拦截。注意该护栏仅覆盖 Mongoose ODM 层，
+  // 经原生驱动（mongoose.connection.db.collection(...)）的写入不受此约束，
+  // 「篡改可发现」的最终保障落在哈希链校验（scripts/verify-audit-chain）。
   const appendOnlyHooks = [
     'updateOne',
+    'updateMany',
     'deleteOne',
     'deleteMany',
     'replaceOne',
     'findOneAndUpdate',
     'findOneAndDelete',
+    'findOneAndReplace',
+    'bulkWrite',
   ];
   schema.pre(appendOnlyHooks, function (next) {
     if (!appendOnlyEnforced) return next();

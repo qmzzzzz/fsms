@@ -24,6 +24,14 @@ test-results/
 # 备份/编辑器残留
 *.bak
 
+# 数据备份产物（#4）：scripts/backup-mongo.sh 输出目录 backups/、
+# run-rollback-drill.js 产出的含口令哈希/mfaSecret/审计日志的 *.ndjson.gz，
+# 以及任何私钥文件（.pem/.key，含 .env.example 引导生成的 login_ecdh_private.pem）
+backups/
+*.ndjson.gz
+*.pem
+*.key
+
 # 构建
 web-admin/dist/
 dist/
@@ -64,19 +72,12 @@ secrets/
 # 工具/会话内部状态（非项目代码，不入库）
 .mimosa/
 
+# 会话工具生成的完整性快照（引用被忽略文件，新克隆无法复现，不入库）
+.merkle-snapshot.json
+
 # 会话工具内部记忆（非项目代码）
 .workbuddy/
 # 设计参考资产副本（工具技能产物，如需入库可移除本行）
 .design_library/
 # 前端构建产物变体
 web-admin/dist-optimized/
-
-# 备份目录（run-rollback-drill / backup-mongo 默认产出路径）
-backups/
-
-# 审计/敏感导出（ndjson.gz 含用户哈希与审计日志）
-*.ndjson.gz
-
-# 私钥/证书文件（login_ecdh_private.pem 等）
-*.pem
-*.key

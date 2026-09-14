@@ -47,38 +47,38 @@ describe('captchaService 分支补齐', () => {
   });
 
   describe('Redis 模式校验（一次性消费语义）', () => {
+    // 评价报告低危项：verify 已改用原子取删 getDel（GETDEL），不再 get→del 两步
     const setupRedisMode = () => {
       jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(true);
       return {
-        delSpy: jest.spyOn(sharedCache, 'del').mockResolvedValue(true),
-        getSpy: jest.spyOn(sharedCache, 'get'),
+        getDelSpy: jest.spyOn(sharedCache, 'getDel'),
       };
     };
 
-    test('命中且文本匹配（大小写不敏感 + 去空白）→ true，且条目被删除', async () => {
-      const { delSpy, getSpy } = setupRedisMode();
-      getSpy.mockResolvedValue({ text: 'AbCd' });
+    test('命中且文本匹配（大小写不敏感 + 去空白）→ true，且取删即消费', async () => {
+      const { getDelSpy } = setupRedisMode();
+      getDelSpy.mockResolvedValue({ text: 'AbCd' });
       await expect(captchaService.verify('cid-1', '  aBcD ')).resolves.toBe(true);
-      expect(delSpy).toHaveBeenCalledWith('captcha:cid-1');
+      expect(getDelSpy).toHaveBeenCalledWith('captcha:cid-1');
     });
 
     test('条目不存在 → false', async () => {
-      const { getSpy } = setupRedisMode();
-      getSpy.mockResolvedValue(null);
+      const { getDelSpy } = setupRedisMode();
+      getDelSpy.mockResolvedValue(null);
       await expect(captchaService.verify('cid-2', 'AAAA')).resolves.toBe(false);
     });
 
     test('条目 text 非字符串（脏数据）→ false', async () => {
-      const { getSpy } = setupRedisMode();
-      getSpy.mockResolvedValue({ text: 1234 });
+      const { getDelSpy } = setupRedisMode();
+      getDelSpy.mockResolvedValue({ text: 1234 });
       await expect(captchaService.verify('cid-3', '1234')).resolves.toBe(false);
     });
 
-    test('读取抛错时仍在 finally 中消费条目（杜绝悬挂验证码）', async () => {
-      const { delSpy, getSpy } = setupRedisMode();
-      getSpy.mockRejectedValue(new Error('cache down (故障注入)'));
-      await expect(captchaService.verify('cid-4', 'AAAA')).rejects.toThrow();
-      expect(delSpy).toHaveBeenCalledWith('captcha:cid-4');
+    test('取删抛错 → 按未通过处理（fail-closed，不悬挂验证码）', async () => {
+      const { getDelSpy } = setupRedisMode();
+      getDelSpy.mockRejectedValue(new Error('cache down (故障注入)'));
+      await expect(captchaService.verify('cid-4', 'AAAA')).resolves.toBe(false);
+      expect(getDelSpy).toHaveBeenCalledWith('captcha:cid-4');
     });
   });
 });

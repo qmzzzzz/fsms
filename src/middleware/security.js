@@ -14,6 +14,10 @@ const { auditPath, deriveAuditMeta, ROUTE_CATEGORY_MAP } = require('../utils/aud
 // 测试环境销毁后执行，惰性 require 会抛「import after torn down」
 const AuditLog = require('../models/AuditLog');
 const { computeFingerprint } = require('../utils/fingerprint');
+// #10：脱敏名单单一事实来源——与 models/auditLogSanitizer.js 复用同一份
+// SENSITIVE_KEYS，避免两处名单漂移（原内联名单缺 secret/apikey，同一审计体
+// 两条路径脱敏口径不一、可能明文入库）。此处仅取名单键，脱敏遍历逻辑各自保留。
+const { SENSITIVE_KEYS: AUDIT_SENSITIVE_KEYS } = require('../models/auditLogSanitizer');
 
 /**
  * CSP 违规上报端点（G9）
@@ -429,6 +433,16 @@ const checkIPBlacklist = async (req, res, next) => {
       });
       return ApiResponse.error(res, '您的 IP 已被禁止访问', 403);
     }
+    // 评价报告 #7：fail-open 放行（缓存未命中）必须有显式可观测信号——
+    // 否则「DB 挂了 + 全站裸奔」只有一条 error 日志可循。计入
+    // security_alerts_total{type=ip_blacklist_failopen,level=high}，
+    // 由 alert-rules 的「安全告警突增」规则捕获，运维可据此紧急处置。
+    try {
+      require('../utils/metrics').incSecurityAlert('ip_blacklist_failopen', 'high');
+    } catch (_) {
+      /* 指标端不可用不影响放行主流程 */
+    }
+    logger.warn(`IP 黑名单降级缓存未命中，fail-open 放行：${clientIP}`);
   }
 
   next();
@@ -586,14 +600,8 @@ const auditLog = (options = {}) => {
             ? null
             : (() => {
                 // 脱敏敏感字段（递归处理嵌套对象与数组，防止嵌套的密码/令牌明文入库）
-                const SENSITIVE_KEYS = [
-                  'password',
-                  'currentpassword',
-                  'newpassword',
-                  'mfacode',
-                  'token',
-                  'refreshtoken',
-                ];
+                // #10：名单来自 models/auditLogSanitizer 单一事实来源（含 secret/apikey）
+                const SENSITIVE_KEYS = AUDIT_SENSITIVE_KEYS;
                 const sanitizeValue = (value, depth = 0) => {
                   // 深度保护，避免循环引用/超深嵌套导致栈溢出
                   if (depth > 6 || value === null || typeof value !== 'object') return value;
@@ -741,7 +749,11 @@ const applyPreBodySecurity = (app) => {
   app.use(reportingEndpoints);
   // 协议合规校验：置于 body 解析之前，畸形请求早拒绝、不进入下游解析
   const { protocolCompliance } = require('./protocolCompliance');
-  app.use(protocolCompliance());
+  // 评价报告低危项：Content-Length 上限与 express.json 的 body 上限（1mb）
+  // 对齐——原默认 10MB 让 1MB~10MB 的请求在协议层放行后又被 body 解析
+  // 413 拒掉，两道闸门口径不一，审计里的拒绝原因也不一致。
+  // 业务载荷均为小表单（无文件上传端点），1MB 是两层的统一收口。
+  app.use(protocolCompliance({ maxContentLength: 1024 * 1024 }));
 };
 
 /**

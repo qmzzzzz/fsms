@@ -151,6 +151,23 @@ describe('安全管理深覆盖（批次 C）', () => {
     expect(badType.status).toBe(400);
   });
 
+  test('#9 普通用户（无 system:read）经二次验证可查看本人敏感信息；查看他人被拒', async () => {
+    // 本人：lowToken 无 system:read，但查的是自己 → 免鉴权放行 → requireReAuthentication 通过后 200
+    const selfOk = await request(app)
+      .post('/api/security/view-sensitive')
+      .set('Authorization', `Bearer ${lowToken}`)
+      .send({ dataType: 'email', currentPassword: PASSWORD });
+    expect(selfOk.status).toBe(200);
+    expect(selfOk.body.data.full).toBe(`sdlow${stamp}@example.com`);
+
+    // 他人：lowToken 查 victim → 需 system:read → 403
+    const otherForbidden = await request(app)
+      .post('/api/security/view-sensitive')
+      .set('Authorization', `Bearer ${lowToken}`)
+      .send({ dataType: 'email', targetUserId: victimId, currentPassword: PASSWORD });
+    expect(otherForbidden.status).toBe(403);
+  });
+
   test('强化改密：确认密码不一致 400 → 成功 200', async () => {
     const mismatch = await request(app)
       .put('/api/security/change-password')

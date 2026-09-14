@@ -12,28 +12,7 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
-    # 私有仓库在未开通 code scanning（GitHub Advanced Security）时，CodeQL 的
-    # 分析本身能完整跑完，但 SARIF 上传会被拒——
-    #   "Code scanning is not enabled for this repository. Please enable code
-    #    scanning in the repository settings."
-    # job 必红且扫描结果无处落地，等于纯烧 runner 时间（2026-09-11 CI 实证：
-    # analyze 步骤 6 分钟跑完 344 个文件，最后一步 403）。经 API 开启 default
-    # setup 也被 404 拒绝，说明当前套餐/账号形态下无法程序化开启。
-    # 因此本工作流仅在**公开**仓库上运行；仓库转公开、或在
-    # Settings → Code security and analysis 里开通 code scanning 后，
-    # 删掉下面这行 if 即可恢复。
-    if: github.event.repository.private == false
     permissions:
-      # 声明 permissions 会整体覆盖仓库默认令牌作用域，未列出的作用域一律变成 none，
-      # 因此必须显式补回本流程真正用到的每一项（2026-09-11 CI 逐项实证）：
-      #   contents: read        → 缺了 actions/checkout 报 "Repository not found"
-      #   actions: read         → 缺了 analyze 报 "Resource not accessible by integration"
-      #                           （其内部会调 GET /actions/runs/{id} 取运行元数据）
-      #   packages: read        → analyze 拉取依赖包所需（私有仓）
-      #   security-events: write → 上传 SARIF 到 code scanning
-      contents: read
-      actions: read
-      packages: read
       security-events: write
 
     strategy:

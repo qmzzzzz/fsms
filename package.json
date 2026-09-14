@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "lint": "eslint src scripts eslint.config.js",
+    "lint": "eslint src scripts e2e eslint.config.js",
     "lint:ratchet": "node scripts/lint-ratchet.js",
     "lint:web": "npm --prefix web-admin run lint",
     "lint:all": "npm run lint && npm run lint:ratchet && npm run lint:web",

@@ -42,6 +42,28 @@ function escapeLabelValue(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
 }
 
+// 评价报告低危项：指标 Map 无淘汰上限——正常路径 route 标签是路由模板
+// （有界），但防御纵深不能依赖单一标签的自觉：未来任何人引入一个用户可控
+// 标签（如 path、userId），长跑进程内存就会缓慢增长。加全局 series 上限：
+// 超限后只累计已存在的 series、丢弃新 series，并告警一次。
+const MAX_SERIES = 5000;
+let seriesLimitWarned = false;
+function canAddSeries(currentSize) {
+  if (currentSize < MAX_SERIES) return true;
+  if (!seriesLimitWarned) {
+    seriesLimitWarned = true;
+    // 惰性 require 避免 logger ↔ metrics 潜在加载环
+    try {
+      require('./logger').warn(
+        `指标 series 数已达上限 ${MAX_SERIES}，新 series 被丢弃（疑似高基数标签泄漏）`
+      );
+    } catch (_) {
+      /* logger 不可用时静默，指标采集绝不影响业务 */
+    }
+  }
+  return false;
+}
+
 function labelsKey(labels) {
   const parts = [];
   for (const key of Object.keys(labels)) {
@@ -50,10 +72,13 @@ function labelsKey(labels) {
   return parts.join(',');
 }
 
-/** 计数器 +1（不存在则建 0，并登记标签对象供 snapshot 使用） */
+/** 计数器 +1（不存在则建 0，并登记标签对象供 snapshot 使用；受 MAX_SERIES 约束） */
 function incCounter(map, labels, labelStore) {
   const key = labelsKey(labels);
-  if (!labelStore.has(key)) labelStore.set(key, labels);
+  if (!map.has(key)) {
+    if (!canAddSeries(map.size)) return;
+    labelStore.set(key, labels);
+  }
   map.set(key, (map.get(key) || 0) + 1);
 }
 
@@ -84,6 +109,7 @@ function metricsMiddleware(req, res, next) {
       const key = labelsKey(labels);
       let h = histograms.get(key);
       if (!h) {
+        if (!canAddSeries(histograms.size)) return;
         h = { buckets: DURATION_BUCKETS.map(() => 0), sum: 0, count: 0 };
         histograms.set(key, h);
         histogramLabels.set(key, labels);

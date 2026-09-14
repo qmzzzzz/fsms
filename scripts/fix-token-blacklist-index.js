@@ -26,7 +26,7 @@ const mongoose = require('mongoose');
 const APPLY = process.argv.includes('--apply');
 
 (async () => {
-  const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/fire_safety';
+  const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/fire_safety_db';
   await mongoose.connect(uri);
   console.log(
     `已连接：${mongoose.connection.host}:${mongoose.connection.port}/${mongoose.connection.name}`

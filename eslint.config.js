@@ -88,7 +88,8 @@ module.exports = [
       'no-global-assign': 'error',
 
       // 棘轮第六档（O-3，2026-09-05）：体积棘轮，warn 级 + 基线锁死不增。
-      // 首次基线（eslint.ratchet.json）：94 个文件共 133 条 warn，集中在
+      // 首次基线为 94 个文件共 133 条 warn；经多轮瘦身与 e2e 纳入 lint 后，
+      // 当前基线（eslint.ratchet.json）：16 个文件共 17 条 warn，集中在
       // initData/authService/securityController 等大文件与长测试套件——
       // 正是控制器瘦身与拆分的后续目标。与第五档「清零后提 error」不同，
       // 体积债短期清不完，故走 warn + scripts/lint-ratchet.js 逐文件计数

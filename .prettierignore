@@ -9,5 +9,3 @@ web-admin/src/auto-imports.d.ts
 web-admin/src/components.d.ts
 # 交付物报告（生成型 HTML 产物，重排只会产生巨量无意义 diff）
 deliverables/*.html
-# 完整性校验快照（脚本生成的紧凑 JSON 数据文件，非手写源码；重排会产生数千行噪音 diff）
-.merkle-snapshot.json

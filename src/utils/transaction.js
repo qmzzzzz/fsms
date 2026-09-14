@@ -12,10 +12,12 @@
  * - standalone（拓扑类型 Single）：降级为顺序执行 fn(null)——与修复前行为
  *   一致，并告警一次提示多集合一致性此时依赖应用层写入顺序。
  *
- * 能力判定读驱动拓扑描述（client.topology.description.type），确定性探测、
- * 不依赖「先写失败再重试」——空事务的 commit 会被驱动跳过，用错误推断
- * 能力会把 standalone 误判为支持事务。拓扑不可读时按支持处理，
- * 让真实错误自然暴露而非静默降级。
+ * 能力判定用 hello 命令探测（评价报告 #14）：原实现读
+ * client.topology.description.type——driver 6 的内部属性，不稳定且可能读不到，
+ * 读不到时按支持处理（fail-loud）会把 standalone 误判为支持事务。
+ * 改为向 admin 库发一次 hello：副本集成员响应含 setName、mongos 含
+ * msg='isdbgrid'，standalone 两者皆无——这是驱动公开契约，跨版本稳定。
+ * 探测失败（含未连库 client 缺失）仍按支持处理，让真实错误自然暴露而非静默降级。
  *
  * 调用约定：fn 接收 session（可能为 null），所有写操作必须透传
  * `{ session }`（session 为 null 时传空对象即可，Mongoose 会忽略）。
@@ -27,11 +29,21 @@ const logger = require('./logger');
 // 降级告警只发一次（每次部署/进程一条，避免刷日志）
 let degradeWarned = false;
 
-/** 当前拓扑是否支持事务；拓扑不可读时按支持处理（fail-loud） */
-const topologySupportsTransactions = () => {
-  const type = mongoose.connection.client?.topology?.description?.type;
-  if (!type) return true;
-  return type !== 'Single';
+// 探测结果缓存：hello 是一次网络往返，进程内只需探一次（连接拓扑不会热切换）
+let cachedSupport = null;
+
+/** hello 探测当前拓扑是否支持事务；探测失败按支持处理（fail-loud） */
+const detectTransactionSupport = async () => {
+  if (cachedSupport !== null) return cachedSupport;
+  try {
+    const hello = await mongoose.connection.client.db('admin').command({ hello: 1 });
+    cachedSupport = Boolean(hello.setName) || hello.msg === 'isdbgrid';
+  } catch (err) {
+    // 未连库（client 缺失）或探测网络失败：按支持处理，真实错误自然暴露
+    logger.warn(`事务能力探测失败，按副本集处理（fail-loud）：${err.message}`);
+    cachedSupport = true;
+  }
+  return cachedSupport;
 };
 
 /**
@@ -41,7 +53,7 @@ const topologySupportsTransactions = () => {
  * @returns {Promise<T>} fn 的返回值
  */
 async function withTransaction(fn, options = {}) {
-  if (!topologySupportsTransactions()) {
+  if (!(await detectTransactionSupport())) {
     if (!degradeWarned) {
       degradeWarned = true;
       logger.warn(
@@ -69,9 +81,10 @@ async function withTransaction(fn, options = {}) {
   }
 }
 
-/** 仅供测试：重置降级告警标志 */
+/** 仅供测试：重置降级告警标志与探测缓存 */
 function _resetForTests() {
   degradeWarned = false;
+  cachedSupport = null;
 }
 
 module.exports = { withTransaction, _resetForTests };

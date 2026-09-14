@@ -88,6 +88,30 @@ const checkPermission = (requiredPermissions, logic = 'OR') => {
 };
 
 /**
+ * 查看他人敏感信息需 system:read；查看本人敏感信息则免鉴权（#9）
+ *
+ * 背景（评价报告 #9）：/api/security/view-sensitive 原实现一律要求
+ * system:read，但控制器查询的是调用者本人数据（securityController.js:239
+ * `User.findById(req.user.userId)`），普通角色（消防员/访客）查看本人
+ * 手机号/邮箱也拿不到该权限 → 403。正确口径是：
+ *   - 本人查看 → 放行（数据范围即本人，二次验证已由 requireReAuthentication 兜底）
+ *   - 查看他人（请求体带 targetUserId）→ 需要 system:read
+ * 注意：超管持有 *:* 恒通过（上方 checkPermission 顶层已处理），不受影响。
+ */
+const checkViewSensitivePermission = async (req, res, next) => {
+  try {
+    const { targetUserId } = req.body || {};
+    if (targetUserId && String(targetUserId) !== String(req.user.userId)) {
+      return checkPermission('system:read')(req, res, next);
+    }
+    return next();
+  } catch (error) {
+    logger.error('查看敏感信息权限检查出错', { error: error.message });
+    return next(error);
+  }
+};
+
+/**
  * 角色检查中间件
  * @param {string|string[]} requiredRoles - 需要的角色编码
  */
@@ -352,6 +376,7 @@ const applyDataScopeToQuery = (query, dataScope, { ownerField, departmentField }
 
 module.exports = {
   checkPermission,
+  checkViewSensitivePermission,
   checkRole,
   getDataScope,
   buildDataScopeFilter,

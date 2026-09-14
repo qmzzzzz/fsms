@@ -351,6 +351,8 @@ export default {
     occurredAt: 'Occurred At',
     receivedAt: 'Received At',
     reportAlarm: 'Report Alarm',
+    deviceId: 'Device ID',
+    deviceIdPlaceholder: 'Optional device ID',
     dispatch: 'Dispatch',
     arrive: 'Arrive',
     resolve: 'Resolve',

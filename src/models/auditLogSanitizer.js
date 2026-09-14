@@ -28,4 +28,4 @@ const sanitizeAuditBody = (body, depth = 0) => {
   return cleaned;
 };
 
-module.exports = { sanitizeAuditBody };
+module.exports = { sanitizeAuditBody, SENSITIVE_KEYS };

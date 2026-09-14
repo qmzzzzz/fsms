@@ -286,11 +286,18 @@ class AlarmService {
 
   /**
    * 取消报警
+   * 评价报告 #11：补对象级授权——已指派的工单仅处理人本人可取消，
+   * 未指派（pending 且无 handler）任何同数据范围者可取消。
+   * 与 markAsFalseAlarm 的 M-1 口径一致，堵住「同范围者取消他人工单」路径。
    */
   async cancelAlarm(id, reason, operatorId) {
     const now = new Date();
     const updated = await FireAlarm.findOneAndUpdate(
-      { _id: id, status: 'pending' },
+      {
+        _id: id,
+        status: 'pending',
+        $or: [{ handler: operatorId }, { handler: { $exists: false } }, { handler: null }],
+      },
       {
         $set: { status: 'cancelled' },
         $push: {

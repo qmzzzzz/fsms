@@ -339,6 +339,8 @@ export default {
     occurredAt: '发生时间',
     receivedAt: '接收时间',
     reportAlarm: '上报火警',
+    deviceId: '设备 ID',
+    deviceIdPlaceholder: '选填设备 ID',
     dispatch: '指派处理',
     arrive: '到达现场',
     resolve: '处理完成',

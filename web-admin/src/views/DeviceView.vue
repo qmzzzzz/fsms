@@ -220,6 +220,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api } from '@/utils/api'
+import { localDateStr as sharedLocalDateStr } from '@/utils/datetime'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 
@@ -265,11 +266,9 @@ const statusText = (s) =>
     scrapped: t('deviceStatus.scrapped'),
   })[s] || s
 
-// 本地时区日期串（YYYY-MM-DD）：toISOString 按 UTC 取日期会导致跨日偏移
-const localDateStr = (d = new Date()) => {
-  const p = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
-}
+// 本地时区日期串（YYYY-MM-DD）：toISOString 按 UTC 取日期会导致跨日偏移。
+// 评价报告 #20：删除本文件的重复实现，统一走 utils/datetime 单一事实来源
+const localDateStr = sharedLocalDateStr
 // 编辑回填：已是 YYYY-MM-DD 字符串则原样使用，Date/时间戳按本地时区取日期部分
 const toDateOnly = (value) => {
   if (!value) return ''

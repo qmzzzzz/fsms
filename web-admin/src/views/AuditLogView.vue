@@ -374,6 +374,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { apiClient } from '@/utils/api'
+import { localDateStr } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { usePermission } from '@/composables/usePermission'
 
@@ -538,7 +539,8 @@ const exportLogs = async () => {
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `audit_logs_${new Date().toISOString().slice(0, 10)}.xlsx`
+    // 评价报告 #20：文件名日期走本地时区（toISOString 在东八区 0-8 点会早一天）
+    link.download = `audit_logs_${localDateStr()}.xlsx`
     link.click()
     window.URL.revokeObjectURL(url)
 

@@ -8,9 +8,8 @@ const { validationResult } = require('express-validator');
 const AuditLog = require('../models/AuditLog');
 const SystemConfig = require('../models/SystemConfig');
 const ApiResponse = require('../utils/apiResponse');
-const { getOperatorMaxLevel } = require('../utils/permissionHelper');
+const { getOperatorMaxLevel, maxRoleLevel } = require('../utils/permissionHelper');
 const { DataMasking } = require('../utils/encryption');
-const { validatePasswordStrength } = require('../utils/helpers');
 const { isSuperAdminRole } = require('../utils/superAdmin');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
@@ -91,96 +90,50 @@ const changePasswordSecure = asyncHandler(async (req, res) => {
     return ApiResponse.error(res, '数据验证失败', 400, errors.array());
   }
 
-  // ===== 口令密文轨（S5：与 /api/auth/password 双轨口径一致）=====
-  // LOGIN_ENCRYPT_STRICT=true 后明文轨已被校验层关闭，此端点此前只收明文，
-  // 会成为「明文轨已关」不变量的缺口；现在密文字段优先，解密后走同一套校验
-  const { decryptLoginCredential } = require('../utils/loginCipher');
-  let currentPassword = req.body.currentPassword;
-  if (typeof req.body.encCurrentPassword === 'string' && req.body.encCurrentPassword) {
-    try {
-      currentPassword = await decryptLoginCredential(req.body.encCurrentPassword);
-    } catch (err) {
-      logger.warn('改密拒绝 - 当前口令密文无效', { username: req.user?.username, code: err.code });
-      return ApiResponse.codeError(res, 'AUTH_ENCRYPTED_CREDENTIAL_INVALID');
-    }
-  }
+  // 评价报告 #15（改密逻辑双实现收敛）：本端点与 /api/auth/password 的
+  // 「解密→确认→强度→比对→落库→吊销→会话收敛」此前各写一遍，极易漂移。
+  // 现在控制器只做 HTTP 语义映射，业务规则全部收敛到
+  // authService.changeUserPassword 单一实现（确认密码比对在解密后于业务层完成）。
+  const result = await authService.changeUserPassword(req.user.userId, req.body, {
+    username: req.user?.username,
+  });
 
-  let newPassword = req.body.newPassword;
-  if (typeof req.body.encNewPassword === 'string' && req.body.encNewPassword) {
-    try {
-      newPassword = await decryptLoginCredential(req.body.encNewPassword);
-    } catch (err) {
-      logger.warn('改密拒绝 - 新口令密文无效', { username: req.user?.username, code: err.code });
+  switch (result.outcome) {
+    case 'ENC_INVALID':
       return ApiResponse.codeError(res, 'AUTH_ENCRYPTED_CREDENTIAL_INVALID');
-    }
-    // 密文轨下校验层无法比对 confirm（明文在信封内）：若客户端仍携带
-    // 明文 confirmPassword，则在此兜底比对；未携带时以解密结果为准
-    const { confirmPassword } = req.body;
-    if (typeof confirmPassword === 'string' && confirmPassword && confirmPassword !== newPassword) {
+    case 'MISSING':
+      return ApiResponse.error(res, '请提供当前密码和新密码', 400);
+    case 'CONFIRM_MISMATCH':
       return ApiResponse.error(res, '两次输入的新密码不一致', 400);
-    }
-  } else if (newPassword !== req.body.confirmPassword) {
-    // 明文轨：验证新密码一致性
-    return ApiResponse.error(res, '两次输入的新密码不一致', 400);
+    case 'WEAK':
+      return ApiResponse.error(res, result.message, 400);
+    case 'USER_NOT_FOUND':
+      return ApiResponse.unauthorized(res, '用户不存在或已被删除');
+    case 'CURRENT_WRONG':
+      logger.warn('密码修改失败 - 当前密码错误', { username: req.user?.username });
+      return ApiResponse.error(res, '当前密码错误', 400);
+    case 'SAME_PASSWORD':
+      return ApiResponse.error(res, '新密码不能与当前密码相同', 400);
+    case 'REVOKE_FAILED':
+      // fail-closed：密码已落库但吊销失败，如实告知「已改但未吊销」（与 auth 端点同文案）
+      return ApiResponse.error(
+        res,
+        '密码已修改，但会话吊销服务暂不可用，旧登录状态可能仍然有效，请重新登录',
+        503
+      );
+    default:
+      break;
   }
 
-  // 验证新密码强度（统一企业级策略；密文轨的明文只有解密后才能评估）
-  const strengthError = validatePasswordStrength(newPassword);
-  if (strengthError) {
-    return ApiResponse.error(res, strengthError, 400);
-  }
-
-  const user = await User.findById(req.user.userId).select('+password');
-  if (!user) {
-    return ApiResponse.unauthorized(res, '用户不存在或已被删除');
-  }
-
-  // 验证当前密码
-  const isMatch = await user.comparePassword(currentPassword);
-  if (!isMatch) {
-    logger.warn('密码修改失败 - 当前密码错误', { username: user.username });
-    return ApiResponse.error(res, '当前密码错误', 400);
-  }
-
-  // 检查新密码是否与旧密码相同
-  if (await user.comparePassword(newPassword)) {
-    return ApiResponse.error(res, '新密码不能与当前密码相同', 400);
-  }
-
-  // 更新密码
-  user.password = newPassword;
-  user.passwordChangedAt = new Date();
-  await user.save();
-
-  // 改密后立即吊销该用户全部会话，与 /api/auth/password 口径一致：
-  // invalidateUserTokens 内部完成 tokenVersion += 1 与用户缓存失效。
-  // fail-closed：密码此刻已落库，吊销失败绝不能变成笼统 500 或假装成功——
-  // 必须如实告知「已改但未吊销」，引导用户重新登录以建立干净会话
-  const { invalidateUserTokens } = require('../middleware/tokenBlacklist');
-  try {
-    await invalidateUserTokens(user._id);
-  } catch (revokeErr) {
-    logger.error(`改密成功但会话吊销失败：${revokeErr.message}`, { username: user.username });
-    return ApiResponse.error(
-      res,
-      '密码已修改，但会话吊销服务暂不可用，旧登录状态可能仍然有效，请重新登录',
-      503
-    );
-  }
-  // 会话表须与 tokenVersion 同步收敛：tokenVersion 递增已让所有令牌失效，
-  // 但会话记录若仍是 active，「登录会话」界面会列出一批实际已掉线的设备，
-  // 用户据此判断「账号是否被别人登录着」会得到错误结论
-  await sessionService.revokeAllSessionsSafe(user._id, 'password_changed');
-
-  logger.info('用户成功修改密码', { username: user.username });
+  logger.info('用户成功修改密码', { username: result.username });
 
   // 记录审计日志
   res.locals.skipGlobalAudit = true;
   await AuditLog.create({
     action: 'password_changed',
     category: 'auth',
-    userId: user._id,
-    username: user.username,
+    userId: req.user.userId,
+    username: result.username,
     ip: req.ip,
     userAgent: req.get('user-agent'),
     success: true,
@@ -234,9 +187,30 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
     return ApiResponse.error(res, '数据验证失败', 400, errors.array());
   }
 
-  const { dataType } = req.body;
+  const { dataType, targetUserId } = req.body;
+  // #9：本人查看（未指定 targetUserId 或指向自己）免鉴权——二次验证已由
+  // requireReAuthentication 兜底；查看他人需 system:read（路由层 checkViewSensitivePermission
+  // 已拦），且受数据范围约束（非超管不得越级查看层级高于自己的目标）。
+  const isSelf = !targetUserId || String(targetUserId) === String(req.user.userId);
 
-  const user = await User.findById(req.user.userId);
+  // 数据范围保护：查看他人时，操作者层级须 ≥ 目标用户层级（level 越低越敏感可读性差，
+  // 遵循「≥9 全部 / ≥7 本部门 / ≥5 仅本人」口径；超管 *:* 恒通过）
+  if (!isSelf) {
+    const opLevel = await getOperatorMaxLevel(req.user.userId);
+    const targetUser = await User.findById(targetUserId)
+      .select('roles')
+      .populate('roles', 'level')
+      .lean();
+    if (!targetUser) {
+      return ApiResponse.notFound(res, '目标用户不存在');
+    }
+    const targetLevel = maxRoleLevel(targetUser.roles);
+    if (opLevel < targetLevel) {
+      return ApiResponse.forbidden(res, '无权查看更高层级用户的敏感信息');
+    }
+  }
+
+  const user = isSelf ? await User.findById(req.user.userId) : await User.findById(targetUserId);
   if (!user) {
     return ApiResponse.unauthorized(res, '用户不存在或已被删除');
   }

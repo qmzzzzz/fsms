@@ -166,8 +166,12 @@
             show-word-limit
           />
         </el-form-item>
-        <el-form-item label="Device ID" prop="deviceId">
-          <el-input v-model="reportForm.deviceId" placeholder="Optional device ID" maxlength="24" />
+        <el-form-item :label="$t('alarm.deviceId')" prop="deviceId">
+          <el-input
+            v-model="reportForm.deviceId"
+            :placeholder="$t('alarm.deviceIdPlaceholder')"
+            maxlength="24"
+          />
         </el-form-item>
       </el-form>
       <template #footer>

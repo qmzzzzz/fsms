@@ -260,7 +260,11 @@ fireDeviceSchema.methods.scrapped = function (reason) {
 // B-2：overrides 允许调用方把补录字段（如历史报废日期）并入同一次原子写入——
 // 此前 scrapDevice 先 transitionTo 落库再二次 save 补 scrapDate，两步之间失败
 // 会留下「状态 scrapped 但报废日期矛盾」的半成品记录
-fireDeviceSchema.methods.transitionTo = function (stage, overrides = {}) {
+// 评价报告低危项：原为同步方法 + 同步 throw——直调方（不经 DeviceService
+// try/catch 的路径）会让非法迁移变成 500。改为 async 方法，throw 自动变成
+// rejected Promise：await 调用方语义不变，遗漏 await 也只是 unhandled rejection
+// 而非同步崩溃，且错误可被统一错误处理链按 ApiError 映射为 400。
+fireDeviceSchema.methods.transitionTo = async function (stage, overrides = {}) {
   const transitions = {
     installed: ['in_use', 'scrapped'],
     in_use: ['maintenance', 'retired', 'scrapped'],
@@ -270,7 +274,9 @@ fireDeviceSchema.methods.transitionTo = function (stage, overrides = {}) {
   };
 
   if (!transitions[this.lifecycleStage]?.includes(stage)) {
-    throw new Error(`无法从 ${this.lifecycleStage} 转换到 ${stage}`);
+    const err = new Error(`无法从 ${this.lifecycleStage} 转换到 ${stage}`);
+    err.statusCode = 400;
+    throw err;
   }
 
   this.lifecycleStage = stage;

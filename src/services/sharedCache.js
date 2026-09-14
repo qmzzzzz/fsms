@@ -183,6 +183,36 @@ async function del(key) {
 }
 
 /**
+ * 原子取删（评价报告低危项：验证码 get→del 两步在并发下可双花）。
+ * Redis ≥6.2 走 GETDEL（compose 钉 redis:7）；命令不可用时降级为
+ * get→del 的旧两步语义（可用性优先，调用方可接受极小双花窗口）。
+ * 内存回退路径本身是同步取删，天然原子。
+ * @returns {Promise<{value:*|null}>|Promise<*|null>} 取出的值，不存在/已过期返回 null
+ */
+async function getDel(key) {
+  if (isRedisEnabled()) {
+    try {
+      const raw = await redisClient.getdel(key);
+      return raw === null ? null : JSON.parse(raw);
+    } catch (err) {
+      logger.debug(`共享缓存 getdel 失败（降级 get+del）：${err.message}`);
+      try {
+        const value = await get(key);
+        await del(key);
+        return value;
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+  const entry = memStore.get(key);
+  if (!entry) return null;
+  memStore.delete(key);
+  if (entry.expireAt <= Date.now()) return null;
+  return entry.value;
+}
+
+/**
  * 原子自增 + 首设过期（限流计数类用途）。
  * @returns {number} 自增后的值
  */
@@ -369,6 +399,7 @@ module.exports = {
   set,
   get,
   del,
+  getDel,
   incrWithTtl,
   setIfAbsent,
   acquireLock,

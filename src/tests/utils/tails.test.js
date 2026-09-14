@@ -176,14 +176,14 @@ describe('尾差覆盖（批次 F）', () => {
       lifecycleStage: 'installed',
     });
     // lifecycleStage 迁移表：installed → in_use 合法；回退 installed 非法
-    // （transitionTo 为同步校验，非法迁移同步抛错）
+    // （transitionTo 已改 async（评价报告低危项），非法迁移返回 rejected Promise）
     await dev.transitionTo('in_use');
     expect(dev.lifecycleStage).toBe('in_use');
-    expect(() => dev.transitionTo('installed')).toThrow();
+    await expect(dev.transitionTo('installed')).rejects.toThrow();
 
     // in_use → scrapped 后无出口迁移
     await dev.transitionTo('scrapped');
-    expect(() => dev.transitionTo('in_use')).toThrow();
+    await expect(dev.transitionTo('in_use')).rejects.toThrow();
   });
 
   test('IPBlacklist：blockIP/unblockIP/isWhitelisted', async () => {

@@ -7,7 +7,6 @@
 
 const mongoose = require('mongoose');
 const AuditLog = require('../models/AuditLog');
-const User = require('../models/User');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
@@ -20,7 +19,6 @@ const {
 } = require('../utils/cursorPagination');
 const { normalizeIP } = require('../utils/ipUtils');
 const { AUDIT_CATEGORIES, AUDIT_LOG_ACTIONS } = require('../constants/audit');
-const { getDataScope } = require('../middleware/rbac');
 
 const AUDIT_LOG_CATEGORIES = AUDIT_CATEGORIES; // 单一事实来源：constants/audit.js
 const AUDIT_LOG_RISK_LEVELS = ['low', 'medium', 'high', 'critical'];
@@ -47,52 +45,9 @@ const buildAuditSummary = (summaryAgg) => {
   };
 };
 
-const deniedAuditQuery = (query) => {
-  const denied = { ...query, _id: { $in: [] } };
-  return denied;
-};
-
-const applyAuditDataScope = async (query, operatorId) => {
-  const dataScope = await getDataScope(operatorId);
-  if (dataScope.type === 'all') return { query, dataScope };
-
-  if (dataScope.type === 'self' && dataScope.userId) {
-    const requestedUserId = query.userId ? String(query.userId) : null;
-    if (requestedUserId && requestedUserId !== String(dataScope.userId)) {
-      return { query: deniedAuditQuery(query), dataScope };
-    }
-    return {
-      query: { ...query, userId: new mongoose.Types.ObjectId(dataScope.userId) },
-      dataScope,
-    };
-  }
-
-  if (dataScope.type === 'department') {
-    if (!dataScope.department) {
-      return {
-        query: { ...query, userId: new mongoose.Types.ObjectId(dataScope.userId) },
-        dataScope,
-      };
-    }
-    const departmentUserIds = await User.distinct('_id', {
-      department: dataScope.department,
-    });
-    const requestedUserId = query.userId ? String(query.userId) : null;
-    const inDepartment = departmentUserIds.some((id) => String(id) === requestedUserId);
-    if (requestedUserId && !inDepartment) {
-      return { query: deniedAuditQuery(query), dataScope };
-    }
-    if (departmentUserIds.length === 0) {
-      return { query: deniedAuditQuery(query), dataScope };
-    }
-    return {
-      query: { ...query, userId: { $in: departmentUserIds } },
-      dataScope,
-    };
-  }
-
-  return { query: deniedAuditQuery(query), dataScope };
-};
+// 评价报告 #22/#13：数据范围过滤（all/self/department 翻译 + 部门成员缓存）
+// 已拆分至 auditScopeFilter.js（体积棘轮），此处 re-export 保持既有调用面不变。
+const applyAuditDataScope = require('./auditScopeFilter').applyAuditDataScope;
 
 const fetchAuditCursorPage = (cursorQuery, query, limitNum) =>
   Promise.all([

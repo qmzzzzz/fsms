@@ -5,8 +5,9 @@
  * 低于 jest.config.js 门槛 { branches: 68, functions: 68 }。
  * 本文件用 mock 方式直接调用控制器函数，精确命中未覆盖行：
  *   - getMySecurityInfo: failedLogins > 3 分支（57-58）、recentLogins.map（71）
- *   - changePasswordSecure: 密码不一致(96)、弱密码(102)、用户不存在(107)、
- *     当前密码错误(113-114)、新旧密码相同(119)
+ *   - changePasswordSecure: #15 收敛后委托 authService.changeUserPassword，
+ *     覆盖 outcome → HTTP 映射（ENC_INVALID/MISSING/CONFIRM_MISMATCH/WEAK/
+ *     USER_NOT_FOUND/CURRENT_WRONG/SAME_PASSWORD/REVOKE_FAILED/OK）
  *   - viewSensitiveData: 用户不存在(203)、email 分支(217-224)
  *   - reportSuspiciousActivity: 缺 targetType/reason(312)
  *   - toggleUserLock: 用户不存在(384)、同级拦截(402)、inactive 解锁(415)、
@@ -91,6 +92,17 @@ jest.mock('../../utils/logger', () => ({
 jest.mock('../../services/sessionService', () => ({
   revokeAllSessionsSafe: jest.fn(() => Promise.resolve()),
 }));
+
+// authService mock（评价报告 #15 收敛后，changePasswordSecure 委托业务层单一实现）。
+// 注意：必须保留真实模块的其余导出——toggleUserLock 依赖 authService.setUserLockStatus
+const mockChangeUserPassword = jest.fn();
+jest.mock('../../services/authService', () => {
+  const actual = jest.requireActual('../../services/authService');
+  return {
+    ...actual,
+    changeUserPassword: (...args) => mockChangeUserPassword(...args),
+  };
+});
 
 // tokenBlacklist mock（changePasswordSecure 内部 require）
 jest.mock('../../middleware/tokenBlacklist', () => ({
@@ -269,10 +281,12 @@ describe('getMySecurityInfo 分支补齐', () => {
 });
 
 // ============================================================
-// changePasswordSecure 未覆盖分支
+// changePasswordSecure 分支补齐（#15 收敛后：业务分支在 authService 单一实现内，
+// 此处验证控制器 outcome → HTTP 映射）
 // ============================================================
-describe('changePasswordSecure 分支补齐', () => {
-  test('新密码不一致返回 400（行 96）', async () => {
+describe('changePasswordSecure 分支补齐（委托 authService 后的映射）', () => {
+  test('CONFIRM_MISMATCH → 400 两次输入的新密码不一致', async () => {
+    mockChangeUserPassword.mockResolvedValue({ outcome: 'CONFIRM_MISMATCH' });
     const { req, res, next } = makeCtx({
       body: {
         currentPassword: 'OldPass1!xy2',
@@ -283,78 +297,71 @@ describe('changePasswordSecure 分支补齐', () => {
     await invoke(changePasswordSecure, req, res, next);
     expect(res.statusCode).toBe(400);
     expect(res.payload.message).toBe('两次输入的新密码不一致');
+    expect(mockChangeUserPassword).toHaveBeenCalledWith('u-admin', req.body, {
+      username: 'admin',
+    });
   });
 
-  test('密码强度不足返回 400（行 102）', async () => {
-    mockValidatePasswordStrength.mockReturnValue('密码太弱');
+  test('WEAK → 400 强度文案', async () => {
+    mockChangeUserPassword.mockResolvedValue({ outcome: 'WEAK', message: '密码太弱' });
     const { req, res, next } = makeCtx({
-      body: {
-        currentPassword: 'OldPass1!xy2',
-        newPassword: 'weak',
-        confirmPassword: 'weak',
-      },
+      body: { currentPassword: 'OldPass1!xy2', newPassword: 'weak' },
     });
     await invoke(changePasswordSecure, req, res, next);
     expect(res.statusCode).toBe(400);
     expect(res.payload.message).toBe('密码太弱');
   });
 
-  test('用户不存在返回 401（行 107）', async () => {
-    mockUserFindById.mockReturnValue({
-      select: jest.fn().mockResolvedValue(null),
-    });
-    const { req, res, next } = makeCtx({
-      body: {
-        currentPassword: 'OldPass1!xy2',
-        newPassword: 'NewPass1!abc',
-        confirmPassword: 'NewPass1!abc',
-      },
-    });
+  test('USER_NOT_FOUND → 401', async () => {
+    mockChangeUserPassword.mockResolvedValue({ outcome: 'USER_NOT_FOUND' });
+    const { req, res, next } = makeCtx({ body: { currentPassword: 'x', newPassword: 'y' } });
     await invoke(changePasswordSecure, req, res, next);
     expect(res.statusCode).toBe(401);
   });
 
-  test('当前密码错误返回 400（行 113-114）', async () => {
-    const fakeUser = {
-      username: 'testuser',
-      comparePassword: jest.fn().mockResolvedValue(false),
-    };
-    mockUserFindById.mockReturnValue({
-      select: jest.fn().mockResolvedValue(fakeUser),
-    });
-    const { req, res, next } = makeCtx({
-      body: {
-        currentPassword: 'WrongPass1!x',
-        newPassword: 'NewPass1!abc',
-        confirmPassword: 'NewPass1!abc',
-      },
-    });
+  test('CURRENT_WRONG → 400 当前密码错误', async () => {
+    mockChangeUserPassword.mockResolvedValue({ outcome: 'CURRENT_WRONG' });
+    const { req, res, next } = makeCtx({ body: { currentPassword: 'x', newPassword: 'y' } });
     await invoke(changePasswordSecure, req, res, next);
     expect(res.statusCode).toBe(400);
     expect(res.payload.message).toBe('当前密码错误');
   });
 
-  test('新密码与当前密码相同返回 400（行 119）', async () => {
-    // 第一次 comparePassword(currentPassword) → true（当前密码正确）
-    // 第二次 comparePassword(newPassword) → true（新旧相同）
-    const fakeUser = {
-      username: 'testuser',
-      comparePassword: jest.fn().mockResolvedValue(true),
-      save: jest.fn(),
-    };
-    mockUserFindById.mockReturnValue({
-      select: jest.fn().mockResolvedValue(fakeUser),
-    });
-    const { req, res, next } = makeCtx({
-      body: {
-        currentPassword: 'SamePass1!xy3',
-        newPassword: 'SamePass1!xy3',
-        confirmPassword: 'SamePass1!xy3',
-      },
-    });
+  test('SAME_PASSWORD → 400 新密码不能与当前密码相同', async () => {
+    mockChangeUserPassword.mockResolvedValue({ outcome: 'SAME_PASSWORD' });
+    const { req, res, next } = makeCtx({ body: { currentPassword: 'x', newPassword: 'y' } });
     await invoke(changePasswordSecure, req, res, next);
     expect(res.statusCode).toBe(400);
     expect(res.payload.message).toBe('新密码不能与当前密码相同');
+  });
+
+  test('ENC_INVALID → codeError 统一错误码', async () => {
+    mockChangeUserPassword.mockResolvedValue({ outcome: 'ENC_INVALID' });
+    const { req, res, next } = makeCtx({
+      body: { encCurrentPassword: 'bad', encNewPassword: 'bad' },
+    });
+    await invoke(changePasswordSecure, req, res, next);
+    expect(res.statusCode).toBe(400);
+    expect(res.payload.errors.errorCode).toBe('AUTH_ENCRYPTED_CREDENTIAL_INVALID');
+  });
+
+  test('REVOKE_FAILED → 503（已改未吊销，如实告知）', async () => {
+    mockChangeUserPassword.mockResolvedValue({ outcome: 'REVOKE_FAILED', username: 'admin' });
+    const { req, res, next } = makeCtx({ body: { currentPassword: 'x', newPassword: 'y' } });
+    await invoke(changePasswordSecure, req, res, next);
+    expect(res.statusCode).toBe(503);
+    expect(res.payload.message).toContain('会话吊销服务暂不可用');
+  });
+
+  test('OK → 200 + 审计落库（skipGlobalAudit + password_changed）', async () => {
+    mockChangeUserPassword.mockResolvedValue({ outcome: 'OK', username: 'admin' });
+    const { req, res, next } = makeCtx({ body: { currentPassword: 'x', newPassword: 'y' } });
+    await invoke(changePasswordSecure, req, res, next);
+    expect(res.statusCode).toBe(200);
+    expect(res.locals.skipGlobalAudit).toBe(true);
+    expect(mockAuditLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'password_changed', username: 'admin' })
+    );
   });
 });
 
