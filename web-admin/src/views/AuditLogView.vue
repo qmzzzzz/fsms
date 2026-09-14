@@ -29,64 +29,64 @@
         <el-form-item :label="$t('security.title')">
           <el-select
             v-model="filters.category"
-            :placeholder="$t('请选择')"
+            :placeholder="$t('common.pleaseSelect')"
             clearable
             style="width: 150px"
             @change="handleSearch"
             @clear="handleSearch"
           >
-            <el-option :label="$t('认证登录')" value="auth" />
-            <el-option :label="$t('用户管理')" value="user" />
-            <el-option :label="$t('角色管理')" value="role" />
-            <el-option :label="$t('权限管理')" value="permission" />
-            <el-option :label="$t('设备管理')" value="device" />
-            <el-option :label="$t('报警处理')" value="alarm" />
-            <el-option :label="$t('巡检管理')" value="inspection" />
-            <el-option :label="$t('安全')" value="security" />
-            <el-option :label="$t('报表')" value="report" />
-            <el-option :label="$t('系统操作')" value="system" />
+            <el-option :label="$t('auditLog.catAuthLogin')" value="auth" />
+            <el-option :label="$t('auditLog.catUserManagement')" value="user" />
+            <el-option :label="$t('auditLog.catRoleManagement')" value="role" />
+            <el-option :label="$t('auditLog.catPermissionManagement')" value="permission" />
+            <el-option :label="$t('auditLog.catDeviceManagement')" value="device" />
+            <el-option :label="$t('auditLog.catAlarmHandling')" value="alarm" />
+            <el-option :label="$t('auditLog.catInspectionManagement')" value="inspection" />
+            <el-option :label="$t('auditLog.catSecurity')" value="security" />
+            <el-option :label="$t('auditLog.catReport')" value="report" />
+            <el-option :label="$t('auditLog.catSystemOps')" value="system" />
           </el-select>
         </el-form-item>
-        <el-form-item :label="$t('日志等级')">
+        <el-form-item :label="$t('auditLog.logLevel')">
           <el-select
             v-model="filters.level"
-            :placeholder="$t('请选择')"
+            :placeholder="$t('common.pleaseSelect')"
             clearable
             style="width: 120px"
             @change="handleSearch"
             @clear="handleSearch"
           >
-            <el-option :label="$t('信息')" value="info" />
-            <el-option :label="$t('警告')" value="warning" />
-            <el-option :label="$t('错误')" value="error" />
+            <el-option :label="$t('auditLog.levelInfo')" value="info" />
+            <el-option :label="$t('auditLog.levelWarning')" value="warning" />
+            <el-option :label="$t('auditLog.levelError')" value="error" />
           </el-select>
         </el-form-item>
-        <el-form-item :label="$t('风险等级')">
+        <el-form-item :label="$t('auditLog.riskLevel')">
           <el-select
             v-model="filters.riskLevel"
-            :placeholder="$t('请选择')"
+            :placeholder="$t('common.pleaseSelect')"
             clearable
             style="width: 120px"
             @change="handleSearch"
             @clear="handleSearch"
           >
-            <el-option :label="$t('严重')" value="critical" />
-            <el-option :label="$t('高')" value="high" />
-            <el-option :label="$t('中')" value="medium" />
-            <el-option :label="$t('低')" value="low" />
+            <el-option :label="$t('auditLog.riskCritical')" value="critical" />
+            <el-option :label="$t('common.levelHigh')" value="high" />
+            <el-option :label="$t('common.levelMedium')" value="medium" />
+            <el-option :label="$t('common.levelLow')" value="low" />
           </el-select>
         </el-form-item>
-        <el-form-item :label="$t('操作结果')">
+        <el-form-item :label="$t('auditLog.resultLabel')">
           <el-select
             v-model="filters.success"
-            :placeholder="$t('请选择')"
+            :placeholder="$t('common.pleaseSelect')"
             clearable
             style="width: 120px"
             @change="handleSearch"
             @clear="handleSearch"
           >
-            <el-option :label="$t('成功')" :value="true" />
-            <el-option :label="$t('失败')" :value="false" />
+            <el-option :label="$t('auditLog.resultSuccess')" :value="true" />
+            <el-option :label="$t('auditLog.resultFailure')" :value="false" />
           </el-select>
         </el-form-item>
         <el-form-item class="glass-btn-group">
@@ -110,7 +110,7 @@
               {{ stats.criticalAlerts || 0 }}
             </div>
             <div class="stat-label">
-              {{ $t('严重告警') }}
+              {{ $t('auditLog.severeAlert') }}
             </div>
           </div>
         </el-card>
@@ -122,7 +122,7 @@
               {{ stats.highAlerts || 0 }}
             </div>
             <div class="stat-label">
-              {{ $t('高风险操作') }}
+              {{ $t('auditLog.highRiskOps') }}
             </div>
           </div>
         </el-card>
@@ -134,7 +134,7 @@
               {{ stats.failedLogins || 0 }}
             </div>
             <div class="stat-label">
-              {{ $t('登录失败') }}
+              {{ $t('auditLog.loginFailed') }}
             </div>
           </div>
         </el-card>
@@ -146,7 +146,7 @@
               {{ total }}
             </div>
             <div class="stat-label">
-              {{ $t('总记录数') }}
+              {{ $t('auditLog.totalRecords') }}
             </div>
           </div>
         </el-card>
@@ -286,44 +286,47 @@
       append-to-body
     >
       <el-descriptions v-if="detailDialog.data" :column="1" border>
-        <el-descriptions-item :label="$t('操作时间')">
+        <el-descriptions-item :label="$t('auditLog.opTime')">
           {{ formatTime(detailDialog.data.timestamp) }}
         </el-descriptions-item>
-        <el-descriptions-item :label="$t('操作用户')">
+        <el-descriptions-item :label="$t('auditLog.opUser')">
           {{ detailDialog.data.username }}
         </el-descriptions-item>
-        <el-descriptions-item :label="$t('用户 ID')">
+        <el-descriptions-item :label="$t('auditLog.userIdLabel')">
           {{ detailDialog.data.userId || '-' }}
         </el-descriptions-item>
-        <el-descriptions-item :label="$t('操作类型')">
+        <el-descriptions-item :label="$t('auditLog.opType')">
           {{ actionLabel(detailDialog.data.action) }}
         </el-descriptions-item>
-        <el-descriptions-item :label="$t('分类')">
+        <el-descriptions-item :label="$t('auditLog.categoryLabel')">
           {{ categoryLabel(detailDialog.data.category) }}
         </el-descriptions-item>
-        <el-descriptions-item v-if="detailDialog.data.targetUsername" :label="$t('目标用户')">
+        <el-descriptions-item
+          v-if="detailDialog.data.targetUsername"
+          :label="$t('auditLog.targetUser')"
+        >
           {{ detailDialog.data.targetUsername }}
         </el-descriptions-item>
-        <el-descriptions-item v-if="detailDialog.data.reason" :label="$t('操作原因')">
+        <el-descriptions-item v-if="detailDialog.data.reason" :label="$t('auditLog.opReason')">
           {{ detailDialog.data.reason }}
         </el-descriptions-item>
-        <el-descriptions-item :label="$t('请求方式')">
+        <el-descriptions-item :label="$t('auditLog.reqMethod')">
           {{ detailDialog.data.method || '-' }}
         </el-descriptions-item>
-        <el-descriptions-item :label="$t('请求路径')">
+        <el-descriptions-item :label="$t('auditLog.reqPath')">
           {{ detailDialog.data.path || '-' }}
         </el-descriptions-item>
         <el-descriptions-item label="IP 地址">
           {{ detailDialog.data.ip || '-' }}
         </el-descriptions-item>
-        <el-descriptions-item :label="$t('风险等级')">
+        <el-descriptions-item :label="$t('auditLog.riskLevel')">
           <el-tag :type="riskType(detailDialog.data.riskLevel)">
             {{ riskText(detailDialog.data.riskLevel) }}
           </el-tag>
         </el-descriptions-item>
         <el-descriptions-item
           v-if="detailDialog.data.riskFactors && detailDialog.data.riskFactors.length"
-          :label="$t('风险因素')"
+          :label="$t('auditLog.riskFactors')"
         >
           <el-tag
             v-for="factor in detailDialog.data.riskFactors"
@@ -336,15 +339,22 @@
             {{ factor }}
           </el-tag>
         </el-descriptions-item>
-        <el-descriptions-item :label="$t('操作结果')">
+        <el-descriptions-item :label="$t('auditLog.resultLabel')">
           <el-tag :type="detailDialog.data.success ? 'success' : 'danger'">
-            {{ detailDialog.data.success ? $t('成功') : $t('失败') }}
+            {{
+              detailDialog.data.success
+                ? $t('auditLog.resultSuccess')
+                : $t('auditLog.resultFailure')
+            }}
           </el-tag>
         </el-descriptions-item>
-        <el-descriptions-item v-if="detailDialog.data.errorMessage" :label="$t('错误信息')">
+        <el-descriptions-item
+          v-if="detailDialog.data.errorMessage"
+          :label="$t('auditLog.errorInfo')"
+        >
           {{ detailDialog.data.errorMessage }}
         </el-descriptions-item>
-        <el-descriptions-item :label="$t('请求参数')">
+        <el-descriptions-item :label="$t('auditLog.reqBody')">
           <pre class="json-preview">{{
             formatJson(detailDialog.data.body ?? detailDialog.data.params)
           }}</pre>
@@ -352,7 +362,10 @@
         <el-descriptions-item label="User-Agent">
           <span class="ua-text">{{ detailDialog.data.userAgent || '-' }}</span>
         </el-descriptions-item>
-        <el-descriptions-item v-if="detailDialog.data.duration != null" :label="$t('执行时长')">
+        <el-descriptions-item
+          v-if="detailDialog.data.duration != null"
+          :label="$t('auditLog.duration')"
+        >
           {{ detailDialog.data.duration }}ms
         </el-descriptions-item>
       </el-descriptions>
@@ -578,16 +591,16 @@ const actionLabel = (action) => {
 // 分类标签
 const categoryLabel = (category) => {
   const labels = {
-    auth: t('认证'),
-    user: t('用户'),
-    role: t('角色'),
-    permission: t('权限'),
-    device: t('设备'),
-    alarm: t('报警'),
-    inspection: t('巡检'),
-    security: t('安全'),
-    report: t('报表'),
-    system: t('系统'),
+    auth: t('auditLog.shortAuth'),
+    user: t('auditLog.shortUser'),
+    role: t('auditLog.shortRole'),
+    permission: t('auditLog.shortPermission'),
+    device: t('auditLog.shortDevice'),
+    alarm: t('auditLog.shortAlarm'),
+    inspection: t('auditLog.shortInspection'),
+    security: t('auditLog.catSecurity'),
+    report: t('auditLog.catReport'),
+    system: t('auditLog.shortSystem'),
   }
   return labels[category] || category || '-'
 }
