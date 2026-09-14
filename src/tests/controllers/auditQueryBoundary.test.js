@@ -48,7 +48,11 @@ describe('buildAuditQuery boundaries', () => {
       })
     );
 
-    expect(query.timestamp.$gte.getTime()).toBe(new Date('2026-09-01T00:00:00').getTime());
+    // date-only 边界走业务时区口径（评价报告 #12）；期望值内嵌 +08:00，
+    // 不随 runner 本地时区漂移（UTC CI 实证：无后缀写法在 UTC 下差 8 小时）
+    expect(query.timestamp.$gte.getTime()).toBe(
+      new Date('2026-09-01T00:00:00.000+08:00').getTime()
+    );
     expect(query.timestamp.$lte.getMilliseconds()).toBe(999);
     expect(query.userId).toBe('000000000000000000000001');
     expect(query.username.$regex).toBe('alice\\(\\.\\*');

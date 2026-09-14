@@ -353,14 +353,15 @@ describe('Helper Utils', () => {
     });
 
     test('仅起始：只含 $gte', () => {
+      // 期望值内嵌业务时区偏移（+08:00），不随 runner 本地时区漂移（UTC CI 实证）
       expect(buildDateRangeFilter('2026-08-01', undefined)).toEqual({
-        $gte: new Date(2026, 7, 1, 0, 0, 0, 0),
+        $gte: new Date('2026-08-01T00:00:00.000+08:00'),
       });
     });
 
     test('仅结束：只含 $lte', () => {
       expect(buildDateRangeFilter(undefined, '2026-08-31')).toEqual({
-        $lte: new Date(2026, 7, 31, 23, 59, 59, 999),
+        $lte: new Date('2026-08-31T23:59:59.999+08:00'),
       });
     });
 
