@@ -30,12 +30,21 @@ const applyWriteStatics = (schema) => {
     });
   };
 
+  // 评价报告 #8：审计写入不得静默吞错——落库失败时除日志外，计入
+  // security_alerts_total{type=audit_write_failed,level=medium}，
+  // 让「审计链出现缺口」在监控面可见（审计完整性是合规硬要求）。
+  // 返回值契约不变（resolve null），调用方无需感知失败形态。
   schema.statics.record = function (entry) {
     return this.create(entry).catch((error) => {
-      logger.warn('业务审计落库失败', {
+      logger.error('业务审计落库失败', {
         action: entry.action || 'unknown',
         error: error.message,
       });
+      try {
+        require('../utils/metrics').incSecurityAlert('audit_write_failed', 'medium');
+      } catch (_) {
+        /* 指标端不可用时仅保留日志 */
+      }
       return null;
     });
   };

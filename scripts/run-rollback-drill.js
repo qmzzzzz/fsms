@@ -7,6 +7,13 @@
  * - 快照仍包含 BSON 兼容的 EJSON，ObjectId/Date 可无损还原；
  * - 默认只演练 DRILL/SHADOW 库。源库带 --apply-source 才允许清空回滚，
  *   避免误连生产库造成破坏。
+ *
+ * 评价报告 #21（破坏性脚本护栏）：
+ * - 库名白名单：--apply-source 只允许显式列入 ALLOWED_SOURCE_DB 白名单的库，
+ *   生产库（fire_safety_db）必须显式出现在环境变量中才可作用——
+ *   「默认安全、显式放开」，防 MONGODB_URI 误指生产时整批 deleteMany；
+ * - 目标库回显：执行前打印实际连接的数据库名，人工核对一眼可辨；
+ * - 二次确认：--apply-source 需再传 --yes 才真正落斧（CI 里显式带 --yes）。
  */
 
 require('dotenv').config();
@@ -19,12 +26,32 @@ const mongoose = require('mongoose');
 const COLLECTIONS = ['users', 'roles', 'permissions', 'auditlogs'];
 
 function parseArgs(argv) {
-  const args = { applySource: false, backupDir: path.join('backups', 'rollback-drill') };
+  const args = {
+    applySource: false,
+    confirmYes: false,
+    backupDir: path.join('backups', 'rollback-drill'),
+  };
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === '--apply-source') args.applySource = true;
+    if (argv[index] === '--yes') args.confirmYes = true;
     if (argv[index] === '--backup-dir') args.backupDir = argv[index + 1];
   }
   return args;
+}
+
+/** #21：源库白名单——生产库名必须显式列入才允许 --apply-source */
+function assertSourceDbAllowed(dbName) {
+  const allowList = (process.env.ALLOWED_SOURCE_DB || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (allowList.length > 0 && !allowList.includes(dbName)) {
+    console.error(
+      `错误：--apply-source 的目标库「${dbName}」不在 ALLOWED_SOURCE_DB 白名单中（当前白名单：${allowList.join(', ') || '空'}）。` +
+        '如确需演练该库，请设置 ALLOWED_SOURCE_DB=<库名> 后重试。'
+    );
+    process.exit(2);
+  }
 }
 
 async function backupCollection(collection, file) {
@@ -52,7 +79,7 @@ async function restoreCollection(collection, file) {
 }
 
 (async () => {
-  const { applySource, backupDir } = parseArgs(process.argv.slice(2));
+  const { applySource, confirmYes, backupDir } = parseArgs(process.argv.slice(2));
   const uri = process.env.MONGODB_URI;
   if (!uri) {
     console.error('错误：必须提供 MONGODB_URI');
@@ -62,8 +89,19 @@ async function restoreCollection(collection, file) {
   await fs.mkdir(backupDir, { recursive: true });
   await mongoose.connect(uri);
   const database = mongoose.connection.db;
+  const dbName = mongoose.connection.name;
+  console.log(`>>> 目标数据库：${dbName}（--apply-source=${applySource}）`);
+  if (applySource && !confirmYes) {
+    console.error(
+      `错误：--apply-source 将对上述库执行 deleteMany + 回灌，需再传 --yes 确认。` +
+        `当前库名：${dbName}；如非预期请立即中断。`
+    );
+    await mongoose.connection.close();
+    process.exit(2);
+  }
+  if (applySource) assertSourceDbAllowed(dbName);
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const manifest = { uri: mongoose.connection.name, timestamp, collections: {} };
+  const manifest = { uri: dbName, timestamp, collections: {} };
 
   for (const name of COLLECTIONS) {
     const source = database.collection(name);

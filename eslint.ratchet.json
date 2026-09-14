@@ -33,8 +33,7 @@
     "max-lines-per-function": 1
   },
   "src/middleware/security.js": {
-    "max-lines": 1,
-    "max-lines-per-function": 1
+    "max-lines": 1
   },
   "src/services/auditChainVerify.js": {
     "max-lines-per-function": 1
@@ -44,6 +43,9 @@
     "max-lines-per-function": 1
   },
   "src/services/initData.js": {
+    "max-lines": 1
+  },
+  "src/services/sharedCache.js": {
     "max-lines": 1
   },
   "src/services/websocketService.js": {

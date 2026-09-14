@@ -14,7 +14,10 @@ module.exports = defineConfig({
   testDir: './e2e',
   timeout: 60_000,
   fullyParallel: false, // 旅程间可能有数据依赖，串行降低相互干扰
-  retries: process.env.CI ? 1 : 0,
+  // 评价报告低危项：CI retries=1 会把偶发失败自动重试成绿，掩盖真实抖动；
+  // E2E 是发布门禁，失败应显性暴露并排查（trace 'retain-on-failure' 语义由
+  // 下方 screenshot/trace 配置保留），故统一 0 重试。
+  retries: 0,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
     baseURL: process.env.E2E_BASE_URL || 'http://127.0.0.1:3000',

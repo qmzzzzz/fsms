@@ -20,6 +20,33 @@ const ApiError = require('./ApiError');
 
 const MAX_CURSOR_LENGTH = 512;
 
+// 评价报告 #13：sortField 防注入白名单格式。当前 4 个调用点均为服务层硬编码，
+// 但工具层不能假设未来调用者——排序键直接拼进查询键位（[sortField]），
+// 一旦被用户输入污染即可构造任意字段条件（含 $ 开头操作符）。
+// 规则：字母/数字/下划线/点号组成、不以点号开头结尾、禁止 $ 与空键段。
+const SORT_FIELD_REGEX = /^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$/;
+
+const validateSortField = (sortField) => {
+  if (typeof sortField !== 'string' || !SORT_FIELD_REGEX.test(sortField)) {
+    throw ApiError.badRequest('排序字段不合法');
+  }
+  return sortField;
+};
+
+/**
+ * 点路径取值（评价报告 #13）：buildCursorResult 原用 last[sortField]，
+ * 排序键为嵌套路径（如 'meta.ip'）或 lean 文档时取到 undefined，
+ * 生成的游标条件 { field: undefined } 会让翻页错查。逐段下钻取值。
+ */
+const getPath = (obj, path) => {
+  let cur = obj;
+  for (const seg of path.split('.')) {
+    if (cur === null || cur === undefined) return undefined;
+    cur = cur[seg];
+  }
+  return cur;
+};
+
 /**
  * 编码游标
  * @param {{ v: any, id: any }} payload 排序键值与文档 _id
@@ -64,6 +91,7 @@ const decodeCursor = (cursor) => {
  */
 const applyCursorCondition = (baseQuery, { sortField, sortDir, cursor, valueType = 'date' }) => {
   if (!cursor) return baseQuery;
+  validateSortField(sortField);
 
   let v = cursor.v;
   if (valueType === 'date') {
@@ -100,11 +128,12 @@ const applyCursorCondition = (baseQuery, { sortField, sortDir, cursor, valueType
  * @returns {{ items: Array, hasMore: boolean, nextCursor: string|null }}
  */
 const buildCursorResult = (docs, limit, sortField) => {
+  validateSortField(sortField);
   const hasMore = docs.length > limit;
   const items = hasMore ? docs.slice(0, limit) : docs;
   const last = items[items.length - 1];
   const nextCursor =
-    hasMore && last ? encodeCursor({ v: last[sortField], id: String(last._id) }) : null;
+    hasMore && last ? encodeCursor({ v: getPath(last, sortField), id: String(last._id) }) : null;
   return { items, hasMore, nextCursor };
 };
 

@@ -247,6 +247,36 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
     expect((await admin().put(`/api/alarms/${id}/cancel`).send({ reason: 'x' })).status).toBe(409);
   });
 
+  test('#11 对象级授权：pending+已指派（脏状态/并发窗口）仅处理人本人可取消', async () => {
+    // 正常状态机里 handler 与 processing 原子落库，pending 必然未指派；
+    // 归属护栏防的是「库内已有 handler 但状态仍 pending」的脏数据/并发窗口
+    //（与权限树 32 层环用例同款模型层直造手法）。
+    const others = await FireAlarm.create({
+      alarmType: 'other',
+      description: `取消归属_他人_${stamp}`,
+      level: 'info',
+      status: 'pending',
+      handler: scopedUserId, // 处理人是 scopedUser
+    });
+    const mine = await FireAlarm.create({
+      alarmType: 'other',
+      description: `取消归属_本人_${stamp}`,
+      level: 'info',
+      status: 'pending',
+      handler: adminId, // 处理人是操作者本人
+    });
+
+    // 非处理人（admin 持 *:* 通过权限层，但对象级归属不匹配）→ 409
+    expect(
+      (await admin().put(`/api/alarms/${others._id}/cancel`).send({ reason: '越权取消' })).status
+    ).toBe(409);
+
+    // 处理人本人取消 → 200
+    expect(
+      (await admin().put(`/api/alarms/${mine._id}/cancel`).send({ reason: '本人取消' })).status
+    ).toBe(200);
+  });
+
   // ==================== 报警：数据范围 403 ====================
 
   test('报警：self 范围用户看他人记录 403，看自己记录 200', async () => {

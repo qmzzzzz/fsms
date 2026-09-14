@@ -4,15 +4,15 @@
 
 ## 技术栈
 
-| 层级   | 技术选型                                                                                                      |
-| ------ | ------------------------------------------------------------------------------------------------------------- |
-| 前端   | Vue 3（Composition API）、Vite、Element Plus、Pinia、Vue Router、ECharts、Axios                               |
-| 后端   | Node.js、Express、Mongoose、Socket.IO、JWT（HS256）、winston                                                  |
-| 数据库 | MongoDB 6.x                                                                                                   |
-| 安全   | helmet、三层限流（IP 级 / 用户级 / 通用）、bcryptjs、AES-256 + HMAC 加密、令牌黑名单、IP 黑名单、全量审计日志 |
-| 测试   | Jest + mongodb-memory-server（内存 MongoDB，无需本地实例）                                                    |
-| 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 18/20/22 矩阵测试）                                |
-| 监控   | Prometheus + Grafana + Alertmanager（docker-compose 随栈启动）、Sentry（可选）                                |
+| 层级   | 技术选型                                                                                                       |
+| ------ | -------------------------------------------------------------------------------------------------------------- |
+| 前端   | Vue 3（Composition API）、Vite、Element Plus、Pinia、Vue Router、ECharts、Axios                                |
+| 后端   | Node.js、Express、Mongoose、Socket.IO、JWT（HS256）、winston                                                   |
+| 数据库 | MongoDB 6.x                                                                                                    |
+| 安全   | helmet、三层限流（IP 级 / 用户级 / 通用）、bcryptjs、AES-256 + HMAC 加密、令牌黑名单、IP 黑名单、全量审计日志  |
+| 测试   | Jest + mongodb-memory-server（内存 MongoDB，无需本地实例）                                                     |
+| 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 18/20/22 矩阵测试，前端构建 24，镜像 node:22.14.0） |
+| 监控   | Prometheus + Grafana + Alertmanager（docker-compose 随栈启动）、Sentry（可选）                                 |
 
 ## 功能特性
 
@@ -126,34 +126,35 @@ export HMAC_SECRET=$(openssl rand -hex 16)
 docker compose up -d
 ```
 
-编排包含应用服务与 MongoDB 6（仅容器内网通信，不暴露宿主机端口），数据持久化到命名卷。
+编排包含应用服务、MongoDB 6（仅容器内网通信，不暴露宿主机端口）与 Redis 7（同样仅内网），数据持久化到命名卷。生产环境变量校验要求配置 `REDIS_URL`（compose 已注入 `redis://redis:6379`），无需额外设置。
 
 ## 环境变量
 
 复制 `.env.example` 为 `.env` 后按需修改。本表仅为核心运行变量节选；完整运行与安全变量（指标端点、ECDH 私钥、CSP 上报、主机白名单、审计保留期等）以 `.env.example` 为准。生产环境建议用 `<NAME>_FILE` 注入密钥文件。
 
-| 变量                                               | 说明                                                  | 默认值                                     |
-| -------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------ |
-| `PORT`                                             | 后端服务端口                                          | `3000`                                     |
-| `NODE_ENV`                                         | 运行环境                                              | `development`                              |
-| `MONGODB_URI`                                      | MongoDB 连接地址                                      | `mongodb://localhost:27017/fire_safety_db` |
-| `JWT_SECRET`                                       | 访问令牌密钥（生产必须 ≥32 字符）                     | -                                          |
-| `JWT_EXPIRE`                                       | 访问令牌有效期                                        | `2h`                                       |
-| `JWT_REFRESH_SECRET`                               | 刷新令牌密钥（生产必须 ≥32 字符）                     | -                                          |
-| `JWT_REFRESH_EXPIRE`                               | 刷新令牌有效期                                        | `7d`                                       |
-| `AES_SECRET_KEY`                                   | AES 加密密钥（生产必须 ≥32 字符）                     | -                                          |
-| `HMAC_SECRET`                                      | HMAC 签名密钥（生产必填）                             | -                                          |
-| `CORS_ORIGIN`                                      | 跨域白名单，逗号分隔（生产必填，禁止通配符）          | 开发模式默认本机 3001/5173                 |
-| `ALLOW_PUBLIC_REGISTRATION`                        | 公开注册开关，生产建议 `false`                        | `false`                                    |
-| `ADMIN_INITIAL_PASSWORD`                           | 初始管理员密码；不设置则自动生成随机强密码            | 随机生成                                   |
-| `TRUST_PROXY_HOPS`                                 | 反向代理跳数（生产必填，否则限流/黑名单按代理 IP 计） | -                                          |
-| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX_REQUESTS` | 通用限流窗口 / 阈值                                   | `900000` / `300`                           |
-| `BCRYPT_ROUNDS`                                    | 密码哈希强度                                          | `10`                                       |
-| `LOG_LEVEL`                                        | 日志级别                                              | `info`                                     |
-| `SENTRY_DSN`                                       | Sentry 错误监控（可选）                               | -                                          |
-| `ENABLE_API_DOCS`                                  | 是否暴露 Swagger API 文档（生产默认 false）           | 开发=true / 生产=false                     |
-| `DOCS_USERNAME`                                    | API 文档 Basic Auth 用户名（可选）                    | -                                          |
-| `DOCS_PASSWORD`                                    | API 文档 Basic Auth 密码（可选）                      | -                                          |
+| 变量                                               | 说明                                                          | 默认值                                     |
+| -------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------ |
+| `PORT`                                             | 后端服务端口                                                  | `3000`                                     |
+| `NODE_ENV`                                         | 运行环境                                                      | `development`                              |
+| `MONGODB_URI`                                      | MongoDB 连接地址                                              | `mongodb://localhost:27017/fire_safety_db` |
+| `REDIS_URL`                                        | Redis 连接地址（生产必填：限流共享、IP 黑名单广播、审计链锁） | -                                          |
+| `JWT_SECRET`                                       | 访问令牌密钥（生产必须 ≥32 字符）                             | -                                          |
+| `JWT_EXPIRE`                                       | 访问令牌有效期                                                | `2h`                                       |
+| `JWT_REFRESH_SECRET`                               | 刷新令牌密钥（生产必须 ≥32 字符）                             | -                                          |
+| `JWT_REFRESH_EXPIRE`                               | 刷新令牌有效期                                                | `7d`                                       |
+| `AES_SECRET_KEY`                                   | AES 加密密钥（生产必须 ≥32 字符）                             | -                                          |
+| `HMAC_SECRET`                                      | HMAC 签名密钥（生产必填）                                     | -                                          |
+| `CORS_ORIGIN`                                      | 跨域白名单，逗号分隔（生产必填，禁止通配符）                  | 开发模式默认本机 3001/5173                 |
+| `ALLOW_PUBLIC_REGISTRATION`                        | 公开注册开关，生产建议 `false`                                | `false`                                    |
+| `ADMIN_INITIAL_PASSWORD`                           | 初始管理员密码；不设置则自动生成随机强密码                    | 随机生成                                   |
+| `TRUST_PROXY_HOPS`                                 | 反向代理跳数（生产必填，否则限流/黑名单按代理 IP 计）         | -                                          |
+| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX_REQUESTS` | 通用限流窗口 / 阈值                                           | `900000` / `300`                           |
+| `BCRYPT_ROUNDS`                                    | 密码哈希强度                                                  | `12`                                       |
+| `LOG_LEVEL`                                        | 日志级别                                                      | `info`                                     |
+| `SENTRY_DSN`                                       | Sentry 错误监控（可选）                                       | -                                          |
+| `ENABLE_API_DOCS`                                  | 是否暴露 Swagger API 文档（生产默认 false）                   | 开发=true / 生产=false                     |
+| `DOCS_USERNAME`                                    | API 文档 Basic Auth 用户名（可选）                            | -                                          |
+| `DOCS_PASSWORD`                                    | API 文档 Basic Auth 密码（可选）                              | -                                          |
 
 ## 默认账户
 
@@ -372,6 +373,7 @@ docker compose up -d app     # mongo 未变动时不重启
 - [ ] `JWT_SECRET`、`JWT_REFRESH_SECRET`、`AES_SECRET_KEY` 均为 ≥32 字符的强随机密钥
 - [ ] `HMAC_SECRET` 已设置
 - [ ] `MONGODB_URI` 不指向 localhost（使用独立数据库服务）
+- [ ] `REDIS_URL` 已配置为有效 Redis 地址（限流共享、IP 黑名单广播、审计链锁依赖；compose 默认 `redis://redis:6379`）
 - [ ] `CORS_ORIGIN` 已配置为明确的前端域名白名单（禁止通配符）
 - [ ] `TRUST_PROXY_HOPS` 已按反向代理层数设置
 - [ ] `ALLOW_PUBLIC_REGISTRATION` 保持 `false`

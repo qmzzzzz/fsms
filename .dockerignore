@@ -9,7 +9,11 @@ logs
 .git
 .gitignore
 README.md
+# 备份目录与备份产物（评价报告低危项：原写 backup 而 Runbook/脚本用 backups，
+# 目录名不一致会让 .ndjson.gz 备份漏进构建上下文）
 backup
+backups
+*.ndjson.gz
 coverage
 .nyc_output
 web-admin/node_modules

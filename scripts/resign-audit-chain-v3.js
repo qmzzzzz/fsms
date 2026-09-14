@@ -31,7 +31,7 @@ const { verifyAuditChain } = require('../src/services/auditChainVerify');
 const BATCH_SIZE = 1000;
 
 function parseArgs(argv) {
-  return { apply: argv.includes('--apply') };
+  return { apply: argv.includes('--apply'), confirmYes: argv.includes('--yes') };
 }
 
 async function rechainAllDocuments(apply) {
@@ -87,7 +87,7 @@ async function rechainAllDocuments(apply) {
 }
 
 (async () => {
-  const { apply } = parseArgs(process.argv);
+  const { apply, confirmYes } = parseArgs(process.argv);
   const uri = process.env.MONGODB_URI;
   if (!uri) {
     console.error('错误：必须通过环境变量或 .env 提供 MONGODB_URI');
@@ -99,6 +99,30 @@ async function rechainAllDocuments(apply) {
   }
 
   await mongoose.connect(uri);
+  // 评价报告 #21（破坏性脚本护栏）：--apply 会 bulkWrite 重签整条审计链，
+  // 加三道门——目标库回显、--yes 二次确认、ALLOWED_SOURCE_DB 库名白名单
+  // （生产库必须显式列入白名单才可作用；演练库不受影响时无需设置）。
+  const dbName = mongoose.connection.name;
+  console.log(`>>> 目标数据库：${dbName}（--apply=${apply}）`);
+  if (apply && !confirmYes) {
+    console.error('错误：--apply 将重签全部审计记录的 hash/hmac/prevHash，需再传 --yes 确认。');
+    await mongoose.connection.close();
+    process.exit(2);
+  }
+  if (apply) {
+    const allowList = (process.env.ALLOWED_SOURCE_DB || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (allowList.length > 0 && !allowList.includes(dbName)) {
+      console.error(
+        `错误：目标库「${dbName}」不在 ALLOWED_SOURCE_DB 白名单中（当前白名单：${allowList.join(', ') || '空'}）。` +
+          '如确需重签该库，请设置 ALLOWED_SOURCE_DB=<库名> 后重试。'
+      );
+      await mongoose.connection.close();
+      process.exit(2);
+    }
+  }
   const report = await rechainAllDocuments(apply);
   console.log(JSON.stringify({ ...report, apply }, null, 2));
 

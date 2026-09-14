@@ -99,6 +99,15 @@ describe('Helper Utils', () => {
       expect(result.page).toBe(10000);
     });
 
+    test('#13 深分页按偏移量收敛：(p-1)*limit 不得超过 10 万', () => {
+      // maxLimit 500 时旧口径 page 10000 → skip 5e6；现按偏移量收敛到 201 页
+      const result = normalizePagination('10000', '500');
+      expect(result.page).toBe(201);
+      // 小页长不受影响（10000*10 ≈ 10 万，恰在阈值内）
+      const fine = normalizePagination('10000', '10');
+      expect(fine.page).toBe(10000);
+    });
+
     test('should accept numeric inputs', () => {
       const result = normalizePagination(2, 50);
       expect(result.page).toBe(2);
@@ -303,23 +312,25 @@ describe('Helper Utils', () => {
   });
 
   describe('parseDateBoundary', () => {
-    test('date-only 起始边界为本地当天零点', () => {
-      expect(parseDateBoundary('2026-08-21', 'start')).toEqual(new Date(2026, 7, 21, 0, 0, 0, 0));
+    // 评价报告 #12：date-only 边界统一到业务时区（默认 Asia/Shanghai），
+    // 不再随服务器本地时区漂移。期望值内嵌 +08:00 偏移，机器无关。
+    const BIZ_OFFSET = '+08:00';
+    const bizStart = (d) => new Date(`${d}T00:00:00.000${BIZ_OFFSET}`).getTime();
+    const bizEnd = (d) => new Date(`${d}T23:59:59.999${BIZ_OFFSET}`).getTime();
+
+    test('date-only 起始边界为业务时区当天零点（Asia/Shanghai）', () => {
+      expect(parseDateBoundary('2026-08-21', 'start').getTime()).toBe(bizStart('2026-08-21'));
     });
 
-    test('date-only 结束边界为本地当天 23:59:59.999', () => {
-      expect(parseDateBoundary('2026-08-21', 'end')).toEqual(
-        new Date(2026, 7, 21, 23, 59, 59, 999)
-      );
+    test('date-only 结束边界为业务时区当天 23:59:59.999', () => {
+      expect(parseDateBoundary('2026-08-21', 'end').getTime()).toBe(bizEnd('2026-08-21'));
     });
 
     test('回归：date-only 不走 new Date() 的 UTC 零点解析', () => {
-      // new Date('2026-08-21') 在 GMT+8 是当天 08:00，会漏掉 00:00~08:00 的数据；
-      // 手工构造本地时间后与 new Date(str) 的差值应为本地时区偏移而非恰好相等
+      // new Date('2026-08-21') 是 UTC 零点（东八区当天 08:00），会漏 0-8 点数据；
+      // 业务时区（Asia/Shanghai）零点对应 UTC 前一天 16:00，即 UTC 零点 -8h
       const parsed = parseDateBoundary('2026-08-21', 'start');
-      const utcParsed = new Date('2026-08-21');
-      const offsetMs = new Date(2026, 7, 21).getTimezoneOffset() * 60000;
-      expect(parsed.getTime()).toBe(utcParsed.getTime() + offsetMs);
+      expect(parsed.getTime()).toBe(new Date('2026-08-21T00:00:00Z').getTime() - 8 * 3600 * 1000);
     });
 
     test('完整时间串透传给 new Date()', () => {
@@ -329,20 +340,16 @@ describe('Helper Utils', () => {
     });
 
     test('跨年与月末日期构造正确', () => {
-      expect(parseDateBoundary('2026-12-31', 'end')).toEqual(
-        new Date(2026, 11, 31, 23, 59, 59, 999)
-      );
-      expect(parseDateBoundary('2026-02-28', 'start')).toEqual(new Date(2026, 1, 28, 0, 0, 0, 0));
+      expect(parseDateBoundary('2026-12-31', 'end').getTime()).toBe(bizEnd('2026-12-31'));
+      expect(parseDateBoundary('2026-02-28', 'start').getTime()).toBe(bizStart('2026-02-28'));
     });
   });
 
   describe('buildDateRangeFilter', () => {
-    test('双边界：返回 {$gte,$lte} 且口径与 parseDateBoundary 一致', () => {
+    test('双边界：返回 {$gte,$lte} 且口径与业务时区一致', () => {
       const filter = buildDateRangeFilter('2026-08-01', '2026-08-31');
-      expect(filter).toEqual({
-        $gte: new Date(2026, 7, 1, 0, 0, 0, 0),
-        $lte: new Date(2026, 7, 31, 23, 59, 59, 999),
-      });
+      expect(filter.$gte.getTime()).toBe(new Date('2026-08-01T00:00:00.000+08:00').getTime());
+      expect(filter.$lte.getTime()).toBe(new Date('2026-08-31T23:59:59.999+08:00').getTime());
     });
 
     test('仅起始：只含 $gte', () => {

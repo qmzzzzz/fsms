@@ -572,6 +572,63 @@ describe('审计日志合规化', () => {
       ).rejects.toThrow(/append-only|禁止/);
     });
 
+    test('updateMany 被拒绝（#2 批量写入口）', async () => {
+      await AuditLog.create({
+        action: 'append_um',
+        category: 'system',
+        username: 'append_um',
+        ip: '::1',
+        path: '/api/um',
+        statusCode: 200,
+        success: true,
+      });
+      await expect(
+        AuditLog.updateMany({ username: 'append_um' }, { $set: { success: false } })
+      ).rejects.toThrow(/append-only|禁止/);
+    });
+
+    test('bulkWrite 被拒绝（#2 批量写入口）', async () => {
+      const doc = await AuditLog.create({
+        action: 'append_bw',
+        category: 'system',
+        username: 'append_bw',
+        ip: '::1',
+        path: '/api/bw',
+        statusCode: 200,
+        success: true,
+      });
+      await expect(
+        AuditLog.bulkWrite([
+          { updateOne: { filter: { _id: doc._id }, update: { $set: { success: false } } } },
+        ])
+      ).rejects.toThrow(/append-only|禁止/);
+    });
+
+    test('findOneAndReplace 被拒绝（#2 批量写入口）', async () => {
+      const doc = await AuditLog.create({
+        action: 'append_far',
+        category: 'system',
+        username: 'append_far',
+        ip: '::1',
+        path: '/api/far',
+        statusCode: 200,
+        success: true,
+      });
+      await expect(
+        AuditLog.findOneAndReplace(
+          { _id: doc._id },
+          {
+            action: 'replaced',
+            category: 'system',
+            username: 'append_far',
+            ip: '::1',
+            statusCode: 200,
+            success: true,
+          }
+        )
+      ).rejects.toThrow(/append-only|禁止/);
+    });
+
     test('{bypassAppendOnly:true} 可放行清理', async () => {
       await AuditLog.create({
         action: 'append_bypass',

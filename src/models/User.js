@@ -57,7 +57,13 @@ const userSchema = new mongoose.Schema(
       // 且纯 JS bcryptjs 对超长输入存在 CPU 放大。
       // 路由层 validatePasswordStrength 另有 64 字符 / 72 字节双重收口，
       // 此处是绕过路由直接操作模型（脚本、初始化数据）时的兜底。
+      // 评价报告低危项：maxlength 是**字符**数，中文口令单字符 3 字节，
+      // 72 个汉字可达 216 字节——补字节级校验器把边界对齐 bcrypt 实际截断点。
       maxlength: [72, '密码最多 72 个字符'],
+      validate: {
+        validator: (v) => Buffer.byteLength(v, 'utf8') <= 72,
+        message: '密码过长（超过 bcrypt 72 字节硬边界，超出部分会被静默丢弃）',
+      },
       select: false, // 默认不返回密码字段
     },
 

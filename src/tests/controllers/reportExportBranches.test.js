@@ -499,24 +499,31 @@ describe('reportController.exportReport 分支补齐', () => {
   // ===== dashboardCache TTL 定时清理（L49-54）=====
 
   test('dashboardCache 定时清理：过期条目回收、有效条目保留（L49-54）', () => {
-    // 模块加载期的 setInterval 必须落在假定时器上才能确定性触发，
-    // 故在 isolateModules 内（先启用假定时器）重新加载控制器
+    // 惰性定时器（评价报告低危项）：sweeper 不再于模块加载期启动，
+    // 需显式调用 ensureDashboardCacheSweeper（模拟首次业务写入）后，
+    // setInterval 落在假定时器上，advance 才能确定性触发
     jest.useFakeTimers();
-    let isolatedController;
-    jest.isolateModules(() => {
-      isolatedController = require('../../controllers/reportController');
-    });
-    const { dashboardCache } = isolatedController.__test;
+    let dashboardCache = null;
+    let ensureSweeper = null;
+    try {
+      let isolatedController;
+      jest.isolateModules(() => {
+        isolatedController = require('../../controllers/reportController');
+      });
+      ({ dashboardCache, ensureDashboardCacheSweeper: ensureSweeper } = isolatedController.__test);
+      ensureSweeper();
 
-    dashboardCache.set('expired-key', { data: {}, expireAt: Date.now() - 1000 });
-    dashboardCache.set('live-key', { data: {}, expireAt: Date.now() + 60 * 1000 });
+      dashboardCache.set('expired-key', { data: {}, expireAt: Date.now() - 1000 });
+      dashboardCache.set('live-key', { data: {}, expireAt: Date.now() + 60 * 1000 });
 
-    jest.advanceTimersByTime(30 * 1000 + 1); // 触发 30s 清理节拍
+      jest.advanceTimersByTime(30 * 1000 + 1); // 触发 30s 清理节拍
 
-    expect(dashboardCache.has('expired-key')).toBe(false);
-    expect(dashboardCache.has('live-key')).toBe(true);
-
-    dashboardCache.clear();
-    jest.useRealTimers();
+      expect(dashboardCache.has('expired-key')).toBe(false);
+      expect(dashboardCache.has('live-key')).toBe(true);
+    } finally {
+      // 假定时器必须还原：泄漏会冻结后续用例的 mongoose/supertest 定时器
+      if (dashboardCache) dashboardCache.clear();
+      jest.useRealTimers();
+    }
   });
 });

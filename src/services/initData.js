@@ -23,6 +23,18 @@ const { SUPER_ADMIN_ROLE_CODE, getSuperAdminUsername } = require('../utils/super
 const defaultPermissions = [
   // ================= 系统管理模块 =================
   { name: '系统管理', code: 'system:*', type: 'menu', module: 'system', path: '/system' },
+  {
+    // #9：查看他人敏感信息（手机号/邮箱全文）所需权限。本人查看免鉴权
+    // （/api/security/view-sensitive 路由层 checkViewSensitivePermission 已按
+    //  targetUserId 分派）；本权限授予 SECURITY_ADMIN 等需跨用户查看的角色。
+    name: '查看敏感信息',
+    code: 'system:read',
+    type: 'api',
+    module: 'system',
+    path: '/api/security/view-sensitive',
+    method: 'POST',
+    parent: null,
+  },
 
   // 用户管理
   { name: '用户管理菜单', code: 'user:*', type: 'menu', module: 'system', path: '/system/users' },
@@ -441,6 +453,8 @@ const rolePermissionMap = {
     // — 安全管理 —
     'security:stats',
     'security:audit',
+    // #9：查看他人敏感信息（手机号/邮箱全文）需 system:read；本人查看免鉴权
+    'system:read',
     // — 业务数据只读（监督用）—
     'device:read',
     'device:stats',

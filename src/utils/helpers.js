@@ -80,7 +80,14 @@ const normalizePagination = (page, limit, maxLimit = 500) => {
   if (Number.isNaN(l) || l < 1) l = 10;
   if (l > maxLimit) l = maxLimit;
   // 限制 page 上限，防止 skip 巨大偏移量导致性能问题
-  if (p > 10000) p = 10000;
+  const MAX_PAGE = 10000;
+  if (p > MAX_PAGE) p = MAX_PAGE;
+  // 评价报告 #13：深分页的真实代价是偏移量 (p-1)*l——page 上限 10000 配
+  // maxLimit 500 时 skip 可达 5e6，MongoDB 需扫描丢弃全部前序文档。
+  // 按偏移量二次收敛：默认参数下最深可翻到约 10 万条（高量级列表应走游标分页）。
+  const MAX_SKIP_OFFSET = 100000;
+  const maxPageByOffset = Math.floor(MAX_SKIP_OFFSET / l) + 1;
+  if (p > maxPageByOffset) p = maxPageByOffset;
   return { page: p, limit: l };
 };
 
@@ -255,19 +262,22 @@ const validateSort = (sortInput, options = {}) => {
 };
 
 /**
- * 解析日期字符串为本地时区的查询边界
+ * 解析日期字符串为查询边界（评价报告 #12：统一到业务时区口径）
+ *
  * date-only 字符串（如 '2026-08-21'）被 new Date() 按 UTC 零点解析（GMT+8 为当天 08:00），
- * 会漏掉边界时段的数据；此处手工构造本地时间，避免日期范围查询边界偏移
+ * 会漏掉边界时段的数据。原实现用服务器本地时区手工构造——在 UTC 容器下与
+ * constants/timezone 的东八区业务口径相差 8 小时（跨日漏数）。
+ * 现收敛为单一事实来源：date-only 一律走 businessDayBounds（业务时区，
+ * 默认 Asia/Shanghai，可用 TZ_BUSINESS 覆盖）；完整时间串仍透传 new Date()。
  * @param {string} dateStr 日期字符串
- * @param {'start'|'end'} boundary 边界类型：start → 本地当天 00:00:00.000，end → 本地当天 23:59:59.999
- * @returns {Date} 本地时间 Date
+ * @param {'start'|'end'} boundary 边界类型：start → 业务时区当天 00:00:00.000，end → 23:59:59.999
+ * @returns {Date} 业务时区口径的 UTC 瞬间
  */
 const parseDateBoundary = (dateStr, boundary) => {
   if (typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    const [y, m, d] = dateStr.split('-').map(Number);
-    return boundary === 'end'
-      ? new Date(y, m - 1, d, 23, 59, 59, 999)
-      : new Date(y, m - 1, d, 0, 0, 0, 0);
+    const { businessDayBounds } = require('../constants/timezone');
+    const bounds = businessDayBounds(dateStr);
+    return boundary === 'end' ? bounds.end : bounds.start;
   }
   return new Date(dateStr);
 };
@@ -367,6 +377,19 @@ const SENSITIVE_QUERY_KEYS = Object.freeze([
   'session',
 ]);
 
+// 评价报告低危项：code/sign 等短键做 includes 子串匹配会误伤
+// postcode/zipcode（都含 'code'）——合法业务参数被脱敏成 ***。
+// 改为下划线边界感知：精确相等，或以 _ 为边界的组合词
+// （access_code / user_password / auth_token 命中；postcode / zipcode 放行）。
+const matchesSensitiveQueryKey = (lower) =>
+  SENSITIVE_QUERY_KEYS.some(
+    (s) =>
+      lower === s ||
+      lower.endsWith(`_${s}`) ||
+      lower.startsWith(`${s}_`) ||
+      lower.includes(`_${s}_`)
+  );
+
 /**
  * 对 URL 的 query string 做敏感值打码，保留键名与结构便于排障
  *
@@ -387,7 +410,7 @@ const redactUrlQuery = (url) => {
       if (eq === -1) return pair;
       const key = pair.slice(0, eq);
       const lower = key.toLowerCase();
-      return SENSITIVE_QUERY_KEYS.some((s) => lower.includes(s)) ? `${key}=***` : pair;
+      return matchesSensitiveQueryKey(lower) ? `${key}=***` : pair;
     })
     .join('&');
   return `${pathPart}?${redacted}`;

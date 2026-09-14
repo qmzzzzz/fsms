@@ -185,7 +185,8 @@ jobs:
 
     services:
       mongo:
-        image: mongo:7.0.14
+        # 评价报告 #18：mongo 版本口径统一到生产 compose 的钉版 6.0.20
+        image: mongo:6.0.20
         ports:
           - 27017:27017
 
@@ -216,6 +217,10 @@ jobs:
           ALLOW_PUBLIC_REGISTRATION: 'false'
         run: |
           E2E_TEST_PASSWORD="E2e!$(openssl rand -hex 12)Aa1"
+          # 评价报告 #16：MFA 旅程固定种子（base32，RFC 4648 测试向量式占位）
+          E2E_MFA_SEED="JBSWY3DPEHPK3PXP"
+          # AES 密钥生成一次，服务端与 MFA 种子加密脚本共用（否则密文解不开）
+          E2E_AES_KEY="$(openssl rand -hex 32)"
           export E2E_TEST_PASSWORD
           NODE_ENV=development \
           PORT=3000 \
@@ -223,7 +228,7 @@ jobs:
           MONGODB_URI="$MONGODB_URI" \
           JWT_SECRET="$(openssl rand -hex 32)" \
           JWT_REFRESH_SECRET="$(openssl rand -hex 32)" \
-          AES_SECRET_KEY="$(openssl rand -hex 32)" \
+          AES_SECRET_KEY="$E2E_AES_KEY" \
           HMAC_SECRET="$(openssl rand -hex 32)" \
           ADMIN_INITIAL_PASSWORD="$E2E_TEST_PASSWORD" \
           LOGIN_CAPTCHA_ENABLED="$LOGIN_CAPTCHA_ENABLED" \
@@ -233,9 +238,42 @@ jobs:
           node src/index.js > logs-browser-e2e-backend.log 2>&1 &
           echo "$!" > browser-e2e-backend.pid
           echo "password=$E2E_TEST_PASSWORD" >> "$GITHUB_OUTPUT"
+          echo "mfa-seed=$E2E_MFA_SEED" >> "$GITHUB_OUTPUT"
 
           for i in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:3000/readyz >/dev/null; then
+              # 评价报告 #16：MFA 旅程用独立账号 mfa-e2e（固定种子）——
+              # 不动 admin：否则其余旅程的登录会被 MFA 墙挡住。
+              # 密码用 bcrypt 落库（经 User 模型预存钩子），种子存 AES 密文。
+              AES_SECRET_KEY="$E2E_AES_KEY" JWT_SECRET="$E2E_AES_KEY" HMAC_SECRET="$E2E_AES_KEY" \
+              E2E_MFA_PASSWORD="$E2E_TEST_PASSWORD" node -e "
+                const mongoose = require('mongoose');
+                (async () => {
+                  await mongoose.connect(process.env.MONGODB_URI);
+                  const User = require('./src/models/User');
+                  const Role = require('./src/models/Role');
+                  const { encryptMfaSecret } = require('./src/utils/mfaSecret');
+                  const role = await Role.findOne({ code: 'SUPER_ADMIN' });
+                  if (!role) throw new Error('SUPER_ADMIN 角色未播种');
+                  let u = await User.findByUsername('mfa-e2e');
+                  if (!u) {
+                    u = await User.create({
+                      username: 'mfa-e2e',
+                      email: 'mfa-e2e@example.com',
+                      password: process.env.E2E_MFA_PASSWORD,
+                      roles: [role._id],
+                      status: 'active',
+                    });
+                  }
+                  const enc = encryptMfaSecret('$E2E_MFA_SEED');
+                  await User.updateOne(
+                    { _id: u._id },
+                    { \$set: { mfaEnabled: true, mfaSecret: enc, mfaLastCounter: 0, status: 'active' } }
+                  );
+                  console.log('mfa-e2e seeded');
+                  await mongoose.disconnect();
+                })().catch((e) => { console.error(e); process.exit(1); });
+              "
               exit 0
             fi
             sleep 1
@@ -248,7 +286,29 @@ jobs:
           E2E_BASE_URL: http://127.0.0.1:3000
           E2E_USER: admin
           E2E_PASS: ${{ steps.full-stack.outputs.password }}
-        run: npm run test:e2e:browser -- --workers=1 --project=desktop-chromium --project=mobile-chrome
+          # 评价报告 #16：MFA 旅程用独立账号 mfa-e2e——种子在上一环节点脚本
+          # 写入该账户（AES 密文），TOTP 码由 journey 内按种子实时生成
+          E2E_MFA_USER: mfa-e2e
+          E2E_MFA_PASS: ${{ steps.full-stack.outputs.password }}
+          E2E_MFA_SECRET: ${{ steps.full-stack.outputs.mfa-seed }}
+        run: |
+          set -o pipefail
+          npm run test:e2e:browser -- --workers=1 --project=desktop-chromium --project=mobile-chrome 2>&1 | tee playwright-run.log
+
+      - name: Assert no skipped journeys
+        # 评价报告 #16：E2E 曾可全量跳过且 CI 全绿（「0 执行也绿」的假门禁）。
+        # 凭据与 MFA 种子均已注入，此处断言 skipped==0，防回归为按缺省静默跳过
+        run: |
+          node -e "
+            const log = require('fs').readFileSync('playwright-run.log', 'utf8');
+            const m = log.match(/(\d+)\s+skipped/);
+            const skipped = m ? Number(m[1]) : 0;
+            if (skipped > 0) {
+              console.error('E2E 存在被跳过的旅程：' + skipped + '（期望 0，视为门禁失败）');
+              process.exit(1);
+            }
+            console.log('skipped=0 校验通过');
+          "
 
       - name: Upload Playwright report
         if: always()
@@ -261,8 +321,10 @@ jobs:
 
   build:
     # I-M2：镜像构建/推送串联 e2e、secret-scan 与 security-audit——
-    # 此前仅 needs:test，gitleaks 检出泄漏时含泄漏内容的镜像仍会推上 GHCR
-    needs: [test, e2e, e2e-browser, secret-scan, security-audit]
+    # 此前仅 needs:test，gitleaks 检出泄漏时含泄漏内容的镜像仍会推上 GHCR。
+    # 评价报告 #3：追加 frontend-build——Dockerfile 只执行前端 build，
+    # 前端 lint 或 vitest 覆盖率失败时，含缺陷前端的镜像不得推送到 GHCR。
+    needs: [test, e2e, e2e-browser, secret-scan, security-audit, frontend-build]
     runs-on: ubuntu-latest
     # main 分支推 latest；v* 标签发布版本镜像（R-7）
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')

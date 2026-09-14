@@ -268,6 +268,8 @@ async function loginUser(params, ctx) {
     const { allowed, reason } = isIPAllowed(ip, user.allowedIPs);
     if (!allowed) {
       logger.warn('登录被拒 - IP 不在允许范围', { username, ip, reason });
+      // 评价报告 #8：fire-and-forget 审计写入显式挂 catch——record 内部虽已
+      // 兜底，这里再挂一层防契约漂移，且表明「不留悬挂 Promise」的意图
       AuditLog.record({
         action: 'ip_range_denied',
         category: 'auth',
@@ -280,7 +282,7 @@ async function loginUser(params, ctx) {
         riskLevel: 'high',
         riskFactors: ['ip_range_violation'],
         reason: `登录 IP 不在允许范围内（${reason}）`,
-      });
+      }).catch(() => {});
       // P2-10 修复：此前返回 403/AUTH_IP_RANGE_DENIED，构成用户名枚举预言机——
       // 从受限 IP 之外探测即可区分「该账号存在且配了 allowedIPs」。
       // 这与 M-5 口径（对外一律与「用户名或密码错误」完全一致）自相矛盾：
@@ -329,6 +331,7 @@ async function loginUser(params, ctx) {
         lockUntil: new Date(Date.now() + LOCK_DURATION_MS),
       }).catch(() => {});
       logger.warn('账户临时锁定', { username, failedCount: newCount, lockMinutes: 10 });
+      // 评价报告 #8：暴力破解信号审计写入显式挂 catch（同上口径）
       AuditLog.record({
         action: 'account_temp_locked',
         category: 'auth',
@@ -341,7 +344,7 @@ async function loginUser(params, ctx) {
         riskLevel: 'high',
         riskFactors: ['excessive_failed_logins'],
         reason: `连续登录失败 ${newCount} 次，账户临时锁定 10 分钟`,
-      });
+      }).catch(() => {});
     }
     return { outcome: 'INVALID_CREDENTIALS' };
   }
@@ -809,6 +812,15 @@ async function changeUserPassword(userId, body, ctx) {
 
   if (!currentPassword || !newPassword) {
     return { outcome: 'MISSING' };
+  }
+
+  // 确认密码一致性（评价报告 #15 收敛点：原 securityController 内联比对，
+  // 密文轨下明文只有解密后才知道，因此统一在解密完成后于业务层校验。
+  // 客户端未携带 confirmPassword 时不强制——/api/auth/password 一直如此）
+  if (typeof body.confirmPassword === 'string' && body.confirmPassword) {
+    if (body.confirmPassword !== newPassword) {
+      return { outcome: 'CONFIRM_MISMATCH' };
+    }
   }
 
   // 统一企业级密码强度策略

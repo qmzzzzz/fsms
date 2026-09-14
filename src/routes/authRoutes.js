@@ -243,6 +243,7 @@ router.post(
       return ApiResponse.error(res, '注册服务暂不可用，请稍后重试', 503);
     }
   }
+  // PERMISSION-EXEMPT: 公共端点（注册开关+限流管控），无资源所有者
 );
 
 /**
@@ -278,6 +279,7 @@ router.post(
   loginUserLimiter,
   loginValidation,
   authController.login
+  // PERMISSION-EXEMPT: 公共端点（登录限流+哑bcrypt防枚举）
 );
 
 /**
@@ -286,6 +288,7 @@ router.post(
  * @access  Public
  */
 router.post('/refresh', strictLimiter, refreshTokenBodyValidation, authController.refreshToken);
+// PERMISSION-EXEMPT: 公共端点（刷新令牌轮换，黑名单 fail-closed）
 
 /**
  * @route   GET /api/auth/session
@@ -314,6 +317,9 @@ router.put(
   passwordChangeLimiter,
   changePasswordValidation,
   authController.changePassword
+  // PERMISSION-EXEMPT: 本人资源：authenticate 已确定身份，改密对象恒为本人
+
+  // PERMISSION-EXEMPT: 公共端点（刷新令牌轮换，黑名单fail-closed）
 );
 
 /**
@@ -322,6 +328,7 @@ router.put(
  * @access  Private
  */
 router.put('/profile', authenticate, updateProfileValidation, authController.updateProfile);
+// PERMISSION-EXEMPT: 本人资源：authenticate 已确定身份，资料对象恒为本人
 
 /**
  * @route   POST /api/auth/logout
@@ -329,6 +336,7 @@ router.put('/profile', authenticate, updateProfileValidation, authController.upd
  * @access  Private
  */
 router.post('/logout', authenticate, refreshTokenBodyValidation, authController.logout);
+// PERMISSION-EXEMPT: 会话生命周期：吊销当前调用者自己的会话
 
 // ================= MFA 两步验证（I-06，TOTP） =================
 
@@ -349,6 +357,7 @@ router.get('/mfa/status', authenticate, mfaController.getMfaStatus);
  * 有意为之而非遗漏。
  */
 router.post('/mfa/enroll', authenticate, strictLimiter, mfaController.mfaEnroll);
+// PERMISSION-EXEMPT: 本人资源：为本人注册 MFA
 
 /**
  * @route   POST /api/auth/mfa/enable
@@ -363,6 +372,13 @@ router.post(
     .matches(/^\d{6}$/)
     .withMessage('两步验证码应为 6 位数字'),
   mfaController.mfaEnable
+  // PERMISSION-EXEMPT: 本人资源：启用本人 MFA（需二次验证）
+
+  // PERMISSION-EXEMPT: 本人资源：为本人注册 MFA
+
+  // PERMISSION-EXEMPT: 会话生命周期：吊销当前调用者自己的会话
+
+  // PERMISSION-EXEMPT: 本人资源：authenticate 已确定身份，资料对象恒为本人
 );
 
 /**
@@ -376,6 +392,7 @@ router.post(
   strictLimiter,
   mfaDisableValidation,
   mfaController.mfaDisable
+  // PERMISSION-EXEMPT: 本人资源：停用本人 MFA（需二次验证）
 );
 
 /**
@@ -392,6 +409,7 @@ router.post(
     .matches(/^\d{6}$/)
     .withMessage('两步验证码应为 6 位数字'),
   mfaController.regenerateRecoveryCodes
+  // PERMISSION-EXEMPT: 本人资源：重生成本人恢复码（需二次验证）
 );
 
 // ================= 设备级会话管理（登录会话） =================
@@ -427,6 +445,7 @@ router.get('/sessions', authenticate, authController.listSessions);
  * 若顺序颠倒，'others' 会被当作 sid 传入并被 UUID 校验拒为 400。
  */
 router.delete('/sessions/others', authenticate, strictLimiter, authController.revokeOtherSessions);
+// PERMISSION-EXEMPT: 本人资源：吊销本人其他会话
 
 /**
  * @route   DELETE /api/auth/sessions/:sid
@@ -439,6 +458,9 @@ router.delete(
   strictLimiter,
   sessionSidValidation,
   authController.revokeSession
+  // PERMISSION-EXEMPT: 本人资源：吊销本人指定会话（服务层校验归属）
+
+  // PERMISSION-EXEMPT: 本人资源：吊销本人其他会话
 );
 
 module.exports = router;

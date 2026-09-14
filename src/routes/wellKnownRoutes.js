@@ -106,6 +106,7 @@ router.post('/csp-report', cspReportLimiter, cspReportParser, (req, res) => {
     logger.debug(`CSP 上报解析失败：${e.message}`);
   }
 });
+// PERMISSION-EXEMPT: 公共上报端点（浏览器自动发起，无法携带认证；限流+协议层校验）
 
 /**
  * 前端异常上报专用限流：单 IP 5 分钟 30 批。
@@ -179,6 +180,7 @@ router.post('/client-errors', clientErrorLimiter, (req, res) => {
     logger.debug(`前端异常上报解析失败：${e.message}`);
   }
 });
+// PERMISSION-EXEMPT: 公共上报端点（会话失效后异常也要上报，无法要求认证；限流+协议层校验）
 
 /**
  * security.txt 内容按请求动态生成（G10）

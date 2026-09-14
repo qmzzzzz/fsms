@@ -15,13 +15,20 @@ const dashboardCache = new Map();
 const DASHBOARD_CACHE_TTL_MS = 30 * 1000;
 const DASHBOARD_CACHE_MAX_ENTRIES = 500;
 
-const dashboardCacheTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of dashboardCache.entries()) {
-    if (entry.expireAt <= now) dashboardCache.delete(key);
-  }
-}, 30 * 1000);
-dashboardCacheTimer.unref?.();
+// 评价报告低危项（与 P3-23 结论对齐）：模块加载即 setInterval——
+// 纯 import 该模块（脚本/单测/Tree-shaking 场景）也会常驻一个定时器。
+// 改为首次真正使用缓存时惰性启动，一次性句柄保证只启一个。
+let dashboardCacheTimer = null;
+const ensureDashboardCacheSweeper = () => {
+  if (dashboardCacheTimer) return;
+  dashboardCacheTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of dashboardCache.entries()) {
+      if (entry.expireAt <= now) dashboardCache.delete(key);
+    }
+  }, 30 * 1000);
+  dashboardCacheTimer.unref?.();
+};
 
 const enforceDashboardCacheLimit = () => {
   if (dashboardCache.size < DASHBOARD_CACHE_MAX_ENTRIES) return;
@@ -183,6 +190,7 @@ const getDashboardData = async (userId) => {
   const data = buildDashboardData(deviceFacet, alarmFacet, inspectionFacet);
 
   enforceDashboardCacheLimit();
+  ensureDashboardCacheSweeper();
   dashboardCache.set(cacheKey, { data, expireAt: Date.now() + DASHBOARD_CACHE_TTL_MS });
   return { data, message: '获取仪表盘统计成功' };
 };
@@ -192,6 +200,7 @@ module.exports = {
   __test: {
     dashboardCache,
     enforceDashboardCacheLimit,
+    ensureDashboardCacheSweeper,
     DASHBOARD_CACHE_MAX_ENTRIES,
   },
 };

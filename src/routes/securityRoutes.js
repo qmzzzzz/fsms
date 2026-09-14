@@ -8,7 +8,12 @@ const securityController = require('../controllers/securityController');
 // D-1：审计日志与 IP 名单端点自 securityController 拆出
 const auditController = require('../controllers/auditController');
 const ipListController = require('../controllers/ipListController');
-const { authenticate, checkPermission, requireReAuthentication } = require('../middleware');
+const {
+  authenticate,
+  checkPermission,
+  checkViewSensitivePermission,
+  requireReAuthentication,
+} = require('../middleware');
 const { body, param, query } = require('express-validator');
 // 改密专用限流器 + 严格限流器（导出等重资源操作）
 // 注意：change-password 此前误用 loginLimiter——其组键读取 body.username 且
@@ -101,6 +106,7 @@ router.put(
   passwordChangeLimiter,
   changePasswordValidation,
   securityController.changePasswordSecure
+  // PERMISSION-EXEMPT: 本人资源：authenticate 已确定身份（#15 收敛后业务在 authService）
 );
 
 /**
@@ -118,7 +124,9 @@ router.get('/bindings', authenticate, securityController.getAccountBindings);
 router.post(
   '/view-sensitive',
   authenticate,
-  checkPermission('system:read'),
+  // #9：本人查看免鉴权；查看他人需 system:read（原来一律要求 system:read，
+  // 导致普通角色连查看本人手机号/邮箱都被 403，见 rbac.checkViewSensitivePermission）
+  checkViewSensitivePermission,
   requireReAuthentication(),
   // G3：dataType 白名单前置校验（控制器 default 分支已兜底，此处提前拦截
   // 非法/缺失值，避免无效请求进入二次验证后的敏感数据分支）
@@ -144,6 +152,7 @@ router.get(
  * @access  Private
  */
 router.post('/report', authenticate, reportValidation, securityController.reportSuspiciousActivity);
+// PERMISSION-EXEMPT: 本人资源：可疑行为上报的内容来自调用者自身，无越权面
 
 /**
  * @route   GET /api/security/my-logs

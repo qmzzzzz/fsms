@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { validateEnum, escapeRegExp } = require('./helpers');
+const { validateEnum, escapeRegExp, parseDateBoundary } = require('./helpers');
 const { normalizeIP } = require('./ipUtils');
 const { AUDIT_CATEGORIES, AUDIT_LOG_ACTIONS } = require('../constants/audit');
 
@@ -38,15 +38,14 @@ const buildAuditQuery = (req) => {
   const query = {};
   if (startDate || endDate) {
     query.timestamp = {};
+    // 评价报告 #12：date-only 边界统一走 parseDateBoundary（业务时区口径）。
+    // 原实现 `new Date('YYYY-MM-DDT00:00:00')` 无时区后缀按服务器本地时区解析，
+    // UTC 容器下比东八区业务口径早 8 小时，跨日漏数。
     if (startDate) {
-      query.timestamp.$gte = /^\d{4}-\d{2}-\d{2}$/.test(startDate)
-        ? new Date(`${startDate}T00:00:00`)
-        : new Date(startDate);
+      query.timestamp.$gte = parseDateBoundary(startDate, 'start');
     }
     if (endDate) {
-      query.timestamp.$lte = /^\d{4}-\d{2}-\d{2}$/.test(endDate)
-        ? new Date(`${endDate}T23:59:59.999`)
-        : new Date(endDate);
+      query.timestamp.$lte = parseDateBoundary(endDate, 'end');
     }
   }
   if (userId) query.userId = userId;

@@ -17,7 +17,7 @@ require('./src/config/secrets').hydrateSecretsFromFiles();
 
 const config = {
   mongodb: {
-    url: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/fire_safety',
+    url: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/fire_safety_db',
     options: {
       // 迁移为低频维护操作，显式超时避免挂起
       serverSelectionTimeoutMS: 5000,

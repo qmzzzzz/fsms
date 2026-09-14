@@ -44,6 +44,12 @@ function makeSharedStore(prefix) {
   // store.increment/decrement/resetKey，不接受 Promise<Store>。
   const fallback = new rateLimit.MemoryStore();
   let active = fallback;
+  // 评价报告 #6：express-rate-limit 只在中间件挂载时同步调用一次 store.init，
+  // 此刻异步切换尚未完成——原实现 init 固定绑在 fallback 上，切换到
+  // RedisStore 后其 init 永远不会被调用，跨实例共享计数可能不生效。
+  // 修复：init 动态分发到当前 active，并记录 options；RedisStore 就绪切换后
+  // 显式补一次 init，保证共享存储完成与挂载期等价的初始化。
+  let lastInitOptions = null;
   (async () => {
     const { initSharedCache, isRedisEnabled, getRedisClient } = require('../services/sharedCache');
     await initSharedCache();
@@ -54,6 +60,9 @@ function makeSharedStore(prefix) {
       sendCommand: (...args) => client.call(...args),
       prefix: `rl:${prefix}:`,
     });
+    if (typeof active.init === 'function' && lastInitOptions) {
+      active.init(lastInitOptions);
+    }
   })().catch((err) => {
     logger.warn(`限流共享存储初始化失败（${prefix}），回退进程内计数：${err.message}`);
   });
@@ -70,7 +79,10 @@ function makeSharedStore(prefix) {
     async resetAll() {
       if (active.resetAll) return active.resetAll();
     },
-    init: fallback.init, // 透传 init（如有）
+    init(options) {
+      lastInitOptions = options;
+      if (active && typeof active.init === 'function') active.init(options);
+    },
   };
 }
 

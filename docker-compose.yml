@@ -28,6 +28,10 @@ services:
       - HMAC_SECRET_FILE=/run/secrets/hmac_secret
       - MONGODB_URI_FILE=/run/secrets/mongodb_uri
       - ADMIN_INITIAL_PASSWORD_FILE=/run/secrets/admin_initial_password
+      # 生产校验（src/config/validate.js）强制 REDIS_URL：限流共享计数、
+      # IP 黑名单广播与审计链锁不得退化为单实例内存态。
+      # 指向下方 redis 服务的容器网络别名，非敏感值，可明文置于 environment。
+      - REDIS_URL=redis://redis:6379
     secrets:
       - jwt_secret
       - jwt_refresh_secret
@@ -37,6 +41,8 @@ services:
       - admin_initial_password
     depends_on:
       mongo:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     # ===== R-4 容器加固：资源上限 + 日志轮转 =====
@@ -290,16 +296,43 @@ services:
     networks:
       - fire-safety-net
 
-  # 可选：Redis 用于缓存和 session
-  # redis:
-  #   image: redis:7-alpine
-  #   ports:
-  #     - "6379:6379"
-  #   volumes:
-  #     - redis-data:/data
-  #   restart: unless-stopped
-  #   networks:
-  #     - fire-safety-net
+  redis:
+    # R-5 同口径：钉补丁号，digest 由部署机 docker pull 后捕获追加
+    image: redis:7-alpine
+    # 仅容器内网通信（app 以 redis://redis:6379 访问），不暴露宿主机端口
+    expose:
+      - '6379'
+    command: ['redis-server', '--appendonly', 'yes']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: '0.5'
+        reservations:
+          memory: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - redis-data:/data
+    networks:
+      - fire-safety-net
 
 # ============================================================
 # 密钥文件（P3-48）
@@ -352,6 +385,10 @@ secrets:
 volumes:
   mongo-data:
   mongo-config:
+  # R-6（#1）：Redis 持久化卷。限流共享计数、IP 黑名单广播与审计链锁依赖
+  # Redis 存活；appendonly 开启时数据落此卷，重启不丢黑名单/计数状态。
+  # 不备份——重启后可从 DB 重建，属可再生缓存（见 docs/adr/ADR-005）
+  redis-data:
   # C-1：app 只读根下的日志卷（与 mongo 数据卷不同，日志可再生，
   # 灾难恢复时不需要它，但正常运行期必须持久（审计 WAL 在此）
   app-logs:

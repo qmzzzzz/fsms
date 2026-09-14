@@ -167,17 +167,18 @@ const initCharts = (alarmTrendData, deviceTypeData) => {
   // 饼图
   pieChart = echarts.init(pieChartRef.value)
 
-  // 如果没有设备数据，使用示例数据
-  const displayDeviceData =
-    deviceTypeData.length > 0
-      ? deviceTypeData
-      : [
-          { name: t('dashboard.smokeAlarm'), count: 10 },
-          { name: t('dashboard.tempSensor'), count: 8 },
-          { name: t('dashboard.manualAlarm'), count: 5 },
-        ]
+  // 评价报告 #19：空数据不再渲染「示例数据」（易被误认成真实占比），
+  // 与上方折线图同款空态文案（common.noData）
+  const displayDeviceData = deviceTypeData
 
   pieChart.setOption({
+    title: {
+      show: displayDeviceData.length === 0,
+      text: t('common.noData'),
+      left: 'center',
+      top: 'center',
+      textStyle: { fontSize: 14, color: '#64748b' },
+    },
     tooltip: {
       trigger: 'item',
       // L7：类目名（设备名等）用户可控，HTML tooltip 中转义后再拼接
@@ -185,6 +186,7 @@ const initCharts = (alarmTrendData, deviceTypeData) => {
         `${escapeHtml(p.seriesName)}<br/>${escapeHtml(p.name)}: ${p.value} (${p.percent}%)`,
     },
     legend: {
+      show: displayDeviceData.length > 0,
       bottom: 0,
       left: 'center',
       data: displayDeviceData.map((d) => d.name),

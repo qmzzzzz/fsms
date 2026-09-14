@@ -136,13 +136,9 @@ const verify = async (captchaId, inputText) => {
   if (!captchaId || !inputText) return false;
 
   if (sharedCache.isRedisEnabled()) {
-    let entry = null;
-    try {
-      entry = await sharedCache.get(entryKey(captchaId));
-    } finally {
-      // 无论校验结果如何都立即消费
-      await sharedCache.del(entryKey(captchaId));
-    }
+    // 评价报告低危项：原 get→del 两步在并发下同一验证码可被消费两次（双花）。
+    // 改用原子取删 GETDEL（sharedCache.getDel）：取值与删除在同一命令内完成。
+    const entry = await sharedCache.getDel(entryKey(captchaId)).catch(() => null);
     if (!entry || typeof entry.text !== 'string') return false;
     return String(inputText).trim().toLowerCase() === entry.text.toLowerCase();
   }
