@@ -44,8 +44,14 @@ jobs:
       - name: Run format check (prettier)
         run: npm run format:check
 
+      # --forceExit：2026-09-15 CI 实证（4 轮 × Node 18/20/22），测试 1754 全过、
+      # globalTeardown 成功后约 130ms 进程静默 exit 1、无任何错误输出——
+      # mongodb-memory-server 子进程句柄与 jest 主进程退出的清理竞态，本地
+      # （Win/GMT+8/Node 22/20）始终 exit 0 无法复现。teardown 完成即代表
+      # 全部断言已通过且数据库已清理，forceExit 仅绕过退出阶段的悬挂句柄，
+      # 不影响测试语义。--watch 场景不兼容 forceExit，但 CI 无 watch。
       - name: Run tests
-        run: npm test
+        run: npm test -- --forceExit
         env:
           NODE_ENV: test
           JWT_SECRET: test-secret
@@ -53,7 +59,7 @@ jobs:
           HMAC_SECRET: test-hmac-secret
 
       - name: Run tests with coverage
-        run: npm run test:coverage --if-present
+        run: npm run test:coverage --if-present -- --forceExit
         env:
           NODE_ENV: test
           JWT_SECRET: test-secret
