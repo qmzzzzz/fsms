@@ -40,7 +40,7 @@ const ERROR_CODE_I18N_MAP = {
   AUTH_IP_RANGE_DENIED: 'errors.authIpRangeDenied',
   AUTH_USER_NOT_FOUND: 'errors.authUserNotFound',
   // 登录/改密口令密文轨解密失败（服务端换钥后重试一次即可自愈）
-  AUTH_ENCRYPTED_CREDENTIAL_INVALID: 'errors.encryptedCredentialInvalid',
+  AUTH_ENCRYPTED_CREDENTIAL_INVALID: 'errors.authEncryptedCredentialInvalid',
   // 图形验证码
   CAPTCHA_INVALID: 'errors.captchaInvalid',
   CAPTCHA_SERVICE_UNAVAILABLE: 'errors.captchaServiceUnavailable',

@@ -993,10 +993,11 @@ export default {
   // Backend error-code messages (errors.errorCode → i18n key mapping in utils/api.js).
   // Keep in sync with the backend registry src/utils/errorCodes.js
   errors: {
+    fullRangeForbidden: 'Full-range entries can only be configured or removed by super admins',
     authInvalidCredentials: 'Invalid username or password',
     authIpRangeDenied: 'Your current IP is not within the allowed access range',
     authUserNotFound: 'User not found',
-    encryptedCredentialInvalid:
+    authEncryptedCredentialInvalid:
       'Credential encryption is invalid or expired, please refresh and try again',
     captchaInvalid: 'Captcha is incorrect or has expired',
     captchaServiceUnavailable: 'Captcha service is busy, please try again later',
@@ -1073,13 +1074,15 @@ export default {
     userNotFoundOrDeleted: 'User does not exist or has been deleted',
     passwordCurrentIncorrect: 'Current password is incorrect',
     passwordSameAsOld: 'New password cannot be the same as the old password',
-    passwordChangedRevokeFailed: 'Password was changed, but the session revocation service is unavailable; previous sessions may still be valid, please sign in again',
+    passwordChangedRevokeFailed:
+      'Password was changed, but the session revocation service is unavailable; previous sessions may still be valid, please sign in again',
     userNotFound: 'User not found',
     phoneInvalid: 'Please enter a valid mobile number',
     emailInvalid: 'Please enter a valid email address',
     emailTaken: 'This email is already in use by another user',
     avatarInvalid: 'Avatar must be a valid image URL or image data',
-    cannotRevokeCurrentSession: 'You cannot terminate the current device from the session list; please use sign out instead',
+    cannotRevokeCurrentSession:
+      'You cannot terminate the current device from the session list; please use sign out instead',
     sessionNotFound: 'Session does not exist or is no longer valid',
     deviceNotFound: 'Device not found',
     deviceViewForbidden: 'Not allowed to view this device',
@@ -1090,15 +1093,20 @@ export default {
     inspectionOperateForbidden: 'Not allowed to operate on this inspection record',
     ipListTypeInvalid: 'List type must be black or white',
     ipListDurationOutOfRange: 'Duration must be between 0 (permanent) and 8760 hours',
-    ipFullRangeSuperAdminOnly: 'The full-range entry (${ip}) matches every IP and can only be configured by a super administrator; use a narrower range if you need to restrict specific addresses',
-    ipCoveredByWhitelist: 'This IP is already covered by whitelist entry (${coveredBy}); the whitelist takes precedence over the blacklist. Remove it from the whitelist first if you need to block it',
+    ipFullRangeSuperAdminOnly:
+      'The full-range entry (${ip}) matches every IP and can only be configured by a super administrator; use a narrower range if you need to restrict specific addresses',
+    ipCoveredByWhitelist:
+      'This IP is already covered by whitelist entry (${coveredBy}); the whitelist takes precedence over the blacklist. Remove it from the whitelist first if you need to block it',
     ipListEntryNotFound: 'List entry not found',
-    ipFullRangeRemoveSuperAdminOnly: 'The full-range entry (${ip}) can only be removed by a super administrator: it underpins rate-limit exemption and trust marking, and removing it affects access control for every IP',
+    ipFullRangeRemoveSuperAdminOnly:
+      'The full-range entry (${ip}) can only be removed by a super administrator: it underpins rate-limit exemption and trust marking, and removing it affects access control for every IP',
     permissionNotFound: 'Permission not found',
     parentPermissionSelf: 'A permission cannot be its own parent',
     parentPermissionNotFound: 'Parent permission not found',
-    parentPermissionCycle: 'This parent setting would create a circular reference (the permission is already an ancestor of the target parent)',
-    permissionTreeDepthAnomaly: 'Abnormal permission tree depth; please ask an administrator to check parent references',
+    parentPermissionCycle:
+      'This parent setting would create a circular reference (the permission is already an ancestor of the target parent)',
+    permissionTreeDepthAnomaly:
+      'Abnormal permission tree depth; please ask an administrator to check parent references',
     permissionListInvalid: 'Please provide a valid permission list',
     exportFormatUnsupported: 'Unsupported export format: ${format}',
     reportTypeUnsupported: 'Unsupported report type',
@@ -1121,27 +1129,38 @@ export default {
     roleInUse: '${userCount} user(s) are using this role; please remove the role from them first',
     permissionIdRequired: 'Please provide at least one valid permission ID',
     permissionIdInvalid: 'One or more permission IDs are invalid',
-    rolePermPeerOrHigherForbidden: 'Not allowed to modify permissions of a role at or above your own level',
-    rolePermBaseHigherLevelForbidden: 'Not allowed to adjust permissions based on a role above your own level',
+    rolePermPeerOrHigherForbidden:
+      'Not allowed to modify permissions of a role at or above your own level',
+    rolePermBaseHigherLevelForbidden:
+      'Not allowed to adjust permissions based on a role above your own level',
     permissionAssignForbidden: 'Not allowed to assign the following permissions: ${permissions}',
     targetUserIdInvalid: 'Target user ID format is invalid',
     targetUserNotFound: 'Target user not found',
-    targetUserLacksRole: 'The target user does not hold this role, so it cannot be adjusted individually',
-    userRolePermPeerOrHigherForbidden: 'Not allowed to change role permissions of a peer or higher-level user',
+    targetUserLacksRole:
+      'The target user does not hold this role, so it cannot be adjusted individually',
+    userRolePermPeerOrHigherForbidden:
+      'Not allowed to change role permissions of a peer or higher-level user',
     passwordConfirmMismatch: 'The two new passwords do not match',
     passwordSameAsCurrent: 'New password cannot be the same as the current password',
-    sensitiveViewHigherLevelForbidden: 'Not allowed to view sensitive information of a higher-level user',
+    sensitiveViewHigherLevelForbidden:
+      'Not allowed to view sensitive information of a higher-level user',
     unsupportedDataType: 'Unsupported data type',
     reportTargetAndReasonRequired: 'Please provide the target type and reason',
     userOperatePeerOrHigherForbidden: 'Not allowed to operate on a peer or higher-level user',
-    unlockInactiveAccount: 'This account has been disabled by an administrator (inactive) and cannot be restored by unlocking; please enable the account first',
-    lockInactiveAccount: 'This account has been disabled by an administrator and cannot be locked again',
+    unlockInactiveAccount:
+      'This account has been disabled by an administrator (inactive) and cannot be restored by unlocking; please enable the account first',
+    lockInactiveAccount:
+      'This account has been disabled by an administrator and cannot be locked again',
     accountNotLocked: 'This account is not currently locked; no unlock needed',
-    cannotResetOwnMfaViaAdmin: 'You cannot reset your own two-factor authentication via the admin interface; please use your profile page',
+    cannotResetOwnMfaViaAdmin:
+      'You cannot reset your own two-factor authentication via the admin interface; please use your profile page',
     targetMfaNotEnabled: 'This user has not enabled two-factor authentication; no reset needed',
-    mfaResetPeerOrHigherForbidden: 'Not allowed to reset two-factor authentication for a peer or higher-level user',
-    sessionRevokeServiceUnavailable: 'Session revocation service is unavailable; the reset was not performed, please try again later',
-    forceLogoutMfaClearFailed: 'The user was signed out forcibly, but clearing the two-factor status failed; please retry',
+    mfaResetPeerOrHigherForbidden:
+      'Not allowed to reset two-factor authentication for a peer or higher-level user',
+    sessionRevokeServiceUnavailable:
+      'Session revocation service is unavailable; the reset was not performed, please try again later',
+    forceLogoutMfaClearFailed:
+      'The user was signed out forcibly, but clearing the two-factor status failed; please retry',
     securityOverviewFormatInvalid: 'Security overview data format is invalid',
     securityOverviewStructureInvalid: 'Security overview data structure is invalid',
     securityOverviewQueryFailed: 'Failed to query security overview',
@@ -1155,24 +1174,30 @@ export default {
     roleNotFoundInList: 'The list contains a role that does not exist',
     roleAssignHigherLevelForbidden: 'Not allowed to assign a role above your own level',
     userUpdatePeerOrHigherForbidden: 'Not allowed to modify a peer or higher-level user',
-    cannotChangeOwnStatus: 'You cannot change your own account status through this endpoint; please ask another administrator',
-    userStatusChangeForbidden: 'Not allowed to change user status (requires the user:lock permission)',
+    cannotChangeOwnStatus:
+      'You cannot change your own account status through this endpoint; please ask another administrator',
+    userStatusChangeForbidden:
+      'Not allowed to change user status (requires the user:lock permission)',
     emailTakenShort: 'Email is already in use',
     roleListInvalid: 'Please provide a valid role list',
     roleIdInvalid: 'One or more role IDs are invalid',
-    userRoleAssignPeerOrHigherForbidden: 'Not allowed to change roles of a peer or higher-level user',
-    roleAssignForeignPeerForbidden: 'Not allowed to assign peer-level roles you do not hold: ${foreignRoles}',
+    userRoleAssignPeerOrHigherForbidden:
+      'Not allowed to change roles of a peer or higher-level user',
+    roleAssignForeignPeerForbidden:
+      'Not allowed to assign peer-level roles you do not hold: ${foreignRoles}',
     userDeletePeerOrHigherForbidden: 'Not allowed to delete a peer or higher-level user',
     userIdListInvalid: 'Please provide a valid user ID list',
     batchDeleteLimitExceeded: 'A single batch delete supports at most ${max} users',
     userIdFormatInvalidInList: 'The list contains an invalid user ID format: ${invalidIds}',
     userIdNotFoundInList: 'The list contains a user ID that does not exist',
-    batchDeletePeerOrHigherForbidden: 'Not allowed to delete a peer or higher-level user: ${username}',
+    batchDeletePeerOrHigherForbidden:
+      'Not allowed to delete a peer or higher-level user: ${username}',
     authTokenMissing: 'Authentication token not provided',
     authTokenRevoked: 'Authentication token is no longer valid, please sign in again',
     accountDisabled: 'Account has been disabled, please contact an administrator',
     accountLocked: 'Account has been locked, please contact an administrator',
-    accountTempLocked: 'Account temporarily locked due to repeated failed sign-ins, please try again later',
+    accountTempLocked:
+      'Account temporarily locked due to repeated failed sign-ins, please try again later',
     authTokenInvalid: 'Invalid authentication token',
     authTokenExpired: 'Authentication token has expired',
     authProcessFailed: 'An error occurred during authentication',
@@ -1193,9 +1218,11 @@ export default {
     permissionCheckFailed: 'An error occurred while verifying permissions',
     roleNotAllowed: 'Your role is not allowed to perform this action',
     roleCheckFailed: 'An error occurred while verifying roles',
-    reauthRequired: 'This sensitive operation requires re-authentication; please provide your current password or MFA code',
+    reauthRequired:
+      'This sensitive operation requires re-authentication; please provide your current password or MFA code',
     reauthPasswordIncorrect: 'Current password is incorrect; verification failed',
-    reauthMfaNotEnabled: 'Two-factor authentication is not enabled; please verify with your current password',
+    reauthMfaNotEnabled:
+      'Two-factor authentication is not enabled; please verify with your current password',
     reauthMfaIncorrect: 'MFA code is incorrect; verification failed',
     reauthProcessFailed: 'An error occurred during identity verification',
     ipBlocked: 'Your IP has been blocked',
@@ -1203,8 +1230,10 @@ export default {
     uploadTypeNotAllowed: 'File type not allowed: ${mimetype}',
     uploadExtNotAllowed: 'File extension not allowed: .${ext}',
     paramMustBeValidObjectId: 'Parameter ${name} must be a valid object ID',
-    publicRegistrationDisabled: 'Public registration is currently disabled; please contact an administrator to create an account',
-    registerServiceUnavailable: 'Registration service is temporarily unavailable, please try again later',
+    publicRegistrationDisabled:
+      'Public registration is currently disabled; please contact an administrator to create an account',
+    registerServiceUnavailable:
+      'Registration service is temporarily unavailable, please try again later',
     auditQueryFailed: 'Failed to query audit logs',
   },
 }
