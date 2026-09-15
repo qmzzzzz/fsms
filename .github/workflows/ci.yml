@@ -12,7 +12,12 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [18.x, 20.x, 22.x]
+        # Node 18 已于 2025-04 EOL：2026-09-15 实证其失败形态已从「真用例失败」
+        # （时区断言，已修）退化为「1754 全过但进程 exit 1、无任何错误输出」的
+        # 环境 flaky，本地 Node 18 复现出 auditBufferGap 套件的文件系统/计时敏感
+        # 问题——无法用代码修复，纯烧 runner。项目实际运行口径为 20/22（部署）
+        # 与 24（前端构建），故测试矩阵收敛到当前 LTS 双线。
+        node-version: [20.x, 22.x]
 
     steps:
       - uses: actions/checkout@v5
@@ -56,7 +61,7 @@ jobs:
           HMAC_SECRET: test-hmac-secret
 
       - name: Upload backend coverage
-        if: matrix.node-version == '18.x'
+        if: matrix.node-version == '22.x'
         uses: codecov/codecov-action@v5
         with:
           files: ./coverage/lcov.info
