@@ -22,8 +22,9 @@ test('口令 + 动态码完成两步登录', async ({ page }) => {
   const mfaInput = page.getByPlaceholder('动态验证码 / 备用恢复码');
   await expect(mfaInput).toBeVisible({ timeout: 15_000 });
   await mfaInput.fill(generateTotp(SECRET));
-  // 二阶段沿用同一「登录/确认」按钮
-  await page.getByRole('button', { name: /登录|确认|验证/ }).click();
+  // 二阶段沿用同一「登录/确认」按钮；按钮文案为「登 录」（中间有空格），
+  // 正则须容忍空白——2026-09-14 CI 实证：/登录|确认|验证/ 匹配不到导致 60s 超时
+  await page.getByRole('button', { name: /^登\s*录$/ }).click();
   await expectLoggedIn(page);
 });
 
@@ -32,6 +33,6 @@ test('错误的动态码被拒', async ({ page }) => {
   const mfaInput = page.getByPlaceholder('动态验证码 / 备用恢复码');
   await expect(mfaInput).toBeVisible({ timeout: 15_000 });
   await mfaInput.fill('000000');
-  await page.getByRole('button', { name: /登录|确认|验证/ }).click();
+  await page.getByRole('button', { name: /^登\s*录$/ }).click();
   await expect(page.getByText(/验证码错误|MFA|两步验证/)).toBeVisible({ timeout: 10_000 });
 });
