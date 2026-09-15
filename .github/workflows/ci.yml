@@ -62,7 +62,7 @@ jobs:
 
       - name: Upload backend coverage
         if: matrix.node-version == '22.x'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: ./coverage/lcov.info
           # 配置 CODECOV_TOKEN 后上传即生效；未配置时私有仓上传必然失败，
@@ -186,7 +186,7 @@ jobs:
         run: npm run build
 
       - name: Upload frontend coverage
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: ./web-admin/coverage/lcov.info
           # 同后端口径：配置 CODECOV_TOKEN 后上传即生效，未配置时尽力而为；
