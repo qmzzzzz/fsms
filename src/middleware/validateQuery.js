@@ -24,7 +24,7 @@ const ApiResponse = require('../utils/apiResponse');
 const consumeValidation = () => (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
   return next();
 };

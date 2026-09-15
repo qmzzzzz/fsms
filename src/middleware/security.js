@@ -230,7 +230,7 @@ const requireReAuthentication = () => {
       const { currentPassword, mfaCode } = req.body;
 
       if (!currentPassword && !mfaCode) {
-        return ApiResponse.error(res, '敏感操作需要重新验证身份，请提供当前密码或 MFA 验证码', 403);
+        return ApiResponse.codeError(res, 'REAUTH_REQUIRED');
       }
 
       // 优先校验当前密码
@@ -238,12 +238,12 @@ const requireReAuthentication = () => {
         const User = require('../models/User');
         const user = await User.findById(req.user.userId).select('+password');
         if (!user) {
-          return ApiResponse.unauthorized(res, '用户不存在');
+          return ApiResponse.codeError(res, 'USER_NOT_FOUND');
         }
         const isValid = await user.comparePassword(currentPassword);
         if (!isValid) {
           logger.warn('敏感操作二次验证失败（密码错误）', { username: req.user.username });
-          return ApiResponse.error(res, '当前密码错误，验证未通过', 403);
+          return ApiResponse.codeError(res, 'REAUTH_PASSWORD_INCORRECT');
         }
         req.reAuthenticated = true;
         return next();
@@ -255,21 +255,21 @@ const requireReAuthentication = () => {
       const User = require('../models/User');
       const user = await User.findById(req.user.userId).select('+mfaSecret');
       if (!user) {
-        return ApiResponse.unauthorized(res, '用户不存在');
+        return ApiResponse.codeError(res, 'USER_NOT_FOUND');
       }
       if (!user.mfaEnabled) {
-        return ApiResponse.error(res, '未开启两步验证，请使用当前密码验证', 403);
+        return ApiResponse.codeError(res, 'REAUTH_MFA_NOT_ENABLED');
       }
       // 库内 mfaSecret 为 AES-GCM 密文（存量明文由 decryptMfaSecret 原样透传）
       if (!verifyTotp(decryptMfaSecret(user.mfaSecret), String(mfaCode || '').trim())) {
         logger.warn('敏感操作二次验证失败（MFA 验证码错误）', { username: req.user.username });
-        return ApiResponse.error(res, 'MFA 验证码错误，验证未通过', 403);
+        return ApiResponse.codeError(res, 'REAUTH_MFA_INCORRECT');
       }
       req.reAuthenticated = true;
       return next();
     } catch (error) {
       logger.error(`二次验证失败：${error.message}`);
-      return ApiResponse.serverError(res, '身份验证过程出错');
+      return ApiResponse.codeError(res, 'REAUTH_PROCESS_FAILED');
     }
   };
 };
@@ -413,7 +413,7 @@ const checkIPBlacklist = async (req, res, next) => {
       } catch (_) {
         /* 通知失败不影响拦截主流程 */
       }
-      return ApiResponse.error(res, '您的 IP 已被禁止访问', 403);
+      return ApiResponse.codeError(res, 'IP_BLOCKED');
     }
 
     // DB 查询成功且未命中黑名单：清除可能存在的陈旧缓存（解封后立即放行）
@@ -431,7 +431,7 @@ const checkIPBlacklist = async (req, res, next) => {
         riskFactors: ['ip_blacklisted', 'blacklist_db_degraded'],
         riskLevel: 'high',
       });
-      return ApiResponse.error(res, '您的 IP 已被禁止访问', 403);
+      return ApiResponse.codeError(res, 'IP_BLOCKED');
     }
     // 评价报告 #7：fail-open 放行（缓存未命中）必须有显式可观测信号——
     // 否则「DB 挂了 + 全站裸奔」只有一条 error 日志可循。计入
@@ -664,16 +664,12 @@ const fileUploadSecurity = (options = {}) => {
     for (const file of req.files) {
       // 检查文件大小
       if (file.size > maxSize) {
-        return ApiResponse.error(
-          res,
-          `文件 ${file.originalname} 超过最大限制 ${maxSize / 1024 / 1024}MB`,
-          400
-        );
+        return ApiResponse.codeError(res, 'UPLOAD_FILE_TOO_LARGE', { message: `文件 ${file.originalname} 超过最大限制 ${maxSize / 1024 / 1024}MB`, params: { filename: file.originalname, maxSize: maxSize / 1024 / 1024 } });
       }
 
       // 检查文件类型
       if (allowedTypes.length > 0 && !allowedTypes.includes(file.mimetype)) {
-        return ApiResponse.error(res, `不允许的文件类型：${file.mimetype}`, 400);
+        return ApiResponse.codeError(res, 'UPLOAD_TYPE_NOT_ALLOWED', { message: `不允许的文件类型：${file.mimetype}`, params: { mimetype: file.mimetype } });
       }
 
       // 检查文件扩展名（防止 MIME 类型欺骗）
@@ -689,7 +685,7 @@ const fileUploadSecurity = (options = {}) => {
       const allowedExts = allowedTypes.map((t) => mimeToExt[t]).filter(Boolean);
 
       if (allowedExts.length > 0 && !allowedExts.includes(ext)) {
-        return ApiResponse.error(res, `不允许的文件扩展名：.${ext}`, 400);
+        return ApiResponse.codeError(res, 'UPLOAD_EXT_NOT_ALLOWED', { message: `不允许的文件扩展名：.${ext}`, params: { ext: ext } });
       }
     }
 

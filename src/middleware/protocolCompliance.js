@@ -117,7 +117,7 @@ const protocolCompliance = (options = {}) => {
     // 1. HTTP 方法白名单
     if (FORBIDDEN_METHODS.includes(req.method)) {
       recordViolation(req, 'forbidden_method', `方法 ${req.method} 不被允许`);
-      return ApiResponse.error(res, `不支持的请求方法：${req.method}`, 405);
+      return ApiResponse.codeError(res, 'HTTP_METHOD_UNSUPPORTED', { message: `不支持的请求方法：${req.method}`, params: { method: req.method } });
     }
 
     // 2. 请求头卫生检查
@@ -128,14 +128,14 @@ const protocolCompliance = (options = {}) => {
         'excessive_headers',
         `头部数量 ${headerNames.length} 超过上限 ${maxHeaderCount}`
       );
-      return ApiResponse.error(res, '请求头数量异常', 431);
+      return ApiResponse.codeError(res, 'HEADER_COUNT_EXCESSIVE');
     }
 
     for (const name of headerNames) {
       // Node 已将头名小写化，此处校验字符集，拦截含控制字符/空格的畸形头名
       if (!VALID_HEADER_NAME.test(name)) {
         recordViolation(req, 'invalid_header_name', `非法头名：${name.slice(0, 64)}`);
-        return ApiResponse.error(res, '请求头格式非法', 400);
+        return ApiResponse.codeError(res, 'HEADER_NAME_INVALID');
       }
       const value = req.headers[name];
       const len = Array.isArray(value)
@@ -143,7 +143,7 @@ const protocolCompliance = (options = {}) => {
         : String(value ?? '').length;
       if (len > maxHeaderValueLength) {
         recordViolation(req, 'oversized_header', `头部 ${name} 长度 ${len} 超过上限`);
-        return ApiResponse.error(res, '请求头长度超限', 431);
+        return ApiResponse.codeError(res, 'HEADER_VALUE_TOO_LONG');
       }
     }
 
@@ -152,7 +152,7 @@ const protocolCompliance = (options = {}) => {
       const host = req.get('host');
       if (!host || !allowedHosts.includes(host)) {
         recordViolation(req, 'host_mismatch', `Host 头 ${host || '(空)'} 不在允许列表内`);
-        return ApiResponse.error(res, '请求 Host 非法', 400);
+        return ApiResponse.codeError(res, 'HOST_HEADER_INVALID');
       }
     }
 
@@ -166,7 +166,7 @@ const protocolCompliance = (options = {}) => {
           'invalid_content_length',
           `Content-Length 值非法：${contentLengthRaw}`
         );
-        return ApiResponse.error(res, 'Content-Length 头非法', 400);
+        return ApiResponse.codeError(res, 'CONTENT_LENGTH_INVALID');
       }
       if (contentLength > maxContentLength) {
         recordViolation(
@@ -174,7 +174,7 @@ const protocolCompliance = (options = {}) => {
           'payload_too_large',
           `Content-Length ${contentLength} 超过上限 ${maxContentLength}`
         );
-        return ApiResponse.error(res, '请求体过大', 413);
+        return ApiResponse.codeError(res, 'PAYLOAD_TOO_LARGE');
       }
     }
 
@@ -187,13 +187,13 @@ const protocolCompliance = (options = {}) => {
         const contentType = req.get('content-type');
         if (!contentType) {
           recordViolation(req, 'missing_content_type', `${req.method} 请求未声明 Content-Type`);
-          return ApiResponse.error(res, '请求缺少 Content-Type 头', 400);
+          return ApiResponse.codeError(res, 'CONTENT_TYPE_MISSING');
         }
         // 只取媒体类型部分，忽略 charset / boundary 等参数
         const mediaType = contentType.split(';')[0].trim().toLowerCase();
         if (!allowedContentTypes.includes(mediaType)) {
           recordViolation(req, 'unsupported_media_type', `不支持的 Content-Type：${mediaType}`);
-          return ApiResponse.error(res, `不支持的 Content-Type：${mediaType}`, 415);
+          return ApiResponse.codeError(res, 'CONTENT_TYPE_UNSUPPORTED', { message: `不支持的 Content-Type：${mediaType}`, params: { mediaType: mediaType } });
         }
       }
     }

@@ -93,8 +93,8 @@ const getDevices = asyncHandler(async (req, res) => {
  */
 const getDeviceById = asyncHandler(async (req, res) => {
   const device = await deviceService.getDeviceById(req.params.id);
-  if (!device) return ApiResponse.notFound(res, '设备不存在');
-  if (!(await isDeviceInScope(req, device))) return ApiResponse.forbidden(res, '无权查看该设备');
+  if (!device) return ApiResponse.codeError(res, 'DEVICE_NOT_FOUND');
+  if (!(await isDeviceInScope(req, device))) return ApiResponse.codeError(res, 'DEVICE_VIEW_FORBIDDEN');
   return ApiResponse.success(res, device, '获取成功');
 });
 
@@ -104,7 +104,7 @@ const getDeviceById = asyncHandler(async (req, res) => {
  */
 const createDevice = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const allowedFields = (({
     deviceCode,
@@ -154,11 +154,11 @@ const createDevice = asyncHandler(async (req, res) => {
  */
 const updateDevice = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const device = await deviceService.getDeviceById(req.params.id);
-  if (!device) return ApiResponse.notFound(res, '设备不存在');
-  if (!(await isDeviceInScope(req, device))) return ApiResponse.forbidden(res, '无权操作该设备');
+  if (!device) return ApiResponse.codeError(res, 'DEVICE_NOT_FOUND');
+  if (!(await isDeviceInScope(req, device))) return ApiResponse.codeError(res, 'DEVICE_OPERATE_FORBIDDEN');
 
   const updated = await deviceService.updateDevice(device, req.body);
   return ApiResponse.success(res, updated, '设备更新成功');
@@ -170,12 +170,12 @@ const updateDevice = asyncHandler(async (req, res) => {
  */
 const updateDeviceStatus = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { status } = req.body;
   const device = await deviceService.getDeviceById(req.params.id);
-  if (!device) return ApiResponse.notFound(res, '设备不存在');
-  if (!(await isDeviceInScope(req, device))) return ApiResponse.forbidden(res, '无权操作该设备');
+  if (!device) return ApiResponse.codeError(res, 'DEVICE_NOT_FOUND');
+  if (!(await isDeviceInScope(req, device))) return ApiResponse.codeError(res, 'DEVICE_OPERATE_FORBIDDEN');
 
   try {
     const updated = await deviceService.updateDeviceStatus(device, status);
@@ -195,11 +195,11 @@ const updateDeviceStatus = asyncHandler(async (req, res) => {
  */
 const addMaintenanceRecord = asyncHandler(async (req, res) => {
   const { content, type } = req.body;
-  if (!content) return ApiResponse.error(res, '请提供维护内容', 400);
+  if (!content) return ApiResponse.codeError(res, 'MAINTENANCE_CONTENT_REQUIRED');
 
   const device = await deviceService.getDeviceById(req.params.id);
-  if (!device) return ApiResponse.notFound(res, '设备不存在');
-  if (!(await isDeviceInScope(req, device))) return ApiResponse.forbidden(res, '无权操作该设备');
+  if (!device) return ApiResponse.codeError(res, 'DEVICE_NOT_FOUND');
+  if (!(await isDeviceInScope(req, device))) return ApiResponse.codeError(res, 'DEVICE_OPERATE_FORBIDDEN');
 
   // type 透传：repair/replacement 属维修行为，不应顺延检查周期
   // （模型层 addMaintenanceRecord 按此区分，见 FireDevice.js 注释）
@@ -213,8 +213,8 @@ const addMaintenanceRecord = asyncHandler(async (req, res) => {
  */
 const deleteDevice = asyncHandler(async (req, res) => {
   const device = await deviceService.getDeviceById(req.params.id);
-  if (!device) return ApiResponse.notFound(res, '设备不存在');
-  if (!(await isDeviceInScope(req, device))) return ApiResponse.forbidden(res, '无权操作该设备');
+  if (!device) return ApiResponse.codeError(res, 'DEVICE_NOT_FOUND');
+  if (!(await isDeviceInScope(req, device))) return ApiResponse.codeError(res, 'DEVICE_OPERATE_FORBIDDEN');
 
   await deviceService.deleteDevice(device);
   return ApiResponse.success(res, null, '设备删除成功');
@@ -252,12 +252,12 @@ const getExpiringDevices = asyncHandler(async (req, res) => {
  */
 const scrapDevice = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { scrapReason, scrapDate } = req.body;
   const device = await deviceService.getDeviceById(req.params.id);
-  if (!device) return ApiResponse.notFound(res, '设备不存在');
-  if (!(await isDeviceInScope(req, device))) return ApiResponse.forbidden(res, '无权操作该设备');
+  if (!device) return ApiResponse.codeError(res, 'DEVICE_NOT_FOUND');
+  if (!(await isDeviceInScope(req, device))) return ApiResponse.codeError(res, 'DEVICE_OPERATE_FORBIDDEN');
 
   const updated = await deviceService.scrapDevice(device, scrapReason, scrapDate);
   return ApiResponse.success(res, updated, '设备报废成功');

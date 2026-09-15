@@ -87,7 +87,7 @@ const getMySecurityInfo = asyncHandler(async (req, res) => {
 const changePasswordSecure = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   // 评价报告 #15（改密逻辑双实现收敛）：本端点与 /api/auth/password 的
@@ -102,25 +102,21 @@ const changePasswordSecure = asyncHandler(async (req, res) => {
     case 'ENC_INVALID':
       return ApiResponse.codeError(res, 'AUTH_ENCRYPTED_CREDENTIAL_INVALID');
     case 'MISSING':
-      return ApiResponse.error(res, '请提供当前密码和新密码', 400);
+      return ApiResponse.codeError(res, 'PASSWORD_CURRENT_AND_NEW_REQUIRED');
     case 'CONFIRM_MISMATCH':
-      return ApiResponse.error(res, '两次输入的新密码不一致', 400);
+      return ApiResponse.codeError(res, 'PASSWORD_CONFIRM_MISMATCH');
     case 'WEAK':
       return ApiResponse.error(res, result.message, 400);
     case 'USER_NOT_FOUND':
-      return ApiResponse.unauthorized(res, '用户不存在或已被删除');
+      return ApiResponse.codeError(res, 'USER_NOT_FOUND_OR_DELETED');
     case 'CURRENT_WRONG':
       logger.warn('密码修改失败 - 当前密码错误', { username: req.user?.username });
-      return ApiResponse.error(res, '当前密码错误', 400);
+      return ApiResponse.codeError(res, 'PASSWORD_CURRENT_INCORRECT');
     case 'SAME_PASSWORD':
-      return ApiResponse.error(res, '新密码不能与当前密码相同', 400);
+      return ApiResponse.codeError(res, 'PASSWORD_SAME_AS_CURRENT');
     case 'REVOKE_FAILED':
       // fail-closed：密码已落库但吊销失败，如实告知「已改但未吊销」（与 auth 端点同文案）
-      return ApiResponse.error(
-        res,
-        '密码已修改，但会话吊销服务暂不可用，旧登录状态可能仍然有效，请重新登录',
-        503
-      );
+      return ApiResponse.codeError(res, 'PASSWORD_CHANGED_REVOKE_FAILED');
     default:
       break;
   }
@@ -184,7 +180,7 @@ const getAccountBindings = asyncHandler(async (req, res) => {
 const viewSensitiveData = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { dataType, targetUserId } = req.body;
@@ -202,17 +198,17 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
       .populate('roles', 'level')
       .lean();
     if (!targetUser) {
-      return ApiResponse.notFound(res, '目标用户不存在');
+      return ApiResponse.codeError(res, 'TARGET_USER_NOT_FOUND');
     }
     const targetLevel = maxRoleLevel(targetUser.roles);
     if (opLevel < targetLevel) {
-      return ApiResponse.forbidden(res, '无权查看更高层级用户的敏感信息');
+      return ApiResponse.codeError(res, 'SENSITIVE_VIEW_HIGHER_LEVEL_FORBIDDEN');
     }
   }
 
   const user = isSelf ? await User.findById(req.user.userId) : await User.findById(targetUserId);
   if (!user) {
-    return ApiResponse.unauthorized(res, '用户不存在或已被删除');
+    return ApiResponse.codeError(res, 'USER_NOT_FOUND_OR_DELETED');
   }
 
   let sensitiveData = {};
@@ -233,7 +229,7 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
       };
       break;
     default:
-      return ApiResponse.error(res, '不支持的数据类型', 400);
+      return ApiResponse.codeError(res, 'UNSUPPORTED_DATA_TYPE');
   }
 
   // 记录审计日志
@@ -318,13 +314,13 @@ const getSecurityStats = asyncHandler(async (req, res) => {
 const reportSuspiciousActivity = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { targetType, targetId, reason, description } = req.body;
 
   if (!targetType || !reason) {
-    return ApiResponse.error(res, '请提供目标类型和原因', 400);
+    return ApiResponse.codeError(res, 'REPORT_TARGET_AND_REASON_REQUIRED');
   }
 
   res.locals.skipGlobalAudit = true;
@@ -392,7 +388,7 @@ const getMyLogs = asyncHandler(async (req, res) => {
 const toggleUserLock = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { userId } = req.params;
@@ -411,21 +407,17 @@ const toggleUserLock = asyncHandler(async (req, res) => {
 
   switch (result.outcome) {
     case 'NOT_FOUND':
-      return ApiResponse.notFound(res, '用户不存在');
+      return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });
     case 'FORBIDDEN_SAME_LEVEL':
-      return ApiResponse.error(res, '无权操作同级或更高级别的用户', 403);
+      return ApiResponse.codeError(res, 'USER_OPERATE_PEER_OR_HIGHER_FORBIDDEN');
     case 'CANNOT_LOCK_SUPER_ADMIN':
       return ApiResponse.codeError(res, 'CANNOT_LOCK_SUPER_ADMIN');
     case 'INACTIVE_UNLOCK':
-      return ApiResponse.error(
-        res,
-        '该账户已被管理员禁用（inactive），不能通过解锁恢复；请先由管理员启用该账户',
-        400
-      );
+      return ApiResponse.codeError(res, 'UNLOCK_INACTIVE_ACCOUNT');
     case 'INACTIVE_LOCK':
-      return ApiResponse.error(res, '该账户已被管理员禁用，不能重复锁定', 400);
+      return ApiResponse.codeError(res, 'LOCK_INACTIVE_ACCOUNT');
     case 'NOT_LOCKED':
-      return ApiResponse.error(res, '该账户当前未处于锁定状态，无需解锁', 400);
+      return ApiResponse.codeError(res, 'ACCOUNT_NOT_LOCKED');
     default:
       break;
   }
@@ -454,21 +446,21 @@ const toggleUserLock = asyncHandler(async (req, res) => {
 const resetUserMfa = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { userId } = req.params;
   const user = await User.findById(userId);
   if (!user) {
-    return ApiResponse.notFound(res, '用户不存在');
+    return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });
   }
 
   // 自身不走管理员重置：请通过个人资料页用动态口令正常关闭
   if (String(user._id) === String(req.user.userId)) {
-    return ApiResponse.error(res, '不能通过管理接口重置自己的两步验证，请在个人资料页操作', 400);
+    return ApiResponse.codeError(res, 'CANNOT_RESET_OWN_MFA_VIA_ADMIN');
   }
   if (!user.mfaEnabled) {
-    return ApiResponse.error(res, '该用户未开启两步验证，无需重置', 400);
+    return ApiResponse.codeError(res, 'TARGET_MFA_NOT_ENABLED');
   }
 
   // 层级与内置超管保护（与 toggleUserLock 同口径）
@@ -480,7 +472,7 @@ const resetUserMfa = asyncHandler(async (req, res) => {
     targetUserRoles.length > 0 ? Math.max(...targetUserRoles.map((r) => r.level || 0)) : 0;
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
   if (targetMaxLevel >= operatorMaxLevel) {
-    return ApiResponse.error(res, '无权重置同级或更高级别用户的两步验证', 403);
+    return ApiResponse.codeError(res, 'MFA_RESET_PEER_OR_HIGHER_FORBIDDEN');
   }
   if (targetUserRoles.some(isSuperAdminRole)) {
     return ApiResponse.codeError(res, 'CANNOT_RESET_MFA_SUPER_ADMIN', {
@@ -500,7 +492,7 @@ const resetUserMfa = asyncHandler(async (req, res) => {
       username: user.username,
       operator: req.user.username,
     });
-    return ApiResponse.error(res, '会话吊销服务暂不可用，未执行重置，请稍后重试', 503);
+    return ApiResponse.codeError(res, 'SESSION_REVOKE_SERVICE_UNAVAILABLE');
   }
 
   try {
@@ -518,7 +510,7 @@ const resetUserMfa = asyncHandler(async (req, res) => {
       username: user.username,
       operator: req.user.username,
     });
-    return ApiResponse.error(res, '该用户已被强制下线，但两步验证状态清除失败，请重试', 503);
+    return ApiResponse.codeError(res, 'FORCE_LOGOUT_MFA_CLEAR_FAILED');
   }
 
   // 会话表须与 tokenVersion 同步收敛：否则被重置 MFA 的用户在「登录会话」
@@ -563,7 +555,7 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
     const securityAlert = require('../services/securityAlert');
     const overview = await securityAlert.getSecurityOverview(7);
     if (!overview || typeof overview !== 'object') {
-      return ApiResponse.error(res, '安全概览数据格式错误', 404);
+      return ApiResponse.codeError(res, 'SECURITY_OVERVIEW_FORMAT_INVALID');
     }
     // 验证必要的字段
     if (
@@ -571,7 +563,7 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
       typeof overview.highAlerts !== 'number' ||
       typeof overview.failedLogins !== 'number'
     ) {
-      return ApiResponse.error(res, '安全概览数据结构错误', 404);
+      return ApiResponse.codeError(res, 'SECURITY_OVERVIEW_STRUCTURE_INVALID');
     }
     // 添加默认值
     overview.period = overview.period || `${7}天`;
@@ -643,7 +635,7 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
     return ApiResponse.success(res, overview, '获取成功');
   } catch (error) {
     logger.error(`安全概览查询失败: ${error.message}`);
-    return ApiResponse.serverError(res, '安全概览查询失败');
+    return ApiResponse.codeError(res, 'SECURITY_OVERVIEW_QUERY_FAILED');
   }
 });
 
@@ -658,7 +650,7 @@ const getRecentAlerts = asyncHandler(async (req, res) => {
     const ALERTS_PAGE_SIZE = 50;
     const alertsRaw = await securityAlert.getRecentAlerts(ALERTS_PAGE_SIZE + 1);
     if (!alertsRaw || !Array.isArray(alertsRaw)) {
-      return ApiResponse.error(res, '最近告警数据为空', 404);
+      return ApiResponse.codeError(res, 'RECENT_ALERTS_EMPTY');
     }
     // 据实计算 hasMore 后再截断到页大小，保证返回体与元数据一致
     const hasMore = alertsRaw.length > ALERTS_PAGE_SIZE;
@@ -714,7 +706,7 @@ const getRecentAlerts = asyncHandler(async (req, res) => {
     return ApiResponse.success(res, response, '获取成功');
   } catch (error) {
     logger.error(`最近告警查询失败: ${error.message}`);
-    return ApiResponse.serverError(res, '最近告警查询失败');
+    return ApiResponse.codeError(res, 'RECENT_ALERTS_QUERY_FAILED');
   }
 });
 
@@ -758,7 +750,7 @@ const setRegistrationConfig = asyncHandler(async (req, res) => {
   const { allowPublicRegistration } = req.body;
 
   if (typeof allowPublicRegistration !== 'boolean') {
-    return ApiResponse.error(res, '参数 allowPublicRegistration 必须为布尔值', 400);
+    return ApiResponse.codeError(res, 'CONFIG_ALLOW_REGISTRATION_MUST_BE_BOOLEAN');
   }
 
   await SystemConfig.set('allowPublicRegistration', allowPublicRegistration, req.user.userId);
@@ -814,7 +806,7 @@ const setLoginCaptchaConfig = asyncHandler(async (req, res) => {
   const { loginCaptchaEnabled } = req.body;
 
   if (typeof loginCaptchaEnabled !== 'boolean') {
-    return ApiResponse.error(res, '参数 loginCaptchaEnabled 必须为布尔值', 400);
+    return ApiResponse.codeError(res, 'CONFIG_LOGIN_CAPTCHA_MUST_BE_BOOLEAN');
   }
 
   await SystemConfig.set('loginCaptchaEnabled', loginCaptchaEnabled, req.user.userId);
@@ -870,7 +862,7 @@ const setRegisterCaptchaConfig = asyncHandler(async (req, res) => {
   const { registerCaptchaEnabled } = req.body;
 
   if (typeof registerCaptchaEnabled !== 'boolean') {
-    return ApiResponse.error(res, '参数 registerCaptchaEnabled 必须为布尔值', 400);
+    return ApiResponse.codeError(res, 'CONFIG_REGISTER_CAPTCHA_MUST_BE_BOOLEAN');
   }
 
   await SystemConfig.set('registerCaptchaEnabled', registerCaptchaEnabled, req.user.userId);

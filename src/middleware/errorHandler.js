@@ -45,7 +45,7 @@ const errorHandler = (err, req, res, _next) => {
     logger.warn(`ValidationError: ${JSON.stringify(errors)}`);
     // 生产环境不返回具体字段名，避免泄露 schema 信息
     const safeErrors = isDev ? errors : undefined;
-    return ApiResponse.error(res, '数据验证失败', 400, safeErrors);
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: safeErrors });
   }
 
   // JWT 错误
@@ -75,14 +75,14 @@ const errorHandler = (err, req, res, _next) => {
   // 对外仅返回通用文案，不回显解析器内部错误细节（生产环境口径一致，不泄堆栈）
   if (err.type === 'entity.parse.failed') {
     logger.warn(`JSON 解析失败：${req.method} ${req.originalUrl}`);
-    return ApiResponse.error(res, '请求体 JSON 解析失败', 400);
+    return ApiResponse.codeError(res, 'JSON_PARSE_FAILED');
   }
 
   // 请求体超过大小限制（body-parser entity.too.large，上限见 app.js 的 express.json limit）
   // 同样只返回通用文案，不暴露具体限额配置与堆栈信息
   if (err.type === 'entity.too.large') {
     logger.warn(`请求体超限：${req.method} ${req.originalUrl}`);
-    return ApiResponse.error(res, '请求体超过大小限制', 413);
+    return ApiResponse.codeError(res, 'PAYLOAD_EXCEEDS_LIMIT');
   }
 
   // 未知错误 - 服务器内部错误
@@ -93,7 +93,7 @@ const errorHandler = (err, req, res, _next) => {
     logger.error(`UnhandledError: ${err.message} (${err.name})`);
   }
 
-  return ApiResponse.serverError(res, '服务器内部错误，请稍后重试');
+  return ApiResponse.codeError(res, 'INTERNAL_ERROR');
 };
 
 /**

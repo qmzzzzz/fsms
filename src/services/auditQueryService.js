@@ -195,7 +195,7 @@ const queryAuditCursorPage = (req, res, query, { limitNum, decodedCursor }) => {
     })();
   } catch (error) {
     logger.error(`审计日志查询失败: ${error.message}`);
-    return ApiResponse.serverError(res, '审计日志查询失败');
+    return ApiResponse.codeError(res, 'AUDIT_QUERY_FAILED');
   }
 };
 
@@ -256,7 +256,7 @@ const queryAuditOffsetPage = (req, res, query, { pageNum, limitNum }) => {
     })();
   } catch (error) {
     logger.error(`审计日志查询失败: ${error.message}`);
-    return ApiResponse.serverError(res, '审计日志查询失败');
+    return ApiResponse.codeError(res, 'AUDIT_QUERY_FAILED');
   }
 };
 
@@ -273,7 +273,7 @@ const queryAuditLogs = asyncHandler(async (req, res) => {
 
   warnLargeAuditRange({ startDate, endDate }, res);
   if (!req.user || !req.user.userId) {
-    return ApiResponse.unauthorized(res, '未授权访问');
+    return ApiResponse.codeError(res, 'UNAUTHORIZED_ACCESS');
   }
 
   ({ query } = await applyAuditDataScope(query, req.user.userId));

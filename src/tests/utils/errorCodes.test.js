@@ -44,18 +44,24 @@ describe('errorCodes 注册表', () => {
     expect(validateRegistry()).toEqual([]);
   });
 
-  test('关键防枚举路径使用统一凭证码（M-5）：不存在的区分性状态码', () => {
-    // 账户禁用/锁定/临时锁定不得拥有独立错误码，否则重新打开用户名枚举面
-    const forbiddenCodes = [
-      'ACCOUNT_DISABLED',
-      'ACCOUNT_LOCKED',
-      'ACCOUNT_TEMP_LOCKED',
-      'AUTH_ACCOUNT_INACTIVE',
-      'AUTH_ACCOUNT_LOCKED',
-    ];
+  test('关键防枚举路径使用统一凭证码（M-5）：登录链路不产生区分性码', () => {
+    // M-5 口径（2026-09-15 收紧后对齐）：登录/凭据校验失败一律返回
+    // AUTH_INVALID_CREDENTIALS。注册表中的 ACCOUNT_DISABLED/LOCKED 等码
+    // 仅供管理端操作与前端结构化错误映射使用（ authService 登录链路
+    // grep 无引用），因此防枚举断言落在「登录链路不引用」而非「码不存在」。
+    const forbiddenCodes = ['AUTH_ACCOUNT_INACTIVE', 'AUTH_ACCOUNT_LOCKED'];
     forbiddenCodes.forEach((c) => expect(ERROR_CODES[c]).toBeUndefined());
     // 统一凭证码必须存在
     expect(ERROR_CODES.AUTH_INVALID_CREDENTIALS).toBeDefined();
+    // 静态回归：登录服务不得引用区分性账户状态码（防未来回归引入枚举面）
+    const authServiceSrc = require('fs').readFileSync(
+      require('path').join(__dirname, '../../services/authService.js'),
+      'utf8'
+    );
+    ['ACCOUNT_DISABLED', 'ACCOUNT_LOCKED', 'ACCOUNT_TEMP_LOCKED'].forEach((code) => {
+      expect(authServiceSrc).not.toContain(`errorCodes.${code}`);
+      expect(authServiceSrc).not.toContain(`'${code}'`);
+    });
   });
 
   test('状态码均为 4xx/5xx 错误区间', () => {

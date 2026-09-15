@@ -82,7 +82,7 @@ function createMetricsAuth(options = {}) {
 
     // ③ 其余一律拒绝：公网直连（Nginx 防线已失守的信号）必须在此被拦下
     logger.warn('metrics 端点拒绝非内网来源', { ip: req.ip || 'unknown' });
-    return ApiResponse.unauthorized(res, 'metrics 端点仅限内网访问');
+    return ApiResponse.codeError(res, 'METRICS_INTERNAL_ONLY');
   };
 }
 

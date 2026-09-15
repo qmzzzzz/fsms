@@ -48,7 +48,7 @@ const getInspections = asyncHandler(async (req, res) => {
     (startDate && isNaN(new Date(startDate).getTime())) ||
     (endDate && isNaN(new Date(endDate).getTime()))
   ) {
-    return ApiResponse.error(res, '日期参数格式错误', 400);
+    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
   }
 
   const dataScope = await getDataScope(req.user.userId);
@@ -103,9 +103,9 @@ const getInspections = asyncHandler(async (req, res) => {
  */
 const getInspectionById = asyncHandler(async (req, res) => {
   const inspection = await inspectionService.getInspectionById(req.params.id);
-  if (!inspection) return ApiResponse.notFound(res, '巡检记录不存在');
+  if (!inspection) return ApiResponse.codeError(res, 'INSPECTION_NOT_FOUND');
   if (!(await isInspectionInScope(req, inspection)))
-    return ApiResponse.forbidden(res, '无权查看该巡检记录');
+    return ApiResponse.codeError(res, 'INSPECTION_VIEW_FORBIDDEN');
   return ApiResponse.success(res, inspection, '获取成功');
 });
 
@@ -115,7 +115,7 @@ const getInspectionById = asyncHandler(async (req, res) => {
  */
 const createInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const allowedFields = (({
     title,
@@ -153,12 +153,12 @@ const createInspection = asyncHandler(async (req, res) => {
  */
 const updateInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const inspection = await inspectionService.getInspectionById(req.params.id);
-  if (!inspection) return ApiResponse.notFound(res, '巡检记录不存在');
+  if (!inspection) return ApiResponse.codeError(res, 'INSPECTION_NOT_FOUND');
   if (!(await isInspectionInScope(req, inspection)))
-    return ApiResponse.forbidden(res, '无权操作该巡检记录');
+    return ApiResponse.codeError(res, 'INSPECTION_OPERATE_FORBIDDEN');
 
   try {
     const updated = await inspectionService.updateInspection(inspection, req.body);
@@ -178,12 +178,12 @@ const updateInspection = asyncHandler(async (req, res) => {
  */
 const startInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const inspection = await inspectionService.getInspectionById(req.params.id);
-  if (!inspection) return ApiResponse.notFound(res, '巡检记录不存在');
+  if (!inspection) return ApiResponse.codeError(res, 'INSPECTION_NOT_FOUND');
   if (!(await isInspectionInScope(req, inspection)))
-    return ApiResponse.forbidden(res, '无权操作该巡检记录');
+    return ApiResponse.codeError(res, 'INSPECTION_OPERATE_FORBIDDEN');
 
   try {
     const updated = await inspectionService.startInspection(inspection, req.user.userId);
@@ -203,13 +203,13 @@ const startInspection = asyncHandler(async (req, res) => {
  */
 const completeInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { result, findings, location, remark } = req.body;
   const inspection = await inspectionService.getInspectionById(req.params.id);
-  if (!inspection) return ApiResponse.notFound(res, '巡检记录不存在');
+  if (!inspection) return ApiResponse.codeError(res, 'INSPECTION_NOT_FOUND');
   if (!(await isInspectionInScope(req, inspection)))
-    return ApiResponse.forbidden(res, '无权操作该巡检记录');
+    return ApiResponse.codeError(res, 'INSPECTION_OPERATE_FORBIDDEN');
 
   try {
     const updated = await inspectionService.completeInspection(
@@ -233,13 +233,13 @@ const completeInspection = asyncHandler(async (req, res) => {
  */
 const reviewInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { reviewComment, reviewResult } = req.body;
   const inspection = await inspectionService.getInspectionById(req.params.id);
-  if (!inspection) return ApiResponse.notFound(res, '巡检记录不存在');
+  if (!inspection) return ApiResponse.codeError(res, 'INSPECTION_NOT_FOUND');
   if (!(await isInspectionInScope(req, inspection)))
-    return ApiResponse.forbidden(res, '无权操作该巡检记录');
+    return ApiResponse.codeError(res, 'INSPECTION_OPERATE_FORBIDDEN');
 
   try {
     const updated = await inspectionService.reviewInspection(
@@ -263,13 +263,13 @@ const reviewInspection = asyncHandler(async (req, res) => {
  */
 const cancelInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { reason } = req.body;
   const inspection = await inspectionService.getInspectionById(req.params.id);
-  if (!inspection) return ApiResponse.notFound(res, '巡检记录不存在');
+  if (!inspection) return ApiResponse.codeError(res, 'INSPECTION_NOT_FOUND');
   if (!(await isInspectionInScope(req, inspection)))
-    return ApiResponse.forbidden(res, '无权操作该巡检记录');
+    return ApiResponse.codeError(res, 'INSPECTION_OPERATE_FORBIDDEN');
 
   try {
     const updated = await inspectionService.cancelInspection(inspection, reason, req.user.userId);
@@ -289,12 +289,12 @@ const cancelInspection = asyncHandler(async (req, res) => {
  */
 const deleteInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const inspection = await inspectionService.getInspectionById(req.params.id);
-  if (!inspection) return ApiResponse.notFound(res, '巡检记录不存在');
+  if (!inspection) return ApiResponse.codeError(res, 'INSPECTION_NOT_FOUND');
   if (!(await isInspectionInScope(req, inspection)))
-    return ApiResponse.forbidden(res, '无权操作该巡检记录');
+    return ApiResponse.codeError(res, 'INSPECTION_OPERATE_FORBIDDEN');
 
   try {
     await inspectionService.deleteInspection(inspection);
@@ -318,7 +318,7 @@ const getInspectionStats = asyncHandler(async (req, res) => {
     (startDate && isNaN(new Date(startDate).getTime())) ||
     (endDate && isNaN(new Date(endDate).getTime()))
   ) {
-    return ApiResponse.error(res, '日期参数格式错误', 400);
+    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
   }
   // L2：与列表同口径的数据范围，防止越权统计全组织巡检
   const dataScope = await getDataScope(req.user.userId);

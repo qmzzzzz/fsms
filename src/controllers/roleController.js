@@ -71,14 +71,14 @@ const getAllRoles = asyncHandler(async (req, res) => {
 const getRoleById = asyncHandler(async (req, res) => {
   const role = await roleService.getRoleDetail(req.params.id);
   if (!role) {
-    return ApiResponse.notFound(res, '角色不存在');
+    return ApiResponse.codeError(res, 'ROLE_NOT_FOUND');
   }
 
   const { dataScope } = await applyRoleScopeToQuery({}, req.user.userId);
   if (dataScope.type !== 'all') {
     const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
     if (dataScope.type === 'none' || (role.level || 0) > operatorMaxLevel) {
-      return ApiResponse.forbidden(res, '无权查看该角色');
+      return ApiResponse.codeError(res, 'ROLE_VIEW_FORBIDDEN');
     }
   }
   return ApiResponse.success(res, role, '获取成功');
@@ -87,13 +87,13 @@ const getRoleById = asyncHandler(async (req, res) => {
 const createRole = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { name, code, description, level, permissions } = req.body;
   const existing = await roleService.findRoleByCode(code);
   if (existing) {
-    return ApiResponse.error(res, '角色编码已存在', 400);
+    return ApiResponse.codeError(res, 'ROLE_CODE_TAKEN');
   }
 
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
@@ -102,19 +102,19 @@ const createRole = asyncHandler(async (req, res) => {
 
   if (!isSuperAdmin) {
     if ((level || 1) > operatorMaxLevel) {
-      return ApiResponse.forbidden(res, '无权创建高于自身层级的角色');
+      return ApiResponse.codeError(res, 'ROLE_CREATE_HIGHER_LEVEL_FORBIDDEN');
     }
 
     if ((permissions || []).length > 0) {
       const validPerms = await roleService.findPermissionsByIds(permissions);
       if (validPerms.some((perm) => perm.code === '*:*')) {
-        return ApiResponse.forbidden(res, '不能授予超级管理员权限（*:*）');
+        return ApiResponse.codeError(res, 'CANNOT_GRANT_WILDCARD_PERMISSION');
       }
       const lacking = validPerms
         .filter((perm) => !matchesPermissionCodes(operatorPermCodes, perm.code))
         .map((perm) => perm.code);
       if (lacking.length > 0) {
-        return ApiResponse.forbidden(res, `无权授予以下权限：${lacking.join('、')}`);
+        return ApiResponse.codeError(res, 'PERMISSION_GRANT_FORBIDDEN', { message: `无权授予以下权限：${lacking.join('、')}`, params: { permissions: lacking.join('、') } });
       }
     }
   }
@@ -142,36 +142,36 @@ const createRole = asyncHandler(async (req, res) => {
 const updateRole = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { name, description, level, status } = req.body;
   const role = await roleService.findRoleForUpdate(req.params.id);
   if (!role) {
-    return ApiResponse.notFound(res, '角色不存在');
+    return ApiResponse.codeError(res, 'ROLE_NOT_FOUND');
   }
 
   const { dataScope } = await applyRoleScopeToQuery({}, req.user.userId);
   if (dataScope.type === 'none') {
-    return ApiResponse.forbidden(res, '无权变更该角色');
+    return ApiResponse.codeError(res, 'ROLE_UPDATE_FORBIDDEN');
   }
   if (dataScope.type !== 'all') {
     const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
     if ((role.level || 0) > operatorMaxLevel) {
-      return ApiResponse.forbidden(res, '无权变更高于自身层级的角色');
+      return ApiResponse.codeError(res, 'ROLE_UPDATE_HIGHER_LEVEL_FORBIDDEN');
     }
   }
 
   if (role.isBuiltIn && (name !== undefined || level !== undefined)) {
-    return ApiResponse.error(res, '内置角色不能修改名称和层级', 403);
+    return ApiResponse.codeError(res, 'BUILTIN_ROLE_NAME_LEVEL_LOCKED');
   }
 
   if (status !== undefined) {
     if (!['active', 'inactive'].includes(status)) {
-      return ApiResponse.error(res, 'status 必须是 active 或 inactive', 400);
+      return ApiResponse.codeError(res, 'ROLE_STATUS_INVALID');
     }
     if (role.isBuiltIn) {
-      return ApiResponse.error(res, '内置角色不能修改状态', 403);
+      return ApiResponse.codeError(res, 'BUILTIN_ROLE_STATUS_LOCKED');
     }
   }
 
@@ -181,21 +181,21 @@ const updateRole = asyncHandler(async (req, res) => {
     const isGlobalAdmin = operatorPermCodes.includes('*:*');
 
     if (!isGlobalAdmin && level > operatorMaxLevel) {
-      return ApiResponse.forbidden(res, '无权将角色层级设置为高于自身层级');
+      return ApiResponse.codeError(res, 'ROLE_LEVEL_ABOVE_SELF_FORBIDDEN');
     }
     if (!isGlobalAdmin && (role.level || 0) > operatorMaxLevel) {
       logger.warn(
         `角色降级提权尝试被拒：operator=${req.user.username || req.user.userId}` +
           `(L${operatorMaxLevel}) role=${role.code}(L${role.level}) → L${level}`
       );
-      return ApiResponse.forbidden(res, '无权变更高于自身层级的角色');
+      return ApiResponse.codeError(res, 'ROLE_UPDATE_HIGHER_LEVEL_FORBIDDEN');
     }
   }
 
   if (name !== undefined) {
     const trimmed = String(name).trim();
     if (!trimmed) {
-      return ApiResponse.error(res, '角色名称不能为空', 400);
+      return ApiResponse.codeError(res, 'ROLE_NAME_REQUIRED');
     }
     role.name = trimmed;
   }
@@ -213,31 +213,27 @@ const updateRole = asyncHandler(async (req, res) => {
 const deleteRole = asyncHandler(async (req, res) => {
   const role = await roleService.findRoleForUpdate(req.params.id);
   if (!role) {
-    return ApiResponse.notFound(res, '角色不存在');
+    return ApiResponse.codeError(res, 'ROLE_NOT_FOUND');
   }
 
   const { dataScope } = await applyRoleScopeToQuery({}, req.user.userId);
   if (dataScope.type === 'none') {
-    return ApiResponse.forbidden(res, '无权删除该角色');
+    return ApiResponse.codeError(res, 'ROLE_DELETE_FORBIDDEN');
   }
   if (dataScope.type !== 'all') {
     const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
     if ((role.level || 0) > operatorMaxLevel) {
-      return ApiResponse.forbidden(res, '无权删除高于自身层级的角色');
+      return ApiResponse.codeError(res, 'ROLE_DELETE_HIGHER_LEVEL_FORBIDDEN');
     }
   }
 
   if (role.isBuiltIn) {
-    return ApiResponse.error(res, '内置角色不可删除', 403);
+    return ApiResponse.codeError(res, 'BUILTIN_ROLE_NOT_DELETABLE');
   }
 
   const userCount = await roleService.countUsersWithRole(role._id);
   if (userCount > 0) {
-    return ApiResponse.error(
-      res,
-      `有 ${userCount} 个用户正在使用该角色，请先移除这些用户的角色`,
-      400
-    );
+    return ApiResponse.codeError(res, 'ROLE_IN_USE', { message: `有 ${userCount} 个用户正在使用该角色，请先移除这些用户的角色`, params: { userCount: userCount } });
   }
 
   await roleService.deleteRole(role._id);

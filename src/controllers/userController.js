@@ -88,14 +88,14 @@ const getUserById = asyncHandler(async (req, res) => {
   const user = await userService.getUserDetail(req.params.id);
 
   if (!user) {
-    return ApiResponse.notFound(res, '用户不存在');
+    return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });
   }
 
   // 数据范围校验：与列表接口口径一致，防止按 ID 横向越权
   // （本接口在路由上已有 user:read 权限门槛，这里补齐数据范围一致性）
   const { allowed } = await assertRecordInScope(req, user, 'createdBy', 'department');
   if (!allowed) {
-    return ApiResponse.forbidden(res, '无权查看该用户');
+    return ApiResponse.codeError(res, 'USER_VIEW_FORBIDDEN');
   }
 
   return ApiResponse.success(res, user, '获取成功');
@@ -108,7 +108,7 @@ const getUserById = asyncHandler(async (req, res) => {
 const createUser = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { username, email, realName, phone, department, roles, allowedIPs } = req.body;
@@ -135,7 +135,7 @@ const createUser = asyncHandler(async (req, res) => {
   if (allowedIPs !== undefined && allowedIPs !== '') {
     const check = validateRules(allowedIPs);
     if (!check.valid) {
-      return ApiResponse.error(res, `IP 范围规则格式有误：${check.invalid.join('、')}`, 400);
+      return ApiResponse.codeError(res, 'IP_RULES_FORMAT_INVALID', { message: `IP 范围规则格式有误：${check.invalid.join('、')}`, params: { rules: check.invalid.join('、') } });
     }
   }
 
@@ -157,7 +157,7 @@ const createUser = asyncHandler(async (req, res) => {
       lean: true,
     });
     if (targetRoles.length !== roles.length) {
-      return ApiResponse.error(res, '包含不存在的角色', 400);
+      return ApiResponse.codeError(res, 'ROLE_NOT_FOUND_IN_LIST');
     }
     // 超管唯一性：新建账户一律不得携带超管角色。
     // 层级校验不足以拦住这条路径——超管本人的 operatorMaxLevel 也是 10，
@@ -171,7 +171,7 @@ const createUser = asyncHandler(async (req, res) => {
     const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
     const targetMaxLevel = Math.max(...targetRoles.map((r) => r.level || 0));
     if (targetMaxLevel > operatorMaxLevel) {
-      return ApiResponse.forbidden(res, '无权分配高于自身层级的角色');
+      return ApiResponse.codeError(res, 'ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN');
     }
     validatedRoles = roles;
   }
@@ -206,14 +206,14 @@ const createUser = asyncHandler(async (req, res) => {
 const updateUser = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { realName, email, phone, department, avatar, status, allowedIPs } = req.body;
 
   const user = await userService.findUserForUpdate(req.params.id);
   if (!user) {
-    return ApiResponse.notFound(res, '用户不存在');
+    return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });
   }
 
   // 层级保护：禁止修改等于或高于自身层级的用户（与删除/锁定/角色分配逻辑保持一致），
@@ -227,7 +227,7 @@ const updateUser = asyncHandler(async (req, res) => {
     // 按操作者 ID 重新查询角色层级（req.user.roles 存的是角色编码，不能直接用于 _id 查询）
     const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
     if (targetMaxLevel >= operatorMaxLevel) {
-      return ApiResponse.forbidden(res, '无权修改同级或更高级别的用户');
+      return ApiResponse.codeError(res, 'USER_UPDATE_PEER_OR_HIGHER_FORBIDDEN');
     }
   }
 
@@ -242,7 +242,7 @@ const updateUser = asyncHandler(async (req, res) => {
   // ===== 安全修复（自我锁死防护）：禁止变更自身状态 =====
   // 防止管理员把自己改成 inactive/locked 后无法登录、且无人能解锁
   if (isSelf && status !== undefined && String(status) !== String(user.status)) {
-    return ApiResponse.error(res, '不能通过本接口修改自身账户状态，请联系其他管理员处理', 400);
+    return ApiResponse.codeError(res, 'CANNOT_CHANGE_OWN_STATUS');
   }
 
   // ===== 安全修复：status 变更须持 user:lock 权限 =====
@@ -251,20 +251,20 @@ const updateUser = asyncHandler(async (req, res) => {
   if (!isSelf && status !== undefined && String(status) !== String(user.status)) {
     const operatorPermCodes = await userService.getPermissions(req.user.userId);
     if (!operatorPermCodes.includes('user:lock') && !operatorPermCodes.includes('*:*')) {
-      return ApiResponse.forbidden(res, '无权变更用户状态（需要 user:lock 权限）');
+      return ApiResponse.codeError(res, 'USER_STATUS_CHANGE_FORBIDDEN');
     }
   }
 
   // 头像白名单校验：与个人资料更新接口同一口径，防止存储恶意 URL/data URI
   if (avatar !== undefined && avatar !== '' && !isValidAvatar(avatar)) {
-    return ApiResponse.error(res, '头像必须是有效的图片 URL 或图片数据', 400);
+    return ApiResponse.codeError(res, 'AVATAR_INVALID');
   }
 
   // IP 访问范围规则格式校验：非法片段直接回报，避免入库后规则静默失效
   if (allowedIPs !== undefined && allowedIPs !== '') {
     const check = validateRules(allowedIPs);
     if (!check.valid) {
-      return ApiResponse.error(res, `IP 范围规则格式有误：${check.invalid.join('、')}`, 400);
+      return ApiResponse.codeError(res, 'IP_RULES_FORMAT_INVALID', { message: `IP 范围规则格式有误：${check.invalid.join('、')}`, params: { rules: check.invalid.join('、') } });
     }
   }
 
@@ -273,7 +273,7 @@ const updateUser = asyncHandler(async (req, res) => {
   if (email !== undefined && email !== user.email) {
     const existing = await userService.findOneUser({ email, _id: { $ne: user._id } });
     if (existing) {
-      return ApiResponse.error(res, '邮箱已被使用', 400);
+      return ApiResponse.codeError(res, 'EMAIL_TAKEN_SHORT');
     }
   }
 
@@ -320,18 +320,18 @@ const assignRoles = asyncHandler(async (req, res) => {
   // 只声明校验器不消费 = 校验链形同虚设（与其他接口口径统一，报告 O-3）
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { roles } = req.body;
 
   if (!roles || !Array.isArray(roles) || roles.length === 0) {
-    return ApiResponse.error(res, '请提供有效的角色列表', 400);
+    return ApiResponse.codeError(res, 'ROLE_LIST_INVALID');
   }
 
   const user = await userService.findUserForUpdate(req.params.id);
   if (!user) {
-    return ApiResponse.notFound(res, '用户不存在');
+    return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });
   }
 
   // M-01 修复：目标用户层级保护（口径对齐 updateUser/deleteUser/toggleUserLock）
@@ -346,20 +346,20 @@ const assignRoles = asyncHandler(async (req, res) => {
     populate: { path: 'permissions', select: 'code' },
   });
   if (validRoles.length !== roles.length) {
-    return ApiResponse.error(res, '存在无效的角色 ID', 400);
+    return ApiResponse.codeError(res, 'ROLE_ID_INVALID');
   }
 
   // 权限层级校验：禁止分配高于操作者自身层级的角色
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
   const targetMaxLevel = Math.max(...validRoles.map((r) => r.level || 0));
   if (targetMaxLevel > operatorMaxLevel) {
-    return ApiResponse.forbidden(res, '无权分配高于自身层级的角色');
+    return ApiResponse.codeError(res, 'ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN');
   }
 
   // 目标用户层级保护：禁止变更等于或高于自身层级的用户（修改自身除外）
   const isSelf = String(user._id) === String(req.user.userId);
   if (!isSelf && targetUserMaxLevel >= operatorMaxLevel) {
-    return ApiResponse.forbidden(res, '无权变更同级或更高级别用户的角色');
+    return ApiResponse.codeError(res, 'USER_ROLE_ASSIGN_PEER_OR_HIGHER_FORBIDDEN');
   }
 
   // ===== P2-8 修复：权限子集校验 =====
@@ -397,7 +397,7 @@ const assignRoles = asyncHandler(async (req, res) => {
         `角色分配越权被拒：operator=${req.user.username || req.user.userId} ` +
           `target=${user.username} 缺少权限=${lacking.join(',')}`
       );
-      return ApiResponse.forbidden(res, `无权授予以下权限：${lacking.join('、')}`);
+      return ApiResponse.codeError(res, 'PERMISSION_GRANT_FORBIDDEN', { message: `无权授予以下权限：${lacking.join('、')}`, params: { permissions: lacking.join('、') } });
     }
   }
 
@@ -428,7 +428,7 @@ const assignRoles = asyncHandler(async (req, res) => {
         `角色分配越权被拒（同级角色归属）：operator=${req.user.username || req.user.userId} ` +
           `target=${user.username} 非自身持有的同级角色=${foreignRoles.join(',')}`
       );
-      return ApiResponse.forbidden(res, `无权分配自身未持有的同级角色：${foreignRoles.join('、')}`);
+      return ApiResponse.codeError(res, 'ROLE_ASSIGN_FOREIGN_PEER_FORBIDDEN', { message: `无权分配自身未持有的同级角色：${foreignRoles.join('、')}`, params: { foreignRoles: foreignRoles.join('、') } });
     }
   }
 
@@ -476,7 +476,7 @@ const assignRoles = asyncHandler(async (req, res) => {
 const deleteUser = asyncHandler(async (req, res) => {
   const user = await userService.findUserForUpdate(req.params.id);
   if (!user) {
-    return ApiResponse.notFound(res, '用户不存在');
+    return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });
   }
 
   // 不允许删除自己
@@ -490,7 +490,7 @@ const deleteUser = asyncHandler(async (req, res) => {
   const targetMaxLevel =
     targetRoles.length > 0 ? Math.max(...targetRoles.map((r) => r.level || 0)) : 0;
   if (targetMaxLevel >= operatorMaxLevel) {
-    return ApiResponse.forbidden(res, '无权删除同级或更高级别的用户');
+    return ApiResponse.codeError(res, 'USER_DELETE_PEER_OR_HIGHER_FORBIDDEN');
   }
 
   // 超管账户不可删除：删账户等于让超管归属归零。
@@ -526,29 +526,25 @@ const deleteUser = asyncHandler(async (req, res) => {
 const batchDeleteUsers = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { ids } = req.body;
   const BATCH_DELETE_MAX = 100; // 单次批量删除上限
 
   if (!ids || !Array.isArray(ids) || ids.length === 0) {
-    return ApiResponse.error(res, '请提供有效的用户 ID 列表', 400);
+    return ApiResponse.codeError(res, 'USER_ID_LIST_INVALID');
   }
 
   if (ids.length > BATCH_DELETE_MAX) {
-    return ApiResponse.error(res, `单次批量删除最多 ${BATCH_DELETE_MAX} 个用户`, 400);
+    return ApiResponse.codeError(res, 'BATCH_DELETE_LIMIT_EXCEEDED', { message: `单次批量删除最多 ${BATCH_DELETE_MAX} 个用户`, params: { max: BATCH_DELETE_MAX } });
   }
 
   // 校验所有 ID 是否为合法 ObjectId
   const mongoose = require('mongoose');
   const invalidIds = ids.filter((id) => !mongoose.Types.ObjectId.isValid(id));
   if (invalidIds.length > 0) {
-    return ApiResponse.error(
-      res,
-      `包含非法的用户 ID 格式: ${invalidIds.slice(0, 5).join(', ')}`,
-      400
-    );
+    return ApiResponse.codeError(res, 'USER_ID_FORMAT_INVALID_IN_LIST', { message: `包含非法的用户 ID 格式: ${invalidIds.slice(0, 5).join(', ')}`, params: { invalidIds: invalidIds.slice(0, 5).join(', ') } });
   }
 
   // 检查是否包含自己（统一转为字符串比较，避免 ObjectId 类型不一致）
@@ -560,14 +556,14 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
   const targets = await userService.findBatchUsers(ids);
   if (targets.length !== ids.length) {
-    return ApiResponse.error(res, '包含不存在的用户 ID', 400);
+    return ApiResponse.codeError(res, 'USER_ID_NOT_FOUND_IN_LIST');
   }
   const oversized = targets.find((t) => {
     const targetMaxLevel = t.roles?.length > 0 ? Math.max(...t.roles.map((r) => r.level || 0)) : 0;
     return targetMaxLevel >= operatorMaxLevel;
   });
   if (oversized) {
-    return ApiResponse.forbidden(res, `无权删除同级或更高级别的用户：${oversized.username}`);
+    return ApiResponse.codeError(res, 'BATCH_DELETE_PEER_OR_HIGHER_FORBIDDEN', { message: `无权删除同级或更高级别的用户：${oversized.username}`, params: { username: oversized.username } });
   }
 
   // 超管账户不可删除（与单个删除口径一致）：任一目标是超管则整批拒绝，

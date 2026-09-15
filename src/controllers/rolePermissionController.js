@@ -28,13 +28,13 @@ const emitWebSocketEvent = (req, eventType, data) => {
 const validateAssignmentInput = (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
     return null;
   }
 
   const { permissions, targetUserId } = req.body;
   if (!permissions || !Array.isArray(permissions)) {
-    ApiResponse.error(res, '请提供有效的权限列表', 400);
+    ApiResponse.codeError(res, 'PERMISSION_LIST_INVALID');
     return null;
   }
   return { permissions, targetUserId };
@@ -46,13 +46,13 @@ const validatePermissionTargets = async (req, res, role, permissions, targetUser
     ...new Set(permissions.map((item) => String(item)).filter((id) => objectIdRegex.test(id))),
   ];
   if (uniquePermIds.length === 0) {
-    ApiResponse.error(res, '请提供至少一个有效的权限 ID', 400);
+    ApiResponse.codeError(res, 'PERMISSION_ID_REQUIRED');
     return null;
   }
 
   const validPerms = await roleService.findPermissionsByIds(uniquePermIds, 'code');
   if (validPerms.length !== uniquePermIds.length) {
-    ApiResponse.error(res, '存在无效的权限 ID', 400);
+    ApiResponse.codeError(res, 'PERMISSION_ID_INVALID');
     return null;
   }
 
@@ -63,11 +63,11 @@ const validatePermissionTargets = async (req, res, role, permissions, targetUser
   if (isSuperAdmin) return { uniquePermIds, validPerms, operatorMaxLevel };
 
   if (role.level >= operatorMaxLevel && !targetUserId) {
-    ApiResponse.forbidden(res, '无权修改等于或高于自身层级的角色权限');
+    ApiResponse.codeError(res, 'ROLE_PERM_PEER_OR_HIGHER_FORBIDDEN');
     return null;
   }
   if (role.level > operatorMaxLevel && targetUserId) {
-    ApiResponse.forbidden(res, '无权基于高于自身层级的角色调整权限');
+    ApiResponse.codeError(res, 'ROLE_PERM_BASE_HIGHER_LEVEL_FORBIDDEN');
     return null;
   }
 
@@ -75,7 +75,7 @@ const validatePermissionTargets = async (req, res, role, permissions, targetUser
     .filter((perm) => !matchesPermissionCodes(operatorPermCodes, perm.code))
     .map((perm) => perm.code);
   if (lacking.length > 0) {
-    ApiResponse.forbidden(res, `无权分配以下权限：${lacking.join('、')}`);
+    ApiResponse.codeError(res, 'PERMISSION_ASSIGN_FORBIDDEN', { message: `无权分配以下权限：${lacking.join('、')}`, params: { permissions: lacking.join('、') } });
     return null;
   }
   return { uniquePermIds, validPerms, operatorMaxLevel };
@@ -83,19 +83,19 @@ const validatePermissionTargets = async (req, res, role, permissions, targetUser
 
 const findTargetUserInScope = async (req, res, role, targetUserId, operatorMaxLevel) => {
   if (!mongoose.Types.ObjectId.isValid(targetUserId)) {
-    ApiResponse.error(res, '目标用户 ID 格式无效', 400);
+    ApiResponse.codeError(res, 'TARGET_USER_ID_INVALID');
     return null;
   }
 
   const targetUser = await roleService.findUserForUpdate(targetUserId);
   if (!targetUser) {
-    ApiResponse.notFound(res, '目标用户不存在');
+    ApiResponse.codeError(res, 'TARGET_USER_NOT_FOUND');
     return null;
   }
 
   const hasRole = targetUser.roles.some((roleId) => roleId.toString() === role._id.toString());
   if (!hasRole) {
-    ApiResponse.error(res, '目标用户未持有该角色，无法单独调整', 400);
+    ApiResponse.codeError(res, 'TARGET_USER_LACKS_ROLE');
     return null;
   }
 
@@ -104,7 +104,7 @@ const findTargetUserInScope = async (req, res, role, targetUserId, operatorMaxLe
     targetRoles.length > 0 ? Math.max(...targetRoles.map((item) => item.level || 0)) : 0;
   const isSelf = String(targetUser._id) === String(req.user.userId);
   if (!isSelf && targetUserMaxLevel >= operatorMaxLevel) {
-    ApiResponse.forbidden(res, '无权变更同级或更高级别用户的角色权限');
+    ApiResponse.codeError(res, 'USER_ROLE_PERM_PEER_OR_HIGHER_FORBIDDEN');
     return null;
   }
   return targetUser;
@@ -166,7 +166,7 @@ const assignPermissions = asyncHandler(async (req, res) => {
 
   const role = await roleService.findRoleForUpdate(req.params.id);
   if (!role) {
-    return ApiResponse.notFound(res, '角色不存在');
+    return ApiResponse.codeError(res, 'ROLE_NOT_FOUND');
   }
 
   const assignment = await validatePermissionTargets(

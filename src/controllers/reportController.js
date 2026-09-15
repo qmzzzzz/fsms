@@ -48,7 +48,7 @@ const getDeviceReport = asyncHandler(async (req, res) => {
   const { startDate, endDate } = req.query;
 
   if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
-    return ApiResponse.error(res, '日期参数格式错误', 400);
+    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
   }
 
   const data = await reportStatsService.getDeviceReportData({
@@ -66,7 +66,7 @@ const getAlarmReport = asyncHandler(async (req, res) => {
   const { startDate, endDate } = req.query;
 
   if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
-    return ApiResponse.error(res, '日期参数格式错误', 400);
+    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
   }
 
   // 日期边界统一经 buildDateRangeFilter（本地时区边界口径，见 utils/helpers）
@@ -153,7 +153,7 @@ const getInspectionReport = asyncHandler(async (req, res) => {
   const { startDate, endDate } = req.query;
 
   if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
-    return ApiResponse.error(res, '日期参数格式错误', 400);
+    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
   }
 
   const data = await reportStatsService.getInspectionReportData({
@@ -190,12 +190,12 @@ const exportReport = asyncHandler(async (req, res) => {
 
   // 目前仅支持 xlsx,其他格式提前拒绝,避免前端误以为导出成功
   if (format !== 'xlsx') {
-    return ApiResponse.error(res, `不支持的导出格式: ${format}`, 400);
+    return ApiResponse.codeError(res, 'EXPORT_FORMAT_UNSUPPORTED', { message: `不支持的导出格式: ${format}`, params: { format: format } });
   }
 
   // 日期参数校验：非法值会产生 Invalid Date 导致查询抛错
   if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
-    return ApiResponse.error(res, '日期参数格式错误', 400);
+    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
   }
 
   // 日期边界统一经 buildDateRangeFilter：date-only 按本地时区解析，
@@ -248,7 +248,7 @@ const exportReport = asyncHandler(async (req, res) => {
     ip,
     userId,
   });
-  if (query === null) return ApiResponse.error(res, '不支持的报表类型', 400);
+  if (query === null) return ApiResponse.codeError(res, 'REPORT_TYPE_UNSUPPORTED');
 
   // 无数据权限时直接返回空文件(只有表头)
   if (dataScope.type === 'none') {

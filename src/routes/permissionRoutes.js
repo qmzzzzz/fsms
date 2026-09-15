@@ -94,6 +94,7 @@ const updatePermissionValidation = [
 const batchCreateValidation = [
   body('permissions')
     .isArray({ min: 1, max: 500 })
+    .withMessage('权限条目最多 500 条，请分批提交')
     .withMessage('权限列表不能为空且单次最多 500 条'),
   // P2-23：批量路径此前完全没有逐条校验，控制器又不消费 validationResult，
   // 于是 max:500 形同虚设、`*:*` 可被批量铸造、parent 悬空无人拦。

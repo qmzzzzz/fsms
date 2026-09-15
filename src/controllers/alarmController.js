@@ -44,7 +44,7 @@ const getAlarms = asyncHandler(async (req, res) => {
     (startDate && isNaN(new Date(startDate).getTime())) ||
     (endDate && isNaN(new Date(endDate).getTime()))
   ) {
-    return ApiResponse.error(res, '日期参数格式错误', 400);
+    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
   }
 
   const dataScope = await getDataScope(req.user.userId);
@@ -99,11 +99,11 @@ const getAlarms = asyncHandler(async (req, res) => {
  */
 const getAlarmById = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const alarm = await alarmService.getAlarmById(req.params.id);
-  if (!alarm) return ApiResponse.notFound(res, '报警记录不存在');
-  if (!(await isAlarmInScope(req, alarm))) return ApiResponse.forbidden(res, '无权查看该报警记录');
+  if (!alarm) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
+  if (!(await isAlarmInScope(req, alarm))) return ApiResponse.codeError(res, 'ALARM_VIEW_FORBIDDEN');
   return ApiResponse.success(res, alarm, '获取成功');
 });
 
@@ -113,7 +113,7 @@ const getAlarmById = asyncHandler(async (req, res) => {
  */
 const reportAlarm = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { alarmType, level, location, description, deviceId, reporter } = req.body;
   const alarm = await alarmService.reportAlarm({
@@ -137,15 +137,15 @@ const reportAlarm = asyncHandler(async (req, res) => {
  */
 const dispatchAlarm = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { handlerId } = req.body;
   // 单次查询合并：此前先 getAlarmStatus 再 getAlarmById 双查同一 ID，
   // getAlarmById 返回完整文档（含 status），存在性判断直接读其状态字段即可
   const fullAlarm = await alarmService.getAlarmById(req.params.id);
-  if (!fullAlarm) return ApiResponse.notFound(res, '报警记录不存在');
+  if (!fullAlarm) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
   if (!(await isAlarmInScope(req, fullAlarm)))
-    return ApiResponse.forbidden(res, '无权操作该报警记录');
+    return ApiResponse.codeError(res, 'ALARM_OPERATE_FORBIDDEN');
 
   // 传入数据范围：Service 层据此校验被指派人是否在操作者可管辖范围内（P2-17）
   const dataScope = await getDataScope(req.user.userId);
@@ -154,8 +154,8 @@ const dispatchAlarm = asyncHandler(async (req, res) => {
   });
   if (!updated) {
     const exists = await alarmService.getAlarmStatus(req.params.id);
-    if (!exists) return ApiResponse.notFound(res, '报警记录不存在');
-    return ApiResponse.error(res, '该报警已被处理', 409);
+    if (!exists) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
+    return ApiResponse.codeError(res, 'ALARM_ALREADY_HANDLED');
   }
   return ApiResponse.success(res, updated, '报警已指派');
 });
@@ -166,18 +166,18 @@ const dispatchAlarm = asyncHandler(async (req, res) => {
  */
 const arriveAtScene = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const fullAlarm = await alarmService.getAlarmById(req.params.id);
-  if (!fullAlarm) return ApiResponse.notFound(res, '报警记录不存在');
+  if (!fullAlarm) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
   if (!(await isAlarmInScope(req, fullAlarm)))
-    return ApiResponse.forbidden(res, '无权操作该报警记录');
+    return ApiResponse.codeError(res, 'ALARM_OPERATE_FORBIDDEN');
 
   const updated = await alarmService.arriveAtScene(req.params.id, req.user.userId);
   if (!updated) {
     const exists = await alarmService.getAlarmStatus(req.params.id);
-    if (!exists) return ApiResponse.notFound(res, '报警记录不存在');
-    return ApiResponse.error(res, '报警状态不允许此操作', 409);
+    if (!exists) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
+    return ApiResponse.codeError(res, 'ALARM_STATUS_NOT_ALLOWED_SHORT');
   }
   return ApiResponse.success(res, updated, '已登记到达现场');
 });
@@ -188,15 +188,15 @@ const arriveAtScene = asyncHandler(async (req, res) => {
  */
 const resolveAlarm = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { handleResult, cause } = req.body;
-  if (!handleResult) return ApiResponse.error(res, '请提供处理结果描述', 400);
+  if (!handleResult) return ApiResponse.codeError(res, 'ALARM_HANDLE_RESULT_REQUIRED');
 
   const fullAlarm = await alarmService.getAlarmById(req.params.id);
-  if (!fullAlarm) return ApiResponse.notFound(res, '报警记录不存在');
+  if (!fullAlarm) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
   if (!(await isAlarmInScope(req, fullAlarm)))
-    return ApiResponse.forbidden(res, '无权操作该报警记录');
+    return ApiResponse.codeError(res, 'ALARM_OPERATE_FORBIDDEN');
 
   const updated = await alarmService.resolveAlarm(
     req.params.id,
@@ -205,8 +205,8 @@ const resolveAlarm = asyncHandler(async (req, res) => {
   );
   if (!updated) {
     const exists = await alarmService.getAlarmStatus(req.params.id);
-    if (!exists) return ApiResponse.notFound(res, '报警记录不存在');
-    return ApiResponse.error(res, '该报警当前状态不允许此操作', 409);
+    if (!exists) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
+    return ApiResponse.codeError(res, 'ALARM_STATUS_NOT_ALLOWED');
   }
   return ApiResponse.success(res, updated, '报警处理完成');
 });
@@ -217,19 +217,19 @@ const resolveAlarm = asyncHandler(async (req, res) => {
  */
 const markAsFalseAlarm = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { reason } = req.body;
   const fullAlarm = await alarmService.getAlarmById(req.params.id);
-  if (!fullAlarm) return ApiResponse.notFound(res, '报警记录不存在');
+  if (!fullAlarm) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
   if (!(await isAlarmInScope(req, fullAlarm)))
-    return ApiResponse.forbidden(res, '无权操作该报警记录');
+    return ApiResponse.codeError(res, 'ALARM_OPERATE_FORBIDDEN');
 
   const updated = await alarmService.markAsFalseAlarm(req.params.id, reason, req.user.userId);
   if (!updated) {
     const exists = await alarmService.getAlarmStatus(req.params.id);
-    if (!exists) return ApiResponse.notFound(res, '报警记录不存在');
-    return ApiResponse.error(res, '该报警当前状态不允许此操作', 409);
+    if (!exists) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
+    return ApiResponse.codeError(res, 'ALARM_STATUS_NOT_ALLOWED');
   }
   return ApiResponse.success(res, updated, '已标记为误报');
 });
@@ -240,19 +240,19 @@ const markAsFalseAlarm = asyncHandler(async (req, res) => {
  */
 const cancelAlarm = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { reason } = req.body;
   const fullAlarm = await alarmService.getAlarmById(req.params.id);
-  if (!fullAlarm) return ApiResponse.notFound(res, '报警记录不存在');
+  if (!fullAlarm) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
   if (!(await isAlarmInScope(req, fullAlarm)))
-    return ApiResponse.forbidden(res, '无权操作该报警记录');
+    return ApiResponse.codeError(res, 'ALARM_OPERATE_FORBIDDEN');
 
   const updated = await alarmService.cancelAlarm(req.params.id, reason, req.user.userId);
   if (!updated) {
     const exists = await alarmService.getAlarmStatus(req.params.id);
-    if (!exists) return ApiResponse.notFound(res, '报警记录不存在');
-    return ApiResponse.error(res, '该报警当前状态不允许此操作', 409);
+    if (!exists) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
+    return ApiResponse.codeError(res, 'ALARM_STATUS_NOT_ALLOWED');
   }
   return ApiResponse.success(res, updated, '报警已取消');
 });
@@ -267,7 +267,7 @@ const getAlarmStats = asyncHandler(async (req, res) => {
     (startDate && isNaN(new Date(startDate).getTime())) ||
     (endDate && isNaN(new Date(endDate).getTime()))
   ) {
-    return ApiResponse.error(res, '日期参数格式错误', 400);
+    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
   }
   const dataScope = await getDataScope(req.user.userId);
   const stats = await alarmService.getAlarmStats(startDate, endDate, dataScope);

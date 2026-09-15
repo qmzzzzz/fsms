@@ -31,7 +31,7 @@ const exportAuditLogs = asyncHandler(async (req, res) => {
     }
 
     if (!req.user || !req.user.userId) {
-      return ApiResponse.unauthorized(res, '未授权访问');
+      return ApiResponse.codeError(res, 'UNAUTHORIZED_ACCESS');
     }
 
     ({ query } = await applyAuditDataScope(query, req.user.userId));
@@ -60,7 +60,7 @@ const exportAuditLogs = asyncHandler(async (req, res) => {
     logger.error(`审计日志导出失败: ${error.message}`);
     // 流已开始后无法再改状态码发 JSON 错误，只能尽力结束响应
     if (!res.headersSent) {
-      return ApiResponse.serverError(res, '审计日志导出失败');
+      return ApiResponse.codeError(res, 'AUDIT_EXPORT_FAILED');
     }
     res.end();
     return undefined;
@@ -80,11 +80,11 @@ const verifyAuditChainIntegrity = asyncHandler(async (req, res) => {
 
   const rawLimit = req.query.limit;
   if (rawLimit !== undefined && !/^\d+$/.test(String(rawLimit))) {
-    return ApiResponse.error(res, 'limit 必须是正整数', 400);
+    return ApiResponse.codeError(res, 'LIMIT_MUST_BE_POSITIVE_INT');
   }
   const from = req.query.from;
   if (from !== undefined && !['latest', 'earliest'].includes(from)) {
-    return ApiResponse.error(res, 'from 只能是 latest 或 earliest', 400);
+    return ApiResponse.codeError(res, 'FROM_MUST_BE_LATEST_OR_EARLIEST');
   }
 
   const report = await verifyAuditChain(AuditLog, {

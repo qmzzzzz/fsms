@@ -46,7 +46,7 @@ const getPermissions = asyncHandler(async (req, res) => {
 const getPermissionById = asyncHandler(async (req, res) => {
   const permission = await permissionService.getPermissionById(req.params.id);
   if (!permission) {
-    return ApiResponse.notFound(res, '权限不存在');
+    return ApiResponse.codeError(res, 'PERMISSION_NOT_FOUND');
   }
 
   return ApiResponse.success(res, permission, '获取成功');
@@ -59,7 +59,7 @@ const getPermissionById = asyncHandler(async (req, res) => {
 const createPermission = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { name, code, description, type, module, parent, path, method, sort } = req.body;
@@ -86,25 +86,25 @@ const createPermission = asyncHandler(async (req, res) => {
 const updatePermission = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { name, description, type, module, parent, path, method, sort, status } = req.body;
   const permission = await permissionService.getPermissionForUpdate(req.params.id);
   if (!permission) {
-    return ApiResponse.notFound(res, '权限不存在');
+    return ApiResponse.codeError(res, 'PERMISSION_NOT_FOUND');
   }
 
   // 提供非空 parent 时必须真实存在且不能指向自身；
   // 显式传空值（''/null）表示清除父级、置为顶层权限。
   if (parent !== undefined && parent !== null && parent !== '') {
     if (String(parent) === String(permission._id)) {
-      return ApiResponse.error(res, '父级权限不能是权限自身', 400);
+      return ApiResponse.codeError(res, 'PARENT_PERMISSION_SELF');
     }
 
     const parentExists = await permissionService.getPermissionForUpdate(parent);
     if (!parentExists) {
-      return ApiResponse.error(res, '父级权限不存在', 400);
+      return ApiResponse.codeError(res, 'PARENT_PERMISSION_NOT_FOUND');
     }
 
     const MAX_DEPTH = 32;
@@ -112,11 +112,7 @@ const updatePermission = asyncHandler(async (req, res) => {
     let depth = 0;
     while (cursor && depth < MAX_DEPTH) {
       if (String(cursor._id) === String(permission._id)) {
-        return ApiResponse.error(
-          res,
-          '父级权限设置会形成循环引用（该权限已是目标父级的祖先）',
-          400
-        );
+        return ApiResponse.codeError(res, 'PARENT_PERMISSION_CYCLE');
       }
       if (!cursor.parent) break;
       cursor = await permissionService.getAncestorForCycleCheck(cursor.parent);
@@ -124,7 +120,7 @@ const updatePermission = asyncHandler(async (req, res) => {
     }
     if (depth >= MAX_DEPTH) {
       logger.warn(`权限树深度超过 ${MAX_DEPTH}，环路检测提前终止：permissionId=${permission._id}`);
-      return ApiResponse.error(res, '权限树层级异常，请联系管理员核查父级引用', 400);
+      return ApiResponse.codeError(res, 'PERMISSION_TREE_DEPTH_ANOMALY');
     }
 
     permission.parent = parent;
@@ -153,7 +149,7 @@ const updatePermission = asyncHandler(async (req, res) => {
 const deletePermission = asyncHandler(async (req, res) => {
   const permission = await permissionService.getPermissionForUpdate(req.params.id);
   if (!permission) {
-    return ApiResponse.notFound(res, '权限不存在');
+    return ApiResponse.codeError(res, 'PERMISSION_NOT_FOUND');
   }
 
   await permissionService.deletePermission(permission._id);
@@ -168,12 +164,12 @@ const deletePermission = asyncHandler(async (req, res) => {
 const batchCreatePermissions = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { permissions } = req.body;
   if (!permissions || !Array.isArray(permissions) || permissions.length === 0) {
-    return ApiResponse.error(res, '请提供有效的权限列表', 400);
+    return ApiResponse.codeError(res, 'PERMISSION_LIST_INVALID');
   }
 
   const { created, skipped } = await permissionService.batchCreatePermissions(permissions);

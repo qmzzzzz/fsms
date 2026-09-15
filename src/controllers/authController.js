@@ -41,7 +41,7 @@ const register = asyncHandler(async (req, res) => {
   // 验证输入
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const result = await authService.registerUser(req.body);
@@ -54,7 +54,7 @@ const register = asyncHandler(async (req, res) => {
       return ApiResponse.error(res, result.message, 400);
     case 'DUPLICATE':
       // 统一返回模糊提示，防止枚举探测有效用户名/邮箱
-      return ApiResponse.error(res, '注册信息无效或已被使用', 400);
+      return ApiResponse.codeError(res, 'REGISTER_INFO_INVALID');
     default:
       break;
   }
@@ -132,7 +132,7 @@ const getLoginPublicKey = asyncHandler(async (req, res) => {
 const login = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const result = await authService.loginUser(
@@ -205,7 +205,7 @@ const refreshToken = asyncHandler(async (req, res) => {
   // G3：请求体 refreshToken 的类型/长度校验结果（校验器见 authRoutes.refreshTokenBodyValidation）
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   // 刷新令牌来源：请求体 refreshToken 优先，回退读取 refresh_token cookie（I-01 httpOnly 方案）
@@ -218,29 +218,29 @@ const refreshToken = asyncHandler(async (req, res) => {
   } catch (error) {
     // 与拆分前口径一致：刷新链路上的任何未预期异常（含数据库故障）
     // 一律按「无效的刷新令牌」拒绝，不把内部错误细节暴露给客户端
-    return ApiResponse.unauthorized(res, '无效的刷新令牌');
+    return ApiResponse.codeError(res, 'REFRESH_TOKEN_INVALID');
   }
 
   switch (result.outcome) {
     case 'MISSING':
-      return ApiResponse.error(res, '缺少刷新令牌', 400);
+      return ApiResponse.codeError(res, 'REFRESH_TOKEN_MISSING');
     case 'INVALID':
-      return ApiResponse.unauthorized(res, '无效的刷新令牌');
+      return ApiResponse.codeError(res, 'REFRESH_TOKEN_INVALID');
     case 'IP_DENIED':
     case 'REPLAYED':
-      return ApiResponse.unauthorized(res, '刷新令牌已失效，请重新登录');
+      return ApiResponse.codeError(res, 'REFRESH_TOKEN_REVOKED');
     case 'PASSWORD_CHANGED':
-      return ApiResponse.unauthorized(res, '密码已修改，请重新登录');
+      return ApiResponse.codeError(res, 'PASSWORD_CHANGED_RELOGIN');
     case 'VERSION_MISMATCH':
-      return ApiResponse.unauthorized(res, '会话已失效，请重新登录');
+      return ApiResponse.codeError(res, 'SESSION_EXPIRED');
     case 'BLACKLIST_UNAVAILABLE':
     case 'SESSION_UNAVAILABLE':
     case 'REVOKE_UNAVAILABLE':
-      return ApiResponse.error(res, '安全服务暂不可用，请稍后重试', 503);
+      return ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE');
     case 'SESSION_REVOKED':
-      return ApiResponse.unauthorized(res, '该设备的登录已被终止，请重新登录');
+      return ApiResponse.codeError(res, 'DEVICE_SESSION_REVOKED');
     case 'EXPIRED':
-      return ApiResponse.unauthorized(res, '刷新令牌已过期，请重新登录');
+      return ApiResponse.codeError(res, 'REFRESH_TOKEN_EXPIRED');
     default:
       break;
   }
@@ -303,7 +303,7 @@ const getMe = asyncHandler(async (req, res) => {
 const changePassword = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const result = await authService.changeUserPassword(req.user.userId, req.body, {
@@ -314,15 +314,15 @@ const changePassword = asyncHandler(async (req, res) => {
     case 'ENC_INVALID':
       return ApiResponse.codeError(res, 'AUTH_ENCRYPTED_CREDENTIAL_INVALID');
     case 'MISSING':
-      return ApiResponse.error(res, '请提供当前密码和新密码', 400);
+      return ApiResponse.codeError(res, 'PASSWORD_CURRENT_AND_NEW_REQUIRED');
     case 'WEAK':
       return ApiResponse.error(res, result.message, 400);
     case 'USER_NOT_FOUND':
-      return ApiResponse.unauthorized(res, '用户不存在或已被删除');
+      return ApiResponse.codeError(res, 'USER_NOT_FOUND_OR_DELETED');
     case 'CURRENT_WRONG':
-      return ApiResponse.error(res, '当前密码错误', 400);
+      return ApiResponse.codeError(res, 'PASSWORD_CURRENT_INCORRECT');
     case 'SAME_PASSWORD':
-      return ApiResponse.error(res, '新密码不能与旧密码相同', 400);
+      return ApiResponse.codeError(res, 'PASSWORD_SAME_AS_OLD');
     case 'REVOKE_FAILED': {
       // 密码已经改成功——审计必须落库，且先把状态码置为 503，
       // 让 recordSensitiveAction 按 res.statusCode 如实记录失败与风险因子
@@ -335,11 +335,7 @@ const changePassword = asyncHandler(async (req, res) => {
         req,
         res
       ).catch((e) => logger.warn(`改密吊销失败审计落库失败：${e.message}`));
-      return ApiResponse.error(
-        res,
-        '密码已修改，但会话吊销服务暂不可用，旧登录状态可能仍然有效，请重新登录',
-        503
-      );
+      return ApiResponse.codeError(res, 'PASSWORD_CHANGED_REVOKE_FAILED');
     }
     default:
       break;
@@ -364,22 +360,22 @@ const changePassword = asyncHandler(async (req, res) => {
 const updateProfile = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const result = await authService.updateUserProfile(req.user.userId, req.body);
 
   switch (result.outcome) {
     case 'NOT_FOUND':
-      return ApiResponse.notFound(res, '用户不存在');
+      return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });
     case 'INVALID_PHONE':
-      return ApiResponse.error(res, '请输入有效的手机号码', 400);
+      return ApiResponse.codeError(res, 'PHONE_INVALID');
     case 'INVALID_EMAIL':
-      return ApiResponse.error(res, '请输入有效的邮箱地址', 400);
+      return ApiResponse.codeError(res, 'EMAIL_INVALID');
     case 'EMAIL_TAKEN':
-      return ApiResponse.error(res, '该邮箱已被其他用户使用', 400);
+      return ApiResponse.codeError(res, 'EMAIL_TAKEN');
     case 'INVALID_AVATAR':
-      return ApiResponse.error(res, '头像必须是有效的图片 URL 或图片数据', 400);
+      return ApiResponse.codeError(res, 'AVATAR_INVALID');
     default:
       break;
   }
@@ -398,7 +394,7 @@ const logout = asyncHandler(async (req, res) => {
   // G3：请求体 refreshToken 的类型/长度校验结果
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   // 将当前 access token 和 refresh token 同时加入黑名单（保留既有黑名单逻辑）
@@ -519,7 +515,7 @@ const listSessions = asyncHandler(async (req, res) => {
 const revokeSession = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { sid } = req.params;
@@ -528,7 +524,7 @@ const revokeSession = asyncHandler(async (req, res) => {
   // 清 cookie。若允许从这里踢自己，用户会停留在一个 cookie 尚在、
   // 但每个请求都返回 401 的页面上，只能手动刷新才恢复正常。
   if (req.user.sid && String(sid) === String(req.user.sid)) {
-    return ApiResponse.error(res, '不能从会话列表中终止当前设备，请使用退出登录', 400);
+    return ApiResponse.codeError(res, 'CANNOT_REVOKE_CURRENT_SESSION');
   }
 
   const revoked = await sessionService.revokeSession({
@@ -540,7 +536,7 @@ const revokeSession = asyncHandler(async (req, res) => {
   if (!revoked) {
     // 不区分「不存在」与「不属于你」：两者返回同一个 404，否则响应差异
     // 会变成 sid 存在性的探测通道
-    return ApiResponse.notFound(res, '会话不存在或已失效');
+    return ApiResponse.codeError(res, 'SESSION_NOT_FOUND');
   }
 
   AuditLog.recordSensitiveAction(

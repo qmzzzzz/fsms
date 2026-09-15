@@ -44,7 +44,7 @@ const getMfaStatus = asyncHandler(async (req, res) => {
 const regenerateRecoveryCodes = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const code = typeof req.body.mfaCode === 'string' ? req.body.mfaCode.trim() : '';
@@ -227,7 +227,7 @@ const mfaDisable = asyncHandler(async (req, res) => {
   // G3：mfaCode / currentPassword 的类型与长度校验结果
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const user = await User.findById(req.user.userId).select('+password +mfaSecret');

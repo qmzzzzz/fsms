@@ -189,7 +189,7 @@ const authenticate = async (req, res, next) => {
     // 1. 提取令牌：Authorization Bearer 优先，缺失时回退 access_token cookie（I-01）
     const token = extractAccessToken(req);
     if (!token) {
-      return ApiResponse.unauthorized(res, '未提供认证令牌');
+      return ApiResponse.codeError(res, 'AUTH_TOKEN_MISSING');
     }
 
     // 2. 验证 Token 签名与有效期（限制算法防止 alg:none 攻击）
@@ -197,22 +197,22 @@ const authenticate = async (req, res, next) => {
 
     // 2.5. 检查 Token 是否在黑名单中（登出后失效）
     if (await isTokenBlacklisted(token)) {
-      return ApiResponse.unauthorized(res, '认证令牌已失效，请重新登录');
+      return ApiResponse.codeError(res, 'AUTH_TOKEN_REVOKED');
     }
 
     // 3. 查询用户当前是否仍有效（防止已禁用/锁定用户的旧 Token 继续使用）
     const freshUser = await loadValidUser(decoded.userId);
     if (!freshUser) {
-      return ApiResponse.unauthorized(res, '用户不存在或已被删除');
+      return ApiResponse.codeError(res, 'USER_NOT_FOUND_OR_DELETED');
     }
     if (freshUser.status === 'inactive') {
-      return ApiResponse.unauthorized(res, '账户已被禁用，请联系管理员');
+      return ApiResponse.codeError(res, 'ACCOUNT_DISABLED');
     }
     if (freshUser.status === 'locked') {
-      return ApiResponse.unauthorized(res, '账户已被锁定，请联系管理员');
+      return ApiResponse.codeError(res, 'ACCOUNT_LOCKED');
     }
     if (freshUser.lockUntil && freshUser.lockUntil > new Date()) {
-      return ApiResponse.unauthorized(res, '账户因多次登录失败被临时锁定，请稍后再试');
+      return ApiResponse.codeError(res, 'ACCOUNT_TEMP_LOCKED');
     }
 
     // 4. 检查密码是否已修改（token 签发时间早于密码修改时间则拒绝）
@@ -222,7 +222,7 @@ const authenticate = async (req, res, next) => {
     if (freshUser.passwordChangedAt && decoded.iat) {
       const changedAtSec = Math.floor(freshUser.passwordChangedAt.getTime() / 1000);
       if (changedAtSec > decoded.iat) {
-        return ApiResponse.unauthorized(res, '密码已修改，请重新登录');
+        return ApiResponse.codeError(res, 'PASSWORD_CHANGED_RELOGIN');
       }
     }
 
@@ -232,7 +232,7 @@ const authenticate = async (req, res, next) => {
     // 历史文档可能缺少该字段，按 schema 默认值 0 参与比对
     const expectedTokenVersion = freshUser.tokenVersion ?? 0;
     if (decoded.tokenVersion === undefined || decoded.tokenVersion !== expectedTokenVersion) {
-      return ApiResponse.unauthorized(res, '会话已失效，请重新登录');
+      return ApiResponse.codeError(res, 'SESSION_EXPIRED');
     }
 
     // 4.6 校验用户 IP 访问范围：token 有效期内换到未授权 IP 同样被拒绝，
@@ -260,7 +260,7 @@ const authenticate = async (req, res, next) => {
           riskFactors: ['ip_range_violation'],
           reason: `请求 IP 不在允许范围内（${reason}）`,
         });
-        return ApiResponse.forbidden(res, '当前 IP 不在您的允许访问范围内');
+        return ApiResponse.codeError(res, 'AUTH_IP_RANGE_DENIED');
       }
     }
 
@@ -279,7 +279,7 @@ const authenticate = async (req, res, next) => {
       // 反而会让人误以为此处做了额外处理。
       const sessionState = await sessionService.validateSession(decoded.sid);
       if (!sessionState.usable) {
-        return ApiResponse.unauthorized(res, '该设备的登录已被终止，请重新登录');
+        return ApiResponse.codeError(res, 'DEVICE_SESSION_REVOKED');
       }
       // 活跃信息更新（节流写入）：不 await，避免把只读认证路径变成阻塞写路径
       // ——lastSeenAt 是观测性数据，迟一点无妨。
@@ -330,25 +330,25 @@ const authenticate = async (req, res, next) => {
     return userLimiter(req, res, next);
   } catch (error) {
     if (error.name === 'JsonWebTokenError') {
-      return ApiResponse.unauthorized(res, '无效的认证令牌');
+      return ApiResponse.codeError(res, 'AUTH_TOKEN_INVALID');
     }
     if (error.name === 'TokenExpiredError') {
-      return ApiResponse.unauthorized(res, '认证令牌已过期');
+      return ApiResponse.codeError(res, 'AUTH_TOKEN_EXPIRED');
     }
     // 黑名单服务故障（fail-closed 上抛）：明确返回 503 而非笼统 500，
     // 与 tokenBlacklist.isTokenBlacklisted 的注释契约一致
     if (error.code === 'BLACKLIST_SERVICE_UNAVAILABLE') {
       logger.error(`认证中止 - 黑名单服务不可用：${error.message}`);
-      return ApiResponse.error(res, '安全服务暂不可用，请稍后重试', 503);
+      return ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE');
     }
     // 会话服务故障同样 fail-closed 转 503：会话校验是授权决策的一部分，
     // 查不到结论时放行等于取消设备级吊销这条防线
     if (error.code === 'SESSION_SERVICE_UNAVAILABLE') {
       logger.error(`认证中止 - 会话服务不可用：${error.message}`);
-      return ApiResponse.error(res, '安全服务暂不可用，请稍后重试', 503);
+      return ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE');
     }
     logger.error(`认证失败：${error.message}`);
-    return ApiResponse.serverError(res, '认证过程出错');
+    return ApiResponse.codeError(res, 'AUTH_PROCESS_FAILED');
   }
 };
 

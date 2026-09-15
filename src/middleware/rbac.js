@@ -78,11 +78,11 @@ const checkPermission = (requiredPermissions, logic = 'OR') => {
         } catch (_) {
           /* 检测失败不影响拒绝主流程 */
         }
-        return ApiResponse.forbidden(res, '您没有执行此操作的权限');
+        return ApiResponse.codeError(res, 'PERMISSION_DENIED');
       }
     } catch (error) {
       logger.error(`权限检查失败：${error.message}`);
-      return ApiResponse.serverError(res, '权限验证过程出错');
+      return ApiResponse.codeError(res, 'PERMISSION_CHECK_FAILED');
     }
   };
 };
@@ -142,11 +142,11 @@ const checkRole = (requiredRoles) => {
         next();
       } else {
         logger.warn(`用户角色不匹配，需要：${roles.join(', ')}`);
-        return ApiResponse.forbidden(res, '您的角色无权执行此操作');
+        return ApiResponse.codeError(res, 'ROLE_NOT_ALLOWED');
       }
     } catch (error) {
       logger.error(`角色检查失败：${error.message}`);
-      return ApiResponse.serverError(res, '角色验证过程出错');
+      return ApiResponse.codeError(res, 'ROLE_CHECK_FAILED');
     }
   };
 };

@@ -233,14 +233,14 @@ router.post(
       const { SystemConfig } = require('../models');
       const allowed = await SystemConfig.isRegistrationAllowed();
       if (!allowed) {
-        return ApiResponse.error(res, '当前系统已关闭公开注册，请联系管理员创建账户', 403);
+        return ApiResponse.codeError(res, 'PUBLIC_REGISTRATION_DISABLED');
       }
       return authController.register(req, res, next);
     } catch (err) {
       // 数据库故障时无法确认注册开关，fail-closed 直接拒绝：
       // 原「降级到静态配置放行」并不成立——register 本身依赖数据库，
       // 放行只会把失败推迟为 500，不如在此明确返回 503
-      return ApiResponse.error(res, '注册服务暂不可用，请稍后重试', 503);
+      return ApiResponse.codeError(res, 'REGISTER_SERVICE_UNAVAILABLE');
     }
   }
   // PERMISSION-EXEMPT: 公共端点（注册开关+限流管控），无资源所有者

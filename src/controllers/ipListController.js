@@ -28,7 +28,7 @@ const getIPList = asyncHandler(async (req, res) => {
   // 调用方以为在查某个名单实际拿到两个名单的混合分页，计数也对不上。
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { type, page = 1, limit = 20 } = req.query;
@@ -119,7 +119,7 @@ const queryIPMatch = asyncHandler(async (req, res) => {
 const addIPEntry = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { ip, type = 'black', reason = 'manual_configuration', durationHours = 0 } = req.body;
@@ -128,7 +128,7 @@ const addIPEntry = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'IP_REQUIRED');
   }
   if (!['black', 'white'].includes(type)) {
-    return ApiResponse.error(res, '名单类型必须为 black（黑名单）或 white（白名单）', 400);
+    return ApiResponse.codeError(res, 'IP_LIST_TYPE_INVALID');
   }
 
   const trimmedIP = ip.trim();
@@ -146,7 +146,7 @@ const addIPEntry = asyncHandler(async (req, res) => {
 
   const hours = Number(durationHours) || 0;
   if (hours < 0 || hours > 24 * 365) {
-    return ApiResponse.error(res, '生效时长应在 0（永久）至 8760 小时之间', 400);
+    return ApiResponse.codeError(res, 'IP_LIST_DURATION_OUT_OF_RANGE');
   }
 
   // 全网段（0.0.0.0/0、::/0）权限收口：此类条目一次性命中所有客户端——
@@ -178,11 +178,7 @@ const addIPEntry = asyncHandler(async (req, res) => {
         riskFactors: ['full_range_cidr_attempt'],
         reason: `尝试将全网段 ${normalizedIP} 加入${type === 'black' ? '黑' : '白'}名单，权限不足`,
       });
-      return ApiResponse.forbidden(
-        res,
-        `全网段（${normalizedIP}）会命中所有 IP，仅超级管理员可配置；如需限制特定范围请使用更精确的网段`,
-        { errorCode: 'FULL_RANGE_FORBIDDEN', ip: normalizedIP }
-      );
+      return ApiResponse.codeError(res, 'FULL_RANGE_FORBIDDEN', { message: `全网段（${normalizedIP}）会命中所有 IP，仅超级管理员可配置；如需限制特定范围请使用更精确的网段`, params: { ip: normalizedIP } });
     }
 
     logger.warn('超级管理员正在添加全网段名单', {
@@ -204,11 +200,7 @@ const addIPEntry = asyncHandler(async (req, res) => {
     const covering = await IPBlacklistModel.findCoveringEntries(normalizedIP, 'white');
     if (covering.length > 0) {
       const coveredBy = covering.map((e) => e.ip).join('、');
-      return ApiResponse.error(
-        res,
-        `该 IP 已被白名单条目（${coveredBy}）覆盖，白名单优先级高于黑名单；如需封禁请先将其移出白名单`,
-        400
-      );
+      return ApiResponse.codeError(res, 'IP_COVERED_BY_WHITELIST', { message: `该 IP 已被白名单条目（${coveredBy}）覆盖，白名单优先级高于黑名单；如需封禁请先将其移出白名单`, params: { coveredBy: coveredBy } });
     }
   } else if (type === 'white') {
     await IPBlacklistModel.unblockIP(normalizedIP, 'black');
@@ -256,7 +248,7 @@ const addIPEntry = asyncHandler(async (req, res) => {
 const removeIPEntry = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.error(res, '数据验证失败', 400, errors.array());
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
   }
 
   const { id } = req.params;
@@ -264,7 +256,7 @@ const removeIPEntry = asyncHandler(async (req, res) => {
 
   const entry = await IPBlacklistModel.findById(id);
   if (!entry) {
-    return ApiResponse.notFound(res, '名单记录不存在');
+    return ApiResponse.codeError(res, 'IP_LIST_ENTRY_NOT_FOUND');
   }
 
   // ===== P2-13 修复：删除侧的对称约束 =====
@@ -296,11 +288,7 @@ const removeIPEntry = asyncHandler(async (req, res) => {
         riskFactors: ['full_range_cidr_removal_attempt'],
         reason: `尝试移除全网段 ${entry.ip} 的${entry.type === 'black' ? '黑' : '白'}名单，权限不足`,
       });
-      return ApiResponse.forbidden(
-        res,
-        `全网段（${entry.ip}）名单仅超级管理员可移除：它是限流豁免与信任标记的前提，移除会影响全部 IP 的访问控制`,
-        { errorCode: 'FULL_RANGE_FORBIDDEN', ip: entry.ip }
-      );
+      return ApiResponse.codeError(res, 'FULL_RANGE_FORBIDDEN', { message: `全网段（${entry.ip}）名单仅超级管理员可移除：它是限流豁免与信任标记的前提，移除会影响全部 IP 的访问控制`, params: { ip: entry.ip } });
     }
 
     logger.warn('超级管理员正在移除全网段名单', {
