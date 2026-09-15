@@ -19,7 +19,14 @@ jest.mock('../../services/sharedCache', () => ({
 }));
 
 jest.mock('rate-limit-redis', () => ({
-  RedisStore: jest.fn().mockImplementation((opts) => ({ __redisStore: true, opts })),
+  RedisStore: jest.fn().mockImplementation(() => ({
+    __redisStore: true,
+    init: jest.fn(),
+    increment: jest.fn(),
+    decrement: jest.fn(),
+    resetKey: jest.fn(),
+    resetAll: jest.fn(),
+  })),
 }));
 
 describe('makeSharedStore 共享存储分支', () => {
@@ -85,5 +92,63 @@ describe('makeSharedStore 共享存储分支', () => {
     const opts = RedisStore.mock.calls[RedisStore.mock.calls.length - 1][0];
     opts.sendCommand('PING');
     expect(mockRedisClient.call).toHaveBeenCalledWith('PING');
+  });
+
+  // ===== 评价报告 #6 新增分支：init 动态分发与代理转发（2026-09-15 覆盖率债务补齐）=====
+
+  test('切换完成前调 init → 记录 lastInitOptions，切换完成后补发给 RedisStore.init', async () => {
+    process.env.REDIS_URL = 'redis://127.0.0.1:6399';
+    sharedCache.initSharedCache.mockResolvedValueOnce(undefined);
+    sharedCache.isRedisEnabled.mockReturnValueOnce(true);
+    const store = makeSharedStore('mfa');
+    const options = { skipFailedRequests: true, windowMs: 60000 };
+    // 切换尚未完成（后台 IIFE 未跑完），此时 init 只记录
+    store.init(options);
+    // 等待后台切换完成 → initSharedCache 的 lastInitOptions 被补发给 active.init
+    await new Promise((r) => setTimeout(r, 50));
+    const inst = RedisStore.mock.results[RedisStore.mock.results.length - 1].value;
+    expect(inst.init).toHaveBeenCalledWith(options);
+  });
+
+  test('切换完成后调用 init → 直接转发当前 active（RedisStore.init）', async () => {
+    process.env.REDIS_URL = 'redis://127.0.0.1:6399';
+    sharedCache.initSharedCache.mockResolvedValueOnce(undefined);
+    sharedCache.isRedisEnabled.mockReturnValueOnce(true);
+    const store = makeSharedStore('password');
+    await new Promise((r) => setTimeout(r, 50));
+    const options = { skipFailedRequests: false };
+    store.init(options);
+    const inst = RedisStore.mock.results[RedisStore.mock.results.length - 1].value;
+    expect(inst.init).toHaveBeenCalledWith(options);
+  });
+
+  test('代理方法转发：increment/decrement/resetKey → 当前 active', async () => {
+    process.env.REDIS_URL = 'redis://127.0.0.1:6399';
+    sharedCache.initSharedCache.mockResolvedValueOnce(undefined);
+    sharedCache.isRedisEnabled.mockReturnValueOnce(true);
+    const store = makeSharedStore('user');
+    await new Promise((r) => setTimeout(r, 50));
+    const inst = RedisStore.mock.results[RedisStore.mock.results.length - 1].value;
+    inst.increment.mockResolvedValueOnce({ totalHits: 1 });
+    await store.increment('key-a');
+    expect(inst.increment).toHaveBeenCalledWith('key-a');
+    await store.decrement('key-a');
+    expect(inst.decrement).toHaveBeenCalledWith('key-a');
+    await store.resetKey('key-a');
+    expect(inst.resetKey).toHaveBeenCalledWith('key-a');
+  });
+
+  test('resetAll：active 有该方法则转发，无则静默（不抛错）', async () => {
+    process.env.REDIS_URL = 'redis://127.0.0.1:6399';
+    sharedCache.initSharedCache.mockResolvedValueOnce(undefined);
+    sharedCache.isRedisEnabled.mockReturnValueOnce(true);
+    const store = makeSharedStore('strict');
+    // active 仍是 fallback MemoryStore（切换中）→ resetAll 不存在 → 静默
+    await expect(store.resetAll()).resolves.toBeUndefined();
+    await new Promise((r) => setTimeout(r, 50));
+    const inst = RedisStore.mock.results[RedisStore.mock.results.length - 1].value;
+    inst.resetAll.mockResolvedValueOnce(undefined);
+    await expect(store.resetAll()).resolves.toBeUndefined();
+    expect(inst.resetAll).toHaveBeenCalled();
   });
 });
