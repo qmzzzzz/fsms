@@ -17,9 +17,6 @@
   "src/controllers/authController.js": {
     "max-lines": 1
   },
-  "src/controllers/ipListController.js": {
-    "max-lines-per-function": 1
-  },
   "src/controllers/securityController.js": {
     "max-lines": 1
   },
@@ -49,6 +46,9 @@
     "max-lines": 1
   },
   "src/services/websocketService.js": {
+    "max-lines": 1
+  },
+  "src/utils/errorCodes.js": {
     "max-lines": 1
   }
 }
