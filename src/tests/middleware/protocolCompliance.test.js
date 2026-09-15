@@ -205,3 +205,56 @@ describe('protocolCompliance 协议合规校验', () => {
     expect(res.statusCode).toBe(400);
   });
 });
+
+describe('protocolCompliance 边界补齐（2026-09-15）', () => {
+  let mw;
+  const AuditLog = require('../../models/AuditLog');
+
+  beforeEach(() => {
+    mw = protocolCompliance();
+    AuditLog.record.mockClear();
+  });
+
+  it('同名 header 多值：各单值合法但求和超限 → 拒绝（reduce 求和分支）', () => {
+    const next = jest.fn();
+    const req = buildReq({
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-multi': Array.from({ length: 10 }, (_, i) => 'v'.repeat(1000) + i),
+      },
+    });
+    const res = buildRes();
+    mw(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(431); // HEADER_VALUE_TOO_LONG → 431
+  });
+
+  it('请求违规 → setImmediate 异步审计落库（malformed_request_blocked）', async () => {
+    const next = jest.fn();
+    const req = buildReq({ method: 'TRACE', headers: {} });
+    const res = buildRes();
+    mw(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    // 等待 setImmediate 回调执行
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(AuditLog.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'malformed_request_blocked' })
+    );
+  });
+
+  it('审计写入抛错 → 容忍（debug 跳过），不向外抛出', async () => {
+    AuditLog.record.mockImplementationOnce(() => {
+      throw new Error('audit down');
+    });
+    const next = jest.fn();
+    const req = buildReq({ method: 'TRACE', headers: {} });
+    const res = buildRes();
+    expect(() => mw(req, res, next)).not.toThrow();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    // 主流程结论不受审计故障影响
+    expect(next).not.toHaveBeenCalled();
+  });
+});
