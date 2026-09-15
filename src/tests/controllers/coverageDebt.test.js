@@ -98,11 +98,7 @@ describe('inspectionController 写端点越权分支（6 处 403）', () => {
   const cases = [
     ['updateInspection', 'update', () => inspectionController.updateInspection],
     ['startInspection', 'start', () => inspectionController.startInspection],
-    [
-      'completeInspection',
-      'complete',
-      () => inspectionController.completeInspection,
-    ],
+    ['completeInspection', 'complete', () => inspectionController.completeInspection],
     ['reviewInspection', 'review', () => inspectionController.reviewInspection],
     ['cancelInspection', 'cancel', () => inspectionController.cancelInspection],
     ['deleteInspection', 'delete', () => inspectionController.deleteInspection],
@@ -113,7 +109,9 @@ describe('inspectionController 写端点越权分支（6 处 403）', () => {
       const res = makeRes();
       await getHandler()(reqOf({}), res);
       expect(res.status).toHaveBeenCalledWith(403);
-      expect(mockInspectionService[label === 'delete' ? 'deleteInspection' : name]).not.toHaveBeenCalled();
+      expect(
+        mockInspectionService[label === 'delete' ? 'deleteInspection' : name]
+      ).not.toHaveBeenCalled();
     });
   }
 
