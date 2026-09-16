@@ -30,7 +30,12 @@ jest.mock('../../models/User', () => ({
 const mongoose = require('mongoose');
 const { applyAuditDataScope } = require('../../services/auditScopeFilter');
 const { applyCursorCondition, decodeCursor } = require('../../utils/cursorPagination');
-const { validateRules, isIPAllowed, MAX_RULE_LENGTH, MAX_TEXT_LENGTH } = require('../../utils/ipRange');
+const {
+  validateRules,
+  isIPAllowed,
+  MAX_RULE_LENGTH,
+  MAX_TEXT_LENGTH,
+} = require('../../utils/ipRange');
 
 const HEX_SELF = 'a'.repeat(24);
 const OID = (s) => new mongoose.Types.ObjectId(s);
@@ -157,11 +162,14 @@ describe('cursorPagination 类型注入与非法值分支', () => {
 
   test('sortField 被注入为 object（qs 展开）→ 400 排序字段不合法', () => {
     expect(() =>
-      applyCursorCondition({}, {
-        sortField: { $where: '1' },
-        sortDir: 1,
-        cursor: validCursor(),
-      })
+      applyCursorCondition(
+        {},
+        {
+          sortField: { $where: '1' },
+          sortDir: 1,
+          cursor: validCursor(),
+        }
+      )
     ).toThrow('排序字段不合法');
   });
 
@@ -173,23 +181,29 @@ describe('cursorPagination 类型注入与非法值分支', () => {
 
   test('valueType=date 且 v 非法日期 → 400 游标无效', () => {
     expect(() =>
-      applyCursorCondition({}, {
-        sortField: 'createdAt',
-        sortDir: 1,
-        cursor: validCursor('a'.repeat(24), 'not-a-date'),
-        valueType: 'date',
-      })
+      applyCursorCondition(
+        {},
+        {
+          sortField: 'createdAt',
+          sortDir: 1,
+          cursor: validCursor('a'.repeat(24), 'not-a-date'),
+          valueType: 'date',
+        }
+      )
     ).toThrow('分页游标无效');
   });
 
   test('valueType=number 且 v 非有限数 → 400 游标无效', () => {
     expect(() =>
-      applyCursorCondition({}, {
-        sortField: 'count',
-        sortDir: 1,
-        cursor: validCursor('a'.repeat(24), 'NaN-ish'),
-        valueType: 'number',
-      })
+      applyCursorCondition(
+        {},
+        {
+          sortField: 'count',
+          sortDir: 1,
+          cursor: validCursor('a'.repeat(24), 'NaN-ish'),
+          valueType: 'number',
+        }
+      )
     ).toThrow('分页游标无效');
   });
 

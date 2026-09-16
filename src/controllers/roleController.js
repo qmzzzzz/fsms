@@ -114,7 +114,10 @@ const createRole = asyncHandler(async (req, res) => {
         .filter((perm) => !matchesPermissionCodes(operatorPermCodes, perm.code))
         .map((perm) => perm.code);
       if (lacking.length > 0) {
-        return ApiResponse.codeError(res, 'PERMISSION_GRANT_FORBIDDEN', { message: `无权授予以下权限：${lacking.join('、')}`, params: { permissions: lacking.join('、') } });
+        return ApiResponse.codeError(res, 'PERMISSION_GRANT_FORBIDDEN', {
+          message: `无权授予以下权限：${lacking.join('、')}`,
+          params: { permissions: lacking.join('、') },
+        });
       }
     }
   }
@@ -233,7 +236,10 @@ const deleteRole = asyncHandler(async (req, res) => {
 
   const userCount = await roleService.countUsersWithRole(role._id);
   if (userCount > 0) {
-    return ApiResponse.codeError(res, 'ROLE_IN_USE', { message: `有 ${userCount} 个用户正在使用该角色，请先移除这些用户的角色`, params: { userCount: userCount } });
+    return ApiResponse.codeError(res, 'ROLE_IN_USE', {
+      message: `有 ${userCount} 个用户正在使用该角色，请先移除这些用户的角色`,
+      params: { userCount: userCount },
+    });
   }
 
   await roleService.deleteRole(role._id);

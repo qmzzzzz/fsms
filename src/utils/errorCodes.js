@@ -322,11 +322,13 @@ const ERROR_CODES = {
   },
   IP_FULL_RANGE_SUPER_ADMIN_ONLY: {
     status: 403,
-    message: '全网段（${normalizedIP}）会命中所有 IP，仅超级管理员可配置；如需限制特定范围请使用更精确的网段',
+    message:
+      '全网段（${normalizedIP}）会命中所有 IP，仅超级管理员可配置；如需限制特定范围请使用更精确的网段',
   },
   IP_COVERED_BY_WHITELIST: {
     status: 400,
-    message: '该 IP 已被白名单条目（${coveredBy}）覆盖，白名单优先级高于黑名单；如需封禁请先将其移出白名单',
+    message:
+      '该 IP 已被白名单条目（${coveredBy}）覆盖，白名单优先级高于黑名单；如需封禁请先将其移出白名单',
   },
   IP_LIST_ENTRY_NOT_FOUND: {
     status: 404,
@@ -334,7 +336,8 @@ const ERROR_CODES = {
   },
   IP_FULL_RANGE_REMOVE_SUPER_ADMIN_ONLY: {
     status: 403,
-    message: '全网段（${entry.ip}）名单仅超级管理员可移除：它是限流豁免与信任标记的前提，移除会影响全部 IP 的访问控制',
+    message:
+      '全网段（${entry.ip}）名单仅超级管理员可移除：它是限流豁免与信任标记的前提，移除会影响全部 IP 的访问控制',
   },
   PERMISSION_NOT_FOUND: {
     status: 404,
@@ -390,7 +393,7 @@ const ERROR_CODES = {
   },
   PERMISSION_GRANT_FORBIDDEN: {
     status: 403,
-    message: '无权授予以下权限：${lacking.join(\'、\')}',
+    message: "无权授予以下权限：${lacking.join('、')}",
   },
   ROLE_UPDATE_FORBIDDEN: {
     status: 403,
@@ -454,7 +457,7 @@ const ERROR_CODES = {
   },
   PERMISSION_ASSIGN_FORBIDDEN: {
     status: 403,
-    message: '无权分配以下权限：${lacking.join(\'、\')}',
+    message: "无权分配以下权限：${lacking.join('、')}",
   },
   TARGET_USER_ID_INVALID: {
     status: 400,
@@ -566,7 +569,7 @@ const ERROR_CODES = {
   },
   IP_RULES_FORMAT_INVALID: {
     status: 400,
-    message: 'IP 范围规则格式有误：${check.invalid.join(\'、\')}',
+    message: "IP 范围规则格式有误：${check.invalid.join('、')}",
   },
   ROLE_NOT_FOUND_IN_LIST: {
     status: 400,
@@ -606,7 +609,7 @@ const ERROR_CODES = {
   },
   ROLE_ASSIGN_FOREIGN_PEER_FORBIDDEN: {
     status: 403,
-    message: '无权分配自身未持有的同级角色：${foreignRoles.join(\'、\')}',
+    message: "无权分配自身未持有的同级角色：${foreignRoles.join('、')}",
   },
   USER_DELETE_PEER_OR_HIGHER_FORBIDDEN: {
     status: 403,
@@ -622,7 +625,7 @@ const ERROR_CODES = {
   },
   USER_ID_FORMAT_INVALID_IN_LIST: {
     status: 400,
-    message: '包含非法的用户 ID 格式: ${invalidIds.slice(0, 5).join(\', \')}',
+    message: "包含非法的用户 ID 格式: ${invalidIds.slice(0, 5).join(', ')}",
   },
   USER_ID_NOT_FOUND_IN_LIST: {
     status: 400,
@@ -770,7 +773,7 @@ const ERROR_CODES = {
   },
   PARAM_MUST_BE_VALID_OBJECT_ID: {
     status: 400,
-    message: '参数 ${name || \'id\'} 必须是合法的对象 ID',
+    message: "参数 ${name || 'id'} 必须是合法的对象 ID",
   },
   PUBLIC_REGISTRATION_DISABLED: {
     status: 403,

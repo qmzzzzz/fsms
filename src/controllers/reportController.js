@@ -190,7 +190,10 @@ const exportReport = asyncHandler(async (req, res) => {
 
   // 目前仅支持 xlsx,其他格式提前拒绝,避免前端误以为导出成功
   if (format !== 'xlsx') {
-    return ApiResponse.codeError(res, 'EXPORT_FORMAT_UNSUPPORTED', { message: `不支持的导出格式: ${format}`, params: { format: format } });
+    return ApiResponse.codeError(res, 'EXPORT_FORMAT_UNSUPPORTED', {
+      message: `不支持的导出格式: ${format}`,
+      params: { format: format },
+    });
   }
 
   // 日期参数校验：非法值会产生 Invalid Date 导致查询抛错

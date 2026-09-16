@@ -115,7 +115,8 @@ const getInspectionById = asyncHandler(async (req, res) => {
  */
 const createInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const allowedFields = (({
     title,
@@ -153,7 +154,8 @@ const createInspection = asyncHandler(async (req, res) => {
  */
 const updateInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const inspection = await inspectionService.getInspectionById(req.params.id);
   if (!inspection) return ApiResponse.codeError(res, 'INSPECTION_NOT_FOUND');
@@ -178,7 +180,8 @@ const updateInspection = asyncHandler(async (req, res) => {
  */
 const startInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const inspection = await inspectionService.getInspectionById(req.params.id);
   if (!inspection) return ApiResponse.codeError(res, 'INSPECTION_NOT_FOUND');
@@ -203,7 +206,8 @@ const startInspection = asyncHandler(async (req, res) => {
  */
 const completeInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { result, findings, location, remark } = req.body;
   const inspection = await inspectionService.getInspectionById(req.params.id);
@@ -233,7 +237,8 @@ const completeInspection = asyncHandler(async (req, res) => {
  */
 const reviewInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { reviewComment, reviewResult } = req.body;
   const inspection = await inspectionService.getInspectionById(req.params.id);
@@ -263,7 +268,8 @@ const reviewInspection = asyncHandler(async (req, res) => {
  */
 const cancelInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { reason } = req.body;
   const inspection = await inspectionService.getInspectionById(req.params.id);
@@ -289,7 +295,8 @@ const cancelInspection = asyncHandler(async (req, res) => {
  */
 const deleteInspection = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const inspection = await inspectionService.getInspectionById(req.params.id);
   if (!inspection) return ApiResponse.codeError(res, 'INSPECTION_NOT_FOUND');

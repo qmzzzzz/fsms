@@ -135,7 +135,10 @@ const createUser = asyncHandler(async (req, res) => {
   if (allowedIPs !== undefined && allowedIPs !== '') {
     const check = validateRules(allowedIPs);
     if (!check.valid) {
-      return ApiResponse.codeError(res, 'IP_RULES_FORMAT_INVALID', { message: `IP 范围规则格式有误：${check.invalid.join('、')}`, params: { rules: check.invalid.join('、') } });
+      return ApiResponse.codeError(res, 'IP_RULES_FORMAT_INVALID', {
+        message: `IP 范围规则格式有误：${check.invalid.join('、')}`,
+        params: { rules: check.invalid.join('、') },
+      });
     }
   }
 
@@ -264,7 +267,10 @@ const updateUser = asyncHandler(async (req, res) => {
   if (allowedIPs !== undefined && allowedIPs !== '') {
     const check = validateRules(allowedIPs);
     if (!check.valid) {
-      return ApiResponse.codeError(res, 'IP_RULES_FORMAT_INVALID', { message: `IP 范围规则格式有误：${check.invalid.join('、')}`, params: { rules: check.invalid.join('、') } });
+      return ApiResponse.codeError(res, 'IP_RULES_FORMAT_INVALID', {
+        message: `IP 范围规则格式有误：${check.invalid.join('、')}`,
+        params: { rules: check.invalid.join('、') },
+      });
     }
   }
 
@@ -397,7 +403,10 @@ const assignRoles = asyncHandler(async (req, res) => {
         `角色分配越权被拒：operator=${req.user.username || req.user.userId} ` +
           `target=${user.username} 缺少权限=${lacking.join(',')}`
       );
-      return ApiResponse.codeError(res, 'PERMISSION_GRANT_FORBIDDEN', { message: `无权授予以下权限：${lacking.join('、')}`, params: { permissions: lacking.join('、') } });
+      return ApiResponse.codeError(res, 'PERMISSION_GRANT_FORBIDDEN', {
+        message: `无权授予以下权限：${lacking.join('、')}`,
+        params: { permissions: lacking.join('、') },
+      });
     }
   }
 
@@ -428,7 +437,10 @@ const assignRoles = asyncHandler(async (req, res) => {
         `角色分配越权被拒（同级角色归属）：operator=${req.user.username || req.user.userId} ` +
           `target=${user.username} 非自身持有的同级角色=${foreignRoles.join(',')}`
       );
-      return ApiResponse.codeError(res, 'ROLE_ASSIGN_FOREIGN_PEER_FORBIDDEN', { message: `无权分配自身未持有的同级角色：${foreignRoles.join('、')}`, params: { foreignRoles: foreignRoles.join('、') } });
+      return ApiResponse.codeError(res, 'ROLE_ASSIGN_FOREIGN_PEER_FORBIDDEN', {
+        message: `无权分配自身未持有的同级角色：${foreignRoles.join('、')}`,
+        params: { foreignRoles: foreignRoles.join('、') },
+      });
     }
   }
 
@@ -537,14 +549,20 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
   }
 
   if (ids.length > BATCH_DELETE_MAX) {
-    return ApiResponse.codeError(res, 'BATCH_DELETE_LIMIT_EXCEEDED', { message: `单次批量删除最多 ${BATCH_DELETE_MAX} 个用户`, params: { max: BATCH_DELETE_MAX } });
+    return ApiResponse.codeError(res, 'BATCH_DELETE_LIMIT_EXCEEDED', {
+      message: `单次批量删除最多 ${BATCH_DELETE_MAX} 个用户`,
+      params: { max: BATCH_DELETE_MAX },
+    });
   }
 
   // 校验所有 ID 是否为合法 ObjectId
   const mongoose = require('mongoose');
   const invalidIds = ids.filter((id) => !mongoose.Types.ObjectId.isValid(id));
   if (invalidIds.length > 0) {
-    return ApiResponse.codeError(res, 'USER_ID_FORMAT_INVALID_IN_LIST', { message: `包含非法的用户 ID 格式: ${invalidIds.slice(0, 5).join(', ')}`, params: { invalidIds: invalidIds.slice(0, 5).join(', ') } });
+    return ApiResponse.codeError(res, 'USER_ID_FORMAT_INVALID_IN_LIST', {
+      message: `包含非法的用户 ID 格式: ${invalidIds.slice(0, 5).join(', ')}`,
+      params: { invalidIds: invalidIds.slice(0, 5).join(', ') },
+    });
   }
 
   // 检查是否包含自己（统一转为字符串比较，避免 ObjectId 类型不一致）
@@ -563,7 +581,10 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
     return targetMaxLevel >= operatorMaxLevel;
   });
   if (oversized) {
-    return ApiResponse.codeError(res, 'BATCH_DELETE_PEER_OR_HIGHER_FORBIDDEN', { message: `无权删除同级或更高级别的用户：${oversized.username}`, params: { username: oversized.username } });
+    return ApiResponse.codeError(res, 'BATCH_DELETE_PEER_OR_HIGHER_FORBIDDEN', {
+      message: `无权删除同级或更高级别的用户：${oversized.username}`,
+      params: { username: oversized.username },
+    });
   }
 
   // 超管账户不可删除（与单个删除口径一致）：任一目标是超管则整批拒绝，

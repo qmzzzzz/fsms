@@ -37,7 +37,10 @@ const validateObjectIdParam = (req, res, next, value, name) => {
   // mongoose.Types.ObjectId.isValid 对 24 位 hex 与 12 字节字符串均判合法，
   // 这里用于拦截明显非法值（短串/含特殊字符），避免 CastError→500
   if (!mongoose.Types.ObjectId.isValid(value)) {
-    return ApiResponse.codeError(res, 'PARAM_MUST_BE_VALID_OBJECT_ID', { message: `参数 ${name || 'id'} 必须是合法的对象 ID`, params: { name: name || 'id' } });
+    return ApiResponse.codeError(res, 'PARAM_MUST_BE_VALID_OBJECT_ID', {
+      message: `参数 ${name || 'id'} 必须是合法的对象 ID`,
+      params: { name: name || 'id' },
+    });
   }
   next();
 };

@@ -75,7 +75,10 @@ const validatePermissionTargets = async (req, res, role, permissions, targetUser
     .filter((perm) => !matchesPermissionCodes(operatorPermCodes, perm.code))
     .map((perm) => perm.code);
   if (lacking.length > 0) {
-    ApiResponse.codeError(res, 'PERMISSION_ASSIGN_FORBIDDEN', { message: `无权分配以下权限：${lacking.join('、')}`, params: { permissions: lacking.join('、') } });
+    ApiResponse.codeError(res, 'PERMISSION_ASSIGN_FORBIDDEN', {
+      message: `无权分配以下权限：${lacking.join('、')}`,
+      params: { permissions: lacking.join('、') },
+    });
     return null;
   }
   return { uniquePermIds, validPerms, operatorMaxLevel };

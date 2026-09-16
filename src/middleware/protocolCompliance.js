@@ -117,7 +117,10 @@ const protocolCompliance = (options = {}) => {
     // 1. HTTP 方法白名单
     if (FORBIDDEN_METHODS.includes(req.method)) {
       recordViolation(req, 'forbidden_method', `方法 ${req.method} 不被允许`);
-      return ApiResponse.codeError(res, 'HTTP_METHOD_UNSUPPORTED', { message: `不支持的请求方法：${req.method}`, params: { method: req.method } });
+      return ApiResponse.codeError(res, 'HTTP_METHOD_UNSUPPORTED', {
+        message: `不支持的请求方法：${req.method}`,
+        params: { method: req.method },
+      });
     }
 
     // 2. 请求头卫生检查
@@ -193,7 +196,10 @@ const protocolCompliance = (options = {}) => {
         const mediaType = contentType.split(';')[0].trim().toLowerCase();
         if (!allowedContentTypes.includes(mediaType)) {
           recordViolation(req, 'unsupported_media_type', `不支持的 Content-Type：${mediaType}`);
-          return ApiResponse.codeError(res, 'CONTENT_TYPE_UNSUPPORTED', { message: `不支持的 Content-Type：${mediaType}`, params: { mediaType: mediaType } });
+          return ApiResponse.codeError(res, 'CONTENT_TYPE_UNSUPPORTED', {
+            message: `不支持的 Content-Type：${mediaType}`,
+            params: { mediaType: mediaType },
+          });
         }
       }
     }

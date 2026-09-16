@@ -99,11 +99,13 @@ const getAlarms = asyncHandler(async (req, res) => {
  */
 const getAlarmById = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const alarm = await alarmService.getAlarmById(req.params.id);
   if (!alarm) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
-  if (!(await isAlarmInScope(req, alarm))) return ApiResponse.codeError(res, 'ALARM_VIEW_FORBIDDEN');
+  if (!(await isAlarmInScope(req, alarm)))
+    return ApiResponse.codeError(res, 'ALARM_VIEW_FORBIDDEN');
   return ApiResponse.success(res, alarm, '获取成功');
 });
 
@@ -113,7 +115,8 @@ const getAlarmById = asyncHandler(async (req, res) => {
  */
 const reportAlarm = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { alarmType, level, location, description, deviceId, reporter } = req.body;
   const alarm = await alarmService.reportAlarm({
@@ -137,7 +140,8 @@ const reportAlarm = asyncHandler(async (req, res) => {
  */
 const dispatchAlarm = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { handlerId } = req.body;
   // 单次查询合并：此前先 getAlarmStatus 再 getAlarmById 双查同一 ID，
@@ -166,7 +170,8 @@ const dispatchAlarm = asyncHandler(async (req, res) => {
  */
 const arriveAtScene = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const fullAlarm = await alarmService.getAlarmById(req.params.id);
   if (!fullAlarm) return ApiResponse.codeError(res, 'ALARM_NOT_FOUND');
@@ -188,7 +193,8 @@ const arriveAtScene = asyncHandler(async (req, res) => {
  */
 const resolveAlarm = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { handleResult, cause } = req.body;
   if (!handleResult) return ApiResponse.codeError(res, 'ALARM_HANDLE_RESULT_REQUIRED');
@@ -217,7 +223,8 @@ const resolveAlarm = asyncHandler(async (req, res) => {
  */
 const markAsFalseAlarm = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { reason } = req.body;
   const fullAlarm = await alarmService.getAlarmById(req.params.id);
@@ -240,7 +247,8 @@ const markAsFalseAlarm = asyncHandler(async (req, res) => {
  */
 const cancelAlarm = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+  if (!errors.isEmpty())
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
 
   const { reason } = req.body;
   const fullAlarm = await alarmService.getAlarmById(req.params.id);

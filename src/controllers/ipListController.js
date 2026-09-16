@@ -178,7 +178,10 @@ const addIPEntry = asyncHandler(async (req, res) => {
         riskFactors: ['full_range_cidr_attempt'],
         reason: `尝试将全网段 ${normalizedIP} 加入${type === 'black' ? '黑' : '白'}名单，权限不足`,
       });
-      return ApiResponse.codeError(res, 'FULL_RANGE_FORBIDDEN', { message: `全网段（${normalizedIP}）会命中所有 IP，仅超级管理员可配置；如需限制特定范围请使用更精确的网段`, params: { ip: normalizedIP } });
+      return ApiResponse.codeError(res, 'FULL_RANGE_FORBIDDEN', {
+        message: `全网段（${normalizedIP}）会命中所有 IP，仅超级管理员可配置；如需限制特定范围请使用更精确的网段`,
+        params: { ip: normalizedIP },
+      });
     }
 
     logger.warn('超级管理员正在添加全网段名单', {
@@ -200,7 +203,10 @@ const addIPEntry = asyncHandler(async (req, res) => {
     const covering = await IPBlacklistModel.findCoveringEntries(normalizedIP, 'white');
     if (covering.length > 0) {
       const coveredBy = covering.map((e) => e.ip).join('、');
-      return ApiResponse.codeError(res, 'IP_COVERED_BY_WHITELIST', { message: `该 IP 已被白名单条目（${coveredBy}）覆盖，白名单优先级高于黑名单；如需封禁请先将其移出白名单`, params: { coveredBy: coveredBy } });
+      return ApiResponse.codeError(res, 'IP_COVERED_BY_WHITELIST', {
+        message: `该 IP 已被白名单条目（${coveredBy}）覆盖，白名单优先级高于黑名单；如需封禁请先将其移出白名单`,
+        params: { coveredBy: coveredBy },
+      });
     }
   } else if (type === 'white') {
     await IPBlacklistModel.unblockIP(normalizedIP, 'black');
@@ -288,7 +294,10 @@ const removeIPEntry = asyncHandler(async (req, res) => {
         riskFactors: ['full_range_cidr_removal_attempt'],
         reason: `尝试移除全网段 ${entry.ip} 的${entry.type === 'black' ? '黑' : '白'}名单，权限不足`,
       });
-      return ApiResponse.codeError(res, 'FULL_RANGE_FORBIDDEN', { message: `全网段（${entry.ip}）名单仅超级管理员可移除：它是限流豁免与信任标记的前提，移除会影响全部 IP 的访问控制`, params: { ip: entry.ip } });
+      return ApiResponse.codeError(res, 'FULL_RANGE_FORBIDDEN', {
+        message: `全网段（${entry.ip}）名单仅超级管理员可移除：它是限流豁免与信任标记的前提，移除会影响全部 IP 的访问控制`,
+        params: { ip: entry.ip },
+      });
     }
 
     logger.warn('超级管理员正在移除全网段名单', {

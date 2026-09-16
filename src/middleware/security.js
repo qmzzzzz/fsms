@@ -664,12 +664,18 @@ const fileUploadSecurity = (options = {}) => {
     for (const file of req.files) {
       // 检查文件大小
       if (file.size > maxSize) {
-        return ApiResponse.codeError(res, 'UPLOAD_FILE_TOO_LARGE', { message: `文件 ${file.originalname} 超过最大限制 ${maxSize / 1024 / 1024}MB`, params: { filename: file.originalname, maxSize: maxSize / 1024 / 1024 } });
+        return ApiResponse.codeError(res, 'UPLOAD_FILE_TOO_LARGE', {
+          message: `文件 ${file.originalname} 超过最大限制 ${maxSize / 1024 / 1024}MB`,
+          params: { filename: file.originalname, maxSize: maxSize / 1024 / 1024 },
+        });
       }
 
       // 检查文件类型
       if (allowedTypes.length > 0 && !allowedTypes.includes(file.mimetype)) {
-        return ApiResponse.codeError(res, 'UPLOAD_TYPE_NOT_ALLOWED', { message: `不允许的文件类型：${file.mimetype}`, params: { mimetype: file.mimetype } });
+        return ApiResponse.codeError(res, 'UPLOAD_TYPE_NOT_ALLOWED', {
+          message: `不允许的文件类型：${file.mimetype}`,
+          params: { mimetype: file.mimetype },
+        });
       }
 
       // 检查文件扩展名（防止 MIME 类型欺骗）
@@ -685,7 +691,10 @@ const fileUploadSecurity = (options = {}) => {
       const allowedExts = allowedTypes.map((t) => mimeToExt[t]).filter(Boolean);
 
       if (allowedExts.length > 0 && !allowedExts.includes(ext)) {
-        return ApiResponse.codeError(res, 'UPLOAD_EXT_NOT_ALLOWED', { message: `不允许的文件扩展名：.${ext}`, params: { ext: ext } });
+        return ApiResponse.codeError(res, 'UPLOAD_EXT_NOT_ALLOWED', {
+          message: `不允许的文件扩展名：.${ext}`,
+          params: { ext: ext },
+        });
       }
     }
 
