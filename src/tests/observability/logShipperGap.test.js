@@ -261,6 +261,13 @@ describe('HttpShipperTransport', () => {
             res.end('error');
           } else if (req.url === '/slow') {
             // 不响应，让客户端超时
+          } else if (req.url === '/rst') {
+            // M-06 回归：发出响应头与部分响应体后立即销毁 socket。
+            // 客户端 IncomingMessage 会 emit 'error'（ECONNRESET），
+            // 若 _post 未监听该事件，将变成 uncaughtException → 进程退出。
+            res.writeHead(200);
+            res.write('partial');
+            res.socket.destroy();
           } else {
             res.writeHead(200);
             res.end('ok');
@@ -319,6 +326,58 @@ describe('HttpShipperTransport', () => {
       const t = createTransport({ url: 'http://127.0.0.1:1/bad' });
       await expect(t._post(['test'])).rejects.toThrow();
       t.close();
+    });
+
+    // ==================== M-06 回归：响应流错误必须被接管 ====================
+    // 原先 _post 的响应回调只调 res.resume() 而未监听 res.on('error')。
+    // 对端在响应体传输中途断连时 IncomingMessage emit ECONNRESET；EventEmitter
+    // 上无 'error' 监听器即抛未捕获异常 → index.js 处理器 process.exit(1)。
+    // 后果：不稳定的日志后端可反复打死业务进程（崩溃循环）。
+    // 正确写法见 src/utils/httpPostJson.js:64-72。
+    //
+    // 注意：不能用「服务端 RST」来触发——那条路径的 ECONNRESET 由 req.on('error')
+    // 接管（已存在），测不到 res 的缺失监听器。必须直接向伪造响应流 emit('error')：
+    // 若无监听器，emit 会同步抛出，正是本缺陷的可观测形态。
+    test('M-06 - 响应回调注册 error 监听器（响应中途断连不致进程退出）', async () => {
+      const { EventEmitter } = require('events');
+      const httpLib = require('http');
+
+      const fakeReq = new EventEmitter();
+      fakeReq.write = () => true;
+      fakeReq.end = () => {};
+      fakeReq.destroy = () => {};
+
+      let capturedRes = null;
+      const spy = jest.spyOn(httpLib, 'request').mockImplementation((_opts, cb) => {
+        const fakeRes = new EventEmitter();
+        fakeRes.statusCode = 200;
+        fakeRes.resume = () => {};
+        capturedRes = fakeRes;
+        setImmediate(() => cb(fakeRes));
+        return fakeReq;
+      });
+
+      try {
+        const t = createTransport({ url: 'http://127.0.0.1:9/logs' });
+        const pending = t._post(['test']);
+
+        // 等响应回调被调用（此时应已注册 error 监听器）
+        await new Promise((r) => setImmediate(r));
+        expect(capturedRes).not.toBeNull();
+
+        // 核心断言：响应流必须注册 'error' 监听器。
+        // EventEmitter 在无 'error' 监听器时 emit('error') 会**同步抛出**，
+        // 在 Node 的 http 客户端里即表现为 uncaughtException → 进程退出。
+        // 这正是 M-06 缺陷的可观测形态，也是本测试的判据。
+        expect(capturedRes.listenerCount('error')).toBeGreaterThanOrEqual(1);
+        expect(() => capturedRes.emit('error', new Error('ECONNRESET'))).not.toThrow();
+
+        // 允许已 settle（statusCode=200 时回调会先行 resolve），仅确保不悬挂
+        await pending.catch(() => {});
+        t.close();
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('HTTPS 协议选择 https 库（URL 解析分支）', () => {

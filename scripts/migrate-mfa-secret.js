@@ -32,6 +32,9 @@ const mongoose = require('mongoose');
 const { AESCipher } = require('../src/utils/encryption');
 const { ENC_PREFIX } = require('../src/utils/mfaSecret');
 
+// M-08：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
+const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
+
 function parseArgs(argv) {
   const args = { apply: false, oldKey: null, newKey: null };
   for (let i = 2; i < argv.length; i += 1) {
@@ -67,7 +70,7 @@ function parseArgs(argv) {
   const oldCipher = new AESCipher(oldKey);
   const newCipher = new AESCipher(newKey);
 
-  const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/fire_safety_db';
+  const { uri, dbName } = resolveMongoUri({ scriptName: 'migrate-mfa-secret.js' });
   await mongoose.connect(uri);
   console.log(
     `已连接：${mongoose.connection.host}:${mongoose.connection.port}/${mongoose.connection.name}`
@@ -75,6 +78,14 @@ function parseArgs(argv) {
   console.log(
     args.apply ? '模式：APPLY（将实际修改数据）' : '模式：DRY-RUN（仅报告，加 --apply 才执行）'
   );
+
+  // M-08：fail-closed——--apply 类操作必须显式声明 ALLOWED_SOURCE_DB。
+  // 原先只需单个 --apply 即可批量改写 users.mfaSecret（两因素凭据密文），
+  // 且默认回退本地库。
+  if (!assertApplyAllowed({ scriptName: 'migrate-mfa-secret.js', dbName, apply: args.apply })) {
+    await mongoose.disconnect();
+    process.exit(2);
+  }
 
   const coll = mongoose.connection.collection('users');
   // mfaSecret 在 schema 中 select:false，这里用原生集合直接投影读取

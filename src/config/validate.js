@@ -44,6 +44,31 @@ function collectProductionWarnings() {
   return warnings;
 }
 
+/**
+ * M-01：开启 API 文档时必须配置 Basic Auth 凭据。
+ *
+ * swagger.basicAuth 已改为 fail-closed（无凭据则 503），故缺凭据不会造成
+ * 匿名可读；但那是运行期兜底，配置错误应当在启动期就被拦下——否则文档
+ * 实际不可用却无人知晓，属"静默失效"。口令下限 16 字符与其余密钥口径一致。
+ *
+ * 抽为独立函数：validateConfig 已接近 max-lines-per-function 上限
+ *（见 eslint.ratchet.json），新增校验须放在独立函数内。
+ */
+function validateDocsCredentials(errors) {
+  if ((process.env.ENABLE_API_DOCS || '').trim().toLowerCase() !== 'true') return;
+
+  const docsUser = (process.env.DOCS_USERNAME || '').trim();
+  const docsPass = process.env.DOCS_PASSWORD || '';
+  if (!docsUser || !docsPass) {
+    errors.push(
+      'ENABLE_API_DOCS=true 时必须同时配置 DOCS_USERNAME 与 DOCS_PASSWORD：' +
+        '否则 API 文档将按 fail-closed 拒绝访问（配置错误应在启动期暴露，而非运行期静默失效）'
+    );
+  } else if (docsPass.length < 16) {
+    errors.push('DOCS_PASSWORD 至少 16 字符（API 文档暴露全部接口契约与权限编码，需强口令）');
+  }
+}
+
 // 生产环境配置校验（与 config/index.js 的 validateProductionConfig 保持一致）
 function validateConfig() {
   const nodeEnv = process.env.NODE_ENV || 'development';
@@ -99,6 +124,10 @@ function validateConfig() {
       'ALLOWED_HOSTS 必须配置：生产环境缺少 Host 头白名单，存在缓存投毒与密码重置链接投毒风险'
     );
   }
+
+  // M-01：API 文档凭据校验（抽为独立函数，避免 validateConfig 体积超标——
+  // 见 eslint.ratchet.json 的 max-lines-per-function 约束）
+  validateDocsCredentials(errors);
 
   // M3：TLS 终结校验（2026-09-11 放宽版）后置于 TRUST_PROXY_HOPS 校验之后——
   // 判定需要 MAX_TRUST_PROXY_HOPS 与合法的 hops 值。

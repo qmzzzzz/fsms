@@ -161,6 +161,15 @@ class HttpShipperTransport extends TransportStream {
           timeout: this.timeoutMs,
         },
         (res) => {
+          // 【M-06 修复】必须先接管响应流错误：对端在响应体传输中途断连时
+          // IncomingMessage 会 emit 'error'（典型 ECONNRESET），无监听器即
+          // uncaughtException → index.js 的处理器会 process.exit(1)。
+          // 后果：一个不稳定的日志后端可反复打死业务进程（重启后又重试投递，
+          // 形成崩溃循环）。一次失败的投递绝不应终止服务。
+          //
+          // 与 src/utils/httpPostJson.js:64-72 的既有正确写法对齐（同一缺陷
+          // 在该文件已被识别并修复，此处未同步——故两处口径现已一致）。
+          res.on('error', reject);
           // 消费响应体避免 socket 泄漏
           res.resume();
           if (res.statusCode >= 200 && res.statusCode < 300) resolve();

@@ -23,10 +23,13 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 
+// M-08：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
+const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
+
 const APPLY = process.argv.includes('--apply');
 
 (async () => {
-  const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/fire_safety_db';
+  const { uri, dbName } = resolveMongoUri({ scriptName: 'fix-token-blacklist-index.js' });
   await mongoose.connect(uri);
   console.log(
     `已连接：${mongoose.connection.host}:${mongoose.connection.port}/${mongoose.connection.name}`
@@ -34,6 +37,13 @@ const APPLY = process.argv.includes('--apply');
   console.log(
     APPLY ? '模式：APPLY（将实际修改数据）' : '模式：DRY-RUN（仅报告，加 --apply 才执行）'
   );
+
+  // M-08：fail-closed——--apply 类操作必须显式声明 ALLOWED_SOURCE_DB。
+  // 原先只需单个 --apply 即可删除索引与历史文档，且默认回退本地库。
+  if (!assertApplyAllowed({ scriptName: 'fix-token-blacklist-index.js', dbName, apply: APPLY })) {
+    await mongoose.disconnect();
+    process.exit(2);
+  }
 
   const coll = mongoose.connection.collection('tokenblacklists');
 

@@ -8,10 +8,10 @@
  * - 默认只演练 DRILL/SHADOW 库。源库带 --apply-source 才允许清空回滚，
  *   避免误连生产库造成破坏。
  *
- * 评价报告 #21（破坏性脚本护栏）：
- * - 库名白名单：--apply-source 只允许显式列入 ALLOWED_SOURCE_DB 白名单的库，
- *   生产库（fire_safety_db）必须显式出现在环境变量中才可作用——
- *   「默认安全、显式放开」，防 MONGODB_URI 误指生产时整批 deleteMany；
+ * 评价报告 #21（破坏性脚本护栏）/ M-08：
+ * - 库名白名单（**fail-closed**）：--apply-source 只允许作用于显式列入
+ *   ALLOWED_SOURCE_DB 白名单的库。**未设置白名单即拒绝执行**——原先未设置时
+ *   等于不校验，与「默认安全、显式放开」相反，已修正；
  * - 目标库回显：执行前打印实际连接的数据库名，人工核对一眼可辨；
  * - 二次确认：--apply-source 需再传 --yes 才真正落斧（CI 里显式带 --yes）。
  */
@@ -22,6 +22,9 @@ const fs = require('fs/promises');
 const path = require('path');
 const zlib = require('zlib');
 const mongoose = require('mongoose');
+
+// M-08：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
+const { assertApplyAllowed } = require('./destructiveGuard');
 
 const COLLECTIONS = ['users', 'roles', 'permissions', 'auditlogs'];
 
@@ -39,19 +42,16 @@ function parseArgs(argv) {
   return args;
 }
 
-/** #21：源库白名单——生产库名必须显式列入才允许 --apply-source */
+/** #21 / M-08：源库白名单——生产库名必须显式列入才允许 --apply-source
+ *
+ * 【M-08 修复】原实现为 fail-open：
+ *   `if (allowList.length > 0 && !allowList.includes(dbName))`
+ * 未设置 ALLOWED_SOURCE_DB 时 allowList 为空 → 条件恒假 → **白名单形同不存在**，
+ * 与函数注释承诺的「默认安全、显式放开」相反。现改用共享护栏（fail-closed）：
+ * 未设置白名单即拒绝执行。
+ */
 function assertSourceDbAllowed(dbName) {
-  const allowList = (process.env.ALLOWED_SOURCE_DB || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (allowList.length > 0 && !allowList.includes(dbName)) {
-    console.error(
-      `错误：--apply-source 的目标库「${dbName}」不在 ALLOWED_SOURCE_DB 白名单中（当前白名单：${allowList.join(', ') || '空'}）。` +
-        '如确需演练该库，请设置 ALLOWED_SOURCE_DB=<库名> 后重试。'
-    );
-    process.exit(2);
-  }
+  return assertApplyAllowed({ scriptName: 'run-rollback-drill.js', dbName, apply: true });
 }
 
 async function backupCollection(collection, file) {
@@ -99,7 +99,10 @@ async function restoreCollection(collection, file) {
     await mongoose.connection.close();
     process.exit(2);
   }
-  if (applySource) assertSourceDbAllowed(dbName);
+  if (applySource && !assertSourceDbAllowed(dbName)) {
+    await mongoose.connection.close();
+    process.exit(2);
+  }
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const manifest = { uri: dbName, timestamp, collections: {} };
 

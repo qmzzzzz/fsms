@@ -870,11 +870,26 @@ async function changeUserPassword(userId, body, ctx) {
 
 /**
  * 更新个人资料（业务层）
+ *
+ * 【H-01 修复】department 刻意不在自助可改字段内：
+ * 它是数据范围的唯一来源（middleware/rbac.js:195 以 user.department 构造
+ * department 型 dataScope，再经 constants/dataScopeFields.js 映射为各业务
+ * 资源的过滤字段）。若允许用户自助修改，持有 level>=7 角色的账户只需一次
+ * PUT /api/auth/profile 即可把 dataScope 指向任意部门，绕过部门隔离读取并
+ * 导出该部门的设备/报警/巡检/用户数据。
+ *
+ * 反向证据：管理员改他人部门（PUT /api/users/:id）是有层级校验的，
+ * 而自助入口原先无任何关卡——这一不对称说明原实现是疏漏而非设计。
+ *
+ * 部门变更应经管理员接口（userController），不自助。
+ *
  * @returns {Promise<{outcome:'NOT_FOUND'|'INVALID_PHONE'|'INVALID_EMAIL'|'EMAIL_TAKEN'|'INVALID_AVATAR'|'OK'}>}
  *   OK 时附 { profile }
  */
 async function updateUserProfile(userId, body) {
-  const { realName, email, phone, department, avatar } = body;
+  // 注意：不解构 department——即使请求体携带该字段也会被静默忽略（不报错，
+  // 避免向调用方暴露"该字段不可改"的实现细节）
+  const { realName, email, phone, avatar } = body;
 
   const user = await User.findById(userId);
   if (!user) {
@@ -904,11 +919,11 @@ async function updateUserProfile(userId, body) {
     return { outcome: 'INVALID_AVATAR' };
   }
 
-  // 更新允许的字段
+  // 更新允许的字段（白名单，非黑名单）
+  // department 不在其列——见函数头 H-01 说明；它是授权范围来源，只能由管理员改
   if (realName !== undefined) user.realName = realName;
   if (email !== undefined) user.email = email;
   if (phone !== undefined) user.phone = phone;
-  if (department !== undefined) user.department = department;
   if (avatar !== undefined) user.avatar = avatar;
 
   await user.save();

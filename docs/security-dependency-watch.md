@@ -30,9 +30,29 @@
   2. 出现仅更高主版本修复的高危问题；
   3. 新框架能力能显著降低安全或维护成本，且有完整回归窗口。
 
+## morgan（M-02，已修复 + 门禁已收紧）
+
+- **问题**：`morgan < 1.12.0` 存在日志伪造（CWE-117 / GHSA-jxfw-x594-9x9m，
+  CVSS 5.3）。不转义 `U+2028`/`U+2029`，攻击者可在 User-Agent / Referer / URL
+  中嵌入这些字符，使单条访问日志在采集端被解析为**多行**，从而伪造看似合法的
+  日志条目 → SIEM 解析规则错乱、告警被淹没或伪造、事后取证可信度下降。
+- **为什么长期未被发现**：CI 原用 `npm audit --omit=dev --audit-level=high`，
+  **moderate 不会导致构建失败**；同时本清单只登记了 svg-captcha 与 Express，
+  **未包含 morgan** —— 既不会失败 CI，也不在任何人的监控清单上。
+- **已采取的动作（2026-09-16）**：
+  1. 升级 `morgan` → `^1.12.1`；
+  2. **CI audit 阈值由 `high` 收紧至 `moderate`**（`.github/workflows/ci.yml`
+     的 backend 与 web-admin 两处）——这才是根治：同类中危不会再静默通过；
+  3. 顺带修复 devDependencies 中的 `js-yaml`（GHSA-2883-xcg3-v3hh，high）：
+     eslint 链 4.3.1 → 4.3.2、jest 链 3.15.1 → 3.15.2，均在原 semver 范围内，
+     无破坏性升级。
+- **当前状态**：`npm audit`（含 dev）与 `npm audit --omit=dev` 均为 **0 漏洞**。
+
 ## 通用约定
 
 - 任何依赖更换必须附：变更前后 `npm audit` 对比、全量测试结果、
   （涉及运行时行为的）冒烟走查记录。
 - 例外登记：确需带洞上线的，在 `deliverables/security-scan-record-*.md`
   登记例外（编号、理由、关闭期限），不允许静默放行。
+- **CI 阈值**：`security-audit` job 使用 `--audit-level=moderate`（2026-09-16 起）。
+  即 moderate 及以上 advisory 一律阻断合并，不再区分「高危才拦」。

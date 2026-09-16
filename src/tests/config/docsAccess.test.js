@@ -4,7 +4,7 @@
  * 覆盖 config/swagger.js 的三条行为线（2026-09-05 覆盖率复核：
  * swagger.js 行覆盖 45%，为未覆盖行数第二高文件）：
  *   1. isDocsEnabled 开关判定（显式 env 优先，生产默认关 / 非生产默认开）；
- *   2. basicAuth 凭据校验（未配置不拦截 / 恒定时间比较 / 各畸形头 401）；
+ *   2. basicAuth 凭据校验（未配置则拒绝 503 / 恒定时间比较 / 各畸形头 401）；
  *   3. 启动期「开启但无凭据」一次性告警 + 文档模板渲染不变量。
  *
  * 凭据一律运行期随机组装（无字面量口令）；环境变量逐项保存/恢复，
@@ -93,13 +93,16 @@ describe('API 文档门禁（swagger.js）', () => {
       next = jest.fn();
     });
 
-    test('未配置 DOCS_USERNAME/PASSWORD → 不拦截直接放行', () => {
+    // M-01：原先"未配凭据即放行"是 fail-open——文档已开启却无凭据时，
+    // 攻击者无需凭据即可枚举全部端点与权限编码。现改为 fail-closed。
+    test('未配置 DOCS_USERNAME/PASSWORD → 拒绝访问（503，fail-closed）', () => {
       setEnv('DOCS_USERNAME', undefined);
       setEnv('DOCS_PASSWORD', undefined);
       const res = mockRes();
       swagger.basicAuth({ headers: {} }, res, next);
-      expect(next).toHaveBeenCalledTimes(1);
-      expect(res.status).not.toHaveBeenCalled();
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: false }));
     });
 
     test('有效凭据（恒定时间比较路径）→ 放行', () => {
@@ -137,12 +140,13 @@ describe('API 文档门禁（swagger.js）', () => {
       );
     });
 
-    test('仅配置用户名缺口令 → 视为未配置，不拦截（fail-safe 与启动告警口径一致）', () => {
+    test('仅配置用户名缺口令 → 视为未配置，拒绝访问（fail-closed）', () => {
       setEnv('DOCS_USERNAME', DOCS_USER);
       setEnv('DOCS_PASSWORD', undefined);
       const res = mockRes();
       swagger.basicAuth({ headers: {} }, res, next);
-      expect(next).toHaveBeenCalledTimes(1);
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(503);
     });
   });
 

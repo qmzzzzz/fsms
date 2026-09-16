@@ -32,6 +32,8 @@ const { startAlertCleanup, stopAlertCleanup } = require('./services/securityAler
 const { startCaptchaCleanup, stopCaptchaCleanup } = require('./services/captchaService');
 const auditBuffer = require('./services/auditBuffer');
 const auditMonitor = require('./services/auditMonitor');
+// M-09：启动期重同步审计链链尾（清除崩溃遗留的幻影链尾）
+const { resyncChainTail } = require('./utils/auditChain');
 const statsCache = require('./services/statsCache');
 const userPermissionService = require('./services/userPermissionService');
 const sharedCache = require('./services/sharedCache');
@@ -240,6 +242,23 @@ const startServer = async () => {
       }
       process.exit(1);
     });
+
+    // 【M-09】启动期从 DB 重同步审计链链尾，清除可能的「幻影链尾」。
+    //
+    // 成因：链尾推进发生在 ODM 的 pre('save') 钩子内（见 models/auditLogHooks.js），
+    // 而文档落库在钩子之后。若进程恰在「已推进链尾、尚未完成 insert」之间被强杀
+    //（SIGKILL / OOM / 容器驱逐），链尾就指向一条从未入库的 hash。其后所有记录的
+    // prevHash 都会指向不存在的 hash，完整性校验产生**持续性假阳性** chain_break，
+    // 运维在反复确认"是误报"后倾向忽略该告警，从而在真正篡改发生时失去检测能力。
+    //
+    // 为什么不在 post('save') 里推进链尾：链尾推进与哈希计算必须处于同一把
+    // withChainLock 临界区内，否则并发写入会读到相同链尾、算出相同 prevHash，
+    // 造成**真实分叉**——那比幻影链尾（仅假阳性）严重得多。跨 pre/post 两个
+    // 钩子持锁则会引入"钩子未触发即锁泄漏、审计整体停摆"的新失效模式。
+    // 故保持原推进位置，改在启动期做一次自愈：从 DB 重建真实链尾。
+    //
+    // 位置：必须在 listen 回调**之外**（该回调非 async），且早于任何审计写入。
+    await resyncChainTail();
 
     httpServer = server.listen(PORT, () => {
       // 初始化 WebSocket（挂载到同一 HTTP server）

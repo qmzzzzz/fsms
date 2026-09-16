@@ -89,7 +89,7 @@ jobs:
         # I-M3：取消 continue-on-error——高危依赖告警直接让 job 失败（硬门禁）；
         # 结果写入 Job Summary 留痕（此前软门禁会静默吞掉告警，事后无法追溯）
         run: |
-          npm audit --omit=dev --audit-level=high | tee audit-backend.txt
+          npm audit --omit=dev --audit-level=moderate | tee audit-backend.txt
           echo "### Backend npm audit" >> "$GITHUB_STEP_SUMMARY"
           tail -3 audit-backend.txt >> "$GITHUB_STEP_SUMMARY" || true
 
@@ -97,7 +97,7 @@ jobs:
         working-directory: web-admin
         # I-M3：同上，硬门禁 + 留痕
         run: |
-          npm audit --omit=dev --audit-level=high | tee ../audit-web.txt
+          npm audit --omit=dev --audit-level=moderate | tee ../audit-web.txt
           echo "### Web-admin npm audit" >> "$GITHUB_STEP_SUMMARY"
           tail -3 ../audit-web.txt >> "$GITHUB_STEP_SUMMARY" || true
 

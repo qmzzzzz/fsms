@@ -73,12 +73,19 @@ function isDocsEnabled() {
   return config.nodeEnv !== 'production';
 }
 
-// 启动期一次性告警：文档开启但未配置 Basic Auth 凭据时提示一次。
-// 告警必须放在模块加载期而非请求路径内，否则每个未带凭据的文档请求都会刷一条 warn
+// 启动期一次性告警：文档开启但未配置 Basic Auth 凭据。
+// 告警必须放在模块加载期而非请求路径内，否则每个未带凭据的文档请求都会刷一条 warn。
+//
+// 【M-01 修复】此处原为 fail-open（未配凭据则 basicAuth 直接放行），
+// 攻击者无需凭据即可枚举全部 API 端点、请求/响应 schema 与内部权限编码。
+// 现改为 fail-closed：basicAuth 拒绝访问，生产环境另由 config/validate.js
+// 在启动期直接阻断。告警文案同步改为"已按安全策略拒绝访问"，避免误导运维
+// 以为只是提示。
 if (isDocsEnabled() && !(process.env.DOCS_USERNAME && process.env.DOCS_PASSWORD)) {
   try {
     require('../utils/logger').warn(
-      'ENABLE_API_DOCS 已开启但未设置 DOCS_USERNAME/DOCS_PASSWORD，API 文档无 Basic Auth 保护'
+      'ENABLE_API_DOCS 已开启但未设置 DOCS_USERNAME/DOCS_PASSWORD：' +
+        'API 文档已按安全策略拒绝访问（fail-closed）。如需开放请同时配置两项凭据。'
     );
   } catch (_) {
     /* logger 不可用时静默 */
@@ -86,17 +93,24 @@ if (isDocsEnabled() && !(process.env.DOCS_USERNAME && process.env.DOCS_PASSWORD)
 }
 
 /**
- * Basic Auth 中间件（可选）
- * 设置 DOCS_USERNAME 和 DOCS_PASSWORD 后启用，未设置则不保护
- * 注意：Basic Auth 仅为轻量防护，生产环境建议配合网络层访问控制
+ * Basic Auth 中间件（fail-closed）
+ *
+ * 行为约定（M-01）：
+ *   - 未配置凭据 → 拒绝（503），不再放行。理由是"文档已开启却无凭据"属配置
+ *     错误，此时放行等于把全部接口契约匿名公开；失败方向应为拒绝。
+ *   - 生产环境还会在启动期由 config/validate.js 直接阻断，双保险。
+ *   - 凭据校验用恒定时间比较，避免时序侧信道。
  */
 function basicAuth(req, res, next) {
   const username = process.env.DOCS_USERNAME;
   const password = process.env.DOCS_PASSWORD;
 
-  // 未配置凭据则不启用保护（无凭据时的启动告警见模块加载期的一次性检查）
+  // fail-closed：文档已开启却无凭据，拒绝访问而非放行
   if (!username || !password) {
-    return next();
+    return res.status(503).json({
+      success: false,
+      message: 'API 文档未配置访问凭据，已按安全策略拒绝访问',
+    });
   }
 
   const authHeader = req.headers.authorization || '';

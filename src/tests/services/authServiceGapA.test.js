@@ -86,19 +86,48 @@ describe('authService gap A', () => {
       expect(result.outcome).toBe('INVALID_AVATAR');
     });
 
-    test('OK - 正常更新全部字段并返回 profile', async () => {
+    test('OK - 正常更新全部可自助字段并返回 profile', async () => {
       const user = await makeUser('prof5');
       const result = await authService.updateUserProfile(user._id, {
         realName: '张三',
         phone: '13800138000',
-        department: '消防科',
         avatar: 'https://example.com/avatar.png',
       });
       expect(result.outcome).toBe('OK');
       expect(result.profile.realName).toBe('张三');
       expect(result.profile.phone).toBe('13800138000');
-      expect(result.profile.department).toBe('消防科');
       expect(result.profile.avatar).toBe('https://example.com/avatar.png');
+    });
+
+    // ==================== H-01 回归：department 不可自助修改 ====================
+    // department 是数据范围的唯一来源（rbac.js:195 构造 department 型 dataScope，
+    // 再经 constants/dataScopeFields.js 映射为各业务资源的过滤字段）。
+    // 若可自助修改，持有 level>=7 角色的账户只需一次 PUT /api/auth/profile
+    // 即可把 dataScope 指向任意部门，绕过部门隔离读取并导出该部门数据。
+    // 反向证据：管理员改他人部门（PUT /api/users/:id）有层级校验，自助入口原先无。
+    test('H-01 - 携带 department 时被忽略，不改变原值', async () => {
+      const user = await makeUser('prof5dept', { department: 'B栋' });
+      expect((await User.findById(user._id)).department).toBe('B栋');
+
+      const result = await authService.updateUserProfile(user._id, {
+        realName: '李四',
+        department: 'A栋', // 尝试越权改写数据范围来源
+      });
+      expect(result.outcome).toBe('OK');
+
+      // 数据库中的 department 必须保持原值
+      expect((await User.findById(user._id)).department).toBe('B栋');
+      // 返回的 profile 也不得回显请求体中的值
+      expect(result.profile.department).toBe('B栋');
+      // 其余字段正常更新（确认是"忽略该字段"而非"整体拒绝请求"）
+      expect((await User.findById(user._id)).realName).toBe('李四');
+    });
+
+    test('H-01 - 原本无 department 时不会被写入', async () => {
+      const user = await makeUser('prof5nodept');
+      const result = await authService.updateUserProfile(user._id, { department: 'A栋' });
+      expect(result.outcome).toBe('OK');
+      expect((await User.findById(user._id)).department).toBeUndefined();
     });
 
     test('OK - 更新邮箱为自己当前邮箱不触发 EMAIL_TAKEN', async () => {

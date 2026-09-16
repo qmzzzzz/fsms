@@ -111,6 +111,12 @@ node scripts/resign-audit-hmac.js --new-key "$NEW_HMAC" --apply    # 执行
 # 4. 原子替换 secrets 目录（JWT/URI/口令等无迁移依赖的随批生效）
 mv ./secrets ./secrets-old && mv ./secrets-new ./secrets
 chmod 700 ./secrets && chmod 600 ./secrets/*
+#    ⚠️ 上面两条 chmod 仅在 Linux 生效。Windows 开发机不支持 POSIX 权限位
+#    （NTFS 用 ACL），chmod 是空操作，密钥会继承父目录的宽松 ACL（默认对
+#    BUILTIN\Users 可读、Authenticated Users 可改）。Windows 上请改用：
+#      icacls "secrets" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
+#    验证：icacls "secrets" 不应再出现 BUILTIN\Users / Authenticated Users
+#    生产环境经 Docker Secrets 挂载，不受此影响。
 
 # 5. 启动并验证
 docker compose up -d

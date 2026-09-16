@@ -81,3 +81,13 @@ secrets/
 .design_library/
 # 前端构建产物变体
 web-admin/dist-optimized/
+
+# CI 调试脚本与运行日志（M-03：曾误入库，含读取 git 凭据的成型代码与 CI 内部信息）
+_ci_*
+# 临时排查脚本
+_tmp_*
+
+# CI 调试脚本与运行日志（M-03：曾误入库，含读取 git 凭据的成型代码与 CI 内部信息）
+_ci_*
+# 临时排查脚本
+_tmp_*

@@ -27,6 +27,9 @@ require('../src/config/secrets').hydrateSecretsFromFiles();
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 
+// M-08：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
+const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
+
 const BATCH_SIZE = 1000;
 
 function parseArgs(argv) {
@@ -59,7 +62,7 @@ const hmacOf = (secret, hash) =>
     process.exit(0);
   }
 
-  const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/fire_safety_db';
+  const { uri, dbName } = resolveMongoUri({ scriptName: 'resign-audit-hmac.js' });
   await mongoose.connect(uri);
   console.log(
     `已连接：${mongoose.connection.host}:${mongoose.connection.port}/${mongoose.connection.name}`
@@ -67,6 +70,14 @@ const hmacOf = (secret, hash) =>
   console.log(
     args.apply ? '模式：APPLY（将实际修改数据）' : '模式：DRY-RUN（仅报告，加 --apply 才执行）'
   );
+
+  // M-08：fail-closed——--apply 类操作必须显式声明 ALLOWED_SOURCE_DB。
+  // 原先只需单个 --apply 即可批量改写 auditlogs.hmac（等于重写审计完整性
+  // 证据），且默认回退本地库，误在生产 shell 执行时不会因库名不符而中止。
+  if (!assertApplyAllowed({ scriptName: 'resign-audit-hmac.js', dbName, apply: args.apply })) {
+    await mongoose.disconnect();
+    process.exit(2);
+  }
 
   const coll = mongoose.connection.collection('auditlogs');
 

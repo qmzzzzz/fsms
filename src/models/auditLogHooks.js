@@ -45,6 +45,16 @@ const applyHooks = (schema, logger) => {
         this.hash = computeHash(prevHash, payload);
         this.hmac = computeHmac(this.hash);
         this.hashVersion = CURRENT_PAYLOAD_VERSION;
+        // 【M-09】链尾推进刻意留在 pre('save')，与哈希计算同处一把 withChainLock
+        // 临界区内。原因：
+        //   ① 若移到 post('save')，锁无法跨 pre/post 两个钩子持有，并发写入会
+        //      读到相同链尾、算出相同 prevHash → **真实分叉**，比幻影链尾严重；
+        //   ② 若强行跨钩子持锁，则 post 钩子未触发时锁泄漏，其后所有审计写入
+        //      无限排队（表现为「服务正常但审计彻底停摆」），是更差的失效模式。
+        // 代价是崩溃时可能留下「幻影链尾」（链尾指向从未入库的 hash）。该风险
+        // 改由**启动期自愈**消除：index.js 在 auditBuffer.start() 后调用
+        // resyncChainTail()，从 DB 重建真实链尾。故完整性校验不会产生持续假阳性。
+        // 修改此处前请先阅读 src/index.js 中的 M-09 说明。
         await advanceChainTail(this.hash, generation);
         this.$__chainAdvancedFrom = prevHash;
       });

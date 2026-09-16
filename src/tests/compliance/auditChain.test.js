@@ -454,6 +454,46 @@ describe('审计日志合规化', () => {
       expect(tail).not.toBe('e'.repeat(64));
     });
 
+    // ==================== M-09：幻影链尾的启动期自愈 ====================
+    // 成因：链尾推进在 models/auditLogHooks.js 的 pre('save') 内，而文档落库
+    // 在钩子之后。进程若在「已推进链尾、尚未完成 insert」之间被强杀
+    //（SIGKILL / OOM / 容器驱逐），链尾就指向一条**从未入库**的 hash。
+    // 后果：其后所有记录的 prevHash 都指向不存在的 hash，完整性校验产生
+    // **持续性假阳性** chain_break，运维在反复确认"是误报"后倾向忽略该告警，
+    // 从而在真正篡改发生时失去检测能力。
+    //
+    // 为什么不在 post('save') 推进链尾：链尾推进与哈希计算必须同处一把
+    // withChainLock 临界区，否则并发写入会算出相同 prevHash 造成**真实分叉**，
+    // 比幻影链尾严重。故改为启动期自愈：index.js 在 auditBuffer.start() 后
+    // 调用 resyncChainTail()，从 DB 重建真实链尾。
+    test('M-09 - 幻影链尾（指向未入库 hash）经启动期 resync 后被清除', async () => {
+      // ① 先写入一条真实记录，作为"最后一条成功入库"的记录
+      const real = await AuditLog.create({
+        action: 'chain_m09_real',
+        category: 'system',
+        username: 'chain_m09',
+        ip: '::1',
+        path: '/api/m09',
+        statusCode: 200,
+        success: true,
+      });
+      await resyncChainTail();
+      expect(await getChainTail(AuditLog)).toBe(real.hash);
+
+      // ② 模拟"已推进链尾但未完成 insert 即崩溃"
+      const phantom = 'f'.repeat(63) + '0';
+      await advanceChainTail(phantom);
+      expect(await getChainTail(AuditLog)).toBe(phantom);
+      // 该 hash 在 DB 中确实不存在——这正是"幻影"的定义
+      expect(await AuditLog.findOne({ hash: phantom })).toBeNull();
+
+      // ③ 启动期自愈：resyncChainTail 从 DB 重建，幻影被清除
+      await resyncChainTail();
+      const healed = await getChainTail(AuditLog);
+      expect(healed).not.toBe(phantom);
+      expect(healed).toBe(real.hash);
+    });
+
     afterAll(async () => {
       // 归还干净状态，避免影响同 worker 内后续测试文件
       await resyncChainTail();

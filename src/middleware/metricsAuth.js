@@ -76,12 +76,28 @@ function createMetricsAuth(options = {}) {
     }
 
     // ② 内网/回环来源放行：容器网络内 Prometheus → app:3000 零配置兼容
-    if (isPrivateOrLoopback(req.ip)) {
+    //
+    // 【M-07 修复】判定必须用**不可伪造的 socket 对端地址**，不能用 req.ip。
+    // req.ip 在启用 trust proxy 时会采纳 X-Forwarded-For：生产环境
+    // validate.js 强制 TRUST_PROXY_HOPS，故 req.ip 必然受 XFF 影响。此时
+    // 直连 app 端口的攻击者只需发送 `X-Forwarded-For: 127.0.0.1`，req.ip 即
+    // 变为回环地址，跳过令牌校验——恰好在本中间件注释声明的防御场景
+    //（Nginx 配置漂移、有人从容器网络直连 app:3000）下失效。
+    // 后果：泄露 QPS、延迟直方图、错误计数与**安全告警计数**（可据以判断
+    // 攻击是否被检测到），属侦察面。
+    //
+    // req.socket.remoteAddress 取自 TCP 连接本身，不受任何请求头影响。
+    const peerIp = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+    if (isPrivateOrLoopback(peerIp)) {
       return next();
     }
 
     // ③ 其余一律拒绝：公网直连（Nginx 防线已失守的信号）必须在此被拦下
-    logger.warn('metrics 端点拒绝非内网来源', { ip: req.ip || 'unknown' });
+    // 日志同时记录 socket 对端与 req.ip：二者不一致说明有 XFF 伪造尝试
+    logger.warn('metrics 端点拒绝非内网来源', {
+      peer: peerIp || 'unknown',
+      reqIp: req.ip || 'unknown',
+    });
     return ApiResponse.codeError(res, 'METRICS_INTERNAL_ONLY');
   };
 }

@@ -108,6 +108,26 @@ if (outDir) {
     }
     console.log(`已写入 ${file}（${Buffer.byteLength(value)} 字节）`);
   }
+
+  // 【M-05 修复】Windows 上 mode/chmod 均不映射 NTFS ACL：writeFileSync 的 mode
+  // 被忽略，chmodSync 只能粗粒度切换只读属性。因此上面的权限收紧在 Windows 上
+  // 是空操作，而文件会继承父目录的宽松 ACL（实测默认含 BUILTIN\Users:(I)(RX)
+  // 与 Authenticated Users:(I)(M)，即任何本地用户可读取并改写密钥文件）。
+  //
+  // 原实现在 Windows 上静默跳过——用户以为权限已收紧。现显式提示并给出可直接
+  // 执行的 icacls 命令。对照：src/services/initData.js:765-772 早已对同一平台
+  // 局限做了 best-effort + 告警，此处口径与之对齐。
+  if (!isPosix) {
+    console.log('');
+    console.log('⚠️  注意：Windows 不支持 POSIX 权限位，上述 0600/0700 未生效。');
+    console.log('   密钥文件当前继承父目录 ACL，可能对本机其他用户可读/可改。');
+    console.log('   请手动收紧（仅当前用户 + Administrators + SYSTEM 可访问）：');
+    console.log('');
+    console.log(`     icacls "${dir}" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`);
+    console.log('');
+    console.log('   验证：icacls "' + dir + '"  应不再出现 BUILTIN\\Users 与 Authenticated Users');
+  }
+
   console.log('\n落地后请执行轮换手册中的迁移步骤（AES 先迁 mfaSecret、HMAC 重签），');
   console.log('再重启应用。见 deployment/secret-rotation.md。');
 } else {
