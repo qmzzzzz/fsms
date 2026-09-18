@@ -22,6 +22,19 @@
  *    严格逐对比较会产出大量假阳性断链，反而掩盖真实篡改。
  *    窗口足够小（LINK_WINDOW_SIZE），删除或插入记录仍会立即暴露。
  *
+ * 无哈希记录不再一律算 legacy（P2 级修正）：哈希链自启用起就是**连续**的，
+ * 因此「无 hash」出现在带 hash 记录之前 = 存量 legacy（不计断裂），出现在之后 =
+ * 完整性无法追认，计入 breaks（type=hash_stripped）。原先两种都只累加 legacy 且
+ * `intact: breaks===0`，等于把某条记录整组 $unset 掉 hash/prevHash/hmac 就能把它
+ * 改写过的内容洗白——顺带还把"其后第一条不再校验链接"的窗口重置一并利用。
+ * 注：$unset 只能由绕过 mongoose 中间件的写入完成（直连驱动 / mongosh），
+ * 而这正是本服务要防的威胁模型（持有 DB 写权限的内部人）。
+ *
+ * 已知检出上限（不得当作已修好）：**插入**一条 prevHash 指向链中已有 hash 的
+ * 伪造记录，在本设计下不可检出——滑动窗口只要求 prevHash 命中近期任一 hash。
+ * 要堵住它需要给链上每条记录一个参与哈希的序号（chainIndex），使"父子关系"
+ * 变成严格线性；那是一次需要全量重签的格式升级，不在本轮范围。
+ *
  * 存量数据的已知限制（必须如实告知，不得当作「已修好」）：
  * - hashVersion=null（legacy，本机 1137 条）：写入时无哈希链，完全无保护。
  * - hashVersion=2（本机 4419 条）：批量路径算 hash 时未补 schema 默认值，
@@ -63,6 +76,10 @@ const MAX_SAMPLES = 20;
  * @param {Object} [options]
  * @param {number} [options.maxRecords] 最多校验多少条（从最新往前取，再按时序校验）
  * @param {boolean} [options.fromLatest=true] true=校验最近 maxRecords 条；false=从最早开始
+ * @param {Object} [options.filter] 附加查询条件，用于只校验某个子集（如单条测试自己的
+ *   造数）。**仅限离线/测试作用域**：在线自检接口与运维脚本一律不传，否则
+ *   「挑一个没有断链的子集」就能把真实断裂藏起来——报告里会把 filter 原样回显，
+ *   便于消费方识别这是一次局部校验。
  * @returns {Promise<Object>} 校验报告
  */
 const verifyAuditChain = async (AuditLog, options = {}) => {
@@ -71,6 +88,7 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
     Math.min(Number(options.maxRecords) || DEFAULT_MAX_RECORDS, HARD_MAX_RECORDS)
   );
   const fromLatest = options.fromLatest !== false;
+  const filter = options.filter && Object.keys(options.filter).length > 0 ? options.filter : {};
 
   const hmacChecked = isHmacConfigured();
 
@@ -82,6 +100,7 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
     hmac_missing: 0,
     hmac_mismatch: 0,
     chain_break: 0,
+    hash_stripped: 0,
   };
   // v2 批量路径的历史默认值漂移：不是篡改，单独计数不计入 breaks
   let legacyV2BatchTolerated = 0;
@@ -95,7 +114,7 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
 
   // 取最近 maxRecords 条：先按 _id 降序取窗口，再反转为升序校验
   // （链接性校验依赖时序，必须升序推进）
-  const window = await AuditLog.find({})
+  const window = await AuditLog.find(filter)
     .sort({ _id: fromLatest ? -1 : 1 })
     .limit(maxRecords)
     .lean();
@@ -114,6 +133,13 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
 
   // 窗口起点的 prevHash 无从校验（其父记录在窗口之外），跳过第一条的链接检查
   let isFirst = true;
+  // 是否已经见过「带哈希」的记录。用于区分两种形态完全不同的无哈希记录：
+  // - 出现在带哈希记录**之前**：存量 legacy（写入时尚无哈希链），不属篡改；
+  // - 出现在带哈希记录**之后**：要么有人把 hash/prevHash/hmac 整组 $unset 掉
+  //   （mongoose 中间件拦不住直连驱动/mongosh 的改写），要么哈希计算失败后
+  //   仍落库（见 auditBuffer 的「批次将无哈希落库」分支）。两种情况都意味着
+  //   「这条记录的完整性无法追认」，必须计入断裂而不是被 legacy 吸收。
+  let seenHashed = false;
 
   for (const doc of docs) {
     total += 1;
@@ -121,12 +147,28 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
     // 无 hash 的存量记录：计为 legacy，并清空链接窗口
     // （其后第一条记录的 prevHash 指向 legacy 之前，无法在此校验）
     if (!doc.hash) {
+      if (seenHashed) {
+        pushBreak({
+          _id: String(doc._id),
+          index: total,
+          type: 'hash_stripped',
+          action: doc.action,
+          timestamp: doc.timestamp,
+        });
+        // 这里**不**重置 isFirst：抹掉哈希正是为了让自己和后继之间的链接失联，
+        // 沿用 legacy 的「跳过其后第一条」宽容等于替篡改者收尾。父哈希已不存在，
+        // 后继必然 chain_break —— 两条一起报才是完整结论。
+        seen.clear();
+        seenOrder.length = 0;
+        continue;
+      }
       legacy += 1;
       seen.clear();
       seenOrder.length = 0;
       isFirst = true;
       continue;
     }
+    seenHashed = true;
 
     const version = doc.hashVersion || 1;
     const expectedHash = computeHash(doc.prevHash, canonicalPayload(doc, version));
@@ -192,7 +234,7 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
     // 数值应随存量记录过期（TTL）而归零，若持续增长说明仍有 v2 写入路径存活。
     legacyV2BatchTolerated,
     hmacChecked,
-    scanned: { maxRecords, fromLatest },
+    scanned: { maxRecords, fromLatest, filter },
     chainTailHash: seenOrder.length ? seenOrder[seenOrder.length - 1] : null,
     samples,
     verifiedAt: new Date().toISOString(),

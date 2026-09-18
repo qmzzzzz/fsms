@@ -1,10 +1,16 @@
 #!/usr/bin/env node
 /**
- * 审计链 v2/v1 存量重签工具（离线维护窗口执行）
+ * 审计链存量重签工具（离线维护窗口执行）
+ *
+ * 目标版本 = CURRENT_PAYLOAD_VERSION（当前 v4），脚本本身不写死版本号：
+ * payload 每升一版，重跑本脚本即可把存量拉到新口径。
  *
  * 背景：
  * - v1 记录没有哈希链，无法只改本条 hash 追认；
  * - v2 记录的部分批量写入 hash 未纳入 riskLevel/riskFactors 默认值；
+ * - v2/v3 记录的 targetType/targetId/dataType/description **从未参与哈希**，
+ *   升 v4 重签后这四个字段才受保护（但只能保护"从现在起的值"：
+ *   重签是对当前值重新摘要，无法证明这些值在历史上未被改过）；
  * - 任何一条记录 hash 变更后，后续 prevHash/hash 都必须同步重算。
  *
  * 执行顺序：
@@ -12,6 +18,9 @@
  *   2. node scripts/resign-audit-chain-v3.js --apply；
  *   3. 启动应用；
  *   4. node scripts/verify-audit-chain.js --from=earliest 复核。
+ *
+ * 命名说明：文件名里的 v3 是它被引入时的目标版本，保留原名以免与既有
+ * 轮换手册/运维记录脱钩；实际目标版本始终取常量。
  */
 
 require('dotenv').config();

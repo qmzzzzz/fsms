@@ -44,8 +44,28 @@ const PAYLOAD_FIELDS_V2 = [
   'duration',
 ];
 
-const PAYLOAD_FIELDS_V3 = PAYLOAD_FIELDS_V2;
-const CURRENT_PAYLOAD_VERSION = 3;
+/**
+ * v3 = v2 的字段集（当时只是补了「算哈希前统一填默认值」的口径，字段没变）。
+ * 必须是**独立快照**而不是 `= PAYLOAD_FIELDS_V2`：同一引用的话，将来给 v2
+ * 追加任何字段都会静默改写 v3 的语义，历史记录的哈希就再也算不回来了。
+ */
+const PAYLOAD_FIELDS_V3 = [...PAYLOAD_FIELDS_V2];
+
+/**
+ * v4：补进 P1-12 加到 schema 却从未进哈希的四个字段
+ * （targetType / targetId / dataType / description）。
+ * 这四字段承载「谁举报了谁 / 看了哪类敏感数据 / 操作描述」，正是取证要看的值；
+ * 不在 payload 里就意味着落库后可被任意改写而三层校验一层都不会红。
+ */
+const PAYLOAD_FIELDS_V4 = [
+  ...PAYLOAD_FIELDS_V3,
+  'targetType',
+  'targetId',
+  'dataType',
+  'description',
+];
+
+const CURRENT_PAYLOAD_VERSION = 4;
 
 const stableStringify = (value) => {
   if (value === null || value === undefined) return 'null';
@@ -91,10 +111,10 @@ const canonicalPayloadV1 = (doc) => {
   });
 };
 
-const canonicalPayloadV2 = (doc) => {
+const canonicalPayloadV2 = (doc, fields = PAYLOAD_FIELDS_V2) => {
   const defaultEmptyObjectFields = new Set(['params', 'query', 'body']);
   const payload = {};
-  for (const field of PAYLOAD_FIELDS_V2) {
+  for (const field of fields) {
     payload[field] =
       doc[field] === undefined && defaultEmptyObjectFields.has(field)
         ? {}
@@ -110,8 +130,16 @@ const canonicalPayloadV2LegacyBatch = (doc) => {
   return canonicalPayloadV2(probe);
 };
 
-const canonicalPayload = (doc, version = CURRENT_PAYLOAD_VERSION) =>
-  version >= 2 ? canonicalPayloadV2(doc) : canonicalPayloadV1(doc);
+/**
+ * 按记录自带的 hashVersion 选择口径。v2/v3 共用 25 字段集（v3 只是补齐默认值
+ * 的写入口径，字段集未变），v4 起加入 targetType/targetId/dataType/description。
+ * 每新增一版都必须保留旧分支——历史记录的哈希只有按当年口径才复算得出来。
+ */
+const canonicalPayload = (doc, version = CURRENT_PAYLOAD_VERSION) => {
+  if (version >= 4) return canonicalPayloadV2(doc, PAYLOAD_FIELDS_V4);
+  if (version >= 2) return canonicalPayloadV2(doc, PAYLOAD_FIELDS_V2);
+  return canonicalPayloadV1(doc);
+};
 
 const computeHash = (prevHash, payload) => {
   const previous = prevHash === undefined ? null : prevHash;
@@ -125,8 +153,10 @@ module.exports = {
   PAYLOAD_FIELDS_V1,
   PAYLOAD_FIELDS_V2,
   PAYLOAD_FIELDS_V3,
+  PAYLOAD_FIELDS_V4,
   CURRENT_PAYLOAD_VERSION,
   canonicalPayload,
+  canonicalPayloadV2,
   canonicalPayloadV2LegacyBatch,
   computeHash,
 };

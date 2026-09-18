@@ -315,14 +315,23 @@ describe('后台任务与错误路径（批次 E）', () => {
         timestamp: new Date(),
       });
     }
-    const verifyOk = await verifyAuditChain(AuditLog, { maxRecords: 200 });
+    // 只校验本用例自己造的这三条链：同文件前面的用例用 insertMany 写过**无哈希**的
+    // 审计行（那是异常检测用例的造数，不涉及链），全库校验会把它们算进结论，
+    // 于是本用例变成「取决于先跑了谁」的顺序依赖用例。
+    const chainFilter = { username: `chain${stamp}` };
+    const verifyOk = await verifyAuditChain(AuditLog, { maxRecords: 200, filter: chainFilter });
+    expect(verifyOk.total).toBe(3);
     expect(verifyOk.intact).toBe(true);
 
     // 绕过钩子直接改库（模拟篡改）→ 链校验应检出
-    const target = await AuditLog.findOne({ username: `chain${stamp}` }).lean();
+    const target = await AuditLog.findOne(chainFilter).lean();
     await AuditLog.collection.updateOne({ _id: target._id }, { $set: { action: 'tampered' } });
-    const verifyTampered = await verifyAuditChain(AuditLog, { maxRecords: 200 });
+    const verifyTampered = await verifyAuditChain(AuditLog, {
+      maxRecords: 200,
+      filter: chainFilter,
+    });
     expect(verifyTampered.intact).toBe(false);
+    expect(verifyTampered.scanned.filter).toEqual(chainFilter);
   });
 
   // ================= auditBuffer flush =================

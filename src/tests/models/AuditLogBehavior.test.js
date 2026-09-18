@@ -53,11 +53,12 @@ describe('AuditLog behavior guards', () => {
     // 【断言收紧】原断言只有 toBeTruthy()×2，标题承诺的「保留调用方提供的 hash」从未被断言：
     // 变异验证——把 auditLogHooks 的 `if (this.hash)` 短路分支改成 `if (false)`
     // （调用方 hash 会被重算覆盖），旧写法 SURVIVED（同目录 45 个相关用例全绿）。
-    // 实测：hash 原样保留、prevHash 保持 null 不被改写、hashVersion 落为 CURRENT_PAYLOAD_VERSION(3)、
+    // 实测：hash 原样保留、prevHash 保持 null 不被改写、hashVersion 落为 CURRENT_PAYLOAD_VERSION、
     // hmac 为 64 位十六进制（= SHA-256 输出长度）。
     expect(doc.hash).toBe('imported-chain-hash');
     expect(doc.prevHash).toBeNull();
-    expect(doc.hashVersion).toBe(3);
+    const { CURRENT_PAYLOAD_VERSION } = require('../../utils/auditChain');
+    expect(doc.hashVersion).toBe(CURRENT_PAYLOAD_VERSION);
     expect(String(doc.hmac)).toMatch(/^[0-9a-f]{64}$/);
   });
 

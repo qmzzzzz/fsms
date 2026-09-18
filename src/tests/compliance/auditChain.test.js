@@ -227,35 +227,77 @@ describe('审计日志合规化', () => {
       expect(doc.timestamp).toBeInstanceOf(Date);
     });
 
-    test('默认值表覆盖 schema 中所有「参与 payload 且有 default」的字段', () => {
-      // 防漂移守卫：schema 新增带 default 的 payload 字段却忘记登记到
-      // PAYLOAD_SCHEMA_DEFAULTS 时，同类断链会再次出现
-      const { PAYLOAD_SCHEMA_DEFAULTS, PAYLOAD_FIELDS_V3 } = require('../../utils/auditChain');
+    test('payload 白名单与 schema 双向对齐（防漂移守卫，两个方向都查）', () => {
+      // 防漂移守卫。原实现只遍历 PAYLOAD_FIELDS_V3——也就是**被它监管的那份清单本身**，
+      // 于是 P1-12 给 schema 加了 targetType/targetId/dataType/description 却忘了
+      // 加进 payload 时，守卫全绿：方向错了，等于没有守卫。
+      const { PAYLOAD_SCHEMA_DEFAULTS, PAYLOAD_FIELDS_V4 } = require('../../utils/auditChain');
       const paths = AuditLog.schema.paths;
 
-      const missing = PAYLOAD_FIELDS_V3.filter((field) => {
+      const hasImplicitDefault = (path) =>
+        path.instance === 'Array' || Boolean(path.options && path.options.default !== undefined);
+
+      // 方向①：payload 里带 default 的字段必须登记默认值表，否则 chainBatch 算 hash
+      // 时是 undefined、落库后被 Mongoose 填成默认值 → 整批断链（AUX-02 的根因）
+      const notRegistered = PAYLOAD_FIELDS_V4.filter((field) => {
         const path = paths[field];
-        if (!path) return false;
-        const hasDefault = path.options && path.options.default !== undefined;
-        // 数组字段（riskFactors）在 mongoose 中默认即 []，需单独识别
-        const isArrayWithImplicitDefault = path.instance === 'Array';
         return (
-          (hasDefault || isArrayWithImplicitDefault) &&
-          !Object.prototype.hasOwnProperty.call(PAYLOAD_SCHEMA_DEFAULTS, field)
+          path && hasImplicitDefault(path) && !Object.keys(PAYLOAD_SCHEMA_DEFAULTS).includes(field)
         );
       });
+      expect(notRegistered).toEqual([]);
 
-      expect(missing).toEqual([]);
+      // 方向②：schema 里凡是**不在排除清单内**的字段（嵌套路径按顶层字段计）
+      // 都必须进 payload。排除清单是封闭的：哈希链自身的元数据 + 恒等/时间戳列。
+      const CHAIN_METADATA = new Set([
+        '_id',
+        '__v',
+        'hash',
+        'prevHash',
+        'hmac',
+        'hashVersion',
+        'createdAt',
+        'updatedAt',
+      ]);
+      const uncovered = Object.keys(paths)
+        .filter((p) => !p.startsWith('$'))
+        .filter((p) => !CHAIN_METADATA.has(p.split('.')[0]))
+        .filter((p) => !PAYLOAD_FIELDS_V4.includes(p.split('.')[0]));
+      expect(uncovered).toEqual([]);
+
+      // 方向②的自检：把守卫的判据反过来必须能抓到真实缺口，
+      // 否则「空数组等于全覆盖」这类断言可能是空转
+      const tampered = PAYLOAD_FIELDS_V4.filter((f) => f !== 'description');
+      expect(
+        Object.keys(paths)
+          .filter((p) => !CHAIN_METADATA.has(p.split('.')[0]))
+          .filter((p) => !tampered.includes(p.split('.')[0]))
+      ).toContain('description');
     });
 
-    test('v2 历史口径仅用于校验存量、不影响 v3 新写入', () => {
+    test('历史口径仅用于校验存量、不影响新写入（v2/v3/v4 三版并存）', () => {
       // 校验端对 v2 记录额外尝试「riskLevel/riskFactors 缺席」的历史口径，
-      // 把已知的默认值漂移与真实篡改区分开；v3 记录不得享受这份宽容
+      // 把已知的默认值漂移与真实篡改区分开；v3/v4 记录不得享受这份宽容
       const {
         canonicalPayloadV2LegacyBatch,
-        CURRENT_PAYLOAD_VERSION,
+        PAYLOAD_FIELDS_V2,
+        PAYLOAD_FIELDS_V3,
+        PAYLOAD_FIELDS_V4,
       } = require('../../utils/auditChain');
-      expect(CURRENT_PAYLOAD_VERSION).toBe(3);
+      expect(CURRENT_PAYLOAD_VERSION).toBe(4);
+
+      // 版本清单必须是**互不相同的快照**：v3 曾写成 `= PAYLOAD_FIELDS_V2`（同一引用），
+      // 将来任何人给 v2 追加字段都会静默改写 v3 的语义，存量 v3 记录集体算不回哈希
+      expect(PAYLOAD_FIELDS_V3).not.toBe(PAYLOAD_FIELDS_V2);
+      expect(PAYLOAD_FIELDS_V4).not.toBe(PAYLOAD_FIELDS_V3);
+      expect(PAYLOAD_FIELDS_V3).toEqual(PAYLOAD_FIELDS_V2);
+      // v4 的增量是封闭的四个字段，且不得改动历史字段集
+      expect([...PAYLOAD_FIELDS_V4].sort()).toEqual(
+        [...PAYLOAD_FIELDS_V3, 'targetType', 'targetId', 'dataType', 'description'].sort()
+      );
+      for (const field of ['targetType', 'targetId', 'dataType', 'description']) {
+        expect(PAYLOAD_FIELDS_V3).not.toContain(field);
+      }
 
       const doc = {
         timestamp: new Date('2026-08-25T00:00:00.000Z'),
@@ -270,11 +312,21 @@ describe('审计日志合规化', () => {
         body: {},
         riskLevel: 'low',
         riskFactors: [],
+        description: '举报描述',
       };
       // 历史口径把这两个字段视为缺席 → 与当前口径产出不同的 payload
       expect(canonicalPayloadV2LegacyBatch(doc)).not.toBe(canonicalPayload(doc, 3));
       // 且不篡改入参
       expect(doc.riskLevel).toBe('low');
+      // v2 与 v3 字段集相同 → 同一文档在两版下 payload 必须逐字相等（存量不漂移）
+      expect(canonicalPayload(doc, 2)).toBe(canonicalPayload(doc, 3));
+      // v4 必须把 description 纳入 → 与 v3 不同
+      expect(canonicalPayload(doc, 4)).not.toBe(canonicalPayload(doc, 3));
+      expect(canonicalPayload({ ...doc, description: '改了' }, 4)).not.toBe(
+        canonicalPayload(doc, 4)
+      );
+      // 反过来：v3 口径对 description 的变化无感，这正是 F-04 的成因
+      expect(canonicalPayload({ ...doc, description: '改了' }, 3)).toBe(canonicalPayload(doc, 3));
     });
 
     test('批量落库后重算 hash 与库内一致（端到端）', async () => {
@@ -315,13 +367,53 @@ describe('审计日志合规化', () => {
       expect(stored).toHaveLength(3);
 
       for (const doc of stored) {
-        expect(doc.hashVersion).toBe(3);
+        expect(doc.hashVersion).toBe(CURRENT_PAYLOAD_VERSION);
         const recomputed = computeHash(doc.prevHash, canonicalPayload(doc, doc.hashVersion || 1));
         expect(recomputed).toBe(doc.hash);
       }
       // 批内链接性
       expect(stored[1].prevHash).toBe(stored[0].hash);
       expect(stored[2].prevHash).toBe(stored[1].hash);
+    });
+
+    // F-04 的直接回归：targetType/targetId/dataType/description 曾只在 schema 里、
+    // 不在 payload 白名单里——落库后经驱动改掉其中一个，三层校验一层都不会红。
+    // 这四字段承载的恰是取证要看的信息（谁举报了谁、看了哪类敏感数据、做了什么）。
+    test('新写入（v4）改写 description 后必须失配（绕过中间件直连驱动改库）', async () => {
+      const { verifyAuditChain } = require('../../services/auditChainVerify');
+      const username = `f04_${Date.now().toString(36)}`;
+      const doc = await AuditLog.create({
+        action: 'report_misuse',
+        category: 'security',
+        username,
+        ip: '127.0.0.1',
+        path: '/api/security/reports',
+        method: 'POST',
+        statusCode: 200,
+        success: true,
+        targetType: 'user',
+        targetId: 'victim-1',
+        dataType: 'phone',
+        description: '原始举报描述',
+      });
+      expect(doc.hashVersion).toBe(CURRENT_PAYLOAD_VERSION);
+
+      // 篡改必须走**驱动层**：模型中间件会拒绝改哈希链字段，而攻击者拿到 DB 写权限
+      // 时用的是 mongosh/直连驱动，本服务的钩子拦不到——校验层才是最后一道闸。
+      await AuditLog.collection.updateOne(
+        { _id: doc._id },
+        { $set: { description: '被改写过的举报描述' } }
+      );
+
+      const after = await AuditLog.findById(doc._id).lean();
+      expect(after.description).toBe('被改写过的举报描述');
+      const recomputed = computeHash(after.prevHash, canonicalPayload(after, after.hashVersion));
+      expect(recomputed).not.toBe(after.hash);
+
+      const report = await verifyAuditChain(AuditLog, { maxRecords: 500 });
+      expect(report.intact).toBe(false);
+      expect(report.byType.hash_mismatch).toBe(1);
+      expect(report.samples.map((s) => String(s._id))).toContain(String(doc._id));
     });
   });
 

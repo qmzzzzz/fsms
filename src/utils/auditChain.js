@@ -9,6 +9,7 @@ const {
   PAYLOAD_FIELDS_V1,
   PAYLOAD_FIELDS_V2,
   PAYLOAD_FIELDS_V3,
+  PAYLOAD_FIELDS_V4,
   CURRENT_PAYLOAD_VERSION,
   canonicalPayload,
   canonicalPayloadV2LegacyBatch,
@@ -35,10 +36,17 @@ const EMPTY_SENTINEL = sharedCache.EMPTY_SENTINEL;
  *             Mongoose 填成 'low'/[]，重算必然失配（实测 4182/4407 条）。
  *             逐条 create 路径（pre-save，默认值已填充）不受影响——
  *             因此 v2 这个版本号本身是歧义的，同一版本号下存在两种 payload 口径。
- *  v3（当前）：与 v2 字段集完全相同，但**语义上保证**默认值在算 hash 前已补齐
+ *  v3：与 v2 字段集完全相同，但**语义上保证**默认值在算 hash 前已补齐
  *             （见 PAYLOAD_SCHEMA_DEFAULTS）。版本号的唯一作用是消除 v2 的歧义：
  *             校验端见到 v3 即可施加严格单一口径，不再需要「试两种」。
- * 新写入一律带 hashVersion=3；校验端按 doc.hashVersion 选择口径。
+ *  v4（当前）：在 v3 的 25 字段上补进 targetType / targetId / dataType /
+ *             description。这四个字段是 P1-12 加到 schema 的（举报对象、被查看的
+ *             敏感数据类型、操作描述），当时未同步进 payload 白名单——落库后可被
+ *             任意改写而 hash/hmac/链接三层都不会红。校验端按 doc.hashVersion
+ *             选择口径，v1~v3 的复算方式逐字保持不变（旧数据不会因新增版本而集体报断链）。
+ * 新写入一律带 hashVersion=CURRENT_PAYLOAD_VERSION(4)；校验端按 doc.hashVersion 选择口径。
+ * 存量 v1~v3 记录的这四字段**无法追认**（重签只能对当前值重新摘要，不能证明历史值未被改）；
+ * 需要把它们升到 v4 时用 scripts/resign-audit-chain-v3.js（该脚本按当前版本常量重签）。
  */
 
 function getHmacSecret() {
@@ -357,6 +365,7 @@ module.exports = {
   PAYLOAD_FIELDS_V1,
   PAYLOAD_FIELDS_V2,
   PAYLOAD_FIELDS_V3,
+  PAYLOAD_FIELDS_V4,
   PAYLOAD_SCHEMA_DEFAULTS,
   CURRENT_PAYLOAD_VERSION,
   canonicalPayload,

@@ -241,18 +241,23 @@ describe('审计报告修复综合回归', () => {
 
       const { verifyAuditChain } = require('../../services/auditChainVerify');
       const stored = await AuditLog.find({ username: 'v3_probe' }).lean();
-      expect(stored.every((d) => d.hashVersion === 3)).toBe(true);
+      // 版本名沿用用例创建时的叫法（v3 探针），断言改为跟随当前版本常量：
+      // 新写入永远带 CURRENT_PAYLOAD_VERSION，硬编码 3 会在每次 payload 升版时假红
+      const { CURRENT_PAYLOAD_VERSION } = require('../../utils/auditChain');
+      expect(stored.every((d) => d.hashVersion === CURRENT_PAYLOAD_VERSION)).toBe(true);
 
       // 单独校验这两条：重算必须一致
       const { canonicalPayload, computeHash, computeHmac } = require('../../utils/auditChain');
       for (const d of stored) {
-        expect(computeHash(d.prevHash, canonicalPayload(d, 3))).toBe(d.hash);
+        expect(computeHash(d.prevHash, canonicalPayload(d, CURRENT_PAYLOAD_VERSION))).toBe(d.hash);
         expect(d.hmac).toBe(computeHmac(d.hash));
       }
 
       // 接口层面也不应把它们计为断裂
       const report = await verifyAuditChain(AuditLog, { maxRecords: 500 });
-      const v3Breaks = (report.samples || []).filter((s) => s.hashVersion === 3);
+      const v3Breaks = (report.samples || []).filter(
+        (s) => s.hashVersion === CURRENT_PAYLOAD_VERSION
+      );
       expect(v3Breaks).toEqual([]);
     });
 
