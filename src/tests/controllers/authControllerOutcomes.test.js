@@ -11,10 +11,10 @@
  * 与 authCookies.test.js（supertest 集成）正交互补，不重复造数据库数据。
  *
  * 覆盖：
- * - register 5 个 outcome + 校验失败 + 成功下发 cookie（201）
- * - login 7 个 outcome + 成功
- * - refreshToken 10 个 outcome + service 抛异常兜底 401 + 成功轮换 cookie
- * - changePassword 8 个 outcome（含 REVOKE_FAILED 的 503 + 审计落库）
+ * - register 4 个 outcome + 校验失败 + 成功下发 cookie（201）
+ * - login 6 个 outcome + 成功
+ * - refreshToken 11 个 outcome + service 抛异常兜底 401 + 成功轮换 cookie
+ * - changePassword 9 个 outcome（含 REVOKE_FAILED 的 503 + 审计落库）
  * - updateProfile 5 个 outcome + 成功
  * - logout revokeFailed fail-closed（不清 cookie）/ 成功（清 cookie + 会话收敛）
  * - getMe 用户消失 / 成功聚合
@@ -298,6 +298,7 @@ describe('changePassword outcome 矩阵', () => {
   test.each([
     ['ENC_INVALID', 400],
     ['MISSING', 400],
+    ['CONFIRM_MISMATCH', 400],
     ['WEAK', 400],
     ['USER_NOT_FOUND', 401],
     ['CURRENT_WRONG', 400],
@@ -308,6 +309,16 @@ describe('changePassword outcome 矩阵', () => {
     await invoke(controller.changePassword, makeReq(), res);
     expect(res.status).toHaveBeenCalledWith(expectedStatus);
     expect(AuditLog.recordSensitiveAction).not.toHaveBeenCalled();
+  });
+
+  // CONFIRM_MISMATCH 曾不在 switch 里：落到 default 后既写了成功审计、又回
+  // 「密码修改成功」，而口令其实一点没改（用户以为已改，旧口令仍有效）。
+  // 上面的表已挡住"不落审计/不返 200"，这里再点名错误码，防它被换成别的 400 码。
+  test('CONFIRM_MISMATCH 点名为 PASSWORD_CONFIRM_MISMATCH（不得复用通用 400）', async () => {
+    authService.changeUserPassword.mockResolvedValue({ outcome: 'CONFIRM_MISMATCH' });
+    const res = makeRes();
+    await invoke(controller.changePassword, makeReq(), res);
+    expect(res.body.errors.errorCode).toBe('PASSWORD_CONFIRM_MISMATCH');
   });
 
   test('REVOKE_FAILED：密码已改但吊销失败 → 503 且如实落审计（fail-safe 口径）', async () => {

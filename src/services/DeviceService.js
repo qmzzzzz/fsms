@@ -56,10 +56,20 @@ class DeviceService {
 
     if (search) {
       const escaped = escapeRegExp(search);
-      query.$or = [
-        { deviceName: new RegExp(escaped, 'i') },
-        { deviceCode: new RegExp(escaped, 'i') },
-      ];
+      const searchCondition = {
+        $or: [{ deviceName: new RegExp(escaped, 'i') }, { deviceCode: new RegExp(escaped, 'i') }],
+      };
+      // 设备的属主声明是数组（createdBy ∪ maintenanceRecord.operator，见
+      // constants/dataScopeFields.js），self/空部门范围下 applyDataScopeToQuery
+      // 已把 $or 用作数据范围条件。直接赋值 query.$or 会把范围条件整条替换掉，
+      // 等于「带 search 参数的列表接口不做数据范围过滤」——越权可见全组织设备。
+      // 与 rbac.js 处理同字段冲突的口径一致：用 $and 取交集。
+      if (query.$or) {
+        query.$and = [...(query.$and || []), { $or: query.$or }, searchCondition];
+        delete query.$or;
+      } else {
+        query.$or = searchCondition.$or;
+      }
     }
 
     if (cursor) {

@@ -139,11 +139,13 @@ class PermissionService {
       try {
         created.push(...(await Permission.insertMany(validDocs, { ordered: false })));
       } catch (err) {
-        if (
-          err?.name === 'BulkWriteError' &&
-          Array.isArray(err.writeErrors) &&
-          err.writeErrors.length > 0
-        ) {
+        // 判定用「错误形状」而非 name：驱动实际抛出的类名是 MongoBulkWriteError
+        // （node_modules/mongodb/lib/error.js 的 getter），原先写 'BulkWriteError'
+        // 永不匹配 → 真发生重名冲突时整批 500，"已插入保留、失败项转 skipped"
+        // 从未生效。mongoose 会把驱动侧 writeErrors 归一化到 err.writeErrors
+        // （model.js:3218-3220），并把未失败的文档挂到 err.insertedDocs（:3248），
+        // 因此这两个字段同时存在即"部分成功"，与类名无关，升级驱动也不会再失配。
+        if (Array.isArray(err?.writeErrors) && err.writeErrors.length > 0) {
           created.push(...(Array.isArray(err.insertedDocs) ? err.insertedDocs : []));
           for (const writeError of err.writeErrors) {
             const failed = validDocs[writeError.index] || {};

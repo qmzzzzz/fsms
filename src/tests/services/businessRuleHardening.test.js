@@ -340,6 +340,36 @@ describe('批次B 业务规则加固回归', () => {
       });
     });
 
+    // F-02 回归：设备属主是数组字段，self 范围把范围条件写进 query.$or，
+    // 而列表的 search 曾直接给 query.$or 赋值——范围条件被整条替换，
+    // 等于「只要带 search 就不做数据范围过滤」，可越权看见全组织设备。
+    test('列表带 search 时仍按 self 范围收敛（搜索不得覆盖数据范围）', async () => {
+      const token = `BRH${Date.now().toString(36)}`;
+      const me = new mongoose.Types.ObjectId();
+      const other = new mongoose.Types.ObjectId();
+      await makeDevice({ deviceName: `泵房烟感-我建的-${token}`, createdBy: me });
+      await makeDevice({ deviceName: `泵房烟感-他人建-${token}`, createdBy: other });
+      await makeDevice({
+        deviceName: `泵房烟感-我维护-${token}`,
+        createdBy: other,
+        maintenanceRecord: [{ operator: me, content: '季度维护' }],
+      });
+
+      const res = await DeviceService.getDevices({
+        page: 1,
+        limit: 50,
+        search: token,
+        dataScope: { type: 'self', userId: me },
+      });
+
+      // 修复前此处得到 3 条（含与我无关的那条）
+      expect(res.devices).toHaveLength(2);
+      expect(res.count).toBe(2);
+      expect(res.devices.some((d) => d.deviceName.includes('他人建'))).toBe(false);
+      // 数组属主的另一半必须仍然生效：我只维护、非我建档的设备仍可见
+      expect(res.devices.some((d) => d.deviceName.includes('我维护'))).toBe(true);
+    });
+
     test('四类资源的字段声明都存在且非空（新增调用方不会拿到 undefined 字段名）', () => {
       for (const key of ['device', 'alarm', 'inspection', 'user']) {
         const f = DATA_SCOPE_FIELDS[key];

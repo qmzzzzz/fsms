@@ -315,6 +315,11 @@ const changePassword = asyncHandler(async (req, res) => {
       return ApiResponse.codeError(res, 'AUTH_ENCRYPTED_CREDENTIAL_INVALID');
     case 'MISSING':
       return ApiResponse.codeError(res, 'PASSWORD_CURRENT_AND_NEW_REQUIRED');
+    case 'CONFIRM_MISMATCH':
+      // 服务端在解密后才比对确认口令（密文轨下明文只有解出来才知道），
+      // 因此该分支可经 HTTP 到达。缺此 case 会落到 default 并回「密码修改成功」，
+      // 而口令其实并未修改——用户以为已改，旧口令仍然有效。
+      return ApiResponse.codeError(res, 'PASSWORD_CONFIRM_MISMATCH');
     case 'WEAK':
       return ApiResponse.error(res, result.message, 400);
     case 'USER_NOT_FOUND':

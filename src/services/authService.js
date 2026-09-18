@@ -944,7 +944,7 @@ async function refreshSession(refreshTokenRaw, ctx) {
  * @param {string} userId
  * @param {object} body 原始请求体（含明文轨与密文轨字段）
  * @param {object} ctx { username } 供审计/日志使用
- * @returns {Promise<{outcome:'ENC_INVALID'|'MISSING'|'WEAK'|'USER_NOT_FOUND'|'CURRENT_WRONG'|'SAME_PASSWORD'|'REVOKE_FAILED'|'OK'}>}
+ * @returns {Promise<{outcome:'ENC_INVALID'|'MISSING'|'CONFIRM_MISMATCH'|'WEAK'|'USER_NOT_FOUND'|'CURRENT_WRONG'|'SAME_PASSWORD'|'REVOKE_FAILED'|'OK'}>}
  *   OK / REVOKE_FAILED 时附 { username }（REVOKE_FAILED 表示密码已改但会话吊销失败）
  */
 async function changeUserPassword(userId, body, ctx) {

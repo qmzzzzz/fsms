@@ -11,7 +11,7 @@
  *  - updatePermission：记录不存在 404、parent 不存在、MAX_DEPTH 提前终止 400
  *    （模型层造 32 节点库内环）
  *  - deletePermission：不存在 404、有子权限、被角色引用
- *  - batchCreate：空/非数组、BulkWriteError 转 skipped
+ *  - batchCreate：空/非数组、驱动级 MongoBulkWriteError 转 skipped
  *
  * userController：
  *  - getUsers：role 不存在 → 空分页
@@ -342,22 +342,48 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
     });
 
-    test('batchCreate：insertMany BulkWriteError → 已插入保留、失败项转 skipped', async () => {
-      const PermissionModel = require('../../models/Permission');
-      const spy = jest.spyOn(PermissionModel, 'insertMany').mockRejectedValue({
-        name: 'BulkWriteError',
-        writeErrors: [{ index: 0, errmsg: 'E11000 duplicate key' }],
-        insertedDocs: [],
+    test('batchCreate：驱动级真实重名错误 → 已插入保留、失败项转 skipped', async () => {
+      // 本用例原先注入的是 `{name:'BulkWriteError'}`，而驱动实际抛出的类名是
+      // MongoBulkWriteError（①里对真库造一次冲突、断言实际 name）。也就是说旧用例
+      // 在为一条「生产必然 500」的死路径发绿灯，任何人把服务侧的判断改成正确的
+      // 类名反而会让它变红。现改为：先从真库取得**驱动产生的错误对象**，再投给服务。
+      const dupCode = pcode('realbulk');
+      const dupDoc = (n) => ({
+        name: `upb_${stamp}_${n}`,
+        code: dupCode,
+        type: 'api',
+        module: 'system',
       });
-      const res = await sec.post('/api/permissions/batch', {
-        permissions: [
-          { name: `upb_${stamp}_bw`, code: pcode('bw'), type: 'api', module: 'system' },
-        ],
-      });
-      expect(res.status).toBe(200);
-      expect(res.body.data.created).toBe(0);
-      expect(res.body.data.skipped[0]).toMatchObject({ code: pcode('bw') });
-      spy.mockRestore();
+      let realError;
+      try {
+        await Permission.insertMany([dupDoc('a'), dupDoc('b')], { ordered: false });
+      } catch (e) {
+        realError = e;
+      }
+      expect(realError).toBeInstanceOf(Error);
+      expect(realError.name).toBe('MongoBulkWriteError');
+      expect(Array.isArray(realError.writeErrors)).toBe(true);
+      expect(realError.writeErrors).toHaveLength(1);
+      // ordered:false 下第一条已真落库，mongoose 把未失败文档挂在 insertedDocs
+      expect(realError.insertedDocs).toHaveLength(1);
+      await Permission.deleteMany({ code: dupCode });
+
+      const spy = jest.spyOn(Permission, 'insertMany').mockRejectedValue(realError);
+      try {
+        const res = await sec.post('/api/permissions/batch', {
+          permissions: [
+            { name: `upb_${stamp}_rb1`, code: pcode('rbone'), type: 'api', module: 'system' },
+            { name: `upb_${stamp}_rb2`, code: pcode('rbtwo'), type: 'api', module: 'system' },
+          ],
+        });
+        expect(res.status).toBe(200);
+        expect(res.body.data.created).toBe(1);
+        expect(res.body.data.skipped).toHaveLength(1);
+        // writeErrors[0].index 已由 mongoose 重映射回入参下标 → 第二条
+        expect(res.body.data.skipped[0].code).toBe(pcode('rbtwo'));
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 

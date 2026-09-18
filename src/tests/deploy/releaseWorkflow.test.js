@@ -83,10 +83,10 @@ describe('D-1 发布工作流：抽取逻辑与结构不变量', () => {
   test('工作流与参考实现采用同一分隔符（^## ）——否则两边行为会漂移', () => {
     // 工作流里的 awk 与 grep 都必须用 `## ` 作为边界判据
     expect(src).toMatch(/\^## /); // grep -E "^## \[$version\]"
-    expect(src).toContain("/^## /"); // awk '/^## / { exit }'
+    expect(src).toContain('/^## /'); // awk '/^## / { exit }'
     // 不得用 `# ` 或 `### ` 作为章节结束判据
-    expect(src).not.toContain("/^# /");
-    expect(src).not.toContain("/^### /");
+    expect(src).not.toContain('/^# /');
+    expect(src).not.toContain('/^### /');
   });
 
   test('fail-closed：抽不到或为空都 exit 1（不静默发空 Release）', () => {
@@ -135,7 +135,7 @@ describe('D-1 发布工作流：抽取逻辑与结构不变量', () => {
       const script = [
         'set -euo pipefail',
         'version=2.0.0',
-        `start="$(grep -n -m1 -E \"^## \\\\[\${version}\\\\]\" '${changelog}' | cut -d: -f1 || true)"`,
+        `start="$(grep -n -m1 -E "^## \\\\[\${version}\\\\]" '${changelog}' | cut -d: -f1 || true)"`,
         'if [[ -z "$start" ]]; then echo NOTFOUND; exit 1; fi',
         `tail -n "+$((start + 1))" '${changelog}' | awk 'NR > 1 && /^## / { exit } NR > 1 { print }' > '${out}'`,
       ].join('\n');

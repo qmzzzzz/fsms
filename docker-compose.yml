@@ -31,6 +31,14 @@ services:
       - NODE_OPTIONS=--max-old-space-size=768
       - TRUST_PROXY_HOPS=${TRUST_PROXY_HOPS:-1}
       - CORS_ORIGIN=${CORS_ORIGIN:?CORS_ORIGIN 必须显式配置（如 https://admin.example.com，多个用逗号分隔）}
+      # Host 头白名单（生产必填，见 src/config/validate.js 的 collectAllowedHostsErrors）。
+      # 本文件此前从未提供这一项，而 NODE_ENV=production 下缺失即**启动失败**——
+      # 也就是照这份 compose 起的服务永远进不到监听阶段（部署链断裂）。
+      # 与 CORS_ORIGIN 同用 `:?` 强制显式声明：给默认值等于把真实域名漏在门外。
+      # 值为逗号分隔的 host（可带端口，如 fsms.example.com,api.example.com:443）；
+      # 健康检查 /health 已在 protocolCompliance 的 skipPaths 中豁免，
+      # 无需把 localhost 写进来。
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:?ALLOWED_HOSTS 必须显式配置（如 fsms.example.com，多个用逗号分隔）}
       # 审计留存天数（合规区间 90..3650，留空取默认 180）
       - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-180}
       # 指向挂载后的 secret 文件路径，本身不含敏感值

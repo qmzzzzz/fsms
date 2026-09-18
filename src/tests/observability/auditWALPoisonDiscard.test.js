@@ -37,6 +37,7 @@ process.env.AUDIT_WAL_MAX_BYTES = '100000'; // 足够大，本套件不触发 WA
 process.env.AUDIT_WAL_STAT_INTERVAL = '1000'; // 不因 append 次数触发上限检查
 
 const auditBuffer = require('../../services/auditBuffer');
+const wal = require('../../services/auditBufferWal');
 const AuditLog = require('../../models/AuditLog');
 
 /** 轮询等待真实完成条件（替代固定 sleep） */
@@ -70,7 +71,10 @@ describe('P1-24 毒批丢弃的 WAL 标记与重启重放', () => {
     }
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    // 先排空 WAL 串行链再删文件：上一用例遗留的在途 append/裁剪会在 unlink
+    // 之后把文件重新创建出来，导致本用例读到上一用例的行（随机序下必现）
+    await wal.drain();
     auditBuffer.__resetForTest();
     auditBuffer.stop();
     for (const f of [auditBuffer.getWalPath(), auditBuffer.getWalPath() + '.discarded']) {
@@ -141,9 +145,12 @@ describe('P1-24 毒批丢弃的 WAL 标记与重启重放', () => {
         await waitFor(() => auditBuffer.getStats().droppedCount > 0);
       }
     }
-    // 等毒批归档链（walChain 上的 filterWalLinesBySeqs）结算
+    // 毒批处理是两步：① 追加归档 ② 原子改写主 WAL 移除该行。
+    // 「看到归档」不等于「主 WAL 已改写」（②排在同一条 walChain 上），
+    // 因此这里必须等链排空，后续对主 WAL 的断言才是确定性的。
     const archived = await waitFor(() => readDiscarded().includes('poison_poisoned'));
     expect(archived).toBe(true);
+    await wal.drain();
   }
 
   test('毒批丢弃 → 归档留痕 + 主 WAL 移除 + 重启重放不再处理该批', async () => {

@@ -176,6 +176,33 @@ const createUser = asyncHandler(async (req, res) => {
     if (targetMaxLevel > operatorMaxLevel) {
       return ApiResponse.codeError(res, 'ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN');
     }
+    // 层级闸只拦「高于自己」的角色，同级/低级角色完全可能携带操作者本人
+    // 没有的权限（例：只持 user:* 的账号管理员建号时挂上一个含 security:config
+    // 的同级角色）。assignRoles 一侧已有 P2-8 权限子集校验，建号一侧原先缺失，
+    // 同一件事两个入口口径不一致 = 绕道提权。此处与 assignRoles 完全同口径。
+    const operatorPermCodes = await userService.getPermissions(req.user.userId);
+    if (!operatorPermCodes.includes('*:*')) {
+      const grantRoleDocs = await userService.findRolePermissionDocs(roles);
+      const granting = new Set();
+      for (const r of grantRoleDocs) {
+        for (const p of r.permissions || []) {
+          if (p?.code) granting.add(p.code);
+        }
+      }
+      const lacking = [...granting].filter(
+        (code) => !matchesPermissionCodes(operatorPermCodes, code)
+      );
+      if (lacking.length > 0) {
+        logger.warn(
+          `建号越权授予权限被拒：operator=${req.user.username || req.user.userId} ` +
+            `缺少权限=${lacking.join(',')}`
+        );
+        return ApiResponse.codeError(res, 'PERMISSION_GRANT_FORBIDDEN', {
+          message: `无权授予以下权限：${lacking.join('、')}`,
+          params: { permissions: lacking.join('、') },
+        });
+      }
+    }
     validatedRoles = roles;
   }
 
