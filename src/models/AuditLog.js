@@ -48,6 +48,31 @@ const auditLogSchema = new mongoose.Schema(
     targetUsername: {
       type: String,
     },
+
+    // P1-12：举报目标与敏感数据类型的显式声明。此前 schema 为 strict:true 且未声明
+    // 这四个字段，securityController 写入的 targetType/targetId/dataType/description
+    // 被静默丢弃——举报记录无法定位被举报对象、敏感查看记录无法回答「看了哪个字段」。
+    // 类型与写入方对齐：
+    //  - targetType: securityRoutes 校验为 user|device|alarm|system 之一，长度受限
+    //  - targetId:   请求体字符串（用户可传设备/报警 ID），不设 ObjectId 约束
+    //  - dataType:   securityRoutes 校验为 phone|email 之一
+    //  - description: securityRoutes 限制 <=500 字符
+    targetType: {
+      type: String,
+      maxlength: [20, '举报目标类型最长 20 个字符'],
+    },
+    targetId: {
+      type: String,
+      maxlength: [100, '举报目标 ID 最长 100 个字符'],
+    },
+    dataType: {
+      type: String,
+      maxlength: [20, '敏感数据类型最长 20 个字符'],
+    },
+    description: {
+      type: String,
+      maxlength: [500, '举报描述最长 500 个字符'],
+    },
     reason: {
       type: String,
     },
@@ -210,7 +235,13 @@ const { setAppendOnlyEnforced } = applyHooks(auditLogSchema, logger);
 // 导出模型
 const AuditLogModel = mongoose.model('AuditLog', auditLogSchema);
 
-// 暴露测试辅助（生产代码不使用）
-AuditLogModel._setAppendOnlyEnforced = setAppendOnlyEnforced;
+// P1-32：append-only 测试开关**仅测试环境导出**。原实现为无条件导出，
+// 生产代码只要拿到 AuditLog 模型即可在运行期关闭防篡改护栏（全仓无调用点，
+// 但这是「随时可开的门」）。注意：既有测试 AuditLogBehavior.test.js 的
+// afterAll 清理路径依赖该符号存在，故不能无条件删除；改为按环境条件挂载，
+// 生产环境 AuditLog._setAppendOnlyEnforced 为 undefined。
+if (process.env.NODE_ENV === 'test') {
+  AuditLogModel._setAppendOnlyEnforced = setAppendOnlyEnforced;
+}
 
 module.exports = AuditLogModel;

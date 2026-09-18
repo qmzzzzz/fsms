@@ -1,0 +1,46 @@
+# 供应链门禁（PR 阶段）：依赖变更在合入之前先过一遍已知漏洞比对。
+#
+# 为什么单独建一个工作流：ci.yml 的 security-audit 跑的是 npm audit（本地审计源，
+# 且只看本次 PR 自身分支）；dependency-review 走 GitHub 官方 dependency graph
+# 的 diff API，直接回答「这个 PR 新增/升级的依赖版本在 GitHub Advisory 数据库里
+# 有没有已知漏洞」——两者口径不同，不能互相替代。
+name: 'Dependency Review'
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+# 声明 permissions 会整体覆盖仓库默认令牌作用域，未列出的作用域一律变成 none，
+# 因此这里显式保留本流程真正用到的两项：
+#   contents: read       → actions/checkout 读取仓库内容
+#   pull-requests: write → comment-summary-in-pr 回写 PR 评论所需
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # 用 v5 而不是 v4：v4 声明的运行时是 node20，node20 正在退场
+      # （actions/runner Constants.cs: Node20RemovalDate = September 23rd, 2026）；
+      # v5.0.0 把运行时升级到 node24（upstream release 5.0.0 原文：
+      # "updates the runtime to node24"）。
+      # 说明：声明 node20 的 action 目前仍能跑——runner 自 2026-06-16 起默认
+      # 改用 node24 执行，会把 node20 请求自动改判为 node24（runner
+      # HandlerFactory / NodeUtil.DetermineActionsNodeVersion），所以 v4 今天
+      # 并未失效。选 v5 是为了不依赖这条自动改判路径，并与本仓库其余 action
+      # （checkout@v5 / setup-node@v5 / gitleaks-action@v3，实测均为 node24）一致。
+      #
+      # 另注：本 action 的 v4 / v5 是**分支**不是 tag（tag 只到 v4.9.0 / v5.0.0，
+      # 实测 git/ref/tags/v4 返回 404、branches/v4 存在），上游约定即按分支引用。
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v5
+        with:
+          # high / critical 直接判失败，阻断合入
+          fail-on-severity: high
+          # 仅在失败时把摘要评论回写到 PR（成功时不评论，避免每个 PR 都刷屏）
+          comment-summary-in-pr: on-failure

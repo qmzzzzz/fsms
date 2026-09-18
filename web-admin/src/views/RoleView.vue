@@ -7,6 +7,7 @@
           <div class="panel-header">
             <span class="panel-title">{{ $t('role.title') }}</span>
             <button
+              v-if="hasPerm('role:create')"
               type="button"
               class="glass-btn glass-btn--primary glass-btn--sm"
               @click="handleAdd"
@@ -20,6 +21,7 @@
             :roles="roles"
             :current-role="currentRole"
             :loading="loadingRoleList"
+            :can-delete="hasPerm('role:delete')"
             @select="handleCurrentChange"
             @delete="handleDelete"
           />
@@ -51,6 +53,7 @@
                 {{ $t('common.reset') }}
               </button>
               <button
+                v-if="hasPerm('role:assign')"
                 type="button"
                 class="glass-btn glass-btn--primary glass-btn--sm"
                 :disabled="savingPermissions"
@@ -149,9 +152,11 @@ import { useLatestRequest } from '@/composables/useLatestRequest'
 import RoleFormDialog from '@/components/RoleFormDialog.vue'
 // D-2：角色列表与权限模块卡片拆为子组件
 import RoleListPanel from '@/components/RoleListPanel.vue'
+import { usePermission } from '@/composables/usePermission'
 import PermissionModuleCard from '@/components/PermissionModuleCard.vue'
 
 const { t } = useI18n()
+const { hasPerm } = usePermission()
 
 const roles = ref([])
 const currentRole = ref(null)

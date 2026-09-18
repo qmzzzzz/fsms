@@ -19,6 +19,7 @@ const {
 const { buildAuditQuery } = require('../utils/auditQuery');
 const { queryAuditLogs, applyAuditDataScope } = require('../services/auditQueryService');
 const { auditPath } = require('../utils/auditMeta');
+const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
 
 const exportAuditLogs = asyncHandler(async (req, res) => {
   try {
@@ -118,7 +119,7 @@ const verifyAuditChainIntegrity = asyncHandler(async (req, res) => {
     userAgent: req.get('user-agent'),
     success: true,
     riskLevel: report.intact ? 'low' : 'high',
-  }).catch(() => {});
+  }).catch(onAuditWriteFailure('audit_chain_verify', req));
 
   return ApiResponse.success(res, report, report.intact ? '审计链完整' : '审计链存在断裂');
 });

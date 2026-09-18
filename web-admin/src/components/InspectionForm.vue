@@ -214,8 +214,8 @@
         v-if="!disabled"
         type="button"
         class="glass-btn glass-btn--primary"
-        :class="{ 'is-loading': loading }"
-        :disabled="loading"
+        :class="{ 'is-loading': loading || submitting }"
+        :disabled="loading || submitting"
         @click="handleSubmit"
       >
         {{ isEdit ? $t('common.save') : $t('common.add') }}
@@ -229,6 +229,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api } from '@/utils/api'
+import { toLocalWallClock } from '@/utils/datetime'
 
 const { t } = useI18n()
 
@@ -261,6 +262,9 @@ const title = computed(() =>
 const isEdit = computed(() => !!props.editData)
 
 const loading = ref(false)
+// 提交重入锁：与 loading 分开，同步置位（loading 要等异步校验通过才置位，
+// 连点时来不及拦住后面的点击——实测同一 tick 三次点击发出 3 个 PUT）
+const submitting = ref(false)
 const deviceLoading = ref(false)
 const userLoading = ref(false)
 const deviceOptions = ref([])
@@ -299,7 +303,7 @@ const form = reactive({
   remark: '',
 })
 
-const rules = {
+const rules = computed(() => ({
   title: [
     { required: true, message: t('inspection.titlePlaceholder'), trigger: 'blur' },
     { min: 2, max: 200, message: t('inspection.titleLengthMsg'), trigger: 'blur' },
@@ -314,7 +318,7 @@ const rules = {
     { validator: validateEndTime, trigger: 'change' },
   ],
   checkItems: [{ required: true, message: t('inspection.checkItemsRequiredMsg'), trigger: 'blur' }],
-}
+}))
 
 // 手工解析 'YYYY-MM-DD HH:mm:ss' 为本地时间：Safari 对该格式 new Date 会返回 Invalid Date
 function parseLocalDateTime(value) {
@@ -398,8 +402,10 @@ const initForm = () => {
       inspectionType: props.editData.inspectionType,
       devices: props.editData.devices?.map((d) => d._id || d) || [],
       assignedTo: props.editData.assignedTo?.map((u) => u._id || u) || [],
-      planStartTime: props.editData.planStartTime,
-      planEndTime: props.editData.planEndTime,
+      // 后端下发 ISO（UTC）；picker 的 value-format 是本地格式串，直接塞会按字面小时
+      // 显示（东八区差 8 小时），保存时再转回 ISO 就把计划时间整体平移（实测复现）
+      planStartTime: toLocalWallClock(props.editData.planStartTime),
+      planEndTime: toLocalWallClock(props.editData.planEndTime),
       remark: props.editData.remark || '',
     })
 
@@ -436,6 +442,7 @@ const handleSubmit = async () => {
   if (!formRef.value) return
 
   // 检查项逐行手动校验：定位到第几项缺名称/缺标准，阻止提交
+  // （同步循环，且在拿重入锁之前——早退不能把锁留下）
   for (let i = 0; i < form.checkItems.length; i++) {
     const item = form.checkItems[i]
     if (!item.name || !String(item.name).trim()) {
@@ -448,8 +455,14 @@ const handleSubmit = async () => {
     }
   }
 
-  await formRef.value.validate(async (valid) => {
-    if (valid) {
+  // 重入防护：必须同步置位。submit 按钮的 :disabled="loading" 要等异步校验
+  // 通过后才生效，连点时来不及拦住后面的点击（实测同一 tick 三次点击发出 3 个 PUT）
+  if (submitting.value) return
+  submitting.value = true
+
+  try {
+    await formRef.value.validate(async (valid) => {
+      if (!valid) return
       loading.value = true
       try {
         // 构建提交数据（时间串转 ISO：value-format 的本地时间串不含时区，
@@ -494,8 +507,11 @@ const handleSubmit = async () => {
       } finally {
         loading.value = false
       }
-    }
-  })
+    })
+  } finally {
+    // 校验不通过 / 请求失败 / 成功，都要解锁：否则按钮永久卡死或被后续点击绕过
+    submitting.value = false
+  }
 }
 
 // 关闭对话框

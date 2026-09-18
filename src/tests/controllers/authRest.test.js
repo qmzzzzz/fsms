@@ -110,6 +110,8 @@ describe('认证剩余分支（批次 B2）', () => {
   test('refresh 全失败矩阵：缺失/坏签名/类型不符/tokenVersion 不符/用户删除', async () => {
     const missing = await request(app).post('/api/auth/refresh').send({});
     expect(missing.status).toBe(400);
+    // 五个失败原因各点名一个码：只断 401 时，把「签名错误」误判成「会话过期」也不会红
+    expect(missing.body.errors.errorCode).toBe('REFRESH_TOKEN_MISSING');
 
     const badSig = await request(app)
       .post('/api/auth/refresh')
@@ -120,11 +122,13 @@ describe('认证剩余分支（批次 B2）', () => {
         ),
       });
     expect(badSig.status).toBe(401);
+    expect(badSig.body.errors.errorCode).toBe('REFRESH_TOKEN_INVALID');
 
     const wrongType = await request(app)
       .post('/api/auth/refresh')
       .send({ refreshToken: superToken });
     expect(wrongType.status).toBe(401);
+    expect(wrongType.body.errors.errorCode).toBe('REFRESH_TOKEN_INVALID');
 
     const wrongVersion = await request(app)
       .post('/api/auth/refresh')
@@ -136,6 +140,8 @@ describe('认证剩余分支（批次 B2）', () => {
         ),
       });
     expect(wrongVersion.status).toBe(401);
+    // tokenVersion 不符走的是会话失效语义（改密/全量吊销），与签名错误不同码
+    expect(wrongVersion.body.errors.errorCode).toBe('SESSION_EXPIRED');
 
     const ghostId = new mongoose.Types.ObjectId().toString();
     const ghostUser = await request(app)
@@ -148,22 +154,18 @@ describe('认证剩余分支（批次 B2）', () => {
         ),
       });
     expect(ghostUser.status).toBe(401);
+    expect(ghostUser.body.errors.errorCode).toBe('REFRESH_TOKEN_INVALID');
   });
 
   test('refresh 轮换成功 + 旧令牌重放检测触发 401', async () => {
     const loginRes = await login(superUsername, PASSWORD);
     expect(loginRes.status).toBe(200);
-    console.error('RAW_SET_COOKIE', JSON.stringify(loginRes.headers['set-cookie']));
+    // 调试输出已移除（P1-30 关联清理）：原实现 console.error 打印完整 Set-Cookie
+    // 与 refresh 令牌片段，会把可复用的凭据写进 CI 日志。
     const oldRefresh = refreshOf(loginRes);
-    console.error(
-      'PARSED_REFRESH',
-      JSON.stringify(oldRefresh && oldRefresh.slice(-20)),
-      'len',
-      oldRefresh && oldRefresh.length
-    );
+    expect(oldRefresh).toBeTruthy();
 
     const rotated = await request(app).post('/api/auth/refresh').send({ refreshToken: oldRefresh });
-    console.error('ROTATE', rotated.status, JSON.stringify(rotated.body).slice(0, 200));
     expect(rotated.status).toBe(200);
 
     // 重放已被轮换消费的旧 refresh → 重放检测分支 → 401
@@ -211,6 +213,8 @@ describe('认证剩余分支（批次 B2）', () => {
       .set('Authorization', `Bearer ${superToken}`)
       .send({ mfaCode: '123456' });
     expect(noEnroll.status).toBe(400);
+    // 三个 400 各点名一个码：未 enroll / 码格式错 / 已开启重复 enroll 是三种不同契约
+    expect(noEnroll.body.errors.errorCode).toBe('MFA_SECRET_MISSING');
 
     const enroll = await request(app)
       .post('/api/auth/mfa/enroll')
@@ -221,6 +225,7 @@ describe('认证剩余分支（批次 B2）', () => {
       .set('Authorization', `Bearer ${superToken}`)
       .send({ mfaCode: 'abcdef' });
     expect(badFormat.status).toBe(400);
+    expect(badFormat.body.errors.errorCode).toBe('MFA_CODE_FORMAT');
 
     const { hotp, base32Decode } = require('../../utils/totp');
     const secret = enroll.body.data.secret;
@@ -235,6 +240,7 @@ describe('认证剩余分支（批次 B2）', () => {
       .post('/api/auth/mfa/enroll')
       .set('Authorization', `Bearer ${superToken}`);
     expect(reEnroll.status).toBe(400);
+    expect(reEnroll.body.errors.errorCode).toBe('MFA_ALREADY_ENABLED_NO_REPEAT');
 
     // 清理 MFA 状态
     await User.findByIdAndUpdate(superUserId, {

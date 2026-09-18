@@ -187,6 +187,10 @@ describe('auth 中间件分支补齐', () => {
       }
       const res = await getMe(users.evict.token);
       expect(res.status).toBe(200);
+      // 「真实用户认证不受影响」的判据是拿到的是该用户自己的资料：
+      // 淘汰若误伤本用户，缓存 miss 后仍可能 200（空 body 或他人资料）
+      expect(res.body.data.user.username).toBe(`${stamp}evict`);
+      expect(String(res.body.data.user.id)).toBe(String(users.evict._id));
     });
 
     test('权限缓存联动失效失败仅告警，不阻断主流程', () => {
@@ -243,7 +247,6 @@ describe('auth 中间件分支补齐', () => {
   describe('跨实例失效广播接收器（无 Redis 环境下直接驱动回调）', () => {
     test('仅对匹配前缀的字符串键执行本地失效，其余忽略', () => {
       let captured = null;
-      jest.resetModules();
       jest.doMock('../../services/sharedCache', () => {
         const actual = jest.requireActual('../../services/sharedCache');
         return {
@@ -254,12 +257,18 @@ describe('auth 中间件分支补齐', () => {
           },
         };
       });
-      // 新鲜加载 auth 中间件：注册回调到我们捕获的桩上
+      // 新鲜加载 auth 中间件：注册回调到我们捕获的桩上。
+      // 必须用 isolateModules 而非 jest.resetModules()：resetModules 会清空**全局**
+      // 模块注册表，此后本文件所有 require（含已加载模块内部的惰性 require，如
+      // auth.js 的 require('../models/User')）都会重新执行，拿到绑定到未连接的新
+      // mongoose 实例（readyState=0）的副本——随机顺序下排在后面的用例（容量保护、
+      // 权限缓存联动失效）会因 users.findOne() buffering timed out 转 500，或因为
+      // 拿到另一份模块级 userCache/userPermissionService 而观察不到自己的副作用。
+      // 隔离注册表只让本次 require 用桩，全局注册表与已连接连接保持原样。
       jest.isolateModules(() => {
         require('../../middleware/auth');
       });
       jest.dontMock('../../services/sharedCache');
-      jest.resetModules();
 
       expect(typeof captured).toBe('function');
       // 匹配前缀 → 本地失效（无异常即通过）；不匹配键与非字符串键一律忽略

@@ -35,8 +35,14 @@ defineProps({
 
 const { t, locale } = useI18n()
 
+// ===== 系统实时时钟 =====
+// now 必须先于 greeting 声明：问候语依赖它——时钟每秒更新 now，
+// 跨时段（如上午→下午）后问候语随之刷新，而不是固守首次渲染时的小时。
+const now = ref(new Date())
+let clockTimer = null
+
 const greeting = computed(() => {
-  const h = new Date().getHours()
+  const h = now.value.getHours()
   if (h < 6) return t('dashboard.greetingLateNight')
   if (h < 12) return t('dashboard.greetingMorning')
   if (h < 14) return t('dashboard.greetingNoon')
@@ -44,10 +50,10 @@ const greeting = computed(() => {
   return t('dashboard.greetingEvening')
 })
 
-// ===== 系统实时时钟 =====
-const now = ref(new Date())
-let clockTimer = null
-
+// 注意：这里**刻意**使用 locale 感知格式（与 utils/datetime 的定长口径不同）。
+// 欢迎条的日期/时间是人读的自然语言展示（如「2026年9月18日星期五」/
+// 「Friday, September 18, 2026」），随界面语言本地化才是正确行为；
+// 数据表格里的时间列则必须定长（便于纵向比对、不随语言漂移），两者口径不同。
 const currentDate = computed(() =>
   now.value.toLocaleDateString(locale.value, {
     year: 'numeric',

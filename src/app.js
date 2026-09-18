@@ -25,6 +25,10 @@ const {
   checkIPBlacklist,
   authenticate,
   checkPermission,
+  // L-21：以下四个原为独立 require（两套入口），现统一从 ./middleware 取用
+  applyObjectIdParams,
+  mountStaticFrontend,
+  metricsAuth,
 } = middleware;
 const {
   initSentry,
@@ -33,7 +37,6 @@ const {
   sentryErrorHandler,
 } = require('./middleware/sentry');
 const requestId = require('./middleware/requestId');
-const { applyObjectIdParams } = require('./middleware/validateObjectId');
 const { redactUrlQuery } = require('./utils/helpers');
 const {
   metricsMiddleware,
@@ -41,11 +44,9 @@ const {
   getSnapshot,
   METRICS_ENABLED,
 } = require('./utils/metrics');
-const { metricsAuth } = require('./middleware/metricsAuth');
 const ApiResponse = require('./utils/apiResponse');
 const { checkMongoReady } = require('./utils/healthChecks');
 const swagger = require('./config/swagger');
-const { mountStaticFrontend } = require('./middleware/staticFrontend');
 
 // 导入路由
 const {
@@ -80,17 +81,33 @@ function createApp() {
   // req.ip 恒为代理 IP，全站共享一个限流桶、审计 IP 全失真，且无任何线索。
   // 生产环境已由 config/validate.js 升级为启动致命错误；此处对所有环境补运行时告警，
   // 保证 staging/dev 的错配同样可被发现。
+  // 过大值（本轮复审补漏）：生产环境已由 config/validate.js 的 MAX_TRUST_PROXY_HOPS=5
+  // 拦下，但该校验在 validateConfig() 开头即对非 production 早退——staging/dev
+  // 设成 999999 会被原样交给 Express。实测后果：hops 足够大时 Express 会信任
+  // XFF 链中更靠前的元素，客户端自行伪造 X-Forwarded-For 即可完全控制 req.ip
+  // （本地复现：设 999999 后请求 /probe，req.ip 直接取 XFF 首段），
+  // 等于击穿 IP 限流、IP 黑名单与审计 IP 溯源。此处对所有环境统一夹取上限，
+  // 与 config/validate.js 共用同一语义（上限 5）。
   const rawTrustProxyHops = process.env.TRUST_PROXY_HOPS;
-  const trustProxyHops = parseInt(rawTrustProxyHops, 10);
+  const parsedTrustProxyHops = parseInt(rawTrustProxyHops, 10);
+  const MAX_TRUST_PROXY_HOPS = 5;
   if (
     rawTrustProxyHops !== undefined &&
     String(rawTrustProxyHops).trim() !== '' &&
-    !(Number.isFinite(trustProxyHops) && trustProxyHops > 0)
+    !(Number.isFinite(parsedTrustProxyHops) && parsedTrustProxyHops > 0)
   ) {
     logger.warn(
       `TRUST_PROXY_HOPS 取值非法（${rawTrustProxyHops}），已退化为「不信任代理头」：` +
         '若本服务位于反向代理之后，req.ip 将恒为代理 IP，导致限流/封禁/审计 IP 全部失真'
     );
+  }
+  let trustProxyHops = parsedTrustProxyHops;
+  if (Number.isFinite(trustProxyHops) && trustProxyHops > MAX_TRUST_PROXY_HOPS) {
+    logger.warn(
+      `TRUST_PROXY_HOPS 超上限（${trustProxyHops} > ${MAX_TRUST_PROXY_HOPS}），已夹取到上限：` +
+        '信任跳数过大时客户端可伪造 X-Forwarded-For 轮换 IP，击穿 IP 限流/黑名单/审计溯源'
+    );
+    trustProxyHops = MAX_TRUST_PROXY_HOPS;
   }
   if (Number.isFinite(trustProxyHops) && trustProxyHops > 0) {
     app.set('trust proxy', trustProxyHops);
@@ -336,7 +353,10 @@ function createApp() {
   app.use((req, res) => {
     res.status(404).json({
       success: false,
-      message: `接口不存在：${req.method} ${req.originalUrl}`,
+      // L-03：原样回显 originalUrl 会把查询串一并带出（含 ?token= 之类），
+      // 而前端错误上报链路会采集响应体。复用 morgan 同一套 redactUrlQuery
+      // 打码，与 :204 的口径保持一致。
+      message: `接口不存在：${req.method} ${redactUrlQuery(req.originalUrl || req.url)}`,
     });
   });
 

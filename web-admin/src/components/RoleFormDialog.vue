@@ -48,6 +48,7 @@
         {{ $t('common.cancel') }}
       </button>
       <button
+        v-if="hasPerm('role:create')"
         type="button"
         class="glass-btn glass-btn--primary"
         :class="{ 'is-loading': submitting }"
@@ -65,10 +66,11 @@
  * 新增角色对话框（自 RoleView 拆出）
  * 提交成功后 emit('created', newRole)，列表刷新与选中新角色由父组件处理。
  */
-import { ref, reactive } from 'vue'
+import { computed, ref, reactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api } from '@/utils/api'
+import { usePermission } from '@/composables/usePermission'
 
 defineProps({
   visible: { type: Boolean, default: false },
@@ -77,6 +79,7 @@ defineProps({
 const emit = defineEmits(['update:visible', 'created'])
 
 const { t } = useI18n()
+const { hasPerm } = usePermission()
 const formRef = ref(null)
 const submitting = ref(false)
 
@@ -111,7 +114,7 @@ const onCodeInput = (val) => {
     .replace(/[^A-Z_]/g, '')
 }
 
-const rules = {
+const rules = computed(() => ({
   name: [
     // P3-44：原先误用 validation.username* 文案——角色名称被提示成
     // 「请输入用户名」「用户名长度应为 3-30 个字符」，而这里的实际约束是 1-50。
@@ -124,7 +127,7 @@ const rules = {
     { min: 1, max: 50, message: t('validation.roleCodeLen'), trigger: 'blur' },
     { pattern: ROLE_CODE_PATTERN, message: t('validation.roleCodePattern'), trigger: 'blur' },
   ],
-}
+}))
 
 const resetForm = () => {
   form.name = ''
@@ -135,25 +138,33 @@ const resetForm = () => {
 
 const submit = async () => {
   if (!formRef.value) return
-  await formRef.value.validate(async (valid) => {
-    if (!valid) return
-    submitting.value = true
-    try {
-      const res = await api.roles.create({
-        name: form.name,
-        code: form.code,
-        description: form.description,
-      })
-      ElMessage.success(t('messages.createSuccess'))
-      emit('update:visible', false)
-      resetForm()
-      const newRole = res?.data?.data
-      if (newRole) emit('created', newRole)
-    } catch (_) {
-      // 错误已在拦截器处理
-    } finally {
-      submitting.value = false
-    }
-  })
+  // 重入防护必须同步置位：el-form 的 validate(callback) 是异步的，按钮的
+  // :disabled 要等下一帧才生效——同一 tick 的第二次点击、或长按回车的自动
+  // 重复会穿透，重复调用 POST /roles（探针实测：修复前两次点击发出 2 个请求，
+  // 用户会先看到一次「创建成功」再连吃错误提示）。
+  if (submitting.value) return
+  submitting.value = true
+  try {
+    await formRef.value.validate(async (valid) => {
+      if (!valid) return
+      try {
+        const res = await api.roles.create({
+          name: form.name,
+          code: form.code,
+          description: form.description,
+        })
+        ElMessage.success(t('messages.createSuccess'))
+        emit('update:visible', false)
+        resetForm()
+        const newRole = res?.data?.data
+        if (newRole) emit('created', newRole)
+      } catch (_) {
+        // 错误已在拦截器处理
+      }
+    })
+  } finally {
+    // 覆盖校验未通过（callback 未被调用）与校验链抛错两条路径，确保解锁
+    submitting.value = false
+  }
 }
 </script>

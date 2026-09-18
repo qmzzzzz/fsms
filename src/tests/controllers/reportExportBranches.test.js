@@ -1,21 +1,30 @@
 /**
- * reportController.exportReport 分支补齐
+ * reportController.exportReport / 报表统计接口 分支补齐
  *
- * 依据全量覆盖率的未覆盖分支行号（exportReport handler）：
- *  - L851-853：format !== 'xlsx' 提前拒绝（此前仅测过 type 非法）
- *  - L856-858：日期参数非法 400（Invalid Date 会让查询在 DB 层抛错）
- *  - L892-898：audit 分支导出枚举白名单校验失败 400（P3-13 补的 level 维度）
- *  - L914-917：dataScope.type === 'none' → 强制空集，导出仅含表头的文件
+ * 【行号说明】本文件早期版本用 `L<行号>` 标注被测分支。2026-09-16 第二轮审计把
+ * 报表导出组件从 reportController 抽到 services/reportExportService.js 与
+ * services/reportWorkbookService.js（控制器由 884 行降到 253 行），所有行号整体漂移，
+ * 标注全部失实。按「注释必须与实现同步」的要求，现改为语义描述、不再写行号——
+ * 行号是易漂移的脆弱耦合，函数名与行为描述才是稳定锚点。
+ *
+ * 覆盖分支：
+ *  - exportReport：format !== 'xlsx' 提前拒绝（此前仅测过 type 非法）
+ *  - exportReport：日期参数非法 400（Invalid Date 会让查询在 DB 层抛错）
+ *  - exportReport：audit 分支导出枚举白名单校验失败 400（P3-13 补的 level 维度）
+ *  - exportReport：dataScope.type === 'none' → 强制空集，导出仅含表头的文件
  *  - 路由层：持认证但缺 report:export 的业务类型导出 → 403
- *  - getDashboardStats L111：dataScope=none → 全零空统计
+ *  - getDashboardStats：dataScope=none → 全零空统计
  *  - getDeviceReport/getAlarmReport/getInspectionReport 的日期分支：
- *    非法日期 400（L255/L324/L411）与日期窗口并入聚合（L268/L330/L425/L450）
- *  - EXPORT_ROW_TRANSFORMS 行级 fallback（L620-690）：需真实导出行驱动，
- *    见 beforeAll 种子注释
- *  - buildExportQuery audit 分支参数（L733-768）：username/action/category/
- *    riskLevel/success/ip（$in 双形态）/userId/level 三档派生
- *  - streamExportRows populate 分批路径（L798-818）：205 行报警跨两个批次
- *  - dashboardCache TTL 定时清理（L49-54）：isolateModules + 假定时器
+ *    非法日期 400 与「日期窗口并入聚合」（两条互为对照，见下）
+ *  - EXPORT_ROW_TRANSFORMS 行级 fallback：需真实导出行驱动，见 beforeAll 种子注释
+ *  - buildExportQuery 的 audit 分支参数：username/action/category/riskLevel/
+ *    success/ip（$in 双形态）/userId/level 三档派生
+ *  - streamExportRows 的 populate 分批回填（BATCH_SIZE=200）：205 行跨两个批次
+ *  - dashboardCache TTL 定时清理：isolateModules + 假定时器
+ *
+ * 【断言口径】「窗口/筛选/分批」这类用例必须做内容级断言：
+ * 一个把筛选器整个删掉的实现，返回的仍是合法的 200 + spreadsheetml 文件。
+ * 只断状态码的用例无法证伪，等于没测（详见各用例内的变异验证记录）。
  *
  * 集成风格：supertest + createApp + JWT 直签（对齐 securityDeep.test.js）。
  * none 分支经 partial mock rbac.getDataScope 注入（路由层的 checkPermission
@@ -43,6 +52,34 @@ describe('reportController.exportReport 分支补齐', () => {
   let superUserId;
   const stamp = `rexp${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
   const PASSWORD = randomPassword();
+
+  /**
+   * 把导出的 xlsx 响应体解析成二维文本表（含表头行）。
+   * 多个用例需要「内容级」断言——只断 200 无法证伪筛选器被删，
+   * 因为返回一个未经过滤的完整表格同样是 200。
+   * @param {Buffer} body xlsx 二进制
+   * @returns {Promise<string[][]>}
+   */
+  const parseWorkbookRows = async (body) => {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(body);
+    const ws = wb.worksheets[0];
+    const rows = [];
+    ws.eachRow((row) => {
+      const cells = [];
+      row.eachCell({ includeEmpty: true }, (cell) => cells.push(String(cell.value ?? '')));
+      rows.push(cells);
+    });
+    return rows;
+  };
+
+  /** 把 Buffer 响应体收全（supertest 默认不缓冲二进制） */
+  const bufferBody = (r, cb) => {
+    const chunks = [];
+    r.on('data', (c) => chunks.push(c));
+    r.on('end', () => cb(null, Buffer.concat(chunks)));
+  };
 
   const signToken = (userId, username) =>
     jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '1h' });
@@ -107,7 +144,7 @@ describe('reportController.exportReport 分支补齐', () => {
     app = createApp();
 
     // ===== 导出数据行种子 =====
-    // EXPORT_ROW_TRANSFORMS 的行级 fallback 分支（L620-690）只在真实行流过
+    // EXPORT_ROW_TRANSFORMS 的行级 fallback 分支只在真实行流过
     // streamExportRows 时执行——此前用例全部导出空数据，transform 一次都没跑。
     // 每张表刻意造「全字段 + 缺省字段」两行，让映射命中与 '-' 兜底两侧都走到。
     const FireAlarm = require('../../models/FireAlarm');
@@ -139,7 +176,7 @@ describe('reportController.exportReport 分支补齐', () => {
         alarmCode: `REXPA${stamp}COORD`,
         alarmType: 'other',
         description: `分支补齐坐标位置报警_${stamp}`,
-        // building/floor/room 全空仅坐标 → location 兜底 '-'（L623 假侧）
+        // building/floor/room 全空仅坐标 → location 兜底 '-'（formatExportLocation 的假侧）
         location: { coordinates: { lat: 30.1, lng: 120.2 } },
       },
     ]);
@@ -193,6 +230,7 @@ describe('reportController.exportReport 分支补齐', () => {
         action: 'login_success', // 命中 EXPORT_ACTION_LABELS
         category: 'auth',
         username: `rexpaudit${stamp}`,
+        userId: superUser._id, // userId 维度筛选的内容级对照锚点
         success: false, // → 等级「错误」
         riskLevel: 'high', // 命中 EXPORT_RISK_LEVEL_LABELS
         method: 'GET',
@@ -214,6 +252,7 @@ describe('reportController.exportReport 分支补齐', () => {
         action: 'logout',
         category: 'auth',
         username: `rexpaudit${stamp}`,
+        userId: superUser._id, // 同上：让 userId 筛选命中 2 行而非 3 行，构成可证伪对照
         success: true,
         // riskLevel 缺省 → 等级「信息」+ riskLevel 列 '-'
         reason: `分支补齐审计行_${stamp}`,
@@ -221,7 +260,8 @@ describe('reportController.exportReport 分支补齐', () => {
     ]);
 
     // 205 行报警：populate 分批导出（BATCH_SIZE=200）跨两个批次，
-    // 覆盖 streamExportRows 的 lastId 续批与 do-while 终止（L805-818）
+    // 覆盖 streamExportRows 的批次循环：orderedIds 按 BATCH_SIZE 分批回填，
+    // 循环必须走到尾批（截断为单批会丢 200..204 这 5 行，见用例内断言）
     await FireAlarm.insertMany(
       Array.from({ length: 205 }, (_, i) => ({
         alarmCode: `REXPB${stamp}${String(i).padStart(3, '0')}`,
@@ -257,7 +297,7 @@ describe('reportController.exportReport 分支补齐', () => {
     }
   });
 
-  test('format != xlsx → 400 提前拒绝，避免前端误以为导出成功（L851-853）', async () => {
+  test('format != xlsx → 400 提前拒绝，避免前端误以为导出成功', async () => {
     const res = await request(app)
       .get('/api/reports/export?type=alarms&format=csv')
       .set('Authorization', `Bearer ${superToken}`);
@@ -265,7 +305,7 @@ describe('reportController.exportReport 分支补齐', () => {
     expect(res.body.message).toContain('不支持的导出格式');
   });
 
-  test('日期参数非法 → 400（Invalid Date 会在查询层抛错，必须前置拦截）（L856-858）', async () => {
+  test('日期参数非法 → 400（Invalid Date 会在查询层抛错，必须前置拦截）', async () => {
     const res = await request(app)
       .get('/api/reports/export?type=alarms&startDate=not-a-date')
       .set('Authorization', `Bearer ${superToken}`);
@@ -273,11 +313,15 @@ describe('reportController.exportReport 分支补齐', () => {
     expect(res.body.message).toContain('日期参数格式错误');
   });
 
-  test('audit 导出枚举白名单校验失败 → 400（非法 level 不允许静默放大导出范围）（L892-898）', async () => {
+  test('audit 导出枚举白名单校验失败 → 400（非法 level 不允许静默放大导出范围）', async () => {
     const res = await request(app)
       .get('/api/reports/export?type=audit&level=bogus-level')
       .set('Authorization', `Bearer ${superToken}`);
     expect(res.status).toBe(400);
+    // 「不允许静默放大导出范围」的判据是错误信息点名了 level 与合法取值，
+    // 而非泛泛的 400 —— 静默忽略同样会返回 200，这才是本用例要防的
+    expect(res.body.message).toContain('level');
+    expect(res.body.message).toContain('info/warning/error');
   });
 
   test('日期窗口内无数据 → 200 空表头文件（响应头齐备）', async () => {
@@ -289,13 +333,44 @@ describe('reportController.exportReport 分支补齐', () => {
     expect(res.headers['content-disposition']).toContain('attachment');
   });
 
-  test('dataScope.type=none → 强制空集，仅导出表头（越权数据零泄漏）（L914-917）', async () => {
+  test('dataScope.type=none → 强制空集，导出的 xlsx 除表头外零数据行（越权面内容级验证）', async () => {
+    // 本轮复审强化：原用例只断言 200 + content-type，等于「只要返回了一个 xlsx 就算过」——
+    // 而 dataScope=none 的**安全语义**是「不得导出任何他人数据」。响应头无法证伪这一语义
+    // （返回一个装满数据的文件同样是 200 + spreadsheetml）。
+    // 现用 exceljs 解析真实响应体，断言：① 工作表存在；② 除表头行外无数据行；
+    // ③ 种子数据里的可识别标记（如报警编码前缀）一个都不出现。
     rbac.getDataScope.mockResolvedValueOnce({ type: 'none' });
     const res = await request(app)
       .get('/api/reports/export?type=devices')
-      .set('Authorization', `Bearer ${superToken}`);
+      .set('Authorization', `Bearer ${superToken}`)
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks = [];
+        r.on('data', (c) => chunks.push(c));
+        r.on('end', () => cb(null, Buffer.concat(chunks)));
+      });
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('spreadsheetml');
+
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(res.body);
+    const ws = wb.worksheets[0];
+    expect(ws).toBeTruthy();
+
+    // 表头行之后不得有任何数据行（rowCount 含表头，故允许 1 行）
+    expect(ws.actualRowCount).toBeLessThanOrEqual(1);
+
+    // 全表文本化后搜种子标记：任何一条泄漏都会被抓住
+    let dump = '';
+    ws.eachRow((row) => {
+      row.eachCell((cell) => {
+        dump += String(cell.value ?? '') + '\u0001';
+      });
+    });
+    expect(dump).not.toContain(stamp); // 本套件所有种子数据的公共标记
+    expect(dump).not.toContain('REXPD'); // 设备种子编码前缀
+
     rbac.getDataScope.mockResolvedValue({ type: 'all' });
   });
 
@@ -304,11 +379,14 @@ describe('reportController.exportReport 分支补齐', () => {
       .get('/api/reports/export?type=devices')
       .set('Authorization', `Bearer ${noExportToken}`);
     expect(res.status).toBe(403);
+    // 路由闸的码是 PERMISSION_DENIED（checkPermission 统一出口），
+    // 与「audit 导出需 security:audit」的业务码区分
+    expect(res.body.errors.errorCode).toBe('PERMISSION_DENIED');
   });
 
   // ===== getDashboardStats / 三张报表接口的日期与范围分支 =====
 
-  test('dashboard：dataScope=none → 全零空统计（越权数据零泄漏）（L111）', async () => {
+  test('dashboard：dataScope=none → 全零空统计（越权数据零泄漏）', async () => {
     rbac.getDataScope.mockResolvedValueOnce({ type: 'none' });
     const res = await request(app)
       .get('/api/reports/dashboard')
@@ -324,7 +402,7 @@ describe('reportController.exportReport 分支补齐', () => {
     expect(res.body.data.inspections.total).toBe(0);
   });
 
-  test('三张报表接口：非法日期 → 400 前置拦截（L255/L324/L411）', async () => {
+  test('三张报表接口：非法日期 → 400 前置拦截', async () => {
     for (const path of [
       '/api/reports/devices',
       '/api/reports/alarms',
@@ -338,52 +416,140 @@ describe('reportController.exportReport 分支补齐', () => {
     }
   });
 
-  test('三张报表接口：日期窗口并入聚合 → 200（L268/L330/L425/L450）', async () => {
-    for (const path of [
-      '/api/reports/devices',
-      '/api/reports/alarms',
-      '/api/reports/inspections',
-    ]) {
-      const res = await request(app)
-        .get(`${path}?startDate=2020-01-01&endDate=2099-01-01`)
-        .set('Authorization', `Bearer ${superToken}`);
-      expect(res.status).toBe(200);
-    }
+  test('三张报表接口：日期窗口并入聚合（窗口内无数据 / 全窗口有数据 双向对照）', async () => {
+    // 本轮复审强化：原用例只断 200 —— 而「日期窗口被丢弃」同样返回 200
+    // （已用变异验证：删掉 matchStage 的日期合并，原断言全绿）。
+    // 现改为内容级：查询窗口取 2099 年（种子数据全在今天），断言导出行归零；
+    // 再取全窗口断言种子行回来。两次对照才能证伪「筛选器被忽略」。
+    const windowed = await request(app)
+      .get(`${'/api/reports/alarms'}?startDate=2099-01-01&endDate=2099-12-31`)
+      .set('Authorization', `Bearer ${superToken}`);
+    expect(windowed.status).toBe(200);
+    expect(windowed.body.data.byType).toEqual([]);
+    expect(windowed.body.data.byStatus).toEqual([]);
+
+    // 对照：不传日期（空窗口 = 不过滤）必须能看到今天种子的报警
+    const all = await request(app)
+      .get('/api/reports/alarms')
+      .set('Authorization', `Bearer ${superToken}`);
+    expect(all.status).toBe(200);
+    const totalByType = all.body.data.byType.reduce((a, r) => a + r.count, 0);
+    expect(totalByType).toBeGreaterThan(0);
   });
 
   // ===== 真实行数据的四类导出（EXPORT_ROW_TRANSFORMS 行级 fallback）=====
 
-  test('带数据行导出：四类全 200（行级 fallback 与映射命中两侧均执行）', async () => {
-    for (const type of ['alarms', 'devices', 'audit', 'inspections']) {
+  test('带数据行导出：四类全 200 且内容含种子行（行级 fallback 与映射命中两侧均执行）', async () => {
+    // 本轮复审强化：原用例只断 200 + content-type，等于「返回了 xlsx 就算过」。
+    // 变异验证：把 EXPORT_ROW_TRANSFORMS 置空，原断言仍全绿——因为行转换被绕过
+    // 时导出的仍是合法 xlsx。现解析响应体，逐类断言种子标记确实出现在单元格中。
+    const seeds = {
+      alarms: `REXPA${stamp}FULL`,
+      devices: `REXPD${stamp}FULL`.toUpperCase(), // deviceCode 模型层 uppercase: true
+      audit: `rexpaudit${stamp}`, // audit 列定义无 reason 字段，用 username 作标记
+      inspections: `分支补齐全字段巡检_${stamp}`,
+    };
+    for (const [type, marker] of Object.entries(seeds)) {
       const res = await request(app)
         .get(`/api/reports/export?type=${type}&format=xlsx`)
-        .set('Authorization', `Bearer ${superToken}`);
+        .set('Authorization', `Bearer ${superToken}`)
+        .buffer(true)
+        .parse(bufferBody);
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toContain('spreadsheetml');
+
+      const rows = await parseWorkbookRows(res.body);
+      expect(rows.length).toBeGreaterThan(1); // 至少表头 + 一行数据
+      const dump = rows.map((r) => r.join('\u0001')).join('\u0002');
+      expect(dump).toContain(marker);
+      // reason/description 字段也经行转换写出：确认转换器没有整体塌成 '-'
+      expect(dump).not.toBe('');
     }
   });
 
-  // ===== buildExportQuery 的 audit 参数分支（L733-768）=====
+  // ===== buildExportQuery 的 audit 参数分支 =====
 
-  test('audit 导出带全部筛选参数 → 200（username/action/category/riskLevel/success/ip $in/userId）', async () => {
-    const res = await request(app)
+  test('audit 导出带全部筛选参数 → 200 且筛选真正生效（username/action/category/riskLevel/success/ip $in/userId）', async () => {
+    // 本轮复审强化：原用例只断 200。变异验证：把 username 正则过滤整个删掉，
+    // 原断言仍全绿（导出的是全量表，同样是 200）。现按「命中/不命中」双向对照：
+    // ① 用种子值筛选 → 必须出现 seed 行；② 用一个不可能存在的值 → 必须为空。
+    const params = (over = {}) =>
+      new URLSearchParams({ type: 'audit', format: 'xlsx', ...over }).toString();
+
+    const hit = await request(app)
+      .get('/api/reports/export?' + params({ username: `rexpaudit${stamp}` }))
+      .set('Authorization', `Bearer ${superToken}`)
+      .buffer(true)
+      .parse(bufferBody);
+    expect(hit.status).toBe(200);
+    const hitRows = await parseWorkbookRows(hit.body);
+    expect(hitRows.length).toBe(4); // 表头 + 3 行同用户名种子
+
+    // 对照：不存在的 username → 只剩表头（证伪「筛选被静默忽略」）
+    const miss = await request(app)
+      .get('/api/reports/export?' + params({ username: `no_such_user_${stamp}` }))
+      .set('Authorization', `Bearer ${superToken}`)
+      .buffer(true)
+      .parse(bufferBody);
+    expect(miss.status).toBe(200);
+    const missRows = await parseWorkbookRows(miss.body);
+    expect(missRows.length).toBe(1);
+
+    // action / category / success 组合筛选同样按内容核对（命中 1 行）
+    const combo = await request(app)
       .get(
-        '/api/reports/export?type=audit&format=xlsx' +
-          `&username=rexp&action=login_success&category=auth&riskLevel=high&success=true` +
-          `&ip=2001:DB8::1&userId=${superUserId}`
+        '/api/reports/export?' +
+          params({ action: 'login_success', category: 'auth', success: 'false' })
       )
-      .set('Authorization', `Bearer ${superToken}`);
-    // 2001:DB8::1 归一化小写后与原始串不同 → ipVariants 双元素 → $in 匹配
-    expect(res.status).toBe(200);
+      .set('Authorization', `Bearer ${superToken}`)
+      .buffer(true)
+      .parse(bufferBody);
+    expect(combo.status).toBe(200);
+    const comboRows = await parseWorkbookRows(combo.body);
+    expect(comboRows.length).toBe(2); // 表头 + login_success/false 那一行
+
+    // userId 维度：3 行种子中 2 行挂在 superUser 名下，命中 2 行（可证伪：
+    // userId 过滤若失效会捞到全部 3 行）
+    const byUser = await request(app)
+      .get('/api/reports/export?' + params({ userId: superUserId }))
+      .set('Authorization', `Bearer ${superToken}`)
+      .buffer(true)
+      .parse(bufferBody);
+    expect(byUser.status).toBe(200);
+    const byUserRows = await parseWorkbookRows(byUser.body);
+    // 注意：全局审计中间件会为本次测试自身的 HTTP 请求写 1 行（userId 也是
+    // superUser），所以命中数是 2 行种子 + 1 行运行时时序行。这里断言「恰为 3 行
+    // 数据行」仍可证伪：userId 过滤一旦失效，会多出第 3 行种子的审计行。
+    expect(byUserRows.length).toBe(4); // 表头 + 3 行
   });
 
-  test('audit 导出 level 三档派生（error/warning/info 各一次 $and 条件构建）→ 200', async () => {
-    for (const level of ['error', 'warning', 'info']) {
+  test('audit 导出 level 三档派生：每档内容互不相同且各自可证伪（error/warning/info $and 条件）', async () => {
+    // 本轮复审强化：原用例 for 循环只断 200，三档都拿到全量表也照样通过。
+    // 变异验证：把 level==="error" 的判断改成 false（该档筛选器整个失效），
+    // 原断言全绿。现按内容断言：三档的行数/首列等级文字必须各不相同。
+    const levels = ['error', 'warning', 'info'];
+    const seen = new Map();
+    for (const level of levels) {
       const res = await request(app)
-        .get(`/api/reports/export?type=audit&format=xlsx&level=${level}`)
-        .set('Authorization', `Bearer ${superToken}`);
+        // 叠加 username 隔离：全局审计中间件会为本次测试的 HTTP 请求写入额外行，
+        // 仅按 level 过滤会把它们一并捞进来（其等级多为 info），使三档断言失准
+        .get(
+          `/api/reports/export?type=audit&format=xlsx&level=${level}` +
+            `&username=rexpaudit${stamp}`
+        )
+        .set('Authorization', `Bearer ${superToken}`)
+        .buffer(true)
+        .parse(bufferBody);
       expect(res.status).toBe(200);
+      const rows = await parseWorkbookRows(res.body);
+      // 每档恰好命中一行种子（三行种子分别为 error/warning/info）
+      expect(rows.length).toBe(2); // 表头 + 1 行
+      const levelCell = rows[1][1]; // 第 2 列 = 日志等级
+      expect(levelCell).toBeTruthy();
+      seen.set(level, levelCell);
     }
+    // 三档派生结果必须互不相同：若某一档的派生条件被删，会退化成同一集合
+    expect(new Set(seen.values()).size).toBe(3);
   });
 
   test('audit 导出：非法 ip / 非法 userId → 构建期抛错 500（当前行为口径）', async () => {
@@ -391,21 +557,38 @@ describe('reportController.exportReport 分支补齐', () => {
       .get('/api/reports/export?type=audit&format=xlsx&ip=999.999.999.999')
       .set('Authorization', `Bearer ${superToken}`);
     expect(badIp.status).toBe(500);
+    // 500 必须走 errorHandler 的统一 500 码，且文案固定——不得把 mongoose
+    // 的原始报错（含查询细节）透给客户端
+    expect(badIp.body.errors.errorCode).toBe('INTERNAL_ERROR');
+    expect(badIp.body.message).toBe('服务器内部错误，请稍后重试');
 
     const badUserId = await request(app)
       .get('/api/reports/export?type=audit&format=xlsx&userId=not-an-object-id')
       .set('Authorization', `Bearer ${superToken}`);
     expect(badUserId.status).toBe(500);
+    expect(badUserId.body.errors.errorCode).toBe('INTERNAL_ERROR');
+    expect(badUserId.body.message).toBe('服务器内部错误，请稍后重试');
   });
 
   // ===== streamExportRows populate 两阶段分批（B-4 修复后）=====
 
-  test('populate 分批导出：205 行报警跨两个 $in 回填批次 → 200', async () => {
+  test('populate 分批导出：205 行报警跨两个 $in 回填批次 → 全部 205 行都在文件里', async () => {
+    // 本轮复审强化：原用例只断 200。分批回填若丢批（只回填第一批），同样是 200。
+    // 现按内容断言：205 条种子编码必须一条不落地出现在导出文件中。
     const res = await request(app)
       .get('/api/reports/export?type=alarms&format=xlsx')
-      .set('Authorization', `Bearer ${superToken}`);
+      .set('Authorization', `Bearer ${superToken}`)
+      .buffer(true)
+      .parse(bufferBody);
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('spreadsheetml');
+
+    const rows = await parseWorkbookRows(res.body);
+    const dump = rows.map((r) => r.join('\u0001')).join('\u0002');
+    // BATCH_SIZE=200 → 必须跨两个回填批次；漏批会让尾批（200..204）整体消失
+    for (const i of [0, 199, 200, 204]) {
+      expect(dump).toContain(`REXPB${stamp}${String(i).padStart(3, '0')}`);
+    }
   });
 
   test('B-4 回归：导出行序与列表接口一致（config.sort=occurredAt 倒序，而非 _id 序）', async () => {
@@ -496,9 +679,9 @@ describe('reportController.exportReport 分支补齐', () => {
     expect(rows).toEqual([{ _id: 'ordered-id', scope: 'ok' }]);
   });
 
-  // ===== dashboardCache TTL 定时清理（L49-54）=====
+  // ===== dashboardCache TTL 定时清理 =====
 
-  test('dashboardCache 定时清理：过期条目回收、有效条目保留（L49-54）', () => {
+  test('dashboardCache 定时清理：过期条目回收、有效条目保留', () => {
     // 惰性定时器（评价报告低危项）：sweeper 不再于模块加载期启动，
     // 需显式调用 ensureDashboardCacheSweeper（模拟首次业务写入）后，
     // setInterval 落在假定时器上，advance 才能确定性触发

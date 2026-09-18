@@ -43,7 +43,10 @@ const userSessionSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
-    index: true,
+    // L-19：此处原为 index: true，生成的单字段索引 { userId: 1 } 与下方
+    // userSessionSchema.index({ userId: 1, status: 1, lastSeenAt: -1 }) 的前缀
+    // 完全重复（复合索引可覆盖任何单字段 userId 查询），属冗余索引——每次会话
+    // 写入都要多维护一棵 B 树。已移除，查询能力不受影响。
   },
 
   /** 会话状态：active=可用；revoked=已吊销（单设备下线）；expired=自然过期 */

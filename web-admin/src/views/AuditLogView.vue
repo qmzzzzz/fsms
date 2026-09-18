@@ -386,12 +386,12 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
-import { apiClient } from '@/utils/api'
-import { localDateStr } from '@/utils/datetime'
+import { apiClient, isCanceledError, resolveErrorMessage } from '@/utils/api'
+import { formatTime, localDateStr } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { usePermission } from '@/composables/usePermission'
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
 const { hasAllPerms } = usePermission()
 
 /**
@@ -470,6 +470,8 @@ const loadData = async () => {
     logs.value = result?.data || []
     total.value = result?.meta?.total || 0
   } catch (e) {
+    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
+    if (isCanceledError(e)) return
     if (!isCurrent()) return
     ElMessage.error(t('messages.loadFailed'))
   } finally {
@@ -528,6 +530,27 @@ const viewDetail = (row) => {
 // 导出日志
 const exporting = ref(false)
 
+/**
+ * 从 blob 响应中解析后端错误信息（P2-56）
+ *
+ * /reports/export 的响应类型是 xlsx，但失败路径（403/400/500 等）返回的是
+ * JSON 包络。responseType:'blob' 下 axios 把 JSON 体也包成 Blob，若不识别
+ * 就会把这段错误 JSON 当成 xlsx 下载下来（文件损坏且界面报「导出成功」）。
+ * 与 ReportView.vue 的 extractErrorMessage 同口径：读文本 → 取 message 字段，
+ * 并优先走码化翻译（api.js 的 resolveErrorMessage）。
+ */
+const extractBlobErrorMessage = async (data, fallback) => {
+  if (data instanceof Blob) {
+    try {
+      const parsed = JSON.parse(await data.text())
+      return resolveErrorMessage(parsed) || parsed?.message || fallback
+    } catch (_) {
+      /* 非 JSON 内容（正常 xlsx 等）或解析失败 → 走兜底文案 */
+    }
+  }
+  return data?.message || fallback
+}
+
 const exportLogs = async () => {
   exporting.value = true
   try {
@@ -541,15 +564,31 @@ const exportLogs = async () => {
       responseType: 'blob',
     })
 
+    // P2-56：后端以 JSON 返回错误时不得继续下载（否则得到损坏的 xlsx + 假成功）
+    const payload = response?.data
+    const contentType = String(response?.headers?.['content-type'] || '')
+    if (
+      payload instanceof Blob &&
+      (payload.type?.includes('json') || contentType.includes('application/json'))
+    ) {
+      ElMessage.error(await extractBlobErrorMessage(payload, t('messages.exportFailed')))
+      return
+    }
+    if (!(payload instanceof Blob)) {
+      ElMessage.error(await extractBlobErrorMessage(payload, t('messages.exportFailed')))
+      return
+    }
+
     // 截断提示：/reports/export 的 xlsx 分支当前不返回截断标记字段（EXPORT_LIMIT 静默截断）；
     // 若后端后续补充截断提示（响应头 X-Export-Truncated 或 JSON 体 notice 字段），这里自动向用户展示
     const notice = response?.headers?.['x-export-truncated'] || ''
     if (notice) ElMessage.warning(String(notice))
 
-    const blob = new Blob([response.data], {
+    const blob = new Blob([payload], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     })
     const url = window.URL.createObjectURL(blob)
+
     const link = document.createElement('a')
     link.href = url
     // 评价报告 #20：文件名日期走本地时区（toISOString 在东八区 0-8 点会早一天）
@@ -559,17 +598,19 @@ const exportLogs = async () => {
 
     ElMessage.success(t('messages.exportSuccess'))
   } catch (e) {
-    ElMessage.error(t('messages.exportFailed'))
+    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
+    if (isCanceledError(e)) return
+    // P2-56：blob 形态的错误体在 e.response.data 中，统一提取（含码化翻译）
+    ElMessage.error(await extractBlobErrorMessage(e?.response?.data, t('messages.exportFailed')))
   } finally {
     exporting.value = false
   }
 }
 
-// 格式化时间
-const formatTime = (time) => {
-  if (!time) return '-'
-  return new Date(time).toLocaleString(locale.value, { hour12: false })
-}
+// 时间格式化统一走 utils/datetime.formatTime（O-3 单一事实来源，本地时区 +
+// 固定 YYYY-MM-DD HH:mm:ss 口径）。此前这里用 toLocaleString(locale)：
+// ① 切换界面语言会让同一列的时间格式突变（月/日顺序与分隔符都变）；
+// ② 非法时间戳渲染成 "Invalid Date"。两者都已由 formatTime 兜住。
 
 // 格式化 JSON（列表接口出于安全不返回 body/params 时显示占位符）
 const formatJson = (value) => {
@@ -578,7 +619,8 @@ const formatJson = (value) => {
   return JSON.stringify(value, null, 2)
 }
 
-// 操作类型标签：audit.action 文案组与后端 securityController AUDIT_LOG_ACTIONS
+// 操作类型标签：audit.action 文案组与后端 AUDIT_LOG_ACTIONS 枚举一一对应。
+// 枚举已迁至 src/constants/audit.js（原位于 securityController，注释未同步）。
 // 枚举全集一一对应（含路由派生型/事件型/历史兼容三部分）
 const actionLabel = (action) => {
   if (!action) return '-'

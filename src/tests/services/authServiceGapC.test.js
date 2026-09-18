@@ -325,29 +325,38 @@ describe('authService gap C - catch handler coverage', () => {
   // ===== changeUserPassword catch handlers =====
 
   describe('changeUserPassword - catch handlers', () => {
-    test('改密成功但 invalidateUserTokens 失败 → REVOKE_FAILED (line 840-841)', async () => {
+    // P1-29 修复（本轮复审）：原用例的 mock 假设「invalidateUserTokens 是第 2 次
+    // findByIdAndUpdate」，但 changeUserPassword 的读路径走 User.findById、
+    // 落库走 user.save()，全程**不调用** findByIdAndUpdate——唯一一次调用
+    // （callCount=1）就是 invalidateUserTokens 本身，因 1 >= 2 不成立而永不 reject。
+    // 结果：该用例恒返回 OK，却用 expect(['OK','REVOKE_FAILED']) 双可能断言兜住，
+    // 名为「验证吊销失败」实则从未触发吊销失败（实测把断言收紧为 REVOKE_FAILED 即红）。
+    // 现改为：直接让 findByIdAndUpdate 一律 reject（它就是吊销路径本身），
+    // 并断言 REVOKE_FAILED + 密码确已落库 + tokenVersion 未递增（部分成功如实上报）。
+    test('改密成功但 invalidateUserTokens 失败 → REVOKE_FAILED + 密码已改/tokenVersion 未增', async () => {
       const user = await makeUser('crev1');
       const newPwd = randomPassword();
-      // invalidateUserTokens calls User.findByIdAndUpdate internally
-      // We need it to throw AFTER the password save succeeds
-      const origFindByIdAndUpdate = User.findByIdAndUpdate.bind(User);
-      let callCount = 0;
-      const spy = jest.spyOn(User, 'findByIdAndUpdate').mockImplementation(function (...args) {
-        callCount++;
-        // The invalidateUserTokens call will be after save; let first few pass
-        if (callCount >= 2) {
-          return Promise.reject(new Error('revoke failed'));
-        }
-        return origFindByIdAndUpdate(...args);
-      });
-      const result = await authService.changeUserPassword(
-        user._id,
-        { currentPassword: PASSWORD, newPassword: newPwd },
-        { username: user.username }
-      );
-      // Could be OK or REVOKE_FAILED depending on call order
-      expect(['OK', 'REVOKE_FAILED']).toContain(result.outcome);
-      spy.mockRestore();
+      const spy = jest
+        .spyOn(User, 'findByIdAndUpdate')
+        .mockRejectedValue(new Error('revoke failed'));
+      let result;
+      try {
+        result = await authService.changeUserPassword(
+          user._id,
+          { currentPassword: PASSWORD, newPassword: newPwd },
+          { username: user.username }
+        );
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(result.outcome).toBe('REVOKE_FAILED');
+
+      // 部分成功必须如实可查：密码已换新、旧口令失效、tokenVersion 未递增
+      const after = await User.findById(user._id).select('+password');
+      expect(await after.comparePassword(newPwd)).toBe(true);
+      expect(await after.comparePassword(PASSWORD)).toBe(false);
+      expect(after.tokenVersion).toBe(0);
     });
   });
 

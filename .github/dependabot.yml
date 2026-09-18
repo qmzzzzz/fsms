@@ -7,6 +7,14 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - 'dependencies'
+    # 把开发依赖的小版本/补丁更新合并成一个 PR，减少 PR 噪音；
+    # 大版本更新仍逐个开 PR，便于逐条评估破坏性变更。
+    groups:
+      dev-minor-patch:
+        dependency-type: 'development'
+        update-types:
+          - 'minor'
+          - 'patch'
 
   - package-ecosystem: 'npm'
     directory: '/web-admin'
@@ -16,6 +24,12 @@ updates:
     labels:
       - 'dependencies'
       - 'frontend'
+    groups:
+      dev-minor-patch:
+        dependency-type: 'development'
+        update-types:
+          - 'minor'
+          - 'patch'
 
   - package-ecosystem: 'github-actions'
     directory: '/'
@@ -24,3 +38,25 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - 'ci'
+
+  # Dockerfile 与 docker-compose.yml 里共钉了 6 个基础镜像引用
+  # （node:22.14.0-alpine / mongo:6.0.20 / prom/prometheus:v2.53.0 /
+  #  prom/alertmanager:v0.27.0 / grafana/grafana:11.1.0 / redis:7-alpine），
+  # 都是精确版本号：精确钉版本保证了可复现，但不会自动漂向修复版，
+  # 基础镜像一旦爆出 CVE 就只能靠人工发现。交给 Dependabot 每周探测。
+  #
+  # 用 docker 而非 docker-compose：两者在上游是不同 ecosystem，但 docker 的
+  # file_fetcher/parser 同时处理 Dockerfile 与 YAML（YAML_REGEXP 会匹配
+  # docker-compose.yml 这类非点号开头的 .yml），并递归提取 YAML 里的 image: 字段。
+  # 单独再配一份 docker-compose 只会对同一批文件重复开 PR。
+  #
+  # 注意 `${APP_IMAGE:-fire-safety-app:local}` 是本地构建产物、非外部依赖，
+  # 解析不出 registry 引用，Dependabot 会自然跳过。
+  - package-ecosystem: 'docker'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 5
+    labels:
+      - 'dependencies'
+      - 'docker'

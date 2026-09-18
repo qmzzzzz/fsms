@@ -1,5 +1,11 @@
 const fs = require('fs');
 const path = require('path');
+// E-05 整改：设备类型枚举此前在 deviceListParams（query）内联展开一份，与
+// utils/constants.js、models/FireDevice.js、routes/deviceRoutes.js 合计 4 份副本。
+// 现统一引用 constants 的单一事实来源（本文件的 deviceType 请求体只声明 string 类型，
+// 枚举约束由模型层负责，故无需改）。
+const { DEVICE_TYPE } = require('../utils/constants');
+const DEVICE_TYPE_VALUES = Object.values(DEVICE_TYPE);
 
 const spec = {
   openapi: '3.0.3',
@@ -69,6 +75,7 @@ spec.paths['/api/auth/register'] = {
         realName: { type: 'string' },
         phone: { type: 'string' },
         department: { type: 'string' },
+        encPassword: { type: 'string', description: '口令密文（与 password 二选一）' },
       },
     }),
     responses: {
@@ -89,7 +96,13 @@ spec.paths['/api/auth/login'] = {
         username: { type: 'string' },
         password: { type: 'string' },
         captchaId: { type: 'string' },
-        captchaCode: { type: 'string' },
+        encPassword: {
+          type: 'string',
+          description:
+            '口令密文（ECDH+HKDF+AES-GCM 信封，经 GET /api/auth/login-public-key 公钥加密）；与 password 二选一',
+        },
+        captchaText: { type: 'string', description: '图形验证码答案（开启验证码时必填）' },
+        mfaCode: { type: 'string', description: 'MFA 动态口令（6 位 TOTP 或 XXXX-XXXX 恢复码）' },
       },
     }),
     responses: {
@@ -132,7 +145,15 @@ spec.paths['/api/auth/password'] = {
     requestBody: body({
       type: 'object',
       required: ['currentPassword', 'newPassword'],
-      properties: { currentPassword: { type: 'string' }, newPassword: { type: 'string' } },
+      properties: {
+        currentPassword: { type: 'string' },
+        newPassword: { type: 'string' },
+        encCurrentPassword: {
+          type: 'string',
+          description: '当前口令密文（与 currentPassword 二选一）',
+        },
+        encNewPassword: { type: 'string', description: '新口令密文（与 newPassword 二选一）' },
+      },
     }),
     responses: { ...ok('修改成功，需重新登录') },
   }),
@@ -159,6 +180,101 @@ spec.paths['/api/auth/profile'] = {
 spec.paths['/api/auth/logout'] = {
   post: p('post', ['Auth'], '用户登出', {
     requestBody: body({ type: 'object', properties: { refreshToken: { type: 'string' } } }, false),
+  }),
+};
+
+// L-24：以下 14 个端点此前只存在于产物、生成器中缺失——重跑生成器会
+// 把它们整体抹掉（实测 path 数 83 → 69），而产物却是线上 Swagger 的实际来源。
+// 本块把它们补回生成器，使两者重新等价；openapiSync 测试新增对账守卫。
+spec.paths['/api/auth/login-public-key'] = {
+  get: p('get', ['Auth'], '获取登录口令加密公钥（ECDH P-256，供前端加密口令上行）', {
+    security: false,
+    responses: ok('返回 publicKey PEM / keyId / curve / 算法标识'),
+  }),
+};
+
+spec.paths['/api/auth/session'] = {
+  get: p('get', ['Auth'], '轻量会话探测（返回是否已登录；始终 200，不触发令牌刷新链）', {
+    security: false,
+    responses: ok('返回 { authenticated: boolean }'),
+  }),
+};
+
+spec.paths['/api/auth/sessions'] = {
+  get: p('get', ['Auth'], '获取当前用户的活跃会话列表（设备级会话管理）', {
+    responses: ok('返回会话列表（sid/设备/时间），可远程吊销其他设备'),
+  }),
+};
+
+spec.paths['/api/auth/sessions/others'] = {
+  delete: p('delete', ['Auth'], '吊销除当前设备外的全部会话', {
+    responses: ok('其余设备全部下线'),
+  }),
+};
+
+spec.paths['/api/auth/sessions/{sid}'] = {
+  delete: p('delete', ['Auth'], '吊销指定会话（踢除单台设备）', {
+    parameters: [{ name: 'sid', in: 'path', required: true, schema: { type: 'string' } }],
+    responses: { ...ok('该设备已下线'), 404: { description: '会话不存在' } },
+  }),
+};
+
+spec.paths['/api/auth/mfa/status'] = {
+  get: p('get', ['Auth'], '查询两步验证开启状态与剩余恢复码数量', {
+    responses: ok('返回 { enabled, recoveryCodesRemaining }'),
+  }),
+};
+
+spec.paths['/api/auth/mfa/enroll'] = {
+  post: p('post', ['Auth'], '生成两步验证密钥（第一步，返回 Base32 密钥与 otpauth URI）', {
+    responses: { ...ok('返回 secret 与 otpauthUri'), 400: { description: '已开启两步验证' } },
+  }),
+};
+
+spec.paths['/api/auth/mfa/enable'] = {
+  post: p('post', ['Auth'], '确认开启两步验证（校验一次动态口令，生成备用恢复码）', {
+    requestBody: body({
+      type: 'object',
+      required: ['mfaCode'],
+      properties: { mfaCode: { type: 'string', description: '6 位动态口令' } },
+    }),
+    responses: {
+      ...ok('返回 { enabled: true, recoveryCodes }（明文仅此一次）'),
+      400: { description: '验证码错误' },
+    },
+  }),
+};
+
+spec.paths['/api/auth/mfa/disable'] = {
+  post: p('post', ['Auth'], '关闭两步验证（需动态口令或登录密码二次验证）', {
+    requestBody: body(
+      {
+        type: 'object',
+        properties: {
+          mfaCode: { type: 'string', description: '6 位动态口令（与 currentPassword 二选一）' },
+          encCurrentPassword: {
+            type: 'string',
+            description: '当前口令密文（与 currentPassword 二选一）',
+          },
+          currentPassword: { type: 'string' },
+        },
+      },
+      // required=true：控制器在「既无动态码也无登录密码」时一律拒绝，
+      // 空请求体必然失败，故此处按必填描述（字段级仍全部可选——两条路径二选一）。
+      true
+    ),
+    responses: { ...ok('返回 { enabled: false }'), 403: { description: '验证失败' } },
+  }),
+};
+
+spec.paths['/api/auth/mfa/recovery-codes'] = {
+  post: p('post', ['Auth'], '重新生成备用恢复码（旧码全部作废；需当前动态口令）', {
+    requestBody: body({
+      type: 'object',
+      required: ['mfaCode'],
+      properties: { mfaCode: { type: 'string', description: '6 位动态口令' } },
+    }),
+    responses: { ...ok('返回新恢复码明文（仅此一次）'), 400: { description: '口令错误' } },
   }),
 };
 
@@ -334,18 +450,8 @@ const deviceListParams = [
     in: 'query',
     schema: {
       type: 'string',
-      enum: [
-        'fire_alarm',
-        'sprinkler',
-        'hydrant',
-        'extinguisher',
-        'smoke_detector',
-        'heat_detector',
-        'emergency_light',
-        'evacuation_sign',
-        'fire_door',
-        'other',
-      ],
+      // E-05：引用共享枚举，避免与模型/路由校验漂移
+      enum: DEVICE_TYPE_VALUES,
     },
   },
   {
@@ -907,6 +1013,50 @@ spec.paths['/api/security/ip-list/query'] = {
         schema: { type: 'string', description: 'IPv4/IPv6 单地址（不含 CIDR）' },
       },
     ],
+    responses: ok('返回命中记录'),
+  }),
+};
+
+// L-24：以下 4 个端点此前只存在于产物、生成器中缺失（同上方 Auth 块）。
+spec.paths['/api/security/users/{userId}/mfa/reset'] = {
+  put: p('put', ['Security'], '管理员重置用户两步验证（清除密钥/恢复码并强制下线）', {
+    parameters: [{ name: 'userId', in: 'path', required: true, schema: { type: 'string' } }],
+    responses: {
+      ...ok('两步验证已重置'),
+      400: { description: '未开启 MFA / 目标为自身' },
+      403: { description: '同级或更高层级 / 内置超管' },
+    },
+  }),
+};
+
+spec.paths['/api/security/audit-logs/verify'] = {
+  get: p('get', ['Security'], '校验审计日志哈希链完整性（hash 重算 + hmac + 链接性三层校验）', {
+    parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer' } }],
+    responses: ok('返回校验报告（intact/breaks/byType）'),
+  }),
+};
+
+spec.paths['/api/security/audit-logs/export'] = {
+  get: p('get', ['Security'], '导出审计日志（CSV + sha256 签名 manifest，流式输出）', {
+    parameters: [
+      { name: 'limit', in: 'query', schema: { type: 'integer' } },
+      { name: 'from', in: 'query', schema: { type: 'string' } },
+    ],
+    responses: ok('text/csv 流式响应'),
+  }),
+};
+
+spec.paths['/api/security/config/registerCaptchaEnabled'] = {
+  get: p('get', ['Security'], '获取注册验证码开关状态', {
+    responses: ok('返回 { registerCaptchaEnabled: boolean }'),
+  }),
+  put: p('put', ['Security'], '切换注册验证码开关', {
+    requestBody: body({
+      type: 'object',
+      required: ['registerCaptchaEnabled'],
+      properties: { registerCaptchaEnabled: { type: 'boolean' } },
+    }),
+    responses: ok('开关已更新'),
   }),
 };
 
@@ -914,21 +1064,39 @@ spec.paths['/api/security/ip-list/query'] = {
 spec.paths['/health'] = {
   get: p('get', ['System'], '健康检查', {
     security: false,
-    responses: ok('系统运行正常，包含数据库连接状态'),
+    // P2-46：原描述称「包含数据库连接状态」，与实现不符——app.js 的 /health
+    // 只回 { status: 'ok' }（刻意最小化，不暴露版本/DB 状态等内部信息）；
+    // 带 DB 连通性的是 /readyz（另有 M-1 固定枚举约束）。
+    responses: ok("进程存活信号，固定返回 { status: 'ok' }"),
   }),
 };
 spec.paths['/api'] = {
   get: p('get', ['System'], 'API 根路径', {
     security: false,
-    responses: ok('返回 API 版本和可用端点列表'),
+    // P2-46：原描述称「返回 API 版本和可用端点列表」，与实现不符——
+    // app.js 的 /api 只回 { success: true, message: '消防管理系统 API' }；
+    // 返回端点清单是刻意的安全取舍（避免未认证的信息暴露），不会再恢复。
+    responses: ok('固定返回 { success: true, message }，不含端点清单'),
   }),
 };
 
-const outPath = path.join(__dirname, 'openapi.json');
-fs.writeFileSync(outPath, JSON.stringify(spec, null, 2), 'utf8');
-console.log('Generated:', outPath);
-console.log('Paths:', Object.keys(spec.paths).length);
-console.log(
-  'Operations:',
-  Object.values(spec.paths).reduce((n, p) => n + Object.keys(p).length, 0)
-);
+// L-24：本文件此前只有「生成」一种用法——require 它就必然重写产物。
+// 于是它无法被测试比对，产物与生成器之间的漂移长期无人发现
+// （实测重跑会把 83 个 path 覆盖成 69 个，精确丢失 14 个端点）。
+//
+// 现在拆成两种用法：
+//   - 直接执行（node src/docs/generate.js）→ 写盘，保持原有行为；
+//   - 被 require → 只导出 spec，不产生任何副作用。
+// 后者让 openapiSync 测试能对「生成器输出」与「已提交产物」做双向对账。
+module.exports = spec;
+
+if (require.main === module) {
+  const outPath = path.join(__dirname, 'openapi.json');
+  fs.writeFileSync(outPath, JSON.stringify(spec, null, 2), 'utf8');
+  console.log('Generated:', outPath);
+  console.log('Paths:', Object.keys(spec.paths).length);
+  console.log(
+    'Operations:',
+    Object.values(spec.paths).reduce((n, p) => n + Object.keys(p).length, 0)
+  );
+}

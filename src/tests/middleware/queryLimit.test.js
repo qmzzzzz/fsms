@@ -26,6 +26,8 @@ describe('queryLengthLimit 中间件', () => {
     const app = buildApp(5);
     const ok = await request(app).get('/list?k=abcde');
     expect(ok.status).toBe(200);
+    // 边界「恰好等于」必须原样透传（不是被截断后放行）
+    expect(ok.body.query.k).toBe('abcde');
     const bad = await request(app).get('/list?k=abcdef');
     expect(bad.status).toBe(400);
   });
@@ -46,5 +48,7 @@ describe('queryLengthLimit 中间件', () => {
   test('无查询参数的请求直接放行', async () => {
     const res = await request(buildApp()).get('/list');
     expect(res.status).toBe(200);
+    // 放行的判据是业务处理器真的执行了（req.query 为空对象）
+    expect(res.body.query).toEqual({});
   });
 });

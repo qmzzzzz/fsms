@@ -8,9 +8,14 @@
  * ================= 权限结果缓存（性能优化 P-01） =================
  * 背景：每个受保护请求原本都要执行「查用户 → populate roles → populate
  * permissions」三层关联查询，100 QPS 下即产生 300+ 次/秒的数据库聚合负载。
- * 策略：进程内 TTL 缓存（30 秒）+ 代际失效（generation）：
+ * 策略：进程内 TTL 缓存（30 秒）+ 显式失效：
  *  - 用户级失效：assignRoles 等变更某用户角色时，仅删除该用户条目
- *  - 全局失效：角色权限被修改（assignPermissions）时递增 generation，所有旧条目即刻过期
+ *  - 全局失效：角色权限被修改（assignPermissions）时清空整个缓存（permCache.clear()）
+ *
+ * L-16 修正：原注释称"全局失效靠递增 generation 使旧条目过期"，但代码中从未
+ * 递增过该变量（`permCacheGeneration` 只被读取），实际走的是 `clear()`。
+ * 二者语义等价（都让旧条目立即失效），`clear()` 更彻底；已删除该死变量并把
+ * 注释改为描述真实机制，避免维护者据此误以为"无需 clear，递增代际即可"。
  *
  * ================= 跨实例主动失效（L-4） =================
  * 单进程内上述缓存自洽，但多副本部署时各进程各持一份缓存：实例 A 改了某用户
@@ -21,7 +26,13 @@
  * 未配置 REDIS_URL 时广播为无操作，退化为原「最长 30 秒自然过期」语义，行为不变。
  */
 
-// 延迟 require 打破 service ↔ model 潜在的循环依赖
+// E-04：**必须**保持惰性 require，不得提到文件顶部。
+//
+// 原因：本模块（service）↔ models/User 之间存在潜在循环依赖，
+// 顶层引入会在加载顺序不利时拿到未完成的 module.exports（undefined）。
+// 惰性化让 require 推迟到首次调用，那时两侧都已加载完毕。
+// 仓内另有 architecture/requireCycles.test.js 对全仓依赖图做无环断言，
+// 若把此处改成顶层 require 触发环，该测试会红灯并指认这条边。
 function getUserModel() {
   return require('../models/User');
 }
@@ -30,8 +41,7 @@ function getUserModel() {
 // 未配置 REDIS_URL 时 publishInvalidate/onInvalidate 均为无操作。
 const sharedCache = require('./sharedCache');
 
-const permCache = new Map(); // userId -> { perms, gen, expireAt }
-let permCacheGeneration = 0;
+const permCache = new Map(); // userId -> { perms, expireAt }
 const PERM_CACHE_TTL_MS = 30 * 1000;
 const PERM_CACHE_MAX_SIZE = 2000;
 
@@ -81,7 +91,7 @@ async function getPermissions(userId) {
   const now = Date.now();
 
   const cached = permCache.get(key);
-  if (cached && cached.gen === permCacheGeneration && cached.expireAt > now) {
+  if (cached && cached.expireAt > now) {
     return cached.perms;
   }
 
@@ -99,7 +109,7 @@ async function getPermissions(userId) {
   if (!user) {
     // 缓存空结果短 TTL：防止不存在的 userId 反复穿透打库
     if (permCache.size >= PERM_CACHE_MAX_SIZE) permCache.clear();
-    permCache.set(key, { perms: [], gen: permCacheGeneration, expireAt: now + 5 * 1000 });
+    permCache.set(key, { perms: [], expireAt: now + 5 * 1000 });
     return [];
   }
 
@@ -112,7 +122,7 @@ async function getPermissions(userId) {
 
   // 容量保护：超过上限直接清空（重建成本远低于逐条淘汰的复杂度）
   if (permCache.size >= PERM_CACHE_MAX_SIZE) permCache.clear();
-  permCache.set(key, { perms, gen: permCacheGeneration, expireAt: now + PERM_CACHE_TTL_MS });
+  permCache.set(key, { perms, expireAt: now + PERM_CACHE_TTL_MS });
 
   return perms;
 }
@@ -125,7 +135,9 @@ function invalidatePermissionCacheLocal(userId) {
   if (userId !== undefined && userId !== null) {
     permCache.delete(String(userId));
   } else {
-    // 全局失效：清空即可（读取路径的 gen 校验与 clear 二选一，保留 clear）
+    // 全局失效：直接清空。此处曾写作「读取路径的 gen 校验与 clear 二选一」，
+    // 但代际变量（permCacheGeneration）从未被递增过、已删除（L-16），
+    // 读取路径并无 gen 校验——保留这句话会让维护者以为存在第二种失效机制。
     permCache.clear();
   }
 }

@@ -20,6 +20,11 @@ const ApiError = require('./ApiError');
 
 const MAX_CURSOR_LENGTH = 512;
 
+// L-14：排序键值的长度上限。游标是客户端可自由构造的入参，
+// `string` 分支此前对 v 不做任何校验，等值/范围查询会直接带上超长串；
+// 32 字符足以容纳真实主键（如 deviceCode），同时封住「用超长 v 撑爆查询」的路径。
+const MAX_CURSOR_VALUE_LENGTH = 32;
+
 // 评价报告 #13：sortField 防注入白名单格式。当前 4 个调用点均为服务层硬编码，
 // 但工具层不能假设未来调用者——排序键直接拼进查询键位（[sortField]），
 // 一旦被用户输入污染即可构造任意字段条件（含 $ 开头操作符）。
@@ -72,7 +77,31 @@ const decodeCursor = (cursor) => {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw invalid();
   if (!('v' in payload) || typeof payload.id !== 'string') throw invalid();
   if (!/^[0-9a-fA-F]{24}$/.test(payload.id)) throw invalid();
+  assertCursorValueShape(payload.v, invalid);
   return payload;
+};
+
+/**
+ * L-14：校验游标排序键值 v 的类型与体积，非法时调用 invalid() 抛出 400。
+ *
+ * 此前只看「键存在」（`'v' in payload`），于是 {v:{}}, {v:[]},
+ * {v:{$gt:''}}, {v:'x'.repeat(1e5)} 都能通过 decodeCursor。危害大小取决于
+ * 调用点的 valueType（见 applyCursorCondition）——date/number 分支会各自
+ * 兜住非法值，**只有 string 分支把它原样透传**进查询条件，代价是静默错页
+ * （详见该分支注释）。
+ *
+ * 此处按「标量或 null」收口：对象（含数组、含 $ 操作符对象）一律拒绝，
+ * 因为它们没有任何合法的排序键语义，只可能是构造出来的查询注入面。
+ * null 予以保留——字段显式为 null 的文档会产生这种游标（见 encodeCursor
+ * 调用点），拒绝它会让这些文档翻页中断，属另一方向的回归。
+ * 独立成函数也是复杂度棘轮（E-02）的要求：decodeCursor 因此回到 15 以内。
+ *
+ * @param {any} v 游标中的排序键值
+ * @param {() => never} invalid 抛错回调（复用调用方的 400 文案）
+ */
+const assertCursorValueShape = (v, invalid) => {
+  if (v !== null && typeof v !== 'string' && typeof v !== 'number') throw invalid();
+  if (typeof v === 'string' && v.length > MAX_CURSOR_VALUE_LENGTH) throw invalid();
 };
 
 /**
@@ -100,6 +129,20 @@ const applyCursorCondition = (baseQuery, { sortField, sortDir, cursor, valueType
   } else if (valueType === 'number') {
     v = Number(v);
     if (!Number.isFinite(v)) throw ApiError.badRequest('分页游标无效，请从第一页重新查询');
+  } else if (valueType === 'string') {
+    // L-14 修复：string 分支此前径直落入「原样透传」，没有任何类型校验。
+    // 后果不是抛错而是**静默错页**——v 若为对象/数组，Mongoose 会把它当
+    // 操作符对象或数组条件处理，查询语义与调用方预期不符：设备列表翻页
+    // 可能返回空页或全部数据，且没有任何可观测信号。
+    // 这里显式收敛为「非空字符串 + 长度上限」，非法即 400（与另两分支同口径）。
+    if (typeof v !== 'string' || v.length === 0 || v.length > MAX_CURSOR_VALUE_LENGTH) {
+      throw ApiError.badRequest('分页游标无效，请从第一页重新查询');
+    }
+  }
+  // 未识别的 valueType（含调用方漏传与拼写错误）按 fail-fast 处理：
+  // 静默透传会让游标条件退化为「无范围约束」，是最危险的一种失败形态。
+  else {
+    throw ApiError.badRequest('分页游标无效，请从第一页重新查询');
   }
 
   const op = sortDir === 1 ? '$gt' : '$lt';
@@ -142,4 +185,5 @@ module.exports = {
   decodeCursor,
   applyCursorCondition,
   buildCursorResult,
+  MAX_CURSOR_VALUE_LENGTH,
 };

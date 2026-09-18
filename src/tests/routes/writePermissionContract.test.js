@@ -61,10 +61,13 @@ describe('写接口权限契约（#23：后端逐接口鉴权是安全边界）'
   test('每个写路由都挂权限中间件，或显式声明 PERMISSION-EXEMPT 理由', () => {
     const violations = [];
     let writeRouteCount = 0;
+    let scannedFiles = 0; // 本轮复审新增：扫描覆盖的文件数（防「只在少数文件里扫」）
 
     for (const file of routeFiles) {
       const source = fs.readFileSync(path.join(ROUTES_DIR, file), 'utf8');
-      for (const block of extractRouteBlocks(source)) {
+      const blocks = extractRouteBlocks(source);
+      if (blocks.length > 0) scannedFiles += 1;
+      for (const block of blocks) {
         writeRouteCount += 1;
         const hasPermissionMiddleware =
           /checkPermission\s*\(/.test(block.source) ||
@@ -77,7 +80,13 @@ describe('写接口权限契约（#23：后端逐接口鉴权是安全边界）'
     }
 
     // 阈值防假绿：当前写路由规模（含豁免）显著大于该值时说明扫描漏了
-    expect(writeRouteCount).toBeGreaterThan(20);
+    // 阈值防假绿（本轮复审收紧）：实测写路由 56 条（2026-09-17，逐文件：
+    // alarm6 auth12 device6 inspection7 permission4 role4 security10 user5 wellKnown2）。
+    // 原阈值 20 仅为实测的 36%，只要扫描器坏掉 2/3 仍会绿——现收紧到 45（留约 20% 余量，
+    // 容忍正常的路由增删，但扫描器整体失效或大范围漏扫会立刻变红）。
+    // 另加自证断言：扫到的写路由须分布在 ≥8 个文件，防止「只在少数文件里扫」的局部失效。
+    expect(writeRouteCount).toBeGreaterThan(45);
+    expect(scannedFiles).toBeGreaterThanOrEqual(8);
 
     expect(violations).toEqual([]);
   });

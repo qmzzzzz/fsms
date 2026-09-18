@@ -211,6 +211,9 @@ describe('设备级会话管理接口（/api/auth/sessions）', () => {
         .delete(`/api/auth/sessions/${them.sid}`)
         .set('Authorization', `Bearer ${me.token}`);
       expect(res.status).toBe(404);
+      // 断言 SESSION_NOT_FOUND：服务层刻意不区分「不存在」与「不属于你」，
+      // 这个统一码就是防枚举契约本身
+      expect(res.body.errors.errorCode).toBe('SESSION_NOT_FOUND');
 
       // 对方仍可正常访问：越权防护落在查询条件上，不依赖「UUID 猜不到」
       const stillOk = await request(app)
@@ -242,6 +245,9 @@ describe('设备级会话管理接口（/api/auth/sessions）', () => {
         .delete(`/api/auth/sessions/${me.sid}`)
         .set('Authorization', `Bearer ${me.token}`);
       expect(res.status).toBe(400);
+      // 必须点名 CANNOT_REVOKE_CURRENT_SESSION：这条 400 的语义是「请改用登出」，
+      // 被别的 400（如参数校验）挡下时提示语与前端引导都会错
+      expect(res.body.errors.errorCode).toBe('CANNOT_REVOKE_CURRENT_SESSION');
 
       // 关键：拒绝之后当前令牌必须仍然可用，不能出现「报错了但人也掉线了」
       const ok = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${me.token}`);
@@ -255,6 +261,10 @@ describe('设备级会话管理接口（/api/auth/sessions）', () => {
           .delete(`/api/auth/sessions/${encodeURIComponent(bad)}`)
           .set('Authorization', `Bearer ${me.token}`);
         expect(res.status).toBe(400);
+        // 拒绝理由必须落在 sid 字段上：证明是 UUID 形状校验拦下的，
+        // 而非控制器里别的 400（注入串也不能靠「恰好不匹配」蒙混过关）
+        expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+        expect(res.body.errors.fieldErrors[0].path).toBe('sid');
       }
     });
 

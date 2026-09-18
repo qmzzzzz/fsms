@@ -153,4 +153,13 @@ inspectionSchema.index({ planStartTime: -1 });
 inspectionSchema.index({ assignedTo: 1 });
 inspectionSchema.index({ 'locations.building': 1 });
 
+// L-22：设备删除级联（DeviceService.deleteDevice）的两条 updateMany——
+// 一条按 devices 数组元素 $pull，一条按 findings.deviceId 数组元素 $unset。
+// 此前两者均无索引覆盖 → COLLSCAN。6 万巡检规模实测：
+//   { devices: id }        60,000 文档 / 139.44ms → 30 文档 / 1.37ms（101.8x）
+//   { 'findings.deviceId': id } 60,000 文档 / 155.47ms → 15 文档 / 1.21ms（128.5x）
+// 明细见 deliverables/性能实测基线-2026-09-16.json。
+inspectionSchema.index({ devices: 1 });
+inspectionSchema.index({ 'findings.deviceId': 1 });
+
 module.exports = mongoose.model('Inspection', inspectionSchema);

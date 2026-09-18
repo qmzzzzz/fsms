@@ -297,28 +297,47 @@ describe('WebSocket 全流程（批次 D2）', () => {
   });
 
   test('emitPermissionSync：重算失败降级为「仅通知」（无 permissionCodes 字段）', async () => {
+    // 【顺序无关修复】此前用 jest.resetModules() 清理桩，但它清空的是**全局**
+    // 模块注册表：本文件其余用例（随机顺序下可能排在其后）里 websocketService 的
+    // 惰性 require（models/User、middleware/tokenBlacklist）会重新执行，拿到绑定到
+    // 未连接 mongoose 的新副本 → findById/findOneAndUpdate buffering timed out，
+    // 表现为「握手认证成功」「已拉黑令牌」「tokenVersion 不匹配」等用例假红。
+    // 改用 isolateModules 隔离注册表：只让本次 require 用桩，全局注册表与已连接
+    // 的 mongoose 保持原样（与 originCheck/authMiddlewareGap 的收口一致）。
+    const permCalls = { n: 0 };
     jest.doMock('../../models/User', () => ({
       getPermissions: async () => {
+        permCalls.n += 1;
         throw new Error('db down');
       },
     }));
-    const FreshService = require('../../services/websocketService');
-    const svc = Object.create(FreshService.prototype);
-    svc.clients = new Map();
-    svc.userConnections = new Map([['u-fallback', new Set(['sid-fb'])]]);
-    const sent = [];
-    svc.io = {
-      to: (t) => ({ emit: (ev, data) => sent.push({ target: t, ev, data }) }),
-      sockets: { adapter: { rooms: new Map() } },
-    };
 
-    const result = await svc.emitPermissionSync(['u-fallback']);
+    let svc;
+    let pending;
+    const sent = [];
+    jest.isolateModules(() => {
+      const FreshService = require('../../services/websocketService');
+      svc = Object.create(FreshService.prototype);
+      svc.clients = new Map();
+      svc.userConnections = new Map([['u-fallback', new Set(['sid-fb'])]]);
+      svc.io = {
+        to: (t) => ({ emit: (ev, data) => sent.push({ target: t, ev, data }) }),
+        sockets: { adapter: { rooms: new Map() } },
+      };
+      // 在隔离注册表内发起：emitPermissionSync 首行的惰性 require 是同步执行的，
+      // 放在回调内才能确保拿到桩模块（jest 对已缓存模块的显式 mock 语义不稳）
+      pending = svc.emitPermissionSync(['u-fallback']);
+    });
+
+    const result = await pending;
     expect(result).toEqual({ notified: 1, offline: 0 });
     expect(sent).toHaveLength(1);
     expect(sent[0].ev).toBe('permission-sync');
+    // 桩必须真的被调用：否则「字段缺失」可能来自「用户不在线」等旁路，
+    // 断言会为错误的理由通过（原版无此断言，mock 未生效也照样绿）
+    expect(permCalls.n).toBe(1);
     expect(sent[0].data.permissionCodes).toBeUndefined();
 
     jest.dontMock('../../models/User');
-    jest.resetModules();
   });
 });

@@ -1,29 +1,29 @@
 /**
  * permissionController / userController 零散分支补齐
  *
- * 依据全量覆盖率的未覆盖分支行号（permissionHardening/securityDeep 已覆盖
- * 批量创建正向、自引用/环路主路径、锁定与重置等，这里补齐残余分支）：
+ * 【行号说明】本文件早期版本按「全量覆盖率的未覆盖分支行号」逐条标注 `L<行号>`。
+ * 2026-09-16 的多轮修复（控制器抽服务、安全加固）使 userController.js 行号整体漂移，
+ * 标注大量指向注释或空白行而失实。按「注释必须与实现同步」的要求，现改为语义描述、
+ * 不再写行号——函数名与行为描述是稳定锚点，行号不是。
  *
  * permissionController：
- *  - createPermission：validationResult 消费（L72-75）、parent 格式无效（L88-89）、
- *    parent 不存在（L91-93）
- *  - updatePermission：记录不存在 404（L132-133）、parent 不存在（L143-145）、
- *    MAX_DEPTH 提前终止 400（L167-169，模型层造 32 节点库内环）
- *  - deletePermission：不存在 404（L204-205）、有子权限（L209-211）、被角色引用（L216-218）
- *  - batchCreate：空/非数组（L245-246）、BulkWriteError 转 skipped（L317-329）
+ *  - createPermission：validationResult 消费、parent 格式无效、parent 不存在
+ *  - updatePermission：记录不存在 404、parent 不存在、MAX_DEPTH 提前终止 400
+ *    （模型层造 32 节点库内环）
+ *  - deletePermission：不存在 404、有子权限、被角色引用
+ *  - batchCreate：空/非数组、BulkWriteError 转 skipped
  *
  * userController：
- *  - getUsers：role 不存在 → 空分页（L103-118）
- *  - getUserById：数据范围外 403（L193-195）
- *  - createUser：校验失败（L206-208）、allowedIPs 非法（L214-218）、
- *    不存在角色（L238-239）、层级越权 403（L250-255）
- *  - updateUser：不存在 404（L296-297）、同级/更高级 403（L310-312）、
- *    改自身状态 400（L325-327）、无 user:lock 改状态 403（L332-337）、
- *    avatar 非法（L340-342）、allowedIPs 非法（L345-350）
- *  - assignRoles：空 roles（L411-413）、不存在用户（L416-417）、无效角色（L433-435）
- *  - deleteUser：不存在 404（L572-573）
- *  - batchDeleteUsers：空列表（L629-631）、超上限（路由层先拦，L633-635 为直调兜底）、
- *    非法 ID（同前）、含自己（L649-651）、含超管（L671-680）
+ *  - getUsers：role 不存在 → 空分页
+ *  - getUserById：数据范围外 403
+ *  - createUser：校验失败、allowedIPs 非法、不存在角色、层级越权 403
+ *  - updateUser：不存在 404、同级/更高级 403、改自身状态 400、
+ *    无 user:lock 改状态 403、avatar 非法、allowedIPs 非法
+ *  - assignRoles：空 roles、不存在用户、无效角色
+ *  - deleteUser：不存在 404
+ *  - batchDeleteUsers：空列表、超上限（路由层先拦，控制器内为直调兜底）、
+ *    非法 ID（同前）、含自己、含超管（整批拒绝；层级闸平时遮蔽该分支，
+ *    用例通过下调 SUPER_ADMIN 的 level 构造可达状态）
  *
  * 集成风格：supertest + createApp + JWT 直签。安全员刻意不含 user:lock，
  * 用于「改状态须持 user:lock」分支。
@@ -186,12 +186,15 @@ describe('permission/user 控制器零散分支补齐', () => {
   // ================= permissionController =================
 
   describe('permissionController', () => {
-    test('createPermission：缺必填字段 → 400（validationResult 被真实消费）（L72-75）', async () => {
+    test('createPermission：缺必填字段 → 400（validationResult 被真实消费）', async () => {
       const res = await sec.post('/api/permissions', { description: '缺少 name/code' });
       expect(res.status).toBe(400);
+      // 「被真实消费」的判据是字段明细透传，不是 400（路由挡住同样是 400）
+      expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+      expect(res.body.errors.fieldErrors.length).toBeGreaterThan(0);
     });
 
-    test('createPermission：parent 非法 ObjectId 格式 → 路由层 isMongoId 先行 400（控制器 L88-89 为兜底，经 HTTP 不可达）', async () => {
+    test('createPermission：parent 非法 ObjectId 格式 → 路由层 isMongoId 先行 400（控制器内为兜底，经 HTTP 不可达）', async () => {
       // 路由 body('parent').optional().isMongoId() 先于控制器校验拦截，
       // 控制器内同义分支仅在绕过路由的直调场景可达（见防御性兜底说明）
       const res = await sec.post('/api/permissions', {
@@ -205,7 +208,7 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(res.body.message).toContain('数据验证失败');
     });
 
-    test('createPermission：parent 不存在 → 400（L91-93）', async () => {
+    test('createPermission：parent 不存在 → 400', async () => {
       const res = await sec.post('/api/permissions', {
         name: `upb_${stamp}_ptwo`,
         code: pcode('ptwo'),
@@ -217,12 +220,32 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(res.body.message).toContain('父级权限不存在');
     });
 
-    test('updatePermission：记录不存在 → 404（L132-133）', async () => {
-      const res = await sec.put('/api/permissions/000000000000000000000002', { name: 'x' });
-      expect(res.status).toBe(404);
+    test('updatePermission：非法字段值 → 400（控制器自身消费 validationResult，非仅靠路由）', async () => {
+      // 路由层 updatePermissionValidation 只挂链不消费；控制器里的 validationResult
+      // 是唯一的直接消费点。这里刻意构造「能过路由链、控制器必须读出错误」的输入——
+      // 实际做法：name 超长同时命中路由链的 withMessage 与控制器透传。
+      // 变异验证：把控制器里的 'VALIDATION_FAILED' 换成别的已注册 400 码，本用例必须转红。
+      const created = await superPost('/api/permissions', {
+        name: `upb_${stamp}_uval`,
+        code: pcode('uval'),
+        type: 'api',
+        module: 'system',
+      });
+      const id = created.body?.data?._id;
+      const res = await sec.put(`/api/permissions/${id}`, { name: 'A'.repeat(51) });
+      expect(res.status).toBe(400);
+      // 明细必须透传：字段名与错误信息同时可见，前端才能定位到具体输入框
+      expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+      expect(res.body.errors.fieldErrors[0].path).toBe('name');
     });
 
-    test('updatePermission：parent 不存在 → 400（L143-145）', async () => {
+    test('updatePermission：记录不存在 → 404', async () => {
+      const res = await sec.put('/api/permissions/000000000000000000000002', { name: 'x' });
+      expect(res.status).toBe(404);
+      expect(res.body.errors.errorCode).toBe('PERMISSION_NOT_FOUND');
+    });
+
+    test('updatePermission：parent 不存在 → 400', async () => {
       // tag 只可用纯字母：action 正则 [a-z_]+ 不含数字（p3 这类会被路由 400）
       const created = await superPost('/api/permissions', {
         name: `upb_${stamp}_pnf`,
@@ -238,7 +261,7 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(res.body.message).toContain('父级权限不存在');
     });
 
-    test('updatePermission：祖先链深达 MAX_DEPTH → 提前终止 400（防御库中脏环挂死）（L167-169）', async () => {
+    test('updatePermission：祖先链深达 MAX_DEPTH → 提前终止 400（防御库中脏环挂死）', async () => {
       // 用模型层直接造一个 32 节点的库内环：环上节点 parent 首尾相接，
       // 从任何入环点回溯都既到不了顶（每个节点都有 parent）、也遇不到
       // 被更新的 X 自身 → 循环必然走到 depth >= MAX_DEPTH 的提前终止分支。
@@ -278,9 +301,10 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(res.body.message).toContain('权限树层级异常');
     });
 
-    test('deletePermission：不存在 404 / 有子权限 400 / 被角色引用 400（L204-218）', async () => {
+    test('deletePermission：不存在 404 / 有子权限 400 / 被角色引用 400', async () => {
       const notFound = await sec.delete('/api/permissions/000000000000000000000004');
       expect(notFound.status).toBe(404);
+      expect(notFound.body.errors.errorCode).toBe('PERMISSION_NOT_FOUND');
 
       const parent = await superPost('/api/permissions', {
         name: `upb_${stamp}_dp`,
@@ -312,12 +336,13 @@ describe('permission/user 控制器零散分支补齐', () => {
       await Role.deleteOne({ _id: role._id });
     });
 
-    test('batchCreate：空列表 → 400（L245-246）', async () => {
+    test('batchCreate：空列表 → 400', async () => {
       const res = await sec.post('/api/permissions/batch', { permissions: [] });
       expect(res.status).toBe(400);
+      expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
     });
 
-    test('batchCreate：insertMany BulkWriteError → 已插入保留、失败项转 skipped（L317-329）', async () => {
+    test('batchCreate：insertMany BulkWriteError → 已插入保留、失败项转 skipped', async () => {
       const PermissionModel = require('../../models/Permission');
       const spy = jest.spyOn(PermissionModel, 'insertMany').mockRejectedValue({
         name: 'BulkWriteError',
@@ -339,7 +364,7 @@ describe('permission/user 控制器零散分支补齐', () => {
   // ================= userController =================
 
   describe('userController', () => {
-    test('getUsers：role 编码不存在 → 空分页而非全量（L103-118）', async () => {
+    test('getUsers：role 编码不存在 → 空分页而非全量', async () => {
       const res = await sec.get('/api/users?role=NO_SUCH_ROLE_CODE');
       expect(res.status).toBe(200);
       // ApiResponse.paginated 的 pagination 在响应顶层（与 data 平级）
@@ -347,21 +372,23 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(res.body.data).toEqual([]);
     });
 
-    test('getUserById：数据范围外用户 → 403 横向越权拦截（L193-195）', async () => {
+    test('getUserById：数据范围外用户 → 403 横向越权拦截', async () => {
       const outsiderId = globalThis.__upbFixtures.outsiderId;
       const res = await sec.get(`/api/users/${outsiderId}`);
-      expect([403, 200]).toContain(res.status); // scope 语义若为 department 命中则 403
-      if (res.status === 403) {
-        expect(res.body.message).toContain('无权查看');
-      }
+      // 实测确定行为（P1-29 修复：原为 expect([403,200]).toContain —— 允许越权成功通过）；
+      // 安全员（level 5 → dataScope=self）读其他部门用户 → assertRecordInScope 拒绝
+      expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('USER_VIEW_FORBIDDEN');
     });
 
-    test('createUser：缺必填字段 → 400（L206-208）', async () => {
+    test('createUser：缺必填字段 → 400', async () => {
       const res = await sec.post('/api/users', { username: `upbtarget${stamp}a` });
       expect(res.status).toBe(400);
+      expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+      expect(res.body.errors.fieldErrors.length).toBeGreaterThan(0);
     });
 
-    test('createUser：allowedIPs 规则非法 → 400（L214-218）', async () => {
+    test('createUser：allowedIPs 规则非法 → 400', async () => {
       const res = await sec.post('/api/users', {
         username: `upbtarget${stamp}b`,
         email: `upbtarget${stamp}b@example.com`,
@@ -372,7 +399,7 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(res.body.message).toContain('IP 范围规则格式有误');
     });
 
-    test('createUser：包含不存在的角色 → 400（L238-239）', async () => {
+    test('createUser：包含不存在的角色 → 400', async () => {
       const res = await sec.post('/api/users', {
         username: `upbtarget${stamp}c`,
         email: `upbtarget${stamp}c@example.com`,
@@ -383,7 +410,7 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(res.body.message).toContain('不存在的角色');
     });
 
-    test('createUser：分配高于自身层级的角色 → 403（L250-255）', async () => {
+    test('createUser：分配高于自身层级的角色 → 403', async () => {
       const res = await sec.post('/api/users', {
         username: `upbtarget${stamp}d`,
         email: `upbtarget${stamp}d@example.com`,
@@ -394,44 +421,46 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(res.body.message).toContain('无权分配高于自身层级');
     });
 
-    test('updateUser：目标不存在 → 404（L296-297）', async () => {
+    test('updateUser：目标不存在 → 404', async () => {
       const res = await sec.put('/api/users/000000000000000000000006', { realName: 'x' });
       expect(res.status).toBe(404);
+      // 404 必须点名 USER_NOT_FOUND：与「越权被拒（403）」「校验失败（400）」区分开
+      expect(res.body.errors.errorCode).toBe('USER_NOT_FOUND');
     });
 
-    test('updateUser：同级或更高级目标 → 403（L310-312）', async () => {
+    test('updateUser：同级或更高级目标 → 403', async () => {
       const superUserId = globalThis.__upbFixtures.superUserId;
       const res = await sec.put(`/api/users/${superUserId}`, { realName: '越权改名' });
       expect(res.status).toBe(403);
       expect(res.body.message).toContain('无权修改同级或更高级别');
     });
 
-    test('updateUser：变更自身状态 → 400 自我锁死防护（L325-327）', async () => {
+    test('updateUser：变更自身状态 → 400 自我锁死防护', async () => {
       const res = await sec.put(`/api/users/${secUserId}`, { status: 'inactive' });
       expect(res.status).toBe(400);
       expect(res.body.message).toContain('不能通过本接口修改自身账户状态');
     });
 
-    test('updateUser：改他人状态但缺 user:lock → 403（L332-337）', async () => {
+    test('updateUser：改他人状态但缺 user:lock → 403', async () => {
       const outsiderId = globalThis.__upbFixtures.outsiderId;
       const res = await sec.put(`/api/users/${outsiderId}`, { status: 'inactive' });
       expect(res.status).toBe(403);
       expect(res.body.message).toContain('user:lock');
     });
 
-    test('updateUser：avatar 非法 → 400（L340-342）', async () => {
+    test('updateUser：avatar 非法 → 400', async () => {
       const res = await sec.put(`/api/users/${secUserId}`, { avatar: 'javascript:alert(1)' });
       expect(res.status).toBe(400);
       expect(res.body.message).toContain('头像');
     });
 
-    test('updateUser：allowedIPs 非法 → 400（L345-350）', async () => {
+    test('updateUser：allowedIPs 非法 → 400', async () => {
       const res = await sec.put(`/api/users/${secUserId}`, { allowedIPs: 'bad-rule' });
       expect(res.status).toBe(400);
       expect(res.body.message).toContain('IP 范围规则格式有误');
     });
 
-    test('assignRoles：空 roles 400 / 用户不存在 404 / 无效角色 ID 400（L411-434）', async () => {
+    test('assignRoles：空 roles 400 / 用户不存在 404 / 无效角色 ID 400', async () => {
       const empty = await sec.put(`/api/users/${secUserId}/roles`, { roles: [] });
       expect(empty.status).toBe(400);
 
@@ -447,18 +476,42 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(invalid.body.message).toContain('无效的角色');
     });
 
-    test('deleteUser：目标不存在 → 404（L572-573）', async () => {
+    test('deleteUser：目标不存在 → 404', async () => {
       const res = await sec.delete('/api/users/000000000000000000000009');
       expect(res.status).toBe(404);
+      expect(res.body.errors.errorCode).toBe('USER_NOT_FOUND');
     });
 
-    test('batchDeleteUsers：空列表 / 超上限 / 非法 ID / 含自己 → 逐层拒绝（L629-651）', async () => {
+    test('deleteUser：目标是超管 → 403 CANNOT_DELETE_SUPER_ADMIN（单例守卫，非层级闸代劳）', async () => {
+      // 与 batchDeleteUsers 同因：SUPER_ADMIN 的 level=10 平时恒被层级闸先拦，
+      // 该守卫只在「level 被下调」时才是唯一防线（源码注释如此声明）。
+      // 变异验证：删掉 targetRoles.some(isSuperAdminRole) 判断，本用例转红。
+      const Role = require('../../models/Role');
+      const User = require('../../models/User');
+      const superUserId = globalThis.__upbFixtures.superUserId;
+      const superRole = await Role.findOne({ code: 'SUPER_ADMIN' });
+      const originalLevel = superRole.level;
+      try {
+        superRole.level = 1; // 低于安全员的 5，让层级闸放行
+        await superRole.save();
+
+        const res = await sec.delete(`/api/users/${superUserId}`);
+        expect(res.status).toBe(403);
+        expect(res.body.errors.errorCode).toBe('CANNOT_DELETE_SUPER_ADMIN');
+        expect(await User.findById(superUserId)).not.toBeNull(); // 确实没删
+      } finally {
+        superRole.level = originalLevel;
+        await superRole.save();
+      }
+    });
+
+    test('batchDeleteUsers：空列表 / 超上限 / 非法 ID / 含自己 → 逐层拒绝', async () => {
       const empty = await sec.delete('/api/users/batch', { ids: [] });
       expect(empty.status).toBe(400);
 
       // 断言口径：101 条在路由层 body('ids').isArray({min:1,max:100}) 就被
       // validationResult 统一拒绝（「数据验证失败」）。控制器内 BATCH_DELETE_MAX
-      // 上限检查（L633-635）是绕过路由直调时的兜底，经 HTTP 恒先被路由拦截。
+      // 上限检查是绕过路由直调时的兜底，经 HTTP 恒先被路由拦截。
       const oversized = await sec.delete('/api/users/batch', {
         ids: Array.from({ length: 101 }, () => '000000000000000000000000'),
       });
@@ -466,7 +519,7 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(oversized.body.message).toContain('数据验证失败');
 
       // 同上口径：非法 ID 由路由层 ids.*.isMongoId 拦截，控制器返回统一 400；
-      // 控制器内的 invalidIds 过滤（L640-646）同样仅为直调兜底
+      // 控制器内的 invalidIds 过滤同样仅为直调兜底
       const invalidIds = await sec.delete('/api/users/batch', { ids: ['bad-id'] });
       expect(invalidIds.status).toBe(400);
       expect(invalidIds.body.message).toContain('数据验证失败');
@@ -475,12 +528,36 @@ describe('permission/user 控制器零散分支补齐', () => {
       expect(selfIn.status).toBe(400);
     });
 
-    test('batchDeleteUsers：批次含超管 → 整批拒绝（批量接口不得成为保护绕过路径）（L671-680）', async () => {
+    test('batchDeleteUsers：批次含超管 → 整批拒绝（批量接口不得成为保护绕过路径）', async () => {
+      // 本轮复审重写：原用例传了 ['0000...000a', superUserId] —— 前一个 ID 不存在，
+      // 响应在「目标数 != 请求数」处就返回 USER_ID_NOT_FOUND_IN_LIST（实测确认），
+      // 超管分支从未被执行。变异验证：把 superTarget 的判断整个删掉，原用例仍全绿。
+      //
+      // 超管分支平时被层级闸遮蔽（SUPER_ADMIN level=10 恒 >= 操作者层级），
+      // 只在「SUPER_ADMIN 的 level 被下调」时生效——源码注释把这条兜底写成了
+      // 「若 SUPER_ADMIN 的 level 被下调，层级校验会失效而本判断仍然生效」。
+      // 因此这里直接把该角色的 level 下调到操作者之下，构造出层级闸放行、
+      // 只有超管兜底能拦住的状态。
+      const Role = require('../../models/Role');
       const superUserId = globalThis.__upbFixtures.superUserId;
-      const res = await sec.delete('/api/users/batch', {
-        ids: ['00000000000000000000000a', superUserId],
-      });
-      expect(res.status).toBe(400);
+      const superRole = await Role.findOne({ code: 'SUPER_ADMIN' });
+      const originalLevel = superRole.level;
+      try {
+        superRole.level = 1; // 低于安全员的 5，绕开层级闸
+        await superRole.save();
+
+        const res = await sec.delete('/api/users/batch', { ids: [superUserId] });
+        // 403 而非 400：必须命中 CANNOT_DELETE_SUPER_ADMIN，而不是别的拒绝路径
+        expect(res.status).toBe(403);
+        expect(res.body.errors.errorCode).toBe('CANNOT_DELETE_SUPER_ADMIN');
+
+        // 对照组：同一次请求里用户的角色未被删除（整批拒绝，不是部分删除）
+        const User = require('../../models/User');
+        expect(await User.findById(superUserId)).not.toBeNull();
+      } finally {
+        superRole.level = originalLevel;
+        await superRole.save();
+      }
     });
   });
 });

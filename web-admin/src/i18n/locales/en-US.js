@@ -104,7 +104,10 @@ export default {
     noData: 'No Data',
     total: 'Total',
     items: 'items',
+    // 用户名缺失时的回退文案（与 zh-CN 的 common.notLoggedIn 同键）
+    notLoggedIn: 'Not signed in',
     all: 'All',
+    other: 'Other',
     enabled: 'Enabled',
     disabled: 'Disabled',
     yes: 'Yes',
@@ -409,6 +412,8 @@ export default {
     clearPermConfirm:
       'This removes every permission from the role. Users holding it will immediately lose the corresponding abilities (effectively frozen). Continue?',
     wsDisconnected: 'Realtime connection lost. Data on this page may be stale — reload to restore.',
+    typeMenu: 'Menu',
+    typeData: 'Data',
   },
   report: {
     title: 'Reports',
@@ -876,7 +881,7 @@ export default {
       'Review your details before submitting. After submission, wait for an administrator to assign a role.',
     summaryTitle: 'Review Details',
     summaryEmpty: 'Not provided',
-    pwdRuleLength: '8-64 characters',
+    pwdRuleLength: '12-64 characters',
     pwdRuleUpper: 'Uppercase letter',
     pwdRuleLower: 'Lowercase letter',
     pwdRuleDigit: 'Digit',
@@ -912,6 +917,8 @@ export default {
     roleCodeLen: 'Role code must be 1-50 characters',
     roleCodePattern:
       'Role code allows uppercase letters and underscores only (input is auto-uppercased)',
+    locationLen: 'Alarm location must be 1-100 characters',
+    descriptionLen: 'Alarm description must be 1-500 characters',
   },
   dashboard: {
     welcome: 'Welcome back to Fire Safety Management System!',
@@ -988,6 +995,11 @@ export default {
     sessionExpired: 'Session expired, please sign in again',
     networkError: 'Network error, please check your connection',
     requestConfigError: 'Request configuration error',
+    methodNotAllowed: 'Request method not allowed',
+    conflict: 'Conflict: the data was changed by another operation; please refresh and retry',
+    payloadTooLarge: 'Request body is too large and was rejected by the server',
+    unsupportedMediaType: 'Unsupported request content type',
+    requestHeaderTooLarge: 'Request headers are too large or too many and were rejected',
   },
 
   // Backend error-code messages (errors.errorCode → i18n key mapping in utils/api.js).
@@ -1094,12 +1106,12 @@ export default {
     ipListTypeInvalid: 'List type must be black or white',
     ipListDurationOutOfRange: 'Duration must be between 0 (permanent) and 8760 hours',
     ipFullRangeSuperAdminOnly:
-      'The full-range entry (${ip}) matches every IP and can only be configured by a super administrator; use a narrower range if you need to restrict specific addresses',
+      'The full-range entry ({ip}) matches every IP and can only be configured by a super administrator; use a narrower range if you need to restrict specific addresses',
     ipCoveredByWhitelist:
-      'This IP is already covered by whitelist entry (${coveredBy}); the whitelist takes precedence over the blacklist. Remove it from the whitelist first if you need to block it',
+      'This IP is already covered by whitelist entry ({coveredBy}); the whitelist takes precedence over the blacklist. Remove it from the whitelist first if you need to block it',
     ipListEntryNotFound: 'List entry not found',
     ipFullRangeRemoveSuperAdminOnly:
-      'The full-range entry (${ip}) can only be removed by a super administrator: it underpins rate-limit exemption and trust marking, and removing it affects access control for every IP',
+      'The full-range entry ({ip}) can only be removed by a super administrator: it underpins rate-limit exemption and trust marking, and removing it affects access control for every IP',
     permissionNotFound: 'Permission not found',
     parentPermissionSelf: 'A permission cannot be its own parent',
     parentPermissionNotFound: 'Parent permission not found',
@@ -1108,14 +1120,14 @@ export default {
     permissionTreeDepthAnomaly:
       'Abnormal permission tree depth; please ask an administrator to check parent references',
     permissionListInvalid: 'Please provide a valid permission list',
-    exportFormatUnsupported: 'Unsupported export format: ${format}',
+    exportFormatUnsupported: 'Unsupported export format: {format}',
     reportTypeUnsupported: 'Unsupported report type',
     roleNotFound: 'Role not found',
     roleViewForbidden: 'Not allowed to view this role',
     roleCodeTaken: 'Role code already exists',
     roleCreateHigherLevelForbidden: 'Not allowed to create a role above your own level',
     cannotGrantWildcardPermission: 'Cannot grant the super administrator permission (*:*)',
-    permissionGrantForbidden: 'Not allowed to grant the following permissions: ${permissions}',
+    permissionGrantForbidden: 'Not allowed to grant the following permissions: {permissions}',
     roleUpdateForbidden: 'Not allowed to modify this role',
     roleUpdateHigherLevelForbidden: 'Not allowed to modify a role above your own level',
     builtinRoleNameLevelLocked: 'Built-in roles cannot have their name or level modified',
@@ -1126,14 +1138,14 @@ export default {
     roleDeleteForbidden: 'Not allowed to delete this role',
     roleDeleteHigherLevelForbidden: 'Not allowed to delete a role above your own level',
     builtinRoleNotDeletable: 'Built-in roles cannot be deleted',
-    roleInUse: '${userCount} user(s) are using this role; please remove the role from them first',
+    roleInUse: '{userCount} user(s) are using this role; please remove the role from them first',
     permissionIdRequired: 'Please provide at least one valid permission ID',
     permissionIdInvalid: 'One or more permission IDs are invalid',
     rolePermPeerOrHigherForbidden:
       'Not allowed to modify permissions of a role at or above your own level',
     rolePermBaseHigherLevelForbidden:
       'Not allowed to adjust permissions based on a role above your own level',
-    permissionAssignForbidden: 'Not allowed to assign the following permissions: ${permissions}',
+    permissionAssignForbidden: 'Not allowed to assign the following permissions: {permissions}',
     targetUserIdInvalid: 'Target user ID format is invalid',
     targetUserNotFound: 'Target user not found',
     targetUserLacksRole:
@@ -1170,10 +1182,12 @@ export default {
     configLoginCaptchaMustBeBoolean: 'Parameter loginCaptchaEnabled must be a boolean',
     configRegisterCaptchaMustBeBoolean: 'Parameter registerCaptchaEnabled must be a boolean',
     userViewForbidden: 'Not allowed to view this user',
-    ipRulesFormatInvalid: 'Invalid IP range rule format: ${rules}',
+    ipRulesFormatInvalid: 'Invalid IP range rule format: {rules}',
     roleNotFoundInList: 'The list contains a role that does not exist',
     roleAssignHigherLevelForbidden: 'Not allowed to assign a role above your own level',
     userUpdatePeerOrHigherForbidden: 'Not allowed to modify a peer or higher-level user',
+    userScopeFieldForbidden:
+      'Not allowed to change the department or IP access scope of this user (outside your data scope)',
     cannotChangeOwnStatus:
       'You cannot change your own account status through this endpoint; please ask another administrator',
     userStatusChangeForbidden:
@@ -1184,14 +1198,14 @@ export default {
     userRoleAssignPeerOrHigherForbidden:
       'Not allowed to change roles of a peer or higher-level user',
     roleAssignForeignPeerForbidden:
-      'Not allowed to assign peer-level roles you do not hold: ${foreignRoles}',
+      'Not allowed to assign peer-level roles you do not hold: {foreignRoles}',
     userDeletePeerOrHigherForbidden: 'Not allowed to delete a peer or higher-level user',
     userIdListInvalid: 'Please provide a valid user ID list',
-    batchDeleteLimitExceeded: 'A single batch delete supports at most ${max} users',
-    userIdFormatInvalidInList: 'The list contains an invalid user ID format: ${invalidIds}',
+    batchDeleteLimitExceeded: 'A single batch delete supports at most {max} users',
+    userIdFormatInvalidInList: 'The list contains an invalid user ID format: {invalidIds}',
     userIdNotFoundInList: 'The list contains a user ID that does not exist',
     batchDeletePeerOrHigherForbidden:
-      'Not allowed to delete a peer or higher-level user: ${username}',
+      'Not allowed to delete a peer or higher-level user: {username}',
     authTokenMissing: 'Authentication token not provided',
     authTokenRevoked: 'Authentication token is no longer valid, please sign in again',
     accountDisabled: 'Account has been disabled, please contact an administrator',
@@ -1205,7 +1219,7 @@ export default {
     payloadExceedsLimit: 'Request body exceeds the size limit',
     internalError: 'Internal server error, please try again later',
     metricsInternalOnly: 'The metrics endpoint is restricted to internal networks',
-    httpMethodUnsupported: 'Unsupported request method: ${method}',
+    httpMethodUnsupported: 'Unsupported request method: {method}',
     headerCountExcessive: 'Abnormal number of request headers',
     headerNameInvalid: 'Invalid request header format',
     headerValueTooLong: 'Request header value exceeds the limit',
@@ -1213,7 +1227,7 @@ export default {
     contentLengthInvalid: 'Invalid Content-Length header',
     payloadTooLarge: 'Request body is too large',
     contentTypeMissing: 'Request is missing the Content-Type header',
-    contentTypeUnsupported: 'Unsupported Content-Type: ${mediaType}',
+    contentTypeUnsupported: 'Unsupported Content-Type: {mediaType}',
     permissionDenied: 'You do not have permission to perform this action',
     permissionCheckFailed: 'An error occurred while verifying permissions',
     roleNotAllowed: 'Your role is not allowed to perform this action',
@@ -1226,10 +1240,10 @@ export default {
     reauthMfaIncorrect: 'MFA code is incorrect; verification failed',
     reauthProcessFailed: 'An error occurred during identity verification',
     ipBlocked: 'Your IP has been blocked',
-    uploadFileTooLarge: 'File ${filename} exceeds the maximum size of ${maxSize}MB',
-    uploadTypeNotAllowed: 'File type not allowed: ${mimetype}',
-    uploadExtNotAllowed: 'File extension not allowed: .${ext}',
-    paramMustBeValidObjectId: 'Parameter ${name} must be a valid object ID',
+    uploadFileTooLarge: 'File {filename} exceeds the maximum size of {maxSize}MB',
+    uploadTypeNotAllowed: 'File type not allowed: {mimetype}',
+    uploadExtNotAllowed: 'File extension not allowed: .{ext}',
+    paramMustBeValidObjectId: 'Parameter {name} must be a valid object ID',
     publicRegistrationDisabled:
       'Public registration is currently disabled; please contact an administrator to create an account',
     registerServiceUnavailable:

@@ -8,7 +8,7 @@
 //   FCP  —— paint 首帧内容绘制
 //   LCP  —— largest-contentful-paint 的最后一条（规范取最后一次）
 //   CLS  —— layout-shift 中非用户输入引发的位移累计
-//   INP  —— event 交互时长的约 P98；无交互数据时回退 FID
+//   INP  —— event 交互时长的 P75（P3-69；交互样本极少时即最差值）
 // 结果在页面隐藏时一次性上报（record('vitals', ...)），避免采集本身
 // 成为运行时开销来源。不支持的浏览器静默跳过，绝不影响业务。
 
@@ -95,8 +95,15 @@ export function initWebVitals(onMetric) {
     if (clsValue > 0) report('CLS', Math.round(clsValue * 1000) / 1000)
     if (durations.length > 0) {
       durations.sort((a, b) => a - b)
-      // 官方 INP 取近似 P98（交互样本极少时即最差值）
-      const idx = Math.min(durations.length - 1, Math.floor(durations.length * 0.98))
+      // P3-69：INP 口径改为 P75。数字来自 Google 对 INP 的定义（「第 75 百分位
+      // 的交互延迟」）；此前用 P98 会系统性高估——样本越多越贴近最差值，
+      // 面板上显示的就不再是「多数用户的实际体验」。
+      // 分位取 nearest-rank（ceil(n*p)-1，最小 0 且不越界）：n=1 即该样本，
+      // n≤3 时取最大（样本不足以支撑分位时宁可保守）。
+      const idx = Math.max(
+        0,
+        Math.min(durations.length - 1, Math.ceil(durations.length * 0.75) - 1)
+      )
       report('INP', durations[idx])
     } else if (fidValue !== null) {
       report('FID', fidValue)

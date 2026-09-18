@@ -208,15 +208,48 @@ describe('ipRange（用户 IP 访问范围规则）', () => {
       expect(r.reason).toBe('invalid_client_ip');
     });
 
-    test('非法规则片段被忽略，不影响其余规则判定', () => {
+    test('含非法规则片段时整体拒绝（L-04 fail-closed）', () => {
+      // 配置文本已含读不懂的片段 → 不再逐条跳过，整条规则视为不可用
       const rule = 'bad-rule, 192.168.1.1';
-      expect(isIPAllowed('192.168.1.1', rule).allowed).toBe(true);
-      expect(isIPAllowed('192.168.1.2', rule).allowed).toBe(false);
+      const r = isIPAllowed('192.168.1.1', rule);
+      expect(r.allowed).toBe(false);
+      expect(r.reason).toBe('invalid_rules');
     });
 
-    test('全部规则非法时等价于无允许项，按放行处理', () => {
-      // 允许项解析后为空且无排除项 → 不构成限制，避免因误填导致账户完全无法登录
-      expect(isIPAllowed('8.8.8.8', 'bad, worse').allowed).toBe(true);
+    test('写坏的排除规则不再静默放行（L-04 核心危害）', () => {
+      // '!10.0.0.0/33' 本意是拉黑 10.0.0.0/8，前缀长度越界导致解析失败。
+      // 原实现在此对该网段完全放行——与配置意图相反，且无任何提示。
+      const r = isIPAllowed('10.1.2.3', '!10.0.0.0/33');
+      expect(r.allowed).toBe(false);
+      expect(r.reason).toBe('invalid_rules');
+    });
+
+    test('全部规则非法时同样拒绝，而非回落到不限制', () => {
+      expect(isIPAllowed('8.8.8.8', 'bad, worse').allowed).toBe(false);
+    });
+
+    test('文本超长或条目超量时拒绝（L-04 fail-closed）', () => {
+      const tooLong = '192.168.1.1,' + 'x'.repeat(9000);
+      expect(isIPAllowed('192.168.1.1', tooLong)).toMatchObject({
+        allowed: false,
+        reason: 'rules_too_long',
+      });
+
+      const tooMany = Array.from(
+        { length: 201 },
+        (_, i) => `10.0.${Math.floor(i / 256)}.${i % 256}`
+      ).join(',');
+      expect(isIPAllowed('10.0.0.1', tooMany)).toMatchObject({
+        allowed: false,
+        reason: 'too_many_rules',
+      });
+    });
+
+    test('仅排除项且语法合法时，未被排除仍放行（不受 L-04 影响）', () => {
+      // 与上条区别：规则可正常解析，只是没有允许项——这是设计内的语义
+      const r = isIPAllowed('8.8.8.8', '!192.168.1.100');
+      expect(r.allowed).toBe(true);
+      expect(r.reason).toBe('no_rules');
     });
 
     test('多条规则命中时返回首个命中的规则文本', () => {

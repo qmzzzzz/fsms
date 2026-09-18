@@ -11,7 +11,9 @@
  *   - 全密文轨成功改密（confirmPassword 缺省以解密结果为准）
  *
  * 注意 passwordChangeLimiter 为 5 次/15 分钟（userId+IP 组合键）：
- * 本套件恰好 4 个请求，不得再往同用户追加改密请求。
+ * 限流键是「userId+IP」，各用户各自计数。前三条用例对一个账号共 3 个请求；
+ * 第四条（成功改密）改用专属账号，自身 1 个请求——两账号均未触及上限。
+ * 往任一账号追加改密请求前，先核对它当前已用的次数。
  */
 
 const request = require('supertest');
@@ -88,15 +90,41 @@ describe('S5 改密密文轨（/api/security/change-password）', () => {
   });
 
   test('全密文轨成功改密（confirmPassword 缺省以解密结果为准）', async () => {
+    // 【顺序无关修复】改密是**破坏性**操作：口令被永久改掉、tokenVersion 递增，
+    // 该账号此前签发的令牌全部作废。此前本用例复用共享的 user/token，随机顺序下
+    // 它先跑时，前三条用例手里的 token 已被吊销 → 一律 401 而非各自期望的 400
+    // （seed=42 实测：两条期望 400 实得 401）。凭据状态属账号私有：
+    // 本用例自建专属账号并自行签发令牌，不改动、也不依赖其他用例的账号。
+    const chgUser = await User.create({
+      username: `${stamp}chg`,
+      email: `${stamp}chg@example.com`,
+      password: PASSWORD,
+    });
+    const chgToken = jwt.sign(
+      { userId: String(chgUser._id), username: chgUser.username, tokenVersion: 0 },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
     const goodCurrent = await buildLoginEnvelope(PASSWORD);
     const goodNew = await buildLoginEnvelope(NEW_PASSWORD);
-    const res = await put({ encCurrentPassword: goodCurrent, encNewPassword: goodNew });
+    const res = await request(app)
+      .put('/api/security/change-password')
+      .set('Authorization', `Bearer ${chgToken}`)
+      .send({ encCurrentPassword: goodCurrent, encNewPassword: goodNew });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
 
-    const after = await User.findById(user._id).select('+password +tokenVersion');
+    const after = await User.findById(chgUser._id).select('+password +tokenVersion');
     expect(await after.comparePassword(NEW_PASSWORD)).toBe(true);
     // 改密后全部会话被吊销（与明文轨同口径）
     expect(after.tokenVersion).toBe(1);
+
+    // 吊销的真实性：改密前的令牌必须立刻不可用（只断 tokenVersion 字段等于信任内部实现，
+    // 打一次受保护接口才能证明「旧会话确实被踢掉」这个对外承诺成立）
+    const reuseOld = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${chgToken}`);
+    expect(reuseOld.status).toBe(401);
   });
 });

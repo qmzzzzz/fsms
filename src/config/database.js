@@ -5,6 +5,7 @@
 
 const mongoose = require('mongoose');
 const logger = require('../utils/logger');
+const { exitAfterFlush } = require('../utils/loggerFlush');
 const config = require('./index');
 
 const MAX_RETRIES = 5;
@@ -22,12 +23,24 @@ const retryDelayMs = (attempt) => {
   return Math.round(base * (0.5 + Math.random()));
 };
 
-// 连接池上限：默认 20（原 10 在高并发下易排队等待连接），
-// 可通过 MONGO_MAX_POOL_SIZE 按压测结果调整
-const maxPoolSize = (() => {
-  const n = parseInt(process.env.MONGO_MAX_POOL_SIZE, 10);
-  return Number.isFinite(n) && n > 0 ? n : 20;
-})();
+// 连接池与超时参数（P2-70：原为硬编码，现全部可配；缺省值保持与原先一致）。
+// 各参数对性能的影响与调参方向：
+//   MONGO_MAX_POOL_SIZE       并发请求数上限的实质瓶颈（原 10 在高并发下排队等待）
+//   MONGO_MIN_POOL_SIZE       预热连接数，过低会让突发流量付出建连延迟
+//   MONGO_SERVER_SELECTION_TIMEOUT_MS  初始选主超时：过大会让「连不上」迟迟不报错
+//   MONGO_SOCKET_TIMEOUT_MS   空闲 socket 超时：过小会在慢查询上误断
+//   MONGO_HEARTBEAT_MS        心跳频率：过低增加无谓流量
+// 解析失败或非正值一律回落默认，避免把 0/负值传给驱动（驱动行为未定义）。
+const envInt = (name, fallback) => {
+  const n = parseInt(process.env[name], 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+const maxPoolSize = envInt('MONGO_MAX_POOL_SIZE', 20);
+const minPoolSize = envInt('MONGO_MIN_POOL_SIZE', 2);
+const serverSelectionTimeoutMS = envInt('MONGO_SERVER_SELECTION_TIMEOUT_MS', 5000);
+const socketTimeoutMS = envInt('MONGO_SOCKET_TIMEOUT_MS', 45000);
+const heartbeatFrequencyMS = envInt('MONGO_HEARTBEAT_MS', 10000);
 
 /**
  * 连接 MongoDB（带指数退避重试）
@@ -36,11 +49,11 @@ const maxPoolSize = (() => {
 const connectDB = async (retries = MAX_RETRIES) => {
   try {
     const conn = await mongoose.connect(config.mongodbUri, {
-      serverSelectionTimeoutMS: 5000, // 初始连接超时 5 秒
-      socketTimeoutMS: 45000, // socket 空闲超时
-      heartbeatFrequencyMS: 10000, // 心跳频率
-      maxPoolSize, // 连接池大小
-      minPoolSize: 2,
+      serverSelectionTimeoutMS, // 初始连接超时（MONGO_SERVER_SELECTION_TIMEOUT_MS）
+      socketTimeoutMS, // socket 空闲超时（MONGO_SOCKET_TIMEOUT_MS）
+      heartbeatFrequencyMS, // 心跳频率（MONGO_HEARTBEAT_MS）
+      maxPoolSize, // 连接池上限（MONGO_MAX_POOL_SIZE）
+      minPoolSize, // 连接池预热（MONGO_MIN_POOL_SIZE）
     });
 
     logger.info(`MongoDB 连接成功：${conn.connection.host}:${conn.connection.port}`);
@@ -56,7 +69,8 @@ const connectDB = async (retries = MAX_RETRIES) => {
       return connectDB(retries - 1);
     }
     logger.error(`数据库连接失败（已重试 ${MAX_RETRIES} 次）：${error.message}`);
-    process.exit(1);
+    // P1-13：等 transport 队列排空后再退出（原为紧接 exit，日志实测丢失）。
+    return exitAfterFlush(1);
   }
 };
 

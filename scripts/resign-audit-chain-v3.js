@@ -28,10 +28,18 @@ const {
 } = require('../src/utils/auditChain');
 const { verifyAuditChain } = require('../src/services/auditChainVerify');
 
+// M-08 / L-26：破坏性操作护栏（fail-closed 库名白名单 + 双标志），
+// 与 resign-audit-hmac.js / run-rollback-drill.js 共用同一份声明。
+const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
+
+// L-26：确认标志的单一常量。同族脚本必须用同一份字符串，
+// 否则「统一护栏」会在字面上统一、在行为上分叉。
+const CONFIRM_FLAG = '--yes';
+
 const BATCH_SIZE = 1000;
 
 function parseArgs(argv) {
-  return { apply: argv.includes('--apply'), confirmYes: argv.includes('--yes') };
+  return { apply: argv.includes('--apply'), confirmYes: argv.includes(CONFIRM_FLAG) };
 }
 
 async function rechainAllDocuments(apply) {
@@ -88,41 +96,33 @@ async function rechainAllDocuments(apply) {
 
 (async () => {
   const { apply, confirmYes } = parseArgs(process.argv);
-  const uri = process.env.MONGODB_URI;
-  if (!uri) {
-    console.error('错误：必须通过环境变量或 .env 提供 MONGODB_URI');
-    process.exit(2);
-  }
+  // L-26：改用共享解析器——原实现直读 process.env.MONGODB_URI，
+  // 与本族其余脚本的「缺省回退本地库 + 显式告警」口径不一致，
+  // 且缺少回退提示，无法判断本次到底连了哪个库。
+  const { uri, dbName } = resolveMongoUri({ scriptName: 'resign-audit-chain-v3.js' });
   if (!process.env.HMAC_SECRET) {
     console.error('错误：必须提供 HMAC_SECRET；重签需要同时生成新 HMAC');
     process.exit(2);
   }
 
-  await mongoose.connect(uri);
-  // 评价报告 #21（破坏性脚本护栏）：--apply 会 bulkWrite 重签整条审计链，
-  // 加三道门——目标库回显、--yes 二次确认、ALLOWED_SOURCE_DB 库名白名单
-  // （生产库必须显式列入白名单才可作用；演练库不受影响时无需设置）。
-  const dbName = mongoose.connection.name;
-  console.log(`>>> 目标数据库：${dbName}（--apply=${apply}）`);
-  if (apply && !confirmYes) {
-    console.error('错误：--apply 将重签全部审计记录的 hash/hmac/prevHash，需再传 --yes 确认。');
-    await mongoose.connection.close();
+  // 三道门（L-26 后与同族脚本完全一致）：
+  //   ① 白名单 fail-closed（共享 assertApplyAllowed，未设 ALLOWED_SOURCE_DB 即拒绝）；
+  //   ② --apply 之外还需 --yes 二次确认（批量改写 hash/hmac/prevHash 不可逆）；
+  //   ③ 连接后回显目标库，便于维护窗口内肉眼核对。
+  // 原先 ① 是本脚本内联的 fail-open 版本（`allowList.length > 0 &&`），
+  // 未设白名单时等同于无白名单——已由共享实现修正。
+  if (!assertApplyAllowed({ scriptName: 'resign-audit-chain-v3.js', dbName, apply })) {
     process.exit(2);
   }
-  if (apply) {
-    const allowList = (process.env.ALLOWED_SOURCE_DB || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (allowList.length > 0 && !allowList.includes(dbName)) {
-      console.error(
-        `错误：目标库「${dbName}」不在 ALLOWED_SOURCE_DB 白名单中（当前白名单：${allowList.join(', ') || '空'}）。` +
-          '如确需重签该库，请设置 ALLOWED_SOURCE_DB=<库名> 后重试。'
-      );
-      await mongoose.connection.close();
-      process.exit(2);
-    }
+  if (apply && !confirmYes) {
+    console.error(
+      `错误：--apply 将重签全部审计记录的 hash/hmac/prevHash，需再传 ${CONFIRM_FLAG} 确认。`
+    );
+    process.exit(2);
   }
+
+  await mongoose.connect(uri);
+  console.log(`>>> 目标数据库：${mongoose.connection.name}（--apply=${apply}）`);
   const report = await rechainAllDocuments(apply);
   console.log(JSON.stringify({ ...report, apply }, null, 2));
 

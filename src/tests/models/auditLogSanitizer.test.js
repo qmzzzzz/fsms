@@ -33,15 +33,54 @@ describe('auditLogSanitizer — 脱敏名单单一事实来源（#10）', () => 
     expect(cleaned.safe).toBe('keep-me');
   });
 
-  test('middleware/security.js 与 auditLogSanitizer 复用同一名单', () => {
-    // 经 require 链路验证：security.js 从 auditLogSanitizer 引入 SENSITIVE_KEYS，
-    // 两处名单必须恒等（防再次漂移）
-    require('../../middleware/security');
-    // security.js 未直接导出名单；此处通过 source 断言其引用同一来源，
-    // 防止重新硬编码一份独立数组
-    const src = require('fs').readFileSync(require.resolve('../../middleware/security'), 'utf8');
-    expect(src).toContain('AUDIT_SENSITIVE_KEYS');
-    expect(src).toMatch(/SENSITIVE_KEYS\s*=\s*AUDIT_SENSITIVE_KEYS/);
-    // 名单本身必须与审计模型侧一致（前面用例已断言名单含 secret/apikey）
+  test('middleware/security.js 与 auditLogSanitizer 复用同一名单（真实中间件驱动）', async () => {
+    // 【本轮改造：源码正则 → 行为断言】原用例断言 security.js 源码里出现
+    // `SENSITIVE_KEYS = AUDIT_SENSITIVE_KEYS` 这行文本——把它改成一份独立的
+    // 内联数组（漂移回原缺陷形态）而在注释里保留该字样，断言照样绿。
+    // 现直接驱动 security.js 的 auditLog() 中间件：构造一个包含**全部**
+    // SENSITIVE_KEYS（含时常被漏掉的 secret/apikey）的请求体，
+    // 断言审计落库文档里这些键**全部**变成 '***'。
+    // 若 security.js 重新硬编码一份缺少某键的名单，对应键会以明文出现 → 立即转红。
+    const express = require('express');
+    const request = require('supertest');
+    const auditBuffer = require('../../services/auditBuffer');
+    const { auditLog } = require('../../middleware/security');
+    const spyPush = jest.spyOn(auditBuffer, 'push');
+
+    const app = express();
+    app.use(express.json());
+    app.use('/api/', auditLog());
+    app.post('/api/probe', (req, res) => res.json({ ok: true }));
+
+    // 每个敏感键绑上可识别的明文值，方便失败时定位
+    const body = {};
+    SENSITIVE_KEYS.forEach((k, i) => {
+      body[k] = `PLAINTEXT-${i}-${k}`;
+    });
+    body.safeField = 'keep-me';
+
+    try {
+      const res = await request(app).post('/api/probe').send(body);
+      expect(res.status).toBe(200);
+      await new Promise((r) => setImmediate(r));
+
+      const pushed = spyPush.mock.calls
+        .map(([doc]) => doc)
+        .filter((d) => d && d.path === '/api/probe');
+      expect(pushed).toHaveLength(1);
+      const recorded = pushed[0].body;
+      for (const k of SENSITIVE_KEYS) {
+        expect(recorded[k]).toBe('***');
+      }
+      // 双重保障：整个序列化结果不得含任何明文标记
+      const serialized = JSON.stringify(recorded);
+      SENSITIVE_KEYS.forEach((k, i) => {
+        expect(serialized).not.toContain(`PLAINTEXT-${i}-${k}`);
+      });
+      // 非敏感字段必须保留（防「全量抹掉」式假修复）
+      expect(recorded.safeField).toBe('keep-me');
+    } finally {
+      spyPush.mockRestore();
+    }
   });
 });

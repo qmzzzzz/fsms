@@ -129,8 +129,10 @@ describe('assignRoles 越权防护（M-01）', () => {
       .put(`/api/users/${superAdmin._id}/roles`)
       .set('Authorization', `Bearer ${operatorToken}`)
       .send({ roles: [String(guestRole._id)] });
-    expect([403, 400]).toContain(res.status);
-    // 超管角色未被变更
+    // 实测确定行为（P1-29 修复：原为 expect([403,400]).toContain —— 400 属校验类拒绝，与本用例
+    // 「层级保护」语义无关，双可能断言会掩盖拦截原因的漂移且断言过宽）；实测 403 层级拒绝
+    expect(res.status).toBe(403);
+    expect(res.body.errors.errorCode).toBe('USER_ROLE_ASSIGN_PEER_OR_HIGHER_FORBIDDEN');
     const after = await User.findById(superAdmin._id).select('roles');
     expect(after.roles.map(String)).not.toContain(String(guestRole._id));
   });
@@ -147,6 +149,14 @@ describe('assignRoles 越权防护（M-01）', () => {
       .set('Authorization', `Bearer ${operatorToken}`)
       .send({ roles: [String(guestRole._id)] });
     expect(res.status).toBe(403);
+    // 403 必须点名角色分配闸：同级保护/数据范围/权限子集都会 403，
+    // 不点名就分不清是哪道闸挡下的（更无法发现「闸门被换掉」）
+    expect(res.body.errors.errorCode).toBe('USER_ROLE_ASSIGN_PEER_OR_HIGHER_FORBIDDEN');
+    // 且角色集合必须原样（403 不等于「先写后报错」）：与请求前的取值逐项比对，
+    // 而不是断言某个具体角色——同级闸若被绕过，roles 会变成 [guestRole]
+    const peerAfter = await User.findById(peer._id).select('roles').lean();
+    expect(peerAfter.roles.map(String)).toEqual(peer.roles.map(String));
+    expect(peerAfter.roles.map(String)).not.toContain(String(guestRole._id));
   });
 
   test('SECURITY_ADMIN 仍可给低层级用户分配不高于自身层级的角色（合法路径不受影响）', async () => {
@@ -166,6 +176,11 @@ describe('assignRoles 越权防护（M-01）', () => {
       .set('Authorization', `Bearer ${operatorToken}`)
       .send({ roles: [String(superRole._id)] });
     expect(res.status).toBe(403);
+    // 「不得超过自身层级」这条闸有独立错误码，与上面的目标侧层级闸区分
+    expect(res.body.errors.errorCode).toBe('ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN');
+    // 越权分配必须没写库
+    const lowAfter = await User.findById(lowUser._id).select('roles').lean();
+    expect(lowAfter.roles.map(String)).not.toContain(String(superRole._id));
   });
 
   // ===== 后端复审 B-2：同级角色归属（纵深防御）=====
@@ -347,6 +362,9 @@ describe('assignRoles 越权防护（M-01）', () => {
         .send({ status: 'inactive' });
 
       expect(res.status).toBe(403);
+      // 三个超管守卫码各不相同，点名「禁用」这一条；
+      // 下面已有 status 仍为 active 的行为断言，两者合起来才说明「拒了且没改」
+      expect(res.body.errors.errorCode).toBe('CANNOT_DISABLE_SUPER_ADMIN');
       const after = await User.findById(superAdmin._id).select('status');
       expect(after.status).toBe('active');
     });
@@ -500,6 +518,10 @@ describe('assignRoles 越权防护（M-01）', () => {
         .send({ description: '仅更新描述' });
 
       expect(res.status).toBe(200);
+      // 「放行」的判据是描述真的改了、且 level 没被动过：
+      // 若实现误把 level 也重置，只断 200 不会红
+      expect(res.body.data.description).toBe('仅更新描述');
+      expect(res.body.data.level).toBe(4);
     });
   });
 

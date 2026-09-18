@@ -13,11 +13,34 @@ const {
   advanceChainTail,
 } = require('../utils/auditChain');
 
+// L-25：append-only 钩子清单提升为模块级导出，供合规门禁（scripts/compliance-check.js）
+// 直接引用——原先是两处手工同步（门禁列 6 项、实际挂 9 项），漏掉的恰好是
+// updateMany / findOneAndReplace / bulkWrite 三个批量篡改路径。收敛为单一事实来源后，
+// 新增钩子只需改这里，门禁自动覆盖。
+const APPEND_ONLY_HOOKS = [
+  'updateOne',
+  'updateMany',
+  'deleteOne',
+  'deleteMany',
+  'replaceOne',
+  'findOneAndUpdate',
+  'findOneAndDelete',
+  'findOneAndReplace',
+  'bulkWrite',
+];
+
 const applyHooks = (schema, logger) => {
+  // P1-32：护栏状态为模块内部状态，**不再无条件暴露开关**。原先导出
+  // setAppendOnlyEnforced 后，任何拿到 AuditLog 模型的生产代码都可在运行期
+  // 关闭 append-only 防篡改护栏（全仓当前无生产调用点，但门不该存在）。
+  // 现仅在测试环境保留开关（AuditLogBehavior.test.js 的清理路径依赖它），
+  // 由 AuditLog.js 按 NODE_ENV === 'test' 条件导出；生产环境无此符号。
   let appendOnlyEnforced = true;
 
   const setAppendOnlyEnforced = (value) => {
-    appendOnlyEnforced = !!value;
+    // 双保险：即使符号被绕过取得，非测试环境调用也不产生任何效果
+    if (process.env.NODE_ENV !== 'test') return;
+    appendOnlyEnforced = value === true;
   };
 
   schema.pre('save', async function () {
@@ -90,25 +113,21 @@ const applyHooks = (schema, logger) => {
   // 批量篡改审计日志的路径同样被拦截。注意该护栏仅覆盖 Mongoose ODM 层，
   // 经原生驱动（mongoose.connection.db.collection(...)）的写入不受此约束，
   // 「篡改可发现」的最终保障落在哈希链校验（scripts/verify-audit-chain）。
-  const appendOnlyHooks = [
-    'updateOne',
-    'updateMany',
-    'deleteOne',
-    'deleteMany',
-    'replaceOne',
-    'findOneAndUpdate',
-    'findOneAndDelete',
-    'findOneAndReplace',
-    'bulkWrite',
-  ];
-  schema.pre(appendOnlyHooks, function (next) {
+  //
+  // L-25：清单已提升为模块级 APPEND_ONLY_HOOKS（见文件上方），合规门禁引用同一常量。
+  schema.pre(APPEND_ONLY_HOOKS, function (next) {
     if (!appendOnlyEnforced) return next();
     const options = (this.getOptions && this.getOptions()) || {};
-    if (options.bypassAppendOnly) return next();
+    // P1-32：bypassAppendOnly 原先接受任意真值即放行（运行时关闭护栏的后门）。
+    // 现收紧为「仅测试环境 + 显式传入布尔 true」才放行：
+    //   - 未传 / 传 false / 非布尔（如 'true'、1）一律拦截；
+    //   - 生产环境（NODE_ENV !== 'test'）无论传什么都不放行。
+    // 测试清理（deleteMany 等）依赖此契约，见 tests/compliance/auditChain.test.js
+    // 与 tests/models/AuditLog.test.js；正常写入（create/insertMany）不经过本钩子。
+    if (process.env.NODE_ENV === 'test' && options.bypassAppendOnly === true) return next();
     next(new Error('审计日志为 append-only，禁止修改/删除'));
   });
-
   return { setAppendOnlyEnforced };
 };
 
-module.exports = { applyHooks };
+module.exports = { applyHooks, APPEND_ONLY_HOOKS };

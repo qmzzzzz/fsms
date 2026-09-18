@@ -21,7 +21,6 @@ describe('登录口令加密传输（密文轨）', () => {
   let User;
   let SystemConfig;
   let loginCipher;
-  let userToken;
   const PASSWORD = randomPassword();
   const NEW_PASSWORD = randomPassword();
 
@@ -84,7 +83,17 @@ describe('登录口令加密传输（密文轨）', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.user.username).toBe('enclogin_user');
     expect(res.body.data.token).toBeTruthy();
-    userToken = res.body.data.token;
+
+    // 【顺序无关修复】原先把令牌存进模块级 userToken 供改密用例读取，形成隐式
+    // 「本用例必须先跑」依赖；改密用例改为自建账号自行登录后本变量已无消费者。
+    // 顺带把「令牌非空」升级为「令牌真能用」：签发的令牌若 tokenVersion/会话
+    // 注册有误，truthy 断言照样通过，只有真正打一次受保护接口才暴露。
+    const me = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${res.body.data.token}`);
+    expect(me.status).toBe(200);
+    // /auth/me 的用户对象嵌在 data.user（不是 data 本身），字段路径必须照实断
+    expect(me.body.data.user.username).toBe('enclogin_user');
   });
 
   test('login 密文轨：错误口令返回与明文轨一致的 401（解密对后续流程透明）', async () => {
@@ -158,11 +167,27 @@ describe('登录口令加密传输（密文轨）', () => {
   });
 
   test('changePassword 双字段密文轨：改密成功且新口令可登录', async () => {
+    // 【顺序无关修复】改密会**永久**改掉账号口令。此前本用例复用 enclogin_user：
+    //   ① 令牌取自模块级 userToken（由「正确口令登录成功」用例写入）——随机顺序下
+    //      本用例先跑时是 undefined，Bearer undefined → 401 假红；
+    //   ② 改密后任何仍以 PASSWORD 登录的用例（重放/明文兼容轨）都会拿到 401。
+    // 口令是账号私有状态：本用例自建专用账号并自行登录取令牌，既不依赖、也不污染他例。
+    const chgUsername = 'enchg_user';
+    await User.create({
+      username: chgUsername,
+      email: 'enchg@example.com',
+      password: PASSWORD,
+    });
+    const chgLogin = await request(app)
+      .post('/api/auth/login')
+      .send({ username: chgUsername, password: PASSWORD });
+    expect(chgLogin.status).toBe(200);
+
     const encCurrent = await buildLoginEnvelope(PASSWORD);
     const encNew = await buildLoginEnvelope(NEW_PASSWORD);
     const res = await request(app)
       .put('/api/auth/password')
-      .set('Authorization', `Bearer ${userToken}`)
+      .set('Authorization', `Bearer ${chgLogin.body.data.token}`)
       .send({ encCurrentPassword: encCurrent, encNewPassword: encNew });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -170,14 +195,15 @@ describe('登录口令加密传输（密文轨）', () => {
     // 旧口令失效（明文轨验证，避免再消耗密文轨 nonce 语义混淆）
     const oldRes = await request(app)
       .post('/api/auth/login')
-      .send({ username: 'enclogin_user', password: PASSWORD });
+      .send({ username: chgUsername, password: PASSWORD });
     expect(oldRes.status).toBe(401);
 
     // 新口令可登录（密文轨）
     const newEnc = await buildLoginEnvelope(NEW_PASSWORD);
     const newRes = await request(app)
       .post('/api/auth/login')
-      .send({ username: 'enclogin_user', encPassword: newEnc });
+      .send({ username: chgUsername, encPassword: newEnc });
     expect(newRes.status).toBe(200);
+    expect(newRes.body.data.user.username).toBe(chgUsername);
   });
 });

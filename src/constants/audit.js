@@ -162,6 +162,9 @@ const AUDIT_LOG_ACTIONS = [
   'session_revoked_others',
   // 用户状态事件
   'user_locked',
+  // P1-11：登录失败计数达阈值触发的 10 分钟临时锁定（authService 写入）。
+  // 此前缺失于白名单：记录在库却无法按该 action 筛选（validateEnum 打 400）
+  'account_temp_locked',
   'user_unlocked',
   // 安全告警事件
   'brute_force_login',

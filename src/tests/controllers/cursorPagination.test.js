@@ -219,14 +219,16 @@ describe('高量级列表游标分页（E-2）', () => {
     expect(times).toEqual([...times].sort((a, b) => b - a));
 
     // 游标模式元数据：不返回 total（省 countDocuments），hasNext/nextCursor 表达翻页
+    // 【静默跳过修正】原先 3 条断言包在 if (nextCursor) 里：守卫一旦为假，
+    // 这三条永不执行而用例照样绿。nextCursor 非空是后续断言的前提，先钉死它。
+    // 实测：该用户 8 条审计 + limit=3 → 首页必然给出 nextCursor。
+    expect(first.body.data.meta.nextCursor).toBeTruthy();
     const cursorPage = await authed().get(
-      `/api/security/audit-logs?username=${auditSeedUser}&limit=3&cursor=${encodeURIComponent(first.body.data.meta.nextCursor || '')}`
+      `/api/security/audit-logs?username=${auditSeedUser}&limit=3&cursor=${encodeURIComponent(first.body.data.meta.nextCursor)}`
     );
-    if (first.body.data.meta.nextCursor) {
-      expect(cursorPage.status).toBe(200);
-      expect(cursorPage.body.data.meta.total).toBeNull();
-      expect(cursorPage.body.data.meta.hasPrev).toBe(true);
-    }
+    expect(cursorPage.status).toBe(200);
+    expect(cursorPage.body.data.meta.total).toBeNull();
+    expect(cursorPage.body.data.meta.hasPrev).toBe(true);
   });
 
   test('无效游标一律 400', async () => {
@@ -239,6 +241,9 @@ describe('高量级列表游标分页（E-2）', () => {
     for (const url of endpoints) {
       const res = await authed().get(url);
       expect(res.status).toBe(400);
+      // 四个接口都必须给出同一句可操作的提示（分页游标无效，请从第一页重新查询），
+      // 而不是各自 400 —— 前端据此统一重置到首页
+      expect(res.body.message).toBe('分页游标无效，请从第一页重新查询');
     }
   });
 

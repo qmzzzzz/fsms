@@ -53,6 +53,9 @@ export default [
         ...globals.browser,
         // Vite 注入
         __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: 'readonly',
+        // vite.config.js 的 define 注入的编译期常量（单一事实来源 = package.json version），
+        // 组件内以 `typeof __APP_VERSION__` 读取，声明为 readonly 避免 no-undef 误报
+        __APP_VERSION__: 'readonly',
         // unplugin-auto-import 自动注入的 Vue/Pinia/Router API
         // （无 auto-imports.d.ts 时 ESLint 无从得知，需显式声明避免 no-undef 误报）
         ref: 'readonly',

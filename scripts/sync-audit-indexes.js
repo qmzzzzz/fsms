@@ -21,6 +21,10 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 
+// M-08 / P1-20：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。
+// 本脚本 --apply 会 dropIndex（含删除历史遗留索引），属「--apply 类」破坏性操作。
+const { dbNameFromUri, assertApplyAllowed } = require('./destructiveGuard');
+
 const APPLY = process.argv.includes('--apply');
 
 /**
@@ -54,6 +58,17 @@ const fullSignature = (key, options = {}) =>
   if (!uri) {
     console.error('未配置 MONGODB_URI，退出');
     process.exit(1);
+  }
+
+  // 未设置白名单即拒绝（fail-closed）：索引删除不可逆，必须先显式声明目标库。
+  if (
+    !assertApplyAllowed({
+      scriptName: 'sync-audit-indexes.js',
+      dbName: dbNameFromUri(uri),
+      apply: APPLY,
+    })
+  ) {
+    process.exit(2);
   }
 
   await mongoose.connect(uri);

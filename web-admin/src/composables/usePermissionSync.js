@@ -21,6 +21,7 @@ import { onMounted, onUnmounted } from 'vue'
 import { ElNotification } from 'element-plus/es/components/notification/index.mjs'
 import { useI18n } from 'vue-i18n'
 import { acquireWebSocket, releaseWebSocket } from '@/utils/websocket'
+import { reportDegradation } from '@/utils/errorReporter'
 import { useAuthStore } from '@/store'
 import { PermissionUpdateEventSchema, formatIssues } from '@/schemas'
 
@@ -75,8 +76,21 @@ export function usePermissionSync() {
     try {
       ws = acquireWebSocket()
       ws.on('permission-sync', handlePermissionSync)
-    } catch (_) {
-      // 建连失败退化为原有行为（下次登录或刷新页面后生效），不影响主流程
+    } catch (error) {
+      // P1-18：建连失败退化为原有行为（下次登录或刷新页面后生效），不影响主流程；
+      // 但此前完全静默——界面照旧，只是权限热同步永久失效，线上无从发现。
+      reportDegradation('permissionSync: WebSocket 订阅失败，权限热同步已失效', {
+        error: error?.message || String(error),
+        fallback: '下次登录或刷新页面后生效',
+      })
+      // 引用计数必须归还：acquireWebSocket 成功返回后才可能失败（典型是 ws.on 抛错），
+      // 此时 refCount 已 +1。若直接置 null，onUnmounted 的 `if (!ws) return` 会跳过
+      // release —— refCount 永久偏高，其他使用方（如角色管理页）全部释放后连接
+      // 也不会断开，且 wsService 永不复位。只归还「确实拿到手」的那次引用：
+      // acquire 自身抛错时 ws 仍为 null，不能凭空 release（会多减别人的计数）。
+      if (ws) {
+        releaseWebSocket()
+      }
       ws = null
     }
   })

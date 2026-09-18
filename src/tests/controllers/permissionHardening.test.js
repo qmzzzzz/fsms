@@ -102,6 +102,18 @@ describe('权限接口加固回归', () => {
         { code: `nofield:${rnd()}`, module: 'test' }, // 缺 name / type
       ]);
       expect(res.status).toBe(400);
+      // 「真正消费」的判据不是 400（路由挡住也是 400），而是控制器把
+      // validationResult 的字段明细透传了出来。字段名缺失时 express-validator
+      // 的 param 为 name/type 之一，这里断言 errors.fieldErrors 非空且含字段信息。
+      expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+      const fieldErrors = res.body.errors.fieldErrors;
+      expect(Array.isArray(fieldErrors)).toBe(true);
+      expect(fieldErrors.length).toBeGreaterThan(0);
+      // path 形态为 permissions[<n>].<field>（express-validator 的批量写法）
+      const fields = fieldErrors.map((e) =>
+        String(e.path || e.param).replace(/^permissions\[\d+\]\./, '')
+      );
+      expect(fields).toEqual(expect.arrayContaining(['name', 'type']));
     });
 
     test('非法 code 格式被拒', async () => {
@@ -109,6 +121,9 @@ describe('权限接口加固回归', () => {
         { name: '格式错误', code: 'NotAValidCode', type: 'api', module: 'test' },
       ]);
       expect(res.status).toBe(400);
+      // 被拒的是 code 字段（批量写法的 path 形态为 permissions[<n>].<field>）
+      expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+      expect(res.body.errors.fieldErrors[0].path).toBe('permissions[0].code');
     });
 
     test('超过 500 条被拒（原先 max:500 形同虚设，构成慢速 DoS 面）', async () => {
@@ -160,6 +175,8 @@ describe('权限接口加固回归', () => {
         },
       ]);
       expect(res.status).toBe(400);
+      expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+      expect(res.body.errors.fieldErrors[0].path).toBe('permissions[0].parent');
     });
   });
 
@@ -194,6 +211,7 @@ describe('权限接口加固回归', () => {
         .send({ parent: String(c._id) });
 
       expect(res.status).toBe(400);
+      // A→C→B→A 多级环路：命中环路文案（与自引用文案区分）
       expect(res.body.message).toContain('循环引用');
       const fresh = await Permission.findById(a._id);
       expect(fresh.parent).toBeFalsy();
@@ -211,6 +229,10 @@ describe('权限接口加固回归', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({ parent: String(p._id) });
       expect(res.status).toBe(400);
+      // 自引用是独立文案（与 A→B→C→A 环路区分）：错的是哪一类必须可断言；且 parent 未被写坏
+      expect(res.body.message).toContain('父级权限不能是权限自身');
+      const fresh = await Permission.findById(p._id);
+      expect(fresh.parent).toBeFalsy();
     });
 
     test('合法的父级调整不受影响（非祖先节点可正常挂载）', async () => {

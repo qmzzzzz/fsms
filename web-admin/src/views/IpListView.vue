@@ -236,7 +236,7 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
-import { apiClient } from '@/utils/api'
+import { apiClient, isCanceledError } from '@/utils/api'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import GlassSegmented from '@/components/GlassSegmented.vue'
 
@@ -314,7 +314,13 @@ const queryRows = computed(() => {
   return rows.filter((entry) => entry.type === listType.value)
 })
 
+// 查询重入锁：与 querying 分开，**同步**置位。querying 要等 DOM 重渲染才让按钮
+// disabled 生效，同一 tick 连点时后面的点击会全部进入 handler（实测三次连点
+// 发出 3 个查询请求），用独立 ref 在函数首行同步拦截。
+const querySubmitting = ref(false)
+
 const handleQuery = async () => {
+  if (querySubmitting.value) return
   const ip = queryForm.ip.trim()
   if (!ip) {
     ElMessage.warning(t('security.ipRequired'))
@@ -324,6 +330,7 @@ const handleQuery = async () => {
     ElMessage.warning(t('ipList.invalidFormat'))
     return
   }
+  querySubmitting.value = true
   querying.value = true
   try {
     const res = await apiClient.get('/security/ip-list/query', { params: { ip } })
@@ -342,6 +349,7 @@ const handleQuery = async () => {
     queryMode.value = false
   } finally {
     querying.value = false
+    querySubmitting.value = false
   }
 }
 
@@ -409,6 +417,8 @@ const loadData = async () => {
     blackCount.value = payload.counts?.black || 0
     whiteCount.value = payload.counts?.white || 0
   } catch (e) {
+    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
+    if (isCanceledError(e)) return
     if (!isCurrent()) return
     ElMessage.error(t('messages.loadFailed'))
     tableData.value = []
@@ -424,7 +434,12 @@ const handleSizeChange = () => {
   loadData()
 }
 
+// 新增重入锁：同 handleQuery，adding 要等 DOM 重渲染才对按钮生效
+// （实测同一 tick 三次连点发出 3 个 POST，名单会被重复写入三次）
+const addSubmitting = ref(false)
+
 const handleAdd = async () => {
+  if (addSubmitting.value) return
   const ip = addForm.ip.trim()
   if (!ip) {
     ElMessage.warning(t('security.ipRequired'))
@@ -435,6 +450,7 @@ const handleAdd = async () => {
     return
   }
 
+  addSubmitting.value = true
   adding.value = true
   try {
     await apiClient.post('/security/ip-list', {
@@ -457,6 +473,7 @@ const handleAdd = async () => {
     // 错误已在拦截器统一提示
   } finally {
     adding.value = false
+    addSubmitting.value = false
   }
 }
 

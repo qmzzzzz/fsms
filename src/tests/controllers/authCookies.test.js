@@ -201,6 +201,9 @@ describe('httpOnly Cookie 认证集成', () => {
       .get('/api/auth/me')
       .set('Cookie', [`access_token=${token}`]);
     expect(denied.status).toBe(401);
+    // 「黑名单命中」必须点名 AUTH_TOKEN_REVOKED：仅 401 无法区分是黑名单生效
+    // 还是 cookie 根本没被解析（后者会让本用例假绿）
+    expect(denied.body.errors.errorCode).toBe('AUTH_TOKEN_REVOKED');
   });
 
   test('刷新接口：请求体来源成功且轮换两个 cookie，响应体保留 tokens 字段', async () => {
@@ -239,6 +242,7 @@ describe('httpOnly Cookie 认证集成', () => {
   test('刷新接口：无任何令牌来源返回 400', async () => {
     const res = await request(app).post('/api/auth/refresh').send({});
     expect(res.status).toBe(400);
+    expect(res.body.errors.errorCode).toBe('REFRESH_TOKEN_MISSING');
   });
 
   test('登出按正确 path 清除两个 cookie 且旧令牌立即失效', async () => {

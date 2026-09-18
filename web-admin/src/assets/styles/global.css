@@ -24,14 +24,9 @@
   --xf-font-size-lg: 18px;
   --xf-font-size-xl: 20px;
   --xf-font-size-2xl: 28px;
-  --xf-font-size-3xl: 36px;
   --xf-tracking-tight: -0.02em;
-  --xf-tracking-normal: 0em;
   --xf-tracking-wide: 0.04em;
   --xf-tracking-wider: 0.08em;
-  --xf-leading-tight: 1.3;
-  --xf-leading-normal: 1.6;
-  --xf-leading-relaxed: 1.8;
 
   /* ===== 高科技装饰令牌 ===== */
   --xf-tech-grid:
@@ -39,13 +34,6 @@
     linear-gradient(90deg, rgba(15, 23, 42, 0.03) 1px, transparent 1px);
   --xf-tech-grid-size: 24px;
   --xf-glow-primary: 0 0 20px rgba(193, 18, 31, 0.15);
-  --xf-glow-primary-strong: 0 0 40px rgba(193, 18, 31, 0.25);
-  --xf-glow-info: 0 0 20px rgba(71, 85, 105, 0.12);
-  --xf-gradient-surface: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.02) 0%,
-    rgba(255, 255, 255, 0) 100%
-  );
   --xf-gradient-tech: linear-gradient(
     135deg,
     rgba(71, 85, 105, 0.03) 0%,
@@ -70,9 +58,7 @@
   --xf-success-strong: #15803d;
   --xf-success-alpha-8: rgba(22, 163, 74, 0.08);
   --xf-success-alpha-15: rgba(22, 163, 74, 0.15);
-  --xf-success-alpha-30: rgba(22, 163, 74, 0.3);
   --xf-success-alpha-45: rgba(22, 163, 74, 0.45);
-  --xf-success-alpha-55: rgba(22, 163, 74, 0.55);
 
   /* ===== 语义色 · 警告 ===== */
   --xf-warning: #d97706;
@@ -81,7 +67,6 @@
   --xf-warning-alpha-15: rgba(217, 119, 6, 0.15);
   --xf-warning-alpha-30: rgba(217, 119, 6, 0.3);
   --xf-warning-alpha-45: rgba(217, 119, 6, 0.45);
-  --xf-warning-alpha-55: rgba(217, 119, 6, 0.55);
 
   /* ===== 语义色 · 危险 ===== */
   --xf-danger: #b91c1c;
@@ -89,9 +74,7 @@
   --xf-danger-deep: #7f1d1d;
   --xf-danger-alpha-8: rgba(185, 28, 28, 0.08);
   --xf-danger-alpha-15: rgba(185, 28, 28, 0.15);
-  --xf-danger-alpha-30: rgba(185, 28, 28, 0.3);
   --xf-danger-alpha-45: rgba(185, 28, 28, 0.45);
-  --xf-danger-alpha-55: rgba(185, 28, 28, 0.55);
 
   /* ===== 语义色 · 信息（冷静灰蓝，避免靛蓝） ===== */
   --xf-info: #475569;
@@ -100,7 +83,6 @@
   --xf-info-alpha-15: rgba(71, 85, 105, 0.15);
   --xf-info-alpha-30: rgba(71, 85, 105, 0.3);
   --xf-info-alpha-45: rgba(71, 85, 105, 0.45);
-  --xf-info-alpha-55: rgba(71, 85, 105, 0.55);
 
   /* ===== 中性灰阶 ===== */
   --xf-gray-50: #f8fafc;
@@ -132,7 +114,6 @@
   --xf-spacing-md: 10px;
   --xf-spacing-lg: 16px;
   --xf-spacing-xl: 20px;
-  --xf-spacing-2xl: 24px;
 
   /* ===== 圆角 ===== */
   --xf-radius-sm: 10px;
@@ -148,16 +129,16 @@
   --xf-shadow-lg: 0 8px 24px rgba(15, 23, 42, 0.1);
   --xf-shadow-xl: 0 12px 40px rgba(15, 23, 42, 0.12);
   --xf-shadow-xl-hover: 0 16px 48px rgba(15, 23, 42, 0.14);
+  /* 大表面（对话框）阴影：:1213 的 .el-dialog（box-shadow 声明在 :1215）引用它，
+     此前三个 CSS 文件均未定义，该处 box-shadow 在计算值阶段无效（回退 none）。值取
+     apple-polish.css 的 .el-dialog 规则；同权重、后加载，实际生效值仍由后者决定。 */
+  --xf-shadow-2xl: 0 12px 48px rgba(0, 0, 0, 0.18);
   --xf-shadow-primary: 0 6px 20px rgba(193, 18, 31, 0.3);
   --xf-shadow-primary-strong: 0 10px 28px rgba(164, 22, 26, 0.4);
   --xf-shadow-danger: 0 6px 20px rgba(185, 28, 28, 0.3);
-  --xf-shadow-danger-strong: 0 10px 28px rgba(153, 27, 27, 0.4);
   --xf-shadow-warning: 0 6px 20px rgba(217, 119, 6, 0.26);
-  --xf-shadow-warning-strong: 0 10px 26px rgba(217, 119, 6, 0.38);
   --xf-shadow-success: 0 6px 20px rgba(22, 163, 74, 0.26);
-  --xf-shadow-success-strong: 0 10px 26px rgba(22, 163, 74, 0.38);
   --xf-shadow-info: 0 6px 20px rgba(71, 85, 105, 0.26);
-  --xf-shadow-info-strong: 0 10px 26px rgba(71, 85, 105, 0.38);
   --xf-focus-ring: 0 0 0 3px var(--xf-primary-alpha-35);
 
   /* ===== 动效（严肃调性：时长收敛、无弹跳过冲） ===== */
@@ -168,21 +149,7 @@
   --xf-ease-glass: cubic-bezier(0.22, 1, 0.36, 1);
 
   /* ===== 液态玻璃质感 ===== */
-  --xf-glass-blur: blur(18px) saturate(180%);
   --xf-glass-border: rgba(255, 255, 255, 0.55);
-  --xf-glass-border-hover: rgba(255, 255, 255, 0.85);
-  --xf-glass-shine: linear-gradient(
-    115deg,
-    transparent 32%,
-    rgba(255, 255, 255, 0.32) 50%,
-    transparent 68%
-  );
-  --xf-glass-highlight: linear-gradient(
-    165deg,
-    rgba(255, 255, 255, 0.5) 0%,
-    rgba(255, 255, 255, 0.12) 42%,
-    transparent 62%
-  );
   --xf-glass-inset-dark: rgba(15, 23, 42, 0.22);
   --xf-glass-edge:
     inset 0 1px 0 rgba(255, 255, 255, 0.95), inset 0 -1px 0 rgba(255, 255, 255, 0.28),
@@ -194,20 +161,9 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.4), inset 0 -1px 0 var(--xf-glass-inset-dark);
   --xf-glass-edge-color-hover:
     inset 0 1px 0 rgba(255, 255, 255, 0.5), inset 0 -1px 0 var(--xf-glass-inset-dark);
-  --xf-glass-press: inset 0 1px 0 rgba(255, 255, 255, 0.7), inset 0 -1px 0 rgba(255, 255, 255, 0.2);
   --xf-text-shadow-dark: 0 1px 2px rgba(15, 23, 42, 0.25);
 
   /* ===== 染色玻璃渐变（按钮变体） ===== */
-  --xf-gradient-default: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.7) 0%,
-    rgba(255, 255, 255, 0.4) 100%
-  );
-  --xf-gradient-default-hover: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.88) 0%,
-    rgba(255, 255, 255, 0.55) 100%
-  );
   --xf-gradient-primary: linear-gradient(
     180deg,
     rgba(193, 18, 31, 0.94) 0%,
@@ -217,46 +173,6 @@
     180deg,
     rgba(230, 57, 70, 0.95) 0%,
     rgba(193, 18, 31, 0.9) 100%
-  );
-  --xf-gradient-danger: linear-gradient(
-    180deg,
-    rgba(185, 28, 28, 0.94) 0%,
-    rgba(153, 27, 27, 0.86) 100%
-  );
-  --xf-gradient-danger-hover: linear-gradient(
-    180deg,
-    rgba(220, 38, 38, 0.95) 0%,
-    rgba(185, 28, 28, 0.9) 100%
-  );
-  --xf-gradient-warning: linear-gradient(
-    180deg,
-    rgba(217, 119, 6, 0.94) 0%,
-    rgba(180, 83, 9, 0.86) 100%
-  );
-  --xf-gradient-warning-hover: linear-gradient(
-    180deg,
-    rgba(245, 158, 11, 0.95) 0%,
-    rgba(217, 119, 6, 0.9) 100%
-  );
-  --xf-gradient-info: linear-gradient(
-    180deg,
-    rgba(71, 85, 105, 0.94) 0%,
-    rgba(51, 65, 85, 0.88) 100%
-  );
-  --xf-gradient-info-hover: linear-gradient(
-    180deg,
-    rgba(100, 116, 139, 0.95) 0%,
-    rgba(71, 85, 105, 0.9) 100%
-  );
-  --xf-gradient-success: linear-gradient(
-    180deg,
-    rgba(22, 163, 74, 0.94) 0%,
-    rgba(21, 128, 61, 0.86) 100%
-  );
-  --xf-gradient-success-hover: linear-gradient(
-    180deg,
-    rgba(34, 197, 94, 0.95) 0%,
-    rgba(22, 163, 74, 0.9) 100%
   );
 }
 
@@ -1688,45 +1604,10 @@ a:hover {
   --xf-skeleton-duration: 1.5s;
 }
 
-/* 基础占位块 */
-.sk-block {
-  position: relative;
-  overflow: hidden;
-  background: var(--xf-skeleton-bg);
-  border-radius: var(--xf-radius-sm);
-  flex-shrink: 0;
-}
-
-/* 柔和扫光：窄亮带从块左缘外扫至右缘外，全程只动伪元素，块几何恒定 */
-.sk-block::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 60%;
-  transform: translateX(-150%);
-  background: linear-gradient(
-    100deg,
-    transparent 0%,
-    var(--xf-skeleton-shine) 50%,
-    transparent 100%
-  );
-  animation: sk-sweep var(--xf-skeleton-duration) ease-in-out infinite;
-  pointer-events: none;
-  will-change: transform;
-}
-
-@keyframes sk-sweep {
-  0% {
-    transform: translateX(-150%);
-  }
-  100% {
-    transform: translateX(360%);
-  }
-}
-
-/* 基础占位块 */
+/* 注意：.sk-block 在本文件中只有下面这一处定义。
+   2026-09-16 审计发现此处曾存在一份被逐行覆盖的重复定义（旧值 width:60%、
+   translateX(-150%)、100deg、ease-in-out、0%/100% 关键帧），因后定义者胜出而
+   从未生效，已删除。改宽度/扫光角度/缓动时改这一处即可，不存在第二份定义。 */
 .sk-block {
   position: relative;
   overflow: hidden;

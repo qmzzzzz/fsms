@@ -23,6 +23,10 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 
+// M-08 / P1-20：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。
+// 本脚本会 +1 tokenVersion 并吊销目标用户全部会话，属「--apply 类」破坏性操作。
+const { dbNameFromUri, assertApplyAllowed } = require('./destructiveGuard');
+
 const argv = process.argv.slice(2);
 const username = argv.find((a) => !a.startsWith('--'));
 const apply = argv.includes('--apply');
@@ -35,6 +39,18 @@ if (!username) {
 if (!process.env.MONGODB_URI) {
   console.error('缺少 MONGODB_URI（.env 或环境变量）');
   process.exit(1);
+}
+
+// 未设置白名单即拒绝（fail-closed）：防止把「重置凭据后吊销会话」误打到非预期库。
+// 连接串仍只从环境/.env 读取（不因接入护栏而放宽为回退本地库）。
+if (
+  !assertApplyAllowed({
+    scriptName: 'revoke-user-sessions.js',
+    dbName: dbNameFromUri(process.env.MONGODB_URI),
+    apply,
+  })
+) {
+  process.exit(2);
 }
 
 (async () => {

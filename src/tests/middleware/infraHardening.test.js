@@ -75,10 +75,15 @@ describe('批次C 基础设施加固回归', () => {
       expect(appLevelHits).toBe(1);
     });
 
-    test('业务路由的非法 :id 在参数阶段就被拒（未认证时先被 401 拦下，不到 500）', async () => {
-      // 未带令牌时 authenticate 会先返回 401；关键是不应出现 CastError→500
+    test('业务路由的非法 :id 在参数阶段就被拒（400 + 码化，不到 500）', async () => {
+      // 【实测修正】原用例标题/注释称「未带令牌时 authenticate 先返回 401」——不成立。
+      // router.param 回调注册在子 Router 上，执行早于路由级 authenticate：
+      // 非法 :id 直接 400，合法 :id 才会走到 401（单独验证过两条分支）。
+      // 断言点名前缀错误码：只断 400 时，「被别的 400 拦下」与「真的没走到 Mongoose」
+      // 无法区分；而本用例的主张正是后者。
       const res = await request(app).get('/api/devices/not-an-objectid');
-      expect([400, 401]).toContain(res.status);
+      expect(res.status).toBe(400);
+      expect(res.body.errors?.errorCode).toBe('PARAM_MUST_BE_VALID_OBJECT_ID');
       expect(res.status).not.toBe(500);
     });
   });
@@ -208,6 +213,46 @@ describe('批次C 基础设施加固回归', () => {
   describe('P2-29/30 API 文档出口治理', () => {
     const swagger = require('../../config/swagger');
 
+    /**
+     * 临时启用 API 文档并创建应用实例。
+     *
+     * 为什么不用 jest.resetModules()：app 内部持有的 mongoose 实例会在
+     * reset 后重建为**未连接**的新实例，每个请求都要等 10s buffering
+     * 超时，用例直接被拖垮（实测）。而 ENABLE_API_DOCS 的读取点在
+     * createApp() 内（app.js: `if (swagger.isDocsEnabled())`）、凭据读取点在 basicAuth
+     * 请求期，二者都走 process.env —— 只需改写环境变量后重新 createApp() 即可。
+     *
+     * 注意：P2-26 用例调用过 jest.resetModules()，此后 require 到的 app 与
+     * swagger 都是新副本（与文件顶部缓存的实例不同一），因此回调
+     * 同时返回新副本的 swagger，供调用方操作真正生效的 docsLimiter 单例。
+     */
+    const withDocsEnabled = async (fn) => {
+      const saved = {
+        ENABLE_API_DOCS: process.env.ENABLE_API_DOCS,
+        DOCS_USERNAME: process.env.DOCS_USERNAME,
+        DOCS_PASSWORD: process.env.DOCS_PASSWORD,
+      };
+      process.env.ENABLE_API_DOCS = 'true';
+      process.env.DOCS_USERNAME = 'infra-probe-user';
+      process.env.DOCS_PASSWORD = 'infra-probe-password-long-enough';
+      try {
+        const { createApp } = require('../../app');
+        const app = createApp();
+        const freshSwagger = require('../../config/swagger');
+        return await fn(app, freshSwagger);
+      } finally {
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+      }
+    };
+
+    const DOCS_AUTH = `Basic ${Buffer.from(
+      'infra-probe-user:infra-probe-password-long-enough'
+    ).toString('base64')}`;
+
+
     test('渲染模板不含内联 script（否则被 script-src self 拦成白屏）', () => {
       const html = swagger.renderDocsHtml();
       expect(html.length).toBeGreaterThan(0);
@@ -224,30 +269,96 @@ describe('批次C 基础设施加固回归', () => {
       }
     });
 
-    test('模板确有内联 style，CSP 仅对 /api-docs 放行 unsafe-inline（L-5）', () => {
+    test('模板确有内联 style，CSP 仅对 /api-docs 放行 unsafe-inline（L-5，真实响应头验证）', async () => {
       const html = swagger.renderDocsHtml();
       expect(html).toMatch(/<style[^>]*>/i);
-      // 与 security.js 的实现保持一致，避免只改一处：
-      // 主 CSP 走每请求 nonce，仅文档路径条件式放行 'unsafe-inline'
-      const security = fs.readFileSync(path.join(REPO_ROOT, 'src/middleware/security.js'), 'utf8');
-      expect(security).toMatch(/'nonce-\$\{res\.locals\.cspNonce\}'/);
-      expect(security).toMatch(/isSwaggerDocsPath\(req\)\s*\?\s*"'unsafe-inline'"/);
-      // 全局常量里不得再出现无条件 'unsafe-inline' 的 style-src
-      expect(security).not.toMatch(/'style-src':\s*\["'self'",\s*"'unsafe-inline'"\]/);
+
+      // 【本轮改造：静态断言 → 行为断言】原用例匹配 security.js 源码里的
+      // 正则片段——把条件判断改成恒真（对所有路径都放行 unsafe-inline）
+      // 后，源码里的片段依然存在，断言照样绿。
+      // 现直接读真实响应的 Content-Security-Policy 头（文档真实启用、带凭据 200）：
+      //   /api-docs/*  → style-src 含 'unsafe-inline'（Swagger UI 自注入内联 style）
+      //   其余路径     → style-src 为每请求 nonce，不含 'unsafe-inline'
+      const mongoose = require('mongoose');
+      if (mongoose.connection.readyState === 0) {
+        await mongoose.connect(process.env.MONGODB_URI);
+      }
+      require('../../models/TokenBlacklist');
+
+      // 请求必须在环境变量生效窗口内发出（basicAuth 请求期读凭据）
+      await withDocsEnabled(async (app) => {
+        const docs = await request(app).get('/api-docs/').set('Authorization', DOCS_AUTH);
+        expect(docs.status).toBe(200);
+        const docsCsp = docs.headers['content-security-policy'];
+        expect(docsCsp).toBeTruthy();
+        expect(docsCsp).toMatch(/style-src [^;]*'unsafe-inline'/);
+
+        const health = await request(app).get('/health');
+        expect(health.status).toBe(200);
+        const healthCsp = health.headers['content-security-policy'];
+        expect(healthCsp).toBeTruthy();
+        expect(healthCsp).not.toMatch(/'unsafe-inline'/);
+        expect(healthCsp).toMatch(/style-src 'self' 'nonce-[A-Za-z0-9+/=]+'/);
+      });
     });
 
     test('docsLimiter 已导出且为中间件函数', () => {
       expect(typeof swagger.docsLimiter).toBe('function');
     });
 
-    test('/api-docs 限流早于 Basic Auth 挂载（顺序颠倒则限流失去意义）', () => {
-      const appSrc = fs.readFileSync(path.join(REPO_ROOT, 'src/app.js'), 'utf8');
-      const line = appSrc.split('\n').find((l) => l.includes("app.use('/api-docs'"));
-      expect(line).toBeTruthy();
-      expect(line.indexOf('docsLimiter')).toBeLessThan(line.indexOf('basicAuth'));
-      // JSON 端点同样受限流覆盖
-      const jsonLine = appSrc.split('\n').find((l) => l.includes("'/api-docs.json'"));
-      expect(jsonLine).toContain('docsLimiter');
+    test('/api-docs 限流早于 Basic Auth 挂载（用真实 429 判定顺序）', async () => {
+      // 【本轮改造：静态断言 → 行为断言】原用例比较 app.js 源码同一行内
+      // docsLimiter 与 basicAuth 的字符位置——把两个中间件在运行时对调
+      // 时源码文本不变，断言照样绿。
+      //
+      // 行为判据：凭据错误时 basicAuth 返回 401 并终止链。若限流器在 basicAuth
+      // **之前**，计数照常累积，最终必出现 429；若在其之后，请求永远到不了
+      // 限流器，无论请求多少次都只有 401、永无 429。
+      //
+      // 实现约束：此处**不能**用 jest.resetModules() 切换 ENABLE_API_DOCS。
+      // 那会重建 mongoose 模块实例，而 app 内部持有的是新实例、处于未连接
+      // 状态，每个请求都要等 10s buffering 超时（实测用例直接超时）。
+      // 现改为直接改写 process.env 后重新 createApp()：app.js 的
+      // isDocsEnabled() 与 basicAuth 都在运行期读 env，模块无需重载。
+      const mongoose = require('mongoose');
+      if (mongoose.connection.readyState === 0) {
+        await mongoose.connect(process.env.MONGODB_URI);
+      }
+      require('../../models/TokenBlacklist');
+
+      await withDocsEnabled(async (app, freshSwagger) => {
+        // 同一 docsLimiter 单例的计数桶可能被本文件其它用例消耗
+        // （如 CSP 用例的一次带凭据请求）。先复位，使「401 累积 → 429 截断」
+        // 从零开始，避免残留计数造成假 429（复位失败时首请求即 429，
+        // 下方 first.status 断言会直接变红）。
+        await freshSwagger.docsLimiter.resetKey('api-docs:::ffff:127.0.0.1');
+
+        // 未带凭据 → 401（证明 basicAuth 确实在链上，且计数桶已复位）
+        const first = await request(app).get('/api-docs/');
+        expect(first.status).toBe(401);
+
+        // 反复请求：必须出现 429（限流在 basicAuth 之前才有此现象）
+        let saw429 = false;
+        let statuses = [];
+        for (let i = 0; i < 80; i += 1) {
+          const r = await request(app).get('/api-docs/');
+          statuses.push(r.status);
+          if (r.status === 429) {
+            saw429 = true;
+            break;
+          }
+          // 凭据缺失时，限流之前不应出现 401 以外的状态码
+          expect(r.status).toBe(401);
+        }
+        expect(saw429).toBe(true);
+        // 429 必须在至少一次 401 之后（首次就 429 = 桶没复位/顺序可疑）
+        expect(statuses.length).toBeGreaterThan(1);
+
+        // JSON 端点与 HTML 共用同一个桶（keyGenerator 按 IP），
+        // 故此时它也必须已被限流覆盖——证明它同样挂在 docsLimiter 之后
+        const jsonRes = await request(app).get('/api-docs.json');
+        expect(jsonRes.status).toBe(429);
+      });
     });
 
     test('超出配额后返回 429（真实请求验证限流生效）', async () => {

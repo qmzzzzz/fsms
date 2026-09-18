@@ -102,6 +102,85 @@ describe('sharedCache 内存回退路径', () => {
     unregister();
   });
 
+  describe('内存上限与原子取删（S-L2 防护 + captcha 双花修复的底层）', () => {
+    const savedMax = process.env.SHARED_CACHE_MEM_MAX;
+    afterEach(() => {
+      if (savedMax === undefined) delete process.env.SHARED_CACHE_MEM_MAX;
+      else process.env.SHARED_CACHE_MEM_MAX = savedMax;
+      cache._resetForTests();
+    });
+
+    test('超过上限时淘汰最旧条目，且不淘汰新写入（Map 插入序）', async () => {
+      // getMemStoreMax 的下限是 1000（防误配把容量压到 0），故用 1000 + 3
+      process.env.SHARED_CACHE_MEM_MAX = '1000';
+      cache._resetForTests();
+      for (let i = 0; i < 1003; i++) await cache.set(`cap-${i}`, i, 600000);
+
+      // 淘汰发生在 set 内部的 enforceMemCap：写满后最多保留上限条
+      const oldest = await cache.get('cap-0');
+      expect(oldest).toBeNull(); // 最旧的被淘汰
+      await expect(cache.get('cap-1002')).resolves.toBe(1002); // 最新的保留
+    });
+
+    test('低于下限的配置被忽略：SHARED_CACHE_MEM_MAX=1 仍按 1000 生效', async () => {
+      // Math.max(1000, ...) 是防误配下限——钉住它，防止有人把下限删掉后
+      // 一次误设 SHARED_CACHE_MEM_MAX=1 就让缓存几乎全部失能
+      process.env.SHARED_CACHE_MEM_MAX = '1';
+      cache._resetForTests();
+      for (let i = 0; i < 200; i++) await cache.set(`low-${i}`, i, 600000);
+      await expect(cache.get('low-0')).resolves.toBe(0); // 未被淘汰
+      await expect(cache.get('low-199')).resolves.toBe(199);
+    });
+
+    test('非数字配置退回默认 20000（Number(...)||20000）', async () => {
+      process.env.SHARED_CACHE_MEM_MAX = 'abc';
+      cache._resetForTests();
+      // 只需证明不会因 NaN 比较而清空/拒绝写入
+      await cache.set('nan-max', 'v', 60000);
+      await expect(cache.get('nan-max')).resolves.toBe('v');
+    });
+
+    test('容量淘汰前先 sweep：过期项不算作淘汰压力（最旧的健在项不被误杀）', async () => {
+      // 构造要点（enforceMemCap 在 set 之前、按 size > max 触发）：
+      //   · 600 条健在项（最旧） + 400 条已过期项（较新） = 1000 条，恰好不触发
+      //   · 第 1001、1002 条写入才越过上限，此时 enforcement 才真正运行
+      // 差异只在这里可见：
+      //   先 sweep → 400 条过期项被清掉，容量回落到 601，最旧的 live-0 活着；
+      //   不 sweep → 按插入序淘汰，最旧的 live-0 被砍掉。
+      process.env.SHARED_CACHE_MEM_MAX = '1000';
+      cache._resetForTests();
+      for (let i = 0; i < 600; i++) await cache.set(`live-${i}`, i, 600000);
+      for (let i = 0; i < 400; i++) await cache.set(`exp-${i}`, i, 1);
+      await new Promise((r) => setTimeout(r, 20)); // 400 条全部过期
+      await cache.set('filler', 'f', 600000); // size 1001（尚未触发 enforcement）
+      await cache.set('trigger', 't', 600000); // 此刻 enforcement 运行
+
+      await expect(cache.get('live-0')).resolves.toBe(0); // 最旧的健在项必须活着
+      await expect(cache.get('live-599')).resolves.toBe(599);
+      await expect(cache.get('trigger')).resolves.toBe('t');
+    });
+
+    test('getDel：内存路径同步取删——取出的值存在，第二次取为 null', async () => {
+      cache._resetForTests();
+      await cache.set('gd', { text: 'AbCd' }, 60000);
+      await expect(cache.getDel('gd')).resolves.toEqual({ text: 'AbCd' });
+      await expect(cache.getDel('gd')).resolves.toBeNull();
+    });
+
+    test('getDel：过期条目返回 null，且条目已被删除（不留垃圾）', async () => {
+      cache._resetForTests();
+      await cache.set('gd-exp', 'v', 1);
+      await new Promise((r) => setTimeout(r, 20));
+      await expect(cache.getDel('gd-exp')).resolves.toBeNull();
+      // 已被删除：del 返回 false（若实现改成「先判过期再决定删」会留下垃圾）
+      await expect(cache.del('gd-exp')).resolves.toBe(false);
+    });
+
+    test('getDel：不存在的键返回 null 且不抛错', async () => {
+      cache._resetForTests();
+      await expect(cache.getDel('gd-missing')).resolves.toBeNull();
+    });
+  });
   test('_resetForTests 清空内存存储', async () => {
     await cache.set('k-reset', 'v', 60000);
     cache._resetForTests();
@@ -115,6 +194,7 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
   class FakeRedis {
     static reset() {
       FakeRedis.store = new Map();
+      FakeRedis.ttls = new Map(); // key -> 过期毫秒（仅由 INCR 脚本与 PEXPIRE 维护，供 L-07 断言）
       FakeRedis.instances = [];
       FakeRedis.failPing = false;
       FakeRedis.failCommands = false;
@@ -141,11 +221,14 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     async set(key, val, ...rest) {
       this.guard();
       let nx = false;
+      let px = null;
       for (let i = 0; i < rest.length; i++) {
         if (rest[i] === 'NX') nx = true;
+        if (String(rest[i]).toUpperCase() === 'PX') px = Number(rest[i + 1]);
       }
       if (nx && FakeRedis.store.has(key)) return null;
       FakeRedis.store.set(key, val);
+      if (px) FakeRedis.ttls.set(key, px);
       return 'OK';
     }
     async get(key) {
@@ -154,6 +237,7 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     }
     async del(key) {
       this.guard();
+      FakeRedis.ttls.delete(key);
       return FakeRedis.store.delete(key) ? 1 : 0;
     }
     async incr(key) {
@@ -162,9 +246,14 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
       FakeRedis.store.set(key, String(v));
       return v;
     }
-    async pexpire() {
+    async pexpire(key, ms) {
       this.guard();
+      FakeRedis.ttls.set(key, ms);
       return 1;
+    }
+    async pttl(key) {
+      this.guard();
+      return FakeRedis.ttls.has(key) ? FakeRedis.ttls.get(key) : -1;
     }
     async publish(channel, message) {
       this.guard();
@@ -181,6 +270,16 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     }
     async eval(script, _numKeys, key, ...args) {
       this.guard();
+      // L-07：incrWithTtl 的 Lua 脚本——在假客户端里按脚本语义复演
+      if (script.includes('INCR')) {
+        const v = (Number(FakeRedis.store.get(key)) || 0) + 1;
+        FakeRedis.store.set(key, String(v));
+        const ttl = Number(args[0]);
+        if (ttl > 0 && (v === 1 || !FakeRedis.ttls.has(key))) {
+          FakeRedis.ttls.set(key, ttl);
+        }
+        return v;
+      }
       if (FakeRedis.store.get(key) === args[0]) {
         if (script.includes('del')) {
           FakeRedis.store.delete(key);
@@ -241,6 +340,41 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     await bootRedisMode();
     await cache.set('rk-nottl', 'v');
     await expect(cache.get('rk-nottl')).resolves.toBe('v');
+  });
+
+  test('L-07：incrWithTtl 走单条 Lua 脚本，首自增即带 TTL（不再是 incr+pexpire 两条命令）', async () => {
+    await bootRedisMode();
+    const calls = [];
+    const origEval = FakeRedis.prototype.eval;
+    FakeRedis.prototype.eval = function (script, ...rest) {
+      calls.push(script);
+      return origEval.call(this, script, ...rest);
+    };
+    try {
+      await expect(cache.incrWithTtl('lua-cnt', 60000)).resolves.toBe(1);
+      await expect(cache.incrWithTtl('lua-cnt', 60000)).resolves.toBe(2);
+    } finally {
+      FakeRedis.prototype.eval = origEval;
+    }
+    expect(calls).toHaveLength(2); // 两次自增 = 两次 eval，无独立 pexpire 往返
+    expect(calls[0]).toContain('INCR');
+    expect(FakeRedis.ttls.get('lua-cnt')).toBe(60000); // 计数器不会永久滞留
+  });
+
+  test('L-07：历史遗留的无 TTL 键在下一次自增时补上过期时间', async () => {
+    await bootRedisMode();
+    // 模拟旧实现留下的永久键：有值、无 TTL
+    FakeRedis.store.set('legacy-cnt', '7');
+    await expect(cache.incrWithTtl('legacy-cnt', 30000)).resolves.toBe(8);
+    expect(FakeRedis.ttls.get('legacy-cnt')).toBe(30000);
+  });
+
+  test('L-07：已有 TTL 的键在自增时不重置窗口（避免滑动窗口导致计数永不归零）', async () => {
+    await bootRedisMode();
+    await cache.incrWithTtl('win-cnt', 60000);
+    FakeRedis.ttls.set('win-cnt', 1234); // 模拟窗口已推进
+    await cache.incrWithTtl('win-cnt', 60000);
+    expect(FakeRedis.ttls.get('win-cnt')).toBe(1234);
   });
 
   test('acquireLock：获取成功 → CAS 释放；锁被占用立即返回 null', async () => {

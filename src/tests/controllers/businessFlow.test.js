@@ -19,8 +19,24 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
   let Inspection;
   let adminToken;
   let selfUserId;
-  let deviceId;
   const stamp = `bf${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
+
+  // 设备 ID 为设备类用例的自包含前置：每个用例自行创建设备后经此传递，
+  // 不再依赖「设备：创建」用例先行（--randomize 下该用例可能最后执行，
+  // 导致其余设备用例拿到 undefined，URL 变成 /api/devices/undefined/...）
+  const createFixtureDevice = async (test) => {
+    const createRes = await authed()
+      .post('/api/devices')
+      .send({
+        deviceCode: `BF-${stamp}-${test}`,
+        deviceName: `烟感_业务闭环_${test}`,
+        deviceType: 'smoke_detector',
+        installDate: new Date().toISOString(),
+        location: { building: 'A栋', floor: '3F', detail: `走廊${test}` },
+      });
+    expect(createRes.status).toBe(201);
+    return String(createRes.body.data._id || createRes.body.data.id);
+  };
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
@@ -100,7 +116,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
         location: { building: 'A栋', floor: '3F', detail: '走廊东侧' },
       });
     expect(createRes.status).toBe(201);
-    deviceId = String(createRes.body.data._id || createRes.body.data.id);
+    const deviceId = String(createRes.body.data._id || createRes.body.data.id);
 
     const list = await authed().get('/api/devices?page=1&limit=10');
     expect(list.status).toBe(200);
@@ -127,6 +143,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
   });
 
   test('设备：状态迁移 normal → warning → fault → maintenance → normal；维护记录推进', async () => {
+    const deviceId = await createFixtureDevice('-901');
     // status 枚举：normal/warning/fault/offline/maintenance/scrapped（DEVICE_STATUS）
     const toWarn = await authed()
       .put(`/api/devices/${deviceId}/status`)
@@ -158,10 +175,12 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
         type: 'routine',
         content: `例行维护_${stamp}`,
       });
-    expect([200, 201]).toContain(maint.status);
+    // 实测 200（维护记录接口固定 200，从未返回过 201）
+    expect(maint.status).toBe(200);
   });
 
   test('设备：报废 → 重复报废拒绝 → 报废后状态变更拒绝 → 删除', async () => {
+    const deviceId = await createFixtureDevice('-902');
     const scrap = await authed()
       .put(`/api/devices/${deviceId}/scrap`)
       .send({ scrapReason: `测试报废_${stamp}` });
@@ -178,7 +197,8 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
     expect(afterScrap.status).toBe(400);
 
     const del = await authed().delete(`/api/devices/${deviceId}`);
-    expect([200, 204]).toContain(del.status);
+    // 实测 200（删除接口固定 200，从未返回过 204）
+    expect(del.status).toBe(200);
   });
 
   // ================= 报警 =================
@@ -220,6 +240,10 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
         cause: 'fire',
       });
     expect(resolve.status).toBe(200);
+    // 处置完成的终态必须真的落到 resolved 且带上处理结果：
+    // 只断 200 时，状态机回滚或结果未写入都看不出来
+    expect(resolve.body.data.status).toBe('resolved');
+    expect(resolve.body.data.handleResult).toContain('已扑灭');
   });
 
   test('报警：指派不存在处理人被拒；误报与取消分支', async () => {
@@ -231,6 +255,10 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
         level: 'info',
       });
     expect(a1.status).toBe(201);
+    // 上报后必须落到 pending 且已带初始处理日志：只断 201 时，
+    // 「先建单再补日志」的两步写或状态初值写错都看不出来
+    expect(a1.body.data.status).toBe('pending');
+    expect(a1.body.data.processLog.map((l) => l.action)).toEqual(['alarm_received']);
     const falseId = String(a1.body.data._id || a1.body.data.id);
 
     const badHandler = await authed()
@@ -239,6 +267,13 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
         handlerId: String(new mongoose.Types.ObjectId()),
       });
     expect(badHandler.status).toBe(400);
+    // 400 必须点名「处理人不存在」：指派路径还有「账户被禁用」「越权指派」等拒绝理由，
+    // 不点名就分不清是哪道闸挡下的（更无法发现闸门被换掉）
+    expect(badHandler.body.message).toBe('指定的处理人不存在');
+    // 且拒绝不等于「先写后报错」：报警必须仍是 pending 且未被写入 handler
+    const afterBad = await authed().get(`/api/alarms/${falseId}`);
+    expect(afterBad.body.data.status).toBe('pending');
+    expect(afterBad.body.data.handler).toBeFalsy();
 
     const falseAlarm = await authed()
       .put(`/api/alarms/${falseId}/false-alarm`)
@@ -246,6 +281,13 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
         reason: `演练触发_${stamp}`,
       });
     expect(falseAlarm.status).toBe(200);
+    // 误报是终态：状态机必须真的落到 false_alarm 且带处理结果与原因，
+    // 只断 200 时，状态没改/原因未落库都看不出来
+    expect(falseAlarm.body.data.status).toBe('false_alarm');
+    expect(falseAlarm.body.data.cause).toBe('false_alarm');
+    expect(falseAlarm.body.data.handleResult).toContain('演练触发');
+    expect(falseAlarm.body.data.resolvedAt).toBeTruthy();
+    expect(falseAlarm.body.data.processLog.at(-1).action).toBe('marked_false_alarm');
 
     const a2 = await authed()
       .post('/api/alarms/report')
@@ -259,6 +301,11 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
       .put(`/api/alarms/${cancelId}/cancel`)
       .send({ reason: `重复上报_${stamp}` });
     expect(cancel.status).toBe(200);
+    // 取消同样是终态 + 留痕：状态必须为 cancelled，取消原因进处理日志
+    expect(cancel.body.data.status).toBe('cancelled');
+    const cancelLog = cancel.body.data.processLog.at(-1);
+    expect(cancelLog.action).toBe('cancelled');
+    expect(cancelLog.remark).toContain('重复上报');
   });
 
   // ================= 巡检 =================
@@ -276,6 +323,8 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
         description: '覆盖用巡检计划',
       });
     expect(create.status).toBe(201);
+    // 状态机起点：新建计划必须是 pending
+    expect(create.body.data.status).toBe('pending');
     const inspId = String(create.body.data._id || create.body.data.id);
 
     const update = await authed().put(`/api/inspections/${inspId}`).send({
@@ -292,6 +341,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
 
     const start = await authed().put(`/api/inspections/${inspId}/start`);
     expect(start.status).toBe(200);
+    expect(start.body.data.status).toBe('in_progress');
 
     // 时间窗倒置（P2-19 关联）：planEndTime < planStartTime 被路由校验拒绝
     const inverted = await authed()
@@ -309,12 +359,15 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
       .put(`/api/inspections/${inspId}/cancel`)
       .send({ reason: '计划变更' });
     expect(cancel.status).toBe(200);
+    expect(cancel.body.data.status).toBe('cancelled');
 
     const stats = await authed().get('/api/inspections/stats');
     expect(stats.status).toBe(200);
 
     const del = await authed().delete(`/api/inspections/${inspId}`);
     expect(del.status).toBe(200);
+    // 删除的判据是记录真的没了：200 也可能是「已取消故无需删除」的空操作
+    expect(await require('../../models/Inspection').findById(inspId)).toBeNull();
   });
 
   test('巡检：执行完成 → 自审被拒（M-2 分离）；未指派记录可审通过', async () => {
@@ -342,6 +395,8 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
         location: 'C栋大厅',
       });
     expect(complete.status).toBe(200);
+    // 执行完成的终态：只断 200 时，状态机停在 in_progress 也不会红
+    expect(complete.body.data.status).toBe('completed');
 
     const selfReview = await authed().put(`/api/inspections/${ownId}/review`).send({
       result: 'approved',
@@ -349,6 +404,10 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
     });
     // 自审自批禁止（M-2）：服务层条件更新不命中 → ApiError 400
     expect(selfReview.status).toBe(400);
+    // 自审被拒后记录必须仍停在已完成、未被写坏（拒了但没改 vs 改了才报错）
+    const afterSelfReview = await require('../../models/Inspection').findById(ownId).lean();
+    expect(afterSelfReview.status).toBe('completed');
+    expect(afterSelfReview.reviewResult ?? null).toBeNull();
 
     // 场景二：未指派记录由管理员审核 → 通过；重复审核被拒
     const otherCreate = await authed()
@@ -371,6 +430,9 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
       reviewComment: '复核无误',
     });
     expect(review.status).toBe(200);
+    // 审核通过的判据是结果真的落库
+    const reviewed = await require('../../models/Inspection').findById(otherId).lean();
+    expect(reviewed.reviewResult).toBe('approved');
 
     const reReview = await authed().put(`/api/inspections/${otherId}/review`).send({
       result: 'rejected',
@@ -378,6 +440,9 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
     });
     // 已审核记录不可再审（服务层 conflict 409）
     expect(reReview.status).toBe(409);
+    // 重复审核不得覆盖首次结果（409 之后结果仍是 approved）
+    const stillApproved = await require('../../models/Inspection').findById(otherId).lean();
+    expect(stillApproved.reviewResult).toBe('approved');
 
     await authed()
       .delete(`/api/inspections/${ownId}`)

@@ -74,6 +74,12 @@ describe('审计 WAL 大小硬上限（R-6）', () => {
   });
 
   test('getStats 暴露 walDroppedLines（合规可观测）', () => {
+    // 顺序无关（自包含）：walEnabled 由 start() 开启、stop() 关闭。原用例依赖
+    // 前一用例先调用过 start()，随机顺序下本用例先跑时实得 false。
+    // 这里显式走「关 → 开」两个方向，不再依赖任何前序用例。
+    auditBuffer.stop();
+    expect(auditBuffer.getStats().walEnabled).toBe(false);
+    auditBuffer.start();
     const stats = auditBuffer.getStats();
     expect(stats).toHaveProperty('walDroppedLines');
     expect(stats.walEnabled).toBe(true);

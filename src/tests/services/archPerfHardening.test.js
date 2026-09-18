@@ -101,6 +101,80 @@ describe('批次E 架构与性能加固回归', () => {
   });
 
   // ================= P3-19 审计链锁超时 =================
+
+  // ================= P3-64 K8s 多副本检测（Deployment 不注入环境变量）=================
+  describe('P3-64 K8s Pod 判据', () => {
+    const load = () => {
+      jest.resetModules();
+      return require('../../constants/runtime');
+    };
+
+    test('StatefulSet 非首序号 → 判为可疑（这是纯 K8s 场景唯一可用的信号）', () => {
+      const { detectMultiProcess } = load();
+      for (const host of ['fsms-web-1', 'fsms-web-2', 'fsms-web-12']) {
+        const r = detectMultiProcess({ hostname: host });
+        expect({ host, suspected: r.suspected }).toEqual({ host, suspected: true });
+        expect(r.reasons.join(' ')).toContain('K8s Pod 序号');
+      }
+    });
+
+    test('StatefulSet 序号 0 → 不算多进程（单副本同样长这样，不能误报）', () => {
+      const { detectMultiProcess } = load();
+      const r = detectMultiProcess({ hostname: 'fsms-web-0' });
+      expect(r.suspected).toBe(false);
+      // 但仍应识别出「这是编排器管理的 Pod」
+      expect(r.k8sPodLike).toBe(true);
+    });
+
+    test('Deployment 形态 → k8sPodLike=true 但不计入 suspected（弱信号不误报）', () => {
+      const { detectMultiProcess } = load();
+      const r = detectMultiProcess({ hostname: 'fsms-web-admin-7d9c8b6f4-abc12' });
+      expect(r.k8sPodLike).toBe(true);
+      expect(r.suspected).toBe(false);
+    });
+
+    test.each([
+      ['本机 hostname', 'LAPTOP-V29F6ASQ'],
+      ['localhost', 'localhost'],
+      ['测试库后缀', 'jest_w1'],
+      ['空串', ''],
+      ['数字结尾但无连字符', 'nodejs20'],
+    ])('%s 不误判为 Pod', (_label, host) => {
+      const { parsePodOrdinal } = load();
+      expect(parsePodOrdinal(host).podLike).toBe(false);
+    });
+
+    test('缺省参数读 os.hostname()（不依赖编排器导出 HOSTNAME）', () => {
+      const { parsePodOrdinal } = load();
+      const os = require('os');
+      // 本机不是 Pod，但函数必须能拿到真实 hostname 而非抛错/返回空
+      expect(parsePodOrdinal()).toEqual(parsePodOrdinal(os.hostname()));
+    });
+
+    test('非字符串入参一律安全返回（不抛错）', () => {
+      const { parsePodOrdinal } = load();
+      for (const v of [null, 123, {}, []]) {
+        expect(parsePodOrdinal(v).podLike).toBe(false);
+      }
+    });
+
+    test('端到端：K8s 副本场景下启动校验输出失效清单', () => {
+      jest.resetModules();
+      const logger = require('../../utils/logger');
+      const spy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+      try {
+        const { detectMultiProcess } = require('../../constants/runtime');
+        // assertSingleProcessAssumptions 内部不传 hostname，此处只验证
+        // 「检测到的可疑信号能形成完整告警文案」这一后半段
+        const r = detectMultiProcess({ hostname: 'fsms-web-1' });
+        expect(r.suspected).toBe(true);
+        expect(r.reasons.join('；')).toContain('K8s Pod 序号=1');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   describe('P3-19 审计链锁超时保护', () => {
     test('fn 悬挂时锁在超时后释放，后续调用不被永久阻塞', async () => {
       jest.resetModules();
@@ -193,19 +267,50 @@ describe('批次E 架构与性能加固回归', () => {
       expect(typeof statsCache.stopCleanup).toBe('function');
     });
 
-    test('源码中不存在模块加载期的 startCleanup() 自调用', () => {
-      const fs = require('fs');
-      const path = require('path');
-      const src = fs.readFileSync(path.join(__dirname, '../../services/statsCache.js'), 'utf8');
-      // 去掉注释行后，顶层不应有裸的 startCleanup(); 调用
-      const code = src
-        .split('\n')
-        .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
-        .join('\n');
-      expect(/^startCleanup\(\);/m.test(code)).toBe(false);
+    test('\u6a21\u5757\u52a0\u8f7d\u671f\u4e0d\u542f\u52a8\u5b9a\u65f6\u5668\uff08\u771f\u5b9e\u8ba1\u6570 setInterval\uff0c\u800c\u975e\u770b\u6e90\u7801\uff09', () => {
+      // \u3010\u672c\u8f6e\u6539\u9020\uff1a\u6e90\u7801\u6b63\u5219 \u2192 \u884c\u4e3a\u8ba1\u6570\u3011\u539f\u7528\u4f8b\u628a statsCache.js \u6e90\u7801\u53bb\u6ce8\u91ca\u540e
+      // \u5339\u914d /^startCleanup\(\);/m\u2014\u2014\u53ea\u8981\u6ca1\u6709\u8fd9\u884c\u5b57\u9762\u6587\u672c\u5c31\u7eff\uff0c\u800c\u6a21\u5757\u52a0\u8f7d\u671f\u542f\u52a8\u5b9a\u65f6\u5668
+      // \u7684\u65b9\u5f0f\u53ef\u4ee5\u662f `setInterval(sweepExpired, ...)` \u76f4\u63a5\u5199\u5728\u9876\u5c42\u3001\u6216\u5305\u5728\u4efb\u610f\u51fd\u6570\u91cc\u8c03\u7528\u3002
+      // \u73b0\u76f4\u63a5\u5bf9\u300c\u9996\u6b21 require\u300d\u8fd9\u4e2a\u52a8\u4f5c\u8ba1\u6570\uff1a\u52a0\u8f7d\u671f\u5fc5\u987b\u4e00\u4e2a\u5b9a\u65f6\u5668\u90fd\u4e0d\u5efa\u3002
+      jest.resetModules();
+      const si = jest.spyOn(global, 'setInterval');
+      try {
+        require('../../services/statsCache');
+        expect(si).not.toHaveBeenCalled();
+      } finally {
+        si.mockRestore();
+        jest.resetModules();
+      }
     });
 
-    test('index.js 显式启动并在优雅关闭中停止', () => {
+    test('startCleanup \u771f\u5efa\u5b9a\u65f6\u5668\u3001stopCleanup \u771f\u6e05\u9664\uff08\u884c\u4e3a\u9a8c\u8bc1\uff09', () => {
+      jest.resetModules();
+      const si = jest.spyOn(global, 'setInterval');
+      const ci = jest.spyOn(global, 'clearInterval');
+      try {
+        const statsCache = require('../../services/statsCache');
+        statsCache.startCleanup();
+        expect(si).toHaveBeenCalledTimes(1);
+        // \u5e42\u7b49\uff1a\u91cd\u590d startCleanup \u4e0d\u5f97\u53e0\u52a0\u7b2c\u4e8c\u4e2a\u5b9a\u65f6\u5668
+        statsCache.startCleanup();
+        expect(si).toHaveBeenCalledTimes(1);
+        statsCache.stopCleanup();
+        expect(ci).toHaveBeenCalledTimes(1);
+        // \u6e05\u9664\u540e\u518d start \u53ef\u91cd\u65b0\u5efa\u7acb\uff08\u72b6\u6001\u771f\u7684\u5f52\u96f6\uff0c\u800c\u975e\u4ec5\u6e05\u4e00\u4e2a\u65e0\u6548\u53e5\u67c4\uff09
+        statsCache.startCleanup();
+        expect(si).toHaveBeenCalledTimes(2);
+        statsCache.stopCleanup();
+      } finally {
+        si.mockRestore();
+        ci.mockRestore();
+        jest.resetModules();
+      }
+    });
+
+    test('index.js \u663e\u5f0f\u542f\u52a8\u5e76\u5728\u4f18\u96c5\u5173\u95ed\u4e2d\u505c\u6b62', () => {
+      // \u5165\u53e3\u7ec4\u88c5\u5173\u7cfb\uff08\u8c01\u8c03\u7528 startCleanup\uff09\u65e0\u6cd5\u5728\u8fdb\u7a0b\u5185 require\uff1a
+      // index.js \u9876\u5c42\u76f4\u63a5\u542f\u52a8 HTTP \u670d\u52a1\u5668\u3002\u4f46\u53ef\u4ee5\u628a\u65ad\u8a00\u6536\u7d27\u5230
+      // \u300c\u540c\u4e00\u6587\u4ef6\u5185\u540c\u65f6\u5b58\u5728\u542f\u52a8\u70b9\u4e0e\u505c\u6b62\u70b9\uff08\u4e0d\u80fd\u53ea\u6709\u4e00\u8fb9\uff09\u300d\u3002
       const fs = require('fs');
       const path = require('path');
       const src = fs.readFileSync(path.join(__dirname, '../../index.js'), 'utf8');

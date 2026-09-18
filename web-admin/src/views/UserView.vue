@@ -346,12 +346,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Search, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
-import { api } from '@/utils/api'
+import { api, isCanceledError } from '@/utils/api'
 import { encryptPassword } from '@/utils/loginCipher'
 import { passwordStrengthRule } from '@/utils/password'
 import { usePermission } from '@/composables/usePermission'
@@ -403,7 +403,11 @@ const dialog = reactive({
     status: 'active',
     allowedIPs: '',
   },
-  rules: {
+  // 校验文案必须随语言切换重建：在 setup 顶层用 t(...) 求值一次只会得到
+  // 一串**固化字符串**，用户在页内切语言后标签变了、错误提示还是旧语言。
+  // 放进 reactive 的 computed 后，模板 :rules="dialog.rules" 无需改动
+  // （reactive 会自动解包 ref）。
+  rules: computed(() => ({
     username: [
       { required: true, message: t('validation.usernameRequired'), trigger: 'blur' },
       { min: 3, max: 30, message: t('validation.usernameLen'), trigger: 'blur' },
@@ -419,7 +423,7 @@ const dialog = reactive({
     ],
     realName: [{ required: true, message: t('validation.realNameRequired'), trigger: 'blur' }],
     status: [{ required: true, message: t('messages.selectRequired'), trigger: 'change' }],
-  },
+  })),
 })
 
 const roleDialog = reactive({
@@ -471,6 +475,8 @@ const loadData = async () => {
     tableData.value = list
     page.total = res?.data?.pagination?.total || list.length
   } catch (e) {
+    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
+    if (isCanceledError(e)) return
     if (!isCurrent()) return
     ElMessage.error(t('messages.loadFailed'))
     tableData.value = []
@@ -579,6 +585,8 @@ const loadAvailableRoles = async () => {
     const res = await api.roles.getAll()
     availableRoles.value = res?.data?.data || []
   } catch (e) {
+    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
+    if (isCanceledError(e)) return
     availableRoles.value = []
     ElMessage.error(t('messages.loadFailed'))
   }

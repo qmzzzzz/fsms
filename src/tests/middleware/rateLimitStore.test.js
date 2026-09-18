@@ -48,6 +48,24 @@ describe('makeSharedStore 共享存储分支', () => {
     else process.env.REDIS_URL = ORIG_REDIS_URL;
   });
 
+  beforeEach(() => {
+    // 隔离跨用例的 mock 状态：RedisStore 是文件级 jest.fn()（见文件顶部 jest.mock
+    // 工厂），其实例与调用历史在同一文件内跨用例累积。不清理会造成两类顺序依赖：
+    //   1. `expect(RedisStore).not.toHaveBeenCalled()` 读到别的用例留下的调用
+    //      （rl:mfa: / rl:user: / rl:strict:）；
+    //   2. 取 `RedisStore.mock.calls/results` 末项时拿到别的用例创建的实例。
+    RedisStore.mockClear();
+    mockRedisClient.call.mockClear();
+    // initSharedCache / isRedisEnabled 的 Once 队列同样要清：上一个用例排队但未被
+    // 消费的 mockReturnValueOnce(true) 会顶替本用例期望的 false，使「Redis 未就绪」
+    // 分支错误地切到 RedisStore。默认值显式给出，与测试环境真实语义一致
+    //（无 REDIS_URL 时：initSharedCache 可成功，但 isRedisEnabled() 恒为 false）。
+    sharedCache.initSharedCache.mockReset();
+    sharedCache.initSharedCache.mockResolvedValue(undefined);
+    sharedCache.isRedisEnabled.mockReset();
+    sharedCache.isRedisEnabled.mockReturnValue(false);
+  });
+
   test('REDIS_URL 未配置 → 同步返回 undefined（走 express-rate-limit 默认 MemoryStore）', () => {
     delete process.env.REDIS_URL;
     expect(makeSharedStore('general')).toBeUndefined();

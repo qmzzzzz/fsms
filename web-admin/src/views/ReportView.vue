@@ -177,7 +177,7 @@ const loading = ref(true)
 // 注册 echarts 组件（按需导入，减少包体积；import 已统一收敛至文件顶部，O-4）
 echarts.use([PieChart, BarChart, TooltipComponent, LegendComponent, GridComponent, CanvasRenderer])
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
-import { api } from '@/utils/api'
+import { api, isCanceledError } from '@/utils/api'
 
 const reportCards = computed(() => [
   {
@@ -368,6 +368,8 @@ const loadChartData = async () => {
       })
     }
   } catch (e) {
+    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
+    if (isCanceledError(e)) return
     // B-2：失败给一次非阻断式提示，区分「无数据」与「加载失败」
     ElMessage.error(t('messages.loadFailed'))
   }
@@ -474,6 +476,8 @@ const handleExport = async () => {
     ElMessage.success(t('messages.exportSuccess'))
     exportDialog.visible = false
   } catch (e) {
+    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
+    if (isCanceledError(e)) return
     // blob 响应的错误信息在 e.response.data（Blob）中，统一提取后提示
     const msg = await extractErrorMessage(
       e?.response?.data,

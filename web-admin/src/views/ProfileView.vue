@@ -45,7 +45,7 @@
               </li>
               <li v-if="user.lastLoginAt">
                 <el-icon><Clock /></el-icon><span>{{ $t('profile.lastLogin') }}：</span
-                >{{ formatDate(user.lastLoginAt) }}
+                >{{ formatProfileTime(user.lastLoginAt) }}
               </li>
             </ul>
           </template>
@@ -149,19 +149,20 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, watch } from 'vue'
+import { computed, ref, reactive, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { User, Message, Phone, OfficeBuilding, Clock } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { useAuthStore } from '@/store'
 import { api } from '@/utils/api'
 import { enterSubmit } from '@/utils/enterSubmit'
+import { formatTime } from '@/utils/datetime'
 import SessionManager from '@/components/SessionManager.vue'
 // D-2：修改口令与两步验证拆为独立组件
 import ChangePasswordCard from '@/components/ChangePasswordCard.vue'
 import MfaSettingsCard from '@/components/MfaSettingsCard.vue'
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
 const authStore = useAuthStore()
 const user = ref(authStore.currentUser || {})
 const profileFormRef = ref(null)
@@ -193,14 +194,14 @@ const form = reactive({
   department: user.value.department || '',
 })
 
-const formRules = {
+const formRules = computed(() => ({
   email: [
     // 与后端 updateProfileValidation（express-validator isEmail）同口径，
     // 非必填：留空不校验（clean 规则自带空值跳过）
     { type: 'email', message: t('validation.emailInvalid'), trigger: 'blur' },
   ],
   phone: [{ pattern: /^1[3-9]\d{9}$/, message: t('validation.phonePattern'), trigger: 'blur' }],
-}
+}))
 
 // 修改口令（pwdForm/changePwd）与两步验证（MFA 状态机/二维码/恢复码对话框）
 // 已分别迁入 ChangePasswordCard.vue 与 MfaSettingsCard.vue（D-2）
@@ -220,10 +221,17 @@ watch(
   { deep: true }
 )
 
-const formatDate = (dateStr) => {
-  if (!dateStr) return '—'
-  const d = new Date(dateStr)
-  return d.toLocaleString(locale.value, { hour12: false })
+/**
+ * 资料页时间展示：统一走 utils/datetime.formatTime（O-3 单一事实来源——本地时区、
+ * 固定 YYYY-MM-DD HH:mm:ss、各段补零、非法值兜底，且不随界面语言漂移）。
+ *
+ * 为什么保留 em dash 而不直接用 formatTime 的半角 '-'：'—' 是本页既有空值占位符，
+ * 换符号属于用户可见的文案变更，与「统一时间格式」目标无关，故仅在 formatTime
+ * 判定为空/非法（返回 '-'）时映射成本页占位符。
+ */
+const formatProfileTime = (value) => {
+  const text = formatTime(value)
+  return text === '-' ? '—' : text
 }
 
 /** 回车提交守卫已抽至 utils/enterSubmit.js，三处表单共用同一判据（D-2） */

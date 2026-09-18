@@ -77,7 +77,13 @@
             <span v-else class="muted">{{ $t('common.noData') }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="planStartTime" :label="$t('inspection.planStartTime')" width="170" />
+        <el-table-column :label="$t('inspection.planStartTime')" width="170">
+          <template #default="{ row }">
+            <!-- 直接 prop 会把 ISO UTC 串原样渲染（东八区 09:00 显示成 01:00）；
+                 走 utils/datetime 的本地时区口径（O-3 单一事实来源） -->
+            {{ formatTime(row.planStartTime) }}
+          </template>
+        </el-table-column>
         <el-table-column prop="result" :label="$t('inspection.result')" width="100">
           <template #default="{ row }">
             <el-tag v-if="row.result" :type="resultType(row.result)" size="small">
@@ -187,7 +193,8 @@ import { CircleCheckFilled, Tools, Bell, Calendar } from '@element-plus/icons-vu
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
-import { api } from '@/utils/api'
+import { api, isCanceledError } from '@/utils/api'
+import { formatTime } from '@/utils/datetime'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import InspectionForm from '@/components/InspectionForm.vue'
@@ -290,6 +297,8 @@ const loadData = async () => {
       /* 忽略统计失败 */
     }
   } catch (e) {
+    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
+    if (isCanceledError(e)) return
     if (!isCurrent()) return
     // API 失败时展示空列表而非假数据，防止误导用户
     tableData.value = []

@@ -189,6 +189,9 @@ describe('审计报告修复综合回归', () => {
     test('标量参数正常通行', async () => {
       const res = await asAdmin('/api/users?status=active&page=1&limit=5');
       expect(res.status).not.toBe(400);
+      // 过滤掉 400 还不够：这里实测 403（测试夹具缺 user:read），
+      // 断言「不是被标量守卫拒绝」才真正对应标题的语义
+      expect(res.body.errors?.errorCode).not.toBe('QUERY_PARAM_MUST_BE_SCALAR');
     });
   });
 
@@ -255,7 +258,14 @@ describe('审计报告修复综合回归', () => {
 
     test('非法 limit / from 返回 400', async () => {
       expect((await asAdmin('/api/security/audit-logs/verify?limit=abc')).status).toBe(400);
+      expect(
+        (await asAdmin('/api/security/audit-logs/verify?limit=abc')).body.errors.errorCode
+      ).toBe('LIMIT_MUST_BE_POSITIVE_INT');
       expect((await asAdmin('/api/security/audit-logs/verify?from=sideways')).status).toBe(400);
+      // limit 与 from 各点名一个码：两者被同一道校验器合并处理时无法定位是哪个参数错
+      expect(
+        (await asAdmin('/api/security/audit-logs/verify?from=sideways')).body.errors.errorCode
+      ).toBe('FROM_MUST_BE_LATEST_OR_EARLIEST');
     });
 
     test('无 security:audit 权限被拒', async () => {
@@ -273,6 +283,8 @@ describe('审计报告修复综合回归', () => {
         .get('/api/security/audit-logs/verify')
         .set('Authorization', `Bearer ${token}`);
       expect(res.status).toBe(403);
+      // 点名 checkPermission 的统一出口码：与「audit 导出需 security:audit」等业务码区分
+      expect(res.body.errors.errorCode).toBe('PERMISSION_DENIED');
     });
   });
 });

@@ -10,6 +10,7 @@
  */
 
 import { io } from 'socket.io-client'
+import { reportDegradation } from '@/utils/errorReporter'
 
 // 始终同源：开发/Vite 代理与生产/Nginx 代理都会把 /socket.io/ 转发到后端 3000。
 // 如需开发期直连后端（绕过代理），可设置 VITE_WS_URL=http://localhost:3000 覆盖。
@@ -148,6 +149,12 @@ export class WebSocketService {
       })
     } catch (error) {
       this.isConnecting = false
+      // P1-18：io() 同步抛错（非法 URL / options）会静默吞掉，调用方只看到「没连上」。
+      // 降级行为不变（调用方仍走「无实时推送」路径），但上报一次使故障可观测。
+      reportDegradation('websocket: 首次建连失败，实时推送不可用', {
+        error: error?.message || String(error),
+        url: this.url,
+      })
     }
   }
 

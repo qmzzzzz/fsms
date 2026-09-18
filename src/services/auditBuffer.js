@@ -6,34 +6,21 @@
  * 注意：事件型审计（AuditLog.record：登录成败、暴力破解告警、锁定/解锁等）不经过本模块，
  * 保持直写——暴力破解检测（checkBruteForce）依赖 login_failed 的即时可查性。
  *
- * 【WAL 兜底（G4 不丢失）】push 时同步追加一行到本地 WAL 文件，flush 落库成功后
- * 按本次落库条数做「前缀裁剪」（读文件→丢弃前 N 行→临时文件原子替换回原名），
- * 只移除已持久化的行——不得整文件截断，否则 flush 间隙新追加的行会被误删，
- * 崩溃后这些"已写 WAL"的记录彻底丢失。进程崩溃后 start() 重放 WAL 残留。
- * 所有 WAL 文件操作串行化在 walChain 上，避免并发读写竞争。
- * walEnabled 门控：仅 start() 后开启，测试不调 start 故无 WAL 副作用，行为与改造前一致。
- * 属 best-effort：未对每条记录 fsync，崩溃仍可能丢 OS 页缓存中最后几条（远优于丢失整批≤100条/2s）。
+ * 【WAL 兜底（G4 不丢失）】的 WAL 文件层已拆至 services/auditBufferWal.js（O-3 体积棘轮，
+ * 2026-09-17）：本模块保留内存缓冲、批量落库（flush）与进程生命周期，WAL 的路径派生、
+ * 按行追加、前缀裁剪、大小上限、毒批序号与归档、以及串行化它们的 walChain 由 wal 模块负责。
+ * 对外行为与拆分前一致：push 时同步追加 WAL 行，flush 落库成功后按本次落库条数前缀裁剪，
+ * 崩溃后 start() 重放 WAL 残留（先按毒批归档序号过滤，P1-24）。
  */
 
-const fs = require('fs');
-const path = require('path');
 const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
+const wal = require('./auditBufferWal');
 
 // 缓冲上限：达到即触发一次批量落库
 const BUFFER_LIMIT = 100;
 // 定时落库间隔（毫秒）
 const FLUSH_INTERVAL_MS = 2000;
-// WAL 文件路径（可配），存放尚未确认落库的审计文档（每行一条 JSON）。
-//
-// 路径解析时机（T-1/auditBufferGap 抖动修复）：历史上是模块加载期 const——
-// Jest 并行 worker 里先 require 本模块的测试文件会锁死路径，后设
-// AUDIT_WAL_PATH 的套件被静默忽略，指向已清理目录或共享默认文件，
-// 造成跨套件 WAL 串写与断言抖动。现改为 start() 时重读 env（与
-// AUDIT_WAL_MAX_BYTES 的运行期读法同语义）：每次启动都可重指向，
-// 生产环境一次启动一个路径不受影响；测试套件按 worker 独立 mkdtemp。
-const DEFAULT_WAL_PATH = path.join(__dirname, '../../logs/audit-buffer.wal');
-let walPath = DEFAULT_WAL_PATH;
 
 // ================= 容量与重试保护（P2-21） =================
 // 缓冲硬上限：Mongo 中断期间每 2s flush 失败整批回退，高流量下缓冲无界增长会 OOM。
@@ -46,30 +33,14 @@ const UNSHIFT_CHUNK_SIZE = 1000;
 // 毒文档隔离阈值：同一批次连续失败达到此次数即丢弃并告警，
 // 防止一条永久非法的文档让整批无限滞留重试（原实现只防了「重复插入」，没防「无限重试」）。
 const MAX_BATCH_RETRY = 5;
-// WAL 硬上限（字节）：DB 长时间不可用且高流量时 WAL 持续增长（磁盘写放大，报告 R-6）。
-// 超限丢弃最旧一半行（与 BUFFER_HARD_LIMIT 丢最旧同向的止损策略）并告警。
-// 被丢弃行的文档若仍在缓冲中会照常落库，其后的 walTrimLines 按实际行数收敛（已有告警口径）；
-// 对应文档已被 BUFFER_HARD_LIMIT 丢弃的行，本就是纯取证残留。
-// 运行期读 env 便于测试注入小阈值；默认 50MB。
-const getWalMaxBytes = () => Number(process.env.AUDIT_WAL_MAX_BYTES) || 50 * 1024 * 1024;
-// B-I1：每条 append 都 stat 是串行 walChain 的吞吐瓶颈——改为每 N 次追加
-// 抽查一次大小（默认 32；N×单行 ≈ 数 KB 的滞后窗口，对 50MB 上限可忽略）。
-// 0/负值按 1 处理（恢复逐条检查，供测试注入）。
-const getWalStatInterval = () => Math.max(1, Number(process.env.AUDIT_WAL_STAT_INTERVAL) || 32);
-let walAppendCount = 0;
 
 const buffer = [];
 let flushTimer = null;
 let flushing = false;
-let walEnabled = false;
-// 串行化所有 WAL 文件操作（追加 / 裁剪 / 重放），杜绝并发读写竞争导致丢行
-let walChain = Promise.resolve();
 // 累计因容量上限被丢弃的条数（供合规仪表盘暴露，不能静默丢数据）
 let droppedCount = 0;
 // 连续 flush 失败次数（毒文档隔离计数器）
 let consecutiveFailures = 0;
-// 累计因 WAL 超限被丢弃的行数（可观测，静默丢取证数据在合规上不可接受）
-let walDroppedLines = 0;
 
 /**
  * 分块回退到缓冲头部（P2-21）
@@ -99,128 +70,6 @@ function enforceBufferLimit() {
       '数据库可能长时间不可用，请立即排查；这些记录的 WAL 行仍在磁盘上'
   );
   return overflow;
-}
-
-function ensureLogsDir() {
-  const dir = path.dirname(walPath);
-  if (!fs.existsSync(dir)) {
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-    } catch {
-      /* logger 已确保 logs 存在，忽略 */
-    }
-  }
-}
-
-/**
- * 当前 WAL 文件路径（导出供测试断言与运维核对）
- * start() 每次重读 AUDIT_WAL_PATH，此处返回的恒为下一次写入将使用的路径
- */
-function getWalPath() {
-  return walPath;
-}
-
-/**
- * 追加一行到 WAL（非阻塞，串行化在 walChain 上）
- */
-function walAppendLine(line) {
-  walChain = walChain
-    .then(() => fs.promises.appendFile(walPath, line, 'utf8'))
-    .then(() => {
-      // B-I1：stat 节流——每 N 次追加抽查一次大小（详见 getWalStatInterval 注释）
-      walAppendCount += 1;
-      if (walAppendCount % getWalStatInterval() === 0) return enforceWalLimit();
-    })
-    .catch((e) => logger.warn(`审计 WAL 追加失败：${e.message}`));
-}
-
-/**
- * WAL 大小硬上限保护（R-6）：超过 getWalMaxBytes() 丢弃最旧一半行并告警。
- * 串行化在 walChain 上（与追加/裁剪互斥）；只保留较新一半——
- * 较新行对应的文档大概率仍在缓冲中等待落库，优先保住可落库数据的账目完整。
- */
-async function enforceWalLimit() {
-  let stat;
-  try {
-    stat = await fs.promises.stat(walPath);
-  } catch (e) {
-    if (e.code !== 'ENOENT') logger.warn(`审计 WAL 大小检查失败：${e.message}`);
-    return;
-  }
-  const maxBytes = getWalMaxBytes();
-  if (stat.size <= maxBytes) return;
-
-  const content = await fs.promises.readFile(walPath, 'utf8');
-  const parts = content.split('\n');
-  const hasTrailingNewline = parts[parts.length - 1] === '';
-  const records = hasTrailingNewline ? parts.slice(0, -1) : parts;
-  if (records.length < 2) return; // 单行超限无「一半」可弃，留给外部取证处理
-
-  const keepFrom = Math.floor(records.length / 2);
-  const dropped = keepFrom;
-  const nextContent = `${records.slice(keepFrom).join('\n')}\n`;
-
-  const tmpPath = `${walPath}.tmp`;
-  await fs.promises.writeFile(tmpPath, nextContent, 'utf8');
-  await fs.promises.rename(tmpPath, walPath);
-
-  walDroppedLines += dropped;
-  logger.error(
-    `审计 WAL 超过硬上限（${stat.size} > ${maxBytes} 字节），已丢弃最旧 ${dropped} 行（累计 ${walDroppedLines} 行）。` +
-      '数据库可能长时间不可用，请立即排查'
-  );
-}
-
-/**
- * 移除 WAL 前 n 行（已确认落库的文档）。前缀裁剪而非整文件截断：
- * flush 成功与裁剪之间 push() 仍会向文件尾部追加新行，整文件截断会把
- * 这些尚未落库的行一并抹掉，崩溃后造成已写 WAL 记录丢失。串行化在 walChain 上，
- * 且裁剪排在既有 append 之后执行，保证被裁掉的行数内不含未落库数据。
- */
-function walTrimLines(n) {
-  walChain = walChain
-    .then(async () => {
-      let content;
-      try {
-        content = await fs.promises.readFile(walPath, 'utf8');
-      } catch (e) {
-        if (e.code !== 'ENOENT') logger.warn(`审计 WAL 读取失败：${e.message}`);
-        return;
-      }
-      if (!content) return;
-
-      const parts = content.split('\n');
-      const hasTrailingNewline = parts[parts.length - 1] === '';
-      const records = hasTrailingNewline ? parts.slice(0, -1) : parts;
-      if (records.length === 0) return;
-
-      if (records.length < n) {
-        // 行数少于待裁剪数：按实际行数清理（WAL 可能被外部干预过），不静默
-        logger.warn(`审计 WAL 行数(${records.length})少于待裁剪行数(${n})，按实际行数清理`);
-      }
-      const rest = records.slice(Math.min(n, records.length));
-      const nextContent = rest.length ? `${rest.join('\n')}\n` : '';
-      if (nextContent === content) return;
-
-      // 临时文件 + 原子替换，避免写一半崩溃留下残缺 WAL
-      const tmpPath = `${walPath}.tmp`;
-      await fs.promises.writeFile(tmpPath, nextContent, 'utf8');
-      await fs.promises.rename(tmpPath, walPath);
-    })
-    .catch((e) => logger.warn(`审计 WAL 裁剪失败：${e.message}`));
-}
-
-/**
- * 读取 WAL 全部物理行（供启动重放使用）。文件不存在视为空。
- */
-async function readWalLines() {
-  try {
-    const content = await fs.promises.readFile(walPath, 'utf8');
-    return content.split('\n').filter(Boolean);
-  } catch (e) {
-    if (e.code !== 'ENOENT') logger.warn(`审计 WAL 读取失败：${e.message}`);
-    return [];
-  }
 }
 
 /**
@@ -263,7 +112,7 @@ async function flush() {
         // 落库确认成功后才推进链尾（消除幻影链尾）；Redis 模式下需 await 落共享缓存；
         // B-L4：传 gen 代际——持锁超时后僵尸 flush 的推进被跳过
         if (chained) await advanceChainTail(pendingTail, gen);
-        if (walEnabled) walTrimLines(docs.length);
+        if (wal.isEnabled()) wal.trimLines(docs.length);
         consecutiveFailures = 0; // 成功即重置毒文档计数
       } catch (insertErr) {
         const insertedDocs = Array.isArray(insertErr.insertedDocs) ? insertErr.insertedDocs : [];
@@ -293,10 +142,18 @@ async function flush() {
     // 连续失败达阈值即丢弃本批并告警，让后续正常记录得以落库。
     if (consecutiveFailures >= MAX_BATCH_RETRY) {
       droppedCount += retryDocs.length;
+      // P1-24：丢弃批次的内存副本后，同步把其 WAL 行归档移出主文件。
+      // 此前 WAL 行原样保留 → 每次重启 start() 重放同一批毒文档，
+      // 再走满 5 次失败、再丢一次，且这几行永远消费不掉。
+      // 按 __walSeq 精确匹配（不按行序），不会误伤同文件中其他待落库的行。
+      const discardSeqs = new Set(retryDocs.map((d) => d && d.__walSeq).filter(Boolean));
+      if (wal.isEnabled() && discardSeqs.size > 0) wal.discardBySeqs(discardSeqs);
       logger.error(
         `审计批次连续失败 ${consecutiveFailures} 次，判定为毒文档批并丢弃 ${retryDocs.length} 条` +
           `（累计丢弃 ${droppedCount} 条）。最后一次错误：${err.message}。` +
-          `WAL 行仍保留在 ${walPath}，可人工取证`
+          (discardSeqs.size > 0
+            ? `已归档 ${discardSeqs.size} 行 WAL 取证行到 ${wal.getWalPath()}.discarded 并从主 WAL 移除（重启重放不再重复处理）`
+            : `WAL 行仍保留在 ${wal.getWalPath()}，可人工取证`)
       );
       consecutiveFailures = 0;
       return;
@@ -318,11 +175,14 @@ async function flush() {
  * @param {object} doc AuditLog 文档
  */
 function push(doc) {
+  // P1-24：分配 WAL 序号（已有则复用——重放/回退重试的文档必须保留原序号，
+  // 否则「毒批丢弃后按序号移除对应 WAL 行」匹配不上）。序号分配逻辑在 wal 模块。
+  wal.assignSeq(doc);
   buffer.push(doc);
   // 行必须以 \n 结尾：readWalLines/walTrimLines/enforceWalLimit 均按行解析，
   // 缺行终止符会让多次 push 连成单个巨型"行"，崩溃重放 JSON.parse 失败、
   // 按行裁剪/超限丢弃全部退化（R-6 实施时由测试暴露的既有缺陷，一并修复）
-  if (walEnabled) walAppendLine(JSON.stringify(doc) + '\n');
+  wal.appendLine(JSON.stringify(doc) + '\n');
   // 容量保护：DB 长时间不可用时缓冲会无界增长（P2-21）
   enforceBufferLimit();
   if (buffer.length >= BUFFER_LIMIT) {
@@ -343,27 +203,40 @@ function push(doc) {
  */
 function start() {
   if (flushTimer) return;
-  // 路径重读（T-1/auditBufferGap 抖动修复）：见文件头注释。env 缺失时回退默认路径
-  walPath = process.env.AUDIT_WAL_PATH || DEFAULT_WAL_PATH;
-  ensureLogsDir();
-  walEnabled = true;
+  // 路径重读（T-1/auditBufferGap 抖动修复）+ L-28 按库名派生：均落在 wal.startup 内。
+  wal.startup(process.env.AUDIT_WAL_PATH);
 
-  walChain = walChain
-    .then(async () => {
-      const lines = await readWalLines();
+  wal.serialize(
+    async () => {
+      const lines = await wal.readLines();
       if (!lines.length) return;
+      // P1-24：先按毒批归档过滤——上一次运行判定丢弃、但归档改写未完成的
+      // 行（崩溃窗口）在此被跳过，避免重启后重复处理毒批。
+      const discarded = await wal.readDiscardedSeqs();
+      let skippedDiscarded = 0;
       for (const line of lines) {
         try {
-          buffer.push(JSON.parse(line));
+          const doc = JSON.parse(line);
+          if (doc && doc.__walSeq && discarded.has(doc.__walSeq)) {
+            skippedDiscarded += 1;
+            continue;
+          }
+          buffer.push(doc);
         } catch {
           // 损坏行跳过，不阻塞启动；该行残留文件中，会被后续裁剪按占位消化
         }
       }
-      logger.info(`审计 WAL 重放 ${lines.length} 条遗留记录`);
+      if (skippedDiscarded > 0) {
+        logger.warn(
+          `审计 WAL 重放跳过 ${skippedDiscarded} 条已判定丢弃的毒批行（归档见 ${wal.getWalPath()}.discarded）`
+        );
+      }
+      logger.info(`审计 WAL 重放 ${lines.length - skippedDiscarded} 条遗留记录`);
       // 重放同样受硬上限约束：崩溃前积压的 WAL 可能远超内存承载（P2-21）
       enforceBufferLimit();
-    })
-    .catch((e) => logger.warn(`审计 WAL 启动重放失败：${e.message}`));
+    },
+    (e) => logger.warn(`审计 WAL 启动重放失败：${e.message}`)
+  );
 
   flushTimer = setInterval(() => {
     flush().catch((err) => logger.warn(`审计日志定时落库异常：${err.message}`));
@@ -376,7 +249,7 @@ function start() {
  * 停止定时器（优雅关闭时先 stop 再 flush，确保缓冲清空）
  */
 function stop() {
-  walEnabled = false;
+  wal.disable();
   if (flushTimer) {
     clearInterval(flushTimer);
     flushTimer = null;
@@ -393,7 +266,7 @@ function stop() {
  */
 async function flushAndStop() {
   await flush().catch((e) => logger.warn(`收尾 flush 失败：${e.message}`));
-  await walChain.catch(() => {}); // 等追加/裁剪链排空（rename 落盘）
+  await wal.drain(); // 等追加/裁剪链排空（rename 落盘）
   stop();
 }
 
@@ -401,7 +274,12 @@ async function flushAndStop() {
  * WAL 是否启用（合规仪表盘指标）
  */
 function isWalEnabled() {
-  return walEnabled;
+  return wal.isEnabled();
+}
+
+/** 当前 WAL 文件路径（导出供测试断言与运维核对）；路径状态由 wal 模块持有 */
+function getWalPath() {
+  return wal.getWalPath();
 }
 
 /**
@@ -414,8 +292,7 @@ function getStats() {
     hardLimit: BUFFER_HARD_LIMIT,
     droppedCount,
     consecutiveFailures,
-    walEnabled,
-    walDroppedLines,
+    ...wal.getStats(),
   };
 }
 
@@ -424,7 +301,7 @@ function __resetForTest() {
   buffer.length = 0;
   droppedCount = 0;
   consecutiveFailures = 0;
-  walDroppedLines = 0;
+  wal.resetCounters();
 }
 
 module.exports = {

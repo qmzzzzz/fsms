@@ -94,7 +94,8 @@ const props = defineProps({
 })
 
 const { t } = useI18n()
-const label = t('common.loading')
+// computed 而非一次性取值：语言切换后 aria-label 必须跟随（固化字符串会让屏幕阅读器听到旧语言）
+const label = computed(() => t('common.loading'))
 
 const avatarStyle = computed(() => ({
   width: `${props.avatarSize}px`,

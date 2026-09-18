@@ -81,6 +81,7 @@ describe('AuditLog 模型静态方法', () => {
     });
 
     test('超深嵌套被截断而非抛栈溢出', async () => {
+      // 叶子口令埋在第 12 层，远超 MAX_SANITIZE_DEPTH(6)
       let deep = { password: 'x' };
       for (let i = 0; i < 12; i++) deep = { level: deep };
       const req = makeReq({ body: deep });
@@ -94,6 +95,14 @@ describe('AuditLog 模型静态方法', () => {
         5
       );
       expect(doc).toBeTruthy();
+      // 「截断」的判据必须是能看出截断发生了，且明文没漏：
+      // 只断 doc truthy 时，把深度超限分支改成原样返回（明文入库）也照样绿。
+      // 实测：第 6 层起被替换为 '[深度超限]'，password 叶子不会出现在结果里。
+      const serialized = JSON.stringify(doc.body);
+      expect(serialized).toContain('[深度超限]');
+      expect(serialized).not.toContain('password');
+      // 前 6 层必须原样保留（截断不等于整段丢弃）
+      expect(doc.body.level.level.level.level.level).toBeDefined();
     });
   });
 

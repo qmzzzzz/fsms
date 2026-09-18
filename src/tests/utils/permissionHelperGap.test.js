@@ -112,6 +112,19 @@ describe('permissionHelper 分支补齐', () => {
   });
 
   describe('getUserPermissions', () => {
+    test('activeRoles（L-15 导出）：null 占位过滤 + 入参缺失/非数组兜底', () => {
+      // null 占位来自 populate + match：未被过滤条件命中的引用在原位置保留 null。
+      // 若不跳过，取 r.name/r.code 会抛 TypeError 被 catch 转成 500。
+      expect(helper.activeRoles({ roles: [{ code: 'a' }, null, { code: 'b' }] })).toEqual([
+        { code: 'a' },
+        { code: 'b' },
+      ]);
+      // 三个兜底分支：user 缺失 / roles 缺失 / roles 不是数组
+      expect(helper.activeRoles(undefined)).toEqual([]);
+      expect(helper.activeRoles({})).toEqual([]);
+      expect(helper.activeRoles({ roles: 'not-an-array' })).toEqual([]);
+    });
+
     test('不存在的用户 → null', async () => {
       await expect(helper.getUserPermissions(new mongoose.Types.ObjectId())).resolves.toBeNull();
     });

@@ -76,8 +76,18 @@ function queryLengthLimit(max = MAX_QUERY_VALUE_LENGTH) {
  * query，故一律 400 拒绝，而非静默取首值——静默取值会让
  * `?status=admin&status=x` 之类的参数污染难以察觉。
  *
- * 注意：本中间件须挂在 applySecurity（含 sanitizeMongo/hpp）之后，
- * 保证看到的是清洗后的最终形态。
+ * 注意（P1-33 修正，2026-09-17）：原注释称「本中间件须挂在 applySecurity（含
+ * sanitizeMongo/hpp）之后，保证看到的是清洗后的最终形态」——该前提在 Express 5 下
+ * **不成立**：req.query 是 getter（每次访问重新解析 URL 查询串），sanitizeMongo/hpp
+ * 对 req.query 的原地清洗结果在下一次访问时即被丢弃，本中间件看到的始终是
+ * **未经清洗的原始解析结果**（实测 `?search[$regex]=^a` 仍为对象、
+ * `?status=a&status=b` 仍为数组）。
+ * 判定强度不受此影响：本中间件对一切非字符串取值一律拒绝，不依赖上游是否清洗过。
+ *
+ * **query 侧的真正防线就是本函数（queryScalarGuard，src/app.js 以
+ * `app.use('/api/', queryScalarGuard())` 挂载，命中即 400 QUERY_PARAM_MUST_BE_SCALAR）。
+ * 若移除它，query 注入防线归零**——sanitizeMongo 与 hpp 对 req.query 的清洗在
+ * Express 5 下均已失效，不要以「已有两道防线」为由移除本中间件。
  *
  * @returns {Function} Express 中间件
  */

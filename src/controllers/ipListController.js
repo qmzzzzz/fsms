@@ -16,6 +16,7 @@ const { normalizeIP, normalizeCIDR, isFullRangeCIDR } = require('../utils/ipUtil
 const { auditPath } = require('../utils/auditMeta');
 const { isSuperAdminRole } = require('../utils/superAdmin');
 const { invalidateIPBlockCache } = require('../middleware/security');
+const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
 
 /**
  * 获取 IP 黑白名单列表
@@ -235,7 +236,7 @@ const addIPEntry = asyncHandler(async (req, res) => {
     userAgent: req.get('user-agent'),
     success: true,
     riskLevel: type === 'black' ? 'medium' : 'high',
-  }).catch(() => {});
+  }).catch(onAuditWriteFailure('ip_list_change', req));
 
   logger.info('IP 已加入名单', {
     ip: normalizedIP,
@@ -330,7 +331,7 @@ const removeIPEntry = asyncHandler(async (req, res) => {
     userAgent: req.get('user-agent'),
     success: true,
     riskLevel: 'medium',
-  }).catch(() => {});
+  }).catch(onAuditWriteFailure('ip_list_change', req));
 
   logger.info('IP 已从名单移除', { ip: entry.ip, type: entry.type, operator: req.user.username });
 

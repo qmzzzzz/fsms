@@ -97,22 +97,36 @@ describe('后台任务与错误路径（批次 E）', () => {
     monitor.start();
     monitor.start(); // 幂等
     expect(monitor.isRunning()).toBe(true);
-    await monitor.runDetection(); // 空库/无异常 → 不推送不抛错
+    // 顺序无关（自包含）：清掉前序用例留下的 success:false 审计（如「权限滥用」用例
+    // 的 21 条 permission_denied）。否则 runDetection 会真的检出高频失败并消耗当日频控键，
+    // 使后续「高频失败告警」用例的首次推送被频控拒绝（spy 恒 0）。
+    await AuditLog.deleteMany({ success: false }, { bypassAppendOnly: true });
+    await monitor.runDetection(); // 无高频失败记录 → 该维度不推送、不抛错
     monitor.stop();
     monitor.stop(); // 幂等
     expect(monitor.isRunning()).toBe(false);
   });
 
-  test('auditMonitor：检出高频失败用户并推送告警', async () => {
+  test('auditMonitor：检出高频失败用户并推送告警（含频控二次去重）', async () => {
     const monitor = require('../../services/auditMonitor');
-    // 造高频失败记录（阈值： AuditLog.detectAnomalies 内部定义）
+    const securityAlert = require('../../services/securityAlert');
+    // P1-29 修复：原用例 0 断言（注释自认「不抛错即通过」），且 fixture 有缺陷——
+    // `userId: new ObjectId()` 写在 for 循环体内，12 条记录分属 12 个用户，
+    // detectAnomalies 按 userId 分组后每组 count=1，永远够不到阈值(10)，
+    // 即「高频失败」从未真正检出，「告警」也从未发生。现改为同一 userId，
+    // 让检测链路真正触发，并对「推送内容」与「频控去重」做行为断言。
+    // 顺序无关（自包含）：清掉前序用例留下的 success:false 审计（如「权限滥用」
+    // 用例的 21 条 permission_denied），确保 failedOperations 只含本用例的 12 条
+    //（否则会混入其他用户的记录，「聚合为 1 个用户」断言实得 2 条）。
+    await AuditLog.deleteMany({ success: false }, { bypassAppendOnly: true });
+    const sharedUserId = new (require('mongoose').Types.ObjectId)();
     const docs = [];
     for (let i = 0; i < 12; i++) {
       docs.push({
         action: 'login_failed',
         category: 'auth',
         username: `efail${stamp}`,
-        userId: new (require('mongoose').Types.ObjectId)(),
+        userId: sharedUserId,
         ip: '203.0.113.201',
         success: false,
         riskLevel: 'medium',
@@ -121,8 +135,28 @@ describe('后台任务与错误路径（批次 E）', () => {
     }
     await AuditLog.insertMany(docs);
 
-    await monitor.runDetection();
-    // 告警侧效果：security_alerts_total 计数或审计记录存在即可（不抛错即通过）
+    // spy 透传原实现（默认行为）：既观察调用参数，也让 logger/指标的真实路径继续执行
+    const spy = jest.spyOn(securityAlert, 'sendNotification');
+    try {
+      await monitor.runDetection();
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      const [type, level, message, meta] = spy.mock.calls[0];
+      expect(type).toBe('audit_anomaly_detected');
+      expect(level).toBe('high');
+      expect(message).toContain('高频失败');
+      // 12 条同用户失败记录聚为 1 个用户、计数 12（阈值 10）
+      expect(meta.failedOperations).toHaveLength(1);
+      expect(String(meta.failedOperations[0]._id)).toBe(String(sharedUserId));
+      expect(meta.failedOperations[0].count).toBe(12);
+      expect(meta.dimensions).toContain('高频失败');
+
+      // 频控窗口内重复检测 → shouldSendAlert 拒绝，不再重复推送
+      await monitor.runDetection();
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   // ================= deviceReminder =================
@@ -244,7 +278,22 @@ describe('后台任务与错误路径（批次 E）', () => {
     expect(abuse).toBeTruthy();
 
     const overview = await securityAlert.getSecurityOverview(7);
-    expect(overview.riskScore).toBeGreaterThanOrEqual(0);
+    // 本用例刚落 2 条 riskLevel='high' 的告警审计（bulk_data_export + permission_abuse），
+    // 7 天窗口必然计入；该下界锚点保证风险评分至少反映本用例写入的数据。
+    expect(overview.highAlerts).toBeGreaterThanOrEqual(2);
+    // 原断言「riskScore >= 0」恒真（实现以 Math.max(0, …) 夹取），把 riskScore
+    // 写死为 0、漏加维度、乘错权重都不会红。改为按源码公式独立复算并精确比对：
+    //   riskScore = min(100, critical*10 + high*5 + failedLogins*2 + unusualAccess*5)
+    const expectedRiskScore = Math.min(
+      100,
+      overview.criticalAlerts * 10 +
+        overview.highAlerts * 5 +
+        overview.failedLogins * 2 +
+        overview.unusualAccess * 5
+    );
+    expect(overview.riskScore).toBe(expectedRiskScore);
+    // 且必须 > 0：本用例写入的 2 条 high 至少贡献 10 分
+    expect(overview.riskScore).toBeGreaterThan(0);
 
     const recent = await securityAlert.getRecentAlerts(10);
     expect(Array.isArray(recent)).toBe(true);
@@ -316,25 +365,34 @@ describe('后台任务与错误路径（批次 E）', () => {
       Object.assign(new Error('cast'), { name: 'CastError', kind: 'ObjectId' })
     );
     expect(cast.statusCode).toBe(400);
+    // 各分支的响应体也须核对：仅断状态码无法发现「文案/结构被换成另一条错误」
+    expect(cast.body).toEqual({ success: false, message: '资源 ID 格式无效', errors: null });
 
     const dup = await run(
       Object.assign(new Error('dup'), { code: 11000, keyValue: { username: 'x' } })
     );
     expect(dup.statusCode).toBe(400);
+    expect(dup.body.message).toBe('资源已存在');
 
     const validation = await run(
       Object.assign(new Error('v'), { name: 'ValidationError', errors: { f: { message: 'bad' } } })
     );
     expect(validation.statusCode).toBe(400);
+    expect(validation.body.errors.errorCode).toBe('VALIDATION_FAILED');
 
     const jwtErr = await run(Object.assign(new Error('jwt'), { name: 'JsonWebTokenError' }));
     expect(jwtErr.statusCode).toBe(401);
+    expect(jwtErr.body.message).toBe('无效的认证令牌');
 
     const expired = await run(Object.assign(new Error('exp'), { name: 'TokenExpiredError' }));
     expect(expired.statusCode).toBe(401);
+    expect(expired.body.message).toBe('认证令牌已过期');
 
     const unknown = await run(new Error('boom'));
     expect(unknown.statusCode).toBe(500);
+    // 未预期错误统一走 INTERNAL_ERROR，且不得回显 err.message（防堆栈/细节泄露）
+    expect(unknown.body.errors.errorCode).toBe('INTERNAL_ERROR');
+    expect(unknown.body.message).not.toContain('boom');
   });
 
   // ================= permissionHelper / apiResponse / ApiError =================

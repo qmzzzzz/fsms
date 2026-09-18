@@ -18,7 +18,11 @@
 export const safeStorage = {
   get(key, fallback = null) {
     try {
-      return sessionStorage.getItem(key)
+      const raw = sessionStorage.getItem(key)
+      // 缺失键同样走 fallback：原实现只在「介质抛错」时用 fallback，
+      // 调用方写 safeStorage.get(k, 默认值) 会静默拿到 null，参数形同虚设，
+      // 与 getJSON 的「无值即 fallback」语义也不一致
+      return raw === null ? fallback : raw
     } catch (_) {
       return fallback
     }
@@ -62,7 +66,9 @@ export const safeStorage = {
 export const safeLocal = {
   get(key, fallback = null) {
     try {
-      return localStorage.getItem(key)
+      const raw = localStorage.getItem(key)
+      // 与 safeStorage.get 同一契约：缺失键即 fallback（详见上方注释）
+      return raw === null ? fallback : raw
     } catch (_) {
       return fallback
     }
@@ -105,7 +111,10 @@ export const readSessionState = (key) => {
   const legacy = safeStorage.getJSON(key)
   if (legacy !== null) {
     safeLocal.setJSON(key, legacy)
-    safeStorage.remove(key)
+    // 确认写入落地后才清旧副本：配额写满/隐私模式下 setJSON 会静默失败，
+    // 若照删 sessionStorage 里的唯一副本，用户刷新即被判未登录
+    // —— 这正是本次迁移要避免的故障。写回失败则保留旧副本，下次再试。
+    if (safeLocal.get(key) !== null) safeStorage.remove(key)
     return legacy
   }
   return null

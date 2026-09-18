@@ -1,0 +1,168 @@
+# 部署自动化（D-1）：手动触发，在目标机上跑 scripts/deploy.js。
+#
+# 为什么是 workflow_dispatch 而不是 push 自动跨越：
+#   CI（ci.yml）负责“构建并推镜像”，但**推镜像不等于部署**——
+#   上线时机、回滚决策、变更审批都是人的判断。把两者绑在一起，
+#   会让“合并到 main”瞬间等于“生产已变”，而且没有回头路。
+#   本流程把“何时上”交给人，把“怎么上”固化为脚本。
+#
+# 两种运行方式（按仓库密钥是否配置自动选择）：
+#   A. 自托管 runner（推荐）：在部署机上注册带 `deploy` 标签的 runner。
+#      部署机与仓库同机时最简单——无需管 SSH 凭据，也不会把部署密钥散到 Actions。
+#   B. SSH：配 DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY / DEPLOY_PATH，在部署机上
+#      拉取仓库到指定提交后跑同一个脚本。
+#
+# 安全套主要取：
+#   - 强制经 GitHub Environment（production / staging），可在仓库设置里给它加**人工审批门**；
+#   - 镜像必须是带版本 tag 的全名，正则校验后才会传给脚本（脚本自身也有一道）；
+#   - 密钥不上命令行：SSH key 走 stdin，远程命令里只出现镜像名。
+#
+# ⚠️ 未验证声明：本流程**从未在 GitHub Actions 上真实跑过**
+#   （本地无 GitHub 控制权，也无部署机）。结构与关键不变量已由
+#   src/tests/deploy/deployWorkflow.test.js 做静态断言，但“能不能跑通”需首次配置后实践。
+name: 'Deploy'
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: '目标镜像（全名 + 版本 tag，如 ghcr.io/owner/repo:sha-abc1234）'
+        required: true
+        type: string
+      environment:
+        description: '部署环境（决定哪组密钥，并触发对应的人工审批门）'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      dry_run:
+        description: '干跑：只打印部署计划与判据，不做任何变更'
+        required: false
+        type: boolean
+        default: false
+      skip_backup:
+        description: '跳过备份（仅演练用；真实发布不要勾）'
+        required: false
+        type: boolean
+        default: false
+
+# 工作流级仅 read-all；写权限一律下放到 job（与 scorecard.yml 同口径）
+permissions:
+  contents: read
+
+jobs:
+  # 第一道：把“输入合法性”与“部署凭据是否配好”提前查掉。
+  # 单独成 job 是为了让失败发生在**任何环境交互之前**，与 deploy.js 的 exit 2 同意图。
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+      image_tag: ${{ steps.validate.outputs.image_tag }}
+    steps:
+      - name: Validate image tag format
+        id: validate
+        # 不接受缺参数、不接受本地开发默认值 fire-safety-app:local。
+        # 与 scripts/deploy.js 的 validatePreflight 同判据（本地默认 tag 无法回答“线上是哪个 commit”）。
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.image_tag }}"
+          if [[ ! "$tag" =~ ^[a-z0-9.-]+(:[0-9]+)?/.+:[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::镜像引用格式不合法（需为 registry/仓库:tag）：$tag"
+            exit 1
+          fi
+          if [[ "$tag" == *":local" ]]; then
+            echo "::error::不允许用 :local 标签发布（指向本机未版本化构建）：$tag"
+            exit 1
+          fi
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Detect deploy credentials
+        id: mode
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        # fail-closed：两种模式都不成立时**拒绝执行**，
+        # 而不是“没配密钥就跳过部署并报绿”——后者会让人以为已发布。
+        run: |
+          set -euo pipefail
+          if [[ -n "${DEPLOY_HOST:-}" && -n "${DEPLOY_SSH_KEY:-}" ]]; then
+            echo "mode=ssh" >> "$GITHUB_OUTPUT"
+            echo "部署方式：SSH（DEPLOY_HOST 已配置）"
+            exit 0
+          fi
+          echo "mode=self-hosted" >> "$GITHUB_OUTPUT"
+          echo "部署方式：自托管 runner（未配 SSH 密钥，将在带 deploy 标签的 runner 上执行）"
+          echo "::warning::未配置 DEPLOY_HOST/DEPLOY_SSH_KEY：若仓库也没有自托管 runner，本次部署将停在“等 runner”上。"
+
+  # 模式 A：自托管 runner（部署机上已注册，标签 deploy）
+  deploy-self-hosted:
+    needs: preflight
+    if: needs.preflight.outputs.mode == 'self-hosted'
+    runs-on: [self-hosted, deploy]
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout (deploy host keeps the repo)
+        uses: actions/checkout@v5
+
+      # 直接调脚本：备份 / 迁移 / 切换 / 健康门禁 / 失败回滚全在脚本内，
+      # 工作流不重复实现一遍判据（否则两处逻辑会漂移）。
+      - name: Run deploy.js
+        env:
+          APP_IMAGE: ${{ needs.preflight.outputs.image_tag }}
+          CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
+        run: |
+          set -euo pipefail
+          args=()
+          [[ "${{ inputs.dry_run }}" == "true" ]] && args+=(--dry-run)
+          [[ "${{ inputs.skip_backup }}" == "true" ]] && args+=(--skip-backup)
+          node scripts/deploy.js "${args[@]}"
+
+  # 模式 B：SSH（部署机上有仓库副本，通过 DEPLOY_PATH 指定）
+  deploy-ssh:
+    needs: preflight
+    if: needs.preflight.outputs.mode == 'ssh'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        # 密钥走 stdin 写入，不出现在命令行（命令行会进进程列表）；
+        # known_hosts 必选：不配就退回 StrictHostKeyChecking=accept-new，
+        # 首次连接会靠 TOFU（依赖首次见到的密钥）。生产建议配上。
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          if [[ -n "${DEPLOY_KNOWN_HOSTS:-}" ]]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+            chmod 644 ~/.ssh/known_hosts
+            echo "OPTIONS=-o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+          else
+            echo "::warning::未配 DEPLOY_KNOWN_HOSTS：本次连接使用 TOFU（accept-new），建议后续补上以防中间人。"
+            echo "OPTIONS=-o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+          fi
+          # 失败则连接层就会拒绝（fail-closed）
+          ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" -- echo "ssh ok"
+
+      - name: Run deploy.js on the host
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
+          IMAGE_TAG: ${{ needs.preflight.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          extra=""
+          [[ "${{ inputs.dry_run }}" == "true" ]] && extra="$extra --dry-run"
+          [[ "${{ inputs.skip_backup }}" == "true" ]] && extra="$extra --skip-backup"
+          # 远程命令里只出现镜像名与开关；CORS_ORIGIN 经 SendEnv 传入而非拼进命令串，
+          # 避免它落到目标机的 shell 历史/进程列表里。
+          ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes -o SendEnv=CORS_ORIGIN \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$DEPLOY_PATH' && APP_IMAGE='$IMAGE_TAG' node scripts/deploy.js $extra"

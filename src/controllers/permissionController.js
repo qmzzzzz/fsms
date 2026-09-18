@@ -9,6 +9,10 @@ const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { normalizePagination } = require('../utils/helpers');
 const permissionService = require('../services/permissionService');
+// P1-14：权限定义变更后必须失效「权限解析缓存」（userPermissionService 的
+// 进程内 TTL 缓存）。该缓存缓存的是**解析结果**，解析带 `status: active` 过滤，
+// 因此停用/启用/删除权限后若不失效，所有已缓存用户最长仍按旧定义授权 30 秒。
+const { invalidatePermissionCache } = require('../services/userPermissionService');
 
 /**
  * 获取权限列表
@@ -74,6 +78,8 @@ const createPermission = asyncHandler(async (req, res) => {
     method,
     sort,
   });
+  // P1-14：新建权限会改变权限树与角色可分配集合，统一失效（见文件头说明）
+  invalidatePermissionCache();
 
   logger.info(`权限已创建：${createdPerm.name}`);
   return ApiResponse.success(res, createdPerm, '权限创建成功', 201);
@@ -138,6 +144,11 @@ const updatePermission = asyncHandler(async (req, res) => {
   if (status !== undefined) permission.status = status;
 
   const updatedPerm = await permissionService.savePermission(permission);
+
+  // P1-14：status 变更直接改变解析结果；其余字段一并失效——
+  // 这里刻意不做「哪些字段影响解析」的字段级判断：判断写错即静默失去防线，
+  // 而失效的代价只是下一次请求重新查库（管理操作低频，可接受）
+  invalidatePermissionCache();
   logger.info(`权限已更新：${updatedPerm.name}`);
   return ApiResponse.success(res, updatedPerm, '权限更新成功');
 });
@@ -153,6 +164,10 @@ const deletePermission = asyncHandler(async (req, res) => {
   }
 
   await permissionService.deletePermission(permission._id);
+
+  // P1-14：删除权限后失效（deletePermission 已先校验无角色引用，
+  // 此处为防御性调用：避免未来放宽引用校验时留下陈旧缓存）
+  invalidatePermissionCache();
   logger.info(`权限已删除：${permission.name}`);
   return ApiResponse.success(res, null, '权限删除成功');
 });
@@ -173,6 +188,9 @@ const batchCreatePermissions = asyncHandler(async (req, res) => {
   }
 
   const { created, skipped } = await permissionService.batchCreatePermissions(permissions);
+
+  // P1-14：批量创建同样改变权限定义，统一失效
+  invalidatePermissionCache();
   logger.info(`批量创建权限：成功 ${created.length}, 跳过 ${skipped.length}`);
 
   return ApiResponse.success(

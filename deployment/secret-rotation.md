@@ -83,6 +83,31 @@ node scripts/verify-audit-chain.js
 - [ ] `npm run validate`（config/validate.js）通过
 - [ ] 抽查日志无「MFA 种子解密失败」「hmac 失配」告警
 
+### L-01 验证步骤（单一事实来源）
+
+轮换后**必须**逐条确认新旧值没有并存，否则会出现「只轮换一处、旧密钥仍有效」的静默失效：
+
+```bash
+# ① 旧令牌必须立即失效（JWT_SECRET 轮换的判据）
+curl -s -o /dev/null -w '%{http_code}\n' -H "Cookie: accessToken=<轮换前签发的令牌>" \
+  http://127.0.0.1:3000/api/auth/me      # 预期 401
+
+# ② 启动日志不得出现「同时配置且取值不同」告警
+#    （src/config/secrets.js:86-91 会在 NAME 与 NAME_FILE 并存且取值不同时告警；
+#     该告警出现即说明存在多副本，必须清理后再轮换）
+
+# ③ 生产 secrets/ 目录权限（Linux）
+stat -c '%a' ./secrets/jwt_secret        # 预期 600
+# ③' Windows 主机改用：
+#   icacls "secrets"                       # 不应出现 BUILTIN\Users / Authenticated Users
+
+# ④ 确认不存在第二份取值不同的副本：列出两处载体上的密钥变量名，逐个核对是否同名同值
+#    本地开发：grep -c '^JWT_SECRET=' .env                     → 预期 0（已切文件注入时）
+#    生产容器：grep -rl 'JWT_SECRET=' ./secrets ./docker-compose.yml  → 预期无明文赋值
+#    判定口径：**同一个密钥不得同时以「环境变量明文」与「文件」两种形态存在**。
+#    仅存在其中一种即为合规；两者并存即触发 ② 的告警，属必须清理的配置。
+```
+
 ## 全量轮换（单维护窗口编排）
 
 适用：上线前首次全量换钥（例如从开发期 `.env` 明文密钥切换到生产密钥），

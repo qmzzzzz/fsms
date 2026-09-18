@@ -10,6 +10,10 @@ const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { escapeRegExp, normalizePagination } = require('../utils/helpers');
 const roleService = require('../services/roleService');
+// P1-14：角色定义变更（status / permissions / 删除）会改变其持有者的权限解析
+// 结果，而 userPermissionService 的进程内 TTL 缓存保存的正是解析结果。
+// 不失效则被停用角色的持有者最长仍按旧权限授权 30 秒（真实越权窗口）。
+const { invalidatePermissionCache } = require('../services/userPermissionService');
 const { getDataScope } = require('../middleware/rbac');
 
 const emitWebSocketEvent = (req, eventType, data) => {
@@ -130,6 +134,10 @@ const createRole = asyncHandler(async (req, res) => {
     permissions: permissions || [],
   });
   const createdRole = await roleService.findPopulatedRole(role._id);
+  // P1-14：新建角色尚无持有者，逻辑上不影响任何已缓存用户；此处仍统一失效，
+  // 理由见文件头——「角色写操作必失效」是一条不需要逐次推理的规则，
+  // 而多失效一次的成本仅为下一次请求重新查库
+  invalidatePermissionCache();
 
   logger.info(`角色已创建：${role.name}`);
   emitWebSocketEvent(req, 'role-created', {
@@ -209,6 +217,9 @@ const updateRole = asyncHandler(async (req, res) => {
   await roleService.saveRole(role);
   const updatedRole = await roleService.findPopulatedRole(role._id);
 
+  // P1-14：status 变更直接改变解析结果（持有者立即失去/恢复该角色权限）
+  invalidatePermissionCache();
+
   logger.info(`角色已更新：${role.name}`);
   return ApiResponse.success(res, updatedRole, '角色更新成功');
 });
@@ -243,6 +254,10 @@ const deleteRole = asyncHandler(async (req, res) => {
   }
 
   await roleService.deleteRole(role._id);
+
+  // P1-14：删除前已校验无用户持有该角色（ROLE_IN_USE 拦截），
+  // 此处为防御性调用，理由同 createRole
+  invalidatePermissionCache();
   logger.info(`角色已删除：${role.name}`);
   emitWebSocketEvent(req, 'role-deleted', {
     action: 'deleted',

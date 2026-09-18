@@ -108,6 +108,10 @@ describe('授权与会话加固回归', () => {
         .send({ roles: [String(deviceRole._id)] });
 
       expect(res.status).toBe(403);
+      // 「不再是豁免口」的判据是角色没被写进去：只断 403 无法区分
+      // 「被新逻辑拦住」与「被旧逻辑以别的理由拦住」
+      const selfAfter = await User.findById(self._id).select('roles').lean();
+      expect(selfAfter.roles.map(String)).not.toContain(String(deviceRole._id));
     });
 
     test('授予自身持有的权限子集仍然放行（合法路径不受影响）', async () => {
@@ -117,6 +121,9 @@ describe('授权与会话加固回归', () => {
         .send({ roles: [String(sameLevelRole._id)] });
 
       expect(res.status).toBe(200);
+      // 「放行」的判据是变更真的落库（200 也可能来自「什么都没做的空操作」）
+      const afterOk = await User.findById(target._id).select('roles').lean();
+      expect(afterOk.roles.map(String)).toContain(String(sameLevelRole._id));
     });
 
     test('收权操作不被误拦（目标已持有的权限不算本次授予）', async () => {
@@ -130,6 +137,38 @@ describe('授权与会话加固回归', () => {
         .send({ roles: [String(sameLevelRole._id)] });
 
       expect(res.status).toBe(200);
+      // 收权语义的判据是角色集合真的被替换成 sameLevelRole（deviceRole 被摘掉），
+      // 而不只是「返回了 200」。若把「目标已持有的权限」误算成本次授予，
+      // 这里会 403 —— 反向若实现变成空操作，下面的 toContain/toHaveLength 会红。
+      const afterDowngrade = await User.findById(target._id).select('roles').lean();
+      expect(afterDowngrade.roles.map(String)).toEqual([String(sameLevelRole._id)]);
+    });
+
+    test('目标用户层级高于操作者 → 403 且角色未被写入（assignRoles 的目标侧层级闸）', async () => {
+      // 覆盖 assignRoles 的目标用户层级保护：操作者 level 5，目标是 level 8 的用户。
+      // 变异验证：把 `if (!isSelf && targetUserMaxLevel >= operatorMaxLevel)` 整个删掉，
+      // 本用例必须转红——原先没有任何用例覆盖这条闸门（P2 变异存活）。
+      const highRole = await seedRole('SUBSET_HIGH_ROLE', 8, []);
+      const highUser = await User.create({
+        username: `subset_high_${Date.now().toString(36)}`,
+        email: `subset_high_${Date.now().toString(36)}@example.com`,
+        password: 'Qz7#Lm42vTx9',
+        roles: [highRole._id],
+      });
+
+      const res = await request(app)
+        .put(`/api/users/${highUser._id}/roles`)
+        .set('Authorization', `Bearer ${opToken}`)
+        .send({ roles: [String(sameLevelRole._id)] });
+
+      expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('USER_ROLE_ASSIGN_PEER_OR_HIGHER_FORBIDDEN');
+      // 层级闸拦下的请求不得写库（否则等于「报错但已生效」）
+      const unchanged = await User.findById(highUser._id).select('roles').lean();
+      expect(unchanged.roles.map(String)).toEqual([String(highRole._id)]);
+
+      await User.findByIdAndDelete(highUser._id).catch(() => {});
+      await Role.deleteOne({ code: 'SUBSET_HIGH_ROLE' }).catch(() => {});
     });
   });
 
@@ -331,7 +370,8 @@ describe('授权与会话加固回归', () => {
         .post('/api/auth/login')
         .send({ username: 'rc_cross_b', password: PASS_B, mfaCode: codesA[0] });
 
-      expect([400, 401]).toContain(res.status);
+      // 实测 401；本用例主张是「不能签发会话」，双可能形式掩盖了拒绝通道的漂移
+      expect(res.status).toBe(401);
       expect(res.body.success).toBeFalsy();
       // 绝不能返回 token
       expect(res.body.data?.token).toBeUndefined();
@@ -353,7 +393,8 @@ describe('授权与会话加固回归', () => {
       const replay = await request(app)
         .post('/api/auth/login')
         .send({ username: 'rc_replay_user', password: PASS, mfaCode: recoveryCode });
-      expect([400, 401]).toContain(replay.status);
+      // 实测 401（恢复码重放被拒）
+      expect(replay.status).toBe(401);
       expect(replay.body.success).toBeFalsy();
       expect(replay.body.data?.token).toBeUndefined();
     });

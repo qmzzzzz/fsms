@@ -247,6 +247,9 @@ router.post(
   authenticate,
   checkPermission('inspection:create'),
   createValidation,
+  // SCOPE-EXEMPT: 创建动作无「他人资源」可越权——归属字段 assignedTo 由路由校验器
+  // 限定为 ObjectId 数组白名单（inspectionRoutes.js:69-70），服务层不接受其他归属来源。
+  // 读取/修改已存在巡检的范围判定见 PUT /:id 等路由（isInspectionInScope）
   inspectionController.createInspection
 );
 
@@ -293,8 +296,12 @@ router.put(
 
 // P3-16：review 此前零 body 校验——reviewComment 超长以英文 ValidationError
 // 回显（Mongoose maxlength 消息），result 枚举错误值直写库
+//
+// L-05 修复：原校验写的是 body('result')，而控制器消费的是 req.body.reviewResult
+//（见 inspectionController 的 review 处理）→ 该校验对真实字段**完全不生效**，
+// 注释声称的"已修复"实际未落地。字段名已更正为 reviewResult。
 const reviewValidation = [
-  body('result').optional().isIn(['approved', 'rejected']).withMessage('无效的审核结果'),
+  body('reviewResult').optional().isIn(['approved', 'rejected']).withMessage('无效的审核结果'),
   body('reviewComment')
     .optional()
     .trim()

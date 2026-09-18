@@ -215,6 +215,9 @@ describe('userPermissionService 缺口覆盖', () => {
   let Permission;
   let svc;
   let testUserId;
+  let upsRoleId;
+  let readCode;
+  let wildcardCode;
 
   beforeAll(async () => {
     mongoose = require('mongoose');
@@ -254,6 +257,9 @@ describe('userPermissionService 缺口覆盖', () => {
       roles: [role._id],
     });
     testUserId = String(user._id);
+    upsRoleId = role._id;
+    readCode = permA.code;
+    wildcardCode = permWild.code;
   });
 
   afterAll(async () => {
@@ -275,22 +281,66 @@ describe('userPermissionService 缺口覆盖', () => {
     expect(second).toEqual(first);
   });
 
-  test('invalidatePermissionCache(userId)：仅失效该用户', async () => {
+  // 以下两条的共同判据：**改库 → 失效 → 重查必须拿到改后的值**。
+  // 原先只断「失效后重查仍返回两条 ups 权限」——那与缓存是否真被清掉无关：
+  // 命中旧缓存或重新查库，返回的都是同一份数据，属真空断言。
+  // 变异验证：把 permCache.delete / permCache.clear 改成空操作，旧写法 SURVIVED。
+  test('invalidatePermissionCache(userId)：仅失效该用户（改库后能立刻读到新值）', async () => {
+    await svc.getPermissions(testUserId); // 先预热缓存
+    const before = await svc.getPermissions(testUserId);
+    expect(before).toHaveLength(2);
+
+    // 改库：摘掉模块通配权限 → 缓存里的旧值若不失效就会继续被返回
+    await Permission.updateOne({ code: wildcardCode }, { $set: { status: 'inactive' } });
     svc.invalidatePermissionCache(testUserId);
-    const perms = await svc.getPermissions(testUserId);
-    expect(Array.isArray(perms)).toBe(true);
+    const after = await svc.getPermissions(testUserId);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toBe(readCode);
   });
 
-  test('invalidatePermissionCache()：全局失效', async () => {
+  test('invalidatePermissionCache()：全局失效（改角色后能立刻读到新值）', async () => {
+    await Permission.updateOne({ code: wildcardCode }, { $set: { status: 'active' } });
+    // 先失效再预热：上一条用例结束时缓存里是「1 条权限」的解析结果，不清掉会读到旧值
     svc.invalidatePermissionCache();
-    const perms = await svc.getPermissions(testUserId);
-    expect(perms.length).toBeGreaterThan(0);
+    expect(await svc.getPermissions(testUserId)).toHaveLength(2); // 预热
+
+    // 改库：停用角色本身 → 解析结果应退化为空
+    await Role.updateOne({ _id: upsRoleId }, { $set: { status: 'inactive' } });
+    svc.invalidatePermissionCache();
+    expect(await svc.getPermissions(testUserId)).toEqual([]);
+
+    await Role.updateOne({ _id: upsRoleId }, { $set: { status: 'active' } });
+    svc.invalidatePermissionCache();
+    expect(await svc.getPermissions(testUserId)).toHaveLength(2);
   });
 
   test('getPermissions：不存在的用户返回空数组（负缓存）', async () => {
     const perms = await svc.getPermissions('000000000000000000000000');
     expect(perms).toEqual([]);
   });
+
+  /**
+   * 【顺序无关修复】把权限/角色启用态与权限缓存复位到「基准态」。
+   *
+   * 背景：本 describe 有三条用例靠「改库 → 失效 → 重查」表达停用是否立刻生效，
+   * 但它们改的是同一批文档，且各自只在自己的用例体内做单侧恢复：
+   * `invalidatePermissionCache(userId)` 用例把模块通配置为 inactive 后**不恢复**，
+   * 只有 `invalidatePermissionCache()` 用例在开头把它置回 active。
+   * 随机顺序下 hasPermission 用例若排在这两条之间，读到的就是「通配已停用」的世界，
+   * `${module}:anything` 期望 true 实得 false（seed=6/12 实测复现）。
+   * 每个用例开始前显式重建基准态（两条权限 + 角色均 active，缓存清空），
+   * 使各用例互不依赖彼此的收尾状态。
+   */
+  const resetPermFixtures = async () => {
+    await Permission.updateMany(
+      { code: { $in: [readCode, wildcardCode] } },
+      { $set: { status: 'active' } }
+    );
+    await Role.updateOne({ _id: upsRoleId }, { $set: { status: 'active' } });
+    svc.invalidatePermissionCache();
+  };
+
+  beforeEach(resetPermFixtures);
 
   test('hasPermission：精确 / 模块通配 / 未持有', async () => {
     const perms = await svc.getPermissions(testUserId);

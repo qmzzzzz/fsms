@@ -1,15 +1,28 @@
 /**
  * 跨标签页会话同步（BroadcastChannel + storage 事件兜底）
  *
- * 问题背景：认证令牌走 httpOnly cookie（浏览器全局共享），而用户身份界面状态
- * （currentUser/permissions）走 sessionStorage（按标签页隔离）。当同一浏览器的
- * 另一个标签页登录了不同账号时，cookie 被新账号覆盖，本标签页出现
- * 「界面显示旧用户、请求实际以新用户身份执行」的权限错位。
+ * 存储介质（2026-09-16 审计核对，此前注释误称 sessionStorage）：
+ *   - 认证令牌：httpOnly cookie（浏览器全局共享，JS 不可读，见 store/auth.js:36-39）
+ *   - 用户身份界面状态（currentUser/permissions）：**localStorage**
+ *     （store/storage.js:56-59、store/auth.js:41-42；另见同文件 :95-112 的
+ *     sessionStorage → localStorage 迁移逻辑，迁移完成后旧键被删除）
+ *   - 本模块自己的广播兜底键 authSessionSyncMirror：localStorage
  *
- * 解决方式：登录/登出时向同源的其他标签页广播事件；接收方比对本地会话身份，
- * 发现被覆盖（不同用户登录）或被终止（同用户登出）时，清除本地状态并跳转登录页。
+ * 问题背景：cookie 是浏览器级共享的，另一个标签页登录不同账号会覆盖它，
+ * 而本标签页的 localStorage 身份状态**不会**随之更新——于是出现「界面显示旧用户、
+ * 请求实际以新用户身份执行」的权限错位。
  *
- * 同一账号在多个标签页登录是无害的（cookie 身份一致），不触发任何处理。
+ * 覆盖范围（localStorage 下仍然成立，故防护不能删）：
+ *   本模块只覆盖「同一浏览器内多个标签页」——BroadcastChannel 与 storage 事件
+ *   都是同源同浏览器内传播，跨设备/跨浏览器不生效。
+ *   接收方比对本地身份，发现被覆盖（不同用户登录）或被终止（同用户登出）时，
+ *   清除本地状态并跳转登录页。
+ *
+ * 不覆盖：
+ *   - 广播发生时对方标签页未在运行（事件丢失，无补投机制）；
+ *   - 禁用/不支持 BroadcastChannel 且 localStorage.setItem 被拒（隐私模式）时，
+ *     两条通道都不可用，仅剩登录后的首个 401 兜底（store/auth.js 的刷新/登出闭环）；
+ *   - 同账号在多标签页登录是无害的（cookie 身份一致），不触发任何处理。
  */
 
 const CHANNEL_NAME = 'auth-session-sync'

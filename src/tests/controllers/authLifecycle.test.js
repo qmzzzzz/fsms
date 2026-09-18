@@ -129,7 +129,8 @@ describe('认证生命周期（批次 B）', () => {
         email: `lbu${stamp}x@example.com`,
         password: PASSWORD,
       });
-    expect([403, 400]).toContain(closed.status);
+    // 实测 403（开关关闭时 register 返回 403）；双可能形式对「改成 400」不敏感
+    expect(closed.status).toBe(403);
 
     await SystemConfig.findOneAndUpdate(
       { key: 'allowPublicRegistration' },
@@ -274,6 +275,8 @@ describe('认证生命周期（批次 B）', () => {
     // 同一恢复码已被消费
     const reused = await login(username, PASSWORD).send({ mfaCode: recoveryCodes[0] });
     expect(reused.status).toBe(401);
+    // 重放被拒的理由须是「码无效」：恢复码已被消费，与「格式错」等其它 401 区分
+    expect(reused.body.errors?.errorCode).toBe('MFA_CODE_INVALID');
   });
 
   test('MFA 关闭：错误口令 403；密码路径错误 403 / 正确关闭', async () => {

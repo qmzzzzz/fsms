@@ -2,9 +2,13 @@
  * 报表导出服务（第二轮审计 O-1：自 reportController 抽取的导出组件区）
  *
  * 迁出内容：导出配置（sheet 名/模型/列定义/行转换/展示名映射）、
- * 查询构建（buildExportQuery）、枚举校验（validateAuditExportEnums）、
- * 流式写出（streamExportRows，含 B-4 两阶段排序）与 workbook 编排
- * （writeExportWorkbook）。控制器只保留参数校验、权限闸与响应编排。
+ * 查询构建（buildExportQuery）、枚举校验（validateAuditExportEnums）。
+ * 控制器只保留参数校验、权限闸与响应编排。
+ *
+ * L-18 修正：原文件头还声称本模块迁出了「流式写出（streamExportRows）与
+ * workbook 编排（writeExportWorkbook）」，但这两个函数实际位于
+ * services/reportWorkbookService.js，本模块的 module.exports 中并无它们。
+ * 已删去该失实描述——按原描述去本文件找函数会扑空。
  *
  * 行为口径与迁移前逐项一致，仅结构调整；行级日期格式化同步收敛到
  * utils/dateFormat（O-6：原 7 处分散的 toLocaleString('zh-CN')，其中

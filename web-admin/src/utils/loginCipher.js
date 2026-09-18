@@ -13,6 +13,7 @@
  * 不可用时返回 null，调用方降级明文轨（后端双轨兼容）。
  */
 import axios from 'axios'
+import { reportDegradation } from '@/utils/errorReporter'
 
 let cachedKey = null // { keyObj, curve }，会话级缓存；服务端换钥后由 invalidate 清除
 
@@ -88,7 +89,15 @@ export const invalidatePublicKeyCache = () => {
  *   并经 console.warn 留痕便于监控密文率。
  */
 export async function encryptPassword(password) {
-  if (!isTransportCryptoAvailable()) return null
+  if (!isTransportCryptoAvailable()) {
+    // P1-18：非 secure context（纯 HTTP 内网）下全部口令走明文轨。降级是设计内的，
+    // 但此前无任何可观测信号——注释所称「便于监控密文率」无法实现。此处上报一次，
+    // 使明文轨占比在留档/收集端可见（同一描述 5s 内折叠，不会因多表单提交刷爆缓冲）。
+    reportDegradation('loginCipher: WebCrypto 不可用，口令降级为明文轨上行', {
+      reason: 'insecure-context-or-unsupported-browser',
+    })
+    return null
+  }
   const { keyObj: serverPub, curve } = await ensurePublicKey()
 
   // 1) 一次性 ECDH 密钥对 → 共享密钥（P-256/P-384 全长）→ HKDF 派生 AES-256 密钥

@@ -1,0 +1,81 @@
+# OpenSSF Scorecard：对仓库自身的安全实践打分（分支保护、依赖锁定与更新、
+# CI 测试、代码审查、危险工作流模式等十余项检查），结果同时落到两处：
+#   1. 本仓库 Code Scanning 面板（SARIF）
+#   2. OpenSSF 公共数据集（publish_results，供 scorecard.dev 查询与挂徽章）
+name: 'Scorecard'
+
+on:
+  # 分支保护规则被增删改时立刻重扫：Branch-Protection 这一项才能反映「当下」状态，
+  # 不必等下一次例行扫描。该事件下 GITHUB_REF 固定为默认分支（官方事件文档
+  # 的 GITHUB_REF 一栏即 "Default branch"）。
+  branch_protection_rule:
+  # 每周例行重扫：Maintained / CI-Tests 等检查依赖时间窗口，需要新鲜数据
+  schedule:
+    - cron: '30 1 * * 1'
+  push:
+    branches: [main]
+
+# 只给 read-all、不给任何写权限；写权限一律下放到 job 级。
+# 原因：开启 publish_results 后 OpenSSF 会校验产出工作流，明确拒绝「工作流级
+# 写权限」与「工作流级 env/defaults」（上游 README "Global workflow restrictions"）。
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    # publish_results 只允许在默认分支运行，否则 OpenSSF 接口会拒绝并让 job 变红。
+    # 本流程三个触发源（branch_protection_rule / schedule / push main）的 GITHUB_REF
+    # 都落在默认分支，此条件是为「默认分支改名」一类漂移兜底。
+    if: github.event.repository.default_branch == github.ref_name
+    permissions:
+      # 上传 SARIF 到 Code Scanning 面板
+      security-events: write
+      # publish_results 需要用 OIDC token 给结果签名（v2 起的硬性要求）
+      id-token: write
+      # 读取仓库内容与 Actions 运行元数据
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          # 不把 GITHUB_TOKEN 留在 .git/config：本 job 会读取并分析仓库内容，
+          # 凭据持久化等于多开一份不必要的外泄面（官方示例同样如此设置）。
+          persist-credentials: false
+
+      # 用 v2.4.4 而不是 v2.4.0：v2.4.0 的 action.yaml 指向
+      # docker://gcr.io/openssf/scorecard-action:v2.4.0，而上游自 v2.4.1 起把
+      # 镜像迁到 GHCR（v2.4.1 release note："The underlying container for the
+      # action is now hosted on GitHub Container Registry"）。
+      # 实测（2026-09-18）：ghcr.io 上 v2.4.0 的 manifest 返回 404、
+      # v2.4.4 返回 200。gcr.io 在本机网络不可达，无法验证旧镜像是否仍可拉取，
+      # 因此选可验证的 v2.4.4（同属 v2 大版本，输入契约一致）。
+      - name: Run analysis
+        uses: ossf/scorecard-action@v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # 推送到 OpenSSF 公共数据集：公开仓库免费，同时省掉上游重复扫描的开销
+          publish_results: true
+
+      # 额外留一份 artifact：Code Scanning 只保留最新一次分析结果，artifact
+      # 便于事后回看本次扫描的原始输出，保留 5 天。
+      # 用 v6 而非 v4/v5：v4 与 v5 的运行时为 node20，v6 起为 node24。
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      # 用 v4 而非 v3：两份 action.yml 的输入契约逐字段相同（实测唯一差异是
+      # runs.using —— v3 = node20、v4 = node24），故为无风险替换。
+      # 上游当前 v3 / v4 并行发版（2026-09-09 同日发布 v3.38.0 与 v4.38.0），
+      # 这里选 node24 原生分支，与工作流内其余 action 的运行时一致。
+      # 仓库既有 codeql.yml 仍用 v3，不属本次改动范围。
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif

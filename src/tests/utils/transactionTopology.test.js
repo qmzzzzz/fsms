@@ -8,8 +8,13 @@
  *      abort 自身失败不掩盖原始错误；
  *   3. standalone（Single 拓扑）降级为顺序写 fn(null)，降级告警每次进程只发一次。
  *
- * 1/2 用 mock session 纯单测（不连库 → client undefined，天然触发 fail-loud）；
+ * 1/2 用 mock session 纯单测（用桩把 client 置为不可读 → 触发 fail-loud）；
  * 3 连 mongodb-memory-server（standalone 拓扑 type='Single'，真实路径）。
+ *
+ * 【顺序无关】原 1/2 靠「本文件还没连库」这一**执行顺序**前提来触发 fail-loud，
+ * 而 3 会连库：随机顺序下 3 先跑时，1/2 的前提断言 `connection.client` 为
+ * undefined 立即失败（seed=42 实测）。改为显式把 client 置为不可读（并在用完后
+ * 还原），前提由「顺序」变成「用例自己的设置」。
  */
 const mongoose = require('mongoose');
 const logger = require('../../utils/logger');
@@ -25,14 +30,25 @@ describe('withTransaction 拓扑能力感知', () => {
   describe('事务路径（拓扑不可读 → fail-loud，mock session）', () => {
     let fakeSession;
     let startSessionSpy;
-
-    beforeAll(() => {
-      // 本文件不连库：connection.client 为 undefined → topologySupportsTransactions
-      // 走 fail-loud 分支，withTransaction 必然进入 startSession 事务路径
-      expect(mongoose.connection.client).toBeUndefined();
-    });
+    let savedClient;
 
     beforeEach(() => {
+      // 显式把 connection.client 置为不可读：detectTransactionSupport 的 hello 探测
+      // 会抛错 → 按支持处理（fail-loud）→ withTransaction 必然进入 startSession
+      // 事务路径。不能用「本文件尚未连库」作前提（见文件头注释）。
+      savedClient = mongoose.connection.client;
+      Object.defineProperty(mongoose.connection, 'client', {
+        value: undefined,
+        configurable: true,
+        writable: true,
+      });
+      expect(mongoose.connection.client).toBeUndefined();
+
+      // 同时清掉探测缓存：detectTransactionSupport 把结果缓存在模块级变量里，
+      // 随机顺序下若 standalone 块先跑（缓存 = false 支持），本块会直接走降级
+      // 路径 fn(null)、根本不 startSession，四条断言全部落空。
+      _resetForTests();
+
       fakeSession = {
         startTransaction: jest.fn(),
         commitTransaction: jest.fn().mockResolvedValue(undefined),
@@ -44,6 +60,12 @@ describe('withTransaction 拓扑能力感知', () => {
 
     afterEach(() => {
       startSessionSpy.mockRestore();
+      // 还原真实 client，避免影响本文件后续（standalone 块）与其他 describe
+      Object.defineProperty(mongoose.connection, 'client', {
+        value: savedClient,
+        configurable: true,
+        writable: true,
+      });
     });
 
     test('成功路径：fn 收到 session，commit + endSession，返回 fn 结果', async () => {

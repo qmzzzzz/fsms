@@ -18,11 +18,16 @@ const path = require('path');
 
 const CONTROLLERS_DIR = path.join(__dirname, '../../controllers');
 
-// 2026-08-30 实测基线（每文件直连 require('../models/*') 次数）
+// 直连基线（本轮复审重新标定：2026-09-17 实测，计数口径见下方 countDirectModelRequires）
+// 上一版的两处问题：
+//   ① 注释写「28」，而对象实际求和为 21——注释与代码不一致（本轮报告反复强调的那类缺陷）；
+//   ② reportController(4→1) 与 securityController(6→5) 声明值高于实测，棘轮因此留出
+//      4 次「白嫖额度」：新增 4 处直连也不会变红，等于门禁形同虚设。
+// 现按实测值申报，任何一处新增直连都会立即触发失败。
 const GRANDFATHERED = {
   'ipListController.js': 6,
-  'securityController.js': 6,
-  'reportController.js': 4,
+  'securityController.js': 5,
+  'reportController.js': 1,
   'roleController.js': 0,
   'authController.js': 2,
   'mfaController.js': 2,
@@ -31,10 +36,14 @@ const GRANDFATHERED = {
   'auditController.js': 1,
 };
 
-const TOTAL_BASELINE = Object.values(GRANDFATHERED).reduce((a, b) => a + b, 0); // 28
+const TOTAL_BASELINE = Object.values(GRANDFATHERED).reduce((a, b) => a + b, 0); // 17（与实测一致）
 
+// 计数口径（本轮复审修正）：原正则只认 require('../models/Xxx') 单引号带斜杠形态，
+// 实测漏掉 authController.js:96 的 require('../models')（无斜杠，走 index 聚合入口）——
+// 该形态同样绕过 service 层；原基线声明 authController=2 而旧正则实测仅 1，差值正是它。
+// 现覆盖 4 种等价形态：单引号、双引号、无斜杠聚合入口、反引号。
 const countDirectModelRequires = (source) =>
-  (source.match(/require\('\.\.\/models\//g) || []).length;
+  (source.match(/require\(\s*['"`]\.\.\/models(?:\/[^'"`]*)?['"`]\s*\)/g) || []).length;
 
 describe('分层纪律棘轮（D-1a）', () => {
   const files = fs

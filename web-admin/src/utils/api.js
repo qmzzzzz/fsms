@@ -185,6 +185,7 @@ const ERROR_CODE_I18N_MAP = {
   ROLE_NOT_FOUND_IN_LIST: 'errors.roleNotFoundInList',
   ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN: 'errors.roleAssignHigherLevelForbidden',
   USER_UPDATE_PEER_OR_HIGHER_FORBIDDEN: 'errors.userUpdatePeerOrHigherForbidden',
+  USER_SCOPE_FIELD_FORBIDDEN: 'errors.userScopeFieldForbidden',
   CANNOT_CHANGE_OWN_STATUS: 'errors.cannotChangeOwnStatus',
   USER_STATUS_CHANGE_FORBIDDEN: 'errors.userStatusChangeForbidden',
   EMAIL_TAKEN_SHORT: 'errors.emailTakenShort',
@@ -244,7 +245,11 @@ const ERROR_CODE_I18N_MAP = {
  */
 function resolveErrorMessage(data) {
   const errorCode = data?.errors?.errorCode
-  if (errorCode && ERROR_CODE_I18N_MAP[errorCode]) {
+  // errorCode 来自响应体（外部输入），必须限定为自有属性：裸查表会让 'toString'/
+  // 'constructor' 等原型链键取到 Object.prototype 上的函数（truthy），返回函数而非
+  // 约定的 null，调用方 `resolveErrorMessage(...) || data?.message || t(...)` 兜底链
+  // 被短路，界面渲染出「function toString() { [native code] }」
+  if (errorCode && Object.prototype.hasOwnProperty.call(ERROR_CODE_I18N_MAP, errorCode)) {
     const i18nKey = ERROR_CODE_I18N_MAP[errorCode]
     const params = data?.errors || {}
     return i18n.global.t(i18nKey, params)
@@ -405,8 +410,27 @@ const SCHEMA_ROUTE_MAP = [
 /**
  * 同一漂移只报一次：形状漂移的成因是后端契约变更，同一路径会持续命中。
  * 每次请求都弹一条 ElMessage 会淹没界面，也无助于定位。
+ *
+ * P3-66：加 LRU 上限。裸 Set 会随漂移种类无限增长（键是 `url::detail`，
+ * detail 含字段级错误信息，长时间运行可持续新增）。Set 的迭代顺序即插入顺序：
+ * 队首是「最久没有再次出现」的键，超限时淘汰它；命中的键会先删后插移到队尾，
+ * 因此**仍在持续发生**的漂移不会被淘汰（真 LRU，不是插入序 FIFO 截断）。
+ * 被淘汰的键若再次出现会再报一次告警——这恰是需要的信息：它还在发生。
  */
+const DRIFT_LRU_MAX = 200
 const reportedDrifts = new Set()
+
+/** 记录并刷新漂移键：移到队尾；超限时从队首（最久未再出现）淘汰 */
+const rememberDrift = (key) => {
+  reportedDrifts.delete(key)
+  reportedDrifts.add(key)
+  while (reportedDrifts.size > DRIFT_LRU_MAX) {
+    reportedDrifts.delete(reportedDrifts.values().next().value)
+  }
+}
+
+/** 供测试断言当前去重集合规模（LRU 上限回归用） */
+export const __getDriftCount = () => reportedDrifts.size
 
 /**
  * 校验响应形状，失败时告警但不阻断
@@ -438,8 +462,13 @@ const verifyResponseShape = (response) => {
 
   const detail = formatIssues(result.error)
   const driftKey = `${url}::${detail}`
-  if (reportedDrifts.has(driftKey)) return
-  reportedDrifts.add(driftKey)
+  if (reportedDrifts.has(driftKey)) {
+    // 命中即刷新 LRU 位置：持续发生的漂移不会被后出现的新键挤掉，
+    // 只有真正「很久没再出现」的旧键才被淘汰（见上方注释）。
+    rememberDrift(driftKey)
+    return
+  }
+  rememberDrift(driftKey)
 
   // console.error 而非 warn：这是需要开发介入的契约破坏，不是可忽略的噪音
   console.error(`[schema-drift] ${url} -> ${detail}`)
@@ -561,14 +590,45 @@ apiClient.interceptors.response.use(
             resolveErrorMessage(data) || data?.message || t('messages.resourceNotFound')
           )
           break
+        case 405:
+          // HTTP_METHOD_UNSUPPORTED：协议层拒绝（如 TRACE/TRACK），非用户可纠正的操作错误
+          ElMessage.error(
+            resolveErrorMessage(data) || data?.message || t('messages.methodNotAllowed')
+          )
+          break
+        case 409:
+          // 状态冲突类（ALARM_ALREADY_HANDLED / ALARM_STATUS_NOT_ALLOWED*）：
+          // 多为「记录已被他人处理」这类可解释的并发结果，用 warning 而非 error
+          ElMessage.warning(resolveErrorMessage(data) || data?.message || t('messages.conflict'))
+          break
+        case 413:
+          // PAYLOAD_EXCEEDS_LIMIT / PAYLOAD_TOO_LARGE：请求体超过服务端上限
+          ElMessage.error(
+            resolveErrorMessage(data) || data?.message || t('messages.payloadTooLarge')
+          )
+          break
+        case 415:
+          // CONTENT_TYPE_UNSUPPORTED：媒体类型不在白名单内
+          ElMessage.error(
+            resolveErrorMessage(data) || data?.message || t('messages.unsupportedMediaType')
+          )
+          break
         case 429:
           // 优先透传后端消息（如 MFA 防爆破锁定的"10 分钟后再试"），映射缺失时按 locale 兜底
           ElMessage.warning(
             resolveErrorMessage(data) || data?.message || t('messages.tooManyRequests')
           )
           break
+        case 431:
+          // HEADER_COUNT_EXCESSIVE / HEADER_VALUE_TOO_LONG：请求头数量或长度超限
+          ElMessage.error(
+            resolveErrorMessage(data) || data?.message || t('messages.requestHeaderTooLarge')
+          )
+          break
         case 500:
-          ElMessage.error(data?.message || t('messages.serverError'))
+          // 500 与 503 同口径：先走码化翻译（如 INTERNAL_ERROR / AUDIT_EXPORT_FAILED），
+          // 否则英文界面下会直接回显后端中文文案
+          ElMessage.error(resolveErrorMessage(data) || data?.message || t('messages.serverError'))
           break
         case 503:
           // 服务不可用类（如 LOGOUT_REVOKE_FAILED / CAPTCHA_SERVICE_UNAVAILABLE）：

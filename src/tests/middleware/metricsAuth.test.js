@@ -102,11 +102,13 @@ describe('metricsAuth /metrics 应用层鉴权纵深', () => {
     test('M-07 - 伪造 X-Forwarded-For: 127.0.0.1 无法伪装内网（socket 为公网 → 401）', async () => {
       const res = await request(externalApp).get('/metrics').set('X-Forwarded-For', '127.0.0.1');
       expect(res.status).toBe(401);
+      expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
     });
 
     test('M-07 - 反向验证：socket 为回环、XFF 为公网 → 仍放行（判定只看 socket）', async () => {
       const res = await request(app).get('/metrics').set('X-Forwarded-For', '8.8.8.8');
       expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
     });
   });
 
@@ -120,6 +122,9 @@ describe('metricsAuth /metrics 应用层鉴权纵深', () => {
         .get('/metrics')
         .set('Authorization', `Bearer ${TOKEN}`);
       expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
+      // 断言放行来源是令牌而非内网判定：该 app 的 socket 对端被设为 8.8.8.8（公网）
+      expect(logger.warn).not.toHaveBeenCalled();
     });
 
     test('外网来源 + 错误令牌 401', async () => {
@@ -127,11 +132,13 @@ describe('metricsAuth /metrics 应用层鉴权纵深', () => {
         .get('/metrics')
         .set('Authorization', `Bearer ${'b'.repeat(64)}`);
       expect(res.status).toBe(401);
+      expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
     });
 
     test('外网来源 + 缺失令牌 401', async () => {
       const res = await request(externalApp).get('/metrics');
       expect(res.status).toBe(401);
+      expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
     });
 
     test('令牌长度不等走短路路径，不抛错且 401（timingSafeEqual 仅接受等长）', async () => {
@@ -139,11 +146,17 @@ describe('metricsAuth /metrics 应用层鉴权纵深', () => {
         .get('/metrics')
         .set('Authorization', 'Bearer short-token');
       expect(res.status).toBe(401);
+      expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
     });
 
     test('内网来源无令牌仍放行（保持容器网络抓取零配置兼容）', async () => {
       const res = await request(app).get('/metrics');
       expect(res.status).toBe(200);
+      // 放行的判据是「走到了业务处理器」，不是「状态码恰好 200」：
+      // 中间件拒绝路径用 ApiResponse.codeError 返回 401，不会返回 { ok: true }
+      expect(res.body).toEqual({ ok: true });
+      // 且确实未走拒绝分支（拒绝路径会记 warn 日志）
+      expect(logger.warn).not.toHaveBeenCalled();
     });
   });
 });

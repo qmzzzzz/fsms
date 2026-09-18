@@ -1,7 +1,6 @@
 const swaggerUi = require('swagger-ui-express');
 const rateLimit = require('express-rate-limit');
 const openapiSpec = require('../docs/openapi.json');
-const config = require('./index');
 
 const swaggerOptions = {
   customCss: '.swagger-ui .topbar { display: none }',
@@ -37,8 +36,20 @@ const swaggerOptions = {
  * 静态资源与 HTML 共用同一个桶是有意的——按 IP 计数才能真正约束爆破者。
  */
 const docsLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: Number(process.env.DOCS_RATE_LIMIT_MAX) || 30,
+  // P2-70：窗口同样外置（原硬编码 15 分钟）。与 max 同一口径：
+  // 只在「有限且为正」时采用，否则回落默认，避免 0/负值让窗口失效。
+  windowMs: (() => {
+    const ms = Number(process.env.DOCS_RATE_LIMIT_WINDOW_MS);
+    return Number.isInteger(ms) && ms > 0 ? ms : 15 * 60 * 1000;
+  })(),
+  // P2-37：原为 `Number(...) || 30`——负值（如 -1）是**真值**，会原样传给
+  // express-rate-limit，得到「配额为负」的限流器：每个请求都被计数并立即超限，
+  // 文档页 100% 429。现改为只在「有限且为正」时采用，否则回落默认 30。
+  // 同时排除小数（限流器按整数比较）与非数字（Number("abc")=NaN）。
+  max: (() => {
+    const n = Number(process.env.DOCS_RATE_LIMIT_MAX);
+    return Number.isInteger(n) && n > 0 ? n : 30;
+  })(),
   // IP 白名单豁免（checkIPBlacklist 在更早阶段设置 req.ipWhitelisted）
   skip: (req) => req.ipWhitelisted === true,
   keyGenerator: (req) => `api-docs:${req.ip}`,
@@ -60,18 +71,23 @@ const docsLimiter = rateLimit({
 });
 
 /**
- * API 文档是否启用
- * 规则：
- *   - 生产环境默认关闭，需显式设置 ENABLE_API_DOCS=true
- *   - 非生产环境默认开启，可设置 ENABLE_API_DOCS=false 关闭
+ * API 文档是否启用（P2-38：判定口径已统一到 config/validate.js）
+ *
+ * 规则（实现在 validate.js 的 isDocsEnabled，此处仅转出）：
+ *   - 显式设置 ENABLE_API_DOCS 时按其取值判定：'true'/'1' 为开，其余为关；
+ *   - 未显式设置时跟随 NODE_ENV：生产默认关，非生产默认开。
+ *
+ * 为何不再在本文件自行判定：启动期校验（validate.js 的 validateDocsCredentials）
+ * 必须与运行期一致，否则 `ENABLE_API_DOCS=1` 会让文档真的开放却不触发
+ * 「必须配 DOCS_USERNAME/DOCS_PASSWORD」的启动期拦截——两处口径分叉就是
+ * 「静默失效」的温床。单一实现放在零依赖的 validate.js，本文件直接复用。
+ *
+ * 保留本函数作为导出：app.js 与既有测试（src/tests/config/docsAccess.test.js）
+ * 按此名消费。
+ *
+ * @returns {boolean} true=文档端点启用
  */
-function isDocsEnabled() {
-  const raw = process.env.ENABLE_API_DOCS;
-  if (raw !== undefined) {
-    return raw.toLowerCase() === 'true' || raw === '1';
-  }
-  return config.nodeEnv !== 'production';
-}
+const { isDocsEnabled } = require('./validate');
 
 // 启动期一次性告警：文档开启但未配置 Basic Auth 凭据。
 // 告警必须放在模块加载期而非请求路径内，否则每个未带凭据的文档请求都会刷一条 warn。

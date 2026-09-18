@@ -110,7 +110,7 @@ npm run dev             # 监听 http://localhost:3001，/api 自动代理到后
 - 文档页面：`http://localhost:3000/api-docs`
 - 原始规范：`http://localhost:3000/api-docs.json`（OpenAPI 3.0）
 
-涵盖 9 个模块共 86 个接口，支持在线调试（需先通过 `/api/auth/login` 获取 token 并在页面右上角 Authorize 中填入）。
+涵盖 10 个模块共 102 个接口（83 个 path / 102 个 operation），支持在线调试（需先通过 `/api/auth/login` 获取 token 并在页面右上角 Authorize 中填入）。
 
 **安全说明**：生产环境默认关闭 API 文档，需显式设置 `ENABLE_API_DOCS=true` 才会暴露。开启后建议同时设置 `DOCS_USERNAME` 和 `DOCS_PASSWORD` 启用 Basic Auth 保护，并在网络层限制仅内网/ VPN 访问。
 
@@ -349,22 +349,41 @@ curl -f http://localhost:3000/health
 
 ### 升级
 
-1. **升级前必备份**：按上节执行一次全量备份并确认备份文件非空。
-2. 拉取新版本代码后运行全量测试确认基线：`npm test`（后端）与 `cd web-admin && npm test`（前端）。
-3. 重建并滚动重启（数据在命名卷中，重建容器不影响数据）：
+> **推荐路径：用 `scripts/deploy.js` 一条命令完成。** 它把下面的手工步骤固化为可失败的门禁：
+> 先备份（失败即中止）→ 拉取指定镜像 → 应用迁移 → 切换 → `/readyz` 健康门禁 → 失败自动回滚。
 
 ```bash
-docker compose build app
-docker compose up -d app     # mongo 未变动时不重启
+# APP_IMAGE 必须是带版本 tag 的镜像（如 :sha-abc1234），不接受本地开发默认值
+APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 node scripts/deploy.js
+
+# 演练 / 评审：只打印计划与判据，不做任何变更
+APP_IMAGE=... node scripts/deploy.js --dry-run
 ```
 
-4. 升级后观察：`curl /health`、日志 `logs/error-*.log` 无新增错误、登录与核心业务冒烟。
+参数：`--dry-run`（干跑）、`--skip-backup`（跳过备份，仅演练）、`--no-rollback`（关闭失败自动回滚）。
+环境变量：`APP_IMAGE`、`CORS_ORIGIN` 必填（可写在 `.env`，与 compose 同口径）；
+`DEPLOY_HEALTH_TIMEOUT_MS`（默认 120000）与 `DEPLOY_ROLLBACK_TIMEOUT_MS`（默认 60000）可按启动耗时调。
+退出码：`0` 成功、`1` 失败（已尝试回滚）、`2` 前置条件不满足（**未做任何变更**）。
+
+手工等价步骤（理解背后动作；正常请用上面的脚本）：
+
+1. **升级前必备份**：按上节执行一次全量备份并确认备份文件非空。
+2. 拉取新版本代码后运行全量测试确认基线：`npm test`（后端）与 `cd web-admin && npm test`（前端）。
+3. 拉取 CI 产出的镜像并切换（数据在命名卷中，重启容器不影响数据）：
+
+```bash
+APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose pull app
+APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
+```
+
+4. 升级后观察：`curl -f /readyz`、日志 `logs/error-*.log` 无新增错误、登录与核心业务冒烟。
 
 ### 回滚
 
-- **应用回滚**：回到上一个正常版本的代码/镜像重新 `docker compose build && up -d app` 即可——应用无状态，会话缓存随进程消亡，用户重新登录。
+- **应用回滚**：指定上一个正常版本的镜像 tag 重新 `up -d --no-build`（`deploy.js` 在健康门禁失败时会自动做这件事）——应用无状态，会话缓存随进程消亡，用户重新登录。
 - **数据回滚**：仅当新版本已发生不兼容写入时才需要。先停应用，按"恢复"节流程回灌升级前的备份，再把应用也回滚到对应版本。
 - 回滚后必须排查根因并保留当时的 `logs/` 与审计日志（AuditLog 集合）用于追溯。
+- 完整演练流程（含验收判据与记录表单）见 [deployment/rollback-drill.md](./deployment/rollback-drill.md)。
 
 ## 生产部署清单
 

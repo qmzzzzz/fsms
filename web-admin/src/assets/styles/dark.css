@@ -53,28 +53,11 @@ html.dark {
   --xf-glass-edge-hover: inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -1px 0 rgba(0, 0, 0, 0.3);
   --xf-glass-inset-dark: rgba(0, 0, 0, 0.4);
 
-  /* 渐变表面 */
-  --xf-gradient-surface: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.01) 0%,
-    rgba(255, 255, 255, 0) 100%
-  );
+  /* 科技渐变（暗色下提高可见度） */
   --xf-gradient-tech: linear-gradient(
     135deg,
     rgba(71, 85, 105, 0.06) 0%,
     rgba(193, 18, 31, 0.04) 100%
-  );
-
-  /* 按钮默认态 - 暗色下用深灰 */
-  --xf-gradient-default: linear-gradient(
-    180deg,
-    rgba(51, 65, 85, 0.7) 0%,
-    rgba(30, 41, 59, 0.7) 100%
-  );
-  --xf-gradient-default-hover: linear-gradient(
-    180deg,
-    rgba(71, 85, 105, 0.8) 0%,
-    rgba(51, 65, 85, 0.8) 100%
   );
 
   color-scheme: dark;

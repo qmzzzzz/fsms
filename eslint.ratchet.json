@@ -6,49 +6,96 @@
     "max-lines-per-function": 1
   },
   "scripts/migrate-mfa-secret.js": {
+    "complexity": 1,
     "max-lines-per-function": 1
   },
   "scripts/sync-audit-indexes.js": {
     "max-lines-per-function": 1
   },
   "src/app.js": {
+    "complexity": 1,
     "max-lines-per-function": 1
   },
   "src/controllers/authController.js": {
+    "complexity": 1,
     "max-lines": 1
   },
+  "src/controllers/ipListController.js": {
+    "complexity": 1
+  },
+  "src/controllers/mfaController.js": {
+    "complexity": 1
+  },
+  "src/controllers/permissionController.js": {
+    "complexity": 1
+  },
+  "src/controllers/roleController.js": {
+    "complexity": 1
+  },
   "src/controllers/securityController.js": {
+    "complexity": 1,
     "max-lines": 1
   },
   "src/controllers/userController.js": {
+    "complexity": 4,
     "max-lines": 1
   },
   "src/docs/generate.js": {
     "max-lines": 1
   },
-  "src/middleware/auth.js": {
-    "max-lines-per-function": 1
+  "src/middleware/errorHandler.js": {
+    "complexity": 1
+  },
+  "src/middleware/protocolCompliance.js": {
+    "complexity": 1
   },
   "src/middleware/security.js": {
+    "complexity": 1,
     "max-lines": 1
   },
   "src/services/auditChainVerify.js": {
+    "complexity": 1,
     "max-lines-per-function": 1
   },
   "src/services/authService.js": {
-    "max-lines": 1,
-    "max-lines-per-function": 1
+    "complexity": 4,
+    "max-lines": 1
   },
   "src/services/initData.js": {
     "max-lines": 1
+  },
+  "src/services/permissionService.js": {
+    "complexity": 1
+  },
+  "src/services/reportExportService.js": {
+    "complexity": 1
+  },
+  "src/services/reportStatsService.js": {
+    "complexity": 1
+  },
+  "src/services/sessionService.js": {
+    "complexity": 1
   },
   "src/services/sharedCache.js": {
     "max-lines": 1
   },
   "src/services/websocketService.js": {
+    "complexity": 1,
     "max-lines": 1
+  },
+  "src/tests/services/behaviorBaseline.test.js": {
+    "complexity": 1
+  },
+  "src/utils/auditQuery.js": {
+    "complexity": 1
   },
   "src/utils/errorCodes.js": {
     "max-lines": 1
+  },
+  "src/utils/loginCipher.js": {
+    "complexity": 1
+  },
+  "src/utils/metrics.js": {
+    "complexity": 1
   }
 }

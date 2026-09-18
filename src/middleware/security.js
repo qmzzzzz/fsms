@@ -160,8 +160,22 @@ const ensureHsts = (req, res, next) => {
 };
 
 /**
- * 2. 数据清理 - MongoDB 注入防护（原地修改，兼容 Express 4.x getter-only req.query）
+ * 2. 数据清理 - MongoDB 注入防护
  * 清理请求中的 MongoDB 操作符，防止 NoSQL 注入
+ *
+ * ⚠ Express 5 前提（P1-33 修正，2026-09-17）：req.query 是 getter
+ * （node_modules/express/lib/request.js 的 defineGetter(req, 'query', ...)），
+ * 每次访问都重新解析 URL 查询串。因此本中间件对 req.query 的**原地赋值无效**：
+ * 清洗结果写在本次访问返回的临时对象上，下一次 req.query 访问会得到全新解析结果。
+ * 实测 `?search[$regex]=^a` 经本中间件后仍为 {"$regex":"^a"}、`?status=a&status=b`
+ * 仍为数组。req.body 是普通属性，原地清洗对其确实生效。
+ *
+ * query 侧的真正防线是 queryScalarGuard（src/app.js 以
+ * `app.use('/api/', queryScalarGuard())` 挂载，命中即 400
+ * QUERY_PARAM_MUST_BE_SCALAR）：它把对象/数组形态的 query 一律挡在控制器之前。
+ * **若移除 queryScalarGuard，query 注入防线归零**——sanitizeMongo 与 hpp 的
+ * query 清洗在 Express 5 下均已失效，不要再假定它们覆盖 query。
+ * 本中间件与 hpp 对 body 仍然有效（纵深无害），故保留。
  */
 // 递归深度上限：1mb 请求体可构造数千层嵌套，无上限的同步递归会被极端载荷
 // 打爆调用栈（RangeError→500 资源骚扰）；超限分支直接整体丢弃该子树
@@ -493,8 +507,15 @@ const addToBlacklist = async (
  * 8. 审计日志中间件
  * 记录所有敏感操作的详细日志，并持久化到 AuditLog 集合用于操作溯源
  *
- * 本中间件是请求型审计日志的唯一入口，自动从路由派生语义 category/action，
- * 控制器不再手动调用 AuditLog.record()，避免同一操作产生两条重复记录。
+ * 本中间件是请求型审计日志的默认入口，自动从路由派生语义 category/action。
+ * 例外：需要专用语义/字段的动作（密码修改、敏感数据查看、IP 名单变更、审计链
+ * 校验等）由控制器手写 AuditLog.create 并置 res.locals.skipGlobalAudit，跳过
+ * 本中间件，避免同一操作产生两条重复记录。该标志共 11 处赋值点
+ * （securityController 8 / ipListController 2 / auditController 1，2026-09-17 实测）。
+ * P0-5 修复（2026-09-17）：标志必须在**响应时刻**读取（见 doLog）——控制器赋值
+ * 发生在本中间件入口之后，入口处读取必然早于赋值。原实现正是在入口只读一次，
+ * 标志 100% 失效：每个这类操作都被双写（控制器手写 1 条 + 本中间件按路由再写
+ * 1 条，且两条 action/category 不同）。
  *
  * 路径取值约束：category/action 派生与 excludePaths 判断统一使用 req.originalUrl
  * （见 utils/auditMeta）。Express 在 `app.use('/api/', mw)` + `router` 两级挂载下会
@@ -505,7 +526,14 @@ const auditLog = (options = {}) => {
     operations = ['POST', 'PUT', 'DELETE', 'PATCH'],
     excludePaths = ['/api/auth/login', '/api/auth/refresh'],
     // 敏感读取路径白名单：GET 请求命中这些前缀时也走审计，但不记录请求体；
-    // 报表导出/审计日志查询与导出为批量数据出口，必须纳入审计（补齐审计盲区）
+    // 报表导出/审计日志查询与导出为批量数据出口，必须纳入审计（补齐审计盲区）。
+    // P0-6 修复（2026-09-17）：两个导出接口原先只包装 res.json/res.send，而导出
+    // 走 res.write/res.end（services/auditExportService.js）与 workbook.xlsx.write(res)
+    // （services/reportWorkbookService.js，ExcelJS 内部同样是 res.write/res.end）——
+    // 实测真实下载成功但 auditBuffer 计数为 0。现响应包装覆盖 write/end，这两条
+    // 路径才真正被审计。
+    // 注意：本白名单只覆盖下列 6 个前缀，其余敏感 GET（设备/报警/巡检详情与各
+    // stats 等）仍未纳入——见审计报告 §3.4，勿据本注释认为「GET 审计已全覆盖」。
     auditGetPaths = [
       '/api/security/config',
       '/api/users',
@@ -536,23 +564,33 @@ const auditLog = (options = {}) => {
       return next();
     }
 
-    // 控制器已手动记录（极少数特殊场景），跳过避免重复
-    if (res.locals && res.locals.skipGlobalAudit) {
-      return next();
-    }
-
     // 记录开始时间
     const startTime = Date.now();
 
-    // 保存原始 json 和 send 方法
+    // 保存原始响应方法。统一先 bind 到 res：包装器可能被以任意 this 调用，
+    // 且 res.send 内部会再调 res.end，绑定后行为与原生一致。
     const originalJson = res.json.bind(res);
     const originalSend = res.send.bind(res);
+    // P0-6：导出类响应只经过 write/end，不经 json/send。部分响应替身
+    // （如既有测试的 makeRes()）没有这两个方法，缺失时不包装。
+    const originalWrite = typeof res.write === 'function' ? res.write.bind(res) : null;
+    const originalEnd = typeof res.end === 'function' ? res.end.bind(res) : null;
     let logged = false;
 
     // 统一的审计日志记录逻辑
     const doLog = () => {
+      // logged 先置位再判定：res.send 内部会调 res.end，第二次进入必须在
+      // skip 判定之前就被守卫吃掉，避免重复判定与重复记录
       if (logged) return; // 防止重复记录
       logged = true;
+
+      // P0-5 修复（2026-09-17）：skipGlobalAudit 在**响应时刻**读取。
+      // 原实现在中间件入口只检查一次，而 11 处赋值点都在控制器内部、响应之前
+      // 才写 res.locals —— 入口检查永远早于赋值，标志 100% 失效，每个这类操作
+      // 都被双写（控制器手写 1 条 + 本中间件按路由再写 1 条，action/category 不同）。
+      if (res.locals && res.locals.skipGlobalAudit) {
+        return; // 控制器已手动记录，本条操作跳过全局审计
+      }
 
       const duration = Date.now() - startTime;
       // 用中间件入口已固化的 fullPath 派生：res.json 时刻 req.path 会被路由二次剥离，
@@ -560,86 +598,149 @@ const auditLog = (options = {}) => {
       const { category, action } = deriveAuditMeta(req);
       const success = res.statusCode < 400;
 
-      // 异步记录（不阻塞响应）
-      setImmediate(() => {
-        // 控制字符清洗：userAgent / params / query 为外部可控输入，
-        // 含 \n \r \u0000 时会污染下游日志渲染与 SIEM 解析，入库前统一剥离
-        const safeUserAgent = stripControlChars(req.get('user-agent'), 512);
-        const safeParams = stripControlCharsDeep(req.params || {});
-        const safeQuery = stripControlCharsDeep(req.query || {});
-        const { computeFingerprint } = require('../utils/fingerprint');
-        const fingerprint = computeFingerprint(req);
-
-        // 1. winston 日志（运维查看）—— 仅写关联指针，不重复写完整审计体
-        //    完整审计体已持久化到 AuditLog 集合，此处仅留 reqId 关联线索供日志检索
-        logger.info(
-          'AUDIT ref=audit act=' +
-            action +
-            ' reqId=' +
-            (req.id || '-') +
-            ' u=' +
-            (req.user?.username || 'anon')
-        );
-
-        // 2. 持久化到 AuditLog 集合（操作溯源/合规留存）
-        //    走缓冲批量写（auditBuffer），降低高频写操作下每请求一次 DB 写的入库压力；
-        //    事件型审计（AuditLog.record）不经此路径，保持直写以保证暴力破解检测实时性
-        const auditBuffer = require('../services/auditBuffer');
-        auditBuffer.push({
-          action,
-          category,
-          userId: req.user?.userId,
-          username: req.user?.username || 'anonymous',
-          sessionId: req.user?.sessionId || null,
-          fingerprint,
-          method: req.method,
-          path: fullPath,
-          params: safeParams,
-          query: safeQuery,
-          body: isGetAudit
-            ? null
-            : (() => {
-                // 脱敏敏感字段（递归处理嵌套对象与数组，防止嵌套的密码/令牌明文入库）
-                // #10：名单来自 models/auditLogSanitizer 单一事实来源（含 secret/apikey）
-                const SENSITIVE_KEYS = AUDIT_SENSITIVE_KEYS;
-                const sanitizeValue = (value, depth = 0) => {
-                  // 深度保护，避免循环引用/超深嵌套导致栈溢出
-                  if (depth > 6 || value === null || typeof value !== 'object') return value;
-                  if (Array.isArray(value)) return value.map((v) => sanitizeValue(v, depth + 1));
-                  const cleaned = {};
-                  for (const [k, v] of Object.entries(value)) {
-                    cleaned[k] = SENSITIVE_KEYS.some((s) => k.toLowerCase().includes(s))
-                      ? '***'
-                      : sanitizeValue(v, depth + 1);
-                  }
-                  return cleaned;
-                };
-                return stripControlCharsDeep(sanitizeValue(req.body || {}));
-              })(),
-          statusCode: res.statusCode,
-          success,
-          errorMessage: success ? undefined : stripControlChars(res.statusMessage, 512),
-          ip: req.ip,
-          userAgent: safeUserAgent,
-          duration,
-        });
-      });
+      // 异步记录（不阻塞响应）；回调体见模块级 persistAuditRecord（体积棘轮拆分）
+      setImmediate(() =>
+        persistAuditRecord({ req, res, action, category, success, duration, fullPath, isGetAudit })
+      );
     };
 
     // 拦截 json 响应
     res.json = (body) => {
-      doLog(body);
+      doLog();
       return originalJson(body);
     };
 
     // 同时拦截 send 响应（如导出文件等场景）
     res.send = (body) => {
-      doLog(body);
+      doLog();
       return originalSend(body);
     };
 
+    // P0-6 修复（2026-09-17）：导出接口绕过 json/send——
+    //   - services/auditExportService.js 直接 res.write(...) / res.end()
+    //   - services/reportWorkbookService.js 走 workbook.xlsx.write(res)
+    //     （ExcelJS 内部同样是 res.write/res.end）
+    // 实测 GET /api/reports/export 与 GET /api/security/audit-logs/export
+    // 真实下载成功但 auditBuffer 计数为 0。此处一并包装 write/end：
+    //   - 用 rest 参数原样透传（含 write(chunk, encoding, callback) 的三参形态），
+    //     返回值原样返回，不改变背压/流控语义；
+    //   - logged 守卫保证整条响应只记录一次，多次 write 不会重复留痕；
+    //   - 响应替身缺这两个方法时（typeof 守卫）跳过包装，不改变其行为。
+    if (originalWrite) {
+      res.write = (...args) => {
+        doLog();
+        return originalWrite(...args);
+      };
+    }
+    if (originalEnd) {
+      res.end = (...args) => {
+        doLog();
+        return originalEnd(...args);
+      };
+    }
+
     next();
   };
+};
+
+/**
+ * 构造并投递一条请求型审计记录（doLog 的 setImmediate 回调体抽出）
+ *
+ * 抽出原因：该回调体内联在 auditLog 工厂函数里，使函数体达 117 行、doLog 达 64 行，
+ * 双双顶爆体积棘轮（max-lines-per-function 100 行）。eslint.ratchet.json 只许降不许升，
+ * 故按仓库既有约定拆为模块级函数；本函数即原回调体，逐行搬运、未改行为。
+ *
+ * 读取时机（抽出前后完全一致，勿提前快照）：
+ *   - action/category/success/duration/fullPath/isGetAudit 由调用方在**响应时刻**固化后传入；
+ *   - req.get("user-agent") / req.params / req.query / req.body / res.statusCode /
+ *     res.statusMessage 仍在本函数执行时（setImmediate 回调时刻）读取。
+ *
+ * 脱敏口径：SENSITIVE_KEYS 取自 models/auditLogSanitizer（单一事实来源），深度上限与
+ * 该模块 MAX_SANITIZE_DEPTH 对齐（P1-10：超限返回占位文案，不得原样返回子树）。
+ *
+ * @param {object} ctx 由 doLog 传入的响应时刻上下文
+ * @returns {void}
+ */
+const persistAuditRecord = (ctx) => {
+  const { req, res, action, category, success, duration, fullPath, isGetAudit } = ctx;
+  // 控制字符清洗：userAgent / params / query 为外部可控输入，
+  // 含 \n \r \u0000 时会污染下游日志渲染与 SIEM 解析，入库前统一剥离
+  const safeUserAgent = stripControlChars(req.get('user-agent'), 512);
+  const safeParams = stripControlCharsDeep(req.params || {});
+  const safeQuery = stripControlCharsDeep(req.query || {});
+  const { computeFingerprint } = require('../utils/fingerprint');
+  const fingerprint = computeFingerprint(req);
+
+  // 1. winston 日志（运维查看）—— 仅写关联指针，不重复写完整审计体
+  //    完整审计体已持久化到 AuditLog 集合，此处仅留 reqId 关联线索供日志检索
+  logger.info(
+    'AUDIT ref=audit act=' +
+      action +
+      ' reqId=' +
+      (req.id || '-') +
+      ' u=' +
+      (req.user?.username || 'anon')
+  );
+
+  // 2. 持久化到 AuditLog 集合（操作溯源/合规留存）
+  //    走缓冲批量写（auditBuffer），降低高频写操作下每请求一次 DB 写的入库压力；
+  //    事件型审计（AuditLog.record）不经此路径，保持直写以保证暴力破解检测实时性
+  const auditBuffer = require('../services/auditBuffer');
+  auditBuffer.push({
+    action,
+    category,
+    userId: req.user?.userId,
+    username: req.user?.username || 'anonymous',
+    sessionId: req.user?.sessionId || null,
+    fingerprint,
+    method: req.method,
+    path: fullPath,
+    params: safeParams,
+    query: safeQuery,
+    body: isGetAudit
+      ? null
+      : (() => {
+          // 脱敏敏感字段（递归处理嵌套对象与数组，防止嵌套的密码/令牌明文入库）
+          // #10：名单来自 models/auditLogSanitizer 单一事实来源（含 secret/apikey）
+          const SENSITIVE_KEYS = AUDIT_SENSITIVE_KEYS;
+          // P1-10 修复（2026-09-17）：深度超限**不得原样返回子树**。
+          // 原实现 `depth > 6` 时 return value，而 sanitizeMongo 的
+          // SANITIZE_MAX_DEPTH = 10（本文件上方）——7/8/9 层嵌套的明文
+          // 口令因此绕过脱敏进入 auditBuffer（漏网窗口宽 3 层）。
+          // 现与 models/auditLogSanitizer 的 MAX_SANITIZE_DEPTH = 6 对齐：
+          // 超限返回同一占位文案 '[深度超限]'。
+          // 为何未收敛为直接调用该模块的 sanitizeAuditBody：本文件的脱敏
+          // 与 sanitizeMongo 的深度窗口同处一条防线，需要独立控制深度常量
+          // （常量同值但不同源，直接调用会把本文件的窗口交给被调用方决定）。
+          // 两处实现必须在 0–10 层输出逐字节一致，由
+          // src/tests/middleware/auditStreamingCoverage.test.js
+          // 「0–10 层：中间件脱敏结果与 sanitizeAuditBody 逐字节一致」锁定：
+          // 实测把任一侧的深度上限改为 7，该用例立即转红。
+          const AUDIT_BODY_MAX_SANITIZE_DEPTH = 6;
+          const SANITIZE_DEPTH_EXCEEDED = '[深度超限]';
+          const sanitizeValue = (value, depth = 0) => {
+            // 深度保护，避免循环引用/超深嵌套导致栈溢出；判定顺序与
+            // models/auditLogSanitizer.sanitizeAuditBody 保持一致（先判深度，再判原始类型）
+            if (depth > AUDIT_BODY_MAX_SANITIZE_DEPTH) return SANITIZE_DEPTH_EXCEEDED;
+            if (value === null || typeof value !== 'object') return value;
+            if (Array.isArray(value)) return value.map((v) => sanitizeValue(v, depth + 1));
+            const cleaned = {};
+            for (const [k, v] of Object.entries(value)) {
+              cleaned[k] = SENSITIVE_KEYS.some((s) => k.toLowerCase().includes(s))
+                ? '***'
+                : sanitizeValue(v, depth + 1);
+            }
+            return cleaned;
+          };
+          return stripControlCharsDeep(sanitizeValue(req.body || {}));
+        })(),
+    statusCode: res.statusCode,
+    success,
+    errorMessage: success ? undefined : stripControlChars(res.statusMessage, 512),
+    ip: req.ip,
+    userAgent: safeUserAgent,
+    duration,
+  });
 };
 
 /**

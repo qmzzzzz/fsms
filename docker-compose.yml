@@ -1,5 +1,17 @@
 services:
   app:
+    # 镜像来源（R-7 / D-1）：CI 已把带版本 tag 的镜像推到 GHCR，但此处原先只写
+    # `build: .`——**推送出去的镜像从未被部署消费**，发布链在「推送」与「部署」
+    # 之间断开：生产机上跑的是本地构建的未版本化镜像，无法回答「线上是哪个 commit」。
+    #
+    # 现改为「变量指定镜像 + 保留 build 供本地开发」：
+    #   生产部署：APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose pull app
+    #             docker compose up -d --no-build app     # 明确不构建，用拉取的镜像
+    #   本地开发：不设 APP_IMAGE，`docker compose build` 仍照常工作（tag 为默认值）
+    #
+    # 默认值故意不带 registry：本地构建产出留在本机，不会被误推到远端。
+    # 生产必须显式给 APP_IMAGE（scripts/deploy.sh 会做 fail-fast 校验）。
+    image: ${APP_IMAGE:-fire-safety-app:local}
     build: .
     ports:
       # 仅绑定本机回环地址，生产由宿主 nginx 反向代理对外提供服务
@@ -298,7 +310,15 @@ services:
 
   redis:
     # R-5 同口径：钉补丁号，digest 由部署机 docker pull 后捕获追加
-    image: redis:7-alpine
+    # P2-49：钉 digest（7-alpine 标签会随上游重建而漂移，无法复现同一镜像）。
+    # digest 捕获：2026-09-17，来源 Docker Hub 官方库清单（OCI image index，
+    # 含 linux/amd64 与 linux/arm64）。**未经本机 docker pull 复核**——
+    # 当时本机 Docker 守护未运行，属静态获取。
+    # 上线前请在本机复验（一条命令即可确认 digest 存在且可拉取）：
+    #   docker pull redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    # 或 docker manifest inspect -v redis:7-alpine 后与上行 digest 比对。
+    # 若复验发现不匹配，以本机复验结果为准并同步更新此处。
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     # 仅容器内网通信（app 以 redis://redis:6379 访问），不暴露宿主机端口
     expose:
       - '6379'

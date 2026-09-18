@@ -30,6 +30,14 @@ const mockAuditLog = {
 jest.mock('../../models/SystemConfig', () => mockSystemConfig);
 jest.mock('../../models/AuditLog', () => mockAuditLog);
 
+// P0-5 回归防护用例需要断言「审计写失败可观测」：logger.error 与 metrics 指标
+const mockLogger = { error: jest.fn(), warn: jest.fn(), info: jest.fn() };
+const mockIncSecurityAlert = jest.fn();
+jest.mock('../../utils/logger', () => mockLogger);
+jest.mock('../../utils/metrics', () => ({
+  incSecurityAlert: (...a) => mockIncSecurityAlert(...a),
+}));
+
 const {
   getRegistrationConfig,
   setRegistrationConfig,
@@ -51,6 +59,10 @@ const makeCtx = (body = {}) => {
       return this;
     },
     json(data) {
+      // P1-29：记录响应写出时刻的标志值。静态断言 res.locals.skipGlobalAudit 只证明
+      // 「控制器最终置过位」，不能证明它早于响应；双写缺陷（P0-5）正是时序问题。
+      // 中间件级/端到端时序由 securityBranches.test.js 与 skipGlobalAuditTiming.test.js 锁定。
+      this.flagAtJson = this.locals.skipGlobalAudit;
       this.payload = data;
       return this;
     },
@@ -125,7 +137,7 @@ describe('登录验证码开关配置', () => {
     await invoke(setLoginCaptchaConfig, req, res, next);
     expect(mockSystemConfig.set).toHaveBeenCalledWith('loginCaptchaEnabled', true, 'u-admin');
     expect(mockSystemConfig.invalidateLoginCaptchaCache).toHaveBeenCalled();
-    expect(res.locals.skipGlobalAudit).toBe(true);
+    expect(res.flagAtJson).toBe(true);
     expect(mockAuditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'login_captcha_enabled',
@@ -165,7 +177,7 @@ describe('注册验证码开关配置', () => {
     await invoke(setRegisterCaptchaConfig, req, res, next);
     expect(mockSystemConfig.set).toHaveBeenCalledWith('registerCaptchaEnabled', false, 'u-admin');
     expect(mockSystemConfig.invalidateRegisterCaptchaCache).toHaveBeenCalled();
-    expect(res.locals.skipGlobalAudit).toBe(true);
+    expect(res.flagAtJson).toBe(true);
     expect(mockAuditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'register_captcha_disabled' })
     );
@@ -178,12 +190,20 @@ describe('注册验证码开关配置', () => {
     expect(mockSystemConfig.set).not.toHaveBeenCalled();
   });
 
-  test('审计落库失败不影响开关生效（.catch 吞错，配置已成功写入）', async () => {
+  test('审计落库失败不影响开关生效，但必须可观测（P0-5 回归防护）', async () => {
+    // P0-5 修复后 skipGlobalAudit 生效，手写审计即本操作的唯一留痕；
+    // 若此处仍为 .catch(() => {}) 静默吞错，则开关变更在审计库中零痕迹。
+    // 本用例锁定：业务仍 200（不阻断），但 error 日志与 audit_write_failed 指标必须被触发。
     mockAuditLog.create.mockReturnValue(Promise.reject(new Error('audit down')));
     const { req, res, next } = makeCtx({ registerCaptchaEnabled: true });
     await invoke(setRegisterCaptchaConfig, req, res, next);
     expect(res.statusCode).toBe(200);
     expect(res.payload.data.registerCaptchaEnabled).toBe(true);
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.stringContaining('审计写入失败'),
+      expect.objectContaining({ auditAction: 'security_config_change' })
+    );
+    expect(mockIncSecurityAlert).toHaveBeenCalledWith('audit_write_failed', 'high');
   });
 });
 

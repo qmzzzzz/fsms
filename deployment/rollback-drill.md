@@ -59,10 +59,19 @@ docker compose down app && docker compose up -d app   # compose 已改回旧版�
 ```bash
 # 先停应用，避免迁移中途被写入干扰
 docker compose stop app
-npm run migrate:status      # 确认当前迁移位点
-npm run migrate:down        # 回退一个迁移（逐步，勿连跳）
+
+# 迁移器在**应用镜像内**（node_modules/.bin/migrate-mongo）：生产主机
+# 只需 Docker，不依赖本机装没装 Node/全局包。用 compose run 在一个
+# 一次性容器里执行，与 scripts/deploy.js 的迁移步骤同路径：
+docker compose run --rm --no-deps app node node_modules/.bin/migrate-mongo status
+docker compose run --rm --no-deps app node node_modules/.bin/migrate-mongo down
+
 docker compose start app
 ```
+
+> 为什么不用 `npm run migrate:down`：那要求宿主机自己装了后端依赖（migrate-mongo
+> 在 package.json 的 devDependencies），而生产主机上通常只有 Docker。上面的写法与
+> 部署脚本保持同一条执行路径，避免「演练跑通、真事故时跑不通」。
 
 ### 3.3 数据级回滚（最后手段，分钟级）
 

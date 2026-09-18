@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * ESLint 体积棘轮（O-3，第六档）
+ * ESLint 体积 / 复杂度棘轮（O-3 第六档 + E-02 第七档）
  *
- * 背景：max-lines / max-lines-per-function 以 warn 级接入（eslint.config.js
- * 棘轮第六档）。体积债与 linter 错误性质不同——后者清零即收，前者须随
- * 控制器瘦身逐步消化，因此不走「清零提 error」，而是逐文件计数基线：
+ * 背景：max-lines / max-lines-per-function（体积，第六档）与 complexity
+ * （圈复杂度，E-02 第七档）以 warn 级接入（eslint.config.js）。这类债
+ * 与 linter 错误性质不同——后者清零即收，前者须随瘦身/拆函数逐步消化，
+ * 因此不走「清零提 error」，而是逐文件计数基线：
  *
  *   - 基线文件 eslint.ratchet.json 记录每个文件当前 warn 计数（按规则维度）
  *   - 检查模式（默认）：任何文件任何规则计数超过基线 → 退出码 1（棘轮只进不退）
@@ -70,10 +71,12 @@ const runLint = async () => {
   return eslint.lintFiles(LINT_TARGETS);
 };
 
-const main = async () => {
-  // ── 1. 跑 lint，聚合每个文件按规则维度的 warn 计数与 error 总数 ──
-  const results = await runLint();
-
+/**
+ * 聚合 lint 结果：每个文件按规则维度的 warn 计数 + error 总数
+ * @param {Array} results ESLint lintFiles 结果
+ * @returns {{ current: Object, errorTotal: number }}
+ */
+const aggregateWarnCounts = (results) => {
   const current = {}; // file -> { ruleId -> warnCount }
   let errorTotal = 0;
 
@@ -89,31 +92,16 @@ const main = async () => {
       current[rel][msg.ruleId] = (current[rel][msg.ruleId] || 0) + 1;
     }
   }
+  return { current, errorTotal };
+};
 
-  if (errorTotal > 0) {
-    console.error(`[lint-ratchet] 检测到 ${errorTotal} 个 error 级违例——error 不属棘轮范畴，`);
-    console.error('                请先修复（npm run lint 应保持 0 error）。');
-    process.exit(1);
-  }
-
-  // ── 2. 与基线比对 ──
-  if (UPDATE_MODE) {
-    const before = readBaseline(false) || {};
-    writeBaseline(current);
-    const beforeFiles = Object.keys(before).length;
-    const afterFiles = Object.keys(current).length;
-    console.log(`[lint-ratchet] 基线已更新：${beforeFiles} -> ${afterFiles} 个含 warn 文件。`);
-    console.log('                体积债只许降不许升，本次收紧已落盘 eslint.ratchet.json。');
-    return;
-  }
-
-  const baseline = readBaseline();
-  if (!baseline) {
-    console.error('[lint-ratchet] 基线文件 eslint.ratchet.json 不存在。');
-    console.error('                首次接入请执行：node scripts/lint-ratchet.js --update-baseline');
-    process.exit(1);
-  }
-
+/**
+ * 与基线比对，产出三类差异（回退 / 改善 / 残留）
+ * @param {Object} baseline 基线（文件 -> 规则 -> 计数）
+ * @param {Object} current 当前实测（同构）
+ * @returns {{ regressions: string[], improvements: string[], stale: string[] }}
+ */
+const diffBaseline = (baseline, current) => {
   const regressions = []; // 基线回退（计数上升 / 新文件带 warn）
   const improvements = []; // 计数下降（可收紧）
   const stale = []; // 基线残留（文件已无该规则违例或已删除）
@@ -142,6 +130,39 @@ const main = async () => {
     }
   }
 
+  return { regressions, improvements, stale };
+};
+
+const main = async () => {
+  // ── 1. 跑 lint，聚合每个文件按规则维度的 warn 计数与 error 总数 ──
+  const { current, errorTotal } = aggregateWarnCounts(await runLint());
+
+  if (errorTotal > 0) {
+    console.error(`[lint-ratchet] 检测到 ${errorTotal} 个 error 级违例——error 不属棘轮范畴，`);
+    console.error('                请先修复（npm run lint 应保持 0 error）。');
+    process.exit(1);
+  }
+
+  // ── 2. 与基线比对 ──
+  if (UPDATE_MODE) {
+    const before = readBaseline(false) || {};
+    writeBaseline(current);
+    const beforeFiles = Object.keys(before).length;
+    const afterFiles = Object.keys(current).length;
+    console.log(`[lint-ratchet] 基线已更新：${beforeFiles} -> ${afterFiles} 个含 warn 文件。`);
+    console.log('                体积/复杂度债只许降不许升，本次收紧已落盘 eslint.ratchet.json。');
+    return;
+  }
+
+  const baseline = readBaseline();
+  if (!baseline) {
+    console.error('[lint-ratchet] 基线文件 eslint.ratchet.json 不存在。');
+    console.error('                首次接入请执行：node scripts/lint-ratchet.js --update-baseline');
+    process.exit(1);
+  }
+
+  const { regressions, improvements, stale } = diffBaseline(baseline, current);
+
   // ── 3. 输出与退出码 ──
   if (improvements.length > 0) {
     console.log('[lint-ratchet] 改善（可收紧，执行 --update-baseline 落盘）：');
@@ -155,14 +176,24 @@ const main = async () => {
   if (regressions.length > 0) {
     console.error('[lint-ratchet] 棘轮回退——以下文件 warn 计数超过基线：');
     for (const line of regressions) console.error(`  + ${line}`);
-    console.error('                体积债只许降不许升：拆分文件/函数，或与评审确认后收紧基线。');
+    console.error(
+      '                体积/复杂度债只许降不许升：拆分文件/函数，或与评审确认后收紧基线。'
+    );
     process.exit(1);
   }
 
   console.log(`[lint-ratchet] 通过：${Object.keys(current).length} 个含 warn 文件均未超过基线。`);
 };
 
-main().catch((err) => {
-  console.error(`[lint-ratchet] 执行失败：${err.message}`);
-  process.exit(1);
-});
+// E-02 加固（2026-09-16）：仅在直接执行时跑 main，并导出纯函数供单测。
+// 原实现 `main()` 在文件尾部无条件调用——任何 `require()` 本模块的代码
+// （单测、工具链）都会连带跑一遍全量 ESLint 并在有回退时 process.exit(1)，
+// 把「引个工具」变成「可能拖垮调用方进程」。与 L-24 的生成器副作用同源。
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`[lint-ratchet] 执行失败：${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { aggregateWarnCounts, diffBaseline, toRepoRelative };

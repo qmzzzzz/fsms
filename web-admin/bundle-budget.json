@@ -1,0 +1,23 @@
+{
+  "measuredAt": "2026-09-18",
+  "measured": {
+    "entryJsGzip": 168859,
+    "entryCssGzip": 18009,
+    "totalRaw": 2267046,
+    "totalGzip": 709616,
+    "maxChunkGzip": 191643,
+    "jsChunks": 68,
+    "cssChunks": 37
+  },
+  "budgets": {
+    "entryJsGzip": 178000,
+    "entryCssGzip": 19000,
+    "totalRaw": 2381000,
+    "totalGzip": 746000,
+    "maxChunkGzip": 202000
+  },
+  "floors": {
+    "jsChunks": 40,
+    "cssChunks": 22
+  }
+}

@@ -161,6 +161,10 @@ describe('/api/security/audit-logs 查询优化', () => {
     for (const cat of ['security', 'report']) {
       const res = await queryLogs(`category=${cat}`);
       expect(res.status).toBe(200);
+      // 「合法取值」的判据是查询真的跑通并返回列表结构，
+      // 而非被枚举白名单静默降级/空手而归
+      expect(res.body.success).toBe(true);
+      expect(Array.isArray(res.body.data.data)).toBe(true);
     }
   });
 

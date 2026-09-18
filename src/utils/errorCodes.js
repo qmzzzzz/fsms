@@ -583,6 +583,12 @@ const ERROR_CODES = {
     status: 403,
     message: '无权修改同级或更高级别的用户',
   },
+  // P0-1 修复（2026-09-17）：数据范围字段（department / allowedIPs）的越界变更。
+  // 这两字段是数据可见范围与 IP 访问控制的判定依据，范围外改写等同越权提权。
+  USER_SCOPE_FIELD_FORBIDDEN: {
+    status: 403,
+    message: '无权变更该用户的部门或 IP 访问范围（超出您的数据范围）',
+  },
   CANNOT_CHANGE_OWN_STATUS: {
     status: 400,
     message: '不能通过本接口修改自身账户状态，请联系其他管理员处理',
@@ -794,13 +800,20 @@ const ERROR_CODES = {
 };
 
 /**
- * 校验注册表完整性（供单测与启动自检使用）：
- * 每个码必须有 status(number) 与 message(非空 string)
+ * 校验注册表完整性（供单测使用）：每个码必须有 status 与 message(非空 string)。
+ *
+ * status 判据为「400..599 的有限整数」而非仅 typeof number：
+ * NaN 与 400.5 都能通过 typeof/区间比较（NaN 的任何比较均为 false），
+ * 但两者在 res.status() 处行为不同——NaN 被 codeError 的 `||` 兜底成 400，
+ * 400.5 则原样传给 Express 并抛 TypeError（Invalid status code），
+ * 使该错误码的每个响应路径在运行期崩溃。注册表是静态数据，
+ * 这类笔误必须在自检期暴露，不能等到线上响应时才发现。
  */
 const validateRegistry = () => {
   const problems = [];
   for (const [code, def] of Object.entries(ERROR_CODES)) {
-    if (typeof def.status !== 'number' || def.status < 400 || def.status > 599) {
+    const statusValid = Number.isInteger(def.status) && def.status >= 400 && def.status <= 599;
+    if (!statusValid) {
       problems.push(`${code}: status 非法（${def.status}）`);
     }
     if (typeof def.message !== 'string' || !def.message.trim()) {

@@ -329,6 +329,10 @@ const { t } = useI18n()
 const router = useRouter()
 
 const loading = ref(false)
+// 提交重入锁：与 loading 分开，**同步**置位。loading 要等整表异步校验通过才置位，
+// 连点时后面的点击早已越过 loading 判断（实测同一 tick 三次点击发出 3 个注册请求，
+// 第 2/3 次会因用户名重复而失败，用户先看到「注册成功」再连吃两个错误提示）。
+const submitting = ref(false)
 const registerFormRef = ref(null)
 const activeStep = ref(0)
 
@@ -367,7 +371,7 @@ const summaryItems = computed(() => [
   { label: t('auth.department'), value: registerForm.department },
 ])
 
-const rules = {
+const rules = computed(() => ({
   username: [
     { required: true, message: t('validation.usernameRequired'), trigger: 'blur' },
     { min: 3, max: 30, message: t('validation.usernameLen'), trigger: 'blur' },
@@ -401,7 +405,7 @@ const rules = {
     { required: true, message: t('validation.captchaRequired'), trigger: 'blur' },
     { len: 4, message: t('validation.captchaLen'), trigger: 'blur' },
   ],
-}
+}))
 
 // 改密码后重新校验确认框：此前 confirmPassword 只在自身 blur 时比对，
 // 用户先填确认再回头改密码时，界面仍显示「已通过」，直到提交才报不一致
@@ -497,7 +501,7 @@ const prevStep = () => {
 
 /** 回车：非末步等价于「下一步」，末步才提交——避免中途误触发注册请求 */
 const onEnter = () => {
-  if (loading.value) return
+  if (submitting.value) return
   if (activeStep.value < steps.value.length - 1) nextStep()
   else onRegister()
 }
@@ -531,7 +535,10 @@ const onAction = (id) => {
 }
 
 const onRegister = async () => {
-  if (loading.value) return
+  // 重入防护必须同步生效：按钮的 loading 占位要等异步校验通过后才挂上，
+  // 校验窗口内的连点拦不住（见 submitting 声明处的实测说明）
+  if (submitting.value) return
+  submitting.value = true
   try {
     // 提交前整表校验：分步校验只覆盖走过的步骤，用户可能通过回退跳过某步
     await registerFormRef.value.validate()
@@ -593,6 +600,8 @@ const onRegister = async () => {
     }
   } finally {
     loading.value = false
+    // 校验不通过 / 加密失败 / 请求失败 / 成功，都必须解锁：否则提交按钮永久卡死
+    submitting.value = false
   }
 }
 
@@ -1107,19 +1116,6 @@ const resetForm = () => {
    - max-height 700px  横屏手机与 768p 笔记本，纵向留白让位给内容
    ========================================================================== */
 
-/* 中间宽度区段（1001px–1200px）：双列布局被压缩，品牌 meta 标签折行的收紧处理 */
-@media (min-width: 1001px) and (max-width: 1200px) {
-  .login-brand__meta {
-    gap: 10px;
-  }
-
-  .login-brand__meta span {
-    padding: 0 12px;
-    font-size: 13px;
-    white-space: nowrap;
-  }
-}
-
 @media (max-width: 1000px) {
   .register__panel {
     grid-template-columns: 1fr;
@@ -1327,34 +1323,28 @@ html.dark .register__aurora {
   }
 }
 
-/* ===== Apple 风格打磨（fluid interfaces：按压即时反馈 / 顺滑过渡 / 材质层次 / 无障碍降级） ===== */
+/* ===== Apple 风格打磨（fluid interfaces：按压即时反馈 / 顺滑过渡 / 材质层次 / 无障碍降级） =====
+   本段 2026-09-16 审计认定为「LoginView.vue 的逐字复制且全为死 CSS」，实测该结论**只对了一半**：
+   与 LoginView 的副本逐字节相同属实，但其中 :deep(...) 规则命中的是子组件内部真实渲染的元素
+   （LiquidGlassButtons 的 .glass-btn、Element Plus 的 .el-input__wrapper），它们**生效**——
+   例如 :deep(.el-input__wrapper.is-focus) 的 4px 外发光与同文件 :1096 的同选择器声明同权重但后出现，
+   是最终生效值。因此本轮只删除确证无效的部分：
+     - .login-card / .login-card__captcha-img / .login__panel / .login-brand / .login-brand__meta span
+       —— 本组件模板中不存在这些类（复制时未改名），选择器永不命中；
+     - :[1001-1200px] 断点里的 .login-brand__meta 收紧规则 —— 同为登录页类名，
+       本页无该元素（已随本段一并删除）；
+     - @keyframes material-enter —— 唯一使用方是上面那个永不命中的 .login__panel；
+     - 两处无障碍降级里对上述类的引用（保留其中仍生效的 :deep(.glass-btn):active）。
+   保留的 :deep(...) 规则是本页按钮与输入框观感的一部分，删除会导致真实回归。 */
 
 /* 1) 按压即时反馈：反馈落在按下瞬间，而非松开（pointer-down） */
-.login-card:active,
 :deep(.liquid-glass-buttons .glass-btn--primary):active,
 :deep(.liquid-glass-buttons .glass-btn):active {
   transform: scale(0.98);
   transition: transform 100ms ease-out;
 }
 
-/* 验证码图同样给按压反馈 */
-.login-card__captcha-img:active {
-  transform: scale(0.97);
-  transition: transform 100ms ease-out;
-}
-
-/* 2) hover 过渡改为更顺滑的曲线（尊重可中断性，避免生硬跳变） */
-.login-card,
-.login-brand__meta span,
-.login-card__captcha-img {
-  transition:
-    transform 100ms ease-out,
-    box-shadow 240ms cubic-bezier(0.32, 0.72, 0, 1),
-    border-color 200ms ease;
-  will-change: transform;
-}
-
-/* 主按钮 hover 的上浮用弹簧感曲线，回落即按压缩放接管 */
+/* 2) 主按钮 hover 的上浮用弹簧感曲线，回落即按压缩放接管 */
 :deep(.liquid-glass-buttons .glass-btn--primary),
 :deep(.liquid-glass-buttons .glass-btn) {
   transition:
@@ -1373,54 +1363,10 @@ html.dark .register__aurora {
     0 0 0 4px var(--xf-primary-alpha-8);
 }
 
-/* 4) 卡片材质：更大的表面用更强的模糊与更深的阴影（尺寸暗示厚度） */
-.login__panel {
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  border-top-color: rgba(255, 255, 255, 0.4); /* 顶缘亮线 = 光照在材质上 */
-}
-.login-card {
-  backdrop-filter: blur(16px) saturate(160%);
-  -webkit-backdrop-filter: blur(16px) saturate(160%);
-}
-
-/* 5) 入场动效：blur+scale 材质化到来，而非单纯透明度淡入 */
-@keyframes material-enter {
-  from {
-    opacity: 0;
-    transform: translateY(12px) scale(0.985);
-    filter: blur(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: blur(0);
-  }
-}
-.login__panel {
-  animation: material-enter 0.5s cubic-bezier(0.32, 0.72, 0, 1) both;
-}
-
-/* 6) 无障碍降级 */
+/* 4) 无障碍降级（仅保留仍命中的 :deep 规则） */
 @media (prefers-reduced-motion: reduce) {
-  .login__panel,
-  .login-card,
-  .login-brand {
-    animation: none !important;
-    transition: opacity 200ms ease !important;
-    transform: none !important;
-  }
-  .login-card:active,
   :deep(.glass-btn):active {
     transform: none !important;
-  }
-}
-@media (prefers-reduced-transparency: reduce) {
-  .login__panel,
-  .login-card {
-    background: var(--xf-gray-50);
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
   }
 }
 </style>

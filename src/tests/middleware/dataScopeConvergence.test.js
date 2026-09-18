@@ -49,25 +49,26 @@ describe('applyDataScopeToQuery — 数据范围收敛', () => {
       expect(applyDataScopeToQuery(query, dataScope, FIELDS)).toBe(false);
     });
 
-    test('绝不出现「返回 true 且未加任何约束」的组合', () => {
-      // 穷举所有非 all 的范围形态，逐一确认：要么被拒绝，要么至少加了一个约束键
-      const scopes = [
-        { type: 'department', department: '' },
-        { type: 'department', department: null },
-        { type: 'department' },
-        { type: 'department', department: 'A栋' },
-        { type: 'self', userId: 'u1' },
-        { type: 'none' },
-        { type: 'bogus' },
-        {},
-      ];
-      for (const scope of scopes) {
-        const query = {};
-        const allowed = applyDataScopeToQuery(query, scope, FIELDS);
-        if (allowed) {
-          expect(Object.keys(query).length).toBeGreaterThan(0);
-        }
-      }
+    // 期望值表驱动：每种范围形态的 allowed 结果显式列出，不再在函数行为上开
+    // 条件分支。原写法 `if (allowed) { expect(...) }` 在 applyDataScopeToQuery
+    // 恒返回 false（拒绝一切数据的可用性退化）时一条断言都不执行、用例恒绿。
+    test.each([
+      ['department 为空串 → 拒绝且不残留约束', { type: 'department', department: '' }, false],
+      ['department 为 null → 拒绝且不残留约束', { type: 'department', department: null }, false],
+      ['department 字段缺失 → 拒绝且不残留约束', { type: 'department' }, false],
+      ['department 有效 → 允许且必须加约束', { type: 'department', department: 'A栋' }, true],
+      ['self 有效 → 允许且必须加约束', { type: 'self', userId: 'u1' }, true],
+      ['type=none → 拒绝且不残留约束', { type: 'none' }, false],
+      ['type 未知值 → 拒绝且不残留约束', { type: 'bogus' }, false],
+      ['空对象（无 type）→ 拒绝且不残留约束', {}, false],
+    ])('%s', (_label, scope, expectedAllowed) => {
+      const query = {};
+      const allowed = applyDataScopeToQuery(query, scope, FIELDS);
+      // 两个方向由同一期望值锁定：
+      //   - expectedAllowed=true：必须施加至少一个约束键（防零过滤越权）；
+      //   - expectedAllowed=false：不得残留任何约束键（防「拒绝」却污染查询并存）。
+      expect(allowed).toBe(expectedAllowed);
+      expect(Object.keys(query).length > 0).toBe(expectedAllowed);
     });
   });
 

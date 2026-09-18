@@ -99,9 +99,23 @@ server {
     }
 
     # 构建产物带内容哈希，可长期强缓存；index.html 不缓存以保证发版即时生效
+    #
+    # 【L-09 修复】nginx 的 add_header 在嵌套块中是**整体替换**而非继承：只要本块
+    # 出现一条 add_header，server 级下发的 HSTS / X-Frame-Options / X-Content-Type-Options
+    # / COOP / CORP / Permissions-Policy 在 /assets/ 路径上会**全部消失**（实测复现）。
+    # 因此这里必须把安全头整套重声明一遍。**改动 server 级清单时请同步本块**，
+    # 否则静态资源路径会静默退化为无安全头。
     location /assets/ {
         expires 1y;
-        add_header Cache-Control "public, immutable";
+        add_header Cache-Control "public, immutable" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-XSS-Protection "0" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()" always;
     }
 
     # ===== Prometheus /metrics（无鉴权端点，必须限制抓取来源） =====

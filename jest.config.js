@@ -25,9 +25,12 @@ module.exports = {
     'src/**/*.js',
     '!src/index.js', // 排除应用入口
     '!src/config/database.js', // 排除数据库连接
-    '!src/config/validate.js', // 排除生产环境校验脚本
-    '!src/services/initData.js', // 排除初始化脚本
     '!src/docs/generate.js', // 排除 Swagger 文档生成脚本（独立工具，非运行时代码）
+    // E-03 整改：validate.js 与 initData.js 已纳入统计（并在下方单独设阈值）。
+    // 这两个文件此前被整体排除，导致约 2,000 行生产代码「不可见」——
+    // initData.js 每次启动都执行权限播种与超管唯一性对账，是安全相关逻辑，
+    // 排除在覆盖率之外等于默认它不会劣化。纳入后先「看见」真实水位，
+    // 再按棘轮逐档补测（两者当前水位偏低，见下方阈值注释）。
   ],
 
   coverageDirectory: 'coverage',
@@ -50,12 +53,12 @@ module.exports = {
   // 规则：修改/新增安全模块代码必须附带测试；每次补齐测试后把对应基线
   // 上调到新实测值下方一档，逐档逼近 80% 后恢复硬门槛。
   coverageThreshold: {
-    // 2026-09-02 实测（时区口径分叉修复批次：auditMonitor 频控时区回归 +
-    // securityStats 今日起点口径回归补齐后，按 lcov 聚合剔除单独设阈文件计算）。
+    // 【口径说明】本文件只锁阈值，不记录实时覆盖率数字——
+    // 此前注释里写死的实测快照（如 st 89.94 / br 77.72）会随代码演进失实，
+    // 反而误导（报告 §10.5 漂移 #11）。需要当前数字请跑 `npm run test:coverage`。
+    //
     // 注意 global 分组**不含**下方单独设阈值的文件——Jest 会把它们从 global
-    // 组里摘出去，因此 global 数字与 text-summary 的总计不同
-    // （总计 st 89.94 / br 77.72 / fn 88.59 / ln 91.51；
-    // 摘除后 st 92.77 / br 80.28 / fn 88.34 / ln 92.77）。
+    // 组里摘出去，因此 global 数字与 text-summary 的总计不同。
     // 基线按分组后的真实值取，否则会莫名红灯。
     global: {
       branches: 79,
@@ -113,6 +116,29 @@ module.exports = {
     './src/utils/permissionHelper.js': { branches: 85, functions: 100 }, // (85.41/100) 2026-09-04 按实测下方一档
     './src/services/auditChainVerify.js': { branches: 80, functions: 100 }, // (86.11/100) 2026-09-04 审计链校验直连单测批次
     './src/services/tokenService.js': { branches: 77, functions: 100 }, // (77.77/100)
+    // ===== 2026-09-16 E-03 整改：此前被 collectCoverageFrom 整体排除的两个文件，
+    // 纳入统计并单独设阈值。基线按「2026-09-16 实测下方一档」取值——
+    // 不是因为它们安全重要度低，而是先让水位可见，再按棘轮逐档补测。
+    // 独立设阈的另一个作用：Jest 会把它们从 global 分组摘出，
+    // 使「新增被排除文件」不会误伤与之无关的全局基线。
+    './src/config/validate.js': { branches: 74, functions: 79 }, // (75/80) 生产配置校验，此前整体排除
+    './src/services/initData.js': { branches: 94, functions: 99 }, // (95/100) 2026-09-18 initDataLifecycle.test.js 批次（行/语句/函数 100%）
+    // 分支 95% 是当前可达上限：剩余 5 个未命中分支经穷举验证为**数据决定的结构不可达**
+    // ——initData.js 的 defaultPermissions 每条 code 都含 ":"（:551 的 else 走不到）、
+    // defaultRoles 每项都 isBuiltIn:true（:634 的 else）、rolePermissionMap 的键集
+    // 与 defaultRoles 的 code 集完全一致且每项非空（:610/:612/:621 的 `|| []`）。
+    // 基线取实测下方一档，与本源「实测下方一档」规则一致。
+    // ===== 2026-09-16 第四轮：M-05 信任根的独立门槛 =====
+    // filePermission.js 是「密钥载体权限已收紧」这一结论的唯一来源（M-05 修复的
+    // 落点）。它在第三轮落地时**没有独立阈值**，违反本文件上文自订的规则
+    // （「修改/新增安全模块代码必须附带测试，并设独立基线」）——实测当时仅
+    // 行 67.34% / 分支 68.42%，失败路径（icacls 执行失败、USERNAME 缺失、
+    // 读取失败 fail-closed）全部未被任何测试触达。第四轮补测后实测
+    // 行 100% / 分支 97.37%（唯一未覆盖的 `|| ''` 分支经穷举验证为结构不可达：
+    // trim() 后 split(/s+/).pop() 必含非空白字符）。
+    // 基线取「实测下方一档」；分支留 2pt 余量是因为该分支依赖 icacls 输出解析，
+    // 未来若新增解析形态，余量可吸收格式差异而不误红灯。
+    './src/utils/filePermission.js': { branches: 95, functions: 100 }, // (97.37/100)
   },
 
   // 测试文件命名约定

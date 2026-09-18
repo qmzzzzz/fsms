@@ -176,6 +176,9 @@ const router = useRouter()
 const authStore = useAuthStore()
 
 const loading = ref(false)
+// 提交重入锁：与 loading 分离并**同步**置位。loading 只在校验通过后才置位，
+// 连点时后面的点击已进入 await 之前的分支（实测同一 tick 三次点击发出 3 次登录请求）。
+const submitting = ref(false)
 const loginFormRef = ref(null)
 const passwordRef = ref(null)
 const captchaRef = ref(null)
@@ -287,11 +290,14 @@ const rules = computed(() => {
 })
 
 const onLogin = async () => {
-  if (loading.value) return
+  // 重入防护必须同步生效：loading 要到校验通过后才置位，连点时拦不住后面的点击
+  if (submitting.value) return
+  submitting.value = true
 
   try {
     await loginFormRef.value.validate()
   } catch (_) {
+    submitting.value = false
     return
   }
 
@@ -366,6 +372,8 @@ const onLogin = async () => {
     }
   } finally {
     loading.value = false
+    // 成功/失败/异常都必须解锁，否则登录按钮永久失效
+    submitting.value = false
   }
 }
 </script>

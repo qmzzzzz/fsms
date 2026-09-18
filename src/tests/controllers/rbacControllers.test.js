@@ -196,28 +196,52 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
 
     const builtin = await Role.findOne({ code: 'SUPER_ADMIN' });
     const builtinRename = await authed().put(`/api/roles/${builtin._id}`).send({ name: '改名' });
-    expect([400, 403]).toContain(builtinRename.status);
+    // 实测 403（内置角色改名 → BUILTIN_ROLE_NAME_LEVEL_LOCKED）
+    expect(builtinRename.status).toBe(403);
 
     const badStatus = await authed().put(`/api/roles/${roleId}`).send({ status: 'bogus' });
     expect(badStatus.status).toBe(400);
   });
 
   test('角色：分配权限（权限子集/层级拦截）+ 删除自定义角色；内置删除被拒', async () => {
-    const custom = await Role.findOne({ code: `RARA_${stamp.toUpperCase()}` });
+    // 自包含前置：本用例依赖的 RARA_* 角色原由「角色：创建成功」用例创建，
+    // 随机顺序下该用例可能尚未执行（--randomize 实测 seed=1/2/777 均因此失败）。
+    // 若尚未存在则按「创建成功」用例同一形态补建，使本用例可独立于执行顺序。
+    let custom = await Role.findOne({ code: `RARA_${stamp.toUpperCase()}` });
+    if (!custom) {
+      custom = await Role.create({
+        name: '批次A角色',
+        code: `RARA_${stamp.toUpperCase()}`,
+        level: 3,
+        permissions: [permReadId, permWriteId],
+      });
+    }
+    expect(custom).toBeTruthy();
     const assign = await authed()
       .put(`/api/roles/${custom._id}/permissions`)
       .send({
         permissions: [permReadId.toString()],
       });
     expect(assign.status).toBe(200);
+    // 「分配权限」的判据是权限真的挂到了该角色上（200 也可能是空操作）
+    const assignedRole = await Role.findById(custom._id).lean();
+    expect(assignedRole.permissions.map(String)).toContain(String(permReadId));
 
     const delBuiltin = await authed().delete(
       `/api/roles/${(await Role.findOne({ code: 'SUPER_ADMIN' }))._id}`
     );
     expect(delBuiltin.status).toBe(403);
+    // 403 必须点名「内置角色不可删除」：仅凭状态码无法区分是被内置保护拒绝
+    // 还是被层级闸/数据范围闸顺手拦下
+    expect(delBuiltin.body.errors.errorCode).toBe('BUILTIN_ROLE_NOT_DELETABLE');
+    // 且角色必须仍在（403 也可能是「先删后报错」的假象）
+    const builtinStillThere = await Role.findOne({ code: 'SUPER_ADMIN' });
+    expect(builtinStillThere).toBeTruthy();
 
     const del = await authed().delete(`/api/roles/${custom._id}`);
     expect(del.status).toBe(200);
+    // 删除的判据是记录真的没了，而不是返回了 200
+    expect(await Role.findById(custom._id)).toBeNull();
   });
 
   // ================= 权限 =================
@@ -227,6 +251,8 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
 
     const detail = await authed().get(`/api/permissions/${permReadId}`);
     expect(detail.status).toBe(200);
+    const missingPerm = await authed().get(`/api/permissions/${new mongoose.Types.ObjectId()}`);
+    expect(missingPerm.body.errors.errorCode).toBe('PERMISSION_NOT_FOUND');
     expect((await authed().get(`/api/permissions/${new mongoose.Types.ObjectId()}`)).status).toBe(
       404
     );
@@ -266,11 +292,16 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
   test('用户：列表（过滤白名单/非法枚举 400）+ 详情（命中/404）', async () => {
     expect((await authed().get('/api/users?page=1&limit=50&status=active')).status).toBe(200);
     expect((await authed().get('/api/users?status=bogus')).status).toBe(400);
+    const badStatusQuery = await authed().get('/api/users?status=bogus');
+    expect(badStatusQuery.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(badStatusQuery.body.errors.fieldErrors[0].path).toBe('status');
     expect((await authed().get('/api/users?search=raadmin')).status).toBe(200);
 
     const me = await authed().get(`/api/users/${selfUserId}`);
     expect(me.status).toBe(200);
     expect((await authed().get(`/api/users/${new mongoose.Types.ObjectId()}`)).status).toBe(404);
+    const missingUser = await authed().get(`/api/users/${new mongoose.Types.ObjectId()}`);
+    expect(missingUser.body.errors.errorCode).toBe('USER_NOT_FOUND');
   });
 
   test('用户：创建（成功/携带超管角色拒绝/用户名重复）', async () => {
@@ -307,13 +338,23 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
   });
 
   test('用户：更新（资料/邮箱冲突 400/状态白名单）', async () => {
-    const target = await User.findOne({ username: `rauser${stamp}a` });
+    // 自包含前置：原实现直接 findOne「用户：创建」用例落库的 rauser*a，
+    // 随机顺序下目标可能尚不存在（--randomize 实测 seed=1/2/3/777 均因此返回 null）。
+    const target = await User.create({
+      username: `rauser${stamp}u`,
+      email: `rauser${stamp}u@example.com`,
+      password: PASSWORD,
+      realName: '批次A用户',
+    });
 
     const renamed = await authed().put(`/api/users/${target._id}`).send({
       realName: '批次A用户改',
       department: '安全部',
     });
     expect(renamed.status).toBe(200);
+    // 200 也要核对字段真的写进去了（防止「请求成功但字段被静默忽略」）
+    expect(renamed.body.data.realName).toBe('批次A用户改');
+    expect(renamed.body.data.department).toBe('安全部');
 
     const conflict = await authed()
       .put(`/api/users/${target._id}`)
@@ -321,9 +362,13 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
         email: `raadmin${stamp}@example.com`,
       });
     expect(conflict.status).toBe(400);
+    // 邮箱冲突必须点名 EMAIL_TAKEN_SHORT：同 400 的校验失败与冲突语义不同
+    expect(conflict.body.errors.errorCode).toBe('EMAIL_TAKEN_SHORT');
 
     const badStatus = await authed().put(`/api/users/${target._id}`).send({ status: 'bogus' });
     expect(badStatus.status).toBe(400);
+    expect(badStatus.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(badStatus.body.errors.fieldErrors[0].path).toBe('status');
   });
 
   test('用户：删除（self 拒绝 / 超管目标拒绝 / 正常删除 / 批量删除）', async () => {
@@ -344,8 +389,13 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
     expect(superDel.status).toBe(403);
     expect(superDel.body.message).toContain('同级或更高级别');
 
-    // 正常删除
-    const victim = await User.findOne({ username: `rauser${stamp}a` });
+    // 正常删除（自包含前置：目标独立创建，不依赖「用户：创建」用例先行；
+    // 用独立用户名资源 d，避免删除动作毁掉其他用例的目标）
+    const victim = await User.create({
+      username: `rauser${stamp}d`,
+      email: `rauser${stamp}d@example.com`,
+      password: PASSWORD,
+    });
     expect((await authed().delete(`/api/users/${victim._id}`)).status).toBe(200);
 
     // 批量删除：混入不存在 ID → 400；合法 → 200

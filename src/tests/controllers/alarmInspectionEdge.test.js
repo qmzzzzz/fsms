@@ -166,6 +166,10 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
 
   test('报警：非法 :id 格式被路由校验拒绝（400）', async () => {
     expect((await admin().get('/api/alarms/not-an-objectid')).status).toBe(400);
+    // 两个端点都必须被同一道 :id 形状校验拒绝（点名错误码，排除「被别的 400 挡下」）
+    expect((await admin().get('/api/alarms/not-an-objectid')).body.errors.errorCode).toBe(
+      'PARAM_MUST_BE_VALID_OBJECT_ID'
+    );
     expect((await admin().put('/api/alarms/not-an-objectid/arrive').send({})).status).toBe(400);
   });
 
@@ -175,6 +179,9 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
       .post('/api/alarms/report')
       .send({ alarmType: 'bogus', description: `x_${stamp}` });
     expect(report.status).toBe(400);
+    // 三个 400 分别落在自己的字段上，证明是各自的路由校验器拦下的
+    expect(report.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(report.body.errors.fieldErrors[0].path).toBe('alarmType');
     // dispatch：handlerId 非 ObjectId
     const rep = await admin()
       .post('/api/alarms/report')
@@ -188,6 +195,8 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
       .put(`/api/alarms/${alarmId}/dispatch`)
       .send({ handlerId: 'not-an-id' });
     expect(dispatch.status).toBe(400);
+    expect(dispatch.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(dispatch.body.errors.fieldErrors[0].path).toBe('handlerId');
     // resolve：cause 非法枚举
     const resolve = await admin()
       .put(`/api/alarms/${alarmId}/resolve`)
@@ -202,7 +211,15 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
 
   test('报警：统计接口非法日期返回 400（控制器防御分支）', async () => {
     expect((await admin().get('/api/alarms/stats?startDate=not-a-date')).status).toBe(400);
+    // 「控制器防御分支」的判据是点名 DATE_PARAM_INVALID（路由未挂该校验，只能由控制器产出）
+    expect(
+      (await admin().get('/api/alarms/stats?startDate=not-a-date')).body.errors.errorCode
+    ).toBe('DATE_PARAM_INVALID');
     expect((await admin().get('/api/alarms/stats?endDate=not-a-date')).status).toBe(400);
+    // startDate 与 endDate 是两个独立条件：任一侧漏判都会让本行转红
+    expect((await admin().get('/api/alarms/stats?endDate=not-a-date')).body.errors.errorCode).toBe(
+      'DATE_PARAM_INVALID'
+    );
   });
 
   // ==================== 报警：409 状态迁移冲突 ====================
@@ -291,6 +308,10 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
     expect(foreign.status).toBe(201);
     const foreignId = String(foreign.body.data._id || foreign.body.data.id);
     expect((await scoped().get(`/api/alarms/${foreignId}`)).status).toBe(403);
+    // 点名数据范围拒绝码：与「无权操作（PERMISSION_DENIED）」区分，前者是范围闸、后者是权限闸
+    expect((await scoped().get(`/api/alarms/${foreignId}`)).body.errors.errorCode).toBe(
+      'ALARM_VIEW_FORBIDDEN'
+    );
 
     // 自己的记录（正向对照：范围校验不得过严）
     const own = await scoped()
@@ -357,7 +378,13 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
 
   test('巡检：统计接口非法日期返回 400（控制器防御分支）', async () => {
     expect((await admin().get('/api/inspections/stats?startDate=not-a-date')).status).toBe(400);
+    expect(
+      (await admin().get('/api/inspections/stats?startDate=not-a-date')).body.errors.errorCode
+    ).toBe('DATE_PARAM_INVALID');
     expect((await admin().get('/api/inspections/stats?endDate=not-a-date')).status).toBe(400);
+    expect(
+      (await admin().get('/api/inspections/stats?endDate=not-a-date')).body.errors.errorCode
+    ).toBe('DATE_PARAM_INVALID');
   });
 
   // ==================== 巡检：服务层抛错的 catch 分支 ====================
@@ -380,6 +407,9 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
     const id = await createInspection('更新拒绝');
     expect((await admin().put(`/api/inspections/${id}/start`).send({})).status).toBe(200);
     // 更新：服务层抛 badRequest → 控制器 catch → err.statusCode=400
+    // 三条均由服务层抛错经控制器 catch 兜底，响应文案统一为「操作失败」
+    // （实测 errors 为 null，controller 不透出内部错误细节）；此处只断言状态码，
+    // 语义区分由状态码本身承担：400=状态不允许、409=转移冲突。
     expect((await admin().put(`/api/inspections/${id}`).send({ description: 'x' })).status).toBe(
       400
     );
@@ -444,7 +474,15 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
     expect(foreign.status).toBe(201);
     const foreignId = String(foreign.body.data._id || foreign.body.data.id);
     expect((await scoped().get(`/api/inspections/${foreignId}`)).status).toBe(403);
+    // 读取与开始执行走的是不同守卫：读取报 INSPECTION_VIEW_FORBIDDEN，
+    // start 落回通用 PERMISSION_DENIED（更新侧的统一出口）
+    expect((await scoped().get(`/api/inspections/${foreignId}`)).body.errors.errorCode).toBe(
+      'INSPECTION_VIEW_FORBIDDEN'
+    );
     expect((await scoped().put(`/api/inspections/${foreignId}/start`).send({})).status).toBe(403);
+    expect(
+      (await scoped().put(`/api/inspections/${foreignId}/start`).send({})).body.errors.errorCode
+    ).toBe('PERMISSION_DENIED');
 
     // 自己参与的计划（正向对照）
     const own = await admin()
@@ -473,12 +511,15 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
       user: { userId: adminId },
     });
     expect(badStart.statusCode).toBe(400);
+    // 直调控制器：状态码 400 必须来自 DATE_PARAM_INVALID 这条防御分支
+    expect(badStart.body.errors.errorCode).toBe('DATE_PARAM_INVALID');
 
     const badEnd = await invoke(inspectionController.getInspections, {
       query: { endDate: 'not-a-date' },
       user: { userId: adminId },
     });
     expect(badEnd.statusCode).toBe(400);
+    expect(badEnd.body.errors.errorCode).toBe('DATE_PARAM_INVALID');
   });
 
   test('resolveAlarm：缺 handleResult 时控制器直接 400（路由已强制，此为防御分支）', async () => {
@@ -490,5 +531,8 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
       user: { userId: adminId },
     });
     expect(out.statusCode).toBe(400);
+    // 「控制器直接 400」必须点名 ALARM_HANDLE_RESULT_REQUIRED：
+    // 否则「缺 handleResult」与「报警不存在」等其它 400 无法区分
+    expect(out.body.errors.errorCode).toBe('ALARM_HANDLE_RESULT_REQUIRED');
   });
 });

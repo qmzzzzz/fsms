@@ -1,15 +1,20 @@
 /**
- * security.js 分支补齐（branches 67.5% → 目标 80%+）
+ * security.js 分支补齐
  *
- * 依据全量覆盖率基线的未覆盖分支行号：
- *  - deepSanitizeKeys：数组深度超限清空（L171-174）、Date/Buffer 跳过（L179）、
- *    对象深度超限清空（L180-182）、JSON.parse 原型污染键剔除（L188-194）
- *  - ensureHsts：已有 HSTS 头时不覆盖（L152）
- *  - checkIPBlacklist：DB 故障降级缓存命中拦截（L415-430）—— 可靠性关键路径；
- *    白名单豁免（L380-385）的缓存失效联动
- *  - addToBlacklist：无法解析的 IP 跳过（L455）、白名单 IP 跳过自动封禁（L462）
- *  - fileUploadSecurity：预留能力全分支（L643-687，当前无路由挂载，直接单测）
- *  - auditLog 中间件：GET 非白名单跳过（L519）、skipGlobalAudit 跳过（L524）
+ * 【行号说明】本文件早期版本按覆盖率基线逐条标注 `L<行号>`。后续多轮安全修复
+ * （P0-5/P0-6 skipGlobalAudit 时序、deepSanitizeKeys 重构等）使 security.js 整体
+ * 位移，标注大量指向注释或空白行。按「注释必须与实现同步」的要求，现改为语义
+ * 描述、不再写行号。
+ *
+ * 覆盖分支：
+ *  - deepSanitizeKeys：数组深度超限清空、Date/Buffer 跳过、对象深度超限清空、
+ *    JSON.parse 原型污染键剔除
+ *  - ensureHsts：已有 HSTS 头时不覆盖 / 无头时补发
+ *  - checkIPBlacklist：DB 故障降级缓存命中拦截（可靠性关键路径）；
+ *    白名单豁免与缓存失效联动
+ *  - addToBlacklist：无法解析的 IP 跳过、白名单 IP 跳过自动封禁
+ *  - fileUploadSecurity：预留能力全分支（当前无路由挂载，直接单测）
+ *  - auditLog 中间件：GET 非白名单跳过、skipGlobalAudit 跳过
  */
 
 const mongoose = require('mongoose');
@@ -83,7 +88,7 @@ describe('security.js 分支补齐', () => {
       return { res, next };
     };
 
-    test('Date 与 Buffer 值被跳过，属性原样保留（L179）', () => {
+    test('Date 与 Buffer 值被跳过，属性原样保留', () => {
       const req = makeReq({
         body: { createdAt: new Date('2026-01-01T00:00:00Z'), blob: Buffer.from('hello') },
       });
@@ -94,7 +99,7 @@ describe('security.js 分支补齐', () => {
       expect(req.body.blob.toString()).toBe('hello');
     });
 
-    test('对象嵌套超深度：超限子树整体清空，浅层保留（L180-182）', () => {
+    test('对象嵌套超深度：超限子树整体清空，浅层保留', () => {
       // 构造 13 层嵌套（depth 0 起算，depth>=10 被清空）
       const root = { payload: 'safe' };
       let cur = root;
@@ -107,19 +112,23 @@ describe('security.js 分支补齐', () => {
 
       expect(next).toHaveBeenCalled();
       expect(req.body.payload).toBe('safe'); // 浅层保留
+      // 逐层下钻收集节点：depth 0..9 共 10 层保留 payload；
+      // depth >= SANITIZE_MAX_DEPTH(10) 的子树被整体清空（对象仍在但已无任何自有键）。
+      // 原实现用 let cleared = 0 计数但从未修改，断言 toBe(0) 恒真（P1-29）；
+      // 现改为直接断言「第 11 层节点存在且键集为空」——清空行为真被触发才通过。
+      const nodes = [];
       let node = req.body;
-      let cleared = 0;
-      let survived = 0;
       while (node && typeof node === 'object') {
-        if ('payload' in node) survived++;
+        nodes.push(node);
         node = node.next;
       }
-      // depth 0..9 共 10 层保留 payload，其余被 delete 清空
-      expect(survived).toBe(10);
-      expect(cleared).toBe(0);
+      expect(nodes.filter((n) => 'payload' in n)).toHaveLength(10);
+      const clearedNode = nodes[10];
+      expect(clearedNode).toBeTruthy();
+      expect(Object.keys(clearedNode)).toEqual([]);
     });
 
-    test('数组嵌套超深度：超限数组被 length=0 清空（L171-174）', () => {
+    test('数组嵌套超深度：超限数组被 length=0 清空', () => {
       // 数组链：list -> [arr] -> ... 共 12 层数组，最内数组深度 >=10 被清空
       let arr = [{ $ne: 1 }];
       for (let i = 0; i < 12; i++) {
@@ -141,7 +150,7 @@ describe('security.js 分支补齐', () => {
       expect(JSON.stringify(req.body)).not.toContain('$ne');
     });
 
-    test('JSON.parse 原型污染键（__proto__）被剔除（L188-194）', () => {
+    test('JSON.parse 原型污染键（__proto__）被剔除', () => {
       const parsed = JSON.parse('{"name":"x","__proto__":{"injected":true},"nested":{"$gt":""}}');
       const req = makeReq({ body: parsed });
       const { next } = run(req);
@@ -158,7 +167,7 @@ describe('security.js 分支补齐', () => {
   });
 
   describe('ensureHsts：HSTS 兜底下发', () => {
-    test('响应无 HSTS 头时补发固定值（L152 正向）', () => {
+    test('响应无 HSTS 头时补发固定值', () => {
       const res = makeRes();
       const next = jest.fn();
       ensureHsts(makeReq(), res, next);
@@ -168,7 +177,7 @@ describe('security.js 分支补齐', () => {
       );
     });
 
-    test('已有 HSTS 头时不覆盖（L152 反向分支）', () => {
+    test('已有 HSTS 头时不覆盖', () => {
       const res = makeRes();
       res.setHeader('Strict-Transport-Security', 'max-age=123');
       const next = jest.fn();
@@ -189,7 +198,7 @@ describe('security.js 分支补齐', () => {
       jest.restoreAllMocks();
     });
 
-    test('DB 正常 + 命中黑名单 → 403 且写入降级缓存（L387-411）', async () => {
+    test('DB 正常 + 命中黑名单 → 403 且写入降级缓存', async () => {
       jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(false);
       jest.spyOn(IPBlacklist, 'isBlocked').mockResolvedValue(true);
       const res = makeRes();
@@ -201,7 +210,7 @@ describe('security.js 分支补齐', () => {
       expect(res.statusCode).toBe(403);
     });
 
-    test('DB 正常 + 白名单命中 → 放行并挂 ipWhitelisted（L380-385）', async () => {
+    test('DB 正常 + 白名单命中 → 放行并挂 ipWhitelisted', async () => {
       jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(true);
       jest.spyOn(IPBlacklist, 'isBlocked').mockResolvedValue(true); // 双命中也放行
       const res = makeRes();
@@ -214,7 +223,7 @@ describe('security.js 分支补齐', () => {
       expect(req.ipWhitelisted).toBe(true);
     });
 
-    test('DB 故障 + 降级缓存命中 → 仍拦截（可靠性关键路径，L415-429）', async () => {
+    test('DB 故障 + 降级缓存命中 → 仍拦截（可靠性关键路径）', async () => {
       // 第一步：DB 正常时命中黑名单，写入进程内降级缓存
       jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(false);
       jest.spyOn(IPBlacklist, 'isBlocked').mockResolvedValue(true);
@@ -245,7 +254,7 @@ describe('security.js 分支补齐', () => {
       expect(res.statusCode).toBeUndefined();
     });
 
-    test('DB 恢复且未命中黑名单 → 清除陈旧降级缓存，解封后立即放行（L413-414）', async () => {
+    test('DB 恢复且未命中黑名单 → 清除陈旧降级缓存，解封后立即放行', async () => {
       // 第一步：DB 正常且命中黑名单，写入降级缓存
       jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(false);
       jest.spyOn(IPBlacklist, 'isBlocked').mockResolvedValue(true);
@@ -271,7 +280,7 @@ describe('security.js 分支补齐', () => {
       expect(res2.statusCode).toBeUndefined();
     });
 
-    test('白名单命中 → 清除该 IP 封禁缓存，DB 故障期不误拦（L380-384）', async () => {
+    test('白名单命中 → 清除该 IP 封禁缓存，DB 故障期不误拦', async () => {
       // 先以黑名单身份写入降级缓存
       jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(false);
       jest.spyOn(IPBlacklist, 'isBlocked').mockResolvedValue(true);
@@ -309,7 +318,7 @@ describe('security.js 分支补齐', () => {
       jest.restoreAllMocks();
     });
 
-    test('无法解析的地址 → 跳过，不调用 blockIP（L455-458）', async () => {
+    test('无法解析的地址 → 跳过，不调用 blockIP', async () => {
       const blockIP = jest.spyOn(IPBlacklist, 'blockIP').mockResolvedValue({});
       jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(false);
 
@@ -318,7 +327,7 @@ describe('security.js 分支补齐', () => {
       expect(blockIP).not.toHaveBeenCalled();
     });
 
-    test('白名单中的 IP → 跳过自动封禁（L461-465）', async () => {
+    test('白名单中的 IP → 跳过自动封禁', async () => {
       const blockIP = jest.spyOn(IPBlacklist, 'blockIP').mockResolvedValue({});
       jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(true);
 
@@ -349,13 +358,13 @@ describe('security.js 分支补齐', () => {
       return mw(req, res, next).then(() => ({ res, next }));
     };
 
-    test('无文件 → 直接放行（L650-652）', async () => {
+    test('无文件 → 直接放行', async () => {
       const { res, next } = await runUpload([]);
       expect(next).toHaveBeenCalled();
       expect(res.statusCode).toBeUndefined();
     });
 
-    test('文件超过大小限制 → 400（L656-662）', async () => {
+    test('文件超过大小限制 → 400', async () => {
       const { res, next } = await runUpload(
         [{ originalname: 'big.png', size: 6 * 1024 * 1024, mimetype: 'image/png' }],
         { maxSize: 5 * 1024 * 1024 }
@@ -364,7 +373,7 @@ describe('security.js 分支补齐', () => {
       expect(res.statusCode).toBe(400);
     });
 
-    test('MIME 类型不在白名单 → 400（L665-667）', async () => {
+    test('MIME 类型不在白名单 → 400', async () => {
       const { res, next } = await runUpload(
         [{ originalname: 'a.exe', size: 100, mimetype: 'application/x-msdownload' }],
         { allowedTypes: ['image/png'] }
@@ -373,7 +382,7 @@ describe('security.js 分支补齐', () => {
       expect(res.statusCode).toBe(400);
     });
 
-    test('扩展名与 MIME 不符（伪装）→ 400（L670-683）', async () => {
+    test('扩展名与 MIME 不符（伪装）→ 400', async () => {
       const { res, next } = await runUpload(
         [{ originalname: 'evil.txt', size: 100, mimetype: 'image/png' }],
         { allowedTypes: ['image/png'] }
@@ -393,7 +402,7 @@ describe('security.js 分支补齐', () => {
   });
 
   describe('auditLog 中间件：路径与跳过分支', () => {
-    test('GET 命中敏感读取白名单 → 包装响应并走审计（L514-516 正向）', async () => {
+    test('GET 命中敏感读取白名单 → 包装响应并走审计', async () => {
       const mw = auditLog();
       const req = makeReq({ method: 'GET', originalUrl: '/api/users?page=1', path: '/api/users' });
       const res = makeRes();
@@ -407,7 +416,7 @@ describe('security.js 分支补齐', () => {
       expect(typeof res.json).toBe('function');
     });
 
-    test('GET 非白名单路径 → 直接放行，不包装响应（L519-521）', () => {
+    test('GET 非白名单路径 → 直接放行，不包装响应', () => {
       const mw = auditLog();
       const originalJson = jest.fn(() => 'orig');
       const req = makeReq({ method: 'GET', originalUrl: '/api/devices', path: '/api/devices' });
@@ -423,19 +432,69 @@ describe('security.js 分支补齐', () => {
       expect(originalJson).toHaveBeenCalledWith('x');
     });
 
-    test('控制器声明 skipGlobalAudit → 跳过（L524-526）', () => {
-      const mw = auditLog();
-      const originalJson = jest.fn(() => 'orig');
-      const req = makeReq({ method: 'POST', originalUrl: '/api/devices', path: '/api/devices' });
-      const res = makeRes();
-      res.locals = { skipGlobalAudit: true };
-      res.json = originalJson;
-      const next = jest.fn();
+    test('控制器在响应前声明 skipGlobalAudit → 跳过全局审计', async () => {
+      // P1-29 修复：原用例手工构造 res.locals = { skipGlobalAudit: true } 再调中间件，
+      // 掩盖了 P0-5 的真实时序缺陷——控制器赋值发生在本中间件入口之后，入口读取
+      // 必然早于赋值，标志 100% 失效。现改为「中间件入口之后、响应之前」赋值，
+      // 并断言 auditBuffer.push 一次都没被调用（真实响应包装器上的行为）。
+      const auditBuffer = require('../../services/auditBuffer');
+      const spyPush = jest.spyOn(auditBuffer, 'push');
+      spyPush.mockClear();
+      try {
+        const mw = auditLog();
+        const req = makeReq({
+          method: 'POST',
+          originalUrl: '/api/devices',
+          path: '/api/devices',
+        });
+        const res = makeRes();
+        const next = jest.fn();
 
-      mw(req, res, next);
+        mw(req, res, next);
+        res.locals = {};
+        // 控制器真实时序：中间件入口之后才置标志
+        res.locals.skipGlobalAudit = true;
+        res.statusCode = 200;
+        res.json({ success: true });
+        await new Promise((r) => setImmediate(r));
 
-      expect(next).toHaveBeenCalled();
-      expect(res.json('x')).toBe('orig');
+        expect(next).toHaveBeenCalled();
+        expect(spyPush).not.toHaveBeenCalled();
+      } finally {
+        spyPush.mockRestore();
+      }
+    });
+
+    test('未声明 skipGlobalAudit → 恰好记录 1 条全局审计（对照，防“一律跳过”式假修复）', async () => {
+      // 与上一条构成正反配对：只有「该跳过的跳过、不该跳过的必须记录」同时成立，
+      // 才说明 skipGlobalAudit 语义正确，而非中间件被整体短路。
+      const auditBuffer = require('../../services/auditBuffer');
+      const spyPush = jest.spyOn(auditBuffer, 'push');
+      spyPush.mockClear();
+      try {
+        const mw = auditLog();
+        const req = makeReq({
+          method: 'POST',
+          originalUrl: '/api/devices',
+          path: '/api/devices',
+        });
+        const res = makeRes();
+        const next = jest.fn();
+
+        mw(req, res, next);
+        res.statusCode = 200;
+        res.json({ success: true });
+        await new Promise((r) => setImmediate(r));
+
+        expect(next).toHaveBeenCalled();
+        expect(spyPush).toHaveBeenCalledTimes(1);
+        const [doc] = spyPush.mock.calls[0];
+        expect(doc.path).toBe('/api/devices');
+        expect(doc.method).toBe('POST');
+        expect(doc.success).toBe(true);
+      } finally {
+        spyPush.mockRestore();
+      }
     });
   });
 });

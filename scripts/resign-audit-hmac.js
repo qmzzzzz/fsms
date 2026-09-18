@@ -11,8 +11,10 @@
  *
  * 步骤（维护窗口内执行）：
  *   1. 停应用，避免迁移期间新记录用旧钥签名
- *   2. node scripts/resign-audit-hmac.js --new-key <新KEY>            # 演练
- *   3. node scripts/resign-audit-hmac.js --new-key <新KEY> --apply    # 执行
+ *   2. node scripts/resign-audit-hmac.js --new-key <新KEY>                     # 演练
+ *   3. ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js \
+ *        --new-key <新KEY> --apply --yes                                      # 执行
+ *      （L-26：--apply 需 ALLOWED_SOURCE_DB 白名单 + --yes 双标志，与同族脚本一致）
  *   4. 更新密钥载体（.env 或 secrets/hmac_secret）为新 KEY，启动应用
  *   5. 运行 node scripts/verify-audit-chain.js 复核（预期零 hmac 失配）
  *
@@ -32,10 +34,17 @@ const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
 
 const BATCH_SIZE = 1000;
 
+// L-26：与同族脚本（resign-audit-chain-v3.js / run-rollback-drill.js）统一为
+// 「--apply + --yes」双标志。原先只有本脚本是单标志，而它批量改写的是
+// auditlogs.hmac——审计完整性证据本身，破坏性与重签整条链同级甚至更高
+// （后者至少还能靠 verify 发现不自洽，重签 hmac 会让失配记录重新「通过」）。
+const CONFIRM_FLAG = '--yes';
+
 function parseArgs(argv) {
-  const args = { apply: false, newKey: null };
+  const args = { apply: false, confirmYes: false, newKey: null };
   for (let i = 2; i < argv.length; i += 1) {
     if (argv[i] === '--apply') args.apply = true;
+    else if (argv[i] === CONFIRM_FLAG) args.confirmYes = true;
     else if (argv[i] === '--new-key') args.newKey = argv[++i];
     else {
       console.error(`未知参数：${argv[i]}`);
@@ -71,10 +80,17 @@ const hmacOf = (secret, hash) =>
     args.apply ? '模式：APPLY（将实际修改数据）' : '模式：DRY-RUN（仅报告，加 --apply 才执行）'
   );
 
-  // M-08：fail-closed——--apply 类操作必须显式声明 ALLOWED_SOURCE_DB。
+  // M-08 / L-26：fail-closed 白名单 + 双标志，与同族脚本口径一致。
   // 原先只需单个 --apply 即可批量改写 auditlogs.hmac（等于重写审计完整性
   // 证据），且默认回退本地库，误在生产 shell 执行时不会因库名不符而中止。
   if (!assertApplyAllowed({ scriptName: 'resign-audit-hmac.js', dbName, apply: args.apply })) {
+    await mongoose.disconnect();
+    process.exit(2);
+  }
+  if (args.apply && !args.confirmYes) {
+    console.error(
+      `错误：--apply 将批量改写 auditlogs.hmac（重写审计完整性证据），需再传 ${CONFIRM_FLAG} 确认。`
+    );
     await mongoose.disconnect();
     process.exit(2);
   }

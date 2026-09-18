@@ -1,0 +1,63 @@
+# 发布（tag → GitHub Release）
+#
+# 为什么需要它：此前打了 v* 标签只有 ci.yml 会推一个带版本号的镜像，
+# 但**没有 Release 记录**——“这个版本改了什么”只能去翻 commit 历史。
+# CHANGELOG.md 已按 Keep a Changelog 维护，本流程把它变成发布时自动生成的 Release Notes——
+# 避免“发布时手写一份、CHANGELOG 里另一份”的两处漂移。
+#
+# fail-closed：tag 对应的 CHANGELOG 章节找不到 → **直接失败**，不发一个
+# 内容为空的 Release。空 Release 比没有 Release 更糟：它看起来像“这个版本没什么可说的”。
+name: 'Release'
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 工作流级仅 read；发 Release 所需的 contents: write 下放到 job
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 创建 Release（与仓库默认权限隔离，只给这一步）
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        # 按 tag 取出 CHANGELOG 里 `## [x.y.z]` 到下一个 `## ` 之间的正文。
+        # 不用第三方 action（如 release-drafter）：本仓库的 CHANGELOG 格式已固定，
+        # 一段 awk 就够，而多引一个 action 就多一份供应链面。
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # 允许 [1.2.3] 与 [1.2.3] - YYYY-MM-DD 两种写法
+          start="$(grep -n -m1 -E "^## \\[${version}\\]" CHANGELOG.md | cut -d: -f1 || true)"
+          if [[ -z "$start" ]]; then
+            echo "::error::CHANGELOG.md 中找不到版本 [${version}] 的章节：发布前必须先把「未发布」重命名为该版本号。"
+            exit 1
+          fi
+          # 从章节标题下一行开始，到下一个二级标题前一行为止
+          tail -n "+$((start + 1))" CHANGELOG.md \
+            | awk 'NR > 1 && /^## / { exit } NR > 1 { print }' > release-notes.md
+          if [[ ! -s release-notes.md ]]; then
+            echo "::error::版本 [${version}] 的 CHANGELOG 章节为空：拒绝发一个无内容的 Release。"
+            exit 1
+          fi
+          echo "摘取到 $(wc -l < release-notes.md) 行发布说明"
+          {
+
+          } >> /dev/null
+          echo "path=release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        # 用 v2（当前维护中的大版本）；文件名与 tag 同名，let Release 与 tag 一一对应
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.path }}
+          draft: false
+          prerelease: false

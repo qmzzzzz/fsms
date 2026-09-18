@@ -62,6 +62,12 @@ const secrets = {
   mongo_root_username: mongoRootUsername,
   mongo_root_password: b64(32),
   admin_initial_password: b64(24),
+  // Grafana 初始管理员口令：docker-compose.yml 的 grafana 服务经
+  // GF_SECURITY_ADMIN_PASSWORD__FILE 指向 ./secrets/grafana_admin_password。
+  // 此前本脚本不产出该文件，而 compose 的 secrets 段声明了它——
+  // 用本脚本生成的密钥目录直接 `docker compose up` 会因为缺文件而失败，
+  // 运维只能从 compose 头注释里的 openssl 片段手抄补齐（正是本脚本要消灭的失误源）。
+  grafana_admin_password: b64(32),
 };
 
 // mongodb_uri 依赖上面两项，拼接时必须用生成值而非占位符
@@ -77,6 +83,7 @@ const strengthChecks = [
   ['aes_secret_key', secrets.aes_secret_key.length >= 32],
   ['hmac_secret', secrets.hmac_secret.length >= 32],
   ['admin_initial_password', secrets.admin_initial_password.length >= 16],
+  ['grafana_admin_password', secrets.grafana_admin_password.length >= 16],
 ];
 const weak = strengthChecks.filter(([, ok]) => !ok).map(([name]) => name);
 if (weak.length > 0) {
@@ -114,18 +121,31 @@ if (outDir) {
   // 是空操作，而文件会继承父目录的宽松 ACL（实测默认含 BUILTIN\Users:(I)(RX)
   // 与 Authenticated Users:(I)(M)，即任何本地用户可读取并改写密钥文件）。
   //
-  // 原实现在 Windows 上静默跳过——用户以为权限已收紧。现显式提示并给出可直接
-  // 执行的 icacls 命令。对照：src/services/initData.js:765-772 早已对同一平台
-  // 局限做了 best-effort + 告警，此处口径与之对齐。
-  if (!isPosix) {
-    console.log('');
-    console.log('⚠️  注意：Windows 不支持 POSIX 权限位，上述 0600/0700 未生效。');
-    console.log('   密钥文件当前继承父目录 ACL，可能对本机其他用户可读/可改。');
-    console.log('   请手动收紧（仅当前用户 + Administrators + SYSTEM 可访问）：');
-    console.log('');
-    console.log(`     icacls "${dir}" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`);
-    console.log('');
-    console.log('   验证：icacls "' + dir + '"  应不再出现 BUILTIN\\Users 与 Authenticated Users');
+  // 2026-09-16 第二轮：由「打印一条待执行命令」升级为**实际执行**（utils/filePermission）。
+  // 只提示不执行，等于把安全语义降级为建议——实践中大多数人不做，密钥长期裸奔。
+  // 本模块的意图本就明确（生成只自己可读的密钥载体），因此默认直接收紧，
+  // 并**回读校验**：收紧失败或校验不通过则大声告警，绝不静默放过。
+  const { hardenPath, verifyHardened } = require('../src/utils/filePermission');
+  const hardened = hardenPath(dir, { isDir: true, log: (m) => console.log(m) });
+
+  // 目录收紧后再对目录内已写入的密钥文件逐个收紧（icacls /T 覆盖递归，这里显式复核）
+  if (hardened.ok) {
+    for (const [name] of Object.entries(secrets)) {
+      const file = path.join(dir, name);
+      if (fs.existsSync(file)) hardenPath(file, { log: (m) => console.log(m) });
+    }
+    const check = verifyHardened(dir);
+    if (check.tightened) {
+      console.log(`\n✅ 权限已收紧并复核通过：${dir}（${hardened.detail}）`);
+      console.log(`   复核证据：${check.evidence}`);
+    } else {
+      console.log(`\n⚠️  权限复核未通过：${dir}`);
+      console.log(`   ${check.evidence}`);
+      console.log('   密钥可能对本机其他用户可读，请按上述提示手动收紧后复核。');
+    }
+  } else {
+    console.log(`\n⚠️  权限收紧未成功：${dir}（${hardened.detail}）`);
+    console.log('   密钥可能对本机其他用户可读/可改，请按上述提示手动执行后复核。');
   }
 
   console.log('\n落地后请执行轮换手册中的迁移步骤（AES 先迁 mfaSecret、HMAC 重签），');
@@ -153,4 +173,5 @@ if (envSnippet) {
   console.log(`HMAC_SECRET=${secrets.hmac_secret}`);
   console.log(`LOGIN_ECDH_PRIVATE_KEY=${pemOneLine}`);
   console.log(`ADMIN_INITIAL_PASSWORD=${secrets.admin_initial_password}`);
+  console.log(`GRAFANA_ADMIN_PASSWORD=${secrets.grafana_admin_password}`);
 }

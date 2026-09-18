@@ -103,7 +103,14 @@ describe('/metrics 与 /readyz（O-8）', () => {
   });
 
   test('GET /api/metrics（面板 JSON 半）：认证后返回 snapshot 结构', async () => {
+    // 顺序无关（自包含）：指标表是进程内状态，不能依赖其他用例（如 Prometheus 文本
+    // 用例）先发过请求；此处自行制造一次 /health 请求，保证 summary / routes /
+    // latency 都有本次用例可控的数据。
+    await request(app).get('/health').expect(200);
+    // 记录请求前后的进程 uptime（同一 worker 进程的单调时钟），供下方对账
+    const uptimeBefore = process.uptime();
     const res = await request(app).get('/api/metrics').set('Authorization', `Bearer ${superToken}`);
+    const uptimeAfter = process.uptime();
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
 
@@ -116,12 +123,22 @@ describe('/metrics 与 /readyz（O-8）', () => {
     // /health 的计数进入路由表
     expect(snap.routes.some((r) => r.route === '/health' && r.requests > 0)).toBe(true);
     expect(Array.isArray(snap.alerts)).toBe(true);
-    expect(snap.process.uptimeSeconds).toBeGreaterThanOrEqual(0);
+    // uptimeSeconds 原断言是「>= 0」——任何进程的 uptime 都非负，该断言恒真：
+    // 字段写死为 0 / 写成任意常量 / 变成 NaN 或负值，都不会让该断言转红。
+    // 现与 worker 自己的单调时钟对账：快照在本次请求处理期间生成，其
+    // Math.floor(process.uptime()) 必然落在「请求前 ~ 响应后」区间内——
+    // 常量、NaN、负值等一切非真实值都必然越界转红，且无时序竞态。
+    expect(Number.isFinite(snap.process.uptimeSeconds)).toBe(true);
+    expect(snap.process.uptimeSeconds).toBeGreaterThanOrEqual(Math.floor(uptimeBefore));
+    expect(snap.process.uptimeSeconds).toBeLessThanOrEqual(Math.floor(uptimeAfter));
   });
 
   test('GET /api/metrics：未认证 401（运行时指标不匿名暴露）', async () => {
     const res = await request(app).get('/api/metrics');
     expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+    // 不得泄露任何指标字段（匿名请求连 shape 都不该拿到）
+    expect(res.body.data).toBeUndefined();
   });
 });
 

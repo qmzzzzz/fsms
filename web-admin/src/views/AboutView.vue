@@ -133,8 +133,10 @@ import { api } from '@/utils/api'
 const { t } = useI18n()
 const { hasPerm } = usePermission()
 
-// 版本号统一常量：两处展示共用，与 package.json 的 version 字段同步维护
-const APP_VERSION = '1.0.0'
+// 版本号：构建期由 vite define 注入（单一事实来源 = package.json 的 version）。
+// 此前是手抄的字面量，发版后页面会永久显示旧版本（实测 2026-09-18）。
+// 非 Vite 构建环境（如直接 vitest 单测的极简转译）下退化为占位，避免 ReferenceError。
+const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0-dev'
 
 const features = computed(() => [
   {

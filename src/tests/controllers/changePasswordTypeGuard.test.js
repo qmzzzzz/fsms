@@ -95,11 +95,17 @@ describe('P1-2 改密接口非字符串入参防护', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({ currentPassword: PASSWORD, newPassword: {} });
       expect(res.status).toBe(400);
+      // 「不进入强度校验的正则分支」的判据是类型校验先拦：明细落在 newPassword 上
+      expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+      expect(res.body.errors.fieldErrors.every((e) => e.path === 'newPassword')).toBe(true);
     });
 
     test('合法字符串但密码错误 → 400（与类型错误同码，不产生可区分信号）', async () => {
       const res = await changePassword('WrongPass@123');
       expect(res.status).toBe(400);
+      // 「与类型错误同码」的标题若成立，则这里必须是 PASSWORD_CURRENT_INCORRECT；
+      // 只断 400 时，把两种原因混成一码也看不出来
+      expect(res.body.errors.errorCode).toBe('PASSWORD_CURRENT_INCORRECT');
     });
   });
 

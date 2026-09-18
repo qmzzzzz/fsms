@@ -19,8 +19,10 @@ describe('安全管理深覆盖（批次 C）', () => {
   let IPBlacklist;
   let superToken; // 内置超管操作者
   let superUserId;
-  let lowToken; // 低层级用户（被操作对象 + 改密用）
+  let lowToken; // 低层级用户（被操作对象）
   let lowUserId;
+  let chgToken; // 改密专用用户
+  let chgUserId;
   let victimId; // MFA 待重置对象
   const stamp = `sd${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
   const PASSWORD = randomPassword();
@@ -77,6 +79,22 @@ describe('安全管理深覆盖（批次 C）', () => {
       { expiresIn: '1h' }
     );
 
+    // 改密专用用户（顺序无关）：改密会写 passwordChangedAt 并递增 tokenVersion
+    // （invalidateUserTokens 全量吊销）。若与 lowUser 共用账号，#10「强化改密」先跑时
+    // #9「本人敏感信息查看」持有的 lowToken 会被连带吊销 → 401 假红。
+    // 凭据状态属账号私有，改密用例自建账号，不向其他用例外溢。
+    const chgUser = await User.create({
+      username: `sdchg${stamp}`,
+      email: `sdchg${stamp}@example.com`,
+      password: PASSWORD,
+    });
+    chgUserId = String(chgUser._id);
+    chgToken = jwt.sign(
+      { userId: chgUserId, username: chgUser.username, tokenVersion: 0 },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
     // MFA 重置对象
     const victim = await User.create({
       username: `sdvictim${stamp}`,
@@ -92,7 +110,7 @@ describe('安全管理深覆盖（批次 C）', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
-      await User.deleteMany({ username: new RegExp(`^sd(super|low|victim)${stamp}$`) }).catch(
+      await User.deleteMany({ username: new RegExp(`^sd(super|low|victim|chg)${stamp}$`) }).catch(
         () => {}
       );
       await IPBlacklist.deleteMany({ ip: new RegExp(`^203\\.0\\.113\\.`) }).catch(() => {});
@@ -130,6 +148,9 @@ describe('安全管理深覆盖（批次 C）', () => {
       reason: 'x',
     });
     expect(bad.status).toBe(400);
+    // 「非法目标类型」的判据是校验明细落在 targetType 上
+    expect(bad.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(bad.body.errors.fieldErrors[0].path).toBe('targetType');
   });
 
   test('敏感数据查看：缺二次验证 403 → 密码验证通过 → 非法 dataType 400', async () => {
@@ -137,6 +158,9 @@ describe('安全管理深覆盖（批次 C）', () => {
       .post('/api/security/view-sensitive')
       .send({ dataType: 'phone' });
     expect(noReauth.status).toBe(403);
+    // 403 的语义是「需要二次验证」：前端据此弹密码/动态码输入框，
+    // 换成别的 403（如权限不足）会让引导错向
+    expect(noReauth.body.errors.errorCode).toBe('REAUTH_REQUIRED');
 
     const ok = await request(app)
       .post('/api/security/view-sensitive')
@@ -149,6 +173,8 @@ describe('安全管理深覆盖（批次 C）', () => {
       .set('Authorization', `Bearer ${superToken}`)
       .send({ dataType: 'ssn', currentPassword: PASSWORD });
     expect(badType.status).toBe(400);
+    expect(badType.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(badType.body.errors.fieldErrors[0].path).toBe('dataType');
   });
 
   test('#9 普通用户（无 system:read）经二次验证可查看本人敏感信息；查看他人被拒', async () => {
@@ -168,19 +194,35 @@ describe('安全管理深覆盖（批次 C）', () => {
     expect(otherForbidden.status).toBe(403);
   });
 
-  test('强化改密：确认密码不一致 400 → 成功 200', async () => {
+  test('强化改密：确认密码不一致 400 → 成功 200 → 改密前的令牌被吊销', async () => {
     const mismatch = await request(app)
       .put('/api/security/change-password')
-      .set('Authorization', `Bearer ${lowToken}`)
+      .set('Authorization', `Bearer ${chgToken}`)
       .send({ currentPassword: PASSWORD, newPassword: randomPassword(), confirmPassword: 'nope' });
     expect(mismatch.status).toBe(400);
+    // 不一致在路由层的 confirmPassword 校验就被判掉（不进入业务层）
+    expect(mismatch.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(mismatch.body.errors.fieldErrors[0].path).toBe('confirmPassword');
 
     const newPassword = randomPassword();
     const ok = await request(app)
       .put('/api/security/change-password')
-      .set('Authorization', `Bearer ${lowToken}`)
+      .set('Authorization', `Bearer ${chgToken}`)
       .send({ currentPassword: PASSWORD, newPassword, confirmPassword: newPassword });
     expect(ok.status).toBe(200);
+
+    // 改密的实质安全语义：旧凭据必须立刻失效（passwordChangedAt / tokenVersion 全量吊销），
+    // 否则「改密挤掉攻击者会话」这一用户预期不成立。
+    const reuseOldToken = await request(app)
+      .get('/api/security/my-logs?limit=1')
+      .set('Authorization', `Bearer ${chgToken}`);
+    expect(reuseOldToken.status).toBe(401);
+    expect(reuseOldToken.body.errors.errorCode).toBe('PASSWORD_CHANGED_RELOGIN');
+
+    // 新口令可登录、旧口令不可登录（改密落库的真实性校验，避免只信响应码）
+    const persisted = await User.findById(chgUserId).select('+password');
+    expect(await persisted.comparePassword(newPassword)).toBe(true);
+    expect(await persisted.comparePassword(PASSWORD)).toBe(false);
   });
 
   test('锁定/解锁：成功/解锁未锁定 400/锁自己 403/锁内置超管拒绝/非法入参 400', async () => {
@@ -202,11 +244,15 @@ describe('安全管理深覆盖（批次 C）', () => {
       .put(`/api/security/users/${lowUserId}/lock`)
       .send({ locked: false });
     expect(unlockAgain.status).toBe(400);
+    // 解锁未锁定账户是独立契约（不是笼统的 400）：提示语与前端按钮态依赖它
+    expect(unlockAgain.body.errors.errorCode).toBe('ACCOUNT_NOT_LOCKED');
 
     const lockSelf = await authed()
       .put(`/api/security/users/${superUserId}/lock`)
       .send({ locked: true });
     expect(lockSelf.status).toBe(403);
+    // 「锁自己」命中的是超管保护（用户是内置超管），不是自锁专用码
+    expect(lockSelf.body.errors.errorCode).toBe('CANNOT_LOCK_SUPER_ADMIN');
 
     const superRole = await Role.findOne({ code: 'SUPER_ADMIN' });
     const superTarget = await User.findOne({ username: `sdsuper${stamp}` });
@@ -217,11 +263,13 @@ describe('安全管理深覆盖（批次 C）', () => {
       .send({ locked: true });
     // 同级 403 先触发（与批次 A 删除同语义）
     expect(lockSuper.status).toBe(403);
+    expect(lockSuper.body.errors.errorCode).toBe('CANNOT_LOCK_SUPER_ADMIN');
 
     const badBody = await authed()
       .put(`/api/security/users/${lowUserId}/lock`)
       .send({ locked: 'yes' });
     expect(badBody.status).toBe(400);
+    expect(badBody.body.errors.errorCode).toBe('VALIDATION_FAILED');
   });
 
   test('管理员重置 MFA：未开启 400 / 自身 400 / 开启对象 200 / 内置超管 403', async () => {
@@ -266,7 +314,8 @@ describe('安全管理深覆盖（批次 C）', () => {
         type: 'black',
         reason: `测试_${stamp}`,
       });
-    expect([200, 201]).toContain(add.status);
+    // 实测 200（新增 IP 名单条目固定 200）
+    expect(add.status).toBe(200);
 
     const query = await authed().get('/api/security/ip-list/query?ip=203.0.113.50');
     expect(query.status).toBe(200);
@@ -279,14 +328,16 @@ describe('安全管理深覆盖（批次 C）', () => {
       type: 'white',
       reason: '全段放行_测试',
     });
-    expect([200, 201]).toContain(fullRange.status);
+    // 实测 200（同上前置）
+    expect(fullRange.status).toBe(200);
     const fullDoc = fullRange.body.data?._id || fullRange.body.data?.id;
-    if (fullDoc) {
-      expect((await authed().delete(`/api/security/ip-list/${fullDoc}`)).status).toBe(200);
-    }
+    // 【静默跳过修正】原先删除断言包在 if (fullDoc) 里：拿不到 id 就整条不执行。
+    // 实测响应体带 _id（=创建返回值），故先钉死 id 存在，再断删除成功。
+    expect(fullDoc).toBeTruthy();
+    expect((await authed().delete(`/api/security/ip-list/${fullDoc}`)).status).toBe(200);
 
     // 非内置超管（无 security:config 权限）→ 权限层 403 先行。
-    // low 用户改密后 tokenVersion 已递增（全量吊销），此处按库内实时版本重签
+    // 按库内实时 tokenVersion 重签：不依赖「改密用例是否已跑过」的顺序前提
     const freshLow = await User.findById(lowUserId).select('username tokenVersion');
     const lowToken2 = jwt.sign(
       { userId: lowUserId, username: freshLow.username, tokenVersion: freshLow.tokenVersion ?? 0 },

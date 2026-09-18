@@ -6,20 +6,11 @@
 
 const mongoose = require('mongoose');
 const autoIncrement = require('../plugins/autoIncrement');
-
-// 设备类型 → 编号前缀映射
-const DEVICE_TYPE_PREFIX = {
-  fire_alarm: 'FA',
-  sprinkler: 'SP',
-  hydrant: 'HD',
-  extinguisher: 'EX',
-  smoke_detector: 'SD',
-  heat_detector: 'TD',
-  emergency_light: 'EL',
-  evacuation_sign: 'ES',
-  fire_door: 'FD',
-  other: 'OT',
-};
+// E-05 整改：设备类型与编号前缀此前在本文件各维护一份（与 utils/constants.js
+// 的同名声明三处并存）。现统一引用 constants 的单一事实来源，避免新增设备
+// 类型时漏改其中一处导致「校验通过但编号前缀取默认 OT」。
+const { DEVICE_TYPE, DEVICE_TYPE_PREFIX } = require('../utils/constants');
+const DEVICE_TYPE_VALUES = Object.values(DEVICE_TYPE);
 
 const fireDeviceSchema = new mongoose.Schema(
   {
@@ -40,18 +31,8 @@ const fireDeviceSchema = new mongoose.Schema(
     },
     deviceType: {
       type: String,
-      enum: [
-        'fire_alarm', // 火灾报警器
-        'sprinkler', // 喷淋系统
-        'hydrant', // 消火栓
-        'extinguisher', // 灭火器
-        'smoke_detector', // 烟雾探测器
-        'heat_detector', // 温度探测器
-        'emergency_light', // 应急灯
-        'evacuation_sign', // 疏散指示牌
-        'fire_door', // 防火门
-        'other', // 其他
-      ],
+      // E-05：枚举值引用 utils/constants.js 的 DEVICE_TYPE（单一事实来源）。
+      enum: DEVICE_TYPE_VALUES,
       required: [true, '设备类型不能为空'],
     },
     model: {

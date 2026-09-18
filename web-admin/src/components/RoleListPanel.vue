@@ -1,6 +1,6 @@
 <template>
   <!-- 角色列表（D-2 自 RoleView 拆出）：只负责渲染与事件上抛，
-       选中/删除/加载逻辑仍归视图层 -->
+       选中/删除/加载逻辑仍归视图层；删除按钮的显隐由 canDelete 门控 -->
   <div class="role-list">
     <!-- 首屏骨架：角色列表未加载完成时占位 -->
     <GlassSkeleton
@@ -26,7 +26,7 @@
             >{{ role.userCount || 0 }}{{ $t('user.title') }}</span
           >
           <button
-            v-if="!role.isBuiltIn"
+            v-if="canDelete && !role.isBuiltIn"
             type="button"
             class="glass-btn glass-btn--danger glass-btn--icon role-delete-btn"
             :title="$t('common.delete')"
@@ -34,7 +34,9 @@
           >
             ×
           </button>
-          <span v-else class="glass-role-item__builtin">{{ $t('role.builtIn') }}</span>
+          <span v-else-if="role.isBuiltIn" class="glass-role-item__builtin">{{
+            $t('role.builtIn')
+          }}</span>
         </div>
       </div>
     </template>
@@ -49,6 +51,8 @@ defineProps({
   /** 当前选中角色，用于高亮；可为 null */
   currentRole: { type: Object, default: null },
   loading: { type: Boolean, default: false },
+  /** 是否显示删除按钮（由视图层按 role:delete 权限传入） */
+  canDelete: { type: Boolean, default: false },
 })
 
 defineEmits(['select', 'delete'])

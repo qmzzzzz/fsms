@@ -45,6 +45,11 @@ const {
 const { getOperatorMaxLevel } = require('../utils/permissionHelper');
 const { isSuperAdminRole } = require('../utils/superAdmin');
 
+// 登录失败计数阈值与锁定时长（E-01：原为 loginUser 内的局部常量，现提到
+// 模块级，供 verifyPasswordOrTrackFailure / incrementFailedLoginCount 共用）
+const MAX_FAILED_LOGINS = 10;
+const LOCK_DURATION_MS = 10 * 60 * 1000;
+
 /**
  * 哑口令摘要：用于抹平「用户不存在」与「用户存在但密码错误」的响应耗时差
  *
@@ -175,9 +180,81 @@ async function registerUser(body) {
  * @param {object} ctx { ip, userAgent, method, path, fingerprint }
  * @returns {Promise<{outcome:'CAPTCHA_INVALID'|'ENC_INVALID'|'INVALID_CREDENTIALS'|'MFA_REQUIRED'|'MFA_ATTEMPTS_EXCEEDED'|'MFA_CODE_INVALID'|'OK'}>}
  */
+/**
+ * 用户登录（业务层，含 MFA 二期验证）
+ *
+ * E-01 整改：本函数原圈复杂度 46（全仓最高，见 deliverables/_complexity-actual.json）。
+ * 按「前置校验 → 账户校验 → 凭据校验 → MFA → 签发」五段拆出模块级 helper，
+ * 骨架只保留编排与提前返回。所有切分线都在**无状态交接**处：helper 入参全部
+ * 显式传递、不引入类或闭包捕获，函数体逐行搬运，行为与拆分前等价。
+ *
+ * @param {object} params { username, password, encPassword, mfaCode }
+ * @param {object} ctx { ip, userAgent, method, path, fingerprint, req }
+ * @returns {Promise<{outcome:'CAPTCHA_INVALID'|'ENC_INVALID'|'INVALID_CREDENTIALS'|'MFA_REQUIRED'|'MFA_ATTEMPTS_EXCEEDED'|'MFA_CODE_INVALID'|'OK'}>}
+ */
 async function loginUser(params, ctx) {
   const { username } = params;
   const { ip, userAgent, fingerprint } = ctx;
+
+  // ① 人机校验 + 口令解析（验证码开关 / 密文轨 / 明文兼容轨）
+  const pre = await resolveLoginPassword(params, ctx, username);
+  if (pre.outcome) return pre;
+  const { password } = pre;
+
+  // ② 查用户（含 password 字段）
+  // 查找用户（包括密码字段）
+  // P3-30：走 findByUsername 以匹配大小写不敏感的 username_ci 唯一索引，
+  // 否则用 `Admin` 登录会查不到 `admin` 账户（与判重口径不一致）
+  const user = await User.findByUsername(username).select('+password');
+  if (!user) {
+    // P2-11 修复：时序侧信道。「用户不存在」原先 0 次 bcrypt 直接返回，
+    // 而「用户存在」要跑 12 轮 bcrypt（纯 JS 实现，百毫秒级），
+    // 响应时间差可直接区分有效用户名——文案统一了但耗时没统一。
+    // 此处对固定的哑摘要做一次等价 compare，把两条路径的 CPU 开销拉平。
+    await consumeDummyPasswordTime(password);
+    // 用户不存在同样计入失败统计，防止借不存在的用户名绕开暴力破解检测
+    await AuditLog.recordLogin(null, username, ip, false, userAgent, { fingerprint }).catch(
+      () => {}
+    );
+    await checkBruteForce(username, ip).catch(() => {});
+    return { outcome: 'INVALID_CREDENTIALS' };
+  }
+
+  // ③ 账户可用性：状态 / 临时锁定 / IP 范围（三处拒绝共用 M-5 的 401 口径）
+  const denied = await assertAccountUsable(user, { password, ctx, username });
+  if (denied) return denied;
+
+  // ④ 口令校验 + 失败计数（P3-1：过期 lockUntil 视为新一轮）
+  const rejected = await verifyPasswordOrTrackFailure(user, { password, username, ctx });
+  if (rejected) return rejected;
+
+  // ⑤ MFA 二期（I-06）：已开启 TOTP 的账户，密码正确后还需动态口令才签发令牌。
+  // 第一步响应携带 mfaRequired 标记，前端据此切换到验证码输入；不泄露其他信息
+  if (user.mfaEnabled) {
+    const mfa = await verifyMfaChallenge(user, {
+      mfaCodeRaw: params.mfaCode,
+      username,
+      ctx,
+    });
+    if (mfa.outcome !== 'OK') return mfa;
+  }
+
+  // ⑥ 签发：非常规时间审计 → 登录信息更新 → 角色权限 → 令牌 → 会话注册 → 成功审计
+  return issueLoginSession(user, ctx, username);
+}
+
+/**
+ * 登录前置校验与口令解析（E-01 自 loginUser 拆出）
+ *
+ * 覆盖：验证码人机校验 → 口令密文轨/明文轨解析。这一段自带验证码开关、
+ * DB 故障降级、密文解密、明文兼容四个分支，与后续「查用户 → 校验凭据 →
+ * 签令牌」无数据耦合；且放在验证码之后，不动「验证码失败」路径的既有耗时特征。
+ *
+ * @returns {Promise<{outcome:'CAPTCHA_INVALID'|'ENC_INVALID'}|{password:string}>}
+ *   失败时返回 { outcome }（调用方直接透传），成功时返回 { password }
+ */
+async function resolveLoginPassword(params, ctx, username) {
+  const { ip, userAgent } = ctx;
 
   // 前置人机校验：仅在系统开启验证码开关时执行（默认关闭）
   // 验证码错误/过期时直接拒绝，不进入凭证校验，
@@ -218,24 +295,19 @@ async function loginUser(params, ctx) {
     // 明文兼容轨（灰度期；strict 模式下请求到不了这里——校验层已 400）
     password = params.password;
   }
+  return { password };
+}
 
-  // 查找用户（包括密码字段）
-  // P3-30：走 findByUsername 以匹配大小写不敏感的 username_ci 唯一索引，
-  // 否则用 `Admin` 登录会查不到 `admin` 账户（与判重口径不一致）
-  const user = await User.findByUsername(username).select('+password');
-  if (!user) {
-    // P2-11 修复：时序侧信道。「用户不存在」原先 0 次 bcrypt 直接返回，
-    // 而「用户存在」要跑 12 轮 bcrypt（纯 JS 实现，百毫秒级），
-    // 响应时间差可直接区分有效用户名——文案统一了但耗时没统一。
-    // 此处对固定的哑摘要做一次等价 compare，把两条路径的 CPU 开销拉平。
-    await consumeDummyPasswordTime(password);
-    // 用户不存在同样计入失败统计，防止借不存在的用户名绕开暴力破解检测
-    await AuditLog.recordLogin(null, username, ip, false, userAgent, { fingerprint }).catch(
-      () => {}
-    );
-    await checkBruteForce(username, ip).catch(() => {});
-    return { outcome: 'INVALID_CREDENTIALS' };
-  }
+/**
+ * 账户可用性校验（E-01 自 loginUser 拆出）：账户状态、临时锁定、IP 访问范围。
+ *
+ * 三处拒绝共用同一外部口径——一律返回与「用户名或密码错误」完全一致的 401
+ * （M-5 / P2-10），真实原因只进服务端日志与审计，避免用户名枚举预言机。
+ *
+ * @returns {Promise<{outcome:'INVALID_CREDENTIALS'}|null>} 拒绝时返回 outcome，可用时返回 null
+ */
+async function assertAccountUsable(user, { password, ctx, username }) {
+  const { ip, userAgent, fingerprint } = ctx;
 
   // 检查账户状态
   // M-5：禁用/锁定账户与"用户不存在/密码错误"返回完全一致的 401 文案，
@@ -293,6 +365,19 @@ async function loginUser(params, ctx) {
       return { outcome: 'INVALID_CREDENTIALS' };
     }
   }
+  return null;
+}
+
+/**
+ * 口令校验 + 失败计数累计（E-01 自 loginUser 拆出）
+ *
+ * P3-1：已过期的 lockUntil 视为新一轮——重置计数从 1 起算并清空过期时间戳；
+ * 否则解锁后仅剩 1 次试错即再次锁定，把 10 分钟窗口的配额从 10 次压到 1 次。
+ *
+ * @returns {Promise<{outcome:'INVALID_CREDENTIALS'}|null>} 口令错误返回 outcome，正确返回 null
+ */
+async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
+  const { ip, userAgent, fingerprint } = ctx;
 
   // 验证密码
   const isMatch = await user.comparePassword(password);
@@ -315,8 +400,6 @@ async function loginUser(params, ctx) {
     // 把 10 分钟窗口内的爆破配额从 10 次压到 1 次（对攻击者反而是限制），
     // 对正常用户则是输错一次就锁。已过期的 lockUntil 视为新一轮：
     // 重置计数从 1 起算并清除过期时间戳（与 MFA 计数路径同款修复）。
-    const MAX_FAILED_LOGINS = 10;
-    const LOCK_DURATION_MS = 10 * 60 * 1000;
     const lockExpired = user.lockUntil && user.lockUntil <= new Date();
     const updated = await User.findByIdAndUpdate(
       user._id,
@@ -348,194 +431,275 @@ async function loginUser(params, ctx) {
     }
     return { outcome: 'INVALID_CREDENTIALS' };
   }
+  return null;
+}
 
-  // MFA 二期验证（I-06）：已开启 TOTP 的账户，密码正确后还需动态口令才签发令牌。
-  // 第一步响应携带 mfaRequired 标记，前端据此切换到验证码输入；不泄露其他信息
-  if (user.mfaEnabled) {
-    const mfaCode = typeof params.mfaCode === 'string' ? params.mfaCode.trim() : '';
-    if (!mfaCode) {
-      await AuditLog.record({
-        action: 'mfa_challenge',
-        category: 'auth',
-        userId: user._id,
-        username,
-        ip,
-        userAgent,
-        fingerprint,
-        success: true,
-        reason: '密码已验证，等待两步验证码',
-      }).catch(() => {});
-      return { outcome: 'MFA_REQUIRED' };
-    }
-    // MFA 验证码独立防爆破：锁定期内直接拒绝（与 failedLoginCount 双轨，
-    // 攻击者持正确密码时也无法对 6 位码无限尝试）
-    if (await isMfaLocked(user._id)) {
-      logger.warn('登录拒绝 - MFA 验证通道锁定中', { username });
-      await AuditLog.record({
-        action: 'mfa_verify_failed',
-        category: 'auth',
-        userId: user._id,
-        username,
-        ip,
-        userAgent,
-        fingerprint,
-        success: false,
-        riskLevel: 'high',
-        riskFactors: ['mfa_bruteforce'],
-        reason: 'MFA 验证通道锁定期间尝试登录',
-      }).catch(() => {});
-      return { outcome: 'MFA_ATTEMPTS_EXCEEDED' };
-    }
-
-    // L5：重放防护——验证码命中的时间窗必须晚于最近一次成功使用的窗口；
-    // 失败与密码错误同口径计入 failedLoginCount，连续失败触发账户锁定。
-    // 支持 6 位 TOTP 或备用恢复码（XXXX-XXXX）二选一：手机丢失/换机时的恢复途径
-    const mfaUser = await User.findById(user._id).select(
-      '+mfaSecret +mfaLastCounter +mfaRecoveryCodes'
-    );
-    let totpResult = null;
-
-    if (/^\d{6}$/.test(mfaCode)) {
-      totpResult = verifyTotpDetailed(decryptMfaSecret(mfaUser?.mfaSecret), mfaCode);
-      // P2-12 修复：重放防护必须原子。原实现「读 mfaLastCounter → 比较 → 事后无条件覆写」
-      // 三步分离，两个携带同一有效验证码的并发请求都会读到旧 counter、都判定通过，
-      // 造成 TOTP 双花（同一 6 位码换取两个会话）。
-      // 现改为条件更新：以 `mfaLastCounter < counter` 为过滤条件推进，
-      // 只有第一个请求能命中（DB 保证），其余落入重放分支。
-      // 与恢复码的原子消费（下方 $pull 条件过滤）口径一致。
-      let claimedCounter = false;
-      if (totpResult.valid) {
-        const advanced = await User.findOneAndUpdate(
-          {
-            _id: user._id,
-            $or: [
-              { mfaLastCounter: { $lt: totpResult.counter } },
-              { mfaLastCounter: { $exists: false } },
-              { mfaLastCounter: null },
-            ],
-          },
-          { $set: { mfaLastCounter: totpResult.counter } },
-          { new: true }
-        ).catch(() => null);
-        claimedCounter = !!advanced;
-      }
-
-      const replayed = totpResult.valid && !claimedCounter;
-      if (!totpResult.valid || replayed) {
-        logger.warn(`登录失败 - 两步验证码${replayed ? '重放' : '错误'}`, { username });
-        // 原子递增（与密码失败路径同口径，见下）
-        const updated = await User.findByIdAndUpdate(
-          user._id,
-          { $inc: { failedLoginCount: 1 } },
-          { new: true }
-        ).catch(() => null);
-        const newCount = updated?.failedLoginCount ?? (user.failedLoginCount || 0) + 1;
-        if (newCount >= 10) {
-          await User.findByIdAndUpdate(user._id, {
-            lockUntil: new Date(Date.now() + 10 * 60 * 1000),
-          }).catch(() => {});
-          logger.warn('账户临时锁定（MFA 失败累计）', { username, failedCount: newCount });
-        }
-        // 独立防爆破计数（6 位码空间小，必须有独立阈值）
-        await recordMfaFailure(user);
-        await AuditLog.record({
-          action: 'mfa_verify_failed',
-          category: 'auth',
-          userId: user._id,
-          username,
-          ip,
-          userAgent,
-          fingerprint,
-          success: false,
-          riskLevel: replayed ? 'high' : 'medium',
-          riskFactors: [replayed ? 'mfa_code_replay' : 'mfa_code_invalid'],
-          reason: replayed ? '两步验证码重放' : '两步验证码错误',
-        }).catch(() => {});
-        return { outcome: 'MFA_CODE_INVALID' };
-      }
-    } else {
-      // 备用恢复码路径：格式 XXXX-XXXX，命中即消费（一次性）
-      const normalized = mfaCode.toUpperCase().replace(/\s/g, '');
-      // 辅助函数：恢复码失败时统一记录（增量 failedLoginCount + MFA 独立计数），
-      // 与上方 6 位 TOTP 错误路径保持口径一致，消除"恢复码爆破不触发账户锁定"的逻辑漏洞
-      const handleRecoveryFailure = async (riskFactors, reason) => {
-        const incUpdated = await User.findByIdAndUpdate(
-          user._id,
-          { $inc: { failedLoginCount: 1 } },
-          { new: true }
-        ).catch(() => null);
-        const newCount = incUpdated?.failedLoginCount ?? (user.failedLoginCount || 0) + 1;
-        if (newCount >= 10) {
-          await User.findByIdAndUpdate(user._id, {
-            lockUntil: new Date(Date.now() + 10 * 60 * 1000),
-          }).catch(() => {});
-          logger.warn('账户临时锁定（恢复码验证失败累计）', { username, failedCount: newCount });
-        }
-        await recordMfaFailure(user);
-        await AuditLog.record({
-          action: 'mfa_verify_failed',
-          category: 'auth',
-          userId: user._id,
-          username,
-          ip,
-          userAgent,
-          fingerprint,
-          success: false,
-          riskLevel: 'high',
-          riskFactors,
-          reason,
-        }).catch(() => {});
-      };
-      if (!/^[A-HJ-KM-NP-Z2-9]{4}-[A-HJ-KM-NP-Z2-9]{4}$/.test(normalized)) {
-        await handleRecoveryFailure(['recovery_code_invalid'], '恢复码格式无效');
-        return { outcome: 'MFA_CODE_INVALID' };
-      }
-      const codeHash = hashRecoveryCode(normalized);
-      // 原子消费：以「数组中仍含该摘要」为过滤条件执行 $pull 并要求命中——
-      // 消除 check 与 pull 分离导致的并发双花窗口；未命中即视为无效。
-      //
-      // 必须用 findOneAndUpdate 而非 findByIdAndUpdate（Critical 修复）：
-      // findByIdAndUpdate 只从第一参取 _id，其余键被**静默丢弃**——
-      // 实测传 { _id, mfaRecoveryCodes: '不存在的摘要' } 依然返回文档，
-      // 于是任意「格式合法」的恢复码都能通过校验并签发会话，
-      // 等同于对所有已开启 MFA 的账户完全绕过两步验证。
-      const consumed = await User.findOneAndUpdate(
-        { _id: user._id, mfaRecoveryCodes: codeHash },
-        { $pull: { mfaRecoveryCodes: codeHash } },
-        { new: true, select: '+mfaRecoveryCodes' }
-      ).catch(() => null);
-      if (!consumed) {
-        logger.warn('登录失败 - 备用恢复码无效', { username });
-        await handleRecoveryFailure(['recovery_code_invalid'], '备用恢复码不匹配');
-        return { outcome: 'MFA_CODE_INVALID' };
-      }
-
-      const remaining = Array.isArray(consumed.mfaRecoveryCodes)
-        ? consumed.mfaRecoveryCodes.length
-        : 0;
-      if (remaining <= 3) {
-        logger.warn('备用恢复码余量不足', { username, remaining });
-      }
-      await AuditLog.record({
-        action: 'login_recovery_code',
-        category: 'auth',
-        userId: user._id,
-        username,
-        ip,
-        userAgent,
-        fingerprint,
-        success: true,
-        riskLevel: 'medium',
-        riskFactors: ['recovery_code_used'],
-        reason: `使用备用恢复码登录（剩余 ${remaining} 个）`,
-      }).catch(() => {});
-    }
-
-    await resetMfaFailures(user._id);
-
-    // mfaLastCounter 已在上方的原子条件更新中推进，此处无需再写
-    // （原实现在此无条件覆写，正是 TOTP 双花的成因之一）
+/**
+ * MFA 二期验证（E-01 自 loginUser 拆出）：TOTP 动态口令或备用恢复码二选一。
+ *
+ * 独立防爆破：6 位码空间小，除 failedLoginCount 外另有 MFA 专用阈值（见
+ * mfaService），锁定期间直接拒绝，攻击者持正确密码也无法对 6 位码无限尝试。
+ * 支持 6 位 TOTP 或备用恢复码（XXXX-XXXX）二选一：手机丢失/换机时的恢复途径。
+ *
+ * @returns {Promise<{outcome:'MFA_REQUIRED'|'MFA_ATTEMPTS_EXCEEDED'|'MFA_CODE_INVALID'|'OK'}>}
+ */
+async function verifyMfaChallenge(user, { mfaCodeRaw, username, ctx }) {
+  const { ip, userAgent, fingerprint } = ctx;
+  const mfaCode = typeof mfaCodeRaw === 'string' ? mfaCodeRaw.trim() : '';
+  if (!mfaCode) {
+    await AuditLog.record({
+      action: 'mfa_challenge',
+      category: 'auth',
+      userId: user._id,
+      username,
+      ip,
+      userAgent,
+      fingerprint,
+      success: true,
+      reason: '密码已验证，等待两步验证码',
+    }).catch(() => {});
+    return { outcome: 'MFA_REQUIRED' };
   }
+  // MFA 验证码独立防爆破：锁定期内直接拒绝（与 failedLoginCount 双轨，
+  // 攻击者持正确密码时也无法对 6 位码无限尝试）
+  if (await isMfaLocked(user._id)) {
+    logger.warn('登录拒绝 - MFA 验证通道锁定中', { username });
+    await AuditLog.record({
+      action: 'mfa_verify_failed',
+      category: 'auth',
+      userId: user._id,
+      username,
+      ip,
+      userAgent,
+      fingerprint,
+      success: false,
+      riskLevel: 'high',
+      riskFactors: ['mfa_bruteforce'],
+      reason: 'MFA 验证通道锁定期间尝试登录',
+    }).catch(() => {});
+    return { outcome: 'MFA_ATTEMPTS_EXCEEDED' };
+  }
+
+  // L5：重放防护——验证码命中的时间窗必须晚于最近一次成功使用的窗口；
+  // 失败与密码错误同口径计入 failedLoginCount，连续失败触发账户锁定。
+  // 支持 6 位 TOTP 或备用恢复码（XXXX-XXXX）二选一：手机丢失/换机时的恢复途径
+  const mfaUser = await User.findById(user._id).select(
+    '+mfaSecret +mfaLastCounter +mfaRecoveryCodes'
+  );
+
+  const result = /^\d{6}$/.test(mfaCode)
+    ? await verifyTotpChallenge(user, { mfaCode, mfaUser, username, ctx })
+    : await verifyRecoveryCodeChallenge(user, { mfaCode, username, ctx });
+  if (result.outcome !== 'OK') return result;
+
+  await resetMfaFailures(user._id);
+
+  // mfaLastCounter 已在上方的原子条件更新中推进，此处无需再写
+  // （原实现在此无条件覆写，正是 TOTP 双花的成因之一）
+  return { outcome: 'OK' };
+}
+
+/**
+ * TOTP 动态口令校验（E-01 二级拆分，控制圈复杂度）
+ *
+ * P2-12：重放防护必须原子。原实现「读 mfaLastCounter → 比较 → 事后无条件覆写」
+ * 三步分离，两个携带同一有效验证码的并发请求都会读到旧 counter、都判定通过，
+ * 造成 TOTP 双花（同一 6 位码换取两个会话）。现改为条件更新：以
+ * `mfaLastCounter < counter` 为过滤条件推进，只有第一个请求能命中（DB 保证），
+ * 其余落入重放分支；与恢复码的原子消费（$pull 条件过滤）口径一致。
+ */
+async function verifyTotpChallenge(user, { mfaCode, mfaUser, username, ctx }) {
+  const { ip, userAgent, fingerprint } = ctx;
+  const totpResult = verifyTotpDetailed(decryptMfaSecret(mfaUser?.mfaSecret), mfaCode);
+  // P2-12 修复：重放防护必须原子。原实现「读 mfaLastCounter → 比较 → 事后无条件覆写」
+  // 三步分离，两个携带同一有效验证码的并发请求都会读到旧 counter、都判定通过，
+  // 造成 TOTP 双花（同一 6 位码换取两个会话）。
+  // 现改为条件更新：以 `mfaLastCounter < counter` 为过滤条件推进，
+  // 只有第一个请求能命中（DB 保证），其余落入重放分支。
+  // 与恢复码的原子消费（下方 $pull 条件过滤）口径一致。
+  let claimedCounter = false;
+  if (totpResult.valid) {
+    const advanced = await User.findOneAndUpdate(
+      {
+        _id: user._id,
+        $or: [
+          { mfaLastCounter: { $lt: totpResult.counter } },
+          { mfaLastCounter: { $exists: false } },
+          { mfaLastCounter: null },
+        ],
+      },
+      { $set: { mfaLastCounter: totpResult.counter } },
+      { new: true }
+    ).catch(() => null);
+    claimedCounter = !!advanced;
+  }
+
+  const replayed = totpResult.valid && !claimedCounter;
+  if (!totpResult.valid || replayed) {
+    logger.warn(`登录失败 - 两步验证码${replayed ? '重放' : '错误'}`, { username });
+    // 原子递增 + 阈值锁定（与口令失败路径同口径；E-01 抽为共用 helper）
+    await incrementFailedLoginCount(user, { username, lockReason: 'MFA 失败累计' });
+    // 独立防爆破计数（6 位码空间小，必须有独立阈值）
+    await recordMfaFailure(user);
+    await AuditLog.record({
+      action: 'mfa_verify_failed',
+      category: 'auth',
+      userId: user._id,
+      username,
+      ip,
+      userAgent,
+      fingerprint,
+      success: false,
+      riskLevel: replayed ? 'high' : 'medium',
+      riskFactors: [replayed ? 'mfa_code_replay' : 'mfa_code_invalid'],
+      reason: replayed ? '两步验证码重放' : '两步验证码错误',
+    }).catch(() => {});
+    return { outcome: 'MFA_CODE_INVALID' };
+  }
+  return { outcome: 'OK' };
+}
+
+/**
+ * 备用恢复码校验（E-01 二级拆分，控制圈复杂度）：格式 XXXX-XXXX，命中即消费。
+ *
+ * 原子消费：以「数组中仍含该摘要」为过滤条件执行 $pull 并要求命中——消除
+ * check 与 pull 分离导致的并发双花窗口；未命中即视为无效。
+ *
+ * 必须用 findOneAndUpdate 而非 findByIdAndUpdate（Critical 修复）：
+ * findByIdAndUpdate 只从第一参取 _id，其余键被**静默丢弃**——实测传
+ * { _id, mfaRecoveryCodes: '不存在的摘要' } 依然返回文档，于是任意「格式合法」的
+ * 恢复码都能通过校验并签发会话，等同于对所有已开启 MFA 的账户完全绕过两步验证。
+ */
+async function verifyRecoveryCodeChallenge(user, { mfaCode, username, ctx }) {
+  const { ip, userAgent, fingerprint } = ctx;
+  // 备用恢复码路径：格式 XXXX-XXXX，命中即消费（一次性）
+  const normalized = mfaCode.toUpperCase().replace(/\s/g, '');
+  // 辅助函数：恢复码失败时统一记录（增量 failedLoginCount + MFA 独立计数），
+  // 与上方 6 位 TOTP 错误路径保持口径一致，消除"恢复码爆破不触发账户锁定"的逻辑漏洞
+  // 恢复码失败统一记录（增量 failedLoginCount + MFA 独立计数 + 审计），
+  // 与 6 位 TOTP 错误路径保持口径一致，消除「恢复码爆破不触发账户锁定」的漏洞
+  const handleRecoveryFailure = (riskFactors, reason) =>
+    recordRecoveryFailure(user, { username, ip, userAgent, fingerprint }, riskFactors, reason);
+  if (!/^[A-HJ-KM-NP-Z2-9]{4}-[A-HJ-KM-NP-Z2-9]{4}$/.test(normalized)) {
+    await handleRecoveryFailure(['recovery_code_invalid'], '恢复码格式无效');
+    return { outcome: 'MFA_CODE_INVALID' };
+  }
+  const codeHash = hashRecoveryCode(normalized);
+  // 原子消费：以「数组中仍含该摘要」为过滤条件执行 $pull 并要求命中——
+  // 消除 check 与 pull 分离导致的并发双花窗口；未命中即视为无效。
+  //
+  // 必须用 findOneAndUpdate 而非 findByIdAndUpdate（Critical 修复）：
+  // findByIdAndUpdate 只从第一参取 _id，其余键被**静默丢弃**——
+  // 实测传 { _id, mfaRecoveryCodes: '不存在的摘要' } 依然返回文档，
+  // 于是任意「格式合法」的恢复码都能通过校验并签发会话，
+  // 等同于对所有已开启 MFA 的账户完全绕过两步验证。
+  const consumed = await User.findOneAndUpdate(
+    { _id: user._id, mfaRecoveryCodes: codeHash },
+    { $pull: { mfaRecoveryCodes: codeHash } },
+    { new: true, select: '+mfaRecoveryCodes' }
+  ).catch(() => null);
+  if (!consumed) {
+    logger.warn('登录失败 - 备用恢复码无效', { username });
+    await handleRecoveryFailure(['recovery_code_invalid'], '备用恢复码不匹配');
+    return { outcome: 'MFA_CODE_INVALID' };
+  }
+
+  const remaining = Array.isArray(consumed.mfaRecoveryCodes) ? consumed.mfaRecoveryCodes.length : 0;
+  if (remaining <= 3) {
+    logger.warn('备用恢复码余量不足', { username, remaining });
+  }
+  await AuditLog.record({
+    action: 'login_recovery_code',
+    category: 'auth',
+    userId: user._id,
+    username,
+    ip,
+    userAgent,
+    fingerprint,
+    success: true,
+    riskLevel: 'medium',
+    riskFactors: ['recovery_code_used'],
+    reason: `使用备用恢复码登录（剩余 ${remaining} 个）`,
+  }).catch(() => {});
+  return { outcome: 'OK' };
+}
+
+/**
+ * 恢复码失败统一记录（E-01 自 loginUser 内的局部闭包提到模块级）
+ *
+ * 与 TOTP 错误路径同口径：增量 failedLoginCount + MFA 独立计数 + 审计。
+ * riskFactors/reason 由调用方区分「格式无效」与「不匹配」两种情况。
+ */
+async function recordRecoveryFailure(
+  user,
+  { username, ip, userAgent, fingerprint },
+  riskFactors,
+  reason
+) {
+  await incrementFailedLoginCount(user, { username, lockReason: '恢复码验证失败累计' });
+  await recordMfaFailure(user);
+  await AuditLog.record({
+    action: 'mfa_verify_failed',
+    category: 'auth',
+    userId: user._id,
+    username,
+    ip,
+    userAgent,
+    fingerprint,
+    success: false,
+    riskLevel: 'high',
+    riskFactors,
+    reason,
+  }).catch(() => {});
+}
+
+/**
+ * 登录失败计数原子递增 + 阈值锁定（E-01 抽出，MFA 两条失败路径共用）
+ *
+ * $inc 由 DB 保证无丢失更新：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，
+ * 丢失更新导致锁定阈值被推迟，利于爆破。阈值判定可能并发重复触发，但
+ * lockUntil 覆写幂等，审计重复仅产生冗余日志，可接受。
+ *
+ * P1-25（2026-09-17）：补 lockExpired 重置，与口令路径
+ * （verifyPasswordOrTrackFailure 内 :403-410）对齐。MFA 两条失败路径
+ * 此前只做纯 $inc：上一轮 10 分钟锁定刚过期时，旧计数会继续累计——
+ * 解锁后仅剩 1 次试错即再次锁定，对正常用户表现为「输错一次就锁」。
+ * 已过期的 lockUntil 视为新一轮：重置计数从 1 起算并清空过期时间戳。
+ * 走到本函数时 lockUntil 必为空或已过期（loginUser ③ 已在锁定期间提前返回），
+ * 故该判断不会误伤「锁定仍生效」的场景。
+ *
+ * @returns {Promise<number>} 递增后的失败计数
+ */
+async function incrementFailedLoginCount(user, { username, lockReason }) {
+  const lockExpired = user.lockUntil && user.lockUntil <= new Date();
+  const updated = await User.findByIdAndUpdate(
+    user._id,
+    lockExpired
+      ? { $set: { failedLoginCount: 1, lockUntil: null } }
+      : { $inc: { failedLoginCount: 1 } },
+    { new: true }
+  ).catch(() => null);
+  const newCount =
+    updated?.failedLoginCount ?? (lockExpired ? 1 : (user.failedLoginCount || 0) + 1);
+  if (newCount >= MAX_FAILED_LOGINS) {
+    await User.findByIdAndUpdate(user._id, {
+      lockUntil: new Date(Date.now() + LOCK_DURATION_MS),
+    }).catch(() => {});
+    logger.warn(`账户临时锁定（${lockReason}）`, { username, failedCount: newCount });
+  }
+  return newCount;
+}
+
+/**
+ * 登录成功后的收尾（E-01 自 loginUser 拆出）：非常规时间审计、登录信息更新、
+ * 角色权限读取、令牌签发、设备会话注册与成功审计。
+ *
+ * 会话注册表落库失败不阻断登录，但要降级为「令牌不含可吊销会话」：若此处失败
+ * 仍下发带 sid 的令牌，authenticate 会因查不到会话而拒绝该令牌，用户登录成功
+ * 却立刻无法访问任何接口——比「本次登录不支持设备级吊销」严重得多。
+ */
+async function issueLoginSession(user, ctx, username) {
+  const { ip, userAgent, fingerprint } = ctx;
 
   // 检查非常规时间登录
   const { isUnusual, hour } = checkUnusualTime();

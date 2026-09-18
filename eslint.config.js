@@ -88,19 +88,28 @@ module.exports = [
       'no-global-assign': 'error',
 
       // 棘轮第六档（O-3，2026-09-05）：体积棘轮，warn 级 + 基线锁死不增。
-      // 首次基线为 94 个文件共 133 条 warn；经多轮瘦身与 e2e 纳入 lint 后，
-      // 当前基线（eslint.ratchet.json）：16 个文件共 17 条 warn，集中在
-      // initData/authService/securityController 等大文件与长测试套件——
-      // 正是控制器瘦身与拆分的后续目标。与第五档「清零后提 error」不同，
-      // 体积债短期清不完，故走 warn + scripts/lint-ratchet.js 逐文件计数
-      // 基线：任何文件计数只许降不许升，降后以
-      // `npm run lint:ratchet -- --update-baseline` 收紧。
+      //
+      // 【唯一事实来源】各文件允许的 warn 条数一律以 eslint.ratchet.json 为准，
+      // 由 scripts/lint-ratchet.js 逐文件逐规则计数比对（只许降不许升）。
+      // 本注释**刻意不写实时数字**：此前写「16 个文件共 17 条 warn」的硬编码快照
+      // 在多次整改后早已失实，反而成为误导（报告 P2-48）。
+      // 需要当前数值时直接读 eslint.ratchet.json 或看 lint-ratchet 的输出。
+      //
+      // 首次基线（2026-09-05）：94 个文件共 133 条 warn；此后经控制器瘦身、
+      // 长测试套件拆分与 e2e 纳入 lint 逐步收敛。与第五档「清零后提 error」不同，
+      // 体积债短期清不完，故走 warn + 基线棘轮：
+      // 降后以 `npm run lint:ratchet -- --update-baseline` 收紧。
       // 这与 O-1/O-2 的控制器瘦身直接互锁：新增胖 handler 会立刻顶爆基线。
       'max-lines': ['warn', { max: 300, skipBlankLines: true, skipComments: true }],
       'max-lines-per-function': [
         'warn',
         { max: 100, skipBlankLines: true, skipComments: true, IIFEs: true },
       ],
+      // 棘轮第七档（E-02，2026-09-16）：圈复杂度棘轮，warn 级 + 基线锁死不增。
+      // 实测 32 个函数 > 15（最高 loginUser 46），明细留档
+      // deliverables/_complexity-actual.json。与体积棘轮同理：计数只许降不许升，
+      // 拆分函数后以 `npm run lint:ratchet -- --update-baseline` 收紧。
+      complexity: ['warn', 15],
     },
   },
   {

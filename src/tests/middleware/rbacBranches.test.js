@@ -1,18 +1,20 @@
 /**
- * rbac.js 分支补齐（branches 72.7% → 目标 85%+）
+ * rbac.js 分支补齐
  *
- * 依据全量覆盖率基线（coverage-final.json）的未覆盖分支行号：
- *  - checkPermission：模块通配符 `module:*` 正向命中（L54）、AND 逻辑（L59）、
- *    无权限 403（L70-72）
- *  - checkRole：数组/单字符串入参、roleCodes 缺失回退查库（L93-99）、
- *    无匹配角色 403（L110）
- *  - getDataScope：用户不存在（L141）、角色为空（L144）、level 阈值边界
- *    9/8/7/4/1 与 maxLevel 多角色取最大（L159-167）
+ * 【行号说明】本文件早期版本按覆盖率基线逐条标注 `L<行号>`。后续修复使 rbac.js
+ * 行号位移，部分标注已指向注释行。按「注释必须与实现同步」的要求，现改为语义
+ * 描述、不再写行号。
+ *
+ * 覆盖分支：
+ *  - checkPermission：模块通配符 `module:*` 正向命中、AND 逻辑、无权限 403
+ *  - checkRole：数组/单字符串入参、roleCodes 缺失回退查库、无匹配角色 403
+ *  - getDataScope：用户不存在、角色为空、level 阈值边界（9/8/7/4/1）
+ *    与 maxLevel 多角色取最大
  *  - buildDataScopeFilter / isRecordInScope：纯函数的空入参、department 空、
- *    ownerField 数组、none、getPath 数组中间层（L186-273）
+ *    ownerField 数组、none、getPath 数组中间层
  *
- * 说明：L49 的 userHasPermission 内部重复 `*:*` 检查为防御性死分支
- * （外层 L37 已 return），不为其构造测试。
+ * 说明：userHasPermission 内层的重复 `*:*` 检查为防御性死分支
+ * （外层已 return），不为其构造测试。
  */
 
 const mongoose = require('mongoose');
@@ -66,7 +68,7 @@ describe('rbac.js 分支补齐', () => {
       jest.restoreAllMocks();
     });
 
-    test('模块通配符命中：持有 device:* 时通过 device:read 检查（L54）', async () => {
+    test('模块通配符命中：持有 device:* 时通过 device:read 检查', async () => {
       jest.spyOn(User, 'getPermissions').mockResolvedValue(['device:*']);
       const req = makeReq();
       const res = makeRes();
@@ -76,7 +78,7 @@ describe('rbac.js 分支补齐', () => {
       expect(res.status).not.toHaveBeenCalled();
     });
 
-    test('模块通配符不命中：持有 alarm:* 时请求 device:read → 403（L54-56）', async () => {
+    test('模块通配符不命中：持有 alarm:* 时请求 device:read → 403', async () => {
       jest.spyOn(User, 'getPermissions').mockResolvedValue(['alarm:*']);
       const req = makeReq();
       const res = makeRes();
@@ -86,7 +88,7 @@ describe('rbac.js 分支补齐', () => {
       expect(res.status).toHaveBeenCalledWith(403);
     });
 
-    test('AND 逻辑：两个权限都持有才通过，缺一即 403（L59-64）', async () => {
+    test('AND 逻辑：两个权限都持有才通过，缺一即 403', async () => {
       jest.spyOn(User, 'getPermissions').mockResolvedValue(['user:read', 'user:export']);
       const req = makeReq();
       const res = makeRes();
@@ -101,7 +103,7 @@ describe('rbac.js 分支补齐', () => {
       expect(res.status).toHaveBeenCalledWith(403);
     });
 
-    test('精确匹配命中：无需通配符直接通过（L47）', async () => {
+    test('精确匹配命中：无需通配符直接通过', async () => {
       jest.spyOn(User, 'getPermissions').mockResolvedValue(['user:read']);
       const req = makeReq();
       const res = makeRes();
@@ -110,7 +112,7 @@ describe('rbac.js 分支补齐', () => {
       expect(next).toHaveBeenCalled();
     });
 
-    test('超管通配：持有 *:* 时任意权限检查直接通过（L37-40）', async () => {
+    test('超管通配：持有 *:* 时任意权限检查直接通过', async () => {
       jest.spyOn(User, 'getPermissions').mockResolvedValue(['*:*']);
       const req = makeReq();
       const res = makeRes();
@@ -131,7 +133,7 @@ describe('rbac.js 分支补齐', () => {
       user: { userId: new mongoose.Types.ObjectId().toString() },
     });
 
-    test('roleCodes 缺失时回退查库并命中（L93-99 回退分支）', async () => {
+    test('roleCodes 缺失时回退查库并命中', async () => {
       jest.spyOn(User, 'findById').mockReturnValue({
         populate: jest.fn().mockReturnThis(),
         lean: jest.fn().mockResolvedValue({ roles: [{ code: 'OPERATOR' }] }),
@@ -148,7 +150,7 @@ describe('rbac.js 分支补齐', () => {
       expect(next2).toHaveBeenCalled();
     });
 
-    test('回退查库后仍无匹配角色 → 403（L108-110）', async () => {
+    test('回退查库后仍无匹配角色 → 403', async () => {
       jest.spyOn(User, 'findById').mockReturnValue({
         populate: jest.fn().mockReturnThis(),
         lean: jest.fn().mockResolvedValue({ roles: [{ code: 'GUEST' }] }),
@@ -161,7 +163,7 @@ describe('rbac.js 分支补齐', () => {
       expect(res.status).toHaveBeenCalledWith(403);
     });
 
-    test('roleCodes 存在时优先使用，不查库（L93 正向分支）', async () => {
+    test('roleCodes 存在时优先使用，不查库', async () => {
       const findById = jest.spyOn(User, 'findById');
       const req = { user: { userId: 'x', roleCodes: ['ADMIN'] } };
       const res = makeRes();
@@ -193,20 +195,20 @@ describe('rbac.js 分支补齐', () => {
         ids[tag] = String(u._id);
       };
 
-      await mkUser('noRoles', []); // 无角色 → none（L144）
+      await mkUser('noRoles', []); // 无角色 → none
       await mkUser('lv9', [r9._id]); // >=9 → all（边界）
       await mkUser('lv7', [r7._id]); // >=7 → department（边界）
       await mkUser('lv4', [r4._id]); // >=4 → self（边界）
       await mkUser('lv1', [r1._id]); // <4 → none
-      await mkUser('mix', [r4._id, r7._id]); // 多角色取 maxLevel=7 → department（L148）
+      await mkUser('mix', [r4._id, r7._id]); // 多角色取 maxLevel=7 → department
     });
 
-    test('用户不存在 → { type: none }（L141）', async () => {
+    test('用户不存在 → { type: none }', async () => {
       const scope = await getDataScope(new mongoose.Types.ObjectId().toString());
       expect(scope.type).toBe('none');
     });
 
-    test('角色为空 → { type: none }（L144）', async () => {
+    test('角色为空 → { type: none }', async () => {
       const scope = await getDataScope(ids.noRoles);
       expect(scope.type).toBe('none');
     });
@@ -221,27 +223,27 @@ describe('rbac.js 分支补齐', () => {
       expect((await getDataScope(ids.lv1)).type).toBe('none');
     });
 
-    test('多角色取 maxLevel：4+7 → department（L148）', async () => {
+    test('多角色取 maxLevel：4+7 → department', async () => {
       expect((await getDataScope(ids.mix)).type).toBe('department');
     });
   });
 
   describe('buildDataScopeFilter（纯函数）', () => {
-    test('null / all → 空条件（L186）', () => {
+    test('null / all → 空条件', () => {
       expect(buildDataScopeFilter(null)).toEqual({});
       expect(buildDataScopeFilter({ type: 'all' })).toEqual({});
     });
 
-    test('department 为空 → 兜底 ownerCondition(null)（L200-202）', () => {
+    test('department 为空 → 兜底 ownerCondition(null)', () => {
       expect(buildDataScopeFilter({ type: 'department' })).toEqual({ createdBy: null });
     });
 
-    test('ownerField 为数组 → $or 取并集（L191-193）', () => {
+    test('ownerField 为数组 → $or 取并集', () => {
       const f = buildDataScopeFilter({ type: 'self', userId: 'u1' }, ['createdBy', 'operator']);
       expect(f).toEqual({ $or: [{ createdBy: 'u1' }, { operator: 'u1' }] });
     });
 
-    test('none → 永不匹配条件 { _id: null }（L210-212）', () => {
+    test('none → 永不匹配条件 { _id: null }', () => {
       expect(buildDataScopeFilter({ type: 'none' })).toEqual({ _id: null });
     });
   });
@@ -278,7 +280,7 @@ describe('rbac.js 分支补齐', () => {
   });
 
   describe('isRecordInScope（纯函数）', () => {
-    test('无范围 / all → true；无文档 → false（L224-225）', () => {
+    test('无范围 / all → true；无文档 → false', () => {
       expect(isRecordInScope(null, {}, {})).toBe(true);
       expect(isRecordInScope({ type: 'all' }, null, {})).toBe(true);
       expect(
@@ -286,7 +288,7 @@ describe('rbac.js 分支补齐', () => {
       ).toBe(false);
     });
 
-    test('department：命中与未命中（L260-263）', () => {
+    test('department：命中与未命中', () => {
       const scope = { type: 'department', department: 'A栋' };
       expect(
         isRecordInScope(
@@ -310,7 +312,7 @@ describe('rbac.js 分支补齐', () => {
       ).toBe(false);
     });
 
-    test('department 范围但 scope 无 department 值 → false（L261-262）', () => {
+    test('department 范围但 scope 无 department 值 → false', () => {
       expect(
         isRecordInScope(
           { type: 'department' },
@@ -323,7 +325,7 @@ describe('rbac.js 分支补齐', () => {
       ).toBe(false);
     });
 
-    test('ownerField 数组：任一字段命中即在范围内（L266-268）', () => {
+    test('ownerField 数组：任一字段命中即在范围内', () => {
       const scope = { type: 'self' };
       const ok = isRecordInScope(
         scope,
@@ -336,7 +338,7 @@ describe('rbac.js 分支补齐', () => {
       expect(ok).toBe(true);
     });
 
-    test('中间层为数组：getPath 展开后命中元素字段（L229-234 数组分支）', () => {
+    test('中间层为数组：getPath 展开后命中元素字段', () => {
       const scope = { type: 'self' };
       const doc = { maintenanceRecord: [{ operator: 'u1' }, { operator: 'u2' }] };
       expect(
@@ -350,7 +352,7 @@ describe('rbac.js 分支补齐', () => {
       expect(isRecordInScope(scope, doc, { ownerField: 'createdBy', userId: 'u1' })).toBe(true);
     });
 
-    test('none → false（L270-272）', () => {
+    test('none → false', () => {
       expect(
         isRecordInScope(
           { type: 'none' },

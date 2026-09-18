@@ -117,31 +117,38 @@ describe('Helper Utils', () => {
 
   describe('validatePasswordStrength', () => {
     test('should reject empty password', () => {
-      expect(validatePasswordStrength('')).toBeTruthy();
-      expect(validatePasswordStrength(null)).toBeTruthy();
-      expect(validatePasswordStrength(undefined)).toBeTruthy();
+      // 断具体文案：只断 truthy 时，「被长度规则拦下」与「被空值规则拦下」无法区分
+      // （实测三者均返回 '密码不能为空'，见 validatePasswordStrength:208 空值前置判定）
+      expect(validatePasswordStrength('')).toBe('密码不能为空');
+      expect(validatePasswordStrength(null)).toBe('密码不能为空');
+      expect(validatePasswordStrength(undefined)).toBe('密码不能为空');
     });
 
     test('should reject password shorter than 12 characters (L-1)', () => {
-      expect(validatePasswordStrength('Ab1!')).toBeTruthy();
-      expect(validatePasswordStrength('Abcdef1!')).toBeTruthy(); // 8 位在旧策略下合法，现须拒绝
+      // 断具体文案：这两条输入的失败理由必须是「长度不足」，而不是顺带被复杂度规则拒了
+      expect(validatePasswordStrength('Ab1!')).toBe('密码长度至少 12 位');
+      expect(validatePasswordStrength('Abcdef1!')).toBe('密码长度至少 12 位'); // 8 位在旧策略下合法，现须拒绝
       expect(validatePasswordStrength('Abcdefgh1!xy')).toBeFalsy(); // exactly 12 chars OK
     });
 
+    // 以下四条：输入必须≥12 位，否则会被第一条「至少 12 位」规则先行拦下，
+    // 用例名承诺的语义就测不到（旧输入 8~9 位，实测全部只命中长度规则；
+    // 变异验证：删掉对应 PASSWORD_RULES 条目，只有补齐长度的输入才会转红）。
+    // 断言具体文案而非 toBeTruthy()——只断 truthy 时，被任意一条规则拒绝都算过。
     test('should reject password without uppercase', () => {
-      expect(validatePasswordStrength('abcdef1!')).toBeTruthy();
+      expect(validatePasswordStrength('abcdefgh1!xy')).toMatch(/大写字母/);
     });
 
     test('should reject password without lowercase', () => {
-      expect(validatePasswordStrength('ABCDEF1!')).toBeTruthy();
+      expect(validatePasswordStrength('ABCDEFGH1!XY')).toMatch(/小写字母/);
     });
 
     test('should reject password without digit', () => {
-      expect(validatePasswordStrength('Abcdefgh!')).toBeTruthy();
+      expect(validatePasswordStrength('Abcdefghij!x')).toMatch(/数字/);
     });
 
     test('should reject password without special character', () => {
-      expect(validatePasswordStrength('Abcdefg1')).toBeTruthy();
+      expect(validatePasswordStrength('Abcdefghij1x')).toMatch(/特殊字符/);
     });
 
     test('should accept strong password', () => {
@@ -150,10 +157,13 @@ describe('Helper Utils', () => {
     });
 
     test('should reject breached password that passes complexity rules (G8)', () => {
-      // 以下口令满足全部复杂度规则（含 12 位长度），只能靠黑名单拦截
-      expect(validatePasswordStrength('Admin@123456')).toBeTruthy();
-      expect(validatePasswordStrength('Password@123')).toBeTruthy();
-      expect(validatePasswordStrength('Welcome@1234')).toBeTruthy();
+      // 以下口令满足全部复杂度规则（含 12 位长度），只能靠黑名单拦截。
+      // 断具体文案而非 truthy：只断 truthy 时，「被顺带命中复杂度规则」也算过，
+      // 黑名单整体失效也看不出来。实测三者均返回同一句泄露口令文案。
+      const BREACHED = '该密码属于常见泄露口令，请更换为不易猜测的密码';
+      expect(validatePasswordStrength('Admin@123456')).toBe(BREACHED);
+      expect(validatePasswordStrength('Password@123')).toBe(BREACHED);
+      expect(validatePasswordStrength('Welcome@1234')).toBe(BREACHED);
     });
   });
 

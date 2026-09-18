@@ -7,12 +7,71 @@ const logger = require('../utils/logger');
 const config = require('../config');
 const sharedCache = require('./sharedCache');
 const { parseCookies, ACCESS_COOKIE_NAME } = require('../utils/cookie');
+const { isIPAllowed } = require('../utils/ipRange');
 
 // 连接管理常量
 const MAX_CONNECTIONS = 1000;
 const HEARTBEAT_INTERVAL = 30000; // 30秒心跳检测
 const HEARTBEAT_TIMEOUT = 60000; // 60秒超时断开
 const AUTH_TIMEOUT = 30000; // 连接后 30 秒内必须完成认证，否则强制断开
+
+/**
+ * 解析握手来源 IP（P0-2 修复，2026-09-17）
+ *
+ * HTTP 侧的 IP 判定读的是 express 的 req.ip（trust proxy 语义）；WS 侧若直接取
+ * TCP 对端地址，反代部署下拿到的是代理 IP，同一个 allowedIPs 规则会在两条通道上
+ * 得出不同结论——用户表现为「网页能开、实时推送连不上」，或更糟：代理 IP 恰好在
+ * 白名单内时静默放宽。
+ *
+ * 本函数复刻 express（proxy-addr）对**数字信任跳数**的取值语义：
+ *   addrs = X-Forwarded-For 链（左→右）+ 直连对端地址
+ *   结果 = addrs[max(0, addrs.length - 1 - hops)]
+ * 逐条比对（真实 express 5.2.1 + 真实 HTTP 请求，见
+ * src/tests/services/websocketAuthScope.test.js）：
+ *   hops=1 XFF="a, b"     → b（与 req.ip 同值）
+ *   hops=2 XFF="a, b"     → a
+ *   hops=3 XFF="a, b, c"  → a
+ *   hops=2 XFF="a"        → a（链长不足时 express 取链最左值，此处一致）
+ *   hops=0（不信任）      → 直连对端地址（与 trust proxy=false 时的 req.ip 同值）
+ *
+ * @param {object} handshake socket.handshake（socket.io 握手对象）
+ * @param {number} hops 信任的代理跳数，0 表示不信任任何转发头
+ * @returns {string|null} 客户端 IP 文本；无任何可用地址时返回 null
+ */
+const resolveHandshakeClientIP = (handshake, hops) => {
+  const direct = handshake?.address || null;
+  const chain = String(handshake?.headers?.['x-forwarded-for'] || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const addrs = direct ? chain.concat([direct]) : chain;
+  if (addrs.length === 0) return null;
+  const trust = Number.isInteger(hops) && hops > 0 ? hops : 0;
+  return addrs[Math.max(0, addrs.length - 1 - trust)];
+};
+
+/**
+ * 信任的代理跳数（P0-2 修复，2026-09-17）
+ *
+ * 与 app.js 的 trust proxy 取值规则逐条对齐（见 src/app.js「trust proxy
+ * （M-4 收紧默认值）」）：
+ *   - TRUST_PROXY_HOPS 为正整数 → 按其跳数信任
+ *   - 否则 development → 1 跳（本机 Vite 代理）
+ *   - 否则（含 production）→ 不信任（0）
+ * 两处若漂移，同一条请求在 WS 与 HTTP 上会得出不同的客户端 IP。
+ * 一致性由 src/tests/services/websocketAuthScope.test.js 断言
+ * （对比 app.get('trust proxy')）。
+ *
+ * 注：不引入 proxy-addr 依赖，也不改 index.js 传入 app 实例——保持本模块自包含，
+ * 避免与 app.js 形成新的跨模块耦合面。
+ * @returns {number}
+ */
+const resolveTrustProxyHops = () => {
+  const hops = parseInt(process.env.TRUST_PROXY_HOPS, 10);
+  if (Number.isFinite(hops) && hops > 0) return hops;
+  if (config.nodeEnv === 'development') return 1;
+  return 0;
+};
 
 /**
  * 用户定向房间名（服务端内部房间，不经客户端 join 白名单）。
@@ -305,10 +364,11 @@ class WebSocketService {
         return false;
       }
 
-      // 校验用户当前状态与 tokenVersion：被禁用/锁定/改密后旧连接应失效
+      // 校验用户当前状态、tokenVersion 与 allowedIPs：被禁用/锁定/改密后旧连接应失效，
+      // allowedIPs 供下方 P0-2 的 IP 访问范围校验使用（auth.js 的等价 select 亦含该字段）
       const User = require('../models/User');
       const freshUser = await User.findById(decoded.userId)
-        .select('username status tokenVersion passwordChangedAt')
+        .select('username status tokenVersion passwordChangedAt allowedIPs')
         .populate('roles', 'code');
       if (!freshUser) {
         logger.warn(`WebSocket 认证失败（用户不存在）: ${socket.id}`);
@@ -344,6 +404,17 @@ class WebSocketService {
           return false;
         }
       }
+
+      // ============ P0-2 修复（2026-09-17）：补齐 HTTP 侧已有、WS 侧缺失的两道失效信号 ============
+      // 审计实证：同一个 JWT 在 HTTP 侧因 allowedIPs 不匹配被 403 AUTH_IP_RANGE_DENIED、
+      // 或因设备会话已吊销被拒；WS 侧却认证通过并绑定 socket.userId。根因是本方法此前
+      // 全文 0 处引用 sid / allowedIPs / sessionService。两段校验抽为独立方法
+      // （与 middleware/auth.js 的 assertIpAllowed / assertSessionUsable 同源同序），
+      // 使「HTTP 拒绝的令牌，WS 也必须拒绝」。
+      const ipFailure = this._assertHandshakeIpAllowed(socket, freshUser);
+      if (ipFailure) return false;
+      const sessionFailure = await this._assertHandshakeSessionUsable(socket, decoded);
+      if (sessionFailure) return false;
 
       socket.userId = decoded.userId || decoded.id;
       socket.username = decoded.username;
@@ -382,6 +453,65 @@ class WebSocketService {
   }
 
   /**
+   * 握手 IP 访问范围校验（P0-2 修复，2026-09-17）
+   *
+   * 与 middleware/auth.js 的 assertIpAllowed（auth.js:297-324）同源：
+   * 规则为空时不限制；配置了规则但来源 IP 解析不出或不在范围内 → 拒绝。
+   * isIPAllowed 对「配置不可用」（超长文本、超量条目、无法解析的片段）本身
+   * 即 fail-closed，此处不再二次包装，避免两处判定漂移。
+   *
+   * 与 HTTP 侧的差异：此处不写 ip_range_denied 审计——WS 认证路径没有 res 对象，
+   * 且 AuditLog.record 是异步直写，在握手期引入 DB 写会拖长认证链；拒绝结论
+   * 已通过 logger.warn 留痕（含 username/ip/reason）。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {object} freshUser 已 select allowedIPs/username 的用户文档
+   * @returns {boolean} true 表示已拒绝并断开连接
+   */
+  _assertHandshakeIpAllowed(socket, freshUser) {
+    if (!freshUser.allowedIPs) return false;
+    const clientIP = resolveHandshakeClientIP(socket.handshake, resolveTrustProxyHops());
+    const { allowed, reason } = isIPAllowed(clientIP, freshUser.allowedIPs);
+    if (allowed) return false;
+    logger.warn('WebSocket 认证失败（IP 访问范围校验拒绝）', {
+      username: freshUser.username,
+      ip: clientIP,
+      reason,
+      socketId: socket.id,
+    });
+    socket.emit('auth-error', { message: '当前网络不在允许的 IP 范围内' });
+    socket.disconnect(true);
+    return true;
+  }
+
+  /**
+   * 握手设备会话状态校验（P0-2 修复，2026-09-17）
+   *
+   * 与 middleware/auth.js 的 assertSessionUsable（auth.js:341-354）同源：
+   * 令牌携带 sid 时校验对应 UserSession 仍可用；未携带 sid 时跳过——功能
+   * 上线前的旧令牌、以及登录时会话注册失败而降级签发的令牌都没有 sid，
+   * 拒绝它们等于把全部在线用户踢下线（HTTP 侧出于同一理由放行）。
+   *
+   * fail-closed 不吞错：validateSession 在 DB 故障时抛
+   * SESSION_SERVICE_UNAVAILABLE，此处让它抛到 authenticateSocket 的 catch，
+   * 按「认证失败」断开连接——拒绝语义与 HTTP 侧返回 503 一致，不会放行。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {object} decoded 已验证的 JWT payload
+   * @returns {Promise<boolean>} true 表示已拒绝并断开连接
+   */
+  async _assertHandshakeSessionUsable(socket, decoded) {
+    if (!decoded.sid) return false;
+    const { validateSession } = require('./sessionService');
+    const sessionState = await validateSession(decoded.sid);
+    if (sessionState.usable) return false;
+    logger.warn(`WebSocket 认证失败（设备会话已吊销或不存在）: ${socket.id}`);
+    socket.emit('auth-error', { message: '该设备会话已失效，请重新登录' });
+    socket.disconnect(true);
+    return true;
+  }
+
+  /**
    * 复查长连接的当前授权状态（P2-14）
    *
    * 认证只发生在连接建立时，之后 socket.roleCodes / status / tokenVersion
@@ -404,42 +534,57 @@ class WebSocketService {
       const fresh = await User.findById(socket.userId)
         .select('status tokenVersion')
         .populate('roles', 'code');
-
-      const kick = (message, logMsg) => {
-        logger.warn(logMsg);
-        socket.emit('auth-error', { message });
-        socket.disconnect(true);
-        return { ok: false, roleCodes: [] };
-      };
-
-      if (!fresh) {
-        return kick('用户不存在', `WebSocket 复查失败（用户已删除）: ${socket.id}`);
-      }
-      if (fresh.status !== 'active') {
-        return kick(
-          '账户已被禁用或锁定',
-          `WebSocket 复查失败（status=${fresh.status}）: ${socket.id}`
-        );
-      }
-      // tokenVersion 推进意味着该用户的全部会话已被吊销（改密/管理员强制下线）
-      const currentVersion = fresh.tokenVersion ?? 0;
-      if (socket.tokenVersion !== undefined && socket.tokenVersion !== currentVersion) {
-        return kick(
-          '会话已失效，请重新登录',
-          `WebSocket 复查失败（tokenVersion 已推进）: ${socket.id}`
-        );
-      }
-
-      const roleCodes = (fresh.roles || []).map((r) => r?.code).filter(Boolean);
-      // 回写快照，供无角色要求的房间与统计使用
-      socket.roleCodes = roleCodes;
-      return { ok: true, roleCodes };
+      return this._applyRevalidation(socket, fresh);
     } catch (err) {
       // fail-closed：复查不可用时不得放行受限房间
       logger.error(`WebSocket 授权复查异常，按拒绝处理: ${socket.id} - ${err.message}`);
       socket.emit('error', { message: '权限校验暂不可用，请稍后重试' });
       return { ok: false, roleCodes: [] };
     }
+  }
+
+  /**
+   * 授权复查的判定体（L-29 抽出）
+   *
+   * 与取数解耦，供两条路径共用同一套判定，避免「批量版」与「单连接版」
+   * 各写一份而逐渐漂移：
+   *  - revalidateSocket：单连接取数后调用（入房复查）
+   *  - runCleanupSweep：批量取数后逐连接调用（周期清扫）
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {object|null} fresh 该 socket.userId 对应的最新用户文档（已 populate roles.code）
+   * @returns {{ok: boolean, roleCodes: string[]}}
+   */
+  _applyRevalidation(socket, fresh) {
+    const kick = (message, logMsg) => {
+      logger.warn(logMsg);
+      socket.emit('auth-error', { message });
+      socket.disconnect(true);
+      return { ok: false, roleCodes: [] };
+    };
+
+    if (!fresh) {
+      return kick('用户不存在', `WebSocket 复查失败（用户已删除）: ${socket.id}`);
+    }
+    if (fresh.status !== 'active') {
+      return kick(
+        '账户已被禁用或锁定',
+        `WebSocket 复查失败（status=${fresh.status}）: ${socket.id}`
+      );
+    }
+    // tokenVersion 推进意味着该用户的全部会话已被吊销（改密/管理员强制下线）
+    const currentVersion = fresh.tokenVersion ?? 0;
+    if (socket.tokenVersion !== undefined && socket.tokenVersion !== currentVersion) {
+      return kick(
+        '会话已失效，请重新登录',
+        `WebSocket 复查失败（tokenVersion 已推进）: ${socket.id}`
+      );
+    }
+
+    const roleCodes = (fresh.roles || []).map((r) => r?.code).filter(Boolean);
+    // 回写快照，供无角色要求的房间与统计使用
+    socket.roleCodes = roleCodes;
+    return { ok: true, roleCodes };
   }
 
   /**
@@ -473,6 +618,10 @@ class WebSocketService {
     let cleanedCount = 0;
     let kickedCount = 0;
 
+    // 第一趟：先做纯内存的「记录回收 + 待查清单」，不碰数据库。
+    // 把不需要 DB 的工作与需要 DB 的工作分开，是为了让下面的批量查询
+    // 只针对真正要复查的连接（未认证连接在认证成功前不参与）。
+    const pending = [];
     for (const socketId of this.clients.keys()) {
       const socket = this.io.sockets.sockets.get(socketId);
       if (!socket) {
@@ -485,19 +634,64 @@ class WebSocketService {
       // 未认证/认证中的连接不复查：认证超时由 authTimer 负责
       if (!socket.authenticated || !socket.userId) continue;
 
-      const fresh = await this.revalidateSocket(socket);
-      if (!fresh.ok) {
-        if (!socket.connected) {
-          // kick 路径（用户删除/停权/tokenVersion 推进）内部已 disconnect(true)
-          kickedCount++;
-        } else {
-          // DB 瞬时故障路径：revalidateSocket fail-closed 拒绝但未断开。
-          // 周期复查不应因一次抖动清场全部在线连接，仅告警，等下一轮重试
-          logger.warn(`WebSocket 周期复查暂不可用，保留连接等待下轮: ${socket.id}`);
-        }
+      pending.push(socket);
+    }
+
+    if (pending.length === 0) {
+      this._logSweepResult(cleanedCount, kickedCount);
+      return;
+    }
+
+    // 第二趟：一次批量查询取回全部待复查用户，再逐连接判定。
+    //
+    // L-29 修复：原实现是 `for ... await this.revalidateSocket(socket)`，
+    // 每个连接一次 findById。上限 1000 连接（见 HEARTBEAT_INTERVAL 注释）时
+    // 每轮固定串行 1000 次 DB 往返——实测 875.92ms，且因为 await 串行，
+    // 这段时间事件循环被反复让出，30 秒一轮等于周期性钝化。
+    // 改为单次 $in 查询后实测 5.55ms（157.8x），存活判定结果完全一致（980/980）。
+    // 明细见 deliverables/性能实测基线-2026-09-16.json。
+    //
+    // 去重：同一用户的多个标签页/设备会产生多个 socket，只需查一次。
+    const uniqueUserIds = [...new Set(pending.map((s) => String(s.userId)))];
+    let freshByUser = new Map();
+    let dbUnavailable = false;
+    try {
+      const User = require('../models/User');
+      const docs = await User.find({ _id: { $in: uniqueUserIds } })
+        .select('status tokenVersion')
+        .populate('roles', 'code');
+      freshByUser = new Map(docs.map((doc) => [String(doc._id), doc]));
+    } catch (err) {
+      // DB 瞬时故障：不能因为一次抖动清场全部在线连接。
+      // 保持原语义——fail-closed 拒绝入房，但周期复查仅告警、等下一轮重试。
+      dbUnavailable = true;
+      logger.error(`WebSocket 批量授权复查异常，本轮跳过: ${err.message}`);
+    }
+
+    if (dbUnavailable) {
+      logger.warn(`WebSocket 周期复查暂不可用，保留 ${pending.length} 个连接等待下轮`);
+      this._logSweepResult(cleanedCount, kickedCount);
+      return;
+    }
+
+    for (const socket of pending) {
+      const fresh = freshByUser.get(String(socket.userId)) || null;
+      const result = this._applyRevalidation(socket, fresh);
+      if (!result.ok && !socket.connected) {
+        // kick 路径（用户删除/停权/tokenVersion 推进）内部已 disconnect(true)
+        kickedCount++;
       }
     }
 
+    this._logSweepResult(cleanedCount, kickedCount);
+  }
+
+  /**
+   * 输出一轮清扫的结果（仅在确有变化时打日志，避免 30s 一次的空转噪声）
+   * @param {number} cleanedCount 回收的失效记录数
+   * @param {number} kickedCount 踢出的失效会话数
+   */
+  _logSweepResult(cleanedCount, kickedCount) {
     if (cleanedCount > 0 || kickedCount > 0) {
       logger.info(
         `WebSocket 清扫: 移除 ${cleanedCount} 个失效记录, 复查踢出 ${kickedCount} 个失效会话, ` +
@@ -694,3 +888,8 @@ class WebSocketService {
 }
 
 module.exports = WebSocketService;
+
+// P0-2 修复配套（2026-09-17）：导出握手 IP 解析工具，供一致性测试直接驱动，
+// 断言「WS 与 HTTP 在同一 trust proxy 语义下得出同一个客户端 IP」。
+// 挂在 class 上而非替换 module.exports——不改变既有 `new WebSocketService()` 用法。
+WebSocketService.resolveHandshakeClientIP = resolveHandshakeClientIP;

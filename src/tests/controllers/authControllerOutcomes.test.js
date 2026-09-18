@@ -251,7 +251,13 @@ describe('refreshToken outcome 矩阵', () => {
     await invoke(controller.refreshToken, makeReq(), res);
     expect(res.statusCode).toBe(expectedStatus);
     expect(res.cookie).not.toHaveBeenCalled();
-    if (expectedMessage) expect(res.body.message).toBe(expectedMessage);
+    // 原写法 `if (expectedMessage) expect(res.body.message).toBe(expectedMessage);`
+    // 在 message 为空字符串时整条断言被跳过、用例恒绿——「空 message」是表驱动里
+    // 最容易引入的退化形态（改表行时删掉文案只留占位）。现改为无条件断言：
+    // 空串 / 文案漂移都直接转红（实测：表行整个缺位时 jest-each 会以 done 回调
+    // 填充形参，原写法在该场景也会红，但属偶然且会伴生 30s done() 超时）。
+    expect(expectedMessage).toBeTruthy();
+    expect(res.body.message).toBe(expectedMessage);
   });
 
   test('service 抛未预期异常（含 DB 故障）：401 且不泄露内部错误', async () => {
@@ -496,6 +502,8 @@ describe('captcha 与 captchaStatus', () => {
     const res = makeRes();
     await invoke(controller.getCaptcha, makeReq(), res);
     expect(res.statusCode).toBe(503);
+    // 标题点名的错误码必须断言：503 只说明「服务不可用」，不说明是哪个契约
+    expect(res.body.errors.errorCode).toBe('CAPTCHA_SERVICE_UNAVAILABLE');
   });
 
   test('getCaptchaStatus：DB 故障降级到静态配置而非 500', async () => {

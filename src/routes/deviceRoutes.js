@@ -8,7 +8,11 @@ const deviceController = require('../controllers/deviceController');
 const { authenticate, checkPermission } = require('../middleware');
 const { body, param, query } = require('express-validator');
 const { consumeValidation } = require('../middleware/validateQuery');
+// E-05 整改：设备类型枚举此前在 createDeviceValidation / updateDeviceValidation
+// 两处内联展开，与 constants 的 DEVICE_TYPE、模型 enum、文档生成器共 4 份副本。
+// 现统一从 constants 取值——新增设备类型只需改这一处。
 const { DEVICE_STATUS, DEVICE_TYPE } = require('../utils/constants');
+const DEVICE_TYPE_VALUES = Object.values(DEVICE_TYPE);
 
 // P3-17：列表 query 枚举校验。status/deviceType 拼错时原先静默返回空集，
 // 枚举清单复用 utils/constants 单一声明（避免与模型 enum 漂移）
@@ -44,20 +48,7 @@ const createDeviceValidation = [
     .withMessage('设备名称不能为空')
     .isLength({ max: 100 })
     .withMessage('设备名称不能超过 100 个字符'),
-  body('deviceType')
-    .isIn([
-      'fire_alarm',
-      'sprinkler',
-      'hydrant',
-      'extinguisher',
-      'smoke_detector',
-      'heat_detector',
-      'emergency_light',
-      'evacuation_sign',
-      'fire_door',
-      'other',
-    ])
-    .withMessage('无效的设备类型'),
+  body('deviceType').isIn(DEVICE_TYPE_VALUES).withMessage('无效的设备类型'),
   body('model').optional().trim().isLength({ max: 100 }).withMessage('型号不能超过 100 个字符'),
   body('manufacturer')
     .optional()
@@ -106,21 +97,7 @@ const updateDeviceValidation = [
     .trim()
     .isLength({ max: 100 })
     .withMessage('设备名称不能超过 100 个字符'),
-  body('deviceType')
-    .optional()
-    .isIn([
-      'fire_alarm',
-      'sprinkler',
-      'hydrant',
-      'extinguisher',
-      'smoke_detector',
-      'heat_detector',
-      'emergency_light',
-      'evacuation_sign',
-      'fire_door',
-      'other',
-    ])
-    .withMessage('无效的设备类型'),
+  body('deviceType').optional().isIn(DEVICE_TYPE_VALUES).withMessage('无效的设备类型'),
   body('model').optional().trim().isLength({ max: 50 }).withMessage('型号不能超过 50 个字符'),
   body('manufacturer')
     .optional()

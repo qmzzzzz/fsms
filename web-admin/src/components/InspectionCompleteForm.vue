@@ -275,7 +275,7 @@ const form = reactive({
   remark: '',
 })
 
-const rules = {
+const rules = computed(() => ({
   result: [{ required: true, message: t('inspectionResult.resultRequiredMsg'), trigger: 'change' }],
   findings: [
     {
@@ -289,7 +289,7 @@ const rules = {
       trigger: 'blur',
     },
   ],
-}
+}))
 
 // 验证至少有一个问题
 function validateFindings(rule, value, callback) {

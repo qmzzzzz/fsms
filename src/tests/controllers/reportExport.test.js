@@ -140,8 +140,13 @@ describe('报表与导出（批次 D1）', () => {
     for (const type of ['devices', 'alarms', 'inspections', 'audit']) {
       const res = await get(`/api/reports/export?type=${type}&format=xlsx`);
       expect(res.status).toBe(200);
+      // 「导出成功」的判据是响应确实是 xlsx 附件（200 也可能是空响应/JSON 错误）
+      expect(res.headers['content-type']).toContain('spreadsheetml');
+      expect(res.headers['content-disposition']).toContain('attachment');
     }
     const bad = await get('/api/reports/export?type=bogus&format=xlsx');
     expect(bad.status).toBe(400);
+    // 非法 type 点名 REPORT_TYPE_UNSUPPORTED，与参数格式错误（VALIDATION_FAILED）区分
+    expect(bad.body.errors.errorCode).toBe('REPORT_TYPE_UNSUPPORTED');
   });
 });

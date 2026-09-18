@@ -21,9 +21,14 @@
  *
  * 匹配语义（与主流网络设备/OA 系统一致）：
  *  - 规则为空       → 不限制，放行
+ *  - 配置不可用     → 拒绝（L-04：文本超长 / 条目超量 / 含无法解析片段）
  *  - 命中任一排除项 → 拒绝（排除优先，不受允许项影响）
  *  - 无允许项       → 仅有排除项时，未被排除即放行
  *  - 有允许项       → 必须命中至少一条才放行
+ *
+ * 失败方向原则（L-04）：本模块是访问控制的判定端，**只有「规则确实为空」
+ * 才可放行**。任何「配置存在但读不懂」的情形都必须拒绝——否则一处笔误
+ * （如 `!10.0.0.0/33`）会让本意拉黑的网段反过来被完全放行，且无任何提示。
  */
 
 const ipaddr = require('ipaddr.js');
@@ -240,11 +245,27 @@ const matchRule = (ip, rule) => {
  * @param {string} clientIp 客户端 IP（可为 ::ffff: 映射形态）
  * @param {string} text 规则文本；空值表示不限制
  * @returns {{allowed: boolean, reason: string, matchedRule: string|null}}
- *          reason 取值：no_rules / denied / allowed / not_in_allowlist / invalid_client_ip
+ *          reason 取值：no_rules / denied / allowed / not_in_allowlist /
+ *                       invalid_client_ip / rules_too_long / too_many_rules / invalid_rules
  */
 const isIPAllowed = (clientIp, text) => {
   if (typeof text !== 'string' || text.trim().length === 0) {
     return { allowed: true, reason: 'no_rules', matchedRule: null };
+  }
+
+  // L-04 修复：以下三种「配置本身不可用」的情形改为 fail-closed。
+  //
+  // 原实现把超长文本、超量条目、无法解析的片段一律按「该片段未配置」跳过，
+  // 于是 allows 为空时走到 no_rules 分支 → 整条 IP 限制被静默禁用。
+  // 对访问控制而言这是方向性错误：配置者以为限制在生效，实际全放行。
+  // 写入期有 validateRules 拦截，故触发面主要是存量数据与直连 DB 写入，
+  // 但一旦发生就是无提示的越权放行，故按拒绝处理——真实用户会立刻报障，
+  // 而不是在无人察觉的情况下持续放行。
+  if (text.length > MAX_TEXT_LENGTH) {
+    return { allowed: false, reason: 'rules_too_long', matchedRule: null };
+  }
+  if (splitRules(text).length > MAX_RULE_COUNT) {
+    return { allowed: false, reason: 'too_many_rules', matchedRule: null };
   }
 
   const ip = normalizeIP(clientIp);
@@ -253,7 +274,15 @@ const isIPAllowed = (clientIp, text) => {
     return { allowed: false, reason: 'invalid_client_ip', matchedRule: null };
   }
 
-  const { allows, denies } = parseRules(text);
+  const { allows, denies, invalid } = parseRules(text);
+
+  // L-04 修复：存在无法解析的片段时整体拒绝。
+  // 典型危害是「写坏的排除规则静默失效」——如 `!10.0.0.0/33` 本意是拉黑，
+  // 解析失败后被跳过，反而对该网段完全放行。此处不区分该片段是允许项还是
+  // 排除项：配置文本已不可信，任何基于它的「放行」判断都不安全。
+  if (invalid.length > 0) {
+    return { allowed: false, reason: 'invalid_rules', matchedRule: null };
+  }
 
   // 排除项优先：命中即拒绝
   for (const rule of denies) {

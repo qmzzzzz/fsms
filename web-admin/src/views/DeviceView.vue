@@ -219,7 +219,7 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
-import { api } from '@/utils/api'
+import { api, isCanceledError } from '@/utils/api'
 import { localDateStr as sharedLocalDateStr } from '@/utils/datetime'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
@@ -329,6 +329,8 @@ const loadData = async () => {
     tableData.value = Array.isArray(payload) ? payload : []
     page.total = res?.data?.pagination?.total || tableData.value.length
   } catch (e) {
+    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
+    if (isCanceledError(e)) return
     if (!isCurrent()) return
     ElMessage.error(t('messages.loadFailed'))
     tableData.value = []

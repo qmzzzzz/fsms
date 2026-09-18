@@ -23,7 +23,12 @@
         <template #title> {{ $t('inspection.findingsCount', { count: findingsCount }) }} </template>
         <div v-for="(finding, index) in inspectionData.findings" :key="index" class="mb-2">
           <div class="finding-item">
-            <span class="finding-device">{{ finding.deviceCode }} - {{ finding.deviceName }}</span>
+            <!-- 后端 InspectionService 用 populate('findings.deviceId', select:'deviceCode deviceName')
+                 返回嵌套对象；直接读 finding.deviceCode 恒为 undefined（实测渲染成「 - 」） -->
+            <span class="finding-device">
+              {{ finding.deviceId?.deviceCode || finding.deviceCode }} -
+              {{ finding.deviceId?.deviceName || finding.deviceName }}
+            </span>
             <el-tag :type="severityType(finding.severity)" size="small" class="ml-2">
               {{ severityLabel(finding.severity) }}
             </el-tag>
@@ -78,7 +83,7 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
-import { api } from '@/utils/api'
+import { api, isCanceledError } from '@/utils/api'
 
 const { t } = useI18n()
 
@@ -109,12 +114,12 @@ const form = reactive({
   result: 'approved',
 })
 
-const rules = {
+const rules = computed(() => ({
   reviewComment: [
     { required: true, message: t('inspection.reviewCommentPlaceholder'), trigger: 'blur' },
     { min: 10, message: t('inspection.reviewCommentMinMsg'), trigger: 'blur' },
   ],
-}
+}))
 
 // 计算属性
 const inspectionAssignedNames = computed(() => {
@@ -164,6 +169,8 @@ const loadInspectionDetail = async () => {
     inspectionData.value = res.data.data
     form.reviewComment = ''
   } catch (error) {
+    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
+    if (isCanceledError(error)) return
     ElMessage.error(t('inspectionReview.loadFailedMsg'))
   }
 }

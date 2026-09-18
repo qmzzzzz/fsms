@@ -103,9 +103,17 @@ describe('认证边界（第三批审计）', () => {
     // 触发缓存填充：一次成功认证
     const token = makeToken(user);
     const warm = await request(app).get('/protected').set('Authorization', `Bearer ${token}`);
+    // 首次认证必须真的进了业务处理器：这里同时是「缓存被填充」的前提，
+    // 若 200 来自别处（如中间件短路），后续的缓存失效断言就失去意义
     expect(warm.status).toBe(200);
+    expect(warm.body).toEqual({ success: true });
 
-    // 模拟 mfaEnable/mfaDisable 路径：更新库 + 失效缓存（与 controller 一致）
+    // 模拟 mfaEnable/mfaDisable 路径：更新库 + 失效缓存（与 controller 一致）。
+    // 【可观测性边界，实测】authenticate 的 loadValidUser 投影里没有 mfaEnabled
+    // （middleware/auth.js:73 的 select 列表），authenticate 全文也不读该字段；
+    // 因此「MFA 开关」本身对 /protected 的响应不可观测——本段写库+失效是为对齐
+    // 生产路径形态，真正被断言的是紧随其后的 tokenVersion 通道（同一份缓存）。
+    // 变异验证：把本段两行整体删除，本用例仍绿（不可证伪，故不声称它被验证）。
     await User.findByIdAndUpdate(user._id, { mfaEnabled: true });
     invalidateUserCache(String(user._id));
 
@@ -115,5 +123,13 @@ describe('认证边界（第三批审计）', () => {
 
     const res = await request(app).get('/protected').set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(401);
+    // 401 必须来自凭据新鲜度通道（SESSION_EXPIRED = tokenVersion 不匹配），
+    // 而不是黑名单/签名类 401：只有点名该错误码才能证明是 tokenVersion 比对拦下的，
+    // 而非别的 401 巧合。
+    // 变异验证：把 invalidateUserCacheLocal 改成 no-op → 转红；把本用例两处
+    // invalidateUserCache 调用一起删除 → 转红（缓存返回旧 tokenVersion=0 而放行）。
+    // 【实测边界】只删其中一处不转红：失效标记是幂等的，两处调用中任一都能
+    // 触发重读，因此无法用「删一处」来区分二者——不声称更强的主张。
+    expect(res.body.errors.errorCode).toBe('SESSION_EXPIRED');
   });
 });

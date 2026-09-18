@@ -14,6 +14,7 @@ config.validateProductionConfig();
 const mongoose = require('mongoose');
 const connectDB = require('./config/database');
 const logger = require('./utils/logger');
+const { exitAfterFlush } = require('./utils/loggerFlush');
 
 // P3-48：密钥文件注入的结果在 config 加载期产生（早于 logger 可用），
 // 此处补记日志。只记变量名不记值。
@@ -65,7 +66,8 @@ const gracefulShutdown = async (signal) => {
   // 直接以非零码终止，避免卡死的清理步骤无限拖住进程
   if (shuttingDown) {
     logger.warn(`收到重复 ${signal} 信号，跳过剩余清理并强制退出`);
-    process.exit(1);
+    // P1-13：强制退出路径同样需要留痕（这条日志解释了为何「跳过清理」）
+    return exitAfterFlush(1);
   }
   shuttingDown = true;
 
@@ -159,7 +161,10 @@ const gracefulShutdown = async (signal) => {
     logger.info('MongoDB 连接已关闭');
   });
 
-  setTimeout(() => process.exit(0), 500);
+  // P1-13：正常关闭路径同样要让日志落地。exitAfterFlush 会先 logger.end()
+  //（排空 transport 队列）再延时退出，比单纯 setTimeout 更确定；
+  // 500ms 与原先一致，给审计 WAL 裁剪的原子 rename 留出余量。
+  return exitAfterFlush(0, { delayMs: 500 });
 };
 
 /**
@@ -226,7 +231,8 @@ const startServer = async () => {
         // 显式要求 HTTPS（ENABLE_HTTPS=true）却加载失败时，禁止静默降级为明文 HTTP：
         // 降级会让令牌/Cookie 以明文传输，属于安全策略失效，直接非零退出交由运维介入
         logger.error(`TLS 证书加载失败（cert=${tlsCert}, key=${tlsKey}）：${tlsErr.message}`);
-        process.exit(1);
+        // P1-13：启动期致命错误最需要取证，等日志落盘后再退出
+        return exitAfterFlush(1);
       }
     } else {
       server = require('http').createServer(app);
@@ -240,7 +246,8 @@ const startServer = async () => {
       } else {
         logger.error(`HTTP 服务器监听出错：${err ? err.message : err}`);
       }
-      process.exit(1);
+      // P1-13：端口占用等监听错误必须留痕，等日志落盘后再退出
+      return exitAfterFlush(1);
     });
 
     // 【M-09】启动期从 DB 重同步审计链链尾，清除可能的「幻影链尾」。
@@ -301,7 +308,9 @@ const startServer = async () => {
     process.on('SIGINT', () => gracefulShutdown('SIGINT'));
   } catch (error) {
     logger.error(`服务器启动失败：${error.message}`);
-    process.exit(1);
+    // P1-13：等日志落盘后再退出。原为紧接 process.exit(1)，而 winston 的
+    // 文件 transport 是异步的——「服务器启动失败」这条最关键的日志实测会丢。
+    return exitAfterFlush(1);
   }
 };
 

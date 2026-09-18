@@ -349,6 +349,8 @@ describe('roleController 覆盖率补齐', () => {
         level: 8,
       });
     expect(res.status).toBe(403);
+    // 创建越级角色有独立错误码，与权限子集/内置保护区分
+    expect(res.body.errors.errorCode).toBe('ROLE_CREATE_HIGHER_LEVEL_FORBIDDEN');
     expect(res.body.message).toContain('无权创建高于自身层级的角色');
   });
 
@@ -363,6 +365,8 @@ describe('roleController 覆盖率补齐', () => {
         permissions: [permReadId],
       });
     expect(res.status).toBe(403);
+    // 权限子集闸点名 PERMISSION_GRANT_FORBIDDEN（响应带无权授予的权限列表）
+    expect(res.body.errors.errorCode).toBe('PERMISSION_GRANT_FORBIDDEN');
     expect(res.body.message).toContain('无权授予以下权限');
   });
 
@@ -387,12 +391,18 @@ describe('roleController 覆盖率补齐', () => {
       .put(`/api/roles/${customRoleId}`)
       .send({ name: 'A'.repeat(51) });
     expect(res.status).toBe(400);
+    // 400 只说明「被拒」，不说明是谁拒的：断言控制器把校验明细透传出来，
+    // 否则换一个 400 码（甚至换成控制器内别的分支）同样能过
+    expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(res.body.errors.fieldErrors[0].path).toBe('name');
   });
 
   test('updateRole: role not found → 404 (line 263)', async () => {
     const fakeId = new mongoose.Types.ObjectId();
     const res = await authed(superToken).put(`/api/roles/${fakeId}`).send({ name: '不存在' });
     expect(res.status).toBe(404);
+    // 404 不区分「角色不存在」与「查库抛错被兜成 404」：必须点名错误码
+    expect(res.body.errors.errorCode).toBe('ROLE_NOT_FOUND');
   });
 
   test('updateRole: built-in role status change → 403 (lines 278-279)', async () => {
@@ -440,12 +450,19 @@ describe('roleController 覆盖率补齐', () => {
       .put(`/api/roles/${customRoleId}/permissions`)
       .send({ permissions: 'not-an-array' });
     expect(res.status).toBe(400);
+    // 同 updateRole：断言校验明细，证明是「权限列表必须是数组」这条被触发
+    expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(res.body.errors.fieldErrors[0].path).toBe('permissions');
   });
 
   test('assignPermissions: missing permissions array → 400 (line 357)', async () => {
     // Body without permissions field at all
     const res = await authed(superToken).put(`/api/roles/${customRoleId}/permissions`).send({});
     expect(res.status).toBe(400);
+    // 与「非数组」同码同路径：两者都必须落在 permissions 字段上，
+    // 才有把握说「缺字段」也被同一道校验挡住（而非误触别的分支）
+    expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(res.body.errors.fieldErrors[0].path).toBe('permissions');
   });
 
   test('assignPermissions: role not found → 404 (line 362)', async () => {
@@ -454,6 +471,7 @@ describe('roleController 覆盖率补齐', () => {
       .put(`/api/roles/${fakeId}/permissions`)
       .send({ permissions: [permReadId] });
     expect(res.status).toBe(404);
+    expect(res.body.errors.errorCode).toBe('ROLE_NOT_FOUND');
   });
 
   test('assignPermissions: empty permissions array after filter → 400 (line 374)', async () => {
@@ -504,12 +522,32 @@ describe('roleController 覆盖率补齐', () => {
   // ===================== assignPermissions: clone mode (lines 412-502) =====================
 
   test('assignPermissions: clone mode — non-built-in role + targetUserId → global mode (not clone)', async () => {
-    // Clone mode only activates for built-in roles. For custom roles with targetUserId,
-    // it falls through to global mode (line 512+). Verify this doesn't crash.
+    // Clone mode 只对内置角色生效；自定义角色带 targetUserId 时必须退回「全局改权限」
+    // （rolePermissionController 的 `if (input.targetUserId && role.isBuiltIn)` 为假）。
+    // 原用例只断 200 —— 而「误走了克隆」同样返回 200（克隆分支也是成功路径），
+    // 断言等于没测。现按三条可证伪的后果断言：
+    //   ① 权限确实写到了该自定义角色上；
+    //   ② 没有凭空多出一个克隆角色；
+    //   ③ 响应里没有克隆专属字段（clonedRole / clonedCode）。
+    const Role = require('../../models/Role');
+
+    const before = await Role.countDocuments({});
     const res = await authed(superToken)
       .put(`/api/roles/${customRoleId}/permissions`)
       .send({ permissions: [permReadId], targetUserId: superUserId });
     expect(res.status).toBe(200);
+
+    // ① 目标角色自身被改（global 模式语义）
+    const after = await Role.findById(customRoleId).lean();
+    expect(after.permissions.map(String)).toContain(String(permReadId));
+
+    // ② 未新增角色（克隆会 createRole）
+    expect(await Role.countDocuments({})).toBe(before);
+
+    // ③ 响应体无克隆专属字段
+    const body = JSON.stringify(res.body);
+    expect(body).not.toContain('clonedRole');
+    expect(body).not.toContain('clonedCode');
   });
 
   test('assignPermissions: clone mode — target user not found → 404 (line 419)', async () => {
@@ -685,6 +723,11 @@ describe('roleController 覆盖率补齐', () => {
     const wsService = app.get('wsService');
     expect(wsService.emitPermissionUpdate).toHaveBeenCalled();
     expect(wsService.emitPermissionSync).toHaveBeenCalled();
+    // 推送参数必须点名真正受影响的用户：只断言「被调用过」时，
+    // 传空数组或传错 userId 同样能过
+    // emitPermissionSync(userIds, meta)：第一个参数才是受影响用户集合
+    const [syncedIds] = wsService.emitPermissionSync.mock.calls.at(-1);
+    expect((syncedIds || []).map(String)).toContain(String(syncUser._id));
 
     await User.findByIdAndDelete(syncUser._id).catch(() => {});
     await Role.findByIdAndDelete(syncRole._id).catch(() => {});
@@ -696,6 +739,7 @@ describe('roleController 覆盖率补齐', () => {
     const fakeId = new mongoose.Types.ObjectId();
     const res = await authed(superToken).delete(`/api/roles/${fakeId}`);
     expect(res.status).toBe(404);
+    expect(res.body.errors.errorCode).toBe('ROLE_NOT_FOUND');
   });
 
   test('deleteRole: role in use → 400 (line 581)', async () => {
@@ -881,6 +925,9 @@ describe('roleController 覆盖率补齐', () => {
       .put(`/api/roles/${failRole._id}/permissions`)
       .send({ permissions: [permReadId] });
     expect(res.status).toBe(200);
+    // 「不阻断」的判据是变更真的落库（200 也可能来自「什么都没做的空操作」）
+    const syncedRole = await Role.findById(failRole._id).lean();
+    expect(syncedRole.permissions.map(String)).toContain(String(permReadId));
 
     // Restore mock
     if (origMock) {

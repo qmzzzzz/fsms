@@ -74,6 +74,11 @@ describe('/api/users/stats 统计缓存', () => {
   };
 
   test('首次请求执行查询并写入缓存，二次请求命中缓存', async () => {
+    // 自包含前置：统计缓存是进程内共享 Map，其他用例可能已写入本用户的缓存。
+    // 本条验证的是「冷缓存首次请求 → 单次聚合 → 写缓存」路径，
+    // 必须显式把本用户缓存清空，而不是依赖随机执行顺序恰好落在冷缓存上
+    cacheKeysOfAdmin().forEach((k) => statsCache._store.delete(k));
+
     const countSpy = jest.spyOn(User, 'countDocuments');
     const aggSpy = jest.spyOn(User, 'aggregate');
 
@@ -115,6 +120,9 @@ describe('/api/users/stats 统计缓存', () => {
     );
 
     await request(app).get('/api/users/stats').set('Authorization', `Bearer ${otherToken}`);
+    // 为当前 admin 生成一次缓存：本条只验证键按用户隔离，
+    // 不再依赖前面其他用例留下的缓存条目（随机顺序下可能已被清空）
+    await getStats();
 
     // 每个用户独立缓存键
     expect(cacheKeysOfAdmin().length).toBe(1);

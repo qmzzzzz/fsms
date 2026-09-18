@@ -11,6 +11,12 @@ const fireAlarmSchema = new mongoose.Schema(
     // 报警基本信息
     alarmCode: {
       type: String,
+      // L-08：与 FireDevice.deviceCode 口径对齐，补 required。
+      // 编号由 plugins/autoIncrement.js 的 pre('save')/pre('validate') 生成，
+      // 而 insertMany 不触发文档中间件——当前唯一写入点是 .create()（会触发钩子），
+      // 故非现存缺陷；但 unique 索引把缺失值视作 null，一旦未来新增批量导入路径
+      // 就会以 E11000 形式暴露。补 required 使失败形态变为显式校验错误。
+      required: [true, '报警编号不能为空'],
       unique: true,
     },
     alarmType: {
@@ -143,5 +149,9 @@ fireAlarmSchema.index({ 'reporter.userId': 1, occurredAt: -1 });
 fireAlarmSchema.index({ 'location.building': 1, occurredAt: -1 });
 fireAlarmSchema.index({ level: 1 });
 fireAlarmSchema.index({ alarmType: 1, occurredAt: -1 });
+// L-22：设备删除级联（DeviceService.deleteDevice）按 deviceId 反查并 $unset 引用。
+// 此前无索引覆盖 → COLLSCAN。12 万告警规模实测：扫 12 万文档 / 204.54ms，
+// 补此索引后扫 30 文档 / 1.07ms（191.2x，见 deliverables/性能实测基线-2026-09-16.json）。
+fireAlarmSchema.index({ deviceId: 1 });
 
 module.exports = mongoose.model('FireAlarm', fireAlarmSchema);

@@ -91,7 +91,7 @@
                   },
                   "password": {
                     "type": "string",
-                    "description": "至少8位，含大小写字母、数字、特殊字符"
+                    "description": "至少12位，含大小写字母、数字、特殊字符"
                   },
                   "realName": {
                     "type": "string"
@@ -357,6 +357,238 @@
         "responses": {
           "200": {
             "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/auth/login-public-key": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "获取登录口令加密公钥（ECDH P-256，供前端加密口令上行）",
+        "responses": {
+          "200": {
+            "description": "返回 publicKey PEM / keyId / curve / 算法标识"
+          }
+        }
+      }
+    },
+    "/api/auth/session": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "轻量会话探测（返回是否已登录；始终 200，不触发令牌刷新链）",
+        "responses": {
+          "200": {
+            "description": "返回 { authenticated: boolean }"
+          }
+        }
+      }
+    },
+    "/api/auth/sessions": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "获取当前用户的活跃会话列表（设备级会话管理）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回会话列表（sid/设备/时间），可远程吊销其他设备"
+          }
+        }
+      }
+    },
+    "/api/auth/sessions/others": {
+      "delete": {
+        "tags": ["Auth"],
+        "summary": "吊销除当前设备外的全部会话",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "其余设备全部下线"
+          }
+        }
+      }
+    },
+    "/api/auth/sessions/{sid}": {
+      "delete": {
+        "tags": ["Auth"],
+        "summary": "吊销指定会话（踢除单台设备）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "该设备已下线"
+          },
+          "404": {
+            "description": "会话不存在"
+          }
+        }
+      }
+    },
+    "/api/auth/mfa/status": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "查询两步验证开启状态与剩余恢复码数量",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 { enabled, recoveryCodesRemaining }"
+          }
+        }
+      }
+    },
+    "/api/auth/mfa/enroll": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "生成两步验证密钥（第一步，返回 Base32 密钥与 otpauth URI）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 secret 与 otpauthUri"
+          },
+          "400": {
+            "description": "已开启两步验证"
+          }
+        }
+      }
+    },
+    "/api/auth/mfa/enable": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "确认开启两步验证（校验一次动态口令，生成备用恢复码）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["mfaCode"],
+                "properties": {
+                  "mfaCode": {
+                    "type": "string",
+                    "description": "6 位动态口令"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回 { enabled: true, recoveryCodes }（明文仅此一次）"
+          },
+          "400": {
+            "description": "验证码错误"
+          }
+        }
+      }
+    },
+    "/api/auth/mfa/disable": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "关闭两步验证（需动态口令或登录密码二次验证）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mfaCode": {
+                    "type": "string",
+                    "description": "6 位动态口令（与 currentPassword 二选一）"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "当前口令密文（与 currentPassword 二选一）"
+                  },
+                  "currentPassword": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回 { enabled: false }"
+          },
+          "403": {
+            "description": "验证失败"
+          }
+        }
+      }
+    },
+    "/api/auth/mfa/recovery-codes": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "重新生成备用恢复码（旧码全部作废；需当前动态口令）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["mfaCode"],
+                "properties": {
+                  "mfaCode": {
+                    "type": "string",
+                    "description": "6 位动态口令"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回新恢复码明文（仅此一次）"
+          },
+          "400": {
+            "description": "口令错误"
           }
         }
       }
@@ -3061,86 +3293,11 @@
         }
       }
     },
-    "/health": {
+    "/api/security/ip-list/query": {
       "get": {
-        "tags": ["System"],
-        "summary": "健康检查",
-        "responses": {
-          "200": {
-            "description": "系统运行正常，包含数据库连接状态"
-          }
-        }
-      }
-    },
-    "/api": {
-      "get": {
-        "tags": ["System"],
-        "summary": "API 根路径",
-        "responses": {
-          "200": {
-            "description": "返回 API 版本和可用端点列表"
-          }
-        }
-      }
-    },
-    "/api/auth/login-public-key": {
-      "get": {
-        "tags": ["Auth"],
-        "summary": "获取登录口令加密公钥（ECDH P-256，供前端加密口令上行）",
-        "responses": {
-          "200": {
-            "description": "返回 publicKey PEM / keyId / curve / 算法标识"
-          }
-        }
-      }
-    },
-    "/api/auth/session": {
-      "get": {
-        "tags": ["Auth"],
-        "summary": "轻量会话探测（返回是否已登录；始终 200，不触发令牌刷新链）",
-        "responses": {
-          "200": {
-            "description": "返回 { authenticated: boolean }"
-          }
-        }
-      }
-    },
-    "/api/auth/sessions": {
-      "get": {
-        "tags": ["Auth"],
-        "summary": "获取当前用户的活跃会话列表（设备级会话管理）",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "返回会话列表（sid/设备/时间），可远程吊销其他设备"
-          }
-        }
-      }
-    },
-    "/api/auth/sessions/others": {
-      "delete": {
-        "tags": ["Auth"],
-        "summary": "吊销除当前设备外的全部会话",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "其余设备全部下线"
-          }
-        }
-      }
-    },
-    "/api/auth/sessions/{sid}": {
-      "delete": {
-        "tags": ["Auth"],
-        "summary": "吊销指定会话（踢除单台设备）",
+        "tags": ["Security"],
+        "summary": "查询 IP 命中的黑/白名单记录",
+        "description": "返回该 IP 命中的全部黑/白名单记录（含 CIDR 网段与等价地址形式）；各列表按覆盖面最宽优先排序（如 /16 与 /24 同时命中时 /16 在首位），并给出最终生效判定（白名单优先）",
         "security": [
           {
             "bearerAuth": []
@@ -3148,169 +3305,18 @@
         ],
         "parameters": [
           {
-            "name": "sid",
-            "in": "path",
+            "name": "ip",
+            "in": "query",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "description": "IPv4/IPv6 单地址（不含 CIDR）"
             }
           }
         ],
         "responses": {
           "200": {
-            "description": "该设备已下线"
-          },
-          "404": {
-            "description": "会话不存在"
-          }
-        }
-      }
-    },
-    "/api/auth/mfa/status": {
-      "get": {
-        "tags": ["Auth"],
-        "summary": "查询两步验证开启状态与剩余恢复码数量",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "返回 { enabled, recoveryCodesRemaining }"
-          }
-        }
-      }
-    },
-    "/api/auth/mfa/enroll": {
-      "post": {
-        "tags": ["Auth"],
-        "summary": "生成两步验证密钥（第一步，返回 Base32 密钥与 otpauth URI）",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "返回 secret 与 otpauthUri"
-          },
-          "400": {
-            "description": "已开启两步验证"
-          }
-        }
-      }
-    },
-    "/api/auth/mfa/enable": {
-      "post": {
-        "tags": ["Auth"],
-        "summary": "确认开启两步验证（校验一次动态口令，生成备用恢复码）",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["mfaCode"],
-                "properties": {
-                  "mfaCode": {
-                    "type": "string",
-                    "description": "6 位动态口令"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "返回 { enabled: true, recoveryCodes }（明文仅此一次）"
-          },
-          "400": {
-            "description": "验证码错误"
-          }
-        }
-      }
-    },
-    "/api/auth/mfa/disable": {
-      "post": {
-        "tags": ["Auth"],
-        "summary": "关闭两步验证（需动态口令或登录密码二次验证）",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "mfaCode": {
-                    "type": "string",
-                    "description": "6 位动态口令（与 currentPassword 二选一）"
-                  },
-                  "encCurrentPassword": {
-                    "type": "string",
-                    "description": "当前口令密文（与 currentPassword 二选一）"
-                  },
-                  "currentPassword": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "返回 { enabled: false }"
-          },
-          "403": {
-            "description": "验证失败"
-          }
-        }
-      }
-    },
-    "/api/auth/mfa/recovery-codes": {
-      "post": {
-        "tags": ["Auth"],
-        "summary": "重新生成备用恢复码（旧码全部作废；需当前动态口令）",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["mfaCode"],
-                "properties": {
-                  "mfaCode": {
-                    "type": "string",
-                    "description": "6 位动态口令"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "返回新恢复码明文（仅此一次）"
-          },
-          "400": {
-            "description": "口令错误"
+            "description": "返回命中记录"
           }
         }
       }
@@ -3450,28 +3456,24 @@
         }
       }
     },
-    "/api/security/ip-list/query": {
+    "/health": {
       "get": {
-        "tags": ["Security"],
-        "summary": "查询 IP 命中的黑/白名单记录（含 CIDR 网段，覆盖面最宽优先）",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "ip",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
+        "tags": ["System"],
+        "summary": "健康检查",
         "responses": {
           "200": {
-            "description": "返回命中记录"
+            "description": "进程存活信号，固定返回 { status: 'ok' }"
+          }
+        }
+      }
+    },
+    "/api": {
+      "get": {
+        "tags": ["System"],
+        "summary": "API 根路径",
+        "responses": {
+          "200": {
+            "description": "固定返回 { success: true, message }，不含端点清单"
           }
         }
       }

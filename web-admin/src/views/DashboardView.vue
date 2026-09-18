@@ -109,6 +109,8 @@ import { CaretTop, CaretBottom, Cpu, Bell, UserFilled } from '@element-plus/icon
 
 import { useAuthStore } from '@/store'
 import { usePermission } from '@/composables/usePermission'
+import { formatTime } from '@/utils/datetime'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import { api, isCanceledError } from '@/utils/api'
 // 类型/状态 → i18n 标签映射（O-1 抽取的单一事实来源，与 ReportView 共用）
 import { makeAlarmTypeLabels, makeAlarmStatusLabels } from '@/utils/labelMaps'
@@ -205,6 +207,12 @@ const stats = ref([
 const recentAlarms = ref([])
 const loading = ref(true)
 
+// 请求新鲜度守卫：5 分钟定时刷新与 visibilitychange 恢复可能交叠，
+// 先发出的慢响应若后返回，会把统计卡与报警表覆盖成旧值（实测复现：
+// 新值 222 落地后又被旧值 111 覆盖）。两个数据源各自持守卫，互不干扰。
+const dashGuard = useLatestRequest()
+const alarmGuard = useLatestRequest()
+
 // 图表实例/初始化/配色/窗口 resize 已迁入 DashboardCharts.vue（D-2）
 
 let refreshTimer = null
@@ -241,6 +249,7 @@ const stopAutoRefresh = () => {
 const loadDashboardData = async () => {
   // P3-39：无 report:read 时整个统计卡片区不渲染，也就不必请求
   if (!canReadReport.value) return
+  const isCurrent = dashGuard()
   try {
     const [reportRes, userRes] = await Promise.all([
       api.reports.getDashboard(),
@@ -250,6 +259,8 @@ const loadDashboardData = async () => {
         : Promise.resolve({ data: { data: {} } }),
     ])
 
+    // 过期响应直接丢弃：否则慢的旧请求会覆盖新值
+    if (!isCurrent()) return
     if (reportRes.data.success) {
       const d = reportRes.data.data
       const userStats = userRes.data?.data || {}
@@ -296,14 +307,16 @@ const loadDashboardData = async () => {
 const loadRecentAlarms = async () => {
   // P3-39：无 alarm:read 时「最近报警」整块不渲染
   if (!canReadAlarm.value) return
+  const isCurrent = alarmGuard()
   try {
     const res = await api.alarms.getList({ limit: 5 })
+    if (!isCurrent()) return
     const list = res?.data?.data || []
     recentAlarms.value = list
       .map((a) => ({
-        time: a.occurredAt
-          ? new Date(a.occurredAt).toLocaleString(locale.value, { hour12: false })
-          : '',
+        // 统一走 utils/datetime.formatTime（O-3）：本地时区 + 固定 YYYY-MM-DD HH:mm:ss，
+        // 不随界面语言漂移；缺失仍保留空串占位（与骨架期同构，不引入新占位符）。
+        time: a.occurredAt ? formatTime(a.occurredAt) : '',
         location: formatLocation(a.location),
         type: alarmTypeLabel(a.alarmType),
         tagType:

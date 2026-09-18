@@ -30,6 +30,7 @@ process.env.AUDIT_WAL_MAX_BYTES = '100000'; // 足够大，不触发 WAL cap
 
 // 必须在 env 设置之后 require
 const auditBuffer = require('../../services/auditBuffer');
+const wal = require('../../services/auditBufferWal');
 const AuditLog = require('../../models/AuditLog');
 const { TEST_CLIENT_IP } = require('../fixtures');
 
@@ -45,19 +46,34 @@ async function waitFor(cond, timeoutMs = 8000) {
   return false;
 }
 
-/** 等 WAL 异步追加链清空：文件内容不再变化（beforeEach 清理前必须先排空） */
+/** 等 WAL 异步写入链真正排空（追加/裁剪/rename 全部落盘）。
+ *
+ * 【竞态修复】原实现比较「两次读到的文件内容是否相同」，但 WAL 追加是
+ * fire-and-forget 的异步链（auditBufferWal.walAppendLine）：push() 返回时
+ * 文件可能**尚未创建**，此时第一次读得 null 作为基线，第二次读仍是 null，
+ * null === null 成立 → 函数在 0 次循环后立即返回。
+ *
+ * 后果：调用方紧接着读 WAL / 断言缓冲内容时，实际读取的是「异步链还没跑完」
+ * 的中间态。单跑本文件时事件循环空闲、链几乎瞬时完成，故长期未被发现；
+ * 全量并行（50% workers，每个 worker 在跑真实 DB 操作）下链明显排队，
+ * 稳定复现为「WAL 行数 0 / 缓冲计数 0」的假红。
+ *
+ * 修复：改为等待 wal 模块自己的串行链排空（drain 就是 flushAndStop 用的
+ * 同一判据），再叠加一次「文件内容稳定」确认，语义与「追加链排空」等价且
+ * 不依赖文件是否已存在。 */
 async function waitForWalQuiet(timeoutMs = 8000) {
-  const walPath = auditBuffer.getWalPath();
+  await wal.drain(); // 精确判据：walChain 上排队的 append/trim/rename 全部完成
+  const p = auditBuffer.getWalPath();
   let last = null;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     let cur;
     try {
-      cur = fs.readFileSync(walPath, 'utf8');
+      cur = fs.readFileSync(p, 'utf8');
     } catch (_) {
-      cur = null;
+      return; // 文件不存在 = 没有待观察的写入（链已排空），无需继续等
     }
-    if (cur === last) return;
+    if (cur === last) return; // 内容不再变化
     last = cur;
     await new Promise((r) => setTimeout(r, 25));
   }
@@ -85,14 +101,31 @@ describe('auditBuffer 分支补齐', () => {
     }
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    // 【顺序无关修复】先把前序用例遗留的在途 WAL 链（含 flush 成功后才排入的 trim）
+    // 等干净，再清理文件。否则前者的 trim 会在本用例执行期内读取并裁掉本用例刚写的行
+    // → 本用例的 trim 读到 0 行提前 return，相关断言（如「writeFile 失败须产生 warn」）
+    // 会等满 8s 超时。waitForWalQuiet = drain + 内容稳定确认，能覆盖「drain 时 trim 尚未入队」的窗口。
+    await waitForWalQuiet();
     auditBuffer.__resetForTest();
     auditBuffer.stop();
-    // 清理 WAL 文件
+    // 【顺序无关修复】清掉本套件写入的审计行：多个用例都以 testuser_ 前缀落库，
+    // 计数型断言（如 /^testuser_\d+$/ === 100）会被前序用例的残留污染。
+    // 每个用例从干净状态起步，结果与执行顺序无关。
+    // bypassAppendOnly 仅测试环境放行（auditLogHooks.js:127 已做 NODE_ENV 校验）。
     try {
-      fs.unlinkSync(auditBuffer.getWalPath());
+      await AuditLog.deleteMany({ username: /^testuser_/ }, { bypassAppendOnly: true });
     } catch (_) {
-      /* ignore */
+      /* 库未连接时忽略 */
+    }
+    // 清理 WAL 文件。两处都清：getWalPath() 在 -t 单跑时可能仍停在模块加载期的
+    // 默认路径，而本套件的写入目标始终是 AUDIT_WAL_PATH（startup() 会重读它）。
+    for (const p of [auditBuffer.getWalPath(), process.env.AUDIT_WAL_PATH]) {
+      try {
+        fs.unlinkSync(p);
+      } catch (_) {
+        /* ignore */
+      }
     }
   });
 
@@ -126,6 +159,14 @@ describe('auditBuffer 分支补齐', () => {
     return fakeHandle;
   }
 
+  /**
+   * 本套件的 WAL 路径（显式钉死，供「写文件 → start() 重放」类用例在 start 前取用）。
+   *
+   * 【顺序无关修复】不能用 auditBuffer.getWalPath()：它在 startup() 之前返回
+   * **模块加载期的默认派生路径**（仓库 logs/），而模块写入时用的是 AUDIT_WAL_PATH。
+   * 写错文件 → 重放读不到 → 轮询 8s 超时。本 helper 恒返回本套件的 env 路径。
+   */
+  const testWalPath = () => process.env.AUDIT_WAL_PATH;
   /** 读 WAL 内容（经 getWalPath，与模块写入路径恒一致） */
   function readWal() {
     try {
@@ -175,8 +216,12 @@ describe('auditBuffer 分支补齐', () => {
       }
 
       // flush 是异步的：轮询 DB 计数（替代固定 1000ms 等待）
+      // 【顺序无关修复】原断言用 /^testuser_/ 全前缀 === 100，会被同套件其他
+      // 用例（如 testuser_timer_test）留下的行污染成 101 → 轮询恒假、8s 超时。
+      // 改为本条用例专属的计数范围（makeDoc(数字) → testuser_<纯数字>），
+      // 与「谁先跑」无关。
       const done = await waitFor(async () => {
-        const n = await AuditLog.countDocuments({ username: /^testuser_/ });
+        const n = await AuditLog.countDocuments({ username: /^testuser_\d+$/ });
         return n === 100;
       });
       expect(done).toBe(true);
@@ -346,7 +391,7 @@ describe('auditBuffer 分支补齐', () => {
   describe('WAL 重放', () => {
     test('start 时重放 WAL 残留行到缓冲', async () => {
       // 先手动写几行到 WAL 文件
-      const walPath = auditBuffer.getWalPath();
+      const walPath = testWalPath();
       const dir = path.dirname(walPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
@@ -363,7 +408,7 @@ describe('auditBuffer 分支补齐', () => {
     });
 
     test('WAL 含损坏行时跳过不阻塞启动', async () => {
-      const walPath = auditBuffer.getWalPath();
+      const walPath = testWalPath();
       const dir = path.dirname(walPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
@@ -431,7 +476,12 @@ describe('auditBuffer 分支补齐', () => {
     test('WAL 文件超过 AUDIT_WAL_MAX_BYTES 时丢弃最旧一半行', async () => {
       // getWalMaxBytes 运行期读 env，注入小阈值触发裁剪
       const origMax = process.env.AUDIT_WAL_MAX_BYTES;
+      const origInterval = process.env.AUDIT_WAL_STAT_INTERVAL;
       process.env.AUDIT_WAL_MAX_BYTES = '200'; // 约 3~4 行就超
+      // 消除顺序依赖（本轮复审）：enforceWalLimit 由 walAppendCount % interval 触发，
+      // interval 默认 32 且 walAppendCount 是模块级累加值——单独跑本用例（-t）时
+      // 只有 10 次 push，永远到不了阈值，用例会假红。设为 1 后每次 append 都检查。
+      process.env.AUDIT_WAL_STAT_INTERVAL = '1';
 
       mockTimer();
       auditBuffer.start();
@@ -449,6 +499,8 @@ describe('auditBuffer 分支补齐', () => {
       expect(done).toBe(true);
 
       process.env.AUDIT_WAL_MAX_BYTES = origMax;
+      if (origInterval === undefined) delete process.env.AUDIT_WAL_STAT_INTERVAL;
+      else process.env.AUDIT_WAL_STAT_INTERVAL = origInterval;
     });
   });
 
@@ -482,14 +534,18 @@ describe('auditBuffer 分支补齐', () => {
   // ---- WAL 目录不存在时 start 自动创建 ----
   describe('ensureLogsDir 创建目录', () => {
     test('WAL 父目录不存在时 start 自动 mkdirSync', () => {
-      // 删除 WAL 所在目录以触发 mkdirSync 分支
-      const walPath = auditBuffer.getWalPath();
+      // 【顺序无关修复】原用例删的是 auditBuffer.getWalPath() 的目录，但在
+      // startup() 之前该函数返回**模块加载期的默认派生路径**（仓库 logs/），
+      // 而不是本套件的 AUDIT_WAL_PATH——于是「删错目录、断言另一个目录」，
+      // 只在特定执行顺序下碰巧通过。现显式钉死路径，删/断言同一个目录。
+      mockTimer();
+      auditBuffer.start(); // 先 startup() 把路径切到本套件 env 路径
+      auditBuffer.stop();
+      const walPath = process.env.AUDIT_WAL_PATH;
+      expect(auditBuffer.getWalPath()).toBe(walPath); // 路径确实切过去了
       const walDir = path.dirname(walPath);
-      try {
-        fs.rmSync(walDir, { recursive: true, force: true });
-      } catch (_) {
-        /* ignore */
-      }
+      fs.rmSync(walDir, { recursive: true, force: true });
+      expect(fs.existsSync(walDir)).toBe(false); // 前置条件：目录真的没了
 
       mockTimer();
       expect(() => auditBuffer.start()).not.toThrow();
@@ -539,44 +595,71 @@ describe('auditBuffer 分支补齐', () => {
       appendSpy.mockRestore();
     });
 
-    test('enforceWalLimit stat 返回非 ENOENT 错误时记录 warn', async () => {
+    test('enforceWalLimit stat 返回非 ENOENT 错误时记录 warn 且不抛异常', async () => {
+      // P1-29 修复（本轮复审）：原用例只有「mock + sleep 300ms + restore」，
+      // 全程零断言——把源码里的 logger.warn 整行删掉，它依然绿（实测确认）。
+      // 现改为捕获 logger.warn 并断言调用参数含错误信息，落实测试名承诺的语义。
       const origMax = process.env.AUDIT_WAL_MAX_BYTES;
+      const origInterval = process.env.AUDIT_WAL_STAT_INTERVAL;
       process.env.AUDIT_WAL_MAX_BYTES = '1'; // 极低阈值确保进入 stat 检查
+      // 关键：walAppendCount % interval 才触发 enforceWalLimit（默认 32）。
+      // 原用例只 push 1 条 → 1 % 32 !== 0 → 压根没进过该函数（这也是它能
+      // 「零断言还绿」的根本原因：mock 了 stat，却从未被调用）。
+      process.env.AUDIT_WAL_STAT_INTERVAL = '1';
 
       mockTimer();
-      auditBuffer.start();
-
-      // mock stat 返回非 ENOENT 错误
+      const logger = require('../../utils/logger');
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
       const statSpy = jest
         .spyOn(fs.promises, 'stat')
         .mockRejectedValue(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+      try {
+        auditBuffer.start();
+        auditBuffer.push(makeDoc('stat_err'));
 
-      auditBuffer.push(makeDoc('stat_err'));
-
-      // 等待 walChain 推进
-      await new Promise((r) => setTimeout(r, 300));
-
-      statSpy.mockRestore();
-      process.env.AUDIT_WAL_MAX_BYTES = origMax;
+        const logged = await waitFor(() =>
+          warnSpy.mock.calls.some((c) => String(c[0]).includes('WAL 大小检查失败'))
+        );
+        expect(logged).toBe(true);
+        expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('EACCES'))).toBe(true);
+      } finally {
+        statSpy.mockRestore();
+        warnSpy.mockRestore();
+        process.env.AUDIT_WAL_MAX_BYTES = origMax;
+        if (origInterval === undefined) delete process.env.AUDIT_WAL_STAT_INTERVAL;
+        else process.env.AUDIT_WAL_STAT_INTERVAL = origInterval;
+      }
     });
 
-    test('walTrimLines 中 writeFile 失败触发外层 catch（line 185）', async () => {
+    test('walTrimLines 中 writeFile 失败触发外层 catch：记 warn 且 WAL 保持原样', async () => {
+      // P1-29 修复（本轮复审）：原用例同样是「mock writeFile + sleep 500ms」，零断言。
+      // walTrimLines 把整段逻辑挂在 walChain.then(...)；atomicReplaceWal 抛错会被链尾
+      // 的 .catch 兜住并 warn（auditBufferWal.js:185 → 链尾 catch）。
+      // 现断言两件事：① 确实产生了 warn（含错误消息）；② 原子替换失败后主 WAL 未被破坏。
       mockTimer();
       auditBuffer.start();
 
       auditBuffer.push(makeDoc('trim_write_err'));
-      // 等 WAL append 完成（轮询内容可见，替代固定 200ms）
       await waitFor(() => readWal().includes('trim_write_err'));
+      const walBefore = readWal();
 
-      // mock writeFile 使 walTrimLines 的原子替换失败
+      const logger = require('../../utils/logger');
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
       const writeSpy = jest
         .spyOn(fs.promises, 'writeFile')
         .mockRejectedValue(new Error('ENOSPC: no space left'));
-
-      tickFn();
-      await new Promise((r) => setTimeout(r, 500));
-
-      writeSpy.mockRestore();
+      try {
+        tickFn();
+        const logged = await waitFor(() =>
+          warnSpy.mock.calls.some((c) => String(c[0]).includes('ENOSPC'))
+        );
+        expect(logged).toBe(true);
+        // 原子替换走「临时文件 → rename」，writeFile 失败即未触碰主 WAL
+        expect(readWal()).toBe(walBefore);
+      } finally {
+        writeSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
     });
 
     test('walTrimLines records.length < n 时记录 warn（line 174）', async () => {
@@ -584,7 +667,7 @@ describe('auditBuffer 分支补齐', () => {
       // → records.length(1) < n(3) → warn + 按实际行数清理
 
       // 先手动写 1 行到 WAL
-      const walPath = auditBuffer.getWalPath();
+      const walPath = testWalPath();
       const dir = path.dirname(walPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(walPath, JSON.stringify(makeDoc('wal_single')) + '\n', 'utf8');
@@ -625,10 +708,28 @@ describe('auditBuffer 分支补齐', () => {
       expect(count).toBe(3);
     });
 
-    test('start WAL 重放 .catch 路径（line 338）', async () => {
-      // 要让 walChain.then(...) 内的代码抛异常，
-      // 可以让 readWalLines 成功返回行，但后续 enforceBufferLimit 内的 logger.error 抛错
-      const walPath = auditBuffer.getWalPath();
+    test('start WAL 重放链上的失败被 catch 吞掉（不炸 start、不阻塞后续写入）', async () => {
+      // 【断言收紧】原用例注入 logger.error 抛错，但重放链上真正会抛的点是
+      // enforceBufferLimit 内部的 logger.error；且末尾 `await waitFor(...)`
+      // **丢弃了返回值**——超时（8s）也照样绿，同时让本用例白等满 8 秒。
+      // 本用例的主张是「重放链上的异常被 serialize 的 catch 处理器吃掉」，
+      // 因此判据改为：重放完成（缓冲达上限）+ start 未抛出 + 后续 push 仍工作。
+      // 【路径必须显式钉死】`getWalPath()` 返回的是「上一次 startup() 设的路径」，
+      // 与「本次 start() 将使用的路径」是两个时刻的值。全量运行下前面的用例已
+      // 调过 start()，此处拿到的正是本套件 env 路径；但用 `-t` 单跑时前序用例被
+      // 跳过，拿到的是模块加载期的默认路径（logs/audit-buffer.<db>.wal）——
+      // 于是行被写进默认文件、重放却读 env 文件，缓冲恒为 0。
+      // 故先把路径切好（start→stop 不改写文件），并断言它确实等于 env 路径。
+      // 先让 startup() 把 WAL 路径切到本套件的 mkdtemp（getWalPath() 否则返回
+      // 模块加载期的默认派生路径），并等这一次重放链跑完（此时文件不存在 → 读 0 行）。
+      // 不等就写文件的话，这条链可能在写入之后才执行 readLines，把 250 行提前吞进
+      // 缓冲并被下一段断言误算——这正是原用例「恒为 0 行」的隐藏成因之一。
+      mockTimer();
+      auditBuffer.start();
+      await wal.drain();
+      auditBuffer.stop();
+      const walPath = testWalPath();
+      expect(walPath).toBe(process.env.AUDIT_WAL_PATH); // 钉死路径确实切过去了
       const dir = path.dirname(walPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
@@ -640,7 +741,7 @@ describe('auditBuffer 分支补齐', () => {
       }
       fs.writeFileSync(walPath, lines.join('\n') + '\n', 'utf8');
 
-      // mock logger.error 使其在 enforceBufferLimit 内抛错
+      // 让重放链上的第一次 logger.error 抛错：serialize 的 catch 处理器必须接住它
       const logger = require('../../utils/logger');
       const errSpy = jest.spyOn(logger, 'error').mockImplementationOnce(() => {
         throw new Error('logger.error exploded');
@@ -649,10 +750,63 @@ describe('auditBuffer 分支补齐', () => {
       mockTimer();
       expect(() => auditBuffer.start()).not.toThrow();
 
-      // 等待 walChain 上的 catch 执行（重放 250 行后触发，轮询缓冲）
-      await waitFor(() => auditBuffer.getStats().bufferLength >= 200);
+      // 重放完成：250 行读回后被硬上限裁剪到 200（drain 等链排空，比轮询确定）
+      await wal.drain();
+      expect(auditBuffer.getStats().bufferLength).toBeGreaterThanOrEqual(200);
+
+      // 链上异常被吞：后续 push 仍能正常入缓冲。
+      // 注意不能断言「缓冲 = before+1」——200 行已满 BUFFER_LIMIT，push 会立即
+      // 触发 flush() 把整批取走落库，缓冲随即归零（实测 before=200 → push 后 0）。
+      // 真正要证明的是「push 本身没抛错，且文档确实进了链路」，故断言 WAL 增长：
+      // push 必然追加一行（wal.appendLine 在 flush 之前同步调用）。
+      const walBefore = fs.readFileSync(walPath, 'utf8');
+      expect(() => auditBuffer.push(makeDoc('after_replay_chain_error'))).not.toThrow();
+      await wal.drain();
+      const walAfter = fs.readFileSync(walPath, 'utf8');
+      expect(walAfter).toContain('after_replay_chain_error');
+      expect(walAfter.length).toBeGreaterThan(walBefore.length);
 
       errSpy.mockRestore();
+    });
+  });
+
+  // ---- waitForWalQuiet 判据（防退化守卫，对应函数注释「竞态修复」）----
+  describe('waitForWalQuiet 判据', () => {
+    test('追加仍在途时，等待判据不得提前返回', async () => {
+      // 【可证伪性】闸住 appendFile 让追加永不完成：waitForWalQuiet 若丢掉
+      // `await wal.drain()`，会在「文件不存在」的 catch 分支立即 return，
+      // 下面的 expect(returned).toBe(false) 随即转红——这正是该行的承重对象。
+      // 修复前的旧判据（只比较两次读到的内容）在同一闸门下必红。
+      mockTimer();
+      auditBuffer.start();
+      await wal.drain(); // 先排空 start() 的重放任务，隔离出 push 的追加
+
+      let release;
+      const gate = new Promise((r) => {
+        release = r;
+      });
+      const realAppend = fs.promises.appendFile.bind(fs.promises);
+      const appendSpy = jest
+        .spyOn(fs.promises, 'appendFile')
+        .mockImplementation(async (...args) => {
+          await gate;
+          return realAppend(...args);
+        });
+
+      let returned = false;
+      auditBuffer.push(makeDoc('quiet_guard'));
+      const waiter = waitForWalQuiet().then(() => {
+        returned = true;
+      });
+      try {
+        await new Promise((r) => setTimeout(r, 150));
+        expect(returned).toBe(false);
+      } finally {
+        release();
+        await waiter;
+        await wal.drain();
+        appendSpy.mockRestore();
+      }
     });
   });
 });

@@ -148,15 +148,23 @@ const checkBruteForce = async (username, ip) => {
     const shouldAlertIp = shouldSendAlert(ipAlertKey);
     if (!shouldAlertUser && !shouldAlertIp) return;
 
-    await AuditLog.create({
-      action: ALERT_TYPES.BRUTE_FORCE,
-      category: 'auth',
-      username,
-      ip,
-      riskLevel: ALERT_LEVELS.CRITICAL,
-      riskFactors: [`登录失败次数超标 (账户:${userFailures}, IP:${ipFailures})`],
-      body: { userAttempts: userFailures, ipAttempts: ipFailures, window: '5 分钟' },
-    });
+    // P1-23：审计写入挂独立 try/catch。此前裸 await 位于 try 块之外，
+    // AuditLog.create 抛错（DB 瞬断/校验失败）会把异常上抛给调用方，
+    // 下方自动封禁 try 块根本执行不到——告警审计写失败反而放过了封禁。
+    // 审计失败不阻断封禁与通知，但按项目风格记录 error（不静默吞错）。
+    try {
+      await AuditLog.create({
+        action: ALERT_TYPES.BRUTE_FORCE,
+        category: 'auth',
+        username,
+        ip,
+        riskLevel: ALERT_LEVELS.CRITICAL,
+        riskFactors: [`登录失败次数超标 (账户:${userFailures}, IP:${ipFailures})`],
+        body: { userAttempts: userFailures, ipAttempts: ipFailures, window: '5 分钟' },
+      });
+    } catch (e) {
+      logger.error(`暴力破解告警审计落库失败（封禁流程继续）: ${e.message}`);
+    }
 
     // B-M1：投递走 fire-and-forget——本函数被登录失败/导出路径 await，
     // webhook 不可达时（2 次重试 × 5s 超时 + 退避 ≈ 11s）会把延迟放大到
@@ -171,6 +179,8 @@ const checkBruteForce = async (username, ip) => {
 
     try {
       const IPBlacklist = require('../models/IPBlacklist');
+      // E-04：**必须**保持惰性 require（securityAlert ↔ middleware/security
+      // 循环依赖），提到文件顶部会在加载顺序不利时拿到未完成的导出。
       const { addToBlacklist } = require('../middleware/security');
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       // 历史封禁次数必须按归一化 IP 统计：addToBlacklist 入库的是归一化形态，

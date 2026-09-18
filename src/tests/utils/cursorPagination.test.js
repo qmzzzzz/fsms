@@ -10,6 +10,7 @@ const {
   decodeCursor,
   applyCursorCondition,
   buildCursorResult,
+  MAX_CURSOR_VALUE_LENGTH,
 } = require('../../utils/cursorPagination');
 const ApiError = require('../../utils/ApiError');
 
@@ -35,6 +36,32 @@ describe('utils/cursorPagination', () => {
     test('排序键为 null 也可往返（边界值不崩溃）', () => {
       const decoded = decodeCursor(encodeCursor({ v: null, id: validId() }));
       expect(decoded.v).toBeNull();
+    });
+  });
+
+  // L-14：decodeCursor 此前只校验「v 键存在」，对象/数组形态直接放行，
+  // 而 string 分支会把它们原样透传进查询条件 → 静默错页而非报错。
+  // 以下用例锁定「非标量一律拒绝」，防回归。
+  describe('decodeCursor：v 必须为标量（L-14）', () => {
+    const encode = (v) =>
+      Buffer.from(JSON.stringify({ v, id: validId() }), 'utf8').toString('base64url');
+
+    test.each([
+      ['对象', { $gt: '' }],
+      ['数组', ['a', 'b']],
+      ['嵌套对象', { a: { b: 1 } }],
+      ['布尔', true],
+    ])('v 为%s → 400（拒绝查询注入面）', (_name, v) => {
+      expect(() => decodeCursor(encode(v))).toThrow(ApiError);
+    });
+
+    test('v 为超长字符串 → 400（封住超长入参）', () => {
+      expect(() => decodeCursor(encode('x'.repeat(MAX_CURSOR_VALUE_LENGTH + 1)))).toThrow(ApiError);
+    });
+
+    test('v 为合法长度的字符串/数字仍放行', () => {
+      expect(decodeCursor(encode('DEV-0007')).v).toBe('DEV-0007');
+      expect(decodeCursor(encode(42)).v).toBe(42);
     });
   });
 

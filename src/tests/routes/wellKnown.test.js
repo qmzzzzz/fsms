@@ -58,8 +58,17 @@ describe('wellKnownRoutes 公共发现端点', () => {
   });
 
   describe('POST /csp-report（G9）', () => {
+    afterEach(() => jest.restoreAllMocks());
+
     test('Level 2 格式上报返回 204', async () => {
-      const res = await request(buildApp())
+      // 204 是本端点对外契约（无 body），但「上报内容真的被归一化并落日志」才是端点价值：
+      // 只断 204 时，normalizeReport 抛异常走 catch、或空上报早退分支被误命中，都照样绿。
+      // 注意 buildApp() 内 jest.resetModules()：必须在它之后再 require logger，
+      // 否则 spy 打在旧模块实例上，路由用的是重置后的新实例，断言会读到空调用记录。
+      const app = buildApp();
+      const loggerNow = require('../../utils/logger');
+      const warnSpy = jest.spyOn(loggerNow, 'warn').mockImplementation(() => {});
+      const res = await request(app)
         .post('/csp-report')
         .set('Content-Type', 'application/csp-report')
         .send(
@@ -72,10 +81,20 @@ describe('wellKnownRoutes 公共发现端点', () => {
           })
         );
       expect(res.status).toBe(204);
+      // Level 2 的连字符字段名必须被归一化成 camelCase 键（violated-directive → directive）
+      const [, meta] = warnSpy.mock.calls.at(-1) || [];
+      expect(meta).toMatchObject({
+        directive: 'script-src',
+        blockedUri: 'https://evil.example/x.js',
+        documentUri: 'https://app.example/page',
+      });
     });
 
     test('Reporting API 数组格式上报返回 204', async () => {
-      const res = await request(buildApp())
+      const app = buildApp();
+      const loggerNow = require('../../utils/logger');
+      const warnSpy = jest.spyOn(loggerNow, 'warn').mockImplementation(() => {});
+      const res = await request(app)
         .post('/csp-report')
         .set('Content-Type', 'application/reports+json')
         .send(
@@ -87,15 +106,26 @@ describe('wellKnownRoutes 公共发现端点', () => {
           ])
         );
       expect(res.status).toBe(204);
+      // 数组格式走 normalizeReport 的 Array 分支：取首个含 body 的条目，
+      // 字段名是 Reporting API 的 effectiveDirective/blockedURL（非 Level 2 连字符名）；
+      // 若把 Array 分支写成对象分支，directive 会是 undefined（本断言转红）
+      const [, meta] = warnSpy.mock.calls.at(-1) || [];
+      expect(meta).toMatchObject({ directive: 'img-src', blockedUri: 'data:image/png;base64,AAA' });
     });
 
     test('空体/畸形体同样返回 204（不给客户端二次噪音）', async () => {
       const app = buildApp();
+      const loggerNow = require('../../utils/logger');
+      const warnSpy = jest.spyOn(loggerNow, 'warn').mockImplementation(() => {});
       const empty = await request(app)
         .post('/csp-report')
         .set('Content-Type', 'application/json')
         .send('{}');
       expect(empty.status).toBe(204);
+      // 「空上报不落日志」是本用例的实质主张（防被当日志注入通道）：
+      // 只断 204 时，早退分支被删掉、空对象也照样写一条 warn 也看不出来
+      const cspLogs = warnSpy.mock.calls.filter((c) => c[0] === 'CSP 违规上报');
+      expect(cspLogs).toHaveLength(0);
     });
 
     test('超过 16kb 的上报体被拒绝', async () => {
@@ -105,6 +135,9 @@ describe('wellKnownRoutes 公共发现端点', () => {
         .set('Content-Type', 'application/csp-report')
         .send(huge);
       expect(res.status).toBe(413);
+      // 413 必须来自体积上限这道闸：断言不是 400/500（解析失败或穿透到处理器）
+      expect(res.status).not.toBe(400);
+      expect(res.status).not.toBe(500);
     });
   });
 

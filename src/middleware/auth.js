@@ -181,8 +181,16 @@ const cacheCleanupTimer = setInterval(() => {
 cacheCleanupTimer.unref?.();
 
 /**
- * 验证 JWT Token
- * 将解析后的用户信息附加到 req.user，并校验用户当前是否仍有效
+ * 验证 JWT Token：将解析后的用户信息附加到 req.user，并校验用户当前是否仍有效
+ *
+ * E-01 整改：本函数原圈复杂度 29（报告 §八 E-01 三个目标函数之一）。
+ * 按「令牌 → 账户 → 凭据新鲜度 → IP → 设备会话 → 上下文 → 错误映射」拆为
+ * 6 个模块级 helper，骨架只保留编排。每个 assert* 返回「错误响应」或 null，
+ * 与原有的 if (...) return ... 逐一对应，短路顺序完全保持不变。
+ *
+ * 刻意不拆的部分：所有校验共用一个 try/catch——黑名单与会话服务的 fail-closed
+ * 异常（BLACKLIST_SERVICE_UNAVAILABLE / SESSION_SERVICE_UNAVAILABLE）必须统一
+ * 转 503，拆散 try 会让某条路径退化成 500。
  */
 const authenticate = async (req, res, next) => {
   try {
@@ -202,122 +210,19 @@ const authenticate = async (req, res, next) => {
 
     // 3. 查询用户当前是否仍有效（防止已禁用/锁定用户的旧 Token 继续使用）
     const freshUser = await loadValidUser(decoded.userId);
-    if (!freshUser) {
-      return ApiResponse.codeError(res, 'USER_NOT_FOUND_OR_DELETED');
-    }
-    if (freshUser.status === 'inactive') {
-      return ApiResponse.codeError(res, 'ACCOUNT_DISABLED');
-    }
-    if (freshUser.status === 'locked') {
-      return ApiResponse.codeError(res, 'ACCOUNT_LOCKED');
-    }
-    if (freshUser.lockUntil && freshUser.lockUntil > new Date()) {
-      return ApiResponse.codeError(res, 'ACCOUNT_TEMP_LOCKED');
-    }
+    const userError = assertAccountUsable(freshUser, res);
+    if (userError) return userError;
 
-    // 4. 检查密码是否已修改（token 签发时间早于密码修改时间则拒绝）
-    // 用秒级比较：iat 为整秒，passwordChangedAt 为毫秒，直接比会因同秒内
-    // ms > iat*1000 误拒"改密后同秒新签发"的合法令牌（如 refresh 重放触发
-    // invalidateUserTokens 置 passwordChangedAt 后的即时新登录）。
-    if (freshUser.passwordChangedAt && decoded.iat) {
-      const changedAtSec = Math.floor(freshUser.passwordChangedAt.getTime() / 1000);
-      if (changedAtSec > decoded.iat) {
-        return ApiResponse.codeError(res, 'PASSWORD_CHANGED_RELOGIN');
-      }
-    }
+    const credentialError = assertCredentialFresh(freshUser, decoded, res);
+    if (credentialError) return credentialError;
 
-    // 4.5 校验 tokenVersion：令牌必须携带且匹配当前版本
-    // 强制要求字段存在——省略 tokenVersion 的令牌一律拒绝，
-    // 防止伪造令牌通过省略字段绕过会话吊销（改密/禁用/refresh 重放检测后的全量吊销）
-    // 历史文档可能缺少该字段，按 schema 默认值 0 参与比对
-    const expectedTokenVersion = freshUser.tokenVersion ?? 0;
-    if (decoded.tokenVersion === undefined || decoded.tokenVersion !== expectedTokenVersion) {
-      return ApiResponse.codeError(res, 'SESSION_EXPIRED');
-    }
+    const ipError = assertIpAllowed(freshUser, req, res);
+    if (ipError) return ipError;
 
-    // 4.6 校验用户 IP 访问范围：token 有效期内换到未授权 IP 同样被拒绝，
-    // 避免「登录时校验通过后换网络仍可长期使用」的绕过路径。
-    // 规则为空时不限制，不影响未配置该功能的用户
-    if (freshUser.allowedIPs) {
-      const clientIP = req.ip || req.connection?.remoteAddress;
-      const { allowed, reason } = isIPAllowed(clientIP, freshUser.allowedIPs);
-      if (!allowed) {
-        logger.warn('IP 访问范围校验拒绝', {
-          username: freshUser.username,
-          ip: clientIP,
-          reason,
-        });
-        AuditLog.record({
-          action: 'ip_range_denied',
-          category: 'auth',
-          userId: freshUser._id,
-          username: freshUser.username,
-          method: req.method,
-          path: req.path,
-          ip: clientIP,
-          success: false,
-          riskLevel: 'high',
-          riskFactors: ['ip_range_violation'],
-          reason: `请求 IP 不在允许范围内（${reason}）`,
-        });
-        return ApiResponse.codeError(res, 'AUTH_IP_RANGE_DENIED');
-      }
-    }
+    const sessionError = await assertSessionUsable(decoded, req, res);
+    if (sessionError) return sessionError;
 
-    // 4.7 校验设备级会话（tokenVersion 只能全局吊销，无法踢单台设备）
-    //
-    // 令牌里的 sid 指向 UserSession 一条记录，用户在「登录会话」界面踢除某台
-    // 设备后，该记录置为 revoked，此处即拒绝——其余设备不受影响。
-    //
-    // 兼容不含 sid 的令牌：本功能上线前签发的令牌、以及登录时会话注册失败
-    // 降级签发的令牌都没有 sid。对它们跳过会话校验而非拒绝，否则功能上线
-    // 瞬间会把所有在线用户全部踢下线。这些令牌最长在 refresh 有效期后自然消亡。
-    if (decoded.sid) {
-      // 不在此处 try/catch：validateSession 的 fail-closed 异常
-      // （code=SESSION_SERVICE_UNAVAILABLE）交由下方统一 catch 转成 503，
-      // 与黑名单服务故障同一口径。在这里捕获再原样抛出没有任何作用，
-      // 反而会让人误以为此处做了额外处理。
-      const sessionState = await sessionService.validateSession(decoded.sid);
-      if (!sessionState.usable) {
-        return ApiResponse.codeError(res, 'DEVICE_SESSION_REVOKED');
-      }
-      // 活跃信息更新（节流写入）：不 await，避免把只读认证路径变成阻塞写路径
-      // ——lastSeenAt 是观测性数据，迟一点无妨。
-      // 不挂 .catch：touchSession 的契约是**永不 reject**（整个函数体在 try 内，
-      // 见 sessionService.touchSession）。挂一个空 catch 只会增加一处永远
-      // 执行不到的分支，反而让人误以为这里可能抛错。
-      sessionService.touchSession(decoded.sid, req);
-    }
-
-    // 5. 附加用户信息到请求对象
-    // 角色信息一律以实时加载的 freshUser 为准，不信任 token payload 中的 roles——
-    // 用户角色被全部撤销后，旧 token 在有效期内不得继续携带签发时的角色快照
-    let freshRoles = [];
-    let freshRoleCodes = [];
-    if (freshUser.roles && freshUser.roles.length > 0) {
-      // freshUser.roles 可能是 ObjectId 数组或已 populate 的 Role 文档
-      freshRoles = freshUser.roles.map((r) => {
-        if (typeof r === 'object' && r.code) {
-          freshRoleCodes.push(r.code);
-          return r.code;
-        }
-        return r;
-      });
-    }
-
-    req.user = {
-      userId: decoded.userId,
-      username: decoded.username,
-      email: decoded.email,
-      roles: freshRoles,
-      roleCodes: freshRoleCodes, // 供 userLimiter 等中间件使用，实时角色
-      realName: decoded.realName, // 用于报警上报时记录真实姓名
-      sessionId: decoded.jti || null,
-      // 设备会话标识：会话管理接口据此标记「本设备」并禁止误踢自己
-      sid: decoded.sid || null,
-      iat: decoded.iat,
-      exp: decoded.exp,
-    };
+    req.user = buildAuthContext(decoded, freshUser);
 
     // userId 自动注入日志上下文（报告 5.6）：认证成功即写入 ALS store，
     // 本请求后续所有日志（morgan finish、审计、限流/业务告警）经 logger format
@@ -329,27 +234,187 @@ const authenticate = async (req, res, next) => {
     // （修复：此前 userLimiter 挂在全局路由之前，req.user 恒为空，用户级限流实际未按用户生效）
     return userLimiter(req, res, next);
   } catch (error) {
-    if (error.name === 'JsonWebTokenError') {
-      return ApiResponse.codeError(res, 'AUTH_TOKEN_INVALID');
-    }
-    if (error.name === 'TokenExpiredError') {
-      return ApiResponse.codeError(res, 'AUTH_TOKEN_EXPIRED');
-    }
-    // 黑名单服务故障（fail-closed 上抛）：明确返回 503 而非笼统 500，
-    // 与 tokenBlacklist.isTokenBlacklisted 的注释契约一致
-    if (error.code === 'BLACKLIST_SERVICE_UNAVAILABLE') {
-      logger.error(`认证中止 - 黑名单服务不可用：${error.message}`);
-      return ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE');
-    }
-    // 会话服务故障同样 fail-closed 转 503：会话校验是授权决策的一部分，
-    // 查不到结论时放行等于取消设备级吊销这条防线
-    if (error.code === 'SESSION_SERVICE_UNAVAILABLE') {
-      logger.error(`认证中止 - 会话服务不可用：${error.message}`);
-      return ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE');
-    }
-    logger.error(`认证失败：${error.message}`);
-    return ApiResponse.codeError(res, 'AUTH_PROCESS_FAILED');
+    return mapAuthFailure(error, res);
   }
+};
+
+/**
+ * 账户可用性校验（E-01 自 authenticate 拆出）：存在性、禁用、锁定、临时锁定。
+ * 返回错误响应或 null；四处拒绝的先后顺序与拆分前一致。
+ */
+const assertAccountUsable = (freshUser, res) => {
+  if (!freshUser) {
+    return ApiResponse.codeError(res, 'USER_NOT_FOUND_OR_DELETED');
+  }
+  if (freshUser.status === 'inactive') {
+    return ApiResponse.codeError(res, 'ACCOUNT_DISABLED');
+  }
+  if (freshUser.status === 'locked') {
+    return ApiResponse.codeError(res, 'ACCOUNT_LOCKED');
+  }
+  if (freshUser.lockUntil && freshUser.lockUntil > new Date()) {
+    return ApiResponse.codeError(res, 'ACCOUNT_TEMP_LOCKED');
+  }
+  return null;
+};
+
+/**
+ * 凭据新鲜度校验（E-01 自 authenticate 拆出）：改密时间 + tokenVersion。
+ *
+ * tokenVersion 强制要求字段存在——省略该字段的令牌一律拒绝，防止伪造令牌
+ * 通过省略字段绕过会话吊销（改密/禁用/refresh 重放检测后的全量吊销）；
+ * 历史文档缺字段时按 schema 默认值 0 参与比对。
+ */
+const assertCredentialFresh = (freshUser, decoded, res) => {
+  // 4. 检查密码是否已修改（token 签发时间早于密码修改时间则拒绝）
+  // 用秒级比较：iat 为整秒，passwordChangedAt 为毫秒，直接比会因同秒内
+  // ms > iat*1000 误拒"改密后同秒新签发"的合法令牌（如 refresh 重放触发
+  // invalidateUserTokens 置 passwordChangedAt 后的即时新登录）。
+  if (freshUser.passwordChangedAt && decoded.iat) {
+    const changedAtSec = Math.floor(freshUser.passwordChangedAt.getTime() / 1000);
+    if (changedAtSec > decoded.iat) {
+      return ApiResponse.codeError(res, 'PASSWORD_CHANGED_RELOGIN');
+    }
+  }
+
+  // 4.5 校验 tokenVersion：令牌必须携带且匹配当前版本
+  // 强制要求字段存在——省略 tokenVersion 的令牌一律拒绝，
+  // 防止伪造令牌通过省略字段绕过会话吊销（改密/禁用/refresh 重放检测后的全量吊销）
+  // 历史文档可能缺少该字段，按 schema 默认值 0 参与比对
+  const expectedTokenVersion = freshUser.tokenVersion ?? 0;
+  if (decoded.tokenVersion === undefined || decoded.tokenVersion !== expectedTokenVersion) {
+    return ApiResponse.codeError(res, 'SESSION_EXPIRED');
+  }
+  return null;
+};
+
+/**
+ * 用户 IP 访问范围校验（E-01 自 authenticate 拆出）
+ *
+ * token 有效期内换到未授权 IP 同样被拒绝，避免「登录时校验通过后换网络仍可
+ * 长期使用」的绕过路径。规则为空时不限制，不影响未配置该功能的用户。
+ */
+const assertIpAllowed = (freshUser, req, res) => {
+  if (freshUser.allowedIPs) {
+    const clientIP = req.ip || req.connection?.remoteAddress;
+    const { allowed, reason } = isIPAllowed(clientIP, freshUser.allowedIPs);
+    if (!allowed) {
+      logger.warn('IP 访问范围校验拒绝', {
+        username: freshUser.username,
+        ip: clientIP,
+        reason,
+      });
+      AuditLog.record({
+        action: 'ip_range_denied',
+        category: 'auth',
+        userId: freshUser._id,
+        username: freshUser.username,
+        method: req.method,
+        path: req.path,
+        ip: clientIP,
+        success: false,
+        riskLevel: 'high',
+        riskFactors: ['ip_range_violation'],
+        reason: `请求 IP 不在允许范围内（${reason}）`,
+      });
+      return ApiResponse.codeError(res, 'AUTH_IP_RANGE_DENIED');
+    }
+  }
+  return null;
+};
+
+/**
+ * 设备级会话校验（E-01 自 authenticate 拆出）
+ *
+ * 令牌里的 sid 指向 UserSession 一条记录，用户在「登录会话」界面踢除某台设备后，
+ * 该记录置为 revoked，此处即拒绝——其余设备不受影响（tokenVersion 只能全局吊销）。
+ *
+ * 兼容不含 sid 的令牌：本功能上线前签发的令牌、以及登录时会话注册失败降级签发
+ * 的令牌都没有 sid。对它们跳过会话校验而非拒绝，否则功能上线瞬间会把所有在线
+ * 用户全部踢下线。这些令牌最长在 refresh 有效期后自然消亡。
+ *
+ * 不在此处 try/catch：validateSession 的 fail-closed 异常
+ * （code=SESSION_SERVICE_UNAVAILABLE）交由调用方统一 catch 转成 503，
+ * 与黑名单服务故障同一口径。在这里捕获再原样抛出没有任何作用，
+ * 反而会让人误以为此处做了额外处理。
+ */
+const assertSessionUsable = async (decoded, req, res) => {
+  if (!decoded.sid) return null;
+  const sessionState = await sessionService.validateSession(decoded.sid);
+  if (!sessionState.usable) {
+    return ApiResponse.codeError(res, 'DEVICE_SESSION_REVOKED');
+  }
+  // 活跃信息更新（节流写入）：不 await，避免把只读认证路径变成阻塞写路径
+  // ——lastSeenAt 是观测性数据，迟一点无妨。
+  // 不挂 .catch：touchSession 的契约是**永不 reject**（整个函数体在 try 内，
+  // 见 sessionService.touchSession）。挂一个空 catch 只会增加一处永远
+  // 执行不到的分支，反而让人误以为这里可能抛错。
+  sessionService.touchSession(decoded.sid, req);
+  return null;
+};
+
+/**
+ * 构造 req.user（E-01 自 authenticate 拆出）
+ *
+ * 角色信息一律以实时加载的 freshUser 为准，不信任 token payload 中的 roles——
+ * 用户角色被全部撤销后，旧 token 在有效期内不得继续携带签发时的角色快照。
+ */
+const buildAuthContext = (decoded, freshUser) => {
+  let freshRoles = [];
+  let freshRoleCodes = [];
+  if (freshUser.roles && freshUser.roles.length > 0) {
+    // freshUser.roles 可能是 ObjectId 数组或已 populate 的 Role 文档
+    freshRoles = freshUser.roles.map((r) => {
+      if (typeof r === 'object' && r.code) {
+        freshRoleCodes.push(r.code);
+        return r.code;
+      }
+      return r;
+    });
+  }
+  return {
+    userId: decoded.userId,
+    username: decoded.username,
+    email: decoded.email,
+    roles: freshRoles,
+    roleCodes: freshRoleCodes, // 供 userLimiter 等中间件使用，实时角色
+    realName: decoded.realName, // 用于报警上报时记录真实姓名
+    sessionId: decoded.jti || null,
+    // 设备会话标识：会话管理接口据此标记「本设备」并禁止误踢自己
+    sid: decoded.sid || null,
+    iat: decoded.iat,
+    exp: decoded.exp,
+  };
+};
+
+/**
+ * 认证异常 → 错误响应（E-01 自 authenticate 拆出）
+ *
+ * 黑名单/会话服务故障（fail-closed 上抛）明确返回 503 而非笼统 500，
+ * 与 tokenBlacklist.isTokenBlacklisted 的注释契约一致——查不到结论时放行
+ * 等于取消对应防线。
+ */
+const mapAuthFailure = (error, res) => {
+  if (error.name === 'JsonWebTokenError') {
+    return ApiResponse.codeError(res, 'AUTH_TOKEN_INVALID');
+  }
+  if (error.name === 'TokenExpiredError') {
+    return ApiResponse.codeError(res, 'AUTH_TOKEN_EXPIRED');
+  }
+  // 黑名单服务故障（fail-closed 上抛）：明确返回 503 而非笼统 500，
+  // 与 tokenBlacklist.isTokenBlacklisted 的注释契约一致
+  if (error.code === 'BLACKLIST_SERVICE_UNAVAILABLE') {
+    logger.error(`认证中止 - 黑名单服务不可用：${error.message}`);
+    return ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE');
+  }
+  // 会话服务故障同样 fail-closed 转 503：会话校验是授权决策的一部分，
+  // 查不到结论时放行等于取消设备级吊销这条防线
+  if (error.code === 'SESSION_SERVICE_UNAVAILABLE') {
+    logger.error(`认证中止 - 会话服务不可用：${error.message}`);
+    return ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE');
+  }
+  logger.error(`认证失败：${error.message}`);
+  return ApiResponse.codeError(res, 'AUTH_PROCESS_FAILED');
 };
 
 /**

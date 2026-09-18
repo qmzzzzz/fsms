@@ -119,5 +119,6 @@ describe('安全管理核心接口（冲 100%）', () => {
   test('未认证访问安全接口返回 401', async () => {
     const res = await request(app).get('/api/security/my-info');
     expect(res.status).toBe(401);
+    expect(res.body.errors.errorCode).toBe('AUTH_TOKEN_MISSING');
   });
 });

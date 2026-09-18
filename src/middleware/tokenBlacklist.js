@@ -154,6 +154,8 @@ const consumeToken = async (token, exp) => {
  */
 const invalidateUserTokens = async (userId) => {
   try {
+    // E-04：**必须**保持惰性 require。middleware/auth ↔ tokenBlacklist
+    // 互为依赖，顶层引入会在加载顺序不利时拿到空模块。
     const User = require('../models/User');
     await User.findByIdAndUpdate(userId, {
       $inc: { tokenVersion: 1 },
@@ -164,6 +166,8 @@ const invalidateUserTokens = async (userId) => {
     throw err;
   }
   // 缓存清除失败不影响吊销结果（最长 60s 自然过期），不纳入上方事务性失败
+  // E-04：**必须**保持惰性 require（auth ↔ tokenBlacklist 循环依赖），
+  // 提到文件顶部会让本模块在 auth 尚未完成导出时被加载。
   const { invalidateUserCache } = require('./auth');
   invalidateUserCache(userId);
   logger.info('用户所有令牌已失效（tokenVersion 递增）', { userId });

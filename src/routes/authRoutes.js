@@ -244,6 +244,8 @@ router.post(
     }
   }
   // PERMISSION-EXEMPT: 公共端点（注册开关+限流管控），无资源所有者
+  // SCOPE-EXEMPT: 未认证端点，无调用者身份可据以划定数据范围；
+  // 创建的是全新用户记录，不存在「他人既有资源」这一越权对象
 );
 
 /**
@@ -280,6 +282,8 @@ router.post(
   loginValidation,
   authController.login
   // PERMISSION-EXEMPT: 公共端点（登录限流+哑bcrypt防枚举）
+  // SCOPE-EXEMPT: 未认证端点，数据范围概念不适用——登录本身是建立身份
+  // 的动作，此时尚无 req.user 可依据（凭据校验与锁定计数见 authService）
 );
 
 /**
@@ -289,6 +293,8 @@ router.post(
  */
 router.post('/refresh', strictLimiter, refreshTokenBodyValidation, authController.refreshToken);
 // PERMISSION-EXEMPT: 公共端点（刷新令牌轮换，黑名单 fail-closed）
+// SCOPE-EXEMPT: 未认证端点；令牌自身即身份凭据，轮换对象恒为该令牌
+// 对应的会话，不存在跨用户选择资源的入口（无 targetUserId 之类参数）
 
 /**
  * @route   GET /api/auth/session

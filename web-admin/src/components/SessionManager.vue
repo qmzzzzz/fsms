@@ -67,8 +67,8 @@
           </div>
           <div class="session-meta">
             <span>{{ t('session.ip') }}：{{ item.lastIp || item.ip || '—' }}</span>
-            <span>{{ t('session.lastSeen') }}：{{ formatTime(item.lastSeenAt) }}</span>
-            <span>{{ t('session.loginAt') }}：{{ formatTime(item.createdAt) }}</span>
+            <span>{{ t('session.lastSeen') }}：{{ formatSessionTime(item.lastSeenAt) }}</span>
+            <span>{{ t('session.loginAt') }}：{{ formatSessionTime(item.createdAt) }}</span>
           </div>
 
           <!--
@@ -100,7 +100,7 @@
               <dd>{{ item.ip }}</dd>
             </template>
             <dt>{{ t('session.expiresAt') }}</dt>
-            <dd>{{ formatTime(item.expiresAt) }}</dd>
+            <dd>{{ formatSessionTime(item.expiresAt) }}</dd>
             <template v-if="item.userAgent">
               <dt>{{ t('session.rawUa') }}</dt>
               <dd class="session-ua">
@@ -142,8 +142,9 @@ import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { Monitor, Cellphone, Platform, Help } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
 import GlassSkeleton from '@/components/GlassSkeleton.vue'
+import { formatTime } from '@/utils/datetime'
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
 
 const sessions = ref([])
 const loading = ref(true)
@@ -210,11 +211,17 @@ const softwareLine = (item) => {
   return withVersion
 }
 
-const formatTime = (value) => {
-  if (!value) return '—'
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleString(locale.value, { hour12: false })
+/**
+ * 会话时间展示：统一走 utils/datetime.formatTime（O-3 单一事实来源——本地时区、
+ * 固定 YYYY-MM-DD HH:mm:ss、各段补零、非法值兜底，且不随界面语言漂移）。
+ *
+ * 为什么保留 em dash 而不直接用 formatTime 的半角 '-'：同排的 IP 缺失时显示 '—'，
+ * 两个字段占位符不一致会像渲染故障；换符号属于用户可见文案变更，与「统一时间
+ * 格式」目标无关，故仅在 formatTime 返回 '-' 时映射为 '—'。
+ */
+const formatSessionTime = (value) => {
+  const text = formatTime(value)
+  return text === '-' ? '—' : text
 }
 
 /** 展开/收起某条会话的技术详情（重建 Set 以触发响应式更新） */

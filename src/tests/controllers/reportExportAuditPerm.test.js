@@ -108,5 +108,7 @@ describe('P1-4 /api/reports/export?type=audit 权限闸门', () => {
   test('未认证请求一律 401（闸门不在认证之前生效）', async () => {
     const res = await request(app).get('/api/reports/export?type=audit&format=xlsx');
     expect(res.status).toBe(401);
+    // 断言是「认证闸」而非别的 401：闸门顺序若被改，错误码会先变成导出权限码
+    expect(res.body.errors.errorCode).toBe('AUTH_TOKEN_MISSING');
   });
 });

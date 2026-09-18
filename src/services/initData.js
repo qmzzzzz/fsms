@@ -546,9 +546,15 @@ const initPermissions = async () => {
     const codeToId = new Map(allPermissions.map((p) => [p.code, p._id]));
 
     // 批量更新 parent 关联
+    // 注意：模块通配符（如 user:*）是模块的根，其 parent 必须是 null。
+    // 若对它也走下面的 `${module}:*` 关联，通配符会被挂到**自己**身上形成自环
+    // （实测 2026-09-18：10 个通配符全部自环），于是 roleController 的
+    // buildPermissionTree 把它们挂进「parent 在结果集内」分支、永不进入任何模块的
+    // children——连同其下 37 个子权限一起从 /api/roles/permissions/tree 消失，
+    // 角色权限编辑页拿不到任何可勾选权限。故显式跳过通配符自身。
     const bulkOps = [];
     for (const permData of toInsert) {
-      if (permData.code.includes(':')) {
+      if (permData.code.includes(':') && !permData.code.endsWith(':*')) {
         const moduleCode = permData.code.split(':')[0];
         const parentCode = `${moduleCode}:*`;
         const parentId = codeToId.get(parentCode);
@@ -691,6 +697,67 @@ const initRoles = async () => {
 };
 
 /**
+ * 落盘初始密码并**确保权限已实际收紧**（M-02 + M-05）
+ *
+ * 两条安全约束同时在此满足：
+ *   - M-02：密码绝不写入日志（容器 stdout 会被日志驱动持久化），只落盘到文件。
+ *   - M-05：落盘后必须真正收紧权限。NTFS 不支持 POSIX 权限位，writeFileSync 的
+ *     mode 参数在 Windows 上被忽略、chmodSync 也只能切换只读属性——此前「chmod 后
+ *     忽略失败 + 日志照打权限 600」是最具误导性的失败形态：用户以为受保护，实际裸奔。
+ *     现改用跨平台 utils/filePermission（Windows 走 icacls 切断继承）并**回读校验**，
+ *     校验不过则明确告警该文件对本机其他用户可读。
+ *
+ * 抽成独立函数而非内联：createDefaultAdmin 已接近复杂度阈值，
+ * 内联这段会让它超标（lint:ratchet 实测 0 → 1）。
+ *
+ * @param {string} adminPassword 已生成或来自环境变量的管理员口令
+ */
+function persistInitialPassword(adminPassword) {
+  // 显式由环境变量注入时，不落盘（运维已知晓口令，落盘反而多一处泄露面）
+  if (process.env.ADMIN_INITIAL_PASSWORD) {
+    logger.warn('*** 请及时修改默认管理员密码！***');
+    return;
+  }
+
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const pwdFile = path.join(process.cwd(), '.admin-initial-password');
+    fs.writeFileSync(
+      pwdFile,
+      `username: ${getSuperAdminUsername()}\npassword: ${adminPassword}\n`,
+      { mode: 0o600 }
+    );
+
+    const { hardenPath, verifyHardened } = require('../utils/filePermission');
+    const hardened = hardenPath(pwdFile, {
+      // 去掉文件权限助手加的前缀符号（⚠️ + 空格），避免日志里出现双重告警标记
+      log: (m) => logger.warn(m.replace(/^\u26a0\ufe0f?\s*/, '')),
+    });
+    const check = verifyHardened(pwdFile);
+
+    if (hardened.ok && check.tightened) {
+      logger.info(`管理员初始密码已写入 ${pwdFile}（已收紧权限并复核通过），请尽快登录后修改`);
+    } else {
+      logger.warn(
+        `管理员初始密码文件权限**未能收紧**（${hardened.detail || check.evidence}）：` +
+          `${pwdFile} 可能对本机其他用户可读，请立即手动收紧或改用 ADMIN_INITIAL_PASSWORD 注入`
+      );
+      logger.info(`管理员初始密码已写入 ${pwdFile}，请尽快登录后修改`);
+    }
+  } catch (e) {
+    // M-02 修复：文件写入失败时绝不将密码明文输出到 stdout/日志
+    // （容器环境 stdout 会被日志驱动持久化，等同密码泄露）。
+    // 只提示可操作的恢复途径；密码仅存在于内存，进程退出即丢失，
+    // 此时应通过 ADMIN_INITIAL_PASSWORD 显式指定后重启。
+    logger.error(
+      `初始密码文件写入失败（${e.message}）。请停止服务，通过环境变量 ADMIN_INITIAL_PASSWORD ` +
+        '显式指定管理员初始密码后重新启动；切勿从日志中查找密码（密码未被记录）。'
+    );
+  }
+}
+
+/**
  * 创建默认管理员账户
  */
 const createDefaultAdmin = async () => {
@@ -750,40 +817,7 @@ const createDefaultAdmin = async () => {
   }
 
   logger.info('默认管理员账户已创建', { username: getSuperAdminUsername() });
-  if (!process.env.ADMIN_INITIAL_PASSWORD) {
-    // 密码不写入日志文件，写入受保护的初始密码文件（权限 600）
-    // 避免被日志收集系统（ELK/CloudWatch）持久化
-    try {
-      const fs = require('fs');
-      const path = require('path');
-      const pwdFile = path.join(process.cwd(), '.admin-initial-password');
-      fs.writeFileSync(
-        pwdFile,
-        `username: ${getSuperAdminUsername()}\npassword: ${adminPassword}\n`,
-        { mode: 0o600 }
-      );
-      // Windows 局限：NTFS 不支持 POSIX 权限位，writeFileSync 的 mode 参数在 Windows 上被忽略，
-      // chmodSync 也只能粗粒度切换只读属性。此处 best-effort 再收紧一次：
-      // 类 Unix 平台确保 0600；Windows 平台失败仅告警不阻断（文件位于进程工作目录内）
-      try {
-        fs.chmodSync(pwdFile, 0o600);
-      } catch (chmodErr) {
-        logger.warn(`初始密码文件权限收紧失败（Windows 下 mode 参数无效）：${chmodErr.message}`);
-      }
-      logger.info(`管理员初始密码已写入 ${pwdFile}（权限 600），请尽快登录后修改`);
-    } catch (e) {
-      // M-02 修复：文件写入失败时绝不将密码明文输出到 stdout/日志
-      // （容器环境 stdout 会被日志驱动持久化，等同密码泄露）。
-      // 只提示可操作的恢复途径；密码仅存在于内存，进程退出即丢失，
-      // 此时应通过 ADMIN_INITIAL_PASSWORD 显式指定后重启。
-      logger.error(
-        `初始密码文件写入失败（${e.message}）。请停止服务，通过环境变量 ADMIN_INITIAL_PASSWORD ` +
-          '显式指定管理员初始密码后重新启动；切勿从日志中查找密码（密码未被记录）。'
-      );
-    }
-  } else {
-    logger.warn('*** 请及时修改默认管理员密码！***');
-  }
+  persistInitialPassword(adminPassword);
 
   return admin;
 };
@@ -830,9 +864,20 @@ const reconcileSuperAdmin = async () => {
   }
 
   // 1) 目标账户补齐超管角色（$addToSet 幂等，不会重复push）
+  // roles 为 null 的形态必须用 $set 修复：schema 默认值是 []，但绕过 schema 的写入
+  // （直连数据库、迁移脚本、collection.insertOne）可留下 null，此时 $addToSet 会抛
+  // MongoServerError（Cannot apply $addToSet to non-array field）。本函数是启动期
+  // 唯一的超管自愈入口，抛错会让 initializeSystem 整体失败 → 进程退出，
+  // 即「账户字段被污染」升级成「服务无法启动」（2026-09-18 实测复现）。
+  const rolesIsArray = Array.isArray(target.roles);
   const targetHas = (target.roles || []).some((r) => String(r) === String(superRole._id));
   if (!targetHas) {
-    await User.updateOne({ _id: target._id }, { $addToSet: { roles: superRole._id } });
+    await User.updateOne(
+      { _id: target._id },
+      rolesIsArray
+        ? { $addToSet: { roles: superRole._id } }
+        : { $set: { roles: [superRole._id] } }
+    );
     logger.warn('已为账户补回 SUPER_ADMIN 角色（此前缺失，最高权限不可用）', { username });
     // 角色变化必须失效认证缓存，否则该账户已签发的会话仍按旧角色鉴权
     try {

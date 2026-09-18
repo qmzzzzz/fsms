@@ -186,6 +186,9 @@ const makeCtx = (overrides = {}) => {
       return this;
     },
     json(data) {
+      // P1-29：见 securityConfigHandlers.test.js 同款说明——记录响应写出时刻的标志值，
+      // 静态值断言无法区分「入口前置位」与「响应前置位」的时序差异。
+      this.flagAtJson = this.locals.skipGlobalAudit;
       this.payload = data;
       return this;
     },
@@ -317,6 +320,8 @@ describe('changePasswordSecure 分支补齐（委托 authService 后的映射）
     const { req, res, next } = makeCtx({ body: { currentPassword: 'x', newPassword: 'y' } });
     await invoke(changePasswordSecure, req, res, next);
     expect(res.statusCode).toBe(401);
+    // 401 需要点名是「用户不存在」这条路：authService 的其余失败原因同样映射 401
+    expect(res.payload.errors.errorCode).toBe('USER_NOT_FOUND_OR_DELETED');
   });
 
   test('CURRENT_WRONG → 400 当前密码错误', async () => {
@@ -358,7 +363,7 @@ describe('changePasswordSecure 分支补齐（委托 authService 后的映射）
     const { req, res, next } = makeCtx({ body: { currentPassword: 'x', newPassword: 'y' } });
     await invoke(changePasswordSecure, req, res, next);
     expect(res.statusCode).toBe(200);
-    expect(res.locals.skipGlobalAudit).toBe(true);
+    expect(res.flagAtJson).toBe(true);
     expect(mockAuditLogCreate).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'password_changed', username: 'admin' })
     );
@@ -374,6 +379,8 @@ describe('viewSensitiveData 分支补齐', () => {
     const { req, res, next } = makeCtx({ body: { dataType: 'phone' } });
     await invoke(viewSensitiveData, req, res, next);
     expect(res.statusCode).toBe(401);
+    // 与 changePasswordSecure 同码：两处的「用户没了」必须统一，不能各自为政
+    expect(res.payload.errors.errorCode).toBe('USER_NOT_FOUND_OR_DELETED');
   });
 
   test('dataType=email 返回邮箱敏感数据（行 217-224）', async () => {
@@ -451,6 +458,7 @@ describe('toggleUserLock 分支补齐', () => {
     });
     await invoke(toggleUserLock, req, res, next);
     expect(res.statusCode).toBe(404);
+    expect(res.payload.errors.errorCode).toBe('USER_NOT_FOUND');
   });
 
   test('同级或更高级别用户拦截返回 403（行 402）', async () => {
@@ -463,6 +471,7 @@ describe('toggleUserLock 分支补齐', () => {
     await invoke(toggleUserLock, ctx.req, ctx.res, ctx.next);
     expect(ctx.res.statusCode).toBe(403);
     expect(ctx.res.payload.message).toBe('无权操作同级或更高级别的用户');
+    expect(ctx.res.payload.errors.errorCode).toBe('USER_OPERATE_PEER_OR_HIGHER_FORBIDDEN');
   });
 
   test('inactive 用户不能解锁返回 400（行 415）', async () => {
@@ -470,6 +479,7 @@ describe('toggleUserLock 分支补齐', () => {
     await invoke(toggleUserLock, ctx.req, ctx.res, ctx.next);
     expect(ctx.res.statusCode).toBe(400);
     expect(ctx.res.payload.message).toContain('不能通过解锁恢复');
+    expect(ctx.res.payload.errors.errorCode).toBe('UNLOCK_INACTIVE_ACCOUNT');
   });
 
   test('inactive 用户不能锁定返回 400（行 427）', async () => {
@@ -477,6 +487,7 @@ describe('toggleUserLock 分支补齐', () => {
     await invoke(toggleUserLock, ctx.req, ctx.res, ctx.next);
     expect(ctx.res.statusCode).toBe(400);
     expect(ctx.res.payload.message).toContain('不能重复锁定');
+    expect(ctx.res.payload.errors.errorCode).toBe('LOCK_INACTIVE_ACCOUNT');
   });
 });
 
@@ -492,6 +503,9 @@ describe('resetUserMfa 分支补齐', () => {
     const { req, res, next } = makeCtx({ params: { userId: 'some-id' } });
     await invoke(resetUserMfa, req, res, next);
     expect(res.statusCode).toBe(400);
+    // 「validation 失败」的判据是字段明细透传，不是 400
+    expect(res.payload.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(res.payload.errors.fieldErrors).toEqual([{ msg: 'invalid' }]);
   });
 
   test('目标用户不存在返回 404（行 494）', async () => {
@@ -499,6 +513,7 @@ describe('resetUserMfa 分支补齐', () => {
     const { req, res, next } = makeCtx({ params: { userId: 'nonexistent' } });
     await invoke(resetUserMfa, req, res, next);
     expect(res.statusCode).toBe(404);
+    expect(res.payload.errors.errorCode).toBe('USER_NOT_FOUND');
   });
 
   test('重置内置超管 MFA 被拒绝（行 517）', async () => {
@@ -513,6 +528,14 @@ describe('resetUserMfa 分支补齐', () => {
     mockRoleFind.mockReturnValue({
       select: jest.fn().mockResolvedValue([{ level: 10, code: 'SUPER_ADMIN', isBuiltIn: true }]),
     });
+    // 层级须严格高于目标才能走到「内置超管」分支。这里的 20 是**测试替身**，
+    // 不是现实值——Role.js:44-45 限定 level ∈ [1,10]，且内置超管恒为 10，故
+    // 现实中 operatorMaxLevel 最大也只能到 10，10 >= 10 会先命中上一行的
+    // MFA_RESET_PEER_OR_HIGHER_FORBIDDEN；换言之下面这个 CANNOT_RESET_MFA_SUPER_ADMIN
+    // 分支在真实数据下**不可达**（属纵深防御的冗余层）。
+    // 仍需测它：一旦有人放宽 Role.level 上限，或给超管角色以外的路径加豁免，
+    // 这层就会变成唯一防线——测试保证它届时是正确工作的。
+    // 目标值 10 与超管实际值一致，此处的 20 仅用于制造无可争议的层级差。
     // 操作者层级必须严格高于目标（否则行 513 的同级拦截先触发，永远到不了 517）
     mockGetOperatorMaxLevel.mockResolvedValue(20);
     mockIsSuperAdminRole.mockReturnValue(true);
@@ -593,6 +616,10 @@ describe('getSecurityOverview 分支补齐', () => {
     const { req, res, next } = makeCtx();
     await invoke(getSecurityOverview, req, res, next);
     expect(res.statusCode).toBe(500);
+    // 500 的判据是「点名了概览查询失败」：笼统的 INTERNAL_ERROR 会掩盖服务层故障定位
+    expect(res.payload.errors.errorCode).toBe('SECURITY_OVERVIEW_QUERY_FAILED');
+    // 故障详情不得随响应外泄（错误文案固定，不带 e.message）
+    expect(res.payload.message).toBe('安全概览查询失败');
   });
 });
 
@@ -606,6 +633,7 @@ describe('getRecentAlerts 分支补齐', () => {
     await invoke(getRecentAlerts, req, res, next);
     expect(res.statusCode).toBe(404);
     expect(res.payload.message).toBe('最近告警数据为空');
+    expect(res.payload.errors.errorCode).toBe('RECENT_ALERTS_EMPTY');
   });
 
   test('正常告警经过 filter/map/summary 处理（行 683-685, 706-709）', async () => {
@@ -667,5 +695,7 @@ describe('getRecentAlerts 分支补齐', () => {
     const { req, res, next } = makeCtx();
     await invoke(getRecentAlerts, req, res, next);
     expect(res.statusCode).toBe(500);
+    expect(res.payload.errors.errorCode).toBe('RECENT_ALERTS_QUERY_FAILED');
+    expect(res.payload.message).toBe('最近告警查询失败');
   });
 });

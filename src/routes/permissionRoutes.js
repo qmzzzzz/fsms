@@ -182,6 +182,7 @@ router.post(
   authenticate,
   checkPermission('permission:create'),
   createPermissionValidation,
+  // SCOPE-EXEMPT: 权限定义属全局管理面（无部门/属主维度），由 checkPermission('permission:create') 把关
   permissionController.createPermission
 );
 
@@ -195,6 +196,7 @@ router.post(
   authenticate,
   checkPermission('permission:create'),
   batchCreateValidation,
+  // SCOPE-EXEMPT: 同 POST /api/permissions：全局管理面，无数据范围维度
   permissionController.batchCreatePermissions
 );
 
@@ -209,6 +211,7 @@ router.put(
   checkPermission('permission:update'),
   permissionIdValidation,
   updatePermissionValidation,
+  // SCOPE-EXEMPT: 同 POST /api/permissions：全局管理面，无数据范围维度
   permissionController.updatePermission
 );
 
@@ -222,6 +225,7 @@ router.delete(
   authenticate,
   checkPermission('permission:delete'),
   permissionIdValidation,
+  // SCOPE-EXEMPT: 同 POST /api/permissions：全局管理面，无数据范围维度
   permissionController.deletePermission
 );
 

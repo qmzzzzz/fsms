@@ -231,6 +231,12 @@ const loadMfaStatus = async () => {
 }
 
 const enrollMfa = async () => {
+  // 重入防护必须同步置位：按钮 :disabled="mfa.busy" 只挡点击，挡不住 Enter 提交
+  // （keydown.enter 直接调用提交函数）。长按回车的自动重复会在请求在途时重复提交
+  // ——本轮实测 enable 路径 4 次 keydown 发出 4 个 POST /auth/mfa/enable。
+  // 四个端点（enroll/enable/disable/recovery-codes）都是「重新生成并覆盖」的
+  // 非幂等语义，重复提交会让服务端状态与用户所见不一致，故四个入口统一拦截。
+  if (mfa.busy) return
   mfa.busy = true
   try {
     const { data: resp } = await api.auth.mfaEnroll()
@@ -288,6 +294,12 @@ const enableMfa = async () => {
     ElMessage.warning(t('profile.mfaCodeInvalid'))
     return
   }
+  // 重入防护必须同步置位：按钮 :disabled="mfa.busy" 只挡点击，挡不住 Enter 提交
+  // （keydown.enter 直接调用提交函数）。长按回车的自动重复会在请求在途时重复提交
+  // ——本轮实测 enable 路径 4 次 keydown 发出 4 个 POST /auth/mfa/enable。
+  // 四个端点（enroll/enable/disable/recovery-codes）都是「重新生成并覆盖」的
+  // 非幂等语义，重复提交会让服务端状态与用户所见不一致，故四个入口统一拦截。
+  if (mfa.busy) return
   mfa.busy = true
   try {
     const { data: resp } = await api.auth.mfaEnable({ mfaCode: code })
@@ -320,6 +332,12 @@ const regenerateCodes = async () => {
     ElMessage.warning(t('profile.mfaCodeInvalid'))
     return
   }
+  // 重入防护必须同步置位：按钮 :disabled="mfa.busy" 只挡点击，挡不住 Enter 提交
+  // （keydown.enter 直接调用提交函数）。长按回车的自动重复会在请求在途时重复提交
+  // ——本轮实测 enable 路径 4 次 keydown 发出 4 个 POST /auth/mfa/enable。
+  // 四个端点（enroll/enable/disable/recovery-codes）都是「重新生成并覆盖」的
+  // 非幂等语义，重复提交会让服务端状态与用户所见不一致，故四个入口统一拦截。
+  if (mfa.busy) return
   mfa.busy = true
   try {
     const { data: resp } = await api.auth.regenerateRecoveryCodes({ mfaCode: code })
@@ -363,6 +381,12 @@ const disableMfa = async () => {
     ElMessage.warning(t('profile.mfaCodeInvalid'))
     return
   }
+  // 重入防护必须同步置位：按钮 :disabled="mfa.busy" 只挡点击，挡不住 Enter 提交
+  // （keydown.enter 直接调用提交函数）。长按回车的自动重复会在请求在途时重复提交
+  // ——本轮实测 enable 路径 4 次 keydown 发出 4 个 POST /auth/mfa/enable。
+  // 四个端点（enroll/enable/disable/recovery-codes）都是「重新生成并覆盖」的
+  // 非幂等语义，重复提交会让服务端状态与用户所见不一致，故四个入口统一拦截。
+  if (mfa.busy) return
   mfa.busy = true
   try {
     await api.auth.mfaDisable({ mfaCode: code })

@@ -8,7 +8,7 @@
  * 检查项:
  *   1. 留存天数配置（AUDIT_RETENTION_DAYS，默认 180）
  *   2. append-only 钩子是否挂载（读取 schema 预编译钩子名）
- *   3. 审计导出接口是否存在（securityController.exportAuditLogs）
+ *   3. 审计导出接口是否存在（auditController.exportAuditLogs，含路由挂载校验）
  *   4. 审计异常监控是否挂载（index.js 中 auditMonitor.start/stop）
  *   5. 哈希链字段是否存在（prevHash / hash）
  *   6. WAL 兜底能力（auditBuffer.isWalEnabled）
@@ -72,14 +72,11 @@ function checkRetention() {
 function checkAppendOnlyHooks() {
   try {
     const AuditLog = require('../src/models/AuditLog');
-    const expectedHooks = [
-      'updateOne',
-      'deleteOne',
-      'deleteMany',
-      'replaceOne',
-      'findOneAndUpdate',
-      'findOneAndDelete',
-    ];
+    // L-25：清单直接引用实现侧的单一事实来源，避免两处手工同步。
+    // 原先此处硬编码 6 项而实际挂 9 项，漏掉的恰是 updateMany /
+    // findOneAndReplace / bulkWrite 三个**批量篡改**路径——若这些守卫被误删，
+    // 门禁不会失败，只能靠事后哈希链校验发现"已被篡改"而非"护栏缺失"。
+    const { APPEND_ONLY_HOOKS: expectedHooks } = require('../src/models/auditLogHooks');
 
     // 读取 schema 预编译钩子列表。schema.s.hooks._pres 属于 Mongoose 内部结构，
     // 可能随版本变化：探测不到时输出警告交由人工核对，而非静默判定为未挂载
@@ -122,14 +119,35 @@ function checkAppendOnlyHooks() {
 }
 
 // ================= 3. 审计导出接口存在 =================
+// L-25 同族修复（2026-09-16）：原实现查的是 securityController 上的同名函数，
+// 但该函数实际位于 controllers/auditController.js（securityRoutes.js:248 引用它）。
+// 于是本项**长期误报「未定义」**——门禁亮红却无人能修，因为代码本身是对的。
+// 门禁的价值在于「失败时指向真问题」；指向错位置的红灯会训练出「红灯可忽略」的
+// 习惯，比没有门禁更危险。现改为按路由实际挂载的处理器校验（单一事实来源），
+// 并顺带断言它确实是路由的最后一个 handler（中间件链完整）。
 function checkExportInterface() {
   try {
-    const securityController = require('../src/controllers/securityController');
-    const passed = typeof securityController.exportAuditLogs === 'function';
+    const auditController = require('../src/controllers/auditController');
+    const hasHandler = typeof auditController.exportAuditLogs === 'function';
+
+    // 交叉验证：路由表里 /audit-logs/export 的处理器链末尾必须是同一个函数
+    const routesSrc = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'src', 'routes', 'securityRoutes.js'),
+      'utf8'
+    );
+    const routeWired = /\/audit-logs\/export[\s\S]{0,200}?auditController\.exportAuditLogs/.test(
+      routesSrc
+    );
+
+    const passed = hasHandler && routeWired;
     recordCheck(
       '审计导出接口 (exportAuditLogs)',
       passed,
-      passed ? 'securityController.exportAuditLogs 已定义' : 'exportAuditLogs 未定义'
+      passed
+        ? 'auditController.exportAuditLogs 已定义且已挂到 GET /audit-logs/export'
+        : hasHandler
+          ? 'auditController.exportAuditLogs 已定义，但未在 securityRoutes.js 挂到 /audit-logs/export'
+          : 'auditController.exportAuditLogs 未定义'
     );
   } catch (err) {
     recordCheck('审计导出接口 (exportAuditLogs)', false, `检查失败：${err.message}`);

@@ -198,6 +198,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed, h } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { formatTime } from '@/utils/datetime'
 import { Bell, WarningFilled, CircleCheckFilled, Tools } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
@@ -210,7 +211,7 @@ import { useLatestRequest } from '@/composables/useLatestRequest'
 import GlassSegmented from '@/components/GlassSegmented.vue'
 
 const { hasPerm, hasAnyPerm } = usePermission()
-const { t, locale } = useI18n()
+const { t } = useI18n()
 
 const CAUSE_OPTIONS = computed(() => [
   { value: 'fire', label: t('alarm.causeFire') },
@@ -274,17 +275,17 @@ const reportForm = reactive({
 })
 
 // 表单验证规则
-const reportRules = {
+const reportRules = computed(() => ({
   alarmType: [{ required: true, message: t('messages.selectRequired'), trigger: 'change' }],
   location: [
     { required: true, message: t('alarm.location'), trigger: 'blur' },
-    { min: 1, max: 100, message: '1-100 chars', trigger: 'blur' },
+    { min: 1, max: 100, message: t('validation.locationLen'), trigger: 'blur' },
   ],
   description: [
     { required: true, message: t('alarm.description'), trigger: 'blur' },
-    { min: 1, max: 500, message: '1-500 chars', trigger: 'blur' },
+    { min: 1, max: 500, message: t('validation.descriptionLen'), trigger: 'blur' },
   ],
-}
+}))
 
 const statusType = (s) =>
   ({
@@ -305,10 +306,17 @@ const statusText = (s) =>
   })[s] || s
 
 // 格式化位置显示
+// 注意 typeof null === "object"：null 必须先挡掉，否则读 location.building 抛
+// TypeError，异常沿 loadData 的 catch 冒泡后整张表被清空（实测 0 行且无提示）。
+// 另：没有 building 的对象（{} / {building:null}）不可直出，会渲染成 "{}"
+// 或 "{ \"building\": null }"，对值班员是噪音，统一回落到「暂无数据」。
 const formatLocation = (location) => {
-  if (typeof location === 'object' && location.building) {
+  if (location && typeof location === 'object' && location.building) {
     return `${location.building}${location.floor || ''}${location.room ? ' ' + location.room : ''}`
   }
+  // 对象但没有可读的 building（{} / {building:null}）：直出会渲染成 "{}" 或
+  // "{ \"building\": null }"，对值班员是噪音，统一回落到「暂无数据」
+  if (location && typeof location === 'object') return t('common.noData')
   return location || t('common.noData')
 }
 
@@ -401,9 +409,10 @@ const loadData = async () => {
       _status: statusText(item.status),
       _statusType: statusType(item.status),
       _tagType: tagTypeMap[item.alarmType] || 'info',
-      _time: item.occurredAt
-        ? new Date(item.occurredAt).toLocaleString(locale.value, { hour12: false })
-        : '-',
+      // 时间列统一走 utils/datetime.formatTime（O-3 单一事实来源）：本地时区 +
+      // 固定 YYYY-MM-DD HH:mm:ss。此前用 toLocaleString(locale)，切界面语言会让
+      // 同一列格式突变（月/日顺序与分隔符都变）；非法值也不再有 Invalid Date。
+      _time: formatTime(item.occurredAt),
     }))
     // 后端 ApiResponse.paginated 把总数放在 pagination.total
     page.total = res?.data?.pagination?.total ?? tableData.value.length
@@ -503,6 +512,9 @@ const submitReport = async () => {
 // 处理报警（pending→派单给当前操作人；processing→登记到达现场）
 const handle = async (row) => {
   if (row.status !== 'pending' && row.status !== 'processing') return
+  // 重入守卫必须在首行同步判定：rowBusy 只是渲染态，同一 tick 的第二次点击
+  // 到达时按钮尚未 disabled（实测双击弹出 2 个确认框），会重复发请求。
+  if (rowBusy.value === row._id) return
 
   rowBusy.value = row._id
   try {
@@ -539,6 +551,9 @@ const resolve = async (row) => {
     ElMessage.warning(t('alarm.resolveRequiresProcessing'))
     return
   }
+
+  // 同 handle：首行同步判定，避免双击弹出两次确认框并重复提交完成请求
+  if (rowBusy.value === row._id) return
 
   rowBusy.value = row._id
   try {

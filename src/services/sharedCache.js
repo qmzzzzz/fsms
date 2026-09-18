@@ -214,16 +214,40 @@ async function getDel(key) {
 
 /**
  * 原子自增 + 首设过期（限流计数类用途）。
+ *
+ * L-07 修复：原实现是 `INCR` + `PEXPIRE` 两条独立命令，与「原子」注释不符。
+ * 两个后果：① `INCR` 成功而 `PEXPIRE` 失败（或进程在两条命令之间退出）→
+ * Redis 键永不带 TTL，限流/验证码计数器永久滞留，且计数再也不重置；
+ * ② 两条命令之间若抛错落入内存分支，同一逻辑操作会被重复计一次。
+ *
+ * 现改为单条 Lua 脚本，两条命令在 Redis 端原子执行：
+ *  - 脚本整体成功或整体失败，消除 ① 的中间态；
+ *  - 额外处理历史遗留的「无 TTL 键」（PTTL < 0）——即使某键此前因旧实现
+ *    落成了永久键，下一次自增时也会补上过期时间，无需人工清理。
+ *
+ * 残留风险（如实记录）：`eval` 若在服务端已执行、回包时连接中断，调用方
+ * 无法区分「没执行」与「执行了但没收到回执」，此时回退内存会重复计数一次。
+ * 该窗口从「两条命令之间」缩短到「单命令回包期间」，且仅发生在 Redis 抖动
+ * 的降级瞬间；对限流计数器而言多计一次的后果是**更严格**，可接受。
+ *
  * @returns {number} 自增后的值
  */
+const INCR_WITH_TTL_SCRIPT = `
+local v = redis.call('INCR', KEYS[1])
+local ttl = tonumber(ARGV[1])
+if ttl and ttl > 0 then
+  if v == 1 or redis.call('PTTL', KEYS[1]) < 0 then
+    redis.call('PEXPIRE', KEYS[1], ttl)
+  end
+end
+return v
+`;
+
 async function incrWithTtl(key, ttlMs) {
   if (isRedisEnabled()) {
     try {
-      const value = await redisClient.incr(key);
-      if (value === 1 && Number.isFinite(ttlMs) && ttlMs > 0) {
-        await redisClient.pexpire(key, ttlMs);
-      }
-      return value;
+      const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? Math.floor(ttlMs) : 0;
+      return await redisClient.eval(INCR_WITH_TTL_SCRIPT, 1, key, String(ttl));
     } catch (err) {
       logger.debug(`共享缓存 incr 失败（回退内存）：${err.message}`);
     }

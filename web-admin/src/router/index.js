@@ -144,7 +144,11 @@ router.onError(async (error, to) => {
 // 全局前置守卫 - 跨浏览器兼容
 router.beforeEach(async (to, from, next) => {
   // 路由切换时取消所有在途请求，避免状态更新到已卸载组件
-  if (from.name !== null) {
+  // P2-58 修复（2026-09-17）：判据改为 `!== undefined`。
+  // 首屏进入时 from 是 vue-router 的 START_LOCATION（name === undefined），
+  // 而 `!== null` 对 undefined 同样成立 —— 条件恒真，注释声称的「仅路由切换时」
+  // 从未成立过。改后首屏不再误触发取消（虽然此时本就没有在途请求，属行为收敛）。
+  if (from.name !== undefined) {
     cancelAllPendingRequests()
   }
 

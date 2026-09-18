@@ -274,6 +274,53 @@ const updateUser = asyncHandler(async (req, res) => {
     }
   }
 
+  // ===== 安全修复（P0-1，2026-09-17）：数据范围校验 =====
+  //
+  // 背景（代码审计已端到端复现的跨部门越权链）：
+  //   本接口此前只有「层级」校验（isSelf 例外 + targetMaxLevel >= operatorMaxLevel），
+  //   完全没有「数据范围」校验。department 是 dataScope='department' 用户可见数据的
+  //   **判定字段**（见 middleware/rbac.js 的 getDataScope / buildDataScopeFilter），
+  //   于是 dept=东区的部门管理员执行：
+  //     PUT /api/users/<自己> { department: '总部' }
+  //   → 200 成功 → 随后 GET /api/devices 以「总部」为口径返回全量设备
+  //   → GET /api/devices/:id 可直取总部设备（越权读取）。
+  //
+  //   allowedIPs 同理：它决定该账户可从哪些 IP 访问（authenticate 的 IP 范围校验），
+  //   属访问控制配置，不应由范围外的操作者改写。
+  //
+  // 修复口径（与 assertRecordInScope / applyDataScopeToQuery 的 deny 语义一致）：
+  //   - dataScope='all'        → 不受限（超级管理员）
+  //   - dataScope='department' → 仅允许**本部门内**变更：目标用户当前须在本部门，
+  //                              且新 department 值也须是本部门（越部门即拒）
+  //   - dataScope='self'/'none'→ 拒绝这两个字段的任何变更
+  //
+  // 注意 isSelf 不构成豁免：攻击链正是「改自己」。层级校验管的是「能不能碰这个人」，
+  // 数据范围校验管的是「能不能把他的归属改到我的可见域之外」——两者正交，都要有。
+  const touchesScopeField =
+    (department !== undefined && department !== user.department) ||
+    (allowedIPs !== undefined && allowedIPs !== user.allowedIPs);
+
+  if (touchesScopeField) {
+    const opScope = await getDataScope(req.user.userId);
+    if (opScope.type !== 'all') {
+      const opDept = opScope.type === 'department' ? opScope.department : null;
+      const targetInScopeDept = Boolean(opDept) && user.department === opDept;
+      const newDeptInScopeDept = department === undefined || department === opDept;
+      if (!targetInScopeDept || !newDeptInScopeDept) {
+        logger.warn('拒绝范围外的数据范围字段变更', {
+          operator: req.user.username || req.user.userId,
+          operatorScope: opScope.type,
+          operatorDept: opDept || null,
+          targetUsername: user.username,
+          targetDept: user.department || null,
+          requestedDept: department,
+          requestedAllowedIPs: allowedIPs !== undefined,
+        });
+        return ApiResponse.codeError(res, 'USER_SCOPE_FIELD_FORBIDDEN');
+      }
+    }
+  }
+
   // email 更新：前端用户编辑表单确实提交该字段，此前被静默丢弃；
   // 唯一性冲突处理与创建接口口径一致（先查重再写入）
   if (email !== undefined && email !== user.email) {

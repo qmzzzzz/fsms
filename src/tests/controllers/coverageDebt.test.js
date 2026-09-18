@@ -33,7 +33,11 @@ jest.mock('express-validator', () => ({
 
 const mockPermissionHelper = {
   getOperatorMaxLevel: jest.fn(),
-  maxRoleLevel: (roles) => (roles || []).reduce((m, r) => Math.max(m, r.level ?? 9), 9),
+  // 与真实实现同口径（permissionHelper.js:367-368）。
+  // 原 mock 用 reduce 且初始值为 9，使「目标角色 level 7」被算成 9——
+  // 在 P1-21 把比较从 `<` 改为 `<=` 后暴露为假红（真实实现下 9 <= 7 为假，应放行）。
+  maxRoleLevel: (roles) =>
+    Math.max(...(Array.isArray(roles) ? roles.filter(Boolean).map((r) => r.level || 0) : [0])),
 };
 
 jest.mock('../../utils/permissionHelper', () => mockPermissionHelper);

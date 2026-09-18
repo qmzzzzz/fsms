@@ -64,8 +64,24 @@ module.exports = {
   bcryptRounds: (() => {
     const rounds = parseInt(process.env.BCRYPT_ROUNDS, 10);
     // 默认 12 轮：现代 GPU 下的推荐下限（10 轮已不足以抵抗离线爆破），
-    // 仅影响新哈希，存量哈希仍可校验；如需迁移可在用户下次改密时自然升级
-    return Number.isFinite(rounds) && rounds > 0 ? rounds : 12;
+    // 仅影响新哈希，存量哈希仍可校验；如需迁移可在用户下次改密时自然升级。
+    //
+    // P2-39：加范围校验 10–14。原先只判 `rounds > 0`，两个方向都危险：
+    //   - 过小（如 BCRYPT_ROUNDS=4）→ 口令哈希秒破，而系统照常启动、无任何提示；
+    //   - 过大（如 999）→ bcrypt 单次哈希耗时指数上升，登录接口直接变成自我 DoS
+    //     （bcrypt 是同步 CPU 密集操作，会占满事件循环）。
+    // 越界值回落默认 12 并在启动日志告警，避免「静默按危险参数运行」。
+    const BCRYPT_MIN_ROUNDS = 10;
+    const BCRYPT_MAX_ROUNDS = 14;
+    if (Number.isFinite(rounds) && (rounds < BCRYPT_MIN_ROUNDS || rounds > BCRYPT_MAX_ROUNDS)) {
+      // 此处不能用 logger（logger 依赖 config，会形成加载期循环）
+      console.warn(
+        `[config] BCRYPT_ROUNDS=${process.env.BCRYPT_ROUNDS} 超出安全范围 ` +
+          `[${BCRYPT_MIN_ROUNDS}, ${BCRYPT_MAX_ROUNDS}]，已回落默认值 12`
+      );
+      return 12;
+    }
+    return Number.isFinite(rounds) ? rounds : 12;
   })(),
   rateLimit: {
     windowMs: (() => {
@@ -107,10 +123,19 @@ module.exports = {
       const ttl = parseInt(process.env.STATS_CACHE_TTL, 10);
       return Number.isFinite(ttl) && ttl > 0 ? ttl : 300;
     })(),
-    // 统计缓存最大条目数
-    statsCacheMaxSize: 500,
+    // 统计缓存最大条目数（P2-40：可配，默认 500）
+    statsCacheMaxSize: (() => {
+      const n = parseInt(process.env.STATS_CACHE_MAX_SIZE, 10);
+      return Number.isFinite(n) && n > 0 ? n : 500;
+    })(),
     // 过期条目清理间隔（毫秒）
-    statsCacheCleanupInterval: 120000,
+    // P2-40：改为可配（原为硬编码 500 / 120000）。大库（数十万设备）下
+    // 500 条上限会让热点统计频繁被淘汰，运维需要能按内存余量上调；
+    // 清理间隔在低配机器上也需要放宽以降低定时扫描频率。
+    statsCacheCleanupInterval: (() => {
+      const ms = parseInt(process.env.STATS_CACHE_CLEANUP_INTERVAL, 10);
+      return Number.isFinite(ms) && ms > 0 ? ms : 120000;
+    })(),
   },
 
   // 生产前端静态托管（L-1）：后端直接服务 web-admin 构建产物。

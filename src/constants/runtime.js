@@ -85,15 +85,74 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
 ]);
 
 /**
+ * 解析 Pod 序号（K8s StatefulSet 的 hostname 约定：<name>-<ordinal>）
+ *
+ * 为什么需要这条判据：Deployment 的 `replicas > 1` 由 ReplicaSet 命名 Pod
+ * （形如 `<deployment>-<rs-hash>-<5位随机>`），**不注入任何环境变量**，
+ * 因此上方 6 条判据（PM2 / cluster / WEB_CONCURRENCY / INSTANCE_COUNT /
+ * REPLICAS / NODE_APP_INSTANCE）在纯 K8s 单容器多副本场景下**全部落空**，
+ * 检测静默失效——而这正是审计哈希链分叉、限流配额放大最可能的生产形态。
+ *
+ * 判据分两档，避免把普通单副本 Pod 误判：
+ *   - 强信号：StatefulSet 序号 > 0（`app-0` / `app-1` …）。同一 StatefulSet
+ *     的序号互不相同，序号非 0 即可确定存在同族其他 Pod。
+ *   - 弱信号：Deployment 形态的 `<name>-<rsHash>-<5位>`。这个形态在**单副本**
+ *     时也成立，故本身不能证明多副本，只能说明「像是由编排器管理的 Pod」。
+ *     调用方按需决定是否上报（见 detectMultiProcess 的 k8sPodLike 字段）。
+ *
+ * 为何读 `os.hostname()` 而不是 `process.env.HOSTNAME`：容器内两者通常相同，
+ * 但 hostname 在本地/裸机也能拿到真实值，且不依赖编排器是否导出该变量——
+ * 本判据必须在「编排器什么都没导出」时仍能工作。
+ *
+ * @param {string} [hostname] 待解析的 hostname，默认取 os.hostname()
+ * @returns {{podLike: boolean, ordinal: number|null, strong: boolean}}
+ */
+function parsePodOrdinal(hostname) {
+  let host = hostname;
+  if (host === undefined) {
+    try {
+      host = require('os').hostname();
+    } catch (_) {
+      return { podLike: false, ordinal: null, strong: false };
+    }
+  }
+  if (typeof host !== 'string' || host.length === 0) {
+    return { podLike: false, ordinal: null, strong: false };
+  }
+
+  const lower = host.toLowerCase();
+
+  // 强信号：StatefulSet 序号（末段为纯数字，且非 0 才算多副本）
+  const sts = /-([0-9]+)$/.exec(lower);
+  if (sts) {
+    const ordinal = Number(sts[1]);
+    // 序号 0 是首个 Pod，单副本时同样成立，不构成多副本证据
+    return { podLike: true, ordinal, strong: ordinal > 0 };
+  }
+
+  // 弱信号：Deployment 形态 <name>-<rsHash>-<5位随机>
+  // rsHash 为 8~10 位字母数字，末段为 5 位字母数字
+  const dep = /-[a-z0-9]{8,10}-[a-z0-9]{5}$/.exec(lower);
+  if (dep) return { podLike: true, ordinal: null, strong: false };
+
+  return { podLike: false, ordinal: null, strong: false };
+}
+
+/**
  * 检测是否存在多进程运行迹象
  *
  * 判据（任一命中即视为可疑）：
  *   - PM2 注入的 instances / NODE_APP_INSTANCE
  *   - Node 原生 cluster 的 worker 标记
  *   - 显式声明的 WEB_CONCURRENCY / CLUSTER_WORKERS > 1
- * @returns {{suspected: boolean, reasons: string[]}}
+ *   - INSTANCE_COUNT / REPLICAS > 1（编排器显式声明的副本数）
+ *   - K8s StatefulSet Pod 序号 > 0（见 parsePodOrdinal；Deployment 形态
+ *     属弱信号，仅置 k8sPodLike 提示，不计入 suspected）
+ *
+ * @param {{hostname?: string}} [opts] 仅测试使用：注入 hostname 以验证判据
+ * @returns {{suspected: boolean, reasons: string[], k8sPodLike: boolean}}
  */
-function detectMultiProcess() {
+function detectMultiProcess(opts = {}) {
   const reasons = [];
 
   for (const key of ['INSTANCE_COUNT', 'REPLICAS']) {
@@ -125,7 +184,14 @@ function detectMultiProcess() {
     if (Number.isFinite(n) && n > 1) reasons.push(`${key}=${n}`);
   }
 
-  return { suspected: reasons.length > 0, reasons };
+  // K8s 兜底判据：Deployment 的 replicas>1 不注入任何环境变量，
+  // 只能从 Pod 名推断（见 parsePodOrdinal 的两档说明）
+  const pod = parsePodOrdinal(opts.hostname);
+  if (pod.strong) {
+    reasons.push(`K8s Pod 序号=${pod.ordinal}（StatefulSet 非首副本）`);
+  }
+
+  return { suspected: reasons.length > 0, reasons, k8sPodLike: pod.podLike };
 }
 
 /**
@@ -188,6 +254,7 @@ function assertSingleProcessAssumptions() {
 
 module.exports = {
   SINGLE_PROCESS_DEPENDENCIES,
+  parsePodOrdinal,
   detectMultiProcess,
   assertSingleProcessAssumptions,
 };

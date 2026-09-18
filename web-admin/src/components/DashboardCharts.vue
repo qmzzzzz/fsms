@@ -269,6 +269,8 @@ const doLoad = async () => {
       const date = new Date(Date.now() - i * 24 * 60 * 60 * 1000)
       const dateStr = toLocalDateStr(date)
       const dayData = alarmByDay.find((d) => d._id === dateStr)
+      // X 轴标签刻意用 locale 短格式（MM-DD）：轴宽有限，定长串会挤爆刻度。
+      // 数据表格的时间列才需要 utils/datetime 的定长口径，两者诉求不同。
       dates.push(date.toLocaleDateString(locale.value, { month: '2-digit', day: '2-digit' }))
       counts.push(dayData?.count || 0)
     }

@@ -108,7 +108,12 @@ const buildSecurityHeaders = (mode) => {
   return {
     // 开发模块使用 ETag/304 时，损坏的浏览器磁盘缓存会表现为 ERR_CACHE_READ_FAILURE。
     // 开发期禁用 HTTP 缓存可强制每次重新读取源文件和依赖产物。
-    'Cache-Control': isDev ? 'no-store' : undefined,
+    // P0-修复（2026-09-17）：原先写死 'Cache-Control': isDev ? 'no-store' : undefined。
+    // resolveConfig 在 production 下把该对象合并进 preview.headers，键存在但值为
+    // undefined，vite preview 的 send() 调用 res.setHeader('Cache-Control', undefined)
+    // 抛 ERR_HTTP_INVALID_HEADER_VALUE → 全站 500（已实测复现）。
+    // 条件展开保证该键只在开发态出现，生产态彻底不生成。
+    ...(isDev ? { 'Cache-Control': 'no-store' } : {}),
     'Content-Security-Policy': [
       "default-src 'self'",
       scriptSrc,
@@ -385,6 +390,13 @@ const registerProcessGuard = (command) => {
 }
 
 export default defineConfig(({ command, mode }) => {
+  // 版本号单一事实来源：把 package.json 的 version 注入为编译期常量，
+  // 供 AboutView 等展示使用。此前组件内手抄了一份字面量（与 package.json 各写一份），
+  // 发版后页面会永久显示旧版本（潜伏型漂移，实测 2026-09-18）。
+  const pkgVersion = JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')
+  ).version
+
   // L1/L2 见 hardenDevServerPlugin；此处注册 L3 进程级兜底
   registerProcessGuard(command)
 
@@ -403,12 +415,32 @@ export default defineConfig(({ command, mode }) => {
   }
 
   return {
+    // 版本号单一事实来源（见上方 pkgVersion）：编译期常量替换，组件内不得再手抄
+    define: {
+      __APP_VERSION__: JSON.stringify(pkgVersion),
+    },
     // vitest 配置（I-02 前端测试基线）：jsdom 提供 localStorage/document，
     // alias 与构建共用；PWA/安全头等插件仅服务 dev/build，测试不加载
     test: {
       environment: 'jsdom',
       include: ['src/tests/**/*.test.js'],
       globals: false,
+      // 组件测试能力（2026-09-18）：.vue 单文件组件经 vue() 插件编译后，
+      // 其 import 的 element-plus 组件会连带 `import '.../style/css'`，
+      // 而 vitest 默认把 node_modules 依赖外部化给 Node 原生 ESM 加载，
+      // Node 不认识 .css 扩展名，挂载即报「Unknown file extension ".css"」。
+      // 把 element-plus 交给 Vite 管道内联处理后，CSS 由 Vite 正常吞掉，
+      // 从而无需 @vue/test-utils 也能用 createApp 直接挂载视图组件做断言。
+      // 这是测试期配置，不进入生产构建产物。
+      server: { deps: { inline: ['element-plus'] } },
+      // 单例默认超时 5s 在「并行子 agent + 多 worker 抢 CPU」时不够：
+      // apiRequestPipeline.test.js 每个用例 vi.resetModules() 重建整个模块图
+      // （api/router/store/i18n），冷启动开销叠加 CPU 竞争会偶发越过 5s，
+      // 表现为「单跑全绿、全量偶红」的 flaky（实测：同一文件在无竞争时 57/57 绿，
+      // 竞争时个别用例超时）。20s 仍能拦住真正的死循环/挂起——本仓最慢的
+      // routeTable.test.js 单例约 12s（真实加载 13 个 .vue），远低于该值。
+      testTimeout: 20000,
+      hookTimeout: 20000,
       // 覆盖率（T-3）：v8 provider 生成可度量报告；reporter 输出终端摘要、lcov
       // （供 codecov 上传）与 json-summary（供 CI 阈值门禁读取）。
       coverage: {
@@ -416,15 +448,36 @@ export default defineConfig(({ command, mode }) => {
         reporter: ['text', 'lcov', 'json-summary'],
         include: ['src/**/*.{js,vue}'],
         exclude: ['src/tests/**', 'src/main.js', 'src/**/*.d.ts'],
-        // 硬门禁（T-3 棘轮基线）：贴着实测值（st 10.79 / br 9.38 / fn 6.35 /
-        // ln 10.53）逐步上调。当前实测 st 11.10 / br 9.76 / fn 6.60 /
-        // ln 10.88，本轮按语句/行先各 +0.5pct 收紧。视图组件暂未纳入
-        // 组件级测试，故用**全局**阈值而非 perFile（否则未测视图会整体红灯）。
+        // 硬门禁（T-3 棘轮基线）：贴着实测值逐步上调，具体数字见下方
+        // thresholds。本注释**不记录实时快照**——原写的「实测 st 11.10 /
+        // br 9.76 / fn 6.60 / ln 10.88」早已失实（报告 §10.5 漂移 #12）。
+        // 视图组件暂未纳入组件级测试，故用**全局**阈值而非 perFile
+        //（否则未测视图会整体红灯）。
+        // 2026-09-18 两次收紧：
+        //   第一次 10.5/8/5/10.5 → 19/17/11.5/18.5（原阈值只有当时实测的一半，
+        //   与本仓后端曾修过的 P3-49 同病：删掉一半测试仍然全绿，等于没有门槛）。
+        //   第二次 → 28.5/25.5/21.5/28：本轮补齐 InspectionView / InspectionForm /
+        //   InspectionReviewForm 等组件级用例后实测跳到
+        //   st 30.03 / br 27.06 / fn 23.34 / ln 29.7（两次运行一致，非抖动）。
+        // 第三次 → 78/71.5/71/79：本轮补齐 AlarmView / DashboardView / AuditLogView /
+        // AuditLogView / IpListView / ProfileView / SessionManager / PermissionModuleCard
+        // 组件级用例后，实测跳到 st 79.92 / br 73.39 / fn 72.84 / ln 80.87
+        // （全量 62 文件 / 806 通过 0 失败的一次运行结果）。
+        // 第四次 → 92/84/90/93：本轮（2026-09-18 第二轮）新增
+        // routeGuard / routeTable / dashboardCharts / app / localeKeyParity /
+        // layout / SessionManager / MfaSettingsCard / InspectionView / InspectionForm /
+        // AboutView / ReportView / apiRequestPipeline / i18nEntry / useRolePermissions
+        // 等测试后，实测跳到 st 94.35 / br 86.38 / fn 92.99 / ln 95.46
+        // （全量 84 文件 / 1215 例的一次运行结果）。
+        // 仍取「实测下方约 2.4pt」留余量：只拦真实退化，不因 CI 环境抖动误伤。
+        // 量化证明（第四次）：临时移出 4 个测试文件后跌至 st 88.1 / br 79.6 /
+        // fn 86.4 / ln 89.1，exitCode=1 且 thresholdViolation=true —— 门槛确实在拦。
+        // 历史：第一/二/三次收紧见上方注释（10.5 → 19 → 28.5 → 78）。
         thresholds: {
-          statements: 10.5,
-          branches: 8,
-          functions: 5,
-          lines: 10.5,
+          statements: 92,
+          branches: 84,
+          functions: 90,
+          lines: 93,
         },
       },
     },
@@ -516,7 +569,6 @@ export default defineConfig(({ command, mode }) => {
         ? {
             https: (() => {
               try {
-                const fs = require('fs')
                 return {
                   cert: fs.readFileSync(process.env.TLS_CERT_PATH || '../certs/server.crt'),
                   key: fs.readFileSync(process.env.TLS_KEY_PATH || '../certs/server.key'),
@@ -571,12 +623,19 @@ export default defineConfig(({ command, mode }) => {
         ? {
             https: (() => {
               try {
-                const fs = require('fs')
                 return {
                   cert: fs.readFileSync(process.env.TLS_CERT_PATH || '../certs/server.crt'),
                   key: fs.readFileSync(process.env.TLS_KEY_PATH || '../certs/server.key'),
                 }
               } catch (e) {
+                // P1-18：preview HTTPS 证书读取失败会静默降级为 HTTP（降级本身是设计内的：
+                // 证书可能尚未生成），但此前无任何可观测信号——外部访问者遇到的是 HTTP，
+                // 而运维在终端里看不到任何提示。构建期配置无法接入应用层 errorReporter：
+                // 后者依赖 import.meta.env 与 localStorage/location，Node 环境实测均不可用
+                // （TypeError: Cannot read properties of undefined (reading VITE_ERROR_REPORT_URL)），
+                // 强行引入只会让 vite 配置加载失败。故改用构建期 console.warn 留痕，
+                // 与上方 dev 分支 :530 的既有做法保持一致。
+                console.warn('[vite] preview HTTPS 证书读取失败，仍以 HTTP 启动：', e.message)
                 return undefined
               }
             })(),
@@ -606,10 +665,17 @@ export default defineConfig(({ command, mode }) => {
             // 仅被 InspectionForm / AuditLogView / DeviceView / ReportView 四个懒加载
             // 入口使用，首屏 Dashboard 完全不需要。改由 rollup 按依赖图自动分配：
             // 首屏组件留在主 chunk，仅被异步入口引用的组件落入对应的异步 chunk。
-            if (
-              id.includes('node_modules/echarts') ||
-              id.includes('node_modules\\.pnpm\\echarts')
-            ) {
+            // P2-52：原实现为 id.includes('node_modules/echarts') ||
+            // id.includes('node_modules\\.pnpm\\echarts') —— 前者是无边界的子串匹配
+            // （echarts-extra 这类包也会被拽进 echarts chunk，且反斜杠 id 匹配不上），
+            // 后者（字符串值 'node_modules\\.pnpm\\echarts'）只对反斜杠 id 命中，
+            // 而实测传入的 1277 个 id 全为正斜杠，故在本环境下从未生效（冗余分支）。
+            // 另外注意：pnpm 路径末段仍含子串 node_modules/echarts，即便删除该分支
+            // 也不会丢失 pnpm 布局的分组——真正的隐患是无边界子串会误伤
+            // echarts-extra 这类包，且反斜杠 id 对两个 includes 都匹配不上。
+            // 收敛为与下方 vue-vendor 同风格的分隔符无关正则：
+            // 要求 node_modules/echarts/ 作为完整路径段出现。
+            if (/[\\/]node_modules[\\/]echarts[\\/]/.test(id)) {
               return 'echarts'
             }
             if (/[\\/]node_modules[\\/](@?vue|vue-router|pinia)[\\/]/.test(id)) {

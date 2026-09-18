@@ -48,7 +48,10 @@ const applyQueryStatics = (schema, responseExclude) => {
         },
       },
       { $group: { _id: '$userId', count: { $sum: 1 } } },
-      { $match: { count: { $gte: 5 } } },
+      // L-20：原为硬编码 5，而同一函数的 failedOperations / failedOperationsByIp
+      // 都用 threshold 参数——调用方以为统一调整了阈值，实际"非常规时间访问"
+      // 始终按 5 计。现统一为 threshold，与其余两路口径一致。
+      { $match: { count: { $gte: threshold } } },
     ]);
 
     return { failedOperations, failedOperationsByIp, unusualTimeOperations };

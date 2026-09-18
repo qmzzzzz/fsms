@@ -73,7 +73,10 @@ describe('batchCreatePermissions 批量写入（O-2）', () => {
   });
 
   test('混合批次：新增 1 条落库，已存在与悬空父引用各进 skipped，响应结构不变', async () => {
-    // 预置一条已存在权限，用于「已存在」skip 分支
+    // 自包含前置：清掉本批次两个 code 的可能残留，再显式预置「已存在」
+    // （仅预置 alpha 时，随机顺序下本用例可能先于「重复提交」运行并写入
+    //  beta，使「重复提交」用例的预检 skip 分支落空、created 由 0 变 1）
+    await Permission.deleteMany({ code: { $in: [`${stamp}:alpha`, `${stamp}:beta`] } });
     await Permission.create({
       name: '已存在',
       code: `${stamp}:alpha`,
@@ -113,6 +116,16 @@ describe('batchCreatePermissions 批量写入（O-2）', () => {
   });
 
   test('重复提交：已落库的 code 走预检 skip，不产生重复文档', async () => {
+    // 自包含前置：原实现依赖「混合批次」用例先把 beta 写库，
+    // 随机顺序下本用例可能先执行，预检查不到 beta 于是真的创建（created 期望 0 实得 1）
+    await Permission.deleteMany({ code: `${stamp}:beta` });
+    await Permission.create({
+      name: '批量新增',
+      code: `${stamp}:beta`,
+      type: 'api',
+      module: 'test',
+    });
+
     const res = await request(app)
       .post('/api/permissions/batch')
       .set('Authorization', `Bearer ${adminToken}`)
@@ -134,11 +147,16 @@ describe('batchCreatePermissions 批量写入（O-2）', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ permissions: [] });
     expect(empty.status).toBe(400);
+    // 断言被拒的是 permissions 字段本身（校验明细透传），而非别的 400
+    expect(empty.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(empty.body.errors.fieldErrors[0].path).toBe('permissions');
 
     const notArray = await request(app)
       .post('/api/permissions/batch')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ permissions: 'nope' });
     expect(notArray.status).toBe(400);
+    expect(notArray.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(notArray.body.errors.fieldErrors[0].path).toBe('permissions');
   });
 });

@@ -7,7 +7,12 @@
  * 3. 同一错误短窗重复触发只累计计数，不刷爆缓冲
  */
 import { describe, test, expect, beforeEach, afterEach, beforeAll, vi } from 'vitest'
-import { initErrorHandling, getLoggedErrors, clearLoggedErrors } from '@/utils/errorReporter'
+import {
+  initErrorHandling,
+  getLoggedErrors,
+  clearLoggedErrors,
+  redactUrl,
+} from '@/utils/errorReporter'
 
 const app = { config: {} }
 
@@ -109,5 +114,44 @@ describe('errorReporter 全局错误兜底', () => {
 
     expect(getLoggedErrors()).toHaveLength(0)
     expect(JSON.parse(localStorage.getItem('fsrbac.errorLog'))).toHaveLength(0)
+  })
+
+  // L-11：上报 URL 不得携带明文凭据。
+  // 该函数与后端 utils/helpers.js 的 redactUrlQuery 同口径（键名保留、值打码）。
+  describe('redactUrl（L-11 URL 脱敏）', () => {
+    test('敏感键的值被打码，非敏感键原样保留', () => {
+      expect(redactUrl('/x?token=abc123&page=2')).toBe('/x?token=***&page=2')
+      expect(redactUrl('/x?access_token=a&refresh_token=b')).toBe(
+        '/x?access_token=***&refresh_token=***'
+      )
+    })
+
+    test('下划线边界感知：不误伤 postcode / zipcode', () => {
+      // 与后端同口径——短键 code 若按子串匹配会把 postcode 一并打码，
+      // 损失排障信息（这是本仓库明确踩过的坑）
+      expect(redactUrl('/x?postcode=100080&zipcode=200000')).toBe(
+        '/x?postcode=100080&zipcode=200000'
+      )
+      // 但边界组合词要命中
+      expect(redactUrl('/x?access_code=z')).toBe('/x?access_code=***')
+    })
+
+    test('hash 中的敏感参数同样被打码（无 query 时也不例外）', () => {
+      expect(redactUrl('/app#/cb?token=leak')).toBe('/app#/cb?token=***')
+      expect(redactUrl('/app#access_token=leak')).toBe('/app#access_token=***')
+    })
+
+    test('无 query 无 hash、或入参非法时原样返回', () => {
+      expect(redactUrl('/plain/path')).toBe('/plain/path')
+      expect(redactUrl('')).toBe('')
+      expect(redactUrl(null)).toBe(null)
+      expect(redactUrl(undefined)).toBe(undefined)
+    })
+
+    test('含 = 的值里有 & 之外的字符不受影响；无值参数不抛错', () => {
+      expect(redactUrl('/x?flag&token=t&url=http%3A%2F%2Fa.b')).toBe(
+        '/x?flag&token=***&url=http%3A%2F%2Fa.b'
+      )
+    })
   })
 })

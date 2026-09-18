@@ -24,9 +24,23 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node-version }}
+          # 缓存两份 lockfile（后端与 web-admin）：下方两次 npm ci 都受益
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web-admin/package-lock.json
 
       - name: Install dependencies
         run: npm ci
+
+      # 体积预算的端到端断言（src/tests/deploy/bundleBudget.test.js 的「真实产物」部分）
+      # 需要真实的 web-admin/dist；而 dist 是构建产物、已被 .gitignore 排除，CI 上不存在。
+      # 该用例组**刻意不静默跳过**（那会让门禁在最需要它的场景变绿），
+      # 因此这里真构建一次，使断言在 CI 上同样成立。
+      - name: Build frontend (bundle budget tests need real dist)
+        run: |
+          npm --prefix web-admin ci
+          npm --prefix web-admin run build
 
       - name: Run lint
         run: npm run lint
@@ -50,6 +64,21 @@ jobs:
       # 不影响测试语义。--watch 场景不兼容 forceExit，但 CI 无 watch。
       - name: Run tests
         run: npm test -- --forceExit
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-secret
+          AES_SECRET_KEY: test-aes-key-32-chars-minimum!!
+          HMAC_SECRET: test-hmac-secret
+
+      # 顺序无关门禁（2026-09-18 新增）：本仓库的测试曾隐含「用例/文件按固定顺序执行」
+      # 的未声明前提——固定顺序全绿、加 --randomize 则 12 个套件转红。这类回归
+      # 极隐蔽：CI 此前只跑固定顺序，破坏顺序无关性的改动（新增共享模块级状态、
+      # 跨用例复用造数、jest.resetModules 污染全局注册表…）在 CI 上永远绿灯，
+      # 直到某次无关改动改变了文件/用例的执行次序才突然爆发，且极难定位。
+      # 此门禁用固定 seed 跑一轮随机顺序：seed 固定 → 结果可复现（不是抽奖式门禁），
+      # 又足以覆盖与默认顺序不同的排列。
+      - name: Test order independence (randomized)
+        run: npx jest --randomize --seed=20260917 --forceExit
         env:
           NODE_ENV: test
           JWT_SECRET: test-secret
@@ -89,6 +118,7 @@ jobs:
         # I-M3：取消 continue-on-error——高危依赖告警直接让 job 失败（硬门禁）；
         # 结果写入 Job Summary 留痕（此前软门禁会静默吞掉告警，事后无法追溯）
         run: |
+          set -o pipefail
           npm audit --omit=dev --audit-level=moderate | tee audit-backend.txt
           echo "### Backend npm audit" >> "$GITHUB_STEP_SUMMARY"
           tail -3 audit-backend.txt >> "$GITHUB_STEP_SUMMARY" || true
@@ -97,6 +127,7 @@ jobs:
         working-directory: web-admin
         # I-M3：同上，硬门禁 + 留痕
         run: |
+          set -o pipefail
           npm audit --omit=dev --audit-level=moderate | tee ../audit-web.txt
           echo "### Web-admin npm audit" >> "$GITHUB_STEP_SUMMARY"
           tail -3 ../audit-web.txt >> "$GITHUB_STEP_SUMMARY" || true
@@ -168,6 +199,8 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: 24.x
+          cache: npm
+          cache-dependency-path: web-admin/package-lock.json
 
       - name: Install dependencies
         working-directory: web-admin
@@ -185,9 +218,27 @@ jobs:
         working-directory: web-admin
         run: npm run test:coverage
 
+      # 顺序无关门禁（前端，2026-09-18 新增，与后端同名步骤对称）：
+      # 后端曾出现 12 个套件依赖固定执行顺序的隐患（见 test job 内说明），
+      # 前端同样存在模块级共享状态（sessionStorage、document.documentElement.lang、
+      # i18n 单例 locale、ResizeObserver 全局替身等），文件顺序一变就可能互相污染。
+      # 此前的 frontend 只跑默认顺序，这类问题在 CI 上永远绿灯。
+      # seed 固定 → 结果可复现（非抽奖式门禁），又与默认顺序构成不同排列。
+      - name: Frontend test order independence (shuffled)
+        working-directory: web-admin
+        run: npx vitest run --sequence.shuffle --sequence.seed=20260918
+
       - name: Build frontend
         working-directory: web-admin
         run: npm run build
+
+      # 体积预算硬门禁（七维终评补）：vite 的 chunkSizeWarningLimit 只是构建期警告，
+      # 不阻断构建——误引入大依赖、manualChunks 规则失效、PWA 预缓存膨胀，
+      # 都会让 CI 全绿而用户端首屏变慢。这一步把体积变成硬门禁（超预算即非零退出），
+      # 必须紧跟在 build 之后——它的断言对象就是 dist/。
+      - name: Check frontend bundle budget
+        working-directory: web-admin
+        run: npm run build:budget
 
       - name: Upload frontend coverage
         uses: codecov/codecov-action@v5
@@ -407,11 +458,24 @@ jobs:
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
+      # 构建时间戳：用于 OCI created 标签。单独成步而不在 build-args 里写
+      # `${{ ... }}` 的 date：Actions 内置上下文没有“当前时间”（只有事件时间戳，
+      # 重跑时会变成旧值）。UTC + ISO8601 是 OCI 规范对 created 的要求。
+      - name: Compute build date
+        id: builddate
+        run: echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          # 不传就会落到默认值 unknown——镜像看不出对应哪个 commit、何时构建。
+          # sha 用全量（与 tag 的短哈希不同，全量可直接对回 git 对象）。
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ steps.builddate.outputs.date }}
+            APP_VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

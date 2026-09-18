@@ -20,6 +20,12 @@ const defaultLocale = savedLocale || (browserLang.startsWith('zh') ? 'zh-CN' : '
  * 本项目消息为纯文本，仅需支持 {name} 具名插值 / 位置插值，无需函数求值。
  * 说明：v9 的 ctx.named 为函数（其 .name 会干扰取参），
  *       真实具名/位置插值参数统一存放在 ctx.values 中。
+ *
+ * 前导 `$` 排除（本轮修复）：词表历史欠账混入了后端 JS 模板字符串的源码形态
+ * （如 ${check.invalid.join(...)}），它们是**文案值**的一部分而非插值占位符。
+ * 旧实现 /\{([^}]+)\}/g 会把 ${x} 中的 {x} 当占位符替换，产出「$ + 参数值」
+ * 这类破相文案（参数未命中时则原样直出模板源码）。本实现显式跳过前导 `$` 的
+ * 花括号，只解析 {name} 语义；词表侧同步改写，两侧共同保证文案完整。
  */
 const messageCompiler = (message) => {
   if (typeof message !== 'string') return message
@@ -27,7 +33,9 @@ const messageCompiler = (message) => {
     if (!/[{}]/.test(message)) return message
     const values = (ctx && typeof ctx === 'object' && ctx.values) || {}
     let listIdx = 0
-    return message.replace(/\{([^}]+)\}/g, (match, key) => {
+    return message.replace(/\{([^}]+)\}/g, (match, key, offset, whole) => {
+      // 前导 `$`：${...} 是模板字符串源码残留，不是 {name} 插值，原样保留
+      if (offset > 0 && whole[offset - 1] === '$') return match
       if (Object.prototype.hasOwnProperty.call(values, key)) {
         return String(values[key])
       }

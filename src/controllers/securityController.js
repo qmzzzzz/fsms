@@ -17,6 +17,7 @@ const sessionService = require('../services/sessionService');
 const authService = require('../services/authService');
 const { RETENTION_DAYS, wasAdjusted: retentionWasAdjusted } = require('../constants/retention');
 const { businessDayBounds } = require('../constants/timezone');
+const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
 
 /**
  * 获取当前用户的安全信息
@@ -189,8 +190,11 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
   // 已拦），且受数据范围约束（非超管不得越级查看层级高于自己的目标）。
   const isSelf = !targetUserId || String(targetUserId) === String(req.user.userId);
 
-  // 数据范围保护：查看他人时，操作者层级须 ≥ 目标用户层级（level 越低越敏感可读性差，
-  // 遵循「≥9 全部 / ≥7 本部门 / ≥5 仅本人」口径；超管 *:* 恒通过）
+  // 数据范围保护：查看他人时，操作者层级须**严格高于**目标用户层级
+  // （目标层级 >= 操作者层级即拒绝，含同级——与 userController/rolePermissionController/
+  // authService 等其余 23 处「>= 即拒绝」口径一致，P1-21 修复，2026-09-17）。
+  // 理由：敏感数据（手机号/邮箱）的横向查看不因同级而合法，同级放行等于允许
+  // 平级管理员互相读取 PII；越级（target > op）更应拒绝。超管 *:* 恒通过。
   if (!isSelf) {
     const opLevel = await getOperatorMaxLevel(req.user.userId);
     const targetUser = await User.findById(targetUserId)
@@ -201,7 +205,7 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
       return ApiResponse.codeError(res, 'TARGET_USER_NOT_FOUND');
     }
     const targetLevel = maxRoleLevel(targetUser.roles);
-    if (opLevel < targetLevel) {
+    if (opLevel <= targetLevel) {
       return ApiResponse.codeError(res, 'SENSITIVE_VIEW_HIGHER_LEVEL_FORBIDDEN');
     }
   }
@@ -233,12 +237,22 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
   }
 
   // 记录审计日志
+  // L-06 修复：原实现把 userId（操作者）与 username（被查看者）写进同一条记录，
+  // 一条记录里两个主体字段指向不同的人。该处已设 skipGlobalAudit，故这是该操作
+  // 的唯一留痕——按 username 检索时会把"谁查看了谁"记为被查看者本人。
+  // 现改为：username 为操作者，被查看者另存 targetUserId/targetUsername。
+  // P0-5 修复（2026-09-17）后"唯一留痕"才成立：skipGlobalAudit 由全局审计
+  // 中间件在**响应时刻**读取（security.js 的 doLog），下方赋值与随后
+  // res.json 之间的顺序因此生效；修复前该标志在中间件入口即被检查，
+  // 此处赋值永远晚于检查，本次操作会被双写。
   res.locals.skipGlobalAudit = true;
   await AuditLog.create({
     action: 'view_sensitive_data',
     category: 'auth',
     userId: req.user.userId,
-    username: user.username,
+    username: req.user.username,
+    targetUserId: user._id,
+    targetUsername: user.username,
     dataType,
     ip: req.ip,
     userAgent: req.get('user-agent'),
@@ -768,7 +782,7 @@ const setRegistrationConfig = asyncHandler(async (req, res) => {
     success: true,
     riskLevel: 'medium',
     body: { allowPublicRegistration },
-  }).catch(() => {});
+  }).catch(onAuditWriteFailure('security_config_change', req));
 
   logger.info('注册开关已变更', { allowPublicRegistration, operator: req.user.username });
 
@@ -824,7 +838,7 @@ const setLoginCaptchaConfig = asyncHandler(async (req, res) => {
     success: true,
     riskLevel: 'medium',
     body: { loginCaptchaEnabled },
-  }).catch(() => {});
+  }).catch(onAuditWriteFailure('security_config_change', req));
 
   logger.info('登录验证码开关已变更', { loginCaptchaEnabled, operator: req.user.username });
 
@@ -880,7 +894,7 @@ const setRegisterCaptchaConfig = asyncHandler(async (req, res) => {
     success: true,
     riskLevel: 'medium',
     body: { registerCaptchaEnabled },
-  }).catch(() => {});
+  }).catch(onAuditWriteFailure('security_config_change', req));
 
   logger.info('注册验证码开关已变更', { registerCaptchaEnabled, operator: req.user.username });
 

@@ -1,0 +1,153 @@
+{
+  "threshold": 15,
+  "count": 29,
+  "note": "E-01/E-02 后重采：loginUser(46)/authenticate(29)/validateConfig(34) 三处已拆分达标",
+  "generatedAt": "2026-09-16",
+  "rows": [
+    {
+      "file": "src\\controllers\\userController.js",
+      "line": 209,
+      "value": 35
+    },
+    {
+      "file": "src\\controllers\\userController.js",
+      "line": 324,
+      "value": 31
+    },
+    {
+      "file": "src\\services\\auditQueryService.js",
+      "line": 73,
+      "value": 30
+    },
+    {
+      "file": "src\\utils\\auditQuery.js",
+      "line": 10,
+      "value": 28
+    },
+    {
+      "file": "src\\utils\\metrics.js",
+      "line": 237,
+      "value": 28
+    },
+    {
+      "file": "src\\controllers\\ipListController.js",
+      "line": 119,
+      "value": 26
+    },
+    {
+      "file": "src\\utils\\loginCipher.js",
+      "line": 130,
+      "value": 26
+    },
+    {
+      "file": "src\\controllers\\mfaController.js",
+      "line": 226,
+      "value": 25
+    },
+    {
+      "file": "src\\controllers\\roleController.js",
+      "line": 145,
+      "value": 25
+    },
+    {
+      "file": "src\\services\\sessionService.js",
+      "line": 95,
+      "value": 25
+    },
+    {
+      "file": "src\\middleware\\protocolCompliance.js",
+      "line": 110,
+      "value": 24
+    },
+    {
+      "file": "src\\services\\reportExportService.js",
+      "line": 253,
+      "value": 23
+    },
+    {
+      "file": "src\\controllers\\permissionController.js",
+      "line": 86,
+      "value": 22
+    },
+    {
+      "file": "src\\controllers\\userController.js",
+      "line": 621,
+      "value": 22
+    },
+    {
+      "file": "src\\services\\authService.js",
+      "line": 808,
+      "value": 22
+    },
+    {
+      "file": "src\\services\\permissionService.js",
+      "line": 82,
+      "value": 21
+    },
+    {
+      "file": "src\\controllers\\userController.js",
+      "line": 108,
+      "value": 20
+    },
+    {
+      "file": "src\\services\\reportStatsService.js",
+      "line": 64,
+      "value": 19
+    },
+    {
+      "file": "src\\services\\auditChainVerify.js",
+      "line": 68,
+      "value": 18
+    },
+    {
+      "file": "src\\controllers\\securityController.js",
+      "line": 559,
+      "value": 17
+    },
+    {
+      "file": "src\\middleware\\errorHandler.js",
+      "line": 12,
+      "value": 17
+    },
+    {
+      "file": "src\\services\\authService.js",
+      "line": 941,
+      "value": 17
+    },
+    {
+      "file": "src\\services\\authService.js",
+      "line": 1116,
+      "value": 17
+    },
+    {
+      "file": "src\\app.js",
+      "line": 71,
+      "value": 16
+    },
+    {
+      "file": "src\\controllers\\authController.js",
+      "line": 204,
+      "value": 16
+    },
+    {
+      "file": "src\\middleware\\security.js",
+      "line": 170,
+      "value": 16
+    },
+    {
+      "file": "src\\services\\authService.js",
+      "line": 1044,
+      "value": 16
+    },
+    {
+      "file": "src\\services\\websocketService.js",
+      "line": 293,
+      "value": 16
+    },
+    {
+      "file": "src\\tests\\services\\behaviorBaseline.test.js",
+      "line": 27,
+      "value": 16
+    }
+  ]
+}

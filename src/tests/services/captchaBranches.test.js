@@ -36,12 +36,37 @@ describe('验证码服务分支（captchaService.js）', () => {
     errSpy.mockRestore();
   });
 
-  test('startCaptchaCleanup 幂等：二次调用直接返回，stop 后句柄清空', () => {
-    captcha.startCaptchaCleanup();
-    captcha.startCaptchaCleanup(); // 第二次命中 if (cleanupTimer) return
-    captcha.stopCaptchaCleanup();
-    // 再次 start/stop 验证句柄生命周期完整（无定时器泄漏）
-    captcha.startCaptchaCleanup();
-    captcha.stopCaptchaCleanup();
+  test('startCaptchaCleanup 幂等：二次调用不重复注册，stop 后可重新注册', () => {
+    // P1-29 修复（本轮复审）：原用例只有连续 start/stop 调用，零断言——
+    // 测试名承诺的「二次调用直接返回」从未被验证（把 :56 的 if (cleanupTimer) return
+    // 整行删掉，用例照样绿）。现用 setInterval spy 观察真实注册次数。
+    const siSpy = jest.spyOn(global, 'setInterval');
+    const ciSpy = jest.spyOn(global, 'clearInterval');
+    try {
+      captcha.stopCaptchaCleanup(); // 归零，避免受同文件其他用例影响
+      siSpy.mockClear();
+      ciSpy.mockClear();
+
+      captcha.startCaptchaCleanup();
+      captcha.startCaptchaCleanup(); // 第二次命中 if (cleanupTimer) return
+      expect(siSpy).toHaveBeenCalledTimes(1); // 幂等：只注册一个定时器
+
+      captcha.stopCaptchaCleanup();
+      expect(ciSpy).toHaveBeenCalledTimes(1);
+
+      // 再次 start 必须能注册（stop 已把句柄清空，未被永久锁死）
+      captcha.startCaptchaCleanup();
+      expect(siSpy).toHaveBeenCalledTimes(2);
+      captcha.stopCaptchaCleanup();
+
+      // 未启动状态下 stop 不应再调 clearInterval
+      const before = ciSpy.mock.calls.length;
+      captcha.stopCaptchaCleanup();
+      expect(ciSpy.mock.calls.length).toBe(before);
+    } finally {
+      captcha.stopCaptchaCleanup();
+      siSpy.mockRestore();
+      ciSpy.mockRestore();
+    }
   });
 });

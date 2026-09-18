@@ -1,10 +1,19 @@
 import { defineStore } from 'pinia'
 import { safeStorage, safeLocal } from './storage'
 
+// P2-59 修复（2026-09-17）：initTheme 可能被重复调用（热重载、未来新增的
+// 重新初始化入口），原实现每次都新建 matchMedia 监听器且从不移除——
+// 旧监听器闭包持有 store 实例，系统主题每切换一次就会叠加一次 _applyTheme。
+// 这里在模块级持有「当前监听器 + 所属 MediaQueryList」的引用，重入时先摘除。
+let systemThemeListener = null
+let systemThemeQuery = null
+
 // 应用设置 Store
 export const useAppStore = defineStore('app', {
   state: () => ({
-    userCount: parseInt(safeStorage.get('userCount') || '0'),
+    // L-12：原 userCount 状态与 increment/decrement/setUserCount 三个 action
+    // 全仓无任何消费方（RoleListPanel 的 role.userCount 是接口字段，非此状态），
+    // 却每次登录自增并持久化到 sessionStorage——冗余状态且与接口同名字段易误导。已删除。
     // 主题模式三态：system=跟随系统（默认）/ light / dark
     // 持久化到 localStorage，关闭网页与登出后保留
     themeMode: safeLocal.get('themeMode') || 'system',
@@ -18,30 +27,12 @@ export const useAppStore = defineStore('app', {
   }),
 
   getters: {
-    getUserCount: (state) => state.userCount,
     // 实际生效的主题：显式选择优先，system 模式看系统偏好
     isDarkMode: (state) =>
       state.themeMode === 'dark' || (state.themeMode === 'system' && state.systemPrefersDark),
   },
 
   actions: {
-    incrementUserCount() {
-      this.userCount++
-      safeStorage.set('userCount', this.userCount.toString())
-    },
-
-    decrementUserCount() {
-      if (this.userCount > 0) {
-        this.userCount--
-        safeStorage.set('userCount', this.userCount.toString())
-      }
-    },
-
-    setUserCount(count) {
-      this.userCount = count
-      safeStorage.set('userCount', count.toString())
-    },
-
     toggleSidebar() {
       this.sidebarCollapsed = !this.sidebarCollapsed
     },
@@ -72,6 +63,16 @@ export const useAppStore = defineStore('app', {
 
       const mq = window.matchMedia?.('(prefers-color-scheme: dark)')
       if (mq) {
+        // 重入保护：若上一轮 initTheme 已注册过监听器，先摘除再注册，
+        // 避免热重载或重复初始化在同一 MediaQueryList 上叠加多个 change 回调。
+        if (systemThemeQuery && systemThemeListener) {
+          if (systemThemeQuery.removeEventListener) {
+            systemThemeQuery.removeEventListener('change', systemThemeListener)
+          } else if (systemThemeQuery.removeListener) {
+            // Safari < 14 只支持 removeListener
+            systemThemeQuery.removeListener(systemThemeListener)
+          }
+        }
         const onChange = (e) => {
           this.systemPrefersDark = e.matches
           this._applyTheme()
@@ -79,6 +80,9 @@ export const useAppStore = defineStore('app', {
         // Safari < 14 只支持 addListener
         if (mq.addEventListener) mq.addEventListener('change', onChange)
         else if (mq.addListener) mq.addListener(onChange)
+        // 记录本轮注册的监听器及其宿主对象，供下次重入时摘除
+        systemThemeQuery = mq
+        systemThemeListener = onChange
       }
     },
 

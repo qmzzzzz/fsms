@@ -24,8 +24,18 @@ const {
 const errorHandler = require('./errorHandler');
 const requestId = require('./requestId');
 const queryLengthLimit = require('./queryLimit');
-const { queryScalarGuard } = require('./queryLimit');
+// 同一模块不重复 require：queryLimit.js 是「默认导出即函数 + 挂具名属性」的形状，
+// 两条 require 语句指向同一模块，属 L-21 同类的「同一模块多入口」残留。
+const { queryScalarGuard } = queryLengthLimit;
 const { createOriginCheck } = require('./originCheck');
+
+// L-21：补齐统一导出面。以下模块原先未被 index.js 覆盖，而 app.js 以独立
+// require 引入——形成"两套入口"，新增/重命名时容易只改一处。此处收口后，
+// app.js 与其余调用方统一从 ./middleware 取用。
+const { applyObjectIdParams } = require('./validateObjectId');
+const { consumeValidation } = require('./validateQuery');
+const { mountStaticFrontend } = require('./staticFrontend');
+const { metricsAuth } = require('./metricsAuth');
 const {
   applySecurity,
   applyPreBodySecurity,
@@ -92,4 +102,10 @@ module.exports = {
   invalidateIPBlockCache,
   requireReAuthentication,
   fileUploadSecurity,
+
+  // L-21：原先游离于统一导出面之外的四个中间件（app.js 曾各自独立 require）
+  applyObjectIdParams,
+  consumeValidation,
+  mountStaticFrontend,
+  metricsAuth,
 };
