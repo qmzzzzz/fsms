@@ -76,5 +76,4 @@ describe('flushLogsSync 落盘失败路径（不抛错 + stderr 留痕）', () =
       stderr.mockRestore();
     }
   });
-
 });

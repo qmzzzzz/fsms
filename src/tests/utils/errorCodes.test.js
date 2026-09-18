@@ -85,8 +85,18 @@ describe('errorCodes 注册表', () => {
       //   inactive = 账户被禁用
       //   locked   = 账户处于临时锁定窗口内
       await User.create([
-        { username: `${stamp}inactive`, email: `${stamp}inactive@example.com`, password: PASSWORD, status: 'inactive' },
-        { username: `${stamp}locked`, email: `${stamp}locked@example.com`, password: PASSWORD, lockUntil: new Date(Date.now() + 10 * 60 * 1000) },
+        {
+          username: `${stamp}inactive`,
+          email: `${stamp}inactive@example.com`,
+          password: PASSWORD,
+          status: 'inactive',
+        },
+        {
+          username: `${stamp}locked`,
+          email: `${stamp}locked@example.com`,
+          password: PASSWORD,
+          lockUntil: new Date(Date.now() + 10 * 60 * 1000),
+        },
       ]);
 
       const login = (username, password) =>

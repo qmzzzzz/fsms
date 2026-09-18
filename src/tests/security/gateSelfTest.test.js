@@ -158,7 +158,14 @@ describe('门禁负向自检：该红时必须红', () => {
         expect(head).not.toMatch(/\)\s*=>\s*\{\s*\}\s*\)/);
       }
       expect(src).toMatch(/expect\(diffs\)\.toEqual\(\[\]\)/);
-      expect(src).not.toMatch(/expect\(diffs\\.length\)\.toBeGreaterThanOrEqual\(0\)/);
+      // 反退化判据。原写法是 /expect\(diffs\\.length\).../，正则里的 `\\.` 要求
+      // 「一个反斜杠 + 任意字符」，而被检源码里是 `diffs.length`（那里没有反斜杠），
+      // 于是这条 not.toMatch 永不命中——门禁本身是恒真的。
+      // 现抽出常量并**正向自证**：同一个正则必须能匹配退化样例，否则 not.toMatch
+      // 通过只是因为正则写错。
+      const DEGENERATE_ASSERT = /expect\(diffs\.length\)\.toBeGreaterThanOrEqual\(0\)/;
+      expect(DEGENERATE_ASSERT.test('expect(diffs.length).toBeGreaterThanOrEqual(0)')).toBe(true);
+      expect(src).not.toMatch(DEGENERATE_ASSERT);
     });
   });
 
@@ -171,16 +178,27 @@ describe('门禁负向自检：该红时必须红', () => {
   });
 
   describe('测试顺序无关门禁（2026-09-18）', () => {
-    it('CI 以随机顺序跑一轮（固定 seed，结果可复现）', () => {
+    it('CI 以随机顺序跑两轮（两个固定 seed，结果可复现）', () => {
       const ci = fs.readFileSync(path.join(ROOT, '.github/workflows/ci.yml'), 'utf8');
       // 本仓 166 个套件曾隐含「按固定顺序执行」的未声明前提：固定顺序全绿、
       // 加 --randomize 则 12 个套件转红。这条件靠人记住是守不住的——
       // 破坏顺序无关性的改动在固定顺序下永远绿灯，只有 CI 自己随机跑才能拦住。
       // 必须同时断言 --randomize 与 --seed：只断言 --randomize 的话，
       // 有人把它挪到一个不执行的 job/分支里也照样绿。
-      expect(ci).toMatch(/npx jest --randomize --seed=\d+/);
-      // seed 必须写死为字面量：`--seed=${{ ... }}` 之类会让本地复现失据
-      expect(ci).toMatch(/--seed=\d{4,}/);
+      //
+      // 2026-09-18 起是**两个** seed（单 seed 只能证明一种排列；当天两个真实耦合
+      // 分别只在 777001 / 31337 下暴露）。因此这里断的是循环形态而不是单行命令。
+      expect(ci).toMatch(/for seed in [\d\s]+; do/);
+      expect(ci).toMatch(/npx jest --randomize --seed="\$seed"/);
+      // 两个回归样本 seed 不得被删减为一个
+      const seedList = ci.match(/for seed in ([\d\s]+); do/);
+      expect(seedList).toBeTruthy();
+      expect(seedList[1].trim().split(/\s+/)).toEqual(['20260917', '31337']);
+      // seed 必须是字面量：写成 `${{ ... }}` 之类会让本地复现失据
+      expect(seedList[1]).not.toMatch(/\$\{\{/);
+      // 失败必须汇总退出——单个 seed 红却被 || 吞掉，等于门禁静默失效
+      expect(ci).toMatch(/\|\| fail=1/);
+      expect(ci).toMatch(/exit "\$fail"/);
     });
   });
 

@@ -71,7 +71,10 @@ describe('尾差覆盖（批次 F）', () => {
 
   // ================= rbac 数据范围分支 =================
 
-  test('rbac：applyDataScopeToQuery 全分支（直驱，返回布尔+原地改写 query）', () => {
+  test('rbac：applyDataScopeToQuery 各 deny/allow 分支（直驱，返回布尔+原地改写 query）', () => {
+    // 标题原写「全分支」，但这里三次调用传的都是空 query，同字段冲突 → $and
+    // 取交集那条分支不可达（它在 dataScopeConvergence.test.js 里被表驱动覆盖）。
+    // 改为如实描述，避免"看起来全测了"的误导。
     const { applyDataScopeToQuery } = require('../../middleware/rbac');
     const FIELDS = { ownerField: 'createdBy', departmentField: 'department' };
 

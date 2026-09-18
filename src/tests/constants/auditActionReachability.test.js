@@ -46,9 +46,24 @@ function readMounts() {
 function readAuditGetPaths() {
   const secSrc = fs.readFileSync(path.join(SRC_DIR, 'middleware/security.js'), 'utf8');
   const start = secSrc.indexOf('auditGetPaths = [');
-  const end = secSrc.indexOf('] = options;', start);
+  if (start < 0) {
+    throw new Error('security.js 里找不到 auditGetPaths 的起点：生产结构已变，守卫必须显式失败');
+  }
+  // 数组成员全是字符串字面量、不含嵌套方括号 → 起点后的第一个 ']' 就是收尾。
+  // 原先这里写的是 indexOf('] = options;')，而生产源码里**根本没有这个串**
+  // （实际是 `],\n  } = options;`）→ end = -1 → slice(start, -1) 一路截到
+  // 倒数第二个字符（实测 12,289 字符 ≈ 整个文件后半段），全靠后面
+  // `.startsWith('/api/')` 侥幸把噪音滤掉。解析失败必须响，不能静默降级。
+  const end = secSrc.indexOf(']', start);
+  if (end < 0) throw new Error('auditGetPaths 数组没有收尾的 ]');
   const block = secSrc.slice(start, end);
-  return [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]).filter((p) => p.startsWith('/api/'));
+  const paths = [...block.matchAll(/'([^']+)'/g)]
+    .map((m) => m[1])
+    .filter((p) => p.startsWith('/api/'));
+  if (paths.length === 0) {
+    throw new Error('解析到 0 条 auditGetPaths：解析器与生产代码已失配，不得当作「无需审计」放行');
+  }
+  return paths;
 }
 
 const concretize = (routePath) =>
@@ -250,6 +265,22 @@ describe('审计 action 白名单可达性台账（P3-62）', () => {
     const orphan = NEVER_PRODUCED.filter((a) => !whitelist.has(a));
     // 白名单里没有它 → 台账失效（可能已被删除）。删除前必须确认存量数据已无该 action。
     expect(orphan).toEqual([]);
+  });
+
+  // 解析器自检：这条用例不为生产代码服务，守的是本文件自己的取数逻辑。
+  // 曾经的实现把「数组收尾」锚在一个源码里并不存在的串上，end=-1 于是截到
+  // 整个文件后半段（实测 12,289 字符）——只要样例还在，这类失配必须当场响。
+  test('auditGetPaths 解析器边界自证（不得越出数组尾部）', () => {
+    const paths = readAuditGetPaths();
+    expect(paths.length).toBeGreaterThanOrEqual(5);
+    expect(paths.every((p) => p.startsWith('/api/'))).toBe(true);
+    // 数组本身只占源码很小一段；若哪天解析结果里混进了数组之外的字面量，
+    // 数量与内容都会先在这里露出来
+    const secSrc = fs.readFileSync(path.join(SRC_DIR, 'middleware/security.js'), 'utf8');
+    const start = secSrc.indexOf('auditGetPaths = [');
+    const end = secSrc.indexOf(']', start);
+    expect(end - start).toBeLessThan(1000);
+    expect(paths).toContain('/api/security/audit-logs');
   });
 
   test('台账无重复项', () => {

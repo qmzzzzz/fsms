@@ -193,6 +193,7 @@ describe('assignRoles 越权防护（M-01）', () => {
     let peerAdminToken;
     let peerRoleA;
     let peerRoleB;
+    let peerRoleWide; // 同级 + 携带操作者没有的权限（用于闸门顺序对照）
     let victim;
 
     beforeAll(async () => {
@@ -215,6 +216,20 @@ describe('assignRoles 越权防护（M-01）', () => {
       peerRoleB = await Role.create({
         name: '同级管理员B',
         code: 'PEER_ADMIN_B',
+        level: 6,
+        // 权限集与 A **完全相同**（只有 code/name 不同）。原先这里多挂了 devicePerm，
+        // 于是请求先被上一层的 P2-8 权限子集校验以 PERMISSION_GRANT_FORBIDDEN 拦掉，
+        // B-2 这条「同级角色归属」闸门根本没执行过——用例只断 403，看不出是谁拦的。
+        // 实测：把 userController 里 B-2 整段（含 ROLE_ASSIGN_FOREIGN_PEER_FORBIDDEN）
+        // 删掉，本文件当时全绿，且该错误码在全仓测试里出现 0 次。
+        permissions: [assignPerm._id],
+      });
+
+      // 对照角色：同级**且**权限比自己宽 —— 两道闸门都该拦，但只有先撞上的那道
+      // 会被执行。单独测它，才能证明上一条用例改的是对的闸门。
+      peerRoleWide = await Role.create({
+        name: '同级管理员B-宽权限',
+        code: 'PEER_ADMIN_B_WIDE',
         level: 6,
         permissions: [assignPerm._id, devicePerm._id],
       });
@@ -239,17 +254,43 @@ describe('assignRoles 越权防护（M-01）', () => {
       });
     });
 
+    // 本组三条用例共用一个 victim，而「放行」那条会把 level 6 的角色真的写进去；
+    // 此后 victim 自身的最高层级就等于操作者（6），**目标侧**层级闸
+    // （USER_ROLE_ASSIGN_PEER_OR_HIGHER_FORBIDDEN）会先于 B-2 与 P2-8 拦下请求。
+    // 原用例只断 403，看不出被哪道闸拦的，于是这条耦合在固定顺序下一直隐身；
+    // 换成点名错误码的断言后，--randomize 换个 seed 就红。逐条重置起点才是正解。
+    beforeEach(async () => {
+      await User.findByIdAndUpdate(victim._id, { $set: { roles: [] } });
+    });
+
     test('不得分配自身未持有的同级角色（同级横向扩权被切断）', async () => {
       // A 把 B 的角色挂到别人身上，是「互挂对方角色集齐双方权限」的第一步。
-      // 层级校验放行（6 不大于 6），必须由 B-2 拦下
+      // 层级校验放行（6 不大于 6），权限子集校验也放行（B 的权限集与 A 相同），
+      // 因此**必须**由 B-2 拦下——错误码点名，才能证明拦它的是 B-2 而不是上一层闸门。
       const res = await request(app)
         .put(`/api/users/${victim._id}/roles`)
         .set('Authorization', `Bearer ${peerAdminToken}`)
         .send({ roles: [String(peerRoleB._id)] });
 
       expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('ROLE_ASSIGN_FOREIGN_PEER_FORBIDDEN');
       const after = await User.findById(victim._id).select('roles');
       expect(after.roles.map(String)).not.toContain(String(peerRoleB._id));
+    });
+
+    test('同级且权限更宽时由 P2-8 先拦（闸门执行顺序的显式记录）', async () => {
+      // 与上一条只差"角色多带一个自己没有的权限"：这一条走 PERMISSION_GRANT_FORBIDDEN。
+      // 两条并排放，是为了让"谁先拦"变成被钉住的事实——将来有人调整闸门顺序或删掉
+      // 其中一道，必有一条用例红，而不是像原先那样两道闸门共用一个 403 谁也分不清。
+      const res = await request(app)
+        .put(`/api/users/${victim._id}/roles`)
+        .set('Authorization', `Bearer ${peerAdminToken}`)
+        .send({ roles: [String(peerRoleWide._id)] });
+
+      expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('PERMISSION_GRANT_FORBIDDEN');
+      const after = await User.findById(victim._id).select('roles');
+      expect(after.roles.map(String)).not.toContain(String(peerRoleWide._id));
     });
 
     test('可分配自身持有的同级角色（归属成立即放行）', async () => {

@@ -95,6 +95,27 @@ describe('applyDataScopeToQuery — 数据范围收敛', () => {
       expect(applyDataScopeToQuery(query, { type: 'self', userId: 'u1' }, FIELDS)).toBe(true);
       expect(query).toEqual({ status: 'active', createdBy: 'u1' });
     });
+
+    // 调用方先写 $or（关键词搜索）、范围随后到达的情形。设备的属主字段是数组
+    // （createdBy ∪ maintenanceRecord.operator），范围条件本身就是 $or —— 两个 $or
+    // 相撞是最容易写错的一种冲突（DeviceService 曾在 search 分支直接覆盖 query.$or，
+    // 等于带关键词就不做范围过滤）。这里把原语层的正确行为钉住。
+    test('两侧都是 $or 时取交集（数组属主 × 关键词搜索）', () => {
+      const search = { deviceName: /泵/, deviceCode: /泵/ };
+      const query = { $or: [{ deviceName: search.deviceName }, { deviceCode: search.deviceCode }] };
+      expect(
+        applyDataScopeToQuery(
+          query,
+          { type: 'self', userId: 'u1' },
+          { ownerField: ['createdBy', 'maintenanceRecord.operator'], departmentField: 'b' }
+        )
+      ).toBe(true);
+      expect(query.$or).toBeUndefined();
+      expect(query.$and).toEqual([
+        { $or: [{ deviceName: search.deviceName }, { deviceCode: search.deviceCode }] },
+        { $or: [{ createdBy: 'u1' }, { 'maintenanceRecord.operator': 'u1' }] },
+      ]);
+    });
   });
 
   test('与 buildDataScopeFilter 的 deny 哨兵口径一致', () => {

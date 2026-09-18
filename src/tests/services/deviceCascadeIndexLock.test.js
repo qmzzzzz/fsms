@@ -118,9 +118,7 @@ describe('L-22 删除级联索引覆盖（explain 级锁定）', () => {
       })
     );
     // findByIdAndDelete 也要拦下，避免真删（本用例只关心三条级联 filter）
-    const deleteSpy = jest
-      .spyOn(FireDevice, 'findByIdAndDelete')
-      .mockResolvedValue(device);
+    const deleteSpy = jest.spyOn(FireDevice, 'findByIdAndDelete').mockResolvedValue(device);
 
     try {
       await deviceService.deleteDevice(device);

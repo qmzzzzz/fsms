@@ -874,9 +874,7 @@ const reconcileSuperAdmin = async () => {
   if (!targetHas) {
     await User.updateOne(
       { _id: target._id },
-      rolesIsArray
-        ? { $addToSet: { roles: superRole._id } }
-        : { $set: { roles: [superRole._id] } }
+      rolesIsArray ? { $addToSet: { roles: superRole._id } } : { $set: { roles: [superRole._id] } }
     );
     logger.warn('已为账户补回 SUPER_ADMIN 角色（此前缺失，最高权限不可用）', { username });
     // 角色变化必须失效认证缓存，否则该账户已签发的会话仍按旧角色鉴权

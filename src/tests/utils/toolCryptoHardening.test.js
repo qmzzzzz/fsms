@@ -840,7 +840,12 @@ describe('批次F 工具与密码学加固回归', () => {
       // loginLimiter：白名单 + 同账号连续尝试必须仍被限速
       const login = await driveLimiter(
         limiters.loginLimiter,
-        mkLimReq({ ip: '203.0.113.71', method: 'POST', body: { username: 'victim' }, ipWhitelisted: true }),
+        mkLimReq({
+          ip: '203.0.113.71',
+          method: 'POST',
+          body: { username: 'victim' },
+          ipWhitelisted: true,
+        }),
         30
       );
       expect(login.hit).not.toBeNull();
@@ -899,7 +904,11 @@ describe('批次F 工具与密码学加固回归', () => {
         expect(next).not.toHaveBeenCalled();
         expect(res.statusCode).toBe(403);
         // recordEarlyRejection 经 setImmediate 异步落库，轮询等待
-        for (let i = 0; i < 50 && !recorded.some((d) => d.action === 'ip_blacklist_blocked'); i += 1) {
+        for (
+          let i = 0;
+          i < 50 && !recorded.some((d) => d.action === 'ip_blacklist_blocked');
+          i += 1
+        ) {
           await new Promise((r) => setImmediate(r));
         }
         const entry = recorded.find((d) => d.action === 'ip_blacklist_blocked');

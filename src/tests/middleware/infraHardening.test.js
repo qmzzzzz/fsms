@@ -239,6 +239,17 @@ describe('批次C 基础设施加固回归', () => {
         const { createApp } = require('../../app');
         const app = createApp();
         const freshSwagger = require('../../config/swagger');
+        // docsLimiter 是 config/swagger.js 的模块级单例 → 本文件所有用例共用一个
+        // 内存桶。「跑满配额验证 429」那条用例把桶打满后，后续用例的 /api-docs
+        // 会从 200 变 429（固定顺序下恰好没人先跑满，所以一直隐身；
+        // 换 --randomize 的 seed 即复现）。每次进入前先清一次自己的键。
+        // keyGenerator 是 `api-docs:${req.ip}`，而 supertest 下 req.ip 的形态
+        // 不唯一（::1 / ::ffff:127.0.0.1 / 127.0.0.1）→ 三种都清，不靠猜。
+        for (const ip of ['::1', '::ffff:127.0.0.1', '127.0.0.1']) {
+          if (typeof freshSwagger.docsLimiter?.resetKey === 'function') {
+            await freshSwagger.docsLimiter.resetKey(`api-docs:${ip}`);
+          }
+        }
         return await fn(app, freshSwagger);
       } finally {
         for (const [k, v] of Object.entries(saved)) {
@@ -251,7 +262,6 @@ describe('批次C 基础设施加固回归', () => {
     const DOCS_AUTH = `Basic ${Buffer.from(
       'infra-probe-user:infra-probe-password-long-enough'
     ).toString('base64')}`;
-
 
     test('渲染模板不含内联 script（否则被 script-src self 拦成白屏）', () => {
       const html = swagger.renderDocsHtml();

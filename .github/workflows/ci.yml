@@ -77,8 +77,24 @@ jobs:
       # 直到某次无关改动改变了文件/用例的执行次序才突然爆发，且极难定位。
       # 此门禁用固定 seed 跑一轮随机顺序：seed 固定 → 结果可复现（不是抽奖式门禁），
       # 又足以覆盖与默认顺序不同的排列。
+      #
+      # 2026-09-18 起跑**两个** seed：单 seed 只能证明"这一种排列"通过，而顺序耦合
+      # 是概率性的——当天实测两个真实耦合都在默认 seed 下隐身、换 seed 才红：
+      #   seed 777001 → assignRoles 三条用例共用一个 victim，"放行"那条把 level 6
+      #                  角色写进去后，目标侧层级闸抢在 B-2/P2-8 前面拦下请求；
+      #   seed 31337  → infraHardening 全文件共用 config/swagger 的 docsLimiter
+      #                  模块级单例，跑满 429 的用例让后续用例的 200 变 429。
+      # 两处都已修（前者按用例重置起点，后者进入前清自己的键），seed 也保留在
+      # 这里当回归样本：再引入共享状态型耦合，这两个排列会替我们抓到。
       - name: Test order independence (randomized)
-        run: npx jest --randomize --seed=20260917 --forceExit
+        run: |
+          fail=0
+          for seed in 20260917 31337; do
+            echo "::group::jest --randomize --seed=$seed"
+            npx jest --randomize --seed="$seed" --forceExit || fail=1
+            echo "::endgroup::"
+          done
+          exit "$fail"
         env:
           NODE_ENV: test
           JWT_SECRET: test-secret

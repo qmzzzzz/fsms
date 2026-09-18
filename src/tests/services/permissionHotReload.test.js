@@ -166,17 +166,38 @@ describe('控制器侧：事件分派与定向同步（真实 HTTP 驱动）', (
 
     const wildcard = await Permission.findOneAndUpdate(
       { code: '*:*' },
-      { $setOnInsert: { name: '\u5168\u90e8\u6743\u9650', code: '*:*', type: 'api', module: 'system' } },
+      {
+        $setOnInsert: {
+          name: '\u5168\u90e8\u6743\u9650',
+          code: '*:*',
+          type: 'api',
+          module: 'system',
+        },
+      },
       { upsert: true, new: true }
     );
     probePerm = await Permission.findOneAndUpdate(
       { code: 'hotreload:read' },
-      { $setOnInsert: { name: '\u70ed\u751f\u6548\u8bfb', code: 'hotreload:read', type: 'api', module: 'hotreload' } },
+      {
+        $setOnInsert: {
+          name: '\u70ed\u751f\u6548\u8bfb',
+          code: 'hotreload:read',
+          type: 'api',
+          module: 'hotreload',
+        },
+      },
       { upsert: true, new: true }
     );
     otherPerm = await Permission.findOneAndUpdate(
       { code: 'hotreload:write' },
-      { $setOnInsert: { name: '\u70ed\u751f\u6548\u5199', code: 'hotreload:write', type: 'api', module: 'hotreload' } },
+      {
+        $setOnInsert: {
+          name: '\u70ed\u751f\u6548\u5199',
+          code: 'hotreload:write',
+          type: 'api',
+          module: 'hotreload',
+        },
+      },
       { upsert: true, new: true }
     );
 
