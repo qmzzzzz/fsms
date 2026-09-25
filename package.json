@@ -76,7 +76,7 @@
     "migrate-mongo": "^14.0.7",
     "mongodb-memory-server": "^11.2.0",
     "nodemon": "^3.0.2",
-    "prettier": "^3.9.6",
+    "prettier": "^3.9.8",
     "supertest": "^6.3.3"
   }
 }
