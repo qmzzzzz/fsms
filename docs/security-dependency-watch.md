@@ -10,7 +10,7 @@
   难度参数、识别率全部重来，临近上线窗口收益低于风险；且当前无已知高危
   advisory 指向该版本。
 - **监控动作**：
-  - `npm audit`（CI `security-audit` job 每次合并跑，阈值 high）；
+  - `npm audit`（CI `security-audit` job 每次合并跑，阈值 **moderate** —— 2026-09-16 起由 `high` 收紧，见文末「通用约定」）；
   - 每月人工查看一次 GitHub Security Advisories / OSV：`svg-captcha`。
 - **更换触发条件**（满足其一即启动评估）：
   1. 出现 medium 及以上 advisory 且无补丁；

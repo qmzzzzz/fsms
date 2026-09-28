@@ -42,4 +42,4 @@
 
 ## 自检基线
 
-本项目定期执行：`npm audit --audit-level=high`（CI security-audit job）、Gitleaks 全量密钥扫描、`node scripts/compliance-check.js` 合规自检。已归档的渗透/白盒报告结论见 `deliverables/`。
+本项目定期执行：`npm audit --omit=dev --audit-level=moderate`（CI security-audit job，阈值 2026-09-16 起由 `high` 收紧至 `moderate`）、Gitleaks 全量密钥扫描、`node scripts/compliance-check.js` 合规自检。已归档的渗透/白盒报告结论见 `deliverables/`。

@@ -14,8 +14,17 @@
 | `journey-fault-injection.spec.js`  | 依赖故障注入：连接被拒/超时/500 的界面韧性 + 会话期宕机降级与自愈 |
 | `journey-mobile.spec.js`           | Pixel 7 登录、移动端抽屉导航与业务列表只读巡场                    |
 
-缺凭据时用例自动跳过（不计失败）——保证「未配置环境也能全绿」，
-配置齐全后自动升级为真实断言。
+> **缺凭据时用例自动跳过 —— 本地可以「绿」，但那不代表旅程被执行。**
+>
+> Playwright 把跳过**不计入失败**，所以未配置环境时本地跑出全绿是**假绿**。
+> 原文档把「未配置环境也能全绿」当特性写，正是这种假绿被制度化的来源。
+> CI 侧有 fail-closed 门禁兜底（`.github/workflows/ci.yml` 的
+> `Assert no skipped journeys`）：日志里必须存在 `N passed` 汇总行，且
+> `passed >= 32`（16 条旅程 × 2 个 project）、`skipped == 0`、`failed == 0`，
+> 任一不满足即 `exit 1`。
+>
+> ⇒ **本地绿 ≠ CI 绿。** 能证明「旅程真的跑了」的只有 `N passed` 那一行 ——
+> `N skipped` / `N failed` 两行只在计数非 0 时才打印，缺了是正常态，不是通过信号。
 
 ## 运行步骤
 
