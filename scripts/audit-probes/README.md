@@ -15,11 +15,22 @@
 用法（需先在仓库根 `npm install`）：
 
 ```bash
-node scripts/audit-probes/ws-session-bypass.cjs
+node scripts/audit-probes/ws-session-bypass.cjs; echo "exit=$?"
 ```
 
-**2026-09-17 复核：P0-2 修复已落地**，本脚本实测结论为「✅ 未通过」（WS 侧
-已按 allowedIPs 拒绝，`auth-error` 帧为「当前网络不在允许的 IP 范围内」）。
+**退出码即结论**（2026-09-19 起，此前无论结论如何都 exit 0）：
+
+| 退出码 | 含义                                                                                                                                  |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`    | 已拒，**且拿到 `auth-error` 帧作为正向证据**                                                                                          |
+| `1`    | 确认绕过（socket 绑上了 userId）                                                                                                      |
+| `2`    | 不可判定：没绑上用户、也没有 auth-error 回帧——多半是握手层变了使请求根本没走到 `authenticateSocket`；探针自身的失效不能当成"漏洞已修" |
+
+`decideVerdict` 的真值表由 `src/tests/zzqoder_wsProbeVerdict.test.js`（6 例）钉住；
+探针自身带 `require.main` 守卫，所以那个套件可以只 require 它取判据而不触发建库。
+
+**2026-09-17 复核：P0-2 修复已落地**；2026-09-19 真跑实测 `verdict=rejected exit=0`，
+下行帧为 `42["auth-error",{"message":"当前网络不在允许的 IP 范围内"}]`。
 对应的自动化回归见 `src/tests/services/websocketAuthScope.test.js`（8 用例：
 allowedIPs 命中/不命中/为空/非法、sid 已吊销/不存在/active/缺省）。
 本脚本保留为可脱离 Jest 的人工复核工具（走真实 socket.io 握手路径，

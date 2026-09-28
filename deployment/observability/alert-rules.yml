@@ -58,3 +58,143 @@ groups:
         annotations:
           summary: '安全告警事件突发'
           description: '近 10 分钟累计安全告警 {{ $value }} 条，建议查看安全日志与 /api/metrics 面板。'
+
+  # 自监控：可观测性链路自身的失效。这类规则不反映业务异常，反映的是
+  # 「我们看到的业务数据不完整」——所以它的严重度是 warning 而非 info：
+  # 数据缺失期间的其它告警判读都要打折。
+  - name: xf-self-monitoring
+    rules:
+      # series 上限（MAX_SERIES）开始丢弃新序列 = 高基数标签泄漏。
+      # 不告警的话它只表现为"面板少了几条 route / 错误率的分母不对"，
+      # 面板照常画满格，没人会怀疑数据被砍过：兜底机制必须自己喊得出来。
+      - alert: MetricsSeriesTruncated
+        expr: increase(metrics_series_dropped_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '指标 series 触顶并丢弃新序列（store={{ $labels.store }}）'
+          description: >-
+            近 15 分钟有新增 metric series 被逐 store 的 MAX_SERIES 上限丢弃，
+            该 store 的面板与规则口径已不完整。排查方向：是否有用户可控的标签
+            （路径参数、userId、IP、动态 alert type）进了指标维度。
+
+      # 审计记录在落库前被丢弃 = 合规留存出现空洞。这条比任何业务告警都更该被看见：
+      # 丢的是「谁在什么时候做了什么」的证据，而丢弃本身此前只写日志、只进需
+      # security:audit 权限的 JSON 接口——监控侧完全看不见，面板照常满格。
+      # 三条丢弃路径（缓冲超硬上限裁剪 / 毒文档整批丢弃 / 预铸造拒收）统一计入
+      # audit_records_dropped_total{reason}；WAL 里通常仍有对应行可重放，
+      # 但"能不能重放"要人去查，所以这里按 critical 报。
+      - alert: AuditRecordsDropped
+        expr: increase(audit_records_dropped_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: '审计记录被丢弃（reason={{ $labels.reason }}）'
+          description: >-
+            近 15 分钟有审计记录在落库前被丢弃，合规留存已出现空洞。
+            处置：先确认 MongoDB 可用性与缓冲积压（audit_buffer_backlog_records），
+            再核对 logs/audit-buffer.*.wal 与 *.discarded 归档是否可回灌
+            （见 deployment/rollback-drill.md 的审计链核对步骤）。
+
+  # 运行时健康（2026-09-28 补）：原有 7 条规则全部只覆盖"业务指标异常"，
+  # 而"服务已经不能干活""磁盘写满""日志送不出去"这三类故障在监控侧零信号。
+  #
+  # 补规则之前必须先补指标（src/utils/metricsRuntime.js）：指标不存在时规则
+  # **永远不触发**，那比没有规则更坏——仪表盘上多了一条"守护中"的假象。
+  # 本组的每一条都遵守同一纪律：**凡是可能"因为量不到而静默失效"的规则，
+  # 都配一条把它自己变成故障的规则**（DiskProbeFailing / ReadinessProbeMissing）。
+  - name: xf-runtime
+    rules:
+      # /readyz 判定失败 = 编排器/LB 正在摘流量。它是"能干活"的唯一权威判据，
+      # 而 /readyz 的唯一检查项就是 Mongo ping（见 src/app.js 的处理器），
+      # 所以这条等价于「MongoDB 不可用」。持续 2 分钟才报：Mongo 短暂抖动会让
+      # /readyz 瞬时 503，那属常态（Docker HEALTHCHECK 用 /health 正是为了
+      # 不因抖动重启容器）。
+      - alert: MongoUnavailable
+        expr: readyz_verdict{job="xf-app"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: '就绪探针持续失败：MongoDB 不可用'
+          description: >-
+            /readyz 连续 2 分钟判定为 unready（唯一检查项是 Mongo ping），
+            编排器/LB 应已摘掉本实例流量。处置：确认 MongoDB 可达性与副本集状态，
+            并看 readyz_checks_total 里 timeout / unreachable 的占比，
+            区分是网络问题还是库自身问题。
+
+      # 「没人探测」与「探测正常」必须可区分：readyz_verdict 只在被观测过之后才输出，
+      # 所以 absent() 覆盖"LB 根本没在探"，age 覆盖"探过但早已停止"。
+      # 没有这条，上面那条规则在"探针链路已断"时会静默失效——正是本轮在修的那类缺陷。
+      - alert: ReadinessProbeMissing
+        expr: absent(readyz_verdict{job="xf-app"}) or readyz_verdict_age_seconds{job="xf-app"} > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: '就绪探针没有在跑（从未被探测，或已停止 5 分钟以上）'
+          description: >-
+            readyz_verdict 无样本或已陈旧，此时 MongoUnavailable 无法被判定，
+            监控侧对"服务能不能干活"是盲的。排查方向：LB/编排器的 probe 配置
+            是否被改动、/readyz 是否被网关误拦。
+
+      # 日志卷余量 < 10%：日志目录（WAL / 审计缓冲 / 日志）写不进去时，
+      # 最先出现的不是报错而是"静默丢数据"——审计留痕出现空洞。
+      # 用 free/total 比值而非绝对字节：卷大小因环境而异，绝对阈值无法同时
+      # 适配开发机与生产卷。
+      - alert: DiskSpaceLow
+        expr: |
+          disk_free_bytes{job="xf-app"} / disk_total_bytes{job="xf-app"} < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: '日志卷可用空间低于 10%'
+          description: >-
+            日志目录所在卷余量 {{ $value | humanizePercentage }}。写满后
+            WAL/审计缓冲/日志会先失败再丢数据，而业务接口照常返回 200。
+            处置：清理或轮转 logs/ 下的 *.log / *.wal / *.discarded，再扩容挂载卷。
+
+      # 「量不到磁盘」本身要能喊出来：探针失败时不输出 disk_free_bytes，
+      # 于是上面那条规则静默失效。这条把它变成显式故障。
+      - alert: DiskProbeFailing
+        expr: increase(disk_probe_failures_total{job="xf-app"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '磁盘探针失败（statfs 打不开日志目录）'
+          description: >-
+            近 15 分钟 statfs(LOG_DIR) 失败，disk_free_bytes 因此缺失，
+            DiskSpaceLow 在此期间无法判定。排查方向：LOG_DIR 是否存在/可读、
+            挂载卷是否已掉线。
+
+      # 日志投递失败：本地日志完整、SIEM 侧却是空洞。审计场景下，
+      # "本地有、远端没有"与"根本没有"在合规上是两件事。
+      - alert: LogShipperDeliveryFailing
+        expr: increase(log_shipper_flush_failures_total{job="xf-app"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '日志批量转发失败（SIEM 侧可能出现空洞）'
+          description: >-
+            近 10 分钟有批次未能送达 LOG_SHIPPING_URL。失败批会整批放回缓冲重试，
+            短时间内可自愈；持续失败会一路堆到缓冲上限并开始丢行
+            （见 LogShipperDroppingLines）。处置：确认目标端点可达与 TOKEN 有效。
+
+      # 缓冲触顶丢行 = 已经**确定**丢了日志，且不可自愈（丢的是最旧那批）。
+      # 按 critical 报：日志链路丢数据在合规上等同于留痕被裁剪。
+      - alert: LogShipperDroppingLines
+        expr: increase(log_shipper_dropped_lines_total{job="xf-app"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: '日志缓冲触顶并丢弃最旧行'
+          description: >-
+            近 10 分钟有日志行因缓冲达到上限被丢弃（上限 5000 行）。
+            SIEM 侧会出现断档标记行，但标记只能说明"丢了多少"，内容不可恢复。
+            处置：确认 LOG_SHIPPING_URL 长期可达，必要时调大批次或降低日志量。

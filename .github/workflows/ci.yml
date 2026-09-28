@@ -56,6 +56,19 @@ jobs:
       - name: Run format check (prettier)
         run: npm run format:check
 
+      # 编码门禁：源码必须是 UTF-8 且不含乱码指纹（GBK 混入 / U+FFFD / mojibake）。
+      # 2026-09-19 实证过"脚本存在但没有任何工作流引用它"的腐化形态——
+      # 一道没人调用的门禁比没有更糟：它给出已设防的错觉。
+      # 判据由 src/tests/deploy/zzqA_ciGateWiring.test.js 钉住（删步骤即红）。
+      - name: Check source encoding (UTF-8 / mojibake fingerprints)
+        run: npm run check:utf8
+
+      # 合规门禁：append-only 钩子是否还挂着、审计导出边界是否还在、
+      # WAL 兜底有没有被摘掉。此前只被 `npm run security:audit` 引用，
+      # 而 security-audit job 只跑 npm audit ⇒ 这些检查从未真正被自动兑现。
+      - name: Run compliance checks (audit invariants)
+        run: node scripts/compliance-check.js
+
       # --forceExit：2026-09-15 CI 实证（4 轮 × Node 18/20/22），测试 1754 全过、
       # globalTeardown 成功后约 130ms 进程静默 exit 1、无任何错误输出——
       # mongodb-memory-server 子进程句柄与 jest 主进程退出的清理竞态，本地
@@ -78,18 +91,22 @@ jobs:
       # 此门禁用固定 seed 跑一轮随机顺序：seed 固定 → 结果可复现（不是抽奖式门禁），
       # 又足以覆盖与默认顺序不同的排列。
       #
-      # 2026-09-18 起跑**两个** seed：单 seed 只能证明"这一种排列"通过，而顺序耦合
-      # 是概率性的——当天实测两个真实耦合都在默认 seed 下隐身、换 seed 才红：
+      # 2026-09-18 起把"一个 seed"改成"多个 seed"（当前三个）：单 seed 只能证明"这一种
+      # 排列"通过，而顺序耦合是概率性的——当天实测两个真实耦合都在默认 seed 下隐身、换 seed 才红：
       #   seed 777001 → assignRoles 三条用例共用一个 victim，"放行"那条把 level 6
       #                  角色写进去后，目标侧层级闸抢在 B-2/P2-8 前面拦下请求；
       #   seed 31337  → infraHardening 全文件共用 config/swagger 的 docsLimiter
       #                  模块级单例，跑满 429 的用例让后续用例的 200 变 429。
       # 两处都已修（前者按用例重置起点，后者进入前清自己的键），seed 也保留在
       # 这里当回归样本：再引入共享状态型耦合，这两个排列会替我们抓到。
+      #
+      # 但"注释声称保留"不等于"真的在跑"：777001 一度只写在上面这段说明里，
+      # 下面的列表却是 20260917 31337 ——抓到过真实耦合的那个排列一次都没再执行，
+      # 该样本的门禁形同虚设。现在列表含全部三个 seed，并由 gateSelfTest 断言。
       - name: Test order independence (randomized)
         run: |
           fail=0
-          for seed in 20260917 31337; do
+          for seed in 20260917 31337 777001; do
             echo "::group::jest --randomize --seed=$seed"
             npx jest --randomize --seed="$seed" --forceExit || fail=1
             echo "::endgroup::"
@@ -102,7 +119,11 @@ jobs:
           HMAC_SECRET: test-hmac-secret
 
       - name: Run tests with coverage
-        run: npm run test:coverage --if-present -- --forceExit
+        # 这里刻意不带 --if-present：该标志在脚本改名/删除时把「门禁止血」
+        # 变成「跳过且不报错」，覆盖率阈值（jest.config.js coverageThreshold）
+        # 就再也不执行了。frontend-build 作业里的同名步骤（web-admin 的 vitest 门）
+        # 同样没加此标志。由 src/tests/ci/coverageGateWiring.test.js 钉住（含反向对照）。
+        run: npm run test:coverage -- --forceExit
         env:
           NODE_ENV: test
           JWT_SECRET: test-secret
@@ -408,17 +429,36 @@ jobs:
 
       - name: Assert no skipped journeys
         # 评价报告 #16：E2E 曾可全量跳过且 CI 全绿（「0 执行也绿」的假门禁）。
-        # 凭据与 MFA 种子均已注入，此处断言 skipped==0，防回归为按缺省静默跳过
+        # 2026-09-28 补上第二半：原实现只断言 skipped==0，而且把「日志里根本没有汇总行」
+        # 默认读成 skipped=0 —— 于是跑崩 / 配置错 / 被 --project 过滤成空集时**照样通过**。
+        # 现改为 fail-closed：汇总行必须存在，且 passed 有下界。
+        # 下界 = 16 条旅程（6 个 spec） × 2 个 project = 32，不是"覆盖率阈值"，
+        # 而是「旅程被静默裁剪」的告警；确实要删旅程时同步改这个数字，
+        # 让删减在 diff 里可见（与 eslint.ratchet.json 收紧必须走评审同一条纪律）。
+        # 依据：Playwright 的 generateSummary() 遍历 suite.allTests() 只产出**一个**全局
+        # 汇总行（runner/index.js:1210），所以首个匹配即全量值，不存在按 project 分行的歧义。
+        # 注意 `N skipped` / `N failed` 两行**只在计数非 0 时才打印**
+        # （generateSummaryMessage 是 `if (skipped)` / `if (unexpected.length)`），
+        # 因此"这两行缺失"是正常态，不能当失败；能证明"跑过了"的只有 `N passed` 那一行。
         run: |
           node -e "
             const log = require('fs').readFileSync('playwright-run.log', 'utf8');
-            const m = log.match(/(\d+)\s+skipped/);
-            const skipped = m ? Number(m[1]) : 0;
-            if (skipped > 0) {
-              console.error('E2E 存在被跳过的旅程：' + skipped + '（期望 0，视为门禁失败）');
+            const num = (re) => { const m = log.match(re); return m ? Number(m[1]) : 0; };
+            const passed = num(/(\d+)\s+passed/);
+            const skipped = num(/(\d+)\s+skipped/);
+            const failed = num(/(\d+)\s+failed/);
+            const hasSummary = /(\d+)\s+passed/.test(log);
+            const MIN_PASSED = 32;
+            const problems = [];
+            if (!hasSummary) problems.push('日志里没有 N passed 汇总行：E2E 未跑完或 reporter 形态已变（原实现会把它读成 0 并通过）');
+            if (passed < MIN_PASSED) problems.push('通过数 ' + passed + ' 低于下界 ' + MIN_PASSED + '：旅程被静默裁剪？');
+            if (skipped > 0) problems.push('存在被跳过的旅程：' + skipped + '（期望 0，视为门禁失败）');
+            if (failed > 0) problems.push('存在失败旅程：' + failed);
+            if (problems.length) {
+              problems.forEach((p) => console.error('E2E 门禁失败 - ' + p));
               process.exit(1);
             }
-            console.log('skipped=0 校验通过');
+            console.log('E2E 门禁通过：passed=' + passed + '（下界 ' + MIN_PASSED + '） skipped=0');
           "
 
       - name: Upload Playwright report

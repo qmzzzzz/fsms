@@ -26,8 +26,36 @@ const PASSWORD = 'E2e' + String.fromCharCode(33) + crypto.randomBytes(6).toStrin
 let passed = 0;
 let failed = 0;
 const failures = [];
+const ranSteps = [];
+
+/**
+ * 门禁自证：14 步必须真的全部被调用过。
+ *
+ * `step()` 只在 fn 被调用时才计数 ⇒ 「步骤块消失」既不进 passed 也不进 failed：
+ * 一处提前 return、一次误删、一个 `if (false)` 包裹，都会让冒烟以更少步数**照样退出 0**。
+ * CI 步骤名写着「完整启动序列 14 步」，而那此前只是注释。同型防线本仓已为浏览器旅程
+ * 加过（ci.yml 的 "Assert no skipped journeys"，起因是旅程可全量跳过而 CI 全绿）。
+ * 用关键子串比对：改文案不误伤，删步骤一定红。
+ */
+const REQUIRED_STEP_MARKERS = [
+  '存活探针',
+  '就绪探针',
+  'Prometheus 文本',
+  '下发公钥',
+  'admin + 初始密码',
+  '会话有效',
+  '设备级会话列表',
+  '面板 JSON',
+  '创建设备',
+  '状态迁移',
+  '报表聚合',
+  '删除设备',
+  '登出吊销',
+  '旧令牌失效',
+];
 
 function step(name, fn) {
+  ranSteps.push(name);
   return fn()
     .then(() => {
       passed++;
@@ -38,6 +66,23 @@ function step(name, fn) {
       failures.push(name);
       console.error('  FAIL ' + name + ': ' + err.message);
     });
+}
+
+/** 收口：关键步骤有缺失时把整体判为失败 */
+function selfCheckRequiredSteps(label) {
+  const missing = REQUIRED_STEP_MARKERS.filter((m) => !ranSteps.some((n) => n.includes(m)));
+  if (missing.length === 0) {
+    // 成功也要留痕：一条"自证通过"的日志，否则这道门禁在 CI 日志里完全不可见
+    console.log(
+      `  ok 门禁自证：${REQUIRED_STEP_MARKERS.length} 项关键步骤全部执行（实际 ${ranSteps.length} 步）`
+    );
+    return true;
+  }
+  failed++;
+  failures.push('门禁自证：关键步骤未执行');
+  console.error(`  FAIL 门禁自证：缺失 ${missing.length} 项关键步骤：${missing.join(' | ')}`);
+  console.error(`[${label}] 实际执行 ${ranSteps.length} 步：${ranSteps.join(' / ')}`);
+  return false;
 }
 
 function req(method, urlPath, { token, body, raw } = {}) {
@@ -91,7 +136,7 @@ async function waitForServer(timeoutMs) {
     }
     await sleep(300);
   }
-  throw new Error('服务器 30 秒内未就绪');
+  throw new Error(`服务器 ${Math.round(timeoutMs / 1000)} 秒内未就绪`);
 }
 
 async function main() {
@@ -222,6 +267,7 @@ async function main() {
     if (r.status !== 401) throw new Error('status=' + r.status + '（令牌未被吊销！）');
   });
 
+  selfCheckRequiredSteps('E2E');
   console.log('[E2E] 结果：' + passed + ' 通过, ' + failed + ' 失败');
   if (failed > 0) {
     console.error('[E2E] 失败步骤：' + failures.join(' / '));

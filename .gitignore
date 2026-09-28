@@ -20,6 +20,10 @@ coverage/
 .nyc_output/
 playwright-report/
 test-results/
+# jest 的**手工 cacheDirectory** 产物：`jest.config.js` 里没有这项配置，是某会话为绕开
+# 本机 `EPERM …%TEMP%\jest\haste-map-*` 而临时传 `--cacheDirectory=.jest-cache-laneA` 留下的。
+# 曾残留 309 个文件 / 9.3MB 二进制缓存，`git add -A` 会一并收进仓库。
+.jest-cache-*/
 
 # 备份/编辑器残留
 *.bak
@@ -34,6 +38,10 @@ backups/
 
 # 构建
 web-admin/dist/
+# 前端覆盖率的**带后缀变体**：上面 `coverage/` 只匹配名为 coverage 的目录，
+# 匹配不到 `coverage-zzmfa` / `coverage-zzmfa-before` / `coverage-zzmc1` 这类
+# 手工跑覆盖率时用 `--reporter=... --coverageDirectory=coverage-<tag>` 起的对照目录。
+web-admin/coverage-*/
 dist/
 build/
 
@@ -95,3 +103,14 @@ web-admin/dist-optimized/
 _ci_*
 # 临时排查脚本
 _tmp_*
+# 会话期根目录脚手架：两个并行会话的临时工具目录 / 台账 / 一次性 npm 试验（zznpmtest 含自己的
+# node_modules，约 93MB）。与上面 _ci_*、_tmp_* 同理（M-03 曾把带 git 凭据读取的成型代码误入库）。
+# 只锚定仓库根：src/tests/zzqoder_*.test.js 是**真测试文件**，绝不能被这条规则吞掉。
+/zztmpctl/
+/zznpmtest/
+/zz-*.md
+/zzqoder*.md
+# 门禁自检（gateSelfTest）的仓库内夹具目录：正常路径由 finally 删除，但进程被 kill 时
+# 来不及执行——曾残留一个含 320 行合成告警代码的副本。若被 `git add -A` 收进仓库，
+# 它既污染 lint 门禁又污染基线，故在此兜底（锚定仓库根 + 只匹配该前缀）。
+/.zzqoder-ratchet-*/

@@ -34,5 +34,14 @@ test('错误的动态码被拒', async ({ page }) => {
   await expect(mfaInput).toBeVisible({ timeout: 15_000 });
   await mfaInput.fill('000000');
   await page.getByRole('button', { name: /^登\s*录$/ }).click();
-  await expect(page.getByText(/验证码错误|MFA|两步验证/)).toBeVisible({ timeout: 10_000 });
+  // 判别性断言是这条后端拒绝文案：errorCodes.js MFA_CODE_INVALID「两步验证码错误」
+  // 经 api.js 拦截器以 ElMessage 弹出（zh-CN.js errors.mfaCodeInvalid）。
+  // 若后端误放行动态码，就不会有拒绝提示，用例立即变红。
+  // 原正则 /验证码错误|MFA|两步验证/ 的后两个分支在页面上没有任何渲染文本可命中
+  // （「两步验证」只出现在 LoginView.vue 的注释里），保留只会掩盖未来的文案漂移。
+  await expect(page.getByText('两步验证码错误')).toBeVisible({ timeout: 10_000 });
+  // 且不得建立会话：仍停在登录页、仍是二期动态口令状态
+  // （LoginView 的失败分支刻意保留 mfaRequired 只清空输入，让用户直接重输）
+  await expect(page).toHaveURL(/\/login/);
+  await expect(mfaInput).toBeVisible();
 });

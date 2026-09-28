@@ -51,6 +51,15 @@ on:
 permissions:
   contents: read
 
+# 同一环境同时只允许一个部署：deploy.js 的编排是
+# 「备份 → 迁移 → 切镜像 → 健康门禁 → 失败自动回滚」，两次部署并发时会互相踩——
+# A 的回滚目标可能是 B 刚切上去的新镜像，健康门禁也可能读到对方刚改写的容器。
+# cancel-in-progress 必须为 false：部署跑到一半被取消会留下"迁移已执行、镜像未切换"
+# 的半程状态，比排队更危险。
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
 jobs:
   # 第一道：把“输入合法性”与“部署凭据是否配好”提前查掉。
   # 单独成 job 是为了让失败发生在**任何环境交互之前**，与 deploy.js 的 exit 2 同意图。
@@ -64,10 +73,21 @@ jobs:
         id: validate
         # 不接受缺参数、不接受本地开发默认值 fire-safety-app:local。
         # 与 scripts/deploy.js 的 validatePreflight 同判据（本地默认 tag 无法回答“线上是哪个 commit”）。
+        #
+        # 输入值必须经 env 进入脚本，不能写成 tag="${{ inputs.image_tag }}"：
+        # `${{ }}` 是**文本级**替换，早于 shell 解析与这里的正则校验，
+        # 一个 `x" && id && "` 形态的 tag 就能在这个持有部署凭据的 runner 上执行任意命令
+        # （GitHub 官方 script injection 口径）。env 赋值不参与 shell 文本展开，才是安全通道。
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          tag="${{ inputs.image_tag }}"
-          if [[ ! "$tag" =~ ^[a-z0-9.-]+(:[0-9]+)?/.+:[A-Za-z0-9._-]+$ ]]; then
+          tag="${INPUT_IMAGE_TAG}"
+          # 字符集必须收死：镜像引用随后要单引号包进远程命令
+          # （APP_IMAGE='<tag>' node scripts/deploy.js）。仓库段曾写 `.+`，
+          # 于是 a/x';id;':latest 能通过校验并在持有部署凭据的目标机上执行任意命令。
+          # Docker 仓库段合法字符只有小写字母数字与 . _ - /，不含引号、空格、分号。
+          if [[ ! "$tag" =~ ^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._-]+(/[a-z0-9._-]+)*:[A-Za-z0-9._-]+$ ]]; then
             echo "::error::镜像引用格式不合法（需为 registry/仓库:tag）：$tag"
             exit 1
           fi
@@ -111,11 +131,17 @@ jobs:
         env:
           APP_IMAGE: ${{ needs.preflight.outputs.image_tag }}
           CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
+          # compose 用 `${ALLOWED_HOSTS:?}` 强制显式声明，缺它会在"切换"那步才被拒
+          # （此前只下发 CORS_ORIGIN ⇒ 前置校验通过、切换时才炸）。见 deployWorkflow 自检。
+          ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
+          # 两个开关同样走 env：本文件的规定是 run 脚本里零 `${{ }}` 文本插值
+          DRY_RUN: ${{ inputs.dry_run }}
+          SKIP_BACKUP: ${{ inputs.skip_backup }}
         run: |
           set -euo pipefail
           args=()
-          [[ "${{ inputs.dry_run }}" == "true" ]] && args+=(--dry-run)
-          [[ "${{ inputs.skip_backup }}" == "true" ]] && args+=(--skip-backup)
+          [[ "$DRY_RUN" == "true" ]] && args+=(--dry-run)
+          [[ "$SKIP_BACKUP" == "true" ]] && args+=(--skip-backup)
           node scripts/deploy.js "${args[@]}"
 
   # 模式 B：SSH（部署机上有仓库副本，通过 DEPLOY_PATH 指定）
@@ -129,11 +155,34 @@ jobs:
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         # 密钥走 stdin 写入，不出现在命令行（命令行会进进程列表）；
         # known_hosts 必选：不配就退回 StrictHostKeyChecking=accept-new，
         # 首次连接会靠 TOFU（依赖首次见到的密钥）。生产建议配上。
         run: |
           set -euo pipefail
+          # 三个 secret 随后都要拼进 ssh：DEPLOY_PATH 落在远程命令的**单引号**里
+          # （cd '<path>'），DEPLOY_USER/DEPLOY_HOST 落在 `user@host` 这一个 argv 里。
+          # 前者含 `'` 即可闭合单引号、在持有部署凭据的目标机上执行任意命令
+          # （与已收口的镜像名闸同型：仓库段曾是 `.+`）；后者为空或含空格会让 ssh
+          # 把 argv 当选项解析（-oProxyCommand=… 直接在本 runner 上执行命令）。
+          # secret 只有仓库管理员能设，但部署机凭据不该依赖"管理员不会写错"。
+          # 一次性在这里判掉（放在唯一一处，避免同一规则两处各写一份而漂移）：
+          # 不写密钥、不连主机就先失败，避免半程状态。
+          if [[ ! "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+            echo "::error::DEPLOY_PATH 必须是不含空格/引号的绝对路径（仅 [A-Za-z0-9._/-]；不支持带空格的 IPv6/路径写法）：$DEPLOY_PATH"
+            exit 1
+          fi
+          if [[ ! "$DEPLOY_USER" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::DEPLOY_USER 非法（必须非空、不以 - 开头、仅含 [A-Za-z0-9._-]，不得含空格或 @）"
+            exit 1
+          fi
+          if [[ ! "$DEPLOY_HOST" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::DEPLOY_HOST 非法（必须非空、不以 - 开头、仅含 [A-Za-z0-9._-]；IPv6 字面量请改用主机名）"
+            exit 1
+          fi
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
@@ -147,7 +196,7 @@ jobs:
           fi
           # 失败则连接层就会拒绝（fail-closed）
           ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes \
-            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" -- echo "ssh ok"
+            "$DEPLOY_USER@$DEPLOY_HOST" -- echo "ssh ok"
 
       - name: Run deploy.js on the host
         env:
@@ -155,14 +204,19 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
+          # 与 self-hosted 路径同口径：compose 的 `:?` 要求两条部署路径都下发
+          ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
           IMAGE_TAG: ${{ needs.preflight.outputs.image_tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          SKIP_BACKUP: ${{ inputs.skip_backup }}
         run: |
           set -euo pipefail
           extra=""
-          [[ "${{ inputs.dry_run }}" == "true" ]] && extra="$extra --dry-run"
-          [[ "${{ inputs.skip_backup }}" == "true" ]] && extra="$extra --skip-backup"
-          # 远程命令里只出现镜像名与开关；CORS_ORIGIN 经 SendEnv 传入而非拼进命令串，
-          # 避免它落到目标机的 shell 历史/进程列表里。
-          ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes -o SendEnv=CORS_ORIGIN \
+          [[ "$DRY_RUN" == "true" ]] && extra="$extra --dry-run"
+          [[ "$SKIP_BACKUP" == "true" ]] && extra="$extra --skip-backup"
+          # CORS_ORIGIN / ALLOWED_HOSTS 经 SendEnv 传入而非拼进命令串，避免它们落到
+          # 目标机的 shell 历史/进程列表里。命令串里插值的是镜像名、两个开关与 DEPLOY_PATH：
+          # 前两者由 preflight / inputs 校验，DEPLOY_PATH 由 Prepare SSH 那一步的字符集闸校验。
+          ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes -o SendEnv=CORS_ORIGIN,ALLOWED_HOSTS \
             "$DEPLOY_USER@$DEPLOY_HOST" \
             "cd '$DEPLOY_PATH' && APP_IMAGE='$IMAGE_TAG' node scripts/deploy.js $extra"

@@ -23,10 +23,15 @@
  *   APP_IMAGE=... node scripts/deploy.js --skip-backup  # 明确跳过备份（仅演练用）
  *   APP_IMAGE=... node scripts/deploy.js --no-rollback  # 关闭失败自动回滚
  *
+ * --skip-backup 的连带后果（不是只「少一次备份」）：跳过后**本次发布失去自动回滚资格**
+ * （decideRollback 会拒绝在「迁移已改写库 + 一份备份都没有」时自动切旧镜像），
+ * 健康门禁失败时脚本停在人工介入路径。
+ *
  * 退出码：
  *   0 = 部署成功（且健康门禁通过）
- *   1 = 部署失败（健康门禁未通过；已尝试回滚）
- *   2 = 前置条件不满足（拒绝执行，未做任何变更）
+ *   1 = 部署失败（健康门禁未通过；按资格判定后可能已回滚）
+ *   2 = 前置条件不满足（配置非法 / 镜像 / CORS_ORIGIN+ALLOWED_HOSTS / 密钥文件；
+ *       拒绝执行，未做任何变更）
  */
 
 'use strict';
@@ -35,137 +40,22 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..');
+// 判据全部在 deployPolicy.js：本文件只负责执行外部命令、呈现结果、决定退出码。
+const {
+  ROOT,
+  validatePreflight,
+  buildPlan,
+  decideRollback,
+  isSameImageRef,
+  parseArgs,
+} = require('./deployPolicy');
 
 // 与仓库其余入口（src/config/index.js、scripts/*.js 维护脚本）同一口径：先加载 .env。
 // 不加载会出现一个实测过的陷阱：docker compose 自己会读 .env，而本脚本是 Node，
 // 不读就拿不到里面的 APP_IMAGE / CORS_ORIGIN——操作员按 README 把变量写进 .env
-// 后运行，会被前置校验抦下并报「APP_IMAGE 未设置」，而 compose 层面却明明能读到。
+// 后运行，会被前置校验拦下并报「APP_IMAGE 未设置」，而 compose 层面却明明能读到。
 // 已设置的真实环境变量优先（dotenv 默认不覆盖已存在的值）。
 require('dotenv').config({ path: path.join(ROOT, '.env'), quiet: true });
-
-// ============================================================
-// 纯逻辑层（不产生副作用，可被测试直接断言）
-// ============================================================
-
-/** 部署所需的密钥文件名（与 docker-compose.yml 的 secrets 段一一对应） */
-const REQUIRED_SECRET_FILES = [
-  'jwt_secret',
-  'jwt_refresh_secret',
-  'aes_secret_key',
-  'hmac_secret',
-  'mongodb_uri',
-  'admin_initial_password',
-  'mongo_root_username',
-  'mongo_root_password',
-  'grafana_admin_password',
-];
-
-/**
- * 校验前置条件。返回 { ok, errors, warnings }——**不打印、不退出**，
- * 由调用方决定如何呈现。这样测试可以直接断言校验结果，
- * 而不是去抓 stdout 文本。
- *
- * @param {Record<string,string|undefined>} env 环境变量（注入以便测试）
- * @param {typeof fs} fsImpl 文件系统实现（注入以便测试）
- */
-function validatePreflight(env, fsImpl) {
-  const errors = [];
-  const warnings = [];
-
-  // ① 镜像必须显式指定：
-  //    默认值 fire-safety-app:local 是给本地开发用的，用它发布等于把
-  //    「本机某个未版本化的构建」推上生产——线上跑的是哪个 commit 无从回答。
-  const image = (env.APP_IMAGE || '').trim();
-  if (!image) {
-    errors.push(
-      'APP_IMAGE 未设置。生产发布必须显式指定带版本 tag 的镜像（如 ghcr.io/<owner>/<repo>:sha-<7位>）。'
-    );
-  } else if (image === 'fire-safety-app:local') {
-    errors.push(
-      'APP_IMAGE 不能是本地开发默认值 fire-safety-app:local（该 tag 指向本机构建，无法回答线上是哪个 commit）。'
-    );
-  }
-
-  // ② CORS_ORIGIN 必填：compose 的 `:?` 语法会在缺失时直接拒绝整个项目，
-  //    在这里提前拦下能给出更清楚的提示（而不是让 compose 抛一段插值报错）。
-  if (!(env.CORS_ORIGIN || '').trim()) {
-    errors.push('CORS_ORIGIN 未设置（生产禁止通配符，须为明确的前端域名白名单）。');
-  }
-
-  // ③ 密钥目录：9 个文件一个都不能少。
-  //    缺任何一个都会让容器起不来或带空密钥运行，且失败点在启动期、
-  //    现象是「服务反复重启」，排查成本高——不如在这里一次列全。
-  const secretsDir = path.join(ROOT, 'secrets');
-  if (!fsImpl.existsSync(secretsDir)) {
-    errors.push(
-      `密钥目录不存在：${secretsDir}（先执行 node scripts/generate-secrets.js --out ./secrets）`
-    );
-  } else {
-    const missing = [];
-    for (const name of REQUIRED_SECRET_FILES) {
-      const p = path.join(secretsDir, name);
-      if (!fsImpl.existsSync(p)) {
-        missing.push(name);
-      } else if (fsImpl.readFileSync(p, 'utf8').trim() === '') {
-        // 空文件比缺文件更隐蔽：文件存在、compose 校验通过、应用却拿到空串
-        missing.push(`${name}（内容为空）`);
-      }
-    }
-    if (missing.length > 0) {
-      errors.push(`密钥文件缺失或为空：${missing.join(', ')}`);
-    }
-  }
-
-  return { ok: errors.length === 0, errors, warnings };
-}
-
-/**
- * 生成部署步骤序列。
- *
- * 抽成纯函数是为了让「顺序」本身可被断言——发布流程最脆弱的
- * 恰恰是顺序（备份必须在迁移之前、健康门禁必须在切换之后）。
- */
-function buildPlan({ skipBackup = false, noRollback = false, healthTimeoutMs = 120000 } = {}) {
-  const steps = [];
-  steps.push({ id: 'preflight', desc: '校验前置条件（镜像 / CORS_ORIGIN / 密钥文件）' });
-  steps.push({ id: 'record-current', desc: '记录当前镜像，作为回滚目标' });
-  if (!skipBackup) {
-    steps.push({ id: 'backup', desc: '全量备份数据库（无备份则不具备回滚资格）' });
-  }
-  steps.push({ id: 'pull', desc: '拉取目标镜像' });
-  steps.push({ id: 'migrate-status', desc: '查看待应用迁移（留痕）' });
-  steps.push({ id: 'migrate-up', desc: '应用数据库迁移' });
-  steps.push({ id: 'up', desc: '滚动切换 app 容器' });
-  steps.push({
-    id: 'health',
-    desc: `健康门禁：轮询 /readyz 至通过（上限 ${Math.round(healthTimeoutMs / 1000)}s）`,
-  });
-  if (!noRollback) {
-    steps.push({ id: 'rollback-on-failure', desc: '健康门禁失败时自动回滚到上一镜像' });
-  }
-  return steps;
-}
-
-/**
- * 回滚决策：给定健康门禁结果，决定是否需要回滚。
- * 单独成函数是为了让「什么情况下该回滚」可被逐条断言。
- */
-function decideRollback({ healthOk, noRollback, hasPreviousImage }) {
-  if (healthOk) return { rollback: false, reason: '健康门禁通过' };
-  if (noRollback) return { rollback: false, reason: '已显式禁用自动回滚（--no-rollback）' };
-  if (!hasPreviousImage) {
-    return {
-      rollback: false,
-      reason: '无可回滚目标（首次部署或未记录到上一版本镜像）——需人工介入',
-    };
-  }
-  return { rollback: true, reason: '健康门禁未通过且存在上一版本镜像' };
-}
-
-// ============================================================
-// 副作用层：仅在作为脚本直接运行时执行
-// ============================================================
 
 /** 所有 compose / docker 命令的公共参数：显式指定 compose 文件，避免受 cwd 影响 */
 const COMPOSE_ARGS = ['compose', '-f', path.join(ROOT, 'docker-compose.yml')];
@@ -244,6 +134,12 @@ async function waitForReady({ timeoutMs, intervalMs = 2000, probeUrl }) {
 }
 
 /**
+ * 本次要发布的目标镜像引用。只此一处取值口径（trim），
+ * 提前告警与回滚决策必须比同一串，否则两处判据会分叉。
+ */
+const targetImageRef = () => (process.env.APP_IMAGE || '').trim();
+
+/**
  * 记录回滚目标：读当前运行镜像并打印。返回镜像引用或 null（首次部署）。
  * 单独成函数，让 main() 只表达「步骤顺序」，细节各自内聚。
  */
@@ -254,6 +150,14 @@ function recordRollbackTarget() {
       ? `✓ 当前镜像（回滚目标）: ${previousImage}`
       : '· 未发现运行中的 app 容器（首次部署）'
   );
+  // 按 :latest 这类可变标签发布时，"回滚"用的引用与目标同串 ⇒ 解析到同一个构建。
+  // 现在就说破（此时迁移还没跑），别等健康门禁失败后才发现无处可回。
+  if (isSameImageRef(previousImage, targetImageRef())) {
+    console.warn(
+      `⚠ 回滚目标与目标镜像引用相同（${previousImage}）：本次发布不具备版本级回滚能力，` +
+        '失败时不会自动切镜像，请改用带版本 tag 或 digest 的引用发布。'
+    );
+  }
   return previousImage;
 }
 
@@ -266,8 +170,15 @@ function backupDatabase(skip) {
   const uri = fs.readFileSync(path.join(ROOT, 'secrets', 'mongodb_uri'), 'utf8').trim();
   console.log('\n[备份] 全量备份数据库……');
   try {
+    // COMPOSE_FILE 必传：备份默认在 mongo 容器内执行（宿主机连不上只 expose 不 publish
+    // 的服务），而 `docker compose exec` 必须指向与部署同一份 compose 文件，
+    // 否则会命中另一个同名项目（脚本的 cwd 决定项目名，这里刻意不依赖 cwd）。
     run('bash', [path.join(ROOT, 'scripts', 'backup-mongo.sh'), path.join(ROOT, 'backups')], {
-      env: { ...process.env, MONGODB_URI: uri },
+      env: {
+        ...process.env,
+        MONGODB_URI: uri,
+        COMPOSE_FILE: path.join(ROOT, 'docker-compose.yml'),
+      },
     });
     console.log('✓ 备份完成');
   } catch (err) {
@@ -309,13 +220,23 @@ function applyMigrations() {
   }
 }
 
-/** 滚动切换 app 容器；失败即中止。 */
+/**
+ * 滚动切换 app 容器；失败即中止。
+ *
+ * 失败时不自动回滚——但必须说明此刻的状态：本步骤只在 migrate-up **成功之后**
+ * 才到达，所以线上是「旧版本 + 新 schema」，且此时没有任何东西会去复检健康。
+ * 不写出来，操作员会以为「没切成功就等于什么都没发生」。
+ */
 function switchContainer() {
   console.log('\n[切换] 滚动更新 app 容器……');
   try {
     run('docker', [...COMPOSE_ARGS, 'up', '-d', '--no-build', 'app']);
   } catch (err) {
     console.error('✗ 容器切换失败');
+    console.error(
+      '⚠ 此刻状态：迁移已执行、容器未切换——线上仍是旧版本跑在新 schema 上。' +
+        '发布前的备份位于 ./backups，恢复步骤见 deployment/rollback-drill.md。'
+    );
     process.exit(1);
   }
 }
@@ -323,9 +244,17 @@ function switchContainer() {
 /**
  * 回滚到指定镜像并复检健康；回滚失败不抛出（由调用方统一以退出码 1 收口）。
  * 回滚后的复检同样以 /readyz 为准——回滚成功与否要可观测，而非假定。
+ *
+ * 「回滚只切镜像不切 schema」必须显式打印：本函数只在 migrate-up 成功之后
+ * 才可达，因此回滚完成时数据库停在**比目标镜像更新**的位点。
+ * 只打印「✓ 回滚后服务就绪」会让操作员以为回到了发布前的状态，而事实并非如此。
  */
 async function rollbackTo(previousImage, probeUrl, recheckTimeoutMs) {
   console.log(`\n[回滚] 切回上一镜像：${previousImage}`);
+  console.error(
+    '⚠ 回滚只切镜像：本次迁移已改写数据库，切回的版本跑在更新的 schema 上。' +
+      '请逐条确认这些迁移向后兼容，否则改用 ./backups 的备份恢复（见 deployment/rollback-drill.md）。'
+  );
   try {
     run('docker', [...COMPOSE_ARGS, 'up', '-d', '--no-build', 'app'], {
       env: { ...process.env, APP_IMAGE: previousImage },
@@ -341,22 +270,16 @@ async function rollbackTo(previousImage, probeUrl, recheckTimeoutMs) {
   }
 }
 
-function parseArgs(argv) {
-  return {
-    dryRun: argv.includes('--dry-run'),
-    skipBackup: argv.includes('--skip-backup'),
-    noRollback: argv.includes('--no-rollback'),
-    healthTimeoutMs: Number(process.env.DEPLOY_HEALTH_TIMEOUT_MS || 120000),
-    // 回滚后复检的等待上限（原为写死 60s）：与健康门禁同样可配，
-    // 既让部署环境能按实际启动耗时调，也使端到端测试不必真等 60 秒。
-    rollbackTimeoutMs: Number(process.env.DEPLOY_ROLLBACK_TIMEOUT_MS || 60000),
-  };
-}
-
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  // ---- ⓪ 配置本身也是前置条件：写错的数值会让下面的判据静默失真 ----
+  const { args, errors: configErrors } = parseArgs(process.argv.slice(2), process.env);
+  if (configErrors.length > 0) {
+    console.error('\n配置不合法，拒绝执行（未做任何变更）：');
+    for (const e of configErrors) console.error(`  ✗ ${e}`);
+    process.exit(2);
+  }
   const plan = buildPlan(args);
-  const probeUrl = `http://127.0.0.1:${process.env.DEPLOY_PROBE_PORT || '3000'}/readyz`;
+  const probeUrl = `http://127.0.0.1:${args.probePort}/readyz`;
 
   console.log('===== 部署计划 =====');
   plan.forEach((s, i) => console.log(`  ${i + 1}. ${s.desc}`));
@@ -364,6 +287,12 @@ async function main() {
 
   // ---- ① 前置条件（fail-closed：不满足即拒绝，未做任何变更）----
   const pre = validatePreflight(process.env, fs);
+  // warning 必须先于 ok 判定打印：它们不阻断，但恰恰是"本次发布带着某个已知缺陷继续"
+  // 的唯一痕迹（如告警通道仍是占位）。只判 ok 而不显示 warnings，等于把"响"变成"哑"。
+  if (pre.warnings.length > 0) {
+    console.warn('\n前置校验警告（不阻断本次发布，但请确认）：');
+    for (const w of pre.warnings) console.warn(`  ! ${w}`);
+  }
   if (!pre.ok) {
     console.error('\n前置条件不满足，拒绝执行（未做任何变更）：');
     for (const e of pre.errors) console.error(`  ✗ ${e}`);
@@ -399,6 +328,9 @@ async function main() {
     healthOk: health.ok,
     noRollback: args.noRollback,
     hasPreviousImage: Boolean(previousImage),
+    backupTaken: !args.skipBackup,
+    previousImage,
+    targetImage: targetImageRef(),
   });
   console.log(`[回滚决策] ${decision.reason}`);
 
@@ -422,10 +354,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = {
-  REQUIRED_SECRET_FILES,
-  validatePreflight,
-  buildPlan,
-  decideRollback,
-  ROOT,
-};
+// 本脚本不导出 API：判据在 scripts/deployPolicy.js（测试直接 require 那个模块）。

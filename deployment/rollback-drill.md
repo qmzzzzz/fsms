@@ -81,6 +81,8 @@ docker compose start app
 docker compose stop app                                # 先停写
 MONGODB_URI='<连接串>' RESTORE_CONFIRM='<目标库名>' \
   ./scripts/restore-mongo.sh backups/fire-safety-backup-<时间点>.gz
+# 默认 MONGO_RESTORE_TRANSPORT=docker：mongo 只 expose 不 publish，宿主机既连不上也
+# 常常没有 mongorestore CLI（备份侧一直是这个口径）。直连场景才显式设 local。
 # 需要彻底替换集合内容时才追加 RESTORE_DROP=true（默认不 drop）
 docker compose start app
 curl -fsS http://127.0.0.1:3000/health
@@ -98,7 +100,8 @@ curl -fsS http://127.0.0.1:3000/health
   - [ ] 备份文件可在异机解开（`mongorestore --dryRun` 抽查）
   - [ ] 双实例可同时连接同一 mongo（连接池/会话无冲突）
   - [ ] nginx reload 期间无请求失败（`curl` 循环抽样）
-  - [ ] 回滚后审计链校验通过：`node scripts/verify-audit-chain.js`
+  - [ ] 回滚后审计链校验通过：`node scripts/verify-audit-chain.js` **退出码 0**
+        （1=有断裂；2=校验不完整——窗口截断或该环境无 HMAC_SECRET，不算通过。见 secret-rotation.md 的退出码说明）
   - [ ] WebSocket 重连正常（客户端应自动重连到新实例）
 
 ## 5. 已知边界

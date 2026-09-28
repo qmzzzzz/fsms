@@ -10,6 +10,13 @@
  *      压测结论代表「认证之后」的链路容量，加密开销另行单独评估）
  *   4. 造数：足够的设备/告警/巡检数据（建议 ≥10k 条，才能暴露深分页问题）
  *   5. 压测账号：环境变量 K6_USER / K6_PASS（脚本不落盘任何凭据）
+ *      缺凭据会在 setup() 立刻失败——匿名打读路径只会测到 401 快速路径，
+ * 跑满全程也只得到一个解释成本极高的红色阈值
+ *
+ * 认证口径：显式带 `Authorization: Bearer <token>`，不依赖 k6 的
+ * 自动 cookie jar。因为服务端在 NODE_ENV=production 下把令牌 cookie 标成
+ * Secure，用 `BASE_URL=http://…` 打生产镜像时 cookie 会被浏览器规则丢弃，
+ * 于是「压测目标 = 生产构建」这条路会静默退化成未认证压测。
  *
  * 运行：
  *   k6 run -e BASE_URL=http://127.0.0.1:3000 scripts/perf/k6-core-journeys.js
@@ -27,6 +34,9 @@ const PASSWORD = __ENV.K6_PASS || '';
 const loginFailures = new Rate('login_failures');
 const apiErrors = new Rate('api_errors');
 const listLatency = new Trend('list_latency_ms', true);
+// 深页单独计量：offset 第 200 页是「已知退化点」，混进 list_latency_ms 就会
+// 把首页 P95 基线污染成退化页的 P95（一次迭代 6 个样本里 1 个是深页，足以顶到 p95）
+const deepPageLatency = new Trend('deep_page_latency_ms', true);
 
 export const options = {
   scenarios: {
@@ -44,7 +54,9 @@ export const options = {
   },
   thresholds: {
     // 基线阈值是「先有数再收紧」的起点：首轮跑完用实测回填，
-    // 之后每次回归只允许持平或更好
+    // 之后每次回归只允许持平或更好。
+    // deep_page_latency_ms 刻意不设阈值：退化页的合理上界必须等首轮实测才知道，
+    // 凭空的阈值只会让人去调阈值而不是去查查询。
     http_req_duration: ['p(95)<500', 'p(99)<1500'],
     login_failures: ['rate<0.01'],
     api_errors: ['rate<0.01'],
@@ -52,7 +64,17 @@ export const options = {
   },
 };
 
-const jarCookies = {};
+// k6 的模块作用域即 VU 作用域：每个 VU 各持一份登录态，互不串号。
+let authToken = '';
+
+export function setup() {
+  if (!USERNAME || !PASSWORD) {
+    throw new Error(
+      '缺少 K6_USER / K6_PASS：压测口径是「登录之后」的链路容量，' +
+        '匿名请求只会测到 401 快速路径（见 scripts/perf/README.md）'
+    );
+  }
+}
 
 function login() {
   const res = http.post(
@@ -60,30 +82,40 @@ function login() {
     JSON.stringify({ username: USERNAME, password: PASSWORD }),
     { headers: { 'Content-Type': 'application/json' }, tags: { name: 'POST /auth/login' } }
   );
+  // 令牌在 data.token：ApiResponse.success 的信封是 {success, message, data}，
+  // 取 res.json('token') 拿到的是顶层键（不存在）⇒ 恒 undefined ⇒ 每次迭代都在
+  // `if (!login()) return` 处早退，读路径 0 样本，而报表看起来"跑完了"。
   const ok = check(res, {
     登录成功: (r) => r.status === 200 || r.status === 201,
+    登录返回令牌: (r) => Boolean(r.json('data.token')),
   });
-  loginFailures.add(!ok);
-  return ok;
+  const token = ok ? res.json('data.token') : '';
+  loginFailures.add(!(ok && token));
+  if (ok && token) authToken = String(token);
+  return Boolean(token);
 }
 
-function getJson(path, tag) {
-  const res = http.get(`${BASE_URL}${path}`, { tags: { name: tag } });
+function getJson(path, tag, trend) {
+  const res = http.get(`${BASE_URL}${path}`, {
+    headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+    tags: { name: tag },
+  });
   const ok = check(res, {
     [`${tag} 2xx`]: (r) => r.status >= 200 && r.status < 300,
   });
   apiErrors.add(!ok);
-  listLatency.add(res.timings.duration);
+  (trend || listLatency).add(res.timings.duration);
   return res;
 }
 
 export default function () {
-  group('登录', () => {
-    if (!login()) {
-      sleep(1);
-      return;
-    }
-  });
+  // 登录刻意不套 group（F-64b）：原实现把 `if (!login()) return` 写在 group 回调里，
+  // 那个 return 只跳出回调、不跳出本次迭代，于是登录失败后读路径照样打出去，
+  // 全部拿到 401 —— 一个登录故障会被放大成 4 个 api_errors 样本。
+  if (!login()) {
+    sleep(1);
+    return;
+  }
 
   group('核心读路径', () => {
     getJson('/api/auth/me', 'GET /auth/me');
@@ -94,7 +126,7 @@ export default function () {
 
   group('深分页对照（游标 vs offset）', () => {
     // offset 深页：已知退化点，用于量化游标分页的收益
-    getJson('/api/alarms?page=200&limit=20', 'GET /alarms offset 深页');
+    getJson('/api/alarms?page=200&limit=20', 'GET /alarms offset 深页', deepPageLatency);
     // 游标深页：首轮请求拿不到真实游标时，此用例仅验证首页响应形状；
     // 正式基线请在造数后用真实 nextCursor 串联（见 README「游标深潜」节）
   });
@@ -111,6 +143,7 @@ export function handleSummary(data) {
         at: stamp,
         http_req_duration: data.metrics.http_req_duration?.values,
         list_latency_ms: data.metrics.list_latency_ms?.values,
+        deep_page_latency_ms: data.metrics.deep_page_latency_ms?.values,
         api_errors: data.metrics.api_errors?.values,
         login_failures: data.metrics.login_failures?.values,
       },

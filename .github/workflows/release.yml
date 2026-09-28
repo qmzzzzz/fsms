@@ -48,9 +48,6 @@ jobs:
             exit 1
           fi
           echo "摘取到 $(wc -l < release-notes.md) 行发布说明"
-          {
-
-          } >> /dev/null
           echo "path=release-notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release

@@ -15,13 +15,17 @@ module.exports = defineConfig({
   timeout: 60_000,
   fullyParallel: false, // 旅程间可能有数据依赖，串行降低相互干扰
   // 评价报告低危项：CI retries=1 会把偶发失败自动重试成绿，掩盖真实抖动；
-  // E2E 是发布门禁，失败应显性暴露并排查（trace 'retain-on-failure' 语义由
-  // 下方 screenshot/trace 配置保留），故统一 0 重试。
+  // E2E 是发布门禁，失败应显性暴露并排查，故统一 0 重试。
   retries: 0,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
     baseURL: process.env.E2E_BASE_URL || 'http://127.0.0.1:3000',
-    trace: 'on-first-retry',
+    // 与 retries:0 联动的不变量（由 src/tests/zzqoder_playwrightConfig.test.js 守住）：
+    // 'on-first-retry' 的语义是「仅首次重试时录制并保留 trace」，而 retries:0 意味着
+    // 永远不存在第二次尝试——该取值在本配置下等价于「不留任何失败现场」，
+    // 与上方「失败应显性暴露并排查」直接矛盾。retain-on-failure 才是 0 重试下
+    // 的正确取值（首次失败即保留）。
+    trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     // 管理后台以中文为主，锁定语言避免文案选择器漂移
     locale: 'zh-CN',

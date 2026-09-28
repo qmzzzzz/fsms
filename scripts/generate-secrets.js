@@ -15,6 +15,8 @@
  *
  * 安全约定：
  *   - 生成结果只写向 --out 指定目录或 stdout，从不回显到日志文件；
+ *   - 参数严格校验（退出码 2 = 用法错误）：未知参数与缺值的 --out 在**生成任何密钥之前**
+ *     即被拒绝，因此不存在"手误打成 --output 结果把全套密钥打印到了 stdout/CI 日志"这条路；
  *   - --out 目录建议与仓库隔离（./secrets/ 已在 .gitignore/.dockerignore 在列）；
  *   - 文件一律 0600，目录 0700（非 Windows 平台）。
  */
@@ -25,21 +27,77 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const argv = process.argv.slice(2);
-const getFlag = (name) => argv.includes(name);
-const getOpt = (name) => {
-  const i = argv.indexOf(name);
-  return i !== -1 ? argv[i + 1] : undefined;
+const USAGE = '用法: node scripts/generate-secrets.js [--out <dir> [--force]] [--env-snippet]';
+/** 本脚本接受的全部参数（--out 后面必须跟目录，其余是纯开关） */
+const KNOWN_TOKENS = ['--out', '--force', '--env-snippet', '--help', '-h'];
+
+/**
+ * 拼错时给出可照抄的正确写法（返回**真实 token**，含连字符）。
+ * 抹掉非字母字符后三种形状相同即认定：多/少连字符（--envsnippet）、
+ * 前后缀（--output ⇄ --out）、相邻字符换位（--fource → --force）。
+ */
+const suggestFlag = (token) => {
+  const shape = (s) => s.replace(/[^a-z]/gi, '').toLowerCase();
+  const sorted = (s) => [...s].sort().join('');
+  const s = shape(token);
+  if (s.length < 2) return undefined;
+  return KNOWN_TOKENS.find((f) => {
+    const k = shape(f);
+    return k === s || k.startsWith(s) || s.startsWith(k) || sorted(k) === sorted(s);
+  });
 };
 
-if (getFlag('--help') || getFlag('-h')) {
-  console.log('用法: node scripts/generate-secrets.js [--out <dir> [--force]] [--env-snippet]');
-  process.exit(0);
+/**
+ * 参数解析（严格），且必须在生成任何密钥之前完成。
+ *
+ * 原实现是 `argv.includes(name)` 与 `argv.indexOf(name) + 1` 两套松判据，于是三条
+ * 最常见的手误都会**静默降级成"打印到 stdout"**（`outDir` 取不到值即走 else 分支）：
+ *   - `--output ./secrets`（多打两个字母）→ 不被认成 --out，全套密钥进终端历史/CI 日志，
+ *     而操作者以为已经落成 0600 文件；
+ *   - `--out` 打在末尾（忘了目录）→ 同上；
+ *   - `--out --force` → 目录名被设成字面量「--force」，落盘落到一个垃圾目录里。
+ * 三条共同的形状是「参数没生效，但看起来生效了」。同族规矩已在
+ * scripts/deployPolicy.js（--dryrun 曾换来一次真发布）与 scripts/run-rollback-drill.js
+ * （--backup-dir 缺值）立过：未知参数与缺值一律以退出码 2 拒绝，不猜。
+ */
+function parseCliArgs(tokens) {
+  const parsed = { outDir: undefined, force: false, envSnippet: false, help: false };
+  const errors = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === '--help' || token === '-h') parsed.help = true;
+    else if (token === '--force') parsed.force = true;
+    else if (token === '--env-snippet') parsed.envSnippet = true;
+    else if (token === '--out') {
+      const value = tokens[i + 1];
+      if (!value || value.startsWith('--')) {
+        errors.push('--out 缺少目录参数（要打印到 stdout 请整体不带 --out，而不是让目录丢失）');
+        break; // 值槽被开关形态的 token 占掉后，后面的边界已不可信，不再继续解析
+      }
+      parsed.outDir = value;
+      i += 1;
+    } else {
+      const hint = suggestFlag(token);
+      errors.push(
+        `未知参数：「${token}」（本脚本只接受 ${KNOWN_TOKENS.join(' / ')}，` +
+          `其中 --out 必须跟目录）${hint ? `；是否想写 ${hint}？` : ''}`
+      );
+    }
+  }
+  return { ...parsed, errors };
 }
 
-const outDir = getOpt('--out');
-const force = getFlag('--force');
-const envSnippet = getFlag('--env-snippet');
+const cli = parseCliArgs(process.argv.slice(2));
+if (cli.help) {
+  console.log(USAGE);
+  process.exit(0);
+}
+if (cli.errors.length > 0) {
+  for (const e of cli.errors) console.error(`[generate-secrets] ${e}`);
+  console.error(`[generate-secrets] ${USAGE}`);
+  process.exit(2);
+}
+const { outDir, force, envSnippet } = cli;
 
 // ================= 生成 =================
 const b64 = (bytes) => crypto.randomBytes(bytes).toString('base64').replace(/\n/g, '');

@@ -31,51 +31,44 @@
  *   数值以 web-admin/bundle-budget.json 为唯一事实来源（可 diff、可评审），
  *   本文件的常量只定义预算策略。
  *
- * 用法（退出码：0 = 通过；1 = 超预算 / 低于下限 / 产物不完整 / 基线缺失或损坏）:
+ * 用法（退出码：0 = 通过；1 = 超预算 / 低于下限 / 产物不完整 / 基线缺失或损坏；
+ * 2 = 用法错误——未知参数或缺值的 --dist/--baseline，此时**尚未读任何产物**）:
  *   node scripts/check-bundle-budget.js                    # 检查（CI / 本地门禁，基线缺失即失败）
  *   node scripts/check-bundle-budget.js --update-baseline  # 按当前实测收紧预算（需先构建）
  *   node scripts/check-bundle-budget.js --update-baseline --allow-growth   # 显式放宽预算
+ * 路径覆盖只认 `--dist=<目录>` / `--baseline=<文件>` 这一种形态（写成空格分隔会被判用法错误，
+ * 见 bundleBudgetPolicy.js 的 parseCliArgs 注释）。
+ * 收紧模式的一条硬规则：基线文件**存在但读不出旧预算**（JSON 坏 / 结构缺项）时，
+ * 「本次是否放宽」不可判定，因此按放宽对待——必须带 --allow-growth 才会写入。
+ * 否则「先弄坏基线再重写」就是放宽门禁的免确认通道（这条闸本身有专项用例）。
  *   node scripts/check-bundle-budget.js --dist=<dir> --baseline=<file>     # 测试 / 排障用
  */
 
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+// 判据（基线结构 / 比对 / 收紧公式 / 参数解析）在 bundleBudgetPolicy.js；
+// 本文件只负责读产物、呈现与退出码
+const {
+  METRICS,
+  BUDGET_KEYS,
+  FLOOR_KEYS,
+  isBudget,
+  validateBaseline,
+  compare,
+  tighten,
+  parseCliArgs,
+} = require('./bundleBudgetPolicy');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_DIST_DIR = path.join(REPO_ROOT, 'web-admin', 'dist');
 const DEFAULT_BASELINE_PATH = path.join(REPO_ROOT, 'web-admin', 'bundle-budget.json');
-const UPDATE_MODE = process.argv.includes('--update-baseline');
-const ALLOW_GROWTH = process.argv.includes('--allow-growth');
-const HEADROOM = 0.05; // 预算 = 实测 ×(1+HEADROOM)，向上取整到 ROUND_TO 字节
-const ROUND_TO = 1000;
-const FLOOR_RATIO = 0.6; // 防呆下限 = 实测分块数 ×FLOOR_RATIO；只拦「构建没产出」
 
-/**
- * 指标表：唯一的指标清单来源（校验 / 比对 / 打印 / 收紧都据此驱动，
- * 避免同一组键在四处各写一遍）。
- *   budgets 段 = 实测不得超过的上限；floors 段 = 实测不得低于的构造完整性下限
- */
-const METRICS = [
-  { key: 'entryJsGzip', section: 'budgets', unit: 'B' },
-  { key: 'entryCssGzip', section: 'budgets', unit: 'B' },
-  { key: 'totalRaw', section: 'budgets', unit: 'B' },
-  { key: 'totalGzip', section: 'budgets', unit: 'B' },
-  { key: 'maxChunkGzip', section: 'budgets', unit: 'B' },
-  { key: 'jsChunks', section: 'floors', unit: '个' },
-  { key: 'cssChunks', section: 'floors', unit: '个' },
-];
-const BUDGET_KEYS = METRICS.filter((m) => m.section === 'budgets').map((m) => m.key);
-const FLOOR_KEYS = METRICS.filter((m) => m.section === 'floors').map((m) => m.key);
-const isBudget = (metric) => metric.section === 'budgets';
-
-const readFlag = (name) => {
-  const hit = process.argv.find((arg) => arg.startsWith(`--${name}=`));
-  return hit ? hit.slice(name.length + 3) : null;
-};
-
-/** 普通对象判定（非 null / 非数组）：基线结构校验共用 */
-const isPlainObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+// 参数解析判据在 bundleBudgetPolicy.js：本文件撞过体积棘轮 max-lines=300，
+// 而棘轮只许降不许升（见该文件头注释的同一处理），故按既有边界拆过去而不是收紧基线。
+const CLI = parseCliArgs(process.argv.slice(2));
+const UPDATE_MODE = CLI.updateMode;
+const ALLOW_GROWTH = CLI.allowGrowth;
 
 /** gzip 字节数：zlib 默认等级 6，与 nginx / CDN 的常规压缩档位一致 */
 const gzipSize = (buf) => zlib.gzipSync(buf).length;
@@ -211,63 +204,10 @@ function inspect(distDir) {
 }
 
 /** 校验基线结构：任一指标缺失即拒绝放行（fail-closed） */
-function validateBaseline(baseline) {
-  if (!isPlainObject(baseline)) return ['基线内容不是 JSON 对象'];
-  const problems = [];
-  for (const section of ['budgets', 'floors']) {
-    const group = baseline[section];
-    if (!isPlainObject(group)) {
-      problems.push(`缺少 ${section} 段`);
-      continue;
-    }
-    for (const { key } of METRICS.filter((m) => m.section === section)) {
-      const value = group[key];
-      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-        problems.push(`${section}.${key} 缺失或非正数`);
-      }
-    }
-  }
-  return problems;
-}
 
 /** 与基线比对：budgets 段不得超过上限，floors 段不得低于下限 */
-function compare(stats, baseline) {
-  const violations = [];
-  for (const metric of METRICS) {
-    const { key, section } = metric;
-    const limit = baseline[section][key];
-    const broken = isBudget(metric) ? stats[key] > limit : stats[key] < limit;
-    if (!broken) continue;
-    const detail = isBudget(metric)
-      ? `超预算：实测 ${stats[key]} B > 预算 ${limit} B（超出 ${stats[key] - limit} B）`
-      : `低于防呆下限：实测 ${stats[key]} < 下限 ${limit}（构建可能未完整产出）`;
-    const code = isBudget(metric) ? 'over-budget' : 'under-floor';
-    violations.push({ code, metric: key, message: `${key} ${detail}` });
-  }
-  return violations;
-}
 
 /** 按实测收紧基线：预算 = 实测 ×(1+HEADROOM) 取整；防呆下限 = 实测分块数 ×FLOOR_RATIO */
-function tighten(stats, previous) {
-  const budgets = {};
-  const floors = {};
-  const raised = [];
-  for (const key of BUDGET_KEYS) {
-    budgets[key] = Math.ceil((stats[key] * (1 + HEADROOM)) / ROUND_TO) * ROUND_TO;
-    const prev = previous.budgets ? previous.budgets[key] : undefined;
-    if (typeof prev === 'number' && budgets[key] > prev)
-      raised.push(`${key} ${prev} -> ${budgets[key]}`);
-  }
-  // 下限至少为 1：结构校验已保证入口 script 与 stylesheet 各存在一份，
-  // 产物通过检查时 js/css 分块不可能为 0；若按 ×0.6 取整得出 0，
-  // 写出的基线会被自己的 validateBaseline（要求正数）判为损坏。
-  const floor = (value) => Math.max(1, Math.floor(value * FLOOR_RATIO));
-  for (const key of FLOOR_KEYS) floors[key] = floor(stats[key]);
-  const measured = {};
-  for (const { key } of METRICS) measured[key] = stats[key];
-  const measuredAt = new Date().toISOString().slice(0, 10);
-  return { baseline: { ...previous, measuredAt, measured, budgets, floors }, raised };
-}
 
 function readBaseline(baselinePath, strict) {
   if (!fs.existsSync(baselinePath)) return null;
@@ -310,12 +250,47 @@ function fail(lines) {
   process.exit(1);
 }
 
+/**
+ * 收紧模式的「上一版基线」：文件存在时必须能被当作比较基准，否则不能推断 raised。
+ *
+ * 为什么不能像原先那样"解析失败就当没有旧基线"：`tighten()` 靠
+ * `budgets[key] > previous.budgets[key]` 决定是否要求 `--allow-growth`。
+ * previous 缺失 ⇒ raised 恒空 ⇒ **把基线弄坏（或让其被工具写坏）就成了
+ * 放宽门禁的免确认通道**——同一套件里"上调需显式确认"那条用例会被无声绕过。
+ *
+ * 也不因此卡死运维（原用例「不因解析失败卡死」的诉求保留）：
+ * 仍可用 `--update-baseline --allow-growth` 重建，只是必须显式确认一次。
+ */
+function previousForUpdate(baselinePath) {
+  if (!fs.existsSync(baselinePath)) return {}; // 首次接入：没有旧预算可比，按建立处理
+  const prev = readBaseline(baselinePath, false);
+  const problems = validateBaseline(prev);
+  if (problems.length === 0) return prev;
+  // 拒绝是默认姿态；但必须留一条**真的能走通**的出路（原用例「不因解析失败卡死」）。
+  // 拒绝文案里让操作员追加 --allow-growth，就得在这里认这个 flag——
+  // 否则它是个死胡同：加了 flag 仍然被拒，等于把「可修复」降级成「必须人工改文件」。
+  if (!ALLOW_GROWTH) {
+    fail([
+      `已有基线文件但无法作为「上一版预算」使用，拒绝据此静默重写：${relToRepo(baselinePath)}`,
+      ...problems.map((p) => `  - ${p}`),
+      '原因：与旧预算无法比较时，"本次是否放宽了门禁"不可判定，' +
+        '静默按新实测重写会让「上调预算需 --allow-growth 显式确认」这道闸被绕过。',
+      '确认可接受当前实测为准，请追加 --allow-growth 重跑；' +
+        '或先 git checkout -- 恢复基线（更常见：文件被工具链写坏而非预算真的该放宽）。',
+    ]);
+  }
+  console.error(
+    '[budget] 已带 --allow-growth：旧基线不可用，按「重建基线」处理（本次不与旧预算比较）。'
+  );
+  return {};
+}
+
 /** 收紧模式：产物必须完整，新基线需自检通过；放宽预算需 --allow-growth */
 function runUpdateMode(stats, structural, baselinePath) {
   if (!stats || structural.length > 0) {
     fail([...structural.map((v) => `✗ ${v.message}`), '产物不完整时拒绝收紧基线。']);
   }
-  const { baseline: next, raised } = tighten(stats, readBaseline(baselinePath, false) || {});
+  const { baseline: next, raised } = tighten(stats, previousForUpdate(baselinePath));
   const selfCheck = compare(stats, next);
   if (selfCheck.length > 0) {
     const head = '内部错误：收紧后的基线无法通过自检，已放弃写入。';
@@ -370,8 +345,16 @@ function runCheckMode(stats, structural, baselinePath) {
 }
 
 function main() {
-  const distDir = path.resolve(readFlag('dist') || DEFAULT_DIST_DIR);
-  const baselinePath = path.resolve(readFlag('baseline') || DEFAULT_BASELINE_PATH);
+  if (CLI.errors.length > 0) {
+    for (const e of CLI.errors) console.error(`[budget] 用法错误：${e}`);
+    console.error(
+      '[budget] 用法: node scripts/check-bundle-budget.js ' +
+        '[--update-baseline [--allow-growth]] [--dist=<目录>] [--baseline=<文件>]'
+    );
+    process.exit(2);
+  }
+  const distDir = path.resolve(CLI.dist || DEFAULT_DIST_DIR);
+  const baselinePath = path.resolve(CLI.baseline || DEFAULT_BASELINE_PATH);
   const tag = '[budget] 前端产物体积预算门禁（首屏单列 + 总量 + 假绿防护）';
   console.log(tag);
   console.log(`[budget]   dist = ${relToRepo(distDir)} 基线 = ${relToRepo(baselinePath)}`);
@@ -390,6 +373,12 @@ if (require.main === module) {
   }
 }
 
-// 供单测与工具链复用（纯函数优先；常量随预算策略一并导出）
-const pure = { gzipSize, parseEntryRefs, collectStats, inspect, compare, validateBaseline };
-module.exports = { ...pure, tighten, BUDGET_KEYS, FLOOR_KEYS, HEADROOM, ROUND_TO, FLOOR_RATIO };
+// 供单测与工具链复用：本文件是**唯一** require 入口——计量函数在此，
+// 判据从 bundleBudgetPolicy.js 透出（不另立第二份清单）。
+module.exports = {
+  ...require('./bundleBudgetPolicy'),
+  gzipSize,
+  parseEntryRefs,
+  collectStats,
+  inspect,
+};

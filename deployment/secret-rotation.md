@@ -34,7 +34,9 @@ docker compose stop app        # 或 kill 本地进程
 
 # 2. 演练 → 执行迁移
 node scripts/migrate-mfa-secret.js --new-key <新KEY>
-node scripts/migrate-mfa-secret.js --new-key <新KEY> --apply
+#    --apply 是破坏性写：必须显式给出目标库白名单，否则 destructiveGuard 以 exitCode=2 拒绝
+#    （防止将演练/迁移误指向非预期库）。本文件所有 `--apply` 同理，不再逐处重复注释。
+ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key <新KEY> --apply
 
 # 3. 换钥
 #    本地开发：更新 .env 的 AES_SECRET_KEY
@@ -60,7 +62,7 @@ docker compose stop app
 # 2. 生成新密钥并重签（演练 → 执行）
 NEW=$(openssl rand -hex 32)
 node scripts/resign-audit-hmac.js --new-key "$NEW"
-node scripts/resign-audit-hmac.js --new-key "$NEW" --apply
+ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js --new-key "$NEW" --apply --yes
 
 # 3. 换钥并启动
 printf '%s' "$NEW" > ./secrets/hmac_secret
@@ -68,7 +70,15 @@ docker compose up -d app
 
 # 4. 复核（预期零 hmac 失配）
 node scripts/verify-audit-chain.js
+echo "退出码 $?"
 ```
+
+> 退出码含义（F-41 起）：**0** = 全量校验、无断裂、且 hmac 层确实参与；
+> **1** = 发现断裂/失配；**2** = 校验不完整，**不能当作"链是好的"**——
+> 常见原因是命中 `--limit`/`maxRecords` 上限（只覆盖了窗口）或该环境未配置
+> `HMAC_SECRET`（此时只有无密钥 SHA-256 在跑，拿到 DB 写权限者可整条链重算）。
+> 确要在无 hmac 的环境跑，显式加 `--allow-no-hmac`（知情放行，而不是默认绿）；
+> 该开关**不会**豁免"没验完"这一条。本步骤要求的是 0。
 
 ## JWT 双密钥轮换
 
@@ -127,11 +137,11 @@ docker compose stop app
 # 3. 两个需要数据迁移的密钥：先迁移、后换钥（顺序不可颠倒）
 NEW_AES=$(cat ./secrets-new/aes_secret_key)
 node scripts/migrate-mfa-secret.js --new-key "$NEW_AES"            # 演练
-node scripts/migrate-mfa-secret.js --new-key "$NEW_AES" --apply    # 执行
+ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key "$NEW_AES" --apply    # 执行
 NEW_HMAC=$(cat ./secrets-new/hmac_secret)
 node scripts/verify-audit-chain.js > audit-chain-before-rotation.log
 node scripts/resign-audit-hmac.js --new-key "$NEW_HMAC"            # 演练
-node scripts/resign-audit-hmac.js --new-key "$NEW_HMAC" --apply    # 执行
+ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js --new-key "$NEW_HMAC" --apply --yes    # 执行
 
 # 4. 原子替换 secrets 目录（JWT/URI/口令等无迁移依赖的随批生效）
 mv ./secrets ./secrets-old && mv ./secrets-new ./secrets
@@ -139,14 +149,24 @@ chmod 700 ./secrets && chmod 600 ./secrets/*
 #    ⚠️ 上面两条 chmod 仅在 Linux 生效。Windows 开发机不支持 POSIX 权限位
 #    （NTFS 用 ACL），chmod 是空操作，密钥会继承父目录的宽松 ACL（默认对
 #    BUILTIN\Users 可读、Authenticated Users 可改）。Windows 上请改用：
+#      icacls "secrets" /reset /T /C /Q
 #      icacls "secrets" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
+#    ⚠️ 两步都要跑，且顺序不能颠倒：只 /inheritance:r 只移除**继承来的** ACE，
+#    不动**显式授予**的 ACE——目录若曾被管理员/安装器授予过 Everyone、Users，
+#    那条 ACE 会在"收紧"后存活，密钥仍人人可读。先 /reset 把显式 ACE 清掉
+#    （/T 连目录内既有文件一起重置），再切断继承并授权。与 src/utils/filePermission.js
+#    里 hardenPath 实际执行的两步完全一致（提示与执行同源，见该文件注释）。
+#    另外 %USERNAME% 只在 cmd.exe 展开；PowerShell 里写成 $env:USERNAME。
 #    验证：icacls "secrets" 不应再出现 BUILTIN\Users / Authenticated Users
 #    生产环境经 Docker Secrets 挂载，不受此影响。
 
 # 5. 启动并验证
 docker compose up -d
 curl -fsS http://127.0.0.1:3000/health
-node scripts/verify-audit-chain.js     # 预期零失配
+node scripts/verify-audit-chain.js     # 要求退出码 0（含义见上文"HMAC 密钥轮换"一节）
+#   1 = 有断裂/失配：若本轮换了 HMAC_SECRET 却没先跑 resign-audit-hmac.js 重签，
+#       存量记录的 hmac 必然全红——那是流程漏步，不是被篡改，补跑重签后再验；
+#   2 = 校验不完整（窗口截断或该环境没有 HMAC_SECRET），不得当作"验过了"。
 # 人工验证：已开 MFA 的账户 登录→动态码；管理员登录→核心旅程抽查
 ```
 

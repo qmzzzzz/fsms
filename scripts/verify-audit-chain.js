@@ -13,28 +13,110 @@
  * 校验逻辑集中在 src/services/auditChainVerify.js，与在线接口
  * GET /api/security/audit-logs/verify 共用同一实现，避免两处口径漂移。
  *
- * 退出码:
- *   0 = 完整（无断裂）
- *   1 = 有断裂或运行错误
+ * 退出码（修正：原实现只要 breaks===0 就退 0，把"没验完"和"验过且干净"混成同一个绿）:
+ *   0 = **全量**校验完成、无断裂、且 hmac 层确实参与校验
+ *   1 = 发现断裂/失配（或运行错误）
+ *   2 = 校验不完整，**不得当作"链是好的"**：
+ *         · 命中 maxRecords 上限（只覆盖了窗口，其余没看）
+ *         · 未配置 HMAC_SECRET —— 此时只有无密钥的 SHA-256 在跑，
+ *           拿到 DB 写权限的人可整条链重算（hmac 才是唯一真正的防线，
+ *           见 auditChainVerify.js 头注释）。确要在无 hmac 环境跑，
+ *           显式加 --allow-no-hmac（运维知情放行，而不是默认绿）。
+ *         · 审计集合一条记录都没有：无对象可验。这一条尤其不能默认放过——
+ *           绕过模型钩子的直连 deleteMany({}) 就能造出"0 条且无断裂"的现场，
+ *           退 0 等于校验器为灭迹现场签发合格证明。新装库确要放行加 --allow-empty。
+ *         · 扫到的记录**全部无哈希**：一条都没有经过哈希校验。"链启用前的存量集合"
+ *           与"整表 $unset 掉 hash/prevHash/hmac"（直连驱动/mongosh 可绕过中间件）
+ *           在数据上不可区分，后者是彻底灭迹。旧判据把整窗 legacy 全数吸收 ⇒ breaks=0
+ *           ⇒ 退 0，**抹得越干净反而判得越干净**（只抹链尾退 1、整表全抹退 0）。
+ *           确要在"链从未启用"的存量库上放行加 --allow-all-legacy。
+ *
+ * 四个豁免彼此独立：--allow-no-hmac 只豁免 hmac，--allow-empty 只豁免空集合，
+ * --allow-all-legacy 只豁免"整窗无哈希"，任一未豁免的不完整理由都会把退出码钉在 2
+ * （见 computeVerdict 的真值表用例）。
+ *
+ * 尾部截断（删掉最新若干条）不在本脚本能力范围内：链本身仍自洽，需要外部
+ * 锚点（如周期性签名水位记录）才能发现，属独立设计项，此处如实不做承诺。
  */
 
 require('dotenv').config();
 
 const mongoose = require('mongoose');
-const { verifyAuditChain, HARD_MAX_RECORDS } = require('../src/services/auditChainVerify');
+const {
+  verifyAuditChain,
+  computeChainVerdict,
+  HARD_MAX_RECORDS,
+} = require('../src/services/auditChainVerify');
 
-/** 解析 --key=value 形式的参数 */
+/** 解析 --key=value 与 --flag 形式的参数；未知参数一律报错，不静默忽略 */
 function parseArgs(argv) {
-  const out = {};
+  const out = {
+    limit: undefined,
+    from: undefined,
+    allowNoHmac: false,
+    allowEmpty: false,
+    allowAllLegacy: false,
+  };
   for (const arg of argv) {
+    if (arg === '--allow-no-hmac') {
+      out.allowNoHmac = true;
+      continue;
+    }
+    if (arg === '--allow-empty') {
+      out.allowEmpty = true;
+      continue;
+    }
+    if (arg === '--allow-all-legacy') {
+      out.allowAllLegacy = true;
+      continue;
+    }
     const m = /^--([\w-]+)=(.*)$/.exec(arg);
-    if (m) out[m[1]] = m[2];
+    if (!m)
+      throw new Error(
+        `无法识别的参数：${arg}（支持 --limit=N --from=latest|earliest ` +
+          '--allow-no-hmac --allow-empty --allow-all-legacy）'
+      );
+    const [, key, value] = m;
+    if (key === 'limit') out.limit = value;
+    else if (key === 'from') out.from = value;
+    else throw new Error(`不支持的选项：--${key}`);
   }
   return out;
 }
 
+/**
+ * maxRecords 的取值必须是"用户给的正整数"或"缺省全量上限"。
+ * 原实现 `parseInt(args.limit, 10)` 对 `--limit=abc` 得到 NaN ⇒ NaN 是 falsy ⇒
+ * 静默退回 DEFAULT_MAX_RECORDS（运维以为按窗口跑了，实际跑的是另一套范围）。
+ */
+function resolveMaxRecords(rawLimit) {
+  if (rawLimit === undefined) return HARD_MAX_RECORDS;
+  if (!/^\d+$/.test(String(rawLimit))) {
+    throw new Error(`--limit 必须是正整数，收到「${rawLimit}」`);
+  }
+  const n = Number(rawLimit);
+  if (n < 1) throw new Error(`--limit 必须是正整数，收到「${rawLimit}」`);
+  return n;
+}
+
+/**
+ * 退出码判定：委托给 src/services/auditChainVerify.computeChainVerdict。
+ *
+ * 为什么必须委托而不是各写一份：同一个"能否宣称链完整"的判据此前有两处实现——
+ * 这里纳入 truncated/empty/hmac 三类不完整，而在线接口只看 intact && hmacChecked，
+ * 于是脚本退 2 说"不得当作链完整"的同时，接口却回答「审计链完整」并把核验审计记成 low。
+ * 判据收在一处，CLI 这层只负责把 code 映射成退出码与话术。
+ */
+function computeVerdict(args) {
+  return computeChainVerdict(args);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.from !== undefined && !['latest', 'earliest'].includes(args.from)) {
+    throw new Error(`--from 只能是 latest 或 earliest，收到「${args.from}」`);
+  }
+  const maxRecords = resolveMaxRecords(args.limit);
   const uri = process.env.MONGODB_URI;
   if (!uri) {
     console.error('错误：未提供 MONGODB_URI，请通过环境变量或 .env 指定（命令行传参会泄露到 ps）');
@@ -43,24 +125,59 @@ async function main() {
 
   await mongoose.connect(uri);
   const AuditLog = require('../src/models/AuditLog');
+  // 集合总量仅用于区分"全部看完"与"卡在上限"，用元数据级估算（O(1)）。
+  // 注意它只是**参考**：估算滞后时可能低于实际扫到的条数，判据据此把
+  // "窗口打满 + 两个数不一致"一律判 INCOMPLETE（见 computeChainVerdict 的 truncated 一段），
+  // 不再沿用"追平即可"的旧口径——那正是估算偏低时撤销截断否决的那一行。
+  const collectionTotal = await AuditLog.estimatedDocumentCount();
 
-  // 脚本默认全量校验（离线执行，无响应时间约束）
+  // 默认全量校验（离线执行，无响应时间约束）；一旦落到上限就是"只看了窗口"，
+  // 下面用 truncated 显式区分，不再让"没验完"退成 0。
   const result = await verifyAuditChain(AuditLog, {
-    maxRecords: args.limit ? parseInt(args.limit, 10) : HARD_MAX_RECORDS,
+    maxRecords,
     fromLatest: args.from !== 'earliest',
   });
 
   console.log(JSON.stringify(result, null, 2));
-
   await mongoose.connection.close();
-  process.exit(result.breaks > 0 ? 1 : 0);
+
+  const verdict = computeVerdict({
+    breaks: result.breaks,
+    total: result.total,
+    maxRecords: result.scanned.maxRecords,
+    collectionTotal,
+    hmacChecked: result.hmacChecked,
+    // 整窗无哈希（全 legacy）同样不得背书：见 computeChainVerdict 的 nothingHashed 一段
+    legacy: result.legacy,
+    // 扫描口径由报告回显：判据缺它时按"局部校验"处理（宁 INCOMPLETE，不假 PASS）
+    scanned: result.scanned,
+    allowNoHmac: args.allowNoHmac,
+    allowEmpty: args.allowEmpty,
+    allowAllLegacy: args.allowAllLegacy,
+  });
+  const label =
+    verdict.code === 0
+      ? 'PASS（全量、无断裂、hmac 已校验）'
+      : verdict.code === 1
+        ? 'FAIL（断裂）'
+        : 'INCOMPLETE（不得当作链完整）';
+  console.log(
+    `VERDICT: ${label}${verdict.reasons.length ? ` — ${verdict.reasons.join('；')}` : ''}`
+  );
+  process.exit(verdict.code);
 }
 
-main().catch((err) => {
-  console.error('校验脚本运行失败：', err.message);
-  try {
-    mongoose.connection.close().finally(() => process.exit(1));
-  } catch (_) {
-    process.exit(1);
-  }
-});
+// 仅在直接执行时跑（与 lint-ratchet.js 同一条 E-02 教训：无条件调用 main()
+// 会让任何 require() 本文件的单测连带连库 + 改写退出码）。
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('校验脚本运行失败：', err.message);
+    try {
+      mongoose.connection.close().finally(() => process.exit(1));
+    } catch (_) {
+      process.exit(1);
+    }
+  });
+}
+
+module.exports = { computeVerdict, parseArgs, resolveMaxRecords };

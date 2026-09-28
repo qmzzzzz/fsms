@@ -18,6 +18,14 @@ module.exports = [
       'src/docs/openapi.json',
       // k6 脚本运行于 k6 运行时（ESM + k6 专有模块），非 Node 代码
       'scripts/perf/k6-*.js',
+      // 本地调试/验证用的临时目录（.gitignore 里已忽略，但 ESLint 不读 .gitignore）。
+      // 原先靠仓库根的 .eslintignore 排除——那是 ESLint 8 时代的机制，
+      // 扁平配置根本不读它（每次运行都会打 ESLintIgnoreWarning），实测把探针文件
+      // 放进 zztmpctl/ 后 `npx eslint .` 仍报 5 个 error。写在 ignores 里才是生效的写法：
+      // `npm run lint`（显式列目录）不受影响，而开发者自然敲的 `eslint .` 也不再
+      // 被本地垃圾文件染红——退出码重新等于"已跟踪代码是否干净"。
+      'zztmpctl/**',
+      'zznpmtest/**',
     ],
   },
   {

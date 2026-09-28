@@ -149,21 +149,47 @@ async function hammer({
   return result;
 }
 
+/** 一行打印一个相的结果（模板字面量：等价的 16 行 `+` 拼接只是为了绕行宽，不携带信息） */
 const fmt = (r) =>
-  '  ' +
-  r.total +
-  ' req / ' +
-  r.elapsedSec +
-  's  QPS=' +
-  r.qps +
-  '  P50=' +
-  r.p50 +
-  'ms  P95=' +
-  r.p95 +
-  'ms  P99=' +
-  r.p99 +
-  'ms  status=' +
-  JSON.stringify(r.byStatus);
+  `  ${r.total} req / ${r.elapsedSec}s  QPS=${r.qps}  P50=${r.p50}ms  P95=${r.p95}ms` +
+  `  P99=${r.p99}ms  status=${JSON.stringify(r.byStatus)}`;
+
+/**
+ * 把一个压测相变成**带正确性判据**的门禁，而不是只报数。
+ *
+ * 为什么必须有：`hammer()` 只统计状态码，自己从不失败。所以此前 B（/health）与
+ * C（/metrics）两相在任何退化下都是"绿"的——/health 全 500、/metrics 被
+ * metricsAuth 挡成 401、甚至一个请求都没发出去（total=0 ⇒ QPS=0、P95=0），
+ * 都照样打印数字并写进基线文件。**一份把错误响应当吞吐量的基线比没有基线更糟**：
+ * 它看起来是"压测过了"。E-1 的口径是"测得这台机器的下界"，前提是这些请求真的成功。
+ *
+ * @param {string} label 步骤名前缀
+ * @param {Object} r hammer() 的返回
+ * @param {number[]} allowed 允许出现的状态码集合
+ */
+function assertPhaseHealthy(label, r, allowed) {
+  return step(label, async () => {
+    if (!(r.total > 0)) {
+      throw new Error(
+        '该相没有发出任何成功计数的请求（status=' + JSON.stringify(r.byStatus) + '）'
+      );
+    }
+    const notAllowed = Object.entries(r.byStatus).filter(
+      ([s]) => !allowed.includes(Number(s)) // 'error' 之类经 Number 变 NaN，必然不在白名单内
+    );
+    if (notAllowed.length > 0) {
+      throw new Error(
+        '出现非预期状态码 ' +
+          JSON.stringify(Object.fromEntries(notAllowed)) +
+          '（允许 ' +
+          allowed.join('/') +
+          '；全量=' +
+          JSON.stringify(r.byStatus) +
+          '）'
+      );
+    }
+  });
+}
 
 async function waitForServer(timeoutMs) {
   const deadline = Date.now() + timeoutMs;
@@ -176,7 +202,7 @@ async function waitForServer(timeoutMs) {
     }
     await sleep(300);
   }
-  throw new Error('服务器 30 秒内未就绪');
+  throw new Error(`服务器 ${Math.round(timeoutMs / 1000)} 秒内未就绪`);
 }
 
 async function main() {
@@ -212,6 +238,11 @@ async function main() {
     durationMs: 8000,
   });
   console.log(fmt(health));
+  await assertPhaseHealthy(
+    'B. /health 全 200（压测数字只有在请求真的成功时才有意义）',
+    health,
+    [200]
+  );
 
   console.log('[LOAD] C 相：/metrics 全中间件链（C=50, 8s）…');
   const metrics = await hammer({
@@ -221,6 +252,7 @@ async function main() {
     durationMs: 8000,
   });
   console.log(fmt(metrics));
+  await assertPhaseHealthy('C. /metrics 全 200（回环 metricsAuth 未被改坏）', metrics, [200]);
 
   console.log('[LOAD] 登录取 token + 创建暴力破解靶用户（须在 E 相耗尽配额前完成）…');
   let token = null;
@@ -313,8 +345,11 @@ async function main() {
     const outPath = path.join(__dirname, '..', 'logs', 'load-baseline.json');
     fs.writeFileSync(outPath, JSON.stringify(baseline, null, 2));
     console.log('[LOAD] 基线已写入 ' + outPath);
-  } catch (_) {
-    /* 基线落盘失败不影响结论 */
+  } catch (err) {
+    // 不静默：基线文件是这份报告的产物，写不出来必须让人知道（退出码不变——结论已经在 stdout）
+    console.error(
+      '[LOAD] 基线落盘失败（结论不受影响，但本次没有留下可对比的产物）：' + err.message
+    );
   }
 }
 

@@ -23,7 +23,11 @@ server {
     listen 80;
     listen [::]:80;
     server_name your-domain.example;
-    return 301 https://$host$request_uri;
+    # 跳转目标写字面域名，不用 $host：$host 取自请求的 Host 头，而本块是 :80 的
+    # 默认 server（唯一声明该端口的块自动成为默认），因此任何解析到本机的域名都会被
+    # 它接管并发出 `301 https://evil.com/...`——开放重定向，可直接用于钓鱼；
+    # 配合上面的 HSTS preload 危害更大。$request_uri 只含路径/查询，不含主机，安全。
+    return 301 https://your-domain.example$request_uri;
 }
 
 # HTTPS 主入口
@@ -94,6 +98,21 @@ server {
     root /var/www/fire-safety/web-admin/dist;
     index index.html;
 
+    # 纵深拦截 sourcemap / 源码文件（与 src/middleware/staticFrontend.js 的
+    # DENIED_STATIC_EXTS 同口径 —— 两条托管路径是二选一，只在一侧设防等于没设）。
+    # 构建目前关 sourcemap，这里防的是配置漂移后产物里出现 .map/.ts 仍被公网取到。
+    #
+    # 为什么单开一个正则块而不是往下面的 location / 里加 if：
+    #   - 正则 location 的优先级高于前缀 location（`=` 与 `^~` 除外），所以本块
+    #     一定先于 location / 与 location /assets/ 生效，不需要靠写法顺序赌运气；
+    #   - `~*` 大小写不敏感：Windows/开发机上 leak.js.MAP 命中同一文件，
+    #     只判小写等于留一个平台相关的缺口；
+    #   - 404 响应不需要 /assets/ 那套安全头/缓存头（见下面 L-09 注释：add_header
+    #     在嵌套块里是整体替换），所以本块不写 add_header，也不该写。
+    location ~* \.(map|ts)$ {
+        return 404;
+    }
+
     location / {
         try_files $uri $uri/ /index.html;
     }
@@ -118,6 +137,29 @@ server {
         add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()" always;
     }
 
+    # ===== 反向代理头：每个 proxy 块必须**完整重声明**四条 =====
+    #
+    # 两条 nginx 语义决定了不能只在 server 级写一遍：
+    #   1. proxy_set_header 在嵌套块中是**整体替换**而非继承/追加——只要本块出现
+    #      任意一条 proxy_set_header，外层声明就全部失效（与上方 /assets/ 的
+    #      add_header 同一套语义，见 L-09 说明）；
+    #   2. 未声明 Host 时 nginx 默认发 `Host: $proxy_host`，即 proxy_pass 的目标地址
+    #      127.0.0.1:3000，而不是用户实际访问的域名。
+    #
+    # 第 2 条在本项目是功能性缺陷而非风格问题：ALLOWED_HOSTS 为生产必填项
+    # （src/config/validate.js 的 M3），protocolCompliance 用 req.get('host') 与之
+    # 精确比对，且经 app.js applyPreBodySecurity 挂在 body 解析之前覆盖全站，
+    # skipPaths 仅豁免 '/health'。缺 Host 时 /metrics 抓取、/csp-report 与
+    # /client-errors 上报、/socket.io/ 握手一律得到 400 HOST_HEADER_INVALID。
+    # 这些端点不经过 nginx 就测不到（supertest 直连 app），CI 完全抓不住。
+    #
+    # X-Real-IP / X-Forwarded-For 同理不可省：TRUST_PROXY_HOPS 默认 1
+    # （docker-compose.yml），应用侧的限流、IP 黑名单与审计来源都取 req.ip。
+    # 少传时该通道上所有客户端在应用侧塌缩成同一个 IP（F-10 的反代版本），
+    # 限流与封禁对其失效，审计里的来源 IP 也是假的。
+    #
+    # 一致性由 src/tests/deploy/zzqA_nginxProxyContract.test.js 把守（新增 proxy 块漏头即红）。
+
     # ===== Prometheus /metrics（无鉴权端点，必须限制抓取来源） =====
     # 应用侧该端点不带认证（设计给 Prometheus 抓取），暴露公网等于泄露
     # QPS/延迟/安全告警计数等运行情报。按实际监控主机/网段调整 allow 列表。
@@ -126,6 +168,9 @@ server {
         allow 10.0.0.0/8;        # ← 改成实际监控采集网段
         deny all;
         proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
@@ -134,6 +179,23 @@ server {
     # 均由浏览器自动发起、无法带认证；后端自带独立限流
     location ~ ^/(csp-report|client-errors)$ {
         proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # ===== 安全联络策略（RFC 9116）=====
+    # 后端把 security.txt 挂在**根路径**（app.js 的 app.use('/', wellKnownRoutes) →
+    # GET /.well-known/security.txt 与 GET /security.txt），而本 server 的 root 指向前端
+    # dist：没有这两条反代时上面的 location / 会用 try_files 退到 /index.html，
+    # 生产域名上返回 200 的 SPA HTML 而非文本——对外承诺的漏洞披露渠道静默失效，
+    # 且因为"200 且是 HTML"，监控与人工访问都不容易发现。
+    # 用 regex 而非 ^~ /.well-known/：后者会把 ACME http-01 挑战（/.well-known/acme-challenge/）
+    # 一并转给后端，签单即失败。
+    location ~ ^/(?:\.well-known/)?security\.txt$ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -149,8 +211,34 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    # 前缀块 `location /api/` 匹配不到**不带斜杠**的 `/api`，而它是一条真实路由
+    # （app.js:313 返回 `{"success":true,"message":"消防管理系统 API"}`）：
+    # 少了本块，`https://域名/api` 会落到 location / 的 try_files，
+    # 用 200 的 SPA HTML 回答一个 API 路径请求——客户端解析 JSON 直接炸，
+    # 且炸在业务层而不是网关层，排查成本极高。
+    # 写成独立的 `=` 精确块而不是把上面的前缀改成 `/api`：后者会连带匹配
+    # `/apixyz.html` 这类未来的静态资源，把不该转发的请求也代理走。
+    # 已知取舍：app.js 的 ipLimiter/generalLimiter/auditLog 挂在 `app.use('/api/')` 下，
+    # 该精确路径不经过它们（全站级的 checkIPBlacklist 与 protocolCompliance 仍在）。
+    # 这条响应是常量 JSON、不碰数据库，故不额外为其加限流闸；若将来它变成有状态的端点，
+    # 必须改挂到 /api/ 前缀之下而不是继续扩大本块。
+    location = /api {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # /health 本身在 protocolCompliance 的 skipPaths 内（Host 校验豁免），
+    # 这里仍按同一口径补齐四条：豁免是中间件的默认参数而非契约，且探针的
+    # 来源 IP 同样要进审计。/readyz 刻意不对外（容器健康检查直连 3000）。
     location /health {
         proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
@@ -158,8 +246,11 @@ server {
     location /socket.io/ {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
+        proxy_set_header Host $host;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 300s;
     }

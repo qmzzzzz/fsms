@@ -21,10 +21,26 @@
  */
 
 const COLLECTION = 'auditlogs';
-const RETENTION_SECONDS = 15552000; // 180 天，与 constants/retention.js 默认口径一致
+// 留存期必须取单一来源，不能写死 180 天默认值：
+// models/AuditLog.js 的 TTL 由 RETENTION_SECONDS 推导，而它随 AUDIT_RETENTION_DAYS 变化。
+// 若此处硬编码 15552000，当运维配了非 180 天（如 365）时，本迁移会把 TTL 强行改回 180 天，
+// 与模型/合规仪表盘对外声明的天数背离，且下次启动 createIndexes 因选项冲突(IndexOptionsConflict)
+// 再也改不回来——正是 constants/retention.js(P3-46) 要消除的"声明 N 天、实际留得更少"。
+const { RETENTION_SECONDS } = require('../src/constants/retention');
 
 const getIndex = async (db, name) => {
-  const list = await db.collection(COLLECTION).indexes();
+  let list;
+  try {
+    list = await db.collection(COLLECTION).indexes();
+  } catch (err) {
+    // 集合尚不存在（全新库首次 migrate）＝索引必然不存在，交给下面的"按模型定义创建"分支。
+    // 原生驱动在这种情况是抛 NamespaceNotFound 而不是返回 []，未捕获会让整条
+    // `migrate-mongo up` 在**第一个**审计索引迁移处就失败退出（部署停在半途）。
+    // 只放过这一种：宽口径 catch 会把鉴权失败/选主超时读成"没有索引"→ 静默不补齐
+    // 却打印成功（scripts/fix-token-blacklist-index.js 的旧实现就是这个假绿）。
+    if (err?.codeName === 'NamespaceNotFound' || err?.code === 26 || err?.code === 48) return null;
+    throw err;
+  }
   return list.find((i) => i.name === name) || null;
 };
 

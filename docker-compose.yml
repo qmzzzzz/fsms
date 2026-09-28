@@ -10,7 +10,7 @@ services:
     #   本地开发：不设 APP_IMAGE，`docker compose build` 仍照常工作（tag 为默认值）
     #
     # 默认值故意不带 registry：本地构建产出留在本机，不会被误推到远端。
-    # 生产必须显式给 APP_IMAGE（scripts/deploy.sh 会做 fail-fast 校验）。
+    # 生产必须显式给 APP_IMAGE（scripts/deploy.js 的 validatePreflight 会 fail-fast 校验）。
     image: ${APP_IMAGE:-fire-safety-app:local}
     build: .
     ports:
@@ -38,6 +38,9 @@ services:
       # 值为逗号分隔的 host（可带端口，如 fsms.example.com,api.example.com:443）；
       # 健康检查 /health 已在 protocolCompliance 的 skipPaths 中豁免，
       # 无需把 localhost 写进来。
+      # /metrics 同理：Prometheus 按 `deployment/observability/prometheus.yml` 的 targets 直连
+      # 容器服务名（Host: app:3000）抓取，该形态已由 HOST_GATE_EXEMPT_PATHS 单独豁免 Host 一项。
+      # 别把 app:3000 加进本列表——那等于为了一条抓取链路把 Host 防线对整个站点放宽一档。
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:?ALLOWED_HOSTS 必须显式配置（如 fsms.example.com，多个用逗号分隔）}
       # 审计留存天数（合规区间 90..3650，留空取默认 180）
       - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-180}
@@ -65,6 +68,16 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # ===== F-103：优雅关闭的部署侧契约（与代码侧总预算是同一份约定的两端）=====
+    #
+    # 此前本服务**没有** stop_grace_period ⇒ Docker/Compose 按默认 10 s 发 SIGKILL，
+    # 而关停链最坏要 HTTP 10 s（存量请求排空）+ 设备扫描等待 30 s，
+    # 排在链尾的两步——审计缓冲排空、Mongo 连接关闭——**一次都跑不到**，
+    # 且强退不留任何日志线索（比"指标说谎"更糟：连谎话都没有）。
+    # 现在代码侧由 src/utils/shutdownBudget.js 把整条链收进 SHUTDOWN_TOTAL_BUDGET_MS
+    # （默认 25 s），这里给 30 s：差出的 5 s 留给日志 transport 落盘与 process.exit。
+    # 两个数由 src/tests/utils/shutdownBudgetContract.test.js 钉在一起，改一侧必红。
+    stop_grace_period: 30s
     # ===== R-4 容器加固：资源上限 + 日志轮转 =====
     #
     # 资源上限的意义不在于省资源，而在于**故障隔离**：没有上限时，
@@ -367,15 +380,25 @@ services:
 #
 # 部署前准备（宿主机上执行一次，务必放在仓库之外的目录）：
 #   mkdir -p ./secrets && chmod 700 ./secrets
+#   # 首选：一次生成全套（含本清单遗漏的 login_ecdh_private_key，且连接串自动转义）
+#   node scripts/generate-secrets.js --out ./secrets
+#   # 手抄版（与上面等价，逐条可控）：
 #   openssl rand -base64 48 | tr -d '\n' > ./secrets/jwt_secret
 #   openssl rand -base64 48 | tr -d '\n' > ./secrets/jwt_refresh_secret
 #   openssl rand -hex 32     | tr -d '\n' > ./secrets/aes_secret_key
 #   openssl rand -hex 16     | tr -d '\n' > ./secrets/hmac_secret
 #   printf 'firesafety'  > ./secrets/mongo_root_username
-#   openssl rand -base64 32 | tr -d '\n' > ./secrets/mongo_root_password
+#   # mongo_root_password 必须用 -hex：它要内嵌进 mongodb_uri 的 userinfo 段，
+#   # 而 base64 字符集含 '/'（实测 32 字节 base64 约一半概率出现），驱动对未转义的
+#   # '/' ':' '#' '?' 直接抛 "Password contains unescaped characters" ⇒ 应用启动即退出。
+#   # 熵不变（两者都是 32 字节随机数），只是编码换 URL 安全集。
+#   openssl rand -hex 32     | tr -d '\n' > ./secrets/mongo_root_password
 #   openssl rand -base64 24 | tr -d '\n' > ./secrets/admin_initial_password
 #   openssl rand -base64 32 | tr -d '\n' > ./secrets/grafana_admin_password
-#   # mongodb_uri 需内嵌上面的用户名与口令：
+#   # mongodb_uri 需内嵌上面的用户名与口令：用户名/口令走的是 URL userinfo，
+#   # 上面已把口令限制在 hex 字符集，因此这里可以直接拼接；若改用其它字符集
+#   # （base64 等），必须先 percent-encode —— scripts/generate-secrets.js 就是走
+#   # encodeURIComponent 那条路，两种写法都由用例把"拼出来的串必须被驱动接受"钉住。
 #   printf 'mongodb://%s:%s@mongo:27017/fire_safety_db?authSource=admin' \
 #     "$(cat ./secrets/mongo_root_username)" "$(cat ./secrets/mongo_root_password)" \
 #     > ./secrets/mongodb_uri

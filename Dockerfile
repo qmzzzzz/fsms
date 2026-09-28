@@ -32,6 +32,13 @@ COPY src/ ./src/
 # 因此与 src/ 同源打进镜像，而不是让部署机另配一份源码。
 COPY migrations/ ./migrations/
 COPY migrate-mongo-config.js ./
+# migrate-mongo-config.js 顶层 require('./scripts/destructiveGuard')（目标库判据的
+# 唯一事实来源）。镜像原先只 COPY src/ 与 migrations/，于是容器里
+# `migrate-mongo status|up`（scripts/deploy.js 的部署步骤）在加载配置那一刻
+# MODULE_NOT_FOUND —— 迁移这道闸在任何真实部署里都没执行过，而 CI 用桩 docker
+# 观测命令序列，看不到容器内的文件集合。src/tests/deploy/imageRequireClosure.test.js
+# 把"COPY 集合必须闭合满足相对 require"钉成门禁。
+COPY scripts/destructiveGuard.js ./scripts/
 COPY package*.json ./
 
 # 前端构建阶段（L-1）：产出 web-admin/dist，供后端 express 静态托管
@@ -82,6 +89,10 @@ COPY --from=builder --chown=nodejs:nodejs /app/src ./src
 # D-3：迁移目录与配置（见 builder 阶段说明）
 COPY --from=builder --chown=nodejs:nodejs /app/migrations ./migrations
 COPY --from=builder --chown=nodejs:nodejs /app/migrate-mongo-config.js ./
+# 运行期加载 migrate-mongo-config.js 需要它（见 builder 阶段说明）。
+# 只复制这一个文件，不把整个 scripts/ 塞进镜像：里面的 --apply 破坏性运维脚本
+# 一旦被容器里任何一条命令路径引用到，就等于把"改库开关"分发到生产实例上。
+COPY --from=builder --chown=nodejs:nodejs /app/scripts/destructiveGuard.js ./scripts/
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
 
 # 前端构建产物（L-1 静态托管）：默认路径与 src/middleware/staticFrontend.js
