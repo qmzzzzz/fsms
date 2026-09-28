@@ -94,6 +94,8 @@ const binaryExts = new Set([
   '.xz',
   '.7z',
   '.rar',
+  // ip2region 离线归属地数据库（src/data/ip2region.xdb，见该目录 README.md）
+  '.xdb',
   '.mp3',
   '.mp4',
   '.webm',

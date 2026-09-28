@@ -497,6 +497,9 @@ describe('sessionService（设备级会话服务）', () => {
           'deviceVendor',
           'engine',
           'expiresAt',
+          // 归属地（展示增强，检索不可用时为 null 而非缺字段，前端据此省略）
+          'location',
+          'loginLocation',
           'ip',
           'lastIp',
           'lastSeenAt',
@@ -506,6 +509,32 @@ describe('sessionService（设备级会话服务）', () => {
           'userAgent',
         ].sort()
       );
+    });
+
+    test('归属地随列表输出：内网 IP 标「内网」，lastIp 优先作为主展示归属地', async () => {
+      const { createSession } = sessionService;
+      const s = await createSession({ userId: userA, req: fakeReq(undefined, '223.5.5.5') });
+      // 会话期间换了出口网络：lastIp 指向新的（外网）地址，登录地是阿里 DNS
+      await UserSession.updateOne({ sid: s.sid }, { $set: { lastIp: '8.8.8.8' } });
+
+      const [item] = await sessionService.listSessions({ userId: userA });
+      // 主归属地取最近活跃 IP（列表首屏展示的就是它）
+      expect(item.location).toContain('美国');
+      // 登录地是会话建立时的 IP
+      expect(item.loginLocation).toContain('中国');
+    });
+
+    test('归属地缺失形态：IP 缺失时两字段为 null（fail-soft，不缺字段）', async () => {
+      const stale = sessionService.newSid();
+      await UserSession.create({
+        sid: stale,
+        userId: userA,
+        status: 'active',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      const [item] = await sessionService.listSessions({ userId: userA });
+      expect(item.location).toBeNull();
+      expect(item.loginLocation).toBeNull();
     });
 
     test('列表刻意返回完整 IP —— 脱敏后无法区分同网段的可疑登录', async () => {

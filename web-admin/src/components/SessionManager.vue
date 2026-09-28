@@ -66,7 +66,11 @@
             {{ softwareLine(item) }}
           </div>
           <div class="session-meta">
-            <span>{{ t('session.ip') }}：{{ item.lastIp || item.ip || '—' }}</span>
+            <!-- 归属地是后端可选增强（旧数据/检索不可用时缺字段），必须 v-if 省略而非渲染空串 -->
+            <span>
+              {{ t('session.ip') }}：{{ item.lastIp || item.ip || '—'
+              }}<template v-if="item.location"> · {{ item.location }}</template>
+            </span>
             <span>{{ t('session.lastSeen') }}：{{ formatSessionTime(item.lastSeenAt) }}</span>
             <span>{{ t('session.loginAt') }}：{{ formatSessionTime(item.createdAt) }}</span>
           </div>
@@ -95,9 +99,13 @@
             </template>
             <template v-if="item.ip && item.lastIp && item.ip !== item.lastIp">
               <!-- 仅在两者不同时展示登录 IP：会话期间换网络是「令牌被挪到
-                   别处使用」的关键线索，相同时展示只是重复噪音 -->
+                   别处使用」的关键线索，相同时展示只是重复噪音。
+                   归属地同样只在该行有意义时展示（登录地与最近地不同才有核查价值） -->
               <dt>{{ t('session.loginIp') }}</dt>
-              <dd>{{ item.ip }}</dd>
+              <dd>
+                {{ item.ip
+                }}<template v-if="item.loginLocation"> · {{ item.loginLocation }}</template>
+              </dd>
             </template>
             <dt>{{ t('session.expiresAt') }}</dt>
             <dd>{{ formatSessionTime(item.expiresAt) }}</dd>

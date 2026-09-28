@@ -32,6 +32,7 @@ const logger = require('../utils/logger');
 // （与 userPermissionService 同一口径）。未配置 REDIS_URL 时发布/订阅均为无操作，
 // 自动退化为单进程语义。
 const sharedCache = require('./sharedCache');
+const ipLocationService = require('./ipLocationService');
 const UserSession = require('../models/UserSession');
 const { computeFingerprint } = require('../utils/fingerprint');
 const { durationToMs } = require('../utils/cookie');
@@ -562,7 +563,14 @@ const listSessions = async ({ userId, currentSid = null }) => {
     expiresAt: { $gt: now },
   }).sort({ lastSeenAt: -1 });
 
-  return docs.map((d) => d.toClientJSON(currentSid));
+  return docs.map((d) => {
+    const json = d.toClientJSON(currentSid);
+    // 归属地是纯增强展示：locate 内部 fail-soft（任何异常返回 null），且带结果
+    // 缓存——同 IP 反复刷新列表是 O(1) 命中，不会拖慢 sessions 接口
+    json.location = ipLocationService.locate(json.lastIp || json.ip);
+    json.loginLocation = ipLocationService.locate(json.ip);
+    return json;
+  });
 };
 
 module.exports = {

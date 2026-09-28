@@ -1,3 +1,6 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.sh text eol=lf
+
+# ip2region 归属地离线数据库（二进制，禁止任何行尾/编码改写）
+*.xdb binary
