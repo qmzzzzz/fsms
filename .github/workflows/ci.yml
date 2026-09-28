@@ -12,10 +12,13 @@ jobs:
 
     strategy:
       matrix:
-        # Node 18 于 2025-04 EOL，仍保留做兼容性验证（2026-09-15 应要求恢复）：
-        # 此前两类失败——时区断言（内嵌 +08:00 已修）与 teardown 后静默
-        # exit 1（--forceExit 已治理）——均已闭合，公开仓额度不再是约束。
-        node-version: [18.x, 20.x, 22.x]
+        # Node 18 于 2025-04 EOL，2026-09-28 移除。原因是**结构性必红**，与公开仓额度无关：
+        # 本 job 第 5 步要构建前端，而 web-admin 的 Vite ^8.1.4 其 engines 为
+        # `^20.19.0 || >=22.12.0` ⇒ Node 18 下 `vite build` 必失败，且失败会 fail-fast
+        # 把 lint / format / 编码 / 合规 / 测试等后续 9 步全部 skip（该版本等于什么都没验）。
+        # 历史上「Node 18 两类失败」（时区断言、teardown 后静默 exit 1）此前确已闭合，
+        # 但 Vite 8 的 engines 是第三类，且在 18 上不可能通过。
+        node-version: [20.x, 22.x]
 
     steps:
       - uses: actions/checkout@v5

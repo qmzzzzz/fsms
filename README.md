@@ -4,15 +4,15 @@
 
 ## 技术栈
 
-| 层级   | 技术选型                                                                                                       |
-| ------ | -------------------------------------------------------------------------------------------------------------- |
-| 前端   | Vue 3（Composition API）、Vite、Element Plus、Pinia、Vue Router、ECharts、Axios                                |
-| 后端   | Node.js、Express、Mongoose、Socket.IO、JWT（HS256）、winston                                                   |
-| 数据库 | MongoDB 6.x                                                                                                    |
-| 安全   | helmet、三层限流（IP 级 / 用户级 / 通用）、bcryptjs、AES-256 + HMAC 加密、令牌黑名单、IP 黑名单、全量审计日志  |
-| 测试   | Jest + mongodb-memory-server（内存 MongoDB，无需本地实例）                                                     |
-| 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 18/20/22 矩阵测试，前端构建 24，镜像 node:22.14.0） |
-| 监控   | Prometheus + Grafana + Alertmanager（docker-compose 随栈启动）、Sentry（可选）                                 |
+| 层级   | 技术选型                                                                                                      |
+| ------ | ------------------------------------------------------------------------------------------------------------- |
+| 前端   | Vue 3（Composition API）、Vite、Element Plus、Pinia、Vue Router、ECharts、Axios                               |
+| 后端   | Node.js、Express、Mongoose、Socket.IO、JWT（HS256）、winston                                                  |
+| 数据库 | MongoDB 6.x                                                                                                   |
+| 安全   | helmet、三层限流（IP 级 / 用户级 / 通用）、bcryptjs、AES-256 + HMAC 加密、令牌黑名单、IP 黑名单、全量审计日志 |
+| 测试   | Jest + mongodb-memory-server（内存 MongoDB，无需本地实例）                                                    |
+| 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 20/22 矩阵测试，前端构建 24，镜像 node:22.14.0）   |
+| 监控   | Prometheus + Grafana + Alertmanager（docker-compose 随栈启动）、Sentry（可选）                                |
 
 ## 功能特性
 
@@ -78,7 +78,9 @@ fsms/
 
 ### 环境要求
 
-- Node.js >= 18（CI 验证版本：18 / 20 / 22）
+- Node.js >= 20.19（CI 验证版本：20 / 22）
+  - 后端本身在 Node 18 上可运行，但 `web-admin/` 使用的 Vite 8 声明 `engines: ^20.19.0 || >=22.12.0`，
+    而 CI 的 test job 含前端构建 ⇒ 全仓统一要求 **≥ 20.19**（Node 18 已于 2025-04 EOL）。
 - MongoDB >= 5（推荐 6.x，本地安装或 Docker 均可）
 
 ### 方式一：Windows 一键启动
