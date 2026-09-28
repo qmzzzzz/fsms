@@ -249,6 +249,9 @@ a:hover {
   justify-content: center;
   gap: var(--xf-spacing-sm);
   padding: 9px 20px;
+  /* Apple/Pinguo 标准按钮高度 40px：与 EP large 输入框（40px）在过滤栏对齐；
+     inline-flex 居中，内容不受影响。小尺寸/链接/图标变体在各自规则中复位 */
+  min-height: 40px;
   font-family: var(--xf-font-body);
   font-size: var(--xf-font-size-sm);
   font-weight: 500;
@@ -375,6 +378,7 @@ a:hover {
 
 /* 链接风格（表格内操作） */
 .glass-btn--link {
+  min-height: 0; /* 复位 base 的 40px：表格行内保持紧凑 */
   padding: var(--xf-spacing-xs) var(--xf-spacing-md);
   font-size: var(--xf-font-size-xs);
   font-weight: 500;
@@ -448,6 +452,7 @@ a:hover {
 
 /* 小尺寸 */
 .glass-btn--sm {
+  min-height: 0; /* 复位 base 的 40px */
   padding: 6px 14px;
   font-size: var(--xf-font-size-xs);
 }
@@ -456,8 +461,17 @@ a:hover {
 .glass-btn--icon {
   width: 32px;
   height: 32px;
+  min-height: 0; /* 复位 base 的 40px，尺寸由 width/height 固定 */
   padding: 0;
   border-radius: 50%;
+}
+
+/* 触屏设备：图标按钮满足 Apple 44×44pt 最小触控目标 */
+@media (hover: none) and (pointer: coarse) {
+  .glass-btn--icon {
+    width: 44px;
+    height: 44px;
+  }
 }
 
 /* ==========================================================================

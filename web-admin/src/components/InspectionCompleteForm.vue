@@ -62,6 +62,9 @@
                       :value="item.value"
                     />
                   </el-select>
+                  <div v-if="deviceHint" class="device-hint" :data-kind="deviceState.kind">
+                    {{ deviceHint }}
+                  </div>
                 </el-form-item>
               </el-col>
               <el-col :span="12">
@@ -235,6 +238,20 @@ const visible = computed({
 const loading = ref(false)
 const deviceOptions = ref([])
 
+// 设备下拉的缺数据状态：partial = 后端还有没下发的设备，failed = 请求本身失败。
+// 两种都必须看得见（见 loadDevices 里的说明）。
+const deviceState = reactive({ kind: 'ok', loaded: 0, total: 0 })
+const deviceHint = computed(() => {
+  if (deviceState.kind === 'partial') {
+    return t('inspectionResult.deviceListPartial', {
+      loaded: deviceState.loaded,
+      total: deviceState.total,
+    })
+  }
+  if (deviceState.kind === 'failed') return t('inspectionResult.deviceListFailed')
+  return ''
+})
+
 // 行级自增标识：v-for key 用稳定 uid，避免 splice 删除时 index key 引发的状态错位
 let uidSeq = 0
 const newFinding = () => ({
@@ -268,12 +285,20 @@ const photoRule = {
 }
 
 const formRef = ref()
-const form = reactive({
+/**
+ * 表单出厂态的唯一来源（初值与复位共用同一个对象）。
+ *
+ * 之前这里写的是两个字面量：初值 `findings: []`、复位 `findings: [newFinding()]`。
+ * 它们对「一条新记录该长什么样」给了两个答案，而答案不一致时没人会发现——
+ * 新增字段只补一处，另一处就静默漂移。收成一个工厂后不可能再分叉。
+ */
+const factoryState = () => ({
   result: 'normal',
-  findings: [],
+  findings: [newFinding()],
   location: '',
   remark: '',
 })
+const form = reactive(factoryState())
 
 const rules = computed(() => ({
   result: [{ required: true, message: t('inspectionResult.resultRequiredMsg'), trigger: 'change' }],
@@ -335,14 +360,30 @@ const removeFinding = (index) => {
 
 // 加载设备列表
 const loadDevices = async () => {
+  deviceState.kind = 'ok'
+  deviceState.loaded = 0
+  deviceState.total = 0
   try {
     const res = await api.devices.getList({ limit: 100 })
     deviceOptions.value = res.data.data.map((item) => ({
       value: item._id,
       label: `${item.deviceCode} - ${item.deviceName} (${item.deviceType})`,
     }))
+    deviceState.loaded = deviceOptions.value.length
+    const total = res.data.pagination?.total
+    // 后端 normalizePagination 把 limit 封顶在 100，台账超过 100 台时，
+    // 第 101 台起在这个下拉里根本不存在 —— 不说出来，现场只会以为「这台设备没录进系统」。
+    // 反过来，total 缺位（老响应/别的调用方）时按「未知」处理、不报未列全：
+    // undefined / null / NaN 与数字比较恒为 false，所以这里不需要额外的类型守卫。
+    if (total > deviceState.loaded) {
+      deviceState.kind = 'partial'
+      deviceState.total = total
+    }
   } catch (error) {
-    // 静默处理
+    // 这张表是巡检闭环的最后一步：漏记的隐患不会留下任何痕迹，
+    // 所以失败既不能静默，也不能留着上一次的半截选项让人以为已经加载完。
+    deviceOptions.value = []
+    deviceState.kind = 'failed'
   }
 }
 
@@ -404,19 +445,30 @@ const handleSubmit = async () => {
 const handleClose = () => {
   visible.value = false
   formRef.value?.resetFields()
-  Object.assign(form, {
-    result: 'normal',
-    findings: [newFinding()],
-    location: '',
-    remark: '',
-  })
+  resetForm()
+}
+
+/**
+ * 复位 = 回到 factoryState 的出厂态。
+ *
+ * 为什么打开时也要复位（不只是关闭时）：提交成功路径只写 `visible.value = false`，
+ * 而 `:before-close` 只对**用户发起**的关闭（X 按钮 / ESC / 点遮罩）生效——程序化关闭
+ * 根本不走 handleClose。`InspectionView` 复用同一个组件实例、只换 `:inspection-id`，
+ * 于是上一条记录的 result/location/remark 会带着出现在下一条记录的弹窗里，
+ * 用户看不见地提交到错误的巡检上。关闭侧的复位继续保留（它同时清 el-form 记着的
+ * initialValue），打开侧的复位负责覆盖所有关闭方式。
+ */
+function resetForm() {
+  Object.assign(form, factoryState())
 }
 
 // 监听对话框显示
 watch(visible, (val) => {
   if (val) {
     loadDevices()
-    form.findings = [newFinding()]
+    // 复位排在 loadDevices 之后无所谓：两者写的是不同的响应式键（设备下拉 vs 表单），
+    // 且 deviceState 的计数由 loadDevices 自己按实到条数刷新，不会读到上一轮的残值。
+    resetForm()
   }
 })
 
@@ -468,5 +520,17 @@ watch(visible, (val) => {
   color: var(--xf-gray-400);
   padding: 20px;
   font-size: 14px;
+}
+
+/* 设备没列全 / 压根没加载出来：属于「看不见的数据」，
+   比 placeholder 更显眼才不算白说一遍 */
+.device-hint {
+  font-size: var(--xf-font-size-sm);
+  line-height: 1.5;
+  color: var(--xf-warning);
+}
+
+.device-hint[data-kind='failed'] {
+  color: var(--xf-danger);
 }
 </style>

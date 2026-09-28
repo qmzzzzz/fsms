@@ -88,7 +88,12 @@ const pieChartRef = ref(null)
 let trendChart = null
 let pieChart = null
 
-const initCharts = (alarmTrendData, deviceTypeData) => {
+const initCharts = (alarmTrendData, deviceTypeData, failed = {}) => {
+  // 「这张图没数据」和「这张图的数据没取到」必须写成两种空态。曾经两者都渲染成
+  // common.noData（"暂无数据"），于是 reports 接口抖动一次后，7 天趋势图上盖的是
+  // "这几天没有报警"——值班界面把一次失败读成一次安全。失败侧改说"加载失败"，
+  // 图仍照常初始化（不留白屏，那是本组件既有的契约）。
+  const emptyText = (isFailed) => (isFailed ? t('messages.loadFailed') : t('common.noData'))
   if (!trendChartRef.value || !pieChartRef.value) return
 
   // 销毁旧图表
@@ -108,7 +113,7 @@ const initCharts = (alarmTrendData, deviceTypeData) => {
       trigger: 'axis',
       formatter: (params) => {
         const data = params[0]
-        return `${escapeHtml(data.name)}<br/>${t('dashboard.alarmCount')}: ${data.value}`
+        return `${escapeHtml(data.name)}<br/>${t('dashboard.alarmCount')}: ${escapeHtml(data.value)}`
       },
     },
     grid: { left: '3%', right: '4%', top: '10%', bottom: '15%', containLabel: true },
@@ -122,6 +127,8 @@ const initCharts = (alarmTrendData, deviceTypeData) => {
     },
     yAxis: {
       type: 'value',
+      // 计数数据不出小数刻度（0.2/0.6 个报警没有意义）
+      minInterval: 1,
       splitLine: { show: true, lineStyle: { type: 'dashed' } },
     },
     series: [
@@ -154,7 +161,7 @@ const initCharts = (alarmTrendData, deviceTypeData) => {
             left: 'center',
             top: 'center',
             style: {
-              text: t('common.noData'),
+              text: emptyText(failed.trend),
               fontSize: 14,
               // Canvas 渲染器无法解析 CSS 变量，使用主题灰的十六进制值
               fill: '#64748b',
@@ -168,22 +175,24 @@ const initCharts = (alarmTrendData, deviceTypeData) => {
   pieChart = echarts.init(pieChartRef.value)
 
   // 评价报告 #19：空数据不再渲染「示例数据」（易被误认成真实占比），
-  // 与上方折线图同款空态文案（common.noData）
+  // 空态文案与折线图同款（失败 / 真的没有 两种）
   const displayDeviceData = deviceTypeData
 
   pieChart.setOption({
     title: {
       show: displayDeviceData.length === 0,
-      text: t('common.noData'),
+      text: emptyText(failed.pie),
       left: 'center',
       top: 'center',
       textStyle: { fontSize: 14, color: '#64748b' },
     },
     tooltip: {
       trigger: 'item',
-      // L7：类目名（设备名等）用户可控，HTML tooltip 中转义后再拼接
+      // L7：类目名与数值都走 escapeHtml——正常时 value/percent 是数字（String() 原样），
+      // 但后端聚合口径若漂移（count 变成含 HTML 的字符串），函数型 formatter 的返回值会
+      // 直进 ECharts tooltip 的 innerHTML，故对全部插值字段一律转义，不只 name。
       formatter: (p) =>
-        `${escapeHtml(p.seriesName)}<br/>${escapeHtml(p.name)}: ${p.value} (${p.percent}%)`,
+        `${escapeHtml(p.seriesName)}<br/>${escapeHtml(p.name)}: ${escapeHtml(p.value)} (${escapeHtml(p.percent)}%)`,
     },
     legend: {
       show: displayDeviceData.length > 0,
@@ -285,10 +294,15 @@ const doLoad = async () => {
 
     // 使用处理后的数据初始化图表
     const processedAlarmData = dates.map((date, index) => ({ _id: date, count: counts[index] }))
-    initCharts(processedAlarmData, deviceTypeData)
+    initCharts(processedAlarmData, deviceTypeData, {
+      // null 只有一个成因：那条请求 rejected（成功但空集合会是 `{data:{data:{}}}`）。
+      // 这里把它当成"这一格没取到"而不是"这一格是零"。
+      trend: alarmRes === null,
+      pie: deviceRes === null,
+    })
   } catch (e) {
     // 使用空数据初始化图表
-    initCharts([], [])
+    initCharts([], [], { trend: true, pie: true })
   }
 }
 

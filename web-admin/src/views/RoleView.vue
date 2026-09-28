@@ -192,7 +192,10 @@ const handleAdd = () => {
 const loadRoles = async (forceSelect = false) => {
   loadingRoleList.value = true
   try {
-    const res = await api.roles.getList()
+    // 后端 listRoles 默认 limit=10 且按 level 升序 → 角色多于 10 个时，本视图（无分页器）
+    // 只会显示低层级角色，ADMIN/SUPER_ADMIN 等高层级角色被静默截断消失。
+    // role:read 本就用于管理全部角色，取校验允许的上限 100（roleRoutes.js limit max:100）。
+    const res = await api.roles.getList({ limit: 100 })
     const payload = res?.data?.data
     roles.value = Array.isArray(payload) ? payload : []
     if (forceSelect && roles.value.length > 0) {

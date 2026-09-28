@@ -46,7 +46,12 @@
         />
       </el-form-item>
       <el-form-item>
-        <button type="button" class="glass-btn glass-btn--primary" @click="changePwd">
+        <button
+          type="button"
+          class="glass-btn glass-btn--primary"
+          :disabled="submitting"
+          @click="changePwd"
+        >
           {{ $t('profile.changePassword') }}
         </button>
       </el-form-item>
@@ -76,8 +81,13 @@ const pwdForm = reactive({
 })
 
 const logoutTimer = ref(null)
+// 提交锁：changePwd 走的是带 passwordChangeLimiter(5/15min) 的 PUT /auth/password，
+// 三个输入框都绑了 enterSubmit→changePwd，无守卫时连点/长按回车会并发多次改密
+// → 撞限流返回 429，或在成功提示之上叠加"当前密码不正确"，还白白烧掉改密配额。
+const submitting = ref(false)
 
 const changePwd = async () => {
+  if (submitting.value) return
   if (!pwdForm.currentPassword || !pwdForm.newPassword) {
     ElMessage.warning(t('profile.pwdIncomplete'))
     return
@@ -90,6 +100,7 @@ const changePwd = async () => {
     ElMessage.warning(t('profile.pwdTooShort'))
     return
   }
+  submitting.value = true
   try {
     // 口令密文轨（FE-H1）：两个字段各自独立信封（每次随机 ECDH 临时密钥+nonce）。
     // null 仅限 WebCrypto 不可用（设计内降级）；「可用但失败」抛错时阻断提交
@@ -115,21 +126,31 @@ const changePwd = async () => {
     pwdForm.currentPassword = ''
     pwdForm.newPassword = ''
     pwdForm.confirmPassword = ''
-    // 保存定时器 ID 以便组件卸载时清理
+    // 后端改密成功后已 invalidateUserTokens（该用户所有会话令牌即时失效），必须登出；
+    // 给一次延时是为了让用户看到「已修改」提示。定时器 id 留存，供卸载兜底。
     logoutTimer.value = setTimeout(() => {
+      logoutTimer.value = null
       authStore.clearAuth()
       router.push('/login')
     }, 1500)
   } catch (e) {
     // 错误已在拦截器处理
+  } finally {
+    // 成功路径也要解锁：若稍后未及登出（用户在 1.5s 窗口内），至少按钮不永久禁用
+    submitting.value = false
   }
 }
 
 onUnmounted(() => {
-  // 清理登出定时器，防止组件卸载后仍执行
+  // 改密成功→后端已 invalidateUserTokens（该用户所有会话令牌即时失效）。若组件在
+  // 1.5s 延时登出窗口内被卸载（切页），原实现 clearTimeout 会把这次登出整个吞掉，
+  // 把 SPA 留在"看似已登录、token 却全死"的错乱态。这里就地清认证态。
+  // 刻意不做 router.push：卸载后主动跳转是既定的防内存泄漏/防导航竞态约束（见测试
+  // 「定时器未到期就卸载」），登出后的路由重定向交给导航守卫在用户下一次跳转时完成。
   if (logoutTimer.value) {
     clearTimeout(logoutTimer.value)
     logoutTimer.value = null
+    authStore.clearAuth()
   }
 })
 </script>

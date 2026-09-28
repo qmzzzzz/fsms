@@ -1,7 +1,13 @@
 <template>
   <div class="page">
-    <!-- 统计卡片 -->
-    <el-row :gutter="16" class="stat-row">
+    <!-- 统计卡片：首屏没拿到统计时整排换成失败块，四个数字位不以 0 面孔出现 -->
+    <div v-if="statsFailed && !statsLoadedOnce" class="stats-failed">
+      <span>{{ $t('messages.loadFailed') }}</span>
+      <button type="button" class="glass-btn glass-btn--sm" @click="loadData">
+        {{ $t('common.refresh') }}
+      </button>
+    </div>
+    <el-row v-else :gutter="16" class="stat-row">
       <el-col v-for="s in statCards" :key="s.title" :xs="12" :sm="6">
         <el-card shadow="hover" class="mini-stat">
           <div class="mini-stat-body">
@@ -37,7 +43,7 @@
             {{ $t('common.refresh') }}
           </button>
         </div>
-        <el-radio-group v-model="filters.status" size="small" @change="loadData">
+        <el-radio-group v-model="filters.status" size="small" @change="handleFilterChange">
           <el-radio-button value="">
             {{ $t('common.all') }}
           </el-radio-button>
@@ -102,7 +108,7 @@
         <el-table-column :label="$t('common.operation')" width="280" fixed="right">
           <template #default="{ row }">
             <button
-              v-if="hasPerm('inspection:execute') && row.status === 'pending'"
+              v-if="hasPerm('inspection:execute') && STARTABLE.includes(row.status)"
               type="button"
               class="glass-btn glass-btn--primary glass-btn--link"
               @click="handleStart(row)"
@@ -110,7 +116,7 @@
               {{ $t('inspection.start') }}
             </button>
             <button
-              v-if="hasPerm('inspection:execute') && row.status === 'in_progress'"
+              v-if="hasPerm('inspection:execute') && SUBMITTABLE.includes(row.status)"
               type="button"
               class="glass-btn glass-btn--success glass-btn--link"
               @click="handleComplete(row)"
@@ -130,7 +136,7 @@
               class="glass-btn glass-btn--default glass-btn--link"
               @click="detail(row)"
             >
-              {{ $t('common.operation') }}
+              {{ $t('common.detail') }}
             </button>
             <button
               v-if="hasPerm('inspection:delete') && row.status !== 'in_progress'"
@@ -246,8 +252,31 @@ const statCards = shallowRef([
   { title: t('common.warning'), value: 0, color: '#e63946', icon: Bell },
 ])
 
+// 「开始 / 提交结果」的可进入档位，与后端 src/constants/inspection.js 的
+// INSPECTION_STARTABLE_STATUSES / INSPECTION_SUBMITTABLE_STATUSES 同口径（两边都含 overdue）。
+// overdue 是调度器打的时间标记、不是工作流阶段：只按 pending / in_progress 亮按钮时，
+// 过了计划结束时间的巡检在界面上没有任何入口开工或补录结果，
+// 而巡检结果与发现项只能挂在 completed 上 ⇒ 真实做过的工作永久无法入库（后端明确接受这两条路径）。
+// 同一条 overdue 行两个按钮都在是对的：未开工的人点「开始」、已填一半的人直接「提交结果」，
+// 后端对两种跳转都放行且 actualStartTime 只记首次开工时刻。
+const STARTABLE = ['pending', 'overdue']
+const SUBMITTABLE = ['in_progress', 'overdue']
+
+// 统计是否拿到过：首屏失败（含列表本身失败导致统计没发出去）时整排换成失败块，
+// 已经显示过真实计数后再刷新失败则保留上一次已知数字（与 AlarmView 同口径）。
+const statsFailed = ref(false)
+const statsLoadedOnce = ref(false)
+
 // 竞态守卫：快速筛选/翻页时丢弃过期的旧响应，防止旧数据覆盖新结果
 const listGuard = useLatestRequest()
+
+// 换筛选条件必须回到第 1 页：筛选后的结果集一般比「全部」小，
+// 停在第 N 页发出去的是 page=N + 新条件 ⇒ 表格空白而 total 仍显示有数据。
+// AlarmView / DeviceView / AuditLogView 都是这个口径。
+const handleFilterChange = () => {
+  page.current = 1
+  loadData()
+}
 
 const loadData = async () => {
   const isCurrent = listGuard()
@@ -269,32 +298,50 @@ const loadData = async () => {
     // 统计
     try {
       const statsRes = await api.inspections.getStats()
-      if (statsRes.data.success) {
+      // 列表侧有 isCurrent 守卫、统计侧此前没有：被新筛选条件取代的旧统计后到时
+      // 会把新条件下的计数覆盖成上一条件的（页面上表现为「数字与表格对不上」且无声）。
+      if (!isCurrent()) return
+      // statsRes.data 缺失（畸形/被中间层改写）时读 .success 会抛，被下面的 catch 吞掉，
+      // 四张卡就以 0 面孔出现——与「真的没有巡检」无法区分。
+      if (statsRes?.data?.success) {
         const s = statsRes.data.data
+        // 后端 /api/inspections/stats 返回 { total, byStatus:[{_id,count}], byType, byResult }，
+        // 状态计数是 $group 后的 [{_id:status,count}] 数组，而非 pending/inProgress 平铺字段。
+        // 直接读 s.pending 恒为 undefined → 四张统计卡永远是 0（谎报「无巡检」）。_id 取模型
+        // 枚举原值：pending / in_progress / completed / overdue。
+        const by = (k) => (s.byStatus || []).find((x) => x._id === k)?.count || 0
         statCards.value = [
           {
             title: t('inspection.pending'),
-            value: s.pending || 0,
+            value: by('pending'),
             color: '#64748b',
             icon: Calendar,
           },
           {
             title: t('inspection.inProgress'),
-            value: s.inProgress || 0,
+            value: by('in_progress'),
             color: '#d97706',
             icon: Tools,
           },
           {
             title: t('inspection.completed'),
-            value: s.completed || 0,
+            value: by('completed'),
             color: '#16a34a',
             icon: CircleCheckFilled,
           },
-          { title: t('common.warning'), value: s.overdue || 0, color: '#e63946', icon: Bell },
+          { title: t('common.warning'), value: by('overdue'), color: '#e63946', icon: Bell },
         ]
+        statsLoadedOnce.value = true
+        statsFailed.value = false
+      } else {
+        statsFailed.value = true
       }
-    } catch (_) {
-      /* 忽略统计失败 */
+    } catch (e) {
+      // FE-L1：路由切换 abort 的在途统计不记账为失败（用户已离开本页）
+      if (isCanceledError(e) || !isCurrent()) return
+      // 旧口径是 catch (_) { /* 忽略统计失败 */ }：首屏统计失败后四张卡恒为 0/0/0/0，
+      // 值班员读作「无巡检」，而真实情况是「没拿到数据」。
+      statsFailed.value = true
     }
   } catch (e) {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
@@ -304,6 +351,10 @@ const loadData = async () => {
     tableData.value = []
     page.total = 0
     ElMessage.warning(t('messages.loadFailed'))
+    // 统计请求只在上面的列表成功分支里发出：首屏列表就失败 ⇒ 统计也从没拿到过，
+    // 那四个数字位同样不能以 0 面孔出现（读作「无巡检」）。
+    // 已经显示过真实计数时不动它——保留上一次已知值，别把「刷新失败」伪装成「数据归零」。
+    if (!statsLoadedOnce.value) statsFailed.value = true
   } finally {
     if (isCurrent()) loading.value = false
   }
@@ -333,9 +384,10 @@ const handleStart = async (row) => {
     ElMessage.success(t('messages.updateSuccess'))
     loadData()
   } catch (error) {
-    // 'cancel'/'close' 均为用户主动关闭确认框，不视为操作失败
+    // 'cancel'/'close' 均为用户主动关闭确认框，不视为操作失败；
+    // 其余错误已在拦截器统一提示（2026-09-26 审计：泛化 toast 会双提示并覆盖具体语义）
     if (error !== 'cancel' && error !== 'close') {
-      ElMessage.error(t('messages.updateFailed'))
+      // 已由拦截器提示
     }
   }
 }
@@ -364,7 +416,7 @@ const handleDelete = (row) => {
         ElMessage.success(t('messages.deleteSuccess'))
         loadData()
       } catch (error) {
-        ElMessage.error(t('messages.deleteFailed'))
+        // 错误已在拦截器统一提示（2026-09-26 审计：泛化 toast 会双提示并覆盖具体语义）
       }
     })
     .catch(() => {})
@@ -381,6 +433,14 @@ onMounted(loadData)
 }
 .stat-row {
   margin-bottom: 4px;
+}
+
+/* 统计失败块：与 AlarmView 同形（文案 + 刷新），替换整排数字卡而不是把它们写成 0 */
+.stats-failed {
+  display: flex;
+  gap: var(--xf-spacing-md);
+  align-items: center;
+  margin-bottom: var(--xf-spacing-md);
 }
 
 .mini-stat {

@@ -132,6 +132,19 @@
         stripe
         style="width: 100%"
       >
+        <!-- 空态文案收进表格 empty 插槽：替代 EP 默认「暂无数据」，
+             此前独立 div 挂在分页下方，与默认文案重复且位置错位 -->
+        <template #empty>
+          <div v-if="!loading" class="empty-tip">
+            {{
+              queryMode
+                ? $t('security.noMatchFound')
+                : listType === 'black'
+                  ? $t('security.noBlacklist')
+                  : $t('security.noWhitelist')
+            }}
+          </div>
+        </template>
         <el-table-column prop="ip" :label="$t('security.ipAddress')" min-width="160">
           <template #default="{ row }">
             <span class="ip-cell">{{ row.ip }}</span>
@@ -210,19 +223,6 @@
           @current-change="loadData"
           @size-change="handleSizeChange"
         />
-      </div>
-
-      <div
-        v-if="!loading && (queryMode ? queryRows.length === 0 : tableData.length === 0)"
-        class="empty-tip"
-      >
-        {{
-          queryMode
-            ? $t('security.noMatchFound')
-            : listType === 'black'
-              ? $t('security.noBlacklist')
-              : $t('security.noWhitelist')
-        }}
       </div>
     </div>
   </div>
@@ -396,7 +396,17 @@ const reasonText = (reason) => {
     manual_configuration: t('security.manualConfig'),
     trusted_source: t('security.trustedSource'),
   }
-  return map[reason] || reason || '-'
+  // 用 hasOwnProperty 而非裸 map[reason]：新增表单的 reason 是管理员自由文本，
+  // 直接下标会命中 Object.prototype（如 'constructor'/'toString'）而渲染出函数源码。
+  if (typeof reason === 'string' && Object.prototype.hasOwnProperty.call(map, reason)) {
+    return map[reason]
+  }
+  // 后端渐进式封禁写入的是 brute_force_auto_ban_tier{1..4}（见 src/services/securityAlert.js
+  // ESCALATION_TIERS），裸键 brute_force_auto_ban 从不出现 → 按前缀归一，否则界面直出原始码。
+  if (typeof reason === 'string' && reason.startsWith('brute_force_auto_ban')) {
+    return map.brute_force_auto_ban
+  }
+  return reason || '-'
 }
 
 // 竞态守卫：快速切换黑白名单时丢弃过期的旧响应，防止旧数据覆盖新结果

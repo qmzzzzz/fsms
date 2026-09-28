@@ -41,6 +41,7 @@
           :rules="rules"
           label-position="top"
           size="large"
+          :validate-on-rule-change="false"
           @keyup.enter="onLogin"
         >
           <el-form-item prop="username">
@@ -223,6 +224,12 @@ const captchaId = ref('')
 const captchaImg = ref('')
 
 const loadCaptcha = async () => {
+  // 先清空再拉取：getCaptcha 走 apiClient，失败时拦截器已统一提示。后端 captchaService
+  // 每次校验都会删除旧记录（一次性消费），若刷新失败却留着**上一个已消费的** captchaId 和
+  // 旧图，用户会照旧图反复输入并一直收到"验证码错误"，且 v-if="captchaImg" 会藏掉可点击重试的占位区
+  // → 登录卡死无出口。清空后刷新失败 = 回到"点击重试"占位，是有出口的降级态。
+  captchaId.value = ''
+  captchaImg.value = ''
   try {
     const { data: resp } = await api.auth.getCaptcha()
     if (resp.success && resp.data?.captchaId) {
@@ -272,6 +279,8 @@ watch(
   { immediate: true }
 )
 
+// rules 依赖 t() 随语言重建：EP 默认 validate-on-rule-change=true 会把「规则对象变了」
+// 当成需要重新校验的信号，导致切换语言时空表单立刻冒出 required 红错（模板已显式关闭）
 const rules = computed(() => {
   const base = {
     username: [{ required: true, message: t('validation.usernameRequired'), trigger: 'blur' }],
@@ -487,7 +496,8 @@ const onLogin = async () => {
   align-items: center;
   height: 36px;
   padding: 0 16px;
-  border-radius: 10px;
+  /* Apple/Pinguo：小型标签一律药丸形（与 login-brand__tag 同形） */
+  border-radius: 999px;
   background: var(--xf-bg-glass-strong);
   border: 1px solid var(--xf-border-color);
   color: var(--xf-text-regular);
@@ -516,6 +526,10 @@ const onLogin = async () => {
   gap: 14px;
   /* 窄卡下标题块可收缩，偏好控件不被挤出导致标题换行 */
   min-width: 0;
+  /* 文案较长的语言（英文等）标题 + 两枚药丸可能超过卡宽：
+     允许折行，药丸掉落到下一行右对齐，而不是溢出卡片右边框 */
+  flex-wrap: wrap;
+  row-gap: 10px;
   margin-bottom: 24px;
 }
 

@@ -84,15 +84,17 @@ import { setLocale } from '@/i18n'
 const { t, locale } = useI18n()
 const appStore = useAppStore()
 
-// 主题：三态（system/light/dark），与主布局 handleThemeChange 同口径
+// 主题：三态（system/light/dark），与主布局 handleThemeChange 同口径。
+// 药丸文案用短形式 autoShort：认证卡头空间受限（登录卡内容宽仅 356px），
+// 英文 "Follow System" 曾把两枚药丸挤出卡片右边框 17px；下拉项仍展示完整文案
 const themeMode = computed(() => appStore.themeMode)
 const themeLabel = computed(
   () =>
     ({
-      system: t('common.autoMode'),
+      system: t('common.autoShort'),
       light: t('common.lightMode'),
       dark: t('common.darkMode'),
-    })[themeMode.value] || t('common.autoMode')
+    })[themeMode.value] || t('common.autoShort')
 )
 
 const onThemeCommand = (mode) => {

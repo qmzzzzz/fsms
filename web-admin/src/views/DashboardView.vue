@@ -65,13 +65,16 @@
                   {{ item.value }}
                 </div>
                 <div class="stat-trend">
-                  <el-icon :class="item.trend > 0 ? 'up' : 'down'">
-                    <CaretTop v-if="item.trend > 0" />
-                    <CaretBottom v-else />
-                  </el-icon>
-                  <span :class="item.trend > 0 ? 'up' : 'down'">
-                    {{ item.trendLabel || '' }}
-                  </span>
+                  <!-- 无趋势文案时只留占位行高：孤立的红色下箭头会被误读为"指标下跌" -->
+                  <template v-if="item.trendLabel">
+                    <el-icon :class="item.trend > 0 ? 'up' : 'down'">
+                      <CaretTop v-if="item.trend > 0" />
+                      <CaretBottom v-else />
+                    </el-icon>
+                    <span :class="item.trend > 0 ? 'up' : 'down'">
+                      {{ item.trendLabel }}
+                    </span>
+                  </template>
                 </div>
               </div>
               <div class="stat-icon" :style="{ background: item.color }">
@@ -173,36 +176,30 @@ const DashboardCharts = defineAsyncComponent({
 // 图表组件引用：定时/可见性恢复/语言切换时经 load() 触发刷新
 const chartsRef = ref(null)
 
-const stats = ref([
+// 统计卡视觉主题（Apple/Pinguo 色相纪律：单页主色 ≤2，同一渐变内不混冷暖）。
+// 设备/用户 = 墨黑中性阶（Pinguo icon 阶：800→900 / 500→600，深浅区分且暗色下可读），
+// 在线 = 绿族（安心语义），报警 = 红族（品牌主色兼 urgency）。顺序即渲染顺序，勿调。
+// 颜色/图标原为初始值与 loadDashboardData 两处重复字面量，改一处忘另一处必漂移，故收敛。
+const STAT_THEMES = [
+  { key: 'totalDevices', color: 'linear-gradient(135deg,#48484a,#1d1d1f)', icon: markRaw(Cpu) },
+  { key: 'onlineDevices', color: 'linear-gradient(135deg,#15803d,#16a34a)', icon: markRaw(Cpu) },
+  { key: 'pendingAlarms', color: 'linear-gradient(135deg,#c1121f,#7d0c14)', icon: markRaw(Bell) },
   {
-    title: t('dashboard.totalDevices'),
-    value: '-',
-    trend: 0,
-    color: 'linear-gradient(135deg,#c1121f,#16a34a)',
-    icon: markRaw(Cpu),
-  },
-  {
-    title: t('dashboard.onlineDevices'),
-    value: '-',
-    trend: 0,
-    color: 'linear-gradient(135deg,#15803d,#16a34a)',
-    icon: markRaw(Cpu),
-  },
-  {
-    title: t('dashboard.pendingAlarms'),
-    value: '-',
-    trend: 0,
-    color: 'linear-gradient(135deg,#b91c1c,#d97706)',
-    icon: markRaw(Bell),
-  },
-  {
-    title: t('dashboard.systemUsers'),
-    value: '-',
-    trend: 0,
-    color: 'linear-gradient(135deg,#e63946,#c1121f)',
+    key: 'systemUsers',
+    color: 'linear-gradient(135deg,#8e8e93,#6e6e73)',
     icon: markRaw(UserFilled),
   },
-])
+]
+
+const stats = ref(
+  STAT_THEMES.map((theme) => ({
+    title: t(`dashboard.${theme.key}`),
+    value: '-',
+    trend: 0,
+    color: theme.color,
+    icon: theme.icon,
+  }))
+)
 
 const recentAlarms = ref([])
 const loading = ref(true)
@@ -250,56 +247,49 @@ const loadDashboardData = async () => {
   // P3-39：无 report:read 时整个统计卡片区不渲染，也就不必请求
   if (!canReadReport.value) return
   const isCurrent = dashGuard()
+  // 第四卡（系统用户）有两种"不知道"：没有 user:read（压根不请求）、请求失败。
+  // 两者此前都被写成 0，而"系统用户 0"在值班界面是一个可被当成事实的读数
+  // （真相是"20 个账号 0 个能用"还是"这一格根本没取到"？）。本卡初值已有占位语义 '-'
+  // （见 stats 初值，以及"失败后统计卡保留占位值 -（而不是伪造 0）"那条用例），
+  // 未知一律落回它；`null` 就是"这一格没取到"的显式标记，不再伪装成空对象。
   try {
     const [reportRes, userRes] = await Promise.all([
       api.reports.getDashboard(),
       // 用户统计单独门控：只有 report:read 没有 user:read 的角色很常见
-      canReadUserStats.value
-        ? api.users.getStats().catch(() => ({ data: { data: {} } }))
-        : Promise.resolve({ data: { data: {} } }),
+      canReadUserStats.value ? api.users.getStats().catch(() => null) : Promise.resolve(null),
     ])
 
     // 过期响应直接丢弃：否则慢的旧请求会覆盖新值
     if (!isCurrent()) return
     if (reportRes.data.success) {
       const d = reportRes.data.data
-      const userStats = userRes.data?.data || {}
+      const userStats = userRes?.data?.data || {}
 
-      stats.value = [
-        {
-          title: t('dashboard.totalDevices'),
-          value: d.devices?.total || 0,
-          trend: 0,
-          color: 'linear-gradient(135deg,#c1121f,#16a34a)',
-          icon: markRaw(Cpu),
-        },
-        {
-          title: t('dashboard.onlineDevices'),
-          value: d.devices?.online || 0,
-          trend: 0,
-          color: 'linear-gradient(135deg,#15803d,#16a34a)',
-          icon: markRaw(Cpu),
-        },
-        {
-          title: t('dashboard.pendingAlarms'),
-          value: d.alarms?.pending || 0,
-          trend: 0,
-          color: 'linear-gradient(135deg,#b91c1c,#d97706)',
-          icon: markRaw(Bell),
-        },
-        {
-          title: t('dashboard.systemUsers'),
-          value: userStats.active || userStats.total || 0,
-          trend: 0,
-          color: 'linear-gradient(135deg,#e63946,#c1121f)',
-          icon: markRaw(UserFilled),
-        },
-      ]
+      const values = {
+        totalDevices: d.devices?.total || 0,
+        onlineDevices: d.devices?.online || 0,
+        pendingAlarms: d.alarms?.pending || 0,
+        // 取「活跃用户数」（本卡的既有语义，见 dashboardView.test.js 的用例名
+        // "active 优先于 total"）。用 `??` 而不是 `||`：active 为 0 是**合法读数**
+        // （全部账号被停用/锁定），`||` 会把它当成缺字段退回 total，
+        // 于是"20 个账号里 0 个能用"这种最该被看见的状态显示成了 20。
+        systemUsers: userRes === null ? '-' : (userStats.active ?? userStats.total ?? 0),
+      }
+      stats.value = STAT_THEMES.map((theme) => ({
+        title: t(`dashboard.${theme.key}`),
+        value: values[theme.key],
+        trend: 0,
+        color: theme.color,
+        icon: theme.icon,
+      }))
     }
   } catch (e) {
     // B-3：失败给一次非阻断式提示，避免骨架屏消失后页面静默显示 0 值；
     // FE-L1：路由切换取消（abort）不提示——用户已到达新页面，假错误训练用户忽略红框
     if (isCanceledError(e)) return
+    // 过期响应的失败也不能提示：5 分钟定时器与 visibilitychange 刷新可能交叠，
+    // 旧请求在新请求已成功之后才失败，若不判 isCurrent 就会在新鲜数据上盖一个假红框。
+    if (!isCurrent()) return
     ElMessage.error(t('messages.loadFailed'))
   }
 }
@@ -339,6 +329,8 @@ const loadRecentAlarms = async () => {
   } catch (e) {
     // B-3：失败给一次非阻断式提示；FE-L1：取消不提示
     if (isCanceledError(e)) return
+    // 与主加载同理：过期请求的失败不得在新鲜数据上盖假红框
+    if (!isCurrent()) return
     ElMessage.error(t('messages.loadFailed'))
   }
 }

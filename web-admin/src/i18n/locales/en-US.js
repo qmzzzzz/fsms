@@ -15,6 +15,9 @@ export default {
     catSystemOps: 'System Operations',
     shortAuth: 'Auth',
     shortUser: 'User',
+    // Audit-page username search: prefix match, case-insensitive (since 2026-09-28).
+    // Changed from substring match so that the username_ci_timestamp index can be used.
+    usernamePrefixHint: 'Username prefix (case-insensitive)',
     shortRole: 'Role',
     shortPermission: 'Permission',
     shortDevice: 'Device',
@@ -53,6 +56,10 @@ export default {
     issueNo: 'Finding {n}',
     issueDeviceLabel: 'Select the affected device',
     deviceRequiredMsg: 'Please select a device',
+    deviceListPartial:
+      'Only the first {loaded} of {total} devices are loaded; check the device ledger if yours is missing',
+    deviceListFailed:
+      'Failed to load the device list. Retry — issue devices cannot be recorded until it loads',
     issueDescLabel: 'Issue Description',
     issueDescPlaceholder: 'Please describe the issue',
     severityLabel: 'Severity',
@@ -95,6 +102,7 @@ export default {
     search: 'Search',
     reset: 'Reset',
     operation: 'Action',
+    detail: 'Details',
     status: 'Status',
     createTime: 'Created At',
     updateTime: 'Updated At',
@@ -125,6 +133,8 @@ export default {
     darkMode: 'Dark Mode',
     lightMode: 'Light Mode',
     autoMode: 'Follow System',
+    // 紧凑空间（认证卡头药丸）用的系统档短文案；下拉菜单仍用完整 autoMode
+    autoShort: 'Auto',
     theme: 'Theme',
     language: 'Language',
     chinese: '中文',
@@ -352,6 +362,7 @@ export default {
   },
   user: {
     title: 'User Management',
+    userColumn: 'User',
     username: 'Username',
     email: 'Email',
     realName: 'Full Name',
@@ -818,7 +829,13 @@ export default {
       errorRate: 'Error Rate',
       avgLatency: 'Avg Latency',
       uptime: 'Uptime',
-      level: { low: 'Low', medium: 'Medium', high: 'High', critical: 'Critical' },
+      level: {
+        low: 'Low',
+        medium: 'Medium',
+        high: 'High',
+        critical: 'Critical',
+        unknown: 'Unknown',
+      },
     },
   },
   login: {
@@ -831,7 +848,8 @@ export default {
     meta3: 'Standard Inspections',
     logo: 'FS',
     cardTitle: 'User Login',
-    cardSubtitle: 'Unified Identity Authentication',
+    // 卡头可用宽度仅 ~143px（标题块与偏好药丸并列），长文案换行两行会显得凌乱
+    cardSubtitle: 'Unified Authentication',
     tip: 'Please use your system-assigned account to login',
     loginBtn: 'Sign In',
     loggingIn: 'Signing in...',
@@ -980,6 +998,8 @@ export default {
     remark: 'Remark',
     exportSuccess: 'Export successful',
     exportFailed: 'Export failed',
+    exportTruncated:
+      'The export is incomplete (it hit the per-export limit, or the data changed while exporting). Narrow the range and export again.',
     unsavedChanges: 'Unsaved changes',
     // axios 拦截器 fallback（后端未返回 message 或网络层错误时使用）
     requestParamError: 'Invalid request parameters',
@@ -1182,6 +1202,7 @@ export default {
     configLoginCaptchaMustBeBoolean: 'Parameter loginCaptchaEnabled must be a boolean',
     configRegisterCaptchaMustBeBoolean: 'Parameter registerCaptchaEnabled must be a boolean',
     userViewForbidden: 'Not allowed to view this user',
+    userScopeForbidden: 'Not allowed to operate this user (outside your data scope)',
     ipRulesFormatInvalid: 'Invalid IP range rule format: {rules}',
     roleNotFoundInList: 'The list contains a role that does not exist',
     roleAssignHigherLevelForbidden: 'Not allowed to assign a role above your own level',

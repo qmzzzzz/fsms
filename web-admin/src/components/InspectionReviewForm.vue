@@ -50,12 +50,12 @@
         />
       </el-form-item>
 
-      <el-form-item :label="$t('inspection.reviewResult')">
+      <el-form-item :label="$t('inspection.reviewResult')" prop="result">
         <el-radio-group v-model="form.result">
-          <el-radio label="approved">
+          <el-radio value="approved">
             {{ $t('inspection.approved') }}
           </el-radio>
-          <el-radio label="rejected">
+          <el-radio value="rejected">
             {{ $t('inspection.rejected') }}
           </el-radio>
         </el-radio-group>
@@ -84,6 +84,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api, isCanceledError } from '@/utils/api'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 
 const { t } = useI18n()
 
@@ -107,12 +108,15 @@ const visible = computed({
 
 const loading = ref(false)
 const inspectionData = ref(null)
+const detailRequest = useLatestRequest()
 
 const formRef = ref()
-const form = reactive({
+/** 出厂态的唯一来源：初值与复位共用（与 InspectionCompleteForm 同一写法，避免新增字段时漏一处） */
+const factoryState = () => ({
   reviewComment: '',
   result: 'approved',
 })
+const form = reactive(factoryState())
 
 const rules = computed(() => ({
   reviewComment: [
@@ -164,8 +168,13 @@ const severityLabel = (severity) => {
 
 // 加载巡检详情
 const loadInspectionDetail = async () => {
+  // 门票式竞态守卫：InspectionView 复用同一个组件实例、只换 inspectionId，而上一条的
+  // GET 可能比这一条的更晚返回（慢网/重试）。无守卫时后到的旧响应会把新记录的标题与
+  // 隐患整块覆盖成上一条的内容——复核人正对着 A 的隐患给 B 下结论。
+  const isCurrent = detailRequest()
   try {
     const res = await api.inspections.getById(props.inspectionId)
+    if (!isCurrent()) return
     inspectionData.value = res.data.data
     form.reviewComment = ''
   } catch (error) {
@@ -204,12 +213,30 @@ const handleSubmit = async () => {
 const handleClose = () => {
   visible.value = false
   formRef.value?.resetFields()
+  resetForm()
+}
+
+/**
+ * 复位 = 回到 factoryState 的出厂态，并清掉上一条的详情。
+ *
+ * 为什么打开时也要复位（不只是关闭时）：提交成功路径只写 `visible.value = false`，
+ * 而 `:before-close` 只对**用户发起**的关闭（X / ESC / 点遮罩）生效——程序化关闭
+ * 根本不走 handleClose。`InspectionView` 复用同一个组件实例、只换 `:inspection-id`，
+ * 于是上一条的审核结论会带着出现在下一条弹窗里（默认值 'approved' 形同虚设，
+ * 复核人什么都不点就把「不通过」提交到新记录），详情区块也会在 GET 回来之前
+ * 一直显示上一条的隐患——GET 失败时更是永久停在那里。
+ */
+function resetForm() {
+  Object.assign(form, factoryState())
   inspectionData.value = null
 }
 
 // 监听对话框显示
 watch(visible, (val) => {
   if (val) {
+    // 先清场再拉数据：loadInspectionDetail 只覆盖 reviewComment，
+    // 失败分支更是直接 return，不先清空就会拿上一条的内容给这一条下结论。
+    resetForm()
     loadInspectionDetail()
   }
 })

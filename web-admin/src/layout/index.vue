@@ -685,13 +685,14 @@ const handleCommand = (command) => {
   }
 }
 
-/* 触屏设备：扩大导航操作图标点击热区（含主题/语言切换），满足 ≥40px 触控标准 */
+/* 触屏设备：扩大导航操作图标点击热区（含主题/语言切换），满足 Apple 44×44pt 触控标准
+   action-icon 18px 图标 + 2×13 = 44px；collapse-btn 20px 图标 + 2×13 = 46px */
 @media (hover: none) and (pointer: coarse) {
   .action-icon {
-    padding: 9px;
+    padding: 13px;
   }
   .collapse-btn {
-    padding: 9px;
+    padding: 13px;
   }
 }
 

@@ -181,6 +181,7 @@ const ERROR_CODE_I18N_MAP = {
   CONFIG_LOGIN_CAPTCHA_MUST_BE_BOOLEAN: 'errors.configLoginCaptchaMustBeBoolean',
   CONFIG_REGISTER_CAPTCHA_MUST_BE_BOOLEAN: 'errors.configRegisterCaptchaMustBeBoolean',
   USER_VIEW_FORBIDDEN: 'errors.userViewForbidden',
+  USER_SCOPE_FORBIDDEN: 'errors.userScopeForbidden',
   IP_RULES_FORMAT_INVALID: 'errors.ipRulesFormatInvalid',
   ROLE_NOT_FOUND_IN_LIST: 'errors.roleNotFoundInList',
   ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN: 'errors.roleAssignHigherLevelForbidden',
@@ -525,6 +526,37 @@ apiClient.interceptors.response.use(
       const isAuthEntryPoint = AUTH_NO_REFRESH_PATHS.some((p) =>
         String(config?.url || '').includes(p)
       )
+      // 会话确认不可用：提示 + 清本地态 + 跳登录。两条路径共用（Qoder 轮7）：
+      //   ① 刷新失败（refresh cookie 过期/被撤销/网络错误）；
+      //   ② 刷新**成功**但重发的那一发仍然 401 —— 典型形态是设备被踢或强制下线：
+      //      cookie 有效、新令牌照发，但令牌里的 sid 已失效，于是每次请求都落在
+      //      "刷新成功 → 重发 → 又 401"。此前 ② 因 `_retried` 短路了整段登出逻辑，
+      //      而 switch 里的 401 分支只服务认证入口 → 普通接口得到的是
+      //      **没有提示、没有跳转、界面仍是已登录态**，运维只看到满屏空面板。
+      // 循环约束不变：②不刷新、不重发，只是把已经确定的失败说出来。
+      const forceSessionReset = (payload) => {
+        if (apiClient._isHandling401) return
+        apiClient._isHandling401 = true
+        // 登录页 MFA 二次验证失败也走 401：先查映射（errorCode/后端消息英文化），再透传后端 message
+        ElMessage.error(
+          resolveErrorMessage(payload) || payload?.message || t('messages.sessionExpired')
+        )
+        ;(async () => {
+          try {
+            const { useAuthStore } = await import('@/store')
+            try {
+              useAuthStore().clearAuth()
+            } catch (_) {}
+          } catch (_) {}
+          // 必须 catch：router.push 在"导航被守卫取消/目标就是当前路由"时是 **reject 的 Promise**，
+          // 而这里是即发不待（fire-and-forget）的登出链——不接住就是一条 unhandledrejection，
+          // 被 errorReporter 记成前端异常，且真实登出结论被噪音掩盖。
+          router.push('/login').catch(() => {})
+        })().finally(() => {
+          apiClient._isHandling401 = false
+        })
+      }
+
       if (status === 401 && !config?._retried && !isAuthEntryPoint) {
         try {
           const refreshed = await doRefreshToken()
@@ -546,25 +578,7 @@ apiClient.interceptors.response.use(
           return Promise.reject(error)
         }
 
-        // 刷新失败：清除认证并跳转登录
-        if (!apiClient._isHandling401) {
-          apiClient._isHandling401 = true
-          // 登录页 MFA 二次验证失败也走 401：先查映射（errorCode/后端消息英文化），再透传后端 message
-          ElMessage.error(
-            resolveErrorMessage(data) || data?.message || t('messages.sessionExpired')
-          )
-          ;(async () => {
-            try {
-              const { useAuthStore } = await import('@/store')
-              try {
-                useAuthStore().clearAuth()
-              } catch (_) {}
-            } catch (_) {}
-            router.push('/login')
-          })().finally(() => {
-            apiClient._isHandling401 = false
-          })
-        }
+        forceSessionReset(data)
         return Promise.reject(error)
       }
 
@@ -580,6 +594,11 @@ apiClient.interceptors.response.use(
           // 否则输错密码将完全没有反馈——比原来的「等 10s 才提示」更糟。
           if (isAuthEntryPoint) {
             ElMessage.error(resolveErrorMessage(data) || data?.message || t('login.failed'))
+          } else if (!config?.silent401) {
+            // 落到这里的只剩一种形态：**刷新成功后重发仍然 401**（`_retried` 已置真，
+            // 上方分支不再进入）。此前它两头都不管——上方因 `_retried` 短路、
+            // 这里只服务认证入口——于是用户既没提示也没登出。
+            forceSessionReset(data)
           }
           break
         case 403:

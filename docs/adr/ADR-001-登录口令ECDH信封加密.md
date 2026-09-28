@@ -1,6 +1,6 @@
 # ADR-001：登录口令 ECDH 信封加密
 
-- **状态**：已接受
+- **状态**：已接受（2026-09-28 复核：实现已演进，见「后果与局限」的复核注记）
 - **日期**：2026-08-29（追溯建档）
 - **涉及**：`src/utils/loginCipher.js`、`src/controllers/authController.js`、`web-admin/src/utils/loginCipher.js`
 
@@ -12,13 +12,15 @@
 
 采用「一次性 ECDH + HKDF + AES-256-GCM」信封加密传输口令：
 
-1. 后端生成 ECDH 密钥对，`GET /api/auth/login-public-key` 下发 `{publicKey(JWK), keyId, curve, algorithm}`（`src/routes/authRoutes.js:226` → `src/utils/loginCipher.js:108`）。
-2. 前端对每次提交生成一次性 ECDH 密钥对（WebCrypto），与服务端公钥 `deriveBits` 协商，经 HKDF‑SHA‑256（`info='login-credential'`，16B 随机 salt）派生 AES‑256 密钥，AES‑GCM 加密载荷 `{p:口令, ts:时间戳, nonce:随机数}`，输出 base64 信封 `{v,x,y,salt,iv,c}`（`web-admin/src/utils/loginCipher.js:68`）。
-3. 后端 `decryptLoginCredential()` 重建公钥 → `crypto.diffieHellman()` → HKDF → AES‑GCM 解密（`src/utils/loginCipher.js:134`）。
-4. 防重放：`ts` 校验 ±5 分钟窗口；`nonce` 在进程内 Map 去重（TTL 5 分钟、上限 10000 条）；GCM 认证标签保证篡改即失败。
+1. 后端生成 ECDH 密钥对，`GET /api/auth/login-public-key`（`src/routes/authRoutes.js` 的 `router.get('/login-public-key', …)`）下发 `{publicKey, keyId, curve, algorithm}`（`src/utils/loginCipher.js` 的 `getPublicKeyInfo()`；`publicKey` 为 **PEM** 文本，非 JWK）。
+2. 前端对每次提交生成一次性 ECDH 密钥对（WebCrypto），与服务端公钥 `deriveBits` 协商，经 HKDF‑SHA‑256（`info='login-credential'`，16B 随机 salt）派生 AES‑256 密钥，AES‑GCM 加密载荷 `{p:口令, ts:时间戳, nonce:随机数}`，输出 base64 信封 `{v,x,y,salt,iv,c}`（`web-admin/src/utils/loginCipher.js` 的 `encryptPassword()`）。
+3. 后端 `decryptLoginCredential()` 重建公钥 → `crypto.diffieHellman()` → HKDF → AES‑GCM 解密（`src/utils/loginCipher.js`；内部拆为 `parseCredentialEnvelope()` / `decryptCredentialPayload()` / `parseCredentialPayload()` 三段）。
+4. 防重放：`ts` 校验 ±5 分钟窗口；`nonce` 经 `sharedCache.setIfAbsent()` 原子占位去重（Redis 就绪时跨实例生效，未配置时回退进程内去重；TTL 5 分钟）；GCM 认证标签保证篡改即失败。
 5. 降级：不支持 WebCrypto / 非 secure context 时，前端返回 null 走明文兼容轨；路由层仅在 HTTPS/localhost 下可开 `strict`。
 
-生效端点：登录、注册、改密、关闭 MFA（`authController.js` 264/122/852/1369 附近）。
+生效端点（口令解密的消费方）：登录、注册、改密、关闭 MFA。实际调用点为 `src/services/authService.js`（登录 / 注册 / 改密）与 `src/controllers/userController.js`（重置口令）、`src/controllers/mfaController.js`（关闭 MFA 前校验当前口令），均经 `decryptLoginCredential()`；`src/controllers/authController.js` 只负责用 `getPublicKeyInfo()` 下发公钥，不做解密。
+
+> **2026-09-28 复核注记**：原文此处写「`authController.js` 264/122/852/1369 附近」，该行号既已漂移（`authController.js` 现仅 662 行，1369 超出文件长度），调用方归属亦有误（解密不在 authController）。已按上述实测改为符号引用。
 
 ## 理由
 
@@ -36,9 +38,12 @@
 
 - **不能替代 TLS**：ECDH 公钥经普通 HTTP 下发，挡不住主动 MITM（攻击者可替换公钥）。本机制定位为纵深防御，生产必须叠加 TLS 终结（优化清单 M-2，P0）。
 - **nonce 去重在进程内存**：多实例部署下各进程 Map 独立，防重放不完整，需随 Redis 迁移（优化清单 R-3）。
+  > **2026-09-28 复核注记**：R-3 已落地。现为 `sharedCache.setIfAbsent()` 原子占位，Redis 就绪时「重放无论命中哪个实例都被拒绝」，未配置时回退进程内去重（`src/utils/loginCipher.js` 的 `decryptLoginCredential()`）。本条局限仅对未配 `REDIS_URL` 的部署成立。
 - **降级轨存在**：明文兼容轨在严格模式下可关闭，属可控取舍。
 
 ## 关联
 
-- 优化清单：M-2（TLS 纵深）、R-3（nonce 迁 Redis）
+- 优化清单：M-2（TLS 纵深）、R-3（nonce 迁 Redis，**已落地**）
 - 测试：`src/tests/utils/loginCipher.test.js`、`src/tests/controllers/loginEncryption.test.js`、`web-admin/src/tests/utils/loginCipher.test.js`
+
+> 注：本文出现的「优化清单 X-N」为建仓前遗留的历史编号（源文件 `deliverables/待优化项总清单-2026-08-29.md` 从未进入版本库且已不存在），无源可查。该编号体系已废弃，新提交一律使用 `P*/R*/T*`——详见 `CONTRIBUTING.md` §5。

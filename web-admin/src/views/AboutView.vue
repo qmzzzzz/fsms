@@ -118,7 +118,20 @@
           </el-tag>
         </div>
       </div>
-      <el-empty v-else :description="$t('common.noData')" :image-size="80" />
+      <el-empty
+        v-else
+        :image-size="80"
+        :description="$t(metricsFailed ? 'messages.loadFailed' : 'common.noData')"
+      >
+        <button
+          v-if="metricsFailed"
+          type="button"
+          class="glass-btn glass-btn--sm"
+          @click="loadMetrics"
+        >
+          {{ $t('common.refresh') }}
+        </button>
+      </el-empty>
     </el-card>
   </div>
 </template>
@@ -182,6 +195,10 @@ const canViewMetrics = computed(() => hasPerm('security:audit'))
 
 const metricsSnap = ref(null)
 
+// 空态要能区分「真的没有数据」与「没拿到数据」。整页不报错、不弹红框的原口径保留
+// （本卡是附属信息），改的只有文案与重试入口。
+const metricsFailed = ref(false)
+
 /** 请求数 Top 路由条数：条形图太多会占满整卡且失去对比意义 */
 const TOP_ROUTES_COUNT = 8
 
@@ -226,9 +243,18 @@ const loadMetrics = async () => {
   if (!canViewMetrics.value) return
   try {
     const { data: resp } = await api.reports.getMetrics()
-    if (!resp?.success || !resp.data) return
+    if (!resp?.success) {
+      metricsFailed.value = true
+      return
+    }
+    // success 但 data 缺失 ⇒ 那是「暂无数据」而不是「没拿到数据」，两种空态必须可区分
+    if (!resp.data) {
+      metricsFailed.value = false
+      return
+    }
     // FE-L2：形状归一化兜底——后端契约调整时卡片降级显示 0 值而非 NaN/渲染异常
     const d = resp.data
+    metricsFailed.value = false
     metricsSnap.value = {
       ...d,
       summary: { totalRequests: 0, totalErrors: 0, errorRate: 0, ...(d.summary || {}) },
@@ -238,7 +264,8 @@ const loadMetrics = async () => {
       process: { uptimeSeconds: 0, rssMB: 0, heapUsedMB: 0, ...(d.process || {}) },
     }
   } catch (_) {
-    // 静默：保留上一次数据
+    // 静默：有快照时保留上一次数据；一次都没拿到时空态要说「加载失败」而非「暂无数据」
+    metricsFailed.value = true
   }
 }
 

@@ -52,18 +52,28 @@ const SENSITIVE_QUERY_KEYS = [
   'captcha',
   'authorization',
   'session',
+  'id_token',
+  'jwt',
+  'bearer',
 ]
 
 // 与后端一致的下划线边界感知：短键（code/sign）若用 includes 子串匹配，
 // 会把 postcode / zipcode 这类合法业务参数一并打码，损失排障信息。
-const isSensitiveKey = (lower) =>
-  SENSITIVE_QUERY_KEYS.some(
-    (s) =>
-      lower === s ||
-      lower.endsWith(`_${s}`) ||
-      lower.startsWith(`${s}_`) ||
-      lower.includes(`_${s}_`)
+// 入参传**原始键名**（不是 toLowerCase 后的），以便先补驼峰边界：
+// accessToken / ACCESS_TOKEN / access_token 归一到同一 snake 形态再判，
+// 否则 'accessToken'.toLowerCase()='accesstoken' 既不等于也不以 '_token' 结尾 → 漏码，
+// 明文令牌会被写入 localStorage 环形缓冲并扇出到 Sentry/收集端。
+const isSensitiveKey = (key) => {
+  const lower = String(key).toLowerCase()
+  const snake = String(key)
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+  return SENSITIVE_QUERY_KEYS.some((s) =>
+    [lower, snake].some(
+      (k) => k === s || k.endsWith(`_${s}`) || k.startsWith(`${s}_`) || k.includes(`_${s}_`)
+    )
   )
+}
 
 /**
  * 对 URL 的 query 与 hash 做敏感值打码，保留路径与键名便于排障
@@ -87,7 +97,7 @@ function redactUrl(rawUrl) {
         const eq = pair.indexOf('=')
         if (eq === -1) return pair
         const key = pair.slice(0, eq)
-        return isSensitiveKey(key.toLowerCase()) ? `${key}=***` : pair
+        return isSensitiveKey(key) ? `${key}=***` : pair
       })
       .join('&')
 

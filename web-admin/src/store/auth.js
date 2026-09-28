@@ -23,7 +23,11 @@ import { safeStorage, safeLocal, readSessionState } from './storage'
  * @returns {object|null} 补齐 id 别名后的用户对象
  */
 export const normalizeUser = (user) => {
-  if (!user || typeof user !== 'object') return user
+  // 只接受「普通对象」。标量（true / "1" / 123）或数组经 JSON.parse 也能还原成真值，
+  // 若原样返回：currentUser 变成真值 → isAuthenticated 误判为已登录 → 路由放行进入空壳，
+  // 而 restoreSession 的 `if (this.currentUser) return true` 又会永久短路 /auth/me 自愈，
+  // 用户卡在「无菜单无按钮」的状态直到手动清存储。截断/配额部分的写入或历史脏值即可触发。
+  if (!user || typeof user !== 'object' || Array.isArray(user)) return null
   const id = user.userId ?? user.id ?? user._id ?? null
   if (id === null) return { ...user }
   const idStr = String(id)
@@ -136,6 +140,9 @@ export const useAuthStore = defineStore('auth', {
      */
     async refreshPermissionsFromServer() {
       if (!this.currentUser) return false
+      // 竞态基线：/auth/me 是一次网络往返，其间用户可能登出（clearAuth 把 currentUser
+      // 置 null）或切换账号（currentUser 变成另一个对象）。用引用身份钉住"发起时的那个人"。
+      const epoch = this.currentUser
       try {
         // 动态导入避免 store ← api ← store 的模块循环依赖
         const { api } = await import('@/utils/api')
@@ -143,6 +150,10 @@ export const useAuthStore = defineStore('auth', {
         // 那属于预期结果，交由既有的 401 闭环处理，不在这里弹二次提示
         const { data: resp } = await api.auth.getMe({ silent401: true })
         if (!resp?.success || !resp.data?.user) return false
+        // 回填前复核身份未变：若往返期间已登出/换号，这里必须放弃——否则把旧的 /auth/me
+        // 结果写回去会「复活」一个已登出会话（restoreSession 之后被 `if (this.currentUser)`
+        // 永久短路，用户再也无法自动恢复），并让界面以已失效身份继续显示。
+        if (this.currentUser !== epoch) return false
 
         const normalized = normalizeUser(resp.data.user)
         const codes = toPermissionCodes(resp.data.permissions)
@@ -173,9 +184,15 @@ export const useAuthStore = defineStore('auth', {
      */
     async syncPermissionsFromEvent(event) {
       if (!this.currentUser) return false
-      // 第一段：乐观更新（推送未带完整集合时跳过，直接进入权威校验）
-      this.applyPermissionCodes(event?.permissionCodes)
-      // 第二段：权威校验（其结果覆盖乐观值）
+      // 第一段：乐观更新（推送未带完整集合时跳过，直接进入权威校验）。
+      // 安全边界：推送载荷**绝不允许携带超管通配** `*:*` / `*`——通配只能由 /auth/me 权威授予。
+      // 否则一个伪造/被 MITM 的 permission-sync 帧即可把整个界面提成全权限并写入 localStorage。
+      const raw = event?.permissionCodes
+      const push = Array.isArray(raw)
+        ? toPermissionCodes(raw).filter((c) => c !== '*:*' && c !== '*')
+        : raw
+      this.applyPermissionCodes(push)
+      // 第二段：权威校验（其结果覆盖乐观值；失败则保留，避免网络抖动把界面打空——见该方法注释）
       return this.refreshPermissionsFromServer()
     },
 

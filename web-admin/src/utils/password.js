@@ -72,7 +72,7 @@ export const evaluatePasswordRules = (password) => {
 
 /**
  * 生成 el-form 密码强度校验规则
- * @param {string} message i18n 提示文案（如 t('validation.passwordStrength')）
+ * @param {string} message i18n 提示文案（如 t('validation.passwordMin')）
  * @returns {object} async-validator 规则
  */
 export const passwordStrengthRule = (message) => ({

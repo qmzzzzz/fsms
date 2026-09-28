@@ -106,8 +106,8 @@
         :cols="['6%', '18%', '11%', '13%', '13%', '14%', '9%', '16%']"
       />
       <el-table v-else v-loading="loading" :data="tableData" border stripe style="width: 100%">
-        <el-table-column type="index" label="#" width="60" />
-        <el-table-column :label="$t('user.title')" min-width="180">
+        <el-table-column type="index" label="#" width="50" />
+        <el-table-column :label="$t('user.userColumn')" min-width="160">
           <template #default="{ row }">
             <div class="user-cell">
               <el-avatar :size="32" class="user-avatar">
@@ -124,10 +124,10 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="realName" :label="$t('user.realName')" width="120" />
-        <el-table-column prop="department" :label="$t('user.department')" width="140" />
-        <el-table-column prop="phone" :label="$t('user.phone')" width="140" />
-        <el-table-column :label="$t('user.roles')" width="160">
+        <el-table-column prop="realName" :label="$t('user.realName')" width="110" />
+        <el-table-column prop="department" :label="$t('user.department')" width="120" />
+        <el-table-column prop="phone" :label="$t('user.phone')" width="130" />
+        <el-table-column :label="$t('user.roles')" width="150">
           <template #default="{ row }">
             <el-tag
               v-for="r in (row.roles || []).slice(0, 2)"
@@ -139,21 +139,23 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="status" :label="$t('common.status')" width="100">
+        <el-table-column prop="status" :label="$t('common.status')" width="90">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'active' ? 'success' : 'info'" effect="light">
-              {{ row.status === 'active' ? $t('user.active') : $t('user.inactive') }}
+            <el-tag :type="statusTagType(row.status)" effect="light">
+              {{ statusLabel(row.status) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column :label="$t('user.mfa')" width="90">
+        <el-table-column :label="$t('user.mfa')" width="80">
           <template #default="{ row }">
             <el-tag :type="row.mfaEnabled ? 'success' : 'info'" effect="plain" size="small">
               {{ row.mfaEnabled ? $t('user.mfaOn') : $t('user.mfaOff') }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column :label="$t('common.operation')" width="300" fixed="right">
+        <!-- 列宽预算：主内容区 1440-220(侧栏)-48(边距)=1172px，
+             全列合计须 ≤1172，否则固定列被推出视口（实测曾溢出 115px） -->
+        <el-table-column :label="$t('common.operation')" width="230" fixed="right">
           <template #default="{ row }">
             <button
               v-if="hasPerm('user:update')"
@@ -266,8 +268,13 @@
             :placeholder="$t('messages.selectRequired')"
             style="width: 100%"
           >
-            <el-option :label="$t('user.active')" value="active" />
-            <el-option :label="$t('user.inactive')" value="inactive" />
+            <el-option
+              v-for="opt in statusOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+              :disabled="opt.disabled"
+            />
           </el-select>
         </el-form-item>
         <el-form-item :label="$t('user.allowedIPs')" prop="allowedIPs">
@@ -332,10 +339,14 @@
         >
           {{ $t('common.cancel') }}
         </button>
+        <!--
+          后端 assignRoles 校验 roles 为 isArray({min:1})：清空全部角色会 400。
+          与其让用户点了才知道，不如按同一条业务规则（至少保留一个角色）禁用保存按钮。
+        -->
         <button
           type="button"
           class="glass-btn glass-btn--primary"
-          :disabled="roleDialog.submitting"
+          :disabled="roleDialog.submitting || roleDialog.selectedRoles.length === 0"
           @click="submitRoleAssignment"
         >
           {{ $t('common.save') }}
@@ -361,6 +372,42 @@ import { useAuthStore } from '@/store'
 const { hasPerm } = usePermission()
 const { t } = useI18n()
 const authStore = useAuthStore()
+
+/**
+ * 账户状态的唯一呈现口径：列表标签与编辑下拉共用这一份。
+ *
+ * 后端 User.status 是三值枚举（models/User.js 的 enum: active/inactive/locked），
+ * 而原先两处各自硬编码成两值：表格写 `status === 'active' ? 正常 : 禁用`，
+ * 编辑框只列 active/inactive 两个选项。后果是**被管理员锁定的账户在列表里显示成"禁用"**——
+ * 管理员锁定与管理员禁用是两回事（锁定可由专用接口解除、并会连带清 lockUntil 与失效权限缓存；
+ * 禁用改的是登录语义），看错状态会直接导致错误的处置。
+ *
+ * 这里只统一"怎么显示"，不新增"能改成什么"：locked 在选项里置灰不可选
+ * （锁定/解锁走专用接口，见 services/authService 的 lock/unlock 与审计动作 user_locked），
+ * 但选项本身仍在，于是当前值 locked 能被显出来——原先下拉没有对应项，
+ * 表单里 status 实际是 locked 却显示成空白，管理员改别的字段保存时看不见这个隐值。
+ * 跨账户改状态服务端另需 user:lock 权限（controllers/userController 的三道闸门）。
+ */
+const USER_STATUS_META = {
+  active: { type: 'success', key: 'user.active' },
+  inactive: { type: 'info', key: 'user.inactive' },
+  locked: { type: 'warning', key: 'user.locked' },
+}
+// 未知取值（后端枚举将来加了新值）原样显示，不塌缩成"禁用"
+const statusLabel = (status) => {
+  const meta = USER_STATUS_META[status]
+  return meta ? t(meta.key) : String(status ?? '-')
+}
+const statusTagType = (status) => (USER_STATUS_META[status] || {}).type || 'info'
+// 下拉选项同样从那张表推导，locked 置灰不可选：锁定/解锁走 PUT /api/security/users/:userId/lock
+// （服务层会连带清 lockUntil 并写 user_locked 审计），让它可选等于开一条绕过该接口的旁路。
+const statusOptions = computed(() =>
+  Object.entries(USER_STATUS_META).map(([value, meta]) => ({
+    value,
+    label: t(meta.key),
+    disabled: value === 'locked',
+  }))
+)
 
 const loading = ref(false)
 const filters = reactive({ keyword: '' })

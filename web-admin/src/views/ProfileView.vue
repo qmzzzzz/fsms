@@ -98,14 +98,10 @@
                 @keydown.enter.prevent="enterSubmit($event, save)"
               />
             </el-form-item>
-            <el-form-item :label="$t('profile.department')">
-              <el-input
-                v-model="form.department"
-                :placeholder="$t('register.departmentPlaceholder')"
-                maxlength="100"
-                @keydown.enter.prevent="enterSubmit($event, save)"
-              />
-            </el-form-item>
+            <!-- 部门非自助可改字段：它是数据范围的判定依据（H-01），仅管理员经用户管理可改，
+                 后端 updateUserProfile 刻意不白名单该字段。此前放一个可编辑输入会造成
+                 "改了就报保存成功、刷新又回退旧值"，且本地 store 与库中授权归属长期不一致，
+                 故改为只读展示（见上方信息卡片的 department）。 -->
             <el-form-item>
               <button type="button" class="glass-btn glass-btn--primary" @click="save">
                 {{ $t('common.save') }}
@@ -194,27 +190,84 @@ const form = reactive({
   department: user.value.department || '',
 })
 
+/**
+ * 服务端值灌入表单前问一句"用户动过没有"
+ *
+ * onMounted 的 `/auth/me` 是一次迟到刷新：它完全可能在用户已经开始输入之后才回来
+ * （实测窗口：进页面即在"真实姓名"里打字，慢网络下这次输入被静默还原成服务端值，
+ * 而且没有任何提示——用户只知道"我刚才打的字没了"）。
+ * 下面的 `watch(user)` 本来是为了把权威值同步进表单（保存后的规范化结果、
+ * 迟到刷新的最新资料都靠它），但它是**无条件覆盖**，于是把这条同步通道
+ * 同时变成了丢输入的通道。
+ *
+ * 判据选"表单是否被动过"而不是请求序号：本页只发一次 getMe，
+ * 用来去重并发请求的 `useLatestRequest` 解决不了"回包晚于用户输入"这件事。
+ *
+ * `flush: 'sync'` 是必需的，不是优化：服务端赋值走的是同步代码，而默认的
+ * pre-flush 回调要等到下一个微任务才跑——那时 `syncingFromServer` 已经被 finally
+ * 复原成 false，赋值自己就被记成"用户动过"。保存路径每次都显式撤销脏标记，所以那条
+ * 通道看不出问题；但「重置」之后迟到的 `/auth/me` 会被这个误标挡掉，表单停在重置
+ * 那一刻的旧值上——用户以为"重置后再刷新会拿到最新值"（实测：改成 pre-flush 后
+ * 该用例转红，源文件里那行 `flush: 'sync'` 是有牙齿的）。
+ *
+ * 源是 reactive 对象，Vue 本就隐式深比，所以选项里没有 `deep: true`
+ * （实测：加上它 18 条用例零差异，属于装饰）。
+ *
+ * 另需说明：`syncingFromServer` 这一层抑制目前测不到。两个方向都试过——让它恒为
+ * false（服务端赋值一律标脏）和让它不复原（此后用户输入一律不标脏），18 条用例都全绿。
+ * 原因是本页只有一次非请求式同步（onMounted 的 getMe），而 save()/reset() 各自都在
+ * 末尾显式撤销脏标记，把后果盖住了。留着的理由是它让"服务端写入不算用户输入"成为
+ * 局部不变式，将来多一个同步入口（比如聚焦重取）不会一踩就中；别把它当成有测试兜着的机制。
+ */
+const formDirty = ref(false)
+let syncingFromServer = false
+const applyFromServer = (assign) => {
+  syncingFromServer = true
+  try {
+    assign()
+  } finally {
+    syncingFromServer = false
+  }
+}
+watch(
+  form,
+  () => {
+    if (!syncingFromServer) formDirty.value = true
+  },
+  { flush: 'sync' }
+)
+
 const formRules = computed(() => ({
   email: [
-    // 与后端 updateProfileValidation（express-validator isEmail）同口径，
-    // 非必填：留空不校验（clean 规则自带空值跳过）
+    // User.email 在 schema 上是 required + unique ⇒ 库里永远非空，邮箱不是能清空的字段。
+    // 原先"留空不校验"配上提交时 `email: form.email || undefined`，让清空动作既拦不住
+    // 也不生效：表单显示为空、后端按"未提供"保持旧值、刷新后旧邮箱又冒出来。
+    // 必填之后，这个不可表达的操作以一条红字呈现，而不是以一次假保存呈现。
+    { required: true, message: t('validation.emailRequired'), trigger: 'blur' },
     { type: 'email', message: t('validation.emailInvalid'), trigger: 'blur' },
   ],
+  // 手机号非必填，留空即清空：User.phone 的校验器明确允许 ''，
+  // 路由侧 body('phone').optional({ values: 'falsy' }) 放行空串（两者缺一都会 400）
   phone: [{ pattern: /^1[3-9]\d{9}$/, message: t('validation.phonePattern'), trigger: 'blur' }],
 }))
 
 // 修改口令（pwdForm/changePwd）与两步验证（MFA 状态机/二维码/恢复码对话框）
 // 已分别迁入 ChangePasswordCard.vue 与 MfaSettingsCard.vue（D-2）
 
-// 监听用户数据变化，同步更新表单
+// 监听用户数据变化，同步更新表单；用户已经动过表单时不覆盖其输入
 watch(
   user,
   (newUser) => {
-    form.username = newUser.username || ''
-    form.realName = newUser.realName || ''
-    form.email = newUser.email || ''
-    form.phone = newUser.phone || ''
-    form.department = newUser.department || ''
+    if (!formDirty.value) {
+      applyFromServer(() => {
+        form.username = newUser.username || ''
+        form.realName = newUser.realName || ''
+        form.email = newUser.email || ''
+        form.phone = newUser.phone || ''
+        form.department = newUser.department || ''
+      })
+    }
+    // 只读展示位与脏标记无关：它们显示的就是服务端权威值，盖掉不会丢用户输入
     avatarText.value = (newUser.username || 'U').slice(0, 1).toUpperCase()
     updateRoleText(newUser.roles)
   },
@@ -244,24 +297,27 @@ const save = async () => {
     return
   }
   try {
+    // 原样提交表单值：空串就是"清空"这一合法操作（手机号），不再用 `|| undefined`
+    // 把它伪装成"未提供"。邮箱由上面的必填规则保证非空。
     const updateData = {
-      realName: form.realName,
-      email: form.email || undefined,
-      phone: form.phone || undefined,
-      department: form.department || undefined,
-    }
-
-    await api.auth.updateProfile(updateData)
-
-    // 同步更新本地 user 与 store：user.value 是独立于 store 状态的对象，
-    // 只更新 store 的话左侧卡片与 reset() 仍读取挂载时的旧值
-    const updated = {
-      ...user.value,
       realName: form.realName,
       email: form.email,
       phone: form.phone,
-      department: form.department,
     }
+
+    const res = await api.auth.updateProfile(updateData)
+
+    // 同步更新本地 user 与 store：user.value 是独立于 store 状态的对象，
+    // 只更新 store 的话左侧卡片与 reset() 仍读取挂载时的旧值。
+    // 取服务端回包里的权威 profile 而不是表单值——后端会对提交值做规范化
+    // （邮箱小写化落库），也可能根本不采纳（字段被白名单挡下）；
+    // 把表单值写进本地态就是"界面显示一个数据库里没有的值"，
+    // 下一次 /auth/me 又把它改回去，用户看到的是"保存成功了但没生效"。
+    const updated = { ...user.value, ...(res?.data?.data || {}) }
+    // 保存成功后必须让权威值落回表单：后端的规范化结果（邮箱小写化）与"白名单挡下的
+    // 字段保持原值"都靠这一步显示。脏标记是为"迟到的 getMe"设的，不能反过来把
+    // 刚保存成功的规范化值也一起挡掉，所以这里先撤销脏标记再赋值。
+    formDirty.value = false
     user.value = updated
     authStore.setCurrentUser(updated)
 
@@ -271,11 +327,15 @@ const save = async () => {
   }
 }
 
+/** 「重置」是用户主动要求丢弃输入，因此赋值前后都要让脏标记归位 */
 const reset = () => {
-  form.realName = user.value.realName || ''
-  form.email = user.value.email || ''
-  form.phone = user.value.phone || ''
-  form.department = user.value.department || ''
+  applyFromServer(() => {
+    form.realName = user.value.realName || ''
+    form.email = user.value.email || ''
+    form.phone = user.value.phone || ''
+    form.department = user.value.department || ''
+  })
+  formDirty.value = false
 }
 
 // changePwd 已迁入 ChangePasswordCard.vue（含改密后延时登出与定时器清理，D-2）

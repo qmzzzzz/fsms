@@ -15,10 +15,10 @@
             @change="handleSearch"
           />
         </el-form-item>
-        <el-form-item :label="$t('user.title')">
+        <el-form-item :label="$t('auditLog.shortUser')">
           <el-input
             v-model="filters.username"
-            :placeholder="$t('user.username')"
+            :placeholder="$t('auditLog.usernamePrefixHint')"
             clearable
             maxlength="30"
             style="width: 150px"
@@ -26,7 +26,7 @@
             @clear="handleSearch"
           />
         </el-form-item>
-        <el-form-item :label="$t('security.title')">
+        <el-form-item :label="$t('auditLog.categoryLabel')">
           <el-select
             v-model="filters.category"
             :placeholder="$t('common.pleaseSelect')"
@@ -190,7 +190,7 @@
           </template>
         </el-table-column>
         <!-- 操作用户 + IP 合并：主行用户名，副行 IP（等宽字体） -->
-        <el-table-column :label="$t('user.title')" width="150">
+        <el-table-column :label="$t('auditLog.shortUser')" width="150">
           <template #default="{ row }">
             <div class="cell-main">
               {{ row.username || '-' }}
@@ -257,7 +257,7 @@
               class="glass-btn glass-btn--primary glass-btn--link"
               @click="viewDetail(row)"
             >
-              {{ $t('common.operation') }}
+              {{ $t('common.detail') }}
             </button>
           </template>
         </el-table-column>
@@ -579,10 +579,13 @@ const exportLogs = async () => {
       return
     }
 
-    // 截断提示：/reports/export 的 xlsx 分支当前不返回截断标记字段（EXPORT_LIMIT 静默截断）；
-    // 若后端后续补充截断提示（响应头 X-Export-Truncated 或 JSON 体 notice 字段），这里自动向用户展示
-    const notice = response?.headers?.['x-export-truncated'] || ''
-    if (notice) ElMessage.warning(String(notice))
+    // 截断标记：xlsx 侧的 X-Export-Truncated 值是字面 'true' —— 头只表态"不保证完整"，
+    // 说人话属于展示层。原实现 `ElMessage.warning(String(notice))` 因此给用户弹一个
+    // "true"；而它的用例喂的是"已达上限，结果被截断"这种后端从不发的值，所以一直判绿。
+    // （CSV 侧另有一道 X-Audit-Truncated，本视图没有 CSV 下载入口，不在这里猜。）
+    if (response?.headers?.['x-export-truncated']) {
+      ElMessage.warning(t('messages.exportTruncated'))
+    }
 
     const blob = new Blob([payload], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

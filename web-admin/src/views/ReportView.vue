@@ -43,7 +43,7 @@
           </button>
         </div>
       </template>
-      <el-descriptions :column="3" border>
+      <el-descriptions v-if="!overviewFailed" :column="3" border>
         <el-descriptions-item :label="$t('device.totalDevices')">
           {{ overview.devices }}
         </el-descriptions-item>
@@ -72,6 +72,12 @@
           {{ overview.overdue }}
         </el-descriptions-item>
       </el-descriptions>
+      <div v-else class="overview-failed">
+        <span>{{ $t('messages.loadFailed') }}</span>
+        <button type="button" class="glass-btn glass-btn--sm" @click="loadOverview">
+          {{ $t('common.refresh') }}
+        </button>
+      </div>
     </el-card>
 
     <!-- 简单图表区域 -->
@@ -179,36 +185,45 @@ echarts.use([PieChart, BarChart, TooltipComponent, LegendComponent, GridComponen
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api, isCanceledError } from '@/utils/api'
 
-const reportCards = computed(() => [
-  {
-    title: t('report.deviceReport'),
-    desc: t('device.status'),
-    icon: markRaw(Cpu),
-    color: '#475569',
-    path: '/devices',
-  },
-  {
-    title: t('report.alarmReport'),
-    desc: t('alarm.stats'),
-    icon: markRaw(Bell),
-    color: '#e63946',
-    path: '/alarms',
-  },
-  {
-    title: t('report.inspectionReport'),
-    desc: t('inspection.completed'),
-    icon: markRaw(Tickets),
-    color: '#d97706',
-    path: '/inspections',
-  },
-  {
-    title: t('report.dashboard'),
-    desc: t('common.export'),
-    icon: markRaw(DataAnalysis),
-    color: '#c1121f',
-    path: '',
-  },
-])
+const reportCards = computed(() =>
+  [
+    {
+      title: t('report.deviceReport'),
+      desc: t('device.status'),
+      icon: markRaw(Cpu),
+      color: '#475569',
+      path: '/devices',
+    },
+    {
+      title: t('report.alarmReport'),
+      desc: t('alarm.stats'),
+      icon: markRaw(Bell),
+      color: '#e63946',
+      path: '/alarms',
+    },
+    {
+      title: t('report.inspectionReport'),
+      desc: t('inspection.completed'),
+      icon: markRaw(Tickets),
+      color: '#d97706',
+      path: '/inspections',
+    },
+    {
+      title: t('report.dashboard'),
+      desc: t('common.export'),
+      icon: markRaw(DataAnalysis),
+      color: '#c1121f',
+      path: '',
+      // 没有 path 的卡片=导出入口（模板里 `card.path ? push : showExportDialog()`）。
+      // 权限必须与概览卡片头部那个「导出」按钮同源：原先只给按钮加了
+      // `v-if="hasPerm('report:export')"`，这张卡片却没有，于是无 report:export 的
+      // 用户点它照样弹出导出对话框并发起导出请求（后端会 403，但"入口消失"这条
+      // 本文件自己声明的口径就破了）。写成 perm 字段而不是在模板里加判断，
+      // 是为了让"哪张卡需要哪个权限"留在数据里、不散到模板。
+      perm: 'report:export',
+    },
+  ].filter((card) => !card.perm || hasPerm(card.perm))
+)
 
 const overview = ref({
   devices: 0,
@@ -221,6 +236,10 @@ const overview = ref({
   completionRate: 0,
   overdue: 0,
 })
+
+// 概览请求失败（或后端 success:false）：九个数值位不能继续以 0 面孔出现。
+// 初值 false ⇒ 首帧（loading 骨架期）不会闪出失败块。
+const overviewFailed = ref(false)
 
 const alarmTypeChart = ref(null)
 const deviceStatusChart = ref(null)
@@ -314,7 +333,9 @@ const loadChartData = async () => {
       statusMap[item._id] = item.count || 0
     })
 
-    // 设备状态数据（normal=在线，offline=离线，fault=故障，maintenance=维护中）
+    // 设备状态数据：必须覆盖 FireDevice.status 全部 6 个枚举值
+    // （normal/warning/fault/offline/maintenance/scrapped）。此前只画 4 项，
+    // warning 与 scrapped 设备在「设备状态分布」里静默消失，分布图与总数对不上。
     const deviceStatusData = [
       {
         value: statusMap['normal'] || 0,
@@ -322,9 +343,9 @@ const loadChartData = async () => {
         itemStyle: { color: '#16a34a' },
       },
       {
-        value: statusMap['offline'] || 0,
-        name: t('deviceStatus.offline'),
-        itemStyle: { color: '#64748b' },
+        value: statusMap['warning'] || 0,
+        name: t('deviceStatus.warning'),
+        itemStyle: { color: '#eab308' },
       },
       {
         value: statusMap['fault'] || 0,
@@ -332,9 +353,19 @@ const loadChartData = async () => {
         itemStyle: { color: '#e63946' },
       },
       {
+        value: statusMap['offline'] || 0,
+        name: t('deviceStatus.offline'),
+        itemStyle: { color: '#64748b' },
+      },
+      {
         value: statusMap['maintenance'] || 0,
         name: t('deviceStatus.maintenance'),
         itemStyle: { color: '#d97706' },
+      },
+      {
+        value: statusMap['scrapped'] || 0,
+        name: t('deviceStatus.scrapped'),
+        itemStyle: { color: '#94a3b8' },
       },
     ]
 
@@ -343,16 +374,15 @@ const loadChartData = async () => {
         tooltip: { trigger: 'axis', formatter: '{b}: {c}台' },
         xAxis: {
           type: 'category',
-          data: [
-            t('deviceStatus.normal'),
-            t('deviceStatus.offline'),
-            t('deviceStatus.fault'),
-            t('deviceStatus.maintenance'),
-          ],
+          // 由 deviceStatusData 单一来源派生，轴标签与 series 永远同序同长，
+          // 再也不会出现「改了状态列表漏改 xAxis」的错位（也避免硬编码漏枚举）。
+          data: deviceStatusData.map((d) => d.name),
           axisLabel: { color: '#64748b' },
         },
         yAxis: {
           type: 'value',
+          // 计数数据不出小数刻度
+          minInterval: 1,
           axisLabel: { color: '#64748b' },
           splitLine: { lineStyle: { color: theme.splitLineColor } },
         },
@@ -462,6 +492,13 @@ const handleExport = async () => {
       return
     }
 
+    // 截断声明与 AuditLogView 同一条判据：后端只在"这份不保证完整"时发
+    // X-Export-Truncated（值为字面 'true'），此前本视图完全不读它 —— 于是同一份被封顶的
+    // 报表，从审计页下载会提示、从报表页下载只报"导出成功"，用户按后者的口径信了文件。
+    if (response?.headers?.['x-export-truncated']) {
+      ElMessage.warning(t('messages.exportTruncated'))
+    }
+
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -511,9 +548,15 @@ const loadOverview = async () => {
         completionRate: inspections.completionRate || 0,
         overdue: inspections.overdue || 0,
       }
+      overviewFailed.value = false
+    } else {
+      overviewFailed.value = true
     }
   } catch (e) {
-    // 静默处理
+    // FE-L1：路由切换 abort 的在途请求不算失败（用户已离开本页）
+    if (isCanceledError(e)) return
+    // 旧口径是「静默处理」：失败时九个格子仍以 0 面孔出现，读作「设备 0 台、告警 0 起」
+    overviewFailed.value = true
   }
 }
 
@@ -613,6 +656,12 @@ onUnmounted(() => {
 .overview-card :deep(.el-descriptions__content) {
   font-family: var(--xf-font-display);
   font-variant-numeric: tabular-nums;
+}
+
+.overview-failed {
+  display: flex;
+  gap: var(--xf-spacing-md);
+  align-items: center;
 }
 
 .chart-box {

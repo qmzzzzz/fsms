@@ -116,17 +116,27 @@ npm run dev             # 监听 http://localhost:3001，/api 自动代理到后
 
 ### 方式三：Docker Compose（生产推荐）
 
-```bash
-# 必须先在环境变量或 .env 中设置强密钥
-export JWT_SECRET=$(openssl rand -base64 48)
-export JWT_REFRESH_SECRET=$(openssl rand -base64 48)
-export AES_SECRET_KEY=$(openssl rand -hex 32)
-export HMAC_SECRET=$(openssl rand -hex 16)
+compose 的密钥**不走环境变量**（`docker inspect` 会完整回显 `Config.Env`），而是以 Docker secret 挂载到 `/run/secrets/<name>`，由应用侧 `*_FILE` 读取。因此下面三步缺一不可：
 
-docker compose up -d
+```bash
+# 1) 生成 secrets 文件到 ./secrets/（已在 .gitignore 与 .dockerignore 在列）
+node scripts/generate-secrets.js --out ./secrets
+
+# 2) compose 里两个 `:?` 变量必须显式声明，缺失会直接报
+#    "required variable ... is missing a value" 并中止
+export CORS_ORIGIN=https://admin.example.com   # 前端站点地址，多个逗号分隔，禁止通配符
+export ALLOWED_HOSTS=fsms.example.com          # Host 头白名单，多个逗号分隔
+
+# 3) 生产必须显式指定带版本 tag 的镜像（前置校验会 fail-fast 拦下本地默认 tag）
+export APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234
+
+docker compose pull app
+docker compose up -d --no-build
 ```
 
-编排包含应用服务、MongoDB 6（仅容器内网通信，不暴露宿主机端口）与 Redis 7（同样仅内网），数据持久化到命名卷。生产环境变量校验要求配置 `REDIS_URL`（compose 已注入 `redis://redis:6379`），无需额外设置。
+编排包含应用服务、MongoDB 6（仅容器内网通信，不暴露宿主机端口）与 Redis 7（同样仅内网），数据持久化到命名卷。`REDIS_URL` 由 compose 注入 `redis://redis:6379`，`NODE_ENV=production` 与 `TRUST_PROXY_HOPS` 亦已内置，均无需额外设置。完整的 secrets 生成命令（含 Mongo root 口令、需 percent-encode 的 `mongodb_uri`、Grafana 口令）见 `docker-compose.yml` 文件末尾注释。
+
+发布走 `node scripts/deploy.js`（前置校验 → 备份 → 迁移 → 健康检查，失败自动回滚）；密钥轮换与回滚演练见 `deployment/secret-rotation.md`、`deployment/rollback-drill.md`。
 
 ## 环境变量
 
@@ -151,6 +161,7 @@ docker compose up -d
 | `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX_REQUESTS` | 通用限流窗口 / 阈值                                           | `900000` / `300`                           |
 | `BCRYPT_ROUNDS`                                    | 密码哈希强度                                                  | `12`                                       |
 | `LOG_LEVEL`                                        | 日志级别                                                      | `info`                                     |
+| `LOG_DIR`                                          | 日志目录（容器常需指向挂载卷；测试用它在临时目录里取证）      | 仓库 `logs/`                               |
 | `SENTRY_DSN`                                       | Sentry 错误监控（可选）                                       | -                                          |
 | `ENABLE_API_DOCS`                                  | 是否暴露 Swagger API 文档（生产默认 false）                   | 开发=true / 生产=false                     |
 | `DOCS_USERNAME`                                    | API 文档 Basic Auth 用户名（可选）                            | -                                          |
@@ -341,6 +352,9 @@ docker compose stop app
 
 # 恢复（脚本带三道防误操作门禁：回显目标库、交互确认库名、--drop 需显式 RESTORE_DROP=true）
 MONGODB_URI="mongodb://..." ./scripts/restore-mongo.sh backups/fire-safety-backup-xxxxxxxx-xxxx.gz
+# 默认 MONGO_RESTORE_TRANSPORT=docker：compose 里 mongo 只 expose，宿主机连不上，
+# 于是 mongorestore 在容器内执行、归档经 stdin 流入（与 backup-mongo.sh 同口径）。
+# 直连可达且宿主机装了工具时才用 MONGO_RESTORE_TRANSPORT=local。
 
 # 恢复后重启应用并验证：
 docker compose start app
@@ -360,10 +374,11 @@ APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 node scripts/deploy.js
 APP_IMAGE=... node scripts/deploy.js --dry-run
 ```
 
-参数：`--dry-run`（干跑）、`--skip-backup`（跳过备份，仅演练）、`--no-rollback`（关闭失败自动回滚）。
-环境变量：`APP_IMAGE`、`CORS_ORIGIN` 必填（可写在 `.env`，与 compose 同口径）；
-`DEPLOY_HEALTH_TIMEOUT_MS`（默认 120000）与 `DEPLOY_ROLLBACK_TIMEOUT_MS`（默认 60000）可按启动耗时调。
-退出码：`0` 成功、`1` 失败（已尝试回滚）、`2` 前置条件不满足（**未做任何变更**）。
+参数：`--dry-run`（干跑）、`--skip-backup`（跳过备份，仅演练；**同时使本次发布失去自动回滚资格**）、`--no-rollback`（关闭失败自动回滚）。
+环境变量：`APP_IMAGE`、`CORS_ORIGIN`、`ALLOWED_HOSTS` 必填（后两项与 compose 的 `${VAR:?}` 同口径；可写在 `.env`）；
+`DEPLOY_HEALTH_TIMEOUT_MS`（默认 120000）与 `DEPLOY_ROLLBACK_TIMEOUT_MS`（默认 60000）可按启动耗时调，
+`DEPLOY_PROBE_PORT`（默认 3000）用于改端口——这三项必须是正整数，写成 `120s` 这类值会被**拒绝执行**而不是静默按 0 处理。
+退出码：`0` 成功、`1` 失败（按资格判定后可能已回滚）、`2` 前置条件不满足（**未做任何变更**）。
 
 手工等价步骤（理解背后动作；正常请用上面的脚本）：
 
@@ -394,9 +409,11 @@ APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
 - [ ] `MONGODB_URI` 不指向 localhost（使用独立数据库服务）
 - [ ] `REDIS_URL` 已配置为有效 Redis 地址（限流共享、IP 黑名单广播、审计链锁依赖；compose 默认 `redis://redis:6379`）
 - [ ] `CORS_ORIGIN` 已配置为明确的前端域名白名单（禁止通配符）
+- [ ] `ALLOWED_HOSTS` 已配置为对外域名（Host 头白名单；缺失即拒绝启动，compose 亦以 `${ALLOWED_HOSTS:?}` 硬声明）
 - [ ] `TRUST_PROXY_HOPS` 已按反向代理层数设置
 - [ ] `ALLOW_PUBLIC_REGISTRATION` 保持 `false`
 - [ ] 已修改默认管理员初始密码
+- [ ] `deployment/observability/alertmanager.yml` 的通知渠道已注入真实入口——`docker-compose.yml` 直接挂载仓库内这份文件，而仓库版本是**占位 URL**，照抄上线等于 critical 告警全部发往 `hooks.example.com`（告警静默丢失，监控页面却一切正常）。`scripts/deploy.js` 的前置校验会以生产口径校验它：占位即拒绝发布，并给出注入方式；确为无告警的演练环境时用 `ALLOW_PLACEHOLDER_ALERT_WEBHOOK=true` 显式豁免（那等于书面承认本次发布后无人会被叫醒）
 - [ ] 已在反向代理层启用 HTTPS 并下发 HSTS（见下节）
 
 ## 传输层安全（HTTPS / HSTS）
@@ -413,7 +430,7 @@ APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
 
 - `deployment/observability/prometheus.yml`：Prometheus 抓取配置，直连后端 `app:3000` 的 `/metrics`（该端点在 Nginx 层按 allow 列表限流，不对公网暴露）。
 - `deployment/observability/alert-rules.yml`：4 条内置告警——服务宕机、5xx 错误率 >5%、P95 延迟 >1s、安全告警突增；阈值为保守初值，待压测基线落地后收紧。
-- `deployment/observability/alertmanager.yml`：告警触达链路的路由中枢，按 `severity` 分发（critical 即时通道 30 分钟重复提醒，warning 低优先级通道 4 小时），并按实例维度抑制同源重复告警。仓库内为**占位配置**，通知渠道（webhook/SMTP）按文件头注释以私有副本或模板渲染注入，敏感值不入库。
+- `deployment/observability/alertmanager.yml`：告警触达链路的路由中枢，按 `severity` 分发（critical 即时通道 30 分钟重复提醒，warning 低优先级通道 4 小时），并按实例维度抑制同源重复告警。仓库内为**占位配置**，通知渠道（webhook/SMTP）按文件头注释以私有副本或模板渲染注入，敏感值不入库。两道闸门盯住"忘了注入"：部署路径由 `scripts/deploy.js` 的前置校验（占位即拒绝发布，可用 `ALERTMANAGER_CONFIG_PATH` 指向独立挂载的真实配置）；合规检查路径由 `ALERT_WEBHOOK_CHECK=production node scripts/compliance-check.js` 人工/上线前触发（CI 默认不设该变量，因为仓库模板本身必须是占位）。
 - `deployment/observability/grafana/`：`datasources/` 与 `dashboards/` 由 Grafana provisioning 在容器启动时自动装载，无需界面手配。
 
 ## 常见问题

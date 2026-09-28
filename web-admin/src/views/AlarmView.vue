@@ -1,6 +1,12 @@
 <template>
   <div class="page">
-    <el-row :gutter="16" class="stat-row">
+    <div v-if="statsFailed && !statsLoadedOnce" class="stats-failed">
+      <span>{{ $t('messages.loadFailed') }}</span>
+      <button type="button" class="glass-btn glass-btn--sm" @click="loadStats">
+        {{ $t('common.refresh') }}
+      </button>
+    </div>
+    <el-row v-else :gutter="16" class="stat-row">
       <el-col v-for="s in statCards" :key="s.title" :xs="12" :sm="6">
         <el-card shadow="hover" class="mini-stat">
           <div class="mini-stat-body">
@@ -79,8 +85,17 @@
         </el-table-column>
         <el-table-column :label="$t('common.operation')" width="240" fixed="right">
           <template #default="{ row }">
+            <!--
+              handle(row) 按状态走两条不同后端接口：pending→dispatch（需 alarm:dispatch）、
+              processing→arrive（需 alarm:handle）。旧门控 hasAnyPerm(['alarm:dispatch','alarm:handle'])
+              对两者取或：只有 alarm:handle 的消防员在 pending 行看到「指派处理」→点击发 dispatch→403；
+              反之只有 alarm:dispatch 的角色在 processing 行→发 arrive→403。按状态与所需权限一一对应。
+            -->
             <button
-              v-if="hasAnyPerm(['alarm:dispatch', 'alarm:handle'])"
+              v-if="
+                (row.status === 'pending' && hasPerm('alarm:dispatch')) ||
+                (row.status === 'processing' && hasPerm('alarm:handle'))
+              "
               type="button"
               class="glass-btn glass-btn--primary glass-btn--link"
               :disabled="rowBusy === row._id"
@@ -102,7 +117,7 @@
               class="glass-btn glass-btn--default glass-btn--link"
               @click="detail(row)"
             >
-              {{ $t('common.operation') }}
+              {{ $t('common.detail') }}
             </button>
           </template>
         </el-table-column>
@@ -141,12 +156,12 @@
             :placeholder="$t('messages.selectRequired')"
             style="width: 100%"
           >
-            <el-option :label="$t('dashboard.smokeAlarm')" value="smoke" />
-            <el-option :label="$t('dashboard.tempAbnormal')" value="temp_abnormal" />
-            <el-option :label="$t('dashboard.manualAlarm')" value="manual_button" />
-            <el-option :label="$t('dashboard.phoneReport')" value="phone_report" />
-            <el-option :label="$t('dashboard.patrolFind')" value="patrol_find" />
-            <el-option :label="$t('common.all')" value="other" />
+            <el-option
+              v-for="(label, value) in alarmTypeMap"
+              :key="value"
+              :label="label"
+              :value="value"
+            />
           </el-select>
         </el-form-item>
         <el-form-item :label="$t('alarm.location')" prop="location">
@@ -206,11 +221,12 @@ import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 
 import { ElRadioGroup, ElRadio } from 'element-plus/es/components/radio/index.mjs'
 import { api } from '@/utils/api'
+import { makeAlarmTypeLabels } from '@/utils/labelMaps'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import GlassSegmented from '@/components/GlassSegmented.vue'
 
-const { hasPerm, hasAnyPerm } = usePermission()
+const { hasPerm } = usePermission()
 const { t } = useI18n()
 
 const CAUSE_OPTIONS = computed(() => [
@@ -247,6 +263,11 @@ const stats = reactive({
   resolvedToday: 0,
   totalMonth: 0,
 })
+
+// 首屏统计请求失败时，四张卡不得以 0 面孔出现（0 读作「今日没有待处理报警」）。
+// 已有读数后的刷新失败仍保留上一次数字：见 alarmView.test「第二次刷新失败」。
+const statsFailed = ref(false)
+const statsLoadedOnce = ref(false)
 
 const statCards = computed(() => [
   { title: t('alarm.pending'), value: stats.pending, color: '#e63946', icon: Bell },
@@ -329,14 +350,10 @@ const formatHandler = (handler) => {
   return t('common.noData')
 }
 
-const alarmTypeMap = computed(() => ({
-  smoke: t('dashboard.smokeAlarm'),
-  temp_abnormal: t('dashboard.tempAbnormal'),
-  manual_button: t('dashboard.manualAlarm'),
-  phone_report: t('dashboard.phoneReport'),
-  patrol_find: t('dashboard.patrolFind'),
-  other: t('common.all'),
-}))
+// 类型标签取自 utils/labelMaps 的单一词表（DashboardView / ReportView 同源）：
+// 本处曾自抄一份并把 other 写成「全部」，于是列表列与上报下拉框显示出一个并不存在的
+// 类型，用户按字面选「全部」= 上报一条 alarmType='other' 的工单。
+const alarmTypeMap = computed(() => makeAlarmTypeLabels(t))
 
 // 标签颜色映射
 const tagTypeMap = {
@@ -366,9 +383,14 @@ const loadStats = async () => {
       stats.resolvedToday = resolvedCount
       // 报警总数（累计口径）
       stats.totalMonth = data.total || 0
+      statsLoadedOnce.value = true
+      statsFailed.value = false
+    } else {
+      statsFailed.value = true
     }
   } catch (e) {
-    // 统计加载失败，静默处理
+    // 旧口径是「静默处理」：首屏失败后四张卡恒为 0/0/0/0，读作「今日无报警」
+    statsFailed.value = true
   }
 }
 
@@ -502,7 +524,8 @@ const submitReport = async () => {
       reportDialog.visible = false
       await refreshAll()
     } catch (e) {
-      ElMessage.error(t('messages.createFailed'))
+      // 错误已在拦截器统一提示（2026-09-26 审计：此处再补泛化 toast 会双提示，
+      // 且泛化文案会覆盖拦截器给出的具体错误语义）
     } finally {
       reportDialog.submitting = false
     }
@@ -660,6 +683,13 @@ onMounted(() => {
 }
 .stat-row {
   margin-bottom: 4px;
+}
+
+.stats-failed {
+  display: flex;
+  gap: var(--xf-spacing-md);
+  align-items: center;
+  margin-bottom: var(--xf-spacing-md);
 }
 
 .mini-stat {

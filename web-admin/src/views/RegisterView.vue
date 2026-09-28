@@ -68,6 +68,7 @@
           :rules="rules"
           label-position="top"
           size="large"
+          :validate-on-rule-change="false"
           @keyup.enter="onEnter"
         >
           <!-- 步骤容器：三步内容高度不同（第 1 步比第 3 步高约 130px），
@@ -424,6 +425,12 @@ const captchaId = ref('')
 const captchaImg = ref('')
 
 const loadCaptcha = async () => {
+  // 先清空再拉取（与 LoginView.loadCaptcha 同口径）：验证码是一次性消费，失败的刷新
+  // 若不清空，会留着上一次已被提交消费掉的旧 captchaId + 旧图，用户对着陈旧图重填、
+  // captchaId 仍是消费过的那个 → 每次提交都失败且毫无提示 = 静默锁死。清空后失败态
+  // 落到「点击重试」占位图，可自愈。getCaptcha 走 apiClient，网络失败拦截器已统一提示。
+  captchaId.value = ''
+  captchaImg.value = ''
   try {
     const { data: resp } = await api.auth.getCaptcha()
     if (resp.success && resp.data?.captchaId) {
@@ -431,7 +438,7 @@ const loadCaptcha = async () => {
       captchaImg.value = `data:image/svg+xml;utf8,${encodeURIComponent(resp.data.svg)}`
     }
   } catch (_) {
-    // 验证码加载失败时用户可点击占位区重试
+    // 保持清空态：渲染占位图「点击重试」，而非停在已消费的陈旧验证码
   }
 }
 
@@ -836,6 +843,9 @@ const resetForm = () => {
   display: flex;
   align-items: center;
   gap: 14px;
+  /* 与登录卡同理：长文案语言下标题 + 药丸超宽时折行，不溢出卡片右边框 */
+  flex-wrap: wrap;
+  row-gap: 10px;
   margin-bottom: 18px;
 }
 

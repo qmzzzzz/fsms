@@ -292,6 +292,7 @@ const dialog = reactive({
     building: '',
     floor: '',
     room: '',
+    detail: '',
     installDate: '',
     checkCycle: 30,
     remark: '',
@@ -356,6 +357,7 @@ const handleAdd = () => {
   dialog.form.building = ''
   dialog.form.floor = ''
   dialog.form.room = ''
+  dialog.form.detail = ''
   dialog.form.installDate = localDateStr()
   dialog.form.checkCycle = 30
   dialog.form.remark = ''
@@ -370,7 +372,13 @@ const handleEdit = (row) => {
   dialog.form.deviceType = row.deviceType
   dialog.form.building = row.location?.building || ''
   dialog.form.floor = row.location?.floor || ''
-  dialog.form.room = row.location?.room || row.location?.detail || ''
+  dialog.form.room = row.location?.room || ''
+  // detail 是后端真实字段（FireDevice.location.detail，maxlength 200），随表单原样回填，
+  // 不再折叠进 room——否则编辑保存会把详细位置误存到 room 并丢掉 detail（消防设备定位被破坏）。
+  dialog.form.detail = row.location?.detail || ''
+  // 不再暂存原始 location 作回传底：DeviceService.updateDevice 对 location 按子字段合并，
+  // 「没发的键保持原值」，表单不维护的子字段（API/导入写入的 location.coordinates）
+  // 无需客户端参与就能存活——该存活语义由 src/tests/services/deviceLocationMerge.test.js 钉住。
   dialog.form.installDate = toDateOnly(row.installDate)
   dialog.form.checkCycle = row.checkCycle || 30
   dialog.form.remark = row.remark || ''
@@ -389,7 +397,7 @@ const handleDelete = async (row) => {
     loadData()
   } catch (e) {
     if (e !== 'cancel') {
-      ElMessage.error(t('messages.deleteFailed'))
+      // 错误已在拦截器统一提示（2026-09-26 审计：泛化 toast 会双提示并覆盖具体语义）
     }
   }
 }
@@ -408,13 +416,22 @@ const submitForm = async () => {
       deviceCode: dialog.form.deviceCode || undefined,
       deviceName: dialog.form.deviceName,
       deviceType: dialog.form.deviceType,
+      // 只发表单维护的 4 个键：服务端按子字段合并，未提及的键（coordinates 等）保持原值。
+      // 清空发空串而不是 undefined —— JSON.stringify 会丢掉值为 undefined 的键，
+      // 服务端收到「没提这个键」＝保持原值，"把详细位置删空"就永远保存不下去。
       location: {
         building: dialog.form.building,
         floor: dialog.form.floor,
         room: dialog.form.room,
+        detail: dialog.form.detail,
       },
       installDate: dialog.form.installDate,
-      checkCycle: dialog.form.checkCycle,
+      // el-input-number 清空时 v-model 变 null；后端 update 的 checkCycle 校验是
+      // .optional().isInt({min:1,max:365})，而 .optional() 只对 undefined 放行，
+      // null 仍会进 isInt → 400「检查周期应为 1-365 天」。归一成 undefined：
+      // 未填即「不改动该字段 / 用默认值」。与上面的 detail 相反是有意为之：
+      // 后端没有"空周期"这个合法值（min:1），检查周期因此没有清空这条出路。
+      checkCycle: dialog.form.checkCycle ?? undefined,
       remark: dialog.form.remark,
     }
     if (dialog.isEdit) {
@@ -427,7 +444,7 @@ const submitForm = async () => {
     dialog.visible = false
     loadData()
   } catch (e) {
-    ElMessage.error(dialog.isEdit ? t('messages.updateFailed') : t('messages.createFailed'))
+    // 错误已在拦截器统一提示（2026-09-26 审计：泛化 toast 会双提示并覆盖具体语义）
   } finally {
     dialog.submitting = false
   }
@@ -442,6 +459,7 @@ const resetForm = () => {
     building: '',
     floor: '',
     room: '',
+    detail: '',
     installDate: '',
     checkCycle: 30,
     remark: '',

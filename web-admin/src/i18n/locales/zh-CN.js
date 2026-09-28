@@ -15,6 +15,9 @@ export default {
     catSystemOps: '系统操作',
     shortAuth: '认证',
     shortUser: '用户',
+    // 审计页用户名搜索：2026-09-28 起为「前缀匹配、不区分大小写」
+    // （原为子串匹配；改前缀是为了让 username_ci_timestamp 索引生效）
+    usernamePrefixHint: '用户名前缀（不区分大小写）',
     shortRole: '角色',
     shortPermission: '权限',
     shortDevice: '设备',
@@ -53,6 +56,9 @@ export default {
     issueNo: '问题 {n}',
     issueDeviceLabel: '选择问题设备',
     deviceRequiredMsg: '请选择设备',
+    deviceListPartial:
+      '仅加载了前 {loaded} 台设备（共 {total} 台），没找到目标设备时请先核对设备台账',
+    deviceListFailed: '设备列表加载失败，请重试；加载成功前无法记录问题设备',
     issueDescLabel: '问题描述',
     issueDescPlaceholder: '请输入问题描述',
     severityLabel: '严重程度',
@@ -96,6 +102,7 @@ export default {
     search: '搜索',
     reset: '重置',
     operation: '操作',
+    detail: '详情',
     status: '状态',
     createTime: '创建时间',
     updateTime: '更新时间',
@@ -130,6 +137,8 @@ export default {
     darkMode: '暗色模式',
     lightMode: '亮色模式',
     autoMode: '跟随系统',
+    // 紧凑空间（认证卡头药丸）用的系统档短文案；中文本已足够短，保持同文
+    autoShort: '跟随系统',
     theme: '主题',
     language: '语言',
     copy: '复制',
@@ -355,6 +364,7 @@ export default {
   },
   user: {
     title: '用户管理',
+    userColumn: '用户',
     username: '用户名',
     email: '邮箱',
     realName: '真实姓名',
@@ -811,7 +821,7 @@ export default {
       errorRate: '错误率',
       avgLatency: '平均延迟',
       uptime: '运行时长',
-      level: { low: '低', medium: '中', high: '高', critical: '严重' },
+      level: { low: '低', medium: '中', high: '高', critical: '严重', unknown: '未知' },
     },
   },
   login: {
@@ -965,6 +975,10 @@ export default {
     remark: '备注',
     exportSuccess: '导出成功',
     exportFailed: '导出失败',
+    // 截断提示的文案属于展示层：后端响应头只表态"这份不保证完整"（值是 'true'），
+    // 说人话是这里的事 —— 直接把响应头弹给用户会得到一个 "true"。
+    exportTruncated:
+      '导出结果不完整（已达单次导出上限，或导出期间数据发生变更），请缩小范围后重新导出',
     unsavedChanges: '有未保存的更改',
     // axios 拦截器 fallback（后端未返回 message 或网络层错误时使用）
     requestParamError: '请求参数错误',
@@ -1138,6 +1152,7 @@ export default {
     configLoginCaptchaMustBeBoolean: '参数 loginCaptchaEnabled 必须为布尔值',
     configRegisterCaptchaMustBeBoolean: '参数 registerCaptchaEnabled 必须为布尔值',
     userViewForbidden: '无权查看该用户',
+    userScopeForbidden: '无权操作该用户（超出您的数据范围）',
     ipRulesFormatInvalid: 'IP 范围规则格式有误：{rules}',
     roleNotFoundInList: '包含不存在的角色',
     roleAssignHigherLevelForbidden: '无权分配高于自身层级的角色',

@@ -179,7 +179,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
@@ -402,6 +402,20 @@ const disableMfa = async () => {
 
 onMounted(() => {
   loadMfaStatus()
+})
+
+// 组件卸载时擦除瞬态密钥材料：TOTP secret / otpauth URI / 一次性恢复码只在"配置 MFA"
+// 这一段时间内需要可见。它们都是纯前端内存态、本不落 storage，但 ProfileView 长时间停留
+// 或被 keep-alive 复用时，明文恢复码/密钥会一直挂在 reactive state 里（DevTools/异常快照
+// 可读）。与 LoginView 登录后立即清空 password 字段同一卫生口径。
+onUnmounted(() => {
+  mfa.secret = ''
+  mfa.otpauthUri = ''
+  mfa.recoveryCodes = []
+  mfa.confirmCode = ''
+  mfa.disableCode = ''
+  mfa.regenCode = ''
+  mfa.showRecoveryDialog = false
 })
 </script>
 

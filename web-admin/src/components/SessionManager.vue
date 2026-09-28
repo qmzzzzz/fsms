@@ -16,7 +16,7 @@
         <button
           type="button"
           class="glass-btn glass-btn--danger glass-btn--sm"
-          :disabled="loading || otherCount === 0"
+          :disabled="loading || otherCount === 0 || revokingOthers"
           @click="revokeOthers"
         >
           {{ t('session.revokeOthers') }}
@@ -149,6 +149,10 @@ const { t } = useI18n()
 const sessions = ref([])
 const loading = ref(true)
 const revoking = ref('')
+// 撤销"其它所有会话"的在途锁：revokeOtherSessions 是幂等批处理，但 DELETE 期间
+// loading=false、otherCount 未刷新 → 按钮仍可点，连点会第二次调用返回 revokedCount:0，
+// 弹出与首条成功矛盾的「已终止 0 台设备」。用独立标志在 DELETE 期间锁死入口。
+const revokingOthers = ref(false)
 const currentSidPresent = ref(true)
 /**
  * 已展开技术详情的 sid 集合
@@ -275,6 +279,7 @@ const revokeOne = async (item) => {
 }
 
 const revokeOthers = async () => {
+  if (revokingOthers.value) return
   try {
     await ElMessageBox.confirm(
       t('session.revokeOthersConfirm', { count: otherCount.value }),
@@ -285,12 +290,15 @@ const revokeOthers = async () => {
     return
   }
 
+  revokingOthers.value = true
   try {
     const { data: resp } = await api.auth.revokeOtherSessions()
     ElMessage.success(t('session.revokedOthers', { count: resp.data?.revokedCount ?? 0 }))
     await load()
   } catch (_) {
     // 错误已在拦截器处理
+  } finally {
+    revokingOthers.value = false
   }
 }
 
@@ -350,8 +358,10 @@ defineExpose({ load })
 }
 
 .session-item--current {
-  border-color: var(--xf-primary);
-  background: var(--xf-primary-alpha-15);
+  /* 红色 alpha 染色读感像告警；「本设备」是正向状态（标签本就是绿色 success），
+     卡片底色与描边改用 success 族与标签同频，语义一致 */
+  border-color: var(--xf-success-alpha-45);
+  background: var(--xf-success-alpha-8);
 }
 
 .session-icon {

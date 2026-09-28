@@ -45,6 +45,7 @@
           'is-removed': ui.isPermRemoved(perm._id),
         }"
         :title="ui.permTooltip(perm)"
+        :aria-pressed="ui.isPermChecked(perm._id)"
         @click="ui.togglePerm(perm._id)"
       >
         <span class="glass-perm-btn__check">
