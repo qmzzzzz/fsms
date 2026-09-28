@@ -16,6 +16,11 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const logger = require('../utils/logger');
 const { stripControlChars } = require('../utils/helpers');
+// P-9：三个上报限流器此前是裸 MemoryStore，多副本部署时各自独立计数——
+// 攻击者对每个副本各刷满配额，N 副本 = N 倍日志放大，与 /api 侧限流器的
+// 共享口径不一致。接入同一个 makeSharedStore（无 Redis 时行为不变）。
+const { makeSharedStore } = require('../middleware/rateLimitStore');
+const { normalizeRateLimitIp } = require('../middleware/rateLimit');
 const { captureException, isSentryInitialized } = require('../middleware/sentry');
 
 /**
@@ -26,7 +31,8 @@ const { captureException, isSentryInitialized } = require('../middleware/sentry'
 const cspReportLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 60,
-  keyGenerator: (req) => `csp-report:${req.ip}`,
+  store: makeSharedStore('csp-report'),
+  keyGenerator: (req) => `csp-report:${normalizeRateLimitIp(req.ip)}`,
   standardHeaders: false,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).end(),
@@ -116,7 +122,8 @@ router.post('/csp-report', cspReportLimiter, cspReportParser, (req, res) => {
 const clientErrorLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 30,
-  keyGenerator: (req) => `client-errors:${req.ip}`,
+  store: makeSharedStore('client-errors'),
+  keyGenerator: (req) => `client-errors:${normalizeRateLimitIp(req.ip)}`,
   standardHeaders: false,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).end(),
@@ -233,7 +240,8 @@ const buildSecurityTxt = (req) => {
 const securityTxtLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 30,
-  keyGenerator: (req) => `security-txt:${req.ip}`,
+  store: makeSharedStore('security-txt'),
+  keyGenerator: (req) => `security-txt:${normalizeRateLimitIp(req.ip)}`,
   standardHeaders: false,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).end(),

@@ -46,6 +46,8 @@ const ALERT_TYPES = {
   UNUSUAL_TIME: 'unusual_time_access',
   PERMISSION_ABUSE: 'permission_abuse',
   SUSPICIOUS_IP: 'suspicious_ip_activity',
+  // 限流持续触顶的升级封禁事件（services/rateLimitEscalation.js 的 CC 防护闭环）
+  RATE_LIMIT_ABUSE: 'rate_limit_abuse',
 };
 
 /**
@@ -216,6 +218,12 @@ const checkBruteForce = async (username, ip) => {
     // 形态，用原始值（如 ::ffff:1.2.3.4）查询会恒为 0，阶梯永远停在第一档。
     const normalizedIp = normalizeIP(ip) || ip;
 
+    // R-H2：**封禁判据只看 IP 维度**。maxFailures 取的是双维度的较大值——分布式撞
+    // 单账号（多个攻击 IP 各自少量尝试同一账号）会让 userFailures 达标，而"当前请求
+    // 的 IP"可能只贡献了 1 次失败：此时封它，NAT 出口后的无辜用户陪绑（受害者本人
+    // 换个网络登录一次即被封 1 小时）。账号维度的攻击由账户锁定 + loginUserLimiter
+    // 兜底；IP 封禁只对「这个 IP 自己刷满了失败」的确定性信号执行。
+
     // 渐进式封禁的"第几次"必须在**本次告警落库之前**统计：
     // 每穿过一次上面的频控闸 = 一条 brute_force_login 审计 + 一次封禁动作，
     // 所以"历史上这个 IP 触发过几条该审计"就是封禁事件数。
@@ -260,6 +268,10 @@ const checkBruteForce = async (username, ip) => {
       { username, ip, attempts: maxFailures }
     );
 
+    // R-H2：IP 维度未达标（分布式撞单账号）到此为止——告警与审计已落库
+    // （body 的 ipAttempts 即判据），封禁只对「这个 IP 自己刷满了失败」执行
+    if (ipFailures < THRESHOLDS.bruteForceAttempts) return;
+
     try {
       // E-04：**必须**保持惰性 require（securityAlert ↔ middleware/security
       // 循环依赖），提到文件顶部会在加载顺序不利时拿到未完成的导出。
@@ -272,9 +284,11 @@ const checkBruteForce = async (username, ip) => {
       // 实际上该 IP 还在自由撞库（纸面防线）。封禁结果只能按返回值分派，不能按异常分派。
       // 成功行不带时长：addToBlacklist 自己会打「封禁时长：N秒」，两处各写一遍必然漂移。
       const result = await addToBlacklist(normalizedIp, ESCALATION_TIERS[tier], tierReason, 'auto');
-      const banFailReason = result?.reason ?? 'no_result';
       if (result?.banned) logger.warn(`渐进式封禁 ${normalizedIp} 第 ${priorBans + 1} 次`);
-      else logger.error(`自动封禁未生效 ${normalizedIp}（${banFailReason}）请人工封禁或核对白名单`);
+      else
+        logger.error(
+          `自动封禁未生效 ${normalizedIp}（${result?.reason ?? 'no_result'}）请人工封禁或核对白名单`
+        );
     } catch (e) {
       logger.error(`自动封禁 IP 失败: ${ip}, 错误: ${e.message}`);
     }

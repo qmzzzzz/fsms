@@ -6,9 +6,43 @@
 const rateLimit = require('express-rate-limit');
 const config = require('../config');
 const logger = require('../utils/logger');
+const { normalizeIP } = require('../utils/ipUtils');
 const { SUPER_ADMIN_ROLE_CODE } = require('../utils/superAdmin');
 const { makeSharedStore } = require('./rateLimitStore');
 const { isProbeRequest } = require('../constants/probePaths');
+
+/**
+ * 限流键的 IP 归一化（CC 防护同源收口，见总账 §4.4「限流键直接拼原文 req.ip」条目）
+ *
+ * `::ffff:1.2.3.4` 与 `1.2.3.4` 在名单侧是同一地址（IPBlacklist 入库前归一化），
+ * 限流侧若按原文组键就是两个桶——同一来源拿到两份配额，标称阈值名存实亡；
+ * IPv6 的等价写法（压缩/展开）同理。这里统一走 ipUtils.normalizeIP 与名单侧
+ * 同一把尺。归一化失败的歧义写法（八进制/十六进制等）回退原文：该形态自成一桶，
+ * 不与任何他人共享，fail-closed 语义与改前一致（只是不再翻倍）。
+ * @param {unknown} ip req.ip
+ * @returns {string} 归一化后的限流键 IP 部分
+ */
+const normalizeRateLimitIp = (ip) => normalizeIP(ip) || String(ip ?? 'unknown');
+
+/**
+ * 限流触发 → 升级服务（CC 防护闭环）的统一挂钩
+ *
+ * 惰性 require：rateLimit.js 在 app.js 加载链的最前端，而升级服务要拉
+ * AuditLog 模型与 securityAlert 一串依赖，提前加载会放大启动链路与循环
+ * 依赖风险；首次 429 才加载，代价是一次 require 缓存命中。
+ *
+ * 升级服务的 noteRateLimitHit 自身永不抛错，这里的 catch 只兜"模块加载
+ * 本身失败"（如数据模型未注册）——信号丢了可以，429 响应不能挂。
+ */
+let escalationModule = null;
+const noteRateLimitHit = (req, limiterName) => {
+  try {
+    if (!escalationModule) escalationModule = require('../services/rateLimitEscalation');
+    escalationModule.noteRateLimitHit(req, limiterName);
+  } catch (err) {
+    logger.warn(`限流升级信号上报失败（忽略）: ${err.message}`);
+  }
+};
 
 // 白名单豁免：checkIPBlacklist 中间件命中白名单时会挂 req.ipWhitelisted，
 // 各限流器统一跳过白名单 IP，形成"黑白名单 + 限流"联动的完整访问控制。
@@ -46,6 +80,7 @@ const generalLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: config.rateLimit.maxRequests,
   store: makeSharedStore('general'),
+  keyGenerator: (req) => normalizeRateLimitIp(req.ip),
   skip: skipProbesAndWhitelisted, // 白名单 IP 与探针 IP 豁免通用限流
   standardHeaders: true,
   legacyHeaders: false,
@@ -54,6 +89,7 @@ const generalLimiter = rateLimit({
     message: '请求过于频繁，请稍后再试',
   },
   handler: (req, res, _next) => {
+    noteRateLimitHit(req, 'general');
     logger.warn(`限流触发：${req.ip} - ${req.method} ${req.path}`);
     res.status(429).json({
       success: false,
@@ -71,6 +107,7 @@ const strictLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: 30,
   store: makeSharedStore('strict'),
+  keyGenerator: (req) => normalizeRateLimitIp(req.ip),
   skip: skipIfWhitelisted, // P3-35：资源型限流，可信 IP 豁免（口径同 generalLimiter）
   standardHeaders: true,
   legacyHeaders: false,
@@ -79,6 +116,7 @@ const strictLimiter = rateLimit({
     message: '操作过于频繁，请稍后再试',
   },
   handler: (req, res, _next) => {
+    noteRateLimitHit(req, 'strict');
     logger.warn(`严格限流触发：${req.ip} - ${req.method} ${req.path}`);
     res.status(429).json({
       success: false,
@@ -113,7 +151,7 @@ const loginLimiter = rateLimit({
   keyGenerator: (req) => {
     // 仅按来源 IP 限流：username 是客户端可控字段，参与组键会让攻击者通过
     // 任意轮换用户名不断获得新配额，使暴力破解防护形同虚设
-    return `login:${req.ip}`;
+    return `login:${normalizeRateLimitIp(req.ip)}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -122,6 +160,7 @@ const loginLimiter = rateLimit({
     message: '登录尝试次数过多，请稍后再试',
   },
   handler: (req, res, _next) => {
+    noteRateLimitHit(req, 'login-ip');
     logger.warn('登录限流触发', { ip: req.ip, username: req.body?.username });
     res.status(429).json({
       success: false,
@@ -156,7 +195,9 @@ const loginUserLimiter = rateLimit({
   skipSuccessfulRequests: true,
   keyGenerator: (req) => {
     const username = req.body?.username;
-    return username ? `login-user:${normalizeLoginRateKey(username)}` : `login-user-ip:${req.ip}`;
+    return username
+      ? `login-user:${normalizeLoginRateKey(username)}`
+      : `login-user-ip:${normalizeRateLimitIp(req.ip)}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -180,11 +221,23 @@ const ipLimiter = rateLimit({
   windowMs: config?.rateLimit?.ipWindowMs || 60 * 60 * 1000, // 默认 1 小时
   max: config?.rateLimit?.ipMaxRequests || 1000, // 默认每小时 1000 请求
   store: makeSharedStore('ip'),
+  keyGenerator: (req) => normalizeRateLimitIp(req.ip),
   skip: skipProbesAndWhitelisted, // 白名单 IP 与探针 IP 豁免 IP 限流
-  keyGenerator: (req) => req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: {
     success: false,
     message: 'IP 请求频率超限',
+  },
+  // 显式 handler 而非默认：响应体与原先的 message 选项逐字一致，
+  // 差异只在多出升级信号上报——ipLimiter 是全站每小时桶，是 CC 洪水里
+  // 最先持续触顶的那一层，没有 handler 就没有升级信号
+  handler: (req, res, _next) => {
+    noteRateLimitHit(req, 'ip');
+    res.status(429).json({
+      success: false,
+      message: 'IP 请求频率超限',
+    });
   },
 });
 
@@ -209,11 +262,14 @@ const userLimiter = rateLimit({
   },
   keyGenerator: (req) => {
     // 已认证用户按 userId 限流，未认证按 IP
-    return req.user?.userId ? `user:${req.user.userId}` : `ip:${req.ip}`;
+    return req.user?.userId ? `user:${req.user.userId}` : `ip:${normalizeRateLimitIp(req.ip)}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
+    // 升级信号只看 IP 维度：按 userId 组键的触顶是已认证用户的配额问题，
+    // 封 IP 会误伤同源的其他用户
+    if (!req.user?.userId) noteRateLimitHit(req, 'user-ip');
     logger.warn('用户级限流触发', { userId: req.user?.userId || '-', ip: req.ip });
     res.status(429).json({
       success: false,
@@ -232,10 +288,11 @@ const captchaLimiter = rateLimit({
   max: 60,
   store: makeSharedStore('captcha'),
   skip: skipIfWhitelisted, // P3-35：资源型限流（防内存刷取），可信 IP 豁免
-  keyGenerator: (req) => `captcha:${req.ip}`,
+  keyGenerator: (req) => `captcha:${normalizeRateLimitIp(req.ip)}`,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
+    noteRateLimitHit(req, 'captcha');
     logger.warn(`验证码限流触发：${req.ip}`);
     res.status(429).json({
       success: false,
@@ -259,7 +316,9 @@ const passwordChangeLimiter = rateLimit({
   skipSuccessfulRequests: false,
   keyGenerator: (req) => {
     const userId = req.user?.userId;
-    return userId ? `pwd-change:${userId}:${req.ip}` : `pwd-change-ip:${req.ip}`;
+    return userId
+      ? `pwd-change:${userId}:${normalizeRateLimitIp(req.ip)}`
+      : `pwd-change-ip:${normalizeRateLimitIp(req.ip)}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -277,7 +336,7 @@ const passwordChangeLimiter = rateLimit({
  *
  * 为什么原样组合键不够（实测：`zztmpctl/laneE/xffCredentialLimiter.test.js`，
  * 判据见 `src/tests/security/credentialLimiterPerUserBucket.test.js`）：
- * `passwordChangeLimiter`/`reauthLimiter` 的键是 `${userId}:${req.ip}`，
+ * `passwordChangeLimiter`/`reauthLimiter` 的键由 userId 与来源 IP 拼装而成，
  * IP 是键的**组成部分**而不是并列的另一把尺子 ⇒ 换 IP 就换一个全新桶，
  * "单账号 5 次/15 分钟"实际变成"单账号 × 每个源 IP 各 5 次"。
  * 两条独立放大路径：
@@ -334,10 +393,11 @@ const registerIpLimiter = rateLimit({
   max: config.rateLimit.registerMaxRequests || 10,
   store: makeSharedStore('register-ip'),
   skip: skipIfWhitelisted, // 资源型限流，可信 IP 豁免（口径同 generalLimiter）
-  keyGenerator: (req) => `register:${req.ip}`,
+  keyGenerator: (req) => `register:${normalizeRateLimitIp(req.ip)}`,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
+    noteRateLimitHit(req, 'register');
     logger.warn(`注册 IP 限流触发：${req.ip}（可能存在批量注册滥用）`);
     res.status(429).json({
       success: false,
@@ -365,7 +425,9 @@ const reauthLimiter = rateLimit({
   skipSuccessfulRequests: false,
   keyGenerator: (req) => {
     const userId = req.user?.userId;
-    return userId ? `reauth:${userId}:${req.ip}` : `reauth-ip:${req.ip}`;
+    return userId
+      ? `reauth:${userId}:${normalizeRateLimitIp(req.ip)}`
+      : `reauth-ip:${normalizeRateLimitIp(req.ip)}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -393,4 +455,6 @@ module.exports = {
   registerIpLimiter,
   // 仅供测试：账号维度键的归一化规则（空格填充分裂计数桶的回归由它盯着）
   normalizeLoginRateKey,
+  // 仅供测试与 wellKnownRoutes 复用：限流键 IP 部分的归一化（::ffff: 双桶回归由它盯着）
+  normalizeRateLimitIp,
 };
