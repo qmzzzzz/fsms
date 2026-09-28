@@ -152,7 +152,7 @@ async function restoreCollection(collection, file) {
  * 原实现是「connect → 打印目标库 → 校验 --yes → 校验白名单」⇒ 一次"被拒绝的执行"
  * 仍然对目标库（可能就是生产库）完成了连接；库不可达时脚本卡在 30s serverSelection
  * 重试里，运维看到的是"脚本挂死"而不是"被 fail-closed 拦下"。
- * 同族脚本 fix-token-blacklist-index.js 早已是这个顺序（见 zzqoder_destructiveGuardOrder.test.js）。
+ * 同族脚本 fix-token-blacklist-index.js 早已是这个顺序（见 destructiveGuardOrder.test.js）。
  *
  * 抽成独立函数有两个理由：① 让"护栏先于连接"在源码顺序上一目了然（静态门禁判的就是这个顺序）；
  * ② 主 IIFE 的圈复杂度贴着 lint 上限，护栏分支不能再内联进去。

@@ -59,7 +59,7 @@ jobs:
       # 编码门禁：源码必须是 UTF-8 且不含乱码指纹（GBK 混入 / U+FFFD / mojibake）。
       # 2026-09-19 实证过"脚本存在但没有任何工作流引用它"的腐化形态——
       # 一道没人调用的门禁比没有更糟：它给出已设防的错觉。
-      # 判据由 src/tests/deploy/zzqA_ciGateWiring.test.js 钉住（删步骤即红）。
+      # 判据由 src/tests/deploy/ciGateWiring.test.js 钉住（删步骤即红）。
       - name: Check source encoding (UTF-8 / mojibake fingerprints)
         run: npm run check:utf8
 

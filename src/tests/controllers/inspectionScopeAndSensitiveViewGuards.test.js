@@ -59,7 +59,7 @@ jest.mock('../../middleware/rbac', () => ({
   assertRecordInScope: jest.fn(),
   // 写路径新增的对象级范围闸会先取一次数据范围（getDataScope 查真实 User 文档）。
   // 本套件测的是"各道 403 分支的先后与响应码"，不是范围档位本身——
-  // 档位行为由 zzqoder_inspectionWriteScopeGates.test.js 用真库端到端覆盖。
+  // 档位行为由 inspectionWriteScopeGates.test.js 用真库端到端覆盖。
   // 这里把范围固定为 all，避免夹具里那只"半链式"的 User mock 被 populate 打穿。
   getDataScope: jest.fn(async () => ({ type: 'all' })),
 }));

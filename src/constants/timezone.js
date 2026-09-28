@@ -59,7 +59,7 @@ const DAY_PARTS_FMT = new Intl.DateTimeFormat('en-CA', {
   //   只留 hour12:false（丢掉本行）⇒ '00'，当前构建安全，但换构建可落到 h24 ⇒ 午夜输出 '24'；
   //   两枚都丢 ⇒ en-CA 直接走 h12，午夜输出 '12'——offsetAt 会把业务日界算偏 12 小时，
   //   同时 businessHour 读成 12 让 isOffHours 在午夜整点判成"常规时间"（漏报非常规时间告警）。
-  // 判据由 src/tests/constants/zzqA_businessHourSingleSource.test.js 的午夜臂钉住。
+  // 判据由 src/tests/constants/businessHourSingleSource.test.js 的午夜臂钉住。
   hourCycle: 'h23',
   year: 'numeric',
   month: '2-digit',

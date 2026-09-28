@@ -139,7 +139,7 @@ async function getPermissions(userId) {
   }
 
   const permissions = new Set();
-  // 防御性 filter(Boolean)：实测 mongoose 8.24.1 不留 null 洞（见 zzqoder_populateMatchShape.test.js），保留以防版本改行为
+  // 防御性 filter(Boolean)：实测 mongoose 8.24.1 不留 null 洞（见 populateMatchShape.test.js），保留以防版本改行为
   user.roles.filter(Boolean).forEach((role) => {
     (role.permissions || []).filter(Boolean).forEach((perm) => permissions.add(perm.code));
   });

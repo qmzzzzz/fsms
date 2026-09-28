@@ -1,7 +1,7 @@
 /**
  * 数据范围过滤条件进入聚合管道前的 ObjectId 归一化
  *
- * 根因（实测钉在 src/tests/zzqoder_alarmStatsScopeCast.test.js）：
+ * 根因（实测钉在 src/tests/alarmStatsScopeCast.test.js）：
  * Mongoose 的查询构造器会按 schema 把 `'24位hex字符串'` cast 成 ObjectId，
  * 但 `Model.aggregate([{$match: ...}])` **不做 schema cast** —— 字符串就按字符串比，
  * BSON 里 ObjectId 与 String 是不同类型，于是**永远匹配不到**。
@@ -34,7 +34,7 @@ const HEX_OID = /^[0-9a-f]{24}$/i;
  * 字符串判断放在最外层而不是对象分支里：`{ userId: { $in: ['<hex>', ...] } }` 的
  * 数组元素父节点是 Array 而不是对象，若只在对象分支里判 hex，数组内的字符串
  * 会被原样漏掉（reportExportService 里那份私有实现正是这个形态，实测见
- * src/tests/zzqoder_scopeCastFamily.test.js 的 $in 用例）。
+ * src/tests/scopeCastFamily.test.js 的 $in 用例）。
  *
  * @param {*} node 查询条件（对象 / 数组 / 标量）
  * @returns {*} 同结构、叶子已归一化的新对象（不修改入参）

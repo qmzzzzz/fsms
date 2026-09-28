@@ -71,7 +71,7 @@ function permissionMapKeys(src) {
  * 这两个编码从未被 defaultRoles 种入，却会被 pre-save 标成内置。
  *
  * 为什么不钉"必须为空"：删掉它们会打破既有夹具——
- * `src/tests/models/zzqA_roleBuiltInDeleteGuard.test.js` 用 `code: 'USER'` 造一条内置角色
+ * `src/tests/models/roleBuiltInDeleteGuard.test.js` 用 `code: 'USER'` 造一条内置角色
  * 来测删除护栏，`src/tests/utils/tails.test.js` 用 `code: 'ADMIN'` 造超管之外的第二角色，
  * `scripts/audit-probes/ws-session-bypass.cjs` 同理。也就是说这份更宽的名单已经被别处
  * 当成契约在用，收窄它需要一次带迁移判断的改动（真实库里可能真有历史 ADMIN/USER 行，

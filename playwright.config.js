@@ -20,7 +20,7 @@ module.exports = defineConfig({
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
     baseURL: process.env.E2E_BASE_URL || 'http://127.0.0.1:3000',
-    // 与 retries:0 联动的不变量（由 src/tests/zzqoder_playwrightConfig.test.js 守住）：
+    // 与 retries:0 联动的不变量（由 src/tests/playwrightConfig.test.js 守住）：
     // 'on-first-retry' 的语义是「仅首次重试时录制并保留 trace」，而 retries:0 意味着
     // 永远不存在第二次尝试——该取值在本配置下等价于「不留任何失败现场」，
     // 与上方「失败应显性暴露并排查」直接矛盾。retain-on-failure 才是 0 重试下

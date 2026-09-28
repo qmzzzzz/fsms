@@ -5,7 +5,7 @@
  * 路由 isIn 校验器 ↔ docs/generate.js ↔ **已提交产物** src/docs/openapi.json 五端对账。
  * 本轮把巡检域四组此前共有 15 处手写副本的清单收进 constants/inspection.js
  * （inspectionType 6 值 / status 5 值 / result 3 值 / reviewResult 2 值），
- * severity 那一组由 F-149 的 zzqoder_riskLevelSingleSource.test.js 钉，这里顺手一起对账。
+ * severity 那一组由 F-149 的 riskLevelSingleSource.test.js 钉，这里顺手一起对账。
  *
  * 为什么必须钉**产物**而不是只钉生成器：openapiSync 的 L-24 深比对保证的是"生成器 == 产物"，
  * 两边共用同一份手抄清单时它当然绿——F-142 的记录里就出现过产物落后于生成器。
@@ -225,7 +225,7 @@ describe('已提交产物的文档枚举 = 常量（钉对外交付的那一份�
  *   - userService.releaseOpenAssignments：['pending','in_progress'] —— **漏了 overdue**，
  *     而调度器恰恰会把超期的开放计划改成 overdue ⇒ 删掉唯一执行人后这条计划开工/提交双双 409，
  *     cancel 又不卡执行人 ⇒ 唯一出路是把真做过的消防巡检登记成「已取消」（行为级回归见
- *     zzqoder_userDeleteCascade.test.js 的「超期(overdue)的巡检」用例，整改前它是红的）。
+ *     userDeleteCascade.test.js 的「超期(overdue)的巡检」用例，整改前它是红的）。
  *   - deviceReminder.markOverdueInspections 与 reportDashboardService 的超期统计各写一份
  *     ['pending','in_progress']：两边不同口径时，看板会统计出调度器永不改写的超期数（或漏计），
  *     而漏计在看面上显示为「没有超期」——一个静默的负结果。

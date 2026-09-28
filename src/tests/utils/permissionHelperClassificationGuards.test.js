@@ -155,7 +155,7 @@ describe('permissionHelper 分支补齐', () => {
   describe('getUserPermissions', () => {
     test('activeRoles（L-15 导出）：剔除可能的 null 洞 + 入参缺失/非数组兜底', () => {
       // 防御性冗余：实测 mongoose 8.24.1 对 populate+match 未命中的引用是丢弃元素（不留 null），
-      // 见 zzqoder_populateMatchShape.test.js。下面注入字面 null，是验证「数组里一旦出现 null 洞，
+      // 见 populateMatchShape.test.js。下面注入字面 null，是验证「数组里一旦出现 null 洞，
       // 取 r.name/r.code 也不会抛 TypeError → 500」这层兜底在将来版本改行为时仍然成立。
       expect(helper.activeRoles({ roles: [{ code: 'a' }, null, { code: 'b' }] })).toEqual([
         { code: 'a' },

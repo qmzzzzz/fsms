@@ -399,7 +399,7 @@ const buildAuthContext = (decoded, freshUser) => {
   if (freshUser.roles && freshUser.roles.length > 0) {
     // freshUser.roles 可能是 ObjectId 数组或已 populate 的 Role 文档；
     // 下方 `r &&` 判空属防御性冗余：实测 mongoose 8.24.1 对 populate+match 未命中的引用是
-    // 丢弃元素（不留 null），见 src/tests/zzqoder_populateMatchShape.test.js。
+    // 丢弃元素（不留 null），见 src/tests/populateMatchShape.test.js。
     freshRoles = freshUser.roles.map((r) => {
       if (r && typeof r === 'object' && r.code) {
         freshRoleCodes.push(r.code);

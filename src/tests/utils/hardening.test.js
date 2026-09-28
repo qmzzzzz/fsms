@@ -203,7 +203,7 @@ describe('F-A6 getDataScope 停用角色不授予数据范围 + roles 数组含 
     return Promise.resolve({ ...user, roles });
   };
 
-  // 注：实测 mongoose 8.24.1 的 populate+match **不会**产生 null 洞（见 zzqoder_populateMatchShape.test.js）。
+  // 注：实测 mongoose 8.24.1 的 populate+match **不会**产生 null 洞（见 populateMatchShape.test.js）。
   // 下面两条用例注入字面 null，验证 filter(Boolean) 这层**防御性冗余**在将来版本改为留 null 时仍成立。
   test('active L4 + roles 数组含 null 洞（防御）→ 取 L4 得 self，且不因 null.level 抛错', async () => {
     stub({ department: 'D', roles: [{ level: 4, status: 'active' }, null] });

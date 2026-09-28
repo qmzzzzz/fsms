@@ -88,7 +88,7 @@ describe('makeSharedStore 共享存储分支', () => {
 
   // 断言的是**构造时刻**的状态：Redis 未就绪时不在模块加载期建 RedisStore。
   // 不等价于"永久绑定进程内计数"——未就绪的分支会由请求路径持续探测并在
-  // Redis 就绪后补切换（F-126，见 zzqoder_rateLimitStoreReadinessRace.test.js）。
+  // Redis 就绪后补切换（F-126，见 rateLimitStoreReadinessRace.test.js）。
   test('Redis 未就绪（初始化成功但未启用）→ 代理对象回退 MemoryStore', () => {
     process.env.REDIS_URL = 'redis://127.0.0.1:6399';
     sharedCache.initSharedCache.mockResolvedValueOnce(undefined);

@@ -5,7 +5,7 @@
  *
  * 覆盖率 + 用例检索给出的事实：
  *   - `UserSession.isUsable`（会话能不能用来认证）在全仓只出现在
- *     `zzqA_sessionCrossInstance.test.js` 里，且两次都是 mock：
+ *     `sessionCrossInstance.test.js` 里，且两次都是 mock：
  *     `UserSession.findOne.mockResolvedValue({ isUsable: () => true })`
  *     ⇒ 谓词本体 0 覆盖：改坏它（例如删掉 `status !== 'active'` 或漏掉到期判断）
  *     没有任何用例会红，而它正是"踢掉这台设备"与"会话自然过期"的唯一实现。

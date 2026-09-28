@@ -56,7 +56,7 @@ const sendAuditExportHeaders = async (query, res, collation) => {
 
 const streamAuditExport = async (query, res, collation) => {
   // 截断必须由查询自身封顶，不能靠"回调里 close() 游标"。
-  // 实测（src/tests/zzqoder_exportTruncationCap.test.js）：mongoose 8 的
+  // 实测（src/tests/exportTruncationCap.test.js）：mongoose 8 的
   // `cursor.eachAsync(fn)` 里调用 `cursor.close()` **不会停止迭代**——
   // 全部文档照样进回调（它只是关掉游标，既不抛错也不短路）。
   // 于是原实现在命中 5 万条上限之后，仍会把筛选命中的**剩余全部记录**

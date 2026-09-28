@@ -26,7 +26,7 @@ node scripts/audit-probes/ws-session-bypass.cjs; echo "exit=$?"
 | `1`    | 确认绕过（socket 绑上了 userId）                                                                                                      |
 | `2`    | 不可判定：没绑上用户、也没有 auth-error 回帧——多半是握手层变了使请求根本没走到 `authenticateSocket`；探针自身的失效不能当成"漏洞已修" |
 
-`decideVerdict` 的真值表由 `src/tests/zzqoder_wsProbeVerdict.test.js`（6 例）钉住；
+`decideVerdict` 的真值表由 `src/tests/wsProbeVerdict.test.js`（6 例）钉住；
 探针自身带 `require.main` 守卫，所以那个套件可以只 require 它取判据而不触发建库。
 
 **2026-09-17 复核：P0-2 修复已落地**；2026-09-19 真跑实测 `verdict=rejected exit=0`，

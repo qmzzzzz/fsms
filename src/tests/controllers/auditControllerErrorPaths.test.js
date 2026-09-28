@@ -142,7 +142,7 @@ describe('auditController 导出失败与断链审计', () => {
 
   describe('断链出口：安全事件必须留痕（auditController.js:97-125）', () => {
     // 字段形状与生产报告一致：byType 五类齐全、hmacChecked 必然显式写出
-    // （zzqoder_integrityAttestation.test.js 有专门用例钉住"生产来源必写布尔 hmacChecked"）。
+    // （integrityAttestation.test.js 有专门用例钉住"生产来源必写布尔 hmacChecked"）。
     // 缺了它，判据按 fail-closed 走"未校验"分支，riskLevel 就不是在测"断裂 vs 无断裂"的对照了。
     // scanned 同一条理：判据现在也 fail-closed 处理"没回传扫描口径"（缺 ⇒ 按局部校验，
     // 永不判"可宣称完整"），所以夹具必须像生产报告那样带上它，否则 low 风险那格红成"口径未知"。

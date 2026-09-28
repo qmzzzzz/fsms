@@ -184,7 +184,7 @@ const getDataScope = async (userId) => {
 
   // 防御性 filter(Boolean)：实测 mongoose 8.24.1 对 populate+match 未命中的引用是**丢弃元素**
   // （不留 null），故今天它不改变结果；保留它是防未来版本改为留 null 洞 —— 形状由
-  // src/tests/zzqoder_populateMatchShape.test.js 钉住（升级会先红），届时 `r.level` 才可能抛错。
+  // src/tests/populateMatchShape.test.js 钉住（升级会先红），届时 `r.level` 才可能抛错。
   // 过滤后若 roles 全被剔除 → {type:'none'}（deny），fail-closed。
   const activeRoles = (user.roles || []).filter(Boolean);
 

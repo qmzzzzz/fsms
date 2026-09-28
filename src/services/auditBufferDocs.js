@@ -21,7 +21,7 @@ const auditChain = require('../utils/auditChain');
  * （被哈希的形态 ≠ 落库形态 ⇒ 该记录永久 hash_mismatch，一条假篡改且自身保护静默失效），
  * 多回写非载荷字段则是无谓的写放大。
  * 版本号 bump 而清单没导出时回落 V4：宁可少回写几个字段（由
- * tests/services/zzqB_auditChainBatchCastParity.test.js 那族对拍用例立刻变红），
+ * tests/services/auditChainBatchCastParity.test.js 那族对拍用例立刻变红），
  * 也不能让本层抛 TypeError——那会被 flush 的外层 catch 读成"落库失败"。
  */
 const PRECAST_FIELDS =
@@ -128,7 +128,7 @@ function precastBatch(docs, sink) {
  * 从 insertMany 的错误里收集「已经存在于库中」的文档 _id（字符串形式）。
  *
  * 两类来源（Mongoose 8 + driver 6 实测的错误结构，契约钉在
- * tests/zzqoder_auditBufferZombieDuplicate.test.js 的「前提自证」用例）：
+ * tests/auditBufferZombieDuplicate.test.js 的「前提自证」用例）：
  *  - err.insertedDocs：ordered:false 下**本次**确认写入的文档（带 _id）；
  *  - err.writeErrors[i]：因 _id 唯一键冲突被拒的记录。实测其形状是
  *    `{ index, err: { index, code, errmsg, op } }`——服务端错误码嵌在 `.err` 下，

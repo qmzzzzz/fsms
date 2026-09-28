@@ -108,7 +108,7 @@ const protectBuiltInRoleBulk = async function (next, ops) {
   next();
 };
 
-// 实测（src/tests/models/zzqA_roleBuiltInDeleteGuard.test.js 逐条钉住）：
+// 实测（src/tests/models/roleBuiltInDeleteGuard.test.js 逐条钉住）：
 // mongoose 8 的 Model/Query/文档级删除写法都会经过上面三个钩子——包括 doc.deleteOne()
 // （它内部仍构造 Query），而 Document#remove 在本版本已不存在。
 // 仍不经过 ODM 护栏的只有两条：原生驱动 collection.deleteMany，以及 $graphql/聚合管道一类

@@ -9,7 +9,7 @@
  * 整轮重放静默跳过，连 `审计 WAL 重放 N 条遗留记录` 那行 info 都不打。
  *
  * 与既有账目的分工（不重复装桩）：
- *   - 上限侧的「stat 刚成功、内容却读不回」由 zzqA_walCapTrimFailureTaxonomy.test.js
+ *   - 上限侧的「stat 刚成功、内容却读不回」由 walCapTrimFailureTaxonomy.test.js
  *     的用例②钉住（计入 `walTrimFailures` + 那条 error 措辞），本文件不碰 cap；
  *   - 本文件钉**回收侧**与**重放侧**两处此前零覆盖的静默 `return`。
  *

@@ -7,7 +7,7 @@
  * "看起来正常的一组数字"，没有任何报错。漏传的后果必须是零结果。
  *
  * 已核实的同族（轮 7 已全部按同判据收口，见技术文档 6-W/6-X/6-Y；
- * 判据与反向保护用例见 zzqoder_scopeCastFamily.test.js）：
+ * 判据与反向保护用例见 scopeCastFamily.test.js）：
  *   AlarmService.getAlarmStats: `if (dataScope && !apply(...))` ← 短路把 deny 分支整个跳过
  *   DeviceService.getDeviceStats / getExpiringDevices: `scopeFilter = {}` ← 空匹配即全表
  *

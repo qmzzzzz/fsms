@@ -54,7 +54,7 @@ const onAuditWriteFailure = (auditAction, req) => (err) => {
  * 这两处的正确形态是失败照旧外抛（客户端得到 500，不宣称成功、不外发数据），
  * 同时把原因记进日志与指标。`AuditLog.record` 不在此列——它自带 catch 并计入 medium 档。
  *
- * 档位由 `src/tests/controllers/zzqB_skipGlobalAuditWriteFailure.test.js` 的登记表钉住：
+ * 档位由 `src/tests/controllers/skipGlobalAuditWriteFailure.test.js` 的登记表钉住：
  * 把一处重抛悄悄改成吞错（或反之）都会让那条用例转红。
  *
  * @param {string} auditAction 检索用的审计动作标识

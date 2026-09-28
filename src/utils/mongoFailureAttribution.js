@@ -10,7 +10,7 @@
  * 所以判据必须：① 保守（认不出来就归到基础设施一侧）；② 可被直接断言（不靠间接推断）。
  *
  * 【F-183：判定必须遍历"每一个错误站点"，而不是只看顶层】
- * 真库实跑（同仓 `tests/zzqoder_auditBufferZombieDuplicate.test.js:144-168` 把形状钉成了断言）：
+ * 真库实跑（同仓 `tests/auditBufferZombieDuplicate.test.js:144-168` 把形状钉成了断言）：
  *   服务端 bulk 错误只把**第一条** writeError 的 code 回显到顶层，且**不回显 codeName**：
  *     `[dup, 121]` ⇒ `err.code=11000`；`[121, dup]` ⇒ `err.code=121`。
  *   于是"只看顶层"等价于**按服务端返回顺序**做判定——同一批文档换个顺序就得出相反结论。

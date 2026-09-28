@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * 落地侧的第二批判据（与 `zzqoder_mfaLifecycleTotpClaim.test.js` 互补，不重复它）
+ * 落地侧的第二批判据（与 `mfaLifecycleTotpClaim.test.js` 互补，不重复它）
  *
  * 技术文档里那三条钉的是"重放必须被拒"（行为存在性）。本文件钉的是**实现选择**带来的
  * 三个可回归维度——它们都是这次补丁新引入的、既有测试面没有覆盖的：

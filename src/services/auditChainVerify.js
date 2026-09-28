@@ -41,7 +41,7 @@
  * 「整窗 $unset 但留最新一条」= intact true、判据 code 0（等于为灭迹背书"链完整"），
  * 而「整窗抹光」反而被下面的 nothingHashed 挡在 code 2 ⇒ 留一条比抹光更好用。
  * 判据与四种诚实/攻击形态的对照见
- * `src/tests/services/zzqB_auditChainLegacyPrefixWash.test.js`。
+ * `src/tests/services/auditChainLegacyPrefixWash.test.js`。
  *
  * 已知检出上限（不得当作已修好）：**插入**一条 prevHash 指向链中已有 hash 的
  * 伪造记录，在本设计下不可检出——滑动窗口只要求 prevHash 命中近期任一 hash。

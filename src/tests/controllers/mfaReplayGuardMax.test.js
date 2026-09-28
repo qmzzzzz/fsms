@@ -16,8 +16,8 @@
  * 因为 $max 从不拒绝请求，等于水位的码（登录刚消费掉的那个）照样能冒关 MFA /
  * 铸 10 张恢复码。mfaEnable 没有这个洞：口令校验之前 `MFA_ALREADY_ENABLED`
  * 已把"启用态"挡掉，且开启动作本身不授予访问 ⇒ 无状态可双花。
- * 那两处的门禁在 `zzqoder_mfaLifecycleTotpClaim.test.js`（行为）与
- * `zzqA_mfaTotpClaimImplementation.test.js`（计数不翻倍 / 审计可区分 / fail-closed）。
+ * 那两处的门禁在 `mfaLifecycleTotpClaim.test.js`（行为）与
+ * `mfaTotpClaimImplementation.test.js`（计数不翻倍 / 审计可区分 / fail-closed）。
  * 若有人把这里的 $max "顺手统一"成认领，本文件会红——那是提示不是回归：
  * 请先确认 mfaEnable 真的出现了可双花的状态，再一起改三处。
  */

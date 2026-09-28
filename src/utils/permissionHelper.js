@@ -13,7 +13,7 @@ const logger = require('../utils/logger');
  * **这是防御性冗余，不是当前必需**：实测 mongoose 8.24.1 在数组路径（含嵌套）对
  * populate + `match` 未命中的引用是**丢弃元素、压缩数组**，既不产生 null 也不产生
  * undefined ——「3 个角色、1 个已停用」得到的是 `[role, role]`，**不是** `[role, null, role]`。
- * 该形状由 `src/tests/zzqoder_populateMatchShape.test.js` 钉住（升级若改为留 null 洞会先红）。
+ * 该形状由 `src/tests/populateMatchShape.test.js` 钉住（升级若改为留 null 洞会先红）。
  *
  * 保留 `filter(Boolean)` 的理由：本文件多处直接取 `r.name` / `r.code` / `r.level`，
  * 数组里一旦出现 null 即抛 TypeError 并被上层 catch 转成 500；而过滤成本极低，
@@ -55,7 +55,7 @@ const getUserPermissions = async (userId) => {
     const buttonPermissions = [];
     const apiPermissions = [];
 
-    // 防御性跳过可能的 null 洞（实测 8.24.1 不留，见 activeRoles 注释与 zzqoder_populateMatchShape.test.js）
+    // 防御性跳过可能的 null 洞（实测 8.24.1 不留，见 activeRoles 注释与 populateMatchShape.test.js）
     activeRoles(user).forEach((role) => {
       (role.permissions || []).filter(Boolean).forEach((perm) => {
         permissions.add(perm.code);

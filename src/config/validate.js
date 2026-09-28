@@ -305,7 +305,7 @@ function resolveTrustProxyHops(raw, nodeEnv) {
  * 判据（fail-closed）：
  *   - 开发家族（development/dev/local/test/ci）→ 允许跳过致命校验（保持既有语义）；
  *   - 预发家族（staging/stage）→ 同样跳过（ADR-005 明确的环境边界，见
- *     src/tests/zzqoder_nodeEnvGateFailsClosed.test.js 对该行为的既有断言）；
+ *     src/tests/nodeEnvGateFailsClosed.test.js 对该行为的既有断言）；
  *   - 生产家族（production/prod/live）→ 执行硬闸；
  *   - **其余任何值 → 也执行硬闸并额外报一条致命错**：猜错的代价必须是
  *     "启动不起来"，而不是"生产以零校验启动"。"其余任何值"包含**配了但为空**
@@ -361,7 +361,7 @@ function validateConfig() {
     // （K8s 未声明 / docker run 不带 -e / 直接 node src/index.js）。
     // 这里补一条显式告警，让该部署至少在启动日志里留痕。
     // 注意 `NODE_ENV=`（空串）**不走这条**：F-216 已让它按生产办并报致命错
-    // （zzqoder_nodeEnvGateFailsClosed.test.js:114）。
+    // （nodeEnvGateFailsClosed.test.js:114）。
     if (process.env.NODE_ENV === undefined) {
       const message =
         'NODE_ENV 未设置：按 development 处理，生产硬闸（弱密钥/ALLOWED_HOSTS/REDIS_URL/TLS）已全部跳过';

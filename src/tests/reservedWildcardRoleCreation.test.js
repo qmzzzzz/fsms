@@ -13,7 +13,7 @@
  * 审计上无法界定最终责任人；归属丢失 ⇒ 无接口可恢复），这条路径上它完全失效。
  *
  * 同型缺陷已在 rolePermissionController.js:63-77（**分配**路径）修复并有套件
- * zzqoder_reservedWildcardAssignment.test.js 覆盖；本文件补的是**铸造**路径。
+ * reservedWildcardAssignment.test.js 覆盖；本文件补的是**铸造**路径。
  *
  * 用例覆盖四面：
  *  1) 攻击面：超管建挂 `*:*` 的角色 ⇒ 403，且**落库态**里没有该角色
@@ -34,7 +34,7 @@ const PASSWORD = randomPassword();
  * 角色 code 的字符集是 `^[A-Z_]+$`（roleRoutes.js:37）——**不允许数字**。
  * 所以 stamp 里的数字必须先映射成字母，否则每条用例都会先被 400 拦掉，
  * 得到"看起来在测防线、其实什么都没测到"的假绿。
- * （既有的 zzqoder_reservedWildcardAssignment.test.js 用 `Role.create` 直连建角色、
+ * （既有的 reservedWildcardAssignment.test.js 用 `Role.create` 直连建角色、
  *  绕过路由校验，因此没暴露这一点；本文件走真实 HTTP，必须守这个约束。）
  */
 const codeStamp = stamp.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]).toUpperCase();

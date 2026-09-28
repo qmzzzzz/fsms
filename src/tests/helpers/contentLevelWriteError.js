@@ -14,7 +14,7 @@
  * 而驱动实际抛出的类名是 `MongoBulkWriteError`（同仓 `permissionService.js:164` 也踩过同一个坑），
  * 顶层还多一条"第一条 writeError 的 code 回显"。三处形状断言现在都被
  * `tests/utils/mongoFailureAttribution.test.js` 的"真库形状"用例和
- * `tests/zzqoder_auditBufferZombieDuplicate.test.js:144-168` 钉在真实驱动上，
+ * `tests/auditBufferZombieDuplicate.test.js:144-168` 钉在真实驱动上，
  * 驱动升级改了形状会先红在那里。
  *
  * @param {number} count 被拒条目数（决定 writeErrors 长度）

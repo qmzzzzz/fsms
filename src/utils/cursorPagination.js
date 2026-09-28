@@ -69,7 +69,7 @@ const MAX_CURSOR_LENGTH = 512;
 // **不是报错而是翻页自断**：某一页最后一条的编码超过上限时，`buildCursorResult`
 // 照样下发 nextCursor，客户端照原样回传却被 `decodeCursor` 拒成 400，
 // 用户从这一页起再也翻不动，服务端一条日志都没有——
-// 而 50 字符的编码是台账里的合法值（`src/tests/zzqoder_deviceCodeCap.test.js` 就在存它）。
+// 而 50 字符的编码是台账里的合法值（`src/tests/deviceCodeCap.test.js` 就在存它）。
 // 取 64：覆盖 50 且留余量，相对整条游标的 `MAX_CURSOR_LENGTH`（512）仍是窄闸。
 // 不变式由 `src/tests/utils/cursorPagination.test.js` 从**模型**推导并钉住
 // （上限 < 最宽合法排序键 ⇒ 红），因为抄一份数字到测试等于没钉。

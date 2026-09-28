@@ -227,7 +227,7 @@ describe('utils/cursorPagination', () => {
    * 修前的事实：`MAX_CURSOR_VALUE_LENGTH` 为 32，而设备列表用 `deviceCode` 作排序键
    * （`DeviceService.getDevices` 是全仓唯一的 `valueType:'string'` 调用点），其合法宽度
    * 上限由 `models/FireDevice` 的 `maxlength:50` 决定（`deviceRoutes.js` 的
-   * `isLength({max:50})` 与它对齐，50 字符可入库由 zzqoder_deviceCodeCap.test.js 钉着）。
+   * `isLength({max:50})` 与它对齐，50 字符可入库由 deviceCodeCap.test.js 钉着）。
    * ⇒ 某页最后一条的编码落在 33–50 时，服务照样下发 nextCursor，客户端原样回传却被
    * `decodeCursor` 拒成 400——**翻页从这一页起死掉，且服务端一条日志都没有**。
    *

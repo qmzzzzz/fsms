@@ -142,7 +142,7 @@ describe('停用角色不参与授权判定', () => {
     });
     const codes = populated.roles.map((r) => r?.code).filter(Boolean);
     expect(codes).toEqual([activeRole.code]);
-    // 防御性：实测 8.24.1 的 match 不会产生 null 洞（见 zzqoder_populateMatchShape.test.js），
+    // 防御性：实测 8.24.1 的 match 不会产生 null 洞（见 populateMatchShape.test.js），
     // 此处的 ?.code 是防将来版本改为留 null —— 任何 r.code 形态都不该抛 TypeError。
     for (const r of populated.roles) {
       expect(() => r?.code).not.toThrow();

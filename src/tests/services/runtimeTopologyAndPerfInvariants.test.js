@@ -134,7 +134,7 @@ describe('批次E 架构与性能加固回归', () => {
     // 光凭形状当序号会把单实例机器误判成多副本。因此 parsePodOrdinal 现在还要一个
     // 集群事实判据（kubelet 注入的 KUBERNETES_SERVICE_HOST）。
     // 本 describe 描述的**就是** K8s Pod 场景，所以这里显式声明该前提；
-    // 集群外不得报 strong 的那一半由 src/tests/constants/zzqA_podOrdinalShape.test.js 钉住。
+    // 集群外不得报 strong 的那一半由 src/tests/constants/podOrdinalShape.test.js 钉住。
     const savedK8sEnv = process.env.KUBERNETES_SERVICE_HOST;
     beforeAll(() => {
       process.env.KUBERNETES_SERVICE_HOST = '10.96.0.1';

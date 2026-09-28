@@ -317,7 +317,7 @@ const buildAuditExportQuery = ({
     // 与查询侧 utils/auditQuery.js 共用同一个解析函数。原实现两处各写一遍
     // `success === 'true' || success === true`，把 '1'/'0'/'yes'/'TRUE'/对象/数组
     // 一律静默折成 false；此前两份是刻意选择（该文件当时在并行会话手里），
-    // 现在由单一实现负责一致，`src/tests/zzqoder_auditFilterParity.test.js`
+    // 现在由单一实现负责一致，`src/tests/auditFilterParity.test.js`
     // 的真值表继续作为第二道保险。
     auditQuery.success = parseSuccessFilter(success);
   }

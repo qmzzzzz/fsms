@@ -121,7 +121,7 @@ describe('被指派的处理人对单条报警有操作权', () => {
     const filter = buildDataScopeFilter(scope, ownerField, departmentField);
 
     // 数组属主 ⇒ 范围条件占用 $or。这个形状同时是 search 分支的雷区，
-    // 由 zzqoder_alarmHandlerListVisibility.test.js 守（LV-M2 变异专门杀它）。
+    // 由 alarmHandlerListVisibility.test.js 守（LV-M2 变异专门杀它）。
     expect(Object.keys(filter)).toEqual(['$or']);
     // 真库直接验证：处理人自己的范围现在命中这一条
     expect(await FireAlarm.countDocuments({ _id: alarm._id, ...filter })).toBe(1);

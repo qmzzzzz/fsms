@@ -194,7 +194,7 @@ const normalizeListEntryRequest = (res, { ip, type, durationHours }) => {
  * 因此这条属纵深防御；注释保留原因，免得后人把它当冗余删掉。
  * 防御性说明：实测 mongoose 8.24.1 对 populate+match 未命中的引用是**丢弃元素**（不留 null），
  * 故 isSuperAdminRole 的 !!role 判空今天是冗余；保留它以防未来版本改为留 null 洞
- * （形状由 src/tests/zzqoder_populateMatchShape.test.js 钉住，升级会先红）。
+ * （形状由 src/tests/populateMatchShape.test.js 钉住，升级会先红）。
  */
 const operatorIsSuperAdmin = async (userId) => {
   const operator = await User.findById(userId)
