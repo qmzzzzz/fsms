@@ -1,5 +1,5 @@
 /**
- * withTransaction 拓扑感知事务封装（第二轮审计 F-6 / B-1 基础设施）
+ * withTransaction 拓扑感知事务封装（第二轮审计 / B-1 基础设施）
  *
  * 测试环境为 mongodb-memory-server standalone（拓扑类型 Single），覆盖
  * 「确定性降级」路径：不开 session、fn 收到 null、告警一次、写入真实落库。

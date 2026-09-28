@@ -179,6 +179,29 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
     expect(maint.status).toBe(200);
   });
 
+  test('设备：维护记录校验被真正消费——非法 type/超长 content 返回 400（此前校验器是死代码）', async () => {
+    const deviceId = await createFixtureDevice('-903');
+    // deviceRoutes.js maintenanceValidation：type ∈ [routine,repair,replacement,inspection]、content 1-500。
+    // 修复前控制器不读 validationResult → 非法 type 冲模型 enum 抛 ValidationError=500；
+    // content 无 schema 上限 → 超长被静默入库。现两者都应被路由校验挡下返回 400。
+    const badType = await authed()
+      .post(`/api/devices/${deviceId}/maintenance`)
+      .send({ type: 'not_a_real_type', content: `x_${stamp}` });
+    expect(badType.status).toBe(400);
+    expect(badType.status).not.toBe(500);
+
+    const tooLong = await authed()
+      .post(`/api/devices/${deviceId}/maintenance`)
+      .send({ type: 'repair', content: 'a'.repeat(501) });
+    expect(tooLong.status).toBe(400);
+
+    // 合法维护记录仍正常入库（守卫没把正路一起堵死）
+    const ok = await authed()
+      .post(`/api/devices/${deviceId}/maintenance`)
+      .send({ type: 'repair', content: `ok_${stamp}` });
+    expect(ok.status).toBe(200);
+  });
+
   test('设备：报废 → 重复报废拒绝 → 报废后状态变更拒绝 → 删除', async () => {
     const deviceId = await createFixtureDevice('-902');
     const scrap = await authed()

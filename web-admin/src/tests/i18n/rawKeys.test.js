@@ -35,12 +35,16 @@ const collectFiles = (dir, acc = []) => {
   return acc
 }
 
-/** 从源码中提取 `$t('...')` / `t('...')` 里含中文的键（含跨行调用前的单行形态） */
+/** 从源码中提取 `$t('...')` / `t('...')` 里含中文的键（含跨行调用前的单行形态）
+ *
+ * 引号必须三种都认、且成对匹配：上一版只认单引号，于是 `$t("中文")` 与
+ * `` $t(`中文`) `` 一律扫不到——换种引号就绕过了这道"零裸键"门禁。
+ */
 const extractRawKeys = (text) => {
   const keys = []
-  const re = /(?:\$t|\bt)\(\s*'([^']*[\u4e00-\u9fa5][^']*)'/g
+  const re = /(?:\$t|\bt)\(\s*(['"`])([^'"`]*[\u4e00-\u9fa5][^'"`]*)\1/g
   let m
-  while ((m = re.exec(text)) !== null) keys.push(m[1])
+  while ((m = re.exec(text)) !== null) keys.push(m[2])
   return keys
 }
 

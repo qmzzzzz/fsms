@@ -143,10 +143,34 @@ describe('尾差覆盖（批次 F）', () => {
     expect(parseCookies('=novalue; x=2')).toEqual({ x: '2' });
   });
 
-  test('fingerprint：computeFingerprint 对同输入稳定', () => {
+  test('fingerprint：computeFingerprint 稳定且四项特征都参与', () => {
     const { computeFingerprint } = require('../../utils/fingerprint');
-    const req = { headers: { 'user-agent': 'UA-1', 'accept-language': 'zh-CN' }, ip: '1.2.3.4' };
-    expect(computeFingerprint(req)).toBe(computeFingerprint(req));
+    // 原用例写成 `{ headers: {...}, ip }`，而 computeFingerprint 的第一道闸门是
+    // `typeof req.get !== 'function' ⇒ return null`：它取 req.get('user-agent')，
+    // 从不读 req.headers。于是两次调用都是 null，`toBe` 恒成立——一条"稳定"断言
+    // 其实什么都没测（UA/lang/enc/IP 四项、512 截断、| 转义全在其后）。
+    // 这里把 req 演成 Express 的形状（get 按键名取头），并逐项钉住"参与产出"。
+    const mkReq = (over = {}) => {
+      const headers = {
+        'user-agent': 'UA-1',
+        'accept-language': 'zh-CN',
+        'accept-encoding': 'gzip',
+        ...over,
+      };
+      return { ip: over.ip || '203.0.113.7', get: (k) => headers[String(k).toLowerCase()] };
+    };
+    const base = computeFingerprint(mkReq());
+    expect(base).toMatch(/^[0-9a-f]{32}$/);
+    expect(computeFingerprint(mkReq())).toBe(base);
+
+    // 逐项：任一特征变化都必须换指纹（缺这一项时"稳定"可以是恒真的）
+    expect(computeFingerprint(mkReq({ 'user-agent': 'UA-2' }))).not.toBe(base);
+    expect(computeFingerprint(mkReq({ 'accept-language': 'en-US' }))).not.toBe(base);
+    expect(computeFingerprint(mkReq({ 'accept-encoding': 'br' }))).not.toBe(base);
+    expect(computeFingerprint(mkReq({ ip: '198.51.100.7' }))).not.toBe(base);
+
+    // 没有 get 的 req（本用例原来的形状）走的是 null 分支，不是"产出稳定指纹"
+    expect(computeFingerprint({ headers: { 'user-agent': 'UA-1' }, ip: '1.2.3.4' })).toBeNull();
   });
 
   // ================= 模型尾差 =================

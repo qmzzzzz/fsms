@@ -901,4 +901,39 @@ describe('PermissionModuleCard 语言跟随与兜底', () => {
       warn.mockRestore()
     }
   })
+
+  // 2026-09-19 无障碍修复的可证伪锁：勾选态原先只靠颜色/is-on class 与 ✓ 字形表达，
+  // 辅助技术读不出这个 toggle 的按下状态（WCAG 4.1.2 Name, Role, Value：
+  // role=button 有了、可名字来自文本也有了，缺的是 value）。
+  // 组件里若把 :aria-pressed 删掉，本用例会红——不是装饰性断言。
+  test('权限项必须把勾选态暴露为 aria-pressed（true/false 都在 DOM 上）', () => {
+    const stubUi = {
+      moduleState: () => 'partial',
+      moduleStateText: () => '部分启用',
+      modulePercent: () => 50,
+      toggleModule: () => {},
+      isPermChecked: (id) => id === ID1,
+      isPermAdded: () => false,
+      isPermRemoved: () => false,
+      permTooltip: () => '提示',
+      togglePerm: () => {},
+      typeLabel: () => '按钮',
+    }
+    const stubModule = {
+      module: 'device',
+      name: '设备管理',
+      icon: '🔧',
+      activeCount: 1,
+      permissions: [
+        { _id: ID1, name: '新增设备', code: 'device:create', type: 'button' },
+        { _id: ID2, name: '删除设备', code: 'device:delete', type: 'button' },
+      ],
+    }
+    const btns = mountStub(stubModule, stubUi).findAll('.glass-perm-btn')
+    expect(btns).toHaveLength(2)
+    // 本仓 harness 的 findAll() 返回**原生 DOM 元素**（同文件其余用例直接读 textContent），
+    // 既没有 VTU 的 attributes() 也没有 .element，故直接 getAttribute。
+    expect(btns[0].getAttribute('aria-pressed')).toBe('true')
+    expect(btns[1].getAttribute('aria-pressed')).toBe('false')
+  })
 })

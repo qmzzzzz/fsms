@@ -2,7 +2,7 @@
  * §13 V-8：WAL 重放的**幂等性边界**——本测试锁定「at-least-once 而非 exactly-once」
  *
  * V-8 原问「`auditBuffer.start()` 后立即 SIGKILL，重启检查 WAL 是否重复插入」。
- * 本轮（2026-09-17）用真实内存 mongod 分窗实测，结论是**三个窗口三种结局**，
+ * 本次改动（2026-09-17）用真实内存 mongod 分窗实测，结论是**三个窗口三种结局**，
  * 本测试把这三条边界钉成可失败断言，防止后续有人误以为"已 exactly-once"：
  *
  *  1. **start() 后立即崩溃 → 不会重复**（用例 1）
@@ -32,7 +32,7 @@
  * 只有 start() → wal.startup() 之后才切到本套件 mkdtemp 下的路径。
  * 本文件用 `walPath()` 辅助函数把这件事封装掉：先确保已 startup，再取路径。
  * 不使用 jest.useFakeTimers（与 mongodb-memory-server 冲突），用 spyOn(setInterval)
- * 捕获回调手动触发（与既有 auditBufferGap.test.js 同法）。
+ * 捕获回调手动触发（与既有 observability/auditBufferFlushAndWalGuards.test.js 同法）。
  */
 
 const fs = require('fs');

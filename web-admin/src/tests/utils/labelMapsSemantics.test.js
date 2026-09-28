@@ -13,13 +13,39 @@
  * 断言对象是**可观测输出**（标签映射结果、typeLabel 返回值），不是源码文本：
  * 把 labelMaps 的 other 改回 common.all、或把 typeLabel 的 data 删掉 / 加回 page，
  * 都会让这里的断言变红。
+ *
+ * F-166：本文件原先手抄了三份「后端取值清单」——DEVICE_TYPE 的 10 个、ALARM_TYPES
+ * 的 6 个、ALARM_STATUSES 的 5 个（行 63「覆盖后端全部 10 个取值」的注释宣称对账，
+ * 实际比较的是这份抄件）。抄件钉住的是清单的**结果**而不是清单本身，两个方向都错：
+ *   - 后端加一档、前端没跟 => labels 仍只有旧的 N 个键，toEqual/逐条断言全绿（漏翻裸码）；
+ *   - 前端按后端补齐第 N+1 档 => 断言反倒红，逼人把期望值再抄一遍。
+ * 现在三份清单 createRequire 自后端单一来源（src/utils/constants.js 的 DEVICE_TYPE、
+ * src/constants/alarm.js 的报警三组——两处都是 model 的 enum 指过来的真来源），
+ * 逐档断言「这一档有没有一个真的翻过的标签」；具体文案仍按 P2-55 逐条钉死，
+ * 因为文案的事实来源是前端词表本身，不是后端清单。
  */
+import { createRequire } from 'node:module'
 import { describe, test, expect, vi } from 'vitest'
 import { createI18n } from 'vue-i18n'
 import { createPinia, setActivePinia } from 'pinia'
 import { makeAlarmTypeLabels, makeDeviceTypeLabels, makeAlarmStatusLabels } from '@/utils/labelMaps'
 import zhCN from '@/i18n/locales/zh-CN'
 import enUS from '@/i18n/locales/en-US'
+
+const require = createRequire(import.meta.url)
+const { DEVICE_TYPE } = require('../../../../src/utils/constants.js')
+const { ALARM_TYPES, ALARM_STATUSES } = require('../../../../src/constants/alarm.js')
+const DEVICE_TYPE_VALUES = Object.values(DEVICE_TYPE)
+
+// 一档后端取值在前端必须有一个「真的翻过」的标签：非空、不等于原始码
+// （调用方 DashboardCharts 是 labels[type] || type，缺键就渲染裸码），
+// 且不是一个没解析的词条路径（vue-i18n 找不到键时原样返回 key，如 'alarm.pending'）。
+const KEY_PATH = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/
+const expectTranslated = (label, rawCode) => {
+  expect(label).toBeTruthy()
+  expect(label).not.toBe(rawCode)
+  expect(KEY_PATH.test(label)).toBe(false)
+}
 
 const messages = { 'zh-CN': zhCN, 'en-US': enUS }
 
@@ -51,7 +77,18 @@ describe('P2-55 labelMaps：other 不得显示为「全部」', () => {
     expect(labels.other).not.toBe('All')
   })
 
-  test('其余五种报警类型映射未被改坏', () => {
+  test.each(ALARM_TYPES.map((v) => [v]))(
+    '报警类型 %s（后端逐档）有一个翻过的标签，不是裸码也不是词条路径',
+    (v) => {
+      expectTranslated(makeAlarmTypeLabels(makeT('zh-CN'))[v], v)
+    }
+  )
+
+  test('报警类型键集与后端 ALARM_TYPES 逐一对应（后端加档而前端未跟会红）', () => {
+    expect(Object.keys(makeAlarmTypeLabels(makeT('zh-CN'))).sort()).toEqual([...ALARM_TYPES].sort())
+  })
+
+  test('各报警类型的中文文案未被改坏（逐条钉死，防止只补键集不改文案）', () => {
     const labels = makeAlarmTypeLabels(makeT('zh-CN'))
     expect(labels.smoke).toBe('烟雾报警')
     expect(labels.temp_abnormal).toBe('温度异常')
@@ -60,26 +97,14 @@ describe('P2-55 labelMaps：other 不得显示为「全部」', () => {
     expect(labels.patrol_find).toBe('巡检发现')
   })
 
-  test('设备类型映射覆盖后端全部 10 个取值，fire_door/other 不再是裸码', () => {
-    // 后端枚举：src/utils/constants.js DEVICE_TYPE（10 个）。
+  test('设备类型映射键集与后端 DEVICE_TYPE 逐一对应，fire_door/other 不再是裸码', () => {
+    // 后端枚举：src/utils/constants.js DEVICE_TYPE（model 的 enum 指过来）。
     // 旧断言「other 必须为 undefined」固化的是缺陷：DashboardCharts 用
     // makeDeviceTypeLabels(t)[type] || type 回落，缺键 => 饼图/图例上直接显示
     // 原始码 fire_door / other（词表里 device.typeFireDoor/typeOther 早有译文）。
+    // 期望键集取自后端，不再抄一份 10 个的字面量（见文件头 F-166）。
     const labels = makeDeviceTypeLabels(makeT('zh-CN'))
-    expect(Object.keys(labels).sort()).toEqual(
-      [
-        'emergency_light',
-        'evacuation_sign',
-        'extinguisher',
-        'fire_alarm',
-        'fire_door',
-        'heat_detector',
-        'hydrant',
-        'other',
-        'smoke_detector',
-        'sprinkler',
-      ].sort()
-    )
+    expect(Object.keys(labels).sort()).toEqual([...DEVICE_TYPE_VALUES].sort())
     expect(labels.fire_door).toBe('防火门')
     expect(labels.other).toBe('其他')
     // 其余八项逐一钉住，防止为「补两个键」而错改既有映射
@@ -99,15 +124,25 @@ describe('P2-55 labelMaps：other 不得显示为「全部」', () => {
     expect(labels.other).toBe('Other')
   })
 
-  test('报警状态映射覆盖后端 5 个取值（含 false_alarm 专属词条）', () => {
+  test.each(ALARM_STATUSES.map((v) => [v]))('报警状态 %s（后端逐档）有一个翻过的标签', (v) => {
+    expectTranslated(makeAlarmStatusLabels(makeT('zh-CN'))[v], v)
+  })
+
+  test('报警状态键集与后端 ALARM_STATUSES 逐一对应', () => {
+    // 旧断言是 toEqual(五个键的字面量)：后端加一档而前端没跟 => 仍然全绿；
+    // 前端补了那一档 => 反倒红。现在一侧取后端清单，两个方向都能证伪。
+    expect(Object.keys(makeAlarmStatusLabels(makeT('zh-CN'))).sort()).toEqual(
+      [...ALARM_STATUSES].sort()
+    )
+  })
+
+  test('报警状态中文文案逐条钉死（false_alarm 用专属词条「误报」）', () => {
     const labels = makeAlarmStatusLabels(makeT('zh-CN'))
-    expect(labels).toEqual({
-      pending: '待处理',
-      processing: '处理中',
-      resolved: '已处理',
-      false_alarm: '误报',
-      cancelled: '已取消',
-    })
+    expect(labels.pending).toBe('待处理')
+    expect(labels.processing).toBe('处理中')
+    expect(labels.resolved).toBe('已处理')
+    expect(labels.false_alarm).toBe('误报')
+    expect(labels.cancelled).toBe('已取消')
   })
 })
 

@@ -231,8 +231,13 @@ describe('IpListView 列表加载与渲染', () => {
       ipRow({ _id: 'd', reason: 'trusted_source' }),
       ipRow({ _id: 'e', reason: 'zzz_custom_code' }),
       ipRow({ _id: 'f', reason: '' }),
+      // 后端渐进式封禁实际写入的带层级码（securityAlert.js ESCALATION_TIERS）——裸键从不出现在生产
+      ipRow({ _id: 'g', reason: 'brute_force_auto_ban_tier1' }),
+      ipRow({ _id: 'h', reason: 'brute_force_auto_ban_tier4' }),
+      // 管理员自由文本可命中 Object.prototype：必须按原文回退，不能渲染出函数源码
+      ipRow({ _id: 'i', reason: 'toString' }),
     ])
-    const reasons = [0, 1, 2, 3, 4, 5].map((r) => td(c, r, 3).textContent.trim())
+    const reasons = [0, 1, 2, 3, 4, 5, 6, 7, 8].map((r) => td(c, r, 3).textContent.trim())
     expect(reasons).toEqual([
       '安全策略',
       '暴力破解自动封禁',
@@ -240,6 +245,9 @@ describe('IpListView 列表加载与渲染', () => {
       '可信来源',
       'zzz_custom_code',
       '-',
+      '暴力破解自动封禁',
+      '暴力破解自动封禁',
+      'toString',
     ])
   })
 

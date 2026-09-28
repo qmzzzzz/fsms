@@ -19,7 +19,7 @@
  *   C. 不误伤：毒批之后的正常批次照常落库，其 WAL 行被常规裁剪而非进归档。
  *
  * 约束：不用 jest.useFakeTimers（与 mongodb-memory-server 冲突），
- * 用 spyOn(setInterval) 捕获回调手动触发（与既有 auditBufferGap.test.js 同法）。
+ * 用 spyOn(setInterval) 捕获回调手动触发（与既有 observability/auditBufferFlushAndWalGuards.test.js 同法）。
  */
 
 const fs = require('fs');
@@ -39,6 +39,7 @@ process.env.AUDIT_WAL_STAT_INTERVAL = '1000'; // 不因 append 次数触发上�
 const auditBuffer = require('../../services/auditBuffer');
 const wal = require('../../services/auditBufferWal');
 const AuditLog = require('../../models/AuditLog');
+const { contentLevelWriteError } = require('../helpers/contentLevelWriteError');
 
 /** 轮询等待真实完成条件（替代固定 sleep） */
 async function waitFor(cond, timeoutMs = 8000) {
@@ -160,7 +161,7 @@ describe('P1-24 毒批丢弃的 WAL 标记与重启重放', () => {
 
     const insertSpy = jest
       .spyOn(AuditLog, 'insertMany')
-      .mockRejectedValue(new Error('permanent poison'));
+      .mockRejectedValue(contentLevelWriteError(1));
 
     await poisonDrop();
     insertSpy.mockRestore();
@@ -192,7 +193,7 @@ describe('P1-24 毒批丢弃的 WAL 标记与重启重放', () => {
 
     const insertSpy = jest
       .spyOn(AuditLog, 'insertMany')
-      .mockRejectedValue(new Error('permanent poison'));
+      .mockRejectedValue(contentLevelWriteError(1));
     await poisonDrop();
     insertSpy.mockRestore();
 
@@ -222,7 +223,7 @@ describe('P1-24 毒批丢弃的 WAL 标记与重启重放', () => {
     auditBuffer.push(makeDoc('poisoned'));
     const insertSpy = jest
       .spyOn(AuditLog, 'insertMany')
-      .mockRejectedValue(new Error('permanent poison'));
+      .mockRejectedValue(contentLevelWriteError(1));
     await poisonDrop();
     insertSpy.mockRestore();
     expect(readDiscarded()).toContain('poison_poisoned');

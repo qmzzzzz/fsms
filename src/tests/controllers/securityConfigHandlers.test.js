@@ -114,6 +114,19 @@ describe('注册开关配置', () => {
     expect(mockSystemConfig.set).toHaveBeenCalledWith('allowPublicRegistration', true, 'u-admin');
     expect(mockSystemConfig.invalidateRegistrationCache).toHaveBeenCalled();
     expect(res.statusCode).toBe(200);
+    // 行为级断言（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §2.3 审计链与合规留痕）：注册开关的专用审计是该操作的
+    // 唯一留痕（securityController 已设 res.locals.skipGlobalAudit = true）。
+    // 此前本用例标题只写「PUT 落库并失效缓存」、也没有审计断言——与同组另外两个开关
+    // （登录验证码 :135 / 注册验证码 :175，标题即写「并写专用审计」且都断言）不对称，
+    // 而变异实测显示该写入换成 Promise.resolve 后 70 套 / 746 例全绿。
+    expect(res.flagAtJson).toBe(true);
+    expect(mockAuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'registration_enabled',
+        category: 'system',
+        riskLevel: 'medium',
+      })
+    );
   });
 
   test('PUT 拒绝非布尔值（避免 "false" 字符串被判真）', async () => {

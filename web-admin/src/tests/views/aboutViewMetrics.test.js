@@ -18,7 +18,7 @@
  * （实测：切完推 30s，请求数不变）。
  */
 import { describe, test, expect, vi, afterEach } from 'vitest'
-import { mountComponent, flush } from '../helpers/componentHarness'
+import { mountComponent, click, flush } from '../helpers/componentHarness'
 import { useAuthStore } from '@/store'
 
 const h = vi.hoisted(() => ({ getMetrics: vi.fn() }))
@@ -178,23 +178,46 @@ describe('AboutView 指标快照渲染', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('成功但无数据（data 缺失）：保持空态，不渲染 0 值假数据', async () => {
+  test('成功但无数据（data 缺失）：空态文案说「暂无数据」，不渲染 0 值假数据', async () => {
     h.getMetrics.mockResolvedValue({ data: { success: true, data: null } })
     const c = await open()
     expect(c.find('.metrics-body')).toBeFalsy()
     expect(c.find('.el-empty')).toBeTruthy()
+    // 与「首次加载失败」那条必须能区分：旧口径下两条用例断言完全同形
+    // （都只查 .el-empty 存在），结构上禁止把两种空态读出差别。
+    expect(c.find('.el-empty__description').textContent).toBe('暂无数据')
+    expect(c.find('.el-empty').textContent).not.toContain('刷新')
     expect(c.errors).toEqual([])
   })
 })
 
 describe('AboutView 指标卡失败语义', () => {
-  test('首次加载失败：保持空态（不渲染 0 值假数据）', async () => {
+  test('首次加载失败：空态文案说「加载失败」并给出刷新，不渲染 0 值假数据', async () => {
     h.getMetrics.mockRejectedValue(new Error('network down'))
     const c = await open()
     expect(c.find('.metrics-body')).toBeFalsy()
     expect(c.find('.el-empty')).toBeTruthy()
     expect(statValues(c)).toEqual([])
+    // 「加载失败」与「暂无数据」是两件事：附属数据不可用不该整页报错，
+    // 但空态文案不能替后端宣布「没有数据」。
+    expect(c.find('.el-empty__description').textContent.trim()).toBe('加载失败')
+    expect(c.find('.el-empty').textContent).toContain('刷新')
     expect(c.errors).toEqual([])
+  })
+
+  test('失败后点刷新：真的重发指标请求，成功后空态换回数据卡', async () => {
+    h.getMetrics.mockRejectedValue(new Error('network down'))
+    const c = await open()
+    expect(c.find('.el-empty__description').textContent.trim()).toBe('加载失败')
+    const callsBefore = h.getMetrics.mock.calls.length
+
+    h.getMetrics.mockResolvedValue(snapshot(FULL))
+    click(c.find('.el-empty button'))
+    await flush(8)
+    expect(h.getMetrics.mock.calls.length).toBe(callsBefore + 1)
+
+    expect(c.find('.el-empty')).toBeFalsy()
+    expect(c.find('.metrics-body')).toBeTruthy()
   })
 
   test('轮询失败保留上一次快照（面板不清空），且确实发生了第二次请求', async () => {

@@ -46,6 +46,21 @@ describe('登录口令加密传输（密文轨）', () => {
     );
     SystemConfig.invalidateRegistrationCache();
 
+    // 注册图形验证码**默认开启**（src/config/index.js:72 顶层 registerCaptchaEnabled，
+    // models/SystemConfig.js:207 的 fallback 也读顶层；全仓无任何地方设 REGISTER_CAPTCHA_ENABLED=false）。
+    // 本文件的 register 用例测的是「密文轨 + 解密后补做的强度校验」，与验证码前置层无关：
+    // 验证码若开着，弱口令与合规口令会**同样**被 400 拦在验证码层 ——
+    // 那会让 :150 的 `weakRes.status===400` 退化成"被验证码拦下"的假绿，
+    // 而 :158 的 `res.status===201` 直接转红。故此处显式落库关闭，让本文件只测它要测的那一层。
+    // 注册验证码前置层本身的覆盖见 src/tests/controllers/authLifecycle.test.js（固定文本 mock，端到端）
+    // 与 src/tests/security/systemConfigBooleanContract.test.js（默认值契约）。
+    await SystemConfig.findOneAndUpdate(
+      { key: 'registerCaptchaEnabled' },
+      { $set: { key: 'registerCaptchaEnabled', value: false } },
+      { upsert: true }
+    );
+    SystemConfig.invalidateRegisterCaptchaCache();
+
     await User.create({
       username: 'enclogin_user',
       email: 'enclogin@example.com',

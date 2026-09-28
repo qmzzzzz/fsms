@@ -6,7 +6,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import { useAuthStore } from '@/store'
+import { useAuthStore, normalizeUser } from '@/store'
 
 // restoreSession 动态 import('@/utils/api')，此处 mock 掉网络层。
 // 注意 restoreSession 是「两步探测」：先 /auth/session 确认有会话，再 /auth/me 拉详情。
@@ -48,6 +48,31 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
     expect(store.isAuthenticated).toBe(false)
   })
 
+  test('normalizeUser 只接受普通对象：标量/数组脏值一律归 null（防伪装登录并短路自愈）', () => {
+    // JSON.parse 会把截断/脏值还原成标量或数组，typeof 判定对数组也是 'object'——
+    // 若原样返回，currentUser 变真值 → isAuthenticated 误判已登录 → restoreSession
+    // 的 `if (this.currentUser) return true` 永久短路 /auth/me 自愈。必须归 null。
+    expect(normalizeUser('1')).toBeNull()
+    expect(normalizeUser(true)).toBeNull()
+    expect(normalizeUser(123)).toBeNull()
+    expect(normalizeUser([{ userId: 'x' }])).toBeNull()
+    expect(normalizeUser(null)).toBeNull()
+    expect(normalizeUser(undefined)).toBeNull()
+    // 正常对象仍按原语义补齐 id 别名（回归零副作用）
+    expect(normalizeUser({ userId: 5, username: 'a' })).toMatchObject({
+      userId: '5',
+      id: '5',
+      _id: '5',
+    })
+  })
+
+  test('localStorage 里 currentUser 是脏标量时，store 不得判定为已登录', () => {
+    localStorage.setItem('currentUser', '"1"') // JSON 可解析的标量
+    const store = useAuthStore()
+    expect(store.currentUser).toBeNull()
+    expect(store.isAuthenticated).toBe(false)
+  })
+
   test('setAuth 写入用户与权限，但不持久化令牌', () => {
     const store = useAuthStore()
     store.setAuth(
@@ -71,6 +96,43 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
     expect(JSON.parse(localStorage.getItem('permissions'))).toEqual(['device:read'])
     // 不再写 sessionStorage（标签页级隔离会导致新标签页判为未登录）
     expect(sessionStorage.getItem('currentUser')).toBeNull()
+  })
+
+  test('refreshPermissionsFromServer：/auth/me 往返期间登出，不得复活已失效会话（竞态）', async () => {
+    const store = useAuthStore()
+    store.setAuth('t', 'r', { username: 'alice', roles: [] }, ['device:read'])
+
+    // 让 getMe 挂起，手动控制 resolve，以模拟「权限刷新在途时用户点了登出」
+    let releaseGetMe
+    getMeMock.mockImplementation(
+      () =>
+        new Promise((res) => {
+          releaseGetMe = () =>
+            res({
+              data: {
+                success: true,
+                data: { user: { username: 'alice', roles: [] }, permissions: ['device:read'] },
+              },
+            })
+        })
+    )
+    const p = store.refreshPermissionsFromServer()
+    // 推进到 getMe 真正被调用（动态 import 是微任务，用一次宏任务确保已发起）
+    await new Promise((r) => setTimeout(r, 0))
+    expect(releaseGetMe, 'getMe 应已被调用').toBeTypeOf('function')
+
+    store.clearAuth() // 登出：currentUser→null，localStorage 清空，restoreFailed=true
+    expect(store.currentUser).toBeNull()
+
+    releaseGetMe() // 旧的 /auth/me 结果此刻才回来
+    const ok = await p
+
+    // 竞态守卫必须丢弃这次回填，否则会把已登出会话「复活」（并永久短路后续 restoreSession）
+    expect(ok).toBe(false)
+    expect(store.currentUser).toBeNull()
+    expect(store.isAuthenticated).toBe(false)
+    expect(localStorage.getItem('currentUser')).toBeNull()
+    expect(localStorage.getItem('permissions')).toBeNull()
   })
 
   test('setAuth 清理迁移前残留的旧令牌与旧介质会话状态', () => {

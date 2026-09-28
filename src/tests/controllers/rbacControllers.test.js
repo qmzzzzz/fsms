@@ -165,29 +165,53 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
       .send({ name: '坏码', code: 'lower-case!', level: 3 });
     expect(badCode.status).toBe(400);
 
-    // *:* 铸造拒绝仅对非超管操作者生效（H-01 守卫在 isSuperAdmin 分支内）：
-    // 非超管操作者铸造 → 403；超管操作者允许（由 P2-8 分配子集校验兜底外流）
+    // *:* 铸造拒绝是**无条件**的：本接口一律不得**铸造**保留通配角色，超管也不例外。
+    // 依据 utils/superAdmin.js:29-37「不得铸造 / 不得乱分配，且必须引用本常量」——
+    // 若放行超管铸造，就会在库里留下第二个挂 `*:*` 的角色，击穿 :9-21 的
+    // 「内置超管角色唯一」不变量（本仓防自锁/防归属扩散的地基）。
+    // 注意：这是**铸造**面；把 `*:*` **分配**给别的角色由 rolePermissionController
+    // 的分配子集校验另行拦截（rolePermissionController.js:63-77 同型已修）。
+    const wildcardPerm = await Permission.findOne({ code: '*:*' });
+    const wildcardCode = `RAWILD_${stamp.toUpperCase()}`;
+    const wildcardPayload = {
+      name: '万能',
+      code: wildcardCode,
+      level: 3,
+      permissions: [wildcardPerm._id.toString()],
+    };
+
+    // 无副作用的判据：持 `*:*` 的角色集合在两次请求前后**逐字不变**。
+    // 不能写「全局只应有 1 个」——本文件的夹具自身就用 Role.create 直建了
+    // SUPER_ADMIN_RA_*（超管操作者身份），那是合法的绕过 HTTP 的前置状态。
+    const holdersBefore = (
+      await Role.find({ permissions: wildcardPerm._id }).sort({ code: 1 }).select('code')
+    ).map((r) => r.code);
+
     const wildcardByMid = await request(app)
       .post('/api/roles')
       .set('Authorization', `Bearer ${midToken}`)
-      .send({
-        name: '万能',
-        code: `RAWILD_${stamp.toUpperCase()}`,
-        level: 3,
-        permissions: [(await Permission.findOne({ code: '*:*' }))._id.toString()],
-      });
+      .send(wildcardPayload);
     expect(wildcardByMid.status).toBe(403);
+
+    // 反空转：必须证明「403 是因为通配」而不是因为别的理由先被拦。
+    // 若日后 midToken 失效或校验规则收紧，两条请求会以同一原因 403，
+    // 本用例就会退化成「什么都没测到」的假绿。
+    // 码化错误的码在 body.errors.errorCode（apiResponse.js:91-96），不是 body.code。
+    expect(wildcardByMid.body.errors.errorCode).toBe('CANNOT_GRANT_WILDCARD_PERMISSION');
 
     const wildcardBySuper = await authed()
       .post('/api/roles')
-      .send({
-        name: '万能_超管自铸',
-        code: `RAWILD_${stamp.toUpperCase()}`,
-        level: 3,
-        permissions: [(await Permission.findOne({ code: '*:*' }))._id.toString()],
-      });
-    expect(wildcardBySuper.status).toBe(201);
-    await authed().delete(`/api/roles/${wildcardBySuper.body.data._id}`);
+      .send({ ...wildcardPayload, name: '万能_超管自铸' });
+    expect(wildcardBySuper.status).toBe(403);
+    // 与中权路径同一拒绝码 ⇒ 证明「超管也不例外」是同一条守卫，而非另一条路径顺手拦下
+    expect(wildcardBySuper.body.errors.errorCode).toBe('CANNOT_GRANT_WILDCARD_PERMISSION');
+
+    // 拒绝必须是「未落库」而非「先建后删」
+    expect(await Role.findOne({ code: wildcardCode })).toBeNull();
+    const holdersAfter = (
+      await Role.find({ permissions: wildcardPerm._id }).sort({ code: 1 }).select('code')
+    ).map((r) => r.code);
+    expect(holdersAfter).toEqual(holdersBefore);
   });
 
   test('角色：更新（名称/状态）；内置角色改名称被拒；非法 status 400', async () => {

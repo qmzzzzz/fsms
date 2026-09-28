@@ -67,10 +67,31 @@ describe('auditScopeFilter 数据范围翻译分支（#22）', () => {
     expect(query._id).toEqual({ $in: [] });
   });
 
-  test('department：缺 department 字段 → 退化为本人 userId', async () => {
-    mockPermissionRbac.getDataScope.mockResolvedValue({ type: 'department', userId: HEX_SELF });
+  // 旧用例写的是"缺 department 字段 → 退化为本人 userId"，并喂进
+  // `{type:'department', userId: HEX_SELF}`。那个形态生产供不出来：
+  // rbac.getDataScope 的 department 档返回 `{type:'department', department}`（rbac.js:209），
+  // 带 userId 的是 self 档。于是断言 `query.userId === OID(HEX_SELF)` 绿，
+  // 而真实输入下 dataScope.userId 是 undefined ⇒ new ObjectId(undefined) 随机 ⇒ 永久空结果。
+  // 改成按真实形态断 deny：与本文件其余拒绝分支同 idioms，也与
+  // rbac.buildDataScopeFilter/applyDataScopeToQuery（空部门必须 deny）同口径。
+  test('department 档但本人无部门 → 无条件拒绝（不是"退化为本人 userId"）', async () => {
+    mockPermissionRbac.getDataScope.mockResolvedValue({ type: 'department' });
     const { query } = await applyAuditDataScope({}, 'op1');
-    expect(query.userId).toEqual(OID(HEX_SELF));
+    expect(query._id).toEqual({ $in: [] });
+    // 随机 ObjectId 兜底的指纹就是"userId 被凭空写进来"
+    expect(query.userId).toBeUndefined();
+  });
+
+  test('同一无部门范围：两次调用必须给出逐字相同的条件（随机兜底过不了这条）', async () => {
+    mockPermissionRbac.getDataScope.mockResolvedValue({
+      type: 'department',
+      department: undefined,
+    });
+    const first = await applyAuditDataScope({ action: 'auth_login' }, 'op1');
+    const second = await applyAuditDataScope({ action: 'auth_login' }, 'op1');
+    expect(second.query).toEqual(first.query);
+    // 拒绝条件必须保留原有查询条件，只叠加空 $in
+    expect(first.query.action).toBe('auth_login');
   });
 
   test('department 点查：目标属本部门 → 放行为目标 userId', async () => {
@@ -105,7 +126,41 @@ describe('auditScopeFilter 数据范围翻译分支（#22）', () => {
     expect(query._id).toEqual({ $in: [] });
   });
 
-  test('department 点查：目标查询失败（catch→null）→ 拒绝', async () => {
+  test('department 点查：目标用户不存在 → 拒绝（findById resolve null，不走 catch）', async () => {
+    mockPermissionRbac.getDataScope.mockResolvedValue({
+      type: 'department',
+      userId: 'u1',
+      department: '运维部',
+    });
+    mockUserFindById.mockReturnValue({
+      select: () => ({
+        lean: async () => null,
+      }),
+    });
+    const { query } = await applyAuditDataScope({ userId: OID('5'.repeat(24)) }, 'op1');
+    expect(query._id).toEqual({ $in: [] });
+  });
+
+  /**
+   * 旧用例写的是「目标查询失败（catch→null）→ 拒绝」，也就是把
+   * `.catch(() => null)` 的**折错行为当成契约钉住**了。那个 catch 会把
+   * 「基础设施故障」（连接重置 / 选主 / 写关注超时）也折成"该用户不在本部门"，
+   * 于是 DB 抖动期间导出与列表返回 200 + 空结果，与"确实没有数据"不可区分
+   * ——正是同文件上面那条「缺部门不许凭空写 userId」判为缺陷的同一格。
+   * 现在拆成两条：形状不合 ⇒ deny 且**不碰库**；查询真失败 ⇒ 冒泡。
+   */
+  test('department 点查：id 形状不合 → 拒绝，且根本不查库', async () => {
+    mockPermissionRbac.getDataScope.mockResolvedValue({
+      type: 'department',
+      userId: 'u1',
+      department: '运维部',
+    });
+    const { query } = await applyAuditDataScope({ userId: 'not-an-objectid' }, 'op1');
+    expect(query._id).toEqual({ $in: [] });
+    expect(mockUserFindById).not.toHaveBeenCalled();
+  });
+
+  test('department 点查：查询失败（基础设施故障）必须冒泡，不许折成 deny', async () => {
     mockPermissionRbac.getDataScope.mockResolvedValue({
       type: 'department',
       userId: 'u1',
@@ -118,8 +173,11 @@ describe('auditScopeFilter 数据范围翻译分支（#22）', () => {
         },
       }),
     });
-    const { query } = await applyAuditDataScope({ userId: OID('5'.repeat(24)) }, 'op1');
-    expect(query._id).toEqual({ $in: [] });
+    // 冒泡到调用方后由控制器给 AUDIT_QUERY_FAILED / AUDIT_EXPORT_FAILED
+    // （auditController.js:38 的 try + :64 的 catch），而不是发一份看起来"没有数据"的空导出。
+    await expect(applyAuditDataScope({ userId: OID('5'.repeat(24)) }, 'op1')).rejects.toThrow(
+      'db down'
+    );
   });
 
   test('department 无点查：成员集非空 → $in 集合；30s 内命中缓存', async () => {

@@ -1,5 +1,5 @@
 /**
- * docker-compose 的 production 环境变量契约（F-05 类断裂的回归防线）
+ * docker-compose 的 production 环境变量契约（类断裂的回归防线）
  *
  * 背景：`src/config/validate.js` 在 NODE_ENV=production 下有一组**致命**必填项，
  * 少任何一项应用都起不来（process.exit(1)）。而 `docker-compose.yml` 是实际的
@@ -80,13 +80,20 @@ function readAppEnvironment() {
 function materialize(raw, tmpDir) {
   if (raw.startsWith('/run/secrets/')) {
     const file = path.join(tmpDir, path.basename(raw));
-    fs.writeFileSync(file, STRONG_DUMMY, 'utf8');
+    // 每个 secret 写**不同**的替身值：compose 的四个 secret 是 generate-secrets.js
+    // 分别生成的独立随机值。全部写成同一个 STRONG_DUMMY 会让
+    // JWT_SECRET === JWT_REFRESH_SECRET，被"两把 JWT 密钥不得相同"这条判据按真实
+    // 拓扑拒掉（那条判据是对的，错的是替身）。
+    const name = path.basename(raw);
+    fs.writeFileSync(file, `${STRONG_DUMMY}:${name}`, 'utf8');
     return file;
   }
   const interpolation = raw.match(/^\$\{([A-Z0-9_]+)(?::?[-?][^}]*)?\}$/);
   if (interpolation) {
     const def = raw.match(/:-([^}]*)\}/);
-    return def ? def[1] : STRONG_DUMMY;
+    // 未给默认值时按变量名单独造替身：多个 `${X:?}` 共用同一个值会互相"撞库"，
+    // 让按值比较的判据（如两把 JWT 密钥不得相同）测到替身而不是被测拓扑
+    return def ? def[1] : `${STRONG_DUMMY}:${interpolation[1]}`;
   }
   return raw;
 }
@@ -216,5 +223,103 @@ describe('docker-compose 生产环境变量契约', () => {
 
   test('ALLOWED_HOSTS 是强制显式项而非默认值（给默认等于把真实域名关在门外）', () => {
     expect(composeVars.ALLOWED_HOSTS).toMatch(/^\$\{ALLOWED_HOSTS:\?/);
+  });
+
+  /**
+   * 纯函数：从一批「文档/配置」文本里抽出 `node|sh|bash scripts/<file> [--flag…]` 形式的命令引用，
+   * 报告 ① 指向不存在的脚本、② 文档写了但该脚本源码里根本没有的开关。
+   *
+   * 只认「与 scripts/x.js 出现在同一条命令行上」的 --flag，避免把散文里的引号内容当成参数；
+   * 代价是跨行续行（`\`）里的开关扫不到——这属于漏报而非误报，宁可漏也不给文档加假红。
+   */
+  const findScriptRefDrift = (entries, existsSync, readFileSync) => {
+    const refs = [];
+    const missingFiles = [];
+    const unknownFlags = [];
+    for (const { name, text } of entries) {
+      for (const m of text.matchAll(
+        /(?:node|sh|bash)[ \t]+((?:\.{2}[\\/])?scripts[\\/][\w.@-]+\.(?:js|sh))((?:[ \t]+--[\w-]+)*)/g
+      )) {
+        const target = m[1].replace(/\\/g, '/').replace(/^\.\.\//, '');
+        const flags = (m[2] || '').match(/--[\w-]+/g) || [];
+        refs.push({ from: name, target, flags });
+        if (!existsSync(target)) {
+          missingFiles.push({ from: name, target });
+          continue; // 脚本都不存在，无从判开关
+        }
+        const src = readFileSync(target);
+        for (const f of flags)
+          if (!src.includes(f)) unknownFlags.push({ from: name, target, flag: f });
+      }
+    }
+    return { refs, missingFiles, unknownFlags };
+  };
+
+  test('文档与部署入口里引用的 scripts/* 与其开关，必须与仓库实际一致', () => {
+    // 实证过的两类腐化：
+    //  ① docker-compose.yml 曾写「scripts/deploy.sh 会做 fail-fast 校验」，而仓库从来没有
+    //     deploy.sh（2026-09-18 审计报告点名、长期无人改）——运维照抄就是 command not found；
+    //  ② runbook 写着 `--apply` 而实现早已改名/加双开关，运维按文档敲就是"命令不识别"，
+    //     更坏的情况是脚本把未知参数当没看见、静默不做那一步。
+    // 本用例把「文档说的 = 代码做的」变成断言。它是**文本 vs 文本**的契约（判据对象就是文档），
+    // 所以这里用文本扫描是对的工具，不属于"该测行为却去扫源码"的那种假绿。
+    const root = path.join(__dirname, '../../..');
+    const docFiles = [
+      path.join(root, 'docker-compose.yml'),
+      path.join(root, 'README.md'),
+      path.join(root, 'CONTRIBUTING.md'),
+      ...fs
+        .readdirSync(path.join(root, '.github/workflows'))
+        .map((f) => path.join(root, '.github/workflows', f)),
+      ...fs
+        .readdirSync(path.join(root, 'deployment'))
+        .filter((f) => f.endsWith('.md'))
+        .map((f) => path.join(root, 'deployment', f)),
+    ];
+    const entries = docFiles
+      .filter((f) => fs.existsSync(f))
+      .map((f) => ({
+        name: path.relative(root, f).replace(/\\/g, '/'),
+        text: fs.readFileSync(f, 'utf8'),
+      }));
+
+    const existsSync = (rel) => fs.existsSync(path.join(root, rel));
+    const readFileSync = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+    const { refs, missingFiles, unknownFlags } = findScriptRefDrift(
+      entries,
+      existsSync,
+      readFileSync
+    );
+
+    // 前提自证：真的扫到足量引用（扫空会让本用例恒绿）
+    expect(refs.length).toBeGreaterThanOrEqual(15);
+    expect(missingFiles).toEqual([]);
+    expect(unknownFlags).toEqual([]);
+
+    // 可证伪：判据必须能报错。喂一份"指向不存在的脚本 + 编造一个开关"的假文档，
+    // 两类漂移都要被抓到（否则上面两个 toEqual([]) 等于没断言）。
+    const fake = findScriptRefDrift(
+      [{ name: 'FAKE.md', text: 'node scripts/zzq-ghost.js --apply --confirm-yes' }],
+      (rel) => rel === 'scripts/zzq-real.js',
+      () =>
+        '/* 源码里没有 --confirm-yes 这个开关 */ const APPLY = process.argv.includes("--apply");'
+    );
+    expect(fake.missingFiles).toEqual([{ from: 'FAKE.md', target: 'scripts/zzq-ghost.js' }]);
+    const fake2 = findScriptRefDrift(
+      [{ name: 'FAKE.md', text: 'node scripts/zzq-real.js --apply --confirm-yes' }],
+      (rel) => rel === 'scripts/zzq-real.js',
+      () => 'const APPLY = process.argv.includes("--apply");'
+    );
+    expect(fake2.unknownFlags).toEqual([
+      { from: 'FAKE.md', target: 'scripts/zzq-real.js', flag: '--confirm-yes' },
+    ]);
+    // 且它不误伤：散文里出现的 --flag（不在命令行上）不算引用
+    expect(
+      findScriptRefDrift(
+        [{ name: 'X.md', text: '我们讨论过 --some-random-doc-word 这个概念' }],
+        () => true,
+        () => ''
+      ).refs
+    ).toEqual([]);
   });
 });

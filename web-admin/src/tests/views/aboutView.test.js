@@ -81,8 +81,10 @@ describe('about.metrics i18n 词条', () => {
       expect(zh.about.metrics[key]).toBeTruthy()
       expect(en.about.metrics[key]).toBeTruthy()
     }
-    // 告警级别：模板按 a.level 动态拼键，缺一级就会渲染出原始键名
-    for (const level of ['low', 'medium', 'high', 'critical']) {
+    // 告警级别：模板按 a.level 动态拼键，缺一级就会渲染出原始键名。
+    // 'unknown' 必查——src/utils/metrics.js 对无 level 的告警回吐 level:'unknown'，
+    // 而 zh↔en parity 门只比两份文件彼此一致，两边都缺某键时看不见，只有按真实取值枚举才拦得住。
+    for (const level of ['low', 'medium', 'high', 'critical', 'unknown']) {
       expect(zh.about.metrics.level[level]).toBeTruthy()
       expect(en.about.metrics.level[level]).toBeTruthy()
     }
@@ -97,9 +99,21 @@ describe('about.metrics i18n 词条', () => {
 
   test('英文词条不含中文', async () => {
     const en = (await import('@/i18n/locales/en-US')).default
-    const untranslated = Object.entries(en.about.metrics)
-      .filter(([, v]) => typeof v === 'string' && /[\u4e00-\u9fa5]/.test(v))
-      .map(([k]) => k)
+    // 必须递归到叶子：上一版只取 Object.entries(en.about.metrics) 第一层的字符串，
+    // 于是嵌套块 metrics.level.*（告警级别文案）整块被 typeof==='string' 挡在判据之外，
+    // 往里塞中文本用例照样绿。
+    const leaves = []
+    const walk = (obj, prefix) => {
+      for (const [k, v] of Object.entries(obj)) {
+        const key = prefix ? `${prefix}.${k}` : k
+        if (typeof v === 'string') leaves.push([key, v])
+        else if (v && typeof v === 'object') walk(v, key)
+      }
+    }
+    walk(en.about, '')
+    // 反向自证：确实走进了嵌套层，否则"递归"退化成第一层也不会红
+    expect(leaves.some(([key]) => key.startsWith('metrics.level.'))).toBe(true)
+    const untranslated = leaves.filter(([, v]) => /[\u4e00-\u9fa5]/.test(v)).map(([k]) => k)
     expect(untranslated).toEqual([])
   })
 })

@@ -11,7 +11,10 @@
  * transport 走异步 I/O，而 process.exit 不等待事件循环。
  * 因此：
  *   - 同步上下文（config/validate.js，测试断言其同步抛错）→ 必须同步写文件；
- *   - 异步上下文（database.js / index.js）→ logger.end() + setTimeout 退出。
+ *   - 异步上下文（database.js / index.js）→ 让事件循环推进一轮（setTimeout）后退出。
+ *     【F-187 更正】此处原写「logger.end() + setTimeout 退出」——end() 已被实测
+ *     否证：它对落盘毫无帮助（真正起作用的是那个 setTimeout），反而让此后任何
+ *     logger.* 同步抛 ERR_STREAM_WRITE_AFTER_END。判据见下方 F-187 用例（含 N0 控制组）。
  *
  * 【本文件的可证伪点】下面的子进程用例会把两种写法都真跑一遍并断言
  * 「naive 丢、flushLogsSync 不丢」。若有人把 flushLogsSync 退回成
@@ -164,7 +167,7 @@ describe('P1-13 退出前日志落盘', () => {
     });
 
     test('缺省延迟为 100ms：99ms 未退出、100ms 退出（报告 P1-13 要求 ≥100ms）', () => {
-      // 【本轮改造：源码正则 → 真实计时行为】原用例读 loggerFlush.js 源码匹配
+      // 【本次改动改造：源码正则 → 真实计时行为】原用例读 loggerFlush.js 源码匹配
       // `Number.isFinite(options.delayMs) ? options.delayMs : 100` 这段文本，两个方向都不可靠：
       //   · 假阳性——把 100 改成其他值、或让这段代码落进不可达分支，
       //     只要文本还在，断言照样绿；
@@ -186,11 +189,111 @@ describe('P1-13 退出前日志落盘', () => {
         jest.useRealTimers();
       }
     });
+
+    test('退出时不得拆掉 logger：exitAfterFlush 之后仍要打日志（真实进程）', () => {
+      // 【F-187】原实现在 setTimeout 之前调 logger.end()。两宗罪：
+      //   ① 它买不到任何落盘——见本文件头部实测表，end() 后 exit 依旧丢失，
+      //      真正让那行落地的是那个 setTimeout；
+      //   ② 它把 winston 的流写死——end() 完成（'finish' 事件）之后任何 logger.*
+      //      都**同步**抛 ERR_STREAM_WRITE_AFTER_END（本机实测 'finish' 在 end() 后
+      //      约 2ms 触发；抛错的调用点本身就是日志语句，try/catch 只能保住进程、
+      //      保不住那条日志）。
+      // 而「退出窗口内还要打日志」在真实退出路径上必然发生：
+      //   · index.js 的 exitAfterFlush(0, { delayMs: 500 }) 之后，在途请求的错误处理仍会 log；
+      //   · 二次信号分支里 logger.warn 就排在 exitAfterFlush(1) 之前。
+      //
+      // 【为什么判据是「spy 是否看到 end()」而不是「延迟 100ms 再 log 会不会抛」】
+      // 实测：把后置 log 放在 end() 后固定 100ms，抛不抛取决于 transport 是否已
+      // 关完（本机在 jest 环境下 100ms 那份**没有**抛）——用它当控制组会得到
+      // 「假绿的控制组」。故控制组改用事件驱动（logger.once('finish')），
+      // 被测面用 logger.end 的调用探针，两者都与磁盘/调度时序无关。
+      const uniq = `f187-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const run = (mode) => {
+        // 日志目录隔离到临时路径：不污染仓库当日共享日志（并行套件会写同一文件）
+        const dir = path.join(os.tmpdir(), `fsms-f187-${uniq}-${mode}`);
+        fs.mkdirSync(dir, { recursive: true });
+        const bootstrap = [
+          "const logger = require('./src/utils/logger');",
+          "const { exitAfterFlush } = require('./src/utils/loggerFlush');",
+          // 探针：exitAfterFlush 内部若 require logger 再调 end()，必经过这个包装
+          'let endCalled = false;',
+          'const realEnd = logger.end.bind(logger);',
+          'logger.end = function () {',
+          '  endCalled = true;',
+          '  return realEnd.apply(null, arguments);',
+          '};',
+          `logger.error('PRE-MARK-${uniq}');`,
+          "if (process.env.PROBE_MODE === 'control') {",
+          "  console.log('CONTROL-BRANCH=RAN');",
+          '  logger.end();',
+          "  logger.once('finish', () => {",
+          '    try {',
+          `      logger.warn('POST-MARK-${uniq}');`,
+          "      console.log('HAZARD=logged-fine');",
+          '    } catch (e) {',
+          "      console.log('HAZARD=THREW:' + (e && e.code ? e.code : e.message));",
+          '    }',
+          '  });',
+          '}',
+          // 500ms 预算：真实退出点用的就是这个量级（index.js 的 delayMs: 500）
+          'exitAfterFlush(3, { delayMs: 500 });',
+          'setTimeout(() => {',
+          '  try {',
+          `    logger.warn('LATE-MARK-${uniq}');`,
+          "    console.log('LATE=ok');",
+          '  } catch (e) {',
+          "    console.log('LATE=THREW:' + (e && e.code ? e.code : e.message));",
+          '  }',
+          "  console.log('END-CALLED=' + endCalled);",
+          '}, 100);',
+        ].join('\n');
+        // 【测量法地雷】`node -e <script> foo` 的 foo 落在 process.argv[1]（-e 不占
+        // 脚本名槽位），初版写成 argv[2] ⇒ 控制组分支静默不执行 ⇒「假绿的控制组」，
+        // 与它要证的结论正好相反。改走 env，并在分支里自报 CONTROL-BRANCH=RAN。
+        const r = require('child_process').spawnSync(NODE, ['-e', bootstrap], {
+          cwd: ROOT,
+          env: {
+            ...process.env,
+            NODE_ENV: 'test',
+            LOG_DIR: dir,
+            PORT: '0',
+            PROBE_MODE: mode,
+          },
+          encoding: 'utf8',
+          timeout: 60000,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        return { r, dir };
+      };
+
+      const fixed = run('fixed');
+      // ① 被测不变量：exitAfterFlush 不得调用 logger.end()
+      expect(fixed.r.stdout).toContain('END-CALLED=false');
+      // ② 退出窗口内的日志不抛
+      expect(fixed.r.stdout).toContain('LATE=ok');
+      // ③ 退出码仍是调用方要的那个（去掉 end() 不影响退出契约）
+      expect(fixed.r.status).toBe(3);
+      // ④ 两行都真落到文件（去掉 end() 不能让异步 transport 的落盘能力退化）
+      const combined = fs.readFileSync(path.join(fixed.dir, `combined-${dateStamp()}.log`), 'utf8');
+      expect(combined).toContain(`PRE-MARK-${uniq}`);
+      expect(combined).toContain(`LATE-MARK-${uniq}`);
+      // 前置那行是 error 级别，按 logger.js 的 transport 配置同时进 error-*.log
+      expect(fs.readFileSync(path.join(fixed.dir, `error-${dateStamp()}.log`), 'utf8')).toContain(
+        `PRE-MARK-${uniq}`
+      );
+
+      // ⑤ N0 控制组（同一夹具、同一探针）：分支确实执行、显式 end() 被探针看到，
+      //    且 'finish' 之后再 log 必须复现同步抛错。任一条不成立 ⇒ ①②是空断言。
+      const control = run('control');
+      expect(control.r.stdout).toContain('CONTROL-BRANCH=RAN');
+      expect(control.r.stdout).toContain('END-CALLED=true');
+      expect(control.r.stdout).toContain('HAZARD=THREW:ERR_STREAM_WRITE_AFTER_END');
+    }, 90000);
   });
 
   describe('四处退出点已接入（报告 P1-13 点名的位置）', () => {
     test('validate.js 的致命上报走同步落盘（真实执行）', () => {
-      // 【本轮改造：源码正则 → 行为断言】原用例断言 reportConfigErrors 函数体里出现
+      // 【本次改动改造：源码正则 → 行为断言】原用例断言 reportConfigErrors 函数体里出现
       // flushLogsSync(/process.exit(1) 字样——只要文本在，实际不落盘也绿。
       // 现真跑一次 validateConfig() 的致命路径（极弱 JWT_SECRET 使其报错），
       // 断言「本次新增的日志内容（delta）里真的含有配置错误文案」。
@@ -249,7 +352,7 @@ describe('P1-13 退出前日志落盘', () => {
     });
 
     test('database.js 失败路径走 exitAfterFlush(1) 而非裸 process.exit（真实执行）', async () => {
-      // 【本轮改造：源码正则 → 行为断言】原用例断言 database.js 源码里出现
+      // 【本次改动改造：源码正则 → 行为断言】原用例断言 database.js 源码里出现
       // `return exitAfterFlush(1)` 且不出现 `process.exit(1)`——把调用改成其他函数名但保留注释文本，
       // 或把调用放进不可达分支，断言都照样绿。
       // 现 mock mongoose.connect 持续拒绝 + mock loggerFlush 记录调用，
@@ -283,7 +386,7 @@ describe('P1-13 退出前日志落盘', () => {
     });
 
     test('index.js 四处致命退出点均走 exitAfterFlush(1)（子进程 e2e：启动失败）', () => {
-      // 【本轮改造：源码计数 → 子进程真实退出行为】原用例用正则数
+      // 【本次改动改造：源码计数 → 子进程真实退出行为】原用例用正则数
       // `return exitAfterFlush(1)` 出现次数 ≥ 4——调用全部放进死分支也绿。
       // 现启动真实进程：ENABLE_HTTPS=true 但证书路径不存在（TLS 加载失败路径），
       // 断言：进程以非零码退出、且「TLS 证书加载失败」真的落到了日志文件（而非只在 stdout）。
@@ -292,8 +395,15 @@ describe('P1-13 退出前日志落盘', () => {
       const missingCert = path.join(os.tmpdir(), `${uniq}.crt`);
       const missingKey = path.join(os.tmpdir(), `${uniq}.key`);
       const stamp = dateStamp();
-      const logFile = path.join(ROOT, 'logs', `error-${stamp}.log`);
-      const before = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+      // 【日志隔离】不能让子进程写仓库里那份共享的当日 error 日志：
+      // daily-rotate 带 maxSize，文件到 10MB 就会滚动出 .1，
+      // 加上并行套件同时在写同一文件，"读 before / 读 after 取差集"这套账
+      // 必然偶发算不平（实测：TLS 那行确实落盘了，差集却是空串 ⇒ 假红）。
+      // LOG_DIR 把这一次运行的日志目录指到临时路径，判据强度不降：
+      // 仍然是"真实进程 ⇒ 真实 transport ⇒ 真实文件里必须出现那行"。
+      const tmpLogDir = path.join(os.tmpdir(), `zzq-lf-${Date.now().toString(36)}`);
+      fs.mkdirSync(tmpLogDir, { recursive: true });
+      const logFile = path.join(tmpLogDir, `error-${stamp}.log`);
 
       // 【环境隔离】index.js 的启动编排是 DB → 播种 → createApp → TLS，
       // TLS 分支位于 DB 之后。若让子进程真连测试内存 Mongo，并行负载下建连会
@@ -317,6 +427,7 @@ describe('P1-13 退出前日志落盘', () => {
         env: {
           ...process.env,
           NODE_ENV: 'test',
+          LOG_DIR: tmpLogDir,
           ENABLE_HTTPS: 'true',
           TLS_CERT_PATH: missingCert,
           TLS_KEY_PATH: missingKey,
@@ -327,10 +438,9 @@ describe('P1-13 退出前日志落盘', () => {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       expect(r.status).toBe(1);
-      const after = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
-      const delta = after.slice(before.length);
-      expect(delta).toContain('TLS 证书加载失败');
-      expect(delta).toContain(uniq);
+      const written = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+      expect(written).toContain('TLS 证书加载失败');
+      expect(written).toContain(uniq);
     }, 150000);
   });
 });

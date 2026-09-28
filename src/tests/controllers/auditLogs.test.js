@@ -218,6 +218,25 @@ describe('/api/security/audit-logs 查询优化', () => {
     expect(res.headers['x-performance-warning']).toBe('query_range_too_large');
   });
 
+  test('完全没有时间窗（审计页默认视图）⇒ 声明 no_time_window，且这一格必然扫满留存期', async () => {
+    const res = await queryLogs('username=user.a');
+    expect(res.status).toBe(200);
+    // 原实现在这里直接早退（`if (!startDate || !endDate) return;`），于是唯一
+    // "必然全表扫"的形态反而是唯一不声明的那一格
+    expect(res.headers['x-performance-warning']).toBe('no_time_window');
+    expect(Array.isArray(res.body.data.data)).toBe(true);
+  });
+
+  test('只给一端也算没有时间窗（上界缺失 = 扫到当下）', async () => {
+    const onlyStart = await queryLogs(`startDate=${daysAgo(2)}`);
+    expect(onlyStart.status).toBe(200);
+    expect(onlyStart.headers['x-performance-warning']).toBe('no_time_window');
+
+    const onlyEnd = await queryLogs(`endDate=${daysAgo(1)}`);
+    expect(onlyEnd.status).toBe(200);
+    expect(onlyEnd.headers['x-performance-warning']).toBe('no_time_window');
+  });
+
   test('正常时间范围不设置告警头', async () => {
     const start = daysAgo(3);
     const end = daysAgo(1);

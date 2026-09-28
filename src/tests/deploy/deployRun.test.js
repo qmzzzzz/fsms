@@ -25,7 +25,12 @@ const ROOT = path.resolve(__dirname, '../../..');
 const SCRIPT = path.join(ROOT, 'scripts', 'deploy.js');
 const HOOK = path.join(__dirname, 'helpers', 'stubExec.js');
 const NODE = process.execPath;
-const SECRET_NAMES = require('../../../scripts/deploy').REQUIRED_SECRET_FILES;
+const SECRET_NAMES = require('../../../scripts/deployPolicy').REQUIRED_SECRET_FILES;
+
+/** 本次要发布的目标镜像引用（env.APP_IMAGE）。 */
+const TARGET_IMAGE = 'ghcr.io/qmzzzzz/fsms:sha-abc1234';
+/** inspect 默认返回的「当前运行中的上一版本」引用：与 TARGET_IMAGE 不同串 = 正常可回滚场景。 */
+const PREVIOUS_IMAGE = 'ghcr.io/qmzzzzz/fsms:sha-previous';
 
 const staged = [];
 afterAll(() => {
@@ -41,8 +46,47 @@ function makeStage() {
     const v = n === 'mongodb_uri' ? 'mongodb://127.0.0.1:27017/x\n' : `v-${n}\n`;
     fs.writeFileSync(path.join(secrets, n), v);
   }
+  // 告警接收端：preflight 现在会校验"webhook 是否已注入"（Top-2），而仓库里那份
+  // deployment/observability/alertmanager.yml 是**占位模板**（仓库必须保持占位，
+  // 真实 access_token 不入库）。故这里造一份"已注入"的配置并让脚本读它——
+  // 与 ALLOWED_HOSTS 同理：不补这一项，本套件全部用例会卡在退出码 2
+  // （那正是"早于任何变更就拒绝"的证据，但不是本套件要测的命令序列）。
+  const alertmanager = path.join(dir, 'alertmanager.yml');
+  fs.writeFileSync(
+    alertmanager,
+    [
+      'receivers:',
+      '  - name: ops-critical',
+      '    webhook_configs:',
+      "      - url: 'https://oapi.dingtalk.com/robot/send?access_token=0f1e2d3c4b5a6978'",
+      '  - name: ops-warning',
+      '    webhook_configs:',
+      "      - url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=0f1e2d3c4b5a6978'",
+      '',
+    ].join('\n')
+  );
   staged.push(dir);
-  return { dir, secrets, log: path.join(dir, 'cmd.log'), rules: ['*||0'] };
+  return { dir, secrets, alertmanager, log: path.join(dir, 'cmd.log'), rules: ['*||0'] };
+}
+
+/**
+ * stubExec 的规则表（先命中先返回；具体前缀一律排在 `*` 兜底之前）。
+ * 单独成函数：runDeploy 的分支密度已在 eslint complexity 上限（15）上，
+ * 再加一个默认参数就会棘轮回退——判据抽出来既降密度，也让「规则顺序」这件事只有一处。
+ */
+function buildRules({ readyz, readyzSeq, noPrevious, previousImage, failOn, compose }) {
+  return [
+    // ① 指定的失败命令（前缀命中即非零退出）
+    ...failOn.map((f) => `${f}||1`),
+    // ② 健康探针：固定码或逐次变化的序列
+    `curl|${readyzSeq ? '@seq:' + readyzSeq.join(',') : readyz}|0`,
+    // ③ 回滚目标：inspect 返回上一版本镜像（非空才会触发回滚）
+    `docker inspect|${previousImage}|0`,
+    // ④ ps -q app：默认返回一个容器 ID；noPrevious 时返回空（=首次部署）
+    `${compose} ps -q app|${noPrevious ? '' : 'fake-container-id'}|0`,
+    // ⑤ 兜底：其余命令一律成功、空输出
+    '*||0',
+  ];
 }
 
 /**
@@ -51,12 +95,15 @@ function makeStage() {
  * @param {string} [o.readyz] 健康探针固定返回码（默认 200）
  * @param {boolean} [o.noPrevious] true 时模拟「首次部署」：docker compose ps -q app 无输出
  * @param {string[]} [o.failOn] 命令前缀列表：命中则该命令非零退出
+ * @param {string} [o.previousImage] `docker inspect` 返回的当前镜像引用；传 TARGET_IMAGE
+ *   即模拟「按可变标签发布」——回滚目标与目标同引用
  * @param {string[]} [o.args] 额外命令行参数
  */
 function runDeploy({
   readyz = '200',
   readyzSeq = null,
   noPrevious = false,
+  previousImage = PREVIOUS_IMAGE,
   failOn = [],
   failExact = false,
   healthTimeoutMs = '400',
@@ -64,19 +111,14 @@ function runDeploy({
 } = {}) {
   const stage = makeStage();
   const compose = 'docker compose -f ' + path.join(ROOT, 'docker-compose.yml');
-  // 规则按顺序匹配、先命中先返回；具体前缀一律排在 `*` 兜底之前。
-  stage.rules = [
-    // ① 指定的失败命令（前缀命中即非零退出）
-    ...failOn.map((f) => `${f}||1`),
-    // ② 健康探针：固定码或逐次变化的序列
-    `curl|${readyzSeq ? '@seq:' + readyzSeq.join(',') : readyz}|0`,
-    // ③ 回滚目标：inspect 返回上一版本镜像（非空才会触发回滚）
-    `docker inspect|ghcr.io/qmzzzzz/fsms:sha-previous|0`,
-    // ④ ps -q app：默认返回一个容器 ID；noPrevious 时返回空（=首次部署）
-    `${compose} ps -q app|${noPrevious ? '' : 'fake-container-id'}|0`,
-    // ⑤ 兜底：其余命令一律成功、空输出
-    '*||0',
-  ];
+  stage.rules = buildRules({
+    readyz,
+    readyzSeq,
+    noPrevious,
+    previousImage,
+    failOn,
+    compose,
+  });
   const env = {
     ...process.env,
     // 正斜杠：NODE_OPTIONS 内的反斜杠会被 Node 当转义字符吃掉（实测：直接拼路径会 MODULE_NOT_FOUND）
@@ -85,8 +127,13 @@ function runDeploy({
     STUB_RESPONSES: stage.rules.join('\n'),
     STUB_SECRETS_DIR: stage.secrets,
   };
-  env.APP_IMAGE = 'ghcr.io/qmzzzzz/fsms:sha-abc1234';
+  env.APP_IMAGE = TARGET_IMAGE;
   env.CORS_ORIGIN = 'https://admin.example.com';
+  // compose 里同为 `:?` 硬声明项，preflight 现在会一起校验，不补这一行会让
+  // 本套件全部用例卡在退出码 2（那正是「早于任何变更就拒绝」的证据，但不是被测路径）
+  env.ALLOWED_HOSTS = 'fsms.example.com';
+  // 告警接收端指向本 stage 里那份"已注入"的配置（理由见 makeStage）
+  env.ALERTMANAGER_CONFIG_PATH = stage.alertmanager;
   env.DEPLOY_HEALTH_TIMEOUT_MS = healthTimeoutMs;
   // 回滚后复检也要短：否则失败路径会真等 60 秒（测试挂死）
   env.DEPLOY_ROLLBACK_TIMEOUT_MS = '400';
@@ -111,6 +158,8 @@ function runDeploy({
 
 const idx = (lines, needle) => lines.findIndex((l) => l.includes(needle));
 const count = (lines, needle) => lines.filter((l) => l.includes(needle)).length;
+/** 容器切换那条命令的完整前缀（要精确失败切换、不误伤回滚之外的步骤） */
+const SWITCH_CMD = `docker compose -f ${path.join(ROOT, 'docker-compose.yml')} up -d --no-build app`;
 
 describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () => {
   test('成功路径顺序：备份 → pull → migrate status → migrate up → 切换，退出码 0', () => {
@@ -170,6 +219,9 @@ describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () 
     // 回滚动作 = 第二次 up -d（第一次是发布切换）
     expect(count(r.lines, 'up -d --no-build app')).toBe(2);
     expect(r.stdout).toContain('切回上一镜像');
+    // 回滚只切镜像、不切 schema：此刻库已被迁移改写。走 stderr（失败路径判据
+    // 一律与变更日志分流），不打印出来操作员会以为「✓ 回滚后服务就绪」= 回到发布前状态。
+    expect(r.stderr).toContain('回滚只切镜像');
   });
 
   test('首次部署（无上一版本）+ 健康失败 → 不回滚，但仍以退出码 1 收口', () => {
@@ -193,6 +245,64 @@ describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () 
     expect(count(r.lines, 'up -d --no-build app')).toBe(1);
   });
 
+  test('--skip-backup + 健康失败 → 拒绝自动回滚（无备份即无回滚资格）', () => {
+    // 修复前这里是**第二次 up -d**：脚本自己头注释写着「没有备份的发布不具备回滚资格」，
+    // 但 --skip-backup 完全不参与回滚决策。于是最危险的组合被自动放行——
+    // 迁移已改写数据库 + 一份备份都没有 + 把镜像切回旧版本 ⇒
+    // 旧版本在没有退路的新 schema 上续写，写坏了连现场都取不回来。
+    const r = runDeploy({ readyz: '503', args: ['--skip-backup'] });
+    expect(r.code).toBe(1);
+    // 只有一次 up -d = 只做了发布切换，没有回滚
+    expect(count(r.lines, 'up -d --no-build app')).toBe(1);
+    expect(count(r.lines, 'backup-mongo.sh')).toBe(0);
+    expect(r.stdout).toContain('不具备回滚资格');
+    // 拒绝必须带可执行的前置动作，而不是只说「需人工介入」
+    expect(r.stdout).toContain('backup-mongo.sh');
+  });
+
+  test('回滚目标与目标镜像同引用（:latest 这类可变标签）→ 不执行空操作回滚，且切换前就说明', () => {
+    // 回滚的动作 = `up -d` 用 previousImage 这个**引用**再拉一次容器。按可变标签发布时
+    // previousImage 与 APP_IMAGE 同串 ⇒ 解析到同一个构建 ⇒ "回滚"什么都没换回来。
+    // 两种收场都坏：容器照旧不健康 → 退出 1（看不出是空操作）；
+    // 容器被重启后健康 → 打印「✓ 回滚后服务就绪」，操作员以为已退回旧版本，
+    // 而线上跑的仍是刚把这个库迁移坏的那个版本。现在两处都必须拒。
+    const r = runDeploy({ readyz: '503', previousImage: TARGET_IMAGE });
+    expect(r.code).toBe(1);
+    // 只有一次 up -d = 只做了发布切换，没有那次空操作回滚
+    // （对照上面「有上一版本 → 自动回滚」用例的 2 次：引用不同才回滚，正向控制即那条）
+    expect(count(r.lines, 'up -d --no-build app')).toBe(1);
+    // ① 提前说破：此时迁移还没跑，还有「换个带版本的 tag 重发」的选择
+    expect(r.stderr).toContain('不具备版本级回滚能力');
+    // ② 决策理由与提前告警同源（同一判据），并给出可执行的替代动作
+    expect(r.stdout).toContain('回滚决策');
+    expect(r.stdout).toContain('回滚目标与本次目标镜像引用相同');
+    expect(r.stdout).toContain('digest');
+    // ③ 走了拒绝分支，就不该再出现回滚执行过程的打印
+    expect(r.stdout).not.toContain('切回上一镜像');
+  });
+
+  test('超时配置写成 120s → 退出码 2 且不发起任何对外命令', () => {
+    // 修复前：Number('120s')=NaN ⇒ 健康门禁一次都不探测 ⇒ 判为失败 ⇒
+    // 对一个**完全健康**的版本发起回滚（实测 readyz=200 也照回）。
+    // 现在必须在任何副作用之前拒掉：命令日志必须为空。
+    const r = runDeploy({ healthTimeoutMs: '120s' });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('DEPLOY_HEALTH_TIMEOUT_MS');
+    expect(r.lines.length).toBe(0);
+    // 双保险：不依赖日志文件是否被创建
+    expect(count(r.lines, 'up -d --no-build app')).toBe(0);
+  });
+
+  test('容器切换失败 → 说明「迁移已执行、版本未切换」的此刻状态', () => {
+    // 该分支在 migrate-up 之后，且不进回滚决策（容器没切，线上仍是旧版本 + 新 schema）。
+    // 不打印状态，操作员会以为「切换失败 = 什么都没发生」。
+    const r = runDeploy({ failOn: [SWITCH_CMD] });
+    expect(r.code).toBe(1);
+    expect(count(r.lines, 'migrate-mongo up')).toBe(1);
+    expect(count(r.lines, SWITCH_CMD)).toBe(1);
+    expect(r.stderr).toContain('迁移已执行、容器未切换');
+  });
+
   test('脚本真的把 .env 读进来了（拦截 dotenv.config，观测它的实际调用与后果）', () => {
     // 为什么不能只 grep 源码：`require('dotenv').config(...)` 写在源码里不等于生效——
     // 写进 if(false)、被后面的直接赋值取代、或 path 指向别处，grep 都照样命中。
@@ -205,6 +315,7 @@ describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () 
       [
         'APP_IMAGE=ghcr.io/qmzzzzz/fsms:sha-fromdotenv',
         'CORS_ORIGIN=https://from-dotenv.example.com',
+        'ALLOWED_HOSTS=from-dotenv.example.com',
       ].join('\n')
     );
     const preload = path.join(stage.dir, 'dotenvSpy.js');
@@ -232,7 +343,7 @@ describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () 
       STUB_LOG: stage.log,
       STUB_RESPONSES: [
         'curl|200|0',
-        `docker inspect|ghcr.io/qmzzzzz/fsms:sha-previous|0`,
+        `docker inspect|${PREVIOUS_IMAGE}|0`,
         `${compose} ps -q app|fake-id|0`,
         '*||0',
       ].join('\n'),
@@ -241,6 +352,7 @@ describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () 
     // 清掉父进程传来的值：使「通过前置校验」只能靠临时 .env
     delete env.APP_IMAGE;
     delete env.CORS_ORIGIN;
+    delete env.ALLOWED_HOSTS;
     delete env.DEPLOY_HEALTH_TIMEOUT_MS;
     delete env.DEPLOY_ROLLBACK_TIMEOUT_MS;
     const r = spawnSync(NODE, [SCRIPT, '--dry-run'], { cwd: ROOT, env, encoding: 'utf8' });

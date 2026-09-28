@@ -141,7 +141,13 @@ describe('utils/cursorPagination', () => {
         cursor: { v: new Date().toISOString(), id: validId() },
       });
       expect(q.$and[0].$or).toEqual([{ a: 1 }, { b: 2 }]);
-      expect(q.$and[1].$or).toHaveLength(2);
+      // 钉的是"游标条件与 baseQuery 的 $or 各占一个 $and 成员、没有互相覆盖"这件事本身。
+      // 原来这里写 `toHaveLength(2)`：条数不是判据（倒序还带着空值块子句，条数会随语义
+      // 演进变化），拿它当判据既挡不住"子句被换成别的"，又会在无关改动上假红。
+      const clauses = q.$and[1].$or;
+      expect(clauses.some((c) => c.occurredAt && c.occurredAt.$lt instanceof Date)).toBe(true);
+      expect(clauses.some((c) => c._id && c._id.$lt instanceof mongoose.Types.ObjectId)).toBe(true);
+      expect(clauses.every((c) => 'occurredAt' in c || '_id' in c)).toBe(true);
     });
 
     test('date 类型游标值非法时抛 400', () => {
@@ -212,6 +218,61 @@ describe('utils/cursorPagination', () => {
       expect(items).toEqual([]);
       expect(hasMore).toBe(false);
       expect(nextCursor).toBeNull();
+    });
+  });
+
+  /**
+   * F-169：游标值上限 ⇄ 服务真正下发的排序键宽度（跨文件不变式）
+   *
+   * 修前的事实：`MAX_CURSOR_VALUE_LENGTH` 为 32，而设备列表用 `deviceCode` 作排序键
+   * （`DeviceService.getDevices` 是全仓唯一的 `valueType:'string'` 调用点），其合法宽度
+   * 上限由 `models/FireDevice` 的 `maxlength:50` 决定（`deviceRoutes.js` 的
+   * `isLength({max:50})` 与它对齐，50 字符可入库由 zzqoder_deviceCodeCap.test.js 钉着）。
+   * ⇒ 某页最后一条的编码落在 33–50 时，服务照样下发 nextCursor，客户端原样回传却被
+   * `decodeCursor` 拒成 400——**翻页从这一页起死掉，且服务端一条日志都没有**。
+   *
+   * 为什么旧用例抓不到：上面「v 为超长字符串 → 400」那条把期望长度**算自同一个常量**
+   * （`MAX_CURSOR_VALUE_LENGTH + 1`），上限从 32 改成任何值它都跟着变绿。
+   * 所以下面两条的期望值一律取自**模型 schema**（与被检对象不同一侧），不抄数字。
+   */
+  describe('游标值上限必须覆盖服务下发的排序键宽度（F-169）', () => {
+    const FireDevice = require('../../models/FireDevice');
+
+    /** deviceCode 的合法最大长度：事实来源是模型，不是测试里抄的一个数 */
+    const widestLegalCode = () => {
+      const declared = FireDevice.schema.path('deviceCode').options.maxlength;
+      const n = Array.isArray(declared) ? declared[0] : declared;
+      // 前提自证：声明形态变了（改成标量、或被删）就先红在这里，而不是让下面几条静默空跑
+      expect(Number.isInteger(n)).toBe(true);
+      return n;
+    };
+
+    test('上限 ≥ 最宽合法排序键，同时仍是远小于整条游标的窄闸', () => {
+      expect(MAX_CURSOR_VALUE_LENGTH).toBeGreaterThanOrEqual(widestLegalCode());
+      expect(MAX_CURSOR_VALUE_LENGTH).toBeLessThan(512);
+    });
+
+    test('端到端：最宽合法编码所在页下发的游标能被自己的解码链吃回去', () => {
+      const code = 'Z'.repeat(widestLegalCode());
+      const docs = [
+        { _id: new mongoose.Types.ObjectId(), deviceCode: 'ZZ-EDGE-A' },
+        { _id: new mongoose.Types.ObjectId(), deviceCode: code },
+        { _id: new mongoose.Types.ObjectId(), deviceCode: 'ZZ-EDGE-C' },
+      ];
+      // 两条前提自证：本页最后一条确实是那条超长编码，且服务确实会下发游标
+      // （否则 decodeCursor 收到 null、后面全部空跑）
+      const page1 = buildCursorResult(docs, 2, 'deviceCode');
+      expect(page1.hasMore).toBe(true);
+      expect(page1.items[1].deviceCode).toBe(code);
+      expect(page1.nextCursor).not.toBeNull();
+
+      const decoded = decodeCursor(page1.nextCursor); // 修前：33–50 长度的编码在这一步抛 400
+      expect(decoded.v).toBe(code);
+      const q = applyCursorCondition(
+        {},
+        { sortField: 'deviceCode', sortDir: 1, cursor: decoded, valueType: 'string' }
+      );
+      expect(q.$and[1].$or[0].deviceCode.$gt).toBe(code);
     });
   });
 });

@@ -206,6 +206,27 @@ describe('A. tooltip 的 HTML 转义（L7：类目名用户可控）', () => {
     expect(out).not.toContain('undefined')
     expect(out).toContain('1 (1%)')
   })
+
+  test('value/percent 同样转义：后端聚合口径若回吐含 HTML 的 count，不留 tooltip 注入面', async () => {
+    await mountCharts({
+      byType: [{ _id: 'smoke_detector', count: 2 }],
+      byDay: [{ _id: localDate(new Date()), count: 3 }],
+    })
+    // 饼图 formatter：value/percent 走的是拼进 innerHTML 的插值，必须与 name 同级转义
+    const pie = pieOption().tooltip.formatter
+    const phtml = pie({ seriesName: 's', name: 'n', value: '<img src=x>', percent: '<b>' })
+    expect(phtml).not.toContain('<img')
+    expect(phtml).not.toContain('<b>')
+    expect(phtml).toContain('&lt;img src=x&gt;')
+    expect(phtml).toContain('&lt;b&gt;')
+    // 趋势图 formatter：value 同样
+    const trend = trendOption().tooltip.formatter
+    const thtml = trend([{ name: 'ok', value: '<script>x</script>' }])
+    expect(thtml).not.toContain('<script>')
+    expect(thtml).toContain('&lt;script&gt;x&lt;/script&gt;')
+    // 正常数字仍原样显示（escapeHtml 走 String()，不把 3 变成别的）
+    expect(trend([{ name: 'ok', value: 3 }])).toContain(': 3')
+  })
 })
 
 describe('B. 趋势图数据接线', () => {
@@ -415,6 +436,21 @@ describe('D. 加载、并发与生命周期', () => {
     expect(active.errors).toEqual([])
   })
 
+  // 空态有两种成因，必须写成两种文案。两条都失败时曾经统一渲染「暂无数据」，
+  // 于是接口抖动一次后，七天的报警趋势图上盖的是"这几天没有报警"——
+  // 值班界面把一次取数失败读成一次安全。反向对照由
+  // 「全部为 0 时显示「暂无数据」」与「空数据不伪造样例」两条用例守住：
+  // 成功但空集合若也说"加载失败"，那两条就会红。
+  test('两个请求都失败：两张图的空态都写「加载失败」而不是「暂无数据」', async () => {
+    await mountCharts({ alarmsReject: new Error('boom'), devicesReject: new Error('boom') })
+    const failText = i18n.global.t('messages.loadFailed')
+    expect(trendOption().graphic[0].style.text).toBe(failText)
+    expect(trendOption().graphic[0].style.text).not.toBe(i18n.global.t('common.noData'))
+    expect(pieOption().title.show).toBe(true)
+    expect(pieOption().title.text).toBe(failText)
+    expect(pieOption().title.text).not.toBe(i18n.global.t('common.noData'))
+  })
+
   test('一个接口失败不影响另一个（各自 catch 为 null，容错语义独立）', async () => {
     await mountCharts({
       alarmsReject: new Error('alarm down'),
@@ -422,6 +458,31 @@ describe('D. 加载、并发与生命周期', () => {
     })
     expect(trendOption().series[0].data).toEqual([0, 0, 0, 0, 0, 0, 0])
     expect(pieOption().series[0].data).toHaveLength(1)
+    // 文案也要独立：失败的那张说「加载失败」，成功且有数据的那张不得有空态标题
+    expect(trendOption().graphic[0].style.text).toBe(i18n.global.t('messages.loadFailed'))
+    expect(pieOption().title.show).toBe(false)
+  })
+
+  test('趋势失败、分布成功但空集合：只有趋势图改说「加载失败」', async () => {
+    await mountCharts({ alarmsReject: new Error('alarm down'), byType: [] })
+    expect(trendOption().graphic[0].style.text).toBe(i18n.global.t('messages.loadFailed'))
+    expect(pieOption().title.show).toBe(true)
+    expect(pieOption().title.text).toBe(i18n.global.t('common.noData'))
+  })
+
+  // 外层 catch 只有一条自然到达路径：响应结构畸形（byDay 不是数组，例如后端聚合
+  // 口径漂移成对象）。此时数据同样不可信，文案必须是「加载失败」——兜底分支若写成
+  // 「暂无数据」，就是拿"这几天没有报警"糊过一次协议级异常。
+  test('响应结构畸形走外层兜底：两张图仍初始化且都判为「加载失败」', async () => {
+    await mountCharts({ byDay: {} })
+    expect(optionCalls.length, '兜底路径也必须初始化两个图表').toBe(2)
+    // 与内层 catch 不同：外层兜底拿到的是空数组（七天槽位来不及铺开），
+    // 断言写死这一差异，避免以后有人把两条路径当成同一条改。
+    expect(trendOption().series[0].data).toEqual([])
+    expect(trendOption().graphic[0].style.text).toBe(i18n.global.t('messages.loadFailed'))
+    expect(pieOption().series[0].data).toEqual([])
+    expect(pieOption().title.text).toBe(i18n.global.t('messages.loadFailed'))
+    expect(active.errors).toEqual([])
   })
 
   test('两个报表请求并行发出（无依赖关系，不串行等待）', async () => {

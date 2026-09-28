@@ -34,7 +34,7 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
  *    controllers/auditReportFixes.test.js:261 等 security:audit 权限用例）
  *  - 非法 ObjectId / 恶意 Origin / 无令牌 / alg:none / 错误密钥 / 省略 tokenVersion
  *    （zzz-adversarial-audit P1/P8/P9/P10/P11/P16 → 分别见 authRest / auth /
- *    originCheck / infraHardening / userPermBranches 等既有套件）
+ *    originCheck / infraParamRateLimitFailClosed / userPermBranches 等既有套件）
  */
 
 describe('对抗性探针场景固化（P1-30：原 zzz-* 探针 → 行为断言）', () => {
@@ -283,15 +283,20 @@ describe('对抗性探针场景固化（P1-30：原 zzz-* 探针 → 行为断�
     }
   });
 
-  test('NoSQL 注入：登录 username/password 传操作符对象 → 401（不进入查询构造）', async () => {
+  test('NoSQL 注入：登录 username/password 传操作符对象 → 校验层就拒，不进入查询构造', async () => {
     // 原 zzz-adversarial-audit.test.js P5：审计期用 { $ne: null } 形态探测登录接口。
     // 该场景此前**无任何跟踪测试覆盖**，故迁移为真实断言（其余探针场景已由
     // 既有套件覆盖，见文件头清单）。
+    // 断言从 401 收紧到 400：body 类型闸门前该形态能穿过校验进入认证（查询构造了、
+    // 匹配不到 ⇒ 401），现在在路由校验层就被点名拒掉，同一安全性质拒得更早。
+    // 401 轨道仍由下面「原型污染」那条用例覆盖（字符串凭据走完整认证）。
     const res = await request(app)
       .post('/api/auth/login')
       .send({ username: { $ne: null }, password: { $ne: null } });
-    expect(res.status).toBe(401);
-    expect(res.body.errors.errorCode).toBe('AUTH_INVALID_CREDENTIALS');
+    expect(res.status).toBe(400);
+    expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    const paths = res.body.errors.fieldErrors.map((e) => e.path);
+    expect(paths).toEqual(expect.arrayContaining(['username', 'password']));
     // 不得因操作符对象绕过查询而误判为「凭据正确」
     expect(res.body.success).toBe(false);
   });

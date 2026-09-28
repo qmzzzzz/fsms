@@ -69,9 +69,12 @@ const expectLocal = (iso) => {
 /** mount 成功后等待列表数据落地 */
 const open = async (rows, opts = {}) => {
   getList.mockResolvedValue({
-    data: { data: rows, pagination: { total: rows.length } },
+    data: { data: rows, pagination: opts.pagination || { total: rows.length } },
   })
-  getStats.mockResolvedValue({ data: { success: true, data: {} } })
+  // opts.statsReject：让统计请求本身失败（首屏失败块的入口条件）；
+  // 不给时保持原默认——成功但 data 为空，四张卡 0。
+  if (opts.statsReject) getStats.mockRejectedValue(new Error('stats down'))
+  else getStats.mockResolvedValue(opts.stats || { data: { success: true, data: {} } })
   getById.mockResolvedValue({ data: { data: { title: 'r', findings: [] } } })
   active = mountComponent(InspectionView, {
     setupStore: (pinia) => {
@@ -107,6 +110,11 @@ afterEach(() => {
   ElMessage.success.mockReset()
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
+  // 确认框的调用计数同样是**跨用例共享**的模块级状态：漏了这一行，
+  // `expect(ElMessageBox.confirm).toHaveBeenCalledTimes(1)` 就把前面用例留下的
+  // 调用一起数（默认顺序恰好把它排在第一个确认框用例之后所以一直侥幸绿，
+  // `--sequence.shuffle` 一打散就变成 "expected 1 times, but got 3 times"）。
+  ElMessageBox.confirm.mockReset()
 })
 
 describe('InspectionView 计划时间列（本地时区口径）', () => {
@@ -292,6 +300,7 @@ describe('InspectionView 启动/删除（操作分支）', () => {
       rowWith({ _id: 'a', title: 'A', status: 'pending' }),
       rowWith({ _id: 'b', title: 'B', status: 'in_progress' }),
       rowWith({ _id: 'c', title: 'C', status: 'completed' }),
+      rowWith({ _id: 'd', title: 'D', status: 'overdue' }),
     ])
     const rowOf = (title) =>
       cells(c)
@@ -302,6 +311,12 @@ describe('InspectionView 启动/删除（操作分支）', () => {
     expect(rowOf('B')).toContain(i18n.global.t('inspection.complete'))
     expect(rowOf('B')).not.toContain(i18n.global.t('inspection.start'))
     expect(rowOf('C')).toContain(i18n.global.t('inspection.review'))
+    // 逾期行两个入口都必须在：后端把 overdue 同时留在「可开工」与「可提交」集合里
+    // （constants/inspection.js 的 INSPECTION_STARTABLE / SUBMITTABLE_STATUSES），
+    // 少任何一个都是「真实做过的工作没有入库入口」。
+    expect(rowOf('D')).toContain(i18n.global.t('inspection.start'))
+    expect(rowOf('D')).toContain(i18n.global.t('inspection.complete'))
+    expect(rowOf('C')).not.toContain(i18n.global.t('inspection.start'))
   })
 
   test('状态筛选切换后按新状态重新请求', async () => {
@@ -319,6 +334,26 @@ describe('InspectionView 启动/删除（操作分支）', () => {
     const last = getList.mock.calls[getList.mock.calls.length - 1][0]
     expect(last.status).toBe('pending')
     expect(last.page).toBe(1)
+  })
+
+  // 上面那条钉不住这个缺陷：它从第 1 点筛选，page 本来就是 1，
+  // 断言恒真。真正的不变量是「换筛选条件 ⇒ 页码归位」，必须先离开第 1 页。
+  // 少了这一步，用户在第 N 页切到「待巡检」时发出的是 page=N + 新筛选，
+  // 结果集不足 N 页 ⇒ 表格先空一片，而 total 显示还有数据。
+  // 同工程的 AlarmView / DeviceView / AuditLogView 都有这一步，此前只有本视图漏掉。
+  test('状态筛选切换必须回到第 1 页（停在第 N 页会看到空表）', async () => {
+    const c = await open([rowWith()], { pagination: { total: 50 } })
+    click(c.find('.btn-next'))
+    await waitFor(() => getList.mock.calls.length === 2, { message: '翻页请求发出' })
+    expect(getList.mock.calls[1][0].page).toBe(2)
+
+    const pendingLabel = c
+      .findAll('.el-radio-button')
+      .find((el) => el.textContent.includes(i18n.global.t('inspection.pending')))
+    expect(pendingLabel, '未找到「待巡检」筛选项').toBeTruthy()
+    click(pendingLabel.querySelector('input') || pendingLabel)
+    await waitFor(() => getList.mock.calls.length === 3, { message: '筛选请求发出' })
+    expect(getList.mock.calls[2][0]).toEqual({ page: 1, limit: 10, status: 'pending' })
   })
 })
 describe('InspectionView 复核对话框接线', () => {
@@ -476,7 +511,7 @@ describe('InspectionView 竞态守卫与结果列', () => {
     const before = getList.mock.calls.length
     const detailBtn = Array.from(
       active.findAll('.el-table__body-wrapper .el-table__row button')
-    ).find((b) => b.textContent.trim() === '操作')
+    ).find((b) => b.textContent.trim() === '详情')
     expect(detailBtn).toBeTruthy()
     click(detailBtn)
     await flush(10)
@@ -502,5 +537,250 @@ describe('InspectionView 竞态守卫与结果列', () => {
     await flush(10)
     expect(document.body.querySelector('.el-dialog')).toBeTruthy()
     expect(active.errors).toEqual([])
+  })
+})
+
+describe('InspectionView 统计卡（后端 byStatus 分组计数，非平铺字段）', () => {
+  test('四张卡按 byStatus._id 取数：pending/in_progress/completed/overdue 各自落地', async () => {
+    // 与后端 /api/inspections/stats 真实返回同形：状态计数是 $group 后的 [{_id,count}] 数组，
+    // 没有 pending / inProgress 平铺字段。旧实现读 s.pending → 恒 undefined → 四卡永远 0，
+    // 值班员以为「无巡检」。修复后按 _id 匹配模型枚举原值。
+    await open([{ _id: 'i1', title: 'A', status: 'pending', planStartTime: null }], {
+      stats: {
+        data: {
+          success: true,
+          data: {
+            total: 16,
+            byStatus: [
+              { _id: 'pending', count: 4 },
+              { _id: 'in_progress', count: 2 },
+              { _id: 'completed', count: 9 },
+              { _id: 'overdue', count: 1 },
+            ],
+            byType: [],
+            byResult: [],
+          },
+        },
+      },
+    })
+    await waitFor(() => active.findAll('.mini-stat .num')[0].textContent.trim() === '4', {
+      message: '统计卡按分组计数落地',
+    })
+    expect(active.findAll('.mini-stat .num').map((x) => x.textContent.trim())).toEqual([
+      '4',
+      '2',
+      '9',
+      '1',
+    ])
+    // 反证：证明取值真来自分组而非"恰好非零"——读回平铺字段会让四卡全 0
+    expect(active.findAll('.mini-stat .num').map((x) => x.textContent.trim())).not.toEqual([
+      '0',
+      '0',
+      '0',
+      '0',
+    ])
+    expect(active.errors).toEqual([])
+  })
+
+  test('byStatus 缺某维度时该卡按 0 兜底，其余照常（不是 undefined / NaN）', async () => {
+    await open([{ _id: 'i1', title: 'A', status: 'pending', planStartTime: null }], {
+      stats: {
+        data: {
+          success: true,
+          data: { total: 5, byStatus: [{ _id: 'pending', count: 5 }], byType: [], byResult: [] },
+        },
+      },
+    })
+    await waitFor(() => active.findAll('.mini-stat .num')[0].textContent.trim() === '5', {
+      message: 'pending 卡落地',
+    })
+    expect(active.findAll('.mini-stat .num').map((x) => x.textContent.trim())).toEqual([
+      '5',
+      '0',
+      '0',
+      '0',
+    ])
+  })
+})
+
+describe('InspectionView 统计「未知 ≠ 0」与统计竞态', () => {
+  /**
+   * 这一组钉的是同一条不变量：四个数字位只允许是**真实计数**，
+   * 任何「没拿到统计」的路径（请求失败 / success:false / 畸形响应 / 列表先失败导致统计压根没发）
+   * 都必须换成失败块，而不是把四张卡写成 0/0/0/0——后者值班员读作「无巡检」，
+   * 与「不知道」无法区分（旧实现是 catch (_) { /* 忽略统计失败 *\/ }）。
+   */
+  const row1 = { _id: 's1', title: '统计行', status: 'pending', planStartTime: null }
+  const nums = (c) => c.findAll('.mini-stat .num').map((x) => x.textContent.trim())
+  const statsWith = (counts) => ({
+    data: {
+      success: true,
+      data: {
+        byStatus: Object.entries(counts).map(([k, count]) => ({ _id: k, count })),
+      },
+    },
+  })
+  const filterButton = (c, text) => {
+    const btn = Array.from(c.find('.el-radio-group').querySelectorAll('.el-radio-button')).find(
+      (b) => b.textContent.includes(text)
+    )
+    expect(btn, `筛选按钮 ${text} 未找到`).toBeTruthy()
+    return btn
+  }
+
+  test('统计请求失败：首屏换成失败块，四个数字位不以 0 面孔出现', async () => {
+    const c = await open([row1], { statsReject: true })
+    await waitFor(() => c.find('.stats-failed') !== null, { message: '统计失败块渲染' })
+    expect(nums(c)).toEqual([])
+    expect(c.find('.mini-stat')).toBeNull()
+    const box = c.find('.stats-failed')
+    expect(box.textContent).toContain('加载失败')
+    expect(box.querySelector('button').textContent.trim()).toBe(i18n.global.t('common.refresh'))
+    expect(c.errors).toEqual([])
+  })
+
+  test('失败块里的「刷新」重新拉统计：换回四张真实计数卡', async () => {
+    const c = await open([row1], { statsReject: true })
+    await waitFor(() => c.find('.stats-failed') !== null, { message: '统计失败块渲染' })
+    getStats.mockResolvedValue(statsWith({ pending: 3, in_progress: 1, completed: 2, overdue: 5 }))
+    click(c.find('.stats-failed button'))
+    await waitFor(() => nums(c).length === 4, { message: '统计卡恢复' })
+    expect(nums(c)).toEqual(['3', '1', '2', '5'])
+    expect(c.find('.stats-failed')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('后端 success:false：按失败处理，不拿空 data 冒充「无巡检」', async () => {
+    const c = await open([row1], { stats: { data: { success: false, message: '内部错误' } } })
+    await waitFor(() => c.find('.stats-failed') !== null, { message: 'success:false 失败块' })
+    expect(nums(c)).toEqual([])
+  })
+
+  test('畸形统计响应（整个 data 层缺失）：不得抛进 catch 后静默成 0 面孔', async () => {
+    // 旧写法 statsRes.data.success 在这种响应下直接 TypeError，被内层 catch 吞掉 ⇒ 四张卡 0
+    const c = await open([row1], { stats: {} })
+    await waitFor(() => c.find('.stats-failed') !== null, { message: '畸形响应失败块' })
+    expect(nums(c)).toEqual([])
+    expect(c.errors).toEqual([])
+  })
+
+  test('首屏列表就失败：统计压根没发出，四个数字位同样不以 0 面孔出现', async () => {
+    getList.mockRejectedValue(new Error('down'))
+    getStats.mockResolvedValue({ data: { success: true, data: {} } })
+    active = mountComponent(InspectionView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(PERMS),
+    })
+    await waitFor(() => active.find('.stats-failed') !== null, { message: '列表失败 ⇒ 失败块' })
+    // 前提自证：统计请求确实没发出去，所以这里的失败块只能来自「未知」而非「拿到了 0」
+    expect(getStats).not.toHaveBeenCalled()
+    expect(active.findAll('.mini-stat')).toHaveLength(0)
+    expect(active.errors).toEqual([])
+  })
+
+  test('已经显示过真实计数后刷新失败：保留上一次已知数字（不把刷新失败伪装成数据归零）', async () => {
+    const c = await open([row1], { stats: statsWith({ pending: 7 }) })
+    await waitFor(() => nums(c)[0] === '7', { message: '首屏真实计数落地' })
+    getStats.mockRejectedValue(new Error('stats down'))
+    click(c.find('.table-toolbar .glass-btn--default'))
+    await waitFor(() => getStats.mock.calls.length === 2, { message: '刷新请求发出' })
+    // 这里必须再给一段静止窗口：getStats 的 reject 与 ref 变更都在微任务里，
+    // 而 waitFor 只看到「调用次数变成 2」就返回，此刻 DOM 还没重渲染。
+    // 少了这一行，下面的断言读的是**失败分支跑之前**的 DOM —— 用例恒绿、没有牙
+    // （实测：删掉 statsLoadedOnce 置位的变异臂在加这行之前存活）。
+    // flush(10) 与上面竞态用例用的是同一个已被变异臂证明足够长的窗口。
+    await flush(10)
+    expect(nums(c)).toEqual(['7', '0', '0', '0'])
+    expect(c.find('.stats-failed')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('被新筛选条件取代的旧统计后到：不得覆盖新条件下的计数', async () => {
+    let releaseOldStats
+    getList.mockResolvedValue({ data: { data: [row1], pagination: { total: 1 } } })
+    getStats.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          releaseOldStats = () => res(statsWith({ pending: 99 }))
+        })
+    )
+    active = mountComponent(InspectionView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(PERMS),
+    })
+    await waitFor(() => getStats.mock.calls.length === 1, { message: '首屏统计发出' })
+
+    // 第二次加载（切换筛选）：它的统计先回来，写入新计数
+    getStats.mockResolvedValueOnce(statsWith({ pending: 1 }))
+    click(filterButton(active, '已完成'))
+    await waitFor(() => nums(active)[0] === '1', { message: '新统计落地' })
+    expect(getStats.mock.calls.length).toBe(2)
+
+    // 放行被取代的旧统计：99 不得覆盖 1
+    releaseOldStats()
+    await flush(10)
+    expect(nums(active)).toEqual(['1', '0', '0', '0'])
+    expect(active.errors).toEqual([])
+  })
+})
+
+describe('InspectionView 逾期（overdue）行的操作入口', () => {
+  /**
+   * 后端 src/constants/inspection.js 把 overdue 同时留在可开工与可提交两个档位集合里
+   * （overdue 是调度器打的时间标记，不是工作流阶段），此前前端按
+   * row.status === 'pending' / 'in_progress' 亮按钮 ⇒ 逾期巡检在界面上没有任何入口
+   * 开工或补录结果，而结果与发现项只能挂在 completed 上：真实做过的工作永久无法入库。
+   */
+  const overdue = { _id: 'o1', title: '逾期巡检', status: 'overdue', planStartTime: null }
+  const rowButtons = (c) =>
+    c
+      .findAll('.el-table__body-wrapper .el-table__row button')
+      .map((b) => b.textContent.replace(/\s+/g, ' ').trim())
+
+  test('逾期行同时给出「开始」与「提交结果」两个入口（后端两条路径都放行）', async () => {
+    const c = await open([overdue])
+    const labels = rowButtons(c)
+    expect(labels).toContain(i18n.global.t('inspection.start'))
+    expect(labels).toContain(i18n.global.t('inspection.complete'))
+    // 状态列确实渲染成逾期（而不是被误标成别的档位）
+    expect(cells(c)[0][6]).toBe(i18n.global.t('common.warning'))
+  })
+
+  test('逾期行点「提交结果」：打开完成表单并能对该行 _id 提交（补录做过的工作）', async () => {
+    const c = await open([overdue])
+    const btn = c
+      .findAll('.el-table__body-wrapper .el-table__row button')
+      .find((b) => b.textContent.trim() === i18n.global.t('inspection.complete'))
+    expect(btn).toBeTruthy()
+    click(btn)
+    await flush(10)
+    expect(document.body.querySelector('.el-dialog')).toBeTruthy()
+    expect(c.errors).toEqual([])
+  })
+
+  test('逾期行点「开始」：确认后按该行 _id 发出 start 请求', async () => {
+    const c = await open([overdue])
+    ElMessageBox.confirm.mockResolvedValue('confirm')
+    start.mockResolvedValue({ data: { success: true } })
+    const btn = c
+      .findAll('.el-table__body-wrapper .el-table__row button')
+      .find((b) => b.textContent.trim() === i18n.global.t('inspection.start'))
+    expect(btn).toBeTruthy()
+    click(btn)
+    await flush(8)
+    expect(start).toHaveBeenCalledTimes(1)
+    expect(start).toHaveBeenCalledWith('o1')
+    expect(ElMessage.success).toHaveBeenCalledWith(i18n.global.t('messages.updateSuccess'))
+    expect(c.errors).toEqual([])
+  })
+
+  test('取消/关闭确认框：逾期行也不发 start 请求（与 pending 行同口径）', async () => {
+    ElMessageBox.confirm.mockRejectedValue('cancel')
+    const c = await open([overdue])
+    const btn = c
+      .findAll('.el-table__body-wrapper .el-table__row button')
+      .find((b) => b.textContent.trim() === i18n.global.t('inspection.start'))
+    click(btn)
+    await flush(8)
+    expect(start).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
   })
 })

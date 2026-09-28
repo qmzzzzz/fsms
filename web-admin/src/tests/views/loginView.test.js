@@ -15,6 +15,7 @@
  */
 import { describe, test, expect, vi, afterEach } from 'vitest'
 import { mountComponent, click, flush, waitFor } from '../helpers/componentHarness'
+import i18n from '@/i18n'
 
 const login = vi.fn()
 const getCaptcha = vi.fn()
@@ -235,14 +236,21 @@ describe('LoginView MFA 二次验证（I-06）', () => {
     encryptPassword.mockResolvedValue('ENC')
     login.mockResolvedValue({ data: { success: true, data: { mfaRequired: true } } })
     const c = await open()
+    // 反向对照：未触发 mfaRequired 前这一格不存在（否则"显示"无从谈起）
+    expect(c.find('#mfaCode')).toBeNull()
     await fill(c, 'alice', 'Str0ng-Pass')
     click(submitBtn(c))
     await waitFor(() => ElMessage.info.mock.calls.length === 1, { message: 'MFA 提示' })
     await flush(20)
     expect(c.router.currentRoute.value.path).toBe('/login')
-    // 动态口令输入框出现（占位文案来自 i18n 词表）
-    const html = c.html()
-    expect(html).toMatch(/mfa|MFA/i)
+    // 动态口令输入框真的出现、真的可输入、占位文案来自词表。
+    // 上一版写的是 `expect(c.html()).toMatch(/mfa|MFA/i)`：模板里恒有 id="mfaCode"
+    // 与 name="mfaCode"，那条正则在任何渲染状态下都命中，等于什么都没断。
+    const mfaInput = c.find('#mfaCode')
+    expect(mfaInput).toBeTruthy()
+    expect(mfaInput.tagName).toBe('INPUT')
+    expect(mfaInput.disabled).toBe(false)
+    expect(mfaInput.placeholder).toBe(i18n.global.t('auth.mfaCodeOrRecovery'))
     expect(ElMessage.success).not.toHaveBeenCalled()
   })
 
@@ -329,6 +337,21 @@ describe('LoginView 验证码一次性消费', () => {
     expect(payload).not.toHaveProperty('captchaId')
     expect(payload).not.toHaveProperty('captchaText')
   })
+
+  test('刷新验证码失败：清空旧 captchaId/图并回到"点击重试"占位（不在已消费验证码上死循环）', async () => {
+    const c = await open({ captchaEnabled: true })
+    expect(c.findAll('img.login-card__captcha-img')).toHaveLength(1) // 首屏验证码已加载
+    // 点击刷新，但这次 getCaptcha 失败。后端 captchaService 每次校验都删除旧记录（一次性消费），
+    // 修复后 loadCaptcha 先清空 captchaImg → 失败即停在可点击重试的占位；
+    // 旧实现留着**已消费的**旧 captchaId/旧图 → 用户照旧图反复输、永远"验证码错误"且无出口。
+    const imgEl = document.querySelector('img.login-card__captcha-img')
+    expect(imgEl).toBeTruthy()
+    getCaptcha.mockRejectedValueOnce(new Error('captcha down'))
+    click(imgEl)
+    await flush(20)
+    expect(c.findAll('img.login-card__captcha-img')).toHaveLength(0)
+    expect(c.findAll('.login-card__captcha-placeholder')).toHaveLength(1)
+  })
 })
 
 describe('LoginView 提交重入', () => {
@@ -371,11 +394,43 @@ describe('LoginView 页面标题与跨标签页提示', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('挂载时消费跨标签页提示：弹出后立即从 sessionStorage 移除（不重复弹）', async () => {
-    sessionStorage.setItem('authSyncNotice', 'auth.syncLoggedOut')
+  // 键必须是 store/auth.js 真正写入的那两个（login.sessionReplaced / login.sessionEnded）。
+  // 上一版塞的是仓里不存在的 'auth.syncLoggedOut'：vue-i18n 对缺键回吐键名本身，
+  // 于是"提示真的解析成了文案"这一半从未被断过（只在 stderr 留一条 intlify 告警）。
+  // 这条提示是动态词汇表（store 写、视图按值解析），静态取键的门禁扫不到，只能这样钉。
+  test.each(['login.sessionReplaced', 'login.sessionEnded'])(
+    '挂载时消费跨标签页提示 %s：文案可解析、弹出后立即从 sessionStorage 移除（不重复弹）',
+    async (noticeKey) => {
+      sessionStorage.setItem('authSyncNotice', noticeKey)
+      const c = await open()
+      expect(ElMessage.warning).toHaveBeenCalledTimes(1)
+      const shown = ElMessage.warning.mock.calls[0][0]
+      expect(shown).toBe(i18n.global.t(noticeKey))
+      expect(shown).not.toBe(noticeKey)
+      expect(sessionStorage.getItem('authSyncNotice')).toBeNull()
+      expect(c.errors).toEqual([])
+      c.handle.unmount()
+      ElMessage.warning.mockClear()
+    }
+  )
+
+  // 回归：rules 依赖 t() 随语言重建，EP 默认 validate-on-rule-change=true 会把
+  // 「规则对象变化」当成重新校验信号——切换语言时空表单曾立刻冒出 required 红错。
+  // 模板已显式 :validate-on-rule-change="false"，此用例钉住该行为不得退化。
+  test('切换语言不得在空表单上触发校验红错（validate-on-rule-change=false）', async () => {
     const c = await open()
-    expect(ElMessage.warning).toHaveBeenCalledTimes(1)
-    expect(sessionStorage.getItem('authSyncNotice')).toBeNull()
+    const i18n = (await import('@/i18n')).default
+    const errorTexts = () =>
+      c
+        .findAll('.el-form-item__error')
+        .map((x) => x.textContent.trim())
+        .filter(Boolean)
+    expect(errorTexts()).toEqual([])
+    i18n.global.locale.value = 'en-US'
+    await flush(6)
+    expect(errorTexts()).toEqual([])
+    expect(c.findAll('.el-form-item.is-error')).toEqual([])
+    i18n.global.locale.value = 'zh-CN'
     expect(c.errors).toEqual([])
   })
 })

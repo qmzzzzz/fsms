@@ -73,7 +73,7 @@ describe('Auth Middleware', () => {
       expect(res.body.errors.errorCode).toBe('AUTH_TOKEN_EXPIRED');
     });
 
-    // P1-29 修复（本轮复审）：原用例用**随机 ObjectId** 签令牌，而 authenticate
+    // P1-29 修复（本次改动复审）：原用例用**随机 ObjectId** 签令牌，而 authenticate
     // 第 3 步 loadValidUser 必查库、用户不存在即 401（实测 USER_NOT_FOUND_OR_DELETED）——
     // 该令牌**永远**走不到通过路径，却用 expect([200, 401]) 双可能断言兜住，
     // 于是「有效 JWT 应通过认证」这条用例实际从未验证过 200 分支（恒走 401）。

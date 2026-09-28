@@ -28,9 +28,10 @@ describe('requireReAuthentication（敏感操作二次验证）', () => {
     const { requireReAuthentication } = require('../../middleware/security');
     const a = express();
     a.use(express.json());
-    // 模拟 authenticate 已注入的 req.user
+    // 模拟 authenticate 已注入的 req.user。`req.body?.`：真实 authenticate 不读 body，
+    // 这里若直读，"无 body"的用例会先在本 stub 上炸掉，测到的是夹具而不是被测中间件。
     a.use((req, res, next) => {
-      req.user = { userId: req.body.__targetUserId, username: 'tester' };
+      req.user = { userId: req.body?.__targetUserId, username: 'tester' };
       next();
     });
     a.post('/sensitive', requireReAuthentication(), (req, res) => {
@@ -156,5 +157,25 @@ describe('requireReAuthentication（敏感操作二次验证）', () => {
     spy.mockRestore();
     expect(res.status).toBe(500);
     expect(res.body.message).toContain('身份验证过程出错');
+  });
+
+  // Express 5 在 body 解析器跳过时（无 Content-Type / 非 JSON）把 req.body 置为 **undefined**
+  // （v4 恒为 {}）。中间件里 `const { currentPassword, mfaCode } = req.body` 因此抛 TypeError，
+  // 并被它自己的 catch 吞成 500「身份验证过程出错」——一次"客户端根本没带凭证"的正常拒绝
+  // 被伪装成服务端故障（还会按 UnhandledError 记 error 日志）。与上一条构成对照：
+  // 真的是查询异常才 500；缺 body 属于"无凭证"，必须落 403 分支。
+  test('没有请求体（req.body 为 undefined）→ 403 要求重新验证，不得变成 500', async () => {
+    const res = await request(app).post('/sensitive');
+    expect(res.status).toBe(403);
+    expect(res.body.message).toContain('重新验证');
+  });
+
+  test('非 JSON 请求体（解析器跳过）→ 同样按无凭证处理', async () => {
+    const res = await request(app)
+      .post('/sensitive')
+      .set('Content-Type', 'text/plain')
+      .send('currentPassword=whatever');
+    expect(res.status).toBe(403);
+    expect(res.body.message).toContain('重新验证');
   });
 });

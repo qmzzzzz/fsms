@@ -13,8 +13,11 @@ jest.mock('../../models/AuditLog', () => ({
 const AuditLog = require('../../models/AuditLog');
 const baseline = require('../../services/behaviorBaseline');
 
-const WRITE_METHODS = ['POST', 'PUT', 'DELETE', 'PATCH'];
-const HIGH_RISK = ['high', 'critical'];
+// 这两份名单在 mock 里是**复刻生产聚合语义**用的，抄一份就等于让夹具说谎：
+// 生产改了口径（写方法集合、高危档）而这里没跟上时，mock 算出来的 highRisk/writes
+// 与真实聚合不同，断言仍然绿（同 F-146 的 auditBuffer 桩教训）。
+const WRITE_METHODS = require('../../middleware/originCheck').WRITE_METHODS;
+const HIGH_RISK = require('../../constants/audit').AUDIT_ERROR_RISK_LEVELS;
 
 /**
  * 构造 AuditLog.aggregate 的返回：在内存里模拟 dailyFeatureStages 的输出

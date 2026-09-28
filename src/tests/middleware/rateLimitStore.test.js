@@ -1,7 +1,7 @@
 /**
  * 限流共享存储分支——行为化测试
  *
- * 覆盖 rateLimit.js 的 makeSharedStore 三条分支（2026-09-05 覆盖率复核
+ * 覆盖 rateLimitStore.js 的 makeSharedStore 三条分支（2026-09-05 覆盖率复核
  * 前该分支整体未覆盖，因 REDIS_URL 在测试环境恒为空）：
  *   1. REDIS_URL 未配置 → 同步返回 undefined（express-rate-limit 默认 MemoryStore）；
  *   2. REDIS_URL 已配置但初始化失败 → 告警回退进程内 MemoryStore（fail-open）；
@@ -37,7 +37,7 @@ describe('makeSharedStore 共享存储分支', () => {
   let logger;
 
   beforeAll(() => {
-    ({ makeSharedStore } = require('../../middleware/rateLimit'));
+    ({ makeSharedStore } = require('../../middleware/rateLimitStore'));
     sharedCache = require('../../services/sharedCache');
     RedisStore = require('rate-limit-redis').RedisStore;
     logger = require('../../utils/logger');
@@ -86,6 +86,9 @@ describe('makeSharedStore 共享存储分支', () => {
     warnSpy.mockRestore();
   });
 
+  // 断言的是**构造时刻**的状态：Redis 未就绪时不在模块加载期建 RedisStore。
+  // 不等价于"永久绑定进程内计数"——未就绪的分支会由请求路径持续探测并在
+  // Redis 就绪后补切换（F-126，见 zzqoder_rateLimitStoreReadinessRace.test.js）。
   test('Redis 未就绪（初始化成功但未启用）→ 代理对象回退 MemoryStore', () => {
     process.env.REDIS_URL = 'redis://127.0.0.1:6399';
     sharedCache.initSharedCache.mockResolvedValueOnce(undefined);

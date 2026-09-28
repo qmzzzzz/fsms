@@ -119,12 +119,17 @@ describe('encryption.js 缺口覆盖：DataMasking / HMACSigner / HashUtils / AE
       expect(k1).toMatch(/^[0-9a-f]{64}$/);
     });
 
-    test('generateSalt 长度符合 2×bytes；randomString 输出不超过指定长度', () => {
+    test('generateSalt 长度符合 2×bytes；randomString 输出恰好等于指定长度', () => {
       expect(HashUtils.generateSalt(16)).toMatch(/^[0-9a-f]{32}$/);
-      // base64 去除非字母数字字符后可能略短于请求长度
-      const s = HashUtils.randomString(32);
-      expect(s.length).toBeGreaterThan(0);
-      expect(s.length).toBeLessThanOrEqual(32);
+      // 旧断言写成 `<= 32`，因为实现把 base64 里的 `+ / =` 删掉后不补位
+      // （实测 500 次里 63% 短于请求长度，最短 27 位）——那是把缺陷固化成了契约。
+      // 现在改丢弃式采样：长度与字符集都必须精确成立。
+      for (const len of [1, 8, 16, 32, 64]) {
+        const s = HashUtils.randomString(len);
+        expect(s).toHaveLength(len);
+        expect(s).toMatch(/^[A-Za-z0-9]+$/);
+      }
+      expect(HashUtils.randomString()).toHaveLength(32);
     });
   });
 

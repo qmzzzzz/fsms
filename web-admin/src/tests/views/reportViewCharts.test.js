@@ -226,7 +226,7 @@ describe('ReportView 首屏加载与骨架替换', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('后端响应 success:false：概览保持 0 值兜底且退出骨架（不永久卡加载态）', async () => {
+  test('后端响应 success:false：概览换成失败块，不以 0 值兜底冒充数据', async () => {
     // 关键：data 里塞非零值——若实现只看「字段是否存在」而不看 success 标志，
     // 这些值就会被渲染出来，本用例转红（用 data:null 则测不出这一点）
     const c = await open({
@@ -242,11 +242,13 @@ describe('ReportView 首屏加载与骨架替换', () => {
       },
     })
     expect(c.findAll('.glass-skeleton')).toHaveLength(0)
-    const text = c.find('.overview-card').textContent.replace(/\s+/g, ' ')
-    expect(text).toContain('设备总数')
-    expect(text).not.toContain('999')
-    expect(text).not.toContain('NaN')
-    expect(text).not.toContain('undefined')
+    expect(c.text()).not.toContain('999')
+    expect(c.text()).not.toContain('NaN')
+    expect(c.text()).not.toContain('undefined')
+    // success:false 与「数据真的全是 0」必须是两种可区分的画面：
+    // 九个数值位整体不渲染，改由失败块 + 刷新入口承接
+    expect(c.findAll('.el-descriptions__content')).toEqual([])
+    expect(c.find('.overview-failed').textContent).toContain('加载失败')
     expect(c.errors).toEqual([])
   })
 
@@ -263,7 +265,7 @@ describe('ReportView 首屏加载与骨架替换', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('概览请求失败：静默退出加载态（页面仍可用，不弹错误提示）', async () => {
+  test('概览请求失败：退出骨架并给出「加载失败 + 刷新」，不留九个 0 值格子', async () => {
     h.getDashboard.mockRejectedValue(new Error('net down'))
     h.getAlarms.mockResolvedValue(ALARMS)
     h.getDevices.mockResolvedValue(DEVICES)
@@ -275,7 +277,38 @@ describe('ReportView 首屏加载与骨架替换', () => {
     mounted.push(c)
     await flush(14)
     expect(c.findAll('.glass-skeleton')).toHaveLength(0)
+    // 旧断言只有「骨架消失 + 无 Vue 错误」两条：那正是零值谎读卡的画面，
+    // 等于把缺陷当契约钉死。失败态必须与「数据全是 0」在结构上可区分。
+    expect(c.findAll('.el-descriptions__content')).toEqual([])
+    const failed = c.find('.overview-failed')
+    expect(failed.textContent).toContain('加载失败')
+    expect(failed.querySelector('button').textContent).toContain('刷新')
     expect(c.errors).toEqual([])
+  })
+
+  test('概览失败后点刷新：请求真的重发，成功后失败块换回数值格', async () => {
+    const c = await open({ dashboardReject: new Error('net down') })
+    expect(c.find('.overview-failed').textContent).toContain('加载失败')
+    const callsBefore = h.getDashboard.mock.calls.length
+
+    h.getDashboard.mockResolvedValue(DASHBOARD)
+    click(c.find('.overview-failed button'))
+    await flush(14)
+
+    // 刷新按钮必须是"再发一次同一个请求"，不是摆设
+    expect(h.getDashboard.mock.calls.length).toBe(callsBefore + 1)
+    expect(c.find('.overview-failed')).toBeFalsy()
+    expect(c.findAll('.el-descriptions__content').map((e) => e.textContent.trim())).toEqual([
+      '10',
+      '40%',
+      '2',
+      '5',
+      '1',
+      '3min',
+      '8',
+      '75%',
+      '1',
+    ])
   })
 })
 
@@ -312,18 +345,27 @@ describe('ReportView 图表数据渲染', () => {
       devices: { data: { success: true } },
     })
     expect(lastPie().series[0].data[0].name).toBe('暂无数据')
-    expect(lastBar().series[0].data.map((x) => x.value)).toEqual([0, 0, 0, 0])
+    expect(lastBar().series[0].data.map((x) => x.value)).toEqual([0, 0, 0, 0, 0, 0])
     expect(c.errors).toEqual([])
   })
 
-  test('设备状态柱状图：四状态固定顺序与配色，缺的状态补 0（不与相邻状态错位）', async () => {
+  test('设备状态柱状图：六状态（全枚举）固定顺序与配色，缺的状态补 0（不与相邻状态错位）', async () => {
     await open()
     const data = lastBar().series[0].data
-    expect(data.map((x) => x.name)).toEqual(['正常', '离线', '故障', '维护中'])
-    expect(data.map((x) => x.value)).toEqual([7, 0, 2, 0])
-    expect(data.map((x) => x.itemStyle.color)).toEqual(['#16a34a', '#64748b', '#e63946', '#d97706'])
+    // FireDevice.status 有 6 个枚举值，分布图必须全画——此前漏了 warning/scrapped，
+    // 使「设备状态分布」与总数对不上。顺序与配色都是本视图契约的一部分。
+    expect(data.map((x) => x.name)).toEqual(['正常', '警告', '故障', '离线', '维护中', '已报废'])
+    expect(data.map((x) => x.value)).toEqual([7, 0, 2, 0, 0, 0])
+    expect(data.map((x) => x.itemStyle.color)).toEqual([
+      '#16a34a',
+      '#eab308',
+      '#e63946',
+      '#64748b',
+      '#d97706',
+      '#94a3b8',
+    ])
     // 轴标签与 series 必须同序同长，否则柱与标签错位
-    expect(lastBar().xAxis.data).toEqual(['正常', '离线', '故障', '维护中'])
+    expect(lastBar().xAxis.data).toEqual(['正常', '警告', '故障', '离线', '维护中', '已报废'])
     // 柱状图 tooltip 带单位「台」；饼图 tooltip 带占比，两者语义不同不可互换
     expect(lastBar().tooltip).toEqual({ trigger: 'axis', formatter: '{b}: {c}台' })
     expect(lastPie().tooltip).toEqual({ trigger: 'item', formatter: '{b}: {c} ({d}%)' })
@@ -338,7 +380,7 @@ describe('ReportView 图表数据渲染', () => {
     expect(lastBar().series[0].data[0].value).toBe(0)
   })
 
-  test('未知状态值不进图（只渲染后端契约内的四状态）', async () => {
+  test('未知状态值不进图（只渲染后端契约内的六个枚举状态）', async () => {
     await open({
       devices: {
         data: {
@@ -351,7 +393,7 @@ describe('ReportView 图表数据渲染', () => {
         },
       },
     })
-    expect(lastBar().series[0].data.map((x) => x.value)).toEqual([1, 0, 0, 0])
+    expect(lastBar().series[0].data.map((x) => x.value)).toEqual([1, 0, 0, 0, 0, 0])
     expect(lastBar().series[0].data.map((x) => x.name)).not.toContain('ghost')
   })
 

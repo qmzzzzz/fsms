@@ -1,5 +1,5 @@
 /**
- * AuditLog 模型静态方法测试：脱敏递归性与风险评估准确性
+ * AuditLog 模型测试：脱敏递归性、风险评估准确性、method 取值全集与越枚举降级
  */
 
 const mongoose = require('mongoose');
@@ -16,7 +16,10 @@ describe('AuditLog 模型静态方法', () => {
 
   afterEach(async () => {
     // append-only 钩子会拒绝 deleteMany，测试清理需通过 bypassAppendOnly 绕过
-    await AuditLog.deleteMany({ username: /^sanitize_|^risk_/ }, { bypassAppendOnly: true });
+    await AuditLog.deleteMany(
+      { username: /^sanitize_|^risk_|^method_/ },
+      { bypassAppendOnly: true }
+    );
   });
 
   afterAll(async () => {
@@ -255,6 +258,122 @@ describe('AuditLog 模型静态方法', () => {
       // 无论环境变量如何取值，TTL 都不得低于合规下限
       expect(ttl[1].expireAfterSeconds).toBeGreaterThanOrEqual(MIN_RETENTION_DAYS * 24 * 60 * 60);
       expect(ttl[0]).toEqual({ timestamp: -1 });
+    });
+  });
+
+  /**
+   * method 维：取值全集 + 「越枚举怎么办」
+   *
+   * 这一维原先只在模型里写死 5 个动词，而**写入方交出来的方法名不受这 5 个约束**：
+   * Express 把 HEAD 路由到 GET 处理器，全局审计中间件与 authenticate 又都排在路由之前，
+   * 所以"带 token 的 HEAD"是常态流量（监控 curl -I、探测脚本、浏览器预取）。
+   * 方法名落在枚举外时失败的是**整条文档**（Mongoose 对 enum 外取值报 ValidationError），
+   * 而两条落库路径都不说"是 method 越枚举"：
+   *   - 直写 AuditLog.record()：错误进 catch，只留一行 error 日志 + audit_write_failed 指标，
+   *     ip_range_denied（riskLevel=high）这类事件在留存里凭空消失；
+   *   - 缓冲路径 auditBuffer 的 insertMany({ordered:false})：该文档被当"毒文档"重试数轮后丢弃，
+   *     与真正的外部畸形文档同形，事后无法区分。
+   * 修复的判据因此是两条而不是第一条：**枚举要覆盖真实流量**（HEAD/OPTIONS 进枚举，
+   * 保住"这次探测是 HEAD"这一维），**越枚举要降级而非丢行**（setter 抹成未设置，整条保住）。
+   * 取舍写明：宁可少一维，不可丢一行——少一维仍可由 path/ip/action 定位同一次请求，
+   * 丢一行是不可逆的取证缺口。
+   */
+  describe('method 枚举：宁可少一维，不可丢一行', () => {
+    const { AUDIT_HTTP_METHODS, AUDIT_RISK_LEVELS } = require('../../constants/audit');
+
+    const entry = (method, username) => ({
+      action: 'ip_range_denied',
+      category: 'security',
+      username,
+      method,
+      path: '/api/auth/me',
+      ip: '::ffff:127.0.0.1',
+      success: false,
+      riskLevel: 'high',
+    });
+
+    const readOwnRow = async (username) => AuditLog.findOne({ username }).lean();
+
+    test('HEAD / OPTIONS 必须在枚举内，且逐字入库（不是被抹空后落库）', async () => {
+      for (const method of ['HEAD', 'OPTIONS']) {
+        const doc = await AuditLog.record(entry(method, `method_${method.toLowerCase()}`));
+        // record() 落库失败时吞错返回 null——这正是缺陷"静默"的形态
+        expect(doc).not.toBeNull();
+        expect(doc.method).toBe(method);
+        const row = await readOwnRow(`method_${method.toLowerCase()}`);
+        expect(row?.method).toBe(method);
+      }
+    });
+
+    test('反向对照：GET 照常落库（证明上一条不是因为"什么都不校验"而白过）', async () => {
+      const doc = await AuditLog.record(entry('GET', 'method_get_control'));
+      expect(doc).not.toBeNull();
+      expect(doc.method).toBe('GET');
+      expect((await readOwnRow('method_get_control'))?.method).toBe('GET');
+    });
+
+    test('越枚举的动词（TRACE/CONNECT/自定义/空串）必须降级为「不记 method」，整条记录保住', async () => {
+      // Node 的 HTTP 解析器不限制方法名，TRACE/CONNECT 与任意自定义动词都会走到审计层。
+      for (const method of ['TRACE', 'CONNECT', 'ZZ-PROBE', '']) {
+        const username = `method_odd_${method.replace(/[^A-Za-z]/g, 'x') || 'empty'}`;
+        const doc = await AuditLog.record(entry(method, username));
+        expect({ method, doc: doc !== null }).toEqual({ method, doc: true });
+        expect(doc.method).toBeUndefined();
+        // 落库形态：字段整个不存在，而不是空串（空串在查询侧会与"未记录"混同）
+        const row = await readOwnRow(username);
+        expect(row).toBeTruthy();
+        expect('method' in row).toBe(false);
+      }
+    });
+
+    test('缓冲路径 insertMany 同样受保护：混入越枚举文档时三条全部入库且无错', async () => {
+      // 这条才是本缺陷的真实落库形态（全局审计中间件走 auditBuffer，不是 record()）。
+      // 未修复时 insertMany 会抛聚合错误、HEAD 那条最终被丢弃。
+      const docs = await AuditLog.insertMany([
+        entry('HEAD', 'method_buf_head'),
+        entry('TRACE', 'method_buf_trace'),
+        entry('POST', 'method_buf_post'),
+      ]);
+      expect(docs).toHaveLength(3);
+      const rows = await AuditLog.find({ username: /^method_buf_/ }).lean();
+      const byUser = Object.fromEntries(rows.map((r) => [r.username, r.method]));
+      expect(Object.keys(byUser).sort()).toEqual(
+        ['method_buf_head', 'method_buf_post', 'method_buf_trace'].sort()
+      );
+      expect(byUser.method_buf_head).toBe('HEAD');
+      expect(byUser.method_buf_post).toBe('POST');
+      expect(byUser.method_buf_trace).toBeUndefined();
+    });
+
+    test('单一事实来源：schema 的 enum 就是 constants/audit.js 那份，且两处写入点不再私抄', () => {
+      const fs = require('fs');
+      const path = require('path');
+      // 与 AUDIT_CATEGORIES 同一口径（模型头注释自陈：漂移会造成静默丢弃）
+      expect(AuditLog.schema.path('method').enumValues).toEqual(AUDIT_HTTP_METHODS);
+      expect(AUDIT_HTTP_METHODS).toEqual(expect.arrayContaining(['HEAD', 'OPTIONS']));
+
+      const PRIVATE_LIST = "'GET', 'POST', 'PUT', 'DELETE', 'PATCH'";
+      const root = path.join(__dirname, '..', '..', '..');
+      for (const rel of ['src/middleware/security.js', 'src/middleware/protocolCompliance.js']) {
+        const text = fs.readFileSync(path.join(root, rel), 'utf8');
+        expect({ file: rel, privateList: text.includes(PRIVATE_LIST) }).toEqual({
+          file: rel,
+          privateList: false,
+        });
+      }
+      // 判据自证：私抄回来必须被上一条抓到（否则那是个恒真的文本闸）
+      expect(`x: [${PRIVATE_LIST}].includes(req.method)`.includes(PRIVATE_LIST)).toBe(true);
+
+      // riskLevel 同一口径（2026-09-25 补齐）：模型此前私抄 `['low','medium','high','critical']`，
+      // 于是本文件头注释宣称的「单一事实来源」对这一维其实不成立。漂移后果与 method 那次同形：
+      // 给常量加一档后，查询/导出侧白名单放行、落库却被 ValidationError 拒，
+      // 缓冲路径把整行当毒文档重试数轮后丢弃，既不报错也不告警。
+      expect(AuditLog.schema.path('riskLevel').enumValues).toEqual(AUDIT_RISK_LEVELS);
+      const RISK_PRIVATE_LIST = "'low', 'medium', 'high', 'critical'";
+      const modelSrc = fs.readFileSync(path.join(root, 'src/models/AuditLog.js'), 'utf8');
+      expect(modelSrc.includes(RISK_PRIVATE_LIST)).toBe(false);
+      // 同上：文本闸必须能抓到私抄，否则这条是个恒绿的摆设
+      expect(`enum: [${RISK_PRIVATE_LIST}]`.includes(RISK_PRIVATE_LIST)).toBe(true);
     });
   });
 });

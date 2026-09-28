@@ -136,6 +136,17 @@ describe('errorReporter 全局错误兜底', () => {
       expect(redactUrl('/x?access_code=z')).toBe('/x?access_code=***')
     })
 
+    test('驼峰形态同样命中（漏码修复）：accessToken/refreshToken/idToken/mfaCode', () => {
+      // 旧实现先 toLowerCase 再按下划线边界匹配，'accessToken'→'accesstoken' 既非
+      // 'access_token' 也不以 '_token' 结尾 → 明文令牌漏码，写进 localStorage + 扇出 Sentry。
+      expect(redactUrl('/x?accessToken=A&refreshToken=B')).toBe(
+        '/x?accessToken=***&refreshToken=***'
+      )
+      expect(redactUrl('/x?idToken=Z&mfaCode=1')).toBe('/x?idToken=***&mfaCode=***')
+      // 归一化不得扩大打码面：普通业务参数保持原样
+      expect(redactUrl('/x?deviceType=smoke&page=3')).toBe('/x?deviceType=smoke&page=3')
+    })
+
     test('hash 中的敏感参数同样被打码（无 query 时也不例外）', () => {
       expect(redactUrl('/app#/cb?token=leak')).toBe('/app#/cb?token=***')
       expect(redactUrl('/app#access_token=leak')).toBe('/app#access_token=***')

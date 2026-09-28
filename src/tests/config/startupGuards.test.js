@@ -373,38 +373,191 @@ describe('validate.js 降级通道：flushLogsSync/logger 不可用时信息不�
   });
 });
 describe('P2-35：.env.example 必须覆盖配置层读取的全部变量', () => {
-  // 缺口检测：配置层（config/）里任何被 process.env 读取的变量，若模板中完全没有
-  // 出现，运维就无从知道它存在——只能去读源码。本用例是「补齐 44 个未文档化变量」
+  // 缺口检测：配置层（src/config/）里任何被读取的变量，若模板中完全没有出现，
+  // 运维就无从知道它存在——只能去读源码。本用例是「补齐 44 个未文档化变量」
   // 那类问题的回归闸门：新增配置项忘了写模板即变红。
   // 只断言「名字出现」（生效行或注释行均可），不锁具体取值/文案。
   const fs = require('fs');
   const path = require('path');
   const ROOT = path.join(__dirname, '..', '..', '..');
-  const CONFIG_FILES = [
-    'src/config/index.js',
-    'src/config/validate.js',
-    'src/config/swagger.js',
-    'src/config/database.js',
-  ];
+  const CONFIG_DIR = path.join(ROOT, 'src', 'config');
 
-  test('config/ 引用的 process.env.* 变量名全部出现在 .env.example 中', () => {
-    const referenced = new Set();
-    for (const rel of CONFIG_FILES) {
-      const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
-      for (const m of src.matchAll(/process\.env\.([A-Z0-9_]+)/g)) referenced.add(m[1]);
-    }
+  // 【扫描集由目录派生，不再硬写清单】原先这里是四条文件名字面量，而 `src/config/`
+  // 实际有五个 .js（缺 `secrets.js`）：新增一个配置文件**不会**让本闸变红，
+  // 只会让它看不见那个文件——静默缩小覆盖面而不是报警，与本仓"五份到期口径"同族。
+  const CONFIG_FILES = fs
+    .readdirSync(CONFIG_DIR)
+    .filter((f) => f.endsWith('.js'))
+    .sort()
+    .map((f) => `src/config/${f}`);
 
+  /**
+   * 剥注释。不剥的失真方向是"凭空多出一个开关"：`src/utils/envNumber.js` 的文件头
+   * 用 `Number(process.env.X)` 举例说明这个惯用法——那是一条**注释**，却会被提取器
+   * 读成一个名叫 `X` 的配置项并要求文档化它。将来任何人在注释里写一句同类示例，
+   * 本闸就会红在一个不存在的东西上；而"红在不存在的东西上"教会的行为是放宽判据。
+   */
+  function stripComments(text) {
+    return text
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((line) => {
+        const t = line.trimStart();
+        if (t.startsWith('//') || t.startsWith('*')) return '';
+        // 行内 ` // `：排除前面是引号或冒号的情况（`'http://…'`、`key: //` 一类不是注释）
+        return line.replace(/([^:"'])\/\/.*$/, '$1');
+      })
+      .join('\n');
+  }
+
+  /**
+   * 一个变量名"被读取"的三种**字面量**形态：
+   *   process.env.NAME / process.env['NAME'] / envInt('NAME', 20) 这一族辅助函数实参。
+   * 第三条不是锦上添花：`src/config/database.js` 的五个 `MONGO_*` 全走 `envInt('…')`
+   * （:39-43），只看点号形态时这五个真实开关对闸是隐形的——它恰好是 P2-35 点名要防的那类。
+   *
+   * 刻意**不含**动态拼接（`process.env[`${n}_FILE`]`、`envInt(name)` 里的形参）：
+   * 那类读取的键名只存在于名单常量里，正则永远只能看到变量名。硬凑一条"能匹配
+   * `FILE_BACKED_SECRETS` 数组字面量"的第四形态，实测会把闸推到 12 个 `_FILE` 变量上
+   * （见下面那条用例的注释），那是文档面的活，不是判据的活。
+   */
+  function envNamesOf(code) {
+    const out = new Set();
+    for (const m of code.matchAll(/process\.env\.([A-Z0-9_]+)/g)) out.add(m[1]);
+    for (const m of code.matchAll(/process\.env\[\s*['"]([A-Z0-9_]+)['"]\s*\]/g)) out.add(m[1]);
+    for (const m of code.matchAll(
+      /(?:envInt|envNum|envBool|readPositiveNumberEnv)\s*\(\s*['"]([A-Z0-9_]+)['"]/g
+    ))
+      out.add(m[1]);
+    return out;
+  }
+
+  const documentedNames = () => {
     const documented = new Set();
     for (const line of fs.readFileSync(path.join(ROOT, '.env.example'), 'utf8').split(/\r?\n/)) {
       const m = line.match(/^\s*#?\s*([A-Z][A-Z0-9_]*)\s*=/);
       if (m) documented.add(m[1]);
     }
+    return documented;
+  };
 
+  /** 闸的实际口径：剥注释 ⇒ 再提取。只此一处组合，用例与扫描共用它。 */
+  const namesInSource = (raw) => envNamesOf(stripComments(raw));
+
+  const referencedAll = () => {
+    const referenced = new Set();
+    for (const rel of CONFIG_FILES) {
+      const raw = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+      for (const n of namesInSource(raw)) referenced.add(n);
+    }
+    return referenced;
+  };
+
+  test('config/ 三种形态读到的变量名全部出现在 .env.example 中', () => {
+    const documented = documentedNames();
+    const referenced = referencedAll();
     const missing = [...referenced].filter((v) => !documented.has(v)).sort();
     // 断言为空：任何缺失都会在失败信息里列出变量名，便于直接补模板
     expect(missing).toEqual([]);
     // 防「文件被清空后 vacuously 通过」：模板必须真的被解析出变量
     expect(documented.size).toBeGreaterThan(50);
+    // 同一条防空转的判据放在读取侧：2026-09-26 实测 43 个（其中 5 个只能经 envInt 看到）。
+    // 提取器的任一条正则被删都会让这个数掉下来 ⇒ 这条不是装饰。
+    expect(referenced.size).toBeGreaterThanOrEqual(43);
+  });
+
+  test('扫描集是 src/config/ 的目录派生，不是抄来的清单（反"硬写清单复辟"）', () => {
+    // 为什么只能钉基数：`secrets.js` 的读取形态全是动态拼接，五个文件里的字面量读取
+    // 恰好都在原先那四条之内 ⇒ **"少扫一个文件"在今天没有任何可观测的名字级差异**。
+    // 所以这里退而钉基数（与上面 `documented.size > 50` 同一条纪律、同一个理由），
+    // 它杀得住"改回四条字面量"这一族，杀不住"将来新增文件且它只用动态读取"——
+    // 后者的确需要一条名字级判据才杀得住，而那要先把 FILE_BACKED_SECRETS 那族纳进提取器
+    // （见下一条负结果注释），条件成熟时按那条收紧，不要现在拿基数凑数当充分。
+    expect(CONFIG_FILES.length).toBeGreaterThanOrEqual(5);
+    // 派生本身的可观测面：清单必须**等于**当前目录里的 .js 全集（不是子集）
+    expect(CONFIG_FILES).toEqual(
+      fs
+        .readdirSync(CONFIG_DIR)
+        .filter((f) => f.endsWith('.js'))
+        .sort()
+        .map((f) => `src/config/${f}`)
+    );
+  });
+
+  test('提取器认识三种字面量形态（夹具自证，不依赖产品代码）', () => {
+    // 这条把"三种形态"从注释变成判据：任一条正则被删，对应那个名字就从集合里消失。
+    // 用合成夹具而不是产品文件，是因为产品文件将来可能改名——那时这条还会替三种形态说话。
+    const names = envNamesOf(
+      [
+        'const a = process.env.SHAPE_DOT;',
+        "const b = process.env['SHAPE_BRACKET'];",
+        'const c = process.env["SHAPE_BRACKET_DQ"];',
+        "const d = envInt('SHAPE_ENVINT', 20);",
+        "const e = readPositiveNumberEnv('SHAPE_RPNE', 15000);",
+        "const f = envNum('SHAPE_ENVNUM', 3);",
+        "const g = envBool('SHAPE_ENVBOOL');",
+      ].join('\n')
+    );
+    expect([...names].sort()).toEqual([
+      'SHAPE_BRACKET',
+      'SHAPE_BRACKET_DQ',
+      'SHAPE_DOT',
+      'SHAPE_ENVBOOL',
+      'SHAPE_ENVINT',
+      'SHAPE_ENVNUM',
+      'SHAPE_RPNE',
+    ]);
+  });
+
+  test('注释里的 process.env.X 形状不构成一个开关', () => {
+    // 这条钉的是 stripComments 的必要性，形状取自真实出处（envNumber.js 文件头的示例）。
+    // 少了剥注释，`GHOST` 会进 referenced ⇒ 上面那条 `missing` 用例红在一个不存在的东西上。
+    const commented = [
+      '// 为什么要有这个文件：本仓多处写成 `Number(process.env.GHOST) || 15000`',
+      '/* 块注释里也有 process.env.GHOST_BLOCK */',
+      'const REAL = process.env.NOT_A_GHOST_UNUSED; // 尾随注释 process.env.GHOST_TAIL',
+    ].join('\n');
+    // 先证明"不剥会读到四个"，即剥注释这一步确实改变了提取结果（否则这条判据空转）
+    expect([...envNamesOf(commented)].sort()).toEqual([
+      'GHOST',
+      'GHOST_BLOCK',
+      'GHOST_TAIL',
+      'NOT_A_GHOST_UNUSED',
+    ]);
+    // 再证明闸的实际口径（namesInSource）只留下真开关。
+    // 【已知限制】`referencedAll()` 若绕过 namesInSource 直接调 envNamesOf，这条抓不到：
+    // 今天五个配置文件里没有任何"只出现在注释中的 env 形状"（实测差集为空），
+    // 所以"扫描路径没剥注释"在名字级**没有可观测差异**。可观测的是这里——
+    // 组合点只有一处（namesInSource），把它的任一半拆掉本条即红。
+    // 收紧的确切条件：任一配置文件出现注释里的 process.env.X ⇒ 绕过路径就会红在 missing 上。
+    expect([...namesInSource(commented)]).toEqual(['NOT_A_GHOST_UNUSED']);
+    // 今天真实配置层里，剥注释**没有**弄丢任何一个名字（两侧集合同则相等）。
+    // 这条钉的是"剥注释不是拿来掩盖真实缺口的手段"——将来谁往注释里塞一个真实存在的
+    // 开关名想让它免于文档化，这一条就会红。
+    const unstripped = new Set();
+    for (const rel of CONFIG_FILES) {
+      for (const n of envNamesOf(fs.readFileSync(path.join(ROOT, rel), 'utf8'))) unstripped.add(n);
+    }
+    expect([...referencedAll()].sort()).toEqual([...unstripped].sort());
+  });
+
+  test('secrets.js 在扫描集里但对提取器不可见（登记已测的负结果）', () => {
+    // 本批把扫描集改成目录派生，secrets.js 因此**进了**扫描集；实测它对 referenced 的贡献
+    // 是 **0 个名字**——它的读取全是 `process.env[`${name}_FILE`]`（:65/:101/:108）。
+    // 把这条写成断言，是为了下一个人不把"文件已入扫描集"读成"它已被覆盖"。
+    //
+    // 要真覆盖它，得把 `FILE_BACKED_SECRETS` 那 14 个名字纳进提取器（第四形态）。
+    // 实测挡在前面：那 14 个里 `MONGO_ROOT_PASSWORD` 在 .env.example 中**根本不存在**，
+    // 且 14 个的 `_FILE` 形态只有 `LOGIN_ECDH_PRIVATE_KEY_FILE` 以注释示例出现过
+    // （缺 12 个）。⇒ 那是补模板的活（一次文档面改动，且要先回答"MONGO_ROOT_PASSWORD
+    // 是不是死条目"：全仓除这张表和 ADR-003 的一行之外无人读它，compose 用的是
+    // `MONGO_INITDB_ROOT_PASSWORD_FILE`）。本批不擅自改 .env.example 与 secrets.js，
+    // 也不为了少一行注释把判据改成"只查已文档化的那些"。
+    // 收紧的确切条件：上面两格补齐后，加第四形态并把这条换成"14 个名字全部已文档化"。
+    expect(CONFIG_FILES).toContain('src/config/secrets.js');
+    const secretsCode = stripComments(fs.readFileSync(path.join(CONFIG_DIR, 'secrets.js'), 'utf8'));
+    expect([...envNamesOf(secretsCode)]).toEqual([]);
+    expect(secretsCode).toMatch(/FILE_BACKED_SECRETS/); // 前提自证：它确实还是动态那一族
   });
 
   test('P2-35 点名的四个关键变量确实在模板中（防误删）', () => {

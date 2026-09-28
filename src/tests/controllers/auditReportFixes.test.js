@@ -1,5 +1,5 @@
 /**
- * 本轮审计报告修复的综合回归
+ * 本次改动审计报告修复的综合回归
  *
  * 覆盖：
  * - P1-2  my-logs 不外泄 hmac（离线爆破通道）
@@ -213,7 +213,7 @@ describe('审计报告修复综合回归', () => {
     });
 
     test('新写入记录（v3）通过校验，不产生 hash_mismatch', async () => {
-      // 本轮修复后 chainBatch 会在算 hash 前补齐 schema 默认值，
+      // 本次改动修复后 chainBatch 会在算 hash 前补齐 schema 默认值，
       // 且版本号升到 3 以消除 v2 的口径歧义
       const docs = [
         {
@@ -253,12 +253,15 @@ describe('审计报告修复综合回归', () => {
         expect(d.hmac).toBe(computeHmac(d.hash));
       }
 
-      // 接口层面也不应把它们计为断裂
-      const report = await verifyAuditChain(AuditLog, { maxRecords: 500 });
-      const v3Breaks = (report.samples || []).filter(
-        (s) => s.hashVersion === CURRENT_PAYLOAD_VERSION
-      );
-      expect(v3Breaks).toEqual([]);
+      // 校验层也不应把它们计为断裂。口径必须收窄到这两条探针：全窗 `samples` 有
+      // MAX_SAMPLES=20 的上限，"样本里没有当前版本的断裂"在共享集合上根本不构成结论
+      // （断裂多于 20 处时必然假绿），而窗口里此刻有谁取决于同一次运行中别的套件写了什么。
+      const probeReport = await verifyAuditChain(AuditLog, { filter: { username: 'v3_probe' } });
+      expect(stored.length).toBe(2);
+      expect(probeReport.total).toBe(stored.length);
+      expect(probeReport.breaks).toBe(0);
+      expect(probeReport.byType.hash_mismatch).toBe(0);
+      expect(probeReport.intact).toBe(true);
     });
 
     test('非法 limit / from 返回 400', async () => {

@@ -122,6 +122,47 @@ describe('P0-6 响应包装覆盖 res.write/res.end', () => {
 
     expect(pushedForPath('/api/probe')).toHaveLength(1);
   });
+
+  // 两条形态各用一个**全新响应**、且一个响应只做一次 write-after-end：
+  // 实测（零依赖探针）第一次 write-after-end 会把流 destroy，第二次就换了分支
+  // （在本用例里表现为 handler 里同步抛出 'write after end'）⇒ 混在一起测会测到别的东西。
+  test.each(['chunk,encoding,cb', 'chunk,cb'])(
+    '底层写失败的 error 实参原样穿过包装器（形态 %s）',
+    async (form) => {
+      // 为什么这条必须存在（F-111）：真实消费方是 services/auditExportService.js 的 writeLine——
+      //   res.write(line, onWriteCb)，而 onWriteCb = (err) => { if (err) settle(reject, err) }，
+      //   **只认回调的第一个实参**。包装器只要把 cb(err) 调成 cb()，半截 CSV 就会被判成完整导出。
+      //   而导出侧用的正是这里的 'chunk,cb' 两参形态。
+      // 该风险只存在于"穿过包装器"这一段：service 侧用例（auditExportWriteLineAbort.test.js ②）
+      //   传的是普通 EventEmitter 假 res，根本不经过本中间件 ⇒ 那里绿不代表这里绿。
+      // 实测 Node 24：write-after-end 返回 false，回调收到 Error(code=ERR_STREAM_WRITE_AFTER_END)，
+      //   **同时**在 res 上 emit('error')——无监听器会让测试进程直接崩，故先吸收该事件。
+      const seen = [];
+      const collect = (err) => seen.push({ truthy: Boolean(err), code: (err && err.code) || null });
+
+      let writeReturn;
+      const app = express();
+      app.use('/api/', auditLog());
+      app.post('/api/probe', (req, res) => {
+        res.once('error', () => {});
+        res.end('body');
+        writeReturn =
+          form === 'chunk,encoding,cb' ? res.write('x', 'utf8', collect) : res.write('x', collect);
+      });
+
+      const res = await request(app).post('/api/probe').send({});
+      expect(res.text).toBe('body');
+      for (let i = 0; i < 20 && seen.length === 0; i += 1) await tick();
+
+      // 只断 truthy + code：`err instanceof Error` 在 jest 的 vm realm 下对 Node 内部
+      // 构造的错误恒为 false（实测本用例曾因此假红），那是环境产物不是被测性质。
+      expect(seen).toEqual([{ truthy: true, code: 'ERR_STREAM_WRITE_AFTER_END' }]);
+      expect(writeReturn).toBe(false);
+      // 失败写不得额外造审计：end 已记 1 条，其后那次 write 由 logged 守卫吃掉
+      await tick();
+      expect(pushedForPath('/api/probe')).toHaveLength(1);
+    }
+  );
 });
 
 // ============================================================
@@ -196,6 +237,13 @@ describe('P0-6 端到端：导出接口真实下载并留痕', () => {
   const get = (key, url) =>
     request(app).get(url).set('Authorization', `Bearer ${actors[key].token}`);
 
+  // 401 在本应用有 5 个来源（缺令牌/签名无效/已过期/被吊销/处理失败），只断 status
+  // 时分不清"真回归"与"环境偶发"，故把 errorCode 一并纳入断言对象：失败信息自带答案。
+  const errorCodeOf = (res) =>
+    res.body && !Buffer.isBuffer(res.body) && typeof res.body === 'object'
+      ? res.body?.errors?.errorCode
+      : undefined;
+
   test('GET /api/reports/export（xlsx 流式写出）→ 真实下载且 push 收到 report_export', async () => {
     // 二进制响应不能用 supertest 默认解析器（会把 xlsx 当对象吞掉），
     // 显式收原始字节：断言 zip 魔数 PK\x03\x04 证明拿到的是真实 xlsx 字节流
@@ -208,7 +256,16 @@ describe('P0-6 端到端：导出接口真实下载并留痕', () => {
         r.on('data', (c) => chunks.push(c));
         r.on('end', () => cb(null, Buffer.concat(chunks)));
       });
-    expect(res.status).toBe(200);
+    // 一次比较同时给出 status 与 zip 魔数：401 时响应体是 JSON 错误，
+    // 魔数段会显示成 `{"er` 之类的十六进制，直接指认"拿到的是错误页而非 xlsx"。
+    expect({
+      status: res.status,
+      zipMagic: res.body.subarray(0, 4).toString('hex'),
+      errorText: res.body
+        .subarray(0, 120)
+        .toString('utf8')
+        .replace(/^PK[\s\S]*$/, 'binary-ok'),
+    }).toEqual({ status: 200, zipMagic: '504b0304', errorText: 'binary-ok' });
     expect(res.headers['content-type']).toContain('spreadsheetml.sheet');
     expect(Buffer.isBuffer(res.body)).toBe(true);
     expect(res.body.length).toBeGreaterThan(0);
@@ -224,7 +281,10 @@ describe('P0-6 端到端：导出接口真实下载并留痕', () => {
 
   test('GET /api/security/audit-logs/export（CSV 流式）→ 真实下载且 push 收到 security_audit-logs_export', async () => {
     const res = await get('auditor', '/api/security/audit-logs/export?limit=10');
-    expect(res.status).toBe(200);
+    expect({ status: res.status, errorCode: errorCodeOf(res) }).toEqual({
+      status: 200,
+      errorCode: undefined,
+    });
     expect(res.headers['content-type']).toContain('text/csv');
     expect(res.text.length).toBeGreaterThan(0); // 真实下载，非空壳 200
     await tick();

@@ -334,4 +334,21 @@ describe('authStore 权限热同步', () => {
     expect(await store.syncPermissionsFromEvent({ permissionCodes: ['a:b'] })).toBe(false)
     expect(getMeMock).not.toHaveBeenCalled()
   })
+
+  test('syncPermissionsFromEvent 拒绝推送载荷里的超管通配（即便权威复核失败也不落盘）', async () => {
+    const store = login(['device:read'])
+    let snapshotDuringFetch
+    // 权威复核失败：这是最危险的窗口——若把推送里的 *:* 留在乐观值，界面会全权且写进 localStorage
+    getMeMock.mockImplementation(async () => {
+      snapshotDuringFetch = [...store.permissions]
+      throw Object.assign(new Error('network'), { response: undefined })
+    })
+    const ok = await store.syncPermissionsFromEvent({ permissionCodes: ['*:*', 'user:read'] })
+    expect(ok).toBe(false)
+    expect(snapshotDuringFetch).not.toContain('*:*') // 乐观阶段就已滤掉通配
+    expect(store.permissions).not.toContain('*:*')
+    expect(store.hasPermission('*:*')).toBe(false)
+    // 非通配的正常码仍按乐观语义应用
+    expect(store.permissions).toEqual(['user:read'])
+  })
 })

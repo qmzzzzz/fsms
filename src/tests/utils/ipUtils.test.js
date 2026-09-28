@@ -21,8 +21,16 @@ describe('ipUtils（ipaddr.js 封装）', () => {
       expect(parseIP('0.0.0.0')).not.toBeNull();
     });
 
-    test('IPv4 前导零规范化为标准形式（192.168.001.001 → 192.168.1.1）', () => {
-      expect(normalizeIP('192.168.001.001')).toBe('192.168.1.1');
+    test('IPv4 前导零不再被"规范化"，而是按歧义拒绝', () => {
+      // 旧口径：192.168.001.001 → 192.168.1.1。改掉的理由不是洁癖：
+      // ipaddr 把 0 开头的段按**八进制**解释，192.168.010.1 会变成 192.168.8.1，
+      // 与"去掉前导零"的结果不同 ⇒ 同一段文本在两侧可以指向两个地址。
+      // 客户端 IP 文本可被 XFF 影响时即为白名单/allowedIPs 绕过（见 ipUtils 头注释）。
+      expect(normalizeIP('192.168.001.001')).toBeNull();
+      expect(normalizeIP('192.168.010.1')).toBeNull();
+      expect(normalizeIP('0177.0.0.1')).toBeNull();
+      // 规范写法不受影响
+      expect(normalizeIP('192.168.1.1')).toBe('192.168.1.1');
     });
 
     test('IPv4 映射 IPv6 收敛为纯 IPv4（消除自动封禁与手动录入的重复记录）', () => {

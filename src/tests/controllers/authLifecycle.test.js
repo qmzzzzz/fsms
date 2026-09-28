@@ -121,6 +121,23 @@ describe('认证生命周期（批次 B）', () => {
 
   // ================= 注册 =================
 
+  /**
+   * 取一枚可用验证码。
+   *
+   * 本文件已把 svg-captcha 固定为文本 'ABCD'（见文件头 jest.mock），
+   * 因此 GET /api/auth/captcha 返回的 captchaId 配 'ABCD' 必然通过 verify。
+   *
+   * 为什么注册用例必须带它：注册接口的图形验证码**默认开启**
+   * （src/config/index.js:72 顶层 registerCaptchaEnabled，全仓无任何地方设
+   * REGISTER_CAPTCHA_ENABLED=false；models/SystemConfig.js:207 的 fallback 同读顶层），
+   * 所以任何期望走到业务层的 register 请求都必须带验证码，否则一律 400 CAPTCHA_INVALID。
+   */
+  const freshCaptcha = async () => {
+    const res = await request(app).get('/api/auth/captcha');
+    expect(res.status).toBe(200);
+    return { captchaId: res.body.data.captchaId, captchaText: 'ABCD' };
+  };
+
   test('注册：开关关闭 403 → 打开 201 → 重复 400 → 弱口令 400', async () => {
     const closed = await request(app)
       .post('/api/auth/register')
@@ -129,7 +146,8 @@ describe('认证生命周期（批次 B）', () => {
         email: `lbu${stamp}x@example.com`,
         password: PASSWORD,
       });
-    // 实测 403（开关关闭时 register 返回 403）；双可能形式对「改成 400」不敏感
+    // 实测 403（开关关闭时 register 返回 403）；双可能形式对「改成 400」不敏感。
+    // 该判定在路由层（routes/authRoutes.js:243-249）先于控制器，故此处无需带验证码。
     expect(closed.status).toBe(403);
 
     await SystemConfig.findOneAndUpdate(
@@ -139,12 +157,27 @@ describe('认证生命周期（批次 B）', () => {
     );
     SystemConfig.invalidateRegistrationCache();
 
+    // 开关打开之后还有**独立**的一道闸：注册图形验证码默认开启。
+    // 先钉住「不带验证码必被拒」，否则下面几条 201/400 都可能是在替这道闸背书——
+    // 少了这一条，`ok.status===201` 在验证码被误关时照样绿，没有任何用例会发现默认值又错了
+    // （这正是 config/index.js 把该键写进 rateLimit 子对象时"静默关闭注册验证码"能长期隐身的原因）。
+    const noCaptcha = await request(app)
+      .post('/api/auth/register')
+      .send({
+        username: `lbu${stamp}x`,
+        email: `lbu${stamp}x@example.com`,
+        password: PASSWORD,
+      });
+    expect(noCaptcha.status).toBe(400);
+    expect(noCaptcha.body.errors?.errorCode).toBe('CAPTCHA_INVALID');
+
     const ok = await request(app)
       .post('/api/auth/register')
       .send({
         username: `lbu${stamp}x`,
         email: `lbu${stamp}x@example.com`,
         password: PASSWORD,
+        ...(await freshCaptcha()),
       });
     expect(ok.status).toBe(201);
 
@@ -154,8 +187,11 @@ describe('认证生命周期（批次 B）', () => {
         username: `lbu${stamp}x`,
         email: `lbu${stamp}y@example.com`,
         password: PASSWORD,
+        ...(await freshCaptcha()),
       });
     expect(dup.status).toBe(400);
+    // 钉住「重复」这个理由本身：只断 400 的话，被验证码/限流拦下也是 400
+    expect(dup.body.errors?.errorCode).toBe('REGISTER_INFO_INVALID');
 
     const weak = await request(app)
       .post('/api/auth/register')
@@ -163,8 +199,12 @@ describe('认证生命周期（批次 B）', () => {
         username: `lbu${stamp}y`,
         email: `lbu${stamp}y@example.com`,
         password: '123',
+        ...(await freshCaptcha()),
       });
     expect(weak.status).toBe(400);
+    // 弱口令由校验层（routes/authRoutes.js:81-84 的 passwordStrengthCheck）在控制器之前拦下，
+    // 故拒绝理由是 VALIDATION_FAILED 而非 CAPTCHA_INVALID——验证码闸在控制器内，更靠后。
+    expect(weak.body.errors?.errorCode).toBe('VALIDATION_FAILED');
   });
 
   // ================= 验证码前置层 =================

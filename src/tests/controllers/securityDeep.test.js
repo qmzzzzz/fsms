@@ -17,6 +17,7 @@ describe('安全管理深覆盖（批次 C）', () => {
   let Role;
   let Permission;
   let IPBlacklist;
+  let AuditLog;
   let superToken; // 内置超管操作者
   let superUserId;
   let lowToken; // 低层级用户（被操作对象）
@@ -36,7 +37,7 @@ describe('安全管理深覆盖（批次 C）', () => {
     Permission = require('../../models/Permission');
     IPBlacklist = require('../../models/IPBlacklist');
     require('../../models/TokenBlacklist');
-    require('../../models/AuditLog');
+    AuditLog = require('../../models/AuditLog');
 
     const wildcardPerm = await Permission.findOneAndUpdate(
       { code: '*:*' },
@@ -226,6 +227,20 @@ describe('安全管理深覆盖（批次 C）', () => {
   });
 
   test('锁定/解锁：成功/解锁未锁定 400/锁自己 403/锁内置超管拒绝/非法入参 400', async () => {
+    // 行为级断言基线（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §2.3 审计链与合规留痕）：锁定/解锁审计是该操作的
+    // **唯一留痕**（控制器已设 skipGlobalAudit）。此前全仓无任何用例断言它落库——
+    // 实测把 authService 的写入换成 Promise.resolve 后 119 套 / 1402 例全绿，
+    // 只有「扫源码字面量」的 constants/auditActionReachability 会红（属文本级防御）。
+    // 用**增量**而非「存在」：审计表跨轮次累积，findOne 会被上一轮残留顶成假绿。
+    const lockedBefore = await AuditLog.countDocuments({
+      action: 'user_locked',
+      targetUserId: lowUserId,
+    });
+    const unlockedBefore = await AuditLog.countDocuments({
+      action: 'user_unlocked',
+      targetUserId: lowUserId,
+    });
+
     const lock = await authed()
       .put(`/api/security/users/${lowUserId}/lock`)
       .send({
@@ -234,11 +249,19 @@ describe('安全管理深覆盖（批次 C）', () => {
       });
     expect(lock.status).toBe(200);
     expect(lock.body.data.status).toBe('locked');
+    // 锁定必须真的落一条 user_locked 审计（唯一留痕）
+    expect(await AuditLog.countDocuments({ action: 'user_locked', targetUserId: lowUserId })).toBe(
+      lockedBefore + 1
+    );
 
     const unlock = await authed()
       .put(`/api/security/users/${lowUserId}/lock`)
       .send({ locked: false });
     expect(unlock.status).toBe(200);
+    // 解锁同理：两态必须各自可追溯（action 由 locked 三元派生）
+    expect(
+      await AuditLog.countDocuments({ action: 'user_unlocked', targetUserId: lowUserId })
+    ).toBe(unlockedBefore + 1);
 
     const unlockAgain = await authed()
       .put(`/api/security/users/${lowUserId}/lock`)
@@ -273,6 +296,12 @@ describe('安全管理深覆盖（批次 C）', () => {
   });
 
   test('管理员重置 MFA：未开启 400 / 自身 400 / 开启对象 200 / 内置超管 403', async () => {
+    // 行为级断言基线：admin_reset_mfa 是该操作的唯一留痕（securityController 已设
+    // skipGlobalAudit）。此前该写入整段替换为 Promise.resolve 后 70 套 / 746 例全绿。
+    const mfaAuditBefore = await AuditLog.countDocuments({
+      action: 'admin_reset_mfa',
+      targetUserId: victimId,
+    });
     const noMfa = await authed().put(`/api/security/users/${lowUserId}/mfa/reset`);
     expect(noMfa.status).toBe(400);
 
@@ -284,6 +313,10 @@ describe('安全管理深覆盖（批次 C）', () => {
     const ok = await authed().put(`/api/security/users/${victimId}/mfa/reset`);
     expect(ok.status).toBe(200);
     expect(ok.body.data.mfaEnabled).toBe(false);
+    // 重置 MFA 必须真的落一条 admin_reset_mfa 审计（唯一留痕）
+    expect(
+      await AuditLog.countDocuments({ action: 'admin_reset_mfa', targetUserId: victimId })
+    ).toBe(mfaAuditBefore + 1);
 
     const superTarget = await User.findOne({ username: `sdsuper${stamp}` });
     const selfResetAgain = await request(app)
@@ -307,6 +340,18 @@ describe('安全管理深覆盖（批次 C）', () => {
   });
 
   test('IP 黑白名单：新增/查询命中/列表/删除；全网段仅内置超管', async () => {
+    // 行为级断言基线：ip_*_added / ip_*_removed 是该操作的唯一留痕（控制器已设
+    // skipGlobalAudit）。此前两处写入换成 Promise.resolve 后 70 套 / 746 例全绿。
+    // 该 IP 跨轮次复用（afterAll 只清 IPBlacklist，不清 AuditLog）⇒ 必须用增量。
+    const IP_UNDER_TEST = '203.0.113.50';
+    const ipAddedBefore = await AuditLog.countDocuments({
+      action: 'ip_blacklist_added',
+      'body.ip': IP_UNDER_TEST,
+    });
+    const ipRemovedBefore = await AuditLog.countDocuments({
+      action: 'ip_blacklist_removed',
+      'body.ip': IP_UNDER_TEST,
+    });
     const add = await authed()
       .post('/api/security/ip-list')
       .send({
@@ -316,6 +361,10 @@ describe('安全管理深覆盖（批次 C）', () => {
       });
     // 实测 200（新增 IP 名单条目固定 200）
     expect(add.status).toBe(200);
+    // 新增必须真的落一条 ip_blacklist_added 审计（唯一留痕）
+    expect(
+      await AuditLog.countDocuments({ action: 'ip_blacklist_added', 'body.ip': IP_UNDER_TEST })
+    ).toBe(ipAddedBefore + 1);
 
     const query = await authed().get('/api/security/ip-list/query?ip=203.0.113.50');
     expect(query.status).toBe(200);
@@ -352,6 +401,10 @@ describe('安全管理深覆盖（批次 C）', () => {
 
     const entry = await IPBlacklist.findOne({ ip: '203.0.113.50', type: 'black' });
     expect((await authed().delete(`/api/security/ip-list/${entry._id}`)).status).toBe(200);
+    // 删除侧同理：removeIPEntry 的写入此前同样无人断言
+    expect(
+      await AuditLog.countDocuments({ action: 'ip_blacklist_removed', 'body.ip': IP_UNDER_TEST })
+    ).toBe(ipRemovedBefore + 1);
   });
 
   test('审计日志：查询（含非法枚举 400）/验证/导出 CSV', async () => {

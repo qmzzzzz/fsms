@@ -143,6 +143,34 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
     expect(selfHosted).toMatch(/APP_IMAGE:\s*\$\{\{\s*needs\.preflight\.outputs\.image_tag\s*\}\}/);
   });
 
+  test('compose 里每个 `:?` 变量都由两条部署路径下发（否则到切换那步才被拒）', () => {
+    // 实证过的断裂链：compose 对 ALLOWED_HOSTS 用了 `${VAR:?}`，而本工作流只下发
+    // CORS_ORIGIN；scripts/deploy.js 的前置校验当时也只查 CORS_ORIGIN。于是
+    // 备份做完、迁移做完，才在 `docker compose up -d` 的插值阶段被拒——
+    // 数据库已改写而版本没切。清单从 compose 反向推导，新增 `:?` 变量必须同步到这里。
+    const yml = fs.readFileSync(path.join(ROOT, 'docker-compose.yml'), 'utf8');
+    const hard = [...yml.matchAll(/\$\{([A-Z0-9_]+):\?/g)].map((m) => m[1]);
+    // 前提自证：正则真的抓到硬声明项（抓空会让本用例恒绿）
+    expect(hard.length).toBeGreaterThanOrEqual(2);
+
+    for (const job of ['deploy-self-hosted', 'deploy-ssh']) {
+      const block = jobBlock(job);
+      for (const name of hard) {
+        // 不用 $ 锚点：本仓库工作流是 CRLF，`\r` 会让行尾锚定的正则恒不匹配（实测过）
+        const delivered = new RegExp(
+          `^\\s+${name}: \\$\\{\\{\\s*secrets\\.${name}\\s*\\}\\}`,
+          'm'
+        ).test(block);
+        expect({ job, name, delivered }).toMatchObject({ job, name, delivered: true });
+      }
+    }
+
+    // SSH 路径还必须把它们列进 SendEnv：env 里有但没 SendEnv = 目标机收不到
+    const sendEnv = (jobBlock('deploy-ssh').match(/SendEnv=([A-Za-z0-9_,-]+)/) || [])[1];
+    expect(sendEnv).toBeTruthy();
+    expect(sendEnv.split(',').sort()).toEqual([...hard].sort());
+  });
+
   test('--dry-run / --skip-backup 能透传（且不会误传空参数）', () => {
     const selfHosted = jobBlock('deploy-self-hosted');
     expect(selfHosted).toMatch(/dry_run/);
@@ -151,5 +179,155 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
     expect(selfHosted).toMatch(/--skip-backup/);
     // 参数必须先入数组再展开：直接拼串会产生空参数与引号问题
     expect(selfHosted).toMatch(/args\+=\(--dry-run\)/);
+  });
+
+  /**
+   * 收集全文件所有 `run: |` 块的行（含注释行，由调用方自行剔除）。
+   * 不用 jobBlock+首个 run：一个 job 可能有多个 step，注入面必须整文件扫。
+   */
+  const allRunLines = () => {
+    const lines = src.split(/\r?\n/);
+    const out = [];
+    let inRun = false;
+    let runIndent = 0;
+    for (const line of lines) {
+      const head = /^(\s*)run: \|\S*\s*$/.exec(line);
+      if (head) {
+        inRun = true;
+        runIndent = head[1].length;
+        continue;
+      }
+      if (!inRun) continue;
+      if (line.trim() === '') {
+        out.push(line);
+        continue;
+      }
+      if (line.match(/^\s*/)[0].length <= runIndent) {
+        inRun = false;
+        continue;
+      }
+      out.push(line);
+    }
+    return out;
+  };
+
+  test('前提：run 块扫描确实覆盖到脚本行（否则下面的零插值断言是空集假绿）', () => {
+    const executable = allRunLines().filter((l) => l.trim() && !l.trim().startsWith('#'));
+    expect(executable.length).toBeGreaterThan(20);
+  });
+
+  // GitHub 的 `${{ }}` 是**文本级**替换，早于 shell 解析与任何正则校验：
+  // 写成 `tag="${{ inputs.image_tag }}"` 时，一个 `x" && id && "` 形态的输入
+  // 就能在这个持有部署凭据的 runner 上执行任意命令（官方 script injection 口径）。
+  // 唯一安全通道是 env: 赋值（env 值不参与 shell 文本展开）。
+  test('所有 run 脚本内零 `${{ }}` 插值：外部值一律经 env 进入', () => {
+    const interpolated = allRunLines()
+      .filter((l) => !l.trim().startsWith('#') && l.includes('${{'))
+      .map((l) => l.trim());
+    expect(interpolated).toEqual([]);
+  });
+
+  test('镜像 tag 与两个开关都改走 env（正向锁住修复本身，而不是只锁"没有旧写法"）', () => {
+    expect(src).toMatch(/INPUT_IMAGE_TAG: \$\{\{ inputs\.image_tag \}\}/);
+    expect(src).toMatch(/tag="\$\{INPUT_IMAGE_TAG\}"/);
+    expect(src).toMatch(/DRY_RUN: \$\{\{ inputs\.dry_run \}\}/);
+    expect(src).toMatch(/SKIP_BACKUP: \$\{\{ inputs\.skip_backup \}\}/);
+    expect(src).toMatch(/\[\[ "\$DRY_RUN" == "true" \]\]/);
+  });
+
+  /**
+   * env 只是把注入时机从"文本替换那一刻"推到"拼远程命令那一刻"：
+   * 校验后的 tag 仍要写进 `APP_IMAGE='<tag>' node scripts/deploy.js` 这句**单引号包裹**的
+   * 远程命令里。仓库段字符集曾是 `.+`，`a/x';id;':latest` 完全通过校验，
+   * 单引号提前闭合 ⇒ `id` 在持有部署凭据的目标机上执行。
+   * 这里把正则从 yml 里抽出来当真值表跑（不是断言"源码里有某个字符串"）。
+   */
+  test('tag 校验正则必须拒掉一切能闭合远程单引号的字符', () => {
+    const m = src.match(/=~ (\^\S+)\s+\]\]; then/);
+    expect(m).not.toBeNull();
+    const rx = new RegExp(m[1]);
+
+    for (const ok of [
+      'ghcr.io/acme/fire-safety-app:1.2.3',
+      'registry.example.com:5000/org/app/release:sha-0a1b2c',
+      'registry.local:5000/fire-safety/app:20260920',
+    ]) {
+      expect(rx.test(ok)).toBe(true);
+    }
+    for (const evil of [
+      `a/x';id;':latest`,
+      'a/x$(id):latest',
+      'a/x`id`:latest',
+      'a/x && reboot:t',
+      'a/x;rm -rf /:latest',
+      'a/x :latest',
+      'a/x\n:latest',
+    ]) {
+      expect(rx.test(evil)).toBe(false);
+    }
+  });
+
+  // 同一形状的第二个洞：DEPLOY_PATH 被单引号包进远程命令（cd '<path>'），
+  // DEPLOY_USER/DEPLOY_HOST 合成 `user@host` 这一个 ssh argv。
+  // 后者若为空或以 `-` 开头，ssh 的 getopt 会把它当选项吃下去
+  // （-oProxyCommand=… ⇒ 在 runner 本机执行命令），所以首字符必须不是 `-`。
+  // 三个 secret 都由仓库管理员设定，属"低可乘性"攻击面，但部署凭据不该依赖"管理员不会写错"。
+  test('拼进 ssh 的三个 secret 都有字符集闸，且闸排在首次 ssh 之前', () => {
+    const block = jobBlock('deploy-ssh');
+    const patterns = [...block.matchAll(/=~ (\^\S+)\s+\]\]; then/g)].map((m) => m[1]);
+    // 反向前提：抽到 3 条才说明三个 secret 各有一道闸；少一条就是漏了一个变量
+    expect(patterns).toHaveLength(3);
+
+    const [pathRx, userRx, hostRx] = patterns.map((s) => new RegExp(s));
+
+    for (const ok of ['/srv/fsms', '/data/app-deploy', '/srv/a_b-c/', '/srv/fsms.1']) {
+      expect(pathRx.test(ok)).toBe(true);
+    }
+    for (const bad of [
+      `'/srv;id;'`,
+      "/srv';id;'",
+      '/srv/a b',
+      '/srv;ls',
+      '/srv/$(id)',
+      '/srv/`id`',
+      'srv/fsms',
+      '',
+      '/srv/a\nb',
+    ]) {
+      expect({ bad, hit: pathRx.test(bad) }).toEqual({ bad, hit: false });
+    }
+
+    for (const ok of ['deploy', 'app.user', 'svc_git', 'a-b', 'u1'])
+      expect(userRx.test(ok)).toBe(true);
+    // 反例必须**只能**被"首字符不得为 -"这条规则拒掉：
+    // 写成 `-oProxyCommand=touch` 会被任何排除 `=` 的字符集拒掉，测不到前导 `-`（实测漏判一次）
+    for (const bad of ['-oProxyCommand', '-x', '', 'a b', "a'b", 'a@b', '$(id)']) {
+      expect({ bad, hit: userRx.test(bad) }).toEqual({ bad, hit: false });
+    }
+    for (const ok of ['deploy.example.com', 'host-1', '10.0.0.8'])
+      expect(hostRx.test(ok)).toBe(true);
+    for (const bad of ['-oProxyCommand', '-x', '', 'a b', '::1']) {
+      expect({ bad, hit: hostRx.test(bad) }).toEqual({ bad, hit: false });
+    }
+
+    // 顺序：校验必须在第一条 ssh 之前，否则"合法字符集"的断言只是纸面
+    const firstGate = block.search(/=~ \^\S+\s+\]\]; then/);
+    const firstSsh = block.search(/^\s*ssh /m);
+    expect(firstGate).toBeGreaterThan(-1);
+    expect(firstSsh).toBeGreaterThan(firstGate);
+    // 且 DEPLOY_PATH 必须真的出现在远程命令里（否则这道闸是死代码）
+    expect(block).toMatch(/cd '\$DEPLOY_PATH'/);
+  });
+
+  // 部署编排是「备份 → 迁移 → 切镜像 → 健康门禁 → 失败自动回滚」。
+  // 同一环境并发两个部署会互相踩：A 的回滚目标可能是 B 刚切上去的镜像。
+  // cancel-in-progress 必须 false：跑到一半被取消会留下"迁移已执行、镜像未切换"的半程状态。
+  test('按环境互斥，且不取消正在进行的部署', () => {
+    const i = src.indexOf('\nconcurrency:');
+    expect(i).toBeGreaterThan(-1);
+    const block = src.slice(i, i + 260);
+    expect(block).toMatch(/^concurrency:$/m);
+    expect(block).toMatch(/group:\s*deploy-\$\{\{ inputs\.environment \}\}/);
+    expect(block).toMatch(/cancel-in-progress:\s*false/);
   });
 });

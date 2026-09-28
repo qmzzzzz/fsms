@@ -28,7 +28,7 @@ describe('WebSocket 认证范围校验（P0-2）', () => {
   /** 造一个用户：allowedIPs 为 null 表示不限制 */
   const makeUser = async (suffix, allowedIPs) => {
     const user = await User.create({
-      username: `w${suffix}-${stamp}`,
+      username: `w${suffix}_${stamp}`,
       email: `w${suffix}-${stamp}@example.com`,
       password: `P@ssw0rd-${stamp}-${suffix}`,
       roles: [roleId],
@@ -103,7 +103,7 @@ describe('WebSocket 认证范围校验（P0-2）', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
-      const users = await User.find({ username: new RegExp(`^w.*-${stamp}$`) }).select('_id');
+      const users = await User.find({ username: new RegExp(`^w.*_${stamp}$`) }).select('_id');
       const ids = users.map((u) => u._id);
       await UserSession.deleteMany({ userId: { $in: ids } }).catch(() => {});
       await User.deleteMany({ _id: { $in: ids } }).catch(() => {});

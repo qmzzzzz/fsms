@@ -25,12 +25,19 @@ describe('wellKnownRoutes 公共发现端点', () => {
 
   describe('GET /.well-known/security.txt（G10）', () => {
     test('返回 text/plain 且包含 RFC 9116 必需字段', async () => {
+      // Canonical 已改为"只从配置取值、无配置则整行缺省"（见
+      // securityTxtCanonicalSource.test.js），所以这里要给一个配置来源，
+      // 而不是依赖 Host 反射。
+      const original = process.env.SECURITY_TXT_CANONICAL;
+      process.env.SECURITY_TXT_CANONICAL = 'https://api.example.com/.well-known/security.txt';
       const res = await request(buildApp()).get('/.well-known/security.txt');
+      if (original === undefined) delete process.env.SECURITY_TXT_CANONICAL;
+      else process.env.SECURITY_TXT_CANONICAL = original;
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toMatch(/text\/plain/);
       expect(res.text).toMatch(/^Contact: mailto:/m);
       expect(res.text).toMatch(/^Expires: /m);
-      expect(res.text).toMatch(/^Canonical: /m);
+      expect(res.text).toMatch(/^Canonical: https:\/\/api\.example\.com\//m);
     });
 
     test('Expires 为将来时间且不超过一年（RFC 9116 约束）', async () => {

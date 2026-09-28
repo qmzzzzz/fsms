@@ -288,6 +288,8 @@ describe('RoleView 角色列表与选中态', () => {
       r1: [{ _id: 'aaaaaaaaaaaaaaaaaaaaaaaa' }],
     })
     expect(rolesGetList).toHaveBeenCalledTimes(1)
+    // 回归：无分页器的前端必须显式取足量（后端默认 limit=10 且 level 升序 → 高层级角色会被截没）
+    expect(rolesGetList).toHaveBeenCalledWith({ limit: 100 })
     expect(rolesGetTree).toHaveBeenCalledTimes(1)
     expect(rolesGetById).toHaveBeenCalledWith('r1')
     expect(roleTags(c)).toEqual(['管理员', '内置角色'])

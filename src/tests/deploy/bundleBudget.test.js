@@ -524,19 +524,82 @@ describe('体积预算门禁：收紧模式（--update-baseline，棘轮只许�
     expect(after.budgets.totalRaw).toBeGreaterThan(1000);
   });
 
-  it('损坏的旧基线在收紧模式下可被修复重写（不因解析失败卡死）', () => {
+  it('坏掉的旧基线不再被静默重写：需 --allow-growth 确认，但仍可修复（不卡死运维）', () => {
     const dist = buildCompleteDist('upd-corrupt');
     const target = trackDir(fs.mkdtempSync(path.join(os.tmpdir(), 'codebudget-updout4-')));
     const baselinePath = path.join(target, 'b.json');
     fs.writeFileSync(baselinePath, '{ 这不是合法 JSON', 'utf8');
-    const { code } = runScript([
+    const before = fs.readFileSync(baselinePath, 'utf8');
+
+    // 拒绝半边：原写法在这里直接 exit 0 并重建基线——而"是否放宽了预算"是与
+    // previous.budgets 比较得出的，previous 读不出 ⇒ raised 恒空 ⇒
+    // 「上调预算需显式确认」那道闸（上面一条用例）就变成可以先弄坏基线再绕开。
+    const blocked = runScript([
       `--dist=${dist}`,
       `--baseline=${baselinePath}`,
       '--update-baseline',
     ]);
-    expect(code).toBe(0);
-    const fixed = JSON.parse(fs.readFileSync(baselinePath, 'utf8'));
-    expect(budget.validateBaseline(fixed)).toEqual([]);
+    expect(blocked.code).toBe(1);
+    expect(blocked.out).toContain('无法作为「上一版预算」使用');
+    // 断言必须落在**可执行指令**上，而不是解释性文案里顺带出现的同一个 flag 名：
+    // 变异实测——删掉「请追加 --allow-growth 重跑」整行后，只写
+    // `toContain('--allow-growth')` 的断言仍绿（上一行的成因说明里就有这个词）。
+    expect(blocked.out).toContain('请追加 --allow-growth 重跑');
+    expect(blocked.out).toContain('git checkout');
+    // 拒绝时必须一字不动（否则"拒绝"只是句空话）
+    expect(fs.readFileSync(baselinePath, 'utf8')).toBe(before);
+
+    // 保留半边：确认可修，一条显式 flag 即可（原用例"不因解析失败卡死"的诉求）
+    const fixed = runScript([
+      `--dist=${dist}`,
+      `--baseline=${baselinePath}`,
+      '--update-baseline',
+      '--allow-growth',
+    ]);
+    expect(fixed.code).toBe(0);
+    // 出路必须在日志里说清楚（拒绝文案承诺的 flag 真要生效，否则是死胡同）
+    expect(fixed.out).toContain('不与旧预算比较');
+    const written = JSON.parse(fs.readFileSync(baselinePath, 'utf8'));
+    expect(budget.validateBaseline(written)).toEqual([]);
+    // 闭环：修好的基线能让同一产物通过检查模式
+    expect(runScript([`--dist=${dist}`, `--baseline=${baselinePath}`]).code).toBe(0);
+  });
+
+  it('JSON 合法但结构缺项的旧基线同样按「不可判定」处理（不能只防语法坏）', () => {
+    // 只 parse 成功不等于能当基准：少一个 budgets 键就少一次比较，
+    // 那个键的预算可以被无声放大——所以判据用 validateBaseline 而不是 JSON.parse。
+    const dist = buildCompleteDist('upd-partial');
+    const target = trackDir(fs.mkdtempSync(path.join(os.tmpdir(), 'codebudget-updout5-')));
+    const baselinePath = path.join(target, 'b.json');
+    runScript([`--dist=${dist}`, `--baseline=${baselinePath}`, '--update-baseline']);
+    const partial = JSON.parse(fs.readFileSync(baselinePath, 'utf8'));
+    delete partial.budgets.entryJsGzip; // 首屏 JS 预算消失 = 最贵的那一格失去门禁
+    fs.writeFileSync(baselinePath, JSON.stringify(partial, null, 2), 'utf8');
+
+    const blocked = runScript([
+      `--dist=${dist}`,
+      `--baseline=${baselinePath}`,
+      '--update-baseline',
+    ]);
+    expect(blocked.code).toBe(1);
+    expect(blocked.out).toContain('budgets.entryJsGzip');
+    expect(blocked.out).toContain('无法作为「上一版预算」使用');
+    // 而同一份基线在**检查模式**下仍必须 fail-closed（这条闸不能只顾收紧侧）
+    const check = runScript([`--dist=${dist}`, `--baseline=${baselinePath}`]);
+    expect(check.code).toBe(1);
+    expect(check.out).toContain('基线结构不完整');
+  });
+
+  it('基线文件不存在时首次收紧仍然可用（不带 --allow-growth 也应放行）', () => {
+    // 负向对照：上面两条的拒绝不得外溢成「全新基线也要确认」，
+    // 否则 CI 首次接入与本地初始化都要多传一个语义上没意义的 flag。
+    const dist = buildCompleteDist('upd-missing-ok');
+    const target = trackDir(fs.mkdtempSync(path.join(os.tmpdir(), 'codebudget-updout6-')));
+    const baselinePath = path.join(target, 'b.json');
+    expect(fs.existsSync(baselinePath)).toBe(false);
+    const r = runScript([`--dist=${dist}`, `--baseline=${baselinePath}`, '--update-baseline']);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('基线已写入');
   });
 });
 
@@ -567,5 +630,101 @@ describe('体积预算门禁：真实产物与基线', () => {
         Math.ceil((baseline.measured[key] * 1.15) / 1000) * 1000
       );
     }
+  });
+});
+
+/**
+ * 指标清单本身（F-167）：删掉 METRICS 的一行就静默少一道门禁
+ *
+ * 判定层 scripts/bundleBudgetPolicy.js 的 validateBaseline / compare / tighten
+ * 和 CLI 的 printTable 全部按同一张表遍历，所以从表里删一行 `{key:'maxChunkGzip'}`
+ * 会让「结构校验、超限比对、收紧写盘、表格打印」同步跳过这一格，而本文件此前
+ * **没有一条用例要求这一格必须被比对**：出现 maxChunkGzip 的地方只有手写假基线
+ * fixture（:187/:239/:276）和 collectStats 的计量断言（:409），二者都不过问比对集。
+ * 上面两条真实基线用例（validateBaseline 返回 []、按 BUDGET_KEYS 复算）也是
+ * 从同一张表派生的期望集合 —— 同义反复，删表行照样全绿。
+ * 而「最大懒加载分块是否失控」恰是这套门禁唯一不可替代的信号：entryJsGzip 有首屏
+ * 指标单独兜着，totalGzip 只反映累积量，一个 300KB 的 echarts 分块被拽大只能靠它。
+ *
+ * 三条判据，期望集合一律不抄自 METRICS（否则挡不住删行）：
+ *   ① 基线 JSON 的键集 ⇄ 判定表键集双向相等：事实来源是 web-admin/bundle-budget.json
+ *      （check-bundle-budget.js 头注释 :31 自己声明「数值以该文件为唯一事实来源」）；
+ *   ② 逐项单独超限 / 单独抬下限，走 CLI 端到端，且必须「恰好 1 项」——
+ *      只动这一格才红，证明它真的在比对集里，同时证明没牵连别格；
+ *   ③ 计量层每测出一个数字，要么进清单，要么在豁免名单里写明为什么不进预算。
+ */
+describe('体积预算门禁：指标清单本身（删一行就静默失去一道门禁）', () => {
+  const realBaseline = JSON.parse(fs.readFileSync(REAL_BASELINE, 'utf8'));
+
+  const writeBaseline = (name, obj) =>
+    trackDir(makeFakeDist(name, { html: null, files: { 'b.json': JSON.stringify(obj) } }));
+
+  it('① 基线 JSON 键集与判定表双向一致', () => {
+    expect(Object.keys(realBaseline.budgets).sort()).toEqual([...budget.BUDGET_KEYS].sort());
+    expect(Object.keys(realBaseline.floors).sort()).toEqual([...budget.FLOOR_KEYS].sort());
+    expect(Object.keys(realBaseline.measured).sort()).toEqual(
+      [...budget.BUDGET_KEYS, ...budget.FLOOR_KEYS].sort()
+    );
+    // 表里每行必须归属两个段之一（section 写错 ⇒ baseline[section] 取不到，比对直接抛）
+    expect(budget.METRICS.length).toBe(budget.BUDGET_KEYS.length + budget.FLOOR_KEYS.length);
+  });
+
+  it.each(Object.keys(realBaseline.budgets))('② 预算项 %s 单独被超过 → 恰好这一项红', (key) => {
+    const cut = JSON.parse(JSON.stringify(realBaseline));
+    cut.budgets[key] = 1; // 正数：过得了结构校验，且必定低于当前实测
+    const dir = writeBaseline(`each-budget-${key}`, cut);
+    const { code, out } = runScript([
+      `--dist=${REAL_DIST}`,
+      `--baseline=${path.join(dir, 'b.json')}`,
+    ]);
+    expect(code).toBe(1);
+    expect(out).toContain(`${key} 超预算`);
+    // 「恰好 1 项」才是重点：0 项＝这一格根本不在比对集里（删表行的表现），
+    // 多于 1 项＝动了一格却牵连别格，两种都会让这条用例失去定位能力
+    expect(out).toContain('未通过（1 项）');
+  });
+
+  it.each(Object.keys(realBaseline.floors))('② 下限项 %s 单独被抬高 → 恰好这一项红', (key) => {
+    const cut = JSON.parse(JSON.stringify(realBaseline));
+    cut.floors[key] = 1e9; // 只可能低于下限，不会与预算项混淆
+    const dir = writeBaseline(`each-floor-${key}`, cut);
+    const { code, out } = runScript([
+      `--dist=${REAL_DIST}`,
+      `--baseline=${path.join(dir, 'b.json')}`,
+    ]);
+    expect(code).toBe(1);
+    expect(out).toContain(`${key} 低于防呆下限`);
+    expect(out).toContain('未通过（1 项）');
+  });
+
+  it.each([...budget.BUDGET_KEYS, ...budget.FLOOR_KEYS])(
+    '①b 基线缺 %s 一格 → 结构校验点名它（不得按 undefined 放行）',
+    (key) => {
+      // 与上一条互补：这里是「这一格没了」而不是「超了」。缺失若被放过，
+      // compare 里 stats[key] > undefined 恒为 false ⇒ 该指标永久绿灯。
+      const section = budget.BUDGET_KEYS.includes(key) ? 'budgets' : 'floors';
+      const cut = JSON.parse(JSON.stringify(realBaseline));
+      delete cut[section][key];
+      const problems = budget.validateBaseline(cut);
+      expect(problems).toEqual([`${section}.${key} 缺失或非正数`]);
+    }
+  );
+
+  it('③ 计量层多出来的数字必须显式豁免，不得"测了但没人管"', () => {
+    // 豁免名单是判据的一部分：新增一个量却不纳入预算的指标要红，写明理由才放行
+    const UNBUDGETED = {
+      entryRefCount: '首屏引用条数：结构性观测值，条数多不等于产物退化（体积才是）',
+    };
+    const { stats } = budget.inspect(REAL_DIST);
+    const numeric = Object.keys(stats).filter((k) => typeof stats[k] === 'number');
+    const governed = new Set([...budget.BUDGET_KEYS, ...budget.FLOOR_KEYS]);
+    expect(numeric.filter((k) => !governed.has(k)).sort()).toEqual(Object.keys(UNBUDGETED));
+    for (const key of Object.keys(UNBUDGETED)) {
+      expect(numeric).toContain(key); // 豁免的对象真实存在
+      expect(governed.has(key)).toBe(false); // 且真的没进清单（否则是重复声明）
+    }
+    // 反方向的空转防护：maxChunkGzip 必须由 compare 处理，而不只是被 collectStats 算出来
+    expect(stats.maxChunkGzip).toBeGreaterThan(0);
+    expect(governed.has('maxChunkGzip')).toBe(true);
   });
 });

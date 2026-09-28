@@ -43,6 +43,7 @@ vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
 
 import ReportView from '@/views/ReportView.vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
+import i18n from '@/i18n'
 
 let active = null
 const EXPORT_PERMS = ['report:read', 'report:export']
@@ -101,6 +102,31 @@ describe('ReportView 导出权限门控', () => {
     const btn = c.findAll('button').find((b) => b.textContent.includes('导出'))
     expect(btn).toBeTruthy()
     await openDialog(c)
+    expect(document.body.querySelector('.el-dialog')).toBeTruthy()
+  })
+
+  // ---- 快捷入口卡片：按钮之外的第二个导出入口 ----
+  // 上面第一条查的是 findAll('button')，而卡片由 el-card 渲染成 div，
+  // 于是「按钮没了」被当成了「入口没了」——这是本文件里最像"已设防"的一处假绿：
+  // 无 report:export 的用户当时仍然可以点第四张卡片打开导出对话框。
+  // 这里两条成对：缺权限时卡片必须**少一张**，有权限时第四张必须真的能开对话框
+  // （后者保证前者不是因为卡片整体没渲染而白过）。
+  test('无 report:export：第四张导出卡片不渲染（少一张，而不是点了才 403）', async () => {
+    const c = await open(['report:read'])
+    const cards = c.findAll('.report-card')
+    expect(cards.length).toBe(3)
+    expect(cards.some((card) => card.textContent.includes('导出'))).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('反向对照：有 report:export 时第四张卡片在，且点它会打开导出对话框', async () => {
+    const c = await open()
+    const cards = c.findAll('.report-card')
+    expect(cards.length).toBe(4)
+    click(cards[3])
+    await waitFor(() => document.body.querySelectorAll('.el-dialog').length > 0, {
+      message: '点击导出卡片应打开对话框',
+    })
     expect(document.body.querySelector('.el-dialog')).toBeTruthy()
   })
 })
@@ -275,5 +301,48 @@ describe('ReportView 导出错误处理', () => {
     click(confirmBtn())
     await waitFor(() => exportReport.mock.calls.length === 2, { message: '重试导出' })
     expect(exportReport.mock.calls.length).toBe(2)
+  })
+})
+
+/**
+ * 报表页的「这份文件不完整」提示（与审计页同一条后端契约）。
+ *
+ * 后端只在结果不保证完整时发 X-Export-Truncated，值是字面 'true'
+ * （截断/丢行/计数漂移三种原因写在 xlsx 表内脚注里，头只表态"不完整"）。
+ * 此前本视图完全不读这个头：同一份被封顶的文件，从审计页下载会提示、
+ * 从报表页下载只报"导出成功"——用户按后者的口径信了文件。
+ */
+describe('ReportView 导出完整性提示', () => {
+  const xlsxResponse = (headers) => ({
+    data: new Blob(['xlsx-bytes'], { type: 'application/vnd.ms-excel' }),
+    headers,
+  })
+
+  const runExport = async (headers) => {
+    exportReport.mockResolvedValue(xlsxResponse(headers))
+    const c = await open()
+    await openDialog(c)
+    click(confirmBtn())
+    await waitFor(() => exportReport.mock.calls.length === 1, { message: '导出请求发出' })
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '导出完成' })
+    return c
+  }
+
+  test('带截断标记：除成功提示外还要警告，且弹的是词表文案而非响应头原值', async () => {
+    await runExport({ 'x-export-truncated': 'true' })
+    expect(ElMessage.warning).toHaveBeenCalledTimes(1)
+    const shown = ElMessage.warning.mock.calls[0][0]
+    expect(shown).not.toBe('true')
+    // 前提自证：键必须真在词表里。缺键时 vue-i18n 把 t() 回落成键名，
+    // 下一条"两边都取键名"的断言会恒真。
+    expect(i18n.global.te('messages.exportTruncated')).toBe(true)
+    expect(shown).toBe(i18n.global.t('messages.exportTruncated'))
+    expect(shown.length).toBeGreaterThan(10)
+  })
+
+  test('反向对照：没有截断头时不得警告（否则上面那条是恒真的氛围断言）', async () => {
+    await runExport({ 'content-type': 'application/vnd.ms-excel' })
+    expect(ElMessage.warning).not.toHaveBeenCalled()
+    expect(ElMessage.success).toHaveBeenCalledTimes(1)
   })
 })

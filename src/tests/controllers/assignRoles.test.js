@@ -19,6 +19,9 @@
  */
 
 const request = require('supertest');
+
+// 所有夹具同部门：让范围闸放行，从而把断言打在层级/权限闸上
+const SCOPE_DEPT = 'SECDEPT';
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
@@ -88,18 +91,24 @@ describe('assignRoles 越权防护（M-01）', () => {
       username: 'sa_target',
       email: 'sa@example.com',
       password: 'Test@1234567',
+      // 夹具必须落在操作者的数据范围内（同部门或其创建），否则范围闸先拒，测不到本该测的闸
+      department: SCOPE_DEPT,
       roles: [superRole._id],
     });
     operator = await User.create({
       username: 'sec_operator',
       email: 'sec@example.com',
       password: 'Test@1234567',
+      // 夹具必须落在操作者的数据范围内（同部门或其创建），否则范围闸先拒，测不到本该测的闸
+      department: SCOPE_DEPT,
       roles: [secRole._id],
     });
     lowUser = await User.create({
       username: 'low_user',
       email: 'low@example.com',
       password: 'Test@1234567',
+      // 夹具必须落在操作者的数据范围内（同部门或其创建），否则范围闸先拒，测不到本该测的闸
+      department: SCOPE_DEPT,
       roles: [],
     });
 
@@ -142,6 +151,8 @@ describe('assignRoles 越权防护（M-01）', () => {
       username: 'sec_peer',
       email: 'peer@example.com',
       password: 'Test@1234567',
+      // 夹具必须落在操作者的数据范围内（同部门或其创建），否则范围闸先拒，测不到本该测的闸
+      department: SCOPE_DEPT,
       roles: [(await Role.findOne({ code: 'SECURITY_ADMIN' }))._id],
     });
     const res = await request(app)
@@ -238,6 +249,9 @@ describe('assignRoles 越权防护（M-01）', () => {
         username: 'peer_admin_a',
         email: 'peer_a@example.com',
         password: 'Test@1234567',
+        // 部门档管理员只能管同部门用户（rbac.isRecordInScope）：不给部门就等于
+        // 让范围闸先拒，本该被测的层级/权限闸根本走不到
+        department: SCOPE_DEPT,
         roles: [peerRoleA._id],
       });
       peerAdminToken = jwt.sign(
@@ -250,6 +264,11 @@ describe('assignRoles 越权防护（M-01）', () => {
         username: 'peer_victim',
         email: 'peer_victim@example.com',
         password: 'Test@1234567',
+        // 部门档管理员只能管同部门用户（rbac.isRecordInScope）：不给部门就等于
+        // 让范围闸先拒，本该被测的层级/权限闸根本走不到
+        department: SCOPE_DEPT,
+        // B-2 的操作者是 level 6 ⇒ 数据范围是 self，只能管自己创建的账户
+        createdBy: peerAdmin._id,
         roles: [],
       });
     });
@@ -316,6 +335,11 @@ describe('assignRoles 越权防护（M-01）', () => {
         username: 'peer_fresh',
         email: 'peer_fresh@example.com',
         password: 'Test@1234567',
+        // 操作者是 level 6 ⇒ self 档；victim 的属主就是本组操作者，直接继承
+        createdBy: victim.createdBy,
+        // 部门档管理员只能管同部门用户（rbac.isRecordInScope）：不给部门就等于
+        // 让范围闸先拒，本该被测的层级/权限闸根本走不到
+        department: SCOPE_DEPT,
         roles: [],
       });
       const res = await request(app)
@@ -349,6 +373,9 @@ describe('assignRoles 越权防护（M-01）', () => {
         username: 'sa_grantee',
         email: 'grantee@example.com',
         password: 'Test@1234567',
+        // 部门档管理员只能管同部门用户（rbac.isRecordInScope）：不给部门就等于
+        // 让范围闸先拒，本该被测的层级/权限闸根本走不到
+        department: SCOPE_DEPT,
         roles: [guestRole._id],
       });
       const res = await request(app)
@@ -368,6 +395,9 @@ describe('assignRoles 越权防护（M-01）', () => {
         username: 'sa_normal',
         email: 'normal@example.com',
         password: 'Test@1234567',
+        // 部门档管理员只能管同部门用户（rbac.isRecordInScope）：不给部门就等于
+        // 让范围闸先拒，本该被测的层级/权限闸根本走不到
+        department: SCOPE_DEPT,
         roles: [],
       });
       const res = await request(app)
@@ -415,6 +445,9 @@ describe('assignRoles 越权防护（M-01）', () => {
         username: 'sa_deleter',
         email: 'deleter@example.com',
         password: 'Test@1234567',
+        // 部门档管理员只能管同部门用户（rbac.isRecordInScope）：不给部门就等于
+        // 让范围闸先拒，本该被测的层级/权限闸根本走不到
+        department: SCOPE_DEPT,
         roles: [superRoleRef._id],
       });
       const token = jwt.sign(
@@ -436,6 +469,9 @@ describe('assignRoles 越权防护（M-01）', () => {
         username: 'sa_batch',
         email: 'batch@example.com',
         password: 'Test@1234567',
+        // 部门档管理员只能管同部门用户（rbac.isRecordInScope）：不给部门就等于
+        // 让范围闸先拒，本该被测的层级/权限闸根本走不到
+        department: SCOPE_DEPT,
         roles: [superRoleRef._id],
       });
       const token = jwt.sign(
@@ -447,6 +483,9 @@ describe('assignRoles 越权防护（M-01）', () => {
         username: 'sa_victim',
         email: 'victim@example.com',
         password: 'Test@1234567',
+        // 部门档管理员只能管同部门用户（rbac.isRecordInScope）：不给部门就等于
+        // 让范围闸先拒，本该被测的层级/权限闸根本走不到
+        department: SCOPE_DEPT,
         roles: [guestRole._id],
       });
 
@@ -488,6 +527,9 @@ describe('assignRoles 越权防护（M-01）', () => {
         username: 'mid_escalate',
         email: 'mid_esc@example.com',
         password: 'Test@1234567',
+        // 部门档管理员只能管同部门用户（rbac.isRecordInScope）：不给部门就等于
+        // 让范围闸先拒，本该被测的层级/权限闸根本走不到
+        department: SCOPE_DEPT,
         roles: [midRole._id],
       });
       midToken = jwt.sign(
@@ -598,6 +640,9 @@ describe('assignRoles 越权防护（M-01）', () => {
           username: 'sa_extra',
           email: 'extra@example.com',
           password: 'Test@1234567',
+          // 部门档管理员只能管同部门用户（rbac.isRecordInScope）：不给部门就等于
+          // 让范围闸先拒，本该被测的层级/权限闸根本走不到
+          department: SCOPE_DEPT,
           roles: [superRoleRef._id],
         });
 
@@ -637,6 +682,104 @@ describe('assignRoles 越权防护（M-01）', () => {
         const after = await Role.findById(superRoleRef._id).select('isBuiltIn');
         expect(after.isBuiltIn).toBe(true);
       });
+    });
+  });
+
+  describe('createUser 权限子集闸门（建号侧 P2-8：与 assignRoles 共用同一实现）', () => {
+    // 实测依据（2026-09-24 变异 MN）：把 `userController.js` 建号侧的
+    // `if (!operatorPermCodes.includes('*:*'))` 整段短路 ⇒ **全套 335 套件 / 3821 例
+    // 全绿**。也就是说这道"不得授予自身不持有的权限"的闸门，此前在全仓没有任何用例
+    // 经过它——assignRoles 侧有 4 条（本文件的 P2-8 与 B-2 两组），建号侧一条都没有。
+    // 而建号与分配角色是**同一件事的两个入口**：都能把带新权限的角色挂到账号上。
+    const ensurePermission = (code, name) =>
+      Permission.findOneAndUpdate(
+        { code },
+        { $setOnInsert: { name, code, type: 'api', module: 'system' } },
+        { upsert: true, new: true }
+      );
+
+    const makeOperator = async () => {
+      const createPerm = await ensurePermission('user:create', '建号');
+      const acctRole = await Role.create({
+        name: 'ZZQ 账号管理员',
+        code: 'ZZQODER_ACCT_ADMIN',
+        level: 7,
+        permissions: [createPerm._id],
+      });
+      const op = await User.create({
+        username: 'zzqoder_acct_op',
+        email: 'zzqoder_acct_op@example.com',
+        password: 'Test@1234567',
+        department: SCOPE_DEPT,
+        roles: [acctRole._id],
+      });
+      const token = jwt.sign(
+        { userId: String(op._id), username: 'zzqoder_acct_op', tokenVersion: 0 },
+        process.env.JWT_SECRET,
+        { expiresIn: '1h' }
+      );
+      return { token, createPerm };
+    };
+
+    afterEach(async () => {
+      await User.deleteMany({ username: /^zzqoder_/ });
+      await Role.deleteMany({ code: /^ZZQODER_/ });
+    });
+
+    test('挂一个"自身不持有其权限"的低层级角色：建号被拒且账号不落库', async () => {
+      const { token } = await makeOperator();
+      // 层级 3 < 操作者 7 ⇒ 层级闸放行；不是超管 ⇒ 超管闸放行；
+      // 唯一能拦住它的就是权限子集闸。
+      const configPerm = await ensurePermission('security:config', '安全配置');
+      const fatRole = await Role.create({
+        name: 'ZZQ 富权限角色',
+        code: 'ZZQODER_FAT_ROLE',
+        level: 3,
+        permissions: [configPerm._id],
+      });
+
+      const res = await request(app)
+        .post('/api/users')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          username: 'zzqoder_escalated',
+          email: 'zzqoder_escalated@example.com',
+          password: 'Vn6$Rw83pKx5',
+          department: SCOPE_DEPT,
+          roles: [String(fatRole._id)],
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.message).toContain('security:config');
+      expect(await User.findOne({ username: 'zzqoder_escalated' })).toBeNull();
+    });
+
+    // 对照组：闸门只拦"自身没有的权限"。删掉上一段代码它照样绿，
+    // 但它保证没人把建号闸改成"逢角色必拒"来糊弄那条 403。
+    test('挂一个权限全在自身集合内的角色仍放行（闸不误伤正常建号）', async () => {
+      const { token, createPerm } = await makeOperator();
+      const narrowRole = await Role.create({
+        name: 'ZZQ 窄权限角色',
+        code: 'ZZQODER_NARROW_ROLE',
+        level: 3,
+        permissions: [createPerm._id],
+      });
+
+      const res = await request(app)
+        .post('/api/users')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          username: 'zzqoder_normal',
+          email: 'zzqoder_normal@example.com',
+          password: 'Vn6$Rw83pKx5',
+          department: SCOPE_DEPT,
+          roles: [String(narrowRole._id)],
+        });
+
+      expect(res.status).toBe(201);
+      const created = await User.findOne({ username: 'zzqoder_normal' });
+      expect(created).not.toBeNull();
+      expect(created.roles.map(String)).toContain(String(narrowRole._id));
     });
   });
 });

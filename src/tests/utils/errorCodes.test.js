@@ -56,7 +56,7 @@ describe('errorCodes 注册表', () => {
     // 统一凭证码必须存在
     expect(ERROR_CODES.AUTH_INVALID_CREDENTIALS).toBeDefined();
 
-    // 【本轮改造：源码 grep → 真实登录行为】
+    // 【本次改动改造：源码 grep → 真实登录行为】
     // 原断言只 grep authService.js 源码里没有 `errorCodes.ACCOUNT_DISABLED` 之类的
     // 字面量。它拦不住真正的回归：只要换一种写法返回区分性码
     //（例如 `throw new AppError(ERROR_CODES[...])`、变量拼接、在 controller 层

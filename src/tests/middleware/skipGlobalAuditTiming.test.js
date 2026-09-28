@@ -30,7 +30,7 @@ const spyPush = jest.spyOn(auditBuffer, 'push');
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-/** 取本轮 push 调用中命中指定 path 的记录 */
+/** 取本次改动 push 调用中命中指定 path 的记录 */
 const pushedForPath = (fullPath) =>
   spyPush.mock.calls.map(([doc]) => doc).filter((doc) => doc && doc.path === fullPath);
 
@@ -234,7 +234,7 @@ describe('P1-33 锁定：queryScalarGuard 阻断 query 注入形态', () => {
   });
 
   test('真实 app 挂载守卫：移除 queryScalarGuard 即防线归零（用真实 400 判定）', async () => {
-    // 【本轮改造：源码正则 → 真实行为】原用例匹配 app.js 源码里
+    // 【本次改动改造：源码正则 → 真实行为】原用例匹配 app.js 源码里
     // `app.use('/api/', queryScalarGuard())` 这行文本——把挂载点放进永不执行的分支、
     // 或换成等价的运行时组装，源码文本仍在、断言照样绿。
     // 现直接对真实 app 发注入形态请求：若 guard 真的挂在 /api/ 上，

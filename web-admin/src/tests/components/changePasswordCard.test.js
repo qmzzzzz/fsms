@@ -204,4 +204,48 @@ describe('ChangePasswordCard 成功后行为', () => {
     // 组件若没清掉定时器，这里会变成 /login
     expect(router.options.history.location).toBe('/profile')
   })
+
+  test('连点/长按回车「修改密码」：并发只发一次改密请求（in-flight 守卫，防撞 5/15min 限流）', async () => {
+    encryptPassword.mockResolvedValue(null)
+    let resolveChange
+    changePassword.mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolveChange = () => r({ data: { success: true } })
+        })
+    )
+    const c = await open()
+    typeInto(c, 'currentPassword', 'OldPass_2026')
+    typeInto(c, 'newPassword', STRONG)
+    typeInto(c, 'confirmPassword', STRONG)
+    await flush(4)
+    submit(c)
+    submit(c) // 同一 tick 第二次触发：第一次仍在途，守卫必须拦下
+    await flush(8)
+    expect(changePassword).toHaveBeenCalledTimes(1)
+    resolveChange?.()
+    await flush(20)
+  })
+
+  test('改密成功后在 1.5s 登出窗口内卸载：就地 clearAuth（不留"看似已登录/token 全死"错乱态）', async () => {
+    encryptPassword.mockResolvedValue(null)
+    changePassword.mockResolvedValue({ data: { success: true } })
+    let store
+    const c = await open((pinia) => {
+      store = useAuthStore(pinia)
+      store.setAuth('t', 'r', { userId: 'u1', username: 'a' }, ['user:read'])
+    })
+    expect(store.currentUser).toBeTruthy()
+    typeInto(c, 'currentPassword', 'OldPass_2026')
+    typeInto(c, 'newPassword', STRONG)
+    typeInto(c, 'confirmPassword', STRONG)
+    await flush(4)
+    submit(c)
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '成功提示' })
+    await flush(10)
+    c.handle.unmount()
+    active = null
+    // 卸载即清认证态（后端已吊销全部 token）；旧实现只 clearTimeout → currentUser 仍残留
+    expect(store.currentUser).toBeNull()
+  })
 })

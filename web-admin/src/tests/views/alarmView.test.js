@@ -177,7 +177,7 @@ describe('AlarmView 列表渲染口径', () => {
       '烟雾报警',
       '张三',
       '待处理',
-      '指派处理处理完成操作',
+      '指派处理处理完成详情',
     ])
     // 时间不得是 ISO 原串（防退回 prop 直渲染 UTC）
     expect(cells(c)[0][1]).not.toContain('T')
@@ -334,12 +334,55 @@ describe('AlarmView 位置与类型显示口径', () => {
       '手动报警',
       '电话报告',
       '巡检发现',
-      '全部',
+      // other 曾渲染成「全部」：本视图并不存在「全部」这个类型，
+      // 该断言当时把缺陷钉成了期望值
+      '其他',
       '回退名',
     ])
     // 与词表取值一致：文案被改动时此断言与 i18n 同时暴露
     expect(i18n.global.t('dashboard.smokeAlarm')).toBe('烟雾报警')
     expect(i18n.global.t('dashboard.patrolFind')).toBe('巡检发现')
+  })
+
+  test('上报下拉框与列表词表同源：六项真实类型，无「全部」，选「其他」提交 other', async () => {
+    const c = await open([mkRow('tp1')])
+    report.mockResolvedValue({ data: { success: true } })
+    click(
+      c
+        .findAll('.glass-btn--danger')
+        .find((b) => b.textContent.includes(i18n.global.t('alarm.reportAlarm')))
+    )
+    await flush(14)
+    const loc = c
+      .findAll('.el-dialog input')
+      .find((i) => i.getAttribute('placeholder') === i18n.global.t('alarm.location'))
+    loc.value = 'A栋'
+    loc.dispatchEvent(new window.Event('input', { bubbles: true }))
+    const ta = c.find('.el-dialog textarea')
+    ta.value = '下拉框自检'
+    ta.dispatchEvent(new window.Event('input', { bubbles: true }))
+    click(c.find('.el-dialog .el-select'))
+    await flush(12)
+    // 页面上的分页第 N 页选择器同样把 el-select-dropdown 传送到 body，
+    // 因此先按内容锁定「含类型标签的那一个下拉」，再把判据打在它的选项上
+    const typeDropdown = Array.from(document.querySelectorAll('.el-select-dropdown')).find((d) =>
+      d.textContent.includes('烟雾报警')
+    )
+    expect(typeDropdown).toBeTruthy()
+    const items = Array.from(typeDropdown.querySelectorAll('.el-select-dropdown__item'))
+    const texts = items.map((o) => o.textContent.replace(/\s+/g, ' ').trim())
+    expect(texts).toEqual(['烟雾报警', '温度异常', '手动报警', '电话报告', '巡检发现', '其他'])
+    // 单项判据：'全部' 是本视图一个不存在的类型（列表列若渲染它即错），
+    // 而 common.all 在同页的筛选分段上确实存在且合法 —— 只禁下拉不禁页面
+    expect(texts).not.toContain('全部')
+    const otherOption = items.find((o) => o.textContent.replace(/\s+/g, ' ').trim() === '其他')
+    click(otherOption)
+    await flush(12)
+    click(dialogSubmit())
+    await waitFor(() => report.mock.calls.length === 1, { message: '上报请求' })
+    // 标签与取值必须成对：「其他」→ other（曾错标成「全部」，用户按字面选即误分类）
+    expect(report.mock.calls[0][0].alarmType).toBe('other')
+    expect(c.errors).toEqual([])
   })
 
   test('英文界面下列头、类型、状态、按钮全部走英文词表（无中文残留）', async () => {
@@ -358,7 +401,7 @@ describe('AlarmView 位置与类型显示口径', () => {
     const row = cells(c)[0]
     expect(row[3]).toBe('Smoke Alarm')
     expect(row[5]).toBe('Processing')
-    expect(row[6]).toBe('DispatchResolveAction')
+    expect(row[6]).toBe('DispatchResolveDetails')
     // 中文不得出现在英文界面（含列头与单元格）
     // 中文不得出现在列头/按钮（数据本身可以是中文姓名，不作断言）
     expect(
@@ -538,7 +581,7 @@ describe('AlarmView 统计卡与分段计数（loadStats 口径）', () => {
     expect(active.errors).toEqual([])
   })
 
-  test('统计接口失败：静默保留 0，不吞掉列表、不弹错、不抛 Vue 错误', async () => {
+  test('统计接口首屏失败：给出「加载失败 + 刷新」而不是四张 0 卡，不吞列表、不弹错', async () => {
     getList.mockResolvedValue({ data: { data: [mkRow('s1')], pagination: { total: 1 } } })
     getStats.mockRejectedValue(new Error('stats down'))
     active = mountComponent(AlarmView, {
@@ -546,15 +589,44 @@ describe('AlarmView 统计卡与分段计数（loadStats 口径）', () => {
     })
     await waitFor(() => cells(active).length === 1, { message: '列表不受统计失败影响' })
     await flush(10)
-    expect(active.findAll('.mini-stat .num').map((x) => x.textContent.trim())).toEqual([
-      '0',
-      '0',
-      '0',
-      '0',
-    ])
+    // 旧断言把 ['0','0','0','0'] 当成契约：首屏拿不到统计时，四张 0 卡读作
+    // 「今日无警情」，与「服务挂了」不可区分。失败态必须换掉整个数值区。
+    expect(active.findAll('.mini-stat .num')).toEqual([])
+    const failed = active.find('.stats-failed')
+    expect(failed.textContent).toContain('加载失败')
+    expect(failed.querySelector('button').textContent).toContain('刷新')
+    expect(cells(active)).toHaveLength(1)
     expect(ElMessage.error).not.toHaveBeenCalled()
     expect(ElMessage.warning).not.toHaveBeenCalled()
     expect(active.errors).toEqual([])
+  })
+
+  test('统计失败块里的刷新：真的重发统计请求，成功后四张卡回来', async () => {
+    getList.mockResolvedValue({ data: { data: [mkRow('s1')], pagination: { total: 1 } } })
+    getStats.mockRejectedValue(new Error('stats down'))
+    active = mountComponent(AlarmView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(ALL_PERMS),
+    })
+    await flush(10)
+    expect(active.find('.stats-failed').textContent).toContain('加载失败')
+    const callsBefore = getStats.mock.calls.length
+
+    getStats.mockResolvedValue({
+      data: { data: { byStatus: [{ _id: 'pending', count: 4 }], total: 12 } },
+    })
+    click(active.find('.stats-failed button'))
+    await waitFor(() => getStats.mock.calls.length === callsBefore + 1, {
+      message: '刷新按钮重发统计请求',
+    })
+    await flush(10)
+
+    expect(active.find('.stats-failed')).toBeFalsy()
+    expect(active.findAll('.mini-stat .num').map((x) => x.textContent.trim())).toEqual([
+      '4',
+      '0',
+      '0',
+      '12',
+    ])
   })
 })
 describe('AlarmView 加载失败与竞态', () => {
@@ -654,13 +726,13 @@ describe('AlarmView 加载失败与竞态', () => {
 })
 
 describe('AlarmView 权限门控（与后端 checkPermission 码逐一对应）', () => {
-  test('只读用户：无上报入口、行内只剩「操作」；派单/完成按钮不渲染', async () => {
+  test('只读用户：无上报入口、行内只剩「详情」；派单/完成按钮不渲染', async () => {
     const c = await open([mkRow('p1', { status: 'processing' })], { perms: ['alarm:read'] })
     expect(c.findAll('.table-toolbar .glass-btn--danger')).toEqual([])
-    // 只读用户行内只应有「操作」一个按钮（无权限的动作入口不得存在）
+    // 只读用户行内只应有「详情」一个按钮（无权限的动作入口不得存在）
     expect(
       Array.from(rowOf(c, 0).querySelectorAll('button')).map((b) => b.textContent.trim())
-    ).toEqual(['操作'])
+    ).toEqual(['详情'])
     expect(c.errors).toEqual([])
   })
 
@@ -669,17 +741,37 @@ describe('AlarmView 权限门控（与后端 checkPermission 码逐一对应）'
     const labels = Array.from(rowOf(c, 0).querySelectorAll('button')).map((b) =>
       b.textContent.trim()
     )
-    expect(labels).toEqual(['指派处理', '操作'])
+    expect(labels).toEqual(['指派处理', '详情'])
   })
 
-  test('alarm:handle 单权限：派单与完成都可见（hasAnyPerm 的 OR 语义，对应 PUT /arrive 与 /resolve）', async () => {
+  test('alarm:handle 单权限 + processing 行：派单（走 arrive）与完成都可见（processing→alarm:handle）', async () => {
     const c = await open([mkRow('p3', { status: 'processing' })], {
       perms: ['alarm:read', 'alarm:handle'],
     })
     const labels = Array.from(rowOf(c, 0).querySelectorAll('button')).map((b) =>
       b.textContent.trim()
     )
-    expect(labels).toEqual(['指派处理', '处理完成', '操作'])
+    expect(labels).toEqual(['指派处理', '处理完成', '详情'])
+  })
+
+  test('回归：pending 行 + 仅 alarm:handle（无 dispatch）→ 不渲染派单入口（点击会发 /dispatch→403）', async () => {
+    // hasAnyPerm(['alarm:dispatch','alarm:handle']) 的 OR 语义会在这里放行：消防员只有
+    // alarm:handle，却对 pending 行看到「指派处理」，点击 → handle() 走 dispatch 分支 → 403。
+    const c = await open([mkRow('g1', { status: 'pending' })], {
+      perms: ['alarm:read', 'alarm:handle'],
+    })
+    expect(rowBtn(c, 0, '指派处理')).toBeUndefined()
+    expect(c.errors).toEqual([])
+  })
+
+  test('回归：processing 行 + 仅 alarm:dispatch（无 handle）→ 不渲染派单入口（点击会发 /arrive→403）', async () => {
+    // 反方向：只有 alarm:dispatch 的调度员对 processing 行点「指派处理」，handle() 走 arrive
+    // 分支（需 alarm:handle）→ 403。新门控按状态与所需权限一一对应，此处入口应缺席。
+    const c = await open([mkRow('g2', { status: 'processing' })], {
+      perms: ['alarm:read', 'alarm:dispatch'],
+    })
+    expect(rowBtn(c, 0, '指派处理')).toBeUndefined()
+    expect(c.errors).toEqual([])
   })
 
   test('alarm:create 门控上报按钮（对应 POST /alarms/report）', async () => {
@@ -731,7 +823,7 @@ describe('AlarmView 行级动作：派单 / 到达现场', () => {
     await flush(6)
     expect(rowBtn(c, 0, '指派处理').disabled).toBe(true)
     // 详情按钮不受行锁约束（只读操作不该被禁用）
-    expect(rowBtn(c, 0, '操作').disabled).toBe(false)
+    expect(rowBtn(c, 0, '详情').disabled).toBe(false)
     release({ data: { success: true } })
     await waitFor(() => rowBtn(c, 0, '指派处理').disabled === false, { message: '完成后解锁' })
   })
@@ -759,16 +851,18 @@ describe('AlarmView 行级动作：派单 / 到达现场', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('已完成的行：点「指派处理」/「处理完成」都不发请求（服务端会 409，界面不该先给入口）', async () => {
+  test('已完成的行：不渲染「指派处理」入口（状态收敛门控），点「处理完成」只提示不发请求', async () => {
     const c = await open([mkRow('d6', { status: 'resolved' })])
-    click(rowBtn(c, 0, '指派处理'))
-    await flush(10)
-    expect(dispatch).not.toHaveBeenCalled()
-    expect(arrive).not.toHaveBeenCalled()
-    expect(confirm).not.toHaveBeenCalled()
+    // 新门控按状态与所需权限一一对应：resolved 既非 pending 也非 processing →
+    // 「指派处理」入口直接缺席（旧实现会渲染出来，点击后 handle() 早退、给不了任何反馈）。
+    expect(rowBtn(c, 0, '指派处理')).toBeUndefined()
+    // 「处理完成」仍按 alarm:handle 显示；resolve() 对非 processing 行只给前置条件说明、不发请求
     click(rowBtn(c, 0, '处理完成'))
     await flush(10)
     expect(resolveAlarm).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(arrive).not.toHaveBeenCalled()
+    expect(confirm).not.toHaveBeenCalled()
     // 只有状态说明提示，且文案指向真实前置条件
     expect(ElMessage.warning).toHaveBeenCalledWith(i18n.global.t('alarm.resolveRequiresProcessing'))
     expect(c.errors).toEqual([])
@@ -932,7 +1026,7 @@ describe('AlarmView 行级动作：处理完成（双确认 + 原因单选）', 
   })
 })
 describe('AlarmView 详情弹窗', () => {
-  test('「操作」按钮展示五要素文本（类型/位置/处理人/状态/发生时间），位置为拼装后的文本', async () => {
+  test('「详情」按钮展示五要素文本（类型/位置/处理人/状态/发生时间），位置为拼装后的文本', async () => {
     const iso = '2026-10-01T01:00:00.000Z'
     const c = await open([
       mkRow('v1', {
@@ -944,7 +1038,7 @@ describe('AlarmView 详情弹窗', () => {
       }),
     ])
     alert.mockResolvedValue('confirm')
-    click(rowBtn(c, 0, '操作'))
+    click(rowBtn(c, 0, '详情'))
     await waitFor(() => alert.mock.calls.length === 1, { message: '详情弹窗弹出' })
     expect(alert.mock.calls[0][0]).toBe(
       [
@@ -965,7 +1059,7 @@ describe('AlarmView 详情弹窗', () => {
       mkRow('v2', { occurredAt: null, alarmType: undefined, type: undefined, handler: null }),
     ])
     alert.mockResolvedValue('confirm')
-    click(rowBtn(c, 0, '操作'))
+    click(rowBtn(c, 0, '详情'))
     await waitFor(() => alert.mock.calls.length === 1, { message: '详情弹窗弹出' })
     const text = alert.mock.calls[0][0]
     expect(text).not.toContain('undefined')

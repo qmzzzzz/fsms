@@ -279,6 +279,25 @@ describe('A. 守卫决策表', () => {
 })
 
 describe('B. 真实导航（守卫 + 路由表 + 重定向链的联合行为）', () => {
+  /**
+   * 每条用例前把单例复位到 /register。
+   *
+   * 为什么必须复位：本组走真 `router.push`，而 vue-router 对「目标等于当前路由」的导航
+   * 按重复处理、**不执行守卫**。`@/router` 是模块级单例，上一条用例停在哪条路由上就成了
+   * 下一条用例的隐含前提——例如「未登录访问受保护页」以 /login 收尾，紧跟其后的
+   * 「已登录访问 /login」push 的就是同一条路径，守卫那条「已登录访问 /login 踢回首页」
+   * 的分支根本不执行，settle 等不到 /dashboard 而超时。默认顺序恰好避开了这些碰撞，
+   * `--sequence.shuffle` 一到就随机红（2026-09-19 实证）。
+   *
+   * 选 /register 作起点：它是 `requiresAuth: false` 的公开路由（router/index.js:18-21，
+   * 复位导航不会被守卫改写到别处），且不是本组任何用例的 push 目标或断言终点，
+   * 因此对每条用例都保证「起点 ≠ 目标」。
+   */
+  beforeEach(async () => {
+    await router.replace('/register').catch(() => {})
+    await settle(() => router.currentRoute.value.path === '/register', '复位起点 /register')
+  })
+
   test('未登录访问受保护页：最终落在 /login，且导航不抛错', async () => {
     const errors = await push('/users')
     await settle(() => router.currentRoute.value.path === '/login', '等 /login')

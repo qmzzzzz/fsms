@@ -325,7 +325,7 @@ describe('审计日志合规化', () => {
       expect(canonicalPayload({ ...doc, description: '改了' }, 4)).not.toBe(
         canonicalPayload(doc, 4)
       );
-      // 反过来：v3 口径对 description 的变化无感，这正是 F-04 的成因
+      // 反过来：v3 口径对 description 的变化无感，这正是 的成因
       expect(canonicalPayload({ ...doc, description: '改了' }, 3)).toBe(canonicalPayload(doc, 3));
     });
 
@@ -376,7 +376,7 @@ describe('审计日志合规化', () => {
       expect(stored[2].prevHash).toBe(stored[1].hash);
     });
 
-    // F-04 的直接回归：targetType/targetId/dataType/description 曾只在 schema 里、
+    // 的直接回归：targetType/targetId/dataType/description 曾只在 schema 里、
     // 不在 payload 白名单里——落库后经驱动改掉其中一个，三层校验一层都不会红。
     // 这四字段承载的恰是取证要看的信息（谁举报了谁、看了哪类敏感数据、做了什么）。
     test('新写入（v4）改写 description 后必须失配（绕过中间件直连驱动改库）', async () => {
@@ -410,9 +410,18 @@ describe('审计日志合规化', () => {
       const recomputed = computeHash(after.prevHash, canonicalPayload(after, after.hashVersion));
       expect(recomputed).not.toBe(after.hash);
 
+      // 「恰好一处失配」必须在**只含自己那条**的口径上断言：全窗 500 条里还有同一次运行中
+      // 别的套件写入的故意断裂记录，绝对计数等于对"此刻共享集合里还剩谁"下结论（跨套件污染，
+      // handoff §31.4 定性的同一根因）。归因到本条的精确性由 filter 给，全窗只留"没把它丢掉"。
+      const scoped = await verifyAuditChain(AuditLog, { filter: { _id: doc._id } });
+      expect(scoped.total).toBe(1);
+      expect(scoped.intact).toBe(false);
+      expect(scoped.byType.hash_mismatch).toBe(1);
+
       const report = await verifyAuditChain(AuditLog, { maxRecords: 500 });
       expect(report.intact).toBe(false);
-      expect(report.byType.hash_mismatch).toBe(1);
+      // samples 有 MAX_SAMPLES=20 的上限：这一条断的是"本条在被报出的样本里"，
+      // 若共享集合攒出 20 处以上断裂它可能因截断而假红——那是一次响亮的红，不是假绿，可接受。
       expect(report.samples.map((s) => String(s._id))).toContain(String(doc._id));
     });
   });
@@ -810,6 +819,16 @@ describe('审计日志合规化', () => {
       expect(exposed.hmac).toBeUndefined();
       expect(exposed.hash).toBe(raw.hash);
       expect(exposed.prevHash).toBe(raw.prevHash);
+    });
+
+    test('xlsx 审计导出的投影就是这份清单（不得另写一份）', () => {
+      // 报表导出是全仓唯一一条"批量读审计"的自建查询（EXPORT_MODEL_CONFIG.audit.select），
+      // 它原先硬编码 '-body -params -query'，比这份清单少一个 -hmac ⇒ 排除控制点被复制成两份
+      // 且已经漂了。等值断言让任一侧单独增删字段都立刻红（清单演进时导出必须自动跟随）。
+      const { EXPORT_MODEL_CONFIG } = require('../../services/reportExportService');
+      expect(EXPORT_MODEL_CONFIG.audit.model).toBe(AuditLog);
+      expect(EXPORT_MODEL_CONFIG.audit.select).toBe(AuditLog.RESPONSE_EXCLUDE);
+      expect(EXPORT_MODEL_CONFIG.audit.select.split(/\s+/)).toContain('-hmac');
     });
   });
 });

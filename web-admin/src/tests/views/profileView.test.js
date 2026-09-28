@@ -3,9 +3,14 @@
  *
  * 组件定位：登录后用户改自己的资料。三类真实退化都不会报错、只会「看起来正常」：
  *  1. 保存时把只读字段（username/roles）一并发给后端 → 后端 400 或静默忽略，
- *     用户以为改了；且**空值必须以 undefined 剔除**，不能发空串覆盖已有值。
- *  2. 保存成功后不更新本地 user 与 store → 左侧卡片与「重置」按钮仍显示旧值，
- *     用户会以为没保存成功。
+ *     用户以为改了。而"空值怎么发"必须逐字段按 schema 判，不能一刀切：
+ *       - phone：User.phone 的校验器明确允许 ''（清空手机号是合法操作）⇒ 空串要真的送出去
+ *       - email：required + unique ⇒ 清空根本无法表达 ⇒ 由必填规则在请求之前拦下
+ *     两侧都写 `form.x || undefined` 的旧实现下，"清空邮箱"表现为一次假保存：
+ *     界面立刻空了，后端按"未提供"保持旧值，刷新后旧邮箱又冒出来。
+ *  2. 保存成功后不更新本地 user 与 store → 左侧卡片与「重置」按钮仍显示旧值；
+ *     但也不能反向写表单值：后端会规范化（邮箱小写落库）也可能不采纳，
+ *     本地态的唯一来源是服务端回包里的 profile。
  *  3. 重置按钮必须回填**当前 user**，而不是回到挂载时的快照（同会话内保存过两次
  *     就会把第二次的修改回滚掉）。
  */
@@ -44,6 +49,27 @@ const ME = {
   roles: [{ name: 'Operator' }],
   createdAt: '2026-01-01T00:00:00.000Z',
 }
+
+/**
+ * 真实控制器在 OK 分支返回 ApiResponse.success(res, result.profile)，
+ * 即 data.data 只有这 7 个自助字段；测试保持同形，免得把"回包里其实有 roles"
+ * 这种幻觉当成前提。
+ */
+const okProfile = (overrides = {}) => ({
+  data: {
+    success: true,
+    data: {
+      userId: ME._id,
+      username: ME.username,
+      realName: ME.realName,
+      email: ME.email,
+      phone: ME.phone,
+      department: ME.department,
+      avatar: ME.avatar,
+      ...overrides,
+    },
+  },
+})
 
 const open = async (me = ME) => {
   getMe.mockResolvedValue({ data: { success: true, data: { user: { ...me } } } })
@@ -126,36 +152,60 @@ describe('ProfileView 保存载荷', () => {
     click(saveBtn(c))
     await waitFor(() => updateProfile.mock.calls.length === 1, { message: '保存请求发出' })
     const payload = updateProfile.mock.calls[0][0]
-    expect(Object.keys(payload).sort()).toEqual(['department', 'email', 'phone', 'realName'])
+    // 仅可自助字段；department 是 H-01 数据范围字段、后端 updateUserProfile 忽略，故不得进入载荷
+    expect(Object.keys(payload).sort()).toEqual(['email', 'phone', 'realName'])
+    expect(payload.department).toBeUndefined()
     expect(payload.username).toBeUndefined()
     expect(payload._id).toBeUndefined()
     expect(payload.roles).toBeUndefined()
   })
 
-  test('清空可选字段：以 undefined 剔除，不得用空串覆盖后端已有值', async () => {
-    updateProfile.mockResolvedValue({ data: { success: true } })
+  // 邮箱与手机号的"清空"语义相反，判据在 schema 上：
+  //   email  required + unique ⇒ 库里永远非空，清空根本不可表达
+  //   phone  校验器明确允许 ''（"清空手机号是合法操作"）⇒ 清空必须能表达
+  // 旧实现两侧都写 `form.x || undefined`，于是清空邮箱表现为一次假保存：
+  // 界面立刻空了、后端按"未提供"保持旧值、刷新后旧邮箱又冒出来。
+  test('清空邮箱：必填规则拦在请求之前（不得发出一次不会生效的假保存）', async () => {
+    updateProfile.mockResolvedValue(okProfile())
     const c = await open()
     await setInput(inputByLabel(c, '邮箱'), '')
+    click(saveBtn(c))
+    await flush(40)
+    expect(updateProfile).not.toHaveBeenCalled()
+    // 红字文本经 EP 的 refDebounced(validateState, 100) 防抖（@vueuse 真实定时器，
+    // 微任务 flush / waitFor 的 nextTick 都推不动它），is-error 类才是同步的。
+    // 两者都要：类证明"确有字段被判失败"，文本证明失败来自必填规则而不是
+    // `{type:'email'}` 那条——只看类的话，把必填换成格式校验也照样绿。
+    const emailItem = c
+      .findAll('.el-form-item')
+      .find((it) => it.querySelector('.el-form-item__label')?.textContent.includes('邮箱'))
+    expect(emailItem.className).toContain('is-error')
+    await new Promise((r) => setTimeout(r, 160))
+    const errors = Array.from(document.querySelectorAll('.el-form-item__error')).map((x) =>
+      x.textContent.trim()
+    )
+    expect(errors).toContain(i18n.global.t('validation.emailRequired'))
+  })
+
+  test('清空手机号：以空串提交（送 undefined 会被后端当成"不改"）', async () => {
+    updateProfile.mockResolvedValue(okProfile({ phone: '' }))
+    const c = await open()
     await setInput(inputByLabel(c, '手机'), '')
     click(saveBtn(c))
     await waitFor(() => updateProfile.mock.calls.length === 1, { message: '保存请求发出' })
-    const payload = updateProfile.mock.calls[0][0]
-    expect(payload.email).toBeUndefined()
-    expect(payload.phone).toBeUndefined()
-    expect(payload.email).not.toBe('')
-    expect(payload.phone).not.toBe('')
+    expect(updateProfile.mock.calls[0][0].phone).toBe('')
   })
 
-  test('保存的值是用户实际输入（不是初始回填值）', async () => {
+  test('保存的值是用户实际输入（不是初始回填值）；部门不可自助改、不进载荷', async () => {
     updateProfile.mockResolvedValue({ data: { success: true } })
     const c = await open()
     await setInput(inputByLabel(c, '姓名'), '鲍勃')
-    await setInput(inputByLabel(c, '部门'), '运维部')
     click(saveBtn(c))
     await waitFor(() => updateProfile.mock.calls.length === 1, { message: '保存请求发出' })
     const payload = updateProfile.mock.calls[0][0]
     expect(payload.realName).toBe('鲍勃')
-    expect(payload.department).toBe('运维部')
+    // department 是数据范围字段（H-01），ProfileView 不再提供可编辑项，也不得出现在请求体中
+    expect(payload.department).toBeUndefined()
   })
 
   test('手机号格式非法：不提交（校验拦在请求之前）', async () => {
@@ -170,7 +220,7 @@ describe('ProfileView 保存载荷', () => {
 
 describe('ProfileView 保存后的本地同步', () => {
   test('保存成功：更新 store 与界面（左侧卡片跟随新值）', async () => {
-    updateProfile.mockResolvedValue({ data: { success: true } })
+    updateProfile.mockResolvedValue(okProfile({ realName: '新名字' }))
     const c = await open()
     await setInput(inputByLabel(c, '姓名'), '新名字')
     click(saveBtn(c))
@@ -184,7 +234,7 @@ describe('ProfileView 保存后的本地同步', () => {
   })
 
   test('重置按钮回到当前 user（保存后的值），而不是挂载时的旧快照', async () => {
-    updateProfile.mockResolvedValue({ data: { success: true } })
+    updateProfile.mockResolvedValue(okProfile({ realName: '第一改' }))
     const c = await open()
     await setInput(inputByLabel(c, '姓名'), '第一改')
     click(saveBtn(c))
@@ -196,6 +246,27 @@ describe('ProfileView 保存后的本地同步', () => {
     click(resetBtn)
     await flush(6)
     expect(inputByLabel(c, '姓名').value).toBe('第一改')
+  })
+
+  // 本地态的来源必须是服务端回包。写表单值会造出"界面上有一个数据库里不存在的东西"：
+  // User.email 带 lowercase setter，落库形态与提交形态可以不同；被白名单挡下的字段
+  // 更不会因提交而改变。回包里只有 7 个自助字段，合并（而非整体替换）才不弄丢 roles/_id。
+  test('本地态取服务端回包而不是表单值；未回包的字段不得被顺手丢掉', async () => {
+    updateProfile.mockResolvedValue(okProfile({ email: 'alice@example.com', realName: '新名字' }))
+    const c = await open()
+    await setInput(inputByLabel(c, '邮箱'), 'ALICE@EXAMPLE.COM')
+    click(saveBtn(c))
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '成功提示' })
+    const auth = useAuthStore(c.pinia)
+    // 载荷送的是用户输入的形态（规范化归后端），本地态收的是回包形态
+    expect(updateProfile.mock.calls[0][0].email).toBe('ALICE@EXAMPLE.COM')
+    expect(auth.currentUser.email).toBe('alice@example.com')
+    // 用户没改的字段也按回包走（回包里有 realName，示例中已被后端改写）
+    expect(auth.currentUser.realName).toBe('新名字')
+    // 回包不含的字段必须原样留住：整体替换会把 roles/_id 洗掉，菜单与权限随即消失
+    expect(auth.currentUser._id).toBe('u1')
+    expect(auth.currentUser.roles).toEqual([{ name: 'Operator' }])
+    expect(c.errors).toEqual([])
   })
 })
 

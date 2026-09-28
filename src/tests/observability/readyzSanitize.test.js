@@ -121,6 +121,28 @@ describe('M-1 /readyz 错误信息脱敏（checkMongoReady reason 枚举）', ()
       spy.mockRestore();
     });
 
+    // F-114：空串/纯空白不能等价于"故意关缓存"。Number('') === 0，而 0 在本模块是合法语义，
+    // 所以判据必须把"没配"和"配了 0"分开——否则 k8s 里一个留空的 value: 就把 S-M1 防护抹掉了。
+    test.each([
+      ['空串（k8s `value:` 留空 / .env `READYZ_CACHE_MS=`）', ''],
+      ['纯空白', '   '],
+    ])('READYZ_CACHE_MS=%s 仍走默认 TTL：缓存不失效', async (_label, raw) => {
+      process.env.READYZ_CACHE_MS = raw;
+      const spy = jest
+        .spyOn(mongoose.connection.db, 'admin')
+        .mockReturnValue({ ping: () => Promise.resolve({ ok: 1 }) });
+
+      await checkMongoReady();
+      await checkMongoReady();
+      await checkMongoReady();
+
+      // 先取轮次再恢复：mockRestore() 若留在 expect 之后，本用例失败时被 mock 的 admin
+      // 会泄漏给下一条用例（邻居看到的 ping 永远"成功"，红会串到不相干的用例身上）
+      const pingRounds = spy.mock.calls.length;
+      spy.mockRestore();
+      expect(pingRounds).toBe(1);
+    });
+
     test('失败结果同样进缓存（DB 悬挂期高频探测不放大为逐请求 ping）', async () => {
       process.env.READYZ_CACHE_MS = '5000';
       const pingSpy = jest

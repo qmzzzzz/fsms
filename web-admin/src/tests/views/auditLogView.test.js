@@ -559,7 +559,12 @@ describe('AuditLogView 导出', () => {
     }
   })
 
-  test('导出截断提示：响应头 X-Export-Truncated 存在时向用户提示', async () => {
+  // 后端在这条头上只发字面 'true'（reportWorkbookService 的 TRUNCATION_HEADER），
+  // 头的作用是表态"这份不保证完整"，说人话属于展示层。本用例此前喂的是
+  // '已达上限，结果被截断' 这种后端从不发的值，而实现直接把响应头当文案弹出 ——
+  // 于是真实链路上用户看到的是 "true"，用例却一路判绿。
+  // 现在喂契约里的真值，并断言弹的是词表文案、且不是响应头本身。
+  test('导出截断提示：响应头 X-Export-Truncated（字面 true）翻译成人话再弹', async () => {
     const realCreateURL = window.URL.createObjectURL
     const realRevokeURL = window.URL.revokeObjectURL
     const realAnchorClick = window.HTMLAnchorElement.prototype.click
@@ -575,7 +580,7 @@ describe('AuditLogView 导出', () => {
         if (url === '/reports/export') {
           return Promise.resolve({
             data: new Blob(['PK'], { type: XLSX }),
-            headers: { 'content-type': XLSX, 'x-export-truncated': '已达上限，结果被截断' },
+            headers: { 'content-type': XLSX, 'x-export-truncated': 'true' },
           })
         }
         return Promise.reject(new Error('unexpected url: ' + url))
@@ -584,7 +589,15 @@ describe('AuditLogView 导出', () => {
       await waitFor(() => logCalls().length >= 1, { message: '列表请求' })
       click(c.find('.card-header .glass-btn'))
       await waitFor(() => ElMessage.warning.mock.calls.length === 1, { message: '截断提示' })
-      expect(ElMessage.warning).toHaveBeenCalledWith('已达上限，结果被截断')
+      const shown = ElMessage.warning.mock.calls[0][0]
+      expect(shown).not.toBe('true')
+      expect(shown).not.toBe('已达上限，结果被截断')
+      // 前提自证：键必须真的在词表里（缺键时 vue-i18n 回落成键名字符串，
+      // 下一条 toBe(t(...)) 会两边同时回落而恒真）
+      expect(i18n.global.te('messages.exportTruncated')).toBe(true)
+      expect(shown).toBe(i18n.global.t('messages.exportTruncated'))
+      expect(typeof shown).toBe('string')
+      expect(shown.length).toBeGreaterThan(10)
       expect(ElMessage.success).toHaveBeenCalledTimes(1)
       expect(ElMessage.error).not.toHaveBeenCalled()
     } finally {

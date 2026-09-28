@@ -12,13 +12,20 @@ jest.mock('../../models/User', () => ({
 jest.mock('../../models/AuditLog', () => ({
   record: jest.fn(() => Promise.resolve()),
 }));
-jest.mock('../../services/mfaService', () => ({
-  hashRecoveryCode: jest.fn((code) => `hash:${code}`),
-  generateRecoveryCodes: jest.fn(),
-  isMfaLocked: jest.fn(),
-  recordMfaFailure: jest.fn(),
-  resetMfaFailures: jest.fn(),
-}));
+jest.mock('../../services/mfaService', () => {
+  // 纯函数（因子路径判定、TOTP 因子验证）走真实实现：在测试里再手写一遍判定，
+  // 就是"两份口径靠注释保持一致"的老毛病；被断言的行为仍由下面的 spy 控制。
+  const actual = jest.requireActual('../../services/mfaService');
+  return {
+    ...actual,
+    hashRecoveryCode: jest.fn((code) => `hash:${code}`),
+    generateRecoveryCodes: jest.fn(),
+    isMfaLocked: jest.fn(),
+    recordMfaFailure: jest.fn(),
+    resetMfaFailures: jest.fn(),
+    claimTotpWindow: jest.fn(async () => true),
+  };
+});
 jest.mock('../../utils/loginCipher', () => ({
   decryptLoginCredential: jest.fn(),
 }));

@@ -29,6 +29,31 @@ import { mountComponent, click, flush, waitFor } from '../helpers/componentHarne
 import { SessionItemSchema, SessionListResponseSchema } from '@/schemas'
 import i18n from '@/i18n'
 
+/**
+ * 全文件级的用例隔离。两件事都必须在这里做，因为它们都是**跨 describe 共享**的状态：
+ *
+ * 1. 卸载实例：ProfileView 会连带渲染 <SessionManager />（其 onMounted 打 listSessions），
+ *    而下面两个 ProfileView 用例原本不卸载，残留实例会继续参与 DOM 查询与请求。
+ * 2. 归零共享 mock 的**调用计数**：`listSessions` 等是模块级 vi.fn()，被本文件三个 describe
+ *    共用，但只有后两个 describe 自带 afterEach 做 reset。于是不 reset 的那个 describe 一旦
+ *    排在前面，它的调用次数就会带进下一个用例——`:699` 断言的是 `calls.length === 2`
+ *    （本用例发了 1 次 + 重新拉取 1 次），被带成 3 就永远等不到，报
+ *    「waitFor 超时：重新拉取列表」。默认顺序恰好把那个 describe 排在后面所以一直侥幸绿，
+ *    `--sequence.shuffle` 一到就红。
+ */
+const tracked = []
+const track = (c) => {
+  tracked.push(c)
+  return c
+}
+afterEach(() => {
+  while (tracked.length) tracked.shift()?.handle?.unmount()
+  listSessions.mockReset()
+  getMe.mockReset()
+  api.auth.revokeSession.mockReset()
+  api.auth.revokeOtherSessions.mockReset()
+})
+
 const listSessions = vi.fn()
 const getMe = vi.fn()
 vi.mock('@/utils/api', () => ({
@@ -305,11 +330,13 @@ describe('ProfileView 挂载登录会话卡片（真实渲染）', () => {
     listSessions.mockResolvedValue({
       data: { data: { sessions: [], currentSidPresent: true } },
     })
-    const c = mountComponent(ProfileView, {
-      setupStore: (pinia) => {
-        useAuthStore(pinia).setCurrentUser({ ...PROFILE_ME })
-      },
-    })
+    const c = track(
+      mountComponent(ProfileView, {
+        setupStore: (pinia) => {
+          useAuthStore(pinia).setCurrentUser({ ...PROFILE_ME })
+        },
+      })
+    )
     await waitFor(() => c.text().includes(PROFILE_ME.realName), { message: '资料加载完成' })
     await flush(20)
 
@@ -358,11 +385,13 @@ describe('ProfileView 两栏布局（真实渲染的栅格类）', () => {
   const renderProfile = async () => {
     getMe.mockResolvedValue({ data: { success: true, data: { user: { ...PROFILE_ME } } } })
     listSessions.mockResolvedValue({ data: { data: { sessions: [], currentSidPresent: true } } })
-    const c = mountComponent(ProfileView, {
-      setupStore: (pinia) => {
-        useAuthStore(pinia).setCurrentUser({ ...PROFILE_ME })
-      },
-    })
+    const c = track(
+      mountComponent(ProfileView, {
+        setupStore: (pinia) => {
+          useAuthStore(pinia).setCurrentUser({ ...PROFILE_ME })
+        },
+      })
+    )
     await waitFor(() => c.text().includes(PROFILE_ME.realName), { message: '资料加载完成' })
     await flush(20)
     return c

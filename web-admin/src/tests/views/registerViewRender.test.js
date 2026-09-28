@@ -203,6 +203,31 @@ describe('RegisterView 分步向导', () => {
   })
 })
 
+// 回归：rules 依赖 t() 随语言重建，EP 默认 validate-on-rule-change=true 会把
+// 「规则对象变化」当成重新校验信号——切换语言时未碰过的空表单曾立刻冒出
+// required 红错（与 LoginView 同源，注册页同样踩中）。模板已显式
+// :validate-on-rule-change="false"，此用例钉住该行为不得退化
+// （反向验证：去掉该 prop，本用例必红）。
+test('切换语言不得在空表单上触发校验红错（validate-on-rule-change=false）', async () => {
+  const c = await open()
+  const i18n = (await import('@/i18n')).default
+  const errorTexts = () =>
+    c
+      .findAll('.el-form-item__error')
+      .map((el) => el.textContent.trim())
+      .filter(Boolean)
+  // 前提：空表单本来就无任何错误态，否则用例本身不成立
+  expect(errCount(c)).toBe(0)
+  expect(errorTexts()).toEqual([])
+  i18n.global.locale.value = 'en-US'
+  await flush(40)
+  // 三步字段全部挂载（v-show 切换，非 v-if），任一步冒出红错都算退化
+  expect(errorTexts()).toEqual([])
+  expect(errCount(c)).toBe(0)
+  i18n.global.locale.value = 'zh-CN'
+  expect(c.errors).toEqual([])
+})
+
 describe('RegisterView 提交载荷与失败处理', () => {
   test('注册成功：通知 + 跳转 /login', async () => {
     register.mockResolvedValue({ data: { success: true } })
@@ -283,6 +308,26 @@ describe('RegisterView 提交载荷与失败处理', () => {
     click(submit)
     await flush(80)
     expect(register.mock.calls.length).toBe(1)
+    expect(c.errors).toEqual([])
+  })
+
+  test('验证码刷新失败：清空陈旧图与 captchaId，落到可重试占位（与 LoginView 同口径）', async () => {
+    // 一次性消费语义：刷新失败若不清空，会留着「上一次提交已消费掉的旧 captchaId + 旧图」，
+    // 用户对着陈旧图重填 → captchaId 仍是消费的旧值 → 每次提交都失败且无提示 = 静默锁死。
+    getCaptcha.mockResolvedValueOnce({
+      data: { success: true, data: { captchaId: 'A', svg: 'X' } },
+    })
+    const c = await open({ captchaEnabled: true })
+    await flush(10)
+    // 首拉成功：渲染真实验证码 <img>
+    expect(c.findAll('img.register-card__captcha-img').length).toBe(1)
+    // 点击图片刷新，但本次拉取失败
+    getCaptcha.mockRejectedValueOnce(new Error('network down'))
+    click(c.findAll('img.register-card__captcha-img')[0])
+    await flush(20)
+    // 陈旧图必须被撤下（v-if 移除 <img>），露出「点击重试」占位——自愈路径而非死锁
+    expect(c.findAll('img.register-card__captcha-img').length).toBe(0)
+    expect(c.findAll('.register-card__captcha-placeholder').length).toBe(1)
     expect(c.errors).toEqual([])
   })
 

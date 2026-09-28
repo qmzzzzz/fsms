@@ -1,7 +1,7 @@
 /**
  * 权限热生效（免重登）后端侧测试
  *
- * 背景缺陷（本轮实测发现，此前无人上报）：
+ * 背景缺陷（本次改动实测发现，此前无人上报）：
  *  1. roleController.emitWebSocketEvent 接收 eventType 却从不使用，
  *     一律转发 emitRoleUpdate —— 前端 'permissions-updated' 监听从未触发；
  *  2. websocketService.emitPermissionUpdate 发的是单数 'permission-updated'，

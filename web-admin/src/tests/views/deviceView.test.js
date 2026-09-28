@@ -305,6 +305,99 @@ describe('DeviceView 编辑', () => {
     expect(payload.installDate).toBe('2026-01-05')
     expect(c.errors).toEqual([])
   })
+
+  test('编辑保存保留 location.detail 且不把它误并入 room（P3 数据完整性回归）', async () => {
+    // 后端 FireDevice.location.detail 是真实字段。旧 handleEdit 做了
+    // `room = location.room || location.detail`，且 submitForm 重建 location 时丢掉 detail
+    // → 编辑一台只有 detail（room 空）的设备，保存后 detail 被搬到 room 且原值消失。
+    update.mockResolvedValue({ data: { success: true } })
+    const row = {
+      ...ROW,
+      location: { building: 'A栋', floor: '1', room: '', detail: '靠东侧消防箱内' },
+    }
+    const c = await open(FULL, [row])
+    await openDialog(c, '编辑')
+    const submit = dlgFootBtn('保存')
+    click(submit)
+    await waitFor(() => update.mock.calls.length === 1, { message: '更新请求发出' })
+    const { location } = update.mock.calls[0][1]
+    expect(location.detail).toBe('靠东侧消防箱内') // 原样保留
+    expect(location.room).toBe('') // 未被 detail 污染
+    expect(c.errors).toEqual([])
+  })
+
+  test('编辑保存只发表单维护的 4 个 location 键（表单不碰的键交给服务端）', async () => {
+    // DeviceService.updateDevice 对 location 按子字段合并，"没发的键保持原值"，
+    // 所以前端不再需要回传整块 location 来保护 API/导入写入的 coordinates.{lat,lng}
+    // ——该存活语义由 src/tests/services/deviceLocationMerge.test.js 钉住。
+    // 这里钉的是另一半：载荷不得越界携带表单不维护的键。回传底一旦回来，它就变成
+    // "以打开对话框那一刻的快照覆盖别人在此期间改过的子字段"（后写覆盖先写）。
+    update.mockResolvedValue({ data: { success: true } })
+    const row = {
+      ...ROW,
+      location: {
+        building: 'A栋',
+        floor: '1',
+        room: '101',
+        coordinates: { lat: 31.2, lng: 121.4 },
+      },
+    }
+    const c = await open(FULL, [row])
+    await openDialog(c, '编辑')
+    click(dlgFootBtn('保存'))
+    await waitFor(() => update.mock.calls.length === 1, { message: '更新请求发出' })
+    const { location } = update.mock.calls[0][1]
+    expect(Object.keys(location).sort()).toEqual(['building', 'detail', 'floor', 'room'])
+    expect(location.building).toBe('A栋') // 可编辑字段取自表单回填值
+    expect(c.errors).toEqual([])
+  })
+
+  test('location 的 4 个键必须都是字符串：清空靠空串上线，靠 undefined 会被传输层吃掉', async () => {
+    // 合并语义下"缺键＝不改动"，而 `JSON.stringify` 恰好会丢掉值为 undefined 的键 ⇒
+    // 把清空写成 `|| undefined`，服务端读到的是"没提这个字段"，旧值原样躺着。
+    // 本仓在 PUT /api/auth/profile 上踩过同一个坑（见
+    // src/tests/routes/profileFieldClearability.test.js：空串才是合法清空指令）。
+    // room 是有输入框的那一格：删空提交即本用例的载荷形态。detail 目前没有输入框，
+    // 表单值恒为回填值（库里没有就是 ''），它必须与另外三格同形，否则一旦补上输入框，
+    // "清空详细位置"又是一个表达不出来的动作。
+    update.mockResolvedValue({ data: { success: true } })
+    const row = { ...ROW, location: { building: 'A栋', floor: '1', room: '101' } }
+    const c = await open(FULL, [row])
+    const d = await openDialog(c, '编辑')
+    typeInto(d.querySelector('input[placeholder="房间"]'), '') // 用户删空房间
+    await flush(3)
+    click(dlgFootBtn('保存'))
+    await waitFor(() => update.mock.calls.length === 1, { message: '更新请求发出' })
+    const { location } = update.mock.calls[0][1]
+    // 逐键过一遍真实序列化：任何一键是 undefined 都会在这里消失，清空就表达不出来
+    const onTheWire = JSON.parse(JSON.stringify({ location })).location
+    expect(Object.keys(onTheWire).sort()).toEqual(['building', 'detail', 'floor', 'room'])
+    expect(onTheWire.room).toBe('') // 删空的格子以空串上线，而不是蒸发成"没提这个字段"
+    expect(onTheWire.detail).toBe('')
+    expect(c.errors).toEqual([])
+  })
+
+  test('编辑保存：清空检查周期后载荷为 undefined（null 会触发后端 .optional().isInt 400）', async () => {
+    update.mockResolvedValue({ data: { success: true } })
+    const c = await open(FULL, [{ ...ROW, checkCycle: 45 }])
+    const d = await openDialog(c, '编辑')
+    const numInput = d.querySelector('.el-input-number input')
+    expect(numInput).toBeTruthy()
+    expect(numInput.value).toBe('45')
+    // 清空 el-input-number：valueOnClear 默认 null → 触发 change 后 v-model 变 null
+    numInput.value = ''
+    numInput.dispatchEvent(new window.Event('input', { bubbles: true }))
+    numInput.dispatchEvent(new window.Event('change', { bubbles: true }))
+    await flush(6)
+    click(dlgFootBtn('保存'))
+    await waitFor(() => update.mock.calls.length === 1, { message: '更新请求发出' })
+    const payload = update.mock.calls[0][1]
+    // 后端 deviceRoutes 的 checkCycle 是 .optional().isInt({min:1,max:365})：.optional() 只对
+    // undefined 放行，null 仍进 isInt → 400「检查周期应为 1-365 天」。客户端把 null 归一为 undefined。
+    expect(payload.checkCycle).toBeUndefined()
+    expect(payload.checkCycle).not.toBeNull()
+    expect(c.errors).toEqual([])
+  })
 })
 
 describe('DeviceView 删除', () => {

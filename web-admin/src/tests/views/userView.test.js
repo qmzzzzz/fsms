@@ -651,6 +651,136 @@ describe('UserView 编辑用户对话框', () => {
     expect(c.errors).toEqual([])
   })
 })
+
+describe('UserView 账户状态呈现（后端三值枚举不得塌缩成两值）', () => {
+  /**
+   * 为什么单独一组：后端 User.status 是 active/inactive/locked 三值，而状态呈现原先在
+   * 表格与编辑下拉各硬编码一份两值判断，被锁定的账户在列表里显示成「禁用」——
+   * 管理员禁用（改登录语义）与管理员锁定（可解、连带清 lockUntil）是两种处置，
+   * 看错状态会直接导致错误操作。本组把三值逐条钉住，并钉住"未知取值原样显示"的兜底。
+   *
+   * 期望值写中文终态（不 import 视图里的映射表）：映射表被改错时两边必须一起错才算漏测。
+   */
+
+  /** 用例行：状态列之外的标签列清空（roles 为空 → 角色列不渲染 el-tag） */
+  const rowWith = (status) => [{ ...ROW_OTHER, roles: [], status }]
+
+  /**
+   * 状态列标签。行内 .el-tag 来自三列：角色（本组用例行不渲染）、状态（effect=light）、
+   * 两步验证（effect=plain）。按 plain 排除后必须恰好剩一个——
+   * 先证明选取口径本身成立，再拿它做断言，避免取到错标签却"恰好通过"。
+   */
+  const statusTag = (c) => {
+    const row = c.findAll('.el-table__body-wrapper .el-table__row')[0]
+    const tags = Array.from(row.querySelectorAll('.el-tag')).filter(
+      (el) => !el.className.includes('el-tag--plain')
+    )
+    expect(tags).toHaveLength(1)
+    return tags[0]
+  }
+  const tagType = (el) => /el-tag--(success|info|warning|danger)/.exec(el.className)[1]
+
+  /** EP 的下拉 teleport 到 body，用 aria-hidden 挑出当前可见的那个 */
+  const visiblePopper = () =>
+    Array.from(document.body.querySelectorAll('.el-popper')).find(
+      (el) => el.getAttribute('aria-hidden') === 'false'
+    )
+  const dropdownItems = () =>
+    Array.from(visiblePopper().querySelectorAll('.el-select-dropdown__item')).map((el) => ({
+      label: el.textContent.trim(),
+      disabled: el.className.includes('is-disabled'),
+    }))
+
+  test('locked → 显示「锁定」且为 warning 色，不得显示成「禁用」', async () => {
+    const c = await mountUser(P_BASE, rowWith('locked'))
+    const tag = statusTag(c)
+    expect(tag.textContent.trim()).toBe('锁定')
+    expect(tagType(tag)).toBe('warning')
+    expect(tag.textContent).not.toContain('禁用')
+    expect(c.errors).toEqual([])
+  })
+
+  test('对照：active/inactive 的既有呈现没被改动（正常=success、禁用=info）', async () => {
+    const c = await mountUser(P_BASE, [
+      { ...ROW_OTHER, roles: [], status: 'active', _id: 'a1', username: 'aa' },
+      { ...ROW_OTHER, roles: [], status: 'inactive', _id: 'a2', username: 'bb' },
+    ])
+    const rows = c.findAll('.el-table__body-wrapper .el-table__row')
+    const tagAt = (n) => {
+      const tags = Array.from(rows[n].querySelectorAll('.el-tag')).filter(
+        (el) => !el.className.includes('el-tag--plain')
+      )
+      expect(tags).toHaveLength(1)
+      return tags[0]
+    }
+    expect(tagAt(0).textContent.trim()).toBe('正常')
+    expect(tagType(tagAt(0))).toBe('success')
+    expect(tagAt(1).textContent.trim()).toBe('禁用')
+    expect(tagType(tagAt(1))).toBe('info')
+  })
+
+  test('后端将来加的新枚举值：原样显示，不塌缩成「禁用」', async () => {
+    const c = await mountUser(P_BASE, rowWith('pending_review'))
+    const tag = statusTag(c)
+    expect(tag.textContent.trim()).toBe('pending_review')
+    expect(tag.textContent).not.toContain('禁用')
+    // 兜底档不得抛异常（映射表查不到就退回原值 + info 默认色）
+    expect(c.errors).toEqual([])
+  })
+
+  test('编辑对话框：locked 回显为「锁定」，三个选项都在且 locked 置灰不可选', async () => {
+    const c = await mountUser(['user:read', 'user:update'], rowWith('locked'))
+    click(rowBtn(c, '编辑'))
+    await flush(8)
+    const dlg = c.find('.el-dialog')
+    // 表单里只有状态一个下拉；先钉住这个前提，后面的单元素查询才不是碰运气
+    expect(dlg.querySelectorAll('.el-select')).toHaveLength(1)
+    const wrapper = dlg.querySelector('.el-select__wrapper')
+    // 回显真实值：原先下拉里没有 locked 项，此处显示的是占位符，
+    // 而表单里 status 实际是 locked —— 隐值在界面上完全不可见
+    expect(wrapper.textContent.trim()).toBe('锁定')
+
+    click(wrapper)
+    await waitForDom(() => visiblePopper() && dropdownItems().length === 3, '状态下拉三个选项')
+    expect(dropdownItems()).toEqual([
+      { label: '正常', disabled: false },
+      { label: '禁用', disabled: false },
+      { label: '锁定', disabled: true },
+    ])
+
+    // 点了也不改：锁定/解锁走专用接口（会清 lockUntil 并写 user_locked 审计），
+    // 编辑框能选中 locked 就是开了一条绕过该接口的旁路
+    click(
+      Array.from(visiblePopper().querySelectorAll('.el-select-dropdown__item')).find((el) =>
+        el.className.includes('is-disabled')
+      )
+    )
+    await flush(6)
+    expect(wrapper.textContent.trim()).toBe('锁定')
+    expect(c.errors).toEqual([])
+  })
+
+  test('locked 当前值不因不可选而丢失：保存仍上行 status=locked', async () => {
+    usersUpdate.mockResolvedValue({ data: { success: true } })
+    const c = await mountUser(['user:read', 'user:update'], rowWith('locked'))
+    click(rowBtn(c, '编辑'))
+    await flush(8)
+    const dlg = c.find('.el-dialog')
+    await setField(dlg, '真实姓名', '鲍勃二世')
+    click(footerBtn(dlg, '保存'))
+    await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求' })
+    expect(usersUpdate).toHaveBeenCalledWith('u2', {
+      username: 'bob',
+      email: 'b@x.com',
+      realName: '鲍勃二世',
+      department: '设备科',
+      phone: '13900000000',
+      status: 'locked',
+      allowedIPs: '10.0.0.1',
+    })
+  })
+})
+
 describe('UserView 分配角色对话框', () => {
   const openRole = async (c) => {
     click(rowBtn(c, '分配角色'))
@@ -690,6 +820,21 @@ describe('UserView 分配角色对话框', () => {
     await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '保存失败提示' })
     expect(ElMessage.error).toHaveBeenCalledWith('保存失败')
     expect(ElMessage.success).not.toHaveBeenCalled()
+  })
+
+  test('回归：清空全部角色后保存按钮禁用（后端 assignRoles 要求 roles min:1）', async () => {
+    // 后端 PUT /:id/roles 的校验是 isArray({min:1})：空角色集会 400「请至少分配一个角色」。
+    // 与"有角色时可保存并真实发请求"（上一条用例）对照，证明禁用只由空选择驱动，不是恒禁用。
+    assignRoles.mockClear()
+    const c = await mountUser(['user:read', 'role:assign'], [{ ...ROW_OTHER, roles: [] }])
+    const dlg = await openRole(c)
+    const save = footerBtn(dlg, '保存')
+    expect(save).toBeTruthy()
+    expect(save.disabled).toBe(true)
+    click(save)
+    await flush(6)
+    expect(assignRoles, '空角色不得发起请求（点了也只会撞后端 400）').not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
   })
 })
 

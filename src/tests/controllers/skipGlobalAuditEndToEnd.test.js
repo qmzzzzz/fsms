@@ -2,7 +2,7 @@
  * P0-5 端到端回归：skipGlobalAudit 必须让「控制器手写审计」成为唯一留痕
  *
  * 背景（审计报告 §8.2 / §15 P0-5）：既有测试 `securityConfigHandlers.test.js:128,168`
- * 与 `securityCoverageGap.test.js:361` 在**无中间件环境**下断言
+ * 与 `securityControllerOutcomeAndGuards.test.js` 在**无中间件环境**下断言
  * `res.locals.skipGlobalAudit === true`。那只证明「控制器最终置过位」，
  * 不能证明它早于响应读取点——而 P0-5 恰恰是时序缺陷：中间件在请求入口读取该
  * 标志，控制器的赋值永远晚于检查，标志 100% 失效，每个这类操作被双写
@@ -24,7 +24,7 @@ const spyPush = jest.spyOn(auditBuffer, 'push');
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-/** 取本轮 push 调用中命中指定 path 的记录 */
+/** 取本次改动 push 调用中命中指定 path 的记录 */
 const pushedForPath = (fullPath) =>
   spyPush.mock.calls.map(([doc]) => doc).filter((doc) => doc && doc.path === fullPath);
 

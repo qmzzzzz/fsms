@@ -57,8 +57,9 @@ const DEVICES = {
   },
 }
 
-const open = async () => {
-  devicesGetList.mockResolvedValue(DEVICES)
+const open = async (devices) => {
+  if (devices instanceof Error) devicesGetList.mockRejectedValue(devices)
+  else devicesGetList.mockResolvedValue(devices || DEVICES)
   devicesGetById.mockResolvedValue({ data: { data: {} } })
   const { Host, state } = makeHost()
   active = mountComponent(Host, {})
@@ -229,5 +230,61 @@ describe('InspectionCompleteForm 失败与重置', () => {
     click(removeBtn)
     await flush(10)
     expect(dlg().querySelectorAll('.finding-item').length).toBe(1)
+  })
+})
+
+/**
+ * 设备下拉的两种「看不见的缺数据」
+ *
+ * loadDevices 只发 `limit: 100`，而后端 normalizePagination 把 limit 封顶在 100：
+ * 台账超过 100 台时，第 101 台在这个下拉里根本不存在；请求失败时下拉直接空掉。
+ * 两种情况下界面都长得和「数据本来就这样」一模一样，而这张表是巡检闭环的最后一步
+ * —— 漏记的隐患不会有任何痕迹。所以两种状态都必须变成看得见的提示。
+ *
+ * 判据取 `data-kind` 与文案里的真实计数，不取措辞：措辞可以改，缺数据必须说话。
+ */
+describe('InspectionCompleteForm 设备下拉的缺数据可见化', () => {
+  const hint = () => dlg().querySelector('.device-hint')
+
+  const deviceRes = (loaded, total) => ({
+    data: {
+      data: Array.from({ length: loaded }, (_, i) => ({
+        _id: `dev-${i}`,
+        deviceCode: `SMK-${i}`,
+        deviceName: `设备${i}`,
+        deviceType: 'smoke',
+      })),
+      pagination: { total },
+    },
+  })
+
+  test('只加载了部分设备：提示未列全，并带出「已加载/总数」两个数', async () => {
+    await open(deviceRes(2, 150))
+    await clickRadio('abnormal')
+    const el = hint()
+    expect(el, '设备未列全时必须给出提示').toBeTruthy()
+    expect(el.getAttribute('data-kind')).toBe('partial')
+    expect(el.textContent).toContain('2')
+    expect(el.textContent).toContain('150')
+  })
+
+  test('加载条数已覆盖全部设备：不得出现未列全提示（否则告警疲劳）', async () => {
+    await open(deviceRes(2, 2))
+    await clickRadio('abnormal')
+    expect(hint()).toBeNull()
+  })
+
+  test('后端没回 pagination：按「未知」处理也不报未列全（不把缺字段当成截断）', async () => {
+    await open({ data: { data: deviceRes(2, 2).data.data } })
+    await clickRadio('abnormal')
+    expect(hint()).toBeNull()
+  })
+
+  test('设备列表请求失败：提示与「暂无设备」可区分', async () => {
+    await open(new Error('network down'))
+    await clickRadio('abnormal')
+    const el = hint()
+    expect(el, '加载失败必须给出可区分的提示').toBeTruthy()
+    expect(el.getAttribute('data-kind')).toBe('failed')
   })
 })

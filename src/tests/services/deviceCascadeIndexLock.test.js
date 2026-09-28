@@ -81,7 +81,7 @@ describe('L-22 删除级联索引覆盖（explain 级锁定）', () => {
   });
 
   /**
-   * 【本轮改造：源码 grep → 真实调用捕获】
+   * 【本次改动改造：源码 grep → 真实调用捕获】
    *
    * 原用例对 DeviceService.js 做正则 grep，断言源码里「出现过」三个 filter 字面量。
    * 它拦不住真正的回归：上面三条 explain 用的是**本测试自己写的 filter**，

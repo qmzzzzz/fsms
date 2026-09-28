@@ -8,8 +8,8 @@
  *  1. 骨架屏不退出（loading 永真）→ 首页永远停在占位块；
  *  2. 权限门控（P3-39）：无 report:read / alarm:read / user:read 时既不该请求接口，
  *     也不该渲染该数据块——原实现无差别请求，用户一进首页连吃 403 红框；
- *  3. 统计卡字段映射：devices.total/online、alarms.pending、users.active||total，
- *     错一个字段 = 首页数字骗人；
+ *  3. 统计卡字段映射：devices.total/online、alarms.pending、users.active（缺字段才退 total），
+ *     错一个字段 = 首页数字骗人；0 与"字段缺失"必须可区分（见「active 为 0」用例）；
  *  4. 最近报警映射 + 截断到 5 条 + limit=5 请求参数 + 空值兜底；
  *  5. 失败与取消：真实失败提示一次、abort 静默、取消不污染占位值；
  *  6. 自动刷新与可见性：5 分钟定时、页面隐藏不发、卸载后彻底停止。
@@ -262,6 +262,14 @@ describe('DashboardView 统计卡数据接线', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('active 为 0（全部账号停用/锁定）必须显示 0，不得退回 total 报喜', async () => {
+    // 反向用例：`active || total` 下这一格会显示 20 —— "0 个可用账号"被读成"20 个"。
+    // 只有把 0 与字段缺失区分开（?? 而非 ||）才可能绿。
+    const c = await open(ALL, { users: okUsers({ active: 0, total: 20 }) })
+    expect(statValues(c)).toEqual(['10', '7', '3', '0'])
+    expect(c.errors).toEqual([])
+  })
+
   test('用户统计缺 active 时退回 total（且不影响其余三张卡）', async () => {
     const c = await open(ALL, { users: okUsers({ total: 20 }) })
     expect(statValues(c)).toEqual(['10', '7', '3', '20'])
@@ -276,14 +284,9 @@ describe('DashboardView 统计卡数据接线', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('趋势图标在 trend=0 时走向下分支且文案为空（不出现 undefined 字样）', async () => {
+  test('无趋势文案时不渲染趋势图标（孤立箭头会被误读为指标下跌；不得出现 undefined 字样）', async () => {
     const c = await open(ALL)
-    expect(c.findAll('.stat-trend .el-icon').map((x) => x.className)).toEqual([
-      'el-icon down',
-      'el-icon down',
-      'el-icon down',
-      'el-icon down',
-    ])
+    expect(c.findAll('.stat-trend .el-icon')).toEqual([])
     expect(c.findAll('.stat-trend').map((x) => x.textContent.trim())).toEqual(['', '', '', ''])
     expect(c.text()).not.toContain('undefined')
   })
@@ -388,12 +391,15 @@ describe('DashboardView 权限门控（P3-39：无权限不请求、不渲染）
     expect(c.errors).toEqual([])
   })
 
-  test('仅 report:read：只请求 dashboard，统计卡与图表渲染，报警卡片不渲染（第四卡 0 不请求 users）', async () => {
+  test('仅 report:read：只请求 dashboard，统计卡与图表渲染，报警卡片不渲染（第四卡未知占位 - 不请求 users）', async () => {
     const c = await open(['report:read'])
     expect(getDashboard).toHaveBeenCalledTimes(1)
     expect(getUserStats).not.toHaveBeenCalled()
     expect(getAlarms).not.toHaveBeenCalled()
-    expect(statValues(c)).toEqual(['10', '7', '3', '0'])
+    // 第四卡必须是"未知"而不是 0：没有 user:read 时这一格压根没取数，
+    // 显示 0 等于向值班人员宣称"系统里没有用户"。
+    expect(statValues(c)).toEqual(['10', '7', '3', '-'])
+    expect(statValues(c)[3]).not.toBe('0')
     expect(c.findAll('.dashboard-charts-stub')).toHaveLength(1)
     expect(c.findAll('.alarm-card')).toEqual([])
   })
@@ -689,11 +695,14 @@ describe('DashboardView 失败与取消路径', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('用户统计失败：静默兜底为空对象（不弹错），第四卡为 0', async () => {
+  test('用户统计失败：不弹错（其余数据源已成功），第四卡回落到未知占位 -', async () => {
     const c = await open(ALL, { usersReject: new Error('users down') })
     await flush(20)
     expect(ElMessage.error).not.toHaveBeenCalled()
-    expect(statValues(c)).toEqual(['10', '7', '3', '0'])
+    // 前三个卡来自 dashboard 接口，这一路是成功的：一个数据源失败不得把它们的
+    // 真实读数一起冲掉（否则局部故障在界面上表现成"全站没数据"）。
+    expect(statValues(c)).toEqual(['10', '7', '3', '-'])
+    expect(statValues(c)[3]).not.toBe('0')
     expect(c.errors).toEqual([])
   })
 

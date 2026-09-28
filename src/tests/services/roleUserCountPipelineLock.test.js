@@ -74,7 +74,7 @@ describe('L-23 角色用户数统计的管道顺序', () => {
 
   test('顺序变化不改变统计结果（语义等价，防"为过测试改口径"）', async () => {
     const RoleModel = require('../../models/Role');
-    const suffix = `l23-${Date.now().toString(36)}`;
+    const suffix = `l23${Date.now().toString(36)}`;
     const roleA = await RoleModel.create({
       name: `L23 角色A ${suffix}`,
       code: `l23_a_${suffix}`,

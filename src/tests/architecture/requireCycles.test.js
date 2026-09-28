@@ -7,12 +7,15 @@
  * 「把 require 提到文件顶部」这种看起来无害的重构（那会引入加载顺序 bug：
  * 拿到的 module.exports 尚不完整，症状是 undefined 而非报错，极难定位）。
  *
- * 本测试做三件事：
+ * 本测试做四件事：
  *   1. 静态解析 src 下所有模块的 require 边，断言不存在环；
  *      （环的存在说明某处惰性 require 被误提到顶层）
  *   2. 断言 3 处关键惰性 require 仍在函数体内（即未被提到顶层）；
  *   3. 断言这些模块可以被正常加载——静态分析看不见的加载顺序问题，
  *      由「真实 require 一遍」兜住。
+ *   4. 断言每条相对 require 都能解析到真实文件（F-193）——前三条都建立在
+ *      「解析得到的边」之上，解析失败的边在图的构造里就被丢掉了，
+ *      所以那一类必须由第 4 条单独记账，否则改名/删除是无红的。
  *
  * 为何用静态解析而不是运行时探测：运行时 require 在测试环境里往往
  * 「碰巧」按正确顺序加载，环可能被掩盖；静态图能确定性地暴露它。
@@ -22,6 +25,8 @@ const fs = require('fs');
 const path = require('path');
 
 const SRC_DIR = path.join(__dirname, '../../');
+/** 仓库相对路径（统一成正斜杠，断言里读得动） */
+const relOf = (f) => path.relative(SRC_DIR, f).replace(/\\/g, '/');
 
 /** 递归收集 src 下全部 .js 文件（跳过测试目录自身） */
 const collectSourceFiles = (dir, acc = []) => {
@@ -73,12 +78,69 @@ const resolveDep = (fromFile, rel) => {
   return null;
 };
 
+/** 代码视图：块注释与行注释都剥掉，判据只看会被执行的 require */
+const codeOnly = (src) => src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+
+/** 全量相对 require（顶层与函数体内都算——解析成不成文件与深度无关） */
+const extractRelativeRequires = (src) =>
+  [...codeOnly(src).matchAll(/require\(\s*['"](\.[^'"]*)['"]\s*\)/g)].map((m) => m[1]);
+
+/**
+ * 解析体检。吃 {file, source} 数组而不是直接读盘：反向臂要喂一份改过的 source，
+ * 读盘版探测器只能"对着真实文件断言 0 条解析不到"，永远证不了自己有牙。
+ * @param {Array<{file: string, source: string}>} modules
+ * @returns {{total: number, unresolved: Array<{file: string, spec: string}>}}
+ */
+const surveyRequires = (modules) => {
+  const unresolved = [];
+  let total = 0;
+  for (const { file, source } of modules) {
+    for (const spec of extractRelativeRequires(source)) {
+      total += 1;
+      if (resolveDep(file, spec) === null) {
+        unresolved.push({ file: relOf(file), spec });
+      }
+    }
+  }
+  return { total, unresolved };
+};
+
 describe('依赖图无环断言（E-04）', () => {
   const files = collectSourceFiles(SRC_DIR);
   const known = new Set(files.map((f) => path.normalize(f)));
+  const modules = files.map((f) => ({ file: f, source: fs.readFileSync(f, 'utf8') }));
+  const resolved = surveyRequires(modules);
 
   test('src 下存在可分析的文件（防扫描路径漂移导致假绿）', () => {
     expect(files.length).toBeGreaterThan(100);
+  });
+
+  // F-193：上面那条"无环"用例对**解析不到**的 require 是瞎的——它 `.filter(d => d && known.has(d))`
+  // 把解析失败的目标直接丢掉，于是「把 services/auditBufferDocs.js 改名而漏改调用点」这种改动
+  // 既不成环也不变红，只在下一次真实加载时 MODULE_NOT_FOUND。src/ 是整目录 COPY 进镜像的，
+  // tests/deploy/imageRequireClosure.test.js 只管"被单独 COPY 的文件"，也看不见这一类。
+  //
+  // 范围只到 src（不含 tests/）：scripts/ 里合法地嵌着给子进程 `-e` 的 require 字符串
+  // （实测：scripts/production-drill.js:198 的 './src/config/validate.js' 按 cwd 而非按
+  // 文件解析），literal 解析在那边必须配一份豁免清单，而清单本身会漂移成新的洞。
+  test('每条相对 require 都能解析到 src 下的真实文件（改名/删除不再静默消失）', () => {
+    expect(resolved.unresolved).toEqual([]);
+  });
+
+  test('自检：探测器对"凭空多一条解析不到的 require"必须报红', () => {
+    // 地板取自实测 701（155 个生产文件）：正则漂移时会掉到 0，本行先红，
+    // 于是上一条的 `toEqual([])` 不会在一个空集合上空转。
+    expect(resolved.total).toBeGreaterThan(400);
+    // **替换**第一条而不是往数组尾巴上追加：追加会把被改文件自己的 require 再算一遍
+    // （实测 +13 而不是 +1），total 的账就说不清"多出来的那一条"到底是谁。
+    const [first, ...rest] = modules;
+    expect(rest).toHaveLength(modules.length - 1);
+    const mutant = surveyRequires([
+      { file: first.file, source: `${first.source}\nrequire('./zz_幽灵模块');` },
+      ...rest,
+    ]);
+    expect(mutant.total).toBe(resolved.total + 1);
+    expect(mutant.unresolved).toEqual([{ file: relOf(first.file), spec: './zz_幽灵模块' }]);
   });
 
   test('模块级 require 图无环', () => {

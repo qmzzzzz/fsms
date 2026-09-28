@@ -67,4 +67,26 @@ describe('CSP nonce（L-5）', () => {
     expect(csp).toMatch(/script-src 'self'/);
     expect(csp).not.toMatch(/script-src[^;]*unsafe-inline/);
   });
+
+  /**
+   * 文档路径判定必须与路由用同一把尺（大小写不敏感 + 段边界）。
+   * 手写的 `=== '/api-docs' || startsWith('/api-docs/')` 会让 `/API-docs`
+   * 命中 Swagger 路由（本仓 app.set('case sensitive routing') 为默认 false）
+   * 却判为"非文档路径" ⇒ 给它下发 nonce，而 Swagger UI 自注入的内联 <style>
+   * 带不上这个 nonce，页面直接白屏。方向是"变严"，所以不是漏洞，是功能断裂。
+   */
+  test('文档路径的大小写变体与相似前缀路径各按应有结论', async () => {
+    const upper = await request(buildApp()).get('/API-docs').expect(200);
+    expect(parseStyleSrc(upper.headers['content-security-policy'])).toContain("'unsafe-inline'");
+
+    const mixed = await request(buildApp()).get('/API-Docs/swagger-ui.css').expect(200);
+    expect(parseStyleSrc(mixed.headers['content-security-policy'])).toContain("'unsafe-inline'");
+
+    // 反向对照：只是"前缀相似"而非段边界的路径不得被放宽（防按字面 startsWith 误放）
+    const lookalike = await request(buildApp()).get('/api-docsX').expect(200);
+    expect(parseStyleSrc(lookalike.headers['content-security-policy'])).toContain("'nonce-");
+    expect(parseStyleSrc(lookalike.headers['content-security-policy'])).not.toContain(
+      "'unsafe-inline'"
+    );
+  });
 });

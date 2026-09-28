@@ -62,6 +62,9 @@ function freezeAtFixedInstant() {
 }
 
 beforeEach(() => {
+  // 同 zzqA_auditMonitorAlertLoop：shouldSendAlert 被整体 mock 掉之后，
+  // "当日已推送"这条真实抑制落在被测模块的模块级表上，多条用例共用业务日必须重置。
+  monitor.__resetForTest();
   securityAlert.shouldSendAlert.mockClear().mockReturnValue(true);
   securityAlert.sendNotification.mockClear();
   AuditLog.detectAnomalies.mockClear();

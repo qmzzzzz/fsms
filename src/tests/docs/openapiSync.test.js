@@ -140,6 +140,29 @@ describe('OpenAPI 文档同步守卫', () => {
     });
   });
 
+  // ================= 参数枚举 ↔ 运行时白名单（2026-09-25） =================
+  //
+  // L-24 那条钉的是「生成器 == 产物」，两边却共用同一份手抄清单：
+  // riskLevel/level 的取值在 constants/audit.js、utils/auditQuery.js（校验白名单）、
+  // models/AuditLog.js（schema enum）与本文档四处各写一份。任何一侧加一档，
+  // 文档就会继续宣称旧四档——调用方照文档传 ?riskLevel=<新档> 得到一个 400，
+  // 或反过来文档列出后端根本不接受的值。生成器现已改为引用常量，这里把最后一根线接上：
+  // 钉**产物**（对外实际交付的那份），生成器一侧由 L-24 的逐端点深比对传递覆盖。
+  describe('查询参数枚举与运行时白名单一致', () => {
+    const { AUDIT_RISK_LEVELS, AUDIT_DISPLAY_LEVELS } = require('../../constants/audit');
+    const params = spec.paths['/api/security/audit-logs'].get.parameters;
+    const enumOf = (name) => {
+      const item = params.find((q) => q.name === name);
+      return item && item.schema ? item.schema.enum : undefined;
+    };
+
+    test('riskLevel / level 的文档枚举逐项等于 constants/audit.js', () => {
+      // 用对象包一层：红灯时输出直接写着是哪个参数漂了（裸 toEqual 只给两个数组）
+      expect({ riskLevel: enumOf('riskLevel') }).toEqual({ riskLevel: AUDIT_RISK_LEVELS });
+      expect({ level: enumOf('level') }).toEqual({ level: AUDIT_DISPLAY_LEVELS });
+    });
+  });
+
   // ================= P2-45 对账盲区补齐 =================
   //
   // 原 MOUNTS 只列 9 个业务子路由，导致三类真实路由完全不参与对账：
@@ -221,7 +244,7 @@ describe('OpenAPI 文档同步守卫', () => {
     });
   });
 
-  test('新增安全端点已在文档中（本轮同步回归锚点）', () => {
+  test('新增安全端点已在文档中（本次改动同步回归锚点）', () => {
     const documented = collectDocumented();
     for (const endpoint of [
       'GET /api/auth/login-public-key',

@@ -199,6 +199,7 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
       FakeRedis.failPing = false;
       FakeRedis.failCommands = false;
       FakeRedis.failSubscribe = false;
+      FakeRedis.setGate = null;
     }
     constructor() {
       this.listeners = {};
@@ -219,6 +220,9 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
       return 'PONG';
     }
     async set(key, val, ...rest) {
+      // 测试钩子：注入一个可控 pending，制造「SET 命令正在飞、而 process.env.REDIS_URL
+      // 在这一个 tick 里被改掉」的时序（F-207 的靶子：落地判据不得回读 env）。
+      if (FakeRedis.setGate) await FakeRedis.setGate;
       this.guard();
       let nx = false;
       let px = null;
@@ -239,6 +243,17 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
       this.guard();
       FakeRedis.ttls.delete(key);
       return FakeRedis.store.delete(key) ? 1 : 0;
+    }
+    // GETDEL（sharedCache.getDel 的 Redis 成功路径）。此前假客户端**没有**这个方法，
+    // 于是门面里的 `redisClient.getdel(...)` 抛 TypeError 被 catch 吞掉，
+    // 整条成功路径（含 F-204 后新增的「抹本地陈旧副本」）一直没被走到过。
+    async getdel(key) {
+      this.guard();
+      if (!FakeRedis.store.has(key)) return null;
+      const raw = FakeRedis.store.get(key);
+      FakeRedis.store.delete(key);
+      FakeRedis.ttls.delete(key);
+      return raw;
     }
     async incr(key) {
       this.guard();
@@ -280,7 +295,14 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
         }
         return v;
       }
-      if (FakeRedis.store.get(key) === args[0]) {
+      // F-195：守卫与否必须由**脚本文本**决定。旧实现在这里硬写了
+      // `store.get(key) === args[0]`，于是把 LOCK_RELEASE_SCRIPT 改成无条件 `del`、
+      // 或把 `==` 反成 `~=`，全套用例照绿——CAS 释放的牙齿其实一次也没被测过
+      // （唯一调到 release 的用例用的是匹配令牌，删锁是它应有的行为，测不出差别）。
+      const guarded = /redis\.call\(\s*["']get["']\s*,\s*KEYS\[1\]\s*\)\s*==\s*ARGV\[1\]/.test(
+        script
+      );
+      if (!guarded || FakeRedis.store.get(key) === args[0]) {
         if (script.includes('del')) {
           FakeRedis.store.delete(key);
         } else {
@@ -297,6 +319,9 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
   }
 
   let cache;
+  // 与 cache **同一个** isolateModules 注册表里取出的 logger：门面内部 require 到的
+  // 就是这一份，spyOn 才可能看见它的日志调用（resetModules 之后再 require 是另一个实例）
+  let isolatedLogger;
   const savedUrl = process.env.REDIS_URL;
 
   const bootRedisMode = async () => {
@@ -306,6 +331,21 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     process.env.REDIS_URL = 'redis://fake:6379';
     jest.isolateModules(() => {
       cache = require('../../services/sharedCache');
+      isolatedLogger = require('../../utils/logger');
+    });
+    await cache.initSharedCache();
+  };
+
+  // 「部署上根本没有共享层」这一态：假 ioredis 仍就位（防止真的去 require ioredis 连网），
+  // 但不设 REDIS_URL ⇒ initSharedCache 直接 return，redisClient 为 null
+  const bootNoRedisMode = async () => {
+    FakeRedis.reset();
+    jest.resetModules();
+    jest.doMock('ioredis', () => FakeRedis);
+    delete process.env.REDIS_URL;
+    jest.isolateModules(() => {
+      cache = require('../../services/sharedCache');
+      isolatedLogger = require('../../utils/logger');
     });
     await cache.initSharedCache();
   };
@@ -326,6 +366,8 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
 
     await cache.set('rk', { n: 1 }, 60000);
     await expect(cache.get('rk')).resolves.toEqual({ n: 1 });
+    // 成功路径的返回值为 true：调用方据此判断「共享层确实收到了」
+    await expect(cache.set('rk2', { n: 2 }, 60000)).resolves.toBe(true);
     await expect(cache.del('rk')).resolves.toBe(true);
     await expect(cache.get('rk')).resolves.toBeNull();
 
@@ -389,6 +431,29 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     expect(again).toBeTruthy();
   });
 
+  // F-195：把 CAS 释放的"牙齿"变成可证伪的断言。场景即 sharedCacheLocks.js:46-49 自述的
+  // 改因——A 的租约到期后 B 抢到同名锁，A 的延迟释放不得删掉 B 的锁，否则 B 仍在临界区时
+  // 第三个实例又能进入（审计链的跨实例互斥当场不成立，产出同父两子）。
+  // 旧 FakeRedis 在 JS 侧硬写比较、不看脚本文本，所以"无条件 del"的变异曾经全绿。
+  test('release 只认自己的令牌：不得删掉后来者（B）的锁', async () => {
+    await bootRedisMode();
+    const lockA = await cache.acquireLock('rl-cas', 60000);
+    expect(lockA).toBeTruthy();
+    // 令牌形态也一并钉住：Math.random()+Date.now() 的旧拼法在同毫秒启动的两实例间可碰撞
+    const tokenA = FakeRedis.store.get('rl-cas');
+    expect(tokenA).toMatch(/^[0-9a-f]{32}$/);
+
+    // ① 租约到点后 B 持有同名锁：A 的迟到释放必须无功（不删）
+    FakeRedis.store.set('rl-cas', 'token-of-B');
+    await lockA.release();
+    expect(FakeRedis.store.get('rl-cas')).toBe('token-of-B');
+
+    // ② 反向对照：令牌仍匹配时释放必须真的删——否则 ① 可以靠"什么都不做"蒙过去
+    FakeRedis.store.set('rl-cas', tokenA);
+    await lockA.release();
+    expect(FakeRedis.store.get('rl-cas')).toBeUndefined();
+  });
+
   test('acquireLockBlocking：排队等待 → 超时 null；释放后可获取；命令失败放弃', async () => {
     await bootRedisMode();
     const first = await cache.acquireLockBlocking('bl', 60000, 500);
@@ -423,11 +488,25 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
   test('命令失败回退语义：set/get/del/incr 落内存；setIfAbsent fail-closed 拒绝', async () => {
     await bootRedisMode();
     FakeRedis.failCommands = true;
-    // set/get/del/incr：回退内存不抛错
-    await cache.set('fk', 'fv', 60000);
+    // set/get/del/incr：回退内存不抛错。
+    // set 的返回值是调用方**唯一**能区分「落到共享层」与「只落到本进程内存」的信号：
+    // 下一行 get 回读到 'fv' 读的是本地回退的那份，不是 Redis 确认过的——
+    // "写后读回"在这种实现里必然给出假确认，所以契约只能落在返回值上
+    // （auditChain 的 F-184b 降级判据依赖它）。
+    await expect(cache.set('fk', 'fv', 60000)).resolves.toBe(false);
     await expect(cache.get('fk')).resolves.toBe('fv');
     await expect(cache.del('fk')).resolves.toBe(true);
+    // F-205：incr 与 set/get/del **不同向**——它不回退内存，而是如实返回 null。
+    // 调用方拿这个返回值去和**全局**上限比较（captchaService 的 MAX_ACTIVE_ENTRIES 洪水闸），
+    // 而本进程的数字两个方向都是假的：偏小 ⇒ 洪水期护栏被骗过；偏大 ⇒ Redis 恢复后
+    // 合法请求仍被这个本地值拒掉（登录前置被自己的降级史卡死）。
+    await expect(cache.incrWithTtl('fcnt', 60000)).resolves.toBeNull();
+    // 连续失败不得在本地累出 1→2：那正是「本地计数被当成集群计数」的形态
+    await expect(cache.incrWithTtl('fcnt', 60000)).resolves.toBeNull();
+    // 反向对照：命令恢复后自增从共享层真值起步（=1），证明降级期没有偷偷写过本地计数
+    FakeRedis.failCommands = false;
     await expect(cache.incrWithTtl('fcnt', 60000)).resolves.toBe(1);
+    FakeRedis.failCommands = true;
     // setIfAbsent：Redis 已配置但失败 → 按重复处理（拒绝），不落内存放行
     await expect(cache.setIfAbsent('fnonce', 'v', 60000)).resolves.toBe(false);
     FakeRedis.failCommands = false;
@@ -486,6 +565,158 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     FakeRedis.failCommands = false;
   });
 
+  test('F-207：SET 在飞期间 REDIS_URL 被撤 ⇒ 落地判据不得因 env 事后变化升格为 true', async () => {
+    await bootRedisMode();
+    let release;
+    FakeRedis.setGate = new Promise((r) => {
+      release = r;
+    });
+    FakeRedis.failCommands = true;
+    const savedUrl = process.env.REDIS_URL;
+    try {
+      const pending = cache.set('envflip-key', 'v', 60000);
+      delete process.env.REDIS_URL; // 命令仍在飞的这一拍里改掉环境
+      release();
+      // 修复前：`return !isRedisConfigured()` 读的是**回话时刻**的 env ⇒ 这里得到 true
+      // = "已落到共享层"，而 Redis 根本没收到；调用方 utils/auditChain.js 的 writeSharedTail
+      // 据此解除不可信并抹掉本地唯一副本（⇒ 权威状态只剩一个谁都不认识的本地值）。
+      expect(await pending).toBe(false);
+      // 可用性回退必须照旧（这是 set 文档承诺的"缓存类调用方可忽略返回值"那一半）：
+      // 值仍留在本进程内存里，读抖动时取得到——**判据说真话不等于把回退删掉**。
+      await expect(cache.get('envflip-key')).resolves.toBe('v');
+    } finally {
+      process.env.REDIS_URL = savedUrl;
+      FakeRedis.setGate = null;
+      FakeRedis.failCommands = false;
+    }
+  });
+
+  test('F-207 对照臂：命令成功且 env 未变时判据仍为 true（证明上一条不是"set 恒返回 false"）', async () => {
+    await bootRedisMode();
+    let release;
+    FakeRedis.setGate = new Promise((r) => {
+      release = r;
+    });
+    try {
+      const pending = cache.set('envflip-ok-key', 'v', 60000);
+      release();
+      await expect(pending).resolves.toBe(true);
+      expect(FakeRedis.store.get('envflip-ok-key')).toBe(JSON.stringify('v'));
+    } finally {
+      FakeRedis.setGate = null;
+    }
+  });
+
+  test('F-205：Redis 已配置但当前不可用 ⇒ 失效广播丢失要留痕（配了共享层却静默不发是谎报同步）', async () => {
+    await bootRedisMode();
+    const warn = jest.spyOn(isolatedLogger, 'warn').mockImplementation(() => {});
+    try {
+      // 用 'error' 事件把 redisReady 翻下来：REDIS_URL 仍在 ⇒ isRedisConfigured()=true，
+      // 这正是「多实例部署 + 抖动」的形态，与「单实例没配 Redis」必须区分开
+      FakeRedis.instances[0].emit('error', new Error('connection lost'));
+      expect(cache.isRedisEnabled()).toBe(false);
+
+      await cache.publishInvalidate('permcache:u1');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('失效广播未发出'));
+
+      // 反向对照：连接恢复后同一调用不得再报（否则这条告警就是恒真的噪音）
+      warn.mockClear();
+      FakeRedis.instances[0].emit('ready');
+      expect(cache.isRedisEnabled()).toBe(true);
+      await cache.publishInvalidate('permcache:u2');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('F-205 反向对照：没配 Redis 的部署不得为广播刷告警（活体探针放在同一用例里防假绿）', async () => {
+    await bootNoRedisMode();
+    expect(cache.isRedisEnabled()).toBe(false);
+    const warn = jest.spyOn(isolatedLogger, 'warn').mockImplementation(() => {});
+    try {
+      // 活体探针：若 spyOn 挂到了另一个 logger 实例，下面这条就会红——
+      // 没有它，'not.toHaveBeenCalled()' 可以是恒真的（本仓反复踩过的"绿但不设防"）
+      process.env.REDIS_URL = 'redis://fake:6379';
+      await cache.publishInvalidate('permcache:probe');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('失效广播未发出'));
+
+      // 判据本身：撤掉 REDIS_URL（＝单实例部署）后同样的调用必须安静
+      warn.mockClear();
+      delete process.env.REDIS_URL;
+      await cache.publishInvalidate('permcache:u1');
+      await cache.publishInvalidate('sesscache:u2');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('F-204 补全：getDel 成功路径必须抹掉本地陈旧副本（权威层已无此键）', async () => {
+    await bootRedisMode();
+    // 先造出「只落在本进程内存」的那份：命令失败期间的 set 会留本地副本并返回 false
+    FakeRedis.failCommands = true;
+    await expect(cache.set('gd-stale', { text: 'ABCD' }, 60000)).resolves.toBe(false);
+    FakeRedis.failCommands = false;
+    // 共享层从来没有这个键 ⇒ 原子取删如实给出「没有」
+    await expect(cache.getDel('gd-stale')).resolves.toBeNull();
+    // 判据：随后的读抖动不得把那份本地副本当成共享层真值顶回来（走 get 的内存回退）
+    FakeRedis.failCommands = true;
+    await expect(cache.get('gd-stale')).resolves.toBeNull();
+    FakeRedis.failCommands = false;
+  });
+
+  test('getDel Redis 成功路径：取到值并从共享层删除，第二次取为 null', async () => {
+    await bootRedisMode();
+    await expect(cache.set('gd-ok', { text: 'XY' }, 60000)).resolves.toBe(true);
+    await expect(cache.getDel('gd-ok')).resolves.toEqual({ text: 'XY' });
+    expect(FakeRedis.store.has('gd-ok')).toBe(false);
+    await expect(cache.getDel('gd-ok')).resolves.toBeNull();
+  });
+
+  test('F-211：配了 REDIS_URL 但连接已掉 ⇒ incr 不得伪造进程内"全局"计数（与 setIfAbsent 同口径）', async () => {
+    await bootRedisMode();
+    const warn = jest.spyOn(isolatedLogger, 'warn').mockImplementation(() => {});
+    try {
+      // 抖动形态：REDIS_URL 仍在（＝部署**要求**跨实例共享），但就绪标记已翻下。
+      // F-205 当年只堵了「命令抛错」这一个入口（catch 返回 null），这条「未就绪」入口
+      // 直落内存计数器——修复前实测连拿 1、2、3，而唯一的生产调用方 captchaService
+      // 把这个本进程数字当"集群活跃验证码数"去比 MAX_ACTIVE_ENTRIES（偏小＝洪水期护栏被骗过）。
+      FakeRedis.instances[0].emit('error', new Error('connection lost'));
+      expect(cache.isRedisConfigured()).toBe(true);
+      expect(cache.isRedisEnabled()).toBe(false);
+
+      expect(await cache.incrWithTtl('f211:cnt', 60000)).toBeNull();
+      // 连续降级不得在本地累出 1→2：那正是"本地计数被当成集群计数"的形态
+      expect(await cache.incrWithTtl('f211:cnt', 60000)).toBeNull();
+      // 降级不留痕＝上限护栏静默失效，运维看不见
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('如实返回 null'));
+
+      // 反向对照：连接恢复后从**共享层真值**起步 ⇒ 证明降级期没有偷偷写过本地/共享计数
+      warn.mockClear();
+      FakeRedis.instances[0].emit('ready');
+      expect(cache.isRedisEnabled()).toBe(true);
+      expect(await cache.incrWithTtl('f211:cnt', 60000)).toBe(1);
+      expect(await cache.incrWithTtl('f211:cnt', 60000)).toBe(2);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('F-211 对照：未配 REDIS_URL（内存就是全部真相）仍须照常计数，判据不得一刀切成 null', async () => {
+    await bootNoRedisMode();
+    expect(cache.isRedisConfigured()).toBe(false);
+    expect(await cache.incrWithTtl('f211:mem', 60000)).toBe(1);
+    expect(await cache.incrWithTtl('f211:mem', 60000)).toBe(2);
+    // 留痕探针：本用例的 logger 是隔离实例，门面内部 require 到的就是这一份——
+    // 若 spyOn 挂错对象，上一条用例的 toHaveBeenCalledWith 就会红（防恒真断言）
+    const warn = jest.spyOn(isolatedLogger, 'warn').mockImplementation(() => {});
+    await cache.incrWithTtl('f211:mem2', 60000);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   test('初始化失败：REDIS_URL 配置但连接拒绝 → 回退内存并告警', async () => {
     FakeRedis.reset();
     FakeRedis.failPing = true;
@@ -497,6 +728,9 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     });
     await cache.initSharedCache();
     expect(cache.isRedisEnabled()).toBe(false);
+    // F-211：这一态（初始化即被拒）才是生产里**最常见**的"配了共享层却用不了"入口，
+    // 判据与 setIfAbsent 同向：宁可不给数，也不给一个会被当集群值的本地数。
+    expect(await cache.incrWithTtl('f211:initfail', 60000)).toBeNull();
   });
 
   test('shutdownSharedCache：停止定时器、清空状态、关闭订阅连接', async () => {

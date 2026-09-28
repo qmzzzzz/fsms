@@ -1,5 +1,5 @@
 /**
- * 审计 action 白名单「可达性台账」（P3-62）
+ * 审计 action 白名单「可达性技术文档」（P3-62）
  *
  * 审计报告 §3.4 / §11.1 指出：`constants/audit.js` 的 AUDIT_LOG_ACTIONS 共 144 条，
  * 其中一批**永不产生**——既没有路由能派生出它们（GET 路由不在 auditGetPaths 白名单内，
@@ -8,24 +8,27 @@
  *
  * 报告给出的两种处置（删条目 / 补 auditGetPaths）都涉及**行为变更**，且删条目会
  * 破坏历史数据可查性（库里已有的 action 一旦不在白名单，validateEnum 直接 400）。
- * 因此本文件采取第三种处置：**把「永不产生」的集合钉成可执行台账**，达到：
+ * 因此本文件采取第三种处置：**把「永不产生」的集合钉成可执行技术文档**，达到：
  *   1. 不删任何条目（历史数据仍可查）；
  *   2. 集合一旦变化（新增/减少）立刻红——新增意味着有人补了 auditGetPaths 或加了写入点，
- *      减少意味着有人删了条目（需同步更新台账并说明理由）；
- *   3. 台账本身即「待清理清单」，附带每条的实测证据（路由 / 方法 / 原因）。
+ *      减少意味着有人删了条目（需同步更新技术文档并说明理由）；
+ *   3. 技术文档本身即「待清理清单」，附带每条的实测证据（路由 / 方法 / 原因）。
  *
  * 度量方法（与生产代码同源，非手抄）：
  *   - 路由派生：读 src/routes/*.js 的 `router.<method>('<path>'`，按 app.js 的挂载前缀
  *     拼出完整路径，动态段按真实形态（ObjectId / UUID）替换后调用**真实的**
  *     `deriveAction`（utils/auditMeta）——不复制其清洗规则，避免二次实现漂移；
- *   - 源码写入：扫 src/ 下 `action: '...'`、`action: ALERT_TYPES.X`、
- *     `recordSensitiveAction(_, _, '...')` 等形态；
+ *   - 源码写入：与正向对账闸共用 helpers/auditWriteSites 的扫描器（见 scanWrittenActions
+ *     的注释）——两套判据各写一份时，"写入"在两处不是同一个事实（F-201）；
  *   - 「永不产生」= 在白名单内 ∧ 不在源码写入集合 ∧ （不在路由派生集合 ∨ 该路由为 GET
  *     且未被 security.js 的 auditGetPaths 覆盖）。
  */
 
 const fs = require('fs');
 const path = require('path');
+
+// 与正向对账闸（auditActionReconciliation）同一份取数实现，见 scanWrittenActions 注释。
+const { scanWriteSites } = require('../helpers/auditWriteSites');
 
 const SRC_DIR = path.resolve(__dirname, '../..');
 const ROUTES_DIR = path.join(SRC_DIR, 'routes');
@@ -104,38 +107,24 @@ function scanRoutes() {
   return rows;
 }
 
-/** 扫描 src/ 下实际写入的 action（四种形态） */
+/**
+ * 源码写入集合 —— 与正向对账闸**共用同一个扫描器**（helpers/auditWriteSites）。
+ *
+ * 原先本文件自带一套裸正则全文扫 `action: '...'`，于是**只读**上下文也被算成写入点：
+ * `AuditLog.countDocuments({ action: 'login_failed' })`（securityController.js:306、
+ * securityAlert.js:399 同类）。后果不是"多算了几条"这么轻——本闸的判据是
+ * 「白名单 ⊆ 可达集合」，多算的写入点会把"其实没人写"的条目洗成"可达"，于是
+ * 实测把 recordLogin 源码里的 'login_failed' 改成未登记的名字，本闸 5 例照旧全绿
+ * （正向对账同轮转红，见 F-201）。两个闸共用取数之后，"写入"在两处是同一个事实，
+ * 对账结论不再只是"两份实现都同意的那部分"。
+ *
+ * 也不在这里硬编码任何"方法自身决定的 action"（原先写着
+ * `written.add('login_success')` / `add('login_failed')` 两行）：硬编码等于给
+ * "扫不到也算可达"开一个无主例外。若哪天写入形态变更导致扫不出来，本闸必须以
+ * "白名单里的某条无人写入"红出来并要求显式判定，而不是静默降级。
+ */
 function scanWrittenActions() {
-  const { ALERT_TYPES } = require('../../services/securityAlert');
-  const files = [];
-  (function walk(d) {
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      if (e.name === 'tests' || e.name === 'node_modules') continue;
-      const full = path.join(d, e.name);
-      if (e.isDirectory()) walk(full);
-      else if (full.endsWith('.js')) files.push(full);
-    }
-  })(SRC_DIR);
-
-  const written = new Set();
-  for (const f of files) {
-    const src = fs.readFileSync(f, 'utf8');
-    for (const m of src.matchAll(/action:\s*'([^']+)'/g)) written.add(m[1]);
-    for (const m of src.matchAll(/action:\s*[^,;\n]*?\?\s*'([^']+)'\s*:\s*'([^']+)'/g)) {
-      written.add(m[1]);
-      written.add(m[2]);
-    }
-    for (const m of src.matchAll(/action:\s*ALERT_TYPES\.([A-Z_]+)/g)) {
-      if (ALERT_TYPES[m[1]]) written.add(ALERT_TYPES[m[1]]);
-    }
-    for (const m of src.matchAll(/recordSensitiveAction\(\s*[^,]+,\s*[^,]+,\s*'([^']+)'/g)) {
-      written.add(m[1]);
-    }
-  }
-  // AuditLog.recordLogin 内部固定写入（方法自身决定，非调用点字面量）
-  written.add('login_success');
-  written.add('login_failed');
-  return written;
+  return new Set(scanWriteSites().written.keys());
 }
 
 /**
@@ -153,13 +142,13 @@ function scanWrittenActions() {
  *    因此这批 action 虽能由 deriveAction 推导出来，实际永远不会落库。
  *    它们正是报告 §3.4「看了哪台设备/哪个报警无留痕」的清单本身。
  *    是否纳入属合规口径决策（报告 §13 V-9 明确标注「无法从代码判断」），
- *    本台账不代为决定——只保证一旦决定并落地（补 auditGetPaths），这里立刻红并提示更新。
+ *    本技术文档不代为决定——只保证一旦决定并落地（补 auditGetPaths），这里立刻红并提示更新。
  *
  * ── B 类（14 条）：既无路由派生、也无源码写入点
  *    三种成因（处置建议不同，勿一刀切删除）：
  *      b1 语义已被替代/改名——实际写入用的是另一个 action：
  *         security_report-suspicious → 实际写 suspicious_report（POST /api/security/report）
- *         （同类但不入本台账：security_view-sensitive 可派生且会进审计中间件，
+ *         （同类但不入本技术文档：security_view-sensitive 可派生且会进审计中间件，
  *           只是控制器置了 skipGlobalAudit 并改写 view_sensitive_data，故不在下表中）
  *         security_view / security_users_view → 无对应无子路径的 GET 路由
  *      b2 从未接线——常量定义了但没有任何调用点：
@@ -172,8 +161,8 @@ function scanWrittenActions() {
  *         alarm_false_alarm
  *        删除会破坏存量数据的可查性（validateEnum 对不在白名单的 action 直接 400）。
  *
- * ⚠️ 本台账不是「免责名单」：下面第二个用例会反向校验——任何登记的条目一旦变得可达
- *    （有人补了 auditGetPaths 或加了写入点），测试立即失败，强制同步更新台账。
+ * ⚠️ 本技术文档不是「免责名单」：下面第二个用例会反向校验——任何登记的条目一旦变得可达
+ *    （有人补了 auditGetPaths 或加了写入点），测试立即失败，强制同步更新技术文档。
  */
 const NEVER_PRODUCED = [
   // ── A 类：GET 路由存在但未被 auditGetPaths 覆盖 ──
@@ -224,8 +213,8 @@ const NEVER_PRODUCED = [
   'alarm_false_alarm',
 ];
 
-describe('审计 action 白名单可达性台账（P3-62）', () => {
-  test('白名单 ⊆（路由派生可达 ∪ 源码写入可达 ∪ 台账登记）', () => {
+describe('审计 action 白名单可达性技术文档（P3-62）', () => {
+  test('白名单 ⊆（路由派生可达 ∪ 源码写入可达 ∪ 技术文档登记）', () => {
     const { AUDIT_LOG_ACTIONS } = require('../../constants/audit');
     const routes = scanRoutes();
     const written = scanWrittenActions();
@@ -237,14 +226,14 @@ describe('审计 action 白名单可达性台账（P3-62）', () => {
     const unexplained = AUDIT_LOG_ACTIONS.filter(
       (a) => !auditedDerived.has(a) && !written.has(a) && !ledger.has(a)
     );
-    // 失败信息必须能直接定位：列出条目 + 它是否路由可达（区分「补台账」与「补写入」）
+    // 失败信息必须能直接定位：列出条目 + 它是否路由可达（区分「补技术文档」与「补写入」）
     const detail = unexplained.map(
       (a) => `${a}（路由派生可达=${derived.has(a)}，已审计=${auditedDerived.has(a)}）`
     );
     expect(detail).toEqual([]);
   });
 
-  test('台账无冗余：登记的每一条都确实不可达（防止台账变成「免责名单」）', () => {
+  test('技术文档无冗余：登记的每一条都确实不可达（防止技术文档变成「免责名单」）', () => {
     const { AUDIT_LOG_ACTIONS } = require('../../constants/audit');
     const routes = scanRoutes();
     const written = scanWrittenActions();
@@ -255,15 +244,15 @@ describe('审计 action 白名单可达性台账（P3-62）', () => {
       (a) => whitelist.has(a) && (auditedDerived.has(a) || written.has(a))
     );
     // 命中说明该条目已变得可达（有人补了 auditGetPaths 或加了写入点）：
-    // 请从本台账移除，并确认审计页筛选行为符合预期
+    // 请从本技术文档移除，并确认审计页筛选行为符合预期
     expect(stale).toEqual([]);
   });
 
-  test('台账内条目必须都在白名单内（删白名单条目会破坏历史数据可查性）', () => {
+  test('技术文档内条目必须都在白名单内（删白名单条目会破坏历史数据可查性）', () => {
     const { AUDIT_LOG_ACTIONS } = require('../../constants/audit');
     const whitelist = new Set(AUDIT_LOG_ACTIONS);
     const orphan = NEVER_PRODUCED.filter((a) => !whitelist.has(a));
-    // 白名单里没有它 → 台账失效（可能已被删除）。删除前必须确认存量数据已无该 action。
+    // 白名单里没有它 → 技术文档失效（可能已被删除）。删除前必须确认存量数据已无该 action。
     expect(orphan).toEqual([]);
   });
 
@@ -283,7 +272,7 @@ describe('审计 action 白名单可达性台账（P3-62）', () => {
     expect(paths).toContain('/api/security/audit-logs');
   });
 
-  test('台账无重复项', () => {
+  test('技术文档无重复项', () => {
     const dup = NEVER_PRODUCED.filter((a, i) => NEVER_PRODUCED.indexOf(a) !== i);
     expect(dup).toEqual([]);
   });

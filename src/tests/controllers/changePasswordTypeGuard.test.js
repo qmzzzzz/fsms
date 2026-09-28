@@ -16,7 +16,7 @@
 
 const request = require('supertest');
 const mongoose = require('mongoose');
-const { passwordChangeLimiter } = require('../../middleware/rateLimit');
+const { passwordChangeLimiter, passwordChangeUserLimiter } = require('../../middleware/rateLimit');
 
 describe('P1-2 改密接口非字符串入参防护', () => {
   let app;
@@ -58,11 +58,14 @@ describe('P1-2 改密接口非字符串入参防护', () => {
 
   // S4：两个改密端点均挂凭据型 passwordChangeLimiter（5 次/15 分钟，
   // userId+IP 组合键、成功请求同样计数）。本文件的类型守卫用例会对同一
-  // 用户连发请求，每例前先清零计数，否则第 6 次起命中 429 而非被测的 400
+  // 用户连发请求，每例前先清零计数，否则第 6 次起命中 429 而非被测的 400。
+  // 改密端点现在并列两把桶（组合键 + 纯 userId 兜底键），两把都要清：
+  // 漏掉兜底键时第 6 次仍 429，测的就不是类型守卫了。
   beforeEach(async () => {
     for (const ip of ['::ffff:127.0.0.1', '127.0.0.1', '::1']) {
       await passwordChangeLimiter.resetKey(`pwd-change:${String(user._id)}:${ip}`);
     }
+    await passwordChangeUserLimiter.resetKey(`pwd-change-user:${String(user._id)}`);
   });
 
   // 非字符串入参谱系：对象是最危险的一类（能通过隐式转字符串的全部校验）

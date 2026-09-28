@@ -12,31 +12,59 @@ const request = require('supertest');
 const config = require('../../config');
 const captchaService = require('../../services/captchaService');
 
+// 明文只能从生成侧拿到，而 `generate()` 只回 SVG 不回文本 ⇒ 想同时断言
+// "正确文本必须过"和"错误文本必须不过"，就得把出图钉成已知文本。
+// 代价如实说明：本文件不再覆盖 svg-captcha 的真实出图（size/ignoreChars 由库自己负责），
+// 换来的是本仓那三层语义（trim + 大小写不敏感 + 一次性消费）第一次可证伪。
+//
+// `create` 的函数体要**延迟**到调用时才读 mockCaptchaSpec：`jest.mock` 会被提到所有
+// require 之前，而工厂在 `require('svg-captcha')` 那一刻就执行——直接引用 const 会撞
+// TDZ（模块初始化期 ReferenceError）。名字必须以 mock 开头：hoist 插件禁止工厂引用
+// 非 mock 前缀的外部变量。
+const mockCaptchaSpec = { text: 'Ab3d' }; // 4 位、不含易混淆字符（库的 ignoreChars 集）
+
+jest.mock('svg-captcha', () => ({
+  create: () => ({
+    text: mockCaptchaSpec.text,
+    data: '<svg data-testid="captcha">zz</svg>',
+  }),
+}));
+
 describe('图形验证码服务（captchaService）', () => {
   // R-3 迁移后 generate/verify 为异步 API（共享存储读取必须异步），调用需 await
-  test('generate 返回一次性 token，正确文本 verify 通过', async () => {
+  test('generate 返回一次性 token：正确文本必过、错误文本必不过、成功消费后重放必不过', async () => {
     const { captchaId, svg } = await captchaService.generate();
     expect(captchaId).toBeTruthy();
     expect(typeof svg).toBe('string');
     expect(svg.length).toBeGreaterThan(0);
 
-    // 通过 verify 获取真实文本比对（verify 内部消费，不能直接读 text）
-    // 此处以"错误文本必须失败 + 正确文本必须成功"两路夹逼验证
-    const ok = await captchaService.verify(captchaId, 'UNKNOWN_PLACEHOLDER');
-    // 由于无法读取明文，这里先验证"错误文本失败"，再用第二次 generate 验证逻辑一致性
-    expect(ok).toBe(false);
+    // 正向半边。此前这里只留下"错误文本失败"一路 ⇒ 一个恒返回 false 的 verify
+    // （或把比对写成 `input === entry.text` 的区分大小写版本）也是绿的，
+    // 而注释声称的是"两路夹逼"。
+    expect(await captchaService.verify(captchaId, mockCaptchaSpec.text)).toBe(true);
+    // 一次性语义在**成功**路径上同样成立（旧文件只覆盖了失败路径的删除）
+    expect(await captchaService.verify(captchaId, mockCaptchaSpec.text)).toBe(false);
+
+    // 反向半边：错误文本必须不过
+    const wrong = await captchaService.generate();
+    expect(await captchaService.verify(wrong.captchaId, 'UNKNOWN_PLACEHOLDER')).toBe(false);
+
+    // 宽松口径也要钉住：大小写与首尾空格是刻意容忍的（用户手输），不能留给运气
+    const loose = await captchaService.generate();
+    expect(
+      await captchaService.verify(loose.captchaId, `  ${mockCaptchaSpec.text.toLowerCase()}  `)
+    ).toBe(true);
   });
 
-  test('同一 token 二次消费失败（一次性语义，防验证码复用）', async () => {
-    // 首先生成并一次性校验正确文本无法在单测中获取明文，故改用：
-    // 1) 用错误文本消费一次（也应使 token 失效，verify 无论成败都删除）
-    // 2) 再次用任意文本消费同一 token 应失败，证明"无论成败都删除"
+  test('失败也消费：错误文本用掉一次后，正确文本再来仍失败', async () => {
+    // 旧写法断的是「错误文本 → false，同一 token 再用错误文本 → false」。那一对
+    // 断言对"是否删除"完全不敏感：一个永不删除条目的实现也是 false/false，
+    // 于是标题里的"一次性语义"实际没人守（绿但不设防）。
+    // 现在把第二次换成**正确**文本：只有"失败也删除"成立时才会是 false。
     const { captchaId } = await captchaService.generate();
-    const first = await captchaService.verify(captchaId, 'WRONG');
-    expect(first).toBe(false); // 错误文本首次即失败
+    expect(await captchaService.verify(captchaId, 'WRONG')).toBe(false);
 
-    const second = await captchaService.verify(captchaId, 'WRONG');
-    expect(second).toBe(false); // 已删除，重放彻底失败
+    expect(await captchaService.verify(captchaId, mockCaptchaSpec.text)).toBe(false);
   });
 
   test('缺失 captchaId / captchaText 时 verify 直接返回 false', async () => {
