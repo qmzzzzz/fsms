@@ -43,6 +43,7 @@ const LINT_BLIND = [
   { file: 'migrations/20260831000000-reconcile-audit-index-options.js', because: '' },
   { file: 'migrations/20260919000000-reconcile-audit-ttl-to-retention.js', because: '' },
   { file: 'migrations/20260926000000-cursor-tiebreak-compound-indexes.js', because: '' },
+  { file: 'migrations/20260928000000-audit-username-ci-index.js', because: '' },
   { file: 'migrate-mongo-config.js', because: '' },
   { file: 'playwright.config.js', because: '' },
   { file: 'scripts/perf/k6-core-journeys.js', because: 'scripts/perf/k6-*.js' },
@@ -222,8 +223,10 @@ describe('lint 与 format 两条门禁的扫描面必须同源', () => {
       expect(ESLINT_IGNORES).toContain(e.because);
       expect(isIgnoredBy(e.file, [e.because])).toBe(true);
     }
-    // 无理由的债也要有数：当前 7 条旁路里 6 条待修（交接项），这个数字只该往下走。
-    expect(LINT_BLIND.filter((e) => !e.because)).toHaveLength(6);
+    // 无理由的债也要有数：当前 8 条旁路里 7 条待修（交接项），这个数字只该往下走。
+    // 2026-09-28 由 6→7：补记 20260928000000 迁移文件入库时漏掉的登记（当时被
+    // test job 的 18.x fail-fast 连坐掩盖，红灯从未真正跑到这里）。
+    expect(LINT_BLIND.filter((e) => !e.because)).toHaveLength(7);
     // 前端 lane 的忽略表是**按文本抽**出来的（ESM 在 jest 的 CJS 运行时 require 不动）。
     // 抽取会静默少读：不判"抽到了几条"，而是判"文件里有这个键 ⇒ 抽取器一定不空"。
     // 缺了这条，哪天 ignores 写成 `ignores: getIgnores()` 或换行形制变了，抽取器返回 []，
