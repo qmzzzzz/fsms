@@ -241,17 +241,24 @@ const DATE_ONLY_LOOSE = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
  * 时间原样保留**（对合法日期是恒等变换，因此不会把 23:59 这类终态时刻挪走）。
  */
 const DATE_PREFIX_WITH_TIME = /^(\d{4})-(\d{2})-(\d{2})([T ].*)$/;
-const parseDateBoundary = (dateStr, boundary) => {
+/**
+ * @param {string} dateStr 日期参数
+ * @param {'start'|'end'} boundary
+ * @param {string} [timeZone] IANA 时区；缺省 = 业务时区（既有口径不变）。
+ *                            报表接口把浏览器的 resolvedOptions().timeZone 传进来，
+ *                            使「今日」按浏览器所在时区的本地自然日计算。
+ */
+const parseDateBoundary = (dateStr, boundary, timeZone) => {
   if (typeof dateStr === 'string') {
     const parts = DATE_ONLY_LOOSE.exec(dateStr.trim());
     const [, yy, mm, dd] = parts || [];
     // 上下界一起判：把 0 月塞进 businessDayBounds 会在 Intl 格式化处抛 RangeError，
     // 于是"该 400 的坏参数"变成 500；越界值一律留给 new Date() 判成无效，由上游拒掉。
     if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
-      const { businessDayBounds } = require('../constants/timezone');
+      const { zonedDayBounds, BUSINESS_TIMEZONE } = require('../constants/timezone');
       // 必须补齐零再转发：非零填充串会被 businessDayBounds 静默换成"今天"
       const pad = (v) => String(v).padStart(2, '0');
-      const bounds = businessDayBounds(`${yy}-${pad(mm)}-${pad(dd)}`);
+      const bounds = zonedDayBounds(timeZone || BUSINESS_TIMEZONE, `${yy}-${pad(mm)}-${pad(dd)}`);
       return boundary === 'end' ? bounds.end : bounds.start;
     }
     const timed = DATE_PREFIX_WITH_TIME.exec(dateStr.trim());
@@ -306,10 +313,10 @@ const isValidDateParam = (value) => {
  * @param {string|undefined} endDate 结束日期（同上，含当天末尾语义）
  * @returns {Object} Mongo 范围条件对象（可能为空对象）
  */
-const buildDateRangeFilter = (startDate, endDate) => {
+const buildDateRangeFilter = (startDate, endDate, timeZone) => {
   const dateFilter = {};
-  if (startDate) dateFilter.$gte = parseDateBoundary(startDate, 'start');
-  if (endDate) dateFilter.$lte = parseDateBoundary(endDate, 'end');
+  if (startDate) dateFilter.$gte = parseDateBoundary(startDate, 'start', timeZone);
+  if (endDate) dateFilter.$lte = parseDateBoundary(endDate, 'end', timeZone);
   return dateFilter;
 };
 

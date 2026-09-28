@@ -17,6 +17,43 @@ const { hasPermission } = require('../utils/permissionHelper');
 const { applyAuditDataScope } = require('../services/auditScopeFilter');
 const { isValidDateParam, buildDateRangeFilter } = require('../utils/helpers');
 const { BUSINESS_TIMEZONE } = require('../constants/timezone');
+
+/**
+ * 解析请求的浏览器时区参数（统计看板「今日」范围用）
+ *
+ * 前端把 `Intl.DateTimeFormat().resolvedOptions().timeZone` 原样传上来；不传 =
+ * 业务时区（既有口径不变）。非法时区必须 400 拒绝而不是吞掉：让 Intl 在聚合
+ * 路径上抛 RangeError 会把"参数写错了"变成 500，且边界静默回落业务时区会让
+ * 两个时区的用户看到同一份数据却各自以为是自己的"今天"。
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @returns {string|null} 合法时区名；非法时返回 null（响应已写出）
+ */
+const resolveQueryTimezone = (req, res) => {
+  const tz = typeof req.query.tz === 'string' ? req.query.tz.trim() : '';
+  if (!tz) return BUSINESS_TIMEZONE;
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: tz });
+    return tz;
+  } catch {
+    ApiResponse.error(res, '时区参数无效', 400);
+    return null;
+  }
+};
+
+/**
+ * 报表日期参数的统一 400 出口（export/alarm 两个入口共用，也把
+ * exportReport 的圈复杂度收在本文件限内）。
+ * @returns {boolean} true = 已写出 400 响应，调用方短路
+ */
+const rejectInvalidReportDates = (res, startDate, endDate) => {
+  if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
+    ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
+    return true;
+  }
+  return false;
+};
 const FireAlarm = require('../models/FireAlarm');
 const {
   scopeFilterFor,
@@ -48,10 +85,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
  */
 const getDeviceReport = asyncHandler(async (req, res) => {
   const { startDate, endDate } = req.query;
-
-  if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
-    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
-  }
+  if (rejectInvalidReportDates(res, startDate, endDate)) return;
 
   const data = await reportStatsService.getDeviceReportData({
     ...req.query,
@@ -66,13 +100,11 @@ const getDeviceReport = asyncHandler(async (req, res) => {
  */
 const getAlarmReport = asyncHandler(async (req, res) => {
   const { startDate, endDate } = req.query;
+  const tz = resolveQueryTimezone(req, res);
+  if (tz === null || rejectInvalidReportDates(res, startDate, endDate)) return;
 
-  if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
-    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
-  }
-
-  // 日期边界统一经 buildDateRangeFilter（本地时区边界口径，见 utils/helpers）
-  const dateFilter = buildDateRangeFilter(startDate, endDate);
+  // 日期边界统一经 buildDateRangeFilter：date-only 按 tz（缺省业务时区）解析
+  const dateFilter = buildDateRangeFilter(startDate, endDate, tz);
 
   const matchStage = Object.keys(dateFilter).length > 0 ? { occurredAt: dateFilter } : {};
   const thirtyDaysAgo = new Date(Date.now() - TREND_WINDOW_MS);
@@ -153,10 +185,7 @@ const getAlarmReport = asyncHandler(async (req, res) => {
  */
 const getInspectionReport = asyncHandler(async (req, res) => {
   const { startDate, endDate } = req.query;
-
-  if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
-    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
-  }
+  if (rejectInvalidReportDates(res, startDate, endDate)) return;
 
   const data = await reportStatsService.getInspectionReportData({
     ...req.query,
@@ -199,13 +228,12 @@ const exportReport = asyncHandler(async (req, res) => {
   }
 
   // 日期参数校验：非法值会产生 Invalid Date 导致查询抛错
-  if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
-    return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
-  }
+  const tz = resolveQueryTimezone(req, res);
+  if (tz === null || rejectInvalidReportDates(res, startDate, endDate)) return;
 
-  // 日期边界统一经 buildDateRangeFilter：date-only 按本地时区解析，
+  // 日期边界统一经 buildDateRangeFilter：date-only 按 tz（缺省业务时区）解析，
   // 结束日期补全为当天末尾（与审计日志列表接口的「含当天」语义一致）
-  const dateFilter = buildDateRangeFilter(startDate, endDate);
+  const dateFilter = buildDateRangeFilter(startDate, endDate, tz);
 
   // 数据范围过滤(与仪表盘保持一致,确保导出数据和所见一致)
   const dataScope = await getDataScope(req.user.userId);
@@ -291,6 +319,9 @@ module.exports = {
   getAlarmReport,
   getInspectionReport,
   exportReport,
+  // 时区参数解析（测试钩子）：非法 tz 的 400 分支经 HTTP 需要 Mongo 之外的
+  // 完整路由栈，直接单测该纯函数更便宜且可证伪
+  resolveQueryTimezone,
   // 测试钩子（与 auditBuffer.__resetForTest 同惯例）：O-1 容量上限分支
   // 无法经 HTTP 在合理开销内填满 500 键，测试直接驱动缓存与保护函数；
   // streamExportRows 重导出自 service（B-4 两阶段排序的单测入口）

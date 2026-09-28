@@ -81,6 +81,19 @@
     </el-card>
 
     <!-- 简单图表区域 -->
+    <!--
+      时间范围选择器：默认「全部」保持既有口径不变。「今日」按浏览器所在时区的
+      本地自然日计算——把浏览器的 IANA 时区原样传给后端（tz 参数），后端用
+      DST 安全的日界算法换算成 UTC 瞬间，跨夏令时切换日（23/25 小时日）不重叠不空洞。
+    -->
+    <div v-if="!loading" class="range-bar">
+      <el-radio-group v-model="statsRange" @change="loadChartData">
+        <el-radio-button value="all">{{ $t('report.range.all') }}</el-radio-button>
+        <el-radio-button value="today">{{ $t('report.range.today') }}</el-radio-button>
+        <el-radio-button value="7d">{{ $t('report.range.last7') }}</el-radio-button>
+        <el-radio-button value="30d">{{ $t('report.range.last30') }}</el-radio-button>
+      </el-radio-group>
+    </div>
     <el-row v-if="loading" :gutter="16">
       <el-col :xs="24" :md="12">
         <el-card shadow="never">
@@ -282,16 +295,41 @@ const chartTheme = () => {
   }
 }
 
+// 统计时间范围：默认「全部」保持既有口径。「今日/近7天/近30天」的日期串由
+// 浏览器本地时钟产生（setDate 日历日加减，跨夏令时切换不会像毫秒减法那样
+// 漂到错误的日历日），并把浏览器 IANA 时区一并交给后端换算成日界瞬间。
+const statsRange = ref('all')
+
+/**
+ * 浏览器所在时区（IANA 名，如 Asia/Shanghai）。resolvedOptions 在极端环境
+ * （无 ICU 数据）可能给空串，此时后端回落业务时区，行为与旧版一致。
+ */
+const browserTimezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || ''
+
+/** 当前范围的查询参数：all ⇒ 不带任何日期参数（口径与历史版本完全一致） */
+const rangeParams = () => {
+  if (statsRange.value === 'all') return {}
+  const offset = statsRange.value === 'today' ? 0 : statsRange.value === '7d' ? -6 : -29
+  const dayStr = (off) => {
+    const d = new Date()
+    d.setDate(d.getDate() + off)
+    return localDateStr(d)
+  }
+  return { startDate: dayStr(offset), endDate: dayStr(0), tz: browserTimezone() }
+}
+
 // 加载图表数据（实例仅在 onMounted 初始化一次，后续复用实例仅 setOption）
 const loadChartData = async () => {
   try {
     // 按当前主题取色，主题切换时由 watch 触发重绘
     const theme = chartTheme()
 
+    const params = rangeParams()
+
     // 获取报警类型分布
     // O-2：报警与设备两个图表请求并行，避免串行叠加时延
     const [alarmRes, deviceRes] = await Promise.all([
-      api.reports.getAlarms(),
+      api.reports.getAlarms(params),
       api.reports.getDevices(),
     ])
     const alarmData = alarmRes?.data?.data || {}
@@ -662,6 +700,13 @@ onUnmounted(() => {
   display: flex;
   gap: var(--xf-spacing-md);
   align-items: center;
+}
+
+/* 时间范围选择器：与卡片间距一致，右对齐弱化（辅助控件不抢图表注意力） */
+.range-bar {
+  margin-bottom: 16px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .chart-box {

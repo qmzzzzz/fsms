@@ -435,6 +435,12 @@ export default {
     inspectionReport: '巡检报表',
     exportExcel: '导出 Excel',
     dateRange: '日期范围',
+    range: {
+      all: '全部',
+      today: '今日',
+      last7: '近7天',
+      last30: '近30天',
+    },
     startDate: '开始日期',
     endDate: '结束日期',
     avgResponseTime: '平均响应时长',

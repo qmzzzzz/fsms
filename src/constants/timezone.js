@@ -50,40 +50,56 @@ const businessDateParts = (at = new Date()) => {
 };
 
 /**
- * 某一刻在业务时区的墙上时间分量（formatter 复用，一次构造多次取值）
+ * 某一刻在指定时区的墙上时间分量（formatter 复用，同一时区一次构造多次取值）
+ *
+ * formatter 按时区缓存：报表接口允许前端传浏览器所在时区（IANA），时区串是
+ * 客户端可控输入，缓存必须设上限——否则轮换时区串即可驱动 Intl 构造器撑爆内存
+ * （与 securityAlert.alertRateLimit 同一条"容量必须有界"的纪律）。
  */
-const DAY_PARTS_FMT = new Intl.DateTimeFormat('en-CA', {
-  timeZone: BUSINESS_TIMEZONE,
-  hour12: false,
-  // 时轮必须显式钉住，两枚选项各挡一种实测形状（本机 ICU 探针）：
-  //   只留 hour12:false（丢掉本行）⇒ '00'，当前构建安全，但换构建可落到 h24 ⇒ 午夜输出 '24'；
-  //   两枚都丢 ⇒ en-CA 直接走 h12，午夜输出 '12'——offsetAt 会把业务日界算偏 12 小时，
-  //   同时 businessHour 读成 12 让 isOffHours 在午夜整点判成"常规时间"（漏报非常规时间告警）。
-  // 判据由 src/tests/constants/businessHourSingleSource.test.js 的午夜臂钉住。
-  hourCycle: 'h23',
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-});
+const DAY_PARTS_FMT_CACHE_LIMIT = 32;
+const dayPartsFmtCache = new Map();
+const dayPartsFmt = (timeZone) => {
+  let fmt = dayPartsFmtCache.get(timeZone);
+  if (!fmt) {
+    if (dayPartsFmtCache.size >= DAY_PARTS_FMT_CACHE_LIMIT) dayPartsFmtCache.clear();
+    fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      hour12: false,
+      // 时轮必须显式钉住，两枚选项各挡一种实测形状（本机 ICU 探针）：
+      //   只留 hour12:false（丢掉本行）⇒ '00'，当前构建安全，但换构建可落到 h24 ⇒ 午夜输出 '24'；
+      //   两枚都丢 ⇒ en-CA 直接走 h12，午夜输出 '12'——offsetAt 会把业务日界算偏 12 小时，
+      //   同时 businessHour 读成 12 让 isOffHours 在午夜整点判成"常规时间"（漏报非常规时间告警）。
+      // 判据由 src/tests/constants/businessHourSingleSource.test.js 的午夜臂钉住。
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    dayPartsFmtCache.set(timeZone, fmt);
+  }
+  return fmt;
+};
 
-const partsOf = (instantMs) =>
-  DAY_PARTS_FMT.formatToParts(new Date(instantMs)).reduce((acc, p) => {
-    acc[p.type] = p.value;
-    return acc;
-  }, {});
+const partsOf = (instantMs, timeZone = BUSINESS_TIMEZONE) =>
+  dayPartsFmt(timeZone)
+    .formatToParts(new Date(instantMs))
+    .reduce((acc, p) => {
+      acc[p.type] = p.value;
+      return acc;
+    }, {});
 
-/** 该 UTC 瞬间在业务时区属于哪一天（YYYY-MM-DD） */
-const localDateOf = (instantMs) => {
-  const p = partsOf(instantMs);
+/** 该 UTC 瞬间在指定时区属于哪一天（YYYY-MM-DD） */
+const localDateOf = (instantMs, timeZone = BUSINESS_TIMEZONE) => {
+  const p = partsOf(instantMs, timeZone);
   return `${p.year}-${p.month}-${p.day}`;
 };
 
 /** 该 UTC 瞬间的墙上时间相对 UTC 的偏移（把墙上时间当 UTC 读回来即得偏移） */
-const offsetAt = (instantMs) => {
-  const p = partsOf(instantMs);
+const offsetAt = (instantMs, timeZone = BUSINESS_TIMEZONE) => {
+  const p = partsOf(instantMs, timeZone);
   const shownUtcMs = Date.UTC(
     Number(p.year),
     Number(p.month) - 1,
@@ -114,13 +130,14 @@ const offsetAt = (instantMs) => {
  * `本地日期===该日 且 减 1ms 已属前一天`** 的。该判据定义的是唯一瞬间，
  * 因此候选里至多一个成立，取第一个即等于取最小值；无 DST 的区第一轮就中。
  */
-const utcStartOfBusinessDay = (day) => {
+const utcStartOfBusinessDay = (day, timeZone = BUSINESS_TIMEZONE) => {
   const probeMs = new Date(`${day}T00:00:00Z`).getTime();
-  const isStartOfDay = (t) => localDateOf(t) === day && localDateOf(t - 1) !== day;
-  let cur = probeMs - offsetAt(probeMs);
+  const isStartOfDay = (t) =>
+    localDateOf(t, timeZone) === day && localDateOf(t - 1, timeZone) !== day;
+  let cur = probeMs - offsetAt(probeMs, timeZone);
   for (let i = 0; i < 4; i += 1) {
     if (isStartOfDay(cur)) return new Date(cur);
-    cur = probeMs - offsetAt(cur);
+    cur = probeMs - offsetAt(cur, timeZone);
   }
   // 兜底：候选里没有一个满足极值判据（本机 ICU 实测不会走到，全年 6 区扫描恒有解）
   // ⇒ 退回最后一次修正值，行为不劣于修前的一次性偏移。
@@ -161,16 +178,31 @@ const clampToRealCalendarDay = (day) => {
  * 两天。取"次日零点 − 1ms"则两种情况都自动正确，且相邻日首尾相接成为恒等式。
  * 日期 +1 天走 UTC 日历（12:00Z 处加 24h 再取日期），不受本机时区与夏令时影响。
  */
-const businessDayBounds = (dateStr) => {
+const businessDayBounds = (dateStr) => zonedDayBounds(BUSINESS_TIMEZONE, dateStr);
+
+/**
+ * 任意 IANA 时区「某一天」对应的 UTC 起止瞬间（报表接口的浏览器时区口径）
+ *
+ * 与 businessDayBounds 同一条 DST 安全算法（见其注释），差别只在时区来自
+ * 参数而非配置：前端把 `Intl.DateTimeFormat().resolvedOptions().timeZone`
+ * 原样传上来，"今日"按**浏览器**所在时区的本地自然日计算——东八区管理员的
+ * "今天"与纽约终端的"今天"各自正确，夏令时切换日由"次日 start − 1ms"的
+ * 构造自动兼容（23/25 小时日都不重叠不空洞）。
+ *
+ * @param {string} timeZone IANA 时区名（调用方须先验证合法性，非法名 Intl 会抛 RangeError）
+ * @param {string} [dateStr] YYYY-MM-DD；缺省取该时区的今天
+ * @returns {{start: Date, end: Date, dateStr: string}} start 含当日 00:00:00.000，end 含 23:59:59.999
+ */
+const zonedDayBounds = (timeZone, dateStr) => {
   const day = clampToRealCalendarDay(
-    dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? dateStr : businessDateParts().dateStr
+    dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? dateStr : localDateOf(Date.now(), timeZone)
   );
 
-  const start = utcStartOfBusinessDay(day);
+  const start = utcStartOfBusinessDay(day, timeZone);
   const nextDay = new Date(new Date(`${day}T12:00:00Z`).getTime() + 24 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10);
-  const end = new Date(utcStartOfBusinessDay(nextDay).getTime() - 1);
+  const end = new Date(utcStartOfBusinessDay(nextDay, timeZone).getTime() - 1);
   return { start, end, dateStr: day };
 };
 
@@ -239,4 +271,6 @@ module.exports = {
   OFF_HOURS_START,
   OFF_HOURS_END,
   clampToRealCalendarDay,
+  // 报表接口的浏览器时区口径（任意 IANA 区的 DST 安全日界）
+  zonedDayBounds,
 };

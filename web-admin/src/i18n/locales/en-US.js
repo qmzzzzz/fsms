@@ -434,6 +434,13 @@ export default {
     inspectionReport: 'Inspection Report',
     exportExcel: 'Export Excel',
     dateRange: 'Date Range',
+    range: {
+      all: 'All',
+      today: 'Today',
+      last7: 'Last 7 days',
+      last30: 'Last 30 days',
+    },
+
     startDate: 'Start Date',
     endDate: 'End Date',
     avgResponseTime: 'Avg Response Time',

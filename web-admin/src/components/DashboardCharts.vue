@@ -253,16 +253,28 @@ const getColor = (name) => {
 
 const deviceTypeLabel = (type) => makeDeviceTypeLabels(t)[type] || type
 
+/**
+ * 「n 个日历日之前」的本地 Date： setDate 按日历日回退，夏令时切换日
+ * （23/25 小时日）不会像毫秒减法那样落到前一天 23:00 导致取错日历日。
+ */
+const localDaysAgo = (n) => {
+  const d = new Date()
+  d.setDate(d.getDate() - n)
+  return d
+}
+
 const doLoad = async () => {
   // P3-39：图表数据全部来自 report 接口
   if (!canShowCharts()) return
   try {
     // 两个报表请求无依赖关系，并行发出；各自 .catch(() => null) 保持与串行时一致的容错语义
     const [alarmRes, deviceRes] = await Promise.all([
-      // 近7天的报警数据
+      // 近7天的报警数据：起始日按「日历日」回退（setDate）——毫秒减法
+      // `Date.now() - 7*24h` 在跨夏令时切换时会漂到 23:00（23/25 小时日），
+      // toLocalDateStr 就会取错一天的日历日，7 天窗口整体偏移一天
       api.reports
         .getAlarms({
-          startDate: toLocalDateStr(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)),
+          startDate: toLocalDateStr(localDaysAgo(7)),
         })
         .catch(() => null),
       // 设备类型分布数据
@@ -271,11 +283,11 @@ const doLoad = async () => {
 
     // 处理报警数据 - 按天统计
     const alarmByDay = alarmRes?.data?.data?.byDay || []
-    // 生成最近7天的日期
+    // 生成最近7天的日期：同样按日历日回退，保证 X 轴日期串与请求窗口同口径
     const dates = []
     const counts = []
     for (let i = 6; i >= 0; i--) {
-      const date = new Date(Date.now() - i * 24 * 60 * 60 * 1000)
+      const date = localDaysAgo(i)
       const dateStr = toLocalDateStr(date)
       const dayData = alarmByDay.find((d) => d._id === dateStr)
       // X 轴标签刻意用 locale 短格式（MM-DD）：轴宽有限，定长串会挤爆刻度。
