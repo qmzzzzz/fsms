@@ -11,7 +11,7 @@
  *   [已自陈] 用例内已记录并给出保留理由。复核证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.9 测试资产。
  *   - [已修复·核心] **F-34（Critical·治理）**：`:509-531` 把「`chainBatch` 抛错时文档仍以无哈希方式落库」**断言为期望行为**，与 `services/auditChainVerify.test.js:117-130` 合起来构成链绕过的正式背书 ⇒ **修复该绕过会让 CI 变红**（deliverables/七维代码健康度深度审计-2026-09-18.md）
  *     复核：校验端已修——`services/auditChainVerify.js:25-31`「无哈希记录不再一律算 legacy…出现在带 hash 记录之后 = 完整性无法追认，计入 breaks（type=hash_stripped）」；`services/auditChainVerify.test.js:74-89` 专项断言 `intact:false` / `legacy:0` / `byType.hash_stripped:1`。故「修复该绕过会让 CI 变红」已不成立。残留（非 Critical）：本文件 `:529` 用例标题写「无哈希方式落库」，函数体只断 `count===1`，未断哈希字段缺失。
- *   - [部分有效] `:563-656` 3 处名实不符 + 2 处 env 泄漏 + 3 处固定 sleep，而文件头宣称「已消除固定 sleep」（deliverables/消防管理系统全面代码审计报告-2026-09-16.md）
+ *   - [部分有效] `:563-656` 3 处名实不符 + 2 处 env 泄漏 + 3 处固定 sleep，而文件头宣称「已消除固定 sleep」（原出处 2026-09-16 全面代码审计报告；**该报告已删除**，问题编号保留原样）
  *     复核：env 泄漏已还原（`:498-499`→`:521-523`、`:622-623`→`:648-650` 成对 restore）；固定 sleep 仍有 `:613`（200ms）、`:822`（150ms）——`:64/:98` 属 `waitFor` 轮询，不计。
  *
  * 命名沿革：2026-09-20 由 `auditBufferGap.test.js` 更名。旧名里的
