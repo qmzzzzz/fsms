@@ -8,17 +8,16 @@ const Permission = require('../models/Permission');
 const logger = require('../utils/logger');
 
 /**
- * 取出用户已 populate 的角色列表，剔除 null 占位（L-15）
+ * 取出用户已 populate 的角色列表，剔除可能的 null 洞（L-15）
  *
- * 为什么会有 null：populate 带 `match` 过滤时，Mongoose 会为**未被过滤条件命中**
- * 的引用在原位置保留 null，而不是把数组压缩。于是「有 3 个角色、其中 1 个已停用」
- * 的用户，其 `user.roles` 形如 `[role, null, role]`。
+ * **这是防御性冗余，不是当前必需**：实测 mongoose 8.24.1 在数组路径（含嵌套）对
+ * populate + `match` 未命中的引用是**丢弃元素、压缩数组**，既不产生 null 也不产生
+ * undefined ——「3 个角色、1 个已停用」得到的是 `[role, role]`，**不是** `[role, null, role]`。
+ * 该形状由 `src/tests/zzqoder_populateMatchShape.test.js` 钉住（升级若改为留 null 洞会先红）。
  *
- * 为什么必须统一过滤：本文件历史上只有 getUserPermissions 的权限聚合处
- * （已带 `.filter(Boolean)`）做了这件事，其余取 `r.name` / `r.code` / `r.level`
- * 的位置直接 map——单个 null 即抛 TypeError，被 catch 转成 500。
- * 触发条件并不罕见：管理员停用任一角色后，该角色下所有用户的 /auth/me、
- * 角色检查、层级校验同时 500。修复方向是「跳过失效引用」而非「放宽过滤」。
+ * 保留 `filter(Boolean)` 的理由：本文件多处直接取 `r.name` / `r.code` / `r.level`，
+ * 数组里一旦出现 null 即抛 TypeError 并被上层 catch 转成 500；而过滤成本极低，
+ * 且形状由第三方库决定、历史上改过。修复方向始终是「跳过失效引用」，不是「放宽 match 过滤」。
  *
  * @param {{roles?: Array}} user 已 populate roles 的用户文档
  * @returns {Array} 过滤后的角色数组；入参缺失或非数组时返回 []
@@ -56,7 +55,7 @@ const getUserPermissions = async (userId) => {
     const buttonPermissions = [];
     const apiPermissions = [];
 
-    // match 过滤后 roles 数组中可能残留 null 占位（引用未命中），需跳过
+    // 防御性跳过可能的 null 洞（实测 8.24.1 不留，见 activeRoles 注释与 zzqoder_populateMatchShape.test.js）
     activeRoles(user).forEach((role) => {
       (role.permissions || []).filter(Boolean).forEach((perm) => {
         permissions.add(perm.code);
@@ -107,7 +106,7 @@ const getUserPermissions = async (userId) => {
         avatar: user.avatar,
         lastLoginAt: user.lastLoginAt,
         createdAt: user.createdAt,
-        // L-15：此处原为 user.roles.map(...)，null 占位会抛 TypeError → 500
+        // L-15：此处原为 user.roles.map(...)；改用 activeRoles 后即使出现 null 洞也不会 TypeError
         roles: activeRoles(user).map((r) => ({ name: r.name, code: r.code })),
       },
       permissions: Array.from(permissions),
@@ -269,14 +268,22 @@ const hasAnyPermission = async (userId, permissionCodes) => {
 
 /**
  * 检查用户是否有所有权限（同上，单次取集）
+ *
+ * 空列表必须先判否再进 try：`[].every(...)` 在数学上是 true，
+ * 那是「空集上的全称命题为真」，放到鉴权里等于"调用方没提要求 ⇒ 放行"。
+ * 同文件 hasAnyPermission 的 `.some([])` 本来就是 false——
+ * 一个模块里"任一"与"全部"对同一个空输入给出相反结论，只能是漏写。
+ * 守卫放在取权限集之前，顺带省掉一次必然无意义的查库。
+ *
  * @param {string} userId - 用户 ID
- * @param {string[]} permissionCodes - 权限编码列表
+ * @param {string[]} permissionCodes - 权限编码列表；非数组或空数组一律判否
  * @returns {Promise<boolean>}
  */
 const hasAllPermissions = async (userId, permissionCodes) => {
+  if (!Array.isArray(permissionCodes) || permissionCodes.length === 0) return false;
   try {
     const permCodeSet = await getUserPermissionSet(userId);
-    return (permissionCodes || []).every((code) => matchesPermission(permCodeSet, code));
+    return permissionCodes.every((code) => matchesPermission(permCodeSet, code));
   } catch (error) {
     logger.error(`批量权限检查失败：${error.message}`);
     return false;
@@ -301,7 +308,7 @@ const hasRole = async (userId, roleCodes) => {
     if (!user) return false;
 
     const codes = Array.isArray(roleCodes) ? roleCodes : [roleCodes];
-    // L-15：同 getUserPermissions 口径——null 占位跳过（原先同样会 TypeError）
+    // L-15：同 getUserPermissions 口径——用 activeRoles 跳过可能的 null 洞（原先直接 map）
     const userRoleCodes = activeRoles(user).map((r) => r.code);
 
     return codes.some((code) => userRoleCodes.includes(code));
@@ -312,7 +319,7 @@ const hasRole = async (userId, roleCodes) => {
 };
 
 /**
- * 获取用户的角色列表
+ * 获取用户的角色列表（仅生效角色）
  * @param {string} userId - 用户 ID
  * @returns {Promise<Array>} 角色列表
  */
@@ -320,12 +327,17 @@ const getUserRoles = async (userId) => {
   try {
     const user = await User.findById(userId).populate({
       path: 'roles',
+      // P3-8 同款口径。这里是当初漏掉的那一处：`activeRoles()` 名字像「按 status 过滤」，
+      // 实际只做 filter(Boolean)（剔可能的 null 洞，见 activeRoles 注释），
+      // 所以"下面已经过了 activeRoles"给人虚假的安全感——停用角色照样返回。
+      // select 里不含 status 也不影响 match：match 是 Role 侧的查询条件，先于投影生效。
+      match: { status: 'active' },
       select: 'name code description level',
     });
 
     if (!user) return [];
 
-    // L-15：null 占位跳过
+    // L-15：经 activeRoles 跳过可能的 null 洞
     return activeRoles(user).map((r) => ({
       id: r._id,
       name: r.name,
@@ -357,9 +369,8 @@ const getDataScope = async (userId) => {
  * 无角色操作者对任何层级都判「低于自身」，与「无角色不得变更任何用户」的
  * fail-closed 语义一致，改写为 0 会放行空角色用户执行层级操作，属安全回归。
  *
- * L-15：null 占位（populate match 未命中）按「无该角色」跳过——
- *         原先 `r.level` 直接抛 TypeError。跳过后的语义与「该角色不存在」
- *         一致，对层级校验是更严格的方向（角色少了 → 层级只会更低）。
+ * L-15：`filter(Boolean)` 跳过可能的 null 洞（实测 8.24.1 不留，属防御性冗余）——
+ *         语义与「该角色不存在」一致，对层级校验是更严格的方向（角色少了 → 层级只会更低）。
  *
  * @param {Array<{level?: number}|object>} roles 已 populate 的角色列表
  * @returns {number} 最高层级；空集合 -Infinity；入参缺失 0

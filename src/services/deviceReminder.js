@@ -7,10 +7,18 @@
  *   - expiringSoon 即将到期（默认 30 天内）
  *   - expired     已过期仍在册
  *   - needMaintenance 超过检查周期未维护
+ *   - needSchedule 从未录入过检查日、因而根本没有排期的设备
+ *     （范围比较 $lte 不匹配缺失字段，缺这一档就等于把"没排期"当成"不需排期"）
+ * 四个维度的判据不在这里写：统一取自 constants/deviceAlerts，
+ * 与 stats / 报表 / 仪表盘共用同一份，避免同一台设备在两个出口结论相反。
  */
 
 const FireDevice = require('../models/FireDevice');
 const logger = require('../utils/logger');
+const { deviceAlertFilters } = require('../constants/deviceAlerts');
+// 与 reportDashboardService 的「事实逾期」统计共用同一份派生清单（F-151）：两边各写一遍时，看板会
+// 统计出调度器永不改写的超期数（或反过来漏计），而漏计在看板上显示为「没有超期」——静默的负结果。
+const { INSPECTION_OVERDUE_MARKABLE_STATUSES } = require('../constants/inspection');
 
 // 内存级缓存最新一次扫描结果，供接口快速返回
 let lastScanResult = null;
@@ -24,8 +32,66 @@ let isScanning = false;
  * @param {number} options.expiringDays 即将到期窗口（默认 30 天）
  * @param {Object|null} options.scopeFilter 数据范围过滤（H-1：接口路径按调用者范围过滤；
  *        后台调度不传 = 全库扫描供审计）。带 scopeFilter 的结果不写入全局缓存，避免跨用户泄漏
- * @param {number} options.resultLimit 每维度返回上限（默认 200，防止无界全库返回）
+ * @param {number} options.resultLimit 每维度返回上限（默认 200，防止无界全库返回）。
+ *        上限是「单次返回多少条」，不是「库里有多少条命中」；两者必须一起出口，
+ *        载体是响应里的 `limits.truncated`（见 ALERT_BUCKETS 下方的说明）
  */
+/**
+ * 四档查询的固定形状：`[响应键, 排序键, select 投影]`，键名取自
+ * `constants/deviceAlerts` 的 `deviceAlertFilters()` 返回值（判据只有一份）。
+ *
+ * 表格化不是为了少写几行，而是为了让下面那条「多取一条当探针」的规则只有一份实现：
+ * 四段近乎相同的 `find().select().sort().limit()` 手抄正是「改三处漏一处」的温床，
+ * 而漏掉的那一处不会报错，只会让某一档的计数继续假装是总数。
+ */
+const ALERT_BUCKETS = [
+  ['expired', 'expiryDate', 'deviceCode deviceName deviceType location expiryDate status'],
+  ['expiringSoon', 'expiryDate', 'deviceCode deviceName deviceType location expiryDate status'],
+  [
+    'needMaintenance',
+    'nextCheckDate',
+    'deviceCode deviceName deviceType location nextCheckDate status',
+  ],
+  // 从未做过检查 ⇒ 没有排期 ⇒ $lte 判据永不命中。
+  // 这一档存在的理由就是：一台装好多年的设备可以在所有出口里永久隐身。
+  [
+    'needSchedule',
+    'installDate',
+    'deviceCode deviceName deviceType location installDate checkCycle status',
+  ],
+];
+
+/** 与 ALERT_BUCKETS 同序的档位名，供"未扫描"兜底补齐形状 */
+const ALERT_BUCKET_KEYS = ALERT_BUCKETS.map(([key]) => key);
+
+/**
+ * 形状完整的"本次未扫描"结果。
+ *
+ * 互斥锁命中时旧实现只回 `{summary:{total:0}, skipped:true}`——三个（现四个）明细数组键
+ * 根本不存在，控制器仍按 200 + "获取设备提醒成功"返回。于是首页卡片显示"0 条待办"，
+ * 与"确实没有到期设备"在响应形状上无法区分，安全提醒被静默丢弃。
+ * 现在补齐全部键并带 `partial:true`，让调用方至少能判别降级。
+ */
+const unscannedResult = () => ({
+  scannedAt: new Date().toISOString(),
+  summary: { expired: 0, expiringSoon: 0, needMaintenance: 0, needSchedule: 0, total: 0 },
+  expired: [],
+  expiringSoon: [],
+  needMaintenance: [],
+  needSchedule: [],
+  limits: {
+    // 本次没有扫描 ⇒ 没有上限可言，也没有清单被截断；这些 0 的含义由 `partial` 承担，
+    // 键必须与正常路径同构，否则调用方读 `limits.truncated.expired` 又是一次 undefined
+    resultLimit: null,
+    truncated: {
+      ...Object.fromEntries(ALERT_BUCKET_KEYS.map((key) => [key, false])),
+      total: false,
+    },
+  },
+  skipped: true,
+  partial: true,
+});
+
 const scanDeviceReminders = async (options = {}) => {
   // 互斥锁：防止并发重叠
   if (isScanning) {
@@ -33,73 +99,67 @@ const scanDeviceReminders = async (options = {}) => {
     // 那是无范围的全库扫描结果，直接返回会把全部设备提醒泄漏给低权限用户
     if (options.scopeFilter) {
       logger.warn('设备到期扫描已在进行中，本次数据范围查询跳过');
-      return { scannedAt: new Date().toISOString(), summary: { total: 0 }, skipped: true };
+      return unscannedResult();
     }
     logger.warn('设备到期扫描已在进行中，返回上次全库结果');
-    return (
-      lastScanResult || {
-        scannedAt: new Date().toISOString(),
-        summary: { total: 0 },
-        skipped: true,
-      }
-    );
+    return lastScanResult || unscannedResult();
   }
   isScanning = true;
 
   try {
     const { expiringDays = 30, scopeFilter = null, resultLimit = 200 } = options;
     const base = scopeFilter || {};
+    // 判定时刻取一次，四档共用（跨秒会让同一响应的两档用两个 now）
+    const alert = deviceAlertFilters(new Date(), expiringDays);
 
-    // 已过期仍在册（未报废）
-    const expired = await FireDevice.find({
-      ...base,
-      expiryDate: { $lt: new Date() },
-      status: { $ne: 'scrapped' },
-    })
-      .select('deviceCode deviceName deviceType location expiryDate status')
-      .sort({ expiryDate: 1 })
-      .limit(resultLimit);
+    // 每档多取一条当探针：`limit(resultLimit)` 拿到 `resultLimit` 条时，
+    // 「够不够回答总数」这个问题根本没有信息量——5000 台超期与 200 台超期
+    // 在响应里是同一个形状。多一条只回答「后面还有没有」，而这一条恰好不进清单，
+    // 于是计数与清单同源于同一次查询，不可能分叉成两个窗口里的数。
+    // 四档串行发出（不是 Promise.all）：同一次响应里的判定时刻已经由上面的 `alert` 唯一确定，
+    // 并发只是把「互斥锁命中」时的在途查询数从 1 变成 4，那是另一条线在钉的性质。
+    const pages = [];
+    for (const [key, sortKey, projection] of ALERT_BUCKETS) {
+      const docs = await FireDevice.find({ ...base, ...alert[key] })
+        .select(projection)
+        .sort({ [sortKey]: 1 })
+        .limit(resultLimit + 1);
+      pages.push({
+        key,
+        items: docs.slice(0, resultLimit),
+        truncated: docs.length > resultLimit,
+      });
+    }
 
-    // 即将到期窗口内
-    const windowEnd = new Date();
-    windowEnd.setDate(windowEnd.getDate() + expiringDays);
-    const expiringSoon = await FireDevice.find({
-      ...base,
-      expiryDate: { $gte: new Date(), $lte: windowEnd },
-      status: { $ne: 'scrapped' },
-    })
-      .select('deviceCode deviceName deviceType location expiryDate status')
-      .sort({ expiryDate: 1 })
-      .limit(resultLimit);
-
-    // 超过检查周期未维护且非维护中
-    const needMaintenance = await FireDevice.find({
-      ...base,
-      nextCheckDate: { $lte: new Date() },
-      status: { $nin: ['maintenance', 'scrapped'] },
-    })
-      .select('deviceCode deviceName deviceType location nextCheckDate status')
-      .sort({ nextCheckDate: 1 })
-      .limit(resultLimit);
+    const buckets = Object.fromEntries(pages.map(({ key, items }) => [key, items]));
+    // 任一档被截断 ⇒ total 同样是下界（total 由四档页内集合去重而来，
+    // 看不见没进页面的设备）
+    const anyTruncated = pages.some((page) => page.truncated);
 
     // total 按设备去重：同一设备可同时命中 expired 与 needMaintenance，
     // 直接相加会把一台设备计成两台，总数虚高
-    const uniqueDeviceIds = new Set(
-      [...expired, ...expiringSoon, ...needMaintenance].map((d) => String(d._id))
-    );
+    const uniqueDeviceIds = new Set(pages.flatMap((page) => page.items).map((d) => String(d._id)));
+
+    const summary = {
+      expired: buckets.expired.length,
+      expiringSoon: buckets.expiringSoon.length,
+      needMaintenance: buckets.needMaintenance.length,
+      needSchedule: buckets.needSchedule.length,
+      total: uniqueDeviceIds.size,
+    };
 
     const result = {
       scannedAt: new Date().toISOString(),
       expiringDays,
-      summary: {
-        expired: expired.length,
-        expiringSoon: expiringSoon.length,
-        needMaintenance: needMaintenance.length,
-        total: uniqueDeviceIds.size,
+      summary,
+      ...buckets,
+      limits: {
+        resultLimit,
+        truncated: {
+          ...Object.fromEntries(pages.map((page) => [page.key, page.truncated])),
+          total: anyTruncated,
+        },
       },
-      expired,
-      expiringSoon,
-      needMaintenance,
     };
 
     // 仅后台全库扫描写入全局缓存；按用户范围的查询结果各不相同，不可缓存共享
@@ -109,7 +169,9 @@ const scanDeviceReminders = async (options = {}) => {
     }
 
     logger.info(
-      `设备到期扫描完成：过期 ${expired.length} / 即将到期 ${expiringSoon.length} / 待维护 ${needMaintenance.length}`
+      `设备到期扫描完成：过期 ${summary.expired} / 即将到期 ${summary.expiringSoon} / 待维护 ${summary.needMaintenance} / 未排期 ${summary.needSchedule}${
+        anyTruncated ? `（至少一档达到单次上限 ${resultLimit}，上面的数是页内值而非库里总数）` : ''
+      }`
     );
 
     return result;
@@ -137,7 +199,7 @@ const markOverdueInspections = async () => {
     const Inspection = require('../models/Inspection');
     const res = await Inspection.updateMany(
       {
-        status: { $in: ['pending', 'in_progress'] },
+        status: { $in: INSPECTION_OVERDUE_MARKABLE_STATUSES },
         planEndTime: { $lt: new Date() },
       },
       { $set: { status: 'overdue' } }
@@ -210,19 +272,20 @@ const startReminderScheduler = (intervalMs = 24 * 60 * 60 * 1000) => {
 
 /**
  * 停止调度器并等待当前扫描完成（供优雅关闭调用）
+ * @param {object} [scheduler] 调度器句柄，缺省用模块内 activeScheduler
+ * @param {{maxWaitMs?: number}} [opts] 最长等待。30 s 是硬上限，但优雅关闭会按
+ *   关停总预算把它压得更小（F-103）：一次扫描跑不跑完，不该决定排在前面的审计能不能落盘。
  */
-const stopReminderScheduler = async (scheduler) => {
+const stopReminderScheduler = async (scheduler, { maxWaitMs = 30000 } = {}) => {
   const target = scheduler || activeScheduler;
   activeScheduler = null;
   if (target) {
     clearTimeout(target.firstTimer);
     clearInterval(target.timer);
   }
-  // 等待当前扫描完成（最多 30 秒）
-  let waitCount = 0;
-  while (isScanning && waitCount < 30) {
+  const scanWaitDeadline = Date.now() + Math.max(0, maxWaitMs);
+  while (isScanning && Date.now() < scanWaitDeadline) {
     await new Promise((r) => setTimeout(r, 1000));
-    waitCount++;
   }
 };
 

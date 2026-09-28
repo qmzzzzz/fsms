@@ -128,8 +128,12 @@ const checkRole = (requiredRoles) => {
       } else {
         // 同一请求内复用角色查询结果，避免 N+1
         if (!req.userRoles) {
-          const user = await User.findById(req.user.userId).populate('roles', 'code').lean();
-          req.userRoles = user?.roles?.map((r) => r.code) || [];
+          // 与 auth.js buildAuthContext / getDataScope 同口径：只认生效角色，
+          // 否则停用角色的 code 会在此回退路径复活、绕过 checkRole（filter(Boolean) 为防御可能的 null 洞，实测 8.24.1 不留）。
+          const user = await User.findById(req.user.userId)
+            .populate({ path: 'roles', select: 'code', match: { status: 'active' } })
+            .lean();
+          req.userRoles = (user?.roles || []).filter(Boolean).map((r) => r.code);
         }
         userRoles = req.userRoles;
       }
@@ -156,11 +160,11 @@ const checkRole = (requiredRoles) => {
  * 根据用户角色层级限制可访问的数据范围
  * 返回的数据范围可用于 Controller 中的查询过滤
  *
- * 数据范围类型：
+ * 数据范围类型（阈值与下方 LEVEL_* 常量同源，不要只改注释）：
  * - all: 全部数据（角色 level >= 9）
  * - department: 本部门/本区域数据（角色 level >= 7）
- * - self: 仅自己创建/负责的数据（角色 level >= 5）
- * - none: 无数据权限
+ * - self: 仅自己创建/负责的数据（角色 level >= 4）
+ * - none: 无数据权限（level < 4）
  *
  * @param {string} userId - 用户 ID
  * @returns {Promise<Object>} 数据范围配置
@@ -169,16 +173,27 @@ const getDataScope = async (userId) => {
   const user = await User.findById(userId).populate({
     path: 'roles',
     select: 'level name code',
+    // 与权限轴（userPermissionService/permissionHelper 的 match:{status:'active'}）同口径：
+    // 管理员停用角色必须让「数据范围」也立即失效。否则停用 SUPER_ADMIN 角色后，
+    // getDataScope 仍按其 level 返回 {type:'all'}，10+ 处列表/统计/报表调用方照常全量放行。
+    // populate 过滤后若 roles 全被剔除 → 下方 length===0 分支返回 {type:'none'}（deny），fail-closed。
+    match: { status: 'active' },
   });
 
   if (!user) return { type: 'none' };
 
+  // 防御性 filter(Boolean)：实测 mongoose 8.24.1 对 populate+match 未命中的引用是**丢弃元素**
+  // （不留 null），故今天它不改变结果；保留它是防未来版本改为留 null 洞 —— 形状由
+  // src/tests/zzqoder_populateMatchShape.test.js 钉住（升级会先红），届时 `r.level` 才可能抛错。
+  // 过滤后若 roles 全被剔除 → {type:'none'}（deny），fail-closed。
+  const activeRoles = (user.roles || []).filter(Boolean);
+
   // 处理 roles 为空的情况
-  if (!user.roles || user.roles.length === 0) {
+  if (activeRoles.length === 0) {
     return { type: 'none' };
   }
 
-  const levels = user.roles.map((r) => r.level || 1);
+  const levels = activeRoles.map((r) => r.level || 1);
   const maxLevel = Math.max(...levels);
 
   // 数据范围层级常量（与 initData.js 中 role level 10/8/6/4/1 对应）
@@ -216,7 +231,15 @@ const buildDataScopeFilter = (
   ownerField = 'createdBy',
   departmentField = 'location.building'
 ) => {
-  if (!dataScope || dataScope.type === 'all') {
+  // 缺失判据一律 deny（与同模块 isRecordInScope / applyDataScopeToQuery 同向）。
+  // 原实现把 `!dataScope` 与 `type==='all'` 并成一臂 `return {}`，而 `{}` 是**空条件 =
+  // 全量放行**：三个兄弟函数里只有这一个在"没有范围信息"时 fail-open。
+  // isRecordInScope 已因同样的理由改成 deny（见其注释「一旦有调用方把 undefined 传进来
+  // （重构、缓存未命中、种子数据缺字段），就变成无条件放行」）——本函数是**漏掉的那一处**。
+  // 今日调用方都传 `await getDataScope(...)`（该函数永不返回 null），所以这是防御性收紧，
+  // 不改变任何现存路径的行为。
+  if (!dataScope) return { _id: null };
+  if (dataScope.type === 'all') {
     return {};
   }
 
@@ -230,13 +253,23 @@ const buildDataScopeFilter = (
 
   switch (dataScope.type) {
     case 'department':
+      // department 为空（用户未填部门，业务常见）必须 deny，不能落到 ownerCondition(null)。
+      // 对设备 ownerCondition(null) = {$or:[{createdBy:null},{'maintenanceRecord.operator':null}]}：
+      // 泄漏臂是 {createdBy:null}——按 Mongo 的 null 语义它会匹配"字段缺失"的文档，
+      // 于是所有未建档设备（播种/导入、createdBy 为空）跨部门全部命中 = 按部门范围却返回全组织数据。
+      // （注：{'maintenanceRecord.operator':null} 对 maintenanceRecord 默认空数组 [] 并不命中。）
+      // 与 applyDataScopeToQuery 的显式 deny 同口径（后者早已拦此情形，这里补齐直接调用方）。
       if (!dataScope.department) {
-        return ownerCondition(null);
+        return { _id: null };
       }
       // 精确匹配而非 RegExp，防止正则注入绕过数据隔离
       return { [departmentField]: dataScope.department };
 
     case 'self':
+      // 同理：self 缺 userId 时 ownerCondition(undefined) 语义含糊，显式 deny。
+      if (!dataScope.userId) {
+        return { _id: null };
+      }
       return ownerCondition(dataScope.userId);
 
     case 'none':
@@ -254,7 +287,11 @@ const buildDataScopeFilter = (
  * @returns {boolean}
  */
 const isRecordInScope = (dataScope, doc, { ownerField, departmentField, userId }) => {
-  if (!dataScope || dataScope.type === 'all') return true;
+  // 缺失判据一律 deny（与同模块 applyDataScopeToQuery 的 `if (!dataScope) return false` 同向）。
+  // 原先写成 return true 是 fail-open：两个兄弟函数对没有范围信息给出相反答案，
+  // 一旦有调用方把 undefined 传进来（重构、缓存未命中、种子数据缺字段），就变成无条件放行。
+  if (!dataScope) return false;
+  if (dataScope.type === 'all') return true;
   if (!doc) return false;
 
   // 路径取值需感知数组：如 locations.building / maintenanceRecord.operator，
@@ -288,6 +325,12 @@ const isRecordInScope = (dataScope, doc, { ownerField, departmentField, userId }
     collectValues(value, values);
     return values.some((v) => v === String(expected));
   };
+
+  // 自己的记录永远在自己范围内（唯一例外是 type:'none'）。
+  // createdBy 与 department 都是可选字段：播种账户、以及范围闸上线之前创建的存量账户很可能是 null，
+  // 只比这两个字段会让"改自己的资料""自己被锁定"被自己的范围闸拒掉（self/department 档实测均如此）。
+  // 'none'（GUEST）必须在短路之前排除：不能因为"是自己的记录"就拿到任何数据权限。
+  if (dataScope.type !== 'none' && matchesField(getPath(doc, '_id'), userId)) return true;
 
   switch (dataScope.type) {
     case 'department':
@@ -349,10 +392,13 @@ const applyDataScopeToQuery = (query, dataScope, { ownerField, departmentField }
   // 显式 deny 判定（不依赖 buildDataScopeFilter 的兜底形态）：
   // - 无范围信息 / 未知 type / type='none' → 拒绝
   // - type='department' 但 department 为空 → 拒绝（这正是曾经零过滤越权的入口）
-  // 之所以在此显式判断而非复用 buildDataScopeFilter 的返回值：后者对
-  // 「department 为空」返回的是 { [ownerField]: null }，一个语义含糊的
-  // 「匹配属主为空的记录」条件——它恰好使结果集接近空，但并不表达 deny，
-  // 且会让调用方误以为查询有效。这里把 deny 变成明确的布尔信号。
+  // 之所以在此显式判断而非复用 buildDataScopeFilter 的返回值：
+  //  ① dataScope 为假时它返回 **{}**（与 type='all' 同一分支）＝不加任何过滤＝全量数据，
+  //     这是"看起来像 deny 的兜底对象"里最危险的一种形态，绝不能被当成拒绝；
+  //  ② department 缺值 / self 缺 userId / type='none' 或未知 type 时它返回 { _id: null }，
+  //     "匹配不到文档"只在**该条件真的被 AND 进最终查询**时才成立——它是个查询片段而不是
+  //     拒绝信号：调用方同名字段覆盖、或把"拿到对象"当成"范围有效"来分支时 deny 静默失效。
+  // 布尔返回值不会静默降级，也让调用方无需反推"这个条件到底是不是空集"。
   if (!dataScope) return false;
   if (dataScope.type === 'all') return true;
   if (dataScope.type === 'none') return false;
@@ -374,6 +420,39 @@ const applyDataScopeToQuery = (query, dataScope, { ownerField, departmentField }
   return true;
 };
 
+/**
+ * 部门维度的**单值**判定：某个字符串（楼栋名/部门名）是否落在操作者的数据范围内。
+ *
+ * 存在必要性：`isRecordInScope` 判的是"一条已存在的文档"，而写路径要在**入库之前**
+ * 判断"用户填进来的这个值能不能写"（设备的 `location.building`、巡检的
+ * `locations[].building`，两者都是各自的 departmentField）。这条规则原先在巡检守卫里
+ * 内联一份，设备侧则完全没有——同一规则两处口径不同正是本仓反复出现的漂移形状。
+ *
+ * 档位语义与 `isRecordInScope` 保持一致：
+ *  · all ⇒ 不限；
+ *  · department ⇒ 必须等于本人部门，未配置部门一律 deny（空部门曾经导致"零过滤放行"）；
+ *  · self ⇒ 该维度恒允许：self 档的可见性由属主臂决定，楼栋对它不是范围维度，
+ *    把它判死会让消防员无法给自己维护的设备填位置（过度收紧）；
+ *  · none / 未识别的档位 ⇒ 一律 deny（新增档位不得静默变成全量授权）。
+ *
+ * @param {Object} dataScope getDataScope 的返回值
+ * @param {string} value 待写入的部门维度值
+ */
+const isDepartmentValueAllowed = (dataScope, value) => {
+  if (!dataScope) return false;
+  switch (dataScope.type) {
+    case 'all':
+      return true;
+    case 'department':
+      return Boolean(dataScope.department) && value === dataScope.department;
+    case 'self':
+      return true;
+    case 'none':
+    default:
+      return false;
+  }
+};
+
 module.exports = {
   checkPermission,
   checkViewSensitivePermission,
@@ -383,4 +462,5 @@ module.exports = {
   applyDataScopeToQuery,
   isRecordInScope,
   assertRecordInScope,
+  isDepartmentValueAllowed,
 };

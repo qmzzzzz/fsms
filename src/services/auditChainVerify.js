@@ -1,8 +1,10 @@
 /**
  * 审计哈希链完整性校验服务
  *
- * 单一实现，供三方复用：运维脚本（scripts/verify-audit-chain.js）、
- * 管理接口（GET /api/security/audit-chain/verify）、周期性自检任务。
+ * 单一实现，供三方复用：运维脚本（scripts/verify-audit-chain.js 与
+ * scripts/resign-audit-chain-v3.js 的改写前/后核验）、管理接口
+ * GET /api/security/audit-logs/verify（见 controllers/auditController.verifyAuditChainIntegrity）。
+ * 没有"周期性自检"这一方：链核验至今只在被调用时执行，未接入任何定时任务。
  *
  * 三层校验，强度递减但互补：
  *
@@ -14,13 +16,14 @@
  *    整条链重算；hmac = HMAC-SHA256(HMAC_SECRET, hash) 是唯一真正的防线。
  *    缺失或失配均计入断裂。未配置 HMAC_SECRET 时降级并显式声明。
  *
- * 3. 链接性校验（删除/插入检测）—— 每条记录的 prevHash 必须命中「近期已见
+ * 3. 链接性校验（删除检测）—— 每条记录的 prevHash 必须命中「近期已见
  *    hash 的滑动窗口」。用窗口而非「严格等于上一条的 hash」，是因为 _id 顺序
  *    与实际串链顺序存在小幅错位：AuditLog.create 在构造文档时就分配了 _id，
  *    而 auditBuffer 走 insertMany 的批次要等 2s 定时器才拿到 _id——两者在
  *    链锁上的先后可能与 _id 大小相反。这种错位不是完整性问题（哈希链本身连续），
  *    严格逐对比较会产出大量假阳性断链，反而掩盖真实篡改。
- *    窗口足够小（LINK_WINDOW_SIZE），删除或插入记录仍会立即暴露。
+ *    窗口足够小（LINK_WINDOW_SIZE），**删除**记录会立即暴露。注意别把它读成
+ *    "插入也覆盖"——插入伪造在本层不可检出，成因与修法见下方「已知检出上限」段。
  *
  * 无哈希记录不再一律算 legacy（P2 级修正）：哈希链自启用起就是**连续**的，
  * 因此「无 hash」出现在带 hash 记录之前 = 存量 legacy（不计断裂），出现在之后 =
@@ -30,10 +33,20 @@
  * 注：$unset 只能由绕过 mongoose 中间件的写入完成（直连驱动 / mongosh），
  * 而这正是本服务要防的威胁模型（持有 DB 写权限的内部人）。
  *
+ * 「legacy 段之后第一条」不属免检档（同一族的另一头）：链接检查只对**窗口的第一条**免检
+ * ——它的父记录确实可能在窗口之外（maxRecords 截断、TTL 把头一批删掉）。legacy 段之后的
+ * 那条不是这一档：它声称的父哈希就落在它前面那条记录的位置上，而那条没有哈希。
+ * 诚实形态照样过得去——链启用时库里读不到任何带哈希的记录，启用后的第一条 prevHash 为 null，
+ * 而 prevHash=null 本就是链首。早先的实现让 legacy 也重置这道免检，实测
+ * 「整窗 $unset 但留最新一条」= intact true、判据 code 0（等于为灭迹背书"链完整"），
+ * 而「整窗抹光」反而被下面的 nothingHashed 挡在 code 2 ⇒ 留一条比抹光更好用。
+ * 判据与四种诚实/攻击形态的对照见
+ * `src/tests/services/zzqB_auditChainLegacyPrefixWash.test.js`。
+ *
  * 已知检出上限（不得当作已修好）：**插入**一条 prevHash 指向链中已有 hash 的
  * 伪造记录，在本设计下不可检出——滑动窗口只要求 prevHash 命中近期任一 hash。
  * 要堵住它需要给链上每条记录一个参与哈希的序号（chainIndex），使"父子关系"
- * 变成严格线性；那是一次需要全量重签的格式升级，不在本轮范围。
+ * 变成严格线性；那是一次需要全量重签的格式升级，不在本次改动范围。
  *
  * 存量数据的已知限制（必须如实告知，不得当作「已修好」）：
  * - hashVersion=null（legacy，本机 1137 条）：写入时无哈希链，完全无保护。
@@ -58,7 +71,7 @@ const {
 } = require('../utils/auditChain');
 
 // 链接性校验的滑动窗口大小：容纳 _id 与串链顺序的正常错位，
-// 远小于任何有意义的删除批量，不影响篡改检出
+// 远小于任何有意义的删除批量 ⇒ 删除可检出；插入伪造不可检，见文件头「已知检出上限」
 const LINK_WINDOW_SIZE = 256;
 
 // 单次校验的记录上限：审计集合可达千万级，全量校验必须由离线脚本分段执行。
@@ -100,6 +113,9 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
     hmac_missing: 0,
     hmac_mismatch: 0,
     chain_break: 0,
+    // F-184a：同一个父哈希被两条记录认领（链在此处分叉成 DAG）。原判据是成员测试，
+    // 一个父节点挂两个子节点照样通过 ⇒ 「防篡改」的链接性在最关键的一种形态上是静默的。
+    chain_fork: 0,
     hash_stripped: 0,
   };
   // v2 批量路径的历史默认值漂移：不是篡改，单独计数不计入 breaks
@@ -123,15 +139,35 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
   // 近期已见 hash 的滑动窗口（Set 用于命中判断，数组用于按序淘汰）
   const seen = new Set();
   const seenOrder = [];
+  /**
+   * F-184a：`prevHash → 第一个认领它的记录`。
+   *
+   * 链接性原本只做**成员测试**（`seen.has(doc.prevHash)`），而分叉的形态恰恰是
+   * "一个父节点挂了两个子节点"：两条记录的 prevHash 都在窗口内（无 chain_break）、
+   * 各自的 hash 也都算得回来（无 hash_mismatch）⇒ 整链其实已经是 DAG，而报告仍然
+   * `intact: true`。分叉不需要攻击者才能造出来：共享链尾写入失败后各实例读到的
+   * 尾不同（见 utils/auditChain 的 advanceChainTail）、锁超时后的僵尸推进、
+   * 或 WAL 重放挑错链尾，都会产出同父两子。
+   * 与 `seen` 同生同灭：淘汰/重置必须同步，否则会拿窗口外的旧子报假分叉。
+   */
+  const firstChildOf = new Map();
+  const forgetOldest = () => {
+    const oldest = seenOrder.shift();
+    if (oldest !== undefined) firstChildOf.delete(oldest);
+  };
+  const resetWindow = () => {
+    seen.clear();
+    seenOrder.length = 0;
+    firstChildOf.clear();
+  };
   const remember = (hash) => {
     seen.add(hash);
     seenOrder.push(hash);
-    if (seenOrder.length > LINK_WINDOW_SIZE) {
-      seen.delete(seenOrder.shift());
-    }
+    if (seenOrder.length > LINK_WINDOW_SIZE) forgetOldest();
   };
 
-  // 窗口起点的 prevHash 无从校验（其父记录在窗口之外），跳过第一条的链接检查
+  // 免检范围严格等于「本窗口的第一条」：它的父记录可能落在窗口之外。
+  // legacy 段之后的那条不在这一档里（那里置 isFirst=false），见文件头的说明。
   let isFirst = true;
   // 是否已经见过「带哈希」的记录。用于区分两种形态完全不同的无哈希记录：
   // - 出现在带哈希记录**之前**：存量 legacy（写入时尚无哈希链），不属篡改；
@@ -144,8 +180,16 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
   for (const doc of docs) {
     total += 1;
 
-    // 无 hash 的存量记录：计为 legacy，并清空链接窗口
-    // （其后第一条记录的 prevHash 指向 legacy 之前，无法在此校验）
+    // 定期让出事件循环：本循环对每条记录做 SHA-256 + 规范 JSON 序列化，是纯 CPU 工作，
+    // 不 yield 时整个扫描期间该进程无法服务任何其他请求（心跳/健康检查也会超时）。
+    // 2000 条一批是折中：yield 太频繁会放大调度开销，太稀则单段阻塞仍然过长。
+    if (total % 2000 === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    // 无 hash 的存量记录：计为 legacy。这里的 resetWindow 是防御性的——走到这条分支说明
+    // 还没见过带哈希的记录，窗口本来就是空的（变异自检里有一臂专门证它删不掉任何结论）。
+    // 清空窗口 ≠ 免检：其后那条要不要验链接，取决于"它是不是窗口的第一条"，见下面 isFirst。
     if (!doc.hash) {
       if (seenHashed) {
         pushBreak({
@@ -158,14 +202,18 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
         // 这里**不**重置 isFirst：抹掉哈希正是为了让自己和后继之间的链接失联，
         // 沿用 legacy 的「跳过其后第一条」宽容等于替篡改者收尾。父哈希已不存在，
         // 后继必然 chain_break —— 两条一起报才是完整结论。
-        seen.clear();
-        seenOrder.length = 0;
+        resetWindow();
         continue;
       }
       legacy += 1;
-      seen.clear();
-      seenOrder.length = 0;
-      isFirst = true;
+      resetWindow();
+      // 「窗口第一条免检」只给窗口的第一条，不给「legacy 段之后的第一条」：
+      // 后者的父哈希不是落在窗口外，而是就在它前面那条记录的位置上——而那条没有哈希。
+      // 诚实形态不受影响：链启用时 getChainTail 在库里读不到任何带哈希的记录，
+      // 启用后的第一条 prevHash 为 null，而 prevHash=null 本来就是链首（见上面的链接检查）。
+      // 原写法在这里置 isFirst=true，把「整窗抹哈希但留最新一条」洗成 intact=true、code=0，
+      // 而「整窗抹光」反而被 nothingHashed 挡住在 code=2 —— 留一条比抹光更好用。
+      isFirst = false;
       continue;
     }
     seenHashed = true;
@@ -208,15 +256,30 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
     }
 
     // 链接性：prevHash=null 是链首，合法
-    if (!isFirst && doc.prevHash && !seen.has(doc.prevHash)) {
-      pushBreak({
-        _id: String(doc._id),
-        index: total,
-        type: 'chain_break',
-        action: doc.action,
-        actualPrevHash: doc.prevHash,
-        timestamp: doc.timestamp,
-      });
+    if (!isFirst && doc.prevHash) {
+      if (!seen.has(doc.prevHash)) {
+        pushBreak({
+          _id: String(doc._id),
+          index: total,
+          type: 'chain_break',
+          action: doc.action,
+          actualPrevHash: doc.prevHash,
+          timestamp: doc.timestamp,
+        });
+      } else if (firstChildOf.has(doc.prevHash)) {
+        // 同一个父哈希的第二个孩子 ⇒ 分叉。两条记录自身都算得回来，所以只有这里能看见。
+        pushBreak({
+          _id: String(doc._id),
+          index: total,
+          type: 'chain_fork',
+          action: doc.action,
+          parentHash: doc.prevHash,
+          forkedWithId: firstChildOf.get(doc.prevHash),
+          timestamp: doc.timestamp,
+        });
+      } else {
+        firstChildOf.set(doc.prevHash, String(doc._id));
+      }
     }
 
     remember(doc.hash);
@@ -241,8 +304,186 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
   };
 };
 
+/**
+ * 扫描口径是否"局部"：缺 scanned 或带 filter 都算。
+ *
+ * 单独成函数有两个理由：① 判据主体要同时摆 5 条否决 + 6 段文案，
+ * 全挤进一个箭头函数就是 complexity 27，会被 lint:ratchet（只许降不许升）挡下——
+ * 拆分在这里不是审美，是让"再加一条否决"仍然便宜；② 这一条判据本身有细节
+ * （服务层对无过滤的扫描回显 `filter: {}`，空对象不算子集），值得有名字。
+ */
+const isPartialScan = (scanned) => {
+  if (!scanned) return true; // 口径未知 ⇒ 按局部处理（fail-closed）
+  const filter = scanned.filter;
+  return Boolean(filter && Object.keys(filter).length > 0);
+};
+
+/** 六条否决的文案，顺序即判据的优先级顺序（断裂在最前：最可行动的那条先读到） */
+const chainVetoReasons = (v) => {
+  const reasons = [];
+  if (v.breaks > 0) reasons.push(`发现 ${v.breaks} 处断裂/失配`);
+  if (v.truncated) {
+    reasons.push(
+      `仅覆盖 ${v.total}/${v.collectionTotal} 条即达 maxRecords=${v.maxRecords} 上限，剩余未校验` +
+        (v.collectionTotal < v.total
+          ? `（元数据估算 ${v.collectionTotal} 条低于实际扫到的 ${v.total} 条，估算与扫描互相矛盾，不以估算撤销截断判定）`
+          : '')
+    );
+  }
+  if (v.hmacSkipped) {
+    reasons.push('未配置 HMAC_SECRET，hmac 层未参与校验（无密钥 SHA-256 可被整条链重算）');
+  }
+  if (v.emptyWaived) {
+    reasons.push('审计集合为空（0 条）：无记录可验，"无断裂"不等于"链完好"');
+  }
+  if (v.nothingVerified) {
+    reasons.push(
+      `本次实际扫到并核验 0 条（元数据估算集合有 ${v.collectionTotal} 条）：` +
+        '一条都没验过的链不具备完整性背书，且估算与扫描已不一致（不受 --allow-empty 豁免）'
+    );
+  }
+  if (v.nothingHashed) {
+    reasons.push(
+      `本次扫到 ${v.total} 条，但全部无哈希（legacy=${v.legacy}）：一条都没有经过哈希校验，` +
+        '不得宣称链完整——"链启用前的存量集合"与"整表 $unset 掉 hash/prevHash/hmac"在数据上不可区分'
+    );
+  }
+  if (v.scoped) {
+    reasons.push(
+      v.scopeUnknown
+        ? '调用方未回传 scanned 扫描口径，无从判断这是全量还是子集（按局部校验处理）'
+        : `带 filter 的子集校验 ${JSON.stringify(v.scanned.filter)}：子集内无断裂不等于全链无断裂`
+    );
+  }
+  return reasons;
+};
+
+/**
+ * 「能不能宣称审计链完整」的唯一判据（CLI 与在线接口共用）
+ *
+ * 为什么要在服务层而不是脚本里：这个判据此前有两份实现——
+ * `scripts/verify-audit-chain.js` 纳入了 truncated/empty/hmac 三类"不完整"，
+ * 而在线的 `GET /api/security/audit-logs/verify` 只看 `intact && hmacChecked`，
+ * 于是同一个事实在两处给出不同结论：脚本退 2 说"不得当作链完整"，
+ * 接口却回答「审计链完整」并把核验审计记成 riskLevel=low。
+ * 在线侧是 UI 与运维实际读的那一个，错得更贵。
+ *
+ * 不完整理由彼此独立，且**豁免不得越界**：allowNoHmac 只豁免 hmac，
+ * allowEmpty 只豁免"集合本来就是空的"（首次部署）；"扫到 0 条"和截断、子集校验
+ * 一样没有任何豁免口子——前者是估算与扫描互相矛盾的异常现场，不是一句"我知道是空的"
+ * 能盖过去的；后者根本不该由判据的调用方自行声明（见下面 scanned 一段）。
+ *
+ * 为什么"扫过的条数"要单独否决一遍（total === 0 与 collectionTotal === 0 不是一回事）：
+ * collectionTotal 来自 `estimatedDocumentCount()`，是**元数据估算**；total 是游标真的读回来
+ * 并逐条重算过哈希的条数。两者不同源，就可以各说各话：
+ * - 在线侧 scan 与估算之间隔着一个 await，清空集合与并发写入交错 ⇒ total=0 而估算>0；
+ * - 脚本侧估算在 scan **之前**取（verify-audit-chain.js），扫描期间被清空 ⇒ 同一现场。
+ * 旧判据只看 `collectionTotal === 0`，于是"0 条被验过 + 估算非 0"直接得 code 0，
+ * 接口答「审计链完整」、脚本打 `PASS（全量、无断裂、hmac 已校验）`——
+ * 为一条都没核验过的链签了合格证明，正是 auditController 里
+ * 「等于为灭迹签发合格证明」那段注释声称要防的事。
+ *
+ * 为什么窗口打满时估算**低于**扫描数也要否决（`total !== collectionTotal` 而非 `<`）：
+ * 旧式 `total < collectionTotal` 把估算当作"库里还有更多"的唯一证据，估算滞后偏低时
+ * 条件为假 ⇒ 截断否决被一个不可信的数撤销。反过来（估算偏高）本来就判截断，
+ * 不受影响。残留上限：估算恰好等于窗口大小时无从分辨"真就这么多条"与"估算滞后"，
+ * 要分辨只能实打实 countDocuments({})（千万级集合上是全索引扫，代价不该由核验请求付）；
+ * 判据在此选择保守一侧的方向是"宁可 INCOMPLETE，也不给局部结论盖章"。
+ *
+ * 为什么"整窗无哈希"要单独否决（`nothingHashed`）：`legacy` 是"无 hash 的记录数"，
+ * 它同时容纳两种成因——链启用前的存量集合，与"整表 `$unset` 掉 hash/prevHash/hmac"
+ * 的彻底灭迹。旧判据只把 legacy 当计数回显，**没有任何否决基于它**，于是实测出现
+ * 这个反向激励：只抹链尾 ⇒ code=1（断裂）；整表全抹 ⇒ code=0（**"链完整"**、
+ * 核验审计记 riskLevel=low）。抹得越彻底、结论反而越好，防御对更强的攻击失效。
+ * `legacy` 缺省（调用方漏传）按"未知"处理、视同整窗无哈希，方向与缺 `scanned` 一致：
+ * 偏保守，不产生假 PASS。确要在"链从未启用"的存量库上放行，显式传
+ * `allowAllLegacy: true`（脚本侧对应 `--allow-all-legacy`）——与另两个豁免彼此独立，
+ * 不得互相顶替。
+ *
+ * @param {Object} [params.scanned] 报告自带的扫描口径 verifyAuditChain 的 scanned 字段。
+ *   判据据此识别"这只是一次子集校验"：带 filter 的扫描即使没撞上限也不是全量，
+ *   旧判据对此毫无察觉（total=5 / maxRecords=20000 / collectionTotal=5000 ⇒ code 0「完整」），
+ *   而服务层的 JSDoc 只是"建议"消费方自己看 filter 回显。**缺 scanned 一律按局部校验处理**：
+ *   调用方漏传只会得到偏保守的 INCOMPLETE（响亮），不会得到一个假的 PASS（静默）。
+ * @param {number} [params.legacy] 报告自带的"无 hash 记录数"（verifyAuditChain 的 legacy 字段）。
+ *   缺省按"未知"处理并视同整窗无哈希（偏保守），见上面 `nothingHashed` 一段。
+ * @param {boolean} [params.allowAllLegacy=false] 唯一豁免 `nothingHashed` 的开关，
+ *   仅供"链从未启用"的存量库在知情前提下放行；与 allowNoHmac / allowEmpty 彼此独立。
+ *
+ * @returns {{code:number, canAttestIntact:boolean, reasons:string[], truncated:boolean, hmacSkipped:boolean, empty:boolean, nothingVerified:boolean, nothingHashed:boolean, scoped:boolean}}
+ *          code：0=全量且无断裂且各层都真跑过；1=发现断裂；2=不完整（不得宣称完整）
+ */
+const computeChainVerdict = ({
+  breaks,
+  total,
+  maxRecords,
+  collectionTotal,
+  hmacChecked,
+  legacy,
+  scanned,
+  allowNoHmac = false,
+  allowEmpty = false,
+  allowAllLegacy = false,
+}) => {
+  const truncated = total >= maxRecords && total !== collectionTotal;
+  const hmacSkipped = !hmacChecked && !allowNoHmac;
+  const emptyCollection = collectionTotal === 0;
+  // 唯一可豁免的一条："我知道集合是空的"（首次部署）
+  const emptyWaived = emptyCollection && !allowEmpty;
+  const nothingVerified = total === 0 && collectionTotal > 0;
+  // 扫到了记录，却**一条都没有经过哈希校验**（整窗无 hash ⇒ 全被 legacy 吸收）。
+  //
+  // 为什么必须单独否决：两种成因在数据上不可区分——①链启用前的存量集合；
+  // ②有人把 hash/prevHash/hmac 整组 $unset（直连驱动 / mongosh 可绕过模型中间件）。
+  // ②是**彻底灭迹**，而旧判据下它比"只抹链尾"**更容易拿到 intact**：legacy 把整窗
+  // 全数吸收、breaks 恒为 0，于是"抹得越干净"反而"判得越干净"——防御对更彻底的
+  // 攻击失效。这与 auditController 里"等于为灭迹签发合格证明"要防的是同一件事，
+  // 只是触发形态从"0 条可验"变成"N 条全不可验"。
+  //
+  // legacy 缺省按"未知"处理、视同整窗无哈希：与 isPartialScan 对缺 scanned 的方向
+  // 一致（**漏传只得到偏保守的 INCOMPLETE，不会得到假 PASS**）。
+  //
+  // 这条闸只管到"N 条全不可验"为止，**不要**把它改成比例阈值：覆盖率不足 X% 在数据上
+  // 与"链刚启用"无法区分，改了就是给每个新库发一张不合格证明。"抹光但留一条"这一档
+  // 由链接性那一层抓（legacy 段之后的第一条 prevHash 非空 ⇒ 父失联 ⇒ chain_break ⇒ code=1），
+  // 见 verifyAuditChain 的 legacy 分支与文件头。
+  const legacyCount = Number.isFinite(legacy) ? legacy : total;
+  const nothingHashed = total > 0 && legacyCount >= total && !allowAllLegacy;
+  const scopeUnknown = !scanned;
+  const scoped = isPartialScan(scanned);
+  const reasons = chainVetoReasons({
+    breaks,
+    total,
+    maxRecords,
+    collectionTotal,
+    legacy: legacyCount,
+    truncated,
+    hmacSkipped,
+    emptyWaived,
+    nothingVerified,
+    nothingHashed,
+    scoped,
+    scopeUnknown,
+    scanned,
+  });
+  const vetoes = [truncated, hmacSkipped, emptyWaived, nothingVerified, nothingHashed, scoped];
+  const code = breaks > 0 ? 1 : vetoes.some(Boolean) ? 2 : 0;
+  return {
+    code,
+    canAttestIntact: code === 0,
+    reasons,
+    truncated,
+    hmacSkipped,
+    empty: emptyCollection || nothingVerified,
+    nothingVerified,
+    nothingHashed,
+    scoped,
+  };
+};
+
 module.exports = {
   verifyAuditChain,
+  computeChainVerdict,
   LINK_WINDOW_SIZE,
   DEFAULT_MAX_RECORDS,
   HARD_MAX_RECORDS,

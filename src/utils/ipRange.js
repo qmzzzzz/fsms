@@ -29,9 +29,20 @@
  * 失败方向原则（L-04）：本模块是访问控制的判定端，**只有「规则确实为空」
  * 才可放行**。任何「配置存在但读不懂」的情形都必须拒绝——否则一处笔误
  * （如 `!10.0.0.0/33`）会让本意拉黑的网段反过来被完全放行，且无任何提示。
+ *
+ * （客户端侧严格形态）+ （判据归位）：clientIp 走 `normalizeIP`，
+ * 拒绝八进制/十六进制/简写等会被 ipaddr **重解释成另一个地址**的形态
+ * （`0x7f.0.0.1` 实测被解析成 `127.0.0.1`）。账户 allowedIPs 是访问控制，
+ * 而客户端 IP 文本在开了 trust proxy 时可由 XFF 影响 ⇒ 不严格就等于
+ * "把自己写成受信任地址"。
+ * 规则文本侧此前已同样严格（parseCIDR 共用同一判据）：这不再只是"入站校验的
+ * 职责"，因为规则与客户端在两两比较时必须同尺，否则严格的一侧反而被宽松的一侧绕过。
+ * 方向仍是 fail-closed：读不懂的规则进 invalid 集，配合 L-04「配置存在但读不懂即拒绝」。
  */
 
 const ipaddr = require('ipaddr.js');
+// 严格形态判据已收进 ipUtils（normalizeIP 自带歧义拒绝），
+// 原先的过渡模块 utils/ipCanonical 已并入并删除——两侧共用一把尺子，不存在第二套规则。
 const { normalizeIP, parseCIDR } = require('./ipUtils');
 
 // 规则分隔符：逗号、分号、中文逗号/分号、空白（含换行、制表）
@@ -135,13 +146,22 @@ const parseRuleBody = (rule) => {
  * 解析规则文本为结构化规则集
  * @param {string} text 规则文本
  * @returns {{allows: object[], denies: object[], invalid: string[]}}
- *          allows 允许项、denies 排除项、invalid 无法解析的原始片段
+ *          allows 允许项、denies 排除项、invalid 无法解析的原始片段；
+ *          条目数超过 MAX_RULE_COUNT 时**整体**判 invalid（不静默截断）
  */
 const parseRules = (text) => {
   const result = { allows: [], denies: [], invalid: [] };
   if (typeof text !== 'string' || text.length > MAX_TEXT_LENGTH) return result;
 
-  const raws = splitRules(text).slice(0, MAX_RULE_COUNT);
+  const raws = splitRules(text);
+  // 超限必须整体判不可信，而不是"截断后继续"：本模块是访问控制判定端，
+  // 被静默丢掉的第 201 条起完全可能是排除项 —— 排除项消失等于放行，方向性错误。
+  // （validateRules / isIPAllowed 各自有更早的同类检查，这条是给 parseRules 的直接调用方兜底，
+  //  也避免同一份文本在两条路径上得出不同结论。）
+  if (raws.length > MAX_RULE_COUNT) {
+    result.invalid.push(`规则条数超过上限 ${MAX_RULE_COUNT}（共 ${raws.length} 条，整体不解析）`);
+    return result;
+  }
 
   for (const raw of raws) {
     if (raw.length > MAX_RULE_LENGTH) {
@@ -270,7 +290,9 @@ const isIPAllowed = (clientIp, text) => {
 
   const ip = normalizeIP(clientIp);
   if (!ip) {
-    // 客户端 IP 无法解析时，在已配置限制的前提下按拒绝处理（fail-closed）
+    // 客户端 IP 无法解析、或形态有歧义（八进制/十六进制/简写会被 ipaddr 解释成
+    // **另一个地址**，判据见 utils/ipUtils 的 isAmbiguousIpText）时，
+    // 在已配置限制的前提下按拒绝处理（fail-closed）
     return { allowed: false, reason: 'invalid_client_ip', matchedRule: null };
   }
 

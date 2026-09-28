@@ -7,6 +7,7 @@ const router = express.Router();
 const userController = require('../controllers/userController');
 const { authenticate, checkPermission } = require('../middleware');
 const { body, param, query } = require('express-validator');
+const { mustBeString } = require('../utils/validationRules');
 const { validatePasswordStrength } = require('../utils/helpers');
 const { MAX_TEXT_LENGTH } = require('../utils/ipRange');
 const { consumeValidation } = require('../middleware/validateQuery');
@@ -66,49 +67,72 @@ const createUserValidation = [
     })
     .isLength({ max: 64 })
     .withMessage('密码长度不能超过 64 个字符'),
+  mustBeString('realName', '姓名'),
   body('realName').optional().trim().isLength({ max: 50 }).withMessage('姓名不能超过 50 个字符'),
   body('phone')
-    .optional()
+    // 可选手机号：前端未填时带空串 ''。.optional() 只跳过 undefined，'' 会流到 .matches 被拒 →
+    // 不填手机号就无法建/改用户。与本仓 falsy 可选约定一致（见上方 status 的 values:'falsy' 注释），
+    // 且 User.phone 校验器显式允许 ''（清空手机号是合法操作）。
+    .optional({ values: 'falsy' })
     .trim()
     .isLength({ max: 20 })
     .withMessage('手机号不能超过 20 个字符')
     .matches(/^1[3-9]\d{9}$/)
     .withMessage('请输入有效的手机号'),
+  mustBeString('department', '部门'),
   body('department')
     .optional()
     .trim()
     .isLength({ max: 100 })
     .withMessage('部门不能超过 100 个字符'),
-  body('roles').optional().isArray(),
+  // 角色引用：与下方 assignRolesValidation 同一条闸门。原先只判「是不是数组」，
+  // 元素格式不设防 ⇒ userService 的 `Role.find({_id:{$in:['zz']}})` 抛 CastError，
+  // 客户端拿到的是「资源 ID 格式无效」且 errors 里没有任何字段明细
+  // （它提交的字段名叫 roles，回显却说"资源 ID"）。条数同样无上界。
+  body('roles').optional().isArray({ max: 50 }).withMessage('角色列表最多 50 项'),
+  body('roles.*').optional().isMongoId().withMessage('角色 ID 格式无效'),
   allowedIPsCheck,
 ];
 
 // 更新用户信息校验：与创建保持一致的字段长度约束（各字段均可选）
 const updateUserValidation = [
   body('email').optional().trim().isEmail().withMessage('请输入有效的邮箱地址'),
+  mustBeString('realName', '姓名'),
   body('realName').optional().trim().isLength({ max: 50 }).withMessage('姓名不能超过 50 个字符'),
   body('phone')
-    .optional()
+    // 可选手机号：前端未填时带空串 ''。.optional() 只跳过 undefined，'' 会流到 .matches 被拒 →
+    // 不填手机号就无法建/改用户。与本仓 falsy 可选约定一致（见上方 status 的 values:'falsy' 注释），
+    // 且 User.phone 校验器显式允许 ''（清空手机号是合法操作）。
+    .optional({ values: 'falsy' })
     .trim()
     .isLength({ max: 20 })
     .withMessage('手机号不能超过 20 个字符')
     .matches(/^1[3-9]\d{9}$/)
     .withMessage('请输入有效的手机号'),
+  mustBeString('department', '部门'),
   body('department')
     .optional()
     .trim()
     .isLength({ max: 100 })
     .withMessage('部门不能超过 100 个字符'),
+  mustBeString('avatar', '头像地址'),
   body('avatar')
     .optional()
     .trim()
     .isLength({ max: 500 })
     .withMessage('头像地址不能超过 500 个字符'),
-  body('status').optional().isIn(['active', 'inactive', 'locked']).withMessage('无效的用户状态'),
+  // 与同文件 :21 的查询侧、models/User.js 的 schema enum 同源：此前这里是手抄的三值清单，
+  // USER_STATUS 增删档位时只有它不动（校验口径与 schema 各说各话）
+  body('status').optional().isIn(Object.values(USER_STATUS)).withMessage('无效的用户状态'),
   allowedIPsCheck,
 ];
 
-const assignRolesValidation = [body('roles').isArray({ min: 1 }).withMessage('请至少分配一个角色')];
+const assignRolesValidation = [
+  body('roles').isArray({ min: 1, max: 50 }).withMessage('请至少分配一个角色（最多 50 项）'),
+  // 与创建用户同口径：非法元素在 userService 的 $in 查询里炸成 CastError，
+  // 错误信息会与提交字段无关
+  body('roles.*').optional().isMongoId().withMessage('角色 ID 格式无效'),
+];
 
 // :id 路径参数必须是合法 ObjectId，防止非法 id 触发 CastError → 500
 const mongoIdParamValidation = [param('id').isMongoId().withMessage('无效的用户ID')];
@@ -145,6 +169,10 @@ router.get(
   authenticate,
   checkPermission('user:read'),
   mongoIdParamValidation,
+  // 2026-09-26 审计 Top5：param 链此前挂而不消费（死校验链）。applyObjectIdParams
+  // 的 router.param 兜底会先对非法 id 400，本消费层正常时收不到错误——挂上是为了让
+  // 「校验 → 消费 → 控制器」在同处成立，兜底移除后不裸奔
+  consumeValidation(),
   userController.getUserById
 );
 
@@ -215,6 +243,8 @@ router.delete(
   authenticate,
   checkPermission('user:delete'),
   mongoIdParamValidation,
+  // 同 GET /:id：死校验链补消费（非法 id 已被 applyObjectIdParams 先行 400）
+  consumeValidation(),
   userController.deleteUser
 );
 

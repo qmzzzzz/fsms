@@ -44,7 +44,14 @@ const applyHooks = (schema, logger) => {
   };
 
   schema.pre('save', async function () {
-    if (!this.isNew && this.hash && appendOnlyEnforced) {
+    // 护栏判据是「这不是一条新记录」，不能写成 `&& this.hash`。
+    // 原式把护栏挂在**恰好会被失效形态抹掉的那个字段**上：chainBatch 抛错时
+    // 无哈希记录仍会落库（observability/auditBufferFlushAndWalGuards.test.js 把这条行为当成期望钉着），
+    // 于是这类存量行既绕开了 append-only 护栏，又会掉进下面的"补签"分支——
+    // 被重新算哈希并**接到活链尾部**。后果不是"少一层校验"，而是
+    // **篡改变得对链校验完全不可见**（重算出的哈希与改后的载荷自洽）。
+    // 全仓无生产代码对已入库 AuditLog 调 save()（已 grep 核实），故收紧不影响任何路径。
+    if (!this.isNew && appendOnlyEnforced) {
       throw new Error('审计日志为 append-only，禁止通过 save() 修改已入库记录');
     }
 
@@ -75,8 +82,10 @@ const applyHooks = (schema, logger) => {
         //   ② 若强行跨钩子持锁，则 post 钩子未触发时锁泄漏，其后所有审计写入
         //      无限排队（表现为「服务正常但审计彻底停摆」），是更差的失效模式。
         // 代价是崩溃时可能留下「幻影链尾」（链尾指向从未入库的 hash）。该风险
-        // 改由**启动期自愈**消除：index.js 在 auditBuffer.start() 后调用
+        // 改由**启动期自愈**消除：index.js 在 auditBuffer.start() **之前**调用
         // resyncChainTail()，从 DB 重建真实链尾。故完整性校验不会产生持续假阳性。
+        // 次序不可颠倒（index.js 的 resyncChainTail() 在 :297、auditBuffer.start()
+        // 在 :315）：自愈必须早于任何审计写入，否则新写入会立刻把链尾推回幻影值。
         // 修改此处前请先阅读 src/index.js 中的 M-09 说明。
         await advanceChainTail(this.hash, generation);
         this.$__chainAdvancedFrom = prevHash;
@@ -127,7 +136,10 @@ const applyHooks = (schema, logger) => {
     if (process.env.NODE_ENV === 'test' && options.bypassAppendOnly === true) return next();
     next(new Error('审计日志为 append-only，禁止修改/删除'));
   });
-  return { setAppendOnlyEnforced };
+  // 合规出口需要报告**实际生效值**：护栏是上面的闭包变量，外部原先无从读取
+  // （`setAppendOnlyEnforced` 又按 P1-32 只在测试环境导出）。给一个只读 getter，
+  // 让 securityController 的 compliance 面板不必再写死 true。
+  return { setAppendOnlyEnforced, isAppendOnlyEnforced: () => appendOnlyEnforced };
 };
 
 module.exports = { applyHooks, APPEND_ONLY_HOOKS };

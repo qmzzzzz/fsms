@@ -10,6 +10,7 @@ const autoIncrement = require('../plugins/autoIncrement');
 // 的同名声明三处并存）。现统一引用 constants 的单一事实来源，避免新增设备
 // 类型时漏改其中一处导致「校验通过但编号前缀取默认 OT」。
 const { DEVICE_TYPE, DEVICE_TYPE_PREFIX } = require('../utils/constants');
+const { businessDateParts } = require('../constants/timezone');
 const DEVICE_TYPE_VALUES = Object.values(DEVICE_TYPE);
 
 const fireDeviceSchema = new mongoose.Schema(
@@ -134,6 +135,12 @@ const fireDeviceSchema = new mongoose.Schema(
       },
     ],
 
+    // maintenanceRecord 的留痕总条数（截断可数的载体，见文件末尾 pushCapped 的说明）。
+    // 只给 maintenanceRecord 配这一个计数：它是唯一有生产写入方的那支数组
+    // （POST /api/devices/:id/maintenance → DeviceService.addMaintenanceRecord）；
+    // inspectionRecord 的写入方法当前零调用方，对它计数就是给不存在的写入编台账。
+    maintenanceRecordCount: { type: Number, default: 0, min: 0 },
+
     // QR 代码（用于设备标识）
     qrCode: {
       type: String,
@@ -156,6 +163,17 @@ const fireDeviceSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
+    // 本模型的三条写路径都是"读快照 → 改内存 → save()"，而 save() 的 filter 默认只有
+    // _id ⇒ 后写者无条件覆盖先写者。可观察后果有三个（都实测复现过）：
+    //   · 已报废设备被另一路拿着报废前快照的请求改回在用（status 翻回非 scrapped，
+    //     而提醒/报表的排除集只看 status ⇒ 报废的灭火器重新出现在待更换五档里）；
+    //   · 重复报废覆盖原始 scrapDate/scrapReason（审计上等于篡改报废时间）；
+    //   · maintenanceRecordCount 的"+1"是绝对覆盖 ⇒ 计数与数组长度分叉，
+    //     而"count > length"恰是数组被截断这一事实的唯一载体。
+    // 开版本守卫后 save() 的 filter 带上加载时读到的 __v，冲突方抛 VersionError，
+    // 由 errorHandler 统一映射为 400。这与 InspectionService 的"前态条件写"是同一口径，
+    // 只是判定交给驱动而不是应用层——好处是所有 pre-save 钩子与校验器照旧生效。
+    optimisticConcurrency: true,
   }
 );
 
@@ -169,16 +187,24 @@ fireDeviceSchema.index({ expiryDate: 1 });
 fireDeviceSchema.index({ nextCheckDate: 1 });
 
 // 自动生成设备编号（使用 autoIncrement 插件，基于 counters 原子计数器）
+//
+// 年份段与报警编号同一条判据（见 models/FireAlarm.js 的同名注释）：`deviceCode` 直接
+// 渲染在设备台账列表里，用服务器本地 getFullYear() 时 UTC 容器会在跨年夜把
+// 业务时区已属新年的设备刻成上一年，编号与 createdAt 各行其是。
+const buildDeviceCodePrefix = (doc, at) => {
+  const typePrefix = DEVICE_TYPE_PREFIX[doc.deviceType] || 'OT';
+  return `${typePrefix}-${businessDateParts(at).year}`;
+};
+
 fireDeviceSchema.plugin(autoIncrement, {
   field: 'deviceCode',
   counterPrefix: 'device',
   seqPadding: 4,
-  generatePrefix: (doc) => {
-    const typePrefix = DEVICE_TYPE_PREFIX[doc.deviceType] || 'OT';
-    const year = new Date().getFullYear();
-    return `${typePrefix}-${year}`;
-  },
+  generatePrefix: (doc, at) => buildDeviceCodePrefix(doc, at),
 });
+
+// 暴露给用例：编号年份段的口径必须能被钉在任意给定时刻上验证（插件内部时刻不可注入）
+fireDeviceSchema.statics.buildCodePrefix = buildDeviceCodePrefix;
 
 // 自动计算下次检查日期：
 // - 录入 lastCheckDate 后尚无排期时按现行公式（lastCheckDate + checkCycle）推算
@@ -199,6 +225,21 @@ fireDeviceSchema.pre('save', function (next) {
   next();
 });
 
+// 两支"每次操作留一条"的追加型子文档数组的尾部封顶（同 Inspection.executionLog 的口径，
+// 判据也抄它的理由：这支数组不止被详情接口整段返回——
+//   · DeviceService.findScopeFieldsByIds 用 select('maintenanceRecord.operator') 把它
+//     读进**报警/巡检写路径的对象级范围闸**，于是一个设备的数组长度会拖慢别人的请求；
+//   · reportStatsService 的报表聚合里有 $unwind: '$maintenanceRecord'（无 $limit），
+//     代价随总条数线性增长；
+//   · 长度无上限 ⇒ 单文档迟早越过 16MB，此后该设备**任何** save() 都失败（含报废、改状态）。
+// 取"留最新 N 条 + 计数记总次数"：count > length 就是"有留痕被截断"这一事实的载体，
+// 截断必须可数，不能拿数组长度假装"这就是全部历史"。
+const RECORD_TAIL_CAP = 200;
+const pushCapped = (list, entry) => {
+  list.push(entry);
+  if (list.length > RECORD_TAIL_CAP) list.splice(0, list.length - RECORD_TAIL_CAP);
+};
+
 // 实例方法：添加维护记录
 // 仅检查类记录（routine=例行检查 / inspection=专项检查）推进检查周期；
 // repair/replacement 属于维修行为，不代表完成了一次检查，不得顺延 lastCheckDate/nextCheckDate。
@@ -207,10 +248,11 @@ fireDeviceSchema.methods.addMaintenanceRecord = function (record) {
   if (this.status === 'scrapped' || this.lifecycleStage === 'scrapped') {
     return Promise.reject(new Error('设备已报废，不能再添加维护记录'));
   }
-  this.maintenanceRecord.push({
+  pushCapped(this.maintenanceRecord, {
     date: new Date(),
     ...record,
   });
+  this.maintenanceRecordCount += 1;
   if (record.type === 'routine' || record.type === 'inspection') {
     this.lastCheckDate = new Date();
     this.nextCheckDate = new Date(Date.now() + this.checkCycle * 24 * 60 * 60 * 1000);
@@ -218,9 +260,9 @@ fireDeviceSchema.methods.addMaintenanceRecord = function (record) {
   return this.save();
 };
 
-// 实例方法：添加检查记录
+// 实例方法：添加检查记录（当前无生产调用方；封顶是为了"接上调用方时不必再回来补"）
 fireDeviceSchema.methods.addInspectionRecord = function (record) {
-  this.inspectionRecord.push({
+  pushCapped(this.inspectionRecord, {
     date: new Date(),
     ...record,
   });
@@ -232,7 +274,9 @@ fireDeviceSchema.methods.addInspectionRecord = function (record) {
 // 迁移表允许 installed/in_use/maintenance/retired → scrapped，已报废（scrapped）再调用会抛错；
 // 方法签名保持不变，既有调用方无需改动
 fireDeviceSchema.methods.scrapped = function (reason) {
-  this.scrapReason = reason || '正常报废';
+  // 与 DeviceService.scrapDevice 同口径：空串是"提交了但没填"，不是"未提交"，
+  // 不能被 `||` 折成一句没人说过的肯定性结论"正常报废"。
+  this.scrapReason = reason ?? '正常报废';
   this.status = 'scrapped';
   return this.transitionTo('scrapped');
 };
@@ -257,6 +301,9 @@ fireDeviceSchema.methods.transitionTo = async function (stage, overrides = {}) {
   if (!transitions[this.lifecycleStage]?.includes(stage)) {
     const err = new Error(`无法从 ${this.lifecycleStage} 转换到 ${stage}`);
     err.statusCode = 400;
+    // 给调用方一个**类型判据**而不是靠文案匹配：DeviceService 的 catch 只应吞这一种
+    // 错误（非法迁移降级为"仅改 status"），并发版本冲突必须原样抛出去。
+    err.transitionIllegal = true;
     throw err;
   }
 

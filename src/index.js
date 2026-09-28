@@ -14,7 +14,7 @@ config.validateProductionConfig();
 const mongoose = require('mongoose');
 const connectDB = require('./config/database');
 const logger = require('./utils/logger');
-const { exitAfterFlush } = require('./utils/loggerFlush');
+const { exitAfterFlush, bestEffortDrain } = require('./utils/loggerFlush');
 
 // P3-48：密钥文件注入的结果在 config 加载期产生（早于 logger 可用），
 // 此处补记日志。只记变量名不记值。
@@ -35,6 +35,8 @@ const auditBuffer = require('./services/auditBuffer');
 const auditMonitor = require('./services/auditMonitor');
 // M-09：启动期重同步审计链链尾（清除崩溃遗留的幻影链尾）
 const { resyncChainTail } = require('./utils/auditChain');
+// F-103：关停链的总预算（每一步向它要自己的超时，见 gracefulShutdown 内的注释）
+const shutdownBudget = require('./utils/shutdownBudget');
 const statsCache = require('./services/statsCache');
 const userPermissionService = require('./services/userPermissionService');
 const sharedCache = require('./services/sharedCache');
@@ -50,6 +52,45 @@ let wsServiceInstance = null;
 let reminderScheduler = null;
 // 优雅关闭幂等守卫：防止信号重复触发导致清理流程重入
 let shuttingDown = false;
+
+/**
+ * 执行一个清理步骤，失败不中断后续步骤
+ *
+ * 第三个参数 `capMs` 是**这一步最多等多久**的硬闸（F-202）：缺省＝不设闸，
+ * 由步骤自己负责超时（HTTP/调度器/审计排空/SIEM 排空就是这一类，它们本就在向
+ * `stepAllowMs` 要额度）。凡是自己不管超时、又确实要 await 一个网络 I/O 的步骤，
+ * **必须**传 capMs —— 否则那一步能把整条关停链楔死（判据见
+ * `src/tests/utils/shutdownBudgetContract.test.js` 的"每一步要么自带额度、要么带硬闸"）。
+ *
+ * 放在模块作用域而不是 gracefulShutdown 体内：它不读关停链的任何闭包状态，
+ * 而 gracefulShutdown 的函数体长度已是要消化的存量债（`npm run lint:ratchet` 只许降不许升）。
+ *
+ * @param {string} name 步骤名（用于日志定位）
+ * @param {Function} fn 步骤实现（可 async）
+ * @param {number} [capMs] 本步最多等待的毫秒数（不传＝信任步骤自带超时）
+ */
+const runStep = async (name, fn, capMs) => {
+  let task;
+  try {
+    task = Promise.resolve(fn());
+  } catch (e) {
+    task = Promise.reject(e);
+  }
+  const { timedOut, error, elapsedMs } = await shutdownBudget.guardStep(task, capMs);
+  if (timedOut) {
+    logger.error(
+      `优雅关闭步骤「${name}」等待超过 ${capMs}ms（实际 ${elapsedMs}ms），` +
+        '放弃等待并继续后续清理：该步的 I/O 可能仍未完成，进程退出时由系统回收。' +
+        '反复出现说明对端（Redis/Mongo）已不可达，本次关停只剩兜底路径'
+    );
+    return;
+  }
+  if (error) {
+    logger.error(
+      `优雅关闭步骤「${name}」失败，继续执行后续清理：${error && error.message ? error.message : error}`
+    );
+  }
+};
 
 /**
  * 优雅关闭：关闭 WS → 停止接收新 HTTP 连接 → 停止调度器 → 关闭 DB → 退出
@@ -70,23 +111,11 @@ const gracefulShutdown = async (signal) => {
     return exitAfterFlush(1);
   }
   shuttingDown = true;
+  // F-103：从这一刻起，链上每一步的超时都受总预算约束（预算小于部署侧 stop_grace_period，
+  // 见 src/utils/shutdownBudget.js 与 docker-compose.yml 的注释）
+  shutdownBudget.beginShutdownBudget();
 
   logger.info(`收到 ${signal} 信号，正在优雅关闭服务器...`);
-
-  /**
-   * 执行一个清理步骤，失败不中断后续步骤
-   * @param {string} name 步骤名（用于日志定位）
-   * @param {Function} fn 步骤实现（可 async）
-   */
-  const runStep = async (name, fn) => {
-    try {
-      await fn();
-    } catch (e) {
-      logger.error(
-        `优雅关闭步骤「${name}」失败，继续执行后续清理：${e && e.message ? e.message : e}`
-      );
-    }
-  };
 
   // 1. 先关闭 WebSocket：WS 连接挂在同一 httpServer 上，
   //    若先调 httpServer.close()，Node 会等待全部存量连接（含 WS 长连接）断开，
@@ -107,14 +136,20 @@ const gracefulShutdown = async (signal) => {
       if (typeof httpServer.closeIdleConnections === 'function') {
         httpServer.closeIdleConnections();
       }
+      // F-103：10 s 只是**硬上限**，实际取"总预算减去尾部保留时间"。否则在途请求会
+      // 永久优先于"审计落盘"——排空与关库排在链尾，10 s 被这里吃光后它们就没机会跑了。
+      const httpAllowMs = Math.min(
+        10000,
+        shutdownBudget.stepAllowMs(shutdownBudget.TAIL_RESERVE_MS)
+      );
       const forceTimeout = setTimeout(() => {
-        logger.warn('HTTP 服务器优雅关闭超时（10s），强制关闭剩余连接');
+        logger.warn(`HTTP 服务器优雅关闭超时（${httpAllowMs}ms），强制关闭剩余连接`);
         // 超时兜底：仍存活的连接（含极端情况下仍在写的响应）强制断开
         if (typeof httpServer.closeAllConnections === 'function') {
           httpServer.closeAllConnections();
         }
         resolve();
-      }, 10000);
+      }, httpAllowMs);
       httpServer.close((err) => {
         clearTimeout(forceTimeout);
         // io.close()（dispose 内）会连带关闭挂载的 HTTP server，
@@ -132,7 +167,10 @@ const gracefulShutdown = async (signal) => {
   // 3. 停止调度器
   await runStep('停止提醒调度器', async () => {
     if (reminderScheduler) {
-      await stopReminderScheduler(reminderScheduler);
+      // 30 s 同样是硬上限（F-103）：一次设备扫描跑完与否，不该决定审计能不能落盘
+      await stopReminderScheduler(reminderScheduler, {
+        maxWaitMs: Math.min(30000, shutdownBudget.stepAllowMs(shutdownBudget.TAIL_RESERVE_MS)),
+      });
       logger.info('设备到期提醒调度已停止');
     }
   });
@@ -142,27 +180,72 @@ const gracefulShutdown = async (signal) => {
   await runStep('停止权限缓存清理定时器', () => userPermissionService.stopCleanup());
 
   // 3.5 审计日志缓冲清空落库 + 异常监控停止（必须在数据库连接关闭前完成）。
-  // 顺序关键：flush（walEnabled 仍为 true，落库后按条数裁剪 WAL）→ 等待
+  // 顺序关键：flush（walEnabled 仍为 true，落库后按本批文档的 __walSeq 精确裁剪 WAL，
+  // F-97 之前这里是"按条数裁剪"——WAL 有行缺序号或已被回收时会误删未落库行）→ 等待
   // walChain 排空（裁剪的原子 rename 落盘）→ stop。此前「await flush(); stop()」
   // 不等裁剪，500ms 强制退出截断 rename → 重启重放把已落库批次重复插入（B-L2）
   await runStep('停止审计监控', () => auditMonitor.stop());
   await runStep('清空审计缓冲', async () => {
-    await auditBuffer.flushAndStop();
-    logger.info('审计日志缓冲已清空');
+    // F-101：这一句以前无条件打「已清空」。flush 在有在途批次时会直接 return，
+    // 于是"定时 flush 正跑到一半时关停"这种常见时序下，日志说清空了、缓冲里其实还压着记录，
+    // 而运维正看着这条日志决定可以强退 ⇒ 谎报本身就是审计缺失的直接证据。
+    // F-103：2500 ms 是"排空之后还要跑完的步骤"的保留（关 Redis + 关 Mongo +
+    // 日志 transport 落盘 500 ms）。预算已经耗尽时这里拿到 0 ⇒ 排空立刻返回并**如实**
+    // 报 residual（走下面的 error 分支），而不是静默跳过——谎报已被 F-101 关掉了。
+    const { drained, residual } = await auditBuffer.flushAndStop(shutdownBudget.stepAllowMs(2500));
+    if (drained) {
+      logger.info('审计日志缓冲已清空');
+    } else {
+      logger.error(
+        `审计日志缓冲未排空：仍有 ${residual} 条待落库（排空预算用尽，通常是数据库不可达）。` +
+          '这些记录的 WAL 行仍在磁盘上，进程重启后由 start() 重放；本次退出前不会落库'
+      );
+    }
   });
 
   // 3.6 关闭共享缓存门面（断开 Redis 连接与失效广播订阅）。
   // 放在审计落库之后、数据库关闭之前，与其它资源清理同一阶段。
-  await runStep('关闭共享缓存', () => sharedCache.shutdownSharedCache());
+  // F-202：这是一次网络往返。Redis socket 卡在半开时 `await` 永不返回 ⇒ 后面的关库、
+  // SIEM 排空、exit 一个都跑不到，进程只在 stop_grace_period 后吃 SIGKILL 且无线索。
+  // 硬闸＝"给后面留 1s"与 2s 的较小值；预算用尽时拿到 0 ⇒ 一帧不等，但**如实**打 error。
+  await runStep(
+    '关闭共享缓存',
+    () => sharedCache.shutdownSharedCache(),
+    Math.min(2000, shutdownBudget.stepAllowMs(1000))
+  );
 
   // 4. 关闭数据库
-  await runStep('关闭 MongoDB 连接', async () => {
-    await mongoose.connection.close(false);
-    logger.info('MongoDB 连接已关闭');
+  await runStep(
+    '关闭 MongoDB 连接',
+    async () => {
+      await mongoose.connection.close(false);
+      logger.info('MongoDB 连接已关闭');
+    },
+    // F-202：`close(false)` 会等在途操作排空，Mongo 不可达时同样是不落地的 promise。
+    // 保留 500ms 给链尾的 SIEM 排空与 exitAfterFlush 的 transport 落盘。
+    Math.min(2000, shutdownBudget.stepAllowMs(500))
+  );
+
+  // 4.5 排空 SIEM 转发缓冲（F-186）。放在链尾是**有意的**：上面每一步自己写的日志
+  // （"MongoDB 连接已关闭"、审计未排空的 error）都还压在这个缓冲里，越早排就越少送到。
+  // 必须是最后一步，所以它的保留额度取 0（后面没有要保住的步骤了）。
+  // 为什么需要这一步：logShipper 的 close() 在 F-186 之前**没有任何生产调用点**。
+  // 但机制不是"end() 够不到 close()"——两支探针实测：end() 确实会经 transport 'finish' →
+  // pipe 收尾的 'unpipe' 触发 close()，只是①**触发而不等待**（end() 后立刻 exit 实测只送达
+  // 5/25，100ms 后 15/25，200ms 才全量，且丢了没人报），②F-187 又删掉了生产里唯一的
+  // end() 调用点 ⇒ 今天的树上 close() 压根不会被触发。判据与源码位置见 loggerFlush 的 JSDoc。
+  await runStep('排空 SIEM 日志转发缓冲', async () => {
+    await bestEffortDrain({
+      allowMs: shutdownBudget.stepAllowMs(0),
+      tag: '优雅关闭',
+      reportDrained: true,
+    });
   });
 
-  // P1-13：正常关闭路径同样要让日志落地。exitAfterFlush 会先 logger.end()
-  //（排空 transport 队列）再延时退出，比单纯 setTimeout 更确定；
+  // P1-13：正常关闭路径同样要让日志落地——延时 500ms 让 winston 的异步 transport
+  // 把队列写完再 exit。这里**不调用** logger.end()（F-187：end() 对落盘零收益，
+  // 却会让这 500ms 窗口内的任何一条日志同步抛 ERR_STREAM_WRITE_AFTER_END）；
+  // SIEM 缓冲的排空也不靠它，由上一步显式 await close() 完成。
   // 500ms 与原先一致，给审计 WAL 裁剪的原子 rename 留出余量。
   return exitAfterFlush(0, { delayMs: 500 });
 };
@@ -189,7 +272,9 @@ const startServer = async () => {
     // WB-1：生产密钥强度审计留痕。弱密钥已在 config/validate.js 以阻断级拦截，
     // 这里把「本次启动用的密钥通过了强度校验」落审计，供事后证明密钥治理持续有效；
     // 审计写入失败只告警不阻断（审计不可用不应反过来让服务起不来）
-    if (process.env.NODE_ENV === 'production') {
+    // 判据统一走 config/validate 的环境归一：字面量比较会让 NODE_ENV=prod 的部署
+    // 静默少一条"密钥强度审计"留痕，而它正是事后证明密钥治理持续有效的证据。
+    if (require('./config/validate').requiresProductionSemantics()) {
       try {
         const AuditLog = require('./models/AuditLog');
         await AuditLog.record({
@@ -316,6 +401,15 @@ const startServer = async () => {
 
 // 未捕获异常
 //
+// F-186b：崩溃路径同样要排空 SIEM 转发缓冲——gracefulShutdown 里的那一步管不到这里，
+// 而按取证价值排序恰好是反的：进程崩掉那一刻的日志最需要进 SIEM，它们此时全压在
+// logShipper 的内存缓冲里（默认 100 行/批、串行发送）。
+// 预算硬顶 500ms：这两条链后面还要 setTimeout(1s) 才 exit，超出即放弃并如实报——
+// 绝不为"送日志"把一个已经崩溃的进程再拖长（helper 内的计时器已 unref）。
+// helper 永不 reject：崩溃链的 finally 之后没有 catch，一次 reject 就是新的
+// unhandledRejection（见 utils/loggerFlush.js 的 bestEffortDrain 注释）。
+const CRASH_DRAIN_BUDGET_MS = 500;
+
 // P3-33：进程即将退出前必须 flush 审计缓冲——内存里可能有上百条已确认
 // 响应给客户端、但尚未落库的审计记录，直接 exit 会让它们随进程消失
 // （WAL 能在下次启动重放，但重放依赖进程能正常再启动，不能作为唯一保障）。
@@ -335,6 +429,7 @@ process.on('uncaughtException', (error) => {
   Promise.resolve()
     .then(() => auditBuffer.flush())
     .catch((e) => logger.error(`退出前审计缓冲落库失败：${e && e.message ? e.message : e}`))
+    .then(() => bestEffortDrain({ allowMs: CRASH_DRAIN_BUDGET_MS, tag: 'uncaughtException' }))
     .finally(() => setTimeout(() => process.exit(1), 1000));
 });
 
@@ -354,6 +449,7 @@ process.on('unhandledRejection', (reason, promise) => {
   Promise.resolve()
     .then(() => auditBuffer.flush())
     .catch((e) => logger.error(`退出前审计缓冲落库失败：${e && e.message ? e.message : e}`))
+    .then(() => bestEffortDrain({ allowMs: CRASH_DRAIN_BUDGET_MS, tag: 'unhandledRejection' }))
     .finally(() => setTimeout(() => process.exit(1), 1000));
 });
 

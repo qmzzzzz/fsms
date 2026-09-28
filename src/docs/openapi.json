@@ -1653,6 +1653,10 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["routine", "repair", "replacement", "inspection"]
                   }
                 }
               }
@@ -1692,8 +1696,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "reason": {
-                    "type": "string"
+                  "scrapReason": {
+                    "type": "string",
+                    "maxLength": 200
                   },
                   "scrapDate": {
                     "type": "string",
@@ -1758,7 +1763,15 @@
             "name": "alarmType",
             "in": "query",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "smoke",
+                "temp_abnormal",
+                "manual_button",
+                "phone_report",
+                "patrol_find",
+                "other"
+              ]
             }
           },
           {
@@ -2149,14 +2162,15 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "enum": ["pending", "in_progress", "completed", "cancelled"]
+              "enum": ["pending", "in_progress", "completed", "overdue", "cancelled"]
             }
           },
           {
             "name": "inspectionType",
             "in": "query",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "enum": ["daily", "weekly", "monthly", "quarterly", "annual", "special"]
             }
           },
           {
@@ -2232,7 +2246,11 @@
                     "format": "date-time"
                   },
                   "assignedTo": {
-                    "type": "string"
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "mongodb-id"
+                    }
                   },
                   "devices": {
                     "type": "array",
@@ -2430,11 +2448,12 @@
           }
         ],
         "requestBody": {
-          "required": false,
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
+                "required": ["result"],
                 "properties": {
                   "result": {
                     "type": "string",

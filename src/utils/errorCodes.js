@@ -567,6 +567,10 @@ const ERROR_CODES = {
     status: 403,
     message: '无权查看该用户',
   },
+  USER_SCOPE_FORBIDDEN: {
+    status: 403,
+    message: '无权操作该用户（超出您的数据范围）',
+  },
   IP_RULES_FORMAT_INVALID: {
     status: 400,
     message: "IP 范围规则格式有误：${check.invalid.join('、')}",

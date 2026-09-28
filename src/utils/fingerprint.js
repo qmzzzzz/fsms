@@ -47,22 +47,31 @@ const ipv6PrefixGroups = (ipv6) => {
  */
 const ipSegment = (ip) => {
   if (typeof ip !== 'string' || !ip) return '';
-  // 剥离 IPv4-mapped IPv6 前缀，统一按 IPv4 处理
-  const bare = ip.replace(/^::ffff:/i, '');
+  // 先归一化、再按族分派。归一化（ipUtils.normalizeIP，内部 ipaddr.process()）已经把两件
+  // 事判对了：IPv4-mapped 前缀收敛为 IPv4、以及 RFC 5952 规范写法。
+  //
+  // 原实现在这里自己 `replace(/^::ffff:/i, '')` 再靠「含不含点」分派——该前缀**只有在后面
+  // 接点分四段时**才剥得掉；接十六进制段时（'::ffff:7f00:1' 就是 127.0.0.1）剥完得到
+  // '7f00:1'，它已经不是同一个地址，而是另一个不完整的 IPv6 文本，实测 normalizeIP 判非法
+  // ⇒ 网段整块丢失（'' ），同一台机器的两种合法写法产出两个指纹，与本文件头声明的
+  // 「同一地址的任意文本写法 → 完全相同的网段键」这条不变式相悖。
+  // 这类文本在本仓是真实存在的：ipUtils.js:151-165 记录过 normalizeCIDR 会把映射网段
+  // 存成 '::ffff:a00:0/104' 这种十六进制写法（同族缺陷，那边已修）。
+  //
+  // 方向：归一化只会**收窄**产出——'999.999.999.999'、'0177.0.0.1'（前导零，ipUtils
+  // 按歧义拒绝）、'1.2.3'（简写）这些过去会产出 '999.999.999' / '0177.0.0' 一类**假网段**
+  // 的文本，现在产出 ''（不参与指纹），不会把过去拒绝的输入放进来。唯一新增产出的方向是
+  // 十六进制映射写法，而它本来就该解出对应的那个 IPv4 网段。
+  const normalized = normalizeIP(ip);
+  if (!normalized) return '';
 
-  if (bare.includes('.')) {
-    const parts = bare.split('.');
-    return parts.length === 4 ? parts.slice(0, 3).join('.') : '';
+  if (normalized.includes('.')) {
+    // 归一化后的 IPv4 恒为点分四段（'1.2.3' 一类简写已被 normalizeIP 判非法，实测 null），
+    // 所以这里不再重复判长度
+    return normalized.split('.').slice(0, 3).join('.');
   }
-  if (bare.includes(':')) {
-    // 先经 ipUtils.normalizeIP 归一化为 RFC 5952 规范形式：
-    // 原始写法直接 split(':').slice(0,4) 会因压缩位置不同（如 :: 在头部/中部）
-    // 对同一地址产出不同网段键；归一化 + 展开 '::' 后再截取，结果稳定
-    const normalized = normalizeIP(bare);
-    if (!normalized || !normalized.includes(':')) return '';
-    return ipv6PrefixGroups(normalized);
-  }
-  return '';
+  // IPv6：归一化后仍可能带 '::' 压缩，交给 ipv6PrefixGroups 展开成完整 8 组再取前四组（/64）
+  return ipv6PrefixGroups(normalized);
 };
 
 /**
@@ -81,7 +90,12 @@ const computeFingerprint = (req) => {
   // 全部特征为空说明请求头被完全剥离（异常客户端），不产出无意义的固定指纹
   if (!ua && !lang && !enc && !seg) return null;
 
-  const material = [ua, lang, enc, seg].join('|');
+  // 分隔符必须与内容解耦：`|` 和 `\` 都是这三个外控头里的合法字符，朴素 join('|') 会让
+  // ['A|B','C'] 与 ['A','B|C'] 得到同一份 material ⇒ 关联键可被伪造/摊薄。
+  // 只转义两个保留字符而**不**整体重编码：不含 | 与 \ 的头 material 逐字节不变，
+  // 已落库的指纹在新老记录之间仍然可比（整体重编码会切断跨版本的"同一行为人"关联）。
+  const esc = (s) => s.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+  const material = [esc(ua), esc(lang), esc(enc), esc(seg)].join('|');
   return crypto.createHash('sha256').update(material, 'utf8').digest('hex').slice(0, 32);
 };
 

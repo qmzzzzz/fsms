@@ -7,6 +7,8 @@
 
 const config = require('../config');
 const logger = require('../utils/logger');
+// 跨实例失效广播通道（sharedCache 仅依赖 logger，顶层引入无环路）
+const sharedCache = require('./sharedCache');
 
 // 底层存储：key -> { data, expireAt }
 const store = new Map();
@@ -77,10 +79,10 @@ function del(cacheKey) {
 }
 
 /**
- * 使指定用户的所有统计缓存失效（前缀匹配 stats:{userId}:）
+ * 使指定用户的所有统计缓存失效（本地，前缀匹配 stats:{userId}:）
  * @param {string} userId 用户 ID
  */
-function invalidateByUserId(userId) {
+function invalidateByUserIdLocal(userId) {
   try {
     const escapedPrefix = `stats:${userId}:`;
     let removed = 0;
@@ -96,6 +98,30 @@ function invalidateByUserId(userId) {
     logger.warn(`统计缓存失效异常: ${err.message}`);
   }
 }
+
+/**
+ * 跨实例失效广播（同型问题）：store 是进程内 Map，
+ * 其它副本上的 `stats:{userId}:…` 不会因本副本的失效而消失，
+ * 只能等 TTL 自然过期——期间删除/改权限后的聚合数字在另一个副本上仍是旧的。
+ * 影响面是"陈旧计数"而非跨租户读取（键里含操作者本人 id），
+ * 但权限缓存与用户缓存都接了广播，这里补齐同一口径。
+ * 未配置 REDIS_URL 时发布为无操作，退化为单进程语义。
+ */
+const STATS_INVAL_PREFIX = 'statscache:';
+
+function invalidateByUserId(userId) {
+  invalidateByUserIdLocal(userId);
+  sharedCache.publishInvalidate(`${STATS_INVAL_PREFIX}${userId}`).catch(() => {
+    /* 发布失败退化为自然过期，不阻断主流程 */
+  });
+}
+
+function handleRemoteStatsInvalidation(raw) {
+  if (typeof raw !== 'string' || !raw.startsWith(STATS_INVAL_PREFIX)) return;
+  invalidateByUserIdLocal(raw.slice(STATS_INVAL_PREFIX.length));
+}
+
+sharedCache.onInvalidate(handleRemoteStatsInvalidation);
 
 /**
  * 清理过期条目；条目数超过上限时清除最旧 50%

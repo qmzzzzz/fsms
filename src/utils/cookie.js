@@ -63,37 +63,99 @@ const getCookies = (req) => {
 };
 
 /**
- * 将 JWT 过期表达式（与 jsonwebtoken/ms 语法兼容的子集）转换为毫秒
- * 支持：'30s' / '15m' / '24h' / '7d' / '2w' / '1y' / 纯数字（毫秒）
+ * 将 JWT 过期表达式转换为毫秒
+ *
+ * 单位集合必须与 jsonwebtoken 自己那套（它依赖的 `ms`）同集，一处不能少：同一个配置值
+ * 有两个解释器——令牌的 `exp` 由 `ms` 解析，而 cookie 的 `maxAge` 与会话行的 `expiresAt`
+ * （sessionService.js:273）由本函数解析。少认一个单位不是报错，而是**静默回落到 fallbackMs**：
+ * 实测 `'2 weeks'` 在令牌侧是 336h、在改造前的本函数是 168h（回退默认值），于是会话行比
+ * 它绑定的 refresh 令牌早死七天，第 7～14 天每次刷新都吃 DEVICE_SESSION_REVOKED。
+ * `'1y'` 更隐蔽：`ms` 用儒略年（365.25 天），原先写 365 会让两侧每年差 6 小时。
+ *
+ * 不能在这里 `require('ms')`——它是 jsonwebtoken 的传递依赖，不在本仓 package.json 里。
+ * 语法表因此只能存在两份，漂移由用例把守而不是由注释把守：
+ * src/tests/utils/durationToMsParity.test.js 的期望值一律由 `jwt.sign` + `jwt.decode`
+ * 现场反推，任何一侧改口径就会红。
+ *
+ * 纯数字串（如 '5000'）按毫秒解释，与 jsonwebtoken 对纯数字串的处理一致
+ * （实测两侧都是 5 秒）；数值入参（typeof number）本函数按毫秒、jsonwebtoken 按秒——
+ * 仓内没有传数值的调用方（env 读出来必是字符串），故不改动。
+ *
  * @param {string|number} expr
  * @param {number} fallbackMs - 无法解析时的回退值
  * @returns {number}
  */
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+// 儒略年：与 ms 的 year 取值同口径
+const YEAR_MS = 365.25 * DAY_MS;
+
+/** 长式/短式/单复数全部展开到同一基数；键集与下面正则的单位交替项一一对应 */
+const DURATION_UNIT_MS = {
+  ms: 1,
+  msec: 1,
+  msecs: 1,
+  millisecond: 1,
+  milliseconds: 1,
+  s: 1000,
+  sec: 1000,
+  secs: 1000,
+  second: 1000,
+  seconds: 1000,
+  m: MINUTE_MS,
+  min: MINUTE_MS,
+  mins: MINUTE_MS,
+  minute: MINUTE_MS,
+  minutes: MINUTE_MS,
+  h: HOUR_MS,
+  hr: HOUR_MS,
+  hrs: HOUR_MS,
+  hour: HOUR_MS,
+  hours: HOUR_MS,
+  d: DAY_MS,
+  day: DAY_MS,
+  days: DAY_MS,
+  w: 7 * DAY_MS,
+  week: 7 * DAY_MS,
+  weeks: 7 * DAY_MS,
+  y: YEAR_MS,
+  yr: YEAR_MS,
+  yrs: YEAR_MS,
+  year: YEAR_MS,
+  years: YEAR_MS,
+};
+
 const durationToMs = (expr, fallbackMs) => {
   if (typeof expr === 'number' && Number.isFinite(expr)) return expr;
   if (typeof expr !== 'string') return fallbackMs;
-  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d|w|y)?$/i.exec(expr.trim());
+  // 单位可省略（省略＝毫秒，对应 ms 把纯数字串当毫秒偏移的分支）；符号位保留——
+  // 否则 '-1h' 会落到 fallbackMs，把一个本该立即过期的配置值读成 7 天（放宽方向）
+  const match =
+    /^(-?(?:\d+)?\.?\d+) *(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w|years?|yrs?|y)?$/i.exec(
+      expr.trim()
+    );
   if (!match) return fallbackMs;
   const value = parseFloat(match[1]);
   const unit = (match[2] || 'ms').toLowerCase();
-  const unitMs = {
-    ms: 1,
-    s: 1000,
-    m: 60 * 1000,
-    h: 60 * 60 * 1000,
-    d: 24 * 60 * 60 * 1000,
-    w: 7 * 24 * 60 * 60 * 1000,
-    y: 365 * 24 * 60 * 60 * 1000,
-  };
-  return Math.round(value * unitMs[unit]);
+  const unitMs = DURATION_UNIT_MS[unit];
+  if (!Number.isFinite(unitMs)) return fallbackMs;
+  return Math.round(value * unitMs);
 };
 
 /**
  * 是否启用 Secure 属性：生产环境强制开启，其余环境由 COOKIE_SECURE=true 显式开启
- * （读 config 现有模式：config.nodeEnv 即 NODE_ENV || 'development'）
+ *
+ * 原实现 `config.nodeEnv === 'production'` 与 config/validate.js 的生产硬闸同源于
+ * 一个字面量比较：NODE_ENV=prod 的部署里生产校验已被 修成"照样执行"，
+ * 但会话 cookie 的 Secure 位仍会因这个拼写**静默关闭**——登录会话可在明文 HTTP 上被截取。
+ * 故统一改用 validate.js 导出的同一判据（惰性 require，避开 utils→config→validate 的加载期环路，
+ * 与仓内 userPermissionService / auditChain 等处的惰性 require 口径一致）。
  */
-const isSecureCookie = () =>
-  config.nodeEnv === 'production' || process.env.COOKIE_SECURE === 'true';
+const isSecureCookie = () => {
+  const { requiresProductionSemantics } = require('../config/validate');
+  return requiresProductionSemantics() || process.env.COOKIE_SECURE === 'true';
+};
 
 /** 公共 cookie 属性 */
 const baseCookieOptions = () => ({

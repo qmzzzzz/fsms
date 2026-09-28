@@ -4,20 +4,39 @@
  */
 
 const { validationResult } = require('express-validator');
+const { safeFieldErrors } = require('../utils/validationRules');
 const ApiResponse = require('../utils/apiResponse');
-const { getOperatorMaxLevel, matchesPermissionCodes } = require('../utils/permissionHelper');
+const {
+  getOperatorMaxLevel,
+  maxRoleLevel,
+  matchesPermissionCodes,
+} = require('../utils/permissionHelper');
 const { syncPermissionsToUsers } = require('../utils/permissionSync');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { getDataScope, buildDataScopeFilter, assertRecordInScope } = require('../middleware/rbac');
+const { castScopeObjectIds } = require('../utils/scopeCast');
+// 数据范围字段名只有一份（constants/dataScopeFields.js）。此前 getUserStats 里私抄了
+// 'createdBy'/'department'：改常量会让列表按新字段过滤、统计仍按旧字段聚合，
+// 同一用户在"我的列表"与"我的统计"上看到互相矛盾的口径——正是这个常量当初要消灭的 P2-20。
+const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const { validateSort, normalizePagination, isValidAvatar } = require('../utils/helpers');
 const { validateRules } = require('../utils/ipRange');
 const { decryptLoginCredential } = require('../utils/loginCipher');
 const { validatePasswordStrength } = require('../utils/helpers');
 const { checkSuperAdminMembership, isSuperAdminRole } = require('../utils/superAdmin');
+const { normalizeEmailKey } = require('../utils/emailKey');
 const statsCache = require('../services/statsCache');
 const { invalidateUserCache } = require('../middleware/auth');
+const { businessMonthStart } = require('../constants/timezone');
 const userService = require('../services/userService');
+
+/**
+ * user 资源的属主/部门字段只有一份（constants/dataScopeFields.js）。
+ * 此前本文件 5 处数据范围闸手写 'createdBy'/'department'，而同文件的统计接口引用常量——
+ * 常量一改就会出现"列表/详情/写路径按新字段、统计按旧字段"的口径分叉（P2-20 的原始教训）。
+ */
+const { ownerField: USER_OWNER_FIELD, departmentField: USER_DEPT_FIELD } = DATA_SCOPE_FIELDS.user;
 
 /**
  * 获取用户列表（支持分页、搜索、过滤）
@@ -93,7 +112,7 @@ const getUserById = asyncHandler(async (req, res) => {
 
   // 数据范围校验：与列表接口口径一致，防止按 ID 横向越权
   // （本接口在路由上已有 user:read 权限门槛，这里补齐数据范围一致性）
-  const { allowed } = await assertRecordInScope(req, user, 'createdBy', 'department');
+  const { allowed } = await assertRecordInScope(req, user, USER_OWNER_FIELD, USER_DEPT_FIELD);
   if (!allowed) {
     return ApiResponse.codeError(res, 'USER_VIEW_FORBIDDEN');
   }
@@ -102,45 +121,255 @@ const getUserById = asyncHandler(async (req, res) => {
 });
 
 /**
+ * P0-1 建号数据范围闸（与 updateUser 的 department 分支同源）。
+ * department 是「数据范围决定字段」：新建账户落入该部门后按自身部门可见数据。
+ * 若允许 department/self 域操作者把新账号建到其可见域之外（例：东区管理员建 总部
+ * 账号并持其口令），等价于在域外安插一个可读该域数据的账号——与 updateUser 明令
+ * 禁止的「把用户移出自己的域」是同一件事的两个入口，此前只有 update 有闸。
+ * self/none（opDept=null）拒任何非空 department；all（超管）与本部门放行。
+ * @returns {Promise<boolean>} true 表示已写出 403 拒绝响应，调用方应立即 return。
+ */
+async function guardCreateUserScope(req, res, department, username) {
+  if (department === undefined || department === '') return false;
+  const opScope = await getDataScope(req.user.userId);
+  if (opScope.type === 'all') return false;
+  const opDept = opScope.type === 'department' ? opScope.department : null;
+  if (department === opDept) return false;
+  logger.warn('拒绝在操作者数据范围外创建用户', {
+    operator: operatorTag(req),
+    operatorScope: opScope.type,
+    operatorDept: opDept || null,
+    requestedUsername: username,
+    requestedDept: department,
+  });
+  ApiResponse.codeError(res, 'USER_SCOPE_FIELD_FORBIDDEN');
+  return true;
+}
+
+/** 角色文档集合 → 其携带的权限码集合（纯投影，不含任何授权判定语义） */
+const permissionCodesOfRoles = (roleDocs) => {
+  const codes = new Set();
+  for (const r of roleDocs) {
+    for (const p of r.permissions || []) {
+      if (p?.code) codes.add(p.code);
+    }
+  }
+  return codes;
+};
+
+/**
+ * 权限子集校验的唯一实现：本次要授予的权限里、操作者自身不具备的那些即越权。
+ *
+ * 建号与角色分配此前各写一份同样的"双重循环取码 + 过滤"，注释里互相声明
+ * "与对方完全同口径"——口径靠注释维持就是漂移的开始（层级闸与子集闸的先后、
+ * 排除集是否参与，两处都必须一致）。
+ *
+ * currentRoleDocs 传目标已持有的角色：收权时目标的权限可能多于操作者，
+ * 那些权限不是本次授予行为，必须排除，否则操作者连"给下级收权"都做不到。
+ * @returns {string[]} 操作者无权授予的权限码；空数组即放行
+ */
+const findUnoperableGrantCodes = (operatorPermCodes, grantRoleDocs, currentRoleDocs) => {
+  const granting = permissionCodesOfRoles(grantRoleDocs);
+  if (currentRoleDocs) {
+    for (const code of permissionCodesOfRoles(currentRoleDocs)) granting.delete(code);
+  }
+  return [...granting].filter((code) => !matchesPermissionCodes(operatorPermCodes, code));
+};
+
+/**
+ * IP 访问范围规则的语法闸（建号与更新共用）：非法片段逐条回报，
+ * 否则入库后规则静默失效——比报错更糟的是"以为限了"。
+ * @returns {boolean} true 表示已写出拒绝响应，调用方应立即 return
+ */
+const rejectInvalidIpRules = (res, allowedIPs) => {
+  if (allowedIPs === undefined || allowedIPs === '') return false;
+  const check = validateRules(allowedIPs);
+  if (check.valid) return false;
+  ApiResponse.codeError(res, 'IP_RULES_FORMAT_INVALID', {
+    message: `IP 范围规则格式有误：${check.invalid.join('、')}`,
+    params: { rules: check.invalid.join('、') },
+  });
+  return true;
+};
+
+/**
+ * 角色列表形状闸：必须是非空数组（元素是否指向真实角色由后续存在性校验负责）。
+ * @returns {boolean} true 表示已写出拒绝响应，调用方应立即 return
+ */
+const rejectInvalidRoleList = (res, roles) => {
+  if (roles && Array.isArray(roles) && roles.length > 0) return false;
+  ApiResponse.codeError(res, 'ROLE_LIST_INVALID');
+  return true;
+};
+
+/** 日志与告警里指代操作者的统一写法（用户名缺失时退回 id，不出现 undefined） */
+const operatorTag = (req) => req.user.username || req.user.userId;
+
+/**
+ * 同级角色的归属校验（纵深防御）：与操作者同 level 的角色，必须是操作者自己持有的那些。
+ *
+ * 只对**与操作者同级**的角色生效：高于操作者的已被层级校验拒绝，低于的由权限子集
+ * 校验兜住，只有"恰好同级"这一档需要额外要求归属——两名同级、分管不同模块的
+ * 管理员互挂对方角色，即可各自集齐双方全部权限且不触发任何层级告警。
+ *
+ * 不能写成"想授予某角色就必须自己持有它"：那会封死"把 GUEST 授予新人"这类
+ * 最常见的合法操作（操作者本人当然不持有 GUEST），反而逼管理员囤积角色，
+ * 本身就是权限膨胀的反模式。
+ * @returns {string[]} 同级且非操作者自身持有的角色编码
+ */
+const findForeignPeerRoles = (operatorRoleCodes, validRoles, operatorMaxLevel) =>
+  validRoles
+    .filter((r) => (r.level || 0) === operatorMaxLevel)
+    .map((r) => r.code)
+    .filter((code) => !operatorRoleCodes.has(code));
+
+/**
+ * 同级角色归属闸的执行体（B-2）：两条授权轨共用同一实现——改角色（assignRoles）
+ * 与建号（createUser）。
+ *
+ * 建号轨原本漏了这一道，而漏掉它不是"当场提权"（上一层的权限子集闸已保证新账户
+ * 权限 ⊆ 操作者自身权限），真实后果是**角色继承型扩权**：新账户成了那个同级角色的
+ * 合法持有者，日后该角色被补上任何权限，新账户——以及掌握其口令的操作者——自动获得，
+ * 而这条增量从未触过任何授权判定。附带同样重要的归因面：动作记在别人名下。
+ * 与 assignRoles 保持同一尺子是必要的：两条轨口径不一致时，运营者会自然流向松的那条。
+ *
+ * `req.user.roleCodes` 由 auth 中间件在请求期实时刷新（freshRoleCodes），
+ * 非签发时快照，作为角色归属比对的事实来源。
+ * @param {string} subjectTag 日志里指代被授权主体的写法（`target=xxx` / `newUser=xxx`）
+ * @returns {boolean} true 表示已写出 403 拒绝响应，调用方应立即返回
+ */
+const rejectForeignPeerRoles = (res, req, grantRoles, operatorMaxLevel, subjectTag) => {
+  const foreignRoles = findForeignPeerRoles(
+    new Set(req.user.roleCodes || []),
+    grantRoles,
+    operatorMaxLevel
+  );
+  if (foreignRoles.length === 0) return false;
+  logger.warn(
+    `角色分配越权被拒（同级角色归属）：operator=${operatorTag(req)} ${subjectTag} ` +
+      `非自身持有的同级角色=${foreignRoles.join(',')}`
+  );
+  ApiResponse.codeError(res, 'ROLE_ASSIGN_FOREIGN_PEER_FORBIDDEN', {
+    message: `无权分配自身未持有的同级角色：${foreignRoles.join('、')}`,
+    params: { foreignRoles: foreignRoles.join('、') },
+  });
+  return true;
+};
+
+/**
+ * 建号角色前置校验：
+ *  1) 角色必须全部存在（数量对不上即有 id 不存在）；
+ *  2) 新建账户一律不得携带超管角色——层级闸拦不住这条路径：超管本人的
+ *     operatorMaxLevel 也是 10，`targetMaxLevel > operatorMaxLevel` 为 false 会放行，
+ *     等于凭空造出第二位超管；
+ *  3) 不得授予高于自身层级的角色；
+ *  4) 不得授予自身不持有的权限——层级闸只拦「高于自己」，同级/低级角色完全可能
+ *     携带操作者没有的权限（只持 user:* 的账号管理员挂一个含 security:config 的
+ *     同级角色即绕道提权）。判定与 assignRoles 共用同一实现。
+ *  5) 不得授予自身未持有的**同级**角色（B-2，判据见 rejectForeignPeerRoles）。
+ *     这一道原先只有 assignRoles 有：同一个人改别人角色会被拦、建个新账户挂同一个
+ *     角色则放行，两条轨口径不一致 ⇒ 松的那条就是实际口径。
+ * @returns {Promise<{roles: Array, rejected: boolean}>}
+ */
+const validateRolesForCreate = async (req, res, roles) => {
+  if (!roles || roles.length === 0) return { roles: [], rejected: false };
+
+  const targetRoles = await userService.findRolesByIds(roles, 'level code isBuiltIn', {
+    lean: true,
+  });
+  if (targetRoles.length !== roles.length) {
+    ApiResponse.codeError(res, 'ROLE_NOT_FOUND_IN_LIST');
+    return { rejected: true };
+  }
+  if (targetRoles.some(isSuperAdminRole)) {
+    logger.warn('创建用户时携带超管角色被拒', { operator: operatorTag(req) });
+    ApiResponse.codeError(res, 'CANNOT_GRANT_SUPER_ADMIN_ON_CREATE');
+    return { rejected: true };
+  }
+
+  const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
+  const targetMaxLevel = maxRoleLevel(targetRoles);
+  if (targetMaxLevel > operatorMaxLevel) {
+    ApiResponse.codeError(res, 'ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN');
+    return { rejected: true };
+  }
+
+  const operatorPermCodes = await userService.getPermissions(req.user.userId);
+  if (!operatorPermCodes.includes('*:*')) {
+    const grantRoleDocs = await userService.findRolePermissionDocs(roles);
+    const lacking = findUnoperableGrantCodes(operatorPermCodes, grantRoleDocs);
+    if (lacking.length > 0) {
+      logger.warn(
+        `建号越权授予权限被拒：operator=${operatorTag(req)} ` + `缺少权限=${lacking.join(',')}`
+      );
+      ApiResponse.codeError(res, 'PERMISSION_GRANT_FORBIDDEN', {
+        message: `无权授予以下权限：${lacking.join('、')}`,
+        params: { permissions: lacking.join('、') },
+      });
+      return { rejected: true };
+    }
+    if (
+      rejectForeignPeerRoles(
+        res,
+        req,
+        targetRoles,
+        operatorMaxLevel,
+        `newUser=${req.body.username}`
+      )
+    ) {
+      return { rejected: true };
+    }
+  }
+  return { roles, rejected: false };
+};
+
+/**
+ * 建号口令取值（FE-M3 双轨）：密文轨 encPassword 与管理员代设明文轨并存。
+ * 密文解密失败统一回 400（不区分原因，免得给探测者回话），解密成功后
+ * 必须补做与注册同口径的强度校验——走密文轨的口令绕过了前端校验，
+ * 不能假定它合格。
+ * @returns {Promise<{password?: string, rejected: boolean}>} rejected=true 表示已写出响应
+ */
+const resolveAdminSetPassword = async (req, res, username) => {
+  if (typeof req.body.encPassword !== 'string' || !req.body.encPassword) {
+    return { password: req.body.password, rejected: false };
+  }
+  let password;
+  try {
+    password = await decryptLoginCredential(req.body.encPassword);
+  } catch (err) {
+    logger.warn(`管理员建号口令密文无效：${username}（${err.code || err.message}）`);
+    ApiResponse.codeError(res, 'AUTH_ENCRYPTED_CREDENTIAL_INVALID');
+    return { rejected: true };
+  }
+  const strengthErr = validatePasswordStrength(password);
+  if (strengthErr) {
+    ApiResponse.error(res, strengthErr, 400);
+    return { rejected: true };
+  }
+  return { password, rejected: false };
+};
+
+/**
  * 创建用户
  * POST /api/users
  */
 const createUser = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { username, email, realName, phone, department, roles, allowedIPs } = req.body;
 
-  // FE-M3：管理员建号口令密文轨（encPassword，与代设明文双轨）——
-  // 解密失败返回统一 400（不区分原因），解密后补做强度校验
-  let password;
-  if (typeof req.body.encPassword === 'string' && req.body.encPassword) {
-    try {
-      password = await decryptLoginCredential(req.body.encPassword);
-    } catch (err) {
-      logger.warn(`管理员建号口令密文无效：${username}（${err.code || err.message}）`);
-      return ApiResponse.codeError(res, 'AUTH_ENCRYPTED_CREDENTIAL_INVALID');
-    }
-    const strengthErr = validatePasswordStrength(password);
-    if (strengthErr) {
-      return ApiResponse.error(res, strengthErr, 400);
-    }
-  } else {
-    password = req.body.password;
-  }
+  // FE-M3：管理员建号口令密文轨（encPassword，与代设明文双轨）
+  const { password, rejected } = await resolveAdminSetPassword(req, res, username);
+  if (rejected) return;
 
   // IP 访问范围规则格式校验：非法片段直接回报，避免入库后规则静默失效
-  if (allowedIPs !== undefined && allowedIPs !== '') {
-    const check = validateRules(allowedIPs);
-    if (!check.valid) {
-      return ApiResponse.codeError(res, 'IP_RULES_FORMAT_INVALID', {
-        message: `IP 范围规则格式有误：${check.invalid.join('、')}`,
-        params: { rules: check.invalid.join('、') },
-      });
-    }
-  }
+  if (rejectInvalidIpRules(res, allowedIPs)) return;
 
   // 检查用户名是否已存在
   // P3-30：username 判重走 collation（大小写不敏感），与唯一索引 username_ci 同口径；
@@ -154,57 +383,12 @@ const createUser = asyncHandler(async (req, res) => {
   }
 
   // 先校验角色，再创建用户，避免角色校验失败后留下孤儿用户
-  let validatedRoles = [];
-  if (roles && roles.length > 0) {
-    const targetRoles = await userService.findRolesByIds(roles, 'level code isBuiltIn', {
-      lean: true,
-    });
-    if (targetRoles.length !== roles.length) {
-      return ApiResponse.codeError(res, 'ROLE_NOT_FOUND_IN_LIST');
-    }
-    // 超管唯一性：新建账户一律不得携带超管角色。
-    // 层级校验不足以拦住这条路径——超管本人的 operatorMaxLevel 也是 10，
-    // `targetMaxLevel > operatorMaxLevel` 判定为 false 会放行，
-    // 从而凭空造出第二位超管
-    if (targetRoles.some(isSuperAdminRole)) {
-      logger.warn('创建用户时携带超管角色被拒', { operator: req.user.username || req.user.userId });
-      return ApiResponse.codeError(res, 'CANNOT_GRANT_SUPER_ADMIN_ON_CREATE');
-    }
-    // 获取当前操作者的最高角色层级
-    const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-    const targetMaxLevel = Math.max(...targetRoles.map((r) => r.level || 0));
-    if (targetMaxLevel > operatorMaxLevel) {
-      return ApiResponse.codeError(res, 'ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN');
-    }
-    // 层级闸只拦「高于自己」的角色，同级/低级角色完全可能携带操作者本人
-    // 没有的权限（例：只持 user:* 的账号管理员建号时挂上一个含 security:config
-    // 的同级角色）。assignRoles 一侧已有 P2-8 权限子集校验，建号一侧原先缺失，
-    // 同一件事两个入口口径不一致 = 绕道提权。此处与 assignRoles 完全同口径。
-    const operatorPermCodes = await userService.getPermissions(req.user.userId);
-    if (!operatorPermCodes.includes('*:*')) {
-      const grantRoleDocs = await userService.findRolePermissionDocs(roles);
-      const granting = new Set();
-      for (const r of grantRoleDocs) {
-        for (const p of r.permissions || []) {
-          if (p?.code) granting.add(p.code);
-        }
-      }
-      const lacking = [...granting].filter(
-        (code) => !matchesPermissionCodes(operatorPermCodes, code)
-      );
-      if (lacking.length > 0) {
-        logger.warn(
-          `建号越权授予权限被拒：operator=${req.user.username || req.user.userId} ` +
-            `缺少权限=${lacking.join(',')}`
-        );
-        return ApiResponse.codeError(res, 'PERMISSION_GRANT_FORBIDDEN', {
-          message: `无权授予以下权限：${lacking.join('、')}`,
-          params: { permissions: lacking.join('、') },
-        });
-      }
-    }
-    validatedRoles = roles;
-  }
+  const roleCheck = await validateRolesForCreate(req, res, roles);
+  if (roleCheck.rejected) return;
+  const validatedRoles = roleCheck.roles;
+
+  // P0-1（建号口径补齐，与 updateUser 的 department 闸同源）：详见 guardCreateUserScope。
+  if (await guardCreateUserScope(req, res, department, username)) return;
 
   // 创建用户（带角色）
   const user = await userService.createUser({
@@ -230,13 +414,167 @@ const createUser = asyncHandler(async (req, res) => {
 });
 
 /**
+ * status 变更的三道闸门（顺序即判定顺序，不可调整）：
+ *  1) 不得把超级管理员置为非 active——且**不带 isSelf 例外**：超管把自己锁死后
+ *     无人能解锁（层级校验会拦下所有针对 level=10 的操作），属自锁死路径；
+ *  2) 不得变更自身 status（改完即失去登录能力，且同样无人能修回）；
+ *  3) 变更他人 status 须持 user:lock——否则仅持 user:update 的账号就能绕过专用
+ *     锁定接口（PUT /api/security/users/:userId/lock）的权限门；*:* 通配视为持有全部权限。
+ * @returns {Promise<boolean>} true 表示已写出拒绝响应，调用方应立即 return
+ */
+const rejectForbiddenStatusChange = async (req, res, { user, status, isSelf, targetRoles }) => {
+  const isBuiltInSuperAdmin = targetRoles.some(isSuperAdminRole);
+  if (status && status !== 'active' && isBuiltInSuperAdmin) {
+    ApiResponse.codeError(res, 'CANNOT_DISABLE_SUPER_ADMIN');
+    return true;
+  }
+  const changesOwnStatus = isSelf && status !== undefined && String(status) !== String(user.status);
+  if (changesOwnStatus) {
+    ApiResponse.codeError(res, 'CANNOT_CHANGE_OWN_STATUS');
+    return true;
+  }
+  const changesOthersStatus =
+    !isSelf && status !== undefined && String(status) !== String(user.status);
+  if (changesOthersStatus) {
+    const operatorPermCodes = await userService.getPermissions(req.user.userId);
+    if (!operatorPermCodes.includes('user:lock') && !operatorPermCodes.includes('*:*')) {
+      ApiResponse.codeError(res, 'USER_STATUS_CHANGE_FORBIDDEN');
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * 字段格式闸：头像白名单（与个人资料接口同口径，防存储恶意 URL/data URI）、
+ * IP 范围规则语法（非法片段必须回报，否则入库后规则静默失效）。
+ * @returns {boolean} true 表示已写出拒绝响应
+ */
+const rejectInvalidFieldFormats = (res, { avatar, allowedIPs }) => {
+  if (avatar !== undefined && avatar !== '' && !isValidAvatar(avatar)) {
+    ApiResponse.codeError(res, 'AVATAR_INVALID');
+    return true;
+  }
+  return rejectInvalidIpRules(res, allowedIPs);
+};
+
+/**
+ * 层级保护：禁止修改等于或高于自身层级的用户（与删除/锁定/角色分配逻辑保持一致），
+ * 防止低层级管理员篡改或禁用高层级账户（含 status 变更）；修改自身资料除外。
+ * @returns {Promise<boolean>} true 表示已写出拒绝响应
+ */
+const rejectPeerOrHigherTarget = async (req, res, { targetRoles, isSelf }) => {
+  if (isSelf) return false;
+  const targetMaxLevel = maxRoleLevel(targetRoles);
+  // 按操作者 ID 重新查询角色层级（req.user.roles 存的是角色编码，不能直接用于 _id 查询）
+  const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
+  if (targetMaxLevel >= operatorMaxLevel) {
+    ApiResponse.codeError(res, 'USER_UPDATE_PEER_OR_HIGHER_FORBIDDEN');
+    return true;
+  }
+  return false;
+};
+
+/**
+ * 数据范围闸（P0-1）：department 与 allowedIPs 都是「决定谁能看见什么/从哪能访问」的
+ * 归属字段，不得由可见域之外的操作者改写。
+ *
+ * 背景（已端到端复现的跨部门越权链）：本接口此前只有层级校验（isSelf 例外 +
+ * targetMaxLevel >= operatorMaxLevel），于是 dept=东区的部门管理员执行
+ *   PUT /api/users/<自己> { department: '总部' }
+ * → 200 → 随后 GET /api/devices 以「总部」口径返回全量设备 → 越权读取。
+ *
+ * 口径（与 assertRecordInScope / applyDataScopeToQuery 的 deny 语义一致）：
+ *   - all        → 不受限（超级管理员）
+ *   - department → 仅允许本部门内变更：目标用户当前须在本部门，新值也须是本部门
+ *   - self/none  → 拒绝这两个字段的任何变更
+ * isSelf 不构成豁免：攻击链正是「改自己」。层级校验管「能不能碰这个人」，
+ * 数据范围校验管「能不能把他的归属改到我的可见域之外」——两者正交，都要有。
+ * @returns {Promise<boolean>} true 表示已写出拒绝响应
+ */
+const rejectOutOfScopeFieldChange = async (req, res, { user, department, allowedIPs }) => {
+  const touchesScopeField =
+    (department !== undefined && department !== user.department) ||
+    (allowedIPs !== undefined && allowedIPs !== user.allowedIPs);
+  if (!touchesScopeField) return false;
+
+  const opScope = await getDataScope(req.user.userId);
+  if (opScope.type === 'all') return false;
+
+  const opDept = opScope.type === 'department' ? opScope.department : null;
+  const targetInScopeDept = Boolean(opDept) && user.department === opDept;
+  const newDeptInScopeDept = department === undefined || department === opDept;
+  if (targetInScopeDept && newDeptInScopeDept) return false;
+
+  logger.warn('拒绝范围外的数据范围字段变更', {
+    operator: operatorTag(req),
+    operatorScope: opScope.type,
+    operatorDept: opDept || null,
+    targetUsername: user.username,
+    targetDept: user.department || null,
+    requestedDept: department,
+    requestedAllowedIPs: allowedIPs !== undefined,
+  });
+  ApiResponse.codeError(res, 'USER_SCOPE_FIELD_FORBIDDEN');
+  return true;
+};
+
+/**
+ * 待写入的用户字段（此前 email 被静默丢弃——前端编辑表单确实提交该字段；
+ * 唯一性冲突处理与创建接口口径一致）
+ * @returns {Promise<boolean>} true 表示邮箱已被他人占用，调用方应立即 return
+ */
+const emailTakenBySomeoneElse = async (email, user) => {
+  // 查重本身不会漏：Mongoose 把 schema 的 lowercase setter 同时作用于查询条件。
+  // 这里显式取规范形态是为了两件事：① 与 user.email 的比较是普通 JS 比较，没有 setter；
+  // ② 不把正确性押在"query setter"这一条 Mongoose 隐式行为上（历史上变过）。见 utils/emailKey.js。
+  const emailKey = normalizeEmailKey(email);
+  if (emailKey === undefined || emailKey === normalizeEmailKey(user.email)) return false;
+  const existing = await userService.findOneUser({
+    email: emailKey,
+    _id: { $ne: user._id },
+  });
+  return Boolean(existing);
+};
+
+/** 按「字段是否出现」逐个赋值：undefined 表示本次不改，不得写成 false/null */
+const applyProfileFields = (
+  user,
+  { realName, email, phone, department, avatar, status, allowedIPs }
+) => {
+  // 必须在逐个赋值**之前**读旧 status：restoringAccess 判的是"这次写入是否把账户从
+  // 不可登录状态恢复回来"，赋值之后旧值就没了。
+  const restoringAccess = status === 'active' && user.status !== 'active';
+  if (realName !== undefined) user.realName = realName;
+  if (email !== undefined) user.email = email;
+  if (phone !== undefined) user.phone = phone;
+  if (department !== undefined) user.department = department;
+  if (avatar !== undefined) user.avatar = avatar;
+  if (status !== undefined) user.status = status;
+  if (allowedIPs !== undefined) user.allowedIPs = allowedIPs;
+  // 恢复可登录状态时必须连**临时锁定**一起清掉，与专用解锁接口同口径
+  // （services/authService 的 lockUser）。两套锁定是分开的：status 由管理员改，
+  // lockUntil 由登录爆破阈值写；而 authenticate 与 loginUser 都只看 lockUntil 就拒登录。
+  // 于是"先被爆破锁定、再被管理员锁定"的账户，本处原先只改 status ⇒
+  // 接口 200「用户信息更新成功」、缓存也失效了，用户依然登不进来，运维只会去怀疑密码。
+  // 判据取「由非 active 变回 active」而不是「status 字段被写过」：
+  // active→active 的普通编辑不得顺手重置爆破计数（那等于给攻击者一个免费清零入口）。
+  if (restoringAccess) {
+    user.lockUntil = null;
+    user.failedLoginCount = 0;
+  }
+};
+
+/**
  * 更新用户信息
  * PUT /api/users/:id
  */
 const updateUser = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { realName, email, phone, department, avatar, status, allowedIPs } = req.body;
@@ -246,125 +584,36 @@ const updateUser = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });
   }
 
-  // 层级保护：禁止修改等于或高于自身层级的用户（与删除/锁定/角色分配逻辑保持一致），
-  // 防止低层级管理员篡改或禁用高层级账户（含 status 变更）；修改自身资料除外
+  // 数据范围闸（与 getUserById 读路径同一判据）：层级校验管"能不能碰这个人"，
+  // 范围校验管"这个人是否在你的可见域内"——两者正交。此前仅读路径有闸，
+  // 部门域管理员可对自己根本看不到（GET 403）的跨部门用户执行写操作。
+  const { allowed: updateTargetInScope } = await assertRecordInScope(
+    req,
+    user,
+    USER_OWNER_FIELD,
+    USER_DEPT_FIELD
+  );
+  if (!updateTargetInScope) {
+    return ApiResponse.codeError(res, 'USER_SCOPE_FORBIDDEN');
+  }
+
+  // 以下逐步调用与原实现同序；每步自己决定是否要查库，调用方只管"被拒即 return"
   const targetRoles = await userService.findRolesByIds(user.roles, 'level code isBuiltIn');
-  const targetMaxLevel =
-    targetRoles.length > 0 ? Math.max(...targetRoles.map((r) => r.level || 0)) : 0;
-
   const isSelf = String(user._id) === String(req.user.userId);
-  if (!isSelf) {
-    // 按操作者 ID 重新查询角色层级（req.user.roles 存的是角色编码，不能直接用于 _id 查询）
-    const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-    if (targetMaxLevel >= operatorMaxLevel) {
-      return ApiResponse.codeError(res, 'USER_UPDATE_PEER_OR_HIGHER_FORBIDDEN');
-    }
+
+  if (await rejectPeerOrHigherTarget(req, res, { targetRoles, isSelf })) return;
+
+  if (await rejectForbiddenStatusChange(req, res, { user, status, isSelf, targetRoles })) return;
+
+  if (rejectInvalidFieldFormats(res, { avatar, allowedIPs })) return;
+
+  if (await rejectOutOfScopeFieldChange(req, res, { user, department, allowedIPs })) return;
+
+  if (await emailTakenBySomeoneElse(email, user)) {
+    return ApiResponse.codeError(res, 'EMAIL_TAKEN_SHORT');
   }
 
-  // 禁止通过本接口禁用/锁定超级管理员（与 toggleUserLock 口径一致）。
-  // 注意这里不带 isSelf 例外：超管把自己置为 inactive 后无人能解锁（层级校验
-  // 会拦下所有针对 level=10 的操作），属自锁死路径
-  const isBuiltInSuperAdmin = targetRoles.some(isSuperAdminRole);
-  if (status && status !== 'active' && isBuiltInSuperAdmin) {
-    return ApiResponse.codeError(res, 'CANNOT_DISABLE_SUPER_ADMIN');
-  }
-
-  // ===== 安全修复（自我锁死防护）：禁止变更自身状态 =====
-  // 防止管理员把自己改成 inactive/locked 后无法登录、且无人能解锁
-  if (isSelf && status !== undefined && String(status) !== String(user.status)) {
-    return ApiResponse.codeError(res, 'CANNOT_CHANGE_OWN_STATUS');
-  }
-
-  // ===== 安全修复：status 变更须持 user:lock 权限 =====
-  // 此前仅持 user:update 的操作者可直接改 status，绕过专用锁定接口
-  // （PUT /api/security/users/:userId/lock）的 user:lock 权限门；*:* 通配视为持有全部权限
-  if (!isSelf && status !== undefined && String(status) !== String(user.status)) {
-    const operatorPermCodes = await userService.getPermissions(req.user.userId);
-    if (!operatorPermCodes.includes('user:lock') && !operatorPermCodes.includes('*:*')) {
-      return ApiResponse.codeError(res, 'USER_STATUS_CHANGE_FORBIDDEN');
-    }
-  }
-
-  // 头像白名单校验：与个人资料更新接口同一口径，防止存储恶意 URL/data URI
-  if (avatar !== undefined && avatar !== '' && !isValidAvatar(avatar)) {
-    return ApiResponse.codeError(res, 'AVATAR_INVALID');
-  }
-
-  // IP 访问范围规则格式校验：非法片段直接回报，避免入库后规则静默失效
-  if (allowedIPs !== undefined && allowedIPs !== '') {
-    const check = validateRules(allowedIPs);
-    if (!check.valid) {
-      return ApiResponse.codeError(res, 'IP_RULES_FORMAT_INVALID', {
-        message: `IP 范围规则格式有误：${check.invalid.join('、')}`,
-        params: { rules: check.invalid.join('、') },
-      });
-    }
-  }
-
-  // ===== 安全修复（P0-1，2026-09-17）：数据范围校验 =====
-  //
-  // 背景（代码审计已端到端复现的跨部门越权链）：
-  //   本接口此前只有「层级」校验（isSelf 例外 + targetMaxLevel >= operatorMaxLevel），
-  //   完全没有「数据范围」校验。department 是 dataScope='department' 用户可见数据的
-  //   **判定字段**（见 middleware/rbac.js 的 getDataScope / buildDataScopeFilter），
-  //   于是 dept=东区的部门管理员执行：
-  //     PUT /api/users/<自己> { department: '总部' }
-  //   → 200 成功 → 随后 GET /api/devices 以「总部」为口径返回全量设备
-  //   → GET /api/devices/:id 可直取总部设备（越权读取）。
-  //
-  //   allowedIPs 同理：它决定该账户可从哪些 IP 访问（authenticate 的 IP 范围校验），
-  //   属访问控制配置，不应由范围外的操作者改写。
-  //
-  // 修复口径（与 assertRecordInScope / applyDataScopeToQuery 的 deny 语义一致）：
-  //   - dataScope='all'        → 不受限（超级管理员）
-  //   - dataScope='department' → 仅允许**本部门内**变更：目标用户当前须在本部门，
-  //                              且新 department 值也须是本部门（越部门即拒）
-  //   - dataScope='self'/'none'→ 拒绝这两个字段的任何变更
-  //
-  // 注意 isSelf 不构成豁免：攻击链正是「改自己」。层级校验管的是「能不能碰这个人」，
-  // 数据范围校验管的是「能不能把他的归属改到我的可见域之外」——两者正交，都要有。
-  const touchesScopeField =
-    (department !== undefined && department !== user.department) ||
-    (allowedIPs !== undefined && allowedIPs !== user.allowedIPs);
-
-  if (touchesScopeField) {
-    const opScope = await getDataScope(req.user.userId);
-    if (opScope.type !== 'all') {
-      const opDept = opScope.type === 'department' ? opScope.department : null;
-      const targetInScopeDept = Boolean(opDept) && user.department === opDept;
-      const newDeptInScopeDept = department === undefined || department === opDept;
-      if (!targetInScopeDept || !newDeptInScopeDept) {
-        logger.warn('拒绝范围外的数据范围字段变更', {
-          operator: req.user.username || req.user.userId,
-          operatorScope: opScope.type,
-          operatorDept: opDept || null,
-          targetUsername: user.username,
-          targetDept: user.department || null,
-          requestedDept: department,
-          requestedAllowedIPs: allowedIPs !== undefined,
-        });
-        return ApiResponse.codeError(res, 'USER_SCOPE_FIELD_FORBIDDEN');
-      }
-    }
-  }
-
-  // email 更新：前端用户编辑表单确实提交该字段，此前被静默丢弃；
-  // 唯一性冲突处理与创建接口口径一致（先查重再写入）
-  if (email !== undefined && email !== user.email) {
-    const existing = await userService.findOneUser({ email, _id: { $ne: user._id } });
-    if (existing) {
-      return ApiResponse.codeError(res, 'EMAIL_TAKEN_SHORT');
-    }
-  }
-
-  // 可更新的字段
-  if (realName !== undefined) user.realName = realName;
-  if (email !== undefined) user.email = email;
-  if (phone !== undefined) user.phone = phone;
-  if (department !== undefined) user.department = department;
-  if (avatar !== undefined) user.avatar = avatar;
-  if (status !== undefined) user.status = status;
-  if (allowedIPs !== undefined) user.allowedIPs = allowedIPs;
+  applyProfileFields(user, { realName, email, phone, department, avatar, status, allowedIPs });
 
   await userService.saveUser(user);
 
@@ -400,26 +649,36 @@ const assignRoles = asyncHandler(async (req, res) => {
   // 只声明校验器不消费 = 校验链形同虚设（与其他接口口径统一，报告 O-3）
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { roles } = req.body;
 
-  if (!roles || !Array.isArray(roles) || roles.length === 0) {
-    return ApiResponse.codeError(res, 'ROLE_LIST_INVALID');
-  }
+  if (rejectInvalidRoleList(res, roles)) return;
 
   const user = await userService.findUserForUpdate(req.params.id);
   if (!user) {
     return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });
   }
 
-  // M-01 修复：目标用户层级保护（口径对齐 updateUser/deleteUser/toggleUserLock）
+  // 数据范围闸：与 updateUser/deleteUser 同判据（派角色同样是对象级写操作）
+  const { allowed: assignTargetInScope } = await assertRecordInScope(
+    req,
+    user,
+    USER_OWNER_FIELD,
+    USER_DEPT_FIELD
+  );
+  if (!assignTargetInScope) {
+    return ApiResponse.codeError(res, 'USER_SCOPE_FORBIDDEN');
+  }
+
   // 此前仅校验"被分配角色"的层级，未校验"目标用户"的层级，
   // 导致低层级管理员可剥离同级/更高级用户（含内置超管）的角色
+  // M-01 修复：目标用户层级保护（口径对齐 updateUser/deleteUser/toggleUserLock）
   const targetUserRoles = await userService.findRolesByIds(user.roles, 'level code isBuiltIn');
-  const targetUserMaxLevel =
-    targetUserRoles.length > 0 ? Math.max(...targetUserRoles.map((r) => r.level || 0)) : 0;
+  const targetUserMaxLevel = maxRoleLevel(targetUserRoles);
 
   // 验证新角色是否存在（同时取出 permissions 供权限子集校验）
   const validRoles = await userService.findRolesByIds(roles, 'level code permissions', {
@@ -431,7 +690,7 @@ const assignRoles = asyncHandler(async (req, res) => {
 
   // 权限层级校验：禁止分配高于操作者自身层级的角色
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-  const targetMaxLevel = Math.max(...validRoles.map((r) => r.level || 0));
+  const targetMaxLevel = maxRoleLevel(validRoles);
   if (targetMaxLevel > operatorMaxLevel) {
     return ApiResponse.codeError(res, 'ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN');
   }
@@ -451,30 +710,15 @@ const assignRoles = asyncHandler(async (req, res) => {
   // 而层级保护恰好对 isSelf 放行。
   const operatorPermCodes = await userService.getPermissions(req.user.userId);
   if (!operatorPermCodes.includes('*:*')) {
-    // 精确匹配或模块通配（O-3：与 createRole/assignPermissions 共用唯一实现）
-    const hasPerm = (code) => matchesPermissionCodes(operatorPermCodes, code);
-
     // 只校验「新增的」权限：目标用户已持有的权限不属于本次授予行为，
-    // 否则操作者无法对权限比自己多的用户做任何角色调整（含收权）
-    const currentPermCodes = new Set();
-    const currentRoleDocs = await userService.findRolePermissionDocs(user.roles);
-    for (const r of currentRoleDocs) {
-      for (const p of r.permissions || []) {
-        if (p?.code) currentPermCodes.add(p.code);
-      }
-    }
-
-    const granting = new Set();
-    for (const r of validRoles) {
-      for (const p of r.permissions || []) {
-        if (p?.code && !currentPermCodes.has(p.code)) granting.add(p.code);
-      }
-    }
-
-    const lacking = [...granting].filter((code) => !hasPerm(code));
+    // 否则操作者无法对权限比自己多的用户做任何角色调整（含收权）。
+    // 判定本身与建号路径共用同一个实现（findUnoperableGrantCodes），
+    // 精确匹配与模块通配的语义则来自 utils/permissionHelper 的唯一实现。
+    const currentRoleDocs = await userService.findActiveRolePermissionDocs(user.roles);
+    const lacking = findUnoperableGrantCodes(operatorPermCodes, validRoles, currentRoleDocs);
     if (lacking.length > 0) {
       logger.warn(
-        `角色分配越权被拒：operator=${req.user.username || req.user.userId} ` +
+        `角色分配越权被拒：operator=${operatorTag(req)} ` +
           `target=${user.username} 缺少权限=${lacking.join(',')}`
       );
       return ApiResponse.codeError(res, 'PERMISSION_GRANT_FORBIDDEN', {
@@ -484,38 +728,13 @@ const assignRoles = asyncHandler(async (req, res) => {
     }
   }
 
-  // ===== 后端复审 B-2：同级角色归属包含校验（纵深防御）=====
-  // P2-8 只约束「权限」子集；本条补上「角色」本身的一道冗余闸门。
-  //
-  // 只对**与操作者同级**的角色生效，这是本条与最初实现的关键差别：
-  // 最初写成「分配的角色必须全部属于操作者自身角色集合」，直接封死了
-  // 「管理员把 GUEST 授予新人」这类最常见的合法操作——操作者本人当然
-  // 不持有 GUEST。要求「想授予某角色就必须自己也持有」反而逼着管理员
-  // 囤积角色，本身就是权限膨胀的反模式。
-  //
-  // 真正需要这道闸门的场景是**同级横向扩权**：两名 level 相同、分管不同
-  // 模块的管理员互挂对方角色，各自集齐双方权限。高于操作者的角色已被上方
-  // 层级校验拒绝，低于操作者的角色由 P2-8 权限子集校验兜住，
-  // 只有「恰好同级」这一档需要额外要求归属。
-  const operatorIsSuper = operatorPermCodes.includes('*:*');
-  if (!operatorIsSuper) {
-    // req.user.roleCodes 由 auth 中间件在请求期实时刷新（freshRoleCodes），
-    // 非签发时快照，作为角色归属比对的事实来源
-    const operatorRoleCodes = new Set(req.user.roleCodes || []);
-    const peerLevelRoles = validRoles.filter((r) => (r.level || 0) === operatorMaxLevel);
-    const foreignRoles = peerLevelRoles
-      .map((r) => r.code)
-      .filter((code) => !operatorRoleCodes.has(code));
-    if (foreignRoles.length > 0) {
-      logger.warn(
-        `角色分配越权被拒（同级角色归属）：operator=${req.user.username || req.user.userId} ` +
-          `target=${user.username} 非自身持有的同级角色=${foreignRoles.join(',')}`
-      );
-      return ApiResponse.codeError(res, 'ROLE_ASSIGN_FOREIGN_PEER_FORBIDDEN', {
-        message: `无权分配自身未持有的同级角色：${foreignRoles.join('、')}`,
-        params: { foreignRoles: foreignRoles.join('、') },
-      });
-    }
+  // ===== 后端复审 B-2：同级角色归属包含校验（判据与理由见 rejectForeignPeerRoles）=====
+  // 建号轨（validateRolesForCreate 第 5 道）调用的是同一个实现，两条轨不会再各走各的尺子。
+  if (
+    !operatorPermCodes.includes('*:*') &&
+    rejectForeignPeerRoles(res, req, validRoles, operatorMaxLevel, `target=${user.username}`)
+  ) {
+    return;
   }
 
   // 超管归属不可变更（含操作者本人）：剥离会造成不可恢复的自锁死
@@ -525,8 +744,7 @@ const assignRoles = asyncHandler(async (req, res) => {
   const membershipError = checkSuperAdminMembership(targetUserRoles, nextRoleDocs);
   if (membershipError) {
     logger.warn(
-      `超管归属变更被拒：operator=${req.user.username || req.user.userId} ` +
-        `target=${user.username} isSelf=${isSelf}`
+      `超管归属变更被拒：operator=${operatorTag(req)} ` + `target=${user.username} isSelf=${isSelf}`
     );
     return ApiResponse.codeError(res, membershipError.code, { message: membershipError.message });
   }
@@ -565,6 +783,17 @@ const deleteUser = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });
   }
 
+  // 数据范围闸：与 updateUser/getUserById 同判据（层级之外的正交一闸）
+  const { allowed: deleteTargetInScope } = await assertRecordInScope(
+    req,
+    user,
+    USER_OWNER_FIELD,
+    USER_DEPT_FIELD
+  );
+  if (!deleteTargetInScope) {
+    return ApiResponse.codeError(res, 'USER_SCOPE_FORBIDDEN');
+  }
+
   // 不允许删除自己
   if (user._id.toString() === req.user.userId) {
     return ApiResponse.codeError(res, 'CANNOT_DELETE_SELF');
@@ -573,8 +802,7 @@ const deleteUser = asyncHandler(async (req, res) => {
   // 层级保护：禁止删除等于或高于自身层级的用户（与锁定/角色分配逻辑保持一致）
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
   const targetRoles = await userService.findRolesByIds(user.roles, 'level code isBuiltIn');
-  const targetMaxLevel =
-    targetRoles.length > 0 ? Math.max(...targetRoles.map((r) => r.level || 0)) : 0;
+  const targetMaxLevel = maxRoleLevel(targetRoles);
   if (targetMaxLevel >= operatorMaxLevel) {
     return ApiResponse.codeError(res, 'USER_DELETE_PEER_OR_HIGHER_FORBIDDEN');
   }
@@ -584,7 +812,7 @@ const deleteUser = asyncHandler(async (req, res) => {
   // 若 SUPER_ADMIN 的 level 被下调，层级校验会失效而本判断仍然生效
   if (targetRoles.some(isSuperAdminRole)) {
     logger.warn('删除超管账户被拒', {
-      operator: req.user.username || req.user.userId,
+      operator: operatorTag(req),
       target: user.username,
     });
     return ApiResponse.codeError(res, 'CANNOT_DELETE_SUPER_ADMIN');
@@ -612,7 +840,9 @@ const deleteUser = asyncHandler(async (req, res) => {
 const batchDeleteUsers = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { ids } = req.body;
@@ -650,10 +880,24 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
   if (targets.length !== ids.length) {
     return ApiResponse.codeError(res, 'USER_ID_NOT_FOUND_IN_LIST');
   }
-  const oversized = targets.find((t) => {
-    const targetMaxLevel = t.roles?.length > 0 ? Math.max(...t.roles.map((r) => r.level || 0)) : 0;
-    return targetMaxLevel >= operatorMaxLevel;
-  });
+  const oversized = targets.find((t) => maxRoleLevel(t.roles) >= operatorMaxLevel);
+
+  // 数据范围闸：任一目标越出可见域即整批拒绝（批量接口不得成为单对象保护的绕过路径）
+  for (const target of targets) {
+    const { allowed: batchTargetInScope } = await assertRecordInScope(
+      req,
+      target,
+      USER_OWNER_FIELD,
+      USER_DEPT_FIELD
+    );
+    if (!batchTargetInScope) {
+      return ApiResponse.codeError(res, 'USER_SCOPE_FORBIDDEN', {
+        message: `无权操作用户：${target.username}（超出您的数据范围）`,
+        params: { username: target.username },
+      });
+    }
+  }
+
   if (oversized) {
     return ApiResponse.codeError(res, 'BATCH_DELETE_PEER_OR_HIGHER_FORBIDDEN', {
       message: `无权删除同级或更高级别的用户：${oversized.username}`,
@@ -666,7 +910,7 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
   const superTarget = targets.find((t) => (t.roles || []).some(isSuperAdminRole));
   if (superTarget) {
     logger.warn('批量删除含超管账户被拒', {
-      operator: req.user.username || req.user.userId,
+      operator: operatorTag(req),
       target: superTarget.username,
     });
     return ApiResponse.codeError(res, 'CANNOT_DELETE_SUPER_ADMIN', {
@@ -689,13 +933,32 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
 });
 
 /**
+ * $facet 结果 → 面板形状。任何一臂缺失都落到 0 / 空集，
+ * 不让 undefined 流到前端（面板按数值直接参与算式）。
+ */
+const facetArmCount = (rows) => rows?.[0]?.count || 0;
+
+const mapUserStatsFacet = (facetResult) => ({
+  total: facetArmCount(facetResult?.total),
+  active: facetArmCount(facetResult?.active),
+  inactive: facetArmCount(facetResult?.inactive),
+  thisMonth: facetArmCount(facetResult?.thisMonth),
+  byDepartment: facetResult?.byDepartment || [],
+  byRole: facetResult?.byRole || [],
+});
+
+/**
  * 获取用户统计信息
  * GET /api/users/stats
  */
 const getUserStats = asyncHandler(async (req, res) => {
   // 数据范围控制：与列表/详情接口口径一致，防止越权看到全组织统计
   const dataScope = await getDataScope(req.user.userId);
-  const scopeFilter = buildDataScopeFilter(dataScope, 'createdBy', 'department');
+  const scopeFilter = buildDataScopeFilter(
+    dataScope,
+    DATA_SCOPE_FIELDS.user.ownerField,
+    DATA_SCOPE_FIELDS.user.departmentField
+  );
 
   // 统计缓存：缓存键由用户 ID + 数据范围稳定摘要组成，保证按用户+数据范围隔离
   const crypto = require('crypto');
@@ -712,14 +975,18 @@ const getUserStats = asyncHandler(async (req, res) => {
     return ApiResponse.success(res, cached.data, '获取用户统计成功');
   }
 
-  // 本月起始时间
-  const startOfMonth = new Date();
-  startOfMonth.setDate(1);
-  startOfMonth.setHours(0, 0, 0, 0);
+  // 本月起始时间：取业务时区当月 1 日零点（与全站「今日」窗口同源）。
+  // 原 setDate(1)+setHours(0,0,0,0) 是服务器本地时区——容器裸跑 UTC 时，
+  // 业务时区每月 1 日前 8 小时新建的账号被算进上月，与同接口的其它计数、
+  // 仪表盘「今日」口径互相矛盾。
+  const startOfMonth = businessMonthStart();
 
   // $facet 单次聚合：冷缓存时 6 次串行 DB 往返合并为 1 次，降低冷启动/并发抖动
   const [facetResult] = await userService.aggregateStats([
-    { $match: scopeFilter },
+    // Model.aggregate 不做 schema cast：self 范围下 scopeFilter.createdBy 是 JWT 里的
+    // 字符串，直接进 $match 对 ObjectId 字段零匹配 → 统计恒 0（列表走 find() 会 cast，
+    // 于是"列表有数据、看板全 0"）。与 AlarmService.getAlarmStats 同用 castScopeObjectIds 归一。
+    { $match: castScopeObjectIds(scopeFilter) },
     {
       $facet: {
         // 总用户数
@@ -759,14 +1026,7 @@ const getUserStats = asyncHandler(async (req, res) => {
     },
   ]);
 
-  const data = {
-    total: facetResult?.total?.[0]?.count || 0,
-    active: facetResult?.active?.[0]?.count || 0,
-    inactive: facetResult?.inactive?.[0]?.count || 0,
-    thisMonth: facetResult?.thisMonth?.[0]?.count || 0,
-    byDepartment: facetResult?.byDepartment || [],
-    byRole: facetResult?.byRole || [],
-  };
+  const data = mapUserStatsFacet(facetResult);
 
   // 写入缓存（TTL 使用配置默认值），便于后续请求直接命中
   statsCache.set(cacheKey, data);

@@ -9,13 +9,19 @@
  * S-M1（改后审计 2026-09-05）：结果进程内缓存——/readyz 无鉴权且被公网
  * LB/探针高频打，每请求一次 ping 构成对 Mongo 的间接 DoS 放大；探针语义下
  * 1 秒陈旧度完全可接受（B-M1 同款思路：把放大量级压到常数）。
- * TTL 经 READYZ_CACHE_MS 运行期读取（0=关闭缓存），默认 1s。
+ * TTL 经 READYZ_CACHE_MS 运行期读取（显式 0=关闭缓存；未配置或空值=默认 1s）。
  */
 
 const MONGO_PING_TIMEOUT_MS = 1500;
+const READY_CACHE_TTL_DEFAULT_MS = 1000;
 const getReadyCacheTtlMs = () => {
-  const v = Number(process.env.READYZ_CACHE_MS);
-  return Number.isFinite(v) && v >= 0 ? v : 1000;
+  const raw = process.env.READYZ_CACHE_MS;
+  // 空串/纯空白必须回落默认值：k8s 的 `value:` 留空与 .env 的 `READYZ_CACHE_MS=` 都会把
+  // 变量定义成空串，而 Number('') === 0 ⇒ "忘了填"被读成"故意关缓存"，S-M1 的放大防护
+  // 静默消失。这里与 utils/envNumber.js 的差别只有一个：0 在本模块是合法语义，不能并入。
+  if (raw === undefined || String(raw).trim() === '') return READY_CACHE_TTL_DEFAULT_MS;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : READY_CACHE_TTL_DEFAULT_MS;
 };
 let readyCache = null; // { at: number, result: {ok, reason, detail} }
 

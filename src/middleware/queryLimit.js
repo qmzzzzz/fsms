@@ -10,6 +10,10 @@
  */
 
 const logger = require('../utils/logger');
+// 日志里的 URL 必须过 redactUrlQuery（与 app.js:236 morgan 的 safe-url、
+// errorHandler.js:26/100/107 同一口径）：本中间件恰好在"参数可疑"的路径上打日志，
+// 未打码就会把 ?accessToken=... 这类凭据原样落盘。
+const { redactUrlQuery } = require('../utils/helpers');
 
 // 单个 query 参数值的最大长度（覆盖 IP 段查询、复合关键字等最长场景）
 const MAX_QUERY_VALUE_LENGTH = 200;
@@ -20,6 +24,22 @@ const sanitizeParamName = (name) =>
   String(name)
     .replace(/[^\w.\-\u4e00-\u9fff]/g, '*')
     .slice(0, 50);
+
+/**
+ * 形态/长度两类查询拒绝都要留审计痕迹。
+ *
+ * 本中间件挂在 auditLog 之前（它必须在任何业务查询前把畸形参数挡掉），
+ * 于是它的 400 原本只进 logger：NoSQL 操作符探测（`?search[$regex]=`、
+ * 对象/数组形态取值）与超长参数轰炸是**攻击者还没拿到任何凭据时就能做**的动作，
+ * 恰好是最该留下趋势数据的一段流量，此前在合规留存里是一片空白。
+ * 姊妹路径（黑名单、来源校验、IP 段）早就通过 recordEarlyRejection 补齐了这类留痕，
+ * 这里补的是同一格，不是新发明一套机制。
+ *
+ * 延迟 require：security.js 与本模块同层且互相引用会成环（originCheck 用的是同一招）。
+ */
+const recordQueryRejection = (req, meta) => {
+  require('./security').recordEarlyRejection(req, meta);
+};
 
 /**
  * 校验 req.query 中所有字符串值的长度
@@ -48,7 +68,14 @@ function queryLengthLimit(max = MAX_QUERY_VALUE_LENGTH) {
     if (violated.length > 0) {
       logger.warn(`查询参数超长已拦截：${violated.join(', ')}（上限 ${max} 字符）`, {
         reqId: req.id,
-        url: req.originalUrl,
+        url: redactUrlQuery(req.originalUrl),
+      });
+      recordQueryRejection(req, {
+        action: 'query_param_rejected',
+        reason: `查询参数值超过 ${max} 字符：${violated.join(', ')}`,
+        riskFactors: ['query_length_violation'],
+        riskLevel: 'low',
+        statusCode: 400,
       });
       return res.status(400).json({
         success: false,
@@ -93,9 +120,12 @@ function queryLengthLimit(max = MAX_QUERY_VALUE_LENGTH) {
  */
 function queryScalarGuard() {
   return (req, res, next) => {
-    // IP 白名单豁免：可信来源不受 query 标量收敛约束
-    if (req.ipWhitelisted === true) return next();
-
+    // 这里**不设** IP 白名单豁免：本中间件约束的是取值形态（对象/数组一律拒绝），
+    // 不是滥用频次。原实现在首行 `if (req.ipWhitelisted) return next()`，
+    // 而按本文件头注释，Express 5 下 sanitizeMongo 与 hpp 对 req.query 的清洗均已失效，
+    // 于是白名单来源（内网运维段、被误加白的网段）可把 {"$ne":...} 这类操作符对象
+    // 直接送进 mongoose 过滤条件——"唯一防线"对白名单归零。
+    // 白名单豁免仍保留在 queryLengthLimit / 各限流器上：那才是频次/体量型约束。
     const offenders = [];
 
     for (const [key, value] of Object.entries(req.query || {})) {
@@ -108,7 +138,14 @@ function queryScalarGuard() {
     if (offenders.length > 0) {
       logger.warn(`查询参数类型非法已拦截：${offenders.join(', ')}（要求标量，收到对象/数组）`, {
         reqId: req.id,
-        url: req.originalUrl,
+        url: redactUrlQuery(req.originalUrl),
+      });
+      recordQueryRejection(req, {
+        action: 'query_param_rejected',
+        reason: `查询参数收到对象/数组形态取值：${offenders.join(', ')}`,
+        riskFactors: ['query_operator_violation'],
+        riskLevel: 'medium',
+        statusCode: 400,
       });
       return res.status(400).json({
         success: false,

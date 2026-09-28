@@ -6,6 +6,12 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const config = require('../config');
+// 账户状态取值全集只有一份（utils/constants.js 的 USER_STATUS）。
+// 此前这里是私抄 `['active','inactive','locked']`，而 userRoutes 的查询校验已经用的是
+// Object.values(USER_STATUS) ⇒ 给 USER_STATUS 加一档时：查询侧放行、
+// userService 的过滤白名单不认识它而**静默丢掉整个 status 条件**（返回全量而非 400），
+// 保存侧则被本 enum 拒。三处同源后这类分叉不再可能。
+const { USER_STATUS } = require('../utils/constants');
 
 /**
  * 用户名比较口径（P3-30）
@@ -36,6 +42,13 @@ const userSchema = new mongoose.Schema(
       trim: true,
       minlength: [3, '用户名至少 3 个字符'],
       maxlength: [30, '用户名最多 30 个字符'],
+      // 字符集约束必须落在模型层，与 userRoutes / authRoutes 的 `^[a-zA-Z0-9_]+$` 同源。
+      // 原先模型只有长度约束：任何**非路由**写入（initData 走 raw collection、
+      // 数据修复脚本、将来的批量导入）都能造出与既有账户视觉上等同的用户名。
+      // USERNAME_COLLATION 只折大小写与重音，**不折西里尔 'а' 与拉丁 'a'**，
+      // 于是 `аdmin` 能合法落库并与 `admin` 并存——而审计日志、告警通知、审批记录
+      // 都以用户名呈现操作者（本文件上方对仿冒面的描述正是这件事）。
+      match: [/^[a-zA-Z0-9_]+$/, '用户名只能包含字母、数字和下划线'],
     },
     email: {
       type: String,
@@ -105,7 +118,7 @@ const userSchema = new mongoose.Schema(
     // 账户状态
     status: {
       type: String,
-      enum: ['active', 'inactive', 'locked'],
+      enum: Object.values(USER_STATUS),
       default: 'active',
     },
     lastLoginAt: {

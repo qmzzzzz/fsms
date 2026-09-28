@@ -15,10 +15,24 @@
  *      每进程独立计数 → 实际配额被放大 N 倍，暴力破解防护按比例削弱。
  *   4. 用户/权限缓存（middleware/auth.js invalidateUserCache）
  *      失效只作用于当前进程 → 禁用用户/改权限后其余进程最长 60s 仍放行。
- *   5. 验证码存储（captchaStore）、统计缓存（statsCache）、
- *      告警频控（securityAlert alertRateLimit Map）、
- *      MFA 重放计数、WebSocket 客户端表（websocketService）
+ *   5. 验证码存储（services/captchaService.js）、统计缓存（services/statsCache.js）、
+ *      告警频控（services/securityAlert.js 的 alertRateLimit Map）、
+ *      WebSocket 客户端表（services/websocketService.js）
  *      均为进程内 Map → 跨进程不可见，一次性消费/风暴抑制不成立。
+ *   6. 安全与数据面的进程内缓存（无失效广播者，多实例下各自为政到一个 TTL）：
+ *      IP 封禁缓存（middleware/security.js）、部门成员缓存（services/auditScopeFilter.js）、
+ *      配置读取缓存（models/SystemConfig.js，TTL 30s）、名单快照（models/IPBlacklist.js，TTL 10s）、
+ *      告警去重表（services/auditMonitor.js，多实例会重复告警）。
+ *      前两项直接影响**鉴权与数据范围判定**，不是"数字抖动"那么轻。
+ *
+ * 刻意**不在**本清单：MFA 重放计数。它一度被写进本注释，属名实不符——
+ * 现由 `User.mfaLastCounter` + `mfaService.claimTotpWindow` 的 Mongo 原子认领实现
+ * （状态在库、跨进程天然一致），不是进程内 Map。把它列进来会让运维在
+ * 多实例部署时误以为"重放防护会失效"，从而漏掉真正失效的那几项。
+ *
+ * 本清单的唯一事实来源是下方 SINGLE_PROCESS_DEPENDENCIES 数组（本注释只是导读）。
+ * 完整性由 src/tests/constants/singleProcessInventoryCompleteness.test.js 钉住：
+ * 新增进程内状态而忘记登记，会在该用例变红。
  *
  * 本模块把这些假设写成可执行的断言：启动期检测多进程迹象并给出
  * 明确的失效清单，而不是让运维在数据不一致时才发现。
@@ -61,8 +75,8 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     redisExternalized: true,
   },
   {
-    module: 'utils/captchaStore',
-    mechanism: '验证码内存表',
+    module: 'services/captchaService.js',
+    mechanism: '验证码内存表（localStore Map）',
     impact: '一次性消费不成立（换进程可复用同一验证码）',
     redisExternalized: true,
   },
@@ -70,11 +84,59 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     module: 'services/statsCache.js',
     mechanism: '统计缓存 Map',
     impact: '各进程数据不一致（仅表现为数字抖动）',
+    // 与 middleware/auth.js 的 userCache 同一模式：缓存本体在进程内，
+    // 失效经 sharedCache 广播（statsCache.js:114 publishInvalidate / :124 onInvalidate）。
+    // 此前漏标 ⇒ Redis 就绪时仍被报成"将静默降级"，属假警报
+    // （假警报会训练运维忽略真信号，见文件头第 3 条判据的同类教训）。
+    redisExternalized: true,
   },
   {
     module: 'services/securityAlert.js',
     mechanism: 'alertRateLimit Map',
     impact: '风暴抑制按进程计，告警量被放大',
+  },
+  {
+    module: 'middleware/security.js',
+    mechanism: 'IP 封禁缓存（ipBlockCache Map）',
+    impact: 'A 实例封禁的 IP 在 B 实例仍放行，直到 B 自己的 TTL 到期',
+  },
+  {
+    module: 'services/auditScopeFilter.js',
+    mechanism: '部门成员缓存（deptMembersCache Map）',
+    impact: '数据范围过滤按各进程缓存判定，改部门成员后其余进程延迟生效',
+  },
+  {
+    module: 'models/SystemConfig.js',
+    mechanism: '配置读取缓存（getCache Map + 注册开关布尔缓存，TTL 30s）',
+    impact: '改配置后各进程最长 30s 仍按旧值判定（如关闭公开注册后仍可注册）',
+  },
+  {
+    module: 'models/IPBlacklist.js',
+    mechanism: '名单快照缓存（snapshotCache Map，TTL 10s）',
+    impact: 'A 实例封禁的 IP 在 B 实例最长 10s 内仍放行，封禁存在时间窗',
+  },
+  {
+    module: 'services/userPermissionService.js',
+    mechanism: '权限缓存（permCache Map，配失效广播）',
+    impact: '缓存本体在进程内，靠 sharedCache 广播失效；Redis 未就绪时不跨进程',
+    redisExternalized: true,
+  },
+  {
+    module: 'services/sessionService.js',
+    mechanism: '会话缓存 Map（sessionCache，配 `sesscache:` 失效广播）',
+    impact: '缓存本体在进程内，靠 sharedCache 广播失效；Redis 未就绪时不跨进程',
+    redisExternalized: true,
+  },
+  {
+    module: 'services/reportDashboardService.js',
+    mechanism: '仪表盘缓存（dashboardCache Map，配失效广播）',
+    impact: '缓存本体在进程内，靠 sharedCache 广播失效；Redis 未就绪时不跨进程',
+    redisExternalized: true,
+  },
+  {
+    module: 'services/auditMonitor.js',
+    mechanism: '告警去重表（notifiedDayByDimension Map）',
+    impact: '各进程各自去重，同一事件按实例数重复告警',
   },
   {
     module: 'services/websocketService.js',
@@ -122,18 +184,32 @@ function parsePodOrdinal(hostname) {
 
   const lower = host.toLowerCase();
 
+  // 先判 Deployment 形态：<name>-<rsHash 8~10>-<5 位随机>。
+  // 必须**先于**下面的「末段纯数字」规则，否则会把单副本 Deployment 误判成多副本：
+  // K8s 的 Pod 名随机后缀取自元音回避字母表 `bcdfghjklmnpqrstvwxz23456789`，
+  // **含数字**，所以 `api-7d9f8c7b6-23459` 的末段是 5 位纯数字，若先跑序号规则
+  // 就会得出 ordinal=23459 > 0 ⇒ strong ⇒ 每次启动打一条 error 级「检测到多实例」
+  // 并列出失效清单，而实际只有一个副本（假警报会训练运维忽略真信号）。
+  // 反向误伤可忽略：StatefulSet 的 ordinal 从 0 连续编号，能凑成
+  // `-<8~10>-<5>` 形态要求上万副本，且其 Pod 名末段不会是 5 位以上数字。
+  const dep = /-[a-z0-9]{8,10}-[a-z0-9]{5}$/.exec(lower);
+  if (dep) return { podLike: true, ordinal: null, strong: false };
+
   // 强信号：StatefulSet 序号（末段为纯数字，且非 0 才算多副本）
   const sts = /-([0-9]+)$/.exec(lower);
   if (sts) {
     const ordinal = Number(sts[1]);
-    // 序号 0 是首个 Pod，单副本时同样成立，不构成多副本证据
-    return { podLike: true, ordinal, strong: ordinal > 0 };
+    // 序号 0 是首个 Pod，单副本时同样成立，不构成多副本证据。
+    // 且"主机名以 -数字 结尾"太常见（CI runner 编号 `runner-14`/`ci-agent-3`、
+    // EC2 私有 DNS 名 `ip-10-0-1-23`、`host-2024`），只看形状会让单实例机器
+    // 每次启动都报一条 error 级"检测到多实例运行迹象"+整页失效清单——正是本文件
+    // 开头警告的"假警报训练运维忽略真信号"。
+    // 故形状之外再要一个集群事实判据：kubelet 会给每个 Pod 注入
+    // KUBERNETES_SERVICE_HOST（它与"编排器没导出模板变量"那条顾虑无关，不是模板变量）。
+    // 不存在形状规则能救这件事：`ci-agent-3` 与 `app-1` 形状完全同构。
+    const inCluster = Boolean(process.env.KUBERNETES_SERVICE_HOST);
+    return { podLike: true, ordinal, strong: inCluster && ordinal > 0 };
   }
-
-  // 弱信号：Deployment 形态 <name>-<rsHash>-<5位随机>
-  // rsHash 为 8~10 位字母数字，末段为 5 位字母数字
-  const dep = /-[a-z0-9]{8,10}-[a-z0-9]{5}$/.exec(lower);
-  if (dep) return { podLike: true, ordinal: null, strong: false };
 
   return { podLike: false, ordinal: null, strong: false };
 }

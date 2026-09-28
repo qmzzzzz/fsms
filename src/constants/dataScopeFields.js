@@ -22,7 +22,15 @@ const DATA_SCOPE_FIELDS = {
     departmentField: 'location.building',
   },
   alarm: {
-    ownerField: 'reporter.userId',
+    // 报警的「属主」同样是两件事：上报它的人，与被派单处理它的人。
+    // rbac 对 self 档的定义本来就写着"仅自己创建/负责的数据"（见 middleware/rbac.js），
+    // 只取 reporter.userId 是实现比自己的文档少了一半：消防员在处理中被派单，
+    // 却在自己的报警列表里看不到那条报警——详情/操作接口已按 handler 放行
+    // （alarmController.canOperateAlarm），列表却按 reporter 过滤，
+    // 于是"有权限但点不到"退化成"界面上根本没有这一行"。
+    // 两条臂都有覆盖索引（FireAlarm:147 {handler,occurredAt} / :148 {reporter.userId,occurredAt}），
+    // 改成 $or 不会退化成全表扫描。
+    ownerField: ['reporter.userId', 'handler'],
     departmentField: 'location.building',
   },
   inspection: {

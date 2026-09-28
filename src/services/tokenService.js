@@ -33,7 +33,21 @@ const generateToken = (
     //   sid —— 整个登录会话期间恒定，指向 UserSession 一条记录。
     // 设备级吊销只能绑定 sid：若绑 jti，下一次轮换就换了新 jti，
     // 「已踢除的设备」会自动复活。
-    { userId, username, email, roles, realName, tokenVersion, jti, ...(sid ? { sid } : {}) },
+    //
+    // type 声明用途（与 refresh 侧对称）。历史上 access 载荷没有这个字段，
+    // 因此读取侧只在"字段存在且不等于 access"时拒绝——新签发的令牌一律带 type，
+    // 已签发的旧令牌继续可用到自然过期，不因这次加固而集体失效。
+    {
+      userId,
+      username,
+      email,
+      roles,
+      realName,
+      tokenVersion,
+      jti,
+      type: 'access',
+      ...(sid ? { sid } : {}),
+    },
     config.jwt.secret,
     { expiresIn: config.jwt.expire }
   );
@@ -61,8 +75,12 @@ const generateRefreshToken = (userId, tokenVersion = 0, sid = null) => {
  * 真正的安全校验仍由后续 getMe（走 authenticate）兜底。
  */
 const isAccessTokenValid = async (token) => {
+  const { violatesAccessTokenPurpose } = require('../utils/tokenPurpose');
   try {
     const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
+    // 两把密钥被配成同值时，refresh 令牌也能在此验签通过 ⇒ 探测会把它当成有效 access。
+    // 判据与 authenticate 中间件同一份（见 utils/tokenPurpose）。
+    if (violatesAccessTokenPurpose(decoded)) return false;
     if (await isTokenBlacklisted(token)) return false;
     const user = await User.findById(decoded.userId).select('status tokenVersion').lean();
     if (!user || user.status !== 'active') return false;

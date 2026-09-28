@@ -76,7 +76,9 @@ function initFromPrivatePem(privateKeyPem) {
   const spkiDer = pub.export({ type: 'spki', format: 'der' });
   keyPair = {
     privateKeyObj: priv,
-    privateKeyPem,
+    // 不保留 privateKeyPem：createPrivateKey 之后私钥已在 OpenSSL 句柄里，
+    // 再把同一段明文 PEM 挂在 JS 对象上，等于让私钥在 V8 堆里多存一份
+    // （堆快照/core dump/将来任何打印 keyPair 的代码都会把它带出去），且无任何读取方。
     publicKeyPem: pub.export({ type: 'spki', format: 'pem' }).toString(),
     curve: curveName,
     coordBytes: curve.coordBytes,
@@ -121,15 +123,13 @@ function getPublicKeyInfo() {
 }
 
 /**
- * 解密并校验口令密文，成功返回明文口令
- * 任何失败一律抛 CredentialError
+ * 阶段 1 —— 信封解析与形状校验（纯结构，不接触任何密钥材料）
  *
- * 异步：nonce 一次性消费经 sharedCache 原子占位（配置 REDIS_URL 时跨实例
- * 共享，重放无论命中哪个实例都被拒绝；未配置时回退进程内去重）
+ * 长度上限先于解码：信封是外部可控输入，先把量钉住再解析。
+ * 临时公钥坐标的长度必须与当前服务端曲线匹配，好让"错配曲线"
+ * （重启换钥后前端仍用缓存的旧公钥加密）在 ECDH 之前就被挡下。
  */
-async function decryptLoginCredential(envelopeB64) {
-  const kp = ensureKeyPair();
-
+function parseCredentialEnvelope(kp, envelopeB64) {
   let envelope;
   try {
     if (
@@ -147,8 +147,6 @@ async function decryptLoginCredential(envelopeB64) {
   const { v, x, y, salt, iv, c } = envelope || {};
   if (v !== 1) throw new CredentialError('ENVELOPE_VERSION');
 
-  // 临时公钥坐标（base64url）：长度必须与当前服务端曲线匹配，
-  // 错配曲线（如重启换钥后前端缓存未刷新）在 ECDH 之前挡下
   if (
     typeof x !== 'string' ||
     typeof y !== 'string' ||
@@ -158,7 +156,9 @@ async function decryptLoginCredential(envelopeB64) {
     throw new CredentialError('ENVELOPE_FORMAT');
   }
 
-  let saltBuf, ivBuf, ctBuf;
+  let saltBuf;
+  let ivBuf;
+  let ctBuf;
   try {
     saltBuf = Buffer.from(String(salt), 'base64');
     ivBuf = Buffer.from(String(iv), 'base64');
@@ -173,9 +173,16 @@ async function decryptLoginCredential(envelopeB64) {
   ) {
     throw new CredentialError('ENVELOPE_FORMAT');
   }
+  return { x, y, saltBuf, ivBuf, ctBuf };
+}
 
-  // 1) ECDH 协商共享密钥 + HKDF-SHA256 派生 AES 密钥（与前端 WebCrypto 同参）
-  let plain;
+/**
+ * 阶段 2 —— ECDH 协商 + HKDF-SHA256 派生 + AES-256-GCM 解载荷（与前端 WebCrypto 同参）
+ *
+ * 无效曲线点 / 公钥错配 / 认证标签不符 等原因**一律吞并**成 DECRYPT：
+ * 不区分失败原因，免得给探测者"差一点了"的信号。
+ */
+function decryptCredentialPayload(kp, { x, y, saltBuf, ivBuf, ctBuf }) {
   try {
     const ephPub = crypto.createPublicKey({
       key: { kty: 'EC', crv: SUPPORTED_CURVES[kp.curve].jwk, x, y },
@@ -186,18 +193,22 @@ async function decryptLoginCredential(envelopeB64) {
       crypto.hkdfSync('sha256', shared, saltBuf, HKDF_INFO, HKDF_KEY_BYTES)
     );
 
-    // 2) AES-256-GCM 解载荷（WebCrypto 输出 = 密文||tag，尾部 16 字节为 tag）
+    // WebCrypto 的输出是 密文||tag，尾部 16 字节即认证标签
     const tag = ctBuf.subarray(ctBuf.length - GCM_TAG_BYTES);
     const body = ctBuf.subarray(0, ctBuf.length - GCM_TAG_BYTES);
     const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, ivBuf);
     decipher.setAuthTag(tag);
-    plain = Buffer.concat([decipher.update(body), decipher.final()]).toString('utf8');
+    return Buffer.concat([decipher.update(body), decipher.final()]).toString('utf8');
   } catch (_) {
-    // 含无效曲线点/错配公钥/认证失败，统一吞并为解密失败
     throw new CredentialError('DECRYPT');
   }
+}
 
-  // 3) 载荷校验：结构 → 时间窗 → nonce 一次性
+/**
+ * 阶段 3 —— 明文载荷结构与时间窗 / nonce 形态校验
+ * （一次性消费要落库，留在编排函数里，那里才有 await）
+ */
+function parseCredentialPayload(plain) {
   let payload;
   try {
     payload = JSON.parse(plain);
@@ -214,6 +225,22 @@ async function decryptLoginCredential(envelopeB64) {
   if (typeof nonce !== 'string' || !/^[0-9a-f]{16,64}$/i.test(nonce)) {
     throw new CredentialError('NONCE_FORMAT');
   }
+  return { p, nonce };
+}
+
+/**
+ * 解密并校验口令密文，成功返回明文口令
+ * 任何失败一律抛 CredentialError
+ *
+ * 异步：nonce 一次性消费经 sharedCache 原子占位（配置 REDIS_URL 时跨实例
+ * 共享，重放无论命中哪个实例都被拒绝；未配置时回退进程内去重）
+ */
+async function decryptLoginCredential(envelopeB64) {
+  const kp = ensureKeyPair();
+  const parts = parseCredentialEnvelope(kp, envelopeB64);
+  const plain = decryptCredentialPayload(kp, parts);
+  const { p, nonce } = parseCredentialPayload(plain);
+
   // 一次性消费：SET NX 原子占位，首个到达的实例赢得消费权，
   // 重放（含命中其他实例的副本）在占位失败处被拒
   const firstSeen = await sharedCache.setIfAbsent(NONCE_KEY_PREFIX + nonce, 1, NONCE_TTL_MS);

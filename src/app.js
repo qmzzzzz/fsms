@@ -10,12 +10,17 @@ const morgan = require('morgan');
 const compression = require('compression');
 
 const config = require('./config');
+const {
+  MAX_TRUST_PROXY_HOPS,
+  resolveTrustProxyHops: resolveTrustProxyHopsFromConfig,
+} = require('./config/validate');
 const logger = require('./utils/logger');
 const middleware = require('./middleware');
 const {
   errorHandler,
   applyPreBodySecurity,
   applyPostBodySecurity,
+  applyResponseHardening,
   generalLimiter,
   ipLimiter,
   auditLog,
@@ -42,6 +47,7 @@ const {
   metricsMiddleware,
   metricsEndpoint,
   getSnapshot,
+  recordReadyz,
   METRICS_ENABLED,
 } = require('./utils/metrics');
 const ApiResponse = require('./utils/apiResponse');
@@ -81,46 +87,46 @@ function createApp() {
   // req.ip 恒为代理 IP，全站共享一个限流桶、审计 IP 全失真，且无任何线索。
   // 生产环境已由 config/validate.js 升级为启动致命错误；此处对所有环境补运行时告警，
   // 保证 staging/dev 的错配同样可被发现。
-  // 过大值（本轮复审补漏）：生产环境已由 config/validate.js 的 MAX_TRUST_PROXY_HOPS=5
+  // 过大值（本次改动复审补漏）：生产环境已由 config/validate.js 的 MAX_TRUST_PROXY_HOPS=5
   // 拦下，但该校验在 validateConfig() 开头即对非 production 早退——staging/dev
   // 设成 999999 会被原样交给 Express。实测后果：hops 足够大时 Express 会信任
   // XFF 链中更靠前的元素，客户端自行伪造 X-Forwarded-For 即可完全控制 req.ip
   // （本地复现：设 999999 后请求 /probe，req.ip 直接取 XFF 首段），
-  // 等于击穿 IP 限流、IP 黑名单与审计 IP 溯源。此处对所有环境统一夹取上限，
-  // 与 config/validate.js 共用同一语义（上限 5）。
+  // 等于击穿 IP 限流、IP 黑名单与审计 IP 溯源。此处对所有环境统一夹取上限。
+  //
+  // 判据本体（非法值告警条件、上限夹取、非生产缺省）已从本函数体提升到
+  // config/validate.js 的 resolveTrustProxyHops，由本处与 WS 握手侧共用。
+  // 此前两侧各写一份且只有本处带夹取，WS 侧因此可被伪造 XFF 绕过 allowedIPs
+  // （用例 src/tests/services/websocketTrustProxyHopsParity.test.js）。
   const rawTrustProxyHops = process.env.TRUST_PROXY_HOPS;
-  const parsedTrustProxyHops = parseInt(rawTrustProxyHops, 10);
-  const MAX_TRUST_PROXY_HOPS = 5;
-  if (
-    rawTrustProxyHops !== undefined &&
-    String(rawTrustProxyHops).trim() !== '' &&
-    !(Number.isFinite(parsedTrustProxyHops) && parsedTrustProxyHops > 0)
-  ) {
+  const trustProxyHops = resolveTrustProxyHopsFromConfig(rawTrustProxyHops, config.nodeEnv);
+  if (trustProxyHops.illegal) {
     logger.warn(
-      `TRUST_PROXY_HOPS 取值非法（${rawTrustProxyHops}），已退化为「不信任代理头」：` +
-        '若本服务位于反向代理之后，req.ip 将恒为代理 IP，导致限流/封禁/审计 IP 全部失真'
+      `TRUST_PROXY_HOPS 取值非法（${rawTrustProxyHops}），已按 ${trustProxyHops.hops} 跳处理` +
+        `（${trustProxyHops.hops === 0 ? '不信任代理头' : '沿用本环境缺省跳数'}）：` +
+        '声明的代理拓扑与真实跳数不符时 req.ip 会失真，影响限流/封禁/审计 IP 溯源'
     );
   }
-  let trustProxyHops = parsedTrustProxyHops;
-  if (Number.isFinite(trustProxyHops) && trustProxyHops > MAX_TRUST_PROXY_HOPS) {
+  if (trustProxyHops.clamped) {
     logger.warn(
-      `TRUST_PROXY_HOPS 超上限（${trustProxyHops} > ${MAX_TRUST_PROXY_HOPS}），已夹取到上限：` +
+      `TRUST_PROXY_HOPS 超上限（${trustProxyHops.parsed} > ${MAX_TRUST_PROXY_HOPS}），已夹取到上限：` +
         '信任跳数过大时客户端可伪造 X-Forwarded-For 轮换 IP，击穿 IP 限流/黑名单/审计溯源'
     );
-    trustProxyHops = MAX_TRUST_PROXY_HOPS;
   }
-  if (Number.isFinite(trustProxyHops) && trustProxyHops > 0) {
-    app.set('trust proxy', trustProxyHops);
-  } else if (config.nodeEnv === 'development') {
-    app.set('trust proxy', 1);
-  } else {
-    app.set('trust proxy', false);
-  }
+  // hops 为 0 时显式置为不信任（false 而非 0）：两者在 proxy-addr 下等价，但
+  // 既有断言（含 src/tests/app/appTrustProxyAndReadyzGuards.test.js）读到的是 false
+  app.set('trust proxy', trustProxyHops.hops > 0 ? trustProxyHops.hops : false);
 
   // Express 5 迁移（ADR-007）：v5 默认 query parser 收窄为 simple（嵌套查询
   // 对象解析变化）。本仓列表接口入参虽全为扁平标量，仍显式固定为 extended
   // 与 4.x 行为对齐，消除隐性行为差——该行删除前须重审全部 req.query 用法
   app.set('query parser', 'extended');
+
+  // Express 默认给**每一个**响应加 `X-Powered-By: Express`。helmet 的 hidePoweredBy 能摘掉它，
+  // 但 helmet 是中间件——凡是比它更早就把响应发出去的路径（IP 黑名单 403、全局限流 429）
+  // 都会把这行服务器指纹带出去。关在 app 级才是单点收口：与中间件挂载顺序彻底解耦，
+  // 以后再把某个闸门往前挪也不会重新开这个口。
+  app.disable('x-powered-by');
 
   // 请求 ID 追踪（在所有中间件之前，确保日志可关联）
   app.use(requestId);
@@ -152,10 +158,16 @@ function createApp() {
     app.use(sentryTracingHandler());
   }
 
+  // ================= 响应头卫生（比所有拒绝型闸门都早）=================
+  // 这一段只 setHeader，不做任何访问判定，因此可以（也必须）排在黑名单与两个全局限流之前：
+  // 否则全站最早的两类拒绝响应（403/429）会一个安全头都没有。见 security.js 的函数注释。
+  applyResponseHardening(app);
+
   // ================= IP 黑白名单（最高优先级访问控制）=================
-  // 必须早于 CORS、securityHeaders、body 解析、限流等一切中间件：
+  // 必须早于 CORS、body 解析、限流等一切**参与判定或消耗资源**的中间件：
   // - 黑名单命中立即 403，不读请求体、不做 CORS 协商，资源消耗最小
   // - 白名单在此挂 req.ipWhitelisted，后续所有限制类中间件据此豁免
+  // 唯一排在它前面的是上面的 applyResponseHardening（纯写响应头，不读 body、不碰数据库）。
   // 仅依赖 req.ip（trust proxy 已在上方配置完毕），不需要已解析的 body/query
   app.use(checkIPBlacklist);
 
@@ -196,6 +208,27 @@ function createApp() {
       maxAge: 600,
     })
   );
+
+  // ================= IP 级 / 通用限流（必须早于 body 解析与协议合规闸门）=================
+  // 两条各自独立成立的理由，缺一都够：
+  // 1) 早期拒绝类中间件（protocolCompliance / originCheck / 黑名单）会为每一次拒绝
+  //    写一条走哈希链的审计记录（recordViolation → AuditLog.record → withChainLock）。
+  //    挂在它们之后时，未认证的一个 `TRACE /api/x`（十余字节）不消耗任何配额，
+  //    却能让全局链锁串行排队——把小请求放大成审计写入，且链锁超时会让合法审计
+  //    降级为无 hash 的 legacy 行（utils/auditChain.js 的 P3-19 注释自证）。
+  //    前移后：违规请求同样计入配额，洪水先撞 429。
+  // 2) 挂在 express.json + sanitizeMongo + hpp 之后时，未认证者每次请求都先让服务端
+  //    付一次 JSON.parse 与递归清洗——限流只保护了数据库，没保护解析器。
+  // 这两个 limiter 的键只取 req.ip（不读 body/query），前移与扩到全站都不改变其语义；
+  // 登录类/用户类限流器仍留在原位（它们要读 req.body.username 或 req.user）。
+  //
+  // 挂载范围**不带 `/api/` 前缀**（此前带）：闸门侧本来就是 `app.use` 无差别生效的
+  // （applyPreBodySecurity 在下一行），只给 `/api/` 计配额等于把放大面原样留在前缀之外——
+  // `/`、`/csp-report`、`/api-docs` 上每个未认证 TRACE 都不吃 429、却照样写一条链上审计。
+  // 探针路径（`/health`、`/readyz`）由这两个限流器自己的 skip 放行，清单见
+  // constants/probePaths：漏了这道 skip，门禁会以 127.0.0.1 的高频探测先把健康版本打成红。
+  app.use(ipLimiter);
+  app.use(generalLimiter);
 
   // ================= 安全中间件（body 解析之前）=================
   // P3-35：protocolCompliance 必须早于 express.json()，否则「Content-Length
@@ -238,10 +271,9 @@ function createApp() {
   // 带来源的写请求必须命中白名单，覆盖 SameSite=Lax 之外旧浏览器残余风险
   app.use('/api/', createOriginCheck(corsOrigin));
 
-  // 限流（IP 级 + 通用全局生效；用户级 userLimiter 由 authenticate 在认证成功后执行，
+  // 限流（用户级 userLimiter 由 authenticate 在认证成功后执行，
   // 以便按 userId 建键、按实时角色定配额——全局挂载时 req.user 尚未就绪，无法按用户限流）
-  app.use('/api/', ipLimiter);
-  app.use('/api/', generalLimiter);
+  // IP 级与通用限流已前移到 body 解析之前，理由见那里那段注释。
 
   // 查询参数长度限制：搜索框等 GET 入参超长（如粘贴大段文本）直接 400，
   // 避免超长关键字进入数据库正则查询造成负载放大
@@ -274,6 +306,9 @@ function createApp() {
   app.get('/readyz', (req, res) => {
     checkMongoReady()
       .then((mongo) => {
+        // 就绪判定落进指标：/readyz 是「Mongo 能不能干活」的唯一权威判据，
+        // 而它此前只在响应体里出现一次——LB 摘了流量，监控面板却全绿。
+        recordReadyz(mongo.ok ? 'ok' : mongo.reason, mongo.ok);
         if (!mongo.ok) {
           logger.warn(`就绪探针未通过（mongo=${mongo.reason}）：${mongo.detail}`);
         }
@@ -284,6 +319,7 @@ function createApp() {
         });
       })
       .catch((err) => {
+        recordReadyz('error', false);
         logger.warn(`就绪探针检查异常：${err.message}`);
         res.status(503).json({
           status: 'unready',

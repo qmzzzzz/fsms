@@ -11,10 +11,13 @@
  */
 
 const { validationResult } = require('express-validator');
+const { safeFieldErrors } = require('../utils/validationRules');
 const config = require('../config');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
+// 令牌提取的唯一实现（authenticate 用的就是它）；登出必须与认证同源，见 logout 注释
+const { extractAccessToken } = require('../middleware/auth');
 const { auditPath } = require('../utils/auditMeta');
 const captchaService = require('../services/captchaService');
 const {
@@ -34,6 +37,22 @@ const AuditLog = require('../models/AuditLog');
 const metrics = require('../utils/metrics');
 
 /**
+ * fail-closed：控制器 switch 未覆盖的 outcome 一律按「服务端契约违背」处理，
+ * 绝不落到成功分支。
+ *
+ * 依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查（2026-09-20 全仓普查）：本文件 5 处 outcome switch
+ * 此前都用 `default: break;` 直落成功分支。它们今天**已穷举** authService 的
+ * outcome 集合（5/5、7/7、12/12、9/9、6/6），故本分支当前不可达——它守的是
+ * 「将来新增 outcome 而此处忘映射」这种情况。同类缺陷在本文件已真实发生过一次：
+ * 见 changePassword 的 CONFIRM_MISMATCH 注释（缺该 case 时曾把「口令没改」
+ * 回成「密码修改成功」）。
+ */
+const rejectUnknownOutcome = (res, scope, outcome) => {
+  logger.error(`[${scope}] 返回未知 outcome，已按失败处理`, { outcome });
+  return ApiResponse.codeError(res, 'INTERNAL_ERROR');
+};
+
+/**
  * 用户注册
  * POST /api/auth/register
  */
@@ -41,10 +60,12 @@ const register = asyncHandler(async (req, res) => {
   // 验证输入
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
-  const result = await authService.registerUser(req.body);
+  const result = await authService.registerUser(req.body, { req });
   switch (result.outcome) {
     case 'CAPTCHA_INVALID':
       return ApiResponse.codeError(res, 'CAPTCHA_INVALID');
@@ -55,8 +76,11 @@ const register = asyncHandler(async (req, res) => {
     case 'DUPLICATE':
       // 统一返回模糊提示，防止枚举探测有效用户名/邮箱
       return ApiResponse.codeError(res, 'REGISTER_INFO_INVALID');
-    default:
+    case 'OK':
       break;
+    default:
+      // 未知 outcome 一律 fail-closed（依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查），绝不落到成功分支
+      return rejectUnknownOutcome(res, 'register', result.outcome);
   }
 
   // 注册成功即建立会话：下发 httpOnly 令牌 cookie（I-01），注册后立即登录无需再次输密码；
@@ -132,7 +156,9 @@ const getLoginPublicKey = asyncHandler(async (req, res) => {
 const login = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const result = await authService.loginUser(
@@ -177,8 +203,11 @@ const login = asyncHandler(async (req, res) => {
       return ApiResponse.codeError(res, 'MFA_ATTEMPTS_EXCEEDED');
     case 'MFA_CODE_INVALID':
       return ApiResponse.codeError(res, 'MFA_CODE_INVALID');
-    default:
+    case 'OK':
       break;
+    default:
+      // 未知 outcome 一律 fail-closed（依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查），绝不落到成功分支
+      return rejectUnknownOutcome(res, 'login', result.outcome);
   }
 
   // I-01：登录成功同时通过 httpOnly cookie 下发两个令牌；
@@ -205,7 +234,9 @@ const refreshToken = asyncHandler(async (req, res) => {
   // G3：请求体 refreshToken 的类型/长度校验结果（校验器见 authRoutes.refreshTokenBodyValidation）
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   // 刷新令牌来源：请求体 refreshToken 优先，回退读取 refresh_token cookie（I-01 httpOnly 方案）
@@ -241,8 +272,11 @@ const refreshToken = asyncHandler(async (req, res) => {
       return ApiResponse.codeError(res, 'DEVICE_SESSION_REVOKED');
     case 'EXPIRED':
       return ApiResponse.codeError(res, 'REFRESH_TOKEN_EXPIRED');
-    default:
+    case 'OK':
       break;
+    default:
+      // 未知 outcome 一律 fail-closed（依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查），绝不落到成功分支
+      return rejectUnknownOutcome(res, 'refreshToken', result.outcome);
   }
 
   // 轮换时同步轮换两个 cookie（I-01）；响应体保留 tokens 字段兼容既有消费者
@@ -303,7 +337,9 @@ const getMe = asyncHandler(async (req, res) => {
 const changePassword = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const result = await authService.changeUserPassword(req.user.userId, req.body, {
@@ -342,8 +378,11 @@ const changePassword = asyncHandler(async (req, res) => {
       ).catch((e) => logger.warn(`改密吊销失败审计落库失败：${e.message}`));
       return ApiResponse.codeError(res, 'PASSWORD_CHANGED_REVOKE_FAILED');
     }
-    default:
+    case 'OK':
       break;
+    default:
+      // 未知 outcome 一律 fail-closed（依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查），绝不落到成功分支
+      return rejectUnknownOutcome(res, 'changePassword', result.outcome);
   }
 
   AuditLog.recordSensitiveAction(
@@ -365,7 +404,9 @@ const changePassword = asyncHandler(async (req, res) => {
 const updateProfile = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const result = await authService.updateUserProfile(req.user.userId, req.body);
@@ -381,8 +422,11 @@ const updateProfile = asyncHandler(async (req, res) => {
       return ApiResponse.codeError(res, 'EMAIL_TAKEN');
     case 'INVALID_AVATAR':
       return ApiResponse.codeError(res, 'AVATAR_INVALID');
-    default:
+    case 'OK':
       break;
+    default:
+      // 未知 outcome 一律 fail-closed（依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查），绝不落到成功分支
+      return rejectUnknownOutcome(res, 'updateProfile', result.outcome);
   }
 
   return ApiResponse.success(res, result.profile, '资料更新成功');
@@ -399,24 +443,40 @@ const logout = asyncHandler(async (req, res) => {
   // G3：请求体 refreshToken 的类型/长度校验结果
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   // 将当前 access token 和 refresh token 同时加入黑名单（保留既有黑名单逻辑）
-  // I-01：令牌来源兼容 Authorization Bearer 头与 httpOnly cookie 双路径
+  // I-01：令牌来源兼容 Authorization Bearer 头与 httpOnly cookie 双路径。
+  //
+  // 必须复用 middleware/auth 的 extractAccessToken，不能在控制器里再抄一份分支：
+  // 手写版是 `if (Bearer) token = split(' ')[1]; else if (cookie) ...`，
+  // 而 `Authorization: Bearer  <token>`（**双空格**；实测 Node 会修剪尾随空格但保留
+  // 中间空格，所以 'Bearer ' 这种形态到不了服务端，'Bearer  x' 能到）下
+  // split(' ')[1] 得到空串 ⇒ 走不进 else-if ⇒ token 停在空值。
+  // 同一请求在 authenticate 那侧却是另一套：extractAccessToken 对空串**回退 cookie**并放行，
+  // 于是"认证用的令牌"与"登出要吊销的令牌"不是同一个东西——登出回 200「已登出」，
+  // 而那个仍然有效的访问令牌没进黑名单，一路活到自己的 TTL。
+  // 这正是 P2-26 用 LOGOUT_REVOKE_FAILED 要堵的 fail-open，被一条复制粘贴的分叉绕开。
+  const token = extractAccessToken(req);
   const cookies = getCookies(req);
-  let token = null;
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.split(' ')[1];
-  } else if (cookies[ACCESS_COOKIE_NAME]) {
-    token = cookies[ACCESS_COOKIE_NAME];
-  }
-  const refreshTokenRaw = req.body?.refreshToken || cookies[REFRESH_COOKIE_NAME];
+  // 两个来源**都要**吊销。旧写法 `req.body?.refreshToken || cookies[...]` 是二选一：
+  // 客户端（或中间层）只要出示一条**已轮换掉的旧串**，浏览器里那条仍在有效期的
+  // refresh 令牌就永远进不了登出请求 ⇒ 接口回 200「已登出」，服务端那条线还活着，
+  // 而用户已经认为会话终止、不会再补救（P2-26 要堵的正是这类假成功）。
+  const presentedRefresh = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : '';
+  const cookieValue = cookies[REFRESH_COOKIE_NAME];
+  const cookieRefresh = typeof cookieValue === 'string' ? cookieValue : '';
+  const [primaryRefresh, ...extraRefresh] = [...new Set([presentedRefresh, cookieRefresh])].filter(
+    Boolean
+  );
 
   const { revokeFailed } = await authService.revokeTokensOnLogout({
     accessToken: token,
-    refreshToken: refreshTokenRaw,
+    refreshToken: primaryRefresh || null,
+    extraRefreshTokens: extraRefresh,
   });
 
   if (revokeFailed) {
@@ -520,7 +580,9 @@ const listSessions = asyncHandler(async (req, res) => {
 const revokeSession = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { sid } = req.params;

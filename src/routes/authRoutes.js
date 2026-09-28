@@ -8,16 +8,18 @@ const authController = require('../controllers/authController');
 // D-1：MFA 生命周期端点自 authController 拆出
 const mfaController = require('../controllers/mfaController');
 const { authenticate } = require('../middleware/auth');
+const { authenticateForLogout } = require('../middleware/logoutAuth');
 const {
   loginLimiter,
-  loginIpLimiter,
   loginUserLimiter,
   strictLimiter,
   captchaLimiter,
   registerIpLimiter,
   passwordChangeLimiter,
+  passwordChangeUserLimiter,
 } = require('../middleware/rateLimit');
 const { body, param } = require('express-validator');
+const { mustBeString } = require('../utils/validationRules');
 const { validatePasswordStrength } = require('../utils/helpers');
 const config = require('../config');
 const ApiResponse = require('../utils/apiResponse');
@@ -79,14 +81,18 @@ const registerValidation = [
     .if((value, { req }) => !req.body.encPassword)
     .custom(passwordStrengthCheck)
     .custom(rejectPlaintextInStrict),
+  mustBeString('realName', '姓名'),
   body('realName').optional().trim().isLength({ max: 50 }).withMessage('姓名不能超过 50 个字符'),
   body('phone')
-    .optional()
+    // 公开注册手机号可选：前端未填带 ''，.optional() 只跳过 undefined，'' 会流到 .matches 被拒 →
+    // 不填手机号就无法注册。改用与本仓一致的 falsy 可选（见上方 values:'falsy' 约定）。
+    .optional({ values: 'falsy' })
     .trim()
     .isLength({ max: 20 })
     .withMessage('手机号不能超过 20 个字符')
     .matches(/^1[3-9]\d{9}$/)
     .withMessage('请输入有效的手机号'),
+  mustBeString('department', '部门'),
   body('department')
     .optional()
     .trim()
@@ -95,6 +101,7 @@ const registerValidation = [
 ];
 
 const loginValidation = [
+  mustBeString('username', '用户名'),
   body('username')
     .trim()
     .notEmpty()
@@ -105,6 +112,7 @@ const loginValidation = [
   encPasswordField('encPassword'),
   rejectEncPlaintextCoexistence('encPassword', 'password'),
   // 明文轨：仅未携带 encPassword 时必填（灰度兼容）；strict 模式下直接拒绝
+  mustBeString('password', '密码'),
   body('password')
     .if((value, { req }) => !req.body.encPassword)
     .notEmpty()
@@ -189,6 +197,7 @@ const mfaDisableValidation = [
 
 // 更新个人资料：长度上限与模型/注册接口保持一致，防超长文本入库
 const updateProfileValidation = [
+  mustBeString('realName', '姓名'),
   body('realName').optional().trim().isLength({ max: 50 }).withMessage('姓名不能超过 50 个字符'),
   body('email')
     .optional()
@@ -198,16 +207,22 @@ const updateProfileValidation = [
     .isEmail()
     .withMessage('请输入有效的邮箱地址'),
   body('phone')
-    .optional()
+    // `values: 'falsy'` 不是放宽校验，是让"清空手机号"这条合法操作表达得出来：
+    // User.phone 的 schema 校验器明确允许 ''（"允许留空（清空手机号是合法操作）"），
+    // 而默认 optional() 只放过 undefined ⇒ 空串会走到 matches() 被 400 拦下，
+    // 前端因此只能把空值改发 undefined（= 不改），于是数据库里永远清不掉手机号。
+    .optional({ values: 'falsy' })
     .isLength({ max: 20 })
     .withMessage('手机号不能超过 20 个字符')
     .matches(/^1[3-9]\d{9}$/)
     .withMessage('请输入有效的手机号'),
+  mustBeString('department', '部门'),
   body('department')
     .optional()
     .trim()
     .isLength({ max: 100 })
     .withMessage('部门不能超过 100 个字符'),
+  mustBeString('avatar', '头像地址'),
   body('avatar')
     .optional()
     .trim()
@@ -273,10 +288,17 @@ router.get('/login-public-key', captchaLimiter, authController.getLoginPublicKey
  * @route   POST /api/auth/login
  * @desc    用户登录
  * @access  Public
+ *
+ * 限流分层（顺序即优先级，勿再并联"同键空间、阈值更宽"的第三个桶）：
+ *   1. `checkIPBlacklist`（app.js 级）：5 次失败/5 分钟的自动封禁在此生效 ⇒ 多数
+ *      非白名单攻击源第 6 次就拿到 403，下面两桶轮不到；
+ *   2. `loginLimiter`：单 IP 10 次/15 分钟，管住白名单 IP（凭据型限流刻意不豁免白名单）
+ *      与"慢速滴灌"（每 5 分钟不足 5 次）；
+ *   3. `loginUserLimiter`：单账号 20 次/15 分钟，管住"多 IP 各试几下同一账号"。
+ * 不变量由 `src/tests/security/loginIpBucketDominator.test.js` 盯住（含"被挡住后不得复活"）。
  */
 router.post(
   '/login',
-  loginIpLimiter,
   loginLimiter,
   loginUserLimiter,
   loginValidation,
@@ -321,6 +343,10 @@ router.put(
   // 凭据型限流（5 次/15 分钟，userId+IP 组合键，白名单不豁免）：
   // 改密是账户接管的关键动作，此前误挂资源型 strictLimiter（30 次且豁免白名单）
   passwordChangeLimiter,
+  // 并列的账号维度桶：组合键含 req.ip，而 TRUST_PROXY_HOPS>0 时 req.ip 取自
+  // X-Forwarded-For ⇒ 攻击者每换一个假 IP 就多一个 5 次配额。本桶只用 userId 作键，
+  // 让"同一账号"的配额不随 IP 分裂（缺失 userId 时跳过，不影响匿名请求）。
+  passwordChangeUserLimiter,
   changePasswordValidation,
   authController.changePassword
   // PERMISSION-EXEMPT: 本人资源：authenticate 已确定身份，改密对象恒为本人
@@ -340,8 +366,14 @@ router.put('/profile', authenticate, updateProfileValidation, authController.upd
  * @route   POST /api/auth/logout
  * @desc    用户登出
  * @access  Private
+ *
+ * 用 authenticateForLogout 而不是 authenticate：登出是 refresh 令牌与设备会话的
+ * **唯一**吊销入口，而 access 令牌先于 refresh 过期是常态。挂在 authenticate 之后时，
+ * "access 已过期"的客户端拿 401 再也进不到处理体 —— 手里那个 7 天有效的 refresh 令牌
+ * 与服务端 active 会话就此无人可关（泄露场景下最需要收尾动作时恰恰收不了尾）。
+ * 判据细节见 middleware/logoutAuth.js 的 authenticateForLogout。
  */
-router.post('/logout', authenticate, refreshTokenBodyValidation, authController.logout);
+router.post('/logout', authenticateForLogout, refreshTokenBodyValidation, authController.logout);
 // PERMISSION-EXEMPT: 会话生命周期：吊销当前调用者自己的会话
 
 // ================= MFA 两步验证（I-06，TOTP） =================
@@ -370,6 +402,11 @@ router.post('/mfa/enroll', authenticate, strictLimiter, mfaController.mfaEnroll)
  * @desc    确认开启 MFA（校验一次动态口令）
  * @access  Private
  */
+// 本链**故意不挂 consumeValidation()**：错误契约由 mfaController.mfaEnable 拥有——
+// 它自己 `typeof req.body.mfaCode === 'string' ? trim() : ''` + `/^\d{6}$/` 判定并返回
+// **字段专属**的 MFA_CODE_FORMAT（前端 web-admin/src/utils/api.js:56 有 i18n 映射）。
+// 补 consumeValidation() 会把专属码吃成通用 VALIDATION_FAILED，并打红
+// authRest.test.js:228 / mfaControllerOrchestration.test.js:120。（`trim()` 仍会执行。）
 router.post(
   '/mfa/enable',
   authenticate,

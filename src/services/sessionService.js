@@ -28,6 +28,10 @@
 const crypto = require('crypto');
 const UAParser = require('ua-parser-js');
 const logger = require('../utils/logger');
+// 跨实例失效广播通道。sharedCache 仅依赖 logger，顶层引入无环路
+// （与 userPermissionService 同一口径）。未配置 REDIS_URL 时发布/订阅均为无操作，
+// 自动退化为单进程语义。
+const sharedCache = require('./sharedCache');
 const UserSession = require('../models/UserSession');
 const { computeFingerprint } = require('../utils/fingerprint');
 const { durationToMs } = require('../utils/cookie');
@@ -75,6 +79,43 @@ const BOT_UA_PATTERN =
   /bot|crawler|spider|curl|wget|python-requests|postman|axios|okhttp|java\/|go-http-client/i;
 
 /**
+ * 「解析不出任何信息」的基准形状。
+ * 各字段用空串而非 'unknown' 字面量：展示层要能区分"没解析出来"与
+ * "解析出来的设备名字恰好叫 unknown"，空串在拼接设备名时可直接 filter 掉。
+ */
+const emptyUserAgentInfo = () => ({
+  deviceType: 'unknown',
+  browser: '',
+  browserVersion: '',
+  os: '',
+  osVersion: '',
+  deviceVendor: '',
+  deviceModel: '',
+  engine: '',
+  cpu: '',
+});
+
+/** ua-parser-js 的字段缺失形态不止 undefined，展示层统一吃空串 */
+const agentText = (v) => v || '';
+
+/** ua-parser-js 结果 → 会话列表要用的扁平字段 */
+const projectUserAgentInfo = (parsed) => ({
+  // ua-parser-js 对桌面浏览器不返回 device.type（只有 mobile/tablet/console/
+  // smarttv/wearable/embedded 才有值）。缺失即桌面 —— 若照抄 undefined，
+  // 列表里所有电脑都会显示成「未知设备」。
+  deviceType: parsed.device?.type || (parsed.browser?.name ? 'desktop' : 'unknown'),
+  browser: agentText(parsed.browser?.name),
+  browserVersion: majorVersion(parsed.browser?.version),
+  os: agentText(parsed.os?.name),
+  osVersion: agentText(parsed.os?.version),
+  // 厂商/型号是「认出自己设备」最有效的线索（Apple iPhone / Xiaomi 13）
+  deviceVendor: agentText(parsed.device?.vendor),
+  deviceModel: agentText(parsed.device?.model),
+  engine: agentText(parsed.engine?.name),
+  cpu: agentText(parsed.cpu?.architecture),
+});
+
+/**
  * 从 User-Agent 解析设备信息（ua-parser-js）
  *
  * bot 判断仍由本模块自己先做，不交给 ua-parser-js：
@@ -83,10 +124,6 @@ const BOT_UA_PATTERN =
  *   脚本调用，用户会误判为「有人用浏览器登录了我的账号」——把可疑访问
  *   伪装成正常访问，比不显示更糟。
  *
- * 各字段的缺失都用空串而非 'unknown' 字面量：
- *   展示层需要区分「解析不出」与「解析出的名字恰好叫 unknown」，
- *   且空串在拼接设备名时可以直接被 filter 掉，不必逐处特判字符串。
- *
  * @param {string} ua 原始 User-Agent
  * @returns {{deviceType: string, browser: string, browserVersion: string,
  *            os: string, osVersion: string, deviceVendor: string,
@@ -94,47 +131,16 @@ const BOT_UA_PATTERN =
  */
 const parseUserAgent = (ua) => {
   const s = String(ua || '');
-  const empty = {
-    deviceType: 'unknown',
-    browser: '',
-    browserVersion: '',
-    os: '',
-    osVersion: '',
-    deviceVendor: '',
-    deviceModel: '',
-    engine: '',
-    cpu: '',
-  };
-  if (!s) return empty;
-  if (BOT_UA_PATTERN.test(s)) return { ...empty, deviceType: 'bot' };
+  if (!s) return emptyUserAgentInfo();
+  if (BOT_UA_PATTERN.test(s)) return { ...emptyUserAgentInfo(), deviceType: 'bot' };
 
-  let parsed;
   try {
-    parsed = new UAParser(s).getResult();
+    return projectUserAgentInfo(new UAParser(s).getResult());
   } catch (err) {
     // 解析失败不能让登录失败：createSession 在登录主路径上
     logger.warn(`User-Agent 解析失败，按未知设备记录：${err.message}`);
-    return empty;
+    return emptyUserAgentInfo();
   }
-
-  // ua-parser-js 对桌面浏览器不返回 device.type（只有 mobile/tablet/console/
-  // smarttv/wearable/embedded 才有值）。缺失即桌面 —— 若照抄 undefined，
-  // 列表里所有电脑都会显示成「未知设备」。
-  const rawType = parsed.device?.type || '';
-  const deviceType = rawType || (parsed.browser?.name ? 'desktop' : 'unknown');
-
-  return {
-    deviceType,
-    browser: parsed.browser?.name || '',
-    browserVersion: majorVersion(parsed.browser?.version),
-    os: parsed.os?.name || '',
-    osVersion: parsed.os?.version || '',
-    // 厂商/型号是「认出自己设备」最有效的线索（Apple iPhone / Xiaomi 13）
-    deviceVendor: parsed.device?.vendor || '',
-    deviceModel: parsed.device?.model || '',
-    engine: parsed.engine?.name || '',
-    cpu: parsed.cpu?.architecture || '',
-  };
 };
 
 /**
@@ -160,18 +166,90 @@ const guardCacheSize = () => {
   if (lastTouchAt.size > SESSION_CACHE_MAX) lastTouchAt.clear();
 };
 
-/** 从缓存与节流表中移除指定 sid（吊销后必须立即调用，否则最长 15 秒仍放行） */
-const invalidateSessionCache = (sid) => {
+/**
+ * 缓存代际：每次**本地失效** +1。
+ *
+ * 要防的是"失效被写回撤销"：validateSession 先查库再 `sessionCache.set`，
+ * 而查库是一次 await。若吊销恰好落在这一趟往返中间，
+ * `invalidateSessionCacheLocal(sid)` 删的是一个**还不存在**的条目（no-op），
+ * 随后 in-flight 的读取拿着"吊销前"的结论把条目重新种回去，
+ * 于是这条被立即吊销的会话在缓存里最长 usable 到 TTL 到期。
+ * 上面 :301 的注释「吊销不需要在这里重查：revokeSession 会本地清除并跨实例广播」
+ * 默认的就是"清除发生在写入之后"，而本窗口里顺序正好相反。
+ *
+ * 读路径在查库前取号、写回时比对，号变了就不写回（下一次请求重新查库）。
+ * 与 middleware/auth.js 的 queryStartedAt/invalidatedDuringQuery 是同一条不变量，
+ * 只是这里用计数而不是时间戳——省掉"同一毫秒"的边界比较，且不引入时钟依赖。
+ * 判定粗（任何一次失效都会让并发的写回一起作废）是刻意的方向选择：
+ * 代价只是多查一次库，收益是绝不会把旧结论缓存成"最新的"。
+ */
+let sessionCacheGeneration = 0;
+
+/** 本地失效（不含广播）：供本进程的吊销路径与远端广播回调共用 */
+const invalidateSessionCacheLocal = (sid) => {
   if (!sid) return;
+  sessionCacheGeneration += 1;
   sessionCache.delete(String(sid));
   lastTouchAt.delete(String(sid));
 };
 
-/** 清空全部会话缓存（用于全局吊销与测试隔离） */
-const clearSessionCache = () => {
+/** 本地全量清空（用于全局吊销与测试隔离） */
+const clearSessionCacheLocal = () => {
+  sessionCacheGeneration += 1;
   sessionCache.clear();
   lastTouchAt.clear();
 };
+
+/**
+ * 跨实例广播用的键前缀。
+ *
+ * 为什么必须有：本服务是「踢除单台设备」的唯一事实来源，
+ * 而 sessionCache 是**进程内** Map，`validateSession` 读的就是它。
+ * 多副本部署下，吊销请求只落在其中一个副本：该副本清了本地缓存并写库，
+ * 其余副本的缓存项仍标着 `{usable:true}` 直到 SESSION_CACHE_TTL（15 秒）到期，
+ * 期间被踢设备的每个请求在**另一个副本**上照常通过认证。
+ * 「踢设备」的语义因此变成"最多 15 秒后生效"，而用户与合规预期都是立即。
+ * 权限缓存（userPermissionService）与用户缓存（middleware/auth）早已接这条广播，
+ * 会话缓存是漏网的一处——同一机制第三次重新实现时省略了它。
+ *
+ * 用 `sesscache:` 前缀，与 `permcache:` / auth 的键空间互不干扰；
+ * 处理器只认自己的前缀，忽略共享通道上其它业务的失效消息。
+ */
+const SESSION_INVAL_PREFIX = 'sesscache:';
+const SESSION_INVAL_ALL = `${SESSION_INVAL_PREFIX}*`;
+
+/** 广播一个失效键（尽力而为：失败即退化为自然过期，不 await、不抛给调用方） */
+const publishSessionInvalidation = (key) => {
+  sharedCache.publishInvalidate(key).catch(() => {
+    /* 见上：发布失败最长延迟至缓存自然过期 */
+  });
+};
+
+/** 从缓存与节流表中移除指定 sid（吊销后必须立即调用，否则最长 15 秒仍放行） */
+const invalidateSessionCache = (sid) => {
+  if (!sid) return;
+  invalidateSessionCacheLocal(sid);
+  publishSessionInvalidation(`${SESSION_INVAL_PREFIX}${sid}`);
+};
+
+/** 清空全部会话缓存，并广播给其它实例（全局吊销/改密后强制下线） */
+const clearSessionCache = () => {
+  clearSessionCacheLocal();
+  publishSessionInvalidation(SESSION_INVAL_ALL);
+};
+
+/** 处理来自其它实例的会话失效广播，仅做本地失效（本地幂等，自身回环无副作用） */
+const handleRemoteSessionInvalidation = (raw) => {
+  if (typeof raw !== 'string' || !raw.startsWith(SESSION_INVAL_PREFIX)) return;
+  if (raw === SESSION_INVAL_ALL) {
+    clearSessionCacheLocal();
+    return;
+  }
+  invalidateSessionCacheLocal(raw.slice(SESSION_INVAL_PREFIX.length));
+};
+
+// 模块加载期注册即可：订阅连接在 Redis 就绪后才建立，注册早晚都不影响送达
+sharedCache.onInvalidate(handleRemoteSessionInvalidation);
 
 /**
  * 创建登录会话
@@ -238,9 +316,23 @@ const validateSession = async (sid) => {
 
   const cached = sessionCache.get(key);
   if (cached && cached.expireAt > now) {
-    return { usable: cached.usable, session: cached.session };
+    // 命中缓存也必须重算"会话自身是否已过期"。
+    // 直查路径的结论来自 `doc.isUsable()`，它同时判 status 与 expiresAt；
+    // 缓存只按 TTL（15 秒）复用结论，于是"到点过期"这件事会被静默推迟最长 15 秒。
+    // 吊销不需要在这里重查：revokeSession 会本地清除并跨实例广播，
+    // 而**过期不是一个会被通知的事件**——只有这里重新比对时刻才不会漏。
+    // （这条成立的前提是"清除不会被随后落地的写回撤销"，
+    // 由下方 sessionCacheGeneration 的写回闸门保证。）
+    const expiresAt = cached.session?.expiresAt;
+    // 时刻缺失/不是日期 ⇒ 判为不可用：与直查路径同口径
+    // （`isUsable()` 对没有 expiresAt 的文档也给 false），两侧一致才不会
+    // 出现"缓存比直查更宽松"这种最难查的偏差。
+    const notExpired = expiresAt instanceof Date && expiresAt.getTime() > now;
+    return { usable: !!cached.usable && notExpired, session: cached.session };
   }
 
+  // 查库前取号：见文件头 sessionCacheGeneration 的说明
+  const genAtRead = sessionCacheGeneration;
   let doc;
   try {
     doc = await UserSession.findOne({ sid: key });
@@ -255,11 +347,17 @@ const validateSession = async (sid) => {
   guardCacheSize();
   // 不可用的结论同样缓存：被吊销的会话往往会持续重试（前端定时轮询、
   // 未感知掉线的客户端），不缓存等于让失效会话反复打库
-  sessionCache.set(key, {
-    usable,
-    session: doc || null,
-    expireAt: now + SESSION_CACHE_TTL,
-  });
+  //
+  // 但"查库期间发生过本地失效"时不得写回：本趟结果读的是失效之前的文档，
+  // 写回去会把手刚删掉的条目重新种回来，吊销被静默撤销到 TTL 到期。
+  // 跳过的代价只是下一次请求再查一次库，方向上不会放行任何旧结论。
+  if (sessionCacheGeneration === genAtRead) {
+    sessionCache.set(key, {
+      usable,
+      session: doc || null,
+      expireAt: now + SESSION_CACHE_TTL,
+    });
+  }
   return { usable, session: doc || null };
 };
 

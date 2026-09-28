@@ -13,6 +13,8 @@ const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { getDataScope } = require('../middleware/rbac');
 const { hasPermission } = require('../utils/permissionHelper');
+// 审计数据范围判据的唯一来源（列表与 CSV 导出用的就是它）
+const { applyAuditDataScope } = require('../services/auditScopeFilter');
 const { isValidDateParam, buildDateRangeFilter } = require('../utils/helpers');
 const { BUSINESS_TIMEZONE } = require('../constants/timezone');
 const FireAlarm = require('../models/FireAlarm');
@@ -214,8 +216,6 @@ const exportReport = asyncHandler(async (req, res) => {
   // - 本接口只要求 report:export（通常下发运营岗）
   // 若不叠加校验，持 report:export 而无 security:audit 者可从此处
   // 全量导出审计日志，绕过整个 security:audit 权限模型（横向提权读取）。
-  // audit 分支同时不叠加 dataScope（审计无部门/属主字段，语义上只能全局或禁止），
-  // 故此处必须以权限码作为唯一闸门。
   if (type === 'audit') {
     const canReadAudit = await hasPermission(req.user.userId, 'security:audit');
     if (!canReadAudit) {
@@ -239,18 +239,27 @@ const exportReport = asyncHandler(async (req, res) => {
     }
   }
 
-  const query = buildExportQuery(type, {
-    dataScope,
-    dateFilter,
-    username,
-    action,
-    category,
-    riskLevel,
-    success,
-    level,
-    ip,
-    userId,
-  });
+  // buildExportQuery 的抛错全是"参数不合法"（ip / userId 形态），与上一条枚举闸同源；
+  // 此前只有枚举闸被兜住，ip/userId 一路穿到全局错误处理器 ⇒ 同一个坏参数，
+  // CSV 导出回 400 + 人话，xlsx 导出回 500。两条导出链共用 utils/auditQuery 的判据，
+  // 对外形态也必须一致（见 tests/controllers/auditExportParamParity.test.js）。
+  let query;
+  try {
+    query = buildExportQuery(type, {
+      dataScope,
+      dateFilter,
+      username,
+      action,
+      category,
+      riskLevel,
+      success,
+      level,
+      ip,
+      userId,
+    });
+  } catch (err) {
+    return ApiResponse.error(res, err.message, 400);
+  }
   if (query === null) return ApiResponse.codeError(res, 'REPORT_TYPE_UNSUPPORTED');
 
   // 无数据权限时直接返回空文件(只有表头)
@@ -258,12 +267,22 @@ const exportReport = asyncHandler(async (req, res) => {
     query._id = { $in: [] };
   }
 
+  // audit 类型必须叠加与「列表 / CSV 导出」同一份数据范围判据（auditScopeFilter）。
+  // 此处原先的注释写着"审计无部门/属主字段，语义上只能全局或禁止"，而 AuditLog.userId
+  // 正是审计列表用来过滤的字段：self 档只见自己、department 档只见本部门成员
+  // （auditController.js:38 与 auditQueryService.js:200 都调用了 applyAuditDataScope）。
+  // 少这一道就是：列表只看得到本部门，xlsx 却导出全库所有人的 IP/路径/操作
+  // ——导出集比可见集宽，属本仓反复出现的"同一条判据的第二处实现漏抄"。
+  if (type === 'audit') {
+    ({ query } = await applyAuditDataScope(query, req.user.userId));
+  }
+
   // 批量导出检测：导出前统计命中行数，超过阈值触发高危审计与告警（补齐导出审计盲区）
   const { checkBulkExport } = require('../services/securityAlert');
   const exportTotal = await EXPORT_MODEL_CONFIG[type].model.countDocuments(query);
   await checkBulkExport(req.user.userId, req.user.username, exportTotal, `report_export_${type}`);
 
-  await writeExportWorkbook(res, { type, query });
+  await writeExportWorkbook(res, { type, query, total: exportTotal });
 });
 
 module.exports = {

@@ -25,7 +25,24 @@ const MIN_RETENTION_DAYS = 90;
 const MAX_RETENTION_DAYS = 3650;
 const DEFAULT_RETENTION_DAYS = 180;
 
-const RAW_RETENTION_DAYS = parseInt(process.env.AUDIT_RETENTION_DAYS, 10);
+/**
+ * F-213：解析必须严格（`Number` 而不是 `parseInt(x, 10)`）。
+ *
+ * `parseInt` 的成功集比"运维写的这个数字"宽得多——它吃掉尾部垃圾只留前缀：
+ *  - `90x` → 90，且因为 RAW===生效值，`wasAdjusted` 为 **false**、
+ *    `describeRetention()` 报「在允许区间内，原样生效」。
+ *    这正是本文件立单源时要消灭的那一类：文件头写着"二者不等即说明配置被静默改写过"，
+ *    而"静默改写"恰好发生在两数相等的那条分支上。
+ *  - `1e3`（compose 里表达 1000 的常见写法）→ **1** → 被钳到合规下限 **90 天**，
+ *    本意 1000 天的留存实际只剩 9 天里的一天不到，而报表口径已随之改写。
+ *
+ * 空串必须显式归入「未配置数值」：`Number('')` 是 0，会被下面的钳制当成"0 天"
+ * 抬到 90 天，而 `AUDIT_RETENTION_DAYS=`（.env 里删掉值就等于这个）今天走的是
+ * 默认 180 那条路，不能借这次收紧把它换成另一个生效值。
+ */
+const RAW_ENV_VALUE = process.env.AUDIT_RETENTION_DAYS;
+const RAW_RETENTION_DAYS =
+  typeof RAW_ENV_VALUE === 'string' && RAW_ENV_VALUE.trim() === '' ? NaN : Number(RAW_ENV_VALUE);
 
 /** 配置是否提供了可解析的数值（未配置或非数值时为 false） */
 const isConfigured = Number.isFinite(RAW_RETENTION_DAYS);
@@ -38,7 +55,7 @@ const RETENTION_DAYS = isConfigured
 /** 配置值是否被钳制或回退（true 表示运维的配置未被原样采用） */
 const wasAdjusted = isConfigured
   ? RAW_RETENTION_DAYS !== RETENTION_DAYS
-  : process.env.AUDIT_RETENTION_DAYS !== undefined;
+  : RAW_ENV_VALUE !== undefined;
 
 /**
  * 生成配置状态的可读说明，供启动日志与合规检查脚本共用
@@ -46,9 +63,9 @@ const wasAdjusted = isConfigured
  */
 const describeRetention = () => {
   if (!isConfigured) {
-    return process.env.AUDIT_RETENTION_DAYS === undefined
+    return RAW_ENV_VALUE === undefined
       ? `未配置 AUDIT_RETENTION_DAYS，采用默认 ${RETENTION_DAYS} 天`
-      : `AUDIT_RETENTION_DAYS=${JSON.stringify(process.env.AUDIT_RETENTION_DAYS)} 无法解析为整数，` +
+      : `AUDIT_RETENTION_DAYS=${JSON.stringify(RAW_ENV_VALUE)} 无法解析为整数，` +
           `已回退到默认 ${RETENTION_DAYS} 天`;
   }
   if (wasAdjusted) {

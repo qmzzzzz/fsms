@@ -102,7 +102,7 @@ const shannonEntropy = (value) => {
  *   形如 'this-is-a-long-pure-lowercase-english-phrase' 的纯小写英文短语，
  *   香农熵 3.76，与既有测试夹具 'strong-random-jwt-secret-that-is-long-enough'
  *   （3.86）数值重叠，无法在不误伤夹具的前提下判弱——夹具断言位于
- *   src/tests/config/validate.test.js（不在本轮写集内）。因此本函数**不**按
+ *   src/tests/config/validate.test.js（不在本次改动写集内）。因此本函数**不**按
  *   「英文短语」一刀切，只拦占位符形态。
  *   残余风险：运维若真手写一句长英文短语当密钥，本校验会放行。该类值约
  *   3.7 bit/char（44 字符 ≈ 163 bit），弱于随机密钥、但强于一切模板占位符，
@@ -230,7 +230,11 @@ function isDocsEnabled() {
   if (raw !== undefined) {
     return TRUTHY_FLAG_VALUES.has(String(raw).trim().toLowerCase());
   }
-  return (process.env.NODE_ENV || 'development') !== 'production';
+  // 未显式设置时按环境决定。原实现是 (NODE_ENV || 'development') !== 'production'，
+  // 于是 NODE_ENV=prod 的部署会把 API 文档**默认打开**——与 validateConfig 的
+  // 生产硬闸恰好相反：闸因拼写被跳过，文档却因同一拼写暴露出来。
+  // 用同一个 fail-closed 判据：未识别的环境值也按"关"处理。
+  return !requiresProductionSemantics();
 }
 
 function validateDocsCredentials(errors) {
@@ -249,8 +253,99 @@ function validateDocsCredentials(errors) {
 }
 
 // 反向代理最大信任跳数（E-01：原为 validateConfig 内的局部常量，现提到模块级，
-// 供 collectTrustProxyErrors 与 collectTlsErrors 共用）
+// 供 collectTrustProxyErrors 与 collectTlsErrors 共用；同时是运行时归一函数
+// resolveTrustProxyHops 的上限，并被导出供 HTTP/WS 两侧复用）
 const MAX_TRUST_PROXY_HOPS = 5;
+
+/**
+ * TRUST_PROXY_HOPS 运行时归一（纯函数：不读 process.env、不打日志，
+ * 于是可以按格钉判据，也不必为「环境分叉」拉起整个 app）
+ *
+ * 为什么要有这一个函数：同一条取值规则原本写了两遍——
+ * src/app.js 与 src/services/websocketService.js 各一份「parseInt → >0 才信任
+ * → 否则 development 取 1 / 其余取 0」，而**只有 app.js 那一份带 MAX 夹取**。
+ * 漂移的后果不是"两个数字不一致"这么轻：WS 侧把 TRUST_PROXY_HOPS=999999 原样
+ * 交给 resolveHandshakeClientIP，等价于信任整条 X-Forwarded-For，握手期客户端 IP
+ * 完全由请求方决定 ⇒ 直接绕过用户 allowedIPs 的登录 IP 白名单
+ * （用例 src/tests/services/websocketTrustProxyHopsParity.test.js 钉住）。
+ *
+ * 判据与 app.js 原实现逐条等价，不引入任何行为变化：
+ *   - 正整数：hops = min(值, MAX_TRUST_PROXY_HOPS)，被夹取时 clamped=true
+ *   - 非正整数（0 / 负数 / 非法文本 / 未配置）：development → 1（本机 Vite 代理），
+ *     其余环境 → 0，0 表示不信任任何转发头
+ *   - 显式配了值却不是正整数 → illegal=true；是否留痕、留什么文案由调用方决定
+ *     （HTTP 与 WS 的失真后果不同，文案各自描述自己的那一条，不强行共用句子）
+ * @param {string|undefined} raw process.env.TRUST_PROXY_HOPS 的原始值
+ * @param {string} nodeEnv 归一后的环境名（如 config.nodeEnv）
+ * @returns {{hops: number, parsed: number, illegal: boolean, clamped: boolean}}
+ */
+function resolveTrustProxyHops(raw, nodeEnv) {
+  const parsed = parseInt(raw, 10);
+  const isPositiveInt = Number.isFinite(parsed) && parsed > 0;
+  const illegal = raw !== undefined && String(raw).trim() !== '' && !isPositiveInt;
+  const clamped = isPositiveInt && parsed > MAX_TRUST_PROXY_HOPS;
+  let hops;
+  if (isPositiveInt) hops = clamped ? MAX_TRUST_PROXY_HOPS : parsed;
+  else hops = nodeEnv === 'development' ? 1 : 0;
+  return { hops, parsed, illegal, clamped };
+}
+
+/**
+ * NODE_ENV 归一
+ *
+ * 原先整套生产硬闸的入口是 `nodeEnv !== 'production'` 的字面量比较，等于把
+ * 「弱密钥能否启动 / 有无 ALLOWED_HOSTS / 有无 REDIS_URL / API 文档是否默认打开」
+ * 全部押在一个字符串的拼写上。实测：
+ *   NODE_ENV=prod JWT_SECRET=change-this-secret（就在 WEAK_SECRETS 黑名单里）
+ *   → validateConfig() 直接 return，进程零校验启动；
+ *   同一环境把值改成 production → 报 8 条致命并 exit(1)。
+ * `prod` / `Production` / `" production "` 都是真实部署里常见的写法，
+ * 而失败的表象是"CI 与本地全绿"，没有任何信号。
+ *
+ * 判据（fail-closed）：
+ *   - 开发家族（development/dev/local/test/ci）→ 允许跳过致命校验（保持既有语义）；
+ *   - 预发家族（staging/stage）→ 同样跳过（ADR-005 明确的环境边界，见
+ *     src/tests/zzqoder_nodeEnvGateFailsClosed.test.js 对该行为的既有断言）；
+ *   - 生产家族（production/prod/live）→ 执行硬闸；
+ *   - **其余任何值 → 也执行硬闸并额外报一条致命错**：猜错的代价必须是
+ *     "启动不起来"，而不是"生产以零校验启动"。"其余任何值"包含**配了但为空**
+ *     （`NODE_ENV=`）——那是部署脚本里最常见的失误，不是"没配"（F-216）。
+ */
+const DEV_ENV_ALIASES = new Set(['development', 'dev', 'local', 'test', 'ci']);
+const PROD_ENV_ALIASES = new Set(['production', 'prod', 'live']);
+const STAGING_ENV_ALIASES = new Set(['staging', 'stage']);
+
+function normalizeNodeEnv() {
+  const raw = process.env.NODE_ENV;
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  // F-216：`value || 'development'` 把"配了但配成空"和"根本没配"并成一类，
+  // 于是本文件头上那条契约（"其余任何值 → 也执行硬闸并额外报一条致命错"）
+  // 对 `NODE_ENV=`（compose 的 `environment:` 只写键名、Dockerfile 的
+  // `ARG NODE_ENV=` 未传值、.env 里留一行 `NODE_ENV=`，三者都得到它）不成立：
+  // requiresProductionSemantics() 返回 false ⇒ validateConfig() 第一行就 return
+  // ⇒ 生产以零校验启动，且一行日志都不打。空串仍归一为"未识别"（'' 不属于任何
+  // 家族），只有**真正未设置**才落 development。
+  return value || (raw === undefined ? 'development' : '');
+}
+
+function isProductionLikeEnv() {
+  return PROD_ENV_ALIASES.has(normalizeNodeEnv());
+}
+
+/**
+ * 该环境是否必须按生产语义行事（生产家族 + 一切无法识别的值）。
+ *
+ * 这是"fail-closed"唯一落点：凡按字面量 'production' 分叉的**安全**开关
+ * （cookie Secure、API 文档默认位、前端托管、密钥强度审计留痕）都必须用它，
+ * 而不是 isProductionLikeEnv()——后者只认显式生产名，会让 `prodution` 这类
+ * 拼写错误重新变成"闸照常关、安全属性静默失效"。
+ * 由本函数把"未识别 = 按生产办"这条规则说一次，避免每个调用点各自猜方向。
+ */
+function requiresProductionSemantics() {
+  const env = normalizeNodeEnv();
+  if (DEV_ENV_ALIASES.has(env) || STAGING_ENV_ALIASES.has(env)) return false;
+  return true;
+}
 
 // 生产环境配置校验（与 config/index.js 的 validateProductionConfig 保持一致）
 //
@@ -259,11 +354,37 @@ const MAX_TRUST_PROXY_HOPS = 5;
 // validateConfig 本体退化为顺序编排。收集器全部保持原有的 push 顺序与文案，
 // 因此 errors 数组的内容与顺序与拆分前逐字一致（测试直接断言该数组）。
 function validateConfig() {
-  const nodeEnv = process.env.NODE_ENV || 'development';
-
-  if (nodeEnv !== 'production') return;
+  if (!requiresProductionSemantics()) {
+    // §14.20.3「最小改动档」（预授权）：`NODE_ENV` **真正未设置**（undefined）时
+    // normalizeNodeEnv() 归一为 development ⇒ 整套生产硬闸（弱密钥/ALLOWED_HOSTS/
+    // REDIS_URL/TLS）静默跳过、零日志、零退出码，而它恰是最常见的误配
+    // （K8s 未声明 / docker run 不带 -e / 直接 node src/index.js）。
+    // 这里补一条显式告警，让该部署至少在启动日志里留痕。
+    // 注意 `NODE_ENV=`（空串）**不走这条**：F-216 已让它按生产办并报致命错
+    // （zzqoder_nodeEnvGateFailsClosed.test.js:114）。
+    if (process.env.NODE_ENV === undefined) {
+      const message =
+        'NODE_ENV 未设置：按 development 处理，生产硬闸（弱密钥/ALLOWED_HOSTS/REDIS_URL/TLS）已全部跳过';
+      try {
+        // 不能顶层 require logger（validate → logger → config 构成加载期环），惰性取。
+        require('../utils/logger').warn(message);
+      } catch (_) {
+        console.warn(message);
+      }
+    }
+    return;
+  }
 
   const errors = [];
+
+  if (!isProductionLikeEnv()) {
+    // 放在最前：运维先看到"你的 NODE_ENV 我看不懂"，再看到下面一串因此被要求的生产项，
+    // 否则会被误读成"生产环境怎么突然多了这么多要求"。
+    errors.push(
+      `NODE_ENV 取值 "${process.env.NODE_ENV}" 未被识别：仅 development/dev/local/test/ci 与 ` +
+        'staging 可跳过生产校验；生产部署请用 production 或 prod'
+    );
+  }
 
   collectSecretErrors(errors);
   collectConnectionErrors(errors);
@@ -307,6 +428,19 @@ function collectSecretErrors(errors) {
 
   if (isWeakSecret(process.env.HMAC_SECRET)) {
     errors.push('HMAC_SECRET 必须设置为至少 32 字符的强随机值');
+  }
+
+  // 两把 JWT 密钥必须不同。access 与 refresh 的唯一区别就是签名密钥不同
+  // （access 载荷里没有 type，见 services/tokenService.js 的说明），
+  // 配成同值 ⇒ 7 天有效期的 refresh 令牌可以直接当 Bearer access 令牌用：
+  // authenticate 只按 userId/tokenVersion/sid 校验，全部通过，
+  // 于是"access 短有效期 + 频繁重新换发"这条收缩访问窗口的机制整体失效。
+  const jwtSecret = (process.env.JWT_SECRET || '').trim();
+  const jwtRefreshSecret = (process.env.JWT_REFRESH_SECRET || '').trim();
+  if (jwtSecret && jwtSecret === jwtRefreshSecret) {
+    errors.push(
+      'JWT_SECRET 与 JWT_REFRESH_SECRET 不得相同（refresh 令牌可被当作 access 令牌直接使用）'
+    );
   }
 }
 
@@ -500,7 +634,26 @@ function reportProductionWarnings() {
   }
 }
 
-module.exports = { validateConfig, isWeakSecret, collectProductionWarnings, isDocsEnabled };
+module.exports = {
+  validateConfig,
+  isWeakSecret,
+  // 纯函数（只往传入的数组里 push），导出供用例直接钉判据：
+  // 走 validateConfig 会连带读环境、按环境分叉，测试里无法只验"两把 JWT 密钥相同"这一格
+  collectSecretErrors,
+  collectProductionWarnings,
+  isDocsEnabled,
+  // 供其余按环境分叉的模块复用同一判据（cookie secure / staticFrontend auto /
+  // logger 生产档 / index.js 的 TLS 要求等），避免各处再各写一次字面量比较。
+  // 安全属性一律用 requiresProductionSemantics（未识别值按生产办）；
+  // isProductionLikeEnv 只回答"是否显式声明为生产"。
+  isProductionLikeEnv,
+  requiresProductionSemantics,
+  normalizeNodeEnv,
+  // trust proxy 取值规则的单一来源：app.js（HTTP）与 websocketService.js（WS 握手）
+  // 必须共用同一份判据与同一个上限，否则同一条请求在两侧得出不同的客户端 IP。
+  MAX_TRUST_PROXY_HOPS,
+  resolveTrustProxyHops,
+};
 
 // 支持直接执行：node src/config/validate.js
 if (require.main === module) {

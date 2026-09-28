@@ -17,7 +17,9 @@ const systemConfigSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       required: true,
     },
-    // 值的类型，用于反序列化
+    // 值的类型标签。由 set() 按传入值的 JS 类型派生写入，
+    // **读取侧不依赖它做反序列化**（Mixed 本身就带 BSON 类型）；
+    // 布尔开关的可读性由 toConfigBoolean 负责，不要指望这里。
     valueType: {
       type: String,
       enum: ['boolean', 'string', 'number', 'json'],
@@ -28,7 +30,9 @@ const systemConfigSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
-    // 是否允许通过 API 修改
+    // 预留位：当前**没有任何执行点读取它**（全仓 grep 无消费方），
+    // set() 也不会因此拒绝写入。要真正变成一道闸，需要连同
+    // securityController 的写回路径一起设计，别把它当成已生效的保护。
     modifiable: {
       type: Boolean,
       default: true,
@@ -52,6 +56,31 @@ const getCache = new Map(); // key -> { value, expireAt, missing }
 
 // 用于区分「缓存了 undefined 值」与「缓存了不存在」的哨兵
 const MISSING = Symbol('config-missing');
+
+// 布尔型配置的解释口径（三个开关共用一份，避免各写一遍各漏一处）
+//
+// 为什么不能直接 `!!doc.value`：value 是 Mixed，落库形态不止 boolean。
+// 运维修配置最常见的是直连库改值（`$set: {value: 'false'}`），
+// 而 `'false'` 的非空字符串真值是 **true** —— 于是
+// `allowPublicRegistration='false'` 会得到"公开注册已开启"，
+// 一个想关闸的动作反而把闸打开，且没有任何报错。方向恰好是最危险的那种：
+// 越权写入面（公开注册 + GUEST 角色）静默打开。
+// 这里显式认常见写法，认不出来的按 fallback（开关类默认关）。
+const CONFIG_TRUTHY = new Set(['true', '1', 'yes', 'on']);
+const CONFIG_FALSY = new Set(['false', '0', 'no', 'off', '']);
+
+const toConfigBoolean = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) && value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (CONFIG_FALSY.has(normalized)) return false;
+    if (CONFIG_TRUTHY.has(normalized)) return true;
+    return fallback;
+  }
+  // null / undefined / 数组 / 对象：不是布尔配置该有的形态，按 fallback
+  return fallback;
+};
 
 // 静态方法：获取配置值（带 30 秒进程内缓存）
 //
@@ -127,7 +156,8 @@ systemConfigSchema.statics.isRegistrationAllowed = async function () {
   }
 
   const doc = await this.findOne({ key: 'allowPublicRegistration' }).lean();
-  _allowRegistrationCache = doc ? !!doc.value : false;
+  // 未落库=关；落库值按统一布尔口径解释（'false' 不得被 !! 读成开）
+  _allowRegistrationCache = doc ? toConfigBoolean(doc.value, false) : false;
   _cacheExpiresAt = now + CACHE_TTL;
   return _allowRegistrationCache;
 };
@@ -149,7 +179,7 @@ systemConfigSchema.statics.isLoginCaptchaEnabled = async function () {
   }
 
   const doc = await this.findOne({ key: 'loginCaptchaEnabled' }).lean();
-  _loginCaptchaCache = doc ? !!doc.value : false;
+  _loginCaptchaCache = doc ? toConfigBoolean(doc.value, false) : false;
   _loginCaptchaCacheExpiresAt = now + CACHE_TTL;
   return _loginCaptchaCache;
 };
@@ -174,8 +204,8 @@ systemConfigSchema.statics.isRegisterCaptchaEnabled = async function () {
 
   const doc = await this.findOne({ key: 'registerCaptchaEnabled' }).lean();
   // 未落库时回退到 env 静态默认（与登录验证码默认 false 不同——注册接口默认强校验）
-  const fallback = require('../config').registerCaptchaEnabled;
-  _registerCaptchaCache = doc ? !!doc.value : !!fallback;
+  const fallback = toConfigBoolean(require('../config').registerCaptchaEnabled, false);
+  _registerCaptchaCache = doc ? toConfigBoolean(doc.value, fallback) : fallback;
   _registerCaptchaCacheExpiresAt = now + CACHE_TTL;
   return _registerCaptchaCache;
 };
@@ -187,5 +217,9 @@ systemConfigSchema.statics.invalidateRegisterCaptchaCache = function () {
 };
 
 const SystemConfig = mongoose.model('SystemConfig', systemConfigSchema);
+
+// 供测试直接驱动布尔解释口径（与 utils/logger 的 __test 同一约定）：
+// 走 DB 的用例要覆盖"存进去的形态"，而纯函数这层能确定性覆盖全部取值形态
+SystemConfig.__test = { toConfigBoolean };
 
 module.exports = SystemConfig;

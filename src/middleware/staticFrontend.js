@@ -10,7 +10,8 @@
  * 托管二选一）：直接服务 web-admin 的构建产物，含——
  *   - SPA history 模式回退（深链/刷新直达前端路由）
  *   - 内容哈希资源长缓存、index.html 与 sw.js 不缓存（发版即时生效）
- *   - 显式拒绝 .map 请求（构建已关 sourcemap，此为纵深拦截）
+ *   - 显式拒绝 .map 请求（构建已关 sourcemap，此为纵深拦截；
+ *     判定按解码后路径 + 大小写归一，并覆盖 HEAD，见 isDeniedStaticPath）
  *
  * 仅在构建产物真实存在时启用；开发环境保持 Vite 工作流不受影响。
  */
@@ -19,6 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const config = require('../config');
+const { matchesAnyPathPrefix } = require('../utils/helpers');
 
 /** 构建产物目录（容器内为 /app/web-admin/dist，可用 FRONTEND_DIST 覆盖） */
 function resolveDistDir() {
@@ -38,7 +40,9 @@ function shouldServeFrontend(distDir = resolveDistDir()) {
   const mode = config.frontend.serve;
   if (mode === 'false') return false;
   if (mode === 'true') return true;
-  if (process.env.NODE_ENV !== 'production') return false;
+  // 与 config/validate.js 同一环境判据：字面量比较会让 NODE_ENV=prod 的部署
+  // 通过硬闸启动（生产校验已 fail-closed），却在这里判定"不是生产"而拒绝托管前端。
+  if (!require('../config/validate').requiresProductionSemantics()) return false;
   return fs.existsSync(path.join(distDir, 'index.html'));
 }
 
@@ -55,6 +59,27 @@ const RESERVED_PREFIXES = [
   '/.well-known',
 ];
 
+/** 纵深拒绝下发的扩展名（构建已关 sourcemap，此处防配置漂移） */
+const DENIED_STATIC_EXTS = ['.map', '.ts'];
+
+/**
+ * 判定必须建立在**解码后**的路径上：静态层解析文件前会先 decodeURIComponent
+ * （node_modules/send/index.js:881），而 req.path 是未解码的原始段。
+ * 两侧口径不一致时 `GET /assets/leak.js%2Emap` 会绕过 endsWith('.map') 被真实下发。
+ * 非法百分号编码解码失败 → 按原始路径判定（静态层自己也会 404）。
+ * 大小写一并归一：Windows 文件系统不区分大小写，`leak.js.MAP` 在本机可取到同一文件。
+ */
+function isDeniedStaticPath(rawPath) {
+  let target = rawPath;
+  try {
+    target = decodeURIComponent(rawPath);
+  } catch (_) {
+    /* 非法编码：保持原始路径 */
+  }
+  const lower = target.toLowerCase();
+  return DENIED_STATIC_EXTS.some((ext) => lower.endsWith(ext));
+}
+
 /**
  * 把静态托管挂到 app 上。返回是否启用（供启动日志/测试断言）。
  * 必须挂载在全部业务路由之后、404 兜底之前。
@@ -70,9 +95,10 @@ function mountStaticFrontend(app, { logger } = {}) {
     );
   }
 
-  // 纵深：构建产物不得含 sourcemap；即使未来配置漂移产出 .map，也拒绝下发
+  // 纵深：构建产物不得含 sourcemap；即使未来配置漂移产出 .map，也拒绝下发。
+  // GET 与 HEAD 都要拦——HEAD 无响应体但回 200+Content-Length，足以探测产物存在性。
   app.use((req, res, next) => {
-    if (req.method === 'GET' && (req.path.endsWith('.map') || req.path.endsWith('.ts'))) {
+    if ((req.method === 'GET' || req.method === 'HEAD') && isDeniedStaticPath(req.path)) {
       return res.status(404).json({ success: false, message: '资源不存在' });
     }
     return next();
@@ -106,8 +132,9 @@ function mountStaticFrontend(app, { logger } = {}) {
   // 一律交回 index.html 由前端路由接管；其余（含 POST/非 HTML 请求）落到 404
   app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-    if (RESERVED_PREFIXES.some((p) => req.path === p || req.path.startsWith(p + '/')))
-      return next();
+    // 保留前缀判定与路由同尺（Express 默认大小写不敏感）：否则 GET /API/不存在路径
+    // 既进不了 API 路由的 404 JSON，又被这里当成普通前端路径 → 回退 200 SPA HTML
+    if (matchesAnyPathPrefix(RESERVED_PREFIXES, req.path)) return next();
     const acceptsHtml = String(req.headers.accept || '').includes('text/html');
     if (!acceptsHtml) return next();
     return res.sendFile(indexFile);

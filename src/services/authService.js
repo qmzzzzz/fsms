@@ -29,10 +29,14 @@ const {
   invalidateUserTokens,
 } = require('../middleware/tokenBlacklist');
 const AuditLog = require('../models/AuditLog');
+// P0-5 后手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
+const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
 const captchaService = require('./captchaService');
 const { verifyTotpDetailed } = require('../utils/totp');
 const { decryptMfaSecret } = require('../utils/mfaSecret');
 const { decryptLoginCredential } = require('../utils/loginCipher');
+const { normalizeEmailKey } = require('../utils/emailKey');
+const { USER_STATUS } = require('../utils/constants');
 const sessionService = require('./sessionService');
 const { generateToken, generateRefreshToken } = require('./tokenService');
 const {
@@ -42,13 +46,28 @@ const {
   hashRecoveryCode,
 } = require('./mfaService');
 // O-2 下沉引入：管理员锁定/解锁的层级与内置超管校验（纯工具模块，无循环依赖）
-const { getOperatorMaxLevel } = require('../utils/permissionHelper');
+const { getOperatorMaxLevel, maxRoleLevel } = require('../utils/permissionHelper');
 const { isSuperAdminRole } = require('../utils/superAdmin');
 
 // 登录失败计数阈值与锁定时长（E-01：原为 loginUser 内的局部常量，现提到
 // 模块级，供 verifyPasswordOrTrackFailure / incrementFailedLoginCount 共用）
 const MAX_FAILED_LOGINS = 10;
 const LOCK_DURATION_MS = 10 * 60 * 1000;
+
+/**
+ * 失败计数的解析规则（口令错误主路径与 MFA/恢复码累计路径共用同一判据）
+ *
+ * 计数写不进库时按「已达阈值」处理（fail-closed），与 mfaService.recordMfaFailure 同口径。
+ * 旧实现的两处兜底方向都反了：一处 `?? 1`（读不到计数 = 第一次失败），
+ * 一处「用请求早先读到的陈旧快照 +1」（写路径持续失败时那个快照永不变，等效卡在 1）。
+ * 后果同形：Mongo 可读不可写（主从切换 / 写关注失败）的窗口里，攻击者对已知用户名
+ * 连续试错，计数永远落不了库 ⇒ 阈值永远到不了 ⇒ 账户临时锁定与自动封禁两道防线
+ * 同时静默消失，只剩 IP 限流。观测不到防线时要收紧，不能假定防线还在。
+ *
+ * 代价如实写明：DB 写故障期间的正当用户会被锁 10 分钟。这与 MFA 侧已作出的取舍一致。
+ */
+const resolveFailedLoginCount = (updated) =>
+  typeof updated?.failedLoginCount === 'number' ? updated.failedLoginCount : MAX_FAILED_LOGINS;
 
 /**
  * 哑口令摘要：用于抹平「用户不存在」与「用户存在但密码错误」的响应耗时差
@@ -84,10 +103,14 @@ const consumeDummyPasswordTime = async (candidate) => {
 
 /**
  * 用户注册（业务层）
+ * @param {object} body 请求体
+ * @param {object} [ctx] `{ req }`：注册成功即建立会话，UserSession 的 ip / UA / 设备指纹
+ *   都只能从真实请求对象取（见 sessionService.createSession），没有 req 时按既有降级口径
+ *   签发不可吊销的令牌
  * @returns {Promise<{outcome:'CAPTCHA_INVALID'|'ENC_INVALID'|'WEAK'|'DUPLICATE'|'OK'}>}
  *   OK 时附 { userId, username, email, token, refreshToken }
  */
-async function registerUser(body) {
+async function registerUser(body, ctx = {}) {
   // 前置人机校验：注册接口强制图形验证码（后台可动态开关，默认开启）
   // 验证码错误/过期时直接拒绝，不进入用户名/邮箱查重与用户创建，
   // 也不计入后续统计——验证码层已挡住自动化批量注册
@@ -150,17 +173,16 @@ async function registerUser(body) {
     roles: roleIds,
   });
 
-  // 注册成功即建立会话：注册后立即登录无需再次输密码
+  // 注册成功即建立会话：注册后立即登录无需再次输密码。
+  // 「建立会话」得真的建立——与登录走同一段 sid + UserSession 落库（判据与降级方向
+  // 见 issueRevocableTokenPair）：只签令牌而不落库，这条登录态在「登录会话」界面里
+  // 不存在、踢不掉，且不带 sid 的 refresh 轮换会一路自我续期而永不过期。
   const regRoles = defaultRole ? [defaultRole.code] : [];
-  const token = generateToken(
-    user._id,
-    user.username,
-    user.email,
-    regRoles,
-    user.realName,
-    user.tokenVersion ?? 0
-  );
-  const refreshToken = generateRefreshToken(user._id, user.tokenVersion ?? 0);
+  const { token, refreshToken, sid, sessionRegistered } = await issueRevocableTokenPair({
+    user,
+    roles: regRoles,
+    req: ctx.req,
+  });
 
   logger.info('新用户注册', { username });
 
@@ -171,6 +193,10 @@ async function registerUser(body) {
     email: user.email,
     token,
     refreshToken,
+    // 调用方（控制器）不消费这两个键，但降级必须可判定：sid 为 null 就是"这次注册
+    // 没有可吊销会话"，测试与后续治理据此区分正常路径与落库失败路径
+    sid,
+    sessionRegistered,
   };
 }
 
@@ -214,7 +240,7 @@ async function loginUser(params, ctx) {
     await consumeDummyPasswordTime(password);
     // 用户不存在同样计入失败统计，防止借不存在的用户名绕开暴力破解检测
     await AuditLog.recordLogin(null, username, ip, false, userAgent, { fingerprint }).catch(
-      () => {}
+      onAuditWriteFailure('login_failed_audit', { user: { username } })
     );
     await checkBruteForce(username, ip).catch(() => {});
     return { outcome: 'INVALID_CREDENTIALS' };
@@ -286,7 +312,7 @@ async function resolveLoginPassword(params, ctx, username) {
       // 公钥是公开的，攻击者可自行构造合法密文——解密失败同样计入防爆破与审计
       await AuditLog.recordLogin(null, username, ip, false, userAgent, {
         reason: `credential_decrypt_failed:${err.code}`,
-      }).catch(() => {});
+      }).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
       await checkBruteForce(username, ip).catch(() => {});
       logger.warn('登录拒绝 - 口令密文无效', { username, code: err.code });
       return { outcome: 'ENC_INVALID' };
@@ -312,12 +338,24 @@ async function assertAccountUsable(user, { password, ctx, username }) {
   // 检查账户状态
   // M-5：禁用/锁定账户与"用户不存在/密码错误"返回完全一致的 401 文案，
   // 防止借差异化响应枚举有效用户名；真实原因仅记入服务端日志与审计
-  if (user.status === 'inactive' || user.status === 'locked') {
+  // 允许清单（F-162）：只有 active 可用。此前是「=== inactive || === locked」的按枚举拒绝，
+  // 与同文件 refresh 的 `status !== 'active'` 是同一个概念的两个答案——
+  // USER_STATUS 加一档、或备份还原/裸写进一个清单外的值时，登录会**完整放行**、refresh 才拒绝。
+  if (user.status !== USER_STATUS.ACTIVE) {
     logger.warn('登录拒绝 - 账户状态异常', { username, status: user.status });
     await AuditLog.recordLogin(user._id, username, ip, false, userAgent, {
       fingerprint,
       reason: `account_status_${user.status}`,
-    }).catch(() => {});
+    }).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
+    // P2-11/M-5 的同族收口：这两条分支此前直接 return，
+    // 一次 bcrypt 都不跑 ⇒ 「存在但被禁的账号」比「用户名不存在」快约一次
+    // compare 的时间（纯 JS cost-12 ≈ 百毫秒），构成账号存在性 + 锁定态预言机，
+    // 且**不需要正确口令**——等于把 ② 里花力气做的时序拉平从这个方向漏掉。
+    await consumeDummyPasswordTime(password);
+    // 同一条拒绝也必须进暴力破解检测：loginUser 的「用户不存在」分支会计数，
+    // 被禁账号若不计数就成了免检探测面（recordLogin 已写失败审计，
+    // 但 checkBruteForce 才是把它读出来并告警的那一步）。
+    await checkBruteForce(username, ip).catch(() => {});
     return { outcome: 'INVALID_CREDENTIALS' };
   }
   if (user.lockUntil && user.lockUntil > new Date()) {
@@ -329,8 +367,11 @@ async function assertAccountUsable(user, { password, ctx, username }) {
       remainMinutes: Math.ceil(remainMs / 60000),
     });
     await AuditLog.recordLogin(user._id, username, ip, false, userAgent, { fingerprint }).catch(
-      () => {}
+      onAuditWriteFailure('login_failed_audit', { user: { username } })
     );
+    // 与上面 status 分支同判据：抹平耗时 + 计入暴力破解检测
+    await consumeDummyPasswordTime(password);
+    await checkBruteForce(username, ip).catch(() => {});
     return { outcome: 'INVALID_CREDENTIALS' };
   }
 
@@ -384,7 +425,7 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
   if (!isMatch) {
     logger.warn('登录失败 - 密码错误', { username });
     await AuditLog.recordLogin(user._id, username, ip, false, userAgent, { fingerprint }).catch(
-      () => {}
+      onAuditWriteFailure('login_failed_audit', { user: { username } })
     );
     // B-L1：与上方 210/233 行同口径——checkBruteForce 内的 DB 查询/告警落库
     // 若因 DB 瞬断 reject，异常上抛会把统一 401 变成 500（破坏 M-5 防枚举口径）
@@ -395,7 +436,7 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
     // 但 lockUntil 覆写幂等，审计重复仅产生冗余日志，可接受）
     //
     // P3-1：走到这里说明账户未处于锁定中（lockUntil 为空或已过期）。
-    // 若 lockUntil 已过期却只做 $inc，上一轮的 9 次失败会继续累计——
+    // 若 lockUntil 已过期却只做 $inc，此前的 9 次失败会继续累计——
     // 解锁后仅剩 1 次试错即再次锁定，等效「每 10 分钟允许 1 次尝试」，
     // 把 10 分钟窗口内的爆破配额从 10 次压到 1 次（对攻击者反而是限制），
     // 对正常用户则是输错一次就锁。已过期的 lockUntil 视为新一轮：
@@ -408,7 +449,8 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
         : { $inc: { failedLoginCount: 1 } },
       { new: true }
     ).catch(() => null);
-    const newCount = updated?.failedLoginCount ?? 1;
+    // 计数不可观测时的取舍见 resolveFailedLoginCount 的定义处（fail-closed）
+    const newCount = resolveFailedLoginCount(updated);
     if (newCount >= MAX_FAILED_LOGINS) {
       await User.findByIdAndUpdate(user._id, {
         lockUntil: new Date(Date.now() + LOCK_DURATION_MS),
@@ -662,7 +704,7 @@ async function recordRecoveryFailure(
  *
  * P1-25（2026-09-17）：补 lockExpired 重置，与口令路径
  * （verifyPasswordOrTrackFailure 内 :403-410）对齐。MFA 两条失败路径
- * 此前只做纯 $inc：上一轮 10 分钟锁定刚过期时，旧计数会继续累计——
+ * 此前只做纯 $inc：此前 10 分钟锁定刚过期时，旧计数会继续累计——
  * 解锁后仅剩 1 次试错即再次锁定，对正常用户表现为「输错一次就锁」。
  * 已过期的 lockUntil 视为新一轮：重置计数从 1 起算并清空过期时间戳。
  * 走到本函数时 lockUntil 必为空或已过期（loginUser ③ 已在锁定期间提前返回），
@@ -679,8 +721,7 @@ async function incrementFailedLoginCount(user, { username, lockReason }) {
       : { $inc: { failedLoginCount: 1 } },
     { new: true }
   ).catch(() => null);
-  const newCount =
-    updated?.failedLoginCount ?? (lockExpired ? 1 : (user.failedLoginCount || 0) + 1);
+  const newCount = resolveFailedLoginCount(updated);
   if (newCount >= MAX_FAILED_LOGINS) {
     await User.findByIdAndUpdate(user._id, {
       lockUntil: new Date(Date.now() + LOCK_DURATION_MS),
@@ -688,6 +729,57 @@ async function incrementFailedLoginCount(user, { username, lockReason }) {
     logger.warn(`账户临时锁定（${lockReason}）`, { username, failedCount: newCount });
   }
   return newCount;
+}
+
+/**
+ * 签发「与一条 UserSession 记录绑定」的令牌对（登录与注册共用同一段实现）
+ *
+ * 为什么必须共用：`sid` 的语义是"跨 refresh 轮换保持不变 ⇒ 踢掉某台设备后那台设备
+ * 刷新令牌也无法复活"，而"落库失败就退回不带 sid 的令牌"是这条语义的唯一兜底。
+ * 两处 mint 各抄一份时，注册路径正是漏抄的那一份（F-175）：它既不建 UserSession，
+ * 签出的 refresh 令牌却能一路自续下去——`refreshSession` 里的 `if (rotateSid)`
+ * 对无 sid 的令牌整段跳过，于是每次轮换再签一对新的无 sid 7 天令牌。结果是这条
+ * 血统不出现在「登录会话」界面、点不掉，也只有改密码（tokenVersion）才能终止，
+ * 而 auth.js 对无 sid 令牌的承诺是"最长在 refresh 有效期后自然消亡"——被无限轮换
+ * 续下去的令牌不消亡。共用之后，新增的登录态一律可吊销；降级只保留给真正的
+ * 落库失败（那一条仍属无上限血统，见交接的待拍板项）。
+ *
+ * 降级方向是"少给一份可吊销性"而不是"拒绝这次登录/注册"，理由见
+ * issueLoginSession 的 JSDoc；`sid` 返回 null 让调用方能看得见降级发生了。
+ *
+ * @returns {Promise<{token:string, refreshToken:string, sessionId:string, sid:string|null, sessionRegistered:boolean}>}
+ */
+async function issueRevocableTokenPair({ user, roles, req }) {
+  // 同一个 UUID 同时作为审计用的 sessionId 与会话表的 sid：两者语义一致（都标识本次
+  // 登录），分开生成只会让审计日志的 sessionId 与 UserSession.sid 无法对应，事后追溯断链。
+  const sessionId = crypto.randomUUID();
+  const tokenVersion = user.tokenVersion ?? 0;
+  let sessionRegistered = false;
+  try {
+    await sessionService.createSession({ userId: user._id, req, sid: sessionId });
+    sessionRegistered = true;
+  } catch (e) {
+    logger.error(`会话注册失败（本次签发降级为无设备级吊销能力）：${e.message}`, {
+      userId: String(user._id),
+    });
+  }
+  const sid = sessionRegistered ? sessionId : null;
+  return {
+    token: generateToken(
+      user._id,
+      user.username,
+      user.email,
+      roles,
+      user.realName,
+      tokenVersion,
+      sessionId,
+      sid
+    ),
+    refreshToken: generateRefreshToken(user._id, tokenVersion, sid),
+    sessionId,
+    sid,
+    sessionRegistered,
+  };
 }
 
 /**
@@ -716,7 +808,7 @@ async function issueLoginSession(user, ctx, username) {
       riskLevel: 'medium',
       riskFactors: ['unusual_time_access'],
       body: { loginHour: hour },
-    }).catch(() => {});
+    }).catch(onAuditWriteFailure('login_unusual_time'));
   }
 
   // 更新登录信息（使用 findByIdAndUpdate 避免触发完整 pre-save 钩子）
@@ -727,11 +819,13 @@ async function issueLoginSession(user, ctx, username) {
     lockUntil: null,
   });
 
-  // 获取用户角色和权限
+  // 获取用户角色和权限（仅生效角色/权限项：登录响应即客户端权限快照，
+  // 若含停用角色，前端会渲染出服务端必然 403 的控件）
   const populatedUser = await User.findById(user._id).populate({
     path: 'roles',
     select: 'name code',
-    populate: { path: 'permissions', select: 'code' },
+    match: { status: 'active' },
+    populate: { path: 'permissions', select: 'code', match: { status: 'active' } },
   });
   // 安全修复：populate 后可能存在 null（指向已删除角色的 ObjectId），需过滤
   const roles = populatedUser.roles.map((r) => r?.code).filter(Boolean);
@@ -739,59 +833,19 @@ async function issueLoginSession(user, ctx, username) {
     ...new Set(populatedUser.roles.flatMap((r) => r?.permissions?.map((p) => p.code) || [])),
   ];
 
-  // 生成 Token（携带 tokenVersion，用于后续会话吊销校验）
-  // sessionId（jti）在此显式生成，使登录审计与后续该会话的所有请求审计可关联为同一会话链。
-  //
-  // 设备级会话：sid 与本次登录的 UserSession 记录一一对应，且**跨 refresh 轮换保持不变**，
-  // 这样用户在「登录会话」界面踢除某台设备后，那台设备即使刷新令牌也无法复活。
-  // 登录路径复用同一个 UUID 作为 sessionId 与 sid：两者语义一致（都标识本次登录），
-  // 分开生成只会让审计日志的 sessionId 与会话表的 sid 无法对应，事后追溯断链。
-  const sessionId = crypto.randomUUID();
-  const sid = sessionId;
-  const token = generateToken(
-    user._id,
-    user.username,
-    user.email,
-    roles,
-    user.realName,
-    user.tokenVersion,
+  // 令牌签发 + 设备会话注册：与注册路径共用同一段实现（见 issueRevocableTokenPair），
+  // 免得"sid 语义"与"落库失败怎么降级"这两条判据各抄一份后各自漂移。
+  const {
+    token: issuedToken,
+    refreshToken: issuedRefreshToken,
     sessionId,
-    sid
-  );
-  const refreshToken = generateRefreshToken(user._id, user.tokenVersion, sid);
-
-  // 会话注册表落库：失败不阻断登录，但要降级为「令牌不含可吊销会话」。
-  // 若此处失败仍下发带 sid 的令牌，authenticate 会因查不到会话而拒绝该令牌，
-  // 用户登录成功却立刻无法访问任何接口——比「本次登录不支持设备级吊销」严重得多。
-  let sessionRegistered = false;
-  try {
-    await sessionService.createSession({ userId: user._id, req: ctx.req, sid });
-    sessionRegistered = true;
-  } catch (e) {
-    logger.error(`登录会话注册失败（本次登录降级为无设备级吊销能力）：${e.message}`);
-  }
-  const issuedToken = sessionRegistered
-    ? token
-    : generateToken(
-        user._id,
-        user.username,
-        user.email,
-        roles,
-        user.realName,
-        user.tokenVersion,
-        sessionId
-      );
-  const issuedRefreshToken = sessionRegistered
-    ? refreshToken
-    : generateRefreshToken(user._id, user.tokenVersion);
+  } = await issueRevocableTokenPair({ user, roles, req: ctx.req });
 
   logger.info('用户登录成功', { username });
 
   // 操作溯源：记录登录成功
   AuditLog.recordLogin(user._id, username, ip, true, userAgent, { sessionId, fingerprint }).catch(
-    (e) => {
-      logger.warn(`登录审计落库失败：${e.message}`);
-    }
+    onAuditWriteFailure('login_success_audit', { user: { username } })
   );
 
   return {
@@ -865,6 +919,7 @@ async function refreshSession(refreshTokenRaw, ctx) {
   const populatedUser = await User.findById(user._id).populate({
     path: 'roles',
     select: 'name code',
+    match: { status: 'active' },
   });
   // 安全修复：populate 后可能存在 null（指向已删除角色的 ObjectId），需过滤
   const roles = populatedUser.roles.map((r) => r?.code).filter(Boolean);
@@ -1071,8 +1126,13 @@ async function updateUserProfile(userId, body) {
   }
 
   // 检查邮箱是否已被其他用户使用
-  if (email && email !== user.email) {
-    const existingUser = await User.findOne({ email });
+  // 比对必须先取 schema 的落库形态（lowercase:true）：`email !== user.email` 吃的是
+  // 内存里的原样串，而 Mongoose 会把 lowercase setter 作用于查询条件 ⇒ 用户提交
+  // "自己邮箱的大写形态"时，比对不等、查重却命中，自己的邮箱被判成被他人占用。
+  // 机制与实测取证见 utils/emailKey.js。
+  const emailKey = normalizeEmailKey(email);
+  if (emailKey && emailKey !== normalizeEmailKey(user.email)) {
+    const existingUser = await User.findOne({ email: emailKey });
     if (existingUser) {
       return { outcome: 'EMAIL_TAKEN' };
     }
@@ -1086,7 +1146,8 @@ async function updateUserProfile(userId, body) {
   // 更新允许的字段（白名单，非黑名单）
   // department 不在其列——见函数头 H-01 说明；它是授权范围来源，只能由管理员改
   if (realName !== undefined) user.realName = realName;
-  if (email !== undefined) user.email = email;
+  // 存 emailKey 而非 email：查重判的就是这个形态，写入必须与判的一致
+  if (email !== undefined) user.email = emailKey;
   if (phone !== undefined) user.phone = phone;
   if (avatar !== undefined) user.avatar = avatar;
 
@@ -1115,7 +1176,7 @@ async function updateUserProfile(userId, body) {
  * 锁定拒绝、inactive 双向状态机保护（禁用账户不可借解锁复活、亦不可重复
  * 锁定）、成功后缓存失效与专用审计落库。控制器只保留参数校验与
  * outcome → HTTP 响应映射，行为口径与迁移前逐项一致
- * （securityCoverageGap.test.js 的 toggleUserLock 分支为安全网）。
+ * （controllers/securityControllerOutcomeAndGuards.test.js 的 toggleUserLock 分支为安全网）。
  *
  * @param {string} userId 目标用户 ID
  * @param {object} params { locked: boolean, reason?: string }
@@ -1135,8 +1196,7 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
   const targetUserRoles = await Role.find({ _id: { $in: user.roles } }).select(
     'level code isBuiltIn'
   );
-  const targetMaxLevel =
-    targetUserRoles.length > 0 ? Math.max(...targetUserRoles.map((r) => r.level || 0)) : 0;
+  const targetMaxLevel = maxRoleLevel(targetUserRoles);
 
   // 按操作者 ID 重新查询角色层级（req.user.roles 存的是角色编码字符串，
   // 直接用于 _id: {$in: ...} 会触发 CastError，导致整个接口 500）
@@ -1170,6 +1230,17 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
 
   user.status = locked ? 'locked' : 'active';
 
+  // 解锁必须连**临时锁定**一起清掉。两套锁定是分开的：管理员锁定改 status，
+  // 暴力破解阈值只写 lockUntil（:443-446，不动 status）。而 authenticate
+  // （middleware/auth.js:284）与 loginUser（:350）都只看 lockUntil 就拒绝登录。
+  // 因此"先被爆破锁定、再被管理员锁定"的账户，此前解锁只改回 status ⇒
+  // 接口 200「用户已解锁」+ 审计 success:true，用户依然登不进来（且活令牌全部 403），
+  // 运维只会去怀疑密码。与"改密假成功"同一类：**报告了没做到的事**。
+  if (!locked) {
+    user.lockUntil = null;
+    user.failedLoginCount = 0;
+  }
+
   if (locked && reason) {
     user.remark = reason;
   }
@@ -1199,7 +1270,8 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
     userAgent,
     success: true,
     riskLevel: 'high',
-  });
+    // 本函数没有 req（只有 ctx），按 onAuditWriteFailure 的取用形态传入操作者
+  }).catch(onAuditWriteFailure('user_lock_status', { user: { username: operatorUsername } }));
 
   logger.info('用户锁定状态变更', { username: user.username, locked, operator: operatorUsername });
 
@@ -1213,7 +1285,37 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
 }
 
 /**
+ * 吊销单个 refresh 令牌。
+ * @returns {Promise<{handled:boolean, failed:boolean}>}
+ *   handled=false 表示签名无效/已过期（本就不可用，不算失败，也不写黑名单）
+ */
+async function revokeOneRefreshToken(token) {
+  let payload = null;
+  try {
+    payload = jwt.verify(token, config.jwt.refreshSecret, { algorithms: ['HS256'] });
+  } catch (e) {
+    // refresh token 校验失败说明它本就无效，不影响登出结论
+    logger.warn(`登出时 refresh token 校验失败: ${e.message}`);
+    return { handled: false, failed: false };
+  }
+  if (!payload || !payload.exp) return { handled: false, failed: false };
+  try {
+    await blacklistToken(token, payload.exp);
+  } catch (e) {
+    logger.error(`登出未能吊销 refresh token（${e.code || e.message}）：令牌在过期前仍然可用`);
+    return { handled: true, failed: true };
+  }
+  return { handled: true, failed: false };
+}
+
+/**
  * 登出令牌吊销（业务层）：把 access/refresh 令牌加入黑名单
+ * @param {object} input
+ * @param {string|null} input.accessToken 认证用的 access 令牌（与 authenticate 同源提取）
+ * @param {string|null} [input.refreshToken] 主 refresh 令牌
+ * @param {string[]} [input.extraRefreshTokens] 其余**同时被出示**的 refresh 令牌
+ *   （控制器把 body 与 cookie 两个来源都交进来：旧签名只能收一个，于是
+ *   `body || cookie` 这种"二选一"让一条已轮换掉的旧串把在用的那条挡在身后）
  * @returns {Promise<{revokeFailed:boolean}>} revokeFailed=true 表示有令牌未能确认入库
  *
  * P2-26 fail-closed：令牌吊销未能落库时由控制器返回失败而非「登出成功」。
@@ -1222,7 +1324,7 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
  * 有效期（默认 2h）内仍可通过认证，而用户已认为会话已终止、不会再补救。
  * refresh 轮换路径（consumeToken）刻意 fail-closed，契约必须一致。
  */
-async function revokeTokensOnLogout({ accessToken, refreshToken }) {
+async function revokeTokensOnLogout({ accessToken, refreshToken, extraRefreshTokens = [] } = {}) {
   // 吊销失败标记：任一令牌未能确认入库即视为登出未完成
   let revokeFailed = false;
 
@@ -1245,24 +1347,11 @@ async function revokeTokensOnLogout({ accessToken, refreshToken }) {
     }
   }
 
-  if (refreshToken) {
-    let refreshPayload = null;
-    try {
-      refreshPayload = jwt.verify(refreshToken, config.jwt.refreshSecret, {
-        algorithms: ['HS256'],
-      });
-    } catch (e) {
-      // refresh token 校验失败说明它本就无效，不影响登出结论
-      logger.warn(`登出时 refresh token 校验失败: ${e.message}`);
-    }
-    if (refreshPayload && refreshPayload.exp) {
-      try {
-        await blacklistToken(refreshToken, refreshPayload.exp);
-      } catch (e) {
-        revokeFailed = true;
-        logger.error(`登出未能吊销 refresh token（${e.code || e.message}）：令牌在过期前仍然可用`);
-      }
-    }
+  // 去重：body 与 cookie 常是同一条令牌（同值重复吊销只是多写一次同键黑名单）
+  const refreshCandidates = [...new Set([refreshToken, ...extraRefreshTokens].filter(Boolean))];
+  for (const token of refreshCandidates) {
+    const { failed } = await revokeOneRefreshToken(token);
+    if (failed) revokeFailed = true;
   }
 
   return { revokeFailed };

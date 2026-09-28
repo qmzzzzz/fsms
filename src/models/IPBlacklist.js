@@ -6,7 +6,44 @@
  */
 
 const mongoose = require('mongoose');
-const { ipMatchesEntry, entryPrefixBits, entryCovers } = require('../utils/ipUtils');
+// 取值清单的单一来源（见 constants/ipList.js 头注释：schema enum / 路由 isIn /
+// 控制器守卫 / OpenAPI 生成器四处曾各抄一份）
+const { IP_LIST_TYPES } = require('../constants/ipList');
+const {
+  ipMatchesEntry,
+  entryPrefixBits,
+  entryCovers,
+  normalizeIP,
+  normalizeCIDR,
+  // 严格形态判据住在 ipUtils（四个解析漏斗共用同一把尺子），
+  // 过渡模块 utils/ipCanonical 已并入并删除
+  isAmbiguousIpText,
+} = require('../utils/ipUtils');
+
+/**
+ * 条目 IP 的存储前归一化：把"同一个地址的等价写法"收敛成一条记录。
+ *
+ * 为什么必须在模型里做：`ip` 上的唯一索引是**文本唯一**，而匹配是**语义唯一**
+ * （ipMatchesEntry 会把 `::ffff:1.2.3.4` 与 `1.2.3.4`、`2001:0DB8::1` 与
+ * `2001:db8::1` 视为同一地址）。两者不对齐时，同一个地址可以躺两条记录——
+ * 后果不是"多一条脏数据"，而是 **解封失效**：管理面按精确文本删除其中一条，
+ * 另一条继续命中，客户端看起来"封了又封不掉"。今天两个写入方
+ * （ipListController / middleware/security 的自动封禁）各自先归一化所以没踩到，
+ * 但这个不变行不该由调用方各自记住——存储边界才是它的归属层。
+ *
+ * 与控制器同一判据：含 `/` 的按 CIDR 归一，否则按单地址归一。
+ * 解析不动的值（脏数据、测试里的 `'::::'`）原样保留：归一化只做收敛，
+ * 不新增拒绝路径——格式校验属于入站边界（控制器）而不是这里。
+ *
+ * @param {unknown} value 原始条目文本
+ * @returns {string} 归一化后的文本（无法归一化时返回去空格后的原文）
+ */
+function normalizeEntryIp(value) {
+  const raw = typeof value === 'string' ? value.trim() : String(value ?? '');
+  if (!raw) return raw;
+  const normalized = raw.includes('/') ? normalizeCIDR(raw) : normalizeIP(raw);
+  return normalized || raw;
+}
 
 const ipBlacklistSchema = new mongoose.Schema({
   ip: {
@@ -16,7 +53,7 @@ const ipBlacklistSchema = new mongoose.Schema({
   // 名单类型：black=黑名单（拦截）、white=白名单（放行，豁免黑名单与限流）
   type: {
     type: String,
-    enum: ['black', 'white'],
+    enum: IP_LIST_TYPES,
     default: 'black',
     index: true,
   },
@@ -56,6 +93,11 @@ ipBlacklistSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 // 复合唯一索引：同一 IP 在黑/白名单各最多一条，两种类型可并存（白名单运行时优先）
 ipBlacklistSchema.index({ ip: 1, type: 1 }, { unique: true });
+
+ipBlacklistSchema.pre('validate', function () {
+  // create/save/insertMany 走这里；findOneAndUpdate 不跑校验，由 blockIP/unblockIP 自己归一
+  if (this.ip !== undefined) this.ip = normalizeEntryIp(this.ip);
+});
 
 /**
  * 名单快照缓存（进程内，短 TTL）
@@ -108,6 +150,12 @@ const getSnapshot = async function (type) {
  */
 const findMatchingEntries = async function (clientIp, type) {
   if (!clientIp || typeof clientIp !== 'string') return [];
+  // 形态有歧义的客户端文本（八进制/十六进制/简写）不参与匹配。
+  // ipaddr 会把 `0x7f.0.0.1` 解释成 `127.0.0.1`（实测），于是"把自己写成白名单里的
+  // 地址"就能同时豁免黑名单与限流。返回空集的方向是安全的：白名单不再被伪装命中；
+  // 黑名单侧本来就能靠伪造 XFF 规避（trust proxy 语义），严格化不新增规避面。
+  // 真实 socket 地址（含 `::ffff:` 映射形态）都是规范文本，一律通过严格判据。
+  if (isAmbiguousIpText(clientIp)) return [];
 
   const candidates = await getSnapshot.call(this, type);
 
@@ -194,7 +242,7 @@ ipBlacklistSchema.statics.findCoveringEntries = async function (entryIp, type) {
 // 静态方法：添加 IP 到名单（黑/白通用，upsert 语义）
 // upsert 键含 type：同一 IP 的黑/白记录相互独立，避免加入一侧时静默覆盖另一侧
 // createdAt 用 $setOnInsert：重复封禁同一 IP 时保留首次加入时间，便于追溯「首封时间」
-ipBlacklistSchema.statics.blockIP = async function (ip, options = {}) {
+ipBlacklistSchema.statics.blockIP = async function (rawIp, options = {}) {
   const {
     reason = 'security_policy',
     durationMs = 3600000, // 默认 1 小时
@@ -202,6 +250,8 @@ ipBlacklistSchema.statics.blockIP = async function (ip, options = {}) {
     targetUsername,
     type = 'black',
   } = options;
+  // findOneAndUpdate 默认不跑 schema 校验，pre('validate') 覆盖不到这里
+  const ip = normalizeEntryIp(rawIp);
 
   const expiresAt = durationMs > 0 ? new Date(Date.now() + durationMs) : null;
 
@@ -234,7 +284,10 @@ ipBlacklistSchema.statics.blockIP = async function (ip, options = {}) {
 };
 
 // 静态方法：移除指定 IP 的名单记录（不传 type 时清除该 IP 的黑白两侧记录）
-ipBlacklistSchema.statics.unblockIP = async function (ip, type) {
+// 删除侧同样归一化：否则"按 ::ffff:1.2.3.4 解封"删不掉存成 1.2.3.4 的那条，
+// 表现为封得住、解不开（与 blockIP 必须用同一把尺子）
+ipBlacklistSchema.statics.unblockIP = async function (rawIp, type) {
+  const ip = normalizeEntryIp(rawIp);
   const filter = type ? { ip, type } : { ip };
   const result = await this.deleteMany(filter);
   invalidateSnapshot(type);
@@ -252,6 +305,9 @@ ipBlacklistSchema.statics.removeById = async function (id, type) {
 ipBlacklistSchema.statics.invalidateSnapshot = function (type) {
   invalidateSnapshot(type);
 };
+
+// 条目归一化判据（导出给测试与需要预检的调用方；模型内部三个写路径已经用它）
+ipBlacklistSchema.statics.normalizeEntryIp = normalizeEntryIp;
 
 // 兜底失效：任何绕过上述静态方法的直接写操作（如测试中的 deleteMany({})、
 // 其他模块直接调用 create/updateOne）同样清空快照，避免读到陈旧名单

@@ -18,7 +18,7 @@ const swaggerOptions = {
   // 三个脚本都是同源外链，因此当前配置下 CSP 并不会阻断文档页；
   // 报告中「开启文档即白屏」的判断对本版本不成立，无需为此放宽 script-src。
   //
-  // 该不变量由 src/tests/middleware/infraHardening.test.js 的
+  // 该不变量由 src/tests/middleware/infraParamRateLimitFailClosed.test.js 的
   // 「渲染模板不含内联 script」用例锁定：一旦升级依赖后模板引入内联脚本，
   // 测试立即失败，避免悄然白屏。
 };

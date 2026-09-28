@@ -8,9 +8,22 @@ const Inspection = require('../models/Inspection');
 const { getDataScope } = require('../middleware/rbac');
 const { buildDateRangeFilter } = require('../utils/helpers');
 const { scopeFilterFor } = require('./reportExportService');
+const { deviceAlertFilters } = require('../constants/deviceAlerts');
 
-const MS_PER_MINUTE = 1000 * 60;
-const EXPIRY_WINDOW_MS = 30 * MS_PER_MINUTE * 60 * 24;
+// 到期窗口不再自己用定长毫秒算：`30*86400*1000` 与其余实现的 `setDate(+30)`
+// 在 31 天月份/夏令时下差最多 1 天，同一台设备在一处算"即将到期"、另一处不算。
+// 口径唯一来源：constants/deviceAlerts（含 scrapped 排除）。
+
+/**
+ * 报表内嵌"即将到期"清单的单次上限（资源护栏）。
+ *
+ * 刻意**不**与 `EXPIRING_LIST_LIMIT`(50) 合并：那是提醒出口的上限，这里是报表出口，
+ * 两者要各自调参（是否统一属待拍板项，见 AGENT 工作总账 §104.7）。
+ * 但「截断必须可数」这条约定（`constants/deviceAlerts.js:38-48`、F-174）对本出口同样成立，
+ * 所以响应体如实带 `expiringSoonTotal` / `expiringSoonTruncated`：
+ * 修复前 20 行的清单与库里 5000 台的清单**同形**，安全员据此排巡检/备耗材。
+ */
+const EXPIRING_REPORT_LIMIT = 20;
 
 const getDeviceReportData = async (query) => {
   const { startDate, endDate } = query;
@@ -21,7 +34,15 @@ const getDeviceReportData = async (query) => {
   const baseMatch = { ...scopeFilter };
   if (Object.keys(dateFilter).length > 0) baseMatch.installDate = dateFilter;
 
-  const [facetResult, expiringSoon] = await Promise.all([
+  // 清单与计数必须共用同一次过滤器构造：分两份写就会各算各的（口径漂移 →
+  // "被数进去却没列出来"或反过来，那比没有总数更糟）。
+  const expiringFilter = {
+    ...scopeFilter,
+    // 原先完全没有状态排除：已报废设备会作为"即将到期"连同位置出现在报表里
+    ...deviceAlertFilters(new Date()).expiringSoon,
+  };
+
+  const [facetResult, expiringSoon, expiringSoonTotal] = await Promise.all([
     FireDevice.aggregate([
       { $match: baseMatch },
       {
@@ -42,13 +63,11 @@ const getDeviceReportData = async (query) => {
         },
       },
     ]),
-    FireDevice.find({
-      ...scopeFilter,
-      expiryDate: { $lte: new Date(Date.now() + EXPIRY_WINDOW_MS), $gte: new Date() },
-    })
+    FireDevice.find(expiringFilter)
       .select('deviceCode deviceName deviceType expiryDate location')
       .sort({ expiryDate: 1 })
-      .limit(20),
+      .limit(EXPIRING_REPORT_LIMIT),
+    FireDevice.countDocuments(expiringFilter),
   ]);
 
   const { byType, byStatus, byBuilding, maintenanceTotal } = facetResult[0];
@@ -57,6 +76,10 @@ const getDeviceReportData = async (query) => {
     byStatus,
     byBuilding,
     expiringSoon,
+    // 截断可数：命中上限不等于"全部"，total 与 truncated 由同一次过滤得出
+    expiringSoonLimit: EXPIRING_REPORT_LIMIT,
+    expiringSoonTotal,
+    expiringSoonTruncated: expiringSoonTotal > expiringSoon.length,
     totalMaintenance: maintenanceTotal[0]?.count || 0,
   };
 };

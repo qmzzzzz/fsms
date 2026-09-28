@@ -24,10 +24,22 @@ const AuditLog = require('../models/AuditLog');
 const { escapeRegExp, sanitizeSpreadsheetCell, validateEnum } = require('../utils/helpers');
 const { buildDataScopeFilter } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
-// 审计枚举单一事实来源：constants/audit.js（D-1 起 AUDIT_LOG_ACTIONS 亦收敛于此）
-const { AUDIT_CATEGORIES, AUDIT_RISK_LEVELS, AUDIT_LOG_ACTIONS } = require('../constants/audit');
-const { normalizeIP } = require('../utils/ipUtils');
+// 审计枚举单一事实来源：constants/audit.js（D-1 起 AUDIT_LOG_ACTIONS 亦收敛于此）。
+// level 三级展示口径原先本文件写两份字面量（下面的 includes 闸门 + 枚举校验）、
+// utils/auditQuery.js 再写一份 ⇒ 单侧增删即"查询放行、导出 400"，现统一取常量版。
+const {
+  AUDIT_CATEGORIES,
+  AUDIT_RISK_LEVELS,
+  AUDIT_DISPLAY_LEVELS,
+  AUDIT_LOG_ACTIONS,
+  AUDIT_ERROR_RISK_LEVELS,
+} = require('../constants/audit');
+const { normalizeIP, ipQueryCondition } = require('../utils/ipUtils');
+// success 解析与三级展示口径（level → Mongo 条件）都与审计查询侧共用同一实现
+// （两份曾各写一遍、靠注释约定同口径）
+const { parseSuccessFilter, buildLevelCondition } = require('../utils/auditQuery');
 const { formatDateTime, formatDate } = require('../utils/dateFormat');
+const { castScopeObjectIds } = require('../utils/scopeCast');
 
 const EXPORT_LIMIT = 5000;
 
@@ -37,11 +49,16 @@ const EXPORT_LIMIT = 5000;
  * 此前每个统计/导出分支各自硬编码属主字段，设备资源在列表用
  * maintenanceRecord.operator、在报表用 createdBy，两套口径导致
  * 「可见清单」与「统计数字」永久对不上，且导出比列表宽（越权面）。
+ *
+ * cast 走 utils/scopeCast 的唯一实现（聚合前必须把 hex 字符串转 ObjectId，
+ * `aggregate([{$match}])` 不做 schema cast）。本文件原先有一份同逻辑私有实现，
+ * 但它只在对象分支里判 hex，`{x:{$in:['<hex>']}}` 的数组元素会原样漏掉——
+ * 与 shared 版并存就是第二次漂移，故删除并统一引用。
  * @param {'device'|'alarm'|'inspection'|'user'} resource
  */
 const scopeFilterFor = (resource, dataScope) => {
   const { ownerField, departmentField } = DATA_SCOPE_FIELDS[resource];
-  return buildDataScopeFilter(dataScope, ownerField, departmentField);
+  return castScopeObjectIds(buildDataScopeFilter(dataScope, ownerField, departmentField));
 };
 
 // ── 导出配置 ─────────────────────────────────────────────────────────────────
@@ -68,7 +85,12 @@ const EXPORT_MODEL_CONFIG = {
     model: AuditLog,
     sort: { timestamp: -1 },
     populate: [],
-    select: '-body -params -query',
+    // 直接取模型上的那份排除清单：xlsx 导出此前自带一份 '-body -params -query'，
+    // 少了 -hmac ⇒ 全仓唯一一条把审计 HMAC 读进进程的路径（RESPONSE_EXCLUDE 存在的
+    // 目的就是阻断 (记录, hmac) 明文—标签对，见 tests/compliance/auditChain.test.js）。
+    // 输出侧本来就不打印 hmac，所以这不是"已经泄露"，而是"排除清单各写一份、
+    // 控制点随时会漂"——写坏一次就变成真外泄。
+    select: AuditLog.RESPONSE_EXCLUDE,
   },
   inspections: {
     model: Inspection,
@@ -177,9 +199,24 @@ const formatExportLocation = (loc) => {
   return building || floor || room ? `${building || ''}${floor || ''}${room || ''}` : '-';
 };
 
+/**
+ * 审计文档 → 展示档位，是 `utils/auditQuery.buildLevelCondition` 的反向镜像。
+ *
+ * 必须与查询侧同一集合互斥划分，而查询侧写的是 Mongo **等值** `{success: true|false}`：
+ * 等值匹配筛不出"字段缺位"的文档（`AuditLog.success` 无 default，多处直写点不带该字段）。
+ * 所以这里也不能替缺位派生一个档位——旧写法 `!item.success ? '错误' : ...` 让
+ * 一次成功的非常规时间登录在导出里成了"错误"，而列表侧 `?level=error` 根本筛不出它。
+ * 高危档是独立触发的一支（对应 `$or` 的第二条件），与 success 是否缺位无关，保持无条件命中。
+ */
+const auditExportLevel = (item) => {
+  if (item.success === false || AUDIT_ERROR_RISK_LEVELS.includes(item.riskLevel)) return '错误';
+  if (item.success !== true) return '-';
+  return item.riskLevel === 'medium' ? '警告' : '信息';
+};
+
 const EXPORT_ROW_TRANSFORMS = {
   alarms: (item) => ({
-    alarmCode: item.alarmCode,
+    alarmCode: item.alarmCode || '-',
     occurredAt: formatDateTime(item.occurredAt),
     alarmType: alarmTypeMap[item.alarmType] || item.alarmType || '-',
     location: formatExportLocation(item.location),
@@ -199,14 +236,14 @@ const EXPORT_ROW_TRANSFORMS = {
     expiryDate: formatDate(item.expiryDate),
   }),
   audit: (item) => ({
-    // 日志等级派生口径与 /security/audit-logs 一致
+    // 日志等级派生口径与 /security/audit-logs 一致。这一处是 buildLevelCondition 的
+    // **反向**（那边 level → 查询条件，这边 文档 → 展示档），高危档必须用同一个派生集合
+    // （F-149）：给有序等级表加一档时，三档划分由 zzqoder_riskLevelSingleSource 的
+    // 划分完整性断言兜住，而这里的 doc→label 镜像它看不见，改等级表时要一并核。
+    // 镜像的**另一头**（success 缺位时不得派生档位）由 zzqB_exportAuditLabelsTriState
+    // 的逐档对拍兜住，两边都要动时才闭合。
     timestamp: formatDateTime(item.timestamp),
-    level:
-      !item.success || ['high', 'critical'].includes(item.riskLevel)
-        ? '错误'
-        : item.riskLevel === 'medium'
-          ? '警告'
-          : '信息',
+    level: auditExportLevel(item),
     username: item.username || '-',
     action: EXPORT_ACTION_LABELS[item.action] || item.action || '-',
     category: item.category || '-',
@@ -214,8 +251,14 @@ const EXPORT_ROW_TRANSFORMS = {
     path: item.path || '-',
     ip: item.ip || '-',
     riskLevel: EXPORT_RISK_LEVEL_LABELS[item.riskLevel] || item.riskLevel || '-',
-    success: item.success ? '成功' : '失败',
-    duration: item.duration ? `${item.duration}ms` : '-',
+    // 三态而不是二态：`AuditLog.success` 无 default、非 required，多处直写点根本不带
+    // 该字段（login_unusual_time / suspicious_report / securityAlert 的三处告警审计）。
+    // `? '成功' : '失败'` 把"未记录"渲染成"这次操作失败了"——一条肯定性结论。
+    success: item.success === true ? '成功' : item.success === false ? '失败' : '-',
+    // `duration` 用 `== null` 而不是真值判断：0 是合法值（同一毫秒内返回，缓存命中时是常态），
+    // 写成 `item.duration ? ...` 会把"亚毫秒完成"与"从未记录"塌成同一个 `-`，
+    // 而同一条记录的 CSV 导出走原样 csvEscape 给 `0` —— 两份合规材料自相矛盾。
+    duration: item.duration == null ? '-' : `${item.duration}ms`,
   }),
   inspections: (item) => ({
     title: item.title || '-',
@@ -247,22 +290,65 @@ const createSafeTransform = (transform) => (item) => {
 };
 
 /**
+ * 审计导出的查询条件：与 /security/audit-logs 查询侧**逐字段同口径**（导出即所见）。
+ * 非法值一律抛错（调用方 catch 后转 400），不静默降级成"另一个更窄的结果集"——
+ * 导出报表是要拿给别人看的，200 + 无提示比报错危险得多。
+ */
+const buildAuditExportQuery = ({
+  dateFilter,
+  username,
+  action,
+  category,
+  riskLevel,
+  success,
+  ip,
+  userId,
+  level,
+}) => {
+  const auditQuery = {};
+  if (Object.keys(dateFilter).length > 0) auditQuery.timestamp = dateFilter;
+  // 使用 escapeRegExp 防止 ReDoS 正则拒绝服务攻击
+  if (username) auditQuery.username = { $regex: escapeRegExp(username), $options: 'i' };
+  // action/category 为枚举值,精确匹配,与审计日志查询接口语义一致
+  if (action) auditQuery.action = action;
+  if (category) auditQuery.category = category;
+  if (riskLevel) auditQuery.riskLevel = riskLevel;
+  if (success !== undefined && success !== '') {
+    // 与查询侧 utils/auditQuery.js 共用同一个解析函数。原实现两处各写一遍
+    // `success === 'true' || success === true`，把 '1'/'0'/'yes'/'TRUE'/对象/数组
+    // 一律静默折成 false；此前两份是刻意选择（该文件当时在并行会话手里），
+    // 现在由单一实现负责一致，`src/tests/zzqoder_auditFilterParity.test.js`
+    // 的真值表继续作为第二道保险。
+    auditQuery.success = parseSuccessFilter(success);
+  }
+  // P3-13：补齐 ip/userId 维度，与 /security/audit-logs 查询口径一致。
+  // 变体集合改由 ipUtils.ipQueryCondition 统一推导（规范 + 原始 + IPv4 的
+  // ::ffff: 映射形态），两侧共用一份实现——各写一份正是查询/导出漂移的来源。
+  if (ip) {
+    const normalizedIPValue = normalizeIP(ip);
+    if (!normalizedIPValue) throw new Error('参数 ip 必须是合法的 IPv4/IPv6 地址');
+    auditQuery.ip = ipQueryCondition(ip);
+  }
+  if (userId) {
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      throw new Error('参数 userId 必须是合法的用户 ID');
+    }
+    auditQuery.userId = userId;
+  }
+  // 日志等级派生筛选,与 /security/audit-logs 接口口径保持一致(导出即所见)
+  // 用 $and 叠加而非直接覆盖字段,避免丢弃用户已选的 success/riskLevel 筛选
+  if (level && AUDIT_DISPLAY_LEVELS.includes(level)) {
+    auditQuery.$and = [...(auditQuery.$and || []), buildLevelCondition(level)];
+  }
+  return auditQuery;
+};
+
+/**
  * 按导出类型构建查询条件（原 exportReport 内联 buildQuery 的模块级提取）
  * @returns {Object|null} 查询条件；不支持的 type 返回 null
  */
 const buildExportQuery = (type, ctx) => {
-  const {
-    dataScope,
-    dateFilter,
-    username,
-    action,
-    category,
-    riskLevel,
-    success,
-    level,
-    ip,
-    userId,
-  } = ctx;
+  const { dataScope, dateFilter } = ctx;
   const withDate = (scopeFilter, field) =>
     Object.keys(dateFilter).length > 0 ? { ...scopeFilter, [field]: dateFilter } : scopeFilter;
 
@@ -276,47 +362,8 @@ const buildExportQuery = (type, ctx) => {
     case 'inspections':
       // 修复：补全巡检导出查询，应用数据范围和日期过滤
       return withDate(scopeFilterFor('inspection', dataScope), 'planStartTime');
-    case 'audit': {
-      const auditQuery = {};
-      if (Object.keys(dateFilter).length > 0) auditQuery.timestamp = dateFilter;
-      // 使用 escapeRegExp 防止 ReDoS 正则拒绝服务攻击
-      if (username) auditQuery.username = { $regex: escapeRegExp(username), $options: 'i' };
-      // action/category 为枚举值,精确匹配,与审计日志查询接口语义一致
-      if (action) auditQuery.action = action;
-      if (category) auditQuery.category = category;
-      if (riskLevel) auditQuery.riskLevel = riskLevel;
-      if (success !== undefined && success !== '') {
-        auditQuery.success = success === 'true' || success === true;
-      }
-      // P3-13：补齐 ip/userId 维度，与 /security/audit-logs 查询口径一致。
-      // ip 归一化 + 原始值双匹配（存量记录可能以 ::ffff:1.2.3.4 形式落库）
-      if (ip) {
-        const normalizedIPValue = normalizeIP(ip);
-        if (!normalizedIPValue) throw new Error('参数 ip 必须是合法的 IPv4/IPv6 地址');
-        const ipVariants = [...new Set([normalizedIPValue, String(ip).trim()])];
-        auditQuery.ip = ipVariants.length > 1 ? { $in: ipVariants } : ipVariants[0];
-      }
-      if (userId) {
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-          throw new Error('参数 userId 必须是合法的用户 ID');
-        }
-        auditQuery.userId = userId;
-      }
-      // 日志等级派生筛选,与 /security/audit-logs 接口口径保持一致(导出即所见)
-      // 用 $and 叠加而非直接覆盖字段,避免丢弃用户已选的 success/riskLevel 筛选
-      if (level && ['info', 'warning', 'error'].includes(level)) {
-        let levelCond;
-        if (level === 'error') {
-          levelCond = { $or: [{ success: false }, { riskLevel: { $in: ['high', 'critical'] } }] };
-        } else if (level === 'warning') {
-          levelCond = { success: true, riskLevel: 'medium' };
-        } else {
-          levelCond = { success: true, riskLevel: { $nin: ['medium', 'high', 'critical'] } };
-        }
-        auditQuery.$and = [...(auditQuery.$and || []), levelCond];
-      }
-      return auditQuery;
-    }
+    case 'audit':
+      return buildAuditExportQuery(ctx);
     default:
       return null;
   }
@@ -333,7 +380,7 @@ const validateAuditExportEnums = ({ action, category, riskLevel, level }) => {
   validateEnum(action, AUDIT_LOG_ACTIONS, 'action');
   validateEnum(category, AUDIT_CATEGORIES, 'category');
   validateEnum(riskLevel, AUDIT_RISK_LEVELS, 'riskLevel');
-  validateEnum(level, ['info', 'warning', 'error'], 'level');
+  validateEnum(level, AUDIT_DISPLAY_LEVELS, 'level');
 };
 
 module.exports = {

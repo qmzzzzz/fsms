@@ -5,6 +5,11 @@
 const socketIo = require('socket.io');
 const logger = require('../utils/logger');
 const config = require('../config');
+// trust proxy 跳数判据的单一来源：与 src/app.js 共用同一函数，避免两侧漂移
+const {
+  MAX_TRUST_PROXY_HOPS,
+  resolveTrustProxyHops: resolveTrustProxyHopsFromConfig,
+} = require('../config/validate');
 const sharedCache = require('./sharedCache');
 const { parseCookies, ACCESS_COOKIE_NAME } = require('../utils/cookie');
 const { isIPAllowed } = require('../utils/ipRange');
@@ -51,27 +56,60 @@ const resolveHandshakeClientIP = (handshake, hops) => {
 };
 
 /**
- * 信任的代理跳数（P0-2 修复，2026-09-17）
+ * 信任的代理跳数（P0-2 修复，2026-09-17；F-B42 起委托给 config/validate）
  *
- * 与 app.js 的 trust proxy 取值规则逐条对齐（见 src/app.js「trust proxy
- * （M-4 收紧默认值）」）：
- *   - TRUST_PROXY_HOPS 为正整数 → 按其跳数信任
- *   - 否则 development → 1 跳（本机 Vite 代理）
- *   - 否则（含 production）→ 不信任（0）
- * 两处若漂移，同一条请求在 WS 与 HTTP 上会得出不同的客户端 IP。
- * 一致性由 src/tests/services/websocketAuthScope.test.js 断言
- * （对比 app.get('trust proxy')）。
+ * 判据（含上限 MAX_TRUST_PROXY_HOPS=5 的夹取）唯一来源是 src/config/validate.js
+ * 的 resolveTrustProxyHops，本处与 src/app.js 各自调用它，于是同一条请求在 WS 与
+ * HTTP 上必然得出同一个客户端 IP。一致性用例见
+ * src/tests/services/websocketTrustProxyHopsParity.test.js；
+ * 注意 websocketAuthScope.test.js 那条「IP 与 HTTP 侧一致」的用例是把 hops 当**入参**
+ * 喂给 resolveHandshakeClientIP 的，从未检验 hops 从哪来——上限漏判因此隐身。
+ *
+ * 委托之前本函数自己实现了一套同样的分支，但**漏了上限夹取**：
+ * TRUST_PROXY_HOPS=999999 时 HTTP 侧被压回 5，本侧原样透传 ⇒ resolveHandshakeClientIP
+ * 取到 XFF 最左段（完全由请求方决定的值），配了 allowedIPs 的账户其登录 IP 白名单
+ * 在 WS 握手面上失效。非 production 可达：config/validate.js 的启动硬闸对
+ * staging/dev 早退，只有 app.js 那一份实现补了运行时夹取。
+ *
+ * 留痕：错配只在真被用到时才告警（本函数唯一调用点在用户配了 allowedIPs 时执行），
+ * 且每进程一次——握手是重入路径，逐次告警会变成日志放大。
  *
  * 注：不引入 proxy-addr 依赖，也不改 index.js 传入 app 实例——保持本模块自包含，
  * 避免与 app.js 形成新的跨模块耦合面。
- * @returns {number}
+ * @returns {number} 信任跳数，0 表示不信任任何转发头
  */
+let hopsMisconfigWarned = false;
 const resolveTrustProxyHops = () => {
-  const hops = parseInt(process.env.TRUST_PROXY_HOPS, 10);
-  if (Number.isFinite(hops) && hops > 0) return hops;
-  if (config.nodeEnv === 'development') return 1;
-  return 0;
+  const raw = process.env.TRUST_PROXY_HOPS;
+  const { hops, parsed, illegal, clamped } = resolveTrustProxyHopsFromConfig(raw, config.nodeEnv);
+  if ((illegal || clamped) && !hopsMisconfigWarned) {
+    hopsMisconfigWarned = true;
+    logger.warn(
+      (illegal
+        ? `TRUST_PROXY_HOPS 取值非法（${raw}）`
+        : `TRUST_PROXY_HOPS 超上限（${parsed} > ${MAX_TRUST_PROXY_HOPS}）`) +
+        `，WS 握手侧按 ${hops} 跳解析客户端 IP：跳数与真实代理拓扑不符时 ` +
+        'allowedIPs 的握手 IP 校验会按错误地址判定（过大即被伪造 XFF 绕过）',
+      { trustProxyHops: hops, illegal, clamped }
+    );
+  }
+  return hops;
 };
+
+/**
+ * 账户是否处于「临时锁定」中（暴力破解阈值写入，10 分钟后自动失效）。
+ *
+ * 判据与 HTTP 侧同源：`src/middleware/auth.js` 的 `assertAccountUsable` 用
+ * `lockUntil && lockUntil > new Date()` 返回 ACCOUNT_TEMP_LOCKED；
+ * `authService.loginUser` 用同一判据拒绝登录。而写入方（authService 的失败计数）
+ * **只写 lockUntil，不动 status、也不推进 tokenVersion**，所以
+ * 「status==='active' 且已有 access 令牌」在临时锁定期间依然成立——
+ * HTTP 面拒绝的令牌，若 WS 面只看 status 就会放行，等于给被锁定的账户
+ * 留了一条实时推送通道（含 role-management 广播）。
+ * @param {object} user 需已 select lockUntil
+ * @returns {boolean}
+ */
+const isTemporarilyLocked = (user) => Boolean(user?.lockUntil) && user.lockUntil > new Date();
 
 /**
  * 用户定向房间名（服务端内部房间，不经客户端 join 白名单）。
@@ -88,6 +126,21 @@ const ROOM_ROLE_REQUIREMENTS = {
   'device-alert': null, // 设备告警：所有已认证用户
   alarm: null, // 报警通知：所有已认证用户
   notification: null, // 系统通知：所有已认证用户
+};
+
+/**
+ * 角色码集合是否满足某个房间的准入要求（无角色要求的房间恒为 true）。
+ *
+ * 抽成一处而非两处各写 `requiredRoles.some(...)`：入房判定与复查后的清房判定
+ * 必须是同一个谓词，否则会出现"入得来、却被清扫逻辑按另一套标准赶出去"（或反之）。
+ * @param {string} room 房间名（须在 ROOM_ROLE_REQUIREMENTS 内）
+ * @param {string[]} roleCodes 该连接当前生效的角色码
+ * @returns {boolean}
+ */
+const roomRolesSatisfied = (room, roleCodes) => {
+  const requiredRoles = ROOM_ROLE_REQUIREMENTS[room];
+  if (!requiredRoles) return true;
+  return requiredRoles.some((r) => roleCodes.includes(r));
 };
 
 class WebSocketService {
@@ -286,7 +339,7 @@ class WebSocketService {
             // revalidateSocket 内部已断开连接并发出 auth-error
             return;
           }
-          if (!requiredRoles.some((r) => fresh.roleCodes.includes(r))) {
+          if (!roomRolesSatisfied(room, fresh.roleCodes)) {
             socket.emit('error', { message: '无权加入该房间' });
             return;
           }
@@ -355,6 +408,20 @@ class WebSocketService {
       // 限制算法防止 alg:none 攻击，使用统一配置而非直接读环境变量
       const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
 
+      // 令牌用途闸：refresh 令牌不得建立推送通道。access/refresh 本是两把密钥，
+      // 但 config 的"两把密钥不得相同"只在生产语义下强制；配成同值时 refresh（7 天有效、
+      // 自带 userId/tokenVersion/sid）在这条路径上能过完全部校验，
+      // 于是"access 短有效期 + 频繁换发"的窗口收缩机制对 WS 整体失效。
+      const { violatesAccessTokenPurpose } = require('../utils/tokenPurpose');
+      if (violatesAccessTokenPurpose(decoded)) {
+        logger.warn(
+          `WebSocket 认证失败（令牌用途不符 type=${String(decoded.type)}）: ${socket.id}`
+        );
+        socket.emit('auth-error', { message: '认证令牌类型不合法' });
+        socket.disconnect(true);
+        return false;
+      }
+
       // 检查 token 是否在黑名单中
       const { isTokenBlacklisted } = require('../middleware/tokenBlacklist');
       if (await isTokenBlacklisted(token)) {
@@ -364,12 +431,12 @@ class WebSocketService {
         return false;
       }
 
-      // 校验用户当前状态、tokenVersion 与 allowedIPs：被禁用/锁定/改密后旧连接应失效，
-      // allowedIPs 供下方 P0-2 的 IP 访问范围校验使用（auth.js 的等价 select 亦含该字段）
+      // 校验用户当前状态、tokenVersion、allowedIPs 与临时锁定：被禁用/锁定/改密后旧连接应失效。
+      // 字段集与 auth.js 的等价 select（含 lockUntil）对齐——少取一个字段就等于少一条判据。
       const User = require('../models/User');
       const freshUser = await User.findById(decoded.userId)
-        .select('username status tokenVersion passwordChangedAt allowedIPs')
-        .populate('roles', 'code');
+        .select('username status tokenVersion passwordChangedAt allowedIPs lockUntil')
+        .populate({ path: 'roles', select: 'code', match: { status: 'active' } });
       if (!freshUser) {
         logger.warn(`WebSocket 认证失败（用户不存在）: ${socket.id}`);
         socket.emit('auth-error', { message: '用户不存在' });
@@ -385,6 +452,10 @@ class WebSocketService {
         socket.disconnect(true);
         return false;
       }
+      // 临时锁定：HTTP 侧对此返回 ACCOUNT_TEMP_LOCKED，WS 侧同判据拒绝
+      // （写法与 _assertHandshakeIpAllowed / _assertHandshakeSessionUsable 一致，
+      //  不再往 authenticateSocket 里叠第 N 个分支——该方法复杂度已在棘轮基线上）
+      if (this._assertHandshakeAccountLocked(socket, freshUser)) return false;
       // tokenVersion 必须携带且匹配：省略字段或版本不匹配均说明令牌可疑/已被强制下线
       // 历史文档可能缺少该字段，按 schema 默认值 0 参与比对
       const expectedTokenVersion = freshUser.tokenVersion ?? 0;
@@ -416,9 +487,21 @@ class WebSocketService {
       const sessionFailure = await this._assertHandshakeSessionUsable(socket, decoded);
       if (sessionFailure) return false;
 
+      // 在途断开复检（F-188）：上面每一次 await 都是一个窗口，客户端可能已经断开。
+      // disconnect 处理器此时跑过，但它按 `socket.userId` 清理，而 userId 要到下面才赋值
+      // ⇒ 只清得掉 clients，清不到 userConnections；这里一旦继续登记就留下**永久幽灵连接**
+      // ——周期清扫只遍历 this.clients.keys()，永不回收它。代价不是内存量级而是"以为还在"：
+      // getStats().totalUsers 长期虚高、emitPermissionSync 给已死 socket.id 逐个查库+投递、
+      // MAX_CONNECTIONS 数的是 io.sockets.sockets.size ⇒ 幽灵不占配额，计数与真实在线分叉。
+      // 位置约束：必须紧贴最后一个 await、且在任何状态写入之前——中间再插 await 就重新开窗。
+      if (!socket.connected) {
+        logger.warn(`WebSocket 认证在途断开，作废本次认证: ${socket.id}`);
+        return false;
+      }
+
       socket.userId = decoded.userId || decoded.id;
       socket.username = decoded.username;
-      socket.roleCodes = freshUser.roles?.map((r) => r.code).filter(Boolean) || [];
+      socket.roleCodes = freshUser.roles?.map((r) => r?.code).filter(Boolean) || [];
       // 记录令牌版本：受限房间入房时用 revalidateSocket 复查，
       // tokenVersion 被推进（改密/强制下线）即断开该长连接
       socket.tokenVersion = decoded.tokenVersion;
@@ -450,6 +533,30 @@ class WebSocketService {
       socket.disconnect(true);
       return false;
     }
+  }
+
+  /**
+   * 握手期临时锁定校验（与 middleware/auth.js 的 assertAccountUsable 同判据）
+   *
+   * 为什么单独一条臂：authService 的爆破阈值写 lockUntil 时**不动 status、
+   * 也不推进 tokenVersion**，所以"status==='active' 且令牌仍有效"在锁定期间成立。
+   * HTTP 侧每个请求都会被 assertAccountUsable 拒掉（ACCOUNT_TEMP_LOCKED），
+   * WS 侧只看 status 就会给被锁定的账户留一条实时推送通道。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {object} freshUser 已 select lockUntil/username 的用户文档
+   * @returns {boolean} true 表示已拒绝并断开连接
+   */
+  _assertHandshakeAccountLocked(socket, freshUser) {
+    if (!isTemporarilyLocked(freshUser)) return false;
+    logger.warn('WebSocket 认证失败（账户临时锁定）', {
+      username: freshUser.username,
+      lockUntil: freshUser.lockUntil,
+      socketId: socket.id,
+    });
+    socket.emit('auth-error', { message: '账户已被临时锁定，请稍后重试' });
+    socket.disconnect(true);
+    return true;
   }
 
   /**
@@ -519,8 +626,8 @@ class WebSocketService {
    * 而受限房间的准入判断若继续读快照，就等于「一次认证、永久有效」。
    *
    * 本方法在受限房间入房前重查数据库：
-   * - 用户不存在 / 非 active / tokenVersion 已推进 → 断开连接（会话已被吊销）
-   * - 否则刷新 socket.roleCodes 并返回最新角色码
+   * - 用户不存在 / 非 active / 临时锁定 / tokenVersion 已推进 → 断开连接（会话已被吊销）
+   * - 否则刷新 socket.roleCodes、把已不满足角色要求的房间 leave 掉，并返回最新角色码
    *
    * 断开而非仅拒绝入房：这三种情形说明整个连接的身份已失效，
    * 不能只拦住一个房间却让它继续留在其他房间收消息。
@@ -532,8 +639,8 @@ class WebSocketService {
     try {
       const User = require('../models/User');
       const fresh = await User.findById(socket.userId)
-        .select('status tokenVersion')
-        .populate('roles', 'code');
+        .select('status tokenVersion lockUntil')
+        .populate({ path: 'roles', select: 'code', match: { status: 'active' } });
       return this._applyRevalidation(socket, fresh);
     } catch (err) {
       // fail-closed：复查不可用时不得放行受限房间
@@ -572,6 +679,14 @@ class WebSocketService {
         `WebSocket 复查失败（status=${fresh.status}）: ${socket.id}`
       );
     }
+    // 临时锁定：写入方只动 lockUntil（不动 status、不推进 tokenVersion），
+    // 少了这一条臂，被锁账户的既有连接会一路活到下次自然重连
+    if (isTemporarilyLocked(fresh)) {
+      return kick(
+        '账户已被临时锁定，请稍后重试',
+        `WebSocket 复查失败（账户临时锁定至 ${fresh.lockUntil}）: ${socket.id}`
+      );
+    }
     // tokenVersion 推进意味着该用户的全部会话已被吊销（改密/管理员强制下线）
     const currentVersion = fresh.tokenVersion ?? 0;
     if (socket.tokenVersion !== undefined && socket.tokenVersion !== currentVersion) {
@@ -584,6 +699,26 @@ class WebSocketService {
     const roleCodes = (fresh.roles || []).map((r) => r?.code).filter(Boolean);
     // 回写快照，供无角色要求的房间与统计使用
     socket.roleCodes = roleCodes;
+
+    // 降级即出房（L1-F1）：授/撤角色**不推进 tokenVersion**（只有"吊销全部会话"才推进），
+    // 所以只复查 status/tokenVersion 的清扫放不倒已被降级但仍 active 的连接。
+    // P2-14 封住的是「入房」面——已驻留在 role-management 的管理员被降级后，
+    // 若不在此主动 leave，他会在整个连接生命周期内继续收 role-updated /
+    // permissions-updated 广播（内容含权限码全集），直到浏览器刷新。
+    // 房间清单取自本服务自己的记账（clients.get(id).rooms，join/leave 两处维护），
+    // 不读 socket.rooms：后者是 socket.io 内部结构，与本服务的白名单记账并不等价。
+    const client = this.clients?.get(socket.id);
+    for (const room of client ? [...client.rooms] : []) {
+      if (roomRolesSatisfied(room, roleCodes)) continue;
+      socket.leave(room);
+      client.rooms.delete(room);
+      logger.warn(`WebSocket 复查：角色不再满足房间要求，已移出 ${room}`, {
+        socketId: socket.id,
+        userId: String(socket.userId),
+        roleCodes,
+      });
+    }
+
     return { ok: true, roleCodes };
   }
 
@@ -598,7 +733,7 @@ class WebSocketService {
    */
   setupConnectionCleanup() {
     this._cleanupTimer = setInterval(() => {
-      // 防重入：上一轮复查若因 DB 慢查询未结束，跳过本轮而非并发叠加打库
+      // 防重入：此前复查若因 DB 慢查询未结束，跳过本次改动而非并发叠加打库
       if (this._sweepRunning) return;
       this._sweepRunning = true;
       this.runCleanupSweep()
@@ -658,8 +793,8 @@ class WebSocketService {
     try {
       const User = require('../models/User');
       const docs = await User.find({ _id: { $in: uniqueUserIds } })
-        .select('status tokenVersion')
-        .populate('roles', 'code');
+        .select('status tokenVersion lockUntil')
+        .populate({ path: 'roles', select: 'code', match: { status: 'active' } });
       freshByUser = new Map(docs.map((doc) => [String(doc._id), doc]));
     } catch (err) {
       // DB 瞬时故障：不能因为一次抖动清场全部在线连接。
@@ -893,3 +1028,7 @@ module.exports = WebSocketService;
 // 断言「WS 与 HTTP 在同一 trust proxy 语义下得出同一个客户端 IP」。
 // 挂在 class 上而非替换 module.exports——不改变既有 `new WebSocketService()` 用法。
 WebSocketService.resolveHandshakeClientIP = resolveHandshakeClientIP;
+// F-B42 配套：一并导出跳数解析，供用例直接钉「WS 与 HTTP 在同一环境下取到同一个
+// hops」。既有的一致性用例把 hops 作为入参传给 resolveHandshakeClientIP，等于跳过了
+// hops 的来源——正是本次上限漏判能藏住的原因。
+WebSocketService.resolveTrustProxyHops = resolveTrustProxyHops;

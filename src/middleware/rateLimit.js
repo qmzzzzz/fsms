@@ -7,95 +7,46 @@ const rateLimit = require('express-rate-limit');
 const config = require('../config');
 const logger = require('../utils/logger');
 const { SUPER_ADMIN_ROLE_CODE } = require('../utils/superAdmin');
+const { makeSharedStore } = require('./rateLimitStore');
+const { isProbeRequest } = require('../constants/probePaths');
 
 // 白名单豁免：checkIPBlacklist 中间件命中白名单时会挂 req.ipWhitelisted，
-// 各限流器统一跳过白名单 IP，形成"黑白名单 + 限流"联动的完整访问控制
+// 各限流器统一跳过白名单 IP，形成"黑白名单 + 限流"联动的完整访问控制。
+// 标记只在可信边界内发放（security.js isWhitelistExemptionTrustworthy）：
+// 公网直连伪造一跳 XFF 冒充白名单 IP 拿不到标记，资源型限流不会被买通
 //
 // P3-35：豁免范围有明确边界，不是「所有限流器都加上」——
 // - 资源型限流（generalLimiter/ipLimiter/userLimiter/strictLimiter/captchaLimiter）：
 //   目的是防滥用与资源保护，可信 IP 豁免；此前 strictLimiter/captchaLimiter 漏挂，
 //   表现为「加白后导出/验证码仍被限流」，运维只能靠调大 max 绕过，等于全局放宽
-// - 凭据型限流（loginLimiter/loginIpLimiter/loginUserLimiter/passwordChangeLimiter）：
+// - 凭据型限流（loginLimiter/loginUserLimiter/passwordChangeLimiter）：
 //   刻意**不豁免**。白名单表达的是「该 IP 可信、不是攻击源」，而暴力破解防护
 //   针对的是凭据本身；办公出口 IP 通常在白名单里，若一并豁免，
 //   内网发起的撞库将完全不受限速 —— 这两类风险不能用同一个开关表达
 const skipIfWhitelisted = (req) => req.ipWhitelisted === true;
 
-/**
- * 限流存储工厂（R-3/M-1）
- *
- * 默认 MemoryStore 的计数是**每实例一份**：多副本 + 负载均衡时，
- * 同一客户端的配额在每个实例各算一遍，等效于把上限放大 N 倍，
- * 暴力破解防护与资源保护同时失真。
- *
- * 配置 REDIS_URL 时改用 rate-limit-redis（共享计数，跨实例一致）。
- * express-rate-limit v7 支持 store 传 Promise：这里先等共享缓存完成
- * 初始化，Redis 就绪则返回 RedisStore，连不上则回退一个全新
- * MemoryStore（单实例语义，与未配置 REDIS_URL 时等价，不阻断启动）。
- *
- * 未配置 REDIS_URL 时返回 undefined —— express-rate-limit 用默认
- * MemoryStore，本地开发/测试行为与历史完全一致。
- */
-function makeSharedStore(prefix) {
-  if (!(process.env.REDIS_URL || '').trim()) return undefined;
-  // 同步返回一个符合 Store 接口的包装对象；后台异步初始化 Redis，
-  // 就绪后自动切到 RedisStore，未就绪或失败时走 MemoryStore。
-  // express-rate-limit v7.5.1 在 parseOptions 中同步校验
-  // store.increment/decrement/resetKey，不接受 Promise<Store>。
-  const fallback = new rateLimit.MemoryStore();
-  let active = fallback;
-  // 评价报告 #6：express-rate-limit 只在中间件挂载时同步调用一次 store.init，
-  // 此刻异步切换尚未完成——原实现 init 固定绑在 fallback 上，切换到
-  // RedisStore 后其 init 永远不会被调用，跨实例共享计数可能不生效。
-  // 修复：init 动态分发到当前 active，并记录 options；RedisStore 就绪切换后
-  // 显式补一次 init，保证共享存储完成与挂载期等价的初始化。
-  let lastInitOptions = null;
-  (async () => {
-    const { initSharedCache, isRedisEnabled, getRedisClient } = require('../services/sharedCache');
-    await initSharedCache();
-    if (!isRedisEnabled()) return;
-    const { RedisStore } = require('rate-limit-redis');
-    const client = getRedisClient();
-    active = new RedisStore({
-      sendCommand: (...args) => client.call(...args),
-      prefix: `rl:${prefix}:`,
-    });
-    if (typeof active.init === 'function' && lastInitOptions) {
-      active.init(lastInitOptions);
-    }
-  })().catch((err) => {
-    logger.warn(`限流共享存储初始化失败（${prefix}），回退进程内计数：${err.message}`);
-  });
-  return {
-    async increment(...a) {
-      return active.increment(...a);
-    },
-    async decrement(...a) {
-      return active.decrement(...a);
-    },
-    async resetKey(...a) {
-      return active.resetKey(...a);
-    },
-    async resetAll() {
-      if (active.resetAll) return active.resetAll();
-    },
-    init(options) {
-      lastInitOptions = options;
-      if (active && typeof active.init === 'function') active.init(options);
-    },
-  };
-}
+// 探针豁免（全站挂载的前提）：/health、/readyz 由编排器与部署门禁以 127.0.0.1 高频探测，
+// 计入配额会让门禁对完全健康的新版本恒红并自动回滚。清单与 protocolCompliance.skipPaths
+// 同源（constants/probePaths），不在这里再造第二份——两份清单迟早有一份先忘。
+// 判据是 `isProbeRequest`（精确路径 + GET/HEAD）而不是路径前缀：前缀语义曾把整个
+// `/health/...` 子树连同任意方法一起免配额免闸门，实测 40 发 ~200KB 的
+// `POST /health/zzflood` 一条 429 都没有——body 解析放大正是这两个限流器要挡的东西。
+const skipProbeRequests = (req) => isProbeRequest(req.method, req.path);
+const skipProbesAndWhitelisted = (req) => skipIfWhitelisted(req) || skipProbeRequests(req);
 
 /**
  * 通用限流器
  * 适用于大多数 API 接口
  * 生产环境：300 次/15 分钟（约 20 次/分钟）
+ *
+ * 挂载范围是**全站**（app.js 不带 `/api/` 前缀）：`/`、`/csp-report`、`/api-docs` 这些
+ * 表面上同样会为每一次协议违规写一条走哈希链的审计记录，只挂 `/api/` 时它们一条 429 都不吃。
  */
 const generalLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: config.rateLimit.maxRequests,
   store: makeSharedStore('general'),
-  skip: skipIfWhitelisted, // 修复：白名单 IP 豁免通用限流
+  skip: skipProbesAndWhitelisted, // 白名单 IP 与探针 IP 豁免通用限流
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -140,6 +91,19 @@ const strictLimiter = rateLimit({
  * 登录限流器（IP 维度）
  * 防止暴力破解密码
  * 生产环境：10 次/15 分钟，跳过成功请求
+ *
+ * 这是登录入口**唯一**的 IP 维度桶，不要再在这里并联"同键空间、阈值更宽"的第二个桶：
+ * 此前 `authRoutes.js` 还挂过一个 `loginIpLimiter`（30 次/15 分钟，键 `login-ip:${ip}`），
+ * 与本桶键空间（只由来源 IP 决定）、窗口、`skipSuccessfulRequests` 全同，只有阈值更宽
+ * ⇒ 它既不可能多挡一次，也不可能多放行一次，只把第 31 次之后的 429 文案换成另一句
+ * （实测见 `src/tests/security/loginIpBucketDominator.test.js`：串联时本桶第 11 次触顶，
+ * 宽桶单独挂载第 31 次触顶）。注释里"外层兜底、封住轮换用户名撞库"描述的是一个
+ * 不存在的能力——那条路径由本桶（更严）与 `loginUserLimiter`（账号维度）共同覆盖。
+ *
+ * 分层事实（不随本条改动）：非白名单 IP 通常在第 6 次失败登录时就被
+ * `securityAlert` 的暴力破解阈值（5 次/5 分钟）自动封禁，`checkIPBlacklist` 早于限流，
+ * 于是第 6 次起拿到的是 403。本桶真正管住的是白名单 IP（凭据型限流刻意**不**豁免白名单）
+ * 与"慢速滴灌"（5 分钟窗口内不足 5 次、15 分钟窗口内累计超 10 次）两条路径。
  */
 const loginLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
@@ -167,31 +131,20 @@ const loginLimiter = rateLimit({
 });
 
 /**
- * 登录限流器（纯 IP 维度，更宽配额）
- * 与上方 loginLimiter 串联使用：前者（10 次）控制单 IP 对单一登录入口的尝试频率，
- * 本限流器（30 次）作为外层兜底，封住“单 IP 撞库”路径（轮换用户名批量尝试）
- * 生产环境：30 次/15 分钟，跳过成功请求
+ * 登录限流器的账号维度键归一化。
+ *
+ * 必须与 `loginValidation` 的 `body('username').trim()` 同形：限流器挂在验证之前，
+ * 控制器拿到的是 trim 后的名字，而"admin␣␣"与"admin"若算两个键，
+ * 每多一个空格就多一个 20 次/15 分钟 的桶（128 字符上限给了数百个），
+ * 本限流器唯一的存在理由——多 IP 各自少量尝试同一账号——就此失效。
+ * @param {unknown} username
+ * @returns {string}
  */
-const loginIpLimiter = rateLimit({
-  windowMs: config.rateLimit.windowMs,
-  max: 30,
-  store: makeSharedStore('login-ip'),
-  skipSuccessfulRequests: true,
-  keyGenerator: (req) => `login-ip:${req.ip}`,
-  standardHeaders: true,
-  legacyHeaders: false,
-  handler: (req, res) => {
-    logger.warn(`登录 IP 维度限流触发：${req.ip}（可能存在撞库/轮换用户名攻击）`);
-    res.status(429).json({
-      success: false,
-      message: '该网络环境登录尝试过于频繁，请稍后再试',
-    });
-  },
-});
+const normalizeLoginRateKey = (username) => String(username).trim().toLowerCase();
 
 /**
  * 登录限流器（账号维度）
- * 与上方两个 IP 维度限流器互补：IP 维度防「单 IP 撞库/轮换用户名」，
+ * 与上方 IP 维度限流器互补：IP 维度防「单 IP 撞库/轮换用户名」，
  * 账号维度防「分布式撞单账号」（多个 IP 各自少量尝试同一用户名，IP 维度无法察觉）。
  * 单账号 20 次/15 分钟，跳过成功请求（成功登录不应占用配额）。
  * username 缺失时回退 IP 键，避免无 username 字段时键为 undefined。
@@ -203,7 +156,7 @@ const loginUserLimiter = rateLimit({
   skipSuccessfulRequests: true,
   keyGenerator: (req) => {
     const username = req.body?.username;
-    return username ? `login-user:${String(username).toLowerCase()}` : `login-user-ip:${req.ip}`;
+    return username ? `login-user:${normalizeLoginRateKey(username)}` : `login-user-ip:${req.ip}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -221,12 +174,13 @@ const loginUserLimiter = rateLimit({
 /**
  * IP 限流器
  * 基于 IP 地址的限流（从 config 读取配置）
+ * 挂载范围同 generalLimiter：全站（含非 `/api/` 表面），豁免口径也同源
  */
 const ipLimiter = rateLimit({
   windowMs: config?.rateLimit?.ipWindowMs || 60 * 60 * 1000, // 默认 1 小时
   max: config?.rateLimit?.ipMaxRequests || 1000, // 默认每小时 1000 请求
   store: makeSharedStore('ip'),
-  skip: skipIfWhitelisted, // 修复：白名单 IP 豁免 IP 限流
+  skip: skipProbesAndWhitelisted, // 白名单 IP 与探针 IP 豁免 IP 限流
   keyGenerator: (req) => req.ip,
   message: {
     success: false,
@@ -319,11 +273,60 @@ const passwordChangeLimiter = rateLimit({
 });
 
 /**
+ * 凭据型限流的「账号维度」姊妹桶（改密 / 二次验证各一个）
+ *
+ * 为什么原样组合键不够（实测：`zztmpctl/laneE/xffCredentialLimiter.test.js`，
+ * 判据见 `src/tests/security/credentialLimiterPerUserBucket.test.js`）：
+ * `passwordChangeLimiter`/`reauthLimiter` 的键是 `${userId}:${req.ip}`，
+ * IP 是键的**组成部分**而不是并列的另一把尺子 ⇒ 换 IP 就换一个全新桶，
+ * "单账号 5 次/15 分钟"实际变成"单账号 × 每个源 IP 各 5 次"。
+ * 两条独立放大路径：
+ *   · 代理池/NAT 后面的真·多源 IP（不需要任何伪造）；
+ *   · `TRUST_PROXY_HOPS>0` 时（生产 compose 默认 1 跳，`app.js:112-113`）
+ *     能直连应用端口的主体（同网段容器、宿主进程、SSRF 跳转）用
+ *     `X-Forwarded-For` 任意编造 req.ip——实测伪造一跳即可让 req.ip 变成 1.2.3.4，
+ *     审计行记录的来源 IP 与 `password_changed` 溯源同被写成假值。
+ * `/auth/login` 一侧早就有账号维度的 `loginUserLimiter` 盯这件事，
+ * 而"拿窃取到的令牌改密/二次验证"这条路径只有 IP 尺子 ⇒ 补齐同一条不变量。
+ *
+ * 口径：**并列两个桶**而不是把 IP 从组合键里删掉。
+ * 只留账号桶会丢掉"单 IP 横扫多账号"的约束，只留 IP 桶就是本条缺陷本身；
+ * 两者阈值/窗口保持一致，不放宽任何一侧。userId 缺失时跳过（未认证请求由
+ * 组合键回退分支与 generalLimiter 负责，不能让所有匿名请求共享一个 `undefined` 桶）。
+ */
+function makeCredentialUserLimiter(prefix, message) {
+  return rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    store: makeSharedStore(`${prefix}-user`),
+    skipSuccessfulRequests: false,
+    skip: (req) => !req.user?.userId,
+    keyGenerator: (req) => `${prefix}-user:${req.user?.userId}`,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (req, res) => {
+      logger.warn(`${prefix} 账号维度限流触发`, { userId: req.user?.userId || '-', ip: req.ip });
+      res.status(429).json({ success: false, message });
+    },
+  });
+}
+
+const passwordChangeUserLimiter = makeCredentialUserLimiter(
+  'pwd-change',
+  '密码修改操作过于频繁，请稍后再试'
+);
+const reauthUserLimiter = makeCredentialUserLimiter('reauth', '二次验证尝试过于频繁，请稍后再试');
+
+/**
  * 注册限流器（IP 维度）
  * 防止暴力注册/滥用：按真实客户端 IP 限流（req.ip），
- * 生产环境 trust proxy=false 不受 X-Forwarded-For 伪造影响；
  * 与 strictLimiter 独立计数，避免注册尝试耗尽严格限流配额、
  * 也避免严格限流配额不足时注册被误伤。
+ * 注意 req.ip 的可信度取决于部署：`TRUST_PROXY_HOPS>0`（生产 compose 默认 1）时
+ * req.ip 取自 X-Forwarded-For，能直连应用端口者可伪造；注册是无凭证的公开入口，
+ * 键里没有任何攻击者不可控的量，因此本限流器的那条"不受 XFF 影响"的老注释不成立，
+ * 已按实际口径改写。真正的缓解在 nginx 侧（覆盖式 `X-Forwarded-For $remote_addr`）
+ * 与"不信任直连"的部署边界上。
  * 默认：10 次/5 分钟/IP，超限返回 429 + Retry-After（express-rate-limit 自动带）
  */
 const registerIpLimiter = rateLimit({
@@ -343,17 +346,51 @@ const registerIpLimiter = rateLimit({
   },
 });
 
+/**
+ * 二次验证（step-up re-authentication）限流器
+ *
+ * 为什么必须与 passwordChangeLimiter 分开：两者都是"凭据校验"型端点，
+ * 强度同级（把 /view-sensitive 拉齐到凭据型限流是对的），
+ * 但**共用一个桶**恰好违反了本文件对改密限流器自己的要求——
+ * "避免 X 尝试配额与 Y 配额互相污染"。实测后果：用户连做 5 次二次验证
+ * （查看本人手机号/邮箱，正常操作就会发生）之后，
+ * PUT /change-password 直接被 429 挡在门外，而且文案是"密码修改操作过于频繁"，
+ * 用户完全不知道是被查看接口耗尽的。反之，攻击者刷改密也能耗尽受害者的二次验证配额。
+ * 键位独立、窗口与阈值保持一致（不放宽任何一侧的防护强度）。
+ */
+const reauthLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  store: makeSharedStore('reauth'),
+  skipSuccessfulRequests: false,
+  keyGenerator: (req) => {
+    const userId = req.user?.userId;
+    return userId ? `reauth:${userId}:${req.ip}` : `reauth-ip:${req.ip}`;
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn('二次验证限流触发', { userId: req.user?.userId || '-', ip: req.ip });
+    res.status(429).json({
+      success: false,
+      message: '二次验证尝试过于频繁，请稍后再试',
+    });
+  },
+});
+
 module.exports = {
   generalLimiter,
   strictLimiter,
   loginLimiter,
-  loginIpLimiter,
   loginUserLimiter,
   captchaLimiter,
   passwordChangeLimiter,
+  passwordChangeUserLimiter,
+  reauthLimiter,
+  reauthUserLimiter,
   ipLimiter,
   userLimiter,
   registerIpLimiter,
-  // 仅供测试：makeSharedStore 的 Redis/MemoryStore 分支需直接驱动（rateLimitStore.test.js）
-  makeSharedStore,
+  // 仅供测试：账号维度键的归一化规则（空格填充分裂计数桶的回归由它盯着）
+  normalizeLoginRateKey,
 };

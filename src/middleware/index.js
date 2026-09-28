@@ -14,7 +14,6 @@ const {
   generalLimiter,
   strictLimiter,
   loginLimiter,
-  loginIpLimiter,
   loginUserLimiter,
   captchaLimiter,
   passwordChangeLimiter,
@@ -38,6 +37,7 @@ const { mountStaticFrontend } = require('./staticFrontend');
 const { metricsAuth } = require('./metricsAuth');
 const {
   applySecurity,
+  applyResponseHardening,
   applyPreBodySecurity,
   applyPostBodySecurity,
   auditLog,
@@ -67,7 +67,6 @@ module.exports = {
   generalLimiter,
   strictLimiter,
   loginLimiter,
-  loginIpLimiter,
   loginUserLimiter,
   captchaLimiter,
   passwordChangeLimiter,
@@ -91,6 +90,7 @@ module.exports = {
 
   // 综合安全中间件
   applySecurity,
+  applyResponseHardening,
   applyPreBodySecurity,
   applyPostBodySecurity,
   auditLog,

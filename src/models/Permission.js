@@ -4,6 +4,11 @@
  */
 
 const mongoose = require('mongoose');
+const {
+  PERMISSION_TYPES,
+  PERMISSION_METHODS,
+  RESOURCE_STATUSES,
+} = require('../constants/permission');
 
 const permissionSchema = new mongoose.Schema(
   {
@@ -30,7 +35,7 @@ const permissionSchema = new mongoose.Schema(
     // 权限类型
     type: {
       type: String,
-      enum: ['menu', 'button', 'api', 'data'],
+      enum: PERMISSION_TYPES,
       default: 'api',
     },
 
@@ -55,14 +60,14 @@ const permissionSchema = new mongoose.Schema(
     },
     method: {
       type: String,
-      enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', '*'],
+      enum: PERMISSION_METHODS,
       default: '*',
     },
 
     // 状态
     status: {
       type: String,
-      enum: ['active', 'inactive'],
+      enum: RESOURCE_STATUSES,
       default: 'active',
     },
 

@@ -14,6 +14,7 @@ const {
 } = require('../utils/cursorPagination');
 const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
+const { castScopeObjectIds, applySearchCondition } = require('../utils/scopeCast');
 const ApiError = require('../utils/ApiError');
 
 class AlarmService {
@@ -56,11 +57,17 @@ class AlarmService {
 
     if (search) {
       const escaped = escapeRegExp(search);
-      query.$or = [
-        { alarmCode: new RegExp(escaped, 'i') },
-        { description: new RegExp(escaped, 'i') },
-        { 'location.building': new RegExp(escaped, 'i') },
-      ];
+      // 必须走 applySearchCondition 而不是直接 query.$or = [...]：
+      // alarm 的属主声明是数组（reporter.userId ∪ handler），self 范围下
+      // applyDataScopeToQuery 已经把 $or 用作范围条件，直接赋值会把它整条覆盖，
+      // 等于「带 search 的报警列表不做数据范围过滤」。详见 utils/scopeCast.js。
+      applySearchCondition(query, {
+        $or: [
+          { alarmCode: new RegExp(escaped, 'i') },
+          { description: new RegExp(escaped, 'i') },
+          { 'location.building': new RegExp(escaped, 'i') },
+        ],
+      });
     }
 
     if (cursor) {
@@ -74,7 +81,11 @@ class AlarmService {
       const docs = await FireAlarm.find(cursorQuery)
         .populate({ path: 'deviceId', select: 'deviceCode deviceName' })
         .populate({ path: 'handler', select: 'username realName' })
-        .sort({ occurredAt: -1 })
+        // 次级排序键 `_id` 不是整洁性偏好，而是与续翻子句绑定的方向约束：
+        // 条件是 `{occurredAt:v,_id:{$lt:id}}`，而单字段索引的隐式平局序是 _id **升序**，
+        // 两者方向相反 ⇒ 等值块（同一毫秒多条）跨页漂移，块内大部分记录永久不可达。
+        // 对应的同向复合索引见 models/FireAlarm.js。
+        .sort({ occurredAt: -1, _id: -1 })
         .limit(limit + 1);
       const { items, hasMore, nextCursor } = buildCursorResult(docs, limit, 'occurredAt');
       return { alarms: items, count: null, hasMore, nextCursor };
@@ -84,7 +95,9 @@ class AlarmService {
       FireAlarm.find(query)
         .populate({ path: 'deviceId', select: 'deviceCode deviceName' })
         .populate({ path: 'handler', select: 'username realName' })
-        .sort({ occurredAt: -1 })
+        // 与上面游标分支同一个排序：offset 页的末条要拿去 mint nextCursor，
+        // 方向不一致就会把游标发到等值块中间
+        .sort({ occurredAt: -1, _id: -1 })
         .limit(limit)
         .skip((page - 1) * limit),
       FireAlarm.countDocuments(query),
@@ -173,15 +186,35 @@ class AlarmService {
       throw ApiError.badRequest('指定的处理人账户已被禁用或锁定');
     }
 
-    // 数据范围校验：部门级操作者不得跨部门指派
+    // P2-17 数据范围矩阵（2026-09-21 补全）：原先只判 department 一档，
+    // 于是 self 档（语义是"仅自己的数据"）可以把报警派给**任意在册用户**——
+    // 连同部门都不需要，而 handler 字段正是 handleAlarm/arriveAtScene 的经办人守卫读的，
+    // 等于把工单塞进别人的清单。none 档与"调用方根本没传 dataScope"同样曾经放行。
+    // 现在每个档位都要有明确判定，认不出来的档位（含 none 与将来新增的档位）一律拒绝：
+    // 默认放行会让"新增一种 scope"变成静默的全量授权。
     const { dataScope } = options;
-    if (dataScope && dataScope.type === 'department') {
-      if (!dataScope.department) {
-        throw ApiError.forbidden('当前账户未配置部门，无法指派处理人');
-      }
-      if (handlerDoc.department !== dataScope.department) {
-        throw ApiError.forbidden('无权将报警指派给其他部门的人员');
-      }
+    if (!dataScope || !dataScope.type) {
+      throw ApiError.forbidden('缺少数据范围上下文，无法判定可指派人员范围');
+    }
+    switch (dataScope.type) {
+      case 'all':
+        break; // 超管/安全总监：不限部门
+      case 'department':
+        if (!dataScope.department) {
+          throw ApiError.forbidden('当前账户未配置部门，无法指派处理人');
+        }
+        if (handlerDoc.department !== dataScope.department) {
+          throw ApiError.forbidden('无权将报警指派给其他部门的人员');
+        }
+        break;
+      case 'self':
+        // 只允许自己接单：self 档没有"给别人派活"的授权语义
+        if (String(handler) !== String(operatorId)) {
+          throw ApiError.forbidden('当前数据范围仅允许处理自己的报警，不能指派给他人');
+        }
+        break;
+      default:
+        throw ApiError.forbidden(`数据范围档位 ${dataScope.type} 不允许执行指派`);
     }
 
     const now = new Date();
@@ -253,6 +286,9 @@ class AlarmService {
   /**
    * 标记为误报
    * M-1：已指派（processing）时仅处理人本人可标记；未指派（pending）任何同权限者可标记
+   *
+   * runValidators：schema 对 handleResult 声明的 maxlength 在 update 路径上默认不生效
+   * （Mongoose 只对 save 跑校验），不打开这道开关，路由层一旦漏装就没有第二道闸。
    */
   async markAsFalseAlarm(id, reason, operatorId) {
     const now = new Date();
@@ -278,7 +314,7 @@ class AlarmService {
           },
         },
       },
-      { new: true }
+      { new: true, runValidators: true }
     );
     if (updated) logger.info(`报警标记为误报：${updated.alarmCode}`);
     return updated;
@@ -289,6 +325,10 @@ class AlarmService {
    * 评价报告 #11：补对象级授权——已指派的工单仅处理人本人可取消，
    * 未指派（pending 且无 handler）任何同数据范围者可取消。
    * 与 markAsFalseAlarm 的 M-1 口径一致，堵住「同范围者取消他人工单」路径。
+   *
+   * reason 的长度只由路由层（handleReasonValidation）钉住：这里不开 runValidators，
+   * 因为 processLog.remark 在 schema 里本就没有上限，开了也只是自我安慰；
+   * 给 remark 补上限会反过来卡住 resolveAlarm（其 remark 为「处理完成：」+ 1000 字描述）。
    */
   async cancelAlarm(id, reason, operatorId) {
     const now = new Date();
@@ -324,8 +364,17 @@ class AlarmService {
 
   /**
    * 获取报警统计（应用与 getAlarms 相同的数据范围口径）
+   *
+   * 两处收口：
+   *  1. 缺省即 deny：原实现是 `if (dataScope && !apply(...))`，漏传 dataScope 时
+   *     整个 deny 分支被短路跳过 ⇒ 统计退化为**全组织**数字，且不报错。
+   *     与 InspectionService.getInspectionStats 同判据：漏传只能得到零结果。
+   *  2. 聚合前归一化 ObjectId：self/department 范围产出的条件是
+   *     `{'reporter.userId':'<24位hex字符串>'}`（userId 来自 JWT）。
+   *     countDocuments 会 cast、aggregate 不会 ⇒ total>0 而 byStatus/byLevel/byType
+   *     全空，只有非管理员用户能看到这个"说谎的看板"。
    */
-  async getAlarmStats(startDate, endDate, dataScope) {
+  async getAlarmStats(startDate, endDate, dataScope = { type: 'none' }) {
     const matchStage = {};
     if (startDate || endDate) {
       matchStage.occurredAt = {};
@@ -336,17 +385,20 @@ class AlarmService {
     const emptyStats = { total: 0, byStatus: [], byLevel: [], byType: [] };
 
     // 数据范围过滤（与 getAlarms 列表口径保持一致：同一函数、同一 deny 语义）
-    if (dataScope && !applyDataScopeToQuery(matchStage, dataScope, DATA_SCOPE_FIELDS.alarm)) {
+    if (!applyDataScopeToQuery(matchStage, dataScope, DATA_SCOPE_FIELDS.alarm)) {
       return emptyStats;
     }
 
-    const baseMatch = Object.keys(matchStage).length > 0 ? { $match: matchStage } : { $match: {} };
+    // 同一个条件既进聚合又进 countDocuments，必须归一化后再分发，
+    // 否则两条臂对同一范围给出互相矛盾的结论（见上）。
+    const scopedMatch = castScopeObjectIds(matchStage);
+    const baseMatch = { $match: scopedMatch };
 
     const [byStatus, byLevel, byType, total] = await Promise.all([
       FireAlarm.aggregate([baseMatch, { $group: { _id: '$status', count: { $sum: 1 } } }]),
       FireAlarm.aggregate([baseMatch, { $group: { _id: '$level', count: { $sum: 1 } } }]),
       FireAlarm.aggregate([baseMatch, { $group: { _id: '$alarmType', count: { $sum: 1 } } }]),
-      FireAlarm.countDocuments(matchStage),
+      FireAlarm.countDocuments(scopedMatch),
     ]);
 
     return { total, byStatus, byLevel, byType };

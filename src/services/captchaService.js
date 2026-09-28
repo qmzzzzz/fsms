@@ -46,6 +46,10 @@ let cleanupTimer = null;
 
 const entryKey = (captchaId) => `captcha:${captchaId}`;
 const COUNT_KEY = 'captcha:active-count';
+// 保留键判定：entryKey(x) === COUNT_KEY 当且仅当 x === 'active-count'。
+// 客户端可自由提交 captchaId，若不拦此值，verify 的 getDel 会删掉活跃计数键
+// （见 verify）。合法 captchaId 恒为 crypto.randomUUID()，永不会取此值。
+const collidesWithCountKey = (captchaId) => entryKey(String(captchaId)) === COUNT_KEY;
 
 /**
  * 启动过期验证码的定期清理（每 5 分钟一次）
@@ -93,7 +97,15 @@ const generate = async () => {
   try {
     active = await sharedCache.incrWithTtl(COUNT_KEY, CAPTCHA_TTL_MS);
   } catch (err) {
-    logger.warn(`验证码计数器异常，降级为内存上限判断：${err.message}`);
+    // 计数器不可用时的真实行为，按模式分两种，别写成一种口径：
+    //  - 内存模式：上限判据本来就是 localStore.size，与计数器无关 ⇒ 等价于"照常按内存判"；
+    //  - Redis 模式：拿不到计数就**没有**上限判定可用（active===null 时下面那个分支放行），
+    //    此时洪水保护只剩 captchaLimiter（60 次/5 分钟/IP）与条目 TTL 两层。
+    // 刻意不 fail-closed：验证码是登录前置，Redis 抖动不该把合法用户挡在门外。
+    // F-205 之后这条 catch 实际上到不了：门面在「Redis 启用但命令抛错」时不再回退
+    // 进程内计数，而是**如实返回 null**（走上面的 active===null 分支）。留着是因为
+    // 成本为零、方向明确（门面内部若改成抛错，这里的行为仍然是上面写的那两种）。
+    logger.warn(`验证码计数器异常，本次不启用活跃数上限判定：${err.message}`);
     active = null;
   }
 
@@ -134,6 +146,12 @@ const generate = async () => {
  */
 const verify = async (captchaId, inputText) => {
   if (!captchaId || !inputText) return false;
+
+  // 保留键闸门（须在触存储之前）：Redis 模式下 captchaId='active-count' 会让
+  // entryKey 正好撞上活跃计数键 COUNT_KEY，getDel 把它删掉 → generate 的
+  // MAX_ACTIVE_ENTRIES 洪水面护栏被反复重置归零。合法 captchaId 恒为 UUID，
+  // 故此闸门不误伤真实流程，仅把该越界值按「校验失败」fail-closed 处理。
+  if (collidesWithCountKey(captchaId)) return false;
 
   if (sharedCache.isRedisEnabled()) {
     // 评价报告低危项：原 get→del 两步在并发下同一验证码可被消费两次（双花）。

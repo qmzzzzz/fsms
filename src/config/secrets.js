@@ -77,7 +77,22 @@ function hydrateSecretsFromFiles() {
 
     // 去掉尾部换行：`echo "secret" > file` 与多数密钥管理工具都会追加 \n，
     // 带着它做 HMAC/AES 密钥会得到与预期不同的密钥，且症状是「解密全部失败」
-    value = value.replace(/[\r\n]+$/, '');
+    //
+    // 前导 BOM 同理且更隐蔽：Windows 记事本编辑过的 secret 文件、带 BOM 的
+    // ConfigMap/`file:` 挂载产物都以 EF BB BF 开头，而 Node 的 utf8 解码**不会**
+    // 剥掉它。结果是服务带着错密钥"成功"启动：AES 侧所有 `enc:v1:` 数据 GCM 认证
+    // 失败 ⇒ mfaSecret 解密返回空串 ⇒ base32Decode 抛 ⇒ 全部 MFA 用户报「验证码错误」，
+    // 与用户输错码的表现完全一致，排查方向会被带偏到验证码上。
+    value = value.replace(/^\uFEFF/, '').replace(/[\r\n]+$/, '');
+
+    // 首尾空白（BOM 之外的空格/Tab）保持原样不裁：真有密钥以空格为内容时静默裁掉
+    // 会复现上面同一症状，所以这里只喊不改。
+    if (value !== value.trim()) {
+      warnings.push(
+        `${filePathVar} 指向的密钥文件内容首尾含空白字符，已按原样保留：` +
+          '若这不是有意为之，它会参与密钥派生并导致所有既有密文/MFA 种子解密失败'
+      );
+    }
 
     if (value.length === 0) {
       throw new Error(`${filePathVar} 指向的密钥文件为空（${filePath}）`);

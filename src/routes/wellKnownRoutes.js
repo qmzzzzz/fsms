@@ -183,6 +183,27 @@ router.post('/client-errors', clientErrorLimiter, (req, res) => {
 // PERMISSION-EXEMPT: 公共上报端点（会话失效后异常也要上报，无法要求认证；限流+协议层校验）
 
 /**
+ * Canonical 的取值优先级：显式配置 → ALLOWED_HOSTS 首项 → 不输出这一行。
+ *
+ * 唯一不该出现的形态是原先的"反射 `Host` 头"。本端点无需认证，响应又带
+ * `Cache-Control: public, max-age=86400`（见 serveSecurityTxt），而 Host 白名单
+ * 那道闸只在 ALLOWED_HOSTS 非空时才生效（protocolCompliance 的
+ * `if (allowedHosts.length > 0)` 分支，未配置时 fail-open）。也就是说在没有配
+ * ALLOWED_HOSTS 的环境里，任何人用一个自定义 Host 头就能改写官方 security.txt
+ * 里的"规范地址"——那正是给漏洞提交者看的字段，投毒一次就得到一条钓鱼目标，
+ * 且会被中间缓存固化 24 小时。宁可缺这一行（RFC 9116 里 Canonical 是可选字段），
+ * 也不输出一个来自请求的、未经声明的值。
+ */
+const securityTxtCanonical = (req) => {
+  const explicit = (process.env.SECURITY_TXT_CANONICAL || '').trim();
+  if (explicit) return explicit;
+  const firstAllowed = (process.env.ALLOWED_HOSTS || '').split(',')[0].trim();
+  if (!firstAllowed) return '';
+  // 协议仍取 req.protocol：TLS 在哪一层终结由 TRUST_PROXY_HOPS 决定，与主机名无关
+  return `${req.protocol}://${firstAllowed}/.well-known/security.txt`;
+};
+
+/**
  * security.txt 内容按请求动态生成（G10）
  *
  * 用动态生成而非静态文件的原因：RFC 9116 要求 Expires 必须存在且不得
@@ -191,20 +212,22 @@ router.post('/client-errors', clientErrorLimiter, (req, res) => {
 const buildSecurityTxt = (req) => {
   const contact = process.env.SECURITY_CONTACT_EMAIL || 'security@example.com';
   const expires = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString();
-  const canonical =
-    process.env.SECURITY_TXT_CANONICAL ||
-    `${req.protocol}://${req.get('host')}/.well-known/security.txt`;
+  const canonical = securityTxtCanonical(req);
 
-  return [
+  const lines = [
     `Contact: mailto:${contact}`,
     `Expires: ${expires}`,
     'Preferred-Languages: zh-Hans, en',
-    `Canonical: ${canonical}`,
+  ];
+  if (canonical) lines.push(`Canonical: ${canonical}`);
+  lines.push(
     '',
     '# 请勿对生产环境执行拒绝服务、暴力破解或社会工程测试。',
     '# 报告请附复现步骤与影响面说明，我们将在 5 个工作日内回复。',
-    '',
-  ].join('\n');
+    ''
+  );
+
+  return lines.join('\n');
 };
 
 const securityTxtLimiter = rateLimit({

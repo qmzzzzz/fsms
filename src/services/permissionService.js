@@ -6,6 +6,9 @@
 const Permission = require('../models/Permission');
 const Role = require('../models/Role');
 const ApiError = require('../utils/ApiError');
+// 保留通配码只在 utils/superAdmin 声明一次；路由的"不得铸造"与本文件的"不得停用"
+// 必须是同一个值，否则两处防线会各拦一半。
+const { RESERVED_WILDCARD_PERMISSION: RESERVED_WILDCARD } = require('../utils/superAdmin');
 
 class PermissionService {
   async listPermissions({ module, type, status, page, limit }) {
@@ -60,7 +63,26 @@ class PermissionService {
     return Permission.findById(id).select('_id parent');
   }
 
+  /**
+   * 权限落库的唯一出口（update 路径只有这里）
+   *
+   * 保留通配 `*:*` 不得被停用：
+   * SUPER_ADMIN 的全部权限解析都来自这一条文档（initData 里唯一持有 `*:*` 的角色），
+   * 把它 status 改成 inactive 就等于**瞬间清空所有超管权限**——此后任何管理接口都是 403，
+   * 界面上连"把它改回来"的入口都没了，只能直连数据库救。
+   * 铸造路径早被路由的 `.not().equals('*:*')` 挡住，删除路径被"角色引用"检查挡住，
+   * 唯独停用这条最短路径没人管。
+   *
+   * 为什么拦在服务层而不是控制器：updatePermission 圈复杂度已 22（上限 15），
+   * 在控制器再加两支会直接撞 `lint:ratchet`「复杂度只降不升」基线；
+   * 而服务层既是唯一落库出口、也自动覆盖将来任何新调用方。
+   */
   async savePermission(permission) {
+    if (permission.code === RESERVED_WILDCARD && permission.status !== 'active') {
+      throw ApiError.badRequest(
+        `保留通配权限 ${RESERVED_WILDCARD} 不允许停用（会导致全体超管失去权限）`
+      );
+    }
     await permission.save();
     return this.getPermissionById(permission._id);
   }

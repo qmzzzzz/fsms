@@ -14,6 +14,8 @@ const sessionService = require('../services/sessionService');
 const { isIPAllowed } = require('../utils/ipRange');
 const { userLimiter } = require('./rateLimit');
 const { getCookies, ACCESS_COOKIE_NAME } = require('../utils/cookie');
+const { violatesAccessTokenPurpose } = require('../utils/tokenPurpose');
+const { USER_STATUS } = require('../utils/constants');
 const { extendLogContext } = require('../utils/logContext');
 
 /**
@@ -72,7 +74,10 @@ const loadValidUser = async (userId) => {
     .select(
       'username email status roles passwordChangedAt lastLoginAt tokenVersion allowedIPs failedLoginCount lockUntil'
     )
-    .populate('roles', 'code');
+    // 仅生效角色参与授权判定（与 userPermissionService / permissionHelper 同口径）：
+    // 停用角色后，该角色码不得继续进入 req.user.roleCodes，
+    // 否则 checkRole 与 userLimiter 会按已作废的角色放行/限流。
+    .populate({ path: 'roles', select: 'code', match: { status: 'active' } });
   if (!user) {
     userCache.delete(userId);
     return null;
@@ -203,6 +208,10 @@ const authenticate = async (req, res, next) => {
     // 2. 验证 Token 签名与有效期（限制算法防止 alg:none 攻击）
     const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
 
+    // 2.1 用途：refresh 令牌不得当 access 用（两把密钥被配成同值时的唯一拦截点）
+    const purposeError = assertTokenPurpose(decoded, res);
+    if (purposeError) return purposeError;
+
     // 2.5. 检查 Token 是否在黑名单中（登出后失效）
     if (await isTokenBlacklisted(token)) {
       return ApiResponse.codeError(res, 'AUTH_TOKEN_REVOKED');
@@ -242,15 +251,40 @@ const authenticate = async (req, res, next) => {
  * 账户可用性校验（E-01 自 authenticate 拆出）：存在性、禁用、锁定、临时锁定。
  * 返回错误响应或 null；四处拒绝的先后顺序与拆分前一致。
  */
+/**
+ * 令牌用途校验：refresh 令牌不得作为 access 令牌使用。
+ *
+ * access 与 refresh 由两把不同的密钥签名，正常配置下 refresh 在本处验签即失败；
+ * 但 config 只分别校验两把密钥的强度，运维把 JWT_SECRET 与 JWT_REFRESH_SECRET
+ * 配成同一个值时，二者就完全等价了 —— refresh 有效期 7 天且带 sid/tokenVersion，
+ * 拿来当 Bearer 直连全部 API，"access 短有效期 + 频繁换发"这条收缩访问窗口的机制整体失效。
+ *
+ * 只在 `type` 存在且不等于 'access' 时拒绝：历史 access 令牌没有该字段，
+ * 不因这次加固而集体失效；新签发的 access 已带 type: 'access'（见 tokenService）。
+ * 同名的正向判据在 config/validate.js（两把密钥不得相同），两道各自成立。
+ */
+const assertTokenPurpose = (decoded, res) => {
+  // 判据本体在 utils/tokenPurpose（HTTP / 令牌探测 / WS 认证三处共用同一份）
+  if (violatesAccessTokenPurpose(decoded)) {
+    logger.warn(`令牌用途不符被拒：type=${String(decoded.type)}`);
+    return ApiResponse.codeError(res, 'AUTH_TOKEN_INVALID');
+  }
+  return null;
+};
+
 const assertAccountUsable = (freshUser, res) => {
   if (!freshUser) {
     return ApiResponse.codeError(res, 'USER_NOT_FOUND_OR_DELETED');
   }
-  if (freshUser.status === 'inactive') {
-    return ApiResponse.codeError(res, 'ACCOUNT_DISABLED');
-  }
-  if (freshUser.status === 'locked') {
+  if (freshUser.status === USER_STATUS.LOCKED) {
     return ApiResponse.codeError(res, 'ACCOUNT_LOCKED');
+  }
+  // 允许清单（F-162）：只有 active 可用。原先只按 'inactive'/'locked' 两个值拒绝，
+  // USER_STATUS 加一档、或备份还原/裸写进一个清单外的值时，本中间件会带着完整权限
+  // 放行，而同一概念的 refresh（authService 里 `status !== 'active'`）拒绝它。
+  // 顺序不能颠倒：locked 必须在兜底分支之前，否则锁定账户拿到"已禁用"文案。
+  if (freshUser.status !== USER_STATUS.ACTIVE) {
+    return ApiResponse.codeError(res, 'ACCOUNT_DISABLED');
   }
   if (freshUser.lockUntil && freshUser.lockUntil > new Date()) {
     return ApiResponse.codeError(res, 'ACCOUNT_TEMP_LOCKED');
@@ -363,9 +397,11 @@ const buildAuthContext = (decoded, freshUser) => {
   let freshRoles = [];
   let freshRoleCodes = [];
   if (freshUser.roles && freshUser.roles.length > 0) {
-    // freshUser.roles 可能是 ObjectId 数组或已 populate 的 Role 文档
+    // freshUser.roles 可能是 ObjectId 数组或已 populate 的 Role 文档；
+    // 下方 `r &&` 判空属防御性冗余：实测 mongoose 8.24.1 对 populate+match 未命中的引用是
+    // 丢弃元素（不留 null），见 src/tests/zzqoder_populateMatchShape.test.js。
     freshRoles = freshUser.roles.map((r) => {
-      if (typeof r === 'object' && r.code) {
+      if (r && typeof r === 'object' && r.code) {
         freshRoleCodes.push(r.code);
         return r.code;
       }
@@ -433,4 +469,7 @@ module.exports = {
   authenticate,
   invalidateUserCache,
   extractAccessToken,
+  // 认证异常 → 响应的唯一映射表。登出的 refresh 通路必须复用同一份（见 logoutAuth），
+  // 否则同一个"安全服务不可用"走 access 得 503、走 refresh 得 500。
+  mapAuthFailure,
 };

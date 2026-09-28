@@ -6,13 +6,24 @@
  */
 
 const { validationResult } = require('express-validator');
+const { safeFieldErrors } = require('../utils/validationRules');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const ApiResponse = require('../utils/apiResponse');
+// 名单类型取值与 models/IPBlacklist 的 enum、securityRoutes 的 isIn 同源
+const { IP_LIST_TYPES } = require('../constants/ipList');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { normalizePagination } = require('../utils/helpers');
-const { normalizeIP, normalizeCIDR, isFullRangeCIDR } = require('../utils/ipUtils');
+// 与 middleware/security.js 的匹配层守卫同一判据（IP 命中查询必须与请求期判定口径一致）。
+// 判据此前已住在 ipUtils（四个解析漏斗共用），本文件直接复用，不再有中间模块。
+const {
+  normalizeIP,
+  normalizeCIDR,
+  isFullRangeCIDR,
+  isAmbiguousIpText,
+  lenientAddressHint,
+} = require('../utils/ipUtils');
 const { auditPath } = require('../utils/auditMeta');
 const { isSuperAdminRole } = require('../utils/superAdmin');
 const { invalidateIPBlockCache } = require('../middleware/security');
@@ -29,7 +40,9 @@ const getIPList = asyncHandler(async (req, res) => {
   // 调用方以为在查某个名单实际拿到两个名单的混合分页，计数也对不上。
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { type, page = 1, limit = 20 } = req.query;
@@ -39,7 +52,10 @@ const getIPList = asyncHandler(async (req, res) => {
   const activeFilter = { $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }] };
 
   const filter = { ...activeFilter };
-  if (type === 'black' || type === 'white') filter.type = type;
+  // 手写 `type === 'black' || type === 'white'` 是本族最坏的一种副本：给清单加一档后，
+  // 路由校验（isIn 读同一份 constants）会放行新值，而这里**不认识**它就整条丢掉过滤
+  // 条件 ⇒ `?type=<新档>` 返回全量名单而不是 400（口径同 F-138 的 userService）。
+  if (IP_LIST_TYPES.includes(type)) filter.type = type;
 
   const { page: pageNum, limit: limitNum } = normalizePagination(page, limit, 200);
 
@@ -79,6 +95,28 @@ const getIPList = asyncHandler(async (req, res) => {
 const queryIPMatch = asyncHandler(async (req, res) => {
   const rawIP = typeof req.query.ip === 'string' ? req.query.ip.trim() : '';
 
+  // 歧义文本必须**明确拒答**，不能给 verdict。
+  // 背景：早前匹配层（models/IPBlacklist.findMatchingEntries）对
+  // `0177.0.0.1` / `0x7f.0.0.1` / `127.1` 这类形态一律返回空 ⇒ 请求期该客户端
+  // 既不算命中黑名单也不算命中白名单。本接口若沿用同一判据却继续打印
+  // `normalizedIP: '127.0.0.1'`，管理员读到的是「127.0.0.1 没被拦」——
+  // 而名单里可能正封着 127.0.0.1，两者互相矛盾，且状态码 200 无任何提示。
+  // 所以这里把"你问的是哪一个地址"问清楚：宽松解析出的规范地址回给对方，让其重查。
+  //
+  // 顺序不可颠倒：ipUtils 收紧后 normalizeIP 对歧义文本已经返回 null，
+  // 若先跑下面那道 null 判断，"形态有歧义"会被误报成"请输入单地址"，
+  // 管理员拿不到重查指引 ⇒ 本分支必须在 normalizeIP 之前。
+  // 提示值走 lenientAddressHint（只显示宽松解释的结果，不参与任何判定）。
+  if (isAmbiguousIpText(rawIP)) {
+    const hint = lenientAddressHint(rawIP);
+    return ApiResponse.codeError(res, 'IP_FORMAT_INVALID', {
+      message:
+        `"${rawIP}" 不是规范的点分十进制写法（前导零/十六进制/短写会被解释成另一个地址）。` +
+        `请求期该文本按非法客户端处理，不参与名单匹配；如需查询地址 ${hint || '（无法确定）'} 的命中情况，请用规范写法重新查询。`,
+      params: { ip: rawIP, normalizedIP: hint },
+    });
+  }
+
   // 仅接受单地址（IPv4/IPv6）；CIDR 网段不是合法的查询目标
   const normalizedIP = rawIP ? normalizeIP(rawIP) : null;
   if (!normalizedIP) {
@@ -113,6 +151,105 @@ const queryIPMatch = asyncHandler(async (req, res) => {
 });
 
 /**
+ * 名单入参校验与归一化（四道判据按原顺序，一步不增不减）：
+ * ip 非空、type 枚举、IP/CIDR 强格式归一化、时长区间。
+ *
+ * 归一化必须发生在入库之前：以 ipaddr.js 把 IPv4 前导零与 IPv6 等价写法收敛成
+ * 规范形式（`192.168.001.001 → 192.168.1.1`），入库文本才与请求期判定
+ * （isBlocked / isWhitelisted）用的是同一个串——否则条目永远不命中，
+ * 名单里留下一条"看着在防、其实没防"的死记录。
+ * @returns {{trimmedIP: string, normalizedIP: string, hours: number}|null} null 表示已写出拒绝响应
+ */
+const normalizeListEntryRequest = (res, { ip, type, durationHours }) => {
+  if (!ip || typeof ip !== 'string' || ip.trim().length === 0) {
+    ApiResponse.codeError(res, 'IP_REQUIRED');
+    return null;
+  }
+  if (!IP_LIST_TYPES.includes(type)) {
+    ApiResponse.codeError(res, 'IP_LIST_TYPE_INVALID');
+    return null;
+  }
+  const trimmedIP = ip.trim();
+  const normalizedIP = trimmedIP.includes('/') ? normalizeCIDR(trimmedIP) : normalizeIP(trimmedIP);
+  if (!normalizedIP) {
+    ApiResponse.codeError(res, 'IP_FORMAT_INVALID');
+    return null;
+  }
+  const hours = Number(durationHours) || 0;
+  if (hours < 0 || hours > 24 * 365) {
+    ApiResponse.codeError(res, 'IP_LIST_DURATION_OUT_OF_RANGE');
+    return null;
+  }
+  return { trimmedIP, normalizedIP, hours };
+};
+
+/**
+ * 操作者是否为内置超级管理员——添加侧与删除侧共用同一判据。
+ *
+ * 只认生效角色，口径与 auth.js buildAuthContext、rbac.js 的回退查询一致。
+ * 字符串形式的 populate 无法携带 match，故必须写成对象形式：
+ * 否则「直连数据库把 SUPER_ADMIN 置为 inactive」之后，其持有者仍被判定为超管，
+ * 依然可以加白 0.0.0.0/0 让黑名单与限流整体失效——正是本文件守卫要防的结局。
+ * 接口侧改内置角色 status 已被 roleGuards.js 的 BUILTIN_ROLE_STATUS_LOCKED 挡住，
+ * 因此这条属纵深防御；注释保留原因，免得后人把它当冗余删掉。
+ * 防御性说明：实测 mongoose 8.24.1 对 populate+match 未命中的引用是**丢弃元素**（不留 null），
+ * 故 isSuperAdminRole 的 !!role 判空今天是冗余；保留它以防未来版本改为留 null 洞
+ * （形状由 src/tests/zzqoder_populateMatchShape.test.js 钉住，升级会先红）。
+ */
+const operatorIsSuperAdmin = async (userId) => {
+  const operator = await User.findById(userId)
+    .populate({ path: 'roles', select: 'code isBuiltIn', match: { status: 'active' } })
+    .lean();
+  return (operator?.roles || []).some(isSuperAdminRole);
+};
+
+/**
+ * 全网段（0.0.0.0/0、::/0）收口：此类条目一次性命中所有客户端——
+ * 加黑导致全站拒服且管理员自己也无法登录解除；加白使黑名单与限流整体失效。
+ * 故仅允许内置超级管理员配置，且两种结局都留高危痕迹（拒绝侧记 privilege_escalation）。
+ * @returns {Promise<boolean>} true 表示已写出拒绝响应，调用方应立即 return
+ */
+const guardFullRangeCIDR = async (req, res, { normalizedIP, type }) => {
+  if (!isFullRangeCIDR(normalizedIP)) return false;
+
+  const isSuperAdmin = await operatorIsSuperAdmin(req.user.userId);
+
+  if (!isSuperAdmin) {
+    logger.warn('非超级管理员尝试添加全网段名单', {
+      ip: normalizedIP,
+      operator: req.user.username,
+    });
+    AuditLog.record({
+      action: 'privilege_escalation',
+      category: 'security',
+      userId: req.user.userId,
+      username: req.user.username,
+      method: req.method,
+      path: auditPath(req),
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      body: { ip: normalizedIP, type },
+      success: false,
+      riskLevel: 'critical',
+      riskFactors: ['full_range_cidr_attempt'],
+      reason: `尝试将全网段 ${normalizedIP} 加入${type === 'black' ? '黑' : '白'}名单，权限不足`,
+    });
+    ApiResponse.codeError(res, 'FULL_RANGE_FORBIDDEN', {
+      message: `全网段（${normalizedIP}）会命中所有 IP，仅超级管理员可配置；如需限制特定范围请使用更精确的网段`,
+      params: { ip: normalizedIP },
+    });
+    return true;
+  }
+
+  logger.warn('超级管理员正在添加全网段名单', {
+    ip: normalizedIP,
+    type,
+    operator: req.user.username,
+  });
+  return false;
+};
+
+/**
  * 添加 IP 到黑/白名单
  * POST /api/security/ip-list
  * body: { ip, type: 'black'|'white', reason, durationHours }
@@ -120,77 +257,18 @@ const queryIPMatch = asyncHandler(async (req, res) => {
 const addIPEntry = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { ip, type = 'black', reason = 'manual_configuration', durationHours = 0 } = req.body;
 
-  if (!ip || typeof ip !== 'string' || ip.trim().length === 0) {
-    return ApiResponse.codeError(res, 'IP_REQUIRED');
-  }
-  if (!['black', 'white'].includes(type)) {
-    return ApiResponse.codeError(res, 'IP_LIST_TYPE_INVALID');
-  }
+  const parsed = normalizeListEntryRequest(res, { ip, type, durationHours });
+  if (!parsed) return;
+  const { trimmedIP, normalizedIP, hours } = parsed;
 
-  const trimmedIP = ip.trim();
-
-  // 基于 ipaddr.js 的强格式校验与归一化（支持 IPv4/IPv6/CIDR 网段）：
-  // - 单地址：IPv4 前导零规范化（192.168.001.001 → 192.168.1.1），IPv6 等价写法统一为规范形式，
-  //   拒绝非法文本（如 999.999.999.999、::::），避免入库后永不命中的死记录
-  // - CIDR：校验前缀长度（IPv4 ≤32、IPv6 ≤128），拒绝 /33、/129 等非法值
-  // - 归一化后入库，保证写入文本与请求期匹配（isBlocked/isWhitelisted）使用同一规范形式
-  const normalizedIP = trimmedIP.includes('/') ? normalizeCIDR(trimmedIP) : normalizeIP(trimmedIP);
-
-  if (!normalizedIP) {
-    return ApiResponse.codeError(res, 'IP_FORMAT_INVALID');
-  }
-
-  const hours = Number(durationHours) || 0;
-  if (hours < 0 || hours > 24 * 365) {
-    return ApiResponse.codeError(res, 'IP_LIST_DURATION_OUT_OF_RANGE');
-  }
-
-  // 全网段（0.0.0.0/0、::/0）权限收口：此类条目一次性命中所有客户端——
-  // 加黑会导致全站拒绝服务且管理员自己也无法登录解除；加白会使黑名单与限流整体失效。
-  // 故仅允许内置超级管理员配置，并强制留下高危审计。
-  if (isFullRangeCIDR(normalizedIP)) {
-    const operator = await User.findById(req.user.userId)
-      .populate('roles', 'code isBuiltIn')
-      .lean();
-    const isSuperAdmin = (operator?.roles || []).some(isSuperAdminRole);
-
-    if (!isSuperAdmin) {
-      logger.warn('非超级管理员尝试添加全网段名单', {
-        ip: normalizedIP,
-        operator: req.user.username,
-      });
-      AuditLog.record({
-        action: 'privilege_escalation',
-        category: 'security',
-        userId: req.user.userId,
-        username: req.user.username,
-        method: req.method,
-        path: auditPath(req),
-        ip: req.ip,
-        userAgent: req.get('user-agent'),
-        body: { ip: normalizedIP, type },
-        success: false,
-        riskLevel: 'critical',
-        riskFactors: ['full_range_cidr_attempt'],
-        reason: `尝试将全网段 ${normalizedIP} 加入${type === 'black' ? '黑' : '白'}名单，权限不足`,
-      });
-      return ApiResponse.codeError(res, 'FULL_RANGE_FORBIDDEN', {
-        message: `全网段（${normalizedIP}）会命中所有 IP，仅超级管理员可配置；如需限制特定范围请使用更精确的网段`,
-        params: { ip: normalizedIP },
-      });
-    }
-
-    logger.warn('超级管理员正在添加全网段名单', {
-      ip: normalizedIP,
-      type,
-      operator: req.user.username,
-    });
-  }
+  if (await guardFullRangeCIDR(req, res, { normalizedIP, type })) return;
 
   const IPBlacklistModel = require('../models/IPBlacklist');
   const durationMs = hours > 0 ? hours * 60 * 60 * 1000 : 0;
@@ -255,7 +333,9 @@ const addIPEntry = asyncHandler(async (req, res) => {
 const removeIPEntry = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { id } = req.params;
@@ -273,10 +353,7 @@ const removeIPEntry = asyncHandler(async (req, res) => {
   // 再塞入恶意黑名单，等效于绕过整个 IP 管控体系。
   // 保护的不变量：谁能添加，才能删除。
   if (isFullRangeCIDR(entry.ip)) {
-    const operator = await User.findById(req.user.userId)
-      .populate('roles', 'code isBuiltIn')
-      .lean();
-    const isSuperAdmin = (operator?.roles || []).some(isSuperAdminRole);
+    const isSuperAdmin = await operatorIsSuperAdmin(req.user.userId);
 
     if (!isSuperAdmin) {
       logger.warn('非超级管理员尝试删除全网段名单', { ip: entry.ip, operator: req.user.username });

@@ -16,7 +16,12 @@ module.exports = {
   secretHydration,
   // 服务器配置
   port: process.env.PORT || 3000,
-  nodeEnv: process.env.NODE_ENV || 'development',
+  // 环境名必须与 validate.js 的归一判据**同源**，否则同一进程里"是否生产"有两个答案：
+  // 体检按生产办（`NODE_ENV=` 空串 ⇒ requiresProductionSemantics()=true），
+  // 而行为按开发走（`|| 'development'` 把空串当 falsy）⇒ morgan 落到 dev 分支、
+  // 查询串里的 refreshToken 原文落盘，originCheck 也回退到 localhost 白名单。
+  // 顶层 require 无环：validate.js 不 require 本文件（见 §112.2）。
+  nodeEnv: require('./validate').normalizeNodeEnv(),
 
   // MongoDB 配置
   mongodbUri: process.env.MONGODB_URI || 'mongodb://localhost:27017/fire_safety_db',
@@ -55,6 +60,21 @@ module.exports = {
 
   // 登录图形验证码开关（数据库配置读取失败时的静态回退值，默认关闭）
   loginCaptchaEnabled: process.env.LOGIN_CAPTCHA_ENABLED === 'true',
+
+  // 注册图形验证码开关（默认**开启**：仅显式 REGISTER_CAPTCHA_ENABLED=false 才关）
+  //
+  // 【位置即契约】这个键必须留在**顶层**。它此前被写在下方 `rateLimit: {}` 子对象里，
+  // 而全部三处读取方读的都是顶层：
+  //   · services/authService.js:118（DB 读取失败时的回退）
+  //   · controllers/authController.js:128（/auth/captcha-status 的降级值）
+  //   · models/SystemConfig.js:207（isRegisterCaptchaEnabled 的 fallback）
+  // ⇒ 恒为 undefined ⇒ toConfigBoolean(undefined, false) === false
+  // ⇒ 注册接口的图形验证码被**静默关闭**。而 initData 从不播种该键
+  // （只播种 allowPublicRegistration / loginCaptchaEnabled），所以**全新部署必然走这条 fallback**，
+  // 与 config/index.js / SystemConfig.js:194,:206 / .env.example:207 四处"默认开启/默认强校验"
+  // 的声明全部相反。与紧邻的 loginCaptchaEnabled 同层是唯一正确写法。
+  // 回归判据见 src/tests/security/systemConfigBooleanContract.test.js 的「默认值契约」用例。
+  registerCaptchaEnabled: process.env.REGISTER_CAPTCHA_ENABLED !== 'false',
 
   // 登录口令加密传输：双轨兼容期结束后置 true 拒绝明文口令字段
   // （注意：浏览器 WebCrypto 仅在 secure context 可用，纯 HTTP 内网部署勿开启）
@@ -101,8 +121,9 @@ module.exports = {
       const max = parseInt(process.env.RATE_LIMIT_IP_MAX_REQUESTS, 10);
       return Number.isFinite(max) && max > 0 ? max : 1000;
     })(),
-    // 注册图形验证码开关（默认开启：注册接口强制人机校验）
-    registerCaptchaEnabled: process.env.REGISTER_CAPTCHA_ENABLED !== 'false',
+    // 注：`registerCaptchaEnabled` **不在**本子对象内——它属于顶层，见上方注释。
+    // 曾经写在这里，导致三处顶层读取恒为 undefined、注册验证码被静默关闭。
+    // 本子对象只放**限流**参数（下面两项），不放开关。
     // 注册 IP 限流阈值（默认 10 次/5 分钟/IP）
     registerWindowMs: (() => {
       const ms = parseInt(process.env.REGISTER_IP_WINDOW_MS, 10);

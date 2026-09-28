@@ -24,6 +24,20 @@
 const SUPER_ADMIN_ROLE_CODE = 'SUPER_ADMIN';
 
 /**
+ * 内置超管专用通配权限码。
+ *
+ * 它是"最高权限"的唯一来源，因此围绕它有两条互不相同的防线，
+ * 都必须引用本常量而不是各写一遍字面量：
+ *  - 不得铸造：permissionRoutes 的 create / batch-create 校验
+ *  - 不得停用、也不得分配给非内置超管角色：permissionService.savePermission
+ *    与 rolePermissionController.validatePermissionTargets
+ * 「不得停用」防的是把唯一权限源关掉导致全体超管自锁；
+ * 「不得乱分配」防的是超管借早返回通道铸出第二个通配角色，
+ * 绕过"内置超管角色唯一"这条不变式。
+ */
+const RESERVED_WILDCARD_PERMISSION = '*:*';
+
+/**
  * 唯一超管账户名。允许用环境变量覆盖以适配已有部署，
  * 未配置时固定为 initData 创建的默认管理员 admin。
  *
@@ -83,6 +97,7 @@ const checkSuperAdminMembership = (currentRoles = [], nextRoles = []) => {
 
 module.exports = {
   SUPER_ADMIN_ROLE_CODE,
+  RESERVED_WILDCARD_PERMISSION,
   getSuperAdminUsername,
   isSuperAdminRole,
   checkSuperAdminMembership,

@@ -10,6 +10,7 @@ const Role = require('../models/Role');
 const User = require('../models/User');
 const logger = require('../utils/logger');
 const { SUPER_ADMIN_ROLE_CODE, getSuperAdminUsername } = require('../utils/superAdmin');
+const { RETENTION_SECONDS, RETENTION_DAYS } = require('../constants/retention');
 
 /**
  * 系统预设权限列表
@@ -166,6 +167,39 @@ const defaultPermissions = [
     module: 'system',
     path: '/api/roles/permissions/tree',
     method: 'GET',
+    parent: null,
+  },
+  // 这三条不是"顺手补的"：路由侧一直用 checkPermission('permission:create|update|delete')
+  // 把关，而目录里没有这三个码 —— 权限文档是角色编辑页唯一的可勾选项来源，
+  // 勾不出来的码就永远无法被授予任何人。结果是"管理权限定义"这件事
+  // 只能在 *:* 超级管理员下发生，且没有任何运维路径能修正它（403 看起来像配置漏了，
+  // 实际是目录里根本没有这个可授予项）。
+  // 这里补齐的是**可授予性**本身：不改变任何既有角色的授权范围，需要授给谁仍由人工决定。
+  {
+    name: '创建权限',
+    code: 'permission:create',
+    type: 'api',
+    module: 'system',
+    path: '/api/permissions',
+    method: 'POST',
+    parent: null,
+  },
+  {
+    name: '更新权限',
+    code: 'permission:update',
+    type: 'api',
+    module: 'system',
+    path: '/api/permissions/:id',
+    method: 'PUT',
+    parent: null,
+  },
+  {
+    name: '删除权限',
+    code: 'permission:delete',
+    type: 'api',
+    module: 'system',
+    path: '/api/permissions/:id',
+    method: 'DELETE',
     parent: null,
   },
 
@@ -505,6 +539,37 @@ const rolePermissionMap = {
 };
 
 /**
+ * 只插入目录里缺失的权限，返回**真实**创建数
+ *
+ * created 不能取 toInsert.length：多实例并发部署时 insertMany 可能抛 11000 且
+ * ordered:false 下只有一部分落库、返回值还拿不到，此时按预查差集上报会把
+ * 没插成功的文档也算成"已创建"（初始化日志一直是运维判断播种是否成功的唯一凭据）。
+ */
+const insertMissingPermissions = async (toInsert) => {
+  if (toInsert.length === 0) {
+    // 不在这里早退整个播种：「所有 code 都已存在」不等于「树是对的」。
+    // 2026-09-18 的 parent 自环事故只修了代码，坏数据留在库里；那些行因为
+    // "本来就存在"永远进不了 toInsert ⇒ 不走到下面的对账就永远不恢复，
+    // 而运维看到的是"重启多次、接口 200、角色权限树依旧空"。
+    logger.info('权限数据已全部存在，仅做 parent 关联对账');
+    return 0;
+  }
+  let inserted = [];
+  let hadConflict = false;
+  try {
+    // 先全部插入（不带 parent），确保所有文档已落库
+    inserted = await Permission.insertMany(toInsert, { ordered: false });
+  } catch (err) {
+    if (err.code !== 11000) throw err;
+    hadConflict = true;
+    logger.warn('权限初始化遇到并发冲突，继续关联 parent');
+  }
+  return hadConflict
+    ? await Permission.countDocuments({ code: { $in: toInsert.map((p) => p.code) } })
+    : inserted.length;
+};
+
+/**
  * 初始化权限数据
  */
 const initPermissions = async () => {
@@ -517,33 +582,20 @@ const initPermissions = async () => {
       .filter((p) => !existingCodes.includes(p.code))
       .map((p) => ({ ...p, parent: null })); // 先全部置为 null，后续统一关联
 
-    if (toInsert.length === 0) {
-      logger.info('权限数据已全部存在，跳过初始化');
-      return { created: 0, skipped: defaultPermissions.length };
-    }
-
-    // 先全部插入（不带 parent），确保所有文档已落库
-    let inserted = [];
-    let hadConflict = false;
-    try {
-      inserted = await Permission.insertMany(toInsert, { ordered: false });
-    } catch (err) {
-      // 多实例并发部署时忽略唯一索引冲突；ordered:false 下可能已有部分文档落库，
-      // 此时拿不到返回数组，下方 created 改用回查数据库统计真实创建数
-      if (err.code !== 11000) throw err;
-      hadConflict = true;
-      logger.warn('权限初始化遇到并发冲突，继续关联 parent');
-    }
+    const created = await insertMissingPermissions(toInsert);
 
     // 修复：构建 code -> _id 映射时查询全部 defaultPermissions 的 code（含已存在的父权限），
-    // 否则已存在的模块通配符权限（如 user:*）不在映射中，新插入子权限的 parent 永远无法关联
+    // 否则已存在的模块通配符（如 user:*）不在映射中，新插入子权限的 parent 永远无法关联
     const allPermCodes = defaultPermissions.map((p) => p.code);
     const allPermissions = await Permission.find({
       code: { $in: allPermCodes },
     })
-      .select('code')
+      .select('code parent')
       .lean();
     const codeToId = new Map(allPermissions.map((p) => [p.code, p._id]));
+    const parentByCode = new Map(
+      allPermissions.map((p) => [p.code, p.parent ? String(p.parent) : null])
+    );
 
     // 批量更新 parent 关联
     // 注意：模块通配符（如 user:*）是模块的根，其 parent 必须是 null。
@@ -551,37 +603,38 @@ const initPermissions = async () => {
     // （实测 2026-09-18：10 个通配符全部自环），于是 roleController 的
     // buildPermissionTree 把它们挂进「parent 在结果集内」分支、永不进入任何模块的
     // children——连同其下 37 个子权限一起从 /api/roles/permissions/tree 消失，
-    // 角色权限编辑页拿不到任何可勾选权限。故显式跳过通配符自身。
+    // 角色权限编辑页拿不到任何可勾选权限。故显式跳过通配符自身（并按 null 纠正历史自环）。
+    //
+    // 遍历对象是 defaultPermissions 而不是 toInsert：目录就是权威形状，已存在的行
+    // 也要对账，否则历史漂移无人回收。口径与内置角色每次启动对账 rolePermissionMap
+    // 一致——运维手工把目录内权限挪到别处会被收回，目录外的自定义权限完全不受影响。
+    // 写入前与库中现值比对：已收敛的库这趟一条 updateOne 都不生成
+    // （"重复播种不下发写入"的幂等契约见 tests/services/initDataLifecycle.test.js A2）。
     const bulkOps = [];
-    for (const permData of toInsert) {
-      if (permData.code.includes(':') && !permData.code.endsWith(':*')) {
-        const moduleCode = permData.code.split(':')[0];
-        const parentCode = `${moduleCode}:*`;
-        const parentId = codeToId.get(parentCode);
-        const permId = codeToId.get(permData.code);
-        if (parentId && permId) {
-          bulkOps.push({
-            updateOne: {
-              filter: { _id: permId },
-              update: { $set: { parent: parentId } },
-            },
-          });
-        }
-      }
+    for (const permData of defaultPermissions) {
+      if (!permData.code.includes(':')) continue;
+      const isModuleRoot = permData.code.endsWith(':*');
+      const desiredId = isModuleRoot
+        ? null
+        : codeToId.get(`${permData.code.split(':')[0]}:*`) || null;
+      const permId = codeToId.get(permData.code);
+      if (!permId) continue; // 唯一键冲突下这行可能确实没落库
+      if (String(parentByCode.get(permData.code) ?? '') === String(desiredId ?? '')) continue;
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: permId },
+          update: { $set: { parent: desiredId } },
+        },
+      });
     }
 
     if (bulkOps.length > 0) {
       await Permission.bulkWrite(bulkOps);
     }
 
-    // created 以 insertMany 实际返回数组长度为准；并发冲突导致返回值丢失时回查数据库兜底，
-    // 避免 toInsert.length 把因唯一键冲突未插入成功的文档也虚报为已创建
-    const created = hadConflict
-      ? await Permission.countDocuments({ code: { $in: toInsert.map((p) => p.code) } })
-      : inserted.length;
     const skipped = defaultPermissions.length - created;
     logger.info(
-      `权限初始化完成：创建 ${created} 个，关联 ${bulkOps.length} 个 parent，跳过 ${skipped} 个`
+      `权限初始化完成：创建 ${created} 个，校准 ${bulkOps.length} 个 parent 关联，跳过 ${skipped} 个`
     );
     return { created, skipped };
   } catch (error) {
@@ -1062,6 +1115,54 @@ const reconcileUserIndexes = async () => {
   }
 };
 
+/**
+ * 对账 auditlogs 的 TTL 索引到留存声明值
+ *
+ * 留存期改档后，光改代码到不了已迁移的库：`migrate-mongo-config.js:88` 的
+ * `useFileHash: false` 让迁移标识只有文件名，`20260831000000` 与
+ * `20260919000000`（它本身就是为补前者的可达性而追加的一次性迁移）在任何跑过
+ * 它们的库上都永远算"已应用"；模型侧 `createIndexes` 遇同名不同选项只抛
+ * IndexOptionsConflict 而不会改选项。于是 `AUDIT_RETENTION_DAYS` 从 180 改到 365
+ * 之后，物理 TTL 仍按 180 天删记录——constants/retention.js 把这类偏差定性为
+ * 「对外声明留存 N 天、实际留得更少」，在合规语境下比配置错误本身更严重。
+ * 每次改档再补一条一次性迁移不可持续，故按仓内既有形态（reconcileUserIndexes /
+ * reconcileTokenBlacklistIndexes）把它收成常驻不变量。
+ *
+ * 顺带覆盖一个回滚后遗症：`20260831000000.down()` 会把 timestamp_-1 重建为
+ * **无 TTL** 索引（:89），若只回滚迁移不回滚代码，启动即声明/物理不一致——
+ * 本对账会把它补回来。
+ *
+ * 只改已存在的索引，不创建：创建是模型声明与 20260831000000 的职责，
+ * 同一件事不能有两个所有者（与 20260919000000 的幂等口径一致）。
+ *
+ * @returns {Promise<void>}
+ */
+const reconcileAuditTtlIndex = async () => {
+  try {
+    const indexes = await mongoose.connection.collection('auditlogs').indexes();
+    const idx = indexes.find((i) => i.name === 'timestamp_-1');
+    if (!idx) return;
+    if (idx.expireAfterSeconds === RETENTION_SECONDS) return;
+
+    // collMod 原地改 TTL，不需要删重建（删重建会让集合短暂失去该索引）
+    await mongoose.connection.db.command({
+      collMod: 'auditlogs',
+      index: { keyPattern: { timestamp: -1 }, expireAfterSeconds: RETENTION_SECONDS },
+    });
+    logger.warn(
+      `审计留存 TTL 由 ${idx.expireAfterSeconds ?? '（未设置）'}s 对齐为声明值 ` +
+        `${RETENTION_SECONDS}s（${RETENTION_DAYS} 天）：改档只靠迁移到不了已迁移库` +
+        '（迁移标识是文件名），物理删除窗口以声明值为准'
+    );
+  } catch (e) {
+    // 集合尚不存在＝索引必然不存在，交给模型声明与迁移（实测驱动抛的是
+    // NamespaceNotFound/26，不是返回空列表）。只放过这一种：宽口径 catch 会把
+    // 权限不足读成"没有这个索引"→ 对账静默不生效却打印成功，即假绿。
+    if (e.codeName === 'NamespaceNotFound' || e.code === 26) return;
+    logger.warn(`auditlogs TTL 对账跳过：${e.message}`);
+  }
+};
+
 const initializeSystem = async () => {
   try {
     await initPermissions();
@@ -1074,6 +1175,8 @@ const initializeSystem = async () => {
     await reconcileSuperAdmin();
     // 索引对账：清掉旧 schema 残留的唯一索引，否则 refresh 轮换会被误判为重放
     await reconcileTokenBlacklistIndexes();
+    // 留存 TTL 常驻对账：改档后迁移不会重放，这里是唯一能把声明落到物理索引的地方
+    await reconcileAuditTtlIndex();
     await initSystemConfig();
     logger.info('=== 系统初始化完成 ===');
   } catch (error) {
@@ -1090,6 +1193,7 @@ module.exports = {
   reconcileSuperAdmin,
   reconcileUserIndexes,
   reconcileTokenBlacklistIndexes,
+  reconcileAuditTtlIndex,
   initSystemConfig,
   defaultPermissions,
   defaultRoles,

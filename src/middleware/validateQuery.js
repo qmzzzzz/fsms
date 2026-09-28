@@ -15,6 +15,7 @@
  */
 
 const { validationResult } = require('express-validator');
+const { safeFieldErrors } = require('../utils/validationRules');
 const ApiResponse = require('../utils/apiResponse');
 
 /**
@@ -24,7 +25,9 @@ const ApiResponse = require('../utils/apiResponse');
 const consumeValidation = () => (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
   return next();
 };

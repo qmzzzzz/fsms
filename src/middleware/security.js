@@ -7,17 +7,28 @@ const crypto = require('crypto');
 const helmet = require('helmet');
 const logger = require('../utils/logger');
 const ApiResponse = require('../utils/apiResponse');
-const { stripControlChars, stripControlCharsDeep } = require('../utils/helpers');
+const {
+  stripControlChars,
+  stripControlCharsDeep,
+  matchesAnyPathPrefix,
+} = require('../utils/helpers');
 const { normalizeIP } = require('../utils/ipUtils');
+// 白名单豁免标记的可信边界判定复用 metricsAuth 的内网/回环判据（同一把尺子）：
+// metricsAuth 只依赖 ipUtils/apiResponse/logger，与本模块无加载环
+const { isPrivateOrLoopback } = require('./metricsAuth');
 const { auditPath, deriveAuditMeta, ROUTE_CATEGORY_MAP } = require('../utils/auditMeta');
 // T-1：顶层引入——recordEarlyRejection 经 setImmediate 异步写审计，回调可能在
 // 测试环境销毁后执行，惰性 require 会抛「import after torn down」
 const AuditLog = require('../models/AuditLog');
 const { computeFingerprint } = require('../utils/fingerprint');
-// #10：脱敏名单单一事实来源——与 models/auditLogSanitizer.js 复用同一份
-// SENSITIVE_KEYS，避免两处名单漂移（原内联名单缺 secret/apikey，同一审计体
-// 两条路径脱敏口径不一、可能明文入库）。此处仅取名单键，脱敏遍历逻辑各自保留。
-const { SENSITIVE_KEYS: AUDIT_SENSITIVE_KEYS } = require('../models/auditLogSanitizer');
+// #10：脱敏判定单一事实来源——与 models/auditLogSanitizer.js 复用同一个
+// 键名判定函数（原内联名单缺 secret/apikey，同一审计体两条路径脱敏口径不一、
+// 可能明文入库）。这里接的是**函数**而不是名单数组：名单一致而判定口径不一致
+// （子串匹配 vs 整键相等）会漂移回同一个洞。
+// body 的递归遍历逻辑本模块各自保留（要与自身的深度/占位策略对齐）；
+// params/query 直接复用 sanitizeAuditQuery，不再各抄一份名单判定
+// （它是 body 名单 ∪ 查询专用名单的并集口径，比 sanitizeAuditBody 宽一档）。
+const { isBodySensitiveKey, sanitizeAuditQuery } = require('../models/auditLogSanitizer');
 
 /**
  * CSP 违规上报端点（G9）
@@ -38,8 +49,10 @@ const cspReportEnabled = process.env.CSP_REPORT_ENABLED === 'true';
  */
 const SWAGGER_PATH_PREFIX = '/api-docs';
 
-const isSwaggerDocsPath = (req) =>
-  req.path === SWAGGER_PATH_PREFIX || req.path.startsWith(`${SWAGGER_PATH_PREFIX}/`);
+// 路径前缀判定用全仓同一把尺（按段边界 + 大小写不敏感）：Express 5 默认大小写不敏感路由，
+// 手写的 `=== / startsWith` 会让 `/API-docs` 命中 Swagger 路由却判为"非文档路径"，
+// 于是那条响应拿不到它必需的 'unsafe-inline'（方向是变严、不是漏洞，但两处口径不一致）。
+const isSwaggerDocsPath = (req) => matchesAnyPathPrefix([SWAGGER_PATH_PREFIX], req.path);
 
 const CSP_DIRECTIVES = {
   'default-src': ["'self'"],
@@ -219,7 +232,13 @@ const deepSanitizeKeys = (obj, depth = 0) => {
 };
 
 const sanitizeMongo = (req, res, next) => {
-  [req.body, req.query, req.params].forEach(deepSanitizeKeys);
+  // 必须显式包一层箭头函数：forEach 的实参是 (元素, 下标, 数组)，
+  // 直接传函数引用会把**下标**当成 deepSanitizeKeys 的 depth 入参——
+  // body 从 0 起算（正确），query 从 1、params 从 2 起算，
+  // 于是这两份的可用嵌套预算凭空少 1~2 层：第 9/8 层子树就被整体清空，
+  // 而注释承诺的是「SANITIZE_MAX_DEPTH 层内不误伤」。
+  // 方向上仍偏保守（超限是删除而非放行），所以不是注入缺口，是数据损失 + 契约不符。
+  [req.body, req.query, req.params].forEach((part) => deepSanitizeKeys(part));
   next();
 };
 
@@ -241,7 +260,10 @@ const preventHPP = hpp({
 const requireReAuthentication = () => {
   return async (req, res, next) => {
     try {
-      const { currentPassword, mfaCode } = req.body;
+      // `|| {}` 不是防御性冗余：Express 5 在 JSON 解析器跳过时把 req.body 留成
+      // undefined（v4 恒为 {}），对 undefined 解构抛 TypeError 并被下面的 catch 吞成 500——
+      // "客户端根本没带凭证"这一正常拒绝因此伪装成服务端故障（还按 UnhandledError 记 error 日志）。
+      const { currentPassword, mfaCode } = req.body || {};
 
       if (!currentPassword && !mfaCode) {
         return ApiResponse.codeError(res, 'REAUTH_REQUIRED');
@@ -264,9 +286,26 @@ const requireReAuthentication = () => {
       }
 
       // MFA 动态口令校验（I-06）：仅对已开启两步验证的用户生效
-      const { verifyTotp } = require('../utils/totp');
+      //
+      // 原实现走裸 `verifyTotp`（只回布尔），既不烧时间窗计数器也不记失败，
+      // 于是同一个合法码在 ±1 窗口（约 90s）内可**无限次重放**通过步进验证，
+      // 且错误尝试不计数、不锁定——而 6 位码空间只有 10^6。
+      // 现对齐仓内既有两处实现：authService.verifyTotpChallenge 的 P2-12 原子消费
+      // （以 `mfaLastCounter < counter` 为条件的更新，只有第一个请求能命中，
+      //  并发双花由 DB 兜底），以及 mfaService 的失败计数 + 阈值锁定。
+      // 与登录共用同一个 mfaLastCounter 字段是有意的：同一个码不得在两个上下文各用一次。
+      const { verifyTotpDetailed } = require('../utils/totp');
       const { decryptMfaSecret } = require('../utils/mfaSecret');
+      const mfaService = require('../services/mfaService');
       const User = require('../models/User');
+
+      if (await mfaService.isMfaLocked(req.user.userId)) {
+        logger.warn('敏感操作二次验证被拒（MFA 通道临时锁定中）', {
+          username: req.user.username,
+        });
+        return ApiResponse.codeError(res, 'MFA_ATTEMPTS_EXCEEDED');
+      }
+
       const user = await User.findById(req.user.userId).select('+mfaSecret');
       if (!user) {
         return ApiResponse.codeError(res, 'USER_NOT_FOUND');
@@ -275,10 +314,38 @@ const requireReAuthentication = () => {
         return ApiResponse.codeError(res, 'REAUTH_MFA_NOT_ENABLED');
       }
       // 库内 mfaSecret 为 AES-GCM 密文（存量明文由 decryptMfaSecret 原样透传）
-      if (!verifyTotp(decryptMfaSecret(user.mfaSecret), String(mfaCode || '').trim())) {
-        logger.warn('敏感操作二次验证失败（MFA 验证码错误）', { username: req.user.username });
+      // mfaCode 此处必为真值：上面的守卫要求"密码与验证码至少有一个"，而密码分支已 return。
+      const totpResult = verifyTotpDetailed(
+        decryptMfaSecret(user.mfaSecret),
+        String(mfaCode).trim()
+      );
+      let claimedCounter = false;
+      if (totpResult.valid) {
+        const advanced = await User.findOneAndUpdate(
+          {
+            _id: user._id,
+            $or: [
+              { mfaLastCounter: { $lt: totpResult.counter } },
+              { mfaLastCounter: { $exists: false } },
+              { mfaLastCounter: null },
+            ],
+          },
+          { $set: { mfaLastCounter: totpResult.counter } },
+          { new: true }
+        ).catch(() => null);
+        claimedCounter = !!advanced;
+      }
+      if (!totpResult.valid || !claimedCounter) {
+        // 重放与口令错误同样计入失败并按同一码拒绝：不向调用方区分
+        // "码正确但已消费"，否则本端点又变成一个验证码探测面。
+        await mfaService.recordMfaFailure(user);
+        logger.warn('敏感操作二次验证失败（MFA 验证码错误或重放）', {
+          username: req.user.username,
+          replayed: totpResult.valid && !claimedCounter,
+        });
         return ApiResponse.codeError(res, 'REAUTH_MFA_INCORRECT');
       }
+      await mfaService.resetMfaFailures(user._id);
       req.reAuthenticated = true;
       return next();
     } catch (error) {
@@ -353,7 +420,10 @@ const invalidateIPBlockCache = (ip) => {
  * 直写 AuditLog.record 而不走 auditBuffer：这类事件量小且属安全信号，
  * 需要即时可查（暴力探测检测也依赖实时性），与 ip_range_denied 同口径。
  * @param {import('express').Request} req
- * @param {{action: string, reason: string, riskFactors: string[], riskLevel?: string}} meta
+ * @param {{action: string, reason: string, riskFactors: string[], riskLevel?: string, statusCode?: number}} meta
+ *        statusCode 缺省 403（黑名单/来源这两类都是拒绝式 403）；
+ *        查询形态守卫那类是 400，必须传真实值——审计里记错状态码，
+ *        等于让事后统计把"畸形请求被拒"算成"越权被拒"。
  * @returns {void}
  */
 const recordEarlyRejection = (req, meta) => {
@@ -366,13 +436,15 @@ const recordEarlyRejection = (req, meta) => {
         username: req.user?.username || 'anonymous',
         sessionId: req.user?.sessionId || null,
         fingerprint: computeFingerprint(req),
-        method: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)
-          ? req.method
-          : undefined,
+        // method 原样交下去：取值全集与"越枚举怎么办"由 AuditLog schema
+        // （constants/audit.js 的 AUDIT_HTTP_METHODS + setter）单点决定。
+        // 原先这里私抄一份 5 动词白名单，把 HEAD/OPTIONS 探测**静默降级成无 method 的记录**，
+        // 而这类探测恰恰是安全信号——事后看不出它是 HEAD。
+        method: req.method,
         path: auditPath(req),
         ip: req.ip,
         userAgent: stripControlChars(req.get('user-agent'), 512),
-        statusCode: 403,
+        statusCode: meta.statusCode || 403,
         success: false,
         riskLevel: meta.riskLevel || 'medium',
         riskFactors: meta.riskFactors,
@@ -382,6 +454,42 @@ const recordEarlyRejection = (req, meta) => {
       logger.debug(`早期拒绝审计写入跳过：${e.message}`);
     }
   });
+};
+
+/**
+ * 白名单豁免标记（req.ipWhitelisted）的**可信边界**判定（2026-09-26 审计 Top3）
+ *
+ * 为什么需要：req.ip 在 TRUST_PROXY_HOPS>0 时取自 X-Forwarded-For（生产 compose
+ * 默认 1 跳），能直连应用端口的主体（容器网络、误配入口、SSRF 跳板）伪造一跳
+ * XFF 即可把 req.ip 变成任意白名单 IP——该标记会被资源型限流（rateLimit.js 的
+ * skipIfWhitelisted）、CSRF 来源校验（originCheck.js）、query 长度限制
+ * （queryLimit.js queryLengthLimit）同时豁免，一次伪造拿到三重豁免（伪造实测
+ * 口径见 tests 的 laneE/xffCredentialLimiter）。修复范式与 metricsAuth 的 M-07
+ * 同源：安全豁免只信**不可伪造的 socket 对端**。
+ *
+ * 三种可发放形态（其余一律不发，宁可不豁免也不能被伪造头买通）：
+ *  1) 未启用 trust proxy：req.ip 恒等于 socket 对端，请求头不参与判定；
+ *  2) 请求未携带 X-Forwarded-For：即使 trust proxy 开着，req.ip 也只能是 socket 对端；
+ *  3) trust proxy 开启且携带 XFF：req.ip 来自请求头，只有 socket 对端属于
+ *     内网/回环（即 nginx/容器网络等基础设施，与 metricsAuth 的放行口径一致）时，
+ *     该 XFF 才是可信代理写入的（生产 nginx 覆写 `X-Forwarded-For $remote_addr`）。
+ * 经 nginx 的正常流量命中 3) ⇒ 办公网 IP 白名单功能不受影响；
+ * 公网直连 + 伪造 XFF 落在 3) 的拒绝侧 ⇒ 三重豁免不再可用。
+ *
+ * 黑名单判定本身不在此门控范围：它消费 clientIP（经代理认定的客户端身份），
+ * 伪造 XFF 本就能换成任意未封禁 IP——那是 req.ip 语义的既有边界，由网络层
+ * （仅 nginx 可达应用端口）兜底，与豁免标记的收紧是两件事。
+ *
+ * @param {import('express').Request} req
+ * @returns {boolean} true=可发放豁免标记
+ */
+const isWhitelistExemptionTrustworthy = (req) => {
+  const trustProxy =
+    req.app && typeof req.app.get === 'function' ? req.app.get('trust proxy') : false;
+  if (!trustProxy) return true;
+  if (req.get('x-forwarded-for') === undefined) return true;
+  const peer = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+  return isPrivateOrLoopback(peer);
 };
 
 const checkIPBlacklist = async (req, res, next) => {
@@ -396,9 +504,18 @@ const checkIPBlacklist = async (req, res, next) => {
       IPBlacklist.isBlocked(clientIP),
     ]);
 
-    // 白名单优先：命中则豁免黑名单拦截，并挂标记供限流器豁免
+    // 白名单优先：命中则豁免黑名单拦截，并挂标记供限流器豁免。
+    // 豁免标记只在可信边界内发放（见 isWhitelistExemptionTrustworthy）：
+    // 命中但边界不可信时**不发放标记、也不拦截请求**——限流与来源校验照常生效，
+    // 只损失"不该有的豁免"，不产生可用性回退
     if (isWhitelisted) {
-      req.ipWhitelisted = true;
+      if (isWhitelistExemptionTrustworthy(req)) {
+        req.ipWhitelisted = true;
+      } else {
+        logger.warn(
+          `白名单命中但来源边界不可信（公网直连且携带 X-Forwarded-For），豁免标记不下发：${clientIP}`
+        );
+      }
       // 已被信任的 IP 不应留有封禁缓存，否则 DB 故障期会被误拦
       invalidateIPBlockCache(clientIP);
       return next();
@@ -415,17 +532,24 @@ const checkIPBlacklist = async (req, res, next) => {
         riskLevel: 'high',
       });
       // 黑名单命中通知（可观测性轮）：按 IP 频控去重后投递 webhook，
-      // fire-and-forget 不拖慢拦截路径
+      // fire-and-forget 不拖慢拦截路径。
+      // F-214：这里必须走统一入口 dispatchNotification，不能写成
+      // `void sendNotification(...)`。裸调的 promise 没有 catch，而**下面这个
+      // try 抓不到异步 reject**（async 函数不抛异常，它返回 rejected promise），
+      // 于是「通知失败不影响主流程」这句注释在裸 void 下是不成立的：它会命中
+      // index.js 的 unhandledRejection 分支，而那条分支在所有环境都 process.exit(1)。
+      // 换成统一入口之后这个 try/catch 才真的闭合：它覆盖的是 require 与
+      // shouldSendAlert 两处同步抛点，没有逃逸的异步路径。
       try {
-        const { shouldSendAlert, sendNotification } = require('../services/securityAlert');
+        const { shouldSendAlert, dispatchNotification } = require('../services/securityAlert');
         if (shouldSendAlert('blacklist_hit_' + clientIP)) {
-          void sendNotification('ip_blacklist_hit', 'high', '黑名单 IP 访问被拦截：' + clientIP, {
+          dispatchNotification('ip_blacklist_hit', 'high', '黑名单 IP 访问被拦截：' + clientIP, {
             ip: clientIP,
             path: req.originalUrl,
           });
         }
       } catch (_) {
-        /* 通知失败不影响拦截主流程 */
+        /* 通知失败不影响拦截主流程（同步部分；异步部分由统一入口的 catch 负责） */
       }
       return ApiResponse.codeError(res, 'IP_BLOCKED');
     }
@@ -471,6 +595,11 @@ const checkIPBlacklist = async (req, res, next) => {
  * @param {number} durationMs - 封禁时长（毫秒），默认 1 小时
  * @param {string} reason - 封禁原因
  * @param {string} source - 封禁来源（manual/auto）
+ * @returns {Promise<{banned: boolean, reason?: string, normalizedIp?: string}>}
+ *   本函数**从不抛错**（内部自己 catch 掉持久化失败），所以"await 正常返回"绝不等于"封禁生效"。
+ *   成功与否只能靠这个返回值判断，调用方不得按"没抛异常"记成功：
+ *   - `{banned:true, normalizedIp}`：黑名单已落库；
+ *   - `{banned:false, reason}`：一条记录都没写，reason ∈ unparsable_ip / whitelisted / persist_failed。
  */
 const addToBlacklist = async (
   ip,
@@ -484,22 +613,24 @@ const addToBlacklist = async (
     const normalizedIp = normalizeIP(ip);
     if (!normalizedIp) {
       logger.warn(`IP 黑名单添加跳过：无法解析的地址 ${ip}`);
-      return;
+      return { banned: false, reason: 'unparsable_ip' };
     }
 
     // 白名单优先：信任 IP 不做自动封禁（如内网监控探针等可信来源的高频请求）
     const whitelisted = await IPBlacklist.isWhitelisted(normalizedIp).catch(() => false);
     if (whitelisted) {
       logger.info(`IP ${normalizedIp} 在白名单中，跳过自动封禁`);
-      return;
+      return { banned: false, reason: 'whitelisted' };
     }
 
     await IPBlacklist.blockIP(normalizedIp, { reason, durationMs, source });
     logger.warn(
       `IP 已加入黑名单：${normalizedIp}, 封禁时长：${durationMs / 1000}秒, 原因：${reason}`
     );
+    return { banned: true, normalizedIp };
   } catch (err) {
     logger.error(`IP 黑名单添加失败：${ip}, 错误：${err.message}`);
+    return { banned: false, reason: 'persist_failed' };
   }
 };
 
@@ -522,8 +653,13 @@ const addToBlacklist = async (
  * 逐层剥离 req.path，用 req.path 会导致全部记录退化为 category=system 且排除规则失效。
  */
 const auditLog = (options = {}) => {
+  // 延迟 require：originCheck 顶层就 require 了本模块（recordEarlyRejection），
+  // 反向在顶层 require 会成环拿到半初始化导出
+  const { WRITE_METHODS } = require('./originCheck');
   const {
-    operations = ['POST', 'PUT', 'DELETE', 'PATCH'],
+    // 写操作口径的单一事实来源（原此处再写一遍四个方法名，与 originCheck 的 CSRF 闸
+    // 各自漂移过：一处加了方法，另一处就出现"拦了但没审计"/"审计了但没拦"）
+    operations = WRITE_METHODS,
     excludePaths = ['/api/auth/login', '/api/auth/refresh'],
     // 敏感读取路径白名单：GET 请求命中这些前缀时也走审计，但不记录请求体；
     // 报表导出/审计日志查询与导出为批量数据出口，必须纳入审计（补齐审计盲区）。
@@ -550,14 +686,25 @@ const auditLog = (options = {}) => {
 
     // 跳过不需要审计的路径（登录/刷新由 authController 写专用事件型审计，
     // 此处必须用 fullPath 判断，否则排除失效会产生 anonymous 的重复记录）
-    if (excludePaths.some((p) => fullPath === p || fullPath.startsWith(`${p}/`))) {
+    if (matchesAnyPathPrefix(excludePaths, fullPath)) {
       return next();
     }
 
     // 判断是否为需审计的 GET 敏感读取（命中白名单前缀）
+    // 必须与路由同尺（大小写不敏感）：GET /API/reports/export 真实执行导出，
+    // 若这里仍做大小写敏感比较，改一个字母大小写即可静默批量导出数据而零留痕
+    //
+    // HEAD 与 GET 同判：Express 的 Route.dispatch 把 HEAD 归一成 GET
+    // （`if (method === 'HEAD') method = 'GET'`），所以 `app.get('/api/reports/export')`
+    // 的处理函数对 HEAD **全量执行**——报表导出把 workbook 完整生成一遍、Node 只是
+    // 不把响应体写出去。原先这一行只认 `req.method === 'GET'`，而 WRITE_METHODS
+    // 又不含 HEAD，于是 HEAD 是一条既跑了业务、又零留痕的口子。实测（真实 createApp，
+    // 带 user:read 的合法令牌）：GET /api/users 审计增量 1、HEAD /api/users 审计增量 0。
+    // 攻击者拿到一个只读账号即可反复批量取数而审计页面上什么都不存在。
+    // HEAD 已在 constants/audit.js 的 AUDIT_HTTP_METHODS 里，不需要动 schema。
     const isGetAudit =
-      req.method === 'GET' &&
-      auditGetPaths.some((p) => fullPath === p || fullPath.startsWith(`${p}/`));
+      (req.method === 'GET' || req.method === 'HEAD') &&
+      matchesAnyPathPrefix(auditGetPaths, fullPath);
 
     // 只记录指定类型的操作，或命中 GET 审计白名单
     if (!operations.includes(req.method) && !isGetAudit) {
@@ -596,7 +743,17 @@ const auditLog = (options = {}) => {
       // 用中间件入口已固化的 fullPath 派生：res.json 时刻 req.path 会被路由二次剥离，
       // 且 req.params 此时才有值，故路径必须取快照而非现读
       const { category, action } = deriveAuditMeta(req);
-      const success = res.statusCode < 400;
+      // 状态码在流式响应里早在第一个 chunk 之前就已发出（200），此后出错无法回改。
+      // 于是"半截 CSV/半截 Excel"会被记成一次**成功导出**——而审计库正是事后追责的
+      // 依据，不能替失败的导出背书。由 errorHandler 与导出控制器在"错误终止响应"时
+      // 显式打这个标记（人读的原因走 logger.error，这里只翻转机器可读的结论）。
+      const abortedAfterHeaders = Boolean(res.locals && res.locals.responseAbortedByError);
+      const success = res.statusCode < 400 && !abortedAfterHeaders;
+      // 告诉错误处理器"这条审计已经落出去了"：流式响应在**第一个 chunk** 时就记一条
+      // （P0-6 的刻意设计，崩溃也不丢记录），且 auditBuffer.push 会同步写 WAL，
+      // 之后再改内存对象只会让 WAL 与库不一致。所以事后失败只能追加一条更正事件，
+      // 不能就地翻转——这正是 append-only 审计的正确形态。
+      if (res.locals) res.locals.auditRecordWritten = true;
 
       // 异步记录（不阻塞响应）；回调体见模块级 persistAuditRecord（体积棘轮拆分）
       setImmediate(() =>
@@ -666,8 +823,17 @@ const persistAuditRecord = (ctx) => {
   // 控制字符清洗：userAgent / params / query 为外部可控输入，
   // 含 \n \r \u0000 时会污染下游日志渲染与 SIEM 解析，入库前统一剥离
   const safeUserAgent = stripControlChars(req.get('user-agent'), 512);
-  const safeParams = stripControlCharsDeep(req.params || {});
-  const safeQuery = stripControlCharsDeep(req.query || {});
+  // 键脱敏（此前缺）：body 走 SENSITIVE_KEYS 名单，而 params/query **完全不脱敏**，
+  // 于是 `POST /api/auth/refresh?refreshToken=<真 JWT>` 这类经 query 传令牌的请求，
+  // 会把可用凭证原样写进不可篡改、且会被定期导出成 CSV 的审计集合——
+  // 审计库因此成了凭据库。名单与 body 同源（auditLogSanitizer 单一事实来源，
+  // 其匹配是 matchesSensitiveBodyKey：先把键名里的空白/控制字符删掉再比子串，
+  // 故 refreshToken/accessToken 能命中，插在词中间的 `pass\u0000word` 也能命中）。
+  // query/params 额外并上「查询专用名单」（与 morgan URL 打码同一份口径）：
+  // `?code=` / `?otp=` / `?authorization=` 这类裸键不含 token/password 子串，
+  // 子串名单抓不到；而只用查询名单又会漏 camelCase（盲区方向相反），所以取并集。
+  const safeParams = sanitizeAuditQuery(stripControlCharsDeep(req.params || {}));
+  const safeQuery = sanitizeAuditQuery(stripControlCharsDeep(req.query || {}));
   const { computeFingerprint } = require('../utils/fingerprint');
   const fingerprint = computeFingerprint(req);
 
@@ -701,8 +867,8 @@ const persistAuditRecord = (ctx) => {
       ? null
       : (() => {
           // 脱敏敏感字段（递归处理嵌套对象与数组，防止嵌套的密码/令牌明文入库）
-          // #10：名单来自 models/auditLogSanitizer 单一事实来源（含 secret/apikey）
-          const SENSITIVE_KEYS = AUDIT_SENSITIVE_KEYS;
+          // #10：判定函数来自 models/auditLogSanitizer 单一事实来源（含 secret/apikey，
+          // 且与它同样先删键名噪声再比子串）
           // P1-10 修复（2026-09-17）：深度超限**不得原样返回子树**。
           // 原实现 `depth > 6` 时 return value，而 sanitizeMongo 的
           // SANITIZE_MAX_DEPTH = 10（本文件上方）——7/8/9 层嵌套的明文
@@ -726,9 +892,16 @@ const persistAuditRecord = (ctx) => {
             if (Array.isArray(value)) return value.map((v) => sanitizeValue(v, depth + 1));
             const cleaned = {};
             for (const [k, v] of Object.entries(value)) {
-              cleaned[k] = SENSITIVE_KEYS.some((s) => k.toLowerCase().includes(s))
-                ? '***'
-                : sanitizeValue(v, depth + 1);
+              // 必须用 defineProperty 落键：express.json 走 JSON.parse，`{"__proto__":{...}}`
+              // 的 __proto__ 是**自身可枚举键**，`cleaned[k] = ...` 会触发 Object.prototype
+              // setter 使该键整个消失 ⇒ 攻击探针在审计副本里蒸发。models/auditLogSanitizer.js
+              // 早已为此改成 defineProperty，本函数是同一规则的第二份实现，此前漏改。
+              Object.defineProperty(cleaned, k, {
+                value: isBodySensitiveKey(k.toLowerCase()) ? '***' : sanitizeValue(v, depth + 1),
+                enumerable: true,
+                writable: true,
+                configurable: true,
+              });
             }
             return cleaned;
           };
@@ -839,7 +1012,7 @@ const assertAuditCategoryConsistency = () => {
  * **之后** —— body 已经被完整读入并解析完，该项收益完全不存在，注释与行为背离。
  * 头部卫生/方法白名单/Host 校验同理：越早拒绝，下游解析器暴露面越小。
  *
- * securityHeaders 等响应头中间件一并前置，使被拒绝的 4xx 响应同样带安全头。
+ * 响应头卫生不在这里挂载，见下面的 applyResponseHardening（它必须比本函数更早）。
  * @param {import('express').Application} app
  * @returns {void}
  */
@@ -847,12 +1020,6 @@ const applyPreBodySecurity = (app) => {
   // 启动期防护：审计分类映射与模型枚举不一致时拒绝启动，避免审计静默丢失
   assertAuditCategoryConsistency();
 
-  // nonce 必须先于 securityHeaders 挂载：helmet 写 CSP 头时读取 res.locals.cspNonce
-  app.use(attachCspNonce);
-  app.use(securityHeaders);
-  app.use(ensureHsts);
-  app.use(permissionsPolicy);
-  app.use(reportingEndpoints);
   // 协议合规校验：置于 body 解析之前，畸形请求早拒绝、不进入下游解析
   const { protocolCompliance } = require('./protocolCompliance');
   // 评价报告低危项：Content-Length 上限与 express.json 的 body 上限（1mb）
@@ -860,6 +1027,29 @@ const applyPreBodySecurity = (app) => {
   // 413 拒掉，两道闸门口径不一，审计里的拒绝原因也不一致。
   // 业务载荷均为小表单（无文件上传端点），1MB 是两层的统一收口。
   app.use(protocolCompliance({ maxContentLength: 1024 * 1024 }));
+};
+
+/**
+ * 挂载「纯写响应头」的那一段 —— 必须是 createApp 里最早的中间件
+ *
+ * 为什么单独成一段、且要排在 IP 黑名单与两个全局限流**之前**：响应头前置此前只做到
+ * protocolCompliance 之前，而 ipLimiter/generalLimiter 与 checkIPBlacklist 为了封住
+ * "小请求放大成链上审计写入"特意挂得比它更早 ⇒ 全站最早的两类拒绝（429 与黑名单 403）
+ * 反而一个安全头都没有，helmet 的 hidePoweredBy 也在这两条路径上失效——被限流/封禁的
+ * 响应替攻击者把 `X-Powered-By` 送出来，全站唯此处泄露服务器指纹。
+ *
+ * 前置不违背限流前移的两条理由：这一段不读 body、不碰数据库，只 setHeader
+ * （每请求 16 字节 randomBytes 生成 CSP nonce，开销相对 express 路由可忽略）。
+ * 顺序不变量：attachCspNonce 必须先于 securityHeaders（helmet 写 CSP 头时读取 res.locals.cspNonce）。
+ * @param {import('express').Application} app
+ * @returns {void}
+ */
+const applyResponseHardening = (app) => {
+  app.use(attachCspNonce);
+  app.use(securityHeaders);
+  app.use(ensureHsts);
+  app.use(permissionsPolicy);
+  app.use(reportingEndpoints);
 };
 
 /**
@@ -883,6 +1073,7 @@ const applyPostBodySecurity = (app) => {
  * @returns {void}
  */
 const applySecurity = (app) => {
+  applyResponseHardening(app);
   applyPreBodySecurity(app);
   applyPostBodySecurity(app);
 };
@@ -899,12 +1090,14 @@ module.exports = {
   preventHPP,
   requireReAuthentication,
   checkIPBlacklist,
+  isWhitelistExemptionTrustworthy,
   addToBlacklist,
   invalidateIPBlockCache,
   auditLog,
   fileUploadSecurity,
   recordEarlyRejection,
   applySecurity,
+  applyResponseHardening,
   applyPreBodySecurity,
   applyPostBodySecurity,
 };

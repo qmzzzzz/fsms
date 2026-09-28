@@ -43,6 +43,48 @@ const socketTimeoutMS = envInt('MONGO_SOCKET_TIMEOUT_MS', 45000);
 const heartbeatFrequencyMS = envInt('MONGO_HEARTBEAT_MS', 10000);
 
 /**
+ * 连接失败日志的凭据脱敏
+ *
+ * 为什么必须有：`MONGODB_URI` 按本仓约定**内含数据库口令**（config/secrets.js 把它
+ * 列入 FILE_BACKED_SECRETS 的理由原文就是"内含数据库口令"，并专门讨论过
+ * `docker inspect` / `docker compose config` 等回显面）。而 mongoose 8.24.1 解析连接串
+ * 用的是它**内嵌**的那一份 mongodb-connection-string-url@3.0.2，该版本在
+ * 「带 userinfo 但缺 host」的形态下会把**整条 URI 原样拼进报错文本**：
+ *
+ *   mongoose.connect('mongodb://appuser:s3cret@/fsms')
+ *     → MongoParseError: Protocol and host list are required in "mongodb://appuser:s3cret@/fsms"
+ *
+ * 下面 `connectDB` 的 catch 直接打印 `error.message`，于是这一形态会把明文口令
+ * 写进日志文件——且重试 5 次就是写 5 遍（外加最后那遍 error 级）。
+ *
+ * **这个坑只有按「消费点」才能测出来**：顶层 mongodb@7.5.0 带的同包是 7.0.2，
+ * 同一输入只抛常量串 `Protocol and host list are required in the uri`、不回显 URI。
+ * 因此用 `new MongoClient(uri)` 做验证会得出「不泄漏」的**反向结论**；
+ * 真正的消费点是 `mongoose.connect`。该形状由
+ * src/tests/config/databaseCredentialRedaction.test.js 钉住（上游若改掉会先红）。
+ *
+ * 脱敏只替换 URI 的 userinfo 段（`scheme://user:pass@` → `scheme://***:***@`），
+ * scheme / host / port / db 全部保留——定位配置错误所需的信息不受影响。
+ * 对不含 `@` 的文本（如 ECONNREFUSED）是恒等变换。
+ *
+ * 两条边界是刻意选的（宁可多脱一点，也不能漏）：
+ *   - scheme 按 RFC 3986 的 `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` 匹配，
+ *     而不是 `\w+`——否则 `mongodb+srv://user:pass@host` 里的 `+` 会让整条不匹配、
+ *     口令原样落盘（SRV 串是本仓 MONGODB_URI 的合法形态）。
+ *   - userinfo 段用 `[^@\s]*` 而不是 `[^/@\s]*`：口令里出现**未转义**的 `/`
+ *     （如 `mongodb://user:a/b@/db`）时后者会整条失配、同样漏出口令。
+ *     代价是极端情况下可能多吃一段（如 `http://h1,mongodb://u:p@h2` 无空格相连），
+ *     属于「多脱敏」——安全方向上可接受。
+ *
+ * @param {unknown} text 待写入日志的文本（通常为 `error.message`）
+ * @returns {unknown} 已脱敏的文本；非字符串原样返回
+ */
+const redactUriCredentials = (text) =>
+  typeof text === 'string'
+    ? text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^@\s]*@/gi, '$1***:***@')
+    : text;
+
+/**
  * 连接 MongoDB（带指数退避重试）
  * @param {number} [retries=MAX_RETRIES] 剩余重试次数
  */
@@ -63,12 +105,14 @@ const connectDB = async (retries = MAX_RETRIES) => {
       // 指数退避：第 n 次重试等待 RETRY_DELAY_MS * 2^n（3s → 6s → 12s → 24s → 30s 封顶）
       const delayMs = retryDelayMs(MAX_RETRIES - retries);
       logger.warn(
-        `数据库连接失败，${delayMs / 1000}s 后重试（剩余 ${retries} 次）：${error.message}`
+        `数据库连接失败，${delayMs / 1000}s 后重试（剩余 ${retries} 次）：${redactUriCredentials(error.message)}`
       );
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       return connectDB(retries - 1);
     }
-    logger.error(`数据库连接失败（已重试 ${MAX_RETRIES} 次）：${error.message}`);
+    logger.error(
+      `数据库连接失败（已重试 ${MAX_RETRIES} 次）：${redactUriCredentials(error.message)}`
+    );
     // P1-13：等 transport 队列排空后再退出（原为紧接 exit，日志实测丢失）。
     return exitAfterFlush(1);
   }
@@ -84,7 +128,10 @@ mongoose.connection.on('reconnected', () => {
 });
 
 mongoose.connection.on('error', (err) => {
-  logger.error(`MongoDB 连接错误：${err.message}`);
+  // 同一把尺子：驱动报错文本可能带连接串（含 userinfo），此处同样脱敏
+  logger.error(`MongoDB 连接错误：${redactUriCredentials(err.message)}`);
 });
 
 module.exports = connectDB;
+// 测试钩子：与 utils/logger.js 的 `logger.__test` 同惯例（纯函数，不参与运行时路径）
+connectDB.__test = { redactUriCredentials };

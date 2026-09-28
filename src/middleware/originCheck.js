@@ -20,14 +20,21 @@
 
 const config = require('../config');
 const logger = require('../utils/logger');
+// 本中间件在认证之前就会被触发，两条拒绝日志都含**攻击者全控**的内容：
+// - originalUrl 的 query 可能带令牌（与 app.js 对 morgan :url 做 redactUrlQuery 同一理由）
+// - origin 本身：含 \n 即可在 printf 格式的日志里伪造整行
+const { redactUrlQuery, stripControlChars } = require('../utils/helpers');
 // P3-35：早期 403 留痕。延迟到调用时 require 以避免 middleware 目录内的
 // 模块加载顺序耦合（security.js 体量大且会按需引入模型）
 const recordEarlyRejection = (req, meta) => {
   require('./security').recordEarlyRejection(req, meta);
 };
 
-// 需要校验来源的写方法（与 auditLog 的写操作口径一致）
-const WRITE_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
+// 需要校验来源的写方法（与 auditLog 的写操作口径一致 —— 这句话此前是**约定**而不是
+// 事实：auditLog 的默认 operations、behaviorBaseline 的 writes 聚合各自又写了一遍同样的
+// 四个方法，任一处增删就会出现"CSRF 拦了但没审计"或反之。现由本数组作单一事实来源，
+// 冻结是为了让它能安全地作为默认值被共享（否则某个调用方 push 一下就同时改掉了 CSRF 闸）。
+const WRITE_METHODS = Object.freeze(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
  * 与 app.js 中 CORS 白名单回退逻辑保持一致（无参调用时的兜底白名单）
@@ -87,7 +94,10 @@ const createOriginCheck = (allowedOrigins) => {
 
   return (req, res, next) => {
     // IP 白名单豁免：checkIPBlacklist 已在更早阶段（CORS 之前）判定可信来源，
-    // 白名单 IP 不受来源校验约束（内网工具/探针等非浏览器客户端可能携带非常规 Origin）
+    // 白名单 IP 不受来源校验约束（内网工具/探针等非浏览器客户端可能携带非常规 Origin）。
+    // 该标记只在可信边界内发放（security.js isWhitelistExemptionTrustworthy）：
+    // 公网直连伪造 XFF 冒充白名单 IP 时标记不下发，来源校验不会被伪造头买通
+    // ——本中间件因此无需自带边界判定，消费侧保持"读标记"一个动作
     if (req.ipWhitelisted === true) {
       return next();
     }
@@ -109,7 +119,7 @@ const createOriginCheck = (allowedOrigins) => {
     // 防止利用空串的 falsy 特性绕过白名单
     if (origin === '') {
       logger.warn(
-        `来源校验失败（空 Origin）：method=${req.method} path=${req.originalUrl} ip=${req.ip}`
+        `来源校验失败（空 Origin）：method=${req.method} path=${redactUrlQuery(req.originalUrl)} ip=${req.ip}`
       );
       // P3-35：本中间件挂在 auditLog 之前（写操作必须在触达控制器前拦下），
       // 其 403 此前只进 logger 不进审计——CSRF 探测在合规留存里毫无痕迹
@@ -126,7 +136,7 @@ const createOriginCheck = (allowedOrigins) => {
     }
 
     logger.warn(
-      `来源校验失败：origin=${origin} method=${req.method} path=${req.originalUrl} ip=${req.ip}`
+      `来源校验失败：origin=${stripControlChars(origin, 256)} method=${req.method} path=${redactUrlQuery(req.originalUrl)} ip=${req.ip}`
     );
     recordEarlyRejection(req, {
       action: 'csrf_origin_denied',

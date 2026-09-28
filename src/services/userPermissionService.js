@@ -12,10 +12,15 @@
  *  - 用户级失效：assignRoles 等变更某用户角色时，仅删除该用户条目
  *  - 全局失效：角色权限被修改（assignPermissions）时清空整个缓存（permCache.clear()）
  *
- * L-16 修正：原注释称"全局失效靠递增 generation 使旧条目过期"，但代码中从未
- * 递增过该变量（`permCacheGeneration` 只被读取），实际走的是 `clear()`。
- * 二者语义等价（都让旧条目立即失效），`clear()` 更彻底；已删除该死变量并把
- * 注释改为描述真实机制，避免维护者据此误以为"无需 clear，递增代际即可"。
+ * L-16 与后续修正：这里的 `permCacheGeneration` 有一段反复。
+ *  L-16 时它"只被读取、从未递增"，因此是死变量，被删掉并把注释改成描述真实
+ *  机制（全局失效走 `clear()`）——那一步判断本身没错，错在删完没留等价机制：
+ *  getPermissions 是"先 await 查库、后 set 写回"，失效若落在这一趟往返中间，
+ *  delete/clear 都作用在一个还不存在的条目上，随后 in-flight 的旧结果把条目
+ *  种回去，主动失效被静默撤销到 TTL 到期（方向是"收回的权限仍能放行"）。
+ *  现在代际被重新引入，且**两侧都接上了**：invalidatePermissionCacheLocal 递增、
+ *  getPermissions 写回前比对（见该处注释）。与 middleware/auth.js 用户缓存的
+ *  queryStartedAt/invalidatedDuringQuery 是同一条不变量的第二次实现。
  *
  * ================= 跨实例主动失效（L-4） =================
  * 单进程内上述缓存自洽，但多副本部署时各进程各持一份缓存：实例 A 改了某用户
@@ -40,6 +45,24 @@ function getUserModel() {
 // 共享缓存门面（失效广播）。sharedCache 仅依赖 logger，无循环依赖，可顶层引入。
 // 未配置 REDIS_URL 时 publishInvalidate/onInvalidate 均为无操作。
 const sharedCache = require('./sharedCache');
+
+/**
+ * 缓存代际：每次本地失效 +1，读路径据此拒绝写回（见 getPermissions 的写回闸门）。
+ *
+ * 要防的窗口：getPermissions 是"先查库、后 set"，而查库是一次 await。
+ * 若 invalidatePermissionCache 落在这一趟往返中间，它 delete 的是一个**还不存在**的
+ * 条目（no-op），随后 in-flight 的读取拿着"改权限之前"的权限集把条目种回去，
+ * 于是这次主动失效被静默撤销、最长到 TTL（30 秒）才收敛。
+ * 方向上是授权而不是显示问题：被收回的权限在这 30 秒里照常放行，与本文件
+ * getPermissions 的 populate match 处口径（「停用角色或权限项后必须立即失效，
+ * 不得等缓存自然过期」）直接矛盾。
+ * 与 middleware/auth.js 的 queryStartedAt/invalidatedDuringQuery 是同一条不变量——
+ * 那里早已修过，这里是漏网的一处（旧的代际变量被 L-16 当死代码删掉时没留等价机制）。
+ *
+ * 判定粗（任何一次失效会连带让并发的写回一起作废）是刻意的方向选择：
+ * 代价只是下一次多查一次库，收益是绝不会把旧的权限集当成最新结果缓存下来。
+ */
+let permCacheGeneration = 0;
 
 const permCache = new Map(); // userId -> { perms, expireAt }
 const PERM_CACHE_TTL_MS = 30 * 1000;
@@ -95,6 +118,8 @@ async function getPermissions(userId) {
     return cached.perms;
   }
 
+  // 查库前取号，写回时比对（见文件头 permCacheGeneration）
+  const genAtRead = permCacheGeneration;
   const user = await User.findById(key).populate({
     path: 'roles',
     // 仅生效角色/权限参与授权（与 permissionHelper.getUserPermissions 同口径）：
@@ -114,7 +139,7 @@ async function getPermissions(userId) {
   }
 
   const permissions = new Set();
-  // match 过滤后数组可能残留 null 占位，需跳过
+  // 防御性 filter(Boolean)：实测 mongoose 8.24.1 不留 null 洞（见 zzqoder_populateMatchShape.test.js），保留以防版本改行为
   user.roles.filter(Boolean).forEach((role) => {
     (role.permissions || []).filter(Boolean).forEach((perm) => permissions.add(perm.code));
   });
@@ -122,7 +147,12 @@ async function getPermissions(userId) {
 
   // 容量保护：超过上限直接清空（重建成本远低于逐条淘汰的复杂度）
   if (permCache.size >= PERM_CACHE_MAX_SIZE) permCache.clear();
-  permCache.set(key, { perms, expireAt: now + PERM_CACHE_TTL_MS });
+  // 写回闸门：查库期间发生过本地失效 ⇒ 本次结果可能是失效前的旧权限集，
+  // 缓存它等于把刚 delete 掉的条目重新种回去（收回的权限继续放行到 TTL 到期）。
+  // 宁可这次不缓存、让下一个请求再查一趟库。
+  if (permCacheGeneration === genAtRead) {
+    permCache.set(key, { perms, expireAt: now + PERM_CACHE_TTL_MS });
+  }
 
   return perms;
 }
@@ -132,12 +162,13 @@ async function getPermissions(userId) {
  * @param {string} [userId] - 指定用户则仅失效该用户；不传则全局失效（角色权限定义变更时使用）
  */
 function invalidatePermissionCacheLocal(userId) {
+  permCacheGeneration += 1;
   if (userId !== undefined && userId !== null) {
     permCache.delete(String(userId));
   } else {
-    // 全局失效：直接清空。此处曾写作「读取路径的 gen 校验与 clear 二选一」，
-    // 但代际变量（permCacheGeneration）从未被递增过、已删除（L-16），
-    // 读取路径并无 gen 校验——保留这句话会让维护者以为存在第二种失效机制。
+    // 全局失效：直接清空。历史实现依赖一个"代际变量 + 读取路径校验"的组合，
+    // 但那个变量从未被递增、读取路径也没有校验（L-16 删除时未留等价机制），
+    // 于是并发写回无人拦截。现在代际由本函数递增、由 getPermissions 消费。
     permCache.clear();
   }
 }

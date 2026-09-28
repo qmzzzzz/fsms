@@ -9,9 +9,10 @@
  * 对外行为不变：auditBuffer 的公开 API 与拆分前一致。
  *
  * 【WAL 兜底（G4 不丢失）】push 时同步追加一行到本地 WAL 文件，flush 落库成功后
- * 按本次落库条数做「前缀裁剪」（读文件→丢弃前 N 行→临时文件原子替换回原名），
- * 只移除已持久化的行——不得整文件截断，否则 flush 间隙新追加的行会被误删，
- * 崩溃后这些"已写 WAL"的记录彻底丢失。进程崩溃后 auditBuffer.start() 重放 WAL 残留。
+ * 按**本批文档的 `__walSeq` 精确移除**对应的行（读文件→挑出序号命中的行→临时文件
+ * 原子替换回原名）。只移除已持久化的行——不得整文件截断，也不得"按条数裁前 N 行"
+ * （F-97：本批文档的行未必是文件最前 N 行，一旦有空洞就会误删尚未落库记录的行），
+ * 否则崩溃后这些"已写 WAL"的记录彻底丢失。进程崩溃后 auditBuffer.start() 重放 WAL 残留。
  * 所有 WAL 文件操作串行化在 walChain 上，避免并发读写竞争。
  * walEnabled 门控：仅 startup() 后开启，测试不调 start 故无 WAL 副作用，行为与改造前一致。
  * 属 best-effort：未对每条记录 fsync，崩溃仍可能丢 OS 页缓存中最后几条（远优于丢失整批≤100条/2s）。
@@ -20,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
+const cap = require('./auditWalCap');
 
 // WAL 文件路径（可配），存放尚未确认落库的审计文档（每行一条 JSON）。
 //
@@ -101,23 +103,14 @@ function dbNameToFileSegment(raw) {
 
 let walPath = deriveDefaultWalPath();
 
-// WAL 硬上限（字节）：DB 长时间不可用且高流量时 WAL 持续增长（磁盘写放大，报告 R-6）。
-// 超限丢弃最旧一半行（与 BUFFER_HARD_LIMIT 丢最旧同向的止损策略）并告警。
-// 被丢弃行的文档若仍在缓冲中会照常落库，其后的 walTrimLines 按实际行数收敛（已有告警口径）；
-// 对应文档已被 BUFFER_HARD_LIMIT 丢弃的行，本就是纯取证残留。
-// 运行期读 env 便于测试注入小阈值；默认 50MB。
-const getWalMaxBytes = () => Number(process.env.AUDIT_WAL_MAX_BYTES) || 50 * 1024 * 1024;
-// B-I1：每条 append 都 stat 是串行 walChain 的吞吐瓶颈——改为每 N 次追加
-// 抽查一次大小（默认 32；N×单行 ≈ 数 KB 的滞后窗口，对 50MB 上限可忽略）。
-// 0/负值按 1 处理（恢复逐条检查，供测试注入）。
-const getWalStatInterval = () => Math.max(1, Number(process.env.AUDIT_WAL_STAT_INTERVAL) || 32);
-let walAppendCount = 0;
-
 let walEnabled = false;
 // 串行化所有 WAL 文件操作（追加 / 裁剪 / 重放），杜绝并发读写竞争导致丢行
 let walChain = Promise.resolve();
-// 累计因 WAL 超限被丢弃的行数（可观测，静默丢取证数据在合规上不可接受）
-let walDroppedLines = 0;
+// 累计"WAL 行没落盘"的追加失败次数。这些记录的崩溃保护层已经失效：
+// 内存缓冲仍在、正常落库后无损，但**在落库之前进程若退出就永久缺失**。
+// 没有这个计数时，面板上的 `walEnabled: true` 在磁盘写不进（满/权限/只读挂载）时
+// 是一句谎话——追加失败的证据只剩一行 warn 日志，而运维看的是合规面板。
+let walAppendFailures = 0;
 // ================= 毒文档批的 WAL 标记（P1-24） =================
 // 背景：batch 连续失败达阈值被丢弃后，内存中已无该批文档，但其 WAL 行仍在。
 // 重启时 start() 会把这些行重新读回缓冲，再次走满 5 次失败——每重启一次
@@ -138,6 +131,16 @@ const WAL_RUN_ID =
 let walSeqCounter = 0;
 // 累计因毒批丢弃被归档移出主 WAL 的行数（P1-24，可观测）
 let walDiscardedLines = 0;
+// 累计"重放时解析不出文档"的行数。这类行既不重放、也没有 __walSeq 可裁，
+// 会每次重启被重新读一遍且永不清零——合规口径下"有多少取证永远进不了库"必须可见。
+let walCorruptLines = 0;
+// 累计"重放补号后整体回写失败"的次数（F-97 机制自身的失效计数）。语义与上面几条
+// 不同：不是"已经丢了"，而是"下一次重启会把同一事件再插一份、哈希链跟着分叉"。
+// 它必须与 walCorruptLines 分开——后者的行不会重放，前者的行已经进了这次缓冲。
+let walRewriteFailures = 0;
+// 上一次读取 WAL 时文件尾是否缺行尾换行（撕裂写或外部写手才会造成）。
+// 缺了它，下一次 append 会把新记录直接拼在残行之后 ⇒ 两条记录同时不可恢复。
+let walTailIncomplete = false;
 
 function ensureLogsDir() {
   const dir = path.dirname(walPath);
@@ -159,24 +162,47 @@ function getWalPath() {
 }
 
 /**
- * 读取 WAL 并切分为记录行数组（P1-24 抽出：enforceWalLimit / walTrimLines /
- * filterWalLinesBySeqs 三处共用，此前各自重复一遍「split + 尾换行判定」）。
+ * 读取 WAL 并切分为记录行数组（P1-24 抽出：enforceWalLimit / removeWalLinesBySeqs /
+ * readWalLines 等处共用，此前各自重复一遍「split + 尾换行判定」）。
  * 与 readWalLines 的差别：尾部无换行的残缺行**保留**为最后一条记录，
  * 按行重写时才不会把它丢掉。
+ *
+ * 「文件不存在」与「读不回文件」必须分派给不同调用方，所以本体只承认前者：
+ * ENOENT → null，其余读取错误**抛出**。折成同一个 null 的代价是 removeWalLinesBySeqs
+ * 把「一批刚确认落库的行没裁掉」读成「本来就没有行要裁」——前者的后果是这些行留在
+ * 原地、重启按 WAL 语义重放（已落库的那批再插一份），后者什么都不是。同一个 null
+ * 也让启动重放把「读不回」当成「WAL 是空的」而静默跳过整轮重放。
+ *
  * @returns {Promise<{records: string[], content: string}|null>} 文件不存在返回 null
+ * @throws 非 ENOENT 的读取错误原样抛出，由调用方按各自后果决定级别与措辞
  */
-async function readWalRecords() {
+async function readWalRecordsStrict() {
   let content;
   try {
     content = await fs.promises.readFile(walPath, 'utf8');
   } catch (e) {
-    if (e.code !== 'ENOENT') logger.warn(`审计 WAL 读取失败：${e.message}`);
+    if (e.code !== 'ENOENT') throw e;
     return null;
   }
   if (!content) return { records: [], content: '' };
   const parts = content.split('\n');
   const hasTrailingNewline = parts[parts.length - 1] === '';
+  walTailIncomplete = !hasTrailingNewline;
   return { records: hasTrailingNewline ? parts.slice(0, -1) : parts, content };
+}
+
+/**
+ * auditWalCap 用的兜版本：那一边把「stat 刚成功、内容却读不回」整体算一次
+ * `walTrimFailures`，级别（error）与措辞归它（F-217 的一一对应判据也建在那条口径上），
+ * 这里只留一行 warn 证据，不再另计一次账。
+ */
+async function readWalRecords() {
+  try {
+    return await readWalRecordsStrict();
+  } catch (e) {
+    logger.warn(`审计 WAL 读取失败：${e.message}`);
+    return null;
+  }
 }
 
 /** 临时文件 + 原子替换回主 WAL（P1-24 抽出，三处改写共用） */
@@ -198,79 +224,138 @@ function walSeqOf(line) {
 
 /**
  * 追加一行到 WAL（非阻塞，串行化在 walChain 上）
+ *
+ * 行尾换行由 WAL 层自己补齐。本模块对外的格式契约是"每行一条 JSON"，
+ * 少一个换行就会把相邻两条记录拼成同一行 ⇒ `readWalRecords` 把它当成**一条损坏行**
+ * （两条取证记录同时不可恢复），而且按行裁剪与按文档 flush 的计数从此永久错位一格，
+ * 之后每次裁剪都会报"行数少于待裁剪行数"。目前唯一调用方自己加了 '\n'，
+ * 但这个不变行不该靠调用方口头遵守——写路径就是它的归属层。
  */
 function walAppendLine(line) {
+  const payload = typeof line === 'string' && line.endsWith('\n') ? line : `${line}\n`;
   walChain = walChain
-    .then(() => fs.promises.appendFile(walPath, line, 'utf8'))
-    .then(() => {
-      // B-I1：stat 节流——每 N 次追加抽查一次大小（详见 getWalStatInterval 注释）
-      walAppendCount += 1;
-      if (walAppendCount % getWalStatInterval() === 0) return enforceWalLimit();
+    .then(() => fs.promises.appendFile(walPath, payload, 'utf8'))
+    // 只给 appendFile 挂这一层 catch：计数口径必须是"这一行没落盘"。
+    // 若与下面的大小抽查共用 catch，enforceWalLimit 的 stat/rename 失败也会记进来，
+    // 面板上就分不清"写不进去"和"抽查出错"。级别保持 warn（不升 error）：磁盘满时
+    // 每条记录都会失败，error 级会把日志刷爆——持续性由 walAppendFailures 这个计数器体现。
+    .catch((e) => {
+      walAppendFailures += 1;
+      logger.warn(
+        `审计 WAL 追加失败（累计 ${walAppendFailures} 次）：${e.message}——` +
+          '本条记录只有内存态，落库前进程退出即永久缺失'
+      );
     })
-    .catch((e) => logger.warn(`审计 WAL 追加失败：${e.message}`));
+    // 上限抽查与裁剪计数已拆到 auditWalCap（B-I1 节流判据在该模块内）。
+    // 这里必须是"表达式形式"的箭头：afterAppend 命中抽查时返回的是 enforceWalLimit 的
+    // Promise，链要等裁剪做完才走下一步——写成 { ...; } 语句体会把它丢成悬空 Promise。
+    .then(() => cap.afterAppend({ walPath, readWalRecords, atomicReplaceWal }))
+    .catch((e) => logger.warn(`审计 WAL 追加链后续操作失败：${e.message}`));
 }
 
 /**
- * WAL 大小硬上限保护（R-6）：超过 getWalMaxBytes() 丢弃最旧一半行并告警。
- * 串行化在 walChain 上（与追加/裁剪互斥）；只保留较新一半——
- * 较新行对应的文档大概率仍在缓冲中等待落库，优先保住可落库数据的账目完整。
+ * 按 `__walSeq` 从主 WAL 移除指定的行。
+ *
+ * 为什么按序号而不是按行序（F-97）：「文件前 N 行」等价「本批 N 条」这个前提
+ * 在本仓至少四条路径下不成立——WAL 未启用窗口入缓冲的文档没有行、`walAppendLine`
+ * 的 appendFile 失败只告警（文档有缓冲副本却没行）、毒批 `discardBySeqs` 从文件
+ * **中间**移走行、部分成功时已落库子集的行留在原地。一旦出现空洞，按行裁剪就会
+ * 越界删掉排在后面的、**尚未落库**记录的行：那些记录只剩内存副本，进程一崩就永久
+ * 缺失，而 `droppedCount` 完全不计。旧告警（"行数少于待裁剪数"）也抓不住——
+ * 后面有更新行垫着时 `records.length >= n` 恒成立，实测该分支在缺陷场景里根本不触发。
+ * 按序号匹配从结构上消灭"错位"这个概念：只可能删到自己确认落库的那些行。
+ *
+ * 必须在本模块 walChain 的临界区内调用（不得自行再串 walChain，否则死锁）。
+ * archive=true 时**先归档后改写**（P1-24 取证顺序）：若在两步间崩溃，归档已含证据、
+ * 主文件仍含这些行——重启重放按归档序号跳过，不会重复处理。
+ * @param {Set<string>} seqSet 待移除行的 __walSeq 集合
+ * @param {boolean} archive 是否把被移除的行追加到 <walPath>.discarded 取证归档
+ * @returns {Promise<number>} 实际移除的行数
  */
-async function enforceWalLimit() {
-  let stat;
+async function removeWalLinesBySeqs(seqSet, archive) {
+  if (!seqSet || seqSet.size === 0) return 0;
+  let wal;
   try {
-    stat = await fs.promises.stat(walPath);
+    wal = await readWalRecordsStrict();
   } catch (e) {
-    if (e.code !== 'ENOENT') logger.warn(`审计 WAL 大小检查失败：${e.message}`);
-    return;
+    // 走到这里说明调用方手上有一批**已确认落库**（或已判定丢弃）的序号，而文件读不回来：
+    // 这些行留在原地。后果与 auditWalCap 的「已超限但读不回内容」同一格——重启按 WAL
+    // 语义重放，已落库的那批再插一份。原先它与「本来就没有行」共用一个 `return 0`，
+    // 日志与面板都分不出这两种世界。级别用 error：这不是"每条记录都可能撞上"的
+    // 高频路径（每轮 flush 一次），而是"这一轮的回收整轮失效"。
+    logger.error(
+      `审计 WAL ${archive ? '毒批归档' : '落库回收'}读不回文件（${e.code || 'READ_ERROR'} ${
+        e.message
+      }）：${seqSet.size} 个序号本轮 0 命中，对应行留在原地——重启会把已落库的记录再重放一遍`
+    );
+    return 0;
   }
-  const maxBytes = getWalMaxBytes();
-  if (stat.size <= maxBytes) return;
+  if (!wal || wal.records.length === 0) return 0;
 
-  const wal = await readWalRecords();
-  if (!wal || wal.records.length < 2) return; // 单行超限无「一半」可弃，留给外部取证处理
+  const removed = [];
+  const kept = [];
+  for (const line of wal.records) {
+    const seq = walSeqOf(line);
+    // 损坏行 seq=null：不参与匹配，保持原样留在主 WAL
+    (seq && seqSet.has(seq) ? removed : kept).push(line);
+  }
+  if (removed.length === 0) return 0;
 
-  const keepFrom = Math.floor(wal.records.length / 2);
-  const dropped = keepFrom;
-  await atomicReplaceWal(`${wal.records.slice(keepFrom).join('\n')}\n`);
+  if (archive) {
+    await fs.promises.appendFile(walPath + '.discarded', removed.join('\n') + '\n', 'utf8');
+    walDiscardedLines += removed.length;
+  }
+  await atomicReplaceWal(kept.length ? kept.join('\n') + '\n' : '');
+  return removed.length;
+}
 
-  walDroppedLines += dropped;
-  logger.error(
-    `审计 WAL 超过硬上限（${stat.size} > ${maxBytes} 字节），已丢弃最旧 ${dropped} 行（累计 ${walDroppedLines} 行）。` +
-      '数据库可能长时间不可用，请立即排查'
-  );
+/** 毒批丢弃入口（P1-24）：串行化在 walChain 上，失败仅告警不阻断 flush 收尾 */
+function walDiscardBySeqs(seqs) {
+  const seqSet = seqs instanceof Set ? seqs : new Set(seqs);
+  walChain = walChain
+    .then(() => removeWalLinesBySeqs(seqSet, true))
+    .then((n) => {
+      if (n > 0) {
+        logger.warn(`审计 WAL 已归档 ${n} 行毒批取证行并从主 WAL 移除（重启重放不再重复处理）`);
+      }
+    })
+    .catch((e) => logger.warn(`审计 WAL 毒批归档失败：${e.message}`));
 }
 
 /**
- * 移除 WAL 前 n 行（已确认落库的文档）。前缀裁剪而非整文件截断：
- * flush 成功与裁剪之间 push() 仍会向文件尾部追加新行，整文件截断会把
- * 这些尚未落库的行一并抹掉，崩溃后造成已写 WAL 记录丢失。串行化在 walChain 上，
- * 且裁剪排在既有 append 之后执行，保证被裁掉的行数内不含未落库数据。
+ * 落库成功后的裁剪入口（F-97）：只移除本批**已确认落库**的那些行。
+ * 不归档——记录已在库里，塞进 `.discarded` 会污染"被丢弃取证"这一语义
+ * （那个文件是"审计永久缺失了多少"的唯一凭据）。
+ * 串行化在 walChain 上，故排在既有 append 之后执行；由于是按序号匹配，
+ * 排在后面的其它待落库行**不可能**被牵连（这正是按行计数做不到的）。
  */
-function walTrimLines(n) {
+function walTrimBySeqs(seqs) {
+  const seqSet = seqs instanceof Set ? seqs : new Set(seqs);
+  if (seqSet.size === 0) return;
   walChain = walChain
-    .then(async () => {
-      const wal = await readWalRecords();
-      if (!wal || wal.records.length === 0) return;
-
-      if (wal.records.length < n) {
-        // 行数少于待裁剪数：按实际行数清理（WAL 可能被外部干预过），不静默
-        logger.warn(`审计 WAL 行数(${wal.records.length})少于待裁剪行数(${n})，按实际行数清理`);
-      }
-      const rest = wal.records.slice(Math.min(n, wal.records.length));
-      const nextContent = rest.length ? `${rest.join('\n')}\n` : '';
-      if (nextContent === wal.content) return;
-
-      // 临时文件 + 原子替换，避免写一半崩溃留下残缺 WAL
-      await atomicReplaceWal(nextContent);
-    })
+    .then(() => removeWalLinesBySeqs(seqSet, false))
     .catch((e) => logger.warn(`审计 WAL 裁剪失败：${e.message}`));
 }
 
 /**
  * 读取 WAL 全部物理行（供启动重放使用）。文件不存在视为空。
+ *
+ * 读失败不能也"视为空"：调用方（auditBuffer.start）拿到 0 行就直接 return，于是上一进程
+ * 待落库的记录这一轮一条都不回来，而 `审计 WAL 重放 N 条遗留记录` 那行 info 根本不打——
+ * 面板与日志上留下的是"没有待重放的记录"这个假象。文件本身还在，下次启动仍会重放，
+ * 所以这里返回 [] 保持原行为，只是把这个"整轮重放没做成"说清楚。
  */
 async function readWalLines() {
-  const wal = await readWalRecords();
+  let wal;
+  try {
+    wal = await readWalRecordsStrict();
+  } catch (e) {
+    logger.error(
+      `审计 WAL 启动重放读不回文件（${e.code || 'READ_ERROR'} ${e.message}）：` +
+        '本轮不重放，缓冲按空启动——上一进程留下的待落库记录这一轮不会回来（文件留在原地，下次启动再试）'
+    );
+    return [];
+  }
   return wal ? wal.records.filter(Boolean) : [];
 }
 
@@ -293,45 +378,98 @@ async function readDiscardedSeqs() {
 }
 
 /**
- * 从主 WAL 移除指定序号的行，并**先归档后改写**（P1-24）。
- * 必须在本模块 walChain 的临界区内调用（不得自行再串 walChain，否则死锁）。
- * 顺序保证：先 append 归档 → 再原子替换主文件。若在两步间崩溃，
- * 归档已含证据、主文件仍含这些行——重启重放按归档序号跳过，不会重复处理。
- * @param {Set<string>} seqSet 待移除行的 __walSeq 集合
- * @returns {Promise<number>} 实际移除的行数
+ * 在 walChain 的临界区内整体重写 WAL（仅供启动重放"补序号"使用，必须在
+ * serialize 回调里 await 调用——不另排一次链，否则新追加的行会被旧快照覆盖掉）。
+ * 与 filterWalLinesBySeqs 的区别：这里不删任何行、不归档，只是把同一批行换了写法。
+ * @param {string[]} lines 与文件顺序一致的行（不含换行符）
  */
-async function filterWalLinesBySeqs(seqSet) {
-  if (!seqSet || seqSet.size === 0) return 0;
-  const wal = await readWalRecords();
-  if (!wal || wal.records.length === 0) return 0;
-
-  const removed = [];
-  const kept = [];
-  for (const line of wal.records) {
-    const seq = walSeqOf(line);
-    // 损坏行 seq=null：不参与匹配，保持原样留在主 WAL
-    (seq && seqSet.has(seq) ? removed : kept).push(line);
-  }
-  if (removed.length === 0) return 0;
-
-  // 先归档（取证留痕）后原子替换主 WAL；两步之间崩溃也不会重复处理（见函数注释）
-  await fs.promises.appendFile(walPath + '.discarded', removed.join('\n') + '\n', 'utf8');
-  await atomicReplaceWal(kept.length ? kept.join('\n') + '\n' : '');
-  walDiscardedLines += removed.length;
-  return removed.length;
+async function rewriteInChain(lines) {
+  await atomicReplaceWal(lines.length ? `${lines.join('\n')}\n` : '');
 }
 
-/** 毒批丢弃入口（P1-24）：串行化在 walChain 上，失败仅告警不阻断 flush 收尾 */
-function walDiscardBySeqs(seqs) {
-  const seqSet = seqs instanceof Set ? seqs : new Set(seqs);
-  walChain = walChain
-    .then(() => filterWalLinesBySeqs(seqSet))
-    .then((n) => {
-      if (n > 0) {
-        logger.warn(`审计 WAL 已归档 ${n} 行毒批取证行并从主 WAL 移除（重启重放不再重复处理）`);
+/**
+ * 给重放读到的、缺 `__walSeq` 的行补序号（F-97 的配套半条）。
+ *
+ * 为什么必须补：裁剪改成"按序号精确匹配"之后，**认不出序号的行永远不会被裁掉**。
+ * 存量里没有序号的行有两类——P1-24 之前写的旧行、以及被外部工具/测试手工写入的行。
+ * 不补的后果不是"文件里多几行"：这些行每次重启都会被重放进缓冲，而重放文档的 `_id`
+ * 是 flush 时才分配的（每次不同）⇒ **每重启一次就重复插入一份审计记录**，
+ * 而且哈希链跟着一起分叉。旧实现靠"按条数裁前 N 行"顺手把它们带走了，
+ * 那是同一个缺陷的另一面：能带走死行，也就能带走别人的活行。
+ *
+ * 补在**边界**而不是补在每个消费方：序号一旦写进行里，之后所有路径（裁剪、
+ * 毒批归档、崩溃重放跳过）用的都是同一份身份，不需要各自再兜一次。
+ * @param {string[]} lines readLines() 的返回值（顺序即文件顺序）
+ * @param {(doc: object) => void} onDoc 每行解析出的文档回调（损坏行不会调用）
+ */
+async function stampReplaySeqs(lines, onDoc) {
+  const out = [];
+  let dirty = false;
+  let corrupt = 0;
+  for (const line of lines) {
+    let doc = null;
+    try {
+      doc = JSON.parse(line);
+    } catch {
+      doc = null; // 损坏行原样保留：不猜内容，也不因此丢掉后面的行
+    }
+    if (doc && typeof doc === 'object') {
+      if (!doc.__walSeq) {
+        assignSeq(doc); // walEnabled 在 startup() 之后恒真，序号在此刻分配并随行回写
+        out.push(JSON.stringify(doc));
+        dirty = true;
+      } else {
+        out.push(line);
       }
-    })
-    .catch((e) => logger.warn(`审计 WAL 毒批归档失败：${e.message}`));
+      onDoc(doc);
+    } else {
+      // 解析不出文档（JSON 抛错，或解析出数字/字符串/null 这类非对象）：
+      // 这一行既不会被重放，也因为带不走 __walSeq 而永远不会被按序号裁掉。
+      // 不删（不猜内容），但必须计数并告警——否则"有多少取证永远进不了库"
+      // 在合规口径里是 0，而它其实每次重启都在原地重复出现。
+      corrupt += 1;
+      out.push(line);
+    }
+  }
+  if (corrupt) {
+    walCorruptLines += corrupt;
+    // 留痕与计数同源：坏行身份、累计数、文件路径都归本模块所有
+    logger.error(
+      `审计 WAL 有 ${corrupt} 行解析不出取证文档（累计 ${walCorruptLines} 行）：` +
+        `文件 ${getWalPath()}。这些行不会重放、也因带不走 __walSeq 而永远不会被裁剪，` +
+        '只会被每次重启重新读一遍——等于这部分审计证据在合规口径里静默失踪，请立即取原件核查'
+    );
+  }
+  // 文件尾缺换行时强制走一次整体重写：rewriteInChain 落的是 `join('\n') + '\n'`，
+  // 顺带把缺失的行尾补回来。不补的后果是下一次 append 把新记录拼在残行尾巴上，
+  // 两条取证记录同时不可恢复（见 walAppendLine 上方那段格式契约）。
+  if (!dirty && walTailIncomplete && lines.length) {
+    dirty = true;
+    logger.warn(
+      `审计 WAL 文件尾缺少行尾换行，已在启动重放时补齐：${getWalPath()}` +
+        '（成因通常是撕裂写或外部写手；不补则下一条记录会被拼在残行之后）'
+    );
+  }
+  // 补号必须回写才算数：内存里的文档有序号，文件里的行没有 ⇒ 落库后按序号裁剪
+  // 认不出这些行，它们留在原地，下次重启被重放成**同一事件的第二个副本**
+  // （_id 是 flush 时才分配的，每次不同），哈希链随之分叉。回写失败是这条
+  // F-97 机制唯一的失效形态，原先只汇进一句 `启动重放失败` 的 warn——
+  // 读日志的人分不清"序号没写回去"和"读文件失败"，也没有任何计数器能事后核对。
+  // 不向上抛：这条链的调用方（auditBuffer.start 的 onError）只会再刷一句 warn，
+  // 而它一抛就跳过了后面的 `enforceBufferLimit()`——崩溃前积压很多时那正是
+  // 唯一挡住缓冲无界增长的闸门，缺陷场景里反而不能丢。
+  if (dirty) {
+    try {
+      await rewriteInChain(out);
+    } catch (e) {
+      walRewriteFailures += 1;
+      logger.error(
+        `审计 WAL 重放补号回写失败（累计 ${walRewriteFailures} 次）：${e.message}——文件 ${getWalPath()}` +
+          ' 里这批行仍缺 __walSeq：本次它们已进内存缓冲并会正常落库，但落库后按序号裁不掉，' +
+          '下次重启会作为同一事件的第二个副本被重放（哈希链同时分叉），请立即取文件原件核查'
+      );
+    }
+  }
 }
 
 // ================= 供 auditBuffer 使用的生命周期与访问器 =================
@@ -388,13 +526,28 @@ async function drain() {
 
 /** WAL 侧运行指标（供 auditBuffer.getStats 展开合并） */
 function getStats() {
-  return { walEnabled, walDroppedLines, walDiscardedLines };
+  return {
+    walEnabled,
+    ...cap.getStats(),
+    walDiscardedLines,
+    walCorruptLines,
+    walAppendFailures,
+    walRewriteFailures,
+  };
 }
 
-/** 重置累计计数（仅供测试） */
+/**
+ * 重置累计计数（仅供测试）。
+ * `cap.resetCounters()` 连抽查相位 `walAppendCount` 一起归零——不归零时它是跨用例泄漏的
+ * 模块级累加值，"默认间隔 32 ⇒ 这批追加里不会抽查"这类前提就取决于此前跑过多少条记录。
+ * 完整理由写在 auditWalCap.resetCounters（判据与相位都在那边）。
+ */
 function resetCounters() {
-  walDroppedLines = 0;
+  cap.resetCounters();
   walDiscardedLines = 0;
+  walCorruptLines = 0;
+  walAppendFailures = 0;
+  walRewriteFailures = 0;
 }
 
 module.exports = {
@@ -403,8 +556,9 @@ module.exports = {
   isEnabled,
   assignSeq,
   appendLine,
-  trimLines: walTrimLines,
+  trimBySeqs: walTrimBySeqs,
   discardBySeqs: walDiscardBySeqs,
+  stampReplaySeqs,
   readLines: readWalLines,
   readDiscardedSeqs,
   serialize,

@@ -6,6 +6,24 @@ const path = require('path');
 // 枚举约束由模型层负责，故无需改）。
 const { DEVICE_TYPE } = require('../utils/constants');
 const DEVICE_TYPE_VALUES = Object.values(DEVICE_TYPE);
+// 同一口径（E-05 的续集）：审计页两维枚举此前在本文件与产物里各抄一份，
+// 与 constants/audit.js 没有任何连线——常量加一档时文档会继续宣称旧的四档，
+// 调用方按文档传值换来一个 400。现在接上同一根线（openapiSync 有对账）。
+const { AUDIT_RISK_LEVELS, AUDIT_DISPLAY_LEVELS } = require('../constants/audit');
+const { PERMISSION_TYPES, PERMISSION_METHODS } = require('../constants/permission');
+const { IP_LIST_TYPES } = require('../constants/ipList');
+const { ALARM_LEVELS, ALARM_TYPES, ALARM_STATUSES, ALARM_CAUSES } = require('../constants/alarm');
+const {
+  INSPECTION_TYPES,
+  INSPECTION_STATUSES,
+  INSPECTION_RESULTS,
+  INSPECTION_REVIEW_RESULTS,
+} = require('../constants/inspection');
+const { USER_STATUS } = require('../utils/constants');
+// 设备状态：全集与「通用状态接口可写子集」都取自 constants/deviceStatus（它自身只是
+// utils/constants 的 DEVICE_STATUS 的派生视图）。原先这两处各写一份字面量，与路由
+// 校验器之间没有连线——加一档会让文档继续推荐旧五档，症状同 audit/alarm 那一族。
+const { DEVICE_STATUS_VALUES, DEVICE_STATUS_WRITABLE } = require('../constants/deviceStatus');
 
 const spec = {
   openapi: '3.0.3',
@@ -286,7 +304,7 @@ const userListParams = [
   {
     name: 'status',
     in: 'query',
-    schema: { type: 'string', enum: ['active', 'inactive', 'locked'] },
+    schema: { type: 'string', enum: Object.values(USER_STATUS) },
   },
   { name: 'department', in: 'query', schema: { type: 'string' } },
 ];
@@ -413,11 +431,11 @@ spec.paths['/api/permissions'] = {
       properties: {
         name: { type: 'string' },
         code: { type: 'string', pattern: '^(\\*|[a-z]+):(\\*|[a-z_]+)$' },
-        type: { type: 'string', enum: ['menu', 'button', 'api', 'data'] },
+        type: { type: 'string', enum: PERMISSION_TYPES },
         module: { type: 'string' },
         parent: { type: 'string' },
         path: { type: 'string' },
-        method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', '*'] },
+        method: { type: 'string', enum: PERMISSION_METHODS },
       },
     }),
     responses: { ...created('创建成功') },
@@ -459,7 +477,7 @@ const deviceListParams = [
     in: 'query',
     schema: {
       type: 'string',
-      enum: ['normal', 'warning', 'fault', 'offline', 'maintenance', 'scrapped'],
+      enum: DEVICE_STATUS_VALUES,
     },
   },
   { name: 'building', in: 'query', schema: { type: 'string' } },
@@ -533,7 +551,7 @@ spec.paths['/api/devices/{id}/status'] = {
       type: 'object',
       required: ['status'],
       properties: {
-        status: { type: 'string', enum: ['normal', 'warning', 'fault', 'offline', 'maintenance'] },
+        status: { type: 'string', enum: DEVICE_STATUS_WRITABLE },
       },
     }),
   }),
@@ -545,7 +563,12 @@ spec.paths['/api/devices/{id}/maintenance'] = {
     requestBody: body({
       type: 'object',
       required: ['content'],
-      properties: { content: { type: 'string', minLength: 1, maxLength: 500 } },
+      properties: {
+        content: { type: 'string', minLength: 1, maxLength: 500 },
+        // type 决定检查周期是否顺延（routine/inspection 顺延，repair/replacement 不顺延）；
+        // 枚举须与 deviceRoutes.maintenanceValidation / FireDevice.maintenanceRecord.type 对齐。
+        type: { type: 'string', enum: ['routine', 'repair', 'replacement', 'inspection'] },
+      },
     }),
     responses: { ...ok('添加成功，自动更新下次检查日期') },
   }),
@@ -557,7 +580,12 @@ spec.paths['/api/devices/{id}/scrap'] = {
     requestBody: body(
       {
         type: 'object',
-        properties: { reason: { type: 'string' }, scrapDate: { type: 'string', format: 'date' } },
+        // 字段名须与 deviceRoutes.scrapDeviceValidation / deviceController 的 scrapReason 一致；
+        // 旧文档写成 reason，集成方按文档提交的报废原因会被静默丢弃（FireDevice.scrapReason 落默认值）。
+        properties: {
+          scrapReason: { type: 'string', maxLength: 200 },
+          scrapDate: { type: 'string', format: 'date' },
+        },
       },
       false
     ),
@@ -571,17 +599,16 @@ const alarmListParams = [
   {
     name: 'status',
     in: 'query',
-    schema: {
-      type: 'string',
-      enum: ['pending', 'processing', 'resolved', 'false_alarm', 'cancelled'],
-    },
+    schema: { type: 'string', enum: ALARM_STATUSES },
   },
   {
     name: 'level',
     in: 'query',
-    schema: { type: 'string', enum: ['info', 'warning', 'critical', 'emergency'] },
+    schema: { type: 'string', enum: ALARM_LEVELS },
   },
-  { name: 'alarmType', in: 'query', schema: { type: 'string' } },
+  // 原先 alarmType 的 query 参数没有 enum，而路由校验器一直在 isIn(...) 上拒非法值：
+  // 文档比运行时宽，调用方按文档传 'smoking' 会拿到 400。接同一根线后一并补齐。
+  { name: 'alarmType', in: 'query', schema: { type: 'string', enum: ALARM_TYPES } },
   { name: 'startDate', in: 'query', schema: { type: 'string' } },
   { name: 'endDate', in: 'query', schema: { type: 'string' } },
   { name: 'search', in: 'query', schema: { type: 'string' } },
@@ -612,9 +639,9 @@ spec.paths['/api/alarms/report'] = {
       properties: {
         alarmType: {
           type: 'string',
-          enum: ['smoke', 'temp_abnormal', 'manual_button', 'phone_report', 'patrol_find', 'other'],
+          enum: ALARM_TYPES,
         },
-        level: { type: 'string', enum: ['info', 'warning', 'critical', 'emergency'] },
+        level: { type: 'string', enum: ALARM_LEVELS },
         location: { type: 'object' },
         description: { type: 'string', maxLength: 500 },
         deviceId: { type: 'string' },
@@ -659,7 +686,7 @@ spec.paths['/api/alarms/{id}/resolve'] = {
         handleResult: { type: 'string', maxLength: 1000 },
         cause: {
           type: 'string',
-          enum: ['fire', 'false_alarm', 'equipment_fault', 'test', 'unknown'],
+          enum: ALARM_CAUSES,
         },
       },
     }),
@@ -687,9 +714,9 @@ const inspectionListParams = [
   {
     name: 'status',
     in: 'query',
-    schema: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'cancelled'] },
+    schema: { type: 'string', enum: INSPECTION_STATUSES },
   },
-  { name: 'inspectionType', in: 'query', schema: { type: 'string' } },
+  { name: 'inspectionType', in: 'query', schema: { type: 'string', enum: INSPECTION_TYPES } },
   { name: 'assignedTo', in: 'query', schema: { type: 'string' } },
   { name: 'startDate', in: 'query', schema: { type: 'string' } },
   { name: 'endDate', in: 'query', schema: { type: 'string' } },
@@ -706,11 +733,11 @@ spec.paths['/api/inspections'] = {
         title: { type: 'string' },
         inspectionType: {
           type: 'string',
-          enum: ['daily', 'weekly', 'monthly', 'quarterly', 'annual', 'special'],
+          enum: INSPECTION_TYPES,
         },
         planStartTime: { type: 'string', format: 'date-time' },
         planEndTime: { type: 'string', format: 'date-time' },
-        assignedTo: { type: 'string' },
+        assignedTo: { type: 'array', items: { type: 'string', format: 'mongodb-id' } },
         devices: { type: 'array', items: { type: 'string' } },
         locations: { type: 'array', items: { type: 'object' } },
         checkItems: { type: 'array', items: { type: 'object' }, minItems: 1 },
@@ -755,14 +782,16 @@ spec.paths['/api/inspections/{id}/complete'] = {
     requestBody: body(
       {
         type: 'object',
+        // result 必填：inspectionRoutes completeValidation 的 body('result').isIn([...]) 无 .optional()
+        required: ['result'],
         properties: {
-          result: { type: 'string', enum: ['normal', 'abnormal', 'partial'] },
+          result: { type: 'string', enum: INSPECTION_RESULTS },
           findings: { type: 'array', items: { type: 'object' } },
           location: { type: 'string' },
           remark: { type: 'string' },
         },
       },
-      false
+      true
     ),
   }),
 };
@@ -774,7 +803,7 @@ spec.paths['/api/inspections/{id}/review'] = {
       type: 'object',
       required: ['reviewResult'],
       properties: {
-        reviewResult: { type: 'string', enum: ['approved', 'rejected'] },
+        reviewResult: { type: 'string', enum: INSPECTION_REVIEW_RESULTS },
         reviewComment: { type: 'string' },
       },
     }),
@@ -936,13 +965,13 @@ spec.paths['/api/security/audit-logs'] = {
       {
         name: 'riskLevel',
         in: 'query',
-        schema: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+        schema: { type: 'string', enum: AUDIT_RISK_LEVELS },
       },
       { name: 'success', in: 'query', schema: { type: 'string', enum: ['true', 'false'] } },
       {
         name: 'level',
         in: 'query',
-        schema: { type: 'string', enum: ['info', 'warning', 'error'] },
+        schema: { type: 'string', enum: AUDIT_DISPLAY_LEVELS },
       },
     ],
   }),
@@ -976,9 +1005,7 @@ spec.paths['/api/security/config/loginCaptchaEnabled'] = {
 
 spec.paths['/api/security/ip-list'] = {
   get: p('get', ['Security'], '获取 IP 黑白名单列表', {
-    parameters: [
-      { name: 'type', in: 'query', schema: { type: 'string', enum: ['black', 'white'] } },
-    ],
+    parameters: [{ name: 'type', in: 'query', schema: { type: 'string', enum: IP_LIST_TYPES } }],
   }),
   post: p('post', ['Security'], '添加 IP 到黑/白名单', {
     description: '白名单优先级高于黑名单；加入黑名单时若已在白名单则拒绝',
@@ -987,7 +1014,7 @@ spec.paths['/api/security/ip-list'] = {
       required: ['ip'],
       properties: {
         ip: { type: 'string', description: '支持 IPv4/IPv6/CIDR' },
-        type: { type: 'string', enum: ['black', 'white'], default: 'black' },
+        type: { type: 'string', enum: IP_LIST_TYPES, default: 'black' },
         reason: { type: 'string', maxLength: 200 },
         durationHours: { type: 'number', minimum: 0, maximum: 8760, description: '0=永久' },
       },
@@ -1092,11 +1119,28 @@ module.exports = spec;
 
 if (require.main === module) {
   const outPath = path.join(__dirname, 'openapi.json');
-  fs.writeFileSync(outPath, JSON.stringify(spec, null, 2), 'utf8');
-  console.log('Generated:', outPath);
-  console.log('Paths:', Object.keys(spec.paths).length);
-  console.log(
-    'Operations:',
-    Object.values(spec.paths).reduce((n, p) => n + Object.keys(p).length, 0)
-  );
+  // 产物按仓库自己的 prettier 配置落盘。原先这里直接写 JSON.stringify 的结果：
+  // 短数组会逐行展开，而已提交产物是 prettier 版（短数组并成一行）——
+  // 于是「改完生成器重跑一次」必然把 500 多行格式噪声灌进 diff，
+  // 并且让 CI 的 `npm run format:check` 红（openapiSync 的逐端点深比对按内容比，
+  // 抓不到格式漂移；实测这次整改就是这么撞上的）。
+  // prettier 只在 CLI 分支 require：被 app/tests require 时不走这里，
+  // 生产安装（--omit=dev）因此不需要它。失败不做静默降级——
+  // 退回未格式化写法等于把这个坑重新埋回去。
+  (async () => {
+    const prettier = require('prettier');
+    const options = await prettier.resolveConfig(outPath);
+    const raw = JSON.stringify(spec, null, 2);
+    const formatted = await prettier.format(raw, { ...options, filepath: outPath });
+    fs.writeFileSync(outPath, formatted, 'utf8');
+    console.log('Generated:', outPath);
+    console.log('Paths:', Object.keys(spec.paths).length);
+    console.log(
+      'Operations:',
+      Object.values(spec.paths).reduce((n, p) => n + Object.keys(p).length, 0)
+    );
+  })().catch((err) => {
+    console.error('生成 openapi.json 失败:', err.message);
+    process.exitCode = 1;
+  });
 }

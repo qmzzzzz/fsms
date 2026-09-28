@@ -4,8 +4,10 @@
  */
 
 const { validationResult } = require('express-validator');
+const { safeFieldErrors } = require('../utils/validationRules');
 const ApiResponse = require('../utils/apiResponse');
 const { getOperatorMaxLevel, matchesPermissionCodes } = require('../utils/permissionHelper');
+const { RESERVED_WILDCARD_PERMISSION } = require('../utils/superAdmin');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { escapeRegExp, normalizePagination } = require('../utils/helpers');
@@ -14,27 +16,25 @@ const roleService = require('../services/roleService');
 // 结果，而 userPermissionService 的进程内 TTL 缓存保存的正是解析结果。
 // 不失效则被停用角色的持有者最长仍按旧权限授权 30 秒（真实越权窗口）。
 const { invalidatePermissionCache } = require('../services/userPermissionService');
-const { getDataScope } = require('../middleware/rbac');
+// 停用/启用一个角色同时改变了两份进程内缓存的内容：userPermissionService 的
+// 「权限解析结果」缓存，和 auth.js 的「用户 + 其生效角色码」缓存。前者一直有失效，
+// 后者此前只在 rolePermissionController 的权限变更路径失效，本文件的 status 路径漏了。
+const { invalidateUserCache } = require('../middleware/auth');
+const {
+  createAuthorityResolver,
+  applyRoleScopeToQuery,
+  guardRoleWithinOperatorLevel,
+  guardBuiltInNameOrLevel,
+  guardRoleStatusValue,
+  guardRoleLevelTarget,
+  applyRoleEditableFields,
+} = require('./roleGuards');
 
 const emitWebSocketEvent = (req, eventType, data) => {
   const wsService = req.app.get('wsService');
   if (!wsService) return;
   const payload = { ...data, type: eventType };
   wsService.emitRoleUpdate(payload);
-};
-
-const applyRoleScopeToQuery = async (query, userId) => {
-  const dataScope = await getDataScope(userId);
-  if (dataScope.type === 'all') return { query, dataScope };
-  if (dataScope.type === 'none') {
-    return { query: { ...query, _id: { $in: [] } }, dataScope };
-  }
-
-  const operatorMaxLevel = await getOperatorMaxLevel(userId);
-  return {
-    query: { ...query, level: { $lte: operatorMaxLevel } },
-    dataScope,
-  };
 };
 
 const getRoles = asyncHandler(async (req, res) => {
@@ -91,7 +91,9 @@ const getRoleById = asyncHandler(async (req, res) => {
 const createRole = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { name, code, description, level, permissions } = req.body;
@@ -102,18 +104,45 @@ const createRole = asyncHandler(async (req, res) => {
 
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
   const operatorPermCodes = await roleService.getOperatorPermissions(req.user.userId);
-  const isSuperAdmin = operatorPermCodes.includes('*:*');
+  const isSuperAdmin = operatorPermCodes.includes(RESERVED_WILDCARD_PERMISSION);
 
-  if (!isSuperAdmin) {
-    if ((level || 1) > operatorMaxLevel) {
-      return ApiResponse.codeError(res, 'ROLE_CREATE_HIGHER_LEVEL_FORBIDDEN');
+  if (!isSuperAdmin && (level || 1) > operatorMaxLevel) {
+    return ApiResponse.codeError(res, 'ROLE_CREATE_HIGHER_LEVEL_FORBIDDEN');
+  }
+
+  // 去重后比对，与 PUT /api/roles/:id/permissions 同尺（那边用 uniquePermIds，
+  // 重复 ID 不算非法）；落库也用这份去重结果，避免"校验看 A、写入看 B"。
+  const uniquePermIds = [...new Set((permissions || []).map((item) => String(item)))];
+  if (uniquePermIds.length > 0) {
+    const validPerms = await roleService.findPermissionsByIds(uniquePermIds);
+
+    // 存在性校验：查到的条数必须等于提交的条数。
+    //
+    // 原先只把「查得到的那些」喂给后面的通配判断与越权判断，于是**格式合法但库里没有**的
+    // 权限 ID 会被静默丢弃：请求方提交 N 条、角色带着 N-1 条实权 + 1 条悬空引用创建
+    // 成功并回 201。这比报错更糟——授予类操作报"成功"就必须真的授到了。
+    // 路由层的格式闸（body('permissions.*').isMongoId()）挡不住这一维：
+    // 它是合法的 ObjectId，只是没有对应文档。同族的分配路径早就有这条判据
+    // （rolePermissionController.js 的 PERMISSION_ID_INVALID），本处是缺的那一处。
+    if (validPerms.length !== uniquePermIds.length) {
+      return ApiResponse.codeError(res, 'PERMISSION_ID_INVALID');
     }
 
-    if ((permissions || []).length > 0) {
-      const validPerms = await roleService.findPermissionsByIds(permissions);
-      if (validPerms.some((perm) => perm.code === '*:*')) {
-        return ApiResponse.codeError(res, 'CANNOT_GRANT_WILDCARD_PERMISSION');
-      }
+    // 保留通配 `*:*` 一律不得经本接口**铸造** —— 这条必须**无条件**执行，含超管。
+    //
+    // 原写法把它放在 `if (!isSuperAdmin)` 内，于是超管只要 POST /api/roles 建一个
+    // 挂 `*:*` 的新角色，就凭空得到一个第二个通配角色：`utils/superAdmin.js` 把
+    // 「内置超管角色唯一」定为**系统不变量**（防归属扩散、防自锁，见该文件头 :9-21），
+    // 而这条路径上它完全失效。
+    //
+    // 同型缺陷已在 rolePermissionController.js:63-77（**分配**路径）修复，那处的注释
+    // 写明了理由；本处是"已修的同类漏掉的那一处"。也正因如此，这里引用常量而不再写
+    // 字面量——superAdmin.js:29-37 明确要求围绕通配的所有防线"都必须引用本常量"。
+    if (validPerms.some((perm) => perm.code === RESERVED_WILDCARD_PERMISSION)) {
+      return ApiResponse.codeError(res, 'CANNOT_GRANT_WILDCARD_PERMISSION');
+    }
+
+    if (!isSuperAdmin) {
       const lacking = validPerms
         .filter((perm) => !matchesPermissionCodes(operatorPermCodes, perm.code))
         .map((perm) => perm.code);
@@ -131,7 +160,7 @@ const createRole = asyncHandler(async (req, res) => {
     code,
     description,
     level,
-    permissions: permissions || [],
+    permissions: uniquePermIds,
   });
   const createdRole = await roleService.findPopulatedRole(role._id);
   // P1-14：新建角色尚无持有者，逻辑上不影响任何已缓存用户；此处仍统一失效，
@@ -153,7 +182,9 @@ const createRole = asyncHandler(async (req, res) => {
 const updateRole = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { name, description, level, status } = req.body;
@@ -162,63 +193,44 @@ const updateRole = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'ROLE_NOT_FOUND');
   }
 
-  const { dataScope } = await applyRoleScopeToQuery({}, req.user.userId);
-  if (dataScope.type === 'none') {
-    return ApiResponse.codeError(res, 'ROLE_UPDATE_FORBIDDEN');
+  // 守卫按"层级范围 → 内置角色锁 → status 合法性 → 目标层级提权 → 字段写入"短路，
+  // 顺序即错误优先级（同一请求同时触犯多条时，客户端看到的错误码由此顺序决定）。
+  const authority = createAuthorityResolver(req.user.userId);
+  const { dataScope } = await applyRoleScopeToQuery({}, req.user.userId, authority);
+  if (
+    await guardRoleWithinOperatorLevel({
+      res,
+      role,
+      dataScope,
+      authority,
+      forbiddenCode: 'ROLE_UPDATE_FORBIDDEN',
+      higherLevelCode: 'ROLE_UPDATE_HIGHER_LEVEL_FORBIDDEN',
+    })
+  ) {
+    return;
   }
-  if (dataScope.type !== 'all') {
-    const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-    if ((role.level || 0) > operatorMaxLevel) {
-      return ApiResponse.codeError(res, 'ROLE_UPDATE_HIGHER_LEVEL_FORBIDDEN');
-    }
-  }
-
-  if (role.isBuiltIn && (name !== undefined || level !== undefined)) {
-    return ApiResponse.codeError(res, 'BUILTIN_ROLE_NAME_LEVEL_LOCKED');
-  }
-
-  if (status !== undefined) {
-    if (!['active', 'inactive'].includes(status)) {
-      return ApiResponse.codeError(res, 'ROLE_STATUS_INVALID');
-    }
-    if (role.isBuiltIn) {
-      return ApiResponse.codeError(res, 'BUILTIN_ROLE_STATUS_LOCKED');
-    }
-  }
-
-  if (level !== undefined) {
-    const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-    const operatorPermCodes = await roleService.getOperatorPermissions(req.user.userId);
-    const isGlobalAdmin = operatorPermCodes.includes('*:*');
-
-    if (!isGlobalAdmin && level > operatorMaxLevel) {
-      return ApiResponse.codeError(res, 'ROLE_LEVEL_ABOVE_SELF_FORBIDDEN');
-    }
-    if (!isGlobalAdmin && (role.level || 0) > operatorMaxLevel) {
-      logger.warn(
-        `角色降级提权尝试被拒：operator=${req.user.username || req.user.userId}` +
-          `(L${operatorMaxLevel}) role=${role.code}(L${role.level}) → L${level}`
-      );
-      return ApiResponse.codeError(res, 'ROLE_UPDATE_HIGHER_LEVEL_FORBIDDEN');
-    }
-  }
-
-  if (name !== undefined) {
-    const trimmed = String(name).trim();
-    if (!trimmed) {
-      return ApiResponse.codeError(res, 'ROLE_NAME_REQUIRED');
-    }
-    role.name = trimmed;
-  }
-  if (description !== undefined) role.description = description;
-  if (level !== undefined) role.level = level;
-  if (status !== undefined) role.status = status;
+  if (guardBuiltInNameOrLevel({ res, role, name, level })) return;
+  if (guardRoleStatusValue({ res, role, status })) return;
+  if (await guardRoleLevelTarget({ req, res, role, level, authority })) return;
+  // applyRoleEditableFields 会就地改写 role.status，故变更前的值必须在此取快照
+  const previousStatus = role.status;
+  if (applyRoleEditableFields({ res, role, name, description, level, status })) return;
 
   await roleService.saveRole(role);
   const updatedRole = await roleService.findPopulatedRole(role._id);
 
   // P1-14：status 变更直接改变解析结果（持有者立即失去/恢复该角色权限）
   invalidatePermissionCache();
+
+  // 权限解析缓存失效之外，还须失效 auth.js 的用户缓存：req.user.roleCodes
+  // 由它提供（TTL 60s），rbac.js 的 checkRole 与 rateLimit.js 的角色配额都读它。
+  // 漏掉这一步则出现自相矛盾的窗口——auth.js 缓存注释承诺「停用角色的 code
+  // 不得继续进入 req.user.roleCodes」，但经本接口停用时该 code 最长留存 60 秒。
+  // 口径对齐 rolePermissionController.js 的权限变更路径（同样按持有者逐个失效）。
+  if (role.status !== previousStatus) {
+    const affectedUsers = await roleService.listUsersWithRole(role._id);
+    affectedUsers.forEach((user) => invalidateUserCache(user._id));
+  }
 
   logger.info(`角色已更新：${role.name}`);
   return ApiResponse.success(res, updatedRole, '角色更新成功');
@@ -230,15 +242,19 @@ const deleteRole = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'ROLE_NOT_FOUND');
   }
 
-  const { dataScope } = await applyRoleScopeToQuery({}, req.user.userId);
-  if (dataScope.type === 'none') {
-    return ApiResponse.codeError(res, 'ROLE_DELETE_FORBIDDEN');
-  }
-  if (dataScope.type !== 'all') {
-    const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-    if ((role.level || 0) > operatorMaxLevel) {
-      return ApiResponse.codeError(res, 'ROLE_DELETE_HIGHER_LEVEL_FORBIDDEN');
-    }
+  const authority = createAuthorityResolver(req.user.userId);
+  const { dataScope } = await applyRoleScopeToQuery({}, req.user.userId, authority);
+  if (
+    await guardRoleWithinOperatorLevel({
+      res,
+      role,
+      dataScope,
+      authority,
+      forbiddenCode: 'ROLE_DELETE_FORBIDDEN',
+      higherLevelCode: 'ROLE_DELETE_HIGHER_LEVEL_FORBIDDEN',
+    })
+  ) {
+    return;
   }
 
   if (role.isBuiltIn) {

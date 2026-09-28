@@ -23,6 +23,68 @@ const AUDIT_CATEGORIES = [
 
 const AUDIT_RISK_LEVELS = ['low', 'medium', 'high', 'critical'];
 
+// AUDIT_RISK_LEVELS 是**有序**清单（低→中→高→致命），所以"某档及以上"是这里的一个切片，
+// 而不是一句需要人肉复述的话。所有此类判据必须由 riskLevelsAtLeast 派生（F-149）。
+// 不这么办的失效模式不是"报错"，是静默漏：给 AUDIT_RISK_LEVELS 新增一档（例如 'urgent'
+// 插在 high 与 critical 之间）后，手抄的 `['high','critical']` 会把新档留在"高危"之外，
+// 而查询/导出侧的白名单引用的是同一份 AUDIT_RISK_LEVELS、已经放行 ⇒ 新档记录能落库、
+// 能在审计页筛出来，却不进任何高危聚合（securityController）、告警取数（securityAlert）、
+// 行为基线（behaviorBaseline）与导出等级派生（reportExportService/auditQuery）——
+// 安全侧的漏，且没有任何一处会说"这一档没人管"。
+// 档位找不到时直接抛：返回半截清单（slice(-1) 之类）等于把上面那个失效模式搬进派生器。
+const riskLevelsAtLeast = (level) => {
+  const idx = AUDIT_RISK_LEVELS.indexOf(level);
+  if (idx < 0) {
+    throw new Error(
+      `riskLevelsAtLeast('${level}')：'${level}' 不在 AUDIT_RISK_LEVELS 内——` +
+        '档位清单改过之后，所有"某档及以上"的判据都要跟着改，不能退回手抄字面量'
+    );
+  }
+  // 冻结的理由同 originCheck.WRITE_METHODS：共享默认值被某个调用方 push 一下就会改掉全部门槛
+  return Object.freeze(AUDIT_RISK_LEVELS.slice(idx));
+};
+
+// 「高危及以上」＝错误档的判定基础（审计页 level=error、导出里的"错误"标签同一口径）
+const AUDIT_ERROR_RISK_LEVELS = riskLevelsAtLeast('high');
+
+// 「警告及以上」。审计页 info 档用的是它的补集（`$nin`）而不是 `$in: ['low']`：
+// 这是既有行为，补集形式对 riskLevel 缺失/为 null 的存量文档仍然成立，
+// 换成 $in 会让这类文档从 info/warning/error 三个档里同时消失。
+const AUDIT_WARNING_OR_HIGHER_RISK_LEVELS = riskLevelsAtLeast('medium');
+
+// 审计记录 method 维的取值全集（单一事实来源：AuditLog schema 的 enum 与所有写入点共用）。
+//
+// 为什么必须有 HEAD：Express 把 HEAD 路由到 GET 处理器，而全局审计中间件与 authenticate
+// 都排在路由之前，所以"带 token 的 HEAD"是常态流量（监控 curl -I、探测脚本、浏览器预取）。
+// 原先 enum 只有 5 个动词，这类记录的 method 落在枚举外 ⇒ **整条文档**被 ValidationError 拒掉，
+// 且两条落库路径都不说"是 method 越枚举"：
+//   - 直写路径 AuditLog.record()：错误进 catch，只剩一行 error 日志 + audit_write_failed 指标，
+//     ip_range_denied（riskLevel=high）这类事件在留存里凭空消失；
+//   - 缓冲路径 auditBuffer 的 insertMany({ordered:false})：该文档被当成"毒文档"重试数轮后丢弃，
+//     与本模块刻意丢弃畸形外部文档的语义混在一起，事后无法区分"客户端畸形"与"我们自己太窄"。
+// OPTIONS 由 app.js 的 cors() 在 preflight 分支直接 204 结束（preflightContinue 默认 false），
+// 走不到审计层；列进来是防御性收口，避免将来摘掉 cors 或改路由顺序时又回到同一处缺口。
+const AUDIT_HTTP_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
+
+/**
+ * method 的落库闸：枚举外的动词一律降级为「不记 method」。
+ *
+ * 抽成函数不是为了复用而复用——**批量写入路径必须在算哈希之前做同一份降级**。
+ * 逐条路径（AuditLog.create）先铸造后算哈希，两侧天然同源；批量路径
+ * （auditBuffer → chainBatch → insertMany）先对普通对象算哈希，铸造发生在之后，
+ * 于是 schema 的 set 把 method 抹掉时「被哈希的形态」与「落库的形态」分叉，
+ * 那条记录从此永远核验不过（永久假篡改），且它自身的完整性保护静默失效——
+ * 已经是红的记录再被改也照样红，唯一的"补救"是整库重签（等于销毁取证价值）。
+ * 触发它只需一条 `curl -X FOO`：app 级审计中间件在路由匹配之前就跑，收得下任意动词。
+ */
+const auditMethodOrUndefined = (value) => (AUDIT_HTTP_METHODS.includes(value) ? value : undefined);
+
+// 审计页的「日志等级」三级展示口径（由 success + riskLevel 派生，不是库里存的字段）。
+// 与 AUDIT_RISK_LEVELS 同理收成单一事实来源：查询侧（utils/auditQuery）、导出侧
+// （reportExportService 的枚举校验与 includes 闸门）原先各写一份字面量，
+// 单侧增删就会造成"查询放行、导出 400"的口径漂移（E-05 同一类）。
+const AUDIT_DISPLAY_LEVELS = ['info', 'warning', 'error'];
+
 // 审计日志 action 枚举白名单
 // 分两部分：
 //  1) 路由派生型——由 utils/auditMeta 的 deriveAction 从「完整路径」推导，
@@ -182,6 +244,15 @@ const AUDIT_LOG_ACTIONS = [
   'ip_blacklist_blocked',
   'csrf_origin_denied',
   'malformed_request_blocked',
+  // queryLimit 的两类拒绝（参数超长 / 收到对象数组形态的取值）。
+  // 与上面三类同族：都发生在 auditLog 之前，此前只进 logger。
+  // 不复用 malformed_request_blocked：那一条由协议合规层发出（Content-Type/头部/方法畸形），
+  // 这一条是 NoSQL 操作符与资源耗尽探测的指纹，混在一起就分不出"谁在探查询参数"。
+  'query_param_rejected',
+  // 响应头已发出、流被中途截断时补写的更正事件（errorHandler 的 markResponseAbortedByError）。
+  // 不登记就是 P1-11 复发：记录确实落库了，但 validateEnum 对不在白名单的 action 直接 400
+  // ⇒ 查询与导出都筛不出它，"这次导出被截断了"这条唯一的线索变成查不到的死角。
+  'response_aborted_after_headers',
   // 系统配置事件
   'registration_enabled',
   'registration_disabled',
@@ -210,5 +281,11 @@ const AUDIT_LOG_ACTIONS = [
 module.exports = {
   AUDIT_CATEGORIES,
   AUDIT_RISK_LEVELS,
+  riskLevelsAtLeast,
+  AUDIT_ERROR_RISK_LEVELS,
+  AUDIT_WARNING_OR_HIGHER_RISK_LEVELS,
+  AUDIT_HTTP_METHODS,
+  auditMethodOrUndefined,
+  AUDIT_DISPLAY_LEVELS,
   AUDIT_LOG_ACTIONS,
 };

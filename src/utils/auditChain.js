@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const logger = require('./logger');
+const { readPositiveNumberEnv } = require('./envNumber');
 
 // 共享缓存门面（A-1）：提供跨实例分布式锁与共享链尾指针的存取。
 // 仅依赖 logger，无循环依赖，可顶层引入。未配置 REDIS_URL 时
@@ -15,6 +16,9 @@ const {
   canonicalPayloadV2LegacyBatch,
   computeHash,
 } = require('./auditChainPayload');
+// method 的取值全集与降级规则只有一份（constants/audit.js）：schema 的 set 与这里的
+// 批量哈希用同一个函数，否则「被哈希的形态」与「落库的形态」会在铸造那一步分叉。
+const { auditMethodOrUndefined } = require('../constants/audit');
 
 // A-1 共享态键名：配置 REDIS_URL 时，链尾与互斥锁外置到共享缓存，
 // 多实例在分布式锁内读写同一链尾，消除「各实例独立链尾 → 必然分叉」；
@@ -102,9 +106,37 @@ let chainLock = Promise.resolve();
 // 超时的「僵尸 fn」稍后调用 advanceChainTail 时因代际过期被跳过，
 // 不再用过期 hash 覆写已重同步的链尾；代价是下一次操作从 DB 重同步
 let chainGeneration = 0;
+/**
+ * F-184b：共享链尾是否**不可信**（上一次推进只写进了本进程内存、Redis 没收）。
+ *
+ * 为什么必须是显式状态而不是"记一条日志就完事"：`sharedCache.set` 在 Redis 抛错时
+ * 回退写本地内存，对本进程自洽；但共享层那个键仍是**旧值**。Redis 恢复后
+ * `getChainTail` 会优先读共享层 ⇒ 拿到旧尾 ⇒ 在旧尾上另起一条链 ⇒ "一父两子"的分叉。
+ * 而链接性判据原本只做成员测试，这种分叉当场仍报 `intact:true`（已由 F-184a 补上检测）。
+ * 置位后本进程改为**每批从 DB 读权威链尾**（DB 里就是真实尾部），直到某次写入确认落到 Redis。
+ */
+let sharedTailUntrusted = false;
+
+/** 非法数值配置的告警（本变量只在模块加载期读一次，无需去重） */
+function invalidEnvWarning(name, raw, fallback) {
+  logger.error(
+    `${name}=${JSON.stringify(raw)} 非法（须为正的毫秒数），已按默认 ${fallback}ms 处理；` +
+      '负值或零会让审计链锁立即判定超时 ⇒ 链尾永不推进、全部审计降级为无哈希落库'
+  );
+}
 
 // 锁持有超时（毫秒）：fn 悬挂时不能让整条审计链永久排队
-const CHAIN_LOCK_TIMEOUT_MS = Number(process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS) || 15000;
+//
+// 原为 `Number(process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS) || 15000`，而**负值是真值**
+// ——`-1` 会原样生效，于是 `Promise.race([prev, timeout])` 与 `race([fn, timeout])`
+// 双双立即超时：每次 withChainLock 都「标记链尾失效 + 抛错」，链尾永不推进，
+// 所有审计记录降级为 legacy（无 hash）落库——防篡改承诺整体失效，
+// 而日志里只会看到一条条"锁持有超时"，看不出根因是配置笔误。
+// 现与 swagger(P2-37)/config(P2-39)/retention 同一口径：只接受有限正数，否则回落默认并告警。
+// 读取时机仍是模块加载期（测试按需在 require 之前设值，语义未变）。
+const CHAIN_LOCK_TIMEOUT_MS = readPositiveNumberEnv('AUDIT_CHAIN_LOCK_TIMEOUT_MS', 15000, {
+  onInvalid: invalidEnvWarning,
+});
 
 /**
  * 互斥执行临界区（fn 内为「读链尾→计算→推进链尾」）：fn 完成前，后续
@@ -134,10 +166,21 @@ function withChainLock(fn) {
   });
 
   // 上一持有者也受超时约束：prev 挂起时不能拖住本次调用
+  //
+  // F-192：这枚定时器必须在前驱正常放行时被 clear——Promise.race 只决定谁的结果被采用，
+  // 不会取消输掉的那一支。原实现于是把下面注释承诺的"前驱超时放行时"才做的失效标记，
+  // 变成了"每一次 withChainLock 都在 CHAIN_LOCK_TIMEOUT_MS 后无条件执行一次"：
+  // 内存链尾自我作废（每批都回库重读尾），代际凭空递增，B-L4 的僵尸守卫因此
+  // 把合法批次的 advanceChainTail 判成僵尸并跳过（实测：无争用两次调用后静置，
+  // 告警"审计链尾推进被跳过（代际 0 已过期，当前 1）"）。
+  let waitTimer = null;
+  const clearWaitTimer = () => {
+    if (waitTimer) clearTimeout(waitTimer);
+  };
   const waitPrev = Promise.race([
     prev,
-    new Promise((resolve) =>
-      setTimeout(() => {
+    new Promise((resolve) => {
+      waitTimer = setTimeout(() => {
         // B-L5：前驱超时放行时同样标记链尾失效并递增代际——
         // 重叠的后继与挂起的前驱，其 advanceChainTail 均因代际过期被跳过，
         // 直到任一操作从 DB 重同步；代价是一次额外重同步
@@ -145,9 +188,14 @@ function withChainLock(fn) {
         chainTail = null;
         chainGeneration += 1;
         resolve();
-      }, CHAIN_LOCK_TIMEOUT_MS).unref?.()
-    ),
+      }, CHAIN_LOCK_TIMEOUT_MS);
+      if (waitTimer.unref) waitTimer.unref();
+    }),
   ]);
+  // 两个分支都 clear：prev 先 settle 是常见路径（这条修复的正文），定时器自己跑完时
+  // clear 是空操作。用 then(fn, fn) 而不是 finally——finally 派生的那支没人接 reject，
+  // prev 一旦异常就冒出 unhandledRejection。
+  waitPrev.then(clearWaitTimer, clearWaitTimer);
 
   return waitPrev
     .then(async () => {
@@ -219,6 +267,29 @@ function withChainLock(fn) {
 }
 
 /**
+ * 链尾写共享缓存的**唯一入口**（三条写路径共用同一套落地判据）。
+ *
+ * 返回 sharedCache.set 的落地判据；顺带维护「共享尾是否可信」：
+ *  - false ⇒ 值只在**本进程内存**里，共享层仍是旧尾：置不可信，此后一律从 DB 读权威尾。
+ *  - 其他（含 undefined，旧桩）⇒ 按已落到 Redis 处理：解除不可信，
+ *    并抹掉本地副本——「本地内存里存在链尾副本 ⇒ 共享尾不可信」这条不变量必须在这里成立，
+ *    否则一次失败写入留下的本地值会在之后任意一次 GET 抖动时被顶回（F-204 的残留缺口：
+ *    只清标记不清副本，而 Redis 成功路径根本不碰内存层），
+ *    把一个早已死掉的父哈希当成链尾续下去 ⇒ chain_fork（误判篡改）。
+ * 调用方失败分支若还需兜内存指针/告警，自行按返回值处理（本函数不越权做）。
+ */
+async function writeSharedTail(value) {
+  const landed = await sharedCache.set(CHAIN_TAIL_KEY, value === null ? EMPTY_SENTINEL : value);
+  if (landed === false) {
+    sharedTailUntrusted = true;
+  } else {
+    sharedTailUntrusted = false;
+    sharedCache.dropLocalCopy(CHAIN_TAIL_KEY);
+  }
+  return landed;
+}
+
+/**
  * 取当前链尾：优先指针（内存或共享缓存）；未初始化时从 DB 读一次。
  *
  * Redis 就绪时链尾外置到共享缓存（CHAIN_TAIL_KEY），多实例共享同一链尾；
@@ -226,13 +297,26 @@ function withChainLock(fn) {
  * 链尾已初始化为 null（尚无任何记录）。未配置 Redis 时走进程内内存指针。
  */
 async function getChainTail(model) {
-  if (sharedCache.isRedisEnabled()) {
+  if (sharedCache.isRedisEnabled() && !sharedTailUntrusted) {
     const shared = await sharedCache.get(CHAIN_TAIL_KEY);
     if (shared === EMPTY_SENTINEL) return null;
     if (shared !== null && shared !== undefined) return shared;
     // 键不存在（未初始化）：从 DB 读并回写共享缓存，供本实例及他实例复用
     const latest = await getLatestHash(model);
-    await sharedCache.set(CHAIN_TAIL_KEY, latest === null ? EMPTY_SENTINEL : latest);
+    // F-204：这条"回写"路径必须和 advanceChainTail 一样吃 set() 的落地判据。
+    // 写没进 Redis 时，sharedCache.set 会把值落进**本进程内存**并返回 false；此后任何
+    // 一次共享读命令失败（Redis 抖动/主从切换）都会让 get() 从内存顶回这份副本，
+    // 而这个键在共享层里早已被其他实例推进过 ⇒ 既不回 DB 重同步也不告警，
+    // 本实例就在一个已死的父哈希上续链 ⇒ 链分叉（实测见 auditChainDistributed.test.js）。
+    // 只标记不可信，不改本轮返回值：latest 本就来自 DB（权威）。
+    await writeSharedTail(latest);
+    return latest;
+  }
+  if (sharedCache.isRedisEnabled()) {
+    // F-184b：共享尾不可信 ⇒ 读 DB（权威），并顺手尝试修复共享键；
+    // 只有确认写入落到 Redis 才解除不可信状态（写回失败时保持降级，不会"以为修好了"）。
+    const latest = await getLatestHash(model);
+    await writeSharedTail(latest);
     return latest;
   }
   if (!chainTailLoaded) {
@@ -245,6 +329,8 @@ async function getChainTail(model) {
 /**
  * 推进链尾（仅供锁内的追加路径调用）。
  * Redis 就绪时写共享缓存（链尾是长期状态，不带 TTL）；否则推进内存指针。
+ * 写入未落到 Redis 时不抛错（审计不丢优先），而是置「共享尾不可信」标记，
+ * 此后 getChainTail 一律从 DB 读权威尾 —— 见 sharedTailUntrusted 注释。
  */
 async function advanceChainTail(hash, gen = chainGeneration) {
   // B-L4：代际守卫——持锁/前驱等待超时递增代际后，超时的「僵尸 fn」稍后
@@ -257,7 +343,18 @@ async function advanceChainTail(hash, gen = chainGeneration) {
     return;
   }
   if (sharedCache.isRedisEnabled()) {
-    await sharedCache.set(CHAIN_TAIL_KEY, hash === null ? EMPTY_SENTINEL : hash);
+    const landed = await writeSharedTail(hash);
+    if (landed === false) {
+      // Redis 没收下：值只在本地内存，共享层仍是旧尾 ⇒ 本进程此后一律从 DB 读尾（见 getChainTail）。
+      // 同时把内存尾写成本批结果：Redis 若整体不可用（isRedisEnabled() 转 false），
+      // 进程内语义接手时指针已经是正确的，不会退化成"从空尾重开"。
+      chainTail = hash;
+      chainTailLoaded = true;
+      logger.error(
+        '审计链共享链尾未能写入 Redis（只落到本进程内存），此后每批改从 DB 重读链尾：' +
+          '继续信任共享层旧尾会让本实例与其他实例在同一父哈希上各写一条 ⇒ 链分叉（F-184a 起分叉会计入 chain_fork）'
+      );
+    }
     return;
   }
   chainTail = hash;
@@ -287,10 +384,15 @@ async function rollbackChainTail(expectedCurrent, restoreTo) {
 
 /**
  * 标记链尾失效：下次 getChainTail 强制从 DB 重读（部分落库成功后的自愈入口）。
- * Redis 就绪时删除共享链尾键（下次 getChainTail 因键缺失回 DB 重读）；
- * 否则清进程内 loaded 标记。
+ * 进程内 loaded 标记在所有分支都清；Redis 就绪时额外删除共享链尾键
+ * （下次 getChainTail 因键缺失回 DB 重读并回写）。
  */
 async function resyncChainTail() {
+  // F-194：进程内链尾必须无条件清。Redis 在线时 getChainTail 不读它，看似无害；
+  // 但 advanceChainTail 明确承诺"Redis 若整体不可用，进程内语义接手"——那时接手的
+  // 就是这枚幻影尾，而调用方（auditBuffer 的部分落库自愈入口）只调本函数、不再手工清。
+  chainTail = null;
+  chainTailLoaded = false;
   if (sharedCache.isRedisEnabled()) {
     try {
       await sharedCache.del(CHAIN_TAIL_KEY);
@@ -299,9 +401,7 @@ async function resyncChainTail() {
       // 但「链尾失效」本就是自愈入口的尽力而为语义，吞错避免 fire-and-forget
       // 路径产生 unhandled rejection
     }
-    return;
   }
-  chainTailLoaded = false;
 }
 
 /**
@@ -349,6 +449,12 @@ function chainBatch(docs, startPrevHash) {
         doc[field] = makeDefault();
       }
     }
+    // method 的降级闸必须与 AuditLog.js 的 schema set 同一份实现，而且必须发生在算哈希**之前**：
+    // 逐条路径先铸造后算哈希（两侧天然同源），批量路径先算哈希、insertMany 才铸造。
+    // 少了这一行，`curl -X FOO` 这类枚举外动词的记录就带着 method='FOO' 进了哈希、
+    // 落库时又被 set 抹成「不记 method」⇒ 该记录从此永久 hash_mismatch（假篡改），
+    // 且它自身的完整性保护静默失效（已经是红的，再被真改也照样红）。
+    doc.method = auditMethodOrUndefined(doc.method);
 
     doc.prevHash = prevHash;
     const payload = canonicalPayload(doc, CURRENT_PAYLOAD_VERSION);
@@ -359,6 +465,18 @@ function chainBatch(docs, startPrevHash) {
     prevHash = hash;
   }
   return prevHash;
+}
+
+/**
+ * 仅供测试重置内部状态（生产不调用）——与 auditBuffer.__resetForTest 同惯例。
+ * 不重置 chainLock：它与在飞的持有者同生死，单独清零会让上一个用例遗留的
+ * release() 去 resolve 本用例新装的锁，反而制造串扰。
+ */
+function __resetForTest() {
+  chainTail = null;
+  chainTailLoaded = false;
+  chainGeneration = 0;
+  sharedTailUntrusted = false;
 }
 
 module.exports = {
@@ -380,4 +498,5 @@ module.exports = {
   advanceChainTail,
   rollbackChainTail,
   resyncChainTail,
+  __resetForTest,
 };

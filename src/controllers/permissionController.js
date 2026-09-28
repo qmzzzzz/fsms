@@ -4,6 +4,7 @@
  */
 
 const { validationResult } = require('express-validator');
+const { safeFieldErrors } = require('../utils/validationRules');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
@@ -63,7 +64,9 @@ const getPermissionById = asyncHandler(async (req, res) => {
 const createPermission = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { name, code, description, type, module, parent, path, method, sort } = req.body;
@@ -92,13 +95,25 @@ const createPermission = asyncHandler(async (req, res) => {
 const updatePermission = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { name, description, type, module, parent, path, method, sort, status } = req.body;
   const permission = await permissionService.getPermissionForUpdate(req.params.id);
   if (!permission) {
     return ApiResponse.codeError(res, 'PERMISSION_NOT_FOUND');
+  }
+
+  // 内置超级通配 `*:*` 不可停用/改状态（与创建路径 permissionRoutes.js:41 的
+  // `.not().equals('*:*')` 同口径，纵深防御）。userPermissionService.getPermissions
+  // populate `match:{status:'active'}`——一旦把 `*:*` 置 inactive，全体超管解析时立刻失去
+  // `*:*`，而本接口只有持 permission:update 的超管能调 → 改完自己也没权限改回 = DB 级自锁死。
+  if (permission.code === '*:*' && status !== undefined) {
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: [{ path: 'status', msg: '内置超级权限 *:* 不可停用或变更状态' }],
+    });
   }
 
   // 提供非空 parent 时必须真实存在且不能指向自身；
@@ -179,7 +194,9 @@ const deletePermission = asyncHandler(async (req, res) => {
 const batchCreatePermissions = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: errors.array() });
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
   }
 
   const { permissions } = req.body;

@@ -67,6 +67,20 @@ const PAYLOAD_FIELDS_V4 = [
 
 const CURRENT_PAYLOAD_VERSION = 4;
 
+/**
+ * 四份历史清单一律冻结。
+ *
+ * 理由不是洁癖：本文件第 48-51 行记着的事故（v3 曾写成 `= PAYLOAD_FIELDS_V2`
+ * 同一个引用）就是"清单被别处改动 ⇒ 历史哈希再也算不回来"这一类，
+ * 而它的后果是**大面积假篡改告警**——防篡改链最坏的失败形态
+ * （把完好的链路报成被篡改，运维只能整库重签）。
+ * 靠注释与 code review 防不住第三次，冻结能防住：数组内容从此不可能被 push/splice 改掉。
+ */
+Object.freeze(PAYLOAD_FIELDS_V1);
+Object.freeze(PAYLOAD_FIELDS_V2);
+Object.freeze(PAYLOAD_FIELDS_V3);
+Object.freeze(PAYLOAD_FIELDS_V4);
+
 const stableStringify = (value) => {
   if (value === null || value === undefined) return 'null';
   if (typeof value !== 'object') return JSON.stringify(value) ?? 'null';
@@ -137,7 +151,13 @@ const canonicalPayloadV2LegacyBatch = (doc) => {
  */
 const canonicalPayload = (doc, version = CURRENT_PAYLOAD_VERSION) => {
   if (version >= 4) return canonicalPayloadV2(doc, PAYLOAD_FIELDS_V4);
-  if (version >= 2) return canonicalPayloadV2(doc, PAYLOAD_FIELDS_V2);
+  // v3 必须读 V3 那份快照。此前这一行读的是 PAYLOAD_FIELDS_V2，于是上面"必须是独立快照"
+  // 的承诺实际未生效：给 V2 追加字段会连同 v3 的口径一起改掉，全部 v3 历史记录
+  // 瞬时变 hash_mismatch（大面积假篡改告警）——正是那条注释声称要防的事故。
+  // 今日 V3 与 V2 内容相等（由 zzqoder_auditFieldSetsImmutable 钉住），所以本行
+  // 不改变任何既有哈希；改的是"将来加字段时谁受影响"。
+  if (version >= 2)
+    return canonicalPayloadV2(doc, version >= 3 ? PAYLOAD_FIELDS_V3 : PAYLOAD_FIELDS_V2);
   return canonicalPayloadV1(doc);
 };
 

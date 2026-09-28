@@ -7,19 +7,21 @@ const router = express.Router();
 const permissionController = require('../controllers/permissionController');
 const { authenticate, checkPermission } = require('../middleware');
 const { body, param, query } = require('express-validator');
+const { mustBeString } = require('../utils/validationRules');
 const { consumeValidation } = require('../middleware/validateQuery');
+// 取值清单只有一份（constants/permission.js）：这些 isIn 与 Permission/Role schema 的 enum
+// 必须同源，否则"校验放行、落库被 ValidationError 拒"。
+const {
+  PERMISSION_TYPES,
+  PERMISSION_METHODS,
+  RESOURCE_STATUSES,
+} = require('../constants/permission');
 
 // P3-4/P3-17：列表 query 校验。module/type/status 此前零校验直入 Mongo 过滤
 // values:'falsy'：前端未选筛选项时带空串（type=&status=），空串语义为「不筛选」
 const listQueryValidation = [
-  query('type')
-    .optional({ values: 'falsy' })
-    .isIn(['menu', 'button', 'api', 'data'])
-    .withMessage('无效的权限类型'),
-  query('status')
-    .optional({ values: 'falsy' })
-    .isIn(['active', 'inactive'])
-    .withMessage('无效的状态值'),
+  query('type').optional({ values: 'falsy' }).isIn(PERMISSION_TYPES).withMessage('无效的权限类型'),
+  query('status').optional({ values: 'falsy' }).isIn(RESOURCE_STATUSES).withMessage('无效的状态值'),
   query('module').optional().trim().isLength({ max: 50 }).withMessage('模块名不能超过 50 个字符'),
   query('page').optional().isInt({ min: 1 }).withMessage('页码无效'),
   query('limit').optional().isInt({ min: 1, max: 500 }).withMessage('每页数量应在 1-500'),
@@ -30,6 +32,7 @@ const permissionIdValidation = [param('id').isMongoId().withMessage('权限 ID �
 
 // 验证规则
 const createPermissionValidation = [
+  mustBeString('name', '权限名称'),
   body('name').trim().isLength({ min: 1, max: 50 }).withMessage('权限名称长度应为 1-50 个字符'),
   body('code')
     .trim()
@@ -41,7 +44,8 @@ const createPermissionValidation = [
     .not()
     .equals('*:*')
     .withMessage('不允许创建保留通配权限 *:*'),
-  body('type').isIn(['menu', 'button', 'api', 'data']).withMessage('无效的权限类型'),
+  body('type').isIn(PERMISSION_TYPES).withMessage('无效的权限类型'),
+  mustBeString('module', '模块名'),
   body('module')
     .trim()
     .notEmpty()
@@ -49,24 +53,28 @@ const createPermissionValidation = [
     .isLength({ max: 50 })
     .withMessage('模块名不能超过 50 个字符'),
   body('parent').optional().isMongoId(),
+  mustBeString('path', '路径'),
   body('path').optional().trim().isLength({ max: 200 }).withMessage('路径不能超过 200 个字符'),
+  mustBeString('description', '描述'),
   body('description')
     .optional()
     .trim()
     .isLength({ max: 200 })
     .withMessage('描述不能超过 200 个字符'),
-  body('method').optional().isIn(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', '*']),
+  body('method').optional().isIn(PERMISSION_METHODS),
 ];
 
 // 更新权限：字段全部可选，长度上限对齐 create；
 // 控制器 updatePermission 不支持修改 code（前端亦未调用该接口），故移除 code 的无效校验，避免误导
 // type/status/parent/sort/method 枚举与 Permission 模型定义对齐，防止非法值直写 DB
 const updatePermissionValidation = [
+  mustBeString('name', '权限名称'),
   body('name')
     .optional()
     .trim()
     .isLength({ min: 1, max: 50 })
     .withMessage('权限名称长度应为 1-50 个字符'),
+  mustBeString('module', '模块名'),
   body('module')
     .optional()
     .trim()
@@ -74,21 +82,20 @@ const updatePermissionValidation = [
     .withMessage('所属模块不能为空')
     .isLength({ max: 50 })
     .withMessage('模块名不能超过 50 个字符'),
+  mustBeString('path', '路径'),
   body('path').optional().trim().isLength({ max: 200 }).withMessage('路径不能超过 200 个字符'),
+  mustBeString('description', '描述'),
   body('description')
     .optional()
     .trim()
     .isLength({ max: 200 })
     .withMessage('描述不能超过 200 个字符'),
-  body('type').optional().isIn(['menu', 'button', 'api', 'data']).withMessage('无效的权限类型'),
-  body('status').optional().isIn(['active', 'inactive']).withMessage('无效的状态值'),
+  body('type').optional().isIn(PERMISSION_TYPES).withMessage('无效的权限类型'),
+  body('status').optional().isIn(RESOURCE_STATUSES).withMessage('无效的状态值'),
   // 显式传空值视为清除父级（置顶），仅非空值要求合法 ObjectId
   body('parent').optional({ values: 'falsy' }).isMongoId().withMessage('父级权限 ID 格式无效'),
   body('sort').optional().isInt({ min: 0, max: 9999 }).withMessage('排序值应为 0-9999 的整数'),
-  body('method')
-    .optional()
-    .isIn(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', '*'])
-    .withMessage('无效的请求方法'),
+  body('method').optional().isIn(PERMISSION_METHODS).withMessage('无效的请求方法'),
 ];
 
 const batchCreateValidation = [
@@ -99,6 +106,7 @@ const batchCreateValidation = [
   // P2-23：批量路径此前完全没有逐条校验，控制器又不消费 validationResult，
   // 于是 max:500 形同虚设、`*:*` 可被批量铸造、parent 悬空无人拦。
   // 逐条校验与单条创建保持同口径（校验器是唯一事实来源，控制器不再重复实现）。
+  mustBeString('permissions.*.name', '权限名称'),
   body('permissions.*.name')
     .trim()
     .isLength({ min: 1, max: 50 })
@@ -113,7 +121,8 @@ const batchCreateValidation = [
     .not()
     .equals('*:*')
     .withMessage('不允许创建保留通配权限 *:*'),
-  body('permissions.*.type').isIn(['menu', 'button', 'api', 'data']).withMessage('无效的权限类型'),
+  body('permissions.*.type').isIn(PERMISSION_TYPES).withMessage('无效的权限类型'),
+  mustBeString('permissions.*.module', '模块名'),
   body('permissions.*.module')
     .trim()
     .notEmpty()
@@ -124,20 +133,19 @@ const batchCreateValidation = [
     .optional({ values: 'falsy' })
     .isMongoId()
     .withMessage('父级权限 ID 格式无效'),
+  mustBeString('permissions.*.path', '路径'),
   body('permissions.*.path')
     .optional()
     .trim()
     .isLength({ max: 200 })
     .withMessage('路径不能超过 200 个字符'),
+  mustBeString('permissions.*.description', '描述'),
   body('permissions.*.description')
     .optional()
     .trim()
     .isLength({ max: 200 })
     .withMessage('描述不能超过 200 个字符'),
-  body('permissions.*.method')
-    .optional()
-    .isIn(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', '*'])
-    .withMessage('无效的请求方法'),
+  body('permissions.*.method').optional().isIn(PERMISSION_METHODS).withMessage('无效的请求方法'),
   body('permissions.*.sort')
     .optional()
     .isInt({ min: 0, max: 9999 })
@@ -169,6 +177,9 @@ router.get(
   authenticate,
   checkPermission('permission:read'),
   permissionIdValidation,
+  // 2026-09-26 审计 Top5：死校验链补消费（非法 id 已被 applyObjectIdParams 先行 400，
+  // 本消费层正常时收不到错误——挂上是为了让「校验 → 消费 → 控制器」在同处成立）
+  consumeValidation(),
   permissionController.getPermissionById
 );
 
@@ -225,6 +236,8 @@ router.delete(
   authenticate,
   checkPermission('permission:delete'),
   permissionIdValidation,
+  // 同 GET /:id：死校验链补消费
+  consumeValidation(),
   // SCOPE-EXEMPT: 同 POST /api/permissions：全局管理面，无数据范围维度
   permissionController.deletePermission
 );

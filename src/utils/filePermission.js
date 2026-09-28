@@ -10,8 +10,9 @@
  *
  * 本模块把「收紧」从提示升级为**实际执行**：
  *   - POSIX：chmod（目录 0700 / 文件 0600）
- *   - Windows：icacls /inheritance:r /grant:r <user>:F
- *     切断继承、只留当前用户（Administrators 与 SYSTEM 经 UAC 提权本就可取，
+ *   - Windows：icacls /reset 再 /inheritance:r /grant:r <user>:F
+ *     先 /reset 清掉**显式授予**的 ACE（否则 Everyone 这类 ACE 会存活），再切断继承、
+ *     只留当前用户（Administrators 与 SYSTEM 经 UAC 提权本就可取，
  *     无需显式授予；显式授予反而多一条可被滥用的 ACE）
  *
  * 为什么默认执行而非仅提示：调用方（generate-secrets / initData）的**意图**本就是
@@ -59,33 +60,40 @@ function hardenPath(target, opts = {}) {
     return { ok: false, method: 'icacls', detail: 'USERNAME 未定义' };
   }
 
+  // 两步命令的参数各只写一处：实际执行与失败提示**共用同一份 argv**（见 catch 里的 hint）。
+  // 之前"执行"和"印给用户的手工命令"各写一遍，于是提示漏掉了 /reset —— 照提示手敲会得到
+  // "显式 ACE 存活"的半套收紧（F-189）。共用 argv 后二者不可能再分叉。
+  // 提示用解析后的真实用户名而不是 `%USERNAME%`：后者只在 cmd.exe 里展开，
+  // 粘进 PowerShell（如今 Windows 开发机的默认 shell）会原样传给 icacls 并失败。
+  const dirFlags = isDir ? ['/T', '/C', '/Q'] : [];
+  const ace = isDir ? '(OI)(CI)F' : 'F';
+  const resetArgv = [target, '/reset', ...dirFlags];
+  const grantArgv = [target, '/inheritance:r', '/grant:r', `${user}:${ace}`, ...dirFlags];
+  const execOpts = { stdio: 'pipe', windowsHide: true };
+  // 渲染成**可直接粘贴**的命令行：开关原样、含空格的参数（路径、用户名）加引号。
+  const show = (argv) => `icacls ${argv.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ')}`;
+
   try {
-    const grant = isDir ? `${user}:(OI)(CI)F` : `${user}:F`;
-    // 【本轮修复】必须先 /reset 清掉**显式授予**的 ACE，再切断继承并授权。
-    //
-    // 缺陷实证：`icacls <path> /inheritance:r /grant:r <user>:F` 只移除
-    // **继承来的** ACE，不动显式授予的 ACE。若密钥目录曾被显式授予过
-    // Everyone / Users（管理员手工改过、或由某个安装器/解压工具带的 ACL），
-    // 该 ACE 会在收紧后**存活**——而本函数照旧返回 ok:true，
-    // 复核对外的结论就成了「已收紧」：密钥目录实际仍对所有人可读。
+    // 【缺陷实证】`icacls <path> /inheritance:r /grant:r <user>:F` 只移除**继承来的** ACE，
+    // 不动显式授予的 ACE。若密钥目录曾被显式授予过 Everyone / Users（管理员手工改过、
+    // 或由某个安装器/解压工具带的 ACL），该 ACE 会在"收紧"后**存活**——而本函数照旧返回
+    // ok:true，对外的结论就成了「已收紧」：密钥目录实际仍对所有人可读。
     // 这正是本模块最要防的失效形态（假阴性：给用户虚假保证）。
     //
-    // /reset 恢复为从父目录继承的默认 ACL（把「显式 ACE」全部清掉，
-    // 含 Everyone 这类组账户），随后再 /inheritance:r 切断继承并只授予当前用户。
+    // /reset 恢复为从父目录继承的默认 ACL（把「显式 ACE」全部清掉，含 Everyone 这类组账户），
+    // 随后再 /inheritance:r 切断继承并只授予当前用户；/T 让目录内既有文件一并重置
+    // （否则子文件保留各自的显式 ACE）。/reset 对**文件**同样是必需的——原实现把它包在
+    // `if (isDir)` 里，于是带显式授予 ACE 的文件在"收紧"后仍然人人可读，而本函数返回 ok:true。
+    // 真跑 icacls 复现过（`/grant *S-1-1-0:(R)` 后再 hardenPath，ACE 存活）：目录分支有修复、
+    // 文件分支漏了——与上面"提示与执行各写一遍"是同一个根：同一语义写两处，必然分叉。
     // 顺序不可颠倒：先 /inheritance:r 再 /reset 会把切断效果一并重置掉。
-    // /T 让目录内既有文件一并重置（否则子文件保留各自的显式 ACE）。
-    if (isDir) {
-      execFileSync('icacls', [target, '/reset', '/T', '/C', '/Q'], {
-        stdio: 'pipe',
-        windowsHide: true,
-      });
-    }
-    const args = [target, '/inheritance:r', '/grant:r', grant];
-    if (isDir) args.push('/T', '/C', '/Q');
-    execFileSync('icacls', args, { stdio: 'pipe', windowsHide: true });
+    execFileSync('icacls', resetArgv, execOpts);
+    execFileSync('icacls', grantArgv, execOpts);
     return { ok: true, method: 'icacls', detail: `已重置显式 ACE 并切断继承，仅授予 ${user}` };
   } catch (err) {
-    const hint = `icacls "${target}" /inheritance:r /grant:r "%USERNAME%:${isDir ? '(OI)(CI)F' : 'F'}"`;
+    // 提示 = 刚才**实际执行**的那两条命令（共用 argv ⇒ 不可能再漏步骤）：
+    // 缺任何一步都会留下存活的显式 ACE，那正是本模块要防的假阴性。
+    const hint = `${show(resetArgv)} && ${show(grantArgv)}`;
     log(`⚠️  ACL 收紧失败（${target}）：${err.message}`);
     log(`    请手动执行：${hint}`);
     return { ok: false, method: 'icacls', detail: err.message };

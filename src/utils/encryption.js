@@ -7,6 +7,27 @@ const crypto = require('crypto');
 const config = require('../config');
 const logger = require('./logger');
 
+// HashUtils.randomString 的字符表：62 个字符，配丢弃式采样（256 不能被 62 整除，
+// 取模会引入偏差，所以表外的字节直接丢弃）
+const RANDOM_STRING_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
+// GCM 密文的字段规范。唯一权威是本模块的写入侧（encrypt 的产出形状），
+// 读取侧的校验正则由这几个常量生成，避免「写入改了、校验忘了改」的漂移。
+const GCM_IV_LENGTH_BYTES = 12; // AES-GCM 标准 96-bit nonce
+const GCM_AUTH_TAG_LENGTH_BYTES = 16; // getAuthTag() 的标签长度
+const hexOfLength = (bytes) => new RegExp(`^[0-9a-f]{${bytes * 2}}$`);
+const GCM_IV_HEX = hexOfLength(GCM_IV_LENGTH_BYTES);
+const GCM_TAG_HEX = hexOfLength(GCM_AUTH_TAG_LENGTH_BYTES);
+// 标准 base64（toString('base64') 的产出形式）：4 字符一组，'=' 只允许作末尾填充。
+// 空密文合法——明文为空时 GCM 密文本就是 0 字节。
+const GCM_CIPHER_B64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+// HMAC 签名串的规范形式：小写十六进制，长度 = 摘要字节数 × 2。
+// 从算法推导而不是写死 64——换算法时校验侧自动跟上，不会出现「产出 64 位、校验按别的长度」的漂移。
+// dummy key 只用于问出摘要长度，不触碰实例密钥。
+const hmacHexShapeOf = (algorithm) =>
+  new RegExp(`^[0-9a-f]{${crypto.createHmac(algorithm, 'shape-probe').digest().length * 2}}$`);
+
 /**
  * AES 加密解密工具类
  * 用于敏感数据的加密存储
@@ -28,7 +49,7 @@ class AESCipher {
     this.secret = effectiveKey || 'default-aes-key-change-in-production';
     // 确保密钥长度为 32 字节（256 位）
     this.key = crypto.createHash('sha256').update(String(this.secret)).digest();
-    this.ivLength = 12; // AES-GCM 推荐 96-bit (12 字节) IV
+    this.ivLength = GCM_IV_LENGTH_BYTES; // AES-GCM 推荐 96-bit (12 字节) IV
   }
 
   /**
@@ -85,17 +106,51 @@ class AESCipher {
     return this._decryptCBC(encryptedText);
   }
 
+  /**
+   * 解析并解密 GCM 密文
+   *
+   * F-181：三段先按 encrypt() 的产出规范校验，再交给密码学调用。
+   * 实测（Node v24.15.0）不加校验时有两类后果：
+   *   1) 接受集严格大于产出集——大写十六进制、十六进制段尾随非法字符
+   *      （`iv:…zz`，Buffer 会截断到坏字符前）、base64 段里插入非法字符
+   *      （解码会跳过），**全都照常解出明文**。也就是同一段明文可以由
+   *      多个互不相同的密文字符串表示，而 encrypt() 永远产不出那些串；
+   *      任何按密文字符串做的比对（改动检测、去重、取证）都会漏掉它们。
+   *   2) 截断的 tag（4/8/12 字节被 setAuthTag 接受，DEP0182）与错误长度的 IV
+   *      只靠 OpenSSL 在 final() 才失败——今天确实是失败关闭（实测无一条解出
+   *      明文），但「认证强度由标签长度决定」这件事被交给了运行时行为而不是本模块。
+   * 校验放在密码学调用之前，非规范输入不进入 GCM 路径。
+   */
   _decryptGCM(payload) {
     const parts = payload.split(':');
     if (parts.length !== 3) {
       throw new Error('无效的 GCM 密文格式');
     }
 
-    const iv = Buffer.from(parts[0], 'hex');
-    const authTag = Buffer.from(parts[1], 'hex');
-    const encrypted = parts[2];
+    const [ivHex, tagHex, encrypted] = parts;
+    if (!GCM_IV_HEX.test(ivHex)) {
+      throw new Error(
+        `无效的 GCM 密文格式：iv 段必须是 ${GCM_IV_LENGTH_BYTES * 2} 位小写十六进制（当前 ${ivHex.length} 字符）`
+      );
+    }
+    if (!GCM_TAG_HEX.test(tagHex)) {
+      throw new Error(
+        `无效的 GCM 密文格式：tag 段必须是 ${GCM_AUTH_TAG_LENGTH_BYTES * 2} 位小写十六进制（当前 ${tagHex.length} 字符）`
+      );
+    }
+    if (!GCM_CIPHER_B64.test(encrypted)) {
+      throw new Error(
+        `无效的 GCM 密文格式：密文段必须是标准 base64（当前 ${encrypted.length} 字符）`
+      );
+    }
 
-    const decipher = crypto.createDecipheriv(this.algorithm, Buffer.from(this.key), iv);
+    const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(tagHex, 'hex');
+
+    // authTagLength 显式传入：不依赖 SDK 默认值与标签长度恰好一致
+    const decipher = crypto.createDecipheriv(this.algorithm, Buffer.from(this.key), iv, {
+      authTagLength: authTag.length,
+    });
     decipher.setAuthTag(authTag);
 
     let decrypted = decipher.update(encrypted, 'base64', 'utf8');
@@ -129,6 +184,8 @@ class AESCipher {
 class HMACSigner {
   constructor(secretKey = null) {
     this.algorithm = 'sha256';
+    // 放在任何 return 分支之前：两条退出路径都要带上它，否则 verify 会读到 undefined
+    this.signatureShape = hmacHexShapeOf(this.algorithm);
     const effectiveKey = secretKey || process.env.HMAC_SECRET || config.hmacSecret;
     if (!effectiveKey) {
       // 生产/开发一律拒绝启动，避免签名退化为可预测值
@@ -161,31 +218,31 @@ class HMACSigner {
   /**
    * 验证 HMAC 签名
    * @param {string} data - 原始数据
-   * @param {string} signature - 待验证的签名
-   * @returns {boolean} - 签名是否有效
+   * @param {string} signature - 待验证的签名（必须是 sign() 的产出形式：小写十六进制）
+   * @returns {boolean} - 签名是否有效（任何输入不合形状都是 false，不抛异常）
    */
   verify(data, signature) {
-    const expectedSignature = this.sign(data);
-
-    // 首先检查签名长度，防止时序攻击
-    if (!signature || typeof signature !== 'string') {
+    // 先守卫、后计算：原先 this.sign(data) 排在守卫之前，非字符串 data 会让
+    // ERR_INVALID_ARG_TYPE 从这个标着 @returns {boolean} 的判定方法里抛给调用方。
+    // 形状必须是"等于产出集"而不是"hex 解得开"：Buffer.from(x,'hex') 大小写不敏感、
+    // 且截断到第一个坏字符，所以改前 sig.toUpperCase() 与 sig+'zz' 都判等成立。
+    if (typeof signature !== 'string' || !this.signatureShape.test(signature)) {
       return false;
     }
 
+    let expectedSignature;
     try {
-      const sigBuffer = Buffer.from(signature, 'hex');
-      const expectedBuffer = Buffer.from(expectedSignature, 'hex');
-
-      // 修复：长度不一致时直接返回 false，无需做无意义的 timingSafeEqual 计算
-      if (sigBuffer.length !== expectedBuffer.length) {
-        return false;
-      }
-
-      return crypto.timingSafeEqual(sigBuffer, expectedBuffer);
-    } catch (error) {
-      // hex 解码失败时返回 false
+      expectedSignature = this.sign(data);
+    } catch {
+      // data 不是 update() 接受的类型：判定为"未通过"，不把异常当成调用方的错误处理负担
       return false;
     }
+
+    // 两侧都是定长小写十六进制（上面已校验），timingSafeEqual 不可能因长度不等抛错
+    return crypto.timingSafeEqual(
+      Buffer.from(signature, 'hex'),
+      Buffer.from(expectedSignature, 'hex')
+    );
   }
 }
 
@@ -247,17 +304,29 @@ class HashUtils {
   }
 
   /**
-   * 生成安全随机字符串
-   * @param {number} length - 字符串长度
-   * @param {string} charset - 字符集
-   * @returns {string} - 随机字符串
+   * 生成安全随机字符串（字母+数字，长度**恰好**等于 length）
+   *
+   * 原实现取 `randomBytes(n*3/4).toString('base64')` 再删掉非字母数字字符，
+   * 于是 `+` `/` `=` 被删掉的那些字符不会补回来——实测 500 次调用里
+   * 63% 的 `randomString(32)` 返回不足 32 位（观察到最短 27 位），16 位档 43% 偏短。
+   * 调用方按"长度=熵"来理解这个函数（重置码/nonce/临时口令），
+   * 静默变短就是熵被悄悄扣掉，且下游任何按长度做的校验会莫名失败。
+   * 现改为在 62 字符表上做丢弃式采样：不做取模（避免模偏差），
+   * 落在表外的字节直接扔掉再取下一批。
+   *
+   * @param {number} length - 字符串长度（正整数）
+   * @returns {string} - 恰好 length 位的随机串
    */
   static randomString(length = 32) {
-    return crypto
-      .randomBytes(Math.ceil((length * 3) / 4))
-      .toString('base64')
-      .replace(/[^A-Za-z0-9]/g, '')
-      .slice(0, length);
+    const chars = [];
+    while (chars.length < length) {
+      const bytes = crypto.randomBytes((length - chars.length) * 2);
+      for (const byte of bytes) {
+        if (byte < RANDOM_STRING_ALPHABET.length) chars.push(RANDOM_STRING_ALPHABET[byte]);
+        if (chars.length === length) break;
+      }
+    }
+    return chars.join('');
   }
 }
 
@@ -273,10 +342,17 @@ class DataMasking {
   static maskPhone(phone) {
     if (!phone) return '';
     const str = String(phone);
+    // 四条正则一律**全串锚定**：非锚定的 `replace` 只改写命中的那一段，
+    // 尾部会整段留下（实测 20 位以上纯数字串会漏出后 12 位明文）。
+    // 锚定后"形状不认识"就落到兜底，兜底保证整串被打码。
     if (str.length === 11) {
-      return str.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2');
+      const masked = str.replace(/^(\d{3})\d{4}(\d{4})$/, '$1****$2');
+      if (masked !== str) return masked;
     }
-    return str.replace(/(\d{2})\d+(\d{2})/, '$1***$2');
+    const generic = str.replace(/^(\d{2})\d+(\d{2})$/, '$1***$2');
+    // `replace` 未命中时返回的是**原串**。原实现在这里把"认不出的形态"
+    // 当成"不需要脱敏"，4 位以内的短号会整串出现在响应/日志里。
+    return generic === str ? '****' : generic;
   }
 
   /**
@@ -309,9 +385,29 @@ class DataMasking {
     if (!idCard) return '';
     const str = String(idCard);
     if (str.length >= 14) {
-      return str.replace(/(\d{6})\d{8}(\w{4})/, '$1********$2');
+      const masked = str.replace(/^(\d{6})\d{8}(\w{4})$/, '$1********$2');
+      if (masked !== str) return masked;
+      // 上面那条正则要 6+8+4=18 位才命中，而**老式 15 位身份证确实存在**
+      // （1999 年前签发），16/17 位也可能来自录入残缺。原实现在这些形态下
+      // 整串原样返回 ⇒ 证件号明文进入响应/日志/导出。
+      return DataMasking._maskMiddle(str, 6, 4);
     }
-    return str.replace(/(\d{4})\d+(\w{2})/, '$1***$2');
+    const short = str.replace(/^(\d{4})\d+(\w{2})$/, '$1***$2');
+    return short === str ? '****' : short;
+  }
+
+  /**
+   * 兜底打码：保留头 head 位与尾 tail 位，中间全部替换为等长星号。
+   * 供各 mask* 在"正则没认出来"时使用——认不出不等于可以不脱敏。
+   * 长度不足以同时保留头尾时整串打码（绝不返回原串）。
+   * @param {string} str 已 String 化的输入
+   * @param {number} head 保留的头部字符数
+   * @param {number} tail 保留的尾部字符数
+   * @returns {string} 与原串等长的脱敏结果
+   */
+  static _maskMiddle(str, head, tail) {
+    if (str.length <= head + tail) return '*'.repeat(str.length);
+    return `${str.slice(0, head)}${'*'.repeat(str.length - head - tail)}${str.slice(-tail)}`;
   }
 
   /**
@@ -434,4 +530,8 @@ module.exports = {
   DataMasking,
   aesCipher,
   hmacSigner,
+  // GCM 密文字段的规范形式（见 _decryptGCM）。导出是为了让用例把
+  // 「写入侧产出」与「读取侧接受」直接比对，而不是把正则再抄一遍到测试里——
+  // 抄一份的话，生产侧放宽、测试侧不会跟着红。
+  GCM_FIELD_SHAPES: { iv: GCM_IV_HEX, tag: GCM_TAG_HEX, cipher: GCM_CIPHER_B64 },
 };

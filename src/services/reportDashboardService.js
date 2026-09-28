@@ -10,7 +10,17 @@ const Inspection = require('../models/Inspection');
 const { getDataScope } = require('../middleware/rbac');
 const { businessDayBounds } = require('../constants/timezone');
 const { scopeFilterFor } = require('./reportExportService');
+const { deviceAlertFilters } = require('../constants/deviceAlerts');
+// 超期统计的两条腿共用清单（F-151）：status:'overdue' 是已改写的，另一条是「该改写但还没轮到」
+// 的开放计划——这个口径必须与 deviceReminder.markOverdueInspections 完全同源。
+const { INSPECTION_OVERDUE_MARKABLE_STATUSES } = require('../constants/inspection');
 
+// 进程内 Map 缓存，**不做跨实例失效广播**——与 services/statsCache.js 的策略刻意不同，
+// 不是漏接：statsCache 有 publishInvalidate()（:112-114）走共享通道，而这里只靠 30s TTL。
+// 理由：仪表盘是聚合统计，跨实例最多滞后一个 TTL（30s），且读多写少；
+// 接共享通道会让这条读路径多一个 Redis 依赖与一次网络往返，收益不抵成本。
+// 若将来要求"改完立刻全实例一致"，改法是在写侧调 sharedCache.publishInvalidate，
+// 而**不是**把 TTL 调小——调 TTL 只是把滞后变小，不改变"可能不一致"这件事。
 const dashboardCache = new Map();
 const DASHBOARD_CACHE_TTL_MS = 30 * 1000;
 const DASHBOARD_CACHE_MAX_ENTRIES = 500;
@@ -65,7 +75,10 @@ const collectDashboardFacets = async (filters, now, startOfDay, endOfDay) => {
         online: [{ $match: { status: 'normal' } }, { $count: 'n' }],
         fault: [{ $match: { status: { $in: ['fault', 'warning'] } } }, { $count: 'n' }],
         needMaintenance: [
-          { $match: { nextCheckDate: { $lte: now }, status: { $ne: 'maintenance' } } },
+          // 口径与 stats/reminders/报表同源（含 scrapped 排除）：
+          // 这里原先写 `status: {$ne:'maintenance'}`，于是同一台报废设备
+          // 在仪表盘"待维护"里计数、在提醒清单里却不出现，同一响应自相矛盾。
+          { $match: deviceAlertFilters(now).needMaintenance },
           { $count: 'n' },
         ],
         byType: [{ $group: { _id: '$deviceType', count: { $sum: 1 } } }, { $sort: { count: -1 } }],
@@ -107,7 +120,10 @@ const collectDashboardFacets = async (filters, now, startOfDay, endOfDay) => {
             $match: {
               $or: [
                 { status: 'overdue' },
-                { status: { $in: ['pending', 'in_progress'] }, planEndTime: { $lte: now } },
+                {
+                  status: { $in: INSPECTION_OVERDUE_MARKABLE_STATUSES },
+                  planEndTime: { $lte: now },
+                },
               ],
             },
           },

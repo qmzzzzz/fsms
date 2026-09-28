@@ -124,58 +124,11 @@ const PASSWORD_RULES = [
 ];
 
 /**
- * 常见泄露/弱口令黑名单（G8）
- *
- * 设计取舍：不接入 HaveIBeenPwned 等在线 API——那会把用户密码哈希前缀
- * 发往第三方，且给注册/改密链路引入外部依赖与延迟。改为内置「已通过复杂度
- * 规则但仍属高频撞库口令」的本地清单：这类口令恰好满足大小写+数字+符号，
- * 复杂度校验拦不住，却位于所有撞库字典的前列。
- *
- * 比对时归一化（小写 + 去除重复末尾数字/符号），覆盖 Admin@123 / admin@1234
- * 这类同源变体。清单保持精简可维护，不追求覆盖全部字典。
+ * 常见泄露/弱口令清单（G8）本体已搬到 constants/breachedPasswords.js：
+ * 四十条字面量是策略数据而非工具函数，放这里会让本文件整体越过体积预算。
+ * 判定逻辑（归一化 + 比对）仍在本文件，见 isBreachedPassword。
  */
-const BREACHED_PASSWORDS = new Set([
-  'admin@123',
-  'admin@1234',
-  'admin@12345',
-  'admin123',
-  'password@123',
-  'passw0rd!',
-  'p@ssw0rd',
-  'p@ssword',
-  'qwer1234!',
-  'qwerty@123',
-  'abc@1234',
-  'abcd1234!',
-  'test@123',
-  'root@123',
-  'user@123',
-  'welcome@123',
-  'changeme@1',
-  'letmein@123',
-  'iloveyou@1',
-  'monkey@123',
-  'dragon@123',
-  'master@123',
-  'sunshine@1',
-  'football@1',
-  'baseball@1',
-  '1qaz@wsx',
-  '1q2w3e4r!',
-  'zaq1@wsx',
-  'qazwsx@123',
-  'aa123456!',
-  'a1234567!',
-  '12345678a!',
-  'huawei@123',
-  'xiaomi@123',
-  'china@123',
-  'fire@123',
-  'fire@1234',
-  'xf@123456',
-  'admin@qwe',
-  'admin@asd',
-]);
+const { BREACHED_PASSWORDS } = require('../constants/breachedPasswords');
 
 /**
  * 归一化口令用于黑名单比对：小写化 + 收敛末尾连续数字为单一形态
@@ -194,9 +147,13 @@ const normalizePasswordForBreachCheck = (pwd) => {
  */
 const isBreachedPassword = (password) => {
   if (!password || typeof password !== 'string') return false;
-  const lower = password.toLowerCase();
-  if (BREACHED_PASSWORDS.has(lower)) return true;
-  return BREACHED_PASSWORDS.has(normalizePasswordForBreachCheck(password));
+  // 去除所有空白后再比对：字典口令本不含空格，去空白只会更严（把 "admin@123 "、
+  // " admin@123" 这类加空格的变体也纳入拦截），不会放过任何真实口令。
+  // 旧实现只做 toLowerCase，导致 userRoutes 未对 password .trim() 时，
+  // "Admin@123456 " 既不在集合、又能破坏末尾数字归一化正则（$ 锚定被空格挡住）→ 绕过。
+  const compact = password.replace(/\s+/g, '');
+  if (BREACHED_PASSWORDS.has(compact.toLowerCase())) return true;
+  return BREACHED_PASSWORDS.has(normalizePasswordForBreachCheck(compact));
 };
 
 /**
@@ -273,11 +230,43 @@ const validateSort = (sortInput, options = {}) => {
  * @param {'start'|'end'} boundary 边界类型：start → 业务时区当天 00:00:00.000，end → 23:59:59.999
  * @returns {Date} 业务时区口径的 UTC 瞬间
  */
+const DATE_ONLY_LOOSE = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
+/**
+ * 零填充日期 + 时间后缀（`T` 或空格分隔，V8 两种都接受）。
+ * 这类串不会进上面的 date-only 分支，也就绕过了 `businessDayBounds` 里的
+ * `clampToRealCalendarDay`，直接落到 `new Date()` 的**前滚**语义：
+ * 实测 `2026-04-31T10:00` → 5 月 1 日 10:00、`2026-06-31T10:00` → 7 月 1 日、
+ * `2027-02-29T12:00` → 3 月 1 日。同一意图写成 date-only 是"回夹到四月底"，
+ * 写成带时间就成了"四月报表含五月"，所以这里补同一道回夹，**只动日期部分、
+ * 时间原样保留**（对合法日期是恒等变换，因此不会把 23:59 这类终态时刻挪走）。
+ */
+const DATE_PREFIX_WITH_TIME = /^(\d{4})-(\d{2})-(\d{2})([T ].*)$/;
 const parseDateBoundary = (dateStr, boundary) => {
-  if (typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    const { businessDayBounds } = require('../constants/timezone');
-    const bounds = businessDayBounds(dateStr);
-    return boundary === 'end' ? bounds.end : bounds.start;
+  if (typeof dateStr === 'string') {
+    const parts = DATE_ONLY_LOOSE.exec(dateStr.trim());
+    const [, yy, mm, dd] = parts || [];
+    // 上下界一起判：把 0 月塞进 businessDayBounds 会在 Intl 格式化处抛 RangeError，
+    // 于是"该 400 的坏参数"变成 500；越界值一律留给 new Date() 判成无效，由上游拒掉。
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      const { businessDayBounds } = require('../constants/timezone');
+      // 必须补齐零再转发：非零填充串会被 businessDayBounds 静默换成"今天"
+      const pad = (v) => String(v).padStart(2, '0');
+      const bounds = businessDayBounds(`${yy}-${pad(mm)}-${pad(dd)}`);
+      return boundary === 'end' ? bounds.end : bounds.start;
+    }
+    const timed = DATE_PREFIX_WITH_TIME.exec(dateStr.trim());
+    if (timed) {
+      const [, ty, tm, td, rest] = timed;
+      // 沿用 date-only 分支同一道越界闸门：日序 > 31（如 2026-12-32）留给 new Date()
+      // 判成 Invalid Date ⇒ 上游 400。刻意不在这里回夹：那会把一个"响亮拒绝"
+      // 悄悄换成"可用窗口"，属对外契约变更，且与 date-only 的既有结论不一致。
+      if (tm >= 1 && tm <= 12 && td >= 1 && td <= 31) {
+        const { clampToRealCalendarDay } = require('../constants/timezone');
+        const padded = `${ty}-${tm}-${td}`;
+        const clamped = clampToRealCalendarDay(padded);
+        if (clamped !== padded) return new Date(`${clamped}${rest}`);
+      }
+    }
   }
   return new Date(dateStr);
 };
@@ -285,15 +274,28 @@ const parseDateBoundary = (dateStr, boundary) => {
 /**
  * 报表/导出日期参数合法性校验（与 buildDateRangeFilter 配套的统一口径）
  *
- * 空值（undefined / ''）视为未传、放行；其余值须能被 Date 解析为有效时间。
- * O-1 迁移补全：该函数原为 reportController 内联实现，迁移时口径已在此处
- * 注释中声明（buildDateRangeFilter 的前置契约），但函数体漏迁导致控制器
- * require 到 undefined（reportExport*.test.js 三套件 16 用例 500）。
- * @param {string|undefined} value 待校验的日期参数
- * @returns {boolean} 合法（含空值）返回 true
+ * 空值（undefined / null / ''）视为未传、放行；其余值必须是**字符串**且能被 Date 解析。
+ *
+ * 为什么不是只判 `!isNaN(new Date(v))`：那条判据对非字符串全部放行——
+ * 实测 `null / false / 0 / 20260801 / '123'` 曾一律返回 true，而 `'123'` 经
+ * `new Date('123')` 变成**公元 0122 年**的有效时刻，于是"参数写错了"退化成
+ * "一个窄得离谱却看起来正常"的结果集（200 + 空表）。本仓对这一格有既定判例：
+ * 静默翻译的筛选参数是一类缺陷，不是风格问题。
+ * 纯数字串单独挡：它是这类误用的最常见形态（把日期写成 20260801 或被 URL 猜成数字）。
+ * 注意 `2026-04-31` 这类"不存在的日历日"仍放行——那是 by-design：入口三道判据
+ * （isISO8601 非 strict / new Date 前滚 / 本函数）都拦不住它，收口在
+ * `constants/timezone.clampToRealCalendarDay`（见 businessDayBoundsIllegalCalendarDay 用例；
+ * 带时间后缀的同一写法由 parseDateBoundary 的 DATE_PREFIX_WITH_TIME 分支收口，
+ * 见 zzqB_illegalCalendarDayWithTime 用例）。
+ * @param {string|undefined|null} value 待校验的日期参数
+ * @returns {boolean} 合法（含未传）返回 true
  */
-const isValidDateParam = (value) =>
-  value === undefined || value === '' || !isNaN(new Date(value).getTime());
+const isValidDateParam = (value) => {
+  if (value === undefined || value === null || value === '') return true;
+  if (typeof value !== 'string') return false;
+  if (/^\d+$/.test(value.trim())) return false;
+  return !Number.isNaN(new Date(value).getTime());
+};
 
 /**
  * 构造日期范围查询过滤器（报表/导出统一口径，七维终评「日期过滤样板 4 处重复」）
@@ -312,6 +314,13 @@ const buildDateRangeFilter = (startDate, endDate) => {
 };
 
 /**
+ * 孤立代理项（未配对的 UTF-16 码元）：高代理项后面不跟低代理项，或低代理项前面不是高代理项。
+ * 必须用前后瞻配对判定，不能用裸区间 `[\uD800-\uDFFF]` —— 那会把合法的 emoji 整个删掉。
+ * 两个分支各只匹配**一个**码元，替换成 U+FFFD 后长度不变。
+ */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
  * 清除字符串中的控制字符（换行/回车/制表/NUL 等），防止日志注入与下游渲染污染
  * @param {any} value 待清洗值
  * @param {number} [maxLength=1024] 最大保留长度，超长截断
@@ -326,8 +335,16 @@ const stripControlChars = (value, maxLength = 1024) => {
   // 原区间上界停在 \u202E 恰好漏掉这四个码点
   // eslint-disable-next-line no-control-regex
   const controlCharPattern = /[\u0000-\u001F\u007F\u0080-\u009F\u2028-\u202E\u2066-\u2069]/g;
-  const cleaned = value.replace(controlCharPattern, ' ').trim();
-  return cleaned.length > maxLength ? cleaned.slice(0, maxLength) : cleaned;
+  const cleaned = value.replace(controlCharPattern, ' ').trim().slice(0, maxLength);
+  // 孤立代理项必须在这里归一，且必须在截断**之后**：
+  // `.length`/`.slice` 按 UTF-16 码元计数，奇数边界会把一个代理对劈成两半，
+  // 留下的那半个码元在 UTF-8 里不存在 ⇒ BSON 落盘时驱动把它改写成 U+FFFD。
+  // 而审计哈希是在序列化**之前**用内存文档算的（models/auditLogHooks.js），校验器却是
+  // 拿读回来的文档重算（services/auditChainVerify.js）⇒ 「内存值 ≠ 落盘值」直接等价于
+  // 一条没人碰过的记录永久报 hash_mismatch，与真实篡改同形（未认证者一条 user-agent 即可投毒）。
+  // 换成 U+FFFD 而不是删掉：这正是存储层本来会做的动作，改完内存值与落盘值逐字符相同，
+  // 长度语义（≤ maxLength）也不变；成对的代理对两个臂都不匹配，合法 emoji 一个都不丢。
+  return cleaned.replace(LONE_SURROGATE, '\uFFFD');
 };
 
 /**
@@ -343,7 +360,16 @@ const stripControlCharsDeep = (value, depth = 0) => {
   if (value && typeof value === 'object') {
     const cleaned = {};
     for (const [k, v] of Object.entries(value)) {
-      cleaned[stripControlChars(k, 128)] = stripControlCharsDeep(v, depth + 1);
+      const ck = stripControlChars(k, 128);
+      // 用 defineProperty 落键：直接 `cleaned[ck] = ...` 在 ck === '__proto__' 时
+      // 触发原型 setter（把值挂成 cleaned 的原型而非自身键），导致审计副本与实际
+      // 请求体不一致。defineProperty 把 '__proto__' 存为普通自身可枚举属性。
+      Object.defineProperty(cleaned, ck, {
+        value: stripControlCharsDeep(v, depth + 1),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
     return cleaned;
   }
@@ -351,7 +377,7 @@ const stripControlCharsDeep = (value, depth = 0) => {
 };
 
 /**
- * 访问日志中需要打码的 query 参数名（小写、子串匹配）
+ * 访问日志中需要打码的 query 参数名（小写、按整键/下划线边界匹配）
  * P3-32：morgan combined 会把完整 URL（含 query string）写入访问日志。
  * 审计日志的 body 有 SENSITIVE_KEYS 脱敏，query 却只做了控制字符清洗——
  * 一旦有接口以 query 传令牌/口令（导出下载链接、找回密码链接、第三方回调），
@@ -377,10 +403,12 @@ const SENSITIVE_QUERY_KEYS = Object.freeze([
   'session',
 ]);
 
-// 评价报告低危项：code/sign 等短键做 includes 子串匹配会误伤
+// 短键（code / sign）不能做 includes 子串匹配，否则会误伤
 // postcode/zipcode（都含 'code'）——合法业务参数被脱敏成 ***。
-// 改为下划线边界感知：精确相等，或以 _ 为边界的组合词
+// 因此这一路按下划线边界判：精确相等，或以 _ 为边界的组合词
 // （access_code / user_password / auth_token 命中；postcode / zipcode 放行）。
+// 代价：按下划线判抓不到无分隔的拼接键（refreshtoken）与 camelCase（refreshToken），
+// 所以它单独用不完备，必须与下面的子串名单取并集（见 isCredentialQueryKey）。
 const matchesSensitiveQueryKey = (lower) =>
   SENSITIVE_QUERY_KEYS.some(
     (s) =>
@@ -389,6 +417,72 @@ const matchesSensitiveQueryKey = (lower) =>
       lower.startsWith(`${s}_`) ||
       lower.includes(`_${s}_`)
   );
+
+/**
+ * 子串匹配名单（拼接键与 camelCase 只有子串抓得住）
+ *
+ * 审计 body 的脱敏走这一路：body 里凭据常以 currentPassword / refreshToken /
+ * mfaCode 之类形态出现，没有下划线可依据边界。
+ * 这里同时是审计与访问日志两条链路的共同事实来源（auditLogSanitizer 直接引用本数组）。
+ */
+const SENSITIVE_KEY_SUBSTRINGS = Object.freeze([
+  'password',
+  'currentpassword',
+  'newpassword',
+  'mfacode',
+  'token',
+  'refreshtoken',
+  'secret',
+  'apikey',
+]);
+
+/**
+ * body 名单：子串匹配（比对前把键名压成纯字母数字）
+ *
+ * 为什么必须先压平：两条审计链路对"清洗"与"脱敏"的先后顺序不同
+ * （writeStatics 先清洗后脱敏、security 中间件先脱敏后清洗），所以判定侧会
+ * 看到两种噪声形态——清洗之前键里是原始控制字符 `pass\0word`，清洗之后
+ * stripControlChars 把控制字符**换成空格**且只 trim 首尾，同一键变成 `pass word`。
+ * 两种形态下 "password" 这个子串都是断的 ⇒ 名单命中不了 ⇒ 明文口令写进
+ * append-only 并定期导出 CSV 的审计集合（本轮实测两处在压平前均原样保留值）。
+ * 落在名单词首尾的噪声早已被 trim 掉，漏网的只有"插在中间"这一种形态。
+ *
+ * 用「删掉所有非字母数字」而不是「枚举空白+控制字符」：一类覆盖两种已知形态，
+ * 且不必为控制字符正则加 no-control-regex 豁免；对业务键的误伤面没有变大——
+ * 本名单里没有裸 code / otp 这类短词（它们归 SENSITIVE_QUERY_KEYS 那侧按下划线
+ * 边界判），所以 `zip code` ⇒ `zipcode`、`postcode` ⇒ `postcode` 仍都不命中。
+ */
+const matchesSensitiveBodyKey = (lower) =>
+  SENSITIVE_KEY_SUBSTRINGS.some((s) => lower.replace(/[^0-9a-z]/gi, '').includes(s));
+
+/**
+ * 「这个键的值算凭据」的唯一判定：边界名单 ∪ 子串名单
+ *
+ * 两份名单盲区方向相反（边界判漏 camelCase，子串判漏裸键 code/otp/authorization），
+ * 任一单独使用都会留洞。审计 query/params 与访问日志 URL 打码必须用同一个函数：
+ * 此前 URL 那侧只用了一半，于是 ?accessToken=xxx 明文进 combined 日志、
+ * 同一条请求的审计副本里却是 ***，两边互相"证明"对方没问题。
+ */
+const isCredentialQueryKey = (key) => {
+  const lower = String(key).toLowerCase();
+  return matchesSensitiveQueryKey(lower) || matchesSensitiveBodyKey(lower);
+};
+
+/**
+ * query 键名解码：判定「算不算凭据」之前必须先还原线上形态
+ *
+ * qs 解析查询串时会先 decode，所以 `?%74oken=<JWT>` 在业务侧就是 `?token=<JWT>`；
+ * 而打码侧原本拿原始键名去匹配 ⇒ 一个百分号编码就绕开脱敏，
+ * 同一请求的审计副本是 ***、访问日志与 404 响应体却是明文（两边互相"证明"没问题）。
+ * 解码失败（非法百分号序列）回退原文：宁可多打一层码，不可因畸形输入放弃判定。
+ */
+const decodeQueryKey = (key) => {
+  try {
+    return decodeURIComponent(String(key).replace(/\+/g, ' '));
+  } catch (_) {
+    return String(key);
+  }
+};
 
 /**
  * 对 URL 的 query string 做敏感值打码，保留键名与结构便于排障
@@ -409,12 +503,34 @@ const redactUrlQuery = (url) => {
       const eq = pair.indexOf('=');
       if (eq === -1) return pair;
       const key = pair.slice(0, eq);
-      const lower = key.toLowerCase();
-      return matchesSensitiveQueryKey(lower) ? `${key}=***` : pair;
+      return isCredentialQueryKey(decodeQueryKey(key)) ? `${key}=***` : pair;
     })
     .join('&');
   return `${pathPart}?${redacted}`;
 };
+
+/**
+ * 路径前缀判定：与路由同尺
+ *
+ * Express 默认 `case sensitive routing = false`，所以 /API/users 会真实命中
+ * /api/users 的处理器；任何用字符串前缀比较来"按路径决定放行/记账/豁免"的判据
+ * 都必须先归一大小写，否则改一个字母大小写就能换一套行为。
+ * 审计侧的后果与落库字段处理见 utils/auditMeta.js 的同名注释。
+ *
+ * @param {string} fullPath 待判定的路径
+ * @param {string} prefix 配置的前缀（自身也归一，防止配置写成 /API 时永不匹配）
+ * @returns {boolean} 相等或为其子路径
+ */
+const matchesPathPrefix = (fullPath, prefix) => {
+  const p = String(prefix || '').toLowerCase();
+  if (!p) return false;
+  const f = String(fullPath || '').toLowerCase();
+  return f === p || f.startsWith(`${p}/`);
+};
+
+/** 列表版前缀判定（excludePaths / auditGetPaths / RESERVED_PREFIXES / skipPaths 共用） */
+const matchesAnyPathPrefix = (prefixes, fullPath) =>
+  (prefixes || []).some((prefix) => matchesPathPrefix(fullPath, prefix));
 
 /**
  * 电子表格公式注入防护（OWASP Formula Injection）
@@ -438,6 +554,13 @@ module.exports = {
   stripControlCharsDeep,
   redactUrlQuery,
   SENSITIVE_QUERY_KEYS,
+  matchesSensitiveQueryKey,
+  SENSITIVE_KEY_SUBSTRINGS,
+  matchesSensitiveBodyKey,
+  isCredentialQueryKey,
+  decodeQueryKey,
+  matchesPathPrefix,
+  matchesAnyPathPrefix,
   sanitizeSpreadsheetCell,
   validateSort,
   validateEnum,
