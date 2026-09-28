@@ -20,6 +20,22 @@ const {
 } = require('../utils/cursorPagination');
 // 超大时间范围阈值（天）
 const AUDIT_LOG_RANGE_WARN_DAYS = 365;
+
+/**
+ * 给审计行补 IP 归属地（后台核查视图增强）。
+ *
+ * mongoose 文档的临时属性不会进 toJSON，须先转 plain object 再挂字段；
+ * locate 内部带结果缓存且 fail-soft（任何异常返回 null），单页 ≤1000 行的
+ * 逐行查询是微秒级，不构成查询路径的新增开销。
+ * @param {Array<object>} docs 分页查询返回的行
+ * @returns {Array<object>} 携带 location（可能为 null）的 plain object 行
+ */
+const withIpLocation = (docs) =>
+  docs.map((doc) => {
+    const row = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+    row.location = require('./ipLocationService').locate(row.ip);
+    return row;
+  });
 /**
  * 把"这次查询要扫多大范围"对外说出来，两个取值：
  *  · `query_range_too_large` —— 两端都给了且跨度 > 365 天；
@@ -193,7 +209,7 @@ const queryAuditCursorPage = async (req, res, query, { limitNum, cursorQuery, co
     return ApiResponse.success(
       res,
       {
-        data: items,
+        data: withIpLocation(items),
         meta: {
           page: null,
           limit: limitNum,
@@ -251,7 +267,7 @@ const queryAuditOffsetPage = async (req, res, query, { pageNum, limitNum, collat
     return ApiResponse.success(
       res,
       {
-        data: logs,
+        data: withIpLocation(logs),
         meta: {
           page: pageNum,
           limit: limitNum,

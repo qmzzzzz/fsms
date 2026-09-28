@@ -16,8 +16,12 @@
  * 会话列表本身；数据文件加载失败只告警一次，避免每请求刷日志。
  */
 const logger = require('../utils/logger');
+const ipaddr = require('ipaddr.js');
 const { normalizeIP } = require('../utils/ipUtils');
 const searcher = require('../utils/ip2regionSearcher');
+
+/** IPv6 的内网族 range（ipaddr.js 口径）：回环 / 链路本地 / ULA */
+const IPV6_PRIVATE_RANGES = new Set(['loopback', 'linkLocal', 'uniqueLocal']);
 
 /** 结果缓存上限：会话列表单页条数极小，2048 条足够覆盖多用户多会话的重复查询 */
 const CACHE_LIMIT = 2048;
@@ -63,12 +67,16 @@ const locate = (ipText) => {
     // 歧义写法（0177.0.0.1 等）与非法文本直接 null——归属地不做"猜意图"的宽松解释
     const normalized = normalizeIP(key);
     if (normalized && !normalized.includes(':')) {
-      // 仅 IPv4 有数据：xdb v4 库不含 IPv6（v6 是独立数据文件，当前未随库分发），
-      // 此处短路返回 null，前端省略展示
       const raw = searcher.search(normalized);
       if (typeof raw === 'string' && raw.length > 0) {
         result = formatRegion(raw);
       }
+    } else if (normalized) {
+      // IPv6 当前仅内置 v4 数据（v6 是独立数据文件，未随库分发），公网 v6 查不出
+      // 归属；但回环/链路本地/ULA 这类内网形态必须给出「内网」——否则本机与内网
+      // IPv6 会话（::1、fe80::、fc00::）在后台表现为"查不到"，与 IPv4 内网口径分裂
+      const range = ipaddr.parse(normalized).range();
+      if (IPV6_PRIVATE_RANGES.has(range)) result = '内网';
     }
   } catch (err) {
     // fail-soft：数据文件缺失/损坏时归属地整体降级为不展示，但不打断会话列表

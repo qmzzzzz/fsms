@@ -31,10 +31,15 @@ describe('ipLocationService（IP 归属地展示）', () => {
       expect(ipLocation.locate(input)).toBeNull();
     });
 
-    test('IPv6 短路返回 null（当前仅内置 IPv4 数据，v6 库未随库分发）', () => {
+    test('IPv6：公网 v6 无数据返回 null，内网族（回环/链路本地/ULA）标「内网」', () => {
+      // v4 数据库不含 v6 归属，公网 v6 只能不展示
       expect(ipLocation.locate('2001:db8::1')).toBeNull();
-      expect(ipLocation.locate('::1')).toBeNull();
-      expect(ipLocation.locate('fe80::1%eth0')).toBeNull();
+      // 内网族不能跟着"缺数据"掉进 null：本机/内网 IPv6 会话（::1、fe80::、fc00::）
+      // 若与 IPv4 内网口径分裂，后台会表现为"有的 IP 查不到归属地"
+      expect(ipLocation.locate('::1')).toBe('内网');
+      expect(ipLocation.locate('fe80::1')).toBe('内网');
+      expect(ipLocation.locate('fe80::1%eth0')).toBe('内网');
+      expect(ipLocation.locate('fd00::1')).toBe('内网');
     });
   });
 

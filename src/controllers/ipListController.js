@@ -28,6 +28,8 @@ const { auditPath } = require('../utils/auditMeta');
 const { isSuperAdminRole } = require('../utils/superAdmin');
 const { invalidateIPBlockCache } = require('../middleware/security');
 const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
+// 归属地展示增强（locate fail-soft 且带缓存；CIDR 网段条目无单一归属，返回 null）
+const ipLocationService = require('../services/ipLocationService');
 
 /**
  * 获取 IP 黑白名单列表
@@ -73,7 +75,8 @@ const getIPList = asyncHandler(async (req, res) => {
   return ApiResponse.success(
     res,
     {
-      list,
+      // list 已是 lean()：直接浅拷贝挂归属地字段（CIDR 网段条目无单一归属，location 为 null，前端省略）
+      list: list.map((entry) => ({ ...entry, location: ipLocationService.locate(entry.ip) })),
       counts: { black: blackCount, white: whiteCount },
       pagination: {
         page: pageNum,

@@ -189,14 +189,14 @@
             {{ formatTime(row.timestamp) }}
           </template>
         </el-table-column>
-        <!-- 操作用户 + IP 合并：主行用户名，副行 IP（等宽字体） -->
+        <!-- 操作用户 + IP 合并：主行用户名，副行 IP（等宽字体）+ 归属地（后端可选增强，缺字段省略） -->
         <el-table-column :label="$t('auditLog.shortUser')" width="150">
           <template #default="{ row }">
             <div class="cell-main">
               {{ row.username || '-' }}
             </div>
             <div class="cell-sub cell-mono">
-              {{ row.ip || '-' }}
+              {{ row.ip || '-' }}<template v-if="row.location"> · {{ row.location }}</template>
             </div>
           </template>
         </el-table-column>
@@ -317,7 +317,10 @@
           {{ detailDialog.data.path || '-' }}
         </el-descriptions-item>
         <el-descriptions-item label="IP 地址">
-          {{ detailDialog.data.ip || '-' }}
+          {{ detailDialog.data.ip || '-'
+          }}<template v-if="detailDialog.data.location">
+            · {{ detailDialog.data.location }}</template
+          >
         </el-descriptions-item>
         <el-descriptions-item :label="$t('auditLog.riskLevel')">
           <el-tag :type="riskType(detailDialog.data.riskLevel)">
