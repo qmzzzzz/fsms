@@ -108,8 +108,8 @@ npm run test:e2e              # HTTP 冒烟（完整启动序列走查）
 发现漏洞请**私密**报告维护者（勿开公开 issue/PR）：附复现步骤、影响面与
 建议修复方向；请勿在报告中携带真实生产凭据。修复与披露节奏遵循
 90 天协调披露惯例。依赖漏洞以 `npm run security:audit` 与 CI
-`security-audit` job 为门禁，例外登记制度见
-`deliverables/security-scan-record-*.md`。
+`security-audit` job 为门禁，例外登记制度见内部留档目录 `deliverables/` 下的
+`security-scan-record-*.md`（该目录**不进版本库**，见 §9，故例外须在 PR 描述中同步摘要）。
 
 ## 9. 目录速览
 
@@ -121,5 +121,9 @@ e2e/            Playwright 浏览器旅程
 migrations/     数据库迁移（migrate-mongo）
 deployment/     部署配置样例与演练手册
 docs/           ADR、架构图、依赖观察清单
-deliverables/   评估报告与留档记录
 ```
+
+> **关于 `deliverables/`**：这是**内部留档目录**（评估报告、审计台账、性能/复杂度基线数据），
+> **不进版本库**（`.gitignore` 已排除）—— 本仓库是公开仓库，而该目录含带 `file:line` 坐标的
+> 可利用漏洞细节。本地文件完整保留；代码注释里出现的 `deliverables/...` 路径即指该内部留档，
+> 在克隆仓库中**不存在**，属**有意为之**，不是断链。

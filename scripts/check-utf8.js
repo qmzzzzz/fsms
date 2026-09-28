@@ -22,7 +22,11 @@ const roots = [
   path.join(REPO, 'migrations'),
   path.join(REPO, 'e2e'),
   path.join(REPO, 'deployment'),
-  path.join(REPO, 'deliverables'),
+  // `deliverables/` 于 2026-09-28 从版本库移除（内部留档目录，见 CONTRIBUTING.md §9），
+  // 因此不再作为扫描根：本脚本对「根缺位」判红的纪律（见文件头）意味着——留着这一条
+  // 会让**任何新克隆**的 `npm run check:utf8` 直接失败。覆盖面一致性判据
+  // （gateSelfTest.test.js「format:check 管的每一条都必须在编码门禁的扫描集里」）
+  // 是包含关系，两处同时移除后仍然成立。
   path.join(REPO, '.github'),
   // `npm run format:check` 的参数表里第一个目录就是 docs，而这份扫描根没有它：
   // 同一批文件被格式门禁管着、却不被编码门禁管着。ADR/架构文档里进一个错编码字符，

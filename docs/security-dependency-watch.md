@@ -52,7 +52,8 @@
 
 - 任何依赖更换必须附：变更前后 `npm audit` 对比、全量测试结果、
   （涉及运行时行为的）冒烟走查记录。
-- 例外登记：确需带洞上线的，在 `deliverables/security-scan-record-*.md`
-  登记例外（编号、理由、关闭期限），不允许静默放行。
+- 例外登记：确需带洞上线的，在内部留档目录 `deliverables/` 下的
+  `security-scan-record-*.md` 登记例外（编号、理由、关闭期限），不允许静默放行。
+  该目录**不进版本库**（见 `CONTRIBUTING.md` §9）⇒ 例外必须在 PR 描述里同步摘要。
 - **CI 阈值**：`security-audit` job 使用 `--audit-level=moderate`（2026-09-16 起）。
   即 moderate 及以上 advisory 一律阻断合并，不再区分「高危才拦」。
