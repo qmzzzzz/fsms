@@ -61,7 +61,7 @@ function evalUrl({ uri, allowed }) {
   }
 }
 
-describe('zzqoder 迁移目标库判据', () => {
+describe('迁移目标库判据', () => {
   test('加载配置本身不碰数据库：migrate:create 不该被目标库判据挡住', () => {
     jest.resetModules();
     expect(() => require(CONFIG)).not.toThrow();
@@ -79,33 +79,33 @@ describe('zzqoder 迁移目标库判据', () => {
 
   test('设了 ALLOWED_SOURCE_DB 而目标库不命中 ⇒ 拒绝交出连接串', () => {
     const r = evalUrl({
-      uri: 'mongodb://127.0.0.1:27017/zzqoder_drill',
-      allowed: 'zzqoder_other_db',
+      uri: 'mongodb://127.0.0.1:27017/drill',
+      allowed: 'other_db',
     });
     expect(r.value).toBeUndefined();
     expect(r.error).toContain('ALLOWED_SOURCE_DB 白名单校验');
-    expect(r.error).toContain('zzqoder_drill');
+    expect(r.error).toContain('drill');
     expect(r.error).toContain('npm run migrate:up');
   });
 
   test('白名单命中 ⇒ 原样交出 MONGODB_URI，并回显目标库名', () => {
     const r = evalUrl({
-      uri: 'mongodb://127.0.0.1:27017/zzqoder_drill',
-      allowed: 'zzqoder_drill,other_ok',
+      uri: 'mongodb://127.0.0.1:27017/drill',
+      allowed: 'drill,other_ok',
     });
     expect(r.error).toBeUndefined();
-    expect(r.value).toBe('mongodb://127.0.0.1:27017/zzqoder_drill');
-    expect(r.printed).toContain('迁移目标库：zzqoder_drill');
+    expect(r.value).toBe('mongodb://127.0.0.1:27017/drill');
+    expect(r.printed).toContain('迁移目标库：drill');
     // 命中白名单时不该再念"未设置白名单"那段
     expect(r.printed).not.toContain('不做白名单校验');
   });
 
   test('未设白名单 ⇒ 放行但必须说清楚（这是刻意的宽松，见文件头权衡）', () => {
-    const r = evalUrl({ uri: 'mongodb://127.0.0.1:27017/zzqoder_drill' });
+    const r = evalUrl({ uri: 'mongodb://127.0.0.1:27017/drill' });
     expect(r.error).toBeUndefined();
-    expect(r.value).toBe('mongodb://127.0.0.1:27017/zzqoder_drill');
+    expect(r.value).toBe('mongodb://127.0.0.1:27017/drill');
     expect(r.printed).toContain('不做白名单校验');
-    expect(r.printed).toContain('迁移目标库：zzqoder_drill');
+    expect(r.printed).toContain('迁移目标库：drill');
   });
 
   test('没配 MONGODB_URI ⇒ 仍然可用，但回退不得静默', () => {

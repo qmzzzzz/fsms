@@ -72,7 +72,7 @@ function collectCategoryLiterals(dirs) {
   return found;
 }
 
-describe('zzqoder 手写 category 字面量必须在审计分类白名单内', () => {
+describe('手写 category 字面量必须在审计分类白名单内', () => {
   const { AUDIT_CATEGORIES } = require('../constants/audit');
   const found = collectCategoryLiterals(SCAN_DIRS);
   const total = [...found.values()].reduce((n, list) => n + list.length, 0);
@@ -83,7 +83,7 @@ describe('zzqoder 手写 category 字面量必须在审计分类白名单内', (
 
   test('扫描范围干净：本文件的示例与任何 .test.js 都不该被算进来', () => {
     const files = new Set([...found.values()].flat());
-    expect([...files].some((f) => f.includes('zzqoder_auditCategoryLiteralWhitelist'))).toBe(false);
+    expect([...files].some((f) => f.endsWith('auditCategoryLiteralWhitelist.test.js'))).toBe(false);
     expect([...files].some((f) => f.includes('.test.'))).toBe(false);
   });
 

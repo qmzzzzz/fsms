@@ -15,7 +15,7 @@
 
 const { HashUtils, DataMasking } = require('../../src/utils/encryption');
 
-describe('zzqoder randomString 长度承诺', () => {
+describe('randomString 长度承诺', () => {
   test('每个请求长度都必须精确成立（旧实现 63% 的调用偏短）', () => {
     for (const len of [1, 4, 8, 12, 16, 24, 32, 48, 64]) {
       for (let i = 0; i < 60; i += 1) {
@@ -40,7 +40,7 @@ describe('zzqoder randomString 长度承诺', () => {
   });
 });
 
-describe('zzqoder 脱敏函数绝不回显原文', () => {
+describe('脱敏函数绝不回显原文', () => {
   // 覆盖"正则认不出"的所有形态：短号、非数字、老式 15 位、残缺 16/17 位、超长串
   const SHAPES = [
     '1',

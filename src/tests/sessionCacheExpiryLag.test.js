@@ -35,7 +35,7 @@ async function seedSession({ expiresAt, status = 'active' }) {
   return sid;
 }
 
-describe('zzqoder 会话缓存命中仍须复核过期时刻', () => {
+describe('会话缓存命中仍须复核过期时刻', () => {
   const created = [];
 
   beforeAll(async () => {

@@ -17,7 +17,7 @@
 
 const cache = require('../../src/services/sharedCache');
 
-describe('zzqoder 占位类判据不回退内存', () => {
+describe('占位类判据不回退内存', () => {
   const savedRedisUrl = process.env.REDIS_URL;
   const savedCacheMax = process.env.SHARED_CACHE_MEM_MAX;
 

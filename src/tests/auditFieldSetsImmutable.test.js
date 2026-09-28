@@ -35,7 +35,7 @@ const ALL_SETS = {
   V4: PAYLOAD_FIELDS_V4,
 };
 
-describe('zzqoder 审计链字段清单不可变', () => {
+describe('审计链字段清单不可变', () => {
   test('四份清单全部 frozen', () => {
     for (const [name, list] of Object.entries(ALL_SETS)) {
       expect({ name, frozen: Object.isFrozen(list) }).toEqual({ name, frozen: true });

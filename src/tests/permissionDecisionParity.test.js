@@ -21,7 +21,7 @@
 
 const mongoose = require('mongoose');
 
-describe('zzqoder 授权判定四路径同口径', () => {
+describe('授权判定四路径同口径', () => {
   let User;
   let Role;
   let Permission;

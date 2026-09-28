@@ -77,7 +77,7 @@ function expectNoSentinel(res) {
   }
 }
 
-describe('zzqoder errorHandler 生产模式下逐分支不得回显内部细节', () => {
+describe('errorHandler 生产模式下逐分支不得回显内部细节', () => {
   const prevEnv = process.env.NODE_ENV;
   let handler;
 
@@ -219,7 +219,7 @@ describe('zzqoder errorHandler 生产模式下逐分支不得回显内部细节'
   });
 });
 
-describe('zzqoder errorHandler 开发模式仅放宽日志与字段明细，不回显 stack', () => {
+describe('errorHandler 开发模式仅放宽日志与字段明细，不回显 stack', () => {
   const prevEnv = process.env.NODE_ENV;
   let handler;
 

@@ -29,7 +29,7 @@ const autoIncrement = require('../../plugins/autoIncrement');
 
 const PAD = 4;
 const PREFIX = 'ZZP';
-const COUNTER_ID = `zzqoder_probe_${PREFIX}`;
+const COUNTER_ID = `probe_${PREFIX}`;
 const codeOf = (seq) => `${PREFIX}-${String(seq).padStart(PAD, '0')}`;
 
 const probeSchema = new mongoose.Schema(
@@ -37,11 +37,11 @@ const probeSchema = new mongoose.Schema(
     code: { type: String, required: true, unique: true },
     note: String,
   },
-  { collection: 'zzqoder_autocode_probe', versionKey: false }
+  { collection: 'autocode_probe', versionKey: false }
 );
 probeSchema.plugin(autoIncrement, {
   field: 'code',
-  counterPrefix: 'zzqoder_probe',
+  counterPrefix: 'probe',
   seqPadding: PAD,
   generatePrefix: () => PREFIX,
 });
@@ -67,7 +67,7 @@ describe('autoIncrement 计数器丢失后的自愈', () => {
     if (mongoose.connection.readyState === 0) {
       await mongoose.connect(process.env.MONGODB_URI);
     }
-    Probe = mongoose.model('ZzqoderAutoCodeProbe', probeSchema);
+    Probe = mongoose.model('AutoCodeProbe', probeSchema);
     counters = mongoose.connection.db.collection('counters');
     // unique 索引必须真的在：没有它，"撞号"这一格根本不成立，用例会假绿
     await Probe.syncIndexes();

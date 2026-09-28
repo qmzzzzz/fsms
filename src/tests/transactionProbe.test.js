@@ -1,5 +1,5 @@
 /**
- * transaction.js 的 hello 探测**缓存策略**（zzqoder 新增）
+ * transaction.js 的 hello 探测**缓存策略**（后加）
  *
  * 既有两份测试（utils/transaction.test.js、utils/transactionTopology.test.js）覆盖的是
  * 「拓扑可读时走哪条分支」和「事务路径的 commit/abort 语义」，没有一条断言

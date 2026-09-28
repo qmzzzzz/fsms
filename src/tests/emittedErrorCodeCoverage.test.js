@@ -72,7 +72,7 @@ for (const f of files) {
   }
 }
 
-describe('zzqoder 调用点错误码必须已注册', () => {
+describe('调用点错误码必须已注册', () => {
   test('扫描确实覆盖到规模（防止路径/正则空转把下面的断言变成恒真）', () => {
     expect(files.length).toBeGreaterThan(100);
     expect(emitted.size).toBeGreaterThan(150);

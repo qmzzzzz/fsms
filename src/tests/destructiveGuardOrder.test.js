@@ -29,7 +29,7 @@ const NODE = process.execPath;
 // 一个必然连不上的库名：只要脚本真去 connect，就会卡在 serverSelection 重试里
 const PROBE_ENV = {
   ...process.env,
-  MONGODB_URI: 'mongodb://127.0.0.1:1/zzqoder_guard_probe_db',
+  MONGODB_URI: 'mongodb://127.0.0.1:1/guard_probe_db',
   ALLOWED_SOURCE_DB: '', // 故意留空 ⇒ fail-closed 必须拒绝
 };
 

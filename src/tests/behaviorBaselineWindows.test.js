@@ -93,7 +93,7 @@ function fixture() {
   return rows;
 }
 
-describe('zzqoder 行为基线窗口判据', () => {
+describe('行为基线窗口判据', () => {
   afterEach(() => jest.clearAllMocks());
 
   test.each([

@@ -154,7 +154,7 @@ const canonicalPayload = (doc, version = CURRENT_PAYLOAD_VERSION) => {
   // v3 必须读 V3 那份快照。此前这一行读的是 PAYLOAD_FIELDS_V2，于是上面"必须是独立快照"
   // 的承诺实际未生效：给 V2 追加字段会连同 v3 的口径一起改掉，全部 v3 历史记录
   // 瞬时变 hash_mismatch（大面积假篡改告警）——正是那条注释声称要防的事故。
-  // 今日 V3 与 V2 内容相等（由 zzqoder_auditFieldSetsImmutable 钉住），所以本行
+  // 今日 V3 与 V2 内容相等（由 auditFieldSetsImmutable 钉住），所以本行
   // 不改变任何既有哈希；改的是"将来加字段时谁受影响"。
   if (version >= 2)
     return canonicalPayloadV2(doc, version >= 3 ? PAYLOAD_FIELDS_V3 : PAYLOAD_FIELDS_V2);

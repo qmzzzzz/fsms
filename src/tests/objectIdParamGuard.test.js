@@ -53,7 +53,7 @@ const collectIdRoutes = (router, out) => {
   return out;
 };
 
-describe('zzqoder P2-25 参数校验注册门禁', () => {
+describe('P2-25 参数校验注册门禁', () => {
   let app;
   let token;
   const stamp = `p225${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);

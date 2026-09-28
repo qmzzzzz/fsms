@@ -238,7 +238,7 @@ const EXPORT_ROW_TRANSFORMS = {
   audit: (item) => ({
     // 日志等级派生口径与 /security/audit-logs 一致。这一处是 buildLevelCondition 的
     // **反向**（那边 level → 查询条件，这边 文档 → 展示档），高危档必须用同一个派生集合
-    // （F-149）：给有序等级表加一档时，三档划分由 zzqoder_riskLevelSingleSource 的
+    // （F-149）：给有序等级表加一档时，三档划分由 riskLevelSingleSource 的
     // 划分完整性断言兜住，而这里的 doc→label 镜像它看不见，改等级表时要一并核。
     // 镜像的**另一头**（success 缺位时不得派生档位）由 zzqB_exportAuditLabelsTriState
     // 的逐档对拍兜住，两边都要动时才闭合。

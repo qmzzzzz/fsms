@@ -115,7 +115,7 @@ describe('门禁负向自检：该红时必须红', () => {
       // 一样能过函数级断言（上一批刚因此把一条 SURVIVED 记成被杀）。这里真跑一次子进程。
       // 夹具放在仓库内的临时目录：脚本里 require('eslint') 需要向上找到仓库 node_modules；
       // 目录名以 . 开头且不在 lint 目标集里，不会污染任何真实门禁。
-      const tmp = fs.mkdtempSync(path.join(ROOT, '.zzqoder-ratchet-'));
+      const tmp = fs.mkdtempSync(path.join(ROOT, '.lint-ratchet-selftest-'));
       const baselinePath = path.join(tmp, 'eslint.ratchet.json');
       try {
         fs.mkdirSync(path.join(tmp, 'scripts'), { recursive: true });
@@ -161,7 +161,7 @@ describe('门禁负向自检：该红时必须红', () => {
     it('对照：纯改善时 --update-baseline 必须放行并落盘（守卫不得退化成"一律拒绝"）', () => {
       // 去掉这条对照，"任何情况都 exit 1"的写法也能让上面那条端到端保持绿色，
       // 而棘轮就此失去唯一合法的收紧通路。
-      const tmp = fs.mkdtempSync(path.join(ROOT, '.zzqoder-ratchet-'));
+      const tmp = fs.mkdtempSync(path.join(ROOT, '.lint-ratchet-selftest-'));
       const baselinePath = path.join(tmp, 'eslint.ratchet.json');
       try {
         fs.mkdirSync(path.join(tmp, 'scripts'), { recursive: true });
@@ -204,7 +204,7 @@ describe('门禁负向自检：该红时必须红', () => {
     // 推导 repoRoot，放别处 ESLint 会指到错误目录，测出来的形态就是假的
     // （上一轮探针正是栽在这点上，把 ESLint 抛错误读成"账本被抹平"）。
     const makeFix = ({ baseline, lines = 320 }) => {
-      const tmp = fs.mkdtempSync(path.join(ROOT, '.zzqoder-ratchet-'));
+      const tmp = fs.mkdtempSync(path.join(ROOT, '.lint-ratchet-selftest-'));
       const write = (rel, content) => {
         const p = path.join(tmp, rel);
         fs.mkdirSync(path.dirname(p), { recursive: true });

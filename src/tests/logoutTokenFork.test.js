@@ -27,7 +27,7 @@ const authController = require('../controllers/authController');
 const authService = require('../services/authService');
 const { extractAccessToken } = require('../middleware/auth');
 
-const TOKEN = 'zzqoder-session-token-abcdef';
+const TOKEN = 'probe-session-token-abcdef';
 
 /** 构造只带 header 的 req（getCookies 会自己从 headers.cookie 解析） */
 const makeReq = ({ authorization, cookie }) => {

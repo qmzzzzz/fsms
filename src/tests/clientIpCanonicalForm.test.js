@@ -21,7 +21,7 @@ const {
 } = require('../utils/ipUtils');
 const { isIPAllowed } = require('../utils/ipRange');
 
-describe('zzqoder 客户端 IP 严格形态', () => {
+describe('客户端 IP 严格形态', () => {
   describe('判据本身', () => {
     test.each([
       ['127.0.0.1', false],

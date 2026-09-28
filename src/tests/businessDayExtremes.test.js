@@ -1,7 +1,7 @@
 /**
  * 业务日窗口必须是"该业务日的极值区间"（防另一类错法：整体平移）
  *
- * 姊妹文件 `zzqoder_timezoneDstBoundary.test.js` 钉的是**首尾相接**
+ * 姊妹文件 `businessDayBoundsDstAdjacency.test.js` 钉的是**首尾相接**
  * （`end + 1ms === 次日 start`，LA 2026 全年逐日）。那条判据有个盲区：
  * 如果 `utcStartOfBusinessDay` 把整天的边界都算晚了一小时，
  * 相邻日依然严丝合缝，而"今日报警数"会少算/多算一小时 —— 平移不破坏邻接。
@@ -64,7 +64,7 @@ const eachDay = (year, fn) => {
   }
 };
 
-describe('zzqoder 业务日窗口的极值语义（跨 6 个区全年逐日）', () => {
+describe('业务日窗口的极值语义（跨 6 个区全年逐日）', () => {
   afterAll(() => {
     loadTz('Asia/Shanghai');
   });

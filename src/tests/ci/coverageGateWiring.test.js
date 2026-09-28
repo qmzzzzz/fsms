@@ -97,11 +97,11 @@ describe('覆盖率门禁接线（CI 侧不得有静默跳过的闸）', () => {
 
   test('判据可失败：把脚本名换成不存在的，同一判据必须报出来', () => {
     // 反向对照——否则"悬空脚本名"这条可能是恒真的文本匹配
-    const bogus = [{ ...runs[0], name: 'zzqoder_no_such_script' }];
+    const bogus = [{ ...runs[0], name: 'no_such_script' }];
     const detected = bogus
       .filter((r) => !Object.prototype.hasOwnProperty.call(scriptsFor(r.workingDirectory), r.name))
       .map((r) => r.name);
-    expect(detected).toEqual(['zzqoder_no_such_script']);
+    expect(detected).toEqual(['no_such_script']);
   });
 
   test('CI 里任何 npm run 都不得带 --if-present（脚本缺失必须硬失败）', () => {

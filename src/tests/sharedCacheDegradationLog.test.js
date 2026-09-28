@@ -50,7 +50,7 @@ class FakeRedis {
   disconnect() {}
 }
 
-describe('zzqoder Redis 降级时刻的失效清单', () => {
+describe('Redis 降级时刻的失效清单', () => {
   const savedUrl = process.env.REDIS_URL;
   let cache = null;
 

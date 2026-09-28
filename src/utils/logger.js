@@ -234,7 +234,7 @@ if (shippingUrl) {
     // 一个每批必死的 transport——它会拉起 intervalMs 定时器、把整条日志流堆进
     // BUFFER_CAP=5000 的缓冲、堆满后裁头留断档标记，而唯一的失败信号是 _flush 里
     // 每分钟一条、走 console.error 且**不经过 winston** 的告警（容器不采 stderr 就全无声）。
-    // 判据本身早在 zzqoder_logShipperSchemeAllowlist 那轮就修了（非法 scheme 不再
+    // 判据本身早在 logShipperSchemeAllowlist 那轮就修了（非法 scheme 不再
     // 静默降级成明文出站），该轮注释点名的残留——"运维看到的仍是『日志转发已启用』"
     // ——就是这里。解析放在数值读取**之前**：一条已经死了的配置不该再刷三条
     // LOG_SHIPPING_BATCH 之类的告警，操作员只需要看到一句"挂载失败：原因"。

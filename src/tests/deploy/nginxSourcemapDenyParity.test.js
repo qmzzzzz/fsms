@@ -47,7 +47,7 @@ function nginxRegexBlocks(code) {
   );
 }
 
-describe('zzqoder nginx 托管路径的 sourcemap 纵深与 Express 侧同口径', () => {
+describe('nginx 托管路径的 sourcemap 纵深与 Express 侧同口径', () => {
   const code = stripComments(read('deployment/nginx.conf.example'));
   const exts = expressDeniedExts();
 

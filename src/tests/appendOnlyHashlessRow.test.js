@@ -19,17 +19,17 @@
  */
 const mongoose = require('mongoose');
 
-const ACTION_TAMPER = 'zzqoder_h1_tamper';
-const ACTION_OK = 'zzqoder_h1_ok';
+const ACTION_TAMPER = 'h1_tamper';
+const ACTION_OK = 'h1_ok';
 // 链上"前驱"专用：不与上面两个 action 重叠，避免把 verifyAuditChain 的过滤集撑大
-const ACTION_ANCHOR = 'zzqoder_h1_anchor';
+const ACTION_ANCHOR = 'h1_anchor';
 
 const baseEntry = (action) => ({
   action,
   category: 'security',
-  username: 'zzqoder_auditor',
+  username: 'auditor',
   method: 'GET',
-  path: '/api/zzqoder-append-only',
+  path: '/api/probe-append-only',
   ip: '203.0.113.1',
   success: true,
 });
@@ -69,14 +69,14 @@ describe('append-only 护栏不得依赖 hash 字段本身', () => {
     expect(fetched.isNew).toBe(false);
     expect(fetched.hash).toBeNull();
 
-    fetched.username = 'zzqoder_erased';
+    fetched.username = 'erased';
     fetched.body = { tampered: true };
 
     await expect(fetched.save()).rejects.toThrow(/append-only/);
 
     const stored = await AuditLog.findById(doc._id);
     // 关键断言：改写没进去，而且**没有被重新签名接到链尾**
-    expect(stored.username).toBe('zzqoder_auditor');
+    expect(stored.username).toBe('auditor');
     expect(stored.hash).toBeNull();
     expect(stored.prevHash).toBeNull();
   });
@@ -110,7 +110,7 @@ describe('append-only 护栏不得依赖 hash 字段本身', () => {
     );
 
     const fetched = await AuditLog.findById(doc._id);
-    fetched.username = 'zzqoder_off_switch';
+    fetched.username = 'off_switch';
 
     AuditLog._setAppendOnlyEnforced(false);
     try {
@@ -121,7 +121,7 @@ describe('append-only 护栏不得依赖 hash 字段本身', () => {
 
     // 关掉护栏就能改写 → 上一条的拒绝确实来自 appendOnlyEnforced 这道闸
     const stored = await AuditLog.findById(doc._id);
-    expect(stored.username).toBe('zzqoder_off_switch');
+    expect(stored.username).toBe('off_switch');
     await AuditLog.deleteMany({ _id: doc._id }, { bypassAppendOnly: true });
   });
 });

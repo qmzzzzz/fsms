@@ -43,15 +43,15 @@ describe('错误截断的响应在审计里必须是失败', () => {
     const app = express();
     app.use(express.json());
     app.use(
-      '/api/zzqoder-stream',
+      '/api/probe-stream',
       (req, _res, next) => {
-        req.auditAction = 'zzqoder_stream_probe';
+        req.auditAction = 'stream_probe';
         req.auditCategory = 'security';
         next();
       },
       // 探针路径本身不在生产 GET 审计白名单里（auditGetPaths 只列 6 个前缀），
       // 必须显式把它加进去，否则中间件在入口就 next() 了，一条审计都不会产生。
-      auditLog({ auditGetPaths: ['/api/zzqoder-stream'] }),
+      auditLog({ auditGetPaths: ['/api/probe-stream'] }),
       routes
     );
     app.use(errorHandler);
@@ -67,7 +67,7 @@ describe('错误截断的响应在审计里必须是失败', () => {
 
   test('反向保护：正常 200 响应仍记 success=true（标记不得变成一律失败）', async () => {
     const app = buildApp((_req, res) => res.json({ ok: true }));
-    const res = await request(app).get('/api/zzqoder-stream');
+    const res = await request(app).get('/api/probe-stream');
     await settle();
 
     expect(res.status).toBe(200);
@@ -82,7 +82,7 @@ describe('错误截断的响应在审计里必须是失败', () => {
       next(new Error('导出流断开'));
     });
 
-    const res = await request(app).get('/api/zzqoder-stream');
+    const res = await request(app).get('/api/probe-stream');
     await settle();
 
     // 前提自证：响应状态码确实还是 200（否则这条用例其实在测 5xx 分支）
@@ -107,7 +107,7 @@ describe('错误截断的响应在审计里必须是失败', () => {
       next(new Error('头已发但记录还没写'));
     });
 
-    const res = await request(app).get('/api/zzqoder-stream');
+    const res = await request(app).get('/api/probe-stream');
     await settle();
 
     expect(res.status).toBe(200);
@@ -121,7 +121,7 @@ describe('错误截断的响应在审计里必须是失败', () => {
   test('未写出过审计的错误不得追加更正事件（一条事实只记一次）', async () => {
     const app = buildApp((_req, _res, next) => next(new Error('还没碰过响应')));
 
-    const res = await request(app).get('/api/zzqoder-stream');
+    const res = await request(app).get('/api/probe-stream');
     await settle();
 
     expect(res.status).toBe(500);
@@ -135,7 +135,7 @@ describe('错误截断的响应在审计里必须是失败', () => {
       res.send('truncated');
     });
 
-    await request(app).get('/api/zzqoder-stream');
+    await request(app).get('/api/probe-stream');
     await settle();
 
     expect(pushed().success).toBe(false);
@@ -146,7 +146,7 @@ describe('错误截断的响应在审计里必须是失败', () => {
       res.status(500).json({ ok: false });
     });
 
-    const res = await request(app).get('/api/zzqoder-stream');
+    const res = await request(app).get('/api/probe-stream');
     await settle();
 
     expect(res.status).toBe(500);

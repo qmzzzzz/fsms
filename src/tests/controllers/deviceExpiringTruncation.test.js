@@ -23,7 +23,7 @@
  * `models/FireDevice.js:235`（"截断必须可数，不能拿数组长度假装这就是全部历史"）。
  *
  * 【修法】`paginated` 只新增 `pagination` 兄弟键，`data` **仍是数组**——三条既有消费路径
- * （zzqB 窗口链、deviceAlertOutletParity 出口三、zzqoder scopeCast 的 `toEqual([])`）
+ * （zzqB 窗口链、deviceAlertOutletParity 出口三、 scopeCast 的 `toEqual([])`）
  * 都不受影响，因此这是纯增补而不是契约破坏。
  * 计数与清单必须共用同一次过滤器构造与同一个判定时刻，否则两个数来自两个窗口，
  * 边界上的设备会"被数进去却没列出来"（或反过来）——那比没有总数更糟。

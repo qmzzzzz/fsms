@@ -18,12 +18,12 @@ const { sanitizeAuditBody } = require('../models/auditLogSanitizer');
 const { stripControlCharsDeep } = require('../utils/helpers');
 
 describe('审计副本同形：__proto__ 等 own 键不得被脱敏环节吞掉', () => {
-  const PROBE = 'zzqoder_proto_probe_value';
+  const PROBE = 'proto_probe_value';
 
   const rawBody = () =>
     // 必须走 JSON.parse：对象字面量里的 __proto__ 是设置原型，不是 own 键；
     // express.json / body-parser 产出的正是 JSON.parse 这种 own 键形态。
-    JSON.parse(`{"__proto__":"${PROBE}","password":"P@ss1#zzqoder","normal":"kept"}`);
+    JSON.parse(`{"__proto__":"${PROBE}","password":"P@ss1#probe","normal":"kept"}`);
 
   describe('① 脱敏结果仍含该 own 键', () => {
     test('__proto__ 键与值都保留，敏感键照样打码', () => {
@@ -88,13 +88,13 @@ describe('审计副本同形：__proto__ 等 own 键不得被脱敏环节吞掉'
 
     test('链一致性：带 __proto__ 的请求体脱敏落库后，重算哈希必须仍对得上', async () => {
       const { verifyAuditChain } = require('../services/auditChainVerify');
-      const action = `zzqoder_proto_${Date.now().toString(36)}`.replace(/[^a-z0-9_]/g, '');
+      const action = `proto_${Date.now().toString(36)}`.replace(/[^a-z0-9_]/g, '');
       await AuditLog.create({
         action,
         category: 'security',
-        username: 'zzqoder_auditor',
+        username: 'auditor',
         method: 'POST',
-        path: '/api/zzqoder-proto',
+        path: '/api/probe-proto',
         ip: '203.0.113.1',
         success: true,
         body: sanitizeAuditBody(rawBody()),

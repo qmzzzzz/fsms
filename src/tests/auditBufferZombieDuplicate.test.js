@@ -34,7 +34,7 @@ const path = require('path');
 const mongoose = require('mongoose');
 
 // 必须在 require 之前设：链锁超时与 WAL 路径都在模块加载期读 env
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zzqoder-zombie-'));
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-zombie-'));
 process.env.AUDIT_WAL_PATH = path.join(tmpDir, 'zombie.wal');
 process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = '150';
 

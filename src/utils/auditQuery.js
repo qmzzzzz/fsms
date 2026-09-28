@@ -16,7 +16,7 @@ const AUDIT_LOG_CATEGORIES = AUDIT_CATEGORIES;
 // 两份清单一旦单侧增删就会造成「查询 400、导出放行」的口径漂移（E-05 同一类故障）。
 const AUDIT_LOG_RISK_LEVELS = AUDIT_RISK_LEVELS;
 // 三级展示口径（info/warning/error）同样收成 constants/audit.js 的单一事实来源。
-// 原先本文件与导出侧各写一份、只靠注释约定同口径，而 `zzqoder_auditFilterParity`
+// 原先本文件与导出侧各写一份、只靠注释约定同口径，而 `auditFilterParity`
 // 当时钉的是**它自己那三份字面量**（此文件的清单、导出侧的清单、测试里再抄一遍），
 // 于是"某侧偷偷多一档"并不会让门禁转红——现在由该测试逐项比对两侧行为。
 const AUDIT_LOG_LEVELS = AUDIT_DISPLAY_LEVELS;
@@ -50,7 +50,7 @@ const parseSuccessFilter = (success) => {
  * 已经放行，于是那一档的记录能落库、能被筛出来，却不进任何高危判据，静默漏。
  * info 档用补集（$nin）而不是 `$in: ['low']`：这是既有行为，别当成冗余写法改掉。
  * warning 档仍写标量 'medium'（唯一一处没写成集合的档位），
- * 由 zzqoder_riskLevelSingleSource 的"三档必须完整划分等级空间"断言看着它。
+ * 由 riskLevelSingleSource 的"三档必须完整划分等级空间"断言看着它。
  */
 const buildLevelCondition = (level) => {
   if (level === 'error') {

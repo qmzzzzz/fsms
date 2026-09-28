@@ -16,14 +16,14 @@ const spot = require('../../scripts/perf/explain-spotcheck');
 
 const explainWith = (winningPlan) => ({ queryPlanner: { winningPlan } });
 
-describe('zzqoder explain-spotcheck 退出码契约', () => {
+describe('explain-spotcheck 退出码契约', () => {
   test('加载脚本即注册全部用例模型（漏 require 的用例不再可能静默跳过）', () => {
     expect(spot.cases).toHaveLength(4);
     spot.cases.forEach((c) => {
       expect(() => mongoose.model(c.model)).not.toThrow();
     });
     // 负向自证：未注册的名字确实抛 MissingSchemaError——否则上面三条断言等于没断言
-    expect(() => mongoose.model('zzqoderNoSuchModel')).toThrow(/hasn't been registered/);
+    expect(() => mongoose.model('NoSuchModel')).toThrow(/hasn't been registered/);
   });
 
   test('用例把模型名/排序/分页与 executionStats 逐条透传（拼错即测不到目标索引）', async () => {

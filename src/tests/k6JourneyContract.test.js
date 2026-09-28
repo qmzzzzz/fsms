@@ -21,9 +21,9 @@ const SCRIPT = path.join(__dirname, '../../scripts/perf/k6-core-journeys.js');
 const src = fs.readFileSync(SCRIPT, 'utf8').replace(/\r\n/g, '\n');
 const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
-describe('zzqoder k6 核心旅程脚本契约', () => {
+describe('k6 核心旅程脚本契约', () => {
   test('仍是可解析的 ESM（无 k6 运行时，语法是唯一能自动执行的门禁）', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zzqoder-k6-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-k6-'));
     const copy = path.join(dir, 'journey.mjs');
     try {
       fs.copyFileSync(SCRIPT, copy);

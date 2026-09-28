@@ -288,7 +288,7 @@ describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
     const fs = require('fs');
     const path = require('path');
     const os = require('os');
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zzqoder-backstop-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-backstop-'));
     try {
       fs.writeFileSync(
         path.join(dir, 'fixture.js'),

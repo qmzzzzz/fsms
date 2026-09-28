@@ -148,6 +148,8 @@
         <el-table-column prop="ip" :label="$t('security.ipAddress')" min-width="160">
           <template #default="{ row }">
             <span class="ip-cell">{{ row.ip }}</span>
+            <!-- 归属地：后端可选增强（CIDR 网段/检索不可用时缺字段），必须省略而非渲染空串 -->
+            <span v-if="row.location" class="ip-location"> · {{ row.location }}</span>
             <el-tag
               v-if="row.isPrimary"
               type="primary"
@@ -562,6 +564,11 @@ onMounted(() => {
   font-family: var(--xf-font-mono);
   font-weight: 600;
   color: var(--xf-gray-800);
+}
+/* 归属地：与等宽 IP 同行但弱一级（辅助信息，不与主键值抢视觉权重） */
+.ip-location {
+  color: var(--xf-text-secondary);
+  font-size: var(--xf-font-size-sm);
 }
 .expire-cell {
   font-family: var(--xf-font-mono);

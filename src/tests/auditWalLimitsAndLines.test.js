@@ -26,7 +26,7 @@ const saved = {
 let dir = null;
 
 function startWal() {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zzqoder-wal-'));
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-wal-'));
   wal.startup(path.join(dir, 'audit-buffer.test.wal'));
   process.env.AUDIT_WAL_STAT_INTERVAL = '1'; // 每次追加都抽查大小，让上限判据立即生效
   return wal.getWalPath();
@@ -55,7 +55,7 @@ async function appendDocs(n, { withNewline = true, seqPrefix = 'run' } = {}) {
   await wal.drain();
 }
 
-describe('zzqoder WAL 大小上限的非法配置', () => {
+describe('WAL 大小上限的非法配置', () => {
   test('AUDIT_WAL_MAX_BYTES 为负数 ⇒ 按默认处理，绝不逐次"超限"弃行', async () => {
     startWal();
     process.env.AUDIT_WAL_MAX_BYTES = '-1';
@@ -107,7 +107,7 @@ describe('zzqoder WAL 大小上限的非法配置', () => {
   });
 });
 
-describe('zzqoder WAL 行尾由写路径自己补齐', () => {
+describe('WAL 行尾由写路径自己补齐', () => {
   test('调用方漏掉换行也不会把两条记录拼成一行', async () => {
     const file = startWal();
     await appendDocs(4, { withNewline: false });

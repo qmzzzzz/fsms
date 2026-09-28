@@ -18,7 +18,7 @@ function aggregateWithBudget(model, pipeline, maxTimeMS) {
   // 预算走 aggregate 的第二参（options）：Mongoose 8 的 Aggregate 实例上**没有**
   // .maxTimeMS() 链式方法（实测 typeof agg.maxTimeMS === 'undefined'，聚合侧只暴露
   // allowDiskUse 一类），写成链式会在运行时抛 TypeError——用替身做的单测看不见，
-  // 所以判据里必须有一条走真实模型（见 zzqoder_auditMonitorDetectionCoverage 真库用例）。
+  // 所以判据里必须有一条走真实模型（见 auditMonitorDetectionCoverage 真库用例）。
   return model.aggregate(pipeline, { maxTimeMS });
 }
 

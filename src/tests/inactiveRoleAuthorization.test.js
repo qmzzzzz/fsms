@@ -58,7 +58,7 @@ describe('停用角色不参与授权判定', () => {
         .toString(36)
         .replace(/[^a-z]/gi, '')
         .slice(0, 6) || 'a1';
-    const mod = `zzqoderbrackets${stamp}`;
+    const mod = `brackets${stamp}`;
     const permOfActive = await Permission.create({
       name: '生效角色权限',
       module: mod,
@@ -73,14 +73,14 @@ describe('停用角色不参与授权判定', () => {
     });
     activeRole = await Role.create({
       name: `生效低阶-${stamp}`,
-      code: `ZZQODER_ACTIVE_${stamp.toUpperCase()}`,
+      code: `ACTIVE_${stamp.toUpperCase()}`,
       level: 4,
       status: 'active',
       permissions: [permOfActive._id],
     });
     inactiveRole = await Role.create({
       name: `停用高阶-${stamp}`,
-      code: `ZZQODER_INACTIVE_${stamp.toUpperCase()}`,
+      code: `INACTIVE_${stamp.toUpperCase()}`,
       level: 9,
       status: 'inactive',
       permissions: [permOfInactive._id],
@@ -88,8 +88,8 @@ describe('停用角色不参与授权判定', () => {
     uid = new mongoose.Types.ObjectId();
     await User.create({
       _id: uid,
-      username: `zzqoder_${stamp}`,
-      email: `zzqoder_${stamp}@example.com`,
+      username: `${stamp}`,
+      email: `${stamp}@example.com`,
       password: 'Aa1!aaaaaaaaaaaaaaaa',
       status: 'active',
       roles: [activeRole._id, inactiveRole._id],
@@ -108,7 +108,7 @@ describe('停用角色不参与授权判定', () => {
 
   test('行为：WebSocket 授权复查返回的角色码集合不含停用角色', async () => {
     const socket = {
-      id: 'zzqoder-sock-1',
+      id: 'probe-sock-1',
       userId: uid,
       tokenVersion: 0,
       roleCodes: ['STALE_FROM_HANDSHAKE'],

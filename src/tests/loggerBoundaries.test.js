@@ -159,7 +159,7 @@ describe('logger：级别解析不得静默失效，落盘边界必须清洗', (
     });
 
     test('循环引用降级为可读文本而不是抛错', () => {
-      const circular = { name: 'zzqoder' };
+      const circular = { name: 'circular' };
       circular.self = circular;
       let out;
       expect(() => {
@@ -167,7 +167,7 @@ describe('logger：级别解析不得静默失效，落盘边界必须清洗', (
       }).not.toThrow();
       expect(typeof out).toBe('string');
       expect(out.length).toBeGreaterThan(0);
-      expect(out).toContain('zzqoder');
+      expect(out).toContain('circular');
     });
 
     test('BigInt 同样不得抛（JSON.stringify 对它直接 TypeError）', () => {
@@ -194,8 +194,8 @@ describe('logger：级别解析不得静默失效，落盘边界必须清洗', (
       const { fileFormat } = loadWithEnv(nodeEnv);
       const out = fileFormat.transform({
         level: 'info',
-        message: 'zzqoder 消息',
-        requestId: 'zzqoder-req',
+        message: '消息',
+        requestId: 'probe-req',
       });
       return out[Symbol.for('message')];
     };
@@ -218,11 +218,11 @@ describe('logger：级别解析不得静默失效，落盘边界必须清洗', (
       if (expected === 'json') {
         expect(line.startsWith('{')).toBe(true);
         // 结构化字段必须在：logShipper/ELK 按字段解析，靠 grep 字符串是脆的
-        expect(JSON.parse(line).requestId).toBe('zzqoder-req');
+        expect(JSON.parse(line).requestId).toBe('probe-req');
       } else {
         expect(line.startsWith('{')).toBe(false);
         expect(line).toContain('[info]:');
-        expect(line).toContain('zzqoder 消息');
+        expect(line).toContain('消息');
       }
     });
   });

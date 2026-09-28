@@ -69,7 +69,7 @@ describe('步进二次验证（/api/security/view-sensitive）的 TOTP 消费语
 
   let secret;
   let uid;
-  const username = 'zzqoder_stepup';
+  const username = 'stepup';
 
   /** 当前时间窗（counter）的合法码；counter 与生产实现同一算法 */
   const codeFor = (offsetWindows = 0) => {

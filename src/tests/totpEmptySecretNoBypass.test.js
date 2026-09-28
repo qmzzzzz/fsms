@@ -32,7 +32,7 @@ const nowCounter = () => Math.floor(Date.now() / 1000 / STEP_SECONDS);
 // 一切"拿不到真实密钥"的形态：解密失败给的空串、脏数据、类型漂移
 const DEGENERATE_SECRETS = ['', '   ', '====', '-', 'A', '!!!!', undefined, null, 123, {}, []];
 
-describe('zzqoder 退化密钥不得产出可通过的 TOTP', () => {
+describe('退化密钥不得产出可通过的 TOTP', () => {
   test('用空密钥算出的当前窗口码，对任何退化密钥都必须判不通过', () => {
     const counter = nowCounter();
     // 攻击者可离线算出的"空密钥码"：±1 窗口全部试一遍

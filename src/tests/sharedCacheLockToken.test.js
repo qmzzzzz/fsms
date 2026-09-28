@@ -42,7 +42,7 @@ function makeLocks({ enabled, configured, client }) {
   });
 }
 
-describe('zzqoder 锁令牌与降级可见性', () => {
+describe('锁令牌与降级可见性', () => {
   test('令牌是 32 位十六进制（CSPRNG），不再由 Math.random + 时间戳拼出', async () => {
     const client = fakeClient();
     const { acquireLock, acquireLockBlocking } = makeLocks({

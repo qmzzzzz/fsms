@@ -4,8 +4,8 @@
  * 落地侧判据：严格性必须覆盖**全部四个解析漏斗**，且不得误伤规范网段
  *
  * 与既有测试的分工：
- *  - `zzqoder_clientIpCanonicalForm`（并行会话）钉客户端侧"歧义文本不得命中"；
- *  - `zzqoder_ipQueryAmbiguousRefusal` 钉管理面查询的拒答文案；
+ *  - `clientIpCanonicalForm`（并行会话）钉客户端侧"歧义文本不得命中"；
+ *  - `ipQueryAmbiguousRefusal` 钉管理面查询的拒答文案；
  *  - `ipUtils.test.js` / `zzqA_ipUtilsMappedCidr` 钉归一化与映射网段收敛。
  *
  * 本文件钉的是**只有这里会红**的两件事：

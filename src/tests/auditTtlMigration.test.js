@@ -23,7 +23,7 @@ const { RETENTION_SECONDS } = require('../constants/retention');
 const COLLECTION = 'auditlogs';
 const INDEX_NAME = 'timestamp_-1';
 // 与既有测试错开的独立库名，避免并行 worker 互相删建索引
-const ISOLATED_DB = 'zzqoder_migration_ttl_test';
+const ISOLATED_DB = 'migration_ttl_test';
 
 describe('迁移：auditlogs TTL 对齐留存声明值', () => {
   let conn;

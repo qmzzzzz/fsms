@@ -229,6 +229,15 @@ jobs:
   frontend-build:
     runs-on: ubuntu-latest
 
+    # 时区必须钉死：web-admin 有一组断言测的就是「界面按**本地**时区口径格式化」
+    # （views/reportView 的「日期区间按本地日期串提交」、views/ipListView 的
+    # 「时间列本地时区口径」、views/inspectionView 的失败提示链路）。在 UTC runner 上
+    # local === UTC，这些断言退化成恒等式而必然失败——2026-09-28 CI 实证：3 个文件 4 条红。
+    # 钉一个固定非 UTC 区后判据在任何 runner 上都可证伪，且与本机开发环境（GMT+8）同口径。
+    # 刻意不用 TZ=UTC：那会让这批用例彻底失去意义，等于删掉判据而不是修好它。
+    env:
+      TZ: Asia/Shanghai
+
     steps:
       - uses: actions/checkout@v5
 

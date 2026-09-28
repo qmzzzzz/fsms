@@ -14,7 +14,7 @@
 
 const { readPositiveNumberEnv } = require('../../src/utils/envNumber');
 
-const NAME = 'ZZQODER_TEST_NUMBER';
+const NAME = 'TEST_NUMBER';
 
 function withEnv(raw, fn) {
   const saved = process.env[NAME];
@@ -29,7 +29,7 @@ function withEnv(raw, fn) {
   }
 }
 
-describe('zzqoder readPositiveNumberEnv 判据', () => {
+describe('readPositiveNumberEnv 判据', () => {
   test.each([
     [undefined, 42],
     ['', 42],
@@ -80,7 +80,7 @@ describe('zzqoder readPositiveNumberEnv 判据', () => {
   });
 });
 
-describe('zzqoder 审计链锁超时不再接受负值', () => {
+describe('审计链锁超时不再接受负值', () => {
   const TIMEOUT_NAME = 'AUDIT_CHAIN_LOCK_TIMEOUT_MS';
   const saved = process.env[TIMEOUT_NAME];
 

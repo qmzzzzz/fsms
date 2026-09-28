@@ -3,7 +3,7 @@
  *
  * `PAYLOAD_FIELDS_V4` 把 `query` / `params` / `body` 三个**完全外控**的对象纳入哈希。
  * 这三个槽是"攻击者可控形状直连存储层"的唯一入口，而 JS 侧已有专门一档守住
- * `__proto__`（`zzqoder_auditBodyProtoFidelity`）。本文件守的是另外两档——
+ * `__proto__`（`auditBodyProtoFidelity`）。本文件守的是另外两档——
  * 它们不是 JS 语义问题，而是 **BSON/服务端**对键名的语义：
  *   · `$` 前缀：查询语言的操作符前缀，历史上被写入侧禁止；
  *   · 点号：子文档路径分隔符，存进去之后**按路径查询会歧义**。

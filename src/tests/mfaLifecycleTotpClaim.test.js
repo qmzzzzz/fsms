@@ -48,7 +48,7 @@ const makeRes = () => {
   return res;
 };
 
-describe('zzqoder MFA 生命周期端点的口令认领语义', () => {
+describe('MFA 生命周期端点的口令认领语义', () => {
   let User;
   let controller;
   let generateSecret;
@@ -57,7 +57,7 @@ describe('zzqoder MFA 生命周期端点的口令认领语义', () => {
   let encryptMfaSecret;
   let secret;
   let uid;
-  const username = 'zzqoder_f85';
+  const username = 'f85';
 
   const codeFor = (offset = 0) => hotp(base32Decode(secret), CURRENT_WINDOW() + offset);
 

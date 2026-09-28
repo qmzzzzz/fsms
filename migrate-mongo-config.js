@@ -13,7 +13,7 @@
  *   scripts/deploy.js 的部署步骤会在应用容器里跑 `migrate-mongo up`，
  *   而 compose 用 secret 文件下发 MONGODB_URI、容器里没有也不需要 ALLOWED_SOURCE_DB。
  *   在此 fail-closed 会把每次生产部署变成一个必须新增必配项的破坏性变更，
- *   故留作待决（见 zzqoderAuditLedger §6-J 与协作台账），由使用方拍口径。
+ *   故留作待决（见审计台账 §6-J 与协作台账），由使用方拍口径。
  * - `migrate:create` 只写文件、不碰数据库，因此判据做成**惰性** getter：
  *   migrate-mongo 在 env/database.js 的 connect() 里才读 mongodb.url，
  *   惰性求值是它的既有语义，不是绕门。

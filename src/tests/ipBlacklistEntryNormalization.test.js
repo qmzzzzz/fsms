@@ -13,7 +13,7 @@
 
 const mongoose = require('mongoose');
 
-describe('zzqoder IPBlacklist 条目归一化', () => {
+describe('IPBlacklist 条目归一化', () => {
   let IPBlacklist;
 
   beforeAll(async () => {

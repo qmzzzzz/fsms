@@ -37,7 +37,7 @@ const tryBuild = (query) => {
   }
 };
 
-describe('zzqoder success 筛选参数不再被静默翻译成 false', () => {
+describe('success 筛选参数不再被静默翻译成 false', () => {
   // 合法值：逐字放行，语义不变
   it.each([
     ['true', true],
@@ -90,7 +90,7 @@ describe('zzqoder success 筛选参数不再被静默翻译成 false', () => {
   });
 });
 
-describe('zzqoder 查询侧与导出侧的枚举清单同源', () => {
+describe('查询侧与导出侧的枚举清单同源', () => {
   it('constants 的每个 riskLevel 都被查询侧接受（退回本地字面量即转红）', () => {
     expect(AUDIT_RISK_LEVELS.length).toBeGreaterThan(0);
     for (const level of AUDIT_RISK_LEVELS) {
@@ -232,12 +232,12 @@ describe('zzqoder 查询侧与导出侧的枚举清单同源', () => {
  * 导出侧 success 的同类缺陷：`reportExportService.buildExportQuery('audit')`
  * 原来也是 `auditQuery.success = success === 'true' || success === true`。
  * 该文件当时是并行会话的在途（M 态）文件，故按本仓既有惯例
- * （initDataLifecycle / zzqoder_credentialRedactionSinks）先用 test.failing 记账；
+ * （initDataLifecycle / credentialRedactionSinks）先用 test.failing 记账；
  * 2026-09-19 落地后 `.failing` 已摘除，现在是常规回归门禁。
  * 两侧的逐值真值表另有 `zzqA_exportSuccessParity` 钉住（那份比的是行为相等，
  * 将来若把判据抽成一个公共函数，它仍然有效）。
  */
-describe('zzqoder 导出侧 success 同口径（已修）', () => {
+describe('导出侧 success 同口径（已修）', () => {
   test('success=1 在导出侧同样不得静默按 false 筛选', () => {
     expect(() => buildExportQuery('audit', { success: '1', dateFilter: {} })).toThrow(/success/);
   });

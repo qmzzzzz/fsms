@@ -402,7 +402,7 @@ describe('WebSocket 临时锁定与降级出房', () => {
 
     test('角色只剩停用/无 code 的残项 → 移出（判定体不看成员关系，只看生效角色码）', async () => {
       // 说明：populate 已按 match:{status:'active'} 过滤停用角色（该语义由
-      // zzqoder_inactiveRoleAuthorization 覆盖）。本用例刻意不动内置角色的 status
+      // inactiveRoleAuthorization 覆盖）。本用例刻意不动内置角色的 status
       // ——改共享文档会污染并发跑的其它套件——而是直接给出"过滤后"的判定体输入。
       const user = await makeUser('dis', { roles: [superAdminRoleId] });
       const svc = makeService();

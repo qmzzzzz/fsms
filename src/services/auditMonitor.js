@@ -165,7 +165,7 @@ async function runDetection() {
         if (!count) continue;
         // 顺序有意：先问共享频控、再问当日闸。反过来会在"当日已推过"时根本不调
         // shouldSendAlert，也就拿不到"抑制来自当日闸而不是 5 分钟 TTL"这条可归因证据
-        // （zzqoder_auditMonitorDailyAlertCap 正是靠这个顺序做因果判定的）。
+        // （auditMonitorDailyAlertCap 正是靠这个顺序做因果判定的）。
         const allowedByThrottle = securityAlert.shouldSendAlert(
           `audit_anomaly_${keyPart}_${dayWindow}`
         );

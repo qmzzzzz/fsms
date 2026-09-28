@@ -18,12 +18,12 @@
 
 const mongoose = require('mongoose');
 
-describe('zzqoder MFA 失败计数的 fail-closed 语义', () => {
+describe('MFA 失败计数的 fail-closed 语义', () => {
   let User;
   let AuditLog;
   let mfaService;
   let uid;
-  const username = 'zzqoder_f86';
+  const username = 'f86';
 
   const readBack = async () => {
     // 走 collection 层，绕开 select:false 投影，读到的是落库真值

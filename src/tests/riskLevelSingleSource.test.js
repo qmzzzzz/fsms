@@ -52,7 +52,7 @@ const WORD = `(?:${LEVEL_SOURCE.join('|')})`;
 const LEVEL_LIST = new RegExp(String.raw`\[\s*(?:'${WORD}'\s*,\s*)+'${WORD}'\s*,?\s*\]`, 'g');
 
 /**
- * 剥注释，只留代码视图（同 zzqoder_auditCategoryLiteralWhitelist 的口径）。
+ * 剥注释，只留代码视图（同 auditCategoryLiteralWhitelist 的口径）。
  * 不剥的话本文件头注释里那句"手抄的 ['high','critical']"会被自己的门禁当成违规。
  * 块注释按等长空白替换以保住行号。
  */
@@ -115,7 +115,7 @@ function matches(doc, cond) {
 /** 一条记录落在哪些展示档里（正常应当恰好一个） */
 const bucketsOf = (doc) => AUDIT_DISPLAY_LEVELS.filter((l) => matches(doc, buildLevelCondition(l)));
 
-describe('zzqoder 风险等级清单只能有一份', () => {
+describe('风险等级清单只能有一份', () => {
   const hits = scanTree(SCAN_DIRS);
 
   test('① 整树扫描：src/scripts/migrations 里没有私抄的档位清单', () => {

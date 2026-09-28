@@ -22,7 +22,7 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const config = require('../config');
 
-describe('zzqoder 凭证有效性判据（UserSession.isUsable / tokenService 探测）', () => {
+describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）', () => {
   let UserSession;
   let User;
   let Role;

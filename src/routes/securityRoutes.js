@@ -435,7 +435,7 @@ router.get(
 // 它对歧义文本/非法地址返回**字段专属**的 IP_FORMAT_INVALID / IP_SINGLE_REQUIRED
 // （前端 web-admin/src/utils/api.js:63 有 i18n 映射）。补 consumeValidation() 会先被
 // 拦成通用 VALIDATION_FAILED、把专属码吃掉，并打红
-// ipListValidationAndConflictGuards / zzqoder_ipQueryAmbiguousRefusal 两组断言。
+// ipListValidationAndConflictGuards / ipQueryAmbiguousRefusal 两组断言。
 // （同下方三开关的既定口径；`trim()` 是净化器仍会执行，故本链并非纯装饰。）
 router.get(
   '/ip-list/query',

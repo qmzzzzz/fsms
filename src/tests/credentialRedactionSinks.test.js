@@ -172,14 +172,14 @@ describe('审计与日志两类长期载体不得存明文凭据', () => {
       app.use('/api/', auditLog());
       // 用 POST：GET 只有命中 auditGetPaths 白名单才审计（本探针不在名单内，
       // 用 GET 会得到"没有审计记录"的假信号，而不是"清洗没生效"）
-      app.post('/api/zzqoder-otp', (_req, res) => res.json({ ok: true }));
+      app.post('/api/probe-otp', (_req, res) => res.json({ ok: true }));
 
       // 必须先取 calls 再 mockRestore：恢复 spyOn 会把 mock.calls 清空，
       // 表现是"中间件没写审计"的假信号（首版就红在这里）。
       let seen = [];
       try {
         await request(app).post(
-          `/api/zzqoder-otp?otp=987654&refreshToken=${SECRET}&postcode=200120&code=PKCE123456`
+          `/api/probe-otp?otp=987654&refreshToken=${SECRET}&postcode=200120&code=PKCE123456`
         );
         await new Promise((r) => setImmediate(r));
         await new Promise((r) => setImmediate(r));
@@ -188,7 +188,7 @@ describe('审计与日志两类长期载体不得存明文凭据', () => {
         spyPush.mockRestore();
       }
 
-      const doc = seen.find((d) => d && d.path === '/api/zzqoder-otp');
+      const doc = seen.find((d) => d && d.path === '/api/probe-otp');
       expect(doc).toBeDefined(); // 自证确实走了真实落库通道
       expect(doc.query.otp).toBe('***');
       expect(doc.query.code).toBe('***');
@@ -218,7 +218,7 @@ describe('审计与日志两类长期载体不得存明文凭据', () => {
       try {
         created = await AuditLog.recordSensitiveAction(
           'u-zz',
-          'zzqoder',
+          '',
           'user_delete',
           'system',
           req,
@@ -257,12 +257,12 @@ describe('审计与日志两类长期载体不得存明文凭据', () => {
       const errorHandler = require('../middleware/errorHandler');
       const app = express();
       app.use(express.json());
-      app.post('/api/zzqoder-parse', (_req, res) => res.json({}));
+      app.post('/api/probe-parse', (_req, res) => res.json({}));
       app.use(errorHandler);
       const server = await listen(app);
       try {
         const res = await request(server)
-          .post('/api/zzqoder-parse?password=hunter2-secret-value')
+          .post('/api/probe-parse?password=hunter2-secret-value')
           .set('Content-Type', 'application/json')
           .send('{not-json');
         expect(res.status).toBe(400);
@@ -279,13 +279,13 @@ describe('审计与日志两类长期载体不得存明文凭据', () => {
       const { createOriginCheck } = require('../middleware/originCheck');
       const app = express();
       app.use(express.json());
-      app.use('/api/zzqoder-csrf', createOriginCheck(['https://good.example']), (_req, res) =>
+      app.use('/api/probe-csrf', createOriginCheck(['https://good.example']), (_req, res) =>
         res.json({ ok: true })
       );
       const server = await listen(app);
       try {
         const res = await request(server)
-          .post('/api/zzqoder-csrf?page=2')
+          .post('/api/probe-csrf?page=2')
           .set('Origin', 'https://evil.example')
           .set('Content-Type', 'application/json')
           .send({});
@@ -308,13 +308,13 @@ describe('审计与日志两类长期载体不得存明文凭据', () => {
       const { createOriginCheck } = require('../middleware/originCheck');
       const app = express();
       app.use(express.json());
-      app.use('/api/zzqoder-csrf2', createOriginCheck(['https://good.example']), (_req, res) =>
+      app.use('/api/probe-csrf2', createOriginCheck(['https://good.example']), (_req, res) =>
         res.json({ ok: true })
       );
       const server = await listen(app);
       try {
         await request(server)
-          .post(`/api/zzqoder-csrf2?accessToken=${SECRET}`)
+          .post(`/api/probe-csrf2?accessToken=${SECRET}`)
           .set('Origin', 'https://evil.example')
           .set('Content-Type', 'application/json')
           .send({});
@@ -330,13 +330,13 @@ describe('审计与日志两类长期载体不得存明文凭据', () => {
       const { createOriginCheck } = require('../middleware/originCheck');
       const app = express();
       app.use(express.json());
-      app.use('/api/zzqoder-ok', createOriginCheck(['https://good.example']), (_req, res) =>
+      app.use('/api/probe-ok', createOriginCheck(['https://good.example']), (_req, res) =>
         res.json({ ok: true })
       );
       const server = await listen(app);
       try {
         const res = await request(server)
-          .post('/api/zzqoder-ok?page=2')
+          .post('/api/probe-ok?page=2')
           .set('Origin', 'https://good.example')
           .set('Content-Type', 'application/json')
           .send({});

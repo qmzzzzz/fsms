@@ -73,7 +73,7 @@ function buildMountedApp(distDir) {
   return app;
 }
 
-describe('zzqoder 静态托管 sourcemap 拦截不得被编码/方法绕过', () => {
+describe('静态托管 sourcemap 拦截不得被编码/方法绕过', () => {
   let dist;
   let app;
 

@@ -58,7 +58,7 @@ const ALLOWED = [
   ['域名（内网指向由 ALLOWLIST/网络层约束）', 'https://hooks.slack.com/services/T/B/X'],
 ];
 
-describe('zzqoder webhook 出站地址判定：白名单只放行全局单播', () => {
+describe('webhook 出站地址判定：白名单只放行全局单播', () => {
   const prevAllowlist = process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST;
   beforeEach(() => {
     delete process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST;

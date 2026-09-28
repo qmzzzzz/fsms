@@ -68,28 +68,28 @@ describe('metrics：截断可见性与缺省标签口径', () => {
 
   describe('缺省标签必须在两个视图同口径（unknown）', () => {
     test('level=undefined：文本与快照都是 unknown，不再一个 undefined 一个 unknown', () => {
-      metrics.incSecurityAlert('zzqoder_probe', undefined);
+      metrics.incSecurityAlert('probe', undefined);
 
       expect(samples('security_alerts_total')).toEqual([
-        'security_alerts_total{type="zzqoder_probe",level="unknown"} 1',
+        'security_alerts_total{type="probe",level="unknown"} 1',
       ]);
       expect(metrics.getSnapshot().alerts).toEqual(
-        expect.arrayContaining([{ type: 'zzqoder_probe', level: 'unknown', count: 1 }])
+        expect.arrayContaining([{ type: 'probe', level: 'unknown', count: 1 }])
       );
       // 反向：文本里不得再出现 "undefined" 这个标签值
       expect(metrics.formatPrometheus()).not.toMatch(/level="undefined"/);
     });
 
     test('level=null 归一为 unknown（而非 String(null)="null"）', () => {
-      metrics.incSecurityAlert('zzqoder_null', null);
+      metrics.incSecurityAlert('null', null);
       expect(samples('security_alerts_total')).toEqual([
-        'security_alerts_total{type="zzqoder_null",level="unknown"} 1',
+        'security_alerts_total{type="null",level="unknown"} 1',
       ]);
     });
 
     test('level=空串归一，且与 undefined 合并成同一条 series', () => {
-      metrics.incSecurityAlert('zzqoder_empty', '');
-      metrics.incSecurityAlert('zzqoder_empty', undefined);
+      metrics.incSecurityAlert('empty', '');
+      metrics.incSecurityAlert('empty', undefined);
 
       expect(metrics._alertCounters.size).toBe(1);
       expect([...metrics._alertCounters.values()]).toEqual([2]);
@@ -117,7 +117,7 @@ describe('metrics：截断可见性与缺省标签口径', () => {
 
   describe('series 上限截断必须可观测', () => {
     test('未打满：五个 store 各一行且为 0——"缺席"与"为 0"在 PromQL 里是两种状态', () => {
-      metrics.incSecurityAlert('zzqoder_low', 'high');
+      metrics.incSecurityAlert('low', 'high');
 
       expect(droppedText()).toEqual(
         STORES.map((s) => `metrics_series_dropped_total{store="${s}"} 0`)
@@ -128,8 +128,8 @@ describe('metrics：截断可见性与缺省标签口径', () => {
     });
 
     test('文本与快照的 store 集合、数值逐一对齐（两视图不得各说各话）', () => {
-      fill('alerts', 7, 'zzqoder_x');
-      fill('login', 3, 'zzqoder_y');
+      fill('alerts', 7, 'x');
+      fill('login', 3, 'y');
 
       const fromText = {};
       for (const line of droppedText()) {
@@ -141,8 +141,8 @@ describe('metrics：截断可见性与缺省标签口径', () => {
     });
 
     test('打满后新增被丢弃 ⇒ 逐 store 计数（不是全局一个数）', () => {
-      fill('alerts', 7, 'zzqoder_a');
-      fill('login', 3, 'zzqoder_l');
+      fill('alerts', 7, 'a');
+      fill('login', 3, 'l');
 
       expect(metrics._alertCounters.size).toBe(CAP);
       expect(metrics._loginCounters.size).toBe(CAP);
@@ -159,18 +159,18 @@ describe('metrics：截断可见性与缺省标签口径', () => {
     });
 
     test('快照上报的 limit 就是实际生效的上限（同一常量，不得各写一遍）', () => {
-      fill('alerts', 2, 'zzqoder_c');
+      fill('alerts', 2, 'c');
       const series = metrics.getSnapshot().series;
       expect(series.limit).toBe(CAP);
       expect(metrics._alertCounters.size).toBe(series.limit);
     });
 
     test('上限只挡新 series：既有标签继续累计（反向保护，上限≠不计数）', () => {
-      fill('alerts', 5, 'zzqoder_b');
+      fill('alerts', 5, 'b');
       const firstKey = [...metrics._alertCounters.keys()][0];
 
-      metrics.incSecurityAlert('zzqoder_b_0', 'high');
-      metrics.incSecurityAlert('zzqoder_b_0', 'high');
+      metrics.incSecurityAlert('b_0', 'high');
+      metrics.incSecurityAlert('b_0', 'high');
 
       expect(metrics._alertCounters.get(firstKey)).toBe(3);
       expect(metrics._droppedSeries.get('alerts')).toBe(5);
@@ -178,7 +178,7 @@ describe('metrics：截断可见性与缺省标签口径', () => {
 
     test('HTTP 两个 store 各自独立计数（直方图打满不与请求计数共用丢弃额度）', () => {
       for (let i = 0; i < CAP + 4; i++) {
-        const req = { method: 'GET', route: { path: `/zzqoder/r${i}` }, baseUrl: '' };
+        const req = { method: 'GET', route: { path: `/probe/r${i}` }, baseUrl: '' };
         const res = {
           statusCode: 200,
           on(_ev, cb) {
@@ -200,14 +200,14 @@ describe('metrics：截断可见性与缺省标签口径', () => {
           .map((args) => String(args[0]))
           .filter((m) => m.includes('series 数已达上限'));
 
-      fill('alerts', 3, 'zzqoder_w');
-      fill('login', 3, 'zzqoder_v');
+      fill('alerts', 3, 'w');
+      fill('login', 3, 'v');
 
       expect(capMessages().filter((m) => m.includes('store=alerts'))).toHaveLength(1);
       expect(capMessages().filter((m) => m.includes('store=login'))).toHaveLength(1);
       expect(capMessages()).toHaveLength(2);
 
-      metrics.incSecurityAlert('zzqoder_w_again', 'high');
+      metrics.incSecurityAlert('w_again', 'high');
       // 第四次丢弃不再重复喊：日志收敛……
       expect(capMessages().filter((m) => m.includes('store=alerts'))).toHaveLength(1);
       // ……但丢弃计数仍累加：可查询的信号不能跟着收敛

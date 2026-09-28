@@ -88,7 +88,7 @@ afterAll(() => {
 
 const warnLines = (out) => out.split('\n').filter((l) => l.includes('[warn]'));
 
-describe('zzqoder 锁降级留痕：已配置 Redis 却失败 ⇒ 必须 warn（子进程取证）', () => {
+describe('锁降级留痕：已配置 Redis 却失败 ⇒ 必须 warn（子进程取证）', () => {
   test('探针自检：logger 在真进程里确实会输出带级别标签的行（防"抓不到"被当成"没告警"）', () => {
     const out = drive('acquire');
     // 至少能抓到一行日志（含时间戳 + [level]），否则下面所有断言都没有意义

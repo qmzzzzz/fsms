@@ -85,7 +85,7 @@ async function tryPost(url) {
   }
 }
 
-describe('zzqoder 日志转发只允许 http/https 出站，拼错的 scheme 必须零投递', () => {
+describe('日志转发只允许 http/https 出站，拼错的 scheme 必须零投递', () => {
   test('前提自证：spy 装在了 transport 真正使用的那两个模块对象上', async () => {
     // 放行对照（http）必须撞进 spy —— 否则后面所有"spy 没被调用"的断言都是空转
     const t = makeTransport('http://siem.internal/logs');

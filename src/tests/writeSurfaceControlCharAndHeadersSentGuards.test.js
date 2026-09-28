@@ -6,10 +6,10 @@
  * 守护的不变式：攻击者可控字段必须 strip 控制字符（防日志伪造）；响应已开始写出后不得再 res.json；计数器必须走 canAddSeries 上限
  * 可证伪性：变异实测（筛查 N=2）：杀 2/3
  *
- * 命名沿革：2026-09-20 由 `zzqoder_writeSurfaceHardening.test.js` 更名。旧名里的
+ * 命名沿革：2026-09-20 更名（旧名带已废弃的会话前缀，逐字旧名见 `git log --follow`）。旧名里的
  *   Coverage / Gap / Hardening / Branch 说的是「当初为什么写它」（补覆盖率基线），
  *   **不是它的价值判据**；它能否挡住回归，由变异实测回答，不由文件名回答。
- *   旧名保留在本行，便于既往审计报告的 `grep 旧文件名` 仍能定位到本文件。
+ *   会话前缀已全仓清除，故不再逐字保留旧名；按旧名回溯请用 `git log --follow <本文件>`。
  * 依据：`deliverables/AGENT工作总账与待办-2026-09-21.md`（§2.9 测试资产 / §6 方法；原编号 §6-AW/AX/AY/AZ/BA 已随原台账删除，无法逐条映射）
  * ──────────────────────────────────────────────────────────────────────────
  */
@@ -35,7 +35,7 @@ const flushAsync = () => new Promise((resolve) => setTimeout(resolve, 150));
 const UA_PAYLOAD = 'A'.repeat(4000);
 // CT 取 1200：Node 单个 header 上限 8KB，9000 字符会被**整个丢弃**，
 // 于是中间件走 missing_content_type（reason 仅 28 字符）而测不到截断。
-const CT_PAYLOAD = 'zzqoder/' + 'x'.repeat(1200);
+const CT_PAYLOAD = 'probe/' + 'x'.repeat(1200);
 
 describe('写入面加固：协议违规留痕 / 错误处理器 / 指标系列上限', () => {
   let AuditLog;
@@ -75,7 +75,7 @@ describe('写入面加固：协议违规留痕 / 错误处理器 / 指标系列�
       const app = express();
       app.use(express.json());
       app.use(protocolCompliance());
-      app.post('/api/zzqoder-probe', (_req, res) => res.json({ ok: true }));
+      app.post('/api/probe', (_req, res) => res.json({ ok: true }));
       server = await new Promise((resolve) => {
         const s = app.listen(0, () => resolve(s));
       });
@@ -91,7 +91,7 @@ describe('写入面加固：协议违规留痕 / 错误处理器 / 指标系列�
     const post = async (userAgent, contentType) => {
       const request = require('supertest');
       return request(server)
-        .post('/api/zzqoder-probe')
+        .post('/api/probe')
         .set('User-Agent', userAgent)
         .set('Content-Type', contentType)
         .send('{"a":1}');
@@ -136,7 +136,7 @@ describe('写入面加固：协议违规留痕 / 错误处理器 / 指标系列�
 
       const request = require('supertest');
       const ok = await request(server)
-        .post('/api/zzqoder-probe')
+        .post('/api/probe')
         .set('User-Agent', legitUA)
         .set('Content-Type', 'application/json')
         .send({ a: 1 });
@@ -228,7 +228,7 @@ describe('写入面加固：协议违规留痕 / 错误处理器 / 指标系列�
 
     test('海量不同 type 不再无界增长（此前唯独该计数器绕过 canAddSeries）', () => {
       for (let i = 0; i < 5200; i++) {
-        metrics.incSecurityAlert(`zzqoder_type_${i}`, 'high');
+        metrics.incSecurityAlert(`type_${i}`, 'high');
       }
       expect(metrics._alertCounters.size).toBeLessThanOrEqual(5000);
     });

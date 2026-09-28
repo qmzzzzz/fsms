@@ -702,19 +702,19 @@ describe('assignRoles 越权防护（M-01）', () => {
       const createPerm = await ensurePermission('user:create', '建号');
       const acctRole = await Role.create({
         name: 'ZZQ 账号管理员',
-        code: 'ZZQODER_ACCT_ADMIN',
+        code: 'ACCT_ADMIN',
         level: 7,
         permissions: [createPerm._id],
       });
       const op = await User.create({
-        username: 'zzqoder_acct_op',
-        email: 'zzqoder_acct_op@example.com',
+        username: 'acct_op',
+        email: 'acct_op@example.com',
         password: 'Test@1234567',
         department: SCOPE_DEPT,
         roles: [acctRole._id],
       });
       const token = jwt.sign(
-        { userId: String(op._id), username: 'zzqoder_acct_op', tokenVersion: 0 },
+        { userId: String(op._id), username: 'acct_op', tokenVersion: 0 },
         process.env.JWT_SECRET,
         { expiresIn: '1h' }
       );
@@ -722,8 +722,8 @@ describe('assignRoles 越权防护（M-01）', () => {
     };
 
     afterEach(async () => {
-      await User.deleteMany({ username: /^zzqoder_/ });
-      await Role.deleteMany({ code: /^ZZQODER_/ });
+      await User.deleteMany({ username: /^(acct_op|escalated|normal)$/ });
+      await Role.deleteMany({ code: /^(ACCT_ADMIN|FAT_ROLE|NARROW_ROLE)$/ });
     });
 
     test('挂一个"自身不持有其权限"的低层级角色：建号被拒且账号不落库', async () => {
@@ -733,7 +733,7 @@ describe('assignRoles 越权防护（M-01）', () => {
       const configPerm = await ensurePermission('security:config', '安全配置');
       const fatRole = await Role.create({
         name: 'ZZQ 富权限角色',
-        code: 'ZZQODER_FAT_ROLE',
+        code: 'FAT_ROLE',
         level: 3,
         permissions: [configPerm._id],
       });
@@ -742,8 +742,8 @@ describe('assignRoles 越权防护（M-01）', () => {
         .post('/api/users')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          username: 'zzqoder_escalated',
-          email: 'zzqoder_escalated@example.com',
+          username: 'escalated',
+          email: 'escalated@example.com',
           password: 'Vn6$Rw83pKx5',
           department: SCOPE_DEPT,
           roles: [String(fatRole._id)],
@@ -751,7 +751,7 @@ describe('assignRoles 越权防护（M-01）', () => {
 
       expect(res.status).toBe(403);
       expect(res.body.message).toContain('security:config');
-      expect(await User.findOne({ username: 'zzqoder_escalated' })).toBeNull();
+      expect(await User.findOne({ username: 'escalated' })).toBeNull();
     });
 
     // 对照组：闸门只拦"自身没有的权限"。删掉上一段代码它照样绿，
@@ -760,7 +760,7 @@ describe('assignRoles 越权防护（M-01）', () => {
       const { token, createPerm } = await makeOperator();
       const narrowRole = await Role.create({
         name: 'ZZQ 窄权限角色',
-        code: 'ZZQODER_NARROW_ROLE',
+        code: 'NARROW_ROLE',
         level: 3,
         permissions: [createPerm._id],
       });
@@ -769,15 +769,17 @@ describe('assignRoles 越权防护（M-01）', () => {
         .post('/api/users')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          username: 'zzqoder_normal',
-          email: 'zzqoder_normal@example.com',
+          username: 'normal',
+          // 邮箱不能复用 normal@example.com：本文件前部 sa_normal 用例占用了它，
+          // 去前缀改名时撞上邮箱唯一索引会让本用例 400（邮箱已被使用）
+          email: 'normal-narrow@example.com',
           password: 'Vn6$Rw83pKx5',
           department: SCOPE_DEPT,
           roles: [String(narrowRole._id)],
         });
 
       expect(res.status).toBe(201);
-      const created = await User.findOne({ username: 'zzqoder_normal' });
+      const created = await User.findOne({ username: 'normal' });
       expect(created).not.toBeNull();
       expect(created.roles.map(String)).toContain(String(narrowRole._id));
     });

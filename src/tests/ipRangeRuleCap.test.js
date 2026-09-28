@@ -27,7 +27,7 @@ const fillerAllows = (n, { coverClient = false } = {}) => {
 
 const CLIENT = '1.1.1.1';
 
-describe('zzqoder IP 规则上限不静默截断', () => {
+describe('IP 规则上限不静默截断', () => {
   test('超过上限的文本整体判不可信，而不是解析前 200 条', () => {
     const r = parseRules(fillerAllows(MAX_RULE_COUNT + 1).join(','));
     expect(r.allows).toEqual([]);

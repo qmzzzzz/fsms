@@ -21,10 +21,10 @@
 
 const mongoose = require('mongoose');
 
-describe('zzqoder 审计导出截断的封顶语义', () => {
+describe('审计导出截断的封顶语义', () => {
   let AuditLog;
   let auditExportService;
-  const marker = 'zzqoder_cursor_close';
+  const marker = 'cursor_close';
 
   const insert = async (n) => {
     const docs = Array.from({ length: n }, () => ({

@@ -40,12 +40,12 @@ describe('二次验证限流与改密限流互不污染', () => {
     const jwt = require('jsonwebtoken');
     User = require('../models/User');
     user = await User.create({
-      username: 'zzqoder_bucket',
-      email: 'zzqoder_bucket@example.com',
+      username: 'bucket',
+      email: 'bucket@example.com',
       password: PASSWORD,
     });
     token = jwt.sign(
-      { userId: String(user._id), username: 'zzqoder_bucket', tokenVersion: user.tokenVersion },
+      { userId: String(user._id), username: 'bucket', tokenVersion: user.tokenVersion },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );

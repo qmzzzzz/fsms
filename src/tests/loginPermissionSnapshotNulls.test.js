@@ -63,11 +63,11 @@ describe('登录权限快照：只含生效角色/权限项', () => {
       { username: user.username, password: PASSWORD },
       {
         ip: '127.0.0.1',
-        userAgent: 'zzqoder-agent',
-        fingerprint: 'zzqoder-fp',
+        userAgent: 'probe-agent',
+        fingerprint: 'probe-fp',
         method: 'POST',
         path: '/api/auth/login',
-        req: { headers: { 'user-agent': 'zzqoder-agent' }, ip: '127.0.0.1', connection: {} },
+        req: { headers: { 'user-agent': 'probe-agent' }, ip: '127.0.0.1', connection: {} },
       }
     );
 

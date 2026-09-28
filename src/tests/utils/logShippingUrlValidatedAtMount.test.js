@@ -22,7 +22,7 @@
  * 面板于是会把"配过一个非法字符串"显示成"日志正在送 SIEM"。
  *
  * 判据来自哪里：非法 scheme 不再静默降级成明文出站，是
- * `zzqoder_logShipperSchemeAllowlist` 那轮修的；该轮注释点名的残留
+ * `logShipperSchemeAllowlist` 那轮修的；该轮注释点名的残留
  * （"运维看到的仍是『日志转发已启用 → htps://…』"）就是本用例钉的东西。
  *
  * 替身为什么要继承 winston-transport（第一版就踩了这个坑）：

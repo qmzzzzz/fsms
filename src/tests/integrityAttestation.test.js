@@ -100,11 +100,11 @@ async function runWith(report, opts = {}) {
 
   const req = {
     query,
-    user: { userId: '000000000000000000000001', username: 'zzqoder_auditor', sessionId: null },
+    user: { userId: '000000000000000000000001', username: 'auditor', sessionId: null },
     ip: '203.0.113.1',
     method: 'GET',
     originalUrl: '/api/security/audit-logs/verify',
-    get: () => 'zzqoder-agent',
+    get: () => 'probe-agent',
   };
   const res = {
     locals: {},

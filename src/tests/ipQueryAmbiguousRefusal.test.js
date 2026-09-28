@@ -34,7 +34,7 @@ const makeRes = () => {
   return res;
 };
 
-describe('zzqoder IP 命中查询的歧义文本拒答', () => {
+describe('IP 命中查询的歧义文本拒答', () => {
   let IPBlacklist;
   let queryIPMatch;
   const next = (err) => {

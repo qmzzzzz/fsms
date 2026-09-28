@@ -108,12 +108,12 @@ _tmp_*
 # 只锚定仓库根（`/` 前缀），避免误吞 src/tests/ 下的真测试文件。
 /zztmpctl/
 /zznpmtest/
-/zz-*.md
-/zzqoder*.md
+/zz*.md
 # 门禁自检（gateSelfTest）的仓库内夹具目录：正常路径由 finally 删除，但进程被 kill 时
 # 来不及执行——曾残留一个含 320 行合成告警代码的副本。若被 `git add -A` 收进仓库，
 # 它既污染 lint 门禁又污染基线，故在此兜底（锚定仓库根 + 只匹配该前缀）。
-/.zzqoder-ratchet-*/
+# 前缀必须与 gateSelfTest.test.js 里 fs.mkdtempSync 的模板逐字一致，改名时两处同步。
+/.lint-ratchet-selftest-*/
 
 # 内部留档目录（2026-09-28）：评估报告、审计台账、性能/复杂度基线数据。
 # 本仓库是**公开仓库**（github.com/qmzzzzz/fsms），而该目录含带 `file:line` 坐标的
@@ -122,3 +122,6 @@ _tmp_*
 # （说明见 CONTRIBUTING.md §9）。历史版本仍在 git 历史中（最后一次入库提交 b50cb40），
 # 取回方式见 deliverables/审计与迭代汇总-2026-09-28.md §6。
 deliverables/
+
+# jest 本地运行临时目录（haste map / 日志）
+.jesttmp/
