@@ -91,6 +91,13 @@ const partsOf = (instantMs, timeZone = BUSINESS_TIMEZONE) =>
       return acc;
     }, {});
 
+// 加载期即构造业务时区的 formatter（缓存是懒的，这条必须急切）：TZ_BUSINESS
+// 配了非法时区名时必须**在 require 本模块的瞬间抛 RangeError**——这是启动闸门
+// 的对账契约（tzBusinessEnvNormalization：生产"放行 ⟺ 加载不抛"，非生产环境
+// 靠这条加载期爆炸兜底）。懒到首次调用才抛，等于把启动期配置错误推迟成
+// 运行期某次统计的 500。
+dayPartsFmt(BUSINESS_TIMEZONE);
+
 /** 该 UTC 瞬间在指定时区属于哪一天（YYYY-MM-DD） */
 const localDateOf = (instantMs, timeZone = BUSINESS_TIMEZONE) => {
   const p = partsOf(instantMs, timeZone);

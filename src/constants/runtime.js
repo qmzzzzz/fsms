@@ -96,6 +96,29 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     impact: '风暴抑制按进程计，告警量被放大',
   },
   {
+    module: 'services/rateLimitEscalation.js',
+    mechanism: '限流升级触发计数（hits Map，固定窗口）',
+    // 计数留在进程内是**刻意的**（见该文件头「实例边界」）：多实例下各实例只
+    // 统计自己分到的 429，实际封禁阈值 = 配置阈值 × 实例数 —— 少封不误封；
+    // 429 拦截本身由限流器自己的共享存储跨实例保证，不受此影响。
+    impact: '多实例下升级封禁阈值按实例数摊薄（少封不误封，by design）',
+  },
+  {
+    module: 'services/ipLocationService.js',
+    mechanism: '归属地结果缓存（resultCache Map，FIFO 上限 2048）',
+    impact: '纯派生缓存、无失效语义，各进程独立仅为性能，不影响正确性',
+  },
+  {
+    module: 'constants/timezone.js',
+    mechanism: 'Intl formatter 时区缓存（dayPartsFmtCache Map，上限 32）',
+    impact: '纯派生缓存（按时区构造 formatter），无跨进程语义',
+  },
+  {
+    module: 'utils/metricsRuntime.js',
+    mechanism: 'readyz 判定计数（readyzChecks Map）',
+    impact: '各进程独立计数（/metrics 的 readyz 观测值按进程呈现）',
+  },
+  {
     module: 'middleware/security.js',
     mechanism: 'IP 封禁缓存（ipBlockCache Map）',
     impact: 'A 实例封禁的 IP 在 B 实例仍放行，直到 B 自己的 TTL 到期',

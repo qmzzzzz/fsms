@@ -1146,13 +1146,18 @@ describe('AlarmView 上报对话框（表单校验 + 位置解析 + 提交）', 
     expect(report.mock.calls[0][0].deviceId).toBe('507f1f77bcf86cd799439011')
   })
 
-  test('提交失败：提示创建失败、对话框保持打开（用户不必重填）、按钮解锁可重试', async () => {
+  test('提交失败：不双提示（错误 toast 由拦截器负责）、对话框保持打开（用户不必重填）、按钮解锁可重试', async () => {
     const c = await open([mkRow('f5')])
     report.mockRejectedValueOnce(new Error('boom'))
     await fillReportForm(c)
     click(dialogSubmit())
-    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '失败提示' })
-    expect(ElMessage.error).toHaveBeenCalledWith(i18n.global.t('messages.createFailed'))
+    await waitFor(() => report.mock.calls.length === 1, { message: '上报请求发出' })
+    await flush(6)
+    // 2026-09-26 审计：提交失败的 toast 由 api 拦截器统一弹出（携带具体错误语义），
+    // 组件再补泛化「创建失败」会双提示并覆盖具体文案。用户可见的失败反馈在
+    // src/tests/utils/apiRequestPipeline.test.js 覆盖；组件侧钉住：不双提示、
+    // 对话框保持打开、按钮经 finally 解锁可重试。
+    expect(ElMessage.error).not.toHaveBeenCalled()
     await waitFor(() => dialogSubmit().disabled === false, { message: '按钮解锁' })
     expect(c.findAll('.el-dialog').length).toBe(1)
     expect(c.errors).toEqual([])

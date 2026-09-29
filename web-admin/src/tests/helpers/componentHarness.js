@@ -33,7 +33,15 @@ export const click = (el) => {
 }
 
 export const flush = async (times = 1) => {
-  for (let i = 0; i < times; i += 1) await nextTick()
+  for (let i = 0; i < times; i += 1) {
+    await nextTick()
+    // 每轮混入一个真实宏任务轮：Element Plus 对话框/消息链路里夹着定时器与
+    // 渲染回调，纯微任务循环会让它们饿死——本地空载时偶发可达，CI 双核
+    // runner 高负载下稳定饿死（run 68 实测 4 条「失败提示」断言全部超时/
+    // 未达）。宏任务轮让出事件循环使定时器得以推进；对纯微任务链路只是
+    // 无害的多等一轮。
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
 }
 
 /**
@@ -142,6 +150,10 @@ export const waitFor = async (predicate, options = {}) => {
   for (let i = 0; i < maxTicks; i += 1) {
     if (predicate()) return
     await nextTick()
+    // 混入真实宏任务轮（理由同 flush）：失败提示链路夹定时器回调，纯微任务
+    // 轮询在 CI 高负载下会饿死它们 ⇒ waitFor 超时（run 68 实测）。macrotask
+    // 让出事件循环后定时器得以推进；命中条件的用例通常第一轮就返回。
+    await new Promise((resolve) => setTimeout(resolve, 0))
   }
   if (predicate()) return
   throw new Error(`waitFor 超时（${maxTicks} 个 nextTick）：${message}`)

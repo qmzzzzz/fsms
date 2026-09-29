@@ -137,7 +137,12 @@ function mountStaticFrontend(app, { logger } = {}) {
     if (matchesAnyPathPrefix(RESERVED_PREFIXES, req.path)) return next();
     const acceptsHtml = String(req.headers.accept || '').includes('text/html');
     if (!acceptsHtml) return next();
-    return res.sendFile(indexFile);
+    // send 1.x 对「绝对路径、无 root」走 no-root 解析分支：把整条绝对路径切段做
+    // dotfiles 判定（默认 'ignore'），部署目录链上任一段以"."开头（/srv/.releases/…、
+    // Windows 的 %TEMP%\.zcode\…）就会对真实存在的 index.html 裸 404——实测
+    // Windows 点段临时目录与 Linux 点段发布目录同病。root 模式只对「相对路径」
+    // 判定，与 express.static 同形态，语义与原意图完全一致。
+    return res.sendFile('index.html', { root: distDir });
   });
 
   if (logger) logger.info(`前端静态托管已启用：${distDir}`);

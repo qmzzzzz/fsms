@@ -348,6 +348,11 @@ describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () 
         '*||0',
       ].join('\n'),
       STUB_SECRETS_DIR: stage.secrets,
+      // 与 runDeploy 同口径：preflight 会校验「告警接收端是否已注入」（Top-2），
+      // 缺省退回仓库占位模板 ⇒ 前置校验拒绝（退出码 2，本用例曾因此假红）。
+      // 指向本 stage 那份"已注入"的 alertmanager 配置后，前置校验的通过就只能
+      // 依赖临时 .env 的三个变量——正是本用例要证明的链路。
+      ALERTMANAGER_CONFIG_PATH: stage.alertmanager,
     };
     // 清掉父进程传来的值：使「通过前置校验」只能靠临时 .env
     delete env.APP_IMAGE;

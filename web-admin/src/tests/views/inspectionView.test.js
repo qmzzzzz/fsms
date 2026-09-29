@@ -245,7 +245,11 @@ describe('InspectionView 启动/删除（操作分支）', () => {
     click(buttonByText(c, i18n.global.t('inspection.start')))
     await flush(8)
 
-    expect(ElMessage.error).toHaveBeenCalledWith(i18n.global.t('messages.updateFailed'))
+    // 2026-09-26 审计后，操作失败的 toast 由 api 拦截器统一弹出（携带具体错误语义）；
+    // 组件再补泛化「更新失败」会双提示并覆盖具体文案。组件侧的新契约是：
+    // 不双提示、不误报成功、不刷新列表（拦截器自身的提示行为在
+    // src/tests/utils/apiRequestPipeline.test.js 覆盖）。
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(ElMessage.success).not.toHaveBeenCalled()
     expect(getList.mock.calls.length).toBe(before)
     expect(c.errors).toEqual([])
@@ -274,7 +278,7 @@ describe('InspectionView 启动/删除（操作分支）', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('删除失败：提示失败且不刷新列表', async () => {
+  test('删除失败：不双提示（错误 toast 由拦截器负责）、不误报成功、不刷新列表', async () => {
     const c = await open([rowWith({ _id: 'd1' })])
     const before = getList.mock.calls.length
     ElMessageBox.confirm.mockResolvedValue('confirm')
@@ -283,7 +287,9 @@ describe('InspectionView 启动/删除（操作分支）', () => {
     click(buttonByText(c, i18n.global.t('common.delete')))
     await flush(8)
 
-    expect(ElMessage.error).toHaveBeenCalledWith(i18n.global.t('messages.deleteFailed'))
+    // 2026-09-26 审计：组件不再自弹泛化「删除失败」（会与拦截器的具体文案双提示）；
+    // 用户可见的失败反馈由拦截器保证，在 apiRequestPipeline.test.js 覆盖。
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(ElMessage.success).not.toHaveBeenCalled()
     expect(getList.mock.calls.length).toBe(before)
   })

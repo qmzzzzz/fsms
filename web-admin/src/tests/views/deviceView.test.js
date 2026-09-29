@@ -428,12 +428,18 @@ describe('DeviceView 删除', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('删除失败：提示失败，不静默吞掉', async () => {
+  test('删除失败：请求已发出且被处理，不双提示（错误 toast 由拦截器负责）、不误报成功', async () => {
     const c = await open()
     confirm.mockResolvedValue('confirm')
     remove.mockRejectedValue(new Error('boom'))
     click(btn(c, '删除'))
-    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '失败提示' })
+    await waitFor(() => remove.mock.calls.length === 1, { message: '删除请求发出' })
+    await flush(8)
+    // 2026-09-26 审计：操作失败的 toast 由 api 拦截器统一弹出（携带具体错误语义），
+    // 组件再补泛化文案会双提示并覆盖具体语义。用户可见的失败反馈在
+    // src/tests/utils/apiRequestPipeline.test.js 覆盖；这里钉的是组件侧契约：
+    // 拒绝被 catch 处理（无未捕获异常进 errorHandler）、不误报成功、不双提示。
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(ElMessage.success).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
   })

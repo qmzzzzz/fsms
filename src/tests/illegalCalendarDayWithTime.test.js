@@ -21,12 +21,34 @@
  * 因为它一旦哪天变成可解析，本文件的闸门就会出现同一个洞。
  */
 const { parseDateBoundary, isValidDateParam, buildDateRangeFilter } = require('../utils/helpers');
-const { businessDayBounds } = require('../constants/timezone');
+const {
+  businessDayBounds,
+  BUSINESS_TIMEZONE,
+  clampToRealCalendarDay,
+} = require('../constants/timezone');
 const { buildAuditQuery } = require('../utils/auditQuery');
 
 const ms = (d) => d.getTime();
 /** 业务时区某个自然日的起点（用它做"没有越到次月/次年"的判据，与本机时区无关） */
 const dayStart = (day) => businessDayBounds(day).start;
+
+// runner 是否处于业务时区：CI 的 UTC runner 上为 false。带时间串的既定口径是
+// **透传 `new Date()`（runner 本地解析）**（helpers.js DATE_PREFIX_WITH_TIME 分支），
+// 因此「parsed 落在业务日界内」只在 runner=业务时区时才无条件成立——UTC runner
+// 上合法的晚间时间串（23:00 本地 = 次日 07:00 业务）本就会跨业务日。
+// runner 中立的强不变量（回夹恒等、clamp 纯 UTC 判定、本地日历日不前滚）
+// 在两种 runner 上都必须成立：原缺陷（2026-04-31T10:00 前滚成 05-01）在
+// UTC runner 上会让 runnerDayOf 变成 '2026-05-01' ≠ '2026-04-30'，照样红。
+const runnerIsBusinessTZ = Intl.DateTimeFormat().resolvedOptions().timeZone === BUSINESS_TIMEZONE;
+/** 该瞬间在 runner 本地时区的日历日（与被测分支同一透镜：new Date() 的本地解析） */
+const runnerDayOf = (d) =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
 
 describe('非法日历日 + 时间后缀：回夹到当月最后一天，时间部分保留', () => {
   test('月末非法日：与"手写最后一天同一时刻"逐毫秒相等，且不进入次月', () => {
@@ -44,10 +66,18 @@ describe('非法日历日 + 时间后缀：回夹到当月最后一天，时间�
     ];
     for (const [bad, good, monthStart, nextMonthStart] of arms) {
       const parsed = parseDateBoundary(bad, 'end');
+      // 回夹恒等式（runner 中立）：非法日与"手写当月最后一天同一时刻"逐毫秒相等
       expect(parsed).toEqual(parseDateBoundary(good, 'end'));
-      // 上下界都用业务时区的首日零点：本机时区与 TZ_BUSINESS 不一致也不会误判
-      expect(ms(parsed)).toBeGreaterThanOrEqual(ms(dayStart(monthStart)));
-      expect(ms(parsed)).toBeLessThan(ms(dayStart(nextMonthStart)));
+      // 日期部分确被夹到当月末天（clampToRealCalendarDay 是纯 UTC 判定，无时区透镜）
+      expect(clampToRealCalendarDay(bad.slice(0, 10))).toBe(good.slice(0, 10));
+      if (runnerIsBusinessTZ) {
+        // 上下界都用业务时区的首日零点：本机时区与 TZ_BUSINESS 不一致也不会误判
+        expect(ms(parsed)).toBeGreaterThanOrEqual(ms(dayStart(monthStart)));
+        expect(ms(parsed)).toBeLessThan(ms(dayStart(nextMonthStart)));
+      } else {
+        // runner 中立不变量：没有前滚进下一日（原缺陷在 UTC runner 上由此变红）
+        expect(runnerDayOf(parsed)).toBe(good.slice(0, 10));
+      }
     }
   });
 
@@ -108,7 +138,12 @@ describe('消费方拿到的查询边界同样不越月（报表与审计两条�
   test('buildDateRangeFilter：四月区间不得含五月', () => {
     const filter = buildDateRangeFilter('2026-04-01', '2026-04-31T23:00:00');
     expect(ms(filter.$gte)).toBeGreaterThanOrEqual(ms(dayStart('2026-04-01')));
-    expect(ms(filter.$lte)).toBeLessThan(ms(dayStart('2026-05-01')));
+    if (runnerIsBusinessTZ) {
+      expect(ms(filter.$lte)).toBeLessThan(ms(dayStart('2026-05-01')));
+    } else {
+      // runner 中立不变量：$lte 的本地日历日不前滚出四月（UTC runner 的强判定）
+      expect(runnerDayOf(filter.$lte)).toBe('2026-04-30');
+    }
   });
 
   test('buildAuditQuery：审计查询的 $lte 与列表侧同一口径（同一函数，两处入口）', () => {
@@ -116,7 +151,11 @@ describe('消费方拿到的查询边界同样不越月（报表与审计两条�
       query: { startDate: '2026-04-01', endDate: '2026-04-31T23:00:00' },
     });
     expect(query.timestamp.$lte).toEqual(parseDateBoundary('2026-04-31T23:00:00', 'end'));
-    expect(ms(query.timestamp.$lte)).toBeLessThan(ms(dayStart('2026-05-01')));
+    if (runnerIsBusinessTZ) {
+      expect(ms(query.timestamp.$lte)).toBeLessThan(ms(dayStart('2026-05-01')));
+    } else {
+      expect(runnerDayOf(query.timestamp.$lte)).toBe('2026-04-30');
+    }
     expect(ms(query.timestamp.$gte)).toBeGreaterThanOrEqual(ms(dayStart('2026-04-01')));
   });
 });
