@@ -13,20 +13,34 @@
  *
  * 执行注意：escalate 是 void fire-and-forget（这正是被测语义），断言必须轮询
  * 等待升级链路落地，而不是数一两个微任务——中间隔着两次真实的 Mongo 往返。
- * 每条用例用独立 IP：升级动作跨用例仍在途（fire-and-forget 的固有形态），
- * 共用 IP 会让上一例的审计行泄漏进下一例的断言。
+ *
+ * 隔离纪律（两条，缺一不可；`--randomize` 会打乱声明顺序，实测 seed 777001 三红）：
+ *  1. **每条用例独占一个 IP**：升级动作是 fire-and-forget 的，上一条用例的 escalate
+ *     会在下一条用例的 beforeEach 之后才落地（写审计 + 调 addToBlacklist），
+ *     共用 IP 就把上一例的审计行泄漏进下一例的断言（CI #72 seed 2/3：「阈值内不写
+ *     审计」读到 1 条）。故 IPS 里每个键只归一条用例，且每条用例自证自己的起点。
+ *  2. **封禁断言必须按 IP 取**（见 bansFor）：banCalls 是跨用例共享的数组，上一例
+ *     迟到的封禁会 push 进来。用 banCalls[0] / banCalls.length === 1 这类全局读数，
+ *     在乱序下把「本 IP 被封了几次」误判成「数组里有几条」——实测 seed 777001 正是
+ *     这么红的：阶梯升档自己的封禁晚到了下一条用例里，于是它读到别人的 tier1，
+ *     而「达阈值」读到了它的 tier2（Received 14400000 / 期望 3600000）。
  */
 
 const mongoose = require('mongoose');
 
 const security = require('../../middleware/security');
 const escalation = require('../../services/rateLimitEscalation');
-const { ALERT_TYPES, ESCALATION_TIERS } = require('../../services/securityAlert');
+const {
+  ALERT_TYPES,
+  ESCALATION_TIERS,
+  BAN_ESCALATION_WINDOW_MS,
+} = require('../../services/securityAlert');
 const AuditLog = require('../../models/AuditLog');
 
 const stamp = Date.now().toString().slice(-7);
-// 每条用例独立 IP（见文件头「执行注意」）
+// 每条用例独占一个 IP（见文件头「隔离纪律 1」）：一个键只归一条用例，不复用
 const IPS = {
+  noop: `192.0.2.${(Number(stamp) % 100) + 29}`,
   threshold: `192.0.2.${(Number(stamp) % 100) + 30}`,
   ladder: `192.0.2.${(Number(stamp) % 100) + 31}`,
   bucket: `192.0.2.${(Number(stamp) % 100) + 32}`,
@@ -38,6 +52,16 @@ const ALL_TEST_IPS = Object.values(IPS).flatMap((ip) => [ip, `::ffff:${ip}`]);
 const originalAdd = security.addToBlacklist;
 let banCalls;
 let banResult;
+
+/**
+ * 本 IP 收到的封禁调用。
+ *
+ * **不要直接读 banCalls**：escalate 是 fire-and-forget，上一条用例的封禁会在本条
+ * 用例的 beforeEach 之后才 push 进来（见文件头「隔离纪律 2」）。按 IP 取之后，
+ * 「恰好一次」断言重新变成「这个 IP 恰好被封了一次」——这才是要钉的不变式，
+ * 且仍然可证伪：服务若对同一 IP 封两次，这里会是 2。
+ */
+const bansFor = (ip) => banCalls.filter((c) => c.ip === ip);
 
 /** 轮询等待升级链路落地（escalate 为 fire-and-forget，中间是真实 DB 往返） */
 const waitUntil = async (fn, timeoutMs = 5000) => {
@@ -69,6 +93,10 @@ afterAll(async () => {
   if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
 });
 
+// 这里**不做**审计清理：清理是"擦共享状态"，而本文件的隔离靠"每条用例独占自己的
+// IP + 自证起点"（见文件头隔离纪律）——那才是与 --randomize 无关的形态。afterAll
+// 只在文件结束时统一收尾，管不了文件内部的顺序，beforeEach 清库同样管不了在途的
+// fire-and-forget 写入（它会在清库之后才落盘）。
 beforeEach(() => {
   banCalls = [];
   banResult = { banned: true, normalizedIp: 'ok' };
@@ -81,29 +109,35 @@ beforeEach(() => {
 
 describe('rateLimitEscalation（CC 防护闭环）', () => {
   test('阈值内只计数，不写审计、不封禁', async () => {
-    for (let i = 0; i < escalation.ESCALATION_THRESHOLD - 1; i += 1) hit(IPS.threshold);
+    // 自证起点：本用例独占 IPS.noop，跑之前该 IP 的审计必须是 0。
+    // 不确认这一条，下面的 toBe(0) 就不可证伪——它可能只是"上一例还没写进来"。
+    expect(
+      await AuditLog.countDocuments({ action: ALERT_TYPES.RATE_LIMIT_ABUSE, ip: IPS.noop })
+    ).toBe(0);
 
-    expect(escalation.peekHits(IPS.threshold)).toBe(escalation.ESCALATION_THRESHOLD - 1);
+    for (let i = 0; i < escalation.ESCALATION_THRESHOLD - 1; i += 1) hit(IPS.noop);
+
+    expect(escalation.peekHits(IPS.noop)).toBe(escalation.ESCALATION_THRESHOLD - 1);
     // 给在途/未来的异步链路留出时间：这里不该有任何动作
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(
-      await AuditLog.countDocuments({ action: ALERT_TYPES.RATE_LIMIT_ABUSE, ip: IPS.threshold })
+      await AuditLog.countDocuments({ action: ALERT_TYPES.RATE_LIMIT_ABUSE, ip: IPS.noop })
     ).toBe(0);
-    expect(banCalls).toHaveLength(0);
+    expect(bansFor(IPS.noop)).toHaveLength(0);
   });
 
   test('达阈值：审计落库 + addToBlacklist 第一档 1h + auto 来源', async () => {
     for (let i = 0; i < escalation.ESCALATION_THRESHOLD; i += 1) hit(IPS.threshold);
 
-    expect(await waitUntil(() => banCalls.length === 1)).toBe(true);
-    expect(banCalls[0]).toMatchObject({
+    expect(await waitUntil(() => bansFor(IPS.threshold).length === 1)).toBe(true);
+    expect(bansFor(IPS.threshold)[0]).toMatchObject({
       ip: IPS.threshold,
       durationMs: ESCALATION_TIERS[0],
       reason: 'rate_limit_auto_ban_tier1',
       source: 'auto',
     });
 
-    // 审计先于封禁（阶梯事件源），banCalls 已到 ⇒ 审计行必然已落库
+    // 审计先于封禁（阶梯事件源），本 IP 的封禁调用已到 ⇒ 该 IP 的审计行必然已落库
     const row = await AuditLog.findOne({
       action: ALERT_TYPES.RATE_LIMIT_ABUSE,
       ip: IPS.threshold,
@@ -127,9 +161,19 @@ describe('rateLimitEscalation（CC 防护闭环）', () => {
       body: { limiter: 'general' },
     });
 
+    // 自证起点：档位由「30 天窗口内该 IP 的审计条数」决定，本用例押的是"恰好 1 条"。
+    // 不自己确认一次，失败时只能靠猜是种子没写进去、还是被别的用例/残留污染。
+    expect(
+      await AuditLog.countDocuments({
+        action: ALERT_TYPES.RATE_LIMIT_ABUSE,
+        ip: IPS.ladder,
+        timestamp: { $gte: new Date(Date.now() - BAN_ESCALATION_WINDOW_MS) },
+      })
+    ).toBe(1);
+
     for (let i = 0; i < escalation.ESCALATION_THRESHOLD; i += 1) hit(IPS.ladder, 'ip');
-    expect(await waitUntil(() => banCalls.length === 1)).toBe(true);
-    expect(banCalls[0].durationMs).toBe(ESCALATION_TIERS[1]);
+    expect(await waitUntil(() => bansFor(IPS.ladder).length === 1)).toBe(true);
+    expect(bansFor(IPS.ladder)[0].durationMs).toBe(ESCALATION_TIERS[1]);
   });
 
   test('::ffff: 前缀与纯 IPv4 是同一个计数桶，且达阈值封禁的是归一化地址', async () => {
@@ -145,15 +189,15 @@ describe('rateLimitEscalation（CC 防护闭环）', () => {
 
     // 最后一击达阈值 → 封禁动作落在归一化地址上
     hit(ip);
-    expect(await waitUntil(() => banCalls.length === 1)).toBe(true);
-    expect(banCalls[0].ip).toBe(ip);
+    expect(await waitUntil(() => bansFor(ip).length === 1)).toBe(true);
+    expect(bansFor(ip)[0].ip).toBe(ip);
   });
 
   test('addToBlacklist 返回 {banned:false}（白名单等）：不抛错，审计照写', async () => {
     banResult = { banned: false, reason: 'whitelisted' };
     for (let i = 0; i < escalation.ESCALATION_THRESHOLD; i += 1) hit(IPS.failsoft);
 
-    expect(await waitUntil(() => banCalls.length === 1)).toBe(true);
+    expect(await waitUntil(() => bansFor(IPS.failsoft).length === 1)).toBe(true);
     const row = await AuditLog.findOne({
       action: ALERT_TYPES.RATE_LIMIT_ABUSE,
       ip: IPS.failsoft,

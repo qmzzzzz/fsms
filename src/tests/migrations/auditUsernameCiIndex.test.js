@@ -88,7 +88,24 @@ describe('迁移 20260928000000 与模型声明的对账', () => {
   });
 
   describe('执行侧（独立库）', () => {
+    // 本 describe 的用例操作**同一个** isolated.db，而状态只有"索引在不在"这一个布尔量。
+    // 原实现靠声明顺序串起来（up 建 → 幂等 → 漂移 → down 删 → down 幂等），
+    // `--randomize` 打乱后必然互相踩：实测 CI #72 的 seed 2/3 里「collation 不一致时 up()
+    // 会删掉重建」跑到了「down()：索引被删除」之后 ⇒ dropIndex 抛
+    // `MongoServerError: index not found with name [username_ci_timestamp]`。
+    // 改为每条用例**自证前置**：需要索引存在就先 up()，需要不存在就先 drop。
+    /** 前置：索引已建成且形态正确（up 本身幂等，重复调用安全） */
+    const ensureIndexPresent = () => migration.up(isolated.db);
+    /** 前置：索引不存在（集合不存在时 dropIndex 会抛，同样视作"不存在"） */
+    const ensureIndexAbsent = async () => {
+      await isolated.db
+        .collection(migration.COLLECTION)
+        .dropIndex(migration.INDEX_NAME)
+        .catch(() => {});
+    };
+
     test('up()：索引建成且带 collation', async () => {
+      await ensureIndexAbsent(); // 自证前置：不依赖"上一条用例刚建过"
       await migration.up(isolated.db);
       const idx = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
       expect(idx).not.toBeNull();
@@ -98,7 +115,9 @@ describe('迁移 20260928000000 与模型声明的对账', () => {
     });
 
     test('up() 幂等：再跑一次不重建、不报错，形态不变', async () => {
+      await ensureIndexPresent(); // 自证前置：before 必须真的存在，否则断言在比 null
       const before = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
+      expect(before).not.toBeNull();
       await migration.up(isolated.db);
       const after = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
       expect(after.name).toBe(before.name);
@@ -107,6 +126,7 @@ describe('迁移 20260928000000 与模型声明的对账', () => {
     });
 
     test('collation 不一致时 up() 会删掉重建（否则查询侧命中不了它）', async () => {
+      await ensureIndexPresent(); // 自证前置：dropIndex 需要索引存在
       const coll = isolated.db.collection(migration.COLLECTION);
       await coll.dropIndex(migration.INDEX_NAME);
       // 故意造成"同名同 key 但无 collation"的漂移形态
@@ -120,11 +140,13 @@ describe('迁移 20260928000000 与模型声明的对账', () => {
     });
 
     test('down()：索引被删除', async () => {
+      await ensureIndexPresent(); // 自证前置：先建出来，才谈得上"被删掉"
       await migration.down(isolated.db);
       expect(await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME)).toBeNull();
     });
 
     test('down() 幂等：索引已不存在时不报错', async () => {
+      await ensureIndexAbsent(); // 自证前置：本用例要的就是"已不存在"这个状态
       await expect(migration.down(isolated.db)).resolves.toBeUndefined();
     });
 
