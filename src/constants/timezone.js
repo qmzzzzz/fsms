@@ -64,12 +64,20 @@ const dayPartsFmt = (timeZone) => {
     if (dayPartsFmtCache.size >= DAY_PARTS_FMT_CACHE_LIMIT) dayPartsFmtCache.clear();
     fmt = new Intl.DateTimeFormat('en-CA', {
       timeZone,
-      hour12: false,
-      // 时轮必须显式钉住，两枚选项各挡一种实测形状（本机 ICU 探针）：
-      //   只留 hour12:false（丢掉本行）⇒ '00'，当前构建安全，但换构建可落到 h24 ⇒ 午夜输出 '24'；
-      //   两枚都丢 ⇒ en-CA 直接走 h12，午夜输出 '12'——offsetAt 会把业务日界算偏 12 小时，
-      //   同时 businessHour 读成 12 让 isOffHours 在午夜整点判成"常规时间"（漏报非常规时间告警）。
-      // 判据由 src/tests/constants/businessHourSingleSource.test.js 的午夜臂钉住。
+      // 时轮必须显式钉住，且**不能**同时传 hour12——ECMA-402 规定 hour12 一旦出现就会
+      // 覆盖/清空 hourCycle（MDN 原文：“hour12 overrides both the hc locale extension tag
+      // and the hourCycle option”）。原实现两枚同传，hourCycle:'h23' 实为空转，实际时轮
+      // 由运行时对 `hour12:false` 的解析决定。实测（ICU 同为 78.2，差异在 V8）：
+      //   Node v20.20.2          → h24 ⇒ 午夜输出 '24'
+      //   Node v22.22.2/v24.15.0 → h23 ⇒ 午夜输出 '00'
+      // 即原注释所说「当前构建安全，但换构建可落到 h24」的危险在 Node 20 上**已经发生**；
+      // 生产之所以还没出错，靠的是下面 offsetAt 的 `% 24` 兜底，以及 businessDateParts
+      // 只读日期分量、不读 hour。只留 hourCycle:'h23' 后三个运行时一致输出 '00'，
+      // 声明的那道防线才真正生效；它同时也挡得住「两枚都丢 ⇒ en-CA 走 h12，午夜输出 '12'」
+      // 那条形状（h12 会把业务日界算偏 12 小时，且 businessHour 读成 12 让 isOffHours
+      // 在午夜整点判成"常规时间"，漏报非常规时间告警）。
+      // 判据由 src/tests/constants/businessHourSingleSource.test.js 的午夜臂钉住；
+      // `% 24` 保留为再换构建时的兜底。
       hourCycle: 'h23',
       year: 'numeric',
       month: '2-digit',

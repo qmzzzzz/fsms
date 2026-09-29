@@ -83,7 +83,13 @@ const renderIn = (tz, at, precise) =>
     hour: '2-digit',
     minute: '2-digit',
     ...(precise ? { second: '2-digit', fractionalSecondDigits: 3 } : {}),
-    hour12: false,
+    // 这里**不能**同时传 hour12:false——ECMA-402 规定 hour12 一旦出现就会覆盖/清空
+    // hourCycle（MDN 原文：“hour12 overrides both the hc locale extension tag and the
+    // hourCycle option”），于是 hourCycle:'h23' 形同虚设，实际时轮退化成运行时对
+    // `hour12:false` 的解析结果。实测（ICU 同为 78.2，差异在 V8）：
+    //   Node v20.20.2          → hour12:false 落到 h24 ⇒ 午夜渲染 '2026-09-01 24:00:00.000'
+    //   Node v22.22.2/v24.15.0 → hour12:false 落到 h23 ⇒ '2026-09-01 00:00:00.000'
+    // 只留 hourCycle:'h23' 时三个运行时都输出 '00'，与构建无关。
     hourCycle: 'h23',
   })
     .format(at)

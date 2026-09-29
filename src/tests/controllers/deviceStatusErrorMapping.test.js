@@ -163,7 +163,10 @@ describe('设备状态变更的错误分派：本地不得吞错，映射唯一�
    * 用户无法知道"报废过的设备要走报废接口"这类可执行信息。
    */
   test('服务层写给用户的业务文案原样到客户端（ApiError 透传，不降级为通用文案）', async () => {
-    const ApiError = require('../../utils/apiError');
+    // 大小写必须与磁盘一致（src/utils/ApiError.js）。Windows 的文件系统不区分大小写，
+    // 写成 apiError 在本地照样 require 得到，但 Linux runner 会直接
+    // `Cannot find module '../../utils/apiError'` —— CI 的 20.x 腿就是这么红的。
+    const ApiError = require('../../utils/ApiError');
     jest
       .spyOn(deviceService, 'updateDeviceStatus')
       .mockRejectedValue(ApiError.badRequest('设备已报废，不能再变更状态'));

@@ -89,17 +89,41 @@ describe('P2-36：TZ_BUSINESS 启动期校验', () => {
     expect(runProd().exited).toBe(false);
   });
 
-  test.each([
-    ['IANA 名', 'Asia/Shanghai'],
-    // 实测：Intl 接受 '+08:00' 形式的固定偏移（本机 Node v24.15.0 确认），
-    // 且 MongoDB 的 $dateToString 同样接受该形式，故不判错。
-    // 注意 constants/timezone.js 的取向是「优先 IANA」——固定偏移不承载夏令时
-    // 规则，跨时区部署时应改用 IANA 名。此处只保证它不会在首次业务调用抛错。
-    ['固定偏移 +08:00（Intl 接受）', '+08:00'],
-  ])('%s → 通过', (_label, value) => {
+  test('IANA 名 → 通过', () => {
     setValidProdEnv();
-    process.env.TZ_BUSINESS = value;
+    process.env.TZ_BUSINESS = 'Asia/Shanghai';
     expect(runProd().exited).toBe(false);
+  });
+
+  // 「固定偏移 +08:00」的判定**随运行时变化**：offset 形式的时区名只有较新的 V8 认。
+  // 实测（ICU 同为 78.2，差异在 V8 而非 ICU 数据）：
+  //   Node v20.20.2          → new Intl.DateTimeFormat('en-CA',{timeZone:'+08:00'}) 抛 RangeError
+  //   Node v22.22.2/v24.15.0 → 接受
+  // 校验器的契约是「与运行期一致」（见 config/validate.js 的 collectTimezoneErrors：
+  // 只有真能被 Intl 接受的名字才放行，避免"校验通过但运行期仍抛"）。故：
+  //   Intl 接受 → 必须放行；Intl 拒绝 → 必须在启动期拦下。
+  // 期望值因此由本运行时的探针给出，而不是写死某个 Node 版本的实测结论——
+  // 写死 v24 的结论会让 CI 的 20.x 腿恒红，写死 v20 的结论则会在 22.x 上漏掉真回归。
+  // （原实现写死「通过」，依据是注释自陈的「本机 Node v24.15.0 确认」。）
+  const intlRejectsOffsetTz = () => {
+    try {
+      new Intl.DateTimeFormat('en-CA', { timeZone: '+08:00' });
+      return false;
+    } catch (_) {
+      return true;
+    }
+  };
+
+  test('固定偏移 +08:00 → 判定与运行期 Intl 一致（Node 20 拒绝 / Node 22+ 接受）', () => {
+    setValidProdEnv();
+    process.env.TZ_BUSINESS = '+08:00';
+    const { exited, messages } = runProd();
+    if (intlRejectsOffsetTz()) {
+      expect(exited).toBe(true);
+      expect(messages).toContain('TZ_BUSINESS');
+    } else {
+      expect(exited).toBe(false);
+    }
   });
 
   test('非生产环境不校验（validateConfig 提前返回）', () => {
