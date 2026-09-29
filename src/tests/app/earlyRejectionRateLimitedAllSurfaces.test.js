@@ -116,6 +116,29 @@ describe('限流挂载范围覆盖全部对外表面', () => {
     expect(await settleCount(path)).toBe(baseline + MAX_GENERAL);
   });
 
+  // 静态前端面（SPA 文档 + 构建产物）走**安全方法**时必须一条 429 都不吃。
+  //
+  // 缺陷形态：generalLimiter/ipLimiter 是全站挂载，而 mountStaticFrontend 挂在它们之后
+  // （app.js:231 vs :386），于是 /assets/* 与 SPA 文档也计入配额。浏览器一次页面加载
+  // 实测 35 个请求、其中 34 个是静态资源/文档、只有 1 个打 /api/**（CI e2e-browser 的
+  // Playwright trace 实测）⇒ 300 次/15 分钟的配额**约 9 次页面加载**就打满；而 429 的
+  // 响应体是 JSON，浏览器会把它当文档渲染出来（e2e 快照实证：页面体就是
+  // `{"success":false,"message":"请求过于频繁，请稍后再试"}`），整个 SPA 白屏。
+  //
+  // 判据只钉「不含 429」、不钉具体状态码：这些路径在测试环境没有构建产物，会落到 404
+  // 兜底，状态码不是本用例的锚点。修前这里恰好是 MAX 条非 429 + 其余全 429。
+  const STATIC_SURFACES = ['/', '/login', '/dashboard', '/assets/index-deadbeef.js'];
+  test.each(STATIC_SURFACES.map((p, i) => [p, `10.8${i}.0.4`]))(
+    '%s：安全方法（GET）不吃资源型配额——SPA/静态面不得被限流打成白屏',
+    async (path, ip) => {
+      const responses = [];
+      for (let i = 0; i < FLOOD; i++) {
+        responses.push(await request(app).get(path).set('X-Forwarded-For', ip));
+      }
+      expect(responses.map((r) => r.status)).not.toContain(429);
+    }
+  );
+
   test(`${PROBE}：探针不被限流吃掉，也不产生审计写入`, async () => {
     const ip = '10.79.0.1';
     const baseline = await settleCount(PROBE);

@@ -68,6 +68,34 @@ const skipIfWhitelisted = (req) => req.ipWhitelisted === true;
 const skipProbeRequests = (req) => isProbeRequest(req.method, req.path);
 const skipProbesAndWhitelisted = (req) => skipIfWhitelisted(req) || skipProbeRequests(req);
 
+// 静态前端面豁免资源型限流（generalLimiter / ipLimiter 这两个全站挂载的）
+//
+// 判据 = **安全方法** + **非 API 前缀**，两条合起来恰好等于「由 middleware/staticFrontend
+// 提供服务的那一面」：/assets/* 构建产物 + SPA history 回退的任意 GET 文档路径。
+//
+// 为什么必须豁免：浏览器一次页面加载实测发出 **35 个请求，其中 34 个是静态资源/文档、
+// 只有 1 个打 /api/****（CI e2e-browser 的 Playwright trace 实测）。通用配额是
+// 300 次/15 分钟 ⇒ **约 9 次页面加载**就把配额打满，而 429 返回的是 JSON——
+// 浏览器把它当文档渲染出来（e2e 快照实证：页面体就是
+// `{"success":false,"message":"请求过于频繁，请稍后再试"}`），整个 SPA 白屏。
+// 这不是"测试环境打得太猛"：NAT 出口共用 IP、或部署后客户端全量重取
+// （index.html/sw.js 是 maxAge:0 + no-cache）都会在正常使用下触发。
+//
+// 为什么豁免是安全的：这两个限流器前移到 express.json 之前，目的是给「未认证请求的
+// **放大面**」设闸——JSON.parse、递归 sanitize、以及协议违规写一条走哈希链的审计。
+// 而安全方法打到静态面时：不解析 body、不 sanitize、无协议违规故不写审计，
+// 只做一次 express.static / sendFile 取文件。它本来就不在这两个限流器要限的工作集合里。
+// 放大面走的**不是**安全方法：未认证 TRACE 打到 `/`、`/csp-report`、`/api-docs` 仍照原样
+// 吃 429（判据见 src/tests/app/earlyRejectionRateLimitedAllSurfaces.test.js——它的四个表面
+// 用例全部用 TRACE，且该文件注释已把豁免明确表述为「只看 GET/HEAD」这条方法维度）。
+//
+// 注意用 `=== '/api' || startsWith('/api/')` 而不是 `startsWith('/api')`：
+// 后者会把 `/api-docs` 一并算进 API 面（它有自己的 docsLimiter，口径不同）。
+const isApiPath = (path) => path === '/api' || path.startsWith('/api/');
+const isStaticFrontendRequest = (req) =>
+  (req.method === 'GET' || req.method === 'HEAD') && !isApiPath(req.path);
+const skipResourceLimiter = (req) => skipProbesAndWhitelisted(req) || isStaticFrontendRequest(req);
+
 /**
  * 通用限流器
  * 适用于大多数 API 接口
@@ -81,7 +109,7 @@ const generalLimiter = rateLimit({
   max: config.rateLimit.maxRequests,
   store: makeSharedStore('general'),
   keyGenerator: (req) => normalizeRateLimitIp(req.ip),
-  skip: skipProbesAndWhitelisted, // 白名单 IP 与探针 IP 豁免通用限流
+  skip: skipResourceLimiter, // 白名单 IP、探针 IP、以及静态前端面（安全方法）豁免通用限流
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -222,7 +250,7 @@ const ipLimiter = rateLimit({
   max: config?.rateLimit?.ipMaxRequests || 1000, // 默认每小时 1000 请求
   store: makeSharedStore('ip'),
   keyGenerator: (req) => normalizeRateLimitIp(req.ip),
-  skip: skipProbesAndWhitelisted, // 白名单 IP 与探针 IP 豁免 IP 限流
+  skip: skipResourceLimiter, // 白名单 IP、探针 IP、以及静态前端面（安全方法）豁免 IP 限流
   standardHeaders: true,
   legacyHeaders: false,
   message: {
