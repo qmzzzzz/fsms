@@ -386,9 +386,15 @@ jobs:
 
           for i in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:3000/readyz >/dev/null; then
-              # 评价报告 #16：MFA 旅程用独立账号 mfa-e2e（固定种子）——
+              # 评价报告 #16：MFA 旅程用独立账号 mfa_e2e（固定种子）——
               # 不动 admin：否则其余旅程的登录会被 MFA 墙挡住。
               # 密码用 bcrypt 落库（经 User 模型预存钩子），种子存 AES 密文。
+              # 用户名只能取 [A-Za-z0-9_]（src/models/User.js 的 username match 正则，
+              # 「用户名只能包含字母、数字和下划线」）。**不能写成 mfa-e2e**：连字符会被
+              # 模型校验拒绝 → User.create 抛 ValidationError → `bash -e` 直接中断本步骤。
+              # 该步的 60 次重试只兜"后端没起来"，兜不住"种子脚本自身失败"，
+              # 且失败表现是 e2e-browser 卡在 Start full stack（Run browser journeys 被跳过），
+              # 看起来像服务起不来，实际是账号名不合法——2026-09-29 定位。
               AES_SECRET_KEY="$E2E_AES_KEY" JWT_SECRET="$E2E_AES_KEY" HMAC_SECRET="$E2E_AES_KEY" \
               E2E_MFA_PASSWORD="$E2E_TEST_PASSWORD" node -e "
                 const mongoose = require('mongoose');
@@ -399,11 +405,11 @@ jobs:
                   const { encryptMfaSecret } = require('./src/utils/mfaSecret');
                   const role = await Role.findOne({ code: 'SUPER_ADMIN' });
                   if (!role) throw new Error('SUPER_ADMIN 角色未播种');
-                  let u = await User.findByUsername('mfa-e2e');
+                  let u = await User.findByUsername('mfa_e2e');
                   if (!u) {
                     u = await User.create({
-                      username: 'mfa-e2e',
-                      email: 'mfa-e2e@example.com',
+                      username: 'mfa_e2e',
+                      email: 'mfa_e2e@example.com',
                       password: process.env.E2E_MFA_PASSWORD,
                       roles: [role._id],
                       status: 'active',
@@ -414,7 +420,7 @@ jobs:
                     { _id: u._id },
                     { \$set: { mfaEnabled: true, mfaSecret: enc, mfaLastCounter: 0, status: 'active' } }
                   );
-                  console.log('mfa-e2e seeded');
+                  console.log('mfa_e2e seeded');
                   await mongoose.disconnect();
                 })().catch((e) => { console.error(e); process.exit(1); });
               "
@@ -430,9 +436,9 @@ jobs:
           E2E_BASE_URL: http://127.0.0.1:3000
           E2E_USER: admin
           E2E_PASS: ${{ steps.full-stack.outputs.password }}
-          # 评价报告 #16：MFA 旅程用独立账号 mfa-e2e——种子在上一环节点脚本
+          # 评价报告 #16：MFA 旅程用独立账号 mfa_e2e——种子在上一环节点脚本
           # 写入该账户（AES 密文），TOTP 码由 journey 内按种子实时生成
-          E2E_MFA_USER: mfa-e2e
+          E2E_MFA_USER: mfa_e2e
           E2E_MFA_PASS: ${{ steps.full-stack.outputs.password }}
           E2E_MFA_SECRET: ${{ steps.full-stack.outputs.mfa-seed }}
         run: |
