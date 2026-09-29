@@ -22,10 +22,17 @@ test('角色页可达且权限树渲染（需要相应权限，403 时跳过）'
   // 去掉了原先并列在选择器里的 `.app-main, main`：`.app-main` 在前端源码中
   // 出现 0 次，`main` 是布局骨架、任何页面都恒在——保留它等于这条断言
   // 永远通过（连"角色列表有没有渲染"都不看）。现在只认真实内容容器。
-  const tree = page.locator('.el-tree, .el-table');
+  //
+  // 锚点必须取自 RoleView.vue 的真实 DOM：该页渲染 <RoleListPanel>（`.role-list` /
+  // `.glass-role-item`）与 `.module-grid` 里的 <PermissionModuleCard>（`.glass-module-card`）。
+  // 原先用的 `.el-tree, .el-table` 在 /roles 上命中 0 个元素——`.el-tree`/`.el-table`
+  // 只出现在 RoleView.vue 两条已失效的 :deep() 样式里，模板中并无对应组件，
+  // 所以 waitFor 必然超时（CI 报 waiting for locator('.el-tree, .el-table')）。
+  const roleList = page.locator('.role-list .glass-role-item');
+  const permModules = page.locator('.glass-module-card');
   const forbidden = page.getByText(/无权|403|没有权限/);
   await Promise.race([
-    tree.first().waitFor({ timeout: 15_000 }),
+    permModules.first().waitFor({ timeout: 15_000 }),
     forbidden.first().waitFor({ timeout: 15_000 }),
   ]);
   test.skip(
@@ -35,7 +42,8 @@ test('角色页可达且权限树渲染（需要相应权限，403 时跳过）'
       .catch(() => false),
     '演练账号无角色管理权限'
   );
-  await expect(tree.first()).toBeVisible();
+  await expect(permModules.first()).toBeVisible();
+  await expect(roleList.first()).toBeVisible();
 });
 
 test('审计日志可追溯到本次登录动作', async ({ page }) => {

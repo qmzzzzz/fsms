@@ -81,8 +81,16 @@ test('移动端抽屉导航可打开并关闭', async ({ page }) => {
   // 抽屉里确实渲染了导航条目，而不是一个空的定位容器
   await expect(page.locator('.sidebar-menu li').first()).toBeVisible();
 
-  // 收起：点遮罩关闭是移动端抽屉的标准交互
-  await overlay.click();
+  // 收起：点遮罩关闭是移动端抽屉的标准交互。
+  // 但不能用 overlay.click() 的默认中心点：遮罩是 position:fixed; inset:0; z-index:150，
+  // 抽屉 .sidebar-mobile 是 fixed; left:0; width:240px; z-index:200 —— 412px 视口下
+  // 遮罩的几何中心（x≈206）落在抽屉覆盖范围内，点击会被抽屉里的 <li> 拦截
+  // （CI 报 "subtree intercepts pointer events"）。故显式把点击点算到抽屉右缘之外、
+  // 仍在遮罩之内：取「抽屉右缘」与「遮罩右缘」的中点。
+  const drawer = await sidebar.boundingBox();
+  const layer = await overlay.boundingBox();
+  const outsideDrawerX = (drawer.x + drawer.width + layer.x + layer.width) / 2 - layer.x;
+  await overlay.click({ position: { x: outsideDrawerX, y: layer.height / 2 } });
   await expect(wrapper).not.toHaveClass(/mobile-sidebar-open/);
   await expect(overlay).toHaveCount(0);
   await expect.poll(sidebarLeftEdge(sidebar)).toBeLessThan(0);
