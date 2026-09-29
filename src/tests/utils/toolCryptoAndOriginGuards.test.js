@@ -851,6 +851,15 @@ describe('批次F 工具与密码学加固回归', () => {
 
     test('资源型限流器全部豁免白名单 IP（以非白名单的触发点为基准对照）', async () => {
       const limiters = require('../../middleware/rateLimit');
+      // 夹具必须是**该限流器真正覆盖的面**。这些是资源型限流器，服务对象是 API 面；
+      // 而 mkLimReq 的默认 path 是 '/x'（GET、非 /api）。
+      // 2026-09-29 给两个**全站挂载**的资源型限流器（generalLimiter / ipLimiter）加了
+      // 「安全方法 + 非 /api 前缀」的静态前端面豁免后，'/x' 落进了豁免面 ⇒
+      // generalLimiter 对这条夹具根本不计数，"基准必须触发"就成了假红：
+      // CI run #73 实测 `generalLimiter` 期望 triggered:true、实得 false。
+      // 这里显式用 /api/ 路径——它对全部五个限流器都是"在范围内"的形状，
+      // 基准才真正证明"该限流器确实在计数"。**不要改回 '/x'**。
+      const inScope = (over) => mkLimReq({ path: '/api/x', originalUrl: '/api/x', ...over });
       // 每个限流器用独立 IP 建键，避免互相污染计数器
       const cases = [
         ['generalLimiter', '203.0.113.61'],
@@ -861,13 +870,13 @@ describe('批次F 工具与密码学加固回归', () => {
       ];
       for (const [name, ip] of cases) {
         // 基准：非白名单必须能触发（证明该限流器确实在计数，防「两边都不触发」的假绿）
-        const base = await driveLimiter(limiters[name], mkLimReq({ ip }), 1500);
+        const base = await driveLimiter(limiters[name], inScope({ ip }), 1500);
         expect({ name, triggered: base.hit !== null }).toEqual({ name, triggered: true });
 
         // 白名单：按基准触发次数 + 余量驱动，始终不得触发
         const wl = await driveLimiter(
           limiters[name],
-          mkLimReq({ ip, ipWhitelisted: true }),
+          inScope({ ip, ipWhitelisted: true }),
           base.hit + 5
         );
         expect({ name, status: wl.res._status }).toEqual({ name, status: null });
