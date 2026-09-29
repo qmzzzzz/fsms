@@ -11,7 +11,12 @@
 const mongoose = require('mongoose');
 
 const security = require('../../middleware/security');
-const { checkBruteForce, ALERT_TYPES, THRESHOLDS } = require('../../services/securityAlert');
+const {
+  checkBruteForce,
+  ALERT_TYPES,
+  THRESHOLDS,
+  ESCALATION_TIERS,
+} = require('../../services/securityAlert');
 const AuditLog = require('../../models/AuditLog');
 
 const stamp = Date.now().toString().slice(-7);
@@ -35,8 +40,13 @@ beforeAll(async () => {
 
 afterAll(async () => {
   security.addToBlacklist = originalAdd;
+  // 第二例的账号名是 `${USER}_b`（IP 维度对照臂），精确等值清不到会泄漏
+  // 5+1 条审计行污染共享测试库（ip=ATTACK_IP_1 的行会干扰后续阶梯用例）
   await AuditLog.deleteMany(
-    { username: USER, action: { $in: ['login_failed', ALERT_TYPES.BRUTE_FORCE] } },
+    {
+      username: { $in: [USER, `${USER}_b`, `${USER}_c`] },
+      action: { $in: ['login_failed', ALERT_TYPES.BRUTE_FORCE] },
+    },
     { bypassAppendOnly: true }
   );
   if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
@@ -89,5 +99,34 @@ describe('checkBruteForce 封禁判据（R-H2：只看 IP 维度）', () => {
     expect(banCalls).toHaveLength(1);
     expect(banCalls[0].ip).toBe(ATTACK_IP_1);
     expect(banCalls[0].source).toBe('auto');
+  });
+
+  test('阶梯事件源只认「该 IP 自己刷满」的行：IP 维度未达标的告警行不得抬升后续封禁档位', async () => {
+    // 场景：受害 IP 在分布式撞库期间被写过一条 ipFailures=1 的告警行（上一例
+    // 同款形态），之后有人用同一 IP 真实刷满 5 次失败——若 countPrior 把那行
+    // 也算"封禁事件"，本次会直接跳到第二档（4h），无辜 IP 陪绑被放大。
+    const ip = `203.0.113.${(Number(stamp) % 200) + 40}`;
+    const victimUser = `${USER}_c`;
+    // 模拟历史遗留：一条 ip 维度未达标的告警行（body.ipAttempts=1）
+    await AuditLog.create({
+      action: ALERT_TYPES.BRUTE_FORCE,
+      category: 'auth',
+      username: victimUser,
+      ip,
+      riskLevel: 'critical',
+      riskFactors: [`登录失败次数超标 (账户:${THRESHOLDS.bruteForceAttempts}, IP:1)`],
+      body: { userAttempts: THRESHOLDS.bruteForceAttempts, ipAttempts: 1, window: '5 分钟' },
+      timestamp: new Date(),
+    });
+
+    // 该 IP 现在真实刷满 5 次 → 本次是它第一次"够格"的封禁事件
+    for (let i = 0; i < THRESHOLDS.bruteForceAttempts; i += 1) {
+      await seedFailure(victimUser, ip);
+    }
+    await checkBruteForce(victimUser, ip);
+
+    expect(banCalls).toHaveLength(1);
+    // 没被历史告警行抬档：仍是第一档 1h
+    expect(banCalls[0].durationMs).toBe(ESCALATION_TIERS[0]);
   });
 });

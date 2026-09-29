@@ -79,12 +79,18 @@ const IPBanEvents = {
       action: ALERT_TYPES.BRUTE_FORCE,
       ip: normalizedIp,
       timestamp: { $gte: new Date(Date.now() - IPBanEvents.windowMs()) },
+      // R-H2 之后"一条 brute_force_login 审计"不再等价于"一次封禁动作"：
+      // 账号维度达标（分布式撞单账号）而 IP 维度未达标时也落一条告警行（当前
+      // 请求 IP 可能只贡献了 1 次失败）。这类行若计入阶梯，受害者的 IP 攒几行
+      // 后会被无辜升档到 4h/24h/7d。body.ipAttempts 是该行落库时即写入的
+      // "IP 维度失败次数"，只有 ≥ 阈值的行才配代表"这个 IP 自己刷满过一次"。
+      'body.ipAttempts': { $gte: THRESHOLDS.bruteForceAttempts },
     }),
   /** 首次触发 = 第 1 档；每多一次历史事件升一档，封顶第 4 档 */
   tierFor: (priorBans) => Math.min(Math.max(priorBans, 0), ESCALATION_TIERS.length - 1),
 };
 
-// 告警频率限制缓存// 结构：{ alertKey: { timestamp, expiresAt } }
+// 告警频率限制缓存。结构：{ alertKey: { timestamp, expiresAt } }
 const alertRateLimit = new Map();
 
 // P3-24 容量上限：alertKey 含攻击者可控内容（如 `brute_force_user_${username}`，
@@ -133,10 +139,9 @@ const startAlertCleanup = () => {
  * 停止告警频率限制的定期清理（供优雅关闭调用）
  */
 const stopAlertCleanup = () => {
-  if (alertCleanupTimer) {
-    clearInterval(alertCleanupTimer);
-    alertCleanupTimer = null;
-  }
+  if (!alertCleanupTimer) return;
+  clearInterval(alertCleanupTimer);
+  alertCleanupTimer = null;
 };
 
 /**
@@ -208,15 +213,15 @@ const checkBruteForce = async (username, ip) => {
 
   const maxFailures = Math.max(userFailures, ipFailures);
   if (maxFailures >= THRESHOLDS.bruteForceAttempts) {
+    // E-04 口径提前到频控闸之前：告警去重键也必须用**归一化 IP**——
+    // `::ffff:1.2.3.4` 与 `1.2.3.4` 混合出现时按原文组键会产生两个去重键，
+    // 同一来源重复告警（与封禁/阶梯的两把尺问题同源）
+    const normalizedIp = normalizeIP(ip) || ip;
     // 按账户维度 + IP 维度分别做频率限制，避免重复告警（键直接内联：
     // 中间变量 userAlertKey/ipAlertKey 各只用一次，本文件行数已在棘轮红线上）
     const shouldAlertUser = shouldSendAlert(`brute_force_user_${username}`);
-    const shouldAlertIp = shouldSendAlert(`brute_force_ip_${ip}`);
+    const shouldAlertIp = shouldSendAlert(`brute_force_ip_${normalizedIp}`);
     if (!shouldAlertUser && !shouldAlertIp) return;
-
-    // E-04 口径：封禁与阶梯统计都以**归一化 IP** 为准。addToBlacklist 入库的是归一化
-    // 形态，用原始值（如 ::ffff:1.2.3.4）查询会恒为 0，阶梯永远停在第一档。
-    const normalizedIp = normalizeIP(ip) || ip;
 
     // R-H2：**封禁判据只看 IP 维度**。maxFailures 取的是双维度的较大值——分布式撞
     // 单账号（多个攻击 IP 各自少量尝试同一账号）会让 userFailures 达标，而"当前请求

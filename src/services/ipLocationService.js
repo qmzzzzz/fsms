@@ -58,14 +58,17 @@ const formatRegion = (raw) => {
 const locate = (ipText) => {
   if (typeof ipText !== 'string' || !ipText.trim()) return null;
 
-  const key = ipText.trim();
-  if (resultCache.has(key)) return resultCache.get(key);
-
   let result = null;
   try {
     // normalizeIP 复用名单/审计同一套入站判据：::ffff:1.2.3.4 收敛为纯 IPv4，
     // 歧义写法（0177.0.0.1 等）与非法文本直接 null——归属地不做"猜意图"的宽松解释
-    const normalized = normalizeIP(key);
+    const normalized = normalizeIP(ipText.trim());
+    // 缓存键用**归一化文本**：223.5.5.5 / ::ffff:223.5.5.5 / 带空白形态是同一个
+    // 地址，各占一个槽会让 2048 上限被等价形态摊薄。归一化失败的垃圾输入按
+    // 原文各自成键（互相不污染），由 FIFO 上限兜底
+    const cacheKey = normalized || ipText.trim();
+    if (resultCache.has(cacheKey)) return resultCache.get(cacheKey);
+
     if (normalized && !normalized.includes(':')) {
       const raw = searcher.search(normalized);
       if (typeof raw === 'string' && raw.length > 0) {
@@ -78,20 +81,21 @@ const locate = (ipText) => {
       const range = ipaddr.parse(normalized).range();
       if (IPV6_PRIVATE_RANGES.has(range)) result = '内网';
     }
+
+    if (resultCache.size >= CACHE_LIMIT) {
+      // Map 迭代序即插入序：删最早一条，代价 O(1)。归属地不随时间变化，
+      // FIFO 与 LRU 的命中率差异可忽略
+      resultCache.delete(resultCache.keys().next().value);
+    }
+    resultCache.set(cacheKey, result);
   } catch (err) {
-    // fail-soft：数据文件缺失/损坏时归属地整体降级为不展示，但不打断会话列表
+    // fail-soft：数据文件缺失/损坏时归属地整体降级为不展示，但不打断会话列表；
+    // 本次结果不入缓存，数据恢复后下一条查询即用上新结果（不拿旧 null 长驻）
     if (!loadFailureLogged) {
       loadFailureLogged = true;
       logger.warn(`IP 归属地检索不可用（已降级为不展示）：${err.message}`);
     }
   }
-
-  if (resultCache.size >= CACHE_LIMIT) {
-    // Map 迭代序即插入序：删最早一条，代价 O(1)。归属地不随时间变化，
-    // FIFO 与 LRU 的命中率差异可忽略
-    resultCache.delete(resultCache.keys().next().value);
-  }
-  resultCache.set(key, result);
   return result;
 };
 

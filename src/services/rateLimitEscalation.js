@@ -18,8 +18,11 @@
  *     被本服务封禁（凭据型限流不豁免白名单，攻击信号同样不该豁免）。
  *   - 凭据型限流的账号维度桶（login-user / pwd-change-user / reauth-user）不接入：
  *     按 username 组键没有 IP 可封，且分布式撞单账号的升级由 checkBruteForce 负责。
+ *   - 同理不接入的还有：wellKnown 三个上报限流器（csp-report/client-errors/
+ *     security-txt，量级小且各有更紧的专属桶）与 pwd-change/reauth 的
+ *     「userId:ip」组合键桶（IP 只是键的组成部分，失败语义属凭据操作而非 IP 洪水）。
  *   - 封禁动作复用 addToBlacklist：白名单命中/解析失败/写库失败全部 fail-soft，
- *     并按返回值记账（F-160 口径），成功与否在日志里不撒谎。
+ *     并按返回值记账（F-160 口径），成功与否在日志与通知里都不撒谎。
  *
  * 实例边界：触发计数在进程内（不引入 Redis 新依赖面），多实例部署时每实例只看到
  * 自己分到的 429 ⇒ 实际封禁阈值 = 配置阈值 × 实例数，语义是"少封不误封"；
@@ -36,6 +39,8 @@ const {
   ESCALATION_TIERS,
   BAN_ESCALATION_WINDOW_MS,
   dispatchNotification,
+  shouldSendAlert,
+  IPBanEvents,
 } = require('./securityAlert');
 
 /** 窗口内触发多少次限流升级为封禁（429 计数） */
@@ -131,6 +136,10 @@ const escalate = async (normalizedIp, limiterName) => {
       logger.error(`限流升级阶梯统计失败（按第一档处理）: ${normalizedIp}, 错误: ${e.message}`);
     }
 
+    // 通知频控与 checkBruteForce 同闸（攻击者以每 100 次 429 换一轮通知/审计写，
+    // 轮换 IP 下无单 IP 窗口上限——不设闸就是告警洪水泵 + 审计写放大通道）
+    if (!shouldSendAlert(`rate_limit_abuse_${normalizedIp}`)) return;
+
     try {
       await AuditLog.create({
         action: ALERT_TYPES.RATE_LIMIT_ABUSE,
@@ -150,23 +159,31 @@ const escalate = async (normalizedIp, limiterName) => {
       logger.error(`限流升级审计落库失败（封禁流程继续）: ${e.message}`);
     }
 
-    dispatchNotification(
-      ALERT_TYPES.RATE_LIMIT_ABUSE,
-      ALERT_LEVELS.HIGH,
-      `IP ${normalizedIp} 持续触发限流被自动封禁（限流器 ${limiterName}）`,
-      { ip: normalizedIp, limiter: limiterName, tier: priorBans + 1 }
-    );
-
     try {
       // 惰性 require 断 securityAlert ↔ middleware/security 的循环依赖（同 checkBruteForce）
       const { addToBlacklist } = require('../middleware/security');
-      const tier = Math.min(Math.max(priorBans, 0), ESCALATION_TIERS.length - 1);
+      // 阶梯钳制复用 securityAlert 的 IPBanEvents.tierFor（两本账各自计数——
+      // brute_force 行与 rate_limit_abuse 行分账，只是共用同一组时长档位）
+      const tier = IPBanEvents.tierFor(priorBans);
       const result = await addToBlacklist(
         normalizedIp,
         ESCALATION_TIERS[tier],
         `rate_limit_auto_ban_tier${tier + 1}`,
         'auto'
       );
+      // 通知在封禁结果**之后**按返回值分派（F-160 同一条教训：addToBlacklist
+      // 从不抛错，白名单/写库失败时"已自动封禁"的通知就是纸面防线撒谎）。
+      // 档位保持静态成员（outboundAlertContract D1 门禁要求调用点档位可静态
+      // 解析 ∈ ALERT_LEVELS）；封禁是否生效在 data.banned 供机器消费。
+      const notice = result?.banned
+        ? `IP ${normalizedIp} 持续触发限流被自动封禁（限流器 ${limiterName}）`
+        : `限流升级封禁未生效：IP ${normalizedIp}（${result?.reason ?? 'no_result'}）请人工核对白名单`;
+      dispatchNotification(ALERT_TYPES.RATE_LIMIT_ABUSE, ALERT_LEVELS.HIGH, notice, {
+        ip: normalizedIp,
+        limiter: limiterName,
+        tier: priorBans + 1,
+        banned: !!result?.banned,
+      });
       const banFailReason = result?.reason ?? 'no_result';
       if (result?.banned)
         logger.warn(

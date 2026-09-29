@@ -7,8 +7,9 @@
  *
  * 均挂在根路径而非 /api 下：security.txt 的路径由 RFC 固定，
  * CSP report-uri 亦需稳定路径；前端异常上报发生在用户会话可能已失效时
- * （401 跳转途中），不能要求认证头。因此它们不经过 /api/ 上挂载的
- * ipLimiter / generalLimiter / originCheck / auditLog，本文件内自带限流。
+ * （401 跳转途中），不能要求认证头。注意：app.js 的 ipLimiter/generalLimiter
+ * 是**全站挂载**（不带 /api/ 前缀），本文件这三个端点同样吃全局配额——
+ * 下面的专属限流是**叠加的更紧一层**（防上报体被当日志放大器），不是唯一防线。
  */
 
 const express = require('express');

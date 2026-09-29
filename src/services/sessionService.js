@@ -268,7 +268,10 @@ sharedCache.onInvalidate(handleRemoteSessionInvalidation);
 const createSession = async ({ userId, req, sid = newSid() }) => {
   const ua = String(req?.get?.('user-agent') || '').slice(0, 512);
   const device = parseUserAgent(ua);
-  const ip = req?.ip || null;
+  // 与 UA 同样截断：schema 的 ip 字段 maxlength=64，而 TRUST_PROXY_HOPS>=1 时
+  // req.ip 可被直连者用超长 XFF 拼出来——不截断会让 UserSession.create 抛
+  // ValidationError 把整个登录打成 500（fail-closed 自伤，攻击面零收益）
+  const ip = req?.ip ? String(req.ip).slice(0, 64) : null;
   // 会话有效期对齐 refresh token：access token 会在此期间反复轮换，
   // 会话的真实存续上限由 refresh 决定
   const ttlMs = durationToMs(config.jwt.refreshExpire, 7 * 24 * 60 * 60 * 1000);

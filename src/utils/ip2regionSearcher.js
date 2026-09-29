@@ -19,7 +19,8 @@
  * 「国家|区域|省份|城市|ISP」，未命中段返回 ''，'0' 为占位符。
  *
  * 仅支持 IPv4：v2 的 v6 库是另一个文件（ip2region_v6.xdb），本服务当前未随库
- * 分发，IPv6 查询在上层直接短路返回 null。
+ * 分发，公网 IPv6 查询在上层返回 null（内网族 v6 由服务层标「内网」，见
+ * ipLocationService）。
  */
 const fs = require('fs');
 const path = require('path');
@@ -39,14 +40,25 @@ const parseIPv4 = (text) => {
   if (typeof text !== 'string') return null;
   const m = text.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (!m) return null;
-  const parts = [m[1], m[2], m[3], m[4]].map(Number);
-  if (parts.some((n) => n > 255)) return null;
-  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+  // 逐段拒绝前导零（`010` 会被宽松解析器当八进制重解释成 8，与 ipUtils 的
+  // CANONICAL_OCTET 同一判据）：归属地不做"帮你猜写法"
+  const octet = /^(?:0|[1-9]\d?|1\d\d|2[0-4]\d|25[0-5])$/;
+  const parts = [m[1], m[2], m[3], m[4]];
+  if (parts.some((s) => !octet.test(s))) return null;
+  const [a, b, c, d] = parts.map(Number);
+  return ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
 };
 
 /**
  * 结构校验 + 构建检索句柄。坏数据在加载期即刻暴露（服务层 fail-soft 降级为
  * 不显示归属地并打日志），而不是每条查询都走一遍防御分支。
+ *
+ * 头部两个指针只是下限：检索的随机读发生在**向量索引区**的 65536 对桶指针上，
+ * 任一桶指针损坏（越文件尾、不对齐 14 字节、sPtr>ePtr）会让二分读到桶外垃圾
+ * 字节——最坏形态不是抛错而是"命中伪段返回随机归属地"（静默给错答案）。
+ * 因此对向量区做一次全量扫描（加载期一次性 O(65536) 定长读），把完整性防线
+ * 从"只看头部"补到全文件；scripts/update-ip2region.js 的校验经 loadFromBuffer
+ * 自动继承这层加固。
  *
  * @param {Buffer} buffer 完整的 xdb 文件内容
  * @returns {{ buffer: Buffer, version: number, startIndexPtr: number, endIndexPtr: number }}
@@ -70,6 +82,22 @@ const loadFromBuffer = (buffer) => {
     throw new Error(
       `xdb 段索引指针越界（start=${startIndexPtr}, end=${endIndexPtr}, size=${buffer.length}）`
     );
+  }
+  // 向量区全量校验：每桶指针必须落在段索引数组界内且按 14 字节对齐。
+  // 空桶（sPtr=0，生成器对无数据前缀的约定）合法；末桶 ePtr 允许等于
+  // buffer.length（排他末尾约定：二分最大读位 p = ePtr-14，不触 ePtr 本身）。
+  for (let i = 0; i < 256 * 256; i += 1) {
+    const sPtr = buffer.readUInt32LE(VECTOR_INDEX_BASE + i * 8);
+    const ePtr = buffer.readUInt32LE(VECTOR_INDEX_BASE + i * 8 + 4);
+    if (sPtr === 0) continue;
+    if (
+      sPtr < startIndexPtr ||
+      ePtr < sPtr ||
+      (ePtr - sPtr) % SEGMENT_INDEX_SIZE !== 0 ||
+      ePtr > buffer.length
+    ) {
+      throw new Error(`xdb 向量桶 ${i} 指针损坏（sPtr=${sPtr}, ePtr=${ePtr}）`);
+    }
   }
   return { buffer, version, startIndexPtr, endIndexPtr };
 };
@@ -113,6 +141,9 @@ const searchRaw = (handle, ipText) => {
     }
     const dataLen = buffer.readUInt16LE(p + 8);
     const dataPtr = buffer.readUInt32LE(p + 10);
+    // 数据串越界 = 段条目被改写（加载期校验覆盖不到段内字段）：按未命中降级，
+    // 绝不让 toString 抛 ERR_OUT_OF_RANGE 打破 fail-soft 契约
+    if (dataPtr + dataLen > buffer.length) return '';
     return buffer.toString('utf-8', dataPtr, dataPtr + dataLen);
   }
   // 落在段间隙（理论不该发生：段连续覆盖全网）；按未命中处理

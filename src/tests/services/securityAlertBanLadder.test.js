@@ -159,6 +159,8 @@ describe('自动封禁阶梯：四档都必须可达', () => {
     // 只测**查询侧**：链上的历史事件按归一化 IP 存着，触发请求是 ::ffff: 形态。
     // 起点自建自证（原先靠"端到端那条先跑满 5 次"，等于把前置状态写成一条有序用例）；
     // 写入侧的归一化由下一条用例端到端覆盖，两条各管一侧，互不借对方的中间态。
+    // 4 条夹具行带 body.ipAttempts=5（与真实落库行同构）：countPrior 过滤
+    // 「IP 维度未达标的告警行」后这些行必须仍在链上（R-H2 阶梯质量闸的回归面）。
     await startChainAtZero(targetIp);
     await AuditLog.insertMany(
       [0, 1, 2, 3].map(() => ({
@@ -168,6 +170,11 @@ describe('自动封禁阶梯：四档都必须可达', () => {
         ip: targetIp,
         success: false,
         riskLevel: 'low',
+        body: {
+          userAttempts: THRESHOLDS.bruteForceAttempts,
+          ipAttempts: THRESHOLDS.bruteForceAttempts,
+          window: '5 分钟',
+        },
         timestamp: new Date(),
       }))
     );
