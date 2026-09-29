@@ -182,6 +182,9 @@ afterEach(() => {
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
   window.localStorage.clear()
+  // P2-5 的用例会切到 en-US 验证标签跟随语言：不复位就会泄漏给后续用例
+  // （它们默认按 zh-CN 断言），表现为「单跑绿、连跑红」的次序耦合。
+  i18n.global.locale.value = 'zh-CN'
 })
 
 describe('AuditLogView 列表加载与渲染', () => {
@@ -232,12 +235,37 @@ describe('AuditLogView 列表加载与渲染', () => {
     expect(cell).not.toContain('1970')
   })
 
-  test('用户/IP 双行单元格：两字段各自独立渲染，缺失时占位为 -', async () => {
+  test('用户/IP 双行单元格：两字段各自独立渲染，缺失时各自占位（用户 -、IP —）', async () => {
     const c = await openList([logRow(), logRow({ _id: 'r2', username: '', ip: '' })])
     expect(td(c, 0, 1).querySelector('.cell-main').textContent.trim()).toBe('alice')
     expect(td(c, 0, 1).querySelector('.cell-sub').textContent.trim()).toBe('10.0.0.9')
+    // 占位符口径（P2-6）：**IP 字段一律用 em dash `—`**——与 SessionManager 的 IP 行
+    // 同口径（三处 IP 站点全用 `—`）；其余文本字段用连字符 `-`（全仓 11 处）。
+    // 同一格里两行口径不同是有意的，不是笔误；此前本用例钉的是 `-`，模板改了没跟。
     expect(td(c, 1, 1).querySelector('.cell-main').textContent.trim()).toBe('-')
-    expect(td(c, 1, 1).querySelector('.cell-sub').textContent.trim()).toBe('-')
+    expect(td(c, 1, 1).querySelector('.cell-sub').textContent.trim()).toBe('—')
+  })
+
+  test('归属地：有 location 时「IP · 归属地」同格渲染，无 location 只渲染 IP（P2-4）', async () => {
+    // 归属地是后端可选增强字段（auditQueryService 挂 row.location，可能为 null），
+    // 模板用 v-if 省略。此前三处归属地展示零断言：退化成渲染空串或字面 "undefined"
+    // 都不会有任何用例变红。
+    const c = await openList([
+      logRow({ _id: 'r1', location: '北京市' }),
+      logRow({ _id: 'r2', location: null }),
+    ])
+
+    const withLoc = td(c, 0, 1).querySelector('.cell-sub').textContent.trim()
+    expect(withLoc).toBe('10.0.0.9 · 北京市')
+    // 归属地走独立的弱化 span（非等宽），与 ipListView 的 .ip-location 同口径
+    expect(td(c, 0, 1).querySelector('.ip-loc')).not.toBeNull()
+
+    const noLoc = td(c, 1, 1).querySelector('.cell-sub').textContent.trim()
+    expect(noLoc).toBe('10.0.0.9')
+    expect(noLoc).not.toContain('·')
+    expect(noLoc).not.toContain('undefined')
+    expect(td(c, 1, 1).querySelector('.ip-loc')).toBeNull()
+    expect(c.errors).toEqual([])
   })
 
   test('风险等级与日志等级派生：critical/high/medium/失败/未知各自映射且行着色', async () => {
@@ -415,15 +443,18 @@ describe('AuditLogView 筛选与分页', () => {
 })
 
 describe('AuditLogView 失败路径与竞态', () => {
-  test('列表加载失败：提示「加载失败」且不抛 Vue 错误', async () => {
+  test('列表加载失败：只清态、不弹 toast（提示归拦截器，P2-3），且不抛 Vue 错误', async () => {
     get.mockImplementation((url) =>
       url === '/security/audit-logs'
         ? Promise.reject(new Error('boom'))
         : Promise.resolve({ data: { data: {} } })
     )
     const c = mountView()
-    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '加载失败提示' })
-    expect(ElMessage.error).toHaveBeenCalledWith('加载失败')
+    // 契约对齐 alarmView：加载失败由 api.js 响应拦截器统一提示，组件不再弹一条。
+    // 原断言 `ElMessage.error.mock.calls.length === 1` 把「同一次失败弹两条」钉成了正确行为。
+    // 完成信号用 isCanceledError：catch 的第一行就是它，比 toast 计数更直接。
+    await waitFor(() => isCanceledError.mock.calls.length >= 1, { message: 'catch 分支已进入' })
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(ElMessage.success).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
   })
@@ -649,7 +680,10 @@ describe('AuditLogView 详情对话框', () => {
     expect(pairs).toContain('分类::认证')
     expect(pairs).toContain('请求方式::-')
     expect(pairs).toContain('请求路径::-')
-    expect(pairs).toContain('IP 地址::10.0.0.9')
+    // P2-5：标签走 i18n（auditLog.ipAddress），不再硬编码中文——原断言把模板里的
+    // 字面 'IP 地址' 钉成契约，于是 en-US 界面漏中文这件事被锁死了。这里经 i18n 取值，
+    // 语言包改名不会让用例假红；「en-US 下不得出现中文」由下面单独一条反向钉住。
+    expect(pairs).toContain(`${i18n.global.t('auditLog.ipAddress')}::10.0.0.9`)
     expect(pairs).toContain('风险等级::低')
     expect(pairs).toContain('操作结果::成功')
     expect(pairs).toContain('请求参数::-')
@@ -700,6 +734,37 @@ describe('AuditLogView 详情对话框', () => {
       await new Promise((r) => setTimeout(r, 10))
     }
     expect(overlay.style.display).toBe('none')
+    expect(c.errors).toEqual([])
+  })
+
+  test('详情弹窗 IP 行：有 location 渲染「IP · 归属地」，无 location 只渲染 IP（P2-4）', async () => {
+    // 与列表列是两条独立模板路径（同字段、各自一个 v-if），必须各自钉住
+    await openDetail([logRow({ location: '北京市' })])
+    const withLoc = descPairs().find((p) =>
+      p.startsWith(`${i18n.global.t('auditLog.ipAddress')}::`)
+    )
+    expect(withLoc).toBe(`${i18n.global.t('auditLog.ipAddress')}::10.0.0.9 · 北京市`)
+
+    active?.handle.unmount()
+    active = null
+    document.body.innerHTML = ''
+
+    await openDetail([logRow({ location: null })])
+    const noLoc = descPairs().find((p) => p.startsWith(`${i18n.global.t('auditLog.ipAddress')}::`))
+    expect(noLoc).toBe(`${i18n.global.t('auditLog.ipAddress')}::10.0.0.9`)
+    expect(noLoc).not.toContain('·')
+    expect(noLoc).not.toContain('undefined')
+  })
+
+  test('IP 行标签跟随语言：切到 en-US 后不得漏出中文（P2-5）', async () => {
+    // 原缺陷：标签是模板里的字面 'IP 地址'，en-US 界面下照样显示中文；
+    // 而 `toContain('IP 地址::…')` 恰好把这个缺陷钉成了契约。
+    const c = await openDetail([logRow()])
+    i18n.global.locale.value = 'en-US'
+    await flush(8)
+    const labels = descPairs().map((p) => p.split('::')[0])
+    expect(labels).toContain('IP Address')
+    expect(labels).not.toContain('IP 地址')
     expect(c.errors).toEqual([])
   })
 })

@@ -350,7 +350,9 @@ const loadData = async () => {
     // API 失败时展示空列表而非假数据，防止误导用户
     tableData.value = []
     page.total = 0
-    ElMessage.warning(t('messages.loadFailed'))
+    // P2-3：加载失败只清态，**提示由 api.js 响应拦截器统一负责**（与 alarmView 同契约）。
+    // 此前组件这里再弹一条 messages.loadFailed（且是 warning 级，与其余三处 error 级
+    // 还不一致），同一次失败会弹两条：拦截器的具体文案 + 组件的泛化文案。
     // 统计请求只在上面的列表成功分支里发出：首屏列表就失败 ⇒ 统计也从没拿到过，
     // 那四个数字位同样不能以 0 面孔出现（读作「无巡检」）。
     // 已经显示过真实计数时不动它——保留上一次已知值，别把「刷新失败」伪装成「数据归零」。

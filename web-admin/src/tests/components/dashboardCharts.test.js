@@ -97,10 +97,20 @@ const localDate = (date) => {
   return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
 }
 
+/** 从固定基准按「日历日」回退 n 天——与实现的 setDate 口径同形，且独立计算。
+ *  勿用毫秒减法（Date.now() - n*DAY）：夏令时切换日（23/25 小时日）会把
+ *  日历日算错一天，测试因此钉不住实现刚修掉的缺陷（审计 P2-2） */
+const daysBackFrom = (base, n) => {
+  const d = new Date(base)
+  d.setDate(d.getDate() - n)
+  return d
+}
+
 /** 最近 7 天的本地日期串，最早 → 最新（与组件生成顺序一致） */
 const lastSevenDays = () => {
   const out = []
-  for (let i = 6; i >= 0; i -= 1) out.push(localDate(new Date(Date.now() - i * DAY)))
+  const base = new Date()
+  for (let i = 6; i >= 0; i -= 1) out.push(localDate(daysBackFrom(base, i)))
   return out
 }
 
@@ -280,7 +290,7 @@ describe('B. 趋势图数据接线', () => {
     await mountCharts({})
     expect(getAlarms).toHaveBeenCalledTimes(1)
     const params = getAlarms.mock.calls[0][0]
-    expect(params.startDate).toBe(localDate(new Date(Date.now() - 7 * DAY)))
+    expect(params.startDate).toBe(localDate(daysBackFrom(new Date(), 7)))
     expect(params.startDate).not.toContain('T')
     expect(params.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/)
   })

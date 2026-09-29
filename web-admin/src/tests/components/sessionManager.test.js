@@ -1006,6 +1006,23 @@ describe('SessionManager 真实交互（确认框 / 吊销 / 展开）', () => {
     expect(c2.findAll('.session-meta span')[0].textContent.trim()).toBe('IP 地址：—')
   })
 
+  test('归属地（后端可选增强）：有 location 拼接展示，无 location 不渲染分隔符', async () => {
+    const withLoc = await renderSessions([
+      otherRow({ lastIp: '203.0.113.45', location: '广东省深圳市 · 电信' }),
+    ])
+    const metaWith = withLoc.findAll('.session-meta span')[0].textContent
+    expect(metaWith).toContain('203.0.113.45')
+    expect(metaWith).toContain('· 广东省深圳市 · 电信')
+    withLoc.handle.unmount()
+
+    // 旧后端/检索降级时缺字段：只渲染 IP，不得出现裸分隔符或 undefined
+    const noLoc = await renderSessions([otherRow({ lastIp: '203.0.113.45' })])
+    const metaWithout = noLoc.findAll('.session-meta span')[0].textContent
+    expect(metaWithout).toContain('203.0.113.45')
+    expect(metaWithout).not.toContain('·')
+    expect(metaWithout).not.toContain('undefined')
+  })
+
   test('本设备打「本设备」标签（否则用户可能试图把自己踢下线）', async () => {
     const c = await renderSessions([validItem({ current: true }), otherRow()])
     const tags = c.findAll('.session-item .el-tag').map((el) => el.textContent.trim())

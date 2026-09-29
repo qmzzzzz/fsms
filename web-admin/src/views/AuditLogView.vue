@@ -196,7 +196,8 @@
               {{ row.username || '-' }}
             </div>
             <div class="cell-sub cell-mono">
-              {{ row.ip || '-' }}<template v-if="row.location"> · {{ row.location }}</template>
+              {{ row.ip || '—'
+              }}<span v-if="row.location" class="ip-loc"> · {{ row.location }}</span>
             </div>
           </template>
         </el-table-column>
@@ -316,10 +317,10 @@
         <el-descriptions-item :label="$t('auditLog.reqPath')">
           {{ detailDialog.data.path || '-' }}
         </el-descriptions-item>
-        <el-descriptions-item label="IP 地址">
-          {{ detailDialog.data.ip || '-'
-          }}<template v-if="detailDialog.data.location">
-            · {{ detailDialog.data.location }}</template
+        <el-descriptions-item :label="$t('auditLog.ipAddress')">
+          {{ detailDialog.data.ip || '—'
+          }}<span v-if="detailDialog.data.location" class="ip-loc">
+            · {{ detailDialog.data.location }}</span
           >
         </el-descriptions-item>
         <el-descriptions-item :label="$t('auditLog.riskLevel')">
@@ -476,7 +477,9 @@ const loadData = async () => {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
     if (isCanceledError(e)) return
     if (!isCurrent()) return
-    ElMessage.error(t('messages.loadFailed'))
+    // P2-3：加载失败只清态，**提示由 api.js 响应拦截器统一负责**（与 alarmView 同契约）。
+    // 此前组件这里再弹一条 messages.loadFailed，同一次失败会弹两条：
+    // 拦截器的具体文案（400/403/404/429/5xx/网络错误）+ 组件的泛化文案。
   } finally {
     if (isCurrent()) loading.value = false
   }
@@ -796,6 +799,16 @@ onMounted(() => {
 .cell-mono {
   font-family: var(--xf-font-mono);
   letter-spacing: var(--xf-tracking-tight);
+}
+/* 归属地：与等宽 IP 同行但弱一级（辅助信息，不与主键值抢视觉权重），
+   非 mono 与 ipListView 口径一致 */
+/* 归属地：与等宽 IP 同格但弱一级（辅助信息，不与主键值抢视觉权重）。
+   与 ipListView 的 .ip-location 同口径：非 mono + 小一号。此前只改了颜色，
+   等宽字体仍从父级 .cell-mono 继承 ⇒ 弱化层级实际没生效（P2-6）。 */
+.ip-loc {
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-text-secondary);
 }
 .method-tag {
   margin-right: 6px;

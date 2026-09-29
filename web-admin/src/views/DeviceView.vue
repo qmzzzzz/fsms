@@ -333,7 +333,9 @@ const loadData = async () => {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
     if (isCanceledError(e)) return
     if (!isCurrent()) return
-    ElMessage.error(t('messages.loadFailed'))
+    // P2-3：加载失败只清态，**提示由 api.js 响应拦截器统一负责**（与 alarmView 同契约）。
+    // 此前组件这里再弹一条 messages.loadFailed，同一次失败会弹两条：
+    // 拦截器的具体文案（400/403/404/429/5xx/网络错误）+ 组件的泛化文案。
     tableData.value = []
     page.total = 0
   } finally {

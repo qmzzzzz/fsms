@@ -257,8 +257,11 @@ const deviceTypeLabel = (type) => makeDeviceTypeLabels(t)[type] || type
  * 「n 个日历日之前」的本地 Date： setDate 按日历日回退，夏令时切换日
  * （23/25 小时日）不会像毫秒减法那样落到前一天 23:00 导致取错日历日。
  */
-const localDaysAgo = (n) => {
-  const d = new Date()
+const localDaysAgo = (n) => daysAgoFrom(new Date(), n)
+
+/** 从固定基准回退 n 个日历日（快照基准，跨午夜不漂移） */
+const daysAgoFrom = (base, n) => {
+  const d = new Date(base)
   d.setDate(d.getDate() - n)
   return d
 }
@@ -284,10 +287,12 @@ const doLoad = async () => {
     // 处理报警数据 - 按天统计
     const alarmByDay = alarmRes?.data?.data?.byDay || []
     // 生成最近7天的日期：同样按日历日回退，保证 X 轴日期串与请求窗口同口径
+    const base = new Date()
+    // 时间基准快照一次：逐次 new Date() 会在跨午夜瞬间取错日历日
     const dates = []
     const counts = []
     for (let i = 6; i >= 0; i--) {
-      const date = localDaysAgo(i)
+      const date = daysAgoFrom(base, i)
       const dateStr = toLocalDateStr(date)
       const dayData = alarmByDay.find((d) => d._id === dateStr)
       // X 轴标签刻意用 locale 短格式（MM-DD）：轴宽有限，定长串会挤爆刻度。

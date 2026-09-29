@@ -18,6 +18,26 @@ import { createApp, h, nextTick } from 'vue'
 import { createPinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import i18n from '@/i18n'
+import { vi } from 'vitest'
+
+/**
+ * 让出一轮事件循环。**必须区分真/假定时器**：
+ *  - 真实定时器：一个 0ms 宏任务，让 Element Plus 消息/对话框链路里的定时器
+ *    回调得以推进（纯微任务循环在 CI 双核高负载下会饿死它们）。
+ *  - 假定时器（vi.useFakeTimers）：setTimeout 已被换成需手动推进的假实现，
+ *    `await` 一个假 setTimeout **永远不会 resolve** ⇒ flush/waitFor 整体挂死。
+ *    实测：aboutViewMetrics 7 条 + dashboardView 2 条定时器用例各挂满 20s
+ *    testTimeout，且红点与 useFakeTimers() 出现的行号位置完全对应
+ *    （该行之前的用例全绿、之后的全红）。
+ *    改为显式推进 0ms：0ms 定时器照常执行，又不越过用例自己设定的时间轴。
+ */
+const yieldLoop = async () => {
+  if (vi.isFakeTimers?.()) {
+    await vi.advanceTimersByTimeAsync(0)
+    return
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0))
+}
 
 /**
  * DOM 事件辅助：Element Plus 的按钮在 jsdom 下需真实派发 click 才会触发监听。
@@ -35,12 +55,11 @@ export const click = (el) => {
 export const flush = async (times = 1) => {
   for (let i = 0; i < times; i += 1) {
     await nextTick()
-    // 每轮混入一个真实宏任务轮：Element Plus 对话框/消息链路里夹着定时器与
+    // 每轮混入一轮真实宏任务：Element Plus 对话框/消息链路里夹着定时器与
     // 渲染回调，纯微任务循环会让它们饿死——本地空载时偶发可达，CI 双核
     // runner 高负载下稳定饿死（run 68 实测 4 条「失败提示」断言全部超时/
-    // 未达）。宏任务轮让出事件循环使定时器得以推进；对纯微任务链路只是
-    // 无害的多等一轮。
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    // 未达）。yieldLoop 在假定时器下走 advanceTimersByTimeAsync，见其注释。
+    await yieldLoop()
   }
 }
 
@@ -140,7 +159,9 @@ export const mountComponent = (component, options = {}) => {
  * （本轮实测：等待 8 个 tick 时按钮仍停在 is-loading，第 9 个才复位）。
  * 轮询断言的是「一定会到达的终态」，既不引入时长假设，也不会掩盖永久失败。
  *
- * @param {Function} predicate 返回真值即结束等待
+ * @param {Function} predicate 返回真值即结束等待。谓词必须是**稳定终态**
+ *        （行渲染/调用次数等不可逆变化）——宏任务轮引入后每轮检查间隔变粗，
+ *        瞬态成立又回退的状态会被错过
  * @param {object}  [options]
  * @param {number}  [options.maxTicks] 上限（默认 50 个 nextTick，约等于瞬时）
  * @param {string}  [options.message]  超时提示，说明在等什么
@@ -150,10 +171,10 @@ export const waitFor = async (predicate, options = {}) => {
   for (let i = 0; i < maxTicks; i += 1) {
     if (predicate()) return
     await nextTick()
-    // 混入真实宏任务轮（理由同 flush）：失败提示链路夹定时器回调，纯微任务
-    // 轮询在 CI 高负载下会饿死它们 ⇒ waitFor 超时（run 68 实测）。macrotask
-    // 让出事件循环后定时器得以推进；命中条件的用例通常第一轮就返回。
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    // 混入一轮事件循环（理由同 flush）：失败提示链路夹定时器回调，纯微任务
+    // 轮询在 CI 高负载下会饿死它们 ⇒ waitFor 超时（run 68 实测）。yieldLoop
+    // 在假定时器下改走 advanceTimersByTimeAsync，否则会永久挂起。
+    await yieldLoop()
   }
   if (predicate()) return
   throw new Error(`waitFor 超时（${maxTicks} 个 nextTick）：${message}`)
@@ -174,5 +195,12 @@ export const settleRouter = async (router, times = 8) => {
   for (let i = 0; i < times; i += 1) {
     await router.isReady().catch(() => {})
     await nextTick()
+    // 同 flush/waitFor 的教训：vue-router 的导航链是一条**长微任务链**
+    // （push → navigate → 解析组件守卫 → finalizeNavigation），8 个 nextTick
+    // 跑不完它 ⇒ 断言会看到「还停在旧路由」的假失败。实测 recentAlarmsCard
+    // 的「查看全部」用例：只 nextTick 时 path 仍是 '/'，补一轮事件循环后
+    // 立刻是 '/alarms'（探针 A/E 红、B/D 绿）。0764a04 给 flush/waitFor 都补
+    // 了宏任务轮，唯独漏了本函数——同一文件里的第三个同类。
+    await yieldLoop()
   }
 }

@@ -155,13 +155,19 @@ describe('InspectionView 计划时间列（本地时区口径）', () => {
 })
 
 describe('InspectionView 加载路径', () => {
-  test('加载失败：清空列表（不留旧数据）并提示，不抛 Vue 错误', async () => {
+  test('加载失败：清空列表（不留旧数据）且组件不弹 toast（提示归拦截器，P2-3）', async () => {
     const rows = [{ _id: 'i1', title: 'A', status: 'pending', planStartTime: null }]
     const c = await open(rows)
     expect(cells(c)).toHaveLength(1)
     getList.mockRejectedValue(new Error('boom'))
     click(c.find('.glass-btn--default'))
-    await waitFor(() => ElMessage.warning.mock.calls.length === 1, { message: '加载失败提示' })
+    // 契约对齐 alarmView：列表加载失败由 api.js 响应拦截器统一提示，组件只清态。
+    // 原断言把组件那条 warning 钉成契约（`ElMessage.warning.mock.calls.length === 1`），
+    // 于是「同一次失败弹两条」被钉成了正确行为，且与其余三处视图的 error 级还不一致。
+    // 前提自证：本套件把 @/utils/api 整体替身掉，拦截器不参与 ⇒ 这里必须恰好 0 次。
+    await waitFor(() => cells(c).length === 0, { message: '失败后列表清空' })
+    expect(ElMessage.warning).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(cells(c)).toEqual([])
     expect(c.errors).toEqual([])
   })

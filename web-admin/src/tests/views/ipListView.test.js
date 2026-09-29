@@ -195,6 +195,26 @@ describe('IpListView 列表加载与渲染', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('归属地：有 location 时「IP · 归属地」，无 location 只渲染 IP（P2-4）', async () => {
+    // 归属地是后端可选增强（CIDR 网段/检索不可用时缺字段），模板必须省略而非渲染空串。
+    // 此前零断言：退化成空串或字面 "undefined" 都不会有任何用例变红。
+    const c = await openList([
+      ipRow({ _id: 'ip1', ip: '10.0.0.1', location: '北京市' }),
+      ipRow({ _id: 'ip2', ip: '10.0.0.2', location: null }),
+    ])
+
+    const withLoc = td(c, 0, 0).textContent.trim()
+    expect(withLoc).toBe('10.0.0.1 · 北京市')
+    expect(td(c, 0, 0).querySelector('.ip-location')).not.toBeNull()
+
+    const noLoc = td(c, 1, 0).textContent.trim()
+    expect(noLoc).toBe('10.0.0.2')
+    expect(noLoc).not.toContain('·')
+    expect(noLoc).not.toContain('undefined')
+    expect(td(c, 1, 0).querySelector('.ip-location')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
   test('时间列本地时区口径：生效时间与创建时间都不是 ISO 原串', async () => {
     const expires = '2026-10-01T01:00:00.000Z'
     const created = '2026-09-01T23:30:15.000Z'
@@ -295,9 +315,11 @@ describe('IpListView 列表加载与渲染', () => {
     click(
       Array.from(c.findAll('.table-toolbar button')).find((b) => b.textContent.trim() === '刷新')
     )
-    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '加载失败提示' })
+    // 契约对齐 alarmView：加载失败由 api.js 响应拦截器统一提示，组件只清态。
+    // 原断言把组件那条 error 钉成契约（`calls.length === 1`），于是双提示被锁死。
+    await waitFor(() => trs(c).length === 0, { message: '失败后列表清空' })
     await flush(6)
-    expect(ElMessage.error).toHaveBeenCalledWith('加载失败')
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(trs(c)).toHaveLength(0)
     expect(c.find('.empty-tip').textContent.trim()).toBe('暂无黑名单记录')
     expect(c.find('.el-pagination__total').textContent.replace(/[^0-9]/g, '')).toBe('0')

@@ -5,6 +5,7 @@ export default {
   auditLog: {
     catAuthLogin: '认证登录',
     catUserManagement: '用户管理',
+    ipAddress: 'IP 地址',
     catRoleManagement: '角色管理',
     catPermissionManagement: '权限管理',
     catDeviceManagement: '设备管理',

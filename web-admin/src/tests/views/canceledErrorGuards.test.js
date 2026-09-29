@@ -6,14 +6,25 @@
  * 会在视图 catch 里抛 ERR_CANCELED，若不做判定就会弹「加载失败」——
  * 用户已经切到新页面，却看到上一页的红框，属于典型的假错误。
  *
- * 实测口径（本轮，全 src 扫描）：catch 体含 ElMessage 的块共 30 处，其中 try 体直接含
- * GET 的 12 处已全部加守卫。其余 18 处属以下三类，均不加守卫：
+ * 实测口径（2026-09-29 重测，全 src 扫描）：catch 体含 ElMessage 的块共 16 处，
+ * 其中 try 体直接含 GET 的 3 处已全部加守卫。
+ *
+ * **目标集从 12 缩到 3 是预期内的收缩，不是漏网**：P2-3 统一了「不双提示」契约——
+ * 加载失败的 catch 不再自己弹 toast（提示改由 api.js 响应拦截器统一负责），这些块
+ * 因「catch 体不再含 ElMessage」而退出本目标集。目标集的判据本身就是「catch 体含
+ * ElMessage」，不再弹 toast 的块已无法产生假错误提示，退出是定义使然。
+ * 它们的状态清理仍保留 isCanceledError + isCurrent 双守卫（见各视图 catch），
+ * 唯一例外是 ReportView.loadChartData：其 catch 体已空（不清态、不提示），守卫
+ * 随之删除——空 catch 不产生任何副作用，不存在需要防的假错误。
+ *
+ * 现存的 3 处（导出/下载失败、审核表单提交）都属「失败要弹具体原因」的块，故
+ * 仍须守卫。其余 13 处含 ElMessage 的 catch 属以下三类，均不加守卫：
  *   1. 写请求（post/put/delete）——不会被 cancelAllPendingRequests 取消；
  *   2. 确认框分支（ElMessageBox.confirm 的 'cancel'/'close'）——另有既有判定；
  *   3. 加密等非请求调用（如 encryptPassword 抛错）。
- * 注意 9 处 catch 的 try 体内仅**间接**调用含 GET 的加载函数（如成功后 loadData()
- * 刷新列表）且未 await：abort 只会让那个游离的 GET 静默失败，不影响本 catch 的
- * 判定，故同样不加守卫（实测未纳入）。
+ * 注意：另有若干 catch 的 try 体内仅**间接**调用含 GET 的加载函数（如成功后
+ * loadData() 刷新列表）且未 await：abort 只会让那个游离的 GET 静默失败，不影响
+ * 本 catch 的判定，故同样不加守卫（实测未纳入）。
  *
  * 本套件做两件事：
  *  1. 行为级：isCanceledError 对 axios 取消错误与普通错误的判定；
@@ -156,10 +167,10 @@ describe('视图 catch 守卫（源码级）', () => {
     const unguarded = targets.filter((t) => !t.body.includes('isCanceledError'))
     const detail = unguarded.map((t) => `${t.file}:${t.line}`).join(', ')
     expect(detail).toBe('')
-    // 锁定实测基线：12 处直接含 GET 的 catch（写请求 catch 不在其列）。
+    // 锁定实测基线：3 处「catch 体含 ElMessage 且 try 体直接含 GET」的块。
     // 用 >= 而非 ===：新增「带守卫」的视图是正确演进，不该被计数卡住；
-    // 真正的防线是上面的零漏网断言。
-    expect(targets.length).toBeGreaterThanOrEqual(12)
+    // 真正的防线是上面的零漏网断言。基线随 P2-3 由 12 降到 3（见文件头说明）。
+    expect(targets.length).toBeGreaterThanOrEqual(3)
   })
 
   test('守卫必须位于 ElMessage 之前（放在之后等于没防住）', () => {

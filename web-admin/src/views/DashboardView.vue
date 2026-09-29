@@ -106,7 +106,6 @@ import {
   defineAsyncComponent,
   h,
 } from 'vue'
-import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { useI18n } from 'vue-i18n'
 import { CaretTop, CaretBottom, Cpu, Bell, UserFilled } from '@element-plus/icons-vue'
 
@@ -290,7 +289,9 @@ const loadDashboardData = async () => {
     // 过期响应的失败也不能提示：5 分钟定时器与 visibilitychange 刷新可能交叠，
     // 旧请求在新请求已成功之后才失败，若不判 isCurrent 就会在新鲜数据上盖一个假红框。
     if (!isCurrent()) return
-    ElMessage.error(t('messages.loadFailed'))
+    // P2-3：组件不再弹 toast，提示由 api.js 响应拦截器统一负责（拦截器给的是具体
+    // 原因：服务端错误/网络错误/服务端 message，组件这条只是重复的泛化文案）。
+    // 本视图的组件侧常驻信号是**统计卡保留 - 占位**（不伪造 0）——失败与真的为 0 可区分。
   }
 }
 
@@ -331,7 +332,9 @@ const loadRecentAlarms = async () => {
     if (isCanceledError(e)) return
     // 与主加载同理：过期请求的失败不得在新鲜数据上盖假红框
     if (!isCurrent()) return
-    ElMessage.error(t('messages.loadFailed'))
+    // P2-3：同主加载——提示归 api.js 响应拦截器，组件只清态。
+    // 已知边界（非本次引入）：RecentAlarmsCard 只收 rows，失败后卡片显示空表，
+    // 与「真的没有报警」不可区分；拦截器 toast 是唯一线索且会自行消失。
   }
 }
 

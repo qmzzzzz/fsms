@@ -194,12 +194,18 @@ describe('DeviceView 列表加载与筛选', () => {
     expect(params.page).toBe(1)
   })
 
-  test('加载失败：清空列表并提示，不留旧数据', async () => {
+  test('加载失败：清空列表、不留旧数据，且组件不弹 toast（提示归拦截器，P2-3）', async () => {
     const c = await open()
     expect(cells(c)).toHaveLength(1)
     getList.mockRejectedValue(new Error('boom'))
     click(btn(c, '搜索'))
-    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '失败提示弹出' })
+    // 契约对齐 alarmView：列表加载失败由 api.js 响应拦截器统一提示，组件只清态。
+    // 组件这里再弹一条的话，生产上同一次失败会弹两条（拦截器具体文案 + 组件泛化文案）。
+    // 前提自证：本套件把 @/utils/api 整体替身掉，拦截器不参与 ⇒ 这里必须恰好 0 次；
+    // 「用户仍能看到错误」的那一半由 apiRequestPipeline.test.js 走真实拦截器兜住。
+    await waitFor(() => cells(c).length === 0, { message: '失败后列表清空' })
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(ElMessage.warning).not.toHaveBeenCalled()
     expect(cells(c)).toEqual([])
     expect(c.errors).toEqual([])
   })

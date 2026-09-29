@@ -460,20 +460,23 @@ describe('UserView 列表与筛选', () => {
     expect(active.errors).toEqual([])
   })
 
-  test('加载失败：清空列表并提示；abort 的取消错误静默不提示', async () => {
+  test('加载失败：清空列表且组件不弹 toast（提示归拦截器，P2-3）；abort 的取消错误静默', async () => {
     const c = await mountUser(P_BASE, [ROW_OTHER])
     expect(c.findAll('.el-table__body-wrapper .el-table__row')).toHaveLength(1)
     usersGetList.mockRejectedValue(new Error('boom'))
     click(c.find('.table-toolbar .glass-btn--default'))
-    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '加载失败提示' })
-    expect(ElMessage.error).toHaveBeenCalledWith('加载失败')
-    expect(c.findAll('.el-table__body-wrapper .el-table__row')).toEqual([])
-    // 再走一次 abort 分支：不得再弹一次错
+    // 契约对齐 alarmView：加载失败由 api.js 响应拦截器统一提示，组件只清态。
+    // 原断言把组件那条 error 钉成契约（`calls.length === 1`），于是双提示被锁死。
+    await waitFor(() => c.findAll('.el-table__body-wrapper .el-table__row').length === 0, {
+      message: '失败后列表清空',
+    })
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    // 再走一次 abort 分支：同样不得弹错（组件侧本来就不弹）
     isCanceledError.mockReturnValue(true)
     usersGetList.mockRejectedValue(new Error('canceled'))
     click(c.find('.table-toolbar .glass-btn--default'))
-    await waitFor(() => isCanceledError.mock.calls.length >= 1, { message: 'abort 分支被走到' })
-    expect(ElMessage.error).toHaveBeenCalledTimes(1)
+    await waitFor(() => isCanceledError.mock.calls.length >= 2, { message: 'abort 分支被走到' })
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
   })
 })

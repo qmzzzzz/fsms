@@ -208,22 +208,25 @@ describe('DashboardView 骨架屏 → 内容直换', () => {
     expect(active.errors).toEqual([])
   })
 
-  test('加载失败也必须退出骨架（否则首页永远停在占位）并提示一次', async () => {
+  test('加载失败也必须退出骨架（否则首页永远停在占位）；提示归拦截器，组件不弹（P2-3）', async () => {
     getDashboard.mockRejectedValue(new Error('boom'))
     getUserStats.mockResolvedValue(okUsers())
     getAlarms.mockResolvedValue({ data: { data: [] } })
     active = mountComponent(DashboardView, {
       setupStore: (pinia) => useAuthStore(pinia).setPermissions(ALL),
     })
+    // 失败路径的稳定终态是「骨架退场」：loading 初值为 true，只有 try/catch 走完才会
+    // 被置 false，单调不可逆。不能改等「统计卡回落到 -」——那是初始态，会立刻成立。
     await waitFor(() => !active.find('.dashboard').classList.contains('is-loading'), {
       message: '骨架退场',
     })
-    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '失败提示' })
-    expect(ElMessage.error).toHaveBeenCalledWith(i18n.global.t('messages.loadFailed'))
     await waitFor(() => active.findAll('.dashboard-charts-stub').length === 1, {
       message: '图表组件挂载',
     })
     await flush(10)
+    // 契约对齐 alarmView：加载失败只清态，提示由 api.js 响应拦截器统一负责。
+    // 本套件把 @/utils/api 整体替身掉，拦截器不参与 ⇒ 这里必须恰好 0 次。
+    expect(ElMessage.error).not.toHaveBeenCalled()
     // 骨架占位（含异步图表区的 loadingComponent）必须全部让位
     expect(active.findAll('.glass-skeleton')).toEqual([])
     // 失败后统计卡保留占位值 -（而不是伪造 0）
@@ -685,10 +688,14 @@ describe('DashboardView 失败与取消路径', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('最近报警加载失败：提示一次加载失败，卡片保留空表，统计卡不受牵连', async () => {
+  test('最近报警加载失败：卡片保留空表、统计卡不受牵连；提示归拦截器，组件不弹（P2-3）', async () => {
     const c = await open(ALL, { alarmsReject: new Error('alarms down') })
-    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '失败提示' })
-    expect(ElMessage.error).toHaveBeenCalledWith(i18n.global.t('messages.loadFailed'))
+    // 可等待的终态是主加载成功（统计卡由 - 占位变成真实读数，单调不可逆）。
+    // 报警那一路失败后**不再改任何状态**（提示归拦截器），因此没有状态变化可等，
+    // 只能等主加载落地后额外 flush，再断言它的副作用边界。
+    await waitFor(() => statValues(c)[0] === '10', { message: '统计卡已填充' })
+    await flush(10)
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(statValues(c)).toEqual(['10', '7', '3', '4'])
     expect(alarmRows(c)).toEqual([])
     expect(c.findAll('.alarm-card .el-table')).toHaveLength(1)

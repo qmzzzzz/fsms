@@ -185,10 +185,11 @@ import { PieChart, BarChart } from 'echarts/charts'
 import { TooltipComponent, LegendComponent, GridComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { usePermission } from '@/composables/usePermission'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useAppStore } from '@/store'
 
 const { hasPerm } = usePermission()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const appStore = useAppStore()
 
 const loading = ref(true)
@@ -292,6 +293,9 @@ const chartTheme = () => {
     borderColor: dark ? '#0f172a' : '#ffffff',
     splitLineColor: dark ? 'rgba(148, 163, 184, 0.25)' : '#e2e8f0',
     noDataColor: dark ? '#475569' : '#cbd5e1',
+    // 轴标签色（P2-8）：此前柱图 x/y 轴都硬编码 #64748b，两主题同色，
+    // 暗色下对比度偏低。并入 chartTheme 后随主题切换。
+    axisLabelColor: dark ? '#94a3b8' : '#64748b',
   }
 }
 
@@ -306,20 +310,28 @@ const statsRange = ref('all')
  */
 const browserTimezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || ''
 
-/** 当前范围的查询参数：all ⇒ 不带任何日期参数（口径与历史版本完全一致） */
+/** 当前范围的查询参数：all ⇒ 不带任何日期参数（口径与历史版本完全一致）。
+ *  时间基准快照一次（now）：两个 dayStr 各自 new Date() 会在跨午夜瞬间分叉，
+ *  「近7天」漂成 8 天、「今日」漂成两天——概率极低但零成本可消。 */
 const rangeParams = () => {
   if (statsRange.value === 'all') return {}
+  const now = new Date()
   const offset = statsRange.value === 'today' ? 0 : statsRange.value === '7d' ? -6 : -29
   const dayStr = (off) => {
-    const d = new Date()
+    const d = new Date(now)
     d.setDate(d.getDate() + off)
     return localDateStr(d)
   }
   return { startDate: dayStr(offset), endDate: dayStr(0), tz: browserTimezone() }
 }
 
+// 竞态守卫（与 AuditLogView/ipListView 同款）：连续切范围/切主题时丢弃过期
+// 响应——「今日」的慢响应后到会把已渲染的「近7天」分布静默覆盖成错误时间窗
+const chartGuard = useLatestRequest()
+
 // 加载图表数据（实例仅在 onMounted 初始化一次，后续复用实例仅 setOption）
 const loadChartData = async () => {
+  const isCurrent = chartGuard()
   try {
     // 按当前主题取色，主题切换时由 watch 触发重绘
     const theme = chartTheme()
@@ -332,6 +344,7 @@ const loadChartData = async () => {
       api.reports.getAlarms(params),
       api.reports.getDevices(),
     ])
+    if (!isCurrent()) return
     const alarmData = alarmRes?.data?.data || {}
     const byType = alarmData.byType || []
 
@@ -415,13 +428,13 @@ const loadChartData = async () => {
           // 由 deviceStatusData 单一来源派生，轴标签与 series 永远同序同长，
           // 再也不会出现「改了状态列表漏改 xAxis」的错位（也避免硬编码漏枚举）。
           data: deviceStatusData.map((d) => d.name),
-          axisLabel: { color: '#64748b' },
+          axisLabel: { color: theme.axisLabelColor },
         },
         yAxis: {
           type: 'value',
           // 计数数据不出小数刻度
           minInterval: 1,
-          axisLabel: { color: '#64748b' },
+          axisLabel: { color: theme.axisLabelColor },
           splitLine: { lineStyle: { color: theme.splitLineColor } },
         },
         grid: { left: '3%', right: '4%', bottom: '10%', containLabel: true },
@@ -435,11 +448,13 @@ const loadChartData = async () => {
         ],
       })
     }
-  } catch (e) {
-    // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
-    if (isCanceledError(e)) return
-    // B-2：失败给一次非阻断式提示，区分「无数据」与「加载失败」
-    ElMessage.error(t('messages.loadFailed'))
+  } catch {
+    // P2-3：本次加载失败一律静默——提示由 api.js 响应拦截器统一负责（取消错误
+    // ERR_CANCELED 拦截器本就不提示）。此前组件这里再弹一条泛化的 messages.loadFailed，
+    // 同一次失败会弹两条：拦截器的具体原因 + 组件的泛化文案。
+    // 已知边界（非本次引入）：图表卡没有常驻失败态，失败时画布保持空白，与「真的
+    // 没有数据」在视觉上不可区分；拦截器 toast 是唯一线索，且会自行消失。
+    // 本 catch 仅用于吞掉 rejection（避免未处理拒绝），不产生副作用。
   }
 }
 
@@ -452,6 +467,14 @@ watch(
     }
   }
 )
+
+// 切语言后图表文案（图例/空态）物化在 canvas 里不会自愈，与 DashboardCharts
+// 同款 watch 重建；并发竞态由 chartGuard 统一兜底
+watch(locale, () => {
+  if (aChart || dChart) {
+    loadChartData()
+  }
+})
 
 // 节流函数
 let resizeTimer = null

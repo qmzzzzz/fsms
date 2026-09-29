@@ -397,12 +397,15 @@ describe('ReportView 图表数据渲染', () => {
     expect(lastBar().series[0].data.map((x) => x.name)).not.toContain('ghost')
   })
 
-  test('图表数据加载失败（非取消）：提示加载失败，且不留下半截图表', async () => {
+  test('图表数据加载失败（非取消）：组件不弹 toast（归拦截器，P2-3），且不留下半截图表', async () => {
     const c = await open({
       alarmsReject: new Error('alarms down'),
       devicesReject: new Error('devices down'),
     })
-    expect(ElMessage.error).toHaveBeenCalledWith('加载失败')
+    // 契约对齐 alarmView：加载失败只清态，提示由 api.js 响应拦截器统一负责。
+    // 本套件把 @/utils/api 整体替身掉（见文件顶部的 vi.mock），拦截器不参与
+    // ⇒ 这里必须恰好 0 次；若断言到 1 次，说明组件又自己弹了，真实环境就会双提示。
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(h.setOptionA).not.toHaveBeenCalled()
     expect(h.setOptionD).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
@@ -713,6 +716,108 @@ describe('ReportView 导出取消语义', () => {
     expect(clicked[0]).not.toContain('报警')
     createUrl.mockRestore()
     createSpy.mockRestore()
+    expect(c.errors).toEqual([])
+  })
+})
+
+describe('ReportView 统计时间范围（P1-2：这条接线此前前端零覆盖）', () => {
+  // 背景：范围选择器是「今日/近7天/近30天/全部」四档，日期串按**浏览器本地日历日**
+  // 产生、并把 IANA 时区透传给后端换算日界。它是全文件回归风险最高的跨时区日期运算，
+  // 但 5168645 那批改动只动了 ReportView.vue / DashboardCharts.vue / 两份 locale，
+  // reportView*.test.js 一行未动（全 tests 目录 grep statsRange|rangeParams|report.range
+  // 零命中）。下面三条把它钉住：入参快照、tz 透传、并发切换的过期响应丢弃。
+
+  /** 期望值独立计算：不 import 视图里的 localDateStr/rangeParams，否则实现写错两边一起错 */
+  const localDay = (offsetDays) => {
+    const d = new Date()
+    d.setDate(d.getDate() + offsetDays)
+    const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+  }
+  /** 两个日期串之间的**日历日**差（用 UTC 解析纯日期串，避开本地时区/DST 干扰） */
+  const dayDiff = (from, to) =>
+    Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000)
+
+  const lastAlarmParams = () => h.getAlarms.mock.calls[h.getAlarms.mock.calls.length - 1][0]
+
+  /** 点范围选择器里的某一档（文案来自 i18n，与模板同一来源） */
+  const pickRange = async (c, label) => {
+    const box = c.findAll('.el-radio-button').find((b) => b.textContent.trim() === label)
+    expect(box, `范围档「${label}」应已渲染`).toBeTruthy()
+    click(box.querySelector('input[type="radio"]') || box)
+    await flush(8)
+  }
+
+  test('三档入参快照：today 同一天、7d 差 6 个日历日、30d 差 29 个日历日', async () => {
+    const c = await open()
+
+    // 默认「全部」：与历史版本口径完全一致 —— 一个日期键都不带
+    expect(lastAlarmParams()).toEqual({})
+
+    await pickRange(c, '今日')
+    expect(lastAlarmParams().startDate).toBe(localDay(0))
+    expect(lastAlarmParams().endDate).toBe(localDay(0))
+    expect(lastAlarmParams().startDate).toBe(lastAlarmParams().endDate)
+
+    await pickRange(c, '近7天')
+    expect(lastAlarmParams().startDate).toBe(localDay(-6))
+    expect(lastAlarmParams().endDate).toBe(localDay(0))
+    // 是「7 天窗口」（首尾都含）⇒ 日历日差 6，不是 7（差 7 会让后端多算一天）
+    expect(dayDiff(lastAlarmParams().startDate, lastAlarmParams().endDate)).toBe(6)
+
+    await pickRange(c, '近30天')
+    expect(dayDiff(lastAlarmParams().startDate, lastAlarmParams().endDate)).toBe(29)
+
+    // 回到「全部」必须把日期键**去掉**，而不是留上一档的残留值
+    await pickRange(c, '全部')
+    expect(lastAlarmParams()).toEqual({})
+    expect(c.errors).toEqual([])
+  })
+
+  test('tz 透传：非「全部」档带上浏览器 IANA 时区（空串时后端回落业务时区）', async () => {
+    const c = await open()
+    expect(lastAlarmParams().tz).toBeUndefined()
+
+    await pickRange(c, '今日')
+    const tz = lastAlarmParams().tz
+    expect(typeof tz).toBe('string')
+    expect(tz).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone || '')
+    // 反证：不是写死的字符串常量（CI 钉 TZ=Asia/Shanghai、本地是 GMT+8，
+    // 硬编码任一个都会在其中一端与浏览器实际值不符）
+    expect(tz.length).toBeGreaterThan(0)
+  })
+
+  test('竞态：慢的过期响应不得覆盖新范围（chartGuard）', async () => {
+    const c = await open()
+    const afterMount = h.setOptionA.mock.calls.length
+
+    // 「今日」这一发挂住不返回；「近7天」这一发立刻返回
+    let releaseToday
+    const pendingToday = new Promise((r) => {
+      releaseToday = r
+    })
+    let n = 0
+    h.getAlarms.mockImplementation(() => {
+      n += 1
+      return n === 1 ? pendingToday : Promise.resolve(ALARMS)
+    })
+
+    await pickRange(c, '今日')
+    await pickRange(c, '近7天')
+    // 前提自证：新范围确实重绘了（否则下面的「没有变化」会因别的原因恒真）
+    expect(h.setOptionA.mock.calls.length).toBeGreaterThan(afterMount)
+    const afterNew = h.setOptionA.mock.calls.length
+    const pieAfterNew = lastPie()
+
+    // 现在放行「今日」的过期响应：它必须被丢弃
+    releaseToday({
+      data: { data: { byType: [{ _id: 'smoke', count: 999 }] } },
+    })
+    await flush(12)
+
+    expect(h.setOptionA.mock.calls.length).toBe(afterNew)
+    expect(lastPie()).toBe(pieAfterNew)
+    expect(JSON.stringify(lastPie())).not.toContain('999')
     expect(c.errors).toEqual([])
   })
 })
