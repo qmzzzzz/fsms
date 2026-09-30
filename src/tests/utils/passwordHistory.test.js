@@ -186,6 +186,22 @@ describe('changeUserPassword：复用被拒（行为级，走真实 Mongo 与真
       { username: 'reuse-tester' }
     );
 
+  /**
+   * 把唯一测试用户重置回确定态（当前口令 = pass，历史 = historyPasswords 的摘要序列）。
+   *
+   * 为什么需要：下面的行为级用例原本是一条**隐式状态机**——上一条用例改成的口令
+   * 是这一条的前置（"全新口令正常通过"把当前口令变成 NEWER，"深度边界"依赖它）。
+   * 固定顺序下成立，`--randomize` 门禁（seed 20260917/31337/777001 实测）洗乱声明
+   * 顺序后前置消失，CURRENT_WRONG 取代了预期 outcome。改为每条用例自置前置，
+   * 与执行顺序彻底解耦；save 走模型预存钩子，bcrypt 语义与真实改密一致。
+   */
+  const resetTo = async (pass, historyPasswords = []) => {
+    const doc = await User.findById(userId).select('+password +passwordHistory');
+    doc.password = pass;
+    doc.passwordHistory = historyPasswords.map((p) => digestOf(p));
+    await doc.save();
+  };
+
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
     const uniq = Date.now().toString(36);
@@ -204,6 +220,7 @@ describe('changeUserPassword：复用被拒（行为级，走真实 Mongo 与真
   });
 
   test('A→B→A：第二步（A 作为新口令）必须被复用历史拒绝', async () => {
+    await resetTo(OLD);
     // 第一步：OLD → NEW。旧口令 OLD 此时进入历史
     const first = await change(OLD, NEW);
     expect(first.outcome).toBe('OK');
@@ -220,6 +237,7 @@ describe('changeUserPassword：复用被拒（行为级，走真实 Mongo 与真
   });
 
   test('拒绝时不写历史（否则一次被拒的尝试会污染历史，把合法口令也挡掉）', async () => {
+    await resetTo(NEW, [OLD]);
     const before = await User.findById(userId).select('+passwordHistory');
     const depthBefore = before.passwordHistory.length;
     await change(NEW, OLD);
@@ -228,11 +246,13 @@ describe('changeUserPassword：复用被拒（行为级，走真实 Mongo 与真
   });
 
   test('与当前口令相同仍报 SAME_PASSWORD（不复用码——两者是不同的事）', async () => {
+    await resetTo(NEW, [OLD]);
     const r = await change(NEW, NEW);
     expect(r.outcome).toBe('SAME_PASSWORD');
   });
 
   test('全新口令正常通过，且旧口令进入历史', async () => {
+    await resetTo(NEW, [OLD]);
     const r = await change(NEW, NEWER);
     expect(r.outcome).toBe('OK');
     const after = await User.findById(userId).select('+password +passwordHistory');
@@ -242,6 +262,8 @@ describe('changeUserPassword：复用被拒（行为级，走真实 Mongo 与真
   });
 
   test('超出深度的更早口令不再被拦（边界是"最近 N 条"，不是永久）', async () => {
+    // 确定态：当前 = NEWER，历史里确有 OLD（等下要验证它会被挤出窗口）
+    await resetTo(NEWER, [NEW, OLD]);
     // 把历史灌到超过深度，让 OLD 掉出窗口
     const doc = await User.findById(userId).select('+password +passwordHistory');
     // 逐条折叠（不能把数组一次性传给 withPrevious —— digestOf 只认字符串，

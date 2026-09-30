@@ -60,6 +60,7 @@ const IPS = {
   notif: `192.0.2.${(Number(stamp) % 100) + 36}`,
   retry: `192.0.2.${(Number(stamp) % 100) + 37}`,
   notif2: `192.0.2.${(Number(stamp) % 100) + 38}`,
+  mix: `192.0.2.${(Number(stamp) % 100) + 39}`,
 };
 const ALL_TEST_IPS = Object.values(IPS).flatMap((ip) => [ip, `::ffff:${ip}`]);
 
@@ -216,13 +217,17 @@ describe('rateLimitEscalation：令牌桶语义（取代固定窗口）', () => 
   });
 
   test('审计记全量构成而不是只记触发阀值的那一个限流器', async () => {
-    flood(IPS.anon, 'captcha', 4);
-    flood(IPS.anon, 'register', anonThreshold - 3);
-    expect(await waitUntil(() => bansFor(IPS.anon).length === 1)).toBe(true);
+    // 独占 IPS.mix（隔离纪律 1）：本用例会真的触发升级、给 ip 落一条
+    // RATE_LIMIT_ABUSE 审计行；曾复用 IPS.anon，与「阈值内只计数」共用——
+    // 固定顺序下前者先跑没事，--randomize（seed 777001 实测）里反过来时
+    // 这条审计行恰好落在后者的 250ms 等待窗口内，count=1 打红。
+    flood(IPS.mix, 'captcha', 4);
+    flood(IPS.mix, 'register', anonThreshold - 3);
+    expect(await waitUntil(() => bansFor(IPS.mix).length === 1)).toBe(true);
 
     const row = await AuditLog.findOne({
       action: ALERT_TYPES.RATE_LIMIT_ABUSE,
-      ip: IPS.anon,
+      ip: IPS.mix,
     }).lean();
     // 混检下只记 limiter 字段会让事后复盘归因错误——这正是本次要修的谎报
     expect(row.body.mix.captcha).toBe(4);
