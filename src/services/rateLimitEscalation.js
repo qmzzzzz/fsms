@@ -11,11 +11,14 @@
  *      → 自动封禁 → checkIPBlacklist 在限流之前以 403 短路该 IP 的后续请求。
  *
  * 误封防线（CC 升级最大的风险是把正常用户/NAT 出口错杀）：
- *   - 阈值默认 100 次/5 分钟：generalLimiter 本身 300 次/15 分钟，触顶后窗口内
+ *   - 阈值默认 30 次/5 分钟：generalLimiter 本身 300 次/15 分钟，触顶后窗口内
  *     **每一条后续请求都是 429**，真攻击 5 分钟可刷出数千次；正常聚合流量触顶后
- *     用户看到错误即停，5 分钟内再堆满 100 次 429 意味着"已被告知限速仍持续高频重试"。
+ *     用户看到错误即停，5 分钟内再堆满 30 次 429 意味着"已被告知限速仍持续高频重试"。
  *   - 白名单 IP 的资源型限流在 rateLimit.js 直接 skip，handler 不执行 ⇒ 天然不会
  *     被本服务封禁（凭据型限流不豁免白名单，攻击信号同样不该豁免）。
+ *   - 预警阈值（20 次）低于封禁阈值：达预警但未达封禁时先出一条 warn + 指标，
+ *     "慢速洪水"（每分钟几次、永远不撞上限）在真被封之前就可观测——封禁是 1h 起步的
+ *     不可逆动作，一个只值 20 次触顶的 IP 被封 1 小时，运维需要能提前看到信号。
  *   - 凭据型限流的账号维度桶（login-user / pwd-change-user / reauth-user）不接入：
  *     按 username 组键没有 IP 可封，且分布式撞单账号的升级由 checkBruteForce 负责。
  *   - 同理不接入的还有：wellKnown 三个上报限流器（csp-report/client-errors/
@@ -44,7 +47,7 @@ const {
 } = require('./securityAlert');
 
 /** 窗口内触发多少次限流升级为封禁（429 计数） */
-const ESCALATION_THRESHOLD = readPositiveNumberEnv('CC_ESCALATION_THRESHOLD', 100, {
+const ESCALATION_THRESHOLD = readPositiveNumberEnv('CC_ESCALATION_THRESHOLD', 30, {
   integer: true,
   onInvalid: (name, raw, d) =>
     logger.error(`${name}=${JSON.stringify(raw)} 非法（须为正整数），已按默认 ${d} 处理`),
@@ -55,6 +58,25 @@ const ESCALATION_WINDOW_MS = readPositiveNumberEnv('CC_ESCALATION_WINDOW_MS', 5 
   onInvalid: (name, raw, d) =>
     logger.error(`${name}=${JSON.stringify(raw)} 非法（须为正整数毫秒），已按默认 ${d} 处理`),
 });
+/**
+ * 预警阈值：窗口内触发次数达到它但未达封禁阈值时，先出一条 warn 级信号，
+ * 让"慢速洪水"（每分钟几次、永远不撞上限）在被封之前就可观测。
+ * 必须严格小于 ESCALATION_THRESHOLD，否则预警分支永不可达——那是一段
+ * 看起来在工作、实际永不执行的死代码（读配置的人却会以为它生效了）。
+ */
+const RAW_WARNING_THRESHOLD = readPositiveNumberEnv('CC_ESCALATION_WARNING_THRESHOLD', 20, {
+  integer: true,
+  onInvalid: (name, raw, d) =>
+    logger.error(`${name}=${JSON.stringify(raw)} 非法（须为正整数），已按默认 ${d} 处理`),
+});
+const ESCALATION_WARNING_THRESHOLD = Math.min(RAW_WARNING_THRESHOLD, ESCALATION_THRESHOLD - 1);
+if (ESCALATION_WARNING_THRESHOLD !== RAW_WARNING_THRESHOLD) {
+  logger.error(
+    `CC_ESCALATION_WARNING_THRESHOLD=${RAW_WARNING_THRESHOLD} 不小于封禁阈值 ` +
+      `${ESCALATION_THRESHOLD}，预警分支将永不触发；已夹取到 ${ESCALATION_WARNING_THRESHOLD}`
+  );
+}
+
 /**
  * 计数表容量上限：键是攻击者可控的来源 IP，轮换 IP 即可驱动 Map 增长。
  * 超限时先清过期窗口，仍超限则整体清空（宁可短时漏计，也不能让防护模块
@@ -106,6 +128,15 @@ const noteRateLimitHit = (req, limiterName) => {
     hits.set(ipKey, entry);
   }
   entry.count += 1;
+  // 用 === 而非 >=：窗口内计数逐次 +1，等值即"本窗口第一次抵达"，
+  // 达封禁阈值后 count 归零重开，因此每个窗口只预警一次，不会刷屏。
+  if (entry.count === ESCALATION_WARNING_THRESHOLD) {
+    incSecurityAlert('rate_limit_warning', 'high');
+    logger.warn(
+      `限流预警：IP ${ipKey} 已在 ${ESCALATION_WINDOW_MS}ms 内触发 ${entry.count} 次限流，` +
+        `逼近封禁阈值 ${ESCALATION_THRESHOLD}，升级通道即将生效`
+    );
+  }
   if (entry.count < ESCALATION_THRESHOLD) return;
 
   // 达阈值：立即重开窗口（同一窗口内只升级一次；封禁生效后 403 短路，
@@ -210,6 +241,7 @@ const resetForTest = () => {
 };
 
 module.exports = {
+  ESCALATION_WARNING_THRESHOLD,
   ESCALATION_THRESHOLD,
   ESCALATION_WINDOW_MS,
   MAX_TRACKED_IPS,
