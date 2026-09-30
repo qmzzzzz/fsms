@@ -8,10 +8,18 @@
 
 ## [未发布]
 
+### 修复（2026-09-30）
+
+- **补上 `d72872c` 漏同步的两处断言**（`auditQuerySharedBuilder.test.js` / `auditQueryFindAggregateParity.test.js`）：该提交把 username 前缀查询的上界从「末字符码点 +1」改为追加 collation 哨兵 `U+FFFF`（ICU 排序下前者对 `z`/`Z`/`9` 等末字符构成**空区间**），并同步了 `auditUsernamePrefixIndex.test.js` 的契约，却漏掉了另两处同样断言该 helper 输出形状的用例 ⇒ HEAD 上稳定 2 红。断言已改为钉哨兵形状；哨兵在 collation 下确实恒大于任何 `prefix + <已分配字符>` 仍由 `auditUsernamePrefixIndex.test.js` 的 DB 回归用例负责，不在此处重复造一个纸面断言
+
+- **CC 升级封禁阈值 100 → 30，并新增预警档**（`src/services/rateLimitEscalation.js`）：封禁阈值下调的依据是 `generalLimiter`（300 次/15 分钟）触顶后**窗口内每一条后续请求都是 429**，真攻击 5 分钟可刷出数千次——100 的下界在反代部署下需要跨窗口累计才够得到，而 30 次在单个窗口内即可抵达。误封面因此扩大（30 次触顶即封 1 小时），配套新增 `CC_ESCALATION_WARNING_THRESHOLD`（默认 20）：达预警但未达封禁时先出一条 warn + `security_alerts_total{type=rate_limit_warning,level=high}`，使「慢速洪水」在被封（1h 起步、不可逆）之前就可观测。预警阈值在加载期夹取到 `封禁阈值 - 1` 并在夹取时 `logger.error` 留痕——否则配成 ≥ 封禁阈值就是一段永不触发的死代码，而读配置的人会以为它生效。窗口内计数逐次 +1 且达封禁阈值后归零重开，故预警每窗口只发一次
+- **`package.json` 的 `engines.node` 与前端实际要求对齐**：`>=18` 与 `web-admin` 的 Vite 8.1.4（`engines.node: ^20.19.0 || >=22.12.0`）冲突——声明允许的 Node 18 上 `npm ci` 能装完依赖，但 `npm run build` 结构性失败。改为 `^20.19.0 || >=22.12.0`，与 CI 的 `[20.x, 22.x]` 矩阵、前端 job 的 `24.x`、Dockerfile 的 `node:22.14.0-alpine` 落在同一条区间上
+- **`.dockerignore` 补齐被漏掉的构建上下文**：Docker 的忽略模式只从上下文根起算，bare `coverage` **不匹配** `web-admin/coverage`（与本文件必须写全 `web-admin/node_modules` / `web-admin/dist` 是同一条语义），而 `web-builder` 阶段是 `COPY web-admin/ ./` ⇒ 3.2 MB 前端覆盖率报告与 4 个 `coverage-zz*` 残留目录一直进构建上下文与镜像层。同时补 `web-admin/.mimosa`、`.mimosa`、`.jesttmp`（本机 82 MB）、`playwright-report`（9.5 MB）、`test-results`、`.lint-ratchet-selftest-*`、`zztmpctl`/`zznpmtest`（含自带 `node_modules` ~93 MB）与 `.admin-initial-password`（当前超管明文口令，59 字节）。后几项目前因 Dockerfile 走 `COPY` 白名单路径而未泄漏，但任何将来新增的宽泛 `COPY .` 都会一次性引爆
+
 ### 新增（2026-09-28）
 
 - **IP 归属地展示（离线零依赖）**：会话管理、审计日志列表、IP 黑白名单等后台界面把裸 IP 翻译为「国家·省·市·运营商」。数据采用 ip2region 官方 xdb（Apache-2.0）入库 `src/data/`（约 11MB，Docker `COPY src/` 一并带入镜像），检索器 `src/utils/ip2regionSearcher.js` 以纯 Node 实现 xdb v2 格式（向量索引 + 二分，全内存约微秒级/次），不引入任何 npm 依赖；`src/services/ipLocationService.js` 负责业务口径（复用 `ipUtils.normalizeIP` 收敛 `::ffff:` 形态、内网/保留地址统一标「内网」含 IPv6 回环/链路本地/ULA、结果 FIFO 缓存 2048 条、任何异常 fail-soft 返回 null）。`GET /api/auth/sessions` 每条会话新增 `location`（最近活跃 IP）与 `loginLocation`（登录 IP）；审计日志两条分页路径与 IP 名单列表逐行补 `location`；前端在 IP 旁以 `·` 拼接展示（后端缺字段/CIDR 网段自动省略）。数据刷新：`node scripts/update-ip2region.js`（Gitee→GitHub→jsDelivr→npm 镜像四级数据源 + 结构校验 + 探针查询 + 原子替换），`--check` 只打印当前数据构建日期
-- **CC 防护升级闭环**（`src/services/rateLimitEscalation.js`）：限流从「只挡不罚」变为「可观测 + 可升级」——每次 429 上报 `security_alerts_total{type=rate_limit_triggered}`；同一 IP 在 5 分钟窗口内触顶 100 次（`CC_ESCALATION_THRESHOLD` / `CC_ESCALATION_WINDOW_MS` 可调）即按与暴力破解同一条封禁阶梯（1h→4h→24h→7d，30 天审计事件计数升档）自动封禁。防误封设计：白名单 IP 的资源型限流直接 skip 不会产生升级信号；阈值 100 意味着「被告知限速后仍持续高频重试」；凭据型账号维度桶不接入（无 IP 可封）；升级链路全程 fail-soft 不拖垮 429 响应。计数为进程内固定窗口（多实例下按实例数摊薄，少封不误封）
+- **CC 防护升级闭环**（`src/services/rateLimitEscalation.js`）：限流从「只挡不罚」变为「可观测 + 可升级」——每次 429 上报 `security_alerts_total{type=rate_limit_triggered}`；同一 IP 在 5 分钟窗口内触顶达阈值（`CC_ESCALATION_THRESHOLD` / `CC_ESCALATION_WINDOW_MS` 可调，**2026-09-30 由 100 下调为 30 并新增预警档，详见上方「修复」段**）即按与暴力破解同一条封禁阶梯（1h→4h→24h→7d，30 天审计事件计数升档）自动封禁。防误封设计：白名单 IP 的资源型限流直接 skip 不会产生升级信号；凭据型账号维度桶不接入（无 IP 可封）；升级链路全程 fail-soft 不拖垮 429 响应。计数为进程内固定窗口（多实例下按实例数摊薄，少封不误封）
 - 数据文件入库配套：`check-utf8` 门禁的常见二进制扩展名清单加入 `.xdb`，`.gitattributes` 钉 `*.xdb binary`
 
 ### 变更（2026-09-28）
@@ -20,9 +28,10 @@
 - **暴力破解自动封禁判据只看 IP 维度**（总账 R-H2）：`checkBruteForce` 此前以 `max(userFailures, ipFailures)` 达标即封禁**当前请求 IP**——分布式撞单账号时把可能只贡献了 1 次失败的 IP（NAT 出口后的无辜用户/受害者本人）封 1 小时。现改为告警与审计照发（双维度都是真实攻击信号，审计 body 含双维度计数），封禁仅在 `ipFailures` 达阈值时执行
 - **wellKnownRoutes 三个限流器接入共享存储**（总账 P-9）：`/csp-report`、`/client-errors`、`/.well-known/security.txt` 的限流计数从每实例独立 MemoryStore 改为 `makeSharedStore`（无 Redis 时行为不变），多副本部署下攻击者不再能对每个副本各刷满一份配额
 
-### 测试基线（2026-09-10 本地实测）
+### 测试基线
 
-- 后端：130 套件 / 1736 例全绿；覆盖率语句 94.66% / 分支 85.12% / 函数 92.39% / 行 96.07%（含独立设阈模块）
+- 后端：477 个套件 / 4583 个用例文件（2026-09-30 按文件数与 `test()/it()` 声明数实测；此前记的「130 套件 / 1736 例」与 `jest.config.js` 注释里的「280 套 / 3300+ 例」均已失真一个台阶）
+- 覆盖率阈值：全局 br 79 / fn 87 / ln 91 / st 91，另 36 个安全关键文件单独设阈；**不复写实时覆盖率数值**——要当前数字看 `npm run test:coverage` 的输出，写死即立刻失真
 
 ### 新增
 

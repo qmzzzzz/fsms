@@ -17,8 +17,14 @@
  * 门禁 2：E2E 里引用的自研 class 选择器必须在真实前端源码中存在。
  *   起因是实测到的三个死选择器：`.app-main` 与 `.role-list` 在 web-admin/src
  *   中出现 0 次，但它们被写在 `.app-main, main` 这类「或」选择器里，
- *   命中的一直是恒真的兜底分支——移动端抽屉那条旅程因此从未断言过抽屉。
+ *   命中的其实是恒真的兜底分支——移动端抽屉那条旅程因此从未断言过抽屉。
  *   这类缺陷人工几乎看不出来（选择器"看起来"没问题），但可以机检。
+ *
+ * 门禁 3：ci.yml 里 E2E 防裁剪下界 MIN_PASSED 必须与实际旅程数对得上。
+ *   该下界唯一的职责是「旅程被静默裁剪时报警」，而它自己就是一个需要人工同步的
+ *   魔数——这类魔数在本仓被反复记录为失真源头（coverage 阈值、bundle 预算、
+ *   测试基线数字都栽过同一处）。此处把「人工同步」换成「机检对账」：数字不再
+ *   需要靠人记得改，增删旅程与 CI 常量必须同时改，否则 test job 直接红。
  */
 
 const fs = require('fs');
@@ -116,6 +122,75 @@ describe('playwright.config.js：失败取证能力与 retries 一致', () => {
   test('两个设备项目都在', () => {
     const names = config.projects.map((p) => p.name);
     expect(names).toEqual(expect.arrayContaining(['desktop-chromium', 'mobile-chrome']));
+  });
+});
+
+describe('E2E 旅程数与 CI 防裁剪下界一致', () => {
+  const config = require('../../playwright.config.js');
+  const CI_YML = path.join(ROOT, '.github', 'workflows', 'ci.yml');
+
+  /**
+   * 统计 spec 文件里声明的**无条件**旅程数。
+   *
+   * 三类形态必须分开，否则数字会错：
+   *  1. `test(...)` / `test.only(...)` —— 真旅程，计入；
+   *  2. `test.skip(cond)` / `test.fixme(...)` —— 条件旅程，**不计入**下界。
+   *     它们跑不跑由 E2E_USER/E2E_PASS 是否注入决定，计入下界等于把"凭据没注入"
+   *     变成门禁永远红；而真被跳过时 ci.yml 的 `skipped > 0` 已经判红，不重复计；
+   *  3. `test.beforeEach` / `test.afterEach` / `test.describe` —— 不是旅程。
+   *     这里最容易被误算：`test.beforeEach` 同样是"行首 test.xxx(" 形态，
+   *     用宽松正则统计会凭空多出十几个"旅程"，下界跟着虚高，真正被裁剪时反而拦不住。
+   */
+  const countJourneys = (files) => {
+    let unconditional = 0;
+    let conditional = 0;
+    for (const file of files) {
+      for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+        if (!/^\s*test(?:\.\w+)*\s*\(/.test(line)) continue;
+        if (/^\s*test\.(beforeEach|afterEach|beforeAll|afterAll|describe)\s*\(/.test(line))
+          continue;
+        if (/^\s*test\.(skip|fixme)\s*\(/.test(line)) {
+          conditional += 1;
+        } else {
+          unconditional += 1;
+        }
+      }
+    }
+    return { unconditional, conditional };
+  };
+
+  const specFiles = walk(E2E_DIR, ['.spec.js']);
+  const { unconditional, conditional } = countJourneys(specFiles);
+  const expectedMinPassed = unconditional * config.projects.length;
+
+  test('确实数到了旅程（否则下界对账是空转）', () => {
+    expect(specFiles.length).toBeGreaterThan(0);
+    expect(unconditional).toBeGreaterThan(0);
+  });
+
+  test('ci.yml 的 MIN_PASSED 必须等于 无条件旅程数 × project 数', () => {
+    const ciYml = fs.readFileSync(CI_YML, 'utf8');
+    const m = ciYml.match(/const MIN_PASSED = (\d+);/);
+    // 先钉住"取得到"：取不到时下面的 toBe 会拿 undefined 比数字，报错信息会被
+    // 误读成"数字不对"，而真实原因是这道门禁被改名或删掉了。
+    expect(m).not.toBeNull();
+    expect(Number(m[1])).toBe(expectedMinPassed);
+  });
+
+  test('下界不得低于实际值（防止靠调小 MIN_PASSED 掩盖删减）', () => {
+    // 上一条已钉住等式；这条单独存在，是为了让"把数字改小来让门禁变绿"这种绕过
+    // 在失败信息里直接指向意图，而不是让人去比对两个大数字猜哪里错了。
+    const minPassed = Number(fs.readFileSync(CI_YML, 'utf8').match(/const MIN_PASSED = (\d+);/)[1]);
+    expect(minPassed).toBeGreaterThanOrEqual(expectedMinPassed);
+  });
+
+  test('条件旅程不计入下界（否则凭据缺失时门禁永远红）', () => {
+    // 把这个"不算"钉成不变式：将来有人为了保险起见把条件旅程也加进 MIN_PASSED，
+    // 门禁会在 E2E_USER/PASS 未注入的 runner 上恒红，而那不是缺陷、只是配置没到位。
+    expect(conditional).toBeGreaterThan(0);
+    const minPassed = Number(fs.readFileSync(CI_YML, 'utf8').match(/const MIN_PASSED = (\d+);/)[1]);
+    const allJourneys = (unconditional + conditional) * config.projects.length;
+    expect(minPassed).toBeLessThan(allJourneys);
   });
 });
 

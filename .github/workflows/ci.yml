@@ -450,9 +450,15 @@ jobs:
         # 2026-09-28 补上第二半：原实现只断言 skipped==0，而且把「日志里根本没有汇总行」
         # 默认读成 skipped=0 —— 于是跑崩 / 配置错 / 被 --project 过滤成空集时**照样通过**。
         # 现改为 fail-closed：汇总行必须存在，且 passed 有下界。
-        # 下界 = 16 条旅程（6 个 spec） × 2 个 project = 32，不是"覆盖率阈值"，
+        # 下界 = 16 条无条件旅程（6 个 spec） × 2 个 project = 32，不是"覆盖率阈值"，
         # 而是「旅程被静默裁剪」的告警；确实要删旅程时同步改这个数字，
         # 让删减在 diff 里可见（与 eslint.ratchet.json 收紧必须走评审同一条纪律）。
+        # 刻意只数**无条件**旅程：另有 9 条 `test.skip(cond)` 条件旅程，它们跑不跑
+        # 由 E2E_USER/E2E_PASS 是否注入决定，把它算进下界会在凭据缺失时把门禁
+        # 变成"永远红"；而它们真被跳过时下方 `skipped > 0` 已经判红，不在此处重复计。
+        # 该数字不再靠人工同步：由 src/tests/playwrightConfig.test.js 的
+        # 「E2E 旅程数与 CI 防裁剪下界一致」门禁做实对账——增删旅程而不同步改这里，
+        # 或反过来把这个数字改小来掩盖删减，都会在 test job 里直接变红。
         # 依据：Playwright 的 generateSummary() 遍历 suite.allTests() 只产出**一个**全局
         # 汇总行（runner/index.js:1210），所以首个匹配即全量值，不存在按 project 分行的歧义。
         # 注意 `N skipped` / `N failed` 两行**只在计数非 0 时才打印**

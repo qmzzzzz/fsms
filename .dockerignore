@@ -14,8 +14,28 @@ README.md
 backup
 backups
 *.ndjson.gz
-coverage
 .nyc_output
+# 覆盖率产物：bare `coverage` 只匹配**根级**目录（与下方必须写全
+# `web-admin/node_modules` / `web-admin/dist` 是同一条 Docker 语义），
+# 因此 `web-admin/coverage` 从未被排除 —— 而 web-builder 阶段是
+# `COPY web-admin/ ./`，3 MB 覆盖率报告 + 4 个 coverage-zz* 残留目录
+# 会一并进构建上下文。`coverage-*` 这一族同样要排：本地按分支跑覆盖率时
+# 留下的临时目录名不固定，只写 `coverage` 挡不住。
+coverage
+coverage-*
+web-admin/coverage
+web-admin/coverage-*
+# 会话/工具状态与测试临时目录（根级与 web-admin 下同名）
+.mimosa
+web-admin/.mimosa
+.jesttmp
+# lint 棘轮自测的临时目录（gateSelfTest 的进程被 kill 时会残留十个）
+.lint-ratchet-selftest-*
+playwright-report
+test-results
+# 交互式探针工作区（含自带 node_modules，~93 MB）
+zztmpctl
+zznpmtest
 web-admin/node_modules
 web-admin/dist
 .vscode
@@ -31,4 +51,10 @@ secrets
 
 # 自签名 TLS 证书同理（仅本地开发使用）
 certs
+
+# 启动时落盘的超管初始口令（initData.persistInitialPassword）：
+# 单文件 59 字节，但它就是**当前超管账号的明文口令**。
+# Dockerfile 只 COPY 白名单路径故暂不泄漏，然而任何将来新增的
+# 宽泛 `COPY .` 都会一次性把它写进镜像层。
+.admin-initial-password
 
