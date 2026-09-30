@@ -2,17 +2,23 @@
  * 审计 action 白名单「可达性技术文档」（P3-62）
  *
  * 审计报告 §3.4 / §11.1 指出：`constants/audit.js` 的 AUDIT_LOG_ACTIONS 共 144 条，
- * 其中一批**永不产生**——既没有路由能派生出它们（GET 路由不在 auditGetPaths 白名单内，
- * 全局审计中间件直接跳过），也没有任何源码写入调用点。这类条目让审计页的下拉筛选
- * 里出现「永远筛不出结果」的选项，也让「白名单 = 实际可写入集合」这一心智模型失真。
+ * 其中一批**永不产生**——既没有「会被审计的」路由能派生出它们，也没有任何源码写入
+ * 调用点。这类条目让审计页的下拉筛选里出现「永远筛不出结果」的选项，也让
+ * 「白名单 = 实际可写入集合」这一心智模型失真。
  *
- * 报告给出的两种处置（删条目 / 补 auditGetPaths）都涉及**行为变更**，且删条目会
- * 破坏历史数据可查性（库里已有的 action 一旦不在白名单，validateEnum 直接 400）。
- * 因此本文件采取第三种处置：**把「永不产生」的集合钉成可执行技术文档**，达到：
+ * 报告给出的两种处置（删条目 / 补白名单）都涉及**行为变更**，且删条目会破坏历史数据
+ * 可查性（库里已有的 action 一旦不在白名单，validateEnum 直接 400）。因此本文件采取
+ * 第三种处置：**把「永不产生」的集合钉成可执行技术文档**，达到：
  *   1. 不删任何条目（历史数据仍可查）；
- *   2. 集合一旦变化（新增/减少）立刻红——新增意味着有人补了 auditGetPaths 或加了写入点，
- *      减少意味着有人删了条目（需同步更新技术文档并说明理由）；
+ *   2. 集合一旦变化（新增/减少）立刻红——新增意味着有人把某条 GET 路由移出了豁免
+ *      清单或加了写入点，减少意味着有人删了条目（需同步更新技术文档并说明理由）；
  *   3. 技术文档本身即「待清理清单」，附带每条的实测证据（路由 / 方法 / 原因）。
+ *
+ * 2026-09-30 判据反转（security.js：auditGetPaths → auditGetExcludePaths）：GET/HEAD
+ * 从「命中 6 条允许清单才审计」改为「默认审计、命中豁免清单才跳过」。原 A 类 25 条里
+ * 有 16 条因此变成真实落库的 action（设备/报警/巡检的 view/stats、report_*、
+ * security_stats/overview/alerts/ip-list_query），从本技术文档移除；剩 9 条的「永不产生」
+ * 原因从「未被允许清单覆盖」变成「被豁免清单显式跳过」。
  *
  * 度量方法（与生产代码同源，非手抄）：
  *   - 路由派生：读 src/routes/*.js 的 `router.<method>('<path>'`，按 app.js 的挂载前缀
@@ -21,7 +27,7 @@
  *   - 源码写入：与正向对账闸共用 helpers/auditWriteSites 的扫描器（见 scanWrittenActions
  *     的注释）——两套判据各写一份时，"写入"在两处不是同一个事实（F-201）；
  *   - 「永不产生」= 在白名单内 ∧ 不在源码写入集合 ∧ （不在路由派生集合 ∨ 该路由为 GET
- *     且未被 security.js 的 auditGetPaths 覆盖）。
+ *     且命中 security.js 的 auditGetExcludePaths 豁免清单）。
  */
 
 const fs = require('fs');
@@ -45,26 +51,31 @@ function readMounts() {
   return mounts;
 }
 
-/** security.js 的 auditGetPaths（从源码读，不手抄——手抄必然漂移） */
-function readAuditGetPaths() {
+/** security.js 的 auditGetExcludePaths（从源码读，不手抄——手抄必然漂移） */
+function readAuditGetExcludePaths() {
   const secSrc = fs.readFileSync(path.join(SRC_DIR, 'middleware/security.js'), 'utf8');
-  const start = secSrc.indexOf('auditGetPaths = [');
+  const start = secSrc.indexOf('auditGetExcludePaths = [');
   if (start < 0) {
-    throw new Error('security.js 里找不到 auditGetPaths 的起点：生产结构已变，守卫必须显式失败');
+    throw new Error(
+      'security.js 里找不到 auditGetExcludePaths 的起点：生产结构已变，守卫必须显式失败'
+    );
   }
   // 数组成员全是字符串字面量、不含嵌套方括号 → 起点后的第一个 ']' 就是收尾。
-  // 原先这里写的是 indexOf('] = options;')，而生产源码里**根本没有这个串**
-  // （实际是 `],\n  } = options;`）→ end = -1 → slice(start, -1) 一路截到
-  // 倒数第二个字符（实测 12,289 字符 ≈ 整个文件后半段），全靠后面
-  // `.startsWith('/api/')` 侥幸把噪音滤掉。解析失败必须响，不能静默降级。
+  // 历史教训（readAuditGetPaths 时代）：把「数组收尾」锚在源码里并不存在的串上，
+  // end=-1 会一路截到文件后半段（实测 12,289 字符），全靠 startsWith('/api/')
+  // 侥幸滤噪。解析失败必须响，不能静默降级。
   const end = secSrc.indexOf(']', start);
-  if (end < 0) throw new Error('auditGetPaths 数组没有收尾的 ]');
+  if (end < 0) throw new Error('auditGetExcludePaths 数组没有收尾的 ]');
   const block = secSrc.slice(start, end);
   const paths = [...block.matchAll(/'([^']+)'/g)]
     .map((m) => m[1])
     .filter((p) => p.startsWith('/api/'));
-  if (paths.length === 0) {
-    throw new Error('解析到 0 条 auditGetPaths：解析器与生产代码已失配，不得当作「无需审计」放行');
+  // 0 条只在字面量真是 `[]` 时合法（豁免清空 = 审计全部 GET，是合法策略）；
+  // 有内容却解析出 0 条说明解析器与生产代码失配，必须响。
+  if (paths.length === 0 && block.replace(/\s/g, '') !== '[]') {
+    throw new Error(
+      '解析到 0 条 auditGetExcludePaths：解析器与生产代码已失配，不得当作「全部豁免」放行'
+    );
   }
   return paths;
 }
@@ -81,8 +92,10 @@ const concretize = (routePath) =>
 function scanRoutes() {
   const { deriveAction, deriveCategory } = require('../../utils/auditMeta');
   const mounts = readMounts();
-  const auditGetPaths = readAuditGetPaths();
-  const isAudited = (full) => auditGetPaths.some((p) => full === p || full.startsWith(`${p}/`));
+  const auditGetExcludePaths = readAuditGetExcludePaths();
+  // 与生产 isGetAudit 同尺：GET/HEAD 默认审计，命中豁免清单才跳过
+  const isExcluded = (full) =>
+    auditGetExcludePaths.some((p) => full === p || full.startsWith(`${p}/`));
 
   const rows = [];
   for (const f of fs.readdirSync(ROUTES_DIR)) {
@@ -100,7 +113,7 @@ function scanRoutes() {
         route,
         action: deriveAction(method, concrete, category),
         // 非 GET 走 auditLog 中间件的 operations 默认集（POST/PUT/DELETE/PATCH）
-        audited: method === 'GET' ? isAudited(route) : true,
+        audited: method === 'GET' ? !isExcluded(route) : true,
       });
     }
   }
@@ -133,16 +146,19 @@ function scanWrittenActions() {
  * 判定口径（与下方用例完全一致，不是手抄清单）：
  *   在白名单内 ∧ 没有任何「会被审计的」路由能派生出它 ∧ 没有任何源码写入点。
  *   「会被审计的路由」= 非 GET 路由（走 auditLog 中间件的 operations 默认集），
- *     或 GET 但命中 security.js 的 auditGetPaths 白名单。
+ *     或 GET 且未命中 security.js 的 auditGetExcludePaths 豁免清单（2026-09-30
+ *     反转后 GET/HEAD 默认审计）。
  *
  * 分两类，处置口径不同：
  *
- * ── A 类（25 条）：路由可派生，但该 GET 路由未被 auditGetPaths 覆盖
- *    全局审计中间件对 GET 只在命中 auditGetPaths 时才记录（见 security.js 的 isGetAudit），
- *    因此这批 action 虽能由 deriveAction 推导出来，实际永远不会落库。
- *    它们正是报告 §3.4「看了哪台设备/哪个报警无留痕」的清单本身。
- *    是否纳入属合规口径决策（报告 §13 V-9 明确标注「无法从代码判断」），
- *    本技术文档不代为决定——只保证一旦决定并落地（补 auditGetPaths），这里立刻红并提示更新。
+ * ── A 类（9 条）：路由可派生，但该 GET 路由命中 auditGetExcludePaths 豁免清单
+ *    全局审计中间件对 GET 默认审计、命中豁免清单才跳过（见 security.js 的 isGetAudit），
+ *    因此这批 action 虽能由 deriveAction 推导出来，实际永远不会落库。这 9 条都在
+ *    豁免清单的两种口径内（预认证/登录流程面、纯自读面，依据见 security.js 的
+ *    auditLog 头注）。反转前本类有 25 条（当时口径：GET 不在 6 条允许清单内，
+ *    正是报告 §3.4「看了哪台设备/哪个报警无留痕」的清单本身）；反转把其中 16 条
+ *    变成真实落库的 action 并从本文档移除——§3.4 的缺口由此收口。
+ *    把某条 GET 路由移出豁免清单 ⇒ 对应条目变可达 ⇒ 本文档立刻红并提示移除。
  *
  * ── B 类（14 条）：既无路由派生、也无源码写入点
  *    三种成因（处置建议不同，勿一刀切删除）：
@@ -162,10 +178,13 @@ function scanWrittenActions() {
  *        删除会破坏存量数据的可查性（validateEnum 对不在白名单的 action 直接 400）。
  *
  * ⚠️ 本技术文档不是「免责名单」：下面第二个用例会反向校验——任何登记的条目一旦变得可达
- *    （有人补了 auditGetPaths 或加了写入点），测试立即失败，强制同步更新技术文档。
+ *    （有人把 GET 路由移出了豁免清单，或加了写入点），测试立即失败，强制同步更新技术文档。
  */
 const NEVER_PRODUCED = [
-  // ── A 类：GET 路由存在但未被 auditGetPaths 覆盖 ──
+  // ── A 类：GET 路由命中 auditGetExcludePaths 豁免清单（2026-09-30 反转后 9 条；
+  //    反转前 25 条里的 device/alarm/inspection view+stats、report_*、
+  //    security_stats/overview/alerts/ip-list_query 共 16 条已随反转真实落库，
+  //    从本技术文档移除）──
   'auth_captcha',
   'auth_captcha-status',
   'auth_login-public-key',
@@ -174,22 +193,6 @@ const NEVER_PRODUCED = [
   'auth_mfa_status',
   'security_my-info',
   'security_bindings',
-  'security_stats',
-  'security_overview',
-  'security_alerts',
-  'security_ip-list_query',
-  'device_stats',
-  'device_expiring',
-  'device_reminders',
-  'device_view',
-  'alarm_stats',
-  'alarm_view',
-  'inspection_stats',
-  'inspection_view',
-  'report_dashboard',
-  'report_devices',
-  'report_alarms',
-  'report_inspections',
   'security_my-logs',
 
   // ── B 类 b1：语义已被替代/改名 ──
@@ -243,7 +246,7 @@ describe('审计 action 白名单可达性技术文档（P3-62）', () => {
     const stale = NEVER_PRODUCED.filter(
       (a) => whitelist.has(a) && (auditedDerived.has(a) || written.has(a))
     );
-    // 命中说明该条目已变得可达（有人补了 auditGetPaths 或加了写入点）：
+    // 命中说明该条目已变得可达（有人把 GET 路由移出了豁免清单，或加了写入点）：
     // 请从本技术文档移除，并确认审计页筛选行为符合预期
     expect(stale).toEqual([]);
   });
@@ -259,17 +262,19 @@ describe('审计 action 白名单可达性技术文档（P3-62）', () => {
   // 解析器自检：这条用例不为生产代码服务，守的是本文件自己的取数逻辑。
   // 曾经的实现把「数组收尾」锚在一个源码里并不存在的串上，end=-1 于是截到
   // 整个文件后半段（实测 12,289 字符）——只要样例还在，这类失配必须当场响。
-  test('auditGetPaths 解析器边界自证（不得越出数组尾部）', () => {
-    const paths = readAuditGetPaths();
-    expect(paths.length).toBeGreaterThanOrEqual(5);
+  test('auditGetExcludePaths 解析器边界自证（不得越出数组尾部）', () => {
+    const paths = readAuditGetExcludePaths();
+    expect(paths.length).toBeGreaterThanOrEqual(1);
     expect(paths.every((p) => p.startsWith('/api/'))).toBe(true);
     // 数组本身只占源码很小一段；若哪天解析结果里混进了数组之外的字面量，
     // 数量与内容都会先在这里露出来
     const secSrc = fs.readFileSync(path.join(SRC_DIR, 'middleware/security.js'), 'utf8');
-    const start = secSrc.indexOf('auditGetPaths = [');
+    const start = secSrc.indexOf('auditGetExcludePaths = [');
     const end = secSrc.indexOf(']', start);
-    expect(end - start).toBeLessThan(1000);
-    expect(paths).toContain('/api/security/audit-logs');
+    expect(end - start).toBeLessThan(1500);
+    // 钉一条豁免清单的锚（豁免清空成 [] 是合法策略 = 审计全部 GET，届时本断言
+    // 与 A 类台账需同步移除并说明理由）
+    expect(paths).toContain('/api/auth/captcha');
   });
 
   test('技术文档无重复项', () => {

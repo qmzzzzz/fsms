@@ -535,7 +535,7 @@ const matchesPathPrefix = (fullPath, prefix) => {
   return f === p || f.startsWith(`${p}/`);
 };
 
-/** 列表版前缀判定（excludePaths / auditGetPaths / RESERVED_PREFIXES / skipPaths 共用） */
+/** 列表版前缀判定（excludePaths / auditGetExcludePaths / RESERVED_PREFIXES / skipPaths 共用） */
 const matchesAnyPathPrefix = (prefixes, fullPath) =>
   (prefixes || []).some((prefix) => matchesPathPrefix(fullPath, prefix));
 

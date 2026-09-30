@@ -49,9 +49,9 @@ describe('错误截断的响应在审计里必须是失败', () => {
         req.auditCategory = 'security';
         next();
       },
-      // 探针路径本身不在生产 GET 审计白名单里（auditGetPaths 只列 6 个前缀），
-      // 必须显式把它加进去，否则中间件在入口就 next() 了，一条审计都不会产生。
-      auditLog({ auditGetPaths: ['/api/probe-stream'] }),
+      // 2026-09-30 反转后 GET 默认审计、命中豁免清单才跳过（auditGetExcludePaths）。
+      // 这里显式传空豁免清单自证意图：本探针永远不被豁免，无论生产清单怎么改。
+      auditLog({ auditGetExcludePaths: [] }),
       routes
     );
     app.use(errorHandler);

@@ -746,6 +746,23 @@ const addToBlacklist = async (
  * 路径取值约束：category/action 派生与 excludePaths 判断统一使用 req.originalUrl
  * （见 utils/auditMeta）。Express 在 `app.use('/api/', mw)` + `router` 两级挂载下会
  * 逐层剥离 req.path，用 req.path 会导致全部记录退化为 category=system 且排除规则失效。
+ *
+ * 敏感读取判据（2026-09-30 反转，收口审计报告 §3.4）：GET/HEAD **默认全量审计**，
+ * 仅 auditGetExcludePaths 清单显式豁免。原实现是 6 条前缀的**允许清单**（auditGetPaths），
+ * 失效形态是 fail-open：新增一条敏感 GET 路由而忘记登记，它就零留痕——设备/报警/
+ * 巡检的列表与详情正是一批这样的盲区（HEAD 归一修复只救了已登记的 6 条前缀；列表
+ * 与详情共用派生 action `*_view`，无需新增 action 登记；tests/constants/
+ * auditActionReachability 的 A 类 25 条即反转前实测的盲区清单，反转后剩 9 条）。
+ * 反转后默认 fail-closed：新路由不做任何登记即被审计；想豁免必须在清单里写明理由，
+ * 归入口径只有两类：
+ *   a) 预认证/登录流程面——无业务数据，调用频率由认证流程决定（每次登录页、
+ *      每次登录尝试都打），审计只灌大集合，证据价值由 login_failed/封禁事件承担；
+ *   b) 纯自读面——返回的只是**请求者本人**的会话/绑定/日志状态，且被前端在每次
+ *      导航时轮询；数据主体即请求者，他人读不到，操作留痕由写路径承担（改密/
+ *      MFA 变更/踢会话均为写方法，照常审计）。
+ * 已知取舍（如实记录）：看板若轮询设备/报警列表，每次轮询都是一条审计记录——真
+ * 发生时按上面口径逐条评估后加入豁免清单，而不是回退到允许清单；匿名/未匹配路径
+ * 的 GET 探测也会留痕（与既有 /api/users 行为一致），这正是探测证据。
  */
 const auditLog = (options = {}) => {
   // 延迟 require：originCheck 顶层就 require 了本模块（recordEarlyRejection），
@@ -756,22 +773,23 @@ const auditLog = (options = {}) => {
     // 各自漂移过：一处加了方法，另一处就出现"拦了但没审计"/"审计了但没拦"）
     operations = WRITE_METHODS,
     excludePaths = ['/api/auth/login', '/api/auth/refresh'],
-    // 敏感读取路径白名单：GET 请求命中这些前缀时也走审计，但不记录请求体；
-    // 报表导出/审计日志查询与导出为批量数据出口，必须纳入审计（补齐审计盲区）。
-    // P0-6 修复（2026-09-17）：两个导出接口原先只包装 res.json/res.send，而导出
-    // 走 res.write/res.end（services/auditExportService.js）与 workbook.xlsx.write(res)
-    // （services/reportWorkbookService.js，ExcelJS 内部同样是 res.write/res.end）——
-    // 实测真实下载成功但 auditBuffer 计数为 0。现响应包装覆盖 write/end，这两条
-    // 路径才真正被审计。
-    // 注意：本白名单只覆盖下列 6 个前缀，其余敏感 GET（设备/报警/巡检详情与各
-    // stats 等）仍未纳入——见审计报告 §3.4，勿据本注释认为「GET 审计已全覆盖」。
-    auditGetPaths = [
-      '/api/security/config',
-      '/api/users',
-      '/api/roles',
-      '/api/permissions',
-      '/api/reports/export',
-      '/api/security/audit-logs',
+    // GET/HEAD 敏感读取的**豁免清单**：默认全量审计，命中才跳过（口径与反转依据
+    // 见本中间件头部注释）；GET 审计不记录请求体。
+    // P0-6 修复（2026-09-17）历史备注：导出类响应只经过 write/end 而非 json/send，
+    // 响应包装现覆盖 write/end——本反转不影响该修复，报表/审计导出照常被审计。
+    auditGetExcludePaths = [
+      // a) 预认证/登录流程面
+      '/api/auth/captcha',
+      '/api/auth/captcha-status',
+      '/api/auth/login-public-key',
+      '/api/auth/mfa/status', // 登录第二步轮询
+      // b) 纯自读面（数据主体即请求者本人 + 前端高频轮询）
+      '/api/auth/session', // 前端路由守卫每次导航轮询
+      '/api/auth/me',
+      '/api/auth/sessions', // 踢会话是 DELETE（写方法），仍审计
+      '/api/security/my-info',
+      '/api/security/bindings',
+      '/api/security/my-logs',
     ],
   } = options;
 
@@ -785,23 +803,24 @@ const auditLog = (options = {}) => {
       return next();
     }
 
-    // 判断是否为需审计的 GET 敏感读取（命中白名单前缀）
+    // 判断是否为需审计的 GET/HEAD 敏感读取：**默认审计，命中豁免清单才跳过**。
     // 必须与路由同尺（大小写不敏感）：GET /API/reports/export 真实执行导出，
-    // 若这里仍做大小写敏感比较，改一个字母大小写即可静默批量导出数据而零留痕
+    // 若这里做大小写敏感比较，改一个字母大小写即可静默批量取数而零留痕
+    // （反转后同尺的意义不变：改大小写换来的只是一条审计记录，不是静默）。
     //
     // HEAD 与 GET 同判：Express 的 Route.dispatch 把 HEAD 归一成 GET
     // （`if (method === 'HEAD') method = 'GET'`），所以 `app.get('/api/reports/export')`
     // 的处理函数对 HEAD **全量执行**——报表导出把 workbook 完整生成一遍、Node 只是
-    // 不把响应体写出去。原先这一行只认 `req.method === 'GET'`，而 WRITE_METHODS
-    // 又不含 HEAD，于是 HEAD 是一条既跑了业务、又零留痕的口子。实测（真实 createApp，
-    // 带 user:read 的合法令牌）：GET /api/users 审计增量 1、HEAD /api/users 审计增量 0。
-    // 攻击者拿到一个只读账号即可反复批量取数而审计页面上什么都不存在。
+    // 不把响应体写出去。原先只认 `req.method === 'GET'` 时，HEAD 是一条既跑了业务、
+    // 又零留痕的口子。实测（真实 createApp，带 user:read 的合法令牌）：
+    // GET /api/users 审计增量 1、HEAD /api/users 审计增量 0。反转后 HEAD 与 GET
+    // 走同一份豁免清单，整类口子随反转一起闭合。
     // HEAD 已在 constants/audit.js 的 AUDIT_HTTP_METHODS 里，不需要动 schema。
     const isGetAudit =
       (req.method === 'GET' || req.method === 'HEAD') &&
-      matchesAnyPathPrefix(auditGetPaths, fullPath);
+      !matchesAnyPathPrefix(auditGetExcludePaths, fullPath);
 
-    // 只记录指定类型的操作，或命中 GET 审计白名单
+    // 只记录指定类型的操作，或未豁免的 GET/HEAD 敏感读取
     if (!operations.includes(req.method) && !isGetAudit) {
       return next();
     }

@@ -169,7 +169,7 @@ const AUDIT_LOG_ACTIONS = [
   'security_my-info', // GET /api/security/my-info
   'security_bindings', // GET /api/security/bindings
   'security_stats', // GET /api/security/stats
-  'security_overview', // GET /api/security/overview（auditGetPaths 未覆盖，防未来接入）
+  'security_overview', // GET /api/security/overview（2026-09-30 GET 默认审计反转后已真实落库）
   'security_alerts', // GET /api/security/alerts
   'security_users_view', // GET 类用户子路径兜底
   'security_users_mfa_reset', // PUT /api/security/users/:userId/mfa/reset
@@ -192,10 +192,10 @@ const AUDIT_LOG_ACTIONS = [
   'report_devices', // GET /api/reports/devices
   'report_alarms', // GET /api/reports/alarms
   'report_inspections', // GET /api/reports/inspections
-  'report_export', // GET /api/reports/export（auditGetPaths 覆盖）
+  'report_export', // GET /api/reports/export（GET 默认审计，批量数据出口）
   'security_report', // POST /api/security/report
   'security_my-logs', // GET /api/security/my-logs
-  'security_audit-logs', // GET /api/security/audit-logs（auditGetPaths 覆盖）
+  'security_audit-logs', // GET /api/security/audit-logs（GET 默认审计）
   'security_audit-logs_export', // GET /api/security/audit-logs/export
   // 设备级会话管理（sid 为 UUID，已由 deriveAction 剔除动态段）
   'auth_sessions', // GET /api/auth/sessions、DELETE /api/auth/sessions/:sid

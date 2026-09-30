@@ -170,8 +170,8 @@ describe('审计与日志两类长期载体不得存明文凭据', () => {
       const app = express();
       app.use(express.json());
       app.use('/api/', auditLog());
-      // 用 POST：GET 只有命中 auditGetPaths 白名单才审计（本探针不在名单内，
-      // 用 GET 会得到"没有审计记录"的假信号，而不是"清洗没生效"）
+      // 用 POST：2026-09-30 反转后 GET 也默认审计（本探针不在豁免清单内），
+      // 沿用 POST 保持历史形态——该用例验证的是 query 脱敏，与动词无关
       app.post('/api/probe-otp', (_req, res) => res.json({ ok: true }));
 
       // 必须先取 calls 再 mockRestore：恢复 spyOn 会把 mock.calls 清空，
