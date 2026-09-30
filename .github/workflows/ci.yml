@@ -33,6 +33,13 @@ jobs:
             package-lock.json
             web-admin/package-lock.json
 
+      # 刻意**不加** --ignore-scripts：下方的 `npm test` 需要内存 MongoDB。
+      # devDeps 里唯一带 install 脚本的 mongodb-memory-server 的 postinstall 负责预下载
+      # mongod 二进制；若在此跳过，下载会延迟到 jest worker 内首次 create 时才发生——
+      # 本仓库已有实证记录（见下方 --forceExit 注释）：mongodb-memory-server 子进程
+      # 句柄与 jest 主进程退出存在清理竞态。把「安装期的一次性二进制下载」挪进测试进程
+      # 会新增一个不可控的时序面；而本 job 装的是 devDeps，其供应链面本就由 security-audit
+      # 里的安装脚本硬门禁守着，两相权衡不加更稳。
       - name: Install dependencies
         run: npm ci
 
@@ -163,11 +170,20 @@ jobs:
           echo "### Backend npm audit" >> "$GITHUB_STEP_SUMMARY"
           tail -3 audit-backend.txt >> "$GITHUB_STEP_SUMMARY" || true
 
-      # P2-⑫：生产依赖树禁止任何安装脚本（fail-closed + 显式白名单）。
+      # P2-⑫：安装脚本必须显式登记（fail-closed + 显式白名单），分两档。
       # 比 --ignore-scripts 更强：ignore-scripts 只让本机跳过，树里有没有脚本没人看；
-      # 这里把不变量变成 CI 硬门禁——新增带 install 脚本的生产依赖必须登记理由。
+      # 这里把不变量变成 CI 硬门禁——新增带 install 脚本的依赖必须登记理由。
+      # 判据来源是 package-lock.json 的 packages 段（npm ls --json 不含 scripts 字段）；
+      # 该 job 因上游 `npm audit` 已隐式装好依赖，锁文件必然就位。
       - name: Check prod dependency install scripts
-        run: node scripts/check-prod-install-scripts.js
+        # 生产树：Dockerfile runtime 阶段 `npm ci --omit=dev --ignore-scripts` 的安全性
+        # 由这一档保证——它证明忽略脚本后的生产闭包里根本没有脚本需要忽略。
+        run: node scripts/check-prod-install-scripts.js --omit=dev
+
+      - name: Check dev dependency install scripts
+        # dev 树：devDeps 的安装脚本会在开发机与 test/e2e 作业上真实执行（那里刻意不加
+        # --ignore-scripts，因为测试需要 mongod），是真实供应链风险面，必须显式登记。
+        run: node scripts/check-prod-install-scripts.js --scan
 
       - name: Audit web-admin dependencies
         working-directory: web-admin
@@ -177,6 +193,17 @@ jobs:
           npm audit --omit=dev --audit-level=moderate | tee ../audit-web.txt
           echo "### Web-admin npm audit" >> "$GITHUB_STEP_SUMMARY"
           tail -3 ../audit-web.txt >> "$GITHUB_STEP_SUMMARY" || true
+
+      # 供应链完整性锚：lockfile 的 semantic 哈希必须与 deployment/lockfile-anchor.json 一致。
+      # 本仓的其余检测面（npm audit / Dependabot / CodeQL / gitleaks / install-script 门禁）
+      # 全部只回答「这个包有没有已知 CVE」，于是**lockfile 被静默篡改**毫无检测：
+      # PR 夹带改 integrity、本地误跑 npm install 改分辨率、CI 缓存污染。本步把它变成硬门禁。
+      # 口径是 JSON 递归排序 + 紧凑序列化后的 SHA-256（**不是原始字节哈希**）：开发机 CRLF、
+      # CI ubuntu LF，raw 口径会在 CI 上恒假红，而假红第一次出现就会被消化掉（方案 §1.3 实测）。
+      # 覆盖后端与 web-admin 两份锁文件；zznpmtest/ 未入库，刻意不纳入。
+      # 注意：它挡不了"上游包本身被投毒且 lockfile/integrity 未变"，也**不是 SBOM**。
+      - name: Verify lockfile integrity anchor
+        run: node scripts/check-lockfile-integrity.js --verify
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -319,6 +346,11 @@ jobs:
         with:
           node-version: 20.x
 
+      # 加 --ignore-scripts 的安全性判据：本 job 只跑 e2e-smoke / production-drill
+      # 两个脚本，二者自带随机强密钥与**内存 Mongo**（见上方 job 注释）——但内存 Mongo
+      # 正是 devDeps 里的 mongodb-memory-server，其 postinstall 负责预下载 mongod。
+      # 与 test job 同理：跳过脚本会把下载延迟进脚本进程本身，故**同样保持不加**。
+      # 若将来确需在此省掉 devDeps 安装脚本，前提是先把 mongod 二进制显式预置为不变量。
       - name: Install dependencies
         run: npm ci
 
@@ -348,8 +380,12 @@ jobs:
         with:
           node-version: 20.x
 
+      # 加 --ignore-scripts 的安全性判据：本 job 的 Mongo 来自上面的 mongo:6.0.20
+      # service 容器（真实 mongod），**不使用** devDeps 的 mongodb-memory-server，
+      # 全量安装的 devDeps 只是为了让 playwright 与各脚本能 require（CI 用不到
+      # mongodb-memory-server 的 postinstall 预下载）。故这里可以安全跳过安装脚本。
       - name: Install backend dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Install frontend dependencies and build
         run: |

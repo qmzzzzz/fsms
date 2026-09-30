@@ -1,0 +1,9 @@
+{
+  "note": "lockfile 的 semantic 哈希锚（sha256(json-sort-keys-compact-utf8)）。变更依赖后必须跑 node scripts/check-lockfile-integrity.js --update，并由人复核 diff——本文件在 git 里，任何改动都会留下可追溯的记录。",
+  "algorithm": "sha256",
+  "canonical": "json-sort-keys-compact-utf8",
+  "locks": {
+    "package-lock.json": "bc9b7da11185e75a174424f42f613849516a31fd0491bd50e4740d052c02899e",
+    "web-admin/package-lock.json": "d385302c08e0af252bcd7f9f4e3d4d9af49f4a1931a906185c02649c406fd291"
+  }
+}

@@ -98,16 +98,34 @@ describe('告警审计落库失败的处理', () => {
 
   test('反向对照：写入成功时不落 error 痕迹，且告警真的进了审计库', async () => {
     jest.spyOn(AuditLog, 'countDocuments').mockResolvedValue(THRESHOLDS.permissionFailures);
-    const okUser = users.get('ok');
-    await securityAlert.checkPermissionAbuse(okUser._id, '203.0.113.10');
+    // 封禁链路显式桩掉：本用例的命题是"审计写入成功 ⇒ 不打 error"，
+    // 不该被"这个 IP 恰好能不能被封"污染（2026-09-30 起 checkPermissionAbuse
+    // 会在审计之后封 IP，真实调用 addToBlacklist 时白名单/写库结果会让本断言变脆）。
+    const security = require('../../middleware/security');
+    const addSpy = jest
+      .spyOn(security, 'addToBlacklist')
+      .mockResolvedValue({ banned: true, normalizedIp: '203.0.113.10' });
+    try {
+      const okUser = users.get('ok');
+      await securityAlert.checkPermissionAbuse(okUser._id, '203.0.113.10');
 
-    const rows = await AuditLog.find({
-      action: securityAlert.ALERT_TYPES.PERMISSION_ABUSE,
-      userId: okUser._id,
-    }).lean();
-    expect(rows).toHaveLength(1);
-    expect(rows[0].riskLevel).toBe(securityAlert.ALERT_LEVELS.HIGH);
-    expect(rows[0].username).toBe(okUser.username);
-    expect(errorSpy).not.toHaveBeenCalled();
+      const rows = await AuditLog.find({
+        action: securityAlert.ALERT_TYPES.PERMISSION_ABUSE,
+        userId: okUser._id,
+      }).lean();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].riskLevel).toBe(securityAlert.ALERT_LEVELS.HIGH);
+      expect(rows[0].username).toBe(okUser.username);
+      expect(errorSpy).not.toHaveBeenCalled();
+      // 遏制确实执行了（这是本次新加的职责，不是"只告警"）
+      expect(addSpy).toHaveBeenCalledWith(
+        '203.0.113.10',
+        expect.any(Number),
+        expect.stringContaining('permission_abuse_auto_ban_tier'),
+        'auto'
+      );
+    } finally {
+      addSpy.mockRestore();
+    }
   });
 });

@@ -158,9 +158,58 @@ function walSeqsOf(docs) {
   return new Set(docs.map((d) => d && d.__walSeq).filter(Boolean));
 }
 
+/**
+ * 处理「批次算哈希失败」的收尾（2026-09-30 加固）。
+ *
+ * 从 auditBuffer.flush 里抽出来（该文件 max-lines 已贴棘轮上限——本文件的存在
+ * 本身就是同一条纪律的产物，见 auditBuffer.js 顶部注释）。
+ *
+ * 做三件事，每一件都有必须的理由：
+ *  ① 打标：给**尚未拿到 hash** 的文档写 `hashFailure`。核验器对"无 hash 记录"
+ *     只有一种解读——出现在带哈希记录之后即判 hash_stripped（人为抹除）。
+ *     而"算 hash 抛错仍落库"是良性且会持续产生的成因，不打标就会让真实篡改告警
+ *     淹没在常态噪声里（M-09「幻影链尾」的同一条演化路径）。
+ *     只标没有 hash 的那些：chainBatch 逐条串链，抛错时前若干条已算出 hash
+ *     （构成一段合法链，父链来自真实链尾），它们不该被一起降级。
+ *  ② 链尾推进：把已串链**前缀**的链尾取出来返回。原实现在抛错时整批不推进，但
+ *     前缀的 hash 已写进文档并会落库 ⇒ 下一批从**旧链尾**重新串链 ⇒ 两条记录
+ *     认领同一个父哈希 ⇒ chain_fork（核验器的 F-184a 判据把它列为高危篡改信号）。
+ *     即「每次哈希异常都制造一个分叉」——返回前缀链尾是必须的修复，不是优化。
+ *  ③ 告警：这条路此前只有 logger.warn。「批次无哈希落库」= 链上出现一段无法追认的
+ *     记录，是完整性缺口的**唯一直接信号**，必须进告警面而非只躺在一行日志里。
+ *
+ * @param {Array} docs 已预铸造、准备落库的文档（本函数就地改写）
+ * @param {Error} hashErr chainBatch 抛出的错误
+ * @param {Function} [onAlert] 告警回调（默认计 incSecurityAlert），便于测试替换
+ * @returns {{pendingTail: string|null, chained: boolean}} 前缀链尾与"是否有可推进的链段"
+ */
+function handleHashFailure(docs, hashErr, onAlert) {
+  // ① 打标（只给无 hash 的）
+  const brief = String((hashErr && hashErr.message) || 'unknown').slice(0, 200);
+  for (const d of docs) {
+    if (!d.hash) {
+      d.hash = null;
+      d.prevHash = null;
+      d.hashVersion = null;
+      d.hashFailure = brief;
+    }
+  }
+  // ② 前缀链尾：最后一个带 hash 的文档，它的 hash 就是本批已确认链段的尾
+  const lastHashed = [...docs].reverse().find((d) => d.hash);
+  // ③ 告警（指标端不可用不影响落库与标记）
+  try {
+    if (typeof onAlert === 'function') onAlert();
+    else require('../utils/metrics').incSecurityAlert('audit_hash_compute_failed', 'high');
+  } catch (_) {
+    /* 指标端不可用：日志与落库标记仍是留痕 */
+  }
+  return { pendingTail: lastHashed ? lastHashed.hash : null, chained: Boolean(lastHashed) };
+}
+
 module.exports = {
   PRECAST_FIELDS,
   precastBatch,
   collectDurableIds,
   walSeqsOf,
+  handleHashFailure,
 };

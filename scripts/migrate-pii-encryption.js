@@ -4,7 +4,9 @@
  * 用法（与 resign-audit-hmac.js 同族的门禁口径：--apply 需 ALLOWED_SOURCE_DB + --yes）：
  *   node scripts/migrate-pii-encryption.js                        # 演练：只读扫描并出报告
  *   ALLOWED_SOURCE_DB=<库名> node scripts/migrate-pii-encryption.js --apply --yes
- *                                                                 # 把存量明文 realName/phone 加密
+ *                                                                 # 把存量明文 phone 加密
+ *      （realName 暂不加密——2026-09-30 决策：保留姓名模糊检索；
+ *        若有行在加密窗口内被加密过，本脚本会自动解回明文自愈）
  *   ALLOWED_SOURCE_DB=<库名> PII_ROTATION_OLD_AES_KEY=<旧KEY> \
  *     node scripts/migrate-pii-encryption.js --apply --yes --rotate
  *                                                                 # 用旧主密钥解密 → 当前主密钥重加密
@@ -19,7 +21,7 @@
  *   - 演练模式一行不改，报告先行（多少行待加密 / 已加密 / 损坏不可解）；
  *   - 损坏行（形似密文但解不开）**绝不覆盖**，点名留待人工：GCM 认证失败
  *     意味着密钥不符或数据被改，静默跳过会让"被改过的数据"伪装成"未迁移"；
- *   - 检索键（realNameKey/phoneKey）随密文一起重算：轮换后旧键检索键全部失效，
+ *   - 检索键（phoneKey）随密文一起重算：轮换后旧键检索键全部失效，
  *     不同步等于按手机号找人的能力静默归零。
  */
 
@@ -89,6 +91,16 @@ async function main() {
     );
     console.error('或按 id 人工核查——这些行本次**未被覆盖**，伪造的"成功"比失败更危险。');
   }
+  // 轮换成功后的清理提示：这是本脚本唯一能主动"提醒清理旧钥"的位置，
+  // 而运维跑完就在看这个输出——比任何文档的命中率都高（见 immutableConfigGuard.js
+  // 的 piiOldKeyLingeringMessage 与 deployment/secret-rotation.md 收尾清单）。
+  // 只在 apply + 无损坏行时打印：演练模式还没真换钥，损坏行时先处理完再说。
+  if (args.rotate && args.apply && stats.corrupt.length === 0) {
+    console.log('\n✅ 轮换完成。**现在请从生产环境移除 PII_ROTATION_OLD_AES_KEY**：');
+    console.log('   它是本次轮换的输入参数，不是运行时配置；留在环境里等于轮换白做');
+    console.log('   （旧钥 + 轮换前的备份归档仍可解出当时全部 PII）。');
+    console.log('   移除后重启，并确认启动日志不再出现 pii_rotation_old_key_lingering 告警。');
+  }
   if (!args.apply) {
     console.log('\n演练模式未改写任何记录。加 --apply --yes（并配置 ALLOWED_SOURCE_DB）执行。');
   }
@@ -145,7 +157,20 @@ async function scanAndRewrite(coll, args) {
   for await (const doc of cursor) {
     stats.scanned += 1;
     const update = {};
-    for (const field of ['realName', 'phone']) {
+
+    // realName 暂不加密（2026-09-30 决策：姓名模糊检索是用户列表的日常能力）。
+    // 若某行在加密窗口内已带密文（本脚本早期版本或手工操作产物），这里解回
+    // 明文自愈——窗口期密文都是「当前密钥」产物，直接用当前密钥解；
+    // 解不开按损坏行点名（与 phone 同一口径）。
+    if (isEncrypted(doc.realName)) {
+      try {
+        update.realName = decryptPii(doc.realName);
+      } catch (e) {
+        stats.corrupt.push({ id: String(doc._id), field: 'realName', reason: e.message });
+      }
+    }
+
+    for (const field of ['phone']) {
       const result = resolveFieldUpdate(doc, field, args);
       if (!result) continue;
       if (result.skip) {

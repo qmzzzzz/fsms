@@ -183,11 +183,14 @@ describe('Config Validation', () => {
       const { collectProductionWarnings } = require('../../config/validate');
       const warnings = collectProductionWarnings();
       restoreHttps();
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain('ALLOWED_HOSTS');
+      // 不再断言总条数：collectProductionWarnings 是**增量**出口，随加固项增加而增长
+      // （2026-09-30 新增 immutable 档位一条）。钉总条数会让"每次加一条合法告警就要改测试"，
+      // 而它本该守的是"该条告警在场"——改钉"恰好一条 ALLOWED_HOSTS 且没有别的同名项"。
+      const allowedHostsWarnings = warnings.filter((w) => w.includes('ALLOWED_HOSTS'));
+      expect(allowedHostsWarnings).toHaveLength(1);
     });
 
-    test('已配置 ALLOWED_HOSTS 且启用 HTTPS 时无告警', () => {
+    test('已配置 ALLOWED_HOSTS 且启用 HTTPS 时无「ALLOWED_HOSTS 缺失」告警', () => {
       process.env.ALLOWED_HOSTS = 'api.example.com,api.example.com:443';
       const prevHttps = process.env.ENABLE_HTTPS;
       const restoreHttps = () => {
@@ -198,7 +201,8 @@ describe('Config Validation', () => {
       const { collectProductionWarnings } = require('../../config/validate');
       const warnings = collectProductionWarnings();
       restoreHttps();
-      expect(warnings).toHaveLength(0);
+      // 同上：只断言"ALLOWED_HOSTS 那条不在"，不锁总条数
+      expect(warnings.some((w) => w.includes('ALLOWED_HOSTS 未配置'))).toBe(false);
     });
 
     test('TLS 告警已并入致命校验：仅缺 ENABLE_HTTPS 时不再产生 TLS 告警', () => {

@@ -122,7 +122,11 @@ const stripQuote = (expr) => {
 };
 
 const resolveLevel = (expr) => {
-  const key = /^ALERT_LEVELS\.([A-Z_]+)$/.exec(expr);
+  // 允许可选的模块前缀（`securityAlert.ALERT_LEVELS.HIGH`）：语义与裸名完全一致，
+  // 且跨模块调用时前缀是必要的（调用点所在文件不一定把 ALERT_LEVELS 解构进来）。
+  // 2026-09-30 实测缺口：auditChainMonitor.js 的调用点原先写作三元表达式，
+  // 拆成 if/else 后必须带前缀，旧解析器把它判成"既不是键也不是字面量"，D1/D2 双红。
+  const key = /^(?:[A-Za-z_$][\w$]*\.)?ALERT_LEVELS\.([A-Z_]+)$/.exec(expr);
   if (key) {
     return ALERT_LEVELS[key[1]] === undefined
       ? { bad: `ALERT_LEVELS.${key[1]} 这个键不存在` }
@@ -133,7 +137,8 @@ const resolveLevel = (expr) => {
 };
 
 const resolveType = (expr) => {
-  const key = /^ALERT_TYPES\.([A-Z_]+)$/.exec(expr);
+  // 前缀的处理与 resolveLevel 同口径（见那里的注释）
+  const key = /^(?:[A-Za-z_$][\w$]*\.)?ALERT_TYPES\.([A-Z_]+)$/.exec(expr);
   if (key) {
     return ALERT_TYPES[key[1]] === undefined
       ? { bad: `ALERT_TYPES.${key[1]} 这个键不存在` }

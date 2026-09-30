@@ -14,7 +14,6 @@ const userPermissionService = require('./userPermissionService');
 const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const { escapeRegExp } = require('../utils/helpers');
-const { piiSearchKey } = require('../utils/piiCrypto');
 const { USER_STATUS } = require('../utils/constants');
 // 级联释放的状态面由巡检域档位表派生（F-151）：写字面量 ['pending','in_progress'] 时漏掉的正是
 // `overdue`——调度器会把超期的开放计划改成它，越紧急的计划越容易漏在闸门外面；漏掉后开工/提交双双 409，
@@ -34,13 +33,14 @@ class UserService {
 
     if (filters.search) {
       const escapedSearch = escapeRegExp(filters.search.trim());
-      // P1-②：realName 已 at-rest 加密——正则对密文不成立，改走 realNameKey
-      // 精确匹配（归一化明文的 HMAC）。能力回归（如实申报）：按姓名**片段**
-      // 搜索不再命中，须输入完整姓名；username/email 未加密，模糊检索保留。
+      // P1-②（2026-09-30 决策修订）：realName **暂不加密**——姓名模糊检索是
+      // 用户管理的日常操作，正则对密文不成立，加密它等于砍掉这个能力。
+      // at-rest 加密当前只覆盖 phone（检索键 phoneKey）。realName 转入加密
+      // 需要先给姓名检索另立方案（如 ES/前缀键），届时随迁移脚本一起走。
       query.$or = [
         { username: new RegExp(escapedSearch, 'i') },
         { email: new RegExp(escapedSearch, 'i') },
-        { realNameKey: piiSearchKey(filters.search) },
+        { realName: new RegExp(escapedSearch, 'i') },
       ];
     }
 

@@ -20,8 +20,14 @@ WORKDIR /app
 # 复制 package 文件
 COPY package*.json ./
 
-# 安装所有依赖（含 devDependencies，用于编译/测试）
-RUN npm ci && npm cache clean --force
+# 安装所有依赖（含 devDependencies）。--ignore-scripts 的安全性判据：
+# 本阶段**从不执行任何测试或构建**（下面只 COPY 源文件，全 Dockerfile 无 `npm test`；
+# 测试在 CI test job 里跑，不在镜像构建里），devDeps 中唯一带 install 脚本的
+# mongodb-memory-server 的 postinstall 只是「预下载 mongod 二进制」，其失败路径是
+# process.exit(0)（node_modules/mongodb-memory-server-core/lib/util/postinstallHelper.js:36
+# 「Exiting with 0 to not fail the install」），跳过它不会造成任何本阶段缺失的产物。
+# 生产侧安装脚本的强不变量另由 scripts/check-prod-install-scripts.js 在 CI 硬门禁。
+RUN npm ci --ignore-scripts && npm cache clean --force
 
 # 复制源代码（显式复制，避免依赖 .dockerignore 排除 .env）
 COPY src/ ./src/
@@ -47,9 +53,13 @@ FROM node:22.14.0-alpine AS web-builder
 
 WORKDIR /web
 COPY web-admin/package*.json ./
-RUN npm ci && npm cache clean --force
-
-COPY web-admin/ ./
+# --ignore-scripts 的安全性判据：本阶段只做前端 `npm run build`，
+# web-admin 依赖树内带 install 脚本的只有 @parcel/watcher（经 vite→sass 引入，
+# node_modules 实测命中；其 install 是原生绑定的按需编译，缺脚本时 npm 落可选
+# 预编译平台包），且它是 devDependency——本阶段不跑 vitest（测试在 CI frontend-build job）。
+# 本镜像的 node:22.14.0-alpine 在 linux-musl-x64 平台确有 @parcel/watcher 预编译包可回落，
+# 故 --ignore-scripts 安全。若未来引入「mac/win 本地构建镜像」，该假设需重新评估。
+RUN npm ci --ignore-scripts && npm cache clean --force
 # vite.config.js 已显式 sourcemap: false（L-1/I-3），产物不含源码映射
 RUN npm run build
 
@@ -107,8 +117,14 @@ COPY --from=web-builder --chown=nodejs:nodejs /web/dist ./web-admin/dist
 # auditBuffer 的 WAL 文件（logs/audit-buffer.wal）同样依赖此目录可写。
 RUN mkdir -p /app/logs && chown -R nodejs:nodejs /app/logs
 
-# 在 runtime 阶段单独安装生产依赖（不含 devDependencies），并将 node_modules 归属到非 root 用户
-RUN npm ci --omit=dev && npm cache clean --force
+# 在 runtime 阶段单独安装生产依赖（不含 devDependencies），并将 node_modules 归属到非 root 用户。
+# --ignore-scripts 的安全性判据：生产树里唯二可能带安装脚本的依赖都已被门禁显式表态——
+#   @scarf/scarf 已登记进 PROD_INSTALL_SCRIPT_ALLOWLIST（其 postinstall 仅为遥测上报，
+#   跳过不影响功能；它经 swagger-ui-express→swagger-ui-dist 传递进生产树，
+#   `npm ls --omit=dev` 实测可见），其余未登记命中为 0。
+# 这条不变量由 `node scripts/check-prod-install-scripts.js --omit=dev` 在 CI security-audit
+# 硬门禁（当前实测退出码 0），不靠本行注释断言。
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 # ===== D-3：迁移执行器 =====
 # migrate-mongo 在 package.json 里是 devDependency，上面 `--omit=dev` 会把它排除，
@@ -119,6 +135,11 @@ RUN npm ci --omit=dev && npm cache clean --force
 # 在 Dockerfile 里再手抄一个版本号会形成第二个事实来源，
 # 升级依赖时漏改一处就变成「迁移用 A 版、开发用 B 版」。
 #
+# --ignore-scripts 的安全判据与上面 runtime 的 `npm ci --omit=dev` 同源：
+# 该命令同样落在生产闭包内（--omit=dev），migrate-mongo 自身及其生产依赖树
+# 若带 install 脚本，会一并被 check-prod-install-scripts.js 的 --omit=dev 变体拦下
+# （当前实测该闭包命中 0）。故此处可以安全忽略脚本。
+#
 # 为何用 --no-save 而不是把 migrate-mongo 移进 dependencies：
 #   - 迁移器是**部署期工具**，不是应用运行期依赖，放进 dependencies
 #     会让每次 npm ci 都为它解析依赖树、也扩大了生产依赖的安全扫描面；
@@ -128,7 +149,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 # 版本上界由 package.json 的 `^` 约束决定，与开发环境同源。
 RUN MIGRATE_MONGO_VERSION="$(node -p "require('./package.json').devDependencies['migrate-mongo']" | sed 's/[^0-9.]//g')" && \
     echo "migrate-mongo 版本（读自 package.json）: $MIGRATE_MONGO_VERSION" && \
-    npm i --no-save --no-package-lock --omit=dev "migrate-mongo@$MIGRATE_MONGO_VERSION" && \
+    npm i --no-save --no-package-lock --omit=dev --ignore-scripts "migrate-mongo@$MIGRATE_MONGO_VERSION" && \
     npm cache clean --force && \
     chown -R nodejs:nodejs node_modules
 

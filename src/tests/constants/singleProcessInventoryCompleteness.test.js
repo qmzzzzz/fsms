@@ -67,6 +67,9 @@ const MUST_NOT_INCLUDE = ['mfaService', 'mfaLastCounter', 'UserSession'];
  */
 const EXEMPT_MODULES = {
   'config/validate.js': '静态字面量 Set（环境别名 / 真值词表），只读',
+  // SECURITY_RELEVANT，静态字面量 Set（哪些 immutable 档位项该计入安全告警面），只读。
+  // 与同族的 config/validate.js、legacyCbcGuard.js 完全同构：是「判据词表」而非进程内状态。
+  'config/immutableConfigGuard.js': 'SECURITY_RELEVANT，静态字面量 Set，只读',
   'constants/breachedPasswords.js': '静态弱口令词表，只读数据',
   'middleware/protocolCompliance.js': 'HOST_GATE_EXEMPT_PATHS，静态字面量 Set',
   'middleware/validateObjectId.js':

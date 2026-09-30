@@ -37,6 +37,10 @@ const PLACEHOLDER_PATTERNS = [
 
 // 香农熵下限（bit/char）。取值依据见 isWeakSecret 的实测注释。
 const MIN_SECRET_ENTROPY_BITS_PER_CHAR = 2.0;
+// 遗留 CBC 解密开关的告警判据（含"为何不阻断启动"的取舍说明）在独立模块：
+// 本文件行数贴着 max-lines 棘轮上限，新增判据须放到独立文件——同 metricsAuditDrops 的惯例。
+// immutable 档位（改配置需配套数据迁移）的判据同在独立模块，理由相同。
+const { cbcAndInvariantWarnings } = require('./legacyCbcGuard');
 
 // 周期 ≤ maxPeriod 的重复串：整串由同一个短单元反复拼接而成。
 // 例：'passwordpassword...'（周期 8）、'12345678901234567890...'（周期 10）。
@@ -166,13 +170,10 @@ function collectProductionWarnings() {
   }
 
   // 2) 遗留 CBC 解密开关（utils/encryption.js）：开启即重新暴露填充预言机面。
-  // 该项是存量数据迁移的一次性开关，本应在迁移完成后关闭。
-  if (process.env.ALLOW_LEGACY_CBC_DECRYPT === 'true') {
-    warnings.push(
-      'ALLOW_LEGACY_CBC_DECRYPT=true：无认证的 AES-CBC 遗留密文解密仍处于开启状态，' +
-        '填充预言机攻击面未收口。存量数据迁移完成后请立即移除该开关。'
-    );
-  }
+  // 【2026-09-30 加固】从"一条日志"升级为可观测的安全告警（同时计 incSecurityAlert），
+  // 并**刻意不阻断启动**。判据与取舍说明集中在 config/legacyCbcGuard.js（本文件的行数
+  // 已贴着 max-lines 棘轮上限，新增判据须放到独立模块——同 metricsAuditDrops 的惯例）。
+  for (const w of cbcAndInvariantWarnings()) warnings.push(w);
 
   // 3) debug 级日志：auth/rbac 等中间件在 debug 级会打印用户权限列表等
   // 运行情报，生产常开会让日志系统变成信息泄露面（且显著增加日志量）。

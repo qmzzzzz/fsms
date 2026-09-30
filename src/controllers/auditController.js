@@ -141,6 +141,10 @@ const verifyAuditChainIntegrity = asyncHandler(async (req, res) => {
     // 整窗无哈希（全 legacy）时不得背书：判据需要知道"扫到的 N 条里有多少条真的带 hash"，
     // 否则"整表 $unset 掉 hash/prevHash/hmac"会被 legacy 全数吸收而拿到 code=0。
     legacy: report.legacy,
+    // 哈希计算失败的无哈希记录数（auditBuffer 算 hash 抛错后照常落库的那批）：
+    // > 0 时判据拒绝 code 0——链上有无法追认的缺口。不计 breaks（那不是篡改），
+    // 但同样不得宣称完整（理由见 auditChainVerify 的 hashComputeFailed 段）。
+    hashComputeFailed: report.hashComputeFailed,
     scanned: report.scanned,
   });
 

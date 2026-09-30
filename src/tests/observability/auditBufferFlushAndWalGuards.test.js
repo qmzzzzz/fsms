@@ -680,6 +680,45 @@ describe('auditBuffer 分支补齐', () => {
 
       chainSpy.mockRestore();
     });
+
+    /**
+     * 2026-09-30 加固：这条路原先只有 logger.warn ——「可检测 ≠ 已告警」。
+     * 批次无哈希落库是链完整性的**唯一直接信号**，必须同时满足三件事：
+     *   ① 计入 security_alerts_total{type=audit_hash_compute_failed}；
+     *   ② 落库文档带 hashFailure 标记（供核验端与"人为抹除"区分）；
+     *   ③ 已算出哈希的前缀**照常保留受保护**，不被一起降级（部分成功的正确形态）。
+     */
+    test('哈希失败 ⇒ 计入安全告警 + 落库带 hashFailure 标记', async () => {
+      mockTimer();
+      auditBuffer.start();
+      auditBuffer.push(makeDoc('hashtrap'));
+
+      const metrics = require('../../utils/metrics');
+      const alertSpy = jest.spyOn(metrics, 'incSecurityAlert').mockImplementation(() => {});
+      const auditChain = require('../../utils/auditChain');
+      const chainSpy = jest.spyOn(auditChain, 'chainBatch').mockImplementation(() => {
+        throw new Error('chain lock timeout');
+      });
+
+      tickFn();
+      await waitFor(async () => {
+        const n = await AuditLog.countDocuments({ username: 'testuser_hashtrap' });
+        return n === 1;
+      });
+
+      // ① 告警面：这是修复的核心断言（修复前调用次数为 0）
+      expect(alertSpy).toHaveBeenCalledWith('audit_hash_compute_failed', 'high');
+
+      // ② 落库标记：绕开 model 读原始形态，确认 hashFailure 真的写进去了
+      const raw = await AuditLog.collection.findOne({ username: 'testuser_hashtrap' });
+      expect(raw.hash).toBeNull();
+      expect(raw.prevHash).toBeNull();
+      expect(raw.hashFailure).toContain('chain lock timeout');
+
+      chainSpy.mockRestore();
+      alertSpy.mockRestore();
+      await AuditLog.deleteMany({ username: 'testuser_hashtrap' }, { bypassAppendOnly: true });
+    });
   });
 
   // ---- WAL 目录不存在时 start 自动创建 ----

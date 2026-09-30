@@ -256,6 +256,11 @@ describe('审计日志合规化', () => {
         'prevHash',
         'hmac',
         'hashVersion',
+        // 2026-09-30 追加：hashFailure 记录「这条为什么没有哈希」（WAL 重放出来的
+        // 无哈希文档的归因），与 hash/prevHash 同族是**哈希链自身的元数据**。
+        // AuditLog schema 明确它是**刻意不参与哈希**的（见该字段上方「安全边界」注释：
+        // 参与哈希反而会让归因字段本身变成可篡改面）。故此处排除，而非补进 PAYLOAD_FIELDS_V4。
+        'hashFailure',
         'createdAt',
         'updatedAt',
       ]);

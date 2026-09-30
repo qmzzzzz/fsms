@@ -23,6 +23,32 @@ node scripts/generate-secrets.js --env-snippet              # 本地：打印 .e
 | LOGIN_ECDH_PRIVATE_KEY | 无：前端每次登录重新获取公钥                | 否                         |
 | MONGODB_URI / 口令     | 需同步改 Mongo 账户，属数据库运维动作       | 不适用                     |
 
+### ⚠️ HMAC_SECRET 的第二重影响：口令复用历史（无迁移手段）
+
+上表 HMAC_SECRET 一行只写了审计链，但 `HMAC_SECRET` 在本仓有**两个**消费点：
+
+1. `utils/auditChain.js:58` — 审计记录 `hmac` 字段（**可用重签工具迁移**，见下节）；
+2. `utils/passwordHistory.js:73` — 口令复用历史摘要的 pepper（**没有迁移手段**）。
+
+第 2 点在轮换后**没有配套工具，也不可能有**：历史里存的是
+`HMAC-SHA256(HMAC_SECRET, 旧口令)` 的 hex，**没有明文**就无从重算——
+`resign-audit-hmac.js` 那套（重签 `hmac = HMAC(新钥, hash)`）在这里不适用，
+因为审计链的 hmac 只覆盖 `hash` 这一列、与新钥无关，而口令历史的摘要与旧钥强绑定。
+
+**后果**：换钥后既有摘要一条都对不上，历史长度静默归零，用户在轮换后可复用
+前 `PASSWORD_HISTORY_DEPTH` 条旧口令各一次，之后重新积累。
+
+**这是已知取舍**（`utils/passwordHistory.js:30-34` 有完整记录），但取舍的**代价**
+与**窗口**必须在轮换时被知悉，而不是靠读源码发现。启动期已配套告警：
+`config/immutableConfigGuard.js` 在每次启动时输出一条 warning
+（同时计 `incSecurityAlert('password_history_pepper_rotation', 'medium')`），
+只要 `PASSWORD_HISTORY_DEPTH > 0` 就会推——运维看到这条就知道自己撞上了哪个窗口。
+
+**轮换时的操作**：本轮换不阻断、无需额外步骤；只需知悉窗口并就近择时
+（口令复用防线最弱的那段时间，建议避开与「口令泄露应急重置」重叠）。
+若这条告警出现在**非轮换窗口**的启动日志里，说明存在未同步的密钥副本，需立即排查
+（同下文「L-01 验证步骤」第 ②/④ 条的口径）。
+
 ## AES_SECRET_KEY 轮换（必须先迁数据）
 
 ```bash
@@ -92,6 +118,55 @@ echo "退出码 $?"
 - [ ] `docker compose config` 输出与 CI 日志中不再出现任何密钥明文
 - [ ] `npm run validate`（config/validate.js）通过
 - [ ] 抽查日志无「MFA 种子解密失败」「hmac 失配」告警
+- [ ] 启动日志中出现过 `password_history_pepper_rotation` 告警（HMAC 轮换的**预期**
+      副作用，见上文「HMAC_SECRET 的第二重影响」）——**换完钥的首次启动若没有它，
+      说明告警链路失效或 `PASSWORD_HISTORY_DEPTH=0`，需人工确认**
+- [ ] **PII 轮换后必须 unset `PII_ROTATION_OLD_AES_KEY`**（见下节），
+      且启动日志**不得**再出现 `pii_rotation_old_key_lingering` 告警
+
+### PII 轮换旧钥必须移除（不做等于轮换白做）
+
+`scripts/migrate-pii-encryption.js --rotate` 需要 `PII_ROTATION_OLD_AES_KEY=<轮换前的
+AES_SECRET_KEY>` 作为**输入参数**——它是轮换过程的中间态，不是运行时配置。
+
+**它一旦驻留生产环境，轮换这件事等于没做**：轮换的全部意义是"假定旧钥已泄露"，
+而旧钥 + 轮换前的备份归档仍能解出当时全部 PII。把已泄露的东西在生产环境变量里
+再挂一个可读副本，等于把风险窗口从"轮换那一刻"延长到"永远"。
+
+- **检测**：生产环境（`NODE_ENV=production`）启动时若该变量存在且非空，
+  `src/config/immutableConfigGuard.js` 会推一条 `pii_rotation_old_key_lingering`
+  告警并计入 `incSecurityAlert`（口径同 immutable 档位：**告警不阻断启动**——
+  它可恢复，unset 后重启即可，阻断会让一次疏忽变成停机事故）。
+- **脚本自提示**：`--apply --yes --rotate` 成功且无损坏行时，脚本会在报告末尾
+  主动打印清理提醒。
+- **处置**：`unset PII_ROTATION_OLD_AES_KEY`（容器：从 compose 环境块 / secrets 挂载
+  中移除）→ 重启 → 确认启动日志无该告警。
+- **注意**：开发机与 CI 保留该变量做演练是正常的，故守卫**只在生产环境生效**。
+
+> 另需知悉（`migrate-pii-encryption.js` 的内部行为，不是缺陷但会咬人）：
+> `--rotate` 执行期间，脚本会把 `AES_SECRET_KEY` **临时改写为旧钥**
+> （`:106`，为了在旧钥下解密），结束后恢复。因此**该进程内 `AES_SECRET_KEY`
+> 指向的是旧钥**。当前脚本是独立 CLI、不加载应用，实际风险低；
+> 但**不要把迁移逻辑内联进服务进程**，否则轮换窗口内服务会用旧钥加密新数据。
+
+### PASSWORD_HISTORY_DEPTH 调小（无需轮换密钥）
+
+单独列出：这是**唯一**不需要动任何密钥、却同样让存量数据「对不上」的配置项。
+
+`utils/passwordHistory.js:86-98` 的 `sanitizeHistory` 在**读取侧**按当前
+`HISTORY_DEPTH` 截断——把 `PASSWORD_HISTORY_DEPTH` 从 10 调到 5，库里每人的
+10 条历史立刻只剩前 5 条，**被截掉的那 5 条不会被删除，但也不再参与比较**：
+用户可以用第 6~10 条里的任意一条改密成功。
+
+- 取值区间：读入后夹到 `[1, 24]`（上限防误配成 1000 后单文档膨胀）；
+  非正整数走 `readPositiveNumberEnv` 的 `onInvalid` 回调，**只打 error 日志**后按默认 5 处理。
+- **调小时**：属产品决策，无技术阻断。请知悉窗口并按需记录。
+- **调大时**：安全侧只会更严，无需操作（但库里的历史条数不会追溯补全，
+  即"调到 10"只对**此后**的改密生效，存量用户仍是 5 条）。
+- 该配置**不在**启动期告警范围内（它是纯运维口径，且
+  `collectInvariantWarnings` 只在 pepper 相关组合下推文案）——
+  判断依据：调小它有真实业务动机（减少单文档体积），
+  而 pepper 轮换通常不是有意为之，两者的告警价值不同。
 
 ### L-01 验证步骤（单一事实来源）
 

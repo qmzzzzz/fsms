@@ -36,6 +36,15 @@ const CI_ENFORCED_GATE_SCRIPTS = [
   'scripts/check-utf8.js',
   'scripts/lint-ratchet.js',
   'scripts/check-bundle-budget.js',
+  // P2-⑫ 安装脚本登记门禁：Dockerfile 的 `npm ci --omit=dev --ignore-scripts` 与
+  // ci.yml 的 --ignore-scripts 之所以安全，直接依赖这一档在跑；删掉 security-audit
+  // 里的两处调用不会惊动任何别的测试，故登记在此。
+  'scripts/check-prod-install-scripts.js',
+  // P2-⑩ 供应链完整性锚（2026-09-30）：把「上次人工拍板时锁文件长什么样」固化成
+  // semantic 哈希写进 deployment/lockfile-anchor.json。删掉 security-audit 里那一步
+  // 同样不会惊动任何别的测试——而它挡的是「PR 夹带改 integrity 字段」这类
+  // audit 全绿、CVE 为空、只能靠人眼发现的改动，故登记在此。
+  'scripts/check-lockfile-integrity.js',
   // 冒烟与生产演练：经 `npm run test:e2e` / `npm run test:prod-drill` 间接调用，
   // 登记前它们确实被 CI 执行着——但登记才有红可报：删掉那两步今天不会惊动任何人。
   'scripts/e2e-smoke.js',
@@ -122,6 +131,39 @@ describe('CI 门禁接线自检', () => {
       exists: false,
       wiring: null,
     });
+  });
+
+  // —— 防清单瘦身（2026-09-30 补）——
+  // 上面的 test.each 只做**正向**检查（登记了 → 必须被调用）。
+  // 变异实测：把清单里任一行删掉，套件只是"少跑一条"，**13/13 依然全绿** ⇒
+  // 清单可以被静默瘦身，被删掉的那道门禁从此无人守护，且没有任何测试变红。
+  // 本条补上反方向：**被工作流真实调用的脚本必须全部登记**（或进下面的豁免清单）。
+  // 判据不看清单、只看 workflow 文本里出现的 `scripts/*.js`，故删清单条目必红。
+  //
+  // 豁免清单的存在理由：workflow 里出现的脚本不全是"门禁"——部署/发布类脚本
+  // 也被调用，但它们**不是**"做错了会让 CI 变绿"的那种闸，被删不会造成静默放行。
+  // 用显式豁免（附理由）而不是放宽匹配规则，是为了让"为什么它不算门禁"这个判断
+  // 本身可审计、可复核，而不是藏在一个宽泛的正则里。
+  const NON_GATE_SCRIPT_EXEMPT = new Map([
+    // 部署脚本：被 deploy.yml 调用，职责是"把已通过门禁的产物推上去"。
+    // 它自己不产生"通过/不通过"的判定，删掉它 CI 不会放行任何坏代码。
+    ['scripts/deploy.js', '部署执行脚本，非判定类门禁'],
+  ]);
+
+  test('防清单瘦身：工作流里被调用的脚本必须已登记或已豁免（删清单行必红）', () => {
+    const called = new Set();
+    for (const m of ciText.matchAll(/scripts\/[\w.-]+\.js/g)) called.add(m[0]);
+    const unaccounted = [...called].filter(
+      (s) => !CI_ENFORCED_GATE_SCRIPTS.includes(s) && !NON_GATE_SCRIPT_EXEMPT.has(s)
+    );
+    expect(unaccounted).toEqual([]);
+    // 前提自证：确实从工作流里抽到了脚本（读到空会让上一条恒真）
+    expect(called.size).toBeGreaterThan(0);
+    expect(called.has('scripts/check-lockfile-integrity.js')).toBe(true);
+    // 豁免清单不得夹带真门禁：豁免项不许同时出现在门禁清单里（否则是两条判据打架）
+    for (const s of NON_GATE_SCRIPT_EXEMPT.keys()) {
+      expect(CI_ENFORCED_GATE_SCRIPTS).not.toContain(s);
+    }
   });
 
   test('可证伪：未接线的脚本必须判为 null（否则上面的用例恒真）', () => {

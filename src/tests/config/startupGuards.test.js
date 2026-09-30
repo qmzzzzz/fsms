@@ -230,12 +230,23 @@ describe('P1-34：加固项告警真正可达', () => {
 
   const collect = () => require('../../config/validate').collectProductionWarnings();
 
-  test('默认（加固项齐备）→ 无告警', () => {
+  /**
+   * 只保留「加固项缺失」告警，剔除 immutable 档位类告警。
+   *
+   * 为什么要剔除而不是放宽计数：本组用例的主题是 **P1-34「加固项告警真正可达」**，
+   * 而 immutable 档位（口令历史 pepper 轮换）是一条**恒定在场**的告警——它描述的是
+   * 配置组合的既有代价，不是"加固项缺失"。把它算进总数会让本组每条用例都被污染：
+   * 实测 2026-09-30 新增该告警后，本文件 4 条用例连带变红。
+   * 分类断言（而不是改数字）才能让后续再加一条 immutable 告警时本组不被动红。
+   */
+  const hardeningWarnings = (list) => list.filter((w) => !w.includes('HMAC_SECRET 轮换'));
+
+  test('默认（加固项齐备）→ 无加固项告警', () => {
     process.env.ALLOWED_HOSTS = 'api.example.com';
     delete process.env.ALLOW_PUBLIC_REGISTRATION;
     delete process.env.ALLOW_LEGACY_CBC_DECRYPT;
     process.env.LOG_LEVEL = 'info';
-    expect(collect()).toEqual([]);
+    expect(hardeningWarnings(collect())).toEqual([]);
   });
 
   test('ALLOW_PUBLIC_REGISTRATION=true → 告警且指明变量名', () => {
@@ -243,7 +254,7 @@ describe('P1-34：加固项告警真正可达', () => {
     process.env.ALLOW_PUBLIC_REGISTRATION = 'true';
     delete process.env.ALLOW_LEGACY_CBC_DECRYPT;
     process.env.LOG_LEVEL = 'info';
-    const w = collect();
+    const w = hardeningWarnings(collect());
     expect(w).toHaveLength(1);
     expect(w[0]).toContain('ALLOW_PUBLIC_REGISTRATION');
   });
@@ -276,7 +287,13 @@ describe('P1-34：加固项告警真正可达', () => {
     process.env.ALLOW_PUBLIC_REGISTRATION = 'true';
     process.env.ALLOW_LEGACY_CBC_DECRYPT = 'true';
     process.env.LOG_LEVEL = 'debug';
-    expect(collect()).toHaveLength(4);
+    const w = hardeningWarnings(collect());
+    // 钉"四条各在场"而不是"总数 == 4"：见 hardeningWarnings 的说明。
+    expect(w.some((x) => x.includes('ALLOWED_HOSTS'))).toBe(true);
+    expect(w.some((x) => x.includes('ALLOW_PUBLIC_REGISTRATION'))).toBe(true);
+    expect(w.some((x) => x.includes('ALLOW_LEGACY_CBC_DECRYPT'))).toBe(true);
+    expect(w.some((x) => x.includes('LOG_LEVEL'))).toBe(true);
+    expect(w).toHaveLength(4);
   });
 
   test('告警确实被 validateConfig 打印（生产 + 加固项缺失但致命项齐备）', () => {

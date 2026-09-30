@@ -33,6 +33,23 @@
  * 注：$unset 只能由绕过 mongoose 中间件的写入完成（直连驱动 / mongosh），
  * 而这正是本服务要防的威胁模型（持有 DB 写权限的内部人）。
  *
+ * **2026-09-30 归因细分（hashFailure 标记）**：出现在带哈希记录之后的无哈希记录，
+ * 有两种成因、且数据形态完全相同——① 人为 $unset（篡改灭迹）；② auditBuffer 算 hash
+ * 抛错后照常落库（write-side 异常）。后者是**良性**的、且会**持续**产生，若与①同样
+ * 计入 breaks，每轮核验都报断裂 ⇒ 真实篡改告警被常态噪声淹没（M-09「幻影链尾」的
+ * 同一条演化路径：反复确认是误报后，人开始忽略它）。
+ * 故 ② 在写入侧被显式打上 `AuditLog.hashFailure` 标记（该字段**不参与哈希**——
+ * 不在 PAYLOAD_FIELDS_V4 里），核验端据此归入独立计数 `hash_compute_failed`：
+ * 不计 breaks，但 > 0 时 `computeChainVerdict` 拒绝给出 code 0（"链完整"）。
+ * 即缺口仍然可见、仍然告警，只是不再伪装成篡改。
+ *
+ * 标记的威胁模型边界（如实记录）：能写 hashFailure 的攻击者已经有 DB 写权限——
+ * 那种情况下他直接 $unset hash 更省事。而本字段不参与哈希 ⇒ **无法洗白内容篡改**
+ * （改过内容的记录仍被 hash_mismatch 抓）；它能把"篡改告警"降级成"缺口告警"，
+ * 但不能让篡改消失（降级后仍有计数与告警）。这条降级路径是刻意的取舍：
+ * 代价是攻击者多写一个字段可以把一处 code 1 变成 code 2，收益是良性缺口不再
+ * 制造假篡改、保住了"篡改告警一响就有人看"这个前提。
+ *
  * 「legacy 段之后第一条」不属免检档（同一族的另一头）：链接检查只对**窗口的第一条**免检
  * ——它的父记录确实可能在窗口之外（maxRecords 截断、TTL 把头一批删掉）。legacy 段之后的
  * 那条不是这一档：它声称的父哈希就落在它前面那条记录的位置上，而那条没有哈希。
@@ -117,9 +134,17 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
     // 一个父节点挂两个子节点照样通过 ⇒ 「防篡改」的链接性在最关键的一种形态上是静默的。
     chain_fork: 0,
     hash_stripped: 0,
+    // 2026-09-30：带 AuditLog.hashFailure 标记的无哈希记录（auditBuffer 算 hash 抛错后
+    // 照常落库的那批）。与 hash_stripped 数据形态相同（无 hash、位于带哈希记录之后），
+    // 但成因是良性的、且会**持续**产生 ⇒ 单列一类、**不计入 breaks**，否则每轮核验都
+    // 报断裂，真实篡改告警被常态噪声淹没（M-09「幻影链尾」的同一条演化路径）。
+    // 仍计入告警面：它代表链上有一段无法追认的记录，是完整性缺口的直接信号。
+    hash_compute_failed: 0,
   };
   // v2 批量路径的历史默认值漂移：不是篡改，单独计数不计入 breaks
   let legacyV2BatchTolerated = 0;
+  // hashFailure 标记的无哈希记录数（不计 breaks，但要在报告里可见、可告警）
+  let hashComputeFailed = 0;
   const samples = [];
 
   const pushBreak = (sample) => {
@@ -192,13 +217,40 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
     // 清空窗口 ≠ 免检：其后那条要不要验链接，取决于"它是不是窗口的第一条"，见下面 isFirst。
     if (!doc.hash) {
       if (seenHashed) {
-        pushBreak({
-          _id: String(doc._id),
-          index: total,
-          type: 'hash_stripped',
-          action: doc.action,
-          timestamp: doc.timestamp,
-        });
+        // 2026-09-30：带 hashFailure 标记 ⇒ 归因明确是「算 hash 抛错后照常落库」，
+        // 不是人为抹除。单列计数、**不计 breaks**——但**仍然重置窗口、仍然不置 isFirst**，
+        // 与 hash_stripped 同处理：这段的哈希本来就没了，其后的记录链接必然失联，
+        // 是真实结论而不是噪声（两条一起报才完整）。
+        //
+        // 为什么绕不过这个标记（威胁模型）：能写 hashFailure 的攻击者已经有 DB 写权限，
+        // 那种情况下直接 $unset hash 更省事、更彻底；而本字段**不参与哈希**
+        // （不在 PAYLOAD_FIELDS_V4 里），所以它无法洗白一条被改过内容的记录——
+        // 内容篡改仍由 hash_mismatch 抓。它唯一的作用是把"无哈希"的归因从硬篡改
+        // 降级为待查，且降级后**仍有独立计数与告警**（hashComputeFailed > 0 使
+        // computeChainVerdict 不走「全绿」结论，见该函数）。即攻击者用这个标记能做的
+        // 最坏事情是"把一处篡改告警换成一处缺口告警"，不是"让篡改消失"。
+        if (doc.hashFailure) {
+          hashComputeFailed += 1;
+          byType.hash_compute_failed += 1;
+          if (samples.length < MAX_SAMPLES) {
+            samples.push({
+              _id: String(doc._id),
+              index: total,
+              type: 'hash_compute_failed',
+              reason: doc.hashFailure,
+              action: doc.action,
+              timestamp: doc.timestamp,
+            });
+          }
+        } else {
+          pushBreak({
+            _id: String(doc._id),
+            index: total,
+            type: 'hash_stripped',
+            action: doc.action,
+            timestamp: doc.timestamp,
+          });
+        }
         // 这里**不**重置 isFirst：抹掉哈希正是为了让自己和后继之间的链接失联，
         // 沿用 legacy 的「跳过其后第一条」宽容等于替篡改者收尾。父哈希已不存在，
         // 后继必然 chain_break —— 两条一起报才是完整结论。
@@ -296,6 +348,10 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
     // 这些记录的 riskLevel/riskFactors 从未受哈希保护，事后无法追认；
     // 数值应随存量记录过期（TTL）而归零，若持续增长说明仍有 v2 写入路径存活。
     legacyV2BatchTolerated,
+    // hashFailure 标记的无哈希记录数（auditBuffer 算 hash 失败后落库）。
+    // 不计 breaks，但 > 0 表示链上有一段无法追认——消费方必须看得见，
+    // 且 computeChainVerdict 据此不让报告拿 code 0（见该函数的 hashComputeFailed 段）。
+    hashComputeFailed,
     hmacChecked,
     scanned: { maxRecords, fromLatest, filter },
     chainTailHash: seenOrder.length ? seenOrder[seenOrder.length - 1] : null,
@@ -348,6 +404,14 @@ const chainVetoReasons = (v) => {
         '不得宣称链完整——"链启用前的存量集合"与"整表 $unset 掉 hash/prevHash/hmac"在数据上不可区分'
     );
   }
+  // 缺口理由排在"截断/子集"之前：它比核验口径问题更具体——是数据里真的有东西无法追认。
+  // （2026-09-30 新增，见 computeChainVerdict 的 hashComputeFailed 段）
+  if (v.hasUnattestableGap) {
+    reasons.push(
+      `发现 ${v.hashComputeFailed} 条哈希计算失败的无哈希记录（write-side 异常，非篡改）：` +
+        '这些记录的内容未被哈希保护，链在该处不可追认，不得宣称完整'
+    );
+  }
   if (v.scoped) {
     reasons.push(
       v.scopeUnknown
@@ -357,6 +421,21 @@ const chainVetoReasons = (v) => {
   }
   return reasons;
 };
+
+/**
+ * 带 hashFailure 标记的无哈希记录数 → 是否构成"不可追认的缺口"。
+ *
+ * 单独成函数（与 isPartialScan 同理）有两条理由：
+ * ① computeChainVerdict 的 complexity 已贴着棘轮上限，正负两句判据再进主体就超；
+ * ② 这条判据有一处**方向与邻居相反**的约定（缺省按 0 而非按"未知"），值得有名字。
+ *
+ * 缺省为何按 0（与 legacy/scanned 的"缺省按未知、偏保守"相反）：
+ * 该字段的"未知"没有保守侧可言——把每次正常核验都判 INCOMPLETE 会让判据失去区分力，
+ * 而那比漏报更糟（运维会开始忽略 code 2）。它由 verifyAuditChain 恒回填，
+ * 唯一漏传路径是旧调用方，而旧调用方根本不可能产生带 hashFailure 标记的记录。
+ */
+const hasUnattestableGapOf = (hashComputeFailed) =>
+  Number.isFinite(hashComputeFailed) ? hashComputeFailed > 0 : false;
 
 /**
  * 「能不能宣称审计链完整」的唯一判据（CLI 与在线接口共用）
@@ -407,10 +486,14 @@ const chainVetoReasons = (v) => {
  *   调用方漏传只会得到偏保守的 INCOMPLETE（响亮），不会得到一个假的 PASS（静默）。
  * @param {number} [params.legacy] 报告自带的"无 hash 记录数"（verifyAuditChain 的 legacy 字段）。
  *   缺省按"未知"处理并视同整窗无哈希（偏保守），见上面 `nothingHashed` 一段。
+ * @param {number} [params.hashComputeFailed] 报告自带的"哈希计算失败的无哈希记录数"
+ *   （verifyAuditChain 的 hashComputeFailed 字段）。> 0 时判据否决 code 0——
+ *   这些记录的内容未被哈希保护，链在该处不可追认。缺省按 0 处理（与 legacy 方向相反，
+ *   理由见实现内注释）。**不计入 breaks**：那是硬篡改信号，良性缺口不该淹没它。
  * @param {boolean} [params.allowAllLegacy=false] 唯一豁免 `nothingHashed` 的开关，
  *   仅供"链从未启用"的存量库在知情前提下放行；与 allowNoHmac / allowEmpty 彼此独立。
  *
- * @returns {{code:number, canAttestIntact:boolean, reasons:string[], truncated:boolean, hmacSkipped:boolean, empty:boolean, nothingVerified:boolean, nothingHashed:boolean, scoped:boolean}}
+ * @returns {{code:number, canAttestIntact:boolean, reasons:string[], truncated:boolean, hmacSkipped:boolean, empty:boolean, nothingVerified:boolean, nothingHashed:boolean, hasUnattestableGap:boolean, scoped:boolean}}
  *          code：0=全量且无断裂且各层都真跑过；1=发现断裂；2=不完整（不得宣称完整）
  */
 const computeChainVerdict = ({
@@ -420,6 +503,7 @@ const computeChainVerdict = ({
   collectionTotal,
   hmacChecked,
   legacy,
+  hashComputeFailed: hashComputeFailedIn,
   scanned,
   allowNoHmac = false,
   allowEmpty = false,
@@ -449,6 +533,14 @@ const computeChainVerdict = ({
   // 见 verifyAuditChain 的 legacy 分支与文件头。
   const legacyCount = Number.isFinite(legacy) ? legacy : total;
   const nothingHashed = total > 0 && legacyCount >= total && !allowAllLegacy;
+  // 2026-09-30：带 hashFailure 标记的无哈希记录 ⇒ 链上有无法追认的缺口。
+  // **不计入 breaks**（那是硬篡改信号，会被良性缺口淹没），但**不能给 code 0**：
+  // 一条记录缺失哈希就是"这段内容未被证明未被改"，无论成因是人为抹除还是算 hash 抛错。
+  // 这道闸与 nothingHashed 的区别：nothingHashed 管"整窗一条都没哈希"（彻底灭迹形态），
+  // 这里管"窗口里混进了若干条无哈希"（部分缺口）——旧实现下后者会让 intact=true、
+  // 且 breaks=0 ⇒ code 0「审计链完整」，等于对缺口一字不提。
+  // 判据与缺省方向见 hasUnattestableGapOf。
+  const hasUnattestableGap = hasUnattestableGapOf(hashComputeFailedIn);
   const scopeUnknown = !scanned;
   const scoped = isPartialScan(scanned);
   const reasons = chainVetoReasons({
@@ -462,11 +554,21 @@ const computeChainVerdict = ({
     emptyWaived,
     nothingVerified,
     nothingHashed,
+    hasUnattestableGap,
+    hashComputeFailed: hashComputeFailedIn,
     scoped,
     scopeUnknown,
     scanned,
   });
-  const vetoes = [truncated, hmacSkipped, emptyWaived, nothingVerified, nothingHashed, scoped];
+  const vetoes = [
+    truncated,
+    hmacSkipped,
+    emptyWaived,
+    nothingVerified,
+    nothingHashed,
+    hasUnattestableGap,
+    scoped,
+  ];
   const code = breaks > 0 ? 1 : vetoes.some(Boolean) ? 2 : 0;
   return {
     code,
@@ -477,6 +579,7 @@ const computeChainVerdict = ({
     empty: emptyCollection || nothingVerified,
     nothingVerified,
     nothingHashed,
+    hasUnattestableGap,
     scoped,
   };
 };

@@ -25,7 +25,15 @@ const path = require('path');
 // 同时避免把「配置校验失败」真写进 logs/（配合下面 loggerFlush 的 mock）。
 // 用 Proxy 而非具名方法：logger 的导出面很宽（error/warn/info/debug/child/...），
 // 只列几个会在后续改动里抛 "not a function"。
+// 分级留痕：mock 合并了所有级别，而"致命校验失败"与"合法启动告警"必须能分开断言。
+// 背景（2026-09-30）：下面的「校验必须通过」用例原本对**全量输出**做
+//   not.toMatch(/...|HMAC_SECRET/)
+// 注释写着"不否定告警文案"，实现却把告警文案也否定了——于是任何合法告警只要
+// 点名了某个密钥（如 immutable 档位的 pepper 轮换告警要点名 HMAC_SECRET 才说得清）
+// 就会被误判为"致命项泄漏"。实测：新增该告警后本用例变红，而服务其实起得来。
+// 故按级别分桶，断言只针对 error 级（真正的致命项）。
 const mockLogLines = [];
+const mockErrors = [];
 jest.mock(
   '../../utils/logger',
   () =>
@@ -36,9 +44,10 @@ jest.mock(
           if (prop === '__esModule') return false;
           if (prop === 'default') return undefined;
           return (...args) => {
-            mockLogLines.push(
-              args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')
-            );
+            const line = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+            mockLogLines.push(line);
+            // error/fatal 是"起不来"的一档；warn（安全加固建议）是"起来了但要知道"
+            if (prop === 'error' || prop === 'fatal') mockErrors.push(line);
           };
         },
       }
@@ -101,6 +110,7 @@ function materialize(raw, tmpDir) {
 /** 跑一次真实的 validateConfig，返回它以什么退出码终止 + 期间记下的日志 */
 function runValidate() {
   mockLogLines.length = 0;
+  mockErrors.length = 0;
   jest.resetModules();
   const { validateConfig } = require('../../config/validate');
   const originalExit = process.exit;
@@ -116,7 +126,7 @@ function runValidate() {
   } finally {
     process.exit = originalExit;
   }
-  return { exitedWith, output: mockLogLines.join('\n') };
+  return { exitedWith, output: mockLogLines.join('\n'), errors: mockErrors.join('\n') };
 }
 
 describe('docker-compose 生产环境变量契约', () => {
@@ -205,19 +215,27 @@ describe('docker-compose 生产环境变量契约', () => {
   });
 
   test('按 compose 给的环境变量，生产配置校验必须通过（服务起得来）', () => {
-    const { exitedWith, output } = runValidate();
+    const { exitedWith, output, errors } = runValidate();
     expect(exitedWith).toBeNull();
-    // 只否定"致命项"的名字，不否定告警文案（reportProductionWarnings 允许有内容）
-    expect(output).not.toMatch(/ALLOWED_HOSTS|REDIS_URL|JWT_SECRET|AES_SECRET_KEY|HMAC_SECRET/);
+    // 只否定"致命项"的名字（error 级），**不否定告警文案**——reportProductionWarnings
+    // 允许有内容，且合法告警会点名密钥（如 pepper 轮换告警必须说清是 HMAC_SECRET）。
+    // 2026-09-30 修正：原实现对该匹配跑在 `output`（全量、含 warn）上，与本注释的
+    // 意图相反，任何合法告警都会被误判。现改为只匹配 error 级输出。
+    expect(errors).not.toMatch(/ALLOWED_HOSTS|REDIS_URL|JWT_SECRET|AES_SECRET_KEY|HMAC_SECRET/);
+    // 前提自证：errors 分桶确实能装东西（否则上面那条恒真）——见下一条负向自证用例
+    expect(typeof output).toBe('string');
   });
 
   test('负向自证：抹掉 ALLOWED_HOSTS 后同一流程必须致命退出', () => {
     const keep = process.env.ALLOWED_HOSTS;
     delete process.env.ALLOWED_HOSTS;
     try {
-      const { exitedWith, output } = runValidate();
+      const { exitedWith, output, errors } = runValidate();
       expect(exitedWith).toBe(1);
       expect(output).toMatch(/ALLOWED_HOSTS/);
+      // 同时证伪 errors 分桶：致命项必须落进 errors，否则上一条的 not.toMatch(errors)
+      // 就是一条恒真断言（空桶永远不匹配任何模式 = 永远绿）
+      expect(errors).toMatch(/ALLOWED_HOSTS/);
     } finally {
       process.env.ALLOWED_HOSTS = keep;
     }

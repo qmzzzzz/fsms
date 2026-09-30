@@ -68,6 +68,10 @@ describe('auditChainVerify', () => {
       chain_break: 0,
       chain_fork: 0,
       hash_stripped: 0,
+      // 2026-09-30 登记：带 AuditLog.hashFailure 标记的无哈希记录（auditBuffer 算 hash
+      // 抛错后落库）。它单列一类、**不计 breaks**，但与本清单里其余项并列——因为它同样
+      // 是"链上有一段无法追认"的信号，只是成因不是篡改。登记而非删条目。
+      hash_compute_failed: 0,
     });
   });
 

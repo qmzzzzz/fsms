@@ -64,6 +64,11 @@ const isHandledCall = (line) =>
 describe('F-214 fire-and-forget 告警投递的单一入口', () => {
   const ENTRY_FILE = 'src/services/securityAlert.js';
   const AWAITER_FILE = 'src/services/auditMonitor.js';
+  // 第二个 await 侧调用点（2026-09-30 新增审计链周期核验时引入）：同 auditMonitor 的
+  // 口径——它要拿投递结果做自己的记账（lastAlertFingerprint / 当日配额），
+  // 所以走 `await sendNotification(...)` 这条显式形态，而不是 fire-and-forget 入口。
+  // 登记在这里正是本闸的设计意图：新增调用点必须显式表态"它怎么接住 promise"。
+  const CHAIN_MONITOR_FILE = 'src/services/auditChainMonitor.js';
   const BLACKLIST_CALLER = 'src/middleware/security.js';
 
   describe('① 全仓生产码：没有第二处丢弃 promise 的 sendNotification 调用', () => {
@@ -73,7 +78,9 @@ describe('F-214 fire-and-forget 告警投递的单一入口', () => {
         .filter((e) => e.lines.length > 0);
 
       // 白名单式断言：新增调用点必须在这里显式登记它是怎么接住 promise 的
-      expect(hits.map((e) => e.rel).sort()).toEqual([ENTRY_FILE, AWAITER_FILE].sort());
+      expect(hits.map((e) => e.rel).sort()).toEqual(
+        [ENTRY_FILE, AWAITER_FILE, CHAIN_MONITOR_FILE].sort()
+      );
 
       const unhandled = hits.flatMap((e) =>
         e.lines.filter((l) => !isHandledCall(l)).map((l) => `${e.rel}: ${l.trim()}`)

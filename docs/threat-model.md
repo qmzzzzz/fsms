@@ -68,7 +68,15 @@
 
 - lockfile 钉版 + `npm audit` 硬门禁 + dependency-review + CodeQL + gitleaks；
 - SBOM（CycloneDX）随构建产出、镜像 cosign keyless 签名 + SLSA provenance；
-- 生产依赖树禁止安装脚本（`scripts/check-prod-install-scripts.js`）+ save-exact。
+- 安装脚本登记门禁（`scripts/check-prod-install-scripts.js`，判据取 `package-lock.json`）：
+  生产树（非 dev 条目，如 `@scarf/scarf` 经 swagger-ui-dist 传递引入）零容忍、
+  dev 树（如 `mongodb-memory-server` 预下载 mongod）逐个评审登记；两档均在 CI 硬门禁；
+- `save-exact=true`（`.npmrc`）从源头杜绝 caret 漂移；
+- **lockfile 完整性锚**（`scripts/check-lockfile-integrity.js` + `deployment/lockfile-anchor.json`）：
+  把「上次人工拍板时锁文件长什么样」固化成 semantic 哈希写进版本库，任何改动必在 diff 现形。
+  **与上面的 SBOM 互补而非替代**——SBOM/provenance 是**构建时产出**，描述「这次构建用了什么、
+  来自哪里」，但不比对「与上次是否一致」：一个夹带改 `integrity` 字段的 PR 会被 SBOM
+  忠实记录、被 `provenance` 证明「来自这次构建」，**没有任何一环能发现「它变了」**。
 
 ## 3. 已知残余风险（如实申报）
 

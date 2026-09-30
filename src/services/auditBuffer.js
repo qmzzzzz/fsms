@@ -277,7 +277,10 @@ async function flush() {
         pendingTail = chainBatch(docs, startPrevHash);
         chained = true;
       } catch (hashErr) {
+        // 哈希计算失败的三件收尾（打标 / 前缀链尾推进 / 告警）在判定层，
+        // 本文件 max-lines 已贴棘轮上限。判据与理由见 auditBufferDocs.handleHashFailure。
         logger.warn(`审计日志哈希链计算失败，批次将无哈希落库：${hashErr.message}`);
+        ({ pendingTail, chained } = auditDocs.handleHashFailure(docs, hashErr));
       }
 
       try {

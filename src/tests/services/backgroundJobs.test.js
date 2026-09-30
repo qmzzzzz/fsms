@@ -240,11 +240,18 @@ describe('后台任务与错误路径（批次 E）', () => {
     const ban = await IPBlacklist.findOne({ ip: '203.0.113.210', source: 'auto' });
     expect(ban).toBeTruthy();
 
-    // 频控窗口内重复检测 → 不再重复告警
+    // 频控窗口内重复检测：**通知**不重复，但**审计必须照写**。
+    //
+    // 本断言原先钉的是「频控窗口内第二次检测不再写审计」——那正是被修掉的缺陷：
+    // 频控（shouldSendAlert）挡在 priorBans 统计 / 审计 / 封禁之前，任一命中即 return。
+    // 后果不是少一条通知：审计行是**阶梯的事件源**（IPBanEvents.countPrior 数的就是它），
+    // 跳过审计 ⇒ 阶梯永远停在第一档 ⇒ 反复触发的 IP 每次都只被封 1 小时，
+    // 而日志照打「第 N 档」。修法与 rateLimitEscalationBan.js 同一条纪律：
+    // 审计与封禁**无条件执行**，只有 dispatchNotification 受频控约束。
     const before = await AuditLog.countDocuments({ action: 'brute_force_login', username: bfUser });
     await securityAlert.checkBruteForce(bfUser, '203.0.113.210');
     const after = await AuditLog.countDocuments({ action: 'brute_force_login', username: bfUser });
-    expect(after).toBe(before);
+    expect(after).toBe(before + 1);
   });
 
   test('checkBulkExport / checkPermissionAbuse / getSecurityOverview / getRecentAlerts', async () => {

@@ -82,31 +82,24 @@ const userSchema = new mongoose.Schema(
       select: false, // 默认不返回密码字段
     },
 
-    // 个人信息（P1-②：at-rest 加密，判据收口在 utils/piiCrypto.js）
-    // 读侧经 getter 解密（存量明文透传），写侧在 pre('validate') 钩子里加密。
-    // 校验全部走钩子的**明文阶段**（长度/手机号格式，错误文案与明文时代逐字
-    // 一致）：validate 阶段看到的已经是密文——schema 级 maxlength/validator
-    // 会把每一行都判非法，这是它们必须搬进钩子的原因（trim 是赋值期 setter，
-    // 仍作用在明文上，保留在 schema 定义里）。
+    // 个人信息（P1-②，2026-09-30 决策修订：仅 phone at-rest 加密）
+    // realName 暂保持明文：姓名**片段模糊检索**是用户列表的日常能力，正则对
+    // 密文不成立，加密它等于砍掉该能力；转入加密需先给姓名检索另立方案。
+    // phone 加密判据收口在 utils/piiCrypto.js：读侧 getter 解密（存量明文
+    // 透传），写侧 pre('validate') 钩子加密；长度/格式校验随钩子前移到明文
+    // 阶段（validate 阶段看到的已是密文，schema 级校验会把每行都判非法）。
     realName: {
       type: String,
       trim: true,
-      get: decryptPii,
+      maxlength: [50, '姓名最多 50 个字符'],
     },
     phone: {
       type: String,
       trim: true,
       get: decryptPii,
     },
-    // 精确检索键（HMAC，select:false）：相等性只在这两个键控字段上成立，
+    // phone 的精确检索键（HMAC，select:false）：相等性只在这个键控字段上成立，
     // 密文列本身随机 IV、不可链接；空值不产生键（空串键会让空值互相命中）。
-    // realName 的模糊检索（正则）对密文不成立，列表搜索已改走 realNameKey
-    // 精确匹配（见 userService.buildListQuery 与 CHANGELOG 申报的能力回归）。
-    realNameKey: {
-      type: String,
-      select: false,
-      default: '',
-    },
     phoneKey: {
       type: String,
       select: false,
@@ -264,9 +257,8 @@ userSchema.index({ status: 1 });
 userSchema.index({ department: 1 });
 userSchema.index({ roles: 1 });
 userSchema.index({ createdAt: -1 });
-// P1-② 检索键索引：列表搜索按 realNameKey 精确匹配、按手机号找回用户走 phoneKey。
-// 非唯一：手机号本就没有唯一约束（保持现状，不在加密改造里夹带行为变更）。
-userSchema.index({ realNameKey: 1 }, { background: true, name: 'realNameKey_1' });
+// P1-② 检索键索引：按手机号找回用户走 phoneKey（realName 暂不加密、保持
+// 正则模糊检索，无检索键）。非唯一：手机号本就没有唯一约束（保持现状）。
 userSchema.index({ phoneKey: 1 }, { background: true, name: 'phoneKey_1' });
 
 /**
@@ -300,7 +292,6 @@ const USER_RESPONSE_EXCLUDE = [
   '-lastLoginIp',
   // P1-② 检索键：相等性预言机（拿一个手机号问"系统里有没有人用"），
   // 对外响应与内部状态同规格排除；查询侧走显式 select('+phoneKey')
-  '-realNameKey',
   '-phoneKey',
   '-__v',
 ].join(' ');
@@ -329,11 +320,6 @@ userSchema.statics.findByUsername = function (username) {
 // 手机号格式校验在这里（加密之前）而不是 schema validator：validate 阶段
 // 看到的已是密文，正则会把每一行都判非法；错误文案与明文时代逐字一致。
 const PII_ENCRYPTED_FIELDS = [
-  {
-    plain: 'realName',
-    key: 'realNameKey',
-    max: [50, '姓名最多 50 个字符'],
-  },
   {
     plain: 'phone',
     key: 'phoneKey',

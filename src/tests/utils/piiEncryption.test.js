@@ -61,7 +61,7 @@ describe('piiCrypto 纯判据', () => {
   });
 });
 
-describe('User schema 接线（真实 Mongo：写侧加密、读侧解密、检索键同步）', () => {
+describe('User schema 接线（真实 Mongo：phone 写侧加密、读侧解密、检索键同步）', () => {
   let userId;
 
   beforeAll(async () => {
@@ -72,7 +72,7 @@ describe('User schema 接线（真实 Mongo：写侧加密、读侧解密、检�
     if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
   });
 
-  test('创建：库内是密文 + 检索键同步，模型读回是明文', async () => {
+  test('创建：phone 库内是密文 + 检索键同步；realName 按决策保持明文', async () => {
     const u = await User.create({
       username: `pii_${Date.now().toString(36)}`,
       email: `pii_${Date.now().toString(36)}@example.invalid`,
@@ -83,21 +83,21 @@ describe('User schema 接线（真实 Mongo：写侧加密、读侧解密、检�
     });
     userId = u._id;
 
-    // 绕过 getter 看库内原始形态：必须是密文且不含明文
+    // 绕过 getter 看库内原始形态
     const raw = await User.collection.findOne({ _id: u._id });
-    expect(raw.realName).toMatch(/^enc\.v1\./);
     expect(raw.phone).toMatch(/^enc\.v1\./);
-    expect(raw.realName).not.toContain(PLAIN_NAME);
     expect(raw.phone).not.toContain(PLAIN_PHONE);
-    // 检索键同步且 select:false
+    // realName 决策：暂不加密（姓名模糊检索依赖），库内保持明文
+    expect(raw.realName).toBe(PLAIN_NAME);
+    // 检索键同步且 select:false（realName 无检索键：无消费者，不造死数据）
     expect(raw.phoneKey).toBe(piiSearchKey(PLAIN_PHONE));
-    expect(raw.realNameKey).toBe(piiSearchKey(PLAIN_NAME));
+    expect(raw.realNameKey).toBeUndefined();
 
     // 模型读回（默认投影不含检索键；明文经 getter 还原）
     const read = await User.findById(u._id);
     expect(read.realName).toBe(PLAIN_NAME);
     expect(read.phone).toBe(PLAIN_PHONE);
-    const withKey = await User.findById(u._id).select('+phoneKey +realNameKey');
+    const withKey = await User.findById(u._id).select('+phoneKey');
     expect(withKey.phoneKey).toBe(piiSearchKey(PLAIN_PHONE));
   });
 
@@ -109,13 +109,13 @@ describe('User schema 接线（真实 Mongo：写侧加密、读侧解密、检�
     expect(await User.findOne({ phoneKey: piiSearchKey('13900000000') })).toBeNull();
   });
 
-  test('更新：改动一个字段只重加密该字段，另一个字段密文不动', async () => {
+  test('更新：只改 phone 时 phone 重加密、realName 明文原样', async () => {
     const before = await User.collection.findOne({ _id: userId });
     const u = await User.findById(userId);
     u.phone = '13987654321';
     await u.save();
     const after = await User.collection.findOne({ _id: userId });
-    expect(after.realName).toBe(before.realName); // 未修改字段密文原样（随机 IV 下重加密=假变更）
+    expect(after.realName).toBe(before.realName); // 未修改字段原样（随机 IV 下重加密=假变更）
     expect(after.phone).not.toBe(before.phone);
     expect(after.phoneKey).toBe(piiSearchKey('13987654321'));
     expect((await User.findById(userId)).phone).toBe('13987654321');

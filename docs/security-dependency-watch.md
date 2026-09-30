@@ -48,6 +48,53 @@
      无破坏性升级。
 - **当前状态**：`npm audit`（含 dev）与 `npm audit --omit=dev` 均为 **0 漏洞**。
 
+## 供应链完整性锚（lockfile semantic 哈希）
+
+### 补的是什么缺口
+
+上面的 `npm audit` \ Dependabot \ CodeQL \ gitleaks \ install-script 门禁，**全部只回答
+一个问题**：「这个包有没有已知 CVE」。于是下面三类**全部漏检**：
+
+- 包被投毒但未上 CVE（audit 查的是 advisory 库）；
+- 发布者账号被盗、推恶意版本（版本号合法、无 CVE）；
+- **lockfile 被静默篡改**——PR 里夹带改一个 `integrity` 字段、本地误跑一次
+  `npm install` 改了分辨率后顺手提交、CI 缓存污染。此前**只有 code review 的人眼**
+  （`dependency-review.yml` 只比对「新引入的依赖有无漏洞」，**不校验锁文件与上次是否一致**）。
+
+本锚把「上次人工拍板时锁文件长什么样」固化为 `deployment/lockfile-anchor.json` 里的
+semantic 哈希，CI 的 `security-audit` 作业每次比对。
+
+### 口径：semantic 哈希，不是原始字节哈希
+
+哈希 = `SHA-256(UTF-8(JSON 递归排序 + 紧凑序列化))`，即
+`json-sort-keys-compact-utf8`。
+
+**为什么不能用原始字节哈希**：开发机是 Windows/CRLF 工作区，CI 是 ubuntu-latest/LF
+checkout，而 `.gitattributes` 对 `package-lock.json` 无规则。实测
+`raw` 口径在 CRLF↔LF 之间**漂移** ⇒ 门禁会在 CI 上**恒假红** ⇒ 而假红第一次出现就会被
+`continue-on-error` 或「先注释掉」消化掉，等于没有门禁。semantic 口径对该差异免疫
+（已固化为 `src/tests/deploy/lockfileAnchor.test.js` 的回归断言）。
+
+### 覆盖面与用法
+
+- 覆盖 **2 份**：`package-lock.json`（后端）、`web-admin/package-lock.json`（前端）。
+  **不纳入 `zznpmtest/package-lock.json`**——它是会话期脚手架，未入库
+  （`.gitignore:106-110` 登记，`git ls-files` 为 0），锚无从比对。
+- `npm run check:lockfile`（= `--verify`，CI 用）；变更依赖后由人工复核 diff 再跑
+  `node scripts/check-lockfile-integrity.js --update` 重写锚，**必须显式指定**。
+- **fail-closed**：锁文件缺失 / 解析失败 / 锚缺失或条目缺失 ⇒ 一律判红。
+
+### 能力边界（如实声明，勿夸大）
+
+- ✓ **能挡**：PR 夹带改 lockfile、本地误 `npm install` 改分辨率、CI 缓存污染、
+  锚被静默改（锚文件本身在 git 里，任何改动必留 diff 并受评审）。
+- ✗ **挡不了**：**上游包本身被投毒**而 lockfile/`integrity` 均未变的场景。
+  这一类只有「SBOM + 来源证明 + CVE 面」能挡，本锚不声称覆盖。
+- ✗ **它不是 SBOM。** 本锚是**篡改检测**（「依赖树自上次拍板以来有没有被改动」）；
+  SBOM 是**合规与追溯**（「我声明用了哪些组件、什么版本、什么许可证」）。
+  二者互补、不互相替代。**当前仓库仍然没有合规意义上的 SBOM**——组件清单/许可证/
+  来源证明都不在本锚的输出里，请勿把「有了完整性锚」误当成「有了 SBOM」。
+
 ## 通用约定
 
 - 任何依赖更换必须附：变更前后 `npm audit` 对比、全量测试结果、

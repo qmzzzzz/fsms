@@ -33,6 +33,9 @@ const { startAlertCleanup, stopAlertCleanup } = require('./services/securityAler
 const { startCaptchaCleanup, stopCaptchaCleanup } = require('./services/captchaService');
 const auditBuffer = require('./services/auditBuffer');
 const auditMonitor = require('./services/auditMonitor');
+// 审计链周期自检（2026-09-30）：补上"链完整性由定时任务守护"这一方，
+// 与 auditMonitor（异常行为检测）分工，见该模块文件头
+const auditChainMonitor = require('./services/auditChainMonitor');
 // M-09：启动期重同步审计链链尾（清除崩溃遗留的幻影链尾）
 const { resyncChainTail } = require('./utils/auditChain');
 // F-103：关停链的总预算（每一步向它要自己的超时，见 gracefulShutdown 内的注释）
@@ -185,6 +188,9 @@ const gracefulShutdown = async (signal) => {
   // walChain 排空（裁剪的原子 rename 落盘）→ stop。此前「await flush(); stop()」
   // 不等裁剪，500ms 强制退出截断 rename → 重启重放把已落库批次重复插入（B-L2）
   await runStep('停止审计监控', () => auditMonitor.stop());
+  // 审计链核验与 auditMonitor 同为"只读扫描 + 告警"的后台任务，关停口径一致：
+  // 只清定时器（停掉新一轮），在途那一轮由 runStep 的超时预算兜底，不阻塞关停
+  await runStep('停止审计链核验', () => auditChainMonitor.stop());
   await runStep('清空审计缓冲', async () => {
     // F-101：这一句以前无条件打「已清空」。flush 在有在途批次时会直接 return，
     // 于是"定时 flush 正跑到一半时关停"这种常见时序下，日志说清空了、缓冲里其实还压着记录，
@@ -371,6 +377,10 @@ const startServer = async () => {
       auditBuffer.start();
       // 启动审计异常检测定时监控（配合 gracefulShutdown 中的 stop）
       auditMonitor.start();
+      // 启动审计链周期自检（2026-09-30）：此前链核验只在被手动调用时发生，
+      // "篡改会留痕"成立而"痕迹会被发现"不成立；本定时器把发现从人工动作
+      // 变成自动循环。窗口取最近 N 条（默认 2000），发现新断裂/缺口即告警。
+      auditChainMonitor.start();
       reminderScheduler = startReminderScheduler(24 * 60 * 60 * 1000);
 
       const scheme = process.env.ENABLE_HTTPS === 'true' ? 'https' : 'http';

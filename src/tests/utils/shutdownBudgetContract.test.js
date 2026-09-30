@@ -239,6 +239,10 @@ describe('关停链总预算与部署窗口的契约（F-103）', () => {
   const SYNC_ONLY_STEPS = [
     '停止告警清理定时器',
     '停止审计监控',
+    // 2026-09-30 追加：审计链周期自检（services/auditChainMonitor.js）与 auditMonitor
+    // 同为"只读扫描 + 告警"的后台定时任务，其 stop() 只 clearInterval、无 await 网络/IO
+    // （见该函数体与 src/index.js 关停链的注释），故属同步步骤。
+    '停止审计链核验',
     '停止权限缓存清理定时器',
     '停止统计缓存清理定时器',
     '停止验证码清理定时器',

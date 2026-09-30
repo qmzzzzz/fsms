@@ -12,7 +12,8 @@ const { AUDIT_ERROR_RISK_LEVELS } = require('../constants/audit');
 const { sendNotification } = require('./securityAlertDelivery');
 const { applyAuditDataScope } = require('./auditScopeFilter');
 const { guardDetection } = require('../utils/auditWriteFailure');
-
+// 审计链三类告警的取值在独立常量文件（本文件 max-lines 已贴棘轮上限）
+const { AUDIT_CHAIN_ALERT_TYPES } = require('./auditChainAlertTypes');
 // 告警阈值配置
 const THRESHOLDS = {
   // 暴力破解：5 次失败/5 分钟
@@ -31,12 +32,7 @@ const THRESHOLDS = {
 };
 
 // 告警级别
-const ALERT_LEVELS = {
-  LOW: 'low',
-  MEDIUM: 'medium',
-  HIGH: 'high',
-  CRITICAL: 'critical',
-};
+const ALERT_LEVELS = { LOW: 'low', MEDIUM: 'medium', HIGH: 'high', CRITICAL: 'critical' };
 
 // 告警类型
 const ALERT_TYPES = {
@@ -46,8 +42,9 @@ const ALERT_TYPES = {
   UNUSUAL_TIME: 'unusual_time_access',
   PERMISSION_ABUSE: 'permission_abuse',
   SUSPICIOUS_IP: 'suspicious_ip_activity',
-  // 限流持续触顶的升级封禁事件（services/rateLimitEscalation.js 的 CC 防护闭环）
-  RATE_LIMIT_ABUSE: 'rate_limit_abuse',
+  RATE_LIMIT_ABUSE: 'rate_limit_abuse', // 限流触顶升级封禁（rateLimitEscalation 闭环）
+  // 审计哈希链三类（2026-09-30）：定义见 auditChainAlertTypes.js，判据见 auditChainMonitor.js
+  ...AUDIT_CHAIN_ALERT_TYPES,
 };
 
 /**
@@ -88,6 +85,21 @@ const IPBanEvents = {
     }),
   /** 首次触发 = 第 1 档；每多一次历史事件升一档，封顶第 4 档 */
   tierFor: (priorBans) => Math.min(Math.max(priorBans, 0), ESCALATION_TIERS.length - 1),
+  /**
+   * 权限滥用的阶梯事件源（2026-09-30 补遏制时新增）。
+   *
+   * 与 countPrior 分账的理由：`body.ipAttempts` 那套过滤只对暴力破解有意义
+   * （它要剔掉"账号维度达标、IP 维度未达标"的告警行）。权限滥用没有维度之分——
+   * 每写一条 permission_abuse 审计就对应一次封禁动作，直接计数即可。
+   *
+   * 复用同一组时长档位（ESCALATION_TIERS）与同一个 windowMs：两本账、一套阶梯。
+   */
+  countPermissionAbusePrior: (normalizedIp) =>
+    AuditLog.countDocuments({
+      action: ALERT_TYPES.PERMISSION_ABUSE,
+      ip: normalizedIp,
+      timestamp: { $gte: new Date(Date.now() - IPBanEvents.windowMs()) },
+    }),
 };
 
 // 告警频率限制缓存。结构：{ alertKey: { timestamp, expiresAt } }
@@ -213,15 +225,10 @@ const checkBruteForce = async (username, ip) => {
 
   const maxFailures = Math.max(userFailures, ipFailures);
   if (maxFailures >= THRESHOLDS.bruteForceAttempts) {
-    // E-04 口径提前到频控闸之前：告警去重键也必须用**归一化 IP**——
+    // E-04 口径：告警去重键与封禁对象都必须用**归一化 IP**——
     // `::ffff:1.2.3.4` 与 `1.2.3.4` 混合出现时按原文组键会产生两个去重键，
     // 同一来源重复告警（与封禁/阶梯的两把尺问题同源）
     const normalizedIp = normalizeIP(ip) || ip;
-    // 按账户维度 + IP 维度分别做频率限制，避免重复告警（键直接内联：
-    // 中间变量 userAlertKey/ipAlertKey 各只用一次，本文件行数已在棘轮红线上）
-    const shouldAlertUser = shouldSendAlert(`brute_force_user_${username}`);
-    const shouldAlertIp = shouldSendAlert(`brute_force_ip_${normalizedIp}`);
-    if (!shouldAlertUser && !shouldAlertIp) return;
 
     // R-H2：**封禁判据只看 IP 维度**。maxFailures 取的是双维度的较大值——分布式撞
     // 单账号（多个攻击 IP 各自少量尝试同一账号）会让 userFailures 达标，而"当前请求
@@ -230,8 +237,8 @@ const checkBruteForce = async (username, ip) => {
     // 兜底；IP 封禁只对「这个 IP 自己刷满了失败」的确定性信号执行。
 
     // 渐进式封禁的"第几次"必须在**本次告警落库之前**统计：
-    // 每穿过一次上面的频控闸 = 一条 brute_force_login 审计 + 一次封禁动作，
-    // 所以"历史上这个 IP 触发过几条该审计"就是封禁事件数。
+    // 每次穿过这个分支 = 一条 brute_force_login 审计 + 一次封禁动作（频控只挡通知，
+    // 不再挡这条路径），所以"历史上这个 IP 触发过几条该审计"就是封禁事件数。
     // 为什么不数 ipblacklist 集合：该集合上 (ip,type) 唯一（models/IPBlacklist.js:92），
     // blockIP 用 findOneAndUpdate + $setOnInsert:createdAt（:266），且 TTL 索引（:89）
     // 到期即删档 ⇒ 同一 IP 任何时刻最多只剩一条 ⇒ countDocuments 恒 ≤1，
@@ -266,12 +273,6 @@ const checkBruteForce = async (username, ip) => {
 
     // B-M1：投递走 fire-and-forget——本函数被登录失败/导出路径 await，
     // 告警已落库（上方 create 在 await 内，即时性保留），这里只走网络投递
-    dispatchNotification(
-      ALERT_TYPES.BRUTE_FORCE,
-      ALERT_LEVELS.CRITICAL,
-      `检测到暴力破解攻击：用户 ${username}，IP ${ip}`,
-      { username, ip, attempts: maxFailures }
-    );
 
     // R-H2：IP 维度未达标（分布式撞单账号）到此为止——告警与审计已落库
     // （body 的 ipAttempts 即判据），封禁只对「这个 IP 自己刷满了失败」执行
@@ -296,6 +297,33 @@ const checkBruteForce = async (username, ip) => {
         );
     } catch (e) {
       logger.error(`自动封禁 IP 失败: ${ip}, 错误: ${e.message}`);
+    }
+
+    // ============ 处置与通知解耦（2026-09-30，与 rateLimitEscalationBan 同一修法）============
+    // 修复前：两行 `shouldSendAlert` 挡在 priorBans 统计 / 审计 / 封禁**之前**，
+    // 任一命中即 `return`，把三件事一起关在门外。后果不是少一条通知：
+    //   - 封禁**失败**（命中白名单 / 黑名单写库故障）时，5 分钟内的重试被这行吞掉——
+    //     而"封禁没生效"恰恰是最需要重试的场合；
+    //   - 审计行是**阶梯的事件源**（IPBanEvents.countPrior 数的就是它，
+    //     见上方 :66-86 的注释），跳过审计 ⇒ 阶梯永远停在第一档 ⇒ 反复触发的 IP
+    //     每次都只被封 1 小时，而 :279 照打「第 N 次」——运维以为阶梯在工作。
+    // 现在：统计 / 审计 / 封禁**无条件执行**，频控只约束 dispatchNotification。
+    // 通知是给人看的，处置是对系统做的，两者不该共用一个开关。
+    //
+    // 键**内联**而非中间变量：键里同时含 username 与归一化 IP，两处各内联一次
+    // 才能保证"构造方式"只有一种（抽成变量反而要再抽一个函数，本文件 max-lines 已贴上限）。
+    // `||` 的短路是有意的：账户维度 key 放行时不消费 IP 维度 key，两个维度各自计频，
+    // 与修复前"任一放行即投递"的语义一致（改 `|` 会多消费一个 key ⇒ 抑制变强 ⇒ 行为回归）。
+    if (
+      shouldSendAlert(`brute_force_user_${username}`) ||
+      shouldSendAlert(`brute_force_ip_${normalizedIp}`)
+    ) {
+      dispatchNotification(
+        ALERT_TYPES.BRUTE_FORCE,
+        ALERT_LEVELS.CRITICAL,
+        `检测到暴力破解攻击：用户 ${username}，IP ${ip}`,
+        { username, ip, attempts: maxFailures }
+      );
     }
   }
 };
@@ -366,42 +394,22 @@ const checkPermissionAbuse = async (userId, ip) => {
   });
 
   if (recentFailures >= THRESHOLDS.permissionFailures) {
-    const alertKey = `permission_abuse_${userId}`;
-    if (!shouldSendAlert(alertKey)) return;
-
     // username 为 AuditLog 必填字段：缺失会让告警写入 ValidationError 静默失败
     //（批次 E 测试暴露的潜伏缺陷——该函数此前无调用方，缺陷从未触发）
     const User = require('../models/User');
     const abuser = await User.findById(userId).select('username').lean();
     if (!abuser) return;
 
-    // P1-23 同口径（另两个检测器都已挂 try/catch，这里是漏网的第三处）：调用方
-    // middleware/rbac.js 是 `void checkPermissionAbuse(...).catch(() => {})`，
-    // 裸 await 一旦抛错（DB 瞬断/必填字段校验失败）整条 HIGH 告警会**无声消失**——
-    // 既不进审计、也没有一行日志，运维与代码都无从知道权限滥用检测在掉链子。
-    // 捕获后仍继续投递通知：告警落库失败不该连带吞掉另一条独立的通知通道。
-    try {
-      await AuditLog.create({
-        action: ALERT_TYPES.PERMISSION_ABUSE,
-        category: 'system',
-        userId,
-        username: abuser.username || String(userId),
-        ip,
-        riskLevel: ALERT_LEVELS.HIGH,
-        riskFactors: ['频繁权限检查失败'],
-        body: { failures: recentFailures },
-      });
-    } catch (e) {
-      logger.error(`权限滥用告警审计落库失败（通知流程继续）: ${e.message}`);
-    }
-
-    // B-M1：同上，fire-and-forget
-    dispatchNotification(
-      ALERT_TYPES.PERMISSION_ABUSE,
-      ALERT_LEVELS.HIGH,
-      `检测到权限滥用：用户 ${userId}，失败 ${recentFailures} 次`,
-      { userId, ip, failures: recentFailures }
-    );
+    // 处置侧整块（审计 / 遏制封禁 / 通知）抽到 securityAlertPermissionAbuse.js：
+    // 本文件 max-lines 已贴棘轮上限，且"遏制"是本次新增的一整条职责。
+    // 该模块的头注释记着为什么这里必须封 IP（此前只告警不封任何东西 ⇒ 有效凭据
+    // 持有者把探测压到 <20 次/5 分钟即可永久试探权限边界）。
+    await require('./securityAlertPermissionAbuse').recordAndContain({
+      userId,
+      username: abuser.username || String(userId),
+      ip,
+      recentFailures,
+    });
   }
 };
 

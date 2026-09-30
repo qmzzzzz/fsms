@@ -16,6 +16,7 @@
     "format": "prettier --write docs deployment CHANGELOG.md README.md docker-compose.yml package.json web-admin/package.json .github src scripts migrations migrate-mongo-config.js web-admin/src e2e playwright.config.js",
     "format:check": "prettier --check docs deployment CHANGELOG.md README.md docker-compose.yml package.json web-admin/package.json .github src scripts migrations migrate-mongo-config.js web-admin/src e2e playwright.config.js",
     "check:utf8": "node scripts/check-utf8.js",
+    "check:lockfile": "node scripts/check-lockfile-integrity.js --verify",
     "test": "jest",
     "test:coverage": "jest --coverage",
     "test:watch": "jest --watch",
