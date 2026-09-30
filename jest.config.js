@@ -117,7 +117,25 @@ module.exports = {
     // 要当前数字跑 `npm run test:coverage`。
     './src/middleware/security.js': { branches: 88, functions: 84 },
     './src/middleware/rateLimit.js': { branches: 77, functions: 97 }, // 2026-09-10 makeSharedStore改为同步代理包装器
-    './src/middleware/auth.js': { branches: 87, functions: 97 },
+    // 【2026-09-30 修正：functions 97 → 90】原值 97 是 aa92bb7（2026-09-28）按
+    // 「实测 - 3pt」机械套用时**误按"实测 100%"推导**出来的，而 auth.js 的函数
+    // 覆盖率实际是 **93.33%（14/15）**。证据链：
+    //   · aa92bb7 版 auth.js 与当前版本**代码逐字节相同**（仅差 5301834 改名带出的
+    //     一行注释路径 `zzqoder_populateMatchShape` → `populateMatchShape`），
+    //     函数计数同为 15 ⇒ 93.33% 自那时起就是真值，97 从未可达。
+    //   · 唯一未覆盖的函数是 `auth.js:178-185` 的 30s 用户缓存清理 setInterval 回调，
+    //     且这是**有意的、有据可查的**取舍——src/tests/middleware/
+    //     authMiddlewareFailClosedGuards.test.js:40-42 记明「不做覆盖……强行驱动需
+    //     伪造系统时钟，与 mongodb 驱动冲突（见 permCacheLifecycle.test.js 实测）」。
+    //   · 同族先例：本文件下方 `auditMonitor.js` 的 `functions: 78` 同样以
+    //     「fn 受 interval 回调/unref 行(91-92)未触达拖累」为由留低。
+    //   ⇒ 这不是"回归导致跌破"，而是**阈值本身推导错误**：按本文件唯一规则
+    //     `floor(实测 - 3)` 应得 `floor(93.33 - 3) = 90`。
+    // 为何长期未暴露：CI 的 step 13「Run tests with coverage」在 #72–#75 都被前序
+    // step 11/12 的红灯 skip/cancel，从未真正执行；2026-09-30 修好 step 11/12 后
+    // 才第一次跑到，于是这条**自写下之日起就不可能通过**的阈值第一次现形。
+    // 修正后仍是有意义的绊线：实测 93.33 vs 阈值 90，再丢 1 个函数（→86.67）即转红。
+    './src/middleware/auth.js': { branches: 87, functions: 90 },
     './src/middleware/tokenBlacklist.js': { branches: 82, functions: 97 },
     './src/middleware/rbac.js': { branches: 88, functions: 93 },
     // 2026-08-28 pureModules.test.js 补 DataMasking/HMAC/HashUtils/AES 缺口
