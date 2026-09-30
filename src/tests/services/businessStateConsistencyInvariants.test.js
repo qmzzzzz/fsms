@@ -425,9 +425,18 @@ describe('批次B 业务规则加固回归', () => {
     const AuditLog = require('../../models/AuditLog');
     const { contentLevelWriteError } = require('../helpers/contentLevelWriteError');
 
-    // 缓冲满 100 条会触发异步 flush，若不等其结算，flushing 标志会串到下个用例，
-    // 让后续的显式 flush() 直接早退（这类"测试间异步泄漏"比被测缺陷更难排查）
-    const settle = () => new Promise((r) => setTimeout(r, 50));
+    // 缓冲是**模块级单例**，`flushing` 标志会跨用例存活：满 100 条触发的
+    // fire-and-forget flush 不等结算就串到下一条用例，让后续的显式 flush() 直接早退
+    // （这类"测试间异步泄漏"比被测缺陷更难排查）。
+    //
+    // 【2026-09-30 修正：原先这里用固定 50ms 睡眠，等于赌时间，CI 上赌输了】
+    // CI 实测（run #74 / seed 777001）本组三条用例的耗时就是铁证：
+    //   ✓ 缓冲不超过硬上限…            (169 ms)  ← 推 10300 条，触发一轮 fire-and-forget flush
+    //   ✓ 失败后文档回到缓冲重试        (1 ms)   ← 1ms 就"通过"，正是 flush() 被早退的证据
+    //   ✕ 同一条文档累计内容级失败达阈值 (133 ms)  ← 5 次 flush 少计一次 ⇒ 失败计数停在 4
+    //                                              < MAX_BATCH_RETRY(5) ⇒ bufferLength 期望 0 实得 1
+    // 现改为显式等待模块空闲（auditBuffer.__waitForFlushIdle），不再依赖墙钟。
+    const settle = () => auditBuffer.__waitForFlushIdle(5000);
 
     // 夹具必须是"schema 判得出合法、真能落库"的文档：批量写路径在算哈希前有一道
     // 预铸造闸，合不上的文档当场丢弃并记账，根本走不到 insertMany。用 `{action:'x'}`
@@ -435,7 +444,15 @@ describe('批次B 业务规则加固回归', () => {
     // 被预检丢弃抢先满足——断言仍然绿，但测的已经不是它声称的那件事。
     const validAudit = (o) => ({ action: 'x', category: 'auth', username: 'u', ...o });
 
+    // 边界上再收一次口：保证没有任何在途 flush 跨到下一条用例。
+    // 顺序必须「先等空闲、再重置」——反过来的话，在途批次回退的文档会落在重置**之后**。
+    const settleAndReset = async () => {
+      await settle();
+      auditBuffer.__resetForTest();
+    };
+
     beforeEach(() => auditBuffer.__resetForTest());
+    afterEach(settleAndReset);
     afterAll(() => auditBuffer.__resetForTest());
 
     test('缓冲不超过硬上限，超出部分计入 droppedCount', async () => {
@@ -451,6 +468,8 @@ describe('批次B 业务规则加固回归', () => {
       expect(stats.bufferLength).toBeLessThanOrEqual(hardLimit);
       expect(stats.droppedCount).toBeGreaterThan(0);
 
+      // 次序不可换：先等这一轮 flush 真正结算完（此时 spy 仍在位 ⇒ 必然"成功"、
+      // 不会整批回退），再撤 spy。撤早了，在途的 insertMany 会打到真库上。
       await settle();
       spy.mockRestore();
       auditBuffer.__resetForTest();

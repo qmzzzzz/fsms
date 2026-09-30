@@ -586,6 +586,26 @@ function __resetForTest() {
   wal.resetCounters();
 }
 
+/**
+ * 仅供测试：等待在途的那一轮 flush 结束（轮询 `flushing`，带毫秒上限）。生产不调用。
+ *
+ * 为什么测试需要它：`flushing` 是**模块级**标志，而 fire-and-forget 的 flush
+ * （push 满额触发、定时器触发）会**跨用例**存活。用例里拿固定 `setTimeout` 当同步
+ * 原语是在赌时间——CI 的 CPU 争用下，一次上万条批次的 flush 能跑数百毫秒，于是下一条
+ * 用例的显式 `flush()` 被 `if (flushing || buffer.length === 0) return` 直接早退，
+ * 断言看到的是"还没处理完"的中间态。
+ *
+ * CI 实测（run #74，seed 777001）就是这一格：
+ *   ✓ 缓冲不超过硬上限…            (169 ms)  ← 推 10300 条并触发一轮 fire-and-forget flush
+ *   ✓ 失败后文档回到缓冲重试        (1 ms)   ← 1ms 就"通过"，正是早退的证据
+ *   ✕ 同一条文档累计内容级失败达阈值 (133 ms)  ← 5 次 flush 少计一次 ⇒ 停在 4 < MAX_BATCH_RETRY(5)
+ *
+ * 返回后可以保证：那一轮的批次**已经结算完**（已落库 / 已丢弃 / 已回退进缓冲）——
+ * `flush()` 的 finally（置 `flushing=false`）排在 catch 的 `unshiftChunked` 之后。
+ * 它**不**保证缓冲为空；要清空请照旧调 `__resetForTest`。
+ */
+const __waitForFlushIdle = (budgetMs = 5000) => waitForFlushIdle(budgetMs);
+
 module.exports = {
   push,
   flush,
@@ -596,4 +616,5 @@ module.exports = {
   getStats,
   getWalPath,
   __resetForTest,
+  __waitForFlushIdle,
 };
