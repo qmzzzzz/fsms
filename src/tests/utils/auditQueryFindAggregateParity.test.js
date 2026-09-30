@@ -87,7 +87,9 @@ describe('审计 query 条件在 find 与 aggregate 两条路径上同尺', () =
     // 「前缀 + collation 范围查询」。两条都锁：不得退回正则（正则既用不上索引——
     // $regex 不感知 collation——不锚定又会把 `adm` 误命中 `damin`），
     // 也不得被 cast 成 ObjectId（这才是本用例原本要防的"过度 cast"）。
-    expect(query.username).toEqual({ $gte: `${TAG}u`, $lt: `${TAG}v` });
+    // 上界追加 collation 哨兵 U+FFFF（永久未分配码位），不是「末字符码点 +1」——
+    // 后者在 ICU 排序下对 z/Z/9 等末字符构成空区间（d72872c 修的正是它）。
+    expect(query.username).toEqual({ $gte: `${TAG}u`, $lt: `${TAG}u\uFFFF` });
   });
 
   test('非 hex 的 userId 仍按既有契约被拒（cast 不得把校验变成静默兜底）', () => {

@@ -137,8 +137,13 @@ describe('buildAuditQuery boundaries', () => {
     // Top-8 前半（2026-09-28）：username 由「不锚定 + $options:'i' 的 $regex」改为
     // 「前缀 + collation 范围查询」。特殊字符因此不再需要转义——范围比较天然免疫正则注入
     // （附带收益：原实现靠 escapeRegExp 防注入，改后这个注入面直接不存在了）。
-    // 上界 = 末字符码点 +1：'alice(.*' 的 `*`(0x2A) → `+`(0x2B)。
-    expect(query.username).toEqual({ $gte: 'alice(.*', $lt: 'alice(.+' });
+    // 上界 = 追加 collation 最高哨兵 U+FFFF（永久未分配码位，隐式权重高于一切已分配字符）。
+    // 2026-09-30 修正：本断言此前仍钉着被 d72872c 废掉的「末字符码点 +1」——'alice(.*'
+    // 的 `*`(0x2A) → `+`(0x2B)——那是 ICU 排序下的**空区间**形态（标点权重排在字母之前，
+    // `alice(.+` < `alice(.*`），与该提交修复的正是同一类缺陷。此处只钉形状（哨兵在末尾），
+    // 哨兵在 collation 下确实恒大于任何 `prefix + <已分配字符>` 由
+    // auditUsernamePrefixIndex.test.js 的 DB 回归用例负责。
+    expect(query.username).toEqual({ $gte: 'alice(.*', $lt: 'alice(.*\uFFFF' });
     expect(query.action).toBe('auth_login');
     expect(query.category).toBe('auth');
     expect(query.riskLevel).toBe('high');
