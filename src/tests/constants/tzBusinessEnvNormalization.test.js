@@ -25,7 +25,10 @@ const fs = require('fs');
 const path = require('path');
 
 const SRC_ROOT = path.join(__dirname, '../..');
-const read = (rel) => fs.readFileSync(path.join(SRC_ROOT, rel), 'utf8');
+// CRLF→LF 归一：本仓 core.autocrlf=true，Windows 工作区里 src/**.js 是 CRLF 而 CI 是 LF。
+// 本套件的写法层判据要按 `\n}\n` 切函数体，不归一时在 Windows 上切出空串（红得莫名），
+// 归一之后两侧同一份视图。
+const read = (rel) => fs.readFileSync(path.join(SRC_ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 
 /** 去掉块注释与行注释，避免"注释里提了一句 trim"被当成代码（F-128 同法） */
 const stripComments = (src) =>
@@ -210,8 +213,14 @@ describe('TZ_BUSINESS：两个引用点都必须带 trim（写法层，防同向
 
   test('闸门侧同样 trim：两处口径同源，缺一个就会重新出现"放行但运行期抛"', () => {
     const gate = stripComments(read('config/validate.js'));
-    const fn = gate.slice(gate.indexOf('function collectTimezoneErrors'));
-    const body = fn.slice(0, fn.indexOf('\n}\n') + 1);
+    const at = gate.indexOf('function collectTimezoneErrors');
+    // 两处定位失败都必须**响**：静默 slice 会切出空串或切到别的函数体上——后者更糟，
+    // 因为别的函数里同样可能有 `process.env.TZ_BUSINESS).trim()`，判据会假绿。
+    if (at < 0) throw new Error('闸门侧找不到 function collectTimezoneErrors，写法层判据已失效');
+    const fn = gate.slice(at);
+    const endAt = fn.indexOf('\n}\n');
+    if (endAt < 0) throw new Error('找不到 collectTimezoneErrors 的收尾大括号，函数体边界不可信');
+    const body = fn.slice(0, endAt + 1);
     expect(body).toContain('process.env.TZ_BUSINESS');
     expect(body).toMatch(/\.trim\(\)/);
   });

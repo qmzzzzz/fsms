@@ -15,11 +15,16 @@
  * 字符串字面量里的 `//`（如 `'https://x'`）同样会被抹掉。对"数某个调用串出现没有"
  * 这类判据无影响（调用串不含 `//`），但**不要**用它做涉及 URL 字面量的判定。
  *
+ * 行尾：入口先把 CRLF 归一成 LF。本仓 `core.autocrlf=true` 且 prettier 是
+ * `endOfLine:"auto"`，Windows 工作区的源码是 CRLF 而 CI 是 LF；不归一的话每行尾部
+ * 会挂一个 `\r`，于是 `/...$/m` 这类锚到行尾的判据只在其中一侧成立。
+ *
  * @param {string} src JS 源码
- * @returns {string} 抹掉块注释（保行号）、整行注释与行尾注释后的视图
+ * @returns {string} 抹掉块注释（保行号）、整行注释与行尾注释后的 LF 视图
  */
 function jsCodeOnly(src) {
   return String(src)
+    .replace(/\r\n/g, '\n')
     .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
     .split('\n')
     .filter((l) => !/^\s*\/\//.test(l))
