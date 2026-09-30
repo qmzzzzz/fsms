@@ -250,7 +250,14 @@ const ERROR_CODES = {
   },
   PASSWORD_SAME_AS_OLD: {
     status: 400,
-    message: '新密码不能与旧密码相同',
+    message: '新密码不能与当前密码相同',
+  },
+  PASSWORD_REUSED_IN_HISTORY: {
+    status: 400,
+    // 必须点明"最近 N 条"而不是笼统说"不能重复"：用户需要知道边界才能换一个
+    // 可用的口令，否则只能猜。N 由 utils/passwordHistory.HISTORY_DEPTH 决定，
+    // 前端文案里的数字与该常量同源，不要各写一份。
+    message: '新密码不能与最近使用过的密码相同',
   },
   PASSWORD_CHANGED_REVOKE_FAILED: {
     status: 503,

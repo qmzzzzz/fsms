@@ -21,8 +21,10 @@ const {
   applyPreBodySecurity,
   applyPostBodySecurity,
   applyResponseHardening,
+  materializeQuery,
   generalLimiter,
   ipLimiter,
+  staticSurfaceLimiter,
   auditLog,
   queryLengthLimit,
   queryScalarGuard,
@@ -229,6 +231,10 @@ function createApp() {
   // constants/probePaths：漏了这道 skip，门禁会以 127.0.0.1 的高频探测先把健康版本打成红。
   app.use(ipLimiter);
   app.use(generalLimiter);
+  // 静态前端面专用桶：静态面被上面两个「整体豁免」，而豁免的代价原本是零预算。
+  // 这是把「豁免」改成「换桶」——同一份豁免判据（staticFrontend.isStaticSurfaceRequest），
+  // 但静态请求落在自己的宽松配额上而不是无限上。阈值推导见 rateLimit.js 的注释。
+  app.use(staticSurfaceLimiter);
 
   // ================= 安全中间件（body 解析之前）=================
   // P3-35：protocolCompliance 必须早于 express.json()，否则「Content-Length
@@ -241,6 +247,14 @@ function createApp() {
 
   // ================= 安全中间件（依赖已解析 body/query）=================
   applyPostBodySecurity(app);
+
+  // req.query 物化：Express 5 下 req.query 是原型 getter（每次访问重新解析 URL），
+  // 于是「清洗后再消费」不成立——sanitizeMongo / hpp 的 query 分支都是空操作。
+  // 本中间件读一次 → 清洗 → 物化成自有数据属性 → 回读自证身份，不等即拒绝请求。
+  // 必须早于下面三个 query 闸门（它们要读清洗后的形态）与 auditLog（落盘快照同源）。
+  // 见 middleware/security.js 的 materializeQuery 注释与
+  // src/tests/app/queryDefenseSingleSource.test.js（真实 express 实例上的行为门禁）。
+  app.use('/api/', materializeQuery());
 
   // 响应压缩（gzip/deflate）：JSON 列表、报表、Swagger 文档等大体积响应显著降低带宽与首屏耗时；
   // 默认仅压缩 ≥1kb 响应，/health 等最小响应不受影响

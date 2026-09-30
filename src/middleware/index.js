@@ -19,6 +19,7 @@ const {
   passwordChangeLimiter,
   ipLimiter,
   userLimiter,
+  staticSurfaceLimiter,
 } = require('./rateLimit');
 const errorHandler = require('./errorHandler');
 const requestId = require('./requestId');
@@ -43,6 +44,7 @@ const {
   auditLog,
   securityHeaders,
   sanitizeMongo,
+  materializeQuery,
   preventHPP,
   checkIPBlacklist,
   addToBlacklist,
@@ -72,6 +74,7 @@ module.exports = {
   passwordChangeLimiter,
   ipLimiter,
   userLimiter,
+  staticSurfaceLimiter,
 
   // 错误处理
   errorHandler,
@@ -96,6 +99,7 @@ module.exports = {
   auditLog,
   securityHeaders,
   sanitizeMongo,
+  materializeQuery,
   preventHPP,
   checkIPBlacklist,
   addToBlacklist,

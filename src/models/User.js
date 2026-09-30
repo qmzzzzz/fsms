@@ -131,6 +131,24 @@ const userSchema = new mongoose.Schema(
       type: Date,
     },
 
+    /**
+     * 口令复用历史：最近 N 条**已退役**口令的 HMAC 摘要（最新在前）。
+     *
+     * select:false —— 与 password 同级的凭证材料：它是对口令明文的单向摘要，
+     * 读到它等于拿到"判定某个口令是否曾被使用"的预言机，对外一律不返回。
+     * 校验时需显式 .select('+password') .select('+passwordHistory')。
+     *
+     * 深度上限由 utils/passwordHistory 的 HISTORY_DEPTH 负责（写入侧截断 +
+     * 读取侧再截一次）。schema 层**刻意不加长度 validator**：上限被调小后，
+     * validator 会让库里既有的超长文档在**任何一次 save** 时校验失败——
+     * 把一条运维配置变成全站不可写。脏数据由读取侧规整，不在 schema 拦。
+     */
+    passwordHistory: {
+      type: [String],
+      select: false,
+      default: [],
+    },
+
     // 允许登录/访问的 IP 范围规则文本（空 = 不限制）
     // 语法见 utils/ipRange：支持单地址、末段区间、CIDR、通配符、段区间，
     // 前缀 ! 表示排除（优先级高于允许项）；分隔符为 , ; 空格 换行
@@ -226,8 +244,9 @@ userSchema.index({ createdAt: -1 });
 /**
  * 对外响应的字段排除投影（G5：响应过度暴露）
  *
- * select:false 只覆盖了「凭证级」字段（password/mfaSecret/mfaRecoveryCodes/
- * mfaFailCount/mfaLockUntil/mfaLastCounter）；下列字段是「内部安全状态」，
+ * select:false 只覆盖了「凭证级」字段（password/passwordHistory/mfaSecret/
+ * mfaRecoveryCodes/mfaFailCount/mfaLockUntil/mfaLastCounter）；下列字段是
+ * 「内部安全状态」，
  * schema 层必须默认可读（authenticate 每请求校验 tokenVersion/lockUntil，
  * 登录流程读写 failedLoginCount），因此不能设 select:false，
  * 只能在响应投影层显式排除。
@@ -243,6 +262,9 @@ userSchema.index({ createdAt: -1 });
  */
 const USER_RESPONSE_EXCLUDE = [
   '-password',
+  // 凭证级材料的第二道：schema 已是 select:false，这里再排一次与 password 同规格。
+  // 只排不减：少排一次的后果是历史摘要进到某个响应体里，而它是对明文的单向预言机。
+  '-passwordHistory',
   '-tokenVersion',
   '-lockUntil',
   '-failedLoginCount',

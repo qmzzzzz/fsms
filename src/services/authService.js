@@ -21,6 +21,7 @@ const Role = require('../models/Role');
 const config = require('../config');
 const logger = require('../utils/logger');
 const { validatePasswordStrength, isValidAvatar } = require('../utils/helpers');
+const { matchesHistory, withPrevious, HISTORY_DEPTH } = require('../utils/passwordHistory');
 const { isIPAllowed } = require('../utils/ipRange');
 const { checkBruteForce, checkUnusualTime } = require('./securityAlert');
 const {
@@ -999,8 +1000,9 @@ async function refreshSession(refreshTokenRaw, ctx) {
  * @param {string} userId
  * @param {object} body 原始请求体（含明文轨与密文轨字段）
  * @param {object} ctx { username } 供审计/日志使用
- * @returns {Promise<{outcome:'ENC_INVALID'|'MISSING'|'CONFIRM_MISMATCH'|'WEAK'|'USER_NOT_FOUND'|'CURRENT_WRONG'|'SAME_PASSWORD'|'REVOKE_FAILED'|'OK'}>}
+ * @returns {Promise<{outcome:'ENC_INVALID'|'MISSING'|'CONFIRM_MISMATCH'|'WEAK'|'USER_NOT_FOUND'|'CURRENT_WRONG'|'SAME_PASSWORD'|'PASSWORD_REUSED'|'REVOKE_FAILED'|'OK'}>}
  *   OK / REVOKE_FAILED 时附 { username }（REVOKE_FAILED 表示密码已改但会话吊销失败）
+ *   PASSWORD_REUSED 时附 { historyDepth }（供控制器回显可用范围）
  */
 async function changeUserPassword(userId, body, ctx) {
   // ===== 口令密文轨（与明文轨双轨并存，LOGIN_ENCRYPT_STRICT=true 后明文轨由校验层关闭）=====
@@ -1048,7 +1050,7 @@ async function changeUserPassword(userId, body, ctx) {
     return { outcome: 'WEAK', message: strengthError };
   }
 
-  const user = await User.findById(userId).select('+password');
+  const user = await User.findById(userId).select('+password +passwordHistory');
   if (!user) {
     return { outcome: 'USER_NOT_FOUND' };
   }
@@ -1063,8 +1065,21 @@ async function changeUserPassword(userId, body, ctx) {
     return { outcome: 'SAME_PASSWORD' };
   }
 
+  // 复用历史：A→B→A 这种两步复用上面那条 SAME_PASSWORD 挡不住（当前口令是 B），
+  // 必须查历史。两条路径互补且错误码不同——「与当前相同」与「与更早的相同」
+  // 是两件事，合并成一个码会让用户以为自己只是没改够。
+  if (matchesHistory(user.passwordHistory, newPassword)) {
+    logger.warn(`改密拒绝 - 新口令命中复用历史（最近 ${HISTORY_DEPTH} 条）`, {
+      username: ctx.username,
+    });
+    return { outcome: 'PASSWORD_REUSED', historyDepth: HISTORY_DEPTH };
+  }
+
   user.password = newPassword;
   user.passwordChangedAt = new Date();
+  // 记的是**刚被替换掉的旧口令**：本次比较发生在写入之前，检查对象是
+  // 「候选新口令 vs 既往口令」。当前口令由上面的 SAME_PASSWORD 单独判。
+  user.passwordHistory = withPrevious(user.passwordHistory, currentPassword);
   await user.save();
 
   // 改密后立即吊销该用户全部会话（tokenVersion 递增 + 缓存失效），并审计。

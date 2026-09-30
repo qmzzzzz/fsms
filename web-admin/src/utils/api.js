@@ -160,6 +160,7 @@ const ERROR_CODE_I18N_MAP = {
   USER_ROLE_PERM_PEER_OR_HIGHER_FORBIDDEN: 'errors.userRolePermPeerOrHigherForbidden',
   PASSWORD_CONFIRM_MISMATCH: 'errors.passwordConfirmMismatch',
   PASSWORD_SAME_AS_CURRENT: 'errors.passwordSameAsCurrent',
+  PASSWORD_REUSED_IN_HISTORY: 'errors.passwordReusedInHistory',
   SENSITIVE_VIEW_HIGHER_LEVEL_FORBIDDEN: 'errors.sensitiveViewHigherLevelForbidden',
   UNSUPPORTED_DATA_TYPE: 'errors.unsupportedDataType',
   REPORT_TARGET_AND_REASON_REQUIRED: 'errors.reportTargetAndReasonRequired',

@@ -10,6 +10,9 @@ const { normalizeIP } = require('../utils/ipUtils');
 const { SUPER_ADMIN_ROLE_CODE } = require('../utils/superAdmin');
 const { makeSharedStore } = require('./rateLimitStore');
 const { isProbeRequest } = require('../constants/probePaths');
+// 静态面判据的**唯一事实来源**在 staticFrontend（它才是"谁托管哪一面"的权威）。
+// 此前本文件自带一份，两份独立清单漂移出 8 条判定相反的路径——见下方 skipResourceLimiter 注释。
+const { isStaticSurfaceRequest } = require('./staticFrontend');
 
 /**
  * 限流键的 IP 归一化（CC 防护同源收口，见总账 §4.4「限流键直接拼原文 req.ip」条目）
@@ -33,6 +36,20 @@ const normalizeRateLimitIp = (ip) => normalizeIP(ip) || String(ip ?? 'unknown');
  *
  * 升级服务的 noteRateLimitHit 自身永不抛错，这里的 catch 只兜"模块加载
  * 本身失败"（如数据模型未注册）——信号丢了可以，429 响应不能挂。
+ *
+ * limiterName 的取值不是自由的：它决定该次信号落进升级服务的**哪一个类别**，
+ * 而各类别的阀值相差 10 倍（ANON_ABUSE 10 / VOLUME 100 / AUTH 30 且不封 IP）。
+ * 改名 = 改判据归属。分类表见 services/rateLimitEscalation.js 的
+ * SIGNAL_CLASSES / LIMITER_CLASS，门禁见
+ * src/tests/services/rateLimitEscalation.test.js「未登记的限流器归入 VOLUME」。
+ *
+ * 哪些限流器**不**接本挂钩，以及为什么，是这套设计里最容易做错的一半：
+ *   - 账号维度桶（login-user / pwd-change-user / reauth-user）：按 username 或
+ *     userId 组键，没有可封的 IP（见 rateLimitEscalation.js 文件头）；
+ *   - 组合键桶（passwordChange / reauth 的「userId:ip」）：IP 只是键的组成部分，
+ *     失败语义属凭据操作而非 IP 洪水；
+ *   - staticSurfaceLimiter：NAT 出口聚合流量，接封禁阶梯会把误封从单个 IP
+ *     放大到整个办公室。
  */
 let escalationModule = null;
 const noteRateLimitHit = (req, limiterName) => {
@@ -70,31 +87,30 @@ const skipProbesAndWhitelisted = (req) => skipIfWhitelisted(req) || skipProbeReq
 
 // 静态前端面豁免资源型限流（generalLimiter / ipLimiter 这两个全站挂载的）
 //
-// 判据 = **安全方法** + **非 API 前缀**，两条合起来恰好等于「由 middleware/staticFrontend
-// 提供服务的那一面」：/assets/* 构建产物 + SPA history 回退的任意 GET 文档路径。
+// 判据来自 middleware/staticFrontend 的 `isStaticSurfaceRequest`——**唯一事实来源**。
+// 此前本文件自带一份（安全方法 + 非 `/api/` 前缀），与 staticFrontend 的
+// RESERVED_PREFIXES 是两份独立清单，实测对 11 条非 /api 路径有 8 条判定相反：
+// `/health` `/readyz` `/metrics` `/socket.io` `/api-docs` `/csp-report`
+// `/client-errors` `/.well-known` 全被旧判据豁免，而 staticFrontend 一个都不托管。
+// 其中真正裸奔的是 `/socket.io/`（Socket.IO HTTP long-polling 握手是未认证 GET，
+// 而 MAX_CONNECTIONS=1000 约束的是**已建立连接数**不是握手速率）与 `/metrics`
+// （metricsAuth 允许内网免令牌，而 app.js 自陈的威胁模型正是容器网络内直连）。
 //
-// 为什么必须豁免：浏览器一次页面加载实测发出 **35 个请求，其中 34 个是静态资源/文档、
-// 只有 1 个打 /api/****（CI e2e-browser 的 Playwright trace 实测）。通用配额是
-// 300 次/15 分钟 ⇒ **约 9 次页面加载**就把配额打满，而 429 返回的是 JSON——
-// 浏览器把它当文档渲染出来（e2e 快照实证：页面体就是
+// 为什么必须豁免静态面：浏览器一次页面加载实测发出 **35 个请求，其中 34 个是静态
+// 资源/文档、只有 1 个打 /api/**（CI e2e-browser 的 Playwright trace 实测）。
+// 通用配额 300 次/15 分钟 ⇒ **约 9 次页面加载**就把配额打满，而 429 返回的是 JSON——
+// 浏览器把它当文档渲染（e2e 快照实证：页面体就是
 // `{"success":false,"message":"请求过于频繁，请稍后再试"}`），整个 SPA 白屏。
 // 这不是"测试环境打得太猛"：NAT 出口共用 IP、或部署后客户端全量重取
 // （index.html/sw.js 是 maxAge:0 + no-cache）都会在正常使用下触发。
 //
 // 为什么豁免是安全的：这两个限流器前移到 express.json 之前，目的是给「未认证请求的
 // **放大面**」设闸——JSON.parse、递归 sanitize、以及协议违规写一条走哈希链的审计。
-// 而安全方法打到静态面时：不解析 body、不 sanitize、无协议违规故不写审计，
-// 只做一次 express.static / sendFile 取文件。它本来就不在这两个限流器要限的工作集合里。
-// 放大面走的**不是**安全方法：未认证 TRACE 打到 `/`、`/csp-report`、`/api-docs` 仍照原样
-// 吃 429（判据见 src/tests/app/earlyRejectionRateLimitedAllSurfaces.test.js——它的四个表面
-// 用例全部用 TRACE，且该文件注释已把豁免明确表述为「只看 GET/HEAD」这条方法维度）。
+// 而安全方法打到静态面时：不解析 body、不 sanitize、无协议违规故不写审计。
 //
 // 注意用 `=== '/api' || startsWith('/api/')` 而不是 `startsWith('/api')`：
 // 后者会把 `/api-docs` 一并算进 API 面（它有自己的 docsLimiter，口径不同）。
-const isApiPath = (path) => path === '/api' || path.startsWith('/api/');
-const isStaticFrontendRequest = (req) =>
-  (req.method === 'GET' || req.method === 'HEAD') && !isApiPath(req.path);
-const skipResourceLimiter = (req) => skipProbesAndWhitelisted(req) || isStaticFrontendRequest(req);
+const skipResourceLimiter = (req) => skipProbesAndWhitelisted(req) || isStaticSurfaceRequest(req);
 
 /**
  * 通用限流器
@@ -122,6 +138,68 @@ const generalLimiter = rateLimit({
     res.status(429).json({
       success: false,
       message: '请求过于频繁，请稍后再试',
+    });
+  },
+});
+
+/**
+ * 静态前端面限流器（2026-09-30 新增）
+ *
+ * 存在的理由是**修一个度量缺陷**，不是加一道闸：
+ * 此前静态面被 generalLimiter / ipLimiter 整体豁免，豁免的代价是「零预算」——
+ * 单个 IP 可以无限拉 `/assets/*`。而它之所以需要豁免，恰恰是因为通用配额
+ * （300 次/15 分钟）在度量**错误的东西**：一次页面加载 = 34 个静态请求 + 1 个 API
+ * 请求（Playwright trace 实测），静态请求的成本（一次 express.static 取文件）
+ * 与 API 请求的成本（认证 + 授权 + DB 往返）差着两三个数量级，共享一个计数器时
+ * 无论把阈值调多高都会在某一侧出错——调高则 API 侧失去保护，调低则 SPA 白屏。
+ *
+ * 正确形态是**按成本分桶**：静态面自己一个宽松但非零的桶，API 面保留严桶。
+ * 于是"豁免"变成"换桶"，不再是"无上限"。
+ *
+ * 阈值推导（全部来自实测，不是拍的）：
+ *   34 静态请求/页面 × 30 人（NAT 出口的常见规模）× 10 次页面加载/15 分钟 = 10200
+ *   取 12000，留约 18% 余量。
+ * 按 IP 而非 IP+UA 键：NAT 出口后同版本同浏览器的 UA 完全一致，
+ * 加 UA 进键只是把一个桶拆成几个值相同的桶，收益为零而键空间凭空变大。
+ *
+ * 这个桶的定位要说清：它挡的是**意外洪水**（脚本误循环、爬虫无节制重取），
+ * 不是决心明确的攻击者——10000 req/min 的攻击者打穿 12000/15min 毫不费力，
+ * 那种流量本来就该由前置反代挡（Nginx 示例配置里对 /metrics 也有同层限流）。
+ * 把应用层桶当反代来用，只会在"正常用户被误伤"和"真攻击打不穿"之间两头不讨好。
+ *
+ * 429 文案与 generalLimiter **刻意不同**：静态面被限流时页面已加载一半，
+ * 返回通用文案会让用户以为是接口故障。命中几乎总是"某个 IP 出口后面的人全被限了"，
+ * 直接说明现象即可。
+ */
+const STATIC_SURFACE_MAX_REQUESTS = 12000;
+/**
+ * 本桶的计数范围判定。单独导出（仅供测试驱动语义）——express-rate-limit 的实例上
+ * 不暴露 skip，测试拿不到它；这与 normalizeLoginRateKey / normalizeRateLimitIp
+ * 「导出以供测试」是同一条既有做法，而不是为测试新增的后门。
+ */
+const staticSurfaceSkip = (req) => !isStaticSurfaceRequest(req) || skipProbesAndWhitelisted(req);
+
+const staticSurfaceLimiter = rateLimit({
+  windowMs: config.rateLimit.windowMs,
+  max: STATIC_SURFACE_MAX_REQUESTS,
+  store: makeSharedStore('static-surface'),
+  keyGenerator: (req) => normalizeRateLimitIp(req.ip),
+  // 只在静态面计数：本桶是给静态面**补**预算的，挂到全站会把 API 请求也计进来
+  skip: staticSurfaceSkip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: '静态资源请求过于频繁，请稍后再试',
+  },
+  handler: (req, res, _next) => {
+    // 刻意**不**接 noteRateLimitHit：CC 升级服务的阶梯是按"IP 触顶即封"设计的，
+    // 而静态面被限流绝大多数是 NAT 出口聚合的结果（一个人多刷几个标签页就可能撞上），
+    // 接到封禁阶梯上就是把误封风险从"一个 IP"放大到"一整个办公室"。
+    logger.warn(`静态面限流触发：${req.ip} - ${req.method} ${req.path}`);
+    res.status(429).json({
+      success: false,
+      message: '静态资源请求过于频繁，请稍后再试',
     });
   },
 });
@@ -481,8 +559,12 @@ module.exports = {
   ipLimiter,
   userLimiter,
   registerIpLimiter,
+  staticSurfaceLimiter,
   // 仅供测试：账号维度键的归一化规则（空格填充分裂计数桶的回归由它盯着）
   normalizeLoginRateKey,
   // 仅供测试与 wellKnownRoutes 复用：限流键 IP 部分的归一化（::ffff: 双桶回归由它盯着）
   normalizeRateLimitIp,
+  // 静态面限流器的计数范围判定（仅供测试驱动语义，见 staticSurfaceSkip 的注释）
+  staticSurfaceSkip,
+  STATIC_SURFACE_MAX_REQUESTS,
 };

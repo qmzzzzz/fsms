@@ -103,28 +103,30 @@ function queryLengthLimit(max = MAX_QUERY_VALUE_LENGTH) {
  * query，故一律 400 拒绝，而非静默取首值——静默取值会让
  * `?status=admin&status=x` 之类的参数污染难以察觉。
  *
- * 注意（P1-33 修正，2026-09-17）：原注释称「本中间件须挂在 applySecurity（含
- * sanitizeMongo/hpp）之后，保证看到的是清洗后的最终形态」——该前提在 Express 5 下
- * **不成立**：req.query 是 getter（每次访问重新解析 URL 查询串），sanitizeMongo/hpp
- * 对 req.query 的原地清洗结果在下一次访问时即被丢弃，本中间件看到的始终是
- * **未经清洗的原始解析结果**（实测 `?search[$regex]=^a` 仍为对象、
- * `?status=a&status=b` 仍为数组）。
- * 判定强度不受此影响：本中间件对一切非字符串取值一律拒绝，不依赖上游是否清洗过。
+ * 注意（P1-33 修正，2026-09-17；2026-09-30 收口）：原注释称「本中间件须挂在
+ * applySecurity（含 sanitizeMongo/hpp）之后，保证看到的是清洗后的最终形态」——
+ * 该前提在 Express 5 下**不成立**：req.query 是 getter（每次访问重新解析 URL 查询串），
+ * sanitizeMongo/hpp 对 req.query 的原地清洗结果在下一次访问时即被丢弃。
  *
- * **query 侧的真正防线就是本函数（queryScalarGuard，src/app.js 以
- * `app.use('/api/', queryScalarGuard())` 挂载，命中即 400 QUERY_PARAM_MUST_BE_SCALAR）。
- * 若移除它，query 注入防线归零**——sanitizeMongo 与 hpp 对 req.query 的清洗在
- * Express 5 下均已失效，不要以「已有两道防线」为由移除本中间件。
+ * 2026-09-30 起本中间件上游多了一道 materializeQuery（middleware/security.js）：
+ * 它把解析结果**物化成 req 的自有数据属性**并清洗，且每次物化后回读自证身份。
+ * 于是「看到的是清洗后的最终形态」从注释里的承诺变成运行时事实，且物化一旦失效
+ * 就 fail-closed 拒绝请求，而不是静默放行。
+ *
+ * 判定强度仍不依赖上游：本中间件对一切非字符串取值一律拒绝，即使 materializeQuery
+ * 明天被摘掉，注入面也不会因此打开——两道防线各自独立成立，这是刻意的冗余。
+ *
+ * **两道防线都靠注释守着是不够的**：挂载点与顺序由
+ * src/tests/app/queryDefenseSingleSource.test.js 在真实 express 实例上钉住
+ * （真实 getter，不是手搓 req 桩——桩上的 query 是普通属性，结构上测不出这类缺陷）。
  *
  * @returns {Function} Express 中间件
  */
 function queryScalarGuard() {
   return (req, res, next) => {
     // 这里**不设** IP 白名单豁免：本中间件约束的是取值形态（对象/数组一律拒绝），
-    // 不是滥用频次。原实现在首行 `if (req.ipWhitelisted) return next()`，
-    // 而按本文件头注释，Express 5 下 sanitizeMongo 与 hpp 对 req.query 的清洗均已失效，
-    // 于是白名单来源（内网运维段、被误加白的网段）可把 {"$ne":...} 这类操作符对象
-    // 直接送进 mongoose 过滤条件——"唯一防线"对白名单归零。
+    // 不是滥用频次。此前白名单豁免的真实危害是：白名单来源（内网运维段、被误加白的
+    // 网段）可把 {"$ne":...} 这类操作符对象直接送进 mongoose 过滤条件。
     // 白名单豁免仍保留在 queryLengthLimit / 各限流器上：那才是频次/体量型约束。
     const offenders = [];
 

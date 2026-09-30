@@ -152,14 +152,22 @@ describe('security.js 分支补齐', () => {
       expect(Object.keys(clearedNode)).toEqual([]);
     });
 
-    test('三份入参各自拿到同一份深度预算（forEach 下标不得当成 depth 传进去）', () => {
+    test('两份入参各自拿到同一份深度预算（forEach 下标不得当成 depth 传进去）', () => {
       // 上一条只喂 body，而 body 恰好是数组下标 0 —— 于是它测不到真正的调用形状。
       // 原实现 `[…].forEach(deepSanitizeKeys)` 让 forEach 的第二个实参（下标）
-      // 落到 deepSanitizeKeys 的 depth 形参上：query 从 1 起算、params 从 2 起算，
-      // 两者的可用嵌套层数各少 1~2 层，第 9/8 层子树即被整体清空，
+      // 落到 deepSanitizeKeys 的 depth 形参上：params 从 1 起算，
+      // 可用嵌套层数少 1 层，第 9 层子树即被整体清空，
       // 与 deepSanitizeKeys 上方注释承诺的「SANITIZE_MAX_DEPTH 层内不误伤」不符
       // （超限是删除不是放行，所以是数据损失，不是注入缺口）。
-      // 判据取「三份对同一份链路的保留层数完全相等」——只有真缺陷会让它们不等。
+      // 判据取「两份对同一份链路的保留层数完全相等」——只有真缺陷会让它们不等。
+      //
+      // 2026-09-30：query 已从本中间件的入参里移除（Express 5 下 req.query 是原型
+      // getter，原地对它清洗是空操作），改由 materializeQuery 物化后清洗。
+      // 本用例此前断言 `query: 10`，看起来在证明"query 也被清洗了"——**那是假的**：
+      // 本文件用的是手搓 req 桩，桩上的 query 是普通自有属性，所以无论真实现如何
+      // 这条都会绿。它结构上不可能发现 Express 5 的 getter 前提。
+      // query 侧的真实覆盖在 src/tests/app/queryDefenseSingleSource.test.js
+      // （真实 express 实例 + 真实 supertest）。
       const makeChain = () => {
         const root = { payload: 'safe' };
         let cur = root;
@@ -178,15 +186,25 @@ describe('security.js 分支补齐', () => {
         return kept;
       };
 
+      // query 照样喂进去——不喂就测不出"没被碰过"（没喂 + 没清洗 = 同一个 0，
+      // 断言会因正确的原因绿、因错误的原因也绿，等于没断言）
       const req = makeReq({ body: makeChain(), query: makeChain(), params: makeChain() });
       const { next } = run(req);
       expect(next).toHaveBeenCalled();
 
+      // query 刻意不在"被清洗"的期望里：sanitizeMongo 不再遍历它（见用例注释）
       expect({
         body: keptLevels(req.body),
-        query: keptLevels(req.query),
         params: keptLevels(req.params),
-      }).toEqual({ body: 10, query: 10, params: 10 });
+      }).toEqual({ body: 10, params: 10 });
+
+      // 反向断言：query 确实**没有**被本中间件碰过。与"未被清洗的同一条链路"比，
+      // 不写死层数（makeChain 的层数一改这里就红，而那与本断言无关）。
+      // `untouched > 10` 是本断言的前提：若它 ≤ 深度预算，"没被清洗"与"被清洗了但
+      // 没到上限"读数相同，断言就成了恒真。
+      const untouched = keptLevels(makeChain());
+      expect(untouched).toBeGreaterThan(10);
+      expect(keptLevels(req.query)).toBe(untouched);
     });
 
     test('数组嵌套超深度：超限数组被 length=0 清空', () => {

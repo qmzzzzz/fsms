@@ -1137,6 +1137,10 @@ export default {
     userRolePermPeerOrHigherForbidden: '无权变更同级或更高级别用户的角色权限',
     passwordConfirmMismatch: '两次输入的新密码不一致',
     passwordSameAsCurrent: '新密码不能与当前密码相同',
+    // {historyDepth} 由后端 PASSWORD_REUSED_IN_HISTORY 的 params 传入，
+    // 与服务端 utils/passwordHistory.HISTORY_DEPTH 同源——前端不写死数字，
+    // 运维调了 PASSWORD_HISTORY_DEPTH 之后文案自动跟着变
+    passwordReusedInHistory: '新密码不能与最近 {historyDepth} 条使用过的密码相同',
     sensitiveViewHigherLevelForbidden: '无权查看更高层级用户的敏感信息',
     unsupportedDataType: '不支持的数据类型',
     reportTargetAndReasonRequired: '请提供目标类型和原因',

@@ -59,6 +59,44 @@ const RESERVED_PREFIXES = [
   '/.well-known',
 ];
 
+/**
+ * 「这一面归静态托管管吗」——**限流豁免判据的唯一事实来源**（2026-09-30）。
+ *
+ * 此前 rateLimit.js 自带一份判据（安全方法 + 非 `/api/` 前缀），与本文件的
+ * RESERVED_PREFIXES 是**两份独立清单**，实测二者对 11 条非 /api 路径里有 8 条
+ * 判定相反：
+ *
+ *   现判据豁免、而本模块并不托管的：/health /readyz /metrics /socket.io
+ *                                  /api-docs /csp-report /client-errors /.well-known
+ *
+ * 其中 /health、/readyz 由 constants/probePaths 的 isProbeRequest 单独兜住，
+ * /api-docs、/csp-report、/client-errors、/.well-known 各有专属限流器——
+ * 但那都是**各自的补丁**，不是判据本身正确。真正裸奔的两条：
+ *   - `/socket.io/`：Socket.IO 的 HTTP long-polling 握手是**未认证 GET**，
+ *     而 websocketService 的 MAX_CONNECTIONS=1000 约束的是**已建立连接数**，
+ *     不是握手速率 ⇒ 握手面在应用层没有任何限流（`new WebSocketService()` 只在
+ *     连接**建立之后**才认证）；
+ *   - `/metrics`：metricsAuth 允许内网/回环免令牌，而 app.js 自己写明这条端点的
+ *     威胁模型正是「有人从容器网络直连 app:3000」⇒ 该情形下可无限抓取。
+ *
+ * 两份清单迟早有一份先忘——这与 constants/probePaths 的注释是同一条纪律，
+ * 探针清单已经做了单一来源，静态面此前没做。现在由本函数收口：
+ * 限流侧只读这一个判据，两侧漂移在结构上不可能发生。
+ *
+ * 注意方向：判据从「非 /api/ 即豁免」**收窄**为「本模块确实托管的才豁免」，
+ * 即豁免集合变小、覆盖变大——新登记的保留前缀会自动重新纳入限流，
+ * 而不需要改动限流侧任何代码。
+ *
+ * @param {import('express').Request} req
+ * @returns {boolean} 该请求是否落在静态托管面（安全方法且非保留前缀）
+ */
+function isStaticSurfaceRequest(req) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  // 与 Express 默认路由同尺（大小写不敏感），否则 GET /API/x 会被判成静态面
+  // 而实际落到 API 路由——两份判据不同尺比两份判据不同源更难查
+  return !matchesAnyPathPrefix(RESERVED_PREFIXES, req.path);
+}
+
 /** 纵深拒绝下发的扩展名（构建已关 sourcemap，此处防配置漂移） */
 const DENIED_STATIC_EXTS = ['.map', '.ts'];
 
@@ -149,4 +187,10 @@ function mountStaticFrontend(app, { logger } = {}) {
   return true;
 }
 
-module.exports = { mountStaticFrontend, shouldServeFrontend, resolveDistDir };
+module.exports = {
+  mountStaticFrontend,
+  shouldServeFrontend,
+  resolveDistDir,
+  isStaticSurfaceRequest,
+  RESERVED_PREFIXES,
+};

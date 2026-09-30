@@ -1182,6 +1182,11 @@ export default {
       'Not allowed to change role permissions of a peer or higher-level user',
     passwordConfirmMismatch: 'The two new passwords do not match',
     passwordSameAsCurrent: 'New password cannot be the same as the current password',
+    // {historyDepth} comes from the backend PASSWORD_REUSED_IN_HISTORY params —
+    // same source as utils/passwordHistory.HISTORY_DEPTH. Never hardcode the
+    // number here or an ops change to PASSWORD_HISTORY_DEPTH desyncs the copy.
+    passwordReusedInHistory:
+      'New password cannot match any of the last {historyDepth} passwords used',
     sensitiveViewHigherLevelForbidden:
       'Not allowed to view sensitive information of a higher-level user',
     unsupportedDataType: 'Unsupported data type',

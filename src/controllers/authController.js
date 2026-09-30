@@ -364,6 +364,12 @@ const changePassword = asyncHandler(async (req, res) => {
       return ApiResponse.codeError(res, 'PASSWORD_CURRENT_INCORRECT');
     case 'SAME_PASSWORD':
       return ApiResponse.codeError(res, 'PASSWORD_SAME_AS_OLD');
+    // 复用历史与"与当前相同"分开成码：两条路径判的是不同的事，合并会让用户
+    // 以为自己只是没改够（提示他"再改一次换一个"），而真实情况是他正在回滚到旧口令
+    case 'PASSWORD_REUSED':
+      return ApiResponse.codeError(res, 'PASSWORD_REUSED_IN_HISTORY', {
+        params: { historyDepth: result.historyDepth },
+      });
     case 'REVOKE_FAILED': {
       // 密码已经改成功——审计必须落库，且先把状态码置为 503，
       // 让 recordSensitiveAction 按 res.statusCode 如实记录失败与风险因子

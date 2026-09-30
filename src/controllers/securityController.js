@@ -126,6 +126,12 @@ const changePasswordSecure = asyncHandler(async (req, res) => {
       return ApiResponse.codeError(res, 'PASSWORD_CURRENT_INCORRECT');
     case 'SAME_PASSWORD':
       return ApiResponse.codeError(res, 'PASSWORD_SAME_AS_CURRENT');
+    // 与 authController 同码同语义：两个端点改的是同一份口令、同一套历史，
+    // 文案差异只应来自各自对"当前密码"的称呼（profile 页 vs 安全中心），复用历史没有这种差异
+    case 'PASSWORD_REUSED':
+      return ApiResponse.codeError(res, 'PASSWORD_REUSED_IN_HISTORY', {
+        params: { historyDepth: result.historyDepth },
+      });
     case 'REVOKE_FAILED':
       // fail-closed：密码已落库但吊销失败，如实告知「已改但未吊销」（与 auth 端点同文案）
       return ApiResponse.codeError(res, 'PASSWORD_CHANGED_REVOKE_FAILED');
