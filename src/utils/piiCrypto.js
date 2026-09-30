@@ -33,21 +33,38 @@ const crypto = require('crypto');
 
 const VERSION_PREFIX = 'enc.v1.';
 
+/**
+ * 主密钥取值判据（fail-closed，加密侧与检索键侧共用这唯一一个口子）。
+ *
+ * 为什么要拦 `'undefined'` / `'null'` 这类**字面量**，而不只是拦空值：
+ * `process.env.X = undefined` 被 Node 强转成字符串 `"undefined"`（实测，v18/v22/v24 同），
+ * 于是「非空即通过」的写法在这三种现场全部恒真通过——
+ *   ① 运维在 `.env` 里写了 `AES_SECRET_KEY=undefined`（dotenv 给出的就是这四个字符）；
+ *   ② 轮换脚本 `process.env.AES_SECRET_KEY = process.env.PII_ROTATION_CURRENT_KEY`
+ *      而后者从未被设置（见 scripts/migrate-pii-encryption.js 的 decryptWith）；
+ *   ③ CI/容器少传一个变量，模板把变量名展开成了字面量。
+ * 后果不是报错而是**静默降级**：全部 PII 落到 `sha256("undefined:pii:aes:v1")` 这把
+ * 任何读得到源码的人都能算出的密钥上，且轮换脚本照样打印「✅ 完成」。
+ * 密钥缺失必须响，绝不允许拿一个可推导常量去加密。
+ */
+const DEGENERATE_KEY_LITERALS = new Set(['undefined', 'null', 'nan', '']);
+const requireMasterSecret = () => {
+  const raw = process.env.AES_SECRET_KEY;
+  if (typeof raw !== 'string' || DEGENERATE_KEY_LITERALS.has(raw.trim().toLowerCase())) {
+    throw new Error(
+      'PII 加密不可用：AES_SECRET_KEY 未设置为有效值' +
+        '（空/未设置/字面量 undefined|null|nan 一律拒绝，宁可不写也不落到可推导常量密钥上）'
+    );
+  }
+  return raw;
+};
+
 /** 由主密钥派生子密钥：域分离标签保证「同一把主密钥、不同用途」互不混用 */
 const deriveKey = (purpose) =>
-  crypto
-    .createHash('sha256')
-    .update(`${process.env.AES_SECRET_KEY || ''}:${purpose}`, 'utf8')
-    .digest();
+  crypto.createHash('sha256').update(`${requireMasterSecret()}:${purpose}`, 'utf8').digest();
 
-/** 加解密都用当前版本密钥；缺失时直接抛错（fail-closed），绝不静默退化为明文写入 */
-const currentAesKey = () => {
-  const key = deriveKey('pii:aes:v1');
-  if (!process.env.AES_SECRET_KEY) {
-    throw new Error('PII 加密不可用：AES_SECRET_KEY 未设置（拒绝以明文写入 PII 字段）');
-  }
-  return key;
-};
+/** 加解密都用当前版本密钥；密钥不可用时由 masterSecret 抛错（fail-closed），绝不静默退化为明文写入 */
+const currentAesKey = () => deriveKey('pii:aes:v1');
 
 /**
  * 加密一个 PII 值（随机 IV AES-256-GCM）。
@@ -106,4 +123,10 @@ const piiSearchKey = (value) => {
     .digest('hex');
 };
 
-module.exports = { encryptPii, decryptPii, piiSearchKey, VERSION_PREFIX };
+module.exports = {
+  encryptPii,
+  decryptPii,
+  piiSearchKey,
+  requireMasterSecret,
+  VERSION_PREFIX,
+};

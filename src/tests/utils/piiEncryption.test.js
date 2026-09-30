@@ -59,6 +59,77 @@ describe('piiCrypto 纯判据', () => {
     expect(piiSearchKey(PLAIN_NAME)).toHaveLength(64);
     expect(piiSearchKey('李四')).not.toBe(piiSearchKey(PLAIN_NAME));
   });
+
+  /**
+   * 主密钥退化取值必须**响**，不许静默降级（2026-09-30 审计线，lane-pii P1）。
+   *
+   * 原缺陷形态：`currentAesKey()` 用 `if (!process.env.AES_SECRET_KEY)` 判缺失，
+   * 而 `process.env.X = undefined` 被 Node 强转成字符串 "undefined"（实测 v24.15.0），
+   * dotenv 里写 `AES_SECRET_KEY=undefined` 给出的也是这四个字符 ⇒ 判据恒真通过，
+   * 于是加密侧与 **检索键侧（原先连这道判据都没有）** 一起落到
+   * `sha256("undefined:pii:aes:v1")` 这把任何读得到源码的人都能算出的密钥上。
+   * 轮换脚本更狠：它照样打印「✅ 轮换完成」，事后无人察觉。
+   */
+  describe('主密钥取值退化：三处消费点一律抛错，不给可推导常量密钥留活路', () => {
+    const runWithKey = (value, fn) => {
+      const saved = process.env.AES_SECRET_KEY;
+      if (value === undefined) delete process.env.AES_SECRET_KEY;
+      else process.env.AES_SECRET_KEY = value;
+      try {
+        return fn();
+      } finally {
+        if (saved === undefined) delete process.env.AES_SECRET_KEY;
+        else process.env.AES_SECRET_KEY = saved;
+      }
+    };
+
+    test.each([
+      ['未设置', undefined],
+      ['空串', ''],
+      ['纯空白', '   '],
+      ['字面量 undefined', 'undefined'],
+      ['字面量 null', 'null'],
+      ['字面量 NaN', 'NaN'],
+    ])('%s ⇒ 加密/检索键/解密文三处都抛（fail-closed）', (_label, value) => {
+      runWithKey(value, () => {
+        expect(() => encryptPii(PLAIN_PHONE)).toThrow(/AES_SECRET_KEY/);
+        expect(() => piiSearchKey(PLAIN_PHONE)).toThrow(/AES_SECRET_KEY/);
+        expect(() => decryptPii('enc.v1.eA==.eA==')).toThrow(/AES_SECRET_KEY/);
+      });
+    });
+
+    test('反向自证：正常密钥下三处都不抛——上一条不是一句"永远抛"的恒真判据', () => {
+      expect(() => encryptPii(PLAIN_PHONE)).not.toThrow();
+      expect(() => piiSearchKey(PLAIN_PHONE)).not.toThrow();
+      expect(() => decryptPii(encryptPii(PLAIN_PHONE))).not.toThrow();
+    });
+
+    test('空值语义不被这道闸影响：空手机号仍返回空串而不是抛错（清空字段是合法操作）', () => {
+      runWithKey(undefined, () => {
+        expect(piiSearchKey('')).toBe('');
+        expect(piiSearchKey('  ')).toBe('');
+        expect(encryptPii('')).toBe('');
+        expect(decryptPii('存量明文')).toBe('存量明文');
+      });
+    });
+
+    test('字面量 undefined 那一档命中的是主密钥守卫本身（不是"恰好抛了个别的错"）', () => {
+      const underRealKey = piiSearchKey(PLAIN_PHONE);
+      const outcome = runWithKey('undefined', () => {
+        try {
+          return { threw: false, digest: piiSearchKey(PLAIN_PHONE) };
+        } catch (e) {
+          return { threw: true, message: e.message };
+        }
+      });
+      // 只认这道守卫自己的文案前缀：把字面量清单删掉（回到"非空即通过"）后，
+      // 这里会拿到一把 64 位摘要 ⇒ 两条断言同时变红，而不是继续绿着替降级背书。
+      expect(outcome.threw).toBe(true);
+      expect(outcome.digest).toBeUndefined();
+      expect(outcome.message.startsWith('PII 加密不可用')).toBe(true);
+      expect(underRealKey).toHaveLength(64);
+    });
+  });
 });
 
 describe('User schema 接线（真实 Mongo：phone 写侧加密、读侧解密、检索键同步）', () => {

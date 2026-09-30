@@ -28,7 +28,13 @@
 const mongoose = require('mongoose');
 require('../src/config/secrets').hydrateSecretsFromFiles();
 const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
-const { encryptPii, decryptPii, piiSearchKey, VERSION_PREFIX } = require('../src/utils/piiCrypto');
+const {
+  encryptPii,
+  decryptPii,
+  piiSearchKey,
+  requireMasterSecret,
+  VERSION_PREFIX,
+} = require('../src/utils/piiCrypto');
 
 function parseArgs() {
   const args = { apply: false, confirmYes: false, rotate: false };
@@ -43,12 +49,30 @@ function parseArgs() {
 /** 判断一个值是否已是本模块的密文形态（迁移与轮换共用的分拣判据） */
 const isEncrypted = (v) => typeof v === 'string' && v.startsWith(VERSION_PREFIX);
 
+/**
+ * 主密钥可用性必须在**连库之前**判，且复用 piiCrypto 那一份判据（不另抄字面量清单）：
+ * 少传 AES_SECRET_KEY 时，`process.env.PII_ROTATION_CURRENT_KEY = process.env.AES_SECRET_KEY`
+ * 会把 undefined 强转成字符串 "undefined"，非空校验恒真通过 ⇒ 全表 PII 静默迁到一把
+ * 谁都能从源码算出来的密钥上，而脚本照样打印「✅ 轮换完成」。
+ * 单独成函数是为了不把 main 的 complexity 推过棘轮上限（这条闸本身就是新增分支）。
+ */
+function assertMasterKeyUsable() {
+  try {
+    requireMasterSecret();
+  } catch (e) {
+    console.error(`Error: ${e.message}`);
+    process.exit(1);
+  }
+}
+
 async function main() {
   const args = parseArgs();
   if (args.rotate && !process.env.PII_ROTATION_OLD_AES_KEY) {
     console.error('Error: --rotate 需要 PII_ROTATION_OLD_AES_KEY=<轮换前的 AES_SECRET_KEY>');
     process.exit(1);
   }
+  // 主密钥判据见 assertMasterKeyUsable 的头注释：必须在连库与快照当前密钥**之前**响
+  assertMasterKeyUsable();
   // 轮换前快照当前主密钥（hydrate 之后）：decryptWith 在新旧两把之间切换派生源
   if (args.rotate) process.env.PII_ROTATION_CURRENT_KEY = process.env.AES_SECRET_KEY;
 
