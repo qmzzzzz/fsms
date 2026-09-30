@@ -8,6 +8,18 @@
 
 ## [未发布]
 
+### 修复（2026-09-30 · 安全缺口核查落地）
+
+- **敏感 GET 读取审计判据反转（P1-④）+ PII at-rest 加密（P1-②）+ 备份加密（P1-①）等七项缺口收口**（对照 `deliverables/安全缺口核查-2026-09-30.md`，其中 P1-④ 与 P2-⑥ 已于本日早先提交落地）：
+  - **P2-⑧ 传输加密启动断言**：生产环境 Mongo 非回环主机必须 `tls=true`、Redis 必须 `rediss:`，豁免走显式旗标 `MONGODB_TLS_EXEMPT`/`REDIS_TLS_EXEMPT`（同宿主 compose 即豁免使用者，拆分拓扑忘摘旗标会被启动期拦截）；判据收口 `config/transportSecurity.js`（回环判定吃 127.0.0.1/::1/IPv4-mapped/localhost 全形态；hostname 解析不出保持沉默——compose 契约测试的替身 URI 不被误杀）
+  - **P2-⑨ 出站目标门禁**：`LOG_SHIPPING_URL` 在 scheme 白名单之外再拒内网/回环/链路本地目标（云元数据端点是经典 SSRF 目标）；歧义 IPv4 形态（127.1/2130706433/0x7f.0.0.1，严格解析判 null 但 OS 仍按回环连）一并拒绝；内网 SIEM 用 `LOG_SHIPPING_ALLOW_PRIVATE_HOSTS` 显式放行（主机名/IP/CIDR，与 IP 名单同一把尺）。判据 `isPrivateOrLoopback` 自 metricsAuth 迁入 `utils/ipUtils.js` 单一来源（middleware→utils 反向依赖会破分层）
+  - **P1-① 备份加密 + 校验和 + 异地副本**：`backup-mongo.sh` 默认 gpg 非对称加密（备份宿主机只放公钥，私钥托管异地），明文出口 `BACKUP_ENCRYPTION=plaintext-acknowledged`（取值即确认词）；产物三件套 .gz.gpg + .sha256 + `BACKUP_OFFSITE_CMD` 异地钩子（argv 解析不经 shell 展开、失败即整体失败）；`restore-mongo.sh` 按后缀自动解密；加密/解密/校验和收口 `scripts/backupCrypto.sh`（与 mongoUri.sh 同一共享范式）；恢复演练与密钥托管见 `deployment/backup-encryption.md`
+  - **P1-② PII at-rest 加密**：realName/phone 走随机 IV AES-256-GCM（`utils/piiCrypto.js`，密文带 `enc.v1` 版本前缀供轮换），精确检索走 HMAC 检索键 `realNameKey`/`phoneKey`（select:false + 索引）——相等性不泄漏在密文列里；存量明文**读路径透传**（迁移前的旧行照常可读），写侧 `pre('validate')` 钩子加密（长度/手机号格式校验随钩子前移到明文阶段，错误文案逐字不变）；迁移/轮换脚本 `scripts/migrate-pii-encryption.js`（演练/apply 双模，损坏行点名不覆盖，同族 allowlist 门禁）。**能力回归如实申报**：用户列表按姓名片段模糊搜索不再命中（正则对密文不成立），改为全名精确匹配
+  - **P2-⑩ 供应链可追溯**：CI 构建产出 CycloneDX SBOM 并上传 artifact；镜像 `provenance: true` + cosign keyless 签名（build 作业补 `id-token: write`）
+  - **P2-⑫ 依赖钉版**：`.npmrc` `save-exact=true` 从源头杜绝 caret 漂移；新增 CI 硬门禁「生产依赖树禁止任何 install 脚本」（`scripts/check-prod-install-scripts.js`，fail-closed + 显式白名单——比 --ignore-scripts 更强：ignore-scripts 只让本机跳过，树里有没有脚本没人看）
+  - **P3-⑬⑭⑮ 治理文档三份**：`docs/threat-model.md`（STRIDE + 残余风险如实申报）、`docs/incident-response.md`（角色/时限/命令级遏制清单，全部绑定本系统实际存在的端点与脚本）、`docs/mlps2-controls.md`（等保 2.0 第三级重点项对照，每条挂文件/测试/端点证据）
+  - 门禁：`transportTlsAssertion`（9 例）/ `backupEncryptionContract`（stub gpg 行为链）/ `piiEncryption`（纯判据 + 真实 Mongo 接线，9 例）/ logShipper 出站目标真值表（27 例）等新增约 60 例；既有 backupTransport/backupScriptGuards 夹具显式声明明文确认出口，保持其原断言对象不变
+
 ### 新增（2026-09-30）
 
 - **口令复用历史**：此前 `changeUserPassword` 里只有 `SAME_PASSWORD`（"不能与**当前**口令相同"），A→B→A 这种两步复用完全放行；`helpers.validatePasswordStrength` 只覆盖长度/复杂度/泄露库，全仓零处检查复用。现 `User.passwordHistory` 保存最近 N 条（默认 5，`PASSWORD_HISTORY_DEPTH` 可调，上限 24）**已退役**口令的 HMAC-SHA256 摘要，改密时逐条比对并拒绝，写入被替换掉的旧口令。摘要用 HMAC 而非 bcrypt：历史条目的用途是**等值比较**（比较时明文就在手里），bcrypt 的"慢"是为离线爆破服务的，此处不适用，而代价很实在——rounds=12 下每条 250~300ms、保留 5 条即 1.5 秒且全部挂在改密端点上，而 `passwordChangeLimiter` 只按 user+ip 限到 5 次/15 分钟、**没有全局护栏**，N 个账号就能把 CPU 打满。沿用本仓已有的同类先例 `services/mfaService.hashRecoveryCode`（HMAC + pepper，未配密钥时退化 sha256）。新增错误码 `PASSWORD_REUSED_IN_HISTORY`（400），两个改密端点（`/api/auth/password` 与 `/api/security/change-password`）映射一致，文案里的 N 由后端 `params.historyDepth` 下发，前端不写死数字

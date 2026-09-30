@@ -22,6 +22,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { decryptPii } = require('../../utils/piiCrypto');
 
 const stamp = `pfc${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
 const PASSWORD = randomPassword();
@@ -56,7 +57,10 @@ describe('资料接口的空值分档：手机号可清空、邮箱不可清空'
       .set('Authorization', `Bearer ${tokens.get(id)}`)
       .send(body);
 
-  const fieldOf = async (id, field) => (await User.findById(id).lean())[field];
+  // P1-②：realName/phone 在库里是密文（getter 只在 mongoose 文档上生效，lean 拿到
+  // 原始形态）——本用例断言的是"业务意义上的字段值"，故对密文先解密再比对；
+  // 明文存量行透传，两种形态都归一到明文口径。
+  const fieldOf = async (id, field) => decryptPii((await User.findById(id).lean())[field]);
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);

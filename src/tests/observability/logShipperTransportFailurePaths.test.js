@@ -50,6 +50,12 @@ const siSpy = jest.spyOn(global, 'setInterval').mockImplementation((cb) => {
 
 const { HttpShipperTransport, BUFFER_CAP } = require('../../utils/logShipper');
 
+// P2-⑨：出站目标门禁默认拒绝回环目标，而本文件的传输失败路径恰恰全部打在
+// 127.0.0.1/localhost 的本地 dummy server 上——这些用例测的是"失败时传输层
+// 怎么表现"，不是目标门禁。显式放行回环（fail-closed 门禁的显式出口），
+// 目标门禁本身的行为由 logShipperSchemeAllowlist.test.js 钉住。
+process.env.LOG_SHIPPING_ALLOW_PRIVATE_HOSTS = '127.0.0.1,localhost,::1';
+
 afterAll(() => {
   siSpy.mockRestore();
 });

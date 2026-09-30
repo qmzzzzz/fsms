@@ -163,6 +163,12 @@ jobs:
           echo "### Backend npm audit" >> "$GITHUB_STEP_SUMMARY"
           tail -3 audit-backend.txt >> "$GITHUB_STEP_SUMMARY" || true
 
+      # P2-⑫：生产依赖树禁止任何安装脚本（fail-closed + 显式白名单）。
+      # 比 --ignore-scripts 更强：ignore-scripts 只让本机跳过，树里有没有脚本没人看；
+      # 这里把不变量变成 CI 硬门禁——新增带 install 脚本的生产依赖必须登记理由。
+      - name: Check prod dependency install scripts
+        run: node scripts/check-prod-install-scripts.js
+
       - name: Audit web-admin dependencies
         working-directory: web-admin
         # I-M3：同上，硬门禁 + 留痕
@@ -506,6 +512,7 @@ jobs:
     permissions:
       contents: read
       packages: write # GHCR 推送所需
+      id-token: write # P2-⑩：cosign keyless 签名需要 OIDC 令牌（sigstore 无键签名）
 
     steps:
       - uses: actions/checkout@v5
@@ -537,6 +544,7 @@ jobs:
             TAGS="${TAGS},${IMAGE}:latest"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
 
       # 构建时间戳：用于 OCI created 标签。单独成步而不在 build-args 里写
       # `${{ ... }}` 的 date：Actions 内置上下文没有“当前时间”（只有事件时间戳，
@@ -546,6 +554,7 @@ jobs:
         run: echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -557,5 +566,35 @@ jobs:
             GIT_SHA=${{ github.sha }}
             BUILD_DATE=${{ steps.builddate.outputs.date }}
             APP_VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+          # P2-⑩：SLSA provenance 证明（构建来源与参数随镜像一同入 GHCR）
+          provenance: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # P2-⑩：SBOM（CycloneDX）——供应链可追溯的最低配套。
+      # 从刚推送的镜像生成并作为构建产物上传：漏洞影响评估时按 SBOM 对账依赖树，
+      # 而不是去猜基础镜像里装了什么。
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
+          format: cyclonedx-json
+          artifact-name: sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+          if-no-files-found: error
+
+      # P2-⑩：cosign keyless 签名（Fulcio 短期证书，无长命签名密钥需托管）。
+      # 验签方：cosign verify <image> --certificate-identity-regexp ... --certificate-oidc-issuer ...
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"

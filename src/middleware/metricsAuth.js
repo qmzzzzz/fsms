@@ -21,8 +21,10 @@
  *     无关紧要的信息，而全等长路径才是逐字节比较的防侧信道主体）。
  */
 
-// 地址解析统一走 ipUtils（内含严格形态判据），本文件不再直接依赖 ipaddr
-const { parseIP } = require('../utils/ipUtils');
+// 地址解析统一走 ipUtils（内含严格形态判据），本文件不再直接依赖 ipaddr。
+// isPrivateOrLoopback 的判据本体也已迁入 ipUtils（2026-09-30，P2-9）：logShipper
+// 的出站目标门禁需要同一把尺，判据归 utils、本文件保留同名再导出以稳定既有引用。
+const { isPrivateOrLoopback } = require('../utils/ipUtils');
 const crypto = require('crypto');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
@@ -30,38 +32,12 @@ const logger = require('../utils/logger');
 /**
  * 判断 IP 是否属内网/回环（Prometheus 抓取的合法网段）
  *
- * 解析走 `ipUtils.parseIP`，不再直接 `ipaddr.parse`。这是加固而非修洞，理由如下。
- *
- * 唯一调用方传的是 `req.socket.remoteAddress`（见下方 M-07 注释），它取自 TCP 连接
- * 本身、不受任何请求头影响，且由 OS 给出规范形态（`::ffff:a.b.c.d` 或规范 IPv6）
- * ⇒ 宽松数值形态今天**进不到这个函数**，"XFF 可控即可伪装环回放行 /metrics"在本调用点上不成立。
- *
- * 那这次改什么价值：
- *  1) 本函数是 **exported** 判据。它的输入契约目前是"socket 对端"，但签名和名字
- *     都不体现这一点；一旦有人拿它去判 req.ip（或 M-07 被回退），
- *     `0177.0.0.1` / `0x7f.0.0.1` / `2130706433` / `127.1` 实测一律被判定为环回 ⇒ 放行。
- * 同一根因在名单侧已经关过一次，这里补齐最后一处独立解析器。
- *  2) 全仓 IP 解析回到"一把尺子"：`grep "require('ipaddr.js')" src/` 现在只剩
- *     ipUtils（判据本体）、ipRange（对已归一化的值做 match）、
- *     securityAlertDelivery（输入是 WHATWG URL 归一化后的 hostname，实测同尺）。
- * 拒绝方向不变：parseIP 对"解析不出"与"形态有歧义"都返回 null ⇒ 仍走 fail-safe 拒绝，
- * 不新增拒绝类别，所以真内网/回环抓取（含 `::ffff:` 映射形态）行为分毫未动。
+ * 判据本体在 `utils/ipUtils.isPrivateOrLoopback`（本文件是它的再导出与使用方）。
+ * 使用契约（M-07，勿回退）：唯一调用方传的是 `req.socket.remoteAddress`——取自
+ * TCP 连接本身、不受任何请求头影响，由 OS 给出规范形态 ⇒ 宽松数值形态
+ * （`0177.0.0.1` / `0x7f.0.0.1` / `2130706433` / `127.1`，ipUtils 的严格解析
+ * 一律 null ⇒ false）进不到本判定，"XFF 伪造来源伪装环回"在此不成立。
  */
-function isPrivateOrLoopback(rawIp) {
-  if (!rawIp) return false;
-  const ip = parseIP(String(rawIp));
-  if (!ip) return false;
-
-  const range = ip.range();
-  // ::ffff:a.b.c.d 形式的 IPv4-mapped IPv6 解包回 IPv4 再判段：
-  // trust proxy 未启用时 req.ip 常保留该形式，若按 IPv6 段判定会把
-  // 本机回环误判为公网，导致本机抓取被拒
-  if (ip.kind() === 'ipv6' && range === 'ipv4Mapped') {
-    return ['loopback', 'private', 'linkLocal'].includes(ip.toIPv4Address().range());
-  }
-  // IPv4: loopback/private/linkLocal；IPv6: loopback/uniqueLocal/linkLocal
-  return ['loopback', 'private', 'linkLocal', 'uniqueLocal'].includes(range);
-}
 
 /** 等长校验 + timingSafeEqual 比较，防逐字节时序侧信道 */
 function safeTokenEqual(provided, expected) {

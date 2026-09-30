@@ -11,6 +11,11 @@
 #   MONGO_CONTAINER_HOST    可选，容器内连接地址（默认 127.0.0.1:27017）
 #   COMPOSE_FILE            可选，compose 文件路径（默认 docker-compose.yml）
 #
+# 【P1-① 加密归档】（2026-09-30）：backup-mongo.sh 默认产出 .gz.gpg（gpg 非对称
+# 加密，见 scripts/backupCrypto.sh）。本脚本按**后缀**自动识别：*.gz.gpg 先解密到
+# 0600 临时文件再走既有恢复链路；*.gz 旧归档原样支持。解密需要**私钥**——
+# 它按设计不在备份宿主机上，恢复演练就是验证"私钥托管 + 异地副本"这条链的。
+#
 # 【P2-27 恢复必须有门禁】
 # 恢复是**破坏性**操作：mongorestore 会把归档内容写入目标库，
 # 原实现仅检查文件存在与 URI 非空便直接执行——把生产 URI 填错一次即覆盖生产数据，
@@ -26,6 +31,8 @@ set -euo pipefail
 
 # 与 backup-mongo.sh 共用同一个 URI 主机段改写判据（见该文件注释）
 . "$(dirname "$0")/mongoUri.sh"
+# 加密/解密/校验和的共享实现（P1-①）：.gz.gpg 归档的解密走这里
+. "$(dirname "$0")/backupCrypto.sh"
 
 if [ -z "${1:-}" ]; then
   echo "Usage: $0 <backup_file>" >&2
@@ -111,9 +118,13 @@ fi
 
 # ================= 凭据保护（同 backup 口径） =================
 CONFIG_FILE=""
+DECRYPTED_FILE=""
 cleanup() {
   if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     rm -f "$CONFIG_FILE"
+  fi
+  if [ -n "$DECRYPTED_FILE" ] && [ -f "$DECRYPTED_FILE" ]; then
+    rm -f "$DECRYPTED_FILE"
   fi
 }
 trap cleanup EXIT INT TERM
@@ -131,6 +142,36 @@ if [ "${RESTORE_DROP:-false}" = "true" ]; then
   echo "警告：已启用 --drop，目标库中同名集合将先被删除"
   DROP_ARG="--drop"
 fi
+
+# P1-①：加密归档先解密到 0600 临时文件（trap 清理），其余链路不变。
+# 解密产物与归档同为 mongodump --gzip 形态，--gzip 参数两种来源通用。
+DECRYPTED_FILE=""
+case "$BACKUP_FILE" in
+  *.gz.gpg)
+    crypto_require_gpg || exit 1
+    OLD_UMASK_DECRYPT=$(umask)
+    umask 077
+    DECRYPTED_FILE=$(mktemp "${TMPDIR:-/tmp}/mongorestore-decrypted.XXXXXX.gz")
+    chmod 600 "$DECRYPTED_FILE"
+    umask "$OLD_UMASK_DECRYPT"
+    echo "检测到加密归档（$BACKUP_FILE），先解密到临时文件"
+    if ! crypto_decrypt "$BACKUP_FILE" "$DECRYPTED_FILE"; then
+      echo "Error: 解密失败（私钥缺失/口令错误/归档损坏）" >&2
+      exit 1
+    fi
+    if [ ! -s "$DECRYPTED_FILE" ]; then
+      echo "Error: 解密产物为 0 字节，归档可能已损坏" >&2
+      exit 1
+    fi
+    BACKUP_FILE="$DECRYPTED_FILE"
+    ;;
+  *.gz) ;; # 明文旧归档：直接走既有链路
+  *)
+    echo "Error: 无法识别的归档后缀：$BACKUP_FILE（期望 .gz 或 .gz.gpg）" >&2
+    exit 1
+    ;;
+esac
+
 RESTORE_ARGS=(--config="$CONFIG_FILE" --archive="$BACKUP_FILE" --gzip)
 if [ -n "$DROP_ARG" ]; then
   RESTORE_ARGS+=("$DROP_ARG")

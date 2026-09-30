@@ -12,6 +12,8 @@ const config = require('../config');
 // userService 的过滤白名单不认识它而**静默丢掉整个 status 条件**（返回全量而非 400），
 // 保存侧则被本 enum 拒。三处同源后这类分叉不再可能。
 const { USER_STATUS } = require('../utils/constants');
+// P1-②：PII at-rest 加密（读侧解密 / 写侧加密 / 检索键），判据收口在 utils/piiCrypto.js
+const { encryptPii, decryptPii, piiSearchKey } = require('../utils/piiCrypto');
 
 /**
  * 用户名比较口径（P3-30）
@@ -80,21 +82,35 @@ const userSchema = new mongoose.Schema(
       select: false, // 默认不返回密码字段
     },
 
-    // 个人信息
+    // 个人信息（P1-②：at-rest 加密，判据收口在 utils/piiCrypto.js）
+    // 读侧经 getter 解密（存量明文透传），写侧在 pre('validate') 钩子里加密。
+    // 校验全部走钩子的**明文阶段**（长度/手机号格式，错误文案与明文时代逐字
+    // 一致）：validate 阶段看到的已经是密文——schema 级 maxlength/validator
+    // 会把每一行都判非法，这是它们必须搬进钩子的原因（trim 是赋值期 setter，
+    // 仍作用在明文上，保留在 schema 定义里）。
     realName: {
       type: String,
       trim: true,
-      maxlength: [50, '姓名最多 50 个字符'],
+      get: decryptPii,
     },
     phone: {
       type: String,
       trim: true,
-      maxlength: [20, '手机号最多 20 个字符'],
-      validate: {
-        // 允许留空（清空手机号是合法操作），非空时才校验大陆手机号格式
-        validator: (v) => v === '' || v === undefined || v === null || /^1[3-9]\d{9}$/.test(v),
-        message: '请输入有效的手机号',
-      },
+      get: decryptPii,
+    },
+    // 精确检索键（HMAC，select:false）：相等性只在这两个键控字段上成立，
+    // 密文列本身随机 IV、不可链接；空值不产生键（空串键会让空值互相命中）。
+    // realName 的模糊检索（正则）对密文不成立，列表搜索已改走 realNameKey
+    // 精确匹配（见 userService.buildListQuery 与 CHANGELOG 申报的能力回归）。
+    realNameKey: {
+      type: String,
+      select: false,
+      default: '',
+    },
+    phoneKey: {
+      type: String,
+      select: false,
+      default: '',
     },
     department: {
       type: String,
@@ -229,6 +245,14 @@ const userSchema = new mongoose.Schema(
   }
 );
 
+// P1-②：PII 字段的明文只在 getter 里（存储侧是密文）。Mongoose 的 toObject/
+// toJSON **默认不套字段 getter**——不开这两项，res.json / toObject 走到的地方
+// （用户管理、资料、populate 出来的"经办人姓名"……）全都输出密文。
+// 实测（zzz 探针）：doc.realName 是明文、toJSON 是密文——这是接线不变量，
+// 迁移到哪条新序列化路径都要带着这两行走。
+userSchema.set('toJSON', { getters: true });
+userSchema.set('toObject', { getters: true });
+
 // 索引优化
 // P3-30：username 唯一索引显式带 collation（大小写不敏感），
 // 名称固定为 username_ci 以便与旧的 username_1 区分、供启动期对账识别
@@ -240,6 +264,10 @@ userSchema.index({ status: 1 });
 userSchema.index({ department: 1 });
 userSchema.index({ roles: 1 });
 userSchema.index({ createdAt: -1 });
+// P1-② 检索键索引：列表搜索按 realNameKey 精确匹配、按手机号找回用户走 phoneKey。
+// 非唯一：手机号本就没有唯一约束（保持现状，不在加密改造里夹带行为变更）。
+userSchema.index({ realNameKey: 1 }, { background: true, name: 'realNameKey_1' });
+userSchema.index({ phoneKey: 1 }, { background: true, name: 'phoneKey_1' });
 
 /**
  * 对外响应的字段排除投影（G5：响应过度暴露）
@@ -270,6 +298,10 @@ const USER_RESPONSE_EXCLUDE = [
   '-failedLoginCount',
   '-passwordChangedAt',
   '-lastLoginIp',
+  // P1-② 检索键：相等性预言机（拿一个手机号问"系统里有没有人用"），
+  // 对外响应与内部状态同规格排除；查询侧走显式 select('+phoneKey')
+  '-realNameKey',
+  '-phoneKey',
   '-__v',
 ].join(' ');
 
@@ -290,6 +322,49 @@ userSchema.statics.USERNAME_COLLATION = USERNAME_COLLATION;
 userSchema.statics.findByUsername = function (username) {
   return this.findOne({ username }).collation(USERNAME_COLLATION);
 };
+
+// P1-②：PII 字段写入侧收口（加密 + 检索键同步 + 明文期格式校验）
+// 只在字段被修改时动作：未修改的行重复 save 不重加密——随机 IV 下重加密会
+// 无谓改写密文，让 updatedAt 漂移、审计上出现"没有变更的变更"。
+// 手机号格式校验在这里（加密之前）而不是 schema validator：validate 阶段
+// 看到的已是密文，正则会把每一行都判非法；错误文案与明文时代逐字一致。
+const PII_ENCRYPTED_FIELDS = [
+  {
+    plain: 'realName',
+    key: 'realNameKey',
+    max: [50, '姓名最多 50 个字符'],
+  },
+  {
+    plain: 'phone',
+    key: 'phoneKey',
+    max: [20, '手机号最多 20 个字符'],
+  },
+];
+userSchema.pre('validate', function (next) {
+  try {
+    for (const { plain, key, max } of PII_ENCRYPTED_FIELDS) {
+      if (!this.isModified(plain)) continue;
+      // this[plain] 经 getter：赋值期的明文与存量密文都解回明文（透传口径）
+      const value = this[plain];
+      if (value) {
+        // 长度与格式判据都在加密前（明文阶段），文案与明文时代逐字一致
+        if (value.length > max[0]) {
+          this.invalidate(plain, max[1], value);
+          continue; // 非法值不加密不落键：失败路径不留任何写入（与复用历史同纪律）
+        }
+        if (plain === 'phone' && !/^1[3-9]\d{9}$/.test(value)) {
+          this.invalidate(plain, '请输入有效的手机号', value);
+          continue;
+        }
+      }
+      this[key] = value ? piiSearchKey(value) : '';
+      this[plain] = value ? encryptPii(value) : value;
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 
 // 密码加密中间件
 userSchema.pre('save', async function (next) {

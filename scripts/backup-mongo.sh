@@ -13,6 +13,15 @@
 #   MONGO_COMPOSE_SERVICE   可选，容器内执行 mongodump 的服务名（默认 mongo）
 #   MONGO_CONTAINER_HOST    可选，容器内连接地址（默认 127.0.0.1:27017）
 #   COMPOSE_FILE            可选，compose 文件路径（默认 docker-compose.yml）
+#   BACKUP_ENCRYPTION       可选，gpg（默认）| plaintext-acknowledged
+#                           P1-①：归档是全量业务库（含人员 PII 与审计集合），
+#                           明文落盘 = 拿到文件即拿到整个系统。默认 gpg 非对称加密
+#                           （宿主机只放公钥，私钥托管异地/密钥库）；
+#                           明文出口取值本身就是一句确认词，且仍打 error 级警告。
+#   BACKUP_GPG_RECIPIENT    BACKUP_ENCRYPTION=gpg 时必填，收件人公钥指纹/邮箱
+#   BACKUP_OFFSITE_CMD      可选，备份+校验和完成后的异地副本命令（如 rclone copy）。
+#                           以 BACKUP_FILE / BACKUP_SHA256 环境变量传产物路径，
+#                           失败即整体失败（异地副本失败被吞掉等于没有异地副本）
 #
 # 【P2-27 凭据不上命令行】
 # 原实现 `mongodump --uri="$MONGODB_URI"`：进程参数在 Linux 上对同机任意用户
@@ -25,6 +34,8 @@ set -euo pipefail
 
 # URI 主机段改写的唯一实现（与 restore-mongo.sh 共用）
 . "$(dirname "$0")/mongoUri.sh"
+# 加密/解密/校验和的唯一实现（与 restore-mongo.sh 共用，P1-①）
+. "$(dirname "$0")/backupCrypto.sh"
 
 BACKUP_DIR=${1:-"./backups"}
 # 时间戳带秒。原先是 %Y%m%d-%H%M（只到分钟）：同一分钟内两次备份会算出**同名**文件，
@@ -160,8 +171,68 @@ if [ "$ARCHIVE_BYTES" -le 0 ]; then
   exit 1
 fi
 
-echo "Backup completed successfully: $ARCHIVE_PATH ($ARCHIVE_BYTES bytes)"
-echo "Backup size: $(du -h "$ARCHIVE_PATH" | cut -f1)"
+# ================= P1-① 加密与校验和 =================
+# 默认 gpg 非对称加密（归档 → 归档.gz.gpg + .sha256，明文归档随后删除）。
+# 明文出口的取值本身就是一句确认词——它必须出现在环境配置里才生效，
+# 任何"忘了配加密"的部署会在这一步硬失败，而不是静默产出明文全量库。
+BACKUP_ENCRYPTION=${BACKUP_ENCRYPTION:-gpg}
+case "$BACKUP_ENCRYPTION" in
+  gpg)
+    crypto_require_gpg || exit 1
+    ENCRYPTED_PATH="$ARCHIVE_PATH.gpg"
+    if [ -e "$ENCRYPTED_PATH" ]; then
+      echo "Error: 目标加密归档已存在，拒绝覆盖：$ENCRYPTED_PATH" >&2
+      exit 1
+    fi
+    if ! crypto_encrypt "$ARCHIVE_PATH" "$ENCRYPTED_PATH"; then
+      rm -f "$ENCRYPTED_PATH"
+      echo "Error: gpg 加密失败，已删除半成品：$ENCRYPTED_PATH" >&2
+      exit 1
+    fi
+    if [ ! -s "$ENCRYPTED_PATH" ]; then
+      rm -f "$ENCRYPTED_PATH"
+      echo "Error: 加密产物为空，不是一次有效备份：$ENCRYPTED_PATH" >&2
+      exit 1
+    fi
+    crypto_checksum "$ENCRYPTED_PATH"
+    # 明文归档完成历史使命：加密副本 + 校验和在手的瞬间就地删除。
+    # 留着它 = P1-① 的缺口原样存在，只是多花了一次加密的 CPU。
+    rm -f "$ARCHIVE_PATH"
+    BACKUP_FILE_FINAL="$ENCRYPTED_PATH"
+    ;;
+  plaintext-acknowledged)
+    echo "ERROR-LEVEL WARNING: BACKUP_ENCRYPTION=plaintext-acknowledged——本次备份是明文全量库，" >&2
+    echo "  含全部人员 PII 与不可篡改审计集合。此选择必须已在部署文档记录理由与补偿控制。" >&2
+    crypto_checksum "$ARCHIVE_PATH"
+    BACKUP_FILE_FINAL="$ARCHIVE_PATH"
+    ;;
+  *)
+    echo "Error: BACKUP_ENCRYPTION 只能是 gpg 或 plaintext-acknowledged（当前：'${BACKUP_ENCRYPTION}'）" >&2
+    exit 1
+    ;;
+esac
+
+echo "Backup completed successfully: $BACKUP_FILE_FINAL ($(wc -c < "$BACKUP_FILE_FINAL") bytes)"
+echo "Backup size: $(du -h "$BACKUP_FILE_FINAL" | cut -f1)"
+echo "Checksum: $BACKUP_FILE_FINAL.sha256"
+
+# 异地副本（P1-① 的另一半：单机副本在"机器没了"面前等于没有备份）。
+# 值按 argv 解析后直接 exec（rclone copy / scp 目标 …），不经过 shell 展开——
+# 命令注入面为零；代价是不支持 $VAR 展开与引号聚合（写不过来的复杂同步逻辑
+# 请包成自己的脚本再填路径）。失败即整体失败：被吞掉的异地失败比没有异地更
+# 危险——它让运维以为自己有异地副本。
+if [ -n "${BACKUP_OFFSITE_CMD:-}" ]; then
+  read -r -a OFFSITE_ARGS <<< "$BACKUP_OFFSITE_CMD"
+  export BACKUP_FILE="$BACKUP_FILE_FINAL"
+  export BACKUP_SHA256="$BACKUP_FILE_FINAL.sha256"
+  if ! "${OFFSITE_ARGS[@]}"; then
+    echo "Error: 异地副本命令失败（BACKUP_OFFSITE_CMD），本次备份按失败处理" >&2
+    exit 1
+  fi
+  echo "Offsite copy completed: $BACKUP_OFFSITE_CMD"
+else
+  echo "Warning: 未配置 BACKUP_OFFSITE_CMD——备份只存在于本机。等保 2.0 与 P1-① 都要求异地副本。" >&2
+fi
 
 # 清理过期备份。
 # 实测：find 在**没有任何文件匹配**时返回 0，所以旧写法末尾的 `|| true` 并不是
@@ -169,8 +240,10 @@ echo "Backup size: $(du -h "$ARCHIVE_PATH" | cut -f1)"
 # 把退出码抹平——恰是最需要看见错误的那一类。
 # 这里改为显式分叉：清理失败要喊出来，但不让一次已成功的备份整体判失败
 # （scripts/deploy.js 见到非零退出会中止发布；备份已经在手了）。
+# 匹配模式覆盖加密产物（.gz.gpg）与校验和（.sha256）：过期清理漏掉任何一种
+# 都会让 backups/ 单向膨胀（校验和通常先被漏掉——它比归档晚出现）。
 echo "Pruning backups older than $RETENTION_DAYS days"
-if ! find "$BACKUP_DIR" -name "fire-safety-backup-*.gz" -mtime "+$RETENTION_DAYS" -delete; then
+if ! find "$BACKUP_DIR" \( -name "fire-safety-backup-*.gz" -o -name "fire-safety-backup-*.gz.gpg" -o -name "fire-safety-backup-*.sha256" \) -mtime "+$RETENTION_DAYS" -delete; then
   echo "Warning: 过期备份清理失败（备份本身已成功，不阻断发布）——请看上面的 find 报错。" >&2
 fi
 

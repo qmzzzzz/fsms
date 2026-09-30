@@ -19,6 +19,7 @@
 ```bash
 # 发布前（每次）
 MONGODB_URI='<连接串>' ./scripts/backup-mongo.sh ./backups
+# 默认产出加密归档 .gz.gpg + .sha256（P1-①）；明文出口/异地副本/私钥托管见 backup-encryption.md
 ```
 
 ## 2. 蓝绿部署流程（单机 compose 版）
@@ -80,7 +81,7 @@ docker compose start app
 ```bash
 docker compose stop app                                # 先停写
 MONGODB_URI='<连接串>' RESTORE_CONFIRM='<目标库名>' \
-  ./scripts/restore-mongo.sh backups/fire-safety-backup-<时间点>.gz
+  ./scripts/restore-mongo.sh backups/fire-safety-backup-<时间点>.gz.gpg
 # 默认 MONGO_RESTORE_TRANSPORT=docker：mongo 只 expose 不 publish，宿主机既连不上也
 # 常常没有 mongorestore CLI（备份侧一直是这个口径）。直连场景才显式设 local。
 # 需要彻底替换集合内容时才追加 RESTORE_DROP=true（默认不 drop）

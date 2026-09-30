@@ -14,6 +14,7 @@ const userPermissionService = require('./userPermissionService');
 const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const { escapeRegExp } = require('../utils/helpers');
+const { piiSearchKey } = require('../utils/piiCrypto');
 const { USER_STATUS } = require('../utils/constants');
 // 级联释放的状态面由巡检域档位表派生（F-151）：写字面量 ['pending','in_progress'] 时漏掉的正是
 // `overdue`——调度器会把超期的开放计划改成它，越紧急的计划越容易漏在闸门外面；漏掉后开工/提交双双 409，
@@ -33,10 +34,13 @@ class UserService {
 
     if (filters.search) {
       const escapedSearch = escapeRegExp(filters.search.trim());
+      // P1-②：realName 已 at-rest 加密——正则对密文不成立，改走 realNameKey
+      // 精确匹配（归一化明文的 HMAC）。能力回归（如实申报）：按姓名**片段**
+      // 搜索不再命中，须输入完整姓名；username/email 未加密，模糊检索保留。
       query.$or = [
         { username: new RegExp(escapedSearch, 'i') },
         { email: new RegExp(escapedSearch, 'i') },
-        { realName: new RegExp(escapedSearch, 'i') },
+        { realNameKey: piiSearchKey(filters.search) },
       ];
     }
 

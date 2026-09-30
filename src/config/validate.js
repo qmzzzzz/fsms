@@ -449,11 +449,12 @@ function collectSecretErrors(errors) {
  *
  * Redis 的 URL 解析放在这里而非独立函数：解析失败与协议不符是同一处 try/catch
  * 的两个出口，拆开会让 try 的边界与错误归属脱节。
+ * 传输加密断言（P2-⑧）收口在 config/transportSecurity.js：非回环主机的
+ * Mongo/Redis 不得明文过网，豁免走显式旗标（compose 的同宿主形态即豁免使用者）。
  */
 function collectConnectionErrors(errors) {
-  if (!process.env.MONGODB_URI || process.env.MONGODB_URI.includes('localhost')) {
-    errors.push('MONGODB_URI 不能指向 localhost');
-  }
+  // Mongo/Redis 的 host 侧判据（含既有的 localhost 拒绝）收口在 transportSecurity
+  require('./transportSecurity').collectTransportErrors(errors);
 
   if (!process.env.CORS_ORIGIN) {
     errors.push('CORS_ORIGIN 必须设置（禁止通配符）');

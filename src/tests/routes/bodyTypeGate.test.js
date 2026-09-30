@@ -24,6 +24,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { decryptPii } = require('../../utils/piiCrypto');
 
 const stamp = `btg${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
 const PASSWORD = randomPassword();
@@ -194,8 +195,9 @@ describe('写路径的 body 类型闸门', () => {
         expect(gateFired(res, 'realName', '姓名')).toBe(true);
         expect(res.status).toBe(400);
       }
+      // P1-②：库内是密文（lean 不走 getter）——"原值不变"按解密后的口径断言
       const doc = await User.findById(target._id).lean();
-      expect(doc.realName).toBe('原名');
+      expect(decryptPii(doc.realName)).toBe('原名');
     });
   });
 

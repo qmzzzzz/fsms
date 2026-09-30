@@ -92,6 +92,10 @@ function run(st, { retention, uri = 'mongodb://user:sup3rs3cr3t@db:27017/fire_sa
     // 不写这一行的话下面的 mongodump 桩根本不会被调用，7 条用例会一起变红。
     // docker 传输那一支由 src/tests/deploy/backupTransport.test.js 覆盖。
     MONGO_BACKUP_TRANSPORT: 'local',
+    // 本文件测的是门禁/保留期判据，不是加密（P1-①）——显式走明文确认出口，
+    // 使归档产物保持在 ARCHIVE_PATH 原位供下方 archives 断言；默认 gpg 路径
+    // 由 src/tests/deploy/backupEncryptionContract.test.js 覆盖。
+    BACKUP_ENCRYPTION: 'plaintext-acknowledged',
     // 让 stub 写文件时用 POSIX 路径（Windows 上 fs 侧仍认这个路径）
     TMPDIR: st.dir,
   };
@@ -105,7 +109,11 @@ function run(st, { retention, uri = 'mongodb://user:sup3rs3cr3t@db:27017/fire_sa
     code: r.status,
     out: (r.stdout || '') + (r.stderr || ''),
     argv: argvLog.split(/\r?\n/).filter(Boolean),
-    archives: fs.existsSync(st.backups) ? fs.readdirSync(st.backups) : [],
+    // 只数归档本体（.gz）：P1-① 后 backups/ 还会有 .sha256 校验和——
+    // 各用例断言的是"归档份量"，把校验和算进去会每个数字都 +1 而红一遍
+    archives: fs.existsSync(st.backups)
+      ? fs.readdirSync(st.backups).filter((f) => f.endsWith('.gz'))
+      : [],
   };
 }
 

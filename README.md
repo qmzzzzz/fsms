@@ -340,6 +340,7 @@ npm run validate         # 独立校验环境配置
 # BACKUP_RETENTION_DAYS 调整；凭据经临时配置文件传递，不上命令行）
 MONGODB_URI="mongodb://..." ./scripts/backup-mongo.sh
 
+# 默认产出加密归档 .gz.gpg + sha256 校验和；密钥/异地副本配置见 deployment/backup-encryption.md
 # 容器化部署时对卷数据定时备份（宿主机 crontab 示例，每日 02:00）：
 # 0 2 * * * cd /opt/xf && MONGODB_URI="mongodb://..." ./scripts/backup-mongo.sh >> logs/backup.log 2>&1
 ```
@@ -353,7 +354,7 @@ MONGODB_URI="mongodb://..." ./scripts/backup-mongo.sh
 docker compose stop app
 
 # 恢复（脚本带三道防误操作门禁：回显目标库、交互确认库名、--drop 需显式 RESTORE_DROP=true）
-MONGODB_URI="mongodb://..." ./scripts/restore-mongo.sh backups/fire-safety-backup-xxxxxxxx-xxxx.gz
+MONGODB_URI="mongodb://..." ./scripts/restore-mongo.sh backups/fire-safety-backup-xxxxxxxx-xxxx.gz.gpg
 # 默认 MONGO_RESTORE_TRANSPORT=docker：compose 里 mongo 只 expose，宿主机连不上，
 # 于是 mongorestore 在容器内执行、归档经 stdin 流入（与 backup-mongo.sh 同口径）。
 # 直连可达且宿主机装了工具时才用 MONGO_RESTORE_TRANSPORT=local。

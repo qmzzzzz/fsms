@@ -79,6 +79,10 @@ function runBackup(work, env = {}) {
       PATH: `${work.bin}${path.delimiter}${process.env.PATH}`,
       BACKUP_RETENTION_DAYS: '30',
       MONGODB_URI: URI,
+      // 本文件测的是传输路径与凭据通道，不是加密（P1-①）——显式走明文确认出口，
+      // 使归档产物保持在 ARCHIVE_PATH 原位；默认 gpg 路径由
+      // src/tests/deploy/backupEncryptionContract.test.js 覆盖。
+      BACKUP_ENCRYPTION: 'plaintext-acknowledged',
       ...files,
       ...env,
     },

@@ -162,3 +162,82 @@ describe('日志转发只允许 http/https 出站，拼错的 scheme 必须零�
     expect(REJECTED.length).toBeGreaterThanOrEqual(5);
   });
 });
+
+describe('出站目标门禁：私网/回环/元数据目标零投递（P2-⑨）', () => {
+  // scheme 合法、目标危险——这正是 scheme 白名单管不到的那一半
+  const PRIVATE_TARGETS = [
+    'http://169.254.169.254/latest/meta-data', // 云元数据端点（链路本地，经典 SSRF 目标）
+    'https://10.1.2.3/logs', // RFC1918
+    'http://192.168.1.1/logs',
+    'https://172.16.0.9/logs',
+    'http://127.0.0.1:9200/_bulk', // IPv4 回环
+    'https://[::1]:9200/_bulk', // IPv6 回环
+    'http://[::ffff:127.0.0.1]/logs', // IPv4-mapped 形态的回环
+    'https://[fc00::1]/logs', // IPv6 uniqueLocal
+  ];
+
+  test.each(PRIVATE_TARGETS)('%s ⇒ 拒绝且零投递', async (url) => {
+    const { err } = await tryPost(url);
+    expect({ url, rejected: Boolean(err) }).toEqual({ url, rejected: true });
+    expect(err.message).toContain('LOG_SHIPPING_ALLOW_PRIVATE_HOSTS');
+    expect({ url, http: httpSpy.mock.calls.length, https: httpsSpy.mock.calls.length }).toEqual({
+      url,
+      http: 0,
+      https: 0,
+    });
+  });
+
+  test.each([
+    '127.1', // 歧义点分：OS 仍按 127.0.0.1 连
+    '2130706433', // 整数形态的回环
+    '0x7f.0.0.1', // 十六进制形态
+  ])('歧义 IPv4 形态 %s 同样拒绝（严格解析判 null 不得成为旁路）', async (host) => {
+    const { err } = await tryPost(`http://${host}/logs`);
+    expect(err).toBeTruthy();
+    expect(httpSpy).not.toHaveBeenCalled();
+  });
+
+  /** 门禁放行的信号：_post 真正发起请求（撞上 spy 的哨兵抛错），而非被门禁拦下 */
+  const gatePassed = (err) => err && err.message === 'SENTINEL_REQUEST_ATTEMPTED';
+
+  test('公网目标不受影响（http/https 两个协议都放行）', async () => {
+    expect(gatePassed((await tryPost('http://siem.example.com/logs')).err)).toBe(true);
+    expect(gatePassed((await tryPost('https://siem.example.com/logs')).err)).toBe(true);
+    expect(httpSpy).toHaveBeenCalledTimes(1);
+    expect(httpsSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('allowlist 显式放行内网 SIEM：精确主机名 / IP / 网段三种条目形态', async () => {
+    const cases = [
+      ['http://169.254.169.254/latest/meta-data', '169.254.169.254'],
+      ['https://10.1.2.3/logs', 'siem.corp, 10.1.2.3'],
+      ['http://10.9.9.9/logs', '10.0.0.0/8'],
+    ];
+    for (const [url, allow] of cases) {
+      process.env.LOG_SHIPPING_ALLOW_PRIVATE_HOSTS = allow;
+      try {
+        const { err } = await tryPost(url);
+        expect({ url, allow, gatePassed: gatePassed(err) }).toEqual({
+          url,
+          allow,
+          gatePassed: true,
+        });
+      } finally {
+        delete process.env.LOG_SHIPPING_ALLOW_PRIVATE_HOSTS;
+      }
+    }
+    // 全部都打到了对应目标（spy 计数 = 3 证明真的发起而非静默吞掉）
+    expect(httpSpy.mock.calls.length + httpsSpy.mock.calls.length).toBe(3);
+  });
+
+  test('allowlist 精确匹配才放行：同网段的其他私网地址仍被拒', async () => {
+    process.env.LOG_SHIPPING_ALLOW_PRIVATE_HOSTS = '10.1.2.3';
+    try {
+      const { err } = await tryPost('https://10.1.2.99/logs');
+      expect(err).toBeTruthy();
+      expect(httpsSpy).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.LOG_SHIPPING_ALLOW_PRIVATE_HOSTS;
+    }
+  });
+});

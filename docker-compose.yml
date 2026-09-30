@@ -51,6 +51,12 @@ services:
       - HMAC_SECRET_FILE=/run/secrets/hmac_secret
       - MONGODB_URI_FILE=/run/secrets/mongodb_uri
       - ADMIN_INITIAL_PASSWORD_FILE=/run/secrets/admin_initial_password
+      # 传输加密豁免（P2-⑧，src/config/validate.js 启动断言）：本 compose 的
+      # mongo/redis 都在**同一宿主的受信容器网络**内，流量不出网卡，明文可接受；
+      # 一旦拆分（分库部署/云托管实例），必须摘掉这两个旗标并改用 tls=true /
+      # rediss:——启动校验会替你把这件事拦成硬错误，而不是让数据先明文过网。
+      - MONGODB_TLS_EXEMPT=true
+      - REDIS_TLS_EXEMPT=true
       # 生产校验（src/config/validate.js）强制 REDIS_URL：限流共享计数、
       # IP 黑名单广播与审计链锁不得退化为单实例内存态。
       # 指向下方 redis 服务的容器网络别名，非敏感值，可明文置于 environment。

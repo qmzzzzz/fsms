@@ -397,7 +397,32 @@ const ipQueryCondition = (ip) => {
   return variants.length > 1 ? { $in: variants } : variants[0];
 };
 
+/**
+ * IP 是否属内网/回环 —— metrics 来源判定与出站目标门禁共用的同一把尺。
+ *
+ * 自 metricsAuth.js 迁入（2026-09-30，P2-9）：它原是 metricsAuth 的私有判据，
+ * logShipper 的出站目标门禁需要同一把尺，而 middleware → utils 反向 require 会
+ * 破坏分层，故按「判据归 utils、消费方各取」收口；metricsAuth 保留同名再导出。
+ * 语义与迁入前逐字一致：parseIP（严格形态）解析不出/形态有歧义 ⇒ false——
+ * 本函数只回答「是不是内网/回环」这一件事，放行还是拒绝由调用方按场景决定。
+ */
+function isPrivateOrLoopback(rawIp) {
+  if (!rawIp) return false;
+  const ip = parseIP(String(rawIp));
+  if (!ip) return false;
+
+  const range = ip.range();
+  // ::ffff:a.b.c.d（IPv4-mapped IPv6）解包回 IPv4 再判段：trust proxy 未启用时
+  // req.ip 常保留该形式，按 IPv6 段判定会把本机回环误判为公网
+  if (ip.kind() === 'ipv6' && range === 'ipv4Mapped') {
+    return ['loopback', 'private', 'linkLocal'].includes(ip.toIPv4Address().range());
+  }
+  // IPv4: loopback/private/linkLocal；IPv6: loopback/uniqueLocal/linkLocal
+  return ['loopback', 'private', 'linkLocal', 'uniqueLocal'].includes(range);
+}
+
 module.exports = {
+  isPrivateOrLoopback,
   parseIP,
   normalizeIP,
   parseCIDR,

@@ -136,6 +136,8 @@ describe('docker-compose 生产环境变量契约', () => {
     'DOCS_PASSWORD',
     'LOGIN_ENCRYPT_STRICT',
     'MONGODB_URI',
+    'MONGODB_TLS_EXEMPT',
+    'REDIS_TLS_EXEMPT',
     'JWT_SECRET',
     'JWT_REFRESH_SECRET',
     'AES_SECRET_KEY',

@@ -25,11 +25,11 @@ describe('P2-36：TZ_BUSINESS 启动期校验', () => {
     process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
     process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
     process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-    process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+    process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
     process.env.CORS_ORIGIN = 'https://example.com';
     process.env.ENABLE_HTTPS = 'true';
     process.env.ALLOWED_HOSTS = 'api.example.com';
-    process.env.REDIS_URL = 'redis://redis.example.com:6379';
+    process.env.REDIS_URL = 'rediss://redis.example.com:6379';
     process.env.TRUST_PROXY_HOPS = '1';
   };
 
@@ -189,11 +189,11 @@ describe('P2-38：ENABLE_API_DOCS 判定口径统一', () => {
     process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
     process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
     process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-    process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+    process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
     process.env.CORS_ORIGIN = 'https://example.com';
     process.env.ENABLE_HTTPS = 'true';
     process.env.ALLOWED_HOSTS = 'api.example.com';
-    process.env.REDIS_URL = 'redis://redis.example.com:6379';
+    process.env.REDIS_URL = 'rediss://redis.example.com:6379';
     process.env.TRUST_PROXY_HOPS = '1';
     delete process.env.DOCS_USERNAME;
     delete process.env.DOCS_PASSWORD;
@@ -285,11 +285,12 @@ describe('P1-34：加固项告警真正可达', () => {
     process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
     process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
     process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-    process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+    // P2-8：合法生产夹具须带传输加密（非回环主机 tls=true / rediss:）
+    process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
     process.env.CORS_ORIGIN = 'https://example.com';
     process.env.ENABLE_HTTPS = 'true';
     process.env.ALLOWED_HOSTS = 'api.example.com';
-    process.env.REDIS_URL = 'redis://redis.example.com:6379';
+    process.env.REDIS_URL = 'rediss://redis.example.com:6379';
     process.env.TRUST_PROXY_HOPS = '1';
     process.env.ALLOW_PUBLIC_REGISTRATION = 'true';
 
@@ -369,11 +370,11 @@ describe('validate.js 降级通道：flushLogsSync/logger 不可用时信息不�
     process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
     process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
     process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-    process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+    process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
     process.env.CORS_ORIGIN = 'https://example.com';
     process.env.ENABLE_HTTPS = 'true';
     process.env.ALLOWED_HOSTS = 'api.example.com';
-    process.env.REDIS_URL = 'redis://redis.example.com:6379';
+    process.env.REDIS_URL = 'rediss://redis.example.com:6379';
     process.env.TRUST_PROXY_HOPS = '1';
     process.env.LOG_LEVEL = 'debug'; // 命中加固项告警
     jest.doMock('../../utils/logger', () => ({

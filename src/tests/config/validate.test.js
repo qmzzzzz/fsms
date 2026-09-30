@@ -27,7 +27,7 @@ describe('Config Validation', () => {
       process.env.JWT_SECRET = '';
       process.env.AES_SECRET_KEY = 'test-aes-key-32-chars-minimum!!';
       process.env.HMAC_SECRET = 'test-hmac';
-      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
       process.env.CORS_ORIGIN = 'https://example.com';
       process.env.ENABLE_HTTPS = 'true';
       process.env.ALLOWED_HOSTS = 'api.example.com';
@@ -51,7 +51,7 @@ describe('Config Validation', () => {
       process.env.JWT_SECRET = 'strong-random-jwt-secret-that-is-long-enough';
       process.env.AES_SECRET_KEY = 'short';
       process.env.HMAC_SECRET = 'test-hmac';
-      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
       process.env.CORS_ORIGIN = 'https://example.com';
       process.env.ENABLE_HTTPS = 'true';
       process.env.ALLOWED_HOSTS = 'api.example.com';
@@ -76,12 +76,12 @@ describe('Config Validation', () => {
       process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
       // HMAC_SECRET 与其他密钥同口径：>=32 字符（审计修复后不再接受 16 字符弱值）
       process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+      // P2-8（2026-09-30）：生产非回环主机必须带传输加密（tls=true / rediss:）
+      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
       process.env.CORS_ORIGIN = 'https://example.com';
       process.env.ENABLE_HTTPS = 'true';
       process.env.ALLOWED_HOSTS = 'api.example.com';
-      process.env.REDIS_URL = 'redis://redis.example.com:6379';
-      process.env.REDIS_URL = 'redis://redis.example.com:6379';
+      process.env.REDIS_URL = 'rediss://redis.example.com:6379';
       process.env.TRUST_PROXY_HOPS = '1';
 
       const { validateConfig } = require('../../config/validate');
@@ -98,11 +98,12 @@ describe('Config Validation', () => {
       process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
       process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
       process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+      // P2-8：合法生产夹具须带传输加密（非回环主机 tls=true / rediss:）
+      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
       process.env.CORS_ORIGIN = 'https://example.com';
       process.env.ENABLE_HTTPS = 'true';
       process.env.ALLOWED_HOSTS = 'api.example.com';
-      process.env.REDIS_URL = 'redis://redis.example.com:6379';
+      process.env.REDIS_URL = 'rediss://redis.example.com:6379';
     };
 
     /** 以指定 TRUST_PROXY_HOPS 跑校验，返回收集到的错误消息 */
@@ -217,7 +218,7 @@ describe('Config Validation', () => {
       process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
       process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
       process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
       process.env.CORS_ORIGIN = 'https://example.com';
       process.env.ENABLE_HTTPS = 'true';
       process.env.ALLOWED_HOSTS = 'api.example.com';
@@ -247,9 +248,9 @@ describe('Config Validation', () => {
       process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
       process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
       process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db';
+      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
       process.env.CORS_ORIGIN = 'https://example.com';
-      process.env.REDIS_URL = 'redis://redis.example.com:6379';
+      process.env.REDIS_URL = 'rediss://redis.example.com:6379';
     };
 
     /** 跑一次生产校验，返回 { exited, messages } */
