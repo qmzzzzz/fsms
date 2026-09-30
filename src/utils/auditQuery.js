@@ -127,20 +127,45 @@ const applyIpFilter = (query, rawIp) => {
 };
 
 /**
- * 前缀匹配的上界：把末字符码点 +1（'adm' → 'adn'，'zz' → 'zz{'）。
- * 返回 null 表示无上界（输入全为最大码点，此时退化为单边 `$gte`）。
+ * 前缀匹配的上界：**追加 collation 最高哨兵 U+FFFF**（'adm' → 'adm\uFFFF'）。
+ * 返回 null 表示无上界（空串输入，退化为单边 `$gte`）。
+ *
+ * 【2026-09-30 修正：这里原先做「末字符码点 +1」，在查询实际使用的 collation 下是错的】
+ *
+ * 本查询**必须**挂 `AUDIT_USERNAME_COLLATION = { locale: 'en', strength: 2 }`
+ * （见 models/AuditLog.js 与下方 usernamePrefixCondition 的注释），而 ICU 排序
+ * **不是码点序**：标点的权重排在字母之前。于是「码点 +1」一旦把末字符顶出字母类，
+ * 上界就**小于前缀本身**，区间成为空集：
+ *
+ *   prefix='pfxz' ⇒ 上界 'pfx{' ⇒ ICU 下 'pfx{' < 'pfxz'
+ *   ⇒ [$gte 'pfxz', $lt 'pfx{') = ∅ ⇒ **以 z 结尾的用户名前缀恒返回 0 条**
+ *
+ * 实测（本机 Mongo，collation 同上，同一集合同一数据）：
+ *   { $gte:'pfxz', $lt:'pfx{' }         → collation 命中 0 条，二进制命中 2 条
+ *   { $gte:'pfxz', $lt:'pfxz\uFFFF' }   → 与锚定正则 `^pfxz` + `i` 逐条一致
+ * 同族：'Z'→'['、'9'→':' 等任何"后继字符跨字符类"的前缀都中招。
+ *
+ * 该缺陷在 CI 上表现为 **~1/10 概率的偶发红**：cursorTiebreakPagination 的夹具用户名是
+ * `tb${Date.now()}` 逐位映射到 'wxyzabcdef' 的串，末位为 'z' 的概率约 1/10；
+ * 命中时审计列表首屏返回空（`200` + 249 字节的空结果体），断言报 `[]` 对不上 24 条。
+ *
+ * 为什么哨兵可行：ICU 给**未分配码位**（U+FFFF 是永久未分配）的隐式权重高于一切
+ * 已分配字符，故它在 collation 下严格大于任何 `prefix + <已分配字符>`。
+ * 已逐类实测与锚定正则基线一致：末字符为 z / Z / 9 / _ / a / A / 中。
+ *
+ * 为什么不用「进位到前一个字符并截断」（'pfxz' → 'pfxg'）：区间
+ * `[$gte 'pfxz', $lt 'pfxg')` 会漏掉 'pfxzzz'（'z' > 'g'），同样是错的。
+ *
+ * 索引不退化：仍是单侧有界区间，实测带 collation 的 `username_ci_timestamp`
+ * 仍走 IXSCAN，keysExamined 与旧上界相同（10 vs 10）。
+ *
+ * 边界：用户名字符集受 User 模型正则限制为 `[A-Za-z0-9_]`，不含 U+FFFF 以上的码位；
+ * 若将来放开该字符集（如允许 emoji），这里的哨兵必须一并复核——
+ * src/tests/controllers/auditUsernamePrefixIndex.test.js 用例 ① 已把这条前提钉住。
  */
-const nextUsernamePrefixUpperBound = (prefix) => {
-  const chars = [...prefix];
-  for (let i = chars.length - 1; i >= 0; i--) {
-    const cp = chars[i].codePointAt(0);
-    if (cp < 0x10ffff) {
-      chars[i] = String.fromCodePoint(cp + 1);
-      return chars.slice(0, i + 1).join('');
-    }
-  }
-  return null;
-};
+const PREFIX_UPPER_SENTINEL = '\uFFFF';
+const nextUsernamePrefixUpperBound = (prefix) =>
+  prefix ? `${prefix}${PREFIX_UPPER_SENTINEL}` : null;
 
 /**
  * username 前缀条件：用范围比较，不用 `$regex`。

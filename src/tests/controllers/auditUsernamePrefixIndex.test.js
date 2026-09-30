@@ -13,11 +13,24 @@
  * **前缀 + collation 范围 = 1144**。即"只把正则改成前缀、保留 `i`"收益**为零**，
  * collation 才是让前缀真正生效的开关。
  *
+ * 【2026-09-30 修正：上界算法本身曾是错的，collation 把它放大成"查不到"】
+ * 原上界 = 「末字符码点 +1」（'zzz' → 'zz{'）。它在二进制比较下成立，但本查询
+ * **必须**挂 collation，而 ICU 排序不是码点序——标点权重排在字母之前，于是
+ * `'pfx{' < 'pfxz'`，区间 `[$gte 'pfxz', $lt 'pfx{')` 成为**空集**：
+ * 以 z 结尾的用户名前缀**恒返回 0 条**（'Z'→'['、'9'→':' 同理）。
+ * 实测：同一数据下 collation 命中 0 条、二进制命中 2 条。
+ * 现改为追加最高码位哨兵 U+FFFF（ICU 给未分配码位的隐式权重高于一切已分配字符），
+ * 已逐类实测与锚定正则 `^prefix` + `i` 一致（末字符 z / Z / 9 / _ / a / A / 中），
+ * 且仍是单侧有界区间 ⇒ 索引不退化（keysExamined 与旧上界相同）。
+ * 该缺陷原先只在 cursorTiebreakPagination 的夹具里以 ~1/10 概率显形（其用户名
+ * 由 `tb${Date.now()}` 逐位映射而来，末位为 'z' 约 1/10），现在由 ④ 的确定性用例钉住。
+ *
  * 可证伪性（每条都实测过会红）：
  *  - `usernamePrefixCondition` 退回 `$regex` ⇒ ①③ 红；
  *  - 索引的 `collation` 去掉 ⇒ ② 红；
  *  - service 里 `withCollation` 去掉 ⇒ ⑤（真跑 DB）红；
- *  - `auditExportService` 里 `withCollation` 去掉 ⇒ ⑥ 红（列表能搜到、导出搜不到）。
+ *  - `auditExportService` 里 `withCollation` 去掉 ⇒ ⑥ 红（列表能搜到、导出搜不到）；
+ *  - 上界退回「末字符码点 +1」⇒ ①（形状）与 ④ 的 z 前缀用例红。
  */
 
 'use strict';
@@ -44,6 +57,12 @@ const NAMES = {
   longer: `${TAG}administrator`,
   // 含子串 `${TAG}a` 但**不在开头** ⇒ 子串匹配会命中它，前缀匹配不会
   infix: `zz${TAG}a`,
+  // 末字符为 z 的一组：钉住「上界用『末字符码点 +1』会在 ICU 下变成空区间」这条缺陷。
+  // 旧实现下 `^${TAG}z` 恒返回 0 条——上界 `${TAG}{` 里的 '{' 是标点，ICU 下标点权重
+  // 排在字母之前，于是 [$gte `${TAG}z`, $lt `${TAG}{`) 是空集。
+  zDigit: `${TAG}z1`,
+  zLower: `${TAG}zebra`,
+  zRepeat: `${TAG}zz`,
 };
 
 const mkDoc = (username) => ({
@@ -59,23 +78,26 @@ const mkDoc = (username) => ({
 
 describe('Top-8 前半：username 前缀 + collation 范围查询', () => {
   describe('① 前缀上界（纯函数）', () => {
-    test('末字符码点 +1；末字符是 z 时进位为 {', () => {
-      expect(nextUsernamePrefixUpperBound('adm')).toBe('adn');
-      expect(nextUsernamePrefixUpperBound('zzz')).toBe('zz{');
-      expect(nextUsernamePrefixUpperBound('a')).toBe('b');
+    test('上界 = 前缀 + 最高码位哨兵 U+FFFF（collation 下严格大于任何前缀扩展）', () => {
+      expect(nextUsernamePrefixUpperBound('adm')).toBe('adm\uFFFF');
+      expect(nextUsernamePrefixUpperBound('a')).toBe('a\uFFFF');
+      // 末字符是 z **不**做特殊处理：旧实现把它「码点 +1」成 '{'，
+      // 而 ICU 下标点排在字母之前 ⇒ 'pfx{' < 'pfxz' ⇒ 区间空集、恒返回 0 条。
+      // 这条契约由下面 ④ 的真跑 DB 用例兜住，不再只断言字符串形状。
+      expect(nextUsernamePrefixUpperBound('zzz')).toBe('zzz\uFFFF');
     });
 
     test('正则元字符原样保留（范围比较天然免疫正则注入，不再需要转义）', () => {
-      expect(nextUsernamePrefixUpperBound('alice(.*')).toBe('alice(.+');
+      expect(nextUsernamePrefixUpperBound('alice(.*')).toBe('alice(.*\uFFFF');
       expect(usernamePrefixCondition('alice(.*')).toEqual({
         $gte: 'alice(.*',
-        $lt: 'alice(.+',
+        $lt: 'alice(.*\uFFFF',
       });
     });
 
-    test('末字符已是最大码点时向前进位（丢弃已到顶的后缀）', () => {
-      expect(nextUsernamePrefixUpperBound('a\u{10FFFF}')).toBe('b');
-      expect(nextUsernamePrefixUpperBound('\u{10FFFF}')).toBeNull();
+    test('哨兵与输入内容无关：已是最大码位的输入也照样追加（不丢后缀）', () => {
+      expect(nextUsernamePrefixUpperBound('a\u{10FFFF}')).toBe('a\u{10FFFF}\uFFFF');
+      expect(nextUsernamePrefixUpperBound('\u{10FFFF}')).toBe('\u{10FFFF}\uFFFF');
     });
 
     test('空串无上界（退化为单边 $gte，不产生 $lt: ""）', () => {
@@ -110,7 +132,7 @@ describe('Top-8 前半：username 前缀 + collation 范围查询', () => {
     test('带 username ⇒ usernamePrefix 为 true（下游据此挂 collation）', () => {
       const built = buildAuditQuery({ query: { username: `${TAG}a`, action: 'auth_login' } });
       expect(built.usernamePrefix).toBe(true);
-      expect(built.query.username).toEqual({ $gte: `${TAG}a`, $lt: `${TAG}b` });
+      expect(built.query.username).toEqual({ $gte: `${TAG}a`, $lt: `${TAG}a\uFFFF` });
       // 不得退回正则
       expect(built.query.username.$regex).toBeUndefined();
       expect(built.query.username.$options).toBeUndefined();
@@ -165,6 +187,20 @@ describe('Top-8 前半：username 前缀 + collation 范围查询', () => {
       }).select('username');
       // 旧形态仍能命中 infix——这正是被替换掉的行为，保留它作为"确实变了"的证据
       expect(found(docs)).toContain(NAMES.infix);
+    });
+
+    // 2026-09-30：这条是本文件此前**没有**钉住的那一格。
+    // 原上界「末字符码点 +1」在二进制比较下成立，但本查询必须挂 collation，
+    // 而 ICU 排序不是码点序 ⇒ 末字符为 z 时上界 '{' 反而**小于**前缀，区间空集。
+    // 缺陷由 cursorTiebreakPagination 暴露（其夹具用户名末位为 'z' 的概率约 1/10，
+    // 表现为 ~1/10 的偶发红），这里把它变成**确定性**回归。
+    test('末字符为 z 的前缀不得是空区间（旧上界在 ICU 下小于前缀本身）', async () => {
+      const prefix = `${TAG}z`;
+      const cond = usernamePrefixCondition(prefix);
+      // 旧实现此处给出 `$lt: `${TAG}{`` ⇒ ICU 下区间为空 ⇒ 下面恒为 []
+      expect(cond.$lt).toBe(`${prefix}\uFFFF`);
+      const docs = await AuditLog.find({ username: cond }).collation(COLLATION).select('username');
+      expect(found(docs)).toEqual([NAMES.zDigit, NAMES.zLower, NAMES.zRepeat].sort());
     });
   });
 
