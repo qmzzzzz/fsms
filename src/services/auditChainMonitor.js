@@ -14,12 +14,20 @@
  * 成本差一个量级、失败含义也完全不同（异常行为 ≠ 完整性断裂），合并只会让
  * 一个拖累另一个。故独立定时器、独立间隔、独立健康计数。
  *
- * 【资源闸：窗口就是唯一的闸】
- * `verifyAuditChain` 内部**不接受 maxTimeMS**（它的 find 是裸的），所以
- * "一轮最多扫多少条"是唯一能限制单轮耗时的旋钮——默认 2000 条，
- * 远小于接口侧默认的 20000（那个是单次请求、有 HTTP 超时兜底；这里是定时器，
- * CPU 占住事件循环会连带拖垮心跳/健康检查）。每条做 SHA-256 + 规范 JSON 序列化，
- * 2000 条在本机是百毫秒级；调大到数万会让单轮占住事件循环数十秒。
+ * 【资源闸：两道，各管一种"卡"】
+ * ① **CPU 闸 = 窗口条数**（默认 2000，远小于接口侧的 20000）：每条要做
+ *    SHA-256 + 规范 JSON 序列化，2000 条在本机是百毫秒级；调大到数万会让单轮
+ *    占住事件循环数十秒，连带拖垮心跳/健康检查。接口侧有 HTTP 超时兜底，这里没有。
+ * ② **服务端闸 = maxTimeMS**（`roundBudgetMs()`，取 `max(60s, 生效间隔)`）：
+ *    窗口只管"扫到之后算多少条"，**管不到取数本身**——那条 `find` 若在服务端挂死
+ *    （索引缺失/集合锁住/网络半开），`await` 永不返回，于是
+ *    `verificationRunning` 这个单轮闸门**永久停在 true**：此后每一轮都判
+ *    "上一轮未结束"而跳过，`finally` 永远轮不到执行，监控静默停摆而
+ *    `isRunning()` 仍然回答 true（定时器确实挂着）。这是本模块唯一的
+ *    "看起来在跑、其实早已死"的路径，必须构造上排除而不是靠人发现。
+ *    带预算后最坏情况由**服务端**中断本轮 → 抛错进 catch（计 failures、
+ *    写 lastFailureMessage）→ `finally` 释放闸门，下一轮照常起跑。
+ *    与 auditMonitor 的 roundBudgetMs 同法（见该文件 :73-75）。
  *
  * 【噪声治理：这是本模块最要紧的设计约束】
  * 链条一旦出现断裂（例如历史遗留的 v2 记录失配、或若干条 hash_stripped），
@@ -46,7 +54,13 @@ const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
 /** 最小间隔：低于此值会与 auditMonitor 抢库（两条扫描都打满集合） */
 const MIN_INTERVAL_MS = 60 * 1000;
 /**
- * 单轮扫描窗口（条）。**这是本模块唯一的资源闸**（见文件头「资源闸」）。
+ * 单轮服务端预算的下限（毫秒）。与 auditMonitor 的 MIN_ROUND_BUDGET_MS 同值同义：
+ * 预算取 `max(本下限, 生效间隔)`，间隔被配得再小也不给服务端发一个"比一轮还短"的
+ * 上限（那样每一轮都会被自己的预算掐死，failure 恒增）。
+ */
+const MIN_ROUND_BUDGET_MS = 60 * 1000;
+/**
+ * 单轮扫描窗口（条）：限制**单轮 CPU 量**的那道闸（见文件头「资源闸」）。
  * 2000 条足以覆盖"最近一段时间"的写入，从而使**新发生的**篡改/缺口在下一轮就被看到；
  * 历史更早的篡改由离线全量脚本负责（接口/脚本仍有 20000 / 200000 的上限）。
  */
@@ -71,6 +85,24 @@ const health = {
   lastFailureMessage: null,
   lastVerdictCode: null,
 };
+
+/**
+ * 单轮服务端预算：一轮最多占一个周期，但不低于下限（与 auditMonitor 同式）。
+ * 读的是**钳制后**的 `effectiveIntervalMs`，所以 `AUDIT_CHAIN_MONITOR_INTERVAL_MS`
+ * 配成 30s 时预算取 30s，配成非法值回落 10min 时预算跟着取 10min——
+ * 两个旋钮不会互相打架（写死常量的话，间隔调小后预算就大于间隔，闸门形同不存在）。
+ *
+ * **必须取整**：`AUDIT_CHAIN_MONITOR_INTERVAL_MS` 的读取没有 `integer: true`
+ * （只要求"正数"），所以 90000.5 是完全可能的配置值。而服务端对小数 maxTimeMS 是
+ * **拒绝**的——真库实测 `estimatedDocumentCount({maxTimeMS: 1.5})` 抛错
+ * （文案随 mongod 版本而变：FailedToParse「Expected an integer」或「non-integral value」）。
+ * 核验侧（verifyAuditChain）自己会把预算向下取整，所以只有估算这一次调用会漏：
+ * 不取整的后果是"find 每次都成功、count 每次都抛错"，本轮仍进 catch 释放闸门，
+ * 于是表现为 failures 每轮 +1 而链核验看起来正常——比没有预算更难归因。
+ */
+function roundBudgetMs() {
+  return Math.floor(Math.max(MIN_ROUND_BUDGET_MS, effectiveIntervalMs));
+}
 
 /**
  * 上次推送时的断裂指纹。
@@ -192,14 +224,22 @@ async function runVerification() {
       MAX_WINDOW_RECORDS
     );
 
+    // 一道预算同时覆盖本轮两次取数（核验的 find + 截断判据用的估算），
+    // 与文件头「资源闸 ②」是同一条承诺：闸门释放只取决于"这一轮有没有结束"，
+    // 而本轮的任何一次 await 都不允许无上限地挂着。
+    const budgetMs = roundBudgetMs();
+
     const report = await verifyAuditChain(AuditLog, {
       maxRecords: windowRecords,
       fromLatest: true,
+      maxTimeMS: budgetMs,
     });
     // collectionTotal 只用于判据的"截断"识别。这里刻意用 estimatedDocumentCount
     // （元数据估算，不扫集合）：定时器每轮都实数 countDocuments 会在千万级集合上
     // 变成固定开销，而窗口本来就取"最近 N 条"——截断与否只是判据的一个否决项。
-    const collectionTotal = await AuditLog.estimatedDocumentCount();
+    // 带 maxTimeMS 的入参会由 mongoose setOptions 转给驱动（实测 8.24.1：
+    // Query.prototype.estimatedDocumentCount(options) → this.setOptions(options)）。
+    const collectionTotal = await AuditLog.estimatedDocumentCount({ maxTimeMS: budgetMs });
 
     const verdict = computeChainVerdict({
       breaks: report.breaks,
@@ -352,5 +392,6 @@ module.exports = {
   __resetForTest,
   __DEFAULT_INTERVAL_MS: DEFAULT_INTERVAL_MS,
   __MIN_INTERVAL_MS: MIN_INTERVAL_MS,
+  __MIN_ROUND_BUDGET_MS: MIN_ROUND_BUDGET_MS,
   __MAX_WINDOW_RECORDS: MAX_WINDOW_RECORDS,
 };

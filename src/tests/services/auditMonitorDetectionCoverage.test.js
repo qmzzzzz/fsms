@@ -154,6 +154,16 @@ describe('auditMonitor 检测窗口占空比 / 重入 / 失败可见（F-125）'
       expect(slow.maxTimeMS).toBeGreaterThanOrEqual(fast.maxTimeMS);
     });
 
+    // 间隔这个 env 没有 integer 校验（只要求正数），所以 90000.5 是合法配置；
+    // 而服务端对小数 maxTimeMS 直接拒（真库实测，文案随版本而变）⇒ 预算必须是整数。
+    // 不取整时三路聚合每轮都抛错、被 runDetection 的 catch 吞成 failures 恒增，
+    // 检测静默停摆而 isRunning() 仍报 true——本仓反复声明要防的那一类。
+    test('预算取整：小数间隔不得把小数 maxTimeMS 发给服务端', async () => {
+      const fractional = await runOneRound(90000.5);
+      expect(Number.isInteger(fractional.maxTimeMS)).toBe(true);
+      expect(fractional.maxTimeMS).toBe(90000);
+    });
+
     // 下面两条用替身，而替身"允许"任何 API：本仓 Mongoose 8 的 Aggregate 实例上
     // 根本没有 .maxTimeMS() 方法（链式写法在替身下全绿、在真库下抛 TypeError，
     // 又被 runDetection 的 catch 吞掉 ⇒ 检测静默停摆）。

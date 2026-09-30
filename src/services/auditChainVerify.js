@@ -110,6 +110,13 @@ const MAX_SAMPLES = 20;
  *   造数）。**仅限离线/测试作用域**：在线自检接口与运维脚本一律不传，否则
  *   「挑一个没有断链的子集」就能把真实断裂藏起来——报告里会把 filter 原样回显，
  *   便于消费方识别这是一次局部校验。
+ * @param {number} [options.maxTimeMS=0] 服务端单查询时间预算（毫秒），**0=不限**（HTTP 接口与
+ *   离线脚本的原行为，保持不带该参数时的结论与耗时特征完全不变）。
+ *   取值口径：有限正数才生效，且**向下取整**（真库对小数报 FailedToParse）；
+ *   0 / 负数 / NaN / Infinity / 非数字一律按"不限"，见实现处的实测说明。
+ *   为什么只有定时器侧必须传：`auditChainMonitor` 用 `verificationRunning` 做单轮闸门，
+ *   一条挂死的 find 会让之后每一轮都判"上一轮未结束"而跳过，且**永不恢复**——
+ *   带预算时最坏情况由服务端中断本轮、走 catch 释放闸门（与 auditMonitor 的 roundBudgetMs 同法）。
  * @returns {Promise<Object>} 校验报告
  */
 const verifyAuditChain = async (AuditLog, options = {}) => {
@@ -119,6 +126,15 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
   );
   const fromLatest = options.fromLatest !== false;
   const filter = options.filter && Object.keys(options.filter).length > 0 ? options.filter : {};
+  // 预算归一：只接受**有限正数**，并向下取整。
+  // 取整不是洁癖——真库实测小数一律被拒（文案随 mongod 版本而变：本机报
+  // FailedToParse「Expected an integer: maxTimeMS」，测试用的内存 mongod 报
+  // 「maxTimeMS has non-integral value」），负数报 BadValue「value must be >= 0」。
+  // 两种都是**抛错**形态，若留给调用方传（间隔来自 env，`AUDIT_*_INTERVAL_MS=1.5`
+  // 完全可能）就会让每一轮核验都在服务端失败，而闸门侧看到的是 failures 恒增——
+  // 比没预算更难查。0 / 未设置 / NaN / Infinity / 非数字一律落回"不限"（原行为）。
+  const rawBudget = Number(options.maxTimeMS);
+  const maxTimeMS = Number.isFinite(rawBudget) && rawBudget > 0 ? Math.floor(rawBudget) : 0;
 
   const hmacChecked = isHmacConfigured();
 
@@ -155,7 +171,19 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
 
   // 取最近 maxRecords 条：先按 _id 降序取窗口，再反转为升序校验
   // （链接性校验依赖时序，必须升序推进）
-  const window = await AuditLog.find(filter)
+  //
+  // 预算走 find 的**第三参**而不是链式 `.maxTimeMS()`，三条理由：
+  // ① 与模型侧既有先例同法（models/auditLogQueryStatics.js 的 aggregateWithBudget
+  //    就是「不带预算走单参、带预算走 options 袋」）；
+  // ② 不带预算时必须走**逐字不变**的单参形态：HTTP 接口与离线脚本的调用面、
+  //    以及消费方对 `find` 的既有断言都不该因为一个"默认不生效"的参数而漂移
+  //    （`maxTimeMS: 0` 在服务端本就是"不限"，实测接受，所以发 0 只是多一个签名）；
+  // ③ 第二参是 projection，写成 `find(filter, { maxTimeMS })` 会被当成投影而不是选项，
+  //    是个静默失效的经典坑，故必须 `find(filter, null, { maxTimeMS })` 显式占位。
+  // 实测 mongoose 8.24.1：`find(f, null, {maxTimeMS:2500}).options.maxTimeMS === 2500`，
+  // 与链式 `.maxTimeMS()` 落进同一个 options 袋（到驱动层等价）。
+  const windowOptions = maxTimeMS > 0 ? { maxTimeMS } : undefined;
+  const window = await AuditLog.find(filter, null, windowOptions)
     .sort({ _id: fromLatest ? -1 : 1 })
     .limit(maxRecords)
     .lean();

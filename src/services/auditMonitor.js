@@ -69,9 +69,17 @@ function windowMinutesFor(intervalMs) {
   return (intervalMs + WINDOW_OVERLAP_MS) / 60000;
 }
 
-/** 单轮聚合的服务端上限：一轮最多占一个周期，但不低于下限 */
+/**
+ * 单轮聚合的服务端上限：一轮最多占一个周期，但不低于下限。
+ * **取整是必须的**：`AUDIT_MONITOR_INTERVAL_MS` 的读取只要求"正数"（没有 integer: true），
+ * 而服务端对小数 maxTimeMS 直接拒绝——真库实测
+ * `aggregate(pipe, {maxTimeMS: 90000.5})` 抛错（文案随 mongod 版本而变：
+ * FailedToParse「Expected an integer」或「maxTimeMS has non-integral value」）。
+ * 不取整时该异常会被 runDetection 的 catch 吞成"每轮失败"，检测静默停摆而
+ * isRunning() 仍报 true——正是本模块注释里反复声明要防的那一类。
+ */
 function roundBudgetMs() {
-  return Math.max(MIN_ROUND_BUDGET_MS, effectiveIntervalMs);
+  return Math.floor(Math.max(MIN_ROUND_BUDGET_MS, effectiveIntervalMs));
 }
 
 /**
