@@ -38,7 +38,7 @@
  *    白名单豁免与缓存失效联动
  *  - addToBlacklist：无法解析的 IP 跳过、白名单 IP 跳过自动封禁
  *  - fileUploadSecurity：预留能力全分支（当前无路由挂载，直接单测）
- *  - auditLog 中间件：GET 非白名单跳过、skipGlobalAudit 跳过
+ *  - auditLog 中间件：GET 命中豁免清单跳过、skipGlobalAudit 跳过
  */
 
 const mongoose = require('mongoose');
@@ -481,7 +481,7 @@ describe('security.js 分支补齐', () => {
   });
 
   describe('auditLog 中间件：路径与跳过分支', () => {
-    test('GET 命中敏感读取白名单 → 包装响应并走审计', async () => {
+    test('GET 敏感读取（2026-09-30 反转后默认审计）→ 包装响应并走审计', async () => {
       const mw = auditLog();
       const req = makeReq({ method: 'GET', originalUrl: '/api/users?page=1', path: '/api/users' });
       const res = makeRes();
@@ -495,10 +495,15 @@ describe('security.js 分支补齐', () => {
       expect(typeof res.json).toBe('function');
     });
 
-    test('GET 非白名单路径 → 直接放行，不包装响应', () => {
+    test('GET 命中豁免清单 → 直接放行，不包装响应', () => {
+      // 2026-09-30 反转：判据从「命中允许清单才审计」改为「默认审计、命中
+      // auditGetExcludePaths 才跳过」。探针必须用豁免清单内的路径——用非豁免路径
+      // （如 /api/devices）时中间件会包装 res.json，本用例末尾的 res.json('x') 触发
+      // doLog，其 setImmediate 回调泄漏进下一个用例的 push spy（实测即
+      // skipGlobalAudit 用例被这条多出来的 device_view 行打红）。
       const mw = auditLog();
       const originalJson = jest.fn(() => 'orig');
-      const req = makeReq({ method: 'GET', originalUrl: '/api/devices', path: '/api/devices' });
+      const req = makeReq({ method: 'GET', originalUrl: '/api/auth/me', path: '/api/auth/me' });
       const res = makeRes();
       res.json = originalJson;
       const next = jest.fn();

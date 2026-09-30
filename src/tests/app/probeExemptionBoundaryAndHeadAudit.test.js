@@ -243,21 +243,46 @@ describe('探针豁免的边界与 HEAD 审计留痕', () => {
     expect([getRow.action, headRow.action]).toEqual(['user_view', 'user_view']);
   });
 
-  test('反向对照：非敏感读取白名单的路径，GET 与 HEAD 都不产生审计', async () => {
+  test('反向对照：豁免清单内的纯自读路径，GET 与 HEAD 都不产生审计', async () => {
     const before = await settleAudit();
-    // device:read 不在这个账号上 ⇒ 403，但 403 与否都不该写审计（判据是路径不在白名单）
 
+    // 2026-09-30 反转后「不审计」的判据是命中 auditGetExcludePaths（豁免清单），
+    // 不再是「不在允许清单」。/api/auth/me 是纯自读面：带合法令牌走认证链、
+    // req.user 有值（若有审计行必然记到本用户名下，计数法才有效），仍必须零留痕。
+    const get = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${userToken}`)
+      .set('X-Forwarded-For', freshIp(5));
+    const head = await request(app)
+      .head('/api/auth/me')
+      .set('Authorization', `Bearer ${userToken}`)
+      .set('X-Forwarded-For', freshIp(5));
+    expect([get.status, head.status]).toEqual([200, 200]);
+    expect(await settleAudit()).toBe(before);
+  });
+
+  test('反转收口：敏感读取的 403 拒绝同样留痕（静默探测面清零）', async () => {
+    const before = await settleAudit();
+    // device:read 不在这个账号上 ⇒ 403。反转前 403 与否都不写审计（路径不在允许
+    // 清单），只读账号可无限探测设备列表而零留痕；反转后拒绝本身也是证据。
     const get = await request(app)
       .get('/api/devices')
       .set('Authorization', `Bearer ${userToken}`)
-      .set('X-Forwarded-For', freshIp(5));
+      .set('X-Forwarded-For', freshIp(8));
+    expect(get.status).toBe(403);
+    const afterGet = await settleAudit();
+    expect(afterGet - before).toBe(1);
 
     const head = await request(app)
       .head('/api/devices')
       .set('Authorization', `Bearer ${userToken}`)
-      .set('X-Forwarded-For', freshIp(5));
-    expect([get.status, head.status]).toEqual([403, 403]);
-    expect(await settleAudit()).toBe(before);
+      .set('X-Forwarded-For', freshIp(8));
+    expect(head.status).toBe(403);
+    const afterHead = await settleAudit();
+    expect(afterHead - afterGet).toBe(1);
+    const row = await newestRow();
+    // HEAD 与 GET 同尺：Express 归一后跑的是同一条读取逻辑，action 不得退化为 user_head
+    expect([row.method, row.action]).toEqual(['HEAD', 'device_view']);
   });
 
   test('OPTIONS 现状：cors 早于限流短路，但既不反射 Origin 也不是路由 oracle', async () => {
