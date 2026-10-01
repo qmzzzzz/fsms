@@ -12,6 +12,7 @@ const sharedCache = require('../services/sharedCache');
 const { isTokenBlacklisted } = require('./tokenBlacklist');
 const sessionService = require('../services/sessionService');
 const { isIPAllowed } = require('../utils/ipRange');
+const { clientIpForSecurityDecision, isClientIpIdentityTrustworthy } = require('../utils/ipUtils');
 const { userLimiter } = require('./rateLimit');
 const { getCookies, ACCESS_COOKIE_NAME } = require('../utils/cookie');
 const { violatesAccessTokenPurpose } = require('../utils/tokenPurpose');
@@ -327,10 +328,24 @@ const assertCredentialFresh = (freshUser, decoded, res) => {
  *
  * token 有效期内换到未授权 IP 同样被拒绝，避免「登录时校验通过后换网络仍可
  * 长期使用」的绕过路径。规则为空时不限制，不影响未配置该功能的用户。
+ *
+ * 客户端身份取 `clientIpForSecurityDecision` 而**不是** `req.ip`：开着 trust proxy 时
+ * req.ip 来自 X-Forwarded-For，能直连应用端口的主体（容器网络、误配入口、SSRF 跳板）
+ * 伪造一跳即可把它换成白名单里的地址——限流被这样买到三重豁免已是既有结论（判据同源），
+ * 而这里买的是**访问控制**，后果更重。边界不可信时退回不可伪造的 socket 对端，
+ * 宁可让配置不完整的部署吃一次拒绝，也不让一个请求头通过 IP 范围校验。
  */
 const assertIpAllowed = (freshUser, req, res) => {
   if (freshUser.allowedIPs) {
-    const clientIP = req.ip || req.connection?.remoteAddress;
+    const identityTrustworthy = isClientIpIdentityTrustworthy(req);
+    const clientIP = clientIpForSecurityDecision(req);
+    if (!identityTrustworthy) {
+      logger.warn('IP 访问范围按 socket 对端判定（req.ip 取自边界外的 X-Forwarded-For）', {
+        username: freshUser.username,
+        reqIp: req.ip,
+        peerIp: req.socket?.remoteAddress,
+      });
+    }
     const { allowed, reason } = isIPAllowed(clientIP, freshUser.allowedIPs);
     if (!allowed) {
       logger.warn('IP 访问范围校验拒绝', {

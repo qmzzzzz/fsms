@@ -272,8 +272,10 @@ const snapshotOf = (state) => ({
 const noteRateLimitHit = (req, limiterName) => {
   incSecurityAlert('rate_limit_triggered', 'medium');
 
-  // 与名单/封禁同一把尺：::ffff:1.2.3.4 与 1.2.3.4 必须是同一个攻击源
-  const ipKey = normalizeIP(req?.ip) || String(req?.ip ?? 'unknown');
+  // 与名单/封禁同一把尺：::ffff:1.2.3.4 与 1.2.3.4 必须是同一个攻击源。
+  // 归一化失败不得回退原文——req.ip 在 trust proxy 下来自请求方写的 XFF，
+  // 换一个垃圾串就换一个全新计数桶，阶梯就永远走不到（口径同 rateLimit.js）
+  const ipKey = normalizeIP(req?.ip) || 'unknown';
   const now = Date.now();
 
   let rec;
@@ -324,9 +326,9 @@ const noteRateLimitHit = (req, limiterName) => {
   }
 };
 
-/** 读取某 IP 各类别的当前水位（仅测试/诊断用） */
+/** 读取某 IP 各类别的当前水位（仅测试/诊断用）；键口径与 noteRateLimitHit 必须一致 */
 const peekIp = (ip) => {
-  const rec = records.get(normalizeIP(ip) || String(ip ?? 'unknown'));
+  const rec = records.get(normalizeIP(ip) || 'unknown');
   if (!rec) return null;
   const out = {};
   for (const [className, spec] of Object.entries(CLASSES)) {

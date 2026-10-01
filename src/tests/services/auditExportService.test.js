@@ -46,6 +46,7 @@ describe('audit export service', () => {
       // 并且断言它真的被调用（光"能跑"不够，跑错方向也要能发现）
       limit: jest.fn().mockReturnThis(),
       lean: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
       cursor: jest.fn(() => ({
         close: jest.fn(),
         eachAsync: async (callback) => {
@@ -68,6 +69,11 @@ describe('audit export service', () => {
     expect(res.setHeader).toHaveBeenCalledWith('Content-Type', 'text/csv; charset=utf-8');
     expect(res.setHeader).toHaveBeenCalledWith('X-Audit-Manifest-Records', String(rows.length));
     expect(result.recordCount).toBe(2);
+    // 排除清单必须真的挂到查询上（只在注释里说"不读 HMAC"= 只登记不接线）：
+    // 这条腿此前是全字段取回，一次上限导出会把 5 万条记录的 hmac/body/params/query
+    // 读进进程。RESPONSE_EXCLUDE 不含 -hash/-prevHash ⇒ 上面那条链摘要照样算得出，
+    // 两件事由同一条用例同时钉住：清单挂了、且挂了没把链字段一起排除掉。
+    expect(chain1.select).toHaveBeenCalledWith(AuditLog.RESPONSE_EXCLUDE);
 
     // 摘要必须可复算，且真的依赖记录内容。但注意口径：`sha256` 覆盖的是**记录的 hash 字段
     // 串联**，不是 CSV 字节 ⇒ 它证明"这些记录出自哈希链"，**不能**当作
@@ -92,6 +98,7 @@ describe('audit export service', () => {
       sort: jest.fn().mockReturnThis(),
       limit: jest.fn().mockReturnThis(),
       lean: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
       cursor: jest.fn(() => ({
         close: jest.fn(),
         eachAsync: async (callback) => {
@@ -137,6 +144,7 @@ describe('audit export service', () => {
       sort: jest.fn().mockReturnThis(),
       limit: jest.fn().mockReturnThis(), // 链式桩必须跟得上生产链
       lean: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
       cursor: jest.fn(() => ({
         close: jest.fn(),
         eachAsync: async (callback) => {

@@ -22,7 +22,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '../../..');
 const CRYPTO = path.join(ROOT, 'scripts/backupCrypto.sh');
@@ -61,6 +61,29 @@ describe('备份加密契约（P1-①）', () => {
     expect(src).toContain('fire-safety-backup-*.gz"');
     expect(src).toContain('fire-safety-backup-*.gz.gpg');
     expect(src).toContain('fire-safety-backup-*.sha256');
+  });
+
+  test('备份侧：umask 077 必须覆盖整个产物写入窗口（还原点只能落在 cleanup 里）', () => {
+    // 为什么是位置判据而不是"跑一遍看权限位"：Git Bash/MSYS 下 NTFS 不承载 POSIX
+    // 权限位，chmod/umask 都是空操作、stat 恒报 644（该文件自己的注释已记录），
+    // 本机跑出来的模式没有信息量。这条闸钉的是"收紧的作用域"这一事实本身。
+    // 修复前实测：umask 在凭据临时文件建好后立刻还原，于是 mongodump 的归档
+    // （全量业务库明文）与随后的 .gpg/.sha256 都落在调用方 umask 022 上 = 0644。
+    const src = read(BACKUP);
+    const restrict = src.search(/^[ \t]*umask 077$/m);
+    const dump = src.indexOf('mongodump --config=');
+    const encrypt = src.indexOf('crypto_encrypt ');
+    expect(restrict).toBeGreaterThan(-1);
+    expect(dump).toBeGreaterThan(-1);
+    expect(encrypt).toBeGreaterThan(-1);
+    expect(restrict).toBeLessThan(dump); // 收紧必须早于第一次产物写入
+
+    const cleanupMatch = src.match(/cleanup\(\)\s*\{[\s\S]*?\n\}/);
+    expect(cleanupMatch).not.toBeNull();
+    // 还原语句必须在 cleanup 体内（trap EXIT INT TERM ⇒ 任何退出路径都还原）
+    expect(cleanupMatch[0]).toMatch(/umask "\$OLD_UMASK"/);
+    // 且**只**在那里：cleanup 之外再出现一次还原，就是提前放开作用域
+    expect(src.replace(cleanupMatch[0], '')).not.toMatch(/umask "\$OLD_UMASK"/);
   });
 
   test('异地副本：BACKUP_OFFSITE_CMD 以 argv 解析执行，不经 shell 展开', () => {
@@ -166,5 +189,134 @@ describe('备份加密契约（P1-①）', () => {
       expect(out).toContain('REJECTED');
       expect(out).toContain('NO-ARTIFACT');
     });
+  });
+});
+
+/**
+ * 恢复侧的 sha256 门禁（2026-10-01）
+ *
+ * 上面那条既有用例断言的是校验和**被产出**；本组断言它**被消费**。
+ * 此前全仓没有任何一处读 .sha256：备份侧写了，恢复侧不验 ⇒
+ * 异地取回的归档哪怕传错文件、被截断、被替换，也照样进 mongorestore，
+ * 而"先 sha256sum --check"只写在 deployment/backup-encryption.md 里。
+ *
+ * 为什么用 stub mongorestore 真跑脚本（而不是文本断言）：这条防线的全部价值在于
+ * "验不过就不写库"，而"写库"是一个副作用。文本断言只能证明代码里出现过 sha256，
+ * 证不了 mongorestore 真的没被执行——恰恰是被截断归档最容易被半写进库的形态。
+ *
+ * 反向自证（用例 6）：本仓比的是**哈希值**而不是 `sha256sum --check`。
+ * sidecar 里记的是备份宿主机上的路径字符串，异地副本改名/换目录后 --check 会报
+ * no such file —— 用 `--check` 实现的"看似更严格"的版本会在用例 6 红。
+ */
+describe('restore-mongo.sh 的完整性门禁：验不过就不许写库', () => {
+  let tmpDir;
+  let stubDir;
+  let stubLog;
+  let archive;
+
+  const sh = (p) => p.replace(/\\/g, '/');
+
+  const runRestore = (env = {}) =>
+    spawnSync('bash', [sh(RESTORE), sh(archive)], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      timeout: 60000,
+      env: {
+        ...process.env,
+        PATH: `${stubDir}${path.delimiter}${process.env.PATH}`,
+        // local 传输 + 非交互确认：与 CI/cron 恢复同一分支
+        MONGO_RESTORE_TRANSPORT: 'local',
+        MONGODB_URI: 'mongodb://restore_user:pw@127.0.0.1:27017/fire_safety?authSource=admin',
+        RESTORE_CONFIRM: 'fire_safety',
+        STUB_LOG: sh(stubLog),
+        ...env,
+      },
+    });
+
+  /** 用真实 sha256sum 写 sidecar（与 backupCrypto.sh 的 crypto_checksum 同一形态） */
+  const writeChecksum = (target = archive) =>
+    execFileSync('bash', ['-c', `sha256sum '${sh(target)}' > '${sh(target)}.sha256'`], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    });
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'restore-checksum-'));
+    stubDir = path.join(tmpDir, 'bin');
+    fs.mkdirSync(stubDir);
+    stubLog = path.join(tmpDir, 'mongorestore.calls');
+    fs.writeFileSync(
+      path.join(stubDir, 'mongorestore'),
+      ['#!/bin/bash', 'echo "STUB-MONGORESTORE $*" >> "$STUB_LOG"', 'exit 0', ''].join('\n'),
+      { mode: 0o755 }
+    );
+    archive = path.join(tmpDir, 'fire-safety-backup-t1.gz');
+    fs.writeFileSync(archive, 'ARCHIVE-BYTES- ORIGINAL');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test('1 校验通过 ⇒ 放行到 mongorestore（stub 真的被调用）', () => {
+    writeChecksum();
+    const r = runRestore();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('完整性校验通过');
+    expect(r.stdout).toContain('Restore completed successfully');
+    const calls = fs.readFileSync(stubLog, 'utf8');
+    expect(calls).toContain('STUB-MONGORESTORE');
+    expect(calls).toContain('--archive=');
+  });
+
+  test('2 归档被篡改（字节变了、sidecar 仍是旧的）⇒ 终止且 mongorestore 一次都不执行', () => {
+    writeChecksum();
+    fs.writeFileSync(archive, 'ARCHIVE-BYTES- TRUNCATED/TAMPERED');
+    const r = runRestore();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('完整性校验失败');
+    expect(r.stderr).toContain('已终止恢复');
+    expect(r.stdout).not.toContain('Restore completed successfully');
+    // 关键断言：不是"报了错"，而是**根本没有写库**
+    expect(fs.existsSync(stubLog)).toBe(false);
+  });
+
+  test('3 缺 sidecar ⇒ 硬失败（不得静默放行），且点名显式出口', () => {
+    const r = runRestore();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('缺少校验和文件');
+    expect(r.stderr).toContain('RESTORE_SKIP_CHECKSUM');
+    expect(fs.existsSync(stubLog)).toBe(false);
+  });
+
+  test('4 正向对照：RESTORE_SKIP_CHECKSUM=true 放行，但警告必须可见', () => {
+    const r = runRestore({ RESTORE_SKIP_CHECKSUM: 'true' });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain('未经任何完整性证明');
+    expect(fs.existsSync(stubLog)).toBe(true);
+  });
+
+  test('5 sidecar 解析不出 64 位十六进制 ⇒ 失败而不是"当作匹配"', () => {
+    fs.writeFileSync(`${archive}.sha256`, 'not-a-hash  fire-safety-backup-t1.gz\n');
+    const r = runRestore();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('解析不出 sha256');
+    expect(fs.existsSync(stubLog)).toBe(false);
+  });
+
+  test('6 异地副本改名/换目录后仍能验（比哈希值，不是 sha256sum --check 的路径耦合）', () => {
+    const offsiteDir = path.join(tmpDir, 'offsite');
+    fs.mkdirSync(offsiteDir);
+    const offsite = path.join(offsiteDir, 't1-copy-renamed.gz');
+    fs.copyFileSync(archive, offsite);
+    writeChecksum(); // sidecar 里记的是**原名**的路径字符串
+    fs.copyFileSync(`${archive}.sha256`, `${offsite}.sha256`);
+    // 让 sidecar 内记录的路径失效：这正是 --check 形态会在异地恢复当天报错的原因
+    fs.rmSync(archive);
+    archive = offsite;
+    const r = runRestore();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('完整性校验通过');
+    expect(fs.existsSync(stubLog)).toBe(true);
   });
 });

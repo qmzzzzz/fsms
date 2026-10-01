@@ -18,7 +18,13 @@ const {
 } = require('./auditChainPayload');
 // method 的取值全集与降级规则只有一份（constants/audit.js）：schema 的 set 与这里的
 // 批量哈希用同一个函数，否则「被哈希的形态」与「落库的形态」会在铸造那一步分叉。
-const { auditMethodOrUndefined } = require('../constants/audit');
+// ip / userAgent / username 同族（上界 + 控制字符中和），见各自的 gate 注释。
+const {
+  auditMethodOrUndefined,
+  auditIpOrUndefined,
+  auditUserAgentOrUndefined,
+  cleanAuditUsername,
+} = require('../constants/audit');
 
 // A-1 共享态键名：配置 REDIS_URL 时，链尾与互斥锁外置到共享缓存，
 // 多实例在分布式锁内读写同一链尾，消除「各实例独立链尾 → 必然分叉」；
@@ -455,6 +461,19 @@ function chainBatch(docs, startPrevHash) {
     // 落库时又被 set 抹成「不记 method」⇒ 该记录从此永久 hash_mismatch（假篡改），
     // 且它自身的完整性保护静默失效（已经是红的，再被真改也照样红）。
     doc.method = auditMethodOrUndefined(doc.method);
+    // ip 与 method 同规：闸本体在 constants/audit.js，schema 的 set 会再跑一次（幂等），
+    // 所以两侧形态必然一致。少了这一行，一条超长 XFF 派生值就会带着 4011 字符进哈希、
+    // 落库时被剪到 64 ⇒ 该记录永久 hash_mismatch，且它的完整性保护静默失效。
+    doc.ip = auditIpOrUndefined(doc.ip);
+    // userAgent 同理（它也在 payload 字段集里）：21 个写入点传裸 `req.get('user-agent')`，
+    // 一条 16KB 的 UA 会带着原样进哈希、落库时被剪到 512。
+    doc.userAgent = auditUserAgentOrUndefined(doc.userAgent);
+    // username 也在 payload 字段集里，且它是**唯一由未认证请求方直接决定**的那一维
+    // （登录失败审计传 `req.body.username`）。少了这一行，请求体里一个 JSON 转义
+    // `"\ud800"` 就带着孤立代理项进哈希（内存 61 d800 62），BSON 落盘时被驱动改写成
+    // U+FFFD（61 fffd 62）⇒ 读回复算必然 hash_mismatch。实测形态见
+    // tests/services/auditUsernameCastGate.test.js（闸前后各一条，反向对照）。
+    doc.username = cleanAuditUsername(doc.username);
 
     doc.prevHash = prevHash;
     const payload = canonicalPayload(doc, CURRENT_PAYLOAD_VERSION);

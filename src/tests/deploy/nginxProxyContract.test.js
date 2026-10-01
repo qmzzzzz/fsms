@@ -8,7 +8,7 @@
  * 且 security.txt 根本没被反代。本测试把这类配置漂移变成红灯：静态解析 nginx
  * 与后端根路径路由表，比对两者的契约。
  *
- * 三条断言：
+ * 四条断言：
  *  1. 每个 proxy_pass 块完整声明 Host / X-Real-IP / X-Forwarded-For / X-Forwarded-Proto
  *     —— proxy_set_header 在嵌套块中是**整体替换**而非继承，漏一条等于该块没有，
  *     而 Host 缺失时 nginx 默认发 `Host: $proxy_host`（= proxy_pass 目标地址），
@@ -17,6 +17,8 @@
  *     try_files 退化成 200 的 SPA index.html（security.txt 正是这种静默失效）；
  *  3. 80→443 跳转不得使用 $host —— $host 取自请求 Host 头，任何解析到本机的域名
  *     都会命中 :80 的默认 server 并被 301 到攻击者指定的主机（开放重定向）。
+ *  4. 每个 server 块都要 `server_tokens off`（版本外泄 + 与本仓 app.disable('x-powered-by')
+ *     同口径）。写它的原因是上面那条"两条路径都不经过 nginx"的盲区，而不是这一行本身多高危。
  */
 
 const fs = require('fs');
@@ -109,6 +111,34 @@ const matchLocation = (p, locations) => {
   }
   return prefix;
 };
+
+/**
+ * server 块（花括号配平，含嵌套 location）。入参必须是 codeView() 的输出。
+ * 与 parseLocations 同一套配平逻辑：nginx 忽略注释里的花括号，代码视图才等价。
+ */
+const parseServers = (text) => {
+  const out = [];
+  const re = /^[ \t]*server[ \t]*\{/gm;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    let i = m.index + m[0].length;
+    let depth = 1;
+    while (i < text.length && depth > 0) {
+      if (text[i] === '{') depth += 1;
+      else if (text[i] === '}') depth -= 1;
+      i += 1;
+    }
+    out.push({ body: text.slice(m.index + m[0].length, i - 1) });
+  }
+  return out;
+};
+
+/** 每个 server 块都必须关闭版本外泄；返回缺口所在块的序号（不是布尔，便于报缺） */
+const findServerTokenGaps = (text) =>
+  parseServers(text)
+    .map((s, idx) => ({ idx, ok: /^[ \t]*server_tokens[ \t]+off[ \t]*;/m.test(s.body) }))
+    .filter((s) => !s.ok)
+    .map((s) => ({ server: s.idx, missing: ['server_tokens off'] }));
 
 /** 从源码静态提取「挂在根路径」的后端端点（app.js 根级 + '/' 挂载的 wellKnownRoutes） */
 const rootBackendPaths = () => {
@@ -234,6 +264,28 @@ describe('deployment/nginx.conf.example 反代契约', () => {
     expect([...mutated.matchAll(REDIRECT_RE)].length).toBe(1);
     // 新口径：掩码后归零，上面的 >=1 断言会红
     expect([...codeView(mutated).matchAll(REDIRECT_RE)].length).toBe(0);
+  });
+
+  test('每个 server 块都关闭 server_tokens，且可证伪（注释版不算数）', () => {
+    // 版本外泄本身是低危信息，这条闸的价值在**形状**：本文件是"生产参考配置"，
+    // 部署方按它抄，抄漏一行就等于线上裸奔，而 supertest/e2e 两条路径都不经过 nginx
+    // （见文件头）——漂移只有这里能看见。
+    const servers = parseServers(code);
+    // 解析器自检：本文件有 :80 与 :443 两个 server 块。列表为空时下面的断言会全绿，
+    // 所以先把"确实解析到了"钉住（与 parseLocations 的自检同一条理由）。
+    expect(servers.length).toBe(2);
+    expect(findServerTokenGaps(code)).toEqual([]);
+
+    // 可证伪：把**最后**一处真实指令改成注释形态，同一断言必须报出该缺口。
+    // 这一条同时证明两件事：断言打的是代码视图（不是原文，否则注释里的同名文本会喂出假绿），
+    // 以及缺口是按 server 块逐个报的（不是"全文出现过一次就放行"）。
+    const last = text.lastIndexOf('server_tokens off;');
+    expect(last).toBeGreaterThan(-1);
+    const mutated =
+      text.slice(0, last) + '# server_tokens off;' + text.slice(last + 'server_tokens off;'.length);
+    expect(findServerTokenGaps(codeView(mutated))).toEqual([
+      { server: 1, missing: ['server_tokens off'] },
+    ]);
   });
 
   test('/api-docs 不在生产反代之内（文档默认关闭，反代等于对外常开）', () => {

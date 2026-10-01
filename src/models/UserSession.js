@@ -24,6 +24,39 @@
  */
 
 const mongoose = require('mongoose');
+const { stripControlChars } = require('../utils/helpers');
+
+/**
+ * 会话 ip / lastIp 的落库闸。
+ *
+ * 【schema 上已经写了 `maxlength: 64`，为什么还要闸】实测：`maxlength` 是**校验器**不是
+ * 改写器——`new UserSession({ lastIp: 4007 字符 })` 铸造后仍是 4007 字符，只有走 `validate()`
+ * 才会拒。而本模型最忙的那条写入路径（`sessionService.touchSession` 在每次认证请求上更新
+ * `lastSeenAt` / `lastIp`）用的是 `updateOne(..., { $set })`，Mongoose 的 update **默认不跑校验**，
+ * 于是那个 64 在这条路上从未生效过：trust proxy 打开时 `req.ip` 取自 X-Forwarded-For 的可信段，
+ * express 不校验其形态（Node 头部上限 ~16KB），一条超长 XFF 就能把 16KB 写进一条**认证中会话**的文档。
+ *
+ * 【为什么用 `set` 改写而不是 `runValidators: true`】实测后者会让整条 `$set` 因 ValidationError
+ * 被拒——连带 `lastSeenAt` 一起不写，会话活跃度从此停摆。为一个观测字段做 fail-closed 自伤
+ * 正是 createSession 那条注释（sessionService.js:271-274）已经避过的坑。
+ * `set` 在 update 的 `$set` 上同样执行（实测），所以它一处管住 create 与 touch 两条路径。
+ *
+ * 【危害定级】`lastIp` 上没有索引（实测本集合的索引是 _id / sid / status / fingerprint /
+ * expiresAt / userId+status+lastSeenAt），所以不存在「超长键挤掉整行」，剩下的就是无界的
+ * 请求方可控存储 + 会话列表渲染负载。判据与 AuditLog 的 ip 同族：复用 utils/helpers 的
+ * `stripControlChars`（控制字符替换成空格而非删除、截断后归一孤立代理项）。
+ *
+ * 【为什么空白降级成 null 而不是 ''】createSession 在 `req.ip` 缺失时显式写 null，读侧按
+ * `json.lastIp || json.ip` 取"有没有值"；降级成 '' 会让 `{ lastIp: '' }` 这类查询命中所有
+ * 无 ip 的会话。非字符串一律原样放行：它们来自代码而非请求方，出现即是编程错，
+ * 交给既有校验器报出来，而不是被闸悄悄吞掉。
+ */
+const SESSION_IP_MAX_LENGTH = 64;
+const sessionIpOrNull = (value) => {
+  if (typeof value !== 'string') return value;
+  const cleaned = stripControlChars(value, SESSION_IP_MAX_LENGTH);
+  return cleaned === '' ? null : cleaned;
+};
 
 const userSessionSchema = new mongoose.Schema({
   /**
@@ -141,12 +174,17 @@ const userSessionSchema = new mongoose.Schema({
    */
   ip: {
     type: String,
-    maxlength: 64,
+    maxlength: SESSION_IP_MAX_LENGTH,
+    set: sessionIpOrNull,
   },
   /** 最近一次活动的 IP（会话期间换网络会变化，突变是可疑信号） */
   lastIp: {
     type: String,
-    maxlength: 64,
+    // 与 ip 同一个闸：`touchSession` 是本字段唯一的写入者，而它走的是 updateOne——
+    // 只给 ip 加闸等于承认"两条路径两种口径"（本仓记录过同型漏洗，
+    // 见 constants/audit.js 里 userAgent 那段引用的 middleware/protocolCompliance.js:23-27）。
+    maxlength: SESSION_IP_MAX_LENGTH,
+    set: sessionIpOrNull,
   },
   /**
    * 会话指纹（utils/fingerprint.computeFingerprint 的输出）

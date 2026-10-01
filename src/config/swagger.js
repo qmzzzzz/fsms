@@ -1,5 +1,9 @@
 const swaggerUi = require('swagger-ui-express');
 const rateLimit = require('express-rate-limit');
+// 限流键的 IP 归一化与共享存储：判据取 utils（config → middleware/rateLimit 会绕成
+// config/index ↔ rateLimit 的加载环，而 rateLimitStore 只依赖 express-rate-limit/logger）
+const { normalizeIP } = require('../utils/ipUtils');
+const { makeSharedStore } = require('../middleware/rateLimitStore');
 const openapiSpec = require('../docs/openapi.json');
 
 const swaggerOptions = {
@@ -52,7 +56,12 @@ const docsLimiter = rateLimit({
   })(),
   // IP 白名单豁免（checkIPBlacklist 在更早阶段设置 req.ipWhitelisted）
   skip: (req) => req.ipWhitelisted === true,
-  keyGenerator: (req) => `api-docs:${req.ip}`,
+  // 共享存储：原为每实例一份，N 个副本 = N×30 次/15 分钟，与"约束穷举者"的口径不符
+  store: makeSharedStore('docs'),
+  // 与其余 IP 维度限流器同一把尺：归一化失败并到共享占位键而不回退原文——原文取自
+  // 请求方写的 X-Forwarded-For，换一个垃圾文本就换一个全新桶，本限流器存在的理由
+  // （拦文档口令穷举）会被逐请求换桶清零；`::ffff:1.2.3.4` 与 `1.2.3.4` 也曾各得一份配额。
+  keyGenerator: (req) => `api-docs:${normalizeIP(req.ip) || 'unknown'}`,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {

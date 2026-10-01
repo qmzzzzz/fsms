@@ -129,15 +129,19 @@ describe('report workbook service', () => {
       expect.arrayContaining([expect.objectContaining({ key: 'deviceCode' })])
     );
     expect(workbook.xlsx.write).toHaveBeenCalledWith(res);
+    // 空值占位符必须原样是 `-`：sanitizeSpreadsheetCell 会给一切以 `-` 开头的文本
+    // 加前导单引号，而 xlsx 的单元格是带类型的文本（实测 exceljs 把 `'=1+1'` 存成
+    // type=3 String、formula=undefined，Excel 打开时不会求值），那个引号只会显示出来。
+    // 本条断言此前钉的正是 `'-` —— 它把缺陷写成了期望值。
     expect(worksheet.addRow.mock.calls.map(([row]) => row)).toEqual([
       {
         deviceCode: 'DEV-001',
         deviceName: '烟雾报警器',
-        deviceType: "'-",
-        status: "'-",
-        location: "'-",
-        nextCheckDate: "'-",
-        expiryDate: "'-",
+        deviceType: '-',
+        status: '-',
+        location: '-',
+        nextCheckDate: '-',
+        expiryDate: '-',
       },
     ]);
     findSpy.mockRestore();

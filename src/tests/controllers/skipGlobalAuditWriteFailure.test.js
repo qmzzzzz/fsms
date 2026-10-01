@@ -208,6 +208,59 @@ function tally(sites) {
   return acc;
 }
 
+/**
+ * 第二条闸要扫的形态：`AuditLog.recordSensitiveAction(`
+ *
+ * 上一条闸只普查「设过 skipGlobalAudit 的文件里的 AuditLog.create」，而 recordSensitiveAction
+ * 的四个调用点（authController 的改密 ×2、单设备吊销、批量吊销）**都不设该标志** ⇒ 全在闸外。
+ * 它也不属于"模型自带兜底"那一类：`auditLogWriteStatics.js` 里 `record` 是
+ * `this.create(entry).catch(...)`（resolve null），而 `recordSensitiveAction` 直接
+ * `return this.create({...})` **没有 catch** ⇒ rejection 一律落到调用方手里，
+ * 调用方接到哪一档这件事本身没有任何东西看守。
+ *
+ * 实测缺陷形状（本轮修复前，四处同形）：
+ *   `.catch((e) => logger.warn(\`改密审计落库失败：${e.message}\`))`
+ *   ① 降到 warn ⇒ 生产 log level 下等于不留痕；② 不计 `audit_write_failed` 指标 ⇒
+ *   「敏感操作没写上留痕」在监控面完全不可见（而这条指标正是 P0-5 之后建起来的）；
+ *   ③ `e.message` 假设被 catch 的一定是 Error——本仓 `utils/auditWriteFailure.js` 的
+ *   `errText` 就是为此存在（裸 reject 字符串/driver 裸对象都见过），旧写法会在这步 TypeError。
+ *
+ * 这里不复用上面的 guardOf：它把"内联箭头函数"与"完全没有 .catch"都读成 'none'，
+ * 而那两种形态的修法相反（前者要换守卫，后者要补守卫）。
+ */
+function scanSensitiveActionSites() {
+  const sites = [];
+  for (const file of listProdFiles()) {
+    const src = fs.readFileSync(file, 'utf8');
+    const re = /AuditLog\.recordSensitiveAction\(/g;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      const lineStart = src.lastIndexOf('\n', m.index - 1) + 1;
+      if (/^\s*(?:\/\/|\*|\/\*)/.test(src.slice(lineStart, m.index))) continue;
+      const parsed = readArgs(src, m.index + m[0].length - 1);
+      if (!parsed) continue;
+      const tail = src
+        .slice(parsed.close + 1, parsed.close + 60)
+        .replace(/\s+/g, ' ')
+        .trim();
+      const named = /^\.catch\(\s*([A-Za-z_$][\w$]*)/.exec(tail);
+      const guard = named ? named[1] : tail.startsWith('.catch(') ? 'inline-lambda' : 'NO-CATCH';
+      sites.push({
+        site: `${path.relative(SRC_DIR, file).replace(/\\/g, '/')}#${enclosingHandler(src, m.index)}`,
+        guard,
+      });
+    }
+  }
+  return sites;
+}
+
+// 登记表：键名与计数为**实测原样**（4 处全在 authController，改密 handler 占 2 处）。
+const EXPECTED_SENSITIVE_REGISTRY = {
+  'controllers/authController.js#changePassword': { [GUARD_SWALLOW]: 2 },
+  'controllers/authController.js#revokeSession': { [GUARD_SWALLOW]: 1 },
+  'controllers/authController.js#revokeOtherSessions': { [GUARD_SWALLOW]: 1 },
+};
+
 // ===== 用例 =====
 
 // 登记表：key = `相对 src/ 路径#所在 handler 名`，value = 该写入点用到的兜底档位计数。
@@ -247,6 +300,25 @@ describe('skipGlobalAudit 手写审计的失败通路', () => {
     const sites = scanSkipGlobalAuditSites();
     expect(tally(sites)).toEqual(EXPECTED_REGISTRY);
     expect(sites).toHaveLength(10);
+  });
+
+  test('闸：每一处 recordSensitiveAction 的失败通路必须等于登记表（不設 skipGlobalAudit，故不在上条闸范围内）', () => {
+    // 只钉"用的哪个守卫"这一件事，不外推：守卫本身记 error 日志 + high 指标由本文件的
+    // 行为用例（PII 查看 / 安全举报两处）钉住，两处共用同一个 helper ⇒ 判据归一处。
+    const sites = scanSensitiveActionSites();
+    expect(tally(sites)).toEqual(EXPECTED_SENSITIVE_REGISTRY);
+    expect(sites).toHaveLength(4);
+  });
+
+  test('前提自证：recordSensitiveAction 真的不自带兜底（排除它才是放水）', () => {
+    const src = fs.readFileSync(path.resolve(SRC_DIR, 'models/auditLogWriteStatics.js'), 'utf8');
+    const body =
+      /schema\.statics\.recordSensitiveAction\s*=\s*async function[\s\S]*?\n {2}\};/.exec(src);
+    expect(body).toBeTruthy();
+    // 与 record 相反：这条静态方法里没有 .catch，也没有 audit_write_failed 记账
+    expect(body[0]).not.toContain('.catch(');
+    expect(body[0]).not.toContain('incSecurityAlert');
+    expect(body[0]).toContain('return this.create(');
   });
 
   test('前提自证：record 类写入点确实自带兜底，排除它不是放水', () => {

@@ -533,19 +533,20 @@ describe('reportController.exportReport 分支补齐', () => {
     const comboRows = await parseWorkbookRows(combo.body);
     expect(comboRows.length).toBe(2); // 表头 + login_success/false 那一行
 
-    // userId 维度：3 行种子中 2 行挂在 superUser 名下，命中 2 行（可证伪：
-    // userId 过滤若失效会捞到全部 3 行）
+    // userId 维度：3 行种子中 2 行挂在 superUser 名下。必须**叠加 username 种子
+    // 约束**再断言——全局审计中间件会给本文件的每一发 HTTP 请求写 1 行
+    // userId=superUser 的审计行，运行时行数随用例顺序膨胀（--randomize
+    // seed 31337/777001 实测：无 username 约束时 4 变 6）；username 是
+    // 唯一 stamp，天然隔离运行时行。可证伪性不变：userId 过滤若失效会捞到
+    // 第 3 行种子（另一个用户的 rexpaudit 行），username 失效会捞到运行时行。
     const byUser = await request(app)
-      .get('/api/reports/export?' + params({ userId: superUserId }))
+      .get('/api/reports/export?' + params({ userId: superUserId, username: `rexpaudit${stamp}` }))
       .set('Authorization', `Bearer ${superToken}`)
       .buffer(true)
       .parse(bufferBody);
     expect(byUser.status).toBe(200);
     const byUserRows = await parseWorkbookRows(byUser.body);
-    // 注意：全局审计中间件会为本次测试自身的 HTTP 请求写 1 行（userId 也是
-    // superUser），所以命中数是 2 行种子 + 1 行运行时时序行。这里断言「恰为 3 行
-    // 数据行」仍可证伪：userId 过滤一旦失效，会多出第 3 行种子的审计行。
-    expect(byUserRows.length).toBe(4); // 表头 + 3 行
+    expect(byUserRows.length).toBe(3); // 表头 + 2 行 superUser 名下的种子
   });
 
   test('audit 导出 level 三档派生：每档内容互不相同且各自可证伪（error/warning/info $and 条件）', async () => {

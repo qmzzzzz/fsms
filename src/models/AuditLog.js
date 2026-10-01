@@ -10,6 +10,9 @@ const {
   AUDIT_HTTP_METHODS,
   AUDIT_RISK_LEVELS,
   auditMethodOrUndefined,
+  auditIpOrUndefined,
+  auditUserAgentOrUndefined,
+  cleanAuditUsername,
 } = require('../constants/audit');
 const { applyWriteStatics } = require('./auditLogWriteStatics');
 const { applyQueryStatics } = require('./auditLogQueryStatics');
@@ -42,6 +45,11 @@ const auditLogSchema = new mongoose.Schema(
     username: {
       type: String,
       required: true,
+      // 全仓唯一由未认证请求方直接决定的被哈希字段（登录失败审计传 `req.body.username`）。
+      // 判据与两处偏离本族工厂的理由（required ⇒ 永不降级为 undefined）见 constants/audit.js。
+      // 与 method/ip/userAgent 同规：必须在 auditChain.js 的 chainBatch 里镜像一次，
+      // 否则批量路径「先哈希后铸造」会把一条没人碰过的记录变成永久 hash_mismatch。
+      set: cleanAuditUsername,
     },
 
     // 被操作对象（如管理员锁定某用户时记录目标用户）
@@ -128,9 +136,17 @@ const auditLogSchema = new mongoose.Schema(
     // 网络信息
     ip: {
       type: String,
+      // 与 method 同一族的落库闸（判据本体见 constants/audit.js）：ip 直接来自
+      // X-Forwarded-For 这类请求方可控文本，express 不校验其形态。上界 + 中和控制字符
+      // 都必须在 chainBatch 算哈希**之前**镜像一遍，否则批量路径又是永久假篡改。
+      set: auditIpOrUndefined,
     },
     userAgent: {
       type: String,
+      // 同族闸（判据与"为什么是 512"见 constants/audit.js）：全仓 21 个写入点传的是裸
+      // `req.get('user-agent')`，Node 头部上限 ~16KB ⇒ 上界必须落在 schema 单点，
+      // 而不是要求每个新写入点都记得清洗。同样必须在 chainBatch 算哈希前镜像。
+      set: auditUserAgentOrUndefined,
     },
     clientInfo: {
       browser: String,

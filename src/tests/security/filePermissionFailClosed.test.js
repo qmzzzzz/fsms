@@ -277,6 +277,67 @@ describe('M-05 补漏：filePermission 失败路径', () => {
     });
   });
 
+  /**
+   * 成功路径的 argv 锁（2026-10-01 补，第 7 轮假绿专项 #4 的落地）
+   *
+   * 本文件原先对 `execFileSync` 的 8 个间谍**没有任何 toHaveBeenCalled 类断言**：
+   * 它们要么让间谍抛错（于是断言落在"失败提示文本"上），要么断言"根本没调用"。
+   * 于是最强的一条路径——两步真的执行了、顺序对、参数就是那两条命令——一条用例都没钉。
+   * 变异实测（`mut-round8.js`，改坏实现看用例是否响）：
+   *   R8-A1 删掉 `execFileSync('icacls', resetArgv, …)` ⇒ **SURVIVED**（半套收紧无人拦：
+   *     显式授予的 Everyone ACE 会存活，而函数返回 ok:true —— 正是本模块注释里写明的假阴性）；
+   *   R8-A2 两步顺序颠倒 ⇒ **SURVIVED**（先 /inheritance:r 再 /reset 会把切断效果重置掉）；
+   *   R8-A3 往 argv 里插一个非白名单元素 ⇒ **SURVIVED**（命令行会进进程列表与失败提示文本）；
+   *   R8-A4 文件分支误带目录标志 ⇒ KILLED，被 :274 那条**提示文本**断言杀掉
+   *     （提示与执行共用同一份 argv ⇒ 排版类漂移确实有牙，执行类漂移一点没有）。
+   * 前三条就是本用例要补的洞。断言写成**整个数组逐元素相等**而不是"包含 /reset"：
+   * 相等即白名单——任何后来被拼进命令行的东西（文件内容、密钥、多余参数）都必然让它不相等。
+   */
+  it('成功路径：两步 icacls 必须真被执行，且 argv 逐元素等于白名单形态', () => {
+    const user = process.env.USERNAME || process.env.USER;
+    // 前提自证：用户名取不到时 hardenPath 会提前返回（那不是本用例要走的路径）
+    expect(user).toBeTruthy();
+
+    const run = (platformTarget, opts) => {
+      const spy = jest.spyOn(cp, 'execFileSync').mockReturnValue('');
+      try {
+        const r = loadOn(platformTarget).hardenPath(opts.target, opts);
+        // 调用记录必须在 mockRestore() **之前**取：spy 恢复原实现时会一并清空 mock.calls，
+        // 到 finally 之后再读就永远是空数组——本用例第一版就是这么写红的（一条恒红的用例
+        // 会让任何变异都"被杀掉"，等于把判据换成噪声）。
+        return { r, calls: spy.mock.calls.map((c) => [c[0], c[1]]) };
+      } finally {
+        spy.mockRestore();
+      }
+    };
+
+    withTempDir((dir) => {
+      const { r, calls } = run('win32', { target: dir, isDir: true });
+      expect(r.ok).toBe(true);
+      expect(calls).toEqual([
+        ['icacls', [dir, '/reset', '/T', '/C', '/Q']],
+        ['icacls', [dir, '/inheritance:r', '/grant:r', `${user}:(OI)(CI)F`, '/T', '/C', '/Q']],
+      ]);
+    });
+
+    withTempDir((dir) => {
+      const file = path.join(dir, 'jwt.key');
+      fs.writeFileSync(file, 'PRIVATE-KEY-CONTENT-DO-NOT-ECHO');
+      const { r, calls } = run('win32', { target: file, isDir: false });
+      expect(r.ok).toBe(true);
+      const argv = calls.map((c) => c[1]);
+      expect(argv).toEqual([
+        [file, '/reset'],
+        [file, '/inheritance:r', '/grant:r', `${user}:F`],
+      ]);
+      // 明文反向对照：被保护文件的**内容**不得出现在任何一条命令里
+      // （上面用逐元素相等已经把它挡住了，这条单独写出来是因为它是本模块唯一可能被"顺手加个参数"破坏的边界）
+      for (const one of argv.flat()) {
+        expect(String(one)).not.toContain('PRIVATE-KEY-CONTENT-DO-NOT-ECHO');
+      }
+    });
+  });
+
   it('POSIX：verifyHardened 对文件按 0600 判定（目录另一分支）', () => {
     withTempDir((dir) => {
       const mod = loadOn('linux');

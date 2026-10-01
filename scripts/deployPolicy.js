@@ -144,8 +144,27 @@ function checkAlertingEndpoint(env, fsImpl) {
     source = null;
   }
   if (source === null) {
-    // 读不到就不假装"已就绪"：明确说清这条没验成，而不是静默放行。
-    warnings.push(`未能读取告警接收端配置（${file}）：无法确认 webhook 是否已注入真实通道。`);
+    // 「读不到」不能只写 warning：本函数的裁决位是 `ok = errors.length === 0`（:109），
+    // 只进 warnings 等于让门禁在最坏的一种输入下判绿——alertmanager.yml 被删/未挂载/
+    // 权限不对（catch 把 EACCES、EISDIR 一并吞成 null）时告警链必然不可用，而发布照样通过。
+    // 旧注释写「不静默放行」，但它只保证"话说出了口"，没保证"门真的关上"。
+    // 判不到就是不过，和占位/误配同一档。
+    if ((env.ALERT_CHECK_SKIPPED || '').trim() === 'true') {
+      // 显式逃生口：调用方不是部署流程时（如把本模块当库用的静态合规脚本、CI 里只解析
+      // 资源参数）没有 alertmanager.yml 是常态，硬拦会把合法用法变成必然失败。
+      warnings.push(
+        `已显式跳过告警接收端检查（ALERT_CHECK_SKIPPED=true）：未读取到 ${file}，` +
+          '本次发布没有任何证据表明 critical 告警能触达任何人。'
+      );
+    } else {
+      errors.push(
+        `未能读取告警接收端配置（${file}）：无法确认 webhook 是否已注入真实通道——` +
+          '「判不了」按不通过处理（与占位/误配同档）。处置三选一：' +
+          '① 挂载真实配置（或用 ALERTMANAGER_CONFIG_PATH 指向它，指向的文件仍过同一道闸）；' +
+          '② 确为无告警的演练环境，写 ALLOW_PLACEHOLDER_ALERT_WEBHOOK=true；' +
+          '③ 调用方不是部署流程（无 alertmanager.yml 属正常），写 ALERT_CHECK_SKIPPED=true。'
+      );
+    }
     return { errors, warnings };
   }
   const { evaluateAlertingDelivery } = require('./compliance-alerting');

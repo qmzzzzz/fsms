@@ -85,7 +85,11 @@ const encryptPii = (value) => {
 
 /**
  * 解密一个 PII 值。**存量明文透传**：不带版本前缀的值原样返回，
- * 使迁移前的旧数据行照常可读（读路径永远不需要先跑迁移脚本）。
+ * 使迁移前的旧数据行照常可读（读路径不需要先跑迁移脚本）。
+ * 这句契约的边界写清楚，原先的「永远」是越界的：**透传认的是"没有版本前缀"，
+ * 不认密钥**。存量**明文**确实永远可读；存量**旧钥密文**在 AES_SECRET_KEY 换过之后
+ * 必抛（实测 `Unsupported state or unable to authenticate data`，GCM 认证标签的作用），
+ * 那正是 `migrate-pii-encryption.js --rotate` 存在的理由——它跑完之后这条才重新成立。
  * 密文解密失败（密钥错误/数据被改）直接抛错——GCM 的认证标签就是为此存在的，
  * 吞掉它等于把"数据被篡改"静默降级成"读出乱码"。
  * @param {string|undefined|null} value 密文或存量明文
@@ -111,8 +115,16 @@ const decryptPii = (value) => {
  * 精确检索键：HMAC-SHA256（归一化后），hex 定长。
  * 归一化口径与 normalizeEmailKey 一致（trim + lowercase）——中文姓名不受影响，
  * 拉丁字母姓名大小写归一，避免"张三/张三 "两个键。
+ *
+ * ⚠️ 空值返回的是**空串本身**，而空串是一个查得到的键：`find({ phoneKey: '' })`
+ * 会命中所有无手机号的行。原先这句注释写作「空值不产生键」，是把它说成了
+ * 已规避的风险——实际形态是 `User.phoneKey` 的 default `''`（`pre('validate')`
+ * 钩子在明文为空时也写 `''`），且索引非唯一，所以今天没有任何错误提示。
+ * 判据因此落在调用侧：**必须先确认明文非空再算键**，不要把用户输入直接喂进来。
+ * （全仓目前无按 phoneKey 的查询点，这条是给第一个写它的人的。）
+ *
  * @param {string|undefined|null} value 明文（调用方传解密后的值）
- * @returns {string} 64 位 hex；空值返回空串（不产生可命中空串的键）
+ * @returns {string} 64 位 hex；空值/纯空白返回空串
  */
 const piiSearchKey = (value) => {
   if (typeof value !== 'string' || value.trim() === '') return '';

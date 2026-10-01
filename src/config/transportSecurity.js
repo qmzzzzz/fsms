@@ -20,6 +20,10 @@
  * 连 127.0.0.1 都认不出）：回环是一个**地址性质**，写成 localhost / 127.0.0.1 /
  * [::1] / ::ffff:127.0.0.1 的都是同一条"不出网卡"的事实。判不出的一律按
  * 非回环处理（fail-closed）。
+ *
+ * 未指定地址 `::` / `0.0.0.0` 不是回环——它是"任意接口"，与 127.0.0.1/::1 恰好
+ * 相反，明文连它可能出网卡，故两者一并落在判据外（口径必须对称：曾因只把
+ * `0.0.0.0` 留在外面而让 `mongodb://[::]/` 静默跳过 TLS 断言）。
  */
 const isLoopbackHostname = (rawHostname) => {
   if (!rawHostname) return false;
@@ -30,7 +34,6 @@ const isLoopbackHostname = (rawHostname) => {
     h === 'localhost' ||
     h.endsWith('.localhost') ||
     h === '::1' ||
-    h === '::' ||
     h === '127.0.0.1' ||
     /^127(\.\d{1,3}){3}$/.test(h) ||
     h.startsWith('::ffff:127.')

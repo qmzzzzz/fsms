@@ -109,6 +109,15 @@ cleanup() {
   if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     rm -f "$CONFIG_FILE"
   fi
+  # umask 的还原也放在这里：还原点一旦写在"临时凭据文件建好之后"，收紧就只覆盖了
+  # 那一格，而后面 mongodump 产出的归档同样是**全量业务库明文**（含 PII 与审计集合）。
+  # 修复前的实测：`.sha256`/`.gpg`/（plaintext 模式下的）.gz 全部落在调用方 umask 022
+  # 上 = 0644 世界可读，而 backupCrypto.sh 里那句「0600 权限由调用方的 umask 约束」
+  # 在那一刻已经不再成立。加密模式下明文归档只短暂存在，但那道"写完才删"的窗口
+  # 恰恰是提权到本机的进程最省事的读取时机。
+  if [ -n "${OLD_UMASK:-}" ]; then
+    umask "$OLD_UMASK"
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -121,7 +130,6 @@ CONFIG_FILE=$(mktemp "${TMPDIR:-/tmp}/mongodump-config.XXXXXX")
 # Linux 服务器 / 容器，那里两者都真实生效。
 chmod 600 "$CONFIG_FILE"
 printf 'uri: %s\n' "$MONGODB_URI" > "$CONFIG_FILE"
-umask "$OLD_UMASK"
 
 echo "Starting MongoDB backup at $(date)"
 

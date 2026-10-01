@@ -201,6 +201,26 @@ const usernamePrefixCondition = (prefix) => {
  */
 const withCollation = (query, collation) => (collation ? query.collation(collation) : query);
 
+/**
+ * 「这条已组装的查询是否必须挂 collation」——判据只有一份，消费方各取。
+ *
+ * 为什么从**条件对象**判断而不是从请求参数再推一次：列表链读 `buildAuditQuery` 返回的
+ * `usernamePrefix` 旗标，那个旗标与条件是同一个 `f.username` 在同一次调用里分别产出的，
+ * 结构上不可能不一致。但 xlsx 报表导出链的 query 由 `reportExportService` 自己组装
+ * （没有旗标可读），此前只能写 `type === 'audit' && username` ——那是**第二个来源推同一个
+ * 事实**：组装侧一改（例如 username 为空串时不再产出条件、或某类型新增 username 维度），
+ * 挂不挂 collation 的判断就悄悄失效，而失效形态是"漏记录"而非报错。
+ *
+ * 只认 `$gte` 为字符串的范围形态：等值条件在默认（二进制）collation 下就是精确匹配，
+ * 语义上没有正确性问题，不该为它付出"屏蔽全部非 collation 时间序索引"的代价。
+ */
+const hasUsernamePrefixCondition = (query) =>
+  query !== null &&
+  typeof query === 'object' &&
+  typeof query.username === 'object' &&
+  query.username !== null &&
+  typeof query.username.$gte === 'string';
+
 /** 组装 Mongo 条件（校验已在前一步完成，此处只做形状映射） */
 const assembleQuery = ({
   startDate,
@@ -281,6 +301,7 @@ module.exports = {
   // 供 auditQueryService / auditExportService 共用（同一份"按需挂 collation"语义，
   // 避免两处各写一份后漂移成"列表挂、导出不挂"）
   withCollation,
+  hasUsernamePrefixCondition,
   // 仅供测试直调：前缀边界的多字节码点 / 全最大码点退化路径无法经 HTTP 观察
   usernamePrefixCondition,
   nextUsernamePrefixUpperBound,

@@ -58,8 +58,31 @@ describe('业务时区收敛（P3-18）', () => {
     expect(winter.start.toISOString()).toBe('2026-01-01T08:00:00.000Z');
   });
 
-  test('缺省参数取业务时区的今天（与 businessDateParts 一致）', () => {
+  /**
+   * 原写法是 `expect(businessDayBounds().dateStr).toBe(businessDateParts().dateStr)`——
+   * **结构恒真**：两枚函数都落到同一枚 `dayParts` formatter 上，实现整体漂移
+   * （删掉非法日历日的前滚、把缺省时刻来源换成服务器本地时区）时两边同步移动，
+   * 相等关系不变 ⇒ 永远绿。而且真分叉也只在业务时区 00:00–08:00 那段窗口里偶然响。
+   *
+   * 现在两侧各自钉**人算出来的绝对值**，跨日界各取一个瞬间（上海 23:30 与次日 00:30），
+   * 相等那条降级为"方向相反的第二把锁"：绝对值防的是同步漂移，相等防的是分叉。
+   */
+  test('缺省参数的"今天"：两个瞬间各钉绝对值，再钉两侧同源', () => {
     const { businessDayBounds, businessDateParts } = load();
+    const INSTANTS = [
+      // 2026-08-26T15:30Z = 上海 2026-08-26 23:30（还在 26 日）
+      { now: '2026-08-26T15:30:00.000Z', dateStr: '2026-08-26', start: '2026-08-25T16:00:00.000Z' },
+      // 2026-08-26T16:30Z = 上海 2026-08-27 00:30（服务器还在 26 日，业务日已是 27 日）
+      { now: '2026-08-26T16:30:00.000Z', dateStr: '2026-08-27', start: '2026-08-26T16:00:00.000Z' },
+    ];
+    for (const t of INSTANTS) {
+      expect(businessDateParts(new Date(t.now)).dateStr).toBe(t.dateStr);
+      jest.useFakeTimers().setSystemTime(new Date(t.now));
+      const day = businessDayBounds();
+      jest.useRealTimers();
+      expect(day.dateStr).toBe(t.dateStr);
+      expect(day.start.toISOString()).toBe(t.start);
+    }
     expect(businessDayBounds().dateStr).toBe(businessDateParts().dateStr);
   });
 

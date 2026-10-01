@@ -131,9 +131,20 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 # 于是镜像里即便带了 migrations/ 也**没有执行迁移的工具**——
 # `npm run migrate:up` 在纯镜像部署机上依然不可用（文档承诺与镜像能力不一致）。
 #
-# 这里显式补装，且**版本号从 package.json 的 devDependencies 读取**：
+# 这里显式补装，且**版本号读自 package-lock.json 的解析结果**：
 # 在 Dockerfile 里再手抄一个版本号会形成第二个事实来源，
 # 升级依赖时漏改一处就变成「迁移用 A 版、开发用 B 版」。
+#
+# 为何不读 package.json 的 devDependencies 区间（此前的做法）：
+#   package.json 里是 `^14.0.7` 这样的**约束**，而 dev/CI 的 `npm ci` 装的是 lockfile 里
+#   **解析出的具体版本**。用 sed 抹掉 `^` 等于把"区间的下界"当成"实际版本"——
+#   只要 lockfile 被单独刷新（`npm update`、`npm audit fix --lockfile-only`、
+#   Dependabot 的 lock-only PR），镜像就会安装一个 CI 从未跑过、完整性锚也未覆盖的版本，
+#   而这条偏差不会有任何红灯：迁移工具与开发环境用的不是同一个包。
+#   读 lockfile 后，镜像里的版本与 `npm ci` 装的版本恒等。
+#   取不到值时必须**让构建失败**，而不是带着空串去执行 `npm i migrate-mongo@`：
+#   `$(… | sed …)` 的退出码来自管道右端，node 抛错会被吞掉 ⇒ 空版本交给 npm 后
+#   行为不确定（可能报错，也可能被解析成 `migrate-mongo@` 的最新标签）。
 #
 # --ignore-scripts 的安全判据与上面 runtime 的 `npm ci --omit=dev` 同源：
 # 该命令同样落在生产闭包内（--omit=dev），migrate-mongo 自身及其生产依赖树
@@ -145,10 +156,19 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 #     会让每次 npm ci 都为它解析依赖树、也扩大了生产依赖的安全扫描面；
 #   - --no-save 不改动 package.json / package-lock.json，
 #     依赖声明保持原样，需要撤销时只改本文件。
-# 代价：补装不走 lockfile 的完整性校验（npm 仍会校验 registry 的 integrity），
-# 版本上界由 package.json 的 `^` 约束决定，与开发环境同源。
-RUN MIGRATE_MONGO_VERSION="$(node -p "require('./package.json').devDependencies['migrate-mongo']" | sed 's/[^0-9.]//g')" && \
-    echo "migrate-mongo 版本（读自 package.json）: $MIGRATE_MONGO_VERSION" && \
+# 代价（如实记录，尚未消除）：--no-package-lock 让 npm **完全不读** lockfile，
+# 所以只有 migrate-mongo 自身的版本被锚住了，它的**传递依赖树仍是构建期现解析**，
+# 与 lockfile 锚（deployment/lockfile-anchor.json）不同源。要彻底闭合，需要二选一：
+#   a) 从 builder 阶段（`npm ci` 已按 lockfile 装好全部依赖）按 lockfile 的子树关系
+#      COPY migrate-mongo 及其依赖目录；
+#   b) 把它移进 dependencies，改走 `npm ci --omit=dev` 的锚定路径。
+# 两者都会改变镜像构建的依赖闭包，属结构性改动，未拍板前不做。
+RUN MIGRATE_MONGO_VERSION="$(node -p "require('./package-lock.json').packages['node_modules/migrate-mongo'].version" 2>/dev/null)" && \
+    if [ -z "$MIGRATE_MONGO_VERSION" ]; then \
+      echo '构建失败：无法从 package-lock.json 解析 migrate-mongo 的版本（依赖清单与镜像构建已脱钩，拒绝以不确定版本继续）' >&2; \
+      exit 1; \
+    fi && \
+    echo "migrate-mongo 版本（读自 package-lock.json）: $MIGRATE_MONGO_VERSION" && \
     npm i --no-save --no-package-lock --omit=dev --ignore-scripts "migrate-mongo@$MIGRATE_MONGO_VERSION" && \
     npm cache clean --force && \
     chown -R nodejs:nodejs node_modules

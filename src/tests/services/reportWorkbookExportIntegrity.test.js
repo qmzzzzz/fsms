@@ -17,6 +17,12 @@
  *
  * 每条断连用例都配了反向对照：把"任何 close 都算中断"当成修法，
  * 会让每一次**成功**导出都变成 500（Node 正常收尾时也发 close）。
+ *
+ * 缺口三（本轮补）：xlsx 文件名里的日期取 `new Date().toISOString().slice(0,10)`，
+ *   那是**裸 UTC 日**——既不是本次查询的 `?tz=`（前端传浏览器时区），也不是全仓声明的
+ *   业务时区（`BUSINESS_TIMEZONE`，仪表盘「今日」与报表日期边界都读它）。东八区
+ *   10-01 00:30 点导出的件，名字写着 09-30。导出的 xlsx 是要归档的取证件。
+ *   （CSV 侧 `auditExportService.js:50` 的文件名不带日期，因此不存在这一维。）
  */
 jest.mock('exceljs');
 
@@ -24,6 +30,7 @@ const { Workbook } = require('exceljs');
 const { Writable } = require('stream');
 const { streamExportRows, writeExportWorkbook } = require('../../services/reportWorkbookService');
 const { EXPORT_LIMIT } = require('../../services/reportExportService');
+const { businessDateParts } = require('../../constants/timezone');
 const FireAlarm = require('../../models/FireAlarm');
 const FireDevice = require('../../models/FireDevice');
 
@@ -197,6 +204,48 @@ describe('回填阶段消失的行必须计入 rowsLost 并说出来', () => {
     findSpy.mockRestore();
   });
 
+  test('计数腿过期时脚注不能把截断说成"正好数完"（total ≤ 上限 而 truncated=true）', async () => {
+    // 触发形态：计数腿先数到 LIMIT 条，取数腿读之前又新增一行 ⇒ 第 LIMIT+1 条是探针
+    // ⇒ truncated=true。原措辞无条件写 `命中总数 ${total}`，脚注于是变成
+    // "仅包含前 5000 行（命中总数 5000）"——文件明明被截断，文案却说命中数正好等于
+    // 文件那份切片的行数，被截掉的那批在合规材料里不存在。
+    const findSpy = jest
+      .spyOn(FireDevice, 'find')
+      .mockImplementation(
+        cursorConfig(Array.from({ length: LIMIT + 1 }, (_, i) => ({ deviceCode: `DEV-${i}` })))
+          .model.find
+      );
+    const { worksheet } = injectWorkbook(null);
+    const res = makeRes();
+
+    await writeExportWorkbook(res, { type: 'devices', query: {}, total: LIMIT });
+
+    const footer = String(worksheet.addRow.mock.calls.at(-1)[0][0]);
+    expect(footer).toContain(
+      `本文件仅包含前 ${LIMIT} 行（取数时命中 ≥ ${LIMIT + 1}（计数腿只数到 ${LIMIT}，两腿之间有新增））`
+    );
+    expect(footer).not.toContain(`命中总数 ${LIMIT}`);
+    findSpy.mockRestore();
+  });
+
+  test('计数腿缺位（total=null）退回下界措辞，且不得把 null 印进文件', async () => {
+    const findSpy = jest
+      .spyOn(FireDevice, 'find')
+      .mockImplementation(
+        cursorConfig(Array.from({ length: LIMIT + 1 }, (_, i) => ({ deviceCode: `DEV-${i}` })))
+          .model.find
+      );
+    const { worksheet } = injectWorkbook(null);
+    const res = makeRes();
+
+    await writeExportWorkbook(res, { type: 'devices', query: {} });
+
+    const footer = String(worksheet.addRow.mock.calls.at(-1)[0][0]);
+    expect(footer).toContain(`本文件仅包含前 ${LIMIT} 行（命中数 ≥ ${LIMIT + 1}）`);
+    expect(footer).not.toContain('null');
+    findSpy.mockRestore();
+  });
+
   test('两种不完整同时发生 ⇒ 脚注必须把两条都写出来', async () => {
     const ids = Array.from({ length: LIMIT + 1 }, (_, i) => `id-${i}`);
     // 回填只拿到前 LIMIT 个 id 里的 LIMIT-2 个 ⇒ 探针那条不算丢行
@@ -215,6 +264,34 @@ describe('回填阶段消失的行必须计入 rowsLost 并说出来', () => {
     expect(footer).toContain('2 行在导出期间被删除或不再匹配筛选条件');
     expect(footer).toContain('实际写入 4998 行');
     findSpy.mockRestore();
+  });
+
+  test('文件名里的日期是业务日，不是裸 UTC 日（第三个口径）', async () => {
+    // 东八区 10-01 00:30 = UTC 09-30 16:30：这一刻的「裸 UTC 日」与「业务日」必然不同。
+    const FIXED = new Date('2026-09-30T16:30:00.000Z');
+    const UTC_DATE = '2026-09-30';
+    const business = businessDateParts(FIXED).dateStr;
+    // 夹具前提自证：若 CI 把 TZ_BUSINESS 配成 UTC，这条用例就退化成对同一函数的签字——
+    // 让它在这里响，而不是悄悄绿。
+    expect(business).not.toBe(UTC_DATE);
+
+    jest.useFakeTimers().setSystemTime(FIXED);
+    try {
+      const findSpy = jest
+        .spyOn(FireDevice, 'find')
+        .mockImplementation(cursorConfig([{ deviceCode: 'DEV-1' }]).model.find);
+      injectWorkbook(null);
+      const res = makeRes();
+      await writeExportWorkbook(res, { type: 'devices', query: {}, total: 1 });
+
+      const disposition = res.setHeader.mock.calls.find((c) => c[0] === 'Content-Disposition')[1];
+      const name = decodeURIComponent(disposition.match(/filename="([^"]+)"/)[1]);
+      expect(name.endsWith(`_${business}.xlsx`)).toBe(true);
+      expect(name).not.toContain(UTC_DATE);
+      findSpy.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

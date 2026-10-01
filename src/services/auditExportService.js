@@ -67,6 +67,11 @@ const streamAuditExport = async (query, res, collation) => {
     AuditLog.find(query)
       .sort({ _id: 1 })
       .limit(EXPORT_HARD_LIMIT + 1)
+      // 排除清单取模型上那一份（-body -params -query -hmac，不含 -hash/-prevHash，
+      // 所以下面的链摘要照样读得到 doc.hash）。此前这条腿全字段取回：一次上限导出
+      // 会把 5 万条记录的 HMAC 与请求体读进进程，而 xlsx 那条腿早就在用清单了——
+      // 两条腿各写一遍排除口径，就是"控制点随时会漂"。
+      .select(AuditLog.RESPONSE_EXCLUDE)
       .lean(),
     collation
   ).cursor();

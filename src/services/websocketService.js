@@ -13,6 +13,9 @@ const {
 const sharedCache = require('./sharedCache');
 const { parseCookies, ACCESS_COOKIE_NAME } = require('../utils/cookie');
 const { isIPAllowed } = require('../utils/ipRange');
+// 客户端身份的「可信边界」尺与内网/回环判据都住在 utils/ipUtils：本模块只把它
+// 应用到 handshake 形态的输入上，不另写一份（F-B43，2026-10-01 第 5 轮）。
+const { isPrivateOrLoopback } = require('../utils/ipUtils');
 
 // 连接管理常量
 const MAX_CONNECTIONS = 1000;
@@ -53,6 +56,52 @@ const resolveHandshakeClientIP = (handshake, hops) => {
   if (addrs.length === 0) return null;
   const trust = Number.isInteger(hops) && hops > 0 ? hops : 0;
   return addrs[Math.max(0, addrs.length - 1 - trust)];
+};
+
+/**
+ * 安全裁决用的握手客户端 IP（F-B43，2026-10-01 第 5 轮）
+ *
+ * 缺陷形状（并行审计发现，独立复现成立）：HTTP 侧的 allowedIPs 判定在 auth.js 改用了
+ * `utils/ipUtils.js` 的 `clientIpForSecurityDecision`——可信边界内取 req.ip，边界外
+ * 退回**不可伪造的 socket 对端**；而 WS 侧仍直接用 `resolveHandshakeClientIP`
+ * （= express 的 req.ip）。于是同一条伪造 XFF 在两侧得出相反结论：HTTP 拒、WS 放行，
+ * 持有效令牌但真实地址不在允许范围内的人仍能从 WS 面进入 alarm / device-alert /
+ * role-management 房间。把一个"两侧同样弱"的均匀缺陷修成"HTTP 强、WS 弱"的不均匀
+ * 缺陷，比不修更危险——它会让读侧的收紧看起来已完成。
+ *
+ * 本函数不是新判据：它把 ipUtils 那把尺的三个输入换成 handshake 形态的同源值，
+ * 逐条对应 HTTP 侧 `isClientIpIdentityTrustworthy` 的三种可信形态：
+ *   trustProxyEnabled  ⇔  `req.app.get('trust proxy')`（WS 面的同一配置来源是
+ *                          TRUST_PROXY_HOPS，hops>0 即开；见 resolveTrustProxyHops）
+ *   xffPresent         ⇔  `req.get('x-forwarded-for') !== undefined`
+ *                          （用 === undefined 而非真值判断：**存在但为空**的头在
+ *                          express 里同样算"携带 XFF"，会走对端核查那一臂）
+ *   isPrivateOrLoopback(peer) ⇔ 同一函数，同一来源
+ * 退回侧的 `peer || declared` 也与 HTTP 的 `peer || req.ip` 同序，取不到对端时
+ * 保持既有形态（不让夹具/替身把裁决变成空地址）。
+ *
+ * 一致性用例见 src/tests/services/websocketAllowedIpTrustBoundary.test.js：
+ * 那里把**同一份输入**同时喂给 clientIpForSecurityDecision 与本函数，四种形态逐一
+ * 比对。`resolveHandshakeClientIP` 与真实 express 的等价性已由
+ * websocketAuthScope.test.js 用真实 HTTP 请求钉住，故本函数不再重复那一层。
+ *
+ * 注：**封禁（黑名单）判定不走这里**。HTTP 侧的 checkIPBlacklist 查询用的就是
+ * `req.ip || req.connection.remoteAddress`（security.js:590），所以 WS 的封禁闸继续
+ * 用 resolveHandshakeClientIP——两侧同址这个性质由 websocketHandshakeIpBan.test.js 钉。
+ *
+ * @param {object} handshake socket.handshake
+ * @param {number} hops 信任的代理跳数（来自 resolveTrustProxyHops）
+ * @returns {string|null} 可用作准入裁决的客户端地址；无任何可用地址时返回 null
+ */
+const resolveHandshakeIPForSecurityDecision = (handshake, hops) => {
+  const declared = resolveHandshakeClientIP(handshake, hops);
+  const peer = handshake?.address || '';
+  const trustProxyEnabled = Number.isInteger(hops) && hops > 0;
+  const xffHeader = handshake?.headers?.['x-forwarded-for'];
+  const identityTrustworthy =
+    !trustProxyEnabled || xffHeader === undefined || isPrivateOrLoopback(peer);
+  if (identityTrustworthy) return declared || peer || null;
+  return peer || declared || null;
 };
 
 /**
@@ -404,6 +453,13 @@ class WebSocketService {
    */
   async authenticateSocket(socket, token, authTimer) {
     try {
+      // 黑名单闸（2026-10-01 审计 D-1）：HTTP 侧 checkIPBlacklist 挂在 authenticate
+      // **之前**（app.js:174），WS 侧此前全文 0 处引用 IPBlacklist ⇒ 被自动升级封禁
+      // 或被人工拉黑的 IP，只要手里还有一枚未失效令牌就能建立推送通道并订阅
+      // alarm / device-alert / role-management，封禁对它只关上了 HTTP 那扇门。
+      // 放在令牌校验之前，与 HTTP 侧同序：被禁 IP 一律不消耗后续查库与解密开销。
+      if (await this._assertHandshakeIpNotBanned(socket)) return false;
+
       const jwt = require('jsonwebtoken');
       // 限制算法防止 alg:none 攻击，使用统一配置而非直接读环境变量
       const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
@@ -562,8 +618,10 @@ class WebSocketService {
   /**
    * 握手 IP 访问范围校验（P0-2 修复，2026-09-17）
    *
-   * 与 middleware/auth.js 的 assertIpAllowed（auth.js:297-324）同源：
+   * 与 middleware/auth.js 的 assertIpAllowed 同源（F-B43 起包含可信边界那一半）：
    * 规则为空时不限制；配置了规则但来源 IP 解析不出或不在范围内 → 拒绝。
+   * 地址取 `resolveHandshakeIPForSecurityDecision`，与 HTTP 侧的
+   * `clientIpForSecurityDecision` 逐条对应——两侧若各取一种地址，收紧只生效一半。
    * isIPAllowed 对「配置不可用」（超长文本、超量条目、无法解析的片段）本身
    * 即 fail-closed，此处不再二次包装，避免两处判定漂移。
    *
@@ -577,7 +635,10 @@ class WebSocketService {
    */
   _assertHandshakeIpAllowed(socket, freshUser) {
     if (!freshUser.allowedIPs) return false;
-    const clientIP = resolveHandshakeClientIP(socket.handshake, resolveTrustProxyHops());
+    const clientIP = resolveHandshakeIPForSecurityDecision(
+      socket.handshake,
+      resolveTrustProxyHops()
+    );
     const { allowed, reason } = isIPAllowed(clientIP, freshUser.allowedIPs);
     if (allowed) return false;
     logger.warn('WebSocket 认证失败（IP 访问范围校验拒绝）', {
@@ -589,6 +650,160 @@ class WebSocketService {
     socket.emit('auth-error', { message: '当前网络不在允许的 IP 范围内' });
     socket.disconnect(true);
     return true;
+  }
+
+  /**
+   * 握手 IP 黑名单校验（2026-10-01 审计 D-1）
+   *
+   * 缺陷：`checkIPBlacklist`（middleware/security.js）是 Express 中间件，而 socket.io
+   * 挂在同一个 http server 上**自成一个入口**，不经 Express 中间件链。于是 IP 一旦被
+   * 分级自动封禁（securityAlert / rateLimitEscalation 那两条升级链）或被管理员手工拉黑，
+   * 该地址在 HTTP 侧吃 403 IP_BLOCKED，在 WS 侧却照常建连——它仍能以手中未失效的令牌
+   * 订阅 alarm / device-alert / role-management 等实时房间。封禁是"处置"，
+   * 只关一半的门等于没有关。
+   *
+   * 判据与 HTTP 侧同源，逐条对齐：
+   *  - 地址取自 resolveHandshakeClientIP(handshake, resolveTrustProxyHops())——
+   *    这是本仓已用真实 express 逐条比对过、与 req.ip 恒等的那个实现
+   *    （见 websocketAuthScope.test.js / websocketTrustProxyHopsParity.test.js）；
+   *    用别的取法（例如只看 handshake.address）会让"HTTP 侧封的 IP"与"WS 侧查的 IP"
+   *    不是同一个值，闸形同虚设。
+   *  - 白名单优先：与 checkIPBlacklist 一致，命中白名单即豁免黑名单。
+   *  - 取不到地址 / 名单查询抛错 ⇒ fail-open 放行，与 HTTP 侧同口径
+   *    （宁可不拦，也不因一次 DB 抖动把全部实时推送踢下线）；但 fail-open 必须留
+   *    显式可观测信号（评价报告 #7 的同一条纪律），故复用 HTTP 侧的
+   *    ip_blacklist_failopen 计数——同一根因、同一条时间序列，不新造恒真信号。
+   *
+   * 已闭合的部分（2026-10-01 第 4 轮补齐）：本闸只在建立连接时生效，而 HTTP 侧是
+   * 逐请求复查——一条已建立的 socket 是长连接，封禁发生在建连之后时它会存活到自然断开。
+   * 该运行期面由 `runCleanupSweep` → `_sweepBannedIps` 接上（同一个 IP 推导、
+   * 同一份名单快照、同一条 fail-open 口径），两侧共用 resolveHandshakeClientIP，
+   * 不存在"握手看的地址"与"清扫看的地址"两套判据。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @returns {Promise<boolean>} true 表示已拒绝并断开连接
+   */
+  async _assertHandshakeIpNotBanned(socket) {
+    const clientIP = resolveHandshakeClientIP(socket.handshake, resolveTrustProxyHops());
+    if (!clientIP) return false;
+
+    const IPBlacklist = require('../models/IPBlacklist');
+    let whitelisted = false;
+    let blocked = false;
+    try {
+      // 与 HTTP 侧同样的并行查询：两者共用模型层的名单快照，一次加载即可两次匹配
+      [whitelisted, blocked] = await Promise.all([
+        IPBlacklist.isWhitelisted(clientIP),
+        IPBlacklist.isBlocked(clientIP),
+      ]);
+    } catch (err) {
+      logger.error(`WebSocket 握手名单查询失败，fail-open 放行：${socket.id} ${err.message}`);
+      try {
+        require('../utils/metrics').incSecurityAlert('ip_blacklist_failopen', 'high');
+      } catch (_) {
+        /* 指标端不可用不影响放行主流程 */
+      }
+      return false;
+    }
+
+    if (whitelisted || !blocked) return false;
+    logger.warn('WebSocket 认证失败（IP 命中黑名单）', {
+      ip: clientIP,
+      socketId: socket.id,
+    });
+    socket.emit('auth-error', { message: '当前网络已被封禁' });
+    socket.disconnect(true);
+    return true;
+  }
+
+  /**
+   * 运行期 IP 黑名单复查（2026-10-01 第 4 轮，闭合 _assertHandshakeIpNotBanned 的会话面残留）
+   *
+   * HTTP 侧的 checkIPBlacklist 是逐请求复查，长连接没有"下一个请求"：IP 在建连后被
+   * 拉黑时，该 socket 会带着已通过的握手校验一直收实时推送到自然断开。本方法把同一道
+   * 闸挂进周期清扫，判据与握手面**完全同源**——同一个 resolveHandshakeClientIP、
+   * 同一份名单快照（白名单优先）、同一条 fail-open 口径与同一个 ip_blacklist_failopen
+   * 计数。任何一处与握手侧分叉都会变成「握手拦得住、清扫拦不住」的第二扇门。
+   *
+   * 与握手面的两处**刻意**差异：
+   *  1. 取不到地址的连接不参与判定、也**不**断开：握手期"解析不出地址"意味着这次认证
+   *     本身可疑（还没有任何信任给过它），清扫期断开一个已在收数据的连接则是处置。
+   *     无地址即无从判定封禁，断开它只会误伤。
+   *  2. 按 IP 去重后批量并发：同一 NAT 出口下的多条连接只打一次库。
+   *     L-29 的教训（for...await 逐连接打库，1000 连接串行 875.92ms）在这里同样成立。
+   *
+   * fail-open 计数**每轮最多一次**（而非每个失败地址一次）：一次名单库抖动会让全部
+   * 待查地址同时失败，逐地址计数把一个根因放大成 N 倍的告警量，时间序列失去意义。
+   *
+   * @param {import('socket.io').Socket[]} sockets 本轮待复查的已认证连接
+   * @returns {Promise<{alive: import('socket.io').Socket[], kicked: number}>}
+   *          alive = 未被封禁、可继续参与后续授权复查的连接（保持入参顺序）
+   */
+  async _sweepBannedIps(sockets) {
+    const hops = resolveTrustProxyHops();
+    const ipById = new Map();
+    for (const socket of sockets) {
+      const ip = resolveHandshakeClientIP(socket.handshake, hops);
+      if (ip) ipById.set(socket.id, ip);
+    }
+    // 无任何可判定地址时连模型都不加载：纯内存快速返回，
+    // 也让"测试替身没有 handshake"与"生产环境取不到地址"走同一条路径。
+    if (ipById.size === 0) return { alive: sockets, kicked: 0 };
+
+    const IPBlacklist = require('../models/IPBlacklist');
+    const verdicts = await Promise.all(
+      [...new Set(ipById.values())].map(async (ip) => {
+        try {
+          const [whitelisted, blocked] = await Promise.all([
+            IPBlacklist.isWhitelisted(ip),
+            IPBlacklist.isBlocked(ip),
+          ]);
+          return { ip, banned: !whitelisted && blocked, failed: false };
+        } catch (err) {
+          logger.error(
+            `WebSocket 周期名单复查失败，该地址本轮 fail-open 放行：${ip} ${err.message}`
+          );
+          return { ip, banned: false, failed: true };
+        }
+      })
+    );
+    if (verdicts.some((v) => v.failed)) {
+      try {
+        require('../utils/metrics').incSecurityAlert('ip_blacklist_failopen', 'high');
+      } catch (_) {
+        /* 指标端不可用不影响放行主流程 */
+      }
+    }
+    const bannedByIp = new Map(verdicts.map((v) => [v.ip, v.banned]));
+
+    const alive = [];
+    let kicked = 0;
+    for (const socket of sockets) {
+      const ip = ipById.get(socket.id);
+      if (!ip || !bannedByIp.get(ip)) {
+        alive.push(socket);
+        continue;
+      }
+      kicked++;
+      logger.warn('WebSocket 运行期封禁：建连后该地址被拉黑，主动断开', {
+        socketId: socket.id,
+        userId: socket.userId ? String(socket.userId) : undefined,
+        ip,
+      });
+      // 处置与通知解耦：auth-error 发送失败不得推迟断开（本仓多处共用的纪律），
+      // 两条各自兜底而不是共用一个 try。
+      try {
+        socket.emit('auth-error', { message: '当前网络已被封禁' });
+      } catch (_) {
+        /* 通知失败不影响遏制 */
+      }
+      try {
+        socket.disconnect(true);
+      } catch (_) {
+        /* 客户端可能已断开：遏制意图已达成，且不能中断其余连接的复查 */
+      }
+    }
+    return { alive, kicked };
   }
 
   /**
@@ -730,6 +945,9 @@ class WebSocketService {
    * 不会被主动移出，可继续接收 role-updated/permissions-updated 广播直至重连——
    * 破坏「停权即失效」契约。本清扫对每个已认证连接周期重查
    * status/tokenVersion/角色，命中失效即断开（复用 revalidateSocket 的 kick 路径）。
+   *
+   * 第 4 轮起本清扫还承担**运行期 IP 封禁**复查（_sweepBannedIps）：与上面的授权
+   * 复查是同一处挂载点、同一条「握手拦过就不再看」的补集，理由见该方法头注释。
    */
   setupConnectionCleanup() {
     this._cleanupTimer = setInterval(() => {
@@ -746,8 +964,14 @@ class WebSocketService {
   }
 
   /**
-   * 执行一轮清扫（清理失效记录 + 已认证连接授权复查）
+   * 执行一轮清扫（清理失效记录 + 运行期封禁复查 + 已认证连接授权复查）
    * 独立成方法便于测试直接驱动（不必等 30s 定时器）
+   *
+   * 三趟顺序固定，每趟的早退互不影响：
+   *  1. 纯内存回收 + 收集待查清单（不碰库）
+   *  1.5. 名单复查（被拉黑的连接当场断开，不再进入授权复查）
+   *  2. 单次 $in 批量授权复查
+   * 名单复查排在授权批量查询之前，是为了让 User.find 抖动那一轮仍能完成遏制。
    */
   async runCleanupSweep() {
     let cleanedCount = 0;
@@ -777,6 +1001,19 @@ class WebSocketService {
       return;
     }
 
+    // 第 1.5 趟：运行期封禁复查。放在**授权批量查询之前**是刻意的——
+    // User.find 抖动时下面会整轮早退（保留连接等下一轮），若把名单复查排在它后面，
+    // 一次与封禁无关的用户表故障就会顺带推迟遏制。判定按 IP 去重、批量并发
+    // （L-29 的教训：不得 for...await 逐连接打库）。
+    const banPass = await this._sweepBannedIps(pending);
+    kickedCount += banPass.kicked;
+    const reviewable = banPass.alive;
+
+    if (reviewable.length === 0) {
+      this._logSweepResult(cleanedCount, kickedCount);
+      return;
+    }
+
     // 第二趟：一次批量查询取回全部待复查用户，再逐连接判定。
     //
     // L-29 修复：原实现是 `for ... await this.revalidateSocket(socket)`，
@@ -787,7 +1024,7 @@ class WebSocketService {
     // 明细见 deliverables/性能实测基线-2026-09-16.json。
     //
     // 去重：同一用户的多个标签页/设备会产生多个 socket，只需查一次。
-    const uniqueUserIds = [...new Set(pending.map((s) => String(s.userId)))];
+    const uniqueUserIds = [...new Set(reviewable.map((s) => String(s.userId)))];
     let freshByUser = new Map();
     let dbUnavailable = false;
     try {
@@ -804,12 +1041,12 @@ class WebSocketService {
     }
 
     if (dbUnavailable) {
-      logger.warn(`WebSocket 周期复查暂不可用，保留 ${pending.length} 个连接等待下轮`);
+      logger.warn(`WebSocket 周期复查暂不可用，保留 ${reviewable.length} 个连接等待下轮`);
       this._logSweepResult(cleanedCount, kickedCount);
       return;
     }
 
-    for (const socket of pending) {
+    for (const socket of reviewable) {
       const fresh = freshByUser.get(String(socket.userId)) || null;
       const result = this._applyRevalidation(socket, fresh);
       if (!result.ok && !socket.connected) {
@@ -1032,3 +1269,6 @@ WebSocketService.resolveHandshakeClientIP = resolveHandshakeClientIP;
 // hops」。既有的一致性用例把 hops 作为入参传给 resolveHandshakeClientIP，等于跳过了
 // hops 的来源——正是本次上限漏判能藏住的原因。
 WebSocketService.resolveTrustProxyHops = resolveTrustProxyHops;
+// F-B43 配套：导出「安全裁决形态」的握手取址，供跨通道一致性用例与 HTTP 侧的
+// clientIpForSecurityDecision 逐形态比对（见 websocketAllowedIpTrustBoundary.test.js）。
+WebSocketService.resolveHandshakeIPForSecurityDecision = resolveHandshakeIPForSecurityDecision;

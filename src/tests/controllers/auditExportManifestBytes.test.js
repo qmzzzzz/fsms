@@ -97,6 +97,9 @@ const makeCursorChain = (rows) => {
     close,
     sort: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
+    // 取数腿带 .select(RESPONSE_EXCLUDE)（不把 hmac/body/params/query 读进进程），
+    // 夹具必须能接住这一环，否则链在这里断掉，报错落在完全无关的字节断言上。
+    select: jest.fn().mockReturnThis(),
     lean: jest.fn().mockReturnThis(),
     cursor: jest.fn(() => ({
       close,

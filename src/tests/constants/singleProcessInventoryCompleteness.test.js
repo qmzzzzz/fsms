@@ -81,6 +81,10 @@ const EXEMPT_MODULES = {
   'utils/metrics.js': 'Prometheus 指标注册表，按设计逐实例各一份',
   'utils/metricsAuditDrops.js': 'Prometheus 指标注册表，按设计逐实例各一份',
   'utils/mongoFailureAttribution.js': '基础设施错误名/码词表，静态字面量 Set',
+  // DEGENERATE_KEY_LITERALS：「哪些字符串算退化密钥」的判据词表，与 config/validate.js、
+  // utils/mongoFailureAttribution.js 同构。登记进清单会让启动期校验对运维说「多实例部署时
+  // PII 加密会静默失效」——那是假警报：词表内容由源码字面量决定，逐进程恒同，不存在不一致。
+  'utils/piiCrypto.js': '静态字面量 Set（退化密钥字面量词表），只读、内容全由源码决定',
 };
 
 /** 递归收集 src 下全部非测试 .js 文件 */

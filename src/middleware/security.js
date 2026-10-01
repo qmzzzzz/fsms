@@ -12,10 +12,8 @@ const {
   stripControlCharsDeep,
   matchesAnyPathPrefix,
 } = require('../utils/helpers');
-const { normalizeIP } = require('../utils/ipUtils');
-// 白名单豁免标记的可信边界判定复用 metricsAuth 的内网/回环判据（同一把尺子）：
-// metricsAuth 只依赖 ipUtils/apiResponse/logger，与本模块无加载环
-const { isPrivateOrLoopback } = require('./metricsAuth');
+// 白名单豁免标记的可信边界判定已收口到 ipUtils（认证侧 allowedIPs 与这里共用同一把尺）
+const { normalizeIP, isClientIpIdentityTrustworthy } = require('../utils/ipUtils');
 const { auditPath, deriveAuditMeta, ROUTE_CATEGORY_MAP } = require('../utils/auditMeta');
 // T-1：顶层引入——recordEarlyRejection 经 setImmediate 异步写审计，回调可能在
 // 测试环境销毁后执行，惰性 require 会抛「import after torn down」
@@ -484,11 +482,13 @@ const ipBlockCacheCleanupTimer = setInterval(
 ipBlockCacheCleanupTimer.unref?.();
 
 /**
- * 统一缓存键：归一化后存取，使 ::ffff:1.2.3.4 与 1.2.3.4 命中同一条目
+ * 统一缓存键：归一化后存取，使 ::ffff:1.2.3.4 与 1.2.3.4 命中同一条目。
+ * 归一化失败并到一个共享占位键而不是回退原文——原文可能是请求方写的 XFF，
+ * 逐请求换文本会把本缓存撑成无上限的键集（口径同 rateLimit.js）。
  * @param {string} ip 原始 IP
  * @returns {string} 缓存键
  */
-const ipCacheKey = (ip) => normalizeIP(ip) || String(ip);
+const ipCacheKey = (ip) => normalizeIP(ip) || 'unknown';
 
 /**
  * 失效降级缓存
@@ -571,21 +571,20 @@ const recordEarlyRejection = (req, meta) => {
  * 经 nginx 的正常流量命中 3) ⇒ 办公网 IP 白名单功能不受影响；
  * 公网直连 + 伪造 XFF 落在 3) 的拒绝侧 ⇒ 三重豁免不再可用。
  *
- * 黑名单判定本身不在此门控范围：它消费 clientIP（经代理认定的客户端身份），
- * 伪造 XFF 本就能换成任意未封禁 IP——那是 req.ip 语义的既有边界，由网络层
- * （仅 nginx 可达应用端口）兜底，与豁免标记的收紧是两件事。
+ * 判据本体自 2026-10-01 移到 utils/ipUtils.js 的 `isClientIpIdentityTrustworthy`
+ * （理由见那里的头注释：认证侧的 allowedIPs 与豁免发放是同一条伪造链的两侧，必须
+ * 共用一个事实来源）。本文件保留同名再导出，消费方与既有断言口径不变。
+ *
+ * 顺带更正本注释的一处旧推断：原先写「黑名单/封禁判定由网络层兜底（仅 nginx 可达
+ * 应用端口）」——这个前提在随仓交付的 compose 拓扑里不成立：`docker-compose.yml`
+ * 把应用端口发布为 `127.0.0.1:3000:3000`，同一容器网络内的任意服务都能直连 `app:3000`，
+ * 其对端地址恰是 RFC1918 ⇒ 命中上面的可信形态 3) ⇒ 单个 XFF 即可把处置目标换成任意
+ * 地址。惩罚侧（自动封禁的归属判定）因此不能再靠"网络层兜底"这句话免责。
  *
  * @param {import('express').Request} req
  * @returns {boolean} true=可发放豁免标记
  */
-const isWhitelistExemptionTrustworthy = (req) => {
-  const trustProxy =
-    req.app && typeof req.app.get === 'function' ? req.app.get('trust proxy') : false;
-  if (!trustProxy) return true;
-  if (req.get('x-forwarded-for') === undefined) return true;
-  const peer = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
-  return isPrivateOrLoopback(peer);
-};
+const isWhitelistExemptionTrustworthy = (req) => isClientIpIdentityTrustworthy(req);
 
 const checkIPBlacklist = async (req, res, next) => {
   const clientIP = req.ip || req.connection.remoteAddress;

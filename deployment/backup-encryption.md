@@ -54,8 +54,12 @@ gpg --armor --export "ops@example.net" > fsms-backup.pub
 ## 恢复演练（每季度至少一次，与 rollback-drill.md 联动）
 
 ```bash
-# 1. 从异地取回密文 + 校验和，先验完整性
-sha256sum --check backups/fire-safety-backup-<时间点>.gz.gpg.sha256
+# 1. 从异地取回密文 + 校验和（两个文件都要取回）
+#    restore-mongo.sh 会在解密与写库**之前**自己比对 <归档>.sha256，
+#    对不上直接终止；缺 sidecar 同样硬失败（除非显式 RESTORE_SKIP_CHECKSUM=true）。
+#    人工复核可用，但注意 `sha256sum --check` 认的是备份宿主机上的路径字符串，
+#    异地副本改名/换目录后会报 no such file——脚本比的是哈希值，不受影响。
+sha256sum --check backups/fire-safety-backup-<时间点>.gz.gpg.sha256   # 可选
 
 # 2. 在**持有私钥**的机器上恢复（restore-mongo.sh 按 .gz.gpg 后缀自动解密）
 MONGODB_URI='<目标连接串>' ./scripts/restore-mongo.sh backups/fire-safety-backup-<时间点>.gz.gpg

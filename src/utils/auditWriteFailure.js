@@ -23,13 +23,27 @@
 const logger = require('./logger');
 
 /**
+ * 被 catch 的东西**不保证是 Error**：`Promise.reject()`（undefined）、
+ * `throw 'boom'`（字符串）、driver 在缓冲超时里 reject 裸对象都见过。
+ * 原先两处直接写 `${err.message}`，于是在"记账"这一步自己抛 TypeError——
+ * 而这里是旁路可观测性代码，它一炸就正好毁掉本模块存在的理由：
+ *   - `onAuditWriteFailure` 的返回值是登录路径上 `await` 的 `.catch()` 处理器，
+ *     处理器抛错 = 一个新的 rejection = 客户端拿到 500 而不是 401；
+ *   - `guardDetection` 的文档承诺"永不 reject"（见其 @returns），处理器抛错
+ *     直接违背该契约，而调用方全是 `.catch(() => {})` ⇒ TypeError 又被吞掉，
+ *     结果是"检测失效 + 零痕迹"，与不修时同形。
+ * 取本仓库既有写法（index.js:441、loggerFlush.js:216 errText）。
+ */
+const errText = (err) => (err && err.message ? err.message : err);
+
+/**
  * 生成 `.catch()` 处理器
  * @param {string} auditAction 便于检索的审计动作标识（非 AuditLog 的 action 枚举值）
  * @param {object} [req] 可选：用于取操作者用户名
  * @returns {(err: Error) => void}
  */
 const onAuditWriteFailure = (auditAction, req) => (err) => {
-  logger.error(`{审计写入失败}：${err.message}`, {
+  logger.error(`{审计写入失败}：${errText(err)}`, {
     auditAction,
     operator: req?.user?.username,
   });
@@ -96,7 +110,15 @@ const guardDetection =
     try {
       await detect(...args);
     } catch (err) {
-      logger.error(`${label}失败（本轮不检测）: ${err.message}`);
+      logger.error(`${label}失败（本轮不检测）: ${errText(err)}`);
+      try {
+        // 与 onAuditWriteFailure 同一条纪律的两个落点，两边都得"不静默"到同一档：
+        // 只有日志的话，故障期检测器整体失效要人去翻日志才发现，而这一路失效的
+        // 是自动封禁与权限滥用告警——监控面必须有对应的那一格。
+        require('./metrics').incSecurityAlert('security_detection_failed', 'medium');
+      } catch (_) {
+        /* 指标端不可用时仅保留日志（这里绝不能再抛：见本函数 @returns 的"永不 reject"） */
+      }
     }
   };
 

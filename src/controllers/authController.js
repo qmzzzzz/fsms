@@ -15,6 +15,10 @@ const { safeFieldErrors } = require('../utils/validationRules');
 const config = require('../config');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
+// 审计写入失败的兜底档位（error 日志 + audit_write_failed 指标）——见 utils/auditWriteFailure.js。
+// `AuditLog.record` 自带兜底，但 `recordSensitiveAction` 直接 `return this.create(...)`（无 catch），
+// 所以它的调用方必须自己接住 rejection，并且接到同一档。
+const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
 const { asyncHandler } = require('../middleware/errorHandler');
 // 令牌提取的唯一实现（authenticate 用的就是它）；登出必须与认证同源，见 logout 注释
 const { extractAccessToken } = require('../middleware/auth');
@@ -381,7 +385,7 @@ const changePassword = asyncHandler(async (req, res) => {
         'auth',
         req,
         res
-      ).catch((e) => logger.warn(`改密吊销失败审计落库失败：${e.message}`));
+      ).catch(onAuditWriteFailure('password_changed_revoke_failed', req));
       return ApiResponse.codeError(res, 'PASSWORD_CHANGED_REVOKE_FAILED');
     }
     case 'OK':
@@ -398,7 +402,7 @@ const changePassword = asyncHandler(async (req, res) => {
     'auth',
     req,
     res
-  ).catch((e) => logger.warn(`改密审计落库失败：${e.message}`));
+  ).catch(onAuditWriteFailure('password_changed', req));
 
   return ApiResponse.success(res, null, '密码修改成功');
 });
@@ -619,7 +623,7 @@ const revokeSession = asyncHandler(async (req, res) => {
     'auth',
     req,
     res
-  ).catch((e) => logger.warn(`会话吊销审计落库失败：${e.message}`));
+  ).catch(onAuditWriteFailure('session_revoked', req));
 
   return ApiResponse.success(res, { sid }, '该设备的登录已终止');
 });
@@ -645,7 +649,7 @@ const revokeOtherSessions = asyncHandler(async (req, res) => {
     'auth',
     req,
     res
-  ).catch((e) => logger.warn(`批量会话吊销审计落库失败：${e.message}`));
+  ).catch(onAuditWriteFailure('session_revoked_others', req));
 
   return ApiResponse.success(res, { revokedCount: count }, `已终止 ${count} 台其他设备的登录`);
 });

@@ -19,13 +19,19 @@ const { isStaticSurfaceRequest } = require('./staticFrontend');
  *
  * `::ffff:1.2.3.4` 与 `1.2.3.4` 在名单侧是同一地址（IPBlacklist 入库前归一化），
  * 限流侧若按原文组键就是两个桶——同一来源拿到两份配额，标称阈值名存实亡；
- * IPv6 的等价写法（压缩/展开）同理。这里统一走 ipUtils.normalizeIP 与名单侧
- * 同一把尺。归一化失败的歧义写法（八进制/十六进制等）回退原文：该形态自成一桶，
- * 不与任何他人共享，fail-closed 语义与改前一致（只是不再翻倍）。
+ * IPv6 的等价写法（压缩/展开）同理。这里统一走 ipUtils.normalizeIP 与名单侧同一把尺。
+ *
+ * 归一化失败**不再回退原文**（2026-10-01 修正原推断）。原注释写"回退原文：该形态
+ * 自成一桶，不与任何他人共享，fail-closed 语义不变"——这个推断在 trust proxy 开着时
+ * 是反的：req.ip 取自 X-Forwarded-For，而那个头是请求方写的。实测
+ * `X-Forwarded-For: garbage-not-an-ip` 时 proxy-addr 原样透传该文本，于是"自成一桶"
+ * 等于"每请求换一个全新桶"：general/ip/captcha/register/login 五套 IP 配额全部刷不完，
+ * 升级封禁侧（同一把尺）计数永不累积 ⇒ 封禁阶梯不可达。对**请求方可控**的输入，
+ * 失败封闭只能是"并进一个共享占位键"：换不来新配额，也污染不到正常流量。
  * @param {unknown} ip req.ip
  * @returns {string} 归一化后的限流键 IP 部分
  */
-const normalizeRateLimitIp = (ip) => normalizeIP(ip) || String(ip ?? 'unknown');
+const normalizeRateLimitIp = (ip) => normalizeIP(ip) || 'unknown';
 
 /**
  * 限流触发 → 升级服务（CC 防护闭环）的统一挂钩

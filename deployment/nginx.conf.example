@@ -23,6 +23,9 @@ server {
     listen 80;
     listen [::]:80;
     server_name your-domain.example;
+    # 不对外暴露 nginx 版本（403/404 错误页与 Server 头都会带）。
+    # 与后端 app.disable('x-powered-by') 同一口径：不把栈信息白送给指纹匹配者。
+    server_tokens off;
     # 跳转目标写字面域名，不用 $host：$host 取自请求的 Host 头，而本块是 :80 的
     # 默认 server（唯一声明该端口的块自动成为默认），因此任何解析到本机的域名都会被
     # 它接管并发出 `301 https://evil.com/...`——开放重定向，可直接用于钓鱼；
@@ -36,6 +39,7 @@ server {
     listen [::]:443 ssl;
     http2 on;
     server_name your-domain.example;
+    server_tokens off;
 
     # ===== TLS 证书（使用受信任 CA 签发，勿用自签名） =====
     ssl_certificate     /etc/nginx/certs/your-domain.example.fullchain.pem;
@@ -158,7 +162,7 @@ server {
     # 少传时该通道上所有客户端在应用侧塌缩成同一个 IP（F-10 的反代版本），
     # 限流与封禁对其失效，审计里的来源 IP 也是假的。
     #
-    # 一致性由 src/tests/deploy/zzqA_nginxProxyContract.test.js 把守（新增 proxy 块漏头即红）。
+    # 一致性由 src/tests/deploy/nginxProxyContract.test.js 把守（新增 proxy 块漏头即红）。
 
     # ===== Prometheus /metrics（无鉴权端点，必须限制抓取来源） =====
     # 应用侧该端点不带认证（设计给 Prometheus 抓取），暴露公网等于泄露

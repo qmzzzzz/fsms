@@ -8,6 +8,11 @@
  * 否则未覆盖的分类会在 insertMany({ordered:false}) 时被 ValidationError 静默丢弃。
  */
 
+// 控制字符/孤立代理项的清洗判据只有一份（utils/helpers.js 的 stripControlChars）：
+// 审计的其它请求方可控文本（userAgent、body.reason、errorMessage）都走它，ip 不能例外。
+// helpers 自身只依赖 constants/breachedPasswords 与（惰性）constants/timezone，无回环。
+const { stripControlChars } = require('../utils/helpers');
+
 const AUDIT_CATEGORIES = [
   'auth',
   'user',
@@ -78,6 +83,141 @@ const AUDIT_HTTP_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OP
  * 触发它只需一条 `curl -X FOO`：app 级审计中间件在路由匹配之前就跑，收得下任意动词。
  */
 const auditMethodOrUndefined = (value) => (AUDIT_HTTP_METHODS.includes(value) ? value : undefined);
+
+/**
+ * 审计文本维的落库闸工厂：清洗 + 截断，空文本降级为「不记这一维」。
+ *
+ * 为什么复用 `stripControlChars` 而不是在这里写一条正则：它同时做了两件本族字段必须做的事，
+ * 而自己写一定会漏——控制字符**替换成空格**而非删除（删除会把两段文本粘成一个看似合法的
+ * token，见 tests/services/auditSchemaCastRewriters.test.js 钉住的 `ip` 闸形状），以及
+ * 截断**之后**把孤立代理项换成 U+FFFD（按 UTF-16 码元
+ * slice 的奇数边界会劈开一个代理对，落盘时驱动改写成 U+FFFD，而哈希是内存里算的
+ * ⇒ 又是「内存形态 ≠ 落库形态」的永久假篡改，见 tests/utils/auditChainSurrogateArtifact.test.js）。
+ *
+ * 为什么额外补一次 `trimEnd()`——**幂等**是这一族闸的硬约束，不是洁癖：
+ * 批量路径是 `chainBatch` 跑一次（算哈希前）→ `insertMany` 铸造时 schema 的 `set` 再跑一次，
+ * 两次结果不同就会让「被哈希的形态」≠「落库的形态」。实测形状：`stripControlChars` 的
+ * 顺序是「替换 → trim → 截断」，截断点恰好落在一个被替换出来的空格上时，第二次调用的
+ * trim 会再剪掉一个字符 ⇒ 64 的哈希对上 63 的存储。`trimEnd()` 把这一形状在第一次就消掉。
+ *
+ * 逐条路径（`AuditLog.create`）先铸造后算哈希，天然同源；批量路径先对普通对象算哈希，
+ * 所以每个用本工厂产出的闸都必须**在 auditChain.js 里镜像一次**——这条约束由
+ * tests/services/auditSchemaCastRewriters.test.js 的注册表钉住，新增闸必须同步登记。
+ *
+ * 非字符串一律 undefined：`ip`/`userAgent` 来自请求方，`{}`、`[]`、数字都会被 Mongoose
+ * 强制转成字符串存进库里（`toString` 的结果既不是"没这个维度"也不是可查询的形态）。
+ */
+const makeAuditTextFieldGate = (maxLength) => (value) => {
+  if (typeof value !== 'string') return undefined;
+  const cleaned = stripControlChars(value, maxLength).trimEnd();
+  return cleaned === '' ? undefined : cleaned;
+};
+
+// 审计 ip 维的上界。IPv6 完整文本最长 45 字符（IPv4 为 15），64 已含余量，
+// 超出这个长度的"地址"必然来自请求方（X-Forwarded-For 是被 express 原样采纳的文本）。
+const AUDIT_IP_MAX_LENGTH = 64;
+
+/**
+ * ip 的落库闸：由 `makeAuditTextFieldGate(AUDIT_IP_MAX_LENGTH)` 生成——清洗、截断、幂等、
+ * 非字符串一律降级都住在工厂里，这里只提供上界；空文本降级为「不记 ip」。
+ *
+ * 与 `auditMethodOrUndefined` 同一个家族，也因此**同样必须在算哈希之前镜像**（见 auditChain.js）。
+ * 这里不是"顺手整理字符串"：ip 直接来自 X-Forwarded-For 这类文本，express 不校验其形态，
+ * 而在闸出现之前它既没有上界也没有走 `stripControlChars`（`path`/`action` 由 auditMeta
+ * 截到 512/96，`method` 由 schema 的 set 降级）。
+ *
+ * 三条站得住的理由，按实测排序：
+ *  1) 无界的请求方可控存储本身就是问题——单条文档能被一条 XFF 撑到数 KB，
+ *     审计列表与导出按 ip 列渲染时会带着它一起走。
+ *  2) 不可打印字符（LF/CR/NUL/C1/Bidi）会随审计文本进入日志与终端渲染：一条审计记录
+ *     能伪造出"下一行"，这是把注入从请求面搬进取证面。
+ *  3) 该字段已建索引（`{ip:1,timestamp:-1}`）。实测**非唯一**索引不因超键长拒写，
+ *     所以今天不会丢审计；但它一旦改成 unique（或新增 unique 索引），MongoDB 的
+ *     1024 字节键上限会立刻把超长记录变成**静默丢一行**——而 record() 吞错只计
+ *     audit_write_failed。这正是 method 注释里「宁可少一维，不可丢一行」要防的形态，
+ *     补在 schema 单点上，不等它变成事故。
+ *
+ * 清洗判据（为什么复用 `stripControlChars`、为什么再补一次 `trimEnd`）见上面的 `makeAuditTextFieldGate`：
+ * 本族的闸（`ip`、`userAgent`）共用同一段实现，所以这些理由只记一处。
+ */
+const auditIpOrUndefined = makeAuditTextFieldGate(AUDIT_IP_MAX_LENGTH);
+
+// userAgent 的上界：与"已经自觉清洗"的那五处写入点同值（auditLogWriteStatics 2 处、
+// protocolCompliance 1 处、middleware/security 2 处都是 stripControlChars(x, 512)），
+// 所以合法值一个都不会被改写。而其余 21 处传的是裸 `req.get('user-agent')`
+// （securityController 8 处、mfaController 7 处、ipListController 4 处、authController
+// 与 auditController 各 1 处）——Node 的头部上限 ~16KB ⇒ 一条审计文档能被一个 UA 撑到数 KB。
+// 闸补在 schema 单点上的意义就在这里：不再要求每个新写入点都记得清洗，
+// 本仓已经记录过一次"同一类写入两种口径"的漏洗（middleware/protocolCompliance.js:23-27）。
+const AUDIT_USER_AGENT_MAX_LENGTH = 512;
+
+const auditUserAgentOrUndefined = makeAuditTextFieldGate(AUDIT_USER_AGENT_MAX_LENGTH);
+
+// username 维的上界。当前与 `loginValidation` 的 `isLength({max:128})`（authRoutes.js）相等，
+// 但**不 import 它**：路由上界管「什么样的请求算合法」，本上界管「这一维存多长」，
+// 两者哪天分叉不该互相牵动。注册用户名受 `^[a-zA-Z0-9_]{3,30}$` 约束、realName 类写入 ≤50
+// ⇒ 合法值一个都不会被剪；能被剪到的只有请求方构造的垃圾用户名。
+const AUDIT_USERNAME_MAX_LENGTH = 128;
+
+/**
+ * 审计 username 维的落库闸。**刻意不走 `makeAuditTextFieldGate`**，两处偏离都有实测依据：
+ *
+ *  1) 非字符串分两类处理，而不是一律降级 undefined。`username` 是 `required: true`，
+ *     降级成 undefined 就是把「存得下的输入」变成「整行丢失」——实测 Mongoose 8 的
+ *     String 铸造对 `12345`/`true` 转文本入库，对 `{}`/`[1,2]` 抛
+ *     `Cast to string failed`（整行被 record() 吞掉，只剩一个 audit_write_failed 计数）。
+ *     ip/userAgent 可以「宁可少一维」，username 是这一行的 who，少它就是丢行。
+ *     因此 number/boolean 在这里**先收成文本**（实测 `cast(12345)==='12345'`、
+ *     `cast(true)==='true'`），而不是原样透传：批量路径是 `chainBatch` 先按 plain object
+ *     算哈希、`insertMany` 之后才铸造，透传一个数字就是"被哈希的是 12345、落库的是
+ *     '12345'"，而 `canonicalPayload` 类型敏感（`auditChainPayload.js` 对 number 与
+ *     string 产出不同 JSON）⇒ 与本闸要防的伪影同形，是一条永久 hash_mismatch。
+ *     `null`/`undefined`/object 仍原样透传：前者由 `required` 拒（与今日同形），
+ *     后者由铸造抛错拒（收成 `'[object Object]'` 等于把"整行被拒"换成"who 变成垃圾串"）。
+ *     覆盖面按"请求体能构造什么"界定：JSON 只有 null/boolean/number/string/array/object，
+ *     Date/BigInt 不是未认证请求方可达的形态，不做无据的猜测式兜底。
+ *  2) 清洗后为空时**回退到截断原文**而不是 undefined。实测 `'   '`（纯空白）今天照样入库
+ *     （`required` 只拒空串），闸若返回 undefined 就是新增一种丢行。回退不破坏本闸的
+ *     存在理由：`cleaned === ''` 只在输入全部由空白/C0/C1/Bidi 字符组成时发生，
+ *     而孤立代理项会被换成 U+FFFD（非空）——也就是说走到回退分支的串**必然不含代理项**，
+ *     截断它不可能劈开一个代理对，因此不会重新引入下面要防的哈希伪影；
+ *     残留的只是「一个本身就是垃圾的用户名里带着不可打印字符」，与丢整行相比是可接受的另一侧。
+ *     幂等性同样成立：回退值再进本闸仍是同一串。
+ *
+ * 这一族的**动机本体**（为什么必须在 `chainBatch` 算哈希之前镜像一次）见 `makeAuditTextFieldGate`
+ * 的注释，此处不复述。username 独有一条必须补的理由：**它是全仓唯一由未认证请求方直接
+ * 决定的被哈希字段**（`authController.js:166` 把 `req.body.username` 原样交给登录失败审计；
+ * 路由侧只做了 `.trim()`/`notEmpty`/`isLength(128)`，不碰控制字符与代理项）。实测：
+ * 请求体 `{"username":"a\ud800b"}` 里 `JSON.parse` 自己就产出孤立代理项，铸造后内存形态是
+ * `61 d800 62`、BSON 落盘形态是 `61 fffd 62`，而哈希在序列化之前算 ⇒ 该记录**读回来复算必然
+ * hash_mismatch**，与真实篡改同形，且 `scripts/verify-audit-chain.js` 的退出码是部署门禁
+ * （同族另两条触发面已实测记录在 tests/utils/auditChainSurrogateArtifact.test.js）。
+ * 控制字符（NUL/CR/Bidi）实测逐字符原样往返、不产生哈希伪影，但会随审计列表与导出进入
+ * 终端渲染——与 ip 的第 2 条理由同形。
+ *
+ * 负结果一并记下（已转成断言，不再只是散文）：2000 字符的 username 用原生 driver 直插
+ * 能成功、collated 索引 `{username:1, timestamp:-1}` 不因超键长拒写 ⇒ 这一维在本闸之前
+ * 没有「静默丢行」风险，上界的价值是单点防御与渲染口径，不是修一个正在发生的丢数据故障。
+ * 见 tests/services/auditUsernameCastGate.test.js 的「超长原始行仍能读回」用例。
+ *
+ * 两条**实测到的副作用**（本闸的代价，不假装没有）：
+ *  - 等值查询也吃 `set`：`countDocuments({username:'a\\u0000b'})` 实际下发的是
+ *    `{username:'a b'}`（实测命中清洗后那条、命不中原生 driver 塞进去的裸 'a\\u0000b'）。
+ *    于是**存量脏行**（本闸之前写入、username 里真带控制字符的记录）用原文等值查不到，
+ *    `securityAlert.js` 那类按 `username` 等值计数的爆破统计在窗口内会少算这些行。
+ *  - 区间操作数的两侧**各自**过闸：`{username:{$gte:'a\\u0000', $lt:'a\\u0001'}}` 经 Mongoose
+ *    下发时两端都被洗成 `'a'` ⇒ 区间塌空、0 命中（同一条件用原生 driver 查则命中 1 条，实测
+ *    见测试）。合法前缀不受影响（两端都不含空白/控制字符时逐字符不变）。
+ *    合起来说：**存量脏行在 model 层两条路都查不到**（等值被改写、区间被改写后塌空），
+ *    只有原生 driver 的原文查询看得见它——这不是越权面（少看得境不是多看得境），但运维
+ *    若要用审计列表去核对闸前的历史痕迹，必须知道这一点。
+ */
+const cleanAuditUsername = (value) => {
+  if (value === null || value === undefined || typeof value === 'object') return value;
+  const text = typeof value === 'string' ? value : String(value);
+  const cleaned = stripControlChars(text, AUDIT_USERNAME_MAX_LENGTH).trimEnd();
+  return cleaned === '' ? text.slice(0, AUDIT_USERNAME_MAX_LENGTH) : cleaned;
+};
 
 // 审计页的「日志等级」三级展示口径（由 success + riskLevel 派生，不是库里存的字段）。
 // 与 AUDIT_RISK_LEVELS 同理收成单一事实来源：查询侧（utils/auditQuery）、导出侧
@@ -288,6 +428,12 @@ module.exports = {
   AUDIT_WARNING_OR_HIGHER_RISK_LEVELS,
   AUDIT_HTTP_METHODS,
   auditMethodOrUndefined,
+  AUDIT_IP_MAX_LENGTH,
+  auditIpOrUndefined,
+  AUDIT_USER_AGENT_MAX_LENGTH,
+  auditUserAgentOrUndefined,
+  AUDIT_USERNAME_MAX_LENGTH,
+  cleanAuditUsername,
   AUDIT_DISPLAY_LEVELS,
   AUDIT_LOG_ACTIONS,
 };

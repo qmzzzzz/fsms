@@ -129,4 +129,147 @@ describe('批量审计写入：被哈希的形态必须等于落库的形态', (
       expect(selfVerify(docs[0]).same).toBe(true);
     }
   );
+
+  /**
+   * ip 是这个缺陷家族的第 2 个已修实例（2026-10-01 第 5 轮补界）。
+   * 请求方可控文本、schema 侧有闸 ⇒ 批量侧必须在算哈希前镜像同一份判据，
+   * 判据本体见 constants/audit.js 的 `auditIpOrUndefined`。
+   *
+   * 【为什么这里还要再测一遍，schema 层已经断过返回值了】schema 用例钉的是"闸本身对不对"，
+   * 本例钉的是"闸在两条写入路径上跑出的形态是否同一个"。多一条只有批量路径才会暴露的形状：
+   * 截断点恰好落在空格上——chainBatch 得到 64 字符（尾部是空格），insertMany 铸造时
+   * 同一份闸再跑一次并把空格剪掉 ⇒ 64 的哈希对上 63 的存储 ⇒ 永久假篡改。
+   * 只有把闸做成**幂等**（截断后再 trimEnd）才闭得上，而幂等这件事注释里写十遍也会被踩。
+   */
+  describe('ip 的闸（补界之后同样不得让被哈希的形态与落库形态分叉）', () => {
+    const MAX = require('../../constants/audit').AUDIT_IP_MAX_LENGTH;
+    const C = String.fromCharCode(10, 13, 0); // LF / CR / NUL
+
+    it('超长与含控制字符的 ip：批量路径核验自洽，且内存形态就是落库形态', () => {
+      const docs = [
+        baseRecord({ ip: `203.0.113.7${'x'.repeat(4000)}` }),
+        baseRecord({ ip: `203.0.113.9${C}FAKE LOG LINE${C}${'y'.repeat(300)}` }),
+        baseRecord({ ip: `  203.0.113.10  ` }),
+        baseRecord({ ip: '' }),
+        baseRecord({ ip: '   ' }),
+      ];
+      chainBatch(docs, null);
+
+      for (const doc of docs) {
+        const { stored, recomputed } = selfVerify(doc);
+        expect({
+          hashedIp: doc.ip,
+          same: recomputed === stored.hash,
+          // 断言"两侧同一个串"而不是只断言 same：链式核验用的是 doc.hash，
+          // 若内存形态自身又被改写，same 仍可能绿而库里存的是第三条形态。
+          inDbEqualsHashed: stored.ip === doc.ip,
+        }).toEqual({
+          hashedIp: doc.ip,
+          same: true,
+          inDbEqualsHashed: true,
+        });
+        if (typeof doc.ip === 'string') expect(doc.ip.length).toBeLessThanOrEqual(MAX);
+      }
+      // 空/纯空白一律降级成「不记 ip」，与 method 的 `|| undefined` 同口径
+      expect(docs[3].ip).toBeUndefined();
+      expect(docs[4].ip).toBeUndefined();
+    });
+
+    it('截断点落在空格上时必须仍自洽（幂等性的真实后果）', () => {
+      // 11 字符前缀 + (MAX-12) 个 x = MAX-1 字符，再接 " y" ⇒ 截到 MAX 时末位是空格
+      const head = `203.0.113.7${'x'.repeat(MAX - 12)}`;
+      const docs = [baseRecord({ ip: `${head} y` })];
+      chainBatch(docs, null);
+
+      const { stored, recomputed } = selfVerify(docs[0]);
+      expect(docs[0].ip).toBe(head); // trimEnd 生效：被哈希的形态已经没有尾部空格
+      expect(stored.ip).toBe(head);
+      expect(recomputed).toBe(stored.hash);
+    });
+
+    it('反向对照：合法地址（含 IPv6 最长形态）原样落库且自洽', () => {
+      const legal = [
+        '127.0.0.1',
+        '203.0.113.7',
+        '::ffff:203.0.113.7',
+        '2001:0db8:0000:0000:0000:0000:0000:0001', // 39 字符：8 组全展开
+        '0000:0000:0000:0000:0000:ffff:255.255.255.255', // 45 字符：IPv6 最长文本形态
+      ];
+      const docs = legal.map((ip) => baseRecord({ ip }));
+      chainBatch(docs, null);
+
+      docs.forEach((doc, index) => {
+        const { stored, recomputed } = selfVerify(doc);
+        expect({ ip: stored.ip, same: recomputed === stored.hash }).toEqual({
+          ip: legal[index],
+          same: true,
+        });
+      });
+    });
+  });
+
+  /**
+   * userAgent 是这个家族的第 3 个已修实例（2026-10-01 第 6 轮）。它与 ip 的差别只在**量级**：
+   * 21 个写入点传的是裸 `req.get('user-agent')`，Node 的头部上限 ~16KB，
+   * 而 ip 至少还有 `resolveTrustProxyHops()` 那条链在路上剪了一刀。
+   * 判据本体见 constants/audit.js 的 `auditUserAgentOrUndefined`。
+   */
+  describe('userAgent 的闸（同一族：被哈希的形态必须等于落库的形态）', () => {
+    const MAX = require('../../constants/audit').AUDIT_USER_AGENT_MAX_LENGTH;
+    const C = String.fromCharCode(10, 13, 0);
+
+    it('超长（16KB 头部上限形态）与含控制字符的 UA：批量路径自洽', () => {
+      const docs = [
+        baseRecord({ userAgent: `M${'a'.repeat(9000)}` }),
+        baseRecord({ userAgent: `Mozilla/5.0${C}GET /admin HTTP/1.1${C}x${'y'.repeat(600)}` }),
+        baseRecord({ userAgent: '   Mozilla/5.0 (X11; Linux x86_64)   ' }),
+        baseRecord({ userAgent: '' }),
+        baseRecord({ userAgent: '  ' }),
+      ];
+      chainBatch(docs, null);
+
+      for (const doc of docs) {
+        const { stored, recomputed } = selfVerify(doc);
+        expect({
+          hashedUA: doc.userAgent,
+          same: recomputed === stored.hash,
+          inDbEqualsHashed: stored.userAgent === doc.userAgent,
+        }).toEqual({ hashedUA: doc.userAgent, same: true, inDbEqualsHashed: true });
+        if (typeof doc.userAgent === 'string')
+          expect(doc.userAgent.length).toBeLessThanOrEqual(MAX);
+      }
+      expect(docs[3].userAgent).toBeUndefined();
+      expect(docs[4].userAgent).toBeUndefined();
+    });
+
+    it('截断点落在空格上时必须仍自洽（幂等性的真实后果）', () => {
+      const head = 'M'.repeat(MAX - 1);
+      const docs = [baseRecord({ userAgent: `${head} y` })];
+      chainBatch(docs, null);
+
+      const { stored, recomputed } = selfVerify(docs[0]);
+      expect(docs[0].userAgent).toBe(head);
+      expect(stored.userAgent).toBe(head);
+      expect(recomputed).toBe(stored.hash);
+    });
+
+    it('反向对照：真实浏览器 UA（含恰好 512 的边界）原样落库且自洽', () => {
+      const legal = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'curl/8.4.0',
+        'node-fetch/1.0 (+https://github.com/bitinn/node-fetch)',
+        'p'.repeat(MAX),
+      ];
+      const docs = legal.map((userAgent) => baseRecord({ userAgent }));
+      chainBatch(docs, null);
+
+      docs.forEach((doc, index) => {
+        const { stored, recomputed } = selfVerify(doc);
+        expect({ ua: stored.userAgent, same: recomputed === stored.hash }).toEqual({
+          ua: legal[index],
+          same: true,
+        });
+      });
+    });
+  });
 });

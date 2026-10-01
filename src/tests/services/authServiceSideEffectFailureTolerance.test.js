@@ -503,4 +503,106 @@ describe('authService gap C - catch handler coverage', () => {
       expect(result.outcome).toBe('INVALID_CREDENTIALS');
     });
   });
+
+  // ===== 锁定写入失败时「不得谎报防线在场」（2026-10-01，口径源自 mfaService 的 lockApplied）=====
+  //
+  // 上面那条测的是主流程：旁路故障不把 401 拖成 500。这条测的是**另一半**——
+  // 旁路失败之后，日志与审计说了什么。修复前两处锁定点都是 `.catch(() => {})`，
+  // 吞掉之后照常写 `logger.warn('账户临时锁定')` 并追加 action=account_temp_locked
+  // 的 HIGH 级审计：于是故障窗口内，读日志/查审计的人都看到一道**并不存在**的防线，
+  // 而该账户的口令仍可被无限次在线尝试。"记不上就算成功"在这个位置上是反的。
+
+  /**
+   * @param {boolean} lockWriteFails 第二次 findByIdAndUpdate（lockUntil 写入）是否注入故障
+   * @returns 观测面全套：返回值、error/warn 载荷、落库后的审计行、数据库里的 lockUntil
+   */
+  const loginWithLockThreshold = async (suffix, { lockWriteFails }) => {
+    const logger = require('../../utils/logger');
+    const user = await makeUser(suffix, { failedLoginCount: 9 });
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const realFindByIdAndUpdate = User.findByIdAndUpdate.bind(User);
+    const realRecord = AuditLog.record.bind(AuditLog);
+
+    // AuditLog.record 在 authService 里是 fire-and-forget（.catch(() => {})），
+    // 捕获它返回的 promise 才能确定性地等到落库；断言读**持久化后的行**而不是入参：
+    // 入参对得上但被 schema 校验拒绝、错误又被 record 自己吞掉，才是真事故。
+    let lockedAuditPromise = Promise.resolve();
+    const recordSpy = jest.spyOn(AuditLog, 'record').mockImplementation((entry) => {
+      const p = realRecord(entry);
+      if (entry.action === 'account_temp_locked') lockedAuditPromise = p;
+      return p;
+    });
+
+    const updateSpy = jest
+      .spyOn(User, 'findByIdAndUpdate')
+      // 第一次调用是 $inc 失败计数——阈值判定依赖它，必须走真实写库
+      .mockImplementationOnce((...args) => realFindByIdAndUpdate(...args))
+      // 第二次调用是 lockUntil 锁定写入，按用例注入成功/故障
+      .mockImplementationOnce(async (...args) => {
+        if (lockWriteFails) throw new Error('db transient down');
+        return realFindByIdAndUpdate(...args);
+      });
+
+    try {
+      const result = await authService.loginUser(
+        { username: user.username, password: `${PASSWORD}x` },
+        defaultCtx()
+      );
+      await lockedAuditPromise;
+      const lockWarn = warnSpy.mock.calls.find(
+        (c) => String(c[0]).includes('账户临时锁定') && c[1] && 'lockApplied' in c[1]
+      );
+      return {
+        result,
+        user,
+        errors: errorSpy.mock.calls.map((c) => String(c[0])),
+        // 诊断性断言：自证这次运行真的到达了锁定点（否则下面 lockApplied 的断言是假绿）
+        sawLockPoint: Boolean(lockWarn) && lockWarn[1].lockApplied !== undefined,
+        lockApplied: lockWarn ? lockWarn[1].lockApplied : undefined,
+        lockUntil: (await User.findById(user._id)).lockUntil,
+        audit: await AuditLog.findOne({ action: 'account_temp_locked', username: user.username }),
+      };
+    } finally {
+      updateSpy.mockRestore();
+      recordSpy.mockRestore();
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  };
+
+  describe('loginUser - 锁定写入失败的观测面（不静默、不谎报）', () => {
+    test('锁定写入失败 → error 级留痕 + 审计 reason 说实话 + lockUntil 确实未落库', async () => {
+      const r = await loginWithLockThreshold('lh1', { lockWriteFails: true });
+
+      // 前提自证：用例确实走到了锁定点，而不是在 401 之前绕过了它
+      expect(r.sawLockPoint).toBe(true);
+      // 主流程口径不变（与上面那条既有用例同一条承诺）
+      expect(r.result.outcome).toBe('INVALID_CREDENTIALS');
+      // ① 防线状态：锁真的没落库
+      expect(r.lockUntil).toBeFalsy();
+      // ② 不静默：error 级点名"防线未生效"
+      expect(r.errors.some((m) => m.includes('防爆破防线未生效'))).toBe(true);
+      // ③ 日志载荷与 DB 状态一致
+      expect(r.lockApplied).toBe(false);
+      // ④ 审计照写（证据不能因为处置失败而消失），且措辞不得宣称防线在场
+      expect(r.audit).not.toBeNull();
+      expect(r.audit.riskLevel).toBe('high');
+      expect(r.audit.reason).toContain('防爆破防线当前未生效');
+      expect(r.audit.reason).not.toContain('临时锁定 10 分钟');
+    }, 30000);
+
+    test('正向对照：锁定写入成功 → lockUntil 落库、lockApplied=true、不产生 error 留痕', async () => {
+      const r = await loginWithLockThreshold('lh2', { lockWriteFails: false });
+
+      // 反向自证：上一条用例里的 false 来自故障注入，不是这条路径本来就不置位
+      expect(r.sawLockPoint).toBe(true);
+      expect(r.lockApplied).toBe(true);
+      expect(r.lockUntil).toBeInstanceOf(Date);
+      expect(r.lockUntil.getTime()).toBeGreaterThan(Date.now());
+      expect(r.errors.some((m) => m.includes('防爆破防线未生效'))).toBe(false);
+      expect(r.audit).not.toBeNull();
+      expect(r.audit.reason).toContain('账户临时锁定 10 分钟');
+    }, 30000);
+  });
 });

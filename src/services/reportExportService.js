@@ -21,7 +21,7 @@ const FireDevice = require('../models/FireDevice');
 const FireAlarm = require('../models/FireAlarm');
 const Inspection = require('../models/Inspection');
 const AuditLog = require('../models/AuditLog');
-const { escapeRegExp, sanitizeSpreadsheetCell, validateEnum } = require('../utils/helpers');
+const { sanitizeSpreadsheetCell, validateEnum } = require('../utils/helpers');
 const { buildDataScopeFilter } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 // 审计枚举单一事实来源：constants/audit.js（D-1 起 AUDIT_LOG_ACTIONS 亦收敛于此）。
@@ -37,11 +37,28 @@ const {
 const { normalizeIP, ipQueryCondition } = require('../utils/ipUtils');
 // success 解析与三级展示口径（level → Mongo 条件）都与审计查询侧共用同一实现
 // （两份曾各写一遍、靠注释约定同口径）
-const { parseSuccessFilter, buildLevelCondition } = require('../utils/auditQuery');
+const {
+  parseSuccessFilter,
+  buildLevelCondition,
+  usernamePrefixCondition,
+  hasUsernamePrefixCondition,
+} = require('../utils/auditQuery');
 const { formatDateTime, formatDate } = require('../utils/dateFormat');
 const { castScopeObjectIds } = require('../utils/scopeCast');
 
 const EXPORT_LIMIT = 5000;
+
+/**
+ * 审计导出的 collation 口径：返回一份可直接摊给「计数腿 + 取数腿」的 options 对象。
+ *
+ * 为什么判据取自组装好的 query 而不是请求参数：见 utils/auditQuery 的
+ * hasUsernamePrefixCondition。为什么不挂到控制器里：分层棘轮（D-1a）禁止 controller
+ * 直连 models，而这份口径需要 `AuditLog.AUDIT_USERNAME_COLLATION`——数据访问口径
+ * 归 service 层。为什么返回对象而不是布尔/枚举值：调用点一个分支都不新增
+ * （棘轮只许降不许升），且两条腿拿到的是**同一个**对象，不可能一侧挂一侧不挂。
+ */
+const collationOptionsForExport = (query) =>
+  hasUsernamePrefixCondition(query) ? { collation: AuditLog.AUDIT_USERNAME_COLLATION } : {};
 
 /**
  * 按资源类型生成数据范围过滤条件（P2-20 单一口径入口）
@@ -71,10 +88,24 @@ const EXPORT_SHEET_NAMES = {
 };
 
 // 模型 + 排序 + populate + 字段裁剪配置（选择投影在查询阶段生效）
+//
+// 排序必须是**全序**，且与对应列表接口同序——这是仓库既有不变式，不是新约定：
+// FireAlarm.js:155 / Inspection.js:179 / AuditLog.js:300 三处都写明"排序键取值可重复
+// ⇒ 必须有同向 `_id` 次级键"，并为此建了 `{key:-1,_id:-1}` 索引；列表侧
+// AlarmService.js:88、InspectionService.js:146、auditQueryService.js:153 用的就是它。
+// 导出原先只写 `{occurredAt:-1}` / `{planStartTime:-1}` / `{timestamp:-1}`，于是：
+//   1. 同一毫秒内的并列行由查询计划决定先后 ⇒ 撞上限时"前 5000 行"取到哪一批
+//      不确定，同一条筛选重跑两次可以给出两份不同的合规材料；
+//   2. 与列表的次级键**方向相反**（列表 `_id:-1`，取 id 探针腿补的是 `_id:1`）
+//      ⇒ 并列段里列表第 5000 行与导出第 5000 行不是同一条，"导出即所见"破在边界上；
+//   3. `{occurredAt:-1,_id:1}` 这种混合方向排序用不上那条复合索引，退化成
+//      5001 条的阻塞式内存排序。
+// deviceCode 例外：模型上 `unique:true`（FireDevice.js:22），取值不可能重复，
+// 故不需要次级键——同一判断见 DeviceService.js:84、cursorPagination.js:45。
 const EXPORT_MODEL_CONFIG = {
   alarms: {
     model: FireAlarm,
-    sort: { occurredAt: -1 },
+    sort: { occurredAt: -1, _id: -1 },
     populate: [
       { path: 'handler', select: 'username realName' },
       { path: 'deviceId', select: 'deviceCode deviceName' },
@@ -83,18 +114,19 @@ const EXPORT_MODEL_CONFIG = {
   devices: { model: FireDevice, sort: { deviceCode: 1 }, populate: [] },
   audit: {
     model: AuditLog,
-    sort: { timestamp: -1 },
+    sort: { timestamp: -1, _id: -1 },
     populate: [],
-    // 直接取模型上的那份排除清单：xlsx 导出此前自带一份 '-body -params -query'，
-    // 少了 -hmac ⇒ 全仓唯一一条把审计 HMAC 读进进程的路径（RESPONSE_EXCLUDE 存在的
-    // 目的就是阻断 (记录, hmac) 明文—标签对，见 tests/compliance/auditChain.test.js）。
-    // 输出侧本来就不打印 hmac，所以这不是"已经泄露"，而是"排除清单各写一份、
-    // 控制点随时会漂"——写坏一次就变成真外泄。
+    // 直接取模型上的那份排除清单：排除清单只能有一份。xlsx 原先自己写
+    // '-body -params -query'（少了 -hmac ⇒ 把审计 HMAC 读进进程），而 CSV 导出腿
+    // 连清单都没有（全字段取回，hmac/body/params/query 一起进内存）——
+    // 两条腿各写一遍就是"控制点随时会漂"。现在两条腿都引用 RESPONSE_EXCLUDE，
+    // 写坏一次会同时让两边的用例变红。RESPONSE_EXCLUDE 不含 -hash/-prevHash，
+    // 所以 CSV 的链摘要（auditExportService.js:148-151 读 doc.hash）不受影响。
     select: AuditLog.RESPONSE_EXCLUDE,
   },
   inspections: {
     model: Inspection,
-    sort: { planStartTime: -1 },
+    sort: { planStartTime: -1, _id: -1 },
     populate: [{ path: 'assignedTo', select: 'username realName' }],
   },
 };
@@ -193,10 +225,19 @@ const EXPORT_ACTION_LABELS = {
 
 const EXPORT_RISK_LEVEL_LABELS = { critical: '严重', high: '高', medium: '中', low: '低' };
 
+/**
+ * 空值占位符。`utils/dateFormat` 的 formatDateTime/formatDate 用同一个字面量（无值时
+ * 返回 '-'），所以这一格的口径横跨两个文件；createSafeTransform 的放行判据与这里
+ * 必须是同一个常量，否则占位符会被公式注入加固写成 `'-`。
+ */
+const EXPORT_NO_VALUE = '-';
+
 const formatExportLocation = (loc) => {
-  if (!loc) return '-';
+  if (!loc) return EXPORT_NO_VALUE;
   const { building, floor, room } = loc;
-  return building || floor || room ? `${building || ''}${floor || ''}${room || ''}` : '-';
+  return building || floor || room
+    ? `${building || ''}${floor || ''}${room || ''}`
+    : EXPORT_NO_VALUE;
 };
 
 /**
@@ -210,27 +251,27 @@ const formatExportLocation = (loc) => {
  */
 const auditExportLevel = (item) => {
   if (item.success === false || AUDIT_ERROR_RISK_LEVELS.includes(item.riskLevel)) return '错误';
-  if (item.success !== true) return '-';
+  if (item.success !== true) return EXPORT_NO_VALUE;
   return item.riskLevel === 'medium' ? '警告' : '信息';
 };
 
 const EXPORT_ROW_TRANSFORMS = {
   alarms: (item) => ({
-    alarmCode: item.alarmCode || '-',
+    alarmCode: item.alarmCode || EXPORT_NO_VALUE,
     occurredAt: formatDateTime(item.occurredAt),
-    alarmType: alarmTypeMap[item.alarmType] || item.alarmType || '-',
+    alarmType: alarmTypeMap[item.alarmType] || item.alarmType || EXPORT_NO_VALUE,
     location: formatExportLocation(item.location),
-    description: item.description || '-',
-    status: statusMap[item.status] || item.status || '-',
-    reporter: (item.reporter && (item.reporter.name || item.reporter.username)) || '-',
-    handler: (item.handler && (item.handler.realName || item.handler.username)) || '-',
-    handleResult: item.handleResult || '-',
+    description: item.description || EXPORT_NO_VALUE,
+    status: statusMap[item.status] || item.status || EXPORT_NO_VALUE,
+    reporter: (item.reporter && (item.reporter.name || item.reporter.username)) || EXPORT_NO_VALUE,
+    handler: (item.handler && (item.handler.realName || item.handler.username)) || EXPORT_NO_VALUE,
+    handleResult: item.handleResult || EXPORT_NO_VALUE,
   }),
   devices: (item) => ({
-    deviceCode: item.deviceCode || '-',
-    deviceName: item.deviceName || '-',
-    deviceType: item.deviceType || '-',
-    status: deviceStatusMap[item.status] || item.status || '-',
+    deviceCode: item.deviceCode || EXPORT_NO_VALUE,
+    deviceName: item.deviceName || EXPORT_NO_VALUE,
+    deviceType: item.deviceType || EXPORT_NO_VALUE,
+    status: deviceStatusMap[item.status] || item.status || EXPORT_NO_VALUE,
     location: formatExportLocation(item.location),
     nextCheckDate: formatDate(item.nextCheckDate),
     expiryDate: formatDate(item.expiryDate),
@@ -244,27 +285,27 @@ const EXPORT_ROW_TRANSFORMS = {
     // 的逐档对拍兜住，两边都要动时才闭合。
     timestamp: formatDateTime(item.timestamp),
     level: auditExportLevel(item),
-    username: item.username || '-',
-    action: EXPORT_ACTION_LABELS[item.action] || item.action || '-',
-    category: item.category || '-',
-    method: item.method || '-',
-    path: item.path || '-',
-    ip: item.ip || '-',
-    riskLevel: EXPORT_RISK_LEVEL_LABELS[item.riskLevel] || item.riskLevel || '-',
+    username: item.username || EXPORT_NO_VALUE,
+    action: EXPORT_ACTION_LABELS[item.action] || item.action || EXPORT_NO_VALUE,
+    category: item.category || EXPORT_NO_VALUE,
+    method: item.method || EXPORT_NO_VALUE,
+    path: item.path || EXPORT_NO_VALUE,
+    ip: item.ip || EXPORT_NO_VALUE,
+    riskLevel: EXPORT_RISK_LEVEL_LABELS[item.riskLevel] || item.riskLevel || EXPORT_NO_VALUE,
     // 三态而不是二态：`AuditLog.success` 无 default、非 required，多处直写点根本不带
     // 该字段（login_unusual_time / suspicious_report / securityAlert 的三处告警审计）。
     // `? '成功' : '失败'` 把"未记录"渲染成"这次操作失败了"——一条肯定性结论。
-    success: item.success === true ? '成功' : item.success === false ? '失败' : '-',
+    success: item.success === true ? '成功' : item.success === false ? '失败' : EXPORT_NO_VALUE,
     // `duration` 用 `== null` 而不是真值判断：0 是合法值（同一毫秒内返回，缓存命中时是常态），
     // 写成 `item.duration ? ...` 会把"亚毫秒完成"与"从未记录"塌成同一个 `-`，
     // 而同一条记录的 CSV 导出走原样 csvEscape 给 `0` —— 两份合规材料自相矛盾。
-    duration: item.duration == null ? '-' : `${item.duration}ms`,
+    duration: item.duration == null ? EXPORT_NO_VALUE : `${item.duration}ms`,
   }),
   inspections: (item) => ({
-    title: item.title || '-',
-    inspectionType: item.inspectionType || '-',
-    status: item.status || '-',
-    result: item.result || '-',
+    title: item.title || EXPORT_NO_VALUE,
+    inspectionType: item.inspectionType || EXPORT_NO_VALUE,
+    status: item.status || EXPORT_NO_VALUE,
+    result: item.result || EXPORT_NO_VALUE,
     planStartTime: formatDateTime(item.planStartTime),
     planEndTime: formatDateTime(item.planEndTime),
     actualStartTime: formatDateTime(item.actualStartTime),
@@ -275,8 +316,8 @@ const EXPORT_ROW_TRANSFORMS = {
             .map((u) => (u && (u.realName || u.username)) || '')
             .filter(Boolean)
             .join(', ')
-        : '-',
-    remark: item.remark || '-',
+        : EXPORT_NO_VALUE,
+    remark: item.remark || EXPORT_NO_VALUE,
   }),
 };
 
@@ -284,7 +325,15 @@ const EXPORT_ROW_TRANSFORMS = {
 const createSafeTransform = (transform) => (item) => {
   const row = transform(item);
   for (const key of Object.keys(row)) {
-    row[key] = sanitizeSpreadsheetCell(row[key]);
+    // 空值占位符是唯一被放行的 `-` 开头文本：它不是外部输入，没有注入面。
+    // 放行的理由实测过——exceljs 把 `'=1+1'` 这类字符串存成 type=3（String）、
+    // formula=undefined，即 xlsx 的单元格是**带类型的文本**，Excel 打开时不会求值，
+    // 那个前导单引号只会原样显示出来。于是一条没有 success/duration 字段的审计记录
+    // （suspicious_report、非常规时间登录等直写点）在合规文件里显示成 `'-`，
+    // 而 CSV 侧同一条记录显示成空 —— 两份材料不一致，占位符还被污染成看起来像 bug 的串。
+    // 真实数据一律照旧加固：单引号断的是"xlsx 另存为 CSV 再导入"那一跳
+    // （CSV 无类型，`-2+3` 会被 Excel 当公式求值）。
+    if (row[key] !== EXPORT_NO_VALUE) row[key] = sanitizeSpreadsheetCell(row[key]);
   }
   return row;
 };
@@ -307,8 +356,14 @@ const buildAuditExportQuery = ({
 }) => {
   const auditQuery = {};
   if (Object.keys(dateFilter).length > 0) auditQuery.timestamp = dateFilter;
-  // 使用 escapeRegExp 防止 ReDoS 正则拒绝服务攻击
-  if (username) auditQuery.username = { $regex: escapeRegExp(username), $options: 'i' };
+  // username 用与列表**同一条**前缀条件（utils/auditQuery.usernamePrefixCondition）。
+  // 此前这里留着列表侧改造前的旧写法 `{$regex: escapeRegExp(username), $options:'i'}`，
+  // 于是同一个 URL 参数在两条链上有两种语义：列表＝大小写不敏感的前缀，导出＝子串。
+  // 后果不是"搜索结果略有差别"而是**证据材料比可见集宽**——筛 `adm` 的 xlsx 里会出现
+  // `damin`、`superadmin` 的 IP/路径/操作，而操作员以为文件只有那一个人的记录；
+  // 本文件的 docstring 与 utils/auditQuery.js:199-200 都把"导出即所见"写成硬约束。
+  // 注：`i` 正则还有一层已实测的代价——keysExamined 2000（全索引扫），见 auditQuery.js:176-178。
+  if (username) auditQuery.username = usernamePrefixCondition(username);
   // action/category 为枚举值,精确匹配,与审计日志查询接口语义一致
   if (action) auditQuery.action = action;
   if (category) auditQuery.category = category;
@@ -385,6 +440,7 @@ const validateAuditExportEnums = ({ action, category, riskLevel, level }) => {
 
 module.exports = {
   EXPORT_LIMIT,
+  EXPORT_NO_VALUE,
   EXPORT_SHEET_NAMES,
   EXPORT_MODEL_CONFIG,
   EXPORT_COLUMN_DEFS,
@@ -392,5 +448,6 @@ module.exports = {
   createSafeTransform,
   scopeFilterFor,
   buildExportQuery,
+  collationOptionsForExport,
   validateAuditExportEnums,
 };

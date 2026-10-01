@@ -99,7 +99,9 @@ const userSchema = new mongoose.Schema(
       get: decryptPii,
     },
     // phone 的精确检索键（HMAC，select:false）：相等性只在这个键控字段上成立，
-    // 密文列本身随机 IV、不可链接；空值不产生键（空串键会让空值互相命中）。
+    // 密文列本身随机 IV、不可链接。空值落的是**空串键**（default:''，钩子里
+    // 明文为空时也写 ''）——所有无手机号的行共享它，所以这一维只在非空明文上成立；
+    // 判据与调用侧前提见 utils/piiCrypto.js 的 piiSearchKey 注释。
     phoneKey: {
       type: String,
       select: false,
@@ -259,6 +261,11 @@ userSchema.index({ roles: 1 });
 userSchema.index({ createdAt: -1 });
 // P1-② 检索键索引：按手机号找回用户走 phoneKey（realName 暂不加密、保持
 // 正则模糊检索，无检索键）。非唯一：手机号本就没有唯一约束（保持现状）。
+// 接线状态（2026-10-01 逐行复核，grep 实测）：**已供未接**——非测试代码里 phoneKey
+// 只出现在 schema 声明、本索引、-phoneKey 响应投影、pre('validate') 写入与迁移脚本
+// 的重算五处，没有任何 `find({ phoneKey })`；用户列表的搜索列表面向
+// username/email/realName（userService.buildListQuery）。索引在 ≠ 能力在：
+// 要按手机号联系人，得先加查询入口（并满足 piiCrypto.piiSearchKey 的非空前提）。
 userSchema.index({ phoneKey: 1 }, { background: true, name: 'phoneKey_1' });
 
 /**
@@ -291,7 +298,9 @@ const USER_RESPONSE_EXCLUDE = [
   '-passwordChangedAt',
   '-lastLoginIp',
   // P1-② 检索键：相等性预言机（拿一个手机号问"系统里有没有人用"），
-  // 对外响应与内部状态同规格排除；查询侧走显式 select('+phoneKey')
+  // 对外响应与内部状态同规格排除。需要读它的一侧必须显式 select('+phoneKey')，
+  // 而那样的读侧目前不存在（接线状态见本文件 phoneKey 索引处的注释）——
+  // 排在这里是"默认不许外泄"，不是"某处正在用"。
   '-phoneKey',
   '-__v',
 ].join(' ');

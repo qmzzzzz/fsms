@@ -453,10 +453,25 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
     // 计数不可观测时的取舍见 resolveFailedLoginCount 的定义处（fail-closed）
     const newCount = resolveFailedLoginCount(updated);
     if (newCount >= MAX_FAILED_LOGINS) {
+      // 锁定这条更新本身也可能写不进库。修法与 mfaService.js:142-164 同源：
+      // 修复前是 `.catch(() => {})` 吞掉后照常写下「账户临时锁定」，并追加一条
+      // action=account_temp_locked 的审计——日志与审计双双宣称一道**并不存在**的防线，
+      // 而故障窗口内该账户的口令仍可被无限次在线尝试。观测不到时要如实记录，
+      // 不能"记不上就算成功了"。
+      let lockApplied = true;
       await User.findByIdAndUpdate(user._id, {
         lockUntil: new Date(Date.now() + LOCK_DURATION_MS),
-      }).catch(() => {});
-      logger.warn('账户临时锁定', { username, failedCount: newCount, lockMinutes: 10 });
+      }).catch((err) => {
+        lockApplied = false;
+        logger.error(`账户临时锁定写入失败（防爆破防线未生效）：${err.message}`, { username });
+      });
+      logger.warn('账户临时锁定', {
+        username,
+        failedCount: newCount,
+        lockMinutes: 10,
+        // 锁到底有没有落库：读日志的人据此判断防线是否还在，而不是信一句断言
+        lockApplied,
+      });
       // 评价报告 #8：暴力破解信号审计写入显式挂 catch（同上口径）
       AuditLog.record({
         action: 'account_temp_locked',
@@ -469,7 +484,9 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
         success: false,
         riskLevel: 'high',
         riskFactors: ['excessive_failed_logins'],
-        reason: `连续登录失败 ${newCount} 次，账户临时锁定 10 分钟`,
+        reason: lockApplied
+          ? `连续登录失败 ${newCount} 次，账户临时锁定 10 分钟`
+          : `连续登录失败 ${newCount} 次，但锁定未能写入数据库，防爆破防线当前未生效`,
       }).catch(() => {});
     }
     return { outcome: 'INVALID_CREDENTIALS' };
@@ -724,10 +741,20 @@ async function incrementFailedLoginCount(user, { username, lockReason }) {
   ).catch(() => null);
   const newCount = resolveFailedLoginCount(updated);
   if (newCount >= MAX_FAILED_LOGINS) {
+    // 与上面 checkBruteForce 里的同一条修法（本函数是它的第二条登录失败路径）：
+    // 锁定写不进库时不得照常写下「账户临时锁定」——读日志的人会以为防线还在。
+    let lockApplied = true;
     await User.findByIdAndUpdate(user._id, {
       lockUntil: new Date(Date.now() + LOCK_DURATION_MS),
-    }).catch(() => {});
-    logger.warn(`账户临时锁定（${lockReason}）`, { username, failedCount: newCount });
+    }).catch((err) => {
+      lockApplied = false;
+      logger.error(`账户临时锁定写入失败（防爆破防线未生效）：${err.message}`, { username });
+    });
+    logger.warn(`账户临时锁定（${lockReason}）`, {
+      username,
+      failedCount: newCount,
+      lockApplied,
+    });
   }
   return newCount;
 }

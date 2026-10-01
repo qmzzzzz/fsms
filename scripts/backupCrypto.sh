@@ -45,7 +45,11 @@ crypto_decrypt() {
   gpg --batch --yes --output "$_crypto_dest" --decrypt "$_crypto_src"
 }
 
-# 校验和：<file> → <file>.sha256（0600 权限由调用方的 umask 约束）
+# 校验和：<file> → <file>.sha256
+# 权限**继承调用方此刻仍生效的 umask**，本函数自己不动 umask：调用方（backup-mongo.sh）
+# 的 `umask 077` 一直收到 cleanup trap 才还原，所以归档、密文、校验和三者都在 0600 下产出。
+# 这句话此前是错的（调用方在写完凭据文件后就还原了 umask，产物落成 0644）——
+# 现在由 src/tests/deploy/backupEncryptionContract.test.js 的位置闸把守。
 crypto_checksum() {
   _crypto_file=$1
   sha256sum "$_crypto_file" > "$_crypto_file.sha256"

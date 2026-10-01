@@ -50,18 +50,33 @@ function parseArgs() {
 const isEncrypted = (v) => typeof v === 'string' && v.startsWith(VERSION_PREFIX);
 
 /**
- * 主密钥可用性必须在**连库之前**判，且复用 piiCrypto 那一份判据（不另抄字面量清单）：
+ * 主密钥可用性必须在**连库之前**判，且两道判据都是复用而不是另抄一份常量：
  * 少传 AES_SECRET_KEY 时，`process.env.PII_ROTATION_CURRENT_KEY = process.env.AES_SECRET_KEY`
  * 会把 undefined 强转成字符串 "undefined"，非空校验恒真通过 ⇒ 全表 PII 静默迁到一把
  * 谁都能从源码算出来的密钥上，而脚本照样打印「✅ 轮换完成」。
  * 单独成函数是为了不把 main 的 complexity 推过棘轮上限（这条闸本身就是新增分支）。
  */
 function assertMasterKeyUsable() {
+  let key;
   try {
-    requireMasterSecret();
+    key = requireMasterSecret();
   } catch (e) {
     console.error(`Error: ${e.message}`);
     process.exit(1);
+  }
+  // 第二道：强度判据，与同族脚本 migrate-mfa-secret.js 用的是同一把尺
+  // （src/config/validate.js 的 isWeakSecret，启动校验对 AES_SECRET_KEY 也用它）。
+  // requireMasterSecret 只拦退化字面量：实测 `AES_SECRET_KEY=abc`、`.env.example`
+  // 里的原文占位符 `<CHANGE_ME>`、以及 40 个同一字符都能通过它，于是全表 PII 被
+  // 重加密到一把可穷举的密钥上，而脚本照样打印「✅ 轮换完成」——这类改写不可逆，
+  // 等下次启动 validate 才响已经晚了。判据复用而不是再抄一份长度/黑名单常量。
+  if (require('../src/config/validate').isWeakSecret(key)) {
+    console.error(
+      'Error: AES_SECRET_KEY 未通过强度校验（长度 <32 / 命中弱密钥黑名单或占位符形态 / 低熵）。' +
+        '本脚本会把 users 的 PII 列改写在该密钥之下，弱密钥一旦落库不可逆。' +
+        '请用 `openssl rand -hex 32` 生成后经环境变量提供。'
+    );
+    process.exit(2);
   }
 }
 

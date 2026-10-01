@@ -339,12 +339,20 @@ const checkBulkExport = async (userId, username, count, operation) => {
   if (count < THRESHOLDS.bulkExportThreshold) return;
 
   const alertKey = `bulk_export_${userId}`;
-  if (!shouldSendAlert(alertKey)) return;
 
   // P1-23 同口径：告警审计落库失败**不得**冒泡到调用方。checkBulkExport 被
   // reportController/auditController 的导出路径 `await`，此前裸 await AuditLog.create
   // 在 DB 瞬断/校验失败时会把一次本已成功的导出顶成 500——告警是旁路增强，
   // 绝不该拖垮主流程。捕获后仍继续投递通知（告警本身重要），仅记 error 不静默。
+  //
+  // 处置与通知解耦（2026-10-01，与上面 checkBruteForce 里 :302-311 那一条修法同源）：
+  // 修复前这里写的是 `if (!shouldSendAlert(alertKey)) return;`，一行把**审计落库**
+  // 一起挡在了门外。后果不是少一条通知，而是少一条证据：
+  //   - 抑制窗（同一 userId 的 5 分钟）内的第二次、第三次批量导出**完全没有留痕**，
+  //     而"短时间内反复大批量导出"恰恰是最需要被审计看见的内部威胁形态；
+  //   - 审计行是 riskLevel=HIGH 的正式记录，与管理页的审计查询/导出脱敏/取证都相关，
+  //     它的有无不该由"给人看的通知"是否轮到发送来决定。
+  // 现在：审计无条件写，频控只约束 dispatchNotification。
   try {
     await AuditLog.create({
       action: ALERT_TYPES.BULK_EXPORT,
@@ -360,12 +368,14 @@ const checkBulkExport = async (userId, username, count, operation) => {
   }
 
   // B-M1：导出路径不因 webhook 投递阻塞响应
-  dispatchNotification(
-    ALERT_TYPES.BULK_EXPORT,
-    ALERT_LEVELS.HIGH,
-    `检测到批量数据导出：用户 ${username}，数量 ${count}`,
-    { userId, username, count, operation }
-  );
+  if (shouldSendAlert(alertKey)) {
+    dispatchNotification(
+      ALERT_TYPES.BULK_EXPORT,
+      ALERT_LEVELS.HIGH,
+      `检测到批量数据导出：用户 ${username}，数量 ${count}`,
+      { userId, username, count, operation }
+    );
+  }
 };
 
 /**

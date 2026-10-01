@@ -501,6 +501,53 @@ describe('viewSensitiveData 分支补齐', () => {
       })
     );
   });
+
+  /**
+   * 上面那条 `objectContaining` 只锁三个字段，对 `ip` 取哪一个是瞎的（假绿审计报告同判）。
+   * 而 `ip` 恰恰是这条留痕里唯一有归因价值的一维：本操作设了 skipGlobalAudit，
+   * 没有第二条记录。控制器原先写 `req.ip`——开着 trust proxy 时那就是请求方自己写的
+   * XFF 首值，读别人手机号的人可以顺手挑一个地址写进取证里。
+   * 口径与 auth.js 的 `ip_range_denied` 审计一致（`clientIpForSecurityDecision`）：
+   * 可信边界内取 req.ip，边界外退回不可伪造的 socket 对端。
+   * 下面两条是一对可证伪对照（变异：控制器改回 `ip: req.ip` ⇒ 第一条红、第二条仍绿，
+   * 即"只钉住分叉方向、不禁止合理取值"）。
+   */
+  const xffForgedCtx = (peerAddress) => {
+    const ctx = makeCtx({ body: { dataType: 'phone' } });
+    ctx.req.app = { get: (key) => key === 'trust proxy' };
+    ctx.req.ip = '198.51.100.7'; // proxy-addr 在 trust proxy 开时把 XFF 首值原样给 req.ip
+    ctx.req.get = (header) =>
+      String(header).toLowerCase() === 'x-forwarded-for' ? '198.51.100.7' : 'jest-agent';
+    ctx.req.socket = { remoteAddress: peerAddress };
+    return ctx;
+  };
+  const mockedViewer = () =>
+    mockUserFindById.mockResolvedValue({
+      username: 'testuser',
+      phone: '13800138000',
+      email: 'secret@example.com',
+    });
+  const auditIpOfLastCall = () => {
+    const calls = mockAuditLogCreate.mock.calls;
+    return calls[calls.length - 1][0].ip;
+  };
+
+  test('留痕 IP 取不可伪造的 socket 对端（公网对端 + 伪造 XFF）', async () => {
+    mockedViewer();
+    const { req, res, next } = xffForgedCtx('203.0.113.9');
+    await invoke(viewSensitiveData, req, res, next);
+    expect(res.statusCode).toBe(200);
+    expect(auditIpOfLastCall()).toBe('203.0.113.9');
+    expect(auditIpOfLastCall()).not.toBe(req.ip);
+  });
+
+  test('反向对照：对端确为内网可信反代时仍取 req.ip，不"一律丢 XFF"', async () => {
+    mockedViewer();
+    const { req, res, next } = xffForgedCtx('10.0.0.2');
+    await invoke(viewSensitiveData, req, res, next);
+    expect(res.statusCode).toBe(200);
+    expect(auditIpOfLastCall()).toBe('198.51.100.7');
+  });
 });
 
 // ============================================================

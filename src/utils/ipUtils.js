@@ -421,8 +421,108 @@ function isPrivateOrLoopback(rawIp) {
   return ['loopback', 'private', 'linkLocal', 'uniqueLocal'].includes(range);
 }
 
+/**
+ * 客户端 IP 身份的**可信边界**判定——所有拿 req.ip 做安全裁决的地方共用这一把尺。
+ *
+ * 自 middleware/security.js 的 `isWhitelistExemptionTrustworthy` 抽出（2026-10-01）。
+ * 抽出的理由不是整洁：它回答的问题本来就与"发放豁免标记"无关，而是
+ * 「req.ip 这个客户端身份能不能信」。认证的 `allowedIPs`（用户 IP 访问范围）此前
+ * 自己写 `req.ip || socket 对端`，与三重豁免是**同一条伪造链的两侧**——判据分在两个
+ * 文件只会让人以为那是两套事实来源，修一边漏一边。
+ *
+ * 三种可信形态（其余一律按可伪造处理）：
+ *  1) 未启用 trust proxy：req.ip 恒等于 socket 对端，请求头不参与判定；
+ *  2) 未携带 X-Forwarded-For：即使 trust proxy 开着，req.ip 也只能是 socket 对端；
+ *  3) trust proxy 开启且带 XFF：只有 socket 对端属内网/回环（nginx、容器网络这类
+ *     基础设施）时，该 XFF 才是可信代理写入的。
+ *
+ * 代价（如实声明，别让它变成惊喜）：应用直接站在公网 CDN/负载均衡之后（对端是公网
+ * IP）又开着 trust proxy 时，真实客户端只有 XFF 一个来源，而本判据会退回 socket 对端
+ * ⇒ 按对端来裁 IP 访问范围。这是 fail-closed 的取向：宁可对配置不完整的部署判拒，
+ * 也不让一个请求头买到访问控制。正确出路是把代理层留在内网，或按真实跳数配
+ * TRUST_PROXY_HOPS。
+ *
+ * @param {import('express').Request} req
+ * @returns {boolean} true=req.ip 可用作安全裁决的客户端身份
+ */
+function isClientIpIdentityTrustworthy(req) {
+  const trustProxy =
+    req.app && typeof req.app.get === 'function' ? req.app.get('trust proxy') : false;
+  if (!trustProxy) return true;
+  if (req.get('x-forwarded-for') === undefined) return true;
+  const peer = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+  return isPrivateOrLoopback(peer);
+}
+
+/**
+ * 安全裁决用的客户端 IP：可信边界内取 req.ip（代理认定的真实客户端），
+ * 边界外退回不可伪造的 socket 对端。取不到对端时保持既有形态（req.ip），
+ * 避免让替身 req 夹具把裁决变成空 IP。
+ *
+ * @param {import('express').Request} req
+ * @returns {string|undefined}
+ */
+function clientIpForSecurityDecision(req) {
+  const peer = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+  if (isClientIpIdentityTrustworthy(req)) return req.ip || peer || undefined;
+  return peer || req.ip || undefined;
+}
+
+/**
+ * 客户端 IP 的**来源分类**——回答「这个地址是谁写的」。
+ *
+ * 与 `isClientIpIdentityTrustworthy` 的分工不是重复，而是方向不同：那一把尺问
+ * 「req.ip 这个**身份**能不能用于准入/配额」（读侧），本函数问「拿这个地址去
+ * **施加惩罚**（封禁）时它的来源是哪一类」（写侧）。惩罚是不可撤销的对外动作，
+ * 且打击面是"某个地址的所有使用者"，因此需要的信息比"可否信任"更细。
+ *
+ * 四类的现实含义：
+ *  - DIRECT：`req.ip` 就等于 socket 对端（未带 XFF，或 trust proxy 关着）。
+ *    TCP 源地址不可伪造（HTTP 场景下伪造者收不到响应），所以这个值**由请求方
+ *    自己的行为决定**，作为封禁目标不会误伤无辜。
+ *  - TRUSTED_PROXY：带了 XFF，且对端属内网/回环（nginx、容器网络这类基础设施）。
+ *    互联网侧真实客户经此路径是对的（代理追加、按跳数取位，客户改不了自己那段）；
+ *    但**同网络内**任意进程直连应用端口、自己写一个 XFF，长得一模一样——
+ *    应用内部无法区分这两种。故本类是「可用但不可区分」，调用方应把它记下来
+ *    （见 securityAlertPermissionAbuse 的封禁留痕），而不是当成"已验证"。
+ *  - PUBLIC_PEER_HEADER：对端是公网地址却又带来了 XFF——有人站在边界外告诉我们
+ *    "客户端是谁"，这个值完全由对方决定，不可用于惩罚。
+ *    （与 `isClientIpIdentityTrustworthy` 在此类上一致：那里也判不可信。）
+ *  - UNVERIFIABLE：取不到 socket 对端（替身 req / 夹具），不猜测。
+ *
+ * @param {import('express').Request} req
+ * @returns {{kind:string, reportedIp:string|undefined, socketPeer:string}}
+ */
+const IP_ATTRIBUTION_KINDS = {
+  DIRECT: 'direct',
+  TRUSTED_PROXY: 'trusted_proxy',
+  PUBLIC_PEER_HEADER: 'public_peer_header',
+  UNVERIFIABLE: 'unverifiable',
+};
+
+function classifyIpAttribution(req) {
+  const reportedIp = req.ip;
+  const socketPeer = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+  if (!socketPeer) {
+    return { kind: IP_ATTRIBUTION_KINDS.UNVERIFIABLE, reportedIp, socketPeer };
+  }
+  const nReported = normalizeIP(reportedIp);
+  const nPeer = normalizeIP(socketPeer);
+  // 归一化后相同（或文本本来就相同）⇒ 这个地址不是任何请求头写的
+  if ((nReported && nPeer && nReported === nPeer) || reportedIp === socketPeer) {
+    return { kind: IP_ATTRIBUTION_KINDS.DIRECT, reportedIp, socketPeer };
+  }
+  return isPrivateOrLoopback(socketPeer)
+    ? { kind: IP_ATTRIBUTION_KINDS.TRUSTED_PROXY, reportedIp, socketPeer }
+    : { kind: IP_ATTRIBUTION_KINDS.PUBLIC_PEER_HEADER, reportedIp, socketPeer };
+}
+
 module.exports = {
   isPrivateOrLoopback,
+  isClientIpIdentityTrustworthy,
+  clientIpForSecurityDecision,
+  classifyIpAttribution,
+  IP_ATTRIBUTION_KINDS: IP_ATTRIBUTION_KINDS,
   parseIP,
   normalizeIP,
   parseCIDR,

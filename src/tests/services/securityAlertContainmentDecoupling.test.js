@@ -117,6 +117,10 @@ describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
         { userId: { $in: [abuseUser?._id, abuseUser2?._id].filter(Boolean) } },
       ],
     });
+    // checkBulkExport 两条用例的 username 是 zzbx<后缀><stamp>：stamp 在末尾，
+    // 上面那条 `^zz(...)${stamp}` 锚定式打不到 ⇒ 单列一条。同理 User 也要按前缀清。
+    await purge({ username: new RegExp(`^zzbx`), action: ALERT_TYPES.BULK_EXPORT });
+    await User.deleteMany({ username: new RegExp(`^zzbx`) }).catch(() => {});
     await User.deleteMany({ username: new RegExp(`^zzpd2?${stamp}`) }).catch(() => {});
     await IPBlacklist.deleteMany({ ip: { $in: ips } }).catch(() => {});
     if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
@@ -262,6 +266,67 @@ describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
       0
     );
   }, 20000);
+
+  // ============================ 缺陷 C：checkBulkExport ============================
+  // 同族的第三个检测器，形状与前两条不同：它没有封禁动作，被频控吞掉的是**证据本身**。
+  // `if (!shouldSendAlert(key)) return;` 排在 `await AuditLog.create(...)` 之前一行，
+  // 于是同一账号 5 分钟抑制窗内的第 2、3、N 次批量导出零留痕——而"短时间内反复
+  // 大批量导出"恰是这条 HIGH 级检测器存在的理由。通知是给人看的，重复了是噪音；
+  // 审计是取证用的，抑制窗内少一条就是永久少一条。
+
+  /** dispatchNotification 是 fire-and-forget（B-M1），断言投递前先让队列跑完 */
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const delivery = require('../../services/securityAlertDelivery');
+
+  const makeExportUser = async (suffix) =>
+    User.create({
+      username: `zzbx${suffix}${stamp}`,
+      email: `zzbx${suffix}${stamp}@example.com`,
+      password: randomPassword(),
+      roles: [],
+    });
+
+  test('checkBulkExport：抑制窗内的第二次导出仍必须落 HIGH 级审计（通知可以不发）', async () => {
+    const user = await makeExportUser('gate');
+    const username = user.username;
+    // 用**真实** shouldSendAlert 占掉该 userId 的频控键（ spy 导出的属性打不到模块内闭包）
+    expect(securityAlert.shouldSendAlert(`bulk_export_${user._id}`)).toBe(true);
+    delivery.sendNotification.mockClear();
+
+    await securityAlert.checkBulkExport(
+      String(user._id),
+      username,
+      THRESHOLDS.bulkExportThreshold,
+      'report_export'
+    );
+    await settle();
+
+    // 通知被抑制是**正确**行为，这条断言钉的是修法没有顺手把频控删掉
+    expect(delivery.sendNotification).not.toHaveBeenCalled();
+    // 修复前：这一行是 0 ⇒ 抑制窗内的导出完全不留痕
+    const rows = await AuditLog.find({ action: ALERT_TYPES.BULK_EXPORT, username });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].riskLevel).toBe('high');
+    expect(rows[0].body.count).toBe(THRESHOLDS.bulkExportThreshold);
+  }, 20000);
+
+  test('正向对照：频控键空闲时通知照发 ⇒ 上一条的"没发"来自闸而不是投递链断裂', async () => {
+    const user = await makeExportUser('ctl');
+    const username = user.username;
+    delivery.sendNotification.mockClear();
+
+    await securityAlert.checkBulkExport(
+      String(user._id),
+      username,
+      THRESHOLDS.bulkExportThreshold,
+      'report_export'
+    );
+    await settle();
+
+    expect(delivery.sendNotification).toHaveBeenCalledTimes(1);
+    expect(delivery.sendNotification.mock.calls[0][0]).toBe(ALERT_TYPES.BULK_EXPORT);
+    expect(await AuditLog.countDocuments({ action: ALERT_TYPES.BULK_EXPORT, username })).toBe(1);
+  }, 20000);
 });
 
 // ============================ 写法门禁：闸的位置 ============================
@@ -292,6 +357,29 @@ describe('写法门禁：shouldSendAlert 必须排在审计与封禁之后', () 
     // 是既有的正确设计（账号维度达标不封 IP，防 NAT 无辜陪绑），与本闸无关。
     const beforeAudit = body.slice(0, audit);
     expect(beforeAudit.search(/\breturn\b/)).toBe(-1);
+  });
+
+  // 同一族的第三个检测器（2026-10-01 补齐）：checkBulkExport 此前是
+  // `if (!shouldSendAlert(key)) return;` 排在 `await AuditLog.create(...)` 之前，
+  // 一行把 HIGH 级审计证据一起关在门外。前两条用例只覆盖 checkBruteForce 与
+  // checkPermissionAbuse，所以这处同形缺陷一直没人守。
+  test('checkBulkExport：shouldSendAlert 不得出现在审计落库之前', () => {
+    const src = stripComments(
+      fs.readFileSync(path.join(__dirname, '..', '..', 'services', 'securityAlert.js'), 'utf8')
+    );
+    const from = src.indexOf('const checkBulkExport =');
+    expect(from).toBeGreaterThan(-1);
+    const body = src.slice(from, src.indexOf('\nconst checkUnusualTime', from));
+
+    const gate = body.indexOf('shouldSendAlert(');
+    const audit = body.indexOf('await AuditLog.create(');
+    expect(gate).toBeGreaterThan(-1);
+    expect(audit).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(audit);
+    // 审计之前唯一的早退必须是"未达阈值"，不能是频控
+    const beforeAudit = body.slice(0, audit);
+    expect(beforeAudit).toContain('bulkExportThreshold');
+    expect(beforeAudit.search(/shouldSendAlert/)).toBe(-1);
   });
 
   test('checkPermissionAbuse 的处置侧：首个 shouldSendAlert 晚于审计与封禁', () => {

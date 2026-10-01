@@ -6,6 +6,8 @@
 # 环境变量：
 #   MONGODB_URI      必填，目标库连接串
 #   RESTORE_CONFIRM  非交互场景下的确认令牌，须等于目标库名
+#   RESTORE_SKIP_CHECKSUM 可选，默认 false。true = 跳过 <归档>.sha256 完整性校验，
+#                    仅用于恢复无校验和的历史/外部归档；缺失 sidecar 本身是硬失败
 #   MONGO_RESTORE_TRANSPORT 可选，local | docker（默认 docker，与 backup-mongo.sh 同口径）
 #   MONGO_COMPOSE_SERVICE   可选，容器内执行 mongorestore 的服务名（默认 mongo）
 #   MONGO_CONTAINER_HOST    可选，容器内连接地址（默认 127.0.0.1:27017）
@@ -45,6 +47,55 @@ BACKUP_FILE=$1
 if [ ! -f "$BACKUP_FILE" ]; then
   echo "Error: Backup file not found: $BACKUP_FILE" >&2
   exit 1
+fi
+
+# ================= 完整性校验（解密与写库之前）=================
+# 备份侧对**每个**产物都写一份 .sha256（backup-mongo.sh 的加密与明文两条分支都调
+# crypto_checksum），但恢复侧此前从不读它：从异地取回的归档哪怕传错文件、被截断、
+# 被替换，也照样进 mongorestore。deployment/backup-encryption.md 把「先 sha256sum
+# --check」写成恢复前的人工步骤——一道只存在于文档、代码从不执行的防线等于没有防线，
+# 而恢复恰恰是在最糟的时刻（数据已经出事）才跑的那条路径。
+#
+# 校验对象是**取回的原文件**（密文或明文归档），放在解密之前 ⇒ 覆盖传输/存储环节的
+# 全部损坏；私钥对不对由后续 gpg 自己判。
+#
+# 比对**哈希值**而不用 `sha256sum --check`：sidecar 里记的是备份宿主机上的路径字符串
+# （含目录；Windows 侧还会带 \ 转义与 * 二进制模式标记），而异地副本常被改名或换目录，
+# --check 会因为文件名对不上直接报 "no such file"——那等于逼操作者跳过校验。
+#
+# 缺 sidecar 按失败处理（与"忘配加密 = 硬失败"同一条口径）：静默放行会让
+# "有没有校验和"退化成"备份文件有没有被完整复制"的运气。确需恢复无校验和的
+# 历史/外部归档时，显式 RESTORE_SKIP_CHECKSUM=true，且警告走 stderr。
+CHECKSUM_FILE="$BACKUP_FILE.sha256"
+if [ "${RESTORE_SKIP_CHECKSUM:-false}" = "true" ]; then
+  echo "警告：RESTORE_SKIP_CHECKSUM=true —— 本次恢复的归档未经任何完整性证明" >&2
+elif [ ! -f "$CHECKSUM_FILE" ]; then
+  echo "Error: 缺少校验和文件：$CHECKSUM_FILE" >&2
+  echo "       备份脚本会为每个产物生成 .sha256，异地取回时须一并取回。" >&2
+  echo "       确需恢复无校验和的归档：显式设置 RESTORE_SKIP_CHECKSUM=true（不建议）" >&2
+  exit 1
+else
+  # grep -oE 只取 64 位十六进制串：与 sidecar 的分隔符形态（两空格 / 单个 * / 前置 \）解耦。
+  # `|| true` 是必需的：set -e + pipefail 下 grep 无匹配会让赋值命令替换直接结束脚本，
+  # 那样下面那个 -z 分支永远走不到（一道写在那里却不可能执行的分支，和死代码同罪）。
+  EXPECTED_HASH=$(grep -oE '[0-9a-f]{64}' "$CHECKSUM_FILE" | head -1 || true)
+  ACTUAL_HASH=$(sha256sum "$BACKUP_FILE" | grep -oE '[0-9a-f]{64}' | head -1 || true)
+  if [ ${#EXPECTED_HASH} -ne 64 ]; then
+    echo "Error: 校验和文件里解析不出 sha256（期望 64 位十六进制）：$CHECKSUM_FILE" >&2
+    exit 1
+  fi
+  if [ -z "$ACTUAL_HASH" ]; then
+    echo "Error: 无法为归档计算 sha256（sha256sum 不可用或文件不可读）：$BACKUP_FILE" >&2
+    exit 1
+  fi
+  if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+    echo "Error: 归档完整性校验失败 —— 已终止恢复（未解密、未写库）" >&2
+    echo "       期望 $EXPECTED_HASH" >&2
+    echo "       实际 $ACTUAL_HASH" >&2
+    echo "       文件 $BACKUP_FILE" >&2
+    exit 1
+  fi
+  echo "完整性校验通过：sha256=${ACTUAL_HASH}"
 fi
 
 if [ -z "${MONGODB_URI:-}" ]; then

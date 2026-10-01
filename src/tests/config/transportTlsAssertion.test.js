@@ -141,4 +141,31 @@ describe('传输加密启动断言（P2-⑧）', () => {
     withEnv({ NODE_ENV: 'development', MONGODB_URI: 'mongodb://prod-server:27017/db' });
     expect(runValidate().fatal).toBe(false);
   });
+
+  /**
+   * 未指定地址（:: / 0.0.0.0）= 任意接口，与回环恰好相反。
+   * 修前 `::` 被当成回环而 `0.0.0.0` 没有——同一条"可能出网卡"的事实给出两种口径，
+   * 于是 mongodb://[::]/ 形态静默跳过 TLS 断言。两侧一并钉住，防止再单边回归。
+   */
+  test('未指定地址不是回环：:: 与 0.0.0.0 口径对称', () => {
+    const { isLoopbackHostname } = require('../../config/transportSecurity');
+    for (const unspecified of ['::', '[::]', '0.0.0.0']) {
+      expect(isLoopbackHostname(unspecified)).toBe(false);
+    }
+    for (const loopback of ['::1', '[::1]', '127.0.0.1', 'localhost', '::ffff:127.0.0.1']) {
+      expect(isLoopbackHostname(loopback)).toBe(true);
+    }
+  });
+
+  test('Mongo 指向 [::] 且无 tls ⇒ 硬错误（曾因被误判回环而静默放行）', () => {
+    withEnv({ MONGODB_URI: 'mongodb://[::]:27017/db' });
+    const { fatal, lines } = runValidate();
+    expect(fatal).toBe(true);
+    expect(lines.join('\n')).toContain('MONGODB_URI');
+  });
+
+  test('Redis 指向 [::] 明文 ⇒ 硬错误', () => {
+    withEnv({ REDIS_URL: 'redis://[::]:6379' });
+    expect(runValidate().fatal).toBe(true);
+  });
 });

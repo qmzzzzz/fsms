@@ -559,9 +559,43 @@ describe('Top-2 部署前置：告警接收端未注入即拒绝（fail-closed�
     expect(r.errors[0]).toMatch(/未发现任何 webhook 接收端|断开/);
   });
 
-  test('读不到配置 → warning 而不是静默放行（"没验成"必须显形）', () => {
+  test('读不到配置 ⇒ 判不过（2026-10-01 修正：只写 warning 等于门禁判绿）', () => {
+    // 旧行为：errors 为空 + 一条 warning。而本函数的裁决位是 `ok = errors.length === 0`
+    // （deployPolicy.js:109）⇒ alertmanager.yml 被删/未挂载/无读权限时，告警链必然不可用，
+    // 发布却照样通过。2026-09-26 那次修复的标题就是「fail-closed」，这一支恰好没关上。
     const r = checkAlertingEndpoint({}, fakeFs(fullSecrets()));
+    expect(r.errors.length).toBe(1);
+    expect(r.errors[0]).toContain('无法确认 webhook 是否已注入');
+    expect(r.errors[0]).toContain('「判不了」按不通过处理');
+    // 必须给动作：只说"不行"的门禁让人无法收尾
+    for (const hint of ['ALERTMANAGER_CONFIG_PATH', 'ALLOW_PLACEHOLDER_ALERT_WEBHOOK=true']) {
+      expect(r.errors[0]).toContain(hint);
+    }
+    expect(r.warnings).toEqual([]);
+  });
+
+  test('接线：读不到配置时完整 preflight 入口也必须拒绝（判据存在≠生效）', () => {
+    const r = validatePreflight(validEnv(), fakeFs(fullSecrets()));
+    expect(r.ok).toBe(false);
+    expect(r.errors.join('\n')).toContain('未能读取告警接收端配置');
+  });
+
+  test('ALERT_CHECK_SKIPPED=true 是唯一放行口，且放行必须显形', () => {
+    // 存在这个口的理由不是"方便"：deployPolicy.js 也被非部署流程当库调用（静态合规脚本、
+    // CI 里只解析资源参数的那一步），那些现场没有 alertmanager.yml 属正常，
+    // 硬拦会把合法用法变成必然失败——而"必然失败的门禁"的下一站就是 continue-on-error。
+    const r = checkAlertingEndpoint({ ALERT_CHECK_SKIPPED: 'true' }, fakeFs(fullSecrets()));
     expect(r.errors).toEqual([]);
-    expect(r.warnings.join('\n')).toContain('无法确认 webhook 是否已注入');
+    expect(r.warnings.join('\n')).toContain('没有任何证据表明');
+    // 与 ALLOW_PLACEHOLDER_ALERT_WEBHOOK 同一套严格度：只认字面 'true'，
+    // 放行口靠猜写法给出等于把"告警静默丢失"的许可发给任何拼错的人
+    for (const v of ['1', 'yes', 'on', 'TRUE', '']) {
+      expect(
+        checkAlertingEndpoint({ ALERT_CHECK_SKIPPED: v }, fakeFs(fullSecrets())).errors.length
+      ).toBe(1);
+    }
+    expect(
+      checkAlertingEndpoint({ ALERT_CHECK_SKIPPED: ' true ' }, fakeFs(fullSecrets())).errors.length
+    ).toBe(0);
   });
 });

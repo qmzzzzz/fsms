@@ -7,8 +7,15 @@ const {
   EXPORT_ROW_TRANSFORMS,
   createSafeTransform,
 } = require('./reportExportService');
+// 「按需挂 collation」的判据只有一份（utils/auditQuery）：CSV 导出链早就用它，
+// xlsx 这条链此前从未挂过——username 条件改成前缀形态后，不挂就会**漏**记录
+// （默认二进制 collation 下 ADMIN 不落在 [adm, adn) 内），见 auditQuery.js:190-201。
+const { withCollation } = require('../utils/auditQuery');
+// 业务日口径只有一份（constants/timezone）：仪表盘「今日」、报表日期边界、告警的
+// 非工作时间判定都读它，导出文件名没有理由例外。
+const { businessDateParts } = require('../constants/timezone');
 
-const streamExportRows = async (worksheet, config, query, safeTransform) => {
+const streamExportRows = async (worksheet, config, query, safeTransform, collation = null) => {
   // 封顶必须落到查询上：多取一条当"是否真的还有后续"的探针，
   // 于是"恰好 EXPORT_LIMIT 行"不会被误报成截断（与审计 CSV 导出同一判据）。
   const probeLimit = EXPORT_LIMIT + 1;
@@ -20,12 +27,15 @@ const streamExportRows = async (worksheet, config, query, safeTransform) => {
   let rowsLost = 0;
 
   if (config.populate && config.populate.length > 0) {
-    const idDocs = await config.model
-      .find(query)
-      .sort({ ...config.sort, _id: 1 })
-      .limit(probeLimit)
-      .select('_id')
-      .lean();
+    const idDocs = await withCollation(
+      // 排序取 config.sort 原样，**不再补 `_id: 1`**：那份配置现在声明的是全序
+      // （与列表接口同一个 `{key:-1,_id:-1}`，理由见 reportExportService.js 的
+      // EXPORT_MODEL_CONFIG 注释）。这里再补一个反向的 `_id: 1`，等于让"取 id 的腿"
+      // 和"列表"对并列行取不同先后 ⇒ 撞上限时边界那条记录两边不是同一条；
+      // 且混合方向用不上 `{key:-1,_id:-1}` 索引，退化成 5001 条的阻塞内存排序。
+      config.model.find(query).sort(config.sort).limit(probeLimit).select('_id'),
+      collation
+    ).lean();
     truncated = idDocs.length > EXPORT_LIMIT;
     const orderedIds = (truncated ? idDocs.slice(0, EXPORT_LIMIT) : idDocs).map((d) => d._id);
 
@@ -33,11 +43,13 @@ const streamExportRows = async (worksheet, config, query, safeTransform) => {
     const docById = new Map();
     for (let i = 0; i < orderedIds.length; i += BATCH_SIZE) {
       const idBatch = orderedIds.slice(i, i + BATCH_SIZE);
-      const docs = await config.model
-        .find({ $and: [query, { _id: { $in: idBatch } }] })
-        .populate(config.populate)
-        .select(config.select)
-        .lean();
+      const docs = await withCollation(
+        config.model
+          .find({ $and: [query, { _id: { $in: idBatch } }] })
+          .populate(config.populate)
+          .select(config.select),
+        collation
+      ).lean();
       for (const doc of docs) docById.set(String(doc._id), doc);
     }
 
@@ -51,12 +63,10 @@ const streamExportRows = async (worksheet, config, query, safeTransform) => {
       written += 1;
     }
   } else {
-    const cursor = config.model
-      .find(query)
-      .sort(config.sort)
-      .limit(probeLimit)
-      .select(config.select)
-      .cursor();
+    const cursor = withCollation(
+      config.model.find(query).sort(config.sort).limit(probeLimit).select(config.select),
+      collation
+    ).cursor();
     for await (const doc of cursor) {
       if (written >= EXPORT_LIMIT) {
         // 探针那一条：只证明"后面还有"，不写进文件
@@ -95,10 +105,18 @@ const TRUNCATION_HEADER = 'X-Export-Truncated';
 const buildTruncationFooter = ({ total, written, truncated, rowsLost, countDrift }) => {
   const reasons = [];
   if (truncated) {
-    reasons.push(
-      `本文件仅包含前 ${EXPORT_LIMIT} 行` +
-        `（${total > 0 ? `命中总数 ${total}` : `命中数 ≥ ${EXPORT_LIMIT + 1}`}）`
-    );
+    // `truncated` 是**取数腿**亲眼看到的证据：它读到了第 EXPORT_LIMIT+1 条。
+    // 而 total 来自更早的计数腿，两腿之间新增的行它一个都没数到。
+    // 原措辞无条件写"命中总数 ${total}"，于是 total ≤ 上限时脚注自相矛盾——
+    // 文件明明被截断，文案却说命中数正好等于文件里那份切片的行数，
+    // 被截掉的那批在材料里不存在（计数腿 5000 条 + 计数后新增 1 条即触发）。
+    // 计数腿缺位（total 非有限数）时退回下界表述，与原行为一致。
+    const phrase = !Number.isFinite(total)
+      ? `命中数 ≥ ${EXPORT_LIMIT + 1}`
+      : total > EXPORT_LIMIT
+        ? `命中总数 ${total}`
+        : `取数时命中 ≥ ${EXPORT_LIMIT + 1}（计数腿只数到 ${total}，两腿之间有新增）`;
+    reasons.push(`本文件仅包含前 ${EXPORT_LIMIT} 行（${phrase}）`);
   }
   if (rowsLost > 0) {
     reasons.push(`${rowsLost} 行在导出期间被删除或不再匹配筛选条件（实际写入 ${written} 行）`);
@@ -177,10 +195,15 @@ const writeWorkbookToResponse = async (res, workbook) => {
   if (aborted) throw aborted;
 };
 
-const writeExportWorkbook = async (res, { type, query, total = null }) => {
+const writeExportWorkbook = async (res, { type, query, total = null, collation = null }) => {
   const config = EXPORT_MODEL_CONFIG[type];
   const sheetName = EXPORT_SHEET_NAMES[type] || '数据导出';
-  const filename = `${sheetName}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  // 文件名里的日期必须是**业务日**：原先用 `new Date().toISOString().slice(0,10)`，那是第三个
+  // 口径（裸 UTC）——既不是这次查询用的 `?tz=`（前端传浏览器时区，见 reportController
+  // resolveQueryTimezone），也不是全仓声明的业务时区。后果：东八区 10-01 00:30 点导出的文件
+  // 名字写着 09-30，而同一份文件的日期过滤边界与仪表盘的「今日」都算 10-01。
+  // 导出的 xlsx 是会被归档的取证件，名字里的日子说错一天就够人怀疑整份件。
+  const filename = `${sheetName}_${businessDateParts().dateStr}.xlsx`;
   res.setHeader(
     'Content-Type',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -197,7 +220,8 @@ const writeExportWorkbook = async (res, { type, query, total = null }) => {
     worksheet,
     config,
     query,
-    safeTransform
+    safeTransform,
+    collation
   );
   // 三种不完整共用同一个头（头只表态"不保证完整"），由脚注区分成因。
   // 对账这一式必须在这里做而不能塞进 streamExportRows：游标分支"少行"的形态

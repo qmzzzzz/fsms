@@ -116,10 +116,21 @@ class AlarmService {
    * 根据 ID 获取报警详情
    */
   async getAlarmById(id) {
-    return FireAlarm.findById(id)
-      .populate({ path: 'deviceId', select: 'deviceCode deviceName deviceType' })
-      .populate({ path: 'handler', select: 'username realName phone' })
-      .populate({ path: 'processLog.operator', select: 'username realName' });
+    return (
+      FireAlarm.findById(id)
+        .populate({ path: 'deviceId', select: 'deviceCode deviceName deviceType' })
+        // 与上面两条列表分支同口径：handler 只取 username/realName。
+        // 此处原多带一个 `phone`，而 User.phone 的 getter 会把密文解成明文
+        // （models/User.js:99），于是 GET /api/alarms/:id 把处置人的完整手机号
+        // 直接回给任何持 `alarm:read` 且在该条范围内的账号——没有二次验证、没有
+        // `system:read`、也没有 view_sensitive_data 审计。那条合规通道
+        // （POST /api/security/view-sensitive）专门挂了 reauthLimiter +
+        // requireReAuthentication，被这个多出来的 select 架空了。
+        // 前端无 handler.phone 消费者（web-admin 全文 0 处），故收窄即行为对齐，
+        // 不损失任何界面功能。
+        .populate({ path: 'handler', select: 'username realName' })
+        .populate({ path: 'processLog.operator', select: 'username realName' })
+    );
   }
 
   /**

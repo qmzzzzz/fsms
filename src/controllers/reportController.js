@@ -58,6 +58,7 @@ const FireAlarm = require('../models/FireAlarm');
 const {
   scopeFilterFor,
   buildExportQuery,
+  collationOptionsForExport,
   validateAuditExportEnums,
   EXPORT_MODEL_CONFIG,
 } = require('../services/reportExportService');
@@ -307,10 +308,13 @@ const exportReport = asyncHandler(async (req, res) => {
 
   // 批量导出检测：导出前统计命中行数，超过阈值触发高危审计与告警（补齐导出审计盲区）
   const { checkBulkExport } = require('../services/securityAlert');
-  const exportTotal = await EXPORT_MODEL_CONFIG[type].model.countDocuments(query);
+  // 同一个 options 对象喂给计数腿与取数腿：两条腿若挂了不同口径的 collation，
+  // "命中数"与"写出行数"就对不上，而脚注只会说"缺行"，说不出其实是口径不一致。
+  const collationOptions = collationOptionsForExport(query);
+  const exportTotal = await EXPORT_MODEL_CONFIG[type].model.countDocuments(query, collationOptions);
   await checkBulkExport(req.user.userId, req.user.username, exportTotal, `report_export_${type}`);
 
-  await writeExportWorkbook(res, { type, query, total: exportTotal });
+  await writeExportWorkbook(res, { type, query, total: exportTotal, ...collationOptions });
 });
 
 module.exports = {

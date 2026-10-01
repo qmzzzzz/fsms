@@ -27,6 +27,9 @@ const { businessDayBounds } = require('../constants/timezone');
 // 与告警取数、审计页 level=error、行为基线 highRisk 必须同进同退，各抄一份字面量就会分叉。
 const { AUDIT_RISK_LEVELS, AUDIT_ERROR_RISK_LEVELS } = require('../constants/audit');
 const { onAuditWriteFailure, onAuditWriteFailureRethrow } = require('../utils/auditWriteFailure');
+// 安全判定与 PII 查看留痕的客户端地址只有一个口径（utils/ipUtils.js）：
+// `req.ip` 在开着 trust proxy 时取自请求方自己写的 X-Forwarded-For。
+const { clientIpForSecurityDecision } = require('../utils/ipUtils');
 
 /**
  * 获取当前用户的安全信息
@@ -254,7 +257,7 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
       sensitiveData = {
         type: 'phone',
         masked: DataMasking.maskPhone(user.phone),
-        full: user.phone, // 实际场景应解密后返回
+        full: user.phone, // 已是明文：schema 上 phone 的 get 即 decryptPii（P1-②），不要再解一次
       };
       break;
     case 'email':
@@ -286,7 +289,12 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
     targetUserId: user._id,
     targetUsername: user.username,
     dataType,
-    ip: req.ip,
+    // 这条记录是本操作唯一的留痕（上面设了 skipGlobalAudit），而留痕的意义在于归因。
+    // 原实现取 `req.ip`：开着 trust proxy 时那就是请求方自己写的 X-Forwarded-For，
+    // 读别人手机号的人可以顺手挑一个写进取证记录（auth.js 的 IP 范围拒绝审计早就
+    // 用 clientIpForSecurityDecision 了，全仓唯一的 PII 查看留痕却漏了它 —— 同一件事
+    // 两种口径，两边会互相"证明"对方没问题）。
+    ip: clientIpForSecurityDecision(req),
     userAgent: req.get('user-agent'),
     success: true,
     riskLevel: 'medium',

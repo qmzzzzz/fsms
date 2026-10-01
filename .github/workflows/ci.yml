@@ -632,5 +632,10 @@ jobs:
       - name: Sign image (keyless)
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
-          IMAGE: ghcr.io/${{ github.repository }}
+          # 复用 steps.meta 的 image 输出，不在这里重拼一次 `ghcr.io/${{ github.repository }}`：
+          # 上面 Compute image tags 走的是 `${GITHUB_REPOSITORY,,}`（小写化），而 GitHub 仓库名
+          # 允许大写字母。OCI 参考格式规定 repository 段必须小写，所以大写形态下这一步会以
+          # "invalid reference format" 失败——签名步骤整条断掉，而它前面 SBOM 用的又是小写输出，
+          # 于是"构建成功、SBOM 成功、签名红"。同一个镜像名在一条流水线里只允许有一个来源。
+          IMAGE: ${{ steps.meta.outputs.image }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
