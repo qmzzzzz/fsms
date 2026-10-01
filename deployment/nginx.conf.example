@@ -17,6 +17,44 @@
 #     前端 dev/preview 已在 vite.config.js 下发安全头；此配置用于生产域名的最终落地。
 #
 # 使用：替换 your-domain.example、证书路径后启用，并将 80 端口重定向到 443。
+#
+# 审计整改说明（2026-10-01）：
+#   - finding #6「前端文档零 CSP」：静态直出路径（location / 与 /assets/）补 nginx 侧
+#     静态 CSP——此前 SPA 由 try_files 直出、完全不经过后端 nonce CSP（src/middleware/
+#     security.js 只覆盖反代路径），前端面等于无 CSP 裸奔。反代路径维持后端下发、
+#     nginx 不叠加（交集问题只发生在同一响应携带两个 CSP，按路径分工即可化解）。
+#   - finding #10「nginx 缺边缘资源闸与兜底块」：补 limit_req（/api 两条入口）、
+#     超时族（client_header/body_timeout、send/keepalive_timeout + 反代块
+#     proxy_connect/send_timeout 显式钉值）、client_max_body_size 1m（与后端
+#     body parser 显式对齐）与 443 default_server 兜底块
+#     （ssl_reject_handshake + return 444）。契约由
+#     src/tests/deploy/nginxProxyContract.test.js 把守。
+
+# ===== 边缘资源闸（finding #10；本文件按 conf.d include 进 http{}，此处为 http 级指令）=====
+# 慢速攻击（slowloris / slow-read / slow-post）防线：威胁模型把这类防线显式交给
+# nginx 超时（后端 body parser 不做请求级超时，Node 默认 timeout 也不以「踢掉慢连接」
+# 为语义）。取值原则：比最慢的合法客户端更宽，比攻击者挂连接的成本更窄。
+client_header_timeout 10s;   # 请求头整体送达期限；合法客户端一个 RTT 内发完，10s 已覆盖极慢移动网络
+client_body_timeout 30s;     # body 相邻两次读之间的上限（非总时长）；1MB 上限下足够宽松
+send_timeout 60s;            # 向客户端写响应的相邻写间隔上限；显式钉住默认值，防上游 nginx.conf 静默变更
+keepalive_timeout 30s;       # 默认 75s 偏长：缩短半开连接占用窗口，SPA 短请求场景无感
+
+# 请求体上限与后端 body parser **显式对齐**（src/app.js: express.json / express.urlencoded
+# limit '1mb' = 1048576B，nginx 1m 同值）：超限请求 nginx 直接回 413，根本不进 Node 的
+# JSON.parse。这是显式声明而非巧合一致——任一侧调整必须同步另一侧。
+# WebSocket 升级请求没有请求体、socket.io 轮询 POST 是小帧，均不受影响；
+# 全仓无文件上传路由（无 multer/multipart），不存在被误伤的合法大请求体。
+client_max_body_size 1m;
+
+# /api 入口限流的令牌桶（按客户端 IP）。应用侧 generalLimiter = 300 次/15 分钟/IP
+# ≈ 0.33 r/s（src/config/index.js rateLimit 默认 + src/middleware/rateLimit.js），取值依据：
+#   - rate=10r/s：约为应用侧持续配额的 30 倍——正常流量永远不该先于应用限流被本闸拦下
+#     （应用限流带白名单/探针豁免、审计与 JSON 429 语义，必须让它当主闸）；本闸只截
+#     扫描器/爆破量级的洪峰，在 Node 事件循环与 JSON.parse 之前把它们丢弃。
+#   - burst=20 nodelay：吸收 SPA 交互的天然前载突发；nodelay 立即放行突发额度而非
+#     延迟整形——给交互式 API 加延迟没有安全收益，只有体验损失。
+#   - 10m 共享内存 ≈ 16 万个 IPv4 客户端状态（每状态约 64B），裸 IP 粒度足够公网面。
+limit_req_zone $binary_remote_addr zone=api_perip:10m rate=10r/s;
 
 # HTTP -> HTTPS 强制跳转
 server {
@@ -27,7 +65,9 @@ server {
     # 与后端 app.disable('x-powered-by') 同一口径：不把栈信息白送给指纹匹配者。
     server_tokens off;
     # 跳转目标写字面域名，不用 $host：$host 取自请求的 Host 头，而本块是 :80 的
-    # 默认 server（唯一声明该端口的块自动成为默认），因此任何解析到本机的域名都会被
+    # 默认 server（唯一声明该端口的块自动成为默认；:443 侧因存在多个块，默认身份
+    # 由文末的 default_server 兜底块**显式**声明——两个端口的机制不同，见文末注释），
+    # 因此任何解析到本机的域名都会被
     # 它接管并发出 `301 https://evil.com/...`——开放重定向，可直接用于钓鱼；
     # 配合上面的 HSTS preload 危害更大。$request_uri 只含路径/查询，不含主机，安全。
     return 301 https://your-domain.example$request_uri;
@@ -72,10 +112,17 @@ server {
     add_header Cross-Origin-Opener-Policy "same-origin" always;
     add_header Cross-Origin-Resource-Policy "same-origin" always;
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()" always;
-    # 生产 CSP：由后端按每请求下发（src/middleware/security.js）——style-src 携带
-    # 每请求随机 nonce，仅 /api-docs(Swagger) 路径放行 'unsafe-inline'。
-    # **不要**在此再 add_header Content-Security-Policy：浏览器对同一响应携带的
-    # 多个 CSP 取交集，静态策略没有 nonce，会把后端放行的内联样式全部拦掉。
+    # ===== CSP 分工（finding #6 改写）=====
+    # 浏览器对同一响应携带的**多个** CSP 取交集（每个策略都须放行，响应里被任一策略
+    # 禁止的资源即被拦）——交集问题只发生在「一个响应、两个 CSP」，因此按路径划分
+    # 谁下发即可，不存在全文件级的「不许加 CSP」：
+    #   - 反代路径（下方所有 proxy_pass 块）：响应由后端 src/middleware/security.js
+    #     按每请求下发 CSP——style-src 带每请求随机 nonce，仅 /api-docs(Swagger)
+    #     放行 'unsafe-inline'。本文件在 server 级与这些 location **都不加** CSP：
+    #     静态策略没有 nonce，一旦叠加就会把后端放行的内联样式全部拦掉。
+    #   - 静态直出路径（location / 与 /assets/，含 SPA fallback）：请求根本不到后端，
+    #     上述 nonce CSP 永远不会出现——这两处必须在 nginx 侧各自下发静态 CSP
+    #     （见下方两块。L-09：add_header 在嵌套块是整体替换，故连同安全头整套重声明）。
 
     # ===== 传输压缩（gzip + 可选 brotli） =====
     # element-plus / echarts chunk 体积较大，压缩后首屏传输量通常降低 60%–75%。
@@ -117,8 +164,40 @@ server {
         return 404;
     }
 
+    # SPA 直出（含 try_files 退到 /index.html 的 fallback）：不经过后端 CSP 中间件，
+    # 因此这里整套重声明安全头并新增静态 CSP（finding #6）。任何一条 add_header 出现
+    # 都会关掉对 server 级头的继承（L-09），所以是整套而非只写 CSP。
     location / {
         try_files $uri $uri/ /index.html;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-XSS-Protection "0" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()" always;
+        # 静态 CSP（finding #6）取值证据：
+        #   - script-src 'self'：构建产物 dist/index.html 全部为外链 script（vite 默认
+        #     不产内联 script，实测产物三个 script 均带 src），首帧主题脚本
+        #     theme-bootstrap.js 也是同源外链（index.html 模板注释明说「外链保证生产
+        #     CSP(script-src 'self')」）；生产不含 'unsafe-eval'：vue-i18n 走预编译产物
+        #     （vite.config.js 同口径）。
+        #   - style-src 保留 'unsafe-inline' 与 fonts.googleapis.com：global.css 以
+        #     @import 引入 Google Fonts（style-src 须放行其样式表）；element-plus 等组件
+        #     库在运行时经 style 属性/注入做定位与主题，去掉 'unsafe-inline' 会静默破坏
+        #     组件渲染。整体与 web-admin/vite.config.js buildSecurityHeaders 的生产 CSP
+        #     （vite preview 直跑 dist、已被前端侧验证）保持同源，避免两条托管路径分叉。
+        #   - font-src data: 与 fonts.gstatic.com：上述 @import 对应的字体文件域；
+        #     img-src blob: 同样对齐 vite 生产 CSP（本地对象 URL 预览场景）。
+        #   - connect-src 'self'：/api 与同源 wss /socket.io/ 均走本域（CSP3 起 'self'
+        #     覆盖同源 ws/wss；vite 生产 CSP 的 L8 注释同口径）。若启用 VITE_SENTRY_DSN
+        #     扇出（errorReporter 动态加载），须另行放行对应 ingest 域，否则被本策略拦截。
+        #   - frame-ancestors 'none'：与本 server 的 X-Frame-Options DENY 同口径（比
+        #     vite preview 的 'self' 更严；DENY 只管传统 frame，这是 CSP 标准指令）。
+        #   - sw.js/registerSW.js 也经本块直出并携带同一 CSP：与 vite preview 生产行为
+        #     一致（该基线已在用），文档上下文的策略不受子资源响应上的 CSP 头影响。
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
     }
 
     # 构建产物带内容哈希，可长期强缓存；index.html 不缓存以保证发版即时生效
@@ -126,8 +205,9 @@ server {
     # 【L-09 修复】nginx 的 add_header 在嵌套块中是**整体替换**而非继承：只要本块
     # 出现一条 add_header，server 级下发的 HSTS / X-Frame-Options / X-Content-Type-Options
     # / COOP / CORP / Permissions-Policy 在 /assets/ 路径上会**全部消失**（实测复现）。
-    # 因此这里必须把安全头整套重声明一遍。**改动 server 级清单时请同步本块**，
-    # 否则静态资源路径会静默退化为无安全头。
+    # 因此这里必须把安全头整套重声明一遍。**改动 server 级清单或 location / 的重声明
+    # 时请同步本块**——静态头现在有三份副本（server 级 + 两条直出 location 各一套，
+    # finding #6 之后直出套还各多一条静态 CSP），缺一份就是一条静默退化的路径。
     location /assets/ {
         expires 1y;
         add_header Cache-Control "public, immutable" always;
@@ -139,6 +219,9 @@ server {
         add_header Cross-Origin-Opener-Policy "same-origin" always;
         add_header Cross-Origin-Resource-Policy "same-origin" always;
         add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()" always;
+        # 静态 CSP（finding #6）：与 location / 为**同一份**策略（取值证据见其块内
+        # 注释），由契约测试断言两条副本逐字节一致——只改一条 = 另一条静默漂移。
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
     }
 
     # ===== 反向代理头：每个 proxy 块必须**完整重声明**四条 =====
@@ -163,6 +246,17 @@ server {
     # 限流与封禁对其失效，审计里的来源 IP 也是假的。
     #
     # 一致性由 src/tests/deploy/nginxProxyContract.test.js 把守（新增 proxy 块漏头即红）。
+    #
+    # 反代超时（finding #10）：每个反代块都显式声明 connect/send 超时，不依赖
+    # nginx 默认值——上游 nginx.conf 的静默变更不应改变本文件的边缘语义。
+    #   - proxy_connect_timeout 5s：上游是 127.0.0.1:3000，TCP connect 毫秒级，
+    #     5s 已极宽松；上游打满时快速失败（502）优于让客户端按默认 60s 干等。
+    #   - proxy_send_timeout：短请求块取 30s（请求体 ≤1MB、回环写入毫秒级）；
+    #     socket.io 取 60s——升级后的隧道里该计时器由「客户端→上游」方向的数据
+    #     刷新，socket.io 默认 25s 心跳（pingInterval）保证有流量，60s 留足抖动
+    #     余量（取 30s 会把慢网络下正常的心跳间隙误判为僵死连接）。
+    #   - proxy_read_timeout：/api 两条入口显式钉住默认 60s（见其块内注释），
+    #     其余短请求块沿用同一默认值；socket.io 300s 是僵死连接回收闸（见其块）。
 
     # ===== Prometheus /metrics（无鉴权端点，必须限制抓取来源） =====
     # 应用侧该端点不带认证（设计给 Prometheus 抓取），暴露公网等于泄露
@@ -171,6 +265,9 @@ server {
         allow 127.0.0.1;
         allow 10.0.0.0/8;        # ← 改成实际监控采集网段
         deny all;
+        # connect/send 超时口径见上方「反向代理头」段落（finding #10）
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 30s;
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -182,6 +279,9 @@ server {
     # /csp-report（CSP 违规）、/client-errors（前端异常/Web Vitals，G-1）
     # 均由浏览器自动发起、无法带认证；后端自带独立限流
     location ~ ^/(csp-report|client-errors)$ {
+        # connect/send 超时口径见上方「反向代理头」段落（finding #10）
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 30s;
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -198,6 +298,9 @@ server {
     # 用 regex 而非 ^~ /.well-known/：后者会把 ACME http-01 挑战（/.well-known/acme-challenge/）
     # 一并转给后端，签单即失败。
     location ~ ^/(?:\.well-known/)?security\.txt$ {
+        # connect/send 超时口径见上方「反向代理头」段落（finding #10）
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 30s;
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -207,6 +310,18 @@ server {
 
     # ===== 后端 API 反向代理（TLS 在此终结，后端可走明文内网） =====
     location /api/ {
+        # 边缘限流（finding #10）：zone 取值依据见文件顶部 limit_req_zone 处注释。
+        # 只落在 /api 的两条入口——/socket.io/ 长连接语义不同（见其块内注释）刻意豁免；
+        # 上报端点由后端独立限流、/metrics 有 ACL、/health 是探针，都不在本闸范围。
+        limit_req zone=api_perip burst=20 nodelay;
+        # 与后端 express-rate-limit 的 429 语义对齐（nginx 默认 503 会误导客户端退避
+        # 逻辑与监控告警口径）。
+        limit_req_status 429;
+        # 上游在回环地址：connect 毫秒级，5s 已极宽松；read/send 是把 nginx 默认值
+        # 显式钉在本文件，防上游 nginx.conf 静默变更（socket.io 的 300s 是长连接特例）。
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 60s;
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -224,9 +339,16 @@ server {
     # `/apixyz.html` 这类未来的静态资源，把不该转发的请求也代理走。
     # 已知取舍：app.js 的 ipLimiter/generalLimiter/auditLog 挂在 `app.use('/api/')` 下，
     # 该精确路径不经过它们（全站级的 checkIPBlacklist 与 protocolCompliance 仍在）。
-    # 这条响应是常量 JSON、不碰数据库，故不额外为其加限流闸；若将来它变成有状态的端点，
+    # 应用侧的限流缺口由网关侧补齐：本块与 /api/ 共用同一条 limit_req（finding #10，
+    # 取值依据见文件顶部）——响应虽是常量 JSON，边缘闸的本意也是让扫描器的侦察请求
+    # 付出速率代价。若将来它变成有状态的端点，
     # 必须改挂到 /api/ 前缀之下而不是继续扩大本块。
     location = /api {
+        limit_req zone=api_perip burst=20 nodelay;
+        limit_req_status 429;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 60s;
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -239,6 +361,9 @@ server {
     # 这里仍按同一口径补齐四条：豁免是中间件的默认参数而非契约，且探针的
     # 来源 IP 同样要进审计。/readyz 刻意不对外（容器健康检查直连 3000）。
     location /health {
+        # connect/send 超时口径见上方「反向代理头」段落（finding #10）
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 30s;
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -247,6 +372,10 @@ server {
     }
 
     # ===== WebSocket（wss，同源） =====
+    # 刻意**不加** limit_req（finding #10 范围说明）：WebSocket/长轮询是长连接语义，
+    # 握手后消息复用同一逻辑连接，按请求数计的令牌桶表达不了「连接数」，还会误伤
+    # long-polling 兜底传输；此处的资源闸是应用侧 MAX_CONNECTIONS=1000 与下方
+    # 300s 读超时（回收僵死连接），语义各自对位。
     location /socket.io/ {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -256,6 +385,31 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # connect/send 口径见上方「反向代理头」段落（finding #10）：send 取 60s
+        # 是心跳余量（非短请求块的 30s）；read 300s 回收闸保持不动。
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 60s;
         proxy_read_timeout 300s;
     }
+}
+
+# ===== 443 兜底块（finding #10）：未被上方命中的 SNI/Host 一律拒绝 =====
+# 此前 :443 只有主入口一个块，它自动成为该端口的默认 server——IP 直连扫描、证书透明度
+# 爬虫、任意伪造 SNI/Host 的客户端都能完成 TLS 握手并拿到整套 SPA 产物与安全头指纹。
+# 本块把默认身份显式抢过来：
+#   - ssl_reject_handshake on（nginx ≥1.19.4；本文件因主块 `http2 on` 已要求 ≥1.25.1）：
+#     对未匹配 SNI 直接断开握手，因此本块**不需要**证书，也不会响应任何应用层内容；
+#   - return 444 是纵深：若 ssl_reject_handshake 被旧版本环境移除，HTTP 层直接断连
+#     而不是给出可探测的响应；
+#   - server_name _ 与主块的字面域名互斥，不会抢占正常流量；
+#   - 无 root / 无 proxy_pass：兜底块不得携带任何可服务内容，否则等于第二个入口。
+# 与 :80 的差别（见 :80 块注释）：:80 的默认身份靠「唯一声明该端口的块」隐式成立，
+# :443 因为存在两个块，必须显式 default_server。契约由 nginxProxyContract.test.js 把守。
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    server_tokens off;
+    ssl_reject_handshake on;
+    return 444;
 }

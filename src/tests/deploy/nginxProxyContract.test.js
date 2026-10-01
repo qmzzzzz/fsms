@@ -19,6 +19,19 @@
  *     都会命中 :80 的默认 server 并被 301 到攻击者指定的主机（开放重定向）。
  *  4. 每个 server 块都要 `server_tokens off`（版本外泄 + 与本仓 app.disable('x-powered-by')
  *     同口径）。写它的原因是上面那条"两条路径都不经过 nginx"的盲区，而不是这一行本身多高危。
+ *
+ * finding #6/#10 合同（2026-10-01，第二个 describe）：
+ *  5. 静态直出路径（location / 与 /assets/）各自下发**同一份**静态 CSP 且含
+ *     script-src 'self' 等硬底线；CSP 只允许出现在这两块——server 级与反代块叠加
+ *     nginx 侧 CSP 会与后端 nonce CSP 取交集，把后端放行的内联样式全部拦掉。
+ *  6. http 级边缘闸：limit_req_zone、超时族（client_header/body_timeout、
+ *     send/keepalive_timeout）与 client_max_body_size 1m（与后端 express.json
+ *     limit '1mb' 显式对齐）必须在首个 server 块之前声明；limit_req 只落在
+ *     /api 两条入口（nodelay + 429），socket.io 长连接语义刻意豁免；每个反代块
+ *     另须显式钉住 proxy_connect/send_timeout（socket.io 的 send 60s 是心跳余量）。
+ *  7. 443 兜底块：default_server + ssl_reject_handshake + return 444 + server_tokens，
+ *     且不带 root/proxy_pass（任意未匹配 SNI 不再拿到整套 SPA）；:80 仍只有一个
+ *     监听者（其「唯一声明即默认」的前提不被破坏）。
  */
 
 const fs = require('fs');
@@ -85,6 +98,9 @@ const parseLocations = (text) => {
       head: loc.head,
       modifier,
       pattern,
+      // 块体（代码视图切片）：finding #6/#10 的 CSP / limit_req 合同直接在块体上
+      // 做指令级断言。早期版本没有这个字段，各用例只能各自重解析——统一暴露避免漂移。
+      body: loc.body,
       headers,
       proxied: /proxy_pass\s/.test(loc.body),
     };
@@ -271,20 +287,23 @@ describe('deployment/nginx.conf.example 反代契约', () => {
     // 部署方按它抄，抄漏一行就等于线上裸奔，而 supertest/e2e 两条路径都不经过 nginx
     // （见文件头）——漂移只有这里能看见。
     const servers = parseServers(code);
-    // 解析器自检：本文件有 :80 与 :443 两个 server 块。列表为空时下面的断言会全绿，
+    // 解析器自检：本文件有 :80 跳转、:443 主入口、:443 兜底三个 server 块（finding #10
+    // 加入兜底块后为 3）。列表为空时下面的断言会全绿，
     // 所以先把"确实解析到了"钉住（与 parseLocations 的自检同一条理由）。
-    expect(servers.length).toBe(2);
+    expect(servers.length).toBe(3);
     expect(findServerTokenGaps(code)).toEqual([]);
 
     // 可证伪：把**最后**一处真实指令改成注释形态，同一断言必须报出该缺口。
     // 这一条同时证明两件事：断言打的是代码视图（不是原文，否则注释里的同名文本会喂出假绿），
     // 以及缺口是按 server 块逐个报的（不是"全文出现过一次就放行"）。
+    // 最后一处属于文件末尾的 :443 兜底块（序号 2）：它没有证书与内容，唯一的价值
+    // 就是把「未匹配 SNI」挡死，server_tokens 在这里同样是默认身份的一部分。
     const last = text.lastIndexOf('server_tokens off;');
     expect(last).toBeGreaterThan(-1);
     const mutated =
       text.slice(0, last) + '# server_tokens off;' + text.slice(last + 'server_tokens off;'.length);
     expect(findServerTokenGaps(codeView(mutated))).toEqual([
-      { server: 1, missing: ['server_tokens off'] },
+      { server: 2, missing: ['server_tokens off'] },
     ]);
   });
 
@@ -292,5 +311,268 @@ describe('deployment/nginx.conf.example 反代契约', () => {
     // 这是一条「有意如此」的断言：将来若决定开放文档，需显式改这里并配认证。
     const loc = matchLocation('/api-docs.json', locations);
     expect(loc.proxied).toBe(false);
+  });
+});
+
+// ============================================================================
+// finding #6（静态直出路径 CSP）与 finding #10（边缘资源闸 + 443 兜底）的合同。
+// 背景与 #1-#4 同源：supertest/e2e 都不经过 nginx，而这两项整改全部只落在
+// nginx 层——没有本组断言，它们在 CI 上同样是不可见的漂移。
+// ============================================================================
+
+const EXPECTED_STATIC_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  // 'unsafe-inline' 与 fonts.googleapis.com 是**有证据的保留**：global.css 以 @import
+  // 引入 Google Fonts；element-plus 组件运行时经 style 属性/注入做定位与主题。
+  // 与 web-admin/vite.config.js buildSecurityHeaders 的生产 CSP 同源（已被前端验证）。
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data: https://fonts.gstatic.com",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+];
+
+/** /api 两条入口（前缀 + 精确）都必须挂同一条边缘令牌桶 */
+const LIMIT_REQ_LOCATIONS = [
+  { modifier: '', pattern: '/api/' },
+  { modifier: '=', pattern: '/api' },
+];
+
+/** 从直出块提取 CSP 指令值（按分号拆分为指令数组；缺失返回 null） */
+const staticCspDirectives = (loc) => {
+  if (!loc) return null;
+  const m = /add_header[ \t]+Content-Security-Policy[ \t]+"([^"]+)"[ \t]+always;/.exec(loc.body);
+  if (!m) return null;
+  return m[1]
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean);
+};
+
+/** 纯函数：两条直出路径的静态 CSP 缺口清单（入参原文，内部走代码视图） */
+const findStaticCspGaps = (raw) => {
+  const locs = parseLocations(codeView(raw));
+  const root = staticCspDirectives(locs.find((l) => l.modifier === '' && l.pattern === '/'));
+  const assets = staticCspDirectives(
+    locs.find((l) => l.modifier === '' && l.pattern === '/assets/')
+  );
+  const gaps = [];
+  if (!root) gaps.push('location / 缺静态 CSP');
+  if (!assets) gaps.push('location /assets/ 缺静态 CSP');
+  // 同一份策略的两份副本必须逐指令一致：只改一条 = 另一条静默漂移（与 L-09 三份
+  // 安全头副本同一个道理，CSP 是其中最容易漏改的一条）
+  if (root && assets && root.join(';') !== assets.join(';')) {
+    gaps.push('location / 与 /assets/ 的静态 CSP 不一致');
+  }
+  for (const directive of EXPECTED_STATIC_CSP) {
+    if (root && !root.includes(directive)) gaps.push(`location / 的 CSP 缺 ${directive}`);
+    if (assets && !assets.includes(directive))
+      gaps.push(`location /assets/ 的 CSP 缺 ${directive}`);
+  }
+  return gaps;
+};
+
+/** 纯函数：limit_req 闸的落点缺口（必须在 /api 两条入口，且不得出现在其他反代块） */
+const findLimitReqGaps = (raw) => {
+  const locs = parseLocations(codeView(raw));
+  const gaps = [];
+  for (const want of LIMIT_REQ_LOCATIONS) {
+    const loc = locs.find((l) => l.modifier === want.modifier && l.pattern === want.pattern);
+    if (!loc) {
+      gaps.push(`${want.pattern} 块缺失`);
+      continue;
+    }
+    if (!/limit_req\s+zone=\S+\s+burst=\d+\s+nodelay;/.test(loc.body)) {
+      gaps.push(`${want.pattern} 缺 limit_req（nodelay）`);
+    }
+    if (!/limit_req_status\s+429;/.test(loc.body)) {
+      gaps.push(`${want.pattern} 缺 limit_req_status 429`);
+    }
+  }
+  for (const loc of locs) {
+    if (!loc.proxied) continue;
+    const isApiEntry = LIMIT_REQ_LOCATIONS.some(
+      (w) => w.modifier === loc.modifier && w.pattern === loc.pattern
+    );
+    // 注意 limit_req\b 不匹配 limit_req_status（_ 是 word 字符，无边界）
+    if (!isApiEntry && /limit_req\b/.test(loc.body)) gaps.push(`${loc.head} 意外携带 limit_req`);
+  }
+  return gaps;
+};
+
+/** 纯函数：反代块 connect/send 超时缺口（每个 proxy 块显式钉值、不依赖 nginx 默认；#10） */
+const findProxyTimeoutGaps = (raw) => {
+  const locs = parseLocations(codeView(raw));
+  const gaps = [];
+  for (const loc of locs) {
+    if (!loc.proxied) continue;
+    if (!/proxy_connect_timeout\s+\d+s;/.test(loc.body)) {
+      gaps.push(`${loc.head} 缺 proxy_connect_timeout`);
+    }
+    if (!/proxy_send_timeout\s+\d+s;/.test(loc.body)) {
+      gaps.push(`${loc.head} 缺 proxy_send_timeout`);
+    }
+  }
+  return gaps;
+};
+
+/** 纯函数：http 级边缘闸（首个 server 块之前）的缺口清单 */
+const findEdgeGateGaps = (raw) => {
+  const code = codeView(raw);
+  const firstServer = code.search(/^[ \t]*server[ \t]*\{/m);
+  if (firstServer < 0) return ['未解析到任何 server 块'];
+  const httpLevel = code.slice(0, firstServer);
+  const required = [
+    [/limit_req_zone\s+\$binary_remote_addr\s+zone=\S+:\d+m\s+rate=\d+r\/s;/, 'limit_req_zone'],
+    [/client_header_timeout\s+\d+s;/, 'client_header_timeout（slowloris 防线）'],
+    [/client_body_timeout\s+\d+s;/, 'client_body_timeout（slow-read 防线）'],
+    [/send_timeout\s+\d+s;/, 'send_timeout'],
+    [/keepalive_timeout\s+\d+s;/, 'keepalive_timeout'],
+    // 与 src/app.js 的 express.json/urlencoded limit '1mb' 显式对齐，不是巧合一致
+    [/client_max_body_size\s+1m;/, 'client_max_body_size 1m'],
+  ];
+  return required.filter(([re]) => !re.test(httpLevel)).map(([, name]) => name);
+};
+
+/** 纯函数：443 兜底块的缺口清单（存在性 + 五要素 + 不可服务内容） */
+const findFallbackGaps = (raw) => {
+  const fallback = parseServers(codeView(raw)).find((s) =>
+    /listen\s+\[::\]:443\s+ssl\s+default_server;/.test(s.body)
+  );
+  if (!fallback) return ['443 default_server 兜底块缺失'];
+  const required = [
+    [/listen\s+443\s+ssl\s+default_server;/, 'listen 443 ssl default_server'],
+    [/ssl_reject_handshake\s+on;/, 'ssl_reject_handshake on'],
+    [/server_name\s+_;/, 'server_name _'],
+    [/return\s+444;/, 'return 444'],
+    [/server_tokens\s+off;/, 'server_tokens off'],
+  ];
+  const gaps = required
+    .filter(([re]) => !re.test(fallback.body))
+    .map(([, name]) => `兜底块缺 ${name}`);
+  if (/\broot\s|\bproxy_pass\b/.test(fallback.body)) {
+    gaps.push('兜底块携带了可服务内容（root/proxy_pass）');
+  }
+  return gaps;
+};
+
+describe('静态直出 CSP（finding #6）与边缘资源闸/443 兜底（finding #10）', () => {
+  const text = read('deployment/nginx.conf.example');
+  const code = codeView(text);
+  const locations = parseLocations(code);
+
+  test('前提自证：两条直出块、/api 两条入口与 socket.io 都被解析到（防空集假绿）', () => {
+    // 与上面 describe 的解析器自检同一条理由：本组的所有断言都从
+    // parseLocations/parseServers 出发，解析一旦失配就会「全绿因为列表为空」。
+    expect(locations.find((l) => l.modifier === '' && l.pattern === '/')).toBeDefined();
+    expect(locations.find((l) => l.modifier === '' && l.pattern === '/assets/')).toBeDefined();
+    expect(locations.find((l) => l.modifier === '' && l.pattern === '/api/')).toBeDefined();
+    expect(locations.find((l) => l.modifier === '=' && l.pattern === '/api')).toBeDefined();
+    expect(locations.find((l) => l.pattern === '/socket.io/')).toBeDefined();
+  });
+
+  test('两条直出路径各自携带同一份静态 CSP，且含 script-src self 等硬底线（#6）', () => {
+    expect(findStaticCspGaps(text)).toEqual([]);
+  });
+
+  test('CSP 只落在两条直出块：server 级与全部反代块不得叠加 nginx 侧 CSP（#6）', () => {
+    // 反代路径由后端下发 nonce CSP（src/middleware/security.js）；静态策略一旦在
+    // 同一响应上叠加，浏览器取交集就会把后端放行的内联样式全部拦掉——这是原注释
+    // 警告的唯一真实场景，按路径分工后 server 级必须保持无 CSP。
+    expect((code.match(/add_header\s+Content-Security-Policy/g) || []).length).toBe(2);
+    for (const loc of locations) {
+      if (loc.proxied) {
+        expect(/add_header\s+Content-Security-Policy/.test(loc.body)).toBe(false);
+      }
+    }
+  });
+
+  test('可证伪：注释掉 location / 的 CSP 行后必须报缺，且总数减一', () => {
+    // 第一处 CSP 行属于 location /（文件顺序在前）
+    const mutated = text.replace(/^([ \t]*)(add_header[ \t]+Content-Security-Policy)/m, '$1# $2');
+    expect(mutated).not.toBe(text);
+    expect(findStaticCspGaps(mutated)).toContain('location / 缺静态 CSP');
+    expect((codeView(mutated).match(/add_header\s+Content-Security-Policy/g) || []).length).toBe(1);
+  });
+
+  test('可证伪：把两条直出块的 CSP 改成不一致时必须报漂移', () => {
+    const mutated = text.replace(
+      /(location \/assets\/ \{[\s\S]*?add_header Content-Security-Policy ")[^"]+(")/,
+      "$1default-src 'self'$2"
+    );
+    expect(mutated).not.toBe(text);
+    expect(findStaticCspGaps(mutated)).toContain('location / 与 /assets/ 的静态 CSP 不一致');
+  });
+
+  test('http 级边缘闸齐全且位于首个 server 块之前（#10）', () => {
+    expect(findEdgeGateGaps(text)).toEqual([]);
+    // 后端对齐前提自证：client_max_body_size 1m 对齐的是这行 body parser 限额
+    expect(read('src/app.js')).toMatch(/express\.json\(\{ limit: '1mb' \}\)/);
+  });
+
+  test('limit_req 只落在 /api 两条入口（nodelay + 429），socket.io 刻意豁免（#10）', () => {
+    expect(findLimitReqGaps(text)).toEqual([]);
+    const socket = locations.find((l) => l.pattern === '/socket.io/');
+    expect(socket.proxied).toBe(true);
+    expect(/limit_req\b/.test(socket.body)).toBe(false);
+  });
+
+  test('可证伪：注释掉 /api/ 的 limit_req 后必须报缺', () => {
+    const mutated = text.replace(/^([ \t]*)(limit_req\s+zone=)/m, '$1# $2');
+    expect(mutated).not.toBe(text);
+    expect(findLimitReqGaps(mutated)).toContain('/api/ 缺 limit_req（nodelay）');
+  });
+
+  test('每个反代块都显式钉住 connect/send 超时，且可证伪（#10）', () => {
+    // 「显式钉值」的口径与 /api/ 块注释一致：上游 nginx.conf 的静默变更不应改变
+    // 本文件的边缘语义；socket.io 的 send 60s（心跳余量）与短请求块的 30s 都算数。
+    expect(findProxyTimeoutGaps(text)).toEqual([]);
+    // 可证伪：分别抹掉一处 connect（/api/）与一处 send（socket.io），缺口必须
+    // 按块报出——「全文出现过一次就放行」的口径在这里不成立
+    const noConnect = text.replace(
+      /(location \/api\/ \{[\s\S]*?)proxy_connect_timeout 5s;[^\S\n]*\r?\n/,
+      '$1'
+    );
+    expect(noConnect).not.toBe(text);
+    expect(findProxyTimeoutGaps(noConnect)).toEqual(['/api/ 缺 proxy_connect_timeout']);
+    const noSend = text.replace(
+      /(location \/socket\.io\/ \{[\s\S]*?)proxy_send_timeout 60s;[^\S\n]*\r?\n/,
+      '$1'
+    );
+    expect(noSend).not.toBe(text);
+    expect(findProxyTimeoutGaps(noSend)).toEqual(['/socket.io/ 缺 proxy_send_timeout']);
+  });
+
+  test('443 兜底块契约：default_server + ssl_reject_handshake + 444，且不可服务（#10）', () => {
+    expect(findFallbackGaps(text)).toEqual([]);
+    // ssl_reject_handshake 全文仅此一处：主块必须用真证书正常握手，兜底块才谈得上
+    // 「抢到默认身份后拒绝一切」
+    expect((code.match(/ssl_reject_handshake/g) || []).length).toBe(1);
+  });
+
+  test('可证伪：注释掉 ssl_reject_handshake / return 444 后必须报缺', () => {
+    const noHandshake = text.replace(/^([ \t]*)(ssl_reject_handshake\s+on;)/m, '$1# $2');
+    expect(noHandshake).not.toBe(text);
+    expect(findFallbackGaps(noHandshake)).toEqual(['兜底块缺 ssl_reject_handshake on']);
+    const no444 = text.replace(/^([ \t]*)(return\s+444;)/m, '$1# $2');
+    expect(no444).not.toBe(text);
+    expect(findFallbackGaps(no444)).toEqual(['兜底块缺 return 444']);
+  });
+
+  test('default_server 唯一性：443 只有兜底块声明默认；:80 仍只有一个监听者（#10）', () => {
+    const servers = parseServers(code);
+    expect(servers.length).toBe(3); // :80 跳转、:443 主入口、:443 兜底
+    const withDefault = servers.filter((s) =>
+      /listen\s+\[::\]:443\s+ssl\s+default_server;/.test(s.body)
+    );
+    expect(withDefault.length).toBe(1);
+    // :80 块注释「唯一声明该端口的块自动成为默认」的前提：全文只允许一对 :80 监听
+    // （nginx 指令有缩进，正则必须容许前导空白，否则是恒 0 的假绿）
+    expect((code.match(/^[ \t]*listen\s+80;/m) || []).length).toBe(1);
+    expect((code.match(/^[ \t]*listen\s+\[::\]:80;/m) || []).length).toBe(1);
   });
 });
