@@ -5,15 +5,29 @@
 # 浮动 tag 的后果不是「拿到新版本」而是「不同时间构建出不同的镜像」——
 # 出安全问题时无法回答「上线那版用的是哪个 Node」。
 #
-# 生产建议进一步锁 digest（部署机捕获，不要手抄）：
-#   docker pull node:22.14.0-alpine
-#   docker inspect --format='{{index .RepoDigests 0}}' node:22.14.0-alpine
-# 得到 `node:22.14.0-alpine@sha256:<值>` 后替换下面三处 FROM。
-# 各阶段必须用同一个 digest，否则 builder 与 runtime 的 libc/OpenSSL
+# 已钉 digest（捕获日期 2026-10-01，来源与核验方式见下）：
+# 下面三处 FROM 钉在同一 manifest list digest 上：
+#   node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
+# digest 是多架构 OCI image index（含 linux/amd64 与 linux/arm64 等平台条目）。
+# 来源：Docker Hub 官方 tag API（hub.docker.com/v2/...）在捕获当日于本网络不可达
+# （DNS 污染），改用两条相互独立的 registry 通道核验并要求逐字节一致：
+#   a) docker.m.daocloud.io（Docker Hub 的 pull-through 镜像）按 tag 取 manifest，
+#      Docker-Content-Digest = 上述值，且对返回字节本地自算 sha256 与之相等；
+#   b) AWS ECR Public 的 docker/library/node（Docker 官方 library 镜像的 AWS 侧
+#      重发布）按同 tag 取 manifest，返回字节与 a) 逐字节一致（cmp 通过）。
+# digest 是内容寻址的：字节一致 ⇒ 两条通道讲的是同一个上游镜像。
+# **三个阶段必须保持同一 digest**：否则 builder 与 runtime 的 libc/OpenSSL
 # 可能不同版本，原生模块在运行时才暴露不兼容。
+# 部署机复验（一条命令确认该 digest 存在且与 tag 当前指向一致）：
+#   docker pull node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
+#   docker inspect --format='{{index .RepoDigests 0}}' node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
+# scripts/capture-image-digests.sh 仍是部署机侧的复核工具：升级基础镜像时用它
+# 重新捕获 digest，并在同一次改动里同步更新三处 FROM 与
+# src/tests/security/baseImageDigestPinned.test.js 的钉版字面量（该测试把
+# digest 钉成门禁，只改 FROM 不改测试会红灯）。
 
 # Builder 阶段
-FROM node:22.14.0-alpine AS builder
+FROM node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944 AS builder
 
 WORKDIR /app
 
@@ -49,7 +63,7 @@ COPY package*.json ./
 
 # 前端构建阶段（L-1）：产出 web-admin/dist，供后端 express 静态托管
 # （或挂载给 Nginx 托管，二选一）。与后端同版本基础镜像，避免工具链漂移。
-FROM node:22.14.0-alpine AS web-builder
+FROM node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944 AS web-builder
 
 WORKDIR /web
 COPY web-admin/package*.json ./
@@ -68,8 +82,8 @@ COPY web-admin/ ./
 # vite.config.js 已显式 sourcemap: false（L-1/I-3），产物不含源码映射
 RUN npm run build
 
-# Runtime 阶段（版本须与 builder 完全一致，见顶部说明）
-FROM node:22.14.0-alpine
+# Runtime 阶段（digest 须与 builder 完全一致，见顶部说明）
+FROM node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
 
 # ===== 构建元数据（D-2）=====
 # 为什么需要：镜像推到 registry 后，tag 可以被覆盖、也可以被人为改指。
