@@ -28,6 +28,11 @@ const REQUIRED_SECRET_FILES = [
   'mongo_root_username',
   'mongo_root_password',
   'grafana_admin_password',
+  // Redis 认证口令（2026-10-01 审计 finding）：compose secrets 段与 redis/app
+  // 两个消费方共用；缺文件时 redis 容器 requirepass 拿到空串、应用侧 NOAUTH，
+  // 都在启动期才暴露——这里提前一个窗口拦下。与 compose 的一致性由
+  // src/tests/deploy/deployScript.test.js 双向把守
+  'redis_password',
 ];
 
 /** compose 里用 `${VAR:?}` 硬声明的环境变量名 → 缺失时的提示语 */

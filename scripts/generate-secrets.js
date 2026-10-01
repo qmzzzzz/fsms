@@ -126,6 +126,10 @@ const secrets = {
   // 用本脚本生成的密钥目录直接 `docker compose up` 会因为缺文件而失败，
   // 运维只能从 compose 头注释里的 openssl 片段手抄补齐（正是本脚本要消灭的失误源）。
   grafana_admin_password: b64(32),
+  // Redis 认证口令（2026-10-01 审计 finding）：redis 侧 --requirepass 与 app 侧
+  // REDIS_PASSWORD_FILE 共用。b64(32) 即可——应用侧走 ioredis 的 password 选项，
+  // 不进 URL userinfo，字符集不受 percent-encoding 约束
+  redis_password: b64(32),
 };
 
 // mongodb_uri 依赖上面两项，拼接时必须用生成值而非占位符
@@ -142,6 +146,7 @@ const strengthChecks = [
   ['hmac_secret', secrets.hmac_secret.length >= 32],
   ['admin_initial_password', secrets.admin_initial_password.length >= 16],
   ['grafana_admin_password', secrets.grafana_admin_password.length >= 16],
+  ['redis_password', secrets.redis_password.length >= 16],
 ];
 const weak = strengthChecks.filter(([, ok]) => !ok).map(([name]) => name);
 if (weak.length > 0) {

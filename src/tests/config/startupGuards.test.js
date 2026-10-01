@@ -30,6 +30,8 @@ describe('P2-36：TZ_BUSINESS 启动期校验', () => {
     process.env.ENABLE_HTTPS = 'true';
     process.env.ALLOWED_HOSTS = 'api.example.com';
     process.env.REDIS_URL = 'rediss://redis.example.com:6379';
+    // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
+    process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
     process.env.TRUST_PROXY_HOPS = '1';
   };
 
@@ -194,6 +196,8 @@ describe('P2-38：ENABLE_API_DOCS 判定口径统一', () => {
     process.env.ENABLE_HTTPS = 'true';
     process.env.ALLOWED_HOSTS = 'api.example.com';
     process.env.REDIS_URL = 'rediss://redis.example.com:6379';
+    // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
+    process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
     process.env.TRUST_PROXY_HOPS = '1';
     delete process.env.DOCS_USERNAME;
     delete process.env.DOCS_PASSWORD;
@@ -308,6 +312,8 @@ describe('P1-34：加固项告警真正可达', () => {
     process.env.ENABLE_HTTPS = 'true';
     process.env.ALLOWED_HOSTS = 'api.example.com';
     process.env.REDIS_URL = 'rediss://redis.example.com:6379';
+    // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
+    process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
     process.env.TRUST_PROXY_HOPS = '1';
     process.env.ALLOW_PUBLIC_REGISTRATION = 'true';
 
@@ -392,6 +398,8 @@ describe('validate.js 降级通道：flushLogsSync/logger 不可用时信息不�
     process.env.ENABLE_HTTPS = 'true';
     process.env.ALLOWED_HOSTS = 'api.example.com';
     process.env.REDIS_URL = 'rediss://redis.example.com:6379';
+    // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
+    process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
     process.env.TRUST_PROXY_HOPS = '1';
     process.env.LOG_LEVEL = 'debug'; // 命中加固项告警
     jest.doMock('../../utils/logger', () => ({

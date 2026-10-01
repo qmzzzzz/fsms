@@ -33,6 +33,11 @@ const FILE_BACKED_SECRETS = Object.freeze([
   'LOGIN_ECDH_PRIVATE_KEY',
   'MONGODB_URI',
   'REDIS_URL',
+  // Redis 认证口令（2026-10-01 审计 finding：compose 的 redis 无 --requirepass，
+  // 与监控栈同处一张扁平网络）。与 REDIS_URL 同规格：不进 environment，
+  // 经 <NAME>_FILE 从 /run/secrets 注入；建连点（sharedCache / websocketService）
+  // 以 ioredis 的 password 选项携带，避开 URL userinfo 的 percent-encoding 约束。
+  'REDIS_PASSWORD',
   'MONGO_ROOT_PASSWORD',
   'ADMIN_INITIAL_PASSWORD',
   'DOCS_PASSWORD',

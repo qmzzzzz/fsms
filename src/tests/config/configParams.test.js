@@ -153,9 +153,14 @@ describe('P2-49 redis 镜像钉 digest', () => {
     expect(m[1]).toMatch(/^redis:7-alpine@sha256:[0-9a-f]{64}$/);
   });
 
-  test('digest 的来源与复验命令如实记录（未本机 pull 复核不得声称已验证）', () => {
+  test('digest 的来源与复验结论如实记录（2026-10-01 双源复验后同步更新）', () => {
     const yml = read('docker-compose.yml');
+    // 两段事实都必须在：2026-09-17 的初捕获当时未经本机 pull 复核（历史如实保留）；
+    // 2026-10-01 经两条独立 registry 通道复验发现 tag 漂移，digest 已同步为当前指向
     expect(yml).toMatch(/未经本机 docker pull 复核/);
+    expect(yml).toMatch(/2026-10-01 复验/);
+    expect(yml).toMatch(/AWS ECR Public/);
+    // 复验命令保留：部署机侧一条命令可再次确认
     expect(yml).toMatch(/docker pull redis:7-alpine@sha256:/);
   });
 });

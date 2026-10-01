@@ -251,8 +251,14 @@ class WebSocketService {
       const Redis = require('ioredis');
       const url = (process.env.REDIS_URL || '').trim();
       // 订阅端必须独立连接（ioredis 进入订阅模式后禁用普通命令）；
-      // 发布端复用共享缓存主连接，少占一条连接
-      const subClient = new Redis(url, { lazyConnect: false, enableOfflineQueue: true });
+      // 发布端复用共享缓存主连接，少占一条连接。
+      // password 与主连接同源（sharedCache.redisConnectionPassword，REDIS_PASSWORD
+      // 经 *_FILE 注入）：缺了它，requirepass 的 redis 会让 adapter 以 NOAUTH 失败
+      const subClient = new Redis(url, {
+        lazyConnect: false,
+        enableOfflineQueue: true,
+        password: sharedCache.redisConnectionPassword(),
+      });
       this.io.adapter(createAdapter(sharedCache.getRedisClient(), subClient));
       this._adapterClients.push(subClient);
       logger.info('WebSocket 已挂载 Redis adapter：推送跨实例生效');

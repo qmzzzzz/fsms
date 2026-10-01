@@ -52,15 +52,22 @@ services:
       - MONGODB_URI_FILE=/run/secrets/mongodb_uri
       - ADMIN_INITIAL_PASSWORD_FILE=/run/secrets/admin_initial_password
       # 传输加密豁免（P2-⑧，src/config/validate.js 启动断言）：本 compose 的
-      # mongo/redis 都在**同一宿主的受信容器网络**内，流量不出网卡，明文可接受；
-      # 一旦拆分（分库部署/云托管实例），必须摘掉这两个旗标并改用 tls=true /
-      # rediss:——启动校验会替你把这件事拦成硬错误，而不是让数据先明文过网。
+      # mongo/redis 都在**同一宿主的 internal 数据面网络**内（2026-10-01 起与监控/
+      # 边缘面分段，见文末 networks），流量不出网卡，明文可接受；redis 另有
+      # requirepass（口令走 secrets，见下）。一旦拆分（分库部署/云托管实例），
+      # 必须摘掉这两个旗标并改用 tls=true / rediss:——启动校验会替你把这件事
+      # 拦成硬错误，而不是让数据先明文过网。
       - MONGODB_TLS_EXEMPT=true
       - REDIS_TLS_EXEMPT=true
       # 生产校验（src/config/validate.js）强制 REDIS_URL：限流共享计数、
       # IP 黑名单广播与审计链锁不得退化为单实例内存态。
       # 指向下方 redis 服务的容器网络别名，非敏感值，可明文置于 environment。
       - REDIS_URL=redis://redis:6379
+      # Redis 认证（2026-10-01 审计 finding：redis 此前无任何认证）：口令经 secrets
+      # 挂载（/run/secrets/redis_password），不进 environment；建连点
+      # （sharedCache / websocketService）以 ioredis password 选项携带。
+      # validate.js 生产闸：URL 凭据 / REDIS_PASSWORD / 显式豁免三者必居其一。
+      - REDIS_PASSWORD_FILE=/run/secrets/redis_password
     secrets:
       - jwt_secret
       - jwt_refresh_secret
@@ -68,6 +75,7 @@ services:
       - hmac_secret
       - mongodb_uri
       - admin_initial_password
+      - redis_password
     depends_on:
       mongo:
         condition: service_healthy
@@ -128,7 +136,13 @@ services:
     volumes:
       - app-logs:/app/logs
     networks:
+      # 双网络接入：fire-safety-net 承载监控抓取（prometheus→app:3000）与宿主发布的
+      # 3000 端口，且 app 的出网能力（securityAlertDelivery 的 webhook）走这张网；
+      # 只有 data-net 能摸到 mongo/redis——数据面与监控/边缘面隔离（2026-10-01 审计
+      # finding：六服务共处一张扁平 bridge，Grafana 可配任意数据源 URL 直写无密码
+      # redis）。见文末 networks 段。
       - fire-safety-net
+      - data-net
 
   mongo:
     # R-5 基础镜像版本固定（digest 待部署机捕获）
@@ -205,7 +219,8 @@ services:
       - SETGID
       - SETUID
     networks:
-      - fire-safety-net
+      # 只入数据面（internal 网络，见文末）：监控栈与宿主发布面都摸不到 mongo
+      - data-net
 
   # ===== G-2 指标消费端：Prometheus 抓取 + Grafana 看板/告警 =====
   #
@@ -336,22 +351,39 @@ services:
       - fire-safety-net
 
   redis:
-    # R-5 同口径：钉补丁号，digest 由部署机 docker pull 后捕获追加
-    # P2-49：钉 digest（7-alpine 标签会随上游重建而漂移，无法复现同一镜像）。
-    # digest 捕获：2026-09-17，来源 Docker Hub 官方库清单（OCI image index，
-    # 含 linux/amd64 与 linux/arm64）。**未经本机 docker pull 复核**——
-    # 当时本机 Docker 守护未运行，属静态获取。
-    # 上线前请在本机复验（一条命令即可确认 digest 存在且可拉取）：
-    #   docker pull redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
-    # 或 docker manifest inspect -v redis:7-alpine 后与上行 digest 比对。
-    # 若复验发现不匹配，以本机复验结果为准并同步更新此处。
-    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    # R-5 同口径：钉补丁号 + digest。P2-49：钉 digest（7-alpine 标签会随上游重建
+    # 而漂移，无法复现同一镜像）。
+    # digest 捕获与复验：2026-09-17 静态捕获 ff02b58f…（当时未经本机 docker pull 复核）；
+    # 2026-10-01 复验发现 tag 已漂移（ff02b58f 是当时真实捕获的旧 manifest，
+    # 按 digest 直取仍 200），当前指向经两条独立 registry 通道核验（daocloud
+    # pull-through + AWS ECR Public，返回字节逐字节一致、本地自算 sha256 与
+    # Docker-Content-Digest 相等，方法与 Dockerfile 的 node 钉版同源），同步更新为
+    # 当前值。上线前仍可一条命令复验：
+    #   docker pull redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     # 仅容器内网通信（app 以 redis://redis:6379 访问），不暴露宿主机端口
     expose:
       - '6379'
-    command: ['redis-server', '--appendonly', 'yes']
+    # 认证（2026-10-01 审计 finding：redis 此前无任何认证，且与监控栈同网——
+    # Grafana 任意数据源 URL 即一条无密码写路径：删黑名单键 = 撤销封禁、
+    # 清限流计数 = 解除封顶）。requirepass 读自挂载的 secret 文件：口令不进
+    # command 字面量（docker inspect 可见）、不进 environment；$$ 是 compose
+    # 转义，容器内 shell 展开 $(cat …)。应用侧凭据由 REDIS_PASSWORD_FILE 注入
+    # （见 app 服务与 sharedCache.redisConnectionPassword）。
+    command:
+      - /bin/sh
+      - -c
+      - 'exec redis-server --appendonly yes --requirepass "$$(cat /run/secrets/redis_password)"'
+    secrets:
+      - redis_password
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
+      # requirepass 开启后 PING 会回 NOAUTH——必须带口令探测，且 grep -q PONG
+      # 把「redis-cli 对错误回包退出 0」的口子堵死（NOAUTH 也算失败）
+      test:
+        [
+          'CMD-SHELL',
+          'redis-cli --no-auth-warning -a "$$(cat /run/secrets/redis_password)" ping | grep -q PONG',
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -379,7 +411,9 @@ services:
     volumes:
       - redis-data:/data
     networks:
-      - fire-safety-net
+      # 只入数据面（internal 网络）：应用侧唯一，监控栈与宿主发布面都摸不到。
+      # 有限流/封禁状态承载，上面还有无差别命令面——网络可达面必须最小。
+      - data-net
 
 # ============================================================
 # 密钥文件（P3-48）
@@ -393,6 +427,9 @@ services:
 #   openssl rand -base64 48 | tr -d '\n' > ./secrets/jwt_refresh_secret
 #   openssl rand -hex 32     | tr -d '\n' > ./secrets/aes_secret_key
 #   openssl rand -hex 16     | tr -d '\n' > ./secrets/hmac_secret
+#   # redis_password 用 -base64 即可：应用侧走 ioredis 的 password 选项（不进 URL
+#   # userinfo），字符集不受 percent-encoding 约束
+#   openssl rand -base64 32 | tr -d '\n' > ./secrets/redis_password
 #   printf 'firesafety'  > ./secrets/mongo_root_username
 #   # mongo_root_password 必须用 -hex：它要内嵌进 mongodb_uri 的 userinfo 段，
 #   # 而 base64 字符集含 '/'（实测 32 字节 base64 约一半概率出现），驱动对未转义的
@@ -438,6 +475,10 @@ secrets:
     file: ./secrets/mongo_root_password
   grafana_admin_password:
     file: ./secrets/grafana_admin_password
+  # Redis 认证口令（2026-10-01 审计 finding）：redis 侧 --requirepass 与 app 侧
+  # REDIS_PASSWORD_FILE 共用这一份。生成命令见本文件头部注释块
+  redis_password:
+    file: ./secrets/redis_password
 
 volumes:
   mongo-data:
@@ -460,3 +501,13 @@ volumes:
 networks:
   fire-safety-net:
     driver: bridge
+  # ===== 数据面内网（2026-10-01 审计 finding：六服务共处一张扁平 bridge）=====
+  # internal: true ⇒ 该网络不接宿主 NAT、不出外网；mongo / redis 只在此网络上，
+  # 监控栈（prometheus / alertmanager / grafana）与宿主发布面（127.0.0.1:* 端口）
+  # 均无法到达。app 双网络接入（fire-safety-net 出网 + 数据面）。
+  # 这条分段直接封掉的反向路径：Grafana 数据源 URL 可配任意地址 ⇒ 原先可达
+  # 无密码 redis（删黑名单键 = 撤销封禁、清限流计数 = 解除封顶）；
+  # 同网任一容器被攻破即得 mongo 全量读写。
+  data-net:
+    driver: bridge
+    internal: true

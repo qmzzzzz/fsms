@@ -23,6 +23,8 @@ const DUMMY_JWT = 'strong-random-jwt-' + 'secret-that-is-long-enough';
 const DUMMY_REFRESH = 'strong-random-refresh-' + 'secret-long-enough';
 const DUMMY_AES = 'test-aes-key-' + 'with-32-chars-minimum!!';
 const DUMMY_HMAC = 'strong-random-hmac-' + 'secret-that-is-long-enough';
+// Redis 认证替身：由既有替身派生（与 DUMMY_JWT 同一"运行期拼接、不像真实凭据"的纪律）
+const DUMMY_REDIS_AUTH = `${DUMMY_HMAC}-redis`;
 
 const VALID_PROD_BASELINE = () => ({
   NODE_ENV: 'production',
@@ -36,6 +38,8 @@ const VALID_PROD_BASELINE = () => ({
   ENABLE_HTTPS: 'true',
   ALLOWED_HOSTS: 'api.example.com',
   REDIS_URL: 'rediss://redis.example.com:6379',
+  // 2026-10-01 认证闸：生产 compose 拓扑经 REDIS_PASSWORD_FILE 注入（同值形态）
+  REDIS_PASSWORD: DUMMY_REDIS_AUTH,
   TRUST_PROXY_HOPS: '1',
 });
 
@@ -86,6 +90,11 @@ describe('传输加密启动断言（P2-⑧）', () => {
   const withEnv = (overrides) => {
     for (const key of TOUCHED_KEYS) delete process.env[key];
     Object.assign(process.env, VALID_PROD_BASELINE(), overrides);
+    // 值为 undefined 的覆盖项必须真删键：Object.assign 会把 undefined 强转成
+    // 字符串 "undefined"（process.env 的既有陷阱），让「未设置」分支永远测不到
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === undefined) delete process.env[key];
+    }
   };
 
   test('基线（tls=true + rediss:）生产校验通过', () => {
@@ -167,5 +176,37 @@ describe('传输加密启动断言（P2-⑧）', () => {
   test('Redis 指向 [::] 明文 ⇒ 硬错误', () => {
     withEnv({ REDIS_URL: 'redis://[::]:6379' });
     expect(runValidate().fatal).toBe(true);
+  });
+
+  // ===== Redis 认证闸（2026-10-01，collectRedisAuthErrors）=====
+
+  test('认证闸：无凭据且无 REDIS_PASSWORD ⇒ 硬错误并点名两种补法', () => {
+    withEnv({ REDIS_PASSWORD: undefined });
+    const { fatal, lines } = runValidate();
+    expect(fatal).toBe(true);
+    const joined = lines.join('\n');
+    expect(joined).toContain('Redis 必须启用认证');
+    expect(joined).toContain('REDIS_PASSWORD_FILE');
+    expect(joined).toContain('REDIS_AUTH_EXEMPT');
+  });
+
+  test('认证闸：URL userinfo 凭据放行（redis://:pass@host 形态）', () => {
+    withEnv({
+      REDIS_PASSWORD: undefined,
+      REDIS_URL: `rediss://:${DUMMY_REDIS_AUTH}@redis.example.com:6379`,
+    });
+    expect(runValidate().fatal).toBe(false);
+  });
+
+  test('认证闸：REDIS_AUTH_EXEMPT=true 显式豁免放行（受信内网免认证的唯一出口）', () => {
+    withEnv({ REDIS_PASSWORD: undefined, REDIS_AUTH_EXEMPT: 'true' });
+    expect(runValidate().fatal).toBe(false);
+  });
+
+  test('认证闸：REDIS_PASSWORD 携带即放行（生产 compose 的 REDIS_PASSWORD_FILE 同值形态）', () => {
+    withEnv({});
+    expect(runValidate().fatal).toBe(false);
+    withEnv({ REDIS_URL: 'rediss://redis.example.com:6379' }); // 基线 REDIS_PASSWORD 仍在
+    expect(runValidate().fatal).toBe(false);
   });
 });

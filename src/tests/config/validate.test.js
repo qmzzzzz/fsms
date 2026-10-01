@@ -82,6 +82,8 @@ describe('Config Validation', () => {
       process.env.ENABLE_HTTPS = 'true';
       process.env.ALLOWED_HOSTS = 'api.example.com';
       process.env.REDIS_URL = 'rediss://redis.example.com:6379';
+      // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
+      process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
       process.env.TRUST_PROXY_HOPS = '1';
 
       const { validateConfig } = require('../../config/validate');
@@ -104,6 +106,8 @@ describe('Config Validation', () => {
       process.env.ENABLE_HTTPS = 'true';
       process.env.ALLOWED_HOSTS = 'api.example.com';
       process.env.REDIS_URL = 'rediss://redis.example.com:6379';
+      // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
+      process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
     };
 
     /** 以指定 TRUST_PROXY_HOPS 跑校验，返回收集到的错误消息 */
@@ -255,6 +259,8 @@ describe('Config Validation', () => {
       process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
       process.env.CORS_ORIGIN = 'https://example.com';
       process.env.REDIS_URL = 'rediss://redis.example.com:6379';
+      // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
+      process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
     };
 
     /** 跑一次生产校验，返回 { exited, messages } */

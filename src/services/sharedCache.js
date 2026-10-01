@@ -185,6 +185,20 @@ function degradedMechanismHint() {
   }
 }
 
+/**
+ * Redis 认证口令（REDIS_PASSWORD，与 REDIS_URL 同源同时机读取；支持 *_FILE 注入，
+ * 见 config/secrets.js）。取值经 ioredis 的 password 选项携带——不走 URL userinfo，
+ * 口令字符集就不受 percent-encoding 约束（compose 侧 secrets 文件用 base64 即可）。
+ * 空值返回 undefined：不给无认证部署（本地开发/单机内存 Redis）强加 password 选项；
+ * 生产侧由 config/validate.js 的认证闸保证「URL 凭据 / REDIS_PASSWORD / 显式豁免」
+ * 三者必居其一，服务器端开了 requirepass 而客户端没带时 ioredis 以 NOAUTH 显式失败，
+ * 不会静默降级。
+ */
+function redisConnectionPassword() {
+  const password = process.env.REDIS_PASSWORD;
+  return password ? password : undefined;
+}
+
 async function initSharedCache() {
   if (initAttempted) return;
   initAttempted = true;
@@ -199,6 +213,7 @@ async function initSharedCache() {
       maxRetriesPerRequest: 1, // 缓存场景快速失败，回退内存，不拖住请求
       enableOfflineQueue: false,
       retryStrategy: (times) => Math.min(times * 500, 10000),
+      password: redisConnectionPassword(),
     });
     redisClient.on('error', (err) => {
       // 只在"就绪 → 不可用"这一次转换上报（随后 redisReady=false，
@@ -512,6 +527,7 @@ async function ensureSubscriber() {
       maxRetriesPerRequest: 1,
       enableOfflineQueue: true,
       retryStrategy: (times) => Math.min(times * 500, 10000),
+      password: redisConnectionPassword(),
     });
     subClient.on('error', (err) => {
       logger.debug(`共享缓存失效广播订阅连接异常：${err.message}`);
@@ -633,6 +649,7 @@ module.exports = {
   isRedisEnabled,
   isRedisConfigured,
   getRedisClient,
+  redisConnectionPassword,
   jitterTtl,
   initSharedCache,
   shutdownSharedCache,

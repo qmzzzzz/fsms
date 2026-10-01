@@ -61,6 +61,33 @@ const uriHostname = (uri) => {
  * 既有的「不能指向 localhost」一并收口到这里：它与 TLS 断言判的是同一个
  * 对象（连接串的主机形态），分在两个文件只会让人以为那是两套事实来源。
  */
+/**
+ * Redis 认证闸（2026-10-01 审计 finding：redis 此前无 --requirepass 且与监控栈
+ * 同处一张扁平网络——Grafana 任意数据源 URL 即一条无密码写路径：删黑名单键 =
+ * 撤销封禁、清限流计数 = 解除封顶）。口令两种携带形态任一：URL userinfo 段，
+ * 或 REDIS_PASSWORD（生产 compose 经 REDIS_PASSWORD_FILE 注入，建连点见
+ * sharedCache.redisConnectionPassword）；受信内网免认证须显式声明
+ * REDIS_AUTH_EXEMPT=true（与 REDIS_TLS_EXEMPT 同族：豁免必须可见，不许静默）。
+ *
+ * 独立成函数不只是拆复杂度：它判的是「Redis 上的身份」，与 host 侧的「流量去哪」
+ * 是两个维度，分开后各自可独立断言。
+ */
+const collectRedisAuthErrors = (errors, parsedRedisUrl) => {
+  const hasUrlCredential = Boolean(parsedRedisUrl.username || parsedRedisUrl.password);
+  if (
+    !hasUrlCredential &&
+    !process.env.REDIS_PASSWORD &&
+    process.env.REDIS_AUTH_EXEMPT !== 'true'
+  ) {
+    errors.push(
+      'Redis 必须启用认证：REDIS_PASSWORD 未设置且 REDIS_URL 不含凭据段' +
+        '（会话缓存/限流计数/IP 黑名单广播全在这上面，无认证等于任何同网容器都能改写）。' +
+        '生产拓扑经 compose secrets 注入 REDIS_PASSWORD_FILE；' +
+        '确属受信内网的免认证部署请显式声明 REDIS_AUTH_EXEMPT=true'
+    );
+  }
+};
+
 const collectTransportErrors = (errors) => {
   const mongoUri = (process.env.MONGODB_URI || '').trim();
 
@@ -102,6 +129,9 @@ const collectTransportErrors = (errors) => {
         '确属同宿主受信容器网络时，显式设置 REDIS_TLS_EXEMPT=true 并在部署文档记录拓扑依据'
     );
   }
+
+  // Redis 认证闸：判据见 collectRedisAuthErrors 的头注释
+  collectRedisAuthErrors(errors, parsedRedisUrl);
 };
 
 module.exports = { collectTransportErrors, isLoopbackHostname, uriHostname };
