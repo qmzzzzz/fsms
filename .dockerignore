@@ -42,6 +42,13 @@ web-admin/dist
 .idea
 *.md
 *.txt
+# Docker 的通配语义里 `*.md` 只匹配**根级**（与上面 coverage 的注释同一条规则），
+# 子目录里的 .md/.txt 根本没被挡住。`deliverables/` 整目录 1.6 MB，装的是
+# 审计利用细节（带 file:line 的攻击面描述），它们被 .gitignore 刻意挡在版本库外，
+# 却会随 `build: .` 的 context 上传给构建守护进程——构建上下文必须与 git 口径一致。
+deliverables
+**/*.md
+**/*.txt
 
 # P3-48：密钥文件目录绝不进镜像。
 # secrets 由运行时挂载到 /run/secrets，构建期完全不需要；
