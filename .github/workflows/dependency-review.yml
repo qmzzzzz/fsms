@@ -23,7 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        # persist-credentials: false：本流程只做依赖评审（评审结果回写 PR 走 API token），
+        # 不 git push，checkout 的持久凭据是多余外泄面
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       # 用 v5 而不是 v4：v4 声明的运行时是 node20，node20 正在退场
       # （actions/runner Constants.cs: Node20RemovalDate = September 23rd, 2026）；
@@ -37,8 +41,10 @@ jobs:
       #
       # 另注：本 action 的 v4 / v5 是**分支**不是 tag（tag 只到 v4.9.0 / v5.0.0，
       # 实测 git/ref/tags/v4 返回 404、branches/v4 存在），上游约定即按分支引用。
+      # 按仓库「钉 digest」标准改钉到最新发布 tag 的 commit（2026-10 实测最新 release
+      # 即 v5.0.0）；上游再发版时须显式改这里，而非被动跟随移动的分支引用。
       - name: Dependency Review
-        uses: actions/dependency-review-action@v5
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           # high / critical 直接判失败，阻断合入
           fail-on-severity: high

@@ -127,7 +127,7 @@ jobs:
       #   ③ 把 <repo>@sha256:… 传给两条部署路径：deploy.js 全程只 pull/up 这个引用
       #      （deployPolicy 侧另有 DEPLOY_REQUIRE_DIGEST_PIN 闸兜底）。
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
       - name: Resolve digest and verify signature (keyless)
         id: verify
@@ -179,7 +179,11 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout (deploy host keeps the repo)
-        uses: actions/checkout@v5
+        # persist-credentials: false：不把 GITHUB_TOKEN 留在部署机的 .git/config
+        # （部署不需要 git push；SHA 钉版与仓库「钉 digest」标准一致）。
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       # 直接调脚本：备份 / 迁移 / 切换 / 健康门禁 / 失败回滚全在脚本内，
       # 工作流不重复实现一遍判据（否则两处逻辑会漂移）。

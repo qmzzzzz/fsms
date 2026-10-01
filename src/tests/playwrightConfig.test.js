@@ -11,7 +11,8 @@
  *   Playwright 的 'on-first-retry' 语义是「仅在首次重试时录制并保留 trace」
  *   （node_modules/playwright/types/test.d.ts TraceMode），0 重试下永远
  *   不存在第二次尝试 ⇒ 失败时一个现场都不留。而 trace 落在 outputDir
- *   （默认 test-results/），不是 playwright-report/——CI 只上传后者。
+ *   （默认 test-results/），不是 playwright-report/（CI 原上传后者，安全审计 #9
+ *   起已删——失败 trace 含管理员会话态，公开仓工件匿名可下载，见 ciWorkflowInvariants）。
  *   两头一叠加，「失败应显性暴露并排查」这句注释原本是假的。
  *
  * 门禁 2：E2E 里引用的自研 class 选择器必须在真实前端源码中存在。

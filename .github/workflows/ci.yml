@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main, develop]
 
+# 工作流级最小权限（安全审计 #9）：只读兜底。声明 permissions 会整体覆盖仓库默认
+# 令牌作用域，未列出的作用域一律为 none；需要写权限的 job 在**job 级** permissions
+# 里覆盖顶层——本文件只有 build（packages: write + id-token: write，GHCR 推送与
+# cosign 签名）与 secret-scan（pull-requests: read，gitleaks 推导 PR 扫描范围）两处。
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,10 +28,15 @@ jobs:
         node-version: [20.x, 22.x]
 
     steps:
-      - uses: actions/checkout@v5
+      # persist-credentials: false：不把 GITHUB_TOKEN 留在 .git/config。本工作流没有任何
+      # git push 步骤，checkout 的持久凭据是纯多余的外泄面（与 scorecard.yml 同口径；
+      # 所有 actions 均已按仓库「钉 digest」标准钉到不可变 commit SHA）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: ${{ matrix.node-version }}
           # 缓存两份 lockfile（后端与 web-admin）：下方两次 npm ci 都受益
@@ -142,7 +154,7 @@ jobs:
 
       - name: Upload backend coverage
         if: matrix.node-version == '22.x'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           files: ./coverage/lcov.info
           # 配置 CODECOV_TOKEN 后上传即生效；未配置时私有仓上传必然失败，
@@ -154,10 +166,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Use Node.js 20.x
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 20.x
 
@@ -213,14 +227,16 @@ jobs:
     # GET /repos/{owner}/{repo}/pulls/{n}/commits 推导扫描范围，
     # 缺 pull-requests: read 会以 403「Resource not accessible by integration」
     # 让 job 直接失败——2026-09-11 CI 实证（全部 dependabot PR 的 secret-scan 全红）。
+    # 声明在 job 级以覆盖工作流级顶层（顶层 contents: read 只读兜底，见文件头）。
     permissions:
       contents: read
       pull-requests: read
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       # push 事件下 action 的 baseRef 推导有个硬伤：它取 eventJSON.commits[0].id
       # 再拼成 `<base>^..<head>`（^ 是硬编码的）。首次推送/新建分支时 commits[0]
@@ -234,9 +250,14 @@ jobs:
       - name: Resolve gitleaks base ref
         id: gitleaks-base
         if: github.event_name == 'push'
+        # github.event.before 经 env 进入脚本（安全审计 #9，与 deploy.yml 同口径）：
+        # `${{ }}` 是文本级替换、先于 shell 解析，直接写进 run 是脚本注入面；
+        # env 赋值不参与 shell 文本展开，才是安全通道。
+        env:
+          GITHUB_BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          ref="${{ github.event.before }}"
+          ref="$GITHUB_BEFORE_SHA"
           if [ -z "$ref" ] || [ "$ref" = "0000000000000000000000000000000000000000" ]; then
             root="$(git rev-list --max-parents=0 HEAD)"
             ref="$(git rev-list --first-parent --reverse "$root..HEAD" | head -n 1)"
@@ -253,7 +274,7 @@ jobs:
         # 时间线：2026-06-02 起 runner 默认 Node 24（v2 已报警告）；
         # 2026-09-16 Node 20 从 runner 彻底移除，v2 无条件失效——必须升 v3。
         # 个人账号仓库无需 GITLEAKS_LICENSE（仅组织仓库需要）。
-        uses: gitleaks/gitleaks-action@v3
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # push 事件下显式传入解析好的 base ref（见上：覆盖 action 的根提交硬伤）
@@ -272,13 +293,15 @@ jobs:
       TZ: Asia/Shanghai
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       # Node 24：web-admin 锁定的 jsdom 30 依赖 undici 8.10.0，其内置 webidl
       # 直接调用 worker_threads.markAsUncloneable（Node 22.10+ 才有），
       # Node 20 下 jsdom 加载即崩、全部 worker 起不来（2026-09-05 CI 实证）
       - name: Use Node.js 24.x
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24.x
           cache: npm
@@ -323,7 +346,7 @@ jobs:
         run: npm run build:budget
 
       - name: Upload frontend coverage
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           files: ./web-admin/coverage/lcov.info
           # 同后端口径：配置 CODECOV_TOKEN 后上传即生效，未配置时尽力而为；
@@ -339,10 +362,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Use Node.js 20.x
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 20.x
 
@@ -373,10 +398,12 @@ jobs:
           - 27017:27017
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Use Node.js 20.x
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 20.x
 
@@ -527,14 +554,11 @@ jobs:
             console.log('E2E 门禁通过：passed=' + passed + '（下界 ' + MIN_PASSED + '） skipped=0');
           "
 
-      - name: Upload Playwright report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report
-          path: playwright-report/
-          retention-days: 7
-          if-no-files-found: ignore
+      # 刻意不上传 playwright-report/（安全审计 #9）：失败 trace（playwright.config.js
+      # 的 trace: retain-on-failure）嵌有管理员界面的 DOM 与 localStorage 里的 JWT，
+      # 而公开仓库的 workflow artifact 匿名即可下载——等于把管理员会话态交给任何路过的人。
+      # trace 仍按原样落在 runner 本地 outputDir（test-results/）供失败取证；本地跑同栈后
+      # 用 `npx playwright show-report` 查看 HTML 报告。
 
   build:
     # I-M2：镜像构建/推送串联 e2e、secret-scan 与 security-audit——
@@ -545,21 +569,25 @@ jobs:
     runs-on: ubuntu-latest
     # main 分支推 latest；v* 标签发布版本镜像（R-7）
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    # job 级 permissions 覆盖工作流级顶层（顶层 contents: read 只读兜底）：
+    # 本 job 真正需要这两个写作用域，未列出的其余作用域仍然为 none。
     permissions:
       contents: read
       packages: write # GHCR 推送所需
       id-token: write # P2-⑩：cosign keyless 签名需要 OIDC 令牌（sigstore 无键签名）
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       # R-7：登录 GitHub Container Registry（使用工作流内置 GITHUB_TOKEN，
       # 无需额外仓库密钥；镜像默认私有，按需在同仓库设置可见性）
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -591,7 +619,7 @@ jobs:
 
       - name: Build and push Docker image
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           push: true
@@ -611,14 +639,16 @@ jobs:
       # 从刚推送的镜像生成并作为构建产物上传：漏洞影响评估时按 SBOM 对账依赖树，
       # 而不是去猜基础镜像里装了什么。
       - name: Generate SBOM (CycloneDX)
-        uses: anchore/sbom-action@v0
+        # v0 是移动 tag，实测指向 main 上未发布的提交；按仓库「钉 digest」标准钉到
+        # 最新发布的补丁 tag commit（上游再发版时显式改这里，而非被动跟随移动 tag）。
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
           format: cyclonedx-json
           artifact-name: sbom.cdx.json
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom-cyclonedx
           path: sbom.cdx.json
@@ -630,7 +660,7 @@ jobs:
       #   --certificate-oidc-issuer https://token.actions.githubusercontent.com），
       # 并以解析出的 digest 钉死引用部署——只签不验等于没签。
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
       - name: Sign image (keyless)
         env:

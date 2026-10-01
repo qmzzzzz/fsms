@@ -157,6 +157,8 @@ describe('docker-compose 生产环境变量契约', () => {
     'AES_SECRET_KEY_FILE',
     'HMAC_SECRET_FILE',
     'MONGODB_URI_FILE',
+    'REDIS_PASSWORD',
+    'REDIS_PASSWORD_FILE',
     'ADMIN_INITIAL_PASSWORD_FILE',
   ];
   const saved = {};
@@ -179,6 +181,8 @@ describe('docker-compose 生产环境变量契约', () => {
       AES_SECRET_KEY_FILE: 'AES_SECRET_KEY',
       HMAC_SECRET_FILE: 'HMAC_SECRET',
       MONGODB_URI_FILE: 'MONGODB_URI',
+      // 2026-10-01 认证闸：compose 拓扑的 redis 凭据经同一 *_FILE 注入路径进入
+      REDIS_PASSWORD_FILE: 'REDIS_PASSWORD',
     };
     for (const [fileVar, target] of Object.entries(fileMap)) {
       if (process.env[fileVar]) {

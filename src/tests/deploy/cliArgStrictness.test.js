@@ -243,6 +243,9 @@ describe('scripts/generate-secrets.js：参数手误不得把密钥打进 stdout
       'mongodb_uri',
       'jwt_refresh_secret',
       'jwt_secret',
+      // 2026-10-01 审计 finding：redis 认证口令（compose 的 redis --requirepass
+      // 与 app 侧 REDIS_PASSWORD_FILE 共用）——清单写死即为此刻意设计的确认点
+      'redis_password',
     ].sort();
     expect(fs.readdirSync(out).sort()).toEqual(expected);
   });
