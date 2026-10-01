@@ -60,6 +60,11 @@ COPY web-admin/package*.json ./
 # 本镜像的 node:22.14.0-alpine 在 linux-musl-x64 平台确有 @parcel/watcher 预编译包可回落，
 # 故 --ignore-scripts 安全。若未来引入「mac/win 本地构建镜像」，该假设需重新评估。
 RUN npm ci --ignore-scripts && npm cache clean --force
+# ⚠ 源码必须在 npm ci **之后**、build 之前进镜像：2026-09-30 供应链批次重写本阶段
+# 时曾把 `COPY web-admin/ ./` 连同 --ignore-scripts 一起改动而漏掉了这行——
+# `npm run build` 跑在只有 node_modules 的 /web 里，vite 连入口模块都解析不到，
+# exit 1（CI build job 实测）。缓存优化的标准序：package 文件先行，源码后置。
+COPY web-admin/ ./
 # vite.config.js 已显式 sourcemap: false（L-1/I-3），产物不含源码映射
 RUN npm run build
 
