@@ -4,16 +4,19 @@
  * 用法（与 resign-audit-hmac.js 同族的门禁口径：--apply 需 ALLOWED_SOURCE_DB + --yes）：
  *   node scripts/migrate-pii-encryption.js                        # 演练：只读扫描并出报告
  *   ALLOWED_SOURCE_DB=<库名> node scripts/migrate-pii-encryption.js --apply --yes
- *                                                                 # 把存量明文 phone 加密
+ *                                                                 # 存量明文 phone 加密（v2）+ enc.v1 行升级到 v2（AAD 行绑定）
  *      （realName 暂不加密——2026-09-30 决策：保留姓名模糊检索；
  *        若有行在加密窗口内被加密过，本脚本会自动解回明文自愈）
  *   ALLOWED_SOURCE_DB=<库名> PII_ROTATION_OLD_AES_KEY=<旧KEY> \
  *     node scripts/migrate-pii-encryption.js --apply --yes --rotate
- *                                                                 # 用旧主密钥解密 → 当前主密钥重加密
+ *                                                                 # 用旧主密钥解密 → 当前主密钥重加密（v2）
  *
- * 背景：User.realName / User.phone 自 2026-09-30 起 at-rest 加密（utils/piiCrypto.js，
- * AES-256-GCM 随机 IV，格式 `enc.v1.<iv>.<data>`）。模型层对存量明文**透读取**、
- * 修改时才加密——本脚本负责把「尚未修改的存量行」一次性收口，并承担密钥轮换时
+ * 背景：User.phone 自 2026-09-30 起 at-rest 加密（utils/piiCrypto.js，
+ * AES-256-GCM 随机 IV）。密文格式两代：`enc.v1.<iv>.<data>`（无行绑定，
+ * 2026-10-01 审计发现同一派生钥下可跨行搬运）→ `enc.v2.<iv>.<data>`
+ * （AAD 绑定 pii:v2:<_id>:phone，跨行复制在解密侧认证失败）。
+ * 模型层对存量明文**透读取**、修改时才加密（写侧一律产 v2）——本脚本负责把
+ * 「尚未修改的存量行」一次性收口（明文加密 + v1 全列升级），并承担密钥轮换时
  * 的全列重加密。两件事是同一套管道：都是「按当前密钥解密 → 按目标密钥加密 →
  * 同步检索键」，只是解密密钥来源不同（存量明文不需要解密）。
  *
@@ -34,6 +37,7 @@ const {
   piiSearchKey,
   requireMasterSecret,
   VERSION_PREFIX,
+  VERSION_PREFIX_V2,
 } = require('../src/utils/piiCrypto');
 
 function parseArgs() {
@@ -46,8 +50,9 @@ function parseArgs() {
   return args;
 }
 
-/** 判断一个值是否已是本模块的密文形态（迁移与轮换共用的分拣判据） */
-const isEncrypted = (v) => typeof v === 'string' && v.startsWith(VERSION_PREFIX);
+/** 判断一个值是否已是本模块的密文形态（迁移与轮换共用的分拣判据；v1/v2 都算） */
+const isEncrypted = (v) =>
+  typeof v === 'string' && (v.startsWith(VERSION_PREFIX) || v.startsWith(VERSION_PREFIX_V2));
 
 /**
  * 主密钥可用性必须在**连库之前**判，且两道判据都是复用而不是另抄一份常量：
@@ -149,32 +154,48 @@ async function main() {
   process.exit(args.apply && stats.corrupt.length > 0 ? 1 : 0);
 }
 
-/** 解密辅助：轮换模式用旧主密钥解密（临时替换派生用的环境变量），其余用当前密钥 */
-function decryptWith(value, useOldKey) {
-  if (!useOldKey) return decryptPii(value);
+/** 解密辅助：轮换模式用旧主密钥解密（临时替换派生用的环境变量），其余用当前密钥。
+ * aadContext 必须透传：v2 密文没有绑定上下文时解密在形态层就被拒（buildAad 抛错），
+ * 轮换会把整列 v2 行误报成损坏行。 */
+function decryptWith(value, useOldKey, aadContext) {
+  if (!useOldKey) return decryptPii(value, aadContext);
   process.env.AES_SECRET_KEY = process.env.PII_ROTATION_OLD_AES_KEY;
   try {
-    return decryptPii(value);
+    return decryptPii(value, aadContext);
   } finally {
     process.env.AES_SECRET_KEY = process.env.PII_ROTATION_CURRENT_KEY;
   }
 }
 
-/** 单字段分拣：明文 → 加密 + 检索键；轮换模式下的密文 → 跨密钥重加密。返回 $set 片段 */
+/**
+ * 单字段分拣（返回 $set 片段）：
+ *   - 明文 → v2 加密（AAD 行绑定）+ 检索键；
+ *   - v2 且非轮换 → 跳过（已是目标形态）；
+ *   - v1（无论是否轮换）→ 解密后重加密为 v2：2026-10-01 审计（finding）指出 v1 无行
+ *     绑定，同一把派生钥下密文可跨行搬运——本脚本的非轮换路径因此承担 v1→v2 的
+ *     全列升级，跑完后 v1 清零；
+ *   - 解不开 = 密钥不符或数据被改，点名不覆盖。
+ */
 function resolveFieldUpdate(doc, field, args) {
   const stored = doc[field];
   if (!stored) return null;
-  const encrypted = isEncrypted(stored);
-  if (encrypted && !args.rotate) return { skip: 'encrypted' };
-  if (!encrypted) {
-    // 明文：当前密钥直接加密（检索键同步重算——存量明文行的检索键本来是空的，
-    // 这是迁移要补齐的另一半）
-    return { update: { [field]: encryptPii(stored), [`${field}Key`]: piiSearchKey(stored) } };
+  const aadContext = { subjectId: String(doc._id), field };
+  const isV2 = stored.startsWith(VERSION_PREFIX_V2);
+  const isV1 = stored.startsWith(VERSION_PREFIX);
+  if (isV2 && !args.rotate) return { skip: 'encrypted-v2' };
+  if (!isV2 && !isV1) {
+    // 明文：当前密钥直接加密（v2 + AAD 行绑定，检索键同步重算——存量明文行的
+    // 检索键本来是空的，这是迁移要补齐的另一半）
+    return {
+      update: { [field]: encryptPii(stored, aadContext), [`${field}Key`]: piiSearchKey(stored) },
+    };
   }
-  // 轮换：旧密钥解密 → 当前密钥加密。解不开 = 密钥不符或数据被改，点名不覆盖
   try {
-    const plain = decryptWith(stored, true);
-    return { update: { [field]: encryptPii(plain), [`${field}Key`]: piiSearchKey(plain) } };
+    const plain = decryptWith(stored, args.rotate, aadContext);
+    return {
+      update: { [field]: encryptPii(plain, aadContext), [`${field}Key`]: piiSearchKey(plain) },
+      upgrade: isV1 && !args.rotate,
+    };
   } catch (e) {
     return { corrupt: { id: String(doc._id), field, reason: e.message } };
   }
@@ -182,7 +203,14 @@ function resolveFieldUpdate(doc, field, args) {
 
 /** 全表扫描分拣与（apply 模式下的）改写 */
 async function scanAndRewrite(coll, args) {
-  const stats = { scanned: 0, plaintextRows: 0, encryptedRows: 0, corrupt: [], rewritten: 0 };
+  const stats = {
+    scanned: 0,
+    plaintextRows: 0,
+    aadUpgraded: 0,
+    encryptedRows: 0,
+    corrupt: [],
+    rewritten: 0,
+  };
   const cursor = coll.find(
     {
       $or: [
@@ -220,7 +248,8 @@ async function scanAndRewrite(coll, args) {
         stats.corrupt.push(result.corrupt);
         continue;
       }
-      stats.plaintextRows += 1;
+      if (result.upgrade) stats.aadUpgraded += 1;
+      else stats.plaintextRows += 1;
       Object.assign(update, result.update);
     }
     if (Object.keys(update).length > 0) {

@@ -14,7 +14,13 @@
  */
 
 const mongoose = require('mongoose');
-const { encryptPii, decryptPii, piiSearchKey, VERSION_PREFIX } = require('../../utils/piiCrypto');
+const {
+  encryptPii,
+  decryptPii,
+  piiSearchKey,
+  VERSION_PREFIX,
+  VERSION_PREFIX_V2,
+} = require('../../utils/piiCrypto');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 const User = require('../../models/User');
 
@@ -37,6 +43,62 @@ describe('piiCrypto 纯判据', () => {
     expect(decryptPii('')).toBe('');
     expect(decryptPii(null)).toBeNull();
     expect(decryptPii(undefined)).toBeUndefined();
+  });
+
+  /**
+   * v2 AAD 行绑定（2026-10-01 审计 finding：v1 密文可跨行搬运）。
+   * 同一把派生钥下，把受害者的 enc.v1 串复制到自己那行，getter 就会解出受害者的
+   * 明文——一次 DB 写权限兑换任意用户 PII。v2 把 pii:v2:<subjectId>:<field> 灌进
+   * GCM 认证标签：换行、换字段、缺上下文一律认证失败。
+   */
+  describe('v2 AAD 行绑定', () => {
+    const ctxA = { subjectId: 'a'.repeat(24), field: 'phone' };
+    const ctxB = { subjectId: 'b'.repeat(24), field: 'phone' };
+
+    test('往返：密文带 enc.v2. 前缀、随机 IV 不可链接、正确上下文可解', () => {
+      const a = encryptPii(PLAIN_PHONE, ctxA);
+      const b = encryptPii(PLAIN_PHONE, ctxA);
+      expect(a).toMatch(/^enc\.v2\./);
+      expect(a).not.toBe(b); // 随机 IV ⇒ 不可链接
+      expect(decryptPii(a, ctxA)).toBe(PLAIN_PHONE);
+      expect(decryptPii(b, ctxA)).toBe(PLAIN_PHONE);
+    });
+
+    test('跨行搬运被拦：换 subjectId / 换字段 / 缺上下文 ⇒ 解密失败，正确上下文仍可解', () => {
+      const enc = encryptPii(PLAIN_PHONE, ctxA);
+      expect(() => decryptPii(enc, ctxB)).toThrow(); // 复制到别人行 ⇒ GCM 认证失败
+      expect(() => decryptPii(enc, { subjectId: ctxA.subjectId, field: 'realName' })).toThrow();
+      expect(() => decryptPii(enc)).toThrow(/AAD 绑定上下文/); // 形态层就说清楚缺了什么
+      // 正向对照：密文本身没坏，只是绑定不符
+      expect(decryptPii(enc, ctxA)).toBe(PLAIN_PHONE);
+    });
+
+    test('AAD 上下文非法即抛：subjectId/field 任一为空都不允许造出弱绑定密文', () => {
+      expect(() => encryptPii(PLAIN_PHONE, { subjectId: '', field: 'phone' })).toThrow(/AAD/);
+      expect(() => encryptPii(PLAIN_PHONE, { subjectId: 'a'.repeat(24), field: '' })).toThrow(
+        /AAD/
+      );
+      expect(() => encryptPii(PLAIN_PHONE, {})).toThrow(/AAD/);
+      expect(() => encryptPii(PLAIN_PHONE, null)).not.toThrow(); // 无上下文 = v1 旧格式，见下条
+    });
+
+    test('v1 兼容：无上下文加密仍是 v1、解密不需要上下文（存量行迁移前照常可读）', () => {
+      const enc = encryptPii(PLAIN_PHONE);
+      expect(enc).toMatch(/^enc\.v1\./);
+      expect(decryptPii(enc)).toBe(PLAIN_PHONE);
+      // getter 统一传上下文读 v1 也不受影响（v1 路径忽略上下文）
+      expect(decryptPii(enc, ctxA)).toBe(PLAIN_PHONE);
+    });
+
+    test('形态前置校验：IV 非 12 字节 / 数据段不足以容纳 tag ⇒ "形态非法"而非 GCM 原生报错', () => {
+      // 原先 data < 16 字节时 subarray 负索引静默变形（整段当 tag、空 ct），
+      // 要到 setAuthTag/final 才以 GCM 原生报错浮现
+      expect(() => decryptPii('enc.v1.eA==.eA==')).toThrow(/形态非法/);
+      const longIv = Buffer.alloc(16).toString('base64');
+      expect(() => decryptPii(`enc.v1.${longIv}.${Buffer.alloc(20).toString('base64')}`)).toThrow(
+        /形态非法/
+      );
+    });
   });
 
   test('空值不产生密文也不产生检索键（清空手机号是合法操作）', () => {
@@ -175,11 +237,11 @@ describe('User schema 接线（真实 Mongo：phone 写侧加密、读侧解密�
     userId = undefined;
   });
 
-  test('创建：phone 库内是密文 + 检索键同步；realName 按决策保持明文', async () => {
+  test('创建：phone 库内是 v2 密文（AAD 行绑定）+ 检索键同步；realName 按决策保持明文', async () => {
     // 写侧钩子在 beforeEach 的 User.create 上已经跑过，这里断言其落库形态。
     // 绕过 getter 看库内原始形态
     const raw = await User.collection.findOne({ _id: userId });
-    expect(raw.phone).toMatch(/^enc\.v1\./);
+    expect(raw.phone).toMatch(/^enc\.v2\./);
     expect(raw.phone).not.toContain(PLAIN_PHONE);
     // realName 决策：暂不加密（姓名模糊检索依赖），库内保持明文
     expect(raw.realName).toBe(PLAIN_NAME);
@@ -213,6 +275,52 @@ describe('User schema 接线（真实 Mongo：phone 写侧加密、读侧解密�
     expect(after.phone).not.toBe(before.phone);
     expect(after.phoneKey).toBe(piiSearchKey('13987654321'));
     expect((await User.findById(userId)).phone).toBe('13987654321');
+  });
+
+  test('跨行搬运（库级端到端）：把 A 行密文整体写进 B 行，B 的读取以认证失败暴露', async () => {
+    // 攻击位面：持 DB 写权限者把受害者 A 行的 enc.v2 串复制到自己 B 行。
+    // AAD 绑定的是「写密文那一行的 _id」，B 行的 _id 与之不符 ⇒ getter 解密认证失败。
+    const rawA = await User.collection.findOne({ _id: userId });
+    expect(rawA.phone).toMatch(/^enc\.v2\./);
+    const seqB = seq + 1000;
+    const inserted = await User.collection.insertOne({
+      username: `pii_xplant_${Date.now().toString(36)}_${seqB}`,
+      email: `pii_xplant_${Date.now().toString(36)}_${seqB}@example.invalid`,
+      // 原生 collection 插入不过模型校验，口令值无语义；用生成器避免硬编码字面量
+      password: randomPassword(),
+      phone: rawA.phone, // 受害者的密文原样复制
+      phoneKey: '',
+      roles: [],
+    });
+    try {
+      const read = await User.findById(inserted.insertedId);
+      expect(read).toBeTruthy();
+      // getter 在属性访问时解密：A 行密文 × B 行 _id ⇒ AAD 不匹配 ⇒ 抛错
+      expect(() => read.phone).toThrow();
+    } finally {
+      await User.collection.deleteOne({ _id: inserted.insertedId });
+    }
+  });
+
+  test('存量 v1 行（迁移前写入）读侧照常可读：透传口径不因 v2 引入而断裂', async () => {
+    const legacy = encryptPii(PLAIN_PHONE); // 无上下文 = v1 形态（旧行的真实库内形态）
+    expect(legacy).toMatch(/^enc\.v1\./);
+    const seqC = seq + 2000;
+    const inserted = await User.collection.insertOne({
+      username: `pii_legacy_${Date.now().toString(36)}_${seqC}`,
+      email: `pii_legacy_${Date.now().toString(36)}_${seqC}@example.invalid`,
+      password: randomPassword(),
+      phone: legacy,
+      phoneKey: piiSearchKey(PLAIN_PHONE),
+      roles: [],
+    });
+    try {
+      const read = await User.findById(inserted.insertedId);
+      // getter 统一传上下文，v1 路径忽略之——迁移脚本跑完之前旧数据照常可读
+      expect(read.phone).toBe(PLAIN_PHONE);
+    } finally {
+      await User.collection.deleteOne({ _id: inserted.insertedId });
+    }
   });
 
   test('非法手机号：文案与明文时代逐字一致，且不落任何写入', async () => {

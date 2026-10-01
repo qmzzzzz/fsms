@@ -96,7 +96,15 @@ const userSchema = new mongoose.Schema(
     phone: {
       type: String,
       trim: true,
-      get: decryptPii,
+      // v2 密文带 AAD 行绑定（pii:v2:<_id>:phone，见 utils/piiCrypto.js）：读侧必须把
+      // 文档身份喂回解密——跨行复制的密文在这里以 GCM 认证失败暴露。Mongoose 8 以
+      // 文档为 this 调用字段 getter（schematype.js applyGetters），_id 在文档创建期
+      // 即由 ObjectId default 生成，save 前后两条读路径都拿得到。
+      get: function (value) {
+        const doc = this;
+        const subjectId = doc && doc._id !== undefined && doc._id !== null ? String(doc._id) : null;
+        return decryptPii(value, subjectId ? { subjectId, field: 'phone' } : null);
+      },
     },
     // phone 的精确检索键（HMAC，select:false）：相等性只在这个键控字段上成立，
     // 密文列本身随机 IV、不可链接。空值落的是**空串键**（default:''，钩子里
@@ -353,7 +361,16 @@ userSchema.pre('validate', function (next) {
         }
       }
       this[key] = value ? piiSearchKey(value) : '';
-      this[plain] = value ? encryptPii(value) : value;
+      // v2：加密必须绑定行身份（AAD = pii:v2:<_id>:<field>）。_id 缺失时拒绝加密
+      // 而不是落到无绑定密文上——无绑定密文与 v1 同样可跨行搬运，等于白改。
+      // （_id 由 ObjectId default 在文档创建期生成，走到这里必已存在；此守卫是给
+      // 「未来某人改掉 _id 生成时机」的 fail-closed 兜底。）
+      if (!this._id) {
+        throw new Error(`PII v2 加密需要文档 _id 作 AAD 绑定（字段 ${plain}，_id 缺失即拒绝写入）`);
+      }
+      this[plain] = value
+        ? encryptPii(value, { subjectId: String(this._id), field: plain })
+        : value;
     }
     next();
   } catch (error) {
