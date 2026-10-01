@@ -19,7 +19,6 @@ const {
   decryptPii,
   piiSearchKey,
   VERSION_PREFIX,
-  VERSION_PREFIX_V2,
 } = require('../../utils/piiCrypto');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 const User = require('../../models/User');
