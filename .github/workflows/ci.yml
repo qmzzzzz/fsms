@@ -625,7 +625,10 @@ jobs:
           if-no-files-found: error
 
       # P2-⑩：cosign keyless 签名（Fulcio 短期证书，无长命签名密钥需托管）。
-      # 验签方：cosign verify <image> --certificate-identity-regexp ... --certificate-oidc-issuer ...
+      # 验签方：deploy.yml 的 preflight（cosign verify <image>@<digest>
+      #   --certificate-identity-regexp <本仓库 ci.yml 的工作流 ref>
+      #   --certificate-oidc-issuer https://token.actions.githubusercontent.com），
+      # 并以解析出的 digest 钉死引用部署——只签不验等于没签。
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 

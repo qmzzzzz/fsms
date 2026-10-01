@@ -112,6 +112,39 @@ describe('D-1 部署前置校验：fail-closed', () => {
     expect(r.errors.join('\n')).toContain('本地开发默认值');
   });
 
+  test('DEPLOY_REQUIRE_DIGEST_PIN=true 时非 digest 引用拒绝（镜像验签闭环的最后一道闸）', () => {
+    // tag 是 registry 端可被覆盖的可变指针：签名/SBOM/provenance 全部锚在 digest 上，
+    // 验完签却按 tag pull，验签等于没验。工作流路径（deploy.yml preflight）总是传
+    // `<repo>:<tag>@sha256:…`；本闸拦下一切「绕过 preflight 直传 tag」的路径。
+    const r = validatePreflight(
+      {
+        ...validEnv(),
+        APP_IMAGE: 'ghcr.io/qmzzzzz/fsms:sha-abc1234',
+        DEPLOY_REQUIRE_DIGEST_PIN: 'true',
+      },
+      okFs()
+    );
+    expect(r.ok).toBe(false);
+    expect(r.errors.join('\n')).toContain('digest 钉死引用');
+  });
+
+  test('DEPLOY_REQUIRE_DIGEST_PIN=true 且 digest 引用放行（tag+digest 双段形态）', () => {
+    const r = validatePreflight(
+      {
+        ...validEnv(),
+        APP_IMAGE: `ghcr.io/qmzzzzz/fsms:sha-abc1234@sha256:${'0'.repeat(64)}`,
+        DEPLOY_REQUIRE_DIGEST_PIN: 'true',
+      },
+      okFs()
+    );
+    expect(r).toEqual({ ok: true, errors: [], warnings: [] });
+  });
+
+  test('开关显式为 false 时 tag 引用不拦（与未设置同语义，本地手工演练不破坏）', () => {
+    const r = validatePreflight({ ...validEnv(), DEPLOY_REQUIRE_DIGEST_PIN: 'false' }, okFs());
+    expect(r.ok).toBe(true);
+  });
+
   test('密钥目录整体缺失即拒绝，并给出生成命令', () => {
     const r = validatePreflight(validEnv(), fakeFs({}));
     expect(r.ok).toBe(false);

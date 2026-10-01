@@ -19,6 +19,10 @@
  *
  * 用法：
  *   APP_IMAGE=ghcr.io/owner/repo:sha-abc1234 node scripts/deploy.js
+ *   # 工作流路径（deploy.yml）会先在 preflight 里 cosign keyless 验签、把 tag 解析成
+ *   # digest 钉死引用 <repo>:<tag>@sha256:<64位hex> 再传入，并置
+ *   # DEPLOY_REQUIRE_DIGEST_PIN=true 让本脚本拒绝一切非 digest 引用；
+ *   # 手工发布同口径（buildx imagetools inspect <tag> 可取 digest）。
  *   APP_IMAGE=... node scripts/deploy.js --dry-run      # 只打印计划
  *   APP_IMAGE=... node scripts/deploy.js --skip-backup  # 明确跳过备份（仅演练用）
  *   APP_IMAGE=... node scripts/deploy.js --no-rollback  # 关闭失败自动回滚

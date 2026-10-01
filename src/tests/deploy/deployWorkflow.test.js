@@ -140,7 +140,46 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
     const ssh = jobBlock('deploy-ssh');
     expect(selfHosted).toMatch(/node scripts\/deploy\.js/);
     expect(ssh).toMatch(/node scripts\/deploy\.js/);
-    expect(selfHosted).toMatch(/APP_IMAGE:\s*\$\{\{\s*needs\.preflight\.outputs\.image_tag\s*\}\}/);
+    expect(selfHosted).toMatch(/APP_IMAGE:\s*\$\{\{\s*needs\.preflight\.outputs\.image_ref\s*\}\}/);
+  });
+
+  test('镜像验签闭环：preflight 验签并输出 digest 钉死引用，两条部署路径都消费它', () => {
+    // 此前的断裂链：ci.yml 只 sign（verify 只存在于注释），本文件 pull 前不验签
+    // 不比 digest——任何能覆盖 :sha-xxxx 标签的主体都能让生产跑未签名镜像。
+    // 修复后：preflight 解析 digest → keyless 验签 → 以 <repo>:<tag>@sha256:…
+    // 传入两条部署路径，deploy.js 侧 DEPLOY_REQUIRE_DIGEST_PIN 兜底。
+    const preflight = jobBlock('preflight');
+    // ① cosign 安装步骤存在，且排在验签步骤之前
+    expect(preflight).toMatch(/uses:\s*sigstore\/cosign-installer/);
+    expect(preflight.indexOf('Install cosign')).toBeGreaterThan(-1);
+    expect(preflight.indexOf('Resolve digest and verify signature')).toBeGreaterThan(
+      preflight.indexOf('Install cosign')
+    );
+    // ② 验签调用必须在**可执行段**（runScriptOf 已剔除注释——“只写在注释里”
+    //    正是本 finding 的原始病灶，不能让断言重蹈覆辙）
+    const execLines = allRunLines()
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'));
+    const joined = execLines.join('\n');
+    expect(joined).toContain('cosign verify "$image_ref"');
+    expect(joined).toContain('--certificate-identity-regexp');
+    expect(joined).toContain('--certificate-oidc-issuer');
+    // ③ digest 先解析后验签，且解析结果有过合法性闸（不是随便一个串就往下走）
+    expect(joined).toContain('docker buildx imagetools inspect');
+    expect(joined).toMatch(/sha256:\[0-9a-f\]\{64\}/);
+    expect(joined).toContain('image_ref="${IMAGE_TAG}@${digest}"');
+    expect(joined).toContain('echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"');
+    // ④ preflight 输出 image_ref；两条部署路径消费 digest 引用，不再消费原始 tag
+    expect(preflight).toMatch(/image_ref:\s*\$\{\{\s*steps\.verify\.outputs\.image_ref\s*\}\}/);
+    const selfHosted = jobBlock('deploy-self-hosted');
+    const ssh = jobBlock('deploy-ssh');
+    expect(selfHosted).toMatch(/APP_IMAGE:\s*\$\{\{\s*needs\.preflight\.outputs\.image_ref\s*\}\}/);
+    expect(ssh).toMatch(/IMAGE_TAG:\s*\$\{\{\s*needs\.preflight\.outputs\.image_ref\s*\}\}/);
+    expect(selfHosted).not.toMatch(/needs\.preflight\.outputs\.image_tag/);
+    expect(ssh).not.toMatch(/needs\.preflight\.outputs\.image_tag/);
+    // ⑤ deploy.js 侧兜底闸随两条路径显式开启（本地手工路径不受影响）
+    expect(selfHosted).toMatch(/DEPLOY_REQUIRE_DIGEST_PIN: 'true'/);
+    expect(ssh).toMatch(/DEPLOY_REQUIRE_DIGEST_PIN: 'true'/);
   });
 
   test('compose 里每个 `:?` 变量都由两条部署路径下发（否则到切换那步才被拒）', () => {

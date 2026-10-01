@@ -15,6 +15,9 @@
 # 安全套主要取：
 #   - 强制经 GitHub Environment（production / staging），可在仓库设置里给它加**人工审批门**；
 #   - 镜像必须是带版本 tag 的全名，正则校验后才会传给脚本（脚本自身也有一道）；
+#   - 镜像先验签再部署：preflight 用 cosign keyless 验签（身份限本仓库 ci.yml），
+#     并把 tag 解析成不可变 digest 后传给脚本——deployPolicy 的
+#     DEPLOY_REQUIRE_DIGEST_PIN 闸在 deploy.js 侧拒绝一切非 digest 引用；
 #   - 密钥不上命令行：SSH key 走 stdin，远程命令里只出现镜像名。
 #
 # ⚠️ 未验证声明：本流程**从未在 GitHub Actions 上真实跑过**
@@ -65,9 +68,15 @@ jobs:
   # 单独成 job 是为了让失败发生在**任何环境交互之前**，与 deploy.js 的 exit 2 同意图。
   preflight:
     runs-on: ubuntu-latest
+    # digest 解析（buildx imagetools inspect）与 cosign verify 都要读 registry：
+    # GHCR 的包公开与否不定，显式给 packages:read，凭据只用本仓库 GITHUB_TOKEN。
+    permissions:
+      contents: read
+      packages: read
     outputs:
       mode: ${{ steps.mode.outputs.mode }}
       image_tag: ${{ steps.validate.outputs.image_tag }}
+      image_ref: ${{ steps.verify.outputs.image_ref }}
     steps:
       - name: Validate image tag format
         id: validate
@@ -96,6 +105,53 @@ jobs:
             exit 1
           fi
           echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR (digest 解析需要读权限)
+        if: startsWith(steps.validate.outputs.image_tag, 'ghcr.io/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # ===== 镜像验签闭环（此前全链路只签不验）=====
+      # ci.yml 的 build job 只签（cosign sign），cosign verify 此前只存在于注释，
+      # 部署链路 pull 前不验签也不比 digest——任何能覆盖 :sha-xxxx 标签的主体
+      # 都能让生产跑未签名镜像，cosign + SLSA + SBOM 的投入防护值≈0。
+      # 本步骤把验签接进部署链，且验的是**不可变 digest**：
+      #   ① 先把 tag 解析成 digest（验 tag 再 pull tag 有 TOCTOU：两次解析之间
+      #      tag 可被覆盖；digest 在 registry 端不可变，锚定后覆盖标签无意义）；
+      #   ② keyless 验签：证书身份必须是本仓库 ci.yml 的工作流 ref，OIDC issuer
+      #      必须是 GitHub Actions——其他身份（含 fork 仓库同名工作流）一律拒绝；
+      #   ③ 把 <repo>@sha256:… 传给两条部署路径：deploy.js 全程只 pull/up 这个引用
+      #      （deployPolicy 侧另有 DEPLOY_REQUIRE_DIGEST_PIN 闸兜底）。
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Resolve digest and verify signature (keyless)
+        id: verify
+        env:
+          IMAGE_TAG: ${{ steps.validate.outputs.image_tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # ① 解析 digest：.Manifest.Digest 即该 tag 当前指向的顶层清单摘要，
+          #    与 ci.yml 签名时用的 push.outputs.digest 同源（都是 manifest digest）。
+          digest="$(docker buildx imagetools inspect "$IMAGE_TAG" --format '{{.Manifest.Digest}}')"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::未能把镜像引用解析出合法 digest（得到：「$digest」）"
+            exit 1
+          fi
+          image_ref="${IMAGE_TAG}@${digest}"
+          # ② keyless 验签。仓库段要转义点号：org.name 形态不转义会把
+          #    regexp 的 . 放宽成"任意字符"，信任面多开一档。
+          repo_rx="$(printf '%s' "$GITHUB_REPOSITORY" | sed 's/[.]/[.]/g')"
+          identity_rx="^https://github.com/${repo_rx}/\.github/workflows/ci\.yml@"
+          cosign verify "$image_ref" \
+            --certificate-identity-regexp "$identity_rx" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
 
       - name: Detect deploy credentials
         id: mode
@@ -129,7 +185,11 @@ jobs:
       # 工作流不重复实现一遍判据（否则两处逻辑会漂移）。
       - name: Run deploy.js
         env:
-          APP_IMAGE: ${{ needs.preflight.outputs.image_tag }}
+          # digest 钉死引用（preflight 验签 + 解析的产物），不是输入的原始 tag：
+          # 验签与 pull 落在同一份不可变内容上，标签此后被覆盖影响不到本次发布。
+          APP_IMAGE: ${{ needs.preflight.outputs.image_ref }}
+          # 最后一道闸：deploy.js 侧拒绝一切非 digest 引用（含误配直传 tag）
+          DEPLOY_REQUIRE_DIGEST_PIN: 'true'
           CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
           # compose 用 `${ALLOWED_HOSTS:?}` 强制显式声明，缺它会在"切换"那步才被拒
           # （此前只下发 CORS_ORIGIN ⇒ 前置校验通过、切换时才炸）。见 deployWorkflow 自检。
@@ -206,7 +266,9 @@ jobs:
           CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
           # 与 self-hosted 路径同口径：compose 的 `:?` 要求两条部署路径都下发
           ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
-          IMAGE_TAG: ${{ needs.preflight.outputs.image_tag }}
+          IMAGE_TAG: ${{ needs.preflight.outputs.image_ref }}
+          # 与 self-hosted 同口径：deploy.js 侧拒绝非 digest 引用
+          DEPLOY_REQUIRE_DIGEST_PIN: 'true'
           DRY_RUN: ${{ inputs.dry_run }}
           SKIP_BACKUP: ${{ inputs.skip_backup }}
         run: |

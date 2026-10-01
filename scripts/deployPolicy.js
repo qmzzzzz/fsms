@@ -63,6 +63,21 @@ function validatePreflight(env, fsImpl) {
     errors.push(
       'APP_IMAGE 不能是本地开发默认值 fire-safety-app:local（该 tag 指向本机构建，无法回答线上是哪个 commit）。'
     );
+  } else if (
+    (env.DEPLOY_REQUIRE_DIGEST_PIN || '').trim() === 'true' &&
+    !/@sha256:[0-9a-f]{64}$/.test(image)
+  ) {
+    // ④ digest 钉闸（镜像验签闭环的最后一道）：tag 是 registry 端可被覆盖的可变指针，
+    //    签名/SBOM/provenance 都锚在 digest 上——验完签却按 tag pull，验签等于没验。
+    //    deploy.yml 的 preflight 会先 cosign 验签、把 tag 解析成 digest 并以
+    //    `<repo>@sha256:…` 传入，两条工作流部署路径都显式置 DEPLOY_REQUIRE_DIGEST_PIN=true
+    //    让本脚本拒绝一切非 digest 引用（含手误直接给 tag 的情况）。
+    //    开关默认关闭：本地手工演练仍可用 tag 引用，不破坏既有用法。
+    errors.push(
+      'DEPLOY_REQUIRE_DIGEST_PIN=true 但 APP_IMAGE 不是 digest 钉死引用（应为 ' +
+        '<registry>/<repo>:<tag>@sha256:<64位hex>）。工作流路径由 preflight 完成验签并解析 digest；' +
+        '手工发布请先 docker buildx imagetools inspect <tag> 取 digest 后再传。'
+    );
   }
 
   // ② compose 的 `:?` 变量一个都不能少：缺失时 compose 会在插值阶段直接拒绝整个项目。
