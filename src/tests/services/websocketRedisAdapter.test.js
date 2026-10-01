@@ -1,5 +1,8 @@
 /**
  * WebSocket Redis adapter mounting behavior.
+ *
+ * 两条用例一起钉住「降级必须是可见的」：挂载失败要记 warn（否则推送退化成单实例语义
+ * 却无人知道），订阅端要带上与主连接同源的口令（否则 requirepass 下失败形态只有日志）。
  */
 
 jest.mock('@socket.io/redis-adapter', () => ({
@@ -15,6 +18,10 @@ jest.mock('../../utils/logger', () => ({
 jest.mock('../../services/sharedCache', () => ({
   isRedisEnabled: jest.fn(() => true),
   getRedisClient: jest.fn(() => 'redis-client'),
+  // 订阅端与主连接同源的取密函数（2816d68 Redis 认证）。桩返回哨兵值而不是 undefined：
+  // 只有能断言「这个值确实进了 new Redis 的 options.password」，才证伪「adapter 客户端
+  // 漏传凭据」——requirepass 场景下那是一条 NOAUTH 降级日志，业务面只表现为"推送不跨实例"。
+  redisConnectionPassword: jest.fn(() => 'sentinel-redis-secret'),
 }));
 jest.mock('ioredis', () => jest.fn(() => ({ disconnect: jest.fn() })));
 
@@ -48,6 +55,7 @@ describe('WebSocket Redis adapter', () => {
     expect(Redis).toHaveBeenCalledWith('redis://redis-test:6379', {
       lazyConnect: false,
       enableOfflineQueue: true,
+      password: 'sentinel-redis-secret',
     });
     expect(createAdapter).toHaveBeenCalledWith('redis-client', service._adapterClients[0]);
     expect(service.io.adapter).toHaveBeenCalledWith('socket-adapter');

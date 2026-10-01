@@ -14,12 +14,7 @@
  */
 
 const mongoose = require('mongoose');
-const {
-  encryptPii,
-  decryptPii,
-  piiSearchKey,
-  VERSION_PREFIX,
-} = require('../../utils/piiCrypto');
+const { encryptPii, decryptPii, piiSearchKey, VERSION_PREFIX } = require('../../utils/piiCrypto');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 const User = require('../../models/User');
 
