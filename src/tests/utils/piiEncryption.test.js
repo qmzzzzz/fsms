@@ -134,28 +134,51 @@ describe('piiCrypto 纯判据', () => {
 
 describe('User schema 接线（真实 Mongo：phone 写侧加密、读侧解密、检索键同步）', () => {
   let userId;
+  let seq = 0;
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
   });
   afterAll(async () => {
-    if (userId) await User.deleteOne({ _id: userId }, { bypassAppendOnly: true });
     if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
   });
 
-  test('创建：phone 库内是密文 + 检索键同步；realName 按决策保持明文', async () => {
+  /**
+   * 每条用例独占自己的用户切片：userId 只在单条用例内有效，不跨用例传递。
+   *
+   * 原实现把 `userId = u._id` 写在「创建」用例内部，于是整个 describe 块依赖
+   * **声明顺序**——「创建」没排第一时，后三条用例拿到 userId=undefined ⇒
+   * `User.findById(undefined)` 得 null ⇒
+   *   · 按检索键精确查找：expect(found).toBeTruthy() 收到 null
+   *   · 更新 / 非法手机号：TypeError: Cannot set properties of null (setting 'phone')
+   * CI 的顺序无关门禁（--randomize，seed 20260917/31337/777001）实测三种子全红，
+   * 且失败条数随「创建」落在第 2/3/4 位变化（1/2/3 条），正是顺序耦合的指纹。
+   *
+   * 只把创建挪进 beforeAll 并不够：「更新」会把 phone 改成 13987654321，与
+   * 「按检索键精确查找」按 piiSearchKey(PLAIN_PHONE) 查找互相冲突——两条用例
+   * 要的是**各自**的切片，而不是一个共享可变对象。
+   */
+  beforeEach(async () => {
+    seq += 1;
     const u = await User.create({
-      username: `pii_${Date.now().toString(36)}`,
-      email: `pii_${Date.now().toString(36)}@example.invalid`,
+      username: `pii_${Date.now().toString(36)}_${seq}`,
+      email: `pii_${Date.now().toString(36)}_${seq}@example.invalid`,
       password: randomPassword(),
       realName: PLAIN_NAME,
       phone: PLAIN_PHONE,
       roles: [],
     });
     userId = u._id;
+  });
+  afterEach(async () => {
+    if (userId) await User.deleteOne({ _id: userId }, { bypassAppendOnly: true });
+    userId = undefined;
+  });
 
+  test('创建：phone 库内是密文 + 检索键同步；realName 按决策保持明文', async () => {
+    // 写侧钩子在 beforeEach 的 User.create 上已经跑过，这里断言其落库形态。
     // 绕过 getter 看库内原始形态
-    const raw = await User.collection.findOne({ _id: u._id });
+    const raw = await User.collection.findOne({ _id: userId });
     expect(raw.phone).toMatch(/^enc\.v1\./);
     expect(raw.phone).not.toContain(PLAIN_PHONE);
     // realName 决策：暂不加密（姓名模糊检索依赖），库内保持明文
@@ -165,10 +188,10 @@ describe('User schema 接线（真实 Mongo：phone 写侧加密、读侧解密�
     expect(raw.realNameKey).toBeUndefined();
 
     // 模型读回（默认投影不含检索键；明文经 getter 还原）
-    const read = await User.findById(u._id);
+    const read = await User.findById(userId);
     expect(read.realName).toBe(PLAIN_NAME);
     expect(read.phone).toBe(PLAIN_PHONE);
-    const withKey = await User.findById(u._id).select('+phoneKey');
+    const withKey = await User.findById(userId).select('+phoneKey');
     expect(withKey.phoneKey).toBe(piiSearchKey(PLAIN_PHONE));
   });
 
