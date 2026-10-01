@@ -80,6 +80,8 @@ const noteRateLimitHit = (req, limiterName) => {
 //   刻意**不豁免**。白名单表达的是「该 IP 可信、不是攻击源」，而暴力破解防护
 //   针对的是凭据本身；办公出口 IP 通常在白名单里，若一并豁免，
 //   内网发起的撞库将完全不受限速 —— 这两类风险不能用同一个开关表达
+// - 账号维度写滥用桶（securityReportUserLimiter）同样不豁免：它约束的是
+//   「单个账号能往高危审计里写多少条」，与来源 IP 是否可信正交
 const skipIfWhitelisted = (req) => req.ipWhitelisted === true;
 
 // 探针豁免（全站挂载的前提）：/health、/readyz 由编排器与部署门禁以 127.0.0.1 高频探测，
@@ -444,7 +446,7 @@ const passwordChangeLimiter = rateLimit({
 });
 
 /**
- * 凭据型限流的「账号维度」姊妹桶（改密 / 二次验证各一个）
+ * 账号维度桶工厂（改密 / 二次验证 / 安全举报）
  *
  * 为什么原样组合键不够（实测：`zztmpctl/laneE/xffCredentialLimiter.test.js`，
  * 判据见 `src/tests/security/credentialLimiterPerUserBucket.test.js`）：
@@ -464,11 +466,14 @@ const passwordChangeLimiter = rateLimit({
  * 只留账号桶会丢掉"单 IP 横扫多账号"的约束，只留 IP 桶就是本条缺陷本身；
  * 两者阈值/窗口保持一致，不放宽任何一侧。userId 缺失时跳过（未认证请求由
  * 组合键回退分支与 generalLimiter 负责，不能让所有匿名请求共享一个 `undefined` 桶）。
+ *
+ * `max` 是后加的形参（安全举报桶用 20 次/15 分钟，理由见下方 securityReportUserLimiter）：
+ * 凭据型两桶保持原值 5，不因复用而放宽任何一侧。
  */
-function makeCredentialUserLimiter(prefix, message) {
+function makeUserBucketLimiter(prefix, message, max = 5) {
   return rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 5,
+    max,
     store: makeSharedStore(`${prefix}-user`),
     skipSuccessfulRequests: false,
     skip: (req) => !req.user?.userId,
@@ -482,11 +487,35 @@ function makeCredentialUserLimiter(prefix, message) {
   });
 }
 
-const passwordChangeUserLimiter = makeCredentialUserLimiter(
+const passwordChangeUserLimiter = makeUserBucketLimiter(
   'pwd-change',
   '密码修改操作过于频繁，请稍后再试'
 );
-const reauthUserLimiter = makeCredentialUserLimiter('reauth', '二次验证尝试过于频繁，请稍后再试');
+const reauthUserLimiter = makeUserBucketLimiter('reauth', '二次验证尝试过于频繁，请稍后再试');
+
+/**
+ * 安全举报（POST /api/security/report）的账号维度桶
+ *
+ * 为什么这个低频写入口也必须有独立的桶：它**刻意不挂权限码**（人人可举报是产品设计，
+ * 见 securityRoutes 的 PERMISSION-EXEMPT 说明），而每一次成功举报都写一条
+ * `riskLevel:'high'` 的审计行——它同时是安全概览「高风险操作数」的取数来源。
+ * 于是单个被盗令牌可以把高危计数刷成噪声，让真正的告警被淹没（告警疲劳型投毒），
+ * 且刷的是**别人的记录**（targetId 由请求方指定，现另需通过存在性与数据范围核验）。
+ * 全站通用配额帮不上忙：300 次/15 分钟按 IP 组键，NAT 出口下全办公室共用一桶，
+ * 既拦不住定向刷又先误伤正常用户。
+ *
+ * 20 次/15 分钟的来历：一次现场巡检可能顺带报十几条（十几条就是十几个对象），
+ * 而脚本刷量要的是成百上千——20 已经把洪水压在告警噪声之下，同时不把真人挡在门外。
+ * 阈值/键/豁免口径的推导与凭据型姊妹桶一致（见上方工厂注释），
+ * 同样**不接** noteRateLimitHit——账号桶没有可封的 IP（分类表见文件头）。
+ * 该数值不导出：判据要能在配额被改动时**变红**，测试里钉死 20 并同时校验
+ * 响应声明的 `RateLimit-Limit`（见 reportTargetScopeAndLimiter.test.js 的 D 组）。
+ */
+const securityReportUserLimiter = makeUserBucketLimiter(
+  'report',
+  '举报提交过于频繁，请稍后再试',
+  20
+);
 
 /**
  * 注册限流器（IP 维度）
@@ -562,6 +591,7 @@ module.exports = {
   passwordChangeUserLimiter,
   reauthLimiter,
   reauthUserLimiter,
+  securityReportUserLimiter,
   ipLimiter,
   userLimiter,
   registerIpLimiter,

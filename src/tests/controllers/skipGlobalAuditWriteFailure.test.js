@@ -33,8 +33,17 @@ jest.mock('../../middleware/rbac', () => ({
 }));
 
 const mockUserFindById = jest.fn();
+const mockUserFind = jest.fn();
 jest.mock('../../models/User', () => ({
   findById: (...args) => mockUserFindById(...args),
+  // 举报目标核验走 userService.findScopeFieldsByIds（controllers 不直连 model，
+  // 见 architecture/layeringRatchet），取数形态是 `find().select().lean()` 而不是
+  // findById ⇒ 桩必须跟着生产代码的链路形状走。不补这一格，本文件两条举报用例
+  // 会先撞 `User.find is not a function`，根本走不到要测的审计写入点。
+  find: (...args) => {
+    const docs = mockUserFind(...args);
+    return { select: () => ({ lean: () => Promise.resolve(docs) }) };
+  },
 }));
 
 const mockAuditLogCreate = jest.fn();
@@ -289,6 +298,9 @@ beforeEach(() => {
   // 所以桩必须打在模块对象上而不是 import 绑定上，否则记不到调用
   jest.spyOn(metrics, 'incSecurityAlert').mockImplementation(() => {});
   mockUserFindById.mockResolvedValue({ username: 'admin', phone: '13800138000', email: 'a@b.c' });
+  // 举报夹具用 targetType:'user' + targetId:'t-1'：核验要先"取到这条记录"才会继续写审计，
+  // 返回空数组会让控制器提前回 USER_NOT_FOUND，本文件的失败通路就测不到了。
+  mockUserFind.mockReturnValue([{ _id: 't-1', createdBy: 'u-1', department: '技术部' }]);
   mockAuditLogCreate.mockResolvedValue({ _id: 'audit-id' });
 });
 

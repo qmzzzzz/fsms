@@ -8,6 +8,60 @@
 
 ## [未发布]
 
+### 测试（2026-10-01 · 两处 HEAD 上就存在的红灯）
+
+> 全量 `npx jest --ci` + `npm run format:check` 复跑时发现：不需要本轮任何改动，main 上已经有
+> 三条用例与一条格式闸是红的。CI 跑这两条（`ci.yml` 的 jest 与 `:79` 的 format:check）⇒ 合并队列
+> 上任何后续提交都会被这两处**别人的**失败误判成"本提交引入的回归"，所以先修它们。
+
+- **`websocketRedisAdapter.test.js` 落后于 Redis 认证改造（2 例红）**：`2816d68` 给订阅端补了
+  `password: sharedCache.redisConnectionPassword()`（`websocketService.js:260`），但该套件的
+  `jest.mock('../../services/sharedCache')` 工厂只造了 `isRedisEnabled`/`getRedisClient` 两个键。
+  失败形态很有教育意义：第一条是 `toHaveBeenCalledWith` 的对象不匹配，第二条**不是**它声称要测的
+  "挂载失败降级"，而是桩自身缺键抛出的 `sharedCache.redisConnectionPassword is not a function`
+  被 `catch` 吞掉后进了同一条 warn 分支——断言只匹配 `stringContaining`，于是"桩坏了"伪装成
+  "降级路径测过了"。收口：桩补该函数并返回哨兵值，断言要求哨兵出现在 `new Redis` 的 options 里
+  （`toHaveBeenCalledWith` 是全等对象匹配，多键/少键/漏传都红 ⇒ 这条现在是"口令必须外发到
+  订阅端"的真闸，而不是只让套件变绿）。
+- **`piiEncryption.test.js` 格式（1 条格式闸红）**：`4402562` 移除未使用导入时留下了未过 prettier 的
+  解构折行。本轮只做格式化（1 增 6 删，零行为变化）。
+
+### 修复（2026-10-01 · `POST /api/security/report` 的目标核验与账号配额）
+
+> 背景：该端点刻意不挂权限码（人人可举报是产品设计），但路由注释自称「本人资源…无越权面」
+> 是**假的**——上报内容由调用者撰写，`targetId` 指向的却是别人的记录。修复前任何登录用户
+> 都能提交任意 `targetId`（不校验存在性、不校验范围、无独立配额），服务端原样写进一条
+> `riskLevel:'high'` 的审计行，而安全概览的「高风险操作数」与告警取数都读这批行。
+
+- **路由层**：`targetId` 的形态由 `targetType` 决定——记录型（user/device/alarm）必须是非空
+  字符串且为 ObjectId；`system` 型**禁止携带**（否则把类型改成 system 就绕过整条核验）。
+  `.exists({ values:'falsy' })` 承担的是文案而不是拒绝：删掉它后面的 `isString` 会给同一个
+  400 和同一个 path，变异实测确认「只看状态码+path」的用例是绿的但不设防，故用例断言 msg。
+- **控制器**：记录型目标必须**真实存在**（否则 404，`USER_NOT_FOUND` 在注册表里是 401 的
+  登录语义，此处显式改 404）且**落在举报人的数据范围内**（否则 403）。范围判定复用
+  `rbac.assertRecordInScope` + `DATA_SCOPE_FIELDS` 单一声明，与各自详情/写路径同判据；
+  404/403 的先后与 `deviceController.js:122/124`、`alarmController.js:156/158` 的既有口径
+  一致（存在性预言机在每条授权读路径上本来就存在，本处不新引入一类泄露）。
+  自由文本 `reason`/`description` 不受影响：被约束的是"结构化字段必须是真记录"。
+- **限流**：新增账号维度桶 `securityReportUserLimiter`（20 次/15 分钟，键 `report-user:<userId>`，
+  不含 IP 成分）。与凭据型姊妹桶同一口径：**并列**而不是把 IP 从组合键里删掉；同样
+  **不接** `noteRateLimitHit`（账号桶没有可封的 IP）。阈值刻意不导出：测试里钉死 20 并同时
+  校验服务端声明的 `RateLimit-Limit`，改配额会让用例变红而不是自动适配。
+- **分层**：数据访问经 services 的 `findScopeFieldsByIds`（`AlarmService` 补该 getter，
+  投影 `reporter.userId handler location.building`），控制器不新增直连 model——
+  初版直连 FireDevice/FireAlarm 被 `architecture/layeringRatchet` 判红（5→7）后改的。
+  连带：`skipGlobalAuditWriteFailure.test.js` 的 `models/User` 桩只提供了 `findById`，
+  而 `userService.findScopeFieldsByIds` 的形状是 `find().select().lean()` ⇒ 桩补该链路并返回
+  与夹具 `targetId` 同 `_id` 的记录，否则该套件两条举报用例先撞 `TypeError`，
+  走不到它要测的审计写入点（全量跑实测到）。
+- **门禁**：新套件 `src/tests/security/reportTargetScopeAndLimiter.test.js`（23 例：存在性、
+  三条范围臂的放行与拒绝、绕口封堵、配额与 XFF 轮换、trust proxy 前提自证、
+  投影完备性静态闸）+ 改写 `reportTargetIdBoundary.test.js`（形状边界，7 例）。
+  变异实测 5 臂：中和范围臂→B 组 4 红；摘掉限流→D 组 2 红；删 `.exists`→msg 断言红；
+  删 system 反例→绕口封堵红；删存在性→A 组与边界 404 判据 3 红；删投影一列→B/E 同时红。
+- 文档同批收窄：`models/AuditLog.js` 的 `targetId` 契约注释、`PERMISSION-EXEMPT` 理由改写为
+  如实版本、`src/docs/openapi.json` 重生成（targetId 加 ObjectId pattern + 403/404 响应）。
+
 ### 修复（2026-10-01 · 13 项报告回源复核后的三处落地）
 
 > 背景：对一份 13 条的审计报告**逐条回源复核**，其中 8 条已在 19:21~20:50 的提交里闭环、

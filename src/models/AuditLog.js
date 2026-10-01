@@ -67,7 +67,10 @@ const auditLogSchema = new mongoose.Schema(
     // 被静默丢弃——举报记录无法定位被举报对象、敏感查看记录无法回答「看了哪个字段」。
     // 类型与写入方对齐：
     //  - targetType: securityRoutes 校验为 user|device|alarm|system 之一，长度受限
-    //  - targetId:   请求体字符串（用户可传设备/报警 ID），不设 ObjectId 约束
+    //  - targetId:   securityRoutes 校验后只可能是 ObjectId（记录型）或缺席（system 型），
+    //                且记录型已在控制器过存在性 + 数据范围核验；maxlength:100 是
+    //                防御性上限（本字段唯一的写入口收窄后走不到它，留着是为了让
+    //                未来任何新写入方都不至于写出无界字符串）
     //  - dataType:   securityRoutes 校验为 phone|email 之一
     //  - description: securityRoutes 限制 <=500 字符
     targetType: {

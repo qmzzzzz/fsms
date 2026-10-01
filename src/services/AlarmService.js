@@ -134,6 +134,26 @@ class AlarmService {
   }
 
   /**
+   * 只取"数据范围判定要用的字段"的批量查询（供写路径的对象级范围闸使用）
+   *
+   * 存在理由同 `DeviceService.findScopeFieldsByIds`：`POST /api/security/report` 的记录型
+   * 目标要按 id 反查报警再做 `assertRecordInScope`，而 controllers 层直连 model 违反分层
+   * 纪律（判据见 tests/architecture/layeringRatchet）。
+   * 投影逐字对齐 DATA_SCOPE_FIELDS.alarm 的三条臂（上报人 / 处置人 / 楼栋）：少投影一列，
+   * 命中那一臂的记录就会被判成越权——假 deny 只表现为"报不了"，日志里却写着越权，
+   * 比漏判更难发现。新增属主臂时必须同时改这里与那份单一声明。
+   * 不用 `getAlarmById`：它带三次 populate（设备/处置人/操作日志），既多打 DB 往返，
+   * 又把 handler 变成 populate 后的对象，范围判定的取值口径随之改变。
+   */
+  async findScopeFieldsByIds(ids) {
+    const list = [...new Set((ids || []).map((id) => String(id)))];
+    if (list.length === 0) return [];
+    return FireAlarm.find({ _id: { $in: list } })
+      .select('reporter.userId handler location.building')
+      .lean();
+  }
+
+  /**
    * 接收报警（手动上报）
    *
    * P3-15：create 与 processLog 的初始条目必须一次写入。

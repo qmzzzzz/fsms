@@ -21,6 +21,10 @@ const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const sessionService = require('../services/sessionService');
 const authService = require('../services/authService');
+// 举报目标核验的数据访问（同 alarmController 的反查设备口径：controllers 不直连 model）
+const userService = require('../services/userService');
+const deviceService = require('../services/DeviceService');
+const alarmService = require('../services/AlarmService');
 const { RETENTION_DAYS, wasAdjusted: retentionWasAdjusted } = require('../constants/retention');
 const { businessDayBounds } = require('../constants/timezone');
 // 高危档取自 constants/audit.js 由有序等级表切出的同一段（F-149）：概览这里的"高风险操作次数"
@@ -373,6 +377,71 @@ const getSecurityStats = asyncHandler(async (req, res) => {
  * 举报异常行为
  * POST /api/security/report
  */
+
+/**
+ * 举报目标的服务端事实核验（2026-10-01 拍板：校 ID + 存在性 + 数据范围）
+ *
+ * 原状态：本端点**不挂权限码**（刻意的：一线人员必须报得了警），而 targetId 是
+ * 请求方自由填写的字符串，任何登录用户都能写一条 `riskLevel:'high'` 的审计记录
+ * 指向**别人**的记录——路由注释却写着「本人资源…无越权面」。后果有两层：
+ *   ① 安全概览的「高风险操作数」与告警取数都读这批行，定向刷写即制造告警疲劳；
+ *   ② 结构化字段 `targetId` 可以是不存在的对象，事后核查者顺着 ID 找不到任何东西。
+ *
+ * 收口口径：`targetType` 决定 `targetId` 的语义。
+ *  · user/device/alarm ⇒ 必须是**存在**且**在举报人数据范围内**的真实记录
+ *    （范围判定复用 rbac.assertRecordInScope，字段取自 DATA_SCOPE_FIELDS 单一声明，
+ *    与各自详情/写路径同判据；本人的记录恒在范围内，所以"举报自己"永远可行）；
+ *  · system ⇒ 不指向记录，路由层已禁止携带 targetId（否则改一下类型就绕过整条核验）。
+ * 自由文本 reason/description 不受影响：它们本来就不参与结构化判定，
+ * 范围外的对象当然可以用文字描述——被约束的是"结构化字段必须是真记录"。
+ *
+ * 数据访问经 services 层的 `findScopeFieldsByIds`（同 alarmController 反查设备的口径），
+ * 控制器不直连 model（架构棘轮 architecture/layeringRatchet）。这些 getter 返回**投影后的
+ * lean 文档**而不是整条记录：投影必须覆盖 DATA_SCOPE_FIELDS 里该资源的每一条属主臂 +
+ * 部门臂，少一列就会让 self/department 档把"本来在范围内"的记录判成越权（假 deny 比漏判
+ * 更难发现——用户只是"报不了"，日志里却写着越权）。该同值关系有静态闸盯着，判据见
+ * reportTargetScopeAndLimiter.test.js 的「投影完备性」。
+ *
+ * @returns {Promise<{code: string, statusCode?: number}|null>} null=通过；否则待发出的错误码
+ */
+const REPORT_TARGET_KINDS = {
+  user: {
+    pick: (id) => userService.findScopeFieldsByIds([id]),
+    fields: DATA_SCOPE_FIELDS.user,
+    notFound: 'USER_NOT_FOUND',
+    notFoundStatusCode: 404, // 注册表里该码是 401（登录语义），本处是"对象不存在"
+    outOfScope: 'USER_SCOPE_FORBIDDEN',
+  },
+  device: {
+    pick: (id) => deviceService.findScopeFieldsByIds([id]),
+    fields: DATA_SCOPE_FIELDS.device,
+    notFound: 'DEVICE_NOT_FOUND',
+    outOfScope: 'DEVICE_VIEW_FORBIDDEN',
+  },
+  alarm: {
+    pick: (id) => alarmService.findScopeFieldsByIds([id]),
+    fields: DATA_SCOPE_FIELDS.alarm,
+    notFound: 'ALARM_NOT_FOUND',
+    outOfScope: 'ALARM_VIEW_FORBIDDEN',
+  },
+};
+
+async function resolveReportTargetViolation(req, targetType, targetId) {
+  const kind = REPORT_TARGET_KINDS[targetType];
+  if (!kind) return null; // system：没有可核验的记录，路由层已保证 targetId 缺席
+  const [doc] = await kind.pick(targetId);
+  if (!doc) {
+    return { code: kind.notFound, statusCode: kind.notFoundStatusCode };
+  }
+  const { allowed } = await assertRecordInScope(
+    req,
+    doc,
+    kind.fields.ownerField,
+    kind.fields.departmentField
+  );
+  return allowed ? null : { code: kind.outOfScope };
+}
+
 const reportSuspiciousActivity = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -385,6 +454,20 @@ const reportSuspiciousActivity = asyncHandler(async (req, res) => {
 
   if (!targetType || !reason) {
     return ApiResponse.codeError(res, 'REPORT_TARGET_AND_REASON_REQUIRED');
+  }
+
+  const targetViolation = await resolveReportTargetViolation(req, targetType, targetId);
+  if (targetViolation) {
+    // 越权举报尝试本身是安全信号（有人试图往高危审计里投射他人记录）
+    logger.warn('安全举报目标核验未通过', {
+      reporter: req.user.username,
+      targetType,
+      targetId,
+      errorCode: targetViolation.code,
+    });
+    return ApiResponse.codeError(res, targetViolation.code, {
+      statusCode: targetViolation.statusCode,
+    });
   }
 
   res.locals.skipGlobalAudit = true;

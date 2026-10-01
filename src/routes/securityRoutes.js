@@ -26,6 +26,7 @@ const {
   passwordChangeUserLimiter,
   reauthLimiter,
   reauthUserLimiter,
+  securityReportUserLimiter,
   strictLimiter,
 } = require('../middleware/rateLimit');
 const { consumeValidation } = require('../middleware/validateQuery');
@@ -86,18 +87,54 @@ const changePasswordValidation = [
   }),
 ];
 
+/**
+ * 举报目标类型（单一声明，下面两条链共用）：
+ * `system` 表示"没有具体对象的系统级异常"，其余三类都指向一条真实记录。
+ */
+const REPORT_TARGET_TYPES = ['user', 'device', 'alarm', 'system'];
+const REPORT_RECORD_TYPES = REPORT_TARGET_TYPES.filter((t) => t !== 'system');
+
+/** 记录型举报：targetType 已过 isIn，取不到时按非记录型处理（那种请求整体 400） */
+const isReportRecordType = (value, { req }) => REPORT_RECORD_TYPES.includes(req.body?.targetType);
+const isReportSystemType = (value, { req }) => req.body?.targetType === 'system';
+
 const reportValidation = [
-  body('targetType').isIn(['user', 'device', 'alarm', 'system']).withMessage('无效的目标类型'),
-  // targetId 只有 schema 的 maxlength:100 兜底：超长/非字符串会走到 Mongoose 校验，
-  // 而 errorHandler 对 ValidationError 在生产环境**不返回字段明细**（避免泄露 schema），
-  // 于是同一个 400 里 targetType/reason 有 fieldErrors、targetId 只有一句通用文案。
-  // 在路由层补齐：isString 前置（express-validator 会先把对象强转成字符串再跑后续校验）。
+  body('targetType').isIn(REPORT_TARGET_TYPES).withMessage('无效的目标类型'),
+  // targetId 的形态由 targetType 决定（2026-10-01 拍板：校 ID + 存在性 + 限流）：
+  //  · 记录型 ⇒ 必填、必须是 ObjectId。存在性与数据范围在控制器判（路由层不查库：
+  //    校验阶段查库会让每一个坏格式请求都吃一次 DB 往返，而此时 targetType 自己
+  //    可能还没过 isIn）；
+  //  · system ⇒ 不得携带。反向禁止不是洁癖：否则只要把 targetType 改成 'system'
+  //    就绕过整条核验，而"任何登录用户可向审计写入任意 targetId 字符串 +
+  //    riskLevel:high"正是本次要收口的投毒面本身。
+  // 自由文本（reason/description）仍按原样放行：它本来就不参与结构化判定，
+  // 范围外的对象可以用文字描述，被约束的是**结构化字段**必须是真记录。
+  //
+  // isString 前置（express-validator 的标准校验器拿到的是 String(value) 之后的值，
+  // 对象会先变成 '[object Object]'；判据见 tests/routes/bodyTypeGate.test.js 文件头）。
+  // .bail()：字段缺失时不再叠加"格式无效"，否则同一个空字段报出两条互相矛盾的错。
+  // .exists({ values: 'falsy' }) 承担的是**文案**而不是**拒绝**：缺字段/空串即使删掉
+  // 这一环，后面的 isString/isMongoId 也会给出同一个 400 + 同一个 path（变异实证见
+  // reportTargetScopeAndLimiter.test.js 的 msg 断言）。留着它，是为了让漏传 ID 的客户端
+  // 收到「请提供被举报对象的 ID」，而不是把"你漏了字段"误导成"你格式写错了"。
   body('targetId')
-    .optional({ values: 'falsy' })
+    .if(isReportRecordType)
+    .exists({ values: 'falsy' })
+    .withMessage('请提供被举报对象的 ID')
+    .bail()
     .isString()
     .withMessage('目标 ID 必须为字符串')
-    .isLength({ max: 100 })
-    .withMessage('目标 ID 最长 100 个字符'),
+    .bail()
+    .isMongoId()
+    .withMessage('目标 ID 格式无效'),
+  body('targetId')
+    .if(isReportSystemType)
+    .custom((value) => {
+      if (value !== undefined && value !== null && value !== '') {
+        throw new Error('系统级举报不指向具体对象，请勿提交目标 ID');
+      }
+      return true;
+    }),
   mustBeString('reason', '原因'),
   body('reason').trim().isLength({ min: 1, max: 200 }).withMessage('原因长度应为 1-200 个字符'),
   mustBeString('description', '描述'),
@@ -204,8 +241,19 @@ router.get(
  * @desc    举报异常行为
  * @access  Private
  */
-router.post('/report', authenticate, reportValidation, securityController.reportSuspiciousActivity);
-// PERMISSION-EXEMPT: 本人资源：可疑行为上报的内容来自调用者自身，无越权面
+router.post(
+  '/report',
+  authenticate,
+  securityReportUserLimiter,
+  reportValidation,
+  securityController.reportSuspiciousActivity
+);
+// PERMISSION-EXEMPT: 举报是人人可用的入口（挂权限码会让一线人员报不了警），
+// 且它不读取任何他人数据。但它会往审计写一条 riskLevel:high 的记录，所以豁免的
+// 只是"权限码"而不是"约束"：targetId 必须是举报人数据范围内的真实记录（控制器判），
+// 并按账号限流（见 rateLimit.js 的 securityReportUserLimiter）。
+// 原注释写的是「本人资源：可疑行为上报的内容来自调用者自身，无越权面」——
+// 那句是假的：上报内容由调用者撰写，但 targetId 指向的是**别人**的记录。
 
 /**
  * @route   GET /api/security/my-logs

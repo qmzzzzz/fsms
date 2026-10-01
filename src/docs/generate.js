@@ -909,12 +909,19 @@ spec.paths['/api/security/report'] = {
       required: ['targetType', 'reason'],
       properties: {
         targetType: { type: 'string', enum: ['user', 'device', 'alarm', 'system'] },
-        targetId: { type: 'string' },
+        // 记录型（user/device/alarm）必填，且必须指向一条存在并在举报人数据范围内的记录；
+        // system 型不得携带 targetId（服务端会拒绝）。核验位置见 securityRoutes.reportValidation
+        // 与 securityController 的 resolveReportTargetViolation。
+        targetId: { type: 'string', pattern: '^[a-f0-9]{24}$' },
         reason: { type: 'string', maxLength: 200 },
         description: { type: 'string' },
       },
     }),
-    responses: { ...created('举报已提交') },
+    responses: {
+      ...created('举报已提交'),
+      403: { description: '被举报对象超出举报人的数据范围' },
+      404: { description: '被举报对象不存在' },
+    },
   }),
 };
 
