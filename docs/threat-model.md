@@ -45,7 +45,7 @@
 
 ### I 信息泄露（Information Disclosure）
 
-- PII at-rest 加密（realName/phone，GCM）+ 备份加密 + 异地副本（P1-①/②）；
+- PII at-rest 加密（phone，GCM；realName 暂明文见残余风险）+ 备份加密 + 异地副本（P1-①/②）；
 - 传输：生产强制 `tls=true`/`rediss:`（豁免须显式旗标）；
 - 响应投影：凭证级字段 `select:false` + `RESPONSE_EXCLUDE` 双道；
 - 权限：RBAC + 数据范围（`applyDataScopeToQuery`），GET 接口鉴权契约门禁（F-196）。
@@ -81,6 +81,7 @@
 ## 3. 已知残余风险（如实申报）
 
 1. 同宿主 compose 网络明文（TLS 豁免显式声明）——拓扑拆分时摘旗标；
-2. realName 模糊检索能力随加密丧失（精确匹配替代）；
+2. realName 暂以明文存储（2026-09-30 决策：姓名片段模糊检索是用户列表的日常能力，
+   正则对密文不成立）——转入加密需先给姓名检索另立方案（独立检索索引/搜索引擎）；
 3. logShipper 主机名目标的 DNS rebinding 窗口（纵深防御口径，见其头注）；
 4. 轮换 `HMAC_SECRET` 后口令复用历史归零（`passwordHistory.test.js` 头注的取舍）。
