@@ -1036,12 +1036,52 @@ const persistAuditRecord = (ctx) => {
  * 注意（预留能力）：当前项目暂无文件上传路由，本中间件尚未被任何路由挂载。
  * 未来引入文件上传功能时，必须在上传路由强制启用本中间件（配合 MIME 白名单、
  * 扩展名校验与大小限制），不可直接裸奔上传接口。
+ *
+ * 【2026-10-01：扩展名闸由 fail-open 改为构造期 fail-closed】
+ * 原实现是 `allowedExts = allowedTypes.map(t => mimeToExt[t]).filter(Boolean)`，
+ * 再用 `if (allowedExts.length > 0 && ...)` 短路。于是当 `allowedTypes` 里**一个
+ * 都不在** mimeToExt 表里时（表里只有 5 项：jpeg/png/gif/pdf/zip），`filter(Boolean)`
+ * 把整组映射结果清空 ⇒ `allowedExts.length === 0` ⇒ **扩展名校验整条消失**，
+ * 只剩客户端自报的 `file.mimetype`（`allowedTypes.includes(file.mimetype)` 也一并失效，
+ * 因为那条判据同样依赖调用方传的 MIME 与真实类型一致）。即"配置了白名单却等于没配"，
+ * 且没有任何信号——这正是本仓纪律里"配了却不生效=最危险"的形态。
+ * 今天无 multer 挂载故不可利用，但这类缺口一旦随首个上传路由上线就会同时生效。
+ *
+ * 收口方式：把映射与校验提到**构造期**（= 路由装配期，即启动期）——
+ * 只要 `allowedTypes` 里存在**任何一个**没有扩展名映射的 MIME，直接抛错。
+ * 于是运行期不可能再出现"白名单非空但扩展名闸为空"的组合，
+ * 短路判据也随之简化为 `allowedTypes.length > 0`（语义变得与直觉一致）。
+ * 之所以对"部分未映射"也抛：未映射的那一项在运行期就是一条静默放行，
+ * 只抛"全部未映射"会把部分漏洞留在原地。
  */
+const MIME_TO_EXT = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'application/pdf': 'pdf',
+  'application/zip': 'zip',
+};
+
 const fileUploadSecurity = (options = {}) => {
   const {
     maxSize = 5 * 1024 * 1024, // 默认 5MB
     allowedTypes = [],
   } = options;
+
+  // 构造期 fail-closed：白名单里每一项都必须有扩展名映射，否则这条防线是纸面的。
+  // 抛错而不是降级告警：修复它不需要服务先跑起来（与 ALLOWED_HOSTS 那类致命项同口径）。
+  const unmapped = allowedTypes.filter((t) => !MIME_TO_EXT[t]);
+  if (unmapped.length > 0) {
+    throw new Error(
+      `fileUploadSecurity 配置无效：allowedTypes 中的 ${unmapped.join(', ')} 没有对应的` +
+        `扩展名映射（当前仅支持 ${Object.keys(MIME_TO_EXT).join(', ')}）。` +
+        '继续装配会让扩展名校验整条失效（只凭客户端自报的 MIME 判断）——' +
+        '请改用受支持的 MIME，或先在 MIME_TO_EXT 里补齐映射。'
+    );
+  }
+  // 映射后必与 allowedTypes 等长（上面已保证无未映射项），故此处不再 filter(Boolean)：
+  // 那个 filter 正是原先 fail-open 的来源。
+  const allowedExts = allowedTypes.map((t) => MIME_TO_EXT[t]);
 
   return async (req, res, next) => {
     if (!req.files || req.files.length === 0) {
@@ -1067,17 +1107,8 @@ const fileUploadSecurity = (options = {}) => {
 
       // 检查文件扩展名（防止 MIME 类型欺骗）
       const ext = file.originalname.split('.').pop().toLowerCase();
-      const mimeToExt = {
-        'image/jpeg': 'jpg',
-        'image/png': 'png',
-        'image/gif': 'gif',
-        'application/pdf': 'pdf',
-        'application/zip': 'zip',
-      };
-      // 过滤掉 undefined 值，只保留有效的扩展名
-      const allowedExts = allowedTypes.map((t) => mimeToExt[t]).filter(Boolean);
 
-      if (allowedExts.length > 0 && !allowedExts.includes(ext)) {
+      if (allowedTypes.length > 0 && !allowedExts.includes(ext)) {
         return ApiResponse.codeError(res, 'UPLOAD_EXT_NOT_ALLOWED', {
           message: `不允许的文件扩展名：.${ext}`,
           params: { ext: ext },

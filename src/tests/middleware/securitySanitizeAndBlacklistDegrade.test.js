@@ -478,6 +478,44 @@ describe('security.js 分支补齐', () => {
       expect(next).toHaveBeenCalled();
       expect(res.statusCode).toBeUndefined();
     });
+
+    // —— 2026-10-01：扩展名闸由 fail-open 改为构造期 fail-closed ——
+    //
+    // 原实现是 `allowedExts = allowedTypes.map(t => mimeToExt[t]).filter(Boolean)`
+    // 配 `if (allowedExts.length > 0 && ...)` 短路：白名单里**一个都映射不到**时，
+    // filter 把结果清空 ⇒ 扩展名校验整条消失，只剩客户端自报的 MIME。
+    // 下面两条盯住这个形态；变异（把构造期抛错删掉、恢复 `.filter(Boolean)` 短路）
+    // 会让它们变红。
+    describe('构造期 fail-closed：白名单必须能映射出扩展名', () => {
+      test('白名单里全部 MIME 都无扩展名映射 ⇒ 构造期直接抛（不再静默降级）', () => {
+        expect(() => fileUploadSecurity({ allowedTypes: ['application/x-msdownload'] })).toThrow(
+          /没有对应的扩展名映射/
+        );
+      });
+
+      test('部分未映射也抛——未映射的那一项在运行期就是一条静默放行', () => {
+        expect(() =>
+          fileUploadSecurity({ allowedTypes: ['image/png', 'application/x-custom'] })
+        ).toThrow(/application\/x-custom/);
+      });
+
+      test('报错必须点名支持集与后果（否则运维不知道该改成什么）', () => {
+        expect(() => fileUploadSecurity({ allowedTypes: ['application/x-custom'] })).toThrow(
+          /image\/jpeg/
+        );
+      });
+
+      test('空白名单不抛（合法语义：不限类型，此时不做扩展名校验）', () => {
+        expect(() => fileUploadSecurity({})).not.toThrow();
+        expect(() => fileUploadSecurity({ allowedTypes: [] })).not.toThrow();
+      });
+
+      test('受支持的白名单不抛（正向，防"一律抛"的恒真实现）', () => {
+        expect(() =>
+          fileUploadSecurity({ allowedTypes: ['image/png', 'application/pdf'] })
+        ).not.toThrow();
+      });
+    });
   });
 
   describe('auditLog 中间件：路径与跳过分支', () => {

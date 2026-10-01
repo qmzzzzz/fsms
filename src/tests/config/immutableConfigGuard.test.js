@@ -277,4 +277,130 @@ describe('immutable 档位启动期告警（口令历史 pepper 轮换）', () =
       });
     });
   });
+
+  // ==========================================================================
+  // PII v1 密文读取面仍开放（2026-10-01 追加）
+  //
+  // 守护的不变式：
+  //   1. 生产环境 + PII 加密确实在用（主密钥可用）⇒ **必须**推
+  //      pii_v1_rows_unmigrated 告警并计入 incSecurityAlert；
+  //   2. **反向**：非生产环境 ⇒ 不得告警（夹具库里有 v1 行是正常的）；
+  //   3. **反向**：主密钥缺失/退化 ⇒ 不得告警（PII 根本没在加密，纯噪声）；
+  //   4. 文案必须点名「无行绑定 / 跨行搬运 / 迁移脚本 / secret-rotation.md」——
+  //      缺任何一项，运维拿到这条告警都不知道下一步做什么。
+  //
+  // 为什么反向断言是必需的：把判据写成 `if (true)` 或漏掉 NODE_ENV 分支，
+  // 第 1 条照样通过 —— 只有 2/3 两条能杀。
+  // ==========================================================================
+  describe('PII v1 密文读取面（pii_v1_rows_unmigrated）', () => {
+    beforeEach(() => {
+      delete process.env.NODE_ENV;
+      delete process.env.PII_ROTATION_OLD_AES_KEY;
+    });
+
+    describe('判据：isPiiEncryptionInUse', () => {
+      test('主密钥有效 ⇒ true', () => {
+        process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
+        const { isPiiEncryptionInUse } = loadGuard();
+        expect(isPiiEncryptionInUse()).toBe(true);
+      });
+
+      test('主密钥缺失 ⇒ false（PII 没在加密，不该推噪声）', () => {
+        delete process.env.AES_SECRET_KEY;
+        const { isPiiEncryptionInUse } = loadGuard();
+        expect(isPiiEncryptionInUse()).toBe(false);
+      });
+
+      test('主密钥是退化字面量 ⇒ false（复用 requireMasterSecret 的唯一定义）', () => {
+        process.env.AES_SECRET_KEY = 'undefined';
+        const { isPiiEncryptionInUse } = loadGuard();
+        expect(isPiiEncryptionInUse()).toBe(false);
+      });
+    });
+
+    describe('文案：piiV1UnmigratedMessage', () => {
+      test('必须点名无行绑定、跨行搬运、迁移脚本与操作手册四件事', () => {
+        const msg = loadGuard().piiV1UnmigratedMessage();
+        expect(msg).toMatch(/enc\.v1\./);
+        expect(msg).toMatch(/行绑定/);
+        expect(msg).toMatch(/跨行/);
+        // 处置命令必须可复制执行，否则运维只知道"有问题"而不知道"做什么"
+        expect(msg).toMatch(/migrate-pii-encryption\.js/);
+        expect(msg).toMatch(/secret-rotation\.md/);
+      });
+    });
+
+    describe('收集：collectInvariantWarnings', () => {
+      test('生产环境 + PII 在用 ⇒ 告警出现且计入 incSecurityAlert', () => {
+        process.env.NODE_ENV = 'production';
+        process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
+        const incSecurityAlert = jest.fn();
+        jest.isolateModules(() => {
+          jest.doMock('../../utils/metrics', () => ({ incSecurityAlert }));
+          const m = require('../../config/immutableConfigGuard');
+          const ws = m.collectInvariantWarnings();
+          expect(ws.some((w) => w.includes('enc.v1.'))).toBe(true);
+          expect(incSecurityAlert).toHaveBeenCalledWith('pii_v1_rows_unmigrated', 'medium');
+        });
+        jest.dontMock('../../utils/metrics');
+      });
+
+      // —— 本组最关键的反向断言 ——
+      // 变异：去掉 `process.env.NODE_ENV === 'production' &&` 这一半 ⇒ 本条必须变红。
+      test('非生产环境 ⇒ 不得出现该告警（夹具库里有 v1 行是正常的）', () => {
+        process.env.NODE_ENV = 'development';
+        process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
+        const ws = loadGuard().collectInvariantWarnings();
+        expect(ws.some((w) => w.includes('enc.v1.'))).toBe(false);
+      });
+
+      // 变异：把 `isPiiEncryptionInUse()` 换成恒真 ⇒ 本条必须变红。
+      test('生产环境但主密钥缺失 ⇒ 不得出现该告警（纯噪声）', () => {
+        process.env.NODE_ENV = 'production';
+        delete process.env.AES_SECRET_KEY;
+        const ws = loadGuard().collectInvariantWarnings();
+        expect(ws.some((w) => w.includes('enc.v1.'))).toBe(false);
+      });
+
+      test('指标端不可用时只保留文案，不向外抛（导出 API 契约）', () => {
+        process.env.NODE_ENV = 'production';
+        process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
+        jest.isolateModules(() => {
+          jest.doMock('../../utils/metrics', () => {
+            throw new Error('metrics unavailable');
+          });
+          const m = require('../../config/immutableConfigGuard');
+          expect(() => m.collectInvariantWarnings()).not.toThrow();
+          expect(m.collectInvariantWarnings().some((w) => w.includes('enc.v1.'))).toBe(true);
+        });
+        jest.dontMock('../../utils/metrics');
+      });
+    });
+
+    describe('接线：collectProductionWarnings 必须带上这条', () => {
+      const setValidProdEnv = () => {
+        process.env.NODE_ENV = 'production';
+        process.env.JWT_SECRET = 'strong-random-jwt-secret-that-is-long-enough';
+        process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
+        process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
+        process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
+        process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
+        process.env.CORS_ORIGIN = 'https://example.com';
+        process.env.ENABLE_HTTPS = 'true';
+        process.env.ALLOWED_HOSTS = 'api.example.com';
+        process.env.TRUST_PROXY_HOPS = '1';
+        process.env.REDIS_URL = 'redis://prod-server:6379';
+        delete process.env.ALLOW_LEGACY_CBC_DECRYPT;
+        delete process.env.PII_ROTATION_OLD_AES_KEY;
+      };
+
+      test('生产环境 ⇒ 经合并出口出现在告警列表里，且不顶掉既有两条', () => {
+        setValidProdEnv();
+        const warnings = require('../../config/validate').collectProductionWarnings();
+        expect(warnings.some((w) => w.includes('enc.v1.'))).toBe(true);
+        // 「不得互相顶掉」：与另两条并存
+        expect(warnings.some((w) => w.includes('HMAC_SECRET'))).toBe(true);
+      });
+    });
+  });
 });

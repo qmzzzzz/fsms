@@ -8,6 +8,54 @@
 
 ## [未发布]
 
+### 修复（2026-10-01 · 13 项报告回源复核后的三处落地）
+
+> 背景：对一份 13 条的审计报告**逐条回源复核**，其中 8 条已在 19:21~20:50 的提交里闭环、
+> 1 条（封禁目标可伪造）在他方在途、4 条未动。本轮落地的是**报告里没有的三处**——
+> 两条由复核过程新发现，一条属报告第 13 条所在的低优先段。
+
+- **N1 HMAC_SECRET 消费点清单收敛为单一来源**。复核发现同一份仓库里存在**三份互不相同**的清单：
+  `deployment/secret-rotation.md` 写「**两个**消费点」（审计链 + 口令历史），
+  `deliverables/AGENT工作总账与待办` 的 F-26 写「三个」（审计链 + MFA 恢复码 pepper + 数据签名密钥，
+  **漏了口令历史**），而真实源码是**四个**（`src/utils/auditChain.js` / `src/utils/passwordHistory.js` /
+  `src/services/mfaService.js` / `src/utils/encryption.js`）。手册全文 `恢复码` **0 命中**——
+  而恢复码是用户丢掉认证器时的唯一逃生门，换钥后静默失效，故障只在"某个人手机丢了"那天暴露。
+  收口：① 手册改成四消费点表（含"只有第 1 个有迁移工具"的非对称事实）；
+  ② 新增门禁 `src/tests/config/hmacSecretConsumersSingleSource.test.js`——扫描 `src/`（排除
+  `src/tests` 与 `src/config` 装载面）里**取值访问** `HMAC_SECRET` 的文件，要求集合恰好等于登记清单，
+  并要求手册逐个点名。判据取「取值访问」而非「提到 HMAC_SECRET」：注释/报错文案/校验器里都会出现
+  大写 `HMAC_SECRET`，算进来会让清单被噪声撑大、反而失去意义（`services/auditChainVerify.js` 的
+  `computeHmac` 是从 `utils/auditChain.js` 导入的，密钥取值不在它那里，故不重复计）
+  - 门禁：新套件 9 例（含"扫描基线非空"防"零命中被当成通过"、"手册必须点名恢复码"作回归哨兵）
+- **N2 PII v1 存量行的静默缺口补启动期告警**。10-01 把写侧切到 v2（AAD 行绑定）时读侧刻意保留 v1 兼容，
+  代价是 **v1 密文与行身份无关**——`utils/piiCrypto.js` 的 v1 分支 `aad` 保持 `null`、`if (aad)` 永不
+  `setAAD`，于是把 A 行的 `enc.v1.…` 复制到 B 行，B 行的 getter（`models/User.js:105-106` 虽已传
+  `{subjectId, field:'phone'}`）会**正常解出 A 的明文**。写侧不再产 v1，但**存量行不会被自动升级**，
+  而升级唯一入口是手工跑迁移脚本，**没有任何启动期信号**（`src/config` 下只有 `pii_rotation_old_key_lingering`
+  那条旧钥告警，与"v1 未迁移"无关）。收口：`config/immutableConfigGuard.js` 增加第三项
+  `pii_v1_rows_unmigrated`（生产 + PII 主密钥可用 ⇒ 告警 + `incSecurityAlert`，**不阻断启动**，
+  口径同 immutable 档位），并写进轮换手册收尾清单
+  - **如实声明边界**：该告警的判据是"代码仍支持读 v1"，**不是"库里还有 v1 行"**——启动路径
+    （`config/validate.js`）在 mongoose 连接**之前**执行，不连库，故它**不会自行消失**。要判"迁完了没"
+    只有一条路：`node scripts/migrate-pii-encryption.js`（演练模式、只读）看剩余行数。这条边界已写进
+    手册与告警文案，否则运维会拿"告警还在"误判成"没迁完"
+  - 门禁：`immutableConfigGuard.test.js` 追加 10 例（含 **2 条反向断言**：非生产不得告警、
+    主密钥缺失不得告警）。**变异实测被杀**：把判据改成 `NODE_ENV !== 'never-matches' && true` ⇒
+    4 条红（2 条反向断言 + 2 条既有的 `toHaveLength(1)`），改回后 29/29 绿
+  - **待拍板（未落地）**：更彻底的做法是把 v1 读路径也改成 fail-closed（镜像 `ALLOW_LEGACY_CBC_DECRYPT`：
+    缺 `ALLOW_PII_V1_DECRYPT=true` 即抛），那样"库里有 v1 行"会当场变成响亮的读错误。
+    未做是因为它是**生产行为变更**（升级即可能让存量行读失败），按本仓纪律属"需人拍板"那一档
+- **#12 上传扩展名闸由 fail-open 改为构造期 fail-closed**。`middleware/security.js` 原实现是
+  `allowedExts = allowedTypes.map(t => MIME_TO_EXT[t]).filter(Boolean)` 配 `if (allowedExts.length > 0 && …)`
+  短路：白名单里**一个都映射不到**时 `filter(Boolean)` 把结果清空 ⇒ **扩展名校验整条消失**，
+  只剩客户端自报的 MIME。今天无 multer 挂载故不可利用，但"配了却不生效"一旦随首个上传路由上线就会同时生效。
+  收口：MIME→扩展名映射与校验提到**构造期**（= 路由装配期，即启动期），`allowedTypes` 里存在**任何一个**
+  未映射项即抛错（只抛"全部未映射"会把部分静默放行留在原地），运行期不可能再出现"白名单非空但扩展名闸为空"
+  的组合，短路判据随之简化为 `allowedTypes.length > 0`
+  - 门禁：`securitySanitizeAndBlacklistDegrade.test.js` 追加 5 例（全部未映射抛 / 部分未映射抛 /
+    报错点名支持集 / 空白名单不抛 / 受支持白名单不抛——最后两条防"一律抛"的恒真实现），该套件 30/30 绿
+  - 已知边界：本次**只**修扩展名闸的 fail-open，未新增任何上传路由；中间件仍是"预留能力、无路由挂载"
+
 ### 修复（2026-09-30 · 安全缺口核查落地）
 
 - **敏感 GET 读取审计判据反转（P1-④）+ PII at-rest 加密（P1-②）+ 备份加密（P1-①）等七项缺口收口**（对照 `deliverables/安全缺口核查-2026-09-30.md`，其中 P1-④ 与 P2-⑥ 已于本日早先提交落地）：

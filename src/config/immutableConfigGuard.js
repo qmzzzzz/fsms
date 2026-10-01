@@ -43,6 +43,7 @@
 const SECURITY_RELEVANT = new Set([
   'password_history_pepper_rotation',
   'pii_rotation_old_key_lingering',
+  'pii_v1_rows_unmigrated',
 ]);
 
 /**
@@ -108,15 +109,55 @@ const hasPasswordHistoryToInvalidate = () => {
 };
 
 /**
+ * PII 密文 v1（无行绑定）读取面仍在开放的告警文案（拆出来便于测试逐字断言）。
+ *
+ * 与上面两项的差别：前两项是「改配置的代价」，这一项是**代码升级的代价**——
+ * 2026-10-01 把写侧切到 v2（AAD 绑定 `pii:v2:<_id>:phone`）时，读侧刻意保留了
+ * v1 兼容（存量行不需要先跑迁移就能继续读）。代价是：**v1 密文与行身份无关**，
+ * 同一把派生钥下把 A 行的 `enc.v1.…` 复制到 B 行，B 行的 getter 会正常解出 A 的明文。
+ * 写侧已不会再生 v1，但**存量 v1 行不会被自动升级**——迁移脚本跑完之前这条通道一直开着。
+ */
+const PII_V1_ALERT = 'pii_v1_rows_unmigrated';
+
+const piiV1UnmigratedMessage = () =>
+  'PII 读路径仍接受 enc.v1. 密文（无 AAD 行绑定）：v1 密文与行身份无关，' +
+  '同一把派生钥下把某行的密文复制到自己那行，读侧 getter 会正常解出明文——' +
+  '一次 DB 写权限即可兑换任意用户的手机号明文。写侧已强制 v2' +
+  '（AAD 绑定 pii:v2:<_id>:phone，跨行搬运在 GCM 认证标签处失败），' +
+  '但**存量 v1 行不会被自动升级**：迁移脚本未跑完之前，这条通道一直开着。' +
+  '处置：先跑演练看剩余行数（`node scripts/migrate-pii-encryption.js`，只读、不改写），' +
+  '再 `ALLOWED_SOURCE_DB=<库名> node scripts/migrate-pii-encryption.js --apply --yes`；' +
+  '口径见 deployment/secret-rotation.md。本告警不阻断启动。';
+
+/**
+ * PII 加密是否真的在用（主密钥可用性）。
+ *
+ * 判据直接复用 `utils/piiCrypto.requireMasterSecret()`，**不另抄一份**——它是
+ * 「主密钥缺失/退化」的唯一定义（空值、字面量 undefined|null|nan 都算不可用）。
+ * 主密钥不可用时 PII 根本没在加密，推这条告警是纯噪声。
+ */
+const isPiiEncryptionInUse = () => {
+  try {
+    require('../utils/piiCrypto').requireMasterSecret();
+    return true;
+  } catch (_) {
+    return false;
+  }
+};
+
+/**
  * 收集 immutable 档位相关告警。
  *
- * 当前两项：
+ * 当前三项：
  *   ① 口令复用历史的 pepper 轮换——"是否能检测到"本身有歧义的一类：应用**无法
  *      自行判断** HMAC_SECRET 是否刚被轮换过（没有任何持久化的密钥版本记录可比对）。
  *      因此做法是：只要配置组合满足"轮换会削弱防线"这一前提，就在每次启动时提醒一次，
  *      把判断交给读到日志的运维。
  *   ② PII 轮换旧钥残留——这一项**可以**确定性检测（变量在不在是客观事实），
  *      但它只在生产环境判：开发机保留旧钥做演练是正常操作（见下）。
+ *   ③ PII v1 密文读取面仍开放——同样是"升级带来的存量对不上"：写侧切 v2 后
+ *      读侧保留 v1 兼容，存量 v1 行不会自动升级，而 v1 无行绑定 ⇒ 跨行搬运可解。
+ *      判据是「PII 加密确实在用」（主密钥可用），同样只在生产环境判。
  *
  * 这是刻意的保守取向：宁可每次启动多一行日志（内容恒定、可 grep、可屏蔽），
  * 也不要让一次真实轮换完全静默——静默的代价是运维以为轮换是无害操作，
@@ -152,6 +193,19 @@ function collectInvariantWarnings() {
     warnings.push(piiOldKeyLingeringMessage());
   }
 
+  // 同样只在生产环境判：开发机/CI 的库里有 v1 行是正常的（夹具由 encryptPii 不带
+  // AAD 上下文产生），每次启动都推会变成纯噪声。
+  if (process.env.NODE_ENV === 'production' && isPiiEncryptionInUse()) {
+    if (SECURITY_RELEVANT.has(PII_V1_ALERT)) {
+      try {
+        require('../utils/metrics').incSecurityAlert(PII_V1_ALERT, 'medium');
+      } catch (_) {
+        /* 同上：指标端不可用时文案仍是唯一留痕 */
+      }
+    }
+    warnings.push(piiV1UnmigratedMessage());
+  }
+
   return warnings;
 }
 
@@ -162,4 +216,7 @@ module.exports = {
   piiOldKeyLingeringMessage,
   hasPiiOldKeyLingering,
   PII_OLD_KEY_NAME,
+  piiV1UnmigratedMessage,
+  isPiiEncryptionInUse,
+  PII_V1_ALERT,
 };
