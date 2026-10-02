@@ -143,13 +143,27 @@ esac
 # 最短匹配会把"口令的后半段@…"当成主机起点留在回显里——实测
 # `mongodb://fsms:Sup3r!ca@99@10.0.0.5:27017/fsms` 原先打印成
 # `目标主机 : 99@10.0.0.5:27017`，把口令尾巴送进了 stdout（cron 邮件、CI 日志都会收走）。
-# 驱动侧（WHATWG URL 解析）同样以主机段里**最后一个** `@` 界定 userinfo，
-# 所以"剥到最后一个 @"既是最保守的脱敏方向，也和实际连的库一致。
+# 以主机段里**最后一个** `@` 界定 userinfo 的那一侧是 WHATWG/RFC 3986 口径——本机实测的
+# 读者是 Node 的 `new URL`（同一条串它给出 hostname=10.0.0.5）；mongorestore/mongodump 的
+# Go 解析器本机没有二进制，方向上应与之一致，那是**推断**。所以"剥到最后一个 @"取的是
+# 两个读者中更保守的那一侧：无论哪个是对的，回显里都不会剩口令字节。
+# 需要限定主语：本仓用作 parity 的那个 JS 连接串包对**同一条串**读出的是另一段主机——实测
+# `mongodb://fsms:Sup3r!ca@99@10.0.0.5:27017/fsms` 在它眼里 hosts=["99:27017"]。两个读者对
+# 未转义 `@` 的读法不一致，正是 mongoUri.sh 里"凭据段有裸 @ ⇒ 硬拒"的理由；只有 local 传输
+# （URI 原样交给 mongorestore）才会走到这里的回显。
 URI_NO_CRED=${MONGODB_URI#*://}
 URI_NO_CRED=${URI_NO_CRED##*@}
 TARGET_HOST=${URI_NO_CRED%%/*}
 TARGET_DB=${URI_NO_CRED#*/}
 TARGET_DB=${TARGET_DB%%\?*}
+# 库名还要在**第一个** `#` 处截断：`#` 之后是片段，参考解析器不把它算进库名（实测
+# `mongodb://u:p@h:27017/fsms#prod` 的 dbName 是 `fsms`）。少了这一步，回显与
+# `RESTORE_CONFIRM`/键入要核对的名字是 `fsms#prod`，而真正恢复进去的库是 `fsms`——
+# 门禁核对的是一个从来不存在目标库名，"两处点名一致"这条语义就断了。
+# 残余：库名里写成 `%23` 的转义 `#` 不会被这一步截断，回显因此是编码形态
+# （`fsms%23prod`，解析器解码成 `fsms#prod`）。它不会让门禁核对到**别的库**，
+# 只是把同一个库名以编码形态出示，运维照抄即可。
+TARGET_DB=${TARGET_DB%%#*}
 if [ "$TARGET_DB" = "$URI_NO_CRED" ] || [ -z "$TARGET_DB" ]; then
   # 门禁的语义是"你在两处点名的目标必须一致"：一处是 URI，一处是 RESTORE_CONFIRM/键入。
   # URI 里没有库名时只剩一处，原来的兜底是把一句固定文案当作待确认的"库名"——
@@ -266,7 +280,7 @@ case "$MONGO_RESTORE_TRANSPORT" in
   docker)
     # 主机段换成容器内地址：账号、口令、库名与查询串原样保留（判据与 backup 同一份）
     if ! CONTAINER_URI=$(mongo_swap_host "$MONGODB_URI" "$MONGO_CONTAINER_HOST"); then
-      echo "Error: 无法把 URI 主机段改写为容器内地址（${MONGO_CONTAINER_HOST}），请检查 MONGODB_URI 形态" >&2
+      echo "Error: 无法把 URI 主机段改写为容器内地址（目标 ${MONGO_CONTAINER_HOST}），拒绝执行；上一行点名是哪条判据拦下的" >&2
       exit 1
     fi
     # 一条 stdin 流里先送一行配置、再送归档：容器内 `IFS= read -r` 只吃掉第一行（我们写的那行），

@@ -292,6 +292,115 @@ describe('mongo_swap_host 行为真值表', () => {
     expect(swapHost(uri, target)).toBe('rc=1|out=');
   });
 
+  // ── 拒绝路径的可定位性（2026-10-03）─────────────────────────────────────────
+  // 上面两张表只断言退出码与 stdout，**看不见 stderr**，而这一批改的正是 stderr：
+  // 13 个互不相同的失效方向原先折叠成调用方那一句「请检查 MONGODB_URI 形态」，
+  // `MONGO_CONTAINER_HOST` 为空或写错时同样 rc=1，运维却被告知去查 URI。
+  // 所以这里把"拒绝必须能定位"钉成契约，而不是当成日志装饰——否则下次删掉
+  // mongo_swap_refuse 的某一处调用，全表照绿。
+  /** 真跑一次改写并把 stderr 取回（`swapHost` 刻意只看 stdout，不能复用） */
+  function swapHostErr(uri, target) {
+    const script =
+      `. ${sq(HELPER_POSIX)}; ` +
+      `err=$(mongo_swap_host ${sq(uri)} ${sq(target)} 2>&1 >/dev/null); rc=$?; ` +
+      `printf 'RC=%s\\nERR=%s\\n' "$rc" "$err"`;
+    const so = execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+    const at = so.indexOf('\nERR=');
+    return { rc: Number(/RC=(-?\d+)/.exec(so)[1]), err: so.slice(at + 5).replace(/\n+$/, '') };
+  }
+
+  const uriRejects = cases.filter(([, e]) => e.startsWith('rc=1')).map(([u]) => u);
+  const targetRejects = badTargets.map(([, uri, target]) => [uri, target]);
+
+  test('每条拒绝都打一行 Error（只给退出码 ⇒ 现场无从定位）', () => {
+    const all = [...uriRejects.map((u) => [u, T]), ...targetRejects];
+    // 表要是被清空，下面所有断言会集体假绿，所以先把两条数据源的规模钉住
+    expect(all.length).toBeGreaterThanOrEqual(25);
+    for (const [uri, target] of all) {
+      const { rc, err } = swapHostErr(uri, target);
+      expect({ uri, rc }).toEqual({ uri, rc: 1 });
+      expect({ uri, err }).toEqual({ uri, err: expect.stringContaining('Error:') });
+      expect(err.length).toBeGreaterThan('Error:'.length);
+    }
+  });
+
+  test('目标地址自身非法 ⇒ 必须点名 MONGO_CONTAINER_HOST（旧文案把它算到 URI 头上）', () => {
+    // 这一条正是本批动机：URI 合法、目标非法时，旧的一句汇总让人去查 MONGODB_URI。
+    for (const [uri, target] of targetRejects) {
+      const { err } = swapHostErr(uri, target);
+      expect({ target, err }).toEqual({
+        target,
+        err: expect.stringContaining('MONGO_CONTAINER_HOST'),
+      });
+    }
+    // 反向自证：目标合法而 URI 非法时不得反过来冤枉 MONGO_CONTAINER_HOST。
+    // 唯一豁免是 `+srv` 那条——它说的是"这个目标带端口，与 +srv 无解"，确实涉及目标。
+    const uriFaulty = uriRejects.filter((u) => !u.startsWith('mongodb+srv'));
+    expect(uriFaulty.length).toBeGreaterThanOrEqual(12);
+    for (const uri of uriFaulty) {
+      expect(swapHostErr(uri, T).err).not.toContain('MONGO_CONTAINER_HOST');
+    }
+  });
+
+  test('原因是分了类的（一条通用文案过不了这条）', () => {
+    const kinds = new Set([
+      ...uriRejects.map((u) => swapHostErr(u, T).err),
+      ...targetRejects.map(([, u, t]) => swapHostErr(u, t).err),
+    ]);
+    // 13 类判据折叠成一句通用文案 ⇒ size=1；随便两条相同 ⇒ 判据串档。
+    // 这里取 8 而不是 13：种子列表空项 / 端口越界 / 方括号内越界字节同属
+    // "主机段不是合法主机列表"一条文案，那是**有意的**（修法相同），不是漏分类。
+    expect(kinds.size).toBeGreaterThanOrEqual(8);
+    for (const k of kinds) expect(k.replace(/^Error:\s*/, '').trim().length).toBeGreaterThan(8);
+  });
+
+  test('拒绝文案只点类别，绝不回显 URI / 口令 / 目标地址的字节', () => {
+    // 这是凭据：报错走 cron 邮件与 CI 日志，回显取值等于把口令抄进日志系统。
+    // 三条载荷分别点亮**凭据段**、**主机列表**、**目标地址**三条出口，且每一段
+    // 都放独特字节；任何一处 `echo "$_uri"` 漏进去都会被下面的 secret 清单点住。
+    const probes = [
+      ['mongodb://root:Sup3rPass@db.internal:27099,,/fsms', T],
+      ['mongodb://root:Sup3rPass@@db.internal:27099/fsms', T],
+      ['mongodb://root:Sup3rPass@db.internal:27099/fsms', 'bad host'],
+      ['mongodb://root:Sup3rPass@db.internal:27099/fsms', '127.0.0.1:27017\ncollection:auditLog'],
+    ];
+    const secrets = [
+      'Sup3rPass',
+      'db.internal',
+      '27099',
+      'mongodb://',
+      'collection:',
+      'authSource',
+    ];
+    for (const [uri, target] of probes) {
+      const { rc, err } = swapHostErr(uri, target);
+      expect({ uri, rc }).toEqual({ uri, rc: 1 });
+      expect(err).toContain('Error:');
+      for (const secret of secrets) {
+        expect({ uri, target, secret, err }).toEqual({
+          uri,
+          target,
+          secret,
+          err: expect.not.stringContaining(secret),
+        });
+      }
+    }
+  });
+
+  test('少给一个参数是一条拒绝，不是把调用方打断（本文件被 set -u 的脚本 source）', () => {
+    // 旧写法 `${1}`/`${2}` 在 set -u 下以 `unbound variable` 终结**整个调用方 shell**：
+    // 门禁后面的清理与告警全部不执行，恢复脚本连"被拒绝"这件事都不会说出来。
+    const script =
+      `set -u; . ${sq(HELPER_POSIX)}; ` +
+      `if mongo_swap_host 'mongodb://u:p@h:27017/db' 2>/dev/null; then echo branch=ok; ` +
+      `else echo branch=refused; fi; echo alive=$?`;
+    const so = execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+    // `alive` 必须还在 ⇒ 调用方没被带走；判据必须是拒绝而不是崩溃
+    expect(so).toContain('branch=refused');
+    expect(so).toContain('alive=');
+    expect(so).not.toContain('unbound');
+  });
+
   // 反向自证：上面九条不是"任意 target 都拒"——同一夹具换成合法 target 必须放行，
   // 否则判据已经退化成无条件失败，测试全绿却什么都没保住。
   test('反向自证：合法 target 走同一条路径放行', () => {

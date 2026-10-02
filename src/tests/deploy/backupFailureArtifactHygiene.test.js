@@ -86,6 +86,13 @@ function mkwork() {
     '{ echo "STUB-GPG-ENVELOPE"; cat "$src"; } > "$out"',
   ]);
   write('offsite-fail', ['#!/usr/bin/env bash', 'exit 7']);
+  // 成功侧的桩：把收到的参数与两个 export 一起记进日志，用于证明
+  // "异地副本确实被执行了"（而不是只证明脚本没报错）。
+  write('offsite-ok', [
+    '#!/usr/bin/env bash',
+    'echo "OFFSITE $* file=${BACKUP_FILE:-unset} sha=${BACKUP_SHA256:-unset}" >> "$STUB_LOG"',
+    'exit 0',
+  ]);
 
   return { dir, bin, log, backupDir: path.join(dir, 'backups') };
 }
@@ -262,5 +269,42 @@ describe('B：失败现场与定稿之后的产物卫生', () => {
     expect(r.out).toMatch(/异地副本命令失败/);
     expect(r.kinds.plain).toHaveLength(1);
     expect(r.kinds.sha).toEqual([`${r.kinds.plain[0]}.sha256`]);
+  });
+
+  // ── 异地副本的"空命令假成功"（2026-10-03 实测）─────────────────────────────
+  // 旧判据是 `[ -n "$BACKUP_OFFSITE_CMD" ]`：一个只含空白的值**非空** ⇒ 进分支，
+  // 而 `read -a` 切出 0 个词，`"${空数组[@]}"` 落在命令位置是**空命令**，
+  // 实测 bash 5.3.9 返回 0。后果不是"报错看不见"，而是压根没有信号：
+  // 异地副本一次都没执行，回显却是 `Offsite copy completed:`，连未配置那支的
+  // Warning 都不打——cron 邮件里这是一次"有异地副本的成功备份"。
+  test('BACKUP_OFFSITE_CMD 只含空白 ⇒ 判失败，且绝不打印"completed"（旧形态：零词空命令 rc=0）', () => {
+    for (const blank of [' ', '   ', '\t ']) {
+      const r = runBackup(work, null, { BACKUP_OFFSITE_CMD: blank });
+      // 钉死成 1 而不是"非零"：null（spawn 失败）也满足 toBe(0) 的补集，那是另一种故事
+      expect({ blank, code: r.code }).toEqual({ blank, code: 1 });
+      expect(r.out).toMatch(/只含空白/);
+      // 最关键的一条：不得出现成功回显（旧写法两条都给它）
+      expect(r.out).not.toMatch(/Offsite copy completed/);
+      // 未配置那支的 Warning 也不该串味：这不是"没配异地"，是配错了
+      expect(r.out).not.toMatch(/未配置 BACKUP_OFFSITE_CMD/);
+      expect(r.calls).not.toMatch(/OFFSITE /);
+    }
+  });
+
+  test('反向自证：真异地命令确实被执行（否则上一条可能只是"异地一步恒失败"）', () => {
+    const r = runBackup(work, null, { BACKUP_OFFSITE_CMD: `${sh(work.bin)}/offsite-ok` });
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/Offsite copy completed/);
+    // 桩真跑过，且拿到的是定稿后的最终路径（两个 export 仍在分支内）
+    expect(r.calls).toMatch(/OFFSITE .*file=[^\s]+\.gz\.gpg sha=[^\s]+\.sha256/);
+    expect(r.kinds.enc).toHaveLength(1);
+  });
+
+  test('未设置才走 Warning 那一支（不得被新分支吞成失败）', () => {
+    const r = runBackup(work, null, { BACKUP_OFFSITE_CMD: '' });
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/未配置 BACKUP_OFFSITE_CMD/);
+    expect(r.out).not.toMatch(/Offsite copy completed/);
+    expect(r.calls).not.toMatch(/OFFSITE /);
   });
 });

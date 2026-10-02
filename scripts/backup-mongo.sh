@@ -202,7 +202,7 @@ case "$MONGO_BACKUP_TRANSPORT" in
     # scripts/mongoUri.sh（同一份 sed 原先在两个脚本里各写一遍，失败判据还会各自漂移）。
     # 静默按原 URI 在容器里跑就会连到宿主机名，得到"备份失败"这种最难查的表象。
     if ! CONTAINER_URI=$(mongo_swap_host "$MONGODB_URI" "$MONGO_CONTAINER_HOST"); then
-      echo "Error: 无法把 URI 主机段改写为容器内地址（${MONGO_CONTAINER_HOST}），请检查 MONGODB_URI 形态" >&2
+      echo "Error: 无法把 URI 主机段改写为容器内地址（目标 ${MONGO_CONTAINER_HOST}），拒绝执行；上一行点名是哪条判据拦下的" >&2
       exit 1
     fi
     # 归档用 --archive（不带路径＝写 stdout）经 docker exec 流回宿主机文件：
@@ -290,8 +290,15 @@ echo "Checksum: $BACKUP_FILE_FINAL.sha256"
 # 命令注入面为零；代价是不支持 $VAR 展开与引号聚合（写不过来的复杂同步逻辑
 # 请包成自己的脚本再填路径）。失败即整体失败：被吞掉的异地失败比没有异地更
 # 危险——它让运维以为自己有异地副本。
-if [ -n "${BACKUP_OFFSITE_CMD:-}" ]; then
-  read -r -a OFFSITE_ARGS <<< "$BACKUP_OFFSITE_CMD"
+# 判据是"有没有切出词"，不是"字符串是否非空"：`BACKUP_OFFSITE_CMD=" "`（env 文件里
+# 多打一个空格就够了）非空 ⇒ 进分支，`read -a` 却切出 0 个词，而空数组在命令位置是
+# **空命令**——实测 bash 5.3.9 返回 0。于是异地副本一次都没执行，回显却是
+# "Offsite copy completed:"，连 unset 那支的 Warning 都不打。这是上面那句
+# "被吞掉的异地失败比没有异地更危险"里最坏的一种：它连"失败"都不算，没有任何信号。
+# 顺带让 `"${OFFSITE_ARGS[@]}"` 只在词数 > 0 时展开，老 bash（4.2/4.3，RHEL7 一类宿主）
+# 在 `set -u` 下展开空数组会直接掐死调用方，旧写法对那批宿主是"备份到最后一步崩"。
+read -r -a OFFSITE_ARGS <<< "${BACKUP_OFFSITE_CMD:-}"
+if [ "${#OFFSITE_ARGS[@]}" -gt 0 ]; then
   export BACKUP_FILE="$BACKUP_FILE_FINAL"
   export BACKUP_SHA256="$BACKUP_FILE_FINAL.sha256"
   if ! "${OFFSITE_ARGS[@]}"; then
@@ -299,6 +306,11 @@ if [ -n "${BACKUP_OFFSITE_CMD:-}" ]; then
     exit 1
   fi
   echo "Offsite copy completed: $BACKUP_OFFSITE_CMD"
+elif [ -n "${BACKUP_OFFSITE_CMD:-}" ]; then
+  # 配了而一个词都没切出来：这是配置错误，不是"决定不做异地"。与异地命令失败同档处理
+  # （那档本来就是 exit 1），免得一次拼错的副本看起来像一次成功的备份。
+  echo "Error: BACKUP_OFFSITE_CMD 已设置但只含空白，异地副本一步都没有执行；本次备份按失败处理" >&2
+  exit 1
 else
   echo "Warning: 未配置 BACKUP_OFFSITE_CMD——备份只存在于本机。等保 2.0 与 P1-① 都要求异地副本。" >&2
 fi
