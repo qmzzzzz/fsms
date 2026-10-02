@@ -8,6 +8,65 @@
 
 ## [未发布]
 
+### 运维可用性（2026-10-03 · `*_FILE` 这条线的最后一公里：shell 侧解析 + 手册里每条命令行自带密钥）
+
+> 背景：前两轮把 Node 侧的六个运维脚本 + `npm run validate` 都接上了 `<NAME>_FILE` 回填，
+> 但**备份/恢复是 shell 脚本**，而手册里的命令行为它们提供的是明文 `MONGODB_URI=`。
+> 两条都在生产口径（`.env.example:12` 的 b)「只配 `*_FILE`，`.env` 不写同名变量」）下失效。
+
+- **finding：`scripts/backup-mongo.sh` / `restore-mongo.sh` 只认明文 `MONGODB_URI`**。
+  生产宿主机上只有 `./secrets/mongodb_uri` 这个文件，于是每日 cron 每晚 `exit 1`、
+  **零归档**，而 cron 的 stderr 没人读——备份线静默停摆可以拖到第一次真要恢复的那天。
+  修法：共享实现 `scripts/mongoUri.sh` 里加 `mongo_hydrate_uri`，两个调用点各三行改过去，
+  仍保持"凭据不进 argv"（连接串走 mongodump/mongorestore 的临时 `--config` 文件）。
+- **一处刻意与 Node 侧相反**：shell 里**显式 `MONGODB_URI` 赢**（`secrets.js:106-113` 是文件赢）。
+  理由：恢复的目标库必须由这一行的字面内容决定，不能被环境里残留的 `*_FILE` 静默改写到
+  另一个库——把备份写进错库远比连不上严重。并存时打 Warning，README 与手册都写明这层反向。
+  坏文件（空 / 多行 / 不是连接串 / 含空白或控制字符）**硬失败**，不像应用侧只告警。
+- **夹具暴露的实测纠偏**：`printf 'mongodb+srv://u:p%40ss@h/db'` 里 `%40s` 被 printf 当宽度
+  说明符，写出 40 个空格，而首版形状检查**照样放行**（只裁了尾部）。改成"整串必须落在
+  0x21–0x7E"后该形态才被判红。同批 probe 还纠正了 `tr` 的两处写法：八进制只认三位
+  （`\0176` 会解析成 `\017`+`6`），且空格属于可打印区（`tr -d '\040-\176'` 会把内嵌空格删掉
+  而不是查出来）——`*[! -~]*)` 那版更是 `bash -n` 直接报语法错，而语法错让 source 中断，
+  导致当轮所有"应当被拒"的 probe 空过（正向样本才暴露了它）。
+- **新闸 `src/tests/deploy/backupUriFile.test.js`（17 例）**：真 `bash` + 桩 `mongodump`/
+  `mongorestore`，断言的是"文件里的串真的进了 `--config` 内容"而不是脚本自报成功；
+  含**前世版减法自证**（把 `mongo_hydrate_uri` 换成只认 `MONGODB_URI` 的旧实现 ⇒ 同一夹具
+  必须红）、四种真实密钥文件形态（无尾换行 / 尾换行 / CRLF+空行 / PowerShell BOM）、
+  以及 hydrate 之后凭据仍不出现在 argv。
+- **新闸 `src/tests/deploy/runbookSecretSource.test.js`（10 例）**：把手册当成可执行契约扫——
+  语料 **40 条命令行 / 31 条需要连库**，五通道：缺 `MONGODB_URI(_FILE)`、缺该脚本额外的
+  `HMAC_SECRET`/`AES_SECRET_KEY`、命令行出现 `*_FILE=/run/secrets`（那是容器内路径）、
+  经 `docker compose exec` 跑 ops 脚本、`--apply` 未配 `ALLOWED_SOURCE_DB`。
+  自证三件：前提（条数下限 + 被调用脚本文件必须都存在）、每通道合成违例、
+  **真实文件减法**（把 31 条真实命令逐一抹掉前缀喂回同一条通道，全部必须点亮）。
+- **判据取舍（记下来以免下轮又被"放宽"回去）**：围栏内位置无关，所以注释形态的 crontab
+  示例、`cd /opt/xf && …` 复合行都在检查范围；围栏外抓**每个**内联代码 span，所以
+  「- **处置**：`node scripts/…`」这种带标签写法不是盲区（实测把语料从 36 条提到 40 条）。
+  但同一条 `--apply` 命令当时**仍然**看不见：它写在跨两行的内联代码里（`\` 续行 + 未闭合的
+  span），任何 span 判据都读不到——所以把它连同演练那条一起搬进 ```bash 围栏，
+  这才是让它受检的动作。代价是文本判据分不出"这样写"与"不要这样写"，于是把手册里
+  `docker compose exec -T app node scripts/x.js` 那条反例拆成两个 span——
+  **不给判据开"这条不算"的豁免口**。
+  表格行按"记录/状态"排除，覆盖域只含说明书（`deployment/*.md`、`docs/incident-response.md`、
+  `README.md`、`SECURITY.md`、`migrations/README.md`），不含 CHANGELOG/`deliverables`/`docs/adr`。
+- **我自己写错的两句论证（自查后改掉，没有留到现场）**：
+  ① `deployment/secret-rotation.md` 曾写「缺 `MONGODB_URI` 时脚本自己会红」——
+  `destructiveGuard.resolveMongoUri` 只打一行 stderr 告警就**回退本地库**，而
+  `assertApplyAllowed` 在 `apply=false` 时直接放行，真实症状是"数出来的是开发库的 v1 行数"；
+  ② 反证了一个听起来合理的建议：`docker compose exec -T app node scripts/…` **不是**
+  宿主机缺密钥的补救路径，镜像里只有 `scripts/destructiveGuard.js`（`Dockerfile:122-124`，
+  故意的：容器被攻破时拿不到带 `--apply` 的灭迹工具），那条路径只会 `Cannot find module`。
+  能进容器的只有 `npm run validate`（= `node src/config/validate.js`，`src/` 在镜像里）。
+- **文档同步**：`secret-rotation.md` 新增「执行位置与 `*_FILE` 前缀」一节（含逐脚本所需密钥表）、
+  `backup-encryption.md` cron 行、`rollback-drill.md` 备份/校验行、`incident-response.md` 两条处置命令、
+  `README.md` 备份/恢复块。`rollback-drill-record.md` **只改检查单模板那一行**，
+  已完成演练的历史行原样不动——为了让闸变绿去改写演练记录等于伪造现场。
+- 验证：`npx jest src/tests/deploy src/tests/config` ⇒ 37 套件 / 612 例全绿；
+  `npx eslint` 两个新文件 0 问题；`npx prettier --check docs deployment README.md migrations src/tests/deploy`
+  全绿；`node scripts/lint-ratchet.js` 仅剩并发线在改的 `src/services/securityAlert.js`
+  （complexity/max-lines 各 0→1），本批新增文件未引入任何 warn。
+
 ### 运维可用性（2026-10-03 · `npm run validate` 是这条线的第三个入口，而它一直站在闸外）
 
 > 背景：`*_FILE` 回填（P3-48）只在 require 到 `src/config` 的入口自动发生。上一轮补了六个

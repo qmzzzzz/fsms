@@ -35,7 +35,9 @@
 - [ ] 备份文件可在异机解开（mongorestore --dryRun 抽查）
 - [ ] 双实例可同时连接同一 mongo（连接池/会话无冲突）
 - [ ] nginx reload 期间无请求失败（curl 循环抽样）
-- [ ] 回滚后审计链校验通过（node scripts/verify-audit-chain.js）
+- [ ] 回滚后审计链校验通过（宿主机执行，前缀必给：
+      `MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret node scripts/verify-audit-chain.js`，
+      缺 `HMAC_SECRET` 时退出码是 2「校验不完整」，不算通过）
 - [ ] WebSocket 重连正常（客户端自动重连到新实例）
 
 **总耗时（触发回滚 → /health 200）**：____ 分钟 —— ☐ 达标（≤10 分钟） ☐ 不合格

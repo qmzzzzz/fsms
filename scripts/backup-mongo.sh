@@ -4,7 +4,9 @@
 # 用法: ./scripts/backup-mongo.sh [backup_dir]
 #
 # 环境变量：
-#   MONGODB_URI             必填，含凭据的连接串
+#   MONGODB_URI             必填（或用 MONGODB_URI_FILE 指向密钥文件），含凭据的连接串
+#   MONGODB_URI_FILE        生产默认形态：宿主机 ./secrets/mongodb_uri。
+#                           两者都给时以 MONGODB_URI 为准并告警（详见 scripts/mongoUri.sh）
 #   BACKUP_RETENTION_DAYS   可选，备份保留天数（默认 30）
 #   MONGO_BACKUP_TRANSPORT  可选，local | docker（默认 docker）
 #                           docker = 在 compose 服务容器内跑 mongodump，归档经 stdout 流回宿主。
@@ -47,8 +49,13 @@ ARCHIVE_PATH="$BACKUP_DIR/$BACKUP_FILE"
 RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-30}
 
 # 检查环境变量（在创建任何文件之前）
-if [ -z "${MONGODB_URI:-}" ]; then
-  echo "Error: MONGODB_URI environment variable is not set" >&2
+# `*_FILE` 回填必须早于空值检查：生产部署的默认形态是密钥文件
+# （docker-compose.yml 的 secrets 指向宿主机 ./secrets/<name>，应用侧由
+# src/config/secrets.js 的 hydrateSecretsFromFiles() 读取），而本脚本是 shell，
+# 接不到那次回填 ⇒ 照手册配 cron 的人每次拿到的是"变量没设置"，
+# 备份产出静默为零。判据与"显式值优先"的规则都收在 mongoUri.sh 一处，两个脚本共用。
+if ! mongo_hydrate_uri; then
+  echo "Error: 需要 MONGODB_URI，或 MONGODB_URI_FILE 指向的密钥文件" >&2
   exit 1
 fi
 

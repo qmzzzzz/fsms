@@ -40,8 +40,17 @@ gpg --armor --export "ops@example.net" > fsms-backup.pub
 0 2 * * * cd /opt/xf && \
   BACKUP_GPG_RECIPIENT=ops@example.net \
   BACKUP_OFFSITE_CMD='rclone copy ./backups remote:fsms-backups' \
-  MONGODB_URI_FILE=/run/secrets/mongodb_uri ./scripts/backup-mongo.sh ./backups
+  MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh ./backups
 ```
+
+> **这一行为什么必须写成 `./secrets/…` 而不是 `/run/secrets/…`**：cron 跑在**宿主机**上
+> （`cd /opt/xf`），而 `/run/secrets/<name>` 是容器内的挂载点，宿主机没有这个目录。
+> 两者都错过一次：写 `/run/secrets/…` 时文件读不到，写明文串则要求把生产凭据抄进 crontab。
+> 备份/恢复脚本经 `scripts/mongoUri.sh` 的 `mongo_hydrate_uri` 支持 `MONGODB_URI_FILE`，
+> 行为闸见 `src/tests/deploy/backupUriFile.test.js`（真跑 bash + 桩 mongodump）。
+> 这条 cron 在支持 `*_FILE` 之前是**每天退出 1**、一份归档都不产出，
+> 而失败只出现在 cron 的 stderr 里——没人读邮件，于是"有备份"是错觉，
+> 唯一暴露时刻是真正要恢复的那天。
 
 - `BACKUP_GPG_RECIPIENT`：收件人公钥指纹/邮箱（必填，gpg 模式下）。
 - `BACKUP_OFFSITE_CMD`：按 **argv** 解析后直接执行（不经 shell 展开，无注入面；
@@ -63,6 +72,9 @@ sha256sum --check backups/fire-safety-backup-<时间点>.gz.gpg.sha256   # 可�
 
 # 2. 在**持有私钥**的机器上恢复（restore-mongo.sh 按 .gz.gpg 后缀自动解密）
 MONGODB_URI='<目标连接串>' ./scripts/restore-mongo.sh backups/fire-safety-backup-<时间点>.gz.gpg
+#    目标库也可以经密钥文件给：MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/restore-mongo.sh …
+#    但**命令行点名的 MONGODB_URI 一定赢**（两者并存时告警后取显式值）：
+#    恢复是破坏性写入，目标库必须由这一行的字面内容决定，不能被环境残留改写。
 
 # 3. 恢复后抽验：用户可登录、审计页可按 action 过滤（validateEnum 不 400）、
 #    审计链 verify 通过（GET /api/security/audit-logs/verify）

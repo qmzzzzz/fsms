@@ -12,6 +12,45 @@ node scripts/generate-secrets.js --out ./secrets-new        # 生产：写入 06
 node scripts/generate-secrets.js --env-snippet              # 本地：打印 .env 片段
 ```
 
+## 执行位置与 `*_FILE` 前缀（本手册所有命令行的前提，不是可选说明）
+
+本手册里的 `node scripts/…` 与 `./scripts/….sh` 一律在**宿主机**执行，原因有两条，
+两条都不可绕过：
+
+- 运行镜像里**没有**这些脚本。`Dockerfile:122-124` 只 `COPY` 了
+  `scripts/destructiveGuard.js` 一个文件进镜像——其余 `scripts/` 里是带 `--apply`
+  的破坏性运维脚本，故意不进镜像（容器被攻破时拿不到灭迹工具）。
+  所以「用 `docker compose exec` 把 `verify-audit-chain.js` 塞进 app 容器里跑」**不是**替代写法，
+  那条路径只会得到 `Cannot find module`。
+- compose 的 `app` 服务只挂了 `app-logs` 一个卷（`docker-compose.yml:136-137`），
+  宿主机上的 `scripts/` 没有映射进容器，也没有可写入口可以把脚本"送进去"
+  （`docker compose cp` 进去的东西在容器重建时消失，且绕过了上一条的安全意图）。
+
+宿主机侧按 `.env.example:12` 的生产口径 b)「只配 `*_FILE` 指向 `secrets/`，
+`.env` 里不写同名明文变量」部署，因此**每条命令都必须自带 `*_FILE` 前缀**——
+`src/config/secrets.js` 的回填只在进程启动时读 `process.env`，
+不会有人替你在宿主机上 export。忘记前缀的后果不是报错难懂，是**看起来在收尾、
+其实什么都没验**：`verify-audit-chain.js` 缺 `HMAC_SECRET` 时按设计退出 2
+（"校验不完整，不得当作链是好的"，见该脚本头注释第 19-24 行），
+而本手册要求的是退出码 0。
+
+各步骤需要点名的密钥（按脚本实际读取的 `process.env` 项列出，不多给）：
+
+| 脚本                                   | 需要的 `*_FILE`                                               |
+| -------------------------------------- | ------------------------------------------------------------- |
+| `verify-audit-chain.js`                | `MONGODB_URI_FILE` + `HMAC_SECRET_FILE`                       |
+| `resign-audit-hmac.js`                 | `MONGODB_URI_FILE` + `HMAC_SECRET_FILE`（旧钥，用于比对现状） |
+| `migrate-mfa-secret.js`                | `MONGODB_URI_FILE` + `AES_SECRET_KEY_FILE`（旧钥）            |
+| `migrate-pii-encryption.js`            | `MONGODB_URI_FILE` + `AES_SECRET_KEY_FILE`                    |
+| `sync-audit-indexes.js`                | `MONGODB_URI_FILE`                                            |
+| `revoke-user-sessions.js`              | `MONGODB_URI_FILE`                                            |
+| `run-rollback-drill.js`                | `MONGODB_URI_FILE`                                            |
+| `backup-mongo.sh` / `restore-mongo.sh` | `MONGODB_URI_FILE`（shell 侧实现见 `scripts/mongoUri.sh`）    |
+
+路径写宿主机形态 `./secrets/<name>`（`docker-compose.yml` 顶层 `secrets:` 全部指向
+`file: ./secrets/<name>`）。**不要写 `/run/secrets/<name>`**——那是容器内的挂载点，
+宿主机上没有这个目录，照抄等于每天定时失败一次。
+
 ## 各密钥轮换影响面
 
 | 密钥                   | 轮换影响                                    | 是否需要数据迁移           |
@@ -96,10 +135,12 @@ openssl rand -hex 32   # 记下输出作为 <新KEY>
 docker compose stop app        # 或 kill 本地进程
 
 # 2. 演练 → 执行迁移
-node scripts/migrate-mfa-secret.js --new-key <新KEY>
+MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
+  node scripts/migrate-mfa-secret.js --new-key <新KEY>
 #    --apply 是破坏性写：必须显式给出目标库白名单，否则 destructiveGuard 以 exitCode=2 拒绝
 #    （防止将演练/迁移误指向非预期库）。本文件所有 `--apply` 同理，不再逐处重复注释。
-ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key <新KEY> --apply
+MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
+  ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key <新KEY> --apply
 
 # 3. 换钥
 #    本地开发：更新 .env 的 AES_SECRET_KEY
@@ -117,22 +158,30 @@ docker compose up -d app
 
 ```bash
 # 0. 轮换前先留档当前链条状态（证明轮换时点前链条干净）
-node scripts/verify-audit-chain.js > audit-chain-before-rotation.log
+#    两个 *_FILE 都必给：缺 MONGODB_URI 连不上库，缺 HMAC_SECRET 则按设计退 2
+#    （"校验不完整"），拿不到本节要求的退出码 0。
+MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
+  node scripts/verify-audit-chain.js > audit-chain-before-rotation.log
 
 # 1. 停应用
 docker compose stop app
 
 # 2. 生成新密钥并重签（演练 → 执行）
 NEW=$(openssl rand -hex 32)
-node scripts/resign-audit-hmac.js --new-key "$NEW"
-ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js --new-key "$NEW" --apply --yes
+MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
+  node scripts/resign-audit-hmac.js --new-key "$NEW"
+MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
+  ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js --new-key "$NEW" --apply --yes
 
 # 3. 换钥并启动
 printf '%s' "$NEW" > ./secrets/hmac_secret
 docker compose up -d app
 
 # 4. 复核（预期零 hmac 失配）
-node scripts/verify-audit-chain.js
+#    这一步读到的 HMAC_SECRET 必须是**新**钥：./secrets/hmac_secret 已在第 3 步换掉，
+#    所以这里不能再引用旧钥的 *_FILE 值，前缀名字不变、内容已经换了。
+MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
+  node scripts/verify-audit-chain.js
 echo "退出码 $?"
 ```
 
@@ -153,7 +202,12 @@ echo "退出码 $?"
 
 - [ ] 旧密钥密封留档（离线保管，确认无回滚需要后再销毁）
 - [ ] `docker compose config` 输出与 CI 日志中不再出现任何密钥明文
-- [ ] `npm run validate`（config/validate.js）通过
+- [ ] 配置自校验通过——**在容器里跑**，不要在宿主机跑：
+      `docker compose exec -T app npm run validate`
+      （`npm run validate` = `node src/config/validate.js`，`src/` 与 `package.json` 都在镜像里，
+      见 `Dockerfile:117,125`；而 compose 只往容器里注入 `*_FILE`，
+      宿主机上这些变量根本是空的——在宿主机跑这条会得到"缺密钥"的红，
+      那是没喂配置，不是轮换出错。宿主机侧要跑就得逐条点名 `*_FILE=./secrets/<name>`。）
 - [ ] 抽查日志无「MFA 种子解密失败」「hmac 失配」告警
 - [ ] 启动日志中出现过 `password_history_pepper_rotation` 告警（HMAC 轮换的**预期**
       副作用，见上文「HMAC_SECRET 的四重影响」）——**换完钥的首次启动若没有它，
@@ -209,10 +263,23 @@ B 行的 getter（`models/User.js:105-106`）会正常解出 A 的明文。
   `incSecurityAlert`（口径同 immutable 档位：**告警不阻断启动**）。
 - **已知边界（必须知道，否则会被这条告警误导）**：该告警的判据是"代码仍支持读 v1"，
   **不是"库里还有 v1 行"**——启动路径上不连库（`config/validate.js` 在 mongoose 连接之前
-  执行），所以它**不会自行消失**。要判"迁完了没"只有一条路：
-  `node scripts/migrate-pii-encryption.js`（演练模式，只读）看剩余行数。
-- **处置**：`ALLOWED_SOURCE_DB=<库名> node scripts/migrate-pii-encryption.js --apply --yes`
-  （先把演练输出留档，它同时给出待加密 / 已加密 / 损坏三档计数）。
+  执行），所以它**不会自行消失**。要判"迁完了没"只有一条路：跑下面的演练命令看剩余行数。
+  前缀必须给全：缺 `MONGODB_URI` 时 `destructiveGuard` 只打一行 stderr 告警就**回退到本地库**，
+  于是数出来的是开发库的 v1 行数（不是生产库的）；演练模式（`apply=false`）不会被白名单拦下，
+  只有 `--apply` 才会因"回退库"被拒绝执行（退出码 2）。
+- **处置**：先跑演练留档（它同时给出待加密 / 已加密 / 损坏三档计数），确认目标库无误再跑
+  `--apply` 那一条。
+
+```bash
+# 演练（只读）：剩余 v1 行数
+MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
+  node scripts/migrate-pii-encryption.js
+
+# 处置：ALLOWED_SOURCE_DB 必须与上面数出来的库同名
+MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
+  ALLOWED_SOURCE_DB=<库名> node scripts/migrate-pii-encryption.js --apply --yes
+```
+
 - **注意**：开发机与 CI 的库里有 v1 行是正常的（夹具由 `encryptPii` 不带 AAD 上下文产生），
   故守卫**只在生产环境生效**。
 
@@ -251,8 +318,11 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Cookie: accessToken=<轮换前签�
   http://127.0.0.1:3000/api/auth/me      # 预期 401
 
 # ② 启动日志不得出现「同时配置且取值不同」告警
-#    （src/config/secrets.js:86-91 会在 NAME 与 NAME_FILE 并存且取值不同时告警；
-#     该告警出现即说明存在多副本，必须清理后再轮换）
+#    （src/config/secrets.js 的 hydrateSecretsFromFiles() 会在 NAME 与 NAME_FILE
+#     并存且取值不同时告警，并**采用文件内容**；该告警出现即说明存在多副本，
+#     必须清理后再轮换。注意备份/恢复两个 shell 脚本的取向是**反的**——
+#     那边按显式 MONGODB_URI 赢，理由见 scripts/mongoUri.sh 的注释：
+#     恢复目标由命令行点名时不能被环境残留覆写。）
 
 # ③ 生产 secrets/ 目录权限（Linux）
 stat -c '%a' ./secrets/jwt_secret        # 预期 600
@@ -274,7 +344,10 @@ stat -c '%a' ./secrets/jwt_secret        # 预期 600
 
 ```bash
 # 0. 备份（回滚资格的前提）
-MONGODB_URI='<连接串>' ./scripts/backup-mongo.sh ./backups
+#    生产口径下宿主机没有明文连接串可写（.env.example:12 的 b) 档），
+#    所以给 *_FILE；backup-mongo.sh 与 restore-mongo.sh 通过 scripts/mongoUri.sh
+#    读它（行为闸：src/tests/deploy/backupUriFile.test.js）。
+MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh ./backups
 
 # 1. 生成全套新密钥到隔离目录（勿直接写 ./secrets，避免半新半旧混跑）
 node scripts/generate-secrets.js --out ./secrets-new
@@ -283,13 +356,20 @@ node scripts/generate-secrets.js --out ./secrets-new
 docker compose stop app
 
 # 3. 两个需要数据迁移的密钥：先迁移、后换钥（顺序不可颠倒）
+#    前缀一律指向 ./secrets（**旧**钥）——第 4 步才替换目录，
+#    迁移脚本要用旧钥读懂存量、用 --new-key 写新钥。
 NEW_AES=$(cat ./secrets-new/aes_secret_key)
-node scripts/migrate-mfa-secret.js --new-key "$NEW_AES"            # 演练
-ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key "$NEW_AES" --apply    # 执行
+MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
+  node scripts/migrate-mfa-secret.js --new-key "$NEW_AES"            # 演练
+MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
+  ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key "$NEW_AES" --apply    # 执行
 NEW_HMAC=$(cat ./secrets-new/hmac_secret)
-node scripts/verify-audit-chain.js > audit-chain-before-rotation.log
-node scripts/resign-audit-hmac.js --new-key "$NEW_HMAC"            # 演练
-ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js --new-key "$NEW_HMAC" --apply --yes    # 执行
+MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
+  node scripts/verify-audit-chain.js > audit-chain-before-rotation.log
+MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
+  node scripts/resign-audit-hmac.js --new-key "$NEW_HMAC"            # 演练
+MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
+  ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js --new-key "$NEW_HMAC" --apply --yes    # 执行
 
 # 4. 原子替换 secrets 目录（JWT/URI/口令等无迁移依赖的随批生效）
 mv ./secrets ./secrets-old && mv ./secrets-new ./secrets
@@ -311,7 +391,9 @@ chmod 700 ./secrets && chmod 600 ./secrets/*
 # 5. 启动并验证
 docker compose up -d
 curl -fsS http://127.0.0.1:3000/health
-node scripts/verify-audit-chain.js     # 要求退出码 0（含义见上文"HMAC 密钥轮换"一节）
+#    这里的 ./secrets 已经是**新**钥（第 4 步替换了目录）
+MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
+  node scripts/verify-audit-chain.js     # 要求退出码 0（含义见上文"HMAC 密钥轮换"一节）
 #   1 = 有断裂/失配：若本轮换了 HMAC_SECRET 却没先跑 resign-audit-hmac.js 重签，
 #       存量记录的 hmac 必然全红——那是流程漏步，不是被篡改，补跑重签后再验；
 #   2 = 校验不完整（窗口截断或该环境没有 HMAC_SECRET），不得当作"验过了"。

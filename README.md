@@ -328,7 +328,9 @@ docker compose up -d --no-build
 npm test                 # 运行全部测试（自动启动内存 MongoDB，无需本地实例）
 npm run test:coverage    # 运行测试并输出覆盖率（全局阈值：分支79/函数87/语句91/行91；安全关键模块另设独立阈值，棘轮只升不降）
 npm run test:watch       # 监听模式
-npm run validate         # 独立校验环境配置
+npm run validate         # 独立校验环境配置（读当前 shell 的 env；容器化部署要在容器里跑：
+                         #   docker compose exec -T app npm run validate——compose 只往容器注入 *_FILE，
+                         #   宿主机 shell 里这些变量是空的，在宿主机跑会得到"缺密钥"的红）
 ```
 
 ## 运维 Runbook（备份 / 恢复 / 升级 / 回滚）
@@ -339,10 +341,14 @@ npm run validate         # 独立校验环境配置
 # 备份（输出到 ./backups，gzip 压缩，自动清理 30 天前备份，保留天数可经
 # BACKUP_RETENTION_DAYS 调整；凭据经临时配置文件传递，不上命令行）
 MONGODB_URI="mongodb://..." ./scripts/backup-mongo.sh
+# 生产口径（.env 不写明文，密钥只有 ./secrets/<name> 文件）时改给 *_FILE：
+MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh
 
 # 默认产出加密归档 .gz.gpg + sha256 校验和；密钥/异地副本配置见 deployment/backup-encryption.md
 # 容器化部署时对卷数据定时备份（宿主机 crontab 示例，每日 02:00）：
-# 0 2 * * * cd /opt/xf && MONGODB_URI="mongodb://..." ./scripts/backup-mongo.sh >> logs/backup.log 2>&1
+# 0 2 * * * cd /opt/xf && MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh >> logs/backup.log 2>&1
+# 注意 cron 跑在**宿主机**：路径写 ./secrets/<name>，写 /run/secrets/<name> 读不到（那是容器内挂载点）。
+# 明文串写进 crontab 也别用——凭据轮换后那行会静默失效，而 cron 的 stderr 没人看。
 ```
 
 建议至少每日一次全量备份，并把 `./backups` 同步到异机/对象存储——备份与数据库同机存放无法抵御宿主机级故障。
@@ -355,6 +361,9 @@ docker compose stop app
 
 # 恢复（脚本带三道防误操作门禁：回显目标库、交互确认库名、--drop 需显式 RESTORE_DROP=true）
 MONGODB_URI="mongodb://..." ./scripts/restore-mongo.sh backups/fire-safety-backup-xxxxxxxx-xxxx.gz.gpg
+# 只有密钥文件时：MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/restore-mongo.sh <归档>
+# 两者并存时**显式 MONGODB_URI 赢**并告警——恢复目标必须由这一行的字面内容决定，
+# 不能被环境里残留的 *_FILE 静默改写到另一个库（与 Node 侧"文件赢"的取向相反，理由见 scripts/mongoUri.sh）。
 # 默认 MONGO_RESTORE_TRANSPORT=docker：compose 里 mongo 只 expose，宿主机连不上，
 # 于是 mongorestore 在容器内执行、归档经 stdin 流入（与 backup-mongo.sh 同口径）。
 # 直连可达且宿主机装了工具时才用 MONGO_RESTORE_TRANSPORT=local。

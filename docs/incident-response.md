@@ -31,7 +31,9 @@
 
 ```bash
 # 吊销某用户全部会话（tokenVersion 全局失效）
-MONGODB_URI='<uri>' node scripts/revoke-user-sessions.js <username>
+# 事件处置时手上通常只有密钥文件（生产口径 .env 不写明文），故给 *_FILE；
+# 这些脚本在宿主机执行——运行镜像里只有 scripts/destructiveGuard.js。
+MONGODB_URI_FILE=./secrets/mongodb_uri node scripts/revoke-user-sessions.js <username>
 # 锁定账号：管理端 PUT /api/security/users/:id/lock（写审计 user_locked）
 ```
 
@@ -61,7 +63,9 @@ refresh 令牌与审计链 HMAC 的连带轮换一并按该文档执行）。
   密钥未失守时按「未泄露」处理并记录判断依据；
 - 私钥失守 → 立即按 `deployment/secret-rotation.md` 全量轮换
   （`JWT/AES/HMAC` 三把 + gpg 私钥吊销重造），并执行 PII 轮换脚本：
-  `ALLOWED_SOURCE_DB=<库名> PII_ROTATION_OLD_AES_KEY=<旧KEY> node scripts/migrate-pii-encryption.js --apply --yes --rotate`。
+  `MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key ALLOWED_SOURCE_DB=<库名> PII_ROTATION_OLD_AES_KEY=<旧KEY> node scripts/migrate-pii-encryption.js --apply --yes --rotate`。
+  （宿主机执行，`*_FILE` 前缀不能省：`MONGODB_URI` 缺失时 `destructiveGuard` 会回退到本地默认库，
+  而 `--apply` 恰好拒绝作用于该回退库——报错看起来像"白名单配错了"，实际是没给连接串。）
 
 ## 4. 恢复与验证
 

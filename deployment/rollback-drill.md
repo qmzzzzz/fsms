@@ -18,8 +18,11 @@
 
 ```bash
 # 发布前（每次）
-MONGODB_URI='<连接串>' ./scripts/backup-mongo.sh ./backups
+MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh ./backups
 # 默认产出加密归档 .gz.gpg + .sha256（P1-①）；明文出口/异地副本/私钥托管见 backup-encryption.md
+# 本手册所有命令都在**宿主机**执行：运行镜像里只有 scripts/destructiveGuard.js
+# （Dockerfile:122-124 故意不把其余 scripts/ 打进镜像），而宿主机按生产口径
+# 只持密钥文件、不持明文变量，所以前缀是 *_FILE 而不是明文串。
 ```
 
 ## 2. 蓝绿部署流程（单机 compose 版）
@@ -82,6 +85,9 @@ docker compose start app
 docker compose stop app                                # 先停写
 MONGODB_URI='<连接串>' RESTORE_CONFIRM='<目标库名>' \
   ./scripts/restore-mongo.sh backups/fire-safety-backup-<时间点>.gz.gpg
+#    目标库由命令行点名（恢复是破坏性写入，必须赢过环境残留）；
+#    手上只有密钥文件时改写 RESTORE_CONFIRM='<目标库名>' \
+#      MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/restore-mongo.sh …
 # 默认 MONGO_RESTORE_TRANSPORT=docker：mongo 只 expose 不 publish，宿主机既连不上也
 # 常常没有 mongorestore CLI（备份侧一直是这个口径）。直连场景才显式设 local。
 # 需要彻底替换集合内容时才追加 RESTORE_DROP=true（默认不 drop）
@@ -101,8 +107,11 @@ curl -fsS http://127.0.0.1:3000/health
   - [ ] 备份文件可在异机解开（`mongorestore --dryRun` 抽查）
   - [ ] 双实例可同时连接同一 mongo（连接池/会话无冲突）
   - [ ] nginx reload 期间无请求失败（`curl` 循环抽样）
-  - [ ] 回滚后审计链校验通过：`node scripts/verify-audit-chain.js` **退出码 0**
-        （1=有断裂；2=校验不完整——窗口截断或该环境无 HMAC_SECRET，不算通过。见 secret-rotation.md 的退出码说明）
+  - [ ] 回滚后审计链校验通过：
+        `MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret node scripts/verify-audit-chain.js`
+        **退出码 0**
+        （1=有断裂；2=校验不完整——窗口截断或该环境无 HMAC_SECRET，不算通过。见 secret-rotation.md 的退出码说明。
+        宿主机上不给这两个 `*_FILE` 前缀就恒得 2，"跑了校验"不等于"校验过"）
   - [ ] WebSocket 重连正常（客户端应自动重连到新实例）
 
 ## 5. 已知边界

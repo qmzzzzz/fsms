@@ -4,7 +4,9 @@
 # 用法: ./scripts/restore-mongo.sh <backup_file>
 #
 # 环境变量：
-#   MONGODB_URI      必填，目标库连接串
+#   MONGODB_URI      必填（或用 MONGODB_URI_FILE 指向密钥文件），目标库连接串
+#                    恢复目标是破坏性写入的落点，故命令行点名的 MONGODB_URI 一定赢过
+#                    环境里残留的 MONGODB_URI_FILE（两者并存时告警，不静默改目标）
 #   RESTORE_CONFIRM  非交互场景下的确认令牌，须等于目标库名
 #   RESTORE_SKIP_CHECKSUM 可选，默认 false。true = 跳过 <归档>.sha256 完整性校验，
 #                    仅用于恢复无校验和的历史/外部归档；缺失 sidecar 本身是硬失败
@@ -98,8 +100,11 @@ else
   echo "完整性校验通过：sha256=${ACTUAL_HASH}"
 fi
 
-if [ -z "${MONGODB_URI:-}" ]; then
-  echo "Error: MONGODB_URI environment variable is not set" >&2
+# 与 backup-mongo.sh 同口径：先按 `*_FILE` 约定回填，再判空（判据见 mongoUri.sh）。
+# 恢复的目标库只在这里确定，因此"显式 MONGODB_URI 优先于 MONGODB_URI_FILE"
+# 是刻意的——命令行点名目标时必须赢，否则环境里残留的 *_FILE 会把恢复静默打进另一个库。
+if ! mongo_hydrate_uri; then
+  echo "Error: 需要 MONGODB_URI，或 MONGODB_URI_FILE 指向的密钥文件" >&2
   exit 1
 fi
 
