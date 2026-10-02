@@ -10,10 +10,6 @@
 # 而两处的失败判据都是"替换后与原串相同 ⇒ 认定形态不认识"。这个判据有个真实的假阳性：
 # 无凭据且主机本来就写成了目标地址（`mongodb://127.0.0.1:27017/fsms`，在容器内跑脚本时
 # 就是这一形态）会被判成"URI 形态异常"而拒绝执行——备份/恢复在最需要它们的时候报错。
-# 收敛成一处后，两个脚本共用同一判据：
-#   · 先正认提取主机段，认不出来才算形态异常；
-#   · 主机段已经等于目标地址 ⇒ 合法的空操作，放行；
-#   · 其余情形必须真的发生变化，否则按不认识处理（宁可拒，也不要静默连到宿主机名上）。
 # 现在这条替换是**纯 shell 字符串重建，不再有 sed**，因为 sed 形态带着两处实测到的失效：
 #   · 替换串里的字面 `\n` 被 GNU sed 展开成真换行 ⇒
 #     `MONGO_CONTAINER_HOST='127.0.0.1:27017\ncollection:auditLog'` 能给 mongodump 的
@@ -21,7 +17,156 @@
 #   · 口令里未转义的 `/` 会终结 `[^/]*` 那次匹配 ⇒ 替换错位
 #     （`mongodb://u:p/x@h:27017/db` → `mongodb://127.0.0.1:27017/x@h:27017/db`），
 #     凭据被静默丢弃，而横幅承诺的是 `h:27017`/`db`。
+# 但"去掉 sed"只改变了取字节的方式，**取哪一段**的判据本身还留着五条同根缺陷
+# （2026-10-03 逐条实测；产物都写成 `mongodb://…` 原样交给 mongodump）：
+#   1. 静默改错主机：`mongodb://u:p@db.internal:27017?appname=bob@corp`（无路径、查询串里有
+#      裸 `@`）⇒ rc=0，输出 `mongodb://u:p@db.internal:27017?appname=bob@127.0.0.1:27017`。
+#      主机段根本没动，目标地址被拼进了查询串——横幅承诺 127.0.0.1，mongodump 连的是
+#      db.internal。根因：取段用 `case */* | \?* | *` 三分支，第三条分支把整串（含查询串）
+#      当成 authority，再用 `##*@`（**最后**一个 `@`）切凭据。
+#   2. 副本集种子列表被拒：`mongodb://a:27017,b:27017/db?replicaSet=rs0` ⇒ rc=1
+#      （逗号不在字符集判据里）——合法 URI 备份不了，报的却是"形态异常"。
+#   3. 无路径带查询被拒：`mongodb://h:27017?directConnection=true` ⇒ rc=1（同 1 的分支缺陷：
+#      `\?*` 只匹配**以** `?` 开头的串，于是查询串并进主机段，`?`/`=` 再撞字符集判据）。
+#   4. IPv6 容器地址当目标被拒：`MONGO_CONTAINER_HOST='[::1]:27017'` ⇒ rc=1（方括号不在目标
+#      字符集里），而 URI 里写 `[::1]:27017` 却是放行的——同一件事两侧判据不一致。
+#   5. 交回一个 mongodump 自己都不认的串：`mongodb://a@b@c:27017/db` ⇒ rc=0，输出
+#      `mongodb://a@b@127.0.0.1:27017/db`；`mongodb+srv://u:p@cluster0.example.net/fsms`
+#      ⇒ rc=0，输出带端口的 `mongodb+srv://…:27017`（`+srv` 禁止端口）。参考解析器两条都抛。
+# 所以取段判据改成按**参考解析器怎么读主机段**来定（顶层 mongodb 内嵌的
+# mongodb-connection-string-url；本仓按同一族包钉行为的另一处是 src/config/database.js:51，
+# 那里判的是它的报错形态）。三条正面规则 + 一条兜底：
+#   · authority 终止于**第一个** `/`、`?` 或 `#`（RFC 3986 与该包 hosts 段的字符类同一口径），
+#     凭据与主机的分界取**第一个** `@`（该包的 username/password 字符类都不含 `@`）；
+#   · 主机段允许逗号分隔的种子列表，每项都得是 `host[:port]` 或 `[IPv6][:port]`；
+#   · 主机段已经等于目标地址 ⇒ 合法的空操作，放行（旧判据在这里假阳性，见开头那条）；
+#   · 其余认不出来的形态一律硬失败，绝不"原样返回"——宁可拒，也不要静默连到宿主机名上。
+# 刻意比参考解析器更严的两处（失效方向是"响亮拒绝"而不是"静默连到别处"，故可接受）：
+#   · `mongodb://h:/db`（空端口）它读成 hosts=["h:27017"]——空端口被**静默补成默认端口**，我们拒；
+#   · `mongodb+srv://…` 而目标带端口时也拒（`+srv` 禁端口，容器内地址按实际部署必然带端口）。
+#   真撞上运维看到的是"无法把 URI 主机段改写为容器内地址"，而不是一个连向别处的串。
+# 一条**负结果**，防止下一个读者把 `#` 也当成缺陷：第一版这里写着"`mongodb://h#1/db`
+# 解析器读成 ["h#1"]，所以我们更严"，实测不成立——参考解析器把它读成
+# hosts=["h:27017"]、db="db"，即 `#` 同样终止 authority（与本文件 `${_rest%%[/?#]*}`
+# 的取段判据同一口径），而片段区里的 `/db` 仍然是库名。这一形态因此是**放行**的，
+# 由 parity 闸逐条比对主机/库名/凭据。同族的 `mongodb://h/my#db` 库名被解析器截成 `my`
+# 是它自身的规则（`#` 之后是片段）：改写把尾部原样保留，没有制造任何新差异。
+# 判据的承重面由 src/tests/config/mongoTransportParity.test.js 用**真解析器**
+#   跑一遍（改写产物必须解析成"主机就是横幅里那个目标地址、库名与凭据没变"），
+#   而不是断言源码里含某个字符串——注释不执行，也不能当证据。
 # 凭据段与查询串一律原样保留：调用方随后把结果写进 0600 的配置或管道，绝不上 argv。
+
+# 端口：纯数字且落在 1..65535。参考解析器对这两条越界形态都**报错**（实测）：
+#   `h:0` ⇒ 'Invalid port (zero) with hostname'，`h:65536` ⇒ 'Unable to parse h:65536 with URL'。
+# 放行它们的失效方向不是"响亮拒绝"而是"顺手把坏端口换掉了"：改写后的产物解析得动，
+# 于是运维拿到的是一个从来不存在、也从来没被 mongodump 拒过的 URI（横幅却写着原库名/原凭据）。
+# 前导零按解析器的读法处理（`07017` 它读成 7017）：剥掉前导零再比长度与字典序。
+# 刻意不用 `$(( ))`——shell 把 0 前缀当八进制，`08` 会算错甚至直接报错，
+# 而这里是字符串判据，不存在进制陷阱。
+mongo_valid_port() {
+  _p=$1
+  case "$_p" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  _t=${_p#"${_p%%[!0]*}"}
+  # 全零 ⇒ 剥完是空串（0 端口）；6 位以上；以及 65536..99999 的每一段。
+  # 这五个模式合起来正好是"5 位且 > 65535"，逐个区间写死而不用比较运算符：
+  # `[ "$a" \< "$b" ]` 不是 POSIX（dash 不支持），而本文件必须是 `sh`。
+  case "$_t" in
+    '' | ??????*) return 1 ;;
+    6553[6-9] | 655[4-9]? | 65[6-9]?? | 6[6-9]??? | [7-9]????) return 1 ;;
+  esac
+  return 0
+}
+
+# 单个主机项：`host[:port]` 或 `[IPv6][:port]`。逗号列表由 mongo_valid_hostlist 逐项交给它。
+# 判据按**参考解析器怎么读主机段**来定，而不是按 RFC 的字面：这个函数的产物会原样写进
+# mongodump 的 0600 配置，"横幅承诺的主机"必须等于"实际被拨号的主机"。逐条对应实测：
+#   · `h:1:2` ⇒ 'Unable to parse h:1:2 with URL' ⇒ 第二个冒号拒；
+#   · 未加方括号的 IPv6（`::1:27017`）⇒ 同族报错，而前导冒号也撞"空 userinfo"判据 ⇒ 拒；
+#   · `[::1]` 不带端口合法（SRV/默认端口场景），`[::1]x`、`[::1]:`、`[::1]:1:2` 拒；
+#   · 端口区间由 mongo_valid_port 统一判（`h:0`、`h:65536`、`[::1]:65536` 一起拒）。
+# 括号内做的是**字符集**判据（只留十六进制与冒号），不是"整段跳过方括号"：越界字节
+# （空格、换行、`]`）留在括号里时，靠下游 mongodump 报错等于把"配置被改写"伪装成解析错。
+mongo_valid_hostport() {
+  _h=$1
+
+  case "$_h" in
+    \[*\])
+      _inner=${_h#\[}
+      _inner=${_inner%\]}
+      case "$_inner" in
+        '' | *[!0-9A-Fa-f:]*) return 1 ;;
+      esac
+      return 0
+      ;;
+    \[*\]:*)
+      _inner=${_h#\[}
+      _inner=${_inner%%\]:*}
+      case "$_inner" in
+        '' | *[!0-9A-Fa-f:]*) return 1 ;;
+      esac
+      _suffix=${_h#*\]}
+      case "$_suffix" in
+        :*) ;;
+        *) return 1 ;;
+      esac
+      mongo_valid_port "${_suffix#:}" || return 1
+      return 0
+      ;;
+  esac
+
+  case "$_h" in
+    '' | :*) return 1 ;;
+    *[!A-Za-z0-9.:_-]*) return 1 ;;
+  esac
+  case "$_h" in
+    *:*)
+      case "${_h%:*}" in
+        *:*) return 1 ;;
+      esac
+      mongo_valid_port "${_h##*:}" || return 1
+      ;;
+  esac
+  return 0
+}
+
+# 逗号分隔的种子列表（副本集）。空项一律拒：参考解析器把 `a,,b` 读成"少一个主机"，
+# 而"少一个种子"在备份脚本里正是那种现场看不出来的差异。
+mongo_valid_hostlist() {
+  _list=$1
+
+  # 判据是"首/尾/连续逗号 = 空项"。注意 `case` 的模式里**给 `*` 加引号会让它变成字面量**
+  # （实测 `case "h:27017," in "*,")` 不命中，而 `*,)` 命中）：逗号本身不是元字符，
+  # 这里必须让 `*` 保持通配。本文件其余带引号的模式都只引首字符（`'@'*`、`*'['*`），
+  # 那才是"字面量 + 通配"的正确写法。
+  case "$_list" in
+    '' | ,* | *,) return 1 ;;
+  esac
+  while [ -n "$_list" ]; do
+    case "$_list" in
+      *,*) _item=${_list%%,*}; _list=${_list#*,} ;;
+      *) _item=$_list
+        _list='' ;;
+    esac
+    mongo_valid_hostport "$_item" || return 1
+  done
+  return 0
+}
+
+# userinfo（authority 里第一个 `@` 之前那段）。参考解析器对 username/password 用的非法
+# 字符集是 `/[:/?#[\]@]/gi`，其中 `/`、`?`、`#`、`@` 在到达这里之前已被取段规则排除
+# （authority 终止于第一个 `/ ? #`，userinfo 取第一个 `@` 之前），所以真正还要判的只有
+# 方括号与多余冒号。`u:@h`（空口令）是放行的——实测参考解析器接受它。
+mongo_valid_userinfo() {
+  _ui=$1
+
+  case "$_ui" in
+    *'['* | *']'*) return 1 ;;
+    *:*:*) return 1 ;;
+  esac
+  return 0
+}
 
 mongo_swap_host() {
   _uri=$1
@@ -31,61 +176,73 @@ mongo_swap_host() {
     mongodb://* | mongodb+srv://*) ;;
     *) return 1 ;;
   esac
-
-  # _target 的字符集判据：它即将被拼进连接串，而连接串原样写进 0600 配置文件。
-  # 主机标签/域名/IPv6 字面量/端口（以及 systemd 风格的服务名）全在这套字符里，
-  # 换行、空格、`\`、`;`、`|`、反引号等一律进不来——这正是上面第二条失效的正面判据。
-  case "$_target" in
-    '' | *[!A-Za-z0-9.:_-]*) return 1 ;;
-  esac
-
   _scheme=${_uri%%://*}
+
+  # 目标地址与 URI 里的主机段过**同一个**判据。旧写法两边各一套字符集，于是
+  # `[::1]:27017` 在 URI 里放行、作为 MONGO_CONTAINER_HOST 却拒绝（实测缺陷 4）。
+  mongo_valid_hostport "$_target" || return 1
+  if [ "$_scheme" = 'mongodb+srv' ]; then
+    # `+srv` 靠 DNS SRV 发现种子列表，形态上禁止端口（'mongodb+srv URI cannot have port
+    # number'），而容器内地址按实际部署必然带端口（默认 127.0.0.1:27017）。旧写法照样改写
+    # 并交出 `mongodb+srv://u:p@127.0.0.1:27017/fsms`——mongodump 直接拒。这里硬拒并把原因说明白。
+    case "$_target" in
+      *:*) return 1 ;;
+    esac
+  fi
+
   _rest=${_uri#*://}
+  # 空的 userinfo 段（`mongodb://@h/db`、`mongodb://:p@h/db`）：参考解析器直接拒
+  # （'URI contained empty userinfo section'）。旧写法把它当"没有凭据"静默改写通过。
   case "$_rest" in
-    */*) _auth=${_rest%%/*}; _tail=/${_rest#*/} ;;
-    \?*) _auth=${_rest%%\?*}; _tail="?${_rest#*\?}" ;;
-    *) _auth=$_rest; _tail="" ;;
+    '@'* | ':'*) return 1 ;;
   esac
-  case "$_auth" in
-    *@*) _creds=${_auth%@*}; _host=${_auth##*@} ;;
-    *) _creds=''; _host=$_auth ;;
-  esac
-  if [ -z "$_host" ]; then
-    # `mongodb://` 之后什么都没有：不是可识别的 `scheme://[creds@]host[/db][?opts]` 形态
+
+  # authority 终止于**第一个** `/`、`?` 或 `#`（RFC 3986 与参考解析器 hosts 段的字符类同一
+  # 口径），尾部整段原样保留。旧写法用 `case */* | \?* | *` 三分支，第三条分支在"无路径但
+  # 有查询串"时把整串（含查询串）当成 authority ⇒ 实测
+  # `mongodb://u:p@db.internal:27017?appname=bob@corp` 的产物是
+  # `…?appname=bob@127.0.0.1:27017`：主机段没动，目标地址被拼进了查询串。
+  _auth=${_rest%%[/?#]*}
+  _tail=${_rest#"$_auth"}
+  if [ -z "$_auth" ]; then
+    # `mongodb://` 之后什么都没有（或紧跟 `/`）：不是可识别的 `scheme://[creds@]host[/db][?opts]`
     return 1
   fi
 
-  # 提取出的主机段必须"确实是一个 authority"，否则整次重建都是在猜。
-  # 这条判据正是本文件开头声明的意图（"先正认提取主机段，认不出来才算形态异常"）：
-  #   · `mongodb://u:p/x@h:27017/db`（口令里有未转义的 `/`，RFC 3986 要求写成 %2F）
-  #     会被切成"主机 = u:p"——端口位置落进字母 ⇒ 拒绝。旧的 sed 写法在这里
-  #     静默丢掉凭据、拼出一个连向别处的串，而横幅承诺的是 h:27017/db（实测）。
-  #   · IPv6 字面量 `[::1]:27017` 必须放过：方括号内不做字符集判据，只判端口。
-  #   · 路径里的 `@`（`/db@name` 是完全合法的库名）不做任何额外拒绝。第一版在这里补过
-  #     一条"有凭据且尾部含 @ ⇒ 拒"，实测把 `mongodb://u:p@mongo/db@name` 一起误杀，
-  #     而它本来就是多余的：按 RFC 3986 authority 终止于第一个 `/`，路径里的 `@`
-  #     根本不参与主机段提取，需要判的只有"切出来的主机段像不像 authority"。
-  if [ "${_host#[}" != "$_host" ]; then
-    case "$_host" in
-      \[*\]) : ;;
-      \[*\]:*)
-        case "${_host##*:}" in
-          '' | *[!0-9]*) return 1 ;;
-        esac
-        ;;
-      *) return 1 ;;
-    esac
-  else
-    case "$_host" in
-      '' | :*) return 1 ;;
-      *[!A-Za-z0-9.:_-]*) return 1 ;;
-    esac
-    _port=${_host##*:}
-    if [ "$_port" != "$_host" ]; then
-      case "$_port" in
-        '' | *[!0-9]*) return 1 ;;
+  case "$_auth" in
+    *@*)
+      # 凭据与主机的分界取**第一个** `@`：参考解析器的 username/password 字符类都不含 `@`，
+      # 它读的也是第一个。旧写法 `%%@*`/`##*@` 取最后一个，于是 `a@b@c:27017/db` 被切成
+      # "凭据 = a@b、主机 = c:27017"，产物里的裸 `@` 让解析器报 'Invalid connection string'。
+      _creds=${_auth%%@*}
+      _host=${_auth#*@}
+      case "$_host" in
+        *@*) return 1 ;;
       esac
-    fi
+      mongo_valid_userinfo "$_creds" || return 1
+      ;;
+    *)
+      _creds=''
+      _host=$_auth
+      # 没有凭据时，路径/查询串里的裸 `@` 会被解析器当成 userinfo 分隔符**吃掉主机段**：
+      # 实测 `mongodb://h:27017/db@x` 读成 username=h、password=`27017/db` ⇒
+      # 'Password contains unescaped characters'。这种输入本身无效，改写它只是把一个已经
+      # 坏掉的串交回调用方，所以点名拒绝。有凭据时不受影响（分隔符已在第一个 `@` 处用掉）：
+      # `mongodb://u:p@mongo/db@name` 合法，库名里的 `@` 不参与主机段提取。
+      case "$_tail" in
+        *@*) return 1 ;;
+      esac
+      ;;
+  esac
+
+  # 主机段必须"确实是一个主机列表"，否则整次重建都是在猜。副本集种子列表（逗号分隔）与
+  # `[::1]:27017` 都是合法形态，旧写法按单主机 + 不含逗号的字符集判据把它们一起拒了
+  # （实测缺陷 2、3、4：备份不了合法 URI，报的却是"形态异常"）。
+  mongo_valid_hostlist "$_host" || return 1
+  if [ "$_scheme" = 'mongodb+srv' ]; then
+    case "$_host" in
+      *,*) return 1 ;;
+    esac
   fi
 
   if [ "$_host" = "$_target" ]; then
