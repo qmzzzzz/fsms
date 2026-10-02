@@ -323,10 +323,49 @@ const SELF_SEEDED = ['scripts/audit-probes/ws-session-bypass.cjs'];
 
 /**
  * 豁免二：被同族脚本 require 的共享模块——不是进程入口，无权决定何时 hydrate，
- * 责任在各入口。下面用"确实被 ≥4 个入口 require"自证它真的是库，
- * 而不是一张没人认领的豁免条。
+ * 责任在各入口。下面用"确实被入口 require"自证它真的是库，
+ * 而不是一张没人认领的豁免条（逐名取证，见 findLibraryExemptionOffender）。
+ *
+ * `scripts/devSecretIsolation.js` 是闸上线后第一个撞上它的入库：它用
+ * `process.env[name + '_FILE']` 动态键读密钥注入项，所以按闸的口径就是一个读取者。
+ * 但它读这些指针的**唯一目的是把它们置空**，而"合规写法"（在库里调
+ * hydrateSecretsFromFiles()）恰恰是它要防的那个动作——真加了，真实密钥会在
+ * harness 赋一次性值之前进 process.env，而 harness 并不逐个名字都覆写
+ * （REDIS_URL / MONGO_ROOT_PASSWORD / ADMIN_INITIAL_PASSWORD 等），冒烟流量直接接回真实基础设施。
+ * 所以这里给的是"库里不得回填"的豁免，代价是取证必须逐名成立、且由行为用例反证（见
+ * src/tests/config/disposableSecretIsolation.test.js 的 rootPw 断言）。
  */
-const LIBRARIES = ['scripts/destructiveGuard.js'];
+const LIBRARIES = ['scripts/destructiveGuard.js', 'scripts/devSecretIsolation.js'];
+
+/** 进程入口支的签名：库里一旦出现它，"无权决定何时 hydrate"的前提就破了 */
+const CLI_BRANCH = /\brequire\.main\s*===\s*module\b/;
+
+/**
+ * 纯函数：一条「共享库」豁免今天是否仍然成立。
+ * 抽成纯函数与 findCliEntryOffender 同一口径——豁免条最坏的形态是悄悄生效，
+ * 所以它的两个前提都要能被合成源码直接攻击。
+ *
+ * @param {{code: string, consumers: string[]}} a code 为已剥注释的库源码，
+ *        consumers 为**其它被扫描入口**里 require 它的文件名
+ */
+function findLibraryExemptionOffender({ code, consumers }) {
+  if (CLI_BRANCH.test(code))
+    return '库里有 require.main === module 入口支：它已能自己决定何时 hydrate，豁免二不再适用';
+  if (consumers.length === 0) return '没有任何被扫描的入口 require 它（豁免条成了空白条）';
+  return null;
+}
+
+/**
+ * 入口对某个共享库的引入点。这里**刻意收紧**（要求文件名落在 require 的参数里），
+ * 而不是沿用 GUARD_CONSUMER 的宽松口径：读点判据宽松只会多算一个读取（无害），
+ * 豁免前提判据宽松则会让一张没人认领的豁免条看起来有主——方向相反的失效。
+ */
+function libraryRequireRe(file) {
+  const base = path.basename(file, path.extname(file)).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(
+    `require\\s*\\(\\s*(?:['"][^'"]*\\b${base}(?:\\.\\w+)?['"]|path\\.join\\([^)]*${base})`
+  );
+}
 
 describe('入口脚本必须先 hydrate 文件型密钥再读 env', () => {
   const files = [
@@ -358,6 +397,24 @@ describe('入口脚本必须先 hydrate 文件型密钥再读 env', () => {
 
   const readers = analyzed.filter((a) => a.readNames.length > 0 || a.hasDynamicRead);
   const readerFiles = readers.map((r) => r.file);
+
+  /**
+   * 某条共享库豁免的消费者：只算**其它被扫描的入口**（库互相 require 不算有主，
+   * 否则两张空白条可以互相自证）。`code` 已剥注释，所以注释里提一句文件名骗不到。
+   */
+  const consumersOf = (file, set = analyzed) =>
+    set
+      .filter((a) => a.file !== file && !LIBRARIES.includes(a.file))
+      .filter((a) => libraryRequireRe(file).test(a.code))
+      .map((a) => a.file);
+
+  /** 把入口对某库的引入改写成一个不相干的 require，用于减法自证 */
+  const detach = (file, set = analyzed) =>
+    set.map((a) =>
+      consumersOf(file, [a]).length
+        ? { ...a, code: a.code.replace(libraryRequireRe(file), 'require(0)') }
+        : a
+    );
 
   test('判据前提自证：扫描真的覆盖到脚本、根入口与 npm 入口，读点判据不是空转', () => {
     // 任一条归零都说明路径/正则写错了，此时的"全绿"只是判据失效的假绿
@@ -398,15 +455,63 @@ describe('入口脚本必须先 hydrate 文件型密钥再读 env', () => {
     expect(unjustified).toEqual([]);
   });
 
-  test('豁免二成立的前提：共享模块确实被入口 require', () => {
+  test('豁免二成立的前提：每条豁免各自有主，且库自己不是进程入口', () => {
     const orphan = LIBRARIES.filter((name) => !readerFiles.includes(name)).map(
       (name) => `  ${name}：已不读取文件型密钥（豁免条要一起删）`
     );
     expect(orphan).toEqual([]);
+
+    // 逐名取证，而不是全局计数：`consumers.length >= 4` 证明的是 destructiveGuard 有人用，
+    // 新登记的库蹭得到同一句结论却压根没人调用——那正是"预先占位"的形态。
+    const unjustified = LIBRARIES.map((name) => {
+      const a = analyzed.find((x) => x.file === name);
+      if (!a) return `  ${name}：未进入扫描，豁免条成了空白条`;
+      return {
+        file: name,
+        verdict: findLibraryExemptionOffender({ code: a.code, consumers: consumersOf(name) }),
+      };
+    })
+      .filter((x) => x.verdict !== null)
+      .map((x) => `  ${x.file}：${x.verdict}`);
+    expect(unjustified).toEqual([]);
+
+    // destructiveGuard 的代读通道另有更高门槛（它是"静默回退本地库"那类缺陷的来源）
     const consumers = readers.filter(
       (a) => !LIBRARIES.includes(a.file) && GUARD_CONSUMER.test(a.code)
     );
     expect(consumers.length).toBeGreaterThanOrEqual(4);
+  });
+
+  test('减法自证：擦掉入口对守卫的 require，豁免二立刻不成立', () => {
+    // 真文件做减法（不是合成源码）：三个 harness 的 require 全去掉后，
+    // 这张豁免条必须当场失效，否则它就是个永久免费通行证。
+    const name = 'scripts/devSecretIsolation.js';
+    const hooked = consumersOf(name);
+    expect(hooked.length).toBeGreaterThanOrEqual(3);
+    expect([...hooked].sort()).toEqual([
+      'scripts/e2e-smoke.js',
+      'scripts/load-test.js',
+      'scripts/production-drill.js',
+    ]);
+    const detached = consumersOf(name, detach(name));
+    expect(detached).toEqual([]);
+    const lib = analyzed.find((x) => x.file === name);
+    expect(findLibraryExemptionOffender({ code: lib.code, consumers: detached })).toContain(
+      '没有任何被扫描的入口 require'
+    );
+    // 判据本身有牙：合成一条"库里长出入口支"的源码，必须被点名（而不是靠 consumers 非空放行）
+    expect(
+      findLibraryExemptionOffender({
+        code: 'module.exports = f;\nif (require.main === module) {\n  f();\n}\n',
+        consumers: ['scripts/e2e-smoke.js'],
+      })
+    ).toContain('豁免二不再适用');
+    expect(
+      findLibraryExemptionOffender({ code: 'module.exports = f;\n', consumers: [] })
+    ).toContain('空白条');
+    expect(
+      findLibraryExemptionOffender({ code: 'module.exports = f;\n', consumers: ['a.js'] })
+    ).toBeNull();
   });
 
   test('判据可被攻击（一）：缺 hydrate / hydrate 太晚 / 依赖图里有 config 都不能蒙混', () => {

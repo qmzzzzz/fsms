@@ -17,6 +17,11 @@
 const http = require('http');
 const crypto = require('crypto');
 const path = require('path');
+const { isolateDisposableSecrets } = require('./devSecretIsolation');
+
+// 置空宿主/.env 残留的 *_FILE：src/config 在 require 期按"文件优先"回填，会把本脚本即将
+// 设的一次性密钥与内存库连接串覆写成真实值。必须早于任何 require 到 src/ 的语句，故在模块顶层。
+isolateDisposableSecrets({ scriptName: 'e2e-smoke' });
 
 const PORT = process.env.E2E_PORT || 3555;
 const BASE = 'http://127.0.0.1:' + PORT;

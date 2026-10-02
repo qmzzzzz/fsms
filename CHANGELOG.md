@@ -8,6 +8,39 @@
 
 ## [未发布]
 
+### 安全（2026-10-03 · 冒烟/压测/演练不得接回真实基础设施）
+
+> 背景：`src/config/index.js:10-11` 在 **require 期**就调 `hydrateSecretsFromFiles()`，而冲突规则是
+> **文件优先**（`src/config/secrets.js:113` 无条件 `process.env[name] = value`）。三个 harness
+> （`e2e-smoke` / `load-test` / `production-drill`）的形状是「先设一次性 env，再 `require('../src/index.js')`」，
+> 于是只要宿主上还留着 `*_FILE`，回填就会把一次性 `MONGODB_URI` 覆写成真实库连接串——**并且不报错**。
+> 后果不是测试变红，是**写**：`npm run test:e2e` 往那个库播种管理员、建用户、发告警；
+> `npm run test:load` 往它打五相压测流量并写审计。
+
+- **新增 `scripts/devSecretIsolation.js`**：按 `FILE_BACKED_SECRETS` 全量把 `*_FILE` **置空**。
+  两个来源都必须堵（第一版只堵了第一条，实测被打回）：宿主 shell 的 `export`
+  （`deployment/secret-rotation.md` 要求每条命令自带 `*_FILE` 前缀，把它 export 起来是最省事的顺手做法），
+  以及 `.env` 里写着 `*_FILE`（`.env.example:12` 的生产口径 b)）。第二条的关键在时序：dotenv 跑在
+  hydrate 的前一行，守卫只看"当前 `process.env` 里有没有"就会漏掉整条路径，故守卫自己先 `require('dotenv').config()`。
+- **置空而非 `delete` 是承重的**：dotenv 16.6.1 对"已定义"的键不覆盖（空串也算已定义），
+  但会重新填充被 `delete` 掉的键；`secrets.js:71` 又把空路径当"未配置"跳过。
+  六格真值表把这条钉死：`del × .env` 那一臂**仍然被覆写**，所以"觉得 delete 更干净"的改法立刻红。
+- **刻意不做的两个替代**：用 `NODE_ENV` 跳过回填（`production-drill` 自己要 `NODE_ENV=production`，
+  跳过等于演练失去生产同构性，而那正是它存在的意义）；把 hydrate 改成"环境变量优先"
+  （推翻一个深思熟虑的安全决定——挂载 secret 必须压过残留的 `.env` 明文，否则轮换看起来生效实则没生效）。
+- **新闸 `src/tests/config/disposableSecretIsolation.test.js`（12 例）**：真子进程 + 真 `src/config`，
+  断言的是"配置对象里到底是哪个 URI"而不是脚本里有没有某个字符串。含 `MONGO_ROOT_PASSWORD`
+  这一臂：harness 从不给它赋值，回填却照样把真实值填进去 ⇒ 危害不止"它记得覆写的那几个键"，
+  同时反向钉住守卫自己绝不 hydrate。
+- **既有闸 `scriptSecretHydration.test.js`（14 → 16 例）被这次改动撞红一次，且它是对的**：
+  守卫用 `process.env[name + '_FILE']` 动态键读密钥注入项，按闸的口径就是"读取者"，
+  而它的合规写法（在库内调 `hydrateSecretsFromFiles()`）恰恰是它要防的那个动作。
+  因此给的是**逐名取证**的"共享库"豁免：原来那句 `consumers.length >= 4` 是全局计数，
+  新登记的库蹭得到同一句结论却可能压根没人调用；改成每条豁免各自要求"被至少一个入口 require"
+  （引入点判据在这里**刻意收紧**：读点判据宽松只会多算一个读取，豁免前提判据宽松则让空白条看起来有主）
+  - "库里没有 `require.main === module` 入口支"，并补一条**真文件减法**：把三个 harness 的 require 全擦掉，
+    豁免必须当场失效。
+
 ### 运维可用性（2026-10-03 · `*_FILE` 这条线的最后一公里：shell 侧解析 + 手册里每条命令行自带密钥）
 
 > 背景：前两轮把 Node 侧的六个运维脚本 + `npm run validate` 都接上了 `<NAME>_FILE` 回填，

@@ -18,6 +18,12 @@ const http = require('http');
 const crypto = require('crypto');
 const path = require('path');
 const { Worker } = require('worker_threads');
+const { isolateDisposableSecrets } = require('./devSecretIsolation');
+
+// 置空宿主/.env 残留的 *_FILE：src/config 在 require 期按"文件优先"回填，会把本脚本即将
+// 设的一次性密钥与内存库连接串覆写成真实值。必须早于任何 require 到 src/ 的语句，故在模块顶层；
+// 弱密钥负相那个 Worker 建在本行之后且没传 env 选项 ⇒ 它拿的是父线程 process.env 的副本，跟着挡住。
+isolateDisposableSecrets({ scriptName: 'production-drill' });
 
 const PORT = process.env.DRILL_PORT || 3666;
 const BASE = 'http://127.0.0.1:' + PORT;
