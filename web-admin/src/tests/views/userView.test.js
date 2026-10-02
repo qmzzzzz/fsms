@@ -34,6 +34,7 @@ const secSetReg = vi.fn()
 const secSetLogin = vi.fn()
 const secSetRegister = vi.fn()
 const resetMfa = vi.fn()
+const viewSensitive = vi.fn()
 const isCanceledError = vi.fn(() => false)
 vi.mock('@/utils/api', () => ({
   api: {
@@ -53,6 +54,7 @@ vi.mock('@/utils/api', () => ({
       setLoginCaptchaConfig: (...a) => secSetLogin(...a),
       setRegisterCaptchaConfig: (...a) => secSetRegister(...a),
       resetUserMfa: (...a) => resetMfa(...a),
+      viewSensitive: (...a) => viewSensitive(...a),
     },
   },
   isCanceledError: (...a) => isCanceledError(...a),
@@ -96,7 +98,10 @@ const ROW_OTHER = {
   email: 'b@x.com',
   realName: '鲍勃',
   department: '设备科',
-  phone: '13900000000',
+  // 夹具按**服务端真实响应**构造：管理员读接口已不下发明文 phone，只给脱敏的
+  // phoneMasked（services/userService.js 的 toMaskedAdminUser）。视图若仍按旧契约
+  // 读 row.phone，手机号列会渲染成 '-'，下面的列断言即失败。
+  phoneMasked: '139****0000',
   allowedIPs: '10.0.0.1',
   roles: [{ _id: 'r1', name: '管理员', code: 'ADMIN' }],
   status: 'inactive',
@@ -213,6 +218,7 @@ afterEach(() => {
     secSetLogin,
     secSetRegister,
     resetMfa,
+    viewSensitive,
     isCanceledError,
     enc,
     confirmBox,
@@ -615,7 +621,10 @@ describe('UserView 编辑用户对话框', () => {
     expect(fieldByLabel(dlg, '邮箱').value).toBe('b@x.com')
     expect(fieldByLabel(dlg, '真实姓名').value).toBe('鲍勃')
     expect(fieldByLabel(dlg, '部门').value).toBe('设备科')
-    expect(fieldByLabel(dlg, '手机号').value).toBe('13900000000')
+    // 手机号**不回填**：行上只有脱敏展示值，回填等于把 `139****0000` 塞进可写字段，
+    // 一次"什么都没改"的保存就会拿它去撞服务端的号码正则（400）或清空真实号码。
+    expect(fieldByLabel(dlg, '手机号').value).toBe('')
+    expect(dlg.textContent).toContain('留空表示不修改')
     expect(fieldByLabel(dlg, 'IP 访问范围').value).toBe('10.0.0.1')
     expect(c.find('#newUserPassword')).toBeNull()
   })
@@ -652,6 +661,230 @@ describe('UserView 编辑用户对话框', () => {
     expect(ElMessage.error).toHaveBeenCalledWith('更新失败')
     expect(overlayOf(c).style.display).not.toBe('none')
     expect(c.errors).toEqual([])
+  })
+})
+
+describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', () => {
+  /**
+   * 为什么单独一组：服务端已停止在管理员读接口上下发明文 phone（见
+   * services/userService.js 的 toMaskedAdminUser 与 src/tests/security/
+   * userPhoneMaskedEgress.test.js）。前端必须同时满足两件事，缺一即回归：
+   *  1) 展示走脱敏值，编辑框**不得回填**展示值——`139****0000` 不是合法号码，
+   *     回填后一次"什么都没改"的保存会 400，或被服务端当清空；
+   *  2) 提交时未动过的手机号**不发这个键**（userController.js 以
+   *     `phone !== undefined` 决定是否落库，发 '' 等于抹掉号码）。
+   * 期望值全部在本文件内独立写死，不 import 视图里的常量。
+   */
+  const REVEAL_TITLE = '验证身份以查看手机号'
+  const FULL_PHONE = '13900000000'
+
+  const openEdit = async (c) => {
+    click(rowBtn(c, '编辑'))
+    await flush(8)
+    return c.find('.el-dialog')
+  }
+  const openAdd = async (c) => {
+    click(toolbarBtn(c, '新增用户'))
+    await flush(8)
+    return c.find('.el-dialog')
+  }
+  /** 编辑框内的「查看完整号码」入口（与 step-up 弹层的确认按钮同名，故限定作用域） */
+  const revealEntry = (dlg) =>
+    Array.from(dlg.querySelectorAll('.phone-field__reveal')).find((b) =>
+      b.textContent.includes('查看完整号码')
+    )
+  /** step-up 弹层是嵌套对话框，append-to-body 后挂在 body 上，须按标题从 document 里取 */
+  const revealDlg = () =>
+    Array.from(document.body.querySelectorAll('.el-dialog')).find((d) => {
+      const title = d.querySelector('.el-dialog__title')
+      return title && title.textContent.trim() === REVEAL_TITLE
+    })
+  const revealConfirm = () =>
+    Array.from(revealDlg().querySelectorAll('.el-dialog__footer .glass-btn')).find((b) =>
+      b.textContent.includes('查看完整号码')
+    )
+  const revealPasswordInput = () => revealDlg().querySelector('input')
+  const revealCancel = () =>
+    Array.from(revealDlg().querySelectorAll('.el-dialog__footer .glass-btn')).find((b) =>
+      b.textContent.includes('取消')
+    )
+  /**
+   * 弹层是否"看得见"。Element Plus 的对话框关闭后 DOM 仍在（只是 overlay 置
+   * display:none），所以"关闭"只能断言遮罩终态，不能断言节点消失——
+   * 与既有 overlayOf/`style.display` 的口径保持一致。
+   */
+  const revealHidden = () => {
+    const dlg = revealDlg()
+    if (!dlg) return true
+    const overlay = dlg.closest('.el-overlay')
+    return !overlay || overlay.style.display === 'none'
+  }
+  const revealOpen = () => !!revealDlg() && !revealHidden()
+  const typeRevealPassword = async (value) => {
+    const el = revealPasswordInput()
+    el.value = value
+    el.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(2)
+  }
+  const revealOk = () =>
+    viewSensitive.mockResolvedValue({
+      data: { data: { type: 'phone', masked: '139****0000', full: FULL_PHONE } },
+    })
+
+  test('列表手机号列渲染服务端脱敏值（读的是 phoneMasked）', async () => {
+    const c = await mountUser(['user:read'])
+    const row = c.findAll('.el-table__body-wrapper .el-table__row')[0]
+    // 视图若仍按旧契约读 row.phone，这里会渲染成占位符 '-'
+    expect(row.textContent).toContain('139****0000')
+  })
+
+  test('新增对话框没有揭示入口（无现值可揭示）', async () => {
+    const c = await mountUser(['user:read', 'user:create'])
+    const dlg = await openAdd(c)
+    expect(revealEntry(dlg)).toBeUndefined()
+  })
+
+  test('空口令不发请求：确认按钮禁用，点击不消耗 step-up 配额', async () => {
+    const c = await mountUser(['user:read', 'user:update'])
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    expect(revealDlg().textContent).toContain('本次查看会写入安全审计')
+    expect(revealConfirm().disabled).toBe(true)
+    click(revealConfirm())
+    await flush(4)
+    expect(viewSensitive).not.toHaveBeenCalled()
+  })
+
+  test('揭示：带口令与目标用户调 view-sensitive，明文进输入框并切换提示语', async () => {
+    revealOk()
+    const c = await mountUser(['user:read', 'user:update'])
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await typeRevealPassword('CurrentP@ss')
+    expect(revealConfirm().disabled).toBe(false)
+    click(revealConfirm())
+    await waitFor(() => fieldByLabel(c.find('.el-dialog'), '手机号').value === FULL_PHONE, {
+      message: '明文回填到手机号输入框',
+    })
+    expect(viewSensitive).toHaveBeenCalledWith({
+      dataType: 'phone',
+      targetUserId: 'u2',
+      currentPassword: 'CurrentP@ss',
+    })
+    // 弹层收起，提示语从「留空表示不修改」切到「已载入完整号码…」
+    await waitFor(() => revealHidden(), { message: 'step-up 弹层关闭' })
+    expect(c.find('.el-dialog').textContent).toContain('已载入完整号码')
+  })
+
+  test('揭示后不改：PUT 载荷不含 phone 键（看完等于没看）', async () => {
+    revealOk()
+    usersUpdate.mockResolvedValue({ data: { success: true } })
+    const c = await mountUser(['user:read', 'user:update'])
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await typeRevealPassword('CurrentP@ss')
+    click(revealConfirm())
+    await waitFor(() => fieldByLabel(c.find('.el-dialog'), '手机号').value === FULL_PHONE, {
+      message: '明文回填',
+    })
+    await setField(c.find('.el-dialog'), '真实姓名', '鲍勃二世')
+    click(footerBtn(c.find('.el-dialog'), '保存'))
+    await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求' })
+    expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('phone')
+    expect(usersUpdate.mock.calls[0][1].realName).toBe('鲍勃二世')
+  })
+
+  test('揭示后删空再保存：phone 以空串上行（这是真正的"清空号码"）', async () => {
+    revealOk()
+    usersUpdate.mockResolvedValue({ data: { success: true } })
+    const c = await mountUser(['user:read', 'user:update'])
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await typeRevealPassword('CurrentP@ss')
+    click(revealConfirm())
+    await waitFor(() => fieldByLabel(c.find('.el-dialog'), '手机号').value === FULL_PHONE, {
+      message: '明文回填',
+    })
+    await setField(c.find('.el-dialog'), '手机号', '')
+    click(footerBtn(c.find('.el-dialog'), '保存'))
+    await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求' })
+    expect(usersUpdate.mock.calls[0][1].phone).toBe('')
+  })
+
+  test('揭示到一个空号码：提示语切到"已载入"，但值没变就仍不发 phone 键', async () => {
+    viewSensitive.mockResolvedValue({ data: { data: { type: 'phone', masked: '', full: '' } } })
+    usersUpdate.mockResolvedValue({ data: { success: true } })
+    const c = await mountUser(['user:read', 'user:update'])
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await typeRevealPassword('CurrentP@ss')
+    click(revealConfirm())
+    await waitFor(() => revealHidden(), { message: 'step-up 弹层关闭' })
+    expect(fieldByLabel(c.find('.el-dialog'), '手机号').value).toBe('')
+    // 基线从 null 变成 ''：界面上要区分"从没看过"和"看过、确认是空"，
+    // 否则管理员会以为这个人的号码被自己抹掉了。
+    expect(c.find('.el-dialog').textContent).toContain('已载入完整号码')
+    click(footerBtn(c.find('.el-dialog'), '保存'))
+    await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求' })
+    // 脏判定比的是"与基线是否不同"，空基线 + 空输入 = 没动 ⇒ 不发键（不发等于不写）。
+    // 正例对照在同组其它用例里：'提交更新'（敲了新号码 ⇒ 必发）与
+    // '揭示后删空再保存'（非空基线删成空 ⇒ 发 ''）。
+    expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('phone')
+  })
+
+  test('揭示失败：输入框不被污染，随后的保存也不会带出半截号码', async () => {
+    viewSensitive.mockRejectedValue(new Error('boom'))
+    usersUpdate.mockResolvedValue({ data: { success: true } })
+    const c = await mountUser(['user:read', 'user:update'])
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await typeRevealPassword('WrongP@ss')
+    click(revealConfirm())
+    await waitFor(() => viewSensitive.mock.calls.length === 1, { message: 'step-up 请求发出' })
+    await flush(6)
+    expect(fieldByLabel(c.find('.el-dialog'), '手机号').value).toBe('')
+    // 失败不收起弹层：口令错了要能就地改，而不是关掉重来
+    expect(revealHidden()).toBe(false)
+    await setField(c.find('.el-dialog'), '真实姓名', '鲍勃二世')
+    click(footerBtn(c.find('.el-dialog'), '保存'))
+    await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求' })
+    // 基线仍是 null（从未成功揭示）→ phone 键不发，绝不能把空串当"清空"上行
+    expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('phone')
+    expect(usersUpdate.mock.calls[0][1].realName).toBe('鲍勃二世')
+  })
+
+  test('取消后重开：上一次的口令不残留（确认按钮回到禁用态）', async () => {
+    const c = await mountUser(['user:read', 'user:update'])
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await typeRevealPassword('CurrentP@ss')
+    expect(revealConfirm().disabled).toBe(false)
+    click(revealCancel())
+    await settleDom()
+    click(revealEntry(c.find('.el-dialog')))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层重新打开' })
+    expect(revealConfirm().disabled).toBe(true)
+    expect(revealPasswordInput().value).toBe('')
+    expect(viewSensitive).not.toHaveBeenCalled()
+  })
+
+  test('关掉编辑对话框时 step-up 弹层一并收起（不留悬空密码框）', async () => {
+    const c = await mountUser(['user:read', 'user:update'])
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    // 正例：先证明判据本身能取到 overlay（否则"已收起"可能只是因为压根没取到节点）
+    expect(revealHidden()).toBe(false)
+    click(footerBtn(c.find('.el-dialog'), '取消'))
+    await settleDom()
+    expect(revealHidden()).toBe(true)
   })
 })
 
@@ -777,10 +1010,12 @@ describe('UserView 账户状态呈现（后端三值枚举不得塌缩成两值�
       email: 'b@x.com',
       realName: '鲍勃二世',
       department: '设备科',
-      phone: '13900000000',
       status: 'locked',
       allowedIPs: '10.0.0.1',
     })
+    // 顺带钉住手机号的新契约：未揭示明文就**不发** phone 键
+    //（userController.js 用 `phone !== undefined` 判是否落库，发 '' 等于清空号码）
+    expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('phone')
   })
 })
 

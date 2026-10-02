@@ -805,6 +805,10 @@ export const api = {
     getIPList: (params) => apiClient.get('/security/ip-list', { params }),
     // 管理员重置用户两步验证（账户救济：清除 TOTP/恢复码并强制下线）
     resetUserMfa: (userId) => apiClient.put(`/security/users/${userId}/mfa/reset`),
+    // 敏感字段按需揭示（step-up）：body { dataType, targetUserId?, currentPassword? | mfaCode? }
+    // → data { type, masked, full }。用户列表/详情只下发脱敏值，明文只能走这一条通道
+    // （服务端在此写 view_sensitive_data 审计，审计写失败即不返回明文）。
+    viewSensitive: (data) => apiClient.post('/security/view-sensitive', data),
     addIPEntry: (data) => apiClient.post('/security/ip-list', data),
     removeIPEntry: (id) => apiClient.delete(`/security/ip-list/${id}`),
   },

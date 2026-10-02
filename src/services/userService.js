@@ -14,6 +14,7 @@ const userPermissionService = require('./userPermissionService');
 const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const { escapeRegExp } = require('../utils/helpers');
+const { DataMasking } = require('../utils/encryption');
 const { USER_STATUS } = require('../utils/constants');
 // 级联释放的状态面由巡检域档位表派生（F-151）：写字面量 ['pending','in_progress'] 时漏掉的正是
 // `overdue`——调度器会把超期的开放计划改成它，越紧急的计划越容易漏在闸门外面；漏掉后开工/提交双双 409，
@@ -26,6 +27,35 @@ const DETAIL_ROLE_POPULATE = {
   select: 'name code description permissions',
   populate: { path: 'permissions', select: 'name code' },
 };
+
+/**
+ * 管理员读用户响应的手机号口径：明文只在这里存在过一瞬，出去的是 `phoneMasked`。
+ *
+ * 为什么不沿用仓里已有的形状（`securityController.js:84` 的 my-info 就是
+ * `phone: maskPhone(...)`）：my-info 是只读面板，而用户列表的值会**回填编辑表单**
+ * （`web-admin/src/views/UserView.vue` 的 handleEdit）。让展示值占住 `phone` 这个
+ * 可写字段的槽位，前端只剩两条必坏的路：
+ *   1) 原样提交回填值 → `138****5678` 撞上 `userRoutes.js:110` 的 /^1[3-9]\d{9}$/ ⇒ 400；
+ *   2) 那条校验是 `.optional({ values:'falsy' })`，空串照样过，而
+ *      `userController.js:550` 写的是 `if (phone !== undefined) user.phone = phone`
+ *      ⇒ 一次"我没动手机号"的保存把号码清空。
+ * 改名成 `phoneMasked` 是把"误把展示值当可写字段"变成结构上不可能，而不是靠约定。
+ *
+ * 另一个不能两头各打一次的理由：`DataMasking.maskPhone` **不幂等**——
+ * `138****5678` 再打一次得到 `****`（两条锚定正则都不命中，落到兜底分支）。
+ * 所以打码点只有这里一个，前端只渲染。
+ *
+ * 返回 POJO 而非文档对象是刻意的：`toJSON()` 的输出与改造前的响应体逐字段同形
+ * （getters 已开），差别只在 phone → phoneMasked；调用方（userController）只读属性
+ * 与序列化，不碰文档方法。
+ */
+function toMaskedAdminUser(doc) {
+  if (!doc) return doc;
+  const obj = typeof doc.toJSON === 'function' ? doc.toJSON() : { ...doc };
+  obj.phoneMasked = DataMasking.maskPhone(obj.phone);
+  delete obj.phone;
+  return obj;
+}
 
 class UserService {
   async buildListQuery(filters, dataScope) {
@@ -68,25 +98,35 @@ class UserService {
     const [users, count] = await Promise.all([
       User.find(query)
         .populate(SIMPLE_ROLE_POPULATE)
-        .select(User.RESPONSE_EXCLUDE)
+        .select(User.RESPONSE_EXCLUDE_PHONE_VISIBLE)
         .sort(sort)
         .limit(limit)
-        .skip((page - 1) * limit),
+        .skip((page - 1) * limit)
+        .then((docs) => docs.map(toMaskedAdminUser)),
       User.countDocuments(query),
     ]);
     return { users, count };
   }
 
   async getUserDetail(id) {
-    return User.findById(id).populate(DETAIL_ROLE_POPULATE).select(User.RESPONSE_EXCLUDE);
+    const user = await User.findById(id)
+      .populate(DETAIL_ROLE_POPULATE)
+      .select(User.RESPONSE_EXCLUDE_PHONE_VISIBLE);
+    return toMaskedAdminUser(user);
   }
 
   async getCreatedUser(id) {
-    return User.findById(id).populate(SIMPLE_ROLE_POPULATE).select(User.RESPONSE_EXCLUDE);
+    const user = await User.findById(id)
+      .populate(SIMPLE_ROLE_POPULATE)
+      .select(User.RESPONSE_EXCLUDE_PHONE_VISIBLE);
+    return toMaskedAdminUser(user);
   }
 
   async getUpdatedUser(id) {
-    return User.findById(id).populate(SIMPLE_ROLE_POPULATE).select(User.RESPONSE_EXCLUDE);
+    const user = await User.findById(id)
+      .populate(SIMPLE_ROLE_POPULATE)
+      .select(User.RESPONSE_EXCLUDE_PHONE_VISIBLE);
+    return toMaskedAdminUser(user);
   }
 
   findUserForUpdate(id) {

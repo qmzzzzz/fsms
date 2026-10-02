@@ -677,7 +677,8 @@
                     "type": "string"
                   },
                   "phone": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "仅接受写入（/^1[3-9]\\d{9}$/）；用户列表/详情/建号/改号/角色回显返回 phoneMasked，不含该字段"
                   },
                   "department": {
                     "type": "string"

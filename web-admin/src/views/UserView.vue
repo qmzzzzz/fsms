@@ -126,7 +126,14 @@
         </el-table-column>
         <el-table-column prop="realName" :label="$t('user.realName')" width="110" />
         <el-table-column prop="department" :label="$t('user.department')" width="120" />
-        <el-table-column prop="phone" :label="$t('user.phone')" width="130" />
+        <!-- 手机号读的是服务端下发的 phoneMasked（脱敏在 services/userService.js
+             的 toMaskedAdminUser 完成）。前端不再打码：maskPhone 不幂等，
+             对 `138****5678` 再打一次会得到 `****`；要看明文走编辑框里的「查看完整号码」。 -->
+        <el-table-column prop="phoneMasked" :label="$t('user.phone')" width="130">
+          <template #default="{ row }">
+            {{ row.phoneMasked || '-' }}
+          </template>
+        </el-table-column>
         <el-table-column :label="$t('user.roles')" width="150">
           <template #default="{ row }">
             <el-tag
@@ -256,11 +263,30 @@
           />
         </el-form-item>
         <el-form-item :label="$t('user.phone')" prop="phone">
-          <el-input
-            v-model="dialog.form.phone"
-            :placeholder="$t('register.phonePlaceholder')"
-            maxlength="20"
-          />
+          <div class="phone-field">
+            <el-input
+              v-model="dialog.form.phone"
+              :placeholder="dialog.isEdit ? '' : $t('register.phonePlaceholder')"
+              maxlength="20"
+            />
+            <button
+              v-if="dialog.isEdit"
+              type="button"
+              class="glass-btn glass-btn--link glass-btn--primary phone-field__reveal"
+              @click="openReveal"
+            >
+              {{ $t('user.revealPhone') }}
+            </button>
+          </div>
+          <!-- 两种状态要说两句不同的话：没揭示过="留空即不修改"，
+               揭示过="现在框里是真值，删掉保存就是清空"。 -->
+          <div v-if="dialog.isEdit" class="phone-field__hint">
+            {{
+              dialog.phoneBaseline === null
+                ? $t('user.phoneKeepBlank')
+                : $t('user.phoneAfterReveal')
+            }}
+          </div>
         </el-form-item>
         <el-form-item :label="$t('common.status')" prop="status">
           <el-select
@@ -353,6 +379,45 @@
         </button>
       </template>
     </el-dialog>
+    <!-- 手机号按需揭示（step-up）：明文唯一的出口是 POST /api/security/view-sensitive
+         （服务端做口令复检 + 写 view_sensitive_data 审计，审计写失败即不返回明文）。
+         揭示结果只进组件内存与下面的编辑框，不写任何 storage。 -->
+    <el-dialog
+      v-model="reveal.visible"
+      :title="$t('user.revealPhoneTitle')"
+      width="420px"
+      append-to-body
+      :close-on-click-modal="false"
+      @closed="resetReveal"
+    >
+      <p class="reveal-hint">{{ $t('user.revealPhoneHint') }}</p>
+      <el-form @submit.prevent>
+        <el-form-item>
+          <el-input
+            v-model="reveal.password"
+            type="password"
+            show-password
+            autocomplete="current-password"
+            :placeholder="$t('auth.currentPassword')"
+            @keydown.enter.prevent="enterSubmit($event, doReveal)"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <button type="button" class="glass-btn glass-btn--default" @click="reveal.visible = false">
+          {{ $t('common.cancel') }}
+        </button>
+        <!-- 空口令不发请求：服务端必定 REAUTH_REQUIRED，白占一次 reauth 限流配额 -->
+        <button
+          type="button"
+          class="glass-btn glass-btn--primary"
+          :disabled="reveal.submitting || !reveal.password"
+          @click="doReveal"
+        >
+          {{ $t('user.revealPhone') }}
+        </button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -365,6 +430,7 @@ import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api, isCanceledError } from '@/utils/api'
 import { encryptPassword } from '@/utils/loginCipher'
 import { passwordStrengthRule } from '@/utils/password'
+import { enterSubmit } from '@/utils/enterSubmit'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useAuthStore } from '@/store'
@@ -450,6 +516,11 @@ const dialog = reactive({
     status: 'active',
     allowedIPs: '',
   },
+  // 手机号脏判定基线：null=本次编辑从未揭示过明文（列表只给 phoneMasked，
+  // 回填它就是拿展示值去撞服务端的号码正则），string=已通过 step-up 揭示并把
+  // 明文交给输入框，此时的值才是"可提交的现值"。提交时只有与基线不同才带 phone 键，
+  // 理由见 submitForm 的注释。
+  phoneBaseline: null,
   // 校验文案必须随语言切换重建：在 setup 顶层用 t(...) 求值一次只会得到
   // 一串**固化字符串**，用户在页内切语言后标签变了、错误提示还是旧语言。
   // 放进 reactive 的 computed 后，模板 :rules="dialog.rules" 无需改动
@@ -469,6 +540,9 @@ const dialog = reactive({
       passwordStrengthRule(t('validation.passwordMin')),
     ],
     realName: [{ required: true, message: t('validation.realNameRequired'), trigger: 'blur' }],
+    // 与 userRoutes.js 的 /^1[3-9]\d{9}$/ 同一条正则（此前只有服务端判，
+    // 用户要等一次往返才知道号码打错了）。留空不触发：空=不修改，见 phoneBaseline。
+    phone: [{ pattern: /^1[3-9]\d{9}$/, message: t('validation.phonePattern'), trigger: 'blur' }],
     status: [{ required: true, message: t('messages.selectRequired'), trigger: 'change' }],
   })),
 })
@@ -651,6 +725,7 @@ const handleAdd = () => {
   dialog.form.realName = ''
   dialog.form.department = ''
   dialog.form.phone = ''
+  dialog.phoneBaseline = null
   dialog.form.status = 'active'
   dialog.form.allowedIPs = ''
   dialog.visible = true
@@ -663,10 +738,63 @@ const handleEdit = (row) => {
   dialog.form.email = row.email
   dialog.form.realName = row.realName || ''
   dialog.form.department = row.department || ''
-  dialog.form.phone = row.phone || ''
+  // 手机号**不回填**：列表给的是脱敏展示值（phoneMasked），把它当可写字段塞进表单
+  // 会让一次"什么都没改"的保存拿 `138****5678` 去撞服务端的号码正则。
+  // 要看/要改现值，走输入框旁边的「查看完整号码」（step-up + 审计）。
+  dialog.form.phone = ''
+  dialog.phoneBaseline = null
   dialog.form.status = row.status || 'active'
   dialog.form.allowedIPs = row.allowedIPs || ''
   dialog.visible = true
+}
+
+// 手机号按需揭示（step-up）的独立弹层状态。
+// 明文在管理端只有一个出口：POST /api/security/view-sensitive——服务端先做当前口令
+// （或 TOTP）复检，再写一条 view_sensitive_data 审计，且审计写入失败就不返回明文。
+// 所以这里只传口令，不在本地做任何"能不能看"的判断。
+const reveal = reactive({
+  visible: false,
+  submitting: false,
+  password: '',
+  userId: null,
+})
+
+// 口令的唯一清理点是下面 el-dialog 的 @closed，openReveal 只负责带入目标用户：
+// 两处都清是冗余，且冗余的那处永远测不到（清理逻辑被改坏时测试照样绿）。
+const openReveal = () => {
+  reveal.userId = dialog.form._id
+  reveal.visible = true
+}
+
+// 绑 el-dialog 的 @closed（动画结束、已离开 DOM）而不是 @close：
+// 口令在请求还在飞的瞬间被清掉会让 doReveal 的守卫提前失败。
+const resetReveal = () => {
+  reveal.password = ''
+  reveal.userId = null
+  reveal.submitting = false
+}
+
+const doReveal = async () => {
+  if (!reveal.password) return
+  reveal.submitting = true
+  try {
+    const res = await api.security.viewSensitive({
+      dataType: 'phone',
+      targetUserId: reveal.userId,
+      currentPassword: reveal.password,
+    })
+    // full 可能为空串（该用户从未填过号码）：此时基线也是空串，
+    // 与"没揭示过"的 null 区分开，下面的提示文案据此切换。
+    const full = res?.data?.data?.full ?? ''
+    dialog.form.phone = full
+    dialog.phoneBaseline = full
+    reveal.visible = false
+  } catch (_) {
+    // 口令错 / 权限不足 / 限流 / 需要 MFA 都由 api.js 拦截器按 errorCode 弹一次，
+    // 组件不再重复提示；失败时输入框保持原样（空），不会写入半截值。
+  } finally {
+    reveal.submitting = false
+  }
 }
 
 const handleRole = async (row) => {
@@ -725,9 +853,16 @@ const submitForm = async () => {
       email: dialog.form.email,
       realName: dialog.form.realName,
       department: dialog.form.department,
-      phone: dialog.form.phone,
       status: dialog.form.status,
       allowedIPs: dialog.form.allowedIPs,
+    }
+    // 手机号**只在动过时才发**：userController.js 落库用的是 `if (phone !== undefined)`，
+    // 键缺失才是 no-op，传空串等于清空号码；而编辑框已不再回填明文（列表只给 phoneMasked）。
+    // 所以"打开编辑框什么都没碰"必须不发这个键，否则一次普通保存就会抹掉用户手机号。
+    // 基线 null 归一到 ''（未揭示=框本来就是空）；揭示过则基线就是明文现值，
+    // 看完不改 → 不发，删空再保存 → 真的清空。
+    if (!dialog.isEdit || dialog.form.phone !== (dialog.phoneBaseline ?? '')) {
+      payload.phone = dialog.form.phone
     }
     if (!dialog.isEdit) {
       // FE-M3：管理员代设口令走密文轨——「可用但失败」阻断提交（用户重试成本为零）
@@ -782,6 +917,10 @@ const resetForm = () => {
     status: 'active',
     allowedIPs: '',
   }
+  dialog.phoneBaseline = null
+  // 编辑对话框被关掉时，挂在它下面的 step-up 弹层（append-to-body，独立渲染）
+  // 不会跟着消失——不主动收就会留一个悬空的密码框。
+  reveal.visible = false
   if (formRef.value) {
     formRef.value.clearValidate()
   }
@@ -833,6 +972,33 @@ onUnmounted(() => {
   font-family: var(--xf-font-mono, monospace);
   white-space: pre;
   color: var(--xf-gray-700, #374151);
+}
+/* 手机号输入 + 揭示按钮同一行，按钮不能把输入框挤窄到截断 11 位号码 */
+.phone-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.phone-field :deep(.el-input) {
+  flex: 1;
+  min-width: 0;
+}
+.phone-field__reveal {
+  flex: none;
+}
+.phone-field__hint {
+  margin-top: 4px;
+  font-size: var(--xf-font-size-xs, 12px);
+  line-height: 1.5;
+  color: var(--xf-gray-600, #6b7280);
+  width: 100%;
+}
+.reveal-hint {
+  margin: 0 0 12px;
+  font-size: var(--xf-font-size-sm, 13px);
+  line-height: 1.6;
+  color: var(--xf-gray-600, #6b7280);
 }
 .glass-card {
   animation: page-enter 0.4s var(--xf-ease-glass) both;

@@ -368,6 +368,12 @@ export default {
     email: 'Email',
     realName: 'Full Name',
     phone: 'Phone',
+    phoneKeepBlank: 'Leave blank to keep the current number',
+    phoneAfterReveal: 'Full number loaded: editing overwrites it, clearing and saving deletes it',
+    revealPhone: 'Show full number',
+    revealPhoneTitle: 'Verify your identity to view the phone number',
+    revealPhoneHint:
+      'Enter your current login password for step-up verification. This view is written to the security audit log.',
     department: 'Department',
     status: 'Status',
     roles: 'Roles',

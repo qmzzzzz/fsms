@@ -8,6 +8,69 @@
 
 ## [未发布]
 
+### 修复（2026-10-02 · 管理员用户读接口停发明文手机号，改走「脱敏下发 + step-up 揭示」）
+
+> 背景：上一轮把 `reporter.phone` 从报警读出路径摘掉后，同一列在**用户管理**上更严重：
+> `models/User.js` 的 `phone` 有 getter 透明解密，且 schema 的 `toJSON/toObject` 只设了
+> `getters:true` 没有 `transform` ⇒ 任何**不带投影**的读取都会把明文号码整体发出去。
+> 原 `User.RESPONSE_EXCLUDE` 排了 password/phoneKey 等 9 项却**没排 phone**，
+> 于是列表 / 详情 / 建号回显 / 改号回显 / 角色回显**五条路径**全部明文下发。
+> 后果不只是"看得到"：明文一旦进列表，`POST /api/security/view-sensitive`
+> 那条专为手机号建的合规通道（step-up 二次验证 + `view_sensitive_data` 审计 +
+> 审计写失败即不返回明文）就被彻底架空——想查号码的人不需要口令，翻页就行。
+> 拍板口径：**表格默认脱敏 + 按需 step-up**（用户明确选择服务端一起收窄，不是前端打码）。
+
+- `models/User.js`：`RESPONSE_EXCLUDE` 改为由字段数组拼出，新增 `-phone` 进默认排除；
+  派生出 `RESPONSE_EXCLUDE_PHONE_VISIBLE`（同一份数组**滤掉** `-phone`）。
+  用数组而不是对字符串做 `replace(' -phone','')`：字符串手术在字段顺序变动时会**静默失配**，
+  失配后的表现恰好是"明文照发、门禁照绿"。变体名字本身就写着危险，注释规定它只能与
+  `toMaskedAdminUser` 配对使用。
+- `services/userService.js`：新增读模型 `toMaskedAdminUser(doc)` —— `phoneMasked =
+DataMasking.maskPhone(obj.phone)` 后 **`delete obj.phone`**。四个管理员读函数
+  （`listUsers` / `getUserDetail` / `getCreatedUser` / `getUpdatedUser`）改用
+  `RESPONSE_EXCLUDE_PHONE_VISIBLE` 并统一过这个函数：投影留着 phone 是为了让**解密 getter
+  在服务端跑一次**，脱敏只在服务端这一处做——`maskPhone` **不幂等**（对 `138****5678`
+  再打一次得到 `****`），所以前端一律不再打码，只做展示。
+- **响应字段改名成 `phoneMasked` 而不是 `phone: 脱敏值`**（有意偏离 `my-info` 的既有口径）：
+  编辑对话框会把行对象灌进表单，而 `userController.js` 用 `if (phone !== undefined)` 落库、
+  路由校验是 `/^1[3-9]\d{9}$/` ⇒ 叫 `phone` 的展示值只有两种结局，且**都是坏的**：
+  原样回传被 400 拒掉，或被当成"用户想清空号码"抹掉真值。改名让"这是展示值、不是可写字段"
+  在类型上就不可能被搞混。
+- `web-admin/src/views/UserView.vue`：列表列读 `phoneMasked`；编辑对话框**不再回填**手机号，
+  改为输入框旁一个「查看完整号码」→ 二级 step-up 弹层（只收当前登录口令）→
+  `POST /api/security/view-sensitive` 返回的 `full` 才进输入框。提交按**脏字段**发键：
+  未揭示 / 揭示后未改 ⇒ 不发 `phone`；揭示后删空 ⇒ 发 `''`（这才是真的清空）。
+  提示语随 `phoneBaseline` 切换，两处状态各自说清"留空即不修改"和"已载入现值"。
+  step-up 的口令由 el-dialog `@closed` 单一清理点负责（打开时再清一次是冗余，
+  冗余那处会让清理逻辑被改坏时测试照样绿）。
+- **有意的边界，不一起收窄**：自助通道 `GET /api/auth/me` 与 `PUT /api/auth/profile`
+  仍返回本人明文号码——那是用户自己的数据、且编辑页需要现值；`utils/permissionHelper.js`
+  处早已写明"回填脱敏值会污染数据或阻断保存"。这条边界用一条**反向**用例钉住
+  （`/auth/me` 必须还能拿到明文），免得下一个人"顺手统一"。
+- 消费方核实：web-admin 里 `users.getList` 的 phone 只有 UserView 一处读，ProfileView 读的是
+  `/auth/me`，RegisterView 是自己的表单 ⇒ 停发零界面功能损失。搜索侧无残留 oracle：
+  列表 `search` 的 `$or` 只覆盖 username/email/realName，`phoneKey` 全仓**无** `find({phoneKey})`
+  （`models/User.js:270-277` 已记为"已供未接"）。
+- 文档同批：`openapi.json` 建号请求体的 `phone` 补 description「仅接受写入；
+  列表/详情/建号/改号/角色回显返回 phoneMasked，不含该字段」（`src/docs/generate.js` 重生成）。
+- **门禁**：新套件 `src/tests/security/userPhoneMaskedEgress.test.js`（10 例）——
+  夹具自证（不带投影的裸读确实能拿到明文，证明排除不是空转）/ 两条投影只相差 `-phone` /
+  五条响应路径逐个断言 `'phone' in payload === false` **且** `JSON.stringify` 不含明文
+  **且** `phoneMasked` 值正确（只断言"没有"会让整列被删也测成通过）/ 边界自证
+  （省略键 ≠ 清空；把 `139****1122` 提交上去必须 400 **且库里原值未变**）/
+  view-sensitive 揭示与 `/auth/me` 两条反向钉 / 源码文本闸：`RESPONSE_EXCLUDE_PHONE_VISIBLE`
+  出现处必须紧邻 `toMaskedAdminUser`（防"换投影忘了脱敏"），并钉住 `delete obj.phone;`。
+  变异实测三臂：摘投影 → 5 红；摘 `delete obj.phone` → 2 红；把变体名改回基名（模拟漏接）→ 1 红。
+- 前端门禁：`userView.test.js` 新增 9 例（脱敏列渲染 / 新增框无揭示入口 / 空口令不发请求 /
+  揭示请求形状 / 揭示后不改不发键 / 揭示后删空发 `''` / 揭示失败不污染也不误发 /
+  口令不跨次残留 / 关外层时二级弹层一并收起）。step-up 是嵌套对话框，`append-to-body` 后
+  节点挂在 body 上，"是否关闭"只能断言 overlay 的 `display` 终态——EP 关闭后 DOM 仍在，
+  断言节点消失会得到一条恒真的假绿。变异实测三臂：提交无条件带 `phone` → 3 红；
+  列改回 `row.phone` → 1 红；摘掉 `@closed` 清理 / 摘掉外层关闭 → 各自对应那条红。
+- **如实声明残留**：库里仍是可解密的密文（本改动只收窄**下发面**）；操作者**本人**的明文手机号
+  仍会写进 `localStorage.currentUser`（`/auth/me` 的形状），是否连浏览器持久化一起收窄
+  需要单独拍板——它会改变刷新后 ProfileView 的短暂空值表现，且 email/realName 同批同性质。
+
 ### 修复（2026-10-02 · 报警读出路径停发 `reporter.phone`）
 
 > 背景：四路逐行审计的 lane-B 报出一条新缺陷并回源核实。`FireAlarm.reporter.phone`

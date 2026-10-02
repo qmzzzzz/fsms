@@ -294,8 +294,13 @@ userSchema.index({ phoneKey: 1 }, { background: true, name: 'phoneKey_1' });
  *
  * 保留 allowedIPs：用户管理界面编辑表单需回填该字段（UserView.handleEdit），
  * 且仅 user:read 权限者可见，属功能必需而非泄露。
+ *
+ * 清单是一张字段表而不是拼好的字符串：RESPONSE_EXCLUDE_PHONE_VISIBLE 要从同一张表
+ * 派生（下面解释为什么要这个变体）。写成字符串手术（`base.replace(' -phone','')`）
+ * 的话，将来清单里多一个空格、多个 `-phone` 别名，都会静默失效——而"静默失效"
+ * 在这一项上等于把明文手机号放回去。
  */
-const USER_RESPONSE_EXCLUDE = [
+const USER_RESPONSE_EXCLUDE_FIELDS = [
   '-password',
   // 凭证级材料的第二道：schema 已是 select:false，这里再排一次与 password 同规格。
   // 只排不减：少排一次的后果是历史摘要进到某个响应体里，而它是对明文的单向预言机。
@@ -305,15 +310,39 @@ const USER_RESPONSE_EXCLUDE = [
   '-failedLoginCount',
   '-passwordChangedAt',
   '-lastLoginIp',
+  // PII（2026-10-02）：phone 落库是密文，但本文件 phone 声明处的 getter **透明解密**，
+  // 于是不写投影的用户读路径会把完整手机号放进响应体——持 user:read 的部门管理员
+  // 一次 GET 就拿到整个部门的手机号，无二次验证、不写 view_sensitive_data 审计，
+  // 而仓里专门为此建的合规通道（POST /api/security/view-sensitive：reauthLimiter +
+  // requireReAuthentication + 严格更高级别 + 审计写失败即不发明文）被这个默认值架空。
+  // 与 -phoneKey 同规格：排在这里是"默认不许外泄"，不是"某处正在用"。
+  '-phone',
   // P1-② 检索键：相等性预言机（拿一个手机号问"系统里有没有人用"），
   // 对外响应与内部状态同规格排除。需要读它的一侧必须显式 select('+phoneKey')，
   // 而那样的读侧目前不存在（接线状态见本文件 phoneKey 索引处的注释）——
   // 排在这里是"默认不许外泄"，不是"某处正在用"。
   '-phoneKey',
   '-__v',
-].join(' ');
+];
+
+const USER_RESPONSE_EXCLUDE = USER_RESPONSE_EXCLUDE_FIELDS.join(' ');
+
+/**
+ * 唯一允许把**明文** phone 读进进程的对外投影：同一张字段表、只少 `-phone` 一项。
+ *
+ * 存在的理由是展示需求而非读取需求：用户管理表格要显示脱敏号码（`138****5678`），
+ * 而脱敏必须在拿到明文的那一侧算——密文列随机 IV、逐行不同，对密文打码什么也读不出。
+ * 代价是这条投影本身是个危险物：取到明文的每一行都必须立刻过
+ * `services/userService.js` 的 `toMaskedAdminUser`，否则等于把明文重新装回响应。
+ * 所以变体与主清单同源派生，并由 `tests/security/userPhoneMaskedEgress.test.js`
+ * 的源码闸盯着"新增了用户读路径却没过脱敏"这一种漂移。
+ */
+const USER_RESPONSE_EXCLUDE_PHONE_VISIBLE = USER_RESPONSE_EXCLUDE_FIELDS.filter(
+  (field) => field !== '-phone'
+).join(' ');
 
 userSchema.statics.RESPONSE_EXCLUDE = USER_RESPONSE_EXCLUDE;
+userSchema.statics.RESPONSE_EXCLUDE_PHONE_VISIBLE = USER_RESPONSE_EXCLUDE_PHONE_VISIBLE;
 
 // P3-30：用户名比较口径对外暴露，供控制器/脚本按同一 collation 查询
 userSchema.statics.USERNAME_COLLATION = USERNAME_COLLATION;

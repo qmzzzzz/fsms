@@ -320,7 +320,13 @@ spec.paths['/api/users'] = {
         email: { type: 'string' },
         password: { type: 'string' },
         realName: { type: 'string' },
-        phone: { type: 'string' },
+        // 写入收明文、读出只给脱敏值：这个不对称是刻意的，理由见
+        // services/userService.js 的 toMaskedAdminUser 注释。
+        phone: {
+          type: 'string',
+          description:
+            '仅接受写入（/^1[3-9]\\d{9}$/）；用户列表/详情/建号/改号/角色回显返回 phoneMasked，不含该字段',
+        },
         department: { type: 'string' },
         roles: { type: 'array', items: { type: 'string' } },
       },
