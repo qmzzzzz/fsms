@@ -8,6 +8,45 @@
 
 ## [未发布]
 
+### 安全（2026-10-03 · 一次性 harness 的第二根暴露轴：宿主上的明文密钥，不只 `*_FILE`）
+
+> 背景：`scripts/devSecretIsolation.js` 上一版把宿主的 `*_FILE` 指针全量置空，但它只看指针。
+> 密钥有**两根正交的轴**——形态（`<NAME>_FILE` 指针 / `<NAME>` 明文值）与通道（宿主 `export` / `.env`），
+> 上一版按通道堵了两格，形态那一根整条没堵。而明文形态不是事故形态：`.env.example:2`
+> 就明写「JWT_SECRET / AES_SECRET_KEY 等可以直接写在本文件（适合本地开发）」。
+> 本机实测（`node -e` 枚举 `FILE_BACKED_SECRETS`）：仓库根 `.env` 今天正带着 6 个明文密钥，
+> 其中 `MONGODB_URI` / `ADMIN_INITIAL_PASSWORD` 与一次性 harness 要用的值是同一类东西。
+
+- **守卫按名字全量置空两类**：`<NAME>_FILE` 与 `<NAME>`。漏掉的这一类比原来那条更宽，
+  因为 harness 只覆写它记得的那几个名字，其余名字一个都不碰，于是明文值直接穿过 dotenv 被读到：
+  `REDIS_URL` ⇒ 冒烟的验证码/限流计数读写宿主那台 Redis；`SECURITY_ALERT_WEBHOOK_SECRET`
+  ⇒ 冒烟造的假告警签名有效、真推到值班群；`SENTRY_DSN` / `LOG_SHIPPING_TOKEN` ⇒ 测试流量进真实观测面；
+  `ADMIN_INITIAL_PASSWORD` / `MONGO_ROOT_PASSWORD` ⇒ 播种与清理动的是真凭据。
+- **由此新增一条顺序不变量**：置空明文值意味着 harness 自己的一次性赋值必须**晚于**守卫
+  （先赋值再调守卫会被擦掉）。接线闸原来只钉"早于 `require('../src/index.js')`"，
+  现在同时钉"早于任何 `process.env.<密钥名>[/_FILE] =` 赋值"，并带三条负向对照
+  （非密钥赋值不算、生成的子脚本里整行是字符串字面量的赋值不算、真赋值提到守卫前必须点名）。
+- **"空串会不会变成第三种状态"有专门用例**：这几个名字在 `src/config` 里没有字段，消费方直读 env
+  （`sharedCache.js:52` 的 `(process.env.REDIS_URL || '').trim() !== ''`、`initData.js:770` 的
+  `if (process.env.ADMIN_INITIAL_PASSWORD)`），置空与"宿主本来没配"逐点等价；用例钉的是**真实源码行**，
+  判据写法改成 `!== undefined` 立刻红。
+- **告警点名不取值**：`*_FILE` 条目打路径（值本身是路径），明文条目只打名字并注明"值不打印"——
+  报错里复读密钥等于把它从 env 搬进 stdout/stderr，CI 日志保留时间通常更长（同一口径见 `scripts/secretFileArg.js`）。
+- **`src/tests/config/disposableSecretIsolation.test.js` 12 → 19 例**：来源臂从两条加到三条
+  （`export` / `.env` 混装 / **`.env` 里只有明文、一个 `*_FILE` 都没有**）。第三条臂就是上一版的靶子：
+  它的 `uri`/`jwt` 本来就是一次性值，"全绿"完全可以和"真 Redis、真初始口令已接上"同时成立。
+  真值表随之扩到九格，`del × {dotenv, plain}` 两臂共同钉住"置空而非删除"对**两类**都承重；
+  `rootPw` 的期望从 `undefined` 改成 `''`（`undefined` 只证"没 hydrate"，`''` 才证"宿主明文也没接上"），
+  并在探针里给所有 env 观测加 `?? null`——`JSON.stringify` 会丢掉 `undefined` 键，
+  那样"挡住了"与"夹具压根没跑"分不开，是一条空断言；另补一条**真文件减法自证**：
+  擦掉置空明文的那两行、只留置空指针，明文轴必须立刻漏且被点名。
+- 单位夹具改用"先全部置空"而不是 `delete` 构造"宿主干净"：本 describe 的 cwd 是仓库根，
+  那里真有一个带 6 个明文密钥的 `.env`，`delete` 会被守卫内的 dotenv 填回来——
+  这正是实现选择置空而非删除的同一条理由。
+- **真 harness 复跑**：`REDIS_URL=… ADMIN_INITIAL_PASSWORD=… SENTRY_DSN=… node scripts/e2e-smoke.js`
+  ⇒ 守卫打印 3 条明文点名（无值）、`[E2E] 结果：14 通过, 0 失败`、退出码 0；
+  不带毒环境的裸跑同样 14/14 绿。
+
 ### 安全（2026-10-03 · 备份/恢复：主机段改写去掉 sed，失败现场不留明文归档）
 
 > 背景：`scripts/mongoUri.sh` 是备份与恢复共用的唯一一份 URI 判据，它自己却是
@@ -120,6 +159,11 @@
   断言的是"配置对象里到底是哪个 URI"而不是脚本里有没有某个字符串。含 `MONGO_ROOT_PASSWORD`
   这一臂：harness 从不给它赋值，回填却照样把真实值填进去 ⇒ 危害不止"它记得覆写的那几个键"，
   同时反向钉住守卫自己绝不 hydrate。
+- **顺手拆掉上一轮自带的一颗定时炸弹**：`backupUriFile.test.js` 的 SIGINT 用例让外面的
+  `sleep 0.4` 与桩里 `sleep 1.2` 赛跑，本机并行跑 `src/tests/config src/tests/deploy` 时漂了
+  （归档写完信号才到 ⇒ "Backup completed successfully" 照打 ⇒ 用例红）。改成由桩在
+  **半截归档落盘的那一刻** `kill -INT "$PPID"`：红绿只取决于脚本自己的 trap 语义，
+  不再取决于机器当时有多忙。
 - **既有闸 `scriptSecretHydration.test.js`（14 → 16 例）被这次改动撞红一次，且它是对的**：
   守卫用 `process.env[name + '_FILE']` 动态键读密钥注入项，按闸的口径就是"读取者"，
   而它的合规写法（在库内调 `hydrateSecretsFromFiles()`）恰恰是它要防的那个动作。

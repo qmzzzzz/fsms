@@ -420,12 +420,18 @@ describe('显式 MONGODB_URI 的内容校验与脱敏回显', () => {
     // 桩 mongodump 演示真工具的行为：先写出半截归档，收到 INT 也不死，1.2s 后正常退出 0。
     // 修前 `trap cleanup EXIT INT TERM` 只做清理不 exit ⇒ 脚本在信号之后继续往下跑，
     // 于是那份 5 字节的半截归档被打印成 "Backup completed successfully" 并补了 .sha256。
+    //
+    // 信号由**桩在半截归档落盘的那一刻**发给父进程，而不是外面挂一个 `sleep 0.4` 的定时器：
+    // 并行跑套件时 mongodump 可能整段跑完都还没到 0.4s（也可能反过来），用例就退化成
+    // "看机器快慢"的随机数——实测在本机 `src/tests/config src/tests/deploy` 同跑时确实漂了。
+    // 让因果落在"归档已存在 ⇒ 立刻打断"上，红绿只取决于脚本自己的 trap 语义。
     fs.writeFileSync(
       path.join(work.bin, 'mongodump'),
       [
         '#!/usr/bin/env bash',
         'for a in "$@"; do case "$a" in --archive=*) out="${a#--archive=}";; esac; done',
         'printf "PARTIAL" > "$out"',
+        'kill -INT "$PPID" 2>/dev/null || true',
         'trap "exit 0" INT',
         'sleep 1.2',
         'exit 0',
@@ -435,7 +441,7 @@ describe('显式 MONGODB_URI 的内容校验与脱敏回显', () => {
     );
     fs.chmodSync(path.join(work.bin, 'mongodump'), 0o755);
 
-    const r = runBashC('( sleep 0.4; kill -INT $$ ) & exec bash "$FS_S" "$FS_D"', work, {
+    const r = runBashC('exec bash "$FS_S" "$FS_D"', work, {
       FS_S: sh(BACKUP),
       FS_D: sh(work.backupDir),
       MONGODB_URI: URI_EXPLICIT,
