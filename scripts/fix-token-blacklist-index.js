@@ -21,6 +21,10 @@
  */
 
 require('dotenv').config();
+// <NAME>_FILE 部署下必须在此回填：否则 resolveMongoUri 读不到 MONGODB_URI，
+// 静默回退成本地默认库——运维以为在清生产索引，实际连的是另一个库。
+// （不变量见 src/tests/config/scriptSecretHydration.test.js）
+require('../src/config/secrets').hydrateSecretsFromFiles();
 const mongoose = require('mongoose');
 
 // M-08：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明

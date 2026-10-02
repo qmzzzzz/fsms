@@ -21,6 +21,9 @@
 'use strict';
 
 require('dotenv').config();
+// <NAME>_FILE 部署下必须在此回填，否则下面直读的 MONGODB_URI 是空串 ⇒ 脚本拒绝执行
+// （不变量见 src/tests/config/scriptSecretHydration.test.js）。
+require('../src/config/secrets').hydrateSecretsFromFiles();
 const mongoose = require('mongoose');
 
 // M-08 / P1-20：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。

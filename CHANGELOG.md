@@ -8,6 +8,56 @@
 
 ## [未发布]
 
+### 运维可用性（2026-10-03 · `*_FILE` 密钥部署下六个独立脚本拿不到连接串）
+
+> 背景：`src/config/secrets.js` 的 `<NAME>_FILE` 约定（P3-48：密钥走文件挂载，不进
+> `docker inspect` / `compose config` / 子进程继承）只在**require 到 `src/config` 的入口**
+> 自动回填 process.env。运维手边的独立脚本几乎都是 `require('dotenv').config()` +
+> 直读 `process.env.MONGODB_URI`，这两者从来没接上。
+>
+> **本轮推翻了自己的第一版判据**：先用静态依赖图筛"哪些脚本需要补 hydrate"，
+> `verify-audit-chain.js` 的图确实通向 `src/config`（auditChainVerify → utils/auditChain →
+> 函数体内 `require('../config')`），按图它不需要改。改成动态探测（只给 `MONGODB_URI_FILE`、
+> 显式把 `MONGODB_URI` 置空、目标端口 1）后结论相反——那是**懒 require**，脚本在 `main()`
+> 里读 env 时它还没执行。静态图在这里会给出假绿。
+
+- 实测（修前）：`verify-audit-chain` / `revoke-user-sessions` / `run-rollback-drill` /
+  `sync-audit-indexes` / `perf/explain-spotcheck` 读到空串，开局报错退出；
+  `fix-token-blacklist-index` 更隐蔽——`resolveMongoUri` **静默回退本地默认库**并打印
+  「已连接：127.0.0.1:27017/fire_safety_db」，运维以为在清生产索引。
+  同族 `resign-audit-hmac.js` / `resign-audit-chain-v3.js` 因为显式调了 hydrate 一直正常，
+  它们同时充当探测方法学的正向对照（对照组判"已 hydrate"，说明判据不是在猜）。
+- 后果直接落在文档化的运维步骤上：`deployment/secret-rotation.md` 的 HMAC 轮换第 0/4/5 步
+  都要求 `node scripts/verify-audit-chain.js` 且注明"要求退出码 0"，
+  在 `*_FILE` 部署里这一步**做不到**——第 5 步会退 1，轮换完成后无人给出链条干净的证据。
+- 六个脚本各自补 `require('../src/config/secrets').hydrateSecretsFromFiles();`
+  （紧跟 `dotenv`，早于任何 env 读取），与本仓既有同族写法一致。
+  不用"把 hydrate 塞进 `destructiveGuard.js`"这种集中式改法：它是被 require 的库，
+  无权决定进程何时回填，而且 `verify-audit-chain` / `explain-spotcheck` 根本不经它。
+- 新闸 `src/tests/config/scriptSecretHydration.test.js`（8 条，逐条能被打红）：
+  读取文件型密钥的入口必须**自己**显式 hydrate，且早于首次读取。
+  读点有两条通道，只钉第一条会漏——`fix-token-blacklist-index` 唯一的读取通道是
+  `require('./destructiveGuard')` 代读，所以把护栏引入点也按读点计（否则删掉它的
+  hydrate 行，闸照样绿）。
+  判据自证：合成源码攻击（缺 hydrate / hydrate 太晚 / 只赋值不读 / `===` 比较 /
+  `JWT_SECRET_V2` 前缀同名）各一条；豁免两条各自带证据——
+  `audit-probes/ws-session-bypass.cjs` 必须能为每个读到的名字指出赋值处，
+  `destructiveGuard.js` 必须真的被 ≥4 个入口 require；
+  压测/演练入口（e2e-smoke / load-test / production-drill）今天只写不读，
+  因此**不许预先占豁免位**，哪天它们开始读 env 就会撞红再登记。
+  变异实测（用真实文件，不是合成源码）：删掉 `fix-token-blacklist-index.js` 的 hydrate 行
+  ⇒ 闸当场报出该文件（「读取文件型密钥 MONGODB_URI，但整个文件没有调用
+  hydrateSecretsFromFiles()」），恢复后 8/8 绿——这条正是"只钉直读通道"时会静默漏掉的那个脚本。
+- 核过不动的：`scripts/*.sh`（backup/restore）按文档就是 `MONGODB_URI='<连接串>' ./scripts/...`
+  显式传值（secret-rotation.md:277），不经 Node 的 env 回填路径。
+- 实测（修后）：同一探针下六个脚本全部改为"拿文件值去连"（端口 1 上超时被杀，
+  即它们真的读到了 `*_FILE` 里的连接串）。
+  另用真实内存 MongoDB 端到端跑 `verify-audit-chain.js`：只给 `MONGODB_URI_FILE`
+  （文件内容**故意带尾部换行**）时它连上了库并打印
+  「VERDICT: INCOMPLETE — 审计集合为空（0 条）：无记录可验」——这条判定只有连接成功才可能给出，
+  空集合是夹具本身没种记录；两者都不给时退 1「未提供 MONGODB_URI」，
+  作为反向对照证明前一条不是默认值蒙出来的。
+
 ### 修复（2026-10-03 · 上一轮 PII 收窄的两处回归：揭示迟到写入 + 审计副本仍存明文号码）
 
 > 背景：四路并行逐行审计复核 2026-10-02 的两批改动，各命中一条**由那批改动自己引出**的缺陷。

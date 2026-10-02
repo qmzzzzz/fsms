@@ -40,6 +40,11 @@
  */
 
 require('dotenv').config();
+// 容器里密钥只以 <NAME>_FILE 挂载，必须在此回填：本脚本既读 MONGODB_URI，
+// 也依赖 HMAC_SECRET 参与校验（缺 hmac 时判据只会退成「校验不完整」）。
+// 不能指望 src/config 的 hydrate——它在懒 require 里执行，读 env 时还没跑过
+// （不变量见 src/tests/config/scriptSecretHydration.test.js）。
+require('../src/config/secrets').hydrateSecretsFromFiles();
 
 const mongoose = require('mongoose');
 const {

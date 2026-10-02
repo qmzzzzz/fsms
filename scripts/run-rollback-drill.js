@@ -19,6 +19,9 @@
  */
 
 require('dotenv').config();
+// <NAME>_FILE 部署下必须在此回填，否则下面直读的 MONGODB_URI 是空串 ⇒ 演练开局即失败
+// （不变量见 src/tests/config/scriptSecretHydration.test.js）。
+require('../src/config/secrets').hydrateSecretsFromFiles();
 
 const fs = require('fs/promises');
 const path = require('path');

@@ -27,6 +27,9 @@
 'use strict';
 
 require('dotenv').config();
+// <NAME>_FILE 部署下必须在此回填，否则下面直读的 MONGODB_URI 是空串 ⇒ 用例全部抛错
+// （不变量见 src/tests/config/scriptSecretHydration.test.js）。
+require('../../src/config/secrets').hydrateSecretsFromFiles();
 const mongoose = require('mongoose');
 
 // 模型注册是显式前置条件：mongoose.model(name) 只查已注册的 schema，
