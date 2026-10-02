@@ -17,6 +17,29 @@ const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const { castScopeObjectIds, applySearchCondition } = require('../utils/scopeCast');
 const ApiError = require('../utils/ApiError');
 
+/**
+ * 报警**读出**投影（列表两条分支 + 详情共用同一个常量，防止只修一条）。
+ *
+ * `reporter.phone` 只接受写入、任何读接口都不回传：它是明文存库的第三方手机号
+ * （不走 models/User.js 那套 getter 加密），而列表/详情原本没有根文档投影，于是
+ * 任何持 `alarm:read` 且落在该条范围内的账号都能整页批量读到它——没有二次验证、
+ * 没有 `system:read`、也不写 `view_sensitive_data` 审计，把仓里专为手机号建的合规
+ * 通道（POST /api/security/view-sensitive：reauthLimiter + requireReAuthentication +
+ * 层级闸）整个架空。同一 model 上的 `handler.phone` 正因同样理由被收窄过
+ * （见 tests/services/alarmDetailHandlerPii.test.js）。
+ * 全仓消费方实测为零：web-admin 无 reporterPhone/reporter.phone、报表导出只取
+ * reporter.name（reportExportService.js:266）、e2e 无引用，故停发不损失任何界面功能。
+ * 写回显是唯一例外，且是有意的：`POST /api/alarms/report` 把 create 出来的文档原样回给
+ * 提交者，而那个号码正是提交者自己刚写进去的（不构成新的读取）；五个处置接口
+ * （dispatch/arrive/resolve/false-alarm/cancel）回的是 updated 文档，所以 projection
+ * 必须写进 options——只修列表与详情，同一列就从这五个口漏出去。
+ *
+ * 如实声明残留缺口：值仍**明文存在库里**（备份转储/密钥轮换的保护缺口不随本改动关闭）。
+ * 将来若真要开放"回拨上报人"，正确做法是给它一条与 User PII 同级的揭示通道，
+ * 而不是把这一列加回读接口。
+ */
+const ALARM_READ_SELECT = '-reporter.phone';
+
 class AlarmService {
   /**
    * 获取报警列表（含数据范围过滤和分页）
@@ -79,6 +102,7 @@ class AlarmService {
         valueType: 'date',
       });
       const docs = await FireAlarm.find(cursorQuery)
+        .select(ALARM_READ_SELECT)
         .populate({ path: 'deviceId', select: 'deviceCode deviceName' })
         .populate({ path: 'handler', select: 'username realName' })
         // 次级排序键 `_id` 不是整洁性偏好，而是与续翻子句绑定的方向约束：
@@ -93,6 +117,7 @@ class AlarmService {
 
     const [alarms, count] = await Promise.all([
       FireAlarm.find(query)
+        .select(ALARM_READ_SELECT)
         .populate({ path: 'deviceId', select: 'deviceCode deviceName' })
         .populate({ path: 'handler', select: 'username realName' })
         // 与上面游标分支同一个排序：offset 页的末条要拿去 mint nextCursor，
@@ -118,6 +143,7 @@ class AlarmService {
   async getAlarmById(id) {
     return (
       FireAlarm.findById(id)
+        .select(ALARM_READ_SELECT)
         .populate({ path: 'deviceId', select: 'deviceCode deviceName deviceType' })
         // 与上面两条列表分支同口径：handler 只取 username/realName。
         // 此处原多带一个 `phone`，而 User.phone 的 getter 会把密文解成明文
@@ -262,7 +288,7 @@ class AlarmService {
           },
         },
       },
-      { new: true }
+      { new: true, projection: ALARM_READ_SELECT }
     );
     if (updated)
       logger.info('报警已指派', { alarmCode: updated.alarmCode, handler: handlerDoc.username });
@@ -283,7 +309,7 @@ class AlarmService {
           processLog: { time: now, action: 'arrived', operator: operatorId, remark: '已到达现场' },
         },
       },
-      { new: true }
+      { new: true, projection: ALARM_READ_SELECT }
     );
     if (updated) logger.info(`到达现场登记：${updated.alarmCode}`);
     return updated;
@@ -308,7 +334,7 @@ class AlarmService {
           },
         },
       },
-      { new: true }
+      { new: true, projection: ALARM_READ_SELECT }
     );
     if (updated) logger.info(`报警处理完成：${updated.alarmCode}`);
     return updated;
@@ -345,7 +371,7 @@ class AlarmService {
           },
         },
       },
-      { new: true, runValidators: true }
+      { new: true, runValidators: true, projection: ALARM_READ_SELECT }
     );
     if (updated) logger.info(`报警标记为误报：${updated.alarmCode}`);
     return updated;
@@ -380,7 +406,7 @@ class AlarmService {
           },
         },
       },
-      { new: true }
+      { new: true, projection: ALARM_READ_SELECT }
     );
     if (updated) logger.info(`报警已取消：${updated.alarmCode}`);
     return updated;

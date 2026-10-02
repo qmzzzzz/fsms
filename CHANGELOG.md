@@ -8,6 +8,41 @@
 
 ## [未发布]
 
+### 修复（2026-10-02 · 报警读出路径停发 `reporter.phone`）
+
+> 背景：四路逐行审计的 lane-B 报出一条新缺陷并回源核实。`FireAlarm.reporter.phone`
+> 是**明文存的第三方手机号**，不属于 `models/User.js` 那套「getter 解密 +
+> `POST /api/security/view-sensitive` step-up + `view_sensitive_data` 审计」通道；
+> 而报警的读出路径原本一条根文档投影都没有 ⇒ 任何持 `alarm:read` 且落在该条范围内的
+> 账号都能**整页批量**读到它，无二次验证、无 `system:read`、无留痕——把仓里专为
+> 手机号建的合规通道架空。同一 model 上的 `handler.phone` 正因同样理由被收窄过
+> （`alarmDetailHandlerPii.test.js`），这条是同一列的邻接漏点。
+> 拍板口径：**读出全部停发**（对齐 handler.phone 先例），不做静态加密改造。
+
+- `services/AlarmService.js`：新增模块级 `ALARM_READ_SELECT = '-reporter.phone'`，
+  **八处**调用点全部引用同一个常量——游标列表 / offset 列表 / 详情用 `.select()`，
+  五个处置接口（dispatch/arrive/resolve/false-alarm/cancel）用 `options.projection`。
+  后者是这次真正容易被漏掉的部分：它们把 `findOneAndUpdate` 的 `updated` 文档原样回给
+  客户端，只修列表与详情等于同一列从这五个口整块漏出去，而 CI 仍全绿（那五个响应体
+  本来没有用例读过）。
+- **有意的例外**：`POST /api/alarms/report` 回显 create 出来的文档，其中含提交者自己
+  刚写进去的号码——不构成新的读取，故不改（已把这条写进常量的 JSDoc，免得被当成漏点
+  重新发现或"顺手补上"）。
+- **如实声明残留缺口**：值仍明文存在库里；备份转储与密钥轮换的保护缺口**不随本改动关闭**。
+  将来若要开放"回拨上报人"，正确做法是给它一条与 User PII 同级的揭示通道，
+  而不是把这一列加回读接口。
+- 消费方核实：web-admin 全文 0 处读 `reporter.phone`/`reporterPhone`，报表导出只取
+  `reporter.name`（`reportExportService.js:266`），e2e 0 处 ⇒ 停发零界面功能损失。
+- 文档同批：`models/FireAlarm.js` 的 `reporter.phone` 注释写明"明文存储 + 读接口不回传"，
+  `openapi.json` 的请求体字段补 description「仅接受写入，列表/详情/处置响应均不返回」。
+- **门禁**：新套件 `src/tests/services/alarmReporterPhoneEgress.test.js`（7 例：
+  夹具自证裸查询能拿到明文 / 详情 / offset 列表 / 游标列表 / 五个处置回显 / 状态机前提自证 /
+  源码文本闸）。每条排除断言都带反向证据（`reporter.name` 必须还在），防止"整个子文档被
+  删了"或"populate 没生效"伪装成通过。源码闸的窗口取「到下一个调用点为止」而不是固定字数
+  ——`resolveAlarm` 的 `$push` 文案块就比 420 字符长，固定窗口会对正确的代码报红。
+  变异实测两臂：摘掉详情的 `.select` → 行为与源码闸 2 红；只摘 `cancelAlarm` 一处的
+  `projection` → 处置回显 + 状态机自证 + 源码闸 3 红（证明"只修一条"确实会被抓住）。
+
 ### 测试（2026-10-01 · 两处 HEAD 上就存在的红灯）
 
 > 全量 `npx jest --ci` + `npm run format:check` 复跑时发现：不需要本轮任何改动，main 上已经有

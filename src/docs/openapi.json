@@ -1911,7 +1911,8 @@
                         "type": "string"
                       },
                       "phone": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "仅接受写入，报警列表/详情/处置响应均不返回该字段"
                       }
                     }
                   }

@@ -647,7 +647,16 @@ spec.paths['/api/alarms/report'] = {
         deviceId: { type: 'string' },
         reporter: {
           type: 'object',
-          properties: { name: { type: 'string' }, phone: { type: 'string' } },
+          properties: {
+            name: { type: 'string' },
+            // 接受写入但任何读接口都不回传（投影见 services/AlarmService.js 的
+            // ALARM_READ_SELECT）：明文手机号原样外发给全体 alarm:read 持有者会绕过
+            // 仓里为手机号建立的 step-up 通道。
+            phone: {
+              type: 'string',
+              description: '仅接受写入，报警列表/详情/处置响应均不返回该字段',
+            },
+          },
         },
       },
     }),

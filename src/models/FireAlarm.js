@@ -67,6 +67,11 @@ const fireAlarmSchema = new mongoose.Schema(
     },
     reporter: {
       name: { type: String, maxlength: [50, '上报人姓名最多 50 个字符'] },
+      // 明文存储，但**任何读接口都不回传**（投影见 services/AlarmService.js 的
+      // ALARM_READ_SELECT）。它不是 models/User.js 那套「getter 解密 + view-sensitive
+      // step-up + view_sensitive_data 审计」通道覆盖的字段，原样外发等于给任何持
+      // `alarm:read` 且在范围内的人开一条无审计的批量手机号出口（列表一页 N 条）。
+      // 写入仍接受：字段保留 API 兼容，只是读不回来。
       phone: { type: String, maxlength: [20, '上报人电话最多 20 个字符'] },
       userId: {
         type: mongoose.Schema.Types.ObjectId,
