@@ -8,6 +8,59 @@
 
 ## [未发布]
 
+### 修复（2026-10-03 · 上一轮 PII 收窄的两处回归：揭示迟到写入 + 审计副本仍存明文号码）
+
+> 背景：四路并行逐行审计复核 2026-10-02 的两批改动，各命中一条**由那批改动自己引出**的缺陷。
+> 两条都已回源核实并做变异实测，不是推测。
+
+- **lane-B #1｜`web-admin/src/views/UserView.vue` 的 `doReveal` 迟到写入守卫**。
+  原实现 `await` 之后无条件 `dialog.form.phone = full; dialog.phoneBaseline = full`，
+  既不校验目标行也不校验弹层是否还开着。可达路径：点「查看完整号码」后请求飞行期间
+  ESC 掉 step-up、关掉编辑框、再点另一行的「编辑」⇒ **A 的明文连同基线一起落进 B 的表单**，
+  而界面上的提示恰好是「清空并提交即删除」⇒ 管理员照着删空再保存，
+  抹掉的是 **B 的真实号码**。修法是发请求前把 `reveal.userId` 快照成 `targetUserId`
+  （step-up 一关 `resetReveal` 就会把它清空，事后读不到），响应回来只在
+  `dialog.form._id === targetUserId` 时写入。只比 `_id` 不叠加 `dialog.visible`/`isEdit`：
+  关框必走 `resetForm`（`_id` 归 null）、新增框同样是 null，多余的两个条件恒真且**写不出
+  能覆盖它们的用例**，留着就是无人验证的死分支。
+  门禁：`web-admin/src/tests/views/userView.test.js` 新增两条（切到另一行 / 切到新增框），
+  夹具用**手工 defer 的 Promise**——`mockResolvedValue` 在下一个微任务就落地，
+  任何迟到守卫都来不及被触发，用例会退化成恒真。
+  变异实测：把守卫改成 `if (false && …)` ⇒ 两条同时转红（`expected '13900000000' to be ''`），
+  恢复后 61/61 绿。
+- **lane-A #2｜`src/utils/helpers.js` 的 `SENSITIVE_KEY_SUBSTRINGS` 补 `phone`**。
+  名单原本只管"凭据"，于是 `PUT /api/users/:id`、`POST /api/alarms/report` 这些**写路径**
+  把手机号明文留在了 `AuditLog.body` 里，而 `services/securityAlert.getRecentAlerts`
+  的投影含 `body` ⇒ `GET /api/security/alerts` 把它再下发一次；`auditBuffer` 的明文 WAL
+  同样带着它。结果：持 `security:audit` 的账号无需口令、无需 `system:read`、
+  不写一条 `view_sensitive_data`，就能读到任意用户与任意报警上报人的完整号码——
+  上一轮"读接口停发明文"只堵了响应侧，**审计侧是同一条合规通道的另一半旁路**，
+  而当时新增的 egress 门禁全绿（它只盯响应体），这正是那条门禁的盲区。
+  改的是单一事实来源：`auditLogSanitizer` 与 `middleware/security.js` 的两条脱敏流水线、
+  以及 morgan 的 URL 打码（`isCredentialQueryKey` 取并集）同时生效，
+  扁平 `phone` / 嵌套 `reporter.phone` / camelCase `workPhone` / 敏感键装数组四种形态一起收，
+  `?phone=` 在访问日志里同步打码。既有用例 `auditLogSanitizer.test.js`「真实中间件驱动」
+  按名单逐键构造请求体，因此**免费**获得了对 `phone` 的端到端覆盖。
+  不误伤边界保持原样：`postcode` / `zipcode` 不含 `phone` 子串，值仍可读。
+  门禁：`src/tests/models/auditLogSanitizer.test.js` 新增一组 5 条（形态覆盖 + 键名噪声 +
+  不误伤 + query/URL 同口径），`src/tests/security/userPhoneMaskedEgress.test.js` 新增一条
+  **真实路由**用例（发一次带明文的 PUT → `auditBuffer.flush()` → 读回审计行，
+  断 `body.phone === '***'`、序列化不含明文，并用 `body.realName` 证明不是"整块抹掉"）。
+  变异实测：从名单里删掉 `phone` ⇒ 4 条同时转红（含真实路由那条），恢复后 12/12 + 11/11 绿。
+- **如实声明的残留**：脱敏判定只看**键名**，不做值形态扫描。因此装在非敏感键下的号码
+  （`{contacts:['139…']}`、备注文本里的号码）仍会进审计副本——这是刻意止步，
+  不是漏网：按 11 位正则扫值会连带抹掉报警描述/备注里的号码，取证价值损失大于收益。
+  该边界已写成一条可执行用例（「如实声明边界」），要跨过它需要单独拍板。
+  `AuditLog` 里的**历史**明文行不会因本改动消失，清理属数据迁移议题，另行决策。
+- 消费方核实：全仓非测试代码只有 `securityAlert.js:84` 按 `body.ipAttempts` 取数，
+  没有任何逻辑依赖审计 body 里的手机号可读；现有测试无一断言审计副本含明文号码。
+- 文档同批（lane-C #8 的实证条目）：`controllers/securityController.js` 里三处注释错位——
+  「举报异常行为 POST /security/report」的标题悬在空处、举报核验的整段 JSDoc（含 `@returns`）
+  挂在 `REPORT_TARGET_KINDS` 这张**对象表**头上、还有一段描述 `buildAuditLogQuery` 的 JSDoc
+  紧跟在 `getRegistrationConfig` 的文档之前（该函数早已搬到 `utils/auditQuery.js` 的
+  `buildAuditQuery`，全仓不存在同名符号）。按"注释只描述它紧邻的代码"重挂，
+  并删掉那段失效的构建器文档。改动纯注释：逐行比对确认代码行零差异（只少一个空行）。
+
 ### 修复（2026-10-02 · 管理员用户读接口停发明文手机号，改走「脱敏下发 + step-up 揭示」）
 
 > 背景：上一轮把 `reporter.phone` 从报警读出路径摘掉后，同一列在**用户管理**上更严重：

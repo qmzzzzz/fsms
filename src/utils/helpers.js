@@ -431,6 +431,15 @@ const matchesSensitiveQueryKey = (lower) =>
  * 审计 body 的脱敏走这一路：body 里凭据常以 currentPassword / refreshToken /
  * mfaCode 之类形态出现，没有下划线可依据边界。
  * 这里同时是审计与访问日志两条链路的共同事实来源（auditLogSanitizer 直接引用本数组）。
+ *
+ * 名单口径不止"凭据"：`phone` 也在列，且理由与凭据同类——AuditLog 是 append-only、
+ * 会被定期导出 CSV 的集合，`security:audit` 持有者能从 GET /api/security/alerts
+ * 与 /audit-logs 直接读出 body。此前 PUT /api/users/:id、POST /api/alarms/report
+ * 这些写路径把**手机号明文**留在了 body 里，等于绕开仓里专为手机号建的合规通道
+ * （POST /api/security/view-sensitive：二次验证 + view_sensitive_data 留痕）
+ * 开了一个无需验证、无需 system:read、也不留任何痕迹的旁路。
+ * 键名判定对嵌套同样生效，故 `reporter.phone`、`workPhone`、`phoneNumber` 一起收。
+ * 不误伤的边界仍成立：`postcode` / `zipcode` 不含 "phone" 这个子串。
  */
 const SENSITIVE_KEY_SUBSTRINGS = Object.freeze([
   'password',
@@ -441,6 +450,7 @@ const SENSITIVE_KEY_SUBSTRINGS = Object.freeze([
   'refreshtoken',
   'secret',
   'apikey',
+  'phone',
 ]);
 
 /**

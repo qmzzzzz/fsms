@@ -776,13 +776,26 @@ const resetReveal = () => {
 
 const doReveal = async () => {
   if (!reveal.password) return
+  // 目标在发请求前定稿：step-up 弹层一关，下面的 resetReveal 就会把 reveal.userId 清空，
+  // 那时再读它已经认不出"这份明文属于哪一行"。
+  const targetUserId = reveal.userId
   reveal.submitting = true
   try {
     const res = await api.security.viewSensitive({
       dataType: 'phone',
-      targetUserId: reveal.userId,
+      targetUserId,
       currentPassword: reveal.password,
     })
+    // 迟到写入守卫：请求飞行期间用户可能已经 ESC 掉 step-up、关掉编辑框、
+    // 甚至点了另一行的「编辑」。少这一道判断，A 的明文就会写进 B 的表单，
+    // 基线（phoneBaseline）也一起变成 A 的号码 —— 用户照着"清空即删除"的提示
+    // 删空再保存，抹掉的就是 B 的真实号码。
+    // 只比 _id 就够：关掉编辑框会走 resetForm（_id 归 null），新增框同样是 null，
+    // 所以"还开着、还是这一行"是唯一能放行写入的状态。
+    if (dialog.form._id !== targetUserId) {
+      reveal.visible = false
+      return
+    }
     // full 可能为空串（该用户从未填过号码）：此时基线也是空串，
     // 与"没揭示过"的 null 区分开，下面的提示文案据此切换。
     const full = res?.data?.data?.full ?? ''

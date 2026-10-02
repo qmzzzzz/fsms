@@ -374,9 +374,30 @@ const getSecurityStats = asyncHandler(async (req, res) => {
 });
 
 /**
- * 举报异常行为
- * POST /api/security/report
+ * 举报目标类型 → 「取哪个字段、越权/不存在各返什么码」的核验配置表。
+ * 消费方是下面的 resolveReportTargetViolation；`system` 不在表内（它不指向记录）。
  */
+const REPORT_TARGET_KINDS = {
+  user: {
+    pick: (id) => userService.findScopeFieldsByIds([id]),
+    fields: DATA_SCOPE_FIELDS.user,
+    notFound: 'USER_NOT_FOUND',
+    notFoundStatusCode: 404, // 注册表里该码是 401（登录语义），本处是"对象不存在"
+    outOfScope: 'USER_SCOPE_FORBIDDEN',
+  },
+  device: {
+    pick: (id) => deviceService.findScopeFieldsByIds([id]),
+    fields: DATA_SCOPE_FIELDS.device,
+    notFound: 'DEVICE_NOT_FOUND',
+    outOfScope: 'DEVICE_VIEW_FORBIDDEN',
+  },
+  alarm: {
+    pick: (id) => alarmService.findScopeFieldsByIds([id]),
+    fields: DATA_SCOPE_FIELDS.alarm,
+    notFound: 'ALARM_NOT_FOUND',
+    outOfScope: 'ALARM_VIEW_FORBIDDEN',
+  },
+};
 
 /**
  * 举报目标的服务端事实核验（2026-10-01 拍板：校 ID + 存在性 + 数据范围）
@@ -404,28 +425,6 @@ const getSecurityStats = asyncHandler(async (req, res) => {
  *
  * @returns {Promise<{code: string, statusCode?: number}|null>} null=通过；否则待发出的错误码
  */
-const REPORT_TARGET_KINDS = {
-  user: {
-    pick: (id) => userService.findScopeFieldsByIds([id]),
-    fields: DATA_SCOPE_FIELDS.user,
-    notFound: 'USER_NOT_FOUND',
-    notFoundStatusCode: 404, // 注册表里该码是 401（登录语义），本处是"对象不存在"
-    outOfScope: 'USER_SCOPE_FORBIDDEN',
-  },
-  device: {
-    pick: (id) => deviceService.findScopeFieldsByIds([id]),
-    fields: DATA_SCOPE_FIELDS.device,
-    notFound: 'DEVICE_NOT_FOUND',
-    outOfScope: 'DEVICE_VIEW_FORBIDDEN',
-  },
-  alarm: {
-    pick: (id) => alarmService.findScopeFieldsByIds([id]),
-    fields: DATA_SCOPE_FIELDS.alarm,
-    notFound: 'ALARM_NOT_FOUND',
-    outOfScope: 'ALARM_VIEW_FORBIDDEN',
-  },
-};
-
 async function resolveReportTargetViolation(req, targetType, targetId) {
   const kind = REPORT_TARGET_KINDS[targetType];
   if (!kind) return null; // system：没有可核验的记录，路由层已保证 targetId 缺席
@@ -442,6 +441,10 @@ async function resolveReportTargetViolation(req, targetType, targetId) {
   return allowed ? null : { code: kind.outOfScope };
 }
 
+/**
+ * 举报异常行为
+ * POST /api/security/report
+ */
 const reportSuspiciousActivity = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -956,14 +959,6 @@ const getRecentAlerts = asyncHandler(async (req, res) => {
  * 与其他接口的单层 data 信封不一致；属 API 契约变更，需与前端协同后统一调整。
  */
 
-/**
- * 构建审计日志查询条件（queryAuditLogs 与 exportAuditLogs 共用筛选逻辑）
- *
- * 将参数校验与查询体构建统一收敛到此函数，避免导出接口与查询接口逻辑分叉。
- * @param {object} req Express 请求对象
- * @returns {{ query: object, startDate: string|undefined, endDate: string|undefined }}
- * @throws {Error} 参数非法时抛出带可读消息的错误（调用方应返回 400）
- */
 /**
  * 获取注册开关状态
  * GET /api/security/config/allowPublicRegistration

@@ -731,6 +731,34 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
       data: { data: { type: 'phone', masked: '139****0000', full: FULL_PHONE } },
     })
 
+  /** 第 n 行的「编辑」按钮：rowBtn 命中的是全文档第一个，双行夹具必须按行定位 */
+  const rowEditBtn = (c, n) =>
+    Array.from(
+      c.findAll('.el-table__body-wrapper .el-table__row')[n].querySelectorAll('.glass-btn--link')
+    ).find((b) => b.textContent.includes('编辑'))
+
+  /** 打开第 n 行的编辑框（openEdit 只服务单行夹具） */
+  const openEditRow = async (c, n) => {
+    click(rowEditBtn(c, n))
+    await flush(8)
+    return c.find('.el-dialog')
+  }
+
+  /**
+   * 挂一个"响应还在飞"的 step-up，返回投递器。
+   * 必须手动 defer：mockResolvedValue 在下一个微任务就落地，任何迟到守卫都来不及被触发，
+   * 用例会在"守卫被删掉"时照样绿。
+   */
+  const holdReveal = () => {
+    let settle
+    viewSensitive.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve
+      })
+    )
+    return (full) => settle({ data: { data: { type: 'phone', masked: '139****0000', full } } })
+  }
+
   test('列表手机号列渲染服务端脱敏值（读的是 phoneMasked）', async () => {
     const c = await mountUser(['user:read'])
     const row = c.findAll('.el-table__body-wrapper .el-table__row')[0]
@@ -884,6 +912,57 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
     expect(revealHidden()).toBe(false)
     click(footerBtn(c.find('.el-dialog'), '取消'))
     await settleDom()
+    expect(revealHidden()).toBe(true)
+  })
+
+  test('迟到的揭示结果不写进另一行的表单（否则删空保存会抹掉对方号码）', async () => {
+    const carol = { ...ROW_OTHER, _id: 'u3', username: 'carol', phoneMasked: '137****7777' }
+    const deliver = holdReveal()
+    usersUpdate.mockResolvedValue({ data: { success: true } })
+    const c = await mountUser(['user:read', 'user:update'], [ROW_OTHER, carol])
+    const bob = await openEditRow(c, 0)
+    click(revealEntry(bob))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await typeRevealPassword('CurrentP@ss')
+    click(revealConfirm())
+    await waitFor(() => viewSensitive.mock.calls.length === 1, { message: 'step-up 请求发出' })
+    // 响应还在飞：关掉 bob 的编辑框，改开 carol 的（关掉编辑框也会收起 step-up）
+    click(footerBtn(c.find('.el-dialog'), '取消'))
+    await settleDom()
+    const next = await openEditRow(c, 1)
+    // 正例：确认切到了另一行，否则"没被污染"可能只是因为压根没打开对的表单
+    expect(fieldByLabel(next, '用户名').value).toBe('carol')
+    // 请求是给 u2 发的：守卫必须据此拒写
+    expect(viewSensitive.mock.calls[0][0].targetUserId).toBe('u2')
+    deliver(FULL_PHONE)
+    await flush(8)
+    expect(fieldByLabel(next, '手机号').value).toBe('')
+    // 基线仍为 null ⇒ 文案还是"留空表示不修改"，不是"已载入完整号码"
+    expect(next.textContent).toContain('留空表示不修改')
+    expect(revealHidden()).toBe(true)
+    click(footerBtn(next, '保存'))
+    await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求' })
+    expect(usersUpdate.mock.calls[0][0]).toBe('u3')
+    // 发了 phone:'' 就是删掉 carol 的真实号码
+    expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('phone')
+  })
+
+  test('迟到的揭示结果也不写进新增表单（新账号会带上别人的号码）', async () => {
+    const deliver = holdReveal()
+    const c = await mountUser(['user:read', 'user:create', 'user:update'])
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await typeRevealPassword('CurrentP@ss')
+    click(revealConfirm())
+    await waitFor(() => viewSensitive.mock.calls.length === 1, { message: 'step-up 请求发出' })
+    click(footerBtn(c.find('.el-dialog'), '取消'))
+    await settleDom()
+    const add = await openAdd(c)
+    expect(fieldByLabel(add, '用户名').value).toBe('')
+    deliver(FULL_PHONE)
+    await flush(8)
+    expect(fieldByLabel(add, '手机号').value).toBe('')
     expect(revealHidden()).toBe(true)
   })
 })

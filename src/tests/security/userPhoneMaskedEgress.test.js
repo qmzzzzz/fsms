@@ -229,6 +229,32 @@ describe('用户管理读路径的手机号口径', () => {
     expect(res.body.data.user.phone).toBe(OP_PHONE);
   });
 
+  test('审计副本口径：写路径提交的号码不会明文留在 AuditLog.body 里', async () => {
+    // 为什么算同一条防线：services/securityAlert.getRecentAlerts 投影里含 `body`，
+    // 于是 GET /api/security/alerts 会把审计副本再下发一次。响应侧收窄了、
+    // 审计侧没收窄的话，持 `security:audit` 的账号照样无需二次验证就能拿到明文
+    // （且不会写一条 view_sensitive_data）。名单见 utils/helpers.js 的 SENSITIVE_KEY_SUBSTRINGS。
+    const put = await authed('put', `/api/users/${target._id}`).send({
+      phone: NEW_PHONE,
+      realName: '审计口径',
+    });
+    expect(put.status).toBe(200);
+    const auditBuffer = require('../../services/auditBuffer');
+    if (typeof auditBuffer.flush === 'function') await auditBuffer.flush();
+    const AuditLog = require('../../models/AuditLog');
+    const rows = await AuditLog.find({ path: `/api/users/${target._id}`, method: 'PUT' })
+      .sort({ timestamp: -1, _id: -1 })
+      .lean();
+    // 前提自证：确实存在这条审计行，且它就是刚才那次带明文的写
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    const { body } = rows[0];
+    expect(body.realName).toBe('审计口径');
+    expect(JSON.stringify(body)).not.toContain(NEW_PHONE);
+    expect(body.phone).toBe('***');
+    // 正例对侧：不是"整块抹掉"换来的干净——键还在，只是值被打码
+    expect(Object.keys(body)).toContain('phone');
+  });
+
   test('源码文本闸：取明文的投影与脱敏函数必须成对出现', () => {
     // 判据落在源码而非只有一次运行结果：将来新增一条用户读路径、用了
     // RESPONSE_EXCLUDE_PHONE_VISIBLE 却忘记过 toMaskedAdminUser，上面所有用例

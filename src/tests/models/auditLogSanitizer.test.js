@@ -173,3 +173,85 @@ describe('auditLogSanitizer — 键名噪声不得绕过脱敏（F-124）', () =
     }
   });
 });
+
+/**
+ * 手机号同样受审计 sinks 收口（2026-10-03 审计线 lane-A #2）
+ *
+ * 缺陷形状：名单此前只覆盖"凭据"，`phone` 不在列 ⇒ PUT /api/users/:id、
+ * POST /api/alarms/report 这些写路径把手机号明文留在了 append-only、定期导出 CSV 的
+ * AuditLog.body 里，而 services/securityAlert.getRecentAlerts 又把 body 整块投影给
+ * GET /api/security/alerts。于是任何持 `security:audit` 的账号无需二次验证、无需
+ * `system:read`、也不写一条 view_sensitive_data，就能读到任意用户/上报人的完整号码——
+ * 仓里专为手机号建的合规通道（POST /api/security/view-sensitive）被这条旁路架空。
+ * 它与"读接口直接下发明文"是同一个缺陷的两半，另半边见
+ * src/tests/security/userPhoneMaskedEgress.test.js。
+ *
+ * 判据为什么必须铺开四种键形：名单是"键名压平 + 子串"匹配，且逐层独立判定。
+ * 只测扁平 `phone` 的话，嵌套 `reporter.phone`、camelCase `workPhone` 的漏法不会被发现。
+ */
+describe('auditLogSanitizer — 手机号不得留在审计副本与访问日志里', () => {
+  const PHONE = '13900001122';
+  const REPORTER = '13812345678';
+  const CONTACT = '13711112222';
+
+  test('扁平 / 嵌套 / camelCase / 数组三种形态一起打码', () => {
+    const out = sanitizeAuditBody({
+      username: 'bob',
+      phone: PHONE,
+      phoneNumber: PHONE,
+      workPhone: PHONE,
+      // 敏感键**装着数组**时整块替换：判定看键名不看值形，
+      // 400 也会被审计，客户端递 `{"phones":["…"]}` 同样不得留下名单
+      phones: [CONTACT],
+      reporters: [{ name: '张三', phone: REPORTER }],
+      reporter: { name: '张三', phone: REPORTER },
+      nested: { deeper: { phone: PHONE } },
+    });
+    expect(JSON.stringify(out)).not.toContain(PHONE);
+    expect(JSON.stringify(out)).not.toContain(REPORTER);
+    expect(JSON.stringify(out)).not.toContain(CONTACT);
+    expect(out.phone).toBe('***');
+    expect(out.phoneNumber).toBe('***');
+    expect(out.workPhone).toBe('***');
+    expect(out.phones).toBe('***');
+    expect(out.reporters[0].phone).toBe('***');
+    expect(out.nested.deeper.phone).toBe('***');
+    // 正例对侧：同一条里的非敏感键必须活着，否则"整片抹掉"也算过
+    expect(out.username).toBe('bob');
+    expect(out.reporter.name).toBe('张三');
+    expect(out.reporters[0].name).toBe('张三');
+  });
+
+  test('如实声明边界：名单按**键名**判，装在非敏感键下的号码不在它的射程内', () => {
+    // 本用例不是"记录一个可接受的行为"，而是把残留缺口写进可执行文档：
+    // 值形态扫描（正则抓 11 位手机号）会顺带抹掉报警描述、备注里的号码，
+    // 取证价值损失大于收益，故收窄止步于键名口径。要补这一层需另做决策。
+    const out = sanitizeAuditBody({ contacts: [CONTACT], remark: `联系电话${CONTACT}` });
+    expect(out.contacts).toEqual([CONTACT]);
+    expect(out.remark).toContain(CONTACT);
+  });
+
+  test('键名噪声切不断手机号判定（与凭据同一压平规则）', () => {
+    // express.json 走 JSON.parse，键里可以真的带 \u0000
+    const noisy = JSON.parse(`{"ph\\u0000one":"${PHONE}","phone\\u0000number":"${PHONE}"}`);
+    expect(JSON.stringify(sanitizeAuditBody(noisy))).not.toContain(PHONE);
+  });
+
+  test('加宽名单不误伤：postcode / zipcode 里没有 "phone" 这个子串', () => {
+    const out = sanitizeAuditBody({ postcode: '200000', zipcode: '100000', zone: 'phone-less' });
+    expect(out).toEqual({ postcode: '200000', zipcode: '100000', zone: 'phone-less' });
+  });
+
+  test('query 与访问日志 URL 与 body 同口径（?phone= 不得原样落地）', () => {
+    const { sanitizeAuditQuery } = require('../../models/auditLogSanitizer');
+    const { redactUrlQuery } = require('../../utils/helpers');
+    expect(sanitizeAuditQuery({ phone: PHONE, search: 'alarm' })).toEqual({
+      phone: '***',
+      search: 'alarm',
+    });
+    const url = redactUrlQuery(`/api/users?phone=${PHONE}&limit=10`);
+    expect(url).not.toContain(PHONE);
+    // 正例对侧：非敏感参数不能被顺手抹掉
+    expect(url).toContain('limit=10');
+  });
+});
