@@ -42,6 +42,97 @@ const ROOT = path.join(__dirname, '..', '..', '..');
 /** 读取仓库根目录下的文件（脚本类断言用） */
 const readRoot = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
+/**
+ * ==== docker-compose.yml 的扫描器（全部接受文本参数，不读文件）====
+ * 之所以做成纯函数：判据必须能被**合成源**反向自证——真实 compose 是共享文件，
+ * 为了证明闸门有效而临时往里插一行明文密钥，等于让并发会话有机会撞上它。
+ * 本仓踩过两次的那类坑也在此一并堵掉：本仓库文件是 CRLF，
+ * 用 `:\n` 这类硬换行锚点会让正则恒不匹配、断言恒绿，所以一律先 split(/\r?\n/)。
+ */
+
+/** app 服务 environment 段的列表行（不含注释与空行）；结构取不到时返回 null */
+function appEnvironmentLines(yml) {
+  const rows = yml.split(/\r?\n/);
+  const appAt = rows.findIndex((l) => l === '  app:');
+  if (appAt < 0) return null;
+  const envAt = rows.findIndex((l, i) => i > appAt && /^ {4}environment:\s*$/.test(l));
+  if (envAt < 0) return null;
+  const out = [];
+  for (let i = envAt + 1; i < rows.length; i += 1) {
+    // 下一个服务级键（4 空格缩进且非列表项）⇒ environment 段结束
+    if (/^ {4}\S/.test(rows[i])) break;
+    if (/^ {6}-\s/.test(rows[i])) out.push(rows[i]);
+  }
+  return out;
+}
+
+/** app environment 里以 `- NAME=值` **明文**出现的文件型密钥名 */
+function plaintextSecretNames(yml, names) {
+  const lines = appEnvironmentLines(yml);
+  // 切片失败不许静默放行：全部按违规上报，让用例红到结构本身
+  if (!lines) return names.slice();
+  return names.filter((name) => lines.some((l) => new RegExp(`^\\s*- ${name}=\\S*$`).test(l)));
+}
+
+/** app environment 里某个变量的值（没有该变量返回 null） */
+function appEnvValue(yml, name) {
+  const line = (appEnvironmentLines(yml) || []).find((l) =>
+    new RegExp(`^\\s*- ${name}=(\\S*)$`).test(l)
+  );
+  return line ? /^\s*- [A-Z0-9_]+=(\S*)$/.exec(line)[1] : null;
+}
+
+/** app 服务级 `secrets:` 列表声明的挂载名 */
+function serviceSecretList(yml) {
+  const rows = yml.split(/\r?\n/);
+  const appAt = rows.findIndex((l) => l === '  app:');
+  if (appAt < 0) return [];
+  const at = rows.findIndex((l, i) => i > appAt && /^ {4}secrets:\s*$/.test(l));
+  if (at < 0) return [];
+  const out = [];
+  for (let i = at + 1; i < rows.length; i += 1) {
+    const m = /^ {6}- (\S+)$/.exec(rows[i]);
+    if (!m) break;
+    out.push(m[1]);
+  }
+  return out;
+}
+
+/** 顶层 `secrets:` 段：键 + 其 file: 目标（缺 file: 时 file 为 null） */
+function topLevelSecrets(yml) {
+  const rows = yml.split(/\r?\n/);
+  const at = rows.findIndex((l) => l === 'secrets:');
+  if (at < 0) return [];
+  const out = [];
+  for (let i = at + 1; i < rows.length; i += 1) {
+    if (/^(volumes|networks):\s*$/.test(rows[i])) break;
+    const k = /^ {2}([a-z0-9_]+):\s*$/.exec(rows[i]);
+    if (!k) continue;
+    const f = /^ {4}file:\s*(\S+)\s*$/.exec(rows[i + 1] || '');
+    out.push({ name: k[1], file: f ? f[1] : null });
+  }
+  return out;
+}
+
+/**
+ * environment 里的 `/run/secrets/<名>` 引用与两处声明的一致性总览。
+ * 漏声明的后果不是"没密钥"而是"启动即崩"：hydrateSecretsFromFiles 对不可读的
+ * _FILE 直接抛错（src/config/secrets.js:99-107），运维看到的是一条与密钥无关的启动失败。
+ */
+function secretMountAudit(yml) {
+  const referenced = (appEnvironmentLines(yml) || [])
+    .map((l) => /^\s*- [A-Z0-9_]+_FILE=\/run\/secrets\/([a-z0-9_]+)\s*$/.exec(l))
+    .filter(Boolean)
+    .map((m) => m[1]);
+  const declared = serviceSecretList(yml);
+  const topLevel = topLevelSecrets(yml).map((s) => s.name);
+  return {
+    referenced,
+    missingFromService: referenced.filter((n) => !declared.includes(n)),
+    missingFromTopLevel: referenced.filter((n) => !topLevel.includes(n)),
+  };
+}
+
 describe('批次H 工程与部署加固回归', () => {
   // ================= P3-46 留存期单一声明 =================
   describe('P3-46 审计留存期单一声明与合规检查', () => {
@@ -407,10 +498,30 @@ describe('批次H 工程与部署加固回归', () => {
       expect(hydrateIdx).toBeLessThan(jwtReadIdx);
     });
 
-    test('docker-compose 不再用 environment 传任何密钥', () => {
+    test('compose 不再用 environment 传任何密钥（清单取自 FILE_BACKED_SECRETS，不写死）', () => {
+      // 原判据把名字清单抄在断言里（5 个），而 FILE_BACKED_SECRETS 有 15 个：
+      // 剩下 10 个（DOCS_PASSWORD / LOG_SHIPPING_TOKEN / METRICS_TOKEN /
+      // SECURITY_ALERT_WEBHOOK_SECRET / SENTRY_DSN / LOGIN_ECDH_PRIVATE_KEY / REDIS_URL …）
+      // 哪天被写成 `- X=${X}` 明文注入，这条闸一声不响。
+      // 清单从 src/config/secrets.js 反向推导：新增文件型密钥不需要回来改用例，
+      // 与 compose 的 `:?` 变量清单闸（deployWorkflow.test.js）同一套路。
+      const { FILE_BACKED_SECRETS } = require('../../config/secrets');
       const yml = readRoot('docker-compose.yml');
-      const appEnvBlock = yml.slice(yml.indexOf('    environment:'), yml.indexOf('    secrets:'));
-      // 这些变量若出现在 environment（且非 _FILE 形式）即回归
+      const envLines = appEnvironmentLines(yml);
+      // 前提自证：切片真的切到了 app 的 environment 段。
+      // 取不到时 plaintextSecretNames 会一律判违规（恒红，可发现）；
+      // 真正难防的是"切到了但只切到一小段"，所以直接数 _FILE 行的条数。
+      expect(FILE_BACKED_SECRETS.length).toBeGreaterThanOrEqual(15);
+      expect(envLines.filter((l) => /_FILE=/.test(l)).length).toBeGreaterThanOrEqual(7);
+
+      // 唯一豁免：REDIS_URL 以明文出现。豁免不写在注释里，而是条件就地可执行——
+      // redis 只挂在 internal 数据网（data-net: internal: true），本仓约定它的 URL
+      // 不含凭据（口令走 REDIS_PASSWORD_FILE）。有人图省事写成 `redis://:pw@redis:6379`
+      // 的那一刻，这条豁免就变成明文密钥注入，本用例当场判红。
+      expect(plaintextSecretNames(yml, FILE_BACKED_SECRETS)).toEqual(['REDIS_URL']);
+      expect(/\/\/[^/@]*@/.test(appEnvValue(yml, 'REDIS_URL') || '')).toBe(false);
+
+      // 核心四密钥 + 连接串必须确实是 _FILE 形态（只挡明文不够：漏接线时应用读到空串）
       for (const key of [
         'JWT_SECRET',
         'JWT_REFRESH_SECRET',
@@ -418,14 +529,106 @@ describe('批次H 工程与部署加固回归', () => {
         'HMAC_SECRET',
         'MONGODB_URI',
       ]) {
-        expect(appEnvBlock).not.toMatch(new RegExp(`- ${key}=`));
-        expect(appEnvBlock).toMatch(new RegExp(`- ${key}_FILE=`));
+        expect(envLines.some((l) => new RegExp(`^\\s*- ${key}_FILE=`).test(l))).toBe(true);
       }
       // mongo 服务同理走 _FILE
       expect(yml).toMatch(/MONGO_INITDB_ROOT_PASSWORD_FILE=/);
       expect(yml).not.toMatch(/- MONGO_INITDB_ROOT_PASSWORD=/);
       // 顶层 secrets 段必须存在
       expect(yml).toMatch(/^secrets:$/m);
+
+      // ==== 反向自证（合成源：真实 compose 是并发会话共享的文件，不临时改它）====
+      // ① 把某个 _FILE 换回明文注入 ⇒ 必须抓到。换成 DOCS_PASSWORD 是有意义的第二次：
+      //    原判据把清单写死成 5 个名字，对第 6+ 个文件型密钥完全无感。
+      const evil = yml.replace(
+        '      - HMAC_SECRET_FILE=/run/secrets/hmac_secret',
+        '      - HMAC_SECRET=${HMAC_SECRET}'
+      );
+      expect(evil).not.toBe(yml);
+      expect(plaintextSecretNames(evil, FILE_BACKED_SECRETS)).toContain('HMAC_SECRET');
+      const evil2 = yml.replace(
+        '      - ADMIN_INITIAL_PASSWORD_FILE=/run/secrets/admin_initial_password',
+        '      - DOCS_PASSWORD=${DOCS_PASSWORD}'
+      );
+      expect(evil2).not.toBe(yml);
+      expect(plaintextSecretNames(evil2, FILE_BACKED_SECRETS)).toContain('DOCS_PASSWORD');
+      // ② REDIS_URL 一旦带上口令，豁免必须立刻不成立
+      const evilUrl = yml.replace(
+        '      - REDIS_URL=redis://redis:6379',
+        '      - REDIS_URL=redis://:s3cr3t@redis:6379'
+      );
+      expect(evilUrl).not.toBe(yml);
+      expect(/\/\/[^/@]*@/.test(appEnvValue(evilUrl, 'REDIS_URL') || '')).toBe(true);
+      // ③ 结构塌了不许静默放行：认不出 app 服务的文本，全部名字按违规上报
+      expect(plaintextSecretNames('services: {}\n', ['HMAC_SECRET'])).toEqual(['HMAC_SECRET']);
+    });
+
+    test('compose 里每个 /run/secrets/<名> 都在服务 secrets 列表与顶层段双重声明', () => {
+      // 三处（environment 的 _FILE 值、服务的 secrets 列表、顶层 secrets 段）必须一致。
+      // 漏声明的后果不是"没密钥"而是"启动即崩"：hydrateSecretsFromFiles 对不可读的
+      // _FILE 直接抛错（src/config/secrets.js），运维看到的是一条与密钥无关的启动失败。
+      // 清单从 compose 自己推导，不写死：改 compose 的人不会想起来回来改这条用例。
+      const yml = readRoot('docker-compose.yml');
+      const audit = secretMountAudit(yml);
+      // 前提自证：三处扫描都真的取到了东西（任一取空都会让对应断言恒绿）
+      expect(audit.referenced.length).toBeGreaterThanOrEqual(7);
+      expect(serviceSecretList(yml).length).toBeGreaterThanOrEqual(audit.referenced.length);
+      const targets = topLevelSecrets(yml);
+      expect(targets.length).toBeGreaterThanOrEqual(audit.referenced.length);
+      expect(targets.every((t) => typeof t.file === 'string')).toBe(true);
+
+      expect(audit.missingFromService).toEqual([]);
+      expect(audit.missingFromTopLevel).toEqual([]);
+      // 顶层声明的 file: 路径必须落在被 git 与 dockerignore 排除的 ./secrets/ 下——
+      // 指到别处等于把密钥放回版本库与构建上下文
+      for (const t of targets) expect(t.file).toMatch(/^\.\/secrets\//);
+
+      // ==== 反向自证（自带夹具，与真实文件无关）====
+      const CLEAN = [
+        'services:',
+        '  app:',
+        '    environment:',
+        '      - A_SECRET_FILE=/run/secrets/a_secret',
+        '    secrets:',
+        '      - a_secret',
+        'secrets:',
+        '  a_secret:',
+        '    file: ./secrets/a_secret',
+        '',
+      ].join('\n');
+      expect(secretMountAudit(CLEAN)).toEqual({
+        referenced: ['a_secret'],
+        missingFromService: [],
+        missingFromTopLevel: [],
+      });
+      const ORPHAN = [
+        'services:',
+        '  app:',
+        '    environment:',
+        '      - A_SECRET_FILE=/run/secrets/a_secret',
+        '      - B_SECRET_FILE=/run/secrets/b_secret',
+        '    secrets:',
+        '      - a_secret',
+        'secrets:',
+        '  a_secret:',
+        '    file: ./secrets/a_secret',
+        '  b_secret:',
+        '    file: ./secrets/elsewhere/b_secret',
+        '',
+      ].join('\n');
+      const orphan = secretMountAudit(ORPHAN);
+      expect(orphan.referenced).toEqual(['a_secret', 'b_secret']);
+      // b_secret 顶层声明了却没挂到 app 上 ⇒ 容器里 /run/secrets/b_secret 不存在
+      expect(orphan.missingFromService).toEqual(['b_secret']);
+      // 这一处必须是空：判据认的是"两处一致性"，不是一刀切地盯 environment
+      expect(orphan.missingFromTopLevel).toEqual([]);
+      // file: 指到 ./secrets/ 之外也要能被看见
+      expect(topLevelSecrets(ORPHAN).map((t) => t.file)).toEqual([
+        './secrets/a_secret',
+        './secrets/elsewhere/b_secret',
+      ]);
+      // 结构缺失 ⇒ 引用数为 0（与上面真实文件的 ≥7 前提自证配成一对，判据不会两头漏）
+      expect(secretMountAudit('services: {}\n').referenced).toEqual([]);
     });
 
     test('secrets 目录被 git 与 docker 构建上下文双重排除', () => {

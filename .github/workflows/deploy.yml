@@ -271,7 +271,9 @@ jobs:
           # 与 self-hosted 路径同口径：compose 的 `:?` 要求两条部署路径都下发
           ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
           IMAGE_TAG: ${{ needs.preflight.outputs.image_ref }}
-          # 与 self-hosted 同口径：deploy.js 侧拒绝非 digest 引用
+          # 与 self-hosted 同口径：deploy.js 侧拒绝非 digest 引用。
+          # 注意这份 env 只到本 runner 为止，目标机上的 deploy.js 看不见它——
+          # 真正生效靠下一步把它拼进远程命令（`${:?}` 漏配即报错，不静默展开成空串）。
           DEPLOY_REQUIRE_DIGEST_PIN: 'true'
           DRY_RUN: ${{ inputs.dry_run }}
           SKIP_BACKUP: ${{ inputs.skip_backup }}
@@ -281,8 +283,14 @@ jobs:
           [[ "$DRY_RUN" == "true" ]] && extra="$extra --dry-run"
           [[ "$SKIP_BACKUP" == "true" ]] && extra="$extra --skip-backup"
           # CORS_ORIGIN / ALLOWED_HOSTS 经 SendEnv 传入而非拼进命令串，避免它们落到
-          # 目标机的 shell 历史/进程列表里。命令串里插值的是镜像名、两个开关与 DEPLOY_PATH：
-          # 前两者由 preflight / inputs 校验，DEPLOY_PATH 由 Prepare SSH 那一步的字符集闸校验。
+          # 目标机的 shell 历史/进程列表里。命令串里插值的是镜像名、digest 钉闸开关、
+          # 两个部署开关与 DEPLOY_PATH：镜像名由 preflight 校验，inputs 由 workflow_call
+          # 校验，DEPLOY_PATH 由 Prepare SSH 那一步的字符集闸校验。
+          # DEPLOY_REQUIRE_DIGEST_PIN 为什么必须拼进命令串：ssh 不转发本地环境变量，
+          # SendEnv 也只在目标机 sshd 显式 AcceptEnv 该变量名时才生效（默认只放行 LANG/LC_*）。
+          # 上面 env 块里那份只到本 runner 为止——此前它从未出现在远程命令里，
+          # 于是「与 self-hosted 同口径」的兜底闸在 SSH 路径上一直是静默关闭的。
+          # 用 `${var:?}` 而非 `$var`：漏配时报错退出，而不是展开成空串让 deploy.js 把闸读成"关"。
           ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes -o SendEnv=CORS_ORIGIN,ALLOWED_HOSTS \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd '$DEPLOY_PATH' && APP_IMAGE='$IMAGE_TAG' node scripts/deploy.js $extra"
+            "cd '$DEPLOY_PATH' && APP_IMAGE='$IMAGE_TAG' DEPLOY_REQUIRE_DIGEST_PIN='${DEPLOY_REQUIRE_DIGEST_PIN:?deploy-ssh 未下发 digest 钉死闸}' node scripts/deploy.js $extra"

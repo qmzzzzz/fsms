@@ -47,6 +47,62 @@ function jobBlock(name) {
   return next < 0 ? rest : rest.slice(0, next + 1);
 }
 
+/**
+ * 从给定文本收集所有 `run: |` 块的行（含注释与空行，由调用方自行剔除）。
+ *
+ * 参数化文本而不是写死全文件：同一份扫描逻辑既要服务「整文件扫注入面」，
+ * 也要服务「只看一个 job 的交付面」，两处各写一遍必然漂移。
+ * 也不取「job 里第一个 run」：一个 job 可能有多个 step（deploy-ssh 就有两个），
+ * 第一个是 Prepare SSH，部署命令在第二个。
+ */
+function collectRunLines(text) {
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let inRun = false;
+  let runIndent = 0;
+  for (const line of lines) {
+    const head = /^(\s*)run: \|\S*\s*$/.exec(line);
+    if (head) {
+      inRun = true;
+      runIndent = head[1].length;
+      continue;
+    }
+    if (!inRun) continue;
+    if (line.trim() === '') {
+      out.push(line);
+      continue;
+    }
+    if (line.match(/^\s*/)[0].length <= runIndent) {
+      inRun = false;
+      continue;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+/** 可执行行里的 deploy.js 调用行（注释不算：注释不执行，不能当交付证据） */
+function deployInvokeLines(text) {
+  return collectRunLines(text)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#') && l.includes('node scripts/deploy.js'));
+}
+
+/**
+ * 兜底闸是否真的交付给了 deploy.js 进程。
+ *
+ * 抽成函数是为了反向自证：把「修复前」的命令串原样喂进来必须判 false——
+ * 只断言「真实 yml 里含有某串」挡不住判据本身失效。
+ * 为什么 SSH 路径上 env 块不算交付：ssh 不转发本地环境变量，SendEnv 也只在目标机
+ * sshd 显式 AcceptEnv 该变量名时才生效（默认只放行 LANG/LC_*）。env 里有、
+ * 命令串里没有 ⇒ 目标机上的 deploy.js 读到未定义 ⇒ 闸静默关闭，且工作流是绿的。
+ * 为什么自托管路径上 env 块算交付：node 就在本 runner 上跑，step env 即进程 env。
+ */
+function digestPinDelivered(text) {
+  const lines = deployInvokeLines(text);
+  return lines.length > 0 && lines.every((l) => /DEPLOY_REQUIRE_DIGEST_PIN='\$\{[^}]*:\?/.test(l));
+}
+
 describe('D-1 部署工作流：结构与关键不变量', () => {
   test('YAML 语法可被解析（格式错误会让整个工作流无法加载）', async () => {
     // 用 prettier（直接 devDependency）的 yaml 解析器做语法校验：
@@ -177,9 +233,34 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
     expect(ssh).toMatch(/IMAGE_TAG:\s*\$\{\{\s*needs\.preflight\.outputs\.image_ref\s*\}\}/);
     expect(selfHosted).not.toMatch(/needs\.preflight\.outputs\.image_tag/);
     expect(ssh).not.toMatch(/needs\.preflight\.outputs\.image_tag/);
-    // ⑤ deploy.js 侧兜底闸随两条路径显式开启（本地手工路径不受影响）
+    // ⑤ deploy.js 侧兜底闸在两条路径**各自真的生效**（本地手工路径不受影响）。
+    //    `NAME: 'true'` 只证明"配了"，不证明"送达"：两条路径的送达形态不同，必须分别钉。
+    //    此前这里只有下面两行 toMatch——SSH 路径的 env 块到不了目标机（见 digestPinDelivered），
+    //    于是"配了但永远读不到"的静默死闸恰好从这条断言底下穿过去（本轮实测到的原缺陷）。
     expect(selfHosted).toMatch(/DEPLOY_REQUIRE_DIGEST_PIN: 'true'/);
     expect(ssh).toMatch(/DEPLOY_REQUIRE_DIGEST_PIN: 'true'/);
+    // 前提自证：两边的 deploy.js 调用行都确实扫到了（各只有 1 处；扫空会让判据退化成恒假/恒真）
+    expect(deployInvokeLines(selfHosted).length).toBe(1);
+    expect(deployInvokeLines(ssh).length).toBe(1);
+    // 自托管：node 在本 runner 上跑，step env 即进程 env ⇒ 命令串里**不该**有它
+    expect(digestPinDelivered(selfHosted)).toBe(false);
+    // SSH：必须拼进远程命令，且用 `${var:?}`（漏配报错退出，而不是展开成空串被读成"关"）
+    expect(digestPinDelivered(ssh)).toBe(true);
+    // 反向自证：修复前的形态（env 块配了、远程命令串里没有）必须判 false
+    expect(
+      digestPinDelivered(
+        [
+          'run: |',
+          '  ssh $OPTIONS "$DEPLOY_USER@$DEPLOY_HOST" \\',
+          '    "cd $DEPLOY_PATH && APP_IMAGE=$IMAGE_TAG node scripts/deploy.js $extra"',
+        ].join('\n')
+      )
+    ).toBe(false);
+    // 交付通道也不能改成"塞进 SendEnv"：目标机 sshd 未 AcceptEnv 该变量名时同样收不到，
+    // 而本仓的 compose `:?` 清单用例要求 SendEnv 恰好等于硬声明变量集，多一个就红。
+    const sendEnvNames =
+      ((jobBlock('deploy-ssh').match(/SendEnv=([A-Za-z0-9_,-]+)/) || [])[1] || '').split(',') || [];
+    expect(sendEnvNames).not.toContain('DEPLOY_REQUIRE_DIGEST_PIN');
   });
 
   test('compose 里每个 `:?` 变量都由两条部署路径下发（否则到切换那步才被拒）', () => {
@@ -223,32 +304,10 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
   /**
    * 收集全文件所有 `run: |` 块的行（含注释行，由调用方自行剔除）。
    * 不用 jobBlock+首个 run：一个 job 可能有多个 step，注入面必须整文件扫。
+   * 扫描逻辑本体在 collectRunLines（模块作用域），因为「只看某个 job 的交付面」
+   * 那条用例要复用同一份——两处各写一遍就会漂移。
    */
-  const allRunLines = () => {
-    const lines = src.split(/\r?\n/);
-    const out = [];
-    let inRun = false;
-    let runIndent = 0;
-    for (const line of lines) {
-      const head = /^(\s*)run: \|\S*\s*$/.exec(line);
-      if (head) {
-        inRun = true;
-        runIndent = head[1].length;
-        continue;
-      }
-      if (!inRun) continue;
-      if (line.trim() === '') {
-        out.push(line);
-        continue;
-      }
-      if (line.match(/^\s*/)[0].length <= runIndent) {
-        inRun = false;
-        continue;
-      }
-      out.push(line);
-    }
-    return out;
-  };
+  const allRunLines = () => collectRunLines(src);
 
   test('前提：run 块扫描确实覆盖到脚本行（否则下面的零插值断言是空集假绿）', () => {
     const executable = allRunLines().filter((l) => l.trim() && !l.trim().startsWith('#'));

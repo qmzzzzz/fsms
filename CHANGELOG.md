@@ -8,6 +8,78 @@
 
 ## [未发布]
 
+### 部署（2026-10-03 · SSH 部署路径上 digest 钉死闸一直是静默关闭的 + compose 密钥闸的清单只有 5/15）
+
+> 背景：本轮由「`*_FILE` 密钥回填」那条线连带查出。三条 finding 都属于同一类形状——
+> **配了但没送达**、**清单抄短了**、**断言扫空了**——共同点是工作流和 jest 全都绿。
+
+- **finding：`DEPLOY_REQUIRE_DIGEST_PIN` 在 SSH 路径上从未到达 `deploy.js`**。
+  `deploy-ssh` 的 `env:` 块里写着 `DEPLOY_REQUIRE_DIGEST_PIN: 'true'`，注释还注明
+  「与 self-hosted 同口径」——但两条路径的送达形态根本不同：`deploy-self-hosted` 在
+  部署机 runner 上直接 `node scripts/deploy.js`，step env 就是进程 env；`deploy-ssh` 的
+  `node` 跑在**目标机**上，而 ssh 既不转发本地环境变量，`SendEnv` 又只在目标机 sshd
+  显式 `AcceptEnv` 该变量名时才生效（默认只放行 `LANG/LC_*`）。于是那道"拒绝非 digest
+  引用"的兜底闸在 SSH 路径上始终不存在。
+  讽刺的是判据早就写过这条口径：本文件 `compose 里每个 :? 变量都由两条部署路径下发`
+  那条用例的注释就是「env 里有但没 SendEnv = 目标机收不到」——只是没把同一口径用到
+  兜底闸上，而 ⑤ 的断言形状（`expect(ssh).toMatch(/DEPLOY_REQUIRE_DIGEST_PIN: 'true'/)`）
+  恰好只查"配了"，替这个洞做了一套完整的掩护。
+  如实定级：**这是纵深防御缺一段，不是可利用漏洞**——`IMAGE_TAG` 本身由 preflight 解析
+  并过 `sha256:[0-9a-f]{64}` 校验，实际 pull 的就是 digest 引用；闸要防的是"误配/绕过
+  preflight 直接把 tag 传进来"，而那条路径上它形同不存在。
+- 修法：把它拼进远程命令，并用 `${var:?}` 而不是 `$var`——漏配时报错退出，
+  而不是展开成空串让 `deploy.js` 把闸读成"关"（那正是本 finding 的原始形态）。
+  不走 `SendEnv`：那要求目标机 sshd 配合，且会撞红上面那条"SendEnv 恰好等于 compose
+  硬声明项"的用例。bash 实测两向：置 `true` 时远程命令串为
+  `… DEPLOY_REQUIRE_DIGEST_PIN='true' node scripts/deploy.js --dry-run`；
+  漏配时 `bash` 立刻退 1 并打印「deploy-ssh 未下发 digest 钉死闸」。
+- **闸改造**：`run: |` 扫描器从 describe 内的闭包抽成模块作用域纯函数
+  （`collectRunLines(text)` / `deployInvokeLines(text)` / `digestPinDelivered(text)`），
+  `allRunLines` 改为委托——同一个 job 可能有多个 step，"取第一个 run"会取到
+  Prepare SSH 而不是部署命令（本仓 helper 的注释里就写着这条，但 ⑤ 没用它）。
+  抽成纯函数是为了**反向自证**：把修复前的命令串喂进 `digestPinDelivered` 必须判 false。
+  变异实测：只删远程命令串里那段（env 块保持"配了"）⇒ ⑤ 当场红在第 248 行
+  `expect(digestPinDelivered(ssh)).toBe(true)`（Expected true / Received false），
+  其余 16 条不动——正是原洞的签名：所有旧断言都不看送达。
+- **finding：compose 密钥闸的名字清单是抄的，5 个 vs `FILE_BACKED_SECRETS` 的 15 个**。
+  `docker-compose 不再用 environment 传任何密钥` 把 JWT/REFRESH/AES/HMAC/MONGODB_URI
+  五个名字写死在断言里；其余 10 个（`DOCS_PASSWORD` / `LOG_SHIPPING_TOKEN` /
+  `METRICS_TOKEN` / `SECURITY_ALERT_WEBHOOK_SECRET` / `SENTRY_DSN` /
+  `LOGIN_ECDH_PRIVATE_KEY` / `REDIS_URL` …）哪天被写成 `- X=${X}` 明文注入，闸一声不响。
+  改为清单从 `src/config/secrets.js` 反向推导（新增文件型密钥不必回来改用例，
+  与 compose `:?` 清单闸同套路）。
+  实测现状：7/15 走 `_FILE`（含 `REDIS_PASSWORD`），`REDIS_URL=redis://redis:6379` 明文，
+  其余 7 个今天压根不在 app 的 environment 里 ⇒ 新判据对它们是"不许以明文出现"，
+  不需要动 compose。**唯一豁免 `REDIS_URL` 不写在注释里，条件就地可执行**：
+  URL 里一旦出现 `//…@`（口令 userinfo）立刻判红——redis 只挂在
+  `data-net: internal: true` 上、口令走 `REDIS_PASSWORD_FILE`，这条豁免成立当且仅当
+  它不含凭据。反向自证用合成源（真实 compose 是并发会话共享的文件，不临时改它）：
+  把 `HMAC_SECRET_FILE` 换回明文 ⇒ 抓到；换成第 6+ 个名字 `DOCS_PASSWORD` 再试一次
+  （这条才真正证明"扩清单"这件事本身有效）；给 REDIS_URL 塞口令 ⇒ 豁免失效；
+  喂一份认不出 app 服务的文本 ⇒ 全部名字按违规上报（判据失效不许静默放行）。
+- **新增：`/run/secrets/<名>` 三处一致性闸**（environment 的 `_FILE` 引用、服务级
+  `secrets:` 列表、顶层 `secrets:` 段）。漏声明的后果不是"没密钥"而是"启动即崩"——
+  `hydrateSecretsFromFiles` 对不可读的 `_FILE` 直接抛错，运维看到的是一条与密钥无关的
+  启动失败。顺带钉住顶层每个 `file:` 必须落在 `./secrets/`（`.gitignore` 与
+  `.dockerignore` 只排除这一个目录，指到别处等于把密钥放回版本库与构建上下文）。
+  合成夹具 `CLEAN` / `ORPHAN` 各证一侧：`b_secret` 顶层声明了却没挂到 app ⇒
+  `missingFromService` 抓到、`missingFromTopLevel` 必须为空（判据认的是"两处一致性"，
+  不是一刀切盯 environment）。
+- **自查出一条假绿（自己写自己抓）**：本条第一版的顶层扫描用了
+  `/^ {2}[a-z0-9_]+:\n {4}file: (\S+)$/gm`——本仓库文件是 CRLF，`:` 与 `\n` 之间夹着
+  `\r`，这条正则**恒不匹配**，那个 `for` 循环体一次都没执行，而用例是绿的。
+  这正是本仓踩过两次、写在 `deployWorkflow.test.js` 注释里的坑（"不用 $ 锚点：
+  本仓库工作流是 CRLF，`\r` 会让行尾锚定的正则恒不匹配（实测过）"），我照样踩了。
+  现在所有 compose 扫描统一先 `split(/\r?\n/)` 再逐行匹配，并把这类"取到多少条"
+  写进前提自证（`referenced.length >= 7`、`targets.length >= referenced.length`、
+  每个 `file:` 必须是字符串）。
+- 核过撤销的怀疑：`ADMIN_INITIAL_PASSWORD_FILE` 曾被记为"compose 接了但应用不读"的
+  疑似死接线——`src/services/initData.js:770,833` 确实在读它（初始管理员口令），
+  嫌疑撤销。
+- 验证：`npx jest src/tests/deploy src/tests/config` ⇒ 35 套件 / 578 条全绿；
+  `prettier --check` 与 `eslint` 对改动的三个文件均 0 问题。
+  本轮未改 `docker-compose.yml` 与 `scripts/deployPolicy.js`（判据变了，配置没变）。
+
 ### 运维可用性（2026-10-03 · `*_FILE` 密钥部署下六个独立脚本拿不到连接串）
 
 > 背景：`src/config/secrets.js` 的 `<NAME>_FILE` 约定（P3-48：密钥走文件挂载，不进
