@@ -80,14 +80,34 @@ fi
 # 实测教训：compose 里 `image: mongo:6.0.20` 这个字面串同时出现在一段注释里
 # （"把输出追加为 `image: mongo:6.0.20@sha256:<捕获值>`"），不带 addr 的全文 sed 会把
 # 注释一起改掉——注释是给人读的用法示例，改掉之后它就成了错误示例。
-pin_ref() {
+#
+# 为什么拆成 check / stage / commit 三相（原先是一个 pin_ref 边检查边落笔，两个目标顺序跑）：
+# 实测的半钉状态——Dockerfile 正常、compose 的 tag 漂移 ⇒
+#   第一轮：Dockerfile 被改成 digest，compose 那步报错退出 rc=1，仓库留下"半钉"；
+#   第二轮（运维把 compose 的 tag 修好再跑）：脚本在 Dockerfile 那一步就撞
+#   "已经存在 @sha256 钉版引用"退出，compose **永远钉不上**。
+# 也就是说旧顺序不仅会半途落笔，还会把半途状态变成死路：供应链钉版的产物是一个
+# compose 仍指向可变 tag 的仓库，而唯一能修它的脚本自己拒绝再跑。
+# 现在 check 阶段只读（两个目标都确认可改，包括"临时文件不存在"），stage 阶段只写临时文件，
+# commit 阶段才 mv——任何一步失败，目标文件都是原样。
+# 诚实交代残余边界：两条 `mv` 之间不是原子的（跨两个文件不存在 single-phase rename）。
+# 之所以够用：check 已确认两文件都在且都可改，stage 已把两改好的内容验过一遍，
+# 到 commit 只剩同目录 rename——失败面从"任何解析/匹配错"缩到"rename 本身出错"。
+check_ref() {
   addr=$1
   file=$2
   old=$3
-  new=$4
-  label=$5
+  label=$4
+  tmp=$5
   if [ ! -f "$file" ]; then
     echo "错误：找不到 $label：$file" >&2
+    exit 1
+  fi
+  # 残留的临时文件必须**先看见再说**：它可能是上一次运行中断留下的，也可能是别人放的。
+  # 本脚本既不覆盖它也不在退出时删它（下面的 trap 只删自己创建过的那些）。
+  if [ -e "$tmp" ]; then
+    echo "错误：$label 的临时文件已存在：$tmp" >&2
+    echo "       可能是上一次中断的运行留下的残留；确认无用后请人工删除再重跑。" >&2
     exit 1
   fi
   # 只在符合 addr 的行里找旧引用（注释里的同名字面串不算）
@@ -103,24 +123,79 @@ pin_ref() {
     echo "       静默跳过会让未钉版的镜像引用被误认为已固定，请同步脚本顶部的 tag 常量。" >&2
     exit 1
   fi
+}
+
+stage_ref() {
+  addr=$1
+  file=$2
+  old=$3
+  new=$4
+  label=$5
+  tmp=$6
   # 先落到临时文件再原子替换：中途失败不会留下半改的目标文件
-  tmp="$file.pin.tmp"
   sed "/$addr/s|$old|$new|g" "$file" > "$tmp"
+  # 预演校验：临时文件里新引用必须出现、旧引用必须消失（mv 之后再报就晚了）
+  if ! sed -n "/$addr/p" "$tmp" | grep -qF "$new" ||
+    sed -n "/$addr/p" "$tmp" | grep -qF "$old"; then
+    rm -f "$tmp"
+    echo "错误：$label 预演失败（新引用未出现或旧引用仍在），未改动任何目标文件。" >&2
+    exit 1
+  fi
+}
+
+commit_ref() {
+  file=$1
+  tmp=$2
+  addr=$3
+  new=$4
+  label=$5
   mv "$tmp" "$file"
-  if ! sed -n "/$addr/p" "$file" | grep -qF "$new" ||
-    sed -n "/$addr/p" "$file" | grep -qF "$old"; then
-    echo "错误：$label 替换后校验失败（新引用未出现或旧引用仍在）" >&2
+  if ! sed -n "/$addr/p" "$file" | grep -qF "$new"; then
+    echo "错误：$label 替换后校验失败（mv 之后新引用不在指令行上）" >&2
     exit 1
   fi
   printf '%s → %s\n' "$label" "$new"
 }
 
-echo "==> 目标仓库根：$ROOT"
-echo "==> 钉定 Dockerfile 中的基础镜像（全部阶段同一 digest）"
-pin_ref '^FROM ' "$ROOT/Dockerfile" "FROM $NODE_TAG" "FROM $NODE_DIGEST" "Dockerfile"
+DOCKERFILE="$ROOT/Dockerfile"
+COMPOSE="$ROOT/docker-compose.yml"
+ADDR_FROM='^FROM '
+ADDR_IMAGE='^[[:space:]]*image: '
+TMP_DOCKERFILE="$DOCKERFILE.pin.tmp"
+TMP_COMPOSE="$COMPOSE.pin.tmp"
 
-echo "==> 钉定 docker-compose.yml 中的 mongo 镜像"
-pin_ref '^[[:space:]]*image: ' "$ROOT/docker-compose.yml" "image: $MONGO_TAG" "image: $MONGO_DIGEST" "docker-compose.yml"
+# trap 只删**本脚本确认过"原本不存在"**的临时文件：这两个变量先置空，
+# check_ref 通过后才赋值。少了这两步，退出时顺手 rm 掉的可能是别人放在这里的同名文件
+# （check_ref 里那条"临时文件已存在"报错正是为了不覆盖它，不能转头又把它删了）。
+PIN_TMP_DOCKERFILE=''
+PIN_TMP_COMPOSE=''
+
+cleanup_pin_tmp() {
+  for _tmp in "$PIN_TMP_DOCKERFILE" "$PIN_TMP_COMPOSE"; do
+    if [ -n "$_tmp" ] && [ -f "$_tmp" ]; then
+      rm -f "$_tmp"
+    fi
+  done
+  return 0
+}
+trap 'cleanup_pin_tmp' EXIT HUP INT TERM
+
+echo "==> 目标仓库根：$ROOT"
+echo "==> 只读检查两个目标（有一个不可改就一个字都不写）"
+check_ref "$ADDR_FROM" "$DOCKERFILE" "FROM $NODE_TAG" "Dockerfile" "$TMP_DOCKERFILE"
+PIN_TMP_DOCKERFILE="$TMP_DOCKERFILE"
+check_ref "$ADDR_IMAGE" "$COMPOSE" "image: $MONGO_TAG" "docker-compose.yml" "$TMP_COMPOSE"
+PIN_TMP_COMPOSE="$TMP_COMPOSE"
+
+echo "==> 预演替换（只写临时文件）"
+echo "    钉定 Dockerfile 中的基础镜像（全部阶段同一 digest）"
+stage_ref "$ADDR_FROM" "$DOCKERFILE" "FROM $NODE_TAG" "FROM $NODE_DIGEST" "Dockerfile" "$TMP_DOCKERFILE"
+echo "    钉定 docker-compose.yml 中的 mongo 镜像"
+stage_ref "$ADDR_IMAGE" "$COMPOSE" "image: $MONGO_TAG" "image: $MONGO_DIGEST" "docker-compose.yml" "$TMP_COMPOSE"
+
+echo "==> 落笔（临时文件原子改名，两侧都校验）"
+commit_ref "$DOCKERFILE" "$TMP_DOCKERFILE" "$ADDR_FROM" "FROM $NODE_DIGEST" "Dockerfile"
+commit_ref "$COMPOSE" "$TMP_COMPOSE" "$ADDR_IMAGE" "image: $MONGO_DIGEST" "docker-compose.yml"
 
 echo
 echo "已替换并校验。请验证："

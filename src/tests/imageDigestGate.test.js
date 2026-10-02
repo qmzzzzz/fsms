@@ -8,7 +8,10 @@
  *     被当成"已按 digest 固定"提交上去；
  *   - `docker inspect --format='{{index .RepoDigests 0}}'` 对 build/load 来的镜像
  *     可能返回 `<no value>` 或空 ⇒ 直接写进 Dockerfile 会得到 `FROM <no value>`，
- *     失败推迟到构建期，且现场看起来"已经钉过版"。
+ *     失败推迟到构建期，且现场看起来"已经钉过版"；
+ *   - "边检查边落笔、两个目标顺序跑"会留下**半钉仓库**（Dockerfile 已改、compose 仍指向
+ *     可变 tag），而且此后唯一能修它的脚本自己拒绝再跑；`sed > tmp; mv tmp file` 还会
+ *     把上一次中断留下的同名临时文件**静默吞掉**。
  * 全部由真跑证明（PATH 里插 docker stub），不用扫源码文本 —— 同仓 backup-mongo.sh
  * 的既有覆盖就是文本契约，证明不了任何运行时行为。
  *
@@ -137,10 +140,62 @@ function run(fx, args, mode = 'good') {
     out: (r.stdout || '') + (r.stderr || ''),
     dockerfile: fs.readFileSync(path.join(fx.dir, 'Dockerfile'), 'utf8'),
     compose: fs.readFileSync(path.join(fx.dir, 'docker-compose.yml'), 'utf8'),
+    // 临时文件也是产物的一部分：它既是"预演过"的证据，也是下一次运行的门禁
+    // （脚本拒绝覆盖已存在的同名文件）。失败矩阵用"应当为空"、
+    // 残留用例用"应当看得见"，两边共用同一个过滤器 ⇒ 见下面那条非空集自证。
+    tmps: fs
+      .readdirSync(fx.dir)
+      .filter((f) => f.endsWith('.pin.tmp'))
+      .sort(),
     calls: fs.existsSync(fx.log)
       ? fs.readFileSync(fx.log, 'utf8').split(/\r?\n/).filter(Boolean)
       : [],
   };
+}
+
+/** 只把 compose 的 mongo **指令行**换成常量表里没有的 tag（注释里那份演示保持原样） */
+const driftCompose = (src) => src.replace(/^ {4}image: mongo:6\.0\.20$/m, '    image: mongo:9.9.9');
+const driftComposeTag = (fx) =>
+  fs.writeFileSync(path.join(fx.dir, 'docker-compose.yml'), driftCompose(fx.compose), 'utf8');
+const driftDockerfileTag = (fx) =>
+  fs.writeFileSync(
+    path.join(fx.dir, 'Dockerfile'),
+    fx.dockerfile.replace(/node:22\.14\.0-alpine/g, 'node:22.99.9-alpine'),
+    'utf8'
+  );
+const noMutation = () => {};
+
+/**
+ * 所有可达失败臂的**共同后置条件**：两个目标各自保持"本次运行开始前"的字节，
+ * 目录里没有 `*.pin.tmp`（失败不许留 litter，成功也不留——见成功用例）。
+ * 基准取"变异之后"的内容而不是夹具原文：漂移用例改的就是被检查的那个文件，
+ * 拿夹具原文当基准会把"脚本没动"和"脚本把它改了回去"混成一条。
+ *
+ * 行宽必须等于处理函数的形参个数：jest-each 少喂一格会把 `done` 当成第 N 个实参注入，
+ * 用例既不通过也不失败，而是卡满 30s 超时（本仓实测踩过）。下面那条"表宽"用例钉住它。
+ */
+const failureArms = [
+  ['Dockerfile tag 漂移', driftDockerfileTag, 'good', ['--apply']],
+  ['compose tag 漂移', driftComposeTag, 'good', ['--apply']],
+  ['digest 取不到（<no value>）', noMutation, 'novalue', ['--apply']],
+  ['digest 长度不足（伪 digest）', noMutation, 'wrongarch', ['--apply']],
+  ['未知参数', noMutation, 'good', ['--aply']],
+];
+
+function checkFailure(_label, mutate, mode, args) {
+  const fx = fixture();
+  mutate(fx);
+  const before = {
+    dockerfile: fs.readFileSync(path.join(fx.dir, 'Dockerfile'), 'utf8'),
+    compose: fs.readFileSync(path.join(fx.dir, 'docker-compose.yml'), 'utf8'),
+  };
+  const r = run(fx, args, mode);
+  expect(r.code).not.toBe(0);
+  expect({ dockerfile: r.dockerfile, compose: r.compose, tmps: r.tmps }).toEqual({
+    dockerfile: before.dockerfile,
+    compose: before.compose,
+    tmps: [],
+  });
 }
 
 group('capture-image-digests.sh 真跑行为', () => {
@@ -245,4 +300,74 @@ group('capture-image-digests.sh 真跑行为', () => {
     expect(r.out).toContain('未知参数');
     expect(r.dockerfile).toBe(fx.dockerfile);
   });
+
+  /**
+   * 半钉状态是这个脚本特有的失效形状，它同时踩中两条：
+   * ① 供应链上 compose 仍指向**可变 tag**，而仓库看起来"已经钉过版"；
+   * ② 唯一能修它的脚本从此**拒绝再跑**（下一次运行会在 Dockerfile 那一步撞
+   *    "已经存在 @sha256 钉版引用"）。
+   * 实测复现过：旧实现是"边检查边落笔、两个目标顺序跑"，compose 漂移时 Dockerfile 已写盘。
+   * 所以这里必须逐字节比（`toBe`），`toContain('node:22.14.0-alpine')` 挡不住"改了一半"。
+   */
+  test('第二个目标（compose）漂移 ⇒ 第一个目标一个字都不写，也不留临时文件', () => {
+    const fx = fixture();
+    const drifted = driftCompose(fx.compose);
+    driftComposeTag(fx);
+    const r = run(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('漂移');
+    expect(r.dockerfile).toBe(fx.dockerfile);
+    expect(r.compose).toBe(drifted);
+    expect(r.tmps).toEqual([]);
+  });
+
+  test('半钉不是死路：照报错修好 compose 之后重跑，两个目标都能钉上', () => {
+    // 旧顺序下这一条跑不通——第一轮已经把 Dockerfile 钉了，第二轮在第一步就退出。
+    const fx = fixture();
+    driftComposeTag(fx);
+    expect(run(fx, ['--apply']).code).not.toBe(0);
+    expect(fs.readFileSync(path.join(fx.dir, 'Dockerfile'), 'utf8')).toBe(fx.dockerfile);
+    fs.writeFileSync(path.join(fx.dir, 'docker-compose.yml'), fx.compose, 'utf8');
+    const second = run(fx, ['--apply']);
+    expect({ code: second.code, tail: second.out.slice(-120) }).toMatchObject({ code: 0 });
+    expect(second.dockerfile).toContain(`FROM ${NODE_REF}`);
+    expect(second.compose).toMatch(/^ {4}image: mongo@sha256:b{64}$/m);
+    expect(second.tmps).toEqual([]);
+  });
+
+  test('同名临时文件已存在：拒绝、不覆盖，退出时也不删（trap 只清自己创建的）', () => {
+    const fx = fixture();
+    const tmp = path.join(fx.dir, 'Dockerfile.pin.tmp');
+    const SENTINEL = '上一次中断留下的产物，或别人手工放的：脚本既不能改它也不能删它\n';
+    fs.writeFileSync(tmp, SENTINEL, 'utf8');
+    const r = run(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('临时文件已存在');
+    expect(r.out).toContain('Dockerfile.pin.tmp');
+    expect(r.dockerfile).toBe(fx.dockerfile);
+    expect(r.compose).toBe(fx.compose);
+    // 最关键的一条：这次非零退出会走 EXIT trap，trap 必须**没有**碰到它。
+    // 直觉写法 `trap 'rm -f "$ROOT"/*.pin.tmp' EXIT` 就是在这里删掉运维的文件。
+    expect(fs.readFileSync(tmp, 'utf8')).toBe(SENTINEL);
+    // 非空集自证：同一个 readdir 过滤器看得见这个文件。少了它，上面/下面的
+    // `tmps === []` 都可能是"过滤器永远返回空"造成的假绿。
+    expect(r.tmps).toEqual(['Dockerfile.pin.tmp']);
+    // 报错也不是死路：人工删除后必须能正常钉版，且成功运行自己不留临时文件
+    fs.rmSync(tmp);
+    const after = run(fx, ['--apply']);
+    expect({ code: after.code, tmps: after.tmps }).toMatchObject({ code: 0, tmps: [] });
+    expect(after.dockerfile).toContain(`FROM ${NODE_REF}`);
+  });
+
+  test('反向自证：失败矩阵的表宽 = 处理函数形参个数（窄一格是超时假绿，不是失败）', () => {
+    expect({ declared: checkFailure.length }).toEqual({ declared: 4 });
+    expect({ width: failureArms.map((row) => row.length) }).toEqual({
+      width: [4, 4, 4, 4, 4],
+    });
+    // 判据本身非空集：把行削窄一格必须点亮
+    const narrow = failureArms.map((row) => row.slice(0, 3));
+    expect(narrow.every((row) => row.length === checkFailure.length)).toBe(false);
+  });
+
+  test.each(failureArms)('%s ⇒ 目标文件逐字节不变且不留临时文件', checkFailure);
 });
