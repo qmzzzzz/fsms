@@ -128,6 +128,42 @@ describe('backup-mongo.sh 传输路径', () => {
     expect(r.read(r.files.MONGODUMP_ARGV_FILE)).toBe('');
   });
 
+  // ---- 主机段改写被拒时，docker 分支必须"什么都没做"（finding #24）----
+  // 这条分支自写下来就没被任何用例跑过：本文件的 docker 用例一律喂可改写的 URI，
+  // 于是"拒绝发生在拉容器之前"一直是注释里的承诺，不是被证过的事实。
+  // 顺序之所以要紧：`docker … >"$ARCHIVE_PATH"` 的重定向在命令执行前就建出文件，
+  // 而 `set -e` 会让 exit 1 直接带走脚本，删半成品的 `rm -f` 一步都走不到。
+  test('docker 传输：URI 主机段无法改写 ⇒ 非零、容器从未被拉起、归档一个字节都不留', () => {
+    const work = makeWorkspace();
+    // 口令里两个裸 @：JS 连接串包与 WHATWG URL 对"凭据/主机"的分界读法相反，
+    // 无法判定实际拨号对象 ⇒ mongo_swap_host 拒绝（判据本身见 scripts/mongoUri.sh）
+    const unswappable = 'mongodb://fsms:Sup3r!ca@99@mongo:27017/fire-safety?authSource=admin';
+    const r = runBackup(work, { MONGODB_URI: unswappable });
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/拒绝执行/);
+    // 从未 exec 进容器：argv 与 stdin 两个桩文件都不该被创建
+    expect(r.read(r.files.DOCKER_ARGV_FILE)).toBe('');
+    expect(r.read(r.files.DOCKER_STDIN_FILE)).toBe('');
+    expect(archivesOf(work)).toEqual([]);
+    expect(fs.existsSync(path.join(work.dir, 'docker.stdin'))).toBe(false);
+    // 上一行必须点名"是哪条判据拦下的"（mongo_swap_refuse 的原因分类），
+    // 而不是只有调用方那句泛泛的"拒绝执行"——cron 邮件里要能一眼定位。
+    // 注意：调用方那句打印的是改写目标的**值**（`${MONGO_CONTAINER_HOST}` 已展开），
+    // 变量名本身不会出现在输出里，所以这里判的是"有两条 Error 且原因在上一行"。
+    expect((r.out.match(/Error:/g) || []).length).toBeGreaterThanOrEqual(2);
+    expect(r.out).toMatch(/主机段/);
+    // 不回显凭据字节
+    expect(r.out).not.toMatch(/Sup3r|mongodb:\/\//);
+  });
+
+  test('反向自证：同一条 URI 只要主机段可改写，docker 就会被拉起（拒绝用例的红不是桩坏了）', () => {
+    const work = makeWorkspace();
+    const r = runBackup(work);
+    expect(r.code).toBe(0);
+    expect(r.read(r.files.DOCKER_ARGV_FILE)).toContain('compose');
+    expect(archivesOf(work)).toHaveLength(1);
+  });
+
   test('COMPOSE_FILE 被透传给 docker compose（否则 exec 会命中同名另一个项目）', () => {
     const work = makeWorkspace();
     const composeFile = path.join(work.dir, 'docker-compose.yml');

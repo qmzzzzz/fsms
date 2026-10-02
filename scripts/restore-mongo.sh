@@ -222,13 +222,15 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
-OLD_UMASK=$(umask)
-umask 077
-CONFIG_FILE=$(mktemp "${TMPDIR:-/tmp}/mongorestore-config.XXXXXX")
-# umask 之外再显式 chmod（Windows/MSYS 下两者均为空操作，Linux 生效）
-chmod 600 "$CONFIG_FILE"
-printf 'uri: %s\n' "$MONGODB_URI" > "$CONFIG_FILE"
-umask "$OLD_UMASK"
+# 凭据配置文件**不在这里创建**：只有 local 分支需要它（mongorestore 的 --config 只吃文件），
+# 而 docker 分支——本脚本的默认传输——是经 stdin 把 `uri:` 行送进容器的。
+# 修前这里无条件 umask 077 + mktemp + 写入含口令的 URI，docker 路径从头到尾没人读它，
+# 却在宿主机磁盘上实打实留了一次凭据（DR 现场往往是笔记本/运维机）；
+# 下方 docker 分支的注释还一直声称"含凭据的 URI 不落宿主机临时文件"，那句当时是失实的。
+# 改成按需创建之后，那句注释才与代码一致。
+# 这条不是自我表扬：src/tests/deploy/restoreTransport.test.js 的判据是"宿主机上有没有
+# mongorestore-config.*"。把上面那段无条件写入原样贴回来，两条用例立刻变红（docker 那格
+# 探到文件名、local 那格数出 2 个文件）——实测过，不是推演。
 
 DROP_ARG=""
 if [ "${RESTORE_DROP:-false}" = "true" ]; then
@@ -265,16 +267,27 @@ case "$BACKUP_FILE" in
     ;;
 esac
 
-RESTORE_ARGS=(--config="$CONFIG_FILE" --archive="$BACKUP_FILE" --gzip)
-if [ -n "$DROP_ARG" ]; then
-  RESTORE_ARGS+=("$DROP_ARG")
-fi
-
 echo "Starting MongoDB restore from $BACKUP_FILE（transport=${MONGO_RESTORE_TRANSPORT}）"
 
 # set -e 已保证失败即退出（退出码由 mongorestore / docker exec 传递给调用方），无需再判 $?
 case "$MONGO_RESTORE_TRANSPORT" in
   local)
+    # mongorestore 的 --config 只吃文件 ⇒ 凭据必须落一次盘。范围压到最小：
+    # umask 077 + 显式 chmod 600（Windows/MSYS 下两者均为空操作，Linux 生效），
+    # 收尾由顶部 trap 删除，含被信号打断的 130/143 两条路径。
+    OLD_UMASK=$(umask)
+    umask 077
+    CONFIG_FILE=$(mktemp "${TMPDIR:-/tmp}/mongorestore-config.XXXXXX")
+    printf 'uri: %s\n' "$MONGODB_URI" > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    umask "$OLD_UMASK"
+    # 两条传输的 --drop 口径必须一致：docker 分支把参数拼在远端命令字符串里，
+    # 与这里各写一遍，任一侧漏掉 ${DROP_ARG} 都会让"默认不删既有集合"的门禁
+    # 只在一台机器上成立（用例见 src/tests/deploy/restoreTransport.test.js）。
+    RESTORE_ARGS=(--config="$CONFIG_FILE" --archive="$BACKUP_FILE" --gzip)
+    if [ -n "$DROP_ARG" ]; then
+      RESTORE_ARGS+=("$DROP_ARG")
+    fi
     mongorestore "${RESTORE_ARGS[@]}"
     ;;
   docker)

@@ -184,6 +184,14 @@ echo "Starting MongoDB backup at $(date)"
 
 # 执行备份。两条路径的共同点：含凭据的 URI 只出现在 0600 的配置文件里或管道里，
 # 绝不出现在任何 argv 上（P2-27 的原始动机）。
+#
+# 顺带交代一个范围问题（曾被记成缺陷，源码读下来否证了）：URI 末尾的库名**会**限制 mongodump
+# 的范围——mongo-tools 100.9 的 common/options 在没有显式 --db 时把连接串里的库名赋给 opts.DB，
+# mongodump 随后只为那一个库建 intents，归档里就只有 `<库名>.*`；mongorestore 对同一个字段做
+# 同样的赋值，并把 `[库名.*]` 当作 includes 过滤归档条目。**两侧范围因此一致**，不存在
+# "备份一个库、恢复时把整台实例覆写掉"的错配（恢复脚本核对的 RESTORE_CONFIRM 正是这个库名）。
+# 口径来源是读 100.9 的源码，本机没有 mongodump/mongorestore 可实测——这是**源码推断**，
+# 不是执行证据；工具大版本换了就要重读。
 case "$MONGO_BACKUP_TRANSPORT" in
   local)
     # 失败也要删半成品：docker 分支早就这么做了（重定向会先建出 0 字节文件），
@@ -197,7 +205,6 @@ case "$MONGO_BACKUP_TRANSPORT" in
     fi
     ;;
   docker)
-    # 只把主机段换成容器内地址：账号、口令、库名与查询参数原样保留
     # 主机段换成容器内地址：账号、口令、库名与查询串原样保留。判据与 restore 共用
     # scripts/mongoUri.sh（同一份 sed 原先在两个脚本里各写一遍，失败判据还会各自漂移）。
     # 静默按原 URI 在容器里跑就会连到宿主机名，得到"备份失败"这种最难查的表象。
