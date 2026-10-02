@@ -44,6 +44,37 @@ mongo_swap_host() {
   printf '%s' "$_swapped"
 }
 
+# 校验一个连接串**值本身**（不论它来自显式 MONGODB_URI 还是密钥文件）。
+#
+# 为什么两条来源都要过，而不是只过文件那条：这个值最终会被写成
+# `uri: <值>` 放进 mongodump/mongorestore 的 0600 配置文件，而它是配置里唯一
+# 由调用方决定的部分。实测：
+#   MONGODB_URI=$'mongodb://fsms:pw@127.0.0.1:27017/fsms?authSource=admin\ndrop: true'
+#   ./scripts/restore-mongo.sh <归档>
+# 因为恢复了 0 而非拒绝 ⇒ 换行把 `drop: true` 追加成配置文件的第二行，mongorestore
+# 按 drop 执行；而横幅回显「删除既有 : false」、门禁也要求 `RESTORE_DROP=true` 才允许
+# --drop。**门禁被一条值里的换行绕过，而现场证据声明相反**——这是恢复侧最坏的一类失效。
+# 提取目标库名用的还是 `%%\?*`/`#*/` 这类截断，`?authSource=admin` 之后的内容不进库名，
+# 所以确认令牌照样对得上，没有任何一环会亮。
+#
+# 判据与文件侧同源：单行、纯可打印 ASCII（越界字节按 tr 的八进制区间判，
+# 空格也算越界——连接串里的空格必须写成 %20）、scheme 认识。
+mongo_validate_uri() {
+  _uri=$1
+  _src=$2
+
+  if [ -n "$(printf '%s' "$_uri" | tr -d '\041-\176')" ]; then
+    printf 'Error: %s 含空白、换行或不可打印字符（应为单行纯 ASCII，特殊字符需 %%XX 转义）\n' \
+      "$_src" >&2
+    return 1
+  fi
+  case "$_uri" in
+    mongodb://* | mongodb+srv://*) return 0 ;;
+  esac
+  printf 'Error: %s 不是 mongodb:// 或 mongodb+srv:// 连接串\n' "$_src" >&2
+  return 1
+}
+
 # 按 `<NAME>_FILE` 约定从文件回填 MONGODB_URI（读不到/形状不认识 ⇒ 硬失败）。
 #
 # 为什么需要：`*_FILE` 回填的权威实现只有一处——src/config/secrets.js 的
@@ -69,6 +100,7 @@ mongo_hydrate_uri() {
       printf 'Warning: MONGODB_URI 与 MONGODB_URI_FILE 同时存在，按显式 MONGODB_URI 执行（忽略 %s）\n' \
         "$MONGODB_URI_FILE" >&2
     fi
+    mongo_validate_uri "$MONGODB_URI" "MONGODB_URI" || return 1
     return 0
   fi
   if [ -z "${MONGODB_URI_FILE:-}" ]; then
@@ -81,9 +113,18 @@ mongo_hydrate_uri() {
     return 1
   fi
 
-  # grep -c 无命中时打印 0 并以 1 退出；`|| true` 是为了不因这条退出码被调用方的
-  # set -e 端走（本函数的返回值另有语义，不能靠 grep 的）。
-  _n=$(grep -c '[^[:space:]]' "$_file" || true)
+  # 一律经 stdin 读，不把 $_file 作为操作数交给 grep/sed：文件名以 `-` 开头时
+  # （`MONGODB_URI_FILE=-c` 是实测过的形态）它会被当成选项，grep 转去读**调用方的
+  # stdin**，于是密钥文件从头到尾没被打开，而报错却说"内容不是连接串"——
+  # 说的是它根本没读过的字节。cat -- 之后所有环节只碰管道，没有可被误认成选项的参数。
+  if ! _body=$(cat -- "$_file" 2>/dev/null); then
+    printf 'Error: MONGODB_URI_FILE 读取失败：%s\n' "$_file" >&2
+    return 1
+  fi
+
+  # grep -c 无命中时打印 0 并以 1 退出；`|| _n=0` 同时兜住"输出被上层吞掉变成空串"，
+  # 否则 `[ "" -eq 0 ]` 会抛 shell 的 integer 表达式错误，退出码与原因都不对。
+  _n=$(printf '%s\n' "$_body" | grep -c '[^[:space:]]') || _n=0
   if [ "$_n" -eq 0 ]; then
     printf 'Error: MONGODB_URI_FILE 是空文件（没有任何非空行）：%s\n' "$_file" >&2
     return 1
@@ -98,7 +139,8 @@ mongo_hydrate_uri() {
   #     （Windows 记事本 / `Set-Content -Encoding UTF8` 写出的密钥文件）。
   #     连接串本身全是 ASCII，绝不会以这类字节开头，所以这一步不会误伤。
   #   · `s/[[:space:]]*$//` 去掉行尾空白与 CR（CRLF 文件、编辑器残留）。
-  MONGODB_URI=$(grep -m 1 '[^[:space:]]' "$_file" | sed -e 's/^[^ -~]*//' -e 's/[[:space:]]*$//')
+  MONGODB_URI=$(printf '%s\n' "$_body" | grep -m 1 '[^[:space:]]' |
+    sed -e 's/^[^ -~]*//' -e 's/[[:space:]]*$//')
 
   # 连接串必须是**单行纯可打印 ASCII**（凭据里的特殊字符按 RFC 3986 写成 %XX）。
   # 空白/控制字符留在中间时，mongodump 只会报一个和"密钥文件写坏了"毫无关系的解析错，
@@ -113,16 +155,5 @@ mongo_hydrate_uri() {
   #   · 区间必须写成 3 位八进制 —— `'\040-\0176'` 被解析成 `\017` 加字面量 '6'（漏检）。
   #   · 起点是 \041 不是 \040：空格属于"可打印 ASCII"，但合法连接串里绝不该有空格
   #     （要写成 %20），把它算进允许集就等于放行上面那条夹具事故。
-  # 这里删掉允许的字节、留下越界者；输出非空 ⇒ 有越界字符。
-  if [ -n "$(printf '%s' "$MONGODB_URI" | tr -d '\041-\176')" ]; then
-    printf 'Error: MONGODB_URI_FILE 的内容含空白或不可打印字符（应为单行纯 ASCII，特殊字符需 %%XX 转义）：%s\n' \
-      "$_file" >&2
-    return 1
-  fi
-
-  case "$MONGODB_URI" in
-    mongodb://* | mongodb+srv://*) return 0 ;;
-  esac
-  printf 'Error: MONGODB_URI_FILE 的内容不是 mongodb:// 或 mongodb+srv:// 连接串：%s\n' "$_file" >&2
-  return 1
+  mongo_validate_uri "$MONGODB_URI" "MONGODB_URI_FILE 的内容（$_file）" || return 1
 }

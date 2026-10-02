@@ -62,25 +62,23 @@ function mkwork(prefix) {
   return { dir, bin, log, backupDir: path.join(dir, 'backups') };
 }
 
-function runScript(script, args, work, env) {
-  const r = spawnSync('bash', [sh(script), ...args.map(sh)], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    timeout: 60000,
-    env: {
-      ...process.env,
-      PATH: `${work.bin}${path.delimiter}${process.env.PATH}`,
-      STUB_LOG: sh(work.log),
-      // 本文件只锁"连接串从哪来"，加密与异地副本由 backupEncryptionContract.test.js 覆盖
-      BACKUP_ENCRYPTION: 'plaintext-acknowledged',
-      MONGO_BACKUP_TRANSPORT: 'local',
-      MONGO_RESTORE_TRANSPORT: 'local',
-      RESTORE_CONFIRM: DB,
-      BACKUP_RETENTION_DAYS: '30',
-      STUB_WRITES_ARCHIVE: '1',
-      ...env,
-    },
-  });
+function baseEnv(work, env) {
+  return {
+    ...process.env,
+    PATH: `${work.bin}${path.delimiter}${process.env.PATH}`,
+    STUB_LOG: sh(work.log),
+    // 本文件只锁"连接串从哪来"，加密与异地副本由 backupEncryptionContract.test.js 覆盖
+    BACKUP_ENCRYPTION: 'plaintext-acknowledged',
+    MONGO_BACKUP_TRANSPORT: 'local',
+    MONGO_RESTORE_TRANSPORT: 'local',
+    RESTORE_CONFIRM: DB,
+    BACKUP_RETENTION_DAYS: '30',
+    STUB_WRITES_ARCHIVE: '1',
+    ...env,
+  };
+}
+
+function collect(r, work) {
   if (r.error) {
     // 环境没有 bash ⇒ 红，不静默跳过（静默跳过等于把这层防护换成错觉）
     throw new Error(
@@ -97,6 +95,38 @@ function runScript(script, args, work, env) {
     archives,
     calls: fs.existsSync(work.log) ? fs.readFileSync(work.log, 'utf8') : '',
   };
+}
+
+function runScript(script, args, work, env, opts = {}) {
+  return collect(
+    spawnSync('bash', [sh(script), ...args.map(sh)], {
+      // opts.cwd：`MONGODB_URI_FILE=-c` 这类"文件名会被当成选项"的形态只能在
+      // 该文件所在目录里复现，且不能把 `-c` 造进仓库目录
+      cwd: opts.cwd || ROOT,
+      encoding: 'utf8',
+      timeout: 60000,
+      env: baseEnv(work, env),
+    }),
+    work
+  );
+}
+
+/**
+ * 经 `bash -c` 起脚本，只为一种形态服务：**连接串里带真换行**。
+ * 换行不能走 Node 的 env 块（Windows 上能否承载不可靠），而 `$'…\n…'` 由 bash 自己展开，
+ * 与运维手滑敲出来的那个字节等价。脚本与目录也经 env 传进去，避免把含非 ASCII 的
+ * 临时目录拼进命令串。
+ */
+function runBashC(cmd, work, env) {
+  return collect(
+    spawnSync('bash', ['-c', cmd], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      timeout: 60000,
+      env: baseEnv(work, env),
+    }),
+    work
+  );
 }
 
 const backup = (work, env) => runScript(BACKUP, [work.backupDir], work, env);
@@ -274,5 +304,144 @@ describe('backup/restore 的 MONGODB_URI_FILE 接线（每日 cron 的默认形�
     expect(argvLines).not.toContain('mongodb://');
     expect(argvLines).not.toContain('FilePw');
     expect(argvLines).toContain('--config=');
+  });
+});
+
+/**
+ * 显式 MONGODB_URI 与密钥文件必须过同一道值校验（2026-10-03 审计 finding）。
+ *
+ * 修前的形状：mongo_hydrate_uri 里"显式值非空 ⇒ return 0"，四条内容判据
+ * （单行、纯可打印 ASCII、scheme、非空）只加在文件分支上。于是换行走后门：
+ *   MONGODB_URI=$'mongodb://…?authSource=admin\ndrop: true' ./scripts/restore-mongo.sh 归档
+ * 退出码 0，配置文件的第二行变成 mongorestore 的 `drop: true`——
+ * 「--drop 需显式 RESTORE_DROP=true」这道门禁被绕过，而横幅回显「删除既有 : false」，
+ * 现场证据与实际行为相反。目标库名又是在 `?` 处截断出来的，确认令牌照样对得上。
+ *
+ * 同一批 finding 还有三条形态各异的漏检，一并钉在这里：
+ *   · `MONGODB_URI_FILE=-c`：文件操作数没加 `--`，grep 把 `-c` 当选项、转去读调用方
+ *     stdin，密钥文件自始至终没被打开，报错却说"内容不是连接串"（说的是没读过的字节）；
+ *   · 口令里含未转义 `@`：`${URI_NO_CRED#*@}` 剥最短前缀，把口令尾巴留在"目标主机"里
+ *     打进 stdout（cron 邮件与 CI 日志会收走）；
+ *   · URI 不含库名：确认令牌退化成一句固定文案，而拒绝信息把这句原样回显——
+ *     第二次运行照抄即可放行，恢复范围变成"归档里有什么就恢复什么"。
+ */
+describe('显式 MONGODB_URI 的内容校验与脱敏回显', () => {
+  let work;
+  beforeEach(() => {
+    work = mkwork('backup-uri-hard-');
+  });
+  afterEach(() => {
+    fs.rmSync(work.dir, { recursive: true, force: true });
+  });
+
+  const bashBackup = (uriExpr, extra = {}) =>
+    runBashC(`MONGODB_URI=$'${uriExpr}' exec bash "$FS_S" "$FS_D"`, work, {
+      FS_S: sh(BACKUP),
+      FS_D: sh(work.backupDir),
+      MONGODB_URI_FILE: '',
+      ...extra,
+    });
+
+  test('显式值里的换行 ⇒ 拒绝，drop 不会被追加进配置文件（正向对照同通道放行）', () => {
+    const r = bashBackup(`${URI_EXPLICIT}\\ndrop: true`);
+    expect(r.code).not.toBe(0);
+    expect(r.archives).toEqual([]);
+    expect(r.out).toMatch(/换行|不可打印/);
+    // 桩工具会把 --config 的内容 cat 回日志：修前这里就会出现 `drop: true` 一行
+    expect(r.calls).not.toContain('drop: true');
+
+    // 反向自证：同一命令、同一夹具，只是不带那个换行 ⇒ 必须绿。
+    // 没有这一格，上面的红可能来自 bash -c 接线而不是判据本身。
+    const ok = bashBackup(URI_EXPLICIT);
+    expect(ok.code).toBe(0);
+    expect(ok.archives).toHaveLength(1);
+  });
+
+  test('显式值不是连接串 ⇒ 同样拒绝（此前只验文件那条路）', () => {
+    const r = bashBackup('postgres://fsms:pw@127.0.0.1:5432/fire_safety');
+    expect(r.code).not.toBe(0);
+    expect(r.archives).toEqual([]);
+    expect(r.out).toMatch(/不是 mongodb/);
+  });
+
+  test('MONGODB_URI_FILE=-c ⇒ 打开的是那个文件，不是调用方的 stdin', () => {
+    // `-c` 与密钥文件放在同一个目录里，并以该目录为 cwd：值就是字面量 `-c`，
+    // 这正是"以 - 开头的路径被当成选项"的唯一可复现形状。
+    fs.writeFileSync(path.join(work.dir, '-c'), URI_FILE);
+    const r = runScript(
+      BACKUP,
+      [work.backupDir],
+      work,
+      { MONGODB_URI: '', MONGODB_URI_FILE: '-c' },
+      {
+        cwd: work.dir,
+      }
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain(`uri: ${URI_FILE}`);
+    expect(r.out).not.toMatch(/空文件/);
+  });
+
+  test('口令里含未转义 @ ⇒ 回显的主机段不含口令尾巴', () => {
+    makeArchive(work);
+    const uri = 'mongodb://fsms:Sup3r!ca@99@10.0.0.5:27017/fire_safety?authSource=admin';
+    const r = restore(work, { MONGODB_URI: uri, MONGODB_URI_FILE: '' });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('目标主机 : 10.0.0.5:27017');
+    expect(r.out).not.toContain('99@10.0.0.5');
+    expect(r.out).not.toContain('Sup3r');
+  });
+
+  test('URI 不含库名 ⇒ 拒绝执行，抄不动确认门禁', () => {
+    makeArchive(work);
+    const uri = 'mongodb://fsms:pw@10.0.0.5:27017';
+    // 修前：期望值就是被拒绝信息原样回显的那句固定文案，照抄一遍即可放行
+    const asSentinel = restore(work, {
+      MONGODB_URI: uri,
+      MONGODB_URI_FILE: '',
+      RESTORE_CONFIRM: '(未在 URI 中指定，将按归档内的库名恢复)',
+    });
+    expect(asSentinel.code).not.toBe(0);
+    expect(asSentinel.out).toMatch(/未指定库名/);
+    // 桩工具把每次调用都记进 log：这里必须一条都没有 ⇒ 真的没走到 mongorestore
+    expect(asSentinel.calls).toBe('');
+
+    // 补上库名 ⇒ 同一条链路必须放行（证明红来自"没有库名"，不是夹具或 transport）
+    const withDb = restore(work, {
+      MONGODB_URI: `${uri}/fire_safety`,
+      MONGODB_URI_FILE: '',
+      RESTORE_CONFIRM: DB,
+    });
+    expect(withDb.code).toBe(0);
+    expect(withDb.calls).toContain('--config=');
+  });
+
+  test('SIGINT 打断备份 ⇒ 不得打印"备份成功"（trap 必须自己 exit）', () => {
+    // 桩 mongodump 演示真工具的行为：先写出半截归档，收到 INT 也不死，1.2s 后正常退出 0。
+    // 修前 `trap cleanup EXIT INT TERM` 只做清理不 exit ⇒ 脚本在信号之后继续往下跑，
+    // 于是那份 5 字节的半截归档被打印成 "Backup completed successfully" 并补了 .sha256。
+    fs.writeFileSync(
+      path.join(work.bin, 'mongodump'),
+      [
+        '#!/usr/bin/env bash',
+        'for a in "$@"; do case "$a" in --archive=*) out="${a#--archive=}";; esac; done',
+        'printf "PARTIAL" > "$out"',
+        'trap "exit 0" INT',
+        'sleep 1.2',
+        'exit 0',
+        '',
+      ].join('\n'),
+      { mode: 0o755 }
+    );
+    fs.chmodSync(path.join(work.bin, 'mongodump'), 0o755);
+
+    const r = runBashC('( sleep 0.4; kill -INT $$ ) & exec bash "$FS_S" "$FS_D"', work, {
+      FS_S: sh(BACKUP),
+      FS_D: sh(work.backupDir),
+      MONGODB_URI: URI_EXPLICIT,
+      MONGODB_URI_FILE: '',
+    });
+    expect(r.out).not.toMatch(/Backup completed successfully/);
+    expect(r.code).not.toBe(0);
   });
 });

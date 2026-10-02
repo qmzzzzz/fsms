@@ -41,6 +41,32 @@
   - "库里没有 `require.main === module` 入口支"，并补一条**真文件减法**：把三个 harness 的 require 全擦掉，
     豁免必须当场失效。
 
+### 安全（2026-10-03 · 备份/恢复 shell 的输入校验与退出路径）
+
+> 背景：上一轮给 shell 侧接上 `*_FILE` 后，逐行审计发现"能跑起来"和"不会把凭据/目标库交给
+> 一个没人校验的字符串"是两件事。九条 CONFIRMED 全部按缺陷本身定级，不看发现者的措辞。
+
+- **显式 `MONGODB_URI` 此前完全不校验**（只有文件那条路校验）。最糟的一条：连接串里嵌一个换行，
+  `printf 'uri: %s\n'` 写进 mongodump 的 `--config` 后，第二行就成了**配置文件里的一行选项**——
+  `…@host/db\n drop: true` 直接越过恢复侧所有门禁把"删库再恢复"追加进去。
+  新增共享判据 `mongo_validate_uri`（整串必须是单行纯可打印 ASCII + `mongodb(+srv)://` 前缀），
+  两个来源同闸。
+- **缺 `--` 操作数分隔符**：`MONGODB_URI_FILE=-c` 会被 `cat`/`grep` 当选项 ⇒ 读的是**调用方的 stdin**
+  而不是那个文件。补 `--`，并用真子进程断言"打开的是那个文件"。
+- **告警回显会泄出口令尾巴**：`${MONGODB_URI#*://}` 之后接 `${…*@}` 是最短匹配，
+  口令里含未转义 `@` 时把口令后半段连同主机名一起打进日志。改最长匹配，并补含 `@` 口令的夹具。
+- **恢复目标必须由字面决定**：URI 不含库名时，目标库由**归档内容**决定，
+  而 `RESTORE_CONFIRM` 的核对退化成"输入就是整串 URI 本身"——一个可猜的哨兵。
+  现在缺库名直接拒绝执行（门禁的前提是目标 identifiable），正向对照同夹具带库名放行。
+- **`trap cleanup EXIT INT TERM` 不自己 exit**：SIGINT 打断备份时，清理跑完继续往下执行，
+  实测打印「Backup completed successfully」而产物只有 5 字节。三条 trap 各自补 `exit 130/143`。
+- **`local` 传输分支失败后留 0 字节归档**：`docker` 分支早就处理了（重定向在失败前就建了文件），
+  `local` 分支没有——一个躺在 `backups/` 里的空 `.gz` 在回滚清单上"就是一次备份"。同一处理补齐。
+- **`grep -c` 无命中时把 `-c` 当选项吃 stdin**，且失败路径留下的空串会让 `[ "$_n" -eq 0 ]`
+  报 integer expression。改成先 `cat` 进变量再从 stdin 计数。
+- 测试：`backupUriFile.test.js` 17 → 23 例、`backupTransport.test.js` 7 → 8 例，每例都带**正向对照**
+  （证明不是靠"永远判红"混过去的）。`src/tests/config` + `src/tests/deploy` 合计 632/632 绿。
+
 ### 运维可用性（2026-10-03 · `*_FILE` 这条线的最后一公里：shell 侧解析 + 手册里每条命令行自带密钥）
 
 > 背景：前两轮把 Node 侧的六个运维脚本 + `npm run validate` 都接上了 `<NAME>_FILE` 回填，

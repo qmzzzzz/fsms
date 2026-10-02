@@ -126,7 +126,16 @@ cleanup() {
     umask "$OLD_UMASK"
   fi
 }
-trap cleanup EXIT INT TERM
+# INT/TERM 两条 trap 必须**自己收尾退出**：`trap cleanup EXIT INT TERM` 只在同一条里做清理、
+# 不做 exit，于是信号打断 mongodump 后脚本会**继续往下跑**——此刻 cleanup 已把 0600 配置删掉、
+# umask 也还原了，而后面"归档存在且非空"的判据用的是 mongodump 中途被截断的产物。
+# 实测（local 传输 + 桩工具响应 SIGINT 后退出）：产出 5 字节归档，仍然打印
+# `Backup completed successfully: …（5 bytes）`并补写 .sha256，哈希还对得上。
+# 那次"看起来成功的备份"正是 retention 清单与回滚演练会挑中的那一份。
+# 130/143 = 128+SIGINT/SIGTERM，让 cron 邮件与 CI 看得见是被信号打断的。
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 OLD_UMASK=$(umask)
 umask 077
@@ -144,7 +153,15 @@ echo "Starting MongoDB backup at $(date)"
 # 绝不出现在任何 argv 上（P2-27 的原始动机）。
 case "$MONGO_BACKUP_TRANSPORT" in
   local)
-    mongodump --config="$CONFIG_FILE" --archive="$ARCHIVE_PATH" --gzip
+    # 失败也要删半成品：docker 分支早就这么做了（重定向会先建出 0 字节文件），
+    # local 分支漏掉 ⇒ mongodump 非零退出时 set -e 直接把脚本带走，一个截断的 .gz
+    # 留在 backups/ 里，而它同样匹配 retention/回滚清单的时间戳命名。
+    # 失败现场不能留下看起来像成功的产物（与下方"不能只信退出码"同一条理由）。
+    if ! mongodump --config="$CONFIG_FILE" --archive="$ARCHIVE_PATH" --gzip; then
+      rm -f "$ARCHIVE_PATH"
+      echo "Error: mongodump 失败，已删除半成品归档：$ARCHIVE_PATH" >&2
+      exit 1
+    fi
     ;;
   docker)
     # 只把主机段换成容器内地址：账号、口令、库名与查询参数原样保留

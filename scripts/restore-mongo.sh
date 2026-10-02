@@ -5,6 +5,8 @@
 #
 # 环境变量：
 #   MONGODB_URI      必填（或用 MONGODB_URI_FILE 指向密钥文件），目标库连接串
+#                    **必须含库名**（`…/fire_safety?authSource=admin`）：没有库名时
+#                    恢复范围由归档内容决定，确认门禁无从核对，脚本直接拒绝执行
 #                    恢复目标是破坏性写入的落点，故命令行点名的 MONGODB_URI 一定赢过
 #                    环境里残留的 MONGODB_URI_FILE（两者并存时告警，不静默改目标）
 #   RESTORE_CONFIRM  非交互场景下的确认令牌，须等于目标库名
@@ -136,14 +138,27 @@ case "$MONGO_RESTORE_TRANSPORT" in
 esac
 
 # ================= 目标识别 =================
-# 从 URI 中剥离凭据后提取 host 与库名用于回显（绝不打印口令部分）
+# 从 URI 中剥离凭据后提取 host 与库名用于回显（绝不打印口令部分）。
+# 用 `##*@`（最长匹配）而不是 `#*@`（最短匹配）：口令里出现未转义的 `@` 时，
+# 最短匹配会把"口令的后半段@…"当成主机起点留在回显里——实测
+# `mongodb://fsms:Sup3r!ca@99@10.0.0.5:27017/fsms` 原先打印成
+# `目标主机 : 99@10.0.0.5:27017`，把口令尾巴送进了 stdout（cron 邮件、CI 日志都会收走）。
+# 驱动侧（WHATWG URL 解析）同样以主机段里**最后一个** `@` 界定 userinfo，
+# 所以"剥到最后一个 @"既是最保守的脱敏方向，也和实际连的库一致。
 URI_NO_CRED=${MONGODB_URI#*://}
-URI_NO_CRED=${URI_NO_CRED#*@}
+URI_NO_CRED=${URI_NO_CRED##*@}
 TARGET_HOST=${URI_NO_CRED%%/*}
 TARGET_DB=${URI_NO_CRED#*/}
 TARGET_DB=${TARGET_DB%%\?*}
 if [ "$TARGET_DB" = "$URI_NO_CRED" ] || [ -z "$TARGET_DB" ]; then
-  TARGET_DB="(未在 URI 中指定，将按归档内的库名恢复)"
+  # 门禁的语义是"你在两处点名的目标必须一致"：一处是 URI，一处是 RESTORE_CONFIRM/键入。
+  # URI 里没有库名时只剩一处，原来的兜底是把一句固定文案当作待确认的"库名"——
+  # 而那句话恰好被拒绝信息原样回显（`期望 '(未在 URI 中指定，将按归档内的库名恢复)'`），
+  # 于是第二次运行把这句抄进 RESTORE_CONFIRM 就能放行，门禁自己印出了自己的钥匙，
+  # 实际恢复范围变成"归档里有哪些库就恢复哪些"。
+  echo "Error: MONGODB_URI 未指定库名，恢复目标将由归档内容决定 ⇒ 确认门禁无从核对，拒绝执行" >&2
+  echo "       请在连接串末尾写明目标库：mongodb://<用户>:<口令>@<主机>:27017/<库名>?authSource=admin" >&2
+  exit 1
 fi
 
 echo "=============================================="
@@ -183,7 +198,15 @@ cleanup() {
     rm -f "$DECRYPTED_FILE"
   fi
 }
-trap cleanup EXIT INT TERM
+# INT/TERM 必须**自己收尾退出**：`trap cleanup EXIT INT TERM` 在同一条 trap 里只做清理
+# 不做 exit，信号打断 mongorestore 后脚本会**继续往下跑**（cleanup 已把 0600 配置删掉、
+# umask 也还原了），后面的成功回显照打。备份侧实测过同一形态：产出一份 5 字节的
+# 半成品归档并打印 "Backup completed successfully"，还补写了 .sha256 ——
+# 于是它在回滚清单上就是一次"好备份"。恢复侧少一层产物、多一份"以为没恢复成"的误判。
+# 130/143 是 128+SIGINT/SIGTERM 的惯例退出码，让 cron/CI 看得见是被信号打断的。
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 OLD_UMASK=$(umask)
 umask 077

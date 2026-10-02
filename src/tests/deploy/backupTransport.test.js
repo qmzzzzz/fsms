@@ -52,6 +52,9 @@ function makeWorkspace() {
     '    --archive=*) out="${arg#--archive=}"; printf \'MONGODUMP-LOCAL\' > "$out";;',
     '  esac',
     'done',
+    // 与 DOCKER_STUB_EXIT 对称：local 分支要能确定性地演"工具已经写出半截归档、随后失败"。
+    // 归档写入在上一行的 case 里已经完成，所以这里的退出就是 mongodump 干到一半挂掉的形态。
+    'if [ "${MONGODUMP_STUB_EXIT:-0}" != "0" ]; then exit "$MONGODUMP_STUB_EXIT"; fi',
     'exit 0',
     '',
   ].join('\n');
@@ -166,6 +169,17 @@ describe('backup-mongo.sh 传输路径', () => {
     const r = runBackup(work, { DOCKER_STUB_EXIT: '1' });
     expect(r.code).not.toBe(0);
     expect(archivesOf(work)).toEqual([]);
+  });
+
+  test('local 传输失败 ⇒ 同样不留半成品归档（修前只有 docker 分支删，local 直接漏）', () => {
+    // 与上一条同判据、不同分支：修前 local 分支是裸的 `mongodump …`，非零退出被
+    // set -e 带走，已经写了一半的 $ARCHIVE_PATH 原样留在 backups/ 里，
+    // 而它的命名正好匹配 retention 与回滚演练挑归档用的时间戳通配。
+    const work = makeWorkspace();
+    const r = runBackup(work, { MONGO_BACKUP_TRANSPORT: 'local', MONGODUMP_STUB_EXIT: '2' });
+    expect(r.code).not.toBe(0);
+    expect(archivesOf(work)).toEqual([]);
+    expect(r.out).toMatch(/已删除半成品归档/);
   });
 
   test('归档为 0 字节 ⇒ 判失败（mongodump 退出码 0 不等于备份成功）', () => {
