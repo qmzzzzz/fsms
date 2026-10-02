@@ -8,6 +8,66 @@
 
 ## [未发布]
 
+### 运维可用性（2026-10-03 · `npm run validate` 是这条线的第三个入口，而它一直站在闸外）
+
+> 背景：`*_FILE` 回填（P3-48）只在 require 到 `src/config` 的入口自动发生。上一轮补了六个
+> 运维脚本并立了 `scriptSecretHydration.test.js` 这条闸；本轮由并发审计线（lane-hydration-audit）
+> 逐条攻击那条闸的判据，查出**四个漏判形态**和**第三个同类入口**。
+
+- **finding：`node src/config/validate.js`（= `npm run validate`）在 `*_FILE` 部署下报四条假弱密钥**。
+  它不经过 `src/config/index.js:11`，没人回填，于是 `collectSecretErrors` 读到 `undefined`，
+  报「JWT_SECRET / JWT_REFRESH_SECRET / AES_SECRET_KEY / HMAC_SECRET 必须设置为至少 32 字符」
+  并以 1 退出。而 `deployment/secret-rotation.md:156` 正是拿这一步的退出码当
+  "轮换后配置自洽"的证据——密钥轮换流程的收尾在容器里做不到。
+  失效形态也和其余六个不同：它们症状是"读不到"，这条是**"密钥看起来弱"**，
+  会把排查方向直接带到"是不是运维把密钥换短了"上去。
+- **我自己的修法被打回了第一次（如实记录）**：第一版按位置判据把 hydrate 放在
+  `validate.js` 文件顶部（这样"hydrate 早于首次读取"在源码位置上成立、可被闸钉住）。
+  结果连带打红 5 个配置套件（validate / startupGuards / weakSecretPlaceholder /
+  transportTlsAssertion / immutableConfigGuard）。根因不是测试写错，是**判据形状与文件形状不匹配**：
+  `validate.js` 同时是库（app.js / index.js / staticFrontend.js / websocketService.js 都 require 它）
+  和进程入口，而"库在 require 期覆写调用方的 `process.env`"本身就是不该有的副作用——
+  `src/tests/setup.js` 给每个 worker 预置了四把 `*_FILE` 临时副本，凡"先设 env、后 require"
+  的夹具都被回填悄悄改回测试密钥。`index.js` 能那么做是因为它自己就是应用入口。
+  最终改法：hydrate 放进 `if (require.main === module)` 入口支，先回填再 `validateConfig()`。
+  A/B 实测（只给 `*_FILE`、`NODE_ENV=production`）：A 臂（预加载删掉 `*_FILE`，复现"回填没发生"）
+  四条假弱密钥 + 「MONGODB_URI 不能指向 localhost」全在；B 臂（当前代码，走真实 CLI）
+  弱密钥计数 0，剩下的是我没给的 `CORS_ORIGIN` / `REDIS_URL` / `ALLOWED_HOSTS` /
+  `TRUST_PROXY_HOPS`——与密钥无关。
+- **finding：闸的读点判据只认一种书写形态**。审计线逐条攻击后确认四处漏判：
+  ① 注释里提到 `hydrateSecretsFromFiles()` 就算证据（删掉真调用、留一句注释即绿）；
+  ② 解构 `const { MONGODB_URI } = process.env`、别名 `const env = process.env; env.X`、
+  动态键 `process.env[k]` 三种读法一律看不见——**看不见比判错更坏**，那等于静默豁免；
+  ③ 护栏代读通道 `resolveMongoUri()` 的 require 正则不认带扩展名（`'./destructiveGuard.js'`）
+  和 `require(path.join(__dirname, 'destructiveGuard'))` 两种写法，
+  而 `fix-token-blacklist-index.js` 唯一的读取通道就是它——上一轮那个"静默回退本地库"的
+  缺陷类别因此可以再次溜过；④ 扫描范围只有 `scripts/**`，既不含 package.json 里
+  `node <file>` 形态的 npm 入口（`src/config/validate.js` 就是这么漏的），也不含根目录
+  `migrate-mongo-config.js`。后者是本轮新发现：`npm run migrate:up` 是以**裸命令名**调 CLI，
+  `node <file>` 匹配看不见它，而 CLI 会把同目录的 `migrate-mongo-config.js` 当模块加载——
+  那个文件里既有 `resolveMongoUri()`，也有一行上一轮补的 hydrate，**但那行一直站在闸外**，
+  删掉不会有任何测试变红。
+- **闸改造**：判据抽成三个纯函数（`findHydrationOffender` / `findCliEntryOffender` / `topLevelReads`）
+  以便被合成源码直接攻击。注释先剥（逐字符走并跟踪引号，`'mongodb://127.0.0.1/db'` 里的 `//`
+  不能当注释起点）；动态键按"可能是读取"计（多算无害，少算是静默漏判）；护栏 require 放宽到
+  「`require(` 之后、右括号之前出现 destructiveGuard」。扫描范围三处并集，每处各由一条前提自证钉住。
+  新增三条豁免都带**可执行**证据而不是一句注释：豁免一（自带临时值的探针）逐个名字找到赋值处、
+  豁免二（共享库 `destructiveGuard.js`）用"确实被 ≥4 个入口 require"自证、
+  豁免三（库兼入口）的前提是该文件**没有任何模块顶层读取**（用括号深度算，`depthAt`）——
+  前提一破用例即红，逼着改法回到正题。压测/演练三个入口今天不读文件型密钥，
+  因此**不许预先占豁免位**（`expect(CLI_ENTRY_BLOCKS).not.toContain(f)` 那类反向钉）。
+  减法自证两处：把六个脚本各自的 hydrate 擦掉 ⇒ 闸逐个点名（`verdict` 必须含 hydrate，
+  并断言 `stripped !== a.code` 防止"减法没真的动"）；`migrate-mongo-config.js` 同做一遍。
+- **工具层陷阱（影响结论可信度，单独记）**：本会话的 Bash 里 `env VAR=x node …` 这种前缀
+  **静默不执行**（rc=0、无任何输出），于是第一版 A/B 探针两臂都数到 0 条错误，
+  看起来像"缺陷不存在"。同一份 env 用 bash 原生 `VAR=x node …` 前缀跑，才拿到 4 vs 0。
+  与上一轮 `'j'.repeat(48)` 夹具被 `isWeakSecret` 判弱那次同一性质：**探针自己坏掉时，
+  它给出的"否证"和"证伪"长得一模一样**，所以每条 A/B 都要先证明两臂至少各产出过非零信号。
+- 验证：`npx jest src/tests/config src/tests/deploy` ⇒ 35 套件 / 585 条全绿；
+  `scriptSecretHydration.test.js` 单跑 15/15；`prettier --check`、`eslint` 对改动的两个文件 0 问题；
+  `node scripts/lint-ratchet.js` 对我改的两个文件无回退（现存回退在 `src/services/securityAlert.js`，
+  属并发会话在改的文件，未动）。本轮没改 `docker-compose.yml`、`scripts/*.js` 与任何文档。
+
 ### 部署（2026-10-03 · SSH 部署路径上 digest 钉死闸一直是静默关闭的 + compose 密钥闸的清单只有 5/15）
 
 > 背景：本轮由「`*_FILE` 密钥回填」那条线连带查出。三条 finding 都属于同一类形状——

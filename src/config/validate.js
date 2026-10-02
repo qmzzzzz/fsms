@@ -657,7 +657,25 @@ module.exports = {
   resolveTrustProxyHops,
 };
 
-// 支持直接执行：node src/config/validate.js
+// 支持直接执行：node src/config/validate.js（= `npm run validate`）
+//
+// 这一支是**独立进程入口**，不经过 src/config/index.js:11，于是没人替它把 <NAME>_FILE
+// 回填进 process.env——而容器里密钥**只**以文件挂载（P3-48，见 ./secrets.js）。
+// 不回填时 collectSecretErrors 读到 undefined，报出四条「JWT/REFRESH/AES/HMAC 必须设置
+// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:156
+// 正是拿这一步的退出码当"轮换后配置自洽"的证据——*_FILE 部署下那条轮换流程做不到收尾。
+//
+// 为什么不在文件顶部 hydrate（本轮真的先写成顶部方案，被自己的测试打回来了）：
+// 本文件同时是**库**（app.js / index.js / staticFrontend.js / websocketService.js 都 require 它）
+// 和**入口**，而这两种身份对 require 期的副作用要求相反。顶部写法在 require 期就覆写
+// process.env：src/tests/setup.js 给每个 worker 预置了四把 `*_FILE` 临时副本，于是
+// 「先设 env、后 require」的用例被回填悄悄改回测试密钥，实测连带打红 5 个配置套件
+// （validate / startupGuards / weakSecretPlaceholder / transportTlsAssertion / immutableConfigGuard）。
+// 库不该在 require 期动全局环境；index.js 能那么做是因为它本身就是应用入口。
+// 代价是"hydrate 早于首次读取"在本文件不再由源码位置保证（读取都在函数体内），
+// 改由下面两条判据钉住：① 回填必须在本支里、② 且必须早于 validateConfig() 调用。
+// 见 src/tests/config/scriptSecretHydration.test.js。
 if (require.main === module) {
+  require('./secrets').hydrateSecretsFromFiles();
   validateConfig();
 }
