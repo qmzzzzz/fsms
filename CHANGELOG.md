@@ -8,6 +8,46 @@
 
 ## [未发布]
 
+### 安全（2026-10-03 · 密钥轮换的密钥不再经过命令行）
+
+> 背景：仓里所有密钥早已统一成 `<NAME>_FILE` 口径，唯独密钥轮换这一族还留着
+> `--new-key <KEY>`：把值写在 argv 上，同一个密钥就同时出现在
+> `/proc/<pid>/cmdline`（Linux 默认 0444 ⇒ 同机任意本地用户可读，而一次全量迁移要跑几分钟，
+> 窗口足够长；`ps(1)` / 任务管理器同理）、shell 历史（`HISTCONTROL=ignorespace` 只是
+> "记得在前面加空格"的人为约定，不是机制）、以及任何 `set -x` 的 CI 日志。
+> 同一门安全要求上的两个标准，收口成一条。
+
+- **新增 `scripts/secretFileArg.js`**：`readSecretFile` 把"密钥文件"的形状判据写死——
+  恰好一行非空内容、去 UTF-8 BOM 与 CR/尾空白、字符集限 `0x21–0x7E`（与 shell 侧
+  `mongoUri.sh` 的 `tr -d '\041-\176'` 同判据）；读不到、多行、含空白一律**硬失败**，
+  绝不"取第一条非空行"蒙过去。`resolveSecretSource` 的优先级与 shell 侧一致：
+  **显式 `--*-file` 赢过环境变量**（命令行点名的是"这一次轮换要用的值"，不能被 shell 里
+  残留的同名变量悄悄改写），两者都给时只打一行提示且**只点名不取值**。
+  所有错误信息只含标签与路径——一条"密钥泄漏"的报错如果把密钥再打一遍，
+  就是把它从 argv 换成了 stdout/stderr，而 CI 日志的保留时间通常更长。
+- **`migrate-mfa-secret.js` / `resign-audit-hmac.js` 改为 `--new-key-file` / `--old-key-file`**，
+  旧形态不是"删掉了事"而是**具名拒绝**（exit 2 并指向替代写法）。具名而非落到
+  `未知参数：${argv[i]}` 那条默认分支是刻意的：默认分支打印 `argv[i]`，而循环下一步就是
+  那个密钥本身——报错本身就成了第二次泄漏。
+- **一处有意的收窄**：`--*-file` 只接受 ASCII 密钥；密钥本身含非 ASCII 的用户仍走环境变量
+  （env 不经 `/proc/<pid>/cmdline`，不在这条禁令范围），报错里直接写明这条路。
+- **手册同步改口径，并顺手拆掉一个更常见的事故源**：`deployment/secret-rotation.md` 原先第 0 步
+  `openssl rand -hex 32` 让人"记下输出"、第 3 步 `printf '%s' '<新KEY>' > 载体` 让人**再敲一遍**——
+  重敲一次打错一个字符，数据已经用新钥加密完毕而应用拿的是另一把钥，比不改更糟。现在生成即落盘
+  （`umask 077` + 单行文件），迁移用 `--new-key-file` 指它，换钥用 `mv` 把同一份字节扶正；
+  全量轮换一节本就由 `generate-secrets.js` 产出文件，直接指过去即可。
+- **新闸 `src/tests/deploy/cliSecretArgGate.test.js`（20 例）**，三层判据：
+  静态完备性用**派生枚举**（"从 argv 取值"的判据是 `argv[i] === '--x'` 之后 60 字符窗口内的
+  `argv[++i]`，因此具名拒绝分支不会被误判成还在收密钥），任何密钥类选项必须以 `-file` 结尾，
+  文档里 `node scripts/…` 形态的命令行只允许使用该脚本确实接受的那些选项——新写第三个轮换脚本
+  时这条闸自动对它提要求，不需要有人记得来登记；行为闸真起子进程传 canary，断言 exit 2、
+  点名替代写法、**canary 一个字节都不出现在 stdout/stderr**、且看不到"已连接"（拒绝早于连库）；
+  再加 `--new-key-file` 成功路径"值进内存但不进输出"与优先级提示。
+  自证：合成违规（`--new-key` / `--db-password`）与真文件减法（把手册里的 `-file` 去掉）都能点亮。
+- 受影响的既有套件同步迁移到新形态并复跑绿：`destructiveGuardOrder`（9 例，夹具改为真实密钥文件——
+  必须是**能过强度校验**的密钥，否则 migrate 会以"拒绝迁移"而非断言的"拒绝执行"退出）、
+  `hmacResignPrecheck`（8 例）、`runbookApplyCommandContract`、`migrateMfaWriteVerify`。
+
 ### 安全（2026-10-03 · 冒烟/压测/演练不得接回真实基础设施）
 
 > 背景：`src/config/index.js:10-11` 在 **require 期**就调 `hydrateSecretsFromFiles()`，而冲突规则是

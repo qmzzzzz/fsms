@@ -20,6 +20,8 @@
  * 否则 secrets.hydrateSecretsFromFiles 会用文件内容把密钥恢复（文件优先于环境变量）。
  */
 
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
@@ -32,6 +34,13 @@ const NODE = process.execPath;
 const OLD_KEY = '11'.repeat(32);
 const NEW_KEY = '22'.repeat(32);
 const ATTACKER_KEY = '33'.repeat(32);
+
+// 新密钥经文件给出：`--new-key` 已移除（写在 argv 上的密钥会进 /proc/<pid>/cmdline 与 shell 历史）。
+// 本套件的判据里有"四条文档一字未动"这种逐字比对，argv 形态换了就得连带改夹具，
+// 而夹具改错的失效方向是"脚本拿到空密钥"——那会走 unverifiable 分支，报的仍是拒绝，只是原因不同。
+const KEY_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-hmac-resign-'));
+const KEY_FILE = path.join(KEY_DIR, 'new_hmac');
+fs.writeFileSync(KEY_FILE, `${NEW_KEY}\n`);
 
 const hmacOf = (secret, hash) =>
   crypto.createHmac('sha256', secret).update(hash, 'utf8').digest('hex');
@@ -93,7 +102,7 @@ function runScript({ apply, allowSuspect, currentKey }) {
     delete env.HMAC_SECRET_FILE; // 否则文件内容会覆盖上面的取值
   }
   delete env.NEW_HMAC_SECRET;
-  const argv = ['--new-key', NEW_KEY];
+  const argv = ['--new-key-file', KEY_FILE];
   if (apply) argv.push('--apply', '--yes');
   if (allowSuspect) argv.push('--allow-suspect-hmac');
   const r = spawnSync(NODE, [SCRIPT, ...argv], {
@@ -116,6 +125,7 @@ afterAll(async () => {
       .deleteMany({ hash: { $in: Object.values(HASHES) } });
     await mongoose.disconnect();
   }
+  fs.rmSync(KEY_DIR, { recursive: true, force: true });
 });
 
 describe('hmac 轮换预检的分类判定（纯函数真值表）', () => {

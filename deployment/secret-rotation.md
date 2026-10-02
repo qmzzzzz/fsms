@@ -128,24 +128,24 @@ node scripts/generate-secrets.js --env-snippet              # 本地：打印 .e
 ## AES_SECRET_KEY 轮换（必须先迁数据）
 
 ```bash
-# 0. 生成新密钥（不要直接覆盖旧文件）
-openssl rand -hex 32   # 记下输出作为 <新KEY>
+# 0. 生成新密钥（不要直接覆盖旧文件，也不要写进命令行）
+umask 077; openssl rand -hex 32 > ./secrets/aes_secret_key.new   # 单行、0600；下面用 --new-key-file 指它
 
 # 1. 停应用（避免迁移期间新数据用旧钥写入）
 docker compose stop app        # 或 kill 本地进程
 
 # 2. 演练 → 执行迁移
 MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
-  node scripts/migrate-mfa-secret.js --new-key <新KEY>
+  node scripts/migrate-mfa-secret.js --new-key-file ./secrets/aes_secret_key.new
 #    --apply 是破坏性写：必须显式给出目标库白名单，否则 destructiveGuard 以 exitCode=2 拒绝
 #    （防止将演练/迁移误指向非预期库）。本文件所有 `--apply` 同理，不再逐处重复注释。
 MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
-  ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key <新KEY> --apply
+  ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key-file ./secrets/aes_secret_key.new --apply
 
 # 3. 换钥
 #    本地开发：更新 .env 的 AES_SECRET_KEY
-#    容器：更新宿主机 ./secrets/aes_secret_key（chmod 600）
-printf '%s' '<新KEY>' > ./secrets/aes_secret_key
+#    容器：把迁移用的那份落成正式载体（mv 而非 printf：与写入密文的字节完全同一份，重敲一次就等于换了钥）
+mv ./secrets/aes_secret_key.new ./secrets/aes_secret_key
 
 # 4. 启动并验证：任一已开启 MFA 的账户走一遍 登录→输入动态码
 docker compose up -d app
@@ -166,15 +166,15 @@ MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
 # 1. 停应用
 docker compose stop app
 
-# 2. 生成新密钥并重签（演练 → 执行）
-NEW=$(openssl rand -hex 32)
+# 2. 生成新密钥并重签（演练 → 执行；新钥从生成到落库全程不进 argv）
+umask 077; openssl rand -hex 32 > ./secrets/hmac_secret.new
 MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
-  node scripts/resign-audit-hmac.js --new-key "$NEW"
+  node scripts/resign-audit-hmac.js --new-key-file ./secrets/hmac_secret.new
 MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
-  ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js --new-key "$NEW" --apply --yes
+  ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js --new-key-file ./secrets/hmac_secret.new --apply --yes
 
 # 3. 换钥并启动
-printf '%s' "$NEW" > ./secrets/hmac_secret
+mv ./secrets/hmac_secret.new ./secrets/hmac_secret
 docker compose up -d app
 
 # 4. 复核（预期零 hmac 失配）
@@ -357,19 +357,19 @@ docker compose stop app
 
 # 3. 两个需要数据迁移的密钥：先迁移、后换钥（顺序不可颠倒）
 #    前缀一律指向 ./secrets（**旧**钥）——第 4 步才替换目录，
-#    迁移脚本要用旧钥读懂存量、用 --new-key 写新钥。
-NEW_AES=$(cat ./secrets-new/aes_secret_key)
+#    迁移脚本要用旧钥读懂存量、用 --new-key-file 点名的新钥写回。
+#    新钥已经在 ./secrets-new 里（第 1 步生成的），直接把那份文件交出去：不 cat 进 shell 变量，
+#    也不 printf 到命令行——两者都会让密钥出现在 /proc/<pid>/cmdline（同机任意本地用户可读）。
 MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
-  node scripts/migrate-mfa-secret.js --new-key "$NEW_AES"            # 演练
+  node scripts/migrate-mfa-secret.js --new-key-file ./secrets-new/aes_secret_key            # 演练
 MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
-  ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key "$NEW_AES" --apply    # 执行
-NEW_HMAC=$(cat ./secrets-new/hmac_secret)
+  ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key-file ./secrets-new/aes_secret_key --apply    # 执行
 MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
   node scripts/verify-audit-chain.js > audit-chain-before-rotation.log
 MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
-  node scripts/resign-audit-hmac.js --new-key "$NEW_HMAC"            # 演练
+  node scripts/resign-audit-hmac.js --new-key-file ./secrets-new/hmac_secret            # 演练
 MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
-  ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js --new-key "$NEW_HMAC" --apply --yes    # 执行
+  ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js --new-key-file ./secrets-new/hmac_secret --apply --yes    # 执行
 
 # 4. 原子替换 secrets 目录（JWT/URI/口令等无迁移依赖的随批生效）
 mv ./secrets ./secrets-old && mv ./secrets-new ./secrets

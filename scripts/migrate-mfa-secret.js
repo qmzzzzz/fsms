@@ -8,16 +8,18 @@
  *
  * 步骤（维护窗口内执行）：
  *   1. 停应用（或停止 MFA enroll/登录写入），避免迁移期间新数据用旧钥写入
- *   2. node scripts/migrate-mfa-secret.js --new-key <新KEY>            # 演练
+ *   2. node scripts/migrate-mfa-secret.js --new-key-file <新KEY文件>       # 演练
  *   3. ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js \
- *        --new-key <新KEY> --apply                                     # 执行（M-08：无白名单直接拒绝）
+ *        --new-key-file <新KEY文件> --apply                                # 执行（M-08：无白名单直接拒绝）
  *   4. 更新密钥载体（.env 或 secrets/aes_secret_key）为新 KEY
  *   5. 启动应用；旧 KEY 建议密封留档至确认无回滚需要后再销毁
  *
  * 参数（命令行优先于环境变量）：
- *   --old-key <hex>        旧 AES_SECRET_KEY；缺省取当前环境（.env / *_FILE 注入）
- *   --new-key <hex>        新 AES_SECRET_KEY；也可经 NEW_AES_SECRET_KEY 环境变量提供
+ *   --old-key-file <路径>  旧 AES_SECRET_KEY；缺省取当前环境（.env / *_FILE 注入）
+ *   --new-key-file <路径>  新 AES_SECRET_KEY；也可经 NEW_AES_SECRET_KEY 环境变量提供
  *   --apply                实际写库；缺省为演练模式（只报告不改动）
+ *   密钥文件＝单行纯 ASCII，无 BOM/换行/缩进。原先的 --old-key/--new-key 已移除：
+ *   把密钥写在命令行上会同时落进 /proc/<pid>/cmdline（同机任意本地用户可读）与 shell 历史。
  *
  * 安全性：
  *   - 每条记录两道校验：先在内存用新钥回读（解不出原文就不碰库），写库后再从库里
@@ -38,13 +40,28 @@ const { ENC_PREFIX } = require('../src/utils/mfaSecret');
 // M-08：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
 const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
 
+// 密钥来源的统一判据（--*-file 或环境变量；错误信息只点名路径，不回显内容）
+const { resolveSecretSource } = require('./secretFileArg');
+
+// 已移除的 argv 形态密钥选项 → 替代写法。保留一个**具名**分支而不是落到"未知参数"：
+// 默认分支会打印 argv[i]，而循环下一步就是那个密钥本身——那等于把同一次泄漏又抄进 stderr/CI 日志。
+const REMOVED_KEY_FLAGS = { '--old-key': '--old-key-file', '--new-key': '--new-key-file' };
+
 function parseArgs(argv) {
-  const args = { apply: false, oldKey: null, newKey: null };
+  const args = { apply: false, oldKeyFile: null, newKeyFile: null };
   for (let i = 2; i < argv.length; i += 1) {
     if (argv[i] === '--apply') args.apply = true;
-    else if (argv[i] === '--old-key') args.oldKey = argv[++i];
-    else if (argv[i] === '--new-key') args.newKey = argv[++i];
-    else {
+    else if (argv[i] === '--old-key-file') args.oldKeyFile = argv[++i];
+    else if (argv[i] === '--new-key-file') args.newKeyFile = argv[++i];
+    else if (REMOVED_KEY_FLAGS[argv[i]]) {
+      console.error(
+        `已移除 ${argv[i]}：写在命令行上的密钥会出现在 /proc/<pid>/cmdline（同机任意本地用户可读）` +
+          `与 shell 历史里。\n` +
+          `   请改用 ${REMOVED_KEY_FLAGS[argv[i]]} <路径>（单行纯 ASCII），` +
+          `或环境变量 AES_SECRET_KEY / NEW_AES_SECRET_KEY。`
+      );
+      process.exit(2);
+    } else {
       console.error(`未知参数：${argv[i]}`);
       process.exit(2);
     }
@@ -59,7 +76,7 @@ function guardNewKeyStrength(newKey) {
   if (require('../src/config/validate').isWeakSecret(newKey)) {
     console.error(
       '拒绝迁移：新 AES 密钥未通过强度校验（长度 <32 / 命中弱密钥黑名单 / 低熵）。' +
-        '请用 `openssl rand -hex 32` 生成强随机密钥后经 --new-key 或 NEW_AES_SECRET_KEY 提供。'
+        '请用 `openssl rand -hex 32` 生成强随机密钥后经 --new-key-file 或 NEW_AES_SECRET_KEY 提供。'
     );
     process.exit(2);
   }
@@ -171,17 +188,29 @@ async function migrateAll({ coll, oldCipher, newCipher, apply }) {
 
 const runCli = async () => {
   const args = parseArgs(process.argv);
-  const oldKey = args.oldKey || process.env.AES_SECRET_KEY;
-  const newKey = args.newKey || process.env.NEW_AES_SECRET_KEY;
+  let oldKey;
+  let newKey;
+  try {
+    oldKey = resolveSecretSource({
+      filePath: args.oldKeyFile,
+      envValue: process.env.AES_SECRET_KEY,
+      label: '旧 AES 密钥',
+      flagName: '--old-key-file',
+      envName: 'AES_SECRET_KEY（.env / *_FILE 注入）',
+    });
+    newKey = resolveSecretSource({
+      filePath: args.newKeyFile,
+      envValue: process.env.NEW_AES_SECRET_KEY,
+      label: '新 AES 密钥',
+      flagName: '--new-key-file',
+      envName: 'NEW_AES_SECRET_KEY',
+    });
+  } catch (err) {
+    // 只转述 err.message：它按构造只含标签与路径，不含任何密钥内容
+    console.error(`参数错误：${err.message}`);
+    process.exit(2);
+  }
 
-  if (!oldKey) {
-    console.error('缺少旧密钥：请用 --old-key 提供，或确保 .env / *_FILE 已注入 AES_SECRET_KEY');
-    process.exit(2);
-  }
-  if (!newKey) {
-    console.error('缺少新密钥：请用 --new-key 提供，或设置 NEW_AES_SECRET_KEY 环境变量');
-    process.exit(2);
-  }
   if (oldKey === newKey) {
     console.log('新旧密钥相同，无需迁移');
     process.exit(0);

@@ -11,12 +11,15 @@
  *
  * 步骤（维护窗口内执行）：
  *   1. 停应用，避免迁移期间新记录用旧钥签名
- *   2. node scripts/resign-audit-hmac.js --new-key <新KEY>                     # 演练
+ *   2. node scripts/resign-audit-hmac.js --new-key-file <新KEY文件>              # 演练
  *   3. ALLOWED_SOURCE_DB=<库名> node scripts/resign-audit-hmac.js \
- *        --new-key <新KEY> --apply --yes                                      # 执行
+ *        --new-key-file <新KEY文件> --apply --yes                               # 执行
  *      （L-26：--apply 需 ALLOWED_SOURCE_DB 白名单 + --yes 双标志，与同族脚本一致）
  *   4. 更新密钥载体（.env 或 secrets/hmac_secret）为新 KEY，启动应用
  *   5. 运行 node scripts/verify-audit-chain.js 复核（预期零 hmac 失配）
+ *
+ *   密钥文件＝单行纯 ASCII，无 BOM/换行/缩进。原先的 --new-key 已移除：写在命令行上的密钥
+ *   会同时落进 /proc/<pid>/cmdline（同机任意本地用户可读）与 shell 历史。
  *
  * 注意：校验脚本只能证明「当前库内数据自洽」，不能区分「从未被篡改」与
  * 「被篡改后用新钥重签」——因此重签前建议先跑一次 verify 留档，
@@ -54,14 +57,26 @@ const SAMPLE_LIMIT = 10;
 // （后者至少还能靠 verify 发现不自洽，重签 hmac 会让失配记录重新「通过」）。
 const CONFIRM_FLAG = '--yes';
 
+// 密钥来源的统一判据（--*-file 或环境变量；错误信息只点名路径，不回显内容）
+const { resolveSecretSource } = require('./secretFileArg');
+
 function parseArgs(argv) {
-  const args = { apply: false, confirmYes: false, newKey: null, allowSuspect: false };
+  const args = { apply: false, confirmYes: false, newKeyFile: null, allowSuspect: false };
   for (let i = 2; i < argv.length; i += 1) {
     if (argv[i] === '--apply') args.apply = true;
     else if (argv[i] === CONFIRM_FLAG) args.confirmYes = true;
     else if (argv[i] === '--allow-suspect-hmac') args.allowSuspect = true;
-    else if (argv[i] === '--new-key') args.newKey = argv[++i];
-    else {
+    else if (argv[i] === '--new-key-file') args.newKeyFile = argv[++i];
+    else if (argv[i] === '--new-key') {
+      // 具名拒绝而不是落到"未知参数"：默认分支会打印 argv[i]，而循环下一步就是那个密钥本身，
+      // 等于把同一次泄漏再抄进 stderr / CI 日志一遍。
+      console.error(
+        '已移除 --new-key：写在命令行上的密钥会出现在 /proc/<pid>/cmdline（同机任意本地用户可读）' +
+          '与 shell 历史里。\n' +
+          '   请改用 --new-key-file <路径>（单行纯 ASCII），或环境变量 NEW_HMAC_SECRET。'
+      );
+      process.exit(2);
+    } else {
       console.error(`未知参数：${argv[i]}`);
       process.exit(2);
     }
@@ -190,13 +205,22 @@ module.exports = { classifyHmacState, SCAN_STATES, hmacOf };
 if (require.main === module) {
   (async () => {
     const args = parseArgs(process.argv);
-    const newKey = args.newKey || process.env.NEW_HMAC_SECRET;
-    const currentKey = process.env.HMAC_SECRET;
-
-    if (!newKey) {
-      console.error('缺少新密钥：请用 --new-key 提供，或设置 NEW_HMAC_SECRET 环境变量');
+    let newKey;
+    try {
+      newKey = resolveSecretSource({
+        filePath: args.newKeyFile,
+        envValue: process.env.NEW_HMAC_SECRET,
+        label: '新 HMAC 密钥',
+        flagName: '--new-key-file',
+        envName: 'NEW_HMAC_SECRET',
+      });
+    } catch (err) {
+      // 只转述 err.message：它按构造只含标签与路径，不含任何密钥内容
+      console.error(`参数错误：${err.message}`);
       process.exit(2);
     }
+    const currentKey = process.env.HMAC_SECRET;
+
     if (currentKey && currentKey === newKey) {
       console.log('新密钥与当前 HMAC_SECRET 相同，无需重签');
       process.exit(0);

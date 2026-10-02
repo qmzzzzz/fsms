@@ -19,6 +19,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
@@ -34,9 +35,15 @@ const PROBE_ENV = {
 };
 
 const KEY64 = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'.repeat(2);
+// 新密钥经文件给出（`--new-key` 已移除：写在 argv 上的密钥会进 /proc/<pid>/cmdline 与 shell 历史）。
+// 必须是**真文件且强度合格**：migrate-mfa-secret 的强度闸门排在护栏之前，给个空文件就会
+// 以「拒绝迁移」退出 2，而本用例断言的是「拒绝执行」这句护栏话术——那时绿的是错的分支。
+const KEY_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-guard-order-'));
+const KEY_FILE = path.join(KEY_DIR, 'new_key');
+fs.writeFileSync(KEY_FILE, `${KEY64}\n`);
 const DESTRUCTIVE = [
-  ['migrate-mfa-secret.js', ['--apply', '--new-key', KEY64]],
-  ['resign-audit-hmac.js', ['--apply', '--yes', '--new-key', KEY64]],
+  ['migrate-mfa-secret.js', ['--apply', '--new-key-file', KEY_FILE]],
+  ['resign-audit-hmac.js', ['--apply', '--yes', '--new-key-file', KEY_FILE]],
   ['resign-audit-chain-v3.js', ['--apply', '--yes']],
   ['fix-token-blacklist-index.js', ['--apply', '--yes']],
   ['sync-audit-indexes.js', ['--apply', '--yes']],
@@ -48,6 +55,10 @@ const DESTRUCTIVE = [
 ];
 
 describe('破坏性脚本：白名单校验必须先于数据库连接', () => {
+  afterAll(() => {
+    fs.rmSync(KEY_DIR, { recursive: true, force: true });
+  });
+
   test.each(DESTRUCTIVE)('%s：--apply 且无白名单 ⇒ 秒级 exit 2 并给出拒绝原因', (file, args) => {
     const t0 = Date.now();
     const r = spawnSync(NODE, [path.join(SCRIPTS, file), ...args], {
