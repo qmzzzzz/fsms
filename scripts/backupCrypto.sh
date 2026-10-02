@@ -24,16 +24,46 @@ crypto_require_gpg() {
   fi
 }
 
+# 确认收件人已在环境里（gpg 非对称加密的唯一"密钥输入"）
+crypto_require_recipient() {
+  if [ -z "${BACKUP_GPG_RECIPIENT:-}" ]; then
+    echo "Error: BACKUP_GPG_RECIPIENT 未设置（gpg 加密需要收件人公钥指纹/邮箱）。" >&2
+    return 1
+  fi
+}
+
+# 备份侧的**前置**门禁：模式认识 + 该模式需要的条件齐备，全部在产出任何文件之前问一次。
+# 为什么单独成函数而不是让调用方在 case 的各分支里现查：判据原先只写在
+# `case "$BACKUP_ENCRYPTION"` 那一段，而它位于 mongodump **之后** ⇒ 没装 gpg
+# 或忘配收件人的部署会先花几分钟导出一整个明文全量库（含 PII 与审计集合），
+# 再在加密步失败退出。本函数把"这次能不能加密"提到导出之前，
+# 加密步仍保留同样的检查（crypto_encrypt 自己也要拒绝，判据不靠调用顺序）。
+crypto_precheck_backup() {
+  case "$1" in
+    gpg)
+      crypto_require_gpg || return 1
+      crypto_require_recipient || {
+        echo "       现在还没有产出任何文件：配好收件人再跑，比导完整库再失败少一份明文泄露面。" >&2
+        return 1
+      }
+      ;;
+    plaintext-acknowledged)
+      # 明文出口是"取值即确认词"，不需要额外条件；警告由调用方在产出时打。
+      ;;
+    *)
+      echo "Error: BACKUP_ENCRYPTION 只能是 gpg 或 plaintext-acknowledged（当前：'$1'）" >&2
+      return 1
+      ;;
+  esac
+}
+
 # 加密：<src> → <dest>.gpg 语义由调用方给全路径；本函数只负责调用形态一致
 # 非交互（--batch --yes）：备份跑在 cron / deploy 流程里，任何 pinentry 弹窗
 # 都会让备份挂死，而加密侧只需要公钥、本就不该有交互。
 crypto_encrypt() {
   _crypto_src=$1
   _crypto_dest=$2
-  if [ -z "${BACKUP_GPG_RECIPIENT:-}" ]; then
-    echo "Error: BACKUP_GPG_RECIPIENT 未设置（gpg 加密需要收件人公钥指纹/邮箱）。" >&2
-    return 1
-  fi
+  crypto_require_recipient || return 1
   gpg --batch --yes --trust-model always \
     --output "$_crypto_dest" --encrypt --recipient "$BACKUP_GPG_RECIPIENT" "$_crypto_src"
 }

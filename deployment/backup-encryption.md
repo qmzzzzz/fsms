@@ -59,6 +59,16 @@ gpg --armor --export "ops@example.net" > fsms-backup.pub
 - 失败语义：加密失败 / 校验和失败 / 异地命令失败，任一发生都按**备份失败**处理
   （deploy.js 据此中止发布）。被吞掉的异地失败比没有异地更危险——它制造
   「以为自己有异地副本」的假象。
+- **门禁早于导出**：`BACKUP_ENCRYPTION` 认不出来、gpg 不在 PATH、`BACKUP_GPG_RECIPIENT`
+  没配，三种情况都在 `mongodump` 之前拒绝（连 `backups/` 都不创建）。此前它们是
+  "先导出整个明文全量库、再在加密步失败"——`set -e` 直接带走脚本，那句"加密成功后
+  立即删除明文"永远执行不到，于是每次失败都往备份目录多留一份全量库明文。
+- **失败现场零残留**：未到"定稿点"（密文 + 校验和都已在手且非空）的产物由 `cleanup`
+  一律删除，包括被 SIGINT/SIGTERM 打断时那半截归档。它们在 `backups/` 里与成功产物
+  **同名**（`fire-safety-backup-*.gz[.gpg][.sha256]`），留着就会被 retention 清单、
+  回滚演练和"最近一次备份"的报表挑中。定稿之后反过来一个都不删——异地副本失败时，
+  已到手的本地副本仍是回滚抓手。行为闸见
+  `src/tests/deploy/backupFailureArtifactHygiene.test.js`（真跑 bash + 桩 mongodump/gpg）。
 
 ## 恢复演练（每季度至少一次，与 rollback-drill.md 联动）
 

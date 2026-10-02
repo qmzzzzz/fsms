@@ -99,6 +99,18 @@ case "$MONGO_BACKUP_TRANSPORT" in
     ;;
 esac
 
+# ================= P1-① 加密门禁（必须早于 mongodump） =================
+# 默认 gpg 非对称加密；明文出口取值本身就是一句确认词。
+# 为什么在这里查而不是等到加密那一步：判据原先只写在归档**之后**的 case 里，
+# 于是"宿主机没装 gpg"或"忘配 BACKUP_ENCRYPTION 收件人"的部署会先花几分钟导出
+# 整个明文全量库（含人员 PII 与不可篡改审计集合），再在加密步失败退出——
+# 每次失败都往 backups/ 留下一份 0600 的明文归档（set -e 直接带走脚本，
+# 加密分支里"写完就删明文"那行永远执行不到）。问不清能不能加密就不开始导出。
+BACKUP_ENCRYPTION=${BACKUP_ENCRYPTION:-gpg}
+if ! crypto_precheck_backup "$BACKUP_ENCRYPTION"; then
+  exit 1
+fi
+
 # 创建备份目录
 mkdir -p "$BACKUP_DIR"
 
@@ -112,9 +124,30 @@ fi
 # 凭据配置文件：umask 077 保证 0600 权限，trap 保证任何退出路径都清理
 # （含 set -e 触发的中途失败与 SIGINT/SIGTERM）
 CONFIG_FILE=""
+# 定稿标志：0 = 这次运行还不是一次可信备份，它的产物必须被清掉；
+# 1 = 加密副本（或经确认的明文归档）与校验和都已在手，任何退出路径都不许再碰。
+FINALIZED=0
 cleanup() {
   if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     rm -f "$CONFIG_FILE"
+  fi
+  # 未定稿的产物一律删除。它们在 backups/ 里和成功产物**同名**
+  # （fire-safety-backup-*.gz[.gpg][.sha256]），于是会被 retention 清单、回滚演练
+  # 与"最近一次备份"的报表挑中——真要恢复那天才发现是半截的。
+  # 分支里原有的删除点只覆盖两条 mongodump 失败路径，覆盖不到的是：
+  #   · 加密步失败/校验和写不出（明文归档已经在盘上，set -e 直接带走，
+  #     "写完就删明文"那行永远执行不到 ⇒ 每次失败多留一份全量明文）；
+  #   · 被 SIGINT/SIGTERM 打断的窗口：下面两条 trap 已经会自己收尾退出，
+  #     但退出后那 5 字节的半截归档仍留在目录里（实测过它的形状）。
+  # 反过来，定稿之后一个都不能删：异地副本失败按设计要让整体失败，
+  # 那时到手的加密备份连同校验和必须留下。
+  if [ "$FINALIZED" -ne 1 ]; then
+    for _artifact in "$ARCHIVE_PATH" "$ARCHIVE_PATH.sha256" \
+                     "${ENCRYPTED_PATH:-}" "${ENCRYPTED_PATH:-}.sha256"; do
+      if [ -n "$_artifact" ]; then
+        rm -f -- "$_artifact"
+      fi
+    done
   fi
   # umask 的还原也放在这里：还原点一旦写在"临时凭据文件建好之后"，收紧就只覆盖了
   # 那一格，而后面 mongodump 产出的归档同样是**全量业务库明文**（含 PII 与审计集合）。
@@ -204,13 +237,10 @@ if [ "$ARCHIVE_BYTES" -le 0 ]; then
 fi
 
 # ================= P1-① 加密与校验和 =================
-# 默认 gpg 非对称加密（归档 → 归档.gz.gpg + .sha256，明文归档随后删除）。
-# 明文出口的取值本身就是一句确认词——它必须出现在环境配置里才生效，
-# 任何"忘了配加密"的部署会在这一步硬失败，而不是静默产出明文全量库。
-BACKUP_ENCRYPTION=${BACKUP_ENCRYPTION:-gpg}
+# 模式与前置条件已在 mongodump 之前由 crypto_precheck_backup 问过（见上），这里只做分发。
+# 归档 → 归档.gz.gpg + .sha256，明文归档在"加密副本 + 校验和都到手"的瞬间删除。
 case "$BACKUP_ENCRYPTION" in
   gpg)
-    crypto_require_gpg || exit 1
     ENCRYPTED_PATH="$ARCHIVE_PATH.gpg"
     if [ -e "$ENCRYPTED_PATH" ]; then
       echo "Error: 目标加密归档已存在，拒绝覆盖：$ENCRYPTED_PATH" >&2
@@ -227,6 +257,9 @@ case "$BACKUP_ENCRYPTION" in
       exit 1
     fi
     crypto_checksum "$ENCRYPTED_PATH"
+    # 定稿点：密文与校验和都已在手且非空。此刻起 cleanup 不得再删任何产物
+    # （见下方 FINALIZED 的注释），而明文归档的历史使命已经结束。
+    FINALIZED=1
     # 明文归档完成历史使命：加密副本 + 校验和在手的瞬间就地删除。
     # 留着它 = P1-① 的缺口原样存在，只是多花了一次加密的 CPU。
     rm -f "$ARCHIVE_PATH"
@@ -236,10 +269,14 @@ case "$BACKUP_ENCRYPTION" in
     echo "ERROR-LEVEL WARNING: BACKUP_ENCRYPTION=plaintext-acknowledged——本次备份是明文全量库，" >&2
     echo "  含全部人员 PII 与不可篡改审计集合。此选择必须已在部署文档记录理由与补偿控制。" >&2
     crypto_checksum "$ARCHIVE_PATH"
+    FINALIZED=1
     BACKUP_FILE_FINAL="$ARCHIVE_PATH"
     ;;
   *)
-    echo "Error: BACKUP_ENCRYPTION 只能是 gpg 或 plaintext-acknowledged（当前：'${BACKUP_ENCRYPTION}'）" >&2
+    # 前置门禁已经用同一句判据拒过这个值，走到这里只可能是有人在导出途中改了它。
+    # 错误文案由共享实现产出（两处的口径不会各自漂移），兜底分支再点名分发口径。
+    crypto_precheck_backup "$BACKUP_ENCRYPTION" || exit 1
+    echo "Error: 加密模式 '${BACKUP_ENCRYPTION}' 未进入任何已知分发支" >&2
     exit 1
     ;;
 esac

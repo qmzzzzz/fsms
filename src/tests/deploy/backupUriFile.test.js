@@ -443,5 +443,9 @@ describe('显式 MONGODB_URI 的内容校验与脱敏回显', () => {
     });
     expect(r.out).not.toMatch(/Backup completed successfully/);
     expect(r.code).not.toBe(0);
+    // 信号打断之后**目录里不能留东西**：桩已经写出半截归档，而它的名字与成功产物
+    // 同形（fire-safety-backup-*.gz）——留着它，retention 清单与回滚演练就会把
+    // 一次中断的运行当成"最近有一次备份"。cleanup 按定稿标志（FINALIZED）删除未定稿产物。
+    expect(r.archives).toEqual([]);
   });
 });

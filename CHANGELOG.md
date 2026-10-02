@@ -8,6 +8,54 @@
 
 ## [未发布]
 
+### 安全（2026-10-03 · 备份/恢复：主机段改写去掉 sed，失败现场不留明文归档）
+
+> 背景：`scripts/mongoUri.sh` 是备份与恢复共用的唯一一份 URI 判据，它自己却是
+> `sed -E "s#^((mongodb(\+srv)?://)([^/]*@)?)[^/]*#\1${MONGO_CONTAINER_HOST}#"`——
+> 两条注入路径都落在这句替换上，而落点都是 mongodump/mongorestore 的 **0600 配置文件**：
+> 配置里唯一由调用方决定的就是那一行 `uri:`。
+
+- **`mongo_swap_host` 改为纯 shell 字符串重建**（scheme / authority / tail 三段用参数展开切开）。
+  sed 形态的两个实测失效：① 替换串里的字面 `\n` 被 GNU sed 展开成**真换行** ⇒
+  `MONGO_CONTAINER_HOST='127.0.0.1:27017\ncollection:auditLog'` 能给配置追加第二行，
+  单集合导出被记成一次成功的全量备份；② 口令里未转义的 `/` 提前终结 `[^/]*` 那次匹配 ⇒
+  替换错位（`mongodb://u:p/x@h:27017/db` → `mongodb://127.0.0.1:27017/x@h:27017/db`），
+  **凭据被静默丢弃**而横幅承诺的仍是 `h:27017`/`db`。
+- **`MONGO_CONTAINER_HOST` 新增字符集判据**（`[A-Za-z0-9.:_-]`，且端口必须是数字、
+  IPv6 字面量 `[::1]:27017` 单独放行）。换行、空格、`\`、`;`、`|`、反引号、`$` 全部进不来。
+- **切出来的主机段必须"确实是一个 authority"**：认不出来就拒（`u:p`、`mongo:abc`、`mongo:`、
+  `[::1]:abc` 都在这一条）。第一版在这里补过一条"有凭据且路径里含 `@` ⇒ 拒"，实测把
+  `mongodb://u:p@mongo/db@name` 一起误杀（库名带 `@` 合法，authority 终止于第一个 `/`），
+  已由精确判据取代。
+- **两条出口都过值判据**：改写那一支与"主机段本来就等于目标地址"的合法空操作那一支。
+  少了后者，`$'mongodb://127.0.0.1:27017/fsms\ndrop:true'` 配 `MONGO_CONTAINER_HOST=127.0.0.1:27017`
+  会绕过全部检查被原样交回调用方。
+- **`mongo_validate_uri` 的越界字节判据补哨兵**：`$(… | tr -d '\041-\176')` 非空这个写法漏在
+  **命令替换会剥掉尾部全部换行**——载荷 `…?authSource=admin\ndrop:true` 的注入部分本身全是
+  可打印 ASCII，残串为空 ⇒ 放行，`drop:true` 成为配置文件的第二行，而门禁与横幅都声明相反。
+  现在先补一个 `~` 再比，判据无歧义。
+- **`backup-mongo.sh` 的加密门禁提到 `mongodump` 之前**（新增 `crypto_precheck_backup`，
+  与 `crypto_encrypt` 同源）。原先 `gpg` 不在 PATH 或 `BACKUP_GPG_RECIPIENT` 没配时，
+  脚本先花几分钟导出整个明文全量库（人员 PII + 不可篡改审计集合）再在加密步失败退出，
+  而 `set -e` 直接带走 ⇒ "写完就删明文"那行永远执行不到，**每次失败都往 `backups/`
+  多留一份明文**。现在三种不可用形态都在创建目录之前拒绝。
+- **未定稿产物由 `cleanup` 一律删除（`FINALIZED` 标志）**。失败产物与成功产物同名
+  （`fire-safety-backup-*.gz[.gpg][.sha256]`），留着就会被 retention 清单、回滚演练与
+  "最近一次备份"的报表挑中。定稿点（密文 + 校验和都在手且非空）之后反向成立：
+  一个都不能删——异地副本失败按设计整体失败，那时已到手的本地副本仍是回滚抓手。
+  `deployment/backup-encryption.md` 的失败语义两条已同步。
+- **闸**：`src/tests/config/mongoTransportParity.test.js` 15 → 41 例（真跑 bash 的行为真值表 +
+  目标地址字符集九臂 + 值判据的 LF/CR 成对臂；结构层的"反向前提"换了方向——原先断言
+  那句 sed 还在共享实现里，现在断言改写函数体内不许出现 sed，并用历史写法作合成违例
+  证明判据非空集，注释过滤本身也自证）。夹具改经单引号安全转义传入（`$`/反引号不得被
+  bash 先展开一次），CR 载荷由 shell `printf` 现场构造（Node 传 `bash -c` 时裸 CR 会在
+  传输层被吃掉，测到的是"没有 CR 的串"——假绿）。
+- **新闸 `src/tests/deploy/backupFailureArtifactHygiene.test.js`（9 例）**：真进程 + 桩
+  mongodump/gpg（PATH 注入），断言的是"目录里到底有什么文件、桩有没有被调用"。
+  含一处前世版对照：从脚本副本里按缩进反向引用删掉 `FINALIZED` 块（并 `bash -n` 证明它仍是
+  合法脚本），同一夹具必须**留下明文归档**，否则这条断言抓不住回退。
+  `backupUriFile.test.js` 的 SIGINT 用例同时补上"打断后目录里不得留半截归档"。
+
 ### 安全（2026-10-03 · 密钥轮换的密钥不再经过命令行）
 
 > 背景：仓里所有密钥早已统一成 `<NAME>_FILE` 口径，唯独密钥轮换这一族还留着

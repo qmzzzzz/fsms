@@ -6,7 +6,7 @@
 #   · mongo_swap_host：把 URI 的主机段换成容器内地址
 #
 # 为什么单独成文件：backup-mongo.sh 与 restore-mongo.sh 各自维护过一份一模一样的
-# `sed -E "s#^((mongodb(\+srv)?://)([^/]*@)?)[^/]*#\1${MONGO_CONTAINER_HOST}#"`，
+# 主机段替换（`sed -E "s#^((mongodb(\+srv)?://)([^/]*@)?)[^/]*#\1${MONGO_CONTAINER_HOST}#"`），
 # 而两处的失败判据都是"替换后与原串相同 ⇒ 认定形态不认识"。这个判据有个真实的假阳性：
 # 无凭据且主机本来就写成了目标地址（`mongodb://127.0.0.1:27017/fsms`，在容器内跑脚本时
 # 就是这一形态）会被判成"URI 形态异常"而拒绝执行——备份/恢复在最需要它们的时候报错。
@@ -14,6 +14,13 @@
 #   · 先正认提取主机段，认不出来才算形态异常；
 #   · 主机段已经等于目标地址 ⇒ 合法的空操作，放行；
 #   · 其余情形必须真的发生变化，否则按不认识处理（宁可拒，也不要静默连到宿主机名上）。
+# 现在这条替换是**纯 shell 字符串重建，不再有 sed**，因为 sed 形态带着两处实测到的失效：
+#   · 替换串里的字面 `\n` 被 GNU sed 展开成真换行 ⇒
+#     `MONGO_CONTAINER_HOST='127.0.0.1:27017\ncollection:auditLog'` 能给 mongodump 的
+#     0600 配置追加第二行，单集合导出被记成一次**成功的全量备份**；
+#   · 口令里未转义的 `/` 会终结 `[^/]*` 那次匹配 ⇒ 替换错位
+#     （`mongodb://u:p/x@h:27017/db` → `mongodb://127.0.0.1:27017/x@h:27017/db`），
+#     凭据被静默丢弃，而横幅承诺的是 `h:27017`/`db`。
 # 凭据段与查询串一律原样保留：调用方随后把结果写进 0600 的配置或管道，绝不上 argv。
 
 mongo_swap_host() {
@@ -25,23 +32,85 @@ mongo_swap_host() {
     *) return 1 ;;
   esac
 
-  _host=$(printf '%s' "$_uri" | sed -E 's#^mongodb(\+srv)?://([^/]*@)?([^/]*)(/.*)?$#\3#')
-  if [ -z "$_host" ] || [ "$_host" = "$_uri" ]; then
-    # sed 没有命中 ⇒ 不是可识别的 `scheme://[creds@]host[/db][?opts]` 形态
+  # _target 的字符集判据：它即将被拼进连接串，而连接串原样写进 0600 配置文件。
+  # 主机标签/域名/IPv6 字面量/端口（以及 systemd 风格的服务名）全在这套字符里，
+  # 换行、空格、`\`、`;`、`|`、反引号等一律进不来——这正是上面第二条失效的正面判据。
+  case "$_target" in
+    '' | *[!A-Za-z0-9.:_-]*) return 1 ;;
+  esac
+
+  _scheme=${_uri%%://*}
+  _rest=${_uri#*://}
+  case "$_rest" in
+    */*) _auth=${_rest%%/*}; _tail=/${_rest#*/} ;;
+    \?*) _auth=${_rest%%\?*}; _tail="?${_rest#*\?}" ;;
+    *) _auth=$_rest; _tail="" ;;
+  esac
+  case "$_auth" in
+    *@*) _creds=${_auth%@*}; _host=${_auth##*@} ;;
+    *) _creds=''; _host=$_auth ;;
+  esac
+  if [ -z "$_host" ]; then
+    # `mongodb://` 之后什么都没有：不是可识别的 `scheme://[creds@]host[/db][?opts]` 形态
     return 1
   fi
 
+  # 提取出的主机段必须"确实是一个 authority"，否则整次重建都是在猜。
+  # 这条判据正是本文件开头声明的意图（"先正认提取主机段，认不出来才算形态异常"）：
+  #   · `mongodb://u:p/x@h:27017/db`（口令里有未转义的 `/`，RFC 3986 要求写成 %2F）
+  #     会被切成"主机 = u:p"——端口位置落进字母 ⇒ 拒绝。旧的 sed 写法在这里
+  #     静默丢掉凭据、拼出一个连向别处的串，而横幅承诺的是 h:27017/db（实测）。
+  #   · IPv6 字面量 `[::1]:27017` 必须放过：方括号内不做字符集判据，只判端口。
+  #   · 路径里的 `@`（`/db@name` 是完全合法的库名）不做任何额外拒绝。第一版在这里补过
+  #     一条"有凭据且尾部含 @ ⇒ 拒"，实测把 `mongodb://u:p@mongo/db@name` 一起误杀，
+  #     而它本来就是多余的：按 RFC 3986 authority 终止于第一个 `/`，路径里的 `@`
+  #     根本不参与主机段提取，需要判的只有"切出来的主机段像不像 authority"。
+  if [ "${_host#[}" != "$_host" ]; then
+    case "$_host" in
+      \[*\]) : ;;
+      \[*\]:*)
+        case "${_host##*:}" in
+          '' | *[!0-9]*) return 1 ;;
+        esac
+        ;;
+      *) return 1 ;;
+    esac
+  else
+    case "$_host" in
+      '' | :*) return 1 ;;
+      *[!A-Za-z0-9.:_-]*) return 1 ;;
+    esac
+    _port=${_host##*:}
+    if [ "$_port" != "$_host" ]; then
+      case "$_port" in
+        '' | *[!0-9]*) return 1 ;;
+      esac
+    fi
+  fi
+
   if [ "$_host" = "$_target" ]; then
+    # 合法空操作也要过一次值判据。少了这一步，"主机段本来就等于目标地址"的 URI
+    # 会绕过全部换行/不可打印检查被原样交回调用方，而调用方紧接着就把返回值
+    # 写进 mongodump 的 0600 配置（实测形态：`$'mongodb://127.0.0.1:27017/fsms\ndrop:true'`
+    # 配 `MONGO_CONTAINER_HOST=127.0.0.1:27017`）。上游 hydrate 确实会拒它，
+    # 但判据不能靠调用方的顺序——这正是本函数存在的理由（一处实现，两侧共用）。
+    mongo_validate_uri "$_uri" "MONGODB_URI（主机段已等于目标地址，未改写）" || return 1
     printf '%s' "$_uri"
     return 0
   fi
 
-  _swapped=$(printf '%s' "$_uri" |
-    sed -E "s#^((mongodb(\+srv)?://)([^/]*@)?)[^/]*#\1${_target}#")
-  if [ -z "$_swapped" ] || [ "$_swapped" = "$_uri" ]; then
+  if [ -n "$_creds" ]; then
+    _new="${_scheme}://${_creds}@${_target}${_tail}"
+  else
+    _new="${_scheme}://${_target}${_tail}"
+  fi
+  if [ "$_new" = "$_uri" ]; then
     return 1
   fi
-  printf '%s' "$_swapped"
+  # 重建结果再过一次值判据：越界字节留在中间时 mongodump 只会报一个和"配置被改写"
+  # 毫无关系的解析错，所以在这里点名拒绝。
+  mongo_validate_uri "$_new" "MONGO_CONTAINER_HOST 改写后的连接串" || return 1
+  printf '%s' "$_new"
 }
 
 # 校验一个连接串**值本身**（不论它来自显式 MONGODB_URI 还是密钥文件）。
@@ -63,7 +132,15 @@ mongo_validate_uri() {
   _uri=$1
   _src=$2
 
-  if [ -n "$(printf '%s' "$_uri" | tr -d '\041-\176')" ]; then
+  # 哨兵是必需的，不是装饰：命令替换会剥掉**尾部**全部换行，所以
+  #   $(printf '%s' "$_uri" | tr -d '\041-\176')
+  # 对"注入内容本身全是可打印 ASCII、只靠换行分隔"的载荷返回空串 ⇒ 放行。实测形态：
+  #   MONGODB_URI=$'mongodb://fsms:pw@10.0.0.5:27017/fire_safety?authSource=admin\ndrop:true'
+  # 旧写法照样退 0，`drop:true` 成为配置文件的第二行，而横幅回显「删除既有 : false」——
+  # 门禁被值里的一条换行绕过，现场证据还声明相反。
+  # 先补一个哨兵字符再比较：残串只可能是越界字节（可打印 ASCII 已被 tr 删掉），
+  # 因此 "残串+哨兵" 等于哨兵 当且仅当 残串为空，判据无歧义。
+  if [ "$(printf '%s' "$_uri" | tr -d '\041-\176'; printf '~')" != '~' ]; then
     printf 'Error: %s 含空白、换行或不可打印字符（应为单行纯 ASCII，特殊字符需 %%XX 转义）\n' \
       "$_src" >&2
     return 1
