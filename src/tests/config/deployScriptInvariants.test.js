@@ -381,6 +381,17 @@ describe('批次H 工程与部署加固回归', () => {
       'AES_SECRET_KEY_FILE',
       'HMAC_SECRET',
       'HMAC_SECRET_FILE',
+      // 下面三对是 NUL/UTF-16 那组用例引入的。必须一起进隔离清单：
+      // hydrateSecretsFromFiles() 会遍历 FILE_BACKED_SECRETS 全集，残留的
+      // *_FILE 会让**后面每条**用例都多读到一份指向已删临时目录的文件，
+      // 于是失败原因从"判据不成立"变成"上一个用例污染环境"——同一 worker 进程
+      // 里的其他测试文件也会跟着中招（jest 复用 worker，process.env 不重置）。
+      'METRICS_TOKEN',
+      'METRICS_TOKEN_FILE',
+      'SECURITY_ALERT_WEBHOOK_SECRET',
+      'SECURITY_ALERT_WEBHOOK_SECRET_FILE',
+      'LOGIN_ECDH_PRIVATE_KEY',
+      'LOGIN_ECDH_PRIVATE_KEY_FILE',
     ];
     const saved = {};
 
@@ -445,6 +456,87 @@ describe('批次H 工程与部署加固回归', () => {
     test('内容只有 BOM 时按空文件抛错（而不是带着 \\uFEFF 单字符密钥启动）', () => {
       process.env.JWT_SECRET_FILE = writeSecret('bom-only', '\uFEFF');
       expect(() => hydrate()).toThrow(/为空/);
+    });
+
+    // ── NUL / UTF-16（finding #26 的 Node 侧同族）──────────────────────────────
+    // 这条与 scripts/mongoUri.sh 的 NUL 闸同根，但失败形态更糟：bash 的命令替换把 NUL
+    // **删掉**（值被拼接改坏），Node 的 utf8 解码把 NUL **留下**，随后 process.env 赋值
+    // 把它截断。所以下面第一条不是断言我们的代码，而是断言平台事实——它是"为什么必须在
+    // 入口抛错"的全部理由；哪天 Node 改成拒绝赋值，这条会告警我们前提变了。
+    test('前置事实：真实进程里 process.env 无法原样往返含 NUL 的值（截断或拒绝赋值）', () => {
+      // 必须 spawn 子进程量，不能在用例进程里直接赋：jest-environment-node 用自己的
+      // 对象代理 process.env，在本进程内 'A\\u0000b' 能原样读回 —— 实测第一版就这么
+      // 写在这条上，它把"真实平台会截断"这条前提判成了假。
+      const { execFileSync } = require('child_process');
+      const code =
+        'try{process.env.Z_PROBE="A\\u0000b";' +
+        'process.stdout.write(String(process.env.Z_PROBE===undefined?-1:process.env.Z_PROBE.length));}' +
+        'catch(e){process.stdout.write("threw");}';
+      let out = '';
+      try {
+        out = execFileSync(process.execPath, ['-e', code], { encoding: 'utf8' }).trim();
+      } catch (e) {
+        out = 'spawn-failed';
+      }
+      // 'A\u0000b' 原样往返 = 长度 3；实测（Windows / Node 24）得到长度 1（'A'）。
+      // 判据只钉"不是 3"，这样 Linux 上若表现为拒绝赋值（'threw'）用例照样成立，
+      // 而两个平台上"注入的值 ≠ 文件里的值"这个前提都被守住了。
+      expect(out === 'threw' || out === '1').toBe(true);
+      expect(out).not.toBe('3');
+    });
+
+    test('UTF-16 另存的密钥文件抛错，而不是带着只剩首字符的密钥启动', () => {
+      // 'aes-key-…' 的 UTF-16LE 形态里每个 ASCII 字符都跟着一个 00 ⇒ 无这道闸时
+      // 注入值是 'a'（1 个字符）。AES_SECRET_KEY 下游有 ≥32 长度闸会吵，但同一入口
+      // 服务的 METRICS_TOKEN / SECURITY_ALERT_WEBHOOK_SECRET 等没有长度判据，
+      // 它们的形态是"进程活着、签名/MAC 全对不上"⇒ 安全告警静默丢弃。
+      const p = path.join(tmpDir, 'aes-utf16le');
+      fs.writeFileSync(p, Buffer.from('aes-key-0000000000000000000000', 'utf16le'));
+      process.env.AES_SECRET_KEY_FILE = p;
+      expect(() => hydrate()).toThrow(/含 NUL 字符/);
+      expect(process.env.AES_SECRET_KEY).toBeUndefined();
+    });
+
+    test('密钥中间混进一个 NUL 也拒绝（不只是 UTF-16 整文件形态）', () => {
+      const p = path.join(tmpDir, 'token-mid-nul');
+      fs.writeFileSync(p, Buffer.from('metrics\u0000token-value', 'utf8'));
+      process.env.METRICS_TOKEN_FILE = p;
+      expect(() => hydrate()).toThrow(/含 NUL 字符/);
+      expect(process.env.METRICS_TOKEN).toBeUndefined();
+    });
+
+    test('NUL 在末尾时同样拒绝（尾部换行的剥离不覆盖 NUL）', () => {
+      const p = path.join(tmpDir, 'trailing-nul');
+      fs.writeFileSync(p, Buffer.from('webhook-secret-value\u0000\u0000', 'utf8'));
+      process.env.SECURITY_ALERT_WEBHOOK_SECRET_FILE = p;
+      expect(() => hydrate()).toThrow(/含 NUL 字符/);
+    });
+
+    test('反向自证：多行 PEM（真换行、无 NUL）照常注入 —— 判据没有扩成"拒绝控制字符"', () => {
+      // LOGIN_ECDH_PRIVATE_KEY 是 PEM，内容必然含换行。把判据写成"拒绝所有控制字符"
+      // 会把正常部署拦死，所以这条钉住"只有 NUL 被拒"。
+      const pem = '-----BEGIN EC PRIVATE KEY-----\nMHQCewYKK\n-----END EC PRIVATE KEY-----\n';
+      process.env.LOGIN_ECDH_PRIVATE_KEY_FILE = writeSecret('ec', pem);
+      const { loaded, warnings } = hydrate();
+      expect(loaded).toContain('LOGIN_ECDH_PRIVATE_KEY');
+      expect(warnings).toEqual([]);
+      expect(process.env.LOGIN_ECDH_PRIVATE_KEY).toBe(pem.replace(/\n+$/, ''));
+    });
+
+    test('NUL 的报错只点名变量与文件路径，不回显密钥内容', () => {
+      const secret = 'super-unique-do-not-leak-0000000000';
+      const p = path.join(tmpDir, 'leak-check');
+      fs.writeFileSync(p, Buffer.from(`${secret}\u0000`, 'utf8'));
+      process.env.HMAC_SECRET_FILE = p;
+      let msg = '';
+      expect(() => hydrate()).toThrow(/含 NUL 字符/);
+      try {
+        hydrate();
+      } catch (e) {
+        msg = e.message;
+      }
+      expect(msg).not.toMatch(/super-unique-do-not-leak/);
+      expect(msg).toMatch(/HMAC_SECRET_FILE/);
     });
 
     test('首尾空格保持原样但必须告警（只在 BOM 上自动裁剪）', () => {

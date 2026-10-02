@@ -90,6 +90,27 @@ function hydrateSecretsFromFiles() {
     // 与用户输错码的表现完全一致，排查方向会被带偏到验证码上。
     value = value.replace(/^\uFEFF/, '').replace(/[\r\n]+$/, '');
 
+    // NUL 一律拒绝，且必须判在**赋给 process.env 之前**：Node 的 utf8 解码会把 NUL
+    // 原样留在 JS 字符串里（`trim()` 也不认它是空白，所以既不改值也不触发下面的
+    // 空白告警），而把含 NUL 的串赋给环境变量时实测（Windows / Node 24.18）**不抛错**、
+    // 按 C 字符串在第一个 NUL 处截断，回读 `'A\0b'` 得到 `'A'`。UTF-16"另存为"的密钥文件
+    // ——每个 ASCII 字符后面都跟一个 00 —— 会让服务带着"只剩首字符"的密钥成功启动。
+    // 能不能被下游拦住纯属巧合：JWT/REFRESH/AES/HMAC 有 ≥32 长度闸、DOCS_PASSWORD 有
+    // ≥16 闸（这些会启动失败，吵得响），而 METRICS_TOKEN / SECURITY_ALERT_WEBHOOK_SECRET /
+    // LOG_SHIPPING_TOKEN / MONGO_ROOT_PASSWORD / SENTRY_DSN / REDIS_URL 没有长度判据，
+    // 它们的失败形态是"进程活着但对不上"——webhook 签名校验失败等于安全告警静默丢弃。
+    // 判据因此放在唯一的注入入口，而不是散到 16 个下游校验里。
+    //
+    // 只拒 NUL，不拒"所有控制字符"：LOGIN_ECDH_PRIVATE_KEY 是多行 PEM，
+    // 中间的 \n 完全合法，一刀切会把正常部署拦死。
+    if (value.includes('\u0000')) {
+      throw new Error(
+        `${filePathVar} 指向的密钥文件含 NUL 字符（${filePath}）。` +
+          '赋给环境变量时会在第一个 NUL 处静默截断，注入的将不是文件里写的那串密钥；' +
+          '多为 UTF-16/二进制"另存为"的产物，请用 UTF-8（无 BOM）重写该文件'
+      );
+    }
+
     // 首尾空白（BOM 之外的空格/Tab）保持原样不裁：真有密钥以空格为内容时静默裁掉
     // 会复现上面同一症状，所以这里只喊不改。
     if (value !== value.trim()) {

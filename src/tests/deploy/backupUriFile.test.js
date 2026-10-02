@@ -291,6 +291,86 @@ describe('backup/restore 的 MONGODB_URI_FILE 接线（每日 cron 的默认形�
     expect(r.out).toContain(missing);
   });
 
+  // ---- NUL / UTF-16（finding #26）----
+  // `_body=$(cat -- "$_file")` 这一步 bash 就把 NUL 吃掉了（只在 stderr 留一行 warning，
+  // 退出码仍是 0），于是后面四条判据看到的是**改写后的串**，不是文件里的字节。
+  // 两条现实形态：UTF-16"另存为"整文件（每个 ASCII 后跟一个 00）⇒ 改写结果恰好仍是合法
+  // 连接串，备份 rc=0；库名中间夹一个 NUL ⇒ 改写结果连的是**没人写过的库**。
+  // 同族缺陷在 Node 侧的形态更糟（process.env 截断成首字符），见 deployScriptInvariants.test.js。
+
+  test('UTF-16 另存的连接串文件 ⇒ 非零、点名文件、零归档', () => {
+    const file = secretFile(work, Buffer.from(`${URI_FILE}\n`, 'utf16le'));
+    const r = backup(work, { MONGODB_URI: '', MONGODB_URI_FILE: file });
+    expect(r.code).not.toBe(0);
+    expect(r.archives).toEqual([]);
+    expect(r.out).toMatch(/NUL/);
+    expect(r.out).toMatch(/UTF-16/);
+    expect(r.out).toContain(file);
+  });
+
+  test('库名中间夹一个 NUL ⇒ 拒绝，而不是打进改写后的那个库', () => {
+    // 去掉 NUL 后是 `…/fsmsx?authSource=admin`——形状完全合法，四条判据一条都拦不住，
+    // 但运维在文件里写的是 `fsms` + 一个不可见字节。这类差异只会出现在恢复那天。
+    const file = secretFile(
+      work,
+      Buffer.from(
+        'mongodb://fsms:FilePw%401@127.0.0.1:27017/fsms\u0000x?authSource=admin\n',
+        'utf8'
+      )
+    );
+    const r = backup(work, { MONGODB_URI: '', MONGODB_URI_FILE: file });
+    expect(r.code).not.toBe(0);
+    expect(r.archives).toEqual([]);
+    expect(r.calls).not.toMatch(/TOOL /);
+    expect(r.out).toMatch(/NUL/);
+  });
+
+  test('反向自证：同一串去掉 NUL ⇒ 照常放行（判据没有退化成"拒绝一切"）', () => {
+    const file = secretFile(
+      work,
+      'mongodb://fsms:FilePw%401@127.0.0.1:27017/fsmsx?authSource=admin\n'
+    );
+    const r = backup(work, { MONGODB_URI: '', MONGODB_URI_FILE: file });
+    expect(r.code).toBe(0);
+    expect(r.archives).toHaveLength(1);
+    expect(r.calls).toMatch(/fsmsx/);
+  });
+
+  test('前提自证：删掉 NUL 闸 ⇒ 同一份 UTF-16 夹具 rc=0 并产出归档（红确实来自这道闸）', () => {
+    // 机械删块 + 找不到就抛：上一轮踩过"变异没落地、用例对着未改动的文件保持绿"，
+    // 所以这里不用 sed 行号，改成"按特征定位并显式断言定位成功"。
+    const lines = fs.readFileSync(path.join(ROOT, 'scripts', 'mongoUri.sh'), 'utf8').split('\n');
+    const from = lines.findIndex((l) => /tr -dc '\\000'/.test(l));
+    if (from < 0) {
+      throw new Error('夹具前提失效：mongoUri.sh 里找不到 NUL 闸的判据行，请同步本用例');
+    }
+    let to = from;
+    while (to < lines.length && lines[to].trim() !== 'fi') to += 1;
+    if (to >= lines.length) {
+      throw new Error('夹具前提失效：NUL 闸的 if 没有配对的 fi 收尾');
+    }
+    const legacy = path.join(work.dir, 'legacy-nul');
+    fs.mkdirSync(legacy);
+    for (const f of ['backup-mongo.sh', 'backupCrypto.sh']) {
+      fs.copyFileSync(path.join(ROOT, 'scripts', f), path.join(legacy, f));
+    }
+    fs.writeFileSync(
+      path.join(legacy, 'mongoUri.sh'),
+      [...lines.slice(0, from), ...lines.slice(to + 1)].join('\n')
+    );
+
+    const file = secretFile(work, Buffer.from(`${URI_FILE}\n`, 'utf16le'));
+    const r = runScript(path.join(legacy, 'backup-mongo.sh'), [work.backupDir], work, {
+      MONGODB_URI: '',
+      MONGODB_URI_FILE: file,
+    });
+    expect(r.code).toBe(0);
+    expect(r.archives).toHaveLength(1);
+    // 而且送去 mongodump 的是"吃掉 NUL 之后"的串：与正确值字形相同，所以任何
+    // 只比对文本的断言都看不出文件其实不是 UTF-8。
+    expect(r.calls).toContain('fire_safety');
+  });
+
   // ---- 凭据通道不回退（P2-27：连接串绝不上 argv）----
 
   test('hydrate 之后凭据仍不进 argv：文件里的串只出现在 --config 内容中', () => {

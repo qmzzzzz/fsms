@@ -8,6 +8,51 @@
 
 ## [未发布]
 
+### 安全（2026-10-03 · UTF-16 密钥文件：bash 侧把连接串改坏、Node 侧把密钥截成一个字符，两边都 rc=0）
+
+> 背景：`*_FILE` 约定有两个读者，它们吃掉"坏字节"的方式**相反**，而两个都不报警。
+> 触发形态是运维用记事本/PowerShell 把密钥"另存为 Unicode"——UTF-16LE 里每个 ASCII
+> 字符后面都跟一个 `00`，肉眼看文件内容完全正常。
+>
+> - **bash 侧**（`scripts/mongoUri.sh` 的 `mongo_hydrate_uri`）：`_body=$(cat -- "$_file")`
+>   这一步命令替换就把 NUL **删掉**了（bash 只在 stderr 留一行 warning，退出码仍是 0），
+>   于是后面四条判据（单行 / 纯可打印 ASCII / scheme / 非空）校验的是**改写后的串**，
+>   不是文件里的字节。实测（bash 5.3.9）：UTF-16LE 的
+>   `mongodb://fsms:pw@h/db` 剥掉 NUL 后字形与正确值一模一样 ⇒ 放行；把 NUL 埋在库名中间
+>   （`…/fsms<NUL>x`）则放行一个"没人写过的库"，rc=0。
+> - **Node 侧**（`src/config/secrets.js` 的 `hydrateSecretsFromFiles`）：`readFileSync(…,'utf8')`
+>   把 NUL **留在** JS 字符串里，`trim()` 不认它是空白（所以既不裁也不告警），
+>   随后 `process.env[name] = value` 在第一个 NUL 处**截断**。实测（Windows / Node 24.18）：
+>   `process.env.X='A\0b'` 不抛错、回读得到 `'A'`；把 UTF-16 的 AES 密钥喂进去，
+>   注入值是 1 个字符，`loaded` 照常包含该键、`warnings` 为空。
+>
+> 哪些会被下游拦住纯属巧合，所以不能拿它当"没问题"的证据：`JWT_SECRET` /
+> `JWT_REFRESH_SECRET` / `AES_SECRET_KEY` / `HMAC_SECRET` 有 ≥32 长度闸、`DOCS_PASSWORD` 有
+> ≥16 闸（这些会启动失败，吵得响）；`METRICS_TOKEN` / `SECURITY_ALERT_WEBHOOK_SECRET` /
+> `LOG_SHIPPING_TOKEN` / `MONGO_ROOT_PASSWORD` / `SENTRY_DSN` / `REDIS_URL` 没有长度判据，
+> 它们的形态是"进程活着但对不上"——其中 webhook 签名密钥被截断等于**安全告警静默丢弃**。
+> 反向核验过一条更吓人的假设，结论是否定的：`ADMIN_INITIAL_PASSWORD` 被截断**不会**
+> 造出 1 字符管理员口令，`models/User.js:67` 的 `minlength: 12` 会在 `User.create` 抛错。
+
+- `scripts/mongoUri.sh`：在任何命令替换**之前**按原始文件字节判 NUL
+  （`tr -dc '\000' < file | wc -c`），非零即拒绝并点名文件与"UTF-16/二进制另存为"这一成因。
+  判据写成"剩下的字节个数 ≠ 0"而不是"grep 到就算"：`tr` 自身失败时残串是空串，
+  `"" != "0"` 照样点亮 ⇒ fail-closed。
+- `src/config/secrets.js`：在唯一的注入入口抛错，早于赋值也早于"空文件"判定
+  （`'\0'` 单字符文件若走到赋值，得到的会是**空**环境变量）。只拒 NUL，不拒"所有控制字符"——
+  `LOGIN_ECDH_PRIVATE_KEY` 是多行 PEM，中间的 `\n` 合法，一刀切会把正常部署拦死。
+- 报错只点名变量名与文件路径，不回显任何密钥字节（新增一条用例钉住这点）。
+- 新增 4 条 shell 侧 + 6 条 Node 侧用例，其中两条是**闸内的变异自证**：
+  `backupUriFile.test.js` 按代码特征删掉 NUL 闸那段、用同一份 UTF-16 夹具重跑备份，
+  必须变成 rc=0 且产出归档——这证明"红"确实来自那道闸，而不是被别的东西凑出来的绿；
+  找不到判据行就直接抛错，避免上一轮踩过的"变异没落地、用例对着未改动的文件保持绿"。
+  Node 侧配套一条反向自证：多行 PEM 照常注入，证明判据没退化成拒绝一切。
+- 记一条踩过的测试环境坑：**平台事实不能在 jest 进程里量**。第一版把
+  `process.env.X='A\0b'` 的回读断言写在用例里，jest-environment-node 用自己的对象代理
+  `process.env`，NUL 能原样往返 ⇒ 把"真实进程会截断"这条前提判成了假。改为 spawn 子进程量，
+  并把判据写成"长度不是 3"（截断得到 1、或某平台直接拒绝赋值都算通过），
+  这样 Linux 上的表现尚未实测也不会成为跨平台红灯。
+
 ### 安全（2026-10-03 · 异地副本的"空命令假成功"：`BACKUP_OFFSITE_CMD=" "` 时一次都没复制，回显却写 completed）
 
 > 背景：`scripts/backup-mongo.sh` 的异地副本那一步，头部注释早就写着原则
