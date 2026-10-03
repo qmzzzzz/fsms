@@ -11,12 +11,21 @@
  *     失败推迟到构建期，且现场看起来"已经钉过版"；
  *   - **RepoDigests 条目天生不带 tag**（`docker.io/library/node@sha256:…`），旧脚本把整串
  *     当钉版引用写入 ⇒ 可读 tag 消失，产物被本仓的钉版门禁 `baseImageDigestPinned` 判红；
- *     而"已经是 `tag@sha256:…`"的行又**包含**脚本常量 `FROM node:22.14.0-alpine` 这个前缀，
- *     旧判据用无边界子串匹配，会把已钉版仓库放行到落笔，产出 `…@sha256:新@sha256:旧`
- *     的双 digest 并打印成功（2026-10-03 对着真实 Dockerfile 实测复现）；
- *   - "边检查边落笔、两个目标顺序跑"会留下**半钉仓库**（Dockerfile 已改、compose 仍指向
- *     可变 tag），而且此后唯一能修它的脚本自己拒绝再跑；`sed > tmp; mv tmp file` 还会
- *     把上一次中断留下的同名临时文件**静默吞掉**。
+ *   - 判据用"子串匹配"而不是"值的位置"：`已是 tag@sha256:…` 的行**包含**脚本常量
+ *     `FROM node:22.14.0-alpine` 这个前缀，于是旧实现把已钉版仓库放行到落笔，产出
+ *     `…@sha256:新@sha256:旧` 的双 digest 并打印"已替换并校验"
+ *     （2026-10-03 对着真实 Dockerfile 实测复现，三条 FROM 全中招）；
+ *   - 反过来，"已钉"被判成错误又会把**混合仓库**变成死路：本仓库今天的真实状态是
+ *     Dockerfile 三条 FROM 全钉、compose 的 mongo 没钉，旧实现第一步就退出 ⇒ compose
+ *     永远钉不上，而 `baseImageDigestPinned` 的文件头把"跑本脚本重新捕获"写成唯一升级路径。
+ *
+ * 现在脚本按**指令行的值 token** 分类，四个处置各有对应期望（本文件逐条覆盖）：
+ *   待钉 bare      → 钉上；已钉 same → 该目标跳过（不改字节、不报错）；
+ *   待刷新 refresh → 换成刚捕获的 digest（上游滚动同名 tag 的升级路径，注释里的示例一起跟上）；
+ *   够不着（--platform= 前缀 / 引号包裹 / 序列项 / 折叠标量 / 变量展开 / tag 与 @ 之间夹空白 /
+ *   无 tag 的纯 digest / tag 漂移）→ 停手、零写入、打印行号。
+ * 整体 no-op（两个目标都已钉成刚捕获的 digest）仍然是错误。
+ *
  * 全部由真跑证明（PATH 里插 docker stub），不用扫源码文本 —— 同仓 backup-mongo.sh
  * 的既有覆盖就是文本契约，证明不了任何运行时行为。
  *
@@ -34,8 +43,12 @@ const ROOT = path.resolve(__dirname, '../..');
 const SCRIPT = path.join(ROOT, 'scripts', 'capture-image-digests.sh');
 
 function findShell() {
+  // 分类器（awk）与替换（sed -E）都是脚本的硬依赖：缺任一个时整组显式跳过并说明原因，
+  // 否则失败会以"rc=127 的不明报错"出现，看起来像脚本缺陷而不是平台缺工具。
   for (const c of ['/bin/sh', 'sh', 'C:/Program Files/Git/bin/sh.exe', 'bash']) {
-    const r = spawnSync(c, ['-c', 'exit 0'], { encoding: 'utf8' });
+    const r = spawnSync(c, ['-c', 'command -v awk >/dev/null && command -v sed >/dev/null'], {
+      encoding: 'utf8',
+    });
     if (!r.error && r.status === 0) return c;
   }
   return null;
@@ -43,7 +56,7 @@ function findShell() {
 const SH = findShell();
 if (!SH) {
   console.warn(
-    '[跳过] 未找到 POSIX sh：capture-image-digests.sh 的行为用例在本平台无法执行（CI ubuntu 会跑）'
+    '[跳过] 未找到带 awk/sed 的 POSIX sh：capture-image-digests.sh 的行为用例在本平台无法执行（CI ubuntu 会跑）'
   );
 }
 
@@ -51,6 +64,8 @@ const group = SH ? describe : describe.skip;
 
 const HEX_A = 'a'.repeat(64);
 const HEX_B = 'b'.repeat(64);
+/** 夹具里"已经钉着、但不是本次捕获值"的 digest：待刷新（refresh）这条臂用它 */
+const HEX_OLD = 'c'.repeat(64);
 /**
  * `docker inspect --format='{{index .RepoDigests 0}}'` 的两个真实形态：**都不带 tag**。
  *   短名   `node@sha256:…`（按 digest 拉取时常见）
@@ -78,6 +93,8 @@ const QUALIFIED_MONGO_REF = `docker.io/library/mongo@sha256:${HEX_B}`;
  */
 const NODE_PINNED = `node:22.14.0-alpine@sha256:${HEX_A}`;
 const MONGO_PINNED = `mongo:6.0.20@sha256:${HEX_B}`;
+const NODE_STALE = `node:22.14.0-alpine@sha256:${HEX_OLD}`;
+const MONGO_STALE = `mongo:6.0.20@sha256:${HEX_OLD}`;
 
 /** 双 digest 的坏引用：钉版失败推迟到 docker build，而文件"看起来已经钉过" */
 const DOUBLE_DIGEST = /@sha256:[0-9a-f]{64}@sha256:/;
@@ -110,6 +127,22 @@ case "$sub" in
 esac
 exit 0
 `;
+
+/**
+ * 从脚本源码里切出一个 shell 函数体（`name() {` 到下一个独占一行的 `}`）。
+ * 只用于把仓库名归一那两个纯函数单独跑一遍：脚本常量写死在文件顶部，
+ * 带端口的私有 registry 引用**没法通过 --root 夹具喂进真跑**，而那正是对账逻辑
+ * 最容易判错的一侧（从第一个冒号截断就会把 registry 名当成仓库名）。
+ * 切片而不是重写：判据必须来自同一份源码，抄一遍就成了测我自己的副本。
+ */
+function extractFn(name) {
+  const src = fs.readFileSync(SCRIPT, 'utf8').split(/\r?\n/);
+  const start = src.findIndex((line) => line === `${name}() {`);
+  expect(start).toBeGreaterThan(-1);
+  const end = src.slice(start + 1).findIndex((line) => line === '}');
+  expect(end).toBeGreaterThan(-1);
+  return src.slice(start, start + 1 + end + 1).join('\n');
+}
 
 const tracked = [];
 afterAll(() => {
@@ -192,37 +225,69 @@ function run(fx, args, mode = 'good') {
   };
 }
 
-/** 只把 compose 的 mongo **指令行**换成常量表里没有的 tag（注释里那份演示保持原样） */
-const driftCompose = (src) => src.replace(/^ {4}image: mongo:6\.0\.20$/m, '    image: mongo:9.9.9');
-const driftComposeTag = (fx) =>
-  fs.writeFileSync(path.join(fx.dir, 'docker-compose.yml'), driftCompose(fx.compose), 'utf8');
-const driftDockerfileTag = (fx) =>
-  fs.writeFileSync(
-    path.join(fx.dir, 'Dockerfile'),
-    fx.dockerfile.replace(/node:22\.14\.0-alpine/g, 'node:22.99.9-alpine'),
-    'utf8'
-  );
-const noMutation = () => {};
+const writeDockerfile = (fx, body) =>
+  fs.writeFileSync(path.join(fx.dir, 'Dockerfile'), body, 'utf8');
+const writeCompose = (fx, body) =>
+  fs.writeFileSync(path.join(fx.dir, 'docker-compose.yml'), body, 'utf8');
 
 /**
- * 把两个目标都写成**已经钉过版**的形态（`name:tag@sha256:<hex>`，保留可读 tag）。
- * 这一臂是 2026-10-03 实测复现的入口：钉版形态仍然把脚本常量 `FROM node:22.14.0-alpine`
- * 当**前缀**包含，旧判据用无边界子串匹配 ⇒ "可改"，旧替换又无边界 ⇒
- * 产出 `…@sha256:<新>@sha256:<旧>` 的双 digest 并打印"已替换并校验"。
+ * 把 compose 的 mongo **指令行**换成常量表里没有的 tag。
+ * 注释里那份演示保持原样：分类器只看指令行的值位置，注释是给人读的示例。
+ */
+const driftCompose = (src) => src.replace(/^ {4}image: mongo:6\.0\.20$/m, '    image: mongo:9.9.9');
+const driftComposeTag = (fx) => writeCompose(fx, driftCompose(fx.compose));
+const driftDockerfileTag = (fx) =>
+  writeDockerfile(fx, fx.dockerfile.replace(/node:22\.14\.0-alpine/g, 'node:22.99.9-alpine'));
+
+/**
+ * 把两个目标都写成**已经钉成刚捕获的 digest** 的形态（`name:tag@sha256:<hex>`）。
+ * 这一臂验的是两件事，它们是同一条边界的两侧：
+ *   ① 钉版行仍然把脚本常量 `FROM node:22.14.0-alpine` 当**前缀**包含，旧判据用无边界子串
+ *      匹配 ⇒ "可改"，旧替换又无边界 ⇒ 产出 `…@sha256:<新>@sha256:<旧>` 的双 digest
+ *      并打印"已替换并校验"（2026-10-03 实测复现）；现在分类器认它是"已钉"，不动；
+ *   ② 两个目标**都**已钉 ⇒ 本次没有任何事可做，必须报错而不是报成功（sed 无匹配仍返回 0
+ *      的旧缺陷）。单个目标已钉不再是错误：见下面"混合仓库"那条。
  * 共同后置条件（文件逐字节不变 + 不留临时文件）由 checkFailure 统一执行。
  */
 const pinEverything = (fx) => {
-  fs.writeFileSync(
-    path.join(fx.dir, 'Dockerfile'),
-    fx.dockerfile.replace(/node:22\.14\.0-alpine/g, NODE_PINNED),
-    'utf8'
-  );
-  fs.writeFileSync(
-    path.join(fx.dir, 'docker-compose.yml'),
-    fx.compose.replace(/^ {4}image: mongo:6\.0\.20$/m, `    image: ${MONGO_PINNED}`),
-    'utf8'
+  writeDockerfile(fx, fx.dockerfile.replace(/node:22\.14\.0-alpine/g, NODE_PINNED));
+  writeCompose(
+    fx,
+    fx.compose.replace(/^ {4}image: mongo:6\.0\.20$/m, `    image: ${MONGO_PINNED}`)
   );
 };
+
+/** 只钉 Dockerfile，compose 留裸 tag：本仓库 2026-10-04 的真实状态（混合仓库） */
+const pinDockerfileOnly = (fx) =>
+  writeDockerfile(fx, fx.dockerfile.replace(/node:22\.14\.0-alpine/g, NODE_PINNED));
+
+/** 两个目标都钉在**别的** digest 上：上游滚动同名 tag 之后的升级路径（待刷新） */
+const stalePinBoth = (fx) => {
+  writeDockerfile(
+    fx,
+    `# 用法示例：docker pull ${NODE_STALE}\n` +
+      fx.dockerfile.replace(/node:22\.14\.0-alpine/g, NODE_STALE)
+  );
+  writeCompose(fx, fx.compose.replace(/mongo:6\.0\.20\n/, `${MONGO_STALE}\n`));
+};
+
+/**
+ * 「够不着」一族：值不在脚本能锚定的位置上。这类写法**必须停手**——
+ * 静默跳过的产物是一份仍指向可变 tag 的引用，外加"我跑过钉版脚本"的印象。
+ */
+const platformDockerfile = (fx) =>
+  writeDockerfile(fx, 'FROM --platform=$BUILDPLATFORM node:22.14.0-alpine AS builder\n');
+const strayDockerfile = (fx) =>
+  writeDockerfile(fx, `FROM node:22.14.0-alpine @sha256:${HEX_A} AS builder\n`);
+const taglessDockerfile = (fx) =>
+  writeDockerfile(fx, `FROM docker.io/library/node@sha256:${HEX_A}\n`);
+const quotedCompose = (fx) => writeCompose(fx, 'services:\n  mongo:\n    image: "mongo:6.0.20"\n');
+const seqCompose = (fx) => writeCompose(fx, 'services:\n  app:\n    - image: mongo:6.0.20\n');
+const foldedCompose = (fx) =>
+  writeCompose(fx, 'services:\n  mongo:\n    image: >-\n      mongo:6.0.20\n');
+const varexpandCompose = (fx) =>
+  writeCompose(fx, 'services:\n  mongo:\n    image: ${MONGO_IMAGE:-mongo:6.0.20}\n');
+const noMutation = () => {};
 
 /**
  * 所有可达失败臂的**共同后置条件**：两个目标各自保持"本次运行开始前"的字节，
@@ -239,8 +304,15 @@ const failureArms = [
   ['digest 取不到（<no value>）', noMutation, 'novalue', ['--apply']],
   ['digest 长度不足（伪 digest）', noMutation, 'wrongarch', ['--apply']],
   ['digest 属于别的镜像（RepoDigests 名号对不上）', noMutation, 'wrongname', ['--apply']],
-  ['已是钉版形态（tag@digest）⇒ 无边界判据会被前缀骗过', pinEverything, 'good', ['--apply']],
+  ['两个目标都已钉成刚捕获的 digest ⇒ 整体 no-op 不得报成功', pinEverything, 'good', ['--apply']],
   ['未知参数', noMutation, 'good', ['--aply']],
+  ['FROM --platform= 前缀（值不在能锚定的位置）', platformDockerfile, 'good', ['--apply']],
+  ['tag 与 @sha256 之间夹空白', strayDockerfile, 'good', ['--apply']],
+  ['无 tag 的纯 digest 钉版（旧实现写坏的形态）', taglessDockerfile, 'good', ['--apply']],
+  ['compose 值被引号包裹', quotedCompose, 'good', ['--apply']],
+  ['compose 序列项 - image:', seqCompose, 'good', ['--apply']],
+  ['compose 折叠标量', foldedCompose, 'good', ['--apply']],
+  ['compose 变量展开', varexpandCompose, 'good', ['--apply']],
 ];
 
 function checkFailure(_label, mutate, mode, args) {
@@ -286,7 +358,8 @@ group('capture-image-digests.sh 真跑行为', () => {
     expect(r.dockerfile).toContain(`FROM ${NODE_PINNED} AS runner`);
     expect(r.dockerfile).not.toMatch(DOUBLE_DIGEST);
     // compose 只钉指令行；注释里那份"用法示例"必须原样留着
-    // （不带行定位的全文 sed 会把它一起改掉，改完注释就成了错误示例）
+    // （它带的是 `<捕获值>` 占位符，不是十六进制摘要，所以"全文刷新 digest"那条
+    //   表达式也碰不到它——示例保持示例，不会被改成一个具体的假 digest）
     expect(r.compose).toMatch(/^ {4}image: mongo:6\.0\.20@sha256:b{64}$/m);
     expect(r.compose).toContain('# 用法示例：image: mongo:6.0.20@sha256:<捕获值>');
     expect(r.compose).toContain('image: x'); // 其它 image 不受影响
@@ -312,11 +385,7 @@ group('capture-image-digests.sh 真跑行为', () => {
 
   test('脚本常量与仓库文件漂移（tag 变了）⇒ 必须报错，不得静默跳过', () => {
     const fx = fixture();
-    fs.writeFileSync(
-      path.join(fx.dir, 'Dockerfile'),
-      fx.dockerfile.replace(/node:22\.14\.0-alpine/g, 'node:22.99.9-alpine'),
-      'utf8'
-    );
+    driftDockerfileTag(fx);
     const r = run(fx, ['--apply']);
     expect(r.code).not.toBe(0);
     expect(r.out).toContain('漂移');
@@ -367,8 +436,7 @@ group('capture-image-digests.sh 真跑行为', () => {
   /**
    * 半钉状态是这个脚本特有的失效形状，它同时踩中两条：
    * ① 供应链上 compose 仍指向**可变 tag**，而仓库看起来"已经钉过版"；
-   * ② 唯一能修它的脚本从此**拒绝再跑**（下一次运行会在 Dockerfile 那一步撞
-   *    "已经存在 @sha256 钉版引用"）。
+   * ② 唯一能修它的脚本从此**拒绝再跑**（旧顺序会把 Dockerfile 先落笔）。
    * 实测复现过：旧实现是"边检查边落笔、两个目标顺序跑"，compose 漂移时 Dockerfile 已写盘。
    * 所以这里必须逐字节比（`toBe`），`toContain('node:22.14.0-alpine')` 挡不住"改了一半"。
    */
@@ -390,7 +458,7 @@ group('capture-image-digests.sh 真跑行为', () => {
     driftComposeTag(fx);
     expect(run(fx, ['--apply']).code).not.toBe(0);
     expect(fs.readFileSync(path.join(fx.dir, 'Dockerfile'), 'utf8')).toBe(fx.dockerfile);
-    fs.writeFileSync(path.join(fx.dir, 'docker-compose.yml'), fx.compose, 'utf8');
+    writeCompose(fx, fx.compose);
     const second = run(fx, ['--apply']);
     expect({ code: second.code, tail: second.out.slice(-120) }).toMatchObject({ code: 0 });
     expect(second.dockerfile).toContain(`FROM ${NODE_PINNED}`);
@@ -420,25 +488,6 @@ group('capture-image-digests.sh 真跑行为', () => {
     const after = run(fx, ['--apply']);
     expect({ code: after.code, tmps: after.tmps }).toMatchObject({ code: 0, tmps: [] });
     expect(after.dockerfile).toContain(`FROM ${NODE_PINNED}`);
-  });
-
-  /**
-   * 前缀陷阱的前提自证：钉版形态**仍然包含**脚本常量那串字面量。
-   * 旧实现的全部错误都从这一格出发（`grep -qF "$old"` 判"可改" ⇒ 无边界前缀替换 ⇒ 双 digest），
-   * 所以这里把它钉成断言：将来有人把 check 换回 `grep -qF`，本用例仍然为真、
-   * 而上面那条"已经是钉版 ⇒ 拒绝"会立刻红——两条一起构成完整证据链。
-   * 最后那一格是判据本身的非空集自证：只把 `@` 换成空格，三条判据必须同时翻转，
-   * 否则这几条断言可能只是在描述一个恒真式。
-   */
-  test('前提自证：钉版行包含 old 字面串，但 old 后紧跟 @ ⇒ 属于"已钉"而不是"可改"', () => {
-    const pinnedLine = `FROM ${NODE_PINNED} AS builder`;
-    expect(pinnedLine).toContain('FROM node:22.14.0-alpine'); // 无边界子串判据会被它骗过
-    expect(pinnedLine).toMatch(/^FROM node:22\.14\.0-alpine@/); // 边界判据认它是"已钉"
-    expect(pinnedLine).not.toMatch(/^FROM node:22\.14\.0-alpine(\s|$)/m); // 后随空白或行尾才算"可改"
-    expect(DOUBLE_DIGEST.test(pinnedLine)).toBe(false);
-    const lookalike = pinnedLine.replace('-alpine@', '-alpine ');
-    expect(lookalike).toMatch(/^FROM node:22\.14\.0-alpine(\s|$)/m);
-    expect(lookalike).not.toMatch(/^FROM node:22\.14\.0-alpine@/);
   });
 
   test('产物形态是 name:tag@sha256:<hex>：钉版门禁的判据判绿（旧实现在这里判红）', () => {
@@ -478,35 +527,53 @@ group('capture-image-digests.sh 真跑行为', () => {
     expect(short.dockerfile).toContain(`FROM ${NODE_PINNED} AS builder`);
   });
 
-  test('仓库今天是"已钉 Dockerfile + 未钉 compose" ⇒ 必须报错，不得把已钉的改坏', () => {
-    // 这一格就是 2026-10-03 实测复现的现场：旧实现对着本仓库的 Dockerfile 跑 --apply，
-    // check 阶段被子串匹配放行、stage 阶段产出 @sha256:新@sha256:旧，然后打印"已替换并校验"。
+  /**
+   * 这一臂就是 2026-10-04 之前本仓库的真实状态，也是旧实现的死路：
+   * 它把"已钉"判成错误并在第一个目标就退出 ⇒ compose 那条未钉的引用**永远钉不上**，
+   * 而 `baseImageDigestPinned` 的文件头把"跑本脚本重新捕获"写成唯一的升级路径。
+   * 现在的期望是反过来：Dockerfile 逐字节不动，compose 钉上，并把"跳过了谁"打印出来。
+   */
+  test('混合仓库（已钉 Dockerfile + 未钉 compose）：跳过已钉的那个，把没钉的那个钉上', () => {
     const fx = fixture();
-    const pinned =
-      `FROM ${NODE_PINNED} AS builder\nRUN echo build\n` +
-      `FROM ${NODE_PINNED} AS runner\nUSER nodejs\n`;
-    fs.writeFileSync(path.join(fx.dir, 'Dockerfile'), pinned, 'utf8');
+    pinDockerfileOnly(fx);
+    const pinnedDockerfile = fs.readFileSync(path.join(fx.dir, 'Dockerfile'), 'utf8');
     const r = run(fx, ['--apply'], 'qualified');
-    expect(r.code).not.toBe(0);
-    expect(r.out).toContain('已经存在');
-    expect(r.out).toContain('no-op');
-    // 最关键：一个字节都不能动，尤其不能出现 @sha256:X@sha256:Y
-    expect(fs.readFileSync(path.join(fx.dir, 'Dockerfile'), 'utf8')).toBe(pinned);
+    expect({ code: r.code, tail: r.out.slice(-160) }).toMatchObject({ code: 0 });
+    expect(r.dockerfile).toBe(pinnedDockerfile); // 一个字节都不动
     expect(r.dockerfile).not.toMatch(DOUBLE_DIGEST);
-    expect(r.compose).toBe(fx.compose);
+    expect(r.compose).toMatch(/^ {4}image: mongo:6\.0\.20@sha256:b{64}$/m);
+    // 运维要能看见"谁被跳过了"：静默跳过与静默改动同样是失效
+    expect(r.out).toContain('跳过');
+    expect(r.out).toContain('Dockerfile');
     expect(r.tmps).toEqual([]);
   });
 
-  test('混合状态不是死路：已钉的那条一笔不碰，未钉的那条钉上', () => {
-    // 三相重构的目标之一就是"半途状态能修好"。带 tag 的钉版形态下这件事更微妙：
-    // 已钉行仍然包含 old 字面串，无边界替换会把它也改坏；有边界替换必须绕开它。
+  test('待刷新不是死路：钉在别的 digest 上 ⇒ 换成刚捕获的，注释里的示例一起跟上', () => {
+    // 上游把同名 tag 的内容滚动了（digest 变了）时，唯一正确的动作就是替换旧 digest。
+    // 旧实现把这种仓库判成"不可操作"。注释里那行 `docker pull node:…@sha256:<旧>` 也要跟上：
+    // 只改指令行的话，注释从"正确示例"变成"错误示例"，而它正是运维照抄的那一行。
     const fx = fixture();
-    const mixed =
-      `FROM ${NODE_PINNED} AS builder\nRUN echo build\n` +
-      'FROM node:22.14.0-alpine AS runner\nUSER nodejs\n';
-    fs.writeFileSync(path.join(fx.dir, 'Dockerfile'), mixed, 'utf8');
+    stalePinBoth(fx);
+    const r = run(fx, ['--apply']);
+    expect({ code: r.code, tail: r.out.slice(-160) }).toMatchObject({ code: 0 });
+    expect(r.dockerfile).toContain(`FROM ${NODE_PINNED} AS builder`);
+    expect(r.dockerfile).toContain('# 用法示例：docker pull ' + NODE_PINNED);
+    expect(r.dockerfile).not.toContain(HEX_OLD);
+    expect(r.dockerfile).not.toMatch(DOUBLE_DIGEST);
+    expect(r.compose).toContain(`image: ${MONGO_PINNED}`);
+    expect(r.tmps).toEqual([]);
+    // 刷完再跑就是整体 no-op：必须报错，不能报成功
+    expect(run(fx, ['--apply']).code).not.toBe(0);
+  });
+
+  test('混合到单行也能收敛：同一文件里已钉的行不动、未钉的行钉上', () => {
+    const fx = fixture();
+    writeDockerfile(
+      fx,
+      `FROM ${NODE_PINNED} AS builder\nRUN echo build\nFROM node:22.14.0-alpine AS runner\nUSER nodejs\n`
+    );
     const r = run(fx, ['--apply'], 'qualified');
-    expect({ code: r.code, tail: r.out.slice(-120) }).toMatchObject({ code: 0 });
+    expect({ code: r.code, tail: r.out.slice(-160) }).toMatchObject({ code: 0 });
     expect(r.dockerfile.split('\n')[0]).toBe(`FROM ${NODE_PINNED} AS builder`); // 原样
     expect(r.dockerfile.match(/@sha256:/g) || []).toHaveLength(2); // 每条 FROM 恰好一个 digest
     expect(r.dockerfile).toContain('AS runner'); // 这条被钉上
@@ -516,6 +583,57 @@ group('capture-image-digests.sh 真跑行为', () => {
     const again = run(fx, ['--apply'], 'qualified');
     expect(again.code).not.toBe(0);
     expect(again.dockerfile).toBe(r.dockerfile);
+  });
+
+  test('指令词后的空白宽度不参与判断：`FROM  node:…` 双空格也要钉上', () => {
+    // 锚定用的是"一个或多个空白"，不是常量里那一串单空格的字面串；
+    // 反过来，值的位置不对（见失败矩阵）就必须停手。
+    const fx = fixture();
+    writeDockerfile(fx, 'FROM  node:22.14.0-alpine  AS builder\n');
+    const r = run(fx, ['--apply']);
+    expect({ code: r.code, tail: r.out.slice(-120) }).toMatchObject({ code: 0 });
+    expect(r.dockerfile).toBe(`FROM  ${NODE_PINNED}  AS builder\n`);
+  });
+
+  /**
+   * 前缀陷阱的前提自证：钉版形态**仍然包含**脚本常量那串字面量。
+   * 旧实现的全部错误都从这一格出发（`grep -qF "$old"` 判"可改" ⇒ 无边界前缀替换 ⇒ 双 digest），
+   * 所以这里把它钉成断言：将来有人把分类器换回子串匹配，本用例仍然为真、
+   * 而上面那两条"已钉 ⇒ 跳过/no-op"会立刻红——两条一起构成完整证据链。
+   * 最后那一格是判据本身的非空集自证：只把 `@` 换成空格，三条判据必须同时翻转，
+   * 否则这几条断言可能只是在描述一个恒真式。
+   */
+  test('前提自证：钉版行包含 old 字面串，但 old 后紧跟 @ ⇒ 属于"已钉"而不是"可改"', () => {
+    const pinnedLine = `FROM ${NODE_PINNED} AS builder`;
+    expect(pinnedLine).toContain('FROM node:22.14.0-alpine'); // 无边界子串判据会被它骗过
+    expect(pinnedLine).toMatch(/^FROM node:22\.14\.0-alpine@/); // 边界判据认它是"已钉"
+    expect(pinnedLine).not.toMatch(/^FROM node:22\.14\.0-alpine(\s|$)/m); // 后随空白或行尾才算"可改"
+    expect(DOUBLE_DIGEST.test(pinnedLine)).toBe(false);
+    const lookalike = pinnedLine.replace('-alpine@', '-alpine ');
+    expect(lookalike).toMatch(/^FROM node:22\.14\.0-alpine(\s|$)/m);
+    expect(lookalike).not.toMatch(/^FROM node:22\.14\.0-alpine@/);
+    // 行为侧的同一格：把 `@` 换成空格（值仍是裸 tag、行里却多出一个游离摘要），
+    // 同一个脚本就从"已钉/跳过"翻成"形态处理不了"——判据不是恒真式。
+    const stray = fixture();
+    strayDockerfile(stray);
+    const r = run(stray, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('处理不了');
+    expect(r.dockerfile).toContain('node:22.14.0-alpine @sha256:');
+  });
+
+  test('无 tag 的纯 digest 引用（旧实现的产物）⇒ 拒绝，不追加第二个 digest', () => {
+    // `FROM docker.io/library/node@sha256:…` 是本脚本 2026-10-03 之前的写法留下的现场：
+    // 它符合"已按 digest 固定"的直觉，却不带可读 tag，且字符串里根本没有 tag 常量可以挂。
+    // 猜一个 tag 上去就是编造事实；跳过它就是"仓库里还有一条可变引用却没人知道"。
+    const fx = fixture();
+    taglessDockerfile(fx);
+    const r = run(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('没有可读 tag');
+    expect(r.dockerfile).toBe(`FROM docker.io/library/node@sha256:${HEX_A}\n`);
+    expect(r.compose).toBe(fx.compose);
+    expect(r.tmps).toEqual([]);
   });
 
   test('RepoDigests 的仓库名与请求的引用对不上 ⇒ 取不到 digest，一个文件都不碰', () => {
@@ -537,13 +655,63 @@ group('capture-image-digests.sh 真跑行为', () => {
     expect(run(fixture(), ['--apply'], 'good').code).toBe(0);
   });
 
+  test('隐式命名空间与带端口的 registry 都必须判对（只比末段会把别人的仓库当成自己）', () => {
+    // 这两侧是同一条对账逻辑的两个方向：
+    //   少做归一 ⇒ `docker.io/myorg/mongo` 的 digest 被挂到官方 mongo 上（判据只看末段时成立）；
+    //   归一做错 ⇒ `reg.example.com:8443/…` 这种合法引用被硬拒（从第一个冒号截断取仓库名时成立）。
+    // 判据取自脚本源码本身（见 extractFn），不是在测试里重写一份。
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'digests-name-'));
+    tracked.push(dir);
+    const harness = path.join(dir, 'name.sh');
+    fs.writeFileSync(
+      harness,
+      [
+        'set -eu',
+        extractFn('repo_of_ref'),
+        extractFn('norm_repo'),
+        'want=$(norm_repo "$(repo_of_ref "$1")")',
+        'got=$(norm_repo "${2%@*}")',
+        'if [ "$want" = "$got" ]; then echo ACCEPT; else echo "REJECT $got != $want"; fi',
+      ].join('\n'),
+      'utf8'
+    );
+    const cases = [
+      ['node:22.14.0-alpine', `node@sha256:${HEX_A}`, true],
+      ['node:22.14.0-alpine', `docker.io/library/node@sha256:${HEX_A}`, true],
+      ['mongo:6.0.20', `docker.io/library/mongo@sha256:${HEX_B}`, true],
+      ['mongo:6.0.20', `docker.io/myorg/mongo@sha256:${HEX_B}`, false],
+      ['mongo:6.0.20', `registry.example.com/mongo@sha256:${HEX_B}`, false],
+      // 带端口的 registry：tag 分隔符只在**最后一个 `/` 之后**才算 tag，否则是端口
+      [
+        'reg.example.com:8443/library/node:1.2',
+        `reg.example.com:8443/library/node@sha256:${HEX_A}`,
+        true,
+      ],
+      ['prom/prometheus:v2.53.0', `docker.io/prom/prometheus@sha256:${HEX_A}`, true],
+    ];
+    const verdicts = cases.map(([tag, digest]) => {
+      const r = spawnSync(SH, [harness, tag, digest], { encoding: 'utf8' });
+      return { tag, digest, out: ((r.stdout || '') + (r.stderr || '')).trim() };
+    });
+    for (const [i, [tag, digest, shouldPass]] of cases.entries()) {
+      expect({ tag, digest, accepted: verdicts[i].out.startsWith('ACCEPT') }).toEqual({
+        tag,
+        digest,
+        accepted: shouldPass,
+      });
+      if (!shouldPass) expect(verdicts[i].out).toContain('REJECT');
+    }
+    // 非空集自证：判据不是"一律 ACCEPT"，也不是"一律 REJECT"
+    expect(verdicts.filter((v) => v.out.startsWith('ACCEPT'))).toHaveLength(5);
+  });
+
   test('反向自证：失败矩阵的表宽 = 处理函数形参个数（窄一格是超时假绿，不是失败）', () => {
     expect({ declared: checkFailure.length }).toEqual({ declared: 4 });
     expect({ widths: [...new Set(failureArms.map((row) => row.length))] }).toEqual({
       widths: [4],
     });
     // 行数也是台账的一部分：增删一臂必须在这里留痕
-    expect({ rows: failureArms.length }).toEqual({ rows: 7 });
+    expect({ rows: failureArms.length }).toEqual({ rows: 14 });
     // 判据本身非空集：把行削窄一格必须点亮
     const narrow = failureArms.map((row) => row.slice(0, 3));
     expect(narrow.every((row) => row.length === checkFailure.length)).toBe(false);

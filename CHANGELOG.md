@@ -8,6 +8,79 @@
 
 ## [未发布]
 
+### 供应链（2026-10-04 · 唯一能修"半钉仓库"的脚本自己拒绝再跑：已钉从报错改成按目标跳过，digest 刷新与"够不着就停手"补齐）
+
+> 起点是 `src/tests/security/baseImageDigestPinned.test.js` 的文件头——它把升级路径写成
+> "在部署机跑 `scripts/capture-image-digests.sh` 重新捕获，再同步闸里的字面量"。上一轮把产物
+> 口径与双 digest 修好之后，这条路径**仍然一步都走不通**：check 阶段把"这一行已经是
+> `tag@sha256:…`"当成错误直接退出。而本仓库今天的真实状态恰好是混合仓库——Dockerfile 三条
+> `FROM` 全钉死、compose 的 mongo 没钉 ⇒ 脚本在第一个目标就停手，永远到不了需要它的那个目标。
+> 也就是说闸的注释把自己否证了：它点名的唯一工具，对着真实仓库跑必然红。
+> 实测入口很简单：`sh scripts/capture-image-digests.sh --apply` 在本仓库根跑一次即可复现。
+
+> 第二类更隐蔽，是"报告成功而什么都没做"的**反向版本**。判"这条引用够不够得着"用的是无锚定
+> 子串计数，而替换用的是锚定正则——两套口径不同，于是这些形态被判成"可改"、进了落笔分支，
+> 替换却一条都不匹配（`sed` 无匹配仍然 rc=0）⇒ 打印"已替换并校验"，文件一字未改：
+> `FROM --platform=… node:22.14.0-alpine`（值不在能锚定的位置）、compose 的引号包裹值
+> `"mongo:6.0.20"`、序列项 `- image: mongo:6.0.20`、折叠标量、`${MONGO_IMAGE}` 变量展开、
+> `node:22.14.0-alpine @sha256:…`（tag 与 `@` 之间夹空白）、以及无 tag 的纯 digest 钉版
+> （旧上一版脚本自己写坏出来的形态）。每一类都留下同一个后果：仍指向可变 tag 的引用被当成
+> 已固定提交上去。
+
+修（`scripts/capture-image-digests.sh` 的 check→stage→commit 三相，判据从"数子串"换成"分类值 token"）：
+
+- **单遍分类器**（awk，只限 POSIX 构造，CI 的 mawk 与本机的 gawk 同结果）：按"行首 = 可选缩进 +
+  指令词（`FROM` / `image:`）+ 空白"锚定，取整个值做 token，再按镜像名（剥 `@…`、剥最后一个 `/`
+  之前的仓库名与 tag）过滤掉不相干的镜像行——redis / prometheus / `${APP_IMAGE:-…}` 不会被误判。
+  值分四类：`待钉 bare`、`已钉 same`、`待刷新 refresh`（钉在**别的** 64hex 上）、其余一律
+  `够不着` ⇒ 立即停手、零写入、只打**行号与形态名**（不回显整行）。分类器只按脚本顶部的 tag
+  常量精确匹配，不做模糊猜测；指向本镜像的引用一条都找不到同样报错（脚本常量与仓库漂移是
+  另一类事故）。
+- **按目标跳过，而不是整体报错**：`same` 让该目标原样不动并明打"本次跳过（不改动）"，
+  混合仓库因此能收敛（已钉行一笔不碰、未钉行钉上）；`refresh` 让滚动同名 tag 换 digest 的升级
+  路径真的存在。**整体 no-op 仍然是错误**（两个目标都 `same` ⇒ 红），保住"报告成功但一字未改"
+  那条老缺陷的判据。
+- stage 用两条 `sed -E` 表达式：① 锚定的裸 tag 追加本次 digest；② 全文 `tag@sha256:<64hex>` →
+  本次 digest，**故意不带锚定**——Dockerfile 顶部的用法注释里也写了完整钉版引用，只改指令行会把
+  "正确示例"变成"错误示例"，而那正是本脚本要躲开的第一类失效。产物先落 `*.pin.tmp`，再用**同一个
+  分类器复查预演结果**：仍残留 `待钉`/`待刷新`、或指向本镜像的条数变了 ⇒ 删临时文件退出；
+  分类说"要改"而 `cmp` 判逐字节一致 ⇒ 报"分类与替换不一致"退出（这是自我矛盾探测器，不是保险丝）。
+  commit 阶段 `mv` 之后对盘上的真实文件再 classify 一次。两个 `mv` 之间不是原子的，这条边界
+  明写在脚本注释里，没有假装成原子替换。
+- 计划可见：check 阶段就打印每个目标"待钉 N 条、待刷新 M 条、已是本次 digest K 条 ⇒ 会改动/跳过"，
+  跑之前就知道这次动哪几条。
+
+本轮实测到、并写进注释当教训的三处自身缺陷：POSIX sh 没有 `local`，`classify_ref` 覆写全局
+`file` ⇒ `cmp -s "$file" "$tmp"` 变成"临时文件与自己比"，每一次合法运行都被报成"逐字节一致"；
+`plan_ref` 读的是全局计数，两个目标都 probe 完再统一打印 ⇒ compose 的计数被打在 Dockerfile 标签下；
+`sed` 用 `|` 作定界符与 ERE 的选择运算符撞车（`unknown option to 's'`）⇒ 换成 `%`（registry 引用
+文法不含 `%`）。
+
+闸（`src/tests/imageDigestGate.test.js`，38 用例全部真跑，PATH 插 docker 替身，不用扫源码文本）：
+失败矩阵从 7 臂扩到 14 臂，新增 6 条"够不着"臂（`--platform=`、夹空白、无 tag 纯 digest、
+引号包裹、序列项、折叠标量、变量展开），共同后置条件是**目标文件逐字节不变 + 目录里没有
+`*.pin.tmp`**；表宽自证同步改成 14（jest-each 少喂一格是超时假绿，不是失败）。新增成功腿：
+混合仓库（已钉的 DF 一笔不碰、compose 钉上、打印"跳过"）、`refresh`（含注释示例自愈、断言旧
+digest 不再出现在文件里、复跑判 no-op）、单行内混合收敛、`FROM  node:…` 双空格；命名空间腿把
+脚本的 `repo_of_ref`/`norm_repo` 抽进 sh 夹具跑 7 个真实引用（`node`→`docker.io/library/node`、
+`prom/prometheus`、带端口的 registry 必须保留原样，反向 2 例必须 REJECT）并断言 ACCEPT 集非空——
+只比末段会把别人的仓库当成自己的。零串扰自检保持：真实 `Dockerfile` 与 `docker-compose.yml` 的
+base64 前后相等，本轮实测 `git diff -- Dockerfile docker-compose.yml` 为空。
+
+未收（诚实清单，留作下一批）：compose 的 mongo 本身仍未钉（本轮没有 `docker pull` 证据，不臆造
+digest），prometheus / alertmanager / grafana 与 `.github/workflows/ci.yml` 的 service 容器同理；
+`baseImageDigestPinned` 的标题、compose 里"digest 由部署机 docker pull 后捕获追加"的注释、
+`docs/architecture.md` 的"镜像钉版本：node、mongo"这三处**全覆盖式表述**与上述现状不符，
+要和那份清单同批一起改成可核对的范围。`.sh` 不在 eslint/prettier 的覆盖里（无 parser），
+本文件的验证手段只有 `sh -n` + 真跑。
+
+验证：`sh -n` 通过；14 形态探测（临时夹具 + docker 替身，digest 用假值）全 PASS，且每次成功之后
+复跑都被判 no-op 红；对真实仓库跑 dry 分类 ⇒ 三条 `FROM` 与三处注释引用识别为待刷新，
+redis/prometheus/alertmanager/grafana/`${APP_IMAGE}` 与 Dockerfile 的散文行一笔不碰；
+`npx jest --runInBand` 跑 `imageDigestGate` + `security/baseImageDigestPinned` +
+`ci/commentAnchorFreshness` = 55 绿、`deploy/deployScript` = 56 绿、`ci/codeViewPhantomLedger` 绿；
+`eslint src scripts --quiet` 0 error、`lint-ratchet` 通过、prettier 与 `check-utf8` 通过。
+
 ### 运维手册（2026-10-04 · 轮换手册 ① 发的 cookie 名服务端根本不读，"旧令牌必须立即失效"是一项不可能失败的检查）
 
 > 起点是运维侧 P2-3（`deployment/secret-rotation.md` 的 L-01 ①）。复现只需一次函数调用：
