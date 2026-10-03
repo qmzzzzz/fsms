@@ -205,26 +205,37 @@ describe('auditMeta（审计元数据派生）', () => {
   // action」与「审计筛选白名单」做交叉核对，新增路由而忘补白名单时立即失败。
   describe('AUDIT_LOG_ACTIONS 与路由派生 action 对齐（P3-11）', () => {
     // 从各路由文件静态提取路径模式，模拟 deriveAction 的清洗规则生成候选 action。
-    // 静态提取而非逐个手写：保证未来新增路由自动纳入比对范围。
+    //
+    // 【本块原先的注释写着"静态提取而非逐个手写：保证未来新增路由自动纳入比对范围"，
+    // 那句是失实的：扫描集当时是一张手写 9 项清单，而 src/routes 实测有 11 个
+    // .js（index.js、wellKnownRoutes.js 不在清单里）。新增第 12 个路由文件时，
+    // 这张专门用来抓"新增路由而忘补白名单"的闸门会安静地看不见它。
+    // 现在改成"扫目录 + 带理由豁免"，并加一条对账用例：目录里每个 .js 要么被扫，
+    // 要么在 ROUTE_EXEMPT 里有名字和理由，两边都不占就立刻红。】
     const fs = require('fs');
     const path = require('path');
 
-    const ROUTE_FILES = [
-      'authRoutes.js',
-      'userRoutes.js',
-      'roleRoutes.js',
-      'permissionRoutes.js',
-      'deviceRoutes.js',
-      'alarmRoutes.js',
-      'inspectionRoutes.js',
-      'reportRoutes.js',
-      'securityRoutes.js',
-    ];
+    const ROUTES_DIR = path.join(__dirname, '..', '..', 'routes');
+    const ROUTE_EXEMPT = {
+      // 挂载注册表：只有 router.use 与 require，没有 router.<method>('<path>' 字面量
+      // （实测贡献 0 个派生 action，加进来只会让扫描集多一个空文件）
+      'index.js': '挂载注册表，不含 router.x() 路径字面量',
+      // 公开无鉴权端点（CSP report / client errors / security.txt）：整条链不写审计行，
+      // 因此不在"审计筛选白名单"的口径内。实测它派生 4 个 action，全部落在白名单外，
+      // 这正是把它豁免掉而不是补 4 条白名单的理由——补了反而给公开端点编造审计动作。
+      'wellKnownRoutes.js': '公开无鉴权端点，不写审计行，不在筛选白名单口径内',
+    };
+    const routeFilesInDir = () =>
+      fs
+        .readdirSync(ROUTES_DIR)
+        .filter((f) => f.endsWith('.js'))
+        .sort();
+    const collectRouteFiles = () => routeFilesInDir().filter((f) => !ROUTE_EXEMPT[f]);
 
     const collectActions = () => {
       const actions = new Set();
       const methods = ['get', 'post', 'put', 'delete', 'patch'];
-      for (const file of ROUTE_FILES) {
+      for (const file of collectRouteFiles()) {
         const src = fs.readFileSync(path.join(__dirname, '../../routes', file), 'utf8');
         // 匹配 router.get(\n  '/xxx' 与 router.get('/xxx' 两种写法
         const routeRe = /router\.(get|post|put|delete|patch)\(\s*\n?\s*'([^']+)'/g;
@@ -253,6 +264,22 @@ describe('auditMeta（审计元数据派生）', () => {
       }
       return actions;
     };
+
+    test('扫描集对账：src/routes 下每个 .js 要么被扫，要么带理由豁免（并防空转）', () => {
+      // 这条用例自己承担三件事，缺任何一条，上面那条"缺口为空"都可能是恒真的：
+      //  ① 目录普查：新增路由文件必须显式表态（进扫描集或进 ROUTE_EXEMPT）；
+      //  ② 豁免不留幽灵：ROUTE_EXEMPT 里的文件名必须真的还在目录里（改名/删除要同步）；
+      //  ③ 抽取基线：派生 action 的条数钉死（实测 88）。抽取正则一旦因为写法变化
+      //     返回空集或半集，①②与缺口判据会一起变成空转，只有这一条会响。
+      const dir = routeFilesInDir();
+      expect(dir).toEqual([...collectRouteFiles(), ...Object.keys(ROUTE_EXEMPT)].sort());
+      expect(dir).toContain('userRoutes.js'); // 目录读到了东西（路径写错时上面也会绿）
+      expect(Object.keys(ROUTE_EXEMPT).every((name) => dir.includes(name))).toBe(true);
+      for (const reason of Object.values(ROUTE_EXEMPT)) {
+        expect(reason.trim().length).toBeGreaterThan(4); // 豁免必须带理由，不许空占位
+      }
+      expect(collectActions().size).toBe(88);
+    });
 
     test('全部路由派生型 action 均在 AUDIT_LOG_ACTIONS 白名单内', () => {
       const { AUDIT_LOG_ACTIONS } = require('../../constants/audit');

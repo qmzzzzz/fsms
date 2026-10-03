@@ -2,8 +2,8 @@
  * xlsx 审计导出必须与列表/CSV 导出同样受数据范围约束
  *
  * 修复前只有权限码闸门（security:audit），没有 dataScope：
- * `/api/security/audit-logs`（auditController.js:38）与审计列表
- * （auditQueryService.js:200）都调用 `applyAuditDataScope`，
+ * `/api/security/audit-logs`（auditController.js:43）与审计列表
+ * （auditQueryService.js:320）都调用 `applyAuditDataScope`，
  * 而 `/api/reports/export?type=audit` 直接跳过它。⇒ level 7（department 档）的运维
  * 列表里只看得到本部门成员的行为记录，xlsx 却导出**全库所有人**的 IP/路径/操作。
  * 导出集比可见集宽，等于把范围闸从后门拆掉。

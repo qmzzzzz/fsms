@@ -48,7 +48,7 @@ describe('audit export service', () => {
       lean: jest.fn().mockReturnThis(),
       select: jest.fn().mockReturnThis(),
       cursor: jest.fn(() => ({
-        close: jest.fn(),
+        close: jest.fn().mockResolvedValue(undefined),
         eachAsync: async (callback) => {
           for (const row of rows) await callback(row);
         },
@@ -100,7 +100,7 @@ describe('audit export service', () => {
       lean: jest.fn().mockReturnThis(),
       select: jest.fn().mockReturnThis(),
       cursor: jest.fn(() => ({
-        close: jest.fn(),
+        close: jest.fn().mockResolvedValue(undefined),
         eachAsync: async (callback) => {
           for (const row of rowsAlt) await callback(row);
         },
@@ -146,7 +146,7 @@ describe('audit export service', () => {
       lean: jest.fn().mockReturnThis(),
       select: jest.fn().mockReturnThis(),
       cursor: jest.fn(() => ({
-        close: jest.fn(),
+        close: jest.fn().mockResolvedValue(undefined),
         eachAsync: async (callback) => {
           for (let index = 0; index < 50001; index += 1) {
             await callback({

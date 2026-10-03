@@ -118,8 +118,9 @@ describe('authService gap B', () => {
     test('ENC_INVALID - 注册时 encPassword 解密失败', async () => {
       // 注册验证码默认开启（src/config/index.js:72 顶层 registerCaptchaEnabled；
       // models/SystemConfig.js:207 的 fallback 同读顶层；全仓无任何地方设
-      // REGISTER_CAPTCHA_ENABLED=false），而 authService.registerUser 的验证码闸（:120）
-      // 排在密文解密（:128）**之前** ⇒ 不打桩就会被 CAPTCHA_INVALID 拦下，
+      // REGISTER_CAPTCHA_ENABLED=false），而 authService.registerUser 的验证码闸
+      // （src/services/authService.js:127）排在密文解密
+      // （src/services/authService.js:137）**之前** ⇒ 不打桩就会被 CAPTCHA_INVALID 拦下，
       // 永远到不了本用例要测的解密失败分支。被测对象是解密分支，故显式关掉验证码闸
       // （与上方 CAPTCHA_INVALID 用例同一手法，只是方向相反）。
       const SysConfig = require('../../models').SystemConfig;

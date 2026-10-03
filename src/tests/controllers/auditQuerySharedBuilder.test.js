@@ -22,6 +22,7 @@
 
 const mongoose = require('mongoose');
 const { buildAuditQuery } = require('../../utils/auditQuery');
+const { AUDIT_ERROR_RISK_LEVELS } = require('../../constants/audit');
 
 const requestWithQuery = (query) => ({ query });
 
@@ -119,7 +120,11 @@ describe('buildAuditQuery boundaries', () => {
         ip: '192.168.1.1',
         riskLevel: 'high',
         success: 'true',
-        level: 'warning',
+        // 2026-10-03：原先这里写 level:'warning' —— 与 riskLevel:'high'、success:'true'
+        // 构成**恒空**组合（warning 档要求 success:true 且 riskLevel:'medium'），
+        // 本用例于是把"200 + 空结果集"这个缺陷形态当成了期望值钉住。换成 error 档后
+        // 三个条件可同时成立，被钉的才是真正想钉的东西：各筛选项的条件形状。
+        level: 'error',
       })
     );
 
@@ -148,6 +153,33 @@ describe('buildAuditQuery boundaries', () => {
     expect(query.category).toBe('auth');
     expect(query.riskLevel).toBe('high');
     expect(query.success).toBe(true);
-    expect(query.$and).toEqual([{ success: true, riskLevel: 'medium' }]);
+    expect(query.$and).toEqual([
+      { $or: [{ success: false }, { riskLevel: { $in: AUDIT_ERROR_RISK_LEVELS } }] },
+    ]);
+  });
+
+  /**
+   * 恒空组合必须当场响（而不是 200 + 空列表）：审计人员把"这段时间没有 warning"
+   * 记进结论，实际是他自己的两个筛选条件互相抵消。判据与三档语义的对拍表在
+   * src/tests/utils/auditFilterCombination.test.js，这里只钉接线。
+   */
+  test('level 与显式 success/riskLevel 相互抵消 ⇒ 拒绝，不返回恒空条件', () => {
+    for (const q of [
+      { level: 'warning', success: 'false' },
+      { level: 'warning', riskLevel: 'high' },
+      { level: 'info', riskLevel: 'critical' },
+      { level: 'error', success: 'true', riskLevel: 'low' },
+    ]) {
+      expect(() => buildAuditQuery(requestWithQuery(q))).toThrow('恒空');
+    }
+    // 反证：可用的组合一个都不许被拒（判据过严会把管理员的常用筛选打死）
+    for (const q of [
+      { level: 'error', success: 'false' },
+      { level: 'warning', success: 'true', riskLevel: 'medium' },
+      { level: 'info', success: 'true', riskLevel: 'low' },
+      { success: 'false', riskLevel: 'high' },
+    ]) {
+      expect(() => buildAuditQuery(requestWithQuery(q))).not.toThrow();
+    }
   });
 });

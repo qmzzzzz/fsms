@@ -25,6 +25,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { jsCodeOnly } = require('../helpers/jsCodeOnly');
 
 const ROOT = path.join(__dirname, '../../..');
 const SRC_DIR = path.join(ROOT, 'src');
@@ -78,6 +79,12 @@ const EXEMPT_MODULES = {
   'services/behaviorBaseline.js': 'VOLUME_FEATURES / NON_ADDITIVE_FEATURES，静态字面量 Set',
   'services/sharedCache.js': '共享缓存基础设施自身（memStore 是 Redis 未就绪时的回退实现）',
   'utils/auditMeta.js': 'REGISTERED_ACTIONS，由 AUDIT_LOG_ACTIONS 派生的只读集合',
+  // AUDIT_FILTER_DIMENSION_FIELDS：「审计恒空参数组合判据要枚举哪几个维度」的定义域，
+  // 内容全由源码字面量决定、逐进程恒同，且没有任何写入路径（只 .has()）。
+  // 登记进清单会让启动期对运维说「多实例部署时这个集合会不一致」——假警报，与
+  // config/validate.js、utils/auditMeta.js 同族的判据词表。
+  'utils/auditQuery.js':
+    'AUDIT_FILTER_DIMENSION_FIELDS，静态字面量 Set（恒空判据的维度定义域），只读、无跨进程语义',
   'utils/metrics.js': 'Prometheus 指标注册表，按设计逐实例各一份',
   'utils/metricsAuditDrops.js': 'Prometheus 指标注册表，按设计逐实例各一份',
   'utils/mongoFailureAttribution.js': '基础设施错误名/码词表，静态字面量 Set',
@@ -106,6 +113,19 @@ const relOf = (full) => path.relative(SRC_DIR, full).replace(/\\/g, '/');
 /** 模块级（缩进 0）声明的可变容器 */
 const MODULE_LEVEL_CONTAINER =
   /^(?:const|let|var)\s+[\w$]+\s*=\s*new\s+(?:Map|Set|WeakMap|WeakSet)\b/gm;
+
+/**
+ * 「这个模块真的用了 sharedCache」只能看代码，不能看全文。
+ *
+ * 为什么不是 `readFileSync(...).includes('sharedCache')`：本仓惯例要求在模块头写下
+ * 「为什么这里**不**接失效广播」，说明文字里合法地出现 `sharedCache.publishInvalidate`
+ * 这种反例（services/reportDashboardService.js:18-22 正是如此）。全文匹配会把这句真话读成
+ * "该机制走了广播"⇒ ⑤ 于是逼运维二选一：要么补一个假的 `redisExternalized: true`
+ * （那会让启动期把这块缓存从"仍按单进程假设运行"清单里滤掉——**假标记比漏标更糟**），
+ * 要么删掉一句有用的注释。口径取自 tests/helpers/jsCodeOnly：本仓"什么算注释"只有一份实现。
+ * 反向不成问题：真广播的机制必然在代码里出现 sharedCache 调用，代码视图不会漏。
+ */
+const usesSharedCacheInCode = (src) => jsCodeOnly(src).includes('sharedCache');
 
 const scanModuleLevelContainers = () => {
   const hits = [];
@@ -170,8 +190,35 @@ describe('单进程依赖清单完整性（constants/runtime.js）', () => {
     const unflagged = SINGLE_PROCESS_DEPENDENCIES.filter((d) => {
       const file = path.join(SRC_DIR, d.module);
       if (!fs.existsSync(file)) return false;
-      return fs.readFileSync(file, 'utf8').includes('sharedCache') && d.redisExternalized !== true;
+      return usesSharedCacheInCode(fs.readFileSync(file, 'utf8')) && d.redisExternalized !== true;
     }).map((d) => d.module);
     expect({ unflagged }).toEqual({ unflagged: [] });
+  });
+
+  test('⑤ 的判据只看代码：注释里出现 sharedCache 不算，代码里真的用才算（双向自证）', () => {
+    // 这一条是为了让上一条的"改判据"本身有牙：放宽到注释匹配会误伤真话，
+    // 收紧到只认某个特定调用串又会让下一句换个写法的真用法定静默过关，
+    // 所以钉住"注释 vs 代码"这对形状，而不是钉住某个措辞。
+    expect(
+      usesSharedCacheInCode(
+        '// 若将来要求"改完立刻全实例一致"，改法是在写侧调 sharedCache.publishInvalidate\nconst cache = new Map();\n'
+      )
+    ).toBe(false);
+    expect(usesSharedCacheInCode("const sharedCache = require('../services/sharedCache');\n")).toBe(
+      true
+    );
+    expect(usesSharedCacheInCode('  sharedCache.publishInvalidate(key);\n')).toBe(true);
+    expect(usesSharedCacheInCode('/* 与 sharedCache 无关的历史说明 */\nconst y = 1;\n')).toBe(
+      false
+    );
+
+    // 钉住本轮真实形状（否则上面四行可以是自证的空转）：
+    // reportDashboardService 全文**含** sharedCache（在注释里）、代码视图**不含** ⇒ ⑤ 不该再抓它；
+    // statsCache 代码视图含 ⇒ ⑤ 必须继续盯着它（它确实广播，且已标 redisExternalized）。
+    const dash = fs.readFileSync(path.join(SRC_DIR, 'services/reportDashboardService.js'), 'utf8');
+    expect(dash.includes('sharedCache')).toBe(true);
+    expect(usesSharedCacheInCode(dash)).toBe(false);
+    const stats = fs.readFileSync(path.join(SRC_DIR, 'services/statsCache.js'), 'utf8');
+    expect(usesSharedCacheInCode(stats)).toBe(true);
   });
 });

@@ -13,7 +13,7 @@
  * 这正是本仓反复出现的"绿但不设防"，而且这次骗的是完整性凭证本身。
  *
  * 顺带钉住一条更要紧的：导出**必须**走数据范围翻译。此前该步骤只在
- * "mock 掉 applyAuditDataScope"的用例里出现过，删掉 `auditController.js:38`
+ * "mock 掉 applyAuditDataScope"的用例里出现过，删掉 `auditController.js:43`
  * 那行不会有任何测试变红——而后果是跨部门/跨范围导出审计明细。
  *
  * res 用真的 `stream.Writable`：这样 `write()` 的返回值、`once('drain')`、

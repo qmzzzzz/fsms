@@ -5,9 +5,9 @@
  * `EXPORT_MODEL_CONFIG` 的 sort 原先只写主排序键（`{occurredAt:-1}` / `{timestamp:-1}`
  * / `{planStartTime:-1}`），而 populate 分支"取 id"那条腿又补了一个**反向**的 `_id: 1`。
  * 仓库既有不变式不是新约定：「排序键取值可重复 ⇒ 必须有同向 `_id` 次级键」
- * （models/FireAlarm.js:155、models/Inspection.js:179、models/AuditLog.js:300 三处写明，
+ * （models/FireAlarm.js:160、models/Inspection.js:179、models/AuditLog.js:309 三处写明，
  * 复合索引也按 `{key:-1,_id:-1}` 建），列表服务层用的正是它
- * （AlarmService.js:88、InspectionService.js:146、auditQueryService.js:153），
+ * （AlarmService.js:112、InspectionService.js:146、auditQueryService.js:153），
  * 并由 tests/explainSpotcheckContract.test.js:66-71 逐字段钉住那四份排序。
  * 导出这一侧不满足 ⇒ 同一毫秒内的并列行，列表按 `_id` 降序、导出按 `_id` 升序，
  * 两份材料的第 N 行不是同一条记录（"导出即所见"破在并列段与 5000 行截断边界上）；

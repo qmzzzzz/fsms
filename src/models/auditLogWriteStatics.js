@@ -64,7 +64,7 @@ const applyWriteStatics = (schema) => {
     return this.create(entry).catch((error) => {
       logger.error('业务审计落库失败', {
         action: entry.action || 'unknown',
-        error: error.message,
+        error: error?.message ?? error,
       });
       try {
         require('../utils/metrics').incSecurityAlert('audit_write_failed', 'medium');

@@ -236,3 +236,14 @@ describe('Top-3 ③ 消费侧：标记缺席时两处豁免都必须恢复生效
     expect(typeof isWhitelistExemptionTrustworthy).toBe('function');
   });
 });
+
+// 收尾必须关连接：mongodb-memory-server 是所有套件共用的同一个 mongod，
+// 不关的套件会让 jest worker 在 FORCE_EXIT_DELAY(500ms) 后被强杀
+// （"A worker process has failed to exit gracefully"），强杀会吞掉该套件的输出。
+// readyState 守卫是为了不关别人建立的连接；本条挂在根作用域，故在本套件所有
+// describe 自己的 afterAll 之后才跑。这里就地 require('mongoose')：本仓有 3 个套件
+// 只在 describe 体内 require，从根作用域引用那个名字会 ReferenceError。
+afterAll(async () => {
+  const mongoose = require('mongoose');
+  if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+});

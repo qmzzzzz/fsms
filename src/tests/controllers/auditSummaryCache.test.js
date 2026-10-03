@@ -1,8 +1,8 @@
 /**
  * 审计 riskLevel 汇总的 TTL 缓存（2026-09-26 审计 Top-8 后半：每页全量聚合）
  *
- * 缺陷原文：「username regex 全表扫 + **每页全量聚合**」（`auditQuery.js:155` /
- * `auditQueryService.js:69`），修复面「加索引 / 加 TTL 缓存」。
+ * 缺陷原文：「username regex 全表扫 + **每页全量聚合**」（原报告的行号早已失效，这里改引
+ * **当前**的聚合站点 `auditQueryService.js:136`），修复面「加索引 / 加 TTL 缓存」。
  *
  * 为什么当初只修后半：汇总 `$group` **与页码无关**（只依赖 query），却被写在两个
  * 取页函数里各一份 ⇒ 翻 N 页就为同一谓词重算 N 次全量聚合。这是纯粹的重复计算，

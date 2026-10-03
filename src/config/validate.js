@@ -662,7 +662,7 @@ module.exports = {
 // 这一支是**独立进程入口**，不经过 src/config/index.js:11，于是没人替它把 <NAME>_FILE
 // 回填进 process.env——而容器里密钥**只**以文件挂载（P3-48，见 ./secrets.js）。
 // 不回填时 collectSecretErrors 读到 undefined，报出四条「JWT/REFRESH/AES/HMAC 必须设置
-// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:156
+// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:207
 // 正是拿这一步的退出码当"轮换后配置自洽"的证据——*_FILE 部署下那条轮换流程做不到收尾。
 //
 // 为什么不在文件顶部 hydrate（本轮真的先写成顶部方案，被自己的测试打回来了）：

@@ -1,10 +1,12 @@
 /**
  * 登录拒绝路径的口令比较次数必须一致（账号存在性 / 锁定态时序预言机）
  *
- * 缺陷（中危）：`assertAccountUsable` 的两条拒绝分支
+ * 缺陷（中危）：`assertAccountUsable`（src/services/authService.js:337）的两条拒绝分支
  * （status inactive|locked、lockUntil 未到期）**既没跑 consumeDummyPasswordTime，
- * 也没走 checkBruteForce**；而「用户不存在」(:214) 与「IP 不在允许范围」(:364)
- * 两条都跑了。bcrypt 是纯 JS cost-12（百毫秒级），于是
+ * 也没走 checkBruteForce**；而「用户不存在」（src/services/authService.js:242，
+ * 其 checkBruteForce 在 src/services/authService.js:247）与「IP 不在允许范围」
+ * （src/services/authService.js:407，其 checkBruteForce 在
+ * src/services/authService.js:434）两条都跑了。bcrypt 是纯 JS cost-12（百毫秒级），于是
  * **存在的已禁用/已锁定账号比不存在的用户名快约一次 compare 的时间** ⇒
  * 不需要正确口令就能区分「这个用户名存在且被禁了」，
  * 把 P2-11 / M-5 / P2-10 辛苦做的时序拉平从另一个方向漏掉。

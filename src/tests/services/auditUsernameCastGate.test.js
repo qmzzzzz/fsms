@@ -2,7 +2,7 @@
  * 审计 username 维的落库闸（本会话独立实测，非采信任何报告）
  *
  * 【缺陷本体】`username` 是全仓唯一由**未认证请求方直接决定**的被哈希字段：
- * `authController.js:166` 把 `req.body.username` 原样交给登录失败审计，路由侧只做了
+ * `authController.js:170` 把 `req.body.username` 原样交给登录失败审计，路由侧只做了
  * `.trim()` / `notEmpty` / `isLength({max:128})`，既不碰控制字符也不碰代理项。
  * 实测（本文件第一条用例，闸之前跑出的真实数字）：请求体 `{"username":"a\ud800b"}` 里
  * `JSON.parse` 自己就产出孤立代理项 ⇒ 铸造后内存形态 `61 d800 62`，BSON 落盘形态

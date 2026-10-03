@@ -1,12 +1,15 @@
 /**
  * P0-5 端到端回归：skipGlobalAudit 必须让「控制器手写审计」成为唯一留痕
  *
- * 背景（审计报告 §8.2 / §15 P0-5）：既有测试 `securityConfigHandlers.test.js:128,168`
- * 与 `securityControllerOutcomeAndGuards.test.js` 在**无中间件环境**下断言
- * `res.locals.skipGlobalAudit === true`。那只证明「控制器最终置过位」，
+ * 背景（审计报告 §8.2 / §15 P0-5）：这条缺陷最初无人拦得住——当时的
+ * `src/tests/controllers/securityConfigHandlers.test.js` 只在**无中间件环境**下断言
+ * `res.locals.skipGlobalAudit === true`，那只证明「控制器最终置过位」，
  * 不能证明它早于响应读取点——而 P0-5 恰恰是时序缺陷：中间件在请求入口读取该
  * 标志，控制器的赋值永远晚于检查，标志 100% 失效，每个这类操作被双写
  * （控制器手写 1 条 + 全局中间件按路由再写 1 条，action/category 不同）。
+ * （那条盲区后来按 P1-29 补上了：src/tests/controllers/securityConfigHandlers.test.js:65
+ *  在 json() 时刻记录标志值，src/tests/controllers/securityConfigHandlers.test.js:122 断言之。
+ *  本文件承担的仍是"真实 app + 真实中间件链"那一层，两者不互相替代。）
  *
  * 本文件用**真实 app + 真实控制器 + 真实中间件链**，stub 掉 auditBuffer.push
  * 后断言：命中 skipGlobalAudit 的写操作在全局审计侧恰好 0 条，而控制器手写

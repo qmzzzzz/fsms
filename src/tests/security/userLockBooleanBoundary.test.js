@@ -171,7 +171,9 @@ describe('锁定/解锁的布尔边界（字符串 false 不得变成锁定）',
   });
 
   // ==== 两套锁定是分开的：管理员锁定改 status，暴力破解只写 lockUntil ====
-  // loginUser(:350) 与 authenticate(middleware/auth.js:284) 只看 lockUntil 就拒绝，
+  // loginUser（入口 src/services/authService.js:223，lockUntil 判据在
+  // src/services/authService.js:363）与 authenticate（入口 src/middleware/auth.js:208，
+  // lockUntil 判据在 src/middleware/auth.js:297）只看 lockUntil 就拒绝，
   // 所以"解锁只改回 status"会给出 200「用户已解锁」+ 审计 success:true，
   // 而用户依旧登不进来、活令牌全部 403。修法是解锁时连临时锁定一起清掉。
   const makeTempLocked = async (label, status) =>

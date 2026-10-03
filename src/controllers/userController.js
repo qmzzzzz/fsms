@@ -702,7 +702,9 @@ const assignRoles = asyncHandler(async (req, res) => {
   }
 
   // ===== P2-8 修复：权限子集校验 =====
-  // 仅比 level 是不够的。createRole(:172-178) 与 assignPermissions(:338-345)
+  // 仅比 level 是不够的。createRole 的"授予权限必须自身持有"落在
+  // src/controllers/roleController.js:147-150，assignPermissions 的同一条校验落在
+  // src/controllers/rolePermissionController.js:106（由 src/controllers/rolePermissionController.js:215 调用）——
   // 都强制「授予的权限必须自身持有」，唯独 assignRoles 只看层级——
   // 于是两名同级（level 相同）但分管不同模块的管理员互挂对方角色，
   // 即可各自集齐双方全部权限，横向扩权且不触发任何层级告警。

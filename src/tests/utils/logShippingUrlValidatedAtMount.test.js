@@ -180,6 +180,14 @@ describe('F-215 ②：isShippingEnabled() 以实际挂载为准', () => {
 describe('F-215 ③：合规面板的 shippingEnabled 不再回答"配过变量"', () => {
   const { jsCodeOnly } = require('../helpers/jsCodeOnly');
   const codeView = (rel) => jsCodeOnly(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8'));
+  /**
+   * 唯一的"被禁写法"判据。全量扫描与那条"自检：这是不是个假闸"必须共用同一个函数：
+   * 早先两处各自手打一份 `/!!\s*process\.env\.LOG_SHIPPING_URL/` + 各自重写一遍
+   * `BANNED.test(jsCodeOnly(...))`，于是改窄真判据（比如去掉 `!!`）时两条各量各的字面量、
+   * 一起绿——自检证明的是它自己那份副本，不是闸。
+   */
+  const BANNED = /!!\s*process\.env\.LOG_SHIPPING_URL/;
+  const bannedShape = (src) => BANNED.test(jsCodeOnly(src));
 
   test('面板字段读挂载态谓词', () => {
     const view = codeView('src/controllers/securityController.js');
@@ -189,7 +197,6 @@ describe('F-215 ③：合规面板的 shippingEnabled 不再回答"配过变量"
   });
 
   test('生产代码里不得再有"用 env 真值回答转发是否启用"的写法', () => {
-    const BANNED = /!!\s*process\.env\.LOG_SHIPPING_URL/;
     const walk = (dir, acc = []) => {
       for (const name of fs.readdirSync(dir)) {
         const full = path.join(dir, name);
@@ -201,22 +208,22 @@ describe('F-215 ③：合规面板的 shippingEnabled 不再回答"配过变量"
       return acc;
     };
     const offenders = walk('src')
-      .filter(({ text }) => BANNED.test(jsCodeOnly(text)))
+      .filter(({ text }) => bannedShape(text))
       .map(({ rel }) => rel);
     expect(offenders).toEqual([]);
   });
 
   test('自检：上面那条判据真的能识别被禁写法、且不被注释欺骗（否则它是个假闸）', () => {
-    const BANNED = /!!\s*process\.env\.LOG_SHIPPING_URL/;
-    const stripped = (src) => BANNED.test(jsCodeOnly(src));
-    expect(stripped('const a = !!process.env.LOG_SHIPPING_URL;\n')).toBe(true);
-    expect(stripped('const a = logger.isShippingEnabled();\n')).toBe(false);
+    expect(bannedShape('const a = !!process.env.LOG_SHIPPING_URL;\n')).toBe(true);
+    expect(bannedShape('const a = logger.isShippingEnabled();\n')).toBe(false);
     // 行注释与块注释里的反例都不该让闸变绿，也不该让它变红
-    expect(stripped('// const a = !!process.env.LOG_SHIPPING_URL;\nconst b = 1;\n')).toBe(false);
-    expect(stripped('/* const a = !!process.env.LOG_SHIPPING_URL; */\nconst b = 1;\n')).toBe(false);
+    expect(bannedShape('// const a = !!process.env.LOG_SHIPPING_URL;\nconst b = 1;\n')).toBe(false);
+    expect(bannedShape('/* const a = !!process.env.LOG_SHIPPING_URL; */\nconst b = 1;\n')).toBe(
+      false
+    );
     // 而 logger.js 里"是否配置过"的合法读取不能被误判成违规
     expect(
-      stripped('const shippingUrl = process.env.LOG_SHIPPING_URL;\nif (shippingUrl) {}\n')
+      bannedShape('const shippingUrl = process.env.LOG_SHIPPING_URL;\nif (shippingUrl) {}\n')
     ).toBe(false);
   });
 });

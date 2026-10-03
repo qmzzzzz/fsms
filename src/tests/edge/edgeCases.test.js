@@ -174,7 +174,7 @@ describe('auditScopeFilter 数据范围翻译分支（#22）', () => {
       }),
     });
     // 冒泡到调用方后由控制器给 AUDIT_QUERY_FAILED / AUDIT_EXPORT_FAILED
-    // （auditController.js:38 的 try + :64 的 catch），而不是发一份看起来"没有数据"的空导出。
+    // （auditController.js:25 的 try + auditController.js:68 的 catch），而不是发一份看起来"没有数据"的空导出。
     await expect(applyAuditDataScope({ userId: OID('5'.repeat(24)) }, 'op1')).rejects.toThrow(
       'db down'
     );

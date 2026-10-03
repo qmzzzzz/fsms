@@ -186,7 +186,7 @@ const AUDIT_USERNAME_MAX_LENGTH = 128;
  *
  * 这一族的**动机本体**（为什么必须在 `chainBatch` 算哈希之前镜像一次）见 `makeAuditTextFieldGate`
  * 的注释，此处不复述。username 独有一条必须补的理由：**它是全仓唯一由未认证请求方直接
- * 决定的被哈希字段**（`authController.js:166` 把 `req.body.username` 原样交给登录失败审计；
+ * 决定的被哈希字段**（`authController.js:170` 把 `req.body.username` 原样交给登录失败审计；
  * 路由侧只做了 `.trim()`/`notEmpty`/`isLength(128)`，不碰控制字符与代理项）。实测：
  * 请求体 `{"username":"a\ud800b"}` 里 `JSON.parse` 自己就产出孤立代理项，铸造后内存形态是
  * `61 d800 62`、BSON 落盘形态是 `61 fffd 62`，而哈希在序列化之前算 ⇒ 该记录**读回来复算必然

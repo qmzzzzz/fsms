@@ -640,7 +640,9 @@ describe('体积预算门禁：真实产物与基线', () => {
  * 和 CLI 的 printTable 全部按同一张表遍历，所以从表里删一行 `{key:'maxChunkGzip'}`
  * 会让「结构校验、超限比对、收紧写盘、表格打印」同步跳过这一格，而本文件此前
  * **没有一条用例要求这一格必须被比对**：出现 maxChunkGzip 的地方只有手写假基线
- * fixture（:187/:239/:276）和 collectStats 的计量断言（:409），二者都不过问比对集。
+ * fixture（src/tests/deploy/bundleBudget.test.js:187、src/tests/deploy/bundleBudget.test.js:239、
+ * src/tests/deploy/bundleBudget.test.js:276）和 collectStats 的计量断言
+ * （src/tests/deploy/bundleBudget.test.js:409），二者都不过问比对集。
  * 上面两条真实基线用例（validateBaseline 返回 []、按 BUDGET_KEYS 复算）也是
  * 从同一张表派生的期望集合 —— 同义反复，删表行照样全绿。
  * 而「最大懒加载分块是否失控」恰是这套门禁唯一不可替代的信号：entryJsGzip 有首屏

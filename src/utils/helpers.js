@@ -309,8 +309,12 @@ const isValidDateParam = (value) => {
  *
  * 入参须先经 isValidDateParam 校验；本函数只负责把通过校验的入参
  * 翻译为 {$gte,$lte} 形态，空值对应边界省略。
+ * 调用形态：buildDateRangeFilter(startDate, endDate, timeZone)
  * @param {string|undefined} startDate 起始日期（date-only 或完整时间串）
  * @param {string|undefined} endDate 结束日期（同上，含当天末尾语义）
+ * @param {string} [timeZone] date-only 入参按哪个 IANA 时区展开成当天首尾（缺省业务时区）。
+ *   带时间且无偏移的串不吃这个参数：它原样交给 `new Date()`，落点由**宿主**时区决定，
+ *   且 end 与 start 同值——已登记为欠账 A，判据见 src/tests/utils/dateBoundaryTzWiring.test.js。
  * @returns {Object} Mongo 范围条件对象（可能为空对象）
  */
 const buildDateRangeFilter = (startDate, endDate, timeZone) => {

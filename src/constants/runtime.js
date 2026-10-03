@@ -85,7 +85,9 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     mechanism: '统计缓存 Map',
     impact: '各进程数据不一致（仅表现为数字抖动）',
     // 与 middleware/auth.js 的 userCache 同一模式：缓存本体在进程内，
-    // 失效经 sharedCache 广播（statsCache.js:114 publishInvalidate / :124 onInvalidate）。
+    // 失效经 sharedCache 广播（statsCache.js:114 publishInvalidate / statsCache.js:124 onInvalidate）。
+    // 两处行号都写全文件名：`A.js:114 / :124` 这种延续写法门禁只看得见前者（裸 `:124` 没有文件名），
+    // 于是第二条永远不被核对——本仓的口径是"引用要机器判，就把文件名重复一遍"。
     // 此前漏标 ⇒ Redis 就绪时仍被报成"将静默降级"，属假警报
     // （假警报会训练运维忽略真信号，见文件头第 3 条判据的同类教训）。
     redisExternalized: true,
@@ -153,9 +155,12 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
   },
   {
     module: 'services/reportDashboardService.js',
-    mechanism: '仪表盘缓存（dashboardCache Map，配失效广播）',
-    impact: '缓存本体在进程内，靠 sharedCache 广播失效；Redis 未就绪时不跨进程',
-    redisExternalized: true,
+    mechanism: '仪表盘缓存（dashboardCache Map，刻意不接失效广播）',
+    impact:
+      '各进程独立，写侧改完最长滞后一个 30s TTL；不接共享通道是取舍而非漏接，见 services/reportDashboardService.js:18-22',
+    // 这里**没有** redisExternalized：配上 REDIS_URL 也不会让这块缓存跨实例一致
+    // （原条目误写 redisExternalized: true ⇒ Redis 就绪后启动体检把它从"仍按单进程假设运行"
+    // 的清单里滤掉，运维据此以为多实例安全）。
   },
   {
     module: 'services/auditMonitor.js',

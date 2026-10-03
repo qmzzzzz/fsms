@@ -11,7 +11,7 @@
  *    之后直接 savePermission ⇒ PUT 一个 `{status:'inactive'}` 就把超管的唯一权限源关掉
  *
  * 为什么放在 savePermission：它是 update 路径唯一的落库出口
- * （grep 全仓：savePermission 只有 permissionController.js:146 一个调用方），
+ * （grep 全仓：savePermission 只有 permissionController.js:161 一个调用方），
  * 在这里拦既避开控制器复杂度棘轮，也不给未来新增调用方留绕过面。
  */
 const mongoose = require('mongoose');

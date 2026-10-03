@@ -13,6 +13,9 @@
  *      含 `//` 的字符串（URL）不能把整行吃掉导致漏数；
  *   2. 规模下界：扫不到足够多的生产文件时，"零引用"结论是空的；
  *   3. 主判据：每个导出名都要有至少一个生产文件引用它。
+ *   4. 严口径：引用方必须真的 require('…/constants')。少了这一条，本文件要防的病灶
+ *      （别处再声明一份同名枚举）本身就是"引用"——副本越多原稿越长寿，
+ *      门禁恰在最该响的形态上哑掉（R10-D finding，2026-10-02 补牙）。
  */
 
 const fs = require('fs');
@@ -57,6 +60,20 @@ function refCount(name) {
   return PROD_TEXTS.filter((t) => re.test(t)).length;
 }
 
+/**
+ * 严口径：引用它的那个文件还得真的 `require('…/constants')`。
+ * 为什么需要第二把尺（2026-10-01 R10-D 的 finding）：本文件要防的病灶恰好是
+ * "同一个业务枚举存在两份声明"。裸 `\\bNAME\\b` 会把**第二份声明自身**
+ * （`const DEVICE_TYPE = {…}` 写在别处）数成一次引用——副本越多，原稿越"长寿"，
+ * 门禁在它最该响的那种形态上是哑的。实测今天 4 个导出名都还有真 require 方
+ * （探针：零"同名匹配但无人 require"），所以这是补牙，不是止血。
+ */
+const REQUIRE_CONSTANTS_RE = /require\([^)]*['"][^'"]*\/constants['"]/;
+function strictRefCount(name) {
+  const re = new RegExp(`\\b${name}\\b`);
+  return PROD_TEXTS.filter((t) => re.test(t) && REQUIRE_CONSTANTS_RE.test(t)).length;
+}
+
 describe('constants.js 导出的存活性与扫描器可信度', () => {
   test('前提自证：扫描器数得到真引用、数不到注释里的提及', () => {
     const re = /\bDEVICE_TYPE\b/;
@@ -87,5 +104,25 @@ describe('constants.js 导出的存活性与扫描器可信度', () => {
     expect(keys.length).toBeGreaterThanOrEqual(1);
     const dead = keys.filter((k) => refCount(k) === 0);
     expect(dead).toEqual([]);
+  });
+
+  test('严口径：引用方必须真的 require 了 constants（同名声明不能冒充引用）', () => {
+    const keys = Object.keys(exported);
+    const unpaired = keys.filter((k) => strictRefCount(k) === 0);
+    expect(unpaired).toEqual([]);
+    // 前提自证：严口径不是"和宽口径同一把尺"——它必须比宽口径更严或至少等严，
+    // 且 require 侧集合非空（否则上面那条断言是在 0 上恒真）
+    for (const k of keys) {
+      expect(strictRefCount(k)).toBeLessThanOrEqual(refCount(k));
+      expect(refCount(k)).toBeGreaterThan(0);
+    }
+    // 反向对照：一份"只在别处声明同名常量、从不 require"的文本，宽口径会数到、严口径必须数不到
+    const impostor = 'const DEVICE_TYPE = { info: 1, warning: 2 }; // 第二份声明，漂移之源';
+    expect(/\bDEVICE_TYPE\b/.test(impostor)).toBe(true);
+    expect(REQUIRE_CONSTANTS_RE.test(impostor)).toBe(false);
+    // 而真消费的形态两把尺都要数到（否则严口径可能只是写错了正则）
+    const real = "const { DEVICE_TYPE } = require('../utils/constants');\nif (DEVICE_TYPE) {}";
+    expect(/\bDEVICE_TYPE\b/.test(real)).toBe(true);
+    expect(REQUIRE_CONSTANTS_RE.test(real)).toBe(true);
   });
 });

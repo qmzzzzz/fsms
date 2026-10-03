@@ -3,8 +3,8 @@
  *
  * 缺陷一（阶梯只有第一档能用）：渐进式封禁用
  *   IPBlacklist.countDocuments({ ip, source:'auto', createdAt >= 30 天前 })
- * 来数"这是第几次封禁"。但 ipblacklist 上 (ip,type) 是唯一索引（models/IPBlacklist.js:92），
- * blockIP 走 findOneAndUpdate + $setOnInsert:createdAt（:266），TTL 索引（:89）到期即删档
+ * 来数"这是第几次封禁"。但 ipblacklist 上 (ip,type) 是唯一索引（src/models/IPBlacklist.js:95），
+ * blockIP 走 findOneAndUpdate + $setOnInsert:createdAt（src/models/IPBlacklist.js:269），TTL 索引（src/models/IPBlacklist.js:92）到期即删档
  * ⇒ 同一 IP 任何时刻最多只剩一条 ⇒ 计数恒 ≤1，且封禁到期后归零：
  * 第三/四档（24 小时、7 天）永不可达，而 logger.warn 照打"第 N 次"——
  * 运维从日志上看到的是一个根本不存在的防线。

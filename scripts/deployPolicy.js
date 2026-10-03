@@ -164,7 +164,8 @@ function checkAlertingEndpoint(env, fsImpl) {
     source = null;
   }
   if (source === null) {
-    // 「读不到」不能只写 warning：本函数的裁决位是 `ok = errors.length === 0`（:109），
+    // 「读不到」不能只写 warning：调用方 validatePreflight 的裁决位是 `ok = errors.length === 0`
+    // （scripts/deployPolicy.js:129），warnings 不进这个式子——
     // 只进 warnings 等于让门禁在最坏的一种输入下判绿——alertmanager.yml 被删/未挂载/
     // 权限不对（catch 把 EACCES、EISDIR 一并吞成 null）时告警链必然不可用，而发布照样通过。
     // 旧注释写「不静默放行」，但它只保证"话说出了口"，没保证"门真的关上"。

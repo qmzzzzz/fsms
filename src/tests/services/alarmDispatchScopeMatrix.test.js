@@ -45,6 +45,7 @@ describe('dispatchAlarm 数据范围矩阵（self/none/未传参 都必须拒绝
     await User.deleteMany({ username: /^dsx_/ }).catch(() => {});
     if (mongoose.connection.readyState !== 0) {
       // 与其它套件共用内存 Mongo：只有本套件建立的连接才关
+      await mongoose.connection.close();
     }
   });
 

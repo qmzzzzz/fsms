@@ -6,7 +6,7 @@
  * 两侧同一份派生集合）。原镜像写成 `!item.success ? '错误' : ...` 与
  * `item.success ? '成功' : '失败'`，于是「字段缺位」这一第三种状态被两条分支各自
  * 认领成了一个**肯定性结论**。而缺位不是理论形态：`AuditLog.success` 是
- * `{type: Boolean}` 无 default、非 required（`models/AuditLog.js:114`），
+ * `{type: Boolean}` 无 default、非 required（`models/AuditLog.js:132`），
  * 至少五处直写点根本不带该字段——
  * `login_unusual_time`（authService）、`suspicious_report`（securityController）、
  * 以及 securityAlert 的三处告警审计。一次凌晨 23 点的**成功**登录，
