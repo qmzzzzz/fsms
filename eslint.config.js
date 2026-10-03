@@ -54,6 +54,9 @@ module.exports = [
         setImmediate: 'readonly',
         URL: 'readonly',
         fetch: 'readonly',
+        // AbortSignal.timeout()：fetch 的超时入口（scripts/verify-image-digests.js）。
+        // 与上面 AbortController/fetch 同一族，缺它会把合法代码报成 no-undef。
+        AbortSignal: 'readonly',
         // Jest
         describe: 'readonly',
         it: 'readonly',

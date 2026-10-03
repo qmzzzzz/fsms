@@ -39,11 +39,16 @@ updates:
     labels:
       - 'ci'
 
-  # Dockerfile 与 docker-compose.yml 里共钉了 6 个基础镜像引用
-  # （node:22.14.0-alpine / mongo:6.0.20 / prom/prometheus:v2.53.0 /
+  # Dockerfile、docker-compose.yml 与 .github/workflows/ci.yml 的 service 容器里共 6 个
+  # 第三方镜像引用（node:22.14.0-alpine / mongo:6.0.20 / prom/prometheus:v2.53.0 /
   #  prom/alertmanager:v0.27.0 / grafana/grafana:11.1.0 / redis:7-alpine），
-  # 都是精确版本号：精确钉版本保证了可复现，但不会自动漂向修复版，
-  # 基础镜像一旦爆出 CVE 就只能靠人工发现。交给 Dependabot 每周探测。
+  # 全部是「精确版本号 + registry digest」（`name:tag@sha256:<64hex>`）：钉版本保证可复现，
+  # 钉 digest 保证这个 tag 被人改指向别的字节时也不会漂——代价是**不会自动漂向修复版**，
+  # 基础镜像爆出 CVE 只能靠外部探测。交给 Dependabot 每周发现，它提的 PR 会同时改 tag 与 digest。
+  #
+  # 升级时还有第三处要一起改：`scripts/verify-image-digests.js` 的期望表（digest 的取证记录）。
+  # 漏改任何一边都由 `src/tests/security/imageReferenceInventory.test.js` 判红——
+  # 它按文件扫真实引用，再与期望表逐条对账，所以"文件改了、表没改"和"表改了、文件没改"都是红的。
   #
   # 用 docker 而非 docker-compose：两者在上游是不同 ecosystem，但 docker 的
   # file_fetcher/parser 同时处理 Dockerfile 与 YAML（YAML_REGEXP 会匹配

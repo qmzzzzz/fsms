@@ -178,7 +178,7 @@ flowchart LR
 要点：
 
 - **密钥注入**：全部经 Docker secrets 文件（`*_FILE`），`environment` 只留非敏感项（见 ADR-003）
-- **镜像钉版本**：`node:22.14.0-alpine`、`mongo:6.0.20`；digest 待部署机 `docker pull` 后捕获回填（优化清单 R-5）
+- **镜像钉版本**：仓库内所有第三方镜像引用都已钉到 registry digest（`name:tag@sha256:<64hex>`，保留可读 tag）——Dockerfile 的 3 处 `node:22.14.0-alpine`、compose 的 mongo / redis / prometheus / alertmanager / grafana、`.github/workflows/ci.yml` 的 mongo service 容器。digest 的取值与核验口径见 `scripts/verify-image-digests.js`（对返回字节自算 sha256，且要求 ≥2 个运营主体不同的来源一致），对账闸是 `src/tests/security/imageReferenceInventory.test.js`（优化清单 R-5）
 - **Redis** 已在 compose 中预留（注释态），规模化时启用并承接限流/缓存/分布式锁（R-3/A-1）
 - **前端静态托管已落地**（L-1，P0）：由 `src/middleware/staticFrontend.js` 托管 `web-admin/dist`；通过 `SERVE_FRONTEND` 启用、`FRONTEND_DIST` 指定产物目录。内置 `/assets` 一年强缓存 immutable、`index.html` 与 `sw.js` no-cache、SPA history 回退、`.map`/`.ts` 显式拦截，并配套专项测试覆盖。
 

@@ -15,15 +15,27 @@
  *   3. docker-compose.yml 的 redis image 指令行必须带 @sha256（注释行不算数）；
  *   4. Dockerfile 三处 FROM 的 digest 必须等于下方 PINNED_NODE_DIGEST 字面量。
  *
+ * 【覆盖面早就超出本文件了】本闸是 2026-10-01 那批（node + redis）留下的窄闸；
+ * compose 的 mongo / prometheus / alertmanager / grafana 与 `.github/workflows/ci.yml`
+ * 的 service 容器由 `src/tests/security/imageReferenceInventory.test.js` 逐条对账。
+ * 这里只保留两件别处没有的东西：builder/web-builder/runtime 三阶段**同一个 digest**
+ * 这条工具链漂移不变量，以及最早落地的两条字面量。
+ *
  * 【第 4 条为什么是字面量】digest 是**外部落的事实**，不是可复算逻辑：它来自
  * 2026-10-01 对 registry 的双源核验——docker.m.daocloud.io（Docker Hub 的
  * pull-through 镜像）与 AWS ECR Public 的 docker/library/node 各自按 tag
  * 22.14.0-alpine 取到的 manifest 字节逐字节一致，且本地对返回字节自算的 sha256
  * 与 Docker-Content-Digest 相等（内容寻址自证；当日 Docker Hub 官方 tag API 在
- * 本网络不可达：DNS 污染）。任何代码都无法从仓库内重新推导出这个值，所以只能
- * 以字面量 + 来源注释的方式钉进门禁。升级基础镜像时的正确路径：在部署机跑
- * scripts/capture-image-digests.sh 重新捕获 → 同一次改动里同步更新 Dockerfile
- * 三处 FROM 与本文件字面量（漏任何一边都会红灯，这是刻意的）。
+ * 本网络不可达：DNS 污染）。2026-10-04 复跑补了第三个来源 docker.1ms.run，三源一致。
+ * 任何代码都无法从仓库内重新推导出这个值，所以只能以字面量 + 来源注释的方式钉进门禁。
+ *
+ * 【升级基础镜像的两条路径】① 不需要 docker：`node scripts/verify-image-digests.js`
+ * 按期望表逐条自算 sha256，要求多来源一致且拿到的是 manifest 列表；② 在部署机跑
+ * `scripts/capture-image-digests.sh --apply`，它 pull 之后把 digest 写回文件。
+ * 无论走哪条，同一次改动要同步三处：Dockerfile 的三处 FROM、本文件字面量、
+ * `scripts/verify-image-digests.js` 的期望表——漏任何一边都由
+ * `imageReferenceInventory.test.js` 判红（旧版本这里只写了"跑部署机脚本"一条路径，
+ * 那是失实表述：脚本能不能跑与 digest 对不对是两件事）。
  */
 
 'use strict';

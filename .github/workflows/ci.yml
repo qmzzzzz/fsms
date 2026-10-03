@@ -393,7 +393,12 @@ jobs:
     services:
       mongo:
         # 评价报告 #18：mongo 版本口径统一到生产 compose 的钉版 6.0.20
-        image: mongo:6.0.20
+        # 2026-10-04 补 digest：service 容器同样是第三方供应链输入——上游把 6.0.20 这个可变
+        # tag 指向另一批字节时，测试是在"另一个 mongod"上跑绿的，而 CI 日志看不出区别。
+        # 取值口径（自算 sha256 + ≥2 个运营主体不同的来源一致）见 docker-compose.yml 的
+        # mongo 段注释与 scripts/verify-image-digests.js 的期望表；三方对账闸是
+        # src/tests/security/imageReferenceInventory.test.js，这里漏改即红。
+        image: mongo:6.0.20@sha256:eb5819129dee31a32982a940b6e32c9873fed05b5e938b65f802bb96dca8753d
         ports:
           - 27017:27017
 

@@ -8,6 +8,92 @@
 
 ## [未发布]
 
+### 供应链（2026-10-04 · 「全仓镜像都已钉版」第一次变成机器可判的账：6 个引用 × 3 处事实来源，配上不联网的两把闸）
+
+> 上一批的诚实清单欠了三件事：compose 的 mongo / prometheus / alertmanager / grafana 与 `ci.yml`
+> 的 service 容器还是可变 tag；三处"全覆盖式表述"是失实的；而"脚本能跑"与"文件真的钉完了"之间
+> 没有任何东西在对账。这批一次性收掉：**引用面账**（`src/tests/security/imageReferenceInventory.test.js`）
+> 把真实文件 ↔ 期望表 ↔ 脚本常量 ↔ 老闸字面量四处钉成同一笔账，**判据行为账**
+> （`src/tests/imageDigestVerify.test.js`）把新工具的三条放行判据逐个做成可打红的用例。
+
+钉版落地（本轮补 5 条，仓库内第三方引用至此 6 个 / 全部 `name:tag@sha256:<64hex>`，保留可读 tag）：
+
+- `docker-compose.yml`：mongo `eb581912…`、prometheus `075b1ba2…`、alertmanager `e13b6ed5…`、
+  grafana `079600c9…`（redis `858f009f…` 上一批已钉）；`.github/workflows/ci.yml` 的 service
+  容器 mongo 与 compose **同一个 digest**（不同则 CI 是在"另一个 mongod"上跑绿的，而日志看不出区别）。
+  `${APP_IMAGE:-fire-safety-app:local}` 是本机构建产物，不属于第三方供应链输入，分类器把它归"动态"。
+- **取值不需要 docker**：新增 `scripts/verify-image-digests.js`（零依赖，只用 node 内置 `fetch`/`crypto`）
+  对 registry 的 manifest 端点取**原始字节**自算 sha256——这就是该 manifest 的 digest，`Docker-Content-Digest`
+  只作旁证不作结论。放行要三条同时成立：①自算值等于期望表值；②≥`--min-sources`（默认 2）个
+  **运营主体不同**的来源给同一个值（`public.ecr.aws` 是 AWS 自己发布的 official 面，另两个是不同
+  运营商的 Hub pull-through 缓存）；③拿到的必须是 manifest 列表 / OCI index——钉单层摘要等于锁死一个
+  architecture。`captured`/`sources` 两列记录取证现场，不是装饰。
+- 本批落地时与今日复跑都是三源/两源一致：**6 引用全 PASS（退出码 0）**。prom/grafana 只有两源
+  是实测事实：ECR Public 对这些命名空间就是 404（不托管 ⇒ `skipped`，与"来源报错"分成两类，
+  混同会把坏掉的 registry 路径念成"这条腿今天没说话"）。
+
+两把新闸的判据（都不联网；联网核验仍是人跑一次的工具，理由见"未收"⑤）：
+
+- `security/imageReferenceInventory`（9 条）：扫描面自证（8 个文件 / 11 条指令行 / byFile 精确到
+  Dockerfile 3 + compose 6 + ci.yml 2 / 2 条动态 / 9 条 registry 引用，解析塌缩不许静默绿）；
+  行分类器与钉版解析器各带**夹具**自证（13 例分类表 + 6 例拒绝表；注释排除、YAML 键大小写敏感、
+  `image:` 后必须有空白、`(^|[^A-Za-z0-9_.-])image:` 词边界，都不靠仓库内容配合）；双向对账
+  （孤儿引用 / digest 不符 / 期望表过期条目 / `present.size === EXPECTED.length`）；同 tag 必须同
+  digest；`capture-image-digests.sh` 的 `NODE_TAG`/`MONGO_TAG` 与 `baseImageDigestPinned` 的字面量
+  交叉对账，脚本管不到的 4 条引用点名列出。变异 **9/9 全红**（grafana 解钉、表内 digest 分叉、
+  CI↔compose 分叉、解析器收大写、删注释排除、表里放不存在的引用、redis 写成序列项、大写 digest、
+  `image:` 去空格），四份被改文件 sha1 逐字节还原。
+- `imageDigestVerify`（10 条，`global.fetch` 替身）：judge 三条判据各自能单独把结论打回 false
+  （含"两源一致但是单层"这一臂）+ `min-sources` 调大必须变红 + `headerMatches` 三态；fetchOne 的
+  替身故意让 header 与字节摘要**不相等**，钉住"取的是字节"；单层响应体 `entries` 必须归 0（判据③
+  唯一的输入）；Bearer 流程把 URL 序列与 `Authorization` 序列逐位钉死（少一步重试、或取 token 那步
+  带上凭据都要红）；`realm=`/`Realm=` 两种写法都认，解析不出 realm 时报错而不是静默匿名直连；
+  `token` 与 `access_token` 两个字段名都认。变异 **12/12 全红**，同样逐字节还原。
+
+脚本侧顺手修掉的真缺陷（都是写用例时暴露的，不在"计划改"之列）：
+
+- `anonymousToken` 按小写 `realm=` 匹配：registry 生态里 `Realm=` 真实存在，只认一种会让那条来源
+  常年报"响应里没有 Bearer 挑战"，运维第一反应是怀疑网络而不是脚本。改为 `i` 匹配；同时它的旧注释
+  写着"没有 realm 就当作公开端点直连"，而代码从第一版起就是 throw——注释失实已改（静默直连的产物
+  是一个要鉴权的端点用匿名身份返回 401，最后被归因成"这个来源没说话"）。
+- 旧结构是"先探测再取"：公开端点（来源表里两个都是）会为每个引用**把 manifest 下载两遍**，第一遍
+  响应体整批扔掉。改成一次请求、非 200 才按挑战取 token 重试一次，重试目标仍是同一 URL、token 只流向
+  `realm` 指定的地址。
+- 输出侧把"来源没发 `Docker-Content-Digest`"念成"header 相符"——ECR Public 实测就不发这个 header，
+  等于每轮三行假话。改成三态（相符 / 与自算摘要不符 / 来源未发），且认不出的值一律落到**不作断言**
+  那一档（默认值不能是"通过"）。
+- 新增上面那句三态判断立刻触发 `lint-ratchet` 的 `[complexity] 0→1` 回退（`main` 贴着上限 15）。
+  拆出 `printVerdict` / `headerNote` 把复杂度降回基线，**没有**收紧基线。
+
+口径同步（三处失实表述随本批改掉）：`docs/architecture.md` 原写"digest 待部署机捕获"（部署机什么都没
+跑、值已经在仓库里 ⇒ 已是假话）⇒ 改为全部已钉 + 指路取值口径与对账闸；`.github/dependabot.yml` 的 docker 段补上第三处站点
+（期望表，漏改由新闸判红）；`security/baseImageDigestPinned` 文件头原来只承认一条升级路径（部署机跑
+`capture-image-digests.sh`）⇒ 补成两条，并明说本闸覆盖面早就不止 node/redis（它保留的是"三阶段同
+digest"这条工具链漂移不变量与最早的两条字面量）。compose 里那条 `#（它 pull 之后把输出追加为…）`
+示例行**故意留着**：它是 shell 脚本自证文案的一部分，删了脚本的说法就不成立了。
+
+未收（诚实清单）：
+
+- 本批不新增依赖 ⇒ 三个来源里两个是第三方缓存，独立性建立在"缓存不重打包"这个前提上，不是密码学
+  证明。要证伪投毒只能把 digest 与上游签名（Notary / content trust）对上，本批不做。
+- 期望表的 `captured` 是人手写的日期，闸只判形状（`^\d{4}-\d{2}-\d{2}$`）不判真伪；`sources` 列同理。
+- `--only` 里写了表里没有的引用 ⇒ 退出码 2 并点名，但"新镜像进表"这件事仍靠人记得；`imageReferenceInventory`
+  能抓到的是**文件里出现**而表里没有的引用，反向（表里有、文件里全删了）也能抓，靠条数相等那条。
+- `verify-image-digests.js` 不进 CI：联网门禁红了之后人先怀疑网络，那正是最容易被人为绕开的形态。
+  机器只保证仓库内四处事实来源对得上；外部事实变了要靠人跑一次，或等 Dependabot 把 tag 改掉触发红。
+
+验证：`npx jest --runInBand` 供应链四套（`security/imageReferenceInventory` 9 + `imageDigestVerify` 10 +
+`security/baseImageDigestPinned` 4 + `imageDigestGate` 54）= **77 绿**；`node scripts/verify-image-digests.js`
+全表 6 引用 **PASS，退出码 0**；元门禁 18 套 239 例中 4 红，全部指向并发会话——`ci/testTreePurity`
+列出的 7 份未入库用例里有 5 份是他人在飞的 `*.test.js`（本批 2 份随本批入库），另 3 条锚点红是
+`src/services/statsCache.js` 顶部插入 35 行把 `src/constants/runtime.js:88` 钉住的
+`publishInvalidate`/`onInvalidate` 从 **114/124 移到 147/157**，锚点与台账应由该会话同步（本批不代改
+他人文件）。`eslint src scripts --quiet` 0 error（`AbortSignal` 是本仓 globals 白名单缺的一项，已补）；
+`lint-ratchet` 通过（21 个 warn 文件均未超基线）；`check-utf8` 1049 文件通过；prettier 对本批全部文件
+通过，工作树里两份他人文件仍未格式化（不代改）；`git diff -- Dockerfile` 为空（上一批已钉完），
+`docker-compose.yml` 只动了本轮那 4 处 `image:` 与其注释块，`.github/workflows/ci.yml` 只动了 service
+容器的 1 处。
+
 ### 供应链（2026-10-04 · 把上一批的脚本逐个改坏：五条真缺陷全都属于"把没做完说成做完了"，而闸的共同毛病是只会说"非零"）
 
 > 这批的输入不是新代码，而是**对同日上一批落地的 `scripts/capture-image-digests.sh` 做变异测试**：
