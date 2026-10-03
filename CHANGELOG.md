@@ -8,6 +8,35 @@
 
 ## [未发布]
 
+### 质量（2026-10-03 · 「任何新增验签入口都必须引用同一份判据」这句话，判据是注释而不是代码）
+
+> 读 `src/utils/tokenPurpose.js` 时发现它的收敛承诺没有闸：
+> `src/tests/utils/tokenPurposeAndConsumers.test.js` 的「三个入口都引用 utils/tokenPurpose」
+> 用的是**手写死的三个文件名**。它证的是"这三份今天还引用着"，不是"没有第四份"——
+> 新增一处 `jwt.verify(t, config.jwt.secret)` 而忘了用途闸，两个闸都照常绿。
+> 而同一个文件里其实已经有全仓扫描的机器（另一条用例扫的是"不许内联写第二份 type 比较"），
+> 只是没扫这一维。
+
+- 新增 `src/tests/security/tokenPurposeEntryInventory.test.js`（7 格）：**枚举** `src/` 下所有
+  用 access 密钥验签的调用（剥注释后按调用点判，`refreshSecret` 那一侧不算），未引用判据的
+  必须出现在豁免表里。实测全仓 5 处：`middleware/auth.js`、`services/tokenService.js`、
+  `services/websocketService.js` 引用判据；`middleware/logoutAuth.js`、`services/authService.js`
+  是豁免。清单钉成**双向**不变量：多一处红、少一处也红。
+- 两条豁免各绑一条**行为**用例，不是文件名白名单：
+  · 登出入口那次未套判据的验签只决定"走哪条身份通路"，权威判定仍在 `authenticate()` 里 ——
+  拿 `type:'refresh'` 的载荷用 access 密钥签（= 两把密钥被配成同值时攻击者手里的东西）打
+  `/logout` ⇒ 401 且错误码必须是 `AUTH_TOKEN_INVALID`（换成"缺失/过期"那两条 401 本用例就
+  指错了方向），并且 `req.user` 根本没被构造；
+  · 吊销路径少一道用途闸的失效方向是**多吊销一条**而不是**多放行一个** —— 同形态串填进
+  `revokeTokensOnLogout` 的 `accessToken` 槽 ⇒ 唯一的副作用是写黑名单。
+  哪天有人改动让根据不再成立（比如在吊销路径上开始用 payload 构造身份），红的是这两条行为用例，
+  不是清单。
+- 反向自证 + 实跑 mutation：给分类器喂一段"没引用判据的 verify"与"引用了判据的 verify"，
+  两者必须给出相反答案，且注释里提到的 `jwt.verify` 不算入口；再把一个合成入口临时写进
+  `src/utils/superAdmin.js` 真跑一次 ⇒「清单逐条归队」与「规模钉住」两条立刻红并点名
+  `src/utils/superAdmin.js ⇒ jwt.verify(t, config.jwt.secret, …)`，随后恢复原文件（`git diff` 空）。
+- `src/utils/tokenPurpose.js` 的头注释补上这句承诺现在由谁执行，并把实测的 5 处入口写进去。
+
 ### 安全（2026-10-03 · 轮换手册把**两代**真凭据指向一个没被忽略的目录，而生成器"缺哪个补哪个"）
 
 > 触发形态直接写在手册里：`deployment/secret-rotation.md` 第 1 步 `generate-secrets.js

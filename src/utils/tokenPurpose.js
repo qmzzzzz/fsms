@@ -12,6 +12,12 @@
  * 不因这次加固而集体失效。此前这条规则散在三处（HTTP 中间件、令牌有效性探测、
  * WS 认证），后两处漏抄 —— 收敛到这里，任何新增的验签入口都必须引用同一份。
  *
+ * 「任何新增入口」这句以前只是注释，现在有判据：
+ * `src/tests/security/tokenPurposeEntryInventory.test.js` **枚举** src/ 下所有
+ * `jwt.verify(…, config.jwt.secret)` 调用（不是点名已知文件），未引用本判据的
+ * 必须出现在豁免表里，而豁免表的两条豁免各绑一条行为用例——豁免的根据没了就红，
+ * 不看文件名。实测全仓 5 处入口：3 处引用判据，2 处豁免（登出入口的预检、登出吊销）。
+ *
  * @param {object} decoded jwt.verify 的产物
  * @returns {boolean} true = 用途不符（拒绝）
  */
