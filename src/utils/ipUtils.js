@@ -517,11 +517,62 @@ function classifyIpAttribution(req) {
     : { kind: IP_ATTRIBUTION_KINDS.PUBLIC_PEER_HEADER, reportedIp, socketPeer };
 }
 
+/**
+ * 封禁/惩罚目标的**裁定**（写侧的最后一问）：拿到 classifyIpAttribution 的分类后，
+ * 这次惩罚到底落在哪个地址上。
+ *
+ * 逐类的裁定与理由：
+ *  - DIRECT：req.ip 就是 socket 对端，TCP 源地址不可伪造 ⇒ 打 reportedIp。
+ *  - TRUSTED_PROXY：打 reportedIp（经可信代理按跳数取位，互联网侧真实客户是它）。
+ *    这正是注释里说的「可用但不可区分」：同网段进程伪造 XFF 与真实客户在该类上
+ *    无法区分——所以调用方必须把 kind 写进审计留痕（ip_attribution_*），
+ *    让"这次封禁的依据是哪一类来源"事后可查，而不是假装它是已验证身份。
+ *  - PUBLIC_PEER_HEADER：reportedIp 完全由对方写（这正是本 finding 的攻击面：
+ *    同网段容器写 X-Forwarded-For: <受害者IP> 即可定点踢人、换个伪造值换个桶），
+ *    **绝不**作为惩罚目标；打不可伪造的 socketPeer——攻击者换伪造值不再换桶。
+ *  - UNVERIFIABLE：无 socket 对端（替身 req/夹具环境）⇒ 按 req.ip 的既有口径
+ *    处理（归一化失败保留原文交调用方归一），保证既有调用方与测试语义不变。
+ *
+ * @param {import('express').Request} req
+ * @returns {{kind:string, punishIp:string|undefined|null, reportedIp:string|undefined, socketPeer:string}}
+ */
+function resolvePunishableIp(req) {
+  // req 缺省（部分调用方只有 ctx 而 req 未传/测试夹具）按 UNVERIFIABLE 口径落地，
+  // 不让分类本身成为新的抛错点
+  const cls = classifyIpAttribution(req || {});
+  switch (cls.kind) {
+    case IP_ATTRIBUTION_KINDS.PUBLIC_PEER_HEADER:
+      return { ...cls, punishIp: cls.socketPeer };
+    case IP_ATTRIBUTION_KINDS.UNVERIFIABLE:
+      return { ...cls, punishIp: req?.ip ?? null };
+    default:
+      return { ...cls, punishIp: cls.reportedIp };
+  }
+}
+
+/**
+ * 封禁留痕因子：DIRECT 是"对端即身份"的默认事实，不必刷存在；其余类别必须写进
+ * 审计 riskFactors（TRUSTED_PROXY「可用但不可区分」/ PUBLIC_PEER_HEADER 已改打
+ * socket 对端），让"这次封禁依据的是哪一类来源"事后可查。三条封禁链路共用，
+ * 口径只此一份。
+ */
+const ipAttributionRiskFactors = (kind) =>
+  kind && kind !== IP_ATTRIBUTION_KINDS.DIRECT ? [`ip_attribution_${kind}`] : [];
+
+/**
+ * 惩罚目标取值：有裁定结果用 punishIp，否则退回落调用方的既有 ip 串
+ * （checkBruteForce 的历史调用方/测试替身直接传 ip 的兼容形态）。
+ */
+const resolvePunishTarget = (attribution, fallbackIp) => attribution?.punishIp ?? fallbackIp;
+
 module.exports = {
   isPrivateOrLoopback,
   isClientIpIdentityTrustworthy,
   clientIpForSecurityDecision,
   classifyIpAttribution,
+  resolvePunishableIp,
+  ipAttributionRiskFactors,
+  resolvePunishTarget,
   IP_ATTRIBUTION_KINDS: IP_ATTRIBUTION_KINDS,
   parseIP,
   normalizeIP,

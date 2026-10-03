@@ -76,7 +76,7 @@
  * 列出确切失效清单，限流拦截本身仍由各限流器自己的共享存储跨实例保证。
  */
 const logger = require('../utils/logger');
-const { normalizeIP } = require('../utils/ipUtils');
+const { normalizeIP, resolvePunishableIp } = require('../utils/ipUtils');
 const { readPositiveNumberEnv } = require('../utils/envNumber');
 const { incSecurityAlert } = require('../utils/metrics');
 
@@ -272,10 +272,17 @@ const snapshotOf = (state) => ({
 const noteRateLimitHit = (req, limiterName) => {
   incSecurityAlert('rate_limit_triggered', 'medium');
 
+  // 惩罚目标裁定（写侧，utils/ipUtils.resolvePunishableIp）：不再无条件把 req.ip
+  // 当打击对象——trust proxy 下 req.ip 来自请求方写的 XFF，同网段进程伪造
+  // X-Forwarded-For: <受害者IP> 就能把封禁/计数打到任意地址，且自己换个伪造值
+  // 就换一个新桶。裁定口径：DIRECT/TRUSTED_PROXY 打 req.ip（后者「可用但不可
+  // 区分」，kind 随 escalateIp 留进审计）；PUBLIC_PEER_HEADER 打 socket 对端
+  // （不可伪造，换伪造值不再换桶）；UNVERIFIABLE（替身 req/夹具）保持既有语义。
+  const attribution = resolvePunishableIp(req);
+
   // 与名单/封禁同一把尺：::ffff:1.2.3.4 与 1.2.3.4 必须是同一个攻击源。
-  // 归一化失败不得回退原文——req.ip 在 trust proxy 下来自请求方写的 XFF，
-  // 换一个垃圾串就换一个全新计数桶，阶梯就永远走不到（口径同 rateLimit.js）
-  const ipKey = normalizeIP(req?.ip) || 'unknown';
+  // 归一化失败不得回退原文——换一个垃圾串就换一个全新计数桶，阶梯就永远走不到。
+  const ipKey = normalizeIP(attribution.punishIp) || 'unknown';
   const now = Date.now();
 
   let rec;
@@ -311,6 +318,9 @@ const noteRateLimitHit = (req, limiterName) => {
         snapshot,
         threshold: spec.threshold,
         windowMs: ESCALATION_WINDOW_MS,
+        // 封禁留痕：审计行据此写 ip_attribution_*，让"这次封禁的依据是哪一类
+        // 来源"事后可查（TRUSTED_PROXY「可用但不可区分」的留痕义务见 ipUtils）
+        attributionKind: attribution.kind,
       })
       .catch((err) => logger.error(`限流升级处理失败: ${ipKey}, 错误: ${err.message}`));
     return;

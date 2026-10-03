@@ -5,7 +5,7 @@
 
 const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
-const { normalizeIP } = require('../utils/ipUtils');
+const { normalizeIP, ipAttributionRiskFactors, resolvePunishTarget } = require('../utils/ipUtils');
 const { businessHour, isOffHours } = require('../constants/timezone');
 // 高危档不在此复述：与审计页 level=error、概览高危次数同一派生集合（F-149）
 const { AUDIT_ERROR_RISK_LEVELS } = require('../constants/audit');
@@ -206,7 +206,7 @@ const dispatchNotification = (alertType, level, message, data) =>
 /**
  * 检测并记录暴力破解攻击
  */
-const checkBruteForce = async (username, ip) => {
+const checkBruteForce = async (username, ip, attribution = null) => {
   const windowStart = new Date(Date.now() - THRESHOLDS.bruteForceWindowMs);
 
   // 双维度计数：账户维度 + IP 维度，任一达到阈值即告警
@@ -228,7 +228,17 @@ const checkBruteForce = async (username, ip) => {
     // E-04 口径：告警去重键与封禁对象都必须用**归一化 IP**——
     // `::ffff:1.2.3.4` 与 `1.2.3.4` 混合出现时按原文组键会产生两个去重键，
     // 同一来源重复告警（与封禁/阶梯的两把尺问题同源）
-    const normalizedIp = normalizeIP(ip) || ip;
+    //
+    // 惩罚目标裁定（2026-10-01 审计 finding，utils/ipUtils.resolvePunishableIp）：
+    // 有 attribution（调用方持 req 时在调用侧 resolve）则按裁定打——
+    // PUBLIC_PEER_HEADER（对端公网却带 XFF）的 reportedIp 完全由对方写，改打
+    // socketPeer；TRUSTED_PROXY/DIRECT 打 reportedIp 并留痕。缺省（历史调用方/
+    // 测试替身直接传 ip 串）保持既有语义。
+    // 计数仍按**上报的 ip**：审计行的 ip 列就是它，换目标计数会让历史行永远
+    // 配不上；对"固定伪造值刷满阈值"的攻击者，改打 socketPeer 后照样落网，
+    // 对"轮换伪造值"者由账号锁定 + 限流兜底（此处计数本来就攒不起来）。
+    const punishTarget = resolvePunishTarget(attribution, ip);
+    const normalizedIp = normalizeIP(punishTarget) || punishTarget;
 
     // R-H2：**封禁判据只看 IP 维度**。maxFailures 取的是双维度的较大值——分布式撞
     // 单账号（多个攻击 IP 各自少量尝试同一账号）会让 userFailures 达标，而"当前请求
@@ -264,7 +274,11 @@ const checkBruteForce = async (username, ip) => {
         username,
         ip: normalizedIp,
         riskLevel: ALERT_LEVELS.CRITICAL,
-        riskFactors: [`登录失败次数超标 (账户:${userFailures}, IP:${ipFailures})`],
+        riskFactors: [
+          `登录失败次数超标 (账户:${userFailures}, IP:${ipFailures})`,
+          // 封禁留痕（口径见 ipUtils.ipAttributionRiskFactors）
+          ...ipAttributionRiskFactors(attribution?.kind),
+        ],
         body: { userAttempts: userFailures, ipAttempts: ipFailures, window: '5 分钟' },
       });
     } catch (e) {
@@ -393,8 +407,19 @@ const checkUnusualTime = (timestamp = new Date()) => {
 
 /**
  * 检测权限滥用
+ *
+ * @param {string} userId 被拒用户
+ * @param {{kind:string,punishIp:string,reportedIp?:string,socketPeer?:string}|string} attribution
+ *   调用方持 req 时传 utils/ipUtils.resolvePunishableIp(req) 的裁定结果；
+ *   兼容直接传 ip 串（按 UNVERIFIABLE 既有口径处理）
  */
-const checkPermissionAbuse = async (userId, ip) => {
+const checkPermissionAbuse = async (userId, attribution) => {
+  // 惩罚目标裁定：字符串形态 = 旧口径（归一化后即目标）；对象形态按裁定
+  const attr =
+    typeof attribution === 'string'
+      ? { kind: 'unverifiable', punishIp: attribution }
+      : attribution || null;
+  const ip = attr?.punishIp;
   // B-L6 接线口径：信号取全局审计中间件落库的 403 响应（写路径 403 均有记录，
   // 零新增写入），兼容显式写入的 permission_denied/forbidden 动作
   const recentFailures = await AuditLog.countDocuments({
@@ -418,6 +443,7 @@ const checkPermissionAbuse = async (userId, ip) => {
       userId,
       username: abuser.username || String(userId),
       ip,
+      attributionKind: attr?.kind,
       recentFailures,
     });
   }

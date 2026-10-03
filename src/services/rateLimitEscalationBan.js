@@ -53,7 +53,16 @@ const recordEscalation = async (normalizedIp, detail) => {
       username: 'anonymous',
       ip: normalizedIp,
       riskLevel: ALERT_LEVELS.HIGH,
-      riskFactors: ['限流持续触顶', `信号类别:${detail.className}`],
+      riskFactors: [
+        '限流持续触顶',
+        `信号类别:${detail.className}`,
+        // 封禁留痕（utils/ipUtils.resolvePunishableIp 的裁定口径）：DIRECT 是
+        // "无代理、对端即身份"的默认事实，不必刷存在；其余类别（TRUSTED_PROXY
+        // 可用但不可区分 / PUBLIC_PEER_HEADER 已改打 socket 对端）必须可事后追查
+        ...(detail.attributionKind && detail.attributionKind !== 'direct'
+          ? [`ip_attribution_${detail.attributionKind}`]
+          : []),
+      ],
       body: {
         limiter: detail.limiterName,
         className: detail.className,
@@ -77,7 +86,8 @@ const recordEscalation = async (normalizedIp, detail) => {
  *
  * @param {string} normalizedIp 已归一化的来源 IP
  * @param {{className:string, limiterName:string, snapshot:{byLimiter:Object,total:number},
- *          threshold:number, windowMs:number}} detail 计数侧的快照
+ *          threshold:number, windowMs:number, attributionKind?:string}} detail 计数侧的快照
+ *          （attributionKind 来自 resolvePunishableIp 的裁定，写进审计留痕）
  */
 const escalateIp = async (normalizedIp, detail) => {
   const { className, snapshot } = detail;

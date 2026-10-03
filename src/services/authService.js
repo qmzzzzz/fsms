@@ -23,6 +23,7 @@ const logger = require('../utils/logger');
 const { validatePasswordStrength, isValidAvatar } = require('../utils/helpers');
 const { matchesHistory, withPrevious, HISTORY_DEPTH } = require('../utils/passwordHistory');
 const { isIPAllowed } = require('../utils/ipRange');
+const { resolvePunishableIp } = require('../utils/ipUtils');
 const { checkBruteForce, checkUnusualTime } = require('./securityAlert');
 const {
   blacklistToken,
@@ -243,7 +244,7 @@ async function loginUser(params, ctx) {
     await AuditLog.recordLogin(null, username, ip, false, userAgent, { fingerprint }).catch(
       onAuditWriteFailure('login_failed_audit', { user: { username } })
     );
-    await checkBruteForce(username, ip).catch(() => {});
+    await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
     return { outcome: 'INVALID_CREDENTIALS' };
   }
 
@@ -314,7 +315,7 @@ async function resolveLoginPassword(params, ctx, username) {
       await AuditLog.recordLogin(null, username, ip, false, userAgent, {
         reason: `credential_decrypt_failed:${err.code}`,
       }).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
-      await checkBruteForce(username, ip).catch(() => {});
+      await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
       logger.warn('登录拒绝 - 口令密文无效', { username, code: err.code });
       return { outcome: 'ENC_INVALID' };
     }
@@ -356,7 +357,7 @@ async function assertAccountUsable(user, { password, ctx, username }) {
     // 同一条拒绝也必须进暴力破解检测：loginUser 的「用户不存在」分支会计数，
     // 被禁账号若不计数就成了免检探测面（recordLogin 已写失败审计，
     // 但 checkBruteForce 才是把它读出来并告警的那一步）。
-    await checkBruteForce(username, ip).catch(() => {});
+    await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
     return { outcome: 'INVALID_CREDENTIALS' };
   }
   if (user.lockUntil && user.lockUntil > new Date()) {
@@ -372,7 +373,7 @@ async function assertAccountUsable(user, { password, ctx, username }) {
     );
     // 与上面 status 分支同判据：抹平耗时 + 计入暴力破解检测
     await consumeDummyPasswordTime(password);
-    await checkBruteForce(username, ip).catch(() => {});
+    await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
     return { outcome: 'INVALID_CREDENTIALS' };
   }
 
@@ -430,7 +431,7 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
     );
     // B-L1：与上方 210/233 行同口径——checkBruteForce 内的 DB 查询/告警落库
     // 若因 DB 瞬断 reject，异常上抛会把统一 401 变成 500（破坏 M-5 防枚举口径）
-    await checkBruteForce(username, ip).catch(() => {});
+    await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
     // 原子递增失败计数（$inc）：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，
     // 丢失更新导致锁定阈值被推迟，利于爆破；$inc 由 DB 保证无丢失更新。
     // 返回更新后文档，据此判断是否跨过锁定阈值（阈值判定可能并发重复触发，

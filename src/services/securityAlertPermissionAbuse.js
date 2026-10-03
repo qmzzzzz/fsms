@@ -32,7 +32,7 @@
  */
 const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
-const { normalizeIP } = require('../utils/ipUtils');
+const { normalizeIP, ipAttributionRiskFactors } = require('../utils/ipUtils');
 const {
   ALERT_LEVELS,
   ALERT_TYPES,
@@ -50,9 +50,12 @@ const {
  * 因此这里不做任何前置判断——进了这个函数就一定会留下审计行（除非 DB 写失败，
  * 那也是 error 留痕 + 封禁继续），这正是"阶梯事件源不许被频控吞掉"的要求。
  *
- * @param {{userId:*, username:string, ip:string, recentFailures:number}} ctx
+ * @param {{userId:*, username:string, ip:string, attributionKind?:string, recentFailures:number}} ctx
+ *   ip 是调用方（securityAlert.checkPermissionAbuse）按 resolvePunishableIp 裁定后的
+ *   惩罚目标——PUBLIC_PEER_HEADER 时已是 socket 对端而非请求方可写的 XFF；
+ *   attributionKind 为裁定类别，写进审计留痕（ip_attribution_*）
  */
-const recordAndContain = async ({ userId, username, ip, recentFailures }) => {
+const recordAndContain = async ({ userId, username, ip, attributionKind, recentFailures }) => {
   const normalizedIp = normalizeIP(ip) || ip;
   const hasIp = Boolean(ip);
 
@@ -80,7 +83,11 @@ const recordAndContain = async ({ userId, username, ip, recentFailures }) => {
       username,
       ip: normalizedIp,
       riskLevel: ALERT_LEVELS.HIGH,
-      riskFactors: ['频繁权限检查失败'],
+      riskFactors: [
+        '频繁权限检查失败',
+        // 封禁留痕（口径见 ipUtils.ipAttributionRiskFactors）
+        ...ipAttributionRiskFactors(attributionKind),
+      ],
       body: { failures: recentFailures },
     });
   } catch (e) {

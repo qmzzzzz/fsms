@@ -7,6 +7,7 @@
 const User = require('../models/User');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
+const { resolvePunishableIp } = require('../utils/ipUtils');
 
 /**
  * 权限检查中间件工厂
@@ -70,10 +71,12 @@ const checkPermission = (requiredPermissions, logic = 'OR') => {
       } else {
         logger.warn('用户缺少权限', { userId, requiredPermissions: permissions });
         // B-L6 接线：权限滥用频控检测（此前 checkPermissionAbuse 为死代码）——
-        // 信号取全局审计中间件落库的 403 记录，fire-and-forget 不阻塞拒绝路径
+        // 信号取全局审计中间件落库的 403 记录，fire-and-forget 不阻塞拒绝路径。
+        // 2026-10-01：传 resolvePunishableIp(req) 的裁定结果而非裸 req.ip——
+        // 惩罚目标不能取自请求方可写的 XFF（同网段伪造 XFF 定点踢人/换桶逃避）
         try {
           void require('../services/securityAlert')
-            .checkPermissionAbuse(userId, req.ip)
+            .checkPermissionAbuse(userId, resolvePunishableIp(req))
             .catch(() => {});
         } catch (_) {
           /* 检测失败不影响拒绝主流程 */
