@@ -3,7 +3,7 @@
  * （scripts/devSecretIsolation.js 与 scripts/{e2e-smoke,load-test,production-drill}.js）
  *
  * 为什么值得一个专门闸：`src/config/index.js:10-11` 在 require 期就 hydrate，而冲突规则
- * 是**文件优先**（`src/config/secrets.js:113` 无条件 `process.env[name] = value`）。
+ * 是**文件优先**（`src/config/secrets.js:134` 无条件 `process.env[name] = value`）。
  * 三个 harness 的形状是「先设一次性 env，再 require ../src/index.js」，所以只要宿主上
  * 还有 `*_FILE`，回填就会把一次性 `MONGODB_URI` 覆写成真实库连接串——**并且不报错**。
  * 后果不是冒烟变红，是**写**：`npm run test:e2e` 往生产/开发库播种管理员、建用户、发告警，

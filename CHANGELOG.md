@@ -8,6 +8,49 @@
 
 ## [未发布]
 
+### 安全（2026-10-03 · 轮换手册把**两代**真凭据指向一个没被忽略的目录，而生成器"缺哪个补哪个"）
+
+> 触发形态直接写在手册里：`deployment/secret-rotation.md` 第 1 步 `generate-secrets.js
+--out ./secrets-new`（即将上线的那套），第 4 步 `mv ./secrets ./secrets-old`（刚刚下线的
+> **全套生产密钥**）。而 `.gitignore` 当时只有 `secrets/` 一条——目录名不同，一条都挡不住；
+> 本仓库是公开仓库，轮换做完那天一次 `git add -A` 就把新旧两代凭据一起推上去。
+> `.dockerignore` 同族：docker 的忽略模式按**整段路径**匹配，`secrets` 匹配不到 `secrets-new`，
+> 所以一次 `docker compose build` 会把两代真凭据送进构建上下文（镜像层里删不掉）。
+
+- `.gitignore` 加 `secrets-*/`、`.dockerignore` 加 `secrets-*`，各带一句"为什么不是 `secrets`"。
+- 新增 `src/tests/deploy/secretCarriersIgnored.test.js`（14 格）。要点是**哪些目录会装凭据不写死清单**，
+  而是从手册/compose/README 自己的文本里抓 `--out <dir>` 与 `mv <src> <dst>` 两种入口：
+  将来文档新起一个 `./secrets-staging` 而忘了忽略，本闸变红；写死清单则它永远绿着，
+  而漏的恰好是那个新名字。git 侧的"是否被忽略"交给 `git check-ignore` 本身（与
+  `scripts/mongoUri.sh` 同一条规矩：判据按参考解析器怎么读来定），并配一条**反向自证**
+  （同一条命令对没被忽略的目录回 1）——否则探测器坏掉时全部用例会一起假绿。
+- `generate-secrets.js` 前置检查 A（落盘之前问 git）：`--out` 目标在仓库内而 git 不认它被忽略
+  ⇒ 退出码 1，**一个文件都不写**。退出码逐档实测：0=命中规则；1=在仓库内但不报忽略；
+  128=判不了（仓库外 / 容器里没有 `.git` / 没装 git）。只有 1 拒，128 只把"没判成"说出来——
+  拦下一条轮换/DR 路径换来的安全性是负的。判 git 时的 cwd 取**目标最近的已存在祖先目录**
+  而不是调用方所在目录：`--out ~/keys` 而家目录本身是个 dotfiles 仓库时，用调用方 cwd 会一律
+  判成 128 而放行，而那正是必须拦的形状。
+- rc=1 其实合并了**两**种形态（都实测，话术两种都点名）：没有规则命中它；规则有了但文件
+  **已经在 index 里**（先 `git add`、事后才补 `.gitignore`）。第二种更要紧——它就是"密钥已经
+  进了公开仓库"的状态，所以这里**刻意不加** `--no-index`。这条加没加不是风格问题，实跑过：
+  加上后前置检查 A 放行，`--force` 一路 rc=0 把已入库那颗 `jwt_secret` 覆盖成新生成的随机值
+  （历史里一份、工作目录里另一份，且再没有任何一环报警）。用例把这一格钉住，含"旧字节必须
+  原样还在"与"`--force` 也救不了"两条断言。
+- `generate-secrets.js` 前置检查 B：目录里已有密钥时不再"缺哪个补哪个"。原实现逐个
+  `已存在，跳过`，一次中断后的重跑会产出**混合代次**目录——多数密钥彼此独立看不出来，但
+  `mongodb_uri` 是把 `mongo_root_password` 拼进去生成的：mongo 初始化用旧口令建用户、应用拿
+  对不上号的连接串连库，轮换"成功"结束后第一次连库就认证失败，而现场证据是两份刚生成的
+  0600 文件。现在要么 `--force` 重做整套、要么拒绝；用例在 `--force` 之后现场断言
+  `mongodb_uri` 里拼的就是同目录那份 `mongo_root_password`，把这对耦合写成判据而不只是注释。
+- 两处**自我纠正**（都因为"注释不执行"）：① 我先前在注释里写"用目录名探测会假绿"，实测三组
+  形态（`s/`、`s/`+反向 `!s/jwt_secret`、文件先入 index 再补规则）里目录名与文件名探针的命中
+  结果**完全一致**，那句是没取证就下的结论，已删；② 拒绝话术原本指向手册的「失陷处置」小节，
+  而 `secret-rotation.md` 里根本没有这一节（grep 过），改成它真实存在的轮换流程 + `git rm --cached`。
+- 顺带修掉自己上一次提交造成的两处陈旧行号引用：`28f7247` 插入 NUL 守卫后
+  `process.env[name] = value` 从 `src/config/secrets.js:113` 挪到了 `:134`，
+  `scripts/devSecretIsolation.js` 与 `disposableSecretIsolation.test.js` 的锚点跟着改对
+  （`commentAnchorFreshness` 报的，不是豁免掉的）。
+
 ### 安全（2026-10-03 · 破坏性恢复的**默认**传输路径从来没有一个用例跑过，而它正在宿主机上多留一份凭据）
 
 > 背景：给 `restore-mongo.sh` 补用例时发现，本仓所有真跑过它的地方（backupUriFile /

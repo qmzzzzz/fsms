@@ -54,7 +54,11 @@ deliverables
 # secrets 由运行时挂载到 /run/secrets，构建期完全不需要；
 # 一旦被 COPY 进镜像层，任何能 docker pull 该镜像的人都能取出密钥，
 # 且即使后续层删除，历史层仍保留内容。
+# 同族目录名（2026-10-03 补，与 .gitignore 的 `secrets-*/` 一条根）：轮换手册把新钥生成到
+# ./secrets-new、把下线旧钥留在 ./secrets-old，而 docker 的忽略模式按**整段路径**匹配，
+# `secrets` 匹配不到 `secrets-new` ⇒ 一次 `docker compose build` 会把两代真凭据送进构建上下文。
 secrets
+secrets-*
 
 # 自签名 TLS 证书同理（仅本地开发使用）
 certs

@@ -81,6 +81,14 @@ certs/
 # 密钥文件目录（P3-48：docker-compose secrets 的挂载源，含 JWT/AES/DB 口令）
 # 目录本身与其中任何文件都绝不能入库
 secrets/
+# 轮换手册用的**同族目录名**（2026-10-03 补）：deployment/secret-rotation.md 第 1 步
+# `generate-secrets.js --out ./secrets-new`，第 4 步 `mv ./secrets ./secrets-old`——
+# 后者装的是**刚刚下线的全套生产密钥**，前者是即将上线的那套，两边都是真凭据。
+# 上面那条 `secrets/` 只匹配名为 secrets 的目录，一条都挡不住；本仓库是公开仓库，
+# 轮换做完那天一次 `git add -A` 就把新旧两代生产密钥一起推上去。
+# 规则按"内容也要被忽略"验过（git check-ignore secrets-new/jwt_secret ⇒ 命中），
+# 门禁见 src/tests/deploy/secretCarriersIgnored.test.js。
+secrets-*/
 
 
 # 首次启动生成的管理员初始口令文件（initData 写入，绝不能入库）

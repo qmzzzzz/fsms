@@ -2,7 +2,7 @@
  * 一次性开发密钥隔离（e2e / 压测 / 生产演练三个 harness 专用）
  *
  * 背景：`src/config/index.js:10-11` 在 require 期就调 `hydrateSecretsFromFiles()`，
- * 而冲突规则是**文件优先**（`src/config/secrets.js:113` 无条件 `process.env[name] = value`）。
+ * 而冲突规则是**文件优先**（`src/config/secrets.js:134` 无条件 `process.env[name] = value`）。
  * 三个 harness 的模式是「先设一次性 env，再 require ../src/index.js」
  * （index.js 为 require 即启动，见 e2e-smoke.js 头注释）。于是只要宿主上还留着
  * `*_FILE`，回填就会把 harness 刚设好的 `MONGODB_URI` / `JWT_SECRET` / `AES_SECRET_KEY`
