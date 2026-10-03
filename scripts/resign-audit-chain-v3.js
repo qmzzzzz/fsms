@@ -156,6 +156,10 @@ async function runChainVerify() {
     // 整窗无哈希（全 legacy）不得背书：本脚本从最早扫起，窗口若全落在链启用前的
     // legacy 段，旧判据会给 code=0 —— 那正是"为灭迹签发合格证明"。
     legacy: verify.legacy,
+    // 缺口计数同样必须回传：本脚本用「能否宣称完整」作为改写前/后的合格证明，
+    // 而 verifyAuditChain 的报告恒带 hashComputeFailed。漏传不是少一条理由，
+    // 是让"链上有 N 条算不出 hash"直接穿过判据拿到 canAttestIntact=true。
+    hashComputeFailed: verify.hashComputeFailed,
     // 改写前/后核验的"能否宣称完整"是这条链的合格证明本体，扫描口径必须回显给判据
     scanned: verify.scanned,
   });

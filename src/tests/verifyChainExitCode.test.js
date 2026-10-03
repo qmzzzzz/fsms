@@ -14,6 +14,7 @@
  * 全程用测试库（HMAC_SECRET 由 setup.js 注入），不需要外部 MongoDB。
  */
 
+const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const mongoose = require('mongoose');
@@ -50,10 +51,79 @@ const mkDoc = (i) => ({
   success: true,
 });
 
-describe('完整性判据只有一份实现', () => {
-  const fs = require('fs');
-  const path = require('path');
+/**
+ * 判据调用点的静态枚举 —— "回传全字段"门禁的取证面
+ *
+ * 为什么要枚举而不是点名文件：点名清单默认"调用方是固定的那几个"，而 2026-10-03
+ * 实测的两个漏传（verify-audit-chain.js 与 resign-audit-chain-v3.js 都少传
+ * hashComputeFailed，导致链尾有不可追认记录时 CLI 打 PASS 退 0）恰恰都在
+ * **已有清单里**；判据的 JSDoc 当时还写着"唯一漏传路径是旧调用方"。
+ * 清单管不住"新字段 × 旧调用方"，枚举管得住。
+ *
+ * 判据对缺 hashComputeFailed 的调用按 0 处理（不像 scanned/legacy 那样 fail-closed，
+ * 理由见 auditChainVerify.hasUnattestableGapOf），所以这条枚举是该缺口的唯一防线。
+ * 残留上限：`computeChainVerdict(外部对象)` 这种形态看不到字段，这里按"该文件没有
+ * 字面量调用"处理并点名——要求调用点以字面量写出，正是让本门禁看得见。
+ */
+const VERDICT_CALL_RE = /(?:computeChainVerdict|computeVerdict)\s*\(\s*\{/g;
+const VERDICT_ANY_CALL_RE = /(?:computeChainVerdict|computeVerdict)\s*\(/;
+const FORWARDED_FIELDS = ['scanned', 'hashComputeFailed'];
 
+/** 取出 `xxx({ … })` 调用的对象字面量本体（花括号深度配对） */
+const literalCallBodies = (code) => {
+  const bodies = [];
+  for (const m of code.matchAll(VERDICT_CALL_RE)) {
+    const start = code.indexOf('{', m.index);
+    let depth = 0;
+    for (let i = start; i < code.length; i += 1) {
+      if (code[i] === '{') depth += 1;
+      else if (code[i] === '}' && (depth -= 1) === 0) {
+        bodies.push(code.slice(start, i + 1));
+        break;
+      }
+    }
+  }
+  return bodies;
+};
+
+/** src/（不含 src/tests/）+ scripts/ 下所有 .js，按相对路径归一化 */
+const readVerdictCallers = () => {
+  const walk = (dir, acc) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (p === path.join(ROOT, 'src', 'tests')) continue;
+        walk(p, acc);
+      } else if (e.name.endsWith('.js')) {
+        const code = fs.readFileSync(p, 'utf8');
+        if (VERDICT_ANY_CALL_RE.test(code)) acc[path.relative(ROOT, p).replace(/\\/g, '/')] = code;
+      }
+    }
+    return acc;
+  };
+  return { ...walk(path.join(ROOT, 'src'), {}), ...walk(path.join(ROOT, 'scripts'), {}) };
+};
+
+const verdictCallOffenders = (sources) => {
+  const out = [];
+  for (const [rel, code] of Object.entries(sources)) {
+    const bodies = literalCallBodies(code);
+    if (bodies.length === 0) {
+      out.push(`${rel}：调用判据却没有一处字面量对象，回传内容静态不可见`);
+      continue;
+    }
+    for (const body of bodies) {
+      for (const field of FORWARDED_FIELDS) {
+        if (!new RegExp(`${field}\\s*:`).test(body)) {
+          out.push(`${rel}：判据调用少传 ${field}`);
+        }
+      }
+    }
+  }
+  return out;
+};
+
+describe('完整性判据只有一份实现', () => {
   /** 任何"跑链核验"的脚本都必须把结论交给 computeChainVerdict */
   const offenders = (sources) =>
     Object.entries(sources)
@@ -81,6 +151,47 @@ describe('完整性判据只有一份实现', () => {
     ).toEqual(['fake-resign.js']);
     // 没跑核验的脚本不该被误伤
     expect(offenders({ 'other.js': 'console.log(1);\n' })).toEqual([]);
+  });
+});
+
+describe('判据调用方必须把报告字段回传全', () => {
+  test('全仓枚举：每个判据调用点都回传 scanned 与 hashComputeFailed', () => {
+    const sources = readVerdictCallers();
+    const sites = Object.values(sources).reduce((n, c) => n + literalCallBodies(c).length, 0);
+    // 前提自证：在线接口 + 周期核验 + 两个运维脚本，少一个说明枚举没跑起来
+    expect(sites).toBeGreaterThanOrEqual(4);
+    expect(verdictCallOffenders(sources)).toEqual([]);
+  });
+
+  test('反向前提：少传字段与"外部对象调用"都会被点名（防空集恒绿）', () => {
+    const okBody =
+      'computeChainVerdict({ breaks: 0, scanned: r.scanned, hashComputeFailed: r.hashComputeFailed })';
+    expect(verdictCallOffenders({ 'ok.js': okBody })).toEqual([]);
+
+    expect(
+      verdictCallOffenders({
+        'gap.js': 'computeChainVerdict({ breaks: 0, scanned: r.scanned })',
+      })
+    ).toEqual(['gap.js：判据调用少传 hashComputeFailed']);
+
+    expect(
+      verdictCallOffenders({
+        'scope.js': 'computeChainVerdict({ breaks: 0, hashComputeFailed: r.hashComputeFailed })',
+      })
+    ).toEqual(['scope.js：判据调用少传 scanned']);
+
+    // 同一文件里第二个调用点漏传也要抓到（整文件正则匹配会放过它）
+    expect(
+      verdictCallOffenders({
+        'two.js': `computeVerdict({ scanned: r.scanned, hashComputeFailed: r.hashComputeFailed });
+computeChainVerdict({ scanned: r.scanned });`,
+      })
+    ).toEqual(['two.js：判据调用少传 hashComputeFailed']);
+
+    // 非字面量调用看不到字段 ⇒ 点名（而不是静默跳过）
+    expect(
+      verdictCallOffenders({ 'wrap.js': 'function f(p){ return computeChainVerdict(p); }' })
+    ).toEqual(['wrap.js：调用判据却没有一处字面量对象，回传内容静态不可见']);
   });
 });
 
@@ -367,19 +478,59 @@ describe('verify-audit-chain 退出码', () => {
       expect(r.scoped).toBe(true);
       expect(r.canAttestIntact).toBe(false);
       expect(r.reasons.join('')).toMatch(/无从判断这是全量还是子集/);
-      // 反向闸：三个生产调用方（在线接口 + 两个脚本）都回传了 scanned，
-      // 漏传一个就必须红——门禁式断言，防"判据改成忽略 scanned"混过上面几格
-      const fs = require('fs');
-      const callers = [
-        'src/controllers/auditController.js',
-        'scripts/verify-audit-chain.js',
-        'scripts/resign-audit-chain-v3.js',
-      ];
-      for (const f of callers) {
-        const code = fs.readFileSync(path.join(ROOT, f), 'utf8');
-        expect(code).toMatch(/scanned\s*:\s*\w+\.scanned/);
-      }
+      // 反向闸：每个生产调用方（在线接口 + 周期核验 + 两个运维脚本）都回传了 scanned，
+      // 漏传一个就必须红——门禁式断言，防"判据改成忽略 scanned"混过上面几格。
+      // 调用方靠枚举而不是点名（点名为何不够见文件头 verdictCallOffenders 的注释）。
+      expect(verdictCallOffenders(readVerdictCallers())).toEqual([]);
     });
+  });
+
+  // ★ 2026-10-03 实测的漏传现场：链**尾**一条 hashFailure 记录（写侧算 hash 抛错后照常落库，
+  //   真实形态见 AuditLog.hashFailure 的字段注释）。报告里 hashComputeFailed=1、breaks=0，
+  //   而 CLI 构造 verdict 时没有回传该字段 ⇒ 判据拿不到缺口 ⇒
+  //   「VERDICT: PASS（全量、无断裂、hmac 已校验）」exit 0。手册正是按退出码 0 验收的
+  //   （deployment/rollback-drill.md:111-112、deployment/secret-rotation.md:397），
+  //   于是缺口穿过验收。判据本身的这一格早有覆盖
+  //   （src/tests/services/auditChainGuardedIntegrity.test.js 的 B 组），
+  //   缺的是**出口到判据这一段**——所以本用例走真 CLI，不走 computeVerdict。
+  test('链尾有"算 hash 失败"记录 ⇒ exit 2，且四个豁免都盖不住', async () => {
+    const tail = await AuditLog.findOne({ username: `${TAG}_2` })
+      .sort({ timestamp: -1 })
+      .lean();
+    expect(tail).not.toBeNull();
+    const pristine = { hash: tail.hash, hmac: tail.hmac };
+    expect(pristine.hash).toBeTruthy();
+
+    // 原生集合改写（绕开 ODM 钩子），只抹链尾：它是最新一条，没有后继 ⇒ breaks 仍为 0
+    await AuditLog.collection.updateOne(
+      { _id: tail._id },
+      { $unset: { hash: '', hmac: '' }, $set: { hashFailure: 'crypto error (test seed)' } }
+    );
+
+    try {
+      const { code, stdout, out } = runCli([]);
+      const report = JSON.parse(stdout.slice(stdout.indexOf('{'), stdout.lastIndexOf('}') + 1));
+      // 前提自证：现场确实构造成了"报告看得见缺口、但不是篡改"
+      expect({ gaps: report.hashComputeFailed, breaks: report.breaks }).toEqual({
+        gaps: 1,
+        breaks: 0,
+      });
+
+      expect(code).toBe(2);
+      expect(out).toContain('INCOMPLETE');
+      expect(out).toMatch(/哈希计算失败/);
+      expect(out).not.toContain('VERDICT: PASS');
+
+      // 缺口没有任何豁免口子：三个豁免同时给也仍是 2
+      expect(runCli(['--allow-empty', '--allow-no-hmac', '--allow-all-legacy']).code).toBe(2);
+    } finally {
+      await AuditLog.collection.updateOne(
+        { _id: tail._id },
+        { $set: { hash: pristine.hash, hmac: pristine.hmac }, $unset: { hashFailure: '' } }
+      );
+      // 还原自证：链回到"全量、无断裂、无缺口"，否则后面的用例会带着本用例的尾巴跑
+      expect(runCli([]).code).toBe(0);
+    }
   });
 
   test('篡改一条记录（绕过 ODM 直改字段）⇒ exit 1 且报断裂', async () => {

@@ -30,6 +30,9 @@
  *           在数据上不可区分，后者是彻底灭迹。旧判据把整窗 legacy 全数吸收 ⇒ breaks=0
  *           ⇒ 退 0，**抹得越干净反而判得越干净**（只抹链尾退 1、整表全抹退 0）。
  *           确要在"链从未启用"的存量库上放行加 --allow-all-legacy。
+ *         · 报告里有"算 hash 失败后无哈希落库"的记录（hashComputeFailed > 0）：链上
+ *           存在无法追认的缺口。没有豁免开关——"我知道有几条算失败"不是可以一次性放行的
+ *           口径，它要么修好要么留红。
  *
  * 四个豁免彼此独立：--allow-no-hmac 只豁免 hmac，--allow-empty 只豁免空集合，
  * --allow-all-legacy 只豁免"整窗无哈希"，任一未豁免的不完整理由都会把退出码钉在 2
@@ -154,6 +157,14 @@ async function main() {
     hmacChecked: result.hmacChecked,
     // 整窗无哈希（全 legacy）同样不得背书：见 computeChainVerdict 的 nothingHashed 一段
     legacy: result.legacy,
+    // 报告里"算 hash 失败后无哈希落库"的条数：>0 时判据拒绝 code 0。
+    // 这个字段 verifyAuditChain **恒回填**，不回传不是"少一条理由"，而是把
+    // 报告自己已经看见的缺口在出口处丢掉——手册正是按退出码 0 验收这一步
+    // （deployment/rollback-drill.md:111、deployment/secret-rotation.md:397），
+    // 于是"链尾有 N 条不可追认"也能拿到 PASS。
+    // 判据对缺该字段的调用按 0 处理（不像 scanned/legacy 那样 fail-closed），
+    // 所以这一行由 src/tests/verifyChainExitCode.test.js 的「判据调用方必须把报告字段回传全」钉住，漏传即红。
+    hashComputeFailed: result.hashComputeFailed,
     // 扫描口径由报告回显：判据缺它时按"局部校验"处理（宁 INCOMPLETE，不假 PASS）
     scanned: result.scanned,
     allowNoHmac: args.allowNoHmac,

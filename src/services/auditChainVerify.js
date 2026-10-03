@@ -459,8 +459,19 @@ const chainVetoReasons = (v) => {
  *
  * 缺省为何按 0（与 legacy/scanned 的"缺省按未知、偏保守"相反）：
  * 该字段的"未知"没有保守侧可言——把每次正常核验都判 INCOMPLETE 会让判据失去区分力，
- * 而那比漏报更糟（运维会开始忽略 code 2）。它由 verifyAuditChain 恒回填，
- * 唯一漏传路径是旧调用方，而旧调用方根本不可能产生带 hashFailure 标记的记录。
+ * 而那比漏报更糟（运维会开始忽略 code 2）。
+ *
+ * 这里曾写过"唯一漏传路径是旧调用方，而旧调用方根本不可能产生带 hashFailure 标记的记录"——
+ * **该前提是失实的**，2026-10-03 实测推翻：两个运维脚本（verify-audit-chain.js、
+ * resign-audit-chain-v3.js）都是在用调用方，而它们的报告恒带 hashComputeFailed
+ * （verifyAuditChain 无条件回填），漏传纯粹是出口处少写一行。漏传的实际后果也已实测：
+ * 链尾一条 hashFailure 记录 ⇒ 报告 hashComputeFailed=1、breaks=0 ⇒ 旧 CLI 打
+ * 「PASS（全量、无断裂、hmac 已校验）」并退 0。
+ *
+ * 修的是调用方而不是把缺省翻成 fail-closed：翻转会让判据对**任何**不带该字段的调用
+ * 报 INCOMPLETE，而真值表用例与在线侧构造的部分字段调用都属正常用法；本仓对"未来调用方
+ * 漏传"的既有机制是逐调用点门禁（见 src/tests/verifyChainExitCode.test.js 的回传用例，
+ * 它同时钉 scanned 与 hashComputeFailed），不是把判据调瞎。
  */
 const hasUnattestableGapOf = (hashComputeFailed) =>
   Number.isFinite(hashComputeFailed) ? hashComputeFailed > 0 : false;

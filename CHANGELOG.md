@@ -8,6 +8,43 @@
 
 ## [未发布]
 
+### 安全（2026-10-03 · 审计链核验脚本把"报告里已见的缺口"在出口处丢了，PASS 照打）
+
+> 起点是运维侧一条待核判断（P1-1）。我自己复现了一遍，成立，而且比原判据更宽：
+> 漏传的不止一个脚本。现场（`node scripts/verify-audit-chain.js` 对着真库）——
+> 链尾一条 `hashFailure` 记录（写侧算 hash 抛错后照常落库，`AuditLog.hashFailure` 的既定形态）：
+> 报告 `total=3 breaks=0 legacy=0 hashComputeFailed=1`，
+> 而 CLI 打 `VERDICT: PASS（全量、无断裂、hmac 已校验）`、**退 0**。
+> `deployment/rollback-drill.md:111` 与 `deployment/secret-rotation.md:397` 正是拿
+> "退出码 0"当验收条件的那两步，于是链上不可追认的缺口穿过了验收。
+
+- `scripts/verify-audit-chain.js`、`scripts/resign-audit-chain-v3.js` 各补一行
+  `hashComputeFailed: <report>.hashComputeFailed`。判据（`computeChainVerdict`）这一格
+  本来就有实现且正确，**坏的只是调用方**：`src/controllers/auditController.js`、
+  `src/services/auditChainMonitor.js` 都回传了，两个运维脚本没有。
+  修复后同一现场 ⇒ `INCOMPLETE` 退 2（复现脚本前后各跑一次，只差那一行）。
+- 判据 `hasUnattestableGapOf` 的 JSDoc 里那句**失实前提**已就地更正：原文写"它由
+  verifyAuditChain 恒回填，唯一漏传路径是旧调用方"——实测两个现役调用方就在漏传，
+  而报告确实恒回填该字段。缺省方向（漏传按 0）**保持不变**：把它翻成 fail-closed 会让
+  判据对任何不带该字段的调用报 INCOMPLETE，而真值表用例与在线侧构造的字段子集调用都属
+  正常用法；本仓对"未来调用方漏传"的既有机制是逐调用点门禁，不是把判据调瞎。
+- `src/tests/verifyChainExitCode.test.js` 把原来那份**硬编码三个文件名**的 scanned 回传断言
+  换成**全仓枚举**（`src/` 去 tests + `scripts/`，按花括号配对取出每个调用点的对象字面量，
+  逐个查 `scanned` / `hashComputeFailed`；纯 `computeChainVerdict(外部对象)` 形态按
+  "静态看不见字段"点名）。实测 4 个调用点，全部合规。新增 CLI 端到端一格：
+  真库真链尾真 `hashFailure` ⇒ 先自证"报告看得见缺口且不是篡改"，再验退 2、理由点名缺口、
+  **绝不出现 PASS**，且 `--allow-empty --allow-no-hmac --allow-all-legacy` 三个豁免同时给也盖不住；
+  `finally` 还原后必须回到退 0。
+- 变异实测（不是推演）：删掉 CLI 那一行 ⇒ 枚举闸、CLI 端到端、scanned 那格**三条一起红**；
+  删掉 resign 脚本那一行 ⇒ 枚举红并点名该文件。两处都已还原（`grep -c` 各 1）。
+  反向自证 4 形：少 `scanned`、少 `hashComputeFailed`、同文件第二个调用点漏传、
+  非字面量调用，各自都被点名。
+- `scripts/verify-audit-chain.js` 头注释的退出码清单补上第五类不完整（缺口无任何豁免口子），
+  此前它只列了截断 / 无 hmac / 空集合 / 整窗无哈希四类。
+- 验证：`verifyChainExitCode` + `auditChainGuardedIntegrity` 45/45；
+  `commentAnchorFreshness` 13/13（新增的 4 处引用都取到实文件实行号）；
+  `npm run lint` 0 error、`lint:ratchet` 通过（21 个 warn 文件未超基线）；prettier 已格式化。
+
 ### 质量（2026-10-03 · 「任何新增验签入口都必须引用同一份判据」这句话，判据是注释而不是代码）
 
 > 读 `src/utils/tokenPurpose.js` 时发现它的收敛承诺没有闸：
