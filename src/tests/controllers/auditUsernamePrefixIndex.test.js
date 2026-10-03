@@ -215,7 +215,12 @@ describe('Top-8 前半：username 前缀 + collation 范围查询', () => {
     test('auditQueryService：4 处查询点（汇总 aggregate + 两个取页 find + countDocuments）', () => {
       const src = read('src/services/auditQueryService.js');
       expect(src.match(/withCollation\(/g) || []).toHaveLength(4);
-      expect(src).toContain('withCollation(AuditLog.countDocuments(query), collation)');
+      // 2026-10-01 列表链预算（utils/queryBudget.js）：countDocuments 携带 maxTimeMS 选项，
+      // collation 仍由 withCollation 在其上追加——两道闸各管一维。
+      // prettier 会把这一串折行，断言用容折行正则而不是字面子串
+      expect(src).toMatch(
+        /withCollation\(\s*AuditLog\.countDocuments\(query,\s*listCountOptions\(\)\),\s*collation\s*\)/
+      );
       expect(src).toContain('summarizeByRiskLevel(query, collation)');
       // 裸 countDocuments 不许复辟
       expect(src).not.toContain('await AuditLog.countDocuments(query);');

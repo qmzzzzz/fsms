@@ -112,7 +112,7 @@ node scripts/generate-secrets.js --env-snippet              # 本地：打印 .e
 且此时运维早已忘记当天换过钥。与第 2 点同因（无明文可重算）⇒ 同样无迁移手段。
 
 **轮换时的操作**：本轮换不阻断。轮换后执行
-`ALLOWED_SOURCE_DB=<库名> node scripts/invalidate-mfa-recovery-codes.js --apply --yes`
+`ALLOWED_SOURCE_DB=<库名> MONGODB_URI_FILE=./secrets/mongodb_uri \n`node scripts/invalidate-mfa-recovery-codes.js --apply --yes`
 把存量摘要批量清成空数组（先演练看受影响人数；脚本含清零后回读自证），
 使「该用户无恢复码」成为显式可判定状态，并按用户中心口径提示持有 MFA 的用户
 重新生成——**清库存不会自动通知用户**，重新生成这一步仍要靠提示触达。
