@@ -45,6 +45,7 @@ const {
 } = require('./middleware/sentry');
 const requestId = require('./middleware/requestId');
 const { redactUrlQuery } = require('./utils/helpers');
+const { DEV_CORS_ORIGINS } = require('./utils/constants');
 const {
   metricsMiddleware,
   metricsEndpoint,
@@ -71,6 +72,35 @@ const {
 } = require('./routes');
 
 const sentryInitialized = initSentry();
+
+/**
+ * CORS 白名单求值（从 createApp 里抽出来的唯一原因：这条判据原先零行为覆盖）
+ *
+ * 抽出前实测（2026-10-02 R13 变异台 M8）：把 `? [...DEV_CORS_ORIGINS]` 改成
+ * `? [...DEV_CORS_ORIGINS.filter(() => false)]`——即开发兜底静默变空——全仓 503 个套件
+ * 仍然全绿。原因是 src/tests/setup.js 固定注入 `CORS_ORIGIN=DEFAULT_CORS_ORIGIN`，
+ * 所以既有那些断言 `access-control-allow-origin` 的用例走的是「显式配置」分支，
+ * 而 `nodeEnv === 'development'` 兜底分支从来没被执行过。
+ * 分支不跑 = 判据不成立：开发兜底清单是不是真的接进了 CORS，只能靠调用它来证明。
+ *
+ * 抽出后本函数被 createApp 调用（不是死码），且可脱离 DB/中间件链单独跑。
+ *
+ * @param {{corsOrigin?: string, nodeEnv?: string}} cfg 环境配置（默认读真实 config）
+ * @returns {string[]} 允许的来源列表；空数组表示不回应任何 Origin
+ */
+function resolveCorsOrigins(cfg = config) {
+  const parsed = cfg.corsOrigin
+    ? cfg.corsOrigin
+        .split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean)
+    : [];
+  // parsed 为空（未配或配了 `", "` 这类全是空项的值）时的回落方向：
+  // 仅 development 允许本地兜底，staging/production 必须显式配置，
+  // 防止误部署后把本地开发源放进线上白名单。
+  if (parsed.length > 0) return parsed;
+  return cfg.nodeEnv === 'development' ? [...DEV_CORS_ORIGINS] : [];
+}
 
 /**
  * 创建并配置 Express 应用
@@ -176,25 +206,9 @@ function createApp() {
   // ================= 中间件配置 =================
 
   // CORS 白名单配置
-  // credentials:true 时 origin 必须是明确白名单。开发环境允许 localhost 兜底；
-  // staging/production 必须显式配置，防止误部署后把本地开发源放进线上白名单。
-  const parsedCorsOrigin = config.corsOrigin
-    ? config.corsOrigin
-        .split(',')
-        .map((origin) => origin.trim())
-        .filter(Boolean)
-    : [];
-  const corsOrigin =
-    parsedCorsOrigin.length > 0
-      ? parsedCorsOrigin
-      : config.nodeEnv === 'development'
-        ? [
-            'http://localhost:3001',
-            'http://127.0.0.1:3001',
-            'http://localhost:5173',
-            'http://127.0.0.1:5173',
-          ]
-        : [];
+  // credentials:true 时 origin 必须是明确白名单；求值口径（含开发兜底与"配了但全为空项"
+  // 的回落方向）集中在 resolveCorsOrigins，那里的注释即本行的事实来源。
+  const corsOrigin = resolveCorsOrigins();
 
   app.use(
     cors({
@@ -421,4 +435,4 @@ function createApp() {
   return app;
 }
 
-module.exports = { createApp, sentryInitialized };
+module.exports = { createApp, resolveCorsOrigins, sentryInitialized };

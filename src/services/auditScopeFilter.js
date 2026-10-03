@@ -25,12 +25,33 @@ const User = require('../models/User');
 //      于是"被调出者"不可能自己触发这个窗口，能触发的只有本来就看得见他的管理员。
 //   ② 只影响"看我整个部门"这一条范围查询；点查某个人走下面的 findById，实时准确。
 const DEPT_MEMBERS_CACHE_TTL_MS = 30 * 1000;
+// 条数上限与 reportDashboardService 的 DASHBOARD_CACHE_MAX_ENTRIES 同值同手法。
+// 此前只有 TTL 没有上限：条目数 = 用户表里出现过的 department 取值数，随组织架构
+// 单调增长且**只增不减**（读到过期项是直接覆盖，不删除），而值本身是 ObjectId 数组
+// ——整部门成员的 id 列表。低频但无界，与"同一口径"的说法不符，故补齐。
+// 与 dashboardCache 的**真实差异**（保留在注释里，避免下一次审计重复推导）：
+// dashboardCache 另有 30s 定时清扫，这里靠写前清扫（enforce）即可——
+// 本模块的读频由审计查询驱动，没有常驻定时器的必要（也不会拖住退出）。
+const DEPT_MEMBERS_CACHE_MAX = 500;
 const deptMembersCache = new Map(); // department -> { ids, expiresAt }
+
+/** 写前清扫：先删过期，仍超限按插入序淘汰（与 enforceDashboardCacheLimit 同一形状） */
+const enforceDeptMembersLimit = () => {
+  if (deptMembersCache.size < DEPT_MEMBERS_CACHE_MAX) return;
+  const now = Date.now();
+  for (const [key, entry] of deptMembersCache.entries()) {
+    if (entry.expiresAt <= now) deptMembersCache.delete(key);
+  }
+  while (deptMembersCache.size >= DEPT_MEMBERS_CACHE_MAX) {
+    deptMembersCache.delete(deptMembersCache.keys().next().value);
+  }
+};
 
 const getDepartmentMemberIds = async (department) => {
   const hit = deptMembersCache.get(department);
   if (hit && hit.expiresAt > Date.now()) return hit.ids;
   const ids = await User.distinct('_id', { department });
+  enforceDeptMembersLimit();
   deptMembersCache.set(department, { ids, expiresAt: Date.now() + DEPT_MEMBERS_CACHE_TTL_MS });
   return ids;
 };

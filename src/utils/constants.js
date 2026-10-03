@@ -70,9 +70,30 @@ const USER_STATUS = Object.freeze({
   LOCKED: 'locked',
 });
 
+/**
+ * 开发期本地来源兜底白名单——**唯一事实来源**。
+ *
+ * 为什么要抽出来：这份四项清单原先在 app.js（CORS）与 middleware/originCheck.js
+ * （写操作来源校验）各抄一份字面量，而 originCheck 的头注释写着"与 app.js 完全相同"。
+ * 两份字面量不是"相同"，只是"今天恰好相等"：任何一侧加一个前端端口（3001/5173 就是这么来的），
+ * 另一侧就静默不一致——CORS 放行而来源校验 403（或反之），且只在 development 里复现。
+ * 2026-10-02 R10-A 的 finding，本条按仓内「判据归一处」口径收掉重复。
+ *
+ * 仍然存在的**有意**差异（不是漂移）：`CORS_ORIGINS` 非空但切分后为空（如 `", "`）时，
+ * app.js 回落到本清单，originCheck 落到空白名单（全拒）——惩罚方向是 fail-closed，
+ * 见各自文件的分支注释。
+ */
+const DEV_CORS_ORIGINS = Object.freeze([
+  'http://localhost:3001',
+  'http://127.0.0.1:3001',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+]);
+
 module.exports = {
   DEVICE_STATUS,
   DEVICE_TYPE,
   DEVICE_TYPE_PREFIX,
   USER_STATUS,
+  DEV_CORS_ORIGINS,
 };

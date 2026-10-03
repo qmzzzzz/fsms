@@ -61,6 +61,91 @@ const buildLevelCondition = (level) => {
 };
 
 /**
+ * 参数组合的"可满足性"判据：`?level=warning&success=false` 这类请求不是脏数据，
+ * 而是一条**恒空**的查询——`buildLevelCondition('warning')` 要 success:true，
+ * 显式 success 过滤又要 false，两者相交为空集，对外却是 200 + 空列表 + 零提示。
+ * 与本文件 parseSuccessFilter 的裁定同形（见 :30-35：误导性空结果 ⇒ 收口为抛错，调用方给 400）。
+ *
+ * 判法不是"再抄一份哪档 level 含哪些 riskLevel"的字面量（那是第二个来源推同一个事实，
+ * 一改 buildLevelCondition 就静默失真），而是在**有限的取值域**上穷举：
+ * 一条审计记录在这两个维度只能是 (success ∈ {true,false}) × (riskLevel ∈ AUDIT_LOG_RISK_LEVELS)，
+ * 把 buildLevelCondition 的产物与显式过滤合起来对每个候选文档求值，
+ * 全不命中 ⇒ 恒空。求值器只建模它真正认识的操作符：遇到没建模的字段/操作符就
+ * 标记 unsound 并**保守放行**（宁可少拒一次，不许把可用窗口判成空集）。
+ */
+const AUDIT_FILTER_DIMENSION_FIELDS = new Set(['success', 'riskLevel']);
+
+const auditFilterDomain = () => {
+  const docs = [];
+  for (const success of [true, false]) {
+    for (const riskLevel of AUDIT_LOG_RISK_LEVELS) docs.push({ success, riskLevel });
+  }
+  return docs;
+};
+
+const matchDimensionValue = (actual, spec, state) => {
+  if (spec === null || typeof spec !== 'object') return actual === spec;
+  return Object.entries(spec).every(([op, operand]) => {
+    if (op === '$in') return operand.includes(actual);
+    if (op === '$nin') return !operand.includes(actual);
+    if (op === '$eq') return actual === operand;
+    state.unsound = true;
+    return true;
+  });
+};
+
+const matchCondition = (cond, doc, state) => {
+  if (cond === null || typeof cond !== 'object' || Array.isArray(cond)) return cond === doc;
+  // 顶层键要**全部**参与判定：`{success:false, $and:[…]}` 里 $and 与 success 是并列的合取项，
+  // 早退给 $and 就等于把请求里那个显式 success 判丢了（真实形态正是 assembleQuery 的产物）。
+  return Object.entries(cond).every(([key, val]) => {
+    if (key === '$or' || key === '$and') {
+      if (!Array.isArray(val)) {
+        state.unsound = true;
+        return true;
+      }
+      return key === '$or'
+        ? val.some((c) => matchCondition(c, doc, state))
+        : val.every((c) => matchCondition(c, doc, state));
+    }
+    if (!AUDIT_FILTER_DIMENSION_FIELDS.has(key)) {
+      state.unsound = true;
+      return true;
+    }
+    return matchDimensionValue(doc[key], val, state);
+  });
+};
+
+/** 条件在取值域上是否一个文档都命中不了（= 恒空）；建模不完整时返回 false（不判空） */
+const isProvablyEmptyCondition = (cond) => {
+  const state = { unsound: false };
+  const docs = auditFilterDomain();
+  if (docs.some((doc) => matchCondition(cond, doc, state))) return false;
+  return !state.unsound && docs.length > 0;
+};
+
+/**
+ * 恒空组合当场抛错（在 assertFiltersValid 之后调用：那时 level/riskLevel 已过枚举校验、
+ * success 的取值形状还没解析——解析失败要保留原有那条 400 消息，所以顺序不能提前）。
+ *
+ * 条件对象**不自己拼**：直接把真正下发给 Mongo 的 `assembleQuery` 产物拿来判断。
+ * 如果这里再照抄一遍"哪些过滤项会进条件"，它就变成了 assembleQuery 之外的第二个来源——
+ * 组装侧一改（例如新增一个会致空的维度），判据就悄悄失真，而失真的形态是"该 400 的照样 200 空集"。
+ */
+const assertFiltersMutuallySatisfiable = ({ riskLevel, success, level }) => {
+  if (!level || !AUDIT_LOG_LEVELS.includes(level)) return;
+  const combined = assembleQuery({ riskLevel, success, level });
+  if (!isProvablyEmptyCondition(combined)) return;
+  const given = Object.entries(combined)
+    .filter(([field]) => field !== '$and')
+    .map(([field, value]) => `${field}=${value}`)
+    .join('、');
+  throw new Error(
+    `参数组合恒空：level=${level} 与显式 ${given} 不可能同时成立，这样查出来一定是 0 条`
+  );
+};
+
+/**
  * 入参校验（顺序即原实现的顺序：日期 → 枚举 → userId → ip）。
  * 保持顺序是因为"同时写坏两个参数"时对外抛哪一条消息已经是既有行为，
  * 重排会让同一请求的错误提示换一条，测试与前端文案都会跟着漂。
@@ -281,6 +366,7 @@ const buildAuditQuery = (req) => {
   };
 
   assertFiltersValid(f);
+  assertFiltersMutuallySatisfiable(f);
 
   return {
     query: assembleQuery(f),
@@ -298,6 +384,11 @@ module.exports = {
   buildAuditQuery,
   parseSuccessFilter,
   buildLevelCondition,
+  // 仅供测试直调：恒空组合的判据要能在 3 档 level × 全部 riskLevel × success 三态的
+  // 穷举表上对拍，走 HTTP 会把这些组合淹没在数据夹具里。
+  assertFiltersMutuallySatisfiable,
+  isProvablyEmptyCondition,
+  auditFilterDomain,
   // 供 auditQueryService / auditExportService 共用（同一份"按需挂 collation"语义，
   // 避免两处各写一份后漂移成"列表挂、导出不挂"）
   withCollation,

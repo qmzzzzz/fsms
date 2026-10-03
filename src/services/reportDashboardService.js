@@ -19,8 +19,8 @@ const { INSPECTION_OVERDUE_MARKABLE_STATUSES } = require('../constants/inspectio
 // 不是漏接：statsCache 有 publishInvalidate()（:112-114）走共享通道，而这里只靠 30s TTL。
 // 理由：仪表盘是聚合统计，跨实例最多滞后一个 TTL（30s），且读多写少；
 // 接共享通道会让这条读路径多一个 Redis 依赖与一次网络往返，收益不抵成本。
-// 若将来要求"改完立刻全实例一致"，改法是在写侧调 sharedCache.publishInvalidate，
-// 而**不是**把 TTL 调小——调 TTL 只是把滞后变小，不改变"可能不一致"这件事。
+// 若将来要求"改完立刻全实例一致"，改法是两条腿一起接：写侧 sharedCache.publishInvalidate()、
+// 读侧 sharedCache.onInvalidate()（只接其中一条等于没接）；而**不是**把 TTL 调小——调 TTL 只是把滞后变小，不改变"可能不一致"这件事。
 const dashboardCache = new Map();
 const DASHBOARD_CACHE_TTL_MS = 30 * 1000;
 const DASHBOARD_CACHE_MAX_ENTRIES = 500;

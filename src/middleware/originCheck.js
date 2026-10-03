@@ -15,11 +15,16 @@
  *   视为校验失败直接拒绝——空串是 falsy 值，若与「头不存在」混同处理会形成绕过口子
  *
  * 白名单来源：优先使用调用方传入的数组（app.js 已计算的 CORS 白名单，单一配置源）；
- * 无参调用时按与 app.js 完全相同的逻辑从 config.corsOrigin 计算，保证行为一致。
+ * 无参调用时从 config.corsOrigin 自行计算，开发期兜底清单与 app.js **共用同一个常量**
+ * （utils/constants.js 的 DEV_CORS_ORIGINS）。
+ * 两侧逻辑并非逐行相同，差别是**有意**的且方向为 fail-closed：`CORS_ORIGINS` 非空但
+ * 切分后为空（如 `", "`）时，app.js 回落到开发兜底清单，本中间件落到空白名单（全拒）。
+ * 早前这里的注释写的是"与 app.js 完全相同的逻辑"——那是两份字面量各抄一遍时的旧推断。
  */
 
 const config = require('../config');
 const logger = require('../utils/logger');
+const { DEV_CORS_ORIGINS } = require('../utils/constants');
 // 本中间件在认证之前就会被触发，两条拒绝日志都含**攻击者全控**的内容：
 // - originalUrl 的 query 可能带令牌（与 app.js 对 morgan :url 做 redactUrlQuery 同一理由）
 // - origin 本身：含 \n 即可在 printf 格式的日志里伪造整行
@@ -35,16 +40,6 @@ const recordEarlyRejection = (req, meta) => {
 // 四个方法，任一处增删就会出现"CSRF 拦了但没审计"或反之。现由本数组作单一事实来源，
 // 冻结是为了让它能安全地作为默认值被共享（否则某个调用方 push 一下就同时改掉了 CSRF 闸）。
 const WRITE_METHODS = Object.freeze(['POST', 'PUT', 'PATCH', 'DELETE']);
-
-/**
- * 与 app.js 中 CORS 白名单回退逻辑保持一致（无参调用时的兜底白名单）
- */
-const DEFAULT_DEV_ORIGINS = [
-  'http://localhost:3001',
-  'http://127.0.0.1:3001',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-];
 
 /**
  * 解析请求来源：优先 Origin 头；缺失时回退从 Referer 提取 origin
@@ -74,7 +69,10 @@ const resolveRequestOrigin = (req) => {
 /**
  * 创建写操作来源校验中间件
  * @param {string[]} [allowedOrigins] 白名单（完整 origin，含协议与端口）；
- *        缺省时按 app.js 相同逻辑从 config.corsOrigin 计算
+ *        缺省时从 config.corsOrigin 计算。注意与 app.js 的 CORS 求值**有一处有意差异**：
+ *        CORS_ORIGIN 非空但切分后为空（如 `", "`）时，app.js（放行面）回落到
+ *        DEV_CORS_ORIGINS，本中间件（惩罚面）落到空白名单=全拒——fail-closed。
+ *        口径见 src/tests/middleware/originCheck.test.js 的同名用例。
  * @returns {import('express').RequestHandler}
  */
 const createOriginCheck = (allowedOrigins) => {
@@ -87,7 +85,7 @@ const createOriginCheck = (allowedOrigins) => {
       .map((s) => s.trim())
       .filter(Boolean);
   } else if (config.nodeEnv === 'development') {
-    whitelist = [...DEFAULT_DEV_ORIGINS];
+    whitelist = [...DEV_CORS_ORIGINS];
   } else {
     whitelist = [];
   }
