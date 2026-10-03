@@ -8,6 +8,54 @@
 
 ## [未发布]
 
+### 供应链（2026-10-03 · `capture-image-digests.sh` 的产物会被本仓自己的钉版门禁判红，还会把已钉过的行改成双 digest）
+
+> 起点是运维侧 P2-4（"脚本在已钉版仓库上不可操作"）。复现成立，但**失效方向判反了**：
+> 它不是拒绝工作，而是**开心地工作并打印成功**。2026-10-03 对着本仓库真实的
+> `Dockerfile`（三条 FROM 都是 `node:22.14.0-alpine@sha256:9bef…`）抽出脚本的
+> `check_ref` / `stage_ref` 单独跑：check 返回 0（放行），stage 产出
+> **3 条 `@sha256:[0-9a-f]{64}@sha256:` 的双 digest**，脚本随后打印"已替换并校验"。
+> 根因是一句无边界的前缀匹配：钉版形态**仍然包含**脚本常量 `FROM node:22.14.0-alpine`，
+> 于是 `grep -qF "$old"` 把"已经钉过"读成"还能改"，`s|$old|$new|g` 再在它前面插一个新 digest。
+>
+> 顺着这条线查下去撞出第二类、也更严重：**`RepoDigests[0]` 天生不带 tag**
+> （`docker.io/library/node@sha256:…`，本仓 2026-10-02 已实测），而旧实现把整串当引用写入，
+> 产物就是无 tag 的 `FROM docker.io/library/node@sha256:…`。本仓的钉版口径是**保留可读 tag**
+> ——`baseImageDigestPinned.test.js` 的 FROM 判据 `/^node:22\.14\.0-alpine@sha256:[0-9a-f]{64}$/`、
+> `deploy/deployScript.test.js:118` 的 `<repo>:<tag>@sha256:…`、`docker-compose.yml:159` 的
+> "纯 digest 看不出版本，排障时得先 inspect"三处同源，真实文件也全是这个形态。
+> 也就是说 `baseImageDigestPinned` 的文件头把"跑这个脚本重新捕获"写成升级路径，
+> 而**照这条路跑一次，红的一定是它自己**。这个矛盾在审计复核第 20 轮 §A3 已判过、
+> 挂在"等拍板"上；本轮按证据收敛（口径由 3 处文档/闸 + 全部真实文件定死，不是二选一的风格题）。
+> 顺带更正第 20 轮的一句推断：它写"改成追加式之后双 digest 自然失去土壤"——**恰好相反**，
+> 追加式的产物 `tag@sha256:…` 正是 `tag` 的前缀扩展，边界判据从此是承重墙而不是保险丝。
+
+- `capture_digest`：**只取 `@sha256:<hex>` 尾巴追加到 `$tag` 上**，不再回传 RepoDigests 原文；
+  另加仓库名一致性校验（`docker.io/library/node` 对 `node` 放行，`…/alpine` 对 `node` 拒绝）——
+  追加式写法若拿到的 digest 其实属于别的镜像，写出去的就是"这个 tag 指向那个 digest"这个
+  不成立的断言，只能等构建期 pull 才炸。形状判据（`@sha256:[0-9a-f]{64}$`）拦不住它，实测过。
+- `check_ref` / `stage_ref`：子串判据换成**边界口径**——"含 `old` 的指令行数 − 含 `old@` 的
+  指令行数 > 0"才算可改，替换用 BRE 把 `old` 锚在空白或行尾（`\([[:space:]]\)` / `$` 两式）。
+  于是"已钉 Dockerfile + 未钉 compose"这个**本仓库今天的形状**从"改坏还报成功"变成
+  早退报错、逐字节不变、不留临时文件；混合仓库（有的阶段钉了、有的没钉）则一笔不碰已钉的、
+  只钉未钉的，且改完再跑会正确报 no-op 而不是二次污染。
+- 打印口径与脚本头部注释同步改为"直接可用于 `name:tag@sha256:<hex>` 的钉版引用"，
+  收尾提示补上那条会把矛盾的闸（`npx jest src/tests/security/baseImageDigestPinned.test.js`）。
+- `src/tests/imageDigestGate.test.js`（实跑 19 → **27 格**）：删掉那条把错误口径钉成**必要条件**的
+  旧断言 `expect(r.dockerfile).not.toContain('node:22.14.0-alpine')`——它正是两道闸互不相容
+  却各自全绿的成因；替身补 `qualified`（全限定 RepoDigests）与 `wrongname` 两个模式，
+  新增 6 格：产物形态按**闸的原判据**逐条 FROM 实跑、短名与全限定两种 docker 名号收敛成同一串、
+  "已钉 Dockerfile + 未钉 compose"现场必须报错、混合仓库只钉未钉的那条且二次运行不再污染、
+  名号对不上必须拒（含"换回 node 就放行"的反向自证）；
+  前缀陷阱另配一格前提自证（把 `@` 换成空格时三条判据必须同时翻转）。
+  失败矩阵 5 → 7 臂，表宽用例改为 `widths: [4]` + `rows: 7`，行数本身也在台账里留痕。
+- 变异证明（每个变异体跑整套，跑完即还原）：**M1** 判据+替换回到无边界 ⇒ 6 红
+  （含两条新格与"幂等重跑""compose 漂移不留半钉"）；**M2** 直接回传 RepoDigests 原文 ⇒ 6 红
+  （含"产物形态按闸判据"与"名号口径无关"）；**M3** 去掉仓库名校验 ⇒ 恰好 2 红（wrongname 两臂）。
+- 验证：`imageDigestGate` 27/27；邻近两闸 `baseImageDigestPinned` + `deploy/deployScript` 60/60，
+  注释锚点闸 `ci/commentAnchorFreshness` 13/13；`sh -n` 通过；eslint 0 error；prettier 对测试文件 unchanged。
+  真实 `Dockerfile` / `docker-compose.yml` 一个字节未动（套件里有 sha 前后比对兜住）。
+
 ### 安全（2026-10-03 · 审计链核验脚本把"报告里已见的缺口"在出口处丢了，PASS 照打）
 
 > 起点是运维侧一条待核判断（P1-1）。我自己复现了一遍，成立，而且比原判据更宽：

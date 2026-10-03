@@ -11,6 +11,10 @@
 #   sh scripts/capture-image-digests.sh --apply --root=<dir>   # 测试/排障：对指定仓库副本操作
 #
 # 替换后请执行 `docker compose config` 与 `docker build .` 验证。
+#
+# 产出/写入的引用形态是 `name:tag@sha256:<hex>`（保留可读 tag），
+# 不是 `docker inspect` 的 RepoDigests 原文（`docker.io/library/node@sha256:<hex>`，天生无 tag）：
+# 详见下方 capture_digest 的注释——两把门禁都按前者判，写成后者会当场变红。
 
 set -eu
 
@@ -40,28 +44,56 @@ docker pull "$MONGO_TAG"
 #   ① 本地镜像是 build/load 出来的（无 registry 来源）⇒ 切片为空，docker 直接报错；
 #   ② 某些 docker 版本对缺失字段打印 `<no value>` 而不是报错 ⇒ 后面替换会把
 #      `FROM <no value>` 写进 Dockerfile，构建期才炸，而且炸在一个"看起来已钉版"的文件里。
-# 因此取值后立刻校验形状：必须是 name@sha256:64 位十六进制。
+# 因此取值后立刻校验形状：必须以 `@sha256:` + 64 位十六进制结尾。
 # 注意：本函数在 `$( )` 里执行 ⇒ 报错要打 stderr，并用非零退出让**赋值语句**失败
 # （set -e 下 `VAR=$(...)` 的命令替换返回非零会终止脚本；实测确认，别依赖函数里的 echo）。
+#
+# **返回值不是 RepoDigests 原文，而是 `$tag@sha256:<hex>`**（把 digest 追加到调用方给的可读引用上）。
+# 因为 RepoDigests 的条目天生**不带 tag**——本仓 2026-10-02 实测
+# `docker inspect --format='{{index .RepoDigests 0}}' node:22.14.0-alpine`
+# 得到 `docker.io/library/node@sha256:…`。旧实现把整串直接写进 Dockerfile，产物是
+# `FROM docker.io/library/node@sha256:…`：tag 整段消失，而本仓的钉版口径明确是**保留 tag**——
+#   docker-compose.yml 里 mongo 那段注释写着"保留可读 tag：纯 digest 看不出版本，
+#     排障时得先 inspect 才知道跑的是哪个大版本"；
+#   Dockerfile 的三处 FROM 与 docker-compose.yml 的 redis 都是 `name:tag@sha256:<hex>`；
+#   门禁 src/tests/security/baseImageDigestPinned.test.js 的 FROM 判据是
+#     `/^node:22\.14\.0-alpine@sha256:[0-9a-f]{64}$/`，deployScript.test.js 把约定写成 `<repo>:<tag>@sha256:…`。
+# 也就是说照本脚本的升级路径跑一次 `--apply`，产物会被那道闸直接判红——
+# 工具否定了它自己的产物。取尾巴追加到 tag 上，两种形态（短名 `node@…`、
+# 全限定 `docker.io/library/node@…`）都会收敛成同一个 `node:22.14.0-alpine@sha256:…`。
 capture_digest() {
   tag=$1
-  digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$tag" 2>/dev/null || true)
-  if ! printf '%s' "$digest" | grep -Eq '@sha256:[0-9a-f]{64}$'; then
-    printf '错误：取不到 %s 的 registry digest（得到：%s）。\n' "$tag" "'${digest:-空}'" >&2
+  raw=$(docker inspect --format='{{index .RepoDigests 0}}' "$tag" 2>/dev/null || true)
+  if ! printf '%s' "$raw" | grep -Eq '@sha256:[0-9a-f]{64}$'; then
+    printf '错误：取不到 %s 的 registry digest（得到：%s）。\n' "$tag" "'${raw:-空}'" >&2
     printf '       多为本机镜像是 build/load 而来（无 digest）或 docker 输出异常；\n' >&2
     printf '       请在有拉取权限的机器上重新 pull，不要在拿不到 digest 时手工抄。\n' >&2
     return 1
   fi
-  printf '%s' "$digest"
+  # 仓库名一致性：追加式写法把 digest 挂到 "$tag" 上，若 RepoDigests[0] 其实属于**别的**镜像，
+  # 写出来的就是"这个 tag 指向那个 digest"这个根本不成立的断言（构建期 pull 才炸）。
+  # 容忍 registry 前缀（docker.io/library/node、docker.io/prom/prometheus 都能对上），
+  # 因为同一份常量在不同 docker 版本下取到的名字长短不同，这一点不能拿来判死。
+  name=${raw%@*}
+  want=${tag%%:*}
+  case "$name" in
+    "$want"|*/"$want") ;;
+    *)
+      printf '错误：%s 的 RepoDigests 仓库名是 %s，与请求的引用 %s 对不上。\n' "$tag" "$name" "$want" >&2
+      printf '       可能是本地同名镜像来自第二个 registry；请确认取的是刚 pull 的那个，不要手工拼。\n' >&2
+      return 1
+      ;;
+  esac
+  printf '%s' "${tag}@${raw##*@}"
 }
 
-NODE_DIGEST=$(capture_digest "$NODE_TAG") || exit 1
-MONGO_DIGEST=$(capture_digest "$MONGO_TAG") || exit 1
+NODE_PINNED=$(capture_digest "$NODE_TAG") || exit 1
+MONGO_PINNED=$(capture_digest "$MONGO_TAG") || exit 1
 
 echo
-echo "捕获结果："
-echo "  node : $NODE_DIGEST"
-echo "  mongo: $MONGO_DIGEST"
+echo "捕获结果（直接可用于 name:tag@sha256:<hex> 形态的钉版引用）："
+echo "  node : $NODE_PINNED"
+echo "  mongo: $MONGO_PINNED"
 
 if [ "$APPLY" -ne 1 ]; then
   echo
@@ -93,6 +125,28 @@ fi
 # 诚实交代残余边界：两条 `mv` 之间不是原子的（跨两个文件不存在 single-phase rename）。
 # 之所以够用：check 已确认两文件都在且都可改，stage 已把两改好的内容验过一遍，
 # 到 commit 只剩同目录 rename——失败面从"任何解析/匹配错"缩到"rename 本身出错"。
+# old 是**字面量**，但要拿它当 sed 的模式就得转义元字符。这里可能出现的元字符只有 `.`：
+# Docker 的引用文法是 [A-Za-z0-9._-]（tag）加上 `:` `/` `@`（repo/digest 分隔），
+# 后者都不是正则元字符。不转义的话 `22.14.0` 里的 `.` 会当通配，匹配到 `22x14x0` 这类
+# 根本不存在的写法——本仓不需要它出错，只需要它别在别处多改一笔。
+to_re() {
+  printf '%s' "$1" | sed 's/\./\\./g'
+}
+
+# "这行是不是还能改"的判据（2026-10-03 实测，见 check_ref 里那段）：
+#   含 old 的指令行数 − 含 "old@" 的指令行数 > 0。
+# 为什么不能只 grep -qF "$old"：真实 registry 引用是**保留 tag** 的
+#   FROM node:22.14.0-alpine@sha256:9bef… AS builder
+# old = "FROM node:22.14.0-alpine" 是它的**前缀**，`grep -qF` 判"找到了旧引用 ⇒ 可改"，
+# 于是已钉版的仓库被放行到落笔那一步，而无边界的前缀替换产出
+#   FROM …@sha256:<新>@sha256:<旧>
+# 这种双 digest 的坏引用——脚本打印成功，失败推迟到 `docker build`，
+# 且现场是"看起来已按 digest 固定"的文件。下面那个 -cF 配对就是这条边界的表达。
+count_lines_with() {
+  # grep -c 无匹配时打印 0 且退出 1；调用方在 set -e 下要的是那个 0，不是退出码。
+  sed -n "/$1/p" "$2" | grep -cF "$3" || true
+}
+
 check_ref() {
   addr=$1
   file=$2
@@ -111,9 +165,11 @@ check_ref() {
     exit 1
   fi
   # 只在符合 addr 的行里找旧引用（注释里的同名字面串不算）
-  if ! sed -n "/$addr/p" "$file" | grep -qF "$old"; then
-    if sed -n "/$addr/p" "$file" | grep -qF 'sha256:'; then
-      echo "错误：$label 的指令行里找不到 '$old'，但已经存在 @sha256 钉版引用。" >&2
+  old_lines=$(count_lines_with "$addr" "$file" "$old")
+  pinned_lines=$(count_lines_with "$addr" "$file" "$old@")
+  if [ $((old_lines - pinned_lines)) -le 0 ]; then
+    if [ "$pinned_lines" -gt 0 ] || sed -n "/$addr/p" "$file" | grep -qF 'sha256:'; then
+      echo "错误：$label 的指令行里找不到可改的 '$old'，但已经存在 @sha256 钉版引用。" >&2
       echo "       两种可能：(a) 已经钉过 —— 那是 no-op，不该被报成成功；" >&2
       echo "                 (b) 钉的是**别的** digest —— 请核对顶部常量与文件里的 tag 是否漂移。" >&2
       echo "       确认要更新请先把旧引用改回可识别的 tag，或人工替换。" >&2
@@ -132,11 +188,19 @@ stage_ref() {
   new=$4
   label=$5
   tmp=$6
-  # 先落到临时文件再原子替换：中途失败不会留下半改的目标文件
-  sed "/$addr/s|$old|$new|g" "$file" > "$tmp"
-  # 预演校验：临时文件里新引用必须出现、旧引用必须消失（mv 之后再报就晚了）
+  # 先落到临时文件再原子替换：中途失败不会留下半改的目标文件。
+  # 替换**必须带边界**（同一个前缀陷阱，见 check_ref）：只在 old 后面是空白或行尾时动手，
+  # 于是 `…-alpine@sha256:旧` 这类已钉行一笔不碰——混合仓库（有的阶段钉了、有的没钉）
+  # 也能收敛：未钉的被钉上，已钉的保持原样，而不是全变成双 digest。
+  # `&` 与 `\` 在替换侧是特殊字符，但 $new 是 registry 引用（文法不含二者），故原样插入。
+  old_re=$(to_re "$old")
+  sed -e "/$addr/s|$old_re\([[:space:]]\)|$new\1|g" \
+    -e "/$addr/s|$old_re\$|$new|" "$file" > "$tmp"
+  # 预演校验：临时文件里新引用必须出现、可改的旧引用必须全部消失（mv 之后再报就晚了）
+  left_lines=$(count_lines_with "$addr" "$tmp" "$old")
+  left_pinned=$(count_lines_with "$addr" "$tmp" "$old@")
   if ! sed -n "/$addr/p" "$tmp" | grep -qF "$new" ||
-    sed -n "/$addr/p" "$tmp" | grep -qF "$old"; then
+    [ $((left_lines - left_pinned)) -gt 0 ]; then
     rm -f "$tmp"
     echo "错误：$label 预演失败（新引用未出现或旧引用仍在），未改动任何目标文件。" >&2
     exit 1
@@ -189,15 +253,17 @@ PIN_TMP_COMPOSE="$TMP_COMPOSE"
 
 echo "==> 预演替换（只写临时文件）"
 echo "    钉定 Dockerfile 中的基础镜像（全部阶段同一 digest）"
-stage_ref "$ADDR_FROM" "$DOCKERFILE" "FROM $NODE_TAG" "FROM $NODE_DIGEST" "Dockerfile" "$TMP_DOCKERFILE"
+stage_ref "$ADDR_FROM" "$DOCKERFILE" "FROM $NODE_TAG" "FROM $NODE_PINNED" "Dockerfile" "$TMP_DOCKERFILE"
 echo "    钉定 docker-compose.yml 中的 mongo 镜像"
-stage_ref "$ADDR_IMAGE" "$COMPOSE" "image: $MONGO_TAG" "image: $MONGO_DIGEST" "docker-compose.yml" "$TMP_COMPOSE"
+stage_ref "$ADDR_IMAGE" "$COMPOSE" "image: $MONGO_TAG" "image: $MONGO_PINNED" "docker-compose.yml" "$TMP_COMPOSE"
 
 echo "==> 落笔（临时文件原子改名，两侧都校验）"
-commit_ref "$DOCKERFILE" "$TMP_DOCKERFILE" "$ADDR_FROM" "FROM $NODE_DIGEST" "Dockerfile"
-commit_ref "$COMPOSE" "$TMP_COMPOSE" "$ADDR_IMAGE" "image: $MONGO_DIGEST" "docker-compose.yml"
+commit_ref "$DOCKERFILE" "$TMP_DOCKERFILE" "$ADDR_FROM" "FROM $NODE_PINNED" "Dockerfile"
+commit_ref "$COMPOSE" "$TMP_COMPOSE" "$ADDR_IMAGE" "image: $MONGO_PINNED" "docker-compose.yml"
 
 echo
 echo "已替换并校验。请验证："
 echo "  docker compose -f $ROOT/docker-compose.yml config >/dev/null && echo compose-ok"
 echo "  docker build $ROOT --target builder   # 或直接完整构建"
+echo "  # 钉版形态由门禁把守（name:tag@sha256:<hex>），同一次改动要同步它的字面量："
+echo "  npx jest src/tests/security/baseImageDigestPinned.test.js"
