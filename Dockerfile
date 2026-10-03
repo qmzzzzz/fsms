@@ -27,7 +27,7 @@
 # digest 钉成门禁，只改 FROM 不改测试会红灯）。
 
 # Builder 阶段
-FROM node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944 AS builder
+FROM node:26.10.0-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS builder
 
 WORKDIR /app
 
@@ -63,7 +63,7 @@ COPY package*.json ./
 
 # 前端构建阶段（L-1）：产出 web-admin/dist，供后端 express 静态托管
 # （或挂载给 Nginx 托管，二选一）。与后端同版本基础镜像，避免工具链漂移。
-FROM node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944 AS web-builder
+FROM node:26.10.0-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS web-builder
 
 WORKDIR /web
 COPY web-admin/package*.json ./
@@ -83,7 +83,7 @@ COPY web-admin/ ./
 RUN npm run build
 
 # Runtime 阶段（digest 须与 builder 完全一致，见顶部说明）
-FROM node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
+FROM node:26.10.0-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80
 
 # ===== 构建元数据（D-2）=====
 # 为什么需要：镜像推到 registry 后，tag 可以被覆盖、也可以被人为改指。
