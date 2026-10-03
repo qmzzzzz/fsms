@@ -15,6 +15,9 @@
  */
 const fs = require('fs');
 const logger = require('../utils/logger');
+// 「上限已越过而本轮没腾出空间」是 R-6 唯一的可见形态：这两条臂自己一抛，
+// 面板上就既没有裁剪失败也没有超限告警（全总化唯一实现，见 utils/auditWriteFailure）。
+const { errText } = require('../utils/auditWriteFailure');
 const { readPositiveNumberEnv } = require('../utils/envNumber');
 
 // WAL 硬上限（字节）：DB 长时间不可用且高流量时 WAL 持续增长（磁盘写放大，报告 R-6）。
@@ -99,7 +102,7 @@ async function enforceWalLimit({ walPath, readWalRecords, atomicReplaceWal }) {
     stat = await fs.promises.stat(walPath);
   } catch (e) {
     // ENOENT：WAL 还没建（或刚被排空删掉），不是失败；其余都是"这次上限检查没做成"
-    if (e.code !== 'ENOENT') logger.warn(noteTrimFailure(`审计 WAL 大小检查失败：${e.message}`));
+    if (e?.code !== 'ENOENT') logger.warn(noteTrimFailure(`审计 WAL 大小检查失败：${errText(e)}`));
     return;
   }
   const maxBytes = getWalMaxBytes();
@@ -124,7 +127,7 @@ async function enforceWalLimit({ walPath, readWalRecords, atomicReplaceWal }) {
     // 而分开的这两个计数正是本函数要表达的东西。
     logger.error(
       noteTrimFailure(
-        `审计 WAL 超限裁剪回写失败：${e.message}——上限已越过而本轮没有腾出任何空间，` +
+        `审计 WAL 超限裁剪回写失败：${errText(e)}——上限已越过而本轮没有腾出任何空间，` +
           '下一次抽查会再试（R-6 在此期间不生效）'
       )
     );

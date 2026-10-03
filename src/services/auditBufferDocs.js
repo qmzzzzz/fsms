@@ -14,6 +14,8 @@ const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
 const wal = require('./auditBufferWal');
 const auditChain = require('../utils/auditChain');
+// 被 catch 的值不保证是 Error：文案层统一走这一处全总化（定义与理由见 utils/auditWriteFailure.js）
+const { errText } = require('../utils/auditWriteFailure');
 
 /**
  * 载荷字段清单按当前哈希版本取，与 chainBatch 的口径同源。
@@ -144,9 +146,15 @@ function collectDurableIds(err, docs) {
     const id = d && d._id;
     if (id !== undefined && id !== null) ids.add(String(id));
   };
-  if (Array.isArray(err.insertedDocs)) err.insertedDocs.forEach(add);
-  if (Array.isArray(err.writeErrors)) {
-    for (const w of err.writeErrors) {
+  // `err` 是 flush 内层 `catch (insertErr)` 的形参，**不保证是对象**：`Promise.reject()`
+  // （undefined）时裸读 `err.insertedDocs` 会自己抛 TypeError，于是"审计落库为什么失败"
+  // 被改写成"读取 insertedDocs 失败"——观测代码把病因顶掉了，值班照着一句无关的
+  // V8 报错去查数据库。`Object(x)` 对 nullish 给空对象，非对象值也能安全属性读，且
+  // 不引入分支（本函数所在模块的判据密度不是这里该付的债）。
+  const e = Object(err);
+  if (Array.isArray(e.insertedDocs)) e.insertedDocs.forEach(add);
+  if (Array.isArray(e.writeErrors)) {
+    for (const w of e.writeErrors) {
       if (w && w.err && w.err.code === 11000) add(docs[w.index]);
     }
   }
@@ -206,10 +214,51 @@ function handleHashFailure(docs, hashErr, onAlert) {
   return { pendingTail: lastHashed ? lastHashed.hash : null, chained: Boolean(lastHashed) };
 }
 
+/**
+ * 毒批丢弃告警文案。自 auditBuffer.js 搬入（该文件 max-lines 计数正好顶在棘轮基线 300，
+ * 新增判据必须有等量的净去处——与本文件上面那两个函数同理），状态由调用方**按值**传入：
+ * 判定层不持有缓冲与计数器。
+ *
+ * 搬入时顺手补了 err 的 nullish 安全：这两条文案的 `err` 是 flush catch 的形参，
+ * 而 `err.name` / `err.message` 的裸读一旦落在非 Error 拒绝上，就发生在**catch 体内**——
+ * 观测与"批次回到缓冲"的回退会被同一句记账代码带走。判据见
+ * tests/services/observabilityWritesNeverReject.test.js 的 L6。
+ * @param {{doomed:Array, kept:Array, discardSeqs:Set, err:*, droppedTotal:number, maxRetry:number}} p
+ */
+function doomedBatchMessage({ doomed, kept, discardSeqs, err, droppedTotal, maxRetry }) {
+  const walPath = wal.getWalPath();
+  const walPart =
+    discardSeqs.size > 0
+      ? `已归档 ${discardSeqs.size} 行 WAL 取证行到 ${walPath}.discarded 并从主 WAL 移除`
+      : `WAL 行仍保留在 ${walPath}，可人工取证`;
+  return (
+    `审计批次内有 ${doomed.length} 条文档连续 ${maxRetry} 次被服务端按内容拒绝，` +
+    `已丢弃并归档取证（累计丢弃 ${droppedTotal} 条，同批其余 ${kept.length} 条留在缓冲继续重试）。` +
+    `最后一次错误：${err?.name || 'Error'}/${err?.codeName || err?.code || '-'} ${errText(err)}。` +
+    walPart
+  );
+}
+
+/**
+ * 不可归因于内容（基础设施或未知）时的告警：明确写出"不丢弃"，便于值班同学判断处置方向。
+ * 节流由调用方决定（`outageFailures === 1 || %MAX_BATCH_RETRY === 0`），本函数只管措辞。
+ * @param {{outageTotal:number, hardLimit:number, err:*}} p
+ */
+function outageMessage({ outageTotal, hardLimit, err }) {
+  return (
+    `审计落库连续 ${outageTotal} 轮失败且不可归因于文档内容` +
+    `（${err?.name || 'Error'}: ${String(errText(err)).slice(0, 160)}）。` +
+    `缓冲与 WAL 全部保留、不做毒批丢弃——数据库恢复后自动重放；` +
+    `缓冲若增长到硬上限 ${hardLimit} 条，会按最旧优先丢弃并另行以 error 级告警。`
+  );
+}
+
 module.exports = {
   PRECAST_FIELDS,
   precastBatch,
   collectDurableIds,
   walSeqsOf,
   handleHashFailure,
+  doomedBatchMessage,
+  outageMessage,
 };

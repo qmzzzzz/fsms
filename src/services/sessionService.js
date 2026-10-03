@@ -398,7 +398,12 @@ const touchSession = async (sid, req) => {
     );
     return true;
   } catch (err) {
-    logger.warn(`会话活跃时间更新失败（不影响请求）：${err.message}`);
+    // catch 体自己也必须"不会抛"：契约是永不 reject，而这里原先直接读 err.message——
+    // 被 reject(undefined/null) 时那行会变成 TypeError，于是"永不 reject"只在
+    // 上游抛 Error 时成立。认证热路径上这条调用是不 await 的裸调用（见 middleware/auth.js
+    // 的 assertSessionUsable），一次拒绝就撞上 index.js 的 unhandledRejection 兜底
+    // ⇒ process.exit(1)。`?.` + 回落到 err 本身，非 Error 形态也能打出文本。
+    logger.warn(`会话活跃时间更新失败（不影响请求）：${err?.message ?? err}`);
     return false;
   }
 };

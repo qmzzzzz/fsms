@@ -59,6 +59,9 @@ describe('WebSocket Redis adapter', () => {
     });
     expect(createAdapter).toHaveBeenCalledWith('redis-client', service._adapterClients[0]);
     expect(service.io.adapter).toHaveBeenCalledWith('socket-adapter');
+    // 反向对照：成功路径不得就地断开——订阅端此刻归 _adapterClients 持有，
+    // 由 dispose() 回收。把"失败才回收"写成"总是回收"会打断刚挂好的 adapter。
+    expect(service._adapterClients[0].disconnect).not.toHaveBeenCalled();
   });
 
   test('degrades to in-memory delivery when mounting fails', async () => {
@@ -67,6 +70,7 @@ describe('WebSocket Redis adapter', () => {
       throw new Error('adapter unavailable');
     });
     const WebSocketService = require('../../services/websocketService');
+    const Redis = require('ioredis');
     const logger = require('../../utils/logger');
     const service = Object.create(WebSocketService.prototype);
     service._adapterClients = [];
@@ -76,5 +80,14 @@ describe('WebSocket Redis adapter', () => {
 
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('adapter unavailable'));
     expect(service.io.adapter).not.toHaveBeenCalled();
+
+    // 挂载失败留下的是**已建立**的订阅端连接（lazyConnect:false + enableOfflineQueue
+    // ⇒ 它会无限重连）。_adapterClients 只在成功路径登记，所以 dispose() 回收不到
+    // 它——失败分支必须自己断开，否则"降级"顺手造成连接泄漏。
+    const created = Redis.mock.results.map((r) => r.value);
+    expect(created).toHaveLength(1);
+    expect(typeof created[0].disconnect).toBe('function'); // 夹具自证：桩真的有可断的口
+    expect(created[0].disconnect).toHaveBeenCalledTimes(1);
+    expect(service._adapterClients).toEqual([]);
   });
 });

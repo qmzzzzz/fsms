@@ -51,6 +51,12 @@ let effectiveIntervalMs = DEFAULT_INTERVAL_MS;
 let detectionRunning = false;
 
 /**
+ * catch 体的取值必须"永不抛"：`err.message` 在被 reject(undefined/字符串) 时自己就是
+ * TypeError，会把"吞错"变成"再拒绝"。写成函数而非内联三元，顺带不给 runDetection 加圈复杂度。
+ */
+const failureText = (err) => (err && err.message ? err.message : err);
+
+/**
  * 检测运行状态。isRunning() 只说明"定时器挂着"，不说明"检测在成功跑"——
  * 两者可以同时成立，所以每轮的结果必须自己留痕。
  */
@@ -203,8 +209,8 @@ async function runDetection() {
     health.failures += 1;
     health.consecutiveFailures += 1;
     health.lastFailureAt = new Date().toISOString();
-    health.lastFailureMessage = err.message;
-    logger.error(`审计异常监控执行失败：${err.message}`);
+    health.lastFailureMessage = failureText(err);
+    logger.error(`审计异常监控执行失败：${failureText(err)}`);
   } finally {
     detectionRunning = false;
   }
@@ -244,8 +250,9 @@ function start() {
   effectiveIntervalMs = intervalMs;
 
   monitorTimer = setInterval(() => {
+    // 定时器回调是同步的：promise 必须就地持有，且处理器自己不能抛（判据见 observabilityWritesNeverReject）
     runDetection().catch((err) => {
-      logger.error(`审计监控定时任务异常：${err.message}`);
+      logger.error(`审计监控定时任务异常：${failureText(err)}`);
     });
   }, intervalMs);
 

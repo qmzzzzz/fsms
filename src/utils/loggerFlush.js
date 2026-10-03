@@ -115,7 +115,7 @@ function flushLogsSync(level, message, meta, options = {}) {
  *   ② 副作用是致命的——end() 之后再调用**任意** logger 级别（实测 error/warn/info 6/6 复现）
  *      会**同步**抛 `ERR_STREAM_WRITE_AFTER_END`。而退出窗口是有事件的：
  *      index.js:195 用的是 delayMs=500，这期间在途请求的错误处理（errorHandler → logger.error）、
- *      以及二次信号 handler 的 `logger.warn`（index.js:70，它排在 exitAfterFlush 之前但会撞上
+ *      以及二次信号 handler 的 `logger.warn`（index.js:112，它排在 exitAfterFlush 之前但会撞上
  *      第一轮已经调过 end() 的 logger）都会抛；index.js 的 uncaughtException 兜底自己也要
  *      logger.error，于是兜底再抛一次 ⇒ 关停链的取证行写不出去、退出码也不再是调用方要的那个。
  *      "二次 Ctrl-C"是运维最常见的手势，而这条路径上没有任何一处能靠 try/catch 补救——

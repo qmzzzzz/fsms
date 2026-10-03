@@ -361,7 +361,10 @@ describe('P1-13 退出前日志落盘', () => {
       jest.resetModules();
       jest.doMock('mongoose', () => ({
         connect: jest.fn().mockRejectedValue(new Error('probe-connect-refused')),
-        connection: { on: jest.fn(), readyState: 0, close: jest.fn() },
+        // mongoose/types/connection.d.ts:94 `close(force?: boolean): Promise<void>`——
+        // 真 API 是 async。这个键本用例不驱动，但同步桩会让"用它的那条用例"永远打不出
+        // close 拒绝；形状判据见 ci/stubReturnTypeParity.test.js。
+        connection: { on: jest.fn(), readyState: 0, close: jest.fn().mockResolvedValue(undefined) },
       }));
       const exitAfterFlushMock = jest.fn(() => Promise.resolve('exit-after-flush-called'));
       jest.doMock('../../utils/loggerFlush', () => ({

@@ -122,4 +122,8 @@ const guardDetection =
     }
   };
 
-module.exports = { onAuditWriteFailure, onAuditWriteFailureRethrow, guardDetection };
+// `errText` 是本仓对"被 catch 的东西不保证是 Error"这**一条**纪律的唯一实现：
+// services/auditBuffer.js 与 services/auditMonitor.js 原先各自抄了一份箭头
+// （2026-10-03 收敛到这里，两份副本已删）。导出它而不是再留私有副本，是因为
+// 复制品会各自漂移——观测代码里最坏的一种漂移是"记账时自己抛"。
+module.exports = { onAuditWriteFailure, onAuditWriteFailureRethrow, guardDetection, errText };

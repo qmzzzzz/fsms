@@ -187,5 +187,4 @@ module.exports = {
   incLogShipperDroppedLines,
   formatRuntime,
   __resetForTest,
-  _readyzChecks: readyzChecks,
 };

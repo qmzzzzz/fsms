@@ -19,6 +19,10 @@ const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
 const wal = require('./auditBufferWal');
 const { isContentAttributableFailure } = require('../utils/mongoFailureAttribution');
+// catch/.catch 的形参不保证是 Error：`Promise.reject(undefined)` 时裸读 `.message` 就是 TypeError，
+// 而它发生在观测代码里——记账自己抛会把"吞掉失败"变成"再抛一次 + 回退不执行"。
+// 全总化只有一处实现（判据归一处），副本已删：见 utils/auditWriteFailure.js 的 errText。
+const { errText } = require('../utils/auditWriteFailure');
 // 批量写路径的文档级判定层（串链前的预铸造闸 + 落库回执/行号对账）在 services/auditBufferDocs.js。
 // 拆出去是因为本文件的 max-lines 计数正好顶在 300（体积棘轮基线 0）：新增判据必须有等量的净去处。
 const auditDocs = require('./auditBufferDocs');
@@ -196,28 +200,84 @@ function settleContentFaultStrikes(retryDocs) {
   return { doomed, kept: retryDocs.filter((d) => !doomedSet.has(d)) };
 }
 
-/** 丢弃告警文案（独立成函数同样是为了不加重 catch 的分支密度） */
-function doomedBatchMessage(doomed, kept, discardSeqs, err) {
-  const walPart =
-    discardSeqs.size > 0
-      ? `已归档 ${discardSeqs.size} 行 WAL 取证行到 ${wal.getWalPath()}.discarded 并从主 WAL 移除`
-      : `WAL 行仍保留在 ${wal.getWalPath()}，可人工取证`;
-  return (
-    `审计批次内有 ${doomed.length} 条文档连续 ${MAX_BATCH_RETRY} 次被服务端按内容拒绝，` +
-    `已丢弃并归档取证（累计丢弃 ${droppedCount} 条，同批其余 ${kept.length} 条留在缓冲继续重试）。` +
-    `最后一次错误：${err.name || 'Error'}/${err.codeName || err.code || '-'} ${err.message}。` +
-    walPart
-  );
-}
+/** 丢弃告警文案与 outage 文案在判定层（auditBufferDocs）：本文件的 max-lines 计数
+ *  正好顶在棘轮基线 300，新增判据必须有等量的净去处；文案不读缓冲状态，按值传入即可。 */
 
-/** 不可归因于内容（基础设施或未知）时的告警：明确写出"不丢弃"，便于值班同学判断处置方向 */
-function outageMessage(err) {
-  return (
-    `审计落库连续 ${outageFailures} 轮失败且不可归因于文档内容` +
-    `（${err.name || 'Error'}: ${String(err.message).slice(0, 160)}）。` +
-    `缓冲与 WAL 全部保留、不做毒批丢弃——数据库恢复后自动重放；` +
-    `缓冲若增长到硬上限 ${BUFFER_HARD_LIMIT} 条，会按最旧优先丢弃并另行以 error 级告警。`
+/**
+ * flush 的失败处置臂：记账 → 计次 → 决定"该丢哪些" → 把该留的文档放回缓冲。
+ *
+ * 【这个函数体自己绝不能抛】flush() 被 push() 满额分支与 setInterval 裸调用
+ * （两边都挂了 `.catch`），所以这里的抛错会变成"没人接的第二支"或"回退不执行"：
+ *   - 记账语句裸读被拒值的属性（`${err.message}`）在 `Promise.reject(undefined)`／
+ *     reject 字符串时就是 TypeError，而它发生在 catch 体内 ⇒ 批次既不告警也不回退，
+ *     内存副本直接消失（WAL 未启用的窗口里连崩溃重放都没有，droppedCount 还不计），
+ *     同时真实失败原因被顶掉。判据：tests/services/observabilityWritesNeverReject.test.js 的 L6。
+ *   - 文案构造在判定层（`auditDocs.doomedBatchMessage` / `outageMessage`），两边都做了
+ *     nullish 安全；对账读也在判定层（`collectDurableIds` 用 `Object(err)`）。
+ * @param {*} err 被拒值，**不保证是 Error**
+ * @param {Array} docs 本轮取走的批次（预铸造后的可进链子集）
+ */
+function handleFlushFailure(err, docs) {
+  consecutiveFailures += 1;
+  // 审计落库失败不影响业务主流程，仅记录告警（与原单条写入策略一致）。
+  logger.warn(
+    `审计日志批量落库失败（${docs.length} 条，连续第 ${consecutiveFailures} 次）：${errText(err)}`
   );
+
+  const retryDocs = Array.isArray(err?.__retryDocs) ? err.__retryDocs : docs;
+  // 计次与「该丢哪些」抽成纯函数：本臂已经背了幂等重放 / 僵尸回退 / 部分成功三套逻辑，
+  // 再叠判据就会突破 eslint complexity 棘轮（实测 0→1 warn）。
+  if (isContentAttributableFailure(err)) {
+    const { doomed, kept } = settleContentFaultStrikes(retryDocs);
+    if (doomed.length > 0) {
+      noteDropped(doomed.length, 'poison_doc');
+      // P1-24：丢弃批次的内存副本后，同步把其 WAL 行归档移出主文件，
+      // 否则每次重启都重放同一批毒文档、再走满 5 次失败、再丢一次。
+      // 按 __walSeq 精确匹配（不按行序），不误伤同文件中其他待落库的行。
+      const discardSeqs = new Set(doomed.map((d) => d && d.__walSeq).filter(Boolean));
+      // F-143 同族第三处：这里也曾用 `wal.isEnabled() &&` 门控。下面的 error 日志
+      // （doomedBatchMessage）按 `discardSeqs.size > 0` 分支，会照着"已归档…并从主 WAL
+      // 移除"说话——闸门为假时那句话是假的，而 `.discarded` 正是"审计永久缺失了多少"的
+      // 唯一凭据：内存副本已丢、行却没归档 ⇒ 谎报 + 每次重启重放同一批毒文档。
+      if (discardSeqs.size > 0) wal.discardBySeqs(discardSeqs);
+      logger.error(
+        auditDocs.doomedBatchMessage({
+          doomed,
+          kept,
+          discardSeqs,
+          err,
+          droppedTotal: droppedCount,
+          maxRetry: MAX_BATCH_RETRY,
+        })
+      );
+      consecutiveFailures = 0;
+      // 同批无辜文档回到缓冲，别跟着毒文档一起消失
+      if (kept.length > 0) {
+        unshiftChunked(kept);
+        enforceBufferLimit();
+      }
+      return;
+    }
+  } else {
+    // 不可归因于内容 ⇒ 基础设施或未知原因：**一律不丢弃**，只告警。
+    outageFailures += 1;
+    if (outageFailures === 1 || outageFailures % MAX_BATCH_RETRY === 0) {
+      logger.error(
+        auditDocs.outageMessage({
+          outageTotal: outageFailures,
+          hardLimit: BUFFER_HARD_LIMIT,
+          err,
+        })
+      );
+    }
+  }
+
+  // 文档回到缓冲重试（at-least-once；WAL 仍保留这些行，重试成功后再裁剪）。
+  // 部分成功场景只回退未落库的子集（__retryDocs），防止毒文档引发无限重复插入；
+  // 已入库子集的行在上面按序号就地回收（F-97，旧实现留成永久残留）。
+  // 分块回退：数十万级 spread 会触发 V8 参数上限 RangeError
+  unshiftChunked(retryDocs);
+  enforceBufferLimit();
 }
 
 /**
@@ -355,51 +415,10 @@ async function flush() {
       }
     });
   } catch (err) {
-    consecutiveFailures += 1;
-    // 审计落库失败不影响业务主流程，仅记录告警（与原单条写入策略一致）
-    logger.warn(
-      `审计日志批量落库失败（${docs.length} 条，连续第 ${consecutiveFailures} 次）：${err.message}`
-    );
-
-    const retryDocs = Array.isArray(err.__retryDocs) ? err.__retryDocs : docs;
-    // 计次与「该丢哪些」抽成纯函数：本 catch 已经背了幂等重放 / 僵尸回退 /
-    // 部分成功三套逻辑，再叠判据就会突破 eslint complexity 棘轮（实测 0→1 warn）。
-    if (isContentAttributableFailure(err)) {
-      const { doomed, kept } = settleContentFaultStrikes(retryDocs);
-      if (doomed.length > 0) {
-        noteDropped(doomed.length, 'poison_doc');
-        // P1-24：丢弃批次的内存副本后，同步把其 WAL 行归档移出主文件，
-        // 否则每次重启都重放同一批毒文档、再走满 5 次失败、再丢一次。
-        // 按 __walSeq 精确匹配（不按行序），不误伤同文件中其他待落库的行。
-        const discardSeqs = new Set(doomed.map((d) => d && d.__walSeq).filter(Boolean));
-        // F-143 同族第三处：这里也曾用 `wal.isEnabled() &&` 门控。下面的 error 日志
-        // （doomedBatchMessage）按 `discardSeqs.size > 0` 分支，会照着"已归档…并从主 WAL
-        // 移除"说话——闸门为假时那句话是假的，而 `.discarded` 正是"审计永久缺失了多少"的
-        // 唯一凭据：内存副本已丢、行却没归档 ⇒ 谎报 + 每次重启重放同一批毒文档。
-        if (discardSeqs.size > 0) wal.discardBySeqs(discardSeqs);
-        logger.error(doomedBatchMessage(doomed, kept, discardSeqs, err));
-        consecutiveFailures = 0;
-        // 同批无辜文档回到缓冲，别跟着毒文档一起消失
-        if (kept.length > 0) {
-          unshiftChunked(kept);
-          enforceBufferLimit();
-        }
-        return;
-      }
-    } else {
-      // 不可归因于内容 ⇒ 基础设施或未知原因：**一律不丢弃**，只告警。
-      outageFailures += 1;
-      if (outageFailures === 1 || outageFailures % MAX_BATCH_RETRY === 0) {
-        logger.error(outageMessage(err));
-      }
-    }
-
-    // 文档回到缓冲重试（at-least-once；WAL 仍保留这些行，重试成功后再裁剪）。
-    // 部分成功场景只回退未落库的子集（__retryDocs），防止毒文档引发无限重复插入；
-    // 已入库子集的行在上面按序号就地回收（F-97，旧实现留成永久残留）。
-    // 分块回退：数十万级 spread 会触发 V8 参数上限 RangeError
-    unshiftChunked(retryDocs);
-    enforceBufferLimit();
+    // 失败处置整臂外提（告警 + 计次 + 该丢哪些 + 回退）。这条 catch 同时背了幂等重放 /
+    // 僵尸回退 / 部分成功三套逻辑，留在 flush 里会同时顶穿 max-lines-per-function 与
+    // complexity 两道棘轮——棘轮在这里是"该拆了"的信号，不是要绕过去的障碍。
+    handleFlushFailure(err, docs);
   } finally {
     flushing = false;
     // 在途状态结束：批次已落库 / 已回退缓冲 / 已归档丢弃。与 `flushing` 同处置位，
@@ -424,7 +443,7 @@ function push(doc) {
   // 容量保护：DB 长时间不可用时缓冲会无界增长（P2-21）
   enforceBufferLimit();
   if (buffer.length >= BUFFER_LIMIT) {
-    flush().catch((err) => logger.warn(`审计日志落库触发异常：${err.message}`));
+    flush().catch((err) => logger.warn(`审计日志落库触发异常：${errText(err)}`));
   }
 }
 
@@ -474,11 +493,11 @@ function start() {
       // 重放同样受硬上限约束：崩溃前积压的 WAL 可能远超内存承载（P2-21）
       enforceBufferLimit();
     },
-    (e) => logger.warn(`审计 WAL 启动重放失败：${e.message}`)
+    (e) => logger.warn(`审计 WAL 启动重放失败：${errText(e)}`)
   );
 
   flushTimer = setInterval(() => {
-    flush().catch((err) => logger.warn(`审计日志定时落库异常：${err.message}`));
+    flush().catch((err) => logger.warn(`审计日志定时落库异常：${errText(err)}`));
   }, FLUSH_INTERVAL_MS);
   // 不阻塞 Node 进程退出（测试环境尤其需要）
   if (flushTimer && flushTimer.unref) flushTimer.unref();
@@ -542,7 +561,10 @@ async function flushAndStop(hardCeilingMs = Infinity) {
     }
     if (buffer.length === 0) break;
     if (Date.now() >= deadline) break;
-    await flush().catch((e) => logger.warn(`收尾 flush 失败：${e.message}`));
+    // 这里必须是 errText 而不是 ${e.message}：这个 catch 臂后面还跟着
+    // `await wal.drain()`（WAL rename 落盘）与 residual 记账——臂自己一抛，
+    // 收尾循环不是"少一条日志"而是**整段收尾没做完**，且抛出的是 flush 的拒绝。
+    await flush().catch((e) => logger.warn(`收尾 flush 失败：${errText(e)}`));
   }
   // 在途批次此刻既不在缓冲也未落库，只能由 `inFlightCount` 记账（用例 ④ 钉这条）：
   // 漏了它，"关停时正有一批跑不出去"就会被算成 residual 0 ⇒ 又变成"已排空"那句谎话。

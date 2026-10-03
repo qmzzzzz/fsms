@@ -21,6 +21,10 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
+// 全总化只有一处实现（utils/auditWriteFailure 导出，判据归一处）：本模块的 catch 体
+// 大多直接挂在 walChain 的末端——链尾一旦被这些语句自己抛断，就留下一个**无人持有**
+// 的 rejection，而 src/index.js 的 unhandledRejection 在任何环境都 process.exit(1)。
+const { errText } = require('../utils/auditWriteFailure');
 const cap = require('./auditWalCap');
 
 // WAL 文件路径（可配），存放尚未确认落库的审计文档（每行一条 JSON）。
@@ -181,7 +185,7 @@ async function readWalRecordsStrict() {
   try {
     content = await fs.promises.readFile(walPath, 'utf8');
   } catch (e) {
-    if (e.code !== 'ENOENT') throw e;
+    if (e?.code !== 'ENOENT') throw e;
     return null;
   }
   if (!content) return { records: [], content: '' };
@@ -200,7 +204,7 @@ async function readWalRecords() {
   try {
     return await readWalRecordsStrict();
   } catch (e) {
-    logger.warn(`审计 WAL 读取失败：${e.message}`);
+    logger.warn(`审计 WAL 读取失败：${errText(e)}`);
     return null;
   }
 }
@@ -242,7 +246,7 @@ function walAppendLine(line) {
     .catch((e) => {
       walAppendFailures += 1;
       logger.warn(
-        `审计 WAL 追加失败（累计 ${walAppendFailures} 次）：${e.message}——` +
+        `审计 WAL 追加失败（累计 ${walAppendFailures} 次）：${errText(e)}——` +
           '本条记录只有内存态，落库前进程退出即永久缺失'
       );
     })
@@ -250,7 +254,7 @@ function walAppendLine(line) {
     // 这里必须是"表达式形式"的箭头：afterAppend 命中抽查时返回的是 enforceWalLimit 的
     // Promise，链要等裁剪做完才走下一步——写成 { ...; } 语句体会把它丢成悬空 Promise。
     .then(() => cap.afterAppend({ walPath, readWalRecords, atomicReplaceWal }))
-    .catch((e) => logger.warn(`审计 WAL 追加链后续操作失败：${e.message}`));
+    .catch((e) => logger.warn(`审计 WAL 追加链后续操作失败：${errText(e)}`));
 }
 
 /**
@@ -284,9 +288,9 @@ async function removeWalLinesBySeqs(seqSet, archive) {
     // 日志与面板都分不出这两种世界。级别用 error：这不是"每条记录都可能撞上"的
     // 高频路径（每轮 flush 一次），而是"这一轮的回收整轮失效"。
     logger.error(
-      `审计 WAL ${archive ? '毒批归档' : '落库回收'}读不回文件（${e.code || 'READ_ERROR'} ${
-        e.message
-      }）：${seqSet.size} 个序号本轮 0 命中，对应行留在原地——重启会把已落库的记录再重放一遍`
+      `审计 WAL ${archive ? '毒批归档' : '落库回收'}读不回文件（${e?.code || 'READ_ERROR'} ${errText(
+        e
+      )}）：${seqSet.size} 个序号本轮 0 命中，对应行留在原地——重启会把已落库的记录再重放一遍`
     );
     return 0;
   }
@@ -319,7 +323,7 @@ function walDiscardBySeqs(seqs) {
         logger.warn(`审计 WAL 已归档 ${n} 行毒批取证行并从主 WAL 移除（重启重放不再重复处理）`);
       }
     })
-    .catch((e) => logger.warn(`审计 WAL 毒批归档失败：${e.message}`));
+    .catch((e) => logger.warn(`审计 WAL 毒批归档失败：${errText(e)}`));
 }
 
 /**
@@ -334,7 +338,7 @@ function walTrimBySeqs(seqs) {
   if (seqSet.size === 0) return;
   walChain = walChain
     .then(() => removeWalLinesBySeqs(seqSet, false))
-    .catch((e) => logger.warn(`审计 WAL 裁剪失败：${e.message}`));
+    .catch((e) => logger.warn(`审计 WAL 裁剪失败：${errText(e)}`));
 }
 
 /**
@@ -351,7 +355,7 @@ async function readWalLines() {
     wal = await readWalRecordsStrict();
   } catch (e) {
     logger.error(
-      `审计 WAL 启动重放读不回文件（${e.code || 'READ_ERROR'} ${e.message}）：` +
+      `审计 WAL 启动重放读不回文件（${e?.code || 'READ_ERROR'} ${errText(e)}）：` +
         '本轮不重放，缓冲按空启动——上一进程留下的待落库记录这一轮不会回来（文件留在原地，下次启动再试）'
     );
     return [];
@@ -366,7 +370,7 @@ async function readWalLines() {
  */
 async function readDiscardedSeqs() {
   const content = await fs.promises.readFile(walPath + '.discarded', 'utf8').catch((e) => {
-    if (e.code !== 'ENOENT') logger.warn(`审计 WAL 毒批归档读取失败：${e.message}`);
+    if (e?.code !== 'ENOENT') logger.warn(`审计 WAL 毒批归档读取失败：${errText(e)}`);
     return '';
   });
   const seqs = new Set();
@@ -464,7 +468,7 @@ async function stampReplaySeqs(lines, onDoc) {
     } catch (e) {
       walRewriteFailures += 1;
       logger.error(
-        `审计 WAL 重放补号回写失败（累计 ${walRewriteFailures} 次）：${e.message}——文件 ${getWalPath()}` +
+        `审计 WAL 重放补号回写失败（累计 ${walRewriteFailures} 次）：${errText(e)}——文件 ${getWalPath()}` +
           ' 里这批行仍缺 __walSeq：本次它们已进内存缓冲并会正常落库，但落库后按序号裁不掉，' +
           '下次重启会作为同一事件的第二个副本被重放（哈希链同时分叉），请立即取文件原件核查'
       );
@@ -514,7 +518,7 @@ function appendLine(line) {
  * 保证 walChain 上不留 rejection（与既有 walTrimLines/walDiscardBySeqs 的 catch 语义一致）。
  */
 function serialize(fn, onError) {
-  const handle = onError || ((e) => logger.warn(`审计 WAL 链上操作失败：${e.message}`));
+  const handle = onError || ((e) => logger.warn(`审计 WAL 链上操作失败：${errText(e)}`));
   walChain = walChain.then(fn).catch(handle);
   return walChain;
 }

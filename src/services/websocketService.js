@@ -192,6 +192,32 @@ const roomRolesSatisfied = (room, roleCodes) => {
   return requiredRoles.some((r) => roleCodes.includes(r));
 };
 
+/**
+ * 给 async 事件监听器挂上拒绝臂
+ *
+ * socket.io 4.8.3 的派发路径（`node_modules/socket.io/dist/socket.js:697`
+ * 的 `super.emitUntyped.apply(this, event)`）**丢弃监听器的返回值**：
+ * `socket.on('x', async …)` 里 reject 掉的 promise 不会经它的手，
+ * 直接成为 unhandledRejection；而本仓在 `src/index.js:446-463` 的口径是
+ * 「任何未处理拒绝 ⇒ flush 审计后 `process.exit(1)`」。
+ * 合起来就是：一条长连接上的一次 promise 拒绝 = 整个进程下线。
+ * 同文件握手路径写的 `authenticateSocket(...).catch(() => {})`（:353）已经承认
+ * 这条 promise 会 reject，只是兜底没覆盖到事件监听器形态。
+ */
+const guardSocketHandler =
+  (event, handler) =>
+  async (...args) => {
+    try {
+      await handler(...args);
+    } catch (err) {
+      logger.error(
+        `WebSocket 事件处理异常（已就地吞止，避免未处理拒绝打死进程）：${event} - ${
+          err && err.message ? err.message : err
+        }`
+      );
+    }
+  };
+
 class WebSocketService {
   constructor(server) {
     // 从统一配置读取 CORS 来源，禁止使用通配符 '*'
@@ -246,6 +272,7 @@ class WebSocketService {
    */
   async initSharedAdapter() {
     if (!sharedCache.isRedisEnabled()) return;
+    let subClient = null;
     try {
       const { createAdapter } = require('@socket.io/redis-adapter');
       const Redis = require('ioredis');
@@ -254,15 +281,26 @@ class WebSocketService {
       // 发布端复用共享缓存主连接，少占一条连接。
       // password 与主连接同源（sharedCache.redisConnectionPassword，REDIS_PASSWORD
       // 经 *_FILE 注入）：缺了它，requirepass 的 redis 会让 adapter 以 NOAUTH 失败
-      const subClient = new Redis(url, {
+      subClient = new Redis(url, {
         lazyConnect: false,
         enableOfflineQueue: true,
         password: sharedCache.redisConnectionPassword(),
       });
       this.io.adapter(createAdapter(sharedCache.getRedisClient(), subClient));
-      this._adapterClients.push(subClient);
       logger.info('WebSocket 已挂载 Redis adapter：推送跨实例生效');
+      // 登记放最后一条可执行语句：catch 里「没登记 ⇒ 就地断开」由此恒成立
+      this._adapterClients.push(subClient);
     } catch (err) {
+      // 挂载失败时这条订阅端连接已经建立，而 _adapterClients 只在成功路径登记
+      // ⇒ dispose() 永远回收不到它；它带 enableOfflineQueue，会一直重连到 Redis
+      // 恢复为止。于是"降级"顺手留下一个没人认领的连接——就地断开它。
+      if (subClient) {
+        try {
+          subClient.disconnect();
+        } catch (_) {
+          /* 连接可能已断（与 dispose() 的回收同一口径） */
+        }
+      }
       logger.warn(`WebSocket Redis adapter 挂载失败（推送降级为单实例语义）：${err.message}`);
     }
   }
@@ -357,55 +395,61 @@ class WebSocketService {
       }
 
       // 用户身份认证与多连接去重（兑底路径：客户端显式提交令牌）
-      socket.on('auth', async (token) => {
-        // 已完成认证、或认证进行中（含握手路径）均忽略重复提交
-        if (socket.authenticated || socket.authing) return;
-        socket.authing = true;
-        try {
-          await this.authenticateSocket(socket, token, authTimer);
-        } finally {
-          socket.authing = false;
-        }
-      });
+      socket.on(
+        'auth',
+        guardSocketHandler('auth', async (token) => {
+          // 已完成认证、或认证进行中（含握手路径）均忽略重复提交
+          if (socket.authenticated || socket.authing) return;
+          socket.authing = true;
+          try {
+            await this.authenticateSocket(socket, token, authTimer);
+          } finally {
+            socket.authing = false;
+          }
+        })
+      );
 
       // 监听房间加入（需先完成认证，且房间名必须在白名单中）
-      socket.on('join-room', async (room) => {
-        // 必须先完成认证
-        if (!socket.authenticated || !socket.userId) {
-          socket.emit('error', { message: '请先完成认证' });
-          return;
-        }
-        // 房间名必须在白名单中
-        if (!ALLOWED_ROOMS.includes(room)) {
-          socket.emit('error', { message: '无效的房间名' });
-          return;
-        }
-        // 部分房间有角色要求（如 role-management 仅限管理员）
-        //
-        // P2-14 修复：不得使用认证时的 socket.roleCodes 静态快照。
-        // 长连接可存活数小时，期间用户可能被降级/停权，而快照永不刷新——
-        // 被降级的连接仍能加入 role-management 并持续接收角色/权限变更事件。
-        // 受限房间在入房时强制重查数据库（同时复查 status/tokenVersion）；
-        // 无角色要求的房间沿用快照，避免每次入房都打库。
-        const requiredRoles = ROOM_ROLE_REQUIREMENTS[room];
-        if (requiredRoles) {
-          const fresh = await this.revalidateSocket(socket);
-          if (!fresh.ok) {
-            // revalidateSocket 内部已断开连接并发出 auth-error
+      socket.on(
+        'join-room',
+        guardSocketHandler('join-room', async (room) => {
+          // 必须先完成认证
+          if (!socket.authenticated || !socket.userId) {
+            socket.emit('error', { message: '请先完成认证' });
             return;
           }
-          if (!roomRolesSatisfied(room, fresh.roleCodes)) {
-            socket.emit('error', { message: '无权加入该房间' });
+          // 房间名必须在白名单中
+          if (!ALLOWED_ROOMS.includes(room)) {
+            socket.emit('error', { message: '无效的房间名' });
             return;
           }
-        }
-        socket.join(room);
-        logger.debug(`Client ${socket.id} joined room: ${room}`);
+          // 部分房间有角色要求（如 role-management 仅限管理员）
+          //
+          // P2-14 修复：不得使用认证时的 socket.roleCodes 静态快照。
+          // 长连接可存活数小时，期间用户可能被降级/停权，而快照永不刷新——
+          // 被降级的连接仍能加入 role-management 并持续接收角色/权限变更事件。
+          // 受限房间在入房时强制重查数据库（同时复查 status/tokenVersion）；
+          // 无角色要求的房间沿用快照，避免每次入房都打库。
+          const requiredRoles = ROOM_ROLE_REQUIREMENTS[room];
+          if (requiredRoles) {
+            const fresh = await this.revalidateSocket(socket);
+            if (!fresh.ok) {
+              // revalidateSocket 内部已断开连接并发出 auth-error
+              return;
+            }
+            if (!roomRolesSatisfied(room, fresh.roleCodes)) {
+              socket.emit('error', { message: '无权加入该房间' });
+              return;
+            }
+          }
+          socket.join(room);
+          logger.debug(`Client ${socket.id} joined room: ${room}`);
 
-        // 连接建立时已在 clients Map 注册（userId 由认证成功后回写），
-        // 此处必然命中已有条目，仅需追加房间；原「不存在则新建」分支为死代码，已删除
-        this.clients.get(socket.id)?.rooms.add(room);
-      });
+          // 连接建立时已在 clients Map 注册（userId 由认证成功后回写），
+          // 此处必然命中已有条目，仅需追加房间；原「不存在则新建」分支为死代码，已删除
+          this.clients.get(socket.id)?.rooms.add(room);
+        })
+      );
 
       // 监听房间离开
       socket.on('leave-room', (room) => {

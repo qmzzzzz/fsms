@@ -210,8 +210,11 @@ const markOverdueInspections = async () => {
     }
     return n;
   } catch (err) {
-    // 提醒扫描的附加职责，失败不应影响设备提醒本身
-    logger.error(`巡检逾期标记失败：${err.message}`);
+    // 提醒扫描的附加职责，失败不应影响设备提醒本身。
+    // 本函数被调度器裸调用（无 await），所以"永不 reject"是硬契约：catch 体自己也
+    // 不能抛——被 reject(undefined/null) 时 `${err.message}` 会变成 TypeError，
+    // 那正是本函数要消除的东西（未持有的 rejection ⇒ index.js 的 unhandledRejection ⇒ 进程下线）。
+    logger.error(`巡检逾期标记失败：${err?.message ?? err}`);
     return 0;
   }
 };
@@ -246,21 +249,31 @@ const startReminderScheduler = (intervalMs = 24 * 60 * 60 * 1000) => {
     return activeScheduler;
   }
 
-  // 服务启动后延迟 30 秒执行首次扫描，避免与初始化争抢连接
+  // 服务启动后延迟 30 秒执行首次扫描，避免与初始化争抢连接。
+  // 定时器回调是同步的：里面每个 promise 都必须就地持有（.catch），否则回调返回时
+  // 它还在飞——一次拒绝没人接 = 进程下线（见 src/index.js 的 unhandledRejection 处理器）。
   const firstTimer = setTimeout(() => {
-    scanDeviceReminders().catch((err) => logger.error(`首次设备到期扫描失败：${err.message}`));
-    markOverdueInspections();
+    scanDeviceReminders().catch((err) =>
+      logger.error(`首次设备到期扫描失败：${err?.message ?? err}`)
+    );
+    markOverdueInspections().catch((err) =>
+      logger.error(`首次巡检逾期标记失败：${err?.message ?? err}`)
+    );
   }, 30 * 1000);
 
   const timer = setInterval(() => {
     // 巡检逾期标记与设备扫描互不依赖，即使扫描被跳过也要执行
-    markOverdueInspections();
+    markOverdueInspections().catch((err) =>
+      logger.error(`巡检逾期标记调度失败：${err?.message ?? err}`)
+    );
     // 防止并发重叠：上次扫描未完成时跳过
     if (isScanning) {
       logger.warn('上一次设备到期扫描尚未完成，跳过本次');
       return;
     }
-    scanDeviceReminders().catch((err) => logger.error(`设备到期周期扫描失败：${err.message}`));
+    scanDeviceReminders().catch((err) =>
+      logger.error(`设备到期周期扫描失败：${err?.message ?? err}`)
+    );
   }, intervalMs);
   timer.unref?.();
   firstTimer.unref?.();

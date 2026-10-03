@@ -89,7 +89,21 @@ async function withTransaction(fn, options = {}) {
     }
     throw err;
   } finally {
-    session.endSession();
+    // endSession() 是 async，而且它会**显式 rethrow**：node_modules/mongodb/lib/sessions.js:121-129
+    // 的 catch 里除 MongoOperationTimeoutError 外全部 squash，唯独这一种 `throw error`。
+    // 原先这里裸调用 ⇒ 没人持有的拒绝 ⇒ src/index.js:446 的 unhandledRejection 处理器
+    // 在**所有环境**都 process.exit(1)：一次事务清理超时打死整个进程（不是日志噪音）。
+    // 上游同一条链的写法就是"接住"：mongoose/lib/connection.js:743
+    // `session.endSession().catch(() => {})`、mongodb/lib/cursor/abstract_cursor.js:579
+    // `.then(undefined, squashError)`。这里与同文件 catch 里的 abort 同一口径
+    // （await + 就地吞）：清理失败既不掩盖业务结果也不掩盖原始错误，
+    // 顺带保证会话在 withTransaction 返回前已归还连接池。
+    // 资源不靠这个 catch：驱动自己的 finally（sessions.js:132-144）先释放再传播拒绝。
+    try {
+      await session.endSession();
+    } catch (_) {
+      /* 会话已结束，清理超时不影响业务结果（见上） */
+    }
   }
 }
 

@@ -121,9 +121,12 @@ const recordViolation = (req, violation, detail) => {
         riskLevel: 'medium',
         riskFactors: ['protocol_violation', violation],
         reason: stripControlChars(detail, 512),
-      });
+      }).catch((e) => logger.debug(`协议违规审计写入异步失败（不阻断响应）：${e?.message ?? e}`));
     } catch (e) {
-      logger.debug(`协议违规审计写入跳过：${e.message}`);
+      // 上面的 try 只护得住同步部分（computeFingerprint / auditPath 等）；
+      // AuditLog.record 返回的 promise 由它自己的 .catch 持有——
+      // setImmediate 的回调返回值同样被丢弃，两处漏一个就是全进程下线。
+      logger.debug(`协议违规审计写入跳过：${e?.message ?? e}`);
     }
   });
 };

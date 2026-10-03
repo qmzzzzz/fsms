@@ -5,6 +5,10 @@
 
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
+// 这一路是"更正审计写入失败"的兜底日志：写成裸读 err.message 时，非 Error 的被拒值会把
+// 兜底本身变成新的抛出源。本处 catch 包的是同步调用（require + push），今天只会拿到
+// Error，但同一仓的口径不按"今天可达"打折——措辞不会自己变好。
+const { errText } = require('../utils/auditWriteFailure');
 // 日志里的 URL 必须过 redactUrlQuery：app.js 替换 morgan 的 :url 时就是这么做的
 // （query 里可能带令牌/口令，明文长期留存于 combined-*.log）。
 // 错误路径同样是攻击者可稳定触发的写日志入口，没理由例外。
@@ -187,7 +191,7 @@ function markResponseAbortedByError(req, res, reason) {
     });
   } catch (err) {
     // 更正事件本身失败：既不能掩盖原始错误，也不能让调用方（错误处理器/导出控制器）抛出
-    logger.warn(`截断响应的更正审计写入失败：${err.message}`);
+    logger.warn(`截断响应的更正审计写入失败：${errText(err)}`);
   }
 }
 

@@ -66,7 +66,10 @@ describe('withTransaction：拓扑探测结果的缓存语义', () => {
     startTransaction: jest.fn(),
     commitTransaction: jest.fn().mockResolvedValue(undefined),
     abortTransaction: jest.fn().mockResolvedValue(undefined),
-    endSession: jest.fn(),
+    // mongodb.d.ts:2351 `endSession(options?): Promise<void>` —— 真 API 是 async，
+    // 桩必须返回 Promise：`transaction.js` 的 finally 臂丢弃过它的拒绝（第 13 轮真实缺陷），
+    // 而同步桩让那条缺陷在测试里**根本不可能暴露**。判据见 ci/stubReturnTypeParity.test.js
+    endSession: jest.fn().mockResolvedValue(undefined),
   });
 
   beforeEach(() => {

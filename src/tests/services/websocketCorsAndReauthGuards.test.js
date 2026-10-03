@@ -125,7 +125,7 @@ describe('WebSocket 分支补漏', () => {
             ],
           ]),
         },
-        close: jest.fn(),
+        close: jest.fn().mockResolvedValue(undefined),
       };
 
       svc.dispose();
@@ -169,7 +169,7 @@ describe('WebSocket 分支补漏', () => {
       svc._adapterClients = [{ disconnect: dc1 }, { disconnect: dc2 }];
       svc.io = {
         sockets: { sockets: new Map() },
-        close: jest.fn(),
+        close: jest.fn().mockResolvedValue(undefined),
       };
 
       svc.dispose();

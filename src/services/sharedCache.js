@@ -588,7 +588,10 @@ async function publishInvalidate(key) {
   try {
     await redisClient.publish(INVAL_CHANNEL, key);
   } catch (err) {
-    logger.warn(`缓存失效广播发布失败（其余实例最长延迟至自然过期）：${err.message}`);
+    // 本函数被 middleware/auth.js 的 invalidateUserCache **裸调用**（不 await），
+    // 所以"内部吞错"是硬契约：catch 体自己不能抛。
+    // `${err.message}` 在被 reject(undefined/字符串) 时会抛 TypeError ⇒ 契约破 ⇒ 全进程下线。
+    logger.warn(`缓存失效广播发布失败（其余实例最长延迟至自然过期）：${err?.message ?? err}`);
   }
 }
 

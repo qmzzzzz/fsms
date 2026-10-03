@@ -103,12 +103,14 @@ function ensureKeyPair() {
         '（重启后自动换钥，前端会重新获取公钥；生产环境请通过 LOGIN_ECDH_PRIVATE_KEY_FILE 持久注入）'
     );
   }
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
+  // 只绑定 privateKey：initFromPrivatePem 从私钥本体重新导出公钥（createPublicKey），
+  // 第二参数从来不是它的入参——留着 publicKey 只会让人误以为下发的公钥经过外部校验。
+  const { privateKey } = crypto.generateKeyPairSync('ec', {
     namedCurve: DEFAULT_CURVE,
     publicKeyEncoding: { type: 'spki', format: 'pem' },
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
   });
-  return initFromPrivatePem(privateKey, publicKey);
+  return initFromPrivatePem(privateKey);
 }
 
 /** 公钥下发（GET /api/auth/login-public-key），curve 供前端 importKey 使用 */

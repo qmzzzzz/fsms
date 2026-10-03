@@ -167,10 +167,17 @@ sharedCache.onInvalidate((key) => {
  * 主动失效某个用户的缓存（改密、禁用、锁定时调用）：
  * 先本地失效，再经共享缓存广播给其余实例。
  * 广播为尽力而为（内部吞错），失败时其余实例最长延迟至自然过期。
+ *
+ * publishInvalidate 是 async 而本函数是同步的：调用点（roleController / rolePermissionController /
+ * initData）都不 await 本函数，所以那条 promise 必须由这里持有——本仓的 unhandledRejection
+ * 兜底在所有环境都 process.exit(1)，一次无人持有的拒绝 = 全进程下线。
+ * 判据：src/tests/services/observabilityWritesNeverReject.test.js
  */
 const invalidateUserCache = (userId) => {
   invalidateUserCacheLocal(userId);
-  sharedCache.publishInvalidate(USER_CACHE_INVALIDATE_PREFIX + String(userId));
+  sharedCache
+    .publishInvalidate(USER_CACHE_INVALIDATE_PREFIX + String(userId))
+    .catch((err) => logger.warn(`缓存失效广播异常（不阻断本次操作）：${err?.message ?? err}`));
 };
 
 /**

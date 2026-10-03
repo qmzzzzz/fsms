@@ -12,6 +12,8 @@
 
 const crypto = require('crypto');
 const logger = require('../utils/logger');
+// 锁的三条失败分支都是"退化后继续跑"，catch 体自己不能抛（全总化唯一实现，见 utils/auditWriteFailure）
+const { errText } = require('../utils/auditWriteFailure');
 
 const LOCK_RELEASE_SCRIPT = `
 if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -70,7 +72,9 @@ const createLockOperations = ({ getRedisClient, isRedisEnabled, isRedisConfigure
       return ok === 'OK' ? createLockHandle(lockKey, token) : null;
     } catch (error) {
       logger.warn(
-        `共享缓存锁获取失败，本次退化为无锁语义（${lockKey} 的跨实例互斥当前不成立）：${error.message}`
+        `共享缓存锁获取失败，本次退化为无锁语义（${lockKey} 的跨实例互斥当前不成立）：${errText(
+          error
+        )}`
       );
       return { async release() {} };
     }
@@ -89,7 +93,7 @@ const createLockOperations = ({ getRedisClient, isRedisEnabled, isRedisConfigure
         ok = await client.set(lockKey, token, 'PX', ttlMs, 'NX');
       } catch (error) {
         logger.warn(
-          `共享缓存阻塞锁获取失败，调用方将拿不到锁（本应串行的段落可能不串行）：${error.message}`
+          `共享缓存阻塞锁获取失败，调用方将拿不到锁（本应串行的段落可能不串行）：${errText(error)}`
         );
         return null;
       }
@@ -112,7 +116,7 @@ const createLockOperations = ({ getRedisClient, isRedisEnabled, isRedisConfigure
       );
       return result === 1;
     } catch (error) {
-      logger.warn(`共享缓存 casSet 失败（Redis 侧异常，不是版本冲突）：${error.message}`);
+      logger.warn(`共享缓存 casSet 失败（Redis 侧异常，不是版本冲突）：${errText(error)}`);
       return false;
     }
   };

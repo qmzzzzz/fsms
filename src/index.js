@@ -363,8 +363,18 @@ const startServer = async () => {
       wsServiceInstance = new WebSocketService(httpServer);
       app.set('wsService', wsServiceInstance);
       // REDIS_URL 就绪时为推送挂 Redis adapter（跨实例触达）；内部吞错降级，
-      // 不阻塞启动——此处不 await，挂载完成前的推送至多回退单实例语义
-      wsServiceInstance.initSharedAdapter();
+      // 不阻塞启动——此处不 await，挂载完成前的推送至多回退单实例语义。
+      // 但**必须持有返回的 promise**：initSharedAdapter 是 async，它自己那条
+      // catch 一旦再抛（例如 logger 侧异常、或收到非 Error 形态的拒绝时读
+      // err.message），拒绝就没人接住 ⇒ 撞上本文件下方的 unhandledRejection
+      // 兜底 ⇒ 刚 listen 成功就 process.exit(1)。调用点兜一道比改对方文件更便宜，
+      // 且"降级不阻断启动"这条注释承诺由此变成机器判据（见
+      // src/tests/services/observabilityWritesNeverReject.test.js 的调用点闸）。
+      wsServiceInstance.initSharedAdapter().catch((err) => {
+        logger.warn(
+          `WebSocket Redis adapter 挂载异常（推送降级为单实例语义）：${err?.message ?? err}`
+        );
+      });
 
       // 启动后台清理任务
       startAlertCleanup();
