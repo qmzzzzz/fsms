@@ -28,8 +28,8 @@
  *   node scripts/verify-image-digests.js                 # 全表核验
  *   node scripts/verify-image-digests.js --only mongo:6.0.20
  *   node scripts/verify-image-digests.js --min-sources 3
- * 退出码：0 全部通过；1 有来源不一致/达不到下限；2 用法或表本身错。
- * 不打印任何 header 原文，只打印来源名与摘要值：外部响应体一律不回显。
+ * 退出码：0 全部通过；1 有来源不一致/达不到下限；2 用法错、表本身错、或**命中 0 行**（空跑）。
+ * 不打印任何 header 原文，也不回显外部响应体，只打印来源名、摘要值、index 条目数与字节数。
  */
 
 'use strict';
@@ -79,8 +79,10 @@ const EXPECTED = [
     ref: 'redis:7-alpine',
     repo: 'library/redis',
     digest: '858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499',
-    captured: '2026-10-04',
-    sources: 'public.ecr.aws + docker.m.daocloud.io',
+    captured: '2026-10-01',
+    sources:
+      'public.ecr.aws + docker.m.daocloud.io（旧值 ff02b58f 已被上游漂走，见 compose 的 redis 注释）；' +
+      '2026-10-04 复跑补 docker.1ms.run，三源一致',
     sites: 'docker-compose.yml 的 redis',
   },
   {
@@ -169,6 +171,59 @@ async function bearerFromChallenge(first, scope, timeoutMs) {
   return tok;
 }
 
+/** tag 取**最后一个**冒号之后：`reg.example.com:5000/x:1.2` 这类引用里前一个冒号是 registry 端口，不是 tag 分隔符。 */
+function tagOf(ref) {
+  return ref.slice(ref.lastIndexOf(':') + 1);
+}
+
+/**
+ * 主流程的**纯**前置：解析参数 → 校验期望表自身 → 算出要核验哪些行。
+ * 抽成纯函数的理由：这三步全是仓库内的静态判断，不联网就能判；留在 `main` 里就只能靠真
+ * 跑一次网络来覆盖，于是"表本身写坏了"（2）与"某条 digest 漂了"（1）混成一锅。
+ * `table` 形参默认取期望表，是为了让"表写坏了"这一档**能被夹具喂**：仓库里现在的表是好的，
+ * 少了这个注入点，那条分支永远走不到，判据就等于装饰（`main` 同样接受 table）。
+ * 返回 `{ok:true, opts, list}` 或 `{ok:false, code:2, message}`。
+ */
+function planRuns(argv, table = EXPECTED) {
+  let opts;
+  try {
+    opts = parseArgs(argv);
+  } catch (e) {
+    return { ok: false, code: 2, message: `未知或非法参数：${e.message}` };
+  }
+  for (const e of table) {
+    if (!/^[0-9a-f]{64}$/.test(e.digest)) {
+      return {
+        ok: false,
+        code: 2,
+        message: `期望表里 ${e.ref} 的 digest 不是 64 位小写十六进制（表本身写坏了）`,
+      };
+    }
+  }
+  if (opts.only) {
+    const missing = opts.only.filter((r) => !table.some((e) => e.ref === r));
+    if (missing.length) {
+      return {
+        ok: false,
+        code: 2,
+        message: `--only 里有引用不在期望表：${missing.join(', ')}（要加镜像请先在表里登记）`,
+      };
+    }
+  }
+  const list = table.filter((e) => !opts.only || opts.only.includes(e.ref));
+  // 空列表必须是红。可达路径是真实存在的：`--only ,` 里 split/filter 之后是**空数组**，
+  // 而空数组在 JS 里为真值，所以 `!opts.only` 那半永远不成立 ⇒ 六行全被排除。
+  // 不拦就得到"==> 核验 0 个引用 … 全部通过"这种最坏的绿：写歪参数的人会以为全验过了。
+  if (list.length === 0) {
+    return {
+      ok: false,
+      code: 2,
+      message: '命中 0 行期望表，没有可核验的引用（拒绝把空跑报成通过）',
+    };
+  }
+  return { ok: true, opts, list };
+}
+
 /**
  * 取一个来源的 manifest 并**对它自算 sha256**。
  * 返回的 `digest` 永远来自本地哈希计算；`header` 只用于旁证（不一致时报出来，
@@ -195,7 +250,15 @@ async function fetchOne(source, entry, timeoutMs) {
   }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const buf = Buffer.from(await res.arrayBuffer());
-  const json = JSON.parse(buf.toString('utf8'));
+  // 非 JSON 响应（WAF 拦截页、透明代理的登录门户、截断的响应体）必须报错，但不能把响应体
+  // 回显出来：本工具的契约是"外部响应体一律不回显"（文件头），而 JSON 解析异常默认会带上
+  // 原文前若干字符——那正好是最可能被注入的一截内容。只报字节数与来源名。
+  let json;
+  try {
+    json = JSON.parse(buf.toString('utf8'));
+  } catch {
+    throw new Error(`响应体不是 JSON（${buf.length} 字节，内容未回显）`);
+  }
   return {
     source: source.name,
     digest: crypto.createHash('sha256').update(buf).digest('hex'),
@@ -224,6 +287,9 @@ function judge(entry, got, minSources) {
       // 是完全不同的信号——后者才是要警觉的那种）。
       headerMatches: g.digest ? (g.header === '' ? null : g.header === g.digest) : null,
       entries: g.entries || 0,
+      // 字节数也要过一道：`对返回字节自算 sha256` 这句取证话术的唯一实物证据就是它，
+      // 打印出来才能让"某个来源只回了 41 字节的空 index"这种异常在输出里显形。
+      bytes: g.bytes || 0,
     })),
     agreeCount: agreed.length,
     needCount: minSources,
@@ -263,56 +329,51 @@ function headerNote(s) {
  * 逐条打印核验结论。只打印来源名与摘要值，外部响应体一律不回显（见文件头）。
  * 单独成函数不是为了好看：`main` 的圈复杂度贴着棘轮上限（15），把输出面拆出去
  * 才能让"改判据"这件事继续待在小函数里。
+ *
+ * 【为什么是 应答/跳过/报错 三个数而不是"可用"】旧写法打印 `可用 = 非跳过的来源数`，
+ * 而**硬报错**（HTTP 500、响应体不是 JSON）不是"跳过"，于是被算进了"可用"。读者看到
+ * `一致来源 2/3（可用 3）`会以为第三个来源支持了结论，实际它一句话都没说——分母说谎
+ * 与分子说谎在取证工具里是同一类缺陷。三个数分开之后，`应答` 才是 `agreeCount` 的分母，
+ * 跳过与报错各自占用自己的名额。
+ *
+ * 【为什么逐条打印 index 条目数】期望表 `sources` 列里写着"index 7 个条目"这类取证描述，
+ * 它是判据③（必须是 manifest 列表）的现场证据；不打印出来的话那句话就永远不可复核。
  */
 function printVerdict(r) {
   const answered = r.sources.filter((s) => s.digest).length;
-  const usable = r.sources.filter((s) => !s.skipped).length;
+  const skipped = r.sources.filter((s) => s.skipped).length;
+  const errored = r.sources.filter((s) => s.error).length;
   console.log(
     `${r.ok ? 'OK  ' : 'FAIL'} ${r.ref} @sha256:${r.expected.slice(0, 16)}… ` +
-      `一致来源 ${r.agreeCount}/${answered}（可用 ${usable}）`
+      `一致来源 ${r.agreeCount}/${answered}（跳过 ${skipped}，报错 ${errored}）`
   );
   for (const s of r.sources) {
     if (s.skipped) console.log(`       - ${s.source}: 跳过（${s.skipped}）`);
-    else if (s.error) console.log(`       - ${s.source}: ${s.error}`);
-    else console.log(`       - ${s.source}: ${s.digest}${headerNote(s)}`);
+    else if (s.error) console.log(`       - ${s.source}: 报错：${s.error}`);
+    else
+      console.log(
+        `       - ${s.source}: ${s.digest}${headerNote(s)}（index ${s.entries} 个条目，${s.bytes} 字节）`
+      );
   }
   if (!r.ok) for (const why of r.reasons) console.log(`       ! ${why}`);
 }
 
-async function main(argv) {
-  let opts;
-  try {
-    opts = parseArgs(argv);
-  } catch (e) {
-    console.error(`错误：${e.message}`);
-    return 2;
+async function main(argv, table = EXPECTED) {
+  const plan = planRuns(argv, table);
+  if (!plan.ok) {
+    console.error(`错误：${plan.message}`);
+    return plan.code;
   }
-  for (const e of EXPECTED) {
-    if (!/^[0-9a-f]{64}$/.test(e.digest)) {
-      console.error(`错误：期望表里 ${e.ref} 的 digest 不是 64 位小写十六进制（表本身写坏了）`);
-      return 2;
-    }
-  }
-  const list = EXPECTED.filter((e) => !opts.only || opts.only.includes(e.ref));
-  if (opts.only) {
-    const missing = opts.only.filter((r) => !EXPECTED.some((e) => e.ref === r));
-    if (missing.length) {
-      console.error(
-        `错误：--only 里有引用不在期望表：${missing.join(', ')}（要加镜像请先在表里登记）`
-      );
-      return 2;
-    }
-  }
+  const { opts, list } = plan;
   console.log(`==> 核验 ${list.length} 个引用，要求至少 ${opts.minSources} 个来源一致`);
   let failed = 0;
   for (const entry of list) {
-    // tag 取**最后一个**冒号之后：`reg.example.com:5000/x:1.2` 这类引用里前一个冒号是端口。
     // repo 必须用表里的 `entry.repo`（Hub 的仓库路径，official 镜像带 `library/` 前缀），
     // 不能从 `ref` 切——`mongo:6.0.20` 这个短名切出来是 `mongo`，
     // 而 ECR Public 上的路径是 `docker/mongo`：实测这样切会让第三个来源被当成"不托管"跳过，
     // 于是"三源一致"的取证口径悄悄退化成两源，而输出的措辞完全看不出来。
-    const tag = entry.ref.slice(entry.ref.lastIndexOf(':') + 1);
-    const r = await verifyOne({ ...entry, tag }, opts);
+    // 这条踩坑的对账闸是 src/tests/security/imageReferenceInventory.test.js（判 repo 与 ref 互洽）。
+    const r = await verifyOne({ ...entry, tag: tagOf(entry.ref) }, opts);
     printVerdict(r);
     if (!r.ok) failed += 1;
   }
@@ -334,4 +395,16 @@ if (require.main === module) {
   );
 }
 
-module.exports = { EXPECTED, SOURCES, judge, parseArgs, verifyOne, fetchOne, headerNote };
+module.exports = {
+  EXPECTED,
+  SOURCES,
+  judge,
+  parseArgs,
+  planRuns,
+  tagOf,
+  verifyOne,
+  fetchOne,
+  headerNote,
+  printVerdict,
+  main,
+};

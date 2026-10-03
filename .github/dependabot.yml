@@ -42,7 +42,8 @@ updates:
   # Dockerfile、docker-compose.yml 与 .github/workflows/ci.yml 的 service 容器里共 6 个
   # 第三方镜像引用（node:22.14.0-alpine / mongo:6.0.20 / prom/prometheus:v2.53.0 /
   #  prom/alertmanager:v0.27.0 / grafana/grafana:11.1.0 / redis:7-alpine），
-  # 全部是「精确版本号 + registry digest」（`name:tag@sha256:<64hex>`）：钉版本保证可复现，
+  # 每个引用都带 registry digest（`name:tag@sha256:<64hex>`）：让内容唯一的是 digest 而非 tag，
+  # tag 只为人可读，其中 redis:7-alpine 更是刻意保留的滚动范围标签（compose 的 redis 注释已写明它会随上游重建而漂移）。
   # 钉 digest 保证这个 tag 被人改指向别的字节时也不会漂——代价是**不会自动漂向修复版**，
   # 基础镜像爆出 CVE 只能靠外部探测。交给 Dependabot 每周发现，它提的 PR 会同时改 tag 与 digest。
   #

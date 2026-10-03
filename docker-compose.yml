@@ -237,7 +237,8 @@ services:
   #   - Grafana：预配置数据源与看板（deployment/observability/grafana/）
   # 三者都只绑 127.0.0.1：监控面不对外，访问经宿主反代或直接本机。
   prometheus:
-    # R-5 同口径：钉到 digest（取值口径与核验方式见 mongo 段注释；期望表在 scripts/verify-image-digests.js）
+    # R-5 同口径：digest 取自 scripts/verify-image-digests.js（对 manifest 字节自算 sha256、≥2 个独立运营来源一致、须为 manifest list）
+    # 期望表在同脚本；scripts/capture-image-digests.sh 只认 node 与 mongo，第三方命名空间（prom/…、grafana/…）不走那条路。
     image: prom/prometheus:v2.53.0@sha256:075b1ba2c4ebb04bc3a6ab86c06ec8d8099f8fda1c96ef6d104d9bb1def1d8bc
     ports:
       - '127.0.0.1:9090:9090'
@@ -274,7 +275,8 @@ services:
   alertmanager:
     # G-2：告警触达链路的路由中枢（配置见 deployment/observability/alertmanager.yml，
     # 接收器 URL 为占位，生产以私有副本挂载覆盖，不入库）
-    # R-5 同口径：钉到 digest（取值口径与核验方式见 mongo 段注释；期望表在 scripts/verify-image-digests.js）
+    # R-5 同口径：digest 取自 scripts/verify-image-digests.js（对 manifest 字节自算 sha256、≥2 个独立运营来源一致、须为 manifest list）
+    # 期望表在同脚本；scripts/capture-image-digests.sh 只认 node 与 mongo，第三方命名空间（prom/…、grafana/…）不走那条路。
     image: prom/alertmanager:v0.27.0@sha256:e13b6ed5cb929eeaee733479dce55e10eb3bc2e9c4586c705a4e8da41e5eacf5
     ports:
       # 仅本机访问 Web UI；Prometheus 经容器网络 9093 推送告警
@@ -309,7 +311,8 @@ services:
       - fire-safety-net
 
   grafana:
-    # R-5 同口径：钉到 digest（取值口径与核验方式见 mongo 段注释；期望表在 scripts/verify-image-digests.js）
+    # R-5 同口径：digest 取自 scripts/verify-image-digests.js（对 manifest 字节自算 sha256、≥2 个独立运营来源一致、须为 manifest list）
+    # 期望表在同脚本；scripts/capture-image-digests.sh 只认 node 与 mongo，第三方命名空间（prom/…、grafana/…）不走那条路。
     image: grafana/grafana:11.1.0@sha256:079600c9517b678c10cda6006b4487d3174512fd4c6cface37df7822756ed7a5
     ports:
       # 宿主 3000 已被 app 占用，Grafana 用 3001

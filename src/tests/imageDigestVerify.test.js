@@ -15,19 +15,33 @@
  * 【fetchOne 是本文件的重点】它是最容易"写对了但退化了"的一段：把 header 当结论、
  * 把 JSON 解析后的某个字段当摘要、把"来源不托管"和"来源报错"混成一类，都会让输出
  * 仍然像一次核验。替身故意让 header 与真实字节摘要**不相等**，断言取的是字节那条。
+ *
+ * 【判据分两半：逻辑用夹具，外壳用子进程】表内六行在仓库里是**全绿**的，所以"digest 不符"
+ * "命中 0 行""registry 端口当 tag"这些分支在真实数据上永远不会显形——变异测试实测三条
+ * 存活（M2/M3/M6）。对策是把判据写成可注入的纯函数（`planRuns(argv, table)`、`main(argv, table)`、
+ * `tagOf`），用夹具喂；而 `process.exit(code)` 那一层外壳用 spawnSync 真跑脚本判退出码
+ * （挑的都是触网之前就返回的路径，所以仍然是离线的）。表与文件之间的对账同理，见
+ * `src/tests/security/imageReferenceInventory.test.js` 的 `reconcile` 夹具用例。
  */
 
 'use strict';
 
 const crypto = require('crypto');
+const path = require('path');
+const { spawnSync } = require('child_process');
 
 const {
   EXPECTED,
   SOURCES,
   judge,
   parseArgs,
+  planRuns,
+  tagOf,
   fetchOne,
+  verifyOne,
   headerNote,
+  printVerdict,
+  main,
 } = require('../../scripts/verify-image-digests.js');
 
 /** 造一个 manifest 列表体（2 个架构条目）；digest 由调用方按同一批字节自算，保证可核对 */
@@ -433,5 +447,248 @@ describe('verify-image-digests.js 的判据行为', () => {
         });
       }
     }
+  });
+
+  test('judge：判据③对混合结果取"每个来源都是 index"而不是"至少一个"（顺序无关）', () => {
+    // `every` 改成 `some` 是实测存活过的一条变异（M10）：两条腿一条拿到多架构 index、
+    // 另一条只拿到单平台 manifest 时，"多架构已被独立来源共同证实"这句话其实不成立——
+    // 而 ok 会变成 true。夹具必须两个方向都喂：断言顺序不影响结论。
+    const entry = { ref: 'x/y:1.0', digest: 'a'.repeat(64) };
+    const idx = okSource('s1'); // entries: 3
+    const single = { ...okSource('s2'), entries: 0 };
+    for (const got of [
+      [idx, single],
+      [single, idx],
+    ]) {
+      const v = judge(entry, got, 2);
+      expect({ order: got.map((g) => g.entries).join('-'), ok: v.ok }).toEqual({
+        order: got.map((g) => g.entries).join('-'),
+        ok: false,
+      });
+      expect(v.reasons.join('\n')).toMatch(/不是 manifest 列表/);
+      // 摘要一致这件事仍然成立：判据①与判据③混成一团的话，"两条腿都在说谎"和
+      // "两条腿说真话但只有一条是多架构"就分不出来了。
+      expect(v.agreeCount).toBe(2);
+    }
+  });
+
+  test('tagOf：registry 端口不是 tag 分隔符（真实六行各只有一个冒号，判据只能靠夹具）', () => {
+    // `lastIndexOf` 改成 `indexOf`（实测存活 M3）在 `mongo:6.0.20` 这类引用上毫无差别，
+    // 所以这条判据的唯一来源就是带端口的夹具。
+    expect(tagOf('reg.example.com:5000/team/app:1.2.3')).toBe('1.2.3');
+    expect(tagOf('localhost:5000/x:latest')).toBe('latest');
+    expect(tagOf('node:22.14.0-alpine')).toBe('22.14.0-alpine');
+    // 正向对账：真实表里每一条切出来的 tag 必须既不含斜杠也不含冒号（否则 URL 拼接会跨段，
+    // `/v2/<repo>/manifests/<tag>` 直接指到别的路径上去）。
+    for (const e of EXPECTED) {
+      const tag = tagOf(e.ref);
+      // 真实六行都只有一个冒号，所以"最后一个"与"唯一的"两种切法必须给同一个结果——
+      // 这条交叉判据的作用是让下次有人加**内网 registry（带端口）**的引用时先看一眼这里。
+      expect(e.ref.split(':')).toHaveLength(2);
+      expect(tag).toBe(e.ref.split(':')[1]);
+      expect(tag.includes('/')).toBe(false);
+      expect(tag.includes(':')).toBe(false);
+    }
+  });
+
+  test('planRuns：命中 0 行与"表本身写坏"都必须是 2（空跑不得念成全部通过）', () => {
+    const all = planRuns([]);
+    expect(all.ok).toBe(true);
+    expect(all.list).toHaveLength(EXPECTED.length);
+    // 顺序来自**期望表**而不是 `--only` 的写法顺序：这条断言钉的是"过滤不改序"，
+    // 否则下次有人按 --only 的顺序读输出会对不上表。
+    expect(planRuns(['--only', 'mongo:6.0.20,redis:7-alpine']).list.map((e) => e.ref)).toEqual([
+      'redis:7-alpine',
+      'mongo:6.0.20',
+    ]);
+    // `--only ,`：split+filter 之后是**空数组**，而空数组在 JS 里为真值 ⇒ 六行全被排除。
+    // 旧实现由此打印"==> 核验 0 个引用 … 全部通过"并退 0（实测存活 M2）。
+    const empty = planRuns(['--only', ',']);
+    expect(empty.ok).toBe(false);
+    expect(empty.code).toBe(2);
+    expect(empty.message).toMatch(/0 行/);
+    expect(planRuns(['--only', 'nope:1']).code).toBe(2);
+    expect(planRuns(['--nope']).code).toBe(2);
+    // "表写坏了"这一档只能靠注入夹具判（仓库里的表现在是好的）：少一位 hex 必须在**触网之前**
+    // 拦住——放到网络之后就会与"上游漂了"混成同一个 1，运维分不清该改表还是该重新取证。
+    const broken = planRuns([], [{ ref: 'x:1', repo: 'library/x', digest: 'a'.repeat(63) }]);
+    expect({ ok: broken.ok, code: broken.code, msg: broken.message }).toMatchObject({
+      ok: false,
+      code: 2,
+      msg: expect.stringContaining('x:1'),
+    });
+  });
+
+  test('main：0 / 1 / 2 三档退出码各自可达（fetch 全替身，不联网）', async () => {
+    const { buf } = indexBody('1');
+    const self = crypto.createHash('sha256').update(buf).digest('hex');
+    const entry = {
+      ref: 'prom/p:1',
+      repo: 'prom/p',
+      digest: self,
+      captured: '2026-10-04',
+      sources: 'x',
+      sites: 'y',
+    };
+    const out = { log: [], error: [] };
+    const real = { fetch: global.fetch, log: console.log, error: console.error };
+    global.fetch = async () => resp(buf, { status: 200 });
+    console.log = (...a) => out.log.push(a.join(' '));
+    console.error = (...a) => out.error.push(a.join(' '));
+    try {
+      // 0：ECR 不托管该命名空间（跳过），两条缓存给同一个值且都是 index ⇒ 判据三条全立。
+      expect(await main(['--only', 'prom/p:1'], [entry])).toBe(0);
+      expect(out.log.join('\n')).toMatch(/全部通过/);
+      // 1：内容寻址没变，但期望表指的是另一个值——"上游漂了/表被改坏"的形态。
+      out.log.length = 0;
+      expect(await main(['--only', 'prom/p:1'], [{ ...entry, digest: 'b'.repeat(64) }])).toBe(1);
+      expect(out.log.join('\n')).toMatch(/FAIL prom\/p:1/);
+      expect(out.log.join('\n')).not.toMatch(/全部通过/);
+      // 2：前置就拦住，一次网络都不该发（替身换成"发了就抛"）。
+      out.log.length = 0;
+      global.fetch = async () => {
+        throw new Error('不该触网');
+      };
+      expect(await main(['--only', ','], [entry])).toBe(2);
+      expect(out.error.join('\n')).toMatch(/0 行/);
+    } finally {
+      global.fetch = real.fetch;
+      console.log = real.log;
+      console.error = real.error;
+    }
+  });
+
+  test('CLI 外壳真的把返回值接到退出码（spawnSync 判 2 号路径，全程不触网）', () => {
+    // `main` 的返回值判过了不等于 `process.exit(code)` 判过了：把那一句改成 `exit(0)` 时
+    // 上面的用例全绿而 CI 全绿。挑三条都在触网之前返回的路径真跑一次脚本，
+    // 让外壳也进判据（不联网、耗时约三次 node 启动）。
+    const script = path.join(__dirname, '..', '..', 'scripts', 'verify-image-digests.js');
+    const run = (args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' });
+    expect(run(['--only', ',']).status).toBe(2);
+    expect(run(['--min-sources', '0']).status).toBe(2);
+    expect(run(['--aply']).status).toBe(2);
+    const r = run(['--only', 'nope:1']);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toMatch(/不在期望表/);
+    // 三条都得有 stderr 文案：只判退出码的话，"任何异常都退 2"这种偷懒写法也能过。
+    for (const args of [['--only', ','], ['--min-sources', '0'], ['--aply']]) {
+      expect(run(args).stderr.length).toBeGreaterThan(0);
+    }
+  });
+
+  test('替身 self-check：resp() 的 header 归一化两面都有判据（否则大小写用例是空转）', () => {
+    // 上面那条"各种大小写都要读得到"依赖替身模拟了真实 Headers 的大小写不敏感。替身自己
+    // 坏掉的话，那条用例就变成"实现恰好写对小写键"的巧合通过——所以存/取两面各钉一条直接断言：
+    // 把 `h[String(k).toLowerCase()]` 或 `get` 里的归一化删掉任一半，本用例立刻红。
+    const r = resp('{}', { status: 200, headers: { 'Docker-Content-Digest': 'sha256:abc' } });
+    expect(r.headers.get('docker-content-digest')).toBe('sha256:abc'); // 存的那一面
+    expect(r.headers.get('Docker-Content-Digest')).toBe('sha256:abc'); // 取的那一面
+    expect(r.headers.get('DOCKER-CONTENT-DIGEST')).toBe('sha256:abc');
+    // 缺失键必须是 null（不是 undefined、也不是空串）：实现用 `|| ''` 把"没发"归成空串，
+    // 三态判据才分得开"没发"与"发了但和字节不符"。
+    expect(r.headers.get('x-not-there')).toBeNull();
+    // ok 的算法也钉住：替身若写成 `status === 200`，304/2xx 分支的判据就会跟着变。
+    expect(resp('', { status: 404 }).ok).toBe(false);
+    expect(resp('', { status: 201 }).ok).toBe(true);
+  });
+
+  test('fetchOne：Docker-Content-Digest 的各种大小写形态都要读得到', async () => {
+    // 替身按小写存键（真实 Headers 是大小写不敏感的），所以这一条判的是**实现里的取值键**：
+    // 写成 `get('Docker-Content-Digest')` 而替身不归一化时会拿到空串，headerMatches 一律
+    // 退化成 null，输出就对着一个发过 header 的来源念"未发 Docker-Content-Digest"。
+    const { buf } = indexBody('1');
+    const self = crypto.createHash('sha256').update(buf).digest('hex');
+    const realFetch = global.fetch;
+    try {
+      for (const key of [
+        'docker-content-digest',
+        'Docker-Content-Digest',
+        'DOCKER-CONTENT-DIGEST',
+      ]) {
+        global.fetch = async () => resp(buf, { status: 200, headers: { [key]: `sha256:${self}` } });
+        const r = await fetchOne(
+          { name: 'fake', map: (repo) => repo },
+          { repo: 'library/x', tag: '1' },
+          1000
+        );
+        expect({ key, header: r.header }).toEqual({ key, header: self });
+        expect(judge({ ref: 'x:1', digest: self }, [r], 1).sources[0].headerMatches).toBe(true);
+      }
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  test('fetchOne：非 JSON 响应体报错但不回显内容（外部响应一律不进输出）', async () => {
+    const body = '<html>WAF blocked - marker-KEEP-OUT-8f3c</html>';
+    const bytes = Buffer.byteLength(body, 'utf8');
+    const realFetch = global.fetch;
+    global.fetch = async () =>
+      resp(body, { status: 200, headers: { 'content-type': 'text/html' } });
+    let message = '';
+    try {
+      const call = () =>
+        fetchOne({ name: 'fake', map: (repo) => repo }, { repo: 'library/x', tag: '1' }, 1000);
+      await expect(call()).rejects.toThrow(/不是 JSON/);
+      message = await call().catch((e) => e.message);
+    } finally {
+      global.fetch = realFetch;
+    }
+    // JSON.parse 的原生异常文本会带上响应体前若干字符——那正是"外部内容进日志"的口子
+    // （一个透明代理可以把任意文本放进 200 响应体里）。判据是**字节数可报、内容不可报**。
+    expect(message).toContain(String(bytes));
+    expect(message).toMatch(/未回显/);
+    expect(message).not.toMatch(/KEEP-OUT/);
+    expect(message).not.toMatch(/<html>/);
+  });
+
+  test('verifyOne + printVerdict：跳过/报错/应答三个数分开，报错不得占用分母', async () => {
+    const { buf } = indexBody('1');
+    const self = crypto.createHash('sha256').update(buf).digest('hex');
+    const realFetch = global.fetch;
+    global.fetch = async (url) =>
+      url.includes('docker.1ms.run')
+        ? resp('<html>nope</html>', { status: 200 })
+        : resp(buf, { status: 200 });
+    let r;
+    try {
+      r = await verifyOne(
+        { ref: 'prom/p:1', repo: 'prom/p', tag: '1', digest: self },
+        { minSources: 1, timeoutMs: 1000 }
+      );
+    } finally {
+      global.fetch = realFetch;
+    }
+    const byName = Object.fromEntries(r.sources.map((s) => [s.source, s]));
+    expect(byName['public.ecr.aws'].skipped).toBeTruthy(); // 命名空间镜像：ECR 不托管
+    expect(byName['docker.m.daocloud.io'].digest).toBe(self);
+    expect(byName['docker.1ms.run'].error).toMatch(/不是 JSON/);
+    expect(byName['docker.1ms.run'].digest).toBeNull();
+    // 下限设 1：一条腿应答且与期望一致 ⇒ 结论成立，但 reasons 仍要点名那条报错的腿。
+    expect(r.ok).toBe(true);
+    expect(r.agreeCount).toBe(1);
+    expect(r.reasons.join('\n')).toMatch(/有可达来源报错/);
+    const lines = [];
+    const realLog = console.log;
+    console.log = (...a) => lines.push(a.join(' '));
+    try {
+      printVerdict(r);
+    } finally {
+      console.log = realLog;
+    }
+    // 旧写法打印 `可用 = 非跳过的来源数`，把**硬报错**也算进去（实测存活 M13）：
+    // 读者看到 `2/3（可用 3）` 会以为第三条腿支持了结论。
+    expect(lines[0]).toContain('一致来源 1/1（跳过 1，报错 1）');
+    // 标记列的宽度也钉住：`OK  `/`FAIL` 两档等宽是给人（和 grep）读的，退化成 `OK` 就会与
+    // 上面的 FAIL 对不齐。
+    expect(lines[0]).toMatch(/^OK {3}prom\/p:1/);
+    expect(lines.join('\n')).toMatch(/docker\.1ms\.run: 报错：/);
+    expect(lines.join('\n')).toMatch(/index 2 个条目/);
+    expect(lines.join('\n')).not.toMatch(/可用/);
+    // 打印面的字节数必须是**真实字节数**：judge 若不透传 `bytes`（实测存活 D5），
+    // 输出会念 "0 字节"——那正是"对返回字节自算 sha256"这句话唯一的实物证据，念错等于没念。
+    expect(lines.join('\n')).toContain(`${buf.length} 字节`);
+    expect(lines.join('\n')).toMatch(/index 2 个条目/);
+    expect(lines.join('\n')).not.toMatch(/undefined/);
   });
 });

@@ -11,7 +11,7 @@
  * 就撞上了这个形状：改 compose 不会碰任何闸，改表也不会碰任何闸——"钉全了"这个结论
  * 当时只能靠人肉 grep，而人肉 grep 正是这类"全覆盖式表述"最先失实的地方。
  *
- * 本文件把"全仓第三方镜像引用"抽成一份清单，然后按四条判据对账：
+ * 本文件把"全仓第三方镜像引用"抽成一份清单，然后按六条判据对账：
  *   ① 扫描面自证：文件清单与指令行**条数**必须精确。解析器退化（正则改错、注释规则变了）
  *      会让下面所有断言空转通过——先证明"确实扫到了这些行"。
  *   ② 形态：每条指向 registry 的引用都必须是 `name:tag@sha256:<64 位小写 hex>`，
@@ -22,6 +22,20 @@
  *   ④ 名号一致：同一个 `name:tag` 在不同文件里必须是同一个 digest（mongo 同时出现在
  *      compose 与 CI 的 service 容器；node 出现在 Dockerfile 三处）。CI 跑的数据库与生产
  *      跑的数据库不是同一批字节时，测试绿了也不代表生产。
+ *   ⑤ repo 名号唯一：期望表里 `repo` 必须由 `ref` 唯一决定——official 短名（没有命名空间段）
+ *      一律 `library/<名>`，第三方命名空间一律短名本身。判据⑥与 verify 脚本的来源映射都依赖
+ *      这一条；写成"两种之一都接受"就放行了"官方镜像登记成裸短名"这种会让第三个来源静默跳过
+ *      的写法（2026-10-04 的审计实测这条曾经存活）。
+ *   ⑥ 取证列可被证伪：`sources` 里点名的来源必须都在来源表里、且声称用过的来源必须真的能答
+ *      （ECR Public 对第三方命名空间给不出路径）；`sites` 里点名的文件必须与扫描面逐条对齐。
+ *      这两列是"下一个复核人该找谁、该看哪几处"的现场记录，只判非空等于没判。
+ *
+ * 【判据自身也要有夹具】③⑤⑥对**当前数据**都只能判"全等"，真实仓库里六行全对，于是任何
+ * 削弱比较的改动都不会显形。所以 `reconcile()`、`workflowFileNames()`、`parsePinned()`、
+ * `refValueOf()` 都是纯函数并有各自的夹具用例（含 `.yaml` 这种本仓没有实例的后缀）。
+ * 变异矩阵见 CHANGELOG 2026-10-04 供应链批 D：21 条 arm 全 CAUGHT，另 1 条是刻意的负对照
+ * （把判据⑤退回"二选一"后，"第三方命名空间被加上 library/ 前缀"这条数据缺陷确实抓不到——
+ * 那条 arm 用来证明严格版 `toBe` 是唯一能抓它的判据，而不是装饰）。
  *
  * 【例外清单为什么也要自证】`${APP_IMAGE:-fire-safety-app:local}`（compose）与
  * `${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}`（CI 的 SBOM 输入）
@@ -39,7 +53,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { EXPECTED } = require('../../../scripts/verify-image-digests.js');
+const { EXPECTED, SOURCES } = require('../../../scripts/verify-image-digests.js');
 
 const ROOT = path.resolve(__dirname, '../../..');
 
@@ -117,12 +131,20 @@ function unreachableOf(raw) {
  * `.github/workflows/` 按目录列举（新增 workflow 也能被扫到，而不是等下次想起来补）。
  * 文件缺失一律抛错：面账闸自己"扫不到东西"必须是红，不能是绿。
  */
+/**
+ * workflow 目录的文件名筛选（纯函数）。
+ * `.yaml` 那一半在本仓库里**没有实例**——没有任何 `.yaml` 文件，所以真实扫描面证不了它没用：
+ * 把它抽成纯函数才能用夹具喂 `draft.yaml`，证明"后缀判据没写漏"。否则将来有人把工作流命名
+ * 成 `.yaml`，它会既不进扫描面也不报错，而"全仓引用都对账"这句话仍然是假的。
+ */
+function workflowFileNames(names) {
+  return names.filter((f) => f.endsWith('.yml') || f.endsWith('.yaml')).sort();
+}
+
 function targetFiles() {
-  const wf = fs
-    .readdirSync(path.join(ROOT, '.github', 'workflows'))
-    .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
-    .map((f) => path.posix.join('.github/workflows', f))
-    .sort();
+  const wf = workflowFileNames(fs.readdirSync(path.join(ROOT, '.github', 'workflows'))).map((f) =>
+    path.posix.join('.github/workflows', f)
+  );
   return ['Dockerfile', 'docker-compose.yml', ...wf];
 }
 
@@ -150,6 +172,33 @@ const parsedRefs = registryRefs.map((r) => {
   const p = parsePinned(r.value);
   return { ...r, ...p, nameTag: p.nameTag || r.value, digest: p.digest || null };
 });
+
+/** `name:tag` → 它在哪些文件里出现（期望表 `sites` 列的对账基准） */
+const filesByNameTag = new Map();
+for (const r of parsedRefs) {
+  if (!filesByNameTag.has(r.nameTag)) filesByNameTag.set(r.nameTag, new Set());
+  filesByNameTag.get(r.nameTag).add(r.file);
+}
+
+/**
+ * 双向对账的纯逻辑：`refs` 是文件里扫出来的 `{nameTag, digest}`，`table` 是期望表
+ * `Map<ref, digest>`；返回三类缺陷（表里没有的 / digest 不符的 / 表里的陈行）。
+ *
+ * 【为什么抽成函数】真实仓库里六条引用与表**完全一致**，所以"digest 不符"这条判据在真实数据
+ * 上永远是空数组——把它写成 `table.get(x) !== y` 之后改成 `长度不同才不符`，实测变异存活（M6）：
+ * 没有夹具就没有判据。抽出纯函数后同一份逻辑既能对真实数据跑，也能被构造出来的"同长度、
+ * 末位不同"的假 digest 打红。
+ */
+function reconcile(refs, table) {
+  const label = (r) => `${r.file}:${r.line} ${r.nameTag}`;
+  const orphans = refs.filter((r) => !table.has(r.nameTag)).map(label);
+  const mismatched = refs
+    .filter((r) => table.has(r.nameTag) && table.get(r.nameTag) !== r.digest)
+    .map((r) => `${label(r)} 文件 ${r.digest} ≠ 表 ${table.get(r.nameTag)}`);
+  const present = new Set(refs.map((r) => r.nameTag));
+  const stale = [...table.keys()].filter((ref) => !present.has(ref));
+  return { orphans, mismatched, stale, present };
+}
 
 describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方对齐）', () => {
   test('扫描面自证：文件清单与指令行条数一个都不能漂（解析器退化的地基判据）', () => {
@@ -191,11 +240,34 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
       'prom/prometheus:v2.53.0',
       'redis:7-alpine',
     ]);
-    // 自证的反面：注释行确实没被算进来（compose 的 redis 段与 Dockerfile 顶部各放着
-    // 一份示例文本，被当成引用的话条数会变）。
-    expect(all.some((r) => /<64 位 hex>|<捕获值>|示例/.test(r.value))).toBe(false);
+    // 自证的反面（注释语料确实没被算进来）由下面那条独立用例判：这里不再写
+    // `all.some(r => /<64 位 hex>|<捕获值>|/.test(r.value)) === false` 那种永真断言——
+    // 扫描到的 value 全都过了解析器，里面**不可能**出现占位符文本，它红了也说明不了任何事。
     // 真实文件里不能有任何"提到了镜像却没落在可判定位置上"的行（判据本身见夹具那条用例）。
     expect(unreachable).toEqual([]);
+  });
+
+  test('否定语料自证：注释里的钉版文本既不算引用也不算"够不着"（注释排除有实物可判）', () => {
+    const corpus = scanned.filter(
+      (r) => r.raw.trim().startsWith('#') && r.raw.includes('@sha256:')
+    );
+    const byFile = {};
+    for (const r of corpus) byFile[r.file] = (byFile[r.file] || 0) + 1;
+    // 语料必须真实存在且条数精确：这条判据的有效性依赖仓库里放着这些"看着就是引用"的文本
+    // （Dockerfile 顶部的 `docker pull` 抄写行、compose 的 mongo/redis 段、deploy.yml 的说明）。
+    // 哪天有人把它们删光，本用例就退化成空转——所以条数本身也是判据，与扫描面自证同一个道理。
+    expect(byFile).toEqual({
+      Dockerfile: 3,
+      'docker-compose.yml': 2,
+      '.github/workflows/deploy.yml': 1,
+    });
+    expect(corpus.filter((r) => refValueOf(r.raw) !== null)).toEqual([]);
+    expect(corpus.filter((r) => unreachableOf(r.raw) !== null)).toEqual([]);
+    // compose 的 mongo 段里有一条**写成反引号包裹的 `image: mongo…<捕获值>`**：它取不到值
+    // （不在指令位上），所以一旦 `unreachableOf` 的注释排除被删，它立刻进 unreachable 把
+    // "全仓没有够不着的写法"打红。这条断言钉的是"仓库里确实存在这种形态"，否则上一条
+    // 的 null 判定就没人看着——分类器夹具用例管的是逻辑，这条管的是实物。
+    expect(corpus.filter((r) => /`image:/.test(r.raw))).toHaveLength(1);
   });
 
   test('行分类器 self-check：注释/非指令/指令三类各自归位（判据不靠仓库内容配合）', () => {
@@ -280,22 +352,68 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
   test('双向对账：文件里的每条引用都在期望表里且 digest 相等，表里每条 ref 都真的在用', () => {
     const table = new Map(EXPECTED.map((e) => [e.ref, e.digest]));
     expect(table.size).toBe(EXPECTED.length); // ref 不能重复登记
-    const orphans = parsedRefs
-      .filter((r) => !table.has(r.nameTag))
-      .map((r) => `${r.file}:${r.line} ${r.nameTag} 不在期望表`);
+    const { orphans, mismatched, stale, present } = reconcile(parsedRefs, table);
     expect(orphans).toEqual([]);
-    const mismatched = parsedRefs
-      .filter((r) => table.has(r.nameTag) && table.get(r.nameTag) !== r.digest)
-      .map(
-        (r) =>
-          `${r.file}:${r.line} ${r.nameTag} 的 digest ${r.digest} ≠ 期望表 ${table.get(r.nameTag)}`
-      );
     expect(mismatched).toEqual([]);
     // 反向：表里的每一条都必须在某个文件里出现（陈行会让"全部通过"变成一句空话）。
-    const present = new Set(parsedRefs.map((r) => r.nameTag));
-    const stale = EXPECTED.map((e) => e.ref).filter((ref) => !present.has(ref));
     expect(stale).toEqual([]);
     expect(present.size).toBe(EXPECTED.length);
+  });
+
+  test('对账逻辑夹具自证：同长度、末位不同的 digest 必须被判不符（真实数据上这条永远为空）', () => {
+    // 上一条用例对真实六行判的是"全等"，所以它对**判据本身**没有约束力：把
+    // `table.get(x) !== r.digest` 改成 `String(table.get(x)).length !== r.digest.length`
+    // 之类（实测变异 M6 存活）在真实数据上照样全绿。这里用一对"长度相同、只有一位不同"
+    // 的 digest 直接判逻辑，让任何削弱值比较的改动立刻显形。
+    const A = 'a'.repeat(64);
+    const B = `${'a'.repeat(63)}b`;
+    expect(B).toHaveLength(A.length);
+    expect(B).not.toBe(A);
+    const table = new Map([
+      ['pinned:1', A],
+      ['only-in-table:1', A],
+    ]);
+    const refs = [
+      { file: 'docker-compose.yml', line: 1, nameTag: 'pinned:1', digest: B },
+      { file: 'Dockerfile', line: 2, nameTag: 'not-in-table:1', digest: A },
+    ];
+    const r = reconcile(refs, table);
+    expect(r.orphans).toEqual(['Dockerfile:2 not-in-table:1']);
+    expect(r.mismatched).toHaveLength(1);
+    expect(r.mismatched[0]).toContain('pinned:1');
+    expect(r.stale).toEqual(['only-in-table:1']);
+    // 三个集合必须是**互相独立**的判据：若实现把"表里陈行"并进 orphans，上面三条断言里
+    // 至少一条会红——所以每条都在钉自己的那一半。
+    expect(r.present).toEqual(new Set(['pinned:1', 'not-in-table:1']));
+    // 正向腿：完全一致时必须三项全空，否则"空数组"这个判据没意义（夹具退化也会全绿）。
+    const clean = reconcile(
+      [{ file: 'x', line: 3, nameTag: 'pinned:1', digest: A }],
+      new Map([['pinned:1', A]])
+    );
+    expect(clean).toMatchObject({ orphans: [], mismatched: [], stale: [] });
+  });
+
+  test('workflow 文件名筛选夹具自证：.yaml 与噪音后缀各自归位（本仓没有 .yaml 实例）', () => {
+    // `.yaml` 这种"只有后缀"的名字会被当成 workflow 文件收进扫描面——这是**保守方向**
+    // （多扫一个文件而不是漏扫一个），不去收紧它：收紧只会让"新后缀写法"变成静默漏网。
+    // 大小写敏感的 `.YML` 同理不收：GitHub 只认 `.yml` 后缀的工作流，收进来只会让面账噪音化。
+    expect(
+      workflowFileNames([
+        'ci.yml',
+        'draft.yaml',
+        'README.md',
+        'yml',
+        'ci.yml.bak',
+        '.yaml',
+        'x.YML',
+      ])
+    ).toEqual(['.yaml', 'ci.yml', 'draft.yaml']);
+    // 空目录必须得到空数组而不是报错——真正的"扫不到东西"由 targetFiles() 读不存在的目录抛错兜。
+    expect(workflowFileNames([])).toEqual([]);
+    // 顺序自证：readdirSync 的顺序不保证，扫描面必须与它无关（否则新增 workflow 会让
+    // 扫描面自证那条用例随机红）。
+    const names = ['b.yml', 'a.yaml', 'c.yml'];
+    expect(workflowFileNames(names)).toEqual(workflowFileNames([...names].reverse()));
   });
 
   test('同一个 name:tag 在不同文件上必须是同一个 digest（CI 与生产的库不能是两批字节）', () => {
@@ -326,15 +444,61 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
     for (const e of EXPECTED) {
       expect(e.digest).toMatch(/^[0-9a-f]{64}$/);
       expect(e.captured).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-      expect(e.sources.trim().length).toBeGreaterThan(0);
-      expect(e.sites.trim().length).toBeGreaterThan(0);
       expect(parsePinned(`${e.ref}@sha256:${e.digest}`).ok).toBe(true);
       const shortName = e.ref.slice(0, e.ref.lastIndexOf(':'));
-      // 仓库路径只能是「短名本身」或「library/ + 短名」两种之一：`SOURCES` 里 ECR Public 的
-      // map 就是靠 `library/` 前缀判断"官方库才托管"，表里把官方镜像写成裸短名会让第三个
-      // 来源静默变成"跳过"，而输出里的措辞看不出差别（verify 脚本文件头记的就是这条踩坑）。
-      expect([shortName, `library/${shortName}`]).toContain(e.repo);
+      // 仓库路径由 `ref` **唯一决定**：Docker Hub 的 official 镜像（短名里没有命名空间段）在
+      // API 路径里必须写成 `library/<名>`，第三方命名空间就是短名本身。旧写法判的是
+      // "短名 或 library/短名 二者之一"，于是把官方镜像登记成裸短名照样绿——而 `SOURCES` 里
+      // ECR Public 的 map() 正是靠 `library/` 前缀判断"官方库才托管"，第三个来源会静默变成
+      // "跳过"，输出念一句 `一致来源 2/2` 就把"三源一致"的取证口径退化成两源
+      // （这条踩坑在 verify 脚本文件头记着，当时的闸却放行了它：变异 M9 实测存活）。
+      const official = !shortName.includes('/');
+      expect(e.repo).toBe(official ? `library/${shortName}` : shortName);
     }
+  });
+
+  test('取证列可被证伪：sources 说的来源真能答，sites 说的文件与扫描面逐条对齐', () => {
+    // `sources` / `sites` 是"下一个想复核的人该找谁、该看哪几处"的现场记录。旧写法只判
+    // 它们非空（变异 M7 存活：把任一条改成一句假话仍然全绿），所以这里给它们**可证伪**的判据。
+    const names = SOURCES.map((s) => s.name);
+    const ecr = SOURCES.find((s) => s.name === 'public.ecr.aws');
+    expect(ecr).toBeTruthy();
+    const KNOWN = ['Dockerfile', 'docker-compose.yml', '.github/workflows/ci.yml'];
+    for (const e of EXPECTED) {
+      // ① 来源名只能来自来源表：散文里出现一个表里没有的域名，等于给复核者指了一条不存在的腿
+      //    （`grep` 不到的来源就是没核验过的来源）。判据是"散文里所有像主机名的 token 恰好
+      //    等于被登记的来源名集合"，所以编造来源与拼错来源都会被抓住。
+      const mentioned = names.filter((n) => e.sources.includes(n));
+      const hostLike = e.sources.match(/[a-z][a-z0-9.-]*\.[a-z]{2,}/g) || [];
+      expect({ ref: e.ref, got: hostLike.sort() }).toEqual({
+        ref: e.ref,
+        got: [...mentioned].sort(),
+      });
+      // ② 独立来源下限两条腿：不足两条就写不出"多个独立来源一致"（脚本默认 --min-sources 2）。
+      expect(mentioned.length).toBeGreaterThanOrEqual(2);
+      // ③ 声称用了 ECR Public ⇒ 表里的 repo 必须让 ECR 的 map() 给得出路径。
+      //    反向不要求（official 镜像也可以选择不去 ECR 取证）。
+      if (e.sources.includes('public.ecr.aws')) {
+        expect({ ref: e.ref, mapped: ecr.map(e.repo) }).toEqual({
+          ref: e.ref,
+          mapped: `docker/${e.repo}`,
+        });
+      }
+      // ④ sites 必须与扫描面逐文件对上：说了某个文件而那个文件里没有这条引用是假证词，
+      //    漏说某个真实存在的文件则意味着"表改了、文件没改"这一族还没被登记。
+      const files = [...filesByNameTag.get(e.ref)];
+      expect(files.length).toBeGreaterThan(0);
+      for (const f of files) expect(e.sites.includes(f)).toBe(true);
+      for (const f of KNOWN) {
+        if (!files.includes(f)) expect(e.sites.includes(f)).toBe(false);
+      }
+    }
+    // ⑤ 表与扫描面的引用点总数也要对上：9 个引用点 = node 三处 FROM + mongo 两处（compose
+    //    与 CI service）+ 其余四条各一处。漏登记任何一处重复，这条就会与②③同时显形。
+    const occurrences = EXPECTED.map(
+      (e) => parsedRefs.filter((r) => r.nameTag === e.ref).length
+    ).sort();
+    expect(occurrences).toEqual([1, 1, 1, 1, 2, 3]);
   });
 
   test('capture-image-digests.sh 的常量与期望表同源（脚本改得了的每一条都在表里）', () => {
