@@ -104,8 +104,12 @@ describe('POST /api/security/report：目标事实核验与账号维度限流', 
     const deptUser = await mkUser('zzrts_dept', [deptRole._id], DEPT_A);
     const allUser = await mkUser('zzrts_all', [allRole._id], DEPT_C);
     const otherUser = await mkUser('zzrts_other', [selfRole._id], DEPT_C);
-    // 限流用例专用账户（level 10：让每一条都走到"业务放行"，计数才只反映配额）
+    // 限流用例专用账户（level 10：让每一条都走到"业务放行"，计数才只反映配额）。
+    // burst/fresh/roter 各自独占一个账号且各用例只用自己的账号——--randomize 打乱
+    // 文件内用例顺序后，配额消耗不会跨用例串线（3 seed 实测的套内顺序耦合）。
     const burstUser = await mkUser('zzrts_burst', [allRole._id], DEPT_A);
+    const freshUser = await mkUser('zzrts_fresh', [allRole._id], DEPT_A);
+    const roterUser = await mkUser('zzrts_roter', [allRole._id], DEPT_A);
     const otherBurstUser = await mkUser('zzrts_burst2', [allRole._id], DEPT_A);
 
     const sign = (u) =>
@@ -120,6 +124,8 @@ describe('POST /api/security/report：目标事实核验与账号维度限流', 
       all: sign(allUser),
       other: sign(otherUser),
       burst: sign(burstUser),
+      fresh: sign(freshUser),
+      roter: sign(roterUser),
       burst2: sign(otherBurstUser),
     };
     ids = {
@@ -400,18 +406,21 @@ describe('POST /api/security/report：目标事实核验与账号维度限流', 
     }, 60000);
 
     test('换账号立刻恢复（证明键是 userId 而不是 IP）', async () => {
-      const res = await post(tokens.burst2, legal(1));
+      // 用自己独占的账号（fresh）：--randomize 会打乱文件内用例顺序，本用例可能
+      // 排在「轮换 XFF」之后——独占账号的配额不被别的用例消耗，顺序无关。
+      const res = await post(tokens.fresh, legal(1));
       expect(res.status).toBe(200);
     });
 
     test('轮换 X-Forwarded-For 不得恢复配额（证明键里没有 IP 成分）', async () => {
-      // 上一条已让 burst2 用掉 1 次；这里先填满，再逐切换 IP 打
-      for (let i = 2; i <= MAX; i += 1) {
-        expect((await post(tokens.burst2, legal(i), xff(i))).status).toBe(200);
+      // 独占账号从第 1 次填满（不再隐式依赖"上一条已让 burst2 用掉 1 次"的顺序
+      // 前提），填满后逐切换 IP 打到 429——配额键里没有 IP 成分才成立。
+      for (let i = 1; i <= MAX; i += 1) {
+        expect((await post(tokens.roter, legal(i), xff(i))).status).toBe(200);
       }
       const rotated = [];
       for (let i = MAX + 1; i <= MAX + 10; i += 1) {
-        const res = await post(tokens.burst2, legal(i), xff(i));
+        const res = await post(tokens.roter, legal(i), xff(i));
         rotated.push(res.status);
       }
       expect(rotated).toHaveLength(10); // 防呆：空数组的 .every() 恒为 true

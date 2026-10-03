@@ -154,15 +154,16 @@ describe('报警读出路径的 reporter.phone 口径', () => {
       String(op)
     );
     expectNoPhone(falsified, 'false-alarm');
-  });
 
-  test('状态机前提自证：五个接口真的各自命中并返回了文档（不是 null 让断言空过）', async () => {
-    const [chain, cancelled, falsified] = await Promise.all(
+    // 状态机落库自证（原独立用例并入：--randomize 会打乱**文件内**用例顺序，
+    // 独立的前提自证可能先于本用例执行——那时状态还是 pending。断言跟随动作
+    // 本身就不再依赖用例间顺序；三份文档回读确认状态真的落了库，而非空过。）
+    const [chainDoc, cancelledDoc, falsifiedDoc] = await Promise.all(
       [alarmChain, alarmCancel, alarmFalse].map((d) => FireAlarm.findById(d._id))
     );
-    expect(chain.status).toBe('resolved');
-    expect(cancelled.status).toBe('cancelled');
-    expect(falsified.status).toBe('false_alarm');
+    expect(chainDoc.status).toBe('resolved');
+    expect(cancelledDoc.status).toBe('cancelled');
+    expect(falsifiedDoc.status).toBe('false_alarm');
   });
 
   test('源码文本闸：AlarmService 每个 FireAlarm 文档读调用点都必须带投影', () => {

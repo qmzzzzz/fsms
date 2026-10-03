@@ -46,6 +46,9 @@ const VALID_PROD_BASELINE = () => ({
 const TOUCHED_KEYS = Object.keys(VALID_PROD_BASELINE()).concat([
   'MONGODB_TLS_EXEMPT',
   'REDIS_TLS_EXEMPT',
+  // 认证闸的豁免旗必须随 withEnv 清场：否则随机序下「豁免放行」用例先跑，
+  // REDIS_AUTH_EXEMPT=true 会漏进「无凭据 ⇒ 硬错误」用例（3 seed 实测）
+  'REDIS_AUTH_EXEMPT',
 ]);
 
 describe('传输加密启动断言（P2-⑧）', () => {

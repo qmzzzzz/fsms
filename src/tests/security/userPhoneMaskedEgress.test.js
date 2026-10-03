@@ -40,6 +40,7 @@ describe('用户管理读路径的手机号口径', () => {
   let User;
   let operator;
   let target;
+  let mutant;
   let lowRoleId;
   let operatorToken;
   const stamp = `upm${Date.now().toString(36)}`;
@@ -84,6 +85,18 @@ describe('用户管理读路径的手机号口径', () => {
       phone: OP_PHONE,
       roles: [superRole._id],
     });
+    // 可变体用户：改号/角色/边界/审计四个用例会改写它的手机号。与 target 分离后，
+    // 只读断言（列表/详情/夹具）不再隐式依赖「改号用例恰好还没跑」——--randomize
+    // 会打乱**文件内**用例顺序（3 seed 实测的套内顺序耦合），共享可变夹具就是隐患。
+    mutant = await User.create({
+      username: `upmmut${stamp}`,
+      email: `upmmut${stamp}@example.com`,
+      password,
+      realName: '可变体',
+      phone: TARGET_PHONE,
+      department: `UPM_DEPT_${stamp}`,
+      roles: [],
+    });
     target = await User.create({
       username: tgName,
       email: `${tgName}@example.com`,
@@ -106,7 +119,7 @@ describe('用户管理读路径的手机号口径', () => {
   afterAll(async () => {
     if (mongoose.connection.readyState === 0) return;
     // 前缀含本运行的唯一 stamp，不会碰其它用例的数据
-    await User.deleteMany({ username: new RegExp(`^upm(op|tg|new)${stamp}$`) }).catch(() => {});
+    await User.deleteMany({ username: new RegExp(`^upm(op|tg|new|mut)${stamp}$`) }).catch(() => {});
     await require('../../models/Role')
       .deleteMany({ code: { $in: [`UPM_ROLE_${stamp}`, `UPM_LOW_${stamp}`] } })
       .catch(() => {});
@@ -178,11 +191,11 @@ describe('用户管理读路径的手机号口径', () => {
   });
 
   test('改号与角色分配回显：另外两条出口同样只给脱敏值', async () => {
-    const put = await authed('put', `/api/users/${target._id}`).send({ phone: NEW_PHONE });
+    const put = await authed('put', `/api/users/${mutant._id}`).send({ phone: NEW_PHONE });
     expect(put.status).toBe(200);
     expectMaskedShape(put.body.data, '改号回显', { plain: NEW_PHONE, masked: MASK_NEW });
 
-    const roles = await authed('put', `/api/users/${target._id}/roles`).send({
+    const roles = await authed('put', `/api/users/${mutant._id}/roles`).send({
       roles: [lowRoleId],
     });
     expect(roles.status).toBe(200);
@@ -194,16 +207,16 @@ describe('用户管理读路径的手机号口径', () => {
   test('边界自证：省略 phone 不等于清空，提交脱敏串一定被拒且不落库', async () => {
     // 前端"脏字段才提交"的全部理由压在这两条判据上：
     // 省略键 = 保持原值；把列表里的展示值当可写值提交 = 被路由正则拒掉。
-    const untouched = await authed('put', `/api/users/${target._id}`).send({
+    const untouched = await authed('put', `/api/users/${mutant._id}`).send({
       realName: '被管对象乙',
     });
     expect(untouched.status).toBe(200);
-    expect((await User.findById(target._id)).phone).toBe(NEW_PHONE); // 上一用例写入的值还在
+    expect((await User.findById(mutant._id)).phone).toBe(NEW_PHONE); // 上一用例写入的值还在
 
-    const masked = await authed('put', `/api/users/${target._id}`).send({ phone: MASK_TARGET });
+    const masked = await authed('put', `/api/users/${mutant._id}`).send({ phone: MASK_TARGET });
     expect(masked.status).toBe(400);
     // 400 必须发生在写入之前：否则"拒掉"与"写坏再报错"在响应上看不出区别
-    expect((await User.findById(target._id)).phone).toBe(NEW_PHONE);
+    expect((await User.findById(mutant._id)).phone).toBe(NEW_PHONE);
   });
 
   test('合规通道仍然可用：本人 + 口令复检拿得到明文（收窄没有关掉出口）', async () => {
@@ -234,7 +247,7 @@ describe('用户管理读路径的手机号口径', () => {
     // 于是 GET /api/security/alerts 会把审计副本再下发一次。响应侧收窄了、
     // 审计侧没收窄的话，持 `security:audit` 的账号照样无需二次验证就能拿到明文
     // （且不会写一条 view_sensitive_data）。名单见 utils/helpers.js 的 SENSITIVE_KEY_SUBSTRINGS。
-    const put = await authed('put', `/api/users/${target._id}`).send({
+    const put = await authed('put', `/api/users/${mutant._id}`).send({
       phone: NEW_PHONE,
       realName: '审计口径',
     });
@@ -242,7 +255,7 @@ describe('用户管理读路径的手机号口径', () => {
     const auditBuffer = require('../../services/auditBuffer');
     if (typeof auditBuffer.flush === 'function') await auditBuffer.flush();
     const AuditLog = require('../../models/AuditLog');
-    const rows = await AuditLog.find({ path: `/api/users/${target._id}`, method: 'PUT' })
+    const rows = await AuditLog.find({ path: `/api/users/${mutant._id}`, method: 'PUT' })
       .sort({ timestamp: -1, _id: -1 })
       .lean();
     // 前提自证：确实存在这条审计行，且它就是刚才那次带明文的写
