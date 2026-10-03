@@ -8,6 +8,47 @@
 
 ## [未发布]
 
+### 运维手册（2026-10-04 · 轮换手册 ① 发的 cookie 名服务端根本不读，"旧令牌必须立即失效"是一项不可能失败的检查）
+
+> 起点是运维侧 P2-3（`deployment/secret-rotation.md` 的 L-01 ①）。复现只需一次函数调用：
+> `extractAccessToken({headers:{cookie:'accessToken=X'}})` → `null`，而
+> `extractAccessToken({headers:{cookie:'access_token=X'}})` → `X`。服务端只有
+> `ACCESS_COOKIE_NAME='access_token'` 这一个名字（`src/utils/cookie.js` 的导出，
+> `src/middleware/auth.js` 的 extractAccessToken 是 /api/auth/me 上 authenticate 的第一步），
+> 手册却教运维发 `accessToken=`——名字对不上时走的是 `AUTH_TOKEN_MISSING`（"没带令牌"），
+> 而轮换真正生效时走的是 `AUTH_TOKEN_INVALID`（验签失败），**两者同为 401**
+> （`src/utils/errorCodes.js` 里两条的 status 都是 401，这条前提已被钉进用例）。
+>
+> 于是这项检查有两层失效，第二层更根本：判据只写"预期 401"、没有轮换前的正向对照，
+> 匿名请求同样 401。**"检查通过"与"检查没跑"输出完全一样**，这样的判据不是弱，是零。
+> 换句话说：即便当初把名字写对了，这一条也什么都没证明。
+>
+> 修（`deployment/secret-rotation.md` ①）：名字改回 `access_token`；补轮换前的同命令对照
+> （必须 200，不是 200 就先修命令别开始轮换）；判据从状态码换成 `errors.errorCode`，
+> 并把三种 401 的读法写进手册——`AUTH_TOKEN_INVALID`＝旧密钥确实没了、
+> `AUTH_TOKEN_MISSING`＝令牌没被读到（不是轮换成功的证据）、`AUTH_TOKEN_EXPIRED`＝样本本来
+> 就过期，证明不了任何事，重新登录换令牌再测。
+>
+> 闸（新增 `src/tests/deploy/runbookCheckCanFail.test.js`，7 用例）守两条同根判据：
+> **A 是行为重放而不是字符串比对**——文档里每条 `Cookie: <name>=…` 与 `curl -b <name>=…`
+> 的名字拼成真实请求头喂给服务端读取点（access 走 extractAccessToken，refresh 走四处共用的
+> `getCookies(req)[REFRESH_COOKIE_NAME]`），断言取得回值；合法名集合由 `src/utils/cookie.js`
+> 的 `*_COOKIE_NAME` 导出派生，且**每个导出名必须登记一条读取点**（加名不登记即红，闸不另立
+> 第二份清单）。**B 是"负面判据必须自带对照"**——代码块里出现 401/403 时同块必须有 200 级
+> 正向对照或同一状态码下可区分的 errorCode/AUTH_* 码。覆盖域沿用 runbookSecretSource 的
+> "说明书"口径，刻意排除 CHANGELOG/deliverables/docs/adr——本条 CHANGELOG 里写着的
+> `accessToken=` 是证据，不是指令。端点归属（把 refresh 发给 /me）是已声明的边界，不收。
+>
+> 变异（真文档上跑，每次只动一处，跑完逐字节还原）：把 ① 的名字改回 `accessToken` ⇒
+> **恰好 1 红**（判据 A）；把 ① 整段还原成缺陷形状（只留"预期 401"）⇒ **恰好 1 红**（判据 B）。
+> no-op 基线 7/7，扫描器不是空的（前提自证：真文档 ≥1 条 Cookie 名且必须来自被修的文件）。
+>
+> 验证：新闸 7/7；`ci/commentAnchorFreshness` + `testTreePurity` + `src/tests/deploy` 全套
+> 400/407 绿，7 处红**全部**在 `deploy/bundleBudget`（并发会话正在改 web-admin，
+> 前端产物超出现有预算基线；与本批无关，本批一个字节都没碰前端）；
+> eslint 0 error；prettier 对新文件与手册均 unchanged。服务端代码零改动——
+> 缺陷在文档，闸把文档接进了代码。
+
 ### 供应链（2026-10-03 · `capture-image-digests.sh` 的产物会被本仓自己的钉版门禁判红，还会把已钉过的行改成双 digest）
 
 > 起点是运维侧 P2-4（"脚本在已钉版仓库上不可操作"）。复现成立，但**失效方向判反了**：

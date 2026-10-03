@@ -315,8 +315,21 @@ MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_
 
 ```bash
 # ① 旧令牌必须立即失效（JWT_SECRET 轮换的判据）
-curl -s -o /dev/null -w '%{http_code}\n' -H "Cookie: accessToken=<轮换前签发的令牌>" \
-  http://127.0.0.1:3000/api/auth/me      # 预期 401
+#    两条纪律，少任何一条这项检查就形同虚设：
+#    a) cookie 名必须写 access_token。服务端只认这一个名字（src/utils/cookie.js 的
+#       ACCESS_COOKIE_NAME，经 src/middleware/auth.js 的 extractAccessToken 取用）。
+#       写成 accessToken 之类，请求会被当成"根本没带令牌"——而"没带令牌"与"令牌已失效"
+#       都是 401，只比状态码的判据因此永远不会失败（匿名请求也"通过"）。
+#    b) 判据取 errors.errorCode，不取状态码；并补一次轮换前的正向对照。
+T='<轮换前签发的令牌>'
+D='http://127.0.0.1:3000/api/auth/me'
+# 轮换前：同一条命令、同一个令牌，必须 200。不是 200 就先修命令，别开始轮换。
+curl -s -o /dev/null -w '轮换前 %{http_code}（预期 200）\n' -H "Cookie: access_token=$T" "$D"
+# 轮换并重启后重跑同一条命令，预期 AUTH_TOKEN_INVALID（验签失败＝旧密钥确实没了）：
+curl -s -H "Cookie: access_token=$T" "$D" | grep -o '"errorCode":"[^"]*"'
+#   仍是 200              ⇒ 旧密钥还在别处生效：未重启的副本、另一份 .env、compose 里的明文 JWT_SECRET
+#   AUTH_TOKEN_MISSING    ⇒ 服务端没读到令牌，回到 a) 核对 cookie 名与命令拼写（不是轮换成功的证据）
+#   AUTH_TOKEN_EXPIRED    ⇒ 令牌本来就过期了，这个样本证明不了任何事；重新登录取新令牌再测
 
 # ② 启动日志不得出现「同时配置且取值不同」告警
 #    （src/config/secrets.js 的 hydrateSecretsFromFiles() 会在 NAME 与 NAME_FILE
