@@ -9,6 +9,7 @@ const AuditLog = require('../models/AuditLog');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
+const { listCountOptions } = require('../utils/queryBudget');
 const { normalizePagination } = require('../utils/helpers');
 // riskLevel 汇总的 TTL 缓存底座（同一份缓存口径，不再另造一个 Map）
 const statsCache = require('./statsCache');
@@ -234,7 +235,10 @@ const queryAuditCursorPage = async (req, res, query, { limitNum, cursorQuery, co
 // L-13 修复：同上，改为 async 函数 + await，使 try/catch 能真正接管异步失败
 const queryAuditOffsetPage = async (req, res, query, { pageNum, limitNum, collation }) => {
   try {
-    const total = await withCollation(AuditLog.countDocuments(query), collation);
+    const total = await withCollation(
+      AuditLog.countDocuments(query, listCountOptions()),
+      collation
+    );
     if (total === 0) {
       return ApiResponse.success(
         res,

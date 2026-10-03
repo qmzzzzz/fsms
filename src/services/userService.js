@@ -9,6 +9,7 @@ const Role = require('../models/Role');
 // 这两个模型与 User 之间没有相互 require，不会成环。
 const FireAlarm = require('../models/FireAlarm');
 const Inspection = require('../models/Inspection');
+const { withListBudget, listCountOptions } = require('../utils/queryBudget');
 const { withTransaction } = require('../utils/transaction');
 const userPermissionService = require('./userPermissionService');
 const { applyDataScopeToQuery } = require('../middleware/rbac');
@@ -96,14 +97,14 @@ class UserService {
 
   async listUsers(query, sort, page, limit) {
     const [users, count] = await Promise.all([
-      User.find(query)
+      withListBudget(User.find(query))
         .populate(SIMPLE_ROLE_POPULATE)
         .select(User.RESPONSE_EXCLUDE_PHONE_VISIBLE)
         .sort(sort)
         .limit(limit)
         .skip((page - 1) * limit)
         .then((docs) => docs.map(toMaskedAdminUser)),
-      User.countDocuments(query),
+      User.countDocuments(query, listCountOptions()),
     ]);
     return { users, count };
   }

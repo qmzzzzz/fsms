@@ -12,6 +12,7 @@ const {
 const FireAlarm = require('../models/FireAlarm');
 const Inspection = require('../models/Inspection');
 const logger = require('../utils/logger');
+const { withListBudget, listCountOptions, listAggregateOptions } = require('../utils/queryBudget');
 const { escapeRegExp } = require('../utils/helpers');
 const {
   encodeCursor,
@@ -80,7 +81,7 @@ class DeviceService {
         cursor: decoded,
         valueType: 'string',
       });
-      const docs = await FireDevice.find(cursorQuery)
+      const docs = await withListBudget(FireDevice.find(cursorQuery))
         // 这里**不加** `_id` 次级排序键：排序键 deviceCode 是模型 `unique:true` 的
         // 全仓唯一等值不可能重复的键，平局裁决无对象可裁（其余三个列表的排序键是时间，
         // 同一毫秒多条是常态 ⇒ 必须带 `_id`，见 AlarmService/InspectionService/auditQueryService）
@@ -91,11 +92,11 @@ class DeviceService {
     }
 
     const [devices, count] = await Promise.all([
-      FireDevice.find(query)
+      withListBudget(FireDevice.find(query))
         .sort({ deviceCode: 1 })
         .limit(limit)
         .skip((page - 1) * limit),
-      FireDevice.countDocuments(query),
+      FireDevice.countDocuments(query, listCountOptions()),
     ]);
 
     // offset 模式同样下发 nextCursor：客户端可在任意页切换为游标续翻
@@ -400,24 +401,30 @@ class DeviceService {
       expiryUnknown,
       total,
     ] = await Promise.all([
-      FireDevice.aggregate([
-        { $match: scoped },
-        { $group: { _id: '$deviceType', count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-      ]),
-      FireDevice.aggregate([
-        { $match: scoped },
-        { $group: { _id: '$status', count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-      ]),
-      FireDevice.countDocuments({ ...scoped, ...alert.needMaintenance }),
+      FireDevice.aggregate(
+        [
+          { $match: scoped },
+          { $group: { _id: '$deviceType', count: { $sum: 1 } } },
+          { $sort: { count: -1 } },
+        ],
+        listAggregateOptions()
+      ),
+      FireDevice.aggregate(
+        [
+          { $match: scoped },
+          { $group: { _id: '$status', count: { $sum: 1 } } },
+          { $sort: { count: -1 } },
+        ],
+        listAggregateOptions()
+      ),
+      FireDevice.countDocuments({ ...scoped, ...alert.needMaintenance }, listCountOptions()),
       // 从未录入过检查日的设备没有排期，$lte 判据永远不命中它——
       // 单列一档而不是并入 needMaintenance，是为了不改变既有指标的含义
-      FireDevice.countDocuments({ ...scoped, ...alert.needSchedule }),
-      FireDevice.countDocuments({ ...scoped, ...alert.expiringSoon }),
-      FireDevice.countDocuments({ ...scoped, ...alert.expired }),
-      FireDevice.countDocuments({ ...scoped, ...alert.expiryUnknown }),
-      FireDevice.countDocuments(scoped),
+      FireDevice.countDocuments({ ...scoped, ...alert.needSchedule }, listCountOptions()),
+      FireDevice.countDocuments({ ...scoped, ...alert.expiringSoon }, listCountOptions()),
+      FireDevice.countDocuments({ ...scoped, ...alert.expired }, listCountOptions()),
+      FireDevice.countDocuments({ ...scoped, ...alert.expiryUnknown }, listCountOptions()),
+      FireDevice.countDocuments(scoped, listCountOptions()),
     ]);
 
     return {
@@ -462,12 +469,15 @@ class DeviceService {
       ...scopeFilter,
       ...deviceAlertFilters(new Date(), normalizeExpiringDays(days)).expiringSoon,
     };
-    const query = FireDevice.find(filter)
+    const query = withListBudget(FireDevice.find(filter))
       .select('deviceCode deviceName deviceType location expiryDate status')
       .sort({ expiryDate: 1 })
       .limit(limit);
     if (!withTotal) return query;
-    const [devices, total] = await Promise.all([query, FireDevice.countDocuments(filter)]);
+    const [devices, total] = await Promise.all([
+      withListBudget(query),
+      FireDevice.countDocuments(filter, listCountOptions()),
+    ]);
     return { devices, total };
   }
 }

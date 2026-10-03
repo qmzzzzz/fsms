@@ -42,9 +42,12 @@ describe('L-23 角色用户数统计的管道顺序', () => {
       return Promise.resolve([]);
     });
     const listSpy = jest.spyOn(Role, 'find').mockImplementation(() => ({
-      populate: () => ({
-        sort: () => ({
-          limit: () => ({ skip: () => Promise.resolve([]) }),
+      // withListBudget（列表链查询预算）会在链头挂 maxTimeMS，桩必须同形
+      maxTimeMS: () => ({
+        populate: () => ({
+          sort: () => ({
+            limit: () => ({ skip: () => Promise.resolve([]) }),
+          }),
         }),
       }),
     }));

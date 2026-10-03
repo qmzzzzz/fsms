@@ -9,6 +9,7 @@ const ApiError = require('../utils/ApiError');
 // 保留通配码只在 utils/superAdmin 声明一次；路由的"不得铸造"与本文件的"不得停用"
 // 必须是同一个值，否则两处防线会各拦一半。
 const { RESERVED_WILDCARD_PERMISSION: RESERVED_WILDCARD } = require('../utils/superAdmin');
+const { withListBudget, listCountOptions } = require('../utils/queryBudget');
 
 class PermissionService {
   async listPermissions({ module, type, status, page, limit }) {
@@ -18,12 +19,12 @@ class PermissionService {
     if (status) query.status = status;
 
     const [permissions, count] = await Promise.all([
-      Permission.find(query)
+      withListBudget(Permission.find(query))
         .populate({ path: 'parent', select: 'name code' })
         .sort({ module: 1, sort: 1, createdAt: -1 })
         .limit(limit)
         .skip((page - 1) * limit),
-      Permission.countDocuments(query),
+      Permission.countDocuments(query, listCountOptions()),
     ]);
 
     return { permissions, count };

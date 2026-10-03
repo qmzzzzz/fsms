@@ -6,6 +6,7 @@
 const Inspection = require('../models/Inspection');
 const logger = require('../utils/logger');
 const { escapeRegExp, parseDateBoundary } = require('../utils/helpers');
+const { withListBudget, listCountOptions, listAggregateOptions } = require('../utils/queryBudget');
 const {
   encodeCursor,
   decodeCursor,
@@ -137,7 +138,7 @@ class InspectionService {
         cursor: decoded,
         valueType: 'date',
       });
-      const docs = await Inspection.find(cursorQuery)
+      const docs = await withListBudget(Inspection.find(cursorQuery))
         .populate({ path: 'assignedTo', select: 'username realName' })
         .populate({ path: 'devices', select: 'deviceCode deviceName deviceType' })
         .populate({ path: 'reviewedBy', select: 'username realName' })
@@ -150,7 +151,7 @@ class InspectionService {
     }
 
     const [inspections, count] = await Promise.all([
-      Inspection.find(query)
+      withListBudget(Inspection.find(query))
         .populate({ path: 'assignedTo', select: 'username realName' })
         .populate({ path: 'devices', select: 'deviceCode deviceName deviceType' })
         .populate({ path: 'reviewedBy', select: 'username realName' })
@@ -158,7 +159,7 @@ class InspectionService {
         .sort({ planStartTime: -1, _id: -1 })
         .limit(limit)
         .skip((page - 1) * limit),
-      Inspection.countDocuments(query),
+      Inspection.countDocuments(query, listCountOptions()),
     ]);
 
     // offset 模式同样下发 nextCursor：客户端可在任意页切换为游标续翻
@@ -438,13 +439,22 @@ class InspectionService {
     const baseMatch = { $match: scopedMatch };
 
     const [byStatus, byType, byResult, total] = await Promise.all([
-      Inspection.aggregate([baseMatch, { $group: { _id: '$status', count: { $sum: 1 } } }]),
-      Inspection.aggregate([baseMatch, { $group: { _id: '$inspectionType', count: { $sum: 1 } } }]),
-      Inspection.aggregate([
-        { $match: { ...scopedMatch, status: 'completed' } },
-        { $group: { _id: '$result', count: { $sum: 1 } } },
-      ]),
-      Inspection.countDocuments(scopedMatch),
+      Inspection.aggregate(
+        [baseMatch, { $group: { _id: '$status', count: { $sum: 1 } } }],
+        listAggregateOptions()
+      ),
+      Inspection.aggregate(
+        [baseMatch, { $group: { _id: '$inspectionType', count: { $sum: 1 } } }],
+        listAggregateOptions()
+      ),
+      Inspection.aggregate(
+        [
+          { $match: { ...scopedMatch, status: 'completed' } },
+          { $group: { _id: '$result', count: { $sum: 1 } } },
+        ],
+        listAggregateOptions()
+      ),
+      Inspection.countDocuments(scopedMatch, listCountOptions()),
     ]);
 
     return { total, byStatus, byType, byResult };

@@ -7,6 +7,7 @@ const Role = require('../models/Role');
 const Permission = require('../models/Permission');
 const User = require('../models/User');
 const userPermissionService = require('./userPermissionService');
+const { withListBudget, listCountOptions } = require('../utils/queryBudget');
 
 const ROLE_PERMISSION_POPULATE = { path: 'permissions', select: 'name code type module' };
 const ROLE_DETAIL_POPULATE = {
@@ -18,12 +19,12 @@ const ROLE_DETAIL_POPULATE = {
 class RoleService {
   async listRoles(query, page, limit) {
     const [roles, count] = await Promise.all([
-      Role.find(query)
+      withListBudget(Role.find(query))
         .populate(ROLE_PERMISSION_POPULATE)
         .sort({ level: 1, createdAt: -1 })
         .limit(limit)
         .skip((page - 1) * limit),
-      Role.countDocuments(query),
+      Role.countDocuments(query, listCountOptions()),
     ]);
 
     const roleIds = roles.map((role) => role._id);

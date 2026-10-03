@@ -6,6 +6,12 @@
 const FireAlarm = require('../models/FireAlarm');
 const logger = require('../utils/logger');
 const { escapeRegExp, parseDateBoundary } = require('../utils/helpers');
+// 短别名：长名单调用点会超 printWidth 被 prettier 折行，而本文件 max-lines 贴基线
+const {
+  withListBudget,
+  listCountOptions: cntOpts,
+  listAggregateOptions: aggOpts,
+} = require('../utils/queryBudget');
 const {
   encodeCursor,
   decodeCursor,
@@ -101,7 +107,7 @@ class AlarmService {
         cursor: decoded,
         valueType: 'date',
       });
-      const docs = await FireAlarm.find(cursorQuery)
+      const docs = await withListBudget(FireAlarm.find(cursorQuery))
         .select(ALARM_READ_SELECT)
         .populate({ path: 'deviceId', select: 'deviceCode deviceName' })
         .populate({ path: 'handler', select: 'username realName' })
@@ -116,7 +122,7 @@ class AlarmService {
     }
 
     const [alarms, count] = await Promise.all([
-      FireAlarm.find(query)
+      withListBudget(FireAlarm.find(query))
         .select(ALARM_READ_SELECT)
         .populate({ path: 'deviceId', select: 'deviceCode deviceName' })
         .populate({ path: 'handler', select: 'username realName' })
@@ -125,7 +131,7 @@ class AlarmService {
         .sort({ occurredAt: -1, _id: -1 })
         .limit(limit)
         .skip((page - 1) * limit),
-      FireAlarm.countDocuments(query),
+      FireAlarm.countDocuments(query, cntOpts()),
     ]);
 
     // offset 模式同样下发 nextCursor：客户端可在任意页切换为游标续翻
@@ -452,10 +458,15 @@ class AlarmService {
     const baseMatch = { $match: scopedMatch };
 
     const [byStatus, byLevel, byType, total] = await Promise.all([
-      FireAlarm.aggregate([baseMatch, { $group: { _id: '$status', count: { $sum: 1 } } }]),
-      FireAlarm.aggregate([baseMatch, { $group: { _id: '$level', count: { $sum: 1 } } }]),
-      FireAlarm.aggregate([baseMatch, { $group: { _id: '$alarmType', count: { $sum: 1 } } }]),
-      FireAlarm.countDocuments(scopedMatch),
+      // 三个 group-by 同构（status/level/alarmType），map 展开成三个 Promise；
+      // 各自带列表链预算（listAggregateOptions）
+      ...['status', 'level', 'alarmType'].map((field) =>
+        FireAlarm.aggregate(
+          [baseMatch, { $group: { _id: `$${field}`, count: { $sum: 1 } } }],
+          aggOpts()
+        )
+      ),
+      FireAlarm.countDocuments(scopedMatch, cntOpts()),
     ]);
 
     return { total, byStatus, byLevel, byType };

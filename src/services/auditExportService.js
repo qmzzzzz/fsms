@@ -4,6 +4,7 @@ const AuditLog = require('../models/AuditLog');
 // 否则带 username 前缀条件时列表能搜到 `ADMIN`、导出却搜不到（默认 collation 下
 // `ADMIN` 不落在 `[adm, adn)` 内）。这是正确性问题，不只是性能问题。
 const { withCollation } = require('../utils/auditQuery');
+const { listCountOptions } = require('../utils/queryBudget');
 const { sanitizeSpreadsheetCell } = require('../utils/helpers');
 
 const EXPORT_HARD_LIMIT = 50000;
@@ -45,7 +46,10 @@ const exportAuditColumns = (doc, timestamp) =>
   );
 
 const sendAuditExportHeaders = async (query, res, collation) => {
-  const estimatedCount = await withCollation(AuditLog.countDocuments(query), collation);
+  const estimatedCount = await withCollation(
+    AuditLog.countDocuments(query, listCountOptions()),
+    collation
+  );
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="audit-logs-export.csv"');
   res.setHeader('X-Audit-Manifest-Records', String(Math.min(estimatedCount, EXPORT_HARD_LIMIT)));
