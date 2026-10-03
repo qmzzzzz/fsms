@@ -645,7 +645,14 @@ jobs:
         with:
           image: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
           format: cyclonedx-json
-          artifact-name: sbom.cdx.json
+          # output-file 才会把 SBOM 落到工作区：只写 artifact-name 时文件只存在于
+          # action 内部（实测 main 的 build job 因 "No files were found with the
+          # provided path: sbom.cdx.json" 连续红——upload 步骤的 if-no-files-found:
+          # error 是对的，缺的是这份文件本身）。
+          output-file: sbom.cdx.json
+          # 关掉 action 自带的上传：产物统一走下面那一步显式上传（单一出口，
+          # retention/命名/失败语义都由 upload 步骤一处定义，不做双份）。
+          upload-artifact: false
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
