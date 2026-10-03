@@ -28,13 +28,24 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 for arg in "$@"; do
   case "$arg" in
     --apply) APPLY=1 ;;
-    --root=*) ROOT=$(CDPATH= cd -- "${arg#--root=}" && pwd) ;;
+    --root=*)
+      dir=${arg#--root=}
+      # 打不开也要**自己的**报错：旧写法把 cd 的原文丢给运维（`line 31: cd: …: No such
+      # file or directory`），既看不见脚本跑到哪一步，也没说清"这里要的是仓库根目录"。
+      # 2>/dev/null 是必需的：命令替换里 cd 的话会跟着返回值一起被当成消息打出去。
+      if ! ROOT=$(CDPATH= cd -- "$dir" 2>/dev/null && pwd); then
+        printf '错误：--root 指向的目录打不开：%s\n' "$dir" >&2
+        printf '       它必须是**已存在的仓库根**（本脚本只在该根下找 Dockerfile 与 docker-compose.yml）。\n' >&2
+        exit 1
+      fi
+      ;;
     *) echo "错误：未知参数 '$arg'（支持 --apply / --root=<dir>）" >&2; exit 2 ;;
   esac
 done
 
-command -v docker >/dev/null 2>&1 || { echo "错误：未找到 docker 命令"; exit 1; }
-docker info >/dev/null 2>&1 || { echo "错误：Docker 守护进程未运行，请先启动"; exit 1; }
+# 这两条报错打 stderr：它们是失败而不是进度，混在 stdout 里会把"没跑成"读成"跑完了"。
+command -v docker >/dev/null 2>&1 || { echo "错误：未找到 docker 命令" >&2; exit 1; }
+docker info >/dev/null 2>&1 || { echo "错误：Docker 守护进程未运行，请先启动" >&2; exit 1; }
 
 echo "==> 拉取 $NODE_TAG 与 $MONGO_TAG（可能耗时数分钟）"
 docker pull "$NODE_TAG"
@@ -98,6 +109,17 @@ norm_repo() {
 capture_digest() {
   tag=$1
   raw=$(docker inspect --format='{{index .RepoDigests 0}}' "$tag" 2>/dev/null || true)
+  # 先要求**恰好一行**：下面的 grep 按行判，多行输出里只要有一行合规格就整段放行，
+  # 而 $raw 随后要当 sed 的替换文本、还要打进运维的粘贴块——把外部输出当代码用。
+  # 实测（2026-10-04 审计）：inspect 返回 `mongo@sha256:<合法>\n<任意一行>` 时，形状判据与
+  # 仓库名判据都通过（`${raw%@*}` 取的是**最后一个** @ 之前的全部内容），--apply 只是碰巧
+  # 撞在 sed 的 `unterminated s command` 上；不加 --apply 则 rc=0 并把那一行原样打给运维。
+  nlines=$(printf '%s\n' "$raw" | awk 'END{print NR+0}')
+  if [ "$nlines" != 1 ]; then
+    printf '错误：取 %s 的 digest 得到 %s 行输出，本脚本只接受"一行一个引用"。\n' "$tag" "$nlines" >&2
+    printf '       内容不回显：多行输出可以伪造本脚本自己的日志行，照抄等于把注入当证据。\n' >&2
+    return 1
+  fi
   if ! printf '%s' "$raw" | grep -Eq '@sha256:[0-9a-f]{64}$'; then
     printf '错误：取不到 %s 的 registry digest（得到：%s）。\n' "$tag" "'${raw:-空}'" >&2
     printf '       多为本机镜像是 build/load 而来（无 digest）或 docker 输出异常；\n' >&2
@@ -188,8 +210,11 @@ to_re() {
 # 64 位十六进制的校验交给调用方的 grep -E，awk 只判"是不是 tag@sha256: 开头"。
 # 输出的每一行是固定四字段（空格分隔，字段内不含空格）：
 #   instr <类> <行号> <token>    指令行上指向**本镜像**的引用；类 ∈
-#                                bare | pinned | stray | malformed | tagless | drift
-#   unreach x <行号> x           含 tag 字面串、但既不是指令行也不是注释行的行
+#                                bare | pinned | stray | malformed | tagless | drift | prefixed
+#   unreach x <行号> x           含 tag 字面串、却没被取成本镜像的 token，且不在注释行里
+#                                （两类都算：整行不是指令行——引号包裹/折叠标量/序列项；
+#                                 整行是指令行但第一个字段不是该镜像的值——--platform= 前缀、
+#                                 ${VAR:-mongo:6.0.20} 这类变量展开）
 # 注释行（去掉行首空白后以 `#` 开头）里的提及**不算引用**：那是给人读的示例，
 # 本脚本既不读它也不改它——Dockerfile 顶部就写着三行这样的示例。
 probe_ref() {
@@ -209,13 +234,27 @@ probe_ref() {
         sub(/^[ \t]+/, "", rest)
         tok = rest
         sub(/[ \t].*$/, "", tok)
-        # 不是本镜像的指令行（redis / prometheus / ${APP_IMAGE:-…}）直接跳过：
-        # 本脚本只管自己常量里那一个引用，别的一律不碰。
-        if (tok == "" || imgname(tok) != imgname(tag)) next
+        # 「不是本镜像的指令行」与「是本镜像但值不在可锚定的位置上」是两回事。
+        # 旧实现在这里一律 next ⇒ `FROM --platform=linux/amd64 node:22.14.0-alpine AS b` 与
+        # `image: ${MONGO_IMAGE:-mongo:6.0.20}` 被当成不相干的行放过：脚本打印
+        # "钉好 1 条 / 已替换并校验"，文件里却**留着一条可变 tag**（2026-10-04 审计实测复现）。
+        # 区分依据就是 tag 字面串在不在这一行里：不相干的引用（redis / prometheus /
+        # ${APP_IMAGE:-…}）不含它，照旧一笔不碰；含它却取不到的，停手并给行号。
+        if (tok == "" || imgname(tok) != imgname(tag)) {
+          if (index($0, tag) > 0 && line !~ /^#/) print "unreach", "x", NR, "x"
+          next
+        }
         scan = rest
         sha = gsub(/@sha256:/, "@", scan)
         if (index(tok, tag) != 1) {
-          # 同一个仓库名但**不以 tag 常量开头**：带 digest 的是"无 tag 的钉版"（旧实现写坏的
+          if (index(tok, tag) > 0) {
+            # 带 registry / 命名空间前缀的**同名**引用（`myorg/mongo:6.0.20`）：tag 没漂移，
+            # 是常量对不上。旧文案把它说成"tag 与脚本常量漂移"，会把人往"改常量"的方向引，
+            # 而改常量等于让本脚本去钉别人命名空间的镜像。
+            print "instr", "prefixed", NR, tok
+            next
+          }
+          # 同一个仓库名但完全不含 tag 常量：带 digest 的是"无 tag 的钉版"（旧实现写坏的
           # 产物形态），不带的就是 tag 漂移。两种都要人看，脚本不猜。
           print "instr", (tok ~ /@sha256:/ ? "tagless" : "drift"), NR, tok
           next
@@ -275,9 +314,9 @@ classify_ref() {
     if [ -z "$kind" ]; then continue; fi
     case "$kind" in
       unreach)
-        printf '错误：%s 第 %s 行提到了 %s，但既不是能解析的指令行、也不是注释行。\n' \
+        printf '错误：%s 第 %s 行提到了 %s，但脚本取不到"值"的位置（或该行不是可解析的指令行）。\n' \
           "$label" "$ln" "$tag" >&2
-        printf '       这类写法（引号包裹的值、折叠标量、序列项 - image:、变量展开等）本脚本改不了；\n' >&2
+        printf '       这类写法（引号包裹的值、折叠标量、序列项 - image:、变量展开、--platform= 前缀）本脚本改不了；\n' >&2
         printf '       静默跳过会留下一条仍指向可变 tag 的引用，所以在这里停手，请人工处理。\n' >&2
         exit 1
         ;;
@@ -306,6 +345,10 @@ classify_ref() {
             ;;
           drift)
             refuse_drift "$label" "$ln" "$tok" "$tag"
+            ;;
+          prefixed)
+            refuse_shape "$label" "$ln" "$tok" \
+              "同名镜像但带 registry/命名空间前缀，本脚本的常量是裸 $tag（把它改成前缀形式等于去钉别人的仓库）"
             ;;
           *)
             printf '错误：%s 的分类器给出了预定义之外的类「%s」（脚本自身缺陷，请报告）\n' \
@@ -361,11 +404,17 @@ stage_ref() {
   #      锚定是"只改值的位置"的全部保证：注释里的示例（`# 把输出追加为 image: mongo:6.0.20…`）
   #      不在行首指令词之后，一笔不碰；旧实现用无锚定的 `s|FROM node:22.14.0-alpine|…|g`，
   #      而该字面串是钉版行的**前缀** ⇒ 已钉行也被改 ⇒ 双 digest（见上面的注释）。
-  #   ② 全文 `tag@sha256:<64hex>` → 刚捕获的 digest：把"钉在别的 digest 上"的引用刷新，
+  #   ② `tag@sha256:<64hex>` → 刚捕获的 digest：把"钉在别的 digest 上"的引用刷新，
   #      这是上游滚动同名 tag 之后的升级路径（旧实现把这种仓库直接判成不可操作）。
-  #      它**故意不带锚定**：Dockerfile 顶部的用法注释里也写了完整的钉版引用，
+  #      它**故意不带指令行锚定**：Dockerfile 顶部的用法注释里也写了完整的钉版引用，
   #      digest 换了若只改指令行，注释就从"正确示例"变成"错误示例"——那正是本脚本
   #      要躲开的第一类失效。digest 相同时 ② 是逐字节 no-op，所以锚定行也不会被改两遍。
+  #      但"全文替换"必须带**名字边界**，否则两种真实损坏（2026-10-04 审计实测）：
+  #        - 前无边界 ⇒ `myorg/mongo:6.0.20@sha256:…` 里的同名子串被当成自己的引用改掉，
+  #          注释里的别人的仓库 digest 被换成刚捕获的值 ⇒ 示例变成假证；
+  #        - 后无边界 ⇒ `@sha256:` 后跟 68 位十六进制时替换掉前 64 位、留下尾巴 4 位，
+  #          产出一行**看起来完全合法**的钉版引用。
+  #      边界字符类取 Docker 引用文法允许的字符（字母数字 . _ / : @ -）；行首另走 `^`。
   # ①在 ②之前：① 产出的 `tag@sha256:<新>` 随后被 ② 命中并替换成同一个值，不跑偏。
   # `&` 与 `\` 在替换侧是特殊字符，但 registry 引用文法（[A-Za-z0-9._-] : / @）不含二者，
   # 故原样插入。`$` 在双引号里后跟 `)` 不是变量展开，shell 会原样交给 sed 当行尾锚。
@@ -374,7 +423,7 @@ stage_ref() {
   tag_re=$(to_re "$tag")
   sed -E \
     -e "s%^([[:space:]]*${kw}[[:space:]]+)${tag_re}([[:space:]]|$)%\1${want}\2%" \
-    -e "s%${tag_re}@sha256:[0-9a-f]{64}%${want}%g" \
+    -e "s%(^|[^A-Za-z0-9._/:@-])${tag_re}@sha256:[0-9a-f]{64}([^0-9a-f]|$)%\1${want}\2%g" \
     "$src" > "$tmp"
   # 预演校验对**临时文件**再跑一遍分类器（mv 之后再报就晚了）：
   # 待钉与待刷新必须归零、指向本镜像的条数必须不变（sed 只能改形态，不能增删引用）。
@@ -427,6 +476,18 @@ probe_target() {
     echo "错误：找不到 $label：$file" >&2
     exit 1
   fi
+  # CRLF 行尾先停手。理由不是"风格"：同一个输入在两台机器上是**两种结果**——
+  # MSYS 的 gawk 与 GNU sed 会把行尾的 CR 吃掉（⇒ 整份文件行尾被静默改成 LF，还报成功），
+  # Linux 的 gawk 留着 CR（⇒ 该行被判成"形态不认识"，拒绝动手）。钉版脚本可以失败，
+  # 不能"在一台机器上静默重写整份部署文件"。
+  # 检测必须走**字节**通道：本机上 `grep -q "$CR"` 与 `awk '/\r/'` 都看不见 CR——
+  # MSYS 的文本模式在读取时就把 CRLF 换成了 LF（2026-10-04 实测：文件里 od 明明有 \r，
+  # 两者都报 0 处）。tr 不做行切分也不转文本模式，所以按字节数 CR。
+  if [ "$(tr -dc '\r' < "$file" | wc -c)" -ne 0 ]; then
+    printf '错误：%s 里有 CR（CRLF 行尾），本脚本拒绝在两种平台结果不一致的前提下落笔。\n' "$label" >&2
+    printf '       请先把该文件的行尾改成 LF（.gitattributes / 编辑器设置），再重跑。\n' >&2
+    exit 1
+  fi
   # 残留的临时文件必须**先看见再说**：它可能是上一次运行中断留下的，也可能是别人放的。
   # 本脚本既不覆盖它也不在退出时删它（下面的 trap 只删自己创建过的那些）。
   if [ -e "$tmp" ]; then
@@ -461,7 +522,18 @@ cleanup_pin_tmp() {
   done
   return 0
 }
-trap 'cleanup_pin_tmp' EXIT HUP INT TERM
+on_signal() {
+  _sig=$1
+  cleanup_pin_tmp
+  # **必须真的退出**。旧写法 `trap 'cleanup_pin_tmp' EXIT HUP INT TERM` 只清残留不退出：
+  # 运维按下 Ctrl-C 之后脚本继续把两个目标文件写完，还打印"已替换并校验"、rc=0
+  # （2026-10-04 审计在 15MB 夹具上实测：SIGINT 后两个文件都已落盘）。"清理了"不等于"停了"。
+  exit $((128 + _sig))
+}
+trap 'cleanup_pin_tmp' EXIT
+trap 'on_signal 1' HUP
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
 
 echo "==> 目标仓库根：$ROOT"
 echo "==> 只读分类两个目标（有任何一个够不着就一个字都不写）"
@@ -482,8 +554,9 @@ CF_TOTAL=$PROBE_TOTAL
 
 if [ "$DF_NEEDS" -eq 0 ] && [ "$CF_NEEDS" -eq 0 ]; then
   printf '错误：两个目标的指令行上已经存在与刚捕获值逐字相同的 @sha256 引用 ⇒ 本次是 no-op，\n' >&2
-  printf '       不该被报成成功（旧实现正是在这里"打印已替换却一字未改"）。确实只想确认状态\n' >&2
-  printf '       就去掉 --apply 重跑（只读打印，不改文件）；要换 tag 请先改本文件顶部的常量。\n' >&2
+  printf '       不该被报成成功（旧实现正是在这里"打印已替换却一字未改"）。上面两行 plan 就是\n' >&2
+  printf '       真实文件的现状（check 阶段只读分类过，不需要为了"确认状态"再跑一次——不加\n' >&2
+  printf '       --apply 的那条路径只打印捕获值，根本不分类）；要换 tag 请先改本文件顶部的常量。\n' >&2
   exit 1
 fi
 

