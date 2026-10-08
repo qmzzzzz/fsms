@@ -1,19 +1,17 @@
 <template>
-  <div class="register">
-    <!-- 装饰层单独成层、自行裁切：底色渐变 + 细网格 + 光斑（aurora），
+  <div ref="registerRootRef" class="register">
+    <!-- 装饰层单独成层、自行裁切：白色细网格叠加在深红混合渐变（.register 自身背景）上，
          替代原先整屏的品牌红渐变——注册是一次性冷启动动作，
          高饱和红铺满全屏会把「危险/告警」的语义误加到中性表单上。
          裁切必须由本层承担，绝不能挂到 .register 上：注册表单比登录页高得多
          （三步 + 口令强度条 + 信息核对），整页 overflow:hidden 会在 768px
          高的屏上把顶部永久裁掉，且顶部溢出在滚动容器里不可达 -->
-    <div class="register__decor" aria-hidden="true">
-      <div class="register__aurora" />
-    </div>
+    <div class="register__decor" aria-hidden="true" />
     <div class="register__panel">
       <section class="register-brand">
         <span class="register-brand__tag">{{ $t('register.brandTag') }}</span>
         <h1 class="register-brand__title">
-          {{ $t('register.brandTitle') }}
+          <ScrambleText :text="$t('register.brandTitle')" />
         </h1>
         <p class="register-brand__subtitle">
           {{ $t('register.brandSubtitle') }}
@@ -307,10 +305,13 @@ import { ElNotification } from 'element-plus/es/components/notification/index.mj
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { api } from '@/utils/api'
+import { haptic } from '@/utils/haptic'
 import { encryptPassword } from '@/utils/loginCipher'
 import { passwordStrengthRule } from '@/utils/password'
 import LiquidGlassButtons from '@/components/LiquidGlassButtons.vue'
 import AuthPrefs from '@/components/AuthPrefs.vue'
+import ScrambleText from '@/components/ScrambleText.vue'
+import { usePointerGradient } from '@/composables/usePointerGradient'
 // D-2：强度条与信息核对拆为子组件，步骤切换动效拆为组合式函数
 import PasswordStrengthMeter from '@/components/PasswordStrengthMeter.vue'
 import RegisterSummary from '@/components/RegisterSummary.vue'
@@ -328,6 +329,10 @@ import {
 
 const { t } = useI18n()
 const router = useRouter()
+
+// 鼠标追踪渐变：指针位置写入 .register 的 --posX/--posY，驱动装饰层光斑跟随
+const registerRootRef = ref(null)
+usePointerGradient(registerRootRef)
 
 const loading = ref(false)
 // 提交重入锁：与 loading 分开，**同步**置位。loading 要等整表异步校验通过才置位，
@@ -546,6 +551,7 @@ const onRegister = async () => {
   // 校验窗口内的连点拦不住（见 submitting 声明处的实测说明）
   if (submitting.value) return
   submitting.value = true
+  haptic(10)
   try {
     // 提交前整表校验：分步校验只覆盖走过的步骤，用户可能通过回退跳过某步
     await registerFormRef.value.validate()
@@ -645,9 +651,65 @@ const resetForm = () => {
   padding-right: max(24px, env(safe-area-inset-right));
   padding-bottom: max(40px, env(safe-area-inset-bottom));
   padding-left: max(24px, env(safe-area-inset-left));
-  background: linear-gradient(180deg, var(--xf-gray-50) 0%, var(--xf-gray-100) 100%);
   /* 不再设 overflow:hidden —— 裁切职责下放给 .register__decor。
      整页裁切会把超高的注册表单永久切掉顶部且无法滚动 */
+  /* 鼠标追踪混合渐变（亮色主题）：结构照搬参考效果，浅玫瑰色系。
+     多层实色渐变 + overlay/lighten/darken 混合；低 alpha transparent 方案已废弃 */
+  --posX: 0;
+  --posY: 0;
+  --x: calc(var(--posX) * 1px);
+  --y: calc(var(--posY) * 1px);
+  background-image:
+    linear-gradient(115deg, rgb(230 57 70), rgb(255 255 255)),
+    radial-gradient(
+      90% 100% at calc(50% + var(--x)) calc(0% + var(--y)),
+      rgb(255 255 255),
+      rgb(253 228 230)
+    ),
+    radial-gradient(
+      100% 100% at calc(80% - var(--x)) calc(0% - var(--y)),
+      rgb(230 57 70),
+      rgb(250 210 214)
+    ),
+    radial-gradient(
+      150% 210% at calc(100% + var(--x)) calc(0% + var(--y)),
+      rgb(245 245 245),
+      rgb(230 57 70)
+    ),
+    radial-gradient(
+      100% 100% at calc(100% - var(--x)) calc(30% - var(--y)),
+      rgb(193 18 31),
+      rgb(255 245 246)
+    ),
+    linear-gradient(60deg, rgb(240 128 134), rgb(230 57 70));
+  background-blend-mode: overlay, overlay, lighten, darken, normal;
+}
+
+/* 暗色主题：同结构换成深红墨黑系 */
+html.dark .register {
+  background-image:
+    linear-gradient(115deg, rgb(193 18 31), rgb(0 0 0)),
+    radial-gradient(
+      90% 100% at calc(50% + var(--x)) calc(0% + var(--y)),
+      rgb(200 200 200),
+      rgb(45 6 10)
+    ),
+    radial-gradient(
+      100% 100% at calc(80% - var(--x)) calc(0% - var(--y)),
+      rgb(193 18 31),
+      rgb(36 4 7)
+    ),
+    radial-gradient(
+      150% 210% at calc(100% + var(--x)) calc(0% + var(--y)),
+      rgb(125 125 125),
+      rgb(193 18 31)
+    ),
+    radial-gradient(
+      100% 100% at calc(100% - var(--x)) calc(30% - var(--y)),
+      rgb(164 22 26),
+      rgb(0 0 0)
+    ),
+    linear-gradient(60deg, rgb(230 57 70), rgb(193 18 31));
 }
 
 /* 装饰层：只负责铺底与裁切，不参与滚动、不参与命中测试 */
@@ -658,23 +720,21 @@ const resetForm = () => {
   pointer-events: none;
 }
 
+/* 细网格叠加：亮色用深线、暗色用白线 */
 .register__decor::before {
   content: '';
   position: absolute;
   inset: 0;
-  background-image: var(--xf-tech-grid);
+  background-image:
+    linear-gradient(rgba(15, 23, 42, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.05) 1px, transparent 1px);
   background-size: var(--xf-tech-grid-size) var(--xf-tech-grid-size);
 }
 
-/* 两枚柔和光斑：右上品牌红、左下石板灰，radial-gradient 边缘完全透明，
-   不产生硬边；inset:-20% 让模糊后的边缘溢出装饰层被裁掉，避免露出直边 */
-.register__aurora {
-  position: absolute;
-  inset: -20%;
+html.dark .register__decor::before {
   background-image:
-    radial-gradient(38% 38% at 78% 12%, var(--xf-primary-alpha-12) 0%, transparent 100%),
-    radial-gradient(42% 42% at 12% 88%, var(--xf-info-alpha-15) 0%, transparent 100%);
-  filter: blur(6px);
+    linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
 }
 
 .register__panel {
@@ -773,7 +833,6 @@ const resetForm = () => {
   height: 32px;
   border-radius: 50%;
   border: 1px solid var(--xf-border-color-strong);
-  /* gray-50 而非 #fff：暗色下需要跟随翻转，否则圆点变成一排白点 */
   background: var(--xf-gray-50);
   color: var(--xf-gray-500);
   font-family: var(--xf-font-display);
@@ -821,6 +880,34 @@ const resetForm = () => {
 .register-steps__desc {
   font-size: var(--xf-font-size-xs);
   color: var(--xf-gray-500);
+}
+
+/* 步骤条与品牌标签的暗色覆盖：深红墨黑底上，gray-50 翻成的深藏青
+   与 primary-strong 的深红都不可读，翻为白玻璃系 */
+html.dark .register-brand__tag {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+html.dark .register-steps__item:not(:last-child)::before {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+html.dark .register-steps__item.is-done::before {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+html.dark .register-steps__index {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+html.dark .register-steps__item.is-done .register-steps__index {
+  background: rgba(230, 57, 70, 0.3);
+  border-color: rgba(230, 57, 70, 0.6);
+  color: #fff;
 }
 
 /* ===== 右栏：表单卡片 ===== */
@@ -1269,18 +1356,12 @@ const resetForm = () => {
 
 /* ===== 暗色适配 =====
    绝大多数样式已走 --xf-* 变量，dark.css 覆盖变量后自动跟随；
-   下面三处是变量翻转仍不成立、必须显式覆盖的：
-   1. 提示条：前景写的是 primary-deep（深红），暗色底上等于不可读
-   2. 光斑：亮色下的低透明度色斑在深底上几乎看不见，需提亮
-   3. 主渐变按钮/logo 的白字在暗色下保持不变（无需覆盖，此处仅备注）
+   提示条是变量翻转仍不成立、必须显式覆盖的：
+   前景写的是 primary-deep（深红），暗色底上等于不可读。
+   主渐变按钮/logo 的白字在暗色下保持不变（无需覆盖）。
+   背景混合渐变主题无关（亮暗一致），无需暗色覆盖。
    选择器写成 html.dark .x —— scoped 编译后为 html.dark .x[data-v-*]，
    元素本就在本组件内，无需 :global（:global 只用于 teleport 出去的下拉菜单）。 */
-html.dark .register__aurora {
-  background-image:
-    radial-gradient(38% 38% at 78% 12%, var(--xf-primary-alpha-25) 0%, transparent 100%),
-    radial-gradient(42% 42% at 12% 88%, var(--xf-info-alpha-30) 0%, transparent 100%);
-}
-
 /* summary 暗色覆盖已随 RegisterSummary.vue 迁走（D-2） */
 
 /* ===== 减少动态效果 =====

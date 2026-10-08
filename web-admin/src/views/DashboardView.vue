@@ -54,15 +54,15 @@
 
       <!-- 数据卡片（P3-39：无 report:read 时整块不渲染，避免显示一排「-」占位） -->
       <el-row v-if="canReadReport" :gutter="20" class="stat-row">
-        <el-col v-for="item in stats" :key="item.title" :xs="12" :sm="12" :md="6">
-          <el-card shadow="hover" class="stat-card">
+        <el-col v-for="(item, i) in stats" :key="item.title" :xs="12" :sm="12" :md="6">
+          <el-card shadow="hover" class="stat-card hover-lift">
             <div class="stat-body">
               <div class="stat-info">
                 <div class="stat-title">
                   {{ item.title }}
                 </div>
                 <div class="stat-value">
-                  {{ item.value }}
+                  {{ statDisplay[i] }}
                 </div>
                 <div class="stat-trend">
                   <!-- 无趋势文案时只留占位行高：孤立的红色下箭头会被误读为"指标下跌" -->
@@ -113,6 +113,7 @@ import { useAuthStore } from '@/store'
 import { usePermission } from '@/composables/usePermission'
 import { formatTime } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
+import { useCountUp } from '@/composables/useCountUp'
 import { api, isCanceledError } from '@/utils/api'
 // 类型/状态 → i18n 标签映射（O-1 抽取的单一事实来源，与 ReportView 共用）
 import { makeAlarmTypeLabels, makeAlarmStatusLabels } from '@/utils/labelMaps'
@@ -200,6 +201,9 @@ const stats = ref(
   }))
 )
 
+// 数字滚动展示层：数值到达/刷新时从当前显示值滚动到新值（测试与 reduced-motion 直给终值）
+const statDisplay = useCountUp(stats)
+
 const recentAlarms = ref([])
 const loading = ref(true)
 
@@ -208,7 +212,6 @@ const loading = ref(true)
 // 新值 222 落地后又被旧值 111 覆盖）。两个数据源各自持守卫，互不干扰。
 const dashGuard = useLatestRequest()
 const alarmGuard = useLatestRequest()
-
 // 图表实例/初始化/配色/窗口 resize 已迁入 DashboardCharts.vue（D-2）
 
 let refreshTimer = null

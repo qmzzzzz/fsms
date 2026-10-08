@@ -368,7 +368,9 @@ describe('静态不变量（jsdom 无法断言的 CSS 规则）', () => {
     // 变量翻转对这两处不成立：提示条前景写的是 primary-deep（深红），
     // 暗色底上不可读；光斑在深底上几乎看不见。故必须有 html.dark 覆盖规则。
     expect(summarySource).toContain('html.dark .summary__row')
-    expect(source).toContain('html.dark .register__aurora')
+    // 光斑元素本轮由 `register__aurora` 改名为 `register__decor`（并补 aria-hidden），
+    // 暗色覆盖规则跟着改名 ⇒ 断言取新名。契约不变：深底上必须有一条显式的 html.dark 覆盖。
+    expect(source).toContain('html.dark .register__decor')
   })
 
   test('偏好控件的小屏降级规则在组件内维护（不在两个页面各写一份）', () => {

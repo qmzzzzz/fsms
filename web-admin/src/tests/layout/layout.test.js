@@ -853,14 +853,14 @@ describe('布局 · 语言切换', () => {
 })
 
 describe('布局 · 全屏入口与刷新', () => {
-  test('环境无全屏 API：不渲染全屏入口，仅保留刷新（提示文案为「刷新」）', async () => {
+  test('环境无全屏 API：不渲染全屏入口，仅保留搜索与刷新（提示文案为「刷新」）', async () => {
     const c = mountLayout()
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    expect(icons).toHaveLength(1)
-    expect(renderedIconPath(icons[0])).toBe(iconPath(Refresh))
-    const popper = await openByHover(icons[0], '刷新提示')
+    expect(icons).toHaveLength(2)
+    expect(renderedIconPath(icons[1])).toBe(iconPath(Refresh))
+    const popper = await openByHover(icons[1], '刷新提示')
     expect(popper.textContent.trim()).toBe(label('common.refresh'))
   })
 
@@ -879,10 +879,10 @@ describe('布局 · 全屏入口与刷新', () => {
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    expect(icons).toHaveLength(2)
-    expect(renderedIconPath(icons[1])).toBe(iconPath(FullScreen))
+    expect(icons).toHaveLength(3)
+    expect(renderedIconPath(icons[2])).toBe(iconPath(FullScreen))
 
-    click(icons[1])
+    click(icons[2])
     expect(enterCalls).toEqual(['enter'])
     expect(exitCalls).toEqual([])
 
@@ -890,7 +890,7 @@ describe('布局 · 全屏入口与刷新', () => {
       value: document.body,
       configurable: true,
     })
-    click(icons[1])
+    click(icons[2])
     expect(exitCalls).toEqual(['exit'])
   })
 
@@ -904,8 +904,8 @@ describe('布局 · 全屏入口与刷新', () => {
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    expect(icons).toHaveLength(2)
-    click(icons[1])
+    expect(icons).toHaveLength(3)
+    click(icons[2])
     expect(calls).toEqual(['webkit-enter'])
     expect(c.errors).toEqual([])
   })
@@ -921,13 +921,13 @@ describe('布局 · 全屏入口与刷新', () => {
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    click(icons[1])
+    click(icons[2])
     await new Promise((resolve) => setTimeout(resolve, 60))
     Object.defineProperty(document, 'fullscreenElement', {
       value: document.body,
       configurable: true,
     })
-    click(icons[1])
+    click(icons[2])
     await new Promise((resolve) => setTimeout(resolve, 60))
     process.off('unhandledRejection', onUnhandled)
     expect(unhandled).toEqual([])
@@ -949,15 +949,15 @@ describe('布局 · 全屏入口与刷新', () => {
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    expect(icons).toHaveLength(2)
-    click(icons[1])
+    expect(icons).toHaveLength(3)
+    click(icons[2])
     expect(calls).toEqual(['moz-enter'])
 
     Object.defineProperty(document, 'mozFullScreenElement', {
       value: document.body,
       configurable: true,
     })
-    click(icons[1])
+    click(icons[2])
     expect(calls).toEqual(['moz-enter', 'moz-exit'])
     expect(c.errors).toEqual([])
   })
@@ -976,15 +976,15 @@ describe('布局 · 全屏入口与刷新', () => {
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    expect(icons).toHaveLength(2)
-    click(icons[1])
+    expect(icons).toHaveLength(3)
+    click(icons[2])
     expect(calls).toEqual(['ms-enter'])
 
     Object.defineProperty(document, 'msFullscreenElement', {
       value: document.body,
       configurable: true,
     })
-    click(icons[1])
+    click(icons[2])
     expect(calls).toEqual(['ms-enter', 'ms-exit'])
     expect(c.errors).toEqual([])
   })
@@ -995,7 +995,7 @@ describe('布局 · 全屏入口与刷新', () => {
     const c = mountLayout()
     await settleRouter(c.router)
     await flush(10)
-    click(standaloneIcons(c)[0])
+    click(standaloneIcons(c)[1])
     expect(reload).toHaveBeenCalledTimes(1)
   })
 })

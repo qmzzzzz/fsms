@@ -1,5 +1,5 @@
 <template>
-  <div class="login">
+  <div ref="loginRootRef" class="login">
     <div class="login__grid" />
     <div class="login__panel">
       <section class="login-brand">
@@ -7,7 +7,7 @@
           {{ $t('login.brandTag') }}
         </div>
         <h1 class="login-brand__title">
-          {{ $t('login.brandTitle') }}
+          <ScrambleText :text="$t('login.brandTitle')" />
         </h1>
         <p class="login-brand__subtitle">
           {{ $t('login.brandSubtitle') }}
@@ -165,10 +165,13 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { User, Lock, Key } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
+import { haptic } from '@/utils/haptic'
 import { encryptPassword } from '@/utils/loginCipher'
 import { useAuthStore } from '@/store'
 import LiquidGlassButtons from '@/components/LiquidGlassButtons.vue'
 import AuthPrefs from '@/components/AuthPrefs.vue'
+import ScrambleText from '@/components/ScrambleText.vue'
+import { usePointerGradient } from '@/composables/usePointerGradient'
 
 // 偏好控件（主题/语言）已抽为 AuthPrefs 组件，本页不再持有语言状态；
 // locale 仍需保留——下方 watch 用它同步标签页标题
@@ -177,6 +180,9 @@ const router = useRouter()
 const authStore = useAuthStore()
 
 const loading = ref(false)
+// 鼠标追踪渐变：指针位置写入 .login 的 --posX/--posY，驱动 ::before 光斑跟随
+const loginRootRef = ref(null)
+usePointerGradient(loginRootRef)
 // 提交重入锁：与 loading 分离并**同步**置位。loading 只在校验通过后才置位，
 // 连点时后面的点击已进入 await 之前的分支（实测同一 tick 三次点击发出 3 次登录请求）。
 const submitting = ref(false)
@@ -302,6 +308,7 @@ const onLogin = async () => {
   // 重入防护必须同步生效：loading 要到校验通过后才置位，连点时拦不住后面的点击
   if (submitting.value) return
   submitting.value = true
+  haptic(10)
 
   try {
     await loginFormRef.value.validate()
@@ -396,21 +403,86 @@ const onLogin = async () => {
   min-height: 100vh;
   min-height: 100dvh;
   padding: 40px 24px;
-  background: linear-gradient(180deg, var(--xf-gray-50) 0%, var(--xf-gray-100) 100%);
   overflow: hidden;
+  /* 鼠标位置变量：composable 写入纯数值 --posX/--posY，此处换算为长度。
+     结构照搬参考效果：多层**实色**渐变 + overlay/lighten/darken 混合才有戏剧性，
+     颜色由绿色系逐一映射为品牌红 #c1121f 系（primary/strong/light/deep）。
+     （此前用 transparent 端点 + 低 alpha 的版本在视觉上等于没有效果，已废弃） */
+  --posX: 0;
+  --posY: 0;
+  --x: calc(var(--posX) * 1px);
+  --y: calc(var(--posY) * 1px);
+  /* 鼠标追踪混合渐变（亮色主题）：结构照搬参考效果，
+     多层实色渐变 + overlay/lighten/darken 混合，颜色为浅玫瑰色系 */
+  background-image:
+    linear-gradient(115deg, rgb(230 57 70), rgb(255 255 255)),
+    radial-gradient(
+      90% 100% at calc(50% + var(--x)) calc(0% + var(--y)),
+      rgb(255 255 255),
+      rgb(253 228 230)
+    ),
+    radial-gradient(
+      100% 100% at calc(80% - var(--x)) calc(0% - var(--y)),
+      rgb(230 57 70),
+      rgb(250 210 214)
+    ),
+    radial-gradient(
+      150% 210% at calc(100% + var(--x)) calc(0% + var(--y)),
+      rgb(245 245 245),
+      rgb(230 57 70)
+    ),
+    radial-gradient(
+      100% 100% at calc(100% - var(--x)) calc(30% - var(--y)),
+      rgb(193 18 31),
+      rgb(255 245 246)
+    ),
+    linear-gradient(60deg, rgb(240 128 134), rgb(230 57 70));
+  background-blend-mode: overlay, overlay, lighten, darken, normal;
 }
 
+/* 暗色主题：同结构换成深红墨黑系（对应参考效果的纯黑底戏剧性） */
+html.dark .login {
+  background-image:
+    linear-gradient(115deg, rgb(193 18 31), rgb(0 0 0)),
+    radial-gradient(
+      90% 100% at calc(50% + var(--x)) calc(0% + var(--y)),
+      rgb(200 200 200),
+      rgb(45 6 10)
+    ),
+    radial-gradient(
+      100% 100% at calc(80% - var(--x)) calc(0% - var(--y)),
+      rgb(193 18 31),
+      rgb(36 4 7)
+    ),
+    radial-gradient(
+      150% 210% at calc(100% + var(--x)) calc(0% + var(--y)),
+      rgb(125 125 125),
+      rgb(193 18 31)
+    ),
+    radial-gradient(
+      100% 100% at calc(100% - var(--x)) calc(30% - var(--y)),
+      rgb(164 22 26),
+      rgb(0 0 0)
+    ),
+    linear-gradient(60deg, rgb(230 57 70), rgb(193 18 31));
+}
+
+/* 细网格叠加：亮色用深线、暗色用白线 */
 .login::before {
   content: '';
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(135deg, var(--xf-primary-alpha-8), transparent 42%), var(--xf-tech-grid);
-  background-size:
-    100% 100%,
-    var(--xf-tech-grid-size) var(--xf-tech-grid-size),
-    var(--xf-tech-grid-size) var(--xf-tech-grid-size);
+    linear-gradient(rgba(15, 23, 42, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.05) 1px, transparent 1px);
+  background-size: var(--xf-tech-grid-size) var(--xf-tech-grid-size);
   pointer-events: none;
+}
+
+html.dark .login::before {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
 }
 
 .login__grid {
@@ -419,13 +491,20 @@ const onLogin = async () => {
   width: min(1160px, 100%);
   height: min(720px, calc(100vh - 80px));
   height: min(720px, calc(100dvh - 80px));
-  border: 1px solid var(--xf-info-alpha-15);
+  border: 1px solid rgba(15, 23, 42, 0.1);
   background-image:
-    linear-gradient(var(--xf-info-alpha-8) 1px, transparent 1px),
-    linear-gradient(90deg, var(--xf-info-alpha-8) 1px, transparent 1px);
+    linear-gradient(rgba(15, 23, 42, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.05) 1px, transparent 1px);
   background-size: 32px 32px;
   border-radius: 24px;
   opacity: 0.7;
+}
+
+html.dark .login__grid {
+  border-color: rgba(255, 255, 255, 0.14);
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
 }
 
 .login__panel {
@@ -809,6 +888,15 @@ const onLogin = async () => {
   animation: material-enter 0.5s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
+/* ===== 暗色适配 =====
+   新背景是深红混合渐变（主题无关，亮暗一致），无需暗色覆盖。
+   唯一例外是品牌标签 chip：亮色下是「红字红底」，暗色玻璃面板上
+   深红文字（--xf-primary-strong）对比度不足，翻为白玻璃 */
+html.dark .login-brand__tag {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.92);
+}
 /* 6) 无障碍降级 */
 @media (prefers-reduced-motion: reduce) {
   .login__panel,

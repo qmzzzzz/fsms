@@ -1,0 +1,592 @@
+/* ============================================================
+   Apple Copy 精细化打磨层 v3 — 优雅关闭·多端适配·UI 统一
+   覆盖范围：弹层动效 / 消息通知 / 触控目标 / safe-area / 退出过渡
+   加载顺序：必须在 global.css / dark.css / apple-polish.css 之后
+   ============================================================ */
+
+/* ---------- 0) 统一 Apple 弹簧曲线变量（供全站引用） ---------- */
+:root {
+  --apple-ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --apple-ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+  --apple-ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --apple-duration-fast: 150ms;
+  --apple-duration-base: 250ms;
+  --apple-duration-slow: 350ms;
+  --apple-touch-min: 44px;
+}
+
+/* ---------- 1) Element Plus 弹层（Dialog / Drawer）优雅进出 ---------- */
+.el-overlay-dialog {
+  transition:
+    opacity var(--apple-duration-base) var(--apple-ease),
+    backdrop-filter var(--apple-duration-base) var(--apple-ease) !important;
+}
+
+.el-overlay-dialog.el-fade-in-linear-enter-active,
+.el-overlay-dialog.el-fade-in-linear-leave-active {
+  transition: opacity var(--apple-duration-base) var(--apple-ease) !important;
+}
+
+/* Dialog 本体：从下方轻微浮入 + 缩放 */
+.el-dialog {
+  transition:
+    transform var(--apple-duration-slow) var(--apple-ease),
+    opacity var(--apple-duration-base) var(--apple-ease) !important;
+}
+
+.el-dialog__wrapper .el-dialog {
+  transform-origin: center center;
+}
+
+/* 移动端 Dialog 全屏化 + 底部滑入 */
+@media (max-width: 768px) {
+  .el-dialog {
+    width: 92vw !important;
+    max-width: 92vw;
+    margin: 4vh auto !important;
+    border-radius: var(--xf-radius-lg, 16px) !important;
+  }
+
+  .el-dialog__body {
+    max-height: calc(92vh - 140px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+@media (max-width: 480px) {
+  .el-dialog {
+    width: 100vw !important;
+    max-width: 100vw;
+    margin: 0 !important;
+    border-radius: var(--xf-radius-lg, 16px) var(--xf-radius-lg, 16px) 0 0 !important;
+    position: fixed !important;
+    bottom: 0;
+    top: auto !important;
+    transform: translateY(0) !important;
+    max-height: 92vh;
+  }
+
+  .el-dialog__body {
+    max-height: calc(92vh - 130px);
+  }
+}
+
+/* ---------- 2) 消息框 / 通知 统一材质与动效 ---------- */
+.el-message {
+  border-radius: var(--xf-radius-md, 12px) !important;
+  backdrop-filter: blur(20px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+  box-shadow:
+    0 8px 24px -8px rgba(0, 0, 0, 0.12),
+    0 0 0 1px rgba(0, 0, 0, 0.04) !important;
+  border: 1px solid var(--xf-border-color, #e5e5ea) !important;
+  padding: 12px 20px !important;
+  min-width: 240px;
+  max-width: 90vw;
+}
+
+.el-message__content {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.el-notification {
+  border-radius: var(--xf-radius-lg, 16px) !important;
+  backdrop-filter: blur(20px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+  box-shadow:
+    0 12px 40px -10px rgba(0, 0, 0, 0.14),
+    0 0 0 1px rgba(0, 0, 0, 0.04) !important;
+  border: 1px solid var(--xf-border-color, #e5e5ea) !important;
+  padding: 16px 20px !important;
+  width: 360px;
+  max-width: calc(100vw - 32px);
+}
+
+@media (max-width: 480px) {
+  .el-notification {
+    width: calc(100vw - 32px);
+    right: 16px !important;
+    left: 16px !important;
+  }
+
+  .el-message {
+    min-width: auto;
+    width: calc(100vw - 32px);
+    left: 16px !important;
+    right: 16px !important;
+    transform: none !important;
+  }
+
+  .el-message-box {
+    width: 92vw !important;
+    max-width: 92vw;
+  }
+}
+
+/* ---------- 3) 下拉菜单统一 ---------- */
+.el-dropdown-menu {
+  border-radius: var(--xf-radius-md, 12px) !important;
+  backdrop-filter: blur(20px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+  box-shadow:
+    0 8px 24px -8px rgba(0, 0, 0, 0.12),
+    0 0 0 1px rgba(0, 0, 0, 0.04) !important;
+  border: 1px solid var(--xf-border-color, #e5e5ea) !important;
+  padding: 6px !important;
+}
+
+.el-dropdown-menu__item {
+  border-radius: var(--xf-radius-sm, 8px) !important;
+  padding: 8px 12px !important;
+  margin: 2px 0 !important;
+  font-size: 14px;
+  transition:
+    background-color var(--apple-duration-fast) ease,
+    color var(--apple-duration-fast) ease !important;
+}
+
+/* ---------- 4) 触控目标统一（Apple 44×44pt 最小标准） ---------- */
+@media (hover: none) and (pointer: coarse) {
+  /* Element Plus 按钮最小触控区 */
+  .el-button {
+    min-height: var(--apple-touch-min);
+    min-width: var(--apple-touch-min);
+  }
+
+  .el-button--small {
+    min-height: 36px;
+    min-width: 36px;
+  }
+
+  /* 分页按钮 */
+  .el-pagination .btn-prev,
+  .el-pagination .btn-next,
+  .el-pagination .el-pager li {
+    min-width: var(--apple-touch-min);
+    min-height: var(--apple-touch-min);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* 表格行内操作按钮 */
+  .el-table .cell .el-button.is-text,
+  .el-table .cell .el-button.is-link {
+    min-height: 36px;
+    min-width: 36px;
+    padding: 6px 10px;
+  }
+
+  /* 下拉菜单项 */
+  .el-dropdown-menu__item {
+    min-height: var(--apple-touch-min);
+    display: flex;
+    align-items: center;
+  }
+
+  /* 菜单项 */
+  .el-menu-item,
+  .el-sub-menu__title {
+    min-height: var(--apple-touch-min);
+  }
+
+  /* 选择器 */
+  .el-select .el-input__wrapper {
+    min-height: var(--apple-touch-min);
+  }
+
+  /* 输入框 */
+  .el-input__wrapper {
+    min-height: var(--apple-touch-min);
+  }
+
+  /* 复选框 / 单选框 */
+  .el-checkbox,
+  .el-radio {
+    min-height: var(--apple-touch-min);
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* 日期选择器单元格 */
+  .el-date-table td {
+    height: var(--apple-touch-min);
+  }
+
+  /* 时间选择器 */
+  .el-time-spinner__item {
+    height: var(--apple-touch-min);
+    line-height: var(--apple-touch-min);
+  }
+
+  /* tabs */
+  .el-tabs__item {
+    min-height: var(--apple-touch-min);
+    display: inline-flex;
+    align-items: center;
+  }
+}
+
+/* ---------- 5) safe-area 全面适配（刘海屏 / 底部手势条） ---------- */
+@supports (padding: max(0px)) {
+  /* 导航栏顶部安全区 */
+  .navbar {
+    padding-top: max(0px, env(safe-area-inset-top));
+    padding-left: max(24px, env(safe-area-inset-left));
+    padding-right: max(24px, env(safe-area-inset-right));
+  }
+
+  @media (max-width: 768px) {
+    .navbar {
+      padding-left: max(12px, env(safe-area-inset-left));
+      padding-right: max(12px, env(safe-area-inset-right));
+    }
+  }
+
+  /* 主内容区底部安全区（避免被手势条遮挡） */
+  .main-content {
+    padding-bottom: max(24px, env(safe-area-inset-bottom));
+  }
+
+  @media (max-width: 768px) {
+    .main-content {
+      padding-bottom: max(12px, env(safe-area-inset-bottom));
+    }
+  }
+
+  /* 侧边栏 */
+  .sidebar {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  /* 移动端侧边栏抽屉 */
+  .sidebar-mobile {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* 登录/注册页 */
+  .login__panel,
+  .register__panel {
+    padding-top: max(40px, env(safe-area-inset-top));
+    padding-bottom: max(40px, env(safe-area-inset-bottom));
+    padding-left: max(24px, env(safe-area-inset-left));
+    padding-right: max(24px, env(safe-area-inset-right));
+  }
+
+  @media (max-width: 768px) {
+    .login__panel,
+    .register__panel {
+      padding-top: max(16px, env(safe-area-inset-top));
+      padding-bottom: max(16px, env(safe-area-inset-bottom));
+      padding-left: max(16px, env(safe-area-inset-left));
+      padding-right: max(16px, env(safe-area-inset-right));
+    }
+  }
+}
+
+/* ---------- 7) 弹层遮罩统一材质化 ---------- */
+.el-overlay {
+  background-color: rgba(0, 0, 0, 0.45) !important;
+  backdrop-filter: blur(6px) !important;
+  -webkit-backdrop-filter: blur(6px) !important;
+}
+
+@media (max-width: 768px) {
+  .el-overlay {
+    background-color: rgba(0, 0, 0, 0.55) !important;
+  }
+}
+
+/* ---------- 8) Loading 遮罩材质化 ---------- */
+.el-loading-mask {
+  backdrop-filter: blur(8px) saturate(120%) !important;
+  -webkit-backdrop-filter: blur(8px) saturate(120%) !important;
+}
+
+/* ---------- 9) 表格移动端优化 ---------- */
+@media (max-width: 768px) {
+  .el-table {
+    font-size: 13px;
+  }
+
+  .el-table th.el-table__cell {
+    font-size: 11px;
+    padding: 10px 8px !important;
+  }
+
+  .el-table td.el-table__cell {
+    padding: 10px 8px !important;
+  }
+
+  /* 横向滚动提示 */
+  .el-table__body-wrapper {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* ---------- 10) 表单移动端优化 ---------- */
+@media (max-width: 768px) {
+  .el-form-item__label {
+    font-size: 13px;
+    padding-bottom: 4px;
+  }
+
+  .el-input__inner,
+  .el-textarea__inner {
+    font-size: 16px !important; /* 防止 iOS 缩放 */
+  }
+}
+
+/* ---------- 11) 日期/时间选择器移动端优化 ---------- */
+@media (max-width: 768px) {
+  .el-picker__popper {
+    max-width: 96vw;
+  }
+
+  .el-date-picker {
+    width: 300px !important;
+  }
+
+  .el-date-range-picker {
+    width: 560px !important;
+  }
+}
+
+@media (max-width: 600px) {
+  .el-date-range-picker {
+    width: 300px !important;
+  }
+
+  .el-date-range-picker__content {
+    float: none !important;
+    width: 100% !important;
+  }
+
+  .el-date-range-picker__content.is-left {
+    border-right: none !important;
+    border-bottom: 1px solid var(--xf-border-color);
+  }
+}
+
+/* ---------- 12) Tooltip 统一 ---------- */
+.el-popper.is-dark {
+  border-radius: var(--xf-radius-sm, 8px) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  background: rgba(30, 41, 59, 0.92) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* ---------- 13) 标签页统一 ---------- */
+.el-tabs__item {
+  transition:
+    color var(--apple-duration-fast) ease,
+    background-color var(--apple-duration-fast) ease !important;
+}
+
+/* ---------- 14) 级联选择器 / 树 弹层 ---------- */
+.el-cascader__dropdown,
+.el-tree-select__popper {
+  border-radius: var(--xf-radius-md, 12px) !important;
+  backdrop-filter: blur(20px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+  box-shadow:
+    0 8px 24px -8px rgba(0, 0, 0, 0.12),
+    0 0 0 1px rgba(0, 0, 0, 0.04) !important;
+}
+
+/* ---------- 15) 颜色选择器弹层 ---------- */
+.el-color-picker__panel {
+  border-radius: var(--xf-radius-md, 12px) !important;
+  backdrop-filter: blur(20px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+}
+
+/* ---------- 16) 暗色模式下的 el-overlay 微调 ---------- */
+html.dark .el-overlay {
+  background-color: rgba(0, 0, 0, 0.65) !important;
+}
+
+html.dark .el-dropdown-menu {
+  background: rgba(30, 41, 59, 0.95) !important;
+  border-color: var(--xf-border-color, #1e293b) !important;
+}
+
+html.dark .el-message {
+  background: rgba(30, 41, 59, 0.95) !important;
+  border-color: var(--xf-border-color, #1e293b) !important;
+}
+
+html.dark .el-notification {
+  background: rgba(30, 41, 59, 0.95) !important;
+  border-color: var(--xf-border-color, #1e293b) !important;
+}
+
+/* ---------- 17) 移动端底部固定操作栏（通用工具类） ---------- */
+@supports (padding: max(0px)) {
+  .mobile-sticky-bar {
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+}
+
+/* ---------- 18) 减少动态效果偏好 — 全面降级 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .exit-overlay,
+  .exit-overlay__spinner {
+    transition: none !important;
+    animation: none !important;
+  }
+
+  .el-dialog,
+  .el-message,
+  .el-notification,
+  .el-dropdown-menu,
+  .el-overlay-dialog {
+    transition: opacity 100ms ease !important;
+    animation: none !important;
+  }
+}
+
+/* ---------- 19) 减少透明度偏好 ---------- */
+@media (prefers-reduced-transparency: reduce) {
+  .el-message,
+  .el-notification,
+  .el-dropdown-menu {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  .el-overlay {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+
+/* ---------- 20) iOS 特定修复 ---------- */
+@supports (-webkit-touch-callout: none) {
+  /* 修复 iOS 100vh 问题 */
+  .app-wrapper,
+  .sidebar,
+  .main-content {
+    min-height: -webkit-fill-available;
+  }
+
+  /* 修复 iOS 输入框聚焦时的页面缩放 */
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
+/* ============================================================
+   第二轮深化：骨架屏 shimmer / 入场动效 / 暗色玻璃打磨
+   ============================================================ */
+
+/* ---------- 21) 骨架屏统一 shimmer（Apple 式流动微光） ---------- */
+/* 项目骨架系统用 .sk-block 自定义扫光（global.css §Skeleton），
+   此处仅接管扫光缓动为 Apple 弹簧曲线，几何与布局完全不动 */
+.sk-block::after {
+  animation-timing-function: var(--apple-ease) !important;
+}
+
+/* 暗色模式：扫光亮带在深色背景下改用柔和暖白，避免刺眼 */
+html.dark {
+  --xf-skeleton-bg: var(--xf-gray-700, #334155);
+  --xf-skeleton-bg-strong: var(--xf-gray-600, #475569);
+  --xf-skeleton-shine: rgba(255, 255, 255, 0.12);
+}
+
+/* ---------- 22) 认证卡片入场动效（模糊 + 上浮 + 轻微缩放的材质化入场） ---------- */
+.login-card,
+.register-card {
+  animation: xf-card-enter 0.6s var(--apple-ease) both;
+}
+
+/* 装饰层稍延迟入场，形成层次 */
+.login__decor,
+.register__decor {
+  animation: xf-card-enter 0.7s var(--apple-ease) 0.08s both;
+}
+
+@keyframes xf-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.98);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+/* ---------- 23) 暗色模式玻璃质感深度打磨 ---------- */
+/* 弹层内高光描边：暗色下玻璃材质的关键是顶部 1px 内高光 */
+html.dark .el-dropdown-menu,
+html.dark .el-message,
+html.dark .el-notification,
+html.dark .el-message-box,
+html.dark .el-dialog {
+  box-shadow:
+    0 12px 40px -8px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+}
+
+/* 暗色 tooltip 提亮一档，与纯黑背景拉开层次 */
+html.dark .el-popper.is-dark {
+  background: rgba(51, 65, 85, 0.95) !important;
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+}
+
+/* 暗色遮罩稍微加深并保留模糊，维持内容可读性 */
+html.dark .el-loading-mask {
+  background-color: rgba(10, 15, 26, 0.72) !important;
+}
+
+/* ---------- 24) 通用悬浮提升工具类（按需加在统计卡/图表卡上） ---------- */
+.hover-lift {
+  transition:
+    transform var(--apple-duration-base) var(--apple-ease),
+    box-shadow var(--apple-duration-base) var(--apple-ease) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .hover-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 32px -8px rgba(15, 23, 42, 0.12) !important;
+  }
+
+  html.dark .hover-lift:hover {
+    box-shadow:
+      0 12px 32px -8px rgba(0, 0, 0, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+  }
+}
+
+/* ---------- 25) 第二轮无障碍降级补充 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .sk-block::after {
+    animation: none !important;
+  }
+
+  .login-card,
+  .register-card,
+  .login__decor,
+  .register__decor {
+    animation: none !important;
+  }
+
+  .hover-lift,
+  .hover-lift:hover {
+    transition: none !important;
+    transform: none !important;
+  }
+}

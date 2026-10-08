@@ -89,7 +89,14 @@ export const useAppStore = defineStore('app', {
     setThemeMode(mode) {
       this.themeMode = mode
       safeLocal.set('themeMode', mode)
-      this._applyTheme()
+      // 用户主动切换时走 View Transitions 交叉淡化（不支持的环境/reduced-motion 回退硬切）。
+      // initTheme 首帧与系统主题跟随不经过这里，不会误触发动画。
+      const reduced = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      if (typeof document.startViewTransition === 'function' && !reduced) {
+        document.startViewTransition(() => this._applyTheme())
+      } else {
+        this._applyTheme()
+      }
     },
 
     // 兼容旧调用：亮暗互切（视为手动选择，脱离跟随系统）

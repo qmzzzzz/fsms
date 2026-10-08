@@ -32,14 +32,19 @@
               <el-icon><component :is="item.icon" /></el-icon>
               <span>{{ t(item.i18nKey) }}</span>
             </template>
-            <el-menu-item v-for="child in item.children" :key="child.path" :index="child.path">
+            <el-menu-item
+              v-for="child in item.children"
+              :key="child.path"
+              :index="child.path"
+              @mouseenter="prefetchRoute(child.path)"
+            >
               <el-icon><component :is="child.icon" /></el-icon>
               <template #title>
                 {{ t(child.i18nKey) }}
               </template>
             </el-menu-item>
           </el-sub-menu>
-          <el-menu-item v-else :index="item.path">
+          <el-menu-item v-else :index="item.path" @mouseenter="prefetchRoute(item.path)">
             <el-icon><component :is="item.icon" /></el-icon>
             <template #title>
               {{ t(item.i18nKey) }}
@@ -64,6 +69,13 @@
           </el-breadcrumb>
         </div>
         <div class="navbar-right">
+          <!-- ⌘K 全局搜索（移动端同样可点按触发） -->
+          <el-tooltip :content="searchTooltip" placement="bottom">
+            <el-icon class="action-icon" @click="searchPaletteRef?.open()">
+              <Search />
+            </el-icon>
+          </el-tooltip>
+
           <!-- 语言切换 -->
           <el-dropdown trigger="click" @command="handleLanguageChange">
             <el-icon class="action-icon" :title="t('common.language')">
@@ -148,7 +160,17 @@
         </div>
       </header>
 
-      <main class="main-content">
+      <div
+        class="pull-indicator"
+        :style="{ transform: `translate(-50%, ${pullY}px)`, opacity: pullOpacity }"
+      >
+        <div class="pull-indicator__spinner" :class="{ 'is-spinning': pullRefreshing }" />
+        <span class="pull-indicator__text">{{
+          pullRefreshing ? t('common.refreshing') : t('common.pullToRefresh')
+        }}</span>
+      </div>
+
+      <main ref="mainContentRef" class="main-content">
         <router-view v-slot="{ Component }">
           <transition name="fade" mode="out-in">
             <component :is="Component" :key="route.fullPath" />
@@ -156,6 +178,12 @@
         </router-view>
       </main>
     </div>
+
+    <!-- 优雅退出遮罩 -->
+    <ExitOverlay :visible="showExit" />
+
+    <!-- ⌘K 全局搜索面板 -->
+    <SearchPalette ref="searchPaletteRef" :menu="menuItems" />
   </div>
 </template>
 
@@ -189,13 +217,18 @@ import {
   Moon,
   Monitor,
   Operation,
+  Search,
 } from '@element-plus/icons-vue'
 import { useAuthStore, useAppStore } from '@/store'
 import { matchPermission } from '@/utils/permission'
 import { api } from '@/utils/api'
 import { setLocale } from '@/i18n'
 import { usePermissionSync } from '@/composables/usePermissionSync'
+import { usePullToRefresh } from '@/composables/usePullToRefresh'
+import { prefetchRoute } from '@/utils/routePrefetch'
 import { disconnectWebSocket } from '@/utils/websocket'
+import ExitOverlay from '@/components/ExitOverlay.vue'
+import SearchPalette from '@/components/SearchPalette.vue'
 
 const { t, locale } = useI18n()
 const route = useRoute()
@@ -239,13 +272,64 @@ const checkMobile = () => {
   }
 }
 
+// ===== 移动端下拉刷新 =====
+const mainContentRef = ref(null)
+const { y: pullY, refreshing: pullRefreshing } = usePullToRefresh(mainContentRef, async () => {
+  // 下拉刷新等价于点击刷新按钮：整页重载，各视图自行重新拉取
+  window.location.reload()
+  // reload 完成后页面已重建，无需手动复位 refreshing
+  return new Promise(() => {})
+})
+
+const pullOpacity = computed(() => Math.min(pullY.value / 60, 1))
+
+// ===== 移动端侧栏边缘滑动手势 =====
+// 从左缘 24px 热区右滑打开侧栏；侧栏打开时任意位置左滑关闭。
+// 判定要求水平位移 ≥50px 且明显大于垂直位移，避免与纵向滚动、浏览器返回手势冲突。
+const EDGE_SWIPE_WIDTH = 24
+const EDGE_SWIPE_THRESHOLD = 50
+let swipeStartX = 0
+let swipeStartY = 0
+let swipeTracking = false
+
+const onSwipeStart = (e) => {
+  if (!isMobile.value || e.touches.length !== 1) return
+  const x = e.touches[0].clientX
+  if (mobileSidebarOpen.value || x <= EDGE_SWIPE_WIDTH) {
+    swipeTracking = true
+    swipeStartX = x
+    swipeStartY = e.touches[0].clientY
+  }
+}
+
+const onSwipeEnd = (e) => {
+  if (!swipeTracking) return
+  swipeTracking = false
+  const touch = e.changedTouches[0]
+  const dx = touch.clientX - swipeStartX
+  const dy = touch.clientY - swipeStartY
+  if (Math.abs(dx) < EDGE_SWIPE_THRESHOLD || Math.abs(dx) <= Math.abs(dy)) return
+  if (dx > 0 && swipeStartX <= EDGE_SWIPE_WIDTH) {
+    mobileSidebarOpen.value = true
+  } else if (dx < 0 && mobileSidebarOpen.value) {
+    mobileSidebarOpen.value = false
+  }
+}
+
 onMounted(() => {
   checkMobile()
   window.addEventListener('resize', checkMobile)
+  window.addEventListener('touchstart', onSwipeStart, { passive: true })
+  window.addEventListener('touchend', onSwipeEnd, { passive: true })
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', checkMobile)
+  window.removeEventListener('touchstart', onSwipeStart)
+  window.removeEventListener('touchend', onSwipeEnd)
+  // 登出延迟跳转的定时器：组件若在其触发前卸载，必须清掉，
+  // 否则回调会把用户刚进入的页面强行拽回 /login 并弹出假的"已登出"
+  if (exitTimer) clearTimeout(exitTimer)
 })
 
 const sidebarStyle = computed(() => {
@@ -358,6 +442,15 @@ const toggleFullScreen = () => {
   }
 }
 
+const searchPaletteRef = ref(null)
+const searchTooltip = computed(() => {
+  const k = /mac/i.test(navigator.platform || navigator.userAgent || '') ? '⌘K' : 'Ctrl K'
+  return `${t('common.search')} (${k})`
+})
+const showExit = ref(false)
+// 登出遮罩动画结束后跳转登录页的延迟句柄（onUnmounted 里清理）
+let exitTimer = null
+
 const handleCommand = (command) => {
   switch (command) {
     case 'profile':
@@ -373,6 +466,9 @@ const handleCommand = (command) => {
         type: 'warning',
       })
         .then(async () => {
+          // 显示优雅退出遮罩
+          showExit.value = true
+
           // 服务端登出使 token 进入黑名单，成功后才清本地状态。
           //
           // 后端 P2-26 起，令牌吊销未落库会返回 503/LOGOUT_REVOKE_FAILED——
@@ -386,6 +482,7 @@ const handleCommand = (command) => {
           } catch (err) {
             if (err?.response?.status === 503) {
               // 提示已由 api 响应拦截器按错误码本地化输出，此处仅中止登出
+              showExit.value = false
               return
             }
           }
@@ -393,10 +490,16 @@ const handleCommand = (command) => {
           // 登出必须强制断开 WebSocket 并清零引用计数：残留连接仍携带旧身份的
           // cookie，会继续接收上一个账号的权限推送
           disconnectWebSocket()
-          router.push('/login')
-          ElMessage.success(t('auth.logoutSuccess'))
+
+          // 等待遮罩动画完成后跳转
+          exitTimer = setTimeout(() => {
+            router.push('/login')
+            ElMessage.success(t('auth.logoutSuccess'))
+          }, 600)
         })
-        .catch(() => {})
+        .catch(() => {
+          showExit.value = false
+        })
       break
   }
 }
@@ -524,6 +627,62 @@ const handleCommand = (command) => {
   box-shadow:
     inset 3px 0 0 var(--xf-primary),
     0 0 20px rgba(193, 18, 31, 0.15);
+}
+
+/* ===== 移动端下拉刷新指示器 ===== */
+.pull-indicator {
+  position: absolute;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%) translateY(0);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
+@media (max-width: 768px) {
+  .pull-indicator {
+    top: 56px;
+  }
+}
+
+.pull-indicator__spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--xf-border-color);
+  border-top-color: var(--xf-primary);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.pull-indicator__spinner.is-spinning {
+  animation: pull-spin 0.7s linear infinite;
+}
+
+.pull-indicator__text {
+  font-size: 12px;
+  color: var(--xf-text-secondary);
+  background: var(--xf-bg-card);
+  padding: 6px 12px;
+  border-radius: 999px;
+  box-shadow: var(--xf-shadow-sm);
+  border: 1px solid var(--xf-border-color);
+}
+
+@keyframes pull-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pull-indicator__spinner.is-spinning {
+    animation: none !important;
+  }
 }
 
 /* ===== 主容器 ===== */

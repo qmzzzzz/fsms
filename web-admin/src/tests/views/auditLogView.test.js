@@ -19,6 +19,14 @@ const get = vi.fn()
 const isCanceledError = vi.fn(() => false)
 vi.mock('@/utils/api', () => ({
   apiClient: { get: (...a) => get(...a), post: vi.fn(), delete: vi.fn() },
+  // api.security 封装与 apiClient 共用同一个 get 漏斗，URL/参数断言沿用既有写法
+  api: {
+    security: {
+      verifyAuditChain: (params) => get('/security/audit-logs/verify', { params }),
+      exportAuditLogs: (params) =>
+        get('/security/audit-logs/export', { params, responseType: 'blob' }),
+    },
+  },
   isCanceledError: (...a) => isCanceledError(...a),
   resolveErrorMessage: () => '码化文案',
 }))
@@ -26,7 +34,7 @@ vi.mock('element-plus/es/components/message/index.mjs', () => ({
   ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }))
 vi.mock('element-plus/es/components/message-box/index.mjs', () => ({
-  ElMessageBox: { confirm: vi.fn() },
+  ElMessageBox: { confirm: vi.fn(), alert: vi.fn() },
 }))
 
 import AuditLogView from '@/views/AuditLogView.vue'
@@ -508,6 +516,8 @@ describe('AuditLogView 失败路径与竞态', () => {
 
 describe('AuditLogView 导出', () => {
   test('导出按钮双权限门控：缺任一权限都不渲染，双权限齐备才显示', async () => {
+    // 注：表头除 xlsx「导出」外还有「取证导出」按钮（仅需 security:audit），
+    // 因此此处断言的是按钮总数：无权限 0 / 仅 audit 1（取证）/ 双权限 2。
     const buttonCount = async (perms) => {
       const c = await openList([logRow()], { total: 1 }, perms)
       const n = c.findAll('.card-header .glass-btn').length
@@ -516,8 +526,8 @@ describe('AuditLogView 导出', () => {
       return n
     }
     expect(await buttonCount(['report:export'])).toBe(0)
-    expect(await buttonCount(['security:audit'])).toBe(0)
-    expect(await buttonCount(PERMS)).toBe(1)
+    expect(await buttonCount(['security:audit'])).toBe(1)
+    expect(await buttonCount(PERMS)).toBe(2)
   })
 
   test('导出：携带 type=audit 与当前筛选，成功后触发下载并提示', async () => {
@@ -660,6 +670,121 @@ describe('AuditLogView 导出', () => {
     resolveExport({ data: { message: '导出被拒绝' }, headers: {} })
     await waitFor(() => btn.disabled === false, { message: '导出结束后按钮恢复' })
     expect(ElMessage.error).toHaveBeenCalledWith('导出被拒绝')
+  })
+
+  test('取证导出：点击第二个按钮，携带当前筛选，响应头 X-Audit-Truncated 弹警告', async () => {
+    const realCreateURL = window.URL.createObjectURL
+    const realRevokeURL = window.URL.revokeObjectURL
+    const realAnchorClick = window.HTMLAnchorElement.prototype.click
+    window.URL.createObjectURL = vi.fn(() => 'blob:forensic')
+    window.URL.revokeObjectURL = vi.fn()
+    window.HTMLAnchorElement.prototype.click = vi.fn()
+    try {
+      get.mockImplementation((url) => {
+        if (url === '/security/audit-logs') {
+          return Promise.resolve({ data: { data: { data: [], meta: { total: 0 } } } })
+        }
+        if (url === '/security/overview') return Promise.resolve({ data: { data: {} } })
+        if (url === '/security/audit-logs/export') {
+          return Promise.resolve({
+            data: new Blob(['id,time\n1,2026'], { type: 'text/csv' }),
+            headers: {
+              'content-type': 'text/csv; charset=utf-8',
+              'x-audit-truncated': 'true',
+            },
+          })
+        }
+        return Promise.reject(new Error('unexpected url: ' + url))
+      })
+      const c = mountView()
+      await waitFor(() => logCalls().length >= 1, { message: '列表请求' })
+      // 先设一个分类筛选，证明「参数即所见」
+      await pickSelect(c, 0, '设备管理')
+      await waitFor(() => lastParams().category === 'device', { message: '分类筛选生效' })
+      // 第二个按钮 = 取证导出（xlsx 在前、取证在后）
+      const forensicBtn = c.findAll('.card-header .glass-btn')[1]
+      expect(forensicBtn.textContent).toContain('取证导出')
+      click(forensicBtn)
+      await waitFor(() => get.mock.calls.some((x) => x[0] === '/security/audit-logs/export'), {
+        message: '取证导出请求已发出',
+      })
+      const call = get.mock.calls.find((x) => x[0] === '/security/audit-logs/export')
+      expect(call[1]).toEqual({
+        params: { category: 'device' },
+        responseType: 'blob',
+      })
+      await waitFor(() => ElMessage.warning.mock.calls.length === 1, { message: '截断警告弹出' })
+      expect(ElMessage.error).not.toHaveBeenCalled()
+    } finally {
+      window.URL.createObjectURL = realCreateURL
+      window.URL.revokeObjectURL = realRevokeURL
+      window.HTMLAnchorElement.prototype.click = realAnchorClick
+    }
+  })
+
+  test('核验审计链：点击核验按钮 → /security/audit-logs/verify → 按 canAttestIntact 弹结论', async () => {
+    const { ElMessageBox } = await import('element-plus/es/components/message-box/index.mjs')
+    get.mockImplementation((url) => {
+      if (url === '/security/audit-logs') {
+        return Promise.resolve({ data: { data: { data: [], meta: { total: 0 } } } })
+      }
+      if (url === '/security/overview') {
+        return Promise.resolve({
+          data: {
+            data: {
+              criticalAlerts: 0,
+              highAlerts: 0,
+              failedLogins: 0,
+              compliance: {
+                retentionDays: 90,
+                appendOnlyEnforced: true,
+                monitorRunning: true,
+                walEnabled: true,
+                shippingEnabled: false,
+                chainTailHash: 'abcd1234efgh5678ijkl',
+                auditLoss: {
+                  droppedCount: 0,
+                  walDroppedLines: 0,
+                  walDiscardedLines: 0,
+                  outageFailures: 0,
+                },
+              },
+            },
+          },
+        })
+      }
+      if (url === '/security/audit-logs/verify') {
+        return Promise.resolve({
+          data: {
+            data: {
+              canAttestIntact: true,
+              verdictCode: 'intact',
+              verdictReasons: [],
+              scanned: 1234,
+              collectionTotal: 1234,
+              breaks: 0,
+            },
+          },
+        })
+      }
+      return Promise.reject(new Error('unexpected url: ' + url))
+    })
+    const c = mountView()
+    await waitFor(() => c.find('.compliance-card') !== null, { message: '合规面板渲染' })
+    const verifyBtn = c.find('.compliance-card .glass-btn')
+    expect(verifyBtn).toBeTruthy()
+    expect(verifyBtn.textContent).toContain('核验')
+    click(verifyBtn)
+    await waitFor(() => get.mock.calls.some((x) => x[0] === '/security/audit-logs/verify'), {
+      message: '核验请求已发出',
+    })
+    await waitFor(() => ElMessageBox.alert.mock.calls.length === 1, {
+      message: '核验结论弹出',
+    })
+    const alertArgs = ElMessageBox.alert.mock.calls[0]
+    // 第二参数是 title（或 options.title 兜底）
+    const title = alertArgs[1]?.title ?? alertArgs[1]
+    expect(title).toContain('完整')
   })
 })
 

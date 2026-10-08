@@ -153,19 +153,86 @@
       </el-col>
     </el-row>
 
+    <!-- 合规与防篡改面板：overview.compliance 随统计接口同包下发，此前前端取完 3 个计数就丢弃 -->
+    <div v-if="compliance && !compliance.error" class="glass compliance-card">
+      <div class="compliance-card__header">
+        <span class="compliance-card__title">{{ $t('auditLog.complianceTitle') }}</span>
+        <button
+          type="button"
+          class="glass-btn glass-btn--default glass-btn--sm"
+          :disabled="verifying"
+          @click="verifyChain"
+        >
+          {{ verifying ? $t('auditLog.verifying') : $t('auditLog.verifyChain') }}
+        </button>
+      </div>
+      <div class="compliance-card__chips">
+        <span class="compliance-chip">
+          {{ $t('auditLog.retentionDaysLabel') }} {{ compliance.retentionDays
+          }}{{ $t('auditLog.dayUnit') }}
+        </span>
+        <span class="compliance-chip" :class="compliance.appendOnlyEnforced ? 'is-ok' : 'is-bad'">
+          {{ $t('auditLog.appendOnlyLabel') }}·{{
+            compliance.appendOnlyEnforced ? $t('common.enabled') : $t('common.disabled')
+          }}
+        </span>
+        <span class="compliance-chip" :class="compliance.monitorRunning ? 'is-ok' : 'is-bad'">
+          {{ $t('auditLog.monitorLabel') }}·{{
+            compliance.monitorRunning ? $t('common.enabled') : $t('common.disabled')
+          }}
+        </span>
+        <span class="compliance-chip" :class="compliance.walEnabled ? 'is-ok' : 'is-bad'">
+          {{ $t('auditLog.walLabel') }}·{{
+            compliance.walEnabled ? $t('common.enabled') : $t('common.disabled')
+          }}
+        </span>
+        <span class="compliance-chip" :class="compliance.shippingEnabled ? 'is-ok' : ''">
+          {{ $t('auditLog.shippingLabel') }}·{{
+            compliance.shippingEnabled ? $t('common.enabled') : $t('common.disabled')
+          }}
+        </span>
+        <span
+          class="compliance-chip"
+          :class="auditLossTotal > 0 ? 'is-bad' : 'is-ok'"
+          :title="auditLossDetail"
+        >
+          {{ $t('auditLog.auditLossLabel') }} {{ auditLossTotal }}
+        </span>
+        <span
+          v-if="compliance.chainTailHash"
+          class="compliance-chip compliance-chip--mono"
+          :title="compliance.chainTailHash"
+        >
+          {{ $t('auditLog.chainTailLabel') }} {{ compliance.chainTailHash.slice(0, 12) }}…
+        </span>
+      </div>
+    </div>
+
     <!-- 日志列表 -->
     <div class="glass glass-card" style="margin-top: 16px">
       <div class="card-header" style="margin-bottom: 16px">
         <span>{{ $t('security.auditLogs') }}</span>
-        <button
-          v-if="canExportAudit"
-          type="button"
-          class="glass-btn glass-btn--primary glass-btn--sm"
-          :disabled="exporting"
-          @click="exportLogs"
-        >
-          {{ $t('common.export') }}
-        </button>
+        <div class="card-header__actions">
+          <button
+            v-if="canExportAudit"
+            type="button"
+            class="glass-btn glass-btn--primary glass-btn--sm"
+            :disabled="exporting"
+            @click="exportLogs"
+          >
+            {{ $t('common.export') }}
+          </button>
+          <!-- 取证级导出：CSV + 签名 manifest（含截断/记录数响应头），只需 security:audit -->
+          <button
+            v-if="canAudit"
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            :disabled="forensicExporting"
+            @click="exportForensic"
+          >
+            {{ $t('auditLog.forensicExport') }}
+          </button>
+        </div>
       </div>
 
       <!-- 首屏骨架：日志未到达时占位 -->
@@ -390,13 +457,14 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
-import { apiClient, isCanceledError, resolveErrorMessage } from '@/utils/api'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
+import { api, apiClient, isCanceledError, resolveErrorMessage } from '@/utils/api'
 import { formatTime, localDateStr } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { usePermission } from '@/composables/usePermission'
 
 const { t } = useI18n()
-const { hasAllPerms } = usePermission()
+const { hasPerm, hasAllPerms } = usePermission()
 
 /**
  * 导出按钮的门控（P3-40）
@@ -413,6 +481,8 @@ const { hasAllPerms } = usePermission()
  * 少任何一个都点不动。
  */
 const canExportAudit = computed(() => hasAllPerms(['report:export', 'security:audit']))
+// 只需 security:audit 的「审计操作」门控（核验、取证导出）
+const canAudit = computed(() => hasPerm('security:audit'))
 
 const loading = ref(false)
 const page = ref(1)
@@ -421,6 +491,26 @@ const total = ref(0)
 const logs = ref([])
 const stats = ref({ criticalAlerts: 0, highAlerts: 0, failedLogins: 0 })
 const statsLoaded = ref(false)
+
+// 合规面板（overview.compliance 数据已随统计接口下发，之前只取了 3 个计数就丢了）
+const compliance = ref(null)
+const verifying = ref(false)
+
+const auditLossTotal = computed(() => {
+  const s = compliance.value?.auditLoss
+  if (!s) return 0
+  return (s.droppedCount || 0) + (s.walDroppedLines || 0) + (s.walDiscardedLines || 0)
+})
+
+const auditLossDetail = computed(() => {
+  const s = compliance.value?.auditLoss
+  if (!s) return ''
+  const parts = []
+  if (s.droppedCount) parts.push(`dropped ${s.droppedCount}`)
+  if (s.walDroppedLines) parts.push(`walDropped ${s.walDroppedLines}`)
+  if (s.walDiscardedLines) parts.push(`walDiscarded ${s.walDiscardedLines}`)
+  return parts.join(' / ')
+})
 
 const filters = reactive({
   dateRange: null,
@@ -508,10 +598,41 @@ const loadStats = async () => {
         highAlerts: data.highAlerts || 0,
         failedLogins: data.failedLogins || 0,
       }
+      // compliance 与计数同包下发：留存/护栏/监控/WAL/链尾哈希/丢失计数
+      compliance.value = data.compliance || null
       statsLoaded.value = true
     }
   } catch (e) {
     // 统计加载失败，静默处理
+  }
+}
+
+// 链完整性核验：结论分 success / warning / error 三档，
+// 判绿依据后端的 canAttestIntact（扫全+无断+各层真跑过），不能只看 intact。
+const verifyChain = async () => {
+  verifying.value = true
+  try {
+    const res = await api.security.verifyAuditChain()
+    const d = res.data?.data
+    if (!d) return
+    const title = d.canAttestIntact
+      ? t('auditLog.verifyOkTitle')
+      : d.breaks > 0
+        ? t('auditLog.verifyBrokenTitle')
+        : t('auditLog.verifyPartialTitle')
+    const type = d.canAttestIntact ? 'success' : d.breaks > 0 ? 'error' : 'warning'
+    const lines = []
+    if (d.breaks > 0) lines.push(t('auditLog.verifyBreaksLine', { n: d.breaks }))
+    lines.push(t('auditLog.verifyDetail', { scanned: d.total, total: d.collectionTotal }))
+    ElMessageBox.alert(lines.join('\n'), title, {
+      type,
+      confirmButtonText: t('common.confirm'),
+    })
+  } catch (e) {
+    // 错误提示由 api 响应拦截器统一输出（含 strictLimiter 的 429）
+    if (isCanceledError(e)) return
+  } finally {
+    verifying.value = false
   }
 }
 
@@ -613,6 +734,53 @@ const exportLogs = async () => {
     ElMessage.error(await extractBlobErrorMessage(e?.response?.data, t('messages.exportFailed')))
   } finally {
     exporting.value = false
+  }
+}
+
+// 取证级导出：/security/audit-logs/export 的 CSV + 签名 manifest。
+// 与上方 xlsx 报表导出定位不同：xlsx 给人看，CSV 给取证（文件自带 csvSha256 摘要，
+// 尾部 manifest 注释行 + X-Audit-Manifest-* 响应头双通道）。
+const forensicExporting = ref(false)
+
+const exportForensic = async () => {
+  forensicExporting.value = true
+  try {
+    const response = await api.security.exportAuditLogs(buildFilterParams())
+
+    // 同 P2-56：失败路径后端回 JSON 包络，blob 下须先识别再决定要不要下载
+    const payload = response?.data
+    const contentType = String(response?.headers?.['content-type'] || '')
+    if (
+      payload instanceof Blob &&
+      (payload.type?.includes('json') || contentType.includes('application/json'))
+    ) {
+      ElMessage.error(await extractBlobErrorMessage(payload, t('messages.exportFailed')))
+      return
+    }
+    if (!(payload instanceof Blob)) {
+      ElMessage.error(await extractBlobErrorMessage(payload, t('messages.exportFailed')))
+      return
+    }
+
+    // CSV 侧截断头是 X-Audit-Truncated: 'true'（在首个流块发出前设置）
+    if (response?.headers?.['x-audit-truncated']) {
+      ElMessage.warning(t('messages.exportTruncated'))
+    }
+
+    const blob = new Blob([payload], { type: 'text/csv;charset=utf-8' })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `audit_logs_forensic_${localDateStr()}.csv`
+    link.click()
+    window.URL.revokeObjectURL(url)
+
+    ElMessage.success(t('messages.exportSuccess'))
+  } catch (e) {
+    if (isCanceledError(e)) return
+    ElMessage.error(await extractBlobErrorMessage(e?.response?.data, t('messages.exportFailed')))
+  } finally {
+    forensicExporting.value = false
   }
 }
 
@@ -723,6 +891,52 @@ onMounted(() => {
   font-family: var(--xf-font-display);
   font-weight: 600;
   letter-spacing: var(--xf-tracking-wide);
+}
+.card-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* 合规与防篡改面板：状态键值 chips，好/坏两档配色 */
+.compliance-card {
+  padding: 14px 16px;
+}
+.compliance-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.compliance-card__title {
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  letter-spacing: var(--xf-tracking-wide);
+}
+.compliance-card__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.compliance-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--xf-border-color);
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-text-secondary);
+  white-space: nowrap;
+}
+.compliance-chip--mono {
+  font-family: var(--xf-font-mono);
+}
+.compliance-chip.is-ok {
+  color: var(--xf-success-strong);
+  border-color: var(--xf-success-alpha-45);
+  background: var(--xf-success-alpha-8);
+}
+.compliance-chip.is-bad {
+  color: var(--xf-danger-strong);
+  border-color: var(--xf-danger-alpha-45);
+  background: var(--xf-danger-alpha-8);
 }
 .table-toolbar {
   font-family: var(--xf-font-body);

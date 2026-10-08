@@ -43,7 +43,13 @@
             {{ $t('common.refresh') }}
           </button>
         </div>
-        <el-radio-group v-model="filters.status" size="small" @change="handleFilterChange">
+        <el-radio-group
+          v-model="filters.status"
+          v-seg-glass
+          class="seg-glass"
+          size="small"
+          @change="handleFilterChange"
+        >
           <el-radio-button value="">
             {{ $t('common.all') }}
           </el-radio-button>
@@ -195,6 +201,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
+import vSegGlass from '@/directives/segGlass'
 import { CircleCheckFilled, Tools, Bell, Calendar } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 

@@ -26,6 +26,10 @@ import '@/assets/styles/global.css'
 import '@/assets/styles/dark.css'
 // Apple 风格全局打磨层：只叠加交互反馈与过渡质感，不改布局；须在 global/dark 之后引入
 import '@/assets/styles/apple-polish.css'
+// Apple Copy 精细化打磨层 v3：优雅关闭·多端适配·UI 统一；须在 apple-polish 之后引入
+import '@/assets/styles/apple-refine.css'
+// Apple Copy 逐视图深度定制层 v5：视图级材质/微交互/排版精修；须在 apple-refine 之后引入
+import '@/assets/styles/view-refine.css'
 
 // 开发端口可能与生产 preview 共用。旧的生产 Service Worker 会拦截 Vite 模块和
 // HMR 请求，造成资源读取失败；开发启动时先清理，刷新一次后即恢复干净状态。

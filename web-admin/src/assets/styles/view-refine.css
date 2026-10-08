@@ -1,0 +1,806 @@
+/* ============================================================
+   Apple Copy 逐视图深度定制层 v5 — 视图级精修
+   覆盖范围：认证页品牌区 / Dashboard 统计卡 / 列表页族工具栏·分页·表头
+             / Profile 头像 / About 图标 / Report 卡片
+   加载顺序：必须在 apple-refine.css 之后（同名属性由本层最终裁定）
+   原则：纯 CSS 钩子挂在各视图既有类名上，不改模板、不动布局几何，
+         只叠加材质、微交互与排版精修；所有新动效纳入无障碍降级。
+   ============================================================ */
+
+/* ============================================================
+   1) 认证页（Login / Register）
+   ============================================================ */
+
+/* 品牌标签：hover 轻微提亮，暗示品牌区也是"活"的 */
+.login-brand__tag,
+.register-brand__tag {
+  transition:
+    background-color var(--apple-duration-base) var(--apple-ease),
+    transform var(--apple-duration-base) var(--apple-ease);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .login-brand__tag:hover,
+  .register-brand__tag:hover {
+    background: var(--xf-primary-alpha-12);
+  }
+}
+
+/* 品牌 meta 药丸：hover 上浮 1px + 描边加深（桌面指针专属） */
+.login-brand__meta span {
+  transition:
+    transform var(--apple-duration-base) var(--apple-ease),
+    border-color var(--apple-duration-base) var(--apple-ease),
+    box-shadow var(--apple-duration-base) var(--apple-ease);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .login-brand__meta span:hover {
+    transform: translateY(-1px);
+    border-color: var(--xf-border-color-strong);
+    box-shadow: var(--xf-shadow-sm);
+  }
+}
+
+/* 登录提示条：左侧色条 + 右侧圆角，补全直角边的生硬感 */
+.login-card__tip {
+  border-radius: 0 var(--xf-radius-sm) var(--xf-radius-sm) 0;
+}
+
+/* 认证页页脚链接：Apple 式下划线生长动画（取代 a:hover 的默认 underline） */
+.login-card__footer a,
+.register-card__footer a {
+  position: relative;
+  text-decoration: none;
+}
+
+.login-card__footer a::after,
+.register-card__footer a::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -2px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: right center;
+  transition: transform var(--apple-duration-base) var(--apple-ease);
+}
+
+.login-card__footer a:hover::after,
+.register-card__footer a:hover::after {
+  transform: scaleX(1);
+  transform-origin: left center;
+}
+
+/* 验证码图：键盘聚焦可见环（鼠标点击不显示，与 Apple focus-visible 纪律一致） */
+.login-card__captcha-img:focus-visible,
+.register-card__captcha-img:focus-visible {
+  outline: none;
+  box-shadow: var(--xf-focus-ring);
+}
+
+/* 注册步骤序号：当前步的投影呼吸感收敛为静态高光（严肃调性，不做脉动） */
+.register-steps__item.is-active .register-steps__index {
+  box-shadow:
+    var(--xf-shadow-primary),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+/* ============================================================
+   2) Dashboard
+   ============================================================ */
+
+/* 统计卡图标：卡 hover 时图标微放大，视觉重心落在数据语义上 */
+.stat-icon {
+  transition: transform var(--apple-duration-base) var(--apple-ease);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .stat-card:hover .stat-icon {
+    transform: scale(1.06);
+  }
+}
+
+/* 欢迎卡：深色表面补一道顶部内高光——暗色材质的关键是"上缘受光" */
+.welcome-card {
+  box-shadow:
+    var(--xf-shadow-lg),
+    inset 0 1px 0 rgba(255, 255, 255, 0.09);
+}
+
+/* ============================================================
+   3) 列表页族（Alarm / Device / User / Role / Inspection / AuditLog / IpList）
+   ============================================================ */
+
+/* 工具栏与表格之间加一道发丝分隔线：工具区与数据区层次分离 */
+.glass-card > .table-toolbar {
+  padding-bottom: var(--xf-spacing-md);
+  margin-bottom: var(--xf-spacing-md);
+  border-bottom: 1px solid var(--xf-border-color);
+}
+
+/* 表头排版精修（桌面端）：小号、加粗、宽字距——Apple 表格标题语言。
+   移动端字号由 apple-refine.css §9 的 11px 规则管辖，本层不覆盖 */
+@media (min-width: 769px) {
+  .glass-card .el-table th.el-table__cell {
+    font-size: var(--xf-font-size-xs);
+    font-weight: 600;
+    letter-spacing: var(--xf-tracking-wide);
+    color: var(--xf-gray-500);
+  }
+}
+
+/* 空状态：占位文案收敛为次级灰 + 舒适行距，不与数据行争视觉 */
+.el-table__empty-text {
+  color: var(--xf-text-muted);
+  font-size: var(--xf-font-size-sm);
+  letter-spacing: var(--xf-tracking-wide);
+}
+
+/* 统计加载失败横幅：药丸化容器，弱化"报错"的刺眼感（仍是可操作的降级态） */
+.stats-failed {
+  padding: 10px 16px;
+  border: 1px solid var(--xf-warning-alpha-30);
+  border-radius: var(--xf-radius-md);
+  background: var(--xf-warning-alpha-8);
+  color: var(--xf-warning-strong);
+  font-size: var(--xf-font-size-sm);
+}
+
+/* mini-stat 卡（Alarm / Inspection 顶部统计）：hover 上浮，与 Dashboard hover-lift 同口径 */
+.mini-stat {
+  transition:
+    transform var(--apple-duration-base) var(--apple-ease),
+    box-shadow var(--apple-duration-base) var(--apple-ease);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .mini-stat:hover {
+    transform: translateY(-2px);
+  }
+}
+
+/* 表格行入场编排：仅透明度淡入 + 逐级延迟（transform 对 table-row 在 Blink 下不生效，故不用位移）。
+   动画在元素创建时播放：首屏骨架→表格替换时整表新建触发一次；
+   后续带数据刷新走原地 patch，不会重播，避免轮询噪声。 */
+@keyframes table-row-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.el-table__body-wrapper .el-table__row {
+  animation: table-row-in var(--apple-duration-base) ease both;
+}
+
+.el-table__body-wrapper .el-table__row:nth-child(2) {
+  animation-delay: 40ms;
+}
+
+.el-table__body-wrapper .el-table__row:nth-child(3) {
+  animation-delay: 80ms;
+}
+
+.el-table__body-wrapper .el-table__row:nth-child(4) {
+  animation-delay: 120ms;
+}
+
+.el-table__body-wrapper .el-table__row:nth-child(5) {
+  animation-delay: 160ms;
+}
+
+.el-table__body-wrapper .el-table__row:nth-child(6) {
+  animation-delay: 200ms;
+}
+
+.el-table__body-wrapper .el-table__row:nth-child(7) {
+  animation-delay: 240ms;
+}
+
+.el-table__body-wrapper .el-table__row:nth-child(8) {
+  animation-delay: 280ms;
+}
+
+.el-table__body-wrapper .el-table__row:nth-child(9) {
+  animation-delay: 320ms;
+}
+
+.el-table__body-wrapper .el-table__row:nth-child(n + 10) {
+  animation-delay: 360ms;
+}
+
+/* 表单校验反馈：进入错误态时输入框轻摇一次（错误文本沿用 EP 自带 zoom-in-top，不叠加以免双重动效）。
+   动画挂在 .is-error 上：类名每次添加都会重新播放，重复校验失败也有反馈。 */
+@keyframes form-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-4px);
+  }
+  50% {
+    transform: translateX(4px);
+  }
+  75% {
+    transform: translateX(-2px);
+  }
+}
+
+.el-form-item.is-error .el-input__wrapper,
+.el-form-item.is-error .el-textarea__inner {
+  animation: form-shake 300ms ease;
+}
+
+/* 分页药丸化：背景模式下的页码/前后按钮统一胶囊形，
+   当前页用品牌渐变 + 投影，与全站主按钮同一语义 */
+.pagination .el-pagination.is-background .btn-prev,
+.pagination .el-pagination.is-background .btn-next,
+.pagination .el-pagination.is-background .el-pager li {
+  border-radius: 999px;
+  transition:
+    background-color var(--apple-duration-fast) ease,
+    color var(--apple-duration-fast) ease,
+    transform var(--apple-duration-fast) var(--apple-ease),
+    box-shadow var(--apple-duration-fast) ease;
+}
+
+.pagination .el-pagination.is-background .el-pager li:not(.is-active):hover,
+.pagination .el-pagination.is-background .btn-prev:not(:disabled):hover,
+.pagination .el-pagination.is-background .btn-next:not(:disabled):hover {
+  transform: translateY(-1px);
+}
+
+.pagination .el-pagination.is-background .el-pager li.is-active {
+  background: var(--xf-gradient-primary);
+  box-shadow: var(--xf-shadow-primary);
+}
+
+/* ============================================================
+   4) Profile
+   ============================================================ */
+
+/* 头像：品牌渐变底上叠外环 + 顶部内高光，从"色块"升级为"徽章" */
+.profile-avatar .el-avatar {
+  box-shadow:
+    0 0 0 4px var(--xf-primary-alpha-8),
+    0 0 0 1px var(--xf-primary-alpha-25),
+    var(--xf-shadow-primary),
+    inset 0 2px 0 rgba(255, 255, 255, 0.25);
+}
+
+/* 角色药丸：描边取代纯灰底，与品牌 meta 药丸同一语言 */
+.profile-role {
+  background-color: transparent;
+  border: 1px solid var(--xf-border-color-strong);
+}
+
+/* ============================================================
+   5) About
+   ============================================================ */
+
+/* 关于页图标：从裸图标升级为渐变圆角徽标（与退出遮罩品牌图标同形） */
+.about-icon {
+  padding: 10px;
+  border-radius: 14px;
+  background: var(--xf-gradient-primary) !important;
+  color: #fff !important;
+  filter: none;
+  box-shadow:
+    var(--xf-shadow-primary),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+/* ============================================================
+   6) Report
+   ============================================================ */
+
+/* 报表卡：hover 上浮，与统计卡同一交互语言 */
+.report-card {
+  transition:
+    transform var(--apple-duration-base) var(--apple-ease),
+    box-shadow var(--apple-duration-base) var(--apple-ease);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .report-card:hover {
+    transform: translateY(-2px);
+  }
+}
+
+/* ---------- 液态玻璃分段控件（iOS Segmented Control，全站统一） ----------
+   复用钩子：el-radio-group 挂 class="seg-glass" 即得。
+   已接入：Report 时间范围切换器、Inspection 状态筛选。
+   容器为磨砂玻璃药丸，选中段为浮起的玻璃滑块。
+   模板保持 el-radio-group + el-radio-button 结构不变（测试按 .el-radio-button 定位）。 */
+.el-radio-group.seg-glass {
+  position: relative;
+  display: inline-flex;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--xf-border-color);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    var(--xf-shadow-xs);
+}
+
+/* 分段：透明化 EP 默认边框/底色，只留文字（选中态底色由滑动滑块承载） */
+.el-radio-group.seg-glass .el-radio-button .el-radio-button__inner {
+  position: relative;
+  z-index: 1;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 999px;
+  padding: 7px 18px;
+  margin: 0;
+  font-size: var(--xf-font-size-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--xf-text-secondary);
+  transition:
+    color var(--apple-duration-fast) ease,
+    background-color var(--apple-duration-base) var(--apple-ease);
+}
+
+/* small 变体（Inspection 筛选栏等紧凑场景）：收敛内边距，保持同一材质 */
+.el-radio-group.seg-glass.el-radio-group--small .el-radio-button .el-radio-button__inner {
+  padding: 5px 14px;
+  font-size: var(--xf-font-size-xs);
+}
+
+/* 未选中 hover：轻微底色提示可点 */
+@media (hover: hover) and (pointer: fine) {
+  .el-radio-group.seg-glass .el-radio-button:not(.is-active) .el-radio-button__inner:hover {
+    color: var(--xf-text-primary);
+    background: rgba(15, 23, 42, 0.05);
+  }
+}
+
+/* 选中段：仅文字变色加粗，"白底药丸"由下方滑块呈现并滑移过去 */
+.el-radio-group.seg-glass .el-radio-button.is-active .el-radio-button__inner,
+.el-radio-group.seg-glass .el-radio-button__original-radio:checked + .el-radio-button__inner {
+  color: var(--xf-primary) !important;
+  font-weight: 600;
+}
+
+/* 滑动指示器：由 v-seg-glass 指令测量注入，绝对定位平移到选中段。
+   默认无过渡；--live 类（首帧定位后挂载）之后才启用滑动动画。 */
+.seg-glass__thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow:
+    0 2px 8px rgba(15, 23, 42, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--apple-duration-fast) ease;
+}
+
+.el-radio-group.seg-glass.seg-glass--live .seg-glass__thumb {
+  transition:
+    transform var(--apple-duration-slow) var(--apple-ease),
+    width var(--apple-duration-slow) var(--apple-ease),
+    height var(--apple-duration-slow) var(--apple-ease),
+    opacity var(--apple-duration-fast) ease;
+}
+
+/* 键盘聚焦：目标段显示聚焦环 */
+.el-radio-group.seg-glass .el-radio-button__original-radio:focus-visible + .el-radio-button__inner {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--xf-primary-alpha-35) !important;
+}
+
+/* 触屏：分段高度对齐 44px 触控目标 */
+@media (hover: none) and (pointer: coarse) {
+  .el-radio-group.seg-glass .el-radio-button .el-radio-button__inner {
+    padding: 10px 20px;
+    min-height: var(--apple-touch-min);
+    display: inline-flex;
+    align-items: center;
+  }
+}
+
+/* ============================================================
+   7) 暗色模式适配
+   ============================================================ */
+
+/* 主题切换交叉淡化：View Transitions 根快照用苹果弹簧曲线做 350ms 交叉淡化。
+   只在用户主动切换时由 store 触发（见 app.js setThemeMode）。 */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: var(--apple-duration-slow);
+  animation-timing-function: var(--apple-ease);
+  mix-blend-mode: normal;
+}
+
+html.dark .stats-failed {
+  background: var(--xf-warning-alpha-15);
+  border-color: var(--xf-warning-alpha-45);
+}
+
+html.dark .profile-avatar .el-avatar {
+  box-shadow:
+    0 0 0 4px var(--xf-primary-alpha-12),
+    0 0 0 1px var(--xf-primary-alpha-35),
+    0 6px 20px rgba(0, 0, 0, 0.4),
+    inset 0 2px 0 rgba(255, 255, 255, 0.18);
+}
+
+html.dark .about-icon {
+  box-shadow:
+    0 6px 20px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+/* 暗色：容器降为暗玻璃，滑块白底->暗玻璃，文字高亮 */
+html.dark .el-radio-group.seg-glass {
+  background: rgba(15, 23, 42, 0.55);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+html.dark .seg-glass__thumb {
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow:
+    0 2px 10px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  html.dark
+    .el-radio-group.seg-glass
+    .el-radio-button:not(.is-active)
+    .el-radio-button__inner:hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+}
+
+html.dark .el-radio-group.seg-glass .el-radio-button.is-active .el-radio-button__inner,
+html.dark
+  .el-radio-group.seg-glass
+  .el-radio-button__original-radio:checked
+  + .el-radio-button__inner {
+  color: #ffffff !important;
+}
+
+/* ============================================================
+   8) 无障碍降级：本层所有新动效纳入 reduced-motion
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  .login-brand__tag,
+  .register-brand__tag,
+  .login-brand__meta span,
+  .stat-icon,
+  .mini-stat,
+  .report-card,
+  .login-card__footer a::after,
+  .register-card__footer a::after,
+  .el-radio-group.seg-glass .el-radio-button .el-radio-button__inner,
+  .pagination .el-pagination.is-background .btn-prev,
+  .pagination .el-pagination.is-background .btn-next,
+  .pagination .el-pagination.is-background .el-pager li {
+    transition: none !important;
+    transform: none !important;
+  }
+
+  /* 滑块只关过渡：transform 是它的定位手段，不能置 none */
+  .seg-glass__thumb {
+    transition: none !important;
+  }
+
+  /* 表格行入场与表单抖动：动画整体关闭，直接呈现终态 */
+  .el-table__body-wrapper .el-table__row,
+  .el-form-item.is-error .el-input__wrapper,
+  .el-form-item.is-error .el-textarea__inner {
+    animation: none !important;
+  }
+
+  .stat-card:hover .stat-icon,
+  .mini-stat:hover,
+  .report-card:hover,
+  .login-brand__meta span:hover,
+  .pagination .el-pagination.is-background .el-pager li:not(.is-active):hover,
+  .pagination .el-pagination.is-background .btn-prev:not(:disabled):hover,
+  .pagination .el-pagination.is-background .btn-next:not(:disabled):hover {
+    transform: none !important;
+  }
+
+  .login-card__footer a:hover::after,
+  .register-card__footer a:hover::after {
+    transform: scaleX(1) !important;
+  }
+}
+
+/* ============================================================
+   9) ⌘K 全局搜索面板（SearchPalette）
+   Spotlight 式液态玻璃：遮罩整页压暗 + 面板 28px 磨砂，
+   条目激活态用品牌 alpha 底 + 主色文字，匹配片段 <mark> 高亮。
+   ============================================================ */
+
+.search-palette__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh var(--xf-spacing-lg) var(--xf-spacing-lg);
+  background: rgba(15, 23, 42, 0.28);
+  backdrop-filter: blur(8px) saturate(140%);
+  -webkit-backdrop-filter: blur(8px) saturate(140%);
+}
+
+.search-palette {
+  width: min(560px, 100%);
+  max-height: 68vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--xf-radius-lg);
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border: 1px solid var(--xf-border-color);
+  box-shadow:
+    var(--xf-shadow-2xl),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+/* 输入行 */
+.search-palette__input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--xf-spacing-md);
+  padding: 14px var(--xf-spacing-lg);
+  border-bottom: 1px solid var(--xf-border-color);
+}
+
+.search-palette__input-icon {
+  flex: none;
+  font-size: 18px;
+  color: var(--xf-gray-500);
+}
+
+.search-palette__input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: var(--xf-font-size-md);
+  color: var(--xf-text-primary);
+}
+
+.search-palette__input::placeholder {
+  color: var(--xf-text-muted);
+}
+
+/* kbd 按键帽：1px 描边 + 底部加粗模拟机械键帽厚度 */
+.search-palette__kbd {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid var(--xf-border-color-strong);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: var(--xf-gray-50);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--xf-text-secondary);
+}
+
+/* 列表 */
+.search-palette__list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--xf-spacing-sm);
+}
+
+.search-palette__group {
+  padding: 10px 10px 4px;
+  font-size: var(--xf-font-size-xs);
+  font-weight: 600;
+  letter-spacing: var(--xf-tracking-wider);
+  color: var(--xf-text-muted);
+}
+
+.search-palette__item {
+  display: flex;
+  align-items: center;
+  gap: var(--xf-spacing-md);
+  width: 100%;
+  min-height: var(--apple-touch-min);
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--xf-radius-sm);
+  background: transparent;
+  font-size: var(--xf-font-size-base);
+  color: var(--xf-text-regular);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--apple-duration-fast) ease,
+    color var(--apple-duration-fast) ease;
+}
+
+.search-palette__item-icon {
+  flex: none;
+  font-size: 16px;
+  color: var(--xf-gray-500);
+  transition: color var(--apple-duration-fast) ease;
+}
+
+.search-palette__item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-palette__mark {
+  background: transparent;
+  color: var(--xf-primary);
+  font-weight: 600;
+}
+
+.search-palette__item-group,
+.search-palette__item-check {
+  flex: none;
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-text-muted);
+}
+
+.search-palette__item-check {
+  font-size: 14px;
+  color: var(--xf-primary);
+}
+
+/* 激活条目（键盘高亮或鼠标悬停）：品牌 alpha 底 + 主色图标文字 */
+.search-palette__item.is-active {
+  background: var(--xf-primary-alpha-8);
+  color: var(--xf-text-primary);
+}
+
+.search-palette__item.is-active .search-palette__item-icon {
+  color: var(--xf-primary);
+}
+
+/* 空态 */
+.search-palette__empty {
+  padding: 32px var(--xf-spacing-lg);
+  text-align: center;
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-text-muted);
+  letter-spacing: var(--xf-tracking-wide);
+}
+
+/* 页脚快捷键提示 */
+.search-palette__footer {
+  display: flex;
+  align-items: center;
+  gap: var(--xf-spacing-lg);
+  padding: 8px var(--xf-spacing-lg);
+  border-top: 1px solid var(--xf-border-color);
+}
+
+.search-palette__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-text-muted);
+}
+
+/* 进出场：遮罩淡入 + 面板 0.96 缩放轻微上浮，苹果弹簧曲线 */
+.palette-enter-active {
+  transition: opacity var(--apple-duration-base) ease;
+}
+
+.palette-enter-active .search-palette {
+  transition:
+    opacity var(--apple-duration-base) ease,
+    transform var(--apple-duration-base) var(--apple-ease);
+}
+
+.palette-leave-active {
+  transition: opacity 160ms ease;
+}
+
+.palette-leave-active .search-palette {
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+.palette-enter-from,
+.palette-leave-to {
+  opacity: 0;
+}
+
+.palette-enter-from .search-palette,
+.palette-leave-to .search-palette {
+  opacity: 0;
+  transform: translateY(-8px) scale(0.96);
+}
+
+/* 移动端：面板更靠上并铺满宽度，为虚拟键盘留出让位 */
+@media (max-width: 768px) {
+  .search-palette__overlay {
+    padding: 8vh var(--xf-spacing-md) var(--xf-spacing-md);
+  }
+
+  .search-palette__footer {
+    display: none;
+  }
+}
+
+/* 暗色适配 */
+html.dark .search-palette__overlay {
+  background: rgba(2, 6, 23, 0.5);
+}
+
+html.dark .search-palette {
+  background: rgba(15, 23, 42, 0.78);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow:
+    0 12px 48px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+html.dark .search-palette__input-row {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+html.dark .search-palette__kbd {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+html.dark .search-palette__item.is-active {
+  background: var(--xf-primary-alpha-25);
+  color: #ffffff;
+}
+
+html.dark .search-palette__footer {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+/* 无障碍降级：进出场只留瞬时淡入，条目过渡关闭 */
+@media (prefers-reduced-motion: reduce) {
+  .palette-enter-active,
+  .palette-leave-active,
+  .palette-enter-active .search-palette,
+  .palette-leave-active .search-palette {
+    transition: none !important;
+  }
+
+  .palette-enter-from .search-palette,
+  .palette-leave-to .search-palette {
+    transform: none !important;
+  }
+
+  .search-palette__item,
+  .search-palette__item-icon {
+    transition: none !important;
+  }
+}

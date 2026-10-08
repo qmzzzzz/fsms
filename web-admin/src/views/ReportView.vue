@@ -87,7 +87,7 @@
       DST 安全的日界算法换算成 UTC 瞬间，跨夏令时切换日（23/25 小时日）不重叠不空洞。
     -->
     <div v-if="!loading" class="range-bar">
-      <el-radio-group v-model="statsRange" @change="loadChartData">
+      <el-radio-group v-model="statsRange" v-seg-glass class="seg-glass" @change="loadChartData">
         <el-radio-button value="all">{{ $t('report.range.all') }}</el-radio-button>
         <el-radio-button value="today">{{ $t('report.range.today') }}</el-radio-button>
         <el-radio-button value="7d">{{ $t('report.range.last7') }}</el-radio-button>
@@ -187,6 +187,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useAppStore } from '@/store'
+import vSegGlass from '@/directives/segGlass'
 
 const { hasPerm } = usePermission()
 const { t, locale } = useI18n()

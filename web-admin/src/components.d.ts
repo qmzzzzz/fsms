@@ -51,6 +51,7 @@ declare module 'vue' {
     ElTableColumn: typeof import('element-plus/es/components/table/index.mjs')['ElTableColumn']
     ElTag: typeof import('element-plus/es/components/tag/index.mjs')['ElTag']
     ElTooltip: typeof import('element-plus/es/components/tooltip/index.mjs')['ElTooltip']
+    ExitOverlay: typeof import('./components/ExitOverlay.vue')['default']
     GlassSegmented: typeof import('./components/GlassSegmented.vue')['default']
     GlassSkeleton: typeof import('./components/GlassSkeleton.vue')['default']
     InspectionCompleteForm: typeof import('./components/InspectionCompleteForm.vue')['default']
@@ -66,6 +67,8 @@ declare module 'vue' {
     RoleListPanel: typeof import('./components/RoleListPanel.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    ScrambleText: typeof import('./components/ScrambleText.vue')['default']
+    SearchPalette: typeof import('./components/SearchPalette.vue')['default']
     SessionManager: typeof import('./components/SessionManager.vue')['default']
   }
   export interface GlobalDirectives {

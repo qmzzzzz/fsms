@@ -811,6 +811,21 @@ export const api = {
     viewSensitive: (data) => apiClient.post('/security/view-sensitive', data),
     addIPEntry: (data) => apiClient.post('/security/ip-list', data),
     removeIPEntry: (id) => apiClient.delete(`/security/ip-list/${id}`),
+    // 审计链完整性核验：GET /audit-logs/verify?limit=&from=latest|earliest
+    // → data { intact, breaks, byType, total, scanned, canAttestIntact, verdictCode,
+    //          verdictReasons, collectionTotal }
+    // 判绿必须看 canAttestIntact（扫全+无断+各层真跑过），不能只看 intact（仅"扫过的没断"）。
+    verifyAuditChain: (params) => apiClient.get('/security/audit-logs/verify', { params }),
+    // 取证级导出：CSV + 签名 manifest（尾部注释行 + X-Audit-Manifest-* 响应头），
+    // 截断时带 X-Audit-Truncated: true。与 /reports/export?type=audit 的 xlsx 报表定位不同。
+    exportAuditLogs: (params) =>
+      apiClient.get('/security/audit-logs/export', { params, responseType: 'blob' }),
+    // 系统安全统计（管理员，需 security:stats）
+    getSecurityStats: () => apiClient.get('/security/stats'),
+    // 个人安全信息 / 账号绑定 / 个人操作日志（本人数据，无权限码门控）
+    getMySecurityInfo: () => apiClient.get('/security/my-info'),
+    getAccountBindings: () => apiClient.get('/security/bindings'),
+    getMyLogs: (params) => apiClient.get('/security/my-logs', { params }),
   },
 }
 
