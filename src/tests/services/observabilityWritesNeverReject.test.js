@@ -448,4 +448,59 @@ describe('观测性写入的「永不 reject」契约', () => {
       }
     });
   });
+
+  /**
+   * L7（2026-10-08 补，第 5 个实例）：`middleware/auth.js` 的 `invalidateUserCache` 广播臂。
+   *
+   * 与 L5 是同一条等式：`sharedCache.publishInvalidate` 是 async，而 `invalidateUserCache`
+   * 是**同步**函数，调用点（roleController / rolePermissionController / initData）都不 await
+   * 它 ⇒ 那条 promise 只能由这个 `.catch` 持有。ccddabc 补上了它（并把 `err.message` 写成
+   * `err?.message ?? err`），但当时**没有任何用例驱动过它**——覆盖它的
+   * `controllers/roleStatusInvalidatesUserCache.test.js` 把整个 `invalidateUserCache`
+   * `jest.mock` 掉了（只断言"被调用"，不碰函数体）。
+   *
+   * 后果是可量化的：auth.js 的函数覆盖从 14/15（93.33%）掉到 14/16（**87.5%**），低于
+   * jest.config 里那条 90 的阈值——这正是 CI `#13 Run tests with coverage` 的红。
+   * 本层把"持有关系"从注释承诺升级为行为判据：拒绝必须被吞、处理器必须真的被走到、
+   * 非 Error 拒绝不得把"吞错"变成"再抛"。
+   *
+   * 三种拒绝形态里前两种是分支覆盖的必需项（`err?.message` 一侧 + `?? err` 一侧），
+   * 第三种（无 message 的普通对象）钉住 `?? err` 的兜底确实回落到被拒值本身。
+   */
+  describe('L7 auth.invalidateUserCache：广播臂的 .catch 必须真的接住拒绝', () => {
+    test.each([
+      ['Error', new Error('redis down'), 'redis down'],
+      ['undefined（非 Error 形态）', undefined, 'undefined'],
+      ['无 message 的普通对象', { code: 'ECONNREFUSED' }, '[object Object]'],
+    ])('publishInvalidate 以 %s 拒绝 ⇒ 不抛，且 warn 打印被拒值', async (_label, reason, shown) => {
+      const auth = require('../../middleware/auth');
+      const sharedCache = require('../../services/sharedCache');
+      const logger = require('../../utils/logger');
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      const pubSpy = jest
+        .spyOn(sharedCache, 'publishInvalidate')
+        .mockImplementation(() => Promise.reject(reason));
+
+      const userId = `l7-${shown}`;
+      // 同步函数 + 调用点不 await：所以"调用本身不抛"是契约的第一半
+      expect(() => auth.invalidateUserCache(userId)).not.toThrow();
+      await new Promise((resolve) => setImmediate(resolve)); // 让 .catch 微任务跑完
+
+      // 前提自证：广播确实发出去了，且发的是 **auth 那条键**。
+      // 不能断言 toHaveBeenCalledTimes(1)：invalidateUserCacheLocal → User.invalidatePermissionCache
+      // → userPermissionService.invalidatePermissionCache 自己也会广播一条 `permcache:` 键
+      //（src/services/userPermissionService.js:191），两条键同源但前缀不同、各有各的 .catch。
+      const keys = pubSpy.mock.calls.map((c) => String(c[0]));
+      const authCall = keys.indexOf(`auth:user:${userId}`);
+      expect(authCall).toBeGreaterThan(-1);
+      // 该调用的返回值确实 reject（否则下面的 warn 断言可能只是"什么都没发生"）
+      await expect(pubSpy.mock.results[authCall].value).rejects.toBe(reason);
+      // 处理器真的被走到了：文案逐字（含 `：${err?.message ?? err}` 的取值形态）
+      expect(warnSpy.mock.calls.map((c) => String(c[0]))).toContain(
+        `缓存失效广播异常（不阻断本次操作）：${shown}`
+      );
+
+      pubSpy.mockRestore();
+    });
+  });
 });

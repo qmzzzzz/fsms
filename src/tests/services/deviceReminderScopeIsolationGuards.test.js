@@ -25,6 +25,11 @@
  *  - markOverdueInspections（L135-155）：modifiedCount 正常 / `?? 0` 兜底 / 异常吞掉
  *  - startReminderScheduler 重复启动幂等（L182-185）、firstTimer/interval 回调、
  *    interval 里 isScanning 跳过（L197-200）与扫描失败 .catch 分支
+ *  - 2026-10-08 追加：**巡检标记臂**的两处 .catch（CI #13 的 functions 90% /
+ *    branches 86.79% 即由此而来）。它们**不是**普通 DB 故障能驱动的——`markOverdueInspections`
+ *    整段体在 try/catch 内、永不 reject，那两条箭头是**第二道防线**，只在第一道被破坏
+ *    （内层 catch 体自身抛错）时才生效。故用例用"让内层 logger.error 抛错"来驱动，
+ *    两种形态（Error / undefined）各一条，把 `${err?.message ?? err}` 的两条路径都走到。
  *  - stopReminderScheduler 句柄回退（L215）、target 判空（L217）、扫描等待循环（L222-226）
  *
  * 隔离策略（修复上一版跨用例泄漏导致的失败/挂起）：
@@ -335,6 +340,75 @@ describe('deviceReminder 分支补齐', () => {
     expect(logger.error).toHaveBeenCalledTimes(2); // 第三次未再失败
 
     await yieldNow(); // 等待最后一次扫描的微任务收尾，isScanning 复位后再停
+    await service.stopReminderScheduler();
+  });
+
+  /**
+   * 巡检标记臂的两处 .catch（firstTimer 的「首次巡检逾期标记失败」与 interval 的
+   * 「巡检逾期标记调度失败」）。
+   *
+   * 关键前提（**实测得出，不是推测**）：`markOverdueInspections` 的函数体整段都在
+   * try/catch 里，catch 体只调 logger.error 并 `return 0`——它**永不 reject**。上面三条
+   * 调度器用例把它 mock 成 resolve 只是"没触发"，真相更硬：**普通 DB 故障驱动不了这两条箭头**。
+   * 第一版用例正是这么写的，实测 logger.error 只收到内层 catch 自己那条
+   * `巡检逾期标记失败：…`，两条箭头一次都没跑。
+   *
+   * ⇒ 这两条 `.catch` 是**第二道防线**：只有第一道被破坏（内层 catch 体自身抛错，
+   *   例如观测函数故障）时才执行。要验证第二道防线，唯一正确的做法就是**把第一道打断**：
+   *   让内层那一次 logger.error 抛错，使 markOverdueInspections 真的 reject，再看调度器接不接得住。
+   *   这也解释了它们为何看起来像死代码——设计上就只在第一道失效时才生效。
+   *
+   * 两种形态都要测：抛 Error ⇒ 箭头走 `err?.message`；抛 undefined ⇒ 走 `?? err` 兜底。
+   * 非 Error 形态正是这段代码要防的（`${err.message}` 形态会在 .catch 内再抛一次，
+   * 变成第二个无人持有的拒绝 ⇒ 本仓 unhandledRejection 兜底 ⇒ process.exit(1)）。
+   */
+  test('巡检标记臂：内层「永不 reject」契约被破坏时，两条 .catch 必须接住（非 Error 形态）', async () => {
+    jest.useFakeTimers();
+    Inspection.updateMany.mockRejectedValue(undefined);
+    service.startReminderScheduler(60 * 1000);
+
+    // firstTimer：只让**内层**那一次 logger.error 抛——once 队列在箭头那次调用前就耗尽了，
+    // 所以箭头自己的 logger.error 正常返回（否则它自己会变成第二个无人持有的拒绝）。
+    logger.error.mockImplementationOnce(() => {
+      throw undefined;
+    });
+    await jest.advanceTimersByTimeAsync(30 * 1000);
+    expect(logger.error).toHaveBeenCalledWith('首次巡检逾期标记失败：undefined');
+
+    // interval：同上，重新挂一次 once（上一次已在 firstTimer 轮消费掉）
+    logger.error.mockImplementationOnce(() => {
+      throw undefined;
+    });
+    await jest.advanceTimersByTimeAsync(60 * 1000);
+    expect(logger.error).toHaveBeenCalledWith('巡检逾期标记调度失败：undefined');
+    await yieldNow();
+
+    // 前提自证：失败面只在巡检臂——扫描臂（find 立即成功）不得被误报，
+    // 否则上面两条断言可能来自"整条调度都挂了"而不是这两条箭头。
+    expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('扫描失败'));
+
+    await service.stopReminderScheduler();
+  });
+
+  test('巡检标记臂：内层抛 Error ⇒ 同一对箭头走 `err?.message` 一侧（补上另一半分支）', async () => {
+    jest.useFakeTimers();
+    Inspection.updateMany.mockRejectedValue(undefined);
+    service.startReminderScheduler(60 * 1000);
+
+    logger.error.mockImplementationOnce(() => {
+      throw new Error('logger transport down');
+    });
+    await jest.advanceTimersByTimeAsync(30 * 1000);
+    // 箭头拿到的被拒值是**内层抛出的那个** Error（不是 updateMany 的 undefined）
+    expect(logger.error).toHaveBeenCalledWith('首次巡检逾期标记失败：logger transport down');
+
+    logger.error.mockImplementationOnce(() => {
+      throw new Error('logger transport down');
+    });
+    await jest.advanceTimersByTimeAsync(60 * 1000);
+    expect(logger.error).toHaveBeenCalledWith('巡检逾期标记调度失败：logger transport down');
+    await yieldNow();
+
     await service.stopReminderScheduler();
   });
 
