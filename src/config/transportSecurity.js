@@ -69,10 +69,15 @@ const uriHostname = (uri) => {
  * sharedCache.redisConnectionPassword）；受信内网免认证须显式声明
  * REDIS_AUTH_EXEMPT=true（与 REDIS_TLS_EXEMPT 同族：豁免必须可见，不许静默）。
  *
+ * **回环豁免**（与 TLS 闸同一条既有口径）：redis 指向 127.0.0.1/localhost/::1
+ * 时只有本机进程可达，无认证的暴露面收敛到本机——production-drill 的临时栈
+ * 与单机部署形态靠这条放行（e2e CI 曾因本闸无豁免而红，实测复现）。
+ *
  * 独立成函数不只是拆复杂度：它判的是「Redis 上的身份」，与 host 侧的「流量去哪」
  * 是两个维度，分开后各自可独立断言。
  */
 const collectRedisAuthErrors = (errors, parsedRedisUrl) => {
+  if (isLoopbackHostname(parsedRedisUrl.hostname)) return;
   const hasUrlCredential = Boolean(parsedRedisUrl.username || parsedRedisUrl.password);
   if (
     !hasUrlCredential &&

@@ -568,8 +568,8 @@ const recordEarlyRejection = (req, meta) => {
  *  3) trust proxy 开启且携带 XFF：req.ip 来自请求头，只有 socket 对端属于
  *     内网/回环（即 nginx/容器网络等基础设施，与 metricsAuth 的放行口径一致）时，
  *     该 XFF 才是可信代理写入的（生产 nginx 覆写 `X-Forwarded-For $remote_addr`）。
- * 经 nginx 的正常流量命中 3) ⇒ 办公网 IP 白名单功能不受影响；
- * 公网直连 + 伪造 XFF 落在 3) 的拒绝侧 ⇒ 三重豁免不再可用。
+ * 经 nginx 的正常流量命中 3) ⇒ 白名单不受影响；公网直连+伪造 XFF 落 3) 拒绝侧 ⇒ 豁免不可用（探针 E/A）。
+ * 但 3) 认的是"任意内网/回环对端"而非"被指定的代理"：容器网络里的直连方伪造一跳即可同时免黑名单+拿豁免（探针 D）。
  *
  * 判据本体自 2026-10-01 移到 utils/ipUtils.js 的 `isClientIpIdentityTrustworthy`
  * （理由见那里的头注释：认证侧的 allowedIPs 与豁免发放是同一条伪造链的两侧，必须
@@ -599,9 +599,9 @@ const checkIPBlacklist = async (req, res, next) => {
     ]);
 
     // 白名单优先：命中则豁免黑名单拦截，并挂标记供限流器豁免。
-    // 豁免标记只在可信边界内发放（见 isWhitelistExemptionTrustworthy）：
-    // 命中但边界不可信时**不发放标记、也不拦截请求**——限流与来源校验照常生效，
-    // 只损失"不该有的豁免"，不产生可用性回退
+    // 豁免标记只在可信边界内发放（见 isWhitelistExemptionTrustworthy）：边界不可信时不发
+    // 标记、也不拦截——限流与来源校验照常生效。**别把它读成"代价只有豁免"**：下面两次
+    // 名单查询用的都是 req.ip（可伪造），真身在黑名单者伪造一个白名单地址即整条免检。
     if (isWhitelisted) {
       if (isWhitelistExemptionTrustworthy(req)) {
         req.ipWhitelisted = true;
