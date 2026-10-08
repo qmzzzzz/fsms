@@ -39,7 +39,11 @@
  *    不给"这条不算"的豁免口——豁免一旦能靠措辞触发，判据就等于没有。
  *
  * 【前提自证 / 反面自证】
- *  真文档至少抓到 1 条 Cookie 名，且必须来自被修的那个文件；两条通道各由一条合成违例点亮；
+ *  两条"真文档"腿各有地面，不是只等违例为空：Cookie 名 ≥1 且必须来自被修的那个文件；
+ *  负面判据块 ≥1 且同样钉在该文件上，外加每篇扫描文档的**围栏行数必须为偶**——
+ *  块边界靠奇偶追踪，实测证明一个裸 ``` 就能把缺陷块读成散文（401 原地不动而本腿绿），
+ *  所以采集器自己的前提也得由文档证明。
+ *  Cookie 通道按**写法**穷举：`-H`、`--header`、大写 `COOKIE:`、`-b/--cookie` 四条合成违例各点亮一次；
  *  合成合法文档判绿、合成缺陷文档判红且红在同一处；排除规则反向验证（围栏外的 401 散文、
  *  Authorization 头、Set-Cookie 字样都不被判为违例）；另把 ① 的**成立前提**钉住——
  *  AUTH_TOKEN_MISSING 与 AUTH_TOKEN_INVALID 的 status 同为 401，正因为如此才必须看 errorCode。
@@ -71,8 +75,13 @@ const DOCS = [
 const COOKIE_NAME_EXPORTS = Object.keys(cookie).filter((k) => /_COOKIE_NAME$/.test(k));
 const LEGAL_COOKIE_NAMES = COOKIE_NAME_EXPORTS.map((k) => cookie[k]);
 
-/** `-H "Cookie: a=1; b=2"`：引号内的整串按 `;` 拆，每段取 `=` 前的名字 */
-const H_COOKIE_RE = /-H\s+(["'])\s*[Cc]ookie:\s*([^"']+)\1/g;
+/**
+ * `-H "Cookie: a=1; b=2"` / `--header "Cookie: …"`：引号内的整串按 `;` 拆，每段取 `=` 前的名字。
+ * `--header` 是 curl 的官方长写法，头部名按 HTTP 大小写不敏感（`COOKIE:` 同样有效）——
+ * 这两种写法实测收不到时，手册只要换个写法就能绕开 A，而绕开的正是本闸要抓的那个错
+ * （名字写成 accessToken）。所以按写法穷举，不收"应该没人这么写"。
+ */
+const H_COOKIE_RE = /(?:-H|--header)\s+(["'])\s*[Cc][Oo][Oo][Kk][Ii][Ee]:\s*([^"']+)\1/g;
 /** `curl -b name=…` / `--cookie name=…` / `--cookie=name=…`（裸文件名不带 `=`，不匹配） */
 const CURL_COOKIE_RE = /(?:^|[\s;&|`(])(?:-b|--cookie)\s*=?\s*["']?([A-Za-z_][A-Za-z0-9_.-]*)\s*=/g;
 
@@ -91,7 +100,7 @@ const cookieRefs = (doc, text) => {
         const idx = pair.indexOf('=');
         if (idx <= 0) continue;
         const name = pair.slice(0, idx).trim();
-        if (name) push(i + 1, name, '-H "Cookie: …"');
+        if (name) push(i + 1, name, '-H/--header "Cookie: …"');
       }
     }
     for (const m of raw.matchAll(CURL_COOKIE_RE)) push(i + 1, m[1], '-b/--cookie …=…');
@@ -198,6 +207,27 @@ test('真文档｜手册里发出的每个 Cookie 名，认证中间件都取得
 });
 
 test('真文档｜每个"负面判据"代码块都自带正向对照或码级判据', () => {
+  // 采集器自己的前提先钉住：块的边界靠围栏奇偶，奇偶一错，缺陷块就被读成"散文"。
+  // 实测（祸害恒定）：删掉对照行 ⇒ 本腿红；401 文本原样不动、只在该块开围栏前插一行裸 ``` ⇒ 本腿绿。
+  // 一个字符能抹掉判据，所以"我检查过"必须由文档自己证明，不能靠违例列表为空。
+  expect(
+    DOCS.map((d) => ({
+      doc: d,
+      n: read(d)
+        .split(/\r?\n/)
+        .filter((l) => FENCE_RE.test(l)).length,
+    }))
+      .filter((x) => x.n % 2 !== 0)
+      .map((x) => `${x.doc} 围栏行=${x.n}(奇数)：块边界不可追踪，本腿在它上面无效`)
+  ).toEqual([]);
+  // 覆盖面地面，与"真文档 Cookie 名"那条同形：闸必须知道自己确实检查过东西。
+  const negBlocks = DOCS.flatMap((d) =>
+    fencedBlocks(read(d))
+      .filter((b) => b.lines.some((l) => NEGATIVE_VERDICT.test(l)))
+      .map((b) => ({ doc: d, line: b.start }))
+  );
+  expect(negBlocks.length).toBeGreaterThanOrEqual(1);
+  expect(negBlocks.some((b) => b.doc === ROTATION_DOC)).toBe(true);
   expect(
     allUncontrolled().map(
       (b) => `${b.doc}:${b.line} 起的代码块断言 401/403 却无 200/errorCode 对照`
@@ -220,15 +250,29 @@ test('反面自证｜缺陷形状（accessToken）判红、修好后的形状判
     '```bash',
     'curl -s -o /dev/null -w "%{http_code}" -H "Cookie: accessToken=T" "$D"',
     'curl -s -b accessToken=T "$D"',
+    // 同一错误的另外两种合法写法：漏任何一种，手册改个写法就能绕过 A
+    'curl -s --header "Cookie: accessToken=T" "$D"',
+    'curl -s -H "COOKIE: accessToken=T" "$D"',
     '```',
   ].join('\n');
   const wrongRefs = cookieRefs('syn.md', wrong);
-  expect(wrongRefs.map((r) => r.form)).toEqual(['-H "Cookie: …"', '-b/--cookie …=…']);
-  expect(cookieViolations(wrongRefs).map((v) => v.name)).toEqual(['accessToken', 'accessToken']);
+  expect(wrongRefs).toHaveLength(4);
+  expect(wrongRefs.map((r) => r.form)).toEqual([
+    '-H/--header "Cookie: …"',
+    '-b/--cookie …=…',
+    '-H/--header "Cookie: …"',
+    '-H/--header "Cookie: …"',
+  ]);
+  expect(cookieViolations(wrongRefs).map((v) => v.name)).toEqual([
+    'accessToken',
+    'accessToken',
+    'accessToken',
+    'accessToken',
+  ]);
 
   const right = wrong.replace(/accessToken/g, cookie.ACCESS_COOKIE_NAME);
   const rightRefs = cookieRefs('syn.md', right);
-  expect(rightRefs).toHaveLength(2);
+  expect(rightRefs).toHaveLength(4);
   expect(cookieViolations(rightRefs)).toEqual([]);
 });
 
