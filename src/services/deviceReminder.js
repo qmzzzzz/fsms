@@ -120,9 +120,13 @@ const scanDeviceReminders = async (options = {}) => {
     // 并发只是把「互斥锁命中」时的在途查询数从 1 变成 4，那是另一条线在钉的性质。
     const pages = [];
     for (const [key, sortKey, projection] of ALERT_BUCKETS) {
+      // `_id` 次序键不是装饰：四个档的排序键都是**大量同值**的日期（批量采购的到期日相同，
+      // 从未检查过的设备 nextCheckDate 整档全为 null），而同值页取前 resultLimit 条时
+      // 没有次序键就是"同一次查询两次给出不同成员"。与 AlarmService/InspectionService/
+      // auditQueryService 的列表排序同规（全仓 11 处都带，这里原先是唯一漏网的）。
       const docs = await FireDevice.find({ ...base, ...alert[key] })
         .select(projection)
-        .sort({ [sortKey]: 1 })
+        .sort({ [sortKey]: 1, _id: 1 })
         .limit(resultLimit + 1);
       pages.push({
         key,
