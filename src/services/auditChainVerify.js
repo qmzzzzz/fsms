@@ -202,11 +202,19 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
    * 尾不同（见 utils/auditChain 的 advanceChainTail）、锁超时后的僵尸推进、
    * 或 WAL 重放挑错链尾，都会产出同父两子。
    * 与 `seen` 同生同灭：淘汰/重置必须同步，否则会拿窗口外的旧子报假分叉。
+   *
+   * 「同生同灭」是**两侧都要淘汰**，不是只有 `firstChildOf`：原先 forgetOldest 只删
+   * `firstChildOf` 而 `seen` 一路涨到整窗，实测同父两子的分叉在父哈希落后 ≥256 条时
+   * **两头都不报**（无 chain_break、无 chain_fork，报告 `intact: true`），且第二条伪造
+   * 记录会把同胞指认覆盖成第一条伪造记录。诚实链不因此多出断裂：一条链若没有任何
+   * 断裂，它的读入顺序就是串链顺序，每个父哈希恰好落在前 1 个位置上，256 的窗口挡不住它。
    */
   const firstChildOf = new Map();
   const forgetOldest = () => {
     const oldest = seenOrder.shift();
-    if (oldest !== undefined) firstChildOf.delete(oldest);
+    if (oldest === undefined) return;
+    seen.delete(oldest);
+    firstChildOf.delete(oldest);
   };
   const resetWindow = () => {
     seen.clear();
