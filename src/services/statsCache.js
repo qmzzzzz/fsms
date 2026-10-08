@@ -18,6 +18,36 @@ const lastAccess = new Map();
 let cleanupTimer = null;
 
 /**
+ * 陈旧窗口的上界（秒）。
+ *
+ * 存在的理由不是"防呆"，而是这条链路里唯一真实存在的防线：`STATS_CACHE_TTL` 只校验
+ * "有限正数"（src/config/index.js 的 statsCacheTtl），配成一年也不会被拒；而那句
+ * 用来给长 TTL 背书的注释——"写路径已有 invalidateByUserId 主动失效"——按现网键形
+ * 并不成立。缓存键是 `stats:{查看者id}:{范围摘要}`（controllers/userController.js:972），
+ * 失效只删 `stats:{被改用户id}:` 前缀（本文件 invalidateByUserIdLocal）⇒ 除了被改者
+ * 本人以外，其他管理员的桶一条都删不掉；公开注册与角色改名更是根本不触达失效。
+ * 也就是说：多数情况下"多久变新"完全由 TTL 决定，所以 TTL 必须有界。
+ * 上界取 3600 秒：派生统计在 1 小时内不可见变化已经是可感知的口径漂移，再长就是
+ * 把缓存当成快照，而它没有任何版本号能保证一致性。
+ */
+const MAX_TTL_SECONDS = 3600;
+
+const clampTtlSeconds = (seconds, source) => {
+  if (seconds <= MAX_TTL_SECONDS) return seconds;
+  // 只写一次性的、可定位的留痕：运维必须能在日志里看到"你配的值没生效"，
+  // 否则他以为配的是 1 年，实际是 1 小时——这类静默夹取正是本仓反复要防的形态
+  logger.warn(
+    `统计缓存 TTL 被夹到上界 ${MAX_TTL_SECONDS} 秒（请求值 ${seconds} 秒，来源 ${source}）；` +
+      '失效广播按查看者键前缀匹配，覆盖不到其他查看者，因此不能让 TTL 充当无限期的快照'
+  );
+  return MAX_TTL_SECONDS;
+};
+
+// 配置默认值在模块加载时就定死：每次 set 都 warn 会变成刷屏
+// （config.cache.statsCacheTtl 侧已保证"有限正数否则回落 300"，这里只负责上界）
+const configTtlSeconds = clampTtlSeconds(config.cache.statsCacheTtl, 'STATS_CACHE_TTL');
+
+/**
  * 读取缓存
  * @param {string} cacheKey 缓存键
  * @returns {{ hit: boolean, data?: object }}
@@ -48,11 +78,14 @@ function get(cacheKey) {
  * 写入缓存
  * @param {string} cacheKey 缓存键
  * @param {object} data 缓存数据
- * @param {number} [ttl] 过期时间（秒），缺省使用 config.cache.statsCacheTtl
+ * @param {number} [ttl] 过期时间（秒），缺省使用 config.cache.statsCacheTtl；
+ *   两条来源都要过 MAX_TTL_SECONDS 上界（见文件头说明），调用方也不能自行放大陈旧窗口
  */
 function set(cacheKey, data, ttl) {
   try {
-    const ttlMs = Number.isFinite(ttl) && ttl > 0 ? ttl * 1000 : config.cache.statsCacheTtl * 1000;
+    const ttlSeconds =
+      Number.isFinite(ttl) && ttl > 0 ? clampTtlSeconds(ttl, '调用方传入的 ttl') : configTtlSeconds;
+    const ttlMs = ttlSeconds * 1000;
     // P3-23：写入路径上做容量兜底。定时清理改为显式启动（不再模块加载即启动），
     // 若调用方忘记 startCleanup()，仅靠 get() 的惰性过期无法回收「写入后再没被
     // 读取过」的键——那类键会永久滞留。此处在越界时同步触发一次清理。

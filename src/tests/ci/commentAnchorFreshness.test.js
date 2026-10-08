@@ -512,15 +512,15 @@ const LIVE = [
   },
   {
     in: 'src/constants/runtime.js',
-    at: 'statsCache.js:114',
+    at: 'statsCache.js:147',
     must: /sharedCache\.publishInvalidate\(/,
-    why: '清单注释钉住的发布端行号（它是有行号的事实，就该被行号判据管着）',
+    why: '清单注释钉住的发布端行号（它是有行号的事实，就该被行号判据管着）；原 :114，被本轮 TTL 上界那段新增行推下 33 行',
   },
   {
     in: 'src/constants/runtime.js',
-    at: 'statsCache.js:124',
+    at: 'statsCache.js:157',
     must: /sharedCache\.onInvalidate\(/,
-    why: '清单注释钉住的消费端行号',
+    why: '清单注释钉住的消费端行号；原 :124，同上',
   },
   {
     in: 'src/tests/utils/auditFilterCombination.test.js',

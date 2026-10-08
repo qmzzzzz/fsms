@@ -85,7 +85,7 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     mechanism: '统计缓存 Map',
     impact: '各进程数据不一致（仅表现为数字抖动）',
     // 与 middleware/auth.js 的 userCache 同一模式：缓存本体在进程内，
-    // 失效经 sharedCache 广播（statsCache.js:114 publishInvalidate / statsCache.js:124 onInvalidate）。
+    // 失效经 sharedCache 广播（statsCache.js:147 publishInvalidate / statsCache.js:157 onInvalidate）。
     // 两处行号都写全文件名：`A.js:114 / :124` 这种延续写法门禁只看得见前者（裸 `:124` 没有文件名），
     // 于是第二条永远不被核对——本仓的口径是"引用要机器判，就把文件名重复一遍"。
     // 此前漏标 ⇒ Redis 就绪时仍被报成"将静默降级"，属假警报
