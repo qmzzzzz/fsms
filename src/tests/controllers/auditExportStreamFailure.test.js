@@ -130,3 +130,123 @@ describe('导出流失败（auditController.js:60-68 的 catch 出口）', () =>
     expect(res.ended).toBe(false);
   });
 });
+
+/**
+ * 收尾不得重复（第 33 轮）
+ *
+ * 上一组只钉了"该 end 的时候 end 了"；这一组钉反面——响应已经结束时**不许**再 end()。
+ * 真实 http.ServerResponse 上二次 end() 会 emit ERR_STREAM_ALREADY_FINISHED，
+ * 未挂 error 监听即冒成未捕获异常：catch 出口里它把"已经尽力收尾"变成进程级噪音，
+ * 成功出口里它把一次正常导出记成失败。仓库既有规矩见 errorHandler.js:37
+ * 与 writeSurfaceControlCharAndHeadersSentGuards.test.js:184（同一条"连 end() 也不重复调用"）。
+ */
+describe('导出收尾（auditController.js:66 成功出口 / :79 catch 出口）不重复 end()', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    jest.doMock('../../services/auditQueryService', () => ({
+      applyAuditDataScope: async (query) => ({ query }),
+      queryAuditLogs: async () => ({ data: [], meta: {} }),
+    }));
+    // checkBulkExport 在成功出口里被真实 require，且要写审计：本组只关心 end() 次数
+    jest.doMock('../../services/securityAlert', () => ({ checkBulkExport: jest.fn() }));
+    jest.spyOn(require('../../utils/logger'), 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.resetModules();
+  });
+
+  // 带 writableEnded 与 end 计数的响应桩：真实语义里 end() 之后 writableEnded 为 true，
+  // 桩把两者都放开，好让"已结束的响应"这一现场可构造。
+  const makeEndedAwareRes = () => {
+    const res = {
+      statusCode: null,
+      body: null,
+      headersSent: true,
+      writableEnded: false,
+      endCalls: 0,
+      writeCalls: 0,
+      headers: {},
+      setHeader(k, v) {
+        this.headers[k] = v;
+        return this;
+      },
+      write() {
+        this.writeCalls += 1;
+        return true;
+      },
+      end() {
+        this.endCalls += 1;
+        return this;
+      },
+      status(code) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload) {
+        this.body = payload;
+        return this;
+      },
+    };
+    return res;
+  };
+
+  const makeReq = () => ({
+    query: {},
+    user: { userId: '507f1f77bcf86cd799439011', username: 'tester' },
+    method: 'GET',
+    params: {},
+    ip: '::1',
+    get: () => undefined,
+  });
+
+  test('catch 出口：响应已结束 → 不二次 end()，也不抛', async () => {
+    jest.doMock('../../services/auditExportService', () => ({
+      buildAuditExportManifest: () => ({}),
+      sendAuditExportHeaders: async () => {},
+      streamAuditExport: async () => {
+        throw new Error('游标读取失败（模拟）');
+      },
+      MANIFEST_LINE_PREFIX: '#__MANIFEST__:',
+      EXPORT_CSV_HEADER: 'timestamp,action',
+    }));
+    const isolated = require('../../controllers/auditController');
+
+    const res = makeEndedAwareRes();
+    res.writableEnded = true; // 客户端已断开：流在抛错前就收尾了
+    const next = jest.fn();
+
+    await expect(isolated.exportAuditLogs(makeReq(), res, next)).resolves.toBeUndefined();
+
+    expect(res.endCalls).toBe(0);
+    expect(next).not.toHaveBeenCalled();
+    // 截断事实仍要登记：头已发出时"不 end"不等于"不做事"
+    expect(res.statusCode).toBeNull();
+    expect(res.body).toBeNull();
+  });
+
+  test('成功出口：响应已结束 → manifest 之后不二次 end()', async () => {
+    jest.doMock('../../services/auditExportService', () => ({
+      buildAuditExportManifest: () => ({ recordCount: 2 }),
+      sendAuditExportHeaders: async () => {},
+      streamAuditExport: async () => ({ recordCount: 2, truncated: false }),
+      MANIFEST_LINE_PREFIX: '#__MANIFEST__:',
+      EXPORT_CSV_HEADER: 'timestamp,action',
+    }));
+    const isolated = require('../../controllers/auditController');
+
+    const res = makeEndedAwareRes();
+    res.writableEnded = true;
+    const next = jest.fn();
+
+    await expect(isolated.exportAuditLogs(makeReq(), res, next)).resolves.toBeUndefined();
+
+    expect(res.endCalls).toBe(0);
+    // 反向保护：未结束的响应照常收尾（否则本用例只是"永远不 end"的同义反复）
+    const live = makeEndedAwareRes();
+    live.writableEnded = false;
+    await expect(isolated.exportAuditLogs(makeReq(), live, next)).resolves.toBeUndefined();
+    expect(live.endCalls).toBe(1);
+  });
+});

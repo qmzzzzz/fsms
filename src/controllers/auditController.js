@@ -63,7 +63,7 @@ const exportAuditLogs = asyncHandler(async (req, res) => {
     // tests/services/auditExportManifestScope.test.js 的 ①②）。
     // Record-count and truncation headers were set before the first stream chunk.
     res.write(`${MANIFEST_LINE_PREFIX}${JSON.stringify(manifest)}\n`);
-    res.end();
+    if (!res.writableEnded) res.end(); // 已结束时再 end() 会抛 ERR_STREAM_ALREADY_FINISHED
     return undefined;
   } catch (error) {
     logger.error(`审计日志导出失败: ${error.message}`);
@@ -76,7 +76,7 @@ const exportAuditLogs = asyncHandler(async (req, res) => {
     // 不外抛 next：本函数的"头已发出"出口按既有契约自行收尾（见
     // tests/controllers/auditExportStreamFailure.test.js），且 logger.error 已在此留痕。
     markResponseAbortedByError(req, res, error.message);
-    res.end();
+    if (!res.writableEnded) res.end();
   }
 });
 
