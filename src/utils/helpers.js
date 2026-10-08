@@ -92,6 +92,46 @@ const normalizePagination = (page, limit, maxLimit = 500) => {
 };
 
 /**
+ * 请求体 id 列表的归一入口：逐项转字符串 + 大小写规范化 + 去重 + 保序。
+ *
+ * 为什么"去重"属于正确性而不是洁癖：本仓判断"请求的 id 里有不存在的"用的唯一口径是
+ * `查到的文档数 !== 请求的 id 数`，而 `$in` 天生只回**去重后**的文档 ⇒ 请求里重复一个 id
+ * 就会被算成"有一个 id 不存在"，一次本来合法的写操作回 400。归一必须在比较**之前**，
+ * 并且归一后的那份还要参与后续写入——否则重复项会被原样存进数组字段里。
+ *
+ * 为什么"大小写"是同一条判据的另一维（不是风格问题）：
+ *  - 路由格式闸 `isMongoId` **放得过大写十六进制**：validator 的 isMongoId 委托
+ *    isHexadecimal，其正则 `/^(0x|0h)?[0-9A-F]+$/i` 带 `i`（实测 `isMongoId('67ED…D5') === true`）。
+ *  - 而库里读回来的 id **恒为小写**：bson 的 ObjectId.prototype.toString → toHexString 用
+ *    `byteToHex` 查表（表项是 `n.toString(16).padStart(2,'0')`），没有大写分支。
+ *  - `$in` 里两者却指向**同一个文档**（Mongoose 按 12 字节解析，大小写无关）。
+ * 于是 `["67ED…","67ed…"]` 在归一前是 2 个不同字符串、查到 1 份文档 ⇒ 一次合法的写操作被
+ * 判成"有 id 不存在"；更要命的是身份自检：`requestedIds.includes(String(req.user.userId))`
+ * 拿小写的操作者 id 去比大写的那一份，**"不许删除自己"的闸被换个字母大小写绕过**
+ * （userController.js 批量删除）。Mongoose 的 cast 会把落库值归回小写，所以这条只影响
+ * "比较与集合语义"，不影响存储形态——也正因为如此，光看数据库看不出问题。
+ * 只规范化 24 位十六进制：非该形状的值（口令、编码、原始 12 字节串）原样保留，
+ * 否则这个"id 归一入口"会顺手改掉它不该改的字段。
+ *
+ * 只做归一，不校验格式：格式非法与"不存在"在各接口是两条不同的错误文案。
+ *
+ * 两个导出都要：`uniqueIdStrings` 管"数组比对/落库"，`canonicalIdString` 管
+ * "单个请求值 vs 库里读出来的值"这类比较（permissionService 的父级存在性判定）。
+ * 只导出前者的话，单值比较点只能继续手写 `String(...)`——那正是大小写绕过待的地方。
+ * @param {any} list 请求体里的原始数组（可能不是数组）
+ * @returns {string[]} 去重保序的 id 字符串数组（24 位十六进制项已转小写）
+ */
+const ID_HEX_24 = /^[0-9a-fA-F]{24}$/;
+
+const canonicalIdString = (item) => {
+  const text = String(item);
+  return ID_HEX_24.test(text) ? text.toLowerCase() : text;
+};
+
+const uniqueIdStrings = (list) =>
+  Array.isArray(list) ? [...new Set(list.map(canonicalIdString))] : [];
+
+/**
  * 密码策略常量（P3-29）
  *
  * PASSWORD_SPECIAL_REGEX 覆盖全部 ASCII 可打印标点，四段区间依次为：
@@ -568,6 +608,8 @@ const sanitizeSpreadsheetCell = (value) => {
 module.exports = {
   escapeRegExp,
   normalizePagination,
+  canonicalIdString,
+  uniqueIdStrings,
   parseDateBoundary,
   isValidDateParam,
   buildDateRangeFilter,

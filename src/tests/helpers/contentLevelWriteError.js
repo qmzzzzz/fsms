@@ -11,7 +11,8 @@
  * 那测的其实是"未知错误也不许删审计"（另一条判据，已有专门用例）。
  *
  * 形状以**真库实跑**为准，不是手编的：F-183 前这里写的是 `name='BulkWriteError'`，
- * 而驱动实际抛出的类名是 `MongoBulkWriteError`（同仓 `permissionService.js:164` 也踩过同一个坑），
+ * 而驱动实际抛出的类名是 `MongoBulkWriteError`（同仓 `permissionService.js` 里
+ * `Permission.insertMany` 的捕获块注释记着同一条结论，所以那里不写行号——它在被并行改动的文件里），
  * 顶层还多一条"第一条 writeError 的 code 回显"。三处形状断言现在都被
  * `tests/utils/mongoFailureAttribution.test.js` 的"真库形状"用例和
  * `tests/auditBufferZombieDuplicate.test.js:144-168` 钉在真实驱动上，

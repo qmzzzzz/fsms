@@ -5,7 +5,7 @@
 
 const FireAlarm = require('../models/FireAlarm');
 const logger = require('../utils/logger');
-const { escapeRegExp, parseDateBoundary } = require('../utils/helpers');
+const { escapeRegExp, parseDateBoundary, uniqueIdStrings } = require('../utils/helpers');
 // 短别名：长名单调用点会超 printWidth 被 prettier 折行，而本文件 max-lines 贴基线
 const {
   withListBudget,
@@ -178,7 +178,7 @@ class AlarmService {
    * 又把 handler 变成 populate 后的对象，范围判定的取值口径随之改变。
    */
   async findScopeFieldsByIds(ids) {
-    const list = [...new Set((ids || []).map((id) => String(id)))];
+    const list = uniqueIdStrings(ids);
     if (list.length === 0) return [];
     return FireAlarm.find({ _id: { $in: list } })
       .select('reporter.userId handler location.building')

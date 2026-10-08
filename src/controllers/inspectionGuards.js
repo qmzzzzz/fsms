@@ -9,6 +9,7 @@ const mongoose = require('mongoose');
 const ApiResponse = require('../utils/apiResponse');
 const { getDataScope, isRecordInScope, isDepartmentValueAllowed } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
+const { uniqueIdStrings } = require('../utils/helpers');
 
 const inScope = (dataScope, userId, doc, fields) =>
   isRecordInScope(dataScope, doc, {
@@ -16,8 +17,6 @@ const inScope = (dataScope, userId, doc, fields) =>
     departmentField: fields.departmentField,
     userId,
   });
-
-const stringifyIds = (list) => [...new Set(list.map((id) => String(id)))];
 
 /**
  * `assignedTo` 必须落在操作者的数据范围内。
@@ -31,7 +30,7 @@ const stringifyIds = (list) => [...new Set(list.map((id) => String(id)))];
 const rejectOutOfScopeAssignees = async (res, dataScope, userId, assignedTo) => {
   if (!Array.isArray(assignedTo) || assignedTo.length === 0) return false;
   const userService = require('../services/userService');
-  const ids = stringifyIds(assignedTo);
+  const ids = uniqueIdStrings(assignedTo);
   const docs = await userService.findScopeFieldsByIds(ids);
   if (docs.length !== ids.length) {
     return ApiResponse.codeError(res, 'VALIDATION_FAILED', { message: '指定的执行人不存在' });
@@ -57,7 +56,7 @@ const rejectOutOfScopeAssignees = async (res, dataScope, userId, assignedTo) => 
 const rejectOutOfScopeDevices = async (res, dataScope, userId, devices) => {
   if (!Array.isArray(devices) || devices.length === 0) return false;
   const deviceService = require('../services/DeviceService');
-  const ids = stringifyIds(devices);
+  const ids = uniqueIdStrings(devices);
   // 非法 ID 不进 $in（会抛 CastError 变 500），与"不存在"走同一拒绝口径
   if (ids.some((id) => !mongoose.isValidObjectId(id))) {
     return ApiResponse.codeError(res, 'DEVICE_NOT_FOUND');
@@ -138,7 +137,32 @@ const rejectOutOfScopeReferences = async (
   return Boolean(rejectOutOfScopeBuildings(res, dataScope, locations));
 };
 
+/**
+ * 把引用型数组字段就地归一，让**守卫校验的那份**与**落库的那份**是同一份。
+ *
+ * 为什么守卫内部归一了还不够：两条守卫各自 `uniqueIdStrings` 后比长度（决定放不放行），
+ * 而控制器把 `allowedFields` / `req.body` 原样交给服务层；`Inspection.create({ ...fields })`
+ * 与 `$set` 都不去重（models/Inspection.js 的 `devices`/`assignedTo` 是裸 `[ObjectId]`，
+ * 没有 set 去重器），于是重复提交真的存成 2 个元素。下游后果（已核实，非推测）：
+ * `reportStatsService.js:119-120` 的 byAssignee 用 `$unwind + $group count` 统计，
+ * 同一人在一份计划里被计两次，还能把真人挤出 top 10；详情/列表的 populate 会带出重复对象，
+ * 报表"执行人"单元格渲染成 `张三, 张三`。这就是本仓那句"校验看 A、写入看 B"要防的东西。
+ *
+ * `findings` 不在这里归一：它是**记录列表**而不是集合，同一设备两条发现是合法数据。
+ * @param {object} fields 直接来自 req.body 的待写字段（原地归一，返回同一对象）
+ * @returns {object} 同一个 fields
+ */
+const normalizeInspectionRefLists = (fields) => {
+  if (!fields || typeof fields !== 'object') return fields;
+  // 只在"确实是数组"时归一：PUT 是部分更新，服务层用 `updates[field] !== undefined`
+  // 决定这一列要不要写；把没提交的东西归一成空数组等于替调用方清空既有指派/设备。
+  if (Array.isArray(fields.assignedTo)) fields.assignedTo = uniqueIdStrings(fields.assignedTo);
+  if (Array.isArray(fields.devices)) fields.devices = uniqueIdStrings(fields.devices);
+  return fields;
+};
+
 module.exports = {
+  normalizeInspectionRefLists,
   rejectOutOfScopeReferences,
   rejectOutOfScopeAssignees,
   rejectOutOfScopeDevices,

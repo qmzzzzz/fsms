@@ -20,10 +20,15 @@ const { castScopeObjectIds } = require('../utils/scopeCast');
 // 'createdBy'/'department'：改常量会让列表按新字段过滤、统计仍按旧字段聚合，
 // 同一用户在"我的列表"与"我的统计"上看到互相矛盾的口径——正是这个常量当初要消灭的 P2-20。
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
-const { validateSort, normalizePagination, isValidAvatar } = require('../utils/helpers');
+const {
+  validateSort,
+  normalizePagination,
+  isValidAvatar,
+  validatePasswordStrength,
+  uniqueIdStrings,
+} = require('../utils/helpers');
 const { validateRules } = require('../utils/ipRange');
 const { decryptLoginCredential } = require('../utils/loginCipher');
-const { validatePasswordStrength } = require('../utils/helpers');
 const { checkSuperAdminMembership, isSuperAdminRole } = require('../utils/superAdmin');
 const { normalizeEmailKey } = require('../utils/emailKey');
 const statsCache = require('../services/statsCache');
@@ -273,11 +278,14 @@ const rejectForeignPeerRoles = (res, req, grantRoles, operatorMaxLevel, subjectT
  */
 const validateRolesForCreate = async (req, res, roles) => {
   if (!roles || roles.length === 0) return { roles: [], rejected: false };
+  // 归一后的这一份既参与"是否都存在"的比较，也是最终写进新文档的 roles：
+  // 重复项不去掉的话，比较会把合法请求判成 400，去掉了却不复用，重复项就落库。
+  const requestedRoles = uniqueIdStrings(roles);
 
-  const targetRoles = await userService.findRolesByIds(roles, 'level code isBuiltIn', {
+  const targetRoles = await userService.findRolesByIds(requestedRoles, 'level code isBuiltIn', {
     lean: true,
   });
-  if (targetRoles.length !== roles.length) {
+  if (targetRoles.length !== requestedRoles.length) {
     ApiResponse.codeError(res, 'ROLE_NOT_FOUND_IN_LIST');
     return { rejected: true };
   }
@@ -296,7 +304,7 @@ const validateRolesForCreate = async (req, res, roles) => {
 
   const operatorPermCodes = await userService.getPermissions(req.user.userId);
   if (!operatorPermCodes.includes('*:*')) {
-    const grantRoleDocs = await userService.findRolePermissionDocs(roles);
+    const grantRoleDocs = await userService.findRolePermissionDocs(requestedRoles);
     const lacking = findUnoperableGrantCodes(operatorPermCodes, grantRoleDocs);
     if (lacking.length > 0) {
       logger.warn(
@@ -320,7 +328,7 @@ const validateRolesForCreate = async (req, res, roles) => {
       return { rejected: true };
     }
   }
-  return { roles, rejected: false };
+  return { roles: requestedRoles, rejected: false };
 };
 
 /**
@@ -657,6 +665,10 @@ const assignRoles = asyncHandler(async (req, res) => {
   const { roles } = req.body;
 
   if (rejectInvalidRoleList(res, roles)) return;
+  // 归一必须在比较之前：$in 只回**去重后**的文档，`validRoles.length !== roles.length`
+  // 于是会把"重复提交同一个角色"判成"角色不存在"（判据与理由见 utils/helpers 的 uniqueIdStrings）。
+  // 归一后的这一份还要参与最终写入，否则去重的意义只剩一半。
+  const requestedRoles = uniqueIdStrings(roles);
 
   const user = await userService.findUserForUpdate(req.params.id);
   if (!user) {
@@ -681,10 +693,10 @@ const assignRoles = asyncHandler(async (req, res) => {
   const targetUserMaxLevel = maxRoleLevel(targetUserRoles);
 
   // 验证新角色是否存在（同时取出 permissions 供权限子集校验）
-  const validRoles = await userService.findRolesByIds(roles, 'level code permissions', {
+  const validRoles = await userService.findRolesByIds(requestedRoles, 'level code permissions', {
     populate: { path: 'permissions', select: 'code' },
   });
-  if (validRoles.length !== roles.length) {
+  if (validRoles.length !== requestedRoles.length) {
     return ApiResponse.codeError(res, 'ROLE_ID_INVALID');
   }
 
@@ -742,7 +754,9 @@ const assignRoles = asyncHandler(async (req, res) => {
   // 超管归属不可变更（含操作者本人）：剥离会造成不可恢复的自锁死
   // （超管是唯一 *:* 来源，剥离后无任何接口能修回），授予会破坏唯一性。
   // 归属只由启动期 reconcileSuperAdmin 决定，详见 utils/superAdmin.js
-  const nextRoleDocs = await userService.findRolesByIds(roles, 'code isBuiltIn', { lean: true });
+  const nextRoleDocs = await userService.findRolesByIds(requestedRoles, 'code isBuiltIn', {
+    lean: true,
+  });
   const membershipError = checkSuperAdminMembership(targetUserRoles, nextRoleDocs);
   if (membershipError) {
     logger.warn(
@@ -753,7 +767,7 @@ const assignRoles = asyncHandler(async (req, res) => {
 
   // 原子更新替代读-改-save：user.save() 会把整个文档回写，并发窗口内的
   // 其他字段修改（如 status）会被本次内存快照覆盖；findByIdAndUpdate+$set 只写 roles
-  await userService.updateRoles(user._id, roles);
+  await userService.updateRoles(user._id, requestedRoles);
 
   // 角色变更后失效缓存
 
@@ -871,15 +885,19 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
     });
   }
 
+  // 归一必须在比较之前（与 assignRoles 同一条理由：$in 只回**去重后**的文档，
+  // 重复 id 会被 `targets.length !== ids.length` 判成"这个用户不存在"而整批拒绝）
+  const requestedIds = uniqueIdStrings(ids);
+
   // 检查是否包含自己（统一转为字符串比较，避免 ObjectId 类型不一致）
-  if (ids.map(String).includes(String(req.user.userId))) {
+  if (requestedIds.includes(String(req.user.userId))) {
     return ApiResponse.codeError(res, 'CANNOT_DELETE_SELF');
   }
 
   // 层级保护：批量目标中包含同级或更高级别用户时整体拒绝（与单个删除口径一致）
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-  const targets = await userService.findBatchUsers(ids);
-  if (targets.length !== ids.length) {
+  const targets = await userService.findBatchUsers(requestedIds);
+  if (targets.length !== requestedIds.length) {
     return ApiResponse.codeError(res, 'USER_ID_NOT_FOUND_IN_LIST');
   }
   const oversized = targets.find((t) => maxRoleLevel(t.roles) >= operatorMaxLevel);
@@ -920,12 +938,12 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
     });
   }
 
-  const result = await userService.deleteMany({ _id: { $in: ids } });
+  const result = await userService.deleteMany({ _id: { $in: requestedIds } });
 
   // 批量失效缓存
 
-  ids.forEach(invalidateUserCache);
-  ids.forEach((id) => statsCache.invalidateByUserId(id));
+  requestedIds.forEach(invalidateUserCache);
+  requestedIds.forEach((id) => statsCache.invalidateByUserId(id));
   // 统计缓存：操作者（统计视角）也需要同步失效
   statsCache.invalidateByUserId(req.user.userId);
 

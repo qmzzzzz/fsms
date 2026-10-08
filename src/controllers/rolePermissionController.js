@@ -18,6 +18,7 @@ const { asyncHandler } = require('../middleware/errorHandler');
 const { invalidateUserCache } = require('../middleware/auth');
 const { isSuperAdminRole, RESERVED_WILDCARD_PERMISSION } = require('../utils/superAdmin');
 const { assertRecordInScope } = require('../middleware/rbac');
+const { uniqueIdStrings } = require('../utils/helpers');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const roleService = require('../services/roleService');
 
@@ -49,9 +50,12 @@ const validateAssignmentInput = (req, res) => {
 
 const validatePermissionTargets = async (req, res, role, permissions, targetUserId) => {
   const objectIdRegex = /^[0-9a-fA-F]{24}$/;
-  const uniquePermIds = [
-    ...new Set(permissions.map((item) => String(item)).filter((id) => objectIdRegex.test(id))),
-  ];
+  // 格式过滤留在本处（非法片段不该静默混进 $in），归一（去重 + 大小写规范化）走唯一入口
+  // uniqueIdStrings，与 roleController.createRole 同一条尺——两条写路径各写一份归一，
+  // 同一个 role.permissions 字段就会出现两种落库形态。
+  const uniquePermIds = uniqueIdStrings(
+    permissions.filter((item) => objectIdRegex.test(String(item)))
+  );
   if (uniquePermIds.length === 0) {
     ApiResponse.codeError(res, 'PERMISSION_ID_REQUIRED');
     return null;

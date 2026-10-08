@@ -14,7 +14,7 @@ const { withTransaction } = require('../utils/transaction');
 const userPermissionService = require('./userPermissionService');
 const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
-const { escapeRegExp } = require('../utils/helpers');
+const { escapeRegExp, uniqueIdStrings } = require('../utils/helpers');
 const { DataMasking } = require('../utils/encryption');
 const { USER_STATUS } = require('../utils/constants');
 // 级联释放的状态面由巡检域档位表派生（F-151）：写字面量 ['pending','in_progress'] 时漏掉的正是
@@ -216,7 +216,7 @@ class UserService {
    * 数据访问一律经 service。投影固定两列，避免整档用户进出内存。
    */
   findScopeFieldsByIds(ids) {
-    const list = [...new Set((ids || []).map((id) => String(id)))];
+    const list = uniqueIdStrings(ids);
     return User.find({ _id: { $in: list } })
       .select('createdBy department')
       .lean();

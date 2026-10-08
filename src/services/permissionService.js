@@ -10,6 +10,9 @@ const ApiError = require('../utils/ApiError');
 // 必须是同一个值，否则两处防线会各拦一半。
 const { RESERVED_WILDCARD_PERMISSION: RESERVED_WILDCARD } = require('../utils/superAdmin');
 const { withListBudget, listCountOptions } = require('../utils/queryBudget');
+// 父级存在性判定的两个臂（构造 $in 清单 / 与库里结果比对）共用同一个归一入口，
+// 不在本文件手写 String 去重（口径见 utils/helpers 的 canonicalIdString）。
+const { uniqueIdStrings, canonicalIdString } = require('../utils/helpers');
 
 class PermissionService {
   async listPermissions({ module, type, status, page, limit }) {
@@ -122,14 +125,13 @@ class PermissionService {
       ).map((item) => item.code)
     );
 
-    const parentIds = [
-      ...new Set(
-        permissions
-          .map((item) => item?.parent)
-          .filter(Boolean)
-          .map(String)
-      ),
-    ];
+    // 大小写是这一处的真缺陷：`isMongoId` 委托给十六进制判定，大写的 24 位 hex 一样过闸，
+    // 而 `$in` 把两种写法都 cast 成同一个 12 字节 ⇒ 命中一份文档；库里读回来的
+    // `String(_id)` 恒为小写（bson toHexString）。原先这里手写 `new Set(map(String))`
+    // 只去重不转小写，于是 has(大写) miss ⇒ **真实存在的父级被判成「父级权限不存在」**，
+    // 该项静默进 skipped（不 400、不报错、响应照样 success），批量导入表现为
+    // "少建了几条权限且无人知晓"。构造清单与下面逐项比对必须走同一个归一入口。
+    const parentIds = uniqueIdStrings(permissions.map((item) => item?.parent).filter(Boolean));
     const validParentIds = new Set(
       parentIds.length > 0
         ? (
@@ -151,7 +153,7 @@ class PermissionService {
       }
 
       const { name, code, description, type, module, parent, path, method, sort } = item;
-      if (parent && !validParentIds.has(String(parent))) {
+      if (parent && !validParentIds.has(canonicalIdString(parent))) {
         skipped.push({ code, reason: '父级权限不存在' });
         continue;
       }

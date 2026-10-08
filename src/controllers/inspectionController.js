@@ -10,7 +10,7 @@ const ApiResponse = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { getDataScope, assertRecordInScope } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
-const { rejectOutOfScopeReferences } = require('./inspectionGuards');
+const { rejectOutOfScopeReferences, normalizeInspectionRefLists } = require('./inspectionGuards');
 const { normalizePagination, isValidDateParam } = require('../utils/helpers');
 const inspectionService = require('../services/InspectionService');
 
@@ -150,6 +150,11 @@ const createInspection = asyncHandler(async (req, res) => {
     checkItems,
   }))(req.body);
 
+  // 归一必须在守卫之前、且就用这份归一结果落库：守卫内部比长度用的是去重后的列表，
+  // 而落库走 allowedFields ⇒ 两边不是同一份就会把重复项真的存进 assignedTo/devices
+  // （判据与后果见 inspectionGuards.js 的 normalizeInspectionRefLists）。
+  normalizeInspectionRefLists(allowedFields);
+
   if (await rejectUnusableAssignees(res, allowedFields.assignedTo)) return undefined;
   if (await rejectOutOfScopeReferences(req, res, allowedFields)) return undefined;
 
@@ -201,10 +206,21 @@ const updateInspection = asyncHandler(async (req, res) => {
   if (!(await isInspectionInScope(req, inspection)))
     return ApiResponse.codeError(res, 'INSPECTION_OPERATE_FORBIDDEN');
 
-  if (await rejectUnusableAssignees(res, req.body.assignedTo)) return undefined;
+  // 同 create：先归一再判再落库，且归一的这一份就是被写进去的那份
+  // （服务层按 `updates[field] !== undefined` 逐列 $set）。
+  //
+  // 为什么必须归一**副本**而不是 `req.body` 本身：审计中间件在 setImmediate 回调时刻才读
+  // `req.body`（middleware/security.js 的 persistAuditRecord，其文档明确"勿提前快照"），
+  // 并把它哈希进只追加的审计链。原地改写会把"客户端提交的三个指派"记成"一个"——
+  // 取证记录与被审计的行为不再是同一件事，且与 POST 侧（归一 allowedFields 副本、
+  // 审计原始体）形成按 HTTP 方法分叉的两种取证形态。副本用展开浅拷即可：数组属性被
+  // 整体替换，`req.body` 里的原数组不受影响。
+  const updates = normalizeInspectionRefLists({ ...req.body });
+
+  if (await rejectUnusableAssignees(res, updates.assignedTo)) return undefined;
   // 更新路径此前只判"改前这条记录在不在范围内"：范围闸上线后写进来的**新值**
   // （换楼栋、换执行人、换设备）一律不判，等于用一次合法的 PUT 把计划搬出范围。
-  if (await rejectOutOfScopeReferences(req, res, req.body)) return undefined;
+  if (await rejectOutOfScopeReferences(req, res, updates)) return undefined;
 
   // 不写本地 try/catch：错误到 HTTP 的映射只有 errorHandler 一处实现。
   // 本地 `catch { ApiResponse.error(res, '操作失败', err.statusCode || 400) }` 的代价
@@ -217,7 +233,7 @@ const updateInspection = asyncHandler(async (req, res) => {
   //   ③ VersionError 的"刷新即可重试"这类可自愈指引丢失。
   // asyncHandler 的 JSDoc 就是这个意思："避免在 async 函数中使用 try-catch"。
   // 钉住：src/tests/controllers/deviceStatusErrorMapping.test.js（同一映射面）
-  const updated = await inspectionService.updateInspection(inspection, req.body);
+  const updated = await inspectionService.updateInspection(inspection, updates);
   return ApiResponse.success(res, updated, '巡检计划更新成功');
 });
 

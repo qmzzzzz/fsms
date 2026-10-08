@@ -10,7 +10,7 @@ const { getOperatorMaxLevel, matchesPermissionCodes } = require('../utils/permis
 const { RESERVED_WILDCARD_PERMISSION } = require('../utils/superAdmin');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { escapeRegExp, normalizePagination } = require('../utils/helpers');
+const { escapeRegExp, normalizePagination, uniqueIdStrings } = require('../utils/helpers');
 const roleService = require('../services/roleService');
 // P1-14：角色定义变更（status / permissions / 删除）会改变其持有者的权限解析
 // 结果，而 userPermissionService 的进程内 TTL 缓存保存的正是解析结果。
@@ -112,7 +112,7 @@ const createRole = asyncHandler(async (req, res) => {
 
   // 去重后比对，与 PUT /api/roles/:id/permissions 同尺（那边用 uniquePermIds，
   // 重复 ID 不算非法）；落库也用这份去重结果，避免"校验看 A、写入看 B"。
-  const uniquePermIds = [...new Set((permissions || []).map((item) => String(item)))];
+  const uniquePermIds = uniqueIdStrings(permissions);
   if (uniquePermIds.length > 0) {
     const validPerms = await roleService.findPermissionsByIds(uniquePermIds);
 

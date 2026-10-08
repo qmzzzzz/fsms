@@ -13,7 +13,7 @@ const FireAlarm = require('../models/FireAlarm');
 const Inspection = require('../models/Inspection');
 const logger = require('../utils/logger');
 const { withListBudget, listCountOptions, listAggregateOptions } = require('../utils/queryBudget');
-const { escapeRegExp } = require('../utils/helpers');
+const { escapeRegExp, uniqueIdStrings } = require('../utils/helpers');
 const {
   encodeCursor,
   decodeCursor,
@@ -124,7 +124,7 @@ class DeviceService {
    * @returns {Promise<Array>} 命中的设备（顺序不保证；调用方按 _id 计数判存在性）
    */
   async findScopeFieldsByIds(ids) {
-    const list = [...new Set((ids || []).map((id) => String(id)))];
+    const list = uniqueIdStrings(ids);
     if (list.length === 0) return [];
     return FireDevice.find({ _id: { $in: list } })
       .select('createdBy maintenanceRecord.operator location.building')
