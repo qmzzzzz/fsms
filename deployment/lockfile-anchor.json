@@ -3,7 +3,7 @@
   "algorithm": "sha256",
   "canonical": "json-sort-keys-compact-utf8",
   "locks": {
-    "package-lock.json": "859a5451abebab81d2cc2b1b5d2398f6de8bd29da172410be52410909adac870",
-    "web-admin/package-lock.json": "1c35994d96d25ea0fa1f30afbffbf6e5bc49500048751d096fbe8fdb009eac19"
+    "package-lock.json": "fef2d976e4879e1a60bcfef7b2f4cc3271b58efaf43987d7de7f23e5c260bcd1",
+    "web-admin/package-lock.json": "0d9bd21d71616595f3fcc069e69e77f23a1f441a91ab60e6ffe6d8638ae95a66"
   }
 }
