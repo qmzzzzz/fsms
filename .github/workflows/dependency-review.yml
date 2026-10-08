@@ -25,7 +25,7 @@ jobs:
       - name: Checkout repository
         # persist-credentials: false：本流程只做依赖评审（评审结果回写 PR 走 API token），
         # 不 git push，checkout 的持久凭据是多余外泄面
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
