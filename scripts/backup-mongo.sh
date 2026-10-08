@@ -172,13 +172,6 @@ trap 'cleanup; exit 143' TERM
 
 OLD_UMASK=$(umask)
 umask 077
-CONFIG_FILE=$(mktemp "${TMPDIR:-/tmp}/mongodump-config.XXXXXX")
-# umask 之外再显式 chmod：双保险，且让"仅属主可读"成为代码里可见的意图。
-# 注意：在 Git Bash/MSYS（Windows）下 stat 恒报 644 —— NTFS 不承载 POSIX
-# 权限位，chmod 与 umask 在该环境均为空操作。本脚本的目标运行环境是
-# Linux 服务器 / 容器，那里两者都真实生效。
-chmod 600 "$CONFIG_FILE"
-printf 'uri: %s\n' "$MONGODB_URI" > "$CONFIG_FILE"
 
 echo "Starting MongoDB backup at $(date)"
 
@@ -194,6 +187,20 @@ echo "Starting MongoDB backup at $(date)"
 # 不是执行证据；工具大版本换了就要重读。
 case "$MONGO_BACKUP_TRANSPORT" in
   local)
+    # 含凭据的宿主临时文件**只在这一支**建。docker 支把 uri 行经 stdin 送进容器、由容器侧
+    # 落它自己的临时文件（见下），宿主那一份从头到尾没有任何读者：写在 case 之前意味着
+    # 每一次默认（docker）备份都往宿主 /tmp 放一份含生产口令的 0600 文件，一放就是整场
+    # 导出的几分钟；而 SIGKILL / OOM / 断电时 trap 根本不执行，那份文件就长在磁盘上了。
+    # restore-mongo.sh 早就是"建在 local 支里"的形状（门禁用例见 src/tests/deploy/
+    # restoreTransport.test.js 的「docker 传输 ⇒ 宿主机不落任何含凭据的配置文件」），
+    # 两条传输的凭据落盘口径至此对齐。
+    CONFIG_FILE=$(mktemp "${TMPDIR:-/tmp}/mongodump-config.XXXXXX")
+    # umask 之外再显式 chmod：双保险，且让"仅属主可读"成为代码里可见的意图。
+    # 注意：在 Git Bash/MSYS（Windows）下 stat 恒报 644 —— NTFS 不承载 POSIX
+    # 权限位，chmod 与 umask 在该环境均为空操作。本脚本的目标运行环境是
+    # Linux 服务器 / 容器，那里两者都真实生效。
+    chmod 600 "$CONFIG_FILE"
+    printf 'uri: %s\n' "$MONGODB_URI" > "$CONFIG_FILE"
     # 失败也要删半成品：docker 分支早就这么做了（重定向会先建出 0 字节文件），
     # local 分支漏掉 ⇒ mongodump 非零退出时 set -e 直接把脚本带走，一个截断的 .gz
     # 留在 backups/ 里，而它同样匹配 retention/回滚清单的时间戳命名。
@@ -214,9 +221,17 @@ case "$MONGO_BACKUP_TRANSPORT" in
     fi
     # 归档用 --archive（不带路径＝写 stdout）经 docker exec 流回宿主机文件：
     # 不需要往容器里挂备份卷，容器文件系统里的临时 cfg 用完即删。
+    # 容器侧路径用 mktemp 而不是写死的 `/tmp/.mongodump-backup.cfg`：固定名在**并发**下互相
+    # 覆写（cron 备份撞上手工备份，两个 run 共用一个 cfg，后者把前者的凭据行换成自己的，
+    # 前者的 mongodump 就连到别人的库或读半行），而且预创建/符号链接指向别处的文件会被
+    # `cat >` 原样跟随——容器里任何同 uid 进程都能先把那个名字指向 /data/db 里的文件。
+    # mktemp 一次解决三件事：名字不可预测、O_EXCL 拒绝跟随已存在的路径、默认 0600。
+    # 依赖 coreutils 的 mktemp（mongo 官方镜像是 Debian/Ubuntu 基，自带）；缺它这条命令
+    # 直接失败退出，**不**退回固定名——退回就等于把修复做成看容器心情。
     if ! printf 'uri: %s\n' "$CONTAINER_URI" |
       docker compose -f "${COMPOSE_FILE:-docker-compose.yml}" exec -T "$MONGO_COMPOSE_SERVICE" \
-        sh -c 'umask 077; cfg=/tmp/.mongodump-backup.cfg; cat > "$cfg" || exit 1;
+        sh -c 'umask 077; cfg=$(mktemp /tmp/.mongodump-backup.XXXXXX) || exit 1;
+               cat > "$cfg" || { rm -f "$cfg"; exit 1; };
                mongodump --config="$cfg" --gzip --archive; rc=$?;
                rm -f "$cfg"; exit $rc' >"$ARCHIVE_PATH"; then
       # 重定向在命令失败前就已经创建了 0 字节文件。必须删掉：
@@ -304,7 +319,30 @@ echo "Checksum: $BACKUP_FILE_FINAL.sha256"
 # "被吞掉的异地失败比没有异地更危险"里最坏的一种：它连"失败"都不算，没有任何信号。
 # 顺带让 `"${OFFSITE_ARGS[@]}"` 只在词数 > 0 时展开，老 bash（4.2/4.3，RHEL7 一类宿主）
 # 在 `set -u` 下展开空数组会直接掐死调用方，旧写法对那批宿主是"备份到最后一步崩"。
-read -r -a OFFSITE_ARGS <<< "${BACKUP_OFFSITE_CMD:-}"
+#
+# 多行（或含回车）的值必须在**执行任何一步之前**拒绝：`read -r -a <<<` 只吃第一行，
+# 于是"配了三行"实际只跑了第一行，而末尾那句回显打印的是**整个三行**——报表读起来像
+# 三步异地都做完了。这与"被吞掉的异地失败"同档，只是更隐蔽：它连"有一条没跑"都不说。
+# 含 `\r` 更阴（env 文件是 CRLF 写的就够了）：最后一个参数带着回车，rsync/scp 把它当成
+# 路径的一部分，复制到错的地方还报成功。
+# 尾随的换行/回车不算配置错误（`$(...)` 取回的命令天然带尾换行），所以先剥尾部再判形状。
+OFFSITE_VALUE="${BACKUP_OFFSITE_CMD:-}"
+while [ -n "$OFFSITE_VALUE" ]; do
+  case "$OFFSITE_VALUE" in
+    *$'\n' | *$'\r') OFFSITE_VALUE="${OFFSITE_VALUE%?}" ;;
+    *) break ;;
+  esac
+done
+case "$OFFSITE_VALUE" in
+  *$'\n'* | *$'\r'*)
+    echo "Error: BACKUP_OFFSITE_CMD 含多行或回车——本脚本按「一条命令」解析，只会执行第一行，" >&2
+    echo "       却会把整份配置回显成已完成异地副本，因此拒绝执行（一条都没跑）。" >&2
+    echo "       多步同步逻辑请包成自己的脚本，再把该脚本路径填进 BACKUP_OFFSITE_CMD。" >&2
+    echo "       若这个 \\r 是 CRLF 写的 env 文件带进来的：dos2unix 那份 env 后重跑。" >&2
+    exit 1
+    ;;
+esac
+read -r -a OFFSITE_ARGS <<< "$OFFSITE_VALUE"
 if [ "${#OFFSITE_ARGS[@]}" -gt 0 ]; then
   export BACKUP_FILE="$BACKUP_FILE_FINAL"
   export BACKUP_SHA256="$BACKUP_FILE_FINAL.sha256"
@@ -312,7 +350,9 @@ if [ "${#OFFSITE_ARGS[@]}" -gt 0 ]; then
     echo "Error: 异地副本命令失败（BACKUP_OFFSITE_CMD），本次备份按失败处理" >&2
     exit 1
   fi
-  echo "Offsite copy completed: $BACKUP_OFFSITE_CMD"
+  # 回显的是**真正执行掉的那条**（剥过尾随换行的值），不是原始配置：
+  # 与上面"只跑第一行却回显三行"的旧形态分手，日志读起来就是发生过的事。
+  echo "Offsite copy completed: $OFFSITE_VALUE"
 elif [ -n "${BACKUP_OFFSITE_CMD:-}" ]; then
   # 配了而一个词都没切出来：这是配置错误，不是"决定不做异地"。与异地命令失败同档处理
   # （那档本来就是 exit 1），免得一次拼错的副本看起来像一次成功的备份。

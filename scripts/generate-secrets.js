@@ -288,23 +288,38 @@ if (outDir) {
   const hardened = hardenPath(dir, { isDir: true, log: (m) => console.log(m) });
 
   // 目录收紧后再对目录内已写入的密钥文件逐个收紧（icacls /T 覆盖递归，这里显式复核）
+  const fileFailures = [];
   if (hardened.ok) {
     for (const [name] of Object.entries(secrets)) {
       const file = path.join(dir, name);
-      if (fs.existsSync(file)) hardenPath(file, { log: (m) => console.log(m) });
+      if (!fs.existsSync(file)) continue;
+      // 返回值必须收：旧写法把 hardenPath(file) 的结果整批丢掉，于是"11 个密钥文件里
+      // 有 4 个没收紧"只能靠运维盯 stdout 里的 icacls 报错——而它一次都不出现时，
+      // 没有任何东西能区分"全都收好了"和"一个都没试"。
+      const one = hardenPath(file, { log: (m) => console.log(m) });
+      if (!one.ok) fileFailures.push(`${name}：${one.detail}`);
     }
-    const check = verifyHardened(dir);
-    if (check.tightened) {
-      console.log(`\n✅ 权限已收紧并复核通过：${dir}（${hardened.detail}）`);
-      console.log(`   复核证据：${check.evidence}`);
-    } else {
-      console.log(`\n⚠️  权限复核未通过：${dir}`);
-      console.log(`   ${check.evidence}`);
-      console.log('   密钥可能对本机其他用户可读，请按上述提示手动收紧后复核。');
-    }
+  }
+  const check = hardened.ok
+    ? verifyHardened(dir)
+    : { tightened: false, evidence: `目录收紧未执行：${hardened.detail}` };
+
+  if (check.tightened && fileFailures.length === 0) {
+    console.log(`\n✅ 权限已收紧并复核通过：${dir}（${hardened.detail}）`);
+    console.log(`   复核证据：${check.evidence}`);
   } else {
-    console.log(`\n⚠️  权限收紧未成功：${dir}（${hardened.detail}）`);
-    console.log('   密钥可能对本机其他用户可读/可改，请按上述提示手动执行后复核。');
+    // 【为什么必须非零退出】"生成只自己可读的密钥载体"是本脚本的契约而不是建议：旧写法
+    // 把收紧失败/复核不通过打成 console.log（连 stderr 都不走）然后退 0，于是
+    // `generate-secrets … && 下一步` 会在密钥对本机其他用户可读、可改的状态下继续推进，
+    // 而调用方收到的信号是"成功"。这与本仓反复修的"报告里已见的缺口在出口处丢了，PASS 照打"
+    // 同一条形状。
+    // 产物保留不删：密钥内容是有效的，毁掉它只会把运维推向手搓随机值——那比 ACL 宽松更糟。
+    console.error(`\n❌ 权限收紧或复核未通过：${dir}`);
+    if (!check.tightened) console.error(`   目录：${check.evidence}`);
+    for (const f of fileFailures) console.error(`   文件收紧失败：${f}`);
+    console.error('   密钥文件已写出且内容有效；请按上面提示手动收紧后复核，再进下一步。');
+    console.error('   本脚本以非零退出：没做到「仅属主可读」就不算生成成功。');
+    process.exitCode = 1;
   }
 
   console.log('\n落地后请执行轮换手册中的迁移步骤（AES 先迁 mfaSecret、HMAC 重签），');

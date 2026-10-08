@@ -233,3 +233,203 @@ describe('M-05 调用点真的收紧（运行脚本，检查产物权限）', ()
     });
   });
 });
+
+/**
+ * ──────────────────────────────────────────────────────────────────────────
+ * 【2026-10-04 运维脚本批 E】收紧失败的**出口**必须是信号，不是日志
+ *
+ * generate-secrets.js 早就实际执行收紧，但失败分支是 console.log + 退出码 0：
+ * `generate-secrets … && 下一步` 会在密钥仍可被本机其他用户读写、复核也没过的状态下
+ * 继续推进，而调用方收到的信号是「成功」。同一形状在本仓被反复修（"报告里已见的缺口
+ * 在出口处丢了，PASS 照打"）。本批把三个失败面（目录收紧失败 / 复核判未收紧 /
+ * 个别文件收紧失败）汇进一个非零出口，并把逐个文件的返回值聚合成点名清单。
+ *
+ * 【为什么要注入桩，而不是等真环境失败】真实宿主上造不出「icacls 拒绝」：它要么成功，
+ * 要么环境根本不配合。而失败分支恰恰是本批新写的代码——没有可编程的桩，这几条断言
+ * 就只能写成对源码的 grep，而把调用挪进 `if (false)` 一次都拦不住（本文件上半部分
+ * 弃用 grep 的理由，同一条）。桩经 `node -r <preload>` 塞进 `require.cache`，
+ * 被测脚本一行都不动，走的仍是它自己的分支逻辑。
+ *
+ * 【前世版自证】"只有个别文件没收紧"这条配一份"把返回值检查删掉"的脚本副本：
+ * 同一份桩下旧版必须 rc=0 并打印成功行。少了这条对照，新断言红绿都可能来自环境。
+ * ──────────────────────────────────────────────────────────────────────────
+ */
+describe('M-05 收紧失败的出口：generate-secrets.js 非零退出并点名是哪一个', () => {
+  const { spawnSync, execFileSync } = require('child_process');
+  const ROOT = path.resolve(__dirname, '../../..');
+  const SCRIPT = path.resolve(ROOT, 'scripts/generate-secrets.js');
+  const FP = path.resolve(ROOT, 'src/utils/filePermission');
+  const NODE = process.execPath;
+  const NAMES = ['jwt_secret', 'aes_secret_key', 'admin_initial_password'];
+
+  /**
+   * 桩的三种失败面 + 一种全成功（对照）。
+   * `STUB hardenPath` 这类标记打进 stdout：没有它，"桩没挂上（resolve 名字差一个大小写）"
+   * 会伪装成"脚本行为正确"，四条断言一起变成没有地基的绿。
+   */
+  const stubSource = (mode) =>
+    [
+      '({',
+      '  hardenPath: (p, o) => {',
+      "    const kind = o && o.isDir ? 'dir' : 'file';",
+      "    console.log('STUB hardenPath ' + kind);",
+      mode === 'dirFail'
+        ? "    if (kind === 'dir') return { ok: false, method: 'stub', detail: 'stub：目录 icacls 被拒' };"
+        : '',
+      mode === 'fileFail'
+        ? "    if (kind === 'file') return { ok: false, method: 'stub', detail: 'stub：文件 icacls 被拒' };"
+        : '',
+      "    return { ok: true, method: 'stub', detail: 'stub ok' };",
+      '  },',
+      '  verifyHardened: () => {',
+      "    console.log('STUB verifyHardened');",
+      mode === 'verifyFail'
+        ? "    return { tightened: false, evidence: 'stub：复核发现 Everyone 仍可读' };"
+        : "    return { tightened: true, evidence: 'stub：复核通过' };",
+      '  },',
+      '  isWindows: true,',
+      '})',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+  /** 把桩塞进 require.cache：只换模块，不改被测脚本 */
+  const writePreload = (dir, mode) => {
+    const p = path.join(dir, 'preload.js');
+    fs.writeFileSync(
+      p,
+      [
+        'const Module = require("module");',
+        `const target = require.resolve(${JSON.stringify(FP)});`,
+        'const m = new Module(target, null);',
+        'm.filename = target;',
+        `m.exports = ${stubSource(mode)};`,
+        'm.loaded = true;',
+        'Module._cache[target] = m;',
+      ].join('\n'),
+      { encoding: 'utf8' }
+    );
+    return p;
+  };
+
+  const run = (args, out) => {
+    const r = spawnSync(NODE, [...args, '--out', out], {
+      encoding: 'utf8',
+      cwd: ROOT,
+      timeout: 120000,
+    });
+    return {
+      code: r.status,
+      stdout: r.stdout || '',
+      stderr: r.stderr || '',
+      all: `${r.stdout || ''}${r.stderr || ''}`,
+    };
+  };
+
+  const runStubbed = (dir, mode) =>
+    run(['-r', writePreload(dir, mode), SCRIPT], path.join(dir, 'out'));
+
+  /** 失败分支不许毁掉产物：密钥内容是有效的，删掉只会把运维推向手搓随机值 */
+  const keysWritten = (outDir) =>
+    NAMES.map((n) => {
+      const f = path.join(outDir, n);
+      return {
+        name: n,
+        exists: fs.existsSync(f),
+        size: fs.existsSync(f) ? fs.statSync(f).size : 0,
+      };
+    });
+
+  it('前提自证：桩确实顶掉了真实模块，且全成功的桩仍是 rc=0', () => {
+    withTempDir((dir) => {
+      const r = runStubbed(dir, 'ok');
+      // 这一条同时是给"注入本身会不会把脚本带红"准备的对照组：
+      // 桩挂上 + rc=0 + 成功文案，说明下面几条的红只可能来自被注入的那个返回值。
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('STUB hardenPath dir');
+      expect(r.stdout).toContain('STUB verifyHardened');
+      expect(r.stdout).toContain('权限已收紧并复核通过');
+      expect(r.stderr).not.toContain('权限收紧或复核未通过');
+      // 判"少了哪几个"而不是 every()：红了要能一眼看见是哪个密钥没落盘
+      expect(keysWritten(path.join(dir, 'out')).filter((k) => !k.exists || k.size === 0)).toEqual(
+        []
+      );
+    });
+  });
+
+  it('目录收紧失败 ⇒ rc=1，成功文案一次都不出现，产物原样留着', () => {
+    withTempDir((dir) => {
+      const r = runStubbed(dir, 'dirFail');
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('权限收紧或复核未通过');
+      expect(r.stderr).toContain('目录收紧未执行：stub：目录 icacls 被拒');
+      expect(r.stdout).not.toContain('权限已收紧并复核通过');
+      // 判"少了哪几个"而不是 every()：红了要能一眼看见是哪个密钥没落盘
+      expect(keysWritten(path.join(dir, 'out')).filter((k) => !k.exists || k.size === 0)).toEqual(
+        []
+      );
+    });
+  });
+
+  it('回读复核判「未收紧」⇒ rc=1，且复核证据原文可见（不是只说"没通过"）', () => {
+    withTempDir((dir) => {
+      const r = runStubbed(dir, 'verifyFail');
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('stub：复核发现 Everyone 仍可读');
+      expect(r.stdout).not.toContain('权限已收紧并复核通过');
+    });
+  });
+
+  it('只有个别文件没收紧（目录级复核仍"通过"）⇒ rc=1 并逐个点名文件名', () => {
+    // 这条是本批新增的聚合逻辑：旧写法把 hardenPath(file) 的结果整批丢掉，
+    // 于是"11 个密钥文件里全部没试成功"与"全都收好了"在退出码上不可区分。
+    withTempDir((dir) => {
+      const r = runStubbed(dir, 'fileFail');
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('权限收紧或复核未通过');
+      for (const n of NAMES) expect(r.stderr).toContain(`文件收紧失败：${n}：`);
+      expect(r.stdout).not.toContain('权限已收紧并复核通过');
+      // 目录级复核是"通过"的：让退出码翻红的只有文件清单这一条
+      expect(r.stdout).toContain('STUB verifyHardened');
+    });
+  });
+
+  it('前世版自证：删掉返回值检查的副本，同一份桩下 rc=0 还宣布成功', () => {
+    const src = fs.readFileSync(SCRIPT, 'utf8');
+    const legacy = src
+      .replace(/if \(!one\.ok\) fileFailures\.push[^\n]*\r?\n/, '')
+      .replace(/if \(check\.tightened && fileFailures\.length === 0\) \{/, 'if (check.tightened) {')
+      .replace(/for \(const f of fileFailures\) console\.error[^\n]*\r?\n/, '');
+    // 前提自证：删掉的确实是那三处，而不是正则没命中导致"新旧两版同一份源码"
+    expect(legacy).not.toBe(src);
+    expect(legacy).not.toMatch(/fileFailures\.push/);
+    expect(legacy).not.toMatch(/&& fileFailures\.length === 0/);
+
+    withTempDir((dir) => {
+      // 副本放进 <tmp>/scripts/，桩模块放进 <tmp>/src/utils/：
+      // 旧脚本按 `../src/utils/filePermission` 相对定位，这样它取到的正是本用例的桩，
+      // 不需要 require.cache——两条路径证的是同一件事。
+      const scriptDir = path.join(dir, 'scripts');
+      const utilsDir = path.join(dir, 'src', 'utils');
+      fs.mkdirSync(scriptDir, { recursive: true });
+      fs.mkdirSync(utilsDir, { recursive: true });
+      const p = path.join(scriptDir, 'generate-secrets.js');
+      fs.writeFileSync(p, legacy, { encoding: 'utf8' });
+      fs.writeFileSync(
+        path.join(utilsDir, 'filePermission.js'),
+        `module.exports = ${stubSource('fileFail')};\n`,
+        { encoding: 'utf8' }
+      );
+      expect(execFileSync(NODE, ['--check', p], { encoding: 'utf8' })).toBe('');
+
+      const out = path.join(dir, 'out');
+      const r = run([p], out);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('权限已收紧并复核通过');
+      expect(r.stdout).toContain('STUB hardenPath file');
+      expect(r.stderr).not.toContain('文件收紧失败');
+      // 桩确实被这条相对路径解析到了（否则"旧版 rc=0"是真实模块替它背的书）
+      expect(fs.existsSync(path.join(out, 'jwt_secret'))).toBe(true);
+    });
+  });
+});

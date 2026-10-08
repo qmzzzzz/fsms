@@ -51,7 +51,10 @@ function mkwork() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-hygiene-'));
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin);
+  const tmp = path.join(dir, 'tmp');
+  fs.mkdirSync(tmp);
   const log = path.join(dir, 'calls.log');
+  const probe = path.join(dir, 'hostcfg.log');
 
   const write = (name, lines) => {
     const p = path.join(bin, name);
@@ -59,15 +62,42 @@ function mkwork() {
     fs.chmodSync(p, 0o755);
   };
 
+  // 宿主机凭据文件的**结构**探测（与 src/tests/deploy/restoreTransport.test.js 的
+  // HOSTCFG_PROBE 同一口径）：按"首行是 `uri: `"识别，不按文件名——否则把 mktemp 模板
+  // 改名成 fsms-cred.XXXXXX 就能整条绿灯穿过，而钉名字判的是"祸害叫什么"。
+  // 探测必须发生在**工具被拉起的那一刻**：脚本退出前 trap 就把原文件删了，事后去读会
+  // 拿到空目录，那条"没有凭据文件"就成了白给的。
+  const PROBE = [
+    ': > "$PROBE_OUT"',
+    'for f in "$TMPDIR"/*; do',
+    '  [ -f "$f" ] || continue',
+    '  head -n1 "$f" 2>/dev/null | grep -q \'^uri: \' || continue',
+    '  printf \'HOSTCFG %s\\n\' "$f" >> "$PROBE_OUT"',
+    '  cat "$f" >> "$PROBE_OUT"',
+    'done',
+  ];
+
   write('mongodump', [
     '#!/usr/bin/env bash',
     'echo "TOOL $*" >> "$STUB_LOG"',
+    ...PROBE,
     'for a in "$@"; do',
     '  case "$a" in',
     '    --config=*) cat "${a#--config=}" >> "$STUB_LOG" ;;',
     '    --archive=*) printf \'FAKE-ARCHIVE-BYTES\' > "${a#--archive=}" ;;',
     '  esac',
     'done',
+    'exit 0',
+  ]);
+  // docker 桩：把 stdin 喝干（真实容器侧的 `cat > cfg` 就是这么拿到 uri 行的），
+  // 再往 stdout 写归档字节（宿主把它重定向进 .gz）。它**不**执行容器侧命令——
+  // 容器侧的形状由 src/tests/deploy/restoreRemoteHardening.test.js 用真执行的方式判。
+  write('docker', [
+    '#!/usr/bin/env bash',
+    'echo "DOCKER $*" >> "$STUB_LOG"',
+    'cat > /dev/null',
+    ...PROBE,
+    "printf 'STUB-ARCHIVE-BYTES'",
     'exit 0',
   ]);
   // stub gpg：成功时做 --output 的 src→dst 拷贝语义（带信封标记，证明数据真经过它）；
@@ -94,7 +124,7 @@ function mkwork() {
     'exit 0',
   ]);
 
-  return { dir, bin, log, backupDir: path.join(dir, 'backups') };
+  return { dir, bin, tmp, log, probe, backupDir: path.join(dir, 'backups') };
 }
 
 function runBackup(work, script, env) {
@@ -106,6 +136,10 @@ function runBackup(work, script, env) {
       ...process.env,
       PATH: `${work.bin}${path.delimiter}${process.env.PATH}`,
       STUB_LOG: sh(work.log),
+      // TMPDIR 收到本次临时目录：脚本写的宿主临时文件因此**只有这一处落点**，
+      // 桩里的结构探测才有资格说"没看见"。不接 TMPDIR 的探针扫的是运气。
+      TMPDIR: sh(work.tmp),
+      PROBE_OUT: sh(work.probe),
       MONGODB_URI: URI,
       MONGODB_URI_FILE: '',
       MONGO_BACKUP_TRANSPORT: 'local',
@@ -128,6 +162,7 @@ function runBackup(work, script, env) {
     files,
     kinds: classify(files),
     calls: fs.existsSync(work.log) ? fs.readFileSync(work.log, 'utf8') : '',
+    probe: fs.existsSync(work.probe) ? fs.readFileSync(work.probe, 'utf8') : null,
   };
 }
 
@@ -306,5 +341,140 @@ describe('B：失败现场与定稿之后的产物卫生', () => {
     expect(r.out).toMatch(/未配置 BACKUP_OFFSITE_CMD/);
     expect(r.out).not.toMatch(/Offsite copy completed/);
     expect(r.calls).not.toMatch(/OFFSITE /);
+  });
+});
+
+// ── C：凭据落盘的分支 + 异地命令的"形状"（2026-10-04 审计复跑）────────────────
+// C.1 宿主机那份含生产口令的临时配置文件，原先写在 `case` **之前**：docker 传输（默认那一条）
+//     走的是"uri 行经 stdin 送进容器、容器侧落它自己的临时文件"，宿主这份从头到尾没有读者。
+//     于是每次默认备份都在 /tmp 放一份 0600 的明文口令，一放就是整场导出的几分钟；而
+//     SIGKILL / OOM / 断电时 trap 不执行，那份文件就永久留在磁盘上。恢复侧早就是
+//     "建在 local 支里"的形状，这里是把备份侧对齐。
+// C.2 `read -r -a … <<< "$VALUE"` 只吃**第一行**：多行值实际只跑第一行，而末尾的回显打印的是
+//     整份配置——异地副本报表因此说谎（这与本文件 A/B 两段判的是同一族：把没做完说成做完了）。
+//     含 `\r`（CRLF 写的 env 文件）更阴：最后一个参数带回车，rsync/scp 把它当路径的一部分，
+//     复制到错的地方还报成功。尾随的换行/回车不算配置错误，剥掉尾部后再判形状。
+describe('C：凭据只在真正需要它的分支落盘；异地命令一条都不许"半跑还说完成"', () => {
+  let work;
+  beforeEach(() => {
+    work = mkwork();
+  });
+  afterEach(() => {
+    fs.rmSync(work.dir, { recursive: true, force: true });
+  });
+
+  test('C.1 docker 传输：宿主机没有 `uri: ` 开头的文件（工具被拉起的那一刻取证）', () => {
+    const r = runBackup(work, null, { MONGO_BACKUP_TRANSPORT: 'docker' });
+    expect(r.code).toBe(0);
+    expect(r.kinds.enc).toHaveLength(1);
+    // 前提自证：备份确实走到了容器边界（桩 docker 真被调用），不是"根本没跑所以没文件"
+    expect(r.calls).toMatch(/DOCKER .*exec -T mongo sh -c/);
+    expect(r.probe).not.toBeNull();
+    expect(r.probe).toBe('');
+    // 口令也没从 stdin 之外的地方漏进日志：docker 支的 argv 上只该有服务名与 sh -c
+    expect(r.calls).not.toMatch(/ExplicitPw/);
+  });
+
+  test('C.1 反向自证：同一条探测在 local 传输下**看得见**凭据文件（C.1 的空不是探测器坏了）', () => {
+    const r = runBackup(work, null, { MONGO_BACKUP_TRANSPORT: 'local' });
+    expect(r.code).toBe(0);
+    const lines = r.probe.split('\n').filter((l) => l.startsWith('HOSTCFG '));
+    expect(lines).toHaveLength(1);
+    // 按内容而不是名字命中：模板名换成别的也一样会被这条抓到
+    expect(r.probe).toMatch(/^uri: mongodb:\/\/fsms:ExplicitPw@/m);
+  });
+
+  test('C.2 多行 BACKUP_OFFSITE_CMD ⇒ 一条都不执行、不回显 completed、退 1', () => {
+    const value = `${sh(work.bin)}/offsite-ok\n${sh(work.bin)}/offsite-fail`;
+    const r = runBackup(work, null, { BACKUP_OFFSITE_CMD: value });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/含多行或回车/);
+    expect(r.out).not.toMatch(/Offsite copy completed/);
+    // 最关键：第一行也不许跑。跑了第一行再说"拒绝"，异地副本仍是半套，而运维不知道。
+    expect(r.calls).not.toMatch(/OFFSITE /);
+    // 定稿产物按设计保留（本地副本是回滚抓手），拒绝的是异地那一步
+    expect(r.kinds.enc).toHaveLength(1);
+  });
+
+  test('C.2 值里含回车（CRLF env 文件的形态）⇒ 同样拒绝，而不是带着 \\r 去复制', () => {
+    // 内部回车：`offsite-ok \r --flag`。旧写法会让最后一个参数带回车进 argv，
+    // 复制到"看不见的错路径"还说成功；这里必须在执行前就停手。
+    const r = runBackup(work, null, {
+      BACKUP_OFFSITE_CMD: `${sh(work.bin)}/offsite-ok \r --flag`,
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/含多行或回车/);
+    expect(r.calls).not.toMatch(/OFFSITE /);
+  });
+
+  test('C.2 反向自证：尾随换行的单行值照常执行，且回显写的是**被执行的那条**', () => {
+    // 这条是 C.2 上两条的对照：剥尾部不等于拒绝执行。`$(...)` 取回的命令天然带尾换行，
+    // 把它做成配置错误会把一个正常部署挡在门外。
+    const one = `${sh(work.bin)}/offsite-ok`;
+    const r = runBackup(work, null, { BACKUP_OFFSITE_CMD: `${one}\n` });
+    expect(r.code).toBe(0);
+    expect(r.calls).toMatch(/OFFSITE .*file=/);
+    const echo = r.out.split('\n').find((l) => l.startsWith('Offsite copy completed:'));
+    // 回显与真正执行的字符串逐字节相等（原始值里的尾换行不在里面）
+    expect(echo).toBe(`Offsite copy completed: ${one}`);
+  });
+
+  /**
+   * 前世版脚本（与 describe B 的 writeLegacy 同一手法）：把一处修复**还原成修前的形状**，
+   * 再跑同一个夹具。这一对用例判的不是"新版对不对"，而是"断言抓不抓得住回退"——
+   * C.1/C.2 那四条如果换了脚本副本照样绿，它们就是没有牙齿的装饰。
+   */
+  function legacy(transform, name) {
+    const src = fs.readFileSync(BACKUP, 'utf8');
+    const out = transform(src);
+    // 前提自证：正则真的命中了（否则"新旧同一份源码"会让这条永远绿）
+    expect(out).not.toBe(src);
+    const dir = path.join(work.dir, name);
+    fs.mkdirSync(dir, { recursive: true });
+    for (const f of ['mongoUri.sh', 'backupCrypto.sh']) {
+      fs.copyFileSync(path.join(ROOT, 'scripts', f), path.join(dir, f));
+    }
+    const p = path.join(dir, 'backup-mongo.sh');
+    fs.writeFileSync(p, out);
+    expect(execFileSync('bash', ['-n', sh(p)], { encoding: 'utf8' })).toBe('');
+    return p;
+  }
+
+  test('C.1 前世版自证：把凭据文件挪回 `case` 之前 ⇒ docker 支也留下明文口令（断言有牙齿）', () => {
+    const block =
+      /([ \t]*)CONFIG_FILE=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/mongodump-config\.XXXXXX"\)[\s\S]*?printf 'uri: %s\\n' "\$MONGODB_URI" > "\$CONFIG_FILE"\r?\n/m;
+    const m = fs.readFileSync(BACKUP, 'utf8').match(block);
+    expect(m).not.toBeNull();
+    const legacyScript = legacy((src) => {
+      const one = src.match(block)[0];
+      const stripped = src.replace(block, '');
+      // 还原成"建在 case 之前"：缩进去掉，位置挪到 `umask 077` 那行之后
+      return stripped.replace(/^umask 077\r?\n/m, `umask 077\n${one.replace(/^[ \t]+/gm, '')}\n`);
+    }, 'legacy-cfg');
+    const r = runBackup(work, legacyScript, { MONGO_BACKUP_TRANSPORT: 'docker' });
+    // 修前形态：备份本身是**成功**的（这正是它危险的地方——没有任何失败信号）
+    expect(r.code).toBe(0);
+    expect(r.kinds.enc).toHaveLength(1);
+    // 而宿主机多了一份没人读的明文口令文件
+    expect(r.probe).toMatch(/^HOSTCFG /m);
+    expect(r.probe).toMatch(/^uri: mongodb:\/\/fsms:ExplicitPw@/m);
+  });
+
+  test('C.2 前世版自证：删掉形状检查 ⇒ 多行值只跑第一行却宣布全部完成', () => {
+    const legacyScript = legacy(
+      (src) => src.replace(/^case "\$OFFSITE_VALUE" in[\s\S]*?^esac[ \t]*\r?\n/m, ''),
+      'legacy-offsite'
+    );
+    const bin = sh(work.bin);
+    const r = runBackup(work, legacyScript, {
+      BACKUP_OFFSITE_CMD: `${bin}/offsite-ok\n${bin}/offsite-fail`,
+    });
+    // 修前形态：退 0，第一行跑了，第二行**静默消失**，还回显 completed
+    expect(r.code).toBe(0);
+    expect(r.calls).toMatch(/OFFSITE .*file=/);
+    expect(r.out).toMatch(/Offsite copy completed/);
+    // 现版对同一夹具的结果写在上面对照里（退 1 + 一条都不跑）——这里钉的是"两版确有差别"，
+    // 万一有人把检查做成恒真，这条与 C.2 主用例不会同时绿。
+    expect(r.out).not.toMatch(/含多行或回车/);
   });
 });

@@ -216,8 +216,8 @@ describe('restore-mongo.sh 的完整性门禁：验不过就不许写库', () =>
 
   const sh = (p) => p.replace(/\\/g, '/');
 
-  const runRestore = (env = {}) =>
-    spawnSync('bash', [sh(RESTORE), sh(archive)], {
+  const runRestore = (env = {}, script = RESTORE) =>
+    spawnSync('bash', [sh(script), sh(archive)], {
       cwd: ROOT,
       encoding: 'utf8',
       timeout: 60000,
@@ -318,5 +318,67 @@ describe('restore-mongo.sh 的完整性门禁：验不过就不许写库', () =>
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('完整性校验通过');
     expect(fs.existsSync(stubLog)).toBe(true);
+  });
+
+  // ── 7~9：RESTORE_SKIP_CHECKSUM 的作用域（2026-10-04 审计复跑）──────────────────
+  // 旧实现把 `[ "$RESTORE_SKIP_CHECKSUM" = true ]` 写在**整段最前面**，于是它连
+  // "sidecar 在、哈希对不上"一起跳过：这个开关的原意是"恢复一份本来就没有校验和的老归档"，
+  // 落地却成了"已知损坏/被替换的归档也可以直接写进生产库"。两种情况差着一个量级——
+  // 前者缺的是**证据**，后者手里是**反证**。
+  test('7 归档被篡改 + RESTORE_SKIP_CHECKSUM=true ⇒ 仍然硬失败，一次都不写库', () => {
+    writeChecksum();
+    fs.writeFileSync(archive, 'ARCHIVE-BYTES- TAMPERED AFTER CHECKSUM');
+    const r = runRestore({ RESTORE_SKIP_CHECKSUM: 'true' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('完整性校验失败');
+    // 点名开关不管这件事：否则运维的下一步是去查别的脚本，或者手工绕过校验直接 mongorestore
+    expect(r.stderr).toMatch(/只放行「没有 \.sha256」/);
+    expect(r.stderr).not.toMatch(/未经任何完整性证明/);
+    expect(fs.existsSync(stubLog)).toBe(false);
+    expect(r.stdout).not.toContain('Restore completed successfully');
+  });
+
+  test('8 缺 sidecar + SKIP=true 的警告必须说清"缺的是哪一样"（措辞不得漂回通用跳过）', () => {
+    // 这一条钉的是文案的作用域：警告如果写成"未经任何完整性证明"这种通用说法，
+    // 它与第 7 条的"对不上也放行"在文档上就没区别了，下一个改代码的人会照着模糊文案漂。
+    const r = runRestore({ RESTORE_SKIP_CHECKSUM: 'true' });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toMatch(/缺少 \.sha256/);
+    expect(fs.existsSync(stubLog)).toBe(true);
+  });
+
+  test('9 前世版自证：把开关判据挪回整段最前面 ⇒ 篡改 + SKIP=true 真的写库（断言有牙齿）', () => {
+    const src = fs.readFileSync(RESTORE, 'utf8');
+    const legacy = src.replace(
+      /^CHECKSUM_FILE="\$BACKUP_FILE\.sha256"\r?\nif \[ ! -f "\$CHECKSUM_FILE" \]; then[\s\S]*?\nelse\r?\n/m,
+      'CHECKSUM_FILE="$BACKUP_FILE.sha256"\n' +
+        'if [ "${RESTORE_SKIP_CHECKSUM:-false}" = "true" ]; then\n' +
+        '  echo "（前世版形态）跳过整段校验" >&2\n' +
+        'elif [ ! -f "$CHECKSUM_FILE" ]; then\n' +
+        '  echo "Error: 缺少校验和文件：$CHECKSUM_FILE" >&2\n' +
+        '  exit 1\n' +
+        'else\n'
+    );
+    // 前提自证：命中替换的是"开关判在整段最前面"那一层——缺 sidecar 的那条新分支文案
+    // 必须已经不在（mismatch 分支两版共用，所以不能拿它当判据）。
+    expect(legacy).not.toBe(src);
+    expect(legacy).toMatch(/前世版形态/);
+    expect(legacy).not.toMatch(/本次恢复的归档缺少 \.sha256/);
+    const dir = path.join(tmpDir, 'legacy-checksum');
+    fs.mkdirSync(dir, { recursive: true });
+    for (const f of ['mongoUri.sh', 'backupCrypto.sh']) {
+      fs.copyFileSync(path.join(ROOT, 'scripts', f), path.join(dir, f));
+    }
+    const p = path.join(dir, 'restore-mongo.sh');
+    fs.writeFileSync(p, legacy);
+    expect(execFileSync('bash', ['-n', sh(p)], { encoding: 'utf8' })).toBe('');
+
+    writeChecksum();
+    fs.writeFileSync(archive, 'ARCHIVE-BYTES- TAMPERED AFTER CHECKSUM');
+    const r = runRestore({ RESTORE_SKIP_CHECKSUM: 'true' }, p);
+    // 修前形态：退 0 且 mongorestore 被调用——这就是第 7 条要拦住的那次写库
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(stubLog)).toBe(true);
+    expect(r.stdout).toContain('Restore completed successfully');
   });
 });

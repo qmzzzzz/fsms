@@ -38,15 +38,24 @@ const ARCHIVE_BYTES = 'FAKE-GZIP-ARCHIVE-PAYLOAD-BYTES';
 const sh = (p) => String(p).replace(/\\/g, '/');
 
 /**
- * 两个桩共用的探测片段：工具被拉起的那一刻，宿主机上有没有 mongorestore 的凭据文件；
+ * 两个桩共用的探测片段：工具被拉起的那一刻，宿主机上有没有**含明文凭据的配置文件**；
  * 有的话它写的是什么。内容必须在桩里抄出来——脚本退出前 trap 就把原文件删了，
  * 事后再读会拿到 ENOENT（这条实测踩过：断言写成"读 found[0]"直接把闸做成了假失败）。
+ *
+ * 探测按**内容结构**（首行是 `uri: ` ——mongorestore 配置文件唯一的形状，scripts/restore-mongo.sh
+ * 用 printf 'uri: %s\n' 写它）而不是按文件名。原实现扫 `"$TMPDIR"/mongorestore-config.*`，
+ * 于是"把模板改名成 fsms-restore-cred.XXXXXX 再引入同一份宿主明文口令"能整条绿灯穿过——
+ * 按名字探测闸的是"祸害叫什么"，不是"祸害是什么"。判据里也不放口令字面量：
+ * 夹具换口令就会让探测器瞎掉。
+ * 残余盲区（诚实写明）：若回归把文件写到硬编码的 /tmp 而 TMPDIR 被改到别处，本探测看不到；
+ * 桩里把 TMPDIR 指到本次临时目录正是为了让"脚本写的宿主文件"只有这一处落点。
  */
 const HOSTCFG_PROBE = [
   ': > "$HOSTCFG_FILE"',
   ': > "$HOSTCFG_BODY_FILE"',
-  'for f in "$TMPDIR"/mongorestore-config.*; do',
-  '  [ -e "$f" ] || continue',
+  'for f in "$TMPDIR"/*; do',
+  '  [ -f "$f" ] || continue',
+  '  head -n1 "$f" 2>/dev/null | grep -q \'^uri: \' || continue',
   '  printf \'%s\\n\' "$f" >> "$HOSTCFG_FILE"',
   '  cat "$f" >> "$HOSTCFG_BODY_FILE"',
   'done',
@@ -88,14 +97,20 @@ function makeWorkspace() {
     encoding: 'utf8',
   });
 
+  // 桩自己的产物一律放在 TMPDIR 的**点目录**里：bash 的 `"$TMPDIR"/*` 不匹配点文件，
+  // 于是 docker.stdin（首行就是 `uri: …`，那是流经 stdin 的正常内容，不是宿主泄露）
+  // 不会被下面的内容探测误伤。探测器扫的必须是"脚本写的文件"，不能扫到自己的输出。
+  const probeDir = path.join(dir, '.probe');
+  fs.mkdirSync(probeDir);
+
   const files = {
-    dockerArgv: path.join(dir, 'docker.argv'),
-    dockerStdin: path.join(dir, 'docker.stdin'),
-    mongorestoreArgv: path.join(dir, 'mongorestore.argv'),
-    hostCfg: path.join(dir, 'hostcfg.txt'),
-    hostCfgBody: path.join(dir, 'hostcfg.body'),
+    dockerArgv: path.join(probeDir, 'docker.argv'),
+    dockerStdin: path.join(probeDir, 'docker.stdin'),
+    mongorestoreArgv: path.join(probeDir, 'mongorestore.argv'),
+    hostCfg: path.join(probeDir, 'hostcfg.txt'),
+    hostCfgBody: path.join(probeDir, 'hostcfg.body'),
   };
-  return { dir, bin, backupDir, archive, files };
+  return { dir, bin, backupDir, archive, probeDir, files };
 }
 
 // 夹具文件路径 → 桩读取的环境变量名（探测器的接线集中在这里，避免两处拼写漂移）
@@ -166,8 +181,28 @@ describe('restore-mongo.sh 传输路径（默认 docker：mongorestore 在容器
     // 归档确实跟着流进去了：stdin = 一行配置 + 原归档字节
     expect(stdin.endsWith(ARCHIVE_BYTES)).toBe(true);
 
-    // 容器侧临时 cfg/archive 用完即删（凭据不能留在容器文件系统里）
-    expect(argv).toMatch(/rm -f \/tmp\/\.mongorestore\.cfg \/tmp\/\.mongorestore\.archive/);
+    // 容器侧临时文件用完即删（凭据不能留在容器文件系统里）。
+    // 原断言钉 `rm -f /tmp/.mongorestore.cfg /tmp/.mongorestore.archive`：脚本把这两条写死
+    // 路径换成 mktemp（并发恢复会互相截断对方的文件）之后，它红的是"名字变了"，而这条臂要守的
+    // 性质一条都没变——按名字探测的闸守的是祸害叫什么，这里改成按变量核对：
+    //   ① mktemp 出来的每个变量都真的被写过（前提自证，否则下面的包含判断真空成立）
+    //   ② 写入只允许落到变量，不许落写死路径（写死路径既不可预测、又对 ③ 隐形）
+    //   ③ 每个被写过的文件都在退出路径的 rm -f 名单里
+    const lines = argv.split('\n');
+    expect(lines.indexOf('-c')).toBeGreaterThan(-1); // sh -c 的实参就是"真正在容器里跑的那条命令"
+    const remote = lines.slice(lines.indexOf('-c') + 1).join('\n');
+    const mktempVars = [...remote.matchAll(/(\w+)=\$\(?mktemp[^\n]*\)/g)].map((m) => m[1]);
+    const writeVars = [...remote.matchAll(/(?:^|[;\s])>\s*"\$(\w+)"/g)].map((m) => m[1]);
+    expect(mktempVars.length).toBeGreaterThan(0);
+    expect([...mktempVars].sort()).toEqual([...writeVars].sort());
+    const literalWrites = [...remote.matchAll(/(?:^|[;\s])>\s*(?!")[^;&\s][^\s;]*/g)].map((m) =>
+      m[0].trim()
+    );
+    expect(literalWrites).toEqual([]);
+    const cleanup = remote.match(/rc=\$\?;\s*rm -f ([^;]+);/);
+    expect(cleanup).not.toBeNull(); // 退出路径上没有 rm ⇒ 凭据留在容器文件系统
+    const removed = [...cleanup[1].matchAll(/"\$(\w+)"/g)].map((m) => m[1]);
+    writeVars.forEach((v) => expect(removed).toContain(v));
     expect(argv).toMatch(/--gzip/);
   });
 
@@ -267,3 +302,24 @@ describe('restore-mongo.sh 传输路径（默认 docker：mongorestore 在容器
     expect(r.out).toMatch(/目标库名 : fire-safety/);
   });
 });
+
+/**
+ * 变异台账（2026-10-03，第 1 组"容器侧清理"臂改判据后重测）
+ *
+ * 跑法：node tools/ledger.js scripts/restore-mongo.sh src/tests/deploy/restoreTransport.test.js \
+ *        restore-cleanup-dropped="红:#1" restore-cleanup-cfg-only="红:#1" \
+ *        restore-write-literal-path="红:#1" restore-mktemp-cfg-to-fixed="红:#1"
+ *
+ * 基线 8/8 绿；四条变异**预测与实测完全一致**，每次都只有 #1 红，恢复后逐字节相同。
+ * 四条各自钉住这条臂的一个不同断口：退出路径没 rm / rm 少一个文件 / 写入绕过变量 /
+ * mktemp 退回写死路径。
+ *
+ * 为什么改判据：这一臂原先钉的是 `rm -f /tmp/.mongorestore.cfg /tmp/.mongorestore.archive`
+ * 字面量。脚本把两个容器侧路径换成 mktemp（并发恢复会互相截断对方的文件——那是真 bug，
+ * 修得对）之后，这条断言红了，而红的原因是"祸害改了名字"，不是"祸害回来了"。
+ * 这是第 8 族（按名字探测）在我自己门禁里的复发，记下以免下次又去改脚本迁就断言。
+ *
+ * 自纠：台账第一版里 restore-mktemp-cfg-to-fixed 施加失败（MUT-ABORT 命中 0 处）——
+ * 正则里的 `(` 写成了捕获分组。判据是"MUT-ABORT 会响"而不是"我一次写对"，
+ * 所以这类错误不会变成假绿；改用 `[(]`/`[)]` 后命中 1 处。
+ */

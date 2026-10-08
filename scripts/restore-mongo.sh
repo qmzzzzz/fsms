@@ -10,8 +10,10 @@
 #                    恢复目标是破坏性写入的落点，故命令行点名的 MONGODB_URI 一定赢过
 #                    环境里残留的 MONGODB_URI_FILE（两者并存时告警，不静默改目标）
 #   RESTORE_CONFIRM  非交互场景下的确认令牌，须等于目标库名
-#   RESTORE_SKIP_CHECKSUM 可选，默认 false。true = 跳过 <归档>.sha256 完整性校验，
-#                    仅用于恢复无校验和的历史/外部归档；缺失 sidecar 本身是硬失败
+#   RESTORE_SKIP_CHECKSUM 可选，默认 false。true **只**放行"归档没有配对的 .sha256"
+#                    这一种情况（用于恢复无校验和的历史/外部归档）；
+#                    有 sidecar 而哈希对不上时它不放行——那种情况手里是**反证**而不是缺证据，
+#                    跳过就等于把一份已知损坏/被替换的归档写进生产库
 #   MONGO_RESTORE_TRANSPORT 可选，local | docker（默认 docker，与 backup-mongo.sh 同口径）
 #   MONGO_COMPOSE_SERVICE   可选，容器内执行 mongorestore 的服务名（默认 mongo）
 #   MONGO_CONTAINER_HOST    可选，容器内连接地址（默认 127.0.0.1:27017）
@@ -70,14 +72,21 @@ fi
 # 缺 sidecar 按失败处理（与"忘配加密 = 硬失败"同一条口径）：静默放行会让
 # "有没有校验和"退化成"备份文件有没有被完整复制"的运气。确需恢复无校验和的
 # 历史/外部归档时，显式 RESTORE_SKIP_CHECKSUM=true，且警告走 stderr。
+#
+# 【这个开关只管"没有 sidecar"，不管"对不上"】写在这一整段最前面的判据里时，
+# `RESTORE_SKIP_CHECKSUM=true` 会连**哈希不符**一起跳过：那份开关的原意是"恢复一份
+# 本来就没有校验和的老归档"，实现出来却成了"已知损坏/被替换的归档也可以直接写进
+# 生产库"。这两个场景的风险差着一个量级——前者缺的是证据，后者是**反证**。
 CHECKSUM_FILE="$BACKUP_FILE.sha256"
-if [ "${RESTORE_SKIP_CHECKSUM:-false}" = "true" ]; then
-  echo "警告：RESTORE_SKIP_CHECKSUM=true —— 本次恢复的归档未经任何完整性证明" >&2
-elif [ ! -f "$CHECKSUM_FILE" ]; then
-  echo "Error: 缺少校验和文件：$CHECKSUM_FILE" >&2
-  echo "       备份脚本会为每个产物生成 .sha256，异地取回时须一并取回。" >&2
-  echo "       确需恢复无校验和的归档：显式设置 RESTORE_SKIP_CHECKSUM=true（不建议）" >&2
-  exit 1
+if [ ! -f "$CHECKSUM_FILE" ]; then
+  if [ "${RESTORE_SKIP_CHECKSUM:-false}" = "true" ]; then
+    echo "警告：RESTORE_SKIP_CHECKSUM=true —— 本次恢复的归档缺少 .sha256，未经任何完整性证明" >&2
+  else
+    echo "Error: 缺少校验和文件：$CHECKSUM_FILE" >&2
+    echo "       备份脚本会为每个产物生成 .sha256，异地取回时须一并取回。" >&2
+    echo "       确需恢复无校验和的归档：显式设置 RESTORE_SKIP_CHECKSUM=true（不建议）" >&2
+    exit 1
+  fi
 else
   # grep -oE 只取 64 位十六进制串：与 sidecar 的分隔符形态（两空格 / 单个 * / 前置 \）解耦。
   # `|| true` 是必需的：set -e + pipefail 下 grep 无匹配会让赋值命令替换直接结束脚本，
@@ -97,6 +106,12 @@ else
     echo "       期望 $EXPECTED_HASH" >&2
     echo "       实际 $ACTUAL_HASH" >&2
     echo "       文件 $BACKUP_FILE" >&2
+    if [ "${RESTORE_SKIP_CHECKSUM:-false}" = "true" ]; then
+      # 这一句是给"设了开关还想不通为什么红"的运维看的：没有它，下一步动作就是把开关
+      # 当成绕过手段去查别的脚本，或者干脆手工绕过校验直接 mongorestore。
+      echo "       RESTORE_SKIP_CHECKSUM=true 只放行「没有 .sha256」那一种情况，不豁免「对不上」：" >&2
+      echo "       前者缺的是证据，后者是反证。请取回与这份归档配对的 .sha256，或换一份归档。" >&2
+    fi
     exit 1
   fi
   echo "完整性校验通过：sha256=${ACTUAL_HASH}"
@@ -300,10 +315,29 @@ case "$MONGO_RESTORE_TRANSPORT" in
     # 余下字节原样进 --archive。含凭据的 URI 因此既不出现在 argv/ps，也不落宿主机临时文件。
     # 归档要经容器 /tmp 落地一份（mongorestore 的 --config 只吃文件，stdin 已被配置行占用），
     # 这是与 backup 同源的取舍：宁可多占一份容器磁盘，也不把口令写进命令行。
-    REMOTE_CMD="umask 077; IFS= read -r _uri_line; printf '%s\n' \"\$_uri_line\" > /tmp/.mongorestore.cfg;
-cat > /tmp/.mongorestore.archive;
-mongorestore --config=/tmp/.mongorestore.cfg --archive=/tmp/.mongorestore.archive --gzip ${DROP_ARG};
-rc=\$?; rm -f /tmp/.mongorestore.cfg /tmp/.mongorestore.archive; exit \$rc"
+    # 两个容器侧路径改成 mktemp，不再写死 /tmp/.mongorestore.cfg 与 /tmp/.mongorestore.archive：
+    #   · 固定名在并发下互相覆写——cron 演练与手工恢复同时跑时，后到的 `cat >` 把前一份归档
+    #     截断成自己的，前者拿到的就是"半截别人的备份"，而 mongorestore 报的是那种看不出
+    #     入口的归档格式错误；
+    #   · 固定名可被容器内同 uid 的进程预先创建成**符号链接**，`cat >` 原样跟随，于是"恢复"
+    #     变成往 mongod 的数据文件里覆写归档字节；
+    #   · 被 SIGKILL/OOM 带走的 run 会把含生产口令的 cfg 留在容器 /tmp，名字还能预测。
+    # mktemp 一次给齐三条：不可预测的名字、O_EXCL（不跟随已存在的路径）、默认 0600。
+    # 每一步写入都判返回码：read 拿到空行、cat 被截断时立刻停手——恢复是在数据已经出事的
+    # 时候才跑的那条路径，宁可不做，也不要对一份来历不明的归档动手。
+    # 0 字节的归档另外单判：管道断在宿主 `cat` 之前时，远端 `cat > arch` 依然是**成功**的
+    # （它拿到的是 EOF），于是 mongorestore 会对一个空文件动手并返回 0，恢复演练就此
+    # 宣布"Restore completed successfully"。backup 侧早就写着"归档为 0 字节不是一次有效
+    # 备份"，恢复侧收下它等于把一次没做过的事记成做过。
+    REMOTE_CMD="umask 077;
+cfg=\$(mktemp /tmp/.mongorestore-cfg.XXXXXX) || exit 1;
+arch=\$(mktemp /tmp/.mongorestore-arc.XXXXXX) || { rm -f \"\$cfg\"; exit 1; };
+IFS= read -r _uri_line || { rm -f \"\$cfg\" \"\$arch\"; exit 1; };
+printf '%s\n' \"\$_uri_line\" > \"\$cfg\" || { rm -f \"\$cfg\" \"\$arch\"; exit 1; };
+cat > \"\$arch\" || { rm -f \"\$cfg\" \"\$arch\"; exit 1; };
+[ -s \"\$arch\" ] || { echo 'Error: 容器内收到的归档是 0 字节（管道断在 cat 之前），拒绝拿它当一次恢复' >&2; rm -f \"\$cfg\" \"\$arch\"; exit 1; };
+mongorestore --config=\"\$cfg\" --archive=\"\$arch\" --gzip ${DROP_ARG};
+rc=\$?; rm -f \"\$cfg\" \"\$arch\"; exit \$rc"
     {
       printf 'uri: %s\n' "$CONTAINER_URI"
       cat "$BACKUP_FILE"
