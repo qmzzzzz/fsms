@@ -106,8 +106,16 @@ class RoleService {
       .sort({ module: 1, sort: 1 });
   }
 
+  /**
+   * 名字里的 ForUpdate 是一份承诺：调用方拿到的是"准备写回"的文档。
+   * 当前消费者（rolePermissionController.findTargetUserInScope）只做校验，
+   * 落地走 updateUserRoles 的 findByIdAndUpdate，所以这里还不是缺陷；但不带排除投影
+   * 的裸载入只要哪天多出一句 targetUser.save()，就会把 mfaSecret/phoneKey 等
+   * select:false 路径按 schema 默认值写回去（机理见 models/User.js 的
+   * unselectedCredentialProjection）。这行投影是买给未来那一句 save 的保险。
+   */
   findUserForUpdate(id) {
-    return User.findById(id);
+    return User.findById(id).select(User.unselectedCredentialProjection());
   }
 
   findRolesByIds(ids, select = 'level code isBuiltIn') {

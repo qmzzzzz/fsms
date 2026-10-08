@@ -1153,7 +1153,9 @@ async function updateUserProfile(userId, body) {
   // 避免向调用方暴露"该字段不可改"的实现细节）
   const { realName, email, phone, avatar } = body;
 
-  const user = await User.findById(userId);
+  // 排除投影不可省：这里后面是 user.save()，不写投影时 Mongoose 会把未加载的
+  // 凭证列按 schema 默认值写回 $set（机理见 models/User.js 的 unselectedCredentialProjection）
+  const user = await User.findById(userId).select(User.unselectedCredentialProjection());
   if (!user) {
     return { outcome: 'NOT_FOUND' };
   }
@@ -1229,7 +1231,9 @@ async function updateUserProfile(userId, body) {
 async function setUserLockStatus(userId, { locked, reason }, ctx) {
   const { operatorId, operatorUsername, ip, userAgent } = ctx;
 
-  const user = await User.findById(userId);
+  // 同 updateUserProfile：本函数末尾是 user.save()，载入端必须排除凭证列，
+  // 否则锁定/解锁一次就把 MFA 配置与口令历史写回默认值
+  const user = await User.findById(userId).select(User.unselectedCredentialProjection());
   if (!user) {
     return { outcome: 'NOT_FOUND' };
   }

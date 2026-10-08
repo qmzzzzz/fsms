@@ -77,6 +77,10 @@ const mockUserFindByIdAndUpdate = jest.fn();
 jest.mock('../../models/User', () => ({
   findById: (...args) => mockUserFindById(...args),
   findByIdAndUpdate: (...args) => mockUserFindByIdAndUpdate(...args),
+  // 与真实模型同形：载入端（authService.setUserLockStatus / updateUserProfile、
+  // userService/roleService 的 findUserForUpdate）会调它构造"排除凭证列"的投影。
+  // 桩缺这个符号 ⇒ 生产代码抛 TypeError，用例测到的是崩溃而不是它想钉的分支。
+  unselectedCredentialProjection: () => ({}),
 }));
 
 // AuditLog 模型 mock
@@ -593,7 +597,14 @@ describe('toggleUserLock 分支补齐', () => {
       save: jest.fn().mockResolvedValue(undefined),
       ...userOverrides,
     };
-    mockUserFindById.mockResolvedValue(fakeUser);
+    // 同一份桩要同时满足两个调用形状：
+    //   · securityController 的裸 `await User.findById(userId)`（范围判定要读字段）；
+    //   · authService 的 `await User.findById(userId).select(排除投影)`（读-改-save 的载入端）。
+    // 必须用 mockReturnValue 而不是 mockResolvedValue：后者让 findById 返回 Promise，
+    // 链式的 .select 就落在 Promise 上（TypeError: select is not a function）。
+    // 返回普通对象时 `await` 照样把它解析出来，两条路都拿到同一份文档。
+    fakeUser.select = jest.fn().mockReturnValue(fakeUser);
+    mockUserFindById.mockReturnValue(fakeUser);
     return {
       fakeUser,
       ctx: makeCtx({

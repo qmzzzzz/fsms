@@ -130,8 +130,15 @@ class UserService {
     return toMaskedAdminUser(user);
   }
 
+  /**
+   * updateUser/assignRoles/deleteUser 的载入入口，其中 updateUser
+   * （controllers/userController.js 里 saveUser 那一步）走的是
+   * 读-改-save：排除凭证列必须由这里带上，否则那次 save 的 $set 会把
+   * mfaSecret/mfaRecoveryCodes/mfaFailCount/phoneKey/passwordHistory 写成 schema 默认值
+   * （机理与"为什么必须是对象形态"见 models/User.js 的 unselectedCredentialProjection）。
+   */
   findUserForUpdate(id) {
-    return User.findById(id);
+    return User.findById(id).select(User.unselectedCredentialProjection());
   }
 
   findDuplicateUsername(username) {

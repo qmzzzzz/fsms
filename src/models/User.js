@@ -348,6 +348,43 @@ userSchema.statics.RESPONSE_EXCLUDE_PHONE_VISIBLE = USER_RESPONSE_EXCLUDE_PHONE_
 userSchema.statics.USERNAME_COLLATION = USERNAME_COLLATION;
 
 /**
+ * 读-改-save 的载入端必须带的排除投影（对象形态）。
+ *
+ * 它挡的是 HIGH 级"改头像顺手毁凭证"：`User.findById(id)` 不写任何投影时，mongod
+ * 按 `_optionsForExec()`（schema 的 select:false 已并入其中）不返回下面这些路径，
+ * 但文档构造拿到的却是 `_fieldsForExec()`——只含**调用方自己写的**投影，无用户投影时
+ * 为 null。于是 Mongoose 8.24.1 的 applyDefaults 看不见那份排除，照样给未返回的路径
+ * 填上 schema 默认值，而填出来的键会进 `save()` 的 `$set`（实测脏路径：
+ * mfaSecret/mfaRecoveryCodes/mfaLastCounter/mfaFailCount/phoneKey/passwordHistory）。
+ * 后果：一次 PUT /api/auth/profile 就关掉用户的 MFA（口令因子被写成 ""）、抹掉
+ * TOTP 重放防护与恢复码、把爆破计数清零、让手机号精确检索键失联、清空口令历史。
+ *
+ * 三个已排除的替代修法，写下来是为了别让后人再走一遍：
+ *  - 字符串形态 `.select('-mfaSecret')`：`_fields` 里保留 `-` 前缀，applyDefaults 的
+ *    `curPath in fields` 判不出 ⇒ 与不写投影同样漏（实测仍清空）。
+ *  - `findByIdAndUpdate`：绕开本文件 pre('validate')/pre('save')，而 phoneKey 同步与
+ *    口令 bcrypt 正挂在那两个钩子上。
+ *  - 载入时 `select('+全部凭证')` 再 save：把口令摘要与 MFA 密钥读进内存，
+ *    与本文件"凭证级材料默认不出进程"的口径相反。
+ *
+ * 派生自 schema 而不是手写清单：日后新增 select:false 路径自动纳入。
+ * 排除的是**读**，不是写：钩子或业务显式赋值这些路径时（改手机号 ⇒ pre('validate')
+ * 写 phoneKey；解绑 ⇒ 写 mfaSecret）照常落库，由
+ * tests/services/userSaveCredentialWipe.test.js 盯住这一条。
+ *
+ * @returns {Record<string, 0>} 可直接交给 Query#select 的对象形态排除投影
+ */
+userSchema.statics.unselectedCredentialProjection = function unselectedCredentialProjection() {
+  const projection = {};
+  for (const [path, schemaPath] of Object.entries(userSchema.paths)) {
+    if (schemaPath && schemaPath.options && schemaPath.options.select === false) {
+      projection[path] = 0;
+    }
+  }
+  return projection;
+};
+
+/**
  * 按用户名查找（大小写不敏感，与唯一索引同一 collation）
  *
  * 必须走这个入口而非裸 findOne({ username })：后者用默认 collation 比较，
