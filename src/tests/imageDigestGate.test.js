@@ -1101,13 +1101,19 @@ group('capture-image-digests.sh 真跑行为', () => {
       DOCKER_STUB_SLEEP: '1',
     };
     const d = spawnSync(SH, [drive, SH, SCRIPT, fx.dir, out], { env, encoding: 'utf8' });
+    // 驱动脚本的 stdout 只有 printf 那一行。`wait` 被信号打断时，shell 会把作业终止语写到
+    // **自己的 stderr**：实测 dash（CI 的 /bin/sh）给出 stdout="RC=143"、stderr="Terminated"，
+    // 两流一拼就是 "RC=143\nTerminated"，`$` 锚点必然落空——那不是脚本没退出，是把 shell 的
+    // 作业通知当成了脚本输出。所以 rc 只认 stdout 那一行；`printed` 只留作否定断言（拼两流
+    // 正是为了不漏掉任何一侧的失败文案）。
+    const driverOut = (d.stdout || '').trim();
     const printed = ((d.stdout || '') + (d.stderr || '')).trim();
     const scriptOut = readOr(out) || '';
     // 前提自证：替身确实被叫醒过，说明脚本是在**运行中**被信号打死的，不是跑完才退出
     const calls = readOr(fx.log) || '';
     expect(calls).toContain('docker info');
     expect(printed).not.toContain('KILLFAILED');
-    expect({ printed, scriptOut }).toMatchObject({ printed: expect.stringMatching(/RC=143$/) });
+    expect(driverOut).toMatch(/RC=143$/);
     expect(readOr(path.join(fx.dir, 'Dockerfile'))).toBe(fx.dockerfile);
     expect(readOr(path.join(fx.dir, 'docker-compose.yml'))).toBe(fx.compose);
     expect(fs.readdirSync(fx.dir).filter((f) => f.endsWith('.pin.tmp'))).toEqual([]);

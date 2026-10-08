@@ -313,16 +313,25 @@ describe('B：失败现场与定稿之后的产物卫生', () => {
   // 异地副本一次都没执行，回显却是 `Offsite copy completed:`，连未配置那支的
   // Warning 都不打——cron 邮件里这是一次"有异地副本的成功备份"。
   test('BACKUP_OFFSITE_CMD 只含空白 ⇒ 判失败，且绝不打印"completed"（旧形态：零词空命令 rc=0）', () => {
+    // 三种空白形状必须各用各的夹具：归档名只到**秒**级，而"只含空白"的判据落在异地副本
+    // 那一步——此时加密归档已经定稿落盘。共用夹具时第 2 轮会在同一秒里算出同一个目标名，
+    // 先撞上"目标加密归档已存在，拒绝覆盖"那道闸，报错换了故事，这条断言就变成在测另一条判据。
+    // 每轮自建、每轮拆掉，三条之间只差 blank 一个变量。
     for (const blank of [' ', '   ', '\t ']) {
-      const r = runBackup(work, null, { BACKUP_OFFSITE_CMD: blank });
-      // 钉死成 1 而不是"非零"：null（spawn 失败）也满足 toBe(0) 的补集，那是另一种故事
-      expect({ blank, code: r.code }).toEqual({ blank, code: 1 });
-      expect(r.out).toMatch(/只含空白/);
-      // 最关键的一条：不得出现成功回显（旧写法两条都给它）
-      expect(r.out).not.toMatch(/Offsite copy completed/);
-      // 未配置那支的 Warning 也不该串味：这不是"没配异地"，是配错了
-      expect(r.out).not.toMatch(/未配置 BACKUP_OFFSITE_CMD/);
-      expect(r.calls).not.toMatch(/OFFSITE /);
+      const w = mkwork();
+      try {
+        const r = runBackup(w, null, { BACKUP_OFFSITE_CMD: blank });
+        // 钉死成 1 而不是"非零"：null（spawn 失败）也满足 toBe(0) 的补集，那是另一种故事
+        expect({ blank, code: r.code }).toEqual({ blank, code: 1 });
+        expect(r.out).toMatch(/只含空白/);
+        // 最关键的一条：不得出现成功回显（旧写法两条都给它）
+        expect(r.out).not.toMatch(/Offsite copy completed/);
+        // 未配置那支的 Warning 也不该串味：这不是"没配异地"，是配错了
+        expect(r.out).not.toMatch(/未配置 BACKUP_OFFSITE_CMD/);
+        expect(r.calls).not.toMatch(/OFFSITE /);
+      } finally {
+        fs.rmSync(w.dir, { recursive: true, force: true });
+      }
     }
   });
 
