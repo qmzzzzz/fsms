@@ -142,7 +142,7 @@ const LEDGER = [
   },
   {
     site: 'src/services/authService.js',
-    siteLine: 1278,
+    siteLine: 1282,
     raw: '（:350）',
     status: 'DEBT',
     wrongFrom: 350,
@@ -151,14 +151,14 @@ const LEDGER = [
     from: 223,
     to: 223,
     mustRead: 'async function loginUser',
-    note: 'loginUser 实在 :223；:350 落在 assertAccountUsable 里。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场（他人 M）',
+    note: 'loginUser 实在 :223；:350 落在 assertAccountUsable 里。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282：本轮在 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释把它推下去了（指代目标 :350 未动——新增行都在 350 之后）',
   },
   {
     site: 'src/services/permissionService.js',
-    siteLine: 169,
+    siteLine: 171,
     raw: '（:3248）',
     status: 'EXTERNAL',
-    note: '指 mongoose 的 model.js（上一行点名 model.js:3218-3220）；本文件只有 189 行，按所在文件反解必判死锚——依赖内部行号，本闸不核，只钉站点',
+    note: '指 mongoose 的 model.js（上一行点名 model.js:3218-3220）；本文件只有 192 行，按所在文件反解必判死锚——依赖内部行号，本闸不核，只钉站点。站点行号 169→171：父级 id 归一的注释与 require 各占几行把它推下去了（指代目标 :3248 是别仓文件，不受影响）',
   },
   {
     site: 'src/services/securityAlert.js',
@@ -253,13 +253,13 @@ const LEDGER = [
   {
     site: 'src/services/reportDashboardService.js',
     siteLine: 19,
-    raw: '（:112-114）',
+    raw: '（:145-147）',
     status: 'LIVE',
     referent: 'src/services/statsCache.js',
-    from: 112,
-    to: 114,
+    from: 145,
+    to: 147,
     mustRead: 'publishInvalidate(',
-    note: 'invalidateByUserId 体内确实在 :114 调 publishInvalidate',
+    note: 'invalidateByUserId 体内确实在 :147 调 publishInvalidate（原 112-114，被本轮 TTL 上界新增的 33 行推下）',
   },
   {
     site: 'src/tests/ci/commentAnchorFreshness.test.js',
@@ -364,11 +364,20 @@ describe('第 5 族 · 回指式裸行锚', () => {
   test('LIVE 台账：指代文件真实存在、区间有内容、且当场命中 mustRead', () => {
     const live = byStatus('LIVE');
     expect(live.length).toBeGreaterThanOrEqual(6);
+    // 逐条断言必须带**指认**：以前这里是循环里三个裸 expect()，红讯只有 "false vs true"，
+    // 归属方拿到红也不知道是哪条锚、哪一档失败（第 8 族：判据有牙但咬不出位置）。
+    const bad = [];
     for (const e of live) {
-      expect(fs.existsSync(path.join(ROOT, e.referent))).toBe(true);
-      expect(contentFreeKind(e.referent, e.from, e.to)).toBeNull();
-      expect(hasSymbol(e.referent, e.from, e.to, e.mustRead)).toBe(true);
+      const key = `${e.site} => ${e.referent}:${e.from}-${e.to}`;
+      if (!fs.existsSync(path.join(ROOT, e.referent))) bad.push(`${key} [文件不存在]`);
+      else {
+        const free = contentFreeKind(e.referent, e.from, e.to);
+        if (free) bad.push(`${key} [区间无内容:${free}]`);
+        else if (!hasSymbol(e.referent, e.from, e.to, e.mustRead))
+          bad.push(`${key} [不含 mustRead「${e.mustRead}」]`);
+      }
     }
+    expect(bad).toEqual([]);
   });
 
   test('LIVE 的 mustRead 不是恒真：加一个后缀就必须不命中', () => {

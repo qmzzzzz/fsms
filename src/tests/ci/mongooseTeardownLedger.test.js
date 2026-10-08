@@ -40,6 +40,8 @@
 const fs = require('fs');
 const path = require('path');
 
+const { jsCodeOnly, jsCodeOnlyKeepingLines } = require('../helpers/jsCodeOnly');
+
 const ROOT = path.resolve(__dirname, '../../..');
 const SELF = 'src/tests/ci/mongooseTeardownLedger.test.js';
 
@@ -56,7 +58,15 @@ function listTestFiles(dir, acc = []) {
 const SCANNED = listTestFiles(path.join(ROOT, 'src/tests'))
   .filter((rel) => rel !== SELF)
   .sort();
-const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+/**
+ * 判据一律作用在**去注释视图**上（共享 helper，行号保持与原文件对齐）。
+ * 此前 CONNECTS/CLOSES 读的是原文：一个套件把收尾只写在注释里，采集口径就把它当成"已关"，
+ * 于是它从漏关集合里消失——这正是本闸头注第 6 族（"注释承诺、块里空的"）的同一形状，
+ * 只是发生在看门的尺子上。第 33 轮全量对拍（551 个套件，原文口径 vs 视图口径）：
+ * CONNECTS 250=250、CLOSES 249=249、漏关 4=4，**零分歧** ⇒ 这次收口堵的是潜在假绿通道，
+ * 不是现行违规；通道本身由末尾那条"视图口径"用例用临时桩当场打死（不靠"现在没例子"自证）。
+ */
+const read = (rel) => jsCodeOnlyKeepingLines(fs.readFileSync(path.join(ROOT, rel), 'utf8'));
 
 /** 采集口径①：这个套件连库了吗 */
 const CONNECTS = (text) => /mongoose\.connect\s*\(/.test(text);
@@ -82,10 +92,12 @@ function emptyReadyStateShells(text) {
       i++;
     }
     const body = text.slice(RE.lastIndex, i - 1);
-    const code = body
+    // 块里"除了注释还有没有语句"用共享视图判，不再自带一份行前缀过滤（第 33 轮把它迁到
+    // helpers/jsCodeOnly：行前缀过滤只认行首，行尾注释原样留给判据，是同一把尺的第二份复制品）。
+    const code = jsCodeOnly(body)
       .split(/\r?\n/)
       .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('//') && !l.startsWith('*') && !l.startsWith('/*'));
+      .filter(Boolean);
     if (code.length === 0) shells.push(text.slice(0, m.index).split(/\r?\n/).length);
   }
   return shells;
