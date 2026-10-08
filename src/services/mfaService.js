@@ -15,6 +15,11 @@ const logger = require('../utils/logger');
 // 覆盖登录 MFA 步骤、关闭 MFA、重新生成恢复码等所有验证码校验路径）
 const MFA_MAX_FAILS = 5;
 const MFA_LOCK_MS = 10 * 60 * 1000;
+// 日志与审计里那句"锁了多久"必须与真正写进 mfaLockUntil 的那个值同源：
+// 原先 warn 载荷写 lockMinutes: 10、审计 reason 写死"10 分钟"，三处各抄一遍。
+// 改 MFA_LOCK_MS 时这三处不会一起动，于是防线时长变了而留痕还在宣称旧值——
+// 读日志的人据此判断"爆破窗口还有 10 分钟"，实际窗口已经不同。
+const MFA_LOCK_MINUTES = Math.round(MFA_LOCK_MS / 60000);
 
 /** 恢复码摘要：HMAC-SHA256（以服务端 HMAC 密钥为 pepper）。
  * 恢复码是低熵认证因子：熵 = log2(31^8) = 39.6 bit（原注释写「~38.6 bit」，
@@ -158,7 +163,7 @@ const recordMfaFailure = async (user) => {
       // 记不上计数时不谎报次数：审计载荷里宁可缺字段也不要写一个没发生过的数字
       ...(recordFailed ? {} : { failedCount: updated.mfaFailCount }),
       reason: recordFailed ? 'counter_unavailable' : 'threshold_reached',
-      lockMinutes: 10,
+      lockMinutes: MFA_LOCK_MINUTES,
       // 锁到底有没有落库：读日志的人据此判断防线是否还在，而不是信一句断言
       lockApplied,
     });
@@ -171,8 +176,8 @@ const recordMfaFailure = async (user) => {
       riskLevel: 'high',
       riskFactors: [recordFailed ? 'mfa_counter_unavailable' : 'mfa_bruteforce'],
       reason: recordFailed
-        ? 'MFA 失败计数无法落库，按已达阈值处理并临时锁定验证通道 10 分钟'
-        : `MFA 验证连续失败 ${updated.mfaFailCount} 次，验证通道临时锁定 10 分钟`,
+        ? `MFA 失败计数无法落库，按已达阈值处理并临时锁定验证通道 ${MFA_LOCK_MINUTES} 分钟`
+        : `MFA 验证连续失败 ${updated.mfaFailCount} 次，验证通道临时锁定 ${MFA_LOCK_MINUTES} 分钟`,
     }).catch(() => {});
   }
 };
@@ -224,12 +229,19 @@ const claimTotpWindow = async (userId, counter) => {
 /**
  * 本次请求走哪条身份路径。动态口令优先：给了 6 位码就按码验，
  * 只有在没有可用码时才考虑登录密码（两者是"二选一"，不是叠加）。
+ *
+ * 两个字段必须是**布尔**：原先写成 `!codePath && typeof x === 'string' && x`，
+ * `&&` 的求值结果是最后一个操作数，于是 passwordPath 里装的是**登录口令明文本身**。
+ * 现网调用方（mfaController.js:321）只做真值判断，所以分支行为碰巧没错——
+ * 但"碰巧没错"不是判据：这个返回值一旦被记日志、进审计载荷或回给前端（它的字段名
+ * 看着就像布尔，扩散时没人会犹豫），口令就明文出现在那里。形状说谎的地方，
+ * 迟早会有人按它说的形状去用。
  */
 const resolveMfaFactorPaths = (mfaCode, currentPassword) => {
   const codePath = typeof mfaCode === 'string' && /^\d{6}$/.test(mfaCode.trim());
   return {
     codePath,
-    passwordPath: !codePath && typeof currentPassword === 'string' && currentPassword,
+    passwordPath: !codePath && typeof currentPassword === 'string' && currentPassword.length > 0,
   };
 };
 
