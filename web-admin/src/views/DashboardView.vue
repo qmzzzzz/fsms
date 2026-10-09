@@ -64,18 +64,12 @@
                 <div class="stat-value">
                   {{ statDisplay[i] }}
                 </div>
-                <div class="stat-trend">
-                  <!-- 无趋势文案时只留占位行高：孤立的红色下箭头会被误读为"指标下跌" -->
-                  <template v-if="item.trendLabel">
-                    <el-icon :class="item.trend > 0 ? 'up' : 'down'">
-                      <CaretTop v-if="item.trend > 0" />
-                      <CaretBottom v-else />
-                    </el-icon>
-                    <span :class="item.trend > 0 ? 'up' : 'down'">
-                      {{ item.trendLabel }}
-                    </span>
-                  </template>
-                </div>
+                <!--
+                  趋势展示位：后端统计接口不产出趋势数据（无 trendLabel 生产者），
+                  故此处恒为空。留坑而不留半成品——孤立的红色下箭头会被误读成
+                  "指标下跌"，dashboardView.test.js 钉住了"没有数据就不渲染"。
+                -->
+                <div class="stat-trend" />
               </div>
               <div class="stat-icon" :style="{ background: item.color }">
                 <el-icon><component :is="item.icon" /></el-icon>
@@ -107,7 +101,7 @@ import {
   h,
 } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { CaretTop, CaretBottom, Cpu, Bell, UserFilled } from '@element-plus/icons-vue'
+import { Cpu, Bell, UserFilled } from '@element-plus/icons-vue'
 
 import { useAuthStore } from '@/store'
 import { usePermission } from '@/composables/usePermission'
@@ -195,7 +189,6 @@ const stats = ref(
   STAT_THEMES.map((theme) => ({
     title: t(`dashboard.${theme.key}`),
     value: '-',
-    trend: 0,
     color: theme.color,
     icon: theme.icon,
   }))
@@ -280,7 +273,6 @@ const loadDashboardData = async () => {
       stats.value = STAT_THEMES.map((theme) => ({
         title: t(`dashboard.${theme.key}`),
         value: values[theme.key],
-        trend: 0,
         color: theme.color,
         icon: theme.icon,
       }))
@@ -504,13 +496,6 @@ onUnmounted(() => {
   font-size: var(--xf-font-size-xs);
   color: var(--xf-gray-500);
   font-family: var(--xf-font-mono);
-}
-
-.stat-trend .up {
-  color: var(--xf-success);
-}
-.stat-trend .down {
-  color: var(--xf-danger);
 }
 
 .stat-icon {

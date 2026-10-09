@@ -28,6 +28,7 @@ const rolesCreate = vi.fn()
 const rolesAssignPerm = vi.fn()
 const rolesDelete = vi.fn()
 const joinRoom = vi.fn()
+const leaveRoom = vi.fn()
 const onGiveUp = vi.fn()
 const wsOn = vi.fn()
 const wsOff = vi.fn()
@@ -53,6 +54,7 @@ vi.mock('@/utils/websocket', () => ({
     acquireWs(...a)
     return {
       joinRoom: (...b) => joinRoom(...b),
+      leaveRoom: (...b) => leaveRoom(...b),
       onGiveUp: (...b) => onGiveUp(...b),
       on: (...b) => wsOn(...b),
       off: (...b) => wsOff(...b),
@@ -207,6 +209,7 @@ afterEach(() => {
     rolesAssignPerm,
     rolesDelete,
     joinRoom,
+    leaveRoom,
     onGiveUp,
     wsOn,
     wsOff,
@@ -798,6 +801,31 @@ describe('RoleView 删除角色', () => {
     expect(c.find('.unsaved-hint')).toBeNull()
   })
 
+  test('广播删掉当前选中角色（role-updated）：选中态与勾选一起清空，且不拿旧 id 补请求', async () => {
+    // 场景：另一个管理员删除了 r2，服务端广播 role-updated（只刷新列表、不重选）。
+    // 旧实现里 currentRole 仍指向已删对象，随后 permissions-updated 会拿旧 _id 请求，
+    // 空权限集把勾选清成空——用户看到的是「权限全没了」而非「角色已删除」。
+    const c = await mountRole(P_READ, [ROLE_BUILTIN, ROLE_PLAIN], {
+      r1: [],
+      r2: [{ _id: 'aaaaaaaaaaaaaaaaaaaaaaaa' }],
+    })
+    click(c.findAll('.glass-role-item')[1])
+    await waitFor(() => roleTags(c).includes('巡检员'), { message: '切到 r2' })
+    await waitFor(() => permOn(c)[0] === true, { message: 'r2 勾选态落地' })
+    rolesGetList.mockResolvedValue({ data: { data: [ROLE_BUILTIN] } })
+    rolesGetById.mockClear()
+    const roleUpdated = wsOn.mock.calls.find((x) => x[0] === 'role-updated')[1]
+    roleUpdated()
+    await waitFor(() => c.findAll('.glass-role-item').length === 1, { message: '列表重拉' })
+    await flush(6)
+    // 对账生效：选中态清空，右面板回到空状态，不为已删角色留权限面板
+    expect(roleTags(c)).toEqual([])
+    expect(c.find('.empty-state')).toBeTruthy()
+    expect(c.findAll('.glass-perm-btn')).toHaveLength(0)
+    // 清选中不得触发对旧 _id 的补救请求（getById 一次都不该有）
+    expect(rolesGetById).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
   test('删除取消：不发请求、不弹成功', async () => {
     confirmBox.mockRejectedValue('cancel')
     const c = await mountRole(P_ALL)
@@ -924,12 +952,51 @@ describe('RoleView 实时推送（WebSocket）接线', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('卸载：只解绑本页监听并释放一次引用（不拆掉布局层的订阅）', async () => {
+  test('列表刷新失败（roles 置空）后到达 permissions-updated：不拿旧 _id 请求', async () => {
+    const c = await mountRole(P_READ, [ROLE_BUILTIN, ROLE_PLAIN], {
+      r1: [],
+      r2: [{ _id: 'aaaaaaaaaaaaaaaaaaaaaaaa' }],
+    })
+    click(c.findAll('.glass-role-item')[1])
+    await waitFor(() => roleTags(c).includes('巡检员'), { message: '切到 r2' })
+    await waitFor(() => permOn(c)[0] === true, { message: 'r2 勾选态落地' })
+    const roleUpdated = wsOn.mock.calls.find((x) => x[0] === 'role-updated')[1]
+    const permsUpdated = wsOn.mock.calls.find((x) => x[0] === 'permissions-updated')[1]
+    // role-updated 的列表重拉失败：roles 被清空，但 currentRole 仍指向 r2
+    // （失败路径刻意不清选中——用户还在看这个角色，刷新失败不该顺手炸掉选中态）
+    rolesGetList.mockClear()
+    rolesGetList.mockRejectedValue(new Error('network down'))
+    roleUpdated()
+    await waitFor(() => rolesGetList.mock.calls.length === 1, {
+      message: 'role-updated 触发列表重拉',
+    })
+    await flush(6)
+    expect(c.findAll('.glass-role-item')).toHaveLength(0)
+    expect(roleTags(c)).toEqual(['巡检员'])
+    expect(permOn(c)).toEqual([true, false])
+    // 选中角色已不在（空的）列表里：permissions-updated 不得拿旧 _id 请求——
+    // 列表为空说明「这个角色还在不在」已无法确认，请求回来不管是 404 还是空权限集，
+    // 都会把面板洗成「权限全没了」。权限树是全局数据，该刷仍刷。
+    rolesGetById.mockClear()
+    rolesGetTree.mockClear()
+    permsUpdated()
+    await waitFor(() => rolesGetTree.mock.calls.length === 1, { message: '权限树重拉' })
+    await flush(6)
+    expect(rolesGetById).not.toHaveBeenCalled()
+    expect(permOn(c)).toEqual([true, false])
+    expect(c.errors).toEqual([])
+  })
+  test('卸载：解绑本页监听、撤销房间并释放一次引用（不拆掉布局层的订阅）', async () => {
     const c = await mountRole(P_READ)
     c.handle.unmount()
     active = null
     expect(wsOff.mock.calls.map((x) => x[0])).toEqual(['role-updated', 'permissions-updated'])
+    // 房间必须显式撤销：rooms 集合跨页面存活，而重连后 connect 会把声明过的房间全部
+    // 重新 join。该房间后端要求 SUPER_ADMIN/SECURITY_ADMIN，持 role:read 的普通
+    // 管理员每次重连都会白吃一次拒绝（引用计数未归零时连接并不会断开）
+    expect(leaveRoom).toHaveBeenCalledWith('role-management')
     expect(releaseWs).toHaveBeenCalledTimes(1)
+    expect(c.errors).toEqual([])
   })
 })
 

@@ -4,7 +4,7 @@
  * 与其他路由测试的分工：routeGuard.test.js 把视图全部替身化，只验守卫决策；
  * 本文件反过来——**不替身任何视图**，专门验证路由声明指向的目标确实可用。
  *
- * 钉住的四类真实退化（都会在生产环境炸、且构建期不一定报错）：
+ * 钉住的五类真实退化（都会在生产环境炸、且构建期不一定报错）：
  *  1. 懒加载导入指向已改名/删除的视图文件 → 用户点菜单时 chunk 加载失败白屏。
  *     这正是 router/index.js 里 onError 恢复逻辑存在的原因；若导入路径本身写错，
  *     恢复逻辑只会无休止刷新。本用例让这类错误在 CI 阶段就暴露。
@@ -12,6 +12,8 @@
  *  3. meta.permission 形状不合法（缺冒号 / 空模块）→ matchPermission 的
  *     模块通配分支永远失配，持有 `device:*` 的用户会被莫名拒绝。
  *  4. 路由 name 重复 → vue-router 静默覆盖，push({name}) 指向非预期页面。
+ *  5. 缺 scrollBehavior → 导航后停留在旧滚动位，长列表/长表单里用户以为页面没变
+ *     （筛选变化导致同路径重渲染时尤其明显）。
  */
 import { describe, test, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -113,5 +115,20 @@ describe('路由表契约', () => {
       .map((record) => record.name)
       .sort()
     expect(anon).toEqual(['login', 'register'])
+  })
+
+  test('scrollBehavior：前进/后退沿用保存位置，hash 锚点优先，其余回顶部', () => {
+    // 优先级即分支顺序：savedPosition（浏览器历史）> hash 锚点 > top:0。
+    // 删掉 scrollBehavior 时 vue-router 什么都不做 ⇒ 停在旧滚动位。
+    const behavior = router.options.scrollBehavior
+    expect(typeof behavior, 'createRouter 未声明 scrollBehavior').toBe('function')
+    // 浏览器前进/后退：保存的位置优先（长列表回到原来的滚动位）
+    expect(behavior({ hash: '' }, {}, { top: 120 })).toEqual({ top: 120 })
+    // hash 锚点优先于回顶部
+    expect(behavior({ hash: '#row-3' }, {}, null)).toEqual({ el: '#row-3' })
+    // 普通导航（含筛选导致的同路径重渲染）回到顶部
+    expect(behavior({ hash: '' }, {}, null)).toEqual({ top: 0 })
+    // 两者同时存在时仍以保存位置为准
+    expect(behavior({ hash: '#x' }, {}, { top: 50 })).toEqual({ top: 50 })
   })
 })

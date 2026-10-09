@@ -207,6 +207,10 @@ export const useAuthStore = defineStore('auth', {
      * @returns {Promise<boolean>} 是否成功重建会话
      */
     async restoreSession() {
+      // 探测请求走在路由守卫的关键路径上：后端完全不可达时，全局 15s 超时乘以
+      // 串行两步 = 最坏 30s 才放行（用户对着原页面以为卡死）。探测本身是轻量只读，
+      // 10s 足够慢网通过，且与 doRefreshToken 的既有超时同口径。
+      const RESTORE_TIMEOUT = 10000
       if (this.currentUser) return true
       if (this.restoreFailed) return false
       if (this.restorePromise) return this.restorePromise
@@ -218,7 +222,7 @@ export const useAuthStore = defineStore('auth', {
           // 第一步：轻量会话探测（始终 200，不触发 token 刷新链）。
           // 未登录用户首次访问 login 页时，若直接 getMe 会经历
           // 401 → doRefreshToken → refresh 400 的连锁请求，产生无意义日志。
-          const { data: statusResp } = await api.auth.getSessionStatus()
+          const { data: statusResp } = await api.auth.getSessionStatus({ timeout: RESTORE_TIMEOUT })
           if (!statusResp?.success || !statusResp.data?.authenticated) {
             this.restoreFailed = true
             return false
@@ -226,7 +230,7 @@ export const useAuthStore = defineStore('auth', {
           // 第二步：确认有有效会话后，再拉取完整用户信息。
           // silent401：getMe 在 access token 恰好过期但 refresh 有效时返回 401，
           // 此时拦截器会刷新并重试，属预期路径，不弹「登录已过期」
-          const { data: resp } = await api.auth.getMe({ silent401: true })
+          const { data: resp } = await api.auth.getMe({ silent401: true, timeout: RESTORE_TIMEOUT })
           if (!resp?.success || !resp.data?.user) {
             this.restoreFailed = true
             return false

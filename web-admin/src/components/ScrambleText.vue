@@ -5,7 +5,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onUnmounted } from 'vue'
 
 const props = defineProps({
   text: { type: String, required: true },
@@ -64,6 +64,11 @@ watch(
   () => props.text,
   () => stopScramble()
 )
+
+// 卸载必须清定时器：悬停途中路由离开时 stopScramble 不会执行（没有 mouseleave），
+// interval 会靠 props.speed 累计继续空转直到迭代自然结束（长文本可达数十秒），
+// 期间白跑 rAF/定时器回调。onUnmounted 里统一收尸。
+onUnmounted(clear)
 </script>
 
 <style scoped>

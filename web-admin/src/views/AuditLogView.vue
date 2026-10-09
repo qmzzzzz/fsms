@@ -13,6 +13,7 @@
             value-format="YYYY-MM-DD"
             style="width: 280px"
             @change="handleSearch"
+            @clear="handleSearch"
           />
         </el-form-item>
         <el-form-item :label="$t('auditLog.shortUser')">
@@ -27,13 +28,16 @@
           />
         </el-form-item>
         <el-form-item :label="$t('auditLog.categoryLabel')">
+          <!-- 下面四个 el-select 只绑 @change 不绑 @clear：点清除图标时
+               deleteSelected 会先 emit update:modelValue 再 emit change
+               （useSelect.mjs:321-325），双绑定会让同一次清除发两遍完全相同
+               的请求。用户名输入框只有 @clear（无 @change），那条保留。 -->
           <el-select
             v-model="filters.category"
             :placeholder="$t('common.pleaseSelect')"
             clearable
             style="width: 150px"
             @change="handleSearch"
-            @clear="handleSearch"
           >
             <el-option :label="$t('auditLog.catAuthLogin')" value="auth" />
             <el-option :label="$t('auditLog.catUserManagement')" value="user" />
@@ -54,7 +58,6 @@
             clearable
             style="width: 120px"
             @change="handleSearch"
-            @clear="handleSearch"
           >
             <el-option :label="$t('auditLog.levelInfo')" value="info" />
             <el-option :label="$t('auditLog.levelWarning')" value="warning" />
@@ -68,7 +71,6 @@
             clearable
             style="width: 120px"
             @change="handleSearch"
-            @clear="handleSearch"
           >
             <el-option :label="$t('auditLog.riskCritical')" value="critical" />
             <el-option :label="$t('common.levelHigh')" value="high" />
@@ -83,7 +85,6 @@
             clearable
             style="width: 120px"
             @change="handleSearch"
-            @clear="handleSearch"
           >
             <el-option :label="$t('auditLog.resultSuccess')" :value="true" />
             <el-option :label="$t('auditLog.resultFailure')" :value="false" />
@@ -833,9 +834,9 @@ const riskText = (level) => {
   return (
     {
       critical: t('common.critical'),
-      high: t('common.high'),
-      medium: t('common.medium'),
-      low: t('common.low'),
+      high: t('common.levelHigh'),
+      medium: t('common.levelMedium'),
+      low: t('common.levelLow'),
     }[level] ||
     level ||
     '-'

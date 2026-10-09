@@ -352,6 +352,20 @@ describe('AuditLogView 筛选与分页', () => {
     await waitFor(() => !('success' in lastParams()), { message: '清空后不再携带 success' })
     expect(lastParams()).toEqual({ page: 1, limit: 20 })
   })
+  test('清除筛选只发一次请求：select 不再双绑 @clear（第 34 轮 L12）', async () => {
+    // 修复前四个 el-select 同时绑 @change 与 @clear：点一次清除图标，
+    // deleteSelected 先 emit update:modelValue 再 emit change（useSelect.mjs），
+    // 两个处理器各发一遍完全相同的请求——后端白跑一次，分页还被重置两回。
+    const c = await openList([logRow()])
+    await pickSelect(c, 0, '设备管理')
+    await waitFor(() => lastParams().category === 'device', { message: '分类筛选请求' })
+    await flush(6)
+    const before = logCalls().length
+    await clearSelect(c.findAll('.el-select__wrapper')[0])
+    await waitFor(() => !('category' in lastParams()), { message: '清空后不再携带 category' })
+    await flush(10)
+    expect(logCalls().length).toBe(before + 1)
+  })
 
   test('日期范围筛选：startDate/endDate 与选择器值一致，并回到第 1 页', async () => {
     const c = await openList([logRow()], { total: 33 })

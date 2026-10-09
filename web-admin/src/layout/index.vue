@@ -1,5 +1,17 @@
 <template>
-  <div class="app-wrapper" :class="{ 'mobile-sidebar-open': mobileSidebarOpen }">
+  <!--
+    inert：退出遮罩显示期间，把整块应用内容移出可访问性树并禁止聚焦——遮罩盖住的是
+    「正在登出」，此时下层菜单/按钮仍可 Tab 到并触发操作（读屏也会念到它们）。
+    遮罩自身已 Teleport 到 body，不会被这行一起 inert 掉（它的 aria-live 播报依赖这一点）。
+    取值用 '' / null 而非布尔：Vue 对不在 isSpecialBooleanAttr 里的属性走 setAttribute，
+    传 false 会写上 "false" 字面量（对布尔属性仍是「生效」）；'' 与 null 在浏览器属性
+    赋值与 jsdom setAttribute 两条路径下语义一致（测试可断言 hasAttribute）。
+  -->
+  <div
+    class="app-wrapper"
+    :class="{ 'mobile-sidebar-open': mobileSidebarOpen }"
+    :inert="showExit ? '' : null"
+  >
     <!-- 移动端遮罩 -->
     <div
       v-if="isMobile && mobileSidebarOpen"

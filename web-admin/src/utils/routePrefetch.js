@@ -28,6 +28,10 @@ const prefetchers = {
 
 const prefetched = new Set()
 
+// 供测试断言「键 ↔ 路由表 ↔ import 字面量」三方对账（同 websocket.js __getRefCount 的口径）。
+// 不面向业务导出：调用方只应走 prefetchRoute。
+export const __prefetchers = prefetchers
+
 // 触摸设备无悬停概念，整体禁用（避免 tap 瞬间抢带宽反而拖慢点击导航）
 // matchMedia 每次调用时读取，便于测试在调用前用 vi.stubGlobal 覆盖
 const canHover = () =>

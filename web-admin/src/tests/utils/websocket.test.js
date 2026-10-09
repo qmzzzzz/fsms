@@ -5,7 +5,8 @@
  * 不写「调用一遍断言不抛错」的空壳：
  *   1. io() 参数：带退避的重连配置与握手凭证设置确实被传递；
  *   2. 连接状态机：connect 幂等、connect_error 复位、重连耗尽的标记与回调；
- *   3. 房间：连接后 / 重连后自动重新 join，disconnect 清空声明；
+ *   3. 房间：连接后 / 重连后自动重新 join，leaveRoom 撤销后重连不再复活；
+ *      disconnect() 清空声明；
  *   4. 消息分发：on/off 的注册-解绑；send 未连接时静默丢弃；
  *   5. 断开清理：manager 级 reconnect_failed 解绑（防止下次 connect 后重复注册）；
  *   6. 引用计数：acquire/release 归零才断开；归零后重新 acquire 新建连接（V-2 边界）；
@@ -232,6 +233,60 @@ describe('websocket.js（P1-27）', () => {
     expect(svc.rooms.size).toBe(0)
   })
 
+  test('leaveRoom：已连接时 emit leave-room 并撤出声明集合，重连不再重新 join', async () => {
+    // 房间集合跨页面存活（引用计数归零前连接不断），而 connect 处理器会把声明过的
+    // 房间全部重新 join。只释放引用不撤房间 ⇒ 房间名跨页面残留，每次重连白吃一次
+    // 后端拒绝（如 role-management 要求 SUPER_ADMIN/SECURITY_ADMIN）。
+    const sock = new FakeSocket()
+    ioMock.mockReturnValue(sock)
+    const { WebSocketService } = await loadModule()
+
+    const svc = new WebSocketService('http://ws.example')
+    svc.joinRoom('alarms')
+    svc.joinRoom('devices')
+    svc.connect()
+    sock.connected = true
+    sock.fire('connect')
+    expect(sock.emitted).toEqual(
+      expect.arrayContaining([
+        ['join-room', 'alarms'],
+        ['join-room', 'devices'],
+      ])
+    )
+
+    sock.emitted = []
+    svc.leaveRoom('alarms')
+    expect(sock.emitted).toEqual([['leave-room', 'alarms']])
+    expect(svc.rooms.has('alarms')).toBe(false)
+
+    // 重连后只重新 join 仍声明着的房间，被撤销的不得复活
+    sock.emitted = []
+    sock.fire('connect')
+    expect(sock.emitted).toEqual([['join-room', 'devices']])
+  })
+
+  test('leaveRoom：未连接时只撤集合不发包；空值忽略', async () => {
+    const sock = new FakeSocket()
+    ioMock.mockReturnValue(sock)
+    const { WebSocketService } = await loadModule()
+
+    const svc = new WebSocketService('http://ws.example')
+    svc.joinRoom('alarms')
+    svc.leaveRoom('')
+    svc.leaveRoom(null)
+    expect(svc.rooms.size).toBe(1)
+
+    // 未连接时撤销：没有连接可发包，但集合必须改——否则下次建连时
+    // connect 处理器会把房间重新 join 回来，撤销形同没做
+    svc.leaveRoom('alarms')
+    expect(sock.emitted).toHaveLength(0)
+    expect(svc.rooms.size).toBe(0)
+
+    svc.connect()
+    sock.connected = true
+    sock.fire('connect')
+    expect(sock.emitted).toEqual([])
+  })
   test('消息分发：已连接时 on/off 注册与解绑都同步到 socket', async () => {
     const sock = new FakeSocket()
     ioMock.mockReturnValue(sock)

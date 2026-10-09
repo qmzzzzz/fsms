@@ -86,18 +86,31 @@
                 autocomplete="off"
                 @keyup.enter.stop="onCaptchaEnter"
               />
+              <!-- 键盘可达：验证码图是"点击刷新"的控件，纯鼠标绑定会把键盘用户挡在门外。
+                   tabindex + role=button + Enter/Space，与同文件 captcha 输入框的
+                   @keyup.enter.stop 保持同一套键盘路径（作者本就意识得到，见上方输入框） -->
               <img
                 v-if="captchaImg"
                 :src="captchaImg"
                 class="login-card__captcha-img"
                 :alt="t('auth.captcha')"
                 :title="$t('login.captchaRefresh')"
+                :aria-label="$t('login.captchaRefresh')"
+                role="button"
+                tabindex="0"
                 @click="loadCaptcha"
+                @keydown.enter.prevent="loadCaptcha"
+                @keydown.space.prevent="loadCaptcha"
               />
               <div
                 v-else
                 class="login-card__captcha-img login-card__captcha-placeholder"
+                role="button"
+                tabindex="0"
+                :aria-label="$t('login.captchaRefresh')"
                 @click="loadCaptcha"
+                @keydown.enter.prevent="loadCaptcha"
+                @keydown.space.prevent="loadCaptcha"
               >
                 {{ $t('login.captchaLoading') }}
               </div>

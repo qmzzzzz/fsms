@@ -161,9 +161,6 @@ export default {
     chinese: '中文',
     english: 'English',
     critical: 'Critical',
-    high: 'High',
-    medium: 'Medium',
-    low: 'Low',
     error: 'Error',
     warning: 'Warning',
     info: 'Info',
@@ -1055,7 +1052,7 @@ export default {
       'Server response structure does not match expectations; some features may misbehave. Please contact an administrator.',
     permissionsUpdated:
       'Your permissions were changed by an administrator. The interface has been updated automatically (no re-login needed).',
-    sessionExpired: 'Session expired, please sign in again',
+    sessionExpired: 'Session is no longer valid, please sign in again',
     networkError: 'Network error, please check your connection',
     requestConfigError: 'Request configuration error',
     methodNotAllowed: 'Request method not allowed',

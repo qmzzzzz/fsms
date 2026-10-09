@@ -6,14 +6,16 @@
  * 归一化展示/按名单过滤/自动切换到命中名单/查询模式下的刷新与删除回流）、
  * 新增（载荷与白名单默认原因/时长）、移除（确认/取消/失败）。
  *
- * 注意：IpListView 的按钮**不加 hasPerm 门控**是已判定的非缺陷（路由 meta 已覆盖，
- * 见 roleViewPermission.test.js 的显式断言），本文件不为其写「应有门控」的测试。
+ * 权限门控：新增/移除按钮按仓库惯例走 hasPerm('security:config')（与路由 meta、
+ * 后端 POST/DELETE 同一权限码）。路由 meta 只挡住「进不了页面」，挡不住会话期内权限
+ * 被热回收后按钮仍在、点一次 403。默认挂载即授予该权限，另有缺权限/错码对照组。
  *
  * 期望值一律在本文件内独立计算（Date 本地 getter 补零），不 import @/utils/datetime，
  * 否则实现写错时两边一起错、断言恒真。
  */
 import { describe, test, expect, vi, afterEach } from 'vitest'
 import { mountComponent, flush, click, waitFor } from '../helpers/componentHarness'
+import { useAuthStore } from '@/store'
 
 const get = vi.fn()
 const post = vi.fn()
@@ -37,6 +39,10 @@ vi.mock('element-plus/es/components/message-box/index.mjs', () => ({
 
 import IpListView from '@/views/IpListView.vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
+
+// 权限码写死在用例里（不是从源码 import）：门控判据被改错时这里必须失败
+const PERM = 'security:config'
+const PERMS = [PERM]
 
 let active = null
 
@@ -116,9 +122,12 @@ const pickOption = async (wrapper, label) => {
   await flush(8)
 }
 
-/** 挂载并等待首屏列表落地（get 需已配置好 /security/ip-list 的响应） */
-const boot = async (expectedRows) => {
-  active = mountComponent(IpListView, {})
+/** 挂载并等待首屏列表落地（get 需已配置好 /security/ip-list 的响应；perms 默认放行门控） */
+const boot = async (expectedRows, perms = PERMS) => {
+  active = mountComponent(IpListView, {
+    setupStore: (pinia) =>
+      useAuthStore(pinia).setAuth('t', 'r', { userId: 'u-1', username: 'admin' }, perms),
+  })
   await waitFor(() => listCalls().length >= 1, { message: '名单列表请求已发出' })
   if (expectedRows !== undefined) {
     await waitFor(() => trs(active).length === expectedRows, { message: '名单行渲染完成' })
@@ -134,7 +143,7 @@ const openList = async (list, opts = {}) => {
       ? Promise.resolve(listBody(list, opts))
       : Promise.reject(new Error('unexpected url: ' + url))
   )
-  return boot(list.length)
+  return boot(list.length, opts.perms)
 }
 
 /** 填入查询框并点「IP 命中查询」 */
@@ -879,5 +888,41 @@ describe('IpListView 移除名单条目', () => {
     await waitFor(() => queryCalls().length === beforeQuery + 1, { message: '重新查询' })
     expect(queryCalls()[queryCalls().length - 1][1]).toEqual({ params: { ip: '10.0.0.5' } })
     expect(listCalls()).toHaveLength(beforeList)
+  })
+})
+
+describe('IpListView 权限门控（第 34 轮 L13）', () => {
+  test('有 security:config：新增与移除入口都在', async () => {
+    const c = await openList([ipRow()], { total: 1 })
+    expect(addIpBtn(c)).toBeTruthy()
+    await waitFor(() => c.findAll('.el-table__body-wrapper .glass-btn--link').length === 1, {
+      message: '移除按钮渲染完成',
+    })
+  })
+
+  test('缺 security:config：新增与移除入口都不渲染，列表照常可用', async () => {
+    // 路由 meta 只挡住「进不了页面」；会话期内权限被热回收后，按钮必须随之消失，
+    // 而不是留着让用户点一次 403（后端 POST/DELETE 与路由 meta 同一权限码）
+    const c = await openList([ipRow()], { total: 1, perms: [] })
+    expect(trs(c)).toHaveLength(1)
+    expect(addIpBtn(c)).toBeUndefined()
+    expect(c.findAll('.el-table__body-wrapper .glass-btn--link')).toEqual([])
+    // 只读操作不受影响：刷新仍能再拉一次列表
+    const refreshBtn = (v) =>
+      Array.from(v.findAll('.table-toolbar button')).find((b) => b.textContent.includes('刷新'))
+    const before = listCalls().length
+    click(refreshBtn(c))
+    await waitFor(() => listCalls().length === before + 1, { message: '刷新仍可用' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('权限码不可错配：security:conf / security:config:read 都不放行', async () => {
+    // 拼错码 = 没有权限：两个入口都必须保持隐藏（正确码由上一组用例覆盖）
+    const c = await openList([ipRow()], {
+      total: 1,
+      perms: ['security:conf', 'security:config:read'],
+    })
+    expect(addIpBtn(c)).toBeUndefined()
+    expect(c.findAll('.el-table__body-wrapper .glass-btn--link')).toEqual([])
   })
 })

@@ -1,8 +1,7 @@
 {
   "name": "web-admin",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "基于权限管控的消防管理系统 · 前端管理端（web-admin）",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -14,7 +13,14 @@
     "lint": "eslint src vite.config.js eslint.config.js",
     "lint:fix": "eslint src vite.config.js eslint.config.js --fix"
   },
-  "keywords": [],
+  "keywords": [
+    "fire-safety",
+    "rbac",
+    "permission-control",
+    "security",
+    "admin",
+    "vue"
+  ],
   "author": "",
   "license": "ISC",
   "type": "module",
@@ -46,5 +52,8 @@
     "vite": "^8.1.4",
     "vite-plugin-pwa": "^1.3.0",
     "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
   }
 }

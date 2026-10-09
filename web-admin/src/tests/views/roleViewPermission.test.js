@@ -18,8 +18,10 @@
  *   - role:create / role:assign（RoleView 按钮）      → roleView.test.js（停发 can-delete → 3 例变红）
  *   - RoleListPanel 只接收 canDelete prop 不自行读权限 → roleListPanel.test.js（自造 hasPerm → 3 例变红）
  *   - 删除按钮不得用 v-else 兜底                      → roleListPanel.test.js（改 v-else → 2 例变红）
- *   - IpListView 刻意不加 hasPerm 门控                → ipListView.test.js（加门控 → 4 例变红）
+ *   - IpListView 新增/移除按钮的 hasPerm 门控         → ipListView.test.js（去门控 → 缺权限用例变红）
  *   - RoleView 下发 :can-delete="hasPerm('role:delete')" → roleView.test.js（改恒真 → 3 例变红）
+ *   - RoleView 删角色后清选中与勾选（M2）           → roleView.test.js（去对账分支 → 1 例变红）
+ *   - permissions-updated 不拿旧 _id 请求（M2 竞态） → roleView.test.js（去列表守卫 → 1 例变红）
  */
 import { describe, test, expect } from 'vitest'
 import { readFileSync } from 'node:fs'

@@ -289,8 +289,11 @@
           </div>
         </el-form-item>
         <el-form-item :label="$t('common.status')" prop="status">
+          <!-- 编辑自身时禁用：同文件的「重置口令」「删除」都对自身隐藏，
+               状态下拉若还能选，管理员可以把自己停用/锁定后锁在门外 -->
           <el-select
             v-model="dialog.form.status"
+            :disabled="editingSelf"
             :placeholder="$t('messages.selectRequired')"
             style="width: 100%"
           >
@@ -467,6 +470,9 @@ const statusLabel = (status) => {
 const statusTagType = (status) => (USER_STATUS_META[status] || {}).type || 'info'
 // 下拉选项同样从那张表推导，locked 置灰不可选：锁定/解锁走 PUT /api/security/users/:userId/lock
 // （服务层会连带清 lockUntil 并写 user_locked 审计），让它可选等于开一条绕过该接口的旁路。
+// 是否正在编辑自己的账号：状态下拉整框禁用（locked 置灰仍保留——锁定/解锁走 PUT
+// /security/users/:id/lock 专用接口，见 statusOptions 上方注释；对自身则连选都不能选）
+const editingSelf = computed(() => dialog.isEdit && authStore.isSelf(dialog.form._id))
 const statusOptions = computed(() =>
   Object.entries(USER_STATUS_META).map(([value, meta]) => ({
     value,

@@ -168,9 +168,6 @@ export default {
     chinese: '中文',
     english: 'English',
     critical: '严重',
-    high: '高',
-    medium: '中',
-    low: '低',
     error: '错误',
     warning: '警告',
     info: '信息',
@@ -1030,7 +1027,9 @@ export default {
     requestFailed: '请求失败',
     schemaDrift: '服务端返回的数据结构与预期不符，部分功能可能异常，请联系管理员',
     permissionsUpdated: '您的权限已被管理员调整，界面已自动更新（无需重新登录）',
-    sessionExpired: '登录已过期，请重新登录',
+    // 措辞与 errors.sessionExpired 对齐（即后端错误码 SESSION_EXPIRED 的规范文案）：
+    // 码化翻译与无码兜底两条路径都经 ElMessage 提示给用户，不允许同一事件两种说法
+    sessionExpired: '会话已失效，请重新登录',
     networkError: '网络错误，请检查网络连接',
     requestConfigError: '请求配置错误',
     methodNotAllowed: '不支持的请求方法',

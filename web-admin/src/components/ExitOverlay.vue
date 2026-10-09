@@ -1,16 +1,23 @@
 <template>
-  <Transition name="exit-fade">
-    <div v-if="visible" class="exit-overlay" role="alert" aria-live="assertive">
-      <div class="exit-overlay__brand">
-        <div class="exit-overlay__icon">
-          <el-icon><SwitchButton /></el-icon>
+  <!--
+    Teleport 到 body：布局层在退出期间给 .app-wrapper 加 inert（下层内容移出可访问性
+    树、且不可聚焦），遮罩自身必须留在 inert 子树之外——role="alert" + aria-live 的
+    「正在退出」播报依赖它还在可访问性树里。留在原处会被一起 inert 掉，播报静默失效。
+  -->
+  <Teleport to="body">
+    <Transition name="exit-fade">
+      <div v-if="visible" class="exit-overlay" role="alert" aria-live="assertive">
+        <div class="exit-overlay__brand">
+          <div class="exit-overlay__icon">
+            <el-icon><SwitchButton /></el-icon>
+          </div>
+          <span class="exit-overlay__title">{{ t('common.appTitle') }}</span>
         </div>
-        <span class="exit-overlay__title">{{ t('common.appTitle') }}</span>
+        <div class="exit-overlay__spinner" aria-hidden="true" />
+        <p class="exit-overlay__message">{{ t('auth.signingOut') }}</p>
       </div>
-      <div class="exit-overlay__spinner" aria-hidden="true" />
-      <p class="exit-overlay__message">{{ t('auth.signingOut') }}</p>
-    </div>
-  </Transition>
+    </Transition>
+  </Teleport>
 </template>
 
 <script setup>
@@ -33,7 +40,11 @@ defineProps({
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: var(--xf-bg-page, #f8fafc);
+  /* 磨砂玻璃：半透明底 + blur + saturate，叠在页面最上层时
+     透过 overlay 能隐约看到下层内容的红色渐变，材质纵深完整 */
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
 }
 
 .exit-overlay__brand {
@@ -116,7 +127,7 @@ defineProps({
 
 /* 暗色适配 */
 html.dark .exit-overlay {
-  background: var(--xf-bg-page, #0a0f1a);
+  background: rgba(10, 15, 26, 0.82);
 }
 
 html.dark .exit-overlay__title {

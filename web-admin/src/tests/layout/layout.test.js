@@ -703,6 +703,40 @@ describe('布局 · 用户信息与登出', () => {
     expect(currentAuth.currentUser).toEqual({ username: 'alice' })
     expect(unhandled).toEqual([])
   })
+
+  test('退出遮罩显示期间：.app-wrapper 加 inert、遮罩 Teleport 到 body（第 34 轮 M5）', async () => {
+    // 登出接口挂住不返回：遮罩停在可见状态，窗口内才可断言。此前全仓 0 处 inert——
+    // 遮罩盖着「正在登出」时，下层菜单/按钮仍可 Tab 到并触发操作，读屏也会念到它们。
+    let releaseLogout
+    logoutApi.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseLogout = () => resolve({ data: { success: true } })
+        })
+    )
+    const c = mountLayout()
+    await settleRouter(c.router)
+    await flush(10)
+    const popper = await openByHover(c.find('.user-dropdown'), '用户菜单')
+
+    click(dropdownItem(popper, label('auth.logout')))
+    await pollUntil(() => document.body.querySelector('.exit-overlay') !== null, '退出遮罩已显示')
+    await flush(10)
+
+    const wrapper = c.find('.app-wrapper')
+    const overlay = document.body.querySelector('.exit-overlay')
+    // 下层内容不可聚焦、移出可访问性树
+    expect(wrapper.hasAttribute('inert')).toBe(true)
+    // 遮罩自身 Teleport 到 body、不被一起 inert 掉：role=alert + aria-live 的
+    // 「正在退出」播报依赖它还在可访问性树里
+    expect(wrapper.contains(overlay)).toBe(false)
+    expect(overlay.getAttribute('role')).toBe('alert')
+    expect(overlay.getAttribute('aria-live')).toBe('assertive')
+
+    // 放行登出走完整链，避免挂起的 Promise 影响后续用例
+    releaseLogout()
+    await pollUntil(() => c.router.currentRoute.value.path === '/login', '跳转登录页')
+  })
 })
 
 describe('布局 · 路由联动与面包屑', () => {

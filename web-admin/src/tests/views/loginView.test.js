@@ -434,3 +434,49 @@ describe('LoginView 页面标题与跨标签页提示', () => {
     expect(c.errors).toEqual([])
   })
 })
+
+describe('LoginView 验证码图键盘可达（第 34 轮 M4）', () => {
+  test('Enter/Space 可刷新验证码图，控件带 role/tabindex/aria-label', async () => {
+    const c = await open({ captchaEnabled: true })
+    const img = document.querySelector('img.login-card__captcha-img')
+    expect(img).toBeTruthy()
+    // 可访问性属性：键盘导航与屏幕阅读器都把它当按钮（此前只有 @click）
+    expect(img.getAttribute('role')).toBe('button')
+    expect(img.getAttribute('tabindex')).toBe('0')
+    expect(img.getAttribute('aria-label')).toBe(i18n.global.t('login.captchaRefresh'))
+
+    const before = getCaptcha.mock.calls.length
+    img.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flush(6)
+    expect(getCaptcha.mock.calls.length).toBe(before + 1)
+
+    img.dispatchEvent(new window.KeyboardEvent('keydown', { key: ' ', bubbles: true }))
+    await flush(6)
+    expect(getCaptcha.mock.calls.length).toBe(before + 2)
+
+    // 其他键不触发（修饰符写宽会把每次按键都当成刷新）
+    img.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'a', bubbles: true }))
+    await flush(6)
+    expect(getCaptcha.mock.calls.length).toBe(before + 2)
+    expect(c.errors).toEqual([])
+  })
+
+  test('加载失败的占位块同样键盘可达（Enter 重试，不只是鼠标）', async () => {
+    const c = await open({ captchaEnabled: true })
+    const img = document.querySelector('img.login-card__captcha-img')
+    getCaptcha.mockRejectedValueOnce(new Error('captcha down'))
+    click(img)
+    await flush(20)
+    const placeholder = c.find('.login-card__captcha-placeholder')
+    expect(placeholder).toBeTruthy()
+    expect(placeholder.getAttribute('role')).toBe('button')
+    expect(placeholder.getAttribute('tabindex')).toBe('0')
+    expect(placeholder.getAttribute('aria-label')).toBe(i18n.global.t('login.captchaRefresh'))
+
+    const before = getCaptcha.mock.calls.length
+    placeholder.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flush(6)
+    expect(getCaptcha.mock.calls.length).toBe(before + 1)
+    expect(c.errors).toEqual([])
+  })
+})

@@ -204,6 +204,13 @@ const loadRoles = async (forceSelect = false) => {
     } else if (!currentRole.value && roles.value.length > 0) {
       currentRole.value = roles.value[0]
       await loadRolePermissions(currentRole.value._id)
+    } else if (currentRole.value && !roles.value.some((r) => r._id === currentRole.value._id)) {
+      // 选中的角色刚被删（role-updated 只刷新列表、不重选）：currentRole 仍指向
+      // 已删对象。不在这里对账，后续 permissions-updated 会拿旧 _id 去请求，
+      // 权限集返回空 ⇒ 勾选被清空，用户看到的是"权限全没了"而非"角色已删除"。
+      // 仅在请求成功分支对账：catch 里 roles 已置空，那次刷新不能顺带清掉选中。
+      currentRole.value = null
+      clearChecked()
     }
   } catch (e) {
     // 失败原因已在拦截器统一提示
@@ -403,9 +410,13 @@ const handleRoleUpdated = () => {
  */
 const handlePermissionsUpdated = () => {
   loadPermissionTree()
-  if (currentRole.value) {
-    loadRolePermissions(currentRole.value._id)
-  }
+  // 事件顺序竞态：role-updated（列表刷新）与 permissions-updated 可能乱序到达。
+  // 若选中角色已不在当前列表（刚被删、列表尚未刷新），不要拿旧 _id 请求——
+  // 空权限集会把勾选清成空。等列表刷新后的对账来清选中。
+  const selected = currentRole.value
+  if (!selected) return
+  if (!roles.value.some((r) => r._id === selected._id)) return
+  loadRolePermissions(selected._id)
 }
 
 // 路由离开拦截：有未保存的权限变更时先确认，确认后放行并清状态
@@ -438,11 +449,15 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
-  // 只解绑本页的监听并释放一次引用；布局层的权限同步仍持有引用，连接保持。
+  // 只解绑本页的监听、撤销本页的房间并释放一次引用；布局层的权限同步仍持有引用，连接保持。
   // wsRef 为 null 说明 initWebSocket 建连失败，此时未 acquire 也不应 release
   if (!wsRef) return
   wsRef.off('role-updated', handleRoleUpdated)
   wsRef.off('permissions-updated', handlePermissionsUpdated)
+  // 房间名必须显式撤销：rooms 集合跨页面存活，而重连后 connect 会把声明过的房间
+  // 全部重新 join。该房间后端要求 SUPER_ADMIN/SECURITY_ADMIN，持 role:read 的
+  // 普通管理员每次重连都会白吃一次拒绝（引用计数未归零时连接并不会断开）。
+  wsRef.leaveRoom('role-management')
   releaseWebSocket()
   wsRef = null
 })

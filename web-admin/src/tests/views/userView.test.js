@@ -1287,3 +1287,47 @@ describe('UserView 列表渲染细节', () => {
     expect(c.errors).toEqual([])
   })
 })
+
+describe('UserView 编辑自身时状态下拉禁用（第 34 轮 L14）', () => {
+  // EP 的下拉 teleport 到 body，用 aria-hidden 挑出当前可见的那个
+  const visiblePopper = () =>
+    Array.from(document.body.querySelectorAll('.el-popper')).find(
+      (el) => el.getAttribute('aria-hidden') === 'false'
+    )
+  const dropdownItems = () => {
+    const popper = visiblePopper()
+    return popper
+      ? Array.from(popper.querySelectorAll('.el-select-dropdown__item')).map((el) =>
+          el.textContent.trim()
+        )
+      : []
+  }
+
+  test('编辑自己：状态下拉整框禁用，点不开（locked 置灰仍在但一个都选不了）', async () => {
+    // 同文件的「重置口令」「删除」都对自身隐藏；状态下拉若还能选，管理员可以把自己
+    // 停用/锁定后锁在门外（locked 置灰仍保留——锁定/解锁走 PUT 专用接口）。
+    const c = await mountUser(['user:read', 'user:update'], [ROW_SELF])
+    click(rowBtn(c, '编辑'))
+    await flush(8)
+    const dlg = c.find('.el-dialog')
+    expect(dlg.querySelectorAll('.el-select')).toHaveLength(1)
+    const wrapper = dlg.querySelector('.el-select__wrapper')
+    expect(wrapper.className).toContain('is-disabled')
+    // 禁用的 select 不展开下拉
+    click(wrapper)
+    await flush(6)
+    expect(dropdownItems()).toEqual([])
+    expect(c.errors).toEqual([])
+  })
+
+  test('编辑他人：状态下拉可正常展开（对照，证明禁用判据是 isSelf 而非恒真）', async () => {
+    const c = await mountUser(['user:read', 'user:update'], [ROW_OTHER])
+    click(rowBtn(c, '编辑'))
+    await flush(8)
+    const dlg = c.find('.el-dialog')
+    const wrapper = dlg.querySelector('.el-select__wrapper')
+    expect(wrapper.className).not.toContain('is-disabled')
+    click(wrapper)
+    await waitForDom(() => visiblePopper() && dropdownItems().length === 3, '状态下拉三个选项')
+  })
+})

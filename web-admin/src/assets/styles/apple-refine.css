@@ -300,6 +300,32 @@
   }
 }
 
+/* ---------- 7b) 弹窗本体磨砂玻璃（MessageBox / Dialog） ----------
+   遮罩已有 blur(6px)，但弹窗本体此前是不透明实底，浮在模糊背景上缺少材质纵深。
+   72% 半透底 + blur(28px) saturate(180%)：弹窗边缘隐约透出下层内容，
+   同时保留足够不透明度保证正文可读性（Apple Copy 液态玻璃材质口径） */
+.el-message-box,
+.el-dialog {
+  background-color: rgba(255, 255, 255, 0.72) !important;
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border-color: rgba(255, 255, 255, 0.5) !important;
+}
+
+html.dark .el-message-box,
+html.dark .el-dialog {
+  background-color: rgba(15, 23, 42, 0.72) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+/* 不支持 backdrop-filter 的浏览器回退为不透明实底，避免文字直接叠在页面内容上 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .el-message-box,
+  .el-dialog {
+    background-color: var(--el-bg-color, #fff) !important;
+  }
+}
+
 /* ---------- 8) Loading 遮罩材质化 ---------- */
 .el-loading-mask {
   backdrop-filter: blur(8px) saturate(120%) !important;
@@ -458,6 +484,14 @@ html.dark .el-notification {
   .el-dropdown-menu {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
+  }
+
+  /* 磨砂弹窗降级为不透明实底，避免半透明文字叠底不可读 */
+  .el-message-box,
+  .el-dialog {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    background-color: var(--el-bg-color, #fff) !important;
   }
 
   .el-overlay {

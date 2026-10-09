@@ -99,7 +99,10 @@
           />
         </el-form-item>
         <el-form-item>
+          <!-- 权限门控与路由 meta / 后端 POST 同一权限码：会话期内权限被热回收时
+               按钮随之消失，而不是留着让用户点一次 403（下方「移除」同此门控） -->
           <button
+            v-if="hasPerm('security:config')"
             type="button"
             class="glass-btn glass-btn--primary"
             :class="{ 'glass-btn--danger': listType === 'black' }"
@@ -200,9 +203,12 @@
             {{ formatTime(row.createdAt) }}
           </template>
         </el-table-column>
+        <!-- 权限门控与路由 meta / 后端 DELETE 同一权限码：会话期内权限被热回收时，
+             按钮随之消失，而不是留着让用户点一次 403（上方「加入名单」同此门控） -->
         <el-table-column :label="$t('common.operation')" width="100" fixed="right">
           <template #default="{ row }">
             <button
+              v-if="hasPerm('security:config')"
               type="button"
               class="glass-btn glass-btn--danger glass-btn--link"
               @click="handleRemove(row)"
@@ -238,6 +244,7 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
+import { usePermission } from '@/composables/usePermission'
 import { apiClient, isCanceledError } from '@/utils/api'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import GlassSegmented from '@/components/GlassSegmented.vue'
@@ -245,6 +252,7 @@ import GlassSegmented from '@/components/GlassSegmented.vue'
 // locale 未使用：本视图的时间展示已统一走 utils/datetime.formatTime
 // （固定本地时区 + hour12=false），不再依赖 toLocaleString 的 locale 参数
 const { t } = useI18n()
+const { hasPerm } = usePermission()
 
 const loading = ref(false)
 const adding = ref(false)

@@ -230,6 +230,7 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api } from '@/utils/api'
 import { toLocalWallClock } from '@/utils/datetime'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 
 const { t } = useI18n()
 
@@ -342,6 +343,11 @@ function validateEndTime(rule, value, callback) {
   }
 }
 
+// 远程搜索竞态门票：远程搜索是"每个字符发一次请求"的形态，慢响应后到会把
+// 上一次的搜索结果盖回来（换关键词/切记录时用户看到的是错的那批选项）
+const deviceGuard = useLatestRequest()
+const userGuard = useLatestRequest()
+
 // 搜索设备
 const searchDevices = async (query) => {
   if (!query) {
@@ -349,16 +355,21 @@ const searchDevices = async (query) => {
     return
   }
 
+  const isCurrent = deviceGuard()
   deviceLoading.value = true
   try {
     const res = await api.devices.getList({ search: query, limit: 20 })
+    if (!isCurrent()) return
     deviceOptions.value = res.data.data.map((item) => ({
       value: item._id,
       label: `${item.deviceCode} - ${item.deviceName} (${item.deviceType})`,
     }))
   } catch (error) {
+    if (!isCurrent()) return
+    // 失败同样清空：留着上一次的选项，用户会误选到与本次关键词无关的设备
+    deviceOptions.value = []
   } finally {
-    deviceLoading.value = false
+    if (isCurrent()) deviceLoading.value = false
   }
 }
 
@@ -369,16 +380,20 @@ const searchUsers = async (query) => {
     return
   }
 
+  const isCurrent = userGuard()
   userLoading.value = true
   try {
     const res = await api.users.getList({ search: query, limit: 20 })
+    if (!isCurrent()) return
     userOptions.value = res.data.data.map((item) => ({
       value: item._id,
       label: `${item.realName || item.username} (${item.username})`,
     }))
   } catch (error) {
+    if (!isCurrent()) return
+    userOptions.value = []
   } finally {
-    userLoading.value = false
+    if (isCurrent()) userLoading.value = false
   }
 }
 
@@ -409,6 +424,12 @@ const initForm = () => {
       remark: props.editData.remark || '',
     })
 
+    // 远程搜索候选项不随记录复用：deviceOptions/userOptions 是上一次搜索的
+    // 产物，不清空的话切记录后下拉里还是上一条记录的搜索结果（id 对不上当前
+    // 表单，选中即提交错误的对象）
+    deviceOptions.value = []
+    userOptions.value = []
+
     // 位置回填：无位置数据时清空，避免残留上一次编辑的脏数据
     const location = props.editData.locations?.[0]
     form.building = location?.building || ''
@@ -434,6 +455,8 @@ const initForm = () => {
       remark: '',
       checkItems: defaultCheckItems(),
     })
+    deviceOptions.value = []
+    userOptions.value = []
   }
 }
 

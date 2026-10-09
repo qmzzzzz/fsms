@@ -348,3 +348,27 @@ describe('ProfileView 时间格式（O-3 单一事实来源）', () => {
     expect(c.text()).not.toContain('基本信息')
   })
 })
+
+describe('ProfileView 角色文案随语言切换（第 34 轮 M6）', () => {
+  test('切语言后 roleText 重算：普通用户文案不滞留旧语言', async () => {
+    // roleText 是 ref，只由 updateRoleText 写入；修复前调用点只有初值行与 watch(user)，
+    // 没有 watch(locale) ⇒ 切语言后 t('profile.normalUser') 的结果停在切换前的语言。
+    // 无角色时该文案来自词表，是唯一可观测语言切换的形态（有角色时只是角色名拼接）。
+    const c = await open({ ...ME, roles: [] })
+    const zhText = i18n.global.t('profile.normalUser')
+    expect(c.text()).toContain(zhText)
+
+    i18n.global.locale.value = 'en-US'
+    await flush(8)
+    const enText = i18n.global.t('profile.normalUser')
+    expect(enText).not.toBe(zhText)
+    expect(c.text()).toContain(enText)
+    expect(c.text()).not.toContain(zhText)
+
+    // 切回中文同样重算（双向生效，不是一次性）
+    i18n.global.locale.value = 'zh-CN'
+    await flush(8)
+    expect(c.text()).toContain(zhText)
+    expect(c.errors).toEqual([])
+  })
+})

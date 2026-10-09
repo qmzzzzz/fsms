@@ -210,8 +210,11 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
       expect(store.currentUser.userId).toBe('u-1')
       expect(store.permissions).toEqual(['user:read'])
       expect(JSON.parse(localStorage.getItem('currentUser')).userId).toBe('u-1')
-      // 探测须声明 silent401，否则未登录用户会看到「登录已过期」提示
-      expect(getMeMock).toHaveBeenCalledWith({ silent401: true })
+      // 探测须声明 silent401，否则未登录用户会看到「会话已失效」提示
+      // 两步探测还必须自带超时：全局默认 15s × 串行两步 = 最坏 30s 才放行，
+      // 探测走在路由守卫关键路径上，用户会对着原页面以为卡死
+      expect(getSessionStatusMock).toHaveBeenCalledWith({ timeout: 10000 })
+      expect(getMeMock).toHaveBeenCalledWith({ silent401: true, timeout: 10000 })
     })
 
     test('会话探测返回未登录时直接放弃，不再打 /auth/me', async () => {

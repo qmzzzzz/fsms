@@ -85,6 +85,25 @@ export class WebSocketService {
     }
   }
 
+  /**
+   * 声明不再需要某个房间（与 joinRoom 成对，后端 websocketService 对称处理 leave-room）
+   *
+   * 为什么必须有：joinRoom 只往 this.rooms 里加名字，而重连后 connect 处理器会
+   * 无差别重新 join 全部声明过的房间（socket id 已变，服务端成员关系随断连失效）。
+   * 若使用方卸载时只释放引用而不撤房间，房间名就跨页面存活：布局层的权限同步
+   * 仍持有引用 ⇒ 连接不断开 ⇒ 下一次建连时该房间被重新 join。对后端要求
+   * SUPER_ADMIN/SECURITY_ADMIN 的房间（如 role-management），持 role:read 的
+   * 普通管理员每次重连都要白吃一次后端拒绝。
+   * @param {string} room 房间名
+   * @returns {void}
+   */
+  leaveRoom(room) {
+    if (!room) return
+    this.rooms.delete(room)
+    if (this.socket && this.socket.connected) {
+      this.socket.emit('leave-room', room)
+    }
+  }
   connect() {
     if (this.isConnecting || (this.socket && this.socket.connected)) return
 

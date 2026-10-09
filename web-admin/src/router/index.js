@@ -102,6 +102,14 @@ const routes = [
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes,
+  // 导航后回到顶部：各页都是长列表/长表单，停留在旧滚动位会让用户以为页面没变
+  // （筛选变化导致同路径重渲染时尤其明显）。浏览器前进/后退沿用保存的位置，
+  // hash 锚点优先——三者互斥的优先级即下面的分支顺序。
+  scrollBehavior(to, from, savedPosition) {
+    if (savedPosition) return savedPosition
+    if (to.hash) return { el: to.hash }
+    return { top: 0 }
+  },
 })
 
 // 损坏的浏览器磁盘缓存会让动态导入失败。先强制从网络刷新对应模块，

@@ -158,7 +158,7 @@ import SessionManager from '@/components/SessionManager.vue'
 import ChangePasswordCard from '@/components/ChangePasswordCard.vue'
 import MfaSettingsCard from '@/components/MfaSettingsCard.vue'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const authStore = useAuthStore()
 const user = ref(authStore.currentUser || {})
 const profileFormRef = ref(null)
@@ -182,12 +182,13 @@ const updateRoleText = (roles) => {
 }
 updateRoleText(user.value.roles)
 
+// 不含 department：模板无对应输入（上方信息卡只读展示的是 user.department），
+// 提交载荷也不带它（后端 updateUserProfile 不白名单该字段）——留着就是死字段
 const form = reactive({
   username: user.value.username || '',
   realName: user.value.realName || '',
   email: user.value.email || '',
   phone: user.value.phone || '',
-  department: user.value.department || '',
 })
 
 /**
@@ -264,7 +265,6 @@ watch(
         form.realName = newUser.realName || ''
         form.email = newUser.email || ''
         form.phone = newUser.phone || ''
-        form.department = newUser.department || ''
       })
     }
     // 只读展示位与脏标记无关：它们显示的就是服务端权威值，盖掉不会丢用户输入
@@ -273,6 +273,12 @@ watch(
   },
   { deep: true }
 )
+
+// 切语言后重算角色文案：roleText 是 ref，只由 updateRoleText 写入，而调用点只有
+// 初值行与 watch(user) 两处——没有 watch(locale) 时 roles.join(', ') 与
+// t('profile.normalUser') 的结果会停留在切换前的语言（对照 DeviceView.vue
+// 的 watch(locale, () => loadData())，那边确实做了）
+watch(locale, () => updateRoleText(user.value.roles))
 
 /**
  * 资料页时间展示：统一走 utils/datetime.formatTime（O-3 单一事实来源——本地时区、
@@ -333,7 +339,6 @@ const reset = () => {
     form.realName = user.value.realName || ''
     form.email = user.value.email || ''
     form.phone = user.value.phone || ''
-    form.department = user.value.department || ''
   })
   formDirty.value = false
 }

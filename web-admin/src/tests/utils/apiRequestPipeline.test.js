@@ -227,7 +227,7 @@ describe('401 刷新链（含并发合流）', () => {
   })
 
   test('并发 401 且刷新失败：登出提示与跳转只发生一次，两个调用方都收到 401', async () => {
-    // 防退化：去掉 _isHandling401 合流 → 每个失败请求各弹一次「登录已过期」并各跳一次
+    // 防退化：去掉 _isHandling401 合流 → 每个失败请求各弹一次「会话已失效」并各跳一次
     const { apiClient, router, axios, i18n } = await loadAll()
     vi.spyOn(axios, 'post').mockRejectedValue(new Error('refresh down'))
     const pushSpy = vi.spyOn(router, 'push').mockResolvedValue()
@@ -322,7 +322,7 @@ describe('401 刷新链（含并发合流）', () => {
 
   test('silent401：刷新失败不提示不跳转，但刷新确实被尝试过', async () => {
     // 防退化：silent401 提前短路（会话恢复时 access 过期+refresh 有效也救不回来）；
-    // 或 silent401 把 401 也当成需要弹提示的失败（未登录用户首访每次弹「登录已过期」）
+    // 或 silent401 把 401 也当成需要弹提示的失败（未登录用户首访每次弹「会话已失效」）
     const { apiClient, router, axios } = await loadAll()
     const postSpy = vi.spyOn(axios, 'post').mockRejectedValue(new Error('down'))
     const pushSpy = vi.spyOn(router, 'push').mockResolvedValue()
