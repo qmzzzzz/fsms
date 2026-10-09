@@ -23,7 +23,7 @@ describe('设备级会话管理接口（/api/auth/sessions）', () => {
   let UserSession;
   let sessionService;
 
-  // 夹具口令须避开撞库字典（helpers.BREACHED_PASSWORDS），否则注册/改密被拒
+  // 夹具口令须避开撞库词干表（helpers.BREACHED_PASSWORD_STEMS），否则注册/改密被拒
   const PASSWORD = 'Kq4$Wm71zBx3';
   const NEW_PASSWORD = 'Tj8%Rv52nHx7';
 

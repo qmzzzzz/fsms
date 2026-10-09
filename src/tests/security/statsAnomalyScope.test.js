@@ -3,7 +3,7 @@
 /**
  * GET /api/security/stats 的"异常行为"两路聚合必须按操作者数据范围收口
  *
- * 缺陷本体：`getSecurityStats`（securityController.js:284）里
+ * 缺陷本体：`getSecurityStats`（securityController.js:325）里
  * 今日登录数 / 今日失败数 / 高危操作数是**全局聚合**（是否随范围收窄属另一条口径，
  * 本用例不管），但 `AuditLog.detectAnomalies()` 是 `$group:{_id:'$userId'}`
  * ——返回体里就是"哪些用户在一小时内失败了 ≥5 次"，是**行级**信息的聚合出口。

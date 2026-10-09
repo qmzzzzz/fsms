@@ -88,6 +88,39 @@ function pruneLocal() {
 }
 
 /**
+ * 活跃数上限判定被跳过时的统一信号出口（log + 安全告警计数）。
+ *
+ * 【为什么必须补这个信号，2026-10-09 实测】这条路径此前**一个信号都没有**：
+ *   · 本函数 catch 里的 `logger.warn` 不可达（见下方注释，F-205 后门面返回 null 而不抛）；
+ *   · 门面在「Redis 已就绪但命令抛错」时只打 `logger.debug`（sharedCache.js:432），
+ *     而生产默认 `LOG_LEVEL=info`（utils/logger.js:85）⇒ **debug 根本不落盘**。
+ * ⇒ 即「Redis 就绪但命令报错」期间，洪水护栏消失这件事在默认配置下**完全不可见**：
+ *   没有日志、没有指标、没有告警。这正是本仓纪律所反对的形态
+ *   （middleware/rateLimitStore.js:53-56：「降级态只写日志等于没有可告警信号——
+ *   `grep 日志` 不是运维动作」；middleware/security.js:668-672 同口径）。
+ *
+ * 走 `incSecurityAlert` 与 `checkIPBlacklist` 的 ip_blacklist_failopen、
+ * `makeSharedStore` 的 ratelimit_store_degraded **同一计数器**，因此被
+ * deployment/observability/alert-rules.yml 的规则一并覆盖，不新造指标。
+ *
+ * 方向说明：这里补的是**信号**，不是把 fail-open 改成 fail-closed。
+ * 「刻意不 fail-closed」是成文决策（见下方 catch 注释），本次不动它。
+ */
+const noteActiveBoundLost = () => {
+  try {
+    require('../utils/metrics').incSecurityAlert('captcha_active_bound_lost', 'high');
+  } catch (_) {
+    /* 指标端不可用不影响生成主流程 */
+  }
+  // 日志与指标都要：指标给告警，日志给现场（含键名与 TTL 口径）。
+  // 不设「只告警一次」的标志位——本仓已吃过「一次性信号被当成持续信号」的亏
+  // （middleware/rateLimitStore.js:66-79），而这里的调用频率受 captchaLimiter 约束。
+  logger.warn(
+    `验证码活跃数上限判定不可用（Redis 已启用但计数读取失败），本次不设上限：${COUNT_KEY}`
+  );
+};
+
+/**
  * 生成验证码
  * @returns {Promise<{ captchaId: string, svg: string } | null>} 超出上限时返回 null
  */
@@ -105,12 +138,17 @@ const generate = async () => {
     // F-205 之后这条 catch 实际上到不了：门面在「Redis 启用但命令抛错」时不再回退
     // 进程内计数，而是**如实返回 null**（走上面的 active===null 分支）。留着是因为
     // 成本为零、方向明确（门面内部若改成抛错，这里的行为仍然是上面写的那两种）。
+    // 注意：**信号不在本 catch 里发**，而在下面 active===null 的决策点——那条路
+    // 才是实际可达的降级路径，catch 不可达（见 noteActiveBoundLost 的说明）。
     logger.warn(`验证码计数器异常，本次不启用活跃数上限判定：${err.message}`);
     active = null;
   }
 
   if (sharedCache.isRedisEnabled()) {
-    if (active !== null && active > MAX_ACTIVE_ENTRIES) {
+    if (active === null) {
+      // 上限判定被跳过 = fail-open。此处是**唯一可达**的降级路径，信号必须打在这里。
+      noteActiveBoundLost();
+    } else if (active > MAX_ACTIVE_ENTRIES) {
       logger.warn(`验证码存储已达上限（${MAX_ACTIVE_ENTRIES}），拒绝生成，疑似异常刷取`);
       return null;
     }

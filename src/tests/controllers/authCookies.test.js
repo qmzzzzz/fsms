@@ -90,8 +90,8 @@ describe('httpOnly Cookie 认证集成', () => {
   let User;
   let SystemConfig;
   let config;
-  // 夹具口令须避开 helpers.BREACHED_PASSWORDS 黑名单（G8）：
-  // Test@12345 归一化后为 test@123，属撞库字典条目，注册接口会拒绝
+  // 夹具口令须避开 helpers.BREACHED_PASSWORD_STEMS 词干黑名单（G8）：
+  // 归一化 = 小写 → 去所有非字母数字 → 去末尾连续数字；`Test@12345` → `test`，属字典词干，注册接口会拒绝
   const PASSWORD = 'Vn6$Rw83pKx5';
 
   const accessMaxAgeSec = () => Math.round(durationToMs(config.jwt.expire, 0) / 1000);
@@ -116,7 +116,7 @@ describe('httpOnly Cookie 认证集成', () => {
     await SystemConfig.create({ key: 'allowPublicRegistration', value: true });
     SystemConfig.invalidateRegistrationCache();
 
-    // 注册图形验证码**默认开启**（src/config/index.js:72 / models/SystemConfig.js:207 都读顶层）。
+    // 注册图形验证码**默认开启**（src/config/index.js:77 / models/SystemConfig.js:215 都读顶层）。
     // 本用例测的是「注册成功同样下发两个令牌 cookie」，与验证码前置层无关；
     // 验证码若开着，:288 的 `expect(res.status).toBe(201)` 会被 400 CAPTCHA_INVALID 拦掉。
     // 故显式落库关闭（本文件无 svg-captcha mock，拿不到可用的 captchaText）。

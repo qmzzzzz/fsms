@@ -147,6 +147,39 @@
     color var(--apple-duration-fast) ease !important;
 }
 
+/* 外壳透明化：浮层表面只由 .el-dropdown-menu 画一层。EP 默认把表面画在外壳
+   .el-dropdown__popper.el-popper 上（还带着 base 的 5px 11px 内边距与 global.css
+   的 10px 圆角），与本文件的 menu（12px 圆角 + 1px 描边 + 6px 内边距）半径、描边、
+   内边距全不一致——两层表面叠出双边框与错角毛边，边角就不圆润。压成透明壳后箭头
+   （.el-popper__arrow，外壳子元素、::before 自带配色）位置不变。
+   background/border 必须 !important：暗色 dark.css 的 html.dark .el-popper 用
+   !important 给所有浮层上了 --xf-gray-50 实底与 --xf-border-color 描边，不盖掉的
+   话暗色菜单四周会围一圈浅灰框 */
+.el-dropdown__popper.el-popper {
+  padding: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* 暗色再盖一次：dark.css 的 html.dark .el-popper 给所有浮层上的实底与描边两条声明
+   带 !important，且特异性 (0,2,1) 压过上面的 (0,2,0)——不单独处理，暗色菜单四周
+   会围一圈 --xf-gray-50 实底框 + --xf-border-color 描边，与菜单 rgba(30,41,59,.95)
+   的表面脱节。padding/box-shadow 没有带 !important 的对手，不必重复 */
+html.dark .el-dropdown__popper.el-popper {
+  background: transparent !important;
+  border: none !important;
+}
+
+/* 亮色下拉箭头：描边跟随菜单的 --xf-border-color（EP 默认取 --el-border-color-light
+   #e4e7ed，与菜单描边不同源，箭头根部会露出一截异色），底色同取 EP 给菜单的
+   --el-bg-color-overlay。不写 !important：placement 的透明边规则带 !important，
+   必须继续赢，否则旋转方块会变成实心方角 */
+.el-dropdown__popper.el-popper > .el-popper__arrow::before {
+  background: var(--el-bg-color-overlay);
+  border-color: var(--xf-border-color, #e5e5ea);
+}
+
 /* ---------- 4) 触控目标统一（Apple 44×44pt 最小标准） ---------- */
 @media (hover: none) and (pointer: coarse) {
   /* Element Plus 按钮最小触控区 */
@@ -407,6 +440,17 @@ html.dark .el-dialog {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3) !important;
 }
 
+/* 箭头必须与浮层同色。EP 的箭头是独立元素（.el-popper__arrow::before，旋转 45° 的
+   方块），取的是 --el-popper-bg-color-dark / --el-text-color-primary 的实底配色，
+   既不跟随上面的玻璃底色也不带模糊——只改浮层不改箭头，尖角处就露出一截异色。
+   这里只写 background + border-color 且不能加 !important：朝浮层的那两条边由 EP 的
+   placement 规则置 transparent，那条规则带 !important 必须继续赢，否则旋转方块会
+   变成实心方角挂在浮层上 */
+.el-popper.is-dark > .el-popper__arrow::before {
+  background: rgba(30, 41, 59, 0.92);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
 /* ---------- 13) 标签页统一 ---------- */
 .el-tabs__item {
   transition:
@@ -442,6 +486,30 @@ html.dark .el-dropdown-menu {
   border-color: var(--xf-border-color, #1e293b) !important;
 }
 
+/* 暗色下拉菜单的箭头：菜单表面是上面的 rgba(30,41,59,.95) + --xf-border-color，
+   而 EP 默认箭头取 --el-popper-bg-color-light（= --el-bg-color-overlay，EP 暗色
+   是中性深灰 #1d1e1f）+ --el-border-color-light（#414243）——不改就是暗色菜单
+   尖角上挂一块异色三角。作用域必须收在 .el-dropdown__popper：el-date-picker 等
+   .is-light 浮层的暗色表面是 dark.css 里 html.dark .el-popper 的 --xf-gray-50
+   实底，由下面的 is-light 规则负责；两处底色不同（半透明 vs 实底），混写会对错
+   其中一边 */
+html.dark .el-dropdown__popper > .el-popper__arrow::before {
+  background: rgba(30, 41, 59, 0.95);
+  border-color: var(--xf-border-color, #1e293b);
+}
+
+/* 暗色 .is-light 浮层（el-date-picker 等，经 ElTooltip effect="light" 带上
+   is-light）的箭头：表面是 html.dark .el-popper 的 --xf-gray-50 实底，而 EP 的
+   .is-light 箭头取 --el-popper-bg-color-light（同样解析成 #1d1e1f）与
+   --el-border-color-light（#414243）——中性灰贴在蓝调深灰上，尖角会露一截异色。
+   下拉菜单用 :not 排除：它的表面是半透明 rgba(30,41,59,.95)，且本规则特异性更高，
+   不排除会把下拉箭头从半透明一起改成实底。同样不写 !important：placement 的
+   透明边规则带 !important，必须继续赢 */
+html.dark .el-popper.is-light:not(.el-dropdown__popper) > .el-popper__arrow::before {
+  background: var(--xf-gray-50);
+  border-color: var(--xf-border-color);
+}
+
 html.dark .el-message {
   background: rgba(30, 41, 59, 0.95) !important;
   border-color: var(--xf-border-color, #1e293b) !important;
@@ -461,12 +529,6 @@ html.dark .el-notification {
 
 /* ---------- 18) 减少动态效果偏好 — 全面降级 ---------- */
 @media (prefers-reduced-motion: reduce) {
-  .exit-overlay,
-  .exit-overlay__spinner {
-    transition: none !important;
-    animation: none !important;
-  }
-
   .el-dialog,
   .el-message,
   .el-notification,
@@ -575,9 +637,18 @@ html.dark .el-dialog {
 /* 暗色 tooltip 提亮一档，与纯黑背景拉开层次 */
 html.dark .el-popper.is-dark {
   background: rgba(51, 65, 85, 0.95) !important;
+  /* 暗色 surface 自带描边：不写就悄悄吃亮色那条 .el-popper.is-dark 的边，
+     改亮色配色时暗色会被一起带跑 */
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
   box-shadow:
     0 4px 16px rgba(0, 0, 0, 0.4),
     inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+}
+
+/* 箭头跟随提亮后的浮层底色（同 12 的理由：箭头是独立元素，不跟随 background） */
+html.dark .el-popper.is-dark > .el-popper__arrow::before {
+  background: rgba(51, 65, 85, 0.95);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 /* 暗色遮罩稍微加深并保留模糊，维持内容可读性 */

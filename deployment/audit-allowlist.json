@@ -1,0 +1,36 @@
+{
+  "note": "含 dev 依赖审计的显式允许清单。被 scripts/check-audit-allowlist.js 消费：≥ threshold 的根因公告必须在此登记（id 为 GHSA 编号），否则阻断合并。三条 fail-closed 判据：①未登记⇒红；②reviewBy 早于当天⇒红；③清单项在本次报告里已无 ≥threshold 的对应公告（上游已修或被降级）⇒红，必须删行。id 必须是 GHSA 字符串（audit 报告的 via.source 是数字 advisory id，只在 via.url 末段才有 GHSA 号）。本文件在 git 里，任何改动都留 diff 并受评审。",
+  "threshold": "moderate",
+  "entries": [
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "severity": "high",
+      "source": 1240992,
+      "url": "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+      "range": "<=3.0.3",
+      "cvss": 7.5,
+      "noPatch": true,
+      "firstSeen": "2026-10-09",
+      "reviewBy": "2027-01-31",
+      "reason": "braces 经深层嵌套 glob 模式触发栈耗尽 DoS（CWE-674）。上游无修复版本：advisory 的 first_patched_version 为 null，vulnerable 区间 <=3.0.3，而 npm registry 上 braces 的 latest 就是 3.0.3（版本列表止于 3.0.3）⇒ overrides 无版本可指向，与 uuid override 的前提不同（uuid 有已修复版 11.1.1）。micromatch（latest 4.0.8，仍 braces:^3.0.2）与 chokidar 3.x（3.6.0 仍 braces:^3.0.2）同样无解。本仓两条传染链：jest29 → @jest/core → micromatch → braces；nodemon → chokidar → braces。",
+      "reachability": "静态可见但实际不可达：DoS 需要攻击者可控的 glob 模式，而本仓里 braces 的输入只有 jest 的 CLI/config 模式与 nodemon 的 ignore 配置，均非远程可控。2026-10-09 实测含 dev 35 条（30 high）全部由本项与 GHSA-hp3w-g68c-fv3c 两条根因传染而来（35 条 = 2 条根因）。",
+      "exitPlan": "上游发布 3.0.4+ 后：① jest 29→30（实测可消除 micromatch 侧，30 high→3 high）；② nodemon 仅被 npm run dev 引用，真实开发流程 start.bat→dev-backend.cmd 走 node src/index.js 自建退避重启，可用 node --watch 替代后删除，chokidar 链随之消失；③ 二者齐做实测得 0 high。届时删掉本行（否则判据③会让 CI 转红）。"
+    },
+    {
+      "id": "GHSA-hp3w-g68c-fv3c",
+      "package": "sprintf-js",
+      "severity": "moderate",
+      "source": 1241202,
+      "url": "https://github.com/advisories/GHSA-hp3w-g68c-fv3c",
+      "range": "<=1.1.3",
+      "cvss": 5.3,
+      "noPatch": true,
+      "firstSeen": "2026-10-09",
+      "reviewBy": "2027-01-31",
+      "reason": "sprintf-js 对无界精度说明符触发 DoS（CWE-1284）。上游无修复版本：first_patched_version 为 null，vulnerable 区间 <=1.1.3。传染链：jest → @jest/transform → babel-plugin-istanbul → @istanbuljs/load-nyc-config → js-yaml@3 → argparse@1.0.10 → sprintf-js@1.0.3。注意 jest 30 也不能清掉本链：实测 @jest/transform@30.5.2 仍依赖 babel-plugin-istanbul@^8，后者仍依赖 @istanbuljs/load-nyc-config@^1（latest 1.1.0 仍 js-yaml:^3.13.1）。本链同时解释了为何升 jest 30 后 moderate 由 5 条升至 19 条（jest 自身的包被本链传染）。",
+      "reachability": "实测不可达：argparse 只被 js-yaml 的 CLI 引用（`node_modules/js-yaml/bin/js-yaml.js` 是包内唯一 require('argparse') 处），而 @istanbuljs/load-nyc-config/index.js 走 `require('js-yaml').load()`，加载的是 lib/js-yaml.js，其中不 require argparse ⇒ 该链在 jest 运行时根本不被加载。npm audit 是静态分析，不做可达性判断。",
+      "exitPlan": "上游发布 1.1.4+ 或 @istanbuljs/load-nyc-config 迁到 js-yaml@4（js-yaml 4 无 argparse 依赖）后自动消失。届时删掉本行。不要用 overrides 把 js-yaml 强指到 ^4：js-yaml 4 移除了 safeLoad 等 API，load-nyc-config 用的是 3.x 接口，会静默改变行为。"
+    }
+  ]
+}

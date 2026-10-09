@@ -549,6 +549,10 @@ export default {
     invalidFormat: 'Invalid IP or CIDR format',
     typeSwitchLabel: 'Switch list type',
   },
+  // IP 归属地展示（后端只出稳定码，文案归词表，见 src/constants/ipLocationCodes.js）
+  ipLocation: {
+    private: 'Internal network',
+  },
   audit: {
     filter: {
       placeholder: 'Please select',
@@ -838,6 +842,70 @@ export default {
     cannotRevokeCurrent: 'Use "Log out" to end the session on this device',
     noCurrentSidHint:
       'Your current credentials were issued before this feature shipped, so no entry is marked as "This device". Sign in again to manage all sessions.',
+  },
+  // Self-service security surfaces (B-group endpoint wiring: /security/my-info,
+  // /security/bindings, /security/my-logs). All three are the caller's own data,
+  // gated by authentication only (no permission code).
+  securitySelf: {
+    infoTitle: 'My Security',
+    score: 'Security score',
+    scoreHint: 'Auto-assessed from sign-in activity and failed attempts; for reference only',
+    suggestions: 'Suggestions',
+    noSuggestions: 'No security suggestions at this time',
+    // 建议码词表（后端 src/constants/securitySuggestions.js 的码表）。
+    // 键集必须与后端逐一对应，由 tests/utils/securitySuggestionParity.test.js 对账。
+    suggestion: {
+      account_inactive_long:
+        'This account has not signed in for a long time — please review its security',
+      repeated_login_failures:
+        'Multiple failed sign-in attempts detected — consider changing your password',
+      high_risk_score: 'High risk — review recent operation logs immediately',
+      excessive_failed_logins: 'Too many failed sign-ins — please check account security',
+      unusual_time_access:
+        'Access at unusual hours — please confirm these operations are legitimate',
+    },
+    recentLogins: 'Recent sign-ins',
+    loginTime: 'Time',
+    loginAction: 'Action',
+    loginIp: 'IP address',
+    loginResult: 'Result',
+    loginSuccess: 'Success',
+    loginFailed: 'Failed',
+    noRecentLogins: 'No sign-in records',
+    loadFailed: 'Failed to load, please retry',
+    bindingsTitle: 'Account bindings',
+    bindingEmail: 'Email',
+    bindingPhone: 'Phone',
+    bindingDepartment: 'Department',
+    bound: 'Bound',
+    unbound: 'Not bound',
+    requiredField: 'Required',
+    logsTitle: 'My activity logs',
+    logsRange: 'Time range',
+    range7: 'Last 7 days',
+    range30: 'Last 30 days',
+    range90: 'Last 90 days',
+    logsEmpty: 'No activity in the selected range',
+    colTime: 'Time',
+    colAction: 'Action',
+    colCategory: 'Category',
+    colIp: 'IP address',
+    colResult: 'Result',
+    logsCount: '{count} records',
+  },
+  // Admin security statistics (GET /security/stats, requires security:stats); shown on the dashboard
+  securityStats: {
+    title: 'Security Statistics',
+    todayLogins: 'Sign-ins today',
+    todayFailedLogins: 'Failed sign-ins today',
+    highRiskOperations: 'High-risk operations',
+    levelLabel: 'Security level',
+    levelNormal: 'Normal',
+    levelHigh: 'Elevated',
+    anomalies: 'Anomalies (last hour)',
+    failedOperationUsers: 'Users with failures',
+    unusualTimeUsers: 'Users at unusual hours',
+    loadFailed: 'Failed to load, please retry',
   },
   about: {
     title: 'About',

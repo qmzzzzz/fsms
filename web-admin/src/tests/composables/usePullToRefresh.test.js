@@ -150,6 +150,31 @@ describe('usePullToRefresh 下拉刷新', () => {
     expect(api().y.value).toBe(0)
   })
 
+  test('下拉进行中第二指落下：重置本轮（y 归零且不再跟手）', async () => {
+    // 变异实测（M15，2026-10-09）暴露的缺口：上面那条「多指放弃本轮」用例把多指
+    // **当作首个事件**发出——此时 y 本就是 0、isPulling 本就是 false，
+    // 于是 `resetPull()` 删掉与否完全看不出来（该变异在旧用例下存活）。
+    // 真正要守的不变量是「多指介入会**中断进行中的**下拉」：第二指落在已经拉出的
+    // 手势上时必须把 y 复位并清掉 isPulling，否则指示条会停在半途、后续 move 继续跟手。
+    const { fn } = deferredRefresh()
+    const { el, api } = await mountPull(fn)
+
+    // 单指先拉出一段（dy=100 → 55）
+    el.dispatchEvent(touch('touchstart', 100))
+    el.dispatchEvent(touch('touchmove', 200))
+    expect(api().y.value).toBeCloseTo(55, 6)
+
+    // 第二指落下：必须重置本轮
+    el.dispatchEvent(touch('touchstart', 100, 2))
+    expect(api().y.value).toBe(0)
+
+    // 且 isPulling 已复位：后续 move 不再跟手
+    el.dispatchEvent(touch('touchmove', 400))
+    expect(api().y.value).toBe(0)
+    el.dispatchEvent(touch('touchend', 400))
+    expect(fn).not.toHaveBeenCalled()
+  })
+
   test('刷新中的新下拉被忽略；touchcancel 按取消处理不触发刷新', async () => {
     const { fn, settle } = deferredRefresh()
     const { el, api } = await mountPull(fn)

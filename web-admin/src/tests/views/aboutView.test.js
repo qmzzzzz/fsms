@@ -117,3 +117,16 @@ describe('about.metrics i18n 词条', () => {
     expect(untranslated).toEqual([])
   })
 })
+
+describe('AboutView 徽标图标盒模型（jsdom 不注入 SFC 样式，只能读源码）', () => {
+  // .about-icon 是 <el-icon class="about-icon">（element-plus 定尺寸 1em 盒），
+  // view-refine.css 给它加 10px padding 做渐变徽标；不显式 content-box 时 border-box
+  // 让 padding 吃掉内容盒，svg 被 flex-shrink 压成 28×48 细条（实测）。
+  const css = readSrc('assets/styles/view-refine.css')
+  const block = css.slice(css.indexOf('.about-icon {'))
+  const body = block.slice(0, block.indexOf('}'))
+
+  test('徽标图标 content-box：48px 图标 + 2×10px padding = 68×68 徽标', () => {
+    expect(body).toContain('box-sizing: content-box')
+  })
+})

@@ -547,6 +547,10 @@ export default {
     invalidFormat: 'IP 或网段格式不正确',
     typeSwitchLabel: '名单类型切换',
   },
+  // IP 归属地展示（后端只出稳定码，文案归词表，见 src/constants/ipLocationCodes.js）
+  ipLocation: {
+    private: '内网',
+  },
   audit: {
     filter: { placeholder: '请选择', level: '日志等级', riskLevel: '风险等级', result: '操作结果' },
     stats: {
@@ -828,6 +832,66 @@ export default {
     cannotRevokeCurrent: '本设备请使用「退出登录」结束会话',
     noCurrentSidHint:
       '当前登录凭证签发于本功能上线之前，列表中不会标记「本设备」。重新登录一次即可完整管理。',
+  },
+  // 个人自助安全面（B 组端点接线：/security/my-info、/security/bindings、/security/my-logs）
+  // 三块都是「本人数据、无权限码门控」的自助信息，挂在个人资料页「安全设置」栏下。
+  securitySelf: {
+    infoTitle: '我的安全信息',
+    score: '安全评分',
+    scoreHint: '基于登录行为与失败尝试自动评估，仅供参考',
+    suggestions: '安全建议',
+    noSuggestions: '暂无需处理的安全建议',
+    // 建议码词表（后端 src/constants/securitySuggestions.js 的码表）。
+    // 键集必须与后端逐一对应，由 tests/utils/securitySuggestionParity.test.js 对账。
+    suggestion: {
+      account_inactive_long: '账户长期未登录，请注意账户安全',
+      repeated_login_failures: '检测到多次登录失败，建议修改密码',
+      high_risk_score: '高风险：建议立即审查最近的操作日志',
+      excessive_failed_logins: '登录失败次数过多：建议检查账户安全',
+      unusual_time_access: '非常规时间访问：建议确认操作合法性',
+    },
+    recentLogins: '最近登录记录',
+    loginTime: '时间',
+    loginAction: '动作',
+    loginIp: 'IP 地址',
+    loginResult: '结果',
+    loginSuccess: '成功',
+    loginFailed: '失败',
+    noRecentLogins: '暂无登录记录',
+    loadFailed: '加载失败，请重试',
+    bindingsTitle: '账户绑定',
+    bindingEmail: '邮箱',
+    bindingPhone: '手机号',
+    bindingDepartment: '部门',
+    bound: '已绑定',
+    unbound: '未绑定',
+    requiredField: '必填',
+    logsTitle: '我的操作日志',
+    logsRange: '时间范围',
+    range7: '近 7 天',
+    range30: '近 30 天',
+    range90: '近 90 天',
+    logsEmpty: '所选范围内暂无操作记录',
+    colTime: '时间',
+    colAction: '操作',
+    colCategory: '分类',
+    colIp: 'IP 地址',
+    colResult: '结果',
+    logsCount: '共 {count} 条',
+  },
+  // 管理员安全统计（GET /security/stats，需 security:stats），落首页
+  securityStats: {
+    title: '安全统计',
+    todayLogins: '今日登录',
+    todayFailedLogins: '今日失败登录',
+    highRiskOperations: '高危操作',
+    levelLabel: '安全等级',
+    levelNormal: '正常',
+    levelHigh: '偏高',
+    anomalies: '异常行为（近 1 小时）',
+    failedOperationUsers: '失败操作用户',
+    unusualTimeUsers: '非常规时段用户',
+    loadFailed: '加载失败，请重试',
   },
   about: {
     title: '关于系统',

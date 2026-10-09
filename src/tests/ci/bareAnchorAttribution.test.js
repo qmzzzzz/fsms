@@ -129,29 +129,29 @@ const LEDGER = [
 
   {
     site: 'src/services/authService.js',
-    siteLine: 432,
+    siteLine: 425,
     raw: '上方 210/233 行',
     status: 'DEBT',
     wrongFrom: 210,
     wrongTo: 233,
     referent: 'src/services/authService.js',
-    from: 247,
-    to: 318,
+    from: 245,
+    to: 311,
     mustRead: 'checkBruteForce(',
-    note: '同口径真实站点是 :247 与 :318；:210 是 @returns JSDoc 行、:233 是"查找用户"注释（他人 M，不代改）',
+    note: '同口径真实站点是 :245 与 :311；:210 是 @returns JSDoc 行、:233 是"查找用户"注释（他人 M，不代改）。站点与指代坐标 2026-10-09 各随本文件行数迁移：432→425、247/318→245/311（本轮把 registerUser/resolveLoginPassword 里两份手写 captcha try/catch 收口到 SystemConfig.captchaSwitch，共 -7 行；锚上写的错号 210/233 是原文，不动）',
   },
   {
     site: 'src/services/authService.js',
-    siteLine: 1282,
+    siteLine: 1275,
     raw: '（:350）',
     status: 'DEBT',
     wrongFrom: 350,
     wrongTo: 350,
     referent: 'src/services/authService.js',
-    from: 223,
-    to: 223,
+    from: 221,
+    to: 221,
     mustRead: 'async function loginUser',
-    note: 'loginUser 实在 :223；:350 落在 assertAccountUsable 里。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282：本轮在 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释把它推下去了（指代目标 :350 未动——新增行都在 350 之后）',
+    note: 'loginUser 实在 :221；:350 落在 assertAccountUsable 里。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；指代目标 :223→:221 同步随迁，锚上写的错号 :350 是原文，不动',
   },
   {
     site: 'src/services/permissionService.js',
@@ -506,7 +506,11 @@ describe('第 5 族 · 回指式裸行锚', () => {
   test('采集器有牙：合成未署名裸锚必被抓，合成署名锚不被本闸抓', () => {
     const forged = '  // 见上一行的 registerUser（:120）与解密（:128-130）\n';
     expect(forged.match(BARE_PAREN_RE)).toEqual(['（:120）', '（:128-130）']);
-    const attributed = '  // 见 src/services/authService.js:120 与 authService.js:128\n';
+    // 合成「署名锚」样例。注意本闸（commentAnchorFreshness）会扫全仓文本，
+    // 这里出现的 `文件:行号` 也被它当真实锚点校验 ⇒ 数字必须真的落在有内容的行上，
+    // 目标行被改动时要跟着迁移（2026-10-09：authService.js 的 registerUser 验证码闸
+    // 收口到 captchaSwitch，原 :120/:128 已随行数变化迁到 :124/:126）。
+    const attributed = '  // 见 src/services/authService.js:124 与 authService.js:126\n';
     expect(attributed.match(BARE_PAREN_RE)).toBeNull();
     // 数值形态连冒号都没有，CITE_RE 永远看不见它
     expect('与上方 210/233 行同口径'.match(BARE_NUMERIC_RE)).toEqual(['上方 210/233 行']);

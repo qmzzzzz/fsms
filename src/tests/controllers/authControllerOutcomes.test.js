@@ -53,6 +53,11 @@ jest.mock('../../utils/fingerprint', () => ({
 }));
 jest.mock('../../models', () => ({
   SystemConfig: {
+    // 控制器的**真实调用点**是 captchaSwitch(kind)，不是下面这两个 static
+    // （见 authController.getCaptchaStatus）。早期版本只 mock 了被委托的两个
+    // static，于是控制器拿到 undefined 的 captchaSwitch 抛错、被外层兜底网吞掉，
+    // 用例照样绿但走的是兜底分支——断言等于在测静态默认值，与"返回库内开关"无关。
+    captchaSwitch: jest.fn(),
     isLoginCaptchaEnabled: jest.fn(),
     isRegisterCaptchaEnabled: jest.fn(),
   },
@@ -70,6 +75,7 @@ const tokenService = require('../../services/tokenService');
 const permissionHelper = require('../../utils/permissionHelper');
 const AuditLog = require('../../models/AuditLog');
 const { SystemConfig } = require('../../models');
+const logger = require('../../utils/logger');
 
 const controller = require('../../controllers/authController');
 
@@ -517,24 +523,41 @@ describe('captcha 与 captchaStatus', () => {
     expect(res.body.errors.errorCode).toBe('CAPTCHA_SERVICE_UNAVAILABLE');
   });
 
-  test('getCaptchaStatus：DB 故障降级到静态配置而非 500', async () => {
-    SystemConfig.isLoginCaptchaEnabled.mockRejectedValue(new Error('db down'));
-    SystemConfig.isRegisterCaptchaEnabled.mockRejectedValue(new Error('db down'));
+  test('getCaptchaStatus：按 kind 取值并映射到同名键（两个开关不得串位）', async () => {
+    // 两个 kind 刻意返回**不同**的值：若控制器把 'login' 写成 'register'，
+    // 或者把返回值映射到对方的键上，本用例必须红——都返回同一值就测不出串位。
+    SystemConfig.captchaSwitch.mockImplementation(async (kind) => kind === 'login');
     const res = makeRes();
     await invoke(controller.getCaptchaStatus, makeReq(), res);
-    expect(res.statusCode).toBe(200);
-    expect(res.body.data.loginCaptchaEnabled).toBeDefined();
-  });
-
-  test('getCaptchaStatus：正常路径返回库内开关', async () => {
-    SystemConfig.isLoginCaptchaEnabled.mockResolvedValue(true);
-    SystemConfig.isRegisterCaptchaEnabled.mockResolvedValue(false);
-    const res = makeRes();
-    await invoke(controller.getCaptchaStatus, makeReq(), res);
+    // 前提自证：证明真的走了 captchaSwitch（否则上面那两条断言只是在断言兜底默认值）
+    expect(SystemConfig.captchaSwitch.mock.calls.map((c) => c[0]).sort()).toEqual([
+      'login',
+      'register',
+    ]);
     expect(res.body.data).toEqual({
       loginCaptchaEnabled: true,
       registerCaptchaEnabled: false,
     });
+  });
+
+  test('getCaptchaStatus：captchaSwitch 意外 reject → 走兜底网不 500，但不得静默', async () => {
+    // 生产口径下 captchaSwitch 自身不抛（DB 故障由它内部接住并返回静态默认 +
+    // captcha_switch_db_fallback 信号，见 src/tests/services/failOpenSignals.test.js）。
+    // 能 reject 的只可能是意外（models 未导出该方法 / require 期失败），
+    // 此时同样会退回静态默认——绝不允许"没有任何留痕地放宽登录面"。
+    const errSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    try {
+      SystemConfig.captchaSwitch.mockImplementation(async () => {
+        throw new Error('models 未导出 captchaSwitch');
+      });
+      const res = makeRes();
+      await invoke(controller.getCaptchaStatus, makeReq(), res);
+      expect(res.statusCode).toBe(200);
+      expect(res.body.data.loginCaptchaEnabled).toBeDefined();
+      expect(errSpy).toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 

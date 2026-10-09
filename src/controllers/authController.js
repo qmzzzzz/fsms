@@ -122,15 +122,31 @@ const getCaptcha = asyncHandler(async (req, res) => {
  */
 const getCaptchaStatus = asyncHandler(async (req, res) => {
   const { SystemConfig } = require('../models');
+  // 两个开关各自带静态默认兜底 + 降级信号（见 SystemConfig.captchaSwitch）。
+  // 原先这里是一段 Promise.all + 单个 catch：任一失败则两个一起退回静态默认，
+  // 且**没有任何信号**。改成逐键读取后，降级只影响真正失败的那一个键，
+  // 且 DB 读取失败会在 captchaSwitch 内部发 captcha_switch_db_fallback。
+  //
+  // 外层 try/catch 是**最后一道网**，与上面那个降级不是同一回事：captchaSwitch
+  // 自身不抛（有专门的用例钉住这一点），所以走到这里的只可能是「意外」——
+  // models 聚合入口加载失败、或 SystemConfig 上根本没有 captchaSwitch（例如
+  // 测试里的部分 mock、或将来重构漏改调用方）。这种情况**绝不能静默**：
+  // 它同样会把两个开关换成静态默认（captcha 关掉时等于放宽登录），但原因不是
+  // 「DB 故障」，所以**刻意不复用** captcha_switch_db_fallback——那个 type 的语义
+  // 是「库读失败」，把意外错误混进去会让告警的处置方向指错。这里按 error 留痕，
+  // 让「本该不可达却到了」这件事在日志里可见。
+  // （注：本行原写作字面量 `require('…/models')`，被 architecture/layeringRatchet 的
+  //  正则当成第 3 处 controller→models 直连而判红——该门禁扫**原文**、不剥注释。
+  //  代码形状的文本别写进注释。）
   let loginEnabled;
   let registerEnabled;
   try {
     [loginEnabled, registerEnabled] = await Promise.all([
-      SystemConfig.isLoginCaptchaEnabled(),
-      SystemConfig.isRegisterCaptchaEnabled(),
+      SystemConfig.captchaSwitch('login'),
+      SystemConfig.captchaSwitch('register'),
     ]);
-  } catch (_) {
-    // 数据库故障时降级到静态配置
+  } catch (err) {
+    logger.error(`[captcha-status] 开关读取走到兜底网（应为不可达）：${err && err.message}`);
     loginEnabled = config.loginCaptchaEnabled;
     registerEnabled = config.registerCaptchaEnabled;
   }

@@ -19,8 +19,8 @@
  * 「国家|区域|省份|城市|ISP」，未命中段返回 ''，'0' 为占位符。
  *
  * 仅支持 IPv4：v2 的 v6 库是另一个文件（ip2region_v6.xdb），本服务当前未随库
- * 分发，公网 IPv6 查询在上层返回 null（内网族 v6 由服务层标「内网」，见
- * ipLocationService）。
+ * 分发，公网 IPv6 查询在上层返回 null（内网族 v6 由服务层标稳定码 private，
+ * 见 ipLocationService 与 constants/ipLocationCodes.js）。
  */
 const fs = require('fs');
 const path = require('path');

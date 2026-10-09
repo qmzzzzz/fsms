@@ -19,6 +19,7 @@ const logger = require('../utils/logger');
 const ipaddr = require('ipaddr.js');
 const { normalizeIP } = require('../utils/ipUtils');
 const searcher = require('../utils/ip2regionSearcher');
+const { IP_LOCATION_CODES } = require('../constants/ipLocationCodes');
 
 /** IPv6 的内网族 range（ipaddr.js 口径）：回环 / 链路本地 / ULA */
 const IPV6_PRIVATE_RANGES = new Set(['loopback', 'linkLocal', 'uniqueLocal']);
@@ -34,15 +35,16 @@ let loadFailureLogged = false;
  * 把 xdb 原始串「国家|区域|省份|城市|ISP」拼成展示文本。
  *
  * 规则：'0' 占位与空段丢弃，剩余字段用 '·' 连接（语言中立，前端无需 i18n）；
- * 数据把私网/环回统一标为「内网IP」（城市与 ISP 位），收敛成两字「内网」，
- * 与后台列表里 IPv6 内网网段无法出归属地的情形保持同一口径。
+ * 数据把私网/环回统一标为「内网IP」（城市与 ISP 位），收敛成稳定码
+ * `private`（constants/ipLocationCodes.js）——与后台列表里 IPv6 内网网段
+ * 无法出归属地的情形保持同一口径，同时不把中文文案焊死在 API 响应里。
  *
  * @param {string} raw xdb 原始地区串
  * @returns {string|null} 可读归属地；全空（理论不出现）返回 null
  */
 const formatRegion = (raw) => {
   const parts = raw.split('|');
-  if (parts.some((p) => p === '内网IP')) return '内网';
+  if (parts.some((p) => p === '内网IP')) return IP_LOCATION_CODES.PRIVATE_NETWORK;
   // 字段序固定：国家|区域|省份|城市|ISP；「区域」（国家下级行政区）国内数据恒为占位
   const [country, , province, city, isp] = parts;
   const shown = [country, province, city, isp].filter((p) => p && p !== '0');
@@ -53,7 +55,7 @@ const formatRegion = (raw) => {
  * 查询 IP 的归属地展示文本。
  *
  * @param {string|null} ipText 客户端 IP 原文（允许带 ::ffff: 前缀、空白；允许任意垃圾输入）
- * @returns {string|null} 「中国·广东省·深圳市·电信」形态；查不出返回 null
+ * @returns {string|null} 「中国·广东省·深圳市·电信」形态，或内网稳定码 private；查不出返回 null
  */
 const locate = (ipText) => {
   if (typeof ipText !== 'string' || !ipText.trim()) return null;
@@ -76,10 +78,10 @@ const locate = (ipText) => {
       }
     } else if (normalized) {
       // IPv6 当前仅内置 v4 数据（v6 是独立数据文件，未随库分发），公网 v6 查不出
-      // 归属；但回环/链路本地/ULA 这类内网形态必须给出「内网」——否则本机与内网
-      // IPv6 会话（::1、fe80::、fc00::）在后台表现为"查不到"，与 IPv4 内网口径分裂
+      // 归属；但回环/链路本地/ULA 这类内网形态必须给出稳定码 private——否则本机
+      // 与内网 IPv6 会话（::1、fe80::、fc00::）在后台表现为"查不到"，与 IPv4 内网口径分裂
       const range = ipaddr.parse(normalized).range();
-      if (IPV6_PRIVATE_RANGES.has(range)) result = '内网';
+      if (IPV6_PRIVATE_RANGES.has(range)) result = IP_LOCATION_CODES.PRIVATE_NETWORK;
     }
 
     if (resultCache.size >= CACHE_LIMIT) {

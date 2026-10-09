@@ -12,7 +12,7 @@
  *   - [仍有效] 文件头自陈目的是「提升 functions 指标」；12 条断言与 `GapB` 同场景用例**逐字相同**，唯一增量是让 Istanbul 计数器 +1（deliverables/七维代码健康度深度审计-2026-09-18.md）
  *   - [部分有效] `:303-322`（现形 `:327`）标题写「REPLAYED + invalidateUserTokens 成功 + revokeAllSessionsSafe 执行」而函数体只断 `outcome==="REPLAYED"`（deliverables/七维代码健康度深度审计-2026-09-18.md）
  *     变异实测更正（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）：作用域 = authService.js 的 73 套 / 872 例。
- *       `authService.js:907` invalidateUserTokens 变 no-op → 2 例红（杀器 security/revokeFailurePropagation.test.js）
+ *       `authService.js:900` invalidateUserTokens 变 no-op → 2 例红（杀器 security/revokeFailurePropagation.test.js）
  *       ⇒ **第一个动作有人守**；`:916` revokeAllSessionsSafe 变 no-op → **872/872 全绿**
  *       ⇒ **第二个动作全仓无断言**（`:914-915` 注释自陈其后果是「登录会话」界面留下僵尸记录）。
  *       正对照（`:916` 点位 throw）杀掉 2 例，**含本用例本身** ⇒ 本用例确实执行到 `:916`，只是没断言。

@@ -84,4 +84,10 @@
 2. realName 暂以明文存储（2026-09-30 决策：姓名片段模糊检索是用户列表的日常能力，
    正则对密文不成立）——转入加密需先给姓名检索另立方案（独立检索索引/搜索引擎）；
 3. logShipper 主机名目标的 DNS rebinding 窗口（纵深防御口径，见其头注）；
-4. 轮换 `HMAC_SECRET` 后口令复用历史归零（`passwordHistory.test.js` 头注的取舍）。
+4. 轮换 `HMAC_SECRET` 后口令复用历史归零（`passwordHistory.test.js` 头注的取舍）；
+5. **开发/预览服务器的源码可读面（仅开发期，不构成生产面）**：`web-admin/vite.config.js`
+   把 `server.host` 与 `preview.host` 都绑定 `0.0.0.0`（真机/热点调试需要），
+   同网段可访问者能读取前端源码（`src/**` 不在敏感文件黑名单内）、使用 HMR 通道。
+   生产面不受影响（dev/preview 不参与部署，生产为 `dist/` 静态托管 + 反代），
+   但**禁止把 3001 端口发布到公网**；对外演示须用生产构建而非 `npm run preview`。
+   暴露内容对照表与自查清单见 `README.md` 的「开发/预览服务器的暴露边界」。

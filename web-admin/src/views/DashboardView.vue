@@ -84,6 +84,9 @@
 
       <!-- 最近报警（D-2 拆为 RecentAlarmsCard 纯渲染组件；P3-39：无 alarm:read 不渲染） -->
       <RecentAlarmsCard v-if="canReadAlarm" :rows="recentAlarms" />
+
+      <!-- 安全统计（管理员，需 security:stats；无该权限整卡不渲染也不请求） -->
+      <SecurityStatsCard v-if="canReadSecurityStats" ref="securityStatsRef" />
     </template>
   </div>
 </template>
@@ -116,6 +119,7 @@ import { makeAlarmTypeLabels, makeAlarmStatusLabels } from '@/utils/labelMaps'
 // 不再在此静态引入 —— 否则 echarts 会被打进本视图 chunk，阻塞首屏渲染。
 import DashboardWelcome from '@/components/DashboardWelcome.vue'
 import RecentAlarmsCard from '@/components/RecentAlarmsCard.vue'
+import SecurityStatsCard from '@/components/SecurityStatsCard.vue'
 import GlassSkeleton from '@/components/GlassSkeleton.vue'
 
 const authStore = useAuthStore()
@@ -137,10 +141,15 @@ const { t, locale } = useI18n()
  *   reports.getDashboard / getAlarms / getDevices → report:read
  *   users.getStats                               → user:read
  *   alarms.getList                               → alarm:read
+ *   security.getSecurityStats                    → security:stats（管理员）
  */
 const canReadReport = computed(() => hasPerm('report:read'))
 const canReadUserStats = computed(() => hasPerm('user:read'))
 const canReadAlarm = computed(() => hasPerm('alarm:read'))
+// 安全统计是**管理员**端点（后端 checkPermission('security:stats')），
+// 与上面三个业务读权限不同：它给的是全局今日登录/失败/高危与异常用户聚合。
+// 无该权限时整卡不渲染，卡片自身也不发请求（门控在父级，避免"渲染了才发现无权"）。
+const canReadSecurityStats = computed(() => hasPerm('security:stats'))
 // 图表数据全部来自 report 接口，无该权限时整个图表区不渲染（而非渲染空图表）
 const canShowCharts = canReadReport
 
@@ -169,6 +178,8 @@ const DashboardCharts = defineAsyncComponent({
 
 // 图表组件引用：定时/可见性恢复/语言切换时经 load() 触发刷新
 const chartsRef = ref(null)
+// 安全统计卡引用：与图表区同样自加载 + 暴露 load()，随首页刷新周期一起走
+const securityStatsRef = ref(null)
 
 // 统计卡视觉主题（Apple/Pinguo 色相纪律：单页主色 ≤2，同一渐变内不混冷暖）。
 // 设备/用户 = 墨黑中性阶（Pinguo icon 阶：800→900 / 500→600，深浅区分且暗色下可读），
@@ -217,6 +228,7 @@ const startAutoRefresh = () => {
         loadDashboardData()
         loadRecentAlarms()
         chartsRef.value?.load?.()
+        securityStatsRef.value?.load?.()
       }
     },
     5 * 60 * 1000
@@ -228,6 +240,7 @@ const handleVisibilityChange = () => {
     loadDashboardData()
     loadRecentAlarms()
     chartsRef.value?.load?.()
+    securityStatsRef.value?.load?.()
   }
 }
 
@@ -370,6 +383,9 @@ watch(locale, () => {
   // 骨架屏阶段图表容器尚未挂载，跳过图表重建（首屏加载完成后会另行初始化）；
   // DashboardCharts 内部也有 locale watch，但容器不存在时不会发请求
   if (!loading.value) chartsRef.value?.load?.()
+  // 安全统计卡**不**在此重取：它没有画布，文案走模板 $t() 随语言响应式重渲染，
+  // 数据本身（计数）与语言无关——重取只是白跑一次请求。上面的统计卡与图表要重取，
+  // 是因为它们的标题/标签在 script 里被 t() 固化成普通字符串、必须重建。
 })
 
 onUnmounted(() => {

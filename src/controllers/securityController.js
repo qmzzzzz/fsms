@@ -30,6 +30,9 @@ const { businessDayBounds } = require('../constants/timezone');
 // 高危档取自 constants/audit.js 由有序等级表切出的同一段（F-149）：概览这里的"高风险操作次数"
 // 与告警取数、审计页 level=error、行为基线 highRisk 必须同进同退，各抄一份字面量就会分叉。
 const { AUDIT_RISK_LEVELS, AUDIT_ERROR_RISK_LEVELS } = require('../constants/audit');
+// 安全建议码表（i18n）：后端只出稳定码，文案归前端词表——原先这里直接拼中文句子，
+// 英文界面下无从翻译。见 constants/securitySuggestions.js 文件头。
+const { SECURITY_SUGGESTION_CODES } = require('../constants/securitySuggestions');
 const { onAuditWriteFailure, onAuditWriteFailureRethrow } = require('../utils/auditWriteFailure');
 // 安全判定与 PII 查看留痕的客户端地址只有一个口径（utils/ipUtils.js）：
 // `req.ip` 在开着 trust proxy 时取自请求方自己写的 X-Forwarded-For。
@@ -66,14 +69,14 @@ const getMySecurityInfo = asyncHandler(async (req, res) => {
 
   if (daysSinceLastLogin > 30) {
     securityScore -= 10;
-    suggestions.push('账户长期未登录，请注意账户安全');
+    suggestions.push(SECURITY_SUGGESTION_CODES.ACCOUNT_INACTIVE_LONG);
   }
 
   // 检查失败登录尝试
   const failedLogins = recentLogins.filter((l) => !l.success).length;
   if (failedLogins > 3) {
     securityScore -= 15;
-    suggestions.push('检测到多次登录失败，建议修改密码');
+    suggestions.push(SECURITY_SUGGESTION_CODES.REPEATED_LOGIN_FAILURES);
   }
 
   return ApiResponse.success(
@@ -196,8 +199,13 @@ const getAccountBindings = asyncHandler(async (req, res) => {
         },
         {
           type: 'department',
-          value: user.department || '未设置',
-          verified: true,
+          // 原实现 `user.department || '未设置'`：把一句中文占位塞进了**数据字段**，
+          // 英文界面下无法翻译（同 suggestions 那族缺陷）。改为原样下发（未设置即空串），
+          // 占位符交前端词表渲染——AccountBindingsCard 对空值显示 '—'。
+          value: user.department || '',
+          // 与上面 email/phone 两项同口径：verified = 「该项有值」。
+          // 原先这里写死 true，于是没有部门的用户会显示成「已绑定 + 未设置」这一自相矛盾的状态。
+          verified: !!user.department,
           required: false,
         },
       ],
@@ -775,13 +783,13 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
     // 添加安全建议
     overview.suggestions = [];
     if (overview.riskScore > 70) {
-      overview.suggestions.push('高风险：建议立即审查最近的操作日志');
+      overview.suggestions.push(SECURITY_SUGGESTION_CODES.HIGH_RISK_SCORE);
     }
     if (overview.failedLogins > 10) {
-      overview.suggestions.push('登录失败次数过多：建议检查账户安全');
+      overview.suggestions.push(SECURITY_SUGGESTION_CODES.EXCESSIVE_FAILED_LOGINS);
     }
     if (overview.unusualAccess > 5) {
-      overview.suggestions.push('非常规时间访问：建议确认操作合法性');
+      overview.suggestions.push(SECURITY_SUGGESTION_CODES.UNUSUAL_TIME_ACCESS);
     }
     // P3-6：原 summary.successRate = (四类事件总数 - 失败登录数) / 总数，
     // 分母混入了告警数——criticalAlerts=100、failedLogins=10 时显示 90.9%，

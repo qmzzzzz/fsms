@@ -46,7 +46,73 @@
   3. 顺带修复 devDependencies 中的 `js-yaml`（GHSA-2883-xcg3-v3hh，high）：
      eslint 链 4.3.1 → 4.3.2、jest 链 3.15.1 → 3.15.2，均在原 semver 范围内，
      无破坏性升级。
-- **当前状态**：`npm audit`（含 dev）与 `npm audit --omit=dev` 均为 **0 漏洞**。
+- **当前状态（2026-09-16 时点）**：`npm audit`（含 dev）与 `npm audit --omit=dev` 均为 **0 漏洞**。
+  ⚠️ **该结论已于 2026-10-09 失效**，见下方「含 dev 依赖树的两条无补丁公告」。失效**不是本批引入**，
+  而是上游在 09-16 之后批量发布公告（braces 09-18、sprintf-js 09-24）造成的**时间性回归**；
+  当时的「0 漏洞」是真实测量结果，原文保留以记录口径漂移的时点与方向。
+
+## 含 dev 依赖树的两条无补丁公告（2026-10-09 登记）
+
+### 缺口：dev 树 advisory 对 CI 完全不可见
+
+CI 的 `security-audit` 作业两处审计都是 `npm audit --omit=dev`（后端与 web-admin 各一处），
+因此 **devDependencies 里的 advisory 永远不会让构建失败**。2026-10-09 实测：
+
+| 范围                   | 结果                              |
+| ---------------------- | --------------------------------- |
+| 后端 含 dev            | 35 条（**30 high** / 5 moderate） |
+| 后端 `--omit=dev`      | 0                                 |
+| web-admin 含 dev       | 0                                 |
+| web-admin `--omit=dev` | 0                                 |
+
+与 morgan 中危当年长期静默通过（上文 M-02）是同一类失效：**门禁只覆盖了一半的树**。
+
+### 两条根因（35 条包维度告警全部由它们传染而来）
+
+| GHSA                | 包         | 严重度                         | 受影响区间 | 修复版本                                                             |
+| ------------------- | ---------- | ------------------------------ | ---------- | -------------------------------------------------------------------- |
+| GHSA-vfj7-8cjw-p6xm | braces     | high（CVSS 7.5，CWE-674）      | `<=3.0.3`  | **无**（`first_patched_version: null`，registry 的 latest 即 3.0.3） |
+| GHSA-hp3w-g68c-fv3c | sprintf-js | moderate（CVSS 5.3，CWE-1284） | `<=1.1.3`  | **无**                                                               |
+
+传染链：`jest@29 → @jest/core → micromatch → braces`、`nodemon → chokidar → braces`、
+`jest → @jest/transform → babel-plugin-istanbul → @istanbuljs/load-nyc-config → js-yaml@3 → argparse@1 → sprintf-js`。
+
+### 为什么不能用 overrides 修（与 uuid override 的关键差异）
+
+`overrides` 的前提是**存在已修复版本可指向**。uuid 有（11.1.1），braces 与 sprintf-js **都没有**——
+受影响区间的上界就是 registry 上的 latest，加 `overrides` 只会解析回同一个版本。
+`micromatch`（latest 4.0.8 仍 `braces: ^3.0.2`）与 `chokidar` 3.x（3.6.0 仍 `braces: ^3.0.2`）同样无解。
+把 chokidar 强指到 4.x 也不可行——v4 已**移除 glob 支持**，而 nodemon 传的是 `**/node_modules/**`
+这类 glob（`nodemon/lib/config/defaults.js:15`），在 v4 下会被当成字面路径，等于不再忽略 node_modules。
+
+### 可达性：静态可见、实际不可达
+
+- braces 的 DoS 需要**攻击者可控的 glob 模式**；本仓里其输入只有 jest 的 CLI/config 模式与
+  nodemon 的 ignore 配置，均非远程可控。
+- sprintf-js 只在 argparse 的 CLI 路径上。实测 `@istanbuljs/load-nyc-config/index.js:80` 走
+  `require('js-yaml').load()`，加载的是 `lib/js-yaml.js`，而包内**唯一** `require('argparse')`
+  在 `bin/js-yaml.js`（CLI）⇒ 该链在 jest 运行时根本不被加载。npm audit 是静态分析，不做可达性判断。
+
+结论：这 35 条是**供应链卫生问题，不是可利用漏洞**。定性不因此降级门禁，只影响排期优先级。
+
+### 已采取的动作（2026-10-09）
+
+1. 依赖树**不动**——无补丁可升，强行改树只会引入未经验证的行为变化；
+2. CI 新增含 dev 的审计**硬门禁 + 显式允许清单**：`scripts/check-audit-allowlist.js` +
+   `deployment/audit-allowlist.json`，两条公告逐条登记（理由 / 可达性 / 复核期限 `2027-01-31`）；
+3. 三条 fail-closed 判据：**未登记** ⇒ 红；`reviewBy` **已过期** ⇒ 红；清单项在本次报告里
+   **已无对应公告**（上游修好或被降级）⇒ 红，必须删行——否则清单只增不减。
+
+### 复核触发条件
+
+- 上游发布 `braces >= 3.0.4` 或 `sprintf-js >= 1.1.4`（或 `@istanbuljs/load-nyc-config` 迁到 js-yaml 4）；
+- 到达 `2027-01-31` 复核期限；
+- 任一满足即启动出口方案（详见 `deployment/audit-allowlist.json` 的 `exitPlan`）：
+  jest 29→30（实测可消除 micromatch 侧，30 high → 3 high）+ 删除 nodemon
+  （改用 `node --watch`；`dev-backend.cmd` 已有自建指数退避重启，真实开发流程本就不走 nodemon），
+  二者齐做实测得 **0 high**。
+  ⚠️ 升 jest 30 不是免费午餐：实测 moderate 由 5 条升到 19 条（jest 自身的包被上表第二条链传染），
+  且 `jest 30` 的 `@jest/transform` 仍依赖 `babel-plugin-istanbul@^8`，**清不掉** js-yaml@3 那条链。
 
 ## 供应链完整性锚（lockfile semantic 哈希）
 
@@ -104,3 +170,6 @@ checkout，而 `.gitattributes` 对 `package-lock.json` 无规则。实测
   该目录**不进版本库**（见 `CONTRIBUTING.md` §9）⇒ 例外必须在 PR 描述里同步摘要。
 - **CI 阈值**：`security-audit` job 使用 `--audit-level=moderate`（2026-09-16 起）。
   即 moderate 及以上 advisory 一律阻断合并，不再区分「高危才拦」。
+  该阈值对**两处 `--omit=dev` 审计**生效；**dev 树**由 2026-10-09 新增的
+  「含 dev 依赖审计门禁」（`scripts/check-audit-allowlist.js` + `deployment/audit-allowlist.json`）
+  覆盖，阈值同为 moderate，但无补丁项走**显式登记**而非直接阻断。

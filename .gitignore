@@ -106,6 +106,10 @@ secrets-*/
 .design_library/
 # 前端构建产物变体
 web-admin/dist-optimized/
+# 构建产物变体之二：`dist-debug` 是排障时用 `--mode development` 起的产物目录
+# （2.6MB，含 assets/ 与 sw.js）。与上面两个同类——构建产物不入库；此前它不在
+# 忽略列表里，`git add -A` 会把它一并提交。全仓无任何脚本引用该目录（已实测）。
+web-admin/dist-debug/
 
 # CI 调试脚本与运行日志（M-03：曾误入库，含读取 git 凭据的成型代码与 CI 内部信息）
 _ci_*

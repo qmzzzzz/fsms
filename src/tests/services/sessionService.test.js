@@ -511,7 +511,7 @@ describe('sessionService（设备级会话服务）', () => {
       );
     });
 
-    test('归属地随列表输出：内网 IP 标「内网」，lastIp 优先作为主展示归属地', async () => {
+    test('归属地随列表输出：lastIp 优先作为主展示归属地', async () => {
       const { createSession } = sessionService;
       const s = await createSession({ userId: userA, req: fakeReq(undefined, '223.5.5.5') });
       // 会话期间换了出口网络：lastIp 指向新的（外网）地址，登录地是阿里 DNS
@@ -522,6 +522,20 @@ describe('sessionService（设备级会话服务）', () => {
       expect(item.location).toContain('美国');
       // 登录地是会话建立时的 IP
       expect(item.loginLocation).toContain('中国');
+    });
+
+    test('内网 IP 的归属地是稳定码 private（不是中文文案，英文界面才翻得动）', async () => {
+      // 修复前私网地址在服务层收敛成中文两字「内网」直接下发，前端拿到已定型
+      // 文案，切 en-US 也无从翻译；现在只出稳定码，文案归前端词表。
+      const { IP_LOCATION_CODES } = require('../../constants/ipLocationCodes');
+      const { createSession } = sessionService;
+      const s = await createSession({ userId: userA, req: fakeReq(undefined, '10.0.0.1') });
+
+      const rows = await sessionService.listSessions({ userId: userA });
+      const item = rows.find((r) => r.sid === s.sid);
+      expect(item).toBeTruthy();
+      expect(item.location).toBe(IP_LOCATION_CODES.PRIVATE_NETWORK);
+      expect(item.loginLocation).toBe(IP_LOCATION_CODES.PRIVATE_NETWORK);
     });
 
     test('归属地缺失形态：IP 缺失时两字段为 null（fail-soft，不缺字段）', async () => {

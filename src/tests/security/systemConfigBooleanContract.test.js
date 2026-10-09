@@ -166,7 +166,7 @@ describe('安全开关写入契约（非布尔一律拒）+ 读回一致', () =>
     // 本文件原有两条用例**抓不到**这一格：它们先 `PUT {field:true}` 建了 doc，
     // 因此永远走不到 fallback 分支。而真实缺陷恰在 fallback ——
     // `registerCaptchaEnabled` 曾被写在 `config.rateLimit` 子对象里，三处读取方
-    // （authService.js:118 / authController.js:128 / SystemConfig.js:207）
+    // （authController.js:150-151 / SystemConfig.js:215 / SystemConfig.js:283-284）
     // 读的都是**顶层** ⇒ 恒为 undefined ⇒ toConfigBoolean(undefined,false) === false
     // ⇒ 注册接口的图形验证码被静默关闭；而 initData 从不播种该键，
     // 所以全新部署必然走这条 fallback，与四处"默认开启/默认强校验"的声明全部相反。

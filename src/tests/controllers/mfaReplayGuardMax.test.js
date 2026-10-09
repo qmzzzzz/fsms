@@ -4,7 +4,7 @@
  * verifyTotp 有 ±1 窗口（utils/totp.js），因此本端点校验通过的码可能是
  * 比登录/step-up 已推进值更低的时间窗。旧实现无条件覆写
  * `mfaLastCounter: totpResult.counter` 会把登录侧条件更新
- * （authService.js:534，`mfaLastCounter < counter`）刚刚推进的守卫拉回，
+ * （authService.js:527，`mfaLastCounter < counter`）刚刚推进的守卫拉回，
  * 令那条已消费的码在其残余有效期内重放换第二个会话——即 TOTP 双花。
  *
  * 本测把不变式钉死：写库时必须用 `$max:{mfaLastCounter}`，且不得再出现

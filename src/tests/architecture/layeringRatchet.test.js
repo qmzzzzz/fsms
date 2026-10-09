@@ -41,7 +41,7 @@ const GRANDFATHERED = {
 const TOTAL_BASELINE = Object.values(GRANDFATHERED).reduce((a, b) => a + b, 0); // 17（与实测一致）
 
 // 计数口径（本次改动复审修正）：原正则只认 require('../models/Xxx') 单引号带斜杠形态，
-// 实测漏掉 authController.js:96 的 require('../models')（无斜杠，走 index 聚合入口）——
+// 实测漏掉 authController.js:124 的 require('../models')（无斜杠，走 index 聚合入口）——
 // 该形态同样绕过 service 层；原基线声明 authController=2 而旧正则实测仅 1，差值正是它。
 // 现覆盖 4 种等价形态：单引号、双引号、无斜杠聚合入口、反引号。
 const countDirectModelRequires = (source) =>

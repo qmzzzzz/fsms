@@ -22,6 +22,10 @@
 - **告警通道**：Alertmanager webhook（告警规则见 `observability/alert-rules.yml`，
   接收端未配置 = 触达链路断开，部署前置校验会拦——见 D-1 Top-2）；
 - **指标**：`security_alerts_total`、`audit_records_dropped_total`、`readyz_verdict`；
+- **护栏失效信号**：`SecurityFailOpenSustained`（`security_alerts_total{type=~"ip_blacklist_failopen|ratelimit_store_degraded|captcha_active_bound_lost|captcha_switch_db_fallback"}`
+  持续 10 分钟仍有增量）说明**对应护栏正处于失效状态而非偶发抖动**——此时
+  「没看到黑名单拦截 / 没看到限流触发 / 没看到验证码上限拒绝」都不能当作「没有被攻击」的证据，
+  排查前先确认 MongoDB / Redis 是否已恢复（各类型的失效语义见 `src/constants/failOpenSites.js`）。
 - **审计中断判据**：审计落库失败会打 error 日志并计入 `audit_write_failed`——
   「审计页没有新记录」本身就是事件（先查服务是否在写 WAL：`logs/audit.wal`）。
 

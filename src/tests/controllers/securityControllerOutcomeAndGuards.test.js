@@ -244,6 +244,7 @@ jest.mock('express-validator', () => ({
 // 加载被测控制器（所有依赖已被 mock 替换）
 const {
   getMySecurityInfo,
+  getAccountBindings,
   changePasswordSecure,
   viewSensitiveData,
   reportSuspiciousActivity,
@@ -356,10 +357,60 @@ describe('getMySecurityInfo 分支补齐', () => {
     expect(res.statusCode).toBe(200);
     // securityScore = 100 - 15 = 85
     expect(res.payload.data.securityScore).toBe(85);
-    expect(res.payload.data.suggestions).toContain('检测到多次登录失败，建议修改密码');
+    // i18n：suggestions 出的是**稳定码**而非中文句子（文案归前端词表）
+    expect(res.payload.data.suggestions).toContain('repeated_login_failures');
+    // 反向闸：不得再往 suggestions 里塞中文成句（英文界面下无法翻译）
+    expect(res.payload.data.suggestions.join('')).not.toMatch(/[\u4e00-\u9fa5]/);
     // recentLogins.map 应返回掩码后的 IP（行 71）
     expect(res.payload.data.recentLogins.length).toBe(allLogins.length);
     expect(res.payload.data.recentLogins[0].ip).toBeTruthy();
+  });
+});
+
+// ============================================================
+// getAccountBindings：未设置的部门不得下发中文占位（i18n 缺口回归）
+// ============================================================
+describe('getAccountBindings 占位符口径', () => {
+  test('部门未设置：value 为空串 + verified=false，且响应里没有任何中文', async () => {
+    // 原实现 `user.department || '未设置'` + `verified: true`：
+    // 把一句中文塞进数据字段（英文界面下无法翻译），并让"没有部门"显示成
+    // "已绑定 + 未设置"这一自相矛盾的状态。占位符应由前端词表渲染。
+    mockUserFindById.mockReturnValue({
+      select: jest.fn().mockResolvedValue({
+        email: 'a@example.com',
+        phone: '13800138000',
+        department: '',
+      }),
+    });
+
+    const { req, res, next } = makeCtx();
+    await invoke(getAccountBindings, req, res, next);
+
+    expect(res.statusCode).toBe(200);
+    const dept = res.payload.data.bindings.find((b) => b.type === 'department');
+    expect(dept.value).toBe('');
+    // 与 email/phone 同口径：verified = 「该项有值」
+    expect(dept.verified).toBe(false);
+    // 整个响应不得含中文（脱敏后的邮箱/手机号也不该有）
+    expect(JSON.stringify(res.payload.data)).not.toMatch(/[\u4e00-\u9fa5]/);
+  });
+
+  test('部门已设置：原样透传并标 verified=true', async () => {
+    mockUserFindById.mockReturnValue({
+      select: jest.fn().mockResolvedValue({
+        email: 'a@example.com',
+        phone: '13800138000',
+        department: '消防科',
+      }),
+    });
+
+    const { req, res, next } = makeCtx();
+    await invoke(getAccountBindings, req, res, next);
+
+    const dept = res.payload.data.bindings.find((b) => b.type === 'department');
+    // 真实部门名是**业务数据**，原样透传（中文在这里是数据，不是占位文案）
+    expect(dept.value).toBe('消防科');
+    expect(dept.verified).toBe(true);
   });
 });
 
@@ -774,9 +825,14 @@ describe('getSecurityOverview 分支补齐', () => {
     await invoke(getSecurityOverview, req, res, next);
     expect(res.statusCode).toBe(200);
     const suggestions = res.payload.data.suggestions;
-    expect(suggestions).toContain('高风险：建议立即审查最近的操作日志');
-    expect(suggestions).toContain('登录失败次数过多：建议检查账户安全');
-    expect(suggestions).toContain('非常规时间访问：建议确认操作合法性');
+    expect(suggestions).toContain('high_risk_score');
+    expect(suggestions).toContain('excessive_failed_logins');
+    expect(suggestions).toContain('unusual_time_access');
+    // 每一条都必须是 constants/securitySuggestions.js 里的码：
+    // 这条闸挡的是「将来有人再写一个字面量中文句子进去」——那种缺陷只在
+    // 切到英文界面时才看得见，后端断言若不钉码表就完全测不到。
+    const { SECURITY_SUGGESTION_VALUES } = require('../../constants/securitySuggestions');
+    expect(suggestions.every((s) => SECURITY_SUGGESTION_VALUES.includes(s))).toBe(true);
   });
 
   test('compliance 子块抛异常时降级为 error 对象（行 652）', async () => {

@@ -16,6 +16,7 @@
 import { describe, test, expect, vi, afterEach } from 'vitest'
 import { mountComponent, flush, click, waitFor } from '../helpers/componentHarness'
 import { useAuthStore } from '@/store'
+import i18n from '@/i18n'
 
 const get = vi.fn()
 const post = vi.fn()
@@ -221,6 +222,33 @@ describe('IpListView 列表加载与渲染', () => {
     expect(noLoc).not.toContain('·')
     expect(noLoc).not.toContain('undefined')
     expect(td(c, 1, 0).querySelector('.ip-location')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('归属地跟随语言：切到 en-US 后私网稳定码显示 Internal network，公网数据文本原样（i18n 缺口回归）', async () => {
+    // 原缺陷：后端把私网地址收敛成中文两字「内网」直接下发，前端拿到的是已定型
+    // 文案，vue-i18n 无从翻译——英文界面下这一格永远是中文。现后端只出稳定码，
+    // 中文「内网」/ 英文 "Internal network" 归词表（utils/ipLocationLabels.js）。
+    const c = await openList([
+      ipRow({ _id: 'ip1', ip: '10.0.0.1', location: 'private' }),
+      ipRow({ _id: 'ip2', ip: '203.0.113.9', location: '中国·广东省·深圳市·电信' }),
+      ipRow({ _id: 'ip3', ip: '198.51.100.7', location: '美国·蒙特利' }),
+    ])
+
+    i18n.global.locale.value = 'en-US'
+    await flush(8)
+    expect(td(c, 0, 0).textContent.trim()).toBe('10.0.0.1 · Internal network')
+    // 公网归属地是数据文本，按中英对照词典逐段译名（词典见 data/ipLocationDictionary.json）
+    expect(td(c, 1, 0).textContent.trim()).toBe(
+      '203.0.113.9 · China·Guangdong·Shenzhen·China Telecom'
+    )
+    // 词典未收录的段原样透传，不把整块归属地抹掉
+    expect(td(c, 2, 0).textContent.trim()).toBe('198.51.100.7 · United States·蒙特利')
+
+    // 反向：切回中文必须是词表里的「内网」，而不是把英文文案留在界面上
+    i18n.global.locale.value = 'zh-CN'
+    await flush(8)
+    expect(td(c, 0, 0).textContent.trim()).toBe('10.0.0.1 · 内网')
     expect(c.errors).toEqual([])
   })
 

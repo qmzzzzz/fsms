@@ -32,7 +32,7 @@ const DETAIL_ROLE_POPULATE = {
 /**
  * 管理员读用户响应的手机号口径：明文只在这里存在过一瞬，出去的是 `phoneMasked`。
  *
- * 为什么不沿用仓里已有的形状（`securityController.js:84` 的 my-info 就是
+ * 为什么不沿用仓里已有的形状（`securityController.js:87` 的 my-info 就是
  * `phone: maskPhone(...)`）：my-info 是只读面板，而用户列表的值会**回填编辑表单**
  * （`web-admin/src/views/UserView.vue` 的 handleEdit）。让展示值占住 `phone` 这个
  * 可写字段的槽位，前端只剩两条必坏的路：

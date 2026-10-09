@@ -192,7 +192,15 @@ systemConfigSchema.statics.invalidateLoginCaptchaCache = function () {
 
 // 静态方法：获取注册验证码开关状态（带内存缓存）
 // 默认值取静态配置 config.registerCaptchaEnabled（env REGISTER_CAPTCHA_ENABLED，默认 true），
-// 管理员在后台设置后以数据库值为准；DB 故障时降级到静态配置（fail-open 以静态默认）
+// 管理员在后台设置后以数据库值为准；**配置未落库**（doc 为 null）时用静态默认。
+//
+// 【2026-10-09 就地更正】本行原写作「DB 故障时降级到静态配置（fail-open 以静态默认）」——
+// **与实现不符**：`isRegisterCaptchaEnabled` / `isLoginCaptchaEnabled` 都没有 try/catch，
+// `findOne` 在 DB 故障时直接 reject，降级不在本文件发生，而在各调用点。
+// 该表述之所以危险：它让人以为「DB 故障 → 一定有静态默认」，于是没人去问
+// 「降级动作的信号在哪」——实测答案是 3 个调用点各复刻一份 try/catch、全都没有信号。
+// 现已收口到 `captchaSwitch(kind)`（见下），信号为
+// security_alerts_total{type=captcha_switch_db_fallback}。
 let _registerCaptchaCache = null;
 let _registerCaptchaCacheExpiresAt = 0;
 
@@ -214,6 +222,74 @@ systemConfigSchema.statics.isRegisterCaptchaEnabled = async function () {
 systemConfigSchema.statics.invalidateRegisterCaptchaCache = function () {
   _registerCaptchaCache = null;
   _registerCaptchaCacheExpiresAt = 0;
+};
+
+/**
+ * 验证码开关降级（DB 故障 → 静态配置）的**统一信号出口**。
+ *
+ * 【为什么要有它，2026-10-09 实测】「DB 故障时降级到静态配置」这句注释原先写在
+ * `isRegisterCaptchaEnabled` 上方（见下），但**降级根本不发生在那两个函数里**——
+ * 它们没有 try/catch，`findOne` 在 DB 故障时直接 reject。真正做降级的是**调用点**，
+ * 而同一个 try/catch 曾被复刻了 **3 份**：
+ *   · `authService.registerUser`
+ *   · `authService.resolveLoginPassword`（loginUser 链）
+ *   · `authController.getCaptchaStatus`
+ * ⇒ 「降级到静态默认」这个安全相关的 fail-open 动作**没有任何统一信号**，
+ *   只有 3 个各自的空 catch。本仓纪律见 middleware/rateLimitStore.js:53-56：
+ *   「降级态只写日志等于没有可告警信号——`grep 日志` 不是运维动作」。
+ * 现已收口：3 处一律改调本文件下方的 `SystemConfig.captchaSwitch(kind)`，
+ * 降级判定与信号都只在那一个函数里发生，调用点不再自带 try/catch。
+ * （这里刻意只写函数名、不写被删代码的行号——那几行已不存在，行号锚点会变成误导。）
+ *
+ * 严重度定 medium 而非 high：验证码只是登录链的**前置层**，降级后
+ * loginLimiter（凭据型限流）与暴力破解检测仍在，不是「全站裸奔」；
+ * 与 ip_blacklist_failopen 的 high 不同级（那个降级后黑名单整层失效）。
+ *
+ * @param {'login'|'register'} kind 哪个开关
+ */
+const signalCaptchaSwitchFallback = (kind) => {
+  try {
+    require('../utils/metrics').incSecurityAlert('captcha_switch_db_fallback', 'medium');
+  } catch (_) {
+    /* 指标端不可用不影响开关读取 */
+  }
+  try {
+    require('../utils/logger').warn(
+      `验证码开关读取失败，降级为静态配置（fail-open）：${kind}CaptchaEnabled`
+    );
+  } catch (_) {
+    /* 日志端不可用不影响开关读取 */
+  }
+};
+
+/**
+ * 验证码开关的统一读取口径：**带静态默认兜底 + 降级信号**。
+ *
+ * 语义与原先 3 处复刻的 try/catch **逐字等价**（同样的静态默认值、同样吞掉异常、
+ * 同样不抛），只是把降级动作收敛到一处并补上信号。保留 `isLoginCaptchaEnabled` /
+ * `isRegisterCaptchaEnabled` 的 30 秒缓存不变（本函数只是它们的兜底包装）。
+ *
+ * 调用方应改用本函数；直接调用 `isLoginCaptchaEnabled` / `isRegisterCaptchaEnabled`
+ * 会让 DB 故障直接冒泡（那两个函数不吞异常），是否要 fail-open 就成了每个调用点
+ * 各自的决定——那正是本次要收口的东西。
+ *
+ * @param {'login'|'register'} kind
+ * @returns {Promise<boolean>} 开关值；DB 故障时返回静态默认
+ */
+systemConfigSchema.statics.captchaSwitch = async function (kind) {
+  const cfg = require('../config');
+  const fallback =
+    kind === 'login'
+      ? toConfigBoolean(cfg.loginCaptchaEnabled, false)
+      : toConfigBoolean(cfg.registerCaptchaEnabled, false);
+  try {
+    return kind === 'login'
+      ? await this.isLoginCaptchaEnabled()
+      : await this.isRegisterCaptchaEnabled();
+  } catch (_) {
+    signalCaptchaSwitchFallback(kind);
+    return fallback;
+  }
 };
 
 const SystemConfig = mongoose.model('SystemConfig', systemConfigSchema);

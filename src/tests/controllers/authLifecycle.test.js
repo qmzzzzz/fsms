@@ -128,8 +128,8 @@ describe('认证生命周期（批次 B）', () => {
    * 因此 GET /api/auth/captcha 返回的 captchaId 配 'ABCD' 必然通过 verify。
    *
    * 为什么注册用例必须带它：注册接口的图形验证码**默认开启**
-   * （src/config/index.js:72 顶层 registerCaptchaEnabled，全仓无任何地方设
-   * REGISTER_CAPTCHA_ENABLED=false；models/SystemConfig.js:207 的 fallback 同读顶层），
+   * （src/config/index.js:77 顶层 registerCaptchaEnabled，全仓无任何地方设
+   * REGISTER_CAPTCHA_ENABLED=false；models/SystemConfig.js:215 的 fallback 同读顶层），
    * 所以任何期望走到业务层的 register 请求都必须带验证码，否则一律 400 CAPTCHA_INVALID。
    */
   const freshCaptcha = async () => {

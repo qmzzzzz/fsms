@@ -117,13 +117,11 @@ async function registerUser(body, ctx = {}) {
   // 验证码错误/过期时直接拒绝，不进入用户名/邮箱查重与用户创建，
   // 也不计入后续统计——验证码层已挡住自动化批量注册
   const { captchaId, captchaText } = body;
-  let registerCaptchaEnabled;
-  try {
-    const { SystemConfig: SysConfig } = require('../models');
-    registerCaptchaEnabled = await SysConfig.isRegisterCaptchaEnabled();
-  } catch (_) {
-    registerCaptchaEnabled = config.registerCaptchaEnabled;
-  }
+  // 开关读取统一走 SystemConfig.captchaSwitch：DB 故障时降级为静态默认（fail-open）
+  // 并留可告警信号。原先这里自带一份 try/catch，同一个降级动作在 3 个调用点各写一遍、
+  // 且全都没有信号（见 models/SystemConfig.js 的 signalCaptchaSwitchFallback 说明）。
+  const { SystemConfig: SysConfig } = require('../models');
+  const registerCaptchaEnabled = await SysConfig.captchaSwitch('register');
   if (registerCaptchaEnabled && !(await captchaService.verify(captchaId, captchaText))) {
     return { outcome: 'CAPTCHA_INVALID' };
   }
@@ -288,13 +286,8 @@ async function resolveLoginPassword(params, ctx, username) {
   // 验证码错误/过期时直接拒绝，不进入凭证校验，
   // 也不计入登录失败统计（暴力破解检测针对凭证爆破，验证码层已挡住自动化）
   const { SystemConfig } = require('../models');
-  let captchaEnabled;
-  try {
-    captchaEnabled = await SystemConfig.isLoginCaptchaEnabled();
-  } catch (_) {
-    // 数据库故障时降级到静态配置
-    captchaEnabled = config.loginCaptchaEnabled;
-  }
+  // 统一口径：DB 故障时降级为静态默认（fail-open）+ 可告警信号，见 SystemConfig.captchaSwitch
+  const captchaEnabled = await SystemConfig.captchaSwitch('login');
 
   if (captchaEnabled && !(await captchaService.verify(params.captchaId, params.captchaText))) {
     return { outcome: 'CAPTCHA_INVALID' };

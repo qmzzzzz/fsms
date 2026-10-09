@@ -8,6 +8,126 @@
 
 ## [未发布]
 
+### 下拉浮层边角打磨：表面只画一层（2026-10-09 · 双层表面叠出双边框与错角，边角不圆润）
+
+> 顶栏用户菜单与语言/主题下拉的浮层边角发毛、不圆润。复现定位到根因是**两层表面**：Element Plus 把浮层表面（底色/描边/阴影）画在外壳 .el-dropdown__popper.el-popper 上，还带着 base 的 5px 11px 内边距与 global.css 的 10px 圆角；pple-refine.css 又把表面画在内层 .el-dropdown-menu（12px 圆角 + 1px 描边 + 6px 内边距）。两层半径、描边、内边距全不一致，圆角处叠出双边框与错角。暗色还多一层脱节：html.dark .el-popper 的 --xf-gray-50 实底框围着半透明菜单。
+
+| 项       | 内容                                                                                                                                                                                                               |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 外壳透明 | .el-dropdown__popper.el-popper 的 padding/background/border/box-shadow 全部清空（带 !important），表面只由 .el-dropdown-menu 画一层；箭头是外壳子元素、::before 自带配色，位置不受影响                             |
+| 暗色再盖 | html.dark .el-popper 的实底/描边两条声明带 !important 且特异性 (0,2,1) 压过上面的 (0,2,0)，用 html.dark .el-dropdown__popper.el-popper 对 ackground/border 再盖一次，否则暗色菜单四周围一圈 --xf-gray-50 实底框    |
+| 箭头同源 | 亮色下拉箭头描边改为跟随菜单的 --xf-border-color（EP 默认取 --el-border-color-light #e4e7ed，箭头根部露一截异色），底色取 EP 给菜单的 --el-bg-color-overlay；依旧不写 !important——placement 的透明边规则必须继续赢 |
+| 不变量   | web-admin/src/tests/styles/tooltipTheme.test.js 补两例：外壳透明四件套 + 暗色再盖两条；亮色箭头与菜单描边同源、底色同源 EP overlay，并进「不能带 !important」循环                                                  |
+
+### fail-open 降级补信号 + 持续型告警 + 站点台账门禁（2026-10-09 · 同一个降级动作被复刻 3 份，且全都没有可告警信号）
+
+> 本仓早有明文纪律（`middleware/security.js:668-672`、`middleware/rateLimitStore.js:53-56`、
+> `services/websocketService.js:723-725` 三处自陈）：「fail-open 放行必须有显式可观测信号——
+> 否则『DB 挂了 + 全站裸奔』只有一条 error 日志可循」「降级态只写日志等于没有可告警信号——
+> `grep 日志` 不是运维动作」。**验证码开关这条链没做到**：`isLoginCaptchaEnabled` /
+> `isRegisterCaptchaEnabled` 自身没有 try/catch，真正做降级的是调用点，而同一段 try/catch
+> 被复刻了 **3 份**（`authService.registerUser`、`authService.resolveLoginPassword`、
+> `authController.getCaptchaStatus`），三份都是空 catch、都不发信号。
+
+| 项          | 内容                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 收口        | 新增 `SystemConfig.captchaSwitch(kind)`：静态默认兜底 + 降级信号只在这一处发生；3 个调用点改为调它，各自手写的 try/catch 删除                                                                                                                                                                                                                                                                                              |
+| 新信号      | `captcha_switch_db_fallback`（level `medium`）——验证码只是登录链**前置层**，降级后凭据型限流与爆破检测仍在，故与 `ip_blacklist_failopen` 的 `high` 不同级                                                                                                                                                                                                                                                                  |
+| 第二个信号  | `captcha_active_bound_lost`（level `high`）：`captchaService.generate` 在「Redis 已启用但活跃数读取失败」时不设上限放行。**真正的放行点在 `active === null` 而非 `catch`**——`sharedCache.incrWithTtl` 两条降级路径都返回 `null`、从不抛，原先那个 catch 不可达、也永远发不出信号                                                                                                                                           |
+| 告警        | 新增 `SecurityFailOpenSustained`（`for: 10m`，critical）。**按 type 分开判、不跨类型求和**：求和会掺进启动期恒正项（`immutableConfigGuard`/`legacyCbcGuard` 进程启动即写 `security_alerts_total`），既稀释真实突发、又让 crash loop 冒充安全事件；**用持续型而非速率型**：`SecurityAlertBurst` 是「10 分钟 ≥10 条」，而 fail-open 的危险形态恰是低速而持续，速率型可以永远不达标                                           |
+| 台账 + 门禁 | 新增 `constants/failOpenSites.js`（5 个 fail-open 站点 + 10 个其它信号 + 1 个转发点，逐条声明 `direction/trigger/effect/why/tightening`）与 `tests/ci/failOpenLedgerGate.test.js`（8 例）：代码里的静态站点 ⇄ 台账条目双向闭合；每条 type 必须被持续型规则覆盖（**登记信号 ≠ 接上告警**）；反向也拦（规则点名不存在的 type 要红）                                                                                          |
+| 刻意不做    | **不自动收紧**。把 fail-open 自动翻成 fail-closed 会把「保密性降级」转成「可用性事故」，且恰好发生在系统已经不健康时（黑名单 fail-closed = 库挂时全站请求无法验证；验证码 fail-closed = 没人能登录）。是否收紧是产品决策，不是告警规则能代做的                                                                                                                                                                             |
+| 用例        | 新增 `tests/services/failOpenSignals.test.js`（11 例，含反向对照：两个 type 必须真能渲染进 `formatPrometheus()`）；`authControllerOutcomes.test.js` 的两条 `getCaptchaStatus` 重写到新接缝并**补前提自证**（断言真的调了 `captchaSwitch`）——原写法在该文件的 `../../models` 部分 mock 下会因 `captchaSwitch` 是 `undefined` 抛错、被兜底网吞掉而"通过"，等于在断言静态默认值                                               |
+| 文档        | `README.md` 新增「开发/预览服务器的暴露边界」：dev 与 preview **都**绑 `0.0.0.0`，dev 下发**未打包源码**而 `src/**` 不在敏感文件黑名单内 ⇒ 禁止把 3001 发布到公网；`docs/threat-model.md` §3 增第 5 条（明确标注「仅开发期、不构成生产面」）；`docs/incident-response.md` §2 增「护栏失效信号」一条（该规则触发时，「没看到拦截」不能当作「没被攻击」的证据）。顺带修正 `README.md` 已过期的「4 条内置告警」（实为 13 条） |
+| 锚点迁移    | 本轮删行使 `authService.js` -7 行、`authController.js` +13 行，全仓 **32 处**注释锚点随行号迁移（逐条按「迁移后该行内容 == 迁移前该行在 HEAD 的内容」核验）；`bareAnchorAttribution.test.js` 的回指台账两处坐标同步随迁。另修正 `statsAnomalyScope.test.js` 一处**本就指错**的锚点（写 `securityController.js:284`，而 `getSecurityStats` 实为 `:317`）                                                                    |
+
+### 顶栏入口提示统一走 Element Plus 浮层 + 浮层箭头主题适配（2026-10-09 · 语言/主题图标此前挂的是浏览器原生 title）
+
+> 顶栏语言/主题入口把提示写在 `el-icon` 的 `:title` 上，走浏览器原生提示——样式、字号、圆角与出现时机全由浏览器决定，和搜索/刷新/全屏的 `el-tooltip` 浮层是两套观感。本批把两处统一成 `el-tooltip`；顺着这条线查浮层配色时，又发现 Element Plus 的箭头是**独立元素**、取的是另一套变量，仓库只改了浮层底色，亮/暗两个主题下尖角都露着异色（暗色下拉菜单甚至挂一块异色三角）。
+
+| 项       | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 统一提示 | `web-admin/src/layout/index.vue`：语言/主题的 `el-icon` 去掉 `:title`，外面套 `el-tooltip`（`placement="bottom"`，与搜索/刷新同规格）。**不能**反过来把 tooltip 塞进 `el-dropdown` 里——`el-tooltip` 的根是 `ElPopper`（`inheritAttrs: false`），dropdown 经 `ElOnlyChild` 下发的 `role`/`tabindex`/`id`/`aria-*` 与 forward-ref 会在那一层被吃掉，下拉直接点不开（实测：菜单浮层不再出现）                                                                                                                                                                                                                                                                                                                                       |
+| 防叠放   | 下拉展开期间用 `:disabled` 收起提示：菜单浮层与提示浮层同位叠放会互相盖住，而展开时指针停在图标上不产生 `mouseleave`，提示不会自行消失。状态由 `@visible-change` 回写，两个入口互斥共用一个 ref                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 箭头同色 | `apple-refine.css` 新增四条 `.el-popper__arrow::before` 规则（亮色 tooltip / 暗色 tooltip / 暗色下拉菜单 / 暗色 `.is-light`，末条见「续修」），底色与描边逐一对齐浮层。箭头规则**不能**加 `!important`：朝浮层的那两条边由 EP 的 placement 规则置 `transparent`，那条规则带 `!important` 必须继续赢，否则旋转 45° 的方块会露出实心方角                                                                                                                                                                                                                                                                                                                                                                                           |
+| 暗色描边 | `html.dark .el-popper.is-dark` 补上自己的 `border`：原先不写，暗色边悄悄吃亮色那条 `.el-popper.is-dark` 的边（两条特异性相同、后者在源流里更晚），改亮色配色会把暗色一起带跑                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 用例     | `web-admin/src/tests/layout/layout.test.js`：定位辅助从「按 title 找图标」改成文件原有的图标 path oracle（title 已不存在）；新增 `布局 · 顶栏入口悬停提示` 四条——顶栏图标一律不留原生 title、语言/主题悬停出 EP 浮层且文案走 i18n、下拉展开期间只剩菜单浮层。`web-admin/src/tests/styles/tooltipTheme.test.js`：读 CSS 源码比对「箭头与浮层同色」+ 箭头规则不带 `!important`，两条变异（箭头改回白、箭头加 `!important`）均能测红；续修新增两例——「暗色 date-picker 箭头与 `html.dark .el-popper` 实底同色」（表面规则在 dark.css，测试改读两个样式文件）与「`.is-light` 规则必须 `:not(.el-dropdown__popper)`」（特异性 (0,5,2) 高于下拉箭头规则 (0,3,2)，不排除会把半透明下拉箭头打成实底），第三种变异（删掉 `:not`）同样测红 |
+| 续修     | 暗色 `.is-light` 浮层（`el-date-picker`，经 `ElTooltip effect="light"` 带 `is-light`）的箭头补上 `--xf-gray-50`/`--xf-border-color`：EP 的 `.is-light` 箭头取 `--el-popper-bg-color-light`（=`--el-bg-color-overlay`，EP 暗色 `#1d1e1f` 中性灰）与 `--el-border-color-light`（`#414243`），与 `#0f172a` 表面对不上。选择器必须 `:not(.el-dropdown__popper)`：下拉菜单表面是半透明 `rgba(30,41,59,.95)`，而 `.is-light` 规则特异性更高，不排除会把下拉箭头一起打成实底。`el-select` 浮层不渲染箭头，无需处理                                                                                                                                                                                                                      |
+
+### 弱口令黑名单：匹配器口径修复 + 词干表扩充（2026-10-09 · 原 40 条里 24 条永远命中不了）
+
+> 本批**不改依赖、不引入外部服务**。改的是「清单里的条目到底能不能被命中」。
+> 旧实现是 40 条**口令字面量**，而归一化只做「末尾 ≥4 位数字收敛为 3 位」且**只归一化
+> 口令侧**——两侧口径不一致的后果：实测 **24 条永远命中不了**，有效字典只有 **16 个词干**，
+> 而文件看起来有 40 条。`helpers.test.js` 断言 `isBreachedPassword('admin@123') === true`
+> 也是误导性的：生产路径上黑名单排在长度/复杂度之后，9 位口令根本走不到黑名单。
+
+| 项       | 内容                                                                                                                                                                                                                                                                                                                             |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 根因     | **匹配器与数据口径不一致，不是数据错**。清单里 `passw0rd!` / `p@ssw0rd` / `1qaz@wsx` / `abcd1234!` 这种写法本身就说明作者意图是「按词干匹配」；而旧匹配器要求字面量全等。死条目分两族：①8~11 位条目先被长度规则拒掉；②以 ≥4 位数字结尾的条目永远不等于任何口令的归一化结果                                                       |
+| 改法     | 表改为**词干**（`constants/breachedPasswords.js`，40 条字面量 → 123 条词干）；归一化只保留一份且在口令侧：小写 → 去所有非字母数字 → 去末尾连续数字。两侧口径因此不可能再漂移                                                                                                                                                     |
+| 不变量   | 每个词干至少含 2 个字母。这是**必要条件**：归一化不重排字母，故口令的字母序列（小写）必须等于词干的字母序列，而策略要求同时含大写与小写 ⇒ 字母数 <2 的词干在策略下不可达                                                                                                                                                         |
+| 覆盖变化 | 有效词干 16 → 123（**+107**）；`Passw0rd!1234`、`P@ssw0rd1234!`、`Abcd1234!5678`、`1Qaz@Wsx1234!` 等由漏变拦；精度用例同时钉住 12 条强口令不被误伤（`SunshineRain99!` 归一化后是 `sunshinerain`，不是词干）                                                                                                                      |
+| 用例     | 新增 `src/tests/utils/breachedPasswordMatcher.test.js`（176 例）：逐条为 123 个词干构造「除黑名单外无懈可击」的反例并断言被拦；表内条目必须已是词干（混入字面量即红）；回归指纹；精度；边界；原 16 条不回退                                                                                                                      |
+| 失败策略 | 本批**不接** HIBP。若将来要接，失败策略**已预先拍板**：**fail-open + 指标 + 启动日志告警**，且必须带超时与缓存——不让第三方可用性拖垮改密链路                                                                                                                                                                                     |
+| 文档     | `docs/mlps2-controls.md` 的 G8 证据补上「清单规模 + 用例文件」，并新增一段**如实边界声明**（是高频词干表，不是泄露库；长尾覆盖不了）；`breachedPasswords.js` 文件头修正「以隐私为由拒绝 HIBP」的**不完整推论**（原话本身准确：range API 确实只收 SHA-1 前 5 位；但真正有分量的理由是多一个运行时外部依赖及其失败策略，原文没写） |
+
+三处测试夹具注释同步更新（`authCookies.test.js` / `changePasswordTypeGuard.test.js` /
+`sessionManagement.test.js`）：导出名 `BREACHED_PASSWORDS` → `BREACHED_PASSWORD_STEMS`，
+且 `Test@12345 归一化后为 test@123` 的解释已不成立（现在一步归一化成 `test`）。
+三处夹具口令均经 `deliverables/probe-matcher-behavior.js` 复核为新口径下的安全值。
+
+### IP 归属地英文化（2026-10-09 · 私网/环回地址的 `location` 从中文文案改为稳定码）
+
+> 缺陷形状与 `constants/securitySuggestions.js` 那次同族：**后端把文案拼死，前端就永远翻不动**。
+> `ipLocationService` 把私网/环回地址收敛成中文两字「内网」直接下发，而三个消费面
+> （会话管理、审计日志列表 + 详情弹窗、IP 黑白名单）都是 `· {{ row.location }}` 原样渲染——
+> 管理员把界面切到 en-US，IP 旁边那一格仍是中文。公网 IP 的归属地是 ip2region 数据文本
+> （「中国·广东省·深圳市·电信」），不在本次范围：数据侧本地化是另一个议题。
+
+| 项     | 内容                                                                                                                                                                                                                                                                                                                                             |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 根因   | 展示文本由后端拼好并焊进 API 响应：私网这一支既非数据也非用户输入，而是**服务层自己写死的中文**，vue-i18n 对已定型的字符串无从下手                                                                                                                                                                                                               |
+| 修法   | 沿用仓内既有口径（`utils/labelMaps.js` 的 DEVICE_TYPE、`utils/auditLabels.js` 的 `audit.action.*`、`constants/securitySuggestions.js`）：**后端只出稳定码，文案归前端词表**。新增 `src/constants/ipLocationCodes.js`（单一来源，当前一码 `private`），`ipLocationService` 的 IPv4 数据侧（xdb 的「内网IP」）与 IPv6 range 判定两支都改为产出该码 |
+| 前端   | 新增 `web-admin/src/utils/ipLocationLabels.js`（三处消费方共用一份映射，与 securityLabels/auditLabels 同形状：调用方传 `t`、未知值原样透传），词表新增 `ipLocation.private`（zh「内网」/ en "Internal network"）                                                                                                                                 |
+| 兼容性 | `location` 类型不变（string\|null）；老后端下发的中文「内网」按原样透传（与修复前一致，不回退成空白），滚动发布不会出现空归属地                                                                                                                                                                                                                  |
+| 对账闸 | 新增 `web-admin/src/tests/utils/ipLocationCodeParity.test.js`：`createRequire` 后端码表逐一对账双语词表，并断言英文侧不得残留 CJK——「后端加一码、前端漏翻」变红，而不是在界面上静默显示裸码                                                                                                                                                      |
+| 用例   | 后端 `ipLocationService.test.js`（私网取值不含中日韩字符）、`sessionService.test.js`（内网 IP 两字段均为稳定码）；前端三个视图各补一条「切 en-US → Internal network、公网数据文本原样」的语言跟随用例                                                                                                                                            |
+
+### IP 归属地英文化·续（2026-10-09 · 公网归属地的中英对照词典：数据段也跟随界面语言）
+
+> 上一节只解决了「内网」那一格（后端写死的中文）。公网 IP 的归属地是 ip2region xdb 的
+> **数据原文**——库里只有中文一份，于是切到 en-US 后「中国·浙江省·杭州市·阿里云」照样是中文：
+> 实测全部地区段里 **89.9% 的出现次数是中文**，只修私网标签等于修了个零头。
+
+| 项     | 内容                                                                                                                                                                                                                                                                                                                              |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 修法   | 新增 `web-admin/src/data/ipLocationDictionary.json`（1024 条中英对照）；`utils/ipLocationLabels.js` 按当前 locale **逐段**译名后以 `·` 重拼，词典未收录的段原样透传（不把整块归属地抹掉）。语言判定读 i18n 实例的 locale（非中文界面一律英文），渲染期读 ref 即建立响应式依赖，切语言重算                                         |
+| 词典   | 国家名 244 条由 `Intl.DisplayNames` 按 ISO 3166-1 **双向生成**（zh 键 ↔ en 值，不手抄 244 条）；省州 / 城市 / 运营商人工校对。实测覆盖 CJK 出现次数 **98.06%**（国家 100%、省州 98.6%、城市 93.2%、运营商 96.7%）                                                                                                                 |
+| 豁免   | 10 条高频段登记未收录（`内网IP` + 9 个译名不确定的段），理由逐条写在测试里，**上限 12 条**且每条键必须仍在数据里。口径：宁可以英文界面回退中文，也不把没把握的译名写进词典——**错的译名比中文更难发现**                                                                                                                            |
+| 闸     | `web-admin/src/tests/utils/ipLocationDictionary.test.js` 直接对**真实 xdb** 取数（复用后端 `loadFromBuffer` 解析指针，只补段索引遍历）：国家/省州 100%、城市/运营商高频段（出现次数 ≥ 阈值）除登记豁免外全覆盖、整体覆盖率 ≥ 98%、词典无陈旧键、译文不含中文、豁免不越上限。数据刷新带入新地名 ⇒ 测试列出缺哪些，而不是靠用户发现 |
+| 体积   | 词典经三个懒加载视图进入**异步分块**：首屏 `entryJsGzip` +1.1 KB，总 gzip +19.4 KB；五项预算均仍有余量（`check-bundle-budget` 通过），基线未动                                                                                                                                                                                    |
+| 兼容性 | `location` 契约不变（仍是 string）；中文界面行为零变化（数据本就是中文，不过词典）                                                                                                                                                                                                                                                |
+
+### 依赖审计：dev 树盲区补门禁（2026-10-09 · `security-audit` 只审 `--omit=dev`）
+
+> 本批**不改依赖树**。改的是「谁在被审」：CI 两处 audit 都是 `npm audit --omit=dev`，
+> 于是 devDependencies 的 advisory 永远不会让构建失败。实测含 dev **35 条（30 high / 5 moderate）**，
+> `--omit=dev` 为 **0**，web-admin 两侧均为 0。
+
+| 项                 | 内容                                                                                                                                                                                                                                                        |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 根因               | 35 条包维度告警**只由 2 条公告**传染而来：`GHSA-vfj7-8cjw-p6xm`（braces，high，栈耗尽 DoS）与 `GHSA-hp3w-g68c-fv3c`（sprintf-js，moderate）                                                                                                                 |
+| 为何不能 overrides | 两条公告的 `first_patched_version` 均为 **null**，受影响区间上界就是 registry 的 latest（braces 3.0.3 / sprintf-js 1.1.3）⇒ **无版本可指向**，与 uuid override 的前提不同                                                                                   |
+| 为何不升 jest 30   | 实测（隔离探针）：jest 30 + nodemon = 3 high / 19 moderate；jest 30 去 nodemon = 0 high / 19 moderate。**moderate 反而由 5 升到 19**，且清不掉 `js-yaml@3 → argparse@1 → sprintf-js` 链                                                                     |
+| 可达性             | 两条链实测**不可达**：braces 需攻击者可控 glob（本仓输入只有 jest CLI/config 与 nodemon ignore）；argparse 只被 `js-yaml/bin/js-yaml.js` 引用，`load-nyc-config` 走 `lib/js-yaml.js` 不加载它 ⇒ 性质是卫生问题，非可利用漏洞                                |
+| 改法               | 新增 `scripts/check-audit-allowlist.js`（含 dev 审计**硬门禁 + 显式允许清单**）+ `deployment/audit-allowlist.json`（登记两条无补丁公告，含理由/可达性/复核期限 `2027-01-31`）；`ci.yml` 的 `security-audit` 作业新增一步；`ciGateWiring.test.js` 登记新门禁 |
+| fail-closed 三判据 | ①未登记 ⇒ 红；②`reviewBy` 过期 ⇒ 红；③清单项在本次报告里**已无对应公告** ⇒ 红，必须删行（防清单只增不减）                                                                                                                                                   |
+| 文档               | `docs/security-dependency-watch.md` 修正「含 dev 0 漏洞」的过期结论（该结论是 2026-09-16 时点，上游 09-18 / 09-24 才发公告 ⇒ 时间性回归，非本批引入），并登记两条已知例外                                                                                   |
+
+判据来源是**根因公告**而非受影响包（35 条 = 2 条根因），故清单按 GHSA 编号登记，
+不按包名——按包登记必然得到一份腐烂清单。
+
 ### CI 覆盖率门禁修复（2026-10-08 · `#13 Run tests with coverage` 三条阈值未达标）
 
 > 这条红**不是**本批引入，而是被下一节的修复**逼出来的**：`#11 Run tests` / `#12` 修绿之前，

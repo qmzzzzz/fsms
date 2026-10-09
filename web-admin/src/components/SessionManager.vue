@@ -69,7 +69,7 @@
             <!-- 归属地是后端可选增强（旧数据/检索不可用时缺字段），必须 v-if 省略而非渲染空串 -->
             <span>
               {{ t('session.ip') }}：{{ item.lastIp || item.ip || '—'
-              }}<template v-if="item.location"> · {{ item.location }}</template>
+              }}<template v-if="item.location"> · {{ ipLocationLabel(t, item.location) }}</template>
             </span>
             <span>{{ t('session.lastSeen') }}：{{ formatSessionTime(item.lastSeenAt) }}</span>
             <span>{{ t('session.loginAt') }}：{{ formatSessionTime(item.createdAt) }}</span>
@@ -151,6 +151,8 @@ import { Monitor, Cellphone, Platform, Help } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
 import GlassSkeleton from '@/components/GlassSkeleton.vue'
 import { formatTime } from '@/utils/datetime'
+// IP 归属地：后端只出稳定码，中文「内网」/ 英文 "Internal network" 的本地化在这一个模块
+import { ipLocationLabel } from '@/utils/ipLocationLabels'
 
 const { t } = useI18n()
 

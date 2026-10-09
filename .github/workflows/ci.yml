@@ -199,6 +199,26 @@ jobs:
         # --ignore-scripts，因为测试需要 mongod），是真实供应链风险面，必须显式登记。
         run: node scripts/check-prod-install-scripts.js --scan
 
+      # dev 树的 **advisory** 此前对门禁完全不可见：上面两处 audit 都是 --omit=dev。
+      # 2026-10-09 实测含 dev 35 条（30 high / 5 moderate），而 --omit=dev 为 0 ——
+      # 即 devDependencies 可以长期带着 30 条高危全绿合并（与 morgan 中危当年
+      # 长期静默通过是同一类失效）。本步把 dev 树纳入判定。
+      # 之所以不是「把阈值一收紧就完事」：两个根因公告 GHSA-vfj7-8cjw-p6xm（braces）
+      # 与 GHSA-hp3w-g68c-fv3c（sprintf-js）上游**没有修复版本**（first_patched_version
+      # 为 null，registry 上 latest 本身就在受影响区间内 ⇒ overrides 无版本可指向）。
+      # 直接收紧阈值会让本步永久红，而永久红第一次出现就会被 continue-on-error 消化掉。
+      # 故走「硬门禁 + 显式允许清单」：清单在 deployment/audit-allowlist.json，登记项
+      # 必须写明理由、可达性判断与复核期限；未登记 / 已过期 / 已陈旧（上游修好了却
+      # 没删行）三种情形一律 fail-closed。判据来源是**根因公告**而非受影响包——
+      # 35 条包维度告警实际只由 2 条根因传染而来，按包登记必然腐烂。
+      - name: Audit ALL dependencies incl. dev (allowlist gate)
+        # npm audit --json 在存在漏洞时退出码为 1，报告仍写到 stdout，故 || true
+        # 只吞退出码、不吞报告；真正的判定在下一步脚本里。
+        # `.audit-all.json` 命中 .gitignore 的 `.audit-*`，不会污染 git status。
+        run: |
+          npm audit --audit-level=moderate --json > .audit-all.json || true
+          node scripts/check-audit-allowlist.js --report .audit-all.json
+
       - name: Audit web-admin dependencies
         working-directory: web-admin
         # I-M3：同上，硬门禁 + 留痕

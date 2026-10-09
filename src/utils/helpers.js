@@ -164,36 +164,37 @@ const PASSWORD_RULES = [
 ];
 
 /**
- * 常见泄露/弱口令清单（G8）本体已搬到 constants/breachedPasswords.js：
- * 四十条字面量是策略数据而非工具函数，放这里会让本文件整体越过体积预算。
+ * 弱口令词干表（G8）本体在 constants/breachedPasswords.js：
+ * 一百余条词干是策略数据而非工具函数，放这里会让本文件整体越过体积预算。
  * 判定逻辑（归一化 + 比对）仍在本文件，见 isBreachedPassword。
  */
-const { BREACHED_PASSWORDS } = require('../constants/breachedPasswords');
+const { BREACHED_PASSWORD_STEMS } = require('../constants/breachedPasswords');
 
 /**
- * 归一化口令用于黑名单比对：小写化 + 收敛末尾连续数字为单一形态
- * 例：Admin@1234 → admin@123（与 admin@123 同源，一并拦截）
+ * 归一化口令用于黑名单比对：小写化 → 去掉**所有**非字母数字 → 去掉**末尾连续数字**，
+ * 得到「词干」。**只有口令侧需要归一化**——表里存的本来就是词干（见该文件头），
+ * 两侧口径因此不可能再漂移（2026-10-09 前正是两侧口径不一致，导致 40 条里 24 条永不命中）。
+ * 例：Admin@123456 → admin；P@ssw0rd1234! → pssw0rd；Fire@2026Safe! → fire2026safe
  */
-const normalizePasswordForBreachCheck = (pwd) => {
-  const lower = String(pwd).toLowerCase();
-  // 末尾 4 位以上连续数字截断为 3 位，抹平 123/1234/12345 的差异
-  return lower.replace(/(\d{3})\d+$/, '$1');
-};
+const normalizePasswordForBreachCheck = (pwd) =>
+  String(pwd)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .replace(/\d+$/, '');
 
 /**
- * 判断口令是否命中泄露/弱口令黑名单
+ * 判断口令是否命中泄露/弱口令词干表
  * @param {string} password 待检查口令
  * @returns {boolean}
  */
 const isBreachedPassword = (password) => {
   if (!password || typeof password !== 'string') return false;
-  // 去除所有空白后再比对：字典口令本不含空格，去空白只会更严（把 "admin@123 "、
-  // " admin@123" 这类加空格的变体也纳入拦截），不会放过任何真实口令。
-  // 旧实现只做 toLowerCase，导致 userRoutes 未对 password .trim() 时，
-  // "Admin@123456 " 既不在集合、又能破坏末尾数字归一化正则（$ 锚定被空格挡住）→ 绕过。
-  const compact = password.replace(/\s+/g, '');
-  if (BREACHED_PASSWORDS.has(compact.toLowerCase())) return true;
-  return BREACHED_PASSWORDS.has(normalizePasswordForBreachCheck(compact));
+  // 去掉所有非字母数字（含空白）后再比对，方向只会更严：把 "admin@123 "、
+  // " admin@123" 这类加空格的变体也纳入拦截，不会放过任何真实口令。
+  // 旧实现只做 toLowerCase + 去空白，导致 userRoutes 未对 password .trim() 时，
+  // "Admin@123456 " 既不在字面量集合、又能破坏末尾数字归一化正则（$ 锚定被空格挡住）→ 绕过。
+  const stem = normalizePasswordForBreachCheck(password);
+  return stem.length > 0 && BREACHED_PASSWORD_STEMS.has(stem);
 };
 
 /**
@@ -635,5 +636,6 @@ module.exports = {
   PASSWORD_SPECIAL_REGEX,
   PASSWORD_MAX_BYTES,
   PASSWORD_MAX_LENGTH,
-  BREACHED_PASSWORDS,
+  BREACHED_PASSWORD_STEMS,
+  normalizePasswordForBreachCheck,
 };

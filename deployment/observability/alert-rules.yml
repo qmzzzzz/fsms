@@ -59,6 +59,42 @@ groups:
           summary: '安全告警事件突发'
           description: '近 10 分钟累计安全告警 {{ $value }} 条，建议查看安全日志与 /api/metrics 面板。'
 
+      # ── fail-open / 降级护栏的**持续性**信号（2026-10-09 新增）────────────────
+      # 与上面 SecurityAlertBurst 是两件事，不是它的替代：
+      #   · SecurityAlertBurst 是**速率型**（10 分钟 ≥ 10 条），覆盖"批量事件"；
+      #   · 但 fail-open 类事件的危险形态恰恰相反——**低速而持续**：黑名单降级缓存
+      #     长期未命中、限流共享存储持续退化、验证码上限持续失效，每个窗口可能只有
+      #     零星几条，速率型规则可以**永远不达标**，而护栏一直处于失效状态。
+      #     （实测口径：checkIPBlacklist 的 fail-open 只在"缓存未命中 + 库查询失败"
+      #     同时成立时计数，低流量站 + 热缓存可以让它长时间低于任何速率阈值。）
+      #
+      # 两个刻意的写法，都不是风格问题：
+      #   1. **按 type 分开判，不跨类型求和**。跨类型求和会掺进一个恒正项——
+      #      `immutableConfigGuard` / `legacyCbcGuard` 在**进程启动期**也会往
+      #      security_alerts_total 写（见 deliverables/审计复核第3轮…-2026-10-01.md §六，
+      #      该口径问题已登记为待拍板）。后果是双向的：真实突发更难越线，
+      #      而 crash loop / 滚动发布也会冒充安全事件。本规则用标签选择器而非聚合，
+      #      因此每个 type 各自成一条时间序列，`{{ $labels.type }}` 直接可读。
+      #   2. **持续型而非瞬时型**（`for: 10m`）。一次 Redis/Mongo 抖动不该页人；
+      #     连续 10 分钟仍未恢复才说明是依赖不可用，而不是偶发抖动。
+      #
+      # 方向说明：本规则只**报告**护栏失效，不做任何自动收紧。把 fail-open 自动翻成
+      # fail-closed 会把"保密性降级"转成"可用性事故"，且恰好发生在系统已经不健康时
+      # （黑名单 fail-closed = 库挂时全量请求无法验证 = 全站拒绝；验证码 fail-closed
+      # = 没人能登录）。是否收紧是产品决策，不是告警规则能代做的。
+      - alert: SecurityFailOpenSustained
+        expr: increase(security_alerts_total{type=~"ip_blacklist_failopen|ratelimit_store_degraded|captcha_active_bound_lost|captcha_switch_db_fallback"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'fail-open 降级持续 10 分钟未恢复（{{ $labels.type }}）'
+          description: >-
+            {{ $labels.type }} 已连续 10 分钟持续产生降级事件，说明对应依赖（MongoDB / Redis）
+            仍未恢复，护栏处于**失效**状态而非偶发抖动。处置：确认依赖可用性与
+            /api/metrics 的 security_alerts_total 明细；**在恢复前不要把该护栏当作有效防线**
+            （各类型的失效语义见 src/constants/failOpenSites.js）。
+
   # 自监控：可观测性链路自身的失效。这类规则不反映业务异常，反映的是
   # 「我们看到的业务数据不完整」——所以它的严重度是 warning 而非 info：
   # 数据缺失期间的其它告警判读都要打折。

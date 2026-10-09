@@ -25,6 +25,7 @@ import i18n from '@/i18n'
 const getDashboard = vi.fn()
 const getUserStats = vi.fn()
 const getAlarms = vi.fn()
+const getSecurityStats = vi.fn()
 const isCanceledError = vi.fn(() => false)
 /** DashboardCharts 的 load() 探针（父级应在定时/可见性恢复/语言切换时各触发一次） */
 const chartsLoad = vi.fn()
@@ -34,6 +35,7 @@ vi.mock('@/utils/api', () => ({
     reports: { getDashboard: (...a) => getDashboard(...a) },
     users: { getStats: (...a) => getUserStats(...a) },
     alarms: { getList: (...a) => getAlarms(...a) },
+    security: { getSecurityStats: (...a) => getSecurityStats(...a) },
   },
   isCanceledError: (...a) => isCanceledError(...a),
 }))
@@ -65,6 +67,8 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 let active = null
 
 const ALL = ['report:read', 'user:read', 'alarm:read']
+/** 三个业务读权限 + 管理员安全统计权限（用于验证首页刷新周期也带上安全统计卡） */
+const ALL_SEC = [...ALL, 'security:stats']
 
 /**
  * 独立计算 ISO → 本地时区「YYYY-MM-DD HH:mm:ss」定长串（与实现无关的口径）。
@@ -100,6 +104,16 @@ const stubDefaults = () => {
   getDashboard.mockResolvedValue(okDashboard())
   getUserStats.mockResolvedValue(okUsers())
   getAlarms.mockResolvedValue({ data: { data: [] } })
+  getSecurityStats.mockReset()
+  getSecurityStats.mockResolvedValue({
+    data: {
+      data: {
+        overview: { todayLogins: 9, todayFailedLogins: 1, highRiskOperations: 0 },
+        anomalies: { failedOperationUsers: [], unusualTimeUsers: [] },
+        securityLevel: 'normal',
+      },
+    },
+  })
   chartsLoad.mockReset()
 }
 
@@ -143,6 +157,13 @@ const alarmTags = (c) =>
         t.className.match(/el-tag--(danger|warning|info|success)/)[1] + ':' + t.textContent.trim()
     )
 
+/** 安全统计卡（管理员，需 security:stats）的读数与异常标签 */
+const secCard = (c) => c.find('.security-stats-card')
+const secValues = (c) =>
+  c.findAll('.security-stats-card .ss-value').map((x) => x.textContent.trim())
+const secAnomalies = (c) =>
+  c.findAll('.security-stats-card .ss-anomalies .el-tag').map((x) => x.textContent.trim())
+
 /** jsdom 的 visibilityState 是原型 getter，必须用 defineProperty 覆写（delete 可还原） */
 const vis = (v) =>
   Object.defineProperty(document, 'visibilityState', { value: v, configurable: true })
@@ -153,6 +174,7 @@ afterEach(() => {
   getDashboard.mockReset()
   getUserStats.mockReset()
   getAlarms.mockReset()
+  getSecurityStats.mockReset()
   isCanceledError.mockReset()
   isCanceledError.mockReturnValue(false)
   chartsLoad.mockReset()
@@ -379,15 +401,17 @@ describe('DashboardView 请求新鲜度守卫（定时/可见性恢复交叠）'
   })
 })
 describe('DashboardView 权限门控（P3-39：无权限不请求、不渲染）', () => {
-  test('无任何权限：三个接口都不请求，数据块全部不渲染，欢迎卡仍在且无错误提示', async () => {
+  test('无任何权限：四个接口都不请求，数据块全部不渲染，欢迎卡仍在且无错误提示', async () => {
     const c = await open([])
     expect(getDashboard).not.toHaveBeenCalled()
     expect(getUserStats).not.toHaveBeenCalled()
     expect(getAlarms).not.toHaveBeenCalled()
+    expect(getSecurityStats).not.toHaveBeenCalled()
     expect(statValues(c)).toEqual([])
     expect(c.findAll('.dashboard-charts-stub')).toEqual([])
     expect(c.findAll('.charts-async-skeleton')).toEqual([])
     expect(c.findAll('.alarm-card')).toEqual([])
+    expect(secCard(c)).toBeNull()
     expect(c.findAll('.welcome-content')).toHaveLength(1)
     expect(c.findAll('.glass-skeleton')).toEqual([])
     expect(ElMessage.error).not.toHaveBeenCalled()
@@ -399,6 +423,9 @@ describe('DashboardView 权限门控（P3-39：无权限不请求、不渲染）
     expect(getDashboard).toHaveBeenCalledTimes(1)
     expect(getUserStats).not.toHaveBeenCalled()
     expect(getAlarms).not.toHaveBeenCalled()
+    // 业务读权限不等于管理员权限：没有 security:stats 就不该碰安全统计端点
+    expect(getSecurityStats).not.toHaveBeenCalled()
+    expect(secCard(c)).toBeNull()
     // 第四卡必须是"未知"而不是 0：没有 user:read 时这一格压根没取数，
     // 显示 0 等于向值班人员宣称"系统里没有用户"。
     expect(statValues(c)).toEqual(['10', '7', '3', '-'])
@@ -412,6 +439,7 @@ describe('DashboardView 权限门控（P3-39：无权限不请求、不渲染）
     expect(getDashboard).toHaveBeenCalledTimes(1)
     expect(getUserStats).toHaveBeenCalledTimes(1)
     expect(getAlarms).not.toHaveBeenCalled()
+    expect(getSecurityStats).not.toHaveBeenCalled()
     expect(statValues(c)).toEqual(['10', '7', '3', '4'])
     expect(c.findAll('.alarm-card')).toEqual([])
   })
@@ -422,6 +450,7 @@ describe('DashboardView 权限门控（P3-39：无权限不请求、不渲染）
     expect(getUserStats).not.toHaveBeenCalled()
     expect(getAlarms).toHaveBeenCalledTimes(1)
     expect(getAlarms).toHaveBeenCalledWith({ limit: 5 })
+    expect(getSecurityStats).not.toHaveBeenCalled()
     expect(statValues(c)).toEqual([])
     expect(c.findAll('.dashboard-charts-stub')).toEqual([])
     await waitFor(() => alarmCells(c).length === 1 && alarmCells(c)[0].length === 4, {
@@ -433,6 +462,34 @@ describe('DashboardView 权限门控（P3-39：无权限不请求、不渲染）
       '烟雾报警',
       '待处理',
     ])
+  })
+
+  test('仅 security:stats：只请求安全统计，卡片渲染读数；无业务读权限时其余块都不渲染', async () => {
+    const c = await open(['security:stats'])
+    // 这是管理员端点，与业务读权限彼此独立：只有它时不该顺带请求 report/user/alarm
+    expect(getSecurityStats).toHaveBeenCalledTimes(1)
+    expect(getDashboard).not.toHaveBeenCalled()
+    expect(getUserStats).not.toHaveBeenCalled()
+    expect(getAlarms).not.toHaveBeenCalled()
+    expect(statValues(c)).toEqual([])
+    expect(c.findAll('.alarm-card')).toEqual([])
+    expect(c.findAll('.dashboard-charts-stub')).toEqual([])
+
+    await waitFor(() => secValues(c).length === 3, { message: '安全统计读数渲染' })
+    expect(secValues(c)).toEqual(['9', '1', '0'])
+    // 异常区两个标签各带计数（0 也要显示，不是只显示非零项）
+    expect(secAnomalies(c)).toEqual(['失败操作用户 · 0', '非常规时段用户 · 0'])
+    expect(c.text()).toContain('安全统计')
+    expect(c.errors).toEqual([])
+  })
+
+  test('有 security:stats 时卡片与其余数据块并存（互不干扰）', async () => {
+    const c = await open(['report:read', 'alarm:read', 'security:stats'])
+    await waitFor(() => secValues(c).length === 3, { message: '安全统计读数渲染' })
+    // 首页统计卡与安全统计卡同时在屏，且都拿到各自的值
+    expect(statValues(c)).toEqual(['10', '7', '3', '-'])
+    expect(secValues(c)).toEqual(['9', '1', '0'])
+    expect(secCard(c)).not.toBeNull()
   })
 })
 
@@ -654,6 +711,37 @@ describe('DashboardView 自动刷新与可见性', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('首页刷新周期连带刷新安全统计卡（隐藏跳过 / 定时 / 可见性恢复三条路径）', async () => {
+    // 与 DashboardCharts 同型：安全统计卡自加载 + 暴露 load()，由首页驱动刷新。
+    // 若不接线，卡片只在挂载时取一次数，5 分钟后同一屏上"设备数是最新的、
+    // 登录统计是 5 分钟前的"——比整页都旧更难被值班人员发现。
+    vi.useFakeTimers()
+    const c = await open(ALL_SEC)
+    await waitFor(() => getSecurityStats.mock.calls.length >= 1, { message: '首屏安全统计' })
+    const base = getSecurityStats.mock.calls.length
+
+    // ① 隐藏时到点：必须跳过（与其余数据面同口径）
+    vis('hidden')
+    vi.advanceTimersByTime(5 * 60 * 1000)
+    await flush(20)
+    expect(getSecurityStats.mock.calls.length).toBe(base)
+
+    // ② 恢复可见后到点：随首页一起刷新
+    vis('visible')
+    vi.advanceTimersByTime(5 * 60 * 1000)
+    await waitFor(() => getSecurityStats.mock.calls.length === base + 1, {
+      message: '定时刷新安全统计',
+    })
+
+    // ③ 可见性恢复事件：立即刷新一次
+    const b2 = getSecurityStats.mock.calls.length
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => getSecurityStats.mock.calls.length === b2 + 1, {
+      message: '可见性恢复刷新安全统计',
+    })
+    expect(c.errors).toEqual([])
+  })
+
   test('卸载后定时器与可见性监听都停止（不再发任何请求）', async () => {
     vi.useFakeTimers()
     const c = await open(ALL)
@@ -730,6 +818,22 @@ describe('DashboardView 失败与取消路径', () => {
     expect(getUserStats.mock.calls.length).toBe(base.u + 1)
     expect(getAlarms.mock.calls.length).toBe(base.a + 1)
     expect(chartsLoad.mock.calls.length).toBe(base.ch + 1)
+    expect(c.errors).toEqual([])
+  })
+
+  test('语言切换不重取安全统计，但卡片文案确实切到英文（响应式重渲染）', async () => {
+    // 与图表区的**有意不对称**：图表标签画在 canvas 上，必须重取/重绘；
+    // 安全统计卡没有画布，文案走模板 $t() 随语言响应式更新，数据（计数）与语言无关。
+    // 本用例同时钉住"不重取"与"确实切了文案"——否则"没重取"可能是卡片压根没反应。
+    const c = await open(ALL_SEC)
+    await waitFor(() => getSecurityStats.mock.calls.length >= 1, { message: '首屏安全统计' })
+    const base = getSecurityStats.mock.calls.length
+
+    i18n.global.locale.value = 'en-US'
+    await waitFor(() => c.text().includes('Security Statistics'), { message: '文案切英文' })
+    await flush(25)
+    expect(getSecurityStats.mock.calls.length).toBe(base)
+    expect(c.text()).toContain('Security level·Normal')
     expect(c.errors).toEqual([])
   })
 })

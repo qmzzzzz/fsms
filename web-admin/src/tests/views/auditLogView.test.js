@@ -276,6 +276,36 @@ describe('AuditLogView 列表加载与渲染', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('归属地跟随语言：切到 en-US 后私网稳定码显示 Internal network，公网数据文本原样（i18n 缺口回归）', async () => {
+    // 原缺陷：后端把私网地址收敛成中文两字「内网」直接下发，前端拿到的是已定型
+    // 文案，vue-i18n 无从翻译——英文界面下这一格永远是中文。现后端只出稳定码，
+    // 中文「内网」/ 英文 "Internal network" 归词表（utils/ipLocationLabels.js）。
+    const c = await openList([
+      logRow({ _id: 'r1', location: 'private' }),
+      logRow({ _id: 'r2', location: '中国·广东省·深圳市·电信' }),
+      logRow({ _id: 'r3', location: '美国·蒙特利' }),
+    ])
+
+    i18n.global.locale.value = 'en-US'
+    await flush(8)
+    expect(td(c, 0, 1).querySelector('.cell-sub').textContent.trim()).toBe(
+      '10.0.0.9 · Internal network'
+    )
+    // 公网归属地是数据文本，按中英对照词典逐段译名（词典见 data/ipLocationDictionary.json）
+    expect(td(c, 1, 1).querySelector('.cell-sub').textContent.trim()).toBe(
+      '10.0.0.9 · China·Guangdong·Shenzhen·China Telecom'
+    )
+    // 词典未收录的段原样透传，不把整块归属地抹掉
+    expect(td(c, 2, 1).querySelector('.cell-sub').textContent.trim()).toBe(
+      '10.0.0.9 · United States·蒙特利'
+    )
+
+    i18n.global.locale.value = 'zh-CN'
+    await flush(8)
+    expect(td(c, 0, 1).querySelector('.cell-sub').textContent.trim()).toBe('10.0.0.9 · 内网')
+    expect(c.errors).toEqual([])
+  })
+
   test('风险等级与日志等级派生：critical/high/medium/失败/未知各自映射且行着色', async () => {
     const c = await openList([
       logRow({ _id: 'r1', riskLevel: 'critical', success: true }),

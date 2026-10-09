@@ -152,7 +152,9 @@
           <template #default="{ row }">
             <span class="ip-cell">{{ row.ip }}</span>
             <!-- 归属地：后端可选增强（CIDR 网段/检索不可用时缺字段），必须省略而非渲染空串 -->
-            <span v-if="row.location" class="ip-location"> · {{ row.location }}</span>
+            <span v-if="row.location" class="ip-location">
+              · {{ ipLocationLabel(t, row.location) }}</span
+            >
             <el-tag
               v-if="row.isPrimary"
               type="primary"
@@ -240,6 +242,8 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 // O-3：时间格式化统一抽取（本地时区、hour12=false 单一口径）
 import { formatTime } from '@/utils/datetime'
+// IP 归属地：后端只出稳定码，中文「内网」/ 英文 "Internal network" 的本地化在这一个模块
+import { ipLocationLabel } from '@/utils/ipLocationLabels'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 

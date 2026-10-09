@@ -27,6 +27,14 @@ vi.mock('@/utils/api', () => ({
       getMe: (...a) => getMe(...a),
       updateProfile: (...a) => updateProfile(...a),
     },
+    // ProfileView 右栏还挂了 B 组自助卡（我的安全信息/账户绑定/我的操作日志），
+    // 挂载时各发一次请求。给桩以免它们因 api.security 缺失而落进错误态——
+    // 那属于「测试环境缺桩」而非被测行为，会掩盖真正的回归。
+    security: {
+      getMySecurityInfo: () => Promise.resolve({ data: { data: {} } }),
+      getAccountBindings: () => Promise.resolve({ data: { data: { bindings: [] } } }),
+      getMyLogs: () => Promise.resolve({ data: { data: [] } }),
+    },
   },
   isCanceledError: () => false,
 }))

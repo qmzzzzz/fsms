@@ -100,10 +100,39 @@ npm run dev             # 监听 http://localhost:3000
 # 3. 安装前端依赖并启动（新终端）
 cd web-admin
 npm install
-npm run dev             # 监听 http://localhost:3001，/api 自动代理到后端
+npm run dev             # 监听 0.0.0.0:3001（不是仅 localhost，见下节），/api 自动代理到后端
 ```
 
 访问 `http://localhost:3001/login` 进入登录页；访问 `http://localhost:3000/health` 检查后端状态。
+
+### 开发/预览服务器的暴露边界（重要）
+
+`web-admin/vite.config.js` 把**开发**与**预览**两个服务器都显式绑定到 `0.0.0.0`
+（`server.host` 与 `preview.host`，两处都带 `// ← 修改：允许局域网/热点设备访问` 注释）——
+目的是让手机在热点/局域网下直连真机调试。代价是**同网段任何设备**都能访问它，
+所以必须清楚这两个服务器各自暴露了什么：
+
+| 命令              | 监听           | 暴露内容                                                                        | 可否对外 |
+| ----------------- | -------------- | ------------------------------------------------------------------------------- | -------- |
+| `npm run dev`     | `0.0.0.0:3001` | **未打包的源码**（按模块即时转换后下发）、HMR 客户端与 WebSocket、Vite 内部端点 | 否       |
+| `npm run preview` | `0.0.0.0:3001` | `dist/` 构建产物（`sourcemap: false`，不含 `.map`）                             | 否       |
+
+**dev 服务器会下发源码。** 它有一份敏感文件名黑名单（`SENSITIVE_FILE_PATTERNS` +
+`server.fs.deny`），覆盖 `.env`、`package(-lock).json`、`pnpm-lock.yaml`、`.git/`、
+`vite|postcss.config.*`、`.npmrc`、`*.{pem,key,crt,pfx}`；但 **`src/**` 不在其中**——
+前端源码（业务逻辑、接口路径、权限点命名）对能访问该端口的人可读。
+这份黑名单防的是「密钥/配置外泄」，不是「源码保密」。
+（唯一按来源限定的端点是 `/__open-in-editor`：它会在运行 Vite 的机器上用默认编辑器打开任意文件，
+故用 `isLoopbackReq` 拒绝非回环来源。那是**危险动作**的防线，不是源码读取面的防线。）
+
+因此：
+
+1. **不要把 3001 映射到公网**——不要绑到云主机公网 IP、不要在路由器做端口转发、
+   不要经反向代理把 dev/preview 发布出去（反代会把 `0.0.0.0` 的可达面直接放大到公网）。
+2. 需要对外演示时用**生产构建**（`npm run build` 后由后端静态托管或 nginx 托管 `dist/`），
+   而不是 `npm run preview`。preview 的用途是「本地验收构建产物」；`sourcemap: false`
+   只保证**产物**不带源码映射，**不代表 preview 服务器本身可以对外**。
+3. 只在本机调试时，把两处 `host` 改回 `'127.0.0.1'`（或启动时加 `--host 127.0.0.1`）即可消除该暴露面。
 
 ### API 文档
 
@@ -441,7 +470,7 @@ APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
 监控配置集中在 `deployment/observability/`（注意不是 `deployment/` 根目录），`docker-compose.yml` 已挂载并随编排栈一并启动：
 
 - `deployment/observability/prometheus.yml`：Prometheus 抓取配置，直连后端 `app:3000` 的 `/metrics`（该端点在 Nginx 层按 allow 列表限流，不对公网暴露）。
-- `deployment/observability/alert-rules.yml`：4 条内置告警——服务宕机、5xx 错误率 >5%、P95 延迟 >1s、安全告警突增；阈值为保守初值，待压测基线落地后收紧。
+- `deployment/observability/alert-rules.yml`：13 条内置告警，分 5 组——可用性（`BackendDown` 抓取失败、`HighErrorRate` 5xx >5%）、延迟（`HighP95Latency` P95 >1s）、安全（`SecurityAlertBurst` 安全告警突增、`SecurityFailOpenSustained` fail-open 降级持续 10 分钟未恢复）、自监控（`MetricsSeriesTruncated` 指标序列触顶丢弃、`AuditRecordsDropped` 审计记录落库前丢弃）、运行时（`MongoUnavailable`、`ReadinessProbeMissing`、`DiskSpaceLow`、`DiskProbeFailing`、`LogShipperDeliveryFailing`、`LogShipperDroppingLines`）。阈值为保守初值，待压测基线落地后收紧；每条规则的失效语义与处置见规则文件内的注释。
 - `deployment/observability/alertmanager.yml`：告警触达链路的路由中枢，按 `severity` 分发（critical 即时通道 30 分钟重复提醒，warning 低优先级通道 4 小时），并按实例维度抑制同源重复告警。仓库内为**占位配置**，通知渠道（webhook/SMTP）按文件头注释以私有副本或模板渲染注入，敏感值不入库。两道闸门盯住"忘了注入"：部署路径由 `scripts/deploy.js` 的前置校验（占位即拒绝发布，可用 `ALERTMANAGER_CONFIG_PATH` 指向独立挂载的真实配置）；合规检查路径由 `ALERT_WEBHOOK_CHECK=production node scripts/compliance-check.js` 人工/上线前触发（CI 默认不设该变量，因为仓库模板本身必须是占位）。
 - `deployment/observability/grafana/`：`datasources/` 与 `dashboards/` 由 Grafana provisioning 在容器启动时自动装载，无需界面手配。
 

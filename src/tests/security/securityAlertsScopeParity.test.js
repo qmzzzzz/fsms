@@ -160,7 +160,7 @@ describe('/security/alerts 的数据范围必须与 /security/audit-logs 同源'
    * "收口用的字段与出口可见字段不是一回事"这个事实。
    */
   const rowsOf = (body) => {
-    // 控制器：ApiResponse.success(res, { data: [...], meta })（securityController.js:772-784）
+    // 控制器：ApiResponse.success(res, { data: [...], meta })（securityController.js:944-956）
     // ⇒ 响应体里是**双层 data**。这里写死这一层形状，不做"多种可能形状都试一遍"的兜底：
     // 兜底会把"接口返回体变了"和"范围没收口"两件事混成一条红。
     const list = body?.data?.data;

@@ -89,48 +89,67 @@
           </el-tooltip>
 
           <!-- 语言切换 -->
-          <el-dropdown trigger="click" @command="handleLanguageChange">
-            <el-icon class="action-icon" :title="t('common.language')">
-              <Operation />
-            </el-icon>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="zh-CN" :class="{ 'is-active': language === 'zh-CN' }">
-                  中文
-                </el-dropdown-item>
-                <el-dropdown-item command="en-US" :class="{ 'is-active': language === 'en-US' }">
-                  English
-                </el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <!-- 提示走 el-tooltip 而非原生 title：title 的样式与出现时机都由浏览器
+               决定，与搜索/刷新/全屏不是一套观感。展开期间禁用提示——菜单浮层与
+               提示浮层同位叠放会互相盖住，且此时指针停在图标上不产生 mouseleave，
+               提示不会自行消失 -->
+          <el-tooltip :content="t('common.language')" placement="bottom" :disabled="prefMenuOpen">
+            <el-dropdown
+              trigger="click"
+              @command="handleLanguageChange"
+              @visible-change="onPrefMenuVisible"
+            >
+              <el-icon class="action-icon">
+                <Operation />
+              </el-icon>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="zh-CN" :class="{ 'is-active': language === 'zh-CN' }">
+                    中文
+                  </el-dropdown-item>
+                  <el-dropdown-item command="en-US" :class="{ 'is-active': language === 'en-US' }">
+                    English
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </el-tooltip>
 
           <!-- 主题切换：下拉选择，与语言切换交互一致 -->
-          <el-dropdown trigger="click" @command="handleThemeChange">
-            <el-icon class="action-icon" :title="t('common.theme')">
-              <Monitor v-if="themeMode === 'system'" />
-              <Sunny v-else-if="themeMode === 'light'" />
-              <Moon v-else />
-            </el-icon>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="system" :class="{ 'is-active': themeMode === 'system' }">
-                  {{ t('common.autoMode')
-                  }}{{
-                    appStore.systemPrefersDark
-                      ? ' · ' + t('common.darkMode')
-                      : ' · ' + t('common.lightMode')
-                  }}
-                </el-dropdown-item>
-                <el-dropdown-item command="light" :class="{ 'is-active': themeMode === 'light' }">
-                  {{ t('common.lightMode') }}
-                </el-dropdown-item>
-                <el-dropdown-item command="dark" :class="{ 'is-active': themeMode === 'dark' }">
-                  {{ t('common.darkMode') }}
-                </el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <el-tooltip :content="t('common.theme')" placement="bottom" :disabled="prefMenuOpen">
+            <el-dropdown
+              trigger="click"
+              @command="handleThemeChange"
+              @visible-change="onPrefMenuVisible"
+            >
+              <el-icon class="action-icon">
+                <Monitor v-if="themeMode === 'system'" />
+                <Sunny v-else-if="themeMode === 'light'" />
+                <Moon v-else />
+              </el-icon>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    command="system"
+                    :class="{ 'is-active': themeMode === 'system' }"
+                  >
+                    {{ t('common.autoMode')
+                    }}{{
+                      appStore.systemPrefersDark
+                        ? ' · ' + t('common.darkMode')
+                        : ' · ' + t('common.lightMode')
+                    }}
+                  </el-dropdown-item>
+                  <el-dropdown-item command="light" :class="{ 'is-active': themeMode === 'light' }">
+                    {{ t('common.lightMode') }}
+                  </el-dropdown-item>
+                  <el-dropdown-item command="dark" :class="{ 'is-active': themeMode === 'dark' }">
+                    {{ t('common.darkMode') }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </el-tooltip>
 
           <el-tooltip :content="t('common.refresh')" placement="bottom">
             <el-icon class="action-icon" @click="refresh">
@@ -271,6 +290,14 @@ const canToggleFullScreen = computed(() => {
 
 const handleThemeChange = (mode) => {
   appStore.setThemeMode(mode)
+}
+
+// 语言/主题下拉展开期间禁用悬停提示（el-tooltip 的 disabled）：菜单浮层与提示
+// 浮层同位叠放会互相遮挡，而展开时指针停在图标上不会触发 mouseleave，提示
+// 不会自行消失。两个入口互斥，共用一个状态即可
+const prefMenuOpen = ref(false)
+const onPrefMenuVisible = (visible) => {
+  prefMenuOpen.value = visible
 }
 
 // 移动端检测
@@ -727,11 +754,19 @@ const handleCommand = (command) => {
   gap: 24px;
 }
 
+/*
+   box-sizing 必须显式 content-box：element-plus 的 .el-icon 是 width/height:1em 的
+   定尺寸盒，而 global.css 的 * 重置是 border-box——padding 会连内容盒一起吃掉
+   （20px 图标 + 2×6px padding 后内容盒只剩 8px），svg 作为 flex 子项被 flex-shrink
+   压成窄条，热区也永远停在 1em 而不是 1em + 2×padding。content-box 下 1em 指内容盒，
+   padding 才真正长在图标外围（触屏 2×13 = 46×46）。
+ */
 .collapse-btn {
   font-size: 20px;
   cursor: pointer;
   color: var(--xf-gray-500);
   transition: all var(--xf-duration-base) var(--xf-ease-standard);
+  box-sizing: content-box;
   padding: 6px;
   border-radius: var(--xf-radius-sm);
 }
@@ -747,11 +782,13 @@ const handleCommand = (command) => {
   gap: 16px;
 }
 
+/* 同 .collapse-btn：content-box 才能让 padding 长在 1em 图标外围而不是吃掉它 */
 .action-icon {
   font-size: 18px;
   cursor: pointer;
   color: var(--xf-gray-500);
   transition: all var(--xf-duration-base) var(--xf-ease-standard);
+  box-sizing: content-box;
   padding: 6px;
   border-radius: var(--xf-radius-sm);
 }
@@ -857,12 +894,15 @@ const handleCommand = (command) => {
 }
 
 /* 触屏设备：扩大导航操作图标点击热区（含主题/语言切换），满足 Apple 44×44pt 触控标准
-   action-icon 18px 图标 + 2×13 = 44px；collapse-btn 20px 图标 + 2×13 = 46px */
+   action-icon 18px 图标 + 2×13 = 44px；collapse-btn 20px 图标 + 2×13 = 46px
+   选择器必须带上 .navbar-right / .navbar-left 把特异性抬到 (0,3,0)：裸 .action-icon
+   只有 (0,2,0)，会被同文件 max-width:480px 断点里的 .navbar-right .action-icon 盖掉，
+   手机（≤480px，恰是最需要大热区的设备）上 44×44 会静默退回 24×24。 */
 @media (hover: none) and (pointer: coarse) {
-  .action-icon {
+  .navbar-right .action-icon {
     padding: 13px;
   }
-  .collapse-btn {
+  .navbar-left .collapse-btn {
     padding: 13px;
   }
 }

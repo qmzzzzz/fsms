@@ -49,6 +49,10 @@ const CI_ENFORCED_GATE_SCRIPTS = [
   // 登记前它们确实被 CI 执行着——但登记才有红可报：删掉那两步今天不会惊动任何人。
   'scripts/e2e-smoke.js',
   'scripts/production-drill.js',
+  // 含 dev 的依赖审计门禁（2026-10-09）：security-audit 里原本两处 audit 都是
+  // --omit=dev，dev 树的 advisory 对门禁完全不可见（实测含 dev 35 条 / 30 high，
+  // 而 --omit=dev 为 0）。删掉那一步不会惊动任何别的测试，故登记在此。
+  'scripts/check-audit-allowlist.js',
 ];
 
 /** 剥掉整行注释与行尾注释，只留真正会执行的内容 */

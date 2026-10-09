@@ -265,7 +265,9 @@
             </div>
             <div class="cell-sub cell-mono">
               {{ row.ip || '—'
-              }}<span v-if="row.location" class="ip-loc"> · {{ row.location }}</span>
+              }}<span v-if="row.location" class="ip-loc">
+                · {{ ipLocationText(row.location) }}</span
+              >
             </div>
           </template>
         </el-table-column>
@@ -388,7 +390,7 @@
         <el-descriptions-item :label="$t('auditLog.ipAddress')">
           {{ detailDialog.data.ip || '—'
           }}<span v-if="detailDialog.data.location" class="ip-loc">
-            · {{ detailDialog.data.location }}</span
+            · {{ ipLocationText(detailDialog.data.location) }}</span
           >
         </el-descriptions-item>
         <el-descriptions-item :label="$t('auditLog.riskLevel')">
@@ -463,6 +465,11 @@ import { api, apiClient, isCanceledError, resolveErrorMessage } from '@/utils/ap
 import { formatTime, localDateStr } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { usePermission } from '@/composables/usePermission'
+// 动作/分类文案映射与「我的操作日志」自助面共用同一份（utils/auditLabels.js），
+// 避免后端新增 action 枚举时两处文案漂移
+import { actionLabel as toActionLabel, categoryLabel as toCategoryLabel } from '@/utils/auditLabels'
+// IP 归属地：后端只出稳定码，中文「内网」/ 英文 "Internal network" 的本地化在这一个模块
+import { ipLocationLabel as toIpLocationLabel } from '@/utils/ipLocationLabels'
 
 const { t } = useI18n()
 const { hasPerm, hasAllPerms } = usePermission()
@@ -797,33 +804,14 @@ const formatJson = (value) => {
   return JSON.stringify(value, null, 2)
 }
 
-// 操作类型标签：audit.action 文案组与后端 AUDIT_LOG_ACTIONS 枚举一一对应。
-// 枚举已迁至 src/constants/audit.js（原位于 securityController，注释未同步）。
-// 枚举全集一一对应（含路由派生型/事件型/历史兼容三部分）
-const actionLabel = (action) => {
-  if (!action) return '-'
-  const key = `audit.action.${action}`
-  const label = t(key)
-  // 无对应文案时回退展示原始动作名，便于识别新增的枚举值
-  return label === key ? action : label
-}
-
-// 分类标签
-const categoryLabel = (category) => {
-  const labels = {
-    auth: t('auditLog.shortAuth'),
-    user: t('auditLog.shortUser'),
-    role: t('auditLog.shortRole'),
-    permission: t('auditLog.shortPermission'),
-    device: t('auditLog.shortDevice'),
-    alarm: t('auditLog.shortAlarm'),
-    inspection: t('auditLog.shortInspection'),
-    security: t('auditLog.catSecurity'),
-    report: t('auditLog.catReport'),
-    system: t('auditLog.shortSystem'),
-  }
-  return labels[category] || category || '-'
-}
+// 操作类型 / 分类标签：映射本体已抽至 utils/auditLabels.js（与 MyLogsCard 共用）。
+// audit.action.* 文案组与后端 AUDIT_LOG_ACTIONS 枚举一一对应，枚举全集见
+// src/constants/audit.js（含路由派生型/事件型/历史兼容三部分）。
+// 此处仅把模块级 t 绑定进去，模板与 viewDetail 的调用点不变。
+const actionLabel = (action) => toActionLabel(t, action)
+const categoryLabel = (category) => toCategoryLabel(t, category)
+// 归属地是后端可选增强字段：稳定码走本地化，数据文本（公网归属）原样透传
+const ipLocationText = (location) => toIpLocationLabel(t, location)
 
 // 风险等级样式
 const riskType = (level) => {

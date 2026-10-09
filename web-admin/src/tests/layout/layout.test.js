@@ -24,8 +24,19 @@
  * 用词表字面量。真实定时器一律用 setTimeout 等待（harness 的 waitFor 只推 nextTick）。
  */
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { createApp, h, onMounted, onUnmounted } from 'vue'
-import { Expand, Fold, FullScreen, Monitor, Moon, Refresh, Sunny } from '@element-plus/icons-vue'
+import {
+  Expand,
+  Fold,
+  FullScreen,
+  Monitor,
+  Moon,
+  Operation,
+  Refresh,
+  Sunny,
+} from '@element-plus/icons-vue'
 import { mountComponent, click, flush, settleRouter } from '../helpers/componentHarness'
 import { useAppStore, useAuthStore } from '@/store'
 import i18n from '@/i18n'
@@ -129,8 +140,12 @@ const openByHover = async (trigger, message) => {
   return visiblePopper()
 }
 
-const iconByTitle = (c, key) =>
-  c.findAll('.action-icon').find((el) => el.getAttribute('title') === label(key))
+/**
+ * 语言/主题入口定位：两处提示已从原生 title 换成 el-tooltip，title 属性不复存在，
+ * 改用具象图标 oracle 比对渲染出的 <path d>（语言恒为 Operation，主题三态各自给定）。
+ */
+const iconByPath = (c, icon) =>
+  c.findAll('.action-icon').find((el) => renderedIconPath(el) === iconPath(icon))
 
 const menuLabels = (c) => c.findAll('.el-menu-item').map((el) => el.textContent.trim())
 const submenuTitles = (c) => c.findAll('.el-sub-menu__title').map((el) => el.textContent.trim())
@@ -501,7 +516,7 @@ describe('布局 · 主题切换', () => {
       const c = mountLayout({ themeMode: mode })
       await settleRouter(c.router)
       await flush(10)
-      expect(renderedIconPath(iconByTitle(c, 'common.theme'))).toBe(iconPath(icon))
+      expect(renderedIconPath(iconByPath(c, icon))).toBe(iconPath(icon))
       c.handle.unmount()
       active = null
     }
@@ -514,7 +529,7 @@ describe('布局 · 主题切换', () => {
     currentApp.systemPrefersDark = true
     await flush(4)
 
-    const popper = await openByClick(iconByTitle(c, 'common.theme'), '主题下拉')
+    const popper = await openByClick(iconByPath(c, Monitor), '主题下拉')
     expect(dropdownItemLabels(popper)).toEqual([
       label('common.autoMode') + ' · ' + label('common.darkMode'),
       label('common.lightMode'),
@@ -526,23 +541,20 @@ describe('布局 · 主题切换', () => {
     const c = mountLayout({ themeMode: 'light' })
     await settleRouter(c.router)
     await flush(10)
-    const popper = await openByClick(iconByTitle(c, 'common.theme'), '主题下拉')
+    const popper = await openByClick(iconByPath(c, Sunny), '主题下拉')
 
     click(dropdownItem(popper, label('common.darkMode')))
     await pollUntil(() => currentApp.themeMode === 'dark', 'themeMode=dark')
     expect(document.documentElement.classList.contains('dark')).toBe(true)
     expect(window.localStorage.getItem('themeMode')).toBe('dark')
-    await pollUntil(
-      () => renderedIconPath(iconByTitle(c, 'common.theme')) === iconPath(Moon),
-      '图标切为 Moon'
-    )
+    await pollUntil(() => renderedIconPath(iconByPath(c, Moon)) === iconPath(Moon), '图标切为 Moon')
   })
 
   test('当前主题项带 is-active 标记（用户能看出当前选择）', async () => {
     const c = mountLayout({ themeMode: 'dark' })
     await settleRouter(c.router)
     await flush(10)
-    const popper = await openByClick(iconByTitle(c, 'common.theme'), '主题下拉')
+    const popper = await openByClick(iconByPath(c, Moon), '主题下拉')
     const active = Array.from(popper.querySelectorAll('.el-dropdown-menu__item.is-active')).map(
       (el) => el.textContent.trim()
     )
@@ -571,7 +583,7 @@ describe('布局 · 用户信息与登出', () => {
     await flush(10)
     expect(c.find('.user-name').textContent.trim()).toBe('未登录')
 
-    const popper = await openByClick(iconByTitle(c, 'common.language'), '语言下拉')
+    const popper = await openByClick(iconByPath(c, Operation), '语言下拉')
     click(dropdownItem(popper, 'English'))
     await pollUntil(() => i18n.global.locale.value === 'en-US', 'i18n 切到 en-US')
     await flush(10)
@@ -580,7 +592,7 @@ describe('布局 · 用户信息与登出', () => {
     // 硬编码中文会让英文界面出现中英混排；这条断言把「回退文案绕过 i18n」钉死
     expect(/[\u4e00-\u9fa5]/.test(english)).toBe(false)
 
-    const popper2 = await openByClick(iconByTitle(c, 'common.language'), '语言下拉（第二次）')
+    const popper2 = await openByClick(iconByPath(c, Operation), '语言下拉（第二次）')
     click(dropdownItem(popper2, '中文'))
     await pollUntil(() => i18n.global.locale.value === 'zh-CN', 'i18n 切回 zh-CN')
     await flush(10)
@@ -843,7 +855,7 @@ describe('布局 · 语言切换', () => {
     // 先切到中文：jsdom 的 navigator.language 是 en-US，若直接从「已是 en-US」
     // 的初始态出发，断言 html lang / sessionStorage 时会与初始值重合而掩盖
     // 「切换链路被拆掉」这类退化。必须先切到非默认语言，再切回英文。
-    const first = await openByClick(iconByTitle(c, 'common.language'), '语言下拉')
+    const first = await openByClick(iconByPath(c, Operation), '语言下拉')
     expect(dropdownItemLabels(first)).toEqual(['中文', 'English'])
     click(dropdownItem(first, '中文'))
     await pollUntil(() => i18n.global.locale.value === 'zh-CN', 'i18n 切到 zh-CN')
@@ -851,7 +863,7 @@ describe('布局 · 语言切换', () => {
     expect(window.sessionStorage.getItem('locale')).toBe('zh-CN')
     expect(menuLabels(c)).toEqual(MENU_KEYS.map(label))
 
-    const popper = await openByClick(iconByTitle(c, 'common.language'), '语言下拉（第二次）')
+    const popper = await openByClick(iconByPath(c, Operation), '语言下拉（第二次）')
     click(dropdownItem(popper, 'English'))
     await pollUntil(() => i18n.global.locale.value === 'en-US', 'i18n 切到 en-US')
     expect(currentApp.language).toBe('en-US')
@@ -878,11 +890,62 @@ describe('布局 · 语言切换', () => {
     const c = mountLayout()
     await settleRouter(c.router)
     await flush(10)
-    const popper = await openByClick(iconByTitle(c, 'common.language'), '语言下拉')
+    const popper = await openByClick(iconByPath(c, Operation), '语言下拉')
     const active = Array.from(popper.querySelectorAll('.el-dropdown-menu__item.is-active')).map(
       (el) => el.textContent.trim()
     )
     expect(active).toEqual(['中文'])
+  })
+})
+
+describe('布局 · 顶栏入口悬停提示', () => {
+  // 语言/主题此前的提示写在 el-icon 的 :title 上，走浏览器原生提示——样式、字号、
+  // 圆角与出现时机全由浏览器决定，和搜索/刷新/全屏的 el-tooltip 浮层是两套观感。
+  // 以下用例把「统一走 el-tooltip」钉死，防回退到原生 title。
+  test('顶栏操作图标一律不留原生 title（原生提示与 el-tooltip 不是一套观感）', async () => {
+    const c = mountLayout()
+    await settleRouter(c.router)
+    await flush(10)
+    const titled = c.findAll('.action-icon').filter((el) => el.hasAttribute('title'))
+    expect(titled).toEqual([])
+  })
+
+  test('语言入口：悬停出 Element Plus 提示浮层，文案为 i18n 的语言标签', async () => {
+    const c = mountLayout()
+    await settleRouter(c.router)
+    await flush(10)
+    const popper = await openByHover(iconByPath(c, Operation), '语言提示')
+    expect(popper.className).toContain('el-tooltip')
+    expect(popper.className).not.toContain('el-dropdown__popper')
+    expect(popper.textContent.trim()).toBe(label('common.language'))
+  })
+
+  test('主题入口：悬停出 Element Plus 提示浮层，文案为 i18n 的主题标签', async () => {
+    const c = mountLayout({ themeMode: 'system' })
+    await settleRouter(c.router)
+    await flush(10)
+    const popper = await openByHover(iconByPath(c, Monitor), '主题提示')
+    expect(popper.className).toContain('el-tooltip')
+    expect(popper.className).not.toContain('el-dropdown__popper')
+    expect(popper.textContent.trim()).toBe(label('common.theme'))
+  })
+
+  test('下拉展开期间提示浮层收起：两层浮层不得同位叠放', async () => {
+    const c = mountLayout()
+    await settleRouter(c.router)
+    await flush(10)
+    const icon = iconByPath(c, Operation)
+
+    icon.dispatchEvent(new window.MouseEvent('mouseenter', { bubbles: true }))
+    await pollUntil(() => !!visiblePopper(), '语言提示浮层')
+    click(icon)
+    // 菜单展开后提示必须收起：两层浮层同位叠放会互相盖住。轮询到终态而不是只看一帧
+    // ——禁用是经 visible-change 回写 state 再关浮层的链路，比菜单自身显形晚几帧
+    await pollUntil(() => {
+      const shown = poppers().filter((el) => el.getAttribute('aria-hidden') === 'false')
+      return shown.length === 1 && shown[0].className.includes('el-dropdown__popper')
+    }, '提示浮层收起，只剩菜单浮层')
+    expect(dropdownItemLabels(visiblePopper())).toEqual(['中文', 'English'])
   })
 })
 
@@ -1089,5 +1152,42 @@ describe('布局 · 权限热同步接线', () => {
       ['nav.dashboard', 'nav.reports', 'nav.profile', 'nav.about'].map(label)
     )
     expect(c.errors).toEqual([])
+  })
+})
+
+/**
+ * 顶栏图标盒模型静态不变量（jsdom 不注入 SFC 样式，只能读源码）
+ *
+ * 防的退化：给 `.el-icon`（element-plus 的定尺寸盒：width/height: 1em）加 padding
+ * 却不显式 content-box。global.css 的 * 重置是 border-box，padding 会连内容盒一起
+ * 吃掉——18px 图标 + 2×6px padding 后内容盒只剩 6px，svg 作为 flex 子项被
+ * flex-shrink 压成 6×18 细条（顶栏一整排图标连折叠按钮全部如此），热区也永远停在
+ * 1em 而不是 1em + 2×padding。Chromium 实测（build 产物）：修复前 svg 6×18 / 热区
+ * 18×18，修复后 svg 18×18 / 热区 30×30，触屏断点 42×42 / 46×46。
+ */
+describe('布局 · 顶栏图标盒模型静态不变量（jsdom 不注入 SFC 样式，只能读源码）', () => {
+  const source = readFileSync(resolve(__dirname, '../../layout/index.vue'), 'utf8')
+  const ruleBlock = (cls) => {
+    const m = source.match(new RegExp('\\.' + cls + '\\s*\\{[^}]*\\}'))
+    return m ? m[0] : ''
+  }
+
+  test('collapse-btn / action-icon 必须显式 content-box（padding 才长在 1em 图标外围）', () => {
+    for (const cls of ['collapse-btn', 'action-icon']) {
+      expect(ruleBlock(cls)).toContain('box-sizing: content-box')
+    }
+  })
+
+  test('padding 本身保留——修的是盒模型，不是把热区删掉', () => {
+    expect(ruleBlock('collapse-btn')).toContain('padding: 6px')
+    expect(ruleBlock('action-icon')).toContain('padding: 6px')
+  })
+
+  test('触屏热区规则带父级选择器，特异性压过 480px 断点', () => {
+    // 裸 .action-icon 特异性 (0,2,0) 会被同文件 max-width:480px 里的
+    // .navbar-right .action-icon (0,3,0) 盖掉——手机（≤480px）恰是最需要大热区的设备
+    const coarse = source.slice(source.indexOf('@media (hover: none) and (pointer: coarse)'))
+    expect(coarse).toContain('.navbar-right .action-icon')
+    expect(coarse).toContain('.navbar-left .collapse-btn')
   })
 })

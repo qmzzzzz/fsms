@@ -4,7 +4,7 @@
  * MFA 生命周期端点必须**消费**口令窗口，而不只是"单调推进"它
  *
  * 现状（落地前的行为，逐行读 `src/controllers/mfaController.js` 三处消费点 + 对照
- * `src/services/authService.js:534` 与 `middleware/security` 的步进实现）：
+ * `src/services/authService.js:527` 与 `middleware/security` 的步进实现）：
  *
  *   登录 / 步进二次验证：条件更新 `mfaLastCounter < counter` 做**原子认领**
  * ⇒ 同一时间窗的码只能用一次（P2-12 / 已修）。

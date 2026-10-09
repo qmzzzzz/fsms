@@ -123,8 +123,15 @@
         <h2 class="profile-section-title">
           {{ $t('profile.security') }}
         </h2>
+
+        <!-- 我的安全信息（B 组自助面接线）：安全评分 / 建议 / 最近登录 -->
+        <SecurityInfoCard class="profile-block" />
+
         <!-- 修改口令（D-2 拆为 ChangePasswordCard 组件） -->
         <ChangePasswordCard />
+
+        <!-- 账户绑定（B 组自助面接线）：邮箱/手机号/部门的绑定与校验状态 -->
+        <AccountBindingsCard class="profile-block" />
 
         <!-- 设备级登录会话：查看并管理正在使用本账号的设备 -->
         <el-card shadow="never" class="profile-block">
@@ -139,6 +146,9 @@
 
         <!-- MFA 两步验证（I-06，D-2 拆为 MfaSettingsCard 组件） -->
         <MfaSettingsCard />
+
+        <!-- 我的操作日志（B 组自助面接线）：仅本人记录，按时间范围收窄 -->
+        <MyLogsCard class="profile-block" />
       </el-col>
     </el-row>
   </div>
@@ -157,6 +167,10 @@ import SessionManager from '@/components/SessionManager.vue'
 // D-2：修改口令与两步验证拆为独立组件
 import ChangePasswordCard from '@/components/ChangePasswordCard.vue'
 import MfaSettingsCard from '@/components/MfaSettingsCard.vue'
+// B 组自助面接线：后端已有、前端此前零引用的三个本人数据端点
+import SecurityInfoCard from '@/components/SecurityInfoCard.vue'
+import AccountBindingsCard from '@/components/AccountBindingsCard.vue'
+import MyLogsCard from '@/components/MyLogsCard.vue'
 
 const { t, locale } = useI18n()
 const authStore = useAuthStore()

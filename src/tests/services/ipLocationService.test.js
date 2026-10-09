@@ -10,6 +10,10 @@
 
 const searcher = require('../../utils/ip2regionSearcher');
 const ipLocation = require('../../services/ipLocationService');
+// 私网展示值取后端码表单例（constants/ipLocationCodes.js）：断言跟着码表走，
+// 后端改取值时这里跟着改，不会出现「测试还钉着旧中文、实现已是新码」的假绿
+const { IP_LOCATION_CODES } = require('../../constants/ipLocationCodes');
+const PRIVATE = IP_LOCATION_CODES.PRIVATE_NETWORK;
 
 describe('ipLocationService（IP 归属地展示）', () => {
   beforeEach(() => {
@@ -31,20 +35,21 @@ describe('ipLocationService（IP 归属地展示）', () => {
       expect(ipLocation.locate(input)).toBeNull();
     });
 
-    test('IPv6：公网 v6 无数据返回 null，内网族（回环/链路本地/ULA）标「内网」', () => {
+    test('IPv6：公网 v6 无数据返回 null，内网族（回环/链路本地/ULA）标稳定码 private', () => {
       // v4 数据库不含 v6 归属，公网 v6 只能不展示
       expect(ipLocation.locate('2001:db8::1')).toBeNull();
       // 内网族不能跟着"缺数据"掉进 null：本机/内网 IPv6 会话（::1、fe80::、fc00::）
-      // 若与 IPv4 内网口径分裂，后台会表现为"有的 IP 查不到归属地"
-      expect(ipLocation.locate('::1')).toBe('内网');
-      expect(ipLocation.locate('fe80::1')).toBe('内网');
-      expect(ipLocation.locate('fe80::1%eth0')).toBe('内网');
-      expect(ipLocation.locate('fd00::1')).toBe('内网');
+      // 若与 IPv4 内网口径分裂，后台会表现为"有的 IP 查不到归属地"。取值是稳定码
+      // 而非中文文案，英文界面才能本地化（见 constants/ipLocationCodes.js）
+      expect(ipLocation.locate('::1')).toBe(PRIVATE);
+      expect(ipLocation.locate('fe80::1')).toBe(PRIVATE);
+      expect(ipLocation.locate('fe80::1%eth0')).toBe(PRIVATE);
+      expect(ipLocation.locate('fd00::1')).toBe(PRIVATE);
     });
   });
 
   describe('成功路径（真实数据）', () => {
-    test('公网 IP 输出「国家·省·市·ISP」可读串，占位符 0 被丢弃', () => {
+    test('公网 IP 输出数据文本（非稳定码）：占位符 0 被丢弃', () => {
       // 期望值写成「稳定事实的包含断言」而非全串快照：数据更新可能微调
       // 市/ISP 拆分，测试不应因数据版本红掉
       expect(ipLocation.locate('223.5.5.5')).toContain('中国');
@@ -61,11 +66,19 @@ describe('ipLocationService（IP 归属地展示）', () => {
       expect(ipLocation.locate('  223.5.5.5  ')).toContain('中国');
     });
 
-    test('内网/保留地址统一展示为「内网」', () => {
+    test('内网/保留地址统一展示为稳定码 private（IPv4 数据侧与 IPv6 range 判定同一口径）', () => {
       for (const ip of ['127.0.0.1', '10.0.0.1', '192.168.1.1', '100.64.0.1']) {
-        expect(ipLocation.locate(ip)).toBe('内网');
+        expect(ipLocation.locate(ip)).toBe(PRIVATE);
       }
     });
+  });
+
+  test('私网取值不含中日韩字符（英文界面 i18n 缺口回归）', () => {
+    // 修复前私网/环回地址收敛成中文两字「内网」：前端从 API 拿到的已是定型
+    // 文案，切到 en-US 也翻不了，界面上挂着中文。现在必须是语言中立的稳定码
+    expect(ipLocation.locate('127.0.0.1')).not.toMatch(/[\u4e00-\u9fa5]/);
+    expect(ipLocation.locate('::1')).not.toMatch(/[\u4e00-\u9fa5]/);
+    expect(ipLocation.locate('fd00::1')).not.toMatch(/[\u4e00-\u9fa5]/);
   });
 
   describe('失败语义与缓存', () => {

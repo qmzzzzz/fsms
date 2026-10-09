@@ -286,8 +286,11 @@
    5) About
    ============================================================ */
 
-/* 关于页图标：从裸图标升级为渐变圆角徽标（与退出遮罩品牌图标同形） */
+/* 关于页图标：从裸图标升级为渐变圆角徽标（与退出遮罩品牌图标同形）
+   content-box：.el-icon 是 1em 定尺寸盒，border-box 下 10px padding 会把 48px 图标
+   压成 28×48 细条；content-box 下 48px 图标 + 2×10 padding = 68×68 徽标。 */
 .about-icon {
+  box-sizing: content-box;
   padding: 10px;
   border-radius: 14px;
   background: var(--xf-gradient-primary) !important;

@@ -67,6 +67,18 @@ vi.mock('@/utils/api', () => ({
       changePassword: vi.fn(),
       getMfaStatus: vi.fn(() => Promise.resolve({ data: { data: { enabled: false } } })),
     },
+    // ProfileView 右栏的 B 组自助卡（我的安全信息/账户绑定/我的操作日志）在挂载时
+    // 各发一次请求；不在此处给桩的话，本用例挂载 ProfileView 会因 api.security 缺失
+    // 而让三张卡落进错误态（虽被组件内 catch 兜住不抛，但渲染出的不再是正常态）。
+    security: {
+      getMySecurityInfo: vi.fn(() =>
+        Promise.resolve({
+          data: { data: { securityScore: 100, suggestions: [], recentLogins: [] } },
+        })
+      ),
+      getAccountBindings: vi.fn(() => Promise.resolve({ data: { data: { bindings: [] } } })),
+      getMyLogs: vi.fn(() => Promise.resolve({ data: { data: [] } })),
+    },
   },
   isCanceledError: () => false,
 }))
@@ -353,8 +365,19 @@ describe('ProfileView 挂载登录会话卡片（真实渲染）', () => {
     expect(leftTitles).toContain('基本信息')
     expect(leftTitles).not.toContain('登录会话')
 
-    // 右栏内部顺序：安全设置 → 修改密码 → 登录会话 → 两步验证（MFA）
-    expect(rightTitles).toEqual(['安全设置', '修改密码', '登录会话', '两步验证（MFA）'])
+    // 右栏内部顺序：安全设置 → 我的安全信息 → 修改密码 → 账户绑定
+    //                → 登录会话 → 两步验证（MFA） → 我的操作日志
+    // 前三个自助块（我的安全信息/账户绑定/我的操作日志）是 B 组端点接线新增的，
+    // 本断言随之扩展——它守的是「卡片落在正确的栏、且相对顺序不变」。
+    expect(rightTitles).toEqual([
+      '安全设置',
+      '我的安全信息',
+      '修改密码',
+      '账户绑定',
+      '登录会话',
+      '两步验证（MFA）',
+      '我的操作日志',
+    ])
 
     // 会话卡片本体确实渲染了（不是只剩标题空壳）：断言 SessionManager 的
     // 根元素 .session-manager（ProfileView 自身也有 session-intro / session.title，
@@ -364,11 +387,18 @@ describe('ProfileView 挂载登录会话卡片（真实渲染）', () => {
     // 且必须落在「登录会话」那张卡片内，而不是栏内随便某个位置
     const card = manager.closest('.el-card')
     expect(card.querySelector('.card-header').textContent.trim()).toBe('登录会话')
-    // 栏内顺序：登录会话卡片在 MFA 卡片之前
+    // 栏内卡片顺序：登录会话卡片在 MFA 卡片之前，且两侧的自助卡各就各位
     const cardHeaders = Array.from(cols[1].querySelectorAll('.el-card .card-header')).map((e) =>
       e.textContent.trim()
     )
-    expect(cardHeaders).toEqual(['修改密码', '登录会话', '两步验证（MFA）'])
+    expect(cardHeaders).toEqual([
+      '我的安全信息',
+      '修改密码',
+      '账户绑定',
+      '登录会话',
+      '两步验证（MFA）',
+      '我的操作日志',
+    ])
     expect(c.errors).toEqual([])
   })
 })
@@ -1021,6 +1051,30 @@ describe('SessionManager 真实交互（确认框 / 吊销 / 展开）', () => {
     expect(metaWithout).toContain('203.0.113.45')
     expect(metaWithout).not.toContain('·')
     expect(metaWithout).not.toContain('undefined')
+  })
+
+  test('归属地跟随语言：切到 en-US 后私网稳定码显示 Internal network（i18n 缺口回归）', async () => {
+    // 原缺陷：后端把私网地址收敛成中文两字「内网」直接下发，前端拿到的是已定型
+    // 文案，切英文界面也翻不了。现后端只出稳定码，文案归词表。
+    const c = await renderSessions([
+      otherRow({ lastIp: '10.0.0.1', location: 'private' }),
+      otherRow({ lastIp: '203.0.113.45', location: '中国·广东省·深圳市·电信' }),
+    ])
+    i18n.global.locale.value = 'en-US'
+    await flush(8)
+    // 每条会话的 meta 是三段（IP / 最近活跃 / 登录时间），按 IP 定位自己那一段
+    const metaOf = (ip) =>
+      c
+        .findAll('.session-meta span')
+        .map((s) => s.textContent)
+        .find((text) => text.includes(ip))
+    expect(metaOf('10.0.0.1')).toContain('· Internal network')
+    expect(metaOf('10.0.0.1')).not.toContain('内网')
+    // 公网归属地按词典逐段译名
+    expect(metaOf('203.0.113.45')).toContain('· China·Guangdong·Shenzhen·China Telecom')
+    i18n.global.locale.value = 'zh-CN'
+    await flush(8)
+    expect(metaOf('10.0.0.1')).toContain('· 内网')
   })
 
   test('本设备打「本设备」标签（否则用户可能试图把自己踢下线）', async () => {

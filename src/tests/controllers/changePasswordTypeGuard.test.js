@@ -23,7 +23,7 @@ describe('P1-2 改密接口非字符串入参防护', () => {
   let User;
   let user;
   let token;
-  // 夹具口令须避开 BREACHED_PASSWORDS 黑名单（G8）
+  // 夹具口令须避开 BREACHED_PASSWORD_STEMS 词干黑名单（G8）
   const PASSWORD = 'Qz7#Lm42vTx9';
 
   beforeAll(async () => {

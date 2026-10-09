@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AccountBindingsCard: typeof import('./components/AccountBindingsCard.vue')['default']
     AuthPrefs: typeof import('./components/AuthPrefs.vue')['default']
     ChangePasswordCard: typeof import('./components/ChangePasswordCard.vue')['default']
     DashboardCharts: typeof import('./components/DashboardCharts.vue')['default']
@@ -59,6 +60,7 @@ declare module 'vue' {
     InspectionReviewForm: typeof import('./components/InspectionReviewForm.vue')['default']
     LiquidGlassButtons: typeof import('./components/LiquidGlassButtons.vue')['default']
     MfaSettingsCard: typeof import('./components/MfaSettingsCard.vue')['default']
+    MyLogsCard: typeof import('./components/MyLogsCard.vue')['default']
     PasswordStrengthMeter: typeof import('./components/PasswordStrengthMeter.vue')['default']
     PermissionModuleCard: typeof import('./components/PermissionModuleCard.vue')['default']
     RecentAlarmsCard: typeof import('./components/RecentAlarmsCard.vue')['default']
@@ -69,6 +71,8 @@ declare module 'vue' {
     RouterView: typeof import('vue-router')['RouterView']
     ScrambleText: typeof import('./components/ScrambleText.vue')['default']
     SearchPalette: typeof import('./components/SearchPalette.vue')['default']
+    SecurityInfoCard: typeof import('./components/SecurityInfoCard.vue')['default']
+    SecurityStatsCard: typeof import('./components/SecurityStatsCard.vue')['default']
     SessionManager: typeof import('./components/SessionManager.vue')['default']
   }
   export interface GlobalDirectives {

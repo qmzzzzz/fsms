@@ -83,7 +83,7 @@ const PUBLIC_GET_ALLOWLIST = {
   'authRoutes.js /captcha-status': '同上，只回布尔开关',
   'authRoutes.js /login-public-key': '加密登录用的公钥，公钥本就需匿名可得（私钥永不下发）',
   'authRoutes.js /session':
-    '只回 { authenticated }，由调用者自己的 cookie 推导，不接受任何身份入参（authController.js:515-530）',
+    '只回 { authenticated }，由调用者自己的 cookie 推导，不接受任何身份入参（authController.js:554-569）',
   'wellKnownRoutes.js /.well-known/security.txt': 'RFC 9116 公共安全联系信息',
   'wellKnownRoutes.js /security.txt': '同上的历史别名',
 };

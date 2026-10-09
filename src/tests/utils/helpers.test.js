@@ -168,6 +168,11 @@ describe('Helper Utils', () => {
   });
 
   describe('isBreachedPassword (G8)', () => {
+    // 口径注记（2026-10-09）：本 describe 是**匹配器单元级**断言，只回答「这个串命中词干表吗」，
+    // **不回答**「生产上会不会走到这一步」。例如 `admin@123` 只有 9 位，生产路径上会先被
+    // 长度规则拒掉（黑名单排在复杂度之后），永远走不到这里 —— 故不要用本 describe 的用例
+    // 推断「该口令在生产上因黑名单被拒」。端到端的可达性由
+    // `breachedPasswordMatcher.test.js` 用「构造过策略反例」的方式设防。
     test('should match blacklist entries case-insensitively', () => {
       expect(isBreachedPassword('admin@123')).toBe(true);
       expect(isBreachedPassword('ADMIN@123')).toBe(true);
