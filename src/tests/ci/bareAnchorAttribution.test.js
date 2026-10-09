@@ -329,10 +329,10 @@ const LEDGER = [
   },
   {
     site: 'web-admin/src/tests/utils/websocket.test.js',
-    siteLine: 20,
+    siteLine: 21,
     raw: '（:194）',
     status: 'UNVERIFIED',
-    note: '未核',
+    note: '未核。站点行号 20→21：同套件头部「未覆盖」段上方新增一行（第 7 项「降级上报」）把锚推下一行；指代目标 :194（disconnect 的 manager 解绑 catch）未动',
   },
 ];
 const LEDGER_KEYS = LEDGER.map(keyOf).sort();
