@@ -18,7 +18,7 @@
  * 覆盖率冲分第三批：小而独立、可确定性直驱的模块错误/边界分支
  *
  * 目标（基线分支覆盖）：ApiError 22%、httpPostJson 14%、autoIncrement 50%、
- * captchaService 清理定时器未测、middleware/sentry 14%、rateLimit 46%（各 handler 未触发）。
+ * captchaService 清理定时器未测、middleware/sentry 初始化与 handler 分支（v11 迁移后形态）、rateLimit 46%。
  * 全部不依赖真实网络/DB：http|https、@sentry/node、mongoose 均以 jest.mock 替身驱动。
  */
 
@@ -28,16 +28,9 @@ jest.mock('https', () => ({ request: jest.fn() }));
 jest.mock('@sentry/node', () => ({
   init: jest.fn(),
   captureException: jest.fn(),
-  Integrations: {
-    // 与真实 @sentry/node v7 对齐：不存在 AutoSessionTracking 成员，
-    // 会话跟踪通过 init 的 autoSessionTracking 选项开启
-    Http: jest.fn().mockImplementation((opts) => ({ kind: 'Http', opts })),
-  },
-  Handlers: {
-    requestHandler: jest.fn(() => 'REQ_HANDLER'),
-    tracingHandler: jest.fn(() => 'TRACE_HANDLER'),
-    errorHandler: jest.fn(() => 'ERR_HANDLER'),
-  },
+  // v11：Integrations/Handlers 命名空间在 v8 已移除，本模块只用这两个成员。
+  // requestDataIntegration 真实签名 (options) => Integration，include 为扁平六键。
+  requestDataIntegration: jest.fn((opts) => ({ kind: 'requestData', opts })),
 }));
 jest.mock('mongoose', () => ({
   connection: { db: { collection: jest.fn() } },
@@ -329,6 +322,7 @@ describe('middleware/sentry 初始化与处理器（补 14% 分支）', () => {
   beforeEach(() => {
     Sentry.init.mockClear();
     Sentry.captureException.mockClear();
+    Sentry.requestDataIntegration.mockClear();
   });
   afterAll(() => {
     if (ORIGINAL_DSN === undefined) delete process.env.SENTRY_DSN;
@@ -343,7 +337,7 @@ describe('middleware/sentry 初始化与处理器（补 14% 分支）', () => {
     expect(Sentry.init).not.toHaveBeenCalled();
   });
 
-  test('有 DSN 时初始化并返回 true；生产采样率 0.1、集成被实例化', () => {
+  test('有 DSN 时初始化并返回 true；生产采样率 0.1、PII 逐键关、扁平 include', () => {
     process.env.SENTRY_DSN = 'https://k@sentry.io/1';
     process.env.NODE_ENV = 'production';
     expect(sentry.initSentry()).toBe(true);
@@ -351,9 +345,28 @@ describe('middleware/sentry 初始化与处理器（补 14% 分支）', () => {
     expect(arg.dsn).toBe('https://k@sentry.io/1');
     expect(arg.environment).toBe('production');
     expect(arg.tracesSampleRate).toBe(0.1);
-    // v7 起 AutoSessionTracking 改为 init 选项，不再通过 integrations 传入
+    // v11.4.0：init 的 sendDefaultPii 不再映射 dataCollection，必须逐键显式关
+    expect(arg.dataCollection).toEqual({
+      userInfo: false,
+      cookies: false,
+      httpHeaders: false,
+      httpBodies: [],
+      urlQueryParams: false,
+    });
+    // v11：集成是带扁平 include 的 requestDataIntegration 实例；
+    // v7 的 Integrations.Http 与 autoSessionTracking 选项已随 v8 移除
     expect(arg.integrations).toHaveLength(1);
-    expect(arg.autoSessionTracking).toBe(true);
+    expect(arg.integrations[0].kind).toBe('requestData');
+    expect(Sentry.requestDataIntegration).toHaveBeenCalledWith({
+      include: {
+        cookies: false,
+        data: false,
+        headers: false,
+        ip: false,
+        query_string: false,
+        url: true,
+      },
+    });
   });
 
   test('非生产环境采样率 1.0', () => {
@@ -364,10 +377,21 @@ describe('middleware/sentry 初始化与处理器（补 14% 分支）', () => {
     expect(Sentry.init.mock.calls[0][0].environment).toBe('test');
   });
 
-  test('三个 handler 取手透传 Sentry.Handlers', () => {
-    expect(sentry.sentryRequestHandler()).toBe('REQ_HANDLER');
-    expect(sentry.sentryTracingHandler()).toBe('TRACE_HANDLER');
-    expect(sentry.sentryErrorHandler()).toBe('ERR_HANDLER');
+  test('三个 handler：请求/追踪直通，errorHandler 捕获后继续向后传', () => {
+    const req = {};
+    const res = {};
+    const next = jest.fn();
+    expect(typeof sentry.sentryRequestHandler()).toBe('function');
+    sentry.sentryRequestHandler()(req, res, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    sentry.sentryTracingHandler()(req, res, next);
+    expect(next).toHaveBeenCalledTimes(2);
+
+    const errNext = jest.fn();
+    const err = new Error('boom');
+    sentry.sentryErrorHandler()(err, req, res, errNext);
+    expect(Sentry.captureException).toHaveBeenCalledWith(err);
+    expect(errNext).toHaveBeenCalledWith(err);
   });
 
   test('captureException 默认 context={}，也可携带额外上下文', () => {
