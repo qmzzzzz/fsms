@@ -587,7 +587,7 @@ const recordEarlyRejection = (req, meta) => {
 const isWhitelistExemptionTrustworthy = (req) => isClientIpIdentityTrustworthy(req);
 
 const checkIPBlacklist = async (req, res, next) => {
-  const clientIP = req.ip || req.connection.remoteAddress;
+  const clientIP = require('../utils/ipUtils').clientIpForSecurityDecision(req);
 
   try {
     const IPBlacklist = require('../models/IPBlacklist');
@@ -601,7 +601,7 @@ const checkIPBlacklist = async (req, res, next) => {
     // 白名单优先：命中则豁免黑名单拦截，并挂标记供限流器豁免。
     // 豁免标记只在可信边界内发放（见 isWhitelistExemptionTrustworthy）：边界不可信时不发
     // 标记、也不拦截——限流与来源校验照常生效。**别把它读成"代价只有豁免"**：下面两次
-    // 名单查询用的都是 req.ip（可伪造），真身在黑名单者伪造一个白名单地址即整条免检。
+    // 名单查询取 clientIpForSecurityDecision（#24 R1）：边界外退回 socket 对端 ⇒ 探针 A/B 转拦截；容器内直连（对端 RFC1918）仍判可信形态 3) ⇒ 探针 D 仍可用，关它属 R3。
     if (isWhitelisted) {
       if (isWhitelistExemptionTrustworthy(req)) {
         req.ipWhitelisted = true;

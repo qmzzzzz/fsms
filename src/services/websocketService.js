@@ -85,9 +85,9 @@ const resolveHandshakeClientIP = (handshake, hops) => {
  * 比对。`resolveHandshakeClientIP` 与真实 express 的等价性已由
  * websocketAuthScope.test.js 用真实 HTTP 请求钉住，故本函数不再重复那一层。
  *
- * 注：**封禁（黑名单）判定不走这里**。HTTP 侧的 checkIPBlacklist 查询用的就是
- * `req.ip || req.connection.remoteAddress`（security.js:590），所以 WS 的封禁闸继续
- * 用 resolveHandshakeClientIP——两侧同址这个性质由 websocketHandshakeIpBan.test.js 钉。
+ * 封禁（黑名单）判定自 2026-10-10 #24 R1 起也走本函数：HTTP 侧 checkIPBlacklist 改用
+ * clientIpForSecurityDecision（security.js:590），WS 封禁闸随之改用本函数——两侧仍同址，
+ * 且同取安全裁决尺，由 websocketHandshakeIpBan.test.js / websocketAllowedIpTrustBoundary.test.js 钉。
  *
  * @param {object} handshake socket.handshake
  * @param {number} hops 信任的代理跳数（来自 resolveTrustProxyHops）
@@ -713,11 +713,11 @@ class WebSocketService {
    * 只关一半的门等于没有关。
    *
    * 判据与 HTTP 侧同源，逐条对齐：
-   *  - 地址取自 resolveHandshakeClientIP(handshake, resolveTrustProxyHops())——
-   *    这是本仓已用真实 express 逐条比对过、与 req.ip 恒等的那个实现
-   *    （见 websocketAuthScope.test.js / websocketTrustProxyHopsParity.test.js）；
-   *    用别的取法（例如只看 handshake.address）会让"HTTP 侧封的 IP"与"WS 侧查的 IP"
-   *    不是同一个值，闸形同虚设。
+   *  - 地址取自 resolveHandshakeIPForSecurityDecision(handshake, resolveTrustProxyHops())——
+   *    与 HTTP 侧 checkIPBlacklist 同一把安全裁决尺（2026-10-10 #24 R1）：可信边界内取
+   *    req.ip 等价值，边界外（公网直连+伪造 XFF）退回不可伪造的 socket 对端；底层仍复用
+   *    已与真实 express 比对过的 resolveHandshakeClientIP（见 websocketAuthScope / trustProxyHopsParity）。
+   *    两侧不同尺会让"HTTP 侧封的 IP"与"WS 侧查的 IP"不是同一个值，闸形同虚设。
    *  - 白名单优先：与 checkIPBlacklist 一致，命中白名单即豁免黑名单。
    *  - 取不到地址 / 名单查询抛错 ⇒ fail-open 放行，与 HTTP 侧同口径
    *    （宁可不拦，也不因一次 DB 抖动把全部实时推送踢下线）；但 fail-open 必须留
@@ -727,14 +727,17 @@ class WebSocketService {
    * 已闭合的部分（2026-10-01 第 4 轮补齐）：本闸只在建立连接时生效，而 HTTP 侧是
    * 逐请求复查——一条已建立的 socket 是长连接，封禁发生在建连之后时它会存活到自然断开。
    * 该运行期面由 `runCleanupSweep` → `_sweepBannedIps` 接上（同一个 IP 推导、
-   * 同一份名单快照、同一条 fail-open 口径），两侧共用 resolveHandshakeClientIP，
+   * 同一份名单快照、同一条 fail-open 口径），两侧共用 resolveHandshakeIPForSecurityDecision，
    * 不存在"握手看的地址"与"清扫看的地址"两套判据。
    *
    * @param {import('socket.io').Socket} socket
    * @returns {Promise<boolean>} true 表示已拒绝并断开连接
    */
   async _assertHandshakeIpNotBanned(socket) {
-    const clientIP = resolveHandshakeClientIP(socket.handshake, resolveTrustProxyHops());
+    const clientIP = resolveHandshakeIPForSecurityDecision(
+      socket.handshake,
+      resolveTrustProxyHops()
+    );
     if (!clientIP) return false;
 
     const IPBlacklist = require('../models/IPBlacklist');
@@ -771,7 +774,7 @@ class WebSocketService {
    *
    * HTTP 侧的 checkIPBlacklist 是逐请求复查，长连接没有"下一个请求"：IP 在建连后被
    * 拉黑时，该 socket 会带着已通过的握手校验一直收实时推送到自然断开。本方法把同一道
-   * 闸挂进周期清扫，判据与握手面**完全同源**——同一个 resolveHandshakeClientIP、
+   * 闸挂进周期清扫，判据与握手面**完全同源**——同一个 resolveHandshakeIPForSecurityDecision、
    * 同一份名单快照（白名单优先）、同一条 fail-open 口径与同一个 ip_blacklist_failopen
    * 计数。任何一处与握手侧分叉都会变成「握手拦得住、清扫拦不住」的第二扇门。
    *
@@ -793,7 +796,7 @@ class WebSocketService {
     const hops = resolveTrustProxyHops();
     const ipById = new Map();
     for (const socket of sockets) {
-      const ip = resolveHandshakeClientIP(socket.handshake, hops);
+      const ip = resolveHandshakeIPForSecurityDecision(socket.handshake, hops);
       if (ip) ipById.set(socket.id, ip);
     }
     // 无任何可判定地址时连模型都不加载：纯内存快速返回，

@@ -16,10 +16,10 @@
  *     再把同一次请求的头与对端交给 WS 侧函数比对。不在测试里复述任何一侧的判据。
  *  2. **行为**用 allowedIPs 闸的实际返回值断言"伪造头买不到访问控制"，并配
  *     反向对照（经 nginx 的正常流量不得被误伤）——防止把闸做成恒拒绝。
- *  3. 第 3 组用例钉住**本次没有把封禁面一起改掉**：HTTP 的 checkIPBlacklist 查询用的
- *     就是 `req.ip || req.connection.remoteAddress`（security.js:590），所以 WS 的
- *     封禁闸必须继续按 req.ip 形态取值。两处若混用一把尺，"封了地址却拦不住"会以
- *     新的形态复现。
+ *  3. 第 3 组用例（2026-10-10 #24 R1 起改口径）：封禁面**已与准入面同柄**——HTTP 的
+ *     checkIPBlacklist 与 WS 的封禁闸都改取 clientIpForSecurityDecision（security.js:590
+ *     已换尺），公网对端 + 伪造 XFF 一律退回 socket 对端。本组改钉"WS 闸与 HTTP 侧查同一个
+ *     安全裁决地址"：准入 / HTTP 封禁 / WS 封禁三处共用一把尺，不再有"封了 X 却拦不住 Y"。
  */
 
 const express = require('express');
@@ -221,15 +221,15 @@ describe('WS/HTTP 客户端 IP 可信边界一致性（F-B43）', () => {
     });
   });
 
-  describe('3. 封禁面保持按 req.ip 形态取值（本次没有把一把尺套到两处）', () => {
-    test('黑名单查询用的地址 = HTTP 侧 checkIPBlacklist 查询用的地址（伪造段命中即拦）', async () => {
+  describe('3. 封禁面与准入面同取安全裁决尺（#24 R1 后两处同柄）', () => {
+    test('黑名单查询用的地址 = HTTP 侧 checkIPBlacklist 查询用的地址（#24 R1 后同取安全裁决尺）', async () => {
       const IPBlacklist = require(path.join(__dirname, '../../models/IPBlacklist'));
       const isBlocked = jest.spyOn(IPBlacklist, 'isBlocked').mockResolvedValue(true);
       jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(false);
       const original = process.env.TRUST_PROXY_HOPS;
       process.env.TRUST_PROXY_HOPS = '1';
       try {
-        const { peer, headers } = await probe({
+        const { peer, headers, httpIP } = await probe({
           hops: 1,
           xff: FORGED,
           peerOverride: PUBLIC_PEER,
@@ -249,9 +249,13 @@ describe('WS/HTTP 客户端 IP 可信边界一致性（F-B43）', () => {
           WebSocketService.prototype
         )._assertHandshakeIpNotBanned(socket);
 
-        // HTTP 侧查 req.ip（= 伪造段）：WS 必须查同一个值，否则"封了 X 却拦不住 Y"。
+        // #24 R1：HTTP 侧与 WS 封禁闸同取 clientIpForSecurityDecision ⇒ 公网对端 + 伪造 XFF 都退到 socket 对端；WS 必须查同一个安全裁决地址。
         expect(isBlocked).toHaveBeenCalledTimes(1);
-        expect(isBlocked.mock.calls[0][0]).toBe(FORGED);
+        // 前提自证：这把尺对"公网对端 + 伪造 XFF"确实退到不可伪造的 socket 对端
+        expect(httpIP).toBe(PUBLIC_PEER);
+        // WS 闸查的地址必须等于 HTTP 侧同一个安全裁决地址（两侧同址且同尺）
+        expect(isBlocked.mock.calls[0][0]).toBe(httpIP);
+        expect(isBlocked.mock.calls[0][0]).toBe(peer);
         expect(rejected).toBe(true);
         expect(socket.connected).toBe(false);
       } finally {

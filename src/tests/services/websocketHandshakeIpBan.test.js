@@ -292,6 +292,30 @@ describe('WebSocket 握手 IP 黑名单闸', () => {
       expect(socket.connected).toBe(false);
       expect(authErrorOf(socket).data.message).toContain('封禁');
     });
+
+    // #24 R1：公网对端伪造白名单 XFF 不再能买通黑名单闸。改前握手闸读 XFF
+    //（resolveHandshakeClientIP）⇒ 命中白名单即豁免放行；改后取
+    // resolveHandshakeIPForSecurityDecision ⇒ 公网对端+带 XFF 判不可信 ⇒ 退回 socket 对端
+    // ⇒ 真身（对端）在黑名单即被拦。把本闸改回 resolveHandshakeClientIP，这条立刻判红。
+    test('R1 公网对端伪造白名单 XFF ⇒ 仍按真身对端拦下（改前读 XFF 会放行）', async () => {
+      const original = process.env.TRUST_PROXY_HOPS;
+      process.env.TRUST_PROXY_HOPS = '1';
+      try {
+        expect(currentHops()).toBe(1);
+        await putEntry('198.51.100.7', 'black'); // 真身对端：公网，在黑名单
+        // 攻击者把伪造的白名单段地址写进 XFF（10.20.30.40 不在任何名单）
+        const socket = makeSocket('x', { address: '198.51.100.7', xff: '10.20.30.40' });
+
+        const rejected = await call(socket);
+
+        expect(rejected).toBe(true);
+        expect(socket.connected).toBe(false);
+        expect(authErrorOf(socket).data.message).toContain('封禁');
+      } finally {
+        if (original === undefined) delete process.env.TRUST_PROXY_HOPS;
+        else process.env.TRUST_PROXY_HOPS = original;
+      }
+    });
   });
 
   /**
@@ -478,8 +502,10 @@ describe('WebSocket 握手 IP 黑名单闸', () => {
     // 靠 hops 的两个取值让同一条 socket 得出相反结论——分歧只能由"同址"解释。
     test('与握手面同址：hops=0 查直连对端、hops=1 查 XFF 可信段（同一 socket 两种结论）', async () => {
       const original = process.env.TRUST_PROXY_HOPS;
-      const bannedDirect = FRESH(148);
-      const cleanXff = FRESH(149);
+      // #24 R1 后，XFF 可信段只在**对端为内网/回环**（真实代理 nginx/容器）时才被采信；
+      // 公网对端写的 XFF 已不再被信任（那正是本改要关的洞）。故用 RFC1918 对端复现代理跳数分支。
+      const bannedDirect = '10.9.9.148';
+      const cleanXff = '10.9.9.149';
       await putEntry(bannedDirect, 'black');
       try {
         process.env.TRUST_PROXY_HOPS = '0';
