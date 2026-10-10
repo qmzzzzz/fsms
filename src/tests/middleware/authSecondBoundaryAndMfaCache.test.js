@@ -58,7 +58,7 @@ describe('认证边界（第三批审计）', () => {
         ...(iat !== undefined ? { iat } : {}),
       },
       secret,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
   const createUser = async (suffix) => {

@@ -47,7 +47,7 @@ describe('巡检计划的三类引用必须落在操作者数据范围内', () =
     jwt.sign(
       { userId: String(u._id), username: u.username, tokenVersion: u.tokenVersion ?? 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
   beforeAll(async () => {

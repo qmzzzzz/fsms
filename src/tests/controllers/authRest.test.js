@@ -62,7 +62,7 @@ describe('认证剩余分支（批次 B2）', () => {
     superToken = jwt.sign(
       { userId: superUserId, username: superUsername, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');
@@ -136,7 +136,7 @@ describe('认证剩余分支（批次 B2）', () => {
         refreshToken: jwt.sign(
           { userId: superUserId, type: 'refresh', tokenVersion: 99 },
           process.env.JWT_REFRESH_SECRET,
-          { expiresIn: '1h' }
+          { expiresIn: '24h' }
         ),
       });
     expect(wrongVersion.status).toBe(401);
@@ -150,7 +150,7 @@ describe('认证剩余分支（批次 B2）', () => {
         refreshToken: jwt.sign(
           { userId: ghostId, type: 'refresh', tokenVersion: 0 },
           process.env.JWT_REFRESH_SECRET,
-          { expiresIn: '1h' }
+          { expiresIn: '24h' }
         ),
       });
     expect(ghostUser.status).toBe(401);
@@ -177,7 +177,7 @@ describe('认证剩余分支（批次 B2）', () => {
     superToken = jwt.sign(
       { userId: superUserId, username: fresh.username, tokenVersion: fresh.tokenVersion ?? 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // 重新登录恢复会话供后续用例
@@ -202,7 +202,7 @@ describe('认证剩余分支（批次 B2）', () => {
     superToken = jwt.sign(
       { userId: superUserId, username: fresh.username, tokenVersion: fresh.tokenVersion ?? 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     expect(ACCESS_COOKIE_NAME).toBe('access_token');
   });

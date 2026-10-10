@@ -47,7 +47,7 @@ describe('二次验证限流与改密限流互不污染', () => {
     token = jwt.sign(
       { userId: String(user._id), username: 'bucket', tokenVersion: user.tokenVersion },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const { createApp } = require('../app');
     app = createApp();

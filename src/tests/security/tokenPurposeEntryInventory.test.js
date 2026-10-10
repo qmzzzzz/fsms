@@ -185,7 +185,7 @@ describe('豁免的行为根据（根据失效即红，不看文件名）', () =
     jwt.sign(
       { userId: 'inv-user', type: 'refresh', tokenVersion: 0, jti, sid: 'inv-sid' },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
   test('用例②：登出入口那次未套判据的验签不授权——refresh 当 Bearer access 打登出 ⇒ 401', async () => {

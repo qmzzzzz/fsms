@@ -63,7 +63,7 @@ describe('getUserStats self 范围 aggregate cast', () => {
     operatorToken = jwt.sign(
       { userId: operatorId, username: operator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // 本人创建的账号（self 范围应命中这一条）

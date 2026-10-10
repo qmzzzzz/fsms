@@ -74,7 +74,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
     adminToken = jwt.sign(
       { userId: String(admin._id), username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

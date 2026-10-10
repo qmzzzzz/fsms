@@ -110,7 +110,7 @@ describe('用户管理读路径的手机号口径', () => {
     operatorToken = jwt.sign(
       { userId: String(operator._id), username: operator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     lowRoleId = String(lowRole._id);
     app = require('../../app').createApp();

@@ -88,7 +88,7 @@ describe('安全开关写入契约（非布尔一律拒）+ 读回一致', () =>
     token = jwt.sign(
       { userId: String(op._id), username: op.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

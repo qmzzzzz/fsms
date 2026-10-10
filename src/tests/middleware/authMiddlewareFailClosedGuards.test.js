@@ -72,7 +72,7 @@ describe('auth 中间件分支补齐', () => {
       token: jwt.sign(
         { userId: String(user._id), username: user.username, tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       ),
     };
     return user;
@@ -246,7 +246,7 @@ describe('auth 中间件分支补齐', () => {
           sid: 'fake-sid-for-fault-injection',
         },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const spy = jest.spyOn(sessionService, 'validateSession').mockRejectedValue(err);
       let res;

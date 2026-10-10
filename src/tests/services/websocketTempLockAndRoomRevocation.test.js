@@ -99,7 +99,7 @@ describe('WebSocket 临时锁定与降级出房', () => {
         jti: `jti-${++counter}`,
       },
       process.env.JWT_SECRET,
-      { algorithm: 'HS256', expiresIn: '1h' }
+      { algorithm: 'HS256', expiresIn: '24h' }
     );
 
   /** 最小服务实例：authenticateSocket / revalidateSocket 只用这两张表 */

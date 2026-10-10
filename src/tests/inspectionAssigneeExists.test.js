@@ -59,7 +59,7 @@ describe('巡检执行人引用必须存在且启用', () => {
         tokenVersion: operator.tokenVersion,
       },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const { createApp } = require('../app');
     app = createApp();

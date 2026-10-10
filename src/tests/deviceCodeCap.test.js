@@ -55,7 +55,7 @@ describe('deviceCode 上限：路由与模型同一口径', () => {
     token = jwt.sign(
       { userId: String(user._id), username: user.username, tokenVersion: user.tokenVersion },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const { createApp } = require('../app');
     app = createApp();

@@ -136,7 +136,7 @@ describe('对抗性探针场景固化（P1-30：原 zzz-* 探针 → 行为断�
           sid: null,
         },
         process.env.JWT_SECRET,
-        { algorithm: 'HS256', expiresIn: '1h' }
+        { algorithm: 'HS256', expiresIn: '24h' }
       );
     mgrToken = mk(mgr, [`PROBE_MGR_${stamp}`]);
     lowToken = mk(lowUser, [`PROBE_LOW_${stamp}`]);

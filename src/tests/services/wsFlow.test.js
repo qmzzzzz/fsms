@@ -56,7 +56,7 @@ describe('WebSocket 全流程（批次 D2）', () => {
     superToken = jwt.sign(
       { userId: superUserId, username: superUsername, tokenVersion: 0, roles: ['SUPER_ADMIN'] },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
   });
 
@@ -147,7 +147,7 @@ describe('WebSocket 全流程（批次 D2）', () => {
         jti: `dead-${stamp}`,
       },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     await blacklistToken(deadToken, Math.floor(Date.now() / 1000) + 3600);
 
@@ -170,7 +170,7 @@ describe('WebSocket 全流程（批次 D2）', () => {
       jwt.sign(
         { userId: superUserId, username: superUsername, tokenVersion: 99, roles: ['SUPER_ADMIN'] },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       )
     );
     socketRegistry.set(badVersion.id, badVersion);
@@ -182,7 +182,7 @@ describe('WebSocket 全流程（批次 D2）', () => {
       jwt.sign(
         { userId: String(new mongoose.Types.ObjectId()), username: 'ghost', tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       )
     );
     socketRegistry.set(ghost.id, ghost);

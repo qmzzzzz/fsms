@@ -316,7 +316,7 @@ describe('WebSocket 分支补漏', () => {
       const token = jwt.sign(
         { userId: fakeUserId, username: 'disabled-user', tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
 
       const result = await svc.authenticateSocket(socket, token, timer);
@@ -364,7 +364,7 @@ describe('WebSocket 分支补漏', () => {
       const token = jwt.sign(
         { userId: fakeUserId, username: 'pwd-user', tokenVersion: 0, iat: oldIat },
         process.env.JWT_SECRET,
-        { expiresIn: '4h' }
+        { expiresIn: '24h' }
       );
 
       const result = await svc.authenticateSocket(socket, token, timer);

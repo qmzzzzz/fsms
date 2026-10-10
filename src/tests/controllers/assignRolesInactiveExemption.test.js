@@ -107,7 +107,7 @@ describe('assignRoles 排除集只认生效角色/生效权限', () => {
     operatorToken = jwt.sign(
       { userId: String(operator._id), username: 'zzq_inact_op', tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const { createApp } = require('../../app');
     app = createApp();

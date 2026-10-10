@@ -143,7 +143,7 @@ describe('建号轨的同级角色归属闸（与 assignRoles 同尺）', () => 
 
     const sign = (u, name) =>
       jwt.sign({ userId: String(u._id), username: name, tokenVersion: 0 }, process.env.JWT_SECRET, {
-        expiresIn: '1h',
+        expiresIn: '24h',
       });
     peerToken = sign(peerAdmin, 'zzb_peer_a');
     wildToken = sign(wildAdmin, 'zzb_wild_a');

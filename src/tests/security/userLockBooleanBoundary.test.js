@@ -78,7 +78,7 @@ describe('锁定/解锁的布尔边界（字符串 false 不得变成锁定）',
     superToken = jwt.sign(
       { userId: String(operator._id), username: operator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

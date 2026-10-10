@@ -95,7 +95,7 @@ describe('克隆内置角色给他人：targetUser 必须落在操作者的数�
     deptToken = jwt.sign(
       { userId: operatorId, username: operator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // 两个目标用户只差一个部门：层级同为 3（低于操作者的 7），都持同名内置角色
@@ -114,7 +114,7 @@ describe('克隆内置角色给他人：targetUser 必须落在操作者的数�
     jwt.sign(
       { userId: String(user._id), username: user.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
   /** self 档用例专用：内置 L3 角色（克隆分支的入口条件是 role.isBuiltIn） */

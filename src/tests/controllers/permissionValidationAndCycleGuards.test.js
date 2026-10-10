@@ -77,7 +77,7 @@ describe('权限接口加固回归', () => {
     token = jwt.sign(
       { userId: String(operator._id), username: operator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
   });
 

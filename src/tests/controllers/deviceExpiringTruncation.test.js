@@ -114,7 +114,7 @@ describe('到期设备清单的截断必须可数（F-174）', () => {
     adminToken = jwt.sign(
       { userId: String(admin._id), username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

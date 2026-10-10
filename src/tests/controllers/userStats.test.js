@@ -51,7 +51,7 @@ describe('/api/users/stats 统计缓存', () => {
     adminToken = jwt.sign(
       { userId: String(admin._id), username: 'stats_admin', tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');
@@ -116,7 +116,7 @@ describe('/api/users/stats 统计缓存', () => {
     const otherToken = jwt.sign(
       { userId: String(otherUser._id), username: 'stats_other', tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     await request(app).get('/api/users/stats').set('Authorization', `Bearer ${otherToken}`);

@@ -57,7 +57,7 @@ describe('巡检 complete/review/cancel 的输入边界必须拒绝且不落库'
     jwt.sign(
       { userId: String(u._id), username: u.username, tokenVersion: u.tokenVersion ?? 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
   beforeAll(async () => {

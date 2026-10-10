@@ -115,7 +115,7 @@ describe('userController 列表与批量删除边界', () => {
     operatorToken = jwt.sign(
       { userId: String(operator._id), username: operator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     app = require('../../app').createApp();
   });

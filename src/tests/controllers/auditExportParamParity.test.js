@@ -76,7 +76,7 @@ describe('审计导出参数错误：xlsx 与 CSV 同口径', () => {
     token = jwt.sign(
       { userId: String(op._id), username: op.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     await AuditLog.create({

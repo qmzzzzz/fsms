@@ -89,7 +89,7 @@ describe('POST /api/roles 的权限 ID 存在性', () => {
       return jwt.sign(
         { userId: String(u._id), username: u.username, tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
     };
     superToken = await mkUser('super', [superRole._id]);

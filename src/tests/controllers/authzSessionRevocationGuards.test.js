@@ -65,7 +65,7 @@ describe('授权与会话加固回归', () => {
     jwt.sign(
       { userId: String(user._id), username: user.username, tokenVersion: user.tokenVersion ?? 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
   // ================= P2-8 权限子集校验 =================

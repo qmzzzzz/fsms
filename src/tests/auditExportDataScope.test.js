@@ -76,7 +76,7 @@ describe('GET /api/reports/export?type=audit 的数据范围', () => {
       jwt.sign(
         { userId: String(u._id), username: u.username, tokenVersion: u.tokenVersion ?? 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
     deptToken = sign(opA);
     allToken = sign(await User.findOne({ username: `${stamp}_all` }));

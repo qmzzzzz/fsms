@@ -104,7 +104,7 @@ describe('P0-5 端到端：skipGlobalAudit 命中路径不再双写', () => {
         sid: null,
       },
       process.env.JWT_SECRET,
-      { algorithm: 'HS256', expiresIn: '1h' }
+      { algorithm: 'HS256', expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

@@ -58,7 +58,7 @@ describe('POST /api/security/report：targetId 入参边界', () => {
     });
     userId = String(user._id);
     token = jwt.sign({ userId, username: user.username, tokenVersion: 0 }, process.env.JWT_SECRET, {
-      expiresIn: '1h',
+      expiresIn: '24h',
     });
 
     const { createApp } = require('../../app');

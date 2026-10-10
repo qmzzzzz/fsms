@@ -56,7 +56,7 @@ describe('/api/security/audit-logs 查询优化', () => {
     adminToken = jwt.sign(
       { userId: String(admin._id), username: 'audit_admin', tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // 插入审计日志固件

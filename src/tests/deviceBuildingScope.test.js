@@ -80,7 +80,7 @@ describe('设备楼栋只能落在操作者自己部门', () => {
     deptToken = jwt.sign(
       { userId: operatorId, username: operator.username, tokenVersion: operator.tokenVersion ?? 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const { createApp } = require('../app');
     app = createApp();

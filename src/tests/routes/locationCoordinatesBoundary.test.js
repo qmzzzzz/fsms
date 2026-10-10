@@ -56,7 +56,7 @@ describe('设备/报警写入：路由与模型的约束一致性', () => {
   const paths = (res) => (res.body?.errors?.fieldErrors || []).map((e) => e.path);
   const tokenFor = (userId, username) =>
     jwt.sign({ userId: String(userId), username, tokenVersion: 0 }, process.env.JWT_SECRET, {
-      expiresIn: '1h',
+      expiresIn: '24h',
     });
 
   const newDevice = (over) => ({

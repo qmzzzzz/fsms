@@ -75,7 +75,7 @@ describe('停用角色 -> auth 用户缓存失效链', () => {
     adminToken = jwt.sign(
       { userId: String(admin._id), username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     probeRole = await Role.create({

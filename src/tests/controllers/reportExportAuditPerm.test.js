@@ -60,7 +60,7 @@ describe('P1-4 /api/reports/export?type=audit 权限闸门', () => {
         token: jwt.sign(
           { userId: String(user._id), username: user.username, tokenVersion: 0 },
           process.env.JWT_SECRET,
-          { expiresIn: '1h' }
+          { expiresIn: '24h' }
         ),
       };
     };

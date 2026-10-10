@@ -381,7 +381,7 @@ describe('设备级会话管理接口（/api/auth/sessions）', () => {
           jti: require('crypto').randomUUID(),
         },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
 
       // 必须放行而不是 401：上线瞬间拒绝旧令牌等于把所有在线用户踢下线

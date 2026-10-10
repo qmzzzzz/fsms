@@ -141,7 +141,7 @@ describe('roleController 覆盖率补齐', () => {
     superToken = jwt.sign(
       { userId: superUserId, username: superUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // --- Mid-level operator (level 5, holds role CRUD perms but NOT *:*) ---
@@ -195,7 +195,7 @@ describe('roleController 覆盖率补齐', () => {
     midToken = jwt.sign(
       { userId: midUserId, username: midOperator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // --- Low-level user (level 2, role:read only) ---
@@ -216,7 +216,7 @@ describe('roleController 覆盖率补齐', () => {
     _lowToken = jwt.sign(
       { userId: lowUserId, username: lowUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const deptRole = await Role.create({
@@ -237,7 +237,7 @@ describe('roleController 覆盖率补齐', () => {
     deptToken = jwt.sign(
       { userId: deptUserId, username: deptUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const noneOperatorRole = await Role.create({
@@ -256,7 +256,7 @@ describe('roleController 覆盖率补齐', () => {
     noneToken = jwt.sign(
       { userId: String(noneOperator._id), username: noneOperator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // Create a custom role for manipulation

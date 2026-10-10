@@ -43,7 +43,7 @@ describe('S5 改密密文轨（/api/security/change-password）', () => {
     token = jwt.sign(
       { userId: String(user._id), username: user.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const { createApp } = require('../../app');
     app = createApp();
@@ -103,7 +103,7 @@ describe('S5 改密密文轨（/api/security/change-password）', () => {
     const chgToken = jwt.sign(
       { userId: String(chgUser._id), username: chgUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const goodCurrent = await buildLoginEnvelope(PASSWORD);

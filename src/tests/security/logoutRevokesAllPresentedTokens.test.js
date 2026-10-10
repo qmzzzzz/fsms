@@ -30,7 +30,7 @@ const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
 
 const signRefresh = (jti) =>
   jwt.sign({ userId: 'f100-user', type: 'refresh', tokenVersion: 0, jti }, REFRESH_SECRET, {
-    expiresIn: '1h',
+    expiresIn: '24h',
   });
 
 /** 黑名单写入的观测点：blacklistToken 最终落到 findOneAndUpdate 的 upsert */

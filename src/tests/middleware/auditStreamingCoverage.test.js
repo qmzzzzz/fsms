@@ -211,7 +211,7 @@ describe('P0-6 端到端：导出接口真实下载并留痕', () => {
         token: jwt.sign(
           { userId: String(user._id), username: user.username, tokenVersion: 0 },
           process.env.JWT_SECRET,
-          { expiresIn: '1h' }
+          { expiresIn: '24h' }
         ),
       };
     };
@@ -374,7 +374,7 @@ describe('P1-10 审计体脱敏：超深嵌套不泄漏明文', () => {
       const token = jwt.sign(
         { userId: String(user._id), username: user.username, tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
 
       const { createApp } = require('../../app');

@@ -69,7 +69,7 @@ describe('permission/user 控制器零散分支补齐', () => {
   const PASSWORD = randomPassword();
 
   const signToken = (userId, username) =>
-    jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
   // 权限编码必须命中路由校验的 module:action 格式 ^(\*|[a-z]+):(\*|[a-z_]+)$：
   // module 仅小写字母、action 仅小写字母/下划线，均不可含数字。stamp 已是纯字母，

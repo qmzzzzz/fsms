@@ -123,7 +123,7 @@ describe('到期窗口按请求收窄（服务层 + 两个 HTTP 入口）与报�
     adminToken = jwt.sign(
       { userId: String(admin._id), username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../app');
@@ -274,7 +274,7 @@ describe('报废原因：空串是"提交了但没填"，不是"正常报废"', 
     adminToken = jwt.sign(
       { userId: String(admin._id), username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const { createApp } = require('../app');
     app = createApp();

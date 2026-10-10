@@ -76,7 +76,7 @@ describe('凭据型限流的账号维度桶', () => {
 
   const tokenFor = (userId, username) =>
     jwt.sign({ userId: String(userId), username, tokenVersion: 0 }, process.env.JWT_SECRET, {
-      expiresIn: '1h',
+      expiresIn: '24h',
     });
 
   /** 每个用例一个独立用户 ⇒ 账号桶互不污染 */

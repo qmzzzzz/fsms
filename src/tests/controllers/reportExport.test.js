@@ -53,7 +53,7 @@ describe('报表与导出（批次 D1）', () => {
     adminToken = jwt.sign(
       { userId: String(admin._id), username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // 最小业务数据：设备/报警/巡检各一

@@ -60,7 +60,7 @@ describe('view-sensitive：坏 dataType 不得产生凭据侧副作用', () => {
       tokens[name] = jwt.sign(
         { userId: String(u._id), username: name, tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       return name;
     };

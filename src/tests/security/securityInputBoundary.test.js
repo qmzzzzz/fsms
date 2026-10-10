@@ -92,7 +92,7 @@ describe('view-sensitive：targetUserId 必须先于步进验证被校验', () =
         token: jwt.sign(
           { userId: String(u._id), username: u.username, tokenVersion: 0 },
           process.env.JWT_SECRET,
-          { expiresIn: '1h' }
+          { expiresIn: '24h' }
         ),
       };
     };
@@ -213,7 +213,7 @@ describe('锁定/解锁：reason 的类型与长度在路由层收口', () => {
     opToken = jwt.sign(
       { userId: String(op._id), username: op.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

@@ -64,7 +64,7 @@ describe('认证生命周期（批次 B）', () => {
     superToken = jwt.sign(
       { userId: selfUserId, username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     void superToken;
 

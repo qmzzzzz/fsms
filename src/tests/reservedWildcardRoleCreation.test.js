@@ -98,7 +98,7 @@ describe('保留通配的铸造防线（POST /api/roles）', () => {
     superToken = jwt.sign(
       { userId: String(boss._id), username: boss.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../app');

@@ -48,7 +48,7 @@ const tokenFor = (user) =>
   jwt.sign(
     { userId: String(user._id), username: user.username, tokenVersion: 0 },
     process.env.JWT_SECRET,
-    { expiresIn: '1h' }
+    { expiresIn: '24h' }
   );
 
 describe('GET /security/stats 的异常行为聚合按数据范围收口', () => {

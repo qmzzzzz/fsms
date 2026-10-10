@@ -43,7 +43,7 @@ describe('P1-2 改密接口非字符串入参防护', () => {
     token = jwt.sign(
       { userId: String(user._id), username: 'pwdtype_user', tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

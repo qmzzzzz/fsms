@@ -109,7 +109,7 @@ describe('WebSocket 认证在途断开不留幽灵连接（F-188）', () => {
         ...(sid ? { sid } : {}),
       },
       process.env.JWT_SECRET,
-      { algorithm: 'HS256', expiresIn: '1h' }
+      { algorithm: 'HS256', expiresIn: '24h' }
     );
 
   /**

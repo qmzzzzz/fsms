@@ -36,7 +36,7 @@ describe('资料接口的空值分档：手机号可清空、邮箱不可清空'
     jwt.sign(
       { userId: String(u._id), username: u.username, tokenVersion: u.tokenVersion ?? 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
   /** 每个用例一个专属账号：清空类用例会改写库，账号复用会构成跨用例的顺序前提 */

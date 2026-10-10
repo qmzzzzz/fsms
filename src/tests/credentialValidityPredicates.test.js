@@ -112,9 +112,9 @@ describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）'
     let token; // 合法 access
     let refresh; // 合法 refresh
 
-    const signAccess = (payload) => jwt.sign(payload, config.jwt.secret, { expiresIn: '1h' });
+    const signAccess = (payload) => jwt.sign(payload, config.jwt.secret, { expiresIn: '24h' });
     const signRefresh = (payload) =>
-      jwt.sign(payload, config.jwt.refreshSecret, { expiresIn: '1h' });
+      jwt.sign(payload, config.jwt.refreshSecret, { expiresIn: '24h' });
 
     beforeAll(async () => {
       const wildcard = await Permission.findOneAndUpdate(

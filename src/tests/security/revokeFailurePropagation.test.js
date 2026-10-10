@@ -46,7 +46,7 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
       token: jwt.sign(
         { userId: String(user._id), username: user.username, tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       ),
     };
     return user;
@@ -86,7 +86,7 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
     superToken = jwt.sign(
       { userId: String(superUser._id), username: superUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     users.super = { _id: superUser._id };
 

@@ -133,7 +133,7 @@ describe('探针豁免的边界与 HEAD 审计留痕', () => {
     userToken = jwt.sign(
       { userId: String(u._id), username: u.username, tokenVersion: u.tokenVersion ?? 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const { createApp } = require('../../app');
     app = createApp();

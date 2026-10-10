@@ -69,7 +69,7 @@ describe('reportAlarm 的 deviceId 存在性与数据范围闸', () => {
       jwt.sign(
         { userId: String(u._id), username: u.username, tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
     tokenDept = sign(deptUser);
     tokenSelf = sign(selfUser);
@@ -176,7 +176,7 @@ describe('reportAlarm 的 deviceId 存在性与数据范围闸', () => {
     const token = jwt.sign(
       { userId: String(maintainer._id), username: 'zzqar_maint', tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const res = await report(token, { deviceId: String(maintained._id) });
     expect(res.status).toBe(201);

@@ -102,7 +102,7 @@ describe('用户对象写路径的数据范围闸（与读路径同口径）', (
     operatorToken = jwt.sign(
       { userId: String(operator._id), username: operator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     app = require('../app').createApp();
   });

@@ -72,7 +72,7 @@ describe('误报/取消的 reason 长度上限（路由层 + update 校验）', 
     tokenAll = jwt.sign(
       { userId: operatorId, username: user.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

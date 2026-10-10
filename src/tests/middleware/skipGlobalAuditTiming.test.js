@@ -133,7 +133,7 @@ describe('P0-5 端到端：POST /api/security/report 不再双写', () => {
     token = jwt.sign(
       { userId: String(user._id), username: user.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

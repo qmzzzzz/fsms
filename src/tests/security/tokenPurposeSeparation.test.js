@@ -157,7 +157,7 @@ describe('运行层：refresh 令牌不得当 access 用', () => {
     const legacy = jwt.sign(
       { userId, username: 'zzlegacy', tokenVersion: 0, jti: 'legacy-jti' },
       config.jwt.secret,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const r = await driveAuthenticate(legacy);
     expect(r.code).toBe('USER_NOT_FOUND_OR_DELETED'); // 不是 AUTH_TOKEN_INVALID

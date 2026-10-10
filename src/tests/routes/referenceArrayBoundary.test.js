@@ -57,7 +57,7 @@ describe('写路径的引用数组与自由文本边界', () => {
 
   const tokenFor = (userId, username) =>
     jwt.sign({ userId: String(userId), username, tokenVersion: 0 }, process.env.JWT_SECRET, {
-      expiresIn: '1h',
+      expiresIn: '24h',
     });
 
   beforeAll(async () => {

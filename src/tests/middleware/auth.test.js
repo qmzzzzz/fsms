@@ -96,7 +96,7 @@ describe('Auth Middleware', () => {
           tokenVersion: user.tokenVersion ?? 0,
         },
         secret,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
 
       const res = await request(app).get('/protected').set('Authorization', `Bearer ${token}`);
@@ -108,7 +108,7 @@ describe('Auth Middleware', () => {
     test('签名有效但用户不存在 → 401 USER_NOT_FOUND_OR_DELETED（防 401/200 混淆）', async () => {
       const ghostId = new mongoose.Types.ObjectId().toString();
       const token = jwt.sign({ userId: ghostId, username: 'ghost', tokenVersion: 0 }, secret, {
-        expiresIn: '1h',
+        expiresIn: '24h',
       });
 
       const res = await request(app).get('/protected').set('Authorization', `Bearer ${token}`);
@@ -141,7 +141,7 @@ describe('Auth Middleware', () => {
 
       // 省略 tokenVersion：即便签名有效也必须拒绝
       const forged = jwt.sign({ userId: String(user._id), username: 'tvuser' }, secret, {
-        expiresIn: '1h',
+        expiresIn: '24h',
       });
       const res1 = await request(app).get('/protected').set('Authorization', `Bearer ${forged}`);
       expect(res1.status).toBe(401);
@@ -153,7 +153,7 @@ describe('Auth Middleware', () => {
       const legit = jwt.sign(
         { userId: String(user._id), username: 'tvuser', tokenVersion: user.tokenVersion ?? 0 },
         secret,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const res2 = await request(app).get('/protected').set('Authorization', `Bearer ${legit}`);
       expect(res2.status).toBe(200);
@@ -163,7 +163,7 @@ describe('Auth Middleware', () => {
   describe('JWT Token 基础功能', () => {
     test('应生成有效的 JWT token', () => {
       const payload = { userId: '123', username: 'test', role: 'admin' };
-      const token = jwt.sign(payload, secret, { expiresIn: '1h' });
+      const token = jwt.sign(payload, secret, { expiresIn: '24h' });
       expect(token).toBeDefined();
       expect(typeof token).toBe('string');
       expect(token.split('.')).toHaveLength(3);
@@ -171,7 +171,7 @@ describe('Auth Middleware', () => {
 
     test('应验证有效 token', () => {
       const payload = { userId: '123', username: 'test' };
-      const token = jwt.sign(payload, secret, { expiresIn: '1h' });
+      const token = jwt.sign(payload, secret, { expiresIn: '24h' });
       const decoded = jwt.verify(token, secret);
       expect(decoded.userId).toBe('123');
       expect(decoded.username).toBe('test');
@@ -179,7 +179,7 @@ describe('Auth Middleware', () => {
 
     test('应拒绝无效签名', () => {
       const payload = { userId: '123' };
-      const token = jwt.sign(payload, secret, { expiresIn: '1h' });
+      const token = jwt.sign(payload, secret, { expiresIn: '24h' });
       expect(() => jwt.verify(token, 'wrong-secret')).toThrow();
     });
 

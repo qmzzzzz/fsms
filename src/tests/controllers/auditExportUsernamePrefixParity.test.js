@@ -74,7 +74,7 @@ describe('审计 xlsx 导出的 username 前缀 + collation 口径', () => {
   let superToken;
 
   const signToken = (userId, username) =>
-    jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
   /** 把 xlsx 响应体解析成「表头 → 该列全部单元格文本」 */
   const columnsFromWorkbook = async (body) => {

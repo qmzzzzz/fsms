@@ -39,7 +39,7 @@ describe('临时锁定到期必须自动放行（与"未到期拦截"成对）',
     users[name] = jwt.sign(
       { userId: String(user._id), username: user.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
   };
 

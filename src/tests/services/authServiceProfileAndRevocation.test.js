@@ -278,14 +278,14 @@ describe('authService gap A', () => {
     });
 
     test('access token 签名无效 → 不算失败（本就不可用）', async () => {
-      const badToken = jwt.sign({ userId: 'x' }, 'wrong-secret', { expiresIn: '1h' });
+      const badToken = jwt.sign({ userId: 'x' }, 'wrong-secret', { expiresIn: '24h' });
       const result = await authService.revokeTokensOnLogout({ accessToken: badToken });
       expect(result.revokeFailed).toBe(false);
     });
 
     test('refresh token 签名无效 → 不算失败', async () => {
       const badRefresh = jwt.sign({ userId: 'x', type: 'refresh' }, 'wrong-secret', {
-        expiresIn: '1h',
+        expiresIn: '24h',
       });
       const result = await authService.revokeTokensOnLogout({ refreshToken: badRefresh });
       expect(result.revokeFailed).toBe(false);
@@ -295,7 +295,7 @@ describe('authService gap A', () => {
       const token = jwt.sign(
         { userId: 'test-user', username: 'u', tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const result = await authService.revokeTokensOnLogout({ accessToken: token });
       expect(result.revokeFailed).toBe(false);
@@ -306,7 +306,7 @@ describe('authService gap A', () => {
       const token = jwt.sign(
         { userId: 'test-user', type: 'refresh', tokenVersion: 0 },
         refreshSecret,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const result = await authService.revokeTokensOnLogout({ refreshToken: token });
       expect(result.revokeFailed).toBe(false);
@@ -323,7 +323,7 @@ describe('authService gap A', () => {
       const token = jwt.sign(
         { userId: 'test-user', username: 'u', tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const result = await authService.revokeTokensOnLogout({ accessToken: token });
       expect(result.revokeFailed).toBe(true);
@@ -340,7 +340,7 @@ describe('authService gap A', () => {
       const token = jwt.sign(
         { userId: 'test-user', type: 'refresh', tokenVersion: 0 },
         refreshSecret,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const result = await authService.revokeTokensOnLogout({ refreshToken: token });
       expect(result.revokeFailed).toBe(true);

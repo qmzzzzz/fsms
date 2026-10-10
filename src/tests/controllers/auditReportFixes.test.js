@@ -62,7 +62,7 @@ describe('审计报告修复综合回归', () => {
     adminToken = jwt.sign(
       { userId: String(admin._id), username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');
@@ -285,7 +285,7 @@ describe('审计报告修复综合回归', () => {
       const token = jwt.sign(
         { userId: String(plain._id), username: plain.username, tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const res = await request(app)
         .get('/api/security/audit-logs/verify')

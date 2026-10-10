@@ -78,7 +78,7 @@ describe('getSecurityStats 今日起点口径（时区分叉修复回归）', ()
     superToken = jwt.sign(
       { userId: String(superUser._id), username: superUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

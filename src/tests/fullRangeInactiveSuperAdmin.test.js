@@ -87,7 +87,7 @@ describe('全网段名单守卫：停用超管不再等于超管', () => {
     token = jwt.sign(
       { userId: operatorId, username: operator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
   });
 
@@ -180,7 +180,7 @@ describe('全网段名单守卫：停用超管不再等于超管', () => {
         `Bearer ${jwt.sign(
           { userId: String(plain._id), username: plain.username, tokenVersion: 0 },
           process.env.JWT_SECRET,
-          { expiresIn: '1h' }
+          { expiresIn: '24h' }
         )}`
       )
       .send({ ip: FULL_RANGE, type: 'black', reason: 'guard-probe' });

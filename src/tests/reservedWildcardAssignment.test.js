@@ -90,7 +90,7 @@ describe('保留通配的分配防线', () => {
     superToken = jwt.sign(
       { userId: String(boss._id), username: boss.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../app');

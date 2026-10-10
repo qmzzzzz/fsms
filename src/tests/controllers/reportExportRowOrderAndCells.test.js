@@ -56,7 +56,7 @@ describe('xlsx 导出的行序与单元格文本', () => {
   let superToken;
 
   const signToken = (userId, username) =>
-    jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
   /** xlsx 响应体 → 「表头 → 该列全部单元格文本（按文件里的行序）」 */
   const columnsFromWorkbook = async (body) => {

@@ -183,7 +183,7 @@ describe('补齐之后：授予 permission:create 的角色真的能创建权限
     const token = jwt.sign(
       { userId: String(user._id), username: user.username, tokenVersion: 0, type: 'access' },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     return token;
   };

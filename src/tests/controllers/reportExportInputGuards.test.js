@@ -107,7 +107,7 @@ describe('reportController.exportReport 分支补齐', () => {
   };
 
   const signToken = (userId, username) =>
-    jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {

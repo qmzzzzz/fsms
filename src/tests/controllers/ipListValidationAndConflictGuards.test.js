@@ -48,7 +48,7 @@ describe('ipListController 分支补齐', () => {
   const createdIds = [];
 
   const signToken = (userId, username) =>
-    jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    jwt.sign({ userId, username, tokenVersion: 0 }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
   /**
    * 取本操作员名下的越权审计记录。

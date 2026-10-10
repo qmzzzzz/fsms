@@ -75,7 +75,7 @@ describe('权限缓存失效链（P1-14）', () => {
     adminToken = jwt.sign(
       { userId: String(admin._id), username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     perm = await seedPerm('cacheprobe:read');

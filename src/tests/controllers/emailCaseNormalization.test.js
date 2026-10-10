@@ -38,7 +38,7 @@ describe('邮箱大小写规范化：比对、查重、落库同形态', () => {
     jwt.sign(
       { userId: String(u._id), username: u.username, tokenVersion: u.tokenVersion ?? 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
   beforeAll(async () => {

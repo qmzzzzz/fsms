@@ -95,7 +95,7 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
     midToken = jwt.sign(
       { userId: String(midOperator._id), username: midOperator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     roleId = String(superRole._id);
     void builtInSuper;
@@ -103,7 +103,7 @@ describe('RBAC 控制器全覆盖（批次 A）', () => {
     adminToken = jwt.sign(
       { userId: selfUserId, username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

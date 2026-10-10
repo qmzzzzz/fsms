@@ -82,7 +82,7 @@ describe('判据只有一处实现', () => {
 
 describe('行为：refresh 载荷不得建立推送通道 / 不得被探测当成有效 access', () => {
   const userId = String(new mongoose.Types.ObjectId());
-  const sign = (payload) => jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1h' });
+  const sign = (payload) => jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '24h' });
 
   const mockActiveUser = (modPath) => {
     jest.doMock(modPath, () => ({

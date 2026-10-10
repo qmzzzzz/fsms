@@ -67,7 +67,7 @@ describe('createUser 数据范围闸（P0-1 建号补齐）', () => {
         sid: null,
       },
       process.env.JWT_SECRET,
-      { algorithm: 'HS256', expiresIn: '1h' }
+      { algorithm: 'HS256', expiresIn: '24h' }
     );
   });
 

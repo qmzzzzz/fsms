@@ -89,7 +89,7 @@ describe('P2-25 参数校验注册门禁', () => {
     token = jwt.sign(
       { userId: String(u._id), username: u.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // createApp() 里才会执行 applyObjectIdParams(...)，先建 app 再检查各 router 的注册状态

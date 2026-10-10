@@ -46,7 +46,7 @@ describe('写路径的 body 类型闸门', () => {
 
   const tokenFor = (userId, username) =>
     jwt.sign({ userId: String(userId), username, tokenVersion: 0 }, process.env.JWT_SECRET, {
-      expiresIn: '1h',
+      expiresIn: '24h',
     });
 
   /**

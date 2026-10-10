@@ -59,7 +59,7 @@ describe('WebSocket 握手 IP 黑名单闸', () => {
         jti: `jti-ban-${++counter}`,
       },
       process.env.JWT_SECRET,
-      { algorithm: 'HS256', expiresIn: '1h' }
+      { algorithm: 'HS256', expiresIn: '24h' }
     );
 
   /** 最小服务实例：认证路径只用到 clients / userConnections 两张表 */

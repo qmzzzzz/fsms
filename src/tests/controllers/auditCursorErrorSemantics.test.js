@@ -73,7 +73,7 @@ describe('审计日志游标的 400/500 分界', () => {
         tokenVersion: admin.tokenVersion ?? 0,
       },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     await AuditLog.insertMany([

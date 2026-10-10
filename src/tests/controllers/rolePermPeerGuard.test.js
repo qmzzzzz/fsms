@@ -64,7 +64,7 @@ describe('rolePermissionController 同级/上级角色改写闸', () => {
     midToken = jwt.sign(
       { userId: String(midUser._id), username: midUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // 攻击目标：同级(5)、非内置、初始持有一个哨兵权限（用于断言未被改写）

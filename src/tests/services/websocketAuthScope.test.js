@@ -49,7 +49,7 @@ describe('WebSocket 认证范围校验（P0-2）', () => {
         ...(sid ? { sid } : {}),
       },
       process.env.JWT_SECRET,
-      { algorithm: 'HS256', expiresIn: '1h' }
+      { algorithm: 'HS256', expiresIn: '24h' }
     );
 
   /** 最小服务实例：authenticateSocket 只用到 clients / userConnections 两张表 */

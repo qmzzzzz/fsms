@@ -56,7 +56,7 @@ describe('巡检数组入参的长度上限', () => {
     token = jwt.sign(
       { userId: String(user._id), username: user.username, tokenVersion: user.tokenVersion },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     request = require('supertest');
     const { createApp } = require('../app');

@@ -82,7 +82,7 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
     adminToken = jwt.sign(
       { userId: adminId, username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // ===== self 范围用户（level 4 + 具名权限）：制造 403 与正向对照 =====
@@ -116,7 +116,7 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
     scopedToken = jwt.sign(
       { userId: scopedUserId, username: scopedUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');

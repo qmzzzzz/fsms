@@ -115,12 +115,12 @@ describe('assignRoles 越权防护（M-01）', () => {
     operatorToken = jwt.sign(
       { userId: String(operator._id), username: 'sec_operator', tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     superToken = jwt.sign(
       { userId: String(superAdmin._id), username: 'sa_target', tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');
@@ -257,7 +257,7 @@ describe('assignRoles 越权防护（M-01）', () => {
       peerAdminToken = jwt.sign(
         { userId: String(peerAdmin._id), username: 'peer_admin_a', tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
 
       victim = await User.create({
@@ -453,7 +453,7 @@ describe('assignRoles 越权防护（M-01）', () => {
       const token = jwt.sign(
         { userId: String(other._id), username: 'sa_deleter', tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const res = await request(app)
         .delete(`/api/users/${superAdmin._id}`)
@@ -477,7 +477,7 @@ describe('assignRoles 越权防护（M-01）', () => {
       const token = jwt.sign(
         { userId: String(other._id), username: 'sa_batch', tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const victim = await User.create({
         username: 'sa_victim',
@@ -535,7 +535,7 @@ describe('assignRoles 越权防护（M-01）', () => {
       midToken = jwt.sign(
         { userId: String(midUser._id), username: 'mid_escalate', tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
 
       // 目标：非内置的 level 9 富权限角色（内置角色的 level 已被单独锁死）
@@ -716,7 +716,7 @@ describe('assignRoles 越权防护（M-01）', () => {
       const token = jwt.sign(
         { userId: String(op._id), username: 'acct_op', tokenVersion: 0 },
         process.env.JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       return { token, createPerm };
     };

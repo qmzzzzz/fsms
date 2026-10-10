@@ -337,7 +337,7 @@ describe('authService gap B', () => {
 
     test('INVALID - type 不是 refresh', async () => {
       const token = jwt.sign({ userId: 'x', type: 'access', tokenVersion: 0 }, getRefreshSecret(), {
-        expiresIn: '1h',
+        expiresIn: '24h',
       });
       const result = await authService.refreshSession(token, defaultCtx());
       expect(result.outcome).toBe('INVALID');
@@ -345,7 +345,7 @@ describe('authService gap B', () => {
 
     test('INVALID - 签名错误', async () => {
       const token = jwt.sign({ userId: 'x', type: 'refresh', tokenVersion: 0 }, 'wrong-secret', {
-        expiresIn: '1h',
+        expiresIn: '24h',
       });
       const result = await authService.refreshSession(token, defaultCtx());
       expect(result.outcome).toBe('INVALID');
@@ -356,7 +356,7 @@ describe('authService gap B', () => {
       const token = jwt.sign(
         { userId: String(ghostId), type: 'refresh', tokenVersion: 0 },
         getRefreshSecret(),
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const result = await authService.refreshSession(token, defaultCtx());
       expect(result.outcome).toBe('INVALID');
@@ -371,7 +371,7 @@ describe('authService gap B', () => {
           tokenVersion: user.tokenVersion ?? 0,
         },
         getRefreshSecret(),
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const result = await authService.refreshSession(token, defaultCtx({ ip: '192.168.1.1' }));
       expect(result.outcome).toBe('IP_DENIED');
@@ -386,7 +386,7 @@ describe('authService gap B', () => {
           tokenVersion: user.tokenVersion ?? 0,
         },
         getRefreshSecret(),
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       // consumeToken is destructured in authService; spy on underlying model op
       const TokenBlacklist = require('../../models/TokenBlacklist');
@@ -409,7 +409,7 @@ describe('authService gap B', () => {
           sid,
         },
         getRefreshSecret(),
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const spy = jest
         .spyOn(sessionService, 'validateSession')
@@ -430,7 +430,7 @@ describe('authService gap B', () => {
           sid,
         },
         getRefreshSecret(),
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const spy = jest
         .spyOn(sessionService, 'validateSession')
@@ -468,7 +468,7 @@ describe('authService gap B', () => {
           tokenVersion: 999,
         },
         getRefreshSecret(),
-        { expiresIn: '1h' }
+        { expiresIn: '24h' }
       );
       const result = await authService.refreshSession(token, defaultCtx());
       expect(result.outcome).toBe('VERSION_MISMATCH');

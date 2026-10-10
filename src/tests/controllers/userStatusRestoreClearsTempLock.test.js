@@ -87,7 +87,7 @@ describe('用户更新接口把账户恢复回 active 时必须一并解除临�
     operatorToken = jwt.sign(
       { userId: String(operator._id), username: operator.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // 目标账户：管理员锁定 + 尚未到期的临时锁定（先被爆破锁定、再被管理员锁定的形态）

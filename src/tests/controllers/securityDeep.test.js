@@ -64,7 +64,7 @@ describe('安全管理深覆盖（批次 C）', () => {
     superToken = jwt.sign(
       { userId: superUserId, username: superUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // 低层级用户（改密/锁定对象）
@@ -77,7 +77,7 @@ describe('安全管理深覆盖（批次 C）', () => {
     lowToken = jwt.sign(
       { userId: lowUserId, username: lowUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // 改密专用用户（顺序无关）：改密会写 passwordChangedAt 并递增 tokenVersion
@@ -93,7 +93,7 @@ describe('安全管理深覆盖（批次 C）', () => {
     chgToken = jwt.sign(
       { userId: chgUserId, username: chgUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     // MFA 重置对象
@@ -391,7 +391,7 @@ describe('安全管理深覆盖（批次 C）', () => {
     const lowToken2 = jwt.sign(
       { userId: lowUserId, username: freshLow.username, tokenVersion: freshLow.tokenVersion ?? 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     const lowFullRange = await request(app)
       .post('/api/security/ip-list')

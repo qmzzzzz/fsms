@@ -241,7 +241,7 @@ describe('控制器侧：事件分派与定向同步（真实 HTTP 驱动）', (
     adminToken = jwt.sign(
       { userId: String(admin._id), username: admin.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
 
     const { createApp } = require('../../app');
