@@ -19,11 +19,18 @@
 
 const mongoose = require('mongoose');
 
-jest.mock('../../middleware/rbac', () => ({
-  getDataScope: jest.fn(),
-  // auditScopeFilter 只用到 getDataScope；其余导出的存在会让 require 触发真实
-  // rbac 依赖链（redis/审计模型），这里刻意不引。
-}));
+jest.mock('../../middleware/rbac', () => {
+  // #12 之后 auditScopeFilter 还要用 isDataScopeDenied / deniedDataScope 两个导出。
+  // 从真实模块取，不在测试里重抄一遍判据——重抄就是第二处会漂移的实现。
+  // 只把 getDataScope 换成 jest.fn：本套件要数的是 User.distinct 的次数，
+  // 让 getDataScope 照实打库只会把计数搅乱。
+  const actual = jest.requireActual('../../middleware/rbac');
+  return {
+    isDataScopeDenied: actual.isDataScopeDenied,
+    deniedDataScope: actual.deniedDataScope,
+    getDataScope: jest.fn(),
+  };
+});
 
 describe('auditScopeFilter 部门成员缓存的上界', () => {
   const CACHE_MAX = 500;

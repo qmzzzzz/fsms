@@ -955,6 +955,11 @@ const getRecentAlerts = asyncHandler(async (req, res) => {
     };
     return ApiResponse.success(res, response, '获取成功');
   } catch (error) {
+    // 数据范围不可用（403 DATA_SCOPE_DENIED）必须原样上冒：包成 500 会让
+    // "这个账号没有可见范围"表现为"服务端故障"，客户端于是重试一个永远不会
+    // 成功的请求，而运维照 500 去查数据库。只有真实故障才折算成
+    // RECENT_ALERTS_QUERY_FAILED（原行为不变）。
+    if (error.isApiError) throw error;
     logger.error(`最近告警查询失败: ${error.message}`);
     return ApiResponse.codeError(res, 'RECENT_ALERTS_QUERY_FAILED');
   }

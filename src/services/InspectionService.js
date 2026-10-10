@@ -112,9 +112,8 @@ class InspectionService {
     // 数据范围过滤：统一走 applyDataScopeToQuery（同字段冲突取交集，
     // department 为空时按 deny 处理，消除「三分支全不命中→零过滤」越权）
     // 属主/部门字段取自 DATA_SCOPE_FIELDS 单一声明（P2-20）
-    if (!applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.inspection)) {
-      return { inspections: [], count: 0, hasMore: false, nextCursor: null };
-    }
+    // 同 AlarmService：范围不可用即 403，不回空集（#12）
+    applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.inspection);
 
     if (search) {
       const escaped = escapeRegExp(search);
@@ -428,9 +427,7 @@ class InspectionService {
     }
 
     // 数据范围过滤（与 getInspections 相同的口径：同一函数、同一 deny 语义）
-    if (!applyDataScopeToQuery(matchStage, dataScope, DATA_SCOPE_FIELDS.inspection)) {
-      return { total: 0, byStatus: [], byType: [], byResult: [] };
-    }
+    applyDataScopeToQuery(matchStage, dataScope, DATA_SCOPE_FIELDS.inspection);
 
     // inspection 的 ownerField 是 assignedTo（ObjectId 数组），self 范围下条件里
     // 是 JWT 带来的 hex 字符串：aggregate 不 cast、countDocuments cast，

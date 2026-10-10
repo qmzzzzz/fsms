@@ -74,24 +74,35 @@ describe('auditScopeFilter 数据范围翻译分支（#22）', () => {
   // 而真实输入下 dataScope.userId 是 undefined ⇒ new ObjectId(undefined) 随机 ⇒ 永久空结果。
   // 改成按真实形态断 deny：与本文件其余拒绝分支同 idioms，也与
   // rbac.buildDataScopeFilter/applyDataScopeToQuery（空部门必须 deny）同口径。
-  test('department 档但本人无部门 → 无条件拒绝（不是"退化为本人 userId"）', async () => {
+  // #12：拒绝的对外形态从"200 + 空结果"改成 403。原来那条"query._id === {$in: []}"
+  // 的断言是**调用方视角**（拿到的查询匹配不到任何文档）；现在不变量前移到了
+  // "根本不产生查询"——更强的性质：连随机 ObjectId 都没机会被写进去。
+  test('department 档但本人无部门 → 抛 403，且不"退化为本人 userId"', async () => {
     mockPermissionRbac.getDataScope.mockResolvedValue({ type: 'department' });
-    const { query } = await applyAuditDataScope({}, 'op1');
-    expect(query._id).toEqual({ $in: [] });
-    // 随机 ObjectId 兜底的指纹就是"userId 被凭空写进来"
-    expect(query.userId).toBeUndefined();
+    await expect(applyAuditDataScope({}, 'op1')).rejects.toThrow(/没有可用的数据范围/);
+    // 随机 ObjectId 兜底的指纹就是"userId 被凭空写进来"；抛错路径下查询压根不被返回
+    const q = {};
+    await expect(applyAuditDataScope(q, 'op1')).rejects.toThrow();
+    expect(q.userId).toBeUndefined();
+    expect(q._id).toBeUndefined();
   });
 
-  test('同一无部门范围：两次调用必须给出逐字相同的条件（随机兜底过不了这条）', async () => {
+  test('同一无部门范围：两次调用必须给出逐字相同的拒绝（随机兜底过不了这条）', async () => {
     mockPermissionRbac.getDataScope.mockResolvedValue({
       type: 'department',
       department: undefined,
     });
-    const first = await applyAuditDataScope({ action: 'auth_login' }, 'op1');
-    const second = await applyAuditDataScope({ action: 'auth_login' }, 'op1');
-    expect(second.query).toEqual(first.query);
-    // 拒绝条件必须保留原有查询条件，只叠加空 $in
-    expect(first.query.action).toBe('auth_login');
+    // 旧断言比的是"两次的查询条件逐字相同"（防随机 ObjectId 兜底）；
+    // 现在根本没有查询条件可比——取而代之的是两次必须抛**同一条**错，
+    // 这条性质同样杀随机兜底：任何把 userId 写进查询的实现都到不了这里。
+    const first = await applyAuditDataScope({ action: 'auth_login' }, 'op1').catch(
+      (e) => e.message
+    );
+    const second = await applyAuditDataScope({ action: 'auth_login' }, 'op1').catch(
+      (e) => e.message
+    );
+    expect(second).toBe(first);
+    expect(first).toMatch(/没有可用的数据范围/);
   });
 
   test('department 点查：目标属本部门 → 放行为目标 userId', async () => {
@@ -207,10 +218,9 @@ describe('auditScopeFilter 数据范围翻译分支（#22）', () => {
     expect(query._id).toEqual({ $in: [] });
   });
 
-  test('未知范围类型 → 无条件拒绝', async () => {
+  test('未知范围类型 → 抛 403（fail-closed，不回空集）', async () => {
     mockPermissionRbac.getDataScope.mockResolvedValue({ type: 'weird' });
-    const { query } = await applyAuditDataScope({}, 'op1');
-    expect(query._id).toEqual({ $in: [] });
+    await expect(applyAuditDataScope({}, 'op1')).rejects.toThrow(/没有可用的数据范围/);
   });
 });
 

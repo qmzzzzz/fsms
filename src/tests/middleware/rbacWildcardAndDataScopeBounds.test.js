@@ -302,17 +302,21 @@ describe('rbac.js 分支补齐', () => {
       expect(query['location.building']).toBeUndefined();
     });
 
-    test('department 为空 → false 显式 deny（P1-3 零过滤越权入口的回归）', () => {
+    test('department 为空 → 抛 403 显式 deny（P1-3 零过滤越权入口的回归）', () => {
       const query = {};
-      const ok = applyDataScopeToQuery(
-        query,
-        { type: 'department', department: '' },
-        {
-          ownerField: 'createdBy',
-          departmentField: 'location.building',
-        }
-      );
-      expect(ok).toBe(false);
+      // #12 之后 deny 的形态是抛 ApiError(403, DATA_SCOPE_DENIED)，不再返回 false：
+      // false 返回值没有任何机制保证每个调用方都检查它（#12 的出发点）。
+      // query 必须保持原样——抛错不得顺带修改调用方的查询对象。
+      expect(() =>
+        applyDataScopeToQuery(
+          query,
+          { type: 'department', department: '' },
+          {
+            ownerField: 'createdBy',
+            departmentField: 'location.building',
+          }
+        )
+      ).toThrow(/没有可用的数据范围/);
       expect(query).toEqual({});
     });
   });

@@ -200,10 +200,15 @@ describe('P0-6 端到端：导出接口真实下载并留痕', () => {
         { $setOnInsert: { code: roleCode, name: roleCode, level: 8, permissions: permIds } },
         { upsert: true, new: true }
       );
+      // department 必须给：level 8 ⇒ department 档，未分配部门的账号在 #12 之后
+      // 一律 403 DATA_SCOPE_DENIED（范围不可用不再回空结果）。本套件的判据是
+      // "流式写出 + 审计留痕"，与数据范围无关，故把夹具做成一个**有效**的部门档
+      // 操作者，让请求走得进导出那一行。
       const user = await User.create({
         username: `stream_${key}`,
         email: `stream_${key}@example.com`,
         password: randomPassword(),
+        department: 'STREAM_DEPT',
         roles: [role._id],
       });
       actors[key] = {

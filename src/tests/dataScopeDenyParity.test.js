@@ -18,6 +18,11 @@
  *      列表路径却能匹配到文档。两者必须逐条相等，否则就是自相矛盾的闸。
  *
  * 用例 1 钉住"事实"，用例 2-5 钉住"结论"：修好之前 2-5 必红。
+ *
+ * #12 之后 deny 的落点是 **403 DATA_SCOPE_DENIED**（src/utils/errorCodes.js），
+ * 不再是"一份看起来完整的空结果"：空结果让调用方分不清「这个部门没有数据」与
+ * 「这个账号没有可见范围」，而这两件事的后续动作相反。所以用例 2-5 的断言从
+ * "查不到"改成"必须抛"；用例 1 的事实前提不动——它证明旧口径的空集是泄漏而不是拒绝。
  */
 
 const mongoose = require('mongoose');
@@ -49,6 +54,24 @@ describe('数据范围：空部门/空属主必须 deny，且列表与详情口�
   beforeEach(async () => {
     await FireDevice.deleteMany({});
   });
+
+  /**
+   * deny 的断言形态（#12）：同步抛出 403 + DATA_SCOPE_DENIED。
+   * 三项全钉：消息文案（给最终用户）、statusCode（给 HTTP 客户端）、
+   * code（给前端的 ERROR_CODE_I18N_MAP 查表，见 web-admin/src/utils/api.js）。
+   */
+  const expectDataScopeDenied = (fn) => {
+    let caught;
+    try {
+      fn();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeDefined();
+    expect(caught.message).toMatch(/没有可用的数据范围/);
+    expect(caught.statusCode).toBe(403);
+    expect(caught.code).toBe('DATA_SCOPE_DENIED');
+  };
 
   /** 属主缺失、但确实存在于库中的一台设备（模拟系统播种/未建档设备） */
   const makeOwnerlessDevice = (building) =>
@@ -86,49 +109,41 @@ describe('数据范围：空部门/空属主必须 deny，且列表与详情口�
     );
   });
 
-  test('空部门的数据范围用户，报表口径不得看到任何其他部门的无属主设备', async () => {
+  test('空部门的数据范围用户，报表口径必须 403（不得给一份看起来完整的空结果）', async () => {
     await makeOwnerlessDevice('B栋'); // 别的楼、别的部门的设备
-    const visibleToOtherDept = await makeOwnedDevice('A栋', otherOperator());
+    await makeOwnedDevice('A栋', otherOperator());
 
-    const filter = scopeFilterFor('device', { type: 'department', department: undefined });
-    const hits = await FireDevice.find(filter).select('_id').lean();
-
-    expect(hits.map((h) => String(h._id))).not.toContain(String(visibleToOtherDept._id));
-    expect(hits).toHaveLength(0);
+    expectDataScopeDenied(() =>
+      scopeFilterFor('device', { type: 'department', department: undefined })
+    );
+    // 库里确实有数据：403 拒绝的是"可见范围"，不是"恰好没数据"。
+    // 少了这一条，"deny"就可能被实现成"先删光再查"而照样绿。
+    await expect(FireDevice.countDocuments({})).resolves.toBe(2);
   });
 
-  test('空部门：列表命中集必须与详情闸 isRecordInScope 的结论逐条一致', async () => {
+  test('空部门：列表口径与详情闸 isRecordInScope 必须同为拒绝', async () => {
     const leaky = await makeOwnerlessDevice('B栋');
     const owned = await makeOwnedDevice('A栋', otherOperator());
     const scope = { type: 'department', department: '' };
 
-    const filter = scopeFilterFor('device', scope);
-    const listSays = new Set(
-      (await FireDevice.find(filter).select('_id').lean()).map((d) => String(d._id))
-    );
+    // 列表口径：403（#12 之后 deny 的唯一形态）
+    expectDataScopeDenied(() => scopeFilterFor('device', scope));
 
+    // 详情闸：同一边界下一条都不许打开。两条路径的结论必须逐条一致——
+    // 列表拒而详情放（或反之）就是"清单与闸互相矛盾"。
     for (const doc of [leaky, owned]) {
-      const detailSays = rbac.isRecordInScope(scope, doc, {
-        ownerField: deviceFields.ownerField,
-        departmentField: deviceFields.departmentField,
-      });
-      // 列表能看见 ⇔ 详情允许打开。不一致即"清单与闸互相矛盾"。
-      expect(listSays.has(String(doc._id))).toBe(detailSays);
+      expect(
+        rbac.isRecordInScope(scope, doc, {
+          ownerField: deviceFields.ownerField,
+          departmentField: deviceFields.departmentField,
+        })
+      ).toBe(false);
     }
-    // 并且两边都必须是拒绝：详情闸对空部门本来就返回 false。
-    expect(
-      rbac.isRecordInScope(scope, leaky, {
-        ownerField: deviceFields.ownerField,
-        departmentField: deviceFields.departmentField,
-      })
-    ).toBe(false);
-    expect(listSays.size).toBe(0);
   });
 
   test('空 userId 的 self 范围同样必须 deny（不得退化成"属主为空"的全库匹配）', async () => {
     await makeOwnerlessDevice('B栋');
-    const filter = scopeFilterFor('device', { type: 'self', userId: null });
-    await expect(FireDevice.countDocuments(filter)).resolves.toBe(0);
+    expectDataScopeDenied(() => scopeFilterFor('device', { type: 'self', userId: null }));
   });
 
   test('收敛点一致性：applyDataScopeToQuery 判 deny 的范围，报表口径也必须 deny', async () => {
@@ -146,12 +161,10 @@ describe('数据范围：空部门/空属主必须 deny，且列表与详情口�
     ];
 
     for (const scope of denyScopes) {
-      const converged = rbac.applyDataScopeToQuery({}, scope, deviceFields);
-      const reportFilter = scopeFilterFor('device', scope);
-      const reportHits = await FireDevice.countDocuments(reportFilter);
-
-      expect(converged).toBe(false); // 收敛点：拒绝
-      expect(reportHits).toBe(0); // 报表路径：同一范围必须一条都查不到
+      // 收敛点：抛 403（#12 之后 deny 的唯一形态，不再返回 false 让调用方各自回空集）
+      expectDataScopeDenied(() => rbac.applyDataScopeToQuery({}, scope, deviceFields));
+      // 报表路径：同一范围必须同判据、同形态——只改一处就是漂移
+      expectDataScopeDenied(() => scopeFilterFor('device', scope));
     }
   });
 

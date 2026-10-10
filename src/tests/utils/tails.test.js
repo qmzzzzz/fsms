@@ -71,7 +71,7 @@ describe('尾差覆盖（批次 F）', () => {
 
   // ================= rbac 数据范围分支 =================
 
-  test('rbac：applyDataScopeToQuery 各 deny/allow 分支（直驱，返回布尔+原地改写 query）', () => {
+  test('rbac：applyDataScopeToQuery 各 allow/deny 分支（直驱改写 query；deny 抛 403）', () => {
     // 标题原写「全分支」，但这里三次调用传的都是空 query，同字段冲突 → $and
     // 取交集那条分支不可达（它在 dataScopeConvergence.test.js 里被表驱动覆盖）。
     // 改为如实描述，避免"看起来全测了"的误导。
@@ -94,12 +94,28 @@ describe('尾差覆盖（批次 F）', () => {
     expect(applyDataScopeToQuery(qSelf, { type: 'self', userId: 'u1' }, FIELDS)).toBe(true);
     expect(JSON.stringify(qSelf)).toContain('u1');
 
-    // deny 分支：false
-    expect(applyDataScopeToQuery({}, { type: 'none' }, FIELDS)).toBe(false);
-    expect(applyDataScopeToQuery({}, { type: 'mystery' }, FIELDS)).toBe(false);
-    expect(applyDataScopeToQuery({}, { type: 'department', department: '' }, FIELDS)).toBe(false);
-    expect(applyDataScopeToQuery({}, { type: 'self' }, FIELDS)).toBe(false);
-    expect(applyDataScopeToQuery({}, null, FIELDS)).toBe(false);
+    // deny 分支：#12 起一律抛 403 DATA_SCOPE_DENIED，不再返回 false 让调用方各自回空集
+    // ——空集让调用方分不清「没有数据」与「没有可见范围」，而这两件事的后续动作相反。
+    // 抛而不是返布尔，还顺带封掉"调用方忘了判返回值"这条退化路径。
+    // 形状注记：显式传 null 也必须 403 而不是 TypeError⇒500，判据排在读 .type 之前。
+    [
+      { type: 'none' },
+      { type: 'mystery' },
+      { type: 'department', department: '' },
+      { type: 'self' },
+      null,
+    ].forEach((scope) => {
+      let caught;
+      try {
+        applyDataScopeToQuery({}, scope, FIELDS);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeDefined();
+      expect(caught.message).toMatch(/没有可用的数据范围/);
+      expect(caught.statusCode).toBe(403);
+      expect(caught.code).toBe('DATA_SCOPE_DENIED');
+    });
   });
 
   // ================= helpers 尾差 =================

@@ -116,7 +116,7 @@ describe('authService gap A', () => {
     });
 
     // ==================== H-01 回归：department 不可自助修改 ====================
-    // department 是数据范围的唯一来源（rbac.js:195 构造 department 型 dataScope，
+    // department 是数据范围的唯一来源（rbac.js:215 构造 department 型 dataScope，
     // 再经 constants/dataScopeFields.js 映射为各业务资源的过滤字段）。
     // 若可自助修改，持有 level>=7 角色的账户只需一次 PUT /api/auth/profile
     // 即可把 dataScope 指向任意部门，绕过部门隔离读取并导出该部门数据。

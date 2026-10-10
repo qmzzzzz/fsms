@@ -23,7 +23,7 @@ let cleanupTimer = null;
  * 存在的理由不是"防呆"，而是这条链路里唯一真实存在的防线：`STATS_CACHE_TTL` 只校验
  * "有限正数"（src/config/index.js 的 statsCacheTtl），配成一年也不会被拒；而那句
  * 用来给长 TTL 背书的注释——"写路径已有 invalidateByUserId 主动失效"——按现网键形
- * 并不成立。缓存键是 `stats:{查看者id}:{范围摘要}`（controllers/userController.js:972），
+ * 并不成立。缓存键是 `stats:{查看者id}:{范围摘要}`（controllers/userController.js:993），
  * 失效只删 `stats:{被改用户id}:` 前缀（本文件 invalidateByUserIdLocal）⇒ 除了被改者
  * 本人以外，其他管理员的桶一条都删不掉；公开注册与角色改名更是根本不触达失效。
  * 也就是说：多数情况下"多久变新"完全由 TTL 决定，所以 TTL 必须有界。

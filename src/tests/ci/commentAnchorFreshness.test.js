@@ -379,13 +379,13 @@ const LIVE = [
   },
   {
     in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
-    at: 'deviceController.js:102',
+    at: 'deviceController.js:106',
     must: /ApiResponse\.paginated/,
     why: '兄弟接口如实带 total 的反证',
   },
   {
     in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
-    at: 'DeviceService.js:420',
+    at: 'DeviceService.js:419',
     must: /countDocuments\(\{ \.\.\.scoped, \.\.\.alert\.needMaintenance \}, listCountOptions\(\)\)/,
     why: '同一档判据专门跑计数（:423/:424 是同符号的另两处，谓词必须区分得开；行号随 #11 查询预算折行漂移）',
   },
@@ -488,7 +488,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/controllers/createUserScopeGate.test.js',
-    at: 'userController.js:598',
+    at: 'userController.js:602',
     must: /assertRecordInScope/,
     why: 'updateUser 里的数据范围闸（原写 :326，那是另一个函数的 docblock）',
   },
@@ -746,7 +746,7 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
     expect(mustNearestOutside(weakened)).toBeLessThan(UNIQ_GAP);
     expect(toothlessRegistrations([weakened])).toHaveLength(1);
     // 正向自证：收紧后的同一条必须一条都不报（两向都过，才不是只验失败态）
-    expect(toothlessRegistrations([LIVE.find((e) => e.at === 'DeviceService.js:420')])).toEqual([]);
+    expect(toothlessRegistrations([LIVE.find((e) => e.at === 'DeviceService.js:419')])).toEqual([]);
   });
 
   test('谓词有牙（正向命中 + 反向不命中），不许跟着行号走', () => {

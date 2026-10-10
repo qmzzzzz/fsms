@@ -239,8 +239,12 @@ describe('F-138 的真实杀伤路径：schema 合法值被服务层静默丢掉
     // 现在两侧同源，这条恒真；任何一侧被改回私有清单，它立刻变红。
     const enumValues = User.schema.path('status').enumValues;
     expect(enumValues.length).toBeGreaterThan(1);
+    // 夹具口径注记：第二参数必须是 getDataScope 形状的对象。原先传裸字符串 'all'，
+    // 旧实现对它既不命中 'all' 分支也不抛错，而是落进 default 臂给 query 塞一个
+    // { _id: null }——本用例只断言 query.status，于是「范围参数根本是错的」这件事
+    // 一直没被发现（假绿）。#12 起裸字符串会被 isDataScopeDenied 判为不可用并抛 403。
     return Promise.all(
-      enumValues.map((status) => userService.buildListQuery({ status }, 'all'))
+      enumValues.map((status) => userService.buildListQuery({ status }, { type: 'all' }))
     ).then((results) => {
       enumValues.forEach((status, i) => {
         expect(results[i].query.status).toBe(status);
@@ -249,7 +253,7 @@ describe('F-138 的真实杀伤路径：schema 合法值被服务层静默丢掉
   });
 
   test('非法 status 仍被丢弃（钉住既有语义，防止顺手改成 400 造成对外行为变化）', () => {
-    return userService.buildListQuery({ status: 'not-a-status' }, 'all').then((r) => {
+    return userService.buildListQuery({ status: 'not-a-status' }, { type: 'all' }).then((r) => {
       expect(r.query.status).toBeUndefined();
       expect(Object.values(USER_STATUS)).not.toContain('not-a-status');
     });

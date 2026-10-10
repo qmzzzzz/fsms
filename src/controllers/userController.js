@@ -14,8 +14,10 @@ const {
 const { syncPermissionsToUsers } = require('../utils/permissionSync');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { getDataScope, buildDataScopeFilter, assertRecordInScope } = require('../middleware/rbac');
+const { getDataScope, assertRecordInScope } = require('../middleware/rbac');
 const { castScopeObjectIds } = require('../utils/scopeCast');
+// 用户统计与用户列表/导出共用同一把尺（含 #12 的范围不可用 ⇒ 403）
+const { scopeFilterFor } = require('../services/reportExportService');
 // 数据范围字段名只有一份（constants/dataScopeFields.js）。此前 getUserStats 里私抄了
 // 'createdBy'/'department'：改常量会让列表按新字段过滤、统计仍按旧字段聚合，
 // 同一用户在"我的列表"与"我的统计"上看到互相矛盾的口径——正是这个常量当初要消灭的 P2-20。
@@ -66,12 +68,14 @@ const getUsers = asyncHandler(async (req, res) => {
   });
 
   const dataScope = await getDataScope(req.user.userId);
-  const { roleFound, scopeAllowed, query } = await userService.buildListQuery(
+  const { roleFound, query } = await userService.buildListQuery(
     { search, status, department, role },
     dataScope
   );
 
-  if (!roleFound || !scopeAllowed) {
+  // 只剩 roleFound 一判：scopeAllowed 已随 #12 改成"范围不可用即 403"
+  // （applyDataScopeToQuery 抛错，errorHandler 统一映射），控制器不再回空分页。
+  if (!roleFound) {
     return ApiResponse.paginated(
       res,
       [],
@@ -974,11 +978,10 @@ const mapUserStatsFacet = (facetResult) => ({
 const getUserStats = asyncHandler(async (req, res) => {
   // 数据范围控制：与列表/详情接口口径一致，防止越权看到全组织统计
   const dataScope = await getDataScope(req.user.userId);
-  const scopeFilter = buildDataScopeFilter(
-    dataScope,
-    DATA_SCOPE_FIELDS.user.ownerField,
-    DATA_SCOPE_FIELDS.user.departmentField
-  );
+  // 走 scopeFilterFor 而不是直接调 buildDataScopeFilter：后者对"范围不可用"只返回
+  // `{_id: null}`，于是本接口给出 HTTP 200 + 全零统计——调用方分不清"这个部门没有账号"
+  // 与"这个账号没有可见范围"，而这两件的后续动作相反（#12 选项①：一律 403）。
+  const scopeFilter = scopeFilterFor('user', dataScope);
 
   // 统计缓存：缓存键由用户 ID + 数据范围稳定摘要组成，保证按用户+数据范围隔离
   const crypto = require('crypto');

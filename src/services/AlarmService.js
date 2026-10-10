@@ -80,9 +80,9 @@ class AlarmService {
     // 数据范围过滤：统一走 applyDataScopeToQuery
     // （原先手写的三分支在 type==='department' 且 department 为空时全不命中 → 零过滤越权）
     // 属主/部门字段取自 DATA_SCOPE_FIELDS 单一声明（P2-20）
-    if (!applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.alarm)) {
-      return { alarms: [], count: 0, hasMore: false, nextCursor: null };
-    }
+    // 范围不可用时 applyDataScopeToQuery 直接抛 403（#12）：不再由本处回空集——
+    // 空集让调用方分不清「没有报警」与「没有可见范围」。
+    applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.alarm);
 
     if (search) {
       const escaped = escapeRegExp(search);
@@ -431,7 +431,10 @@ class AlarmService {
    * 两处收口：
    *  1. 缺省即 deny：原实现是 `if (dataScope && !apply(...))`，漏传 dataScope 时
    *     整个 deny 分支被短路跳过 ⇒ 统计退化为**全组织**数字，且不报错。
-   *     与 InspectionService.getInspectionStats 同判据：漏传只能得到零结果。
+   *     与 InspectionService.getInspectionStats 同判据。#12 起 deny 由
+   *     applyDataScopeToQuery 统一抛 403（DATA_SCOPE_DENIED），不再由各调用方
+   *     拼一份「全零统计」——空集让调用方分不清「今天没有报警」与「这个账号
+   *     没有可见范围」。原 `if (!apply(...)) return emptyStats` 随之成为死分支。
    *  2. 聚合前归一化 ObjectId：self/department 范围产出的条件是
    *     `{'reporter.userId':'<24位hex字符串>'}`（userId 来自 JWT）。
    *     countDocuments 会 cast、aggregate 不会 ⇒ total>0 而 byStatus/byLevel/byType
@@ -445,12 +448,8 @@ class AlarmService {
       if (endDate) matchStage.occurredAt.$lte = parseDateBoundary(endDate, 'end');
     }
 
-    const emptyStats = { total: 0, byStatus: [], byLevel: [], byType: [] };
-
     // 数据范围过滤（与 getAlarms 列表口径保持一致：同一函数、同一 deny 语义）
-    if (!applyDataScopeToQuery(matchStage, dataScope, DATA_SCOPE_FIELDS.alarm)) {
-      return emptyStats;
-    }
+    applyDataScopeToQuery(matchStage, dataScope, DATA_SCOPE_FIELDS.alarm);
 
     // 同一个条件既进聚合又进 countDocuments，必须归一化后再分发，
     // 否则两条臂对同一范围给出互相矛盾的结论（见上）。

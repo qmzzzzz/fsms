@@ -16,9 +16,16 @@
 const path = require('path');
 
 // 数据范围翻译与失败注入无关，固定为 all 以免依赖库内角色播种
-jest.mock('../../middleware/rbac', () => ({
-  getDataScope: jest.fn(async () => ({ type: 'all' })),
-}));
+// isDataScopeDenied / deniedDataScope 从真实模块取（#12 之后 auditScopeFilter 也要用
+// 这两个导出）：不在测试里重抄判据，重抄就是第二处会漂移的实现。
+jest.mock('../../middleware/rbac', () => {
+  const actual = jest.requireActual('../../middleware/rbac');
+  return {
+    isDataScopeDenied: actual.isDataScopeDenied,
+    deniedDataScope: actual.deniedDataScope,
+    getDataScope: jest.fn(async () => ({ type: 'all' })),
+  };
+});
 
 const MODULE = path.resolve(__dirname, '../../services/auditQueryService');
 

@@ -74,6 +74,21 @@ const ERROR_CODES = {
     message: '登出未完成：请求中包含不属于当前账号的刷新令牌，已拒绝本次登出',
   },
 
+  // 数据范围不可用（type:'none' / 部门档无部门 / self 档无 userId / 未知 type）
+  //
+  // 为什么是 403 而不是 200 + 空集：空集让调用方**分不清「没有」与「不能看」**。
+  // 前者是"这个部门今天确实没有报警"，后者是"你这个人不在这个部门可见范围里"——
+  // 两者的后续动作完全相反（一个继续等数据，一个去找管理员开权限），而响应一模一样。
+  // 与"宁声明勿假装完整"同族：导出截断要喊（X-Export-Truncated），范围不可用也要喊。
+  //
+  // 落点是 middleware/rbac.js 的 applyDataScopeToQuery（列表/统计共用的唯一收口）、
+  // services/auditScopeFilter.js 与 services/reportExportService.js 的 scopeFilterFor
+  // ——三处原先都回空集。
+  DATA_SCOPE_DENIED: {
+    status: 403,
+    message: '当前账号没有可用的数据范围（未分配部门或权限不足），请联系管理员',
+  },
+
   // ================= MFA 两步验证 =================
   // 登录二次验证码错误
   MFA_CODE_INVALID: { status: 401, message: '两步验证码错误' },

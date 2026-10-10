@@ -22,7 +22,7 @@ const FireAlarm = require('../models/FireAlarm');
 const Inspection = require('../models/Inspection');
 const AuditLog = require('../models/AuditLog');
 const { sanitizeSpreadsheetCell, validateEnum } = require('../utils/helpers');
-const { buildDataScopeFilter } = require('../middleware/rbac');
+const { buildDataScopeFilter, isDataScopeDenied, deniedDataScope } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 // 审计枚举单一事实来源：constants/audit.js（D-1 起 AUDIT_LOG_ACTIONS 亦收敛于此）。
 // level 三级展示口径原先本文件写两份字面量（下面的 includes 闸门 + 枚举校验）、
@@ -74,6 +74,8 @@ const collationOptionsForExport = (query) =>
  * @param {'device'|'alarm'|'inspection'|'user'} resource
  */
 const scopeFilterFor = (resource, dataScope) => {
+  // #12：导出与列表同一把尺——范围不可用即 403，不回一份"看起来完整"的空文件
+  if (isDataScopeDenied(dataScope)) throw deniedDataScope();
   const { ownerField, departmentField } = DATA_SCOPE_FIELDS[resource];
   return castScopeObjectIds(buildDataScopeFilter(dataScope, ownerField, departmentField));
 };

@@ -35,12 +35,19 @@ const SRC = path.join(__dirname, '../../src');
  * 第四通道同理：controllers/roleGuards.js 的 guardRoleWithinOperatorLevel 收
  * forbiddenCode/higherLevelCode 两个参数由 codeError(res, 参数) 发出，码字面量在
  * roleController 的调用点上。两个属性名在该仓专属，不会误伤别处对象字段。
+ * 第五通道：#12 之后"范围不可用"由 middleware/rbac.js 的 deniedDataScope 以
+ * `new ApiError(msg, status, errors, 'DATA_SCOPE_DENIED')` 抛出，errorHandler 再把
+ * 它转成 errors.errorCode 发给客户端——这同样是一条"码抵达客户端"的通路。少了它，
+ * DATA_SCOPE_DENIED 会被判成死码（注册了却没人发）。
  */
 const CODE_PATTERNS = [
   /codeError\(\s*[A-Za-z_$][\w.]*\s*,\s*'([A-Z][A-Z0-9_]*)'/g,
   /\berrorCode:\s*'([A-Z][A-Z0-9_]*)'/g,
   /^\s*code:\s*'([A-Z][A-Z0-9_]{3,})',\s*\r?\n\s*message:/gm,
   /\b(?:forbiddenCode|higherLevelCode):\s*'([A-Z][A-Z0-9_]*)'/g,
+  // 末位实参是码字面量的 new ApiError(...)。[^)]* 不跨右括号，正好框住实参表；
+  // 今天全仓只有一处命中（rbac.deniedDataScope），多一处就会在这里现形。
+  /new ApiError\([^)]*["']([A-Z][A-Z0-9_]*)["']\s*\)/gs,
 ];
 
 function collectCodesFromSource(text) {
@@ -100,6 +107,7 @@ describe('调用点错误码必须已注册', () => {
     const synthetic = [
       "  return ApiResponse.codeError(res, 'ALARM_NOTFOUND_TYPEO');",
       "  return ApiResponse.error(res, 'x', 400, { errorCode: 'CAPTCHA_INVALLID' });",
+      "  throw new ApiError(ERROR_CODES.X.message, 403, undefined, 'DATA_SCOPE_DENIEDX');",
       '  const violation = {',
       "    code: 'SUPER_ADMIN_ROLE_NOT_DETACHABLX',",
       "    message: 'x',",
@@ -110,9 +118,10 @@ describe('调用点错误码必须已注册', () => {
       'ALARM_NOTFOUND_TYPEO',
       'CAPTCHA_INVALLID',
       'SUPER_ADMIN_ROLE_NOT_DETACHABLX',
+      'DATA_SCOPE_DENIEDX',
     ]);
     const bad = codes.filter((c) => !ERROR_CODES[c]);
-    expect(bad).toHaveLength(3);
+    expect(bad).toHaveLength(4);
     // 对照：真码走同一条路径必须被放过（证明上面报的是"未注册"而不是"有内容"）
     expect([...collectCodesFromSource(synthetic)].filter((c) => ERROR_CODES[c]).length).toBe(0);
     expect([...collectCodesFromSource("ApiResponse.codeError(res, 'MFA_CODE_INVALID');")]).toEqual([

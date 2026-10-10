@@ -8,12 +8,12 @@
  * 也就是一次**跨用户 roles 数组的写操作**。
  *
  * 同一能力从另一个入口进来是有闸的：`userController.assignRoles`
- * （`src/controllers/userController.js:610`）在动 `roles` 之前先跑
+ * （`src/controllers/userController.js:683`）在动 `roles` 之前先跑
  * `assertRecordInScope(req, user, 'createdBy', 'department')`，不在范围即
  * `USER_SCOPE_FORBIDDEN`。两条路由挂的权限码完全相同（都只有 `role:assign`），
  * 差别仅在这道范围闸——于是部门域操作者可以改**别的部门**用户的角色，
  * 而同一份改动走"编辑用户角色"接口会被 403。本仓对该闸的定性见
- * `userController.js:532` 附近注释："层级校验管能不能碰这个人，
+ * `userController.js:599` 附近注释："层级校验管能不能碰这个人，
  * 范围校验管这个人是否在你的可见域内——两者正交"。
  *
  * 夹具刻意让层级差与范围差不重合（操作者 L7 / 目标 L3 ⇒ 层级闸放行），

@@ -64,11 +64,14 @@ describe('userController data scope and encrypted credentials', () => {
   const authed = (method, url) =>
     request(app)[method](url).set('Authorization', `Bearer ${operatorToken}`);
 
-  test('denies user-list data scope with an explicit empty page', async () => {
+  test('denies user-list data scope with 403 DATA_SCOPE_DENIED', async () => {
+    // 夹具角色 level 3 < LEVEL_SELF(4) ⇒ 数据范围 {type:'none'}。
+    // #12 之前这里是 200 + 空页；之后一律 403 + errorCode：空页让调用方分不清
+    // 「没有用户」与「这个账号没有可见范围」，而这两件事的后续动作相反。
     const res = await authed('get', '/api/users?page=1&limit=10');
-    expect(res.status).toBe(200);
-    expect(res.body.data).toEqual([]);
-    expect(res.body.pagination.total).toBe(0);
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+    expect(res.body.errors.errorCode).toBe('DATA_SCOPE_DENIED');
   });
 
   test('validates password strength after decrypting the credential', async () => {

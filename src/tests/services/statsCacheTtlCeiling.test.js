@@ -12,7 +12,7 @@
  * 为什么"上界"不是防御式冗余：`STATS_CACHE_TTL` 只校验有限正数
  * （src/config/index.js 的 statsCacheTtl），配成一年也不会被拒；而 config 注释给长 TTL
  * 背书的理由是"写路径已有 invalidateByUserId 主动失效"。这个前提**按现网键形不成立**：
- *   · 缓存键 = `stats:{查看者id}:{范围摘要}`（controllers/userController.js:972）；
+ *   · 缓存键 = `stats:{查看者id}:{范围摘要}`（controllers/userController.js:993）；
  *   · 失效只删 `stats:{被改用户id}:` 前缀（statsCache.js 的 invalidateByUserIdLocal）
  *     ⇒ 除了被改者本人，其他管理员的桶一条都删不掉；
  *   · 公开注册（services/authService.js 的 User.create）与角色改名

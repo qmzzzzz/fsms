@@ -1127,7 +1127,7 @@ async function changeUserPassword(userId, body, ctx) {
  * 更新个人资料（业务层）
  *
  * 【H-01 修复】department 刻意不在自助可改字段内：
- * 它是数据范围的唯一来源（middleware/rbac.js:195 以 user.department 构造
+ * 它是数据范围的唯一来源（middleware/rbac.js:215 以 user.department 构造
  * department 型 dataScope，再经 constants/dataScopeFields.js 映射为各业务
  * 资源的过滤字段）。若允许用户自助修改，持有 level>=7 角色的账户只需一次
  * PUT /api/auth/profile 即可把 dataScope 指向任意部门，绕过部门隔离读取并

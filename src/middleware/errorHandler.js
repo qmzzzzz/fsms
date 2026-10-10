@@ -103,10 +103,16 @@ const errorHandler = (err, req, res, _next) => {
   // 自定义 API 错误
   if (err.isApiError) {
     logger.warn(`ApiError: ${err.message}`);
+    // err.code 必须抵达 errors.errorCode：前端 web-admin/src/utils/api.js 的
+    // ERROR_CODE_I18N_MAP 只认这个位置（resolveErrorMessage 读 data.errors.errorCode）。
+    // 服务层抛 ApiError(msg, status, errors, code) 时 code 原先被整个丢掉，客户端
+    // 拿不到码就只能回退到后端中文 message——英文界面显示中文。今天带 code 的抛点
+    // 只有 rbac.deniedDataScope（DATA_SCOPE_DENIED），但"丢码"与抛点个数无关。
+    const errors = err.code ? { ...(err.errors || {}), errorCode: err.code } : err.errors;
     return res.status(err.statusCode || 400).json({
       success: false,
       message: err.message,
-      errors: err.errors,
+      errors,
     });
   }
 

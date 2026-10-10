@@ -37,38 +37,47 @@ describe('applyDataScopeToQuery — 数据范围收敛', () => {
   });
 
   // ===== 核心回归：曾经零过滤的三种输入 =====
-  describe('曾导致零过滤越权的输入一律拒绝', () => {
+  // #12 起这三类输入的处置从"返回 false、调用方各自回空集"改成**抛 403**：
+  // 空集让调用方分不清「没有数据」与「没有可见范围」，而这两者的后续动作相反。
+  describe('曾导致零过滤越权的输入一律拒绝（403，不再回空集）', () => {
     test.each([
       ['department 为空字符串', { type: 'department', department: '' }],
       ['department 为 null', { type: 'department', department: null }],
       ['department 字段缺失', { type: 'department' }],
       ['type=none', { type: 'none' }],
       ['type 为未知值', { type: 'bogus' }],
-    ])('%s → 返回 false（调用方返回空集）', (_label, dataScope) => {
+    ])('%s → 抛 403 DATA_SCOPE_DENIED', (_label, dataScope) => {
       const query = { status: 'active' };
-      expect(applyDataScopeToQuery(query, dataScope, FIELDS)).toBe(false);
+      expect(() => applyDataScopeToQuery(query, dataScope, FIELDS)).toThrow(/没有可用的数据范围/);
+      // 「拒绝」不得顺手污染查询：异常抛出时 query 必须原样不动
+      expect(query).toEqual({ status: 'active' });
     });
 
     // 期望值表驱动：每种范围形态的 allowed 结果显式列出，不再在函数行为上开
     // 条件分支。原写法 `if (allowed) { expect(...) }` 在 applyDataScopeToQuery
     // 恒返回 false（拒绝一切数据的可用性退化）时一条断言都不执行、用例恒绿。
     test.each([
-      ['department 为空串 → 拒绝且不残留约束', { type: 'department', department: '' }, false],
-      ['department 为 null → 拒绝且不残留约束', { type: 'department', department: null }, false],
-      ['department 字段缺失 → 拒绝且不残留约束', { type: 'department' }, false],
+      ['department 为空串 → 拒绝', { type: 'department', department: '' }, false],
+      ['department 为 null → 拒绝', { type: 'department', department: null }, false],
+      ['department 字段缺失 → 拒绝', { type: 'department' }, false],
       ['department 有效 → 允许且必须加约束', { type: 'department', department: 'A栋' }, true],
       ['self 有效 → 允许且必须加约束', { type: 'self', userId: 'u1' }, true],
-      ['type=none → 拒绝且不残留约束', { type: 'none' }, false],
-      ['type 未知值 → 拒绝且不残留约束', { type: 'bogus' }, false],
-      ['空对象（无 type）→ 拒绝且不残留约束', {}, false],
+      ['type=none → 拒绝', { type: 'none' }, false],
+      ['type 未知值 → 拒绝', { type: 'bogus' }, false],
+      ['空对象（无 type）→ 拒绝', {}, false],
     ])('%s', (_label, scope, expectedAllowed) => {
       const query = {};
-      const allowed = applyDataScopeToQuery(query, scope, FIELDS);
       // 两个方向由同一期望值锁定：
-      //   - expectedAllowed=true：必须施加至少一个约束键（防零过滤越权）；
-      //   - expectedAllowed=false：不得残留任何约束键（防「拒绝」却污染查询并存）。
-      expect(allowed).toBe(expectedAllowed);
-      expect(Object.keys(query).length > 0).toBe(expectedAllowed);
+      //   - expectedAllowed=true：必须返回 true 且施加至少一个约束键（防零过滤越权）；
+      //   - expectedAllowed=false：必须抛 403，且不得残留任何约束键
+      //     （防「拒绝」却把查询污染了——异常路径同样要干净）。
+      if (expectedAllowed) {
+        expect(applyDataScopeToQuery(query, scope, FIELDS)).toBe(true);
+        expect(Object.keys(query).length > 0).toBe(true);
+      } else {
+        expect(() => applyDataScopeToQuery(query, scope, FIELDS)).toThrow(/没有可用的数据范围/);
+        expect(Object.keys(query).length).toBe(0);
+      }
     });
   });
 
@@ -119,11 +128,13 @@ describe('applyDataScopeToQuery — 数据范围收敛', () => {
   });
 
   test('与 buildDataScopeFilter 的 deny 哨兵口径一致', () => {
-    // buildDataScopeFilter 用 { _id: null } 表示「永不匹配」；
-    // applyDataScopeToQuery 必须把它翻译成 false，而不是把 _id:null 塞进查询
+    // buildDataScopeFilter 仍用 { _id: null } 表示「永不匹配」（直接调用方照旧可用）；
+    // applyDataScopeToQuery 则必须把它翻译成**抛 403**，而不是把 _id:null 塞进查询
     expect(buildDataScopeFilter({ type: 'none' }, 'createdBy')).toEqual({ _id: null });
     const query = {};
-    expect(applyDataScopeToQuery(query, { type: 'none' }, FIELDS)).toBe(false);
+    expect(() => applyDataScopeToQuery(query, { type: 'none' }, FIELDS)).toThrow(
+      /没有可用的数据范围/
+    );
     expect(query._id).toBeUndefined();
   });
 });

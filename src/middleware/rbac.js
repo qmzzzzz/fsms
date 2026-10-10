@@ -6,6 +6,8 @@
 
 const User = require('../models/User');
 const ApiResponse = require('../utils/apiResponse');
+const ApiError = require('../utils/ApiError');
+const { ERROR_CODES } = require('../utils/errorCodes');
 const logger = require('../utils/logger');
 const { resolvePunishableIp } = require('../utils/ipUtils');
 
@@ -389,8 +391,44 @@ const assertRecordInScope = async (req, doc, ownerField, departmentField) => {
  * @param {Object} query 待就地修改的查询对象
  * @param {Object} dataScope getDataScope 的返回值
  * @param {Object} fields { ownerField, departmentField }
- * @returns {boolean} true=已应用约束可继续查询；false=范围为空，调用方应直接返回空结果
+ * @returns {boolean} true=已应用约束可继续查询
+ * @throws {ApiError} 403 DATA_SCOPE_DENIED——范围不可用（无范围信息 / 未知 type /
+ *   type='none' / department 缺值 / self 缺 userId）。调用方无需也无法"返回空结果"，
+ *   异常会一路冒到 errorHandler 变成 403。
  */
+/**
+ * 数据范围不可用 ⇒ 403（DATA_SCOPE_DENIED）。
+ *
+ * 走 ApiError 而非直接 res.status：本函数被 Service 层调用（那里没有 res），
+ * 由全局 errorHandler 统一映射成 403 响应——与 ApiError 类的既定用途一致。
+ */
+const deniedDataScope = () =>
+  new ApiError(
+    ERROR_CODES.DATA_SCOPE_DENIED.message,
+    ERROR_CODES.DATA_SCOPE_DENIED.status,
+    undefined,
+    'DATA_SCOPE_DENIED'
+  );
+
+/**
+ * 数据范围是否不可用——**唯一一份判据**。
+ *
+ * 为什么必须单点：这份判据原先只活在 applyDataScopeToQuery 开头的几行里，
+ * 而 auditScopeFilter / reportExportService 各自还有一份"deny 就回空集"的私有实现。
+ * #12 要求这三处统一改成 403，判据抄三遍必然漂移，漂移的方向一定是"某一条忘了拒"。
+ *
+ * @param {Object} dataScope getDataScope 的返回值
+ * @returns {boolean} true=不可用（调用方应 403）
+ */
+const isDataScopeDenied = (dataScope) =>
+  !dataScope ||
+  dataScope.type === 'none' ||
+  (dataScope.type === 'department' && !dataScope.department) ||
+  (dataScope.type === 'self' && !dataScope.userId) ||
+  // 白名单必须含 'all'：它是**可用**范围（最宽的那一档），漏掉就会把超管一律拒掉。
+  // 这个漏子第一次跑 edgeCases 的「all：原样放行」就炸了——记在这里免得再犯。
+  !['all', 'department', 'self'].includes(dataScope.type);
+
 const applyDataScopeToQuery = (query, dataScope, { ownerField, departmentField }) => {
   // 显式 deny 判定（不依赖 buildDataScopeFilter 的兜底形态）：
   // - 无范围信息 / 未知 type / type='none' → 拒绝
@@ -401,13 +439,16 @@ const applyDataScopeToQuery = (query, dataScope, { ownerField, departmentField }
   //  ② department 缺值 / self 缺 userId / type='none' 或未知 type 时它返回 { _id: null }，
   //     "匹配不到文档"只在**该条件真的被 AND 进最终查询**时才成立——它是个查询片段而不是
   //     拒绝信号：调用方同名字段覆盖、或把"拿到对象"当成"范围有效"来分支时 deny 静默失效。
-  // 布尔返回值不会静默降级，也让调用方无需反推"这个条件到底是不是空集"。
-  if (!dataScope) return false;
+  // 不可用即**抛 403**（#12 选项①），不再返回 false 让调用方各自回空集：
+  // 空集让调用方分不清「没有数据」与「没有可见范围」，而这两者的后续动作相反。
+  // 抛而不是返回布尔，还顺带封掉"调用方忘了判返回值"这条退化路径——
+  // 旧的 false 返回值没有任何机制保证 6 个调用点都检查它。
+  // deny 判定必须排在读 dataScope.type 之前：调用方显式传 null 时（参数默认值
+  // 只在 undefined 时生效，null 会原样进函数体），先读 .type 会抛 TypeError ⇒ 500，
+  // 而"没有范围信息"本该是 403。isDataScopeDenied 的第一条就是 !dataScope。
+  // （src/tests/alarmStatsScopeCast.test.js 的"显式传 null 也必须 403"钉住这一条。）
+  if (isDataScopeDenied(dataScope)) throw deniedDataScope();
   if (dataScope.type === 'all') return true;
-  if (dataScope.type === 'none') return false;
-  if (dataScope.type === 'department' && !dataScope.department) return false;
-  if (dataScope.type === 'self' && !dataScope.userId) return false;
-  if (!['department', 'self'].includes(dataScope.type)) return false;
 
   const scopeFilter = buildDataScopeFilter(dataScope, ownerField, departmentField);
 
@@ -463,6 +504,8 @@ module.exports = {
   getDataScope,
   buildDataScopeFilter,
   applyDataScopeToQuery,
+  isDataScopeDenied,
+  deniedDataScope,
   isRecordInScope,
   assertRecordInScope,
   isDepartmentValueAllowed,

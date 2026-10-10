@@ -12,8 +12,8 @@
  *      若哪天有人把指纹省成 `dash:<userId>`，被调走部门的用户会在一个 TTL 窗口里
  *      继续拿到**原部门**的统计数字：范围变更不生效期，且响应体看不出它是缓存来的
  *      （①坏了就连②都无从察觉，两条要分别钉）；
- *   ③ `type:'none'` 在缓存之前就短路返回空看板——它不得占用缓存，
- *      也不得因为别人先算过而报"命中"。
+ *   ③ `type:'none'` 在缓存之前就抛 403——它不得占用缓存，也不得出空看板
+ *      （#12：deny 的落点是 403 而不是"看起来完整的一组零"）。
  *
  * 三个用例各用独立用户，互不共享缓存条目（键含 userId），因此不依赖执行顺序。
  */
@@ -125,15 +125,17 @@ describe('仪表盘缓存的命中可区分 / 范围指纹 / none 不占缓存',
     expect(back.data.devices.total).toBe(1);
   });
 
-  test('type:none 在缓存之前短路：两次都是未命中文案且恒为空看板', async () => {
+  test('type:none 在缓存之前就 403：不得占缓存，也不得出空看板', async () => {
+    // #12 之前这里是"短路返回空看板"。#12 之后 deny 的落点是 403：
+    // 空看板让调用方分不清「这个部门没有设备」与「这个账号没有可见范围」，
+    // 而这两件事的后续动作相反。抛点在 scopeFilterFor，位于缓存读写之前，
+    // 所以"不占缓存、不报命中"这条口径由抛错本身保证——没有可返回的对象可判。
     const userId = await mkUser('none', BUILDING_A, noneRole);
-    const first = await getDashboardData(userId);
-    const second = await getDashboardData(userId);
-    for (const res of [first, second]) {
-      expect(res.message).not.toContain(CACHE_HIT);
-      expect(res.data.devices.total).toBe(0);
-      expect(res.data.alarms.total).toBe(0);
-      expect(res.data.inspections.total).toBe(0);
+    for (let i = 0; i < 2; i += 1) {
+      await expect(getDashboardData(userId)).rejects.toMatchObject({
+        statusCode: 403,
+        code: 'DATA_SCOPE_DENIED',
+      });
     }
   });
 });

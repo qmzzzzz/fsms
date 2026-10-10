@@ -3,7 +3,7 @@
  * 本文件的定位（2026-09-20 补注，由变异审计批量补齐）
  *
  * 被测对象：reportController.exportReport 的输入与范围分支
- * 守护的不变式：非 xlsx 提前拒绝；非法日期 400；导出枚举白名单校验；dataScope.type==="none" → 强制空集
+ * 守护的不变式：非 xlsx 提前拒绝；非法日期 400；导出枚举白名单校验；dataScope.type==="none" → 403
  * 可证伪性：变异实测（筛查 N=2）：杀 2/3
  *
  * ⚠️ 既往审计指出的边界（2026-09-20 逐条**内容复核**；原报告行号已漂移，按代码特征取证）
@@ -36,9 +36,9 @@
  *  - exportReport：format !== 'xlsx' 提前拒绝（此前仅测过 type 非法）
  *  - exportReport：日期参数非法 400（Invalid Date 会让查询在 DB 层抛错）
  *  - exportReport：audit 分支导出枚举白名单校验失败 400（P3-13 补的 level 维度）
- *  - exportReport：dataScope.type === 'none' → 强制空集，导出仅含表头的文件
+ *  - exportReport：dataScope.type === 'none' → 403 DATA_SCOPE_DENIED（#12，不再给空文件）
  *  - 路由层：持认证但缺 report:export 的业务类型导出 → 403
- *  - getDashboardStats：dataScope=none → 全零空统计
+ *  - getDashboardStats：dataScope=none → 403 DATA_SCOPE_DENIED（#12，不再给全零看板）
  *  - getDeviceReport/getAlarmReport/getInspectionReport 的日期分支：
  *    非法日期 400 与「日期窗口并入聚合」（两条互为对照，见下）
  *  - EXPORT_ROW_TRANSFORMS 行级 fallback：需真实导出行驱动，见 beforeAll 种子注释
@@ -358,43 +358,22 @@ describe('reportController.exportReport 分支补齐', () => {
     expect(res.headers['content-disposition']).toContain('attachment');
   });
 
-  test('dataScope.type=none → 强制空集，导出的 xlsx 除表头外零数据行（越权面内容级验证）', async () => {
-    // 本次改动复审强化：原用例只断言 200 + content-type，等于「只要返回了一个 xlsx 就算过」——
-    // 而 dataScope=none 的**安全语义**是「不得导出任何他人数据」。响应头无法证伪这一语义
-    // （返回一个装满数据的文件同样是 200 + spreadsheetml）。
-    // 现用 exceljs 解析真实响应体，断言：① 工作表存在；② 除表头行外无数据行；
-    // ③ 种子数据里的可识别标记（如报警编码前缀）一个都不出现。
+  test('dataScope.type=none → 403 DATA_SCOPE_DENIED，一个字节的文件都不产出', async () => {
+    // #12 之前这里回一份"只有表头的空文件"（当时的内容级断言：工作表存在、
+    // 表头之外零数据行、种子标记一个都不出现——那是对的，但只覆盖到"文件里没有数据"）。
+    // #12 之后 deny 的落点是 403：空文件让调用方分不清「这个范围内没有数据」与
+    // 「这个账号没有可见范围」，而这两件事的后续动作相反（前者改筛选条件，
+    // 后者去找管理员开权限）。"不得导出任何他人数据"由 403 本身保证——没有文件可比。
     rbac.getDataScope.mockResolvedValueOnce({ type: 'none' });
     const res = await request(app)
       .get('/api/reports/export?type=devices')
-      .set('Authorization', `Bearer ${superToken}`)
-      .buffer(true)
-      .parse((r, cb) => {
-        const chunks = [];
-        r.on('data', (c) => chunks.push(c));
-        r.on('end', () => cb(null, Buffer.concat(chunks)));
-      });
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toContain('spreadsheetml');
-
-    const ExcelJS = require('exceljs');
-    const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(res.body);
-    const ws = wb.worksheets[0];
-    expect(ws).toBeTruthy();
-
-    // 表头行之后不得有任何数据行（rowCount 含表头，故允许 1 行）
-    expect(ws.actualRowCount).toBeLessThanOrEqual(1);
-
-    // 全表文本化后搜种子标记：任何一条泄漏都会被抓住
-    let dump = '';
-    ws.eachRow((row) => {
-      row.eachCell((cell) => {
-        dump += String(cell.value ?? '') + '\u0001';
-      });
-    });
-    expect(dump).not.toContain(stamp); // 本套件所有种子数据的公共标记
-    expect(dump).not.toContain('REXPD'); // 设备种子编码前缀
+      .set('Authorization', `Bearer ${superToken}`);
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+    expect(res.body.errors.errorCode).toBe('DATA_SCOPE_DENIED');
+    // 反向自证：不得产出 xlsx（zip 魔数 PK\x03\x04）。若 deny 被绕过，
+    // 这里会拿到 200 + spreadsheetml，上一行的 statusCode 断言先红。
+    expect(res.headers['content-type']).not.toContain('spreadsheetml');
 
     rbac.getDataScope.mockResolvedValue({ type: 'all' });
   });
@@ -411,20 +390,16 @@ describe('reportController.exportReport 分支补齐', () => {
 
   // ===== getDashboardStats / 三张报表接口的日期与范围分支 =====
 
-  test('dashboard：dataScope=none → 全零空统计（越权数据零泄漏）', async () => {
+  test('dashboard：dataScope=none → 403（越权数据零泄漏，且不再伪装成全零看板）', async () => {
+    // #12 之前这里回 200 + 全零统计。之后 deny 一律 403：全零看板让调用方分不清
+    // 「这个部门没有设备」与「这个账号没有可见范围」，而这两件事的后续动作相反。
+    // "零泄漏"由 403 本身保证——没有任何数字可以被读走。
     rbac.getDataScope.mockResolvedValueOnce({ type: 'none' });
     const res = await request(app)
       .get('/api/reports/dashboard')
       .set('Authorization', `Bearer ${superToken}`);
-    expect(res.status).toBe(200);
-    expect(res.body.data.devices).toMatchObject({
-      total: 0,
-      online: 0,
-      fault: 0,
-      needMaintenance: 0,
-    });
-    expect(res.body.data.alarms.total).toBe(0);
-    expect(res.body.data.inspections.total).toBe(0);
+    expect(res.status).toBe(403);
+    expect(res.body.errors.errorCode).toBe('DATA_SCOPE_DENIED');
   });
 
   test('三张报表接口：非法日期 → 400 前置拦截', async () => {

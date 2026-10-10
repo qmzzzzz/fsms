@@ -161,15 +161,20 @@ describe('audit log data scope', () => {
     expect(res.body.data.data.map((item) => item.username)).toEqual([users.selfOperator.username]);
   });
 
-  test('guests get an explicitly empty audit page', async () => {
+  test('guests get an explicitly denied audit page (403 DATA_SCOPE_DENIED)', async () => {
     const users = app.get('auditScopeUsers');
     const token = makeToken(users.guestOperator);
     const res = await request(app)
       .get('/api/security/audit-logs?action=login_success&limit=20')
       .set('Authorization', `Bearer ${token}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body.data.data).toEqual([]);
+    // 访客档（level < LEVEL_SELF）数据范围是 {type:'none'}：不可用即 403，
+    // 不再给 HTTP 200 + 空页。#12 选项①——空页让调用方分不清「今天没有日志」
+    // 与「这个账号看不了日志」，而这两件事的后续动作相反。
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+    // errorCode 必须抵达 errors.errorCode：前端 ERROR_CODE_I18N_MAP 只认这个位置
+    expect(res.body.errors.errorCode).toBe('DATA_SCOPE_DENIED');
   });
 
   test('export applies the same department boundary', async () => {

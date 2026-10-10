@@ -287,14 +287,17 @@ const exportReport = asyncHandler(async (req, res) => {
       userId,
     });
   } catch (err) {
+    // 数据范围不可用（403 DATA_SCOPE_DENIED）必须原样上冒：折算成 400 会把
+    // "这个账号没有可见范围"说成"参数不合法"，客户端于是去改筛选条件，重试一个
+    // 永远不可能成功的导出。只有真的参数错误才走 400（原行为不变）。
+    if (err.isApiError) throw err;
     return ApiResponse.error(res, err.message, 400);
   }
   if (query === null) return ApiResponse.codeError(res, 'REPORT_TYPE_UNSUPPORTED');
 
-  // 无数据权限时直接返回空文件(只有表头)
-  if (dataScope.type === 'none') {
-    query._id = { $in: [] };
-  }
+  // 原先这里对 type:'none' 回一份"只有表头的空文件"。buildExportQuery 里的
+  // scopeFilterFor 现在对范围不可用一律抛 403（#12 选项①），这一段已不可达；
+  // 留着它会让人以为"deny 仍然给文件"，与"宁声明勿假装完整"正相反，故删除。
 
   // audit 类型必须叠加与「列表 / CSV 导出」同一份数据范围判据（auditScopeFilter）。
   // 此处原先的注释写着"审计无部门/属主字段，语义上只能全局或禁止"，而 AuditLog.userId

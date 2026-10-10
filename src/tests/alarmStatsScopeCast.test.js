@@ -147,22 +147,25 @@ describe('AlarmService.getAlarmStats：self 范围下分项必须与 total 对�
     expect(stats.byStatus.find((g) => g._id === 'pending').count).toBe(1);
   });
 
-  test('缺省（漏传 dataScope）只能得到零结果，不得退化为全量', async () => {
-    const omitted = await service.getAlarmStats(undefined, undefined);
-    expect(omitted.total).toBe(0);
-    expect(omitted.byStatus).toEqual([]);
-    expect(omitted.byLevel).toEqual([]);
-    expect(omitted.byType).toEqual([]);
+  test('缺省（漏传 dataScope）必须 403，不得退化为全量', async () => {
+    // #12 之后 deny 的落点是 403 而不是零结果：零结果让调用方分不清
+    // "这段时间没有报警"与"这个账号没有可见范围"，而这两件事的后续动作相反。
+    await expect(service.getAlarmStats(undefined, undefined)).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'DATA_SCOPE_DENIED',
+    });
   });
 
-  test('显式传 null 也必须 deny（漏传有默认值兜，null 没有）', async () => {
+  test('显式传 null 也必须 403（漏传有默认值兜，null 没有）', async () => {
     // 这条不是重复上一条：参数默认值只在 **undefined** 时生效，
     // 传 null 会带着 null 进函数体。原实现的条件是 `if (dataScope && !apply(...))`，
     // null 为假 ⇒ 整个 deny 判断被跳过 ⇒ 统计退化为全组织。
     // （变异自检 SC-M5 首轮存活，就是靠这条把它杀掉的。）
-    const asNull = await service.getAlarmStats(undefined, undefined, null);
-    expect(asNull.total).toBe(0);
-    expect(asNull.byStatus).toEqual([]);
+    // #12 之后同一漏子的形态从"全组织"变成"403 被吞掉"，判据换成拒绝。
+    await expect(service.getAlarmStats(undefined, undefined, null)).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'DATA_SCOPE_DENIED',
+    });
   });
 
   test('反向保护：显式 all 仍给全量（缺省窄化不得变成永远为空）', async () => {

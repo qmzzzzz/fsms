@@ -11,10 +11,11 @@ const ApiResponse = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
 const {
   getDataScope,
-  buildDataScopeFilter,
   assertRecordInScope,
   isDepartmentValueAllowed,
 } = require('../middleware/rbac');
+// 统计/到期/提醒三条出口与列表、导出共用同一把尺（含 #12 的范围不可用 ⇒ 403）
+const { scopeFilterFor } = require('../services/reportExportService');
 const { normalizePagination } = require('../utils/helpers');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const deviceService = require('../services/DeviceService');
@@ -53,11 +54,14 @@ const rejectOutOfScopeBuilding = async (req, res, building) => {
 
 /**
  * 生成设备资源的数据范围过滤条件（统计/导出/提醒共用同一口径）
+ *
+ * 走 scopeFilterFor 而不是直接调 buildDataScopeFilter：后者对"范围不可用"
+ * （department 档但未分配部门 / self 档但取不到 userId / type=none / 未知档）
+ * 只返回 `{_id: null}`，调用方照旧给出 HTTP 200 + 全零统计——调用方分不清
+ * "这个部门没有设备"与"这个账号没有可见范围"，而这两件的后续动作相反。
+ * scopeFilterFor 在同一处先判 deny 再抛 403（判据唯一，见 middleware/rbac.js）。
  */
-const buildDeviceScopeFilter = (dataScope) => {
-  const { ownerField, departmentField } = DATA_SCOPE_FIELDS.device;
-  return buildDataScopeFilter(dataScope, ownerField, departmentField);
-};
+const buildDeviceScopeFilter = (dataScope) => scopeFilterFor('device', dataScope);
 
 /**
  * 获取设备列表

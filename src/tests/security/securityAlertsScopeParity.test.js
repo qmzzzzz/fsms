@@ -201,20 +201,25 @@ describe('/security/alerts 的数据范围必须与 /security/audit-logs 同源'
     expect(seen).toContain(subjB.username);
   });
 
-  test('部门档拿不到部门 ⇒ 一条都不给（deny 口径，不退化成"看全部"或"看自己"）', async () => {
+  test('部门档拿不到部门 ⇒ 403 一条都不给（deny 口径，不退化成"看全部"或"看自己"）', async () => {
     // 前提自证：该操作者确实是 department 档、且自己的 department 是空的
     const op = await User.findOne({ username: `zsasecn${stamp}` });
     const { getDataScope } = require('../../middleware/rbac');
     const scope = await getDataScope(String(op._id));
     expect(scope.type).toBe('department');
     expect(scope.department).toBeFalsy();
-    expect(await scopedProbeNames(String(op._id))).toEqual([]);
+    // 参照实现（/audit-logs 用的同一个翻译器）对同一操作者必须同判据、同形态地拒绝
+    await expect(scopedProbeNames(String(op._id))).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'DATA_SCOPE_DENIED',
+    });
 
     const res = await get(noDeptToken, '/api/security/alerts');
-    // 状态码与"零泄漏"两条都要无条件成立。原写法 `if (200) … else expect(404)`
-    // 给了控制器一条逃逸口：把空列表改成 404 就能整条跳过 deny 口径判据还保持绿。
-    expect(res.status).toBe(200);
-    expect(onlyProbe(rowsOf(res.body))).toEqual([]);
+    // 状态码必须无条件成立。原写法 `if (200) … else expect(404)` 给了控制器一条逃逸口：
+    // 把空列表改成 404 就能整条跳过 deny 口径判据还保持绿。
+    // #12 之后 deny 的落点是 403，且必须带 errorCode（前端 ERROR_CODE_I18N_MAP 只认它）
+    expect(res.status).toBe(403);
+    expect(res.body.errors.errorCode).toBe('DATA_SCOPE_DENIED');
   });
 
   test('服务层：不带操作者不可见，带 all 档操作者可见（fail-closed 在服务内收口）', async () => {

@@ -16,7 +16,8 @@
  * 2. 反向对照：all 档必须两条都看到，否则"聚合一律返回空"也能让 1 变绿；
  * 3. 同源判据：同一操作者下，接口见到的 userId = 参照实现（applyAuditDataScope + 同一阈值）
  *    见到的 userId，防止"另起一套范围口径"；
- * 4. 部门档却没有部门 ⇒ 必须空（与 auditScopeFilter.js:45-53 的 deny 口径同向）；
+ * 4. 部门档却没有部门 ⇒ 403 DATA_SCOPE_DENIED（#12 之后 deny 的落点，与
+ *    auditScopeFilter / applyDataScopeToQuery / scopeFilterFor 三处同判据同形态）；
  * 5. 静态方法默认不收口：`detectAnomalies()` 不带 scopeFilter 仍看全库——
  *    auditMonitor 定时任务必须对任意部门的用户都报警，不能被这次改动顺带削弱。
  *
@@ -192,14 +193,23 @@ describe('GET /security/stats 的异常行为聚合按数据范围收口', () =>
     expect(await failedUsers(deptAToken)).toEqual(await referenceUsers(secAId));
   });
 
-  test('4 部门档拿不到部门 ⇒ 一条都不给（deny 口径，不退化成"看全部"或"看自己"）', async () => {
+  test('4 部门档拿不到部门 ⇒ 403 一条都不给（deny 口径，不退化成"看全部"或"看自己"）', async () => {
     const op = await User.findOne({ username: `stsecn${stamp}` });
     const { getDataScope } = require('../../middleware/rbac');
     const scope = await getDataScope(String(op._id));
     expect(scope.type).toBe('department');
     expect(scope.department).toBeFalsy();
-    expect(await referenceUsers(String(op._id))).toEqual([]);
-    expect(await failedUsers(noDeptToken)).toEqual([]);
+    // 参照实现（/audit-logs 同一个翻译器）对同一操作者必须同判据、同形态地拒绝
+    await expect(referenceUsers(String(op._id))).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'DATA_SCOPE_DENIED',
+    });
+    // 接口侧：#12 之后 deny 的落点是 403 + errorCode，不再是 200 + 空列表
+    const res = await request(app)
+      .get('/api/security/stats')
+      .set('Authorization', `Bearer ${noDeptToken}`);
+    expect(res.status).toBe(403);
+    expect(res.body.errors.errorCode).toBe('DATA_SCOPE_DENIED');
   });
 
   test('5 静态方法默认不收口：auditMonitor 仍必须看到全系统用户', async () => {

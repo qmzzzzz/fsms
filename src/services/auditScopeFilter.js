@@ -59,9 +59,15 @@ const getDepartmentMemberIds = async (department) => {
 /** 无条件拒绝：显式空 $in，语义为「该范围下不可见任何记录」 */
 const deniedAuditQuery = (query) => ({ ...query, _id: { $in: [] } });
 
+const { isDataScopeDenied, deniedDataScope } = require('../middleware/rbac');
+
 const applyAuditDataScope = async (query, operatorId) => {
   const { getDataScope } = require('../middleware/rbac');
   const dataScope = await getDataScope(operatorId);
+  // #12：范围不可用即 403（与 applyDataScopeToQuery 同一把尺、同一个错码），
+  // 不再由本处回"查不到任何记录"的空集——空集让调用方分不清「没有审计记录」
+  // 与「没有可见范围」。判据不在此重抄，见 rbac.isDataScopeDenied。
+  if (isDataScopeDenied(dataScope)) throw deniedDataScope();
   if (dataScope.type === 'all') return { query, dataScope };
 
   if (dataScope.type === 'self' && dataScope.userId) {
@@ -83,7 +89,6 @@ const applyAuditDataScope = async (query, operatorId) => {
     // 查询永久 0 命中、两次请求条件还各不相同（不可复现），而接口按"成功导出 0 条"上报。
     // deny 也与另外两个收敛点同口径（rbac.buildDataScopeFilter 的 `!department → {_id:null}`、
     // applyDataScopeToQuery 返回 false），本文件曾是这条不变量唯一的例外。
-    if (!dataScope.department) return { query: deniedAuditQuery(query), dataScope };
     const requestedUserId = query.userId ? String(query.userId) : null;
     // 点查快路径：只校验目标用户本人是否属于本部门（一次 findById），
     // 不拉全部门成员集——这是审计页最常见的「查某人日志」路径
@@ -117,7 +122,9 @@ const applyAuditDataScope = async (query, operatorId) => {
     };
   }
 
-  return { query: deniedAuditQuery(query), dataScope };
+  // 不可达：isDataScopeDenied 已保证走到这里只剩带值的 department / self 两档。
+  // 保留一句抛错而不是回空集——将来若加了新档位，fail-closed 的方向仍然是 403。
+  throw deniedDataScope();
 };
 
 module.exports = { applyAuditDataScope, deniedAuditQuery };

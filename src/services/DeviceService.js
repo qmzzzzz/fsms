@@ -57,9 +57,8 @@ class DeviceService {
     // 数据范围过滤：统一走 applyDataScopeToQuery（内部对同字段冲突用 $and 取交集，
     // 且 department 为空时按 deny 处理，不再落入「三分支全不命中→零过滤」）
     // 属主字段取自 DATA_SCOPE_FIELDS 单一声明（P2-20），与详情/统计/导出同口径
-    if (!applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.device)) {
-      return { devices: [], count: 0, hasMore: false, nextCursor: null };
-    }
+    // 同 AlarmService：范围不可用即 403，不回空集（#12）
+    applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.device);
 
     if (search) {
       const escaped = escapeRegExp(search);

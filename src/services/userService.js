@@ -38,7 +38,7 @@ const DETAIL_ROLE_POPULATE = {
  * 可写字段的槽位，前端只剩两条必坏的路：
  *   1) 原样提交回填值 → `138****5678` 撞上 `userRoutes.js:110` 的 /^1[3-9]\d{9}$/ ⇒ 400；
  *   2) 那条校验是 `.optional({ values:'falsy' })`，空串照样过，而
- *      `userController.js:550` 写的是 `if (phone !== undefined) user.phone = phone`
+ *      `userController.js:562` 写的是 `if (phone !== undefined) user.phone = phone`
  *      ⇒ 一次"我没动手机号"的保存把号码清空。
  * 改名成 `phoneMasked` 是把"误把展示值当可写字段"变成结构上不可能，而不是靠约定。
  *
@@ -87,12 +87,14 @@ class UserService {
 
     if (filters.role) {
       const roleDoc = await this.findRoleByCode(filters.role);
-      if (!roleDoc) return { roleFound: false, scopeAllowed: false, query: null };
+      if (!roleDoc) return { roleFound: false, query: null };
       query.roles = roleDoc._id;
     }
 
-    const scopeAllowed = applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.user);
-    return { roleFound: true, scopeAllowed, query };
+    // 范围不可用时 applyDataScopeToQuery 直接抛 403（#12），不再回 scopeAllowed:false
+    // 让控制器拼一个空分页——那条路径与"真的没有用户"长得一模一样。
+    applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.user);
+    return { roleFound: true, query };
   }
 
   async listUsers(query, sort, page, limit) {

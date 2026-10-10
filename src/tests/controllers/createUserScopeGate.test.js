@@ -7,7 +7,7 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
  * 回归：createUser 必须与 updateUser 同口径执行 P0-1 数据范围校验。
  *
  * department 是「数据范围决定字段」：新建账户落入该部门后按自身部门可见数据。
- * 旧实现只有 updateUser 有闸（userController.js:598），createUser 直接把
+ * 旧实现只有 updateUser 有闸（userController.js:602），createUser 直接把
  * req.body.department 交给 userService.createUser，零范围推理 →
  * department 域管理员可在域外安插一个自己持口令、可读该域数据的账号（绕道）。
  *

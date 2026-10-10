@@ -66,6 +66,10 @@ const exportAuditLogs = asyncHandler(async (req, res) => {
     if (!res.writableEnded) res.end(); // 已结束时再 end() 会抛 ERR_STREAM_ALREADY_FINISHED
     return undefined;
   } catch (error) {
+    // 数据范围不可用（403 DATA_SCOPE_DENIED）必须原样上冒：包成 500 会让
+    // "这个账号没有可见范围"表现为"导出服务故障"，客户端于是重试一个永远不会
+    // 成功的导出。只有真实故障才折算成 AUDIT_EXPORT_FAILED（原行为不变）。
+    if (error.isApiError) throw error;
     logger.error(`审计日志导出失败: ${error.message}`);
     // 流已开始后无法再改状态码发 JSON 错误，只能尽力结束响应
     if (!res.headersSent) {

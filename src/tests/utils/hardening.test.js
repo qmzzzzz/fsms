@@ -137,8 +137,19 @@ describe('F-A5 self 数据范围进 aggregate 前须把字符串 userId 转 Obje
     expect(scopeFilterFor('device', { type: 'department', department: 'A栋' })).toEqual({
       'location.building': 'A栋',
     });
-    // deny 哨兵原样
-    expect(scopeFilterFor('device', { type: 'department', department: '' })).toEqual({ _id: null });
+    // deny 档：#12 后"范围不可用"即 403 DATA_SCOPE_DENIED，不再回 { _id: null } 空集
+    // ——空集让调用方分不清「这个楼栋没有设备」与「这个账号没有可见范围」。
+    // 形状注记：抛的是 ApiError，statusCode/code 与 errorCodes.js 单一来源一致。
+    let denied;
+    try {
+      scopeFilterFor('device', { type: 'department', department: '' });
+    } catch (err) {
+      denied = err;
+    }
+    expect(denied).toBeDefined();
+    expect(denied.message).toMatch(/没有可用的数据范围/);
+    expect(denied.statusCode).toBe(403);
+    expect(denied.code).toBe('DATA_SCOPE_DENIED');
     // 已是 ObjectId 实例：不变。
     // 形状注记：alarm 的属主口径现在是**数组**（reporter.userId + handler，
     // 与报警列表接口对齐），所以条件长成 `$or:[{reporter.userId},{handler}]` 而不是

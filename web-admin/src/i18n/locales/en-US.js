@@ -1146,6 +1146,8 @@ export default {
       'Logout incomplete: token revocation service is unavailable. Please retry (your session is still active)',
     logoutRefreshForeign:
       'Logout incomplete: the request contained a refresh token that does not belong to this account; logout was rejected',
+    dataScopeDenied:
+      'No usable data scope for this account (no department assigned or insufficient permissions). Please contact an administrator',
     mfaCodeInvalid: 'Invalid two-factor verification code',
     mfaNotEnabled: 'Two-factor authentication is not enabled',
     mfaNotEnabledNoCodes:

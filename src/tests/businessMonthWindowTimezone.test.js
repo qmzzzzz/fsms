@@ -125,11 +125,17 @@ jest.mock('../services/statsCache', () => ({
   invalidateByUserId: () => {},
 }));
 
-jest.mock('../middleware/rbac', () => ({
-  getDataScope: async () => ({ type: 'all' }),
-  buildDataScopeFilter: () => ({}),
-  assertRecordInScope: async () => ({ allowed: true }),
-}));
+jest.mock('../middleware/rbac', () => {
+  // 只桩掉取数来源（让 getDataScope 恒定给 all 档），判据一律取真身。
+  // #12 起 getUserStats 改走 scopeFilterFor，它内部要调 isDataScopeDenied /
+  // deniedDataScope；桩工厂漏掉这两个导出时报的是 TypeError 而不是 403，
+  // 本套件的 aggregateStats 调用计数会静默变成 0（本轮全量实测到）。
+  const actual = jest.requireActual('../middleware/rbac');
+  return {
+    ...actual,
+    getDataScope: async () => ({ type: 'all' }),
+  };
+});
 
 jest.mock('../middleware/auth', () => ({ invalidateUserCache: () => {} }));
 
