@@ -563,7 +563,7 @@ describe('UserView 新增用户对话框', () => {
     await setField(dlg, '真实姓名', '新人')
     click(footerBtn(dlg, '新增'))
     await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '加密失败提示' })
-    expect(enc).toHaveBeenCalledWith('Str0ng-Pass_2026')
+    expect(enc).toHaveBeenCalledWith('Str0ng-Pass_2026', 'USER_CREATE')
     expect(usersCreate).not.toHaveBeenCalled()
     expect(ElMessage.success).not.toHaveBeenCalled()
     // 重入锁必须释放：用 waitFor 轮询终态（若永久卡在 disabled，这里会超时失败）

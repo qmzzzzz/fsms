@@ -164,8 +164,10 @@ describe('端到端：登录信封重放', () => {
       nonce: crypto.randomBytes(16).toString('hex'),
     });
 
-    await expect(loginCipher.decryptLoginCredential(envelope)).resolves.toBe('S3cr3t!Passw0rd');
-    await expect(loginCipher.decryptLoginCredential(envelope)).rejects.toMatchObject({
+    await expect(loginCipher.decryptLoginCredential(envelope, 'LOGIN')).resolves.toBe(
+      'S3cr3t!Passw0rd'
+    );
+    await expect(loginCipher.decryptLoginCredential(envelope, 'LOGIN')).rejects.toMatchObject({
       code: 'NONCE_REPLAY',
     });
 
@@ -173,7 +175,7 @@ describe('端到端：登录信封重放', () => {
     await floodNonces(CAP + 2, 'login-nonce:');
 
     // 修复前：受害者的 nonce 已被挤掉，这一行会再次拿到明文口令
-    await expect(loginCipher.decryptLoginCredential(envelope)).rejects.toMatchObject({
+    await expect(loginCipher.decryptLoginCredential(envelope, 'LOGIN')).rejects.toMatchObject({
       code: 'NONCE_REPLAY',
     });
   });

@@ -348,7 +348,7 @@ const resolveAdminSetPassword = async (req, res, username) => {
   }
   let password;
   try {
-    password = await decryptLoginCredential(req.body.encPassword);
+    password = await decryptLoginCredential(req.body.encPassword, 'USER_CREATE');
   } catch (err) {
     logger.warn(`管理员建号口令密文无效：${username}（${err.code || err.message}）`);
     ApiResponse.codeError(res, 'AUTH_ENCRYPTED_CREDENTIAL_INVALID');

@@ -109,11 +109,17 @@ const changePwd = async () => {
     let encCurrent
     let encNew
     try {
-      encCurrent = await encryptPassword(pwdForm.currentPassword)
-      encNew = await encryptPassword(pwdForm.newPassword)
+      encCurrent = await encryptPassword(pwdForm.currentPassword, 'PASSWORD_CURRENT')
+      encNew = await encryptPassword(pwdForm.newPassword, 'PASSWORD_NEW')
     } catch (e) {
       console.warn('[loginCipher] 口令加密失败，已阻断提交：', e?.message)
-      ElMessage.error(t('login.encryptionFailed'))
+      // 公钥指纹不符（PUBLIC_KEY_PIN_MISMATCH）：主动 MITM 或服务端轮换密钥后
+      // 前端包未随之重建——与「网络抖动、重试即可」不是一回事，文案须可执行
+      ElMessage.error(
+        e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
+          ? t('login.publicKeyPinMismatch')
+          : t('login.encryptionFailed')
+      )
       return
     }
     if (encCurrent) payload.encCurrentPassword = encCurrent

@@ -17,6 +17,11 @@ const { getPublicKeyInfo } = require('../../utils/loginCipher');
  * @param {string}  [options.serverPublicPem]  指定加密用公钥（默认取当前服务端公钥）
  * @param {string}  [options.curve]            'P-256' | 'P-384'
  * @param {object}  [options.raw]              直接指定信封对象（构造畸形用例），绕过正常加密
+ * @param {string}  [options.aad]              信封用途（AES-GCM additionalData），默认
+ *                                              'login'（登录端点）。改密/注册/建号/关闭
+ *                                              MFA 等端点必须传对应值（与后端
+ *                                              src/utils/loginCipher.js 的 CREDENTIAL_AAD
+ *                                              逐字节一致），否则解密认证失败
  * @returns {Promise<string>} encPassword 字段值
  */
 async function buildLoginEnvelope(
@@ -27,6 +32,7 @@ async function buildLoginEnvelope(
     serverPublicPem = null,
     curve = 'P-256',
     raw = null,
+    aad = 'login',
   } = {}
 ) {
   if (raw) return Buffer.from(JSON.stringify(raw), 'utf8').toString('base64');
@@ -60,7 +66,13 @@ async function buildLoginEnvelope(
   );
   const jwk = await subtle.exportKey('jwk', eph.publicKey);
   const payload = new TextEncoder().encode(JSON.stringify({ p: password, ts, nonce }));
-  const ct = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, payload));
+  const ct = new Uint8Array(
+    await subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(aad) },
+      aesKey,
+      payload
+    )
+  );
   const b64 = (u8) => Buffer.from(u8).toString('base64');
   return Buffer.from(
     JSON.stringify({

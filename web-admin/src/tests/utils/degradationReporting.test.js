@@ -85,7 +85,8 @@ describe('P1-18：降级路径上报', () => {
       const { encryptPassword, isTransportCryptoAvailable } = await import('@/utils/loginCipher')
       expect(isTransportCryptoAvailable()).toBe(false)
       clearLoggedErrors()
-      const result = await encryptPassword('Aa1!probe-degrade')
+      // 2026-10-10 起 encryptPassword 第二参必传用途键（GCM AAD 绑定）；本用例走降级路径，用途合法即可
+      const result = await encryptPassword('Aa1!probe-degrade', 'LOGIN')
       expect(result).toBeNull()
       const entry = getLoggedErrors().find((e) => e.kind === 'degrade')
       expect(entry).toBeDefined()

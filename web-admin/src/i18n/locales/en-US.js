@@ -968,6 +968,8 @@ export default {
     success: 'Login successful',
     failed: 'Login failed, please check username and password',
     encryptionFailed: 'Password encryption failed. Please retry and submit again',
+    publicKeyPinMismatch:
+      'Server security key verification failed; submission blocked. If the server key was just rotated, refresh the page and retry. Otherwise contact your administrator.',
     captchaRefresh: 'Click to refresh captcha',
     captchaLoading: 'Loading...',
     docTitle: 'Fire Safety Management System - Login',

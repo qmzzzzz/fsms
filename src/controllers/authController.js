@@ -214,7 +214,14 @@ const login = asyncHandler(async (req, res) => {
     case 'CAPTCHA_INVALID':
       return ApiResponse.codeError(res, 'CAPTCHA_INVALID');
     case 'ENC_INVALID':
-      return ApiResponse.codeError(res, 'AUTH_ENCRYPTED_CREDENTIAL_INVALID');
+      // 2026-10-10：与 INVALID_CREDENTIALS 合并为同一对客 401。解密失败曾独占
+      // AUTH_ENCRYPTED_CREDENTIAL_INVALID（400），攻击者可借此区分「信封不可
+      // 解密 / nonce 已消费 / 超出时间窗」与「口令错误」——即 nonce 消费预言机，
+      // 与 utils/loginCipher.js「失败原因不回传客户端做区分」的设计意图相悖。
+      // 真实原因只进服务端日志与审计（authService 已按 err.code 落 reason）。
+      // 前端自愈（服务端轮换密钥后公钥缓存失效）改由 api.js 在登录失败时清缓存，
+      // 见 web-admin/src/utils/api.js FE-M1 段，不再依赖本错误码的区分度。
+      return ApiResponse.codeError(res, 'AUTH_INVALID_CREDENTIALS');
     case 'INVALID_CREDENTIALS':
       return ApiResponse.codeError(res, 'AUTH_INVALID_CREDENTIALS');
     case 'MFA_REQUIRED':
@@ -466,6 +473,12 @@ const updateProfile = asyncHandler(async (req, res) => {
  * （判定在 authService.revokeTokensOnLogout，语义注释见该处）。
  */
 const logout = asyncHandler(async (req, res) => {
+  // 登出用户名提到函数头算一次：下方三个分支（foreign / revokeFailed / 成功日志）都要用。
+  // 重复书写 req.user?.username || 'unknown' 每处在 eslint complexity 里算 2 点
+  // （可选链 + 逻辑或），而 logout 的复杂度贴着 max 15 的棘轮上限——2026-10-10
+  // 实测三处合并后 17 → 13。值在同一请求内不变，提出去不改变语义。
+  const username = req.user?.username || 'unknown';
+
   // G3：请求体 refreshToken 的类型/长度校验结果
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -511,9 +524,7 @@ const logout = asyncHandler(async (req, res) => {
     // 整次失败：不清 cookie（清了浏览器侧看起来已登出，用户不会重试，而那串
     // 令牌仍然有效）、不动会话表。保留 cookie 与下方 revokeFailed 分支同旨——
     // 让客户端能原样重试。判据与理由见 errorCodes.LOGOUT_REFRESH_FOREIGN。
-    logger.warn('登出时出示了非本人的 refresh 令牌，整次拒绝', {
-      username: req.user?.username || 'unknown',
-    });
+    logger.warn('登出时出示了非本人的 refresh 令牌，整次拒绝', { username });
     return ApiResponse.codeError(res, 'LOGOUT_REFRESH_FOREIGN');
   }
 
@@ -521,7 +532,7 @@ const logout = asyncHandler(async (req, res) => {
     // 不清 cookie：清掉会让浏览器侧看起来已登出，用户不会重试，
     // 而服务端令牌仍然有效 —— 那正是 fail-open 的危害本身。
     // 保留 cookie 让前端可以原样重试登出。
-    logger.error('登出失败（令牌吊销未落库）', { username: req.user?.username || 'unknown' });
+    logger.error('登出失败（令牌吊销未落库）', { username });
     return ApiResponse.codeError(res, 'LOGOUT_REVOKE_FAILED');
   }
 
@@ -545,7 +556,7 @@ const logout = asyncHandler(async (req, res) => {
     });
   }
 
-  logger.info('用户登出', { username: req.user?.username || 'unknown' });
+  logger.info('用户登出', { username });
 
   return ApiResponse.success(res, null, '登出成功');
 });

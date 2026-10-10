@@ -120,6 +120,9 @@ describe('登录口令加密传输（密文轨）', () => {
     expect(res.body.errors.errorCode).toBe('AUTH_INVALID_CREDENTIALS');
   });
 
+  // 2026-10-10：以下两例断言 401 + AUTH_INVALID_CREDENTIALS——登录路径的
+  // ENC_INVALID 与 INVALID_CREDENTIALS 已对客合并（nonce 消费预言机收口），
+  // 服务端日志/审计仍按 err.code 区分真实原因。
   test('login 密文轨：重放同一信封被拒', async () => {
     const encPassword = await buildLoginEnvelope(PASSWORD);
     const first = await request(app)
@@ -130,8 +133,8 @@ describe('登录口令加密传输（密文轨）', () => {
     const replay = await request(app)
       .post('/api/auth/login')
       .send({ username: 'enclogin_user', encPassword });
-    expect(replay.status).toBe(400);
-    expect(replay.body.errors.errorCode).toBe('AUTH_ENCRYPTED_CREDENTIAL_INVALID');
+    expect(replay.status).toBe(401);
+    expect(replay.body.errors.errorCode).toBe('AUTH_INVALID_CREDENTIALS');
   });
 
   test('login 密文轨：篡改信封被拒', async () => {
@@ -142,8 +145,8 @@ describe('登录口令加密传输（密文轨）', () => {
     const res = await request(app)
       .post('/api/auth/login')
       .send({ username: 'enclogin_user', encPassword: tampered });
-    expect(res.status).toBe(400);
-    expect(res.body.errors.errorCode).toBe('AUTH_ENCRYPTED_CREDENTIAL_INVALID');
+    expect(res.status).toBe(401);
+    expect(res.body.errors.errorCode).toBe('AUTH_INVALID_CREDENTIALS');
   });
 
   test('login 明文兼容轨：灰度期继续可用', async () => {
@@ -158,7 +161,7 @@ describe('登录口令加密传输（密文轨）', () => {
     const username = 'encreg_user';
     const email = 'encreg@example.com';
     // 强度不足的口令装信封 → 控制器解密后补做强度校验，应 400
-    const weak = await buildLoginEnvelope('weak');
+    const weak = await buildLoginEnvelope('weak', { aad: 'register' });
     const weakRes = await request(app)
       .post('/api/auth/register')
       .send({ username, email, encPassword: weak });
@@ -166,7 +169,7 @@ describe('登录口令加密传输（密文轨）', () => {
 
     // 合规口令装信封 → 201
     const regPassword = randomPassword();
-    const encPassword = await buildLoginEnvelope(regPassword);
+    const encPassword = await buildLoginEnvelope(regPassword, { aad: 'register' });
     const res = await request(app)
       .post('/api/auth/register')
       .send({ username, email, encPassword });
@@ -198,8 +201,8 @@ describe('登录口令加密传输（密文轨）', () => {
       .send({ username: chgUsername, password: PASSWORD });
     expect(chgLogin.status).toBe(200);
 
-    const encCurrent = await buildLoginEnvelope(PASSWORD);
-    const encNew = await buildLoginEnvelope(NEW_PASSWORD);
+    const encCurrent = await buildLoginEnvelope(PASSWORD, { aad: 'password:current' });
+    const encNew = await buildLoginEnvelope(NEW_PASSWORD, { aad: 'password:new' });
     const res = await request(app)
       .put('/api/auth/password')
       .set('Authorization', `Bearer ${chgLogin.body.data.token}`)
@@ -220,5 +223,41 @@ describe('登录口令加密传输（密文轨）', () => {
       .send({ username: chgUsername, encPassword: newEnc });
     expect(newRes.status).toBe(200);
     expect(newRes.body.data.user.username).toBe(chgUsername);
+  });
+
+  test('跨端点重放被 AAD 绑定拒绝：改密用途的信封提交到登录端点', async () => {
+    // AAD 用途绑定（2026-10-10）：口令本身正确、但信封是给改密端点加密的，
+    // 提交到 /login 必须被拒——否则一条「从未到达服务端」的捕获信封可在
+    // ±5 分钟窗口内跨端点重放（如把改密页的 encNewPassword 拿去登录）。
+    // 差分自证：同一口令换登录用途即可成功，证明拒绝源于用途不符而非口令错误。
+    //
+    // 自建专属账号（同 changePassword 用例的理由）：失败登录计入防爆破，
+    // 复用 enclogin_user 会把本文件累计失败次数推过自动封禁阈值，
+    // 后续请求拿到 403 黑名单而非被测的 401/200。
+    const aadUsername = 'aadx_user';
+    await User.create({
+      username: aadUsername,
+      email: 'aadx@example.com',
+      password: PASSWORD,
+    });
+
+    const foreign = await buildLoginEnvelope(PASSWORD, { aad: 'password:new' });
+    const rejected = await request(app)
+      .post('/api/auth/login')
+      .send({ username: aadUsername, encPassword: foreign });
+    expect(rejected.status).toBe(401);
+    expect(rejected.body.errors.errorCode).toBe('AUTH_INVALID_CREDENTIALS');
+
+    // 本文件此前的失败登录（错误口令/重放/篡改/改密后旧口令）+ 本次用途不符的
+    // 失败会把 IP 维度失败计数推过防爆破阈值（5 次/5 分钟）触发 IP 封禁——
+    // 不清则第二个请求拿到 403 黑名单而非 200。被测行为是 AAD 而非防爆破，
+    // 故在两次提交之间解封（unblockIP 内部归一化并失效快照缓存）。
+    await require('../../models/IPBlacklist').unblockIP('127.0.0.1');
+
+    const own = await buildLoginEnvelope(PASSWORD, { aad: 'login' });
+    const accepted = await request(app)
+      .post('/api/auth/login')
+      .send({ username: aadUsername, encPassword: own });
+    expect(accepted.status).toBe(200);
   });
 });

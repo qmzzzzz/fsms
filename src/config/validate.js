@@ -41,6 +41,10 @@ const MIN_SECRET_ENTROPY_BITS_PER_CHAR = 2.0;
 // 本文件行数贴着 max-lines 棘轮上限，新增判据须放到独立文件——同 metricsAuditDrops 的惯例。
 // immutable 档位（改配置需配套数据迁移）的判据同在独立模块，理由相同。
 const { cbcAndInvariantWarnings } = require('./legacyCbcGuard');
+// 登录密文轨 strict 未开的告警（含「为何不阻断启动」的取舍说明）同样在独立模块：
+// LOGIN_ENCRYPT_STRICT 关死明文口令轨的前提是浏览器有 WebCrypto，而纯 HTTP
+// 内网形态拿不到——致命闸会拦死一种合法部署，故只做 loud warning + 计数。
+const { loginEncryptWarnings } = require('./loginEncryptGuard');
 
 // 周期 ≤ maxPeriod 的重复串：整串由同一个短单元反复拼接而成。
 // 例：'passwordpassword...'（周期 8）、'12345678901234567890...'（周期 10）。
@@ -183,6 +187,9 @@ function collectProductionWarnings() {
         '建议改为 info 或更高，仅在排查问题时临时下调。'
     );
   }
+  // 4) 登录密文轨 strict 未开（config/loginEncryptGuard.js）：明文口令字段仍可上行。
+  // 与 2) 同型的「告警 + 计数、不阻断启动」——判据与取舍说明集中在独立模块。
+  for (const w of loginEncryptWarnings()) warnings.push(w);
 
   // M-2 的 TLS 告警已并入 validateConfig 的致命校验（M3，2026-09-11 放宽为
   // 「进程自启 HTTPS 或声明由前置反代终结」二选一），此处不再重复告警——
@@ -662,7 +669,7 @@ module.exports = {
 // 这一支是**独立进程入口**，不经过 src/config/index.js:11，于是没人替它把 <NAME>_FILE
 // 回填进 process.env——而容器里密钥**只**以文件挂载（P3-48，见 ./secrets.js）。
 // 不回填时 collectSecretErrors 读到 undefined，报出四条「JWT/REFRESH/AES/HMAC 必须设置
-// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:207
+// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:221
 // 正是拿这一步的退出码当"轮换后配置自洽"的证据——*_FILE 部署下那条轮换流程做不到收尾。
 //
 // 为什么不在文件顶部 hydrate（本轮真的先写成顶部方案，被自己的测试打回来了）：

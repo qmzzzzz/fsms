@@ -631,7 +631,17 @@ describe('AUTH_ENCRYPTED_CREDENTIAL_INVALID 自愈', () => {
     )
   })
 
-  test('其他错误码不触发公钥缓存失效', async () => {
+  test('登录端点的凭据无效同样失效公钥缓存（ENC_INVALID 合并后自愈不丢）', async () => {
+    // 防退化：登录 ENC_INVALID 与 INVALID_CREDENTIALS 对客合并为同一 401 后，
+    // 若不自带失效，服务端轮换密钥时用户每次提交都拿到旧公钥、永远失败
+    const { apiClient } = await loadAll()
+    apiClient.defaults.adapter = (config) =>
+      Promise.reject(httpError(config, 401, { errors: { errorCode: 'AUTH_INVALID_CREDENTIALS' } }))
+    await apiClient.post('/auth/login', { encPassword: 'x' }).catch((e) => e)
+    expect(invalidatePublicKeyCache).toHaveBeenCalledTimes(1)
+  })
+
+  test('其他错误码/其他端点不触发公钥缓存失效', async () => {
     // 防退化：无差别 invalidate → 每次登录失败都多打一次公钥请求
     const { apiClient } = await loadAll()
     apiClient.defaults.adapter = (config) =>

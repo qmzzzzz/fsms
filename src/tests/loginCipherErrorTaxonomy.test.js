@@ -33,7 +33,7 @@ const envelopeWith = (over = {}) => ({
 const codeOf = async (raw) => {
   const env = await buildLoginEnvelope(null, { raw });
   try {
-    await decryptLoginCredential(env);
+    await decryptLoginCredential(env, 'LOGIN');
     return 'NO_THROW';
   } catch (err) {
     if (!(err instanceof CredentialError)) throw new Error(`非 CredentialError：${err.message}`);
@@ -45,7 +45,7 @@ const codeOf = async (raw) => {
 const codeOfReal = async (over = {}) => {
   const env = await buildLoginEnvelope(randomPassword(), over);
   try {
-    await decryptLoginCredential(env);
+    await decryptLoginCredential(env, 'LOGIN');
     return 'NO_THROW';
   } catch (err) {
     if (!(err instanceof CredentialError)) throw new Error(`非 CredentialError：${err.message}`);
@@ -57,7 +57,7 @@ describe('口令密文的错误分类法', () => {
   test('反向前提：真实前端流程构造的信封能解出明文（夹具没坏）', async () => {
     const pwd = randomPassword();
     const env = await buildLoginEnvelope(pwd);
-    await expect(decryptLoginCredential(env)).resolves.toBe(pwd);
+    await expect(decryptLoginCredential(env, 'LOGIN')).resolves.toBe(pwd);
   });
 
   test('密文短于 GCM 标签（≤16 字节）→ ENVELOPE_FORMAT，而不是含糊的 DECRYPT', async () => {
@@ -103,7 +103,7 @@ describe('口令密文的错误分类法', () => {
   test('口令超长 → PAYLOAD_FORMAT（与明文轨上限一致）', async () => {
     const long = 'x'.repeat(129);
     const env = await buildLoginEnvelope(long);
-    await expect(decryptLoginCredential(env)).rejects.toMatchObject({
+    await expect(decryptLoginCredential(env, 'LOGIN')).rejects.toMatchObject({
       code: 'PAYLOAD_FORMAT',
     });
   });
@@ -112,9 +112,9 @@ describe('口令密文的错误分类法', () => {
     const nonce = NONCE_OK;
     const pwd = randomPassword();
     const first = await buildLoginEnvelope(pwd, { nonce });
-    await expect(decryptLoginCredential(first)).resolves.toBe(pwd);
+    await expect(decryptLoginCredential(first, 'LOGIN')).resolves.toBe(pwd);
     const second = await buildLoginEnvelope(pwd, { nonce });
-    await expect(decryptLoginCredential(second)).rejects.toMatchObject({
+    await expect(decryptLoginCredential(second, 'LOGIN')).rejects.toMatchObject({
       code: 'NONCE_REPLAY',
     });
   });

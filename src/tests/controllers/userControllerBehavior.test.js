@@ -75,7 +75,7 @@ describe('userController data scope and encrypted credentials', () => {
   });
 
   test('validates password strength after decrypting the credential', async () => {
-    const encPassword = await buildLoginEnvelope('weak');
+    const encPassword = await buildLoginEnvelope('weak', { aad: 'user:create' });
     const res = await authed('post', '/api/users').send({
       username: `ucbtarget${stamp}`,
       email: `ucbtarget${stamp}@example.com`,

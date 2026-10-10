@@ -3,7 +3,8 @@
  *
  * 结构（ECIES 式混合加密，与 TLS 1.3 的密钥协商同族）：
  *   前端：生成一次性 ECDH 密钥对，与服务端静态公钥协商出共享密钥，
- *         经 HKDF-SHA256 派生 AES-256-GCM 密钥加密载荷 {p, ts, nonce}；
+ *         经 HKDF-SHA256 派生 AES-256-GCM 密钥加密载荷 {p, ts, nonce}
+ *         （AES-GCM 的 additionalData 绑定端点用途，见 CREDENTIAL_AAD）；
  *   上行：encPassword = base64(JSON{v:1, x, y, salt, iv, c})，
  *         x/y 为临时公钥坐标（base64url），c 为 AES 密文||16 字节 GCM tag。
  *
@@ -14,13 +15,17 @@
  * 防重放：ts 限 ±5 分钟窗口；nonce 经 sharedCache 一次性消费——
  * 配置 REDIS_URL 时跨实例共享（任一实例消费后全集群拒绝重放），
  * 未配置时回退进程内去重（单实例语义，与其余共享层口径一致）。
- * 截获密文的攻击者既无法恢复口令（ECDH 共享密钥只有双方可算），
- * 也无法重放原密文（nonce 已消费，载荷被 GCM 认证不可篡改）。
+ * 截获密文的攻击者无法重放原密文（nonce 已消费，载荷被 GCM 认证不可篡改），
+ * 也无法恢复口令——但后者以「服务端私钥不泄露」为前提：信封自带临时公钥
+ * 坐标，持有静态私钥（LOGIN_ECDH_PRIVATE_KEY_FILE 注入）即可对任一历史
+ * 密文重新协商出共享密钥，即无前向保密。临时密钥对模式（见下）相反：
+ * 私钥不出进程故历史密文攻不破，但重启即换钥，重启前的密文永久不可解密。
  *
  * 密钥管理：私钥经 LOGIN_ECDH_PRIVATE_KEY(_FILE) 注入（P3-48 约定），
  * 曲线支持 P-256 / P-384，非法曲线或非 EC 密钥直接拒绝。
- * 未配置时惰性生成临时密钥对并告警——私钥不出进程、密文一次性、
- * 前端按会话取公钥，重启换钥无安全损失，仅损失 keyId 诊断连续性。
+ * 未配置时惰性生成临时密钥对并告警——私钥不出进程、前端按会话取公钥，
+ * 重启换钥无安全损失（仅损失 keyId 诊断连续性）；但重启前产生的密文
+ * 在重启后永久无法解密——流量取证须在重启前完成，或持久注入静态私钥。
  */
 
 const crypto = require('crypto');
@@ -35,6 +40,23 @@ const SUPPORTED_CURVES = {
 const DEFAULT_CURVE = 'prime256v1';
 // HKDF info 标签：前端（WebCrypto deriveKey 的 info）与后端必须逐字节一致
 const HKDF_INFO = Buffer.from('login-credential', 'utf8');
+// 信封用途绑定（AAD，2026-10-10）：GCM 的 additionalData 把「本信封只准用于
+// 哪个端点」纳入认证范围——没有它时，一条**从未到达服务端**的捕获信封（用户
+// 填完表单但提交失败/被丢弃，密文已上线）在 ±5 分钟窗口内可提交到任何接收
+// 密文口令的端点：例如把改密页捕获的 encNewPassword 提交到 /login，直接以
+// 新口令登录。nonce 去重只能挡「已提交过」的信标，挡不住「从未提交」的。
+// 取值前后端必须逐字节一致（同 HKDF_INFO 的口径）；新增接收端点时两边同步加，
+// 漏加的那一侧对该端点的信封全部解密失败（fail-closed，不会静默放行）。
+// 刻意不把用户名绑进 AAD：跨用户重放会在口令比对处自然失败（401），
+// 绑用户名零安全收益，却让前端每个表单多一个必须逐字一致的条件。
+const CREDENTIAL_AAD = {
+  LOGIN: 'login',
+  REGISTER: 'register',
+  PASSWORD_CURRENT: 'password:current',
+  PASSWORD_NEW: 'password:new',
+  MFA_DISABLE: 'mfa:disable',
+  USER_CREATE: 'user:create',
+};
 const HKDF_SALT_BYTES = 16;
 const HKDF_KEY_BYTES = 32; // AES-256
 const GCM_IV_BYTES = 12;
@@ -84,6 +106,10 @@ function initFromPrivatePem(privateKeyPem) {
     coordBytes: curve.coordBytes,
     // keyId：公钥指纹前 8 位，诊断用（日志/响应），一期不做多密钥并存
     keyId: crypto.createHash('sha256').update(spkiDer).digest('hex').slice(0, 8),
+    // 完整指纹：前端构建期钉扎（web-admin 的 VITE_LOGIN_PUBLIC_KEY_SHA256）
+    // 的取值来源——8 位 keyId 只有 32bit，不足以安全钉扎（可被离线穷举
+    // 碰撞），钉扎必须用完整值或其 >=16 位前缀。公钥指纹是公开信息。
+    publicKeySha256: crypto.createHash('sha256').update(spkiDer).digest('hex'),
   };
   return keyPair;
 }
@@ -94,7 +120,16 @@ function ensureKeyPair() {
   // dotenv 不支持多行值：允许用字面量 \n 表示 PEM 换行
   const envPem = (process.env.LOGIN_ECDH_PRIVATE_KEY || '').replace(/\\n/g, '\n').trim();
   if (envPem) {
-    return initFromPrivatePem(envPem);
+    const kp = initFromPrivatePem(envPem);
+    // 完整指纹随启动日志下发：运维据此把 VITE_LOGIN_PUBLIC_KEY_SHA256 钉进
+    // 前端构建（防主动 MITM 替换公钥，见 web-admin/src/utils/loginCipher.js
+    // ensurePublicKey 的指纹校验）。公钥指纹是公开信息，日志不含秘密。
+    logger.info('登录 ECDH 静态私钥已注入', {
+      keyId: kp.keyId,
+      publicKeySha256: kp.publicKeySha256,
+      curve: kp.curve,
+    });
+    return kp;
   }
 
   if (process.env.NODE_ENV !== 'test') {
@@ -181,10 +216,11 @@ function parseCredentialEnvelope(kp, envelopeB64) {
 /**
  * 阶段 2 —— ECDH 协商 + HKDF-SHA256 派生 + AES-256-GCM 解载荷（与前端 WebCrypto 同参）
  *
- * 无效曲线点 / 公钥错配 / 认证标签不符 等原因**一律吞并**成 DECRYPT：
- * 不区分失败原因，免得给探测者"差一点了"的信号。
+ * 无效曲线点 / 公钥错配 / 认证标签不符 / AAD 用途不符 等原因**一律吞并**成
+ * DECRYPT：不区分失败原因，免得给探测者"差一点了"的信号。AAD 不符（信封是
+ * 为别的端点加密的）与"密钥错了"在对外表现上不可区分，正是这条吞并的延伸。
  */
-function decryptCredentialPayload(kp, { x, y, saltBuf, ivBuf, ctBuf }) {
+function decryptCredentialPayload(kp, { x, y, saltBuf, ivBuf, ctBuf }, aad) {
   try {
     const ephPub = crypto.createPublicKey({
       key: { kty: 'EC', crv: SUPPORTED_CURVES[kp.curve].jwk, x, y },
@@ -200,6 +236,9 @@ function decryptCredentialPayload(kp, { x, y, saltBuf, ivBuf, ctBuf }) {
     const body = ctBuf.subarray(0, ctBuf.length - GCM_TAG_BYTES);
     const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, ivBuf);
     decipher.setAuthTag(tag);
+    // 用途绑定（AAD）：前端 encrypt 的 additionalData 必须与本端点的用途串
+    // 逐字节一致，否则认证标签校验失败——跨端点重放在此被拒
+    decipher.setAAD(Buffer.from(aad, 'utf8'));
     return Buffer.concat([decipher.update(body), decipher.final()]).toString('utf8');
   } catch (_) {
     throw new CredentialError('DECRYPT');
@@ -234,13 +273,23 @@ function parseCredentialPayload(plain) {
  * 解密并校验口令密文，成功返回明文口令
  * 任何失败一律抛 CredentialError
  *
+ * @param {string} envelopeB64 上行信封
+ * @param {string} purpose 用途键（CREDENTIAL_AAD 的键，如 'LOGIN'）：决定
+ *   GCM 的 AAD——为别的端点加密的信封在此解密失败（跨端点重放防护）。
+ *   未知键抛普通 Error（编程错误，不应发生）；两种抛出都落在调用方的
+ *   ENC_INVALID 分支，fail-closed 不放行。
+ *
  * 异步：nonce 一次性消费经 sharedCache 原子占位（配置 REDIS_URL 时跨实例
  * 共享，重放无论命中哪个实例都被拒绝；未配置时回退进程内去重）
  */
-async function decryptLoginCredential(envelopeB64) {
+async function decryptLoginCredential(envelopeB64, purpose) {
+  const aad = CREDENTIAL_AAD[purpose];
+  if (!aad) {
+    throw new Error(`decryptLoginCredential: 未知用途键 "${purpose}"（CREDENTIAL_AAD 未定义）`);
+  }
   const kp = ensureKeyPair();
   const parts = parseCredentialEnvelope(kp, envelopeB64);
-  const plain = decryptCredentialPayload(kp, parts);
+  const plain = decryptCredentialPayload(kp, parts, aad);
   const { p, nonce } = parseCredentialPayload(plain);
 
   // 一次性消费：SET NX 原子占位，首个到达的实例赢得消费权，
@@ -260,6 +309,7 @@ function _resetForTests() {
 
 module.exports = {
   CredentialError,
+  CREDENTIAL_AAD,
   getPublicKeyInfo,
   decryptLoginCredential,
   _resetForTests,

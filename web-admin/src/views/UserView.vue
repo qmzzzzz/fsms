@@ -885,9 +885,15 @@ const submitForm = async () => {
     }
     if (!dialog.isEdit) {
       // FE-M3：管理员代设口令走密文轨——「可用但失败」阻断提交（用户重试成本为零）
-      const enc = await encryptPassword(dialog.form.password).catch((e) => {
+      const enc = await encryptPassword(dialog.form.password, 'USER_CREATE').catch((e) => {
         console.warn('[loginCipher] 建号口令加密失败：', e?.message)
-        ElMessage.error(t('login.encryptionFailed'))
+        // 公钥指纹不符（PUBLIC_KEY_PIN_MISMATCH）：主动 MITM 或服务端轮换密钥后
+        // 前端包未随之重建——与「网络抖动、重试即可」不是一回事，文案须可执行
+        ElMessage.error(
+          e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
+            ? t('login.publicKeyPinMismatch')
+            : t('login.encryptionFailed')
+        )
         return 'BLOCKED'
       })
       if (enc === 'BLOCKED') return

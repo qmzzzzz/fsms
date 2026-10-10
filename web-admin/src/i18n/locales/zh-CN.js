@@ -948,6 +948,9 @@ export default {
     success: '登录成功',
     failed: '登录失败，请核对用户名与密码',
     encryptionFailed: '口令加密失败，请重试后重新提交',
+    // 公钥指纹与构建期固定值不符：主动 MITM 或服务端轮换密钥后前端未重建
+    publicKeyPinMismatch:
+      '服务端安全密钥校验未通过，已阻止提交。如刚更新过服务端密钥，请刷新页面重试；如持续出现请联系管理员',
     captchaRefresh: '点击刷新验证码',
     captchaLoading: '加载中…',
     docTitle: '消防安全管理系统 - 用户登录',

@@ -515,7 +515,21 @@ apiClient.interceptors.response.use(
       // FE-M1：密文被拒（服务端重启换钥/密钥轮换）——统一在此清公钥缓存，
       // 登录/注册/改密三个口令入口全部自愈（原先只接在 LoginView）。
       // import 无循环：loginCipher 仅依赖 axios
+      //
+      // 2026-10-10：登录路径的 ENC_INVALID 已与 INVALID_CREDENTIALS 合并为
+      // 同一 401（消除 nonce 消费预言机，见 src/controllers/authController.js
+      // login 分支），密文轨的登录失败不再有独立错误码可挂。因此登录端点的
+      // 「凭据无效」也清一次公钥缓存：服务端轮换密钥后，用户第一次提交失败、
+      // 第二次提交即取到新公钥而恢复——自愈不依赖错误码的区分度。
+      // 代价是一次失败登录多一个公钥 GET（captchaLimiter 60 次/5 分钟额度内），
+      // 且仅限登录端点：其余路径沿用独立错误码的精确触发，不做无差别失效。
       if (data?.errors?.errorCode === 'AUTH_ENCRYPTED_CREDENTIAL_INVALID') {
+        invalidatePublicKeyCache()
+      } else if (
+        data?.errors?.errorCode === 'AUTH_INVALID_CREDENTIALS' &&
+        typeof config?.url === 'string' &&
+        config.url.includes('/auth/login')
+      ) {
         invalidatePublicKeyCache()
       }
 

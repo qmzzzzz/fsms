@@ -235,15 +235,18 @@ describe('P1-34：加固项告警真正可达', () => {
   const collect = () => require('../../config/validate').collectProductionWarnings();
 
   /**
-   * 只保留「加固项缺失」告警，剔除 immutable 档位类告警。
+   * 只保留「加固项缺失」告警，剔除恒定在场的配置代价类告警。
    *
    * 为什么要剔除而不是放宽计数：本组用例的主题是 **P1-34「加固项告警真正可达」**，
-   * 而 immutable 档位（口令历史 pepper 轮换）是一条**恒定在场**的告警——它描述的是
-   * 配置组合的既有代价，不是"加固项缺失"。把它算进总数会让本组每条用例都被污染：
-   * 实测 2026-09-30 新增该告警后，本文件 4 条用例连带变红。
-   * 分类断言（而不是改数字）才能让后续再加一条 immutable 告警时本组不被动红。
+   * 而以下两条都是**恒定在场**的告警——它们描述的是配置组合的既有代价，不是"加固项缺失"。
+   * 把它们算进总数会让本组每条用例都被污染：实测 2026-09-30 新增 immutable 档位
+   * （口令历史 pepper 轮换）告警后，本文件 4 条用例连带变红；2026-10-10 新增
+   * LOGIN_ENCRYPT_STRICT 未开告警（密文轨灰度期的既有代价，判据与取舍见
+   * config/loginEncryptGuard.js）时同理。
+   * 分类断言（而不是改数字）才能让后续再加一条此类告警时本组不被动红。
    */
-  const hardeningWarnings = (list) => list.filter((w) => !w.includes('HMAC_SECRET 轮换'));
+  const hardeningWarnings = (list) =>
+    list.filter((w) => !w.includes('HMAC_SECRET 轮换') && !w.includes('LOGIN_ENCRYPT_STRICT'));
 
   test('默认（加固项齐备）→ 无加固项告警', () => {
     process.env.ALLOWED_HOSTS = 'api.example.com';

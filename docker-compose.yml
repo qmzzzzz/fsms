@@ -51,6 +51,11 @@ services:
       - HMAC_SECRET_FILE=/run/secrets/hmac_secret
       - MONGODB_URI_FILE=/run/secrets/mongodb_uri
       - ADMIN_INITIAL_PASSWORD_FILE=/run/secrets/admin_initial_password
+      # 登录口令传输加密的服务端静态私钥（src/utils/loginCipher.js，EC
+      # P-256/P-384 PEM）。缺了它服务每次启动惰性生成临时密钥对：重启前的
+      # 历史登录密文永久无法解密（流量取证须在重启前完成），
+      # deployment/secret-rotation.md 里这把钥匙的轮换流程也从不生效。
+      - LOGIN_ECDH_PRIVATE_KEY_FILE=/run/secrets/login_ecdh_private_key
       # 传输加密豁免（P2-⑧，src/config/validate.js 启动断言）：本 compose 的
       # mongo/redis 都在**同一宿主的 internal 数据面网络**内（2026-10-01 起与监控/
       # 边缘面分段，见文末 networks），流量不出网卡，明文可接受；redis 另有
@@ -75,6 +80,7 @@ services:
       - hmac_secret
       - mongodb_uri
       - admin_initial_password
+      - login_ecdh_private_key
       - redis_password
     depends_on:
       mongo:
@@ -427,13 +433,16 @@ services:
 #
 # 部署前准备（宿主机上执行一次，务必放在仓库之外的目录）：
 #   mkdir -p ./secrets && chmod 700 ./secrets
-#   # 首选：一次生成全套（含本清单遗漏的 login_ecdh_private_key，且连接串自动转义）
+#   # 首选：一次生成全套（mongodb_uri 的 userinfo 转义也自动处理，免手抄拼接）
 #   node scripts/generate-secrets.js --out ./secrets
 #   # 手抄版（与上面等价，逐条可控）：
 #   openssl rand -base64 48 | tr -d '\n' > ./secrets/jwt_secret
 #   openssl rand -base64 48 | tr -d '\n' > ./secrets/jwt_refresh_secret
 #   openssl rand -hex 32     | tr -d '\n' > ./secrets/aes_secret_key
 #   openssl rand -hex 16     | tr -d '\n' > ./secrets/hmac_secret
+#   # 登录口令传输加密的服务端静态私钥（P-256 PEM；勿设 passphrase——
+#   # 应用侧直接导入，不过口令）
+#   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ./secrets/login_ecdh_private_key
 #   # redis_password 用 -base64 即可：应用侧走 ioredis 的 password 选项（不进 URL
 #   # userinfo），字符集不受 percent-encoding 约束
 #   openssl rand -base64 32 | tr -d '\n' > ./secrets/redis_password
@@ -476,6 +485,11 @@ secrets:
     file: ./secrets/mongodb_uri
   admin_initial_password:
     file: ./secrets/admin_initial_password
+  # 登录口令信封加密的服务端静态私钥（EC P-256/P-384 PEM，勿设 passphrase）。
+  # generate-secrets.js 与头注释手抄清单都产出该文件；文件缺失时 docker
+  # compose 直接拒绝启动（与其余 secret 同契约），不会静默回退临时密钥。
+  login_ecdh_private_key:
+    file: ./secrets/login_ecdh_private_key
   mongo_root_username:
     file: ./secrets/mongo_root_username
   mongo_root_password:

@@ -216,8 +216,26 @@ describe('Config Validation', () => {
       const { collectProductionWarnings } = require('../../config/validate');
       const warnings = collectProductionWarnings();
       if (prevHttps !== undefined) process.env.ENABLE_HTTPS = prevHttps;
-      expect(warnings.some((w) => w.includes('ENABLE_HTTPS'))).toBe(false);
-      expect(warnings.some((w) => w.includes('TLS'))).toBe(false);
+      // 钉已删除的 M-2 告警的独有措辞，而非宽泛的 'TLS' 子串：2026-10-10 新增的
+      // 登录密文轨 strict 告警会在动机陈述里提到「TLS 配置疏漏」（config/loginEncryptGuard.js），
+      // 与 M-2 的 TLS 终结告警无关——宽子串会把合法新告警误判为回归。
+      expect(warnings.some((w) => w.includes('ENABLE_HTTPS 未启用'))).toBe(false);
+      expect(warnings.some((w) => w.includes('明文 HTTP 提供服务'))).toBe(false);
+    });
+    test('LOGIN_ENCRYPT_STRICT 未开启时产出明文口令轨告警', () => {
+      delete process.env.LOGIN_ENCRYPT_STRICT;
+      const { collectProductionWarnings } = require('../../config/validate');
+      const warnings = collectProductionWarnings();
+      // 不锁总条数（collectProductionWarnings 是增量出口），只钉"恰好一条 strict 告警"
+      const strictWarnings = warnings.filter((w) => w.includes('LOGIN_ENCRYPT_STRICT'));
+      expect(strictWarnings).toHaveLength(1);
+    });
+
+    test('LOGIN_ENCRYPT_STRICT=true 时无明文口令轨告警', () => {
+      process.env.LOGIN_ENCRYPT_STRICT = 'true';
+      const { collectProductionWarnings } = require('../../config/validate');
+      const warnings = collectProductionWarnings();
+      expect(warnings.some((w) => w.includes('LOGIN_ENCRYPT_STRICT'))).toBe(false);
     });
 
     test('ALLOWED_HOSTS missing is now fatal in production (M3)', () => {

@@ -59,8 +59,22 @@ node scripts/generate-secrets.js --env-snippet              # 本地：打印 .e
 | JWT_REFRESH_SECRET     | 全部刷新令牌失效，会话需重建                | 否                         |
 | AES_SECRET_KEY         | **存量 mfaSecret 无法解密，MFA 登录恒失败** | 是（先迁移后换钥）         |
 | HMAC_SECRET            | 存量审计记录 hmac 校验失配                  | 是（用新钥重签，无需旧钥） |
-| LOGIN_ECDH_PRIVATE_KEY | 无：前端每次登录重新获取公钥                | 否                         |
+| LOGIN_ECDH_PRIVATE_KEY | 无迁移；钉扎部署须同步重建前端包（见下）    | 否                         |
 | MONGODB_URI / 口令     | 需同步改 Mongo 账户，属数据库运维动作       | 不适用                     |
+
+`LOGIN_ECDH_PRIVATE_KEY` 一行的机制补笔：该私钥由 compose 的
+`login_ecdh_private_key` secret 经 `LOGIN_ECDH_PRIVATE_KEY_FILE` 注入
+（`src/config/secrets.js` 的 `FILE_BACKED_SECRETS` 在列，`docker-compose.yml`
+的 app 服务已装配），轮换＝第 4 步随批替换 `./secrets/login_ecdh_private_key`
+后重启，无需数据迁移。未配置时服务每次启动生成临时密钥对，重启前的历史登录
+密文将永久无法解密——这也是该私钥必须文件化注入而不能留空的原因。
+
+轮换还有一项前端联动（2026-10-10 钉扎落地后新增）：生产构建可把公钥 SHA-256
+指纹钉进前端包（`VITE_LOGIN_PUBLIC_KEY_SHA256`，防中间人替换公钥）。钉扎部署下
+**只换服务端私钥而不重建前端包，全部登录会被 `PUBLIC_KEY_PIN_MISMATCH` 阻断**——
+轮换窗口必须「换钥 + 按新指纹重建前端包 + 一起发布」。新指纹取自新私钥启动后
+服务端日志的 `publicKeySha256` 字段。另注意静态私钥无前向保密：一旦泄露须按
+口令泄露处置（强制改密），预案见 `SECURITY.md`「登录口令加密的密钥管理」。
 
 ### ⚠️ HMAC_SECRET 的四重影响：请按这张表读，不要按小节读
 

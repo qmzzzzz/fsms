@@ -19,7 +19,7 @@
  *   后果落在文档化的运维步骤上：`deployment/secret-rotation.md` 的轮换第 0/4/5 步都要求
  *   `node scripts/verify-audit-chain.js` 退出码 0，在 *_FILE 部署里这一步**做不到**。
  *   同一族的第三个入口是 `npm run validate`（src/config/validate.js，它连 dotenv 都不走）：
- *   实测四条「JWT_SECRET 必须设置为至少 32 字符」的**假错**，而 secret-rotation.md:207
+ *   实测四条「JWT_SECRET 必须设置为至少 32 字符」的**假错**，而 secret-rotation.md:221
  *   正是拿这一步当"轮换后配置自洽"的证据。
  *
  * 判据因此取"每个入口自己显式 hydrate（或在其之前 require src/config）"，
@@ -673,7 +673,7 @@ describe('入口脚本必须先 hydrate 文件型密钥再读 env', () => {
     //   JWT_SECRET / JWT_REFRESH_SECRET / AES_SECRET_KEY / HMAC_SECRET 四条
     //   「必须设置为至少 32 字符的强随机值」，退出码 1；
     //   用 -r 预加载先 hydrate ⇒ 四条全部消失（余下三条是 REDIS_URL/TRUST_PROXY_HOPS/
-    //   TLS 终结形态，与回填无关）。deployment/secret-rotation.md:207 正是拿这步当证据。
+    //   TLS 终结形态，与回填无关）。deployment/secret-rotation.md:221 正是拿这步当证据。
     const a = analyzed.find((x) => x.file === 'src/config/validate.js');
     if (!a) throw new Error('src/config/validate.js 未进入扫描（npm 入口通道失效？）');
     expect(a.readNames).toEqual(

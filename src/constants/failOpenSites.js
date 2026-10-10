@@ -169,6 +169,17 @@ const OTHER_ALERT_SIGNALS = Object.freeze([
     why: '启动期：仍启用 legacy CBC 解密（降级前的迁移未完成）',
   },
   {
+    type: 'login_encrypt_strict_disabled',
+    file: 'config/loginEncryptGuard.js',
+    level: 'medium',
+    why:
+      '启动期：LOGIN_ENCRYPT_STRICT 未开，明文口令轨仍开放（密文轨灰度期的既有代价）。' +
+      '与 legacy_cbc_decrypt_enabled 的区别：不描述迁移未完成的遗留路径被重新暴露，而是描述' +
+      '一个可选加固项默认关闭，且**刻意不阻断启动**——纯 HTTP 内网部署无 WebCrypto，前端只能' +
+      '走明文降级轨，致命闸会拦死一种合法部署形态（判据见 config/loginEncryptGuard.js 文件头）。' +
+      '另注意与 password_history_pepper_rotation 同型的恒正项问题：每次进程启动都会 +1。',
+  },
+  {
     type: 'password_history_pepper_rotation',
     file: 'config/immutableConfigGuard.js',
     level: 'medium',

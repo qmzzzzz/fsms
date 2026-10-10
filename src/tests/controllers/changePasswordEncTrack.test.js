@@ -70,7 +70,7 @@ describe('S5 改密密文轨（/api/security/change-password）', () => {
   });
 
   test('encNewPassword 密文无效 → 400 AUTH_ENCRYPTED_CREDENTIAL_INVALID', async () => {
-    const goodCurrent = await buildLoginEnvelope(PASSWORD);
+    const goodCurrent = await buildLoginEnvelope(PASSWORD, { aad: 'password:current' });
     const garbage = await buildLoginEnvelope('', { raw: { v: 1, x: 'not-a-key' } });
     const res = await put({ encCurrentPassword: goodCurrent, encNewPassword: garbage });
     expect(res.status).toBe(400);
@@ -78,8 +78,8 @@ describe('S5 改密密文轨（/api/security/change-password）', () => {
   });
 
   test('密文轨下明文 confirmPassword 与解密结果不一致 → 400', async () => {
-    const goodCurrent = await buildLoginEnvelope(PASSWORD);
-    const goodNew = await buildLoginEnvelope(NEW_PASSWORD);
+    const goodCurrent = await buildLoginEnvelope(PASSWORD, { aad: 'password:current' });
+    const goodNew = await buildLoginEnvelope(NEW_PASSWORD, { aad: 'password:new' });
     const res = await put({
       encCurrentPassword: goodCurrent,
       encNewPassword: goodNew,
@@ -106,8 +106,8 @@ describe('S5 改密密文轨（/api/security/change-password）', () => {
       { expiresIn: '24h' }
     );
 
-    const goodCurrent = await buildLoginEnvelope(PASSWORD);
-    const goodNew = await buildLoginEnvelope(NEW_PASSWORD);
+    const goodCurrent = await buildLoginEnvelope(PASSWORD, { aad: 'password:current' });
+    const goodNew = await buildLoginEnvelope(NEW_PASSWORD, { aad: 'password:new' });
     const res = await request(app)
       .put('/api/security/change-password')
       .set('Authorization', `Bearer ${chgToken}`)

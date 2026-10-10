@@ -257,7 +257,10 @@ const resolveDisablePasswordFactor = async (req, res) => {
     return { currentPassword: req.body.currentPassword, responded: false };
   }
   try {
-    const currentPassword = await decryptLoginCredential(req.body.encCurrentPassword);
+    const currentPassword = await decryptLoginCredential(
+      req.body.encCurrentPassword,
+      'MFA_DISABLE'
+    );
     return { currentPassword, responded: false };
   } catch (err) {
     logger.warn('关闭 MFA 拒绝 - 口令密文无效', { username: req.user?.username, code: err.code });

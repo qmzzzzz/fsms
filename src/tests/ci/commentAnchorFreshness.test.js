@@ -349,7 +349,7 @@ const LIVE = [
   },
   {
     in: 'src/config/validate.js',
-    at: 'deployment/secret-rotation.md:207',
+    at: 'deployment/secret-rotation.md:221',
     must: /docker compose exec -T app npm run validate/,
     why: '手册把本步退出码当"轮换后配置自洽"的证据（裸 `npm run validate` 上下两行都有，必须连带容器命令才唯一）',
   },
@@ -476,7 +476,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'src/config/validate.js:358',
+    at: 'src/config/validate.js:365',
     must: /requiresProductionSemantics/,
     why: 'validateConfig() 首行的非生产早退（原写 :264，那是 MAX_TRUST_PROXY_HOPS 常量）',
   },
@@ -500,7 +500,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/config/scriptSecretHydration.test.js',
-    at: 'deployment/secret-rotation.md:207',
+    at: 'deployment/secret-rotation.md:221',
     must: /docker compose exec -T app npm run validate/,
     why: '"拿这一步退出码当证据"的那一步（本轮把 :156 两处一并改对，原 :156 是空行）',
   },
@@ -697,11 +697,11 @@ describe('层 2 · 无内容锚点（空行 / 只剩注释标记；豁免 = STAL
     // 是同一条判据最好的现成样本；去掉 occurrences 的前导边界这条就会红。
     const bare = occurrences(
       'src/tests/config/scriptSecretHydration.test.js',
-      'secret-rotation.md:207'
+      'secret-rotation.md:221'
     );
     const qualified = occurrences(
       'src/tests/config/scriptSecretHydration.test.js',
-      'deployment/secret-rotation.md:207'
+      'deployment/secret-rotation.md:221'
     );
     expect(bare.length).toBe(1);
     expect(qualified.length).toBe(1);

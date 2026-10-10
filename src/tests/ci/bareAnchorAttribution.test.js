@@ -274,7 +274,7 @@ const LEDGER = [
   },
   {
     site: 'src/tests/config/startupGuards.test.js',
-    siteLine: 467,
+    siteLine: 470,
     raw: '（:39-43）',
     status: 'LIVE',
     referent: 'src/config/database.js',

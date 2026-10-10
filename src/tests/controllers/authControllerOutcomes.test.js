@@ -190,7 +190,9 @@ describe('register outcome 矩阵', () => {
 describe('login outcome 矩阵', () => {
   test.each([
     ['CAPTCHA_INVALID', 400],
-    ['ENC_INVALID', 400],
+    // 2026-10-10：ENC_INVALID 与 INVALID_CREDENTIALS 对客合并为同一 401
+    // （消除 nonce 消费预言机，见 authController.login 分支注释）
+    ['ENC_INVALID', 401],
     ['INVALID_CREDENTIALS', 401],
     ['MFA_ATTEMPTS_EXCEEDED', 429],
     ['MFA_CODE_INVALID', 401],

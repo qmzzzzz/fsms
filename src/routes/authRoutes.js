@@ -410,6 +410,12 @@ router.post('/mfa/enroll', authenticate, strictLimiter, mfaController.mfaEnroll)
 router.post(
   '/mfa/enable',
   authenticate,
+  // 与 enroll/disable/recovery-codes 对齐挂 strictLimiter：本步是 TOTP 6 位码的
+  // 在线校验入口，30 次/15 分钟的严格限额对正常用户零感知（输错一次即知），
+  // 却能把「已登录会话 + 自动化枚举动态码」的尝试速度压到与其余 MFA 端点同一档。
+  // 危害面确有界（爆破成功也只是给攻击者自己的账号开 MFA），但限流器挂载的
+  // 一致性本身就是可核查的安全属性——漏挂的那一个端点永远是最先被扫到的。
+  strictLimiter,
   body('mfaCode')
     .trim()
     .matches(/^\d{6}$/)

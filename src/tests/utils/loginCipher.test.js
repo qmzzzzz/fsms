@@ -56,48 +56,72 @@ describe('loginCipher 登录口令传输加密', () => {
   test('加解密往返：明文口令逐字节一致', async () => {
     const pwd = randomPassword();
     const envelope = await buildLoginEnvelope(pwd);
-    expect(await decryptLoginCredential(envelope)).toBe(pwd);
+    expect(await decryptLoginCredential(envelope, 'LOGIN')).toBe(pwd);
+  });
+
+  // AAD 用途绑定（2026-10-10）：信封只能用于它被加密时声明的端点——
+  // 跨端点重放（如改密页捕获的 encNewPassword 提交到 /login）在 GCM 认证处被拒
+  test('用途绑定：为别的端点加密的信封被拒（DECRYPT，AAD 不符）', async () => {
+    const pwd = randomPassword();
+    const loginEnvelope = await buildLoginEnvelope(pwd, { aad: 'login' });
+    // 先用错用途解密：认证标签校验失败，且失败发生在 nonce 占位之前
+    // （若先按正确用途成功一次，nonce 已消费，第二次失败原因就变成
+    //  NONCE_REPLAY，证明不了 AAD 这一格）
+    await expect(decryptLoginCredential(loginEnvelope, 'PASSWORD_NEW')).rejects.toMatchObject({
+      code: 'DECRYPT',
+    });
+    // nonce 未被错用途的尝试消费：按正确用途随后仍可成功
+    expect(await decryptLoginCredential(loginEnvelope, 'LOGIN')).toBe(pwd);
+  });
+
+  test('用途绑定：未知用途键抛编程错误（fail-closed，不放行）', async () => {
+    const envelope = await buildLoginEnvelope(randomPassword());
+    await expect(decryptLoginCredential(envelope, 'NOT_A_PURPOSE')).rejects.toThrow(/未知用途键/);
   });
 
   test('重放防护：同一信封二次提交被拒（NONCE_REPLAY）', async () => {
     const envelope = await buildLoginEnvelope(randomPassword());
-    expect(typeof (await decryptLoginCredential(envelope))).toBe('string');
-    await expect(decryptLoginCredential(envelope)).rejects.toThrow(CredentialError);
-    await expect(decryptLoginCredential(envelope)).rejects.toMatchObject({ code: 'NONCE_REPLAY' });
+    expect(typeof (await decryptLoginCredential(envelope, 'LOGIN'))).toBe('string');
+    await expect(decryptLoginCredential(envelope, 'LOGIN')).rejects.toThrow(CredentialError);
+    await expect(decryptLoginCredential(envelope, 'LOGIN')).rejects.toMatchObject({
+      code: 'NONCE_REPLAY',
+    });
   });
 
   test('时间窗：过期 ts 被拒（TS_WINDOW）', async () => {
     const envelope = await buildLoginEnvelope(randomPassword(), { ts: Date.now() - 6 * 60 * 1000 });
-    await expect(decryptLoginCredential(envelope)).rejects.toThrow(/TS_WINDOW/);
+    await expect(decryptLoginCredential(envelope, 'LOGIN')).rejects.toThrow(/TS_WINDOW/);
   });
 
   test('时间窗：超前 ts 被拒（TS_WINDOW）', async () => {
     const envelope = await buildLoginEnvelope(randomPassword(), { ts: Date.now() + 6 * 60 * 1000 });
-    await expect(decryptLoginCredential(envelope)).rejects.toThrow(/TS_WINDOW/);
+    await expect(decryptLoginCredential(envelope, 'LOGIN')).rejects.toThrow(/TS_WINDOW/);
   });
 
   test('nonce 格式非法被拒（NONCE_FORMAT）', async () => {
     const envelope = await buildLoginEnvelope(randomPassword(), { nonce: 'not-hex-xyz!' });
-    await expect(decryptLoginCredential(envelope)).rejects.toThrow(/NONCE_FORMAT/);
+    await expect(decryptLoginCredential(envelope, 'LOGIN')).rejects.toThrow(/NONCE_FORMAT/);
   });
 
   test('信封版本号错误被拒（ENVELOPE_VERSION）', async () => {
     const envelope = await buildLoginEnvelope(null, {
       raw: { v: 99, x: 'a', y: 'b', salt: 'c', iv: 'd', c: 'e' },
     });
-    await expect(decryptLoginCredential(envelope)).rejects.toThrow(/ENVELOPE_VERSION/);
+    await expect(decryptLoginCredential(envelope, 'LOGIN')).rejects.toThrow(/ENVELOPE_VERSION/);
   });
 
   test('非 base64 / 非 JSON 信封被拒（ENVELOPE_FORMAT）', async () => {
-    await expect(decryptLoginCredential('!!!not-base64-json!!!')).rejects.toThrow(
+    await expect(decryptLoginCredential('!!!not-base64-json!!!', 'LOGIN')).rejects.toThrow(
       /ENVELOPE_FORMAT/
     );
-    await expect(decryptLoginCredential('')).rejects.toThrow(/ENVELOPE_FORMAT/);
-    await expect(decryptLoginCredential(null)).rejects.toThrow(/ENVELOPE_FORMAT/);
+    await expect(decryptLoginCredential('', 'LOGIN')).rejects.toThrow(/ENVELOPE_FORMAT/);
+    await expect(decryptLoginCredential(null, 'LOGIN')).rejects.toThrow(/ENVELOPE_FORMAT/);
   });
 
   test('超长信封被拒（ENVELOPE_FORMAT）', async () => {
-    await expect(decryptLoginCredential('A'.repeat(1100))).rejects.toThrow(/ENVELOPE_FORMAT/);
+    await expect(decryptLoginCredential('A'.repeat(1100), 'LOGIN')).rejects.toThrow(
+      /ENVELOPE_FORMAT/
+    );
   });
 
   test('篡改密文被 GCM 认证拒绝（DECRYPT）', async () => {
@@ -106,7 +130,7 @@ describe('loginCipher 登录口令传输加密', () => {
     // 篡改密文段末 4 字符（nonce 随 payload 加密，篡改会破坏认证标签）
     inner.c = inner.c.slice(0, -4) + 'AAAA';
     const tampered = Buffer.from(JSON.stringify(inner), 'utf8').toString('base64');
-    await expect(decryptLoginCredential(tampered)).rejects.toThrow(/DECRYPT/);
+    await expect(decryptLoginCredential(tampered, 'LOGIN')).rejects.toThrow(/DECRYPT/);
   });
 
   test('错配公钥（重启换钥后前端缓存未刷新）被拒（DECRYPT）', async () => {
@@ -114,12 +138,12 @@ describe('loginCipher 登录口令传输加密', () => {
     const envelope = await buildLoginEnvelope(randomPassword(), {
       serverPublicPem: otherKey.publicKey,
     });
-    await expect(decryptLoginCredential(envelope)).rejects.toThrow(/DECRYPT/);
+    await expect(decryptLoginCredential(envelope, 'LOGIN')).rejects.toThrow(/DECRYPT/);
   });
 
   test('口令超长（>128 字符）被拒（PAYLOAD_FORMAT）', async () => {
     const envelope = await buildLoginEnvelope('a'.repeat(129));
-    await expect(decryptLoginCredential(envelope)).rejects.toThrow(/PAYLOAD_FORMAT/);
+    await expect(decryptLoginCredential(envelope, 'LOGIN')).rejects.toThrow(/PAYLOAD_FORMAT/);
   });
 
   test('P-384 密钥注入与往返', async () => {
@@ -128,7 +152,7 @@ describe('loginCipher 登录口令传输加密', () => {
     expect(getPublicKeyInfo().curve).toBe('P-384');
     const pwd = randomPassword();
     const envelope = await buildLoginEnvelope(pwd, { curve: 'P-384' });
-    expect(await decryptLoginCredential(envelope)).toBe(pwd);
+    expect(await decryptLoginCredential(envelope, 'LOGIN')).toBe(pwd);
   });
 
   test('注入非 EC 密钥（Ed25519）：首次使用即拒绝', () => {

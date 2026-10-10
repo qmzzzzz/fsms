@@ -18,6 +18,7 @@
  */
 
 const fs = require('fs');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 
@@ -94,6 +95,18 @@ function materialize(raw, tmpDir) {
     // JWT_SECRET === JWT_REFRESH_SECRET，被"两把 JWT 密钥不得相同"这条判据按真实
     // 拓扑拒掉（那条判据是对的，错的是替身）。
     const name = path.basename(raw);
+    // login_ecdh_private_key 的替身必须是**真 PEM**：它的下游消费者
+    // （loginCipher 的 createPrivateKey）按 EC 私钥解析，喂 STRONG_DUMMY
+    // 那种随机串会让「装配完整」与「密钥可用」脱节——装配闸绿着而登录全失败。
+    if (name === 'login_ecdh_private_key') {
+      const { privateKey } = crypto.generateKeyPairSync('ec', {
+        namedCurve: 'prime256v1',
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+      });
+      fs.writeFileSync(file, privateKey, 'utf8');
+      return file;
+    }
     fs.writeFileSync(file, `${STRONG_DUMMY}:${name}`, 'utf8');
     return file;
   }
@@ -105,6 +118,104 @@ function materialize(raw, tmpDir) {
     return def ? def[1] : `${STRONG_DUMMY}:${interpolation[1]}`;
   }
   return raw;
+}
+
+/**
+ * app 服务 environment 段里指向 /run/secrets 的 <NAME>_FILE 指针：
+ * 返回 Map<变量名, 挂载名>。入参是 compose 文本而非文件路径——装配完整性
+ * 用例要拿"改过的文本"复跑同一条判据（见该用例的反向自证）。
+ */
+function fileSecretPointers(text) {
+  const envAt = text.indexOf('\n    environment:');
+  const endAt = text.indexOf('\n    secrets:', envAt);
+  const block = text.slice(envAt, endAt < 0 ? text.length : endAt);
+  const pointers = new Map();
+  for (const rawLine of block.split('\n')) {
+    const m = rawLine.trim().match(/^- ([A-Z0-9_]+_FILE)=\/run\/secrets\/([\w-]+)$/);
+    if (m) pointers.set(m[1], m[2]);
+  }
+  return pointers;
+}
+
+/** app 服务 secrets 清单：实际挂载进容器的 secret 名 */
+function appSecretMounts(text) {
+  const envAt = text.indexOf('\n    environment:');
+  const listAt = text.indexOf('\n    secrets:', envAt);
+  const endAt = text.indexOf('\n    depends_on:', listAt);
+  if (listAt < 0 || endAt < 0) {
+    throw new Error('docker-compose.yml 里找不到 app 服务的 secrets 清单段');
+  }
+  return text
+    .slice(listAt, endAt)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('- '))
+    .map((line) => line.slice(2).trim());
+}
+
+/** 顶层 secrets 定义：secret 名 → file: 指向的文件名 */
+function topLevelSecretFiles(text) {
+  const topAt = text.indexOf('\nsecrets:');
+  if (topAt < 0) throw new Error('docker-compose.yml 里找不到顶层 secrets 段');
+  const block = text.slice(topAt, text.indexOf('\nvolumes:', topAt));
+  const defs = new Map();
+  let current = null;
+  for (const rawLine of block.split('\n')) {
+    const name = rawLine.match(/^ {2}([\w-]+):\s*$/);
+    if (name) {
+      current = name[1];
+      continue;
+    }
+    const file = rawLine.match(/^ {4}file:\s*\.\/secrets\/([\w-]+)\s*$/);
+    if (file && current) defs.set(current, file[1]);
+  }
+  return defs;
+}
+
+/** 轮换手册「各密钥轮换影响面」表第一列点名的密钥标识符 */
+function rotationManualSecretNames(manualText) {
+  return [...manualText.matchAll(/^\|\s*`?([A-Z][A-Z0-9_]+)`?[^|]*\|/gm)].map((m) => m[1]);
+}
+
+/**
+ * 文件注入密钥的装配完整性问题清单（空数组＝齐装）。
+ *
+ * 2026-10-10 审计 finding：`FILE_BACKED_SECRETS` 支持
+ * `LOGIN_ECDH_PRIVATE_KEY_FILE`、`generate-secrets.js` 也产出
+ * `login_ecdh_private_key`，但 compose 三处全漏——服务每次启动惰性生成临时
+ * 密钥对，手册里这把钥匙的轮换流程从不生效，重启前的历史登录密文永久无法
+ * 解密。三类漏法各能造出"部署看起来齐了"：有指针没挂载、有挂载没顶层定义、
+ * 手册点名而 compose 没有，故收进同一条判据。
+ */
+function wiringProblems(text, manualFileBacked) {
+  const problems = [];
+  const pointers = fileSecretPointers(text);
+  const appMounts = appSecretMounts(text);
+  const topDefs = topLevelSecretFiles(text);
+
+  for (const [varName, mount] of pointers) {
+    if (!appMounts.includes(mount)) {
+      problems.push(`${varName} 指向 /run/secrets/${mount}，但 app secrets 清单没有挂载它`);
+    }
+    if (topDefs.get(mount) !== mount) {
+      problems.push(
+        `${mount} 在顶层 secrets 没有 file: ./secrets/${mount} 定义（或指向了别的文件）`
+      );
+    }
+  }
+  for (const mount of appMounts) {
+    if (!topDefs.has(mount)) {
+      problems.push(`app secrets 清单挂载了 ${mount}，顶层 secrets 却没有定义它`);
+    }
+  }
+  for (const name of manualFileBacked) {
+    if (!pointers.has(`${name}_FILE`)) {
+      problems.push(
+        `轮换手册点名了 ${name}（FILE_BACKED_SECRETS 成员），但 app environment 没有 ${name}_FILE 指针——手册里的轮换流程从不生效`
+      );
+    }
+  }
+  return problems;
 }
 
 /** 跑一次真实的 validateConfig，返回它以什么退出码终止 + 期间记下的日志 */
@@ -157,6 +268,10 @@ describe('docker-compose 生产环境变量契约', () => {
     'AES_SECRET_KEY_FILE',
     'HMAC_SECRET_FILE',
     'MONGODB_URI_FILE',
+    // 2026-10-10 补装的登录 ECDH 静态私钥：hydration 会把文件内容回填进
+    // LOGIN_ECDH_PRIVATE_KEY，指针与目标值两个名字都必须保存/还原
+    'LOGIN_ECDH_PRIVATE_KEY_FILE',
+    'LOGIN_ECDH_PRIVATE_KEY',
     'REDIS_PASSWORD',
     'REDIS_PASSWORD_FILE',
     'ADMIN_INITIAL_PASSWORD_FILE',
@@ -181,6 +296,9 @@ describe('docker-compose 生产环境变量契约', () => {
       AES_SECRET_KEY_FILE: 'AES_SECRET_KEY',
       HMAC_SECRET_FILE: 'HMAC_SECRET',
       MONGODB_URI_FILE: 'MONGODB_URI',
+      // 登录口令信封加密的服务端静态私钥（2026-10-10 补装）：与生产同形态
+      // 经 *_FILE 注入，目标变量由 validateConfig → hydrateSecretsFromFiles 回填
+      LOGIN_ECDH_PRIVATE_KEY_FILE: 'LOGIN_ECDH_PRIVATE_KEY',
       // 2026-10-01 认证闸：compose 拓扑的 redis 凭据经同一 *_FILE 注入路径进入
       REDIS_PASSWORD_FILE: 'REDIS_PASSWORD',
     };
@@ -210,6 +328,60 @@ describe('docker-compose 生产环境变量契约', () => {
     expect(composeVars.NODE_ENV).toBe('production');
     expect(composeVars.JWT_SECRET_FILE).toBe('/run/secrets/jwt_secret');
     expect(composeVars.TRUST_PROXY_HOPS).toBe('${TRUST_PROXY_HOPS:-1}');
+  });
+
+  /**
+   * 文件注入密钥的装配完整性（2026-10-10 审计 finding 的回归闸）
+   *
+   * 判据不是"变量名出现过"：三方（environment 的 `*_FILE` 指针、app 服务
+   * `secrets:` 挂载清单、顶层 `secrets:` 定义）必须逐一对应，且轮换手册点名、
+   * `FILE_BACKED_SECRETS` 收录的密钥必须全部经指针进容器。只验装配不验手册
+   * 覆盖，就会出现"手册写着能轮换、compose 却没接"的缺口——那正是
+   * LOGIN_ECDH_PRIVATE_KEY 此前的状态。
+   */
+  test('文件注入密钥装配三方一致，且轮换手册点名的密钥全部在装', () => {
+    const text = fs.readFileSync(COMPOSE, 'utf8');
+    const manual = fs.readFileSync(
+      path.join(__dirname, '../../../deployment/secret-rotation.md'),
+      'utf8'
+    );
+    const { FILE_BACKED_SECRETS } = require('../../config/secrets');
+    const manualFileBacked = rotationManualSecretNames(manual).filter((name) =>
+      FILE_BACKED_SECRETS.includes(name)
+    );
+
+    // 前提自证：手册点名集与装配集都不是空的（空集合会让下面的判据恒绿）
+    expect(manualFileBacked).toEqual(
+      expect.arrayContaining([
+        'JWT_SECRET',
+        'JWT_REFRESH_SECRET',
+        'AES_SECRET_KEY',
+        'HMAC_SECRET',
+        'LOGIN_ECDH_PRIVATE_KEY',
+        'MONGODB_URI',
+      ])
+    );
+    expect(fileSecretPointers(text).size).toBeGreaterThanOrEqual(8);
+
+    expect(wiringProblems(text, manualFileBacked)).toEqual([]);
+
+    // 反向自证①：删掉 app environment 的 LOGIN_ECDH_PRIVATE_KEY_FILE 行，
+    // 「手册点名必须装配」通道必须点名它（2026-10-10 缺口的原样复现）
+    const noEnvLine = text.replace(
+      /^[ \t]*- LOGIN_ECDH_PRIVATE_KEY_FILE=\/run\/secrets\/login_ecdh_private_key\r?\n/m,
+      ''
+    );
+    expect(noEnvLine).not.toBe(text);
+    expect(wiringProblems(noEnvLine, manualFileBacked).join('\n')).toContain(
+      'LOGIN_ECDH_PRIVATE_KEY_FILE'
+    );
+
+    // 反向自证②：删掉 app secrets 清单里的挂载项，三方一致通道必须红
+    const noMount = text.replace(/^[ \t]*- login_ecdh_private_key\r?\n/m, '');
+    expect(noMount).not.toBe(text);
+    expect(wiringProblems(noMount, manualFileBacked).join('\n')).toContain(
+      'login_ecdh_private_key'
+    );
   });
 
   test('替身密钥自身不被判弱（否则「校验通过」是假绿）', () => {

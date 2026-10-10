@@ -132,7 +132,7 @@ async function registerUser(body, ctx = {}) {
   let password;
   if (typeof body.encPassword === 'string' && body.encPassword) {
     try {
-      password = await decryptLoginCredential(body.encPassword);
+      password = await decryptLoginCredential(body.encPassword, 'REGISTER');
     } catch (err) {
       logger.warn('注册拒绝 - 口令密文无效', { username, code: err.code });
       return { outcome: 'ENC_INVALID' };
@@ -299,7 +299,7 @@ async function resolveLoginPassword(params, ctx, username) {
   let password;
   if (typeof params.encPassword === 'string' && params.encPassword) {
     try {
-      password = await decryptLoginCredential(params.encPassword);
+      password = await decryptLoginCredential(params.encPassword, 'LOGIN');
     } catch (err) {
       // 时序口径：解密失败必须与「密码错误」等耗时（P2-10/P2-11 同类侧信道——
       // 解密是毫秒级，不补哑 compare 会让该路径显著快于正常失败路径）
@@ -1031,7 +1031,7 @@ async function changeUserPassword(userId, body, ctx) {
   let currentPassword;
   if (typeof body.encCurrentPassword === 'string' && body.encCurrentPassword) {
     try {
-      currentPassword = await decryptLoginCredential(body.encCurrentPassword);
+      currentPassword = await decryptLoginCredential(body.encCurrentPassword, 'PASSWORD_CURRENT');
     } catch (err) {
       logger.warn('改密拒绝 - 当前口令密文无效', { username: ctx.username, code: err.code });
       return { outcome: 'ENC_INVALID' };
@@ -1043,7 +1043,7 @@ async function changeUserPassword(userId, body, ctx) {
   let newPassword;
   if (typeof body.encNewPassword === 'string' && body.encNewPassword) {
     try {
-      newPassword = await decryptLoginCredential(body.encNewPassword);
+      newPassword = await decryptLoginCredential(body.encNewPassword, 'PASSWORD_NEW');
     } catch (err) {
       logger.warn('改密拒绝 - 新口令密文无效', { username: ctx.username, code: err.code });
       return { outcome: 'ENC_INVALID' };

@@ -174,7 +174,7 @@ describe('TZ_BUSINESS：消费侧归一化与启动闸门同口径', () => {
   });
 
   test('口径边界（实测记录，不是"这样正确"的断言）：非生产整体早退，运行期照样抛', () => {
-    // validate.js:345 `if (!requiresProductionSemantics()) return;` ⇒ dev/test/ci/local/staging
+    // validate.js:365 `if (!requiresProductionSemantics()) {` ⇒ dev/test/ci/local/staging
     // 连时区项都不看；而 constants/timezone.js 无条件构造 Intl。所以在开发环境里，
     // TZ_BUSINESS 拼名的失败形态是首次 require 抛 RangeError，而不是启动期一句配置致命错。
     // 本用例钉的是**当前不对称**：若哪天把时区项挪出环境分叉（生产口径同校验），

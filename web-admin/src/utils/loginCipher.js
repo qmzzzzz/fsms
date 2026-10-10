@@ -2,7 +2,9 @@
  * 登录口令传输加密（与后端 src/utils/loginCipher.js 对偶）
  *
  * ECIES 式混合加密：一次性 ECDH 密钥对与服务端静态公钥（GET /api/auth/login-public-key）
- * 协商共享密钥，HKDF-SHA256 派生 AES-256-GCM 密钥加密 {p, ts, nonce}。
+ * 协商共享密钥，HKDF-SHA256 派生 AES-256-GCM 密钥加密 {p, ts, nonce}；
+ * AES-GCM 的 additionalData 绑定端点用途（见 CREDENTIAL_PURPOSE）——为某个
+ * 端点加密的信封提交到另一个端点会认证失败，跨端点重放在此被挡。
  * 上行 encPassword = base64(JSON{v:1, x, y, salt, iv, c})，
  * x/y 为临时公钥 JWK 坐标（base64url），c 为 AES 密文||16 字节 GCM tag。
  *
@@ -16,6 +18,21 @@ import axios from 'axios'
 import { reportDegradation } from '@/utils/errorReporter'
 
 let cachedKey = null // { keyObj, curve }，会话级缓存；服务端换钥后由 invalidate 清除
+
+/**
+ * 信封用途（AES-GCM additionalData 的取值来源）：与后端 src/utils/loginCipher.js
+ * 的 CREDENTIAL_AAD 逐字节一致。键名两侧相同——encryptPassword(password, purpose)
+ * 收用途键，未知键直接抛错（fail-closed，不会退回无 AAD 加密）。
+ * 新增接收密文的端点时两侧同步加，漏加的那一侧对该端点全部认证失败。
+ */
+export const CREDENTIAL_PURPOSE = {
+  LOGIN: 'login',
+  REGISTER: 'register',
+  PASSWORD_CURRENT: 'password:current',
+  PASSWORD_NEW: 'password:new',
+  MFA_DISABLE: 'mfa:disable',
+  USER_CREATE: 'user:create',
+}
 
 export const isTransportCryptoAvailable = () =>
   typeof crypto !== 'undefined' && !!crypto.subtle && typeof TextEncoder !== 'undefined'
@@ -62,6 +79,31 @@ async function ensurePublicKey(force = false) {
     throw new Error('unsupported curve: ' + curve)
   }
   if (!pem) throw new Error('public key unavailable')
+  // 构建期指纹钉死（2026-10-10，防主动 MITM）：公钥经可能被截持的信道下发、
+  // 无内建认证——主动中间人替换成自己的公钥即可解密再转发，ECDH 对其形同
+  // 虚设（ADR-001「不能替代 TLS」的同一事实）。生产构建把服务端公钥的
+  // SHA-256 指纹编入包（VITE_LOGIN_PUBLIC_KEY_SHA256），此处对**取到的 PEM
+  // 自行计算**指纹并比对——不信响应里的 keyId 字段，中间体可以连它一起替换。
+  // 不符即抛错（code=PUBLIC_KEY_PIN_MISMATCH）：调用方阻断提交，不得降级明文。
+  // 未配置时跳过（本地开发 / 未注入静态私钥因而每次重启换钥的部署无处可钉）。
+  // 指纹最短 16 位hex（64bit）：再短可被离线穷举碰撞，失去钉扎意义。
+  const pin = (import.meta.env.VITE_LOGIN_PUBLIC_KEY_SHA256 || '').trim().toLowerCase()
+  if (pin) {
+    if (!/^[0-9a-f]{16,64}$/.test(pin)) {
+      throw new Error(
+        'VITE_LOGIN_PUBLIC_KEY_SHA256 格式无效：应为 16-64 位十六进制指纹（服务端启动日志的 publicKeySha256）'
+      )
+    }
+    const digest = await crypto.subtle.digest('SHA-256', pemToBytes(pem))
+    const fingerprint = toHex(new Uint8Array(digest))
+    if (!fingerprint.startsWith(pin)) {
+      const err = new Error(
+        'login public key fingerprint mismatch：取到的公钥与构建期固定值不符（可能遭中间人替换，或服务端已轮换密钥但前端包未随之重建）'
+      )
+      err.code = 'PUBLIC_KEY_PIN_MISMATCH'
+      throw err
+    }
+  }
   const keyObj = await crypto.subtle.importKey(
     'spki',
     pemToBytes(pem),
@@ -81,14 +123,23 @@ export const invalidatePublicKeyCache = () => {
 /**
  * 加密口令，返回 encPassword 字段值。
  *
+ * @param {string} password 明文口令
+ * @param {string} purpose 用途键（CREDENTIAL_PURPOSE 的键，如 'LOGIN'）：
+ *   作为 AES-GCM 的 additionalData 参与认证——信封只能用于对应端点。
+ *   未知键抛错（fail-closed，不退回无 AAD 加密）。
+ *
  * 失败语义（FE-H1）：
  * - 返回 null：仅限 WebCrypto 不可用（非 secure context，如纯 HTTP 内网）——
  *   调用方走明文轨（后端双轨兼容），属设计内降级；
- * - 抛错：WebCrypto 可用但加密本应成功而失败（公钥网络故障/算法异常）——
- *   **调用方不得降级明文**，应阻断提交并提示重试（用户重试成本为零），
- *   并经 console.warn 留痕便于监控密文率。
+ * - 抛错：WebCrypto 可用但加密本应成功而失败（公钥网络故障/算法异常/
+ *   用途键非法）——**调用方不得降级明文**，应阻断提交并提示重试
+ *   （用户重试成本为零），并经 console.warn 留痕便于监控密文率。
  */
-export async function encryptPassword(password) {
+export async function encryptPassword(password, purpose) {
+  const aad = CREDENTIAL_PURPOSE[purpose]
+  if (!aad) {
+    throw new Error('encryptPassword: 未知用途键 ' + purpose + '（CREDENTIAL_PURPOSE 未定义）')
+  }
   if (!isTransportCryptoAvailable()) {
     // P1-18：非 secure context（纯 HTTP 内网）下全部口令走明文轨。降级是设计内的，
     // 但此前无任何可观测信号——注释所称「便于监控密文率」无法实现。此处上报一次，
@@ -128,7 +179,13 @@ export async function encryptPassword(password) {
   const nonce = toHex(crypto.getRandomValues(new Uint8Array(16)))
   const payload = new TextEncoder().encode(JSON.stringify({ p: password, ts: Date.now(), nonce }))
   const iv = crypto.getRandomValues(new Uint8Array(12))
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, payload))
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(aad) },
+      aesKey,
+      payload
+    )
+  )
 
   // 3) 信封（与后端 decryptLoginCredential 的解析格式逐字段对齐）
   return b64Encode(

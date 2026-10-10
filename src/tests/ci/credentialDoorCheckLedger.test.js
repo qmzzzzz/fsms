@@ -281,7 +281,7 @@ const LEDGER = {
       '第二个同形不对称（本轮实测才发现，原先我只知道 refresh 这一处）：它查了 ' +
       "`user.status !== 'active'`（services/tokenService.js:85-86）却不查 lockUntil。" +
       '调用点本轮已复核（上一条登记里写的"未复核"是当时的状态，现已补齐）：全仓只有 ' +
-      'controllers/authController.js:560 一处，属于 GET /api/auth/session 的会话预筛，' +
+      'controllers/authController.js:579 一处，属于 GET /api/auth/session 的会话预筛，' +
       '它把返回值直接当作 `authenticated` 布尔量，不签发/不轮换/不吊销（该端点注释自陈' +
       '"安全结论以 getMe 为准"）。⇒ 影响面钉死为"锁定账户在该端点被报成已登录，' +
       '随后 getMe 才 401"，不是凭证可达性放开。要不要在这两个布尔预检里补 lockUntil，' +
@@ -297,7 +297,7 @@ const LEDGER = {
     verdict: 'needs-decision',
     why:
       '同上（:102-103 同一形状）：查 status 不查 lockUntil。调用点实测只有 ' +
-      'controllers/authController.js:562 一处（同一端点的 access 失效分支），' +
+      'controllers/authController.js:585 一处（同一端点的 access 失效分支），' +
       '返回布尔量给"是否已登录"提示',
   },
   'services/websocketService.js#authenticateSocket': {

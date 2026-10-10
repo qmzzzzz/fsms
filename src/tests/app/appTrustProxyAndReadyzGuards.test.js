@@ -99,7 +99,7 @@ describe('§13 V-12：trust proxy 有效值分支（app.js:150）', () => {
   // §8.3 点名场景「Trust proxy 过大值」——本次改动复审补测 + 补漏
   // ============================================================
   // 为什么必须测：config/validate.js 有 MAX_TRUST_PROXY_HOPS=5 的上限校验，
-  // 但 validateConfig() 首行即对非 production 早退（src/config/validate.js:358），
+  // 但 validateConfig() 首行即对非 production 早退（src/config/validate.js:365），
   // 因此 staging/dev 可以绕过该闸门。而 app.js 原先对 parseInt 结果不做上界
   // 判断，超上限值被原样交给 Express。实测（2026-09-17，Node 24）：
   //   app.set('trust proxy', 999999) + XFF: "1.1.1.1, 2.2.2.2, ..."

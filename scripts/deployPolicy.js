@@ -25,6 +25,11 @@ const REQUIRED_SECRET_FILES = [
   'hmac_secret',
   'mongodb_uri',
   'admin_initial_password',
+  // 登录口令传输加密的服务端静态私钥（2026-10-10 补装）：compose 挂载它，
+  // 缺文件时 docker compose 直接拒绝启动；且缺了它服务每次启动惰性生成临时
+  // 密钥对，重启前的历史登录密文永久无法解密。与 compose 的一致性由
+  // src/tests/deploy/deployScript.test.js 双向把守
+  'login_ecdh_private_key',
   'mongo_root_username',
   'mongo_root_password',
   'grafana_admin_password',
@@ -165,7 +170,7 @@ function checkAlertingEndpoint(env, fsImpl) {
   }
   if (source === null) {
     // 「读不到」不能只写 warning：调用方 validatePreflight 的裁决位是 `ok = errors.length === 0`
-    // （scripts/deployPolicy.js:129），warnings 不进这个式子——
+    // （scripts/deployPolicy.js:134），warnings 不进这个式子——
     // 只进 warnings 等于让门禁在最坏的一种输入下判绿——alertmanager.yml 被删/未挂载/
     // 权限不对（catch 把 EACCES、EISDIR 一并吞成 null）时告警链必然不可用，而发布照样通过。
     // 旧注释写「不静默放行」，但它只保证"话说出了口"，没保证"门真的关上"。
