@@ -247,6 +247,19 @@ const LEDGER = {
     lockWhere: null,
     why: '吊销路径的原子消费原语：越"不检查账户状态"越好，禁用/锁定账户也必须能完成吊销',
   },
+  'services/authService.js#isForeignRefreshToken': {
+    role: 'primitive',
+    mint: false,
+    verify: true,
+    checksStatus: false,
+    checksLock: false,
+    lockWhere: null,
+    why:
+      '登出属主预检（F-100 另一半）：只回答"这枚 refresh 串是不是当前操作者的"，不判账户档。' +
+      '与 revokeOneRefreshToken / logoutAuth 同旨：吊销通道必须对已禁用/已锁定账户开放，' +
+      '否则被锁定的用户永远清不掉自己手里的令牌（比留着更危险）。' +
+      '它只做判别不做消费——返回 true 时上层整次拒绝登出，一枚令牌都不会进黑名单。',
+  },
   'services/authService.js#revokeTokensOnLogout': {
     role: 'primitive',
     mint: false,

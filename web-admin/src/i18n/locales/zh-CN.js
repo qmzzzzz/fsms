@@ -1116,6 +1116,7 @@ export default {
     captchaInvalid: '验证码错误或已过期',
     captchaServiceUnavailable: '验证码服务繁忙，请稍后重试',
     logoutRevokeFailed: '登出未完成：令牌吊销服务暂不可用，请稍后重试（当前登录状态仍然有效）',
+    logoutRefreshForeign: '登出未完成：请求中包含不属于当前账号的刷新令牌，已拒绝本次登出',
     mfaCodeInvalid: '两步验证码错误',
     mfaNotEnabled: '两步验证未开启',
     mfaNotEnabledNoCodes: '两步验证未开启，无需生成恢复码',

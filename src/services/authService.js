@@ -1329,6 +1329,29 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
  * @returns {Promise<{handled:boolean, failed:boolean}>}
  *   handled=false 表示签名无效/已过期（本就不可用，不算失败，也不写黑名单）
  */
+/**
+ * 判别一枚 refresh 串是否**不属于**当前操作者。
+ *
+ * 无法判别时按"不属于"处理（fail-closed）：载荷里没有 userId、或压根拿不到操作者
+ * 身份，都不能证明"这串是我的"。反过来，签名无效/已过期的串**不算**外来——
+ * 它本就不可用，与 revokeOneRefreshToken 的口径一致（否则一次携带过期串的登出会被拒）。
+ *
+ * @param {string} token 原始 refresh 串
+ * @param {string} ownerUserId 当前操作者 userId（authenticate 保证存在）
+ * @returns {boolean} true=这串不属于当前操作者
+ */
+function isForeignRefreshToken(token, ownerUserId) {
+  let payload = null;
+  try {
+    payload = jwt.verify(token, config.jwt.refreshSecret, { algorithms: ['HS256'] });
+  } catch (e) {
+    return false;
+  }
+  if (!payload || !payload.exp) return false;
+  if (!ownerUserId) return true;
+  return String(payload.userId) !== String(ownerUserId);
+}
+
 async function revokeOneRefreshToken(token) {
   let payload = null;
   try {
@@ -1364,7 +1387,21 @@ async function revokeOneRefreshToken(token) {
  * 有效期（默认 2h）内仍可通过认证，而用户已认为会话已终止、不会再补救。
  * refresh 轮换路径（consumeToken）刻意 fail-closed，契约必须一致。
  */
-async function revokeTokensOnLogout({ accessToken, refreshToken, extraRefreshTokens = [] } = {}) {
+async function revokeTokensOnLogout({
+  accessToken,
+  refreshToken,
+  extraRefreshTokens = [],
+  userId,
+} = {}) {
+  // 属主预检（F-100 的另一半）：任何一枚被出示的 refresh 串若不是当前操作者的，
+  // 整次登出失败，且**不做任何吊销**——见 errorCodes.LOGOUT_REFRESH_FOREIGN 的注释。
+  // 旧实现不判属主：拿到他人 refresh 串即可代为吊销（会话 DoS），接口还回 200。
+  // 预检必须走在任何 blacklistToken 之前：部分成功会让"登出"处于说不清的状态。
+  const refreshCandidates = [...new Set([refreshToken, ...extraRefreshTokens].filter(Boolean))];
+  if (refreshCandidates.some((t) => isForeignRefreshToken(t, userId))) {
+    return { revokeFailed: false, foreignRefresh: true };
+  }
+
   // 吊销失败标记：任一令牌未能确认入库即视为登出未完成
   let revokeFailed = false;
 
@@ -1388,7 +1425,6 @@ async function revokeTokensOnLogout({ accessToken, refreshToken, extraRefreshTok
   }
 
   // 去重：body 与 cookie 常是同一条令牌（同值重复吊销只是多写一次同键黑名单）
-  const refreshCandidates = [...new Set([refreshToken, ...extraRefreshTokens].filter(Boolean))];
   for (const token of refreshCandidates) {
     const { failed } = await revokeOneRefreshToken(token);
     if (failed) revokeFailed = true;

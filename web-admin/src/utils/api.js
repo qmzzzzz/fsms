@@ -46,6 +46,8 @@ const ERROR_CODE_I18N_MAP = {
   CAPTCHA_SERVICE_UNAVAILABLE: 'errors.captchaServiceUnavailable',
   // 会话吊销（后端 P2-26 fail-closed）
   LOGOUT_REVOKE_FAILED: 'errors.logoutRevokeFailed',
+  // 出示了非本人的 refresh 令牌：整次登出被拒（后端 403，见 LOGOUT_REFRESH_FOREIGN）
+  LOGOUT_REFRESH_FOREIGN: 'errors.logoutRefreshForeign',
   // MFA 两步验证
   MFA_CODE_INVALID: 'errors.mfaCodeInvalid',
   MFA_NOT_ENABLED: 'errors.mfaNotEnabled',

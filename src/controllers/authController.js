@@ -499,11 +499,23 @@ const logout = asyncHandler(async (req, res) => {
     Boolean
   );
 
-  const { revokeFailed } = await authService.revokeTokensOnLogout({
+  const { revokeFailed, foreignRefresh } = await authService.revokeTokensOnLogout({
     accessToken: token,
     refreshToken: primaryRefresh || null,
     extraRefreshTokens: extraRefresh,
+    // 属主判据：被出示的 refresh 串必须是当前操作者的（authenticate 已保证 req.user 存在）
+    userId: req.user?.userId,
   });
+
+  if (foreignRefresh) {
+    // 整次失败：不清 cookie（清了浏览器侧看起来已登出，用户不会重试，而那串
+    // 令牌仍然有效）、不动会话表。保留 cookie 与下方 revokeFailed 分支同旨——
+    // 让客户端能原样重试。判据与理由见 errorCodes.LOGOUT_REFRESH_FOREIGN。
+    logger.warn('登出时出示了非本人的 refresh 令牌，整次拒绝', {
+      username: req.user?.username || 'unknown',
+    });
+    return ApiResponse.codeError(res, 'LOGOUT_REFRESH_FOREIGN');
+  }
 
   if (revokeFailed) {
     // 不清 cookie：清掉会让浏览器侧看起来已登出，用户不会重试，

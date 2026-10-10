@@ -1144,6 +1144,8 @@ export default {
     captchaServiceUnavailable: 'Captcha service is busy, please try again later',
     logoutRevokeFailed:
       'Logout incomplete: token revocation service is unavailable. Please retry (your session is still active)',
+    logoutRefreshForeign:
+      'Logout incomplete: the request contained a refresh token that does not belong to this account; logout was rejected',
     mfaCodeInvalid: 'Invalid two-factor verification code',
     mfaNotEnabled: 'Two-factor authentication is not enabled',
     mfaNotEnabledNoCodes:

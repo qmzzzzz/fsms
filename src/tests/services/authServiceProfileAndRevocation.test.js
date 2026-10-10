@@ -308,7 +308,11 @@ describe('authService gap A', () => {
         refreshSecret,
         { expiresIn: '24h' }
       );
-      const result = await authService.revokeTokensOnLogout({ refreshToken: token });
+      // userId 必须随调用传入：属主预检拿不到操作者身份时按"外来"处理（fail-closed）
+      const result = await authService.revokeTokensOnLogout({
+        refreshToken: token,
+        userId: 'test-user',
+      });
       expect(result.revokeFailed).toBe(false);
     });
 
@@ -342,7 +346,10 @@ describe('authService gap A', () => {
         refreshSecret,
         { expiresIn: '24h' }
       );
-      const result = await authService.revokeTokensOnLogout({ refreshToken: token });
+      const result = await authService.revokeTokensOnLogout({
+        refreshToken: token,
+        userId: 'test-user',
+      });
       expect(result.revokeFailed).toBe(true);
       spy.mockRestore();
     });
