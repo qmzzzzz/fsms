@@ -195,6 +195,30 @@ async function dispatchChainAlert(hasBreaks, message, report, gapCount) {
     );
   }
 }
+/**
+ * hash_stripped 的运维面指认（待裁定 #19 选项②：只改告警文案，不动 `intact` 判定）。
+ *
+ * 为什么值得单独一句：`hash_stripped` 与「链锁降级窗口」**数据形态相同**——
+ * 分布式锁拿不到时该批同样无哈希落库、同样位于带哈希记录之后
+ * （utils/auditChain.js:222 抛错走降级 ⇒ auditBuffer 回退重试）。告警原文只报
+ * `type=hash_stripped=N`，读者按字面读成"有人抹了哈希"，而这两类的运维动作完全不同。
+ *
+ * 为什么**不加可判别标记**（选项①）：标记与 `hash` 同层、同一个 DB 写权限可达，
+ * 能 `$unset` hash 的内部人同样能伪造/抹掉标记，区分度是假的。
+ * 为什么**不改 `intact` 判定**：§21.2「误报是 fail-closed 的定价，不是缺陷」——
+ * 把降级窗口判成 intact 会让真篡改披着降级外衣过关，方向更危险。
+ *
+ * @param {object} report verifyAuditChain 的原始报告
+ * @returns {string} 需追加的指认文案；无 hash_stripped 时为空串
+ */
+const hashStrippedOpsHint = (report) => {
+  if (!(report.byType || {}).hash_stripped) return '';
+  return (
+    '；其中 hash_stripped 也可能是链锁降级窗口的产物（无哈希落库），不是篡改的充分证据，' +
+    '请先核对同时间窗的链锁降级日志（"锁持有超时"/"AUDIT_CHAIN_LOCK_TIMEOUT_MS 非法"/' +
+    '"共享链尾未能写入 Redis"）再定性'
+  );
+};
 
 /**
  * 执行一次链完整性核验，按需推送告警
@@ -292,7 +316,7 @@ async function runVerification() {
       .map(([type, count]) => `${type}=${count}`)
       .join(' ');
     const message = hasBreaks
-      ? `审计链周期核验发现 ${report.breaks} 处断裂（${breakdown}），扫描 ${report.total} 条`
+      ? `审计链周期核验发现 ${report.breaks} 处断裂（${breakdown}），扫描 ${report.total} 条${hashStrippedOpsHint(report)}`
       : `审计链周期核验发现 ${gapCount} 条哈希计算失败的无哈希记录（链上缺口，非篡改）`;
 
     lastAlertFingerprint = fingerprint;

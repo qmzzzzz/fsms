@@ -290,6 +290,56 @@ describe('C. auditChainMonitor：周期核验与噪声治理', () => {
     expect(sendSpy.mock.calls[0][1]).toBe('high');
   });
 
+  /** 造一个「hash_mismatch 而非 hash_stripped」的真实断裂（父链仍相连，只哈希算错） */
+  function tamperedHashFixture() {
+    const a = buildDoc(null, { action: 'a' });
+    const b = buildDoc(a, { action: 'b' });
+    const c = buildDoc(b, { action: 'c' });
+    c.hash = computeHash('deadbeef', canonicalPayload(c, c.hashVersion));
+    return [c, b, a];
+  }
+
+  test('断裂告警文案按类型指认：有 hash_stripped 才提链锁降级窗口，纯 hash_mismatch 不提', async () => {
+    // 正例：人为抹哈希（stripByAttacker ⇒ 无 hashFailure 标记）
+    jest.spyOn(AuditLogModel, 'find').mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        limit: jest
+          .fn()
+          .mockReturnValue({ lean: jest.fn().mockResolvedValue(brokenChainFixture()) }),
+      }),
+    });
+    const sendSpy = jest.spyOn(securityAlert, 'sendNotification').mockResolvedValue();
+
+    await auditChainMonitor.runVerification();
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const strippedMsg = sendSpy.mock.calls[0][2];
+    // 计数形态仍在（否则运维看不到规模）
+    expect(strippedMsg).toContain('hash_stripped=1');
+    // #19 选项②：同形不同因，必须点名，否则读者按字面读成"已确认有人抹哈希"
+    expect(strippedMsg).toContain('链锁降级窗口');
+    // 指认必须落到可检索的日志词上，不是一句"去查日志"
+    expect(strippedMsg).toContain('AUDIT_CHAIN_LOCK_TIMEOUT_MS 非法');
+  });
+
+  test('断裂告警文案：纯 hash_mismatch 不得被追加链锁降级指认（指认不是万能膏药）', async () => {
+    jest.spyOn(AuditLogModel, 'find').mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        limit: jest
+          .fn()
+          .mockReturnValue({ lean: jest.fn().mockResolvedValue(tamperedHashFixture()) }),
+      }),
+    });
+    const sendSpy = jest.spyOn(securityAlert, 'sendNotification').mockResolvedValue();
+
+    await auditChainMonitor.runVerification();
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const mismatchMsg = sendSpy.mock.calls[0][2];
+    expect(mismatchMsg).toContain('hash_mismatch=1');
+    expect(mismatchMsg).not.toContain('链锁降级窗口');
+  });
+
   test('单轮闸门：上一轮未结束时本轮跳过并计数', async () => {
     let resolveFind;
     const pending = new Promise((r) => {
