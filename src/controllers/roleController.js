@@ -233,6 +233,18 @@ const updateRole = asyncHandler(async (req, res) => {
   }
 
   logger.info(`角色已更新：${role.name}`);
+
+  // #9：另两个写路径（createRole / deleteRole）都发了广播，唯独 updateRole 只失效
+  // 进程内缓存——于是「改角色名/层级/停用」这一路前端拿不到实时刷新，RoleView 要等
+  // 下一次自然重拉。缓存失效口径（P1-14 那两步）本身没漏，此处只补缺失的那半块，
+  // 属可用性/一致性，不碰越权面。事件名与 websocketService.emitRoleUpdate 的出站名
+  // 一致（复数 updated），前端 RoleView.vue:392 监听同一个。
+  emitWebSocketEvent(req, 'role-updated', {
+    action: 'updated',
+    roleId: role._id,
+    roleName: role.name,
+    timestamp: new Date().toISOString(),
+  });
   return ApiResponse.success(res, updatedRole, '角色更新成功');
 });
 

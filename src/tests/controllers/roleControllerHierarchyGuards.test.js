@@ -1070,4 +1070,31 @@ describe('roleController 覆盖率补齐', () => {
       expect.objectContaining({ type: 'role-deleted' })
     );
   });
+
+  test('updateRole: 成功改写自定义角色 ⇒ 广播 role-updated 并带上被改角色身份（#9 补的另一半）', async () => {
+    const updRole = await Role.create({
+      name: '待改_RCG',
+      code: `UPD_RCG_${stamp.toUpperCase()}`,
+      level: 2,
+      isBuiltIn: false,
+    });
+    const wsService = app.get('wsService');
+    wsService.emitRoleUpdate.mockClear();
+
+    const res = await authed(superToken)
+      .put(`/api/roles/${updRole._id}`)
+      .send({ name: '已改_RCG', description: '#9 广播对账' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message).toContain('角色更新成功');
+    // #9 之前：create/delete 都发广播，唯独 update 只失效进程内缓存 ⇒
+    // 「改角色名/层级/停用」这一路前端拿不到实时刷新。
+    expect(wsService.emitRoleUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'role-updated' })
+    );
+    // 载荷必须带身份：只报"有事发生"会让前端不知道该重拉谁
+    const payload = wsService.emitRoleUpdate.mock.calls.at(-1)[0];
+    expect(String(payload.roleId)).toBe(String(updRole._id));
+    expect(payload.roleName).toBe('已改_RCG');
+  });
 });
