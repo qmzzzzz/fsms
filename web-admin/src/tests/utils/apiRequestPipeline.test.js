@@ -1178,7 +1178,7 @@ describe('请求拦截器', () => {
 
   test('默认取消原因可观测；无在途请求时为零计数', async () => {
     // 防退化：默认原因丢失（调试时无法区分取消来源）；空表时误报计数
-    const { apiClient, cancelAllPendingRequests } = await loadAll()
+    const { apiClient, cancelAllPendingRequests, i18n } = await loadAll()
     expect(cancelAllPendingRequests()).toEqual({ cancelled: 0, kept: 0 })
     const inflight = []
     apiClient.defaults.adapter = (config) => {
@@ -1188,7 +1188,12 @@ describe('请求拦截器', () => {
     const p = apiClient.get('/slow').catch((e) => e)
     await waitUntil(() => inflight.length === 1)
     cancelAllPendingRequests()
-    expect(inflight[0].signal.reason).toBe('路由切换，取消在途请求')
+    // 第 34 轮 L2：默认原因走 i18n（loadAll 固定 en-US，硬编码中文此处即红）；
+    // 顺带钉住 en-US 词条值本身，防止词表被误改成别的文案
+    expect(i18n.global.t('common.routeChangeCancel')).toBe(
+      'Route change, cancelling in-flight requests'
+    )
+    expect(inflight[0].signal.reason).toBe(i18n.global.t('common.routeChangeCancel'))
     await p
   })
 

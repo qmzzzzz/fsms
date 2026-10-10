@@ -26,7 +26,7 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
 import { defineComponent, h, ref } from 'vue'
 import { mountComponent, flush, waitFor } from '../helpers/componentHarness'
-import { useAuthStore } from '@/store'
+import { useAuthStore, useAppStore } from '@/store'
 import i18n from '@/i18n'
 
 const optionCalls = []
@@ -125,6 +125,7 @@ const mountCharts = async (options = {}) => {
     alarmsReject = null,
     devicesReject = null,
     locale = 'zh-CN',
+    theme = null,
   } = options
 
   getAlarms.mockReset()
@@ -139,15 +140,23 @@ const mountCharts = async (options = {}) => {
 
   active = mountComponent(ChartsWrapper, {
     locale,
-    setupStore: (pinia) => useAuthStore(pinia).setPermissions(perms),
+    setupStore: (pinia) => {
+      useAuthStore(pinia).setPermissions(perms)
+      // 暗色首帧：挂载前即置主题，用于断言「首次初始化」就取暗色值
+      if (theme) useAppStore(pinia).setThemeMode(theme)
+    },
   })
   await flush(4)
   return active
 }
 
-/** 首个 setOption = 趋势图；第二个 = 饼图（组件固定按此顺序初始化） */
-const trendOption = () => optionCalls[0]
-const pieOption = () => optionCalls[1]
+/**
+ * 第 n 次初始化的 setOption：首个 = 趋势图；第二个 = 饼图（组件固定按此顺序，
+ * 且每次 initCharts 恰好各调一次 setOption——组件内仅此两处 setOption 调用点）。
+ * 带下标是为了区分「首次渲染」与「切主题/切语言后的重建」两份入参。
+ */
+const trendOption = (n = 0) => optionCalls[n * 2]
+const pieOption = (n = 0) => optionCalls[n * 2 + 1]
 
 beforeEach(() => {
   i18n.global.locale.value = 'zh-CN'
@@ -158,6 +167,9 @@ afterEach(() => {
     active.unmount()
     active = null
   }
+  // 主题偏好持久化在 localStorage：不清会把上个用例的暗色泄为下一个用例
+  // store 的初值（state() 直接读 themeMode），造成跨用例污染
+  localStorage.removeItem('themeMode')
 })
 
 describe('A. tooltip 的 HTML 转义（L7：类目名用户可控）', () => {
@@ -640,5 +652,37 @@ describe('D. 加载、并发与生命周期', () => {
     await new Promise((resolve) => setTimeout(resolve, 160))
     expect(chartInstances[0].resize).not.toHaveBeenCalled()
     expect(chartInstances[1].resize).not.toHaveBeenCalled()
+  })
+})
+
+describe('C. 暗色主题适配（H5：切主题后图表按新配色重建，不留浅色图表）', () => {
+  test('暗色下首次初始化：饼图描边/轴标签/网格线/空态文字取暗色值（四处硬编码浅色已收编）', async () => {
+    await mountCharts({ theme: 'dark' })
+    const trend = trendOption()
+    const pie = pieOption()
+    // 四处修复点逐一钉住（ReportView.vue:291 chartTheme 同口径）
+    expect(pie.series[0].itemStyle.borderColor).toBe('#0f172a')
+    expect(trend.xAxis.axisLabel.color).toBe('#94a3b8')
+    expect(trend.yAxis.splitLine.lineStyle.color).toBe('rgba(148, 163, 184, 0.25)')
+    // 空态文字（byDay/byType 均为空）：趋势图 graphic 与饼图 title
+    expect(trend.graphic[0].style.fill).toBe('#475569')
+    expect(pie.title.textStyle.color).toBe('#475569')
+  })
+
+  test('挂载后从亮色切到暗色：watch(isDarkMode) 驱动重建，新 setOption 取到暗色值', async () => {
+    const c = await mountCharts({})
+    // 先证明初始（亮色）是旧口径，否则下面的「变了」缺少对照、可能是恒真
+    expect(pieOption().series[0].itemStyle.borderColor).toBe('#ffffff')
+
+    const before = optionCalls.length
+    useAppStore(c.pinia).setThemeMode('dark')
+    await waitFor(() => optionCalls.length >= before + 2, {
+      message: '切主题后趋势图与饼图都重新 setOption',
+    })
+    // 第二次初始化的入参必须已按暗色重算：修复前组件不 watch isDarkMode，
+    // 「切主题」不触发数据刷新，用户看到的是暗色页面里一块浅色图表
+    expect(pieOption(1).series[0].itemStyle.borderColor).toBe('#0f172a')
+    expect(trendOption(1).xAxis.axisLabel.color).toBe('#94a3b8')
+    expect(trendOption(1).graphic[0].style.fill).toBe('#475569')
   })
 })

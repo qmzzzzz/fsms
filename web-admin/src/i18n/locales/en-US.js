@@ -180,6 +180,7 @@ export default {
     searchHintNavigate: 'to select',
     searchHintOpen: 'to open',
     searchHintClose: 'to close',
+    routeChangeCancel: 'Route change, cancelling in-flight requests',
   },
   nav: {
     dashboard: 'Dashboard',

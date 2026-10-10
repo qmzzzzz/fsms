@@ -503,11 +503,13 @@ const showExportDialog = () => {
 }
 
 // 报表类型 → 中文文件名前缀(与服务端 sheetName 保持一致)
+// 键必须与导出对话框里的 el-radio value 一一对应：当前只有 alarms/devices
+// 两个可选项（第 34 轮 L7：inspections/audit 两键曾因无对应 radio 永不可达，
+// 连 || 兜底都不会触发）。新增报表类型时两边同步加，并由 reportView.test.js
+// 的「radio 值 ↔ 本表键」对账闸盯住漂移。
 const exportTypeNames = computed(() => ({
   alarms: t('report.alarmReport'),
   devices: t('report.deviceReport'),
-  inspections: t('report.inspectionReport'),
-  audit: t('security.auditLogs'),
 }))
 
 // 本地时区日期串（YYYY-MM-DD）：date-picker 未设 value-format 时返回 Date 对象，

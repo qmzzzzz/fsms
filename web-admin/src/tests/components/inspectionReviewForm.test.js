@@ -255,3 +255,50 @@ describe('InspectionReviewForm 加载失败路径', () => {
     expect(active.errors).toEqual([])
   })
 })
+
+describe('InspectionReviewForm 时间展示的本地时区口径（H2）', () => {
+  /** 独立复刻本地墙钟串口径（不 import 被测的 utils/datetime，避免两边一起错） */
+  const localStamp = (iso) => {
+    const d = new Date(iso)
+    const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  }
+
+  test('actualStartTime/actualEndTime 渲染成本地时间，而非 ISO UTC 原样串', async () => {
+    const start = '2026-10-01T01:00:00.000Z'
+    const end = '2026-10-01T03:30:00.000Z'
+    const c = await open({
+      title: '季度巡检',
+      status: 'completed',
+      actualStartTime: start,
+      actualEndTime: end,
+      findings: [],
+    })
+    const info = textOf(c.findAll('.el-alert')[0])
+    // 修复前原样插值：东八区用户看到 01:00，而真实本地时间是 09:00
+    expect(info).not.toContain('T01:00:00.000Z')
+    expect(info).not.toContain('T03:30:00.000Z')
+    expect(info).toContain(localStamp(start))
+    expect(info).toContain(localStamp(end))
+    // 两个时刻之间必须是「 至 」连接，且都已完成格式化（不是只有一个走了 formatTime）
+    expect(info).toContain(`${localStamp(start)} 至 ${localStamp(end)}`)
+    expect(c.errors).toEqual([])
+  })
+
+  test('缺值/不可解析时不渲染 undefined 或 Invalid Date', async () => {
+    const c = await open({
+      title: '季度巡检',
+      status: 'completed',
+      actualStartTime: null,
+      actualEndTime: 'not-a-date',
+      findings: [],
+    })
+    const info = textOf(c.findAll('.el-alert')[0])
+    expect(info).not.toContain('undefined')
+    expect(info).not.toContain('Invalid')
+    expect(info).not.toContain('not-a-date')
+    // 两端都回退成 '-'，且仍被「至」连接（折叠空白后是 '- 至 -'）
+    expect(info).toContain('- 至 -')
+    expect(c.errors).toEqual([])
+  })
+})

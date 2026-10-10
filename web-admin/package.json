@@ -21,7 +21,6 @@
     "admin",
     "vue"
   ],
-  "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {

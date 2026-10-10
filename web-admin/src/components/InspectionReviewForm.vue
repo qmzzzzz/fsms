@@ -13,8 +13,9 @@
         <div>{{ $t('inspection.inspectionTitle') }}：{{ inspectionData.title }}</div>
         <div>{{ $t('inspection.ownerLabel') }}：{{ inspectionAssignedNames }}</div>
         <div>
-          {{ $t('inspection.actualStartTime') }}：{{ inspectionData.actualStartTime }} 至
-          {{ inspectionData.actualEndTime }}
+          {{ $t('inspection.actualStartTime') }}：{{ formatTime(inspectionData.actualStartTime) }}
+          至
+          {{ formatTime(inspectionData.actualEndTime) }}
         </div>
         <div>{{ $t('inspection.result') }}：{{ resultLabel }}</div>
       </el-alert>
@@ -85,6 +86,9 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api, isCanceledError } from '@/utils/api'
 import { useLatestRequest } from '@/composables/useLatestRequest'
+// 本地时区口径（O-3 单一事实来源）：直接插值会把 ISO UTC 串原样渲染，
+// 东八区 09:00 显示成 01:00 —— InspectionView.vue:94-96 同一修法
+import { formatTime } from '@/utils/datetime'
 
 const { t } = useI18n()
 

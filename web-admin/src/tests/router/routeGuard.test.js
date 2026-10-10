@@ -17,6 +17,9 @@
  *   C. onError 的 chunk 加载失败恢复：非 chunk 错误不得触发恢复、同源资源强制
  *      重取、15s 窗口防刷新风暴、跨域资源不代取、BASE_URL 子路径前缀、
  *      fetch 失败仍兜底重载、sessionStorage 不可用（隐私模式）不阻断。
+ *   D. scrollBehavior 的三分支与优先级（第 34 轮 L3）：push 导航回顶、
+ *      浏览器前进/后退沿用保存位置、hash 锚点滚动，以及 savedPosition
+ *      压过 hash 的优先级（三者互斥，分支顺序即优先级）。
  *
  * 测试手段说明（为什么可以这样测）：
  *   - 守卫与 onError 处理器无法从模块外部取得，本文件在 createRouter 上做了一层
@@ -377,6 +380,67 @@ describe('B. 真实导航（守卫 + 路由表 + 重定向链的联合行为）'
   })
 })
 
+describe('D. 标签页标题（H6：登录后不再永停「用户登录」）', () => {
+  /**
+   * 导航落定与 afterEach 补写标题的顺序：vue-router 先更新 currentRoute、
+   * 再跑 afterEach 钩子，故「路径已到位」不等于「标题已写入」。负例里给
+   * 「错误的 afterEach」留足轮询窗口，避免因为钩子还没跑而假绿。
+   */
+  const drain = async (rounds = 20) => {
+    for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+
+  beforeEach(async () => {
+    mockStore.isAuthenticated = true
+    mockStore.permissions = ['device:read']
+    document.title = ''
+    // 复位到无 meta 的公开路由：既保证「起点 ≠ 目标」，也给出干净的标题基线
+    // （/register 不带 titleKey/title，afterEach 对它早退，不动标题）
+    await router.replace('/register').catch(() => {})
+    await settle(() => router.currentRoute.value.path === '/register', '复位起点 /register')
+  })
+
+  afterEach(() => {
+    document.title = ''
+    mockStore.isAuthenticated = false
+    mockStore.permissions = []
+  })
+
+  test('导航到带 titleKey 的页面：document.title = 页面名 - 应用名', async () => {
+    await push('/devices')
+    await settle(
+      () => document.title === '设备管理 - 消防安全管理系统',
+      '等标题写入（nav.devices + common.appTitle）'
+    )
+    expect(document.title).toBe('设备管理 - 消防安全管理系统')
+  })
+
+  test('hidden 路由（/login 无 meta）：不覆盖视图自管的标题', async () => {
+    // 未登录才能落在 /login（已登录会被守卫送回家页，见 B 组）
+    mockStore.isAuthenticated = false
+    // 视图自己写的标题（LoginView 口径：消防安全管理系统 - 用户登录）
+    document.title = '消防安全管理系统 - 用户登录'
+    await push('/login')
+    await settle(() => router.currentRoute.value.path === '/login', '等 /login')
+    await drain()
+    // 修复前全仓无人写 document.title；若 afterEach 不判 meta 直接覆盖，
+    // 登录页标题会被抹成「undefined - …」或上一页的标题
+    expect(document.title).toBe('消防安全管理系统 - 用户登录')
+  })
+
+  test('切换语言后标题跟着重写（文案物化在 document.title 里，不会随 locale 自愈）', async () => {
+    await push('/devices')
+    await settle(() => document.title === '设备管理 - 消防安全管理系统', '等中文标题写入')
+    i18n.global.locale.value = 'en-US'
+    await settle(
+      () => document.title === 'Devices - Fire Safety Management System',
+      '等英文标题重写'
+    )
+    expect(document.title).toBe('Devices - Fire Safety Management System')
+    i18n.global.locale.value = 'zh-CN'
+  })
+})
+
 describe('C. chunk 加载失败恢复（onError）', () => {
   test('非 chunk 类错误一律不触发恢复（否则任何 JS 异常都会变成整页刷新）', async () => {
     const fake = stubLocation()
@@ -526,5 +590,43 @@ describe('C. chunk 加载失败恢复（onError）', () => {
       spy.mockRestore()
     }
     expect(fake.replace).toHaveBeenCalledWith('/about')
+  })
+})
+
+describe('D. scrollBehavior 三分支与优先级（第 34 轮 L3）', () => {
+  /**
+   * 背景：createRouter 曾漏配 scrollBehavior，路由切换后视口停留旧滚动位——
+   * 设备/告警等长列表滚到深处后跳详情再返回，页面看着「没变」，用户以为点击
+   * 失效；同时 hash 锚点失效、浏览器后退丢位置。三条规则互斥，优先级即实现
+   * 里的分支顺序：savedPosition > hash > 回顶。
+   * 防退化方向：整个字段被删（typeof 断言红）、分支顺序被调（优先级用例红）、
+   * 某一支返回错值（对应用例红）。
+   */
+  const scrollBehavior = () => router.options.scrollBehavior
+
+  test('scrollBehavior 已注册到 createRouter（整字段缺失即红）', () => {
+    expect(typeof scrollBehavior()).toBe('function')
+  })
+
+  test('普通 push 导航回到顶部（长列表不残留旧滚动位）', () => {
+    expect(scrollBehavior()({ hash: '' }, { hash: '' }, null)).toEqual({ top: 0 })
+  })
+
+  test('浏览器前进/后退沿用保存的位置（原样返回同一引用）', () => {
+    const saved = { top: 1200, left: 0 }
+    expect(scrollBehavior()({ hash: '' }, { hash: '' }, saved)).toBe(saved)
+  })
+
+  test('hash 锚点滚动到对应元素（带 # 的 push 不回顶）', () => {
+    expect(scrollBehavior()({ hash: '#device-42' }, { hash: '' }, null)).toEqual({
+      el: '#device-42',
+    })
+  })
+
+  test('优先级：savedPosition 压过 hash（后退到带锚点的路由不跳锚）', () => {
+    // 防退化：把 hash 分支提到 savedPosition 之前 → 后退时先跳锚再恢复位置，
+    // 表现为「返回后页面自己滚到锚点，用户丢失原来的浏览位置」
+    const saved = { top: 300 }
+    expect(scrollBehavior()({ hash: '#alarm-7' }, { hash: '' }, saved)).toBe(saved)
   })
 })

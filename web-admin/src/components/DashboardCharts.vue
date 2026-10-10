@@ -73,6 +73,7 @@ import { usePermission } from '@/composables/usePermission'
 import { api } from '@/utils/api'
 // 类型/状态 → i18n 标签映射（O-1 抽取的单一事实来源，与 ReportView 共用）
 import { makeDeviceTypeLabels } from '@/utils/labelMaps'
+import { useAppStore } from '@/store'
 // 本地日期串（YYYY-MM-DD）：与后端 byDay 的业务时区聚合口径对齐，
 // 避免 toISOString 的 UTC 日期在东八区每天 0-8 点与图表标签错位一天
 // 本地日期串已抽取至 utils/datetime.js 统一口径（O-3）
@@ -80,11 +81,30 @@ import { localDateStr as toLocalDateStr } from '@/utils/datetime'
 
 const { t, locale } = useI18n()
 const { hasPerm } = usePermission()
+const appStore = useAppStore()
 // 图表数据全部来自 report 接口，无该权限时整个图表区不渲染（而非渲染空图表）
 const canShowCharts = () => hasPerm('report:read')
 
 const trendChartRef = ref(null)
 const pieChartRef = ref(null)
+
+/**
+ * 图表暗色适配（H5，与 ReportView.vue:291 chartTheme 同一口径）。
+ *
+ * 此前本组件全文件无 isDarkMode 消费点：饼图描边、轴标签色、空态文字、
+ * 网格线四处硬编码浅色，切到暗色后图表保持浅色直到下次数据刷新才重建——
+ * 而「切主题」本身不触发 load()，于是用户看到的是暗色页面里一块浅色图表。
+ * ReportView 的 P2-8 已把同类轴标签色收进 chartTheme，这是兄弟组件漏修的那一处。
+ */
+const chartTheme = () => {
+  const dark = appStore.isDarkMode
+  return {
+    borderColor: dark ? '#0f172a' : '#ffffff',
+    splitLineColor: dark ? 'rgba(148, 163, 184, 0.25)' : '#e2e8f0',
+    noDataColor: dark ? '#475569' : '#cbd5e1',
+    axisLabelColor: dark ? '#94a3b8' : '#64748b',
+  }
+}
 let trendChart = null
 let pieChart = null
 
@@ -94,6 +114,8 @@ const initCharts = (alarmTrendData, deviceTypeData, failed = {}) => {
   // "这几天没有报警"——值班界面把一次失败读成一次安全。失败侧改说"加载失败"，
   // 图仍照常初始化（不留白屏，那是本组件既有的契约）。
   const emptyText = (isFailed) => (isFailed ? t('messages.loadFailed') : t('common.noData'))
+  // 每次 initCharts 都整体重建实例（dispose + init），故按当前主题现取一次即可
+  const theme = chartTheme()
   if (!trendChartRef.value || !pieChartRef.value) return
 
   // 销毁旧图表
@@ -123,13 +145,14 @@ const initCharts = (alarmTrendData, deviceTypeData, failed = {}) => {
       boundaryGap: false,
       axisLabel: {
         rotate: 0,
+        color: theme.axisLabelColor,
       },
     },
     yAxis: {
       type: 'value',
       // 计数数据不出小数刻度（0.2/0.6 个报警没有意义）
       minInterval: 1,
-      splitLine: { show: true, lineStyle: { type: 'dashed' } },
+      splitLine: { show: true, lineStyle: { type: 'dashed', color: theme.splitLineColor } },
     },
     series: [
       {
@@ -164,7 +187,7 @@ const initCharts = (alarmTrendData, deviceTypeData, failed = {}) => {
               text: emptyText(failed.trend),
               fontSize: 14,
               // Canvas 渲染器无法解析 CSS 变量，使用主题灰的十六进制值
-              fill: '#64748b',
+              fill: theme.noDataColor,
             },
           },
         ]
@@ -184,7 +207,7 @@ const initCharts = (alarmTrendData, deviceTypeData, failed = {}) => {
       text: emptyText(failed.pie),
       left: 'center',
       top: 'center',
-      textStyle: { fontSize: 14, color: '#64748b' },
+      textStyle: { fontSize: 14, color: theme.noDataColor },
     },
     tooltip: {
       trigger: 'item',
@@ -209,7 +232,7 @@ const initCharts = (alarmTrendData, deviceTypeData, failed = {}) => {
         avoidLabelOverlap: false,
         itemStyle: {
           borderRadius: 6,
-          borderColor: '#fff',
+          borderColor: theme.borderColor,
           borderWidth: 2,
         },
         label: {
@@ -353,6 +376,16 @@ const load = () => {
 watch(locale, () => {
   if (trendChartRef.value) load()
 })
+
+// 主题切换后按新配色重建（H5）。Canvas 渲染器读不到 CSS 变量，颜色只能在
+// setOption 时按主题现算；而「切主题」不触发数据刷新，故这里显式驱动一次。
+// 与 locale 切换共用 load()（含 in-flight 复用），不新增请求形状。
+watch(
+  () => appStore.isDarkMode,
+  () => {
+    if (trendChartRef.value) load()
+  }
+)
 
 onMounted(() => {
   window.addEventListener('resize', throttledResize, { passive: true })

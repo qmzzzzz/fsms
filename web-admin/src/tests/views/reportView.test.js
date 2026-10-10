@@ -9,6 +9,8 @@
  * 本套件逐条钉住。echarts 在 jsdom 下无 canvas，故用 vi.mock 替身（本文件不测图表绘制）。
  */
 import { describe, test, expect, vi, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { mountComponent, click, flush, waitFor } from '../helpers/componentHarness'
 import { useAuthStore } from '@/store'
 
@@ -344,5 +346,67 @@ describe('ReportView 导出完整性提示', () => {
     await runExport({ 'content-type': 'application/vnd.ms-excel' })
     expect(ElMessage.warning).not.toHaveBeenCalled()
     expect(ElMessage.success).toHaveBeenCalledTimes(1)
+  })
+})
+describe('ReportView 导出文件名前缀对账（第 34 轮 L7）', () => {
+  /**
+   * 背景：exportTypeNames 曾有 inspections/audit 两个键，而导出对话框的
+   * el-radio 只有 alarms/devices——那两个键永不可达，连 || t('common.export')
+   * 兜底都不会触发（文件名前缀静默少两类，用户拿到的文件叫「导出_日期.xlsx」）。
+   * 本组钉住两个方向：
+   *  1. 行为向：每个 radio 可选项导出的文件名前缀都是对应报表名；
+   *  2. 静态向：exportTypeNames 的键与 el-radio 的 value 集合相等
+   *     （新增 radio 忘加键、或键失去对应 radio，都会红）。
+   */
+  const captureDownload = async (pickType) => {
+    exportReport.mockReset()
+    ElMessage.success.mockReset()
+    exportReport.mockResolvedValue({
+      data: new Blob(['xlsx'], { type: 'application/vnd.ms-excel' }),
+    })
+    const c = await open()
+    const dlg = await openDialog(c)
+    if (pickType) {
+      const radio = Array.from(dlg.querySelectorAll('.el-radio')).find(
+        (r) => r.querySelector('input[type="radio"]').value === pickType
+      )
+      expect(radio, `导出对话框缺少 ${pickType} 单选项`).toBeTruthy()
+      radio
+        .querySelector('input[type="radio"]')
+        .dispatchEvent(new window.Event('change', { bubbles: true }))
+      await flush(6)
+    }
+    const clicked = []
+    const origCreate = document.createElement.bind(document)
+    const createSpy = vi.spyOn(document, 'createElement').mockImplementation((tag) => {
+      const el = origCreate(tag)
+      if (tag === 'a') el.click = () => clicked.push(el.download)
+      return el
+    })
+    click(confirmBtn())
+    await waitFor(() => clicked.length === 1, { message: '导出完成并创建下载链接' })
+    createSpy.mockRestore()
+    return clicked[0]
+  }
+
+  test('alarms：文件名前缀是报警报表名（不落 common.export 兜底）', async () => {
+    const download = await captureDownload(null)
+    expect(download.startsWith(i18n.global.t('report.alarmReport') + '_')).toBe(true)
+    expect(download).not.toContain(i18n.global.t('common.export'))
+  })
+
+  test('devices：文件名前缀是设备报表名（切类型后前缀跟着换）', async () => {
+    const download = await captureDownload('devices')
+    expect(download.startsWith(i18n.global.t('report.deviceReport') + '_')).toBe(true)
+    expect(download).not.toContain(i18n.global.t('common.export'))
+  })
+
+  test('静态对账：exportTypeNames 键 ↔ el-radio value 集合相等（两个方向都拦）', () => {
+    const src = readFileSync(resolve(__dirname, '../../views/ReportView.vue'), 'utf8')
+    const mapBlock = src.match(/const exportTypeNames = computed\(\(\) => \({([\s\S]*?)\n\}\)/)[1]
+    const mapKeys = [...mapBlock.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]).sort()
+    const radioValues = [...src.matchAll(/<el-radio value="(\w+)">/g)].map((m) => m[1]).sort()
+    expect(radioValues).toEqual(['alarms', 'devices'])
+    expect(mapKeys).toEqual(radioValues)
   })
 })

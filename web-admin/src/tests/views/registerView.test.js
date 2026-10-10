@@ -385,3 +385,100 @@ describe('静态不变量（jsdom 无法断言的 CSS 规则）', () => {
     //   <AuthPrefs /> 挂载（注册页 / 登录页各一处）→ 注释掉后分别有 3 例 / 1 例变红。
   })
 })
+
+describe('RegisterView 分步导航与提交的同步锁（H1 / H7）', () => {
+  /** 当前可见步骤下标：三个面板用 v-show 控制，未显示的 display:none */
+  const visibleStep = (c) =>
+    c.findAll('.register-step').findIndex((el) => el.style.display !== 'none')
+
+  const fillStepOne = (c) => {
+    typeInto(c, 'username', 'zhangsan')
+    typeInto(c, 'email', 'zhangsan@example.com')
+    typeInto(c, 'password', STRONG)
+    typeInto(c, 'confirmPassword', STRONG)
+  }
+
+  const nextButton = (c) => c.findAll('button').find((b) => b.textContent.includes('下一步'))
+
+  test('正对照：单击「下一步」前进一步（证明校验链路在 jsdom 里真的通，不是真空断言）', async () => {
+    const c = await openRegister()
+    fillStepOne(c)
+    await flush(6)
+    expect(visibleStep(c)).toBe(0)
+    click(nextButton(c))
+    await flush(30)
+    expect(visibleStep(c)).toBe(1)
+    expect(c.errors).toEqual([])
+  })
+
+  test('H1：校验窗口内连点两次仍只前进一步，不得 0→2 落进确认步', async () => {
+    const c = await openRegister()
+    fillStepOne(c)
+    await flush(6)
+    // 同一 tick 内连点两次：两次都进入 validateStep 的 await，恢复后各自 +1。
+    // 修复前实测 activeStep 0→2——用户没填真实姓名/手机就进了信息核对步，
+    // 而身份步骤的字段一个都没校验过。
+    click(nextButton(c))
+    click(nextButton(c))
+    await flush(40)
+    expect(visibleStep(c)).toBe(1)
+    expect(c.errors).toEqual([])
+  })
+
+  /** 开验证码并走到第 3 步：H7 的可观测面是验证码是否被重载 */
+  const openRegisterWithCaptcha = async () => {
+    getCaptchaStatus.mockResolvedValue({ data: { data: { registerCaptchaEnabled: true } } })
+    getCaptcha.mockResolvedValue({ data: { data: { captchaId: 'c1', svg: '<svg/>' } } })
+    active = mountComponent(RegisterView, { initialRoute: '/register', routes: ROUTES })
+    await waitFor(() => getCaptchaStatus.mock.calls.length > 0, { message: '验证码状态查询' })
+    await flush(8)
+    return active
+  }
+
+  test('H7 正对照：注册请求失败仍会换新验证码（一次性消费语义没被改坏）', async () => {
+    const c = await openRegisterWithCaptcha()
+    fillStepOne(c)
+    await flush(6)
+    click(nextButton(c))
+    await flush(30)
+    // 第 2 步字段后端均 optional，空值即可通过
+    click(nextButton(c))
+    await flush(30)
+    expect(visibleStep(c)).toBe(2)
+    typeInto(c, 'captcha', 'a1b2')
+    await flush(4)
+    const before = getCaptcha.mock.calls.length
+    expect(before).toBeGreaterThan(0)
+    register.mockRejectedValue(new Error('boom'))
+    click(c.findAll('button').find((b) => b.textContent.includes('提交注册')))
+    await flush(40)
+    // 请求失败 ⇒ 必须重载验证码（一次性消费）
+    expect(getCaptcha.mock.calls.length).toBeGreaterThan(before)
+    expect(c.errors).toEqual([])
+  })
+
+  test('H7：整表校验失败不清验证码——与请求失败分开处理', async () => {
+    const c = await openRegisterWithCaptcha()
+    fillStepOne(c)
+    await flush(6)
+    click(nextButton(c))
+    await flush(30)
+    click(nextButton(c))
+    await flush(30)
+    expect(visibleStep(c)).toBe(2)
+    typeInto(c, 'captcha', 'a1b2')
+    await flush(4)
+    // 三个面板用 v-show 渲染、始终挂载：把已通过校验的第 1 步字段改坏，
+    // 让 onRegister 里的整表 validate() 必然 reject（这正是用户回退改错值的路径）
+    typeInto(c, 'username', 'x')
+    await flush(6)
+    const before = getCaptcha.mock.calls.length
+    click(c.findAll('button').find((b) => b.textContent.includes('提交注册')))
+    await flush(40)
+    // 修复前：validate() 的 reject 落进「任何失败都换验证码」的 catch，
+    // 用户刚填对的验证码被清掉并重载。修复后单独一层 try 后 return，不碰验证码。
+    expect(getCaptcha.mock.calls.length).toBe(before)
+    expect(c.find('#captcha').value).toBe('a1b2')
+    expect(c.errors).toEqual([])
+  })
+})

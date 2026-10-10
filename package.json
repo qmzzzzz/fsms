@@ -42,7 +42,6 @@
     "permission-control",
     "security"
   ],
-  "author": "",
   "license": "MIT",
   "dependencies": {
     "@sentry/node": "^7.100.0",

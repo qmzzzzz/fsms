@@ -184,6 +184,9 @@ export default {
     searchHintNavigate: '选择',
     searchHintOpen: '打开',
     searchHintClose: '关闭',
+    // abort 在途请求的默认原因：调试用，由 cancelAllPendingRequests 默认参数经
+    // t() 取用，避免硬编码中文（第 34 轮 L2）
+    routeChangeCancel: '路由切换，取消在途请求',
   },
   nav: {
     dashboard: '仪表盘',

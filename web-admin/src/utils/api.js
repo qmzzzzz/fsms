@@ -345,7 +345,7 @@ const UNCANCELABLE_METHODS = new Set(['post', 'put', 'patch', 'delete'])
 // 跳过「加载失败」提示（用户已到达新页面，弹假错误会训练用户忽略红框）
 export const isCanceledError = (e) => e?.code === 'ERR_CANCELED' || e?.name === 'CanceledError'
 
-export const cancelAllPendingRequests = (message = '路由切换，取消在途请求') => {
+export const cancelAllPendingRequests = (message = t('common.routeChangeCancel')) => {
   let cancelled = 0
   let kept = 0
   for (const [key, entry] of pendingControllers) {

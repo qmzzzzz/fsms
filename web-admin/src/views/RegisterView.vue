@@ -339,6 +339,10 @@ const loading = ref(false)
 // 连点时后面的点击早已越过 loading 判断（实测同一 tick 三次点击发出 3 个注册请求，
 // 第 2/3 次会因用户名重复而失败，用户先看到「注册成功」再连吃两个错误提示）。
 const submitting = ref(false)
+// 分步「下一步」的重入锁：与 submitting 同一理由，但服务另一条路径。validateStep
+// 内部 await validateField，校验窗口内的连点会各自读到同一个 activeStep，恢复后两次
+// 都 +1 => 0->2 直接落到确认步，用户没填身份步骤就注册了（实测复现）。
+const stepping = ref(false)
 const registerFormRef = ref(null)
 const activeStep = ref(0)
 
@@ -492,14 +496,21 @@ const {
 } = useStepTransition(activeStep)
 
 const nextStep = async () => {
-  if (!(await validateStep(activeStep.value))) {
-    ElMessage.warning(t('register.stepIncomplete'))
-    return
-  }
-  if (activeStep.value < steps.value.length - 1) {
-    stepDirection.value = 'forward'
-    activeStep.value += 1
-    beginStepTransition()
+  // 锁必须在 await 之前同步置位，否则拦不住校验窗口内的连点（同 submitting）
+  if (stepping.value) return
+  stepping.value = true
+  try {
+    if (!(await validateStep(activeStep.value))) {
+      ElMessage.warning(t('register.stepIncomplete'))
+      return
+    }
+    if (activeStep.value < steps.value.length - 1) {
+      stepDirection.value = 'forward'
+      activeStep.value += 1
+      beginStepTransition()
+    }
+  } finally {
+    stepping.value = false
   }
 }
 
@@ -553,8 +564,15 @@ const onRegister = async () => {
   submitting.value = true
   haptic(10)
   try {
-    // 提交前整表校验：分步校验只覆盖走过的步骤，用户可能通过回退跳过某步
-    await registerFormRef.value.validate()
+    // 提交前整表校验：分步校验只覆盖走过的步骤，用户可能通过回退跳过某步。
+    // 单独一层 try：它的 reject 不能落进下面「任何失败都换验证码」的分支——
+    // 整表校验失败与请求失败是两件事，前者该保留用户已填对的验证码
+    // （LoginView.vue 同一修法：validate() 包内层 catch 后 return，不碰验证码）
+    try {
+      await registerFormRef.value.validate()
+    } catch (_) {
+      return
+    }
 
     loading.value = true
 

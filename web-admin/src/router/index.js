@@ -3,6 +3,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { cancelAllPendingRequests } from '@/utils/api'
 import { useAuthStore } from '@/store'
 import { matchPermission } from '@/utils/permission'
+import { watch } from 'vue'
 import i18n from '@/i18n'
 
 const Layout = () => import('@/layout/index.vue')
@@ -196,5 +197,38 @@ router.beforeEach(async (to, from, next) => {
 
   next()
 })
+
+/**
+ * 标签页标题（H6）：登录后永停「…- 用户登录」的修法。
+ *
+ * LoginView 只在进入登录页时写一次 document.title（并 watch(locale) 重写），
+ * 之后无论跳到哪个页面都不再更新 ⇒ 用户整天看着「用户登录」。
+ * layout/index.vue:386 的 route.meta.titleKey 只服务菜单/面包屑，
+ * 与 document.title 是两件事，那边改了这边不会跟着动。
+ *
+ * 取值口径与 layout:386 逐字一致（titleKey 优先、meta.title 兜底）：
+ * 两处对同一条 route 必须读出同一个标题，否则菜单与标签页各说各话。
+ * login/register 是 hidden 路由、不带 meta，由各自视图自己管标题，这里不覆盖。
+ */
+let titledRoute = null
+const applyDocumentTitle = () => {
+  const meta = titledRoute?.meta
+  // hidden 路由（login/register）不带 meta，标题由各自视图自己管，这里不覆盖
+  if (!meta?.titleKey && !meta?.title) return
+  const page = meta.titleKey ? i18n.global.t(meta.titleKey) : meta.title
+  document.title = `${page} - ${i18n.global.t('common.appTitle')}`
+}
+
+router.afterEach((to) => {
+  titledRoute = to
+  applyDocumentTitle()
+})
+
+// 首屏（含刷新后直接落在某路由）没有 afterEach 可触发，用当前路由补一次
+titledRoute = router.currentRoute.value
+applyDocumentTitle()
+
+// 切语言后标题要跟着重写：文案物化在 document.title 里，不会随 locale 自愈
+watch(() => i18n.global.locale.value, applyDocumentTitle)
 
 export default router
