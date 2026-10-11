@@ -8,6 +8,10 @@
 
 ## [未发布]
 
+### 修 CI 真红：审计 action 对账闸补登 roleController updated 广播载荷（2026-10-11 · 678e211 漏登）
+
+> 678e211 给 updateRole 补 role-updated 广播时加了 action: 'updated' 载荷字段，但未同步 auditActionReconciliation 的 NOT_AUDIT_ACTION_LITERALS 排除清单（该闸要求每个 action 字面量要么有写入形态认领、要么逐条登记家族与出处；同文件 created/deleted 两条广播载荷均在册）。f4afd88 的 CI 止步于 lint ratchet 未跑到该步、f6bf4e7 早于 678e211，故此前未暴露。按既有机制补登（ws 家族，tally 5→6），并改准两处被 678e211 移动而过时的行号出处。
+
 ### 登录加密轨道安全收口七项（2026-10-10 · 外部审计 8 项发现逐项处置：限流漏配 / 对客预言机 / 信封不绑用途 / 公钥无钉扎 / strict 无生产收口 / PFS 未文档化 / dev 链存量 CVE）
 
 > 对登录口令 ECDH 密文轨（ADR-001）的一轮外部审计逐项修复。另有两项审计结论经核对已过期：nginx 边层 Permissions-Policy 与 transportSecurity 的 HTTPS 断言在受审版本前已落地，本次仅复核确认、无改动。

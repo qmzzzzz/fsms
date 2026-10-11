@@ -239,8 +239,14 @@ describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
    * 新增一条必须写清它为什么不是审计写入——这正是"排除"本来该有的成本。
    */
   const NOT_AUDIT_ACTION_LITERALS = [
-    ['src/controllers/roleController.js', 'created', 'ws', ':170 WebSocket 权限同步广播载荷'],
-    ['src/controllers/roleController.js', 'deleted', 'ws', ':274 同上'],
+    ['src/controllers/roleController.js', 'created', 'ws', ':173 WebSocket 权限同步广播载荷'],
+    ['src/controllers/roleController.js', 'deleted', 'ws', ':291 同上'],
+    [
+      'src/controllers/roleController.js',
+      'updated',
+      'ws',
+      ':243 同上（678e211 补的 updateRole 广播，非审计写入）',
+    ],
     ['src/controllers/rolePermissionController.js', 'permissions-cloned', 'ws', ':189/:199 同上'],
     ['src/controllers/rolePermissionController.js', 'permissions-updated', 'ws', ':269/:280 同上'],
     ['src/controllers/userController.js', 'roles-assigned', 'ws', ':763 同上'],
@@ -272,7 +278,7 @@ describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
       expect(why).toMatch(/:\d{2,}/); // 出处必须落到行号
       tally[family] += 1;
     });
-    expect(tally).toEqual({ ws: 5, helmet: 1, subdoc: 10 });
+    expect(tally).toEqual({ ws: 6, helmet: 1, subdoc: 10 });
   });
 
   /**
