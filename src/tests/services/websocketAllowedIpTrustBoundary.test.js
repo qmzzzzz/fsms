@@ -17,7 +17,7 @@
  *  2. **行为**用 allowedIPs 闸的实际返回值断言"伪造头买不到访问控制"，并配
  *     反向对照（经 nginx 的正常流量不得被误伤）——防止把闸做成恒拒绝。
  *  3. 第 3 组用例（2026-10-10 #24 R1 起改口径）：封禁面**已与准入面同柄**——HTTP 的
- *     checkIPBlacklist 与 WS 的封禁闸都改取 clientIpForSecurityDecision（security.js:590
+ *     checkIPBlacklist 与 WS 的封禁闸都改取 clientIpForSecurityDecision（security.js:685
  *     已换尺），公网对端 + 伪造 XFF 一律退回 socket 对端。本组改钉"WS 闸与 HTTP 侧查同一个
  *     安全裁决地址"：准入 / HTTP 封禁 / WS 封禁三处共用一把尺，不再有"封了 X 却拦不住 Y"。
  */

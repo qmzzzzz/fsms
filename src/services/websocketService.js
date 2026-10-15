@@ -86,7 +86,7 @@ const resolveHandshakeClientIP = (handshake, hops) => {
  * websocketAuthScope.test.js 用真实 HTTP 请求钉住，故本函数不再重复那一层。
  *
  * 封禁（黑名单）判定自 2026-10-10 #24 R1 起也走本函数：HTTP 侧 checkIPBlacklist 改用
- * clientIpForSecurityDecision（security.js:590），WS 封禁闸随之改用本函数——两侧仍同址，
+ * clientIpForSecurityDecision（security.js:685），WS 封禁闸随之改用本函数——两侧仍同址，
  * 且同取安全裁决尺，由 websocketHandshakeIpBan.test.js / websocketAllowedIpTrustBoundary.test.js 钉。
  *
  * @param {object} handshake socket.handshake

@@ -105,7 +105,7 @@ server {
     # ===== 全套安全响应头 =====
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Referrer-Policy "same-origin" always;
     # 与后端 helmet xssFilter 口径一致：主动禁用有绕过历史的旧版 XSS Auditor（值 0），
     # XSS 防护由 CSP + 框架转义承担；现代浏览器已忽略该头，仅为兼容性工具下发
     add_header X-XSS-Protection "0" always;
@@ -172,7 +172,7 @@ server {
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
-        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Referrer-Policy "same-origin" always;
         add_header X-XSS-Protection "0" always;
         add_header Cross-Origin-Opener-Policy "same-origin" always;
         add_header Cross-Origin-Resource-Policy "same-origin" always;
@@ -214,7 +214,7 @@ server {
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
-        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Referrer-Policy "same-origin" always;
         add_header X-XSS-Protection "0" always;
         add_header Cross-Origin-Opener-Policy "same-origin" always;
         add_header Cross-Origin-Resource-Policy "same-origin" always;

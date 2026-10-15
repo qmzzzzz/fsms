@@ -128,7 +128,10 @@ const buildSecurityHeaders = (mode) => {
     ].join('; '),
     'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
     'X-Content-Type-Options': 'nosniff',
-    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    // 2026-10-15：与后端 helmet（src/middleware/security.js）及 nginx.conf.example
+    // 三份副本统一收紧到 same-origin（此前是 FSMS 唯一比上游基线松的响应头）。
+    // 五份副本取值一致性由 src/tests/middleware/securityHeaderPolicyHardening.test.js 钉住。
+    'Referrer-Policy': 'same-origin',
     'Permissions-Policy':
       'camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()',
     // L8：X-XSS-Protection 已废弃（现代浏览器忽略且历史版本可被绕过），移除；

@@ -8,6 +8,26 @@
 
 ## [未发布]
 
+### 响应头加固：X-XSS-Protection 测试守护 + Trusted Types 灰度 + CORP/Referrer-Policy 口径统一到 same-origin（2026-10-15 · 按 `deliverables/安全加固待办清单-2026-10-15.md` 的 P1+P2 逐项落地）
+
+> 清单 P1（Trusted Types report-only）与 P2（COEP 决策记录 / CORP / Referrer-Policy）四项全部落地；P3 的 CSRF 双保险按清单自陈「不做也不构成缺口；仅在明确有子域/多应用共站时做」未做（本仓 nginx 单 `server_name`、无子域前端，已复核）。
+>
+> 落地过程中发现**三处清单本身没写准的地方**，一并记录：
+> ① 清单给的 Trusted Types 写法（`useDefaults:false` + 只写 `require-trusted-types-for`）在 helmet 7.2.0 下**构造期直接抛错**——`normalizeDirectives()` 要求「必须有 default-src，除非显式 `dangerouslyDisableDefaultSrc`」，且该检查对 `reportOnly` 一视同仁（回源 `node_modules/helmet/index.cjs:90-92`，已实测复现）。照抄会让整个 app 起不来。已改为显式摘掉 `default-src`，下发结果就是单条 `require-trusted-types-for 'script'`，不会把 helmet 的全套默认指令拖进灰度策略制造噪音。
+> ② Referrer-Policy 实际有**五份**副本，清单只列了 4 处，漏了 `web-admin/vite.config.js` 的 `buildSecurityHeaders`（vite dev/preview 这条托管路径）。五份已一并改，并由新用例钉住取值一致。
+> ③ 顺带发现 `src/tests/controllers/roleControllerHierarchyGuards.test.js` 中「角色/权限审计全部由全局中间件派生（`utils/auditMeta.js:85-103` → `middleware/security.js:648`；挂载 `src/app.js:325-326`）」这句的**三个锚点全部指错位置**（其中 `security.js:648` 在 HEAD 就已落在 `checkIPBlacklist` 的 `IP_BLOCKED` 行，内容保持式迁移只会把它一路带下来）。已按真实落点更正为派生定义 / 派生调用 / 中间件挂载。
+
+| 项 | 内容 |
+| --- | --- |
+| Trusted Types 灰度（P1） | `src/middleware/security.js` 新增独立中间件 `trustedTypesReportOnly`，挂到 `applyResponseHardening()` 的 `reportingEndpoints` 之后。只写 `Content-Security-Policy-Report-Only: require-trusted-types-for 'script'`，与主 CSP 头名不同、互不覆盖；`CSP_REPORT_ENABLED=true` 时附带 `report-uri`/`report-to`（复用既有 `/csp-report` 与 `csp-endpoint`），关闭时一条多余指令都不下发。**只上报不阻断**，对现有行为零影响 |
+| COEP 决策记录（P2） | `crossOriginEmbedderPolicy: false` 处补注释：为何关闭（无跨源隔离需求；开启会拦掉 Swagger UI 自注入资源、Google Fonts、导出 `blob:` 下载）、什么条件下应重新评估（含「`credentialless` 不是免费开关」这条反面证据）。此前全仓无任何 COEP 决策留痕 |
+| CORP 收紧（P2） | `crossOriginResourcePolicy` 由 `same-site` → `same-origin`，与 nginx 三份副本、`web-admin/vite.config.js` 及 helmet 7 默认值（`index.cjs:168`）对齐。同源反代拓扑下前后端同源，对同源 fetch 无影响 |
+| Referrer-Policy 收紧（P2） | 5 处由 `strict-origin-when-cross-origin` → `same-origin`：`src/middleware/security.js:139`、`deployment/nginx.conf.example:108`/`:175`/`:217`、`web-admin/vite.config.js:134`。前置确认已实测：跨源子资源仅 Google Fonts（不依赖 Referer）、全仓无外部跳转/防盗链/外链来源分析、后端唯一 Referer 消费点是 `originCheck.js` 的 Origin 缺失回退（同源请求照常携带 Referer） |
+| X-XSS-Protection 守护 | 新增 `src/tests/middleware/xssProtectionHeader.test.js`（5 例）钉住「下发且精确等于 `'0'`」与「恰好一个头」——该头此前全仓无断言，误改为 `false`（= 完全不设该头）不会有任何红灯。变异实测：`xssFilter: false` ⇒ 前 4 条转红。同时更正 `security.js` 中语义写反的旧注释（`xssFilter: true` 的语义本就是下发 `0`，照字面读会以为这是"开启保护"） |
+| 锚点同步 | `security.js` 净 +82 行 ⇒ 指向其 123 行之后的 **9 处**锚点逐条迁移（`:608`→`:685`、`:666`→`:743`、`:686-690`→`:763-767`），涉及 5 个源码/文档 + 4 个测试文件；`git grep` 核验旧值 0 残留、新值一一对应，`commentAnchorFreshness` + `bareAnchorAttribution` 全绿 |
+| 新用例 | 新增 `src/tests/middleware/securityHeaderPolicyHardening.test.js`（11 例）：report-only 头取值 / 不污染强制 CSP / 上报开关两态 / CORP 与 Referrer-Policy 五份副本取值一致 + 两类可证伪反证。变异实测：摘掉 `app.use(trustedTypesReportOnly)` ⇒ 4 条转红；CORP 回退 `same-site` ⇒ 2 条转红（断言有牙，非空洞） |
+| 门禁联动 | 两个新用例文件均已 `git add`：`testTreePurity` 要求 `src/tests/**` 下不得存在未跟踪的 `*.test.js`（放在那里 `testMatch` 一定会执行它） |
+
 ### 修 CI 真红：审计 action 对账闸补登 roleController updated 广播载荷（2026-10-11 · 678e211 漏登）
 
 > 678e211 给 updateRole 补 role-updated 广播时加了 action: 'updated' 载荷字段，但未同步 auditActionReconciliation 的 NOT_AUDIT_ACTION_LITERALS 排除清单（该闸要求每个 action 字面量要么有写入形态认领、要么逐条登记家族与出处；同文件 created/deleted 两条广播载荷均在册）。f4afd88 的 CI 止步于 lint ratchet 未跑到该步、f6bf4e7 早于 678e211，故此前未暴露。按既有机制补登（ws 家族，tally 5→6），并改准两处被 678e211 移动而过时的行号出处。
@@ -50,7 +70,7 @@
 
 ### fail-open 降级补信号 + 持续型告警 + 站点台账门禁（2026-10-09 · 同一个降级动作被复刻 3 份，且全都没有可告警信号）
 
-> 本仓早有明文纪律（`middleware/security.js:668-672`、`middleware/rateLimitStore.js:53-56`、
+> 本仓早有明文纪律（`middleware/security.js:763-767`、`middleware/rateLimitStore.js:53-56`、
 > `services/websocketService.js:723-725` 三处自陈）：「fail-open 放行必须有显式可观测信号——
 > 否则『DB 挂了 + 全站裸奔』只有一条 error 日志可循」「降级态只写日志等于没有可告警信号——
 > `grep 日志` 不是运维动作」。**验证码开关这条链没做到**：`isLoginCaptchaEnabled` /

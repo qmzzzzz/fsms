@@ -92,12 +92,31 @@ const securityHeaders = helmet({
     useDefaults: false,
     directives: CSP_DIRECTIVES,
   },
-  // 跨域嵌入策略
+  // 跨域嵌入策略（COEP）——**有意关闭**，勿按"漏配"处理（2026-10-15 补决策记录）
+  //
+  // 为何关闭：COEP 的唯一用途是开启跨源隔离（`crossOriginIsolated === true`），
+  // 从而解锁 SharedArrayBuffer / performance.measureUserAgentSpecificMemory 等高精度
+  // 能力。FSMS 是内部单体系统，无任何跨源隔离需求；而开启后浏览器会要求**所有**
+  // 子资源携带 CORP 或 CORS 授权，本仓依赖的跨源资源会成片加载失败——/api-docs 的
+  // Swagger UI 自注入资源、Google Fonts（style-src/font-src 已显式放行
+  // fonts.googleapis.com、fonts.gstatic.com）、报表导出的 blob: 下载。收益为负。
+  //
+  // 何时应重新评估：① 前端确需 SharedArrayBuffer / 跨源隔离能力；② 跨源资源全部
+  // 迁回同源，或逐项补齐 CORP/CORS（含 /api-docs 路径）；③ 上游基线要求
+  // `credentialless`——注意 credentialless 是"不带凭据的跨源加载"，仍会拦掉需要
+  // Cookie/凭据的跨源请求，不是免费开关，必须按上面的清单逐项实测再决定。
+  // 现状记录：本轮之前全仓（含 *.md）无任何 COEP 决策留痕，下一个人照抄外部基线时
+  // 没有反面证据可查——这条注释就是那份证据。
   crossOriginEmbedderPolicy: false,
   // 跨域 opener 隔离
   crossOriginOpenerPolicy: { policy: 'same-origin' },
-  // 跨域资源策略
-  crossOriginResourcePolicy: { policy: 'same-site' },
+  // 跨域资源策略（CORP）——2026-10-15 由 same-site 收紧到 same-origin
+  // 取值与另外四份副本对齐：nginx.conf.example 的 server 级/`location /`/`location /assets/`
+  // 三份、web-admin/vite.config.js 的 buildSecurityHeaders，以及 helmet 7 的默认值
+  // （node_modules/helmet/index.cjs:168 `{policy = "same-origin"}`）。
+  // 影响面：同源反代拓扑下前后端同源，same-origin 对同源 fetch 无影响，只收紧
+  // "同站子域跨源读取 API 响应"这一档（本仓无子域前端，nginx 单 server_name）。
+  crossOriginResourcePolicy: { policy: 'same-origin' },
   // DNS 预获取控制
   dnsPrefetchControl: { allow: false },
   // 帧选项（防止点击劫持）
@@ -117,9 +136,45 @@ const securityHeaders = helmet({
   noSniff: true,
   // 来源策略
   originAgentCluster: true,
-  // Referrer 策略
-  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-  // XSS 保护（旧版浏览器）
+  // Referrer 策略——2026-10-15 由 strict-origin-when-cross-origin 收紧到 same-origin
+  //
+  // 这是 FSMS 此前**唯一**比上游基线松的响应头。取值须与另外四份副本一致：
+  // nginx.conf.example:108（server 级）、:175（`location /`）、:217（`location /assets/`）、
+  // web-admin/vite.config.js:134（buildSecurityHeaders）。注意 nginx 侧安全头有三份
+  // 副本且 `add_header` 在嵌套块是整体替换（见该文件 L-09 注释），漏改一份就是一条
+  // 静默退化的路径；本仓此前**没有**针对 Referrer-Policy 的跨副本一致性断言，
+  // 现由 src/tests/middleware/securityHeaderPolicyHardening.test.js 钉住五份取值相同。
+  //
+  // 前置确认（已实测，2026-10-15）：
+  //  ① 跨源子资源仅 Google Fonts（fonts.googleapis.com / fonts.gstatic.com），
+  //     不依赖 Referer ⇒ 无影响；
+  //  ② 全仓无外部跳转 / 防盗链 / 外链来源分析：web-admin/src 无
+  //     window.open / location.href= / target="_blank" / document.referrer，
+  //     nginx.conf.example 无 valid_referers；
+  //  ③ 后端唯一消费 Referer 的是 src/middleware/originCheck.js:57（Origin 头缺失时的
+  //     回退分支）——同源请求在 same-origin 下照常携带 Referer，且浏览器写请求必带
+  //     Origin 走优先分支，回退分支不受影响。
+  // 风险提示：跨源请求将完全不带 Referer；若将来引入外链来源分析或防盗链，须回头复评。
+  referrerPolicy: { policy: 'same-origin' },
+  // XSS Auditor 显式禁用（2026-10-15 回源更正注释）
+  //
+  // helmet 的该选项**语义反直觉**，勿按字面理解（回源：node_modules/helmet/
+  // index.cjs 的 xXssProtection() 恒 setHeader("X-XSS-Protection", "0")，
+  // 且 getMiddlewareFunctionsFromOptions 里 `case true: push(...)` /
+  // `case false: break`）：
+  //   - xssFilter: true（当前值）⇒ 下发 `X-XSS-Protection: 0`，即**主动禁用**
+  //     有绕过历史的旧 XSS Auditor（OWASP 建议显式置 0；现代浏览器已忽略该头，
+  //     仅为兼容性工具保留）；
+  //   - xssFilter: false ⇒ **完全不设该头**（不是"设 0"），且 helmet 不告警。
+  // 原注释写作「XSS 保护（旧版浏览器）」，与真实行为方向相反——照字面读会以为
+  // 这是"开启保护"，进而可能在排障时把它当成冗余项删掉/关掉。
+  // XSS 防护实际由 CSP（每请求 nonce，见上方 CSP_DIRECTIVES）+ 前端框架输出转义承担。
+  // 口径一致性：deployment/nginx.conf.example:111 的 `add_header X-XSS-Protection "0"`
+  // 与本项同值（该文件注释所称"与后端 helmet xssFilter 口径一致"经复核成立）。
+  // 改动风险提示：本头曾长期无测试守护（全仓 grep 无断言），误改为 false 不会有任何
+  // 红灯——经 nginx 的流量仍被 nginx 兜住，但直连 app 端口（容器网络/探针）的响应会
+  // 静默失去该头。现由 src/tests/middleware/xssProtectionHeader.test.js 钉住
+  // 「下发且精确等于 '0'」与「恰好一个头」，上述误改会立即转红。
   xssFilter: true,
 });
 
@@ -156,6 +211,46 @@ const reportingEndpoints = (req, res, next) => {
   }
   next();
 };
+
+/**
+ * 1.4 Trusted Types 灰度（report-only，2026-10-15）
+ *
+ * 目的：在不阻断任何现有行为的前提下，先摸清前端有多少 DOM 写入点会被
+ * `require-trusted-types-for 'script'` 命中（innerHTML / insertAdjacentHTML /
+ * document.write / 三方 SDK 的 DOM 写入），为将来是否真正启用 Trusted Types 取证。
+ * 只上报不阻断 ⇒ 对现有行为零影响；头名与主 CSP 不同
+ * （Content-Security-Policy-Report-Only vs Content-Security-Policy），两者互不干扰。
+ *
+ * ⚠ helmet 7.2.0 的**构造期硬约束**（回源 node_modules/helmet/index.cjs:90-92）：
+ *   `Content-Security-Policy needs a default-src but none was provided. If you really
+ *    want to disable it, set it to contentSecurityPolicy.dangerouslyDisableDefaultSrc.`
+ *   该检查在 normalizeDirectives() 里、对 reportOnly 与强制模式一视同仁——**不因为
+ *   report-only 就放宽**。因此只写 `require-trusted-types-for` 会在模块加载期直接抛错
+ *   （整个 app 起不来），必须显式声明「不要 default-src」。
+ *   本策略只要 Trusted Types 这一条，故用 dangerouslyDisableDefaultSrc 把 default-src
+ *   摘掉——下发结果就是 `require-trusted-types-for 'script'` 一条指令，
+ *   不会把 helmet 的全套默认指令（default-src 'self' 等）拖进来制造上报噪音。
+ *
+ * 上报出口：仅当 CSP_REPORT_ENABLED=true 时附带 report-uri / report-to（与主 CSP
+ * 同口径，端点复用 CSP_REPORT_PATH 与 Reporting-Endpoints 的 csp-endpoint）；
+ * 关闭时报告只落在浏览器控制台，不下发任何多余指令。
+ * 前置条件：开启上报前需先排查前端 DOM 写入点，否则噪音会淹没真实违规。
+ */
+const TRUSTED_TYPES_REPORT_ONLY_DIRECTIVES = {
+  'default-src': helmet.contentSecurityPolicy.dangerouslyDisableDefaultSrc,
+  'require-trusted-types-for': ["'script'"],
+};
+
+if (cspReportEnabled) {
+  TRUSTED_TYPES_REPORT_ONLY_DIRECTIVES['report-uri'] = [CSP_REPORT_PATH];
+  TRUSTED_TYPES_REPORT_ONLY_DIRECTIVES['report-to'] = ['csp-endpoint'];
+}
+
+const trustedTypesReportOnly = helmet.contentSecurityPolicy({
+  useDefaults: false,
+  reportOnly: true,
+  directives: TRUSTED_TYPES_REPORT_ONLY_DIRECTIVES,
+});
 
 /**
  * 1.1 HSTS 兜底下发
@@ -1194,6 +1289,10 @@ const applyResponseHardening = (app) => {
   app.use(ensureHsts);
   app.use(permissionsPolicy);
   app.use(reportingEndpoints);
+  // Trusted Types 灰度：独立 CSP 中间件，只写 Content-Security-Policy-Report-Only，
+  // 与上面的 securityHeaders 写出的 Content-Security-Policy 头名不同、互不覆盖。
+  // 必须在 reportingEndpoints 之后（report-to 指令依赖它下发的 Reporting-Endpoints 头）。
+  app.use(trustedTypesReportOnly);
 };
 
 /**
@@ -1228,6 +1327,7 @@ module.exports = {
   ensureHsts,
   permissionsPolicy,
   reportingEndpoints,
+  trustedTypesReportOnly,
   CSP_REPORT_PATH,
   cspReportEnabled,
   sanitizeMongo,

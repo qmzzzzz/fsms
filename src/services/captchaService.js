@@ -97,7 +97,7 @@ function pruneLocal() {
  * ⇒ 即「Redis 就绪但命令报错」期间，洪水护栏消失这件事在默认配置下**完全不可见**：
  *   没有日志、没有指标、没有告警。这正是本仓纪律所反对的形态
  *   （middleware/rateLimitStore.js:53-56：「降级态只写日志等于没有可告警信号——
- *   `grep 日志` 不是运维动作」；middleware/security.js:668-672 同口径）。
+ *   `grep 日志` 不是运维动作」；middleware/security.js:763-767 同口径）。
  *
  * 走 `incSecurityAlert` 与 `checkIPBlacklist` 的 ip_blacklist_failopen、
  * `makeSharedStore` 的 ratelimit_store_degraded **同一计数器**，因此被
