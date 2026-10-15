@@ -99,9 +99,9 @@ describe('Trusted Types report-only 灰度（P1）', () => {
   });
 
   test('CSP_REPORT_ENABLED=false 时不附带任何上报指令（默认态）', async () => {
-    const ro = await request(buildApp()).get('/x').then(
-      (r) => r.headers['content-security-policy-report-only']
-    );
+    const ro = await request(buildApp())
+      .get('/x')
+      .then((r) => r.headers['content-security-policy-report-only']);
     expect(ro).not.toContain('report-uri');
     expect(ro).not.toContain('report-to');
   });
