@@ -5,7 +5,7 @@ let initialized = false;
 /**
  * 出网数据收口（2026-09-26 实测确认的缺陷）
  *
- * `Sentry.Handlers.requestHandler()` 无参调用时走 @sentry/node 7.120.4 的默认采集表
+ * `Sentry.Handlers.requestHandler()` 无参调用时走 @sentry/node 7.x 的默认采集表
  * （`@sentry/utils/cjs/requestdata.js` 的 `DEFAULT_INCLUDES = {ip:false, request:true,
  * transaction:true, user:true}`，而 `request:true` 又展开成
  * `DEFAULT_REQUEST_INCLUDES = ['cookies','data','headers','method','query_string','url']`）。
@@ -42,17 +42,31 @@ let initialized = false;
  *
  * 判据口径（用例与探针都按这个来）：不看 beforeSend 的入参，看**真的写进 transport 的字节**。
  * 实测（自定义 transport 截获 envelope）修复后三处泄漏面全清，只剩
- * `request: {method:'POST', url:'http://<no host>/api/auth/login'}` + `transaction:
- * 'POST /api/auth/login'`。两点容易误判的事实，一并钉在这里：
- *  - 事件对象上的 `sdkProcessingMetadata.request` 是**未裁剪的原始 req**（含 body/headers/user），
- *    但它不会进 envelope（SDK 在序列化前剥掉）⇒ 别把它当泄漏面去补，白做功；
- *  - `include.transaction` 我没关（默认表里它是 true），因为它写的是参数化路由名、实测不含查询串，
- *    关掉只会丢掉 Sentry 侧的分组能力。
+ * `request: {method:'POST', url:'http://<no host>/api/auth/login'}`。
+ * v11 迁移后的两点变化，一并钉在这里：
+ *  - `transaction` 不再由 RequestData 集成写入（v8 起重构，改由 tracing 的 span 名提供，
+ *    本仓 tracesSampleRate>0 时由 httpIntegration 产生）；对它的去查询串剥离由
+ *    scrubOutboundEvent 承担，纯函数真值表覆盖。
+ *  - 事件对象上的 `sdkProcessingMetadata.normalizedRequest` 是归一化请求（含 data/headers），
+ *    同样不会进 envelope（SDK 序列化前剥掉）⇒ 别把它当泄漏面去补，白做功。
+ */
+/**
+ * v11 适配：`requestDataIntegration` 的 include 是**扁平结构**——v7 的两级写法
+ * `{request: [...], user: false}` 在 v8 随 RequestData 集成一起重构，v11 只剩这六个键。
+ * 六个键全部显式关掉、只留 url：v11 的推导默认值（sendDefaultPii 未设时）是
+ * `cookies/headers/query_string` 开着（deny 只过滤已知敏感名，属黑名单）+ `data` 恒真
+ * （`dataCollection.httpBodies` 只管写入不管读取）⇒ 不显式关就是洞。
+ * `method` 不受 include 控制（extractNormalizedRequestData 无条件写），`url` 恒开。
+ *
+ * 这是采集侧第一层；第二层（beforeSend 保留白名单）独立于它，见 SENTRY_ALLOWED_REQUEST_FIELDS。
  */
 const SENTRY_REQUEST_INCLUDE = {
-  request: ['method', 'url'],
-  // 显式关掉默认的 user 提取：本仓从不调 Sentry.setUser，事件里的身份只可能来自 req.user
-  user: false,
+  cookies: false,
+  data: false,
+  headers: false,
+  ip: false,
+  query_string: false,
+  url: true,
 };
 
 /**
@@ -101,11 +115,22 @@ function initSentry() {
       dsn: process.env.SENTRY_DSN,
       environment: process.env.NODE_ENV || 'development',
       tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.1 : 1.0,
-      // v7 起 AutoSessionTracking 不再是 Sentry.Integrations 的成员，改为 init 选项。
-      // 旧写法 new Sentry.Integrations.AutoSessionTracking() 拿到的是 undefined，
-      // 会在配置 SENTRY_DSN 时直接抛 TypeError，导致初始化失败。
-      autoSessionTracking: true,
-      integrations: [new Sentry.Integrations.Http({ tracing: true })],
+      // v11：PII 采集总闸显式关闭。注意 v11.4.0 起 init 的 sendDefaultPii 已不再映射到
+      // dataCollection（实测该版本 resolveDataCollectionOptions 只认 dataCollection 键，
+      // 不传时按 DEFAULTS 全开：userInfo/cookies/httpHeaders/httpBodies/urlQueryParams）
+      // ⇒ 逐键显式关，sendDefaultPii 那句是自欺欺人，不写。
+      dataCollection: {
+        userInfo: false,
+        cookies: false,
+        httpHeaders: false,
+        httpBodies: [],
+        urlQueryParams: false,
+      },
+      // v11：默认集成里已有一个无配置的 requestDataIntegration 和一个开 tracing 的
+      // httpIntegration；这里传同名带 include 的实例覆盖前者（filterDuplicates 后者胜），
+      // tracing 交给后者。v7 的 new Sentry.Integrations.Http({tracing:true}) 与
+      // autoSessionTracking init 选项都已随 Sentry.Integrations 在 v8+ 移除。
+      integrations: [Sentry.requestDataIntegration({ include: SENTRY_REQUEST_INCLUDE })],
       beforeSend: scrubOutboundEvent,
     });
     initialized = true;
@@ -119,16 +144,31 @@ function isSentryInitialized() {
   return initialized;
 }
 
+/**
+ * v11 起请求/追踪数据由集成自动采集（requestDataIntegration + httpIntegration），
+ * Handlers.requestHandler / tracingHandler 这两个中间件在 v8 移除、v11 无替代导出。
+ * 保留函数与中间件形状（app.js:189-190 的挂载点不用改）：返回直通的中间件而不是
+ * null，防止调用点 app.use(undefined) 直接炸——形态由测试钉住。
+ */
 function sentryRequestHandler() {
-  return Sentry.Handlers.requestHandler({ include: SENTRY_REQUEST_INCLUDE });
+  return (req, res, next) => next();
 }
 
 function sentryTracingHandler() {
-  return Sentry.Handlers.tracingHandler();
+  return (req, res, next) => next();
 }
 
+/**
+ * v11 的官方替代是 Sentry.setupExpressErrorHandler(app)，但它要 app 实例、且内部直接
+ * 启 Sentry 自己的错误响应；本模块的调用点（app.js:429）挂在通用 errorHandler 之前、
+ * 只拿得到中间件，所以保持 (err,req,res,next) 四参自实现：捕获后继续向后传，响应
+ * 仍由本仓的 errorHandler 出（与 v7 Handlers.errorHandler 的行为一致）。
+ */
 function sentryErrorHandler() {
-  return Sentry.Handlers.errorHandler();
+  return (err, req, res, next) => {
+    Sentry.captureException(err);
+    next(err);
+  };
 }
 
 function captureException(error, context = {}) {

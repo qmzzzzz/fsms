@@ -2,20 +2,31 @@
  * F-180：Sentry 出网事件不得携带凭据/身份
  *
  * 判据口径（与 src/middleware/sentry.js 的头注释一致）：不看 beforeSend 的入参，
- * 只看**真的写进 transport 的字节**。此前踩过的两个坑都已收口：
- *  1) 用 `defaultIntegrations:false` 会把负责写 event.request 的 RequestData 集成一起关掉
- *     ⇒ 事件里没有 request 字段，"没检测到泄漏"其实是探测器坏了（实测：三臂全 clean 的假绿）。
- *     所以这里显式只装 RequestData，并**先断言探测器能看到泄漏**（臂 0）。
- *  2) 事件对象上的 `sdkProcessingMetadata.request` 是未裁剪的原始 req，但 SDK 序列化前会剥掉，
- *     按它判泄漏会得出"修不住"的错结论。所以只认 transport 截获的 envelope。
- *  3) 第一版收口是"黑名单逐个删已知字段名"，跑变异时才被暴露：`include.request` 里放一个 SDK
- *     不认识的键名（'user'）会走 extractRequestData 的 default 分支，把 `req.user` 整个原样抄进
- *     `event.request.user` ⇒ 黑名单永远追不上字段名。现在咽喉改成保留白名单制，
- *     臂4/臂5 就是这条通道的"能泄漏 / 已被削"对照（变异 M3 实测把它逼出来的）。
+ * 只看**真的写进 transport 的字节**。本文件已随 @sentry/node 7.x → 11.4.0 重写探测器，
+ * v7 时代踩过的坑与 v11 链路的实测事实一并留档：
+ *  1) 用 `defaultIntegrations:false` 会把负责写 event.request 的集成一起关掉
+ *     ⇒ 事件里没有 request 字段，"没检测到泄漏"其实是探测器坏了（实测：全臂 clean 的假绿）。
+ *     所以这里显式只装 httpServerIntegration + requestDataIntegration，并**先断言探测器
+ *     能看到泄漏**（臂 0）。
+ *  2) v11 的 request 数据来自真实 HTTP 请求：httpServerIntegration 在请求经过时把
+ *     normalizedRequest 写进 scope，requestDataIntegration 再按 include 摘进 event
+ *     ⇒ 每条臂都起真服务器、发真请求，比 v7 的"手工造 req 过 handler"更接近生产。
+ *  3) 事件对象上的 `sdkProcessingMetadata.normalizedRequest` 不会进 envelope（SDK 序列化前
+ *     剥掉），按它判泄漏会得出"修不住"的错结论。所以只认 transport 截获的 envelope。
+ *  4) v11 采集侧默认值是 deny 黑名单（敏感子串匹配）：名单认不出的头名/cookie 名/参数名
+ *     原样出网（臂 0 的 x-probe-ticket / probe_ticket / next= 三处实测），与 v7 的
+ *     extractRequestData default 分支同族 ⇒ beforeSend 保留白名单仍不可省。
+ *  5) 第一版收口是"黑名单逐个删已知字段名"（v7 变异 M3 逼出来的教训）：咽喉现为保留
+ *     白名单制；v11 的臂 4/臂 5 是"采集侧被人显式打开通道"的"能漏 / 已被削"对照。
+ *  6) 实测负结果（本版本链路）：请求体在本探测器形态下不进 event.request.data——
+ *     httpServerIntegration 的 body 采集与 captureException 的调用时机相互错开
+ *     （同步 capture 时流未读完；等 end 再 capture 时 async context 丢失、request 整块消失）。
+ *     body 通道因此不在任何臂的 open 里；口令/MFA 标记保留，谁把 body 放行（SDK 升级、
+ *     换框架、改 dataCollection）推导立刻红，而不是无声多一条出网面。
  */
 const fs = require('fs');
 const path = require('path');
-const { EventEmitter } = require('events');
+const http = require('http');
 const Sentry = require('@sentry/node');
 const sentryModule = require('../../middleware/sentry');
 
@@ -24,79 +35,56 @@ const { scrubOutboundEvent, SENTRY_REQUEST_INCLUDE, SENTRY_ALLOWED_REQUEST_FIELD
 // 即便 transport 被绕过，DSN 也只指向本机一个没人监听的端口
 const FAKE_DSN = 'http://aaa@127.0.0.1:1/1';
 
+// 探测令牌：命名刻意避开 v11 的敏感子串名单（SENSITIVE_KEY_SNIPPETS：auth/token/
+// secret/session/password/key/jwt/bearer/sso/saml/csrf/xsrf/credentials/sid/identity/
+// cookie…）与 SENSITIVE_COOKIE_NAME_SNIPPETS——只有"名单认不出"的名字原样出网，
+// 才能证明 headers/cookies 通道真的开着。authorization 头与 sid cookie 一并放进请求
+// 作对照：它们被 v11 替换成 [Filtered]，证明"黑名单只兜已知名"这条链路事实。
+const HEADER_TICKET = 'HEADERVAL_7ab1';
+const COOKIE_TICKET = 'COOKIEVAL_4d2e';
+const QUERY_TICKET = 'RESETTOKEN_8c5f_secret';
+const BODY_TICKET = 'P@ssw0rd!Xy';
+const MFA_TICKET = 'MFA_9f3c_secret';
+
 /**
- * `channels` 是"这条凭据能从哪几格出去"的通道名，与 @sentry/utils 的采集分支一一对应：
- *  - body/headers/cookies/query 走 `case 'data'|'headers'|'cookies'|'query_string'`（query 含 url 里那份）；
- *  - user 走 `include.user`（默认表，只抠 DEFAULT_USER_INCLUDES 命中的键）；
- *  - requestUser 走 extractRequestData 的 `default:` 分支：白名单里出现它不认识的键名时，
- *    它把 `req` 上的同名属性**整个原样抄进 event.request**。sessionId 只存在于 req.user，
- *    所以它是这条通道独有的判别标记（user 通道抠不出它）⇒ 拿它钉"咽喉只不只认自己的保留白名单"。
- * 一个标记可以有多条通道（email 既可能来自 user、也可能随原始 req.user 整块出去），
- * 所以判据是"任一开放通道在场 ⇒ 该标记必须在场"，缺一条通道就红。
+ * `channels` 是"这条凭据能从哪几格出去"的通道名，与 v11 requestDataIntegration 的
+ * include 键一一对应：
+ *  - body    → include.data（request.data，v11 read-time 恒真，写入由 httpBodies 管）
+ *  - headers → include.headers（request.headers）
+ *  - cookies → include.cookies（request.cookies）
+ *  - query   → include.query_string + url 里的查询串（url 恒开，只有 beforeSend 能削）
+ *  - user    → include.ip（v11 的 user 通道只剩 event.user.ip_address）
+ * 邮箱与 sessionId 两条身份通道在 v11 已断（无 DEFAULT_USER_INCLUDES、无 default
+ * 抄属性分支），channels 置空 ⇒ 任何臂都不该出现；谁把通道改回来，推导立刻红。
  */
 const MARKERS = [
-  { label: '登录口令', token: 'P@ssw0rd!Xy', channels: ['body'] },
-  { label: 'MFA 码', token: 'MFA_9f3c_secret', channels: ['body'] },
-  { label: 'Bearer 令牌', token: 'BEARER_7ab1_secret', channels: ['headers'] },
-  { label: '会话 cookie 值', token: 'SIDCOOKIE_4d2e_secret', channels: ['cookies'] },
-  { label: '查询串里的重置令牌', token: 'RESETTOKEN_8c5f_secret', channels: ['query'] },
-  {
-    label: '邮箱（身份）',
-    token: 'probe-identity@example.test',
-    channels: ['user', 'requestUser'],
-  },
-  { label: '会话 sessionId（原始 req.user 直拷）', token: 'SID_3e7b', channels: ['requestUser'] },
+  { label: '登录口令', token: BODY_TICKET, channels: ['body'] },
+  { label: 'MFA 码', token: MFA_TICKET, channels: ['body'] },
+  { label: 'Bearer 级自定义头（名单认不出）', token: HEADER_TICKET, channels: ['headers'] },
+  { label: '会话 cookie 值（名单认不出的名字）', token: COOKIE_TICKET, channels: ['cookies'] },
+  { label: '查询串里的重置令牌（名单认不出的参数名）', token: QUERY_TICKET, channels: ['query'] },
+  { label: '邮箱（身份）', token: 'probe-identity@example.test', channels: [] },
+  { label: '会话 sessionId', token: 'SID_3e7b', channels: [] },
 ];
 
-const mkReq = () => ({
-  method: 'POST',
-  url: '/api/auth/login?next=/home&token=RESETTOKEN_8c5f_secret',
-  originalUrl: '/api/auth/login?next=/home&token=RESETTOKEN_8c5f_secret',
-  baseUrl: '',
-  path: '/api/auth/login',
-  headers: {
-    authorization: 'Bearer BEARER_7ab1_secret',
-    cookie: 'sid=SIDCOOKIE_4d2e_secret',
-    'content-type': 'application/json',
-  },
-  body: { username: 'admin', password: 'P@ssw0rd!Xy', mfaCode: 'MFA_9f3c_secret' },
-  ip: '203.0.113.9',
-  socket: { remoteAddress: { address: '10.0.0.1', port: 43210 } },
-  // auth.js buildAuthContext 的真实形状（userId 而非 id）
-  user: {
-    userId: 'U1',
-    username: 'admin',
-    email: 'probe-identity@example.test',
-    realName: '张三',
-    sessionId: 'SID_3e7b',
-  },
-  getHeader(name) {
-    return this.headers[String(name).toLowerCase()];
-  },
-});
-
-const mkRes = () => {
-  const res = new EventEmitter();
-  res.statusCode = 200;
-  res.setHeader = () => {};
-  res.getHeader = () => undefined;
-  return res;
-};
-
 /**
- * 跑一条臂：init → 过 handler → captureException → 截获真正出网的 envelope
- * @returns {Promise<{bytes: string, event: object, frameCount: number}>}
+ * 跑一条臂：init → 起真服务器 → 发带全量敏感面的真请求 → 截获真正出网的 envelope
+ * @returns {Promise<{bytes: string, event: object}>}
  */
-const runArm = async ({ handlerFactory, beforeSend }) => {
+const runArm = async ({ include, beforeSend }) => {
   const frames = [];
   Sentry.init({
     dsn: FAKE_DSN,
     environment: 'test',
     tracesSampleRate: 0,
-    autoSessionTracking: false,
     defaultIntegrations: false,
-    // 只装这一个集成：它就是往 event.request 写字段的那个组件（生产里它在默认表里）
-    integrations: [new Sentry.Integrations.RequestData()],
+    // v11：只装这两个集成——httpServerIntegration 负责把请求归一化写进 scope，
+    // requestDataIntegration 负责按 include 摘进 event（生产里两者都在默认表里）。
+    // include 缺省 = 走 v11 推导默认（臂 0 的修复前形态：cookies/headers/query/ip 全开）。
+    integrations: [
+      Sentry.httpServerIntegration(),
+      Sentry.requestDataIntegration(include ? { include } : {}),
+    ],
     beforeSend: beforeSend || ((event) => event),
     transport: () => ({
       send: (request) => {
@@ -111,9 +99,35 @@ const runArm = async ({ handlerFactory, beforeSend }) => {
     }),
   });
 
-  const handler = handlerFactory();
-  handler(mkReq(), mkRes(), () => {
+  const server = http.createServer((req, res) => {
     Sentry.captureException(new Error('boom-5xx'));
+    res.end('ok');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const body = JSON.stringify({ username: 'admin', password: BODY_TICKET, mfaCode: MFA_TICKET });
+  await new Promise((resolve) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: server.address().port,
+        path: '/api/auth/login?next=' + QUERY_TICKET,
+        method: 'POST',
+        headers: {
+          // 名单内：v11 替换成 [Filtered]（对照，证明黑名单只兜已知名）
+          authorization: 'Bearer BEARER_7ab1_secret',
+          cookie: 'sid=SIDCOOKIE_4d2e_secret; probe_ticket=' + COOKIE_TICKET,
+          // 名单外：原样出网（headers/cookies 通道的探测器）
+          'x-probe-ticket': HEADER_TICKET,
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        res.resume();
+        res.on('end', resolve);
+      }
+    );
+    req.end(body);
   });
 
   const deadline = Date.now() + 4000;
@@ -122,6 +136,7 @@ const runArm = async ({ handlerFactory, beforeSend }) => {
     await new Promise((r) => setTimeout(r, 20));
   }
   await Sentry.close(1000);
+  await new Promise((resolve) => server.close(resolve));
 
   const bytes = frames.join('\n');
   const envelope = JSON.parse(frames[0]);
@@ -135,79 +150,75 @@ const runArm = async ({ handlerFactory, beforeSend }) => {
 /**
  * 臂＝"两层收口各自开关"的矩阵，而不是一臂一情形。`open` 声明这条臂上还开着哪些泄漏通道，
  * 用例据此推导每个标记该不该出现（不是逐臂手写断言，加一个通道就会到处漏钉）。
- *  - 'query' 在只留白名单的臂上仍然开着：白名单里保留了 'url'，而它由 req.originalUrl 拼成，
+ *  - 'query' 在只留 include 的臂上仍然开着：白名单里保留了 url，而它由 originalUrl 拼成，
  *    天然带查询串 ⇒ 这一格只有 beforeSend 能削，是"两层缺一不可"的实测依据。
- *  - 'requestUser' 只在臂4/臂5 上场：臂5 证明这条通道真的能出网（探测器对照），
- *    臂4 证明咽喉只认自己的保留白名单、采集侧被人加了键也带不出去。
+ *  - 'body' 不在任何臂的 open 里：本版本链路实测不可达（见文件头第 6 条），标记保留作告警。
  */
-/** 被人"顺手加一个字段"的采集白名单：'user' 不在 SDK 的 case 表里 ⇒ 走 default 分支原样抄 req.user */
-const tamperedInclude = () =>
-  Sentry.Handlers.requestHandler({ include: { request: ['method', 'url', 'user'], user: false } });
+/** 被人"顺手打开"的采集配置：显式开 headers/cookies/ip 三个通道（v11 无未知键通道） */
+const tamperedInclude = () => ({
+  ...sentryModule.SENTRY_REQUEST_INCLUDE,
+  headers: true,
+  cookies: true,
+  ip: true,
+});
 
 const ARMS = [
   {
-    name: '臂0 修复前形态：无参 requestHandler + 无 beforeSend',
-    handlerFactory: () => Sentry.Handlers.requestHandler(),
+    name: '臂0 修复前形态：不配 include（走 v11 推导默认）+ 无 beforeSend',
+    include: undefined,
     beforeSend: undefined,
     isControl: true,
-    open: ['body', 'headers', 'cookies', 'query', 'user'],
+    open: ['headers', 'cookies', 'query', 'user'],
   },
   {
-    name: '臂1 本模块真实装配：采集白名单 + beforeSend 两层',
-    handlerFactory: () => sentryModule.sentryRequestHandler(),
+    name: '臂1 本模块真实装配：include 扁平全关 + beforeSend 两层',
+    include: sentryModule.SENTRY_REQUEST_INCLUDE,
     beforeSend: scrubOutboundEvent,
     open: [],
   },
   {
-    name: '臂2 只剩 beforeSend（有人把 handler 改回无参）',
-    handlerFactory: () => Sentry.Handlers.requestHandler(),
+    name: '臂2 只剩 beforeSend（有人把 include 删了）',
+    include: undefined,
     beforeSend: scrubOutboundEvent,
     open: [],
   },
   {
-    name: '臂3 只剩采集白名单（beforeSend 被摘掉）',
-    handlerFactory: () => sentryModule.sentryRequestHandler(),
+    name: '臂3 只剩 include（beforeSend 被摘掉）',
+    include: sentryModule.SENTRY_REQUEST_INCLUDE,
     beforeSend: undefined,
     open: ['query'],
   },
   {
-    name: '臂4 采集白名单被人加了 user + beforeSend 在场（咽喉必须自己兜住）',
-    handlerFactory: tamperedInclude,
+    name: '臂4 采集侧被人显式打开三通道 + beforeSend 在场（咽喉必须自己兜住）',
+    include: tamperedInclude(),
     beforeSend: scrubOutboundEvent,
     open: [],
   },
   {
-    name: '臂5 采集白名单被人加了 user、beforeSend 被摘（新通道的探测器有效性对照）',
-    handlerFactory: tamperedInclude,
+    name: '臂5 采集侧被人显式打开三通道、beforeSend 被摘（多通道探测器有效性对照）',
+    include: tamperedInclude(),
     beforeSend: undefined,
-    open: ['query', 'requestUser'],
+    open: ['headers', 'cookies', 'query', 'user'],
   },
 ];
 
 /**
- * 每条开放通道"该在事件哪儿看到什么"的探测器判据。对照臂（isControl）逐条过一遍：
+ * 每条开放通道"该在事件哪儿看到什么"的探测器判据。open 非空的臂逐条过一遍：
  * 通道声明开着却看不到证据 ⇒ 报错，而不是静默全绿——这是本套件唯一能证明
  * "没检测到泄漏 = 真没泄漏"而不是"探测方式坏了"的地方（已被这条坑过一次，见文件头）。
  */
 const CHANNEL_PROOF = {
-  body: (event) => expect(event.request.data).toContain('P@ssw0rd!Xy'),
-  headers: (event) => expect(event.request.headers.authorization).toContain('BEARER_7ab1_secret'),
-  cookies: (event) => expect(event.request.cookies.sid).toBe('SIDCOOKIE_4d2e_secret'),
+  body: (event) => expect(event.request.data).toContain(BODY_TICKET),
+  headers: (event) => expect(event.request.headers['x-probe-ticket']).toBe(HEADER_TICKET),
+  cookies: (event) => expect(event.request.cookies.probe_ticket).toBe(COOKIE_TICKET),
   query: (event) =>
     expect(`${event.request.query_string || ''}|${event.request.url || ''}`).toContain(
-      'RESETTOKEN_8c5f_secret'
+      QUERY_TICKET
     ),
-  user: (event) =>
-    expect(event.user).toMatchObject({ username: 'admin', email: 'probe-identity@example.test' }),
-  requestUser: (event) =>
-    expect(event.request.user).toMatchObject({
-      userId: 'U1',
-      sessionId: 'SID_3e7b',
-      realName: '张三',
-    }),
+  user: (event) => expect(typeof event.user.ip_address).toBe('string'),
 };
 
-describe('端到端：真正写进 transport 的字节（六臂矩阵）', () => {
+describe('端到端：真正写进 transport 的字节（六臂矩阵，真 HTTP 链路）', () => {
   const results = new Map();
 
   beforeAll(async () => {
@@ -234,8 +245,8 @@ describe('端到端：真正写进 transport 的字节（六臂矩阵）', () =>
     }
   );
 
-  it.each(ARMS.filter((a) => a.isControl).map((a) => [a.name, a]))(
-    '%s — 对照臂上每个声明开放的通道都真能看到凭据（探测器有效性，否则上面的全绿没有意义）',
+  it.each(ARMS.filter((a) => a.open.length > 0).map((a) => [a.name, a]))(
+    '%s — 每个声明开放的通道都真能看到凭据（探测器有效性，否则上面的全绿没有意义）',
     (name, arm) => {
       const { event } = results.get(name);
       expect(arm.open.length).toBeGreaterThan(0);
@@ -257,14 +268,14 @@ describe('端到端：真正写进 transport 的字节（六臂矩阵）', () =>
   );
 
   it.each(ARMS.map((a) => [a.name, a]))(
-    '%s — 原始 req.user 有没有整块抄进 request.user 与预期一致',
-    (name, arm) => {
+    '%s — event.request 从不出现 v7 时代的 request.user 整块（v11 无该通道，未知键也不进 request）',
+    (name) => {
       const { event } = results.get(name);
-      expect('user' in event.request).toBe(arm.open.includes('requestUser'));
+      expect('user' in event.request).toBe(false);
     }
   );
 
-  it.each(ARMS.map((a) => [a.name]))(
+  it.each(ARMS.map((a) => [a.name, a]))(
     '%s — 泄漏面收窄后仍保留定位能力（反"过度削减把事件削废"）',
     (name) => {
       const { event } = results.get(name);
@@ -284,23 +295,35 @@ describe('端到端：真正写进 transport 的字节（六臂矩阵）', () =>
     }
   );
 
-  it.each(ARMS.map((a) => [a.name, a]))('%s — event.user 整块在/不在与预期一致', (name, arm) => {
-    const { event } = results.get(name);
-    expect('user' in event).toBe(arm.open.includes('user'));
-  });
+  it.each(ARMS.map((a) => [a.name, a]))(
+    '%s — event.user 在/不在与预期一致（v11 该通道只剩 ip_address）',
+    (name, arm) => {
+      const { event } = results.get(name);
+      expect('user' in event).toBe(arm.open.includes('user'));
+    }
+  );
 
   it('六臂都恰好产出一个 event envelope（clean 不等于"什么都没发"）', () => {
     for (const arm of ARMS) {
-      const bytes = results.get(arm.name).bytes;
-      expect((bytes.match(/"type":"event"/g) || []).length).toBe(1);
+      expect((results.get(arm.name).bytes.match(/"type":"event"/g) || []).length).toBe(1);
     }
   });
 
-  it('出网字节里不存在未裁剪的原始 req（sdkProcessingMetadata 不入 envelope）', () => {
+  it('出网字节里不存在未裁剪的归一化请求（sdkProcessingMetadata 不入 envelope）', () => {
     // 这条钉的是"判据面"：如果哪天它上了线，本模块的收口口径就得跟着改
     for (const arm of ARMS) {
       expect(results.get(arm.name).bytes).not.toContain('sdkProcessingMetadata');
+      expect(results.get(arm.name).bytes).not.toContain('normalizedRequest');
     }
+  });
+
+  it('探测器自证：名单内的敏感名被 v11 替换成 [Filtered]，名单认不出的名字原样出网（黑名单只兜已知名，收口不能依赖它）', () => {
+    const { event } = results.get(ARMS[0].name);
+    expect(event.request.headers.authorization).toBe('[Filtered]');
+    expect(event.request.cookies.sid).toBe('[Filtered]');
+    expect(event.request.headers['x-probe-ticket']).toBe(HEADER_TICKET);
+    expect(event.request.cookies.probe_ticket).toBe(COOKIE_TICKET);
+    expect(event.request.url).toContain(QUERY_TICKET);
   });
 });
 
@@ -420,33 +443,126 @@ describe('scrubOutboundEvent —— 纯函数真值表', () => {
   });
 });
 
-describe('装配实参（Sentry.init / Handlers.requestHandler 收到什么）', () => {
+describe('真实装配端到端（initSentry 的 init 实参原样驱动）', () => {
+  /**
+   * 六臂矩阵验证的是"两层收口机制"，本组验证的是**本模块真实装配的那一份实参**：
+   * initSentry 交给 Sentry.init 的 dataCollection / requestDataIntegration include /
+   * beforeSend 原样驱动一次端到端。缺了它，摘掉 sentry.js 里的 beforeSend 只有装配
+   * 用例和静态门禁会红、六臂矩阵全绿——v11 迁移时实测踩到过这个缺口（变异 M2）。
+   */
+  it('凭据不出网、request 只剩 method/url、beforeSend 就是 scrubOutboundEvent', async () => {
+    const frames = [];
+    const realInit = Sentry.init;
+    let captured = null;
+    Sentry.init = (opts) => {
+      captured = opts;
+      return {};
+    };
+    try {
+      process.env.SENTRY_DSN = FAKE_DSN;
+      expect(sentryModule.initSentry()).toBe(true);
+    } finally {
+      Sentry.init = realInit;
+      delete process.env.SENTRY_DSN;
+    }
+    expect(captured).toBeTruthy();
+    expect(captured.beforeSend).toBe(scrubOutboundEvent);
+
+    // 用捕获到的真实实参 init：只补探测器需要的 transport 与 httpServerIntegration，
+    // 其余（dataCollection / integrations / beforeSend）一概原样，不"为了好测而改配"
+    Sentry.init({
+      ...captured,
+      dsn: FAKE_DSN,
+      environment: 'test',
+      tracesSampleRate: 0,
+      defaultIntegrations: false,
+      integrations: [Sentry.httpServerIntegration(), ...captured.integrations],
+      transport: () => ({
+        send: (request) => {
+          const envelope =
+            request && typeof request === 'object' && 'body' in request ? request.body : request;
+          frames.push(JSON.stringify(envelope));
+          return Promise.resolve({ reason: 'sent' });
+        },
+        flush: () => Promise.resolve(true),
+      }),
+    });
+
+    const server = http.createServer((req, res) => {
+      Sentry.captureException(new Error('boom-5xx'));
+      res.end('ok');
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const body = JSON.stringify({ username: 'admin', password: BODY_TICKET, mfaCode: MFA_TICKET });
+    await new Promise((resolve) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port: server.address().port,
+          path: '/api/auth/login?next=' + QUERY_TICKET,
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer BEARER_7ab1_secret',
+            cookie: 'sid=SIDCOOKIE_4d2e_secret; probe_ticket=' + COOKIE_TICKET,
+            'x-probe-ticket': HEADER_TICKET,
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          res.resume();
+          res.on('end', resolve);
+        }
+      );
+      req.end(body);
+    });
+    const deadline = Date.now() + 4000;
+    while (frames.length === 0) {
+      if (Date.now() > deadline)
+        throw new Error('探测器失效：4s 内 transport 没有收到任何 envelope');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await Sentry.close(1000);
+    await new Promise((resolve) => server.close(resolve));
+
+    const bytes = frames.join('\n');
+    // jest 的 expect 只收一个参数（vitest 才收 message），故收集后一次断言
+    const leaked = MARKERS.filter((m) => bytes.includes(m.token)).map((m) => m.label);
+    expect(leaked).toEqual([]);
+    const envelope = JSON.parse(frames[0]);
+    const [itemHeader, itemPayload] = envelope[1][0];
+    if (itemHeader.type !== 'event') {
+      throw new Error(`探测器形状已变：首帧 item type = ${String(itemHeader.type)}`);
+    }
+    const event = typeof itemPayload === 'string' ? JSON.parse(itemPayload) : itemPayload;
+    expect(Object.keys(event.request).sort()).toEqual([...SENTRY_ALLOWED_REQUEST_FIELDS].sort());
+    expect('user' in event).toBe(false);
+    // v11 真服务器请求的 url 带真实 host:port（v7 时代是 <no host>，别照抄记忆）；
+    // 判据是"以路径结尾且不带查询串"——查询串只能被 beforeSend 削掉
+    expect(event.request.url.endsWith('/api/auth/login')).toBe(true);
+    expect(event.request.url).not.toContain('?');
+  });
+});
+
+describe('装配实参（Sentry.init 收到什么）', () => {
   const realInit = Sentry.init;
-  const realRequestHandler = Sentry.Handlers.requestHandler;
   const realCaptureException = Sentry.captureException;
   const realNodeEnv = process.env.NODE_ENV;
   let initCalls;
-  let handlerCalls;
   let captureCalls;
 
   beforeEach(() => {
     initCalls = [];
-    handlerCalls = [];
     captureCalls = [];
     Sentry.init = (opts) => {
       initCalls.push(opts);
       return {};
-    };
-    Sentry.Handlers.requestHandler = (...args) => {
-      handlerCalls.push(args);
-      return (_req, _res, next) => next();
     };
     Sentry.captureException = (err, hint) => captureCalls.push({ err, hint });
   });
 
   afterEach(() => {
     Sentry.init = realInit;
-    Sentry.Handlers.requestHandler = realRequestHandler;
     Sentry.captureException = realCaptureException;
     delete process.env.SENTRY_DSN;
     process.env.NODE_ENV = realNodeEnv;
@@ -465,18 +581,40 @@ describe('装配实参（Sentry.init / Handlers.requestHandler 收到什么）',
     expect(initCalls).toHaveLength(0);
   });
 
-  it('sentryRequestHandler 传的是白名单而不是无参调用', () => {
-    sentryModule.sentryRequestHandler();
-    expect(handlerCalls).toHaveLength(1);
-    expect(handlerCalls[0]).toHaveLength(1);
-    expect(handlerCalls[0][0]).toEqual({ include: { request: ['method', 'url'], user: false } });
+  it('init 实参只带一个 requestDataIntegration（tracing 交给默认 httpIntegration，不重复挂）', () => {
+    process.env.SENTRY_DSN = FAKE_DSN;
+    sentryModule.initSentry();
+    expect(initCalls[0].integrations).toHaveLength(1);
+    expect(initCalls[0].integrations[0].name).toBe('RequestData');
   });
 
-  it('白名单里不含任何正文/凭据类字段', () => {
-    // 'user' 在这一列是有实测依据的：它不是 SDK 的 case 名，走 default 分支 ⇒ 原样抄 req.user
-    const dangerous = ['data', 'body', 'cookies', 'headers', 'query_string', 'user', 'session'];
-    expect(SENTRY_REQUEST_INCLUDE.request.filter((k) => dangerous.includes(k))).toEqual([]);
-    expect(SENTRY_REQUEST_INCLUDE.user).toBe(false);
+  it('init 实参带 dataCollection 总闸（v11.4.0 起 sendDefaultPii 不再映射 dataCollection，不写就是全开）', () => {
+    process.env.SENTRY_DSN = FAKE_DSN;
+    sentryModule.initSentry();
+    expect(initCalls[0].dataCollection).toEqual({
+      userInfo: false,
+      cookies: false,
+      httpHeaders: false,
+      httpBodies: [],
+      urlQueryParams: false,
+    });
+  });
+
+  it('SENTRY_REQUEST_INCLUDE 是 v11 扁平六键、只放行 url（v7 的 request/user 两级写法已不存在）', () => {
+    expect(Object.keys(SENTRY_REQUEST_INCLUDE).sort()).toEqual([
+      'cookies',
+      'data',
+      'headers',
+      'ip',
+      'query_string',
+      'url',
+    ]);
+    expect(Object.entries(SENTRY_REQUEST_INCLUDE).filter(([, v]) => v === true)).toEqual([
+      ['url', true],
+    ]);
+    // v7 遗留键一个都不许有：它们在 v11 的 include 里不是"关了"，是"不存在"
+    expect(SENTRY_REQUEST_INCLUDE).not.toHaveProperty('request');
+    expect(SENTRY_REQUEST_INCLUDE).not.toHaveProperty('user');
   });
 
   it('isSentryInitialized 是单向开关：初始化后为 true，未配置 DSN 不翻它', () => {
@@ -495,6 +633,29 @@ describe('装配实参（Sentry.init / Handlers.requestHandler 收到什么）',
   it('tracing/error 两个中间件是 app.js 直接挂的形状（errorHandler 收 (err,req,res,next)）', () => {
     expect(typeof sentryModule.sentryTracingHandler()).toBe('function');
     expect(sentryModule.sentryErrorHandler().length).toBe(4);
+  });
+
+  it('request/tracing 两个 handler 是直通中间件（v11 无 Handlers 导出，不能让 app.use 炸）', () => {
+    for (const factory of [sentryModule.sentryRequestHandler, sentryModule.sentryTracingHandler]) {
+      const mw = factory();
+      expect(mw).toHaveLength(3);
+      let nextCalled = false;
+      mw({}, {}, () => {
+        nextCalled = true;
+      });
+      expect(nextCalled).toBe(true);
+    }
+  });
+
+  it('sentryErrorHandler 捕获后继续向后传（响应仍由本仓 errorHandler 出）', () => {
+    const err = new Error('x');
+    let nextArg = null;
+    sentryModule.sentryErrorHandler()(err, {}, {}, (e) => {
+      nextArg = e;
+    });
+    expect(nextArg).toBe(err);
+    expect(captureCalls).toHaveLength(1);
+    expect(captureCalls[0].err).toBe(err);
   });
 
   it('production 采样 10%、environment 跟随 NODE_ENV（未设置时回落 development）', () => {
@@ -544,6 +705,9 @@ describe('单一咽喉（源码门禁：出网收口不能被旁路）', () => {
     .filter((f) => codeView(fs.readFileSync(f, 'utf8')).includes("require('@sentry/node')"))
     .map((f) => path.relative(SRC_ROOT, f).replace(/\\/g, '/'));
 
+  const sentrySrc = () =>
+    codeView(fs.readFileSync(path.join(SRC_ROOT, 'middleware/sentry.js'), 'utf8'));
+
   it('遮注释的判据自身有效（否则整组门禁都是假绿）', () => {
     expect(codeView("require('@sentry/node')")).toContain('@sentry/node');
     expect(codeView("// const S = require('@sentry/node');")).not.toContain('@sentry/node');
@@ -555,16 +719,27 @@ describe('单一咽喉（源码门禁：出网收口不能被旁路）', () => {
     expect(sdkUsers).toEqual(['middleware/sentry.js']);
   });
 
-  it('该文件从不无参调用 Handlers.requestHandler（无参 = 走默认全量采集表）', () => {
-    const src = codeView(fs.readFileSync(path.join(SRC_ROOT, 'middleware/sentry.js'), 'utf8'));
-    // 锚点必须带 Handlers. 前缀：本模块自己导出的 sentryRequestHandler() 就是零参的，
-    // 只写 requestHandler\(\s*\) 会让这条门禁永远红（也永远没人去修它）
-    expect(src.match(/Handlers\.requestHandler\(\s*\)/g) || []).toEqual([]);
-    expect(src).toMatch(/Handlers\.requestHandler\(\{\s*include:/);
+  it('该文件不残留 v7 的 Handlers./Integrations. 调用（v11 这两个导出已移除，残留即装不上）', () => {
+    const src = sentrySrc();
+    expect(src.match(/Handlers\.\w+/g) || []).toEqual([]);
+    expect(src.match(/Sentry\.Integrations\.\w+/g) || []).toEqual([]);
+  });
+
+  it('requestDataIntegration 必须显式接上 SENTRY_REQUEST_INCLUDE（不接 = 走 v11 推导默认：cookies/headers/query_string/ip 全开）', () => {
+    expect(sentrySrc()).toMatch(
+      /requestDataIntegration\(\{\s*include:\s*SENTRY_REQUEST_INCLUDE\s*\}\)/
+    );
+  });
+
+  it('init 必须带 dataCollection 总闸（v11.4.0 起 sendDefaultPii 不再映射，缺了就是全开）', () => {
+    const src = sentrySrc();
+    expect(src).toMatch(/dataCollection:\s*\{/);
+    expect(src).toMatch(/httpBodies:\s*\[\]/);
+    expect(src).toMatch(/userInfo:\s*false/);
   });
 
   it('该文件的 Sentry.init 一定带 beforeSend', () => {
-    const src = codeView(fs.readFileSync(path.join(SRC_ROOT, 'middleware/sentry.js'), 'utf8'));
+    const src = sentrySrc();
     expect(src.match(/beforeSend:/g) || []).toHaveLength(1);
     expect(src).toMatch(/beforeSend:\s*scrubOutboundEvent/);
   });
