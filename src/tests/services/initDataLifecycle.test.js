@@ -827,20 +827,24 @@ describe('initData 启动播种与安全对账', () => {
   // ==================================================================
   describe('reconcileUserIndexes：username 索引对账', () => {
     /**
-     * 重建 users 集合，只保留 legacy username_1（模拟升级前的库）。
+     * 重建 users 集合，只保留 legacy username_1 + email_1（模拟升级前的库）。
      *
      * 必须显式删掉 schema 注册的 username_ci：dropCollection 在 mongoose 连接池下
      * 可能被同 worker 的 autoIndex/前序 syncIndexes 重新建回来，届时「大小写冲突」
      * 两条测试数据在插入阶段就会撞 username_ci（seed=5 实测），E2 再也走不到被测分支。
+     *
+     * A3（2026-10-16）同理必须显式删掉 emailKey_1：它是「迁移前」与「迁移后」的分界，
+     * switchEmailIndexToKey 的 ②③ 两步判据前置就是「新索引还不存在」。不显式保证，
+     * 同 worker 的 autoIndex 一旦把它补回来，E8/E9 会退化成随机通过（插两行同键直接
+     * E11000），而 ③ 那条分支再也走不到。
      */
     const seedLegacyIndex = async () => {
       await mongoose.connection.dropCollection('users').catch(() => {});
       const coll = mongoose.connection.collection('users');
       await coll.createIndex({ username: 1 }, { unique: true, name: 'username_1' });
       await coll.createIndex({ email: 1 }, { unique: true, name: 'email_1' });
-      const names = (await coll.indexes()).map((i) => i.name);
-      if (names.includes('username_ci')) {
-        await coll.dropIndex('username_ci');
+      for (const stale of ['username_ci', 'emailKey_1']) {
+        await coll.dropIndex(stale).catch(() => {});
       }
       return coll;
     };
@@ -904,6 +908,135 @@ describe('initData 启动播种与安全对账', () => {
       expect(names).not.toContain('username_1');
       expect(names).toContain('email_1');
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('username_1'));
+      await User.syncIndexes();
+    });
+
+    /**
+     * A3（2026-10-16）switchEmailIndexToKey 的四步 fail-closed 对账。
+     *
+     * 为什么单独成组：这四步全部是「不满足就**保留旧索引**并告警」，即安全语义是
+     * 「宁可维持旧约束，也不制造唯一性真空期」。原实现对 ① 有间接覆盖（E3 的库形态
+     * 恰好落在 ①），但 ②重复键 / ③新索引未建 / ④删旧索引 三条分支从未执行过——
+     * 而 CI 的 `Run tests with coverage` 门槛（jest.config.js 对 initData.js 声明
+     * functions: 97）正是被这三条打红（函数 39/41 = 95.12%，未覆盖的正是 :1199 的
+     * `dups.map(...)` 与 :1210 的 `.find(...)`）。
+     *
+     * 断言口径：只断言**可观测的数据状态**（索引列表、日志正文），不断言内部调用次数——
+     * 后者会把「实现是否用了 aggregate」这类细节钉死，换个等价写法就假红。
+     */
+    const errText = () => logger.error.mock.calls.map((c) => String(c[0])).join('\n');
+
+    test('E7 ① emailKey 未回填（缺失 + 空串两种形态）时保留 email_1 并点名数量', async () => {
+      const coll = await seedLegacyIndex();
+      // 「字段缺失」与「显式空串」在唯一索引眼里是同一个键（null / ''），
+      // 两种形态都要被拦下——只挡缺失会让空串行照旧撞 E11000
+      await coll.insertOne({ username: 'raw_missing', email: 'e7a@example.com', password: 'x' });
+      await coll.insertOne({
+        username: 'raw_empty',
+        email: 'e7b@example.com',
+        password: 'x',
+        emailKey: '',
+      });
+
+      await reconcileUserIndexes();
+
+      expect((await coll.indexes()).map((i) => i.name)).toContain('email_1');
+      expect(errText()).toContain('2 行的 emailKey 未回填');
+      // 告警必须给出可执行的修法，否则运维只知道"坏了"、不知道"怎么修"
+      expect(errText()).toContain('migrate-pii-encryption.js --keys-only');
+      await User.syncIndexes();
+    });
+
+    test('E8 ② 回填后 emailKey 仍重复（历史裸写）时保留 email_1 并点名重复组', async () => {
+      const coll = await seedLegacyIndex();
+      // 旧索引只保证**明文列**唯一，而回填是把明文映射成 HMAC：
+      // 历史上有绕过 schema 的裸写造出重复邮箱时，回填后就是重复键，新索引照样建不起来
+      await coll.insertOne({
+        username: 'dup_a',
+        email: 'e8a@example.com',
+        password: 'x',
+        emailKey: 'k_e8',
+      });
+      await coll.insertOne({
+        username: 'dup_b',
+        email: 'e8b@example.com',
+        password: 'x',
+        emailKey: 'k_e8',
+      });
+
+      await reconcileUserIndexes();
+
+      // ② 不过 ⇒ 绝不进入 ④：旧索引必须还在
+      expect((await coll.indexes()).map((i) => i.name)).toContain('email_1');
+      expect(errText()).toContain('检测到重复邮箱');
+      // 重复组要报出行数与 _id，否则运维无法定位要合并哪两行
+      expect(errText()).toContain('2 行');
+      // 但不得回显检索键本身：emailKey 是「拿一个邮箱问系统里有没有人用」的预言机，
+      // User.js 的响应排除清单同样摘掉它——日志里回显等于把它交给持日志者
+      expect(errText()).not.toContain('k_e8');
+
+      // 清理必须**先清行再同步**：本用例刻意留下重复 emailKey（正是被测的坏状态），
+      // 而 User.syncIndexes() 会真的去建 emailKey_1 唯一索引 ⇒ 建不起来会抛 E11000，
+      // 让用例变成"清理动作失败"的假红（本机实测踩过：报错栈落在 createIndex 上）
+      await User.collection.deleteMany({});
+      await User.syncIndexes();
+    });
+
+    test('E9 ③ emailKey_1 尚未建立时不得删 email_1（避免唯一性真空期）', async () => {
+      const coll = await seedLegacyIndex();
+      await coll.insertOne({
+        username: 'solo9',
+        email: 'e9@example.com',
+        password: 'x',
+        emailKey: 'k_e9',
+      });
+      // 前置校验：② 已通过（无重复键），而 ③ 要看的索引确实不存在
+      expect((await coll.indexes()).map((i) => i.name)).not.toContain('emailKey_1');
+
+      await reconcileUserIndexes();
+
+      expect((await coll.indexes()).map((i) => i.name)).toContain('email_1');
+      expect(errText()).toContain('emailKey_1 唯一索引尚未建立');
+      await User.syncIndexes();
+    });
+
+    test('E10 ④ 四步全满足才删 email_1，且约束真的换到 emailKey_1 上（行为闭环）', async () => {
+      const coll = await seedLegacyIndex();
+      await coll.insertOne({
+        username: 'migrated',
+        email: 'e10@example.com',
+        password: 'x',
+        emailKey: 'k_e10',
+      });
+      // 模拟 mongoose autoIndex 已按 schema 建好新索引（唯一 + 与 schema 同名）
+      await coll.createIndex(
+        { emailKey: 1 },
+        { unique: true, background: true, name: 'emailKey_1' }
+      );
+
+      await reconcileUserIndexes();
+
+      const names = (await coll.indexes()).map((i) => i.name);
+      expect(names).not.toContain('email_1');
+      expect(names).toContain('emailKey_1');
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('已删除 users 的遗留索引 email_1')
+      );
+
+      // 行为闭环：不是"索引名换了"，而是约束真的搬到了检索键上——
+      // 同 emailKey 的第二行必须被拒（明文列此时已无唯一索引）
+      let blockedCode = null;
+      try {
+        await coll.insertOne({
+          username: 'migrated2',
+          email: 'e10b@example.com',
+          password: 'x',
+          emailKey: 'k_e10',
+        });
+      } catch (e) {
+        blockedCode = e.code;
+      }
+      expect(blockedCode).toBe(11000);
       await User.syncIndexes();
     });
 
