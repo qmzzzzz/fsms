@@ -431,6 +431,29 @@ const defaultRoles = [
     isBuiltIn: true,
   },
   {
+    // A6（2026-10-16）职责分离：把「查看审计」从「执行敏感操作」的角色里拆出来。
+    //
+    // 背景：SECURITY_ADMIN 同时持有 user:delete 与 security:audit —— 一个角色既能做
+    // 敏感操作、又能查看这些操作的审计记录。主篡改向量（改/删审计记录）已被审计链
+    // （utils/auditChain.js + scripts/verify-audit-chain.js，append-only + hash chain）覆盖，
+    // 剩下的是合规口味问题：执行者与监督者不应是同一人。
+    //
+    // 权限集**只有两条只读**（security:audit + security:stats），没有任何写权限：
+    // 这正是本角色的存在意义——它拿到审计读权限的同时不可能改变任何数据。
+    //
+    // level 取 9（不是 8）是刻意的：数据范围由 level 决定（middleware/rbac.js:169，
+    // ≥9 全部 / ≥7 本部门 / ≥5 仅自己）。外部审计与上级监督要看的正是**全量**审计视图，
+    // 与 SECURITY_ADMIN 同档（8 ⇒ 本部门）会让这个角色看不到本部门之外的记录、
+    // 从而失去拆分的意义。level 只影响数据范围，不授予任何权限——权限一律来自
+    // 下面的 rolePermissionMap，故 level 9 不会让它多拿到任何一条操作权
+    // （isGlobalAdmin 判据是 `*:*` 权限而不是 level，见 controllers/roleGuards.js:122）。
+    name: '审计监督员',
+    code: 'AUDIT_VIEWER',
+    description: '只读审计日志与安全统计，供外部审计/上级监督使用（无任何写权限）',
+    level: 9,
+    isBuiltIn: true,
+  },
+  {
     name: '消防主管',
     code: 'FIRE_SUPERVISOR',
     description: '负责报警处理和巡检审核',
@@ -498,6 +521,14 @@ const rolePermissionMap = {
     'report:read',
     'report:export',
   ],
+
+  // 审计监督员（level 9）：**只读**审计与安全统计，无任何写权限（A6 职责分离）
+  //
+  // 与 SECURITY_ADMIN 的差别只有一处、且是有意的一处：不持 user:delete / role:assign
+  // 等任何敏感操作权限。于是"执行敏感操作"与"查看这些操作的审计"落在两个角色上。
+  // 刻意**不**给 report:export：审计导出（security_audit-logs_export）是 security:audit
+  // 下的独立出口，业务报表导出与审计监督无关，多给一条只会扩大数据外发面。
+  AUDIT_VIEWER: ['security:stats', 'security:audit'],
 
   // 消防主管（level 6）：报警处理 + 巡检审核 + 设备维护 + 报表
   FIRE_SUPERVISOR: [
@@ -857,9 +888,15 @@ const createDefaultAdmin = async () => {
   try {
     admin = await createWith(desiredEmail);
   } catch (err) {
-    // 仅对 email 唯一键冲突降级；其他错误（含 username 冲突）照常抛出
+    // 仅对**邮箱唯一键**冲突降级；其他错误（含 username 冲突）照常抛出。
+    // A3：冲突键名有两个可能的来源，必须都认——
+    //   · `emailKey_1`：新索引（schema 上 email 的唯一约束已搬到检索键列）；
+    //   · `email_1`：**遗留**索引（明文列），它要等 reconcileUserIndexes 四步走完
+    //     才被删掉，在此之前仍会先于新索引报冲突。
+    // 只认其中一个的后果是把"邮箱被抢注"误判成未知错误 → 重新抛 → 开机 DoS，
+    // 而那正是本段两层防护（P2-22）要挡的东西。
     const conflictKey = err?.code === 11000 ? Object.keys(err.keyPattern || {})[0] : null;
-    if (conflictKey !== 'email') throw err;
+    if (conflictKey !== 'emailKey' && conflictKey !== 'email') throw err;
 
     const fallbackEmail = `admin+${Date.now().toString(36)}@localhost.invalid`;
     logger.warn(
@@ -1072,43 +1109,130 @@ const initSystemConfig = async () => {
  *
  * @returns {Promise<void>}
  */
+const dropLegacyUsernameIndex = async (coll, indexes) => {
+  const legacy = indexes.find((idx) => idx.name === 'username_1');
+  if (!legacy) return;
+
+  // 大小写归一化后分组，找出视觉等同却并存的账号
+  const conflicts = await coll
+    .aggregate([
+      {
+        $group: {
+          _id: { $toLower: '$username' },
+          count: { $sum: 1 },
+          names: { $addToSet: '$username' },
+        },
+      },
+      { $match: { count: { $gt: 1 } } },
+    ])
+    .toArray();
+
+  if (conflicts.length > 0) {
+    const detail = conflicts.map((c) => c.names.join('/')).join('；');
+    logger.error(
+      '检测到大小写冲突的用户名，无法启用大小写不敏感唯一索引：' +
+        `${detail}。旧索引 username_1 已保留（约束不会中断），` +
+        '请人工合并或重命名冲突账号后重启服务完成索引升级'
+    );
+    return;
+  }
+
+  await coll.dropIndex('username_1');
+  logger.warn(
+    '已删除 users 的遗留索引 username_1（大小写敏感）：' +
+      '该索引允许 Admin/admin 并存，构成操作者身份仿冒面；' +
+      '大小写不敏感的 username_ci 唯一索引由 schema 定义接管'
+  );
+};
+
+/**
+ * A3（2026-10-16）：把 users 的唯一约束从**明文列 email** 搬到**检索键列 emailKey**。
+ *
+ * 为什么必须搬：email 已 at-rest 加密（随机 IV），明文列上不存在"相等"这回事，
+ * `email_1` 唯一索引对密文形同虚设 ⇒ 唯一性约束出现真空期。而 emailKey 是
+ * HMAC（确定性），唯一索引在它上面才真的成立。
+ *
+ * **四步顺序固定，任一步不满足即保留旧索引 + 告警**（fail-loud，照抄 username_1 的形态）：
+ *   ① 无缺失/空 emailKey 的行；② 无重复 emailKey；③ emailKey_1 确实已存在；④ 才删 email_1。
+ *
+ * 每一步都在防一个具体的坏结果（逐条实测，见 A3 方案 §2/§3）：
+ *   · ① 唯一索引把「字段缺失」视作 null，多条缺失即
+ *     `E11000 dup key: { emailKey: null }`，索引直接建不起来；`default: ''` 让空串行
+ *     同样冲突（实测两行 `emailKey: ''` 也建不起来）。
+ *   · ② 旧索引只保证明文列唯一，而回填是把明文映射成 HMAC——若历史上有绕过 schema
+ *     的裸写造出重复邮箱，回填后就是重复键，新索引照样建不起来。
+ *   · ③ 新索引由 mongoose autoIndex 依 schema 建立，**不保证**在本次启动的对账之前
+ *     已经完成。没确认就先删旧的，等于把唯一性约束清零一段时间。
+ *   · ④ 顺序不能反：先删旧再建新，若存在冲突则**两个约束都没有**（username_1 的教训）。
+ *
+ * @returns {Promise<void>}
+ */
+const switchEmailIndexToKey = async (coll, indexes) => {
+  const legacy = indexes.find((idx) => idx.name === 'email_1');
+  if (!legacy) return; // 已是目标形态（或本库从未建过明文唯一索引）
+
+  // ① `{ emailKey: null }` 在 MongoDB 里同时匹配「字段缺失」与「显式 null」，
+  //    再并上空串——三种形态在唯一索引眼里都是同一个键，都会让索引建不起来。
+  const unbackfilled = await coll.countDocuments({
+    $or: [{ emailKey: null }, { emailKey: '' }],
+  });
+  if (unbackfilled > 0) {
+    logger.error(
+      `users 集合有 ${unbackfilled} 行的 emailKey 未回填（缺失/空串），` +
+        '无法启用 emailKey_1 唯一索引：请先执行 ' +
+        '`ALLOWED_SOURCE_DB=<库名> node scripts/migrate-pii-encryption.js --keys-only --apply --yes` ' +
+        '回填全表，再重启服务完成索引切换。' +
+        '旧索引 email_1 已保留（唯一性约束不会中断）。'
+    );
+    return;
+  }
+
+  // ② 回填后仍重复 ⇒ 历史上有绕过 schema 的裸写造出了重复邮箱
+  const dups = await coll
+    .aggregate([
+      { $group: { _id: '$emailKey', count: { $sum: 1 }, ids: { $addToSet: '$_id' } } },
+      { $match: { count: { $gt: 1 } } },
+      { $limit: 5 },
+    ])
+    .toArray();
+  if (dups.length > 0) {
+    const detail = dups.map((d) => `${d.count} 行（_id: ${d.ids.join(', ')}）`).join('；');
+    logger.error(
+      `检测到重复邮箱（emailKey 相同，至少 ${dups.length} 组）：${detail}。` +
+        '无法启用 emailKey_1 唯一索引——请人工合并或改掉重复账号的邮箱后重启服务。' +
+        '旧索引 email_1 已保留（唯一性约束不会中断）。'
+    );
+    return;
+  }
+
+  // ③ 新索引必须真的存在。emailKey_1 由 schema 声明 + mongoose autoIndex 建立，
+  //    不保证在本次对账之前完成；未确认就删旧的 = 制造唯一性真空期。
+  const fresh = (await coll.indexes()).find((idx) => idx.name === 'emailKey_1');
+  if (!fresh) {
+    logger.error(
+      'emailKey_1 唯一索引尚未建立（mongoose autoIndex 未完成或创建失败），' +
+        '本次不删除旧索引 email_1——先删旧的会让明文列的唯一性约束出现真空期。' +
+        '请确认启动日志无索引创建失败后重启服务完成切换。'
+    );
+    return;
+  }
+
+  await coll.dropIndex('email_1');
+  logger.warn(
+    '已删除 users 的遗留索引 email_1（明文列唯一）：email 列已 at-rest 加密，' +
+      '该索引对密文形同虚设（随机 IV 下不存在"相等"）；' +
+      '唯一性约束现由 emailKey_1（HMAC 检索键）承担，约束真空期结束'
+  );
+};
+
 const reconcileUserIndexes = async () => {
   try {
     const coll = mongoose.connection.collection('users');
     const indexes = await coll.indexes();
-    const legacy = indexes.find((idx) => idx.name === 'username_1');
-    if (!legacy) return;
-
-    // 大小写归一化后分组，找出视觉等同却并存的账号
-    const conflicts = await coll
-      .aggregate([
-        {
-          $group: {
-            _id: { $toLower: '$username' },
-            count: { $sum: 1 },
-            names: { $addToSet: '$username' },
-          },
-        },
-        { $match: { count: { $gt: 1 } } },
-      ])
-      .toArray();
-
-    if (conflicts.length > 0) {
-      const detail = conflicts.map((c) => c.names.join('/')).join('；');
-      logger.error(
-        '检测到大小写冲突的用户名，无法启用大小写不敏感唯一索引：' +
-          `${detail}。旧索引 username_1 已保留（约束不会中断），` +
-          '请人工合并或重命名冲突账号后重启服务完成索引升级'
-      );
-      return;
-    }
-
-    await coll.dropIndex('username_1');
-    logger.warn(
-      '已删除 users 的遗留索引 username_1（大小写敏感）：' +
-        '该索引允许 Admin/admin 并存，构成操作者身份仿冒面；' +
-        '大小写不敏感的 username_ci 唯一索引由 schema 定义接管'
-    );
+    // 两件事都要做，故不能在任一分支里 return——原实现是 `if (!legacy) return;`，
+    // 那样 username_1 不存在时邮箱这一半会被整体跳过。
+    await dropLegacyUsernameIndex(coll, indexes);
+    await switchEmailIndexToKey(coll, indexes);
   } catch (e) {
     if (e.codeName === 'NamespaceNotFound' || /ns does not exist/i.test(e.message || '')) return;
     logger.warn(`users 索引对账跳过：${e.message}`);
@@ -1167,8 +1291,10 @@ const initializeSystem = async () => {
   try {
     await initPermissions();
     await initRoles();
-    // 用户名索引对账须在任何写入 users 之前：createDefaultAdmin 依赖
-    // findByUsername 的 collation 判重，索引缺失时该查询会退化为全表扫描
+    // users 索引对账（username + email 两件事）须在任何写入 users 之前：
+    // ① createDefaultAdmin 依赖 findByUsername 的 collation 判重，索引缺失时该查询
+    //    会退化为全表扫描；② A3 的 emailKey_1 切换若拖到建号之后，本进程内新建的
+    //    管理员行会与"旧索引仍在"的判定打架（见 switchEmailIndexToKey 的四步）。
     await reconcileUserIndexes();
     await createDefaultAdmin();
     // 超管对账须在 createDefaultAdmin 之后：首次启动时 admin 账户此刻才存在
