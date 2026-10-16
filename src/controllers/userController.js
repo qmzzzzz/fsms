@@ -33,6 +33,8 @@ const { validateRules } = require('../utils/ipRange');
 const { decryptLoginCredential } = require('../utils/loginCipher');
 const { checkSuperAdminMembership, isSuperAdminRole } = require('../utils/superAdmin');
 const { normalizeEmailKey } = require('../utils/emailKey');
+// A3：email 已 at-rest 加密 ⇒ 查重改走 HMAC 检索键（明文列随机 IV，相等性不成立）
+const { piiSearchKey } = require('../utils/piiCrypto');
 const statsCache = require('../services/statsCache');
 const { invalidateUserCache } = require('../middleware/auth');
 const { businessMonthStart } = require('../constants/timezone');
@@ -385,10 +387,13 @@ const createUser = asyncHandler(async (req, res) => {
 
   // 检查用户名是否已存在
   // P3-30：username 判重走 collation（大小写不敏感），与唯一索引 username_ci 同口径；
-  // 邮箱保持默认 collation 以命中 email_1 索引，故不能合并为一次 $or 查询
+  // A3（2026-10-16）：邮箱分支改查 **emailKey**（HMAC 检索键，唯一索引）。
+  // 原先查的是明文 `email_1`，而 email 列已加密——继续查明文列会恒不命中，
+  // 表现为「建号时撞他人邮箱不再报 400」。两次查询仍不能合并为一次 $or：
+  // 带 collation 的 username 分支与不带 collation 的 emailKey 分支索引不同。
   const [dupName, dupEmail] = await Promise.all([
     userService.findDuplicateUsername(username),
-    userService.findOneUser({ email }),
+    userService.findOneUser({ emailKey: piiSearchKey(email) }),
   ]);
   if (dupName || dupEmail) {
     return ApiResponse.error(res, dupName ? '用户名已存在' : '邮箱已被使用', 400);
@@ -537,13 +542,18 @@ const rejectOutOfScopeFieldChange = async (req, res, { user, department, allowed
  * @returns {Promise<boolean>} true 表示邮箱已被他人占用，调用方应立即 return
  */
 const emailTakenBySomeoneElse = async (email, user) => {
-  // 查重本身不会漏：Mongoose 把 schema 的 lowercase setter 同时作用于查询条件。
-  // 这里显式取规范形态是为了两件事：① 与 user.email 的比较是普通 JS 比较，没有 setter；
-  // ② 不把正确性押在"query setter"这一条 Mongoose 隐式行为上（历史上变过）。见 utils/emailKey.js。
-  const emailKey = normalizeEmailKey(email);
-  if (emailKey === undefined || emailKey === normalizeEmailKey(user.email)) return false;
+  // A3（2026-10-16）：查重改走 **emailKey**（HMAC 检索键）——email 列已加密，
+  // 明文相等性在随机 IV 的密文列上不成立，继续查 `{ email }` 会恒不命中，
+  // 表现为「管理员改他人邮箱撞车不再报 EMAIL_TAKEN_SHORT」。
+  // 局部变量刻意叫 `normalizedEmail` 而**不叫** `emailKey`：后者现在是 schema 上的
+  // HMAC 字段名，同名不同义极易写出 `user.emailKey = <小写明文>`（旧代码正是这个名字）。
+  // 归一化（lowercase）仍要显式取一次：与 user.email 的比较是普通 JS 比较，没有 setter。
+  const normalizedEmail = normalizeEmailKey(email);
+  if (normalizedEmail === undefined || normalizedEmail === normalizeEmailKey(user.email)) {
+    return false;
+  }
   const existing = await userService.findOneUser({
-    email: emailKey,
+    emailKey: piiSearchKey(normalizedEmail),
     _id: { $ne: user._id },
   });
   return Boolean(existing);

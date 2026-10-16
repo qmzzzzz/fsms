@@ -15,6 +15,12 @@
  *
  * 第 4 条是管理员路径的对应格子（那里 `_id:{$ne}` 把自撞挡掉了，故它在变异体下也应为绿
  * —— 记在这里是为了说明"这条不区分修复前后"，别把它当成修复证据）。
+ *
+ * ⚠️ A3（2026-10-16）改动：本文件原先**唯一的取邮箱方式**是 `.lean()` 读
+ * （`(await User.findById(id).lean()).email`）。`.lean()` **绕过 getter**，
+ * 而 email 已 at-rest 加密 ⇒ 它拿到的会是 `enc.v2.…` 密文，5 条用例会整体失真。
+ * 这里改成文档读（走 getter 透明解密）。**这是"`.lean()` 绕过 getter"的活标本**，
+ * 留档在此：新写用户读路径时，只要经过 PII 列就必须是文档读，不能用 lean。
  */
 
 const mongoose = require('mongoose');
@@ -107,7 +113,9 @@ describe('邮箱大小写规范化：比对、查重、落库同形态', () => {
     }
   });
 
-  const emailOf = async (id) => (await User.findById(id).lean()).email;
+  // 必须走**文档读**：`.lean()` 绕过字段 getter，而 email 已 at-rest 加密，
+  // lean 拿到的是 `enc.v2.…` 密文（见文件头）。这里读的是 getter 解密后的明文。
+  const emailOf = async (id) => (await User.findById(id)).email;
 
   test('本人资料：撞他人邮箱的大写形态 ⇒ 专属码 EMAIL_TAKEN', async () => {
     const taken = await emailOf(dupId);

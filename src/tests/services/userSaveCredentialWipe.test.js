@@ -75,13 +75,19 @@ const authService = require('../../services/authService');
 const userService = require('../../services/userService');
 
 /**
- * 凭证列清单：这里是**独立字面量**，不从 helper 取。
+ * 凭证/检索键列清单：这里是**独立字面量**，不从 helper 取。
  * 否则 helper 退化成 `{}` 时，断言集合也同步变小，判据空转（第 2 族"零断言台账"）。
+ *
+ * A3（2026-10-16）追加 `emailKey` / `emailGrams`：email 转为 at-rest 加密后，
+ * 检索键（HMAC，唯一索引）与子串盲索引（n-gram）都是 select:false 路径，
+ * 一并纳入"载入端不写投影就会被 schema 默认值清掉"的守护面。
  */
 const CREDENTIAL_PATHS = [
   'password',
   'passwordHistory',
   'phoneKey',
+  'emailKey',
+  'emailGrams',
   'mfaSecret',
   'mfaLastCounter',
   'mfaRecoveryCodes',
@@ -219,7 +225,7 @@ describe('第 0 组 · 仪器自证：采样点确实能看见清空', () => {
 });
 
 describe('第 1 组 · helper 的派生形状', () => {
-  test('键集合等于独立字面量的 8 条凭证路径，值全为 0，无 - 前缀', () => {
+  test('键集合等于独立字面量的 10 条凭证/检索键路径，值全为 0，无 - 前缀', () => {
     const projection = RealUser.unselectedCredentialProjection();
     expect(Object.keys(projection).sort()).toEqual([...CREDENTIAL_PATHS].sort());
     expect(Object.values(projection).every((v) => v === 0)).toBe(true);
@@ -240,7 +246,7 @@ describe('第 1 组 · helper 的派生形状', () => {
     } finally {
       delete RealUser.schema.paths[path];
       delete RealUser.schema.tree[path];
-      // 复原后必须立刻回到 8 条：金丝雀留在 schema 里就等于给真模型加了个字段
+      // 复原后必须立刻回到 10 条：金丝雀留在 schema 里就等于给真模型加了个字段
       expect(Object.keys(RealUser.unselectedCredentialProjection())).toHaveLength(
         CREDENTIAL_PATHS.length
       );

@@ -13,7 +13,8 @@ const config = require('../config');
 // 保存侧则被本 enum 拒。三处同源后这类分叉不再可能。
 const { USER_STATUS } = require('../utils/constants');
 // P1-②：PII at-rest 加密（读侧解密 / 写侧加密 / 检索键），判据收口在 utils/piiCrypto.js
-const { encryptPii, decryptPii, piiSearchKey } = require('../utils/piiCrypto');
+// piiSubstringKeys 是 A3 为「加密后仍要按邮箱片段搜索」补的子串盲索引（n-gram）
+const { encryptPii, decryptPii, piiSearchKey, piiSubstringKeys } = require('../utils/piiCrypto');
 
 /**
  * 用户名比较口径（P3-30）
@@ -55,11 +56,44 @@ const userSchema = new mongoose.Schema(
     email: {
       type: String,
       required: [true, '邮箱不能为空'],
-      unique: true,
-      lowercase: true,
+      // A3（2026-10-16）：email 转为 at-rest 加密。原先挂在字段上的四个约束里有
+      // 三个会直接炸（逐条实测，见 deliverables/A3-email加密实施方案-2026-10-16.md §2）：
+      //   · unique   → 搬到 emailKey 的唯一索引（明文列随机 IV，密文上不可能唯一）
+      //   · lowercase→ **必须摘掉**：它是每次赋值都生效的 setter，而 pre('validate')
+      //     钩子里的 `this.email = encryptPii(...)` 是一次普通赋值 ⇒ 刚写进去的
+      //     `enc.v2.<base64>` 被当场 toLowerCase()，base64 字母表含 A-Z，
+      //     密文当场损坏、读侧 GCM 认证必失败（实测：写入 `...AAA...` 读回 `...aaa...`）。
+      //     归一化改在钩子里、**明文阶段**显式做（与落库形态同一处，不再依赖 setter）。
+      //   · maxlength / match → 摘掉：Mongoose 的 schema validator 在 pre('validate')
+      //     之后执行（实测），那时看到的已是密文 ⇒ 邮箱正则与 254 上限会把**每一行**
+      //     都判非法。两者按同文案前移到钩子的明文阶段（this.invalidate）。
+      // 保留 trim：base64 不含空白字符，作用于密文是无操作（phone 同形，已长期验证）。
       trim: true,
-      maxlength: [254, '邮箱最多 254 个字符'],
-      match: [/^\w+([-+.']\w+)*@\w+([-.]\w+)*\.\w+([-.]\w+)*$/, '请输入有效的邮箱地址'],
+      // v2 密文带 AAD 行绑定（pii:v2:<_id>:email）：读侧必须把文档身份喂回解密，
+      // 跨行复制的密文在这里以 GCM 认证失败暴露。机制与 phone 完全同源。
+      get: function (value) {
+        const doc = this;
+        const subjectId = doc && doc._id !== undefined && doc._id !== null ? String(doc._id) : null;
+        return decryptPii(value, subjectId ? { subjectId, field: 'email' } : null);
+      },
+    },
+    // email 的精确检索键（HMAC，select:false）：注册查重、改资料的"邮箱被他人占用"
+    // 判定都改走这里。明文列随机 IV、不可链接，相等性只在这个键控字段上成立。
+    // 空值落的是空串键（default:''）——email 是 required，正常路径不会有空串行。
+    emailKey: {
+      type: String,
+      select: false,
+      default: '',
+    },
+    // email 的**子串**盲索引（HMAC n-gram，select:false）：加密后
+    // `{ email: new RegExp(...) }` 对密文恒不命中、**静默失效**，用户管理
+    // 「按邮箱片段搜索」会无声消失（不报错、不告警，只是搜不到）。
+    // 每行登记自己包含的全部 3-gram 指纹，查询侧切同样粒度求 $all 交集。
+    // 判据与边界（含"给出的是候选超集"这一条）见 utils/piiCrypto.js 的 piiSubstringKeys。
+    emailGrams: {
+      type: [String],
+      select: false,
+      default: [],
     },
     password: {
       type: String,
@@ -82,10 +116,11 @@ const userSchema = new mongoose.Schema(
       select: false, // 默认不返回密码字段
     },
 
-    // 个人信息（P1-②，2026-09-30 决策修订：仅 phone at-rest 加密）
-    // realName 暂保持明文：姓名**片段模糊检索**是用户列表的日常能力，正则对
-    // 密文不成立，加密它等于砍掉该能力；转入加密需先给姓名检索另立方案。
-    // phone 加密判据收口在 utils/piiCrypto.js：读侧 getter 解密（存量明文
+    // 个人信息（P1-②；A3 2026-10-16 扩到 email）
+    // realName 仍保持明文：姓名**片段模糊检索**是用户列表的日常能力，正则对
+    // 密文不成立，加密它等于砍掉该能力；转入加密需先给姓名检索另立方案
+    // （email 的做法是 piiSubstringKeys 的 n-gram 盲索引，可直接复用）。
+    // phone / email 加密判据收口在 utils/piiCrypto.js：读侧 getter 解密（存量明文
     // 透传），写侧 pre('validate') 钩子加密；长度/格式校验随钩子前移到明文
     // 阶段（validate 阶段看到的已是密文，schema 级校验会把每行都判非法）。
     realName: {
@@ -276,6 +311,20 @@ userSchema.index({ createdAt: -1 });
 // 要按手机号联系人，得先加查询入口（并满足 piiCrypto.piiSearchKey 的非空前提）。
 userSchema.index({ phoneKey: 1 }, { background: true, name: 'phoneKey_1' });
 
+// A3 检索键索引：email 加密后，查重/占用判定全部走 emailKey。
+//
+// ⚠️ **唯一索引的创建顺序有硬约束**：MongoDB 的唯一索引把「字段缺失」视作 null，
+// 而存量行**根本没有 emailKey 字段**，多条缺失即
+// `E11000 dup key: { emailKey: null }`，索引直接建不起来（本机 mongod 实测）。
+// `default: ''` 让空串行同样冲突（实测：两行 `emailKey: ''` 也建不起来），
+// 所以「缺失」与「未回填」两种形态都会被拦下——这正是我们想要的 fail-loud。
+// 顺序：先 `migrate-pii-encryption.js --keys-only` 回填全表，再让本索引落地；
+// 由 initData.reconcileUserIndexes 的四步对账兜住（它同时负责删掉旧的 email_1）。
+// 与 phoneKey 的差异就在这里：phoneKey 非唯一，所以 A1 没有这个顺序约束。
+userSchema.index({ emailKey: 1 }, { unique: true, background: true, name: 'emailKey_1' });
+// 子串盲索引：多键（multikey）**非唯一**，只供 $all 求交集，不构成任何约束
+userSchema.index({ emailGrams: 1 }, { background: true, name: 'emailGrams_1' });
+
 /**
  * 对外响应的字段排除投影（G5：响应过度暴露）
  *
@@ -322,6 +371,15 @@ const USER_RESPONSE_EXCLUDE_FIELDS = [
   // 而那样的读侧目前不存在（接线状态见本文件 phoneKey 索引处的注释）——
   // 排在这里是"默认不许外泄"，不是"某处正在用"。
   '-phoneKey',
+  // A3（2026-10-16）：emailKey 与 phoneKey 同规格——拿一个邮箱问"系统里有没有人用"
+  // 的预言机，且它现在是**唯一索引**，泄露还能反推"该邮箱已被占用"。
+  // emailGrams 同理：它是 email 的 n-gram 指纹集合，泄露等于把"该行邮箱包含哪些
+  // 片段"整份交出去（3-gram 足以让持库者做片段级别的碰撞/猜测）。
+  // ⚠️ **刻意不加 `-email`**：email 是用户管理的展示与表单回填字段（与 phone 的
+  // 处置不同——phone 有专门的合规查看通道，email 没有）。加密只是让它在库里
+  // 是密文，读侧的 getter 照常透明解密，响应形状与加密前逐字段一致。
+  '-emailKey',
+  '-emailGrams',
   '-__v',
 ];
 
@@ -407,26 +465,56 @@ const PII_ENCRYPTED_FIELDS = [
     plain: 'phone',
     key: 'phoneKey',
     max: [20, '手机号最多 20 个字符'],
+    pattern: [/^1[3-9]\d{9}$/, '请输入有效的手机号'],
+  },
+  {
+    plain: 'email',
+    key: 'emailKey',
+    gram: 'emailGrams',
+    max: [254, '邮箱最多 254 个字符'],
+    // 正则与文案逐字沿用被摘掉的 schema `match`（User.js 原 :62）
+    pattern: [/^\w+([-+.']\w+)*@\w+([-.]\w+)*\.\w+([-.]\w+)*$/, '请输入有效的邮箱地址'],
+    // 归一化补位：schema 的 `lowercase` 已摘掉（见 email 字段声明处的实测说明），
+    // 必须在**明文阶段**显式做，否则落库明文的大小写不再统一，
+    // 「A@B.C 与 a@b.c 视为同一邮箱」这条既有契约会静默失效。
+    normalize: (v) => v.trim().toLowerCase(),
   },
 ];
+
+/**
+ * 明文期校验：返回错误文案，`null` 表示通过。
+ * 单独成函数是为了不把 pre('validate') 的圈复杂度推过 lint 棘轮上限——
+ * 它同时要跑长度、格式、归一化三件事。
+ */
+function plaintextViolation(spec, value) {
+  if (value.length > spec.max[0]) return spec.max[1];
+  if (spec.pattern && !spec.pattern[0].test(value)) return spec.pattern[1];
+  return null;
+}
+
 userSchema.pre('validate', function (next) {
   try {
-    for (const { plain, key, max } of PII_ENCRYPTED_FIELDS) {
+    for (const spec of PII_ENCRYPTED_FIELDS) {
+      const { plain, key, gram, normalize } = spec;
       if (!this.isModified(plain)) continue;
       // this[plain] 经 getter：赋值期的明文与存量密文都解回明文（透传口径）
-      const value = this[plain];
+      let value = this[plain];
+      if (value && normalize) {
+        value = normalize(value);
+        // 归一化后的明文回写本字段：摘掉 schema 的 lowercase 之后，这里是唯一的
+        // 归一化点；紧接着的加密会覆盖它，落库仍是密文。
+        this[plain] = value;
+      }
       if (value) {
-        // 长度与格式判据都在加密前（明文阶段），文案与明文时代逐字一致
-        if (value.length > max[0]) {
-          this.invalidate(plain, max[1], value);
+        const violation = plaintextViolation(spec, value);
+        if (violation) {
+          // 长度与格式判据都在加密前（明文阶段），文案与明文时代逐字一致
+          this.invalidate(plain, violation, value);
           continue; // 非法值不加密不落键：失败路径不留任何写入（与复用历史同纪律）
-        }
-        if (plain === 'phone' && !/^1[3-9]\d{9}$/.test(value)) {
-          this.invalidate(plain, '请输入有效的手机号', value);
-          continue;
         }
       }
       this[key] = value ? piiSearchKey(value) : '';
+      if (gram) this[gram] = value ? piiSubstringKeys(value) : [];
       // v2：加密必须绑定行身份（AAD = pii:v2:<_id>:<field>）。_id 缺失时拒绝加密
       // 而不是落到无绑定密文上——无绑定密文与 v1 同样可跨行搬运，等于白改。
       // （_id 由 ObjectId default 在文档创建期生成，走到这里必已存在；此守卫是给

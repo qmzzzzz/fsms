@@ -38,6 +38,10 @@ const { verifyTotpDetailed } = require('../utils/totp');
 const { decryptMfaSecret } = require('../utils/mfaSecret');
 const { decryptLoginCredential } = require('../utils/loginCipher');
 const { normalizeEmailKey } = require('../utils/emailKey');
+// A3：email 已 at-rest 加密，查重不能再比对明文列（随机 IV 下相等性不成立），
+// 统一走 HMAC 检索键 emailKey。piiSearchKey 的归一化口径（trim+lowercase）与
+// normalizeEmailKey 一致，两者在同一个查询里可互换——但语义不同，见 utils/emailKey.js。
+const { piiSearchKey } = require('../utils/piiCrypto');
 const { USER_STATUS } = require('../utils/constants');
 const sessionService = require('./sessionService');
 const { generateToken, generateRefreshToken } = require('./tokenService');
@@ -148,11 +152,16 @@ async function registerUser(body, ctx = {}) {
 
   // 检查用户名是否已存在（统一返回模糊提示，防止枚举探测有效用户名/邮箱）
   // P3-30：拆成两次查询而非 $or 单查——username 判重必须带 collation（大小写不敏感），
-  // 而带 collation 的查询无法命中默认 collation 的 email_1 索引，
-  // 合并写会让邮箱分支退化为全集合扫描
+  // 而带 collation 的查询无法命中默认 collation 的索引，合并写会让另一分支退化。
+  // A3（2026-10-16）：邮箱分支改查 **emailKey**（HMAC 检索键）。原先查的是明文
+  // `email_1` 索引，而 email 列已加密（随机 IV）——明文相等性在密文列上不再成立，
+  // 继续查明文列会**恒不命中**，表现为「注册时重名邮箱能通过判重」。
+  // 归一化由 piiSearchKey 内部完成（trim + lowercase），与落库键同口径。
   const [existingByName, existingByEmail] = await Promise.all([
     User.findByUsername(username).select('_id').lean(),
-    User.findOne({ email }).select('_id').lean(),
+    User.findOne({ emailKey: piiSearchKey(email) })
+      .select('_id')
+      .lean(),
   ]);
   if (existingByName || existingByEmail) {
     return { outcome: 'DUPLICATE' };
@@ -1164,13 +1173,15 @@ async function updateUserProfile(userId, body) {
   }
 
   // 检查邮箱是否已被其他用户使用
-  // 比对必须先取 schema 的落库形态（lowercase:true）：`email !== user.email` 吃的是
-  // 内存里的原样串，而 Mongoose 会把 lowercase setter 作用于查询条件 ⇒ 用户提交
-  // "自己邮箱的大写形态"时，比对不等、查重却命中，自己的邮箱被判成被他人占用。
-  // 机制与实测取证见 utils/emailKey.js。
-  const emailKey = normalizeEmailKey(email);
-  if (emailKey && emailKey !== normalizeEmailKey(user.email)) {
-    const existingUser = await User.findOne({ email: emailKey });
+  // ① `normalizedEmail !== normalizeEmailKey(user.email)` 是**普通 JS 比对**（无 setter）：
+  //    用户提交"自己邮箱的大写形态"时若不归一化就会判成"被他人占用"（实测过）。
+  // ② 查重改走 **emailKey**（A3）：email 列已加密，明文相等性在随机 IV 的密文列上
+  //    不成立。局部变量刻意叫 `normalizedEmail` 而**不叫** `emailKey`——后者现在是
+  //    schema 上的 HMAC 字段名，同名不同义极易写出 `user.emailKey = <小写明文>`
+  //    这种把明文写进检索键列的 bug（旧代码正是这个名字）。
+  const normalizedEmail = normalizeEmailKey(email);
+  if (normalizedEmail && normalizedEmail !== normalizeEmailKey(user.email)) {
+    const existingUser = await User.findOne({ emailKey: piiSearchKey(normalizedEmail) });
     if (existingUser) {
       return { outcome: 'EMAIL_TAKEN' };
     }
@@ -1184,8 +1195,10 @@ async function updateUserProfile(userId, body) {
   // 更新允许的字段（白名单，非黑名单）
   // department 不在其列——见函数头 H-01 说明；它是授权范围来源，只能由管理员改
   if (realName !== undefined) user.realName = realName;
-  // 存 emailKey 而非 email：查重判的就是这个形态，写入必须与判的一致
-  if (email !== undefined) user.email = emailKey;
+  // 赋归一化后的明文（不是 emailKey）：写侧钩子负责加密并同步 HMAC 键与 n-gram，
+  // 落库的 email 是密文。这里若赋原样串，钩子也会再归一化一次——赋值取规范形态
+  // 只是让"内存里的值"与"落库明文"始终一致，便于紧邻的比对判据阅读。
+  if (email !== undefined) user.email = normalizedEmail;
   if (phone !== undefined) user.phone = phone;
   if (avatar !== undefined) user.avatar = avatar;
 

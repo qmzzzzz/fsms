@@ -6,10 +6,10 @@
  * secret，没有一处用于业务 PII —— 一旦库文件或备份泄露，PII 即刻可用
  * （个保法第 51 条要求加密/去标识化）。
  *
- * 加密范围（2026-09-30 决策修订）：**当前只覆盖 phone**。realName 暂保持明文——
- * 姓名片段模糊检索是用户列表的日常能力，正则对密文不成立，加密它等于砍掉该
- * 能力；转入加密需先给姓名检索另立方案（独立检索索引/搜索引擎），届时随迁移
- * 脚本一起走。
+ * 加密范围（2026-10-16 扩到 email）：覆盖 `User.phone`、`User.email`、
+ * `FireAlarm.reporter.phone`。realName 仍保持明文——姓名片段模糊检索是用户列表的
+ * 日常能力，正则对密文不成立，加密它等于砍掉该能力；转入加密需先给姓名检索另立
+ * 方案（与 email 的做法同族，见下方 piiSubstringKeys）。
  *
  * 设计：
  *   - phone 走 **随机 IV 的 AES-256-GCM**，密文格式带版本前缀，供轮换脚本按版本
@@ -36,7 +36,8 @@
  *     migrate-pii-encryption.js --rotate 重加密。
  *
  * 已知边界（如实记录）：
- *   - 检索键只支持**精确匹配**（phone 本就无模糊检索需求）；
+ *   - 精确检索键（piiSearchKey）只支持**整串相等**；子串检索另有一套 n-gram 盲索引
+ *     （piiSubstringKeys），它给的是**候选超集**而非精确子串，边界见该函数注释；
  *   - 检索键的相等性 = 归一化（trim + lowercase）后的相等性，与邮箱口径一致。
  */
 
@@ -210,10 +211,64 @@ const piiSearchKey = (value) => {
     .digest('hex');
 };
 
+/** 子串盲索引的 n-gram 长度（3 = 拉丁邮箱地址上「能搜到片段」与索引体积的折中） */
+const SUBSTRING_GRAM_SIZE = 3;
+
+/**
+ * 子串盲索引：把归一化后的明文切成**重叠 n-gram**，逐个 HMAC。
+ *
+ * 存在的唯一理由：`User.email` 加密后，用户管理的「按邮箱片段搜索」
+ * （`userService.buildListQuery` 的 `{ email: new RegExp(...) }`）会对密文恒不命中、
+ * **静默失效**（不报错、不告警、只是搜不到）。精确检索键（piiSearchKey）救不了它——
+ * 那个键只支持「整串相等」。要在密文列上保住**子串**语义，只能让每行预先登记
+ * 它包含的全部片段指纹，查询侧把搜索串也切成同样粒度再求交集。
+ *
+ * 与 piiSearchKey 的两点刻意差异：
+ *   ① 派生标签不同（`pii:ngram:v1` vs `pii:hmac:v1`）——域分离，两个键族互不可推导；
+ *   ② **不 trim 成空串键**：长度不足 n 的输入返回空数组（而不是像 piiSearchKey 那样
+ *      返回 `''`）。原因在调用侧：查询要用 `{ emailGrams: { $all: [...] } }`，
+ *      而 `$all: []` 在 MongoDB 里**匹配全部文档**——返回空串键会让「搜 2 个字符」
+ *      退化成「返回所有用户」。调用方必须把空数组当作「该分支不参与 $or」。
+ *
+ * 已知边界（如实记录，不是待办）：
+ *   - **候选超集**：n-gram 是无位置信息的，`abc` 与 `bcd` 同时命中的行未必包含连续的
+ *     `abcd`（`abcXbcd` 也会命中）。搜索串越长，多余候选的比例越低。要精确子串只能
+ *     解密后在内存里二次过滤，而过滤发生在分页之前 —— 代价是把候选集整表读进进程，
+ *     与 at-rest 加密的初衷相反。本仓接受"略宽的候选集"，不为此把明文拉回内存。
+ *   - **体积随明文线性增长**：gram 数量 = 归一化长度 − n + 1，去重后更少。
+ *     `User.email` 的明文期长度上限 254（`models/User.js` 钩子里的 maxlength）
+ *     把上界钉在 252 个 gram；典型邮箱（≤ 40 字符）约 20~40 个。
+ *   - **相等模式可见**：同一片段在不同行产生同一个 gram，持库者可看到"哪些行共享同一片段"
+ *     的频率分布（拿不到明文，除非同时持有密钥）。这是所有盲索引的固有代价，
+ *     换取的是"不必为了搜索而放弃加密"。
+ *
+ * @param {string|undefined|null} value 明文（调用方传解密后的值）
+ * @param {number} [gramSize] 片段长度，默认 SUBSTRING_GRAM_SIZE
+ * @returns {string[]} 去重并排序的 64 位 hex 片段键；长度不足或非字符串时返回 `[]`
+ */
+const piiSubstringKeys = (value, gramSize = SUBSTRING_GRAM_SIZE) => {
+  if (typeof value !== 'string') return [];
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length < gramSize) return [];
+  const hmacKey = deriveKey('pii:ngram:v1');
+  const keys = new Set();
+  for (let i = 0; i + gramSize <= normalized.length; i += 1) {
+    keys.add(
+      crypto
+        .createHmac('sha256', hmacKey)
+        .update(normalized.slice(i, i + gramSize), 'utf8')
+        .digest('hex')
+    );
+  }
+  return [...keys].sort();
+};
+
 module.exports = {
   encryptPii,
   decryptPii,
   piiSearchKey,
+  piiSubstringKeys,
+  SUBSTRING_GRAM_SIZE,
   requireMasterSecret,
   VERSION_PREFIX,
   VERSION_PREFIX_V2,

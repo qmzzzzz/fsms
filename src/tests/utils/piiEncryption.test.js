@@ -14,7 +14,14 @@
  */
 
 const mongoose = require('mongoose');
-const { encryptPii, decryptPii, piiSearchKey, VERSION_PREFIX } = require('../../utils/piiCrypto');
+const {
+  encryptPii,
+  decryptPii,
+  piiSearchKey,
+  piiSubstringKeys,
+  SUBSTRING_GRAM_SIZE,
+  VERSION_PREFIX,
+} = require('../../utils/piiCrypto');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 const User = require('../../models/User');
 
@@ -114,6 +121,66 @@ describe('piiCrypto 纯判据', () => {
     expect(piiSearchKey(`  ${PLAIN_NAME} `)).toBe(piiSearchKey(PLAIN_NAME.toLowerCase().trim()));
     expect(piiSearchKey(PLAIN_NAME)).toHaveLength(64);
     expect(piiSearchKey('李四')).not.toBe(piiSearchKey(PLAIN_NAME));
+  });
+
+  /**
+   * 子串盲索引（A3 / D1-c）：email 加密后「按邮箱片段搜索」不能静默消失。
+   *
+   * 真值表钉的是三件容易写错的事：
+   *  ① 位置无关 —— 片段键只对**内容**做 HMAC，不含位置，否则查询侧无法构造；
+   *  ② 归一化一致 —— 与 piiSearchKey 同一口径（trim + lowercase）；
+   *  ③ **短串返回空数组**（不是空串键）—— 查询侧要用 `{ $all: [...] }`，
+   *     而 `$all: []` 在 MongoDB 里匹配**全部文档**，返回空串键会让"搜 2 个字符"
+   *     退化成"返回所有用户"。这条边界是整套设计里最危险的一格。
+   */
+  describe('子串盲索引（n-gram）', () => {
+    test('长度不足 n 返回空数组（不是空串键）：$all:[] 会匹配全部文档，调用方必须跳过该分支', () => {
+      expect(piiSubstringKeys('a')).toEqual([]);
+      expect(piiSubstringKeys('ab')).toEqual([]);
+      expect(piiSubstringKeys('')).toEqual([]);
+      expect(piiSubstringKeys('   ')).toEqual([]);
+      expect(piiSubstringKeys(null)).toEqual([]);
+      expect(piiSubstringKeys(undefined)).toEqual([]);
+      expect(piiSubstringKeys(12345)).toEqual([]);
+      // 与 piiSearchKey 的差异点：后者对空值返回空串（那是一个"查得到的键"）
+      expect(piiSearchKey('')).toBe('');
+      expect(piiSubstringKeys('')).not.toBe('');
+    });
+
+    test('长度恰为 n 时只有一个 gram；n+1 时有两个（重叠切分）', () => {
+      expect(piiSubstringKeys('abc')).toHaveLength(1);
+      expect(piiSubstringKeys('abcd')).toHaveLength(2);
+      expect(piiSubstringKeys('abcde')).toHaveLength(3);
+      expect(SUBSTRING_GRAM_SIZE).toBe(3);
+    });
+
+    test('位置无关：同一片段出现在不同位置 ⇒ 同一个键（否则查询侧构造不出来）', () => {
+      const head = piiSubstringKeys('abcX');
+      const tail = piiSubstringKeys('Xabc');
+      // 两者都含 'abc' 这个 gram ⇒ 交集非空
+      expect(head.filter((k) => tail.includes(k))).toHaveLength(1);
+    });
+
+    test('归一化：大小写与首尾空白不影响键（与检索键同口径）', () => {
+      expect(piiSubstringKeys('  A@B.C  ')).toEqual(piiSubstringKeys('a@b.c'));
+    });
+
+    test('去重：重复片段只留一个键（aaa 不产生三个相同键）', () => {
+      expect(piiSubstringKeys('aaaa')).toHaveLength(1);
+      expect(new Set(piiSubstringKeys('aaaa')).size).toBe(1);
+    });
+
+    test('域分离：子串键与整串检索键不共用派生标签（同明文两者不相等）', () => {
+      expect(piiSubstringKeys('abc')).not.toContain(piiSearchKey('abc'));
+    });
+
+    test('候选超集（已知边界）：abc 与 bcd 同时命中不蕴含存在连续的 abcd', () => {
+      const probe = piiSubstringKeys('abcXbcd');
+      const search = piiSubstringKeys('abcd');
+      // 搜索串的每个 gram 都在候选行里 ⇒ $all 会命中，但该行并不含 'abcd'
+      expect(search.every((k) => probe.includes(k))).toBe(true);
+      expect('abcXbcd'.includes('abcd')).toBe(false);
+    });
   });
 
   /**
@@ -333,5 +400,164 @@ describe('User schema 接线（真实 Mongo：phone 写侧加密、读侧解密�
     );
     expect(err).toBeTruthy();
     expect(err.errors.phone.message).toBe('请输入有效的手机号');
+  });
+});
+
+/**
+ * A3（2026-10-16）：email 与 phone 走同一套接线，但 schema 上有三处**不同**，
+ * 所以不能只靠"phone 那组绿了"来推定 email 也对（方案 §2 的三个地雷）：
+ *   ① phone 没有 `lowercase` —— 而 `lowercase` 是每次赋值都生效的 setter，
+ *      会吃掉 pre('validate') 钩子刚写进去的 base64 密文；
+ *   ② phone 没有 schema 级 `match`/`maxlength` —— 那两个 validator 在钩子**之后**跑，
+ *      看到的已是密文，会把每一行都判非法；
+ *   ③ phoneKey 非唯一 —— emailKey 是唯一索引，而唯一索引把「缺失」视作 null。
+ * 本组逐条把这三件事钉成断言（③ 的索引存在性在下面，① ② 由行为断言覆盖）。
+ */
+describe('User schema 接线（A3：email 写侧加密 / 读侧解密 / 检索键 / 子串盲索引）', () => {
+  const PLAIN_EMAIL = 'A3.Probe@Example.COM';
+  const NORMALIZED = 'a3.probe@example.com';
+  let id;
+
+  beforeAll(async () => {
+    if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
+  });
+  afterAll(async () => {
+    if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
+  });
+  beforeEach(async () => {
+    const u = await User.create({
+      username: `pii_email_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
+      email: PLAIN_EMAIL,
+      password: randomPassword(),
+      realName: PLAIN_NAME,
+      roles: [],
+    });
+    id = u._id;
+  });
+  afterEach(async () => {
+    if (id) await User.deleteOne({ _id: id }, { bypassAppendOnly: true });
+    id = undefined;
+  });
+
+  test('地雷 ①：lowercase 不再作用于落库密文（base64 的 A-Z 必须原样保留）', async () => {
+    const raw = await User.collection.findOne({ _id: id });
+    expect(raw.email).toMatch(/^enc\.v2\./);
+    expect(raw.email).not.toContain(NORMALIZED);
+    // 密文主体里必须还能看到大写字母——若 lowercase 仍在，base64 会被整体压成小写，
+    // 解密时 GCM 认证必然失败（这正是地雷 ① 的指纹）。用多行样本降低"恰好全小写"的偶然性。
+    const samples = [];
+    for (let i = 0; i < 5; i += 1) {
+      const extra = await User.create({
+        username: `pii_case_${Date.now().toString(36)}_${i}_${Math.floor(Math.random() * 1e6)}`,
+        email: `case.probe.${i}@example.com`,
+        password: randomPassword(),
+        roles: [],
+      });
+      samples.push((await User.collection.findOne({ _id: extra._id })).email);
+      await User.deleteOne({ _id: extra._id }, { bypassAppendOnly: true });
+    }
+    expect(samples.some((c) => /[A-Z]/.test(c.slice(7)))).toBe(true);
+  });
+
+  test('地雷 ②：schema 级 match/maxlength 已摘掉，钩子写入的密文不会被判非法', async () => {
+    // 若 match 还在，User.create 会抛 ValidationError（密文过不了邮箱正则）
+    const u = await User.findById(id);
+    expect(u.email).toBe(NORMALIZED);
+    // 明文期校验仍在：非法邮箱文案与被摘掉的 schema match 逐字一致
+    const bad = await User.create({
+      username: `pii_bad_${Date.now().toString(36)}`,
+      email: 'not-an-email',
+      password: randomPassword(),
+      roles: [],
+    }).then(
+      () => null,
+      (e) => e
+    );
+    expect(bad).toBeTruthy();
+    expect(bad.errors.email.message).toBe('请输入有效的邮箱地址');
+  });
+
+  test('归一化：大写/空白提交 ⇒ 落库密文解回**小写**，且与已有行同 emailKey', async () => {
+    const raw = await User.collection.findOne({ _id: id });
+    expect(raw.emailKey).toBe(piiSearchKey(NORMALIZED));
+    expect(raw.emailKey).toHaveLength(64);
+    // 用同一邮箱的不同形态再建一个用户：emailKey 必然相同（唯一索引会拦下，这里只验键）
+    const u = new User({
+      username: 'probe2',
+      email: `  ${PLAIN_EMAIL}  `,
+      password: randomPassword(),
+    });
+    await u.validate();
+    expect(u.emailKey).toBe(raw.emailKey);
+  });
+
+  test('emailGrams 同步且为子串检索的真候选集（含该行的片段）', async () => {
+    const raw = await User.collection.findOne({ _id: id });
+    expect(Array.isArray(raw.emailGrams)).toBe(true);
+    expect(raw.emailGrams.length).toBeGreaterThan(0);
+    // 搜索串 'probe' 的全部 gram 都应出现在该行里 ⇒ $all 能命中
+    const search = piiSubstringKeys('probe');
+    expect(search.every((k) => raw.emailGrams.includes(k))).toBe(true);
+    // 不存在的片段不应命中
+    const miss = piiSubstringKeys('zzz');
+    expect(miss.some((k) => raw.emailGrams.includes(k))).toBe(false);
+  });
+
+  test('跨行搬运 email 密文：AAD 行绑定使 B 行读取以认证失败暴露', async () => {
+    const rawA = await User.collection.findOne({ _id: id });
+    const other = await User.create({
+      username: `pii_email_other_${Date.now().toString(36)}`,
+      email: `other.probe.${Date.now().toString(36)}@example.com`,
+      password: randomPassword(),
+      roles: [],
+    });
+    try {
+      await User.collection.updateOne({ _id: other._id }, { $set: { email: rawA.email } });
+      const hijacked = await User.findById(other._id);
+      let outcome = null;
+      try {
+        outcome = hijacked.email;
+      } catch (e) {
+        outcome = 'AUTH-FAIL';
+      }
+      expect(outcome).toBe('AUTH-FAIL');
+    } finally {
+      await User.deleteOne({ _id: other._id }, { bypassAppendOnly: true });
+    }
+  });
+
+  test('emailKey / emailGrams 默认不出现在读回文档（select:false），显式 select 才拿得到', async () => {
+    const plain = await User.findById(id);
+    expect(plain.emailKey).toBeUndefined();
+    expect(plain.emailGrams).toBeUndefined();
+    const withKeys = await User.findById(id).select('+emailKey +emailGrams');
+    expect(withKeys.emailKey).toBe(piiSearchKey(NORMALIZED));
+    expect(withKeys.emailGrams.length).toBeGreaterThan(0);
+    // 但 email 本身必须照常可读（A3 刻意不加 -email）
+    expect(plain.email).toBe(NORMALIZED);
+  });
+
+  test('地雷 ③ 的前置：schema 声明了 emailKey_1 唯一索引与 emailGrams_1 多键索引', () => {
+    const byName = Object.fromEntries(
+      User.schema
+        .indexes()
+        .map(([keys, opts]) => [opts.name || JSON.stringify(keys), { keys, opts }])
+    );
+    expect(byName.emailKey_1).toBeTruthy();
+    expect(byName.emailKey_1.opts.unique).toBe(true);
+    expect(byName.emailGrams_1).toBeTruthy();
+    expect(byName.emailGrams_1.opts.unique).toBeUndefined();
+  });
+
+  test('清空 email 不产生可检索键（空串键会被唯一索引视作同一个键，多行即冲突）', async () => {
+    const u = await User.findById(id);
+    // email 是 required：清空必须被拦下，而不是落到 emailKey:'' 上
+    u.email = '';
+    const err = await u.save().then(
+      () => null,
+      (e) => e
+    );
+    expect(err).toBeTruthy();
+    expect(err.errors.email.message).toBe('邮箱不能为空');
   });
 });

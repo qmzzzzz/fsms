@@ -485,6 +485,14 @@ const matchesSensitiveQueryKey = (lower) =>
  * 开了一个无需验证、无需 system:read、也不留任何痕迹的旁路。
  * 键名判定对嵌套同样生效，故 `reporter.phone`、`workPhone`、`phoneNumber` 一起收。
  * 不误伤的边界仍成立：`postcode` / `zipcode` 不含 "phone" 这个子串。
+ *
+ * A3（2026-10-16）追加 `email`：这是**加密 `User.email` 覆盖不到的独立缺口**。
+ * 管理员建号（`PUT /api/users`）或改资料（`PUT /api/auth/profile`）时，请求体里的
+ * **明文邮箱会原样写进 auditlogs 的 body 快照**；把 users.email 列加密之后，
+ * 「库里已是密文、审计表里还是明文」这个自相矛盾会很难解释，且审计集合是
+ * append-only 且定期导出 CSV 的，泄露面比 users 表更大。
+ * 同样是子串匹配 ⇒ `userEmail` / `contactEmail` / `emailAddress` 一并收；
+ * 方向是"宁可多砍"，与 auditLogSanitizer.js 已声明的取向一致。
  */
 const SENSITIVE_KEY_SUBSTRINGS = Object.freeze([
   'password',
@@ -496,6 +504,7 @@ const SENSITIVE_KEY_SUBSTRINGS = Object.freeze([
   'secret',
   'apikey',
   'phone',
+  'email',
 ]);
 
 /**

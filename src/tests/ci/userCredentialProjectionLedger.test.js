@@ -100,7 +100,10 @@ const WIRED = () => classify(sourceFiles()).wired;
 const EXEMPT = [
   {
     rel: 'src/services/authService.js',
-    contains: 'User.findOne({ email: emailKey })',
+    // A3：查重目标从明文列 email 改为 HMAC 检索键 emailKey（明文列已加密，
+    // 随机 IV 下相等性不成立）。局部变量叫 normalizedEmail 而非 emailKey——
+    // 后者现在是 schema 字段名，同名不同义。
+    contains: 'User.findOne({ emailKey: piiSearchKey(normalizedEmail) })',
     reason:
       '邮箱查重：结果只用于 if (existingUser) 判存在，文档不落地；save 的是另一个变量 user（已带排除投影）',
     recheck: (t) => /emailKey/.test(t),
@@ -186,19 +189,22 @@ describe('第 2 组 · 真实站点的基数台账', () => {
     }
   });
 
-  test('已带投影的载入站点恰好 4 处，且每一处都排的是同一份派生投影（不许各写各的清单）', () => {
+  test('已带投影的载入站点恰好 5 处，且每一处都排的是同一份派生投影（不许各写各的清单）', () => {
     const wired = WIRED().filter((x) => x.text.includes('unselectedCredentialProjection'));
-    expect(wired.length).toBe(4);
+    // 4 → 5：userService.anonymizeById（A2 的删除权流程）原先裸载入 + save，
+    // 第 2 组的"裸载入且近处有 save"台账先把它抓了出来，修法是补投影而非登记豁免。
+    expect(wired.length).toBe(5);
     const sites = wired.map((x) => x.rel).sort();
     expect(sites).toEqual([
       'src/services/authService.js',
       'src/services/authService.js',
       'src/services/roleService.js',
       'src/services/userService.js',
+      'src/services/userService.js',
     ]);
   });
 
-  test('反查：四处已带投影的站点若去掉投影，本闸的分类立刻将它们记为裸载入（判据不是装饰）', () => {
+  test('反查：五处已带投影的站点若去掉投影，本闸的分类立刻将它们记为裸载入（判据不是装饰）', () => {
     const wired = WIRED().filter((x) => x.text.includes('unselectedCredentialProjection'));
     const stripped = wired.map((x) => ({
       ...x,
@@ -337,7 +343,7 @@ describe('第 3 组 · 文档外逃的跨文件闭合（行窗口看不见的那
 });
 
 describe('第 4 组 · 缺陷面的边界：只有 User 有 select:false 路径', () => {
-  test('全模型精确普查：有 select:false 路径的模型恰为 User 一个，且路径 8 条', () => {
+  test('全模型精确普查：有 select:false 路径的模型恰为 User 一个，且路径 10 条', () => {
     const modelDir = path.join(SRC, 'models');
     const offenders = [];
     for (const name of fs.readdirSync(modelDir)) {
@@ -357,9 +363,12 @@ describe('第 4 组 · 缺陷面的边界：只有 User 有 select:false 路径'
     }
     expect(offenders).toHaveLength(1);
     expect(offenders[0].model).toBe('User.js');
-    expect(offenders[0].n).toBe(8);
+    // A3：8 → 10（新增 emailKey 检索键 + emailGrams 子串盲索引，两者都是 select:false）
+    expect(offenders[0].n).toBe(10);
     expect(offenders[0].paths).toEqual(
       [
+        'emailGrams',
+        'emailKey',
         'mfaFailCount',
         'mfaLastCounter',
         'mfaLockUntil',
