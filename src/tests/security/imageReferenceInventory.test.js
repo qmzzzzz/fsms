@@ -209,6 +209,9 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
       '.github/workflows/codeql.yml',
       '.github/workflows/dependency-review.yml',
       '.github/workflows/deploy.yml',
+      // A8（2026-10-16）恢复演练时效的定时工作流：不含任何镜像引用，
+      // 但扫描面必须显式登记——否则将来往它里面加镜像时，面账会静默漏掉这个文件。
+      '.github/workflows/dr-readiness.yml',
       '.github/workflows/release.yml',
       '.github/workflows/scorecard.yml',
     ]);

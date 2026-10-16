@@ -53,6 +53,11 @@ const CI_ENFORCED_GATE_SCRIPTS = [
   // --omit=dev，dev 树的 advisory 对门禁完全不可见（实测含 dev 35 条 / 30 high，
   // 而 --omit=dev 为 0）。删掉那一步不会惊动任何别的测试，故登记在此。
   'scripts/check-audit-allowlist.js',
+  // A8（2026-10-16）恢复演练时效：`.github/workflows/dr-readiness.yml` 定时跑
+  // `scripts/backup-integrity-patrol.js --drill-only`。删掉那一步不会惊动任何别的
+  // 测试——而它挡的是「手册写了每季度一次、实际一年没练过」这类只在事故现场
+  // 才暴露的缺口（恢复能力未经实证，却没有任何信号）。故登记在此。
+  'scripts/backup-integrity-patrol.js',
 ];
 
 /** 剥掉整行注释与行尾注释，只留真正会执行的内容 */

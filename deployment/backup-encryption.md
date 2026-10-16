@@ -93,6 +93,36 @@ MONGODB_URI='<目标连接串>' ./scripts/restore-mongo.sh backups/fire-safety-b
 演练要证明的正是这三条链各自独立成立：**异地副本取回得了、私钥解得开、
 恢复进库后系统跑得动**。任何一环只存在于文档里没被演练过，就当它不存在。
 
+## 完整性巡检（自动化，A8 2026-10-16）
+
+备份脚本自己只验**刚写出来的那一份**（产物有效性闸 + `.sha256`）。它回答不了
+「三天前那份今天还能解开吗」「异地副本还在更新吗」「最新一份是多久以前的」。
+`scripts/backup-integrity-patrol.js` 补这一段，跑在**备份宿主机**上：
+
+```bash
+# 与备份脚本错开（备份 02:00，巡检 03:30）；产物完整性 + 异地副本探针 + 演练时效
+30 3 * * * cd /opt/xf && BACKUP_DIR=./backups BACKUP_OFFSITE_DIR=/mnt/offsite \
+  node scripts/backup-integrity-patrol.js >> logs/backup-patrol.log 2>&1
+```
+
+巡检的判据（细节见 `scripts/backupIntegrityPolicy.js` 头部）：
+
+| 发现码                                                      | 级别  | 含义                                                                 |
+| ----------------------------------------------------------- | ----- | -------------------------------------------------------------------- |
+| `no_archives`                                               | error | 目录里一个归档都没有（备份流水线静默停摆的最强信号）                 |
+| `zero_bytes` / `suspiciously_small`                         | error | 空文件 / 小于 1KB 的半成品（mongodump 被杀留下的空壳）               |
+| `missing_sidecar`                                           | error | 归档缺 `.sha256`——缺的是**证据**，恢复时会被硬失败挡下               |
+| `digest_mismatch`                                           | error | 摘要对不上——这是**反证**（位翻转 / 存储层静默损坏 / 被截断）         |
+| `orphan_sidecar`                                            | warn  | 校验和没有对应归档，会让"归档数 vs 校验和数"的对账永远不平           |
+| `stale_backup`                                              | error | 最新归档超过声明的 RPO（`BACKUP_RPO_HOURS`）                         |
+| `offsite_unreachable` / `offsite_empty` / `offsite_lagging` | error | 异地副本不可达 / 空 / **不含最新归档**（落后一个周期救不了当前 RPO） |
+| `offsite_unconfigured`                                      | warn  | 没配异地目录——如实说出"未探测"，单机副本不构成异地备份               |
+| `rpo_undeclared` / `rto_undeclared`                         | warn  | 目标值待业务口径（见 `deployment/rollback-drill.md` 第 5 节）        |
+
+退出码：`0` 无 error / `1` 有 error / `2` 巡检无法执行（备份目录不存在等）。
+**`2` 必须当成红**：没判定 ≠ 就绪。异地副本探针需要 `BACKUP_OFFSITE_DIR` 指向
+**已挂载的**异地目录（rclone 远端挂成本地路径，或先 `rclone copy` 到本地暂存再探）。
+
 ## 已知边界（如实记录）
 
 - gpg 解密侧的口令交互由 gpg-agent 处理：cron 场景的恢复用无口令子钥或 agent 预缓存，

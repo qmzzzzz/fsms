@@ -1,0 +1,53 @@
+name: DR Readiness Patrol
+
+# A8（2026-10-16）：把「每季度至少一次恢复演练」从一句手册要求变成一条会变红的门禁。
+#
+# 缺口：`deployment/backup-encryption.md:73` 与 `deployment/rollback-drill-record.md:6`
+# 都写着「每季度至少一次」，但**没有任何东西会因为没做而变红**——
+# 一条只写在手册里的频率要求，等价于一条没有执行者的待办。
+#
+# 本工作流就是那个执行者：定时跑 `scripts/backup-integrity-patrol.js --drill-only`，
+# 读 `deployment/rollback-drill-record.md` 里最近一次真实演练日期，
+# 超过一个季度（92 天）即 job 失败。
+#
+# 为什么**只**判演练时效、不在 CI 里判备份产物完整性：
+# CI runner 上没有生产备份目录，也没有异地副本。在 CI 里扫备份目录只会得到
+# 「目录不存在」这一条恒红（或更糟：被人为调成恒绿）。备份侧巡检跑在**备份宿主机**
+# 上（cron 调用同一脚本的完整模式，见 `deployment/backup-encryption.md`）。
+# 两者共用一个脚本、一套判据，只是判定范围不同。
+#
+# 为什么不需要 npm ci：`--drill-only` 路径只读一个 markdown 文件，不 require 任何
+# 第三方包（见脚本头部 import 列表）⇒ 本 job 无依赖安装、无供应链面、秒级完成。
+
+on:
+  schedule:
+    # 每周一 03:00 UTC。用周频而不是季频：逾期是在季度边界**之后**才发生的，
+    # 季度频跑一次的话，最坏情况要等到下个季度才报出来——那时已经晚了一个周期。
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+# 工作流级最小权限：只读兜底（与 ci.yml 同口径）。本流程不需要任何写权限。
+permissions:
+  contents: read
+
+jobs:
+  drill-recency:
+    name: 恢复演练时效（每季度至少一次）
+    runs-on: ubuntu-latest
+
+    steps:
+      # persist-credentials: false：本流程没有任何 git push 步骤，
+      # checkout 的持久凭据是纯多余的外泄面（与 ci.yml / scorecard.yml 同口径）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 22.x
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22.x'
+
+      # 退出码语义（脚本头部有完整说明）：0=在周期内，1=逾期或留档不可读，2=参数/文件不可用。
+      # 三种非 0 都要红——「读不到留档」不等于「没逾期」。
+      - name: 校验最近一次恢复演练是否在周期内
+        run: node scripts/backup-integrity-patrol.js --drill-only
