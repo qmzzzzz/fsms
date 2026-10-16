@@ -347,6 +347,10 @@ describe('User schema 接线（真实 Mongo：phone 写侧加密、读侧解密�
     const inserted = await User.collection.insertOne({
       username: `pii_xplant_${Date.now().toString(36)}_${seqB}`,
       email: `pii_xplant_${Date.now().toString(36)}_${seqB}@example.invalid`,
+      // A3（2026-10-16）：emailKey_1 是**唯一**索引，raw 插入（不过 schema、拿不到
+      // default）必须显式给唯一键，否则 `emailKey: null` 会与库内其它无键行相撞 E11000。
+      // 本用例只测 phone 的跨行搬运，email 只是陪衬字段。
+      emailKey: `xplant_key_${seqB}`,
       // 原生 collection 插入不过模型校验，口令值无语义；用生成器避免硬编码字面量
       password: randomPassword(),
       phone: rawA.phone, // 受害者的密文原样复制
@@ -370,6 +374,8 @@ describe('User schema 接线（真实 Mongo：phone 写侧加密、读侧解密�
     const inserted = await User.collection.insertOne({
       username: `pii_legacy_${Date.now().toString(36)}_${seqC}`,
       email: `pii_legacy_${Date.now().toString(36)}_${seqC}@example.invalid`,
+      // A3：同上一处——raw 插入须给唯一 emailKey，否则与无键行撞 emailKey_1。
+      emailKey: `legacy_key_${seqC}`,
       password: randomPassword(),
       phone: legacy,
       phoneKey: piiSearchKey(PLAIN_PHONE),

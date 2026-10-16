@@ -669,6 +669,10 @@ describe('initData 启动播种与安全对账', () => {
       await User.collection.insertOne({
         username: 'c2_target',
         email: 'c2@example.com',
+        // A3（2026-10-16）：emailKey_1 唯一索引。raw 插入不过 schema、拿不到
+        // `default: ''`，必须显式给键，否则与库内其它无键行撞 E11000。
+        // 本用例只测「roles 为 null 时启动期自愈」，与 email 路径无关。
+        emailKey: 'c2_target_emailkey',
         password: 'x',
         roles: null,
       });

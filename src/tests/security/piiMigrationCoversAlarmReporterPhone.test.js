@@ -82,6 +82,12 @@ describe('migrate-pii-encryption：报警上报人电话列纳入迁移', () => 
       _id: legacyUserId,
       username: `legacy_${stamp}`,
       email: `legacy-${stamp}@example.com`,
+      // A3（2026-10-16）：emailKey_1 是**唯一**索引，raw 插入不过 schema、拿不到
+      // `default: ''`，必须显式给唯一键——否则 `emailKey: null` 会与库内其它无键行
+      // 相撞 E11000（该索引由 mongoose autoIndex 后台异步建立，故是否已存在取决于
+      // 本 worker 先跑过哪些套件 ⇒ 表现为随机顺序下的 flaky）。
+      // 本用例的被测对象是 **phone 列**（A1 迁移），emailKey 不在断言面内。
+      emailKey: `legacy_key_${stamp}`,
       password: 'x'.repeat(60),
       phone: LEGACY_USER_PHONE,
       status: 'active',

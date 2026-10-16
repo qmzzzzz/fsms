@@ -147,6 +147,7 @@ describe('用户匿名化：删除权流程的落点（A2）', () => {
   const OLD_EMAIL = `anon-${stamp}@example.com`;
   const OLD_PHONE = '13800138123';
   let userId;
+  let preAnonymize; // 匿名化**前**的快照（beforeAll 里取，供"抹除了什么"做 before/after 对比）
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
@@ -175,6 +176,20 @@ describe('用户匿名化：删除权流程的落点（A2）', () => {
       handler: userId,
       status: 'processing',
     });
+
+    // 【顺序无关，2026-10-16 CI 修复】匿名化在 beforeAll 里**只执行一次**，此后所有用例
+    // 都在「已完成匿名化」这个不变式上断言。
+    //
+    // 原实现把 `anonymizeById` 放在第一个 test 内、后两个 test 依赖它先跑过 ⇒ CI 的
+    // `jest --randomize`（seed 20260917/31337/777001 门禁）一旦打乱用例顺序就红，实测：
+    //   · "幂等"先跑 ⇒ 它拿到的 before 是**未匿名化**态，调一次后
+    //     `after.email !== before.email`（Expected "anon-anon46545864@example.com" /
+    //     Received "deleted+6ad1fc…@anonymized.invalid"）；
+    //   · 随后"抹除"再跑 ⇒ tokenVersion 已被幂等路径锁住不再自增 ⇒
+    //     `expect(after.tokenVersion).toBe(oldTokenVersion + 1)` 拿到 1 而非 2。
+    // 快照取在匿名化**之前**，故"抹除"用例的 before/after 对比不再受顺序影响。
+    preAnonymize = await User.findById(userId).select('+password');
+    await userService.anonymizeById(userId, { reason: 'unit_test' });
   });
 
   afterAll(async () => {
@@ -186,11 +201,10 @@ describe('用户匿名化：删除权流程的落点（A2）', () => {
   });
 
   test('抹除可识别信息、保留 userId/username：审计链上的引用不悬空', async () => {
-    const before = await User.findById(userId).select('+password');
-    const oldHash = before.password;
-    const oldTokenVersion = before.tokenVersion;
-
-    await userService.anonymizeById(userId, { reason: 'unit_test' });
+    // before 取 beforeAll 的快照（匿名化**前**），after 取当前态（匿名化**后**）——
+    // 不再由本用例自己发起匿名化，故与用例执行顺序无关（见 beforeAll 的说明）。
+    const oldHash = preAnonymize.password;
+    const oldTokenVersion = preAnonymize.tokenVersion;
 
     const after = await User.findById(userId).select('+password');
     // 抹除项

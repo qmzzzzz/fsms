@@ -74,6 +74,14 @@ describe('用户名合法字符集：模型层收口', () => {
     await User.collection.deleteMany({ username: { $in: ['admin', 'admin-x'] } });
     const base = {
       email: `zz${stamp}@example.com`,
+      // 【A3 连带，2026-10-16 CI 修复】User 现在有 emailKey_1 **唯一**索引（A3 把邮箱
+      // 查重键从明文 email 迁到 HMAC 键）。本用例走 raw collection 绕开 schema，若不显式
+      // 给 emailKey，两行都会落成 `emailKey: null` ⇒ 唯一索引把它们视作同一个键 ⇒
+      // E11000 `dup key: { emailKey: null }`（实测 CI `jest --randomize` seed 20260917）。
+      // 索引由 mongoose autoIndex **后台异步**建立，故默认顺序下可能尚未存在 ⇒ 表现为
+      // "同一命令两次跑结论不同"的顺序依赖。给两行**不同的** emailKey 即可隔离这条与
+      // 本用例无关的干扰——本用例要证的是「username 的唯一索引 collation 挡不住同形异码」。
+      emailKey: `rawkey-zz${stamp}`,
       password: '$2$10$notahash',
       status: 'active',
     };
@@ -84,6 +92,7 @@ describe('用户名合法字符集：模型层收口', () => {
       await User.collection.insertOne({
         ...base,
         email: `zz2${stamp}@example.com`,
+        emailKey: `rawkey-zz2${stamp}`,
         username: 'аdmin',
       });
     } catch (err) {
