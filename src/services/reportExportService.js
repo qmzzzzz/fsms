@@ -45,6 +45,10 @@ const {
 } = require('../utils/auditQuery');
 const { formatDateTime, formatDate } = require('../utils/dateFormat');
 const { castScopeObjectIds } = require('../utils/scopeCast');
+// A4（2026-10-16）：导出侧真实姓名脱敏。掩码实现复用 utils/encryption 的 DataMasking
+// （userService / securityController 已在用它的 maskPhone/maskEmail），不另造一份。
+const { DataMasking } = require('../utils/encryption');
+const logger = require('../utils/logger');
 
 const EXPORT_LIMIT = 5000;
 
@@ -92,7 +96,7 @@ const EXPORT_SHEET_NAMES = {
 // 模型 + 排序 + populate + 字段裁剪配置（选择投影在查询阶段生效）
 //
 // 排序必须是**全序**，且与对应列表接口同序——这是仓库既有不变式，不是新约定：
-// FireAlarm.js:160 / Inspection.js:179 / AuditLog.js:309 三处都写明"排序键取值可重复
+// FireAlarm.js:242 / Inspection.js:179 / AuditLog.js:309 三处都写明"排序键取值可重复
 // ⇒ 必须有同向 `_id` 次级键"，并为此建了 `{key:-1,_id:-1}` 索引；列表侧
 // AlarmService.js:118、InspectionService.js:146、auditQueryService.js:154 用的就是它。
 // 导出原先只写 `{occurredAt:-1}` / `{planStartTime:-1}` / `{timestamp:-1}`，于是：
@@ -133,30 +137,55 @@ const EXPORT_MODEL_CONFIG = {
   },
 };
 
-// 状态映射
-const statusMap = {
-  pending: '待处理',
-  processing: '处理中',
-  resolved: '已处理',
-  false_alarm: '误报',
-  cancelled: '已取消',
+/**
+ * 导出侧**携带真实姓名**的报表类型（A4，2026-10-16）。
+ *
+ * alarms 的 handler.realName、inspections 的 assignedTo[].realName 是 populate
+ * 出来的真实姓名；devices 无人员字段，audit 只有 username（账号标识，非姓名）。
+ * 判据落在这里而不是控制器：控制器与 workbook 两条腿都要用同一个集合，
+ * 两处各写一份 `type === 'alarms' || type === 'inspections'` 就是本仓反复出现的
+ * "同一条判据的第二处实现漏抄"。
+ */
+const PII_NAME_EXPORT_TYPES = Object.freeze(['alarms', 'inspections']);
+
+/**
+ * 人员列在导出文件里的取值口径（A4，2026-10-16）。
+ *
+ * 需求对应：数据保护 → 全生命周期（**共享段**）+ 数据脱敏。报表导出是典型的
+ * 「数据离开受控边界」场景（文件会被转发、落到个人电脑），而脱敏与否必须由
+ * **角色**决定：默认掩码，持 `system:read` 者才拿全文（与 User PII 的
+ * `system:read` 口径一致，见 initData.js 的角色注释）。
+ *
+ * 只掩 `realName`，**不动 username**：username 是账号标识不是姓名，掩掉它会让
+ * 导出件失去可追溯性（合规材料要能对到人）。realName 为空时退回 username 的原行为
+ * 保持不变。
+ *
+ * ⚠ 已知残留（**有意不掩**，见交付报告的待确认项）：alarms 的 `reporter.name` 是
+ * 一个**混合字段**——AlarmService.reportAlarm 写的是 `reporterName || username || '匿名用户'`，
+ * 即"上报人自填姓名 / 提交者用户名 / 占位符"三者在同一列里无法区分。掩它会连
+ * 用户名与"匿名用户"一起掩掉，反而降低导出件的可用性；要掩它必须先让业务确认
+ * 该字段的取值口径（是否强制自填姓名）。故本轮**不掩**，并如实登记。
+ *
+ * @param {{realName?: string, username?: string}|null} user populate 出来的人员对象
+ * @param {boolean} maskPii true = 掩码
+ * @returns {string} 展示值；无人员对象时为 EXPORT_NO_VALUE
+ */
+const exportPersonLabel = (user, maskPii) => {
+  if (!user) return EXPORT_NO_VALUE;
+  const realName = user.realName;
+  if (!realName) return user.username || EXPORT_NO_VALUE;
+  return maskPii ? DataMasking.maskName(realName) : realName;
 };
 
-const alarmTypeMap = {
-  smoke: '烟雾报警',
-  temp_abnormal: '温度异常',
-  manual_button: '手动报警',
-  phone_report: '电话报告',
-  patrol_find: '巡检发现',
-  other: '其他',
-};
-
-const deviceStatusMap = {
-  normal: '正常',
-  offline: '离线',
-  fault: '故障',
-  maintenance: '维护中',
-};
+// 状态 / 类型 / 风险等级 / action 的展示名映射已搬到 constants/reportExportLabels.js
+// （纯声明与逻辑分离 + 本文件的 max-lines 体积棘轮预算，理由见该文件头）。
+const {
+  statusMap,
+  alarmTypeMap,
+  deviceStatusMap,
+  EXPORT_ACTION_LABELS,
+  EXPORT_RISK_LEVEL_LABELS,
+} = require('../constants/reportExportLabels');
 
 const EXPORT_COLUMN_DEFS = {
   alarms: [
@@ -206,27 +235,6 @@ const EXPORT_COLUMN_DEFS = {
   ],
 };
 
-// 审计 action 展示名（导出用；与审计页 labelMaps 相互独立，口径同义）
-const EXPORT_ACTION_LABELS = {
-  login_success: '登录成功',
-  login_failed: '登录失败',
-  logout: '退出登录',
-  user_create: '创建用户',
-  user_update: '更新用户',
-  user_delete: '删除用户',
-  role_create: '创建角色',
-  role_update: '更新角色',
-  role_delete: '删除角色',
-  device_create: '创建设备',
-  device_update: '更新设备',
-  alarm_dispatch: '指派报警',
-  alarm_resolve: '处理报警',
-  password_changed: '修改密码',
-  suspicious_report: '安全举报',
-};
-
-const EXPORT_RISK_LEVEL_LABELS = { critical: '严重', high: '高', medium: '中', low: '低' };
-
 /**
  * 空值占位符。`utils/dateFormat` 的 formatDateTime/formatDate 用同一个字面量（无值时
  * 返回 '-'），所以这一格的口径横跨两个文件；createSafeTransform 的放行判据与这里
@@ -258,7 +266,7 @@ const auditExportLevel = (item) => {
 };
 
 const EXPORT_ROW_TRANSFORMS = {
-  alarms: (item) => ({
+  alarms: (item, { maskPii = false } = {}) => ({
     alarmCode: item.alarmCode || EXPORT_NO_VALUE,
     occurredAt: formatDateTime(item.occurredAt),
     alarmType: alarmTypeMap[item.alarmType] || item.alarmType || EXPORT_NO_VALUE,
@@ -266,7 +274,7 @@ const EXPORT_ROW_TRANSFORMS = {
     description: item.description || EXPORT_NO_VALUE,
     status: statusMap[item.status] || item.status || EXPORT_NO_VALUE,
     reporter: (item.reporter && (item.reporter.name || item.reporter.username)) || EXPORT_NO_VALUE,
-    handler: (item.handler && (item.handler.realName || item.handler.username)) || EXPORT_NO_VALUE,
+    handler: exportPersonLabel(item.handler, maskPii),
     handleResult: item.handleResult || EXPORT_NO_VALUE,
   }),
   devices: (item) => ({
@@ -303,7 +311,7 @@ const EXPORT_ROW_TRANSFORMS = {
     // 而同一条记录的 CSV 导出走原样 csvEscape 给 `0` —— 两份合规材料自相矛盾。
     duration: item.duration == null ? EXPORT_NO_VALUE : `${item.duration}ms`,
   }),
-  inspections: (item) => ({
+  inspections: (item, { maskPii = false } = {}) => ({
     title: item.title || EXPORT_NO_VALUE,
     inspectionType: item.inspectionType || EXPORT_NO_VALUE,
     status: item.status || EXPORT_NO_VALUE,
@@ -315,30 +323,38 @@ const EXPORT_ROW_TRANSFORMS = {
     assignedTo:
       item.assignedTo && item.assignedTo.length > 0
         ? item.assignedTo
-            .map((u) => (u && (u.realName || u.username)) || '')
-            .filter(Boolean)
+            .map((u) => exportPersonLabel(u, maskPii))
+            .filter((v) => v && v !== EXPORT_NO_VALUE)
             .join(', ')
         : EXPORT_NO_VALUE,
     remark: item.remark || EXPORT_NO_VALUE,
   }),
 };
 
-/** 电子表格公式注入防护包装：对所有单元格文本做危险前缀加固（= + - @ Tab CR） */
-const createSafeTransform = (transform) => (item) => {
-  const row = transform(item);
-  for (const key of Object.keys(row)) {
-    // 空值占位符是唯一被放行的 `-` 开头文本：它不是外部输入，没有注入面。
-    // 放行的理由实测过——exceljs 把 `'=1+1'` 这类字符串存成 type=3（String）、
-    // formula=undefined，即 xlsx 的单元格是**带类型的文本**，Excel 打开时不会求值，
-    // 那个前导单引号只会原样显示出来。于是一条没有 success/duration 字段的审计记录
-    // （suspicious_report、非常规时间登录等直写点）在合规文件里显示成 `'-`，
-    // 而 CSV 侧同一条记录显示成空 —— 两份材料不一致，占位符还被污染成看起来像 bug 的串。
-    // 真实数据一律照旧加固：单引号断的是"xlsx 另存为 CSV 再导入"那一跳
-    // （CSV 无类型，`-2+3` 会被 Excel 当公式求值）。
-    if (row[key] !== EXPORT_NO_VALUE) row[key] = sanitizeSpreadsheetCell(row[key]);
-  }
-  return row;
-};
+/** 电子表格公式注入防护包装：对所有单元格文本做危险前缀加固（= + - @ Tab CR）
+ *
+ * A4（2026-10-16）：第二参 options 原样透传给行变换（当前只有 `{ maskPii }`）。
+ * 透传而不是在变换里读全局：脱敏是**每请求**的判据（取决于导出者的角色），
+ * 放在模块级状态会让同一进程里的两次导出互相污染。
+ * 不传时是空对象 ⇒ 行变换的默认值（maskPii=false）生效，旧调用方行为不变。
+ */
+const createSafeTransform =
+  (transform, options = {}) =>
+  (item) => {
+    const row = transform(item, options);
+    for (const key of Object.keys(row)) {
+      // 空值占位符是唯一被放行的 `-` 开头文本：它不是外部输入，没有注入面。
+      // 放行的理由实测过——exceljs 把 `'=1+1'` 这类字符串存成 type=3（String）、
+      // formula=undefined，即 xlsx 的单元格是**带类型的文本**，Excel 打开时不会求值，
+      // 那个前导单引号只会原样显示出来。于是一条没有 success/duration 字段的审计记录
+      // （suspicious_report、非常规时间登录等直写点）在合规文件里显示成 `'-`，
+      // 而 CSV 侧同一条记录显示成空 —— 两份材料不一致，占位符还被污染成看起来像 bug 的串。
+      // 真实数据一律照旧加固：单引号断的是"xlsx 另存为 CSV 再导入"那一跳
+      // （CSV 无类型，`-2+3` 会被 Excel 当公式求值）。
+      if (row[key] !== EXPORT_NO_VALUE) row[key] = sanitizeSpreadsheetCell(row[key]);
+    }
+    return row;
+  };
 
 /**
  * 审计导出的查询条件：与 /security/audit-logs 查询侧**逐字段同口径**（导出即所见）。
@@ -440,6 +456,50 @@ const validateAuditExportEnums = ({ action, category, riskLevel, level }) => {
   validateEnum(level, AUDIT_DISPLAY_LEVELS, 'level');
 };
 
+/**
+ * 导出含**未脱敏**真实姓名时的行为留痕（A4，2026-10-16）。
+ *
+ * 与全局审计中间件的关系（**不是**重复留痕）：GET /api/reports/export 已被
+ * `app.use('/api/', auditLog())` 记一条 `report_export`（谁、何时、什么筛选条件）。
+ * 本函数补的是**另一件事**：这次导出拿到了**未掩码**的姓名全文（即绕过了默认脱敏档）。
+ * 两条记录回答不同问题，故并存；这与 securityController 的 view_sensitive_data
+ * 不同——那里设了 skipGlobalAudit，同一动作只留一条。
+ *
+ * 只在"全文导出"这条**提权路径**上写：掩码导出是默认档、已有 report_export 覆盖，
+ * 再写一条只会淹没真正的提权事件。
+ *
+ * 动作复用既有的 `view_sensitive_data`（constants/audit.js 白名单内，语义即
+ * "查看了敏感数据"），不新增 action：新增一条要同步维护审计页枚举与
+ * auditActionReachability 的可达性技术文档，而这里没有任何新语义。
+ *
+ * 失败处理：**吞错不重抛**（与 checkBulkExport 同档，见 utils/auditWriteFailure.js 的
+ * 档位表）。理由与那里一致——本函数在响应流已经写出之后被调用，重抛只会把一个
+ * 已成功的下载顶成 500；且该导出动作的**主留痕**（report_export）由全局中间件负责，
+ * 本条是增强记录。失败仍记 error 日志，不静默。
+ *
+ * @param {{userId: string, username: string, type: string, total: number,
+ *          ip?: string, userAgent?: string}} ctx
+ * @returns {Promise<void>}
+ */
+const auditUnmaskedPiiExport = async ({ userId, username, type, total, ip, userAgent }) => {
+  try {
+    await AuditLog.create({
+      action: 'view_sensitive_data',
+      category: 'report',
+      userId,
+      username,
+      dataType: 'export_realname', // ≤20 字符（AuditLog.dataType 有 maxlength:20）
+      ip,
+      userAgent,
+      success: true,
+      riskLevel: 'medium',
+      body: { type, total, masked: false },
+    });
+  } catch (e) {
+    logger.error(`未脱敏 PII 导出的审计落库失败（导出本身已成功，不阻断）：${e.message}`);
+  }
+};
+
 module.exports = {
   EXPORT_LIMIT,
   EXPORT_NO_VALUE,
@@ -447,9 +507,11 @@ module.exports = {
   EXPORT_MODEL_CONFIG,
   EXPORT_COLUMN_DEFS,
   EXPORT_ROW_TRANSFORMS,
+  PII_NAME_EXPORT_TYPES,
   createSafeTransform,
   scopeFilterFor,
   buildExportQuery,
   collationOptionsForExport,
   validateAuditExportEnums,
+  auditUnmaskedPiiExport,
 };

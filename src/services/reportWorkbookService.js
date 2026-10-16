@@ -195,7 +195,10 @@ const writeWorkbookToResponse = async (res, workbook) => {
   if (aborted) throw aborted;
 };
 
-const writeExportWorkbook = async (res, { type, query, total = null, collation = null }) => {
+const writeExportWorkbook = async (
+  res,
+  { type, query, total = null, collation = null, maskPii = false }
+) => {
   const config = EXPORT_MODEL_CONFIG[type];
   const sheetName = EXPORT_SHEET_NAMES[type] || '数据导出';
   // 文件名里的日期必须是**业务日**：原先用 `new Date().toISOString().slice(0,10)`，那是第三个
@@ -215,7 +218,8 @@ const writeExportWorkbook = async (res, { type, query, total = null, collation =
   worksheet.properties.defaultColWidth = 15;
   worksheet.columns = EXPORT_COLUMN_DEFS[type];
 
-  const safeTransform = createSafeTransform(EXPORT_ROW_TRANSFORMS[type]);
+  // A4（2026-10-16）：脱敏判据随请求透传（默认掩码，持 system:read 者才拿全文）
+  const safeTransform = createSafeTransform(EXPORT_ROW_TRANSFORMS[type], { maskPii });
   const { written, truncated, rowsLost } = await streamExportRows(
     worksheet,
     config,

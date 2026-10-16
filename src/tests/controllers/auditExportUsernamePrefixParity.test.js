@@ -353,12 +353,14 @@ describe('审计 xlsx 导出的 username 前缀 + collation 口径', () => {
       expect(ctrl).not.toContain('AUDIT_USERNAME_COLLATION');
       // 同一个 options 对象同时喂给两条腿（分开构造就是两处口径可各自漂）
       expect(ctrl).toContain('countDocuments(query,collationOptions)');
+      // A4（2026-10-16）：同一份 options 之外多了 maskPii（脱敏档位），但
+      // 「计数腿与取数腿共用同一个 collationOptions 对象」这条判据不变。
       expect(ctrl).toContain(
-        'writeExportWorkbook(res,{type,query,total:exportTotal,...collationOptions})'
+        'writeExportWorkbook(res,{type,query,total:exportTotal,...collationOptions,maskPii,})'
       );
       const wb = squash('../../services/reportWorkbookService.js');
       expect(wb).toContain('streamExportRows(worksheet,config,query,safeTransform,collation)');
-      expect(wb).toContain('{type,query,total=null,collation=null}');
+      expect(wb).toContain('{type,query,total=null,collation=null,maskPii=false}');
     });
   });
 });

@@ -61,7 +61,13 @@ const {
   collationOptionsForExport,
   validateAuditExportEnums,
   EXPORT_MODEL_CONFIG,
+  PII_NAME_EXPORT_TYPES,
+  auditUnmaskedPiiExport,
 } = require('../services/reportExportService');
+// 敏感留痕的 IP 口径只有一份（securityController 的 view_sensitive_data 也用它）：
+// 取 clientIpForSecurityDecision 而不是 req.ip——开着 trust proxy 时后者就是
+// 请求方自己写的 X-Forwarded-For，读 PII 的人可以顺手挑一个写进取证记录。
+const { clientIpForSecurityDecision } = require('../utils/ipUtils');
 const { streamExportRows, writeExportWorkbook } = require('../services/reportWorkbookService');
 const dashboardService = require('../services/reportDashboardService');
 const reportStatsService = require('../services/reportStatsService');
@@ -196,6 +202,46 @@ const getInspectionReport = asyncHandler(async (req, res) => {
 });
 
 /**
+ * A4（2026-10-16）：解析本次导出的脱敏档位。
+ *
+ * 默认掩码，持 `system:read` 者才拿全文——与 User PII 的揭示门槛同源
+ * （initData.js 的 SECURITY_ADMIN 注释：「查看他人敏感信息需 system:read」）。
+ * 只有携带真实姓名的报表类型参与（PII_NAME_EXPORT_TYPES），其余类型一律 false，
+ * 不做多余的权限查询。
+ *
+ * 抽成独立函数是为了**不把 exportReport 的圈复杂度与行数推过棘轮**（该函数已贴基线，
+ * 新增分支会顶爆 lint:ratchet）。判据本身不在这里——类型集合在 reportExportService，
+ * 掩码实现复用 utils/encryption 的 DataMasking。
+ *
+ * @returns {Promise<boolean>} true = 掩码
+ */
+const resolveExportMasking = async (req, type) => {
+  if (!PII_NAME_EXPORT_TYPES.includes(type)) return false;
+  const canViewFullPii = await hasPermission(req.user.userId, 'system:read');
+  return !canViewFullPii;
+};
+
+/**
+ * A4：全文（未掩码）导出是**提权路径**，单独留痕。
+ *
+ * 掩码档是默认行为、已由全局审计中间件的 `report_export` 覆盖，再写一条只会淹没
+ * 真正的提权事件；全文导出才是需要能回答"谁在什么时候导出了含 PII 的报表"的那次。
+ * 留痕放在**写出成功之后**：中断的下载不算"导出了"（writeExportWorkbook 对中断抛错，
+ * 走不到这里）。失败吞错不重抛，见 auditUnmaskedPiiExport 的注释。
+ */
+const auditFullPiiExportIfAny = async (req, type, total, maskPii) => {
+  if (maskPii || !PII_NAME_EXPORT_TYPES.includes(type)) return;
+  await auditUnmaskedPiiExport({
+    userId: req.user.userId,
+    username: req.user.username,
+    type,
+    total,
+    ip: clientIpForSecurityDecision(req),
+    userAgent: req.get('user-agent'),
+  });
+};
+
+/**
  * 导出报表数据
  * GET /api/reports/export
  *
@@ -317,7 +363,16 @@ const exportReport = asyncHandler(async (req, res) => {
   const exportTotal = await EXPORT_MODEL_CONFIG[type].model.countDocuments(query, collationOptions);
   await checkBulkExport(req.user.userId, req.user.username, exportTotal, `report_export_${type}`);
 
-  await writeExportWorkbook(res, { type, query, total: exportTotal, ...collationOptions });
+  // A4：携带真实姓名的报表默认脱敏（持 system:read 者全文），全文导出单独留痕
+  const maskPii = await resolveExportMasking(req, type);
+  await writeExportWorkbook(res, {
+    type,
+    query,
+    total: exportTotal,
+    ...collationOptions,
+    maskPii,
+  });
+  await auditFullPiiExportIfAny(req, type, exportTotal, maskPii);
 });
 
 module.exports = {
