@@ -38,6 +38,27 @@ const CSP_REPORT_PATH = '/csp-report';
 const cspReportEnabled = process.env.CSP_REPORT_ENABLED === 'true';
 
 /**
+ * A7（2026-10-16）：Trusted Types 由 report-only 升为**强制**的开关。
+ *
+ * 默认 false —— 保持灰度（见下方 trustedTypesReportOnly 的头注释）。置 true 时：
+ *   ① `require-trusted-types-for 'script'` 挪进**主 CSP**（强制头，浏览器会阻断违规的
+ *      DOM 写入：innerHTML / insertAdjacentHTML / document.write / 三方 SDK 的 DOM 写入）；
+ *   ② 不再下发 report-only 头（同一个策略下发两遍，浏览器会按两条独立策略各报一次，
+ *      违规计数翻倍，而"报告数"正是本开关的决策依据）。
+ *
+ * ⚠ 前置条件是**数据**而不是代码（deliverables/安全需求加固清单-2026-10-16.md A7）：
+ * 必须先让 `CSP_REPORT_ENABLED=true` 跑够一段时间（建议 ≥2 周），确认
+ * `require-trusted-types-for` 的违规清零、或每一条都有正当豁免，再打开本开关。
+ * 没跑够灰度就升强制会**直接打断前端**（且是"页面局部功能静默失效"这种最难排查的形态）。
+ *
+ * 为什么用环境变量而不是直接改代码：升级是一次**部署决策**（依赖灰度数据），
+ * 而代码里没有任何判据能替运维做这个决定；写成常量会让"回退"变成一次代码提交 +
+ * 重新构建镜像。开关 + 一条用例（securityHeaderPolicyHardening.test.js 的 A7 组）
+ * 让"升强制"与"回退"都是改一个环境变量重启。
+ */
+const trustedTypesEnforced = process.env.TRUSTED_TYPES_ENFORCE === 'true';
+
+/**
  * 1. HTTP 安全头配置
  * 使用 Helmet 设置各种安全相关的 HTTP 响应头
  *
@@ -73,6 +94,13 @@ if (cspReportEnabled) {
   // 因此与新版 report-to（配合 Reporting-Endpoints 响应头）同时下发
   CSP_DIRECTIVES['report-uri'] = [CSP_REPORT_PATH];
   CSP_DIRECTIVES['report-to'] = ['csp-endpoint'];
+}
+
+// A7（2026-10-16）：升强制时把 require-trusted-types-for 挪进**主 CSP**。
+// 必须在 securityHeaders 构造**之前**写入——helmet 在构造期就把 directives 快照进
+// 中间件，之后再改这个对象对已构造的 securityHeaders 无效（静默无效，不会有任何提示）。
+if (trustedTypesEnforced) {
+  CSP_DIRECTIVES['require-trusted-types-for'] = ["'script'"];
 }
 
 /**
@@ -235,6 +263,11 @@ const reportingEndpoints = (req, res, next) => {
  * 同口径，端点复用 CSP_REPORT_PATH 与 Reporting-Endpoints 的 csp-endpoint）；
  * 关闭时报告只落在浏览器控制台，不下发任何多余指令。
  * 前置条件：开启上报前需先排查前端 DOM 写入点，否则噪音会淹没真实违规。
+ *
+ * A7（2026-10-16）**升强制**：灰度达标（违规清零或全部有正当豁免）后，把
+ * `require-trusted-types-for 'script'` 挪进主 CSP。开关是 `TRUSTED_TYPES_ENFORCE`
+ * （见文件上方的 trustedTypesEnforced 注释）——置 true 后本中间件退化为 no-op，
+ * 同一条指令改由 securityHeaders 的强制头下发。
  */
 const TRUSTED_TYPES_REPORT_ONLY_DIRECTIVES = {
   'default-src': helmet.contentSecurityPolicy.dangerouslyDisableDefaultSrc,
@@ -246,11 +279,24 @@ if (cspReportEnabled) {
   TRUSTED_TYPES_REPORT_ONLY_DIRECTIVES['report-to'] = ['csp-endpoint'];
 }
 
-const trustedTypesReportOnly = helmet.contentSecurityPolicy({
-  useDefaults: false,
-  reportOnly: true,
-  directives: TRUSTED_TYPES_REPORT_ONLY_DIRECTIVES,
-});
+/**
+ * 强制态下的占位中间件（A7，2026-10-16）。
+ *
+ * 用 no-op 透传而不是 `if (trustedTypesReportOnly) app.use(...)`：挂载点保持**无条件**
+ * 一条语句，applyResponseHardening 的圈复杂度与行数不变（棘轮只许降不许升），
+ * 也让"策略到底下发在哪一条头里"这件事只有一处判断（本文件的 trustedTypesEnforced），
+ * 而不是"构造处判一次、挂载处再判一次"——两处判据分叉就是一条静默失效的路径
+ * （例如强制态下仍下发 report-only，同一个策略下发两遍）。
+ */
+const noTrustedTypesReportOnly = (req, res, next) => next();
+
+const trustedTypesReportOnly = trustedTypesEnforced
+  ? noTrustedTypesReportOnly
+  : helmet.contentSecurityPolicy({
+      useDefaults: false,
+      reportOnly: true,
+      directives: TRUSTED_TYPES_REPORT_ONLY_DIRECTIVES,
+    });
 
 /**
  * 1.1 HSTS 兜底下发

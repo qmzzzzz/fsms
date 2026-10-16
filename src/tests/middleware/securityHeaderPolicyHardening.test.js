@@ -142,6 +142,78 @@ describe('Trusted Types report-only 灰度（P1）', () => {
   });
 });
 
+describe('A7：Trusted Types 升强制开关（TRUSTED_TYPES_ENFORCE）', () => {
+  /** 在隔离的模块注册表里按给定环境重新加载 middleware/security */
+  const loadWith = (env) => {
+    const saved = {};
+    for (const [k, v] of Object.entries(env)) {
+      saved[k] = process.env[k];
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    let mod;
+    try {
+      jest.resetModules();
+      jest.isolateModules(() => {
+        mod = require('../../middleware/security');
+      });
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      jest.resetModules();
+    }
+    return mod;
+  };
+
+  const headersWith = async (env) => {
+    const mod = loadWith(env);
+    const app = express();
+    mod.applyResponseHardening(app);
+    app.use((req, res) => res.json({ ok: true }));
+    const res = await request(app).get('/x').expect(200);
+    return res.headers;
+  };
+
+  test('默认（未设置）：仍是灰度——主 CSP 不含该指令，report-only 头单独下发', async () => {
+    const headers = await headersWith({ TRUSTED_TYPES_ENFORCE: undefined });
+    expect(headers['content-security-policy']).not.toContain('require-trusted-types-for');
+    expect(headers['content-security-policy-report-only']).toBe(
+      "require-trusted-types-for 'script'"
+    );
+  });
+
+  test('置 true：指令挪进主 CSP，且不再下发 report-only 头（同一策略不下发两遍）', async () => {
+    const headers = await headersWith({ TRUSTED_TYPES_ENFORCE: 'true' });
+    expect(headers['content-security-policy']).toContain("require-trusted-types-for 'script'");
+    // 主 CSP 的其余指令必须还在（证明是"追加"而不是"替换整条策略"）
+    expect(headers['content-security-policy']).toContain("default-src 'self'");
+    // report-only 头必须消失：否则浏览器按两条独立策略各报一次，违规计数翻倍，
+    // 而"报告数"正是本开关的决策依据
+    expect(headers['content-security-policy-report-only']).toBeUndefined();
+  });
+
+  test('非 "true" 的字面量一律不升强制（fail-closed：只有精确 true 才生效）', async () => {
+    for (const value of ['1', 'TRUE', 'yes', '']) {
+      const headers = await headersWith({ TRUSTED_TYPES_ENFORCE: value });
+      expect({ value, csp: headers['content-security-policy'] }).toEqual({
+        value,
+        csp: expect.not.stringContaining('require-trusted-types-for'),
+      });
+    }
+  });
+
+  test('强制态下上报出口仍随 CSP_REPORT_ENABLED 走（两个开关互不吞掉）', async () => {
+    const headers = await headersWith({
+      TRUSTED_TYPES_ENFORCE: 'true',
+      CSP_REPORT_ENABLED: 'true',
+    });
+    expect(headers['content-security-policy']).toContain('report-uri /csp-report');
+    expect(headers['reporting-endpoints']).toContain('csp-endpoint="/csp-report"');
+  });
+});
+
 describe('CORP / Referrer-Policy 取值与五份副本一致性（P2）', () => {
   const nginx = read('deployment/nginx.conf.example');
   const vite = read('web-admin/vite.config.js');
