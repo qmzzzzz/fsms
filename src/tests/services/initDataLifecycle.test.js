@@ -83,6 +83,23 @@ describe('initData 启动播种与安全对账', () => {
       await mongoose.connect(process.env.MONGODB_URI);
     }
     ({ User, Role, Permission, TokenBlacklist, SystemConfig } = require('../../models'));
+    // 收口 mongoose 的一次性 autoIndex 后台建索引链。
+    //
+    // `Model.init()` 里的 `ensureIndexes({ _automatic: true })` 是**每进程只跑一次、
+    // 且没有任何调用方 await 它**的链式建索引（mongoose/lib/model.js:1078-1153：
+    // 结果只存进 memoize 的 `Model.$init`，之后逐个 index 用 `.then()` 递归下发）。
+    // 本套件大量用例要**手工摆布索引**（dropCollection 后只留 legacy 索引、显式删掉
+    // schema 索引），而那条链会在摆布完成之后继续把 schema 索引建回来——两者是竞态。
+    //
+    // 随机顺序（CI 的 `Test order independence (randomized)`）下，本套件排在这条链
+    // 完成之前还是之后完全不确定 ⇒ 表现为 seed 相关的偶发红：CI run 38905717120 只在
+    // Node 22.x 上红、20.x 绿；本机 Node 22 + TZ=UTC 用 seed=5 约 1/3~1/10 概率复现，
+    // 报错固定为 `E11000 dup key: { emailKey: null } index: emailKey_1`（E2/E7/E8 的
+    // 裸插行都不带 emailKey，两条 null 撞 A3 新增的 emailKey_1 唯一索引）。
+    //
+    // `await init()` 把这条链收口：`$init` 已 memoize 且 mongoose 从不重置它，
+    // 之后进程内不再有游离的建索引者（`syncIndexes()` 自身是全程 await 的，不派生游离链）。
+    await Promise.all([User, Role, Permission, TokenBlacklist, SystemConfig].map((m) => m.init()));
     ({
       defaultPermissions,
       defaultRoles,
@@ -846,6 +863,13 @@ describe('initData 启动播种与安全对账', () => {
       for (const stale of ['username_ci', 'emailKey_1']) {
         await coll.dropIndex(stale).catch(() => {});
       }
+      // 后置条件显式化：上面两个 dropIndex 都用 `.catch(() => {})` 吞了错（index 本来
+      // 不存在是正常情形），代价是「drop 没生效」也会静默通过——E8/E9 的前置就退化成
+      // 随机成立。这里把它变成一次显式断言：竞态若再出现，报错会直接指向 seedLegacyIndex
+      // 而不是几十行之后的 insertOne 抛 E11000（后者极难归因，本轮定位就是被它绕进去的）。
+      const seeded = (await coll.indexes()).map((i) => i.name);
+      expect(seeded).not.toContain('emailKey_1');
+      expect(seeded).not.toContain('username_ci');
       return coll;
     };
 
@@ -896,6 +920,13 @@ describe('initData 启动播种与安全对账', () => {
       expect(conflictLog).toBeDefined();
       expect(conflictLog).toContain('AdminX');
       expect(conflictLog).toContain('adminx');
+
+      // 收尾必须**先清行再同步**（与 E8 同款理由）：本用例留下两行大小写冲突的用户名，
+      // 且两行都没有 emailKey。直接 syncIndexes() 会同时撞两把唯一索引——
+      // username_ci（AdminX/adminx 在大小写不敏感排序规则下相等）与
+      // emailKey_1（两条 emailKey:null）——建索引失败会让后续用例的 syncIndexes 连带报错。
+      await User.collection.deleteMany({});
+      await User.syncIndexes();
     });
 
     test('E3 无冲突时删除 legacy 索引（大小写仿冒面收敛）', async () => {
