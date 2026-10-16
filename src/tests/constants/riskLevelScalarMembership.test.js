@@ -120,11 +120,17 @@ const allSites = () =>
     scanSites(path.relative(ROOT, f).replace(/\\/g, '/'), fs.readFileSync(f, 'utf8'))
   );
 
-/** 内存变异：把某 (文件, 档位) 的所有标量绑定改成非档位，绝不写盘 */
+/** 内存变异：把某 (文件, 档位) 的**所有**标量绑定改成非档位，绝不写盘 */
 const TYPO = 'zz-not-a-risk-level';
 function typoLiteralIn(raw, site) {
   const lit = site.literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const sep = site.kind === 'assign' ? String.raw`\s*:\s*` : String.raw`\s*(?:===|!==|==)\s*`;
+  // 【2026-10-16 修正】分隔符必须同时覆盖两种形态（`riskLevel: 'x'` 与 `riskLevel === 'x'`），
+  // 不能按 site.kind 二选一。理由：函数自述是"把某 (文件, 档位) 的**所有**标量绑定改成非档位"，
+  // 而 `same`（调用方用来定期望值）取的是同文件同档位的**全部**站点。一旦某文件同时含两种形态
+  // （A4 给 reportExportService.js 加了 `riskLevel: 'medium'`，与原有的
+  // `riskLevel === 'medium'` 并存），按 kind 二选一就只改到一半 ⇒
+  // `expect(mutated.filter(literal === TYPO)).toHaveLength(same.length)` 必红。
+  const sep = String.raw`(?:\s*:\s*|\s*(?:===|!==|==)\s*)`;
   const re = new RegExp(String.raw`\briskLevel(${sep})(['"])${lit}\2`, 'g');
   const out = raw.replace(re, (_m, s, q) => `riskLevel${s}${q}${TYPO}${q}`);
   return { text: out, changed: out !== raw };

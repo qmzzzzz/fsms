@@ -129,29 +129,29 @@ const LEDGER = [
 
   {
     site: 'src/services/authService.js',
-    siteLine: 425,
+    siteLine: 434,
     raw: '上方 210/233 行',
     status: 'DEBT',
     wrongFrom: 210,
     wrongTo: 233,
     referent: 'src/services/authService.js',
-    from: 245,
-    to: 311,
+    from: 254,
+    to: 320,
     mustRead: 'checkBruteForce(',
-    note: '同口径真实站点是 :245 与 :311；:210 是 @returns JSDoc 行、:233 是"查找用户"注释（他人 M，不代改）。站点与指代坐标 2026-10-09 各随本文件行数迁移：432→425、247/318→245/311（本轮把 registerUser/resolveLoginPassword 里两份手写 captcha try/catch 收口到 SystemConfig.captchaSwitch，共 -7 行；锚上写的错号 210/233 是原文，不动）',
+    note: '同口径真实站点是 :254 与 :320；:210 是 @returns JSDoc 行、:233 是"查找用户"注释（他人 M，不代改）。站点与指代坐标 2026-10-09 各随本文件行数迁移：432→425、247/318→245/311（本轮把 registerUser/resolveLoginPassword 里两份手写 captcha try/catch 收口到 SystemConfig.captchaSwitch，共 -7 行；锚上写的错号 210/233 是原文，不动）。2026-10-16 A3（User.email at-rest 加密）在本文件 registerUser/updateUserProfile 的查重处共 +9 行 ⇒ 425→434、245/311→254/320。',
   },
   {
     site: 'src/services/authService.js',
-    siteLine: 1275,
+    siteLine: 1288,
     raw: '（:350）',
     status: 'DEBT',
     wrongFrom: 350,
     wrongTo: 350,
     referent: 'src/services/authService.js',
-    from: 221,
-    to: 221,
+    from: 230,
+    to: 230,
     mustRead: 'async function loginUser',
-    note: 'loginUser 实在 :221；:350 落在 assertAccountUsable 里。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；指代目标 :223→:221 同步随迁，锚上写的错号 :350 是原文，不动',
+    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动',
   },
   {
     site: 'src/services/permissionService.js',
@@ -241,14 +241,14 @@ const LEDGER = [
 
   {
     site: 'src/services/initData.js',
-    siteLine: 1132,
+    siteLine: 1256,
     raw: '（:89）',
     status: 'LIVE',
     referent: 'migrations/20260831000000-reconcile-audit-index-options.js',
     from: 89,
     to: 89,
     mustRead: 'createIndex({ timestamp: -1 }',
-    note: '指迁移脚本 down() 重建的无 TTL 索引——该文件在 migrations/，不在 commentAnchorFreshness 的 SCAN_ROOTS 内',
+    note: '指迁移脚本 down() 重建的无 TTL 索引——该文件在 migrations/，不在 commentAnchorFreshness 的 SCAN_ROOTS 内。站点行号 2026-10-16 因 A3（emailKey 唯一索引四步对账 + dropLegacyUsernameIndex/switchEmailIndexToKey 拆函数）在 initData.js 上方插入共 +124 行 ⇒ 1132→1256；指代目标在 migrations/ 未动',
   },
   {
     site: 'src/services/reportDashboardService.js',
@@ -510,7 +510,7 @@ describe('第 5 族 · 回指式裸行锚', () => {
     // 这里出现的 `文件:行号` 也被它当真实锚点校验 ⇒ 数字必须真的落在有内容的行上，
     // 目标行被改动时要跟着迁移（2026-10-09：authService.js 的 registerUser 验证码闸
     // 收口到 captchaSwitch，原 :120/:128 已随行数变化迁到 :124/:126）。
-    const attributed = '  // 见 src/services/authService.js:124 与 authService.js:126\n';
+    const attributed = '  // 见 src/services/authService.js:128 与 authService.js:130\n';
     expect(attributed.match(BARE_PAREN_RE)).toBeNull();
     // 数值形态连冒号都没有，CITE_RE 永远看不见它
     expect('与上方 210/233 行同口径'.match(BARE_NUMERIC_RE)).toEqual(['上方 210/233 行']);

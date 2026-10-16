@@ -320,7 +320,7 @@ describe('对抗性探针场景固化（P1-30：原 zzz-* 探针 → 行为断�
 
   test('自我锁定防护：管理员改自己的 status → 400 CANNOT_CHANGE_OWN_STATUS', async () => {
     // 原 zzz-adversarial-r3.test.js R3-4。该错误码此前**无任何跟踪测试覆盖**
-    // （userController.js:247-249 的 isSelf 分支），且它保护的是「把自己改 inactive
+    // （userController.js:249-251 的 isSelf 分支），且它保护的是「把自己改 inactive
     // 后无人能解锁」的自锁死路径，属高价值回归。
     const res = await request(app)
       .put(`/api/users/${mgr._id}`)
@@ -334,7 +334,7 @@ describe('对抗性探针场景固化（P1-30：原 zzz-* 探针 → 行为断�
   });
   test('数据范围口径：department 范围操作者改本部门他人 allowedIPs → 允许（本部门内）', async () => {
     // 原 zzz-adversarial-r3.test.js R3-3 的实测结论固化。
-    // P0-1 修复口径（userController.js:291-298）：dataScope=department 允许
+    // P0-1 修复口径（userController.js:293-300）：dataScope=department 允许
     // **本部门内**的 scope 字段变更；只有越部门 / self、none 范围才拒绝。
     // 本用例锁定「同部门内放行」这一半，越界拒绝由本文件前面两条 P0-1 用例覆盖。
     // 用独立目标用户而非 mgr 自身：避免改动共享 fixture 造成用例间顺序耦合。

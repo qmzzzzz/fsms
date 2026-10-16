@@ -173,7 +173,11 @@ describe('内置角色编码的三处真源', () => {
     // 否则 initData 少标一条 isBuiltIn 会让两边同步变化而悄悄绿过去）：
     // 改任一侧都红，逼改动者把理由与迁移一起带来。
     expect(hookCodes.slice().sort()).toEqual(['ADMIN', 'SUPER_ADMIN', 'USER']);
+    // 2026-10-16 A6：新增只读审计角色 AUDIT_VIEWER（deliverables/安全需求加固清单-2026-10-16.md A6）
+    // ⇒ 种子内置角色由 5 个变 6 个。**该角色已在 initData.defaultRoles 与 rolePermissionMap
+    // 两处同步登记**（上一条用例的集合相等判据即为此设防）；存量库需补种（种子只在初始化时写入）。
     expect(seededBuiltInCodes.slice().sort()).toEqual([
+      'AUDIT_VIEWER',
       'FIREFIGHTER',
       'FIRE_SUPERVISOR',
       'GUEST',

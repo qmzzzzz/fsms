@@ -402,7 +402,12 @@ describe('批次F 工具与密码学加固回归', () => {
       // 内存库里此前可能残留字段级 unique 生成的 username_1，先同步到 schema 定义
       await User.syncIndexes();
       const base = { password: 'Qz7#Lm42vTx9', realName: '大小写测试' };
-      const existing = await User.findOne({ email: 'case1@example.com' });
+      // 【2026-10-16 A3】幂等判据**不能**再用明文 email 等值查询：`User.email` 已 at-rest
+      // 加密（AES-256-GCM 随机 IV）⇒ `findOne({ email: 'case1@example.com' })` 永远 MISS，
+      // `existing` 恒为 null，于是每次都走 create，第二次撞 username_ci 唯一索引而抛
+      // `MongoServerError E11000`（本机实测复现）。改走确定性检索键 emailKey。
+      const { piiSearchKey } = require('../../utils/piiCrypto');
+      const existing = await User.findOne({ emailKey: piiSearchKey('case1@example.com') });
       if (!existing) {
         await User.create({ ...base, username: 'CaseTester', email: 'case1@example.com' });
       }

@@ -64,6 +64,82 @@ const schemaMaxLength = (model, field) => {
   return Array.isArray(declared) ? declared[0] : declared;
 };
 
+/**
+ * 加密列（at-rest PII）的登记表：`Model.field` → 它的**明文期**上限声明在哪儿。
+ *
+ * 为什么这些字段必须豁免 schema 侧的长度对账（2026-10-16 A1/A3 实测）：
+ *
+ *   · 存储值不是明文而是 `enc.v2.<iv>.<ct|tag>` 密文（AES-256-GCM，12 字节随机 IV），
+ *     长度**恒大于**路由上限（`reporter.phone` 明文上限 20 ⇒ 密文最长 152 字符）。
+ *   · 于是 schema 级 `maxlength` 落在 validate 阶段＝对**密文**判定：
+ *        - 写 20 ⇒ 每一行都判非法，接口全 500（A1 前实测：**拒绝**：上报人电话最多 20 个字符）；
+ *        - 写一个"够宽的密文上限" ⇒ 本文件 ②b 的 `caps.some(c => c !== schemaMax)` 要求
+ *          **等于**路由上限，密文上限必然不等 ⇒ ②b 转红，且那个数字在语义上是骗人的
+ *          （它约束的是密文长度，不是业务长度）。
+ *   · 结论：这类字段的长度判据**只存在于明文阶段**（pre('validate') 钩子），
+ *     schema 侧不声明 maxlength 是**有意设计**，不是漏配。
+ *
+ * 但豁免不能变成"这条判据对加密列静默消失"——那正是本文件 ① 里
+ * 「schema 一旦没声明 maxlength 就整条判据不成立」要堵的洞。所以这里**换一个可证伪的判据**：
+ * 该字段必须在产品源码的明文期声明里带一个**等于路由上限**的 max。
+ * 删掉/改窄那条声明，下面的「加密列替代判据」用例立刻转红。
+ */
+const ENCRYPTED_AT_REST = new Map([
+  [
+    'FireAlarm.reporter.phone',
+    { rel: 'models/FireAlarm.js', constName: 'REPORTER_PII_FIELDS', path: 'reporter.phone' },
+  ],
+]);
+
+/**
+ * 从产品源码里取出某个加密字段的**明文期** max 声明值。
+ * 源码形态（`src/models/FireAlarm.js`）：`const REPORTER_PII_FIELDS = [{ path: 'reporter.phone', max: [20, '…'] }];`
+ * 取不到（常量改名 / 该字段被摘掉）返回 `null` ⇒ 由调用方判红。
+ *
+ * 注意 `ROOT` 在本文件里是 `src/`（`parseValidationChain` 用它拼 `routes/…`），
+ * 故登记表里的 `rel` 也必须是相对 `src/` 的路径。
+ */
+const plaintextMaxOf = ({ rel, constName, path: fieldPath }) => {
+  const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+  const block = new RegExp(`const ${constName} = \\[([\\s\\S]*?)\\n?\\];`).exec(src);
+  if (!block) return null;
+  const entry = new RegExp(
+    `path:\\s*'${fieldPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'([\\s\\S]*?)(?=\\n\\s*\\{|\\n\\];|$)`
+  ).exec(block[1]);
+  if (!entry) return null;
+  const m = /max:\s*\[(\d+)/.exec(entry[1]);
+  return m ? Number(m[1]) : null;
+};
+
+/**
+ * ① 的长度对账：返回失败描述，`null` 表示通过。
+ * 单独成函数是因为它要分派"加密列走明文期声明 / 普通列走 schema maxlength"两条路径，
+ * 留在用例里会把那个用例的圈复杂度推过 lint 棘轮上限（实测 16 > 15）。
+ */
+const lengthFailure = (modelName, field, max, schemaMax) => {
+  const enc = ENCRYPTED_AT_REST.get(`${modelName}.${field}`);
+  if (enc) {
+    // 加密列：schema 侧无 maxlength 是**有意设计**（判据在明文阶段，理由见登记表注释）。
+    // 替代判据——明文期声明的 max 必须存在且等于路由上限，否则这条判据对该列静默消失。
+    const plainMax = plaintextMaxOf(enc);
+    if (plainMax === null) {
+      return `${field}: 加密列，但 ${enc.constName} 里找不到它的明文期 max 声明（长度判据已消失）`;
+    }
+    return plainMax === max
+      ? null
+      : `${field}: 路由上限 ${max}，明文期 max 声明 ${plainMax}（两者必须同宽）`;
+  }
+  // 两个方向都要闭合：只判 "schema 严于路由" 的话，schema 一旦**没声明**
+  // maxlength 就整条判据不成立（删掉模型的 maxlength 用例仍绿，DB 侧无上限）。
+  if (typeof schemaMax !== 'number') {
+    return `${field}: 路由上限 ${max}，但 schema 未声明 maxlength（DB 侧无上限）`;
+  }
+  if (schemaMax < max) {
+    return `${field}: 路由上限 ${max}，schema maxlength ${schemaMax}（DB 会抛出点不出名字的 400）`;
+  }
+  return null;
+};
+
 describe('写入链字段与模型 schema 的对账', () => {
   /**
    * `*` 结尾的元素级规则（images.*）不参与 schema path 对账——Mongoose 的数组
@@ -169,19 +245,58 @@ describe('写入链字段与模型 schema 的对账', () => {
           ? schemaPath.options.maxlength[0]
           : schemaPath.options?.maxlength;
         if (max !== null) {
-          // 两个方向都要闭合：只判 "schema 严于路由" 的话，schema 一旦**没声明**
-          // maxlength 就整条判据不成立（删掉模型的 maxlength 用例仍绿，DB 侧无上限）。
-          if (typeof schemaMax !== 'number') {
-            failures.push(`${field}: 路由上限 ${max}，但 schema 未声明 maxlength（DB 侧无上限）`);
-          } else if (schemaMax < max) {
-            failures.push(
-              `${field}: 路由上限 ${max}，schema maxlength ${schemaMax}（DB 会抛出点不出名字的 400）`
-            );
-          }
+          const failure = lengthFailure(modelName, field, max, schemaMax);
+          if (failure) failures.push(failure);
         }
       }
       expect({ chain: constName, failures }).toEqual({ chain: constName, failures: [] });
     });
+  });
+
+  // ==================== 豁免本身必须可证伪 ====================
+  /**
+   * 登记表把"加密列"从 schema 长度对账里摘了出来，所以必须证明：
+   *   ① 摘出来的那条**真的**有明文期声明，且与路由同宽；
+   *   ② 这条替代判据不是恒真（取不存在的常量名/字段必须返回 null）；
+   *   ③ 漏登记不会被静默放过（不靠"本用例说它对"，而是把 ① 的分支判据当场算出来）。
+   */
+  test('加密列豁免的可证伪性：登记项有真声明、判据会失败、漏登记必然转红', () => {
+    // ① 登记表非空，每项都能取到明文期 max，且该 max 等于它在链上的上限
+    expect(ENCRYPTED_AT_REST.size).toBeGreaterThanOrEqual(1);
+    const caps = capsByModelField();
+    for (const [key, enc] of ENCRYPTED_AT_REST) {
+      const plainMax = plaintextMaxOf(enc);
+      expect(`${key} => ${plainMax}`).toBe(`${key} => ${plainMax}`); // 失败时能看见取到了什么
+      expect(typeof plainMax).toBe('number');
+      const modelName = key.split('.')[0];
+      const field = key.slice(key.indexOf('.') + 1);
+      // 该字段在 schema 上确实没有 maxlength——否则它不该进豁免表（进了就是掩盖真漏配）
+      expect(schemaMaxLength({ FireAlarm, FireDevice }[modelName], field)).toBeUndefined();
+      expect(Object.values(caps[key].caps).every((c) => c === plainMax)).toBe(true);
+    }
+
+    // ② 判据不是恒真：常量名写错、字段名写错都必须返回 null（否则"取不到就静默通过"）
+    expect(
+      plaintextMaxOf({
+        rel: 'models/FireAlarm.js',
+        constName: 'NO_SUCH_CONST',
+        path: 'reporter.phone',
+      })
+    ).toBeNull();
+    expect(
+      plaintextMaxOf({
+        rel: 'models/FireAlarm.js',
+        constName: 'REPORTER_PII_FIELDS',
+        path: 'reporter.nope',
+      })
+    ).toBeNull();
+
+    // ③ 漏登记不会被放过：reporter.phone 在 schema 上确实没有 maxlength ⇒
+    //    一旦把它从登记表摘掉，① 的 `typeof schemaMax !== 'number'` 分支必然对它产出失败项。
+    //    这里直接把那个分支的判据算出来，而不是"相信用例本身"。
+    const schemaMax = schemaMaxLength(FireAlarm, 'reporter.phone');
+    expect(schemaMax).toBeUndefined();
+    expect(typeof schemaMax !== 'number').toBe(true);
   });
 
   // ==================== ②b 跨写入链的同宽对账 ====================
@@ -222,6 +337,18 @@ describe('写入链字段与模型 schema 的对账', () => {
           );
         }
         const model = { FireAlarm, FireDevice }[row.modelName];
+        const enc = ENCRYPTED_AT_REST.get(row.key);
+        if (enc) {
+          // 加密列：schema 侧不声明 maxlength 是有意设计（见登记表注释），
+          // 改判**明文期**声明是否与各链上限同宽——豁免不得让判据静默消失。
+          const plainMax = plaintextMaxOf(enc);
+          if (plainMax === null) {
+            failures.push(`${row.key}: 加密列，但 ${enc.constName} 里找不到明文期 max 声明`);
+          } else if (caps.some((c) => c !== plainMax)) {
+            failures.push(`${row.key}: 路由上限 ${caps.join('/')} ≠ 明文期 max ${plainMax}`);
+          }
+          continue;
+        }
         const schemaMax = schemaMaxLength(model, schemaPathOf(row.field));
         if (typeof schemaMax !== 'number') {
           failures.push(`${row.key}: 路由上限 ${caps.join('/')}，schema 却没声明 maxlength`);
