@@ -15,12 +15,39 @@ const userPermissionService = require('./userPermissionService');
 const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const { escapeRegExp, uniqueIdStrings } = require('../utils/helpers');
+// A3：email 加密后，用户列表的「按邮箱片段搜索」改走 n-gram 子串盲索引
+const { piiSubstringKeys } = require('../utils/piiCrypto');
 const { DataMasking } = require('../utils/encryption');
 const { USER_STATUS } = require('../utils/constants');
 // 级联释放的状态面由巡检域档位表派生（F-151）：写字面量 ['pending','in_progress'] 时漏掉的正是
 // `overdue`——调度器会把超期的开放计划改成它，越紧急的计划越容易漏在闸门外面；漏掉后开工/提交双双 409，
 // 而 cancel 不卡执行人 ⇒ 唯一出路是把真做过的巡检登记成「已取消」。
 const { INSPECTION_OPEN_STATUSES } = require('../constants/inspection');
+// A2（2026-10-16）：匿名化需要随机口令（改写密码以彻底断掉旧凭据）与留痕日志
+const crypto = require('crypto');
+const logger = require('../utils/logger');
+
+/**
+ * 匿名化的取值口径（A2，2026-10-16）——**单一声明**，判据只在这里。
+ *
+ * 占位姓名刻意不用「已删除」：记录还在、只是不再指向某个具体的人，
+ * 写成「已删除」会让读报表的人以为这条数据本身被删了。
+ *
+ * email 占位必须唯一（User.email 有唯一索引，且 A3 尚未实施加密）：
+ * 置空会让第二个注销用户撞 E11000，故把 _id 编进占位里 —— 天然唯一、可回溯到原账号，
+ * 且 `.invalid` 是 RFC 2606 保留域，永不会被投递。
+ */
+const ANONYMIZED_REAL_NAME = '已注销用户';
+const ANONYMIZED_EMAIL_PREFIX = 'deleted+';
+const ANONYMIZED_EMAIL_DOMAIN = 'anonymized.invalid';
+
+/** 构造某个用户 id 对应的匿名化邮箱占位（唯一、不可投递、可回溯） */
+const buildAnonymizedEmail = (userId) =>
+  `${ANONYMIZED_EMAIL_PREFIX}${String(userId)}@${ANONYMIZED_EMAIL_DOMAIN}`;
+
+/** 是否已是匿名化占位邮箱（幂等标记，见 anonymizeById） */
+const isAnonymizedEmail = (email) =>
+  typeof email === 'string' && email.startsWith(ANONYMIZED_EMAIL_PREFIX);
 
 const SIMPLE_ROLE_POPULATE = { path: 'roles', select: 'name code' };
 const DETAIL_ROLE_POPULATE = {
@@ -38,7 +65,7 @@ const DETAIL_ROLE_POPULATE = {
  * 可写字段的槽位，前端只剩两条必坏的路：
  *   1) 原样提交回填值 → `138****5678` 撞上 `userRoutes.js:110` 的 /^1[3-9]\d{9}$/ ⇒ 400；
  *   2) 那条校验是 `.optional({ values:'falsy' })`，空串照样过，而
- *      `userController.js:562` 写的是 `if (phone !== undefined) user.phone = phone`
+ *      `userController.js:572` 写的是 `if (phone !== undefined) user.phone = phone`
  *      ⇒ 一次"我没动手机号"的保存把号码清空。
  * 改名成 `phoneMasked` 是把"误把展示值当可写字段"变成结构上不可能，而不是靠约定。
  *
@@ -64,15 +91,26 @@ class UserService {
 
     if (filters.search) {
       const escapedSearch = escapeRegExp(filters.search.trim());
-      // P1-②（2026-09-30 决策修订）：realName **暂不加密**——姓名模糊检索是
-      // 用户管理的日常操作，正则对密文不成立，加密它等于砍掉这个能力。
-      // at-rest 加密当前只覆盖 phone（检索键 phoneKey）。realName 转入加密
-      // 需要先给姓名检索另立方案（如 ES/前缀键），届时随迁移脚本一起走。
+      // P1-②：realName **暂不加密**——姓名模糊检索是用户管理的日常操作，正则对
+      // 密文不成立，加密它等于砍掉这个能力。at-rest 加密当前覆盖 phone 与 email。
+      //
+      // A3（2026-10-16）：email 也已加密 ⇒ 原先那一支 `{ email: new RegExp(...) }`
+      // 对密文**恒不命中、静默失效**（不报错、不告警，只是搜不到），
+      // 「按邮箱片段找人」会无声消失。改走 emailGrams 子串盲索引：
+      // 每行登记自己包含的全部 3-gram HMAC，查询侧切同样粒度求 $all 交集。
+      // 判据与已知边界（它给的是**候选超集**而非精确子串）见 piiCrypto.piiSubstringKeys。
       query.$or = [
         { username: new RegExp(escapedSearch, 'i') },
-        { email: new RegExp(escapedSearch, 'i') },
         { realName: new RegExp(escapedSearch, 'i') },
       ];
+      // ⚠️ 长度不足 3 的搜索串切不出 gram，piiSubstringKeys 返回 `[]`；
+      // 而 `{ emailGrams: { $all: [] } }` 在 MongoDB 里**匹配全部文档**——
+      // 无条件塞进 $or 会让「搜 2 个字符」退化成「返回所有用户」。
+      // 故空数组必须走"该分支不参与 $or"，这是本处唯一的正确写法。
+      const emailGrams = piiSubstringKeys(filters.search);
+      if (emailGrams.length > 0) {
+        query.$or.push({ emailGrams: { $all: emailGrams } });
+      }
     }
 
     // 与 User schema 的 enum、userRoutes 的 isIn 同源（见 models/User.js 头注释）
@@ -305,6 +343,78 @@ class UserService {
       const ids = affected.map((doc) => doc._id);
       result = await User.deleteMany(filter, opts);
       await this.releaseOpenAssignments(ids, session);
+    });
+    return result;
+  }
+
+  /**
+   * 匿名化一个用户（A2「删除权/注销」的落点，2026-10-16）
+   *
+   * 为什么不是硬删除：审计链（AuditLog 的 username 快照、FireAlarm.reporter.userId、
+   * processLog[].operator、reviewedBy、executionLog[].userId、createdBy）里到处都是
+   * 指向用户的引用。硬删之后这些引用变成**悬空指向**——审计上问不出"当时是谁做的"，
+   * 而"删除权"的本意是**不再能识别到这个人**，不是"抹掉他做过的事"。
+   * 匿名化同时满足两侧：保留 userId 与统计口径（`countDocuments({userId})` 照常成立），
+   * 抹除可识别信息（realName / phone / email / avatar）。
+   *
+   * 抹除清单与**保留清单**（都是刻意的）：
+   *   抹除：realName → 固定占位；phone → ''（写侧钩子同步清空 phoneKey）；
+   *         email → `deleted+<id>@anonymized.invalid`（email 有唯一索引，不能置空，
+   *         否则第二个注销用户就撞 E11000；占位里带 _id 因此天然唯一）；
+   *         avatar → ''（可能含人像）。
+   *   保留：username（它是账号标识、审计快照与登录名，抹掉它审计链就断在"匿名用户"上）、
+   *         department（部门级统计口径要它）、roles（角色引用）、createdAt。
+   *   `_id` 保留 ⇒ 统计口径与审计引用全部照旧成立。
+   *
+   * 会话与工单：
+   *   - `tokenVersion++`：立即吊销已签发的访问/刷新令牌（authenticate 每请求校验它）。
+   *   - `status → inactive`：账户不可再登录。
+   *   - 密码改写为随机值：即使有人拿着旧密码也进不来（随机值不落任何日志）。
+   *   - 释放进行中的指派（复用 releaseOpenAssignments）：与删号同一口径，
+   *     否则"处理中"的工单会卡在一个已停用账户上，任何出口都关不掉。
+   *
+   * 幂等：以 email 的占位前缀为标记，重复调用直接返回，不会二次改写
+   * （二次改写会让 `tokenVersion` 无谓自增、审计上出现"没有变更的变更"）。
+   *
+   * @param {string|import('mongoose').Types.ObjectId} id 用户 id
+   * @param {{reason?: string}} [options] 注销原因（仅用于日志与调用方留痕）
+   * @returns {Promise<object|null>} 匿名化后的用户文档；用户不存在时为 null
+   */
+  async anonymizeById(id, { reason = 'deletion_request' } = {}) {
+    let result = null;
+    await withTransaction(async (session) => {
+      const opts = session ? { session } : {};
+      // 排除投影不可省：这里后面是 user.save()，不写投影时 Mongoose 会把**本次没有
+      // 从服务器取回**的 select:false 路径按 schema 默认值填上并写进 $set
+      // （机理见 models/User.js 的 unselectedCredentialProjection）。
+      // 实测后果：一次匿名化会把 mfaSecret 写成 ''、mfaRecoveryCodes 清空、
+      // mfaFailCount/mfaLastCounter/mfaLockUntil 归零、passwordHistory 清空——
+      // 本函数的契约里**没有**这几项（契约只写了 realName/phone/email/avatar），
+      // 那些改写是"默认值回填"这个副作用的产物，不是有意设计。
+      // 该站点由 src/tests/ci/userCredentialProjectionLedger.test.js 第 2 组捕获。
+      const user = await User.findById(id, null, opts).select(
+        User.unselectedCredentialProjection()
+      );
+      if (!user) return;
+      if (isAnonymizedEmail(user.email)) {
+        result = user; // 已匿名化：幂等返回
+        return;
+      }
+
+      user.realName = ANONYMIZED_REAL_NAME;
+      user.phone = ''; // 写侧钩子会同步把 phoneKey 落成 ''
+      user.email = buildAnonymizedEmail(user._id);
+      user.avatar = '';
+      user.status = USER_STATUS.INACTIVE;
+      user.password = crypto.randomBytes(32).toString('hex'); // pre('save') 钩子负责哈希
+      user.tokenVersion = (user.tokenVersion || 0) + 1;
+      await user.save(opts);
+
+      // 与删号同一口径：把"进行中的指派"退回池子（见 releaseOpenAssignments 的注释）
+      await this.releaseOpenAssignments([user._id], session);
+
+      logger.warn(`用户已匿名化（删除权流程）：id=${String(user._id)} reason=${reason}`);
+      result = user;
     });
     return result;
   }

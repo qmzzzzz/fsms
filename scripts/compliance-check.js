@@ -7,6 +7,8 @@
  *
  * 检查项:
  *   1. 留存天数配置（AUDIT_RETENTION_DAYS，默认 180）
+ *   1b. 业务数据保留期（BUSINESS_RETENTION_DAYS_*，未启用时显式说明"数据永久保留"）
+ *   1c. 备份/恢复目标（RPO/RTO，未声明时显式说明"待业务口径"；声明优于备份频率即红）
  *   2. append-only 钩子是否挂载（读取 schema 预编译钩子名）
  *   3. 审计导出接口是否存在（auditController.exportAuditLogs，含路由挂载校验）
  *   4. 审计异常监控是否挂载（index.js 中 auditMonitor.start/stop）
@@ -25,6 +27,10 @@
  */
 
 const path = require('path');
+
+// 判据本体（A2 业务保留期 / A8 RPO-RTO）单独成文件：本文件触到 max-lines 体积棘轮预算，
+// 而 check* 的**声明**必须留在这里（complianceGate.test.js 的 C 用例按源码视图对账）。
+const { businessRetentionVerdict, backupObjectiveVerdict } = require('./complianceVerdicts');
 
 const checks = [];
 let allPassed = true;
@@ -157,6 +163,42 @@ function checkRetention() {
   }
 
   recordCheck('留存天数 (AUDIT_RETENTION_DAYS)', passed, detail);
+}
+
+// ================= 1b. 业务数据保留期（A2，2026-10-16） =================
+// 与上面 checkRetention 同一纪律，但对象是**业务数据**（User/FireDevice/FireAlarm/Inspection）：
+// 「对外声明留 N 天、实际只留更少」在合规语境下比配置错误本身更严重。
+//
+// ⚠ 判据的边界写清楚，避免被读成"业务留存没问题"：
+//   - 通过条件只有一条：**没有任何一条被静默修正**（wasAdjusted === false）。
+//   - **未启用不算不合规**：业务口径尚未确定时不建 TTL 是正确行为——TTL 删除不可逆
+//     且无任何提示，技术单方面定数字等于静默销毁业务台账。但"尚未启用"必须被
+//     **显式说出来**（detail 里写明"全部无 TTL、数据永久保留、待业务口径"），
+//     不能让这条以一句"就绪"盖过去。
+//   - 一旦有人配了环境变量但被钳制/非法，本条立刻转红（那正是配置意图与实际不符）。
+//
+// 判据本体在 scripts/complianceVerdicts.js（体积棘轮预算 + 判据/登记分离，
+// 理由见该文件头）。这里只负责把结论登记进本次报告。
+function checkBusinessRetention() {
+  const v = businessRetentionVerdict();
+  recordCheck(v.name, v.passed, v.detail);
+}
+
+// ================= 1c. 备份 / 恢复目标（A8，2026-10-16） =================
+// 「允许丢多久数据（RPO）」「多久必须恢复（RTO）」此前在仓库里没有任何一处可查，
+// 而备份频率（每日全量）是写死的——于是"备份频率被人改慢"不会有任何信号，
+// 而对外承诺的 RPO 已经悄悄退化了。
+//
+// ⚠ 与 checkBusinessRetention 同一纪律，边界写清楚：
+//   - 通过条件只有一条：**声明值不优于备份频率下限**（`evaluateRpoAlignment`）。
+//     "声明 RPO=1h 而备份每天一次"是不可能兑现的承诺，比配置错误更严重。
+//   - **未声明不算不合规**：RPO/RTO 属业务/合规口径，技术单方面定一个数字等于
+//     把没人评估过的 SLA 印进测评材料。但"未声明"必须被**显式说出来**
+//     （detail 里写明两项目标均未设定、待业务口径），不能让这条以一句"就绪"盖过去。
+//   - 一旦有人配了环境变量但被钳制/非法，本条立刻转红（配置意图与实际不符）。
+function checkBackupObjectives() {
+  const v = backupObjectiveVerdict();
+  recordCheck(v.name, v.passed, v.detail);
 }
 
 // ================= 2. append-only 钩子挂载 =================
@@ -380,6 +422,8 @@ function checkAlertingDeliveryEndpoint() {
  */
 const COMPLIANCE_CHECKS = [
   checkRetention,
+  checkBusinessRetention,
+  checkBackupObjectives,
   checkAppendOnlyHooks,
   checkExportInterface,
   checkMonitorMounted,

@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+/**
+ * 合规检查器的**判据**（纯函数，无 recordCheck 依赖）—— A2 / A8，2026-10-16
+ *
+ * 为什么单独成文件：
+ *   ① `scripts/compliance-check.js` 触到 `max-lines` 体积棘轮预算（300 行代码，
+ *      eslint.config.js 里 skipBlankLines + skipComments 都开着，所以只有代码行算数）。
+ *      把"怎么判"搬出来、"登记到哪"留下，正好把预算还给门禁本体。
+ *   ② 而 `check*` 函数的**声明**必须留在 compliance-check.js：`complianceGate.test.js`
+ *      的 C 用例按源码视图对账「登记表 = 源码里声明的全部 check* 函数」，
+ *      搬走声明会让那条对账失去意义。
+ *   ③ 判据与副作用分离本就是本仓对门禁的一贯要求（见 scripts/backupIntegrityPolicy.js
+ *      文件头的同一段论证）：判据要能被用例直接驱动，而不是"跑一次脚本看输出"。
+ *
+ * 两个判据的**共同纪律**（写在这里一次，两处都适用）：
+ *   - 通过条件只有"配置意图与实际生效一致"这一条；
+ *   - **未启用/未声明不算不合规**——业务口径未定时不建 TTL、不承诺 RPO 是**正确**行为
+ *     （技术单方面定数字等于静默销毁业务台账 / 把没人评估过的 SLA 印进测评材料），
+ *     但"未启用"必须被**显式说出来**，不能让这条以一句"就绪"盖过去；
+ *   - 一旦有人配了环境变量却被钳制/非法，立刻转红（那正是配置意图与实际不符）。
+ */
+
+/**
+ * 业务数据保留期（A2）：User / FireDevice / FireAlarm / Inspection 是否有 TTL 声明，
+ * 以及"对外声明留 N 天、实际只留更少"这类静默修正。
+ *
+ * @returns {{name: string, passed: boolean, detail: string}}
+ */
+function businessRetentionVerdict() {
+  const {
+    BUSINESS_RETENTION_POLICY,
+    resolveBusinessRetention,
+    describeAllBusinessRetention,
+  } = require('../src/constants/businessRetention');
+
+  const all = BUSINESS_RETENTION_POLICY.map((p) => resolveBusinessRetention(p.modelName));
+  const enabled = all.filter((r) => r.enabled);
+  const adjusted = all.filter((r) => r.wasAdjusted);
+
+  const detail =
+    enabled.length === 0
+      ? `业务数据保留期**尚未启用**（${all.length} 个集合全部无 TTL，数据永久保留）：` +
+        '口径待业务方确认，见 src/constants/businessRetention.js'
+      : describeAllBusinessRetention().join('；');
+
+  return { name: '业务数据保留期', passed: adjusted.length === 0, detail };
+}
+
+/**
+ * 备份 / 恢复目标（A8）：RPO / RTO 是否声明，以及声明值是否**优于备份频率下限**
+ * （备份每天一次却声明 RPO=1h，是不可能兑现的承诺——比配置错误更严重，
+ * 因为它在事故复盘时才会暴露，而那时已经有人按那个数字做过决策）。
+ *
+ * @returns {{name: string, passed: boolean, detail: string}}
+ */
+function backupObjectiveVerdict() {
+  const {
+    resolveBackupObjective,
+    evaluateRpoAlignment,
+    describeAllBackupObjectives,
+    BACKUP_SCHEDULE,
+  } = require('../src/constants/backupObjectives');
+
+  const rpo = resolveBackupObjective('rpo');
+  const rto = resolveBackupObjective('rto');
+  const alignment = evaluateRpoAlignment({
+    declaredRpoHours: rpo.set ? rpo.effectiveHours : null,
+    intervalHours: BACKUP_SCHEDULE.intervalHours,
+  });
+
+  const unset = [rpo, rto].filter((o) => !o.set);
+  const adjusted = [rpo, rto].filter((o) => o.wasAdjusted);
+  const described = describeAllBackupObjectives().join('；');
+
+  const detail =
+    unset.length > 0
+      ? `${described}；备份频率为每 ${BACKUP_SCHEDULE.intervalHours}h 一次` +
+        `（${BACKUP_SCHEDULE.cron}，${BACKUP_SCHEDULE.source}）` +
+        '⇒ 当前可兑现的 RPO 下限即该间隔；口径待业务方确认，' +
+        '见 src/constants/backupObjectives.js 与 deployment/rollback-drill.md 第 5 节'
+      : `${described}；${alignment.message}`;
+
+  return {
+    name: '备份/恢复目标（RPO/RTO）',
+    passed: alignment.ok && adjusted.length === 0,
+    detail,
+  };
+}
+
+module.exports = { businessRetentionVerdict, backupObjectiveVerdict };

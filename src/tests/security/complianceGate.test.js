@@ -243,12 +243,18 @@ describe('合规门禁 · 登记项必须真跑过（F-164）', () => {
     expect(faked).toContain('checkFakeInComment'); // 原文里确实在场——只有视图能排除它
   });
 
-  it('D 钉住清单：八项合规要求逐项在场（整条连函数一起被删时 C 会静默放行）', () => {
+  it('D 钉住清单：十项合规要求逐项在场（整条连函数一起被删时 C 会静默放行）', () => {
     // 与 C 互补：C 是"两边一致"，删掉一个检查器会同时删掉两边 ⇒ C 仍绿；
-    // 这里硬写八条名字，删任何一条都要先在这里留痕。顺序无关（故两侧都 sort）。
+    // 这里硬写十条名字，删任何一条都要先在这里留痕。顺序无关（故两侧都 sort）。
+    // 2026-10-16（A2）新增 checkBusinessRetention：业务数据保留期的声明与
+    // "配置被静默修正即转红"判据，与 checkRetention 同一纪律、对象是业务集合。
+    // 2026-10-16（A8）新增 checkBackupObjectives：RPO/RTO 与备份频率的对齐
+    // （"声明 RPO 优于备份频率"即不可能兑现的承诺），未声明时显式说明待业务口径。
     expect(COMPLIANCE_CHECKS.map((f) => f.name).sort()).toEqual(
       [
         'checkRetention',
+        'checkBusinessRetention',
+        'checkBackupObjectives',
         'checkAppendOnlyHooks',
         'checkExportInterface',
         'checkMonitorMounted',
