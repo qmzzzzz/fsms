@@ -1,12 +1,19 @@
 /**
  * 报警的所有读出路径不得回吐 `reporter.phone`（2026-10-02 审计线 lane-B #1）
  *
- * 缺陷形状：`FireAlarm.reporter.phone` 是明文存的第三方手机号（不属于
+ * 缺陷形状：`FireAlarm.reporter.phone` 是**第三方**上报人的手机号（不属于
  * models/User.js 那套「getter 解密 + POST /api/security/view-sensitive step-up +
  * view_sensitive_data 审计」通道），而报警的读出路径原本**一条根文档投影都没有**，
  * 于是任何持 `alarm:read` 且落在该条范围内的账号都能整页批量读到它：
  * 无二次验证、无 `system:read`、无留痕。同一 model 上的 `handler.phone` 正因同样
  * 理由被收窄过（见同目录 alarmDetailHandlerPii.test.js），这是同一列的邻接漏点。
+ *
+ * 2026-10-16 补充（P1 加固）：该列已接入 piiCrypto **at-rest 加密**（写侧钩子加密、
+ * 读侧 getter 解密，见同目录 alarmReporterPhoneEncryption.test.js）。加密解决的是
+ * 「拿到备份转储/DB 文件的人」，**不解决**「持 alarm:read 的人整页批量读」——
+ * 后者靠的仍是本文件钉住的投影收窄，故本文件的判据一条都不放松。
+ * 夹具自证同步改写：库里现在应是密文，而 getter / toJSON 必须给出明文
+ * （toJSON 不套 getter 是 Mongoose 默认，该接线不变量见 FireAlarm.js 的 set('toJSON')）。
  *
  * 为什么判据要覆盖五个处置接口而不只列表/详情：`dispatch/arrive/resolve/
  * false-alarm/cancel` 都把 `findOneAndUpdate` 的 `updated` 文档原样回给客户。
@@ -14,7 +21,7 @@
  * 因为那五个响应体本来就没有用例读过它。这正是本仓反复强调的「绿但不设防」。
  *
  * 可证伪对（每条都配反向证据，避免"其实是被 populate/夹具吞了"）：
- *   · 夹具自证：不过滤的裸查询确实能拿到明文并出现在序列化结果里；
+ *   · 夹具自证：裸查询经 getter 确实能拿到明文并出现在序列化结果里；
  *   · reporter.name 仍在：证明排除的是那一列，不是整个子文档；
  *   · 源码文本闸：逐个 FireAlarm 读调用点必须带投影（运行用例只走一条分支，
  *     源码闸才钉得住"三条列表/详情分支 + 五个处置口"这个整体形状）。
@@ -82,7 +89,16 @@ describe('报警读出路径的 reporter.phone 口径', () => {
     }
   });
 
-  test('夹具自证：号码确实明文入库，裸查询能整块读出（否则下面的 not.toContain 是空的）', async () => {
+  test('夹具自证：库里是 enc.v2. 密文，裸查询经 getter / toJSON 给出明文（否则下面的 not.toContain 是空的）', async () => {
+    // at-rest 侧：直读集合看到的是密文（P1 加密已生效）
+    const stored = await mongoose.connection
+      .collection('firealarms')
+      .findOne({ _id: alarmCancel._id });
+    expect(stored.reporter.phone).toMatch(/^enc\.v2\./);
+    expect(stored.reporter.phone).not.toContain(REPORTER_PHONE);
+
+    // 读出侧：裸查询（不经投影）经 getter 与 toJSON 都给出明文——
+    // 这条同时钉住 set('toJSON', { getters: true }) 这条接线不变量
     const raw = await FireAlarm.findById(alarmCancel._id);
     expect(raw.reporter.phone).toBe(REPORTER_PHONE);
     expect(JSON.stringify(raw.toJSON())).toContain(REPORTER_PHONE);

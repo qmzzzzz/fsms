@@ -313,7 +313,7 @@ const LIVE = [
   },
   {
     in: 'src/services/reportExportService.js',
-    at: 'FireAlarm.js:160',
+    at: 'FireAlarm.js:242',
     must: /取值可重复/,
     why: '"必须有同向 _id 次级键"不变式出处一',
   },
@@ -488,7 +488,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/controllers/createUserScopeGate.test.js',
-    at: 'userController.js:602',
+    at: 'userController.js:612',
     must: /assertRecordInScope/,
     why: 'updateUser 里的数据范围闸（原写 :326，那是另一个函数的 docblock）',
   },
