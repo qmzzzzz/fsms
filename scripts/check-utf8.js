@@ -71,7 +71,30 @@ const rootFiles = [
   'playwright.config.js',
   'start.bat',
 ].map((name) => path.join(REPO, name));
-const skip = new Set(['node_modules', 'dist', '.git', 'coverage']);
+/**
+ * 生成物 / 依赖目录一律跳过（F-05，2026-10-17）。
+ *
+ * 缺陷本体：原先的 skip 是**精确名集合** `['node_modules','dist','.git','coverage']`。
+ * 而本仓存在多种带后缀的生成物目录——`web-admin/dist-debug`（`--mode development`
+ * 的产物）、`web-admin/dist-optimized`、手工跑覆盖率时的 `web-admin/coverage-<tag>`。
+ * 它们一个都不匹配精确名，于是**构建产物被当成源码扫**：
+ *   - 生成一次 debug bundle 后 `npm run check:utf8` 就红，而源码一个字符没变；
+ *   - 报错行指向 `dist-debug/assets/router-<hash>.js`，那是构建工具的输出，
+ *     开发者第一反应是"源码编码回归了"，排查方向被引到错误的地方；
+ *   - CI（干净 checkout，没有生成物）与本地扫描的不是同一批文件。
+ *
+ * 用**前缀**而不是枚举：`dist` / `dist-*`、`coverage` / `coverage-*` 都是生成物，
+ * 每加一种产物目录就往 skip 里补一条，是必然会漏的形状（本轮实测就漏了三种）。
+ * 前缀边界写成 `($|-)` 而不是 `dist.*`：`distribution/`、`distance/` 这类**源码目录**
+ * 若将来出现，不能被误跳过（判据见 utf8ScanScope.test.js）。
+ *
+ * 仍然不用 `git ls-files` 做扫描集：那会让门禁依赖 git 可用（镜像构建阶段、
+ * 导出源码包的场景都没有 .git），把"编码门禁"变成"git 是否可用"的判据。
+ */
+const SKIP_DIR_PATTERN = /^(?:node_modules|\.git|dist(?:$|-)|coverage(?:$|-))/;
+
+/** 目录名是否属于生成物/依赖目录（导出以便用例直接驱动，不靠"跑一遍看输出"） */
+const isSkippedDirName = (name) => SKIP_DIR_PATTERN.test(name);
 
 // 常见二进制扩展名：内容本就不是文本，UTF-8 校验必然误报，直接跳过
 const binaryExts = new Set([
@@ -106,7 +129,7 @@ const binaryExts = new Set([
 
 function walk(dir, out) {
   for (const name of fs.readdirSync(dir)) {
-    if (skip.has(name)) continue;
+    if (isSkippedDirName(name)) continue;
     const full = path.join(dir, name);
     const st = fs.statSync(full);
     if (st.isDirectory()) walk(full, out);
@@ -231,6 +254,6 @@ function main() {
 // 第二份真源。本批把 docs/ 与 25 条根文件加进来时，正是那份硬写清单会静默失效的形状
 // （测试仍按旧夹具生成 ⇒ 对照用例红，或者更糟：新根从来没被自证扫到过）。
 // 被 require 时只声明、不跑门禁、不 process.exit（否则 jest 进程会被门禁的 exit 0 打死）。
-module.exports = { roots, rootFiles };
+module.exports = { roots, rootFiles, SKIP_DIR_PATTERN, isSkippedDirName, walk };
 
 if (require.main === module) main();
