@@ -160,20 +160,65 @@ erDiagram
 
 ## 4. 部署拓扑
 
-当前 `docker-compose.yml` 定义的目标生产形态（TLS 终结的 Nginx 在宿主侧，示例配置见 `deployment/nginx.conf.example`）：
+当前 `docker-compose.yml` 定义的目标生产形态（TLS 终结的 Nginx 在宿主侧，示例配置见 `deployment/nginx.conf.example`）。
+
+**本图以 `docker-compose.yml` 为唯一生成源**（F-06，2026-10-17 重画）。此前的图把 MongoDB 画在
+`fire-safety-net` 里、与 app 同网，而实际 compose 中 mongo **只**在 `data-net`（且该网络
+`internal: true`）——按旧图排障会连错网络、也会误判"app 能否直连数据面"这个安全边界。
+图与 compose 的一致性由 `src/tests/deploy/architectureDocContract.test.js` 钉住：
+compose 里增删服务/网络而文档没跟上，那条门禁会红。
 
 ```mermaid
-flowchart LR
+flowchart TB
   Internet["互联网"] -->|443 TLS| NGX["宿主 Nginx\nTLS 终结 / 安全头 / gzip\n静态托管 web-admin/dist\n/metrics 限源访问"]
-  NGX -->|"/api、/socket.io 反代\n127.0.0.1:3000"| APP["app 容器（node:22.14.0-alpine 三阶段构建）\n非 root / cap_drop ALL / no-new-privileges\nlimits 1g·1.5cpu / 日志轮转 20m×5"]
-  APP -->|"容器内网 27017（不暴露宿主）"| MONGO["mongo:6.0.20\nlimits 2g·2cpu / healthcheck ping\nvolumes: mongo-data, mongo-config"]
+  NGX -->|"/api、/socket.io 反代\n127.0.0.1:3000"| APP
+  OPS["运维 / 值班（本机回环）"] -.->|"127.0.0.1:3000 app\n127.0.0.1:3001 grafana\n127.0.0.1:9090 prometheus · 127.0.0.1:9093 alertmanager"| EDGE
+
+  subgraph EDGE["fire-safety-net（bridge，可出网）"]
+    PROM["prometheus\n15s 抓取 + 告警规则求值"]
+    AM["alertmanager:v0.27.0\n接收器默认占位\n生产以私有副本挂载注入"]
+    GRAF["grafana:11.1.0\n看板 / 告警视图"]
+  end
+
+  subgraph DATA["data-net（bridge，internal: true）\n不接宿主 NAT、不出外网"]
+    MONGO["mongo:6.0.20\nlimits 2g·2cpu / healthcheck ping\nvolumes: mongo-data, mongo-config"]
+    REDIS["redis:7-alpine\n限流 / 缓存 / 分布式锁\nvolumes: redis-data"]
+  end
+
+  APP["app 容器（node:22.14.0-alpine 三阶段构建）\n非 root / cap_drop ALL / no-new-privileges\nlimits 1g·1.5cpu / 日志轮转 20m×5\n**双网络接入**"]
+  APP ---|"接入：被抓取 + 出网发 webhook"| EDGE
+  APP ---|"接入：唯一的数据面访问者"| DATA
+  PROM -->|"抓取 app:3000/metrics"| APP
+  PROM -->|"告警推送 9093"| AM
+  GRAF -->|"查询 9090"| PROM
+  APP -->|"27017（不暴露宿主）"| MONGO
+  APP -->|"6379（不暴露宿主）"| REDIS
   SEC["./secrets/*（chmod 600，仓库外）\njwt/aes/hmac/mongodb_uri…"] -.->|"secrets 挂载 /run/secrets"| APP
   SEC -.->|"mongo_root_username/password"| MONGO
-  subgraph NET["fire-safety-net（bridge）"]
-    APP
-    MONGO
-  end
 ```
+
+**网络边界（三句话，排障时先看这段再看图）**：
+
+1. `fire-safety-net` 是**边缘/监控面**：app、prometheus、alertmanager、grafana 在此网。
+   app 的出网能力（`securityAlertDelivery` 的 webhook）与 Prometheus 的抓取都走这张网。
+2. `data-net` 是**数据面**且 `internal: true`：mongo、redis 只在此网，**没有宿主端口、不能出外网**。
+   监控栈与宿主发布面都摸不到数据面——这条分段直接封掉的反向路径是
+   "Grafana 数据源 URL 可配任意地址 ⇒ 可达无密码 redis（删黑名单键 = 撤销封禁、
+   清限流计数 = 解除封顶）"，见文末 networks 段的注释与 ADR-005。
+3. **app 同时接入两张网**（这是唯一同时接入的服务）：既要被 prometheus 抓取、要出网发告警
+   webhook，又要访问 mongo/redis。把数据面单独拆成 internal 网络，才能让"监控面容器直连数据库"
+   这件事在**网络层**不成立，而不是靠应用层鉴权兜。新增服务时不要顺手把它加进 `data-net`。
+
+**宿主端口（全部绑 127.0.0.1，不对公网）**：
+
+| 服务         | 宿主端口 | 说明                                    |
+| ------------ | -------- | --------------------------------------- |
+| app          | 3000     | 由宿主 Nginx 反代；直接访问仅限本机排障 |
+| grafana      | 3001     | 容器内 3000，宿主 3000 已被 app 占用    |
+| prometheus   | 9090     | 查询 / 状态页                           |
+| alertmanager | 9093     | Web UI；Prometheus 经容器网络推送到此   |
+| mongo        | 无       | 仅 `data-net`，容器内 27017             |
+| redis        | 无       | 仅 `data-net`，容器内 6379              |
 
 要点：
 
