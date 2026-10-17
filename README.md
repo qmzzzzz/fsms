@@ -197,32 +197,33 @@ docker compose up -d --no-build
 
 复制 `.env.example` 为 `.env` 后按需修改。本表仅为核心运行变量节选；完整运行与安全变量（指标端点、ECDH 私钥、CSP 上报、主机白名单、审计保留期等）以 `.env.example` 为准。生产环境建议用 `<NAME>_FILE` 注入密钥文件。
 
-| 变量                                               | 说明                                                          | 默认值                                     |
-| -------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------ |
-| `PORT`                                             | 后端服务端口                                                  | `3000`                                     |
-| `NODE_ENV`                                         | 运行环境                                                      | `development`                              |
-| `MONGODB_URI`                                      | MongoDB 连接地址                                              | `mongodb://localhost:27017/fire_safety_db` |
-| `REDIS_URL`                                        | Redis 连接地址（生产必填：限流共享、IP 黑名单广播、审计链锁） | -                                          |
-| `JWT_SECRET`                                       | 访问令牌密钥（生产必须 ≥32 字符）                             | -                                          |
-| `JWT_EXPIRE`                                       | 访问令牌有效期                                                | `2h`                                       |
-| `JWT_REFRESH_SECRET`                               | 刷新令牌密钥（生产必须 ≥32 字符）                             | -                                          |
-| `JWT_REFRESH_EXPIRE`                               | 刷新令牌有效期                                                | `7d`                                       |
-| `AES_SECRET_KEY`                                   | AES 加密密钥（生产必须 ≥32 字符）                             | -                                          |
-| `HMAC_SECRET`                                      | HMAC 签名密钥（生产必填）                                     | -                                          |
-| `CORS_ORIGIN`                                      | 跨域白名单，逗号分隔（生产必填，禁止通配符）                  | 开发模式默认本机 3001/5173                 |
-| `ALLOW_PUBLIC_REGISTRATION`                        | 公开注册开关，生产建议 `false`                                | `false`                                    |
-| `ADMIN_INITIAL_PASSWORD`                           | 初始管理员密码；不设置则自动生成随机强密码                    | 随机生成                                   |
-| `TRUST_PROXY_HOPS`                                 | 反向代理跳数（生产必填，否则限流/黑名单按代理 IP 计）         | -                                          |
-| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX_REQUESTS` | 通用限流窗口 / 阈值                                           | `900000` / `300`                           |
-| `BCRYPT_ROUNDS`                                    | 密码哈希强度                                                  | `12`                                       |
-| `LOG_LEVEL`                                        | 日志级别                                                      | `info`                                     |
-| `LOG_DIR`                                          | 日志目录（容器常需指向挂载卷；测试用它在临时目录里取证）      | 仓库 `logs/`                               |
-| `SENTRY_DSN`                                       | Sentry 错误监控（可选）                                       | -                                          |
-| `ENABLE_API_DOCS`                                  | 是否暴露 Swagger API 文档（生产默认 false）                   | 开发=true / 生产=false                     |
-| `DOCS_USERNAME`                                    | API 文档 Basic Auth 用户名（可选）                            | -                                          |
-| `DOCS_PASSWORD`                                    | API 文档 Basic Auth 密码（可选）                              | -                                          |
-| `LOGIN_ENCRYPT_STRICT`                             | 拒绝明文口令上行（仅 HTTPS / localhost 部署可开）             | `false`                                    |
-| `TRUSTED_TYPES_ENFORCE`                            | Trusted Types 由 Report-Only 升为强制（移入主 CSP）           | `false`                                    |
+| 变量                                               | 说明                                                                                                                                                                                                                      | 默认值                                     |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `PORT`                                             | 后端服务端口                                                                                                                                                                                                              | `3000`                                     |
+| `NODE_ENV`                                         | 运行环境                                                                                                                                                                                                                  | `development`                              |
+| `MONGODB_URI`                                      | MongoDB 连接地址                                                                                                                                                                                                          | `mongodb://localhost:27017/fire_safety_db` |
+| `REDIS_URL`                                        | Redis 连接地址（生产必填：限流共享、IP 黑名单广播、审计链锁）                                                                                                                                                             | -                                          |
+| `JWT_SECRET`                                       | 访问令牌密钥（生产必须 ≥32 字符）                                                                                                                                                                                         | -                                          |
+| `JWT_EXPIRE`                                       | 访问令牌有效期                                                                                                                                                                                                            | `2h`                                       |
+| `JWT_REFRESH_SECRET`                               | 刷新令牌密钥（生产必须 ≥32 字符）                                                                                                                                                                                         | -                                          |
+| `JWT_REFRESH_EXPIRE`                               | 刷新令牌有效期                                                                                                                                                                                                            | `7d`                                       |
+| `AES_SECRET_KEY`                                   | AES 加密密钥（生产必须 ≥32 字符）                                                                                                                                                                                         | -                                          |
+| `HMAC_SECRET`                                      | HMAC 签名密钥（生产必填）                                                                                                                                                                                                 | -                                          |
+| `CORS_ORIGIN`                                      | 跨域白名单，逗号分隔（生产必填，禁止通配符）                                                                                                                                                                              | 开发模式默认本机 3001/5173                 |
+| `ALLOW_PUBLIC_REGISTRATION`                        | 公开注册开关，生产建议 `false`                                                                                                                                                                                            | `false`                                    |
+| `ADMIN_INITIAL_PASSWORD`                           | 初始管理员密码；不设置则自动生成随机强密码                                                                                                                                                                                | 随机生成                                   |
+| `TRUST_PROXY_HOPS`                                 | 反向代理跳数（生产必填，否则限流/黑名单按代理 IP 计）                                                                                                                                                                     | -                                          |
+| `TRUSTED_PROXY_CIDRS`                              | 可信代理网段（逗号分隔 CIDR）。声明「谁有权替客户端写 `X-Forwarded-For`」；未配置时判据退回「对端属私网/回环即可信」，同容器网络内任意服务可伪造该头（F-01）。空项、非法文本、全域网段（`0.0.0.0/0`、`::/0`）启动致命失败 | -                                          |
+| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX_REQUESTS` | 通用限流窗口 / 阈值                                                                                                                                                                                                       | `900000` / `300`                           |
+| `BCRYPT_ROUNDS`                                    | 密码哈希强度                                                                                                                                                                                                              | `12`                                       |
+| `LOG_LEVEL`                                        | 日志级别                                                                                                                                                                                                                  | `info`                                     |
+| `LOG_DIR`                                          | 日志目录（容器常需指向挂载卷；测试用它在临时目录里取证）                                                                                                                                                                  | 仓库 `logs/`                               |
+| `SENTRY_DSN`                                       | Sentry 错误监控（可选）                                                                                                                                                                                                   | -                                          |
+| `ENABLE_API_DOCS`                                  | 是否暴露 Swagger API 文档（生产默认 false）                                                                                                                                                                               | 开发=true / 生产=false                     |
+| `DOCS_USERNAME`                                    | API 文档 Basic Auth 用户名（可选）                                                                                                                                                                                        | -                                          |
+| `DOCS_PASSWORD`                                    | API 文档 Basic Auth 密码（可选）                                                                                                                                                                                          | -                                          |
+| `LOGIN_ENCRYPT_STRICT`                             | 拒绝明文口令上行（仅 HTTPS / localhost 部署可开）                                                                                                                                                                         | `false`                                    |
+| `TRUSTED_TYPES_ENFORCE`                            | Trusted Types 由 Report-Only 升为强制（移入主 CSP）                                                                                                                                                                       | `false`                                    |
 
 ## 默认账户
 
@@ -525,6 +526,7 @@ APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
 - [ ] `CORS_ORIGIN` 已配置为明确的前端域名白名单（禁止通配符）
 - [ ] `ALLOWED_HOSTS` 已配置为对外域名（Host 头白名单；缺失即拒绝启动，compose 亦以 `${ALLOWED_HOSTS:?}` 硬声明）
 - [ ] `TRUST_PROXY_HOPS` 已按反向代理层数设置（1..5 的正整数，非法值会静默退化为"不信任代理"）
+- [ ] `TRUSTED_PROXY_CIDRS` 已按反向代理实际所在网段设置——未设置时 XFF 的可信判据只看「对端是否在私网」，同一容器网络内任意服务可伪造（见审计 F-01）
 - [ ] `ALLOW_PUBLIC_REGISTRATION` 保持 `false`
 - [ ] 已修改默认管理员初始密码
 - [ ] 若 `ENABLE_API_DOCS=true`：`DOCS_USERNAME` / `DOCS_PASSWORD` 已设置，且口令 ≥16 字符（文档暴露全部接口契约与权限编码）

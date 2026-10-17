@@ -433,8 +433,9 @@ function isPrivateOrLoopback(rawIp) {
  * 三种可信形态（其余一律按可伪造处理）：
  *  1) 未启用 trust proxy：req.ip 恒等于 socket 对端，请求头不参与判定；
  *  2) 未携带 X-Forwarded-For：即使 trust proxy 开着，req.ip 也只能是 socket 对端；
- *  3) trust proxy 开启且带 XFF：只有 socket 对端属内网/回环（nginx、容器网络这类
- *     基础设施）时，该 XFF 才是可信代理写入的。
+ *  3) trust proxy 开启且带 XFF：
+ *     a. 配了 TRUSTED_PROXY_CIDRS（推荐）⇒ 只有对端落在这些网段内才算可信代理；
+ *     b. 未配置 ⇒ 退回「对端属私网/回环即可信」（修复前的唯一形态，见下残余风险）。
  *
  * 代价（如实声明，别让它变成惊喜）：应用直接站在公网 CDN/负载均衡之后（对端是公网
  * IP）又开着 trust proxy 时，真实客户端只有 XFF 一个来源，而本判据会退回 socket 对端
@@ -442,15 +443,29 @@ function isPrivateOrLoopback(rawIp) {
  * 也不让一个请求头买到访问控制。正确出路是把代理层留在内网，或按真实跳数配
  * TRUST_PROXY_HOPS。
  *
+ * 残余风险（F-01，2026-10-17 由仓库负责人明确接受）：3-b 那条回落路径**没有闭合**。
+ * 私网/回环只是位置而非身份，同一容器网络内的任意进程直连应用端口、自己写一条 XFF，
+ * 与真实反代在应用视角完全同形，因此可以买到 IP 白名单豁免、限流配额轮换、
+ * 自动封禁的打击对象与审计来源地址。保留它是为了不打断现存部署；启动期会打 WARN。
+ * **闭合方式只有一个**：配置 TRUSTED_PROXY_CIDRS 走 3-a（配了之后私网不再是理由）。
+ *
  * @param {import('express').Request} req
  * @returns {boolean} true=req.ip 可用作安全裁决的客户端身份
  */
 function isClientIpIdentityTrustworthy(req) {
-  const trustProxy =
-    req.app && typeof req.app.get === 'function' ? req.app.get('trust proxy') : false;
+  const appGet =
+    req.app && typeof req.app.get === 'function' ? (key) => req.app.get(key) : undefined;
+  const trustProxy = appGet ? appGet('trust proxy') : false;
   if (!trustProxy) return true;
   if (req.get('x-forwarded-for') === undefined) return true;
   const peer = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+  // F-01（2026-10-16 审计，P1）：配了显式可信代理网段就以名单为准。
+  // RFC1918 说的是「位置」，不是「代理身份」——同 compose 网络内任意容器直连
+  // app:3000 并自带一条 XFF，对端同样落在私网，与真实 nginx 完全同形。
+  // 名单由 config/trustedProxies 解析、app.js 注入，本函数不读环境（保持纯判据）。
+  // 未配置时行为与修复前逐字一致，残余风险见下方「代价」段与启动期 WARN。
+  const proxies = appGet ? appGet('trusted proxy cidrs') : undefined;
+  if (proxies && proxies.configured) return proxies.matches(peer);
   return isPrivateOrLoopback(peer);
 }
 

@@ -168,6 +168,85 @@ describe('Config Validation', () => {
     });
   });
 
+  describe('TRUSTED_PROXY_CIDRS 启动闸（F-01，2026-10-16 审计 P1）', () => {
+    /** 生产环境下除 TRUSTED_PROXY_CIDRS 外全部配置合法（与 TRUST_PROXY_HOPS 组同夹具） */
+    const setValidProdEnv = () => {
+      process.env.NODE_ENV = 'production';
+      process.env.JWT_SECRET = 'strong-random-jwt-secret-that-is-long-enough';
+      process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
+      process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
+      process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
+      process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
+      process.env.CORS_ORIGIN = 'https://example.com';
+      process.env.ENABLE_HTTPS = 'true';
+      process.env.ALLOWED_HOSTS = 'api.example.com';
+      process.env.REDIS_URL = 'rediss://redis.example.com:6379';
+      process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
+      process.env.TRUST_PROXY_HOPS = '1';
+    };
+
+    /** 以指定 TRUSTED_PROXY_CIDRS 跑生产校验，返回是否致命退出与错误全文 */
+    const runWith = (value) => {
+      setValidProdEnv();
+      if (value === undefined) delete process.env.TRUSTED_PROXY_CIDRS;
+      else process.env.TRUSTED_PROXY_CIDRS = value;
+
+      const { validateConfig } = require('../../config/validate');
+      const logger = require('../../utils/logger');
+      const messages = [];
+      const mockError = jest
+        .spyOn(logger, 'error')
+        .mockImplementation((m) => messages.push(String(m)));
+      jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      let exited = false;
+      try {
+        validateConfig();
+      } catch (e) {
+        exited = e.message === 'process.exit called';
+      }
+      mockError.mockRestore();
+      mockExit.mockRestore();
+      return { exited, messages: messages.join('\n') };
+    };
+
+    test('未配置不是错误：本项选填，未配时判据退回既有行为（由 app.js 打 WARN）', () => {
+      expect(runWith(undefined).exited).toBe(false);
+    });
+
+    test('合法网段（IPv4 与 IPv6 混排）通过', () => {
+      expect(runWith('10.0.0.0/8,fd00::/8').exited).toBe(false);
+    });
+
+    test('全域网段 0.0.0.0/0 致命：等于宣布整个互联网都是可信代理', () => {
+      const { exited, messages } = runWith('0.0.0.0/0');
+      expect(exited).toBe(true);
+      expect(messages).toContain('全域网段');
+    });
+
+    test('全域网段 ::/0 同样致命（IPv6 侧不得漏判）', () => {
+      const { exited, messages } = runWith('::/0');
+      expect(exited).toBe(true);
+      expect(messages).toContain('全域网段');
+    });
+
+    test('空项致命：静默忽略会让运维以为三段都生效', () => {
+      const { exited, messages } = runWith('10.0.0.0/8,,172.16.0.0/12');
+      expect(exited).toBe(true);
+      expect(messages).toContain('空项');
+    });
+
+    test('解析不出的文本致命，且错误里回显原值便于定位', () => {
+      const { exited, messages } = runWith('10.0.0.0/8,not-an-ip');
+      expect(exited).toBe(true);
+      expect(messages).toContain('not-an-ip');
+      expect(messages).toContain('无法解析为 CIDR');
+    });
+  });
+
   describe('collectProductionWarnings (G6)', () => {
     test('未配置 ALLOWED_HOSTS 时产出告警', () => {
       delete process.env.ALLOWED_HOSTS;

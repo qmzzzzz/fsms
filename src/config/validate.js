@@ -1,3 +1,8 @@
+// F-01（2026-10-16 独立审计，P1）：可信代理网段的解析判据在 config/trustedProxies.js，
+// 本文件只把它的结论接到启动闸上。依赖方向 config → utils（trustedProxies 依赖
+// utils/ipUtils 的 CIDR 原语），与 config/swagger.js 同向，不构成环。
+const trustedProxies = require('./trustedProxies');
+
 // 弱密钥黑名单：生产环境禁止使用这些默认值。
 // P0-4（2026-09-17）：加入 '<CHANGE_ME>' —— .env.example 的模板占位符
 // 此前形如「<替换为 openssl rand -base64 48 的输出>」（33 字符）能通过长度校验，
@@ -401,6 +406,15 @@ function validateConfig() {
   // 见 eslint.ratchet.json 的 max-lines-per-function 约束）
   validateDocsCredentials(errors);
   collectTrustProxyErrors(errors);
+  // F-01：TRUSTED_PROXY_CIDRS 选填，未配置不是错误（判据退回「对端属私网/回环即可信」，
+  // 由 app.js 打 WARN 提示收紧）；但**配了就必须配得对**——空项、解析不出、全域网段
+  // （0.0.0.0/0、::/0，等于宣布整个互联网都是可信代理，比不配更糟）三类非法值，
+  // 逐条判据与理由见 config/trustedProxies.js。运行时判据侧已 fail-closed，但那表现为
+  // 「反代后所有请求都不可信」、归因困难，故在启动期升级为致命错误。
+  // 刻意写成两行内联而非新增包装函数：本文件计入 max-lines 的行数是 297/300，
+  // 加一个函数（4 行）+ 导出（1 行）会新增 max-lines warn 并打红 lint:ratchet。
+  const rawTrustedProxyCidrs = process.env[trustedProxies.ENV_KEY];
+  errors.push(...trustedProxies.parseTrustedProxyCidrs(rawTrustedProxyCidrs).errors);
   collectTlsErrors(errors);
   collectTimezoneErrors(errors);
 

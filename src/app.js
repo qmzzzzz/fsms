@@ -14,6 +14,7 @@ const {
   MAX_TRUST_PROXY_HOPS,
   resolveTrustProxyHops: resolveTrustProxyHopsFromConfig,
 } = require('./config/validate');
+const trustedProxies = require('./config/trustedProxies');
 const logger = require('./utils/logger');
 const middleware = require('./middleware');
 const {
@@ -103,6 +104,44 @@ function resolveCorsOrigins(cfg = config) {
 }
 
 /**
+ * 可信代理策略注入与告警（F-01，2026-10-16 审计 P1）
+ *
+ * 抽成独立函数而不是写在 createApp 里，理由与 createApp 已有的体积告警直接相关：
+ * `max-lines-per-function` 对 createApp 长期报 warn（棘轮基线锁死不增），把这段
+ * 连注释带长告警文案塞进去会让它继续膨胀。抽出后 createApp 只留一行调用。
+ *
+ * @param {import('express').Express} app
+ * @param {{hops: number}} trustProxyHops resolveTrustProxyHops 的归一结果
+ */
+function applyTrustedProxyPolicy(app, trustProxyHops) {
+  // 判据位由 utils/ipUtils.isClientIpIdentityTrustworthy 读取；注入点紧跟 trust proxy，
+  // 因为两者回答的是同一个问题的两半（信不信代理头 / 信哪个对端写的代理头）。
+  const proxies = trustedProxies.resolveTrustedProxies();
+  app.set('trusted proxy cidrs', proxies);
+  if (proxies.errors.length > 0) {
+    // 显式配错必须出声：判据侧已 fail-closed（整份名单作废、谁都不信），但若只静默
+    // fail-closed，运维看到的症状是「反代后面所有请求都被判成不可信」，无从归因到这里。
+    logger.error(
+      'TRUSTED_PROXY_CIDRS 配置非法，可信代理判定已 fail-closed（谁都不信）：\n' +
+        proxies.errors.map((e) => `  - ${e}`).join('\n')
+    );
+    return;
+  }
+  if (trustProxyHops.hops > 0 && !proxies.configured) {
+    // 残余风险的唯一提示位：启用了代理头信任却没声明代理网段 ⇒ 判据回落到
+    // 「对端属私网/回环即可信」，同容器网络内任意进程伪造一条 XFF 即可冒用。
+    logger.warn(
+      `已启用 trust proxy（TRUST_PROXY_HOPS=${trustProxyHops.hops}）但未配置 ` +
+        'TRUSTED_PROXY_CIDRS：X-Forwarded-For 的可信判据目前只看「对端是否属私网/回环」，' +
+        '而私网是位置不是代理身份——同一容器网络内的任意服务直连应用端口并自带该头，' +
+        '与真实反向代理在应用视角完全同形，可据此影响 IP 白名单/黑名单、三层限流配额、' +
+        '自动封禁对象与审计来源地址（审计 F-01）。' +
+        '闭合方式：把真实代理所在网段写进 TRUSTED_PROXY_CIDRS（逗号分隔 CIDR）。'
+    );
+  }
+}
+
+/**
  * 创建并配置 Express 应用
  * @returns {express.Application}
  */
@@ -148,6 +187,7 @@ function createApp() {
   // hops 为 0 时显式置为不信任（false 而非 0）：两者在 proxy-addr 下等价，但
   // 既有断言（含 src/tests/app/appTrustProxyAndReadyzGuards.test.js）读到的是 false
   app.set('trust proxy', trustProxyHops.hops > 0 ? trustProxyHops.hops : false);
+  applyTrustedProxyPolicy(app, trustProxyHops);
 
   // Express 5 迁移（ADR-007）：v5 默认 query parser 收窄为 simple（嵌套查询
   // 对象解析变化）。本仓列表接口入参虽全为扁平标量，仍显式固定为 extended
