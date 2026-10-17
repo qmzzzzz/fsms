@@ -680,7 +680,7 @@ const initPermissions = async () => {
  * 防止数据库残留过宽权限（如 GUEST 曾拥有 device:* 通配符）无法被收回。
  *
  * P3-21 消除 N+1：原实现对每个角色各发一次 findOne + 一次 Permission.find
- * （5 个角色 ≥ 10 次串行往返），且 SECURITY_ADMIN/FIRE_SUPERVISOR 的权限集
+ * （6 个角色 ≥ 12 次串行往返），且 SECURITY_ADMIN/FIRE_SUPERVISOR 的权限集
  * 高度重叠却各自重复拉取。现在改为「两次批量查询 + 内存内映射」：
  * 一次取回全部角色，一次取回全部涉及的权限，之后纯内存比对。
  */
