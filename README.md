@@ -4,24 +4,27 @@
 
 ## 技术栈
 
-| 层级   | 技术选型                                                                                                      |
-| ------ | ------------------------------------------------------------------------------------------------------------- |
-| 前端   | Vue 3（Composition API）、Vite、Element Plus、Pinia、Vue Router、ECharts、Axios                               |
-| 后端   | Node.js、Express、Mongoose、Socket.IO、JWT（HS256）、winston                                                  |
-| 数据库 | MongoDB 6.x                                                                                                   |
-| 安全   | helmet、三层限流（IP 级 / 用户级 / 通用）、bcryptjs、AES-256 + HMAC 加密、令牌黑名单、IP 黑名单、全量审计日志 |
-| 测试   | Jest + mongodb-memory-server（内存 MongoDB，无需本地实例）                                                    |
-| 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 20/22 矩阵测试，前端构建 24，镜像 node:22.14.0）   |
-| 监控   | Prometheus + Grafana + Alertmanager（docker-compose 随栈启动）、Sentry（可选）                                |
+| 层级   | 技术选型                                                                                                                                             |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 前端   | Vue 3（Composition API）、Vite、Element Plus、Pinia、Vue Router、ECharts、Axios                                                                      |
+| 后端   | Node.js、Express、Mongoose、Socket.IO、JWT（HS256）、winston                                                                                         |
+| 数据库 | MongoDB 6.x                                                                                                                                          |
+| 安全   | helmet（CSP / Trusted Types）、三层限流 + CC 封禁阶梯、bcryptjs、字段级加密与登录信封加密、TOTP 两步验证、令牌黑名单、IP 黑 / 白名单、审计日志哈希链 |
+| 测试   | 后端 Jest + mongodb-memory-server（内存 MongoDB）；前端 Vitest；E2E Playwright                                                                       |
+| 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 20/22 矩阵测试，前端构建 24，镜像 node:22.14.0）                                          |
+| 监控   | Prometheus + Grafana + Alertmanager（docker-compose 随栈启动）、Sentry（可选）                                                                       |
 
 ## 功能特性
 
-- **RBAC 权限管控**：菜单 / 按钮 / 接口三级权限模型；内置 5 个角色（超级管理员、安全管理员、消防主管、普通消防员、访客），角色 level 决定数据范围（≥9 全部 / ≥7 本部门 / ≥5 仅本人）；内置角色权限每次启动自动对账收敛，防止权限残留
+- **RBAC 权限管控**：菜单 / 按钮 / 接口三级权限模型；内置 6 个角色（超级管理员、安全管理员、审计监督员、消防主管、普通消防员、访客），角色 level 决定数据范围（≥9 全部 / ≥7 本部门 / ≥5 仅本人）；内置角色权限每次启动自动对账收敛，防止权限残留
+- **认证与账号安全**：登录 / 注册 / 改密的口令以 ECDH + HKDF-SHA256 + AES-256-GCM 密文上行（明文轨灰度兼容，置 `LOGIN_ENCRYPT_STRICT=true` 即拒绝明文）；TOTP 两步验证（自助注册 / 启用 / 恢复码 / 管理员重置）；会话列表与远程吊销；登录 / 注册图形验证码开关；口令复用历史；唯一超级管理员账户启动期对账
 - **设备管理**：消防设备台账、状态变更、维护记录、报废处理、到期设备定时扫描与提醒（每日一次）
 - **报警管理**：火警上报 → 指派处理人 → 到达现场 → 处置完成 / 误报标记 / 取消的完整闭环，配合 WebSocket 实时推送
 - **巡检管理**：巡检计划创建 → 开始执行 → 完成填报 → 主管审核，支持取消与删除，含巡检统计
 - **报表统计**：仪表盘汇总、设备 / 报警 / 巡检分项报表，支持 Excel 导出
-- **安全审计**：所有写操作自动落审计日志、安全告警、用户锁定 / 解锁、公开注册开关动态配置、个人安全信息与登录记录查询
+- **安全审计**：所有写操作自动落审计日志、安全告警、用户锁定 / 解锁、公开注册与登录 / 注册验证码开关动态配置、IP 黑 / 白名单管理、敏感信息查看留痕（需二次验证）、个人安全信息与登录记录查询
+- **审计链**：审计日志为 append-only 哈希链（hash + HMAC 双层 + 链接性三层校验），提供完整性校验端点与带 sha256 manifest 的流式 CSV 导出
+- **数据安全与生命周期**：手机号 / 邮箱等 PII 字段级加密（AES-256-GCM，AAD 绑定所在行 `_id`，密文跨行搬运解不开）；邮箱另存整串 HMAC 检索键 + n-gram 盲索引，保留等值 / 子串查询能力；密钥轮换迁移按单一声明（`PII_TARGETS`）逐集合驱动；业务数据保留期单一声明（**只声明不启用**）+ 用户匿名化（删除权）+ 合规检查项
 - **实时通信**：Socket.IO 服务，连接需 JWT 认证（含黑名单校验），房间白名单机制，连接数上限 1000，心跳保活与假死连接清理
 - **健壮性**：优雅关闭（HTTP → WebSocket → 定时任务 → 数据库依序释放）、未捕获异常统一处理、生产环境配置强校验（启动即拦截弱密钥 / 危险配置）
 
@@ -30,49 +33,70 @@
 ```
 fsms/
 ├── src/                        # 后端源码
-│   ├── config/                 # 配置中心、数据库连接、生产环境校验
-│   ├── controllers/            # 业务控制器（认证/用户/角色/权限/设备/报警/巡检/报表/安全）
+│   ├── app.js                  # Express 应用装配（中间件链 / 路由挂载）
+│   ├── config/                 # 配置中心、数据库连接、密钥文件注入、生产环境校验
+│   ├── constants/              # 常量与单一声明（保留期、业务保留期、运行时拓扑检测）
+│   ├── controllers/            # 业务控制器（认证 / MFA / 用户 / 角色 / 权限 / 设备 / 报警 / 巡检 / 报表 / 安全）
 │   ├── middleware/             # 中间件（认证、RBAC、限流、安全头、审计、令牌黑名单、错误处理、Sentry）
 │   ├── models/                 # Mongoose 模型（User/Role/Permission/FireDevice/FireAlarm/Inspection/AuditLog 等）
-│   ├── routes/                 # API 路由（9 个模块）
-│   ├── services/               # 服务层（WebSocket、初始化数据、设备到期提醒、安全告警）
+│   ├── routes/                 # API 路由（9 个业务模块 + /.well-known）
+│   ├── services/               # 服务层（WebSocket、初始化数据、设备到期提醒、安全告警、审计链 / 缓冲 / WAL、MFA、会话、限流升级、缓存、报表）
+│   ├── utils/                  # 工具（日志、加密与 piiCrypto、auditChain、游标分页、响应封装、权限辅助）
+│   ├── docs/                   # OpenAPI 规范（openapi.json）与生成脚本
 │   ├── tests/                  # Jest 测试用例
-│   ├── utils/                  # 工具（日志、加密、响应封装、权限辅助）
 │   └── index.js                # 应用入口
 ├── web-admin/                  # 前端源码（Vue 3 + Vite + Element Plus）
 │   └── src/
-│       ├── views/              # 页面（仪表盘/设备/报警/用户/角色/巡检/报表/审计日志/个人资料等）
-│       ├── components/         # 巡检表单等业务组件
+│       ├── views/              # 页面（仪表盘/设备/报警/用户/角色/巡检/报表/审计日志/IP 名单/个人资料等）
+│       ├── components/         # 业务组件（巡检表单、MFA 设置、改密、账户绑定、图表等）
+│       ├── composables/        # 组合式函数
+│       ├── schemas/            # 表单校验模式
+│       ├── directives/         # 自定义指令（权限控制等）
+│       ├── i18n/               # 多语言文案
 │       ├── router/             # 路由与权限守卫
 │       ├── store/              # Pinia 状态管理
 │       ├── utils/              # Axios 封装、WebSocket 客户端
+│       ├── tests/              # Vitest 用例
 │       └── layout/             # 后台布局框架
-├── scripts/                    # MongoDB 备份 / 恢复脚本
-├── .github/workflows/ci.yml    # CI：多版本测试 + 覆盖率 + Docker 镜像构建
-├── docker-compose.yml          # 应用 + MongoDB 一键编排
+├── migrations/                 # 数据库迁移（migrate-mongo：审计索引 / TTL 保留期 / 游标分页复合索引 / tokenVersion 回填）
+├── scripts/                    # 运维与门禁脚本：部署（deploy.js）/ 备份恢复 / 合规检查 / 审计链校验与重签 / PII 加密迁移 / 密钥生成 / 锁文件与包体积门禁 / 压测
+├── e2e/                        # Playwright 端到端用例（登录 / 巡检-报警 / 权限审计 / MFA / 移动端 / 故障注入）
+├── .github/workflows/ci.yml    # CI：多版本测试 + 覆盖率 + 顺序无关 + Docker 镜像构建
+├── docker-compose.yml          # 应用 + MongoDB + Redis + 监控栈（Prometheus/Alertmanager/Grafana）一键编排
 ├── Dockerfile                  # 后端多阶段构建（非 root 运行 + 健康检查）
-├── docs/                       # 项目文档：架构图/时序图/ER 图/部署拓扑 + ADR
-├── deployment/                 # 部署配套：Nginx 示例 / 密钥轮换 / 回滚演练 / 可观测性
+├── docs/                       # 项目文档：架构 / 威胁模型 / 等保对照 / 应急响应 / 多实例一致性 / 依赖观察 + ADR
+├── deployment/                 # 部署配套：Nginx 示例 / 密钥轮换 / 回滚演练 / 备份加密 / 可观测性
 │   ├── nginx.conf.example      # Nginx 反向代理示例（TLS 终结、安全响应头、/metrics 限流）
 │   ├── secret-rotation.md      # 密钥轮换流程
 │   ├── rollback-drill.md       # 回滚演练手册
+│   ├── backup-encryption.md    # 备份加密与异地副本
+│   ├── audit-allowlist.json    # 审计对账白名单（CI 门禁共用）
+│   ├── lockfile-anchor.json    # 锁文件完整性锚点
 │   └── observability/          # 监控栈（prometheus.yml 在本子目录，非 deployment/ 根）
 │       ├── prometheus.yml      # Prometheus 抓取配置（直连后端 app:3000 的 /metrics）
-│       ├── alert-rules.yml     # 告警规则（宕机 / 5xx 错误率 / P95 延迟 / 安全告警突增）
+│       ├── alert-rules.yml     # 告警规则（13 条：宕机 / 5xx 错误率 / P95 延迟 / 安全告警突增等）
 │       ├── alertmanager.yml    # Alertmanager 路由（按 severity 分发；通知渠道为占位，按头注释注入）
 │       └── grafana/            # Grafana 数据源与仪表盘（datasources/、dashboards/ 容器启动自动装载）
 ├── start.bat                   # Windows 一键启动脚本
 ├── jest.config.js              # 测试配置（覆盖率棘轮：全局 分支79/函数87/语句91/行91，安全关键模块另设独立阈值，只升不降）
+├── playwright.config.js        # E2E 测试配置
+├── migrate-mongo-config.js     # 数据库迁移工具配置
+├── secrets/                    # 密钥文件目录（已 gitignore，容器经 Docker secret 挂载）
 └── .env.example                # 环境变量模板
 ```
 
 ## 项目文档
 
-| 文档                                           | 内容                                                                                                |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| [docs/architecture.md](./docs/architecture.md) | 系统架构图、登录时序图、ER 图、部署拓扑图（Mermaid）                                                |
-| [docs/adr/](./docs/adr/README.md)              | 架构决策记录：登录 ECDH 选型、审计链哈希、密钥管理、单进程锁假设、多实例 Redis 回退、高量级游标分页 |
-| [CHANGELOG.md](./CHANGELOG.md)                 | 版本变更日志                                                                                        |
+| 文档                                                                       | 内容                                                                                                                                              |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [docs/architecture.md](./docs/architecture.md)                             | 系统架构图、登录时序图、ER 图、部署拓扑图（Mermaid）                                                                                              |
+| [docs/threat-model.md](./docs/threat-model.md)                             | STRIDE 威胁模型：资产与信任边界、每项缓解的落地位置与残余风险                                                                                     |
+| [docs/mlps2-controls.md](./docs/mlps2-controls.md)                         | 等保 2.0（GB/T 22239-2019）控制项对照表，逐条给出可出示的证据（文件 / 测试 / 端点）                                                               |
+| [docs/incident-response.md](./docs/incident-response.md)                   | 应急响应预案：角色与升级链，每个动作绑定实际存在的端点 / 脚本 / 日志位置                                                                          |
+| [docs/multi-instance-consistency.md](./docs/multi-instance-consistency.md) | 多实例一致性清单：进程内状态、Redis 外置路径与多实例下的残余差异                                                                                  |
+| [docs/security-dependency-watch.md](./docs/security-dependency-watch.md)   | 依赖安全观察清单：需盯住的依赖、监控动作与触发条件                                                                                                |
+| [docs/adr/](./docs/adr/README.md)                                          | 架构决策记录（8 篇）：登录 ECDH 选型、审计链哈希、密钥管理、单进程锁假设、多实例 Redis 回退、高量级游标分页、Express 5 迁移评估、数据范围强制方式 |
+| [CHANGELOG.md](./CHANGELOG.md)                                             | 版本变更日志                                                                                                                                      |
 
 ## 快速开始
 
@@ -197,6 +221,8 @@ docker compose up -d --no-build
 | `ENABLE_API_DOCS`                                  | 是否暴露 Swagger API 文档（生产默认 false）                   | 开发=true / 生产=false                     |
 | `DOCS_USERNAME`                                    | API 文档 Basic Auth 用户名（可选）                            | -                                          |
 | `DOCS_PASSWORD`                                    | API 文档 Basic Auth 密码（可选）                              | -                                          |
+| `LOGIN_ENCRYPT_STRICT`                             | 拒绝明文口令上行（仅 HTTPS / localhost 部署可开）             | `false`                                    |
+| `TRUSTED_TYPES_ENFORCE`                            | Trusted Types 由 Report-Only 升为强制（移入主 CSP）           | `false`                                    |
 
 ## 默认账户
 
@@ -211,9 +237,15 @@ docker compose up -d --no-build
 | ---------- | ----------------- | ----- | ---------------------------------------------- |
 | 超级管理员 | `SUPER_ADMIN`     | 10    | 全部权限                                       |
 | 安全管理员 | `SECURITY_ADMIN`  | 8     | 用户 / 角色管理、安全审计、业务只读监督        |
+| 审计监督员 | `AUDIT_VIEWER`    | 9     | 只读审计日志与安全统计（无任何写权限）         |
 | 消防主管   | `FIRE_SUPERVISOR` | 6     | 报警全流程处理、巡检审核、设备维护与报废、报表 |
 | 普通消防员 | `FIREFIGHTER`     | 4     | 执行巡检、报警上报与处置、设备只读             |
 | 访客       | `GUEST`           | 1     | 设备 / 报警 / 巡检 / 报表只读                  |
+
+`AUDIT_VIEWER` 为**职责分离**而设：权限集只有 `security:stats` + `security:audit` 两条只读，
+执行者与监督者不再由同一角色兼任。level 取 9（而非与 `SECURITY_ADMIN` 同档的 8）是因为
+数据范围由 level 决定——外部审计与上级监督要看的正是**全量**审计视图；level 本身不授予
+任何操作权（权限一律来自角色-权限映射，全局管理员判据是 `*:*` 而非 level）。
 
 ## API 概览
 
@@ -221,15 +253,27 @@ docker compose up -d --no-build
 
 ### 认证 `/api/auth`
 
-| 方法 | 路径        | 说明                                     |
-| ---- | ----------- | ---------------------------------------- |
-| POST | `/register` | 用户注册（受公开注册开关与严格限流约束） |
-| POST | `/login`    | 用户登录（独立登录限流）                 |
-| POST | `/refresh`  | 刷新访问令牌                             |
-| GET  | `/me`       | 获取当前用户信息                         |
-| PUT  | `/password` | 修改密码                                 |
-| PUT  | `/profile`  | 更新个人资料                             |
-| POST | `/logout`   | 登出（令牌加入黑名单）                   |
+| 方法   | 路径                  | 说明                                               |
+| ------ | --------------------- | -------------------------------------------------- |
+| POST   | `/register`           | 用户注册（受公开注册开关与严格限流约束）           |
+| POST   | `/login`              | 用户登录（独立登录限流）                           |
+| GET    | `/captcha`            | 获取图形验证码                                     |
+| GET    | `/captcha-status`     | 查询登录验证码开关状态                             |
+| GET    | `/login-public-key`   | 获取登录口令加密公钥（ECDH P-256，供前端加密上行） |
+| POST   | `/refresh`            | 刷新访问令牌                                       |
+| GET    | `/session`            | 轻量会话探测（返回是否已登录；始终 200）           |
+| GET    | `/sessions`           | 当前用户的活跃会话列表（设备级会话管理）           |
+| DELETE | `/sessions/others`    | 吊销除当前设备外的全部会话                         |
+| DELETE | `/sessions/{sid}`     | 吊销指定会话（踢除单台设备）                       |
+| GET    | `/me`                 | 获取当前用户信息（含权限、菜单、数据范围）         |
+| PUT    | `/password`           | 修改密码                                           |
+| PUT    | `/profile`            | 更新个人资料                                       |
+| POST   | `/logout`             | 登出（令牌加入黑名单）                             |
+| GET    | `/mfa/status`         | 查询两步验证状态与剩余恢复码数量                   |
+| POST   | `/mfa/enroll`         | 注册两步验证第一步：返回 Base32 密钥与 otpauth URI |
+| POST   | `/mfa/enable`         | 确认开启两步验证（校验一次动态口令并生成恢复码）   |
+| POST   | `/mfa/disable`        | 关闭两步验证（需动态口令或登录密码二次验证）       |
+| POST   | `/mfa/recovery-codes` | 重新生成备用恢复码（旧码全部作废）                 |
 
 ### 用户管理 `/api/users`
 
@@ -325,20 +369,39 @@ docker compose up -d --no-build
 
 ### 安全管理 `/api/security`
 
-| 方法    | 路径                              | 说明                     |
-| ------- | --------------------------------- | ------------------------ |
-| GET     | `/my-info`                        | 当前用户安全信息         |
-| GET     | `/bindings`                       | 账户绑定关系             |
-| GET     | `/my-logs`                        | 个人操作日志             |
-| PUT     | `/change-password`                | 修改密码（登录限流保护） |
-| POST    | `/view-sensitive`                 | 敏感信息查看申请（留痕） |
-| POST    | `/report`                         | 安全事件上报             |
-| GET     | `/stats`                          | 安全统计                 |
-| GET     | `/overview`                       | 安全总览                 |
-| GET     | `/alerts`                         | 安全告警列表             |
-| GET     | `/audit-logs`                     | 审计日志查询             |
-| PUT     | `/users/:userId/lock`             | 锁定 / 解锁用户          |
-| GET/PUT | `/config/allowPublicRegistration` | 查询 / 切换公开注册开关  |
+| 方法    | 路径                              | 说明                                                |
+| ------- | --------------------------------- | --------------------------------------------------- |
+| GET     | `/my-info`                        | 当前用户安全信息                                    |
+| GET     | `/bindings`                       | 账户绑定关系                                        |
+| GET     | `/my-logs`                        | 个人操作日志                                        |
+| PUT     | `/change-password`                | 修改密码（登录限流保护）                            |
+| POST    | `/view-sensitive`                 | 敏感信息查看申请（需二次验证，留痕）                |
+| POST    | `/report`                         | 安全事件上报                                        |
+| GET     | `/stats`                          | 安全统计                                            |
+| GET     | `/overview`                       | 安全总览                                            |
+| GET     | `/alerts`                         | 安全告警列表                                        |
+| GET     | `/audit-logs`                     | 审计日志查询（多维度筛选）                          |
+| GET     | `/audit-logs/verify`              | 审计日志哈希链完整性校验（hash + HMAC + 链接性）    |
+| GET     | `/audit-logs/export`              | 审计日志导出（CSV + sha256 manifest，流式输出）     |
+| PUT     | `/users/:userId/lock`             | 锁定 / 解锁用户                                     |
+| PUT     | `/users/:userId/mfa/reset`        | 管理员重置用户两步验证（清密钥 / 恢复码并强制下线） |
+| GET     | `/ip-list`                        | IP 黑 / 白名单列表                                  |
+| POST    | `/ip-list`                        | 添加 IP 到黑 / 白名单                               |
+| DELETE  | `/ip-list/:id`                    | 从名单中移除 IP 记录                                |
+| GET     | `/ip-list/query`                  | 查询某 IP 命中的黑 / 白名单记录                     |
+| GET/PUT | `/config/allowPublicRegistration` | 查询 / 切换公开注册开关                             |
+| GET/PUT | `/config/loginCaptchaEnabled`     | 查询 / 切换登录验证码开关                           |
+| GET/PUT | `/config/registerCaptchaEnabled`  | 查询 / 切换注册验证码开关                           |
+
+### 系统
+
+| 方法 | 路径      | 说明       |
+| ---- | --------- | ---------- |
+| GET  | `/health` | 健康检查   |
+| GET  | `/api`    | API 根路径 |
+
+就绪探针 `/readyz`（含 Mongo ping）与指标端点 `/metrics` 不列入 OpenAPI 规范，
+说明见下文「可观测性」与「生产部署清单」。
 
 ## WebSocket 实时推送
 
@@ -357,9 +420,16 @@ docker compose up -d --no-build
 npm test                 # 运行全部测试（自动启动内存 MongoDB，无需本地实例）
 npm run test:coverage    # 运行测试并输出覆盖率（全局阈值：分支79/函数87/语句91/行91；安全关键模块另设独立阈值，棘轮只升不降）
 npm run test:watch       # 监听模式
+npm run test:e2e         # 进程内起完整服务器做全链路 HTTP 走查（走 index.js 的完整启动序列，兜住 supertest 测不到的接线问题）
+npm run test:e2e:browser # Playwright 浏览器 E2E（e2e/：登录 / 巡检-报警 / 权限审计 / MFA / 移动端 / 故障注入）
+npm run test:prod-drill  # 生产模式启动演练：弱密钥必须被拒 + 强配置完整启动链路
+npm run test:load        # 压测基线（本地自测版，四相；正式压测另按部署环境执行）
 npm run validate         # 独立校验环境配置（读当前 shell 的 env；容器化部署要在容器里跑：
                          #   docker compose exec -T app npm run validate——compose 只往容器注入 *_FILE，
                          #   宿主机 shell 里这些变量是空的，在宿主机跑会得到"缺密钥"的红）
+npm run lint:ratchet     # ESLint 棘轮（复杂度/行数只许降不许升）；format:check 为 Prettier 检查——均为 CI 硬门禁
+npm run security:audit   # npm audit（high 及以上，忽略 devDependencies）+ 合规检查
+npm run migrate:status   # 数据库迁移（migrate-mongo：status / up / down / create）
 ```
 
 ## 运维 Runbook（备份 / 恢复 / 升级 / 回滚）
@@ -446,14 +516,18 @@ APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
 生产环境启动时会强制校验以下配置，不满足将直接拒绝启动：
 
 - [ ] `JWT_SECRET`、`JWT_REFRESH_SECRET`、`AES_SECRET_KEY` 均为 ≥32 字符的强随机密钥
+- [ ] `JWT_SECRET` 与 `JWT_REFRESH_SECRET` **取值不同**（同值会让 7 天有效期的 refresh 令牌可直接当 access 令牌用，短有效期收缩访问窗口的机制整体失效）
 - [ ] `HMAC_SECRET` 已设置
 - [ ] `MONGODB_URI` 不指向 localhost（使用独立数据库服务）
+- [ ] 非回环主机的 `MONGODB_URI` / `REDIS_URL` 已启用传输加密（Mongo 追加 `?tls=true`、Redis 用 `rediss:`）；同宿主受信容器网络确要豁免时，显式设 `MONGODB_TLS_EXEMPT=true` / `REDIS_TLS_EXEMPT=true` 并在部署文档记录拓扑依据
 - [ ] `REDIS_URL` 已配置为有效 Redis 地址（限流共享、IP 黑名单广播、审计链锁依赖；compose 默认 `redis://redis:6379`）
+- [ ] Redis 已启用认证（`REDIS_PASSWORD`、`REDIS_URL` 凭据段或 compose secrets 的 `REDIS_PASSWORD_FILE` 三者其一）；受信内网确需免认证时显式声明 `REDIS_AUTH_EXEMPT=true`
 - [ ] `CORS_ORIGIN` 已配置为明确的前端域名白名单（禁止通配符）
 - [ ] `ALLOWED_HOSTS` 已配置为对外域名（Host 头白名单；缺失即拒绝启动，compose 亦以 `${ALLOWED_HOSTS:?}` 硬声明）
-- [ ] `TRUST_PROXY_HOPS` 已按反向代理层数设置
+- [ ] `TRUST_PROXY_HOPS` 已按反向代理层数设置（1..5 的正整数，非法值会静默退化为"不信任代理"）
 - [ ] `ALLOW_PUBLIC_REGISTRATION` 保持 `false`
 - [ ] 已修改默认管理员初始密码
+- [ ] 若 `ENABLE_API_DOCS=true`：`DOCS_USERNAME` / `DOCS_PASSWORD` 已设置，且口令 ≥16 字符（文档暴露全部接口契约与权限编码）
 - [ ] `deployment/observability/alertmanager.yml` 的通知渠道已注入真实入口——`docker-compose.yml` 直接挂载仓库内这份文件，而仓库版本是**占位 URL**，照抄上线等于 critical 告警全部发往 `hooks.example.com`（告警静默丢失，监控页面却一切正常）。`scripts/deploy.js` 的前置校验会以生产口径校验它：占位即拒绝发布，并给出注入方式；确为无告警的演练环境时用 `ALLOW_PLACEHOLDER_ALERT_WEBHOOK=true` 显式豁免（那等于书面承认本次发布后无人会被叫醒）
 - [ ] 已在反向代理层启用 HTTPS 并下发 HSTS（见下节）
 
@@ -464,6 +538,15 @@ APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
 1. 使用受信任 CA 签发的证书，参考 `deployment/nginx.conf.example` 配置 TLS 终结、HTTP→HTTPS 跳转与全套安全响应头（HSTS / CSP / X-Frame-Options / X-Content-Type-Options / Referrer-Policy / Permissions-Policy / COOP / CORP / X-XSS-Protection）。
 2. 后端已内置 `Strict-Transport-Security` 兜底下发（`src/middleware/security.js` 的 `ensureHsts`）；前端开发/预览服务器已在 `web-admin/vite.config.js` 统一下发安全头。这些用于开发期与过渡期，生产最终以反向代理为准。
 3. `localhost:3000/3001` 的明文 HTTP 仅用于本地开发调试；扫描器对 localhost 的"未使用 HTTPS/HSTS"项应视为开发环境特性，生产域名以代理层 TLS 为准。
+
+## 内容安全策略（CSP / Trusted Types）
+
+CSP 由 `src/middleware/security.js` 统一下发，Trusted Types 分两档：
+
+1. **默认（Report-Only）**：`require-trusted-types-for 'script'` 只下在 `Content-Security-Policy-Report-Only` 头里——浏览器照常执行，仅上报违规。设 `CSP_REPORT_ENABLED=true` 时违规详情 POST 到 `/csp-report`（无需认证，仅限流 + 体积上限）。
+2. **强制（`TRUSTED_TYPES_ENFORCE=true`）**：同一条指令移入主 CSP，违规写入被浏览器**直接拒绝执行**；此时 Report-Only 那条退化为 no-op，策略只下发一处（避免同一策略两个头各发一遍）。
+
+开启前必须先清零前端 DOM 写入违规（或逐条确认豁免），否则表现是**页面功能性报错**而不是多几条告警。判据是字面量 `'true'`，其他取值一律按关闭处理。前端开发 / 预览服务器另有一套安全头下发，生产最终以反向代理为准。
 
 ## 可观测性（Prometheus / Grafana / 告警）
 
