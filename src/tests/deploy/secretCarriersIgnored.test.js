@@ -90,31 +90,15 @@ const secretDirs = (() => {
 })();
 
 /**
- * .dockerignore 的按行序求值：后面的模式（含 `!` 反选）覆盖前面的结论——这是 docker 自己的
- * 语义，写成"任一模式命中即忽略"会把 `!.env.example` 这类反选读成忽略。
+ * .dockerignore 的按行序求值（解析器在 helpers/dockerignore.js，F-10 也用它）。
+ * 为什么不在这里内联：F-10 判"前端生成物目录是否进构建上下文"用的是同一套语义，
+ * 第二个消费方只能复制一份——两份解析器漂移时会出现"一个门禁绿、一个门禁红"。
  */
-const DOCKER_PATTERNS = fs
-  .readFileSync(path.join(ROOT, '.dockerignore'), 'utf8')
-  .split(/\r?\n/)
-  .map((l) => l.trim())
-  .filter((l) => l !== '' && !l.startsWith('#'))
-  .map((line) => {
-    const negated = line.startsWith('!');
-    const body = negated ? line.slice(1) : line;
-    // 按 `**` 先切段（跨目录通配），段内再把单 `*` 换成"不跨 /"的通配：docker 走 Go 的
-    // filepath.Match，单 `*` 确实不跨越目录分隔符。用切段而不是塞占位符——占位符要么用
-    // 控制字符（eslint no-control-regex 直接报错），要么就可能撞进真实模式的字节里。
-    const esc = (s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*');
-    return { negated, re: new RegExp(`^${body.split('**').map(esc).join('.*')}$`) };
-  });
+const { makeDockerIgnored } = require('./helpers/dockerignore');
 
-const dockerIgnored = (name) => {
-  let ignored = false;
-  for (const p of DOCKER_PATTERNS) {
-    if (p.re.test(name)) ignored = !p.negated;
-  }
-  return ignored;
-};
+const dockerIgnored = makeDockerIgnored(
+  fs.readFileSync(path.join(ROOT, '.dockerignore'), 'utf8')
+);
 
 const mkTmp = (label) => fs.mkdtempSync(path.join(os.tmpdir(), `sec-carriers-${label}-`));
 

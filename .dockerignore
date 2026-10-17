@@ -38,6 +38,16 @@ zztmpctl
 zznpmtest
 web-admin/node_modules
 web-admin/dist
+# F-10（2026-10-17）：`web-admin/dist` 只挡住**这一个**目录名，而 web-builder 阶段是
+# `COPY web-admin/ ./`——本地排障时用 `--mode development` 生成的 `dist-debug`、
+# 以及 `dist-optimized` 都会一并进构建上下文：
+#   - context 体积变大（debug bundle 带完整 source map，是产物目录的数倍）；
+#   - 更糟的是**构建结果依赖开发者本地有没有生成过它**：同一份源码在不同机器上
+#     产出不同的 builder 缓存，而"前端产物由 Dockerfile 自己构建"这个单一来源被破坏；
+#   - 与上面 coverage-* 同一条 Docker 通配语义（`dist` 只匹配该名，不含 `dist-*`）。
+# 用 `dist-*` 而不是逐个列：产物目录名是工具链决定的（Vite 的 outDir 参数），
+# 逐个枚举是必然会漏的形状。
+web-admin/dist-*
 .vscode
 .idea
 *.md
