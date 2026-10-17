@@ -38,6 +38,8 @@ const {
   BACKUP_SCHEDULE,
   resolveBackupObjective,
   evaluateRpoAlignment,
+  evaluateDeclaredBound,
+  parseObjectiveHours,
   describeBackupObjective,
   describeAllBackupObjectives,
 } = require('../../constants/backupObjectives');
@@ -311,12 +313,18 @@ describe('A8 判据的承重假设必须回源（文档改了常量就是假话�
     expect(wf).toMatch(/permissions:\s*\n\s*contents:\s*read/);
   });
 
-  test('runbook 写明 RPO/RTO 目标值且标注待业务确认（不得技术单方面定值）', () => {
+  test('runbook 写明 RPO/RTO 目标值，且点明依据不是等保条文（F-08 已定值）', () => {
     const doc = readRoot('deployment/rollback-drill.md');
     expect(doc).toContain('RPO');
     expect(doc).toContain('RTO');
-    expect(doc).toContain('待业务确认');
     expect(doc).toContain('BACKUP_RPO_HOURS');
+    // 2026-10-17 业务方拍板后已定值：文档不得再写"待业务确认"
+    expect(doc).not.toContain('☐ 待业务确认');
+    // 但依据必须诚实：等保三级没有规定 RPO/RTO 小时数，别把内部决策说成标准条文
+    expect(doc).toContain('不是等保规定的小时数');
+    expect(doc).toContain('业务决策值');
+    // 反向判据（生效值宽于声明）也必须在手册里写明，否则只有一半
+    expect(doc).toContain('rpo_looser_than_declared');
   });
 });
 
@@ -336,14 +344,47 @@ describe('RPO / RTO 声明与备份频率对齐（A8 动作 2）', () => {
     else process.env.BACKUP_RTO_HOURS = saved.rto;
   });
 
-  test('未配置时 set=false、不对外承诺（且说明里点出"待业务口径"）', () => {
+  test('声明值已定（RPO 24h / RTO 4h），未配置生效值时 set=false 且说明里点出"未设定"', () => {
     const rpo = resolveBackupObjective('rpo');
     expect(rpo.set).toBe(false);
     expect(rpo.effectiveHours).toBe(null);
-    expect(rpo.declaredHours).toBe(null);
+    // F-08：声明值由业务方拍板填值，与"是否已在部署侧生效"是两件事
+    expect(rpo.declaredHours).toBe(24);
+    expect(resolveBackupObjective('rto').declaredHours).toBe(4);
     expect(describeBackupObjective('rpo')).toContain('未设定');
-    expect(describeBackupObjective('rpo')).toContain('待业务口径');
+    expect(describeBackupObjective('rpo')).toContain('声明 24h');
     expect(describeAllBackupObjectives()).toHaveLength(2);
+  });
+
+  test('生效值宽于声明值 ⇒ 判红（对外承诺 24h 而配 48h = 承诺没兑现）', () => {
+    process.env.BACKUP_RPO_HOURS = '48';
+    const rpo = resolveBackupObjective('rpo');
+    expect(rpo.exceedsDeclared).toBe(true);
+    const verdict = evaluateDeclaredBound('rpo');
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('rpo_looser_than_declared');
+    expect(verdict.message).toContain('宽于');
+
+    // 等于声明值 ⇒ 可兑现，判绿
+    process.env.BACKUP_RPO_HOURS = '24';
+    expect(resolveBackupObjective('rpo').exceedsDeclared).toBe(false);
+    expect(evaluateDeclaredBound('rpo').ok).toBe(true);
+
+    // 严于声明值（12h）不由本条拦——它由 evaluateRpoAlignment 拦（比备份频率还严）
+    process.env.BACKUP_RPO_HOURS = '12';
+    expect(resolveBackupObjective('rpo').exceedsDeclared).toBe(false);
+    expect(evaluateDeclaredBound('rpo').ok).toBe(true);
+  });
+
+  test('parseObjectiveHours 是纯函数（发布路径注入 env，不读进程环境）', () => {
+    // 与进程环境无关：即使 process.env 里配了别的值，传入什么就解析什么
+    process.env.BACKUP_RPO_HOURS = '1';
+    expect(parseObjectiveHours('24').effectiveHours).toBe(24);
+    expect(parseObjectiveHours(undefined).set).toBe(false);
+    expect(parseObjectiveHours('').set).toBe(false);
+    expect(parseObjectiveHours('48x').set).toBe(false);
+    expect(parseObjectiveHours('99999').effectiveHours).toBe(720);
+    expect(parseObjectiveHours('99999').wasAdjusted).toBe(true);
   });
 
   test('严格解析：`24x` / `1e3` / 空串都不得被静默吃掉（parseInt 会放过前两个）', () => {

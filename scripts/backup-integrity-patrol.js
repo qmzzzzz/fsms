@@ -58,6 +58,7 @@ const {
 const {
   resolveBackupObjective,
   evaluateRpoAlignment,
+  evaluateDeclaredBound,
   describeBackupObjective,
   BACKUP_SCHEDULE,
 } = require('../src/constants/backupObjectives');
@@ -133,13 +134,21 @@ const resolveObjectives = () => {
       declaredRpoHours: rpo.set ? rpo.effectiveHours : null,
       intervalHours: BACKUP_SCHEDULE.intervalHours,
     }),
+    // F-08：反方向也要判——生效值宽于声明值 = 对外承诺没兑现
+    bounds: [evaluateDeclaredBound('rpo'), evaluateDeclaredBound('rto')],
   };
 };
 
-/** 目标值这一档：声明优于频率 ⇒ error；未声明 ⇒ warn（如实告知，不阻断） */
+/**
+ * 目标值这一档：
+ *   - 声明优于备份频率下限 ⇒ error（不可能兑现的承诺）
+ *   - 生效值宽于声明值 ⇒ error（承诺了却没做到）
+ *   - 未配置 ⇒ warn（如实告知，不阻断；生产发布由 deployPolicy 强制）
+ */
 const checkObjectives = (objectives, add) => {
   if (!objectives.alignment.ok)
     add('error', objectives.alignment.code, objectives.alignment.message);
+  for (const bound of objectives.bounds) if (!bound.ok) add('error', bound.code, bound.message);
   if (!objectives.rpo.set) add('warn', 'rpo_undeclared', describeBackupObjective('rpo'));
   if (!objectives.rto.set) add('warn', 'rto_undeclared', describeBackupObjective('rto'));
 };

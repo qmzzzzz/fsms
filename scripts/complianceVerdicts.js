@@ -96,16 +96,23 @@ function businessRetentionVerdict() {
 }
 
 /**
- * 备份 / 恢复目标（A8）：RPO / RTO 是否声明，以及声明值是否**优于备份频率下限**
+ * 备份 / 恢复目标（A8 / F-08）：RPO / RTO 是否声明并生效，声明值是否**优于备份频率下限**
  * （备份每天一次却声明 RPO=1h，是不可能兑现的承诺——比配置错误更严重，
- * 因为它在事故复盘时才会暴露，而那时已经有人按那个数字做过决策）。
+ * 因为它在事故复盘时才会暴露，而那时已经有人按那个数字做过决策），
+ * 以及生效值是否**宽于声明值**（对外承诺 24h 而部署侧配 48h = 承诺没兑现）。
  *
- * @returns {{name: string, passed: boolean, detail: string}}
+ * 【F-08 修正（2026-10-17）】此前只有"声明优于频率"一个方向，另一方向是空的：
+ * 声明 24h、部署侧配 720h 时本条依然判绿，而 720h 意味着"最坏丢一个月"。
+ * 现在两个方向都在：`evaluateRpoAlignment`（声明 vs 能力）+ `evaluateDeclaredBound`
+ * （能力 vs 声明）。声明值本身由业务方拍板（RPO 24h / RTO 4h），见常量文件头。
+ *
+ * @returns {{name: string, passed: boolean, detail: string, notReady: boolean}}
  */
 function backupObjectiveVerdict() {
   const {
     resolveBackupObjective,
     evaluateRpoAlignment,
+    evaluateDeclaredBound,
     describeAllBackupObjectives,
     BACKUP_SCHEDULE,
   } = require('../src/constants/backupObjectives');
@@ -116,25 +123,40 @@ function backupObjectiveVerdict() {
     declaredRpoHours: rpo.set ? rpo.effectiveHours : null,
     intervalHours: BACKUP_SCHEDULE.intervalHours,
   });
+  const bounds = [evaluateDeclaredBound('rpo'), evaluateDeclaredBound('rto')];
+  const looser = bounds.filter((b) => !b.ok);
 
   const unset = [rpo, rto].filter((o) => !o.set);
   const adjusted = [rpo, rto].filter((o) => o.wasAdjusted);
   const described = describeAllBackupObjectives().join('；');
 
+  const problems = [];
+  if (!alignment.ok) problems.push(alignment.message);
+  problems.push(...looser.map((b) => b.message));
+  if (adjusted.length > 0) {
+    problems.push(
+      `配置意图与生效值不一致（被钳制或非法）：${adjusted
+        .map((o) => `${o.key.toUpperCase()}(${o.rawHours}→${o.effectiveHours})`)
+        .join('/')}`
+    );
+  }
+
   const detail =
-    unset.length > 0
-      ? `${described}；备份频率为每 ${BACKUP_SCHEDULE.intervalHours}h 一次` +
-        `（${BACKUP_SCHEDULE.cron}，${BACKUP_SCHEDULE.source}）` +
-        '⇒ 当前可兑现的 RPO 下限即该间隔；口径待业务方确认，' +
-        '见 src/constants/backupObjectives.js 与 deployment/rollback-drill.md 第 5 节'
-      : `${described}；${alignment.message}`;
+    problems.length > 0
+      ? `${problems.join('；')}。${described}`
+      : unset.length > 0
+        ? `${described}；备份频率为每 ${BACKUP_SCHEDULE.intervalHours}h 一次` +
+          `（${BACKUP_SCHEDULE.cron}，${BACKUP_SCHEDULE.source}）` +
+          '⇒ 声明口径已定但部署侧未给生效值，承诺**尚未兑现**；' +
+          '见 src/constants/backupObjectives.js 与 deployment/rollback-drill.md 第 5 节'
+        : `${described}；${alignment.message}`;
 
   return {
     name: '备份/恢复目标（RPO/RTO）',
-    passed: alignment.ok && adjusted.length === 0,
+    passed: problems.length === 0,
     detail,
-    // 未声明 RPO/RTO 属于「治理能力未就绪」，不是「代码不合规」——同业务保留期的两档语义
-    notReady: unset.length > 0 || !alignment.ok || adjusted.length > 0,
+    // 未声明/未配置属于「治理能力未就绪」，不是「代码不合规」——同业务保留期的两档语义
+    notReady: problems.length > 0 || unset.length > 0,
   };
 }
 

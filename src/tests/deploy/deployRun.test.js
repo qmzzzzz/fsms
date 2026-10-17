@@ -134,6 +134,11 @@ function runDeploy({
   env.ALLOWED_HOSTS = 'fsms.example.com';
   // 告警接收端指向本 stage 里那份"已注入"的配置（理由见 makeStage）
   env.ALERTMANAGER_CONFIG_PATH = stage.alertmanager;
+  // F-08（2026-10-17）：preflight 现在要求发布显式给出恢复目标，且不得宽于声明值
+  // （src/constants/backupObjectives.js 的 declaredHours = 24h / 4h）。不补这两行，
+  // 本套件全部用例同样卡在退出码 2——与 ALLOWED_HOSTS、告警配置是同一族前置项。
+  env.BACKUP_RPO_HOURS = '24';
+  env.BACKUP_RTO_HOURS = '4';
   env.DEPLOY_HEALTH_TIMEOUT_MS = healthTimeoutMs;
   // 回滚后复检也要短：否则失败路径会真等 60 秒（测试挂死）
   env.DEPLOY_ROLLBACK_TIMEOUT_MS = '400';
@@ -316,6 +321,9 @@ describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () 
         'APP_IMAGE=ghcr.io/qmzzzzz/fsms:sha-fromdotenv',
         'CORS_ORIGIN=https://from-dotenv.example.com',
         'ALLOWED_HOSTS=from-dotenv.example.com',
+        // F-08：preflight 的恢复目标校验同样只认这里给的来源
+        'BACKUP_RPO_HOURS=24',
+        'BACKUP_RTO_HOURS=4',
       ].join('\n')
     );
     const preload = path.join(stage.dir, 'dotenvSpy.js');

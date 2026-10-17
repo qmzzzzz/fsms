@@ -51,6 +51,10 @@ services:
       - BUSINESS_RETENTION_DAYS_FIRE_DEVICE=${BUSINESS_RETENTION_DAYS_FIRE_DEVICE:-180}
       # User 不建 TTL（匿名化口径），此变量仅用于合规检查的声明一致性核对
       - BUSINESS_RETENTION_DAYS_USER=${BUSINESS_RETENTION_DAYS_USER:-180}
+      # 恢复目标（F-08）：声明值 24h / 4h，见 src/constants/backupObjectives.js。
+      # 默认值与声明一致；发布脚本要求显式给值（不依赖这里的默认）。
+      - BACKUP_RPO_HOURS=${BACKUP_RPO_HOURS:-24}
+      - BACKUP_RTO_HOURS=${BACKUP_RTO_HOURS:-4}
       # 指向挂载后的 secret 文件路径，本身不含敏感值
       - JWT_SECRET_FILE=/run/secrets/jwt_secret
       - JWT_REFRESH_SECRET_FILE=/run/secrets/jwt_refresh_secret

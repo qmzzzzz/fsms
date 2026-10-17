@@ -22,6 +22,7 @@ const {
   REQUIRED_COMPOSE_ENV,
   validatePreflight,
   checkAlertingEndpoint,
+  checkBackupObjectives,
   buildPlan,
   isSameImageRef,
   decideRollback,
@@ -34,6 +35,11 @@ const validEnv = () => ({
   CORS_ORIGIN: 'https://admin.example.com',
   // 与 CORS_ORIGIN 同为 compose 的 `:?` 硬声明项，缺一即 compose 拒绝整个项目
   ALLOWED_HOSTS: 'fsms.example.com',
+  // F-08（2026-10-17）：发布路径要求显式给出恢复目标，且不得宽于声明值。
+  // 这两个值必须与 src/constants/backupObjectives.js 的 declaredHours 一致；
+  // 不一致时 checkBackupObjectives 会拒绝发布（判据见该函数的三条）。
+  BACKUP_RPO_HOURS: '24',
+  BACKUP_RTO_HOURS: '4',
 });
 
 /** 内存文件系统替身：只实现 validatePreflight 用到的方法 */
@@ -630,5 +636,51 @@ describe('Top-2 部署前置：告警接收端未注入即拒绝（fail-closed�
     expect(
       checkAlertingEndpoint({ ALERT_CHECK_SKIPPED: ' true ' }, fakeFs(fullSecrets())).errors.length
     ).toBe(0);
+  });
+});
+
+/**
+ * F-08（2026-10-17）：恢复目标纳入发布前置校验。
+ *
+ * 缺陷本体：`BACKUP_RPO_HOURS` / `BACKUP_RTO_HOURS` 此前只被合规检查与巡检脚本读取，
+ * 而这两者都不在发布路径上——声明 RPO 24h 与"发出去的部署到底配了什么"之间
+ * 没有任何连接，部署忘了给值，线上照跑，没人变红。
+ *
+ * 判据落点刻意选在**发布**路径而不是启动路径：启动期判 error 会让已在运行的服务
+ * 重启失败（那是运维事故，且与本次发布无关），发布是有人值守、可回退的动作。
+ */
+describe('F-08 发布前置：恢复目标必须显式给值且不得宽于声明', () => {
+  test('未给 RPO/RTO ⇒ 拒绝发布（不配等于不承诺，而发布正是把承诺推上线）', () => {
+    const env = validEnv();
+    delete env.BACKUP_RPO_HOURS;
+    delete env.BACKUP_RTO_HOURS;
+    const r = checkBackupObjectives(env);
+    expect(r.errors).toHaveLength(2);
+    expect(r.errors.join('\n')).toContain('BACKUP_RPO_HOURS 未设置');
+    expect(r.errors.join('\n')).toContain('BACKUP_RTO_HOURS 未设置');
+  });
+
+  test('等于声明值 ⇒ 放行（RPO 24h / RTO 4h 与 backupObjectives.js 一致）', () => {
+    expect(checkBackupObjectives(validEnv()).errors).toEqual([]);
+  });
+
+  test('宽于声明值 ⇒ 拒绝（对外承诺 24h 而配 48h = 承诺没兑现）', () => {
+    const r = checkBackupObjectives({ ...validEnv(), BACKUP_RPO_HOURS: '48' });
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toContain('宽于对外声明');
+  });
+
+  test('被钳制的值 ⇒ 拒绝（发布值必须落在允许区间内，不接受静默修正）', () => {
+    const r = checkBackupObjectives({ ...validEnv(), BACKUP_RTO_HOURS: '99999' });
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toContain('超出允许区间并被钳制');
+  });
+
+  test('接线：完整 preflight 入口同样拦（判据存在≠生效）', () => {
+    const env = validEnv();
+    delete env.BACKUP_RPO_HOURS;
+    const r = validatePreflight(env, okFs());
+    expect(r.ok).toBe(false);
+    expect(r.errors.join('\n')).toContain('BACKUP_RPO_HOURS 未设置');
   });
 });

@@ -131,6 +131,13 @@ function validatePreflight(env, fsImpl) {
   errors.push(...alerting.errors);
   warnings.push(...alerting.warnings);
 
+  // ⑤ 恢复目标（F-08）：发布是把「RPO 24h / RTO 4h」这个对外承诺推上线的动作，
+  //    此时没配生效值就等于承诺未生效。放在发布路径而不是启动路径：
+  //    启动期判 error 会让已在运行的服务重启失败（那是运维事故），
+  //    而发布是有人值守、可回退的动作，在这里拦成本最低。
+  const objectives = checkBackupObjectives(env);
+  errors.push(...objectives.errors);
+
   return { ok: errors.length === 0, errors, warnings };
 }
 
@@ -211,6 +218,49 @@ function checkAlertingEndpoint(env, fsImpl) {
     );
   }
   return { errors, warnings };
+}
+
+/**
+ * 恢复目标（RPO / RTO）发布前置校验（F-08，2026-10-17）。
+ *
+ * 审计事实：`BACKUP_RPO_HOURS` / `BACKUP_RTO_HOURS` 在此之前**只被合规检查与巡检脚本
+ * 读取**，而这两者都不在发布路径上——于是「声明 RPO 24h」与「发布出去的部署到底配了
+ * 什么」之间没有任何连接。声明改了代码、部署忘了改环境变量，线上照跑，没人变红。
+ *
+ * 三条判据（都只作用于**发布**路径，不影响已在运行的服务重启）：
+ *   ① 必须显式给值：不配 = 不承诺，而发布是把一个对外承诺推上线的动作，
+ *      此时"没配"等同于"承诺未生效"——判 error，与 CORS_ORIGIN/ALLOWED_HOSTS 同档；
+ *   ② 不得被钳制：`BACKUP_RTO_HOURS=99999` 会被静默钳到 720h，实际生效与填写值不符；
+ *   ③ 不得宽于声明：声明 24h 而配 48h = 对外承诺没兑现（与合规检查同一判据，
+ *      复用 `parseObjectiveHours`，不复制解析规则）。
+ *
+ * @param {Record<string,string|undefined>} env
+ * @returns {{errors: string[], warnings: string[]}}
+ */
+function checkBackupObjectives(env) {
+  const { BACKUP_OBJECTIVES, parseObjectiveHours } = require('../src/constants/backupObjectives');
+  const errors = [];
+  for (const o of BACKUP_OBJECTIVES) {
+    const label = o.key.toUpperCase();
+    const parsed = parseObjectiveHours(env[o.envKey]);
+    if (!parsed.isConfigured) {
+      errors.push(
+        `${o.envKey} 未设置：发布必须显式给出 ${label} 目标值（业务口径 ${o.declaredHours}h）。` +
+          '不配等于「不承诺」，而发布正是把承诺推上线的动作——见 src/constants/backupObjectives.js。'
+      );
+    } else if (parsed.wasAdjusted) {
+      errors.push(
+        `${o.envKey}=${JSON.stringify(env[o.envKey])} 超出允许区间并被钳制（实际生效 ` +
+          `${parsed.effectiveHours}h）：发布值必须落在允许区间内，不接受静默修正。`
+      );
+    } else if (parsed.effectiveHours > o.declaredHours) {
+      errors.push(
+        `${label} 生效值 ${parsed.effectiveHours}h 宽于对外声明 ${o.declaredHours}h：` +
+          '对外承诺的数字在本次部署上不成立，要么收紧配置，要么先改声明。'
+      );
+    }
+  }
+  return { errors, warnings: [] };
 }
 
 /**
@@ -404,6 +454,7 @@ module.exports = {
   REQUIRED_COMPOSE_ENV,
   validatePreflight,
   checkAlertingEndpoint,
+  checkBackupObjectives,
   buildPlan,
   isSameImageRef,
   decideRollback,
