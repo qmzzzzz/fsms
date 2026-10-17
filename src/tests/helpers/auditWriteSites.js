@@ -281,33 +281,84 @@ const WRITE_CALLS = [
   { re: /AuditLog\.recordSensitiveAction\(/g, kind: 'record', mode: 'positional-2' },
   { re: /auditBuffer\.push\(/g, kind: 'auditBuffer', mode: 'object' },
   { re: /auditBuffer['"]\s*\)\s*\.push\(/g, kind: 'auditBuffer', mode: 'object' },
+  // F-03（2026-10-17）引入的可靠审计 outbox。调用形态从
+  // `AuditLog.recordSensitiveAction(...)` 改成 `recordSensitiveActionDurably({ action: '...' })`，
+  // 若不同步扩表，这些写入点会从对账里**整个消失**——实测正是如此：
+  // 补上之前 `written.size` 从 30+ 跌到 27，是第 120 行的下限断言把这件事顶住的。
+  // 两个正则都用 lookbehind 排除 `function xxx(` 定义处（否则定义本身会被当成
+  // 一个"实参不是对象字面量"的写入点，反而制造 unresolved）。
+  { re: /(?<!function\s)\brecordSensitiveActionDurably\(/g, kind: 'record', mode: 'object' },
+  { re: /(?<!function\s)\brecordDurably\(/g, kind: 'record', mode: 'object' },
   // F-201：模型静态方法**自身**决定 action 的写入点（recordLogin 的三元）。
   // 前四类都以 `AuditLog.` / `auditBuffer.` 为前缀，于是这类写入整个不在对账范围内。
   { re: /\bthis\.create\(/g, kind: 'modelStatic', mode: 'object' },
 ];
 
-/** 取 idx 之前最近的 `schema.statics.<name> =`，用来给转发点命名（比行号稳） */
+/** 取 idx 之前最近的 `schema.statics.<name> =` 或具名函数声明，用来给转发点命名（比行号稳） */
 function enclosingStaticName(src, idx) {
   let name = '(module-level)';
-  for (const m of src.slice(0, idx).matchAll(/\bschema\.statics\.(\w+)\s*=/g)) name = m[1];
+  let at = -1;
+  // 静态方法（模型定义里）与普通具名函数（services/auditOutbox.js 的 spool /
+  // recordDurably 这类传输层）都要能命名：只用前者会让 outbox 的两处转发点
+  // 都落成 `<(module-level)>`，账目里两条同名字符串无法区分是哪一处。
+  for (const m of src.slice(0, idx).matchAll(/\bschema\.statics\.(\w+)\s*=/g)) {
+    if (m.index > at) {
+      at = m.index;
+      name = m[1];
+    }
+  }
+  for (const m of src.slice(0, idx).matchAll(/(?:async\s+)?function\s+(\w+)\s*\(/g)) {
+    if (m.index > at) {
+      at = m.index;
+      name = m[1];
+    }
+  }
   return name;
 }
 
 /**
- * 静态方法体内 `this.create(...)` 的**转发型**写法识别：action 由调用方决定，
- * 本处不存在命名字面量，其取值由对应的调用点形态负责（AuditLog.record /
- * AuditLog.recordSensitiveAction）。返回转发形态标签（进 forwarded 账）或 null。
+ * 转发型写入点的识别：action 由调用方决定，本处不存在可解析的字面量。
  *
- * 只在"确实是转发"的两种形态上放行，其余一律 null → 走 unresolved 硬失败：
- *   - `this.create(entry)`：实参整体是一个标识符（静态方法的入参）；
- *   - `{ action, ... }`：action 是对象简写（值即同名入参）。
- * 而 `{ action: someVar }` 既不是转发形态也解析不出字面量 → 必须响，不能被
- * "跳过转发"这条新规则顺手洗掉（那正是本条规则自己可能造成的下一个盲区）。
+ * 只在"确实是转发"的形态上放行，其余一律 null → 走 unresolved 硬失败：
+ *   - `this.create(entry)` / `AuditLog.create(entry)` / `auditBuffer.push(doc)`：
+ *     整个实参是**一个标识符**，即调用方已经构造好的审计文档；
+ *   - `{ action, ... }`：action 是对象简写（值即同名入参），仅限模型静态方法体内。
+ * 而 `{ action: someVar }` / `{ action: f() }` 既不是转发形态也解析不出字面量
+ * → 必须响，不能被"跳过转发"这条规则顺手洗掉（那正是本条规则自己可能造成的下一个盲区）。
+ *
+ * 为什么 2026-10-17 起把「整个实参是标识符」放宽到 record / auditBuffer 两类：
+ * F-03 引入了审计 outbox（`services/auditOutbox.js`），它**只做传输**——
+ * `recordDurably(entry)` 拿到的是调用方用字面量构造好的文档，本文件里根本不存在
+ * action 字面量；`spool(entry)` 里还会先过一遍 schema 铸成 `doc` 再 push。
+ * 若坚持判 unresolved，等于要求传输层伪造一个字面量，那才是真的自欺。
+ *
+ * 放宽的代价被两道闸兜住：① 每个转发点都进 `forwarded` 账，而该账在
+ * `auditActionReconciliation.test.js` 里是**逐条钉死**的 ⇒ 新增一处转发必须
+ * 显式登记并写清理由；② 对象字面量形态（真正的"新写入"长这样）仍然判 null。
+ *
+ * @param {'record'|'auditBuffer'|'modelStatic'} kind 写入形态族
+ * @param {string|null} argsText 括号内的原始实参文本
+ * @param {string|null} expr 取到的 action 表达式（解不出字面量时为 null）
+ * @param {'object'|'positional-2'} [mode] 该形态的实参排布（见 WRITE_CALLS）
+ * @returns {string|null} 转发形态标签或 null
  */
-function forwardingReason(kind, argsText, expr) {
-  if (kind !== 'modelStatic' || argsText == null) return null;
-  if (/^[A-Za-z_$][\w$]*$/.test(argsText.trim())) return 'forward-arg';
-  if (expr == null && /(^|[{,]\s*)action\s*(?:,|$)/.test(argsText)) return 'shorthand-action';
+function forwardingReason(kind, argsText, expr, mode = 'object') {
+  if (argsText == null) return null;
+  const trimmed = argsText.trim();
+  const bareIdentifier = /^[A-Za-z_$][\w$]*$/.test(trimmed);
+  // 第一个实参是标识符（后面可能还有别的实参，如 `recordDurably(entry, { auditAction })`）
+  const firstArgIdentifier = /^[A-Za-z_$][\w$]*\s*(?:,|$)/.test(trimmed);
+
+  if (kind === 'modelStatic') {
+    if (bareIdentifier) return 'forward-arg';
+    if (expr == null && /(^|[{,]\s*)action\s*(?:,|$)/.test(trimmed)) return 'shorthand-action';
+    return null;
+  }
+
+  // 只对**对象形态**放行：`recordSensitiveAction(userId, username, action, ...)` 是
+  // 位置参数形态，第 3 个实参才是 action。若不按 mode 区分，`action` 解不出常量时
+  // 会被"第一个实参是标识符（userId）"顺手洗成转发——那是真的把闸放空了。
+  if (mode === 'object' && firstArgIdentifier && expr == null) return 'forward-arg';
   return null;
 }
 
@@ -340,7 +391,7 @@ function scanWriteSites(rootDir = SRC_DIR) {
         const expr = args == null ? null : extractActionExpr(args, mode);
         const values = resolveActionExpr(expr, ctx, src);
         if (values == null) {
-          const fwd = forwardingReason(kind, args, expr);
+          const fwd = forwardingReason(kind, args, expr, mode);
           if (fwd) {
             forwarded.push(`${rel}<${enclosingStaticName(src, idx)}>:${fwd}`);
             continue;

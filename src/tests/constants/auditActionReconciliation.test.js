@@ -174,12 +174,21 @@ describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
    * （record 把入参对象整体转交、recordSensitiveAction 用 `{ action, ... }` 简写）。
    * 把它们记成一份精确清单而不是"识别到转发就跳过"：清单变化 = 有人新开了一个
    * action 不由本文件决定的写入口，那处调用方是否真的被前四类形态覆盖，必须当场核对。
+   *
+   * 2026-10-17 新增三条（F-03 审计 outbox）：`services/auditOutbox.js` 是**纯传输层**——
+   * `recordDurably(entry)` / `recordSensitiveActionDurably({...})` 收到的就是调用方
+   * 用字面量构造好的文档，本文件里不存在 action 字面量；`spool(entry)` 会先过一遍
+   * schema 铸成 `doc` 再 `auditBuffer.push(doc)`。它们不是"新的写入口"，
+   * 而是同一批 action 换了一条更可靠的投递路径（见 src/services/auditOutbox.js 文件头）。
    */
   test('转发型静态方法写入点：精确清单（跳过有主，不得成为无界逃逸口）', () => {
     const { forwarded } = scanWriteSites();
     expect([...forwarded].sort()).toEqual([
       'src/models/auditLogWriteStatics.js<record>:forward-arg',
       'src/models/auditLogWriteStatics.js<recordSensitiveAction>:shorthand-action',
+      'src/services/auditOutbox.js<recordDurably>:forward-arg',
+      'src/services/auditOutbox.js<recordSensitiveActionDurably>:forward-arg',
+      'src/services/auditOutbox.js<spool>:forward-arg',
     ]);
   });
 
@@ -197,9 +206,19 @@ describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
     // 2) 反噬面：不是转发、且解不出字面量 → null（调用方走 unresolved 硬失败）
     expect(forwardingReason('modelStatic', '{ action: someVar }', 'someVar')).toBeNull();
     expect(forwardingReason('modelStatic', '{ action, other }', "'lit'")).toBeNull();
-    // 3) 反噬面：非 modelStatic 一律不认转发（AuditLog.record(entry) 仍须报 unresolved）
-    expect(forwardingReason('record', 'entry', null)).toBeNull();
-    // 4) 混合形态不得蒙混：action 简写之外还有别的表达式
+    // 3) 对象形态的文档传输：第一个实参就是调用方构造好的文档（F-03 的 outbox）
+    expect(forwardingReason('record', 'entry', null, 'object')).toBe('forward-arg');
+    expect(forwardingReason('record', 'entry, { auditAction: x }', null, 'object')).toBe(
+      'forward-arg'
+    );
+    expect(forwardingReason('auditBuffer', 'doc', null, 'object')).toBe('forward-arg');
+    // 4) 反噬面：对象字面量形态永远不算转发（那才是"新写入"的样子）
+    expect(forwardingReason('record', '{ action: someVar }', 'someVar', 'object')).toBeNull();
+    expect(forwardingReason('auditBuffer', '{ action: f() }', 'f()', 'object')).toBeNull();
+    // 5) 反噬面：位置参数形态一律不放行——第 3 个实参才是 action，
+    //    若只看"第一个实参是标识符"就会把 `recordSensitiveAction(userId, ...)` 洗成转发
+    expect(forwardingReason('record', 'userId, username, action', 'action', 'positional-2')).toBeNull();
+    // 6) 混合形态不得蒙混：action 简写之外还有别的表达式
     expect(forwardingReason('modelStatic', '{ note: f(a, b) }', null)).toBeNull();
   });
 
