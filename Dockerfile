@@ -143,54 +143,29 @@ RUN mkdir -p /app/logs && chown -R nodejs:nodejs /app/logs
 #   `npm ls --omit=dev` 实测可见），其余未登记命中为 0。
 # 这条不变量由 `node scripts/check-prod-install-scripts.js --omit=dev` 在 CI security-audit
 # 硬门禁（当前实测退出码 0），不靠本行注释断言。
-RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
-
-# ===== D-3：迁移执行器 =====
-# migrate-mongo 在 package.json 里是 devDependency，上面 `--omit=dev` 会把它排除，
-# 于是镜像里即便带了 migrations/ 也**没有执行迁移的工具**——
-# `npm run migrate:up` 在纯镜像部署机上依然不可用（文档承诺与镜像能力不一致）。
-#
-# 这里显式补装，且**版本号读自 package-lock.json 的解析结果**：
-# 在 Dockerfile 里再手抄一个版本号会形成第二个事实来源，
-# 升级依赖时漏改一处就变成「迁移用 A 版、开发用 B 版」。
-#
-# 为何不读 package.json 的 devDependencies 区间（此前的做法）：
-#   package.json 里是 `^14.0.7` 这样的**约束**，而 dev/CI 的 `npm ci` 装的是 lockfile 里
-#   **解析出的具体版本**。用 sed 抹掉 `^` 等于把"区间的下界"当成"实际版本"——
-#   只要 lockfile 被单独刷新（`npm update`、`npm audit fix --lockfile-only`、
-#   Dependabot 的 lock-only PR），镜像就会安装一个 CI 从未跑过、完整性锚也未覆盖的版本，
-#   而这条偏差不会有任何红灯：迁移工具与开发环境用的不是同一个包。
-#   读 lockfile 后，镜像里的版本与 `npm ci` 装的版本恒等。
-#   取不到值时必须**让构建失败**，而不是带着空串去执行 `npm i migrate-mongo@`：
-#   `$(… | sed …)` 的退出码来自管道右端，node 抛错会被吞掉 ⇒ 空版本交给 npm 后
-#   行为不确定（可能报错，也可能被解析成 `migrate-mongo@` 的最新标签）。
-#
-# --ignore-scripts 的安全判据与上面 runtime 的 `npm ci --omit=dev` 同源：
-# 该命令同样落在生产闭包内（--omit=dev），migrate-mongo 自身及其生产依赖树
-# 若带 install 脚本，会一并被 check-prod-install-scripts.js 的 --omit=dev 变体拦下
-# （当前实测该闭包命中 0）。故此处可以安全忽略脚本。
-#
-# 为何用 --no-save 而不是把 migrate-mongo 移进 dependencies：
-#   - 迁移器是**部署期工具**，不是应用运行期依赖，放进 dependencies
-#     会让每次 npm ci 都为它解析依赖树、也扩大了生产依赖的安全扫描面；
-#   - --no-save 不改动 package.json / package-lock.json，
-#     依赖声明保持原样，需要撤销时只改本文件。
-# 代价（如实记录，尚未消除）：--no-package-lock 让 npm **完全不读** lockfile，
-# 所以只有 migrate-mongo 自身的版本被锚住了，它的**传递依赖树仍是构建期现解析**，
-# 与 lockfile 锚（deployment/lockfile-anchor.json）不同源。要彻底闭合，需要二选一：
-#   a) 从 builder 阶段（`npm ci` 已按 lockfile 装好全部依赖）按 lockfile 的子树关系
-#      COPY migrate-mongo 及其依赖目录；
-#   b) 把它移进 dependencies，改走 `npm ci --omit=dev` 的锚定路径。
-# 两者都会改变镜像构建的依赖闭包，属结构性改动，未拍板前不做。
-RUN MIGRATE_MONGO_VERSION="$(node -p "require('./package-lock.json').packages['node_modules/migrate-mongo'].version" 2>/dev/null)" && \
-    if [ -z "$MIGRATE_MONGO_VERSION" ]; then \
-      echo '构建失败：无法从 package-lock.json 解析 migrate-mongo 的版本（依赖清单与镜像构建已脱钩，拒绝以不确定版本继续）' >&2; \
-      exit 1; \
-    fi && \
-    echo "migrate-mongo 版本（读自 package-lock.json）: $MIGRATE_MONGO_VERSION" && \
-    npm i --no-save --no-package-lock --omit=dev --ignore-scripts "migrate-mongo@$MIGRATE_MONGO_VERSION" && \
-    npm cache clean --force && \
+# chown 原先挂在被删掉的 migrate-mongo 补装 RUN 段末尾（F-02）；补装段删掉后
+# 它必须留在这里，否则 node_modules 仍归 root，nodejs 用户在运行期无法写入
+# （如 migrate-mongo 写临时状态、npm 更新缓存）。
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force && \
     chown -R nodejs:nodejs node_modules
+
+# ===== D-3 / F-02：迁移执行器 =====
+# migrate-mongo 是**部署期**要用的工具（scripts/deploy.js 的 migrate status/up 步骤），
+# 但此前它在 devDependencies 里 ⇒ 上面的 `npm ci --omit=dev` 把它排除，镜像里即便带了
+# migrations/ 也没有执行迁移的工具。当时的补法是「读 lockfile 取版本 + npm i --no-save
+# --no-package-lock」，这只锚住了 migrate-mongo **自身**，它的传递依赖树仍在构建期
+# 重新解析（审计 F-02）：同一个 Git 提交可能产出依赖闭包不同的镜像，SBOM 与实际运行的
+# 迁移器对不上，回滚到旧代码时迁移工具也未必是当时验证过的那棵树。
+#
+# 2026-10-17 改为 F-02 修复建议的首选方案：把 migrate-mongo 移进 dependencies。
+#   - 它本来就必须在**生产容器内**可执行，放进 dependencies 才是准确的声明
+#     （原先"部署期工具不算运行期依赖"的说法与"镜像里要跑迁移"这个事实自相矛盾）；
+#   - `npm ci --omit=dev` 一次装好，自身与传递依赖全部由 package-lock.json 锚定，
+#     构建期不再有任何解析动作 —— 同一 commit 的依赖闭包唯一；
+#   - 代价如实记录：生产依赖扫描面变大。实测只多 11 个包（migrate-mongo + cli-table3
+#     + commander + 它们的小依赖），`npm audit --omit=dev` 仍为 0 漏洞，
+#     `check-prod-install-scripts.js --omit=dev` 未登记命中仍为 0。
+# 迁移文件与配置的 COPY 见上面 builder 阶段的 D-3 段。
 
 # 切换到非 root 用户
 USER nodejs
