@@ -38,31 +38,59 @@ const toScreamingSnake = (name) => name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').t
  *
  * `declaredDays: null` = 业务口径未定 ⇒ 不得启用 TTL。
  * `basis` 记录的是"为什么这个集合需要保留期"，供业务方评审时对照（不是技术判断）。
+ *
+ * 【2026-10-17 口径落地（F-07）】业务方给定：**全部 180 天**。
+ * 180 天的依据是等保 2.0 三级对审计/日志留存「不少于六个月」的要求（《网络安全法》
+ * 第 21 条同口径），本仓按同一口径统一业务台账的保留期，不再按集合分档。
+ *
+ * 两处必须说清楚的偏离（不是遗漏，是刻意）：
+ *  ① **User 不建 TTL**。删账号与删台账不是同一件事：AuditLog.userId 指向被删用户后，
+ *     审计链上的操作者会变成悬空引用（合规回溯断链），而且删账号不可逆。它的 180 天
+ *     口径体现为**匿名化**（services/userService.anonymizeById），disposition='anonymize'。
+ *  ② **TTL 字段取"事件时间"而非 createdAt**：报警按 occurredAt、巡检按 planStartTime。
+ *     用 createdAt 会让"补录的历史报警"在入库 180 天后被删，而它的事件时间可能更早——
+ *     那等于把台账的保留期与数据产生的真实时间脱钩。
  */
 const BUSINESS_RETENTION_POLICY = Object.freeze(
   [
     [
       'FireAlarm',
+      'occurredAt',
+      'ttl',
       '消防报警记录是事故追溯与消防合规台账的一等证据，也是本系统唯一的"事件时间线"；' +
         '保留期由消防法规/行业台账要求决定，不由技术定。',
     ],
-    ['Inspection', '巡检记录是履职证据（"什么时候谁查了哪里"），与报警记录同属合规台账。'],
+    [
+      'Inspection',
+      'planStartTime',
+      'ttl',
+      '巡检记录是履职证据（"什么时候谁查了哪里"），与报警记录同属合规台账。',
+    ],
     [
       'FireDevice',
-      '设备台账随资产寿命：报废后仍需留存（报废原因/更换链），' +
-        '故其保留期与"资产寿命 + 追责期"挂钩，通常显著长于事件类记录。',
+      'createdAt',
+      'ttl',
+      '设备台账随资产寿命：报废后仍需留存（报废原因/更换链）。' +
+        '按统一的 180 天口径处置；需要更长留存时由归档流程接管，而不是把 TTL 调长。',
     ],
     [
       'User',
+      null,
+      'anonymize',
       '用户账号本身不宜按天数自动删除（删掉会让审计链上的操作者变成悬空引用）；' +
         '本表列在这里是为了让"业务数据"清单完整——它的处置方式是**匿名化**' +
         '（见 services/userService.js 的 anonymizeById），不是 TTL。',
     ],
-  ].map(([modelName, basis]) =>
+  ].map(([modelName, ttlField, disposition, basis]) =>
     Object.freeze({
       modelName,
       envKey: `BUSINESS_RETENTION_DAYS_${toScreamingSnake(modelName)}`,
-      declaredDays: null,
+      // 业务方 2026-10-17 给定的统一口径
+      declaredDays: 180,
+      /** TTL 索引字段；null = 该集合不建 TTL（见 disposition） */
+      ttlField,
+      /** 'ttl' = Mongo TTL 索引；'anonymize' = 由运维/定时任务执行匿名化 */
+      disposition,
       basis,
     })
   )
@@ -105,6 +133,8 @@ const resolveBusinessRetention = (modelName) => {
     modelName,
     envKey: policy.envKey,
     declaredDays: policy.declaredDays,
+    ttlField: policy.ttlField,
+    disposition: policy.disposition,
     rawDays,
     isConfigured,
     effectiveDays,
@@ -121,21 +151,73 @@ const resolveBusinessRetention = (modelName) => {
  * 为什么要有它：将来某人给 FireAlarm 加 TTL 索引时，最容易发生的不是"算错天数"，
  * 而是**跳过业务口径直接写一个数字**。此函数把"口径没定"从"没人记得"变成"当场抛错"。
  *
+ * 【F-07 修正（2026-10-17）】原判据只看 `enabled`（= 环境变量配了就算通过），
+ * 于是 `declaredDays: null`（业务口径根本没定）时只要有人设了一个环境变量，
+ * `assertBusinessRetentionEnforceable()` 就返回该天数、TTL 索引照建——「口径未定
+ * 不许建」这条纪律实际没落地。现在四道闸全过才放行：
+ *   ① 业务口径已声明（declaredDays 非 null）；
+ *   ② 环境变量已配置且能解析出数值；
+ *   ③ 生效值落在 [MIN, MAX] 合规区间内（被钳制 ⇒ 意图与生效不一致，拒绝）；
+ *   ④ 生效值**不得大于**业务声明的天数（声明 180 天却按 3650 天保留，等于绕开口径）。
+ *
  * @param {string} modelName 模型名
  * @returns {number} 生效保留天数
- * @throws {Error} 未配置保留期时抛出
+ * @throws {Error} 任一道闸不通过时抛出
  */
 const assertBusinessRetentionEnforceable = (modelName) => {
   const r = resolveBusinessRetention(modelName);
-  if (!r.enabled) {
+
+  if (r.declaredDays === null) {
     throw new Error(
-      `拒绝为 ${modelName} 建保留期（TTL）索引：${r.envKey} 未配置。` +
-        '业务数据保留期属业务/合规口径，须先由业务方给出书面天数并写入 ' +
-        'constants/businessRetention.js 的 declaredDays，再设置环境变量。' +
+      `拒绝为 ${modelName} 建保留期（TTL）索引：业务口径未声明（declaredDays=null）。` +
+        '须先由业务方给出书面天数并写入 constants/businessRetention.js 的 declaredDays。' +
         '（TTL 删除不可逆且无提示，技术单方面定数字等于静默销毁业务台账。）'
     );
   }
+
+  if (!r.enabled) {
+    throw new Error(
+      `拒绝为 ${modelName} 建保留期（TTL）索引：${r.envKey} 未配置。` +
+        '声明值只用于评审留痕，真正的开关是环境变量——两者都在场才允许建索引。'
+    );
+  }
+
+  if (r.wasAdjusted) {
+    throw new Error(
+      `拒绝为 ${modelName} 建保留期（TTL）索引：${r.envKey}=${r.rawDays} 超出允许区间 ` +
+        `[${MIN_RETENTION_DAYS}, ${MAX_RETENTION_DAYS}]，实际会生效 ${r.effectiveDays} 天。` +
+        '配置意图与生效值不一致时不允许静默按钳制值建索引。'
+    );
+  }
+
+  if (r.effectiveDays > r.declaredDays) {
+    throw new Error(
+      `拒绝为 ${modelName} 建保留期（TTL）索引：${r.envKey}=${r.effectiveDays} 天 ` +
+        `**大于**业务声明的 ${r.declaredDays} 天。声明是对外口径，实际保留不得长于它——` +
+        '否则"我们只留 180 天"这句话在数据面上不成立。'
+    );
+  }
+
   return r.effectiveDays;
+};
+
+/**
+ * 建 TTL 索引的**决策**（不抛错版本，供模型层使用）。
+ *
+ * 模型在**加载期**就要决定建不建 TTL 索引，而那时如果直接调
+ * `assertBusinessRetentionEnforceable` 抛错，一次配置写错（如 99999）会让整个进程
+ * 起不来——错误信息还不指向环境变量。所以模型层要的是"不建 + 有原因"，
+ * 由合规检查把原因变成红灯，而不是让服务起不来。
+ *
+ * @param {string} modelName
+ * @returns {{days: number|null, reason: string|null}}
+ */
+const resolveTtlIndexPlan = (modelName) => {
+  try {
+    return { days: assertBusinessRetentionEnforceable(modelName), reason: null };
+  } catch (err) {
+    return { days: null, reason: err.message };
+  }
 };
 
 /** 单个集合的可读说明（供启动日志 / 合规检查） */
@@ -171,6 +253,7 @@ module.exports = {
   getBusinessRetentionPolicy,
   resolveBusinessRetention,
   assertBusinessRetentionEnforceable,
+  resolveTtlIndexPlan,
   describeBusinessRetention,
   describeAllBusinessRetention,
 };

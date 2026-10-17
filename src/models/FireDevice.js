@@ -186,6 +186,19 @@ fireDeviceSchema.index({ lifecycleStage: 1, status: 1 });
 fireDeviceSchema.index({ expiryDate: 1 });
 fireDeviceSchema.index({ nextCheckDate: 1 });
 
+// 业务数据保留期（F-07，2026-10-17）：口径见 constants/businessRetention.js（180 天），
+// 开关是 BUSINESS_RETENTION_DAYS_FIRE_DEVICE；未配置时不建 TTL。
+// 设备台账没有"事件时间"，按入库时间计龄——报废设备仍需留存更换链/报废原因，
+// 超出统一口径的部分由归档流程接管，而不是把 TTL 调长。
+const { resolveTtlIndexPlan } = require('../constants/businessRetention');
+const fireDeviceTtl = resolveTtlIndexPlan('FireDevice');
+if (fireDeviceTtl.days !== null) {
+  fireDeviceSchema.index(
+    { createdAt: 1 },
+    { expireAfterSeconds: fireDeviceTtl.days * 24 * 60 * 60, name: 'ttl_createdAt' }
+  );
+}
+
 // 自动生成设备编号（使用 autoIncrement 插件，基于 counters 原子计数器）
 //
 // 年份段与报警编号同一条判据（见 models/FireAlarm.js 的同名注释）：`deviceCode` 直接

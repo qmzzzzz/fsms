@@ -89,6 +89,15 @@ jobs:
       # WAL 兜底有没有被摘掉。此前只被 `npm run security:audit` 引用，
       # 而 security-audit job 只跑 npm audit ⇒ 这些检查从未真正被自动兑现。
       - name: Run compliance checks (audit invariants)
+        # F-07（2026-10-17）：保留期开关必须显式给值，否则这条只能输出「未启用」
+        # （仓库态不阻断，但也就等于没验）。
+        # 这里给的是**声明口径**（180 天），与 src/constants/businessRetention.js 的
+        # declaredDays 一致——两处任一处漂移都会让本条红（生效值不得大于声明值）。
+        env:
+          BUSINESS_RETENTION_DAYS_FIRE_ALARM: '180'
+          BUSINESS_RETENTION_DAYS_INSPECTION: '180'
+          BUSINESS_RETENTION_DAYS_FIRE_DEVICE: '180'
+          BUSINESS_RETENTION_DAYS_USER: '180'
         run: node scripts/compliance-check.js
 
       # --forceExit：2026-09-15 CI 实证（4 轮 × Node 18/20/22），测试 1754 全过、

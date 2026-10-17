@@ -193,4 +193,16 @@ inspectionSchema.index({ 'locations.building': 1 });
 inspectionSchema.index({ devices: 1 });
 inspectionSchema.index({ 'findings.deviceId': 1 });
 
+// 业务数据保留期（F-07，2026-10-17）：口径见 constants/businessRetention.js（180 天），
+// 开关是 BUSINESS_RETENTION_DAYS_INSPECTION；未配置时不建 TTL。
+// 字段取 planStartTime（计划时间）而不是 createdAt：补录的巡检同样按事件时间计龄。
+const { resolveTtlIndexPlan } = require('../constants/businessRetention');
+const inspectionTtl = resolveTtlIndexPlan('Inspection');
+if (inspectionTtl.days !== null) {
+  inspectionSchema.index(
+    { planStartTime: 1 },
+    { expireAfterSeconds: inspectionTtl.days * 24 * 60 * 60, name: 'ttl_planStartTime' }
+  );
+}
+
 module.exports = mongoose.model('Inspection', inspectionSchema);

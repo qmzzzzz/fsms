@@ -257,4 +257,18 @@ fireAlarmSchema.index({ alarmType: 1, occurredAt: -1 });
 // 补此索引后扫 30 文档 / 1.07ms（191.2x，见 deliverables/性能实测基线-2026-09-16.json）。
 fireAlarmSchema.index({ deviceId: 1 });
 
+// 业务数据保留期（F-07，2026-10-17）：声明与开关分离——口径在
+// constants/businessRetention.js（declaredDays=180），开关是
+// BUSINESS_RETENTION_DAYS_FIRE_ALARM。**未配置时不建 TTL**（数据永久保留），
+// 配置了且通过四道闸才建；TTL 字段取 occurredAt（事件时间）而不是 createdAt，
+// 否则"补录的历史报警"会在入库 180 天后被删，而它的事件时间可能更早。
+const { resolveTtlIndexPlan } = require('../constants/businessRetention');
+const fireAlarmTtl = resolveTtlIndexPlan('FireAlarm');
+if (fireAlarmTtl.days !== null) {
+  fireAlarmSchema.index(
+    { occurredAt: 1 },
+    { expireAfterSeconds: fireAlarmTtl.days * 24 * 60 * 60, name: 'ttl_occurredAt' }
+  );
+}
+
 module.exports = mongoose.model('FireAlarm', fireAlarmSchema);

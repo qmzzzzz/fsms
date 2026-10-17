@@ -44,6 +44,13 @@ services:
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:?ALLOWED_HOSTS 必须显式配置（如 fsms.example.com，多个用逗号分隔）}
       # 审计留存天数（合规区间 90..3650，留空取默认 180）
       - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-180}
+      # 业务数据保留期（F-07）：口径 180 天，留空则**不建 TTL**（数据永久保留，
+      # 合规检查会判不通过）。见 src/constants/businessRetention.js 的四道闸。
+      - BUSINESS_RETENTION_DAYS_FIRE_ALARM=${BUSINESS_RETENTION_DAYS_FIRE_ALARM:-180}
+      - BUSINESS_RETENTION_DAYS_INSPECTION=${BUSINESS_RETENTION_DAYS_INSPECTION:-180}
+      - BUSINESS_RETENTION_DAYS_FIRE_DEVICE=${BUSINESS_RETENTION_DAYS_FIRE_DEVICE:-180}
+      # User 不建 TTL（匿名化口径），此变量仅用于合规检查的声明一致性核对
+      - BUSINESS_RETENTION_DAYS_USER=${BUSINESS_RETENTION_DAYS_USER:-180}
       # 指向挂载后的 secret 文件路径，本身不含敏感值
       - JWT_SECRET_FILE=/run/secrets/jwt_secret
       - JWT_REFRESH_SECRET_FILE=/run/secrets/jwt_refresh_secret

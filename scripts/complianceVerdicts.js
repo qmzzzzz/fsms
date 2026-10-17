@@ -21,8 +21,18 @@
  */
 
 /**
- * 业务数据保留期（A2）：User / FireDevice / FireAlarm / Inspection 是否有 TTL 声明，
- * 以及"对外声明留 N 天、实际只留更少"这类静默修正。
+ * 业务数据保留期（A2）：User / FireDevice / FireAlarm / Inspection 是否声明并启用了
+ * 保留期，以及"对外声明留 N 天、实际只留更少/更多"这类静默修正。
+ *
+ * 【F-07 修正（2026-10-17）】原判据是 `passed: adjusted.length === 0`——只要没有
+ * "被钳制或非法调整"，**未启用本身不会让 allPassed 变 false**。于是
+ * 「业务数据永久保留」与「保留策略已执行」在自动化消费方眼里是同一个结论，
+ * 而 compliance-check 的 allPassed 正是发布流程读的那个字段。
+ *
+ * 现在的判据分两档，都要成立：
+ *   ① 每个集合都已声明（declaredDays 非 null）且已启用（环境变量给了生效值）；
+ *   ② 没有集合出现"配置意图与生效值不一致"（被钳制 / 超范围 / 超过声明天数）。
+ * 未启用时 passed=false，detail 明确写"未启用 ⇒ 数据永久保留"，不再用"就绪"盖过去。
  *
  * @returns {{name: string, passed: boolean, detail: string}}
  */
@@ -36,14 +46,53 @@ function businessRetentionVerdict() {
   const all = BUSINESS_RETENTION_POLICY.map((p) => resolveBusinessRetention(p.modelName));
   const enabled = all.filter((r) => r.enabled);
   const adjusted = all.filter((r) => r.wasAdjusted);
+  const undeclared = all.filter((r) => r.declaredDays === null);
+  const notEnabled = all.filter((r) => !r.enabled);
+  // 声明是对外口径，实际保留不得长于它（长于声明 = "我们只留 180 天"在数据面上不成立）
+  const longerThanDeclared = all.filter(
+    (r) => r.enabled && r.declaredDays !== null && r.effectiveDays > r.declaredDays
+  );
 
+  const problems = [];
+  if (undeclared.length > 0) {
+    problems.push(
+      `未声明口径：${undeclared.map((r) => r.modelName).join('/')}（declaredDays=null）`
+    );
+  }
+  if (adjusted.length > 0) {
+    problems.push(
+      `配置意图与生效值不一致（被钳制或非法）：${adjusted
+        .map((r) => `${r.modelName}(${r.rawDays}→${r.effectiveDays})`)
+        .join('/')}`
+    );
+  }
+  if (longerThanDeclared.length > 0) {
+    problems.push(
+      `生效值超过业务声明：${longerThanDeclared
+        .map((r) => `${r.modelName}(${r.effectiveDays}>${r.declaredDays})`)
+        .join('/')}`
+    );
+  }
+
+  // passed 回答「代码/配置有没有自相矛盾」；notReady 回答「治理能力有没有真的开起来」。
+  // 两者刻意分开：仓库态（CI）没有生产库，也没有生产环境的保留期开关——在那里把
+  // 「未启用」判成红，门禁会永远红，红的原因却与代码无关，最后必然被人绕过。
+  // 而部署门禁（COMPLIANCE_STRICT=1）读 notReady，未启用即阻断。
   const detail =
-    enabled.length === 0
-      ? `业务数据保留期**尚未启用**（${all.length} 个集合全部无 TTL，数据永久保留）：` +
-        '口径待业务方确认，见 src/constants/businessRetention.js'
-      : describeAllBusinessRetention().join('；');
+    problems.length === 0
+      ? notEnabled.length === 0
+        ? describeAllBusinessRetention().join('；')
+        : `**未启用**（${notEnabled.map((r) => r.modelName).join('/')} 无 TTL，数据永久保留）：` +
+          describeAllBusinessRetention().join('；')
+      : `${problems.join('；')}。已启用 ${enabled.length}/${all.length} 个集合；` +
+        '业务口径与处置方式见 src/constants/businessRetention.js';
 
-  return { name: '业务数据保留期', passed: adjusted.length === 0, detail };
+  return {
+    name: '业务数据保留期',
+    passed: problems.length === 0,
+    detail,
+    notReady: problems.length > 0 || notEnabled.length > 0,
+  };
 }
 
 /**
@@ -84,6 +133,8 @@ function backupObjectiveVerdict() {
     name: '备份/恢复目标（RPO/RTO）',
     passed: alignment.ok && adjusted.length === 0,
     detail,
+    // 未声明 RPO/RTO 属于「治理能力未就绪」，不是「代码不合规」——同业务保留期的两档语义
+    notReady: unset.length > 0 || !alignment.ok || adjusted.length > 0,
   };
 }
 

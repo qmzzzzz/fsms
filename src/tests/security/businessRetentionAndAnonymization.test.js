@@ -60,21 +60,49 @@ describe('业务数据保留期声明（A2）', () => {
     }
   });
 
-  test('fail-closed：口径未配置时建 TTL 索引必须抛错（而不是默默按 null 建）', () => {
+  test('fail-closed：环境变量未配置时建 TTL 索引必须抛错（声明只用于评审留痕）', () => {
     expect(() => assertBusinessRetentionEnforceable('FireAlarm')).toThrow(/未配置/);
-    expect(() => assertBusinessRetentionEnforceable('FireAlarm')).toThrow(/业务\/合规口径/);
+    // F-07 之后：声明已在场（180 天），但开关没开 ⇒ 仍然拒绝建索引。
+    // 这条区分"声明"与"启用"两件事——原实现只看 enabled，声明为 null 时也照建。
+    expect(() => assertBusinessRetentionEnforceable('FireAlarm')).toThrow(/两者都在场/);
+  });
+
+  test('F-07 口径落地：四个集合都声明了 180 天（业务方给定，等保六个月同口径）', () => {
+    for (const p of BUSINESS_RETENTION_POLICY) {
+      expect({ m: p.modelName, declared: p.declaredDays }).toEqual({
+        m: p.modelName,
+        declared: 180,
+      });
+    }
+    // User 的处置方式是匿名化而不是 TTL：删账号会让审计链上的操作者悬空
+    expect(getBusinessRetentionPolicy('User').disposition).toBe('anonymize');
+    expect(getBusinessRetentionPolicy('User').ttlField).toBeNull();
+    expect(getBusinessRetentionPolicy('FireAlarm').ttlField).toBe('occurredAt');
+    expect(getBusinessRetentionPolicy('Inspection').ttlField).toBe('planStartTime');
   });
 
   test('配置合法值：原样生效，wasAdjusted 为 false', () => {
-    process.env.BUSINESS_RETENTION_DAYS_FIRE_ALARM = '365';
+    process.env.BUSINESS_RETENTION_DAYS_FIRE_ALARM = '180';
     const r = resolveBusinessRetention('FireAlarm');
     expect({ enabled: r.enabled, eff: r.effectiveDays, adj: r.wasAdjusted }).toEqual({
       enabled: true,
-      eff: 365,
+      eff: 180,
       adj: false,
     });
-    expect(assertBusinessRetentionEnforceable('FireAlarm')).toBe(365);
+    expect(assertBusinessRetentionEnforceable('FireAlarm')).toBe(180);
     expect(describeBusinessRetention('FireAlarm')).toContain('原样生效');
+  });
+
+  test('生效值大于业务声明 ⇒ 拒绝建索引（声明是对外口径，实际不得更长）', () => {
+    // 365 在合规区间内、也没被钳制，但它**长于**声明的 180 天：
+    // 「我们只留 180 天」这句话在数据面上就不成立了。
+    process.env.BUSINESS_RETENTION_DAYS_FIRE_ALARM = '365';
+    expect(resolveBusinessRetention('FireAlarm').wasAdjusted).toBe(false);
+    expect(() => assertBusinessRetentionEnforceable('FireAlarm')).toThrow(/大于.*业务声明/);
+    // 模型层拿到的决策是"不建"，而不是让进程起不来
+    const { resolveTtlIndexPlan } = require('../../constants/businessRetention');
+    expect(resolveTtlIndexPlan('FireAlarm').days).toBeNull();
+    expect(resolveTtlIndexPlan('FireAlarm').reason).toMatch(/大于.*业务声明/);
   });
 
   test('越界值被钳制到合规区间，且 wasAdjusted 为 true（配置意图与实际必须一致）', () => {

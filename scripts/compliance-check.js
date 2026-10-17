@@ -35,8 +35,14 @@ const { businessRetentionVerdict, backupObjectiveVerdict } = require('./complian
 const checks = [];
 let allPassed = true;
 
-function recordCheck(name, passed, detail) {
-  checks.push({ name, passed, detail });
+/**
+ * @param {string} name 检查项名
+ * @param {boolean} passed 是否通过
+ * @param {string} detail 说明
+ * @param {{notReady?: boolean}} [opts] notReady=「治理能力尚未启用」而非「代码不合规」
+ */
+function recordCheck(name, passed, detail, opts = {}) {
+  checks.push({ name, passed, detail, notReady: opts.notReady === true });
   if (!passed) allPassed = false;
 }
 
@@ -181,7 +187,7 @@ function checkRetention() {
 // 理由见该文件头）。这里只负责把结论登记进本次报告。
 function checkBusinessRetention() {
   const v = businessRetentionVerdict();
-  recordCheck(v.name, v.passed, v.detail);
+  recordCheck(v.name, v.passed, v.detail, { notReady: v.notReady });
 }
 
 // ================= 1c. 备份 / 恢复目标（A8，2026-10-16） =================
@@ -198,7 +204,7 @@ function checkBusinessRetention() {
 //   - 一旦有人配了环境变量但被钳制/非法，本条立刻转红（配置意图与实际不符）。
 function checkBackupObjectives() {
   const v = backupObjectiveVerdict();
-  recordCheck(v.name, v.passed, v.detail);
+  recordCheck(v.name, v.passed, v.detail, { notReady: v.notReady });
 }
 
 // ================= 2. append-only 钩子挂载 =================
@@ -466,10 +472,24 @@ function runRegisteredChecks(registry = COMPLIANCE_CHECKS) {
 function runAllChecks() {
   runRegisteredChecks();
 
+  // F-07/F-08（2026-10-17）：把「治理能力尚未启用」与「代码不合规」分开输出。
+  //
+  // 为什么不是简单地把未启用判成红：仓库态（CI）里没有生产库，也没有生产环境的
+  // 保留期/RPO 开关——在那里判红会让门禁永远红，而红的原因与代码无关，最后必然
+  // 被人用 `|| true` 绕过。反过来，部署门禁**必须**拦它：没启用保留期就上线，
+  // 等于"我们只留 180 天"这句话在数据面上不成立。
+  // 所以分两档：仓库态输出 notReady 信息（allPassed 仍可绿）；COMPLIANCE_STRICT=1
+  // （部署/发布流程使用）时 notReady 非空即阻断。
+  const notReady = checks.filter((c) => c.notReady).map((c) => c.name);
+  const strict = process.env.COMPLIANCE_STRICT === '1';
+  if (strict && notReady.length > 0) allPassed = false;
+
   // 输出 JSON 结果
   const result = {
     timestamp: new Date().toISOString(),
+    strict,
     allPassed,
+    notReady,
     checks,
   };
 
@@ -480,6 +500,10 @@ function runAllChecks() {
   for (const c of checks) {
     const icon = c.passed ? '✅' : '❌';
     console.log(`${icon} ${c.name}: ${c.detail}`);
+  }
+  if (notReady.length > 0) {
+    const note = strict ? '视为不通过（部署门禁口径）' : '仓库态不阻断；部署/发布请用 COMPLIANCE_STRICT=1 运行';
+    console.log(`\n⚠ 未就绪（治理能力未启用）：${notReady.join('、')}\n  ${note}`);
   }
   console.log(`\n总体: ${allPassed ? '就绪' : '存在缺失'}`);
 
