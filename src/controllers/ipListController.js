@@ -27,7 +27,9 @@ const {
 const { auditPath } = require('../utils/auditMeta');
 const { isSuperAdminRole } = require('../utils/superAdmin');
 const { invalidateIPBlockCache } = require('../middleware/security');
-const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
+// F-03（2026-10-17）：IP 黑白名单变更属于**安全配置**且业务状态已落库 ⇒ 审计必须先持久化
+// （DB 或审计 WAL）才允许回成功；落库失败时转 WAL 待重放，不再"回成功但可能零留痕"。
+const { recordDurably } = require('../services/auditOutbox');
 // 归属地展示增强（locate fail-soft 且带缓存；CIDR 网段条目无单一归属，返回 null）
 const ipLocationService = require('../services/ipLocationService');
 
@@ -305,19 +307,22 @@ const addIPEntry = asyncHandler(async (req, res) => {
 
   // 审计日志
   res.locals.skipGlobalAudit = true;
-  await AuditLog.create({
-    action: type === 'black' ? 'ip_blacklist_added' : 'ip_whitelist_added',
-    category: 'security',
-    userId: req.user.userId,
-    username: req.user.username,
-    method: req.method,
-    path: auditPath(req),
-    body: { ip: normalizedIP, type, reason, durationHours: hours },
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    riskLevel: type === 'black' ? 'medium' : 'high',
-  }).catch(onAuditWriteFailure('ip_list_change', req));
+  await recordDurably(
+    {
+      action: type === 'black' ? 'ip_blacklist_added' : 'ip_whitelist_added',
+      category: 'security',
+      userId: req.user.userId,
+      username: req.user.username,
+      method: req.method,
+      path: auditPath(req),
+      body: { ip: normalizedIP, type, reason, durationHours: hours },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: type === 'black' ? 'medium' : 'high',
+    },
+    { auditAction: 'ip_list_change', req }
+  );
 
   logger.info('IP 已加入名单', {
     ip: normalizedIP,
@@ -399,19 +404,22 @@ const removeIPEntry = asyncHandler(async (req, res) => {
 
   // 审计日志
   res.locals.skipGlobalAudit = true;
-  await AuditLog.create({
-    action: entry.type === 'black' ? 'ip_blacklist_removed' : 'ip_whitelist_removed',
-    category: 'security',
-    userId: req.user.userId,
-    username: req.user.username,
-    method: req.method,
-    path: auditPath(req),
-    body: { ip: entry.ip, type: entry.type },
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    riskLevel: 'medium',
-  }).catch(onAuditWriteFailure('ip_list_change', req));
+  await recordDurably(
+    {
+      action: entry.type === 'black' ? 'ip_blacklist_removed' : 'ip_whitelist_removed',
+      category: 'security',
+      userId: req.user.userId,
+      username: req.user.username,
+      method: req.method,
+      path: auditPath(req),
+      body: { ip: entry.ip, type: entry.type },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'medium',
+    },
+    { auditAction: 'ip_list_change', req }
+  );
 
   logger.info('IP 已从名单移除', { ip: entry.ip, type: entry.type, operator: req.user.username });
 

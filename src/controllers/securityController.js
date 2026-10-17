@@ -33,7 +33,11 @@ const { AUDIT_RISK_LEVELS, AUDIT_ERROR_RISK_LEVELS } = require('../constants/aud
 // 安全建议码表（i18n）：后端只出稳定码，文案归前端词表——原先这里直接拼中文句子，
 // 英文界面下无从翻译。见 constants/securitySuggestions.js 文件头。
 const { SECURITY_SUGGESTION_CODES } = require('../constants/securitySuggestions');
-const { onAuditWriteFailure, onAuditWriteFailureRethrow } = require('../utils/auditWriteFailure');
+const { onAuditWriteFailureRethrow } = require('../utils/auditWriteFailure');
+// F-03（2026-10-17）：业务状态已改变的成功路径改走可靠 outbox（落库失败 ⇒ 转审计 WAL
+// 待重放），因此"返回成功"不再等于"审计可能没写上"。仍用 onAuditWriteFailure 的两处
+// （PII 查看、安全举报）是刻意的 fail-closed：它们必须"记账后重抛"，不许把结果交出去。
+const { recordDurably } = require('../services/auditOutbox');
 // 安全判定与 PII 查看留痕的客户端地址只有一个口径（utils/ipUtils.js）：
 // `req.ip` 在开着 trust proxy 时取自请求方自己写的 X-Forwarded-For。
 const { clientIpForSecurityDecision } = require('../utils/ipUtils');
@@ -161,15 +165,19 @@ const changePasswordSecure = asyncHandler(async (req, res) => {
 
   // 记录审计日志
   res.locals.skipGlobalAudit = true;
-  await AuditLog.create({
-    action: 'password_changed',
-    category: 'auth',
-    userId: req.user.userId,
-    username: result.username,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-  }).catch(onAuditWriteFailure('password_changed', req));
+  // F-03：密码已改成功 ⇒ 审计先持久化（DB 或 WAL）才允许回成功
+  await recordDurably(
+    {
+      action: 'password_changed',
+      category: 'auth',
+      userId: req.user.userId,
+      username: result.username,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+    },
+    { auditAction: 'password_changed', req }
+  );
 
   return ApiResponse.success(res, null, '密码修改成功，请重新登录');
 });
@@ -714,20 +722,24 @@ const resetUserMfa = asyncHandler(async (req, res) => {
   await sessionService.revokeAllSessionsSafe(user._id, 'admin_revoked');
 
   res.locals.skipGlobalAudit = true;
-  await AuditLog.create({
-    action: 'admin_reset_mfa',
-    category: 'security',
-    userId: req.user.userId,
-    username: req.user.username,
-    targetUserId: user._id,
-    targetUsername: user.username,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    riskLevel: 'high',
-    riskFactors: ['admin_mfa_reset'],
-    reason: `管理员重置用户 ${user.username} 的两步验证并强制下线`,
-  }).catch(onAuditWriteFailure('admin_reset_mfa', req));
+  // F-03：管理员重置 MFA 已生效（并已强制下线）⇒ 审计先持久化再回成功
+  await recordDurably(
+    {
+      action: 'admin_reset_mfa',
+      category: 'security',
+      userId: req.user.userId,
+      username: req.user.username,
+      targetUserId: user._id,
+      targetUsername: user.username,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'high',
+      riskFactors: ['admin_mfa_reset'],
+      reason: `管理员重置用户 ${user.username} 的两步验证并强制下线`,
+    },
+    { auditAction: 'admin_reset_mfa', req }
+  );
 
   logger.warn('管理员重置 MFA', { username: user.username, operator: req.user.username });
 
@@ -1005,17 +1017,21 @@ const setRegistrationConfig = asyncHandler(async (req, res) => {
 
   // 审计日志
   res.locals.skipGlobalAudit = true;
-  await AuditLog.create({
-    action: allowPublicRegistration ? 'registration_enabled' : 'registration_disabled',
-    category: 'system',
-    userId: req.user.userId,
-    username: req.user.username,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    riskLevel: 'medium',
-    body: { allowPublicRegistration },
-  }).catch(onAuditWriteFailure('security_config_change', req));
+  // F-03：注册开关已落库并失效缓存 ⇒ 审计先持久化再回成功
+  await recordDurably(
+    {
+      action: allowPublicRegistration ? 'registration_enabled' : 'registration_disabled',
+      category: 'system',
+      userId: req.user.userId,
+      username: req.user.username,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'medium',
+      body: { allowPublicRegistration },
+    },
+    { auditAction: 'security_config_change', req }
+  );
 
   logger.info('注册开关已变更', { allowPublicRegistration, operator: req.user.username });
 
@@ -1061,17 +1077,21 @@ const setLoginCaptchaConfig = asyncHandler(async (req, res) => {
 
   // 审计日志
   res.locals.skipGlobalAudit = true;
-  await AuditLog.create({
-    action: loginCaptchaEnabled ? 'login_captcha_enabled' : 'login_captcha_disabled',
-    category: 'system',
-    userId: req.user.userId,
-    username: req.user.username,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    riskLevel: 'medium',
-    body: { loginCaptchaEnabled },
-  }).catch(onAuditWriteFailure('security_config_change', req));
+  // F-03：登录验证码开关已落库并失效缓存 ⇒ 审计先持久化再回成功
+  await recordDurably(
+    {
+      action: loginCaptchaEnabled ? 'login_captcha_enabled' : 'login_captcha_disabled',
+      category: 'system',
+      userId: req.user.userId,
+      username: req.user.username,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'medium',
+      body: { loginCaptchaEnabled },
+    },
+    { auditAction: 'security_config_change', req }
+  );
 
   logger.info('登录验证码开关已变更', { loginCaptchaEnabled, operator: req.user.username });
 
@@ -1117,17 +1137,21 @@ const setRegisterCaptchaConfig = asyncHandler(async (req, res) => {
 
   // 审计日志
   res.locals.skipGlobalAudit = true;
-  await AuditLog.create({
-    action: registerCaptchaEnabled ? 'register_captcha_enabled' : 'register_captcha_disabled',
-    category: 'system',
-    userId: req.user.userId,
-    username: req.user.username,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    riskLevel: 'medium',
-    body: { registerCaptchaEnabled },
-  }).catch(onAuditWriteFailure('security_config_change', req));
+  // F-03：注册验证码开关已落库并失效缓存 ⇒ 审计先持久化再回成功
+  await recordDurably(
+    {
+      action: registerCaptchaEnabled ? 'register_captcha_enabled' : 'register_captcha_disabled',
+      category: 'system',
+      userId: req.user.userId,
+      username: req.user.username,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'medium',
+      body: { registerCaptchaEnabled },
+    },
+    { auditAction: 'security_config_change', req }
+  );
 
   logger.info('注册验证码开关已变更', { registerCaptchaEnabled, operator: req.user.username });
 

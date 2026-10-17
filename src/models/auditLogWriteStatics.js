@@ -75,7 +75,17 @@ const applyWriteStatics = (schema) => {
     });
   };
 
-  schema.statics.recordSensitiveAction = async function (
+  /**
+   * 构造「敏感操作审计」文档（**纯函数**，不落库）。
+   *
+   * 2026-10-17（F-03）从 recordSensitiveAction 里抽出：可靠 outbox
+   * （services/auditOutbox.js）需要在落库失败时把**同一条文档**写进审计 WAL，
+   * 而它拿不到 `create` 的实参。把构造与写入拆开后，两条路径共用同一份字段口径，
+   * 不会出现「DB 里一条形态、WAL 里另一条形态」的分叉。
+   *
+   * @returns {object} 可直接交给 create / insertMany 的文档
+   */
+  schema.statics.buildSensitiveActionDoc = function (
     userId,
     username,
     action,
@@ -97,7 +107,7 @@ const applyWriteStatics = (schema) => {
     const riskLevel =
       riskFactors.length >= 2 ? 'high' : riskFactors.length === 1 ? 'medium' : 'low';
 
-    return this.create({
+    return {
       action,
       category,
       userId,
@@ -120,7 +130,21 @@ const applyWriteStatics = (schema) => {
       duration,
       riskLevel,
       riskFactors,
-    });
+    };
+  };
+
+  schema.statics.recordSensitiveAction = async function (
+    userId,
+    username,
+    action,
+    category,
+    req,
+    res,
+    duration
+  ) {
+    return this.create(
+      this.buildSensitiveActionDoc(userId, username, action, category, req, res, duration)
+    );
   };
 };
 

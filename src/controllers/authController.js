@@ -18,7 +18,14 @@ const logger = require('../utils/logger');
 // 审计写入失败的兜底档位（error 日志 + audit_write_failed 指标）——见 utils/auditWriteFailure.js。
 // `AuditLog.record` 自带兜底，但 `recordSensitiveAction` 直接 `return this.create(...)`（无 catch），
 // 所以它的调用方必须自己接住 rejection，并且接到同一档。
+//
+// F-03（2026-10-17）：**业务状态已改变**的成功路径改走 services/auditOutbox.js 的
+// `recordSensitiveActionDurably`——落库失败时把同一条文档转进审计 WAL，Mongo 恢复后重放，
+// 因此"返回成功"的前提从"DB 已写"变成"已持久化到可重放的介质"。仍用
+// `onAuditWriteFailure` 的地方是**诊断性**审计（失败/拒绝路径，业务状态未改变），
+// best-effort 是正确语义，见该模块头注释的分档说明。
 const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
+const { recordSensitiveActionDurably } = require('../services/auditOutbox');
 const { asyncHandler } = require('../middleware/errorHandler');
 // 令牌提取的唯一实现（authenticate 用的就是它）；登出必须与认证同源，见 logout 注释
 const { extractAccessToken } = require('../middleware/auth');
@@ -418,14 +425,17 @@ const changePassword = asyncHandler(async (req, res) => {
       return rejectUnknownOutcome(res, 'changePassword', result.outcome);
   }
 
-  AuditLog.recordSensitiveAction(
-    req.user.userId,
-    result.username,
-    'change_password',
-    'auth',
+  // F-03：密码已改成功 ⇒ 审计必须先持久化（DB 或 WAL）才允许回成功。
+  // 转 WAL 成功时 recordDurably 返回 null；WAL 不可用会重抛 ⇒ 500，不假装记账成功。
+  await recordSensitiveActionDurably({
+    userId: req.user.userId,
+    username: result.username,
+    action: 'change_password',
+    category: 'auth',
     req,
-    res
-  ).catch(onAuditWriteFailure('password_changed', req));
+    res,
+    auditAction: 'password_changed',
+  });
 
   return ApiResponse.success(res, null, '密码修改成功');
 });
@@ -655,14 +665,16 @@ const revokeSession = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'SESSION_NOT_FOUND');
   }
 
-  AuditLog.recordSensitiveAction(
-    req.user.userId,
-    req.user.username,
-    'session_revoked',
-    'auth',
+  // F-03：会话已吊销 ⇒ 审计先持久化再回成功（同改密口径）
+  await recordSensitiveActionDurably({
+    userId: req.user.userId,
+    username: req.user.username,
+    action: 'session_revoked',
+    category: 'auth',
     req,
-    res
-  ).catch(onAuditWriteFailure('session_revoked', req));
+    res,
+    auditAction: 'session_revoked',
+  });
 
   return ApiResponse.success(res, { sid }, '该设备的登录已终止');
 });
@@ -681,14 +693,16 @@ const revokeOtherSessions = asyncHandler(async (req, res) => {
     reason: 'user_revoked',
   });
 
-  AuditLog.recordSensitiveAction(
-    req.user.userId,
-    req.user.username,
-    'session_revoked_others',
-    'auth',
+  // F-03：批量吊销已完成 ⇒ 审计先持久化再回成功（同改密口径）
+  await recordSensitiveActionDurably({
+    userId: req.user.userId,
+    username: req.user.username,
+    action: 'session_revoked_others',
+    category: 'auth',
     req,
-    res
-  ).catch(onAuditWriteFailure('session_revoked_others', req));
+    res,
+    auditAction: 'session_revoked_others',
+  });
 
   return ApiResponse.success(res, { revokedCount: count }, `已终止 ${count} 台其他设备的登录`);
 });

@@ -13,6 +13,14 @@
  * **一行日志没有、指标不涨**，同时 `skipGlobalAudit` 已生效 ⇒ 这次查看/举报
  * 在审计面与可观测面双双蒸发。合规上这比「留下一条失败标记」更糟。
  *
+ * F-03（2026-10-17）之后本文件看守**三档**语义，而不是原先的两档：
+ *   ① 可靠 outbox（`recordDurably` / `recordSensitiveActionDurably`）：业务状态已改变，
+ *      审计先持久化（DB 或审计 WAL）再回成功；**必须 await**，否则语义退化；
+ *   ② 记账后重抛（`onAuditWriteFailureRethrow`）：PII 查看 / 安全举报——
+ *      留痕写不成就不许把结果交出去；
+ *   ③ 吞错 + 记账（`onAuditWriteFailure`）：只剩诊断性写入（审计链核验）。
+ * 三档的登记表都在下方，改一处语义必须同时改登记表。
+ *
  * 为什么这两处不能照抄另外 8 处的吞错形态：吞掉错误后 `res.json` 照样把 PII
  * 发出去（查看）或回一句「举报已提交」（举报），而那条留痕根本不存在——
  * 「没记成」被包装成「记好了」。实测（本文件 rethrow 两条用例）：
@@ -264,10 +272,68 @@ function scanSensitiveActionSites() {
 }
 
 // 登记表：键名与计数为**实测原样**（4 处全在 authController，改密 handler 占 2 处）。
+// F-03（2026-10-17）：业务状态已改变的三处成功路径改走 services/auditOutbox.js，
+// 此处只剩「改密成功但吊销失败」这一处**诊断性**写入（业务已改、响应是 503 错误），
+// best-effort 仍是正确语义。
 const EXPECTED_SENSITIVE_REGISTRY = {
-  'controllers/authController.js#changePassword': { [GUARD_SWALLOW]: 2 },
-  'controllers/authController.js#revokeSession': { [GUARD_SWALLOW]: 1 },
-  'controllers/authController.js#revokeOtherSessions': { [GUARD_SWALLOW]: 1 },
+  'controllers/authController.js#changePassword': { [GUARD_SWALLOW]: 1 },
+};
+
+/**
+ * 扫描可靠 outbox 的写入点（F-03）。
+ *
+ * 为什么必须单独成闸：`recordDurably` / `recordSensitiveActionDurably` 把「审计落库失败
+ * ⇒ 转 WAL 待重放」这件事收进了一个函数，于是**调用方少写一个 await** 就会让语义失效——
+ * fire-and-forget 时响应先返回，而"审计已持久化"这个前提根本没成立。这是本次修复里
+ * 唯一一处「看起来对、少一个关键字就退化」的地方，必须由机器看守。
+ *
+ * 定义处（`function recordDurably(`）不算写入点：`enclosingHandler` 会把它们读成
+ * 所在文件，而文件本身不是业务写入点。
+ */
+function scanDurableSites() {
+  const DURABLE = ['recordDurably', 'recordSensitiveActionDurably'];
+  const sites = [];
+  for (const file of listProdFiles()) {
+    const rel = path.relative(SRC_DIR, file).replace(/\\/g, '/');
+    // outbox 自身：内部调用与导出定义不是"业务写入点"
+    if (rel === 'services/auditOutbox.js') continue;
+    const src = fs.readFileSync(file, 'utf8');
+    for (const fn of DURABLE) {
+      const re = new RegExp(`\\b${fn}\\(`, 'g');
+      let m;
+      while ((m = re.exec(src)) !== null) {
+        const lineStart = src.lastIndexOf('\n', m.index - 1) + 1;
+        const before = src.slice(lineStart, m.index);
+        // 注释里的同形写法不算（本仓扫描器的既有口径）
+        if (/^\s*(?:\/\/|\*|\/\*)/.test(before)) continue;
+        // 定义处：`function xxx(` 与 `= xxx(` 之外还有一种——导出对象里的简写
+        if (/function\s+$/.test(before)) continue;
+        sites.push({
+          site: `${rel}#${enclosingHandler(src, m.index)}`,
+          fn,
+          awaited: /await\s+$/.test(before),
+        });
+      }
+    }
+  }
+  return sites;
+}
+
+const EXPECTED_DURABLE_REGISTRY = {
+  'controllers/authController.js#changePassword': { recordSensitiveActionDurably: 1 },
+  'controllers/authController.js#revokeSession': { recordSensitiveActionDurably: 1 },
+  'controllers/authController.js#revokeOtherSessions': { recordSensitiveActionDurably: 1 },
+  'controllers/ipListController.js#addIPEntry': { recordDurably: 1 },
+  'controllers/ipListController.js#removeIPEntry': { recordDurably: 1 },
+  'controllers/mfaController.js#mfaDisable': { recordDurably: 1 },
+  'controllers/mfaController.js#mfaEnable': { recordDurably: 1 },
+  'controllers/mfaController.js#mfaEnroll': { recordDurably: 1 },
+  'controllers/mfaController.js#regenerateRecoveryCodes': { recordDurably: 1 },
+  'controllers/securityController.js#changePasswordSecure': { recordDurably: 1 },
+  'controllers/securityController.js#resetUserMfa': { recordDurably: 1 },
+  'controllers/securityController.js#setLoginCaptchaConfig': { recordDurably: 1 },
+  'controllers/securityController.js#setRegisterCaptchaConfig': { recordDurably: 1 },
+  'controllers/securityController.js#setRegistrationConfig': { recordDurably: 1 },
 };
 
 // ===== 用例 =====
@@ -281,13 +347,6 @@ const EXPECTED_SENSITIVE_REGISTRY = {
 // 键名一律为本轮实测原样（见 zztmpctl/b88red2.txt 的 Received 块），不是推演值。
 const EXPECTED_REGISTRY = {
   'controllers/auditController.js#verifyAuditChainIntegrity': { [GUARD_SWALLOW]: 1 },
-  'controllers/ipListController.js#addIPEntry': { [GUARD_SWALLOW]: 1 },
-  'controllers/ipListController.js#removeIPEntry': { [GUARD_SWALLOW]: 1 },
-  'controllers/securityController.js#changePasswordSecure': { [GUARD_SWALLOW]: 1 },
-  'controllers/securityController.js#resetUserMfa': { [GUARD_SWALLOW]: 1 },
-  'controllers/securityController.js#setLoginCaptchaConfig': { [GUARD_SWALLOW]: 1 },
-  'controllers/securityController.js#setRegisterCaptchaConfig': { [GUARD_SWALLOW]: 1 },
-  'controllers/securityController.js#setRegistrationConfig': { [GUARD_SWALLOW]: 1 },
   'controllers/securityController.js#viewSensitiveData': { [GUARD_RETHROW]: 1 },
   'controllers/securityController.js#reportSuspiciousActivity': { [GUARD_RETHROW]: 1 },
 };
@@ -311,7 +370,7 @@ describe('skipGlobalAudit 手写审计的失败通路', () => {
     // 把一处静默改成吞错，响应会从 500 变成「成功但没留痕」，而"有无兜底"的闸对此全绿。
     const sites = scanSkipGlobalAuditSites();
     expect(tally(sites)).toEqual(EXPECTED_REGISTRY);
-    expect(sites).toHaveLength(10);
+    expect(sites).toHaveLength(3);
   });
 
   test('闸：每一处 recordSensitiveAction 的失败通路必须等于登记表（不設 skipGlobalAudit，故不在上条闸范围内）', () => {
@@ -319,7 +378,27 @@ describe('skipGlobalAudit 手写审计的失败通路', () => {
     // 行为用例（PII 查看 / 安全举报两处）钉住，两处共用同一个 helper ⇒ 判据归一处。
     const sites = scanSensitiveActionSites();
     expect(tally(sites)).toEqual(EXPECTED_SENSITIVE_REGISTRY);
-    expect(sites).toHaveLength(4);
+    expect(sites).toHaveLength(1);
+  });
+
+  test('闸：可靠 outbox 的每一处调用点必须等于登记表（F-03）', () => {
+    const sites = scanDurableSites();
+    const acc = {};
+    for (const { site, fn } of sites) {
+      acc[site] = acc[site] || {};
+      acc[site][fn] = (acc[site][fn] || 0) + 1;
+    }
+    expect(acc).toEqual(EXPECTED_DURABLE_REGISTRY);
+  });
+
+  test('闸：可靠 outbox 的每一处调用点都必须 await（少一个 await 语义就退化）', () => {
+    // 这是 F-03 修复的核心不变量：outbox 的价值是「响应返回前审计已持久化」。
+    // 漏掉 await ⇒ 响应先走、审计在后台补 —— 看起来仍是"成功且记账"，
+    // 但进程恰在此刻崩溃就丢记录，而所有静态检查都会绿。
+    const notAwaited = scanDurableSites()
+      .filter((s) => !s.awaited)
+      .map((s) => `${s.site} (${s.fn})`);
+    expect(notAwaited).toEqual([]);
   });
 
   test('前提自证：recordSensitiveAction 真的不自带兜底（排除它才是放水）', () => {
@@ -386,10 +465,12 @@ describe('skipGlobalAudit 手写审计的失败通路', () => {
     expect(logger.error).not.toHaveBeenCalled();
   });
 
-  test('反向对照：吞错档位不得被误升到重抛（另外 8 处的语义是"结果已达成"）', () => {
+  test('反向对照：吞错档位不得被误升到重抛（剩下的诊断性写入语义是"结果已达成"）', () => {
     // password_changed 一类：业务动作在写审计**之前**已经完成（密码已改），
     // 重抛会把已生效的变更报成失败，客户端重试再改一次 ⇒ 语义更坏。
-    // 这条把"两处用重抛"的边界钉住，防止后来人一刀切改齐 10 处。
+    // F-03 之后这类成功路径已全部改走可靠 outbox（失败 ⇒ 转 WAL 待重放），
+    // 仍留在本登记表里的只剩**诊断性**写入：审计链核验（只读动作）。
+    // 这条把"重抛只属于 PII 查看/安全举报"的边界钉住，防止后来人一刀切改齐。
     const swallowOnly = Object.entries(EXPECTED_REGISTRY).filter(
       ([, guards]) => guards[GUARD_SWALLOW]
     );
@@ -400,6 +481,8 @@ describe('skipGlobalAudit 手写审计的失败通路', () => {
       'controllers/securityController.js#reportSuspiciousActivity',
       'controllers/securityController.js#viewSensitiveData',
     ]);
-    expect(swallowOnly).toHaveLength(8);
+    expect(swallowOnly.map(([k]) => k)).toEqual([
+      'controllers/auditController.js#verifyAuditChainIntegrity',
+    ]);
   });
 });

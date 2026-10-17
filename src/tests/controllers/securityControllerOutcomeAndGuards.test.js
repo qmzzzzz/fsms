@@ -99,11 +99,16 @@ const mockAppendOnlyEnforced = jest.fn(() => true);
 jest.mock('../../models/AuditLog', () => ({
   find: (...args) => mockAuditLogFind(...args),
   create: (...args) => mockAuditLogCreate(...args),
+  // F-03：安全配置/MFA 重置的成功路径改走 services/auditOutbox.js
+  buildSensitiveActionDoc: jest.fn(() => ({ action: 'admin_reset_mfa', category: 'security' })),
   countDocuments: (...args) => mockAuditLogCountDocuments(...args),
   detectAnomalies: (...args) => mockAuditLogDetectAnomalies(...args),
   getUserActivity: (...args) => mockAuditLogGetUserActivity(...args),
   isAppendOnlyEnforced: (...args) => mockAppendOnlyEnforced(...args),
 }));
+
+// F-03：审计落库失败后的补偿通道（生产里 auditBuffer.start() 在 listen 后即启用）。
+// 放在下方那处 auditBuffer mock 里统一提供，见「auditChain / auditMonitor / auditBuffer mock」段。
 
 // SystemConfig mock
 jest.mock('../../models/SystemConfig', () => ({
@@ -216,6 +221,8 @@ jest.mock('../../services/auditMonitor', () => ({
 }));
 jest.mock('../../services/auditBuffer', () => ({
   isWalEnabled: jest.fn(() => true),
+  // F-03：审计落库失败时 outbox 把文档推进这里（WAL 追加 + 内存缓冲）
+  push: jest.fn(),
   // 控制器现在会读丢失指标（compliance.auditLoss）。桩不带 getStats 会让整段
   // compliance 抛 TypeError 落进 catch、静默降级成 `{error}` —— 29 条用例照样绿，
   // 但被测的其实是"降级路径"而不是合规面板（本仓反复踩过的"夹具不忠于生产形状"）。
@@ -500,23 +507,37 @@ describe('changePasswordSecure 分支补齐（委托 authService 后的映射）
     );
   });
 
-  test('审计写入失败不阻断改密结果，但必须可观测（「500 失真」的反面）', async () => {
+  test('审计写入失败 ⇒ 转 WAL 后仍 200，且失败可观测（「500 失真」的反面）', async () => {
     // 2026-09-20（`deliverables/AGENT工作总账与待办-2026-09-21.md` §2.3 审计链与合规留痕）：该站点原为**裸 await** ⇒ 审计写失败时
     // asyncHandler 把异常交给 next ⇒ 客户端收到 500，而密码**已经落库**、缓存已失效
     // ⇒ 「状态已改却报错」：管理员会重试，用户会以为没改成功。
-    // 改为 onAuditWriteFailure 后：业务语义不变（改密确实成功了，200 才诚实），
-    // 但失败必须留痕（error 日志 + audit_write_failed 指标），不再静默、也不再失真。
+    // F-03 之后：落库失败 ⇒ 同一条文档进审计 WAL（Mongo 恢复后重放）⇒ 200 才诚实；
+    // 失败必须留痕（error 日志 + audit_write_failed 指标），不再静默、也不再失真。
     mockChangeUserPassword.mockResolvedValue({ outcome: 'OK', username: 'admin' });
+    const auditBuffer = require('../../services/auditBuffer');
+    auditBuffer.isWalEnabled.mockReturnValue(true);
     mockAuditLogCreate.mockRejectedValueOnce(new Error('audit down'));
     const { req, res, next } = makeCtx({ body: { currentPassword: 'x', newPassword: 'y' } });
     await invoke(changePasswordSecure, req, res, next);
     expect(res.statusCode).toBe(200);
     expect(next).not.toHaveBeenCalled();
+    expect(auditBuffer.push).toHaveBeenCalledTimes(1);
     const logger = require('../../utils/logger');
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('审计写入失败'),
       expect.objectContaining({ auditAction: 'password_changed' })
     );
+  });
+
+  test('审计写入失败且 WAL 不可用 ⇒ 500（没有可靠介质就不许声称已记账，F-03）', async () => {
+    mockChangeUserPassword.mockResolvedValue({ outcome: 'OK', username: 'admin' });
+    const auditBuffer = require('../../services/auditBuffer');
+    auditBuffer.isWalEnabled.mockReturnValue(false);
+    mockAuditLogCreate.mockRejectedValueOnce(new Error('audit down'));
+    const { req, res, next } = makeCtx({ body: { currentPassword: 'x', newPassword: 'y' } });
+    // asyncHandler 在本文件被 mock 成恒等函数 ⇒ 异常直接外抛（生产里由它转给 next ⇒ 500）
+    await expect(invoke(changePasswordSecure, req, res, next)).rejects.toThrow('audit down');
+    expect(auditBuffer.push).not.toHaveBeenCalled();
   });
 });
 

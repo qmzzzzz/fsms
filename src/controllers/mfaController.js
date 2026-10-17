@@ -28,6 +28,13 @@ const {
   verifyTotpFactor,
 } = require('../services/mfaService');
 const metrics = require('../utils/metrics');
+// F-03（2026-10-17）：MFA 状态变更（登记/开启/关闭/恢复码重生成）是**业务状态已改变**
+// 的安全操作，审计必须先持久化（DB 或审计 WAL）才允许回成功。原写法
+// `AuditLog.record(...).catch(() => {})` 里 record 自身已吞错返回 null，
+// 外层 catch 永不触发 ⇒ 落库失败只剩一条 error 日志，客户端照收"已开启"。
+// 失败/拒绝路径（success:false 的 mfa_verify_failed 等）仍用 record：业务状态未改变，
+// best-effort 是正确语义。
+const { recordDurably } = require('../services/auditOutbox');
 
 const getMfaStatus = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user.userId).select('mfaEnabled +mfaRecoveryCodes');
@@ -112,17 +119,21 @@ const regenerateRecoveryCodes = asyncHandler(async (req, res) => {
 
   logger.info('用户重新生成备用恢复码', { username: user.username });
   metrics.incMfaAction('recovery_regenerate');
-  AuditLog.record({
-    action: 'recovery_codes_regenerate',
-    category: 'auth',
-    userId: user._id,
-    username: user.username,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    riskLevel: 'medium',
-    reason: '重新生成 10 个备用恢复码（旧码作废）',
-  }).catch(() => {});
+  // F-03：旧恢复码已作废、新码已落库 ⇒ 审计先持久化再回成功
+  await recordDurably(
+    {
+      action: 'recovery_codes_regenerate',
+      category: 'auth',
+      userId: user._id,
+      username: user.username,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'medium',
+      reason: '重新生成 10 个备用恢复码（旧码作废）',
+    },
+    { auditAction: 'recovery_codes_regenerate', req }
+  );
 
   return ApiResponse.success(res, { recoveryCodes }, '已生成新的备用恢复码，请立即保存');
 });
@@ -164,16 +175,20 @@ const mfaEnroll = asyncHandler(async (req, res) => {
     mfaEnabled: false,
   });
 
-  AuditLog.record({
-    action: 'mfa_enroll',
-    category: 'auth',
-    userId: user._id,
-    username: user.username,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    reason: '生成两步验证密钥（待确认）',
-  }).catch(() => {});
+  // F-03：待确认密钥已落库 ⇒ 审计先持久化再回成功
+  await recordDurably(
+    {
+      action: 'mfa_enroll',
+      category: 'auth',
+      userId: user._id,
+      username: user.username,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+      reason: '生成两步验证密钥（待确认）',
+    },
+    { auditAction: 'mfa_enroll', req }
+  );
 
   return ApiResponse.success(
     res,
@@ -227,17 +242,21 @@ const mfaEnable = asyncHandler(async (req, res) => {
 
   logger.info('用户开启 MFA 并生成备用恢复码', { username: user.username });
   metrics.incMfaAction('enable');
-  AuditLog.record({
-    action: 'mfa_enable',
-    category: 'auth',
-    userId: user._id,
-    username: user.username,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    riskLevel: 'medium',
-    reason: '开启两步验证并生成 10 个备用恢复码',
-  }).catch(() => {});
+  // F-03：MFA 已开启 ⇒ 审计先持久化再回成功
+  await recordDurably(
+    {
+      action: 'mfa_enable',
+      category: 'auth',
+      userId: user._id,
+      username: user.username,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'medium',
+      reason: '开启两步验证并生成 10 个备用恢复码',
+    },
+    { auditAction: 'mfa_enable', req }
+  );
 
   return ApiResponse.success(
     res,
@@ -359,18 +378,22 @@ const mfaDisable = asyncHandler(async (req, res) => {
 
   logger.warn('用户关闭 MFA', { username: user.username });
   metrics.incMfaAction('disable');
-  AuditLog.record({
-    action: 'mfa_disable',
-    category: 'auth',
-    userId: user._id,
-    username: user.username,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    success: true,
-    riskLevel: 'high',
-    riskFactors: ['mfa_disabled'],
-    reason: '关闭两步验证',
-  }).catch(() => {});
+  // F-03：MFA 已关闭（缓存已失效、立即生效）⇒ 审计先持久化再回成功
+  await recordDurably(
+    {
+      action: 'mfa_disable',
+      category: 'auth',
+      userId: user._id,
+      username: user.username,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'high',
+      riskFactors: ['mfa_disabled'],
+      reason: '关闭两步验证',
+    },
+    { auditAction: 'mfa_disable', req }
+  );
 
   return ApiResponse.success(res, { enabled: false }, '两步验证已关闭');
 });

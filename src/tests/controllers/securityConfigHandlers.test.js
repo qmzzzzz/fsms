@@ -25,10 +25,20 @@ const mockSystemConfig = {
 
 const mockAuditLog = {
   create: jest.fn(() => Promise.resolve({})),
+  // F-03：配置类成功路径改走 services/auditOutbox.js，需要字段构造静态面
+  buildSensitiveActionDoc: jest.fn(() => ({ action: 'registration_enabled', category: 'system' })),
+};
+
+// F-03：审计落库失败后的补偿通道。默认可用（生产里 auditBuffer.start() 在 listen 后即启用），
+// 「WAL 也不可用 ⇒ 500」那条分支由用例单独切换。
+const mockAuditBuffer = {
+  push: jest.fn(),
+  isWalEnabled: jest.fn(() => true),
 };
 
 jest.mock('../../models/SystemConfig', () => mockSystemConfig);
 jest.mock('../../models/AuditLog', () => mockAuditLog);
+jest.mock('../../services/auditBuffer', () => mockAuditBuffer);
 
 // P0-5 回归防护用例需要断言「审计写失败可观测」：logger.error 与 metrics 指标
 const mockLogger = { error: jest.fn(), warn: jest.fn(), info: jest.fn() };
@@ -203,20 +213,34 @@ describe('注册验证码开关配置', () => {
     expect(mockSystemConfig.set).not.toHaveBeenCalled();
   });
 
-  test('审计落库失败不影响开关生效，但必须可观测（P0-5 回归防护）', async () => {
+  test('审计落库失败 ⇒ 转审计 WAL 待重放，开关仍生效且失败可观测（F-03）', async () => {
     // P0-5 修复后 skipGlobalAudit 生效，手写审计即本操作的唯一留痕；
     // 若此处仍为 .catch(() => {}) 静默吞错，则开关变更在审计库中零痕迹。
-    // 本用例锁定：业务仍 200（不阻断），但 error 日志与 audit_write_failed 指标必须被触发。
+    // F-03 之后语义是「先持久化再回成功」：落库失败 ⇒ 同一条文档进审计 WAL
+    // （Mongo 恢复后重放）⇒ 200 才诚实。error 日志与指标照旧必须触发。
+    mockAuditBuffer.isWalEnabled.mockReturnValue(true);
     mockAuditLog.create.mockReturnValue(Promise.reject(new Error('audit down')));
     const { req, res, next } = makeCtx({ registerCaptchaEnabled: true });
     await invoke(setRegisterCaptchaConfig, req, res, next);
     expect(res.statusCode).toBe(200);
     expect(res.payload.data.registerCaptchaEnabled).toBe(true);
+    expect(mockAuditBuffer.push).toHaveBeenCalledTimes(1);
     expect(mockLogger.error).toHaveBeenCalledWith(
       expect.stringContaining('审计写入失败'),
       expect.objectContaining({ auditAction: 'security_config_change' })
     );
     expect(mockIncSecurityAlert).toHaveBeenCalledWith('audit_write_failed', 'high');
+  });
+
+  test('审计落库失败且 WAL 不可用 ⇒ 500（不许假装记账成功，F-03）', async () => {
+    // 这条是上一条的反面：没有可靠介质时，"已留痕"就是假话。
+    // 开关本身已经落库（业务不可回滚），所以这里断言的是**响应诚实**而非业务未生效。
+    mockAuditBuffer.isWalEnabled.mockReturnValue(false);
+    mockAuditLog.create.mockReturnValue(Promise.reject(new Error('audit down')));
+    const { req, res, next } = makeCtx({ registerCaptchaEnabled: true });
+    await invoke(setRegisterCaptchaConfig, req, res, next);
+    expect(next).toHaveBeenCalled();
+    expect(mockAuditBuffer.push).not.toHaveBeenCalled();
   });
 });
 

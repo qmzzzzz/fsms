@@ -44,6 +44,16 @@ jest.mock('../../utils/permissionHelper', () => ({
 jest.mock('../../models/AuditLog', () => ({
   recordSensitiveAction: jest.fn(() => Promise.resolve()),
   record: jest.fn(() => Promise.resolve()),
+  // F-03：成功路径改走 services/auditOutbox.js 的可靠 outbox，它需要
+  // buildSensitiveActionDoc（字段构造）与 create（落库）两个静态面。
+  // 桩透传实参，用例才能断言"落的是哪个 action"。
+  buildSensitiveActionDoc: jest.fn((userId, username, action, category) => ({
+    userId,
+    username,
+    action,
+    category,
+  })),
+  create: jest.fn(() => Promise.resolve()),
 }));
 jest.mock('../../utils/loginCipher', () => ({
   getPublicKeyInfo: jest.fn(() => ({ keyId: 'k1', publicKey: 'PUB' })),
@@ -349,18 +359,21 @@ describe('changePassword outcome 矩阵', () => {
     );
   });
 
-  test('成功：审计落库（fire-and-forget）+ 200', async () => {
+  test('成功：审计先落库（await，不再 fire-and-forget）+ 200', async () => {
+    // F-03：语义从「后台补写审计」升级为「审计已持久化才回成功」——
+    // 落库失败时 outbox 会转 WAL，仍回 200；但**必须 await**，
+    // 否则响应可能先于审计持久化返回（见 skipGlobalAuditWriteFailure 的 await 闸）。
     authService.changeUserPassword.mockResolvedValue({ outcome: 'OK', username: 'alice' });
     const res = makeRes();
     await invoke(controller.changePassword, makeReq(), res);
     expect(res.statusCode).toBe(200);
-    expect(AuditLog.recordSensitiveAction).toHaveBeenCalledWith(
-      'u-1',
-      'alice',
-      'change_password',
-      'auth',
-      expect.anything(),
-      expect.anything()
+    expect(AuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'u-1',
+        username: 'alice',
+        action: 'change_password',
+        category: 'auth',
+      })
     );
   });
 });
@@ -609,7 +622,10 @@ describe('listSessions / revokeSession / revokeOtherSessions', () => {
     expect(sessionService.revokeSession).toHaveBeenCalledWith(
       expect.objectContaining({ sid: 'sid-other', userId: 'u-1', reason: 'user_revoked' })
     );
-    expect(AuditLog.recordSensitiveAction).toHaveBeenCalled();
+    // F-03：改走可靠 outbox ⇒ 断言落在 create 上（action 由 buildSensitiveActionDoc 透传）
+    expect(AuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'session_revoked', category: 'auth' })
+    );
   });
 
   test('revokeOtherSessions：返回吊销计数（当前设备除外）', async () => {

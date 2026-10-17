@@ -26,7 +26,12 @@ jest.mock('../../models/User', () => ({
   findById: jest.fn(() => ({ select: jest.fn() })),
   findByIdAndUpdate: jest.fn(() => Promise.resolve()),
 }));
-jest.mock('../../models/AuditLog', () => ({ record: jest.fn(() => Promise.resolve()) }));
+jest.mock('../../models/AuditLog', () => ({
+  record: jest.fn(() => Promise.resolve()),
+  // F-03：MFA 状态变更成功路径改走 services/auditOutbox.js
+  buildSensitiveActionDoc: jest.fn(() => ({ action: 'mfa_enable', category: 'auth' })),
+  create: jest.fn(() => Promise.resolve()),
+}));
 jest.mock('../../services/mfaService', () => ({
   hashRecoveryCode: jest.fn((c) => `hash:${c}`),
   generateRecoveryCodes: jest.fn(() => ['r1', 'r2']),
