@@ -102,6 +102,19 @@ function scrubOutboundEvent(event) {
 
 function initSentry() {
   if (process.env.SENTRY_DSN) {
+    // F-11：v7 的 `Sentry.Integrations.Http` 在 v8 被 `httpIntegration()` 取代。
+    // 原先直接 `new Sentry.Integrations.Http(...)`，SDK 漂到大版本时是
+    // `TypeError: Sentry.Integrations.Http is not a constructor`——同样看不出是依赖问题。
+    // 这里只在缺失时给出可操作的报错；不降级为"跳过 integrations"（那会让 HTTP 追踪
+    // 静默消失，而 Sentry 面板上看不出少了什么）。
+    const HttpIntegration = Sentry.Integrations && Sentry.Integrations.Http;
+    if (typeof HttpIntegration !== 'function') {
+      throw new Error(
+        '@sentry/node 的 Integrations.Http 不可用：本仓按 v7 的 API 编写，' +
+          'v8+ 需改用 httpIntegration()。请先把 SDK 回到 lockfile 版本（npm ci），' +
+          '或按官方迁移路径改写本文件后再升级依赖。'
+      );
+    }
     Sentry.init({
       dsn: process.env.SENTRY_DSN,
       // 归一值而不是原始值：`Production` / `" production "` 在 Sentry 侧会变成
@@ -112,7 +125,7 @@ function initSentry() {
       // 旧写法 new Sentry.Integrations.AutoSessionTracking() 拿到的是 undefined，
       // 会在配置 SENTRY_DSN 时直接抛 TypeError，导致初始化失败。
       autoSessionTracking: true,
-      integrations: [new Sentry.Integrations.Http({ tracing: true })],
+      integrations: [new HttpIntegration({ tracing: true })],
       beforeSend: scrubOutboundEvent,
     });
     initialized = true;
@@ -126,15 +139,55 @@ function isSentryInitialized() {
   return initialized;
 }
 
+/**
+ * 断言 v7 的 `Sentry.Handlers.<name>` 存在，缺失时**带指引地抛错**（F-11，2026-10-17）。
+ *
+ * 为什么不是"没有就降级成 no-op"：静默降级等于「配了 SENTRY_DSN、事件却一个都不上报」，
+ * 而监控面板上一切正常——这正是本仓反复清理的那类"看起来有防护"的失效形态。
+ * 也不在这里做 v8 兼容层：v8 的 `setupExpressErrorHandler(app)` 需要 app 实例、
+ * 不再返回中间件，语义与 v7 的 `Handlers.*` 不同，硬兼容只会得到一个既不报错也不生效的中间件。
+ *
+ * 缺陷本体（审计 F-11）：`@sentry/node` 的 Handlers API 在 v8 被移除。原先这里直接
+ * `Sentry.Handlers.requestHandler(...)`，SDK 一旦漂到大版本，报错是
+ * `TypeError: Cannot read properties of undefined (reading 'requestHandler')`——
+ * 看不出"是依赖版本问题"，更看不出"该怎么修"，而它只在**配了真实 DSN 的部署上**才暴露。
+ *
+ * 刻意做成"先断言、再原样调用"而不是"取回工厂再调用"：
+ * `sentryOutboundScrub.test.js` 有一条静态门禁按源码形态钉住「不得无参调用
+ * `Handlers.requestHandler()`」（无参 = 走 SDK 的默认全量采集表，会重新打开
+ * cookie/headers/body 的出网面）。把调用点改成 `requireHandlersApi('requestHandler')({...})`
+ * 会让那条门禁失配，而放宽门禁等于削弱它——所以调用形态保持原样，守卫只负责前置断言。
+ */
+function assertHandlersApi(name) {
+  const handlers = Sentry.Handlers;
+  if (handlers && typeof handlers[name] === 'function') return;
+  let installed = '未知';
+  try {
+    installed = require('@sentry/node/package.json').version;
+  } catch {
+    // 取不到版本不影响判据：下面那句指引不依赖具体版本号
+  }
+  throw new Error(
+    `@sentry/node 的 Handlers.${name} 不可用（已安装版本 ${installed}）。` +
+      '本仓按 v7 的 API 编写；若要把 SDK 升到 v8+，必须先按官方迁移路径改写本文件' +
+      '（v8 用 Sentry.expressIntegration() + setupExpressErrorHandler(app)，不再返回中间件），' +
+      '再同步更新 package.json / package-lock.json 与测试——不能只让 npm install 解决漂移。' +
+      '若本机 node_modules 与 lockfile 不一致，先执行 npm ci。'
+  );
+}
+
 function sentryRequestHandler() {
+  assertHandlersApi('requestHandler');
   return Sentry.Handlers.requestHandler({ include: SENTRY_REQUEST_INCLUDE });
 }
 
 function sentryTracingHandler() {
+  assertHandlersApi('tracingHandler');
   return Sentry.Handlers.tracingHandler();
 }
 
 function sentryErrorHandler() {
+  assertHandlersApi('errorHandler');
   return Sentry.Handlers.errorHandler();
 }
 
