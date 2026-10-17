@@ -31,7 +31,12 @@ const path = require('path');
 
 // 判据本体（A2 业务保留期 / A8 RPO-RTO）单独成文件：本文件触到 max-lines 体积棘轮预算，
 // 而 check* 的**声明**必须留在这里（complianceGate.test.js 的 C 用例按源码视图对账）。
-const { businessRetentionVerdict, backupObjectiveVerdict } = require('./complianceVerdicts');
+const {
+  businessRetentionVerdict,
+  backupObjectiveVerdict,
+  siemShippingVerdict,
+  alertProbeVerdict,
+} = require('./complianceVerdicts');
 
 const checks = [];
 let allPassed = true;
@@ -377,28 +382,14 @@ function checkWalFallback() {
   }
 }
 
-// ================= 7. SIEM 转发能力 =================
+// ================= 7. SIEM 转发能力（F-09：未配置 ⇒ notReady，不再是"关闭状态"） =================
+// 判据在 complianceVerdicts.siemShippingVerdict（体积棘轮预算 + 判据/登记分离）。
+// 修前这里内联的是 `passed = !urlConfigured || transportAvailable`：生产完全没接 SIEM
+// 也判绿，detail 只写"关闭状态（不计为缺陷，也不计为已具备）"——于是"没接"与"接好了"
+// 在 allPassed 眼里是同一个结论。现在未配置是 notReady，部署门禁（COMPLIANCE_STRICT=1）会拦。
 function checkShippingTransport() {
-  try {
-    const { HttpShipperTransport } = require('../src/utils/logShipper');
-    const transportAvailable = typeof HttpShipperTransport === 'function';
-    const urlConfigured = !!process.env.LOG_SHIPPING_URL;
-    // 原判据 `passed = transportAvailable` 在 require 成功时恒真 ⇒ 这条检查永远不会红，
-    // 属于"把没验的报成验过"。改成三态：未配置=转发关闭（如实标注，既不算缺陷也不算已具备）；
-    // 已配置且 transport 可用=启用中；已配置但 transport 不可用=配置与实现不符 ⇒ 红。
-    const passed = !urlConfigured || transportAvailable;
-    recordCheck(
-      'SIEM 转发能力 (logShipper)',
-      passed,
-      passed
-        ? urlConfigured
-          ? '已配置 LOG_SHIPPING_URL 且 transport 可用（启用中）'
-          : '未配置 LOG_SHIPPING_URL：SIEM 转发处于关闭状态（不计为缺陷，也不计为已具备）'
-        : '已配置 LOG_SHIPPING_URL，但 HttpShipperTransport 不可用（配置与实现不符）'
-    );
-  } catch (err) {
-    recordCheck('SIEM 转发能力 (logShipper)', false, `检查失败：${err.message}`);
-  }
+  const v = siemShippingVerdict();
+  recordCheck(v.name, v.passed, v.detail, { notReady: v.notReady });
 }
 
 // ================= 8. 告警投递端点就绪度（2026-09-26 审计 Top2） =================
@@ -417,6 +408,19 @@ function checkAlertingDeliveryEndpoint() {
   } catch (err) {
     recordCheck('告警投递端点就绪度 (alertmanager webhook)', false, `检查失败：${err.message}`);
   }
+}
+
+// ================= 8b. 告警投递探针（F-09，2026-10-17） =================
+// 上一项判的是**配置形态**（有没有占位串、是不是明文 http）；这一项判"这条链路
+// 最近一次被实证是什么时候"。**独立登记而不是并进上一项的 detail**：
+// 合并后"配置正确"会把"从没验过"盖过去——那正是修前的形态（allPassed 里
+// "没接"与"接好了"是同一个结论）。一条 check 函数对应一条报告的不变量保持不变。
+//
+// 探针脚本：scripts/alert-delivery-probe.js（投一条明确标注为探针的告警，
+// 记录 correlationId 到 logs/alert-probe.json）；判据：scripts/alertProbeRecord.js。
+function checkAlertDeliveryProbe() {
+  const v = alertProbeVerdict();
+  recordCheck(v.name, v.passed, v.detail, { notReady: v.notReady });
 }
 
 // ================= 执行所有检查 =================
@@ -441,6 +445,7 @@ const COMPLIANCE_CHECKS = [
   checkWalFallback,
   checkShippingTransport,
   checkAlertingDeliveryEndpoint,
+  checkAlertDeliveryProbe,
 ];
 
 /**

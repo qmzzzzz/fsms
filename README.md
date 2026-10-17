@@ -531,6 +531,8 @@ APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
 - [ ] 已修改默认管理员初始密码
 - [ ] 若 `ENABLE_API_DOCS=true`：`DOCS_USERNAME` / `DOCS_PASSWORD` 已设置，且口令 ≥16 字符（文档暴露全部接口契约与权限编码）
 - [ ] `deployment/observability/alertmanager.yml` 的通知渠道已注入真实入口——`docker-compose.yml` 直接挂载仓库内这份文件，而仓库版本是**占位 URL**，照抄上线等于 critical 告警全部发往 `hooks.example.com`（告警静默丢失，监控页面却一切正常）。`scripts/deploy.js` 的前置校验会以生产口径校验它：占位即拒绝发布，并给出注入方式；确为无告警的演练环境时用 `ALLOW_PLACEHOLDER_ALERT_WEBHOOK=true` 显式豁免（那等于书面承认本次发布后无人会被叫醒）
+- [ ] **告警链路已实证**：`node scripts/alert-delivery-probe.js` 投递成功，且已按 correlationId 在接收端核对后 `--ack` 补记。配置里有 URL 不等于通道能通——一个失效的 access_token 在所有静态判据里与健康通道长得一模一样
+- [ ] **SIEM 转发已接入**（或书面豁免）：`LOG_SHIPPING_URL` 未配置时审计日志只有本地副本，进程崩溃/磁盘写满即失去外部证据。无 SIEM 的部署用 `ALLOW_UNCONFIGURED_LOG_SHIPPING=true` 显式豁免，并在合规报告里留痕
 - [ ] 已在反向代理层启用 HTTPS 并下发 HSTS（见下节）
 
 ## 传输层安全（HTTPS / HSTS）
@@ -557,6 +559,22 @@ CSP 由 `src/middleware/security.js` 统一下发，Trusted Types 分两档：
 - `deployment/observability/prometheus.yml`：Prometheus 抓取配置，直连后端 `app:3000` 的 `/metrics`（该端点在 Nginx 层按 allow 列表限流，不对公网暴露）。
 - `deployment/observability/alert-rules.yml`：13 条内置告警，分 5 组——可用性（`BackendDown` 抓取失败、`HighErrorRate` 5xx >5%）、延迟（`HighP95Latency` P95 >1s）、安全（`SecurityAlertBurst` 安全告警突增、`SecurityFailOpenSustained` fail-open 降级持续 10 分钟未恢复）、自监控（`MetricsSeriesTruncated` 指标序列触顶丢弃、`AuditRecordsDropped` 审计记录落库前丢弃）、运行时（`MongoUnavailable`、`ReadinessProbeMissing`、`DiskSpaceLow`、`DiskProbeFailing`、`LogShipperDeliveryFailing`、`LogShipperDroppingLines`）。阈值为保守初值，待压测基线落地后收紧；每条规则的失效语义与处置见规则文件内的注释。
 - `deployment/observability/alertmanager.yml`：告警触达链路的路由中枢，按 `severity` 分发（critical 即时通道 30 分钟重复提醒，warning 低优先级通道 4 小时），并按实例维度抑制同源重复告警。仓库内为**占位配置**，通知渠道（webhook/SMTP）按文件头注释以私有副本或模板渲染注入，敏感值不入库。两道闸门盯住"忘了注入"：部署路径由 `scripts/deploy.js` 的前置校验（占位即拒绝发布，可用 `ALERTMANAGER_CONFIG_PATH` 指向独立挂载的真实配置）；合规检查路径由 `ALERT_WEBHOOK_CHECK=production node scripts/compliance-check.js` 人工/上线前触发（CI 默认不设该变量，因为仓库模板本身必须是占位）。
+- **告警投递探针（F-09）**：上面两道闸门只判"配置里还有没有占位串"，判不出"URL 写对了但 access_token 已失效"。探针补这一环：
+
+  ```bash
+  # 投一条明确标注为探针的告警（不会进业务数据），记录写入 logs/alert-probe.json
+  node scripts/alert-delivery-probe.js                    # 默认 http://127.0.0.1:9093
+  node scripts/alert-delivery-probe.js --url http://127.0.0.1:9093 --out logs/alert-probe.json
+  # 按返回的 correlationId 到接收端核对后，补记人工确认（不重发）
+  node scripts/alert-delivery-probe.js --ack 值班-张三
+  ```
+
+  合规检查的第 8b 项读这份记录：从未跑过 / 超过 7 天 / 投递失败 / 入队但未人工核对，分别是
+  `missing` / `stale` / `failed` / `queued-unacked`。**入队成功 ≠ 有人收到**——探针只能证明
+  Alertmanager 接受写入且匹配到了 receiver，证明不了钉钉/企微那条 webhook 真的送到了群里，
+  所以"未人工核对"只算"证据不足"（notReady），不算"链路坏了"（红）。
+  部署门禁（`COMPLIANCE_STRICT=1 node scripts/compliance-check.js`）会因 notReady 阻断发布。
+
 - `deployment/observability/grafana/`：`datasources/` 与 `dashboards/` 由 Grafana provisioning 在容器启动时自动装载，无需界面手配。
 
 ## 常见问题

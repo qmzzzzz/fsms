@@ -160,4 +160,80 @@ function backupObjectiveVerdict() {
   };
 }
 
-module.exports = { businessRetentionVerdict, backupObjectiveVerdict };
+/**
+ * SIEM 转发就绪度（F-09，2026-10-17）。
+ *
+ * 【修前的判据】`passed = !urlConfigured || transportAvailable`，detail 写
+ * 「未配置 LOG_SHIPPING_URL：SIEM 转发处于关闭状态（不计为缺陷，也不计为已具备）」。
+ * 结果是：生产环境完全没接 SIEM，这条检查**依然判绿**，而审计日志只落在本地文件与
+ * 容器日志里——磁盘写满或进程崩溃即失去外部副本，且没有任何信号。
+ *
+ * 【修后】未配置 ⇒ passed 仍为 true（仓库态/开发态没 SIEM 是正常的），但 **notReady=true**。
+ * 部署门禁（COMPLIANCE_STRICT=1）读 notReady 会阻断；仓库态只打印"⚠ 未就绪"。
+ * 审计原文要求的是"P1 阻断或明确的书面豁免"——豁免口是 ALLOW_UNCONFIGURED_LOG_SHIPPING=true，
+ * 豁免时仍保留 notReady（写进报告留痕），只是不再阻断发布。
+ *
+ * @returns {{name: string, passed: boolean, detail: string, notReady: boolean}}
+ */
+function siemShippingVerdict() {
+  const { evaluateSiemShipping } = require('./alertProbeRecord');
+  let transportAvailable = false;
+  try {
+    const { HttpShipperTransport } = require('../src/utils/logShipper');
+    transportAvailable = typeof HttpShipperTransport === 'function';
+  } catch {
+    // 模块加载失败按"transport 不可用"处理：此时若已配 URL，就是配置与实现不符（判红）
+    transportAvailable = false;
+  }
+  const v = evaluateSiemShipping({
+    urlConfigured: !!process.env.LOG_SHIPPING_URL,
+    transportAvailable,
+    allowUnconfigured: (process.env.ALLOW_UNCONFIGURED_LOG_SHIPPING || '').trim() === 'true',
+  });
+  return { name: 'SIEM 转发能力 (logShipper)', passed: v.passed, detail: v.detail, notReady: v.notReady };
+}
+
+/**
+ * 告警投递探针（F-09，2026-10-17）—— 「配置对不对」与「通道能不能通」是两件事。
+ *
+ * 第 8 项（`evaluateAlertingDelivery`）判的是**配置形态**：有没有占位串、是不是明文 http。
+ * 它判不出"URL 写对了但 access_token 已失效"。本判据读 `scripts/alert-delivery-probe.js`
+ * 留下的记录，回答"这条链路最近一次被实证是什么时候"。
+ *
+ * 三档映射（判据本体在 scripts/alertProbeRecord.js）：
+ *   - `ok`                              ⇒ passed=true,  notReady=false
+ *   - `missing` / `stale` / `queued-unacked` ⇒ passed=true,  notReady=true（证据不足）
+ *   - `failed` / `invalid`              ⇒ passed=false, notReady=true（链路坏了/记录坏了）
+ * 中间那档刻意不判红：从未跑过探针不等于"告警发不出去"，把它判红会让门禁在
+ * 每个干净 checkout 上红，最后必然被绕过。但它是 notReady——部署门禁会拦。
+ *
+ * @param {{recordPath?: string}} [opts]
+ * @returns {{name: string, passed: boolean, detail: string, notReady: boolean}}
+ */
+function alertProbeVerdict({ recordPath } = {}) {
+  const fs = require('fs');
+  const path = require('path');
+  const { evaluateProbeRecord, PROBE_WINDOW_HOURS } = require('./alertProbeRecord');
+  const file = recordPath || path.join(__dirname, '..', 'logs', 'alert-probe.json');
+  let record = null;
+  try {
+    record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    record = null; // 文件不存在/损坏都归入 missing/invalid，由判据给出具体文案
+  }
+  const v = evaluateProbeRecord({ record });
+  const hardFail = v.state === 'failed' || v.state === 'invalid';
+  return {
+    name: '告警投递探针 (alertmanager)',
+    passed: !hardFail,
+    detail: `${v.detail}（窗口 ${PROBE_WINDOW_HOURS}h，记录：${path.relative(path.join(__dirname, '..'), file)}）`,
+    notReady: v.state !== 'ok',
+  };
+}
+
+module.exports = {
+  businessRetentionVerdict,
+  backupObjectiveVerdict,
+  siemShippingVerdict,
+  alertProbeVerdict,
+};

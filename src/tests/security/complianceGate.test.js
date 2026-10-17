@@ -243,13 +243,16 @@ describe('合规门禁 · 登记项必须真跑过（F-164）', () => {
     expect(faked).toContain('checkFakeInComment'); // 原文里确实在场——只有视图能排除它
   });
 
-  it('D 钉住清单：十项合规要求逐项在场（整条连函数一起被删时 C 会静默放行）', () => {
+  it('D 钉住清单：十一项合规要求逐项在场（整条连函数一起被删时 C 会静默放行）', () => {
     // 与 C 互补：C 是"两边一致"，删掉一个检查器会同时删掉两边 ⇒ C 仍绿；
-    // 这里硬写十条名字，删任何一条都要先在这里留痕。顺序无关（故两侧都 sort）。
+    // 这里硬写十一条名字，删任何一条都要先在这里留痕。顺序无关（故两侧都 sort）。
     // 2026-10-16（A2）新增 checkBusinessRetention：业务数据保留期的声明与
     // "配置被静默修正即转红"判据，与 checkRetention 同一纪律、对象是业务集合。
     // 2026-10-16（A8）新增 checkBackupObjectives：RPO/RTO 与备份频率的对齐
     // （"声明 RPO 优于备份频率"即不可能兑现的承诺），未声明时显式说明待业务口径。
+    // 2026-10-17（F-09）新增 checkAlertDeliveryProbe：告警投递的**实证**（探针记录），
+    // 与 checkAlertingDeliveryEndpoint 的**配置形态**分开登记——合并后"配置正确"
+    // 会把"从没验过"盖过去，那正是修前的形态。
     expect(COMPLIANCE_CHECKS.map((f) => f.name).sort()).toEqual(
       [
         'checkRetention',
@@ -262,6 +265,7 @@ describe('合规门禁 · 登记项必须真跑过（F-164）', () => {
         'checkWalFallback',
         'checkShippingTransport',
         'checkAlertingDeliveryEndpoint',
+        'checkAlertDeliveryProbe',
       ].sort()
     );
   });
