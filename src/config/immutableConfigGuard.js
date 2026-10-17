@@ -32,6 +32,10 @@
  * 因为修复它不需要服务先跑起来。
  */
 
+// 惰性取环境判据：本模块由 legacyCbcGuard 在运行时 require，而 validate.js 顶层
+// 已 require legacyCbcGuard——顶层互 require 会在加载期拿到半成品导出。
+const isProductionSemantics = () => require('./validate').requiresProductionSemantics();
+
 /**
  * 需要同时计入安全告警面的项。
  *
@@ -182,7 +186,12 @@ function collectInvariantWarnings() {
   // 只在生产环境判：开发机/CI 保留 PII_ROTATION_OLD_AES_KEY 做演练是正常的
   // （validate.js 的 collectProductionWarnings 正是生产专属路径，但本函数是导出
   // API，测试与其他调用方可能直接调它，故这里**自己判一次**而不依赖调用方）。
-  if (process.env.NODE_ENV === 'production' && hasPiiOldKeyLingering()) {
+  //
+  // F-04（2026-10-17）：判据从 `process.env.NODE_ENV === 'production'` 改为
+  // `requiresProductionSemantics()`。字面量比较在 `NODE_ENV=prod` / `live` 下为 false，
+  // 而 validate.js 已按生产办（弱密钥/ALLOWED_HOSTS/REDIS_URL/TLS 全闸）——
+  // 于是"生产体检通过"的同时，PII 旧密钥残留这条告警静默不出现。
+  if (isProductionSemantics() && hasPiiOldKeyLingering()) {
     if (SECURITY_RELEVANT.has('pii_rotation_old_key_lingering')) {
       try {
         require('../utils/metrics').incSecurityAlert('pii_rotation_old_key_lingering', 'medium');
@@ -195,7 +204,7 @@ function collectInvariantWarnings() {
 
   // 同样只在生产环境判：开发机/CI 的库里有 v1 行是正常的（夹具由 encryptPii 不带
   // AAD 上下文产生），每次启动都推会变成纯噪声。
-  if (process.env.NODE_ENV === 'production' && isPiiEncryptionInUse()) {
+  if (isProductionSemantics() && isPiiEncryptionInUse()) {
     if (SECURITY_RELEVANT.has(PII_V1_ALERT)) {
       try {
         require('../utils/metrics').incSecurityAlert(PII_V1_ALERT, 'medium');

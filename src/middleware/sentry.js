@@ -1,4 +1,9 @@
 const Sentry = require('@sentry/node');
+// F-04（2026-10-17）：环境语义只能有一个来源。`process.env.NODE_ENV === 'production'`
+// 会让 `NODE_ENV=prod` / `live`（validate.js 按生产办、生产硬闸全开）在 Sentry 侧
+// 落到开发分支：采样率 1.0 而非 0.1，配额被测试期流量吃掉，且事件 environment 字段
+// 与真实环境不一致（按 environment 过滤的告警规则会漏）。
+const { requiresProductionSemantics, normalizeNodeEnv } = require('../config/validate');
 
 let initialized = false;
 
@@ -99,8 +104,10 @@ function initSentry() {
   if (process.env.SENTRY_DSN) {
     Sentry.init({
       dsn: process.env.SENTRY_DSN,
-      environment: process.env.NODE_ENV || 'development',
-      tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.1 : 1.0,
+      // 归一值而不是原始值：`Production` / `" production "` 在 Sentry 侧会变成
+      // 两个不同 environment，按环境聚合与告警过滤都失效。
+      environment: normalizeNodeEnv(),
+      tracesSampleRate: requiresProductionSemantics() ? 0.1 : 1.0,
       // v7 起 AutoSessionTracking 不再是 Sentry.Integrations 的成员，改为 init 选项。
       // 旧写法 new Sentry.Integrations.AutoSessionTracking() 拿到的是 undefined，
       // 会在配置 SENTRY_DSN 时直接抛 TypeError，导致初始化失败。

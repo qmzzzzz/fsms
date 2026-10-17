@@ -403,7 +403,11 @@ const startServer = async () => {
       logger.info(`WebSocket 地址：${wsScheme}://localhost:${PORT}`);
       logger.info(`================================`);
 
-      if (config.nodeEnv === 'production') {
+      // F-04（2026-10-17）：用归一判据而不是 `config.nodeEnv === 'production'`。
+      // `config.nodeEnv` 是 normalizeNodeEnv() 的**归一值**（`prod` 仍是 `prod`，
+      // 不会变成 `production`），字面量比较会让 `NODE_ENV=prod` 的生产部署
+      // 在启动日志里看不到这条提醒——而同一进程的生产硬闸已经全开。
+      if (require('./config/validate').requiresProductionSemantics()) {
         logger.warn('生产环境运行中，请确保已配置强密钥和 CORS 白名单！');
       }
     });

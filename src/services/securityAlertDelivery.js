@@ -5,12 +5,16 @@
 
 const logger = require('../utils/logger');
 const { incSecurityAlert } = require('../utils/metrics');
+// F-04（2026-10-17）：生产判定必须与 validate.js 的归一判据同源。
+// 用字面量比较时 `NODE_ENV=prod`（生产硬闸全开）在这条告警里被当成开发环境 ⇒
+// 「webhook 已配置但没设 allowlist」这条最重要的生产告警**一声不响**。
+const { requiresProductionSemantics } = require('../config/validate');
 
 const MAX_ACTIVE_DELIVERIES = Math.max(1, Number(process.env.SECURITY_ALERT_MAX_CONCURRENT) || 5);
 let activeDeliveries = 0;
 
 if (
-  process.env.NODE_ENV === 'production' &&
+  requiresProductionSemantics() &&
   process.env.SECURITY_ALERT_WEBHOOK &&
   !process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST
 ) {
