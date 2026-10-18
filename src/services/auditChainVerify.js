@@ -110,6 +110,241 @@ const HARD_MAX_RECORDS = 200000;
 // 断裂样本上限（响应体大小保护）
 const MAX_SAMPLES = 20;
 
+// 单批让出的条数（见 verifyAuditChain 循环内的说明）
+const YIELD_EVERY = 2000;
+
+/** 断裂/缺口样本的统一形状（_id 转字符串：样本会进 JSON 响应体） */
+const sampleOf = (doc, index, type, extra = {}) => ({
+  _id: String(doc._id),
+  index,
+  type,
+  ...extra,
+  action: doc.action,
+  timestamp: doc.timestamp,
+});
+
+/**
+ * 扫描状态：计数、样本、链接窗口与两个游标。一个可变对象串起下面全部具名步骤。
+ *
+ * 为什么不是"每步返回新状态"的纯函数：本循环是千万级记录的纯 CPU 路径，
+ * 每条约 3 次分支都要复制一个含 Set/Map/数组的状态对象，代价全在分配上。
+ * 可变状态 + 单一写入点（pushBreak / countUnattestableGap / rememberHash）换来的是
+ * 「谁改了计数」只有三处可查，这是本文件能保持可维护的实际理由。
+ */
+const newChainState = () => ({
+  byType: {
+    hash_mismatch: 0,
+    hmac_missing: 0,
+    hmac_mismatch: 0,
+    chain_break: 0,
+    // F-184a：同一个父哈希被两条记录认领（链在此处分叉成 DAG）。原判据是成员测试，
+    // 一个父节点挂两个子节点照样通过 ⇒「防篡改」的链接性在最关键的一种形态上是静默的。
+    chain_fork: 0,
+    hash_stripped: 0,
+    // 2026-09-30：带 AuditLog.hashFailure 标记的无哈希记录（auditBuffer 算 hash 抛错后
+    // 照常落库的那批）。与 hash_stripped 数据形态相同，但成因是良性的、且会**持续**产生
+    // ⇒ 单列一类、**不计入 breaks**，否则每轮核验都报断裂，真实篡改告警被常态噪声淹没。
+    // 仍计入告警面：它代表链上有一段无法追认的记录，是完整性缺口的直接信号。
+    hash_compute_failed: 0,
+  },
+  samples: [],
+  breaks: 0,
+  legacy: 0,
+  legacyV2BatchTolerated: 0,
+  hashComputeFailed: 0,
+  hmacChecked: isHmacConfigured(),
+  // 链接窗口：`seen` 判「父在不在窗口内」，`firstChildOf` 判「父是否已被别的孩子认领」
+  // （F-184a 分叉）。两者必须**同生同灭**（见 rememberHash）——原先 forgetOldest 只删
+  // firstChildOf 而 seen 一路涨到整窗，实测同父两子的分叉在父哈希落后 ≥256 条时
+  // **两头都不报**（无 chain_break、无 chain_fork，报告 intact: true），且第二条伪造记录
+  // 会把同胞指认覆盖成第一条伪造记录。诚实链不因此多出断裂：一条链若没有任何断裂，它的
+  // 读入顺序就是串链顺序，每个父哈希恰好落在前 1 个位置上，256 的窗口挡不住它。
+  seen: new Set(),
+  seenOrder: [],
+  firstChildOf: new Map(),
+  // 免检范围严格等于「本窗口的第一条」：它的父记录可能落在窗口之外（maxRecords 截断、
+  // TTL 把头一批删掉）。legacy 段之后的那条**不在**这一档里（recordHashlessRecord 不置
+  // isFirst），见文件头。
+  isFirst: true,
+  // 是否已经见过「带哈希」的记录。用于区分两种形态完全不同的无哈希记录：
+  // 出现在带哈希记录**之前** = 存量 legacy（写入时尚无哈希链），不属篡改；
+  // 出现在**之后** = 完整性无法追认（人为 $unset 灭迹，或算 hash 抛错后仍落库）。
+  seenHashed: false,
+});
+
+/** 记一处断裂：计 breaks + byType + 样本（三者的唯一写入点之一） */
+const pushBreak = (state, sample) => {
+  state.breaks += 1;
+  state.byType[sample.type] = (state.byType[sample.type] || 0) + 1;
+  if (state.samples.length < MAX_SAMPLES) state.samples.push(sample);
+};
+
+/**
+ * 记一处缺口（带 hashFailure 标记的无哈希记录）。
+ *
+ * **不计 breaks**：那是硬篡改信号，良性缺口不该淹没它。但计数与样本都要有，
+ * 否则「链上有段无法追认」在报告里不可见（computeChainVerdict 据此拒绝给出 code 0）。
+ */
+const countUnattestableGap = (state, doc, index) => {
+  state.hashComputeFailed += 1;
+  state.byType.hash_compute_failed += 1;
+  if (state.samples.length < MAX_SAMPLES) {
+    state.samples.push(sampleOf(doc, index, 'hash_compute_failed', { reason: doc.hashFailure }));
+  }
+};
+
+/** 记住一条哈希；超出窗口则淘汰最旧的那条（seen 与 firstChildOf 同步淘汰） */
+const rememberHash = (state, hash) => {
+  state.seen.add(hash);
+  state.seenOrder.push(hash);
+  if (state.seenOrder.length <= LINK_WINDOW_SIZE) return;
+  const oldest = state.seenOrder.shift();
+  state.seen.delete(oldest);
+  state.firstChildOf.delete(oldest);
+};
+
+/**
+ * 清空链接窗口。清空 ≠ 免检：其后那条要不要验链接，取决于"它是不是窗口的第一条"，
+ * 见 isFirst。这里的清空是防御性的——走到 legacy 分支说明还没见过带哈希的记录，
+ * 窗口本来就是空的（变异自检里有一臂专门证它删不掉任何结论）。
+ */
+const resetLinkWindow = (state) => {
+  state.seen.clear();
+  state.seenOrder.length = 0;
+  state.firstChildOf.clear();
+};
+
+/** 链尾 = 窗口里最后记住的那个哈希（空窗口为 null） */
+const tailHashOf = (state) =>
+  state.seenOrder.length ? state.seenOrder[state.seenOrder.length - 1] : null;
+
+/**
+ * 无哈希记录的处置（三档）。
+ *
+ * 出现在带哈希记录**之前** = 存量 legacy（不计断裂），但「其后第一条」不再免检：
+ * 后者的父哈希不是落在窗口外，而是就在它前面那条记录的位置上——而那条没有哈希。
+ * 诚实形态不受影响：链启用时库里读不到任何带哈希的记录，启用后第一条 prevHash 为 null，
+ * 而 prevHash=null 本来就是链首。
+ *
+ * 出现在**之后** = 完整性无法追认：带 hashFailure 标记的是良性 write-side 异常
+ * （单列缺口、不计 breaks），没有标记的按 hash_stripped 计入断裂。两档都**重置窗口且
+ * 不置 isFirst**——抹掉哈希正是为了让自己和后继之间的链接失联，沿用 legacy 的「跳过其后
+ * 第一条」宽容等于替篡改者收尾。父哈希已不存在，后继必然 chain_break，两条一起报才完整。
+ */
+const recordHashlessRecord = (state, doc, index) => {
+  if (!state.seenHashed) {
+    state.legacy += 1;
+    resetLinkWindow(state);
+    state.isFirst = false;
+    return;
+  }
+  if (doc.hashFailure) {
+    countUnattestableGap(state, doc, index);
+  } else {
+    pushBreak(state, sampleOf(doc, index, 'hash_stripped'));
+  }
+  resetLinkWindow(state);
+};
+
+/** v2 批量路径的历史默认值漂移：不是篡改，单独计数不计入 breaks */
+const toleratedByLegacyBatch = (doc, version) =>
+  version === 2 && computeHash(doc.prevHash, canonicalPayloadV2LegacyBatch(doc)) === doc.hash;
+
+/**
+ * 内容层：hash 重算（内容防篡改）+ hmac（密钥防篡改）。hmac 未配置时整层跳过，
+ * 报告里由 hmacChecked 显式声明（无密钥 SHA-256 可被整条链重算）。
+ *
+ * v2 记录额外尝试「批量路径历史口径」：v2 时期 chainBatch 未补 schema 默认值，
+ * riskLevel/riskFactors 落库后被 Mongoose 填充，重算必然失配。这是已知的实现缺陷而非
+ * 篡改，不应计入 breaks 淹没真实告警。v1/v3 不做此宽容：v1 的 payload 不含这两个字段，
+ * v3 已保证算前补齐。
+ */
+const checkContentHash = (state, doc, index) => {
+  const version = doc.hashVersion || 1;
+  if (computeHash(doc.prevHash, canonicalPayload(doc, version)) !== doc.hash) {
+    if (toleratedByLegacyBatch(doc, version)) {
+      state.legacyV2BatchTolerated += 1;
+    } else {
+      pushBreak(state, sampleOf(doc, index, 'hash_mismatch', { hashVersion: version }));
+    }
+  }
+  if (!state.hmacChecked) return;
+  if (!doc.hmac) {
+    pushBreak(state, sampleOf(doc, index, 'hmac_missing'));
+    return;
+  }
+  if (doc.hmac !== computeHmac(doc.hash)) {
+    pushBreak(state, sampleOf(doc, index, 'hmac_mismatch'));
+  }
+};
+
+/**
+ * 链接性层：prevHash=null 是链首（合法）；父不在窗口内 = chain_break（删除检测）；
+ * 父已被别的孩子认领 = chain_fork（分叉检测）。
+ *
+ * 用窗口而非「严格等于上一条的 hash」，是因为 _id 顺序与实际串链顺序存在小幅错位：
+ * AuditLog.create 在构造文档时就分配了 _id，而 auditBuffer 走 insertMany 的批次要等
+ * 2s 定时器才拿到 _id——两者在链锁上的先后可能与 _id 大小相反。这种错位不是完整性问题
+ * （哈希链本身连续），严格逐对比较会产出大量假阳性断链，反而掩盖真实篡改。
+ */
+const checkLinkage = (state, doc, index) => {
+  if (state.isFirst || !doc.prevHash) return;
+  if (!state.seen.has(doc.prevHash)) {
+    pushBreak(state, sampleOf(doc, index, 'chain_break', { actualPrevHash: doc.prevHash }));
+    return;
+  }
+  // 同一个父哈希的第二个孩子 ⇒ 分叉。两条记录自身都算得回来，所以只有这里能看见。
+  if (state.firstChildOf.has(doc.prevHash)) {
+    pushBreak(
+      state,
+      sampleOf(doc, index, 'chain_fork', {
+        parentHash: doc.prevHash,
+        forkedWithId: state.firstChildOf.get(doc.prevHash),
+      })
+    );
+    return;
+  }
+  state.firstChildOf.set(doc.prevHash, String(doc._id));
+};
+
+/** 扫描口径归一：三处默认值 + 预算取整的唯一来源（理由见 verifyAuditChain 的 JSDoc） */
+const normalizeScanOptions = (options) => {
+  // 预算归一：只接受**有限正数**，并向下取整。取整不是洁癖——真库实测小数一律被拒
+  // （文案随 mongod 版本而变：本机报 FailedToParse「Expected an integer: maxTimeMS」，
+  // 测试用的内存 mongod 报「maxTimeMS has non-integral value」），负数报 BadValue。
+  // 两种都是**抛错**形态，若留给调用方传（间隔来自 env，`AUDIT_*_INTERVAL_MS=1.5`
+  // 完全可能）就会让每一轮核验都在服务端失败，而闸门侧看到的是 failures 恒增——
+  // 比没预算更难查。0 / 未设置 / NaN / Infinity / 非数字一律落回"不限"（原行为）。
+  const budget = Number(options.maxTimeMS);
+  const maxRecords = Number(options.maxRecords) || DEFAULT_MAX_RECORDS;
+  return {
+    maxRecords: Math.max(1, Math.min(maxRecords, HARD_MAX_RECORDS)),
+    fromLatest: options.fromLatest !== false,
+    filter: options.filter && Object.keys(options.filter).length > 0 ? options.filter : {},
+    maxTimeMS: Number.isFinite(budget) && budget > 0 ? Math.floor(budget) : 0,
+  };
+};
+
+/** 取窗口：按 _id 取最近（或最早）maxRecords 条，再反转成升序供链接性校验 */
+const fetchChainWindow = async (AuditLog, scan) => {
+  // 预算走 find 的**第三参**而不是链式 `.maxTimeMS()`，三条理由：
+  // ① 与模型侧既有先例同法（models/auditLogQueryStatics.js 的 aggregateWithBudget
+  //    就是「不带预算走单参、带预算走 options 袋」）；
+  // ② 不带预算时必须走**逐字不变**的单参形态：HTTP 接口与离线脚本的调用面、
+  //    以及消费方对 `find` 的既有断言都不该因为一个"默认不生效"的参数而漂移
+  //    （`maxTimeMS: 0` 在服务端本就是"不限"，实测接受，所以发 0 只是多一个签名）；
+  // ③ 第二参是 projection，写成 `find(filter, { maxTimeMS })` 会被当成投影而不是选项，
+  //    是个静默失效的经典坑，故必须 `find(filter, null, { maxTimeMS })` 显式占位。
+  // 实测 mongoose 8.24.1：`find(f, null, {maxTimeMS:2500}).options.maxTimeMS === 2500`，
+  // 与链式 `.maxTimeMS()` 落进同一个 options 袋（到驱动层等价）。
+  const windowOptions = scan.maxTimeMS > 0 ? { maxTimeMS: scan.maxTimeMS } : undefined;
+  const window = await AuditLog.find(scan.filter, null, windowOptions)
+    .sort({ _id: scan.fromLatest ? -1 : 1 })
+    .limit(scan.maxRecords)
+    .lean();
+  return scan.fromLatest ? window.reverse() : window;
+};
+
 /**
  * 校验审计哈希链
  *
@@ -131,278 +366,52 @@ const MAX_SAMPLES = 20;
  * @returns {Promise<Object>} 校验报告
  */
 const verifyAuditChain = async (AuditLog, options = {}) => {
-  const maxRecords = Math.max(
-    1,
-    Math.min(Number(options.maxRecords) || DEFAULT_MAX_RECORDS, HARD_MAX_RECORDS)
-  );
-  const fromLatest = options.fromLatest !== false;
-  const filter = options.filter && Object.keys(options.filter).length > 0 ? options.filter : {};
-  // 预算归一：只接受**有限正数**，并向下取整。
-  // 取整不是洁癖——真库实测小数一律被拒（文案随 mongod 版本而变：本机报
-  // FailedToParse「Expected an integer: maxTimeMS」，测试用的内存 mongod 报
-  // 「maxTimeMS has non-integral value」），负数报 BadValue「value must be >= 0」。
-  // 两种都是**抛错**形态，若留给调用方传（间隔来自 env，`AUDIT_*_INTERVAL_MS=1.5`
-  // 完全可能）就会让每一轮核验都在服务端失败，而闸门侧看到的是 failures 恒增——
-  // 比没预算更难查。0 / 未设置 / NaN / Infinity / 非数字一律落回"不限"（原行为）。
-  const rawBudget = Number(options.maxTimeMS);
-  const maxTimeMS = Number.isFinite(rawBudget) && rawBudget > 0 ? Math.floor(rawBudget) : 0;
-
-  const hmacChecked = isHmacConfigured();
+  const scan = normalizeScanOptions(options);
+  const state = newChainState();
+  const docs = await fetchChainWindow(AuditLog, scan);
 
   let total = 0;
-  let legacy = 0;
-  let breaks = 0;
-  const byType = {
-    hash_mismatch: 0,
-    hmac_missing: 0,
-    hmac_mismatch: 0,
-    chain_break: 0,
-    // F-184a：同一个父哈希被两条记录认领（链在此处分叉成 DAG）。原判据是成员测试，
-    // 一个父节点挂两个子节点照样通过 ⇒ 「防篡改」的链接性在最关键的一种形态上是静默的。
-    chain_fork: 0,
-    hash_stripped: 0,
-    // 2026-09-30：带 AuditLog.hashFailure 标记的无哈希记录（auditBuffer 算 hash 抛错后
-    // 照常落库的那批）。与 hash_stripped 数据形态相同（无 hash、位于带哈希记录之后），
-    // 但成因是良性的、且会**持续**产生 ⇒ 单列一类、**不计入 breaks**，否则每轮核验都
-    // 报断裂，真实篡改告警被常态噪声淹没（M-09「幻影链尾」的同一条演化路径）。
-    // 仍计入告警面：它代表链上有一段无法追认的记录，是完整性缺口的直接信号。
-    hash_compute_failed: 0,
-  };
-  // v2 批量路径的历史默认值漂移：不是篡改，单独计数不计入 breaks
-  let legacyV2BatchTolerated = 0;
-  // hashFailure 标记的无哈希记录数（不计 breaks，但要在报告里可见、可告警）
-  let hashComputeFailed = 0;
-  const samples = [];
-
-  const pushBreak = (sample) => {
-    breaks += 1;
-    byType[sample.type] = (byType[sample.type] || 0) + 1;
-    if (samples.length < MAX_SAMPLES) samples.push(sample);
-  };
-
-  // 取最近 maxRecords 条：先按 _id 降序取窗口，再反转为升序校验
-  // （链接性校验依赖时序，必须升序推进）
-  //
-  // 预算走 find 的**第三参**而不是链式 `.maxTimeMS()`，三条理由：
-  // ① 与模型侧既有先例同法（models/auditLogQueryStatics.js 的 aggregateWithBudget
-  //    就是「不带预算走单参、带预算走 options 袋」）；
-  // ② 不带预算时必须走**逐字不变**的单参形态：HTTP 接口与离线脚本的调用面、
-  //    以及消费方对 `find` 的既有断言都不该因为一个"默认不生效"的参数而漂移
-  //    （`maxTimeMS: 0` 在服务端本就是"不限"，实测接受，所以发 0 只是多一个签名）；
-  // ③ 第二参是 projection，写成 `find(filter, { maxTimeMS })` 会被当成投影而不是选项，
-  //    是个静默失效的经典坑，故必须 `find(filter, null, { maxTimeMS })` 显式占位。
-  // 实测 mongoose 8.24.1：`find(f, null, {maxTimeMS:2500}).options.maxTimeMS === 2500`，
-  // 与链式 `.maxTimeMS()` 落进同一个 options 袋（到驱动层等价）。
-  const windowOptions = maxTimeMS > 0 ? { maxTimeMS } : undefined;
-  const window = await AuditLog.find(filter, null, windowOptions)
-    .sort({ _id: fromLatest ? -1 : 1 })
-    .limit(maxRecords)
-    .lean();
-  const docs = fromLatest ? window.reverse() : window;
-
-  // 近期已见 hash 的滑动窗口（Set 用于命中判断，数组用于按序淘汰）
-  const seen = new Set();
-  const seenOrder = [];
-  /**
-   * F-184a：`prevHash → 第一个认领它的记录`。
-   *
-   * 链接性原本只做**成员测试**（`seen.has(doc.prevHash)`），而分叉的形态恰恰是
-   * "一个父节点挂了两个子节点"：两条记录的 prevHash 都在窗口内（无 chain_break）、
-   * 各自的 hash 也都算得回来（无 hash_mismatch）⇒ 整链其实已经是 DAG，而报告仍然
-   * `intact: true`。分叉不需要攻击者才能造出来：共享链尾写入失败后各实例读到的
-   * 尾不同（见 utils/auditChain 的 advanceChainTail）、锁超时后的僵尸推进、
-   * 或 WAL 重放挑错链尾，都会产出同父两子。
-   * 与 `seen` 同生同灭：淘汰/重置必须同步，否则会拿窗口外的旧子报假分叉。
-   *
-   * 「同生同灭」是**两侧都要淘汰**，不是只有 `firstChildOf`：原先 forgetOldest 只删
-   * `firstChildOf` 而 `seen` 一路涨到整窗，实测同父两子的分叉在父哈希落后 ≥256 条时
-   * **两头都不报**（无 chain_break、无 chain_fork，报告 `intact: true`），且第二条伪造
-   * 记录会把同胞指认覆盖成第一条伪造记录。诚实链不因此多出断裂：一条链若没有任何
-   * 断裂，它的读入顺序就是串链顺序，每个父哈希恰好落在前 1 个位置上，256 的窗口挡不住它。
-   */
-  const firstChildOf = new Map();
-  const forgetOldest = () => {
-    const oldest = seenOrder.shift();
-    if (oldest === undefined) return;
-    seen.delete(oldest);
-    firstChildOf.delete(oldest);
-  };
-  const resetWindow = () => {
-    seen.clear();
-    seenOrder.length = 0;
-    firstChildOf.clear();
-  };
-  const remember = (hash) => {
-    seen.add(hash);
-    seenOrder.push(hash);
-    if (seenOrder.length > LINK_WINDOW_SIZE) forgetOldest();
-  };
-
-  // 免检范围严格等于「本窗口的第一条」：它的父记录可能落在窗口之外。
-  // legacy 段之后的那条不在这一档里（那里置 isFirst=false），见文件头的说明。
-  let isFirst = true;
-  // 是否已经见过「带哈希」的记录。用于区分两种形态完全不同的无哈希记录：
-  // - 出现在带哈希记录**之前**：存量 legacy（写入时尚无哈希链），不属篡改；
-  // - 出现在带哈希记录**之后**：要么有人把 hash/prevHash/hmac 整组 $unset 掉
-  //   （mongoose 中间件拦不住直连驱动/mongosh 的改写），要么哈希计算失败后
-  //   仍落库（见 auditBuffer 的「批次将无哈希落库」分支）。两种情况都意味着
-  //   「这条记录的完整性无法追认」，必须计入断裂而不是被 legacy 吸收。
-  let seenHashed = false;
-
   for (const doc of docs) {
     total += 1;
 
     // 定期让出事件循环：本循环对每条记录做 SHA-256 + 规范 JSON 序列化，是纯 CPU 工作，
     // 不 yield 时整个扫描期间该进程无法服务任何其他请求（心跳/健康检查也会超时）。
-    // 2000 条一批是折中：yield 太频繁会放大调度开销，太稀则单段阻塞仍然过长。
-    if (total % 2000 === 0) {
+    // YIELD_EVERY 条一批是折中：yield 太频繁会放大调度开销，太稀则单段阻塞仍然过长。
+    if (total % YIELD_EVERY === 0) {
       await new Promise((resolve) => setImmediate(resolve));
     }
 
-    // 无 hash 的存量记录：计为 legacy。这里的 resetWindow 是防御性的——走到这条分支说明
-    // 还没见过带哈希的记录，窗口本来就是空的（变异自检里有一臂专门证它删不掉任何结论）。
-    // 清空窗口 ≠ 免检：其后那条要不要验链接，取决于"它是不是窗口的第一条"，见下面 isFirst。
-    if (!doc.hash) {
-      if (seenHashed) {
-        // 2026-09-30：带 hashFailure 标记 ⇒ 归因明确是「算 hash 抛错后照常落库」，
-        // 不是人为抹除。单列计数、**不计 breaks**——但**仍然重置窗口、仍然不置 isFirst**，
-        // 与 hash_stripped 同处理：这段的哈希本来就没了，其后的记录链接必然失联，
-        // 是真实结论而不是噪声（两条一起报才完整）。
-        //
-        // 为什么绕不过这个标记（威胁模型）：能写 hashFailure 的攻击者已经有 DB 写权限，
-        // 那种情况下直接 $unset hash 更省事、更彻底；而本字段**不参与哈希**
-        // （不在 PAYLOAD_FIELDS_V4 里），所以它无法洗白一条被改过内容的记录——
-        // 内容篡改仍由 hash_mismatch 抓。它唯一的作用是把"无哈希"的归因从硬篡改
-        // 降级为待查，且降级后**仍有独立计数与告警**（hashComputeFailed > 0 使
-        // computeChainVerdict 不走「全绿」结论，见该函数）。即攻击者用这个标记能做的
-        // 最坏事情是"把一处篡改告警换成一处缺口告警"，不是"让篡改消失"。
-        if (doc.hashFailure) {
-          hashComputeFailed += 1;
-          byType.hash_compute_failed += 1;
-          if (samples.length < MAX_SAMPLES) {
-            samples.push({
-              _id: String(doc._id),
-              index: total,
-              type: 'hash_compute_failed',
-              reason: doc.hashFailure,
-              action: doc.action,
-              timestamp: doc.timestamp,
-            });
-          }
-        } else {
-          pushBreak({
-            _id: String(doc._id),
-            index: total,
-            type: 'hash_stripped',
-            action: doc.action,
-            timestamp: doc.timestamp,
-          });
-        }
-        // 这里**不**重置 isFirst：抹掉哈希正是为了让自己和后继之间的链接失联，
-        // 沿用 legacy 的「跳过其后第一条」宽容等于替篡改者收尾。父哈希已不存在，
-        // 后继必然 chain_break —— 两条一起报才是完整结论。
-        resetWindow();
-        continue;
-      }
-      legacy += 1;
-      resetWindow();
-      // 「窗口第一条免检」只给窗口的第一条，不给「legacy 段之后的第一条」：
-      // 后者的父哈希不是落在窗口外，而是就在它前面那条记录的位置上——而那条没有哈希。
-      // 诚实形态不受影响：链启用时 getChainTail 在库里读不到任何带哈希的记录，
-      // 启用后的第一条 prevHash 为 null，而 prevHash=null 本来就是链首（见上面的链接检查）。
-      // 原写法在这里置 isFirst=true，把「整窗抹哈希但留最新一条」洗成 intact=true、code=0，
-      // 而「整窗抹光」反而被 nothingHashed 挡住在 code=2 —— 留一条比抹光更好用。
-      isFirst = false;
-      continue;
+    if (doc.hash) {
+      // seenHashed 必须在处理前置位：recordHashlessRecord 靠它区分「链启用前的存量」
+      // 与「启用后被抹掉」，置晚了第一条无哈希记录会被误判成 legacy
+      state.seenHashed = true;
+      checkContentHash(state, doc, total);
+      checkLinkage(state, doc, total);
+      rememberHash(state, doc.hash);
+      state.isFirst = false;
+    } else {
+      recordHashlessRecord(state, doc, total);
     }
-    seenHashed = true;
-
-    const version = doc.hashVersion || 1;
-    const expectedHash = computeHash(doc.prevHash, canonicalPayload(doc, version));
-    if (expectedHash !== doc.hash) {
-      // v2 记录额外尝试「批量路径历史口径」：v2 时期 chainBatch 未补 schema
-      // 默认值，riskLevel/riskFactors 落库后被 Mongoose 填充，重算必然失配。
-      // 这是已知的实现缺陷而非篡改，不应计入 breaks 淹没真实告警。
-      // v1/v3 不做此宽容：v1 的 payload 不含这两个字段，v3 已保证算前补齐。
-      const toleratedByLegacyBatch =
-        version === 2 && computeHash(doc.prevHash, canonicalPayloadV2LegacyBatch(doc)) === doc.hash;
-
-      if (toleratedByLegacyBatch) {
-        legacyV2BatchTolerated += 1;
-      } else {
-        pushBreak({
-          _id: String(doc._id),
-          index: total,
-          type: 'hash_mismatch',
-          hashVersion: version,
-          action: doc.action,
-          timestamp: doc.timestamp,
-        });
-      }
-    }
-
-    if (hmacChecked) {
-      if (!doc.hmac) {
-        pushBreak({ _id: String(doc._id), index: total, type: 'hmac_missing', action: doc.action });
-      } else if (doc.hmac !== computeHmac(doc.hash)) {
-        pushBreak({
-          _id: String(doc._id),
-          index: total,
-          type: 'hmac_mismatch',
-          action: doc.action,
-        });
-      }
-    }
-
-    // 链接性：prevHash=null 是链首，合法
-    if (!isFirst && doc.prevHash) {
-      if (!seen.has(doc.prevHash)) {
-        pushBreak({
-          _id: String(doc._id),
-          index: total,
-          type: 'chain_break',
-          action: doc.action,
-          actualPrevHash: doc.prevHash,
-          timestamp: doc.timestamp,
-        });
-      } else if (firstChildOf.has(doc.prevHash)) {
-        // 同一个父哈希的第二个孩子 ⇒ 分叉。两条记录自身都算得回来，所以只有这里能看见。
-        pushBreak({
-          _id: String(doc._id),
-          index: total,
-          type: 'chain_fork',
-          action: doc.action,
-          parentHash: doc.prevHash,
-          forkedWithId: firstChildOf.get(doc.prevHash),
-          timestamp: doc.timestamp,
-        });
-      } else {
-        firstChildOf.set(doc.prevHash, String(doc._id));
-      }
-    }
-
-    remember(doc.hash);
-    isFirst = false;
   }
 
   return {
-    intact: breaks === 0,
+    intact: state.breaks === 0,
     total,
-    legacy,
-    breaks,
-    byType,
+    legacy: state.legacy,
+    breaks: state.breaks,
+    byType: state.byType,
     // v2 时期批量写入路径的默认值漂移条数（已知实现缺陷，非篡改）。
     // 这些记录的 riskLevel/riskFactors 从未受哈希保护，事后无法追认；
     // 数值应随存量记录过期（TTL）而归零，若持续增长说明仍有 v2 写入路径存活。
-    legacyV2BatchTolerated,
+    legacyV2BatchTolerated: state.legacyV2BatchTolerated,
     // hashFailure 标记的无哈希记录数（auditBuffer 算 hash 失败后落库）。
     // 不计 breaks，但 > 0 表示链上有一段无法追认——消费方必须看得见，
     // 且 computeChainVerdict 据此不让报告拿 code 0（见该函数的 hashComputeFailed 段）。
-    hashComputeFailed,
-    hmacChecked,
-    scanned: { maxRecords, fromLatest, filter },
-    chainTailHash: seenOrder.length ? seenOrder[seenOrder.length - 1] : null,
-    samples,
+    hashComputeFailed: state.hashComputeFailed,
+    hmacChecked: state.hmacChecked,
+    scanned: { maxRecords: scan.maxRecords, fromLatest: scan.fromLatest, filter: scan.filter },
+    chainTailHash: tailHashOf(state),
+    samples: state.samples,
     verifiedAt: new Date().toISOString(),
   };
 };

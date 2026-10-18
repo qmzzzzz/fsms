@@ -398,4 +398,102 @@ describe('auditChainVerify', () => {
       chainTailHash: docs.at(-1).hash,
     });
   });
+
+  // =====================================================================
+  // 三类缺陷同窗的**特征化夹具**（2026-10-18 lint 批 2 拆 verifyAuditChain 前补）
+  //
+  // 为什么需要这一组：拆分前这个函数是一个 167 行、complexity 28 的单体循环，
+  // 「篡改 / 缺口 / 断裂」三类判据彼此交错在同一段里。任何一次"把某段搬进具名函数"
+  // 都可能悄悄改变它们的**先后与相互影响**（最典型的是 remember() 被误挪到链接性
+  // 分支的早退之后 ⇒ 断链之后的窗口不再前进，后继全部连锁误报）。
+  // 现有用例每条只造 2-3 条记录、且只覆盖一类，拆完仍然全绿也说明不了组合行为没变。
+  // 所以这里把三类**放进同一个窗口**，逐字钉住报告。
+  //
+  // 缺口（hash_compute_failed）此前只有判据层（computeChainVerdict）的用例，
+  // 报告层从未被钉过——本组同时补上这个空白。
+  // =====================================================================
+
+  /** 一条「无哈希、但带 hashFailure 标记」的记录：auditBuffer 算 hash 抛错后照常落库的形态 */
+  const hashFailureRow = (previous, reason = 'canonical payload 序列化失败') => {
+    const row = buildValidDoc(previous);
+    delete row.hash;
+    delete row.prevHash;
+    delete row.hmac;
+    delete row.hashVersion;
+    row.hashFailure = reason;
+    return row;
+  };
+
+  test('三类缺陷同窗：篡改计断裂、缺口不计断裂但单独计数、断链各归其类', async () => {
+    const d1 = buildValidDoc(null);
+    const d2 = buildValidDoc(d1);
+    const d3 = buildValidDoc(d2); // 下面改内容 ⇒ hash_mismatch（自身哈希仍自洽于新 prevHash）
+    d3.body = { poisoned: true };
+    const d4 = hashFailureRow(d3); // 缺口：不计 breaks，但重置窗口
+    const d5 = buildValidDoc(d3); // 窗口已被 d4 清空 ⇒ 父哈希找不到 ⇒ chain_break
+
+    const report = await verifyAuditChain(makeAuditLog([d5, d4, d3, d2, d1]), { maxRecords: 5 });
+
+    // 缺口**不计** breaks：breaks 只数「篡改(d3) + 断链(d5)」两条
+    expect(report).toMatchObject({
+      intact: false,
+      total: 5,
+      legacy: 0,
+      breaks: 2,
+      hashComputeFailed: 1,
+      hmacChecked: true,
+      chainTailHash: d5.hash,
+    });
+    // 三类各自计数、互不吞并（缺口那一格若被并进 hash_stripped，breaks 会变成 3）
+    expect(report.byType).toEqual({
+      hash_mismatch: 1,
+      hmac_missing: 0,
+      hmac_mismatch: 0,
+      chain_break: 1,
+      chain_fork: 0,
+      hash_stripped: 0,
+      hash_compute_failed: 1,
+    });
+    // 样本按处理顺序产出，且缺口样本带 reason（归因可读，不是只有一个数字）
+    expect(report.samples.map((s) => [s.index, s.type])).toEqual([
+      [3, 'hash_mismatch'],
+      [4, 'hash_compute_failed'],
+      [5, 'chain_break'],
+    ]);
+    expect(report.samples[1]).toMatchObject({
+      _id: String(d4._id),
+      reason: 'canonical payload 序列化失败',
+    });
+  });
+
+  test('同一条无哈希记录去掉 hashFailure 标记即从「缺口」变回「断裂」——归因不能靠形态猜', async () => {
+    const d1 = buildValidDoc(null);
+    const d2 = buildValidDoc(d1);
+    const stripped = buildValidDoc(d2);
+    delete stripped.hash;
+    delete stripped.prevHash;
+    delete stripped.hmac;
+    delete stripped.hashVersion;
+    // 刻意**不**写 hashFailure：数据形态与上一条完全相同，只有这一个字段不同
+
+    const report = await verifyAuditChain(makeAuditLog([stripped, d2, d1]), { maxRecords: 3 });
+
+    expect(report).toMatchObject({ intact: false, total: 3, breaks: 1, hashComputeFailed: 0 });
+    expect(report.byType.hash_stripped).toBe(1);
+    expect(report.byType.hash_compute_failed).toBe(0);
+  });
+
+  test('缺口出现在 legacy 段里不算缺口：seenHashed 未置位时一律按存量 legacy 处理', async () => {
+    // hashFailure 标记是"链启用后算 hash 抛错"的归因，链启用**前**没有 hash 可言，
+    // 也就不存在"算失败"——带标记也只能算存量。这条钉的是判据的分档边界。
+    const legacyMarked = hashFailureRow(null, '不该被当成缺口');
+    const d1 = buildValidDoc(null);
+    const d2 = buildValidDoc(d1);
+
+    const report = await verifyAuditChain(makeAuditLog([d2, d1, legacyMarked]), { maxRecords: 3 });
+
+    expect(report).toMatchObject({ intact: true, total: 3, legacy: 1, breaks: 0, hashComputeFailed: 0 });
+    expect(report.byType.hash_compute_failed).toBe(0);
+    expect(report.samples).toEqual([]);
+  });
 });
