@@ -228,28 +228,32 @@ describe('套件级 mongoose 收尾：连了必关，关不能是空壳', () => 
     const cfg = read('jest.config.js');
     expect(globalClosers(cfg)).toEqual([]);
     // 控制组①：加了键、指向一个不关连接的文件 ⇒ 仍然放行（本条不拦这个键本身）
-    fs.writeFileSync(
-      path.join(ROOT, 'src/tests/ci/__ctrl_noop.js'),
-      'module.exports = async () => {};\n'
-    );
+    //
+    // 夹具放在 `.jesttmp/`（.gitignore 里）而**不是** `src/tests/ci/`：后者被
+    // `testHookConsumerGate` 的 `listJsRecursive(src)` 扫，两个套件并行时会出现
+    // 「A 列出文件 → B 删掉 → A 去读」的窗口，实测报
+    // `ENOENT ... src/tests/ci/__ctrl_noop.js`，且报错栈落在**另一个套件**里
+    // （看起来像那边的解析出错，实际是本套件在别人的扫描目录里种临时文件）。
+    // 判据只关心「配置文本里的相对路径能否被解析」，路径选哪儿不影响鉴别力。
+    const ctrlDir = path.join(ROOT, '.jesttmp');
+    fs.mkdirSync(ctrlDir, { recursive: true });
+    const noopRel = '.jesttmp/__ctrl_noop.js';
+    const closeRel = '.jesttmp/__ctrl_close.js';
+    fs.writeFileSync(path.join(ROOT, noopRel), 'module.exports = async () => {};\n');
     try {
-      expect(
-        globalClosers("setupFilesAfterEnv: ['<rootDir>/src/tests/ci/__ctrl_noop.js'],")
-      ).toEqual([]);
+      expect(globalClosers(`setupFilesAfterEnv: ['<rootDir>/${noopRel}'],`)).toEqual([]);
     } finally {
-      fs.unlinkSync(path.join(ROOT, 'src/tests/ci/__ctrl_noop.js'));
+      fs.unlinkSync(path.join(ROOT, noopRel));
     }
     // 控制组②： planted 那个"在 setup 里关连接"的修法 ⇒ 必须红
     fs.writeFileSync(
-      path.join(ROOT, 'src/tests/ci/__ctrl_close.js'),
+      path.join(ROOT, closeRel),
       "const mongoose = require('mongoose');\nafterAll(async () => mongoose.connection.close());\n"
     );
     try {
-      expect(
-        globalClosers("setupFilesAfterEnv: ['<rootDir>/src/tests/ci/__ctrl_close.js'],")
-      ).toEqual(['src/tests/ci/__ctrl_close.js']);
+      expect(globalClosers(`setupFilesAfterEnv: ['<rootDir>/${closeRel}'],`)).toEqual([closeRel]);
     } finally {
-      fs.unlinkSync(path.join(ROOT, 'src/tests/ci/__ctrl_close.js'));
+      fs.unlinkSync(path.join(ROOT, closeRel));
     }
   });
 
