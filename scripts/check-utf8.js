@@ -91,7 +91,12 @@ const rootFiles = [
  * 仍然不用 `git ls-files` 做扫描集：那会让门禁依赖 git 可用（镜像构建阶段、
  * 导出源码包的场景都没有 .git），把"编码门禁"变成"git 是否可用"的判据。
  */
-const SKIP_DIR_PATTERN = /^(?:node_modules|\.git|dist(?:$|-)|coverage(?:$|-))/;
+// `\.git` 原先没有右边界 ⇒ 同时命中 `.gitignore` / `.gitattributes` / `.gitleaksignore`
+// 三个**根目录文本文件**（实测：walk(REPO) 里一个都看不到，而 rootFiles 清单里明明
+// 三条都在——后者走的是「直接 push」而非 walk，所以编码门禁不受影响，但任何基于
+// walk 的扫描都会静默漏掉它们；F-14 的引用台账正是因此在 `.gitignore:135` 上瞎了一次）。
+// 加 `$` 只放行这三个文件名，`.git` 目录本身仍被跳过。
+const SKIP_DIR_PATTERN = /^(?:node_modules|\.git$|dist(?:$|-)|coverage(?:$|-))/;
 
 /** 目录名是否属于生成物/依赖目录（导出以便用例直接驱动，不靠"跑一遍看输出"） */
 const isSkippedDirName = (name) => SKIP_DIR_PATTERN.test(name);

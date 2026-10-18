@@ -1,10 +1,21 @@
 /**
  * 审计哈希链完整性校验服务
  *
- * 单一实现，供三方复用：运维脚本（scripts/verify-audit-chain.js 与
- * scripts/resign-audit-chain-v3.js 的改写前/后核验）、管理接口
- * GET /api/security/audit-logs/verify（见 controllers/auditController.verifyAuditChainIntegrity）。
- * 没有"周期性自检"这一方：链核验至今只在被调用时执行，未接入任何定时任务。
+ * 单一实现，供**四个**调用方复用：
+ *   1. 运维脚本 scripts/verify-audit-chain.js（人工核查）；
+ *   2. 运维脚本 scripts/resign-audit-chain-v3.js（改写前/后核验）；
+ *   3. 管理接口 GET /api/security/audit-logs/verify
+ *      （见 controllers/auditController.verifyAuditChainIntegrity）；
+ *   4. 周期自检 services/auditChainMonitor.js（`auditChainMonitor.start()`，
+ *      在 src/index.js 的启动流程里注册，窗口默认最近 2000 条）。
+ *
+ * 第 4 条是 2026-09-30 补的：此前链核验**只在被调用时**发生，"篡改会留痕"成立
+ * 而"痕迹会被发现"不成立，于是把发现从人工动作变成自动循环。本文件此前的注释
+ * 写的是"没有周期性自检这一方"，在 monitor 上线后已成反向描述（F-14，2026-10-17
+ * 审计指出：过期注释会让维护者误判系统没有自动检测）。
+ *
+ * 注意 monitor 只**读**链、不写链：它调用本文件的 verifyAuditChain 拿报告，
+ * 断裂/缺口交给 securityAlert 告警；任何补链/改写动作仍只能走上面的脚本。
  *
  * 三层校验，强度递减但互补：
  *

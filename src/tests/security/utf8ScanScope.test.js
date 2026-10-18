@@ -33,6 +33,19 @@ describe('F-05 生成物目录必须跳过', () => {
     expect(isSkippedDirName(name)).toBe(true);
   });
 
+  test.each([
+    ['.gitignore', '根目录文本文件，不是 .git 目录'],
+    ['.gitattributes', '同上'],
+    ['.gitleaksignore', '同上'],
+  ])('%s（%s）不被误跳', (name, why) => {
+    // 回归面：`\.git` 曾无右边界，把这三个文件一并吞掉。编码门禁没受影响（rootFiles
+    // 走直接 push），但任何基于 walk 的扫描都看不见它们——F-14 的引用台账因此在
+    // `.gitignore` 那条「取回方式见 deliverables/…」上瞎了一次，直到有人对着
+    // 「台账里明明登记了、却说没人引用」的红讯去查才暴露。
+    expect({ name, why: Boolean(why) }).toEqual({ name, why: true });
+    expect(isSkippedDirName(name)).toBe(false);
+  });
+
   test.each(['distribution', 'distance', 'dist-tool', 'src', 'docs', 'web-admin'])(
     '同前缀的源码目录不被误跳：%s',
     (name) => {
