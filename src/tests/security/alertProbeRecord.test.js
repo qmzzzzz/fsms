@@ -24,11 +24,7 @@ const {
   evaluateSiemShipping,
   PROBE_WINDOW_HOURS,
 } = require('../../../scripts/alertProbeRecord');
-const {
-  parseArgs,
-  buildProbeAlert,
-  postAlerts,
-} = require('../../../scripts/alert-delivery-probe');
+const { parseArgs, buildProbeAlert, postAlerts } = require('../../../scripts/alert-delivery-probe');
 
 const NOW = Date.parse('2026-10-17T12:00:00Z');
 const hoursAgo = (h) => new Date(NOW - h * 3600000).toISOString();

@@ -364,7 +364,9 @@ class WebSocketService {
       // 故用「>」判断（含自身恰好等于上限时放行），确保实际允许的最大并发恰为 MAX_CONNECTIONS_PER_PROCESS
       const currentConnections = this.io.sockets.sockets.size;
       if (currentConnections > MAX_CONNECTIONS_PER_PROCESS) {
-        logger.warn(`WebSocket 连接数达到上限 ${MAX_CONNECTIONS_PER_PROCESS}，拒绝新连接: ${socket.id}`);
+        logger.warn(
+          `WebSocket 连接数达到上限 ${MAX_CONNECTIONS_PER_PROCESS}，拒绝新连接: ${socket.id}`
+        );
         socket.emit('error', { message: '连接数已满，请稍后重试' });
         socket.disconnect(true);
         return;

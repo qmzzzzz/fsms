@@ -19,7 +19,9 @@
 const { businessRetentionVerdict } = require('../../../scripts/complianceVerdicts');
 
 const MODELS = ['FireAlarm', 'Inspection', 'FireDevice', 'User'];
-const ENV_KEYS = MODELS.map((m) => `BUSINESS_RETENTION_DAYS_${m.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}`);
+const ENV_KEYS = MODELS.map(
+  (m) => `BUSINESS_RETENTION_DAYS_${m.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}`
+);
 
 const clearAll = () => ENV_KEYS.forEach((k) => delete process.env[k]);
 
@@ -87,8 +89,14 @@ describe('F-07 TTL 索引接线：配置后 schema 真的带上 TTL', () => {
       } catch (_) {
         /* 首次加载时不存在，忽略 */
       }
-      if (envValue === undefined) delete process.env[`BUSINESS_RETENTION_DAYS_${modelName.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}`];
-      else process.env[`BUSINESS_RETENTION_DAYS_${modelName.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}`] = envValue;
+      if (envValue === undefined)
+        delete process.env[
+          `BUSINESS_RETENTION_DAYS_${modelName.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}`
+        ];
+      else
+        process.env[
+          `BUSINESS_RETENTION_DAYS_${modelName.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}`
+        ] = envValue;
       indexes = require(`../../models/${modelName}`).schema.indexes();
     });
     return indexes;

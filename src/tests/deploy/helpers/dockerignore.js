@@ -34,10 +34,7 @@ const compilePattern = (line) => {
  * @returns {(name: string) => boolean} 给定相对路径是否被排除
  */
 const makeDockerIgnored = (text) => {
-  const patterns = text
-    .split(/\r?\n/)
-    .map(compilePattern)
-    .filter(Boolean);
+  const patterns = text.split(/\r?\n/).map(compilePattern).filter(Boolean);
   return (name) => {
     let ignored = false;
     for (const p of patterns) {

@@ -190,7 +190,12 @@ function siemShippingVerdict() {
     transportAvailable,
     allowUnconfigured: (process.env.ALLOW_UNCONFIGURED_LOG_SHIPPING || '').trim() === 'true',
   });
-  return { name: 'SIEM 转发能力 (logShipper)', passed: v.passed, detail: v.detail, notReady: v.notReady };
+  return {
+    name: 'SIEM 转发能力 (logShipper)',
+    passed: v.passed,
+    detail: v.detail,
+    notReady: v.notReady,
+  };
 }
 
 /**

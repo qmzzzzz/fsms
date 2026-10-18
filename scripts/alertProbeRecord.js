@@ -41,7 +41,11 @@ const REQUIRED_RECORD_FIELDS = ['probedAt', 'target', 'ok', 'correlationId'];
  * @returns {{state: 'missing'|'invalid'|'stale'|'failed'|'ok'|'queued-unacked',
  *   ok: boolean, ageHours: number|null, detail: string}}
  */
-function evaluateProbeRecord({ record = null, now = Date.now(), windowHours = PROBE_WINDOW_HOURS } = {}) {
+function evaluateProbeRecord({
+  record = null,
+  now = Date.now(),
+  windowHours = PROBE_WINDOW_HOURS,
+} = {}) {
   if (!record) {
     return {
       state: 'missing',
@@ -52,7 +56,9 @@ function evaluateProbeRecord({ record = null, now = Date.now(), windowHours = PR
         '执行 node scripts/alert-delivery-probe.js 后重跑本检查',
     };
   }
-  const missing = REQUIRED_RECORD_FIELDS.filter((f) => record[f] === undefined || record[f] === null);
+  const missing = REQUIRED_RECORD_FIELDS.filter(
+    (f) => record[f] === undefined || record[f] === null
+  );
   if (missing.length > 0) {
     return {
       state: 'invalid',
@@ -132,7 +138,11 @@ function evaluateProbeRecord({ record = null, now = Date.now(), windowHours = PR
  * @returns {{state: 'ready'|'unconfigured'|'misconfigured', passed: boolean,
  *   notReady: boolean, detail: string}}
  */
-function evaluateSiemShipping({ urlConfigured, transportAvailable, allowUnconfigured = false } = {}) {
+function evaluateSiemShipping({
+  urlConfigured,
+  transportAvailable,
+  allowUnconfigured = false,
+} = {}) {
   if (urlConfigured && transportAvailable) {
     return {
       state: 'ready',

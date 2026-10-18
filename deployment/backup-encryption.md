@@ -107,19 +107,19 @@ MONGODB_URI='<目标连接串>' ./scripts/restore-mongo.sh backups/fire-safety-b
 
 巡检的判据（细节见 `scripts/backupIntegrityPolicy.js` 头部）：
 
-| 发现码                                                      | 级别  | 含义                                                                 |
-| ----------------------------------------------------------- | ----- | -------------------------------------------------------------------- |
-| `no_archives`                                               | error | 目录里一个归档都没有（备份流水线静默停摆的最强信号）                 |
-| `zero_bytes` / `suspiciously_small`                         | error | 空文件 / 小于 1KB 的半成品（mongodump 被杀留下的空壳）               |
-| `missing_sidecar`                                           | error | 归档缺 `.sha256`——缺的是**证据**，恢复时会被硬失败挡下               |
-| `digest_mismatch`                                           | error | 摘要对不上——这是**反证**（位翻转 / 存储层静默损坏 / 被截断）         |
-| `orphan_sidecar`                                            | warn  | 校验和没有对应归档，会让"归档数 vs 校验和数"的对账永远不平           |
-| `stale_backup`                                              | error | 最新归档超过声明的 RPO（`BACKUP_RPO_HOURS`）                         |
-| `offsite_unreachable` / `offsite_empty` / `offsite_lagging` | error | 异地副本不可达 / 空 / **不含最新归档**（落后一个周期救不了当前 RPO） |
-| `offsite_unconfigured`                                      | warn  | 没配异地目录——如实说出"未探测"，单机副本不构成异地备份               |
+| 发现码                                                      | 级别  | 含义                                                                          |
+| ----------------------------------------------------------- | ----- | ----------------------------------------------------------------------------- |
+| `no_archives`                                               | error | 目录里一个归档都没有（备份流水线静默停摆的最强信号）                          |
+| `zero_bytes` / `suspiciously_small`                         | error | 空文件 / 小于 1KB 的半成品（mongodump 被杀留下的空壳）                        |
+| `missing_sidecar`                                           | error | 归档缺 `.sha256`——缺的是**证据**，恢复时会被硬失败挡下                        |
+| `digest_mismatch`                                           | error | 摘要对不上——这是**反证**（位翻转 / 存储层静默损坏 / 被截断）                  |
+| `orphan_sidecar`                                            | warn  | 校验和没有对应归档，会让"归档数 vs 校验和数"的对账永远不平                    |
+| `stale_backup`                                              | error | 最新归档超过声明的 RPO（`BACKUP_RPO_HOURS`）                                  |
+| `offsite_unreachable` / `offsite_empty` / `offsite_lagging` | error | 异地副本不可达 / 空 / **不含最新归档**（落后一个周期救不了当前 RPO）          |
+| `offsite_unconfigured`                                      | warn  | 没配异地目录——如实说出"未探测"，单机副本不构成异地备份                        |
 | `rpo_undeclared` / `rto_undeclared`                         | warn  | 未配置生效值（声明 24h / 4h 已定，见 `deployment/rollback-drill.md` 第 5 节） |
-| `rpo_better_than_frequency`                                 | error | 声明的 RPO 比备份频率下限（24h）更严——现有底座兑现不了这个承诺       |
-| `rpo_looser_than_declared` / `rto_looser_than_declared`     | error | 生效值比对外声明更宽（如声明 24h 配 48h）——承诺了却没做到           |
+| `rpo_better_than_frequency`                                 | error | 声明的 RPO 比备份频率下限（24h）更严——现有底座兑现不了这个承诺                |
+| `rpo_looser_than_declared` / `rto_looser_than_declared`     | error | 生效值比对外声明更宽（如声明 24h 配 48h）——承诺了却没做到                     |
 
 退出码：`0` 无 error / `1` 有 error / `2` 巡检无法执行（备份目录不存在等）。
 **`2` 必须当成红**：没判定 ≠ 就绪。异地副本探针需要 `BACKUP_OFFSITE_DIR` 指向

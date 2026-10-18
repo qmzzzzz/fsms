@@ -28,23 +28,23 @@
 - `仅本地` —— 只在开发机磁盘上，克隆仓库与 CI 都看不到；
 - `已断链` —— 本地不存在、Git 历史里也没有，引用**失去来源**。
 
-| 引用路径                                             | 内容                             | 本地存在 | 可复核来源       |
-| ---------------------------------------------------- | -------------------------------- | -------- | ---------------- |
-| `deliverables/AGENT工作总账与待办-2026-09-21.md`     | 跨会话整改总账与待办             | 否       | `git:1f11eaf^`   |
-| `deliverables/七维代码健康度深度审计-2026-09-18.md`  | 七维健康度审计原始报告           | 否       | `git:b50cb40`    |
-| `deliverables/安全需求加固清单-2026-10-16.md`        | 本轮整改的需求清单（F-01…F-15）  | 是       | 仅本地           |
-| `deliverables/安全加固待办清单-2026-10-15.md`        | 安全加固待办                     | 是       | 仅本地           |
-| `deliverables/A3-email加密实施方案-2026-10-16.md`    | 邮箱字段加密实施方案             | 是       | 仅本地           |
-| `deliverables/复核台账-B会话-2026-09-24.md`          | 复核台账（B 会话）               | 否       | `git:1f11eaf^`   |
-| `deliverables/性能实测基线-2026-09-16.json`          | 性能实测基线数据                 | 是       | `git:1f11eaf^`   |
-| `deliverables/_complexity-actual.json`               | 复杂度实测基线（体积棘轮同源）   | 是       | `git:1f11eaf^`   |
-| `deliverables/mutation-harness-breached-matcher.js`  | 变异测试夹具（命中判定）         | 是       | 仅本地           |
-| `deliverables/probe-matcher-behavior.js`             | 命中判定行为探针                 | 是       | 仅本地           |
-| `deliverables/安全缺口核查-2026-09-30.md`            | 安全缺口核查                     | 否       | **已断链**       |
-| `deliverables/待优化项总清单-2026-08-29.md`          | 待优化项总清单                   | 否       | **已断链**       |
-| `deliverables/审计与迭代汇总-2026-09-28.md`          | 审计与迭代汇总（含取回方式说明） | 否       | **已断链**       |
-| `deliverables/审计复核第3轮…-2026-10-01.md`          | 第 3 轮审计复核（文件名被截断）  | 否       | **已断链**       |
-| `deliverables/AGENT工作总账与待办-*.md`              | 上述总账的通配引用               | —        | 同上（按日期取） |
+| 引用路径                                            | 内容                             | 本地存在 | 可复核来源       |
+| --------------------------------------------------- | -------------------------------- | -------- | ---------------- |
+| `deliverables/AGENT工作总账与待办-2026-09-21.md`    | 跨会话整改总账与待办             | 否       | `git:1f11eaf^`   |
+| `deliverables/七维代码健康度深度审计-2026-09-18.md` | 七维健康度审计原始报告           | 否       | `git:b50cb40`    |
+| `deliverables/安全需求加固清单-2026-10-16.md`       | 本轮整改的需求清单（F-01…F-15）  | 是       | 仅本地           |
+| `deliverables/安全加固待办清单-2026-10-15.md`       | 安全加固待办                     | 是       | 仅本地           |
+| `deliverables/A3-email加密实施方案-2026-10-16.md`   | 邮箱字段加密实施方案             | 是       | 仅本地           |
+| `deliverables/复核台账-B会话-2026-09-24.md`         | 复核台账（B 会话）               | 否       | `git:1f11eaf^`   |
+| `deliverables/性能实测基线-2026-09-16.json`         | 性能实测基线数据                 | 是       | `git:1f11eaf^`   |
+| `deliverables/_complexity-actual.json`              | 复杂度实测基线（体积棘轮同源）   | 是       | `git:1f11eaf^`   |
+| `deliverables/mutation-harness-breached-matcher.js` | 变异测试夹具（命中判定）         | 是       | 仅本地           |
+| `deliverables/probe-matcher-behavior.js`            | 命中判定行为探针                 | 是       | 仅本地           |
+| `deliverables/安全缺口核查-2026-09-30.md`           | 安全缺口核查                     | 否       | **已断链**       |
+| `deliverables/待优化项总清单-2026-08-29.md`         | 待优化项总清单                   | 否       | **已断链**       |
+| `deliverables/审计与迭代汇总-2026-09-28.md`         | 审计与迭代汇总（含取回方式说明） | 否       | **已断链**       |
+| `deliverables/审计复核第3轮…-2026-10-01.md`         | 第 3 轮审计复核（文件名被截断）  | 否       | **已断链**       |
+| `deliverables/AGENT工作总账与待办-*.md`             | 上述总账的通配引用               | —        | 同上（按日期取） |
 
 **扫描范围（与用例同源，改这里就要改用例）**：只统计**会进入 checkout 的文件**里的引用。
 `backups/`、`logs/`、`coverage/` 三个目录被 `.gitignore` 忽略（`git ls-files backups`

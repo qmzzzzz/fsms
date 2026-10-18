@@ -103,7 +103,10 @@ function postAlerts(target, body, timeoutMs) {
       url,
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload),
+        },
         timeout: timeoutMs,
       },
       (res) => {
@@ -164,7 +167,9 @@ async function main() {
     record.acknowledgedBy = args.ack;
     record.acknowledgedAt = new Date().toISOString();
     writeRecord(args.out, record);
-    console.log(`[alert-probe] 已记录人工确认：${args.ack}（correlationId=${record.correlationId}）`);
+    console.log(
+      `[alert-probe] 已记录人工确认：${args.ack}（correlationId=${record.correlationId}）`
+    );
     return;
   }
 
@@ -207,4 +212,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, buildProbeAlert, postAlerts, readRecord, writeRecord, DEFAULT_TARGET };
+module.exports = {
+  parseArgs,
+  buildProbeAlert,
+  postAlerts,
+  readRecord,
+  writeRecord,
+  DEFAULT_TARGET,
+};

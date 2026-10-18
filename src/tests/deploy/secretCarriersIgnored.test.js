@@ -96,9 +96,7 @@ const secretDirs = (() => {
  */
 const { makeDockerIgnored } = require('./helpers/dockerignore');
 
-const dockerIgnored = makeDockerIgnored(
-  fs.readFileSync(path.join(ROOT, '.dockerignore'), 'utf8')
-);
+const dockerIgnored = makeDockerIgnored(fs.readFileSync(path.join(ROOT, '.dockerignore'), 'utf8'));
 
 const mkTmp = (label) => fs.mkdtempSync(path.join(os.tmpdir(), `sec-carriers-${label}-`));
 

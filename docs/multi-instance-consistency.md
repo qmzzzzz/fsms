@@ -39,11 +39,11 @@
 
 `constants/runtime.js` 的启动期拓扑校验有**三档**结论：
 
-| 档位       | 触发条件                                                         | 日志级别 | 含义                       |
-| ---------- | ---------------------------------------------------------------- | -------- | -------------------------- |
-| `suspected` | PM2 / cluster / `WEB_CONCURRENCY` / `INSTANCE_COUNT` / `REPLICAS` / `RUNTIME_INSTANCE_COUNT` > 1，或 StatefulSet 序号 > 0 | error | **确证**多进程，列出失效清单 |
-| `unproven`  | 在集群内（`KUBERNETES_SERVICE_HOST` 存在）、无上述强信号、且未声明 `RUNTIME_INSTANCE_COUNT=1` | warn | **无法自证单副本**，列出「若有多副本则会降级」的清单 |
-| 无          | 其余情况                                                         | debug | 单进程假设成立             |
+| 档位        | 触发条件                                                                                                                  | 日志级别 | 含义                                                 |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------- | -------- | ---------------------------------------------------- |
+| `suspected` | PM2 / cluster / `WEB_CONCURRENCY` / `INSTANCE_COUNT` / `REPLICAS` / `RUNTIME_INSTANCE_COUNT` > 1，或 StatefulSet 序号 > 0 | error    | **确证**多进程，列出失效清单                         |
+| `unproven`  | 在集群内（`KUBERNETES_SERVICE_HOST` 存在）、无上述强信号、且未声明 `RUNTIME_INSTANCE_COUNT=1`                             | warn     | **无法自证单副本**，列出「若有多副本则会降级」的清单 |
+| 无          | 其余情况                                                                                                                  | debug    | 单进程假设成立                                       |
 
 `unproven` 这一档的存在原因：**K8s Deployment 的 `replicas: 3` 不会注入任何环境变量**，
 Pod 名（`<name>-<rsHash>-<5位随机>`）也不带 StatefulSet 那样的序号，所以进程在纯
@@ -77,4 +77,3 @@ K8s 多副本下**无从得知**自己不是唯一实例。修前这里只置 `k
 - `getStats()` 返回的 `maxConnections` 是**单进程**值，监控面板聚合时不要把它当总量。
 - 若要真正的全局配额，需在网关层限流或引入共享计数（Redis `INCR` + TTL）；
   当前未实现，属已知缺口而非配置项。
-

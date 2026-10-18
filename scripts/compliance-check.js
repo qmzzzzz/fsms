@@ -511,7 +511,9 @@ function runAllChecks() {
     console.log(`${icon} ${c.name}: ${c.detail}`);
   }
   if (notReady.length > 0) {
-    const note = strict ? '视为不通过（部署门禁口径）' : '仓库态不阻断；部署/发布请用 COMPLIANCE_STRICT=1 运行';
+    const note = strict
+      ? '视为不通过（部署门禁口径）'
+      : '仓库态不阻断；部署/发布请用 COMPLIANCE_STRICT=1 运行';
     console.log(`\n⚠ 未就绪（治理能力未启用）：${notReady.join('、')}\n  ${note}`);
   }
   console.log(`\n总体: ${allPassed ? '就绪' : '存在缺失'}`);

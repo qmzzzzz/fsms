@@ -217,7 +217,9 @@ describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
     expect(forwardingReason('auditBuffer', '{ action: f() }', 'f()', 'object')).toBeNull();
     // 5) 反噬面：位置参数形态一律不放行——第 3 个实参才是 action，
     //    若只看"第一个实参是标识符"就会把 `recordSensitiveAction(userId, ...)` 洗成转发
-    expect(forwardingReason('record', 'userId, username, action', 'action', 'positional-2')).toBeNull();
+    expect(
+      forwardingReason('record', 'userId, username, action', 'action', 'positional-2')
+    ).toBeNull();
     // 6) 混合形态不得蒙混：action 简写之外还有别的表达式
     expect(forwardingReason('modelStatic', '{ note: f(a, b) }', null)).toBeNull();
   });
