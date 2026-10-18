@@ -12,7 +12,7 @@
  * 【代价】userConnections 是「谁在线」的事实来源：
  *   - getStats().totalUsers 直接取它的 size ⇒ 在线用户数虚高且永不回落；
  *   - emitPermissionSync 按它判定在线 ⇒ 每次角色变更为死连接做一次查库 + 一次 emit；
- *   - MAX_CONNECTIONS 数的是 io.sockets.sockets.size，幽灵不占名额 ⇒ 上限挡不住它。
+ *   - MAX_CONNECTIONS_PER_PROCESS 数的是 io.sockets.sockets.size，幽灵不占名额 ⇒ 上限挡不住它。
  *
  * 【修法】最后一个 await 之后、任何状态写入之前复检 `socket.connected`。
  * 为什么判 socket.connected 而不是判 `this.clients.has(socket.id)`：后者会让

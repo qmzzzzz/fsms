@@ -281,6 +281,11 @@ describe('WebSocket 全流程（批次 D2）', () => {
     const stats = svc.getStats();
     expect(stats.totalClients).toBe(0);
     expect(stats.maxConnections).toBe(1000);
+    // F-13（2026-10-17）：值必须与**口径**一起回报。多副本下真实容量是
+    // 实例数 × maxConnections，面板/容量规划只看这个数就会把全局上限算小 N 倍。
+    // 少了这个字段，改名（MAX_CONNECTIONS → MAX_CONNECTIONS_PER_PROCESS）就只是
+    // 改了个变量名，消费侧照旧把它当全局值。
+    expect(stats.capacityScope).toBe('per-process');
     expect(Array.isArray(stats.rooms)).toBe(true);
 
     svc.clients.set('x', { id: 'x', rooms: new Set(['alarm']), connectedAt: new Date() });

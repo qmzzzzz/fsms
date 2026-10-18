@@ -73,7 +73,7 @@ const RESERVED_PREFIXES = [
  * /api-docs、/csp-report、/client-errors、/.well-known 各有专属限流器——
  * 但那都是**各自的补丁**，不是判据本身正确。真正裸奔的两条：
  *   - `/socket.io/`：Socket.IO 的 HTTP long-polling 握手是**未认证 GET**，
- *     而 websocketService 的 MAX_CONNECTIONS=1000 约束的是**已建立连接数**，
+ *     而 websocketService 的 MAX_CONNECTIONS_PER_PROCESS=1000 约束的是**已建立连接数**，
  *     不是握手速率 ⇒ 握手面在应用层没有任何限流（`new WebSocketService()` 只在
  *     连接**建立之后**才认证）；
  *   - `/metrics`：metricsAuth 允许内网/回环免令牌，而 app.js 自己写明这条端点的

@@ -7,7 +7,7 @@
  *   2. 连接状态机：connect 幂等、connect_error 复位、重连耗尽的标记与回调；
  *   3. 房间：连接后 / 重连后自动重新 join，leaveRoom 撤销后重连不再复活；
  *      disconnect() 清空声明；
- *   4. 消息分发：on/off 的注册-解绑；send 未连接时静默丢弃；
+ *   4. 消息分发：on/off 的注册-解绑；send 的返回语义（已发/未发）与丢弃上报节流；
  *   5. 断开清理：manager 级 reconnect_failed 解绑（防止下次 connect 后重复注册）；
  *   6. 引用计数：acquire/release 归零才断开；归零后重新 acquire 新建连接（V-2 边界）；
  *      disconnectWebSocket 强制清零；
@@ -323,19 +323,61 @@ describe('websocket.js（P1-27）', () => {
     expect(received).toEqual([{ id: 1 }])
   })
 
-  test('send 未连接时静默丢弃（不抛出、不 emit）', async () => {
+  /**
+   * F-13（2026-10-17）：send 的返回值就是送达语义。
+   *
+   * 修前这里是「未连接时静默丢弃」——调用方拿不到任何区分，断线窗口里丢掉的
+   * join-room 不会自愈（重连后房间不会自动重建，表现为"连着却收不到推送"）。
+   * 现在三件事一起断言，缺一条都等于把"静默"换个说法：
+   *   ① 未连接返回 false 且不 emit（不假装发了）；
+   *   ② 已连接返回 true 且 emit 一次（不假装没发）；
+   *   ③ 丢弃计入 droppedSends 并触发一次降级上报（丢弃在监控里可见）。
+   */
+  test('send：未连接返回 false 并计入丢弃，已连接返回 true 并 emit', async () => {
     const sock = new FakeSocket()
     ioMock.mockReturnValue(sock)
     const { WebSocketService } = await loadModule()
+    reportDegradation.mockClear()
 
     const svc = new WebSocketService('http://ws.example')
+    expect(svc.droppedSends).toBe(0)
     expect(() => svc.send('join-room', 'alarms')).not.toThrow()
     expect(sock.emitted).toHaveLength(0)
+    expect(svc.droppedSends).toBe(1)
+    expect(reportDegradation).toHaveBeenCalledTimes(1)
+    expect(reportDegradation.mock.calls[0][1]).toMatchObject({ event: 'join-room', dropped: 1 })
 
     svc.connect()
     sock.connected = true
-    svc.send('join-room', 'alarms')
+    expect(svc.send('join-room', 'alarms')).toBe(true)
     expect(sock.emitted).toEqual([['join-room', 'alarms']])
+    // 发送成功不增加丢弃计数（否则"发出去的"和"丢掉的"会被混成一个数）
+    expect(svc.droppedSends).toBe(1)
+  })
+
+  test('send：丢弃上报按 10s 节流，但 droppedSends 照常累计', async () => {
+    const sock = new FakeSocket()
+    ioMock.mockReturnValue(sock)
+    const { WebSocketService } = await loadModule()
+    reportDegradation.mockClear()
+
+    const svc = new WebSocketService('http://ws.example')
+    const now = Date.now()
+    const spy = vi.spyOn(Date, 'now')
+    spy.mockReturnValue(now)
+    svc.send('a')
+    spy.mockReturnValue(now + 1_000)
+    svc.send('b')
+    // 窗口内第二次丢弃：计数涨、上报不涨（否则错误上报通道会被自己打爆）
+    expect(svc.droppedSends).toBe(2)
+    expect(reportDegradation).toHaveBeenCalledTimes(1)
+
+    spy.mockReturnValue(now + 10_000)
+    svc.send('c')
+    expect(svc.droppedSends).toBe(3)
+    expect(reportDegradation).toHaveBeenCalledTimes(2)
+    expect(reportDegradation.mock.calls[1][1]).toMatchObject({ event: 'c', dropped: 3 })
+    spy.mockRestore()
   })
 
   test('disconnect 清理：解绑 manager 监听、清空 handlers 与房间、断开 socket', async () => {

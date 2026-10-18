@@ -18,7 +18,24 @@ const { isIPAllowed } = require('../utils/ipRange');
 const { isPrivateOrLoopback } = require('../utils/ipUtils');
 
 // 连接管理常量
-const MAX_CONNECTIONS = 1000;
+
+/**
+ * 单**进程**的在线连接上限（F-13，2026-10-17 改名）
+ *
+ * 原名 `MAX_CONNECTIONS`，读起来像"整个系统的连接上限"，实际数的是
+ * `io.sockets.sockets.size`——本进程的 Socket.IO 连接数。多副本部署下
+ * 每个实例各自都能到 1000，**整体没有统一上限**：
+ *
+ *     可承载连接总数 ≈ 实例数 × 本常量
+ *
+ * 改名不是洁癖：容量规划与告警阈值都按这个名字读，`MAX_CONNECTIONS=1000`
+ * 会让 Ingress/LB 的 `MaxConnections` 被照着设成 1000，而真实可用量是 3000。
+ * 反向代理侧的总配额必须按乘积设置（见 docs/multi-instance-consistency.md §五）。
+ *
+ * 若要真正的**全局**配额，需要在网关层限流或引入共享计数（Redis INCR + TTL）；
+ * 当前未实现，属已知缺口而非配置项——别把这个常量当成全局上限。
+ */
+const MAX_CONNECTIONS_PER_PROCESS = 1000;
 const HEARTBEAT_INTERVAL = 30000; // 30秒心跳检测
 const HEARTBEAT_TIMEOUT = 60000; // 60秒超时断开
 const AUTH_TIMEOUT = 30000; // 连接后 30 秒内必须完成认证，否则强制断开
@@ -344,10 +361,10 @@ class WebSocketService {
     this.io.on('connection', (socket) => {
       // 连接数上限检查：使用实际 TCP 连接数而非 clients Map 大小。
       // 注意 connection 回调触发时 io.sockets.sockets.size 已计入当前这条新连接，
-      // 故用「>」判断（含自身恰好等于上限时放行），确保实际允许的最大并发恰为 MAX_CONNECTIONS
+      // 故用「>」判断（含自身恰好等于上限时放行），确保实际允许的最大并发恰为 MAX_CONNECTIONS_PER_PROCESS
       const currentConnections = this.io.sockets.sockets.size;
-      if (currentConnections > MAX_CONNECTIONS) {
-        logger.warn(`WebSocket 连接数达到上限 ${MAX_CONNECTIONS}，拒绝新连接: ${socket.id}`);
+      if (currentConnections > MAX_CONNECTIONS_PER_PROCESS) {
+        logger.warn(`WebSocket 连接数达到上限 ${MAX_CONNECTIONS_PER_PROCESS}，拒绝新连接: ${socket.id}`);
         socket.emit('error', { message: '连接数已满，请稍后重试' });
         socket.disconnect(true);
         return;
@@ -362,7 +379,7 @@ class WebSocketService {
       });
 
       // 认证截止计时：超时未认证则强制断开，
-      // 防止攻击者用大量未认证连接占满 MAX_CONNECTIONS 名额（资源耗尽）
+      // 防止攻击者用大量未认证连接占满 MAX_CONNECTIONS_PER_PROCESS 名额（资源耗尽）
       const authTimer = setTimeout(() => {
         if (!socket.authenticated) {
           logger.warn(
@@ -598,7 +615,7 @@ class WebSocketService {
       // ⇒ 只清得掉 clients，清不到 userConnections；这里一旦继续登记就留下**永久幽灵连接**
       // ——周期清扫只遍历 this.clients.keys()，永不回收它。代价不是内存量级而是"以为还在"：
       // getStats().totalUsers 长期虚高、emitPermissionSync 给已死 socket.id 逐个查库+投递、
-      // MAX_CONNECTIONS 数的是 io.sockets.sockets.size ⇒ 幽灵不占配额，计数与真实在线分叉。
+      // MAX_CONNECTIONS_PER_PROCESS 数的是 io.sockets.sockets.size ⇒ 幽灵不占配额，计数与真实在线分叉。
       // 位置约束：必须紧贴最后一个 await、且在任何状态写入之前——中间再插 await 就重新开窗。
       if (!socket.connected) {
         logger.warn(`WebSocket 认证在途断开，作废本次认证: ${socket.id}`);
@@ -1293,7 +1310,10 @@ class WebSocketService {
     const stats = {
       totalClients: this.clients.size,
       totalUsers: this.userConnections.size,
-      maxConnections: MAX_CONNECTIONS,
+      maxConnections: MAX_CONNECTIONS_PER_PROCESS,
+      // F-13：`maxConnections` 的**口径**必须随值一起回报，否则面板聚合时
+      // 会把它当全局上限（多副本下真实容量 = 实例数 × 该值）。
+      capacityScope: 'per-process',
       // 只回报白名单房间的占用情况：adapter.rooms 还包含以 socket.id 命名的
       // 私有房间，逐一列出等于泄露全部连接标识
       rooms: ALLOWED_ROOMS.filter((r) => this.io.sockets.adapter.rooms.has(r)),

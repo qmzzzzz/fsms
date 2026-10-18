@@ -101,7 +101,7 @@ const skipProbesAndWhitelisted = (req) => skipIfWhitelisted(req) || skipProbeReq
 // `/health` `/readyz` `/metrics` `/socket.io` `/api-docs` `/csp-report`
 // `/client-errors` `/.well-known` 全被旧判据豁免，而 staticFrontend 一个都不托管。
 // 其中真正裸奔的是 `/socket.io/`（Socket.IO HTTP long-polling 握手是未认证 GET，
-// 而 MAX_CONNECTIONS=1000 约束的是**已建立连接数**不是握手速率）与 `/metrics`
+// 而 MAX_CONNECTIONS_PER_PROCESS=1000 约束的是**已建立连接数**不是握手速率）与 `/metrics`
 // （metricsAuth 允许内网免令牌，而 app.js 自陈的威胁模型正是容器网络内直连）。
 //
 // 为什么必须豁免静态面：浏览器一次页面加载实测发出 **35 个请求，其中 34 个是静态

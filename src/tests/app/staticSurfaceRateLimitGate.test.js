@@ -13,7 +13,7 @@
  *   /.well-known/security.txt  → wellKnownRoutes 三个专属限流器
  *   /metrics                   → metricsAuth（内网/回环免令牌）——**这就是 app.js 自陈的
  *                                威胁模型「有人从容器网络直连 app:3000」那一档**
- *   /socket.io/                → 无。MAX_CONNECTIONS=1000 约束的是**已建立连接数**，
+ *   /socket.io/                → 无。MAX_CONNECTIONS_PER_PROCESS=1000 约束的是**已建立连接数**，
  *                                而 authenticateSocket 在连接**建立之后**才跑；
  *                                握手是未认证 GET，此前在应用层零限流
  *

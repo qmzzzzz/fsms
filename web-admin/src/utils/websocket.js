@@ -16,6 +16,16 @@ import { reportDegradation } from '@/utils/errorReporter'
 // 如需开发期直连后端（绕过代理），可设置 VITE_WS_URL=http://localhost:3000 覆盖。
 const resolveWsUrl = () => import.meta.env.VITE_WS_URL || window.location.origin
 
+/**
+ * 未连接时丢弃上报的节流窗口（F-13）
+ *
+ * 断线期间 `send()` 会被业务代码反复调用（定时刷新、批量订阅）。每次都
+ * `reportDegradation` 会把错误上报通道自己打爆，而调用方看面板只会看到
+ * "全是 websocket 错误"——反而盖住了真正的首因。窗口内的丢弃仍计入
+ * `droppedSends`，只是不重复上报。
+ */
+const DROP_REPORT_INTERVAL_MS = 10000
+
 export class WebSocketService {
   constructor(url = null, options = {}) {
     this.url = url || resolveWsUrl()
@@ -51,6 +61,10 @@ export class WebSocketService {
      * 每次连接都触发一次「无权加入该房间」。房间由调用方按需声明。
      */
     this.rooms = new Set()
+    /** 未连接时被丢弃的 send 次数（F-13：让"静默丢弃"变成可读数字） */
+    this.droppedSends = 0
+    /** 上一次丢弃上报的时间戳，用于节流（见 send 的注释） */
+    this._lastDropReportAt = 0
   }
 
   /**
@@ -177,11 +191,42 @@ export class WebSocketService {
     }
   }
 
+  /**
+   * 发送事件。返回值是调用方唯一能拿到的送达语义：
+   *   `true`  = 已交给 socket.io 的发送队列（**不等于**对端收到）
+   *   `false` = 未发送（socket 不存在或未连接），已计入 `droppedSends`
+   *
+   * 为什么不再"静默丢弃"（F-13，2026-10-17）：断线窗口里丢掉的 join-room 不会自愈——
+   * 重连后房间不会自动重建，页面表现是"连着却收不到推送"。现在至少让丢弃可分辨、可见：
+   *   1. 返回值区分「已交给发送队列」与「未发送」；
+   *   2. `this.droppedSends` 累计数（调用方/监控/测试可读）；
+   *   3. `reportDegradation` 上报，但按 `DROP_REPORT_INTERVAL_MS` 节流——断线期间
+   *      每次 send 都上报会把错误上报通道自己打爆（降级引发降级）。
+   *
+   * 刻意**不做**自动排队：排队要先定义容量、过期与顺序语义。幂等事件（join-room、
+   * 订阅）重连后由 onConnect 重放更可靠；非幂等事件（指令下发）排队重放会重复执行。
+   * 真正需要"必达"的业务事件应由服务端持久化 + 版本号/重新同步承担，不是本方法能兜的。
+   *
+   * @param {string} event
+   * @param {unknown} [payload]
+   * @returns {boolean} 是否已交给 socket.io 发送队列
+   */
   send(event, payload) {
     if (this.socket && this.socket.connected) {
       this.socket.emit(event, payload)
+      return true
     }
-    // 未连接时静默丢弃
+    this.droppedSends += 1
+    const now = Date.now()
+    if (now - this._lastDropReportAt >= DROP_REPORT_INTERVAL_MS) {
+      this._lastDropReportAt = now
+      reportDegradation('websocket: 未连接，事件未发送', {
+        event,
+        dropped: this.droppedSends,
+        url: this.url,
+      })
+    }
+    return false
   }
 
   on(type, handler) {
