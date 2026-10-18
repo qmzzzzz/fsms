@@ -236,11 +236,37 @@ function parsePodOrdinal(hostname) {
     // 故形状之外再要一个集群事实判据：kubelet 会给每个 Pod 注入
     // KUBERNETES_SERVICE_HOST（它与"编排器没导出模板变量"那条顾虑无关，不是模板变量）。
     // 不存在形状规则能救这件事：`ci-agent-3` 与 `app-1` 形状完全同构。
-    const inCluster = Boolean(process.env.KUBERNETES_SERVICE_HOST);
-    return { podLike: true, ordinal, strong: inCluster && ordinal > 0 };
+    // 判据本体在 isInCluster（同一事实被 detectMultiProcess 的 unproven 档复用）。
+    return { podLike: true, ordinal, strong: isInCluster() && ordinal > 0 };
   }
 
   return { podLike: false, ordinal: null, strong: false };
+}
+
+/** 是否确实跑在 K8s 集群内（kubelet 对每个容器无条件注入，与模板变量无关） */
+function isInCluster() {
+  return Boolean(process.env.KUBERNETES_SERVICE_HOST);
+}
+
+/**
+ * 部署渲染期声明的副本数（F-12，2026-10-17）
+ *
+ * 为什么必须**新开**一个变量而不是复用 INSTANCE_COUNT：`.env.example` 里
+ * `INSTANCE_COUNT=1` 是**默认值**（不带引号、随模板复制进 ConfigMap），
+ * 拿它当"已声明单副本"的证明，等于让所有按模板部署的集群自动闭嘴。
+ * 本变量的语义严格限定为「部署阶段按真实 replicas 写入」，未设置就是未声明。
+ *
+ * K8s 的 Downward API **给不出** replicas（它只能暴露 Pod 自身字段），
+ * 所以只能由渲染阶段（helm/kustomize 模板替换）或 initContainer 调 API 写入；
+ * 见 docs/multi-instance-consistency.md §4。
+ *
+ * @returns {number|null} 有效副本数；未设置或非法值返回 null（不得静默当作 1）
+ */
+function readDeclaredInstanceCount() {
+  const raw = process.env.RUNTIME_INSTANCE_COUNT;
+  if (raw === undefined || String(raw).trim() === '') return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 /**
@@ -251,14 +277,54 @@ function parsePodOrdinal(hostname) {
  *   - Node 原生 cluster 的 worker 标记
  *   - 显式声明的 WEB_CONCURRENCY / CLUSTER_WORKERS > 1
  *   - INSTANCE_COUNT / REPLICAS > 1（编排器显式声明的副本数）
+ *   - RUNTIME_INSTANCE_COUNT > 1（部署渲染期写入的真实副本数，见上）
  *   - K8s StatefulSet Pod 序号 > 0（见 parsePodOrdinal；Deployment 形态
  *     属弱信号，仅置 k8sPodLike 提示，不计入 suspected）
  *
+ * 另有第三档 `unproven`：**在集群内、但没有强信号、也没声明副本数**。
+ * 这不是"检测到多副本"，而是"无法自证单副本"——Deployment 的 replicas>1
+ * 既不注入环境变量、Pod 名也不带序号，此时上面的判据**全部落空**，
+ * 旧实现只置 k8sPodLike 就结束了，等于静默放行（F-12 的缺陷本体）。
+ *
  * @param {{hostname?: string}} [opts] 仅测试使用：注入 hostname 以验证判据
- * @returns {{suspected: boolean, reasons: string[], k8sPodLike: boolean}}
+ * @returns {{suspected: boolean, reasons: string[], k8sPodLike: boolean,
+ *   unproven: boolean, unprovenReason: string|null}}
  */
 function detectMultiProcess(opts = {}) {
   const reasons = [];
+  collectDeclaredCountReasons(reasons);
+  collectProcessManagerReasons(reasons);
+
+  // K8s 兜底判据：Deployment 的 replicas>1 不注入任何环境变量，
+  // 只能从 Pod 名推断（见 parsePodOrdinal 的两档说明）
+  const pod = parsePodOrdinal(opts.hostname);
+  if (pod.strong) {
+    reasons.push(`K8s Pod 序号=${pod.ordinal}（StatefulSet 非首副本）`);
+  }
+
+  const unprovenReason = resolveUnprovenReason(reasons, pod);
+  return {
+    suspected: reasons.length > 0,
+    reasons,
+    k8sPodLike: pod.podLike,
+    unproven: unprovenReason !== null,
+    unprovenReason,
+  };
+}
+
+/**
+ * 副本数类判据：部署声明的真实副本数 + 编排器/进程管理器的实例数
+ *
+ * 抽成独立函数只为压 complexity（原 detectMultiProcess 触到 15 的上限，
+ * 而"再抽一层"正是本项目对复杂度的既定处理方式，不是为拆而拆）。
+ *
+ * @param {string[]} reasons 追加式收集器
+ */
+function collectDeclaredCountReasons(reasons) {
+  const declaredCount = readDeclaredInstanceCount();
+  if (declaredCount !== null && declaredCount > 1) {
+    reasons.push(`RUNTIME_INSTANCE_COUNT=${declaredCount}（部署声明的副本数）`);
+  }
 
   for (const key of ['INSTANCE_COUNT', 'REPLICAS']) {
     const declared = Number(process.env[key]);
@@ -266,7 +332,14 @@ function detectMultiProcess(opts = {}) {
       reasons.push(`${key}=${declared}`);
     }
   }
+}
 
+/**
+ * 进程管理器类判据：PM2 / Node cluster / gunicorn 风格并发数
+ *
+ * @param {string[]} reasons 追加式收集器
+ */
+function collectProcessManagerReasons(reasons) {
   // PM2 cluster 模式会注入 NODE_APP_INSTANCE（0..N-1）与 instances
   const pm2Instances = Number(process.env.instances);
   if (Number.isFinite(pm2Instances) && pm2Instances > 1) {
@@ -288,15 +361,32 @@ function detectMultiProcess(opts = {}) {
     const n = Number(process.env[key]);
     if (Number.isFinite(n) && n > 1) reasons.push(`${key}=${n}`);
   }
+}
 
-  // K8s 兜底判据：Deployment 的 replicas>1 不注入任何环境变量，
-  // 只能从 Pod 名推断（见 parsePodOrdinal 的两档说明）
-  const pod = parsePodOrdinal(opts.hostname);
-  if (pod.strong) {
-    reasons.push(`K8s Pod 序号=${pod.ordinal}（StatefulSet 非首副本）`);
+/**
+ * 判定「无法自证单副本」这一档（F-12）
+ *
+ * 与 suspected **互斥**：已经有确凿多副本证据时，"无法自证单副本"是废话，
+ * 两者同时为真只会让调用方再判一次优先级。
+ *
+ * @param {string[]} reasons 已收集到的强信号
+ * @param {{strong: boolean}} pod parsePodOrdinal 的结论
+ * @returns {string|null} 非 null 即处于 unproven 档
+ */
+function resolveUnprovenReason(reasons, pod) {
+  const declaredCount = readDeclaredInstanceCount();
+  const unproven = reasons.length === 0 && isInCluster() && !pod.strong && declaredCount !== 1;
+  if (!unproven) return null;
+  if (declaredCount === null) {
+    return (
+      '运行在 K8s 集群内（KUBERNETES_SERVICE_HOST 存在）且未声明 RUNTIME_INSTANCE_COUNT：' +
+      'Deployment 的 replicas 不会自动注入任何环境变量、Pod 名也不带序号（StatefulSet 除外），' +
+      '故本进程无法自证单副本'
+    );
   }
-
-  return { suspected: reasons.length > 0, reasons, k8sPodLike: pod.podLike };
+  return `RUNTIME_INSTANCE_COUNT=${JSON.stringify(
+    process.env.RUNTIME_INSTANCE_COUNT
+  )} 不是有效副本数，视为未声明`;
 }
 
 /**
@@ -309,11 +399,17 @@ function detectMultiProcess(opts = {}) {
  * 若共享缓存（Redis）已就绪，标记为 redisExternalized 的机制已外置为
  * 跨实例一致，不再列入失效清单，只单列说明；仍单进程的机制照常告警。
  *
- * @returns {{suspected: boolean, reasons: string[]}}
+ * F-12（2026-10-17）起多出**第三档**：`suspected=false && unproven=true`
+ * （在集群内但无法自证单副本）走 **warn** 而不是 debug 静默放行。
+ * 刻意不用 error：这一档可能是真的单副本 Deployment，打成 error 会让
+ * 「多副本导致审计链分叉」这条真信号被每天一次的假警报稀释——本文件
+ * 开头与 parsePodOrdinal 的注释里都写着这条教训。
+ *
+ * @returns {{suspected: boolean, reasons: string[], unproven: boolean}}
  */
 function assertSingleProcessAssumptions() {
   const result = detectMultiProcess();
-  if (!result.suspected) {
+  if (!result.suspected && !result.unproven) {
     logger.debug('运行时拓扑检查：未检测到多进程迹象，单进程假设成立');
     return result;
   }
@@ -333,15 +429,21 @@ function assertSingleProcessAssumptions() {
     ? SINGLE_PROCESS_DEPENDENCIES.filter((d) => d.redisExternalized)
     : [];
 
-  let message = `检测到多进程/多实例运行迹象（${result.reasons.join('；')}），`;
+  const suspected = result.suspected;
+  let message = suspected
+    ? `检测到多进程/多实例运行迹象（${result.reasons.join('；')}），`
+    : `无法证明本进程是唯一实例：${result.unprovenReason}。`;
   if (stillSingle.length > 0) {
-    message +=
-      '但本服务的以下机制依赖单进程假设，将静默降级：\n' +
-      stillSingle
-        .map((d, i) => `  ${i + 1}. ${d.module} —— ${d.mechanism} → ${d.impact}`)
-        .join('\n');
+    message += suspected
+      ? '但本服务的以下机制依赖单进程假设，将静默降级：\n'
+      : '若实际存在多个副本，本服务的以下机制依赖单进程假设，将静默降级：\n';
+    message += stillSingle
+      .map((d, i) => `  ${i + 1}. ${d.module} —— ${d.mechanism} → ${d.impact}`)
+      .join('\n');
   } else {
-    message += '且共享缓存（Redis）已就绪，相关状态均已外置：';
+    message += suspected
+      ? '且共享缓存（Redis）已就绪，相关状态均已外置：'
+      : '共享缓存（Redis）已就绪，上述机制中标记为外置的部分跨实例一致。';
   }
   if (externalized.length > 0) {
     message +=
@@ -352,8 +454,14 @@ function assertSingleProcessAssumptions() {
       '\n请改为单进程部署（水平扩展用多容器 + 外置状态），' +
       '或先完成上述状态的外置改造（Redis/Mongo）。';
   }
+  if (!suspected) {
+    message +=
+      '\n确认是单副本时，请让部署渲染阶段把真实 replicas 写入 RUNTIME_INSTANCE_COUNT' +
+      '（=1 即视为已声明，本提示消失）；K8s Deployment 的 replicas 无法通过 Downward API 获取。';
+  }
 
-  logger.error(message);
+  if (suspected) logger.error(message);
+  else logger.warn(message);
   return result;
 }
 
@@ -362,4 +470,5 @@ module.exports = {
   parsePodOrdinal,
   detectMultiProcess,
   assertSingleProcessAssumptions,
+  readDeclaredInstanceCount,
 };
