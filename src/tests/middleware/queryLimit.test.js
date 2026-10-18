@@ -52,7 +52,7 @@ describe('queryLengthLimit 中间件', () => {
     expect(res.body.query).toEqual({});
   });
 
-  // 两处拒绝日志的 `url` 字段必须过 redactUrlQuery（同 app.js:236 morgan 的 safe-url、
+  // 两处拒绝日志的 `url` 字段必须过 redactUrlQuery（同 app.js:333 morgan 的 safe-url、
   // errorHandler.js:26/100/107）。本中间件只在"参数可疑"时打日志，而未打码的
   // req.originalUrl 里正是攻击者可控、且常含凭据的那一段。
   describe('拒绝日志不得落明文凭据', () => {

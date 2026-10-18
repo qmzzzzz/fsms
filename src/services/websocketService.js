@@ -13,9 +13,12 @@ const {
 const sharedCache = require('./sharedCache');
 const { parseCookies, ACCESS_COOKIE_NAME } = require('../utils/cookie');
 const { isIPAllowed } = require('../utils/ipRange');
-// 客户端身份的「可信边界」尺与内网/回环判据都住在 utils/ipUtils：本模块只把它
-// 应用到 handshake 形态的输入上，不另写一份（F-B43，2026-10-01 第 5 轮）。
-const { isPrivateOrLoopback } = require('../utils/ipUtils');
+// 客户端身份的「可信边界」尺住在 utils/ipUtils（`isPeerTrustedProxy` 是判据本体，
+// 本模块只把它应用到 handshake 形态的输入上，不另写一份——F-B43 起如此，F-01 收尾
+// 把「只看私网」换成「与 HTTP 侧共用同一份名单」）。名单由 config/trustedProxies
+// 解析，与 app.js 注入 req.app 的是同一份解析结果。
+const { isPeerTrustedProxy } = require('../utils/ipUtils');
+const trustedProxies = require('../config/trustedProxies');
 
 // 连接管理常量
 
@@ -93,7 +96,17 @@ const resolveHandshakeClientIP = (handshake, hops) => {
  *   xffPresent         ⇔  `req.get('x-forwarded-for') !== undefined`
  *                          （用 === undefined 而非真值判断：**存在但为空**的头在
  *                          express 里同样算"携带 XFF"，会走对端核查那一臂）
- *   isPrivateOrLoopback(peer) ⇔ 同一函数，同一来源
+ *   isPeerTrustedProxy(peer, proxies) ⇔ 同一函数、同一份名单
+ *
+ * **F-01 收尾（2026-10-18）：第三臂不能只判私网。** 原实现写死
+ * `isPrivateOrLoopback(peer)`，与 HTTP 侧「配了 TRUSTED_PROXY_CIDRS 就以名单为准」
+ * 的收紧脱钩——HTTP 面把「私网但不在名单内」判成不可信，WS 面仍判可信，于是同一个
+ * 伪造 XFF 在两侧再次得出相反结论。这正是本函数开头点名的「把均匀缺陷修成
+ * 不均匀缺陷，比不修更危险」的复发形态，只是这次分界线从 HTTP/WS 换成了
+ * 「HTTP 已收紧 / WS 没跟上」。现在三处（HTTP 准入、封禁分类、WS 握手）共用
+ * `utils/ipUtils.isPeerTrustedProxy`，名单来源是 `config/trustedProxies`
+ * 的同一份解析结果（与 app.js 注入 `app.set('trusted proxy cidrs', …)` 的是同一个对象）。
+ * 未配置时退回私网/回环，行为与修复前逐字一致（兼容档）。
  * 退回侧的 `peer || declared` 也与 HTTP 的 `peer || req.ip` 同序，取不到对端时
  * 保持既有形态（不让夹具/替身把裁决变成空地址）。
  *
@@ -115,8 +128,12 @@ const resolveHandshakeIPForSecurityDecision = (handshake, hops) => {
   const peer = handshake?.address || '';
   const trustProxyEnabled = Number.isInteger(hops) && hops > 0;
   const xffHeader = handshake?.headers?.['x-forwarded-for'];
+  // 边界判据与 HTTP 侧共用同一个函数（F-01 收尾，理由见上方 JSDoc 末段）；
+  // 名单只在真需要判第三臂时才解析（前两臂已短路的情形不必碰配置）。
   const identityTrustworthy =
-    !trustProxyEnabled || xffHeader === undefined || isPrivateOrLoopback(peer);
+    !trustProxyEnabled ||
+    xffHeader === undefined ||
+    isPeerTrustedProxy(peer, trustedProxies.resolveTrustedProxies());
   if (identityTrustworthy) return declared || peer || null;
   return peer || declared || null;
 };

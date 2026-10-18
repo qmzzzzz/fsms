@@ -37,6 +37,10 @@ const ENV_KEY = 'TRUSTED' + '_' + 'PROXY' + '_' + 'CIDRS';
  *   - **全域网段**（`0.0.0.0/0`、`::/0`）：等于宣布「整个互联网都是我的可信代理」，
  *     比完全不配还糟——不配至少还要求对端在内网。
  *
+ * 相对"合法输入"放宽一处：**裸地址按单主机接受**（IPv4 /32、IPv6 /128），
+ * 理由见下方循环里的注释（单台 nginx 是最常见的真实配置，不该因为它少了 `/32`
+ * 就撞上致命启动错误）。
+ *
  * @param {string|undefined} raw process.env[ENV_KEY] 的原始值
  * @returns {{configured: boolean, cidrs: string[], errors: string[]}}
  *   configured=false 仅当「完全没配」（undefined / 空串 / 纯空白）；
@@ -67,13 +71,19 @@ const parseTrustedProxyCidrs = (raw) => {
       );
       continue;
     }
-    if (!parseCIDR(item)) {
+    // 裸地址按单主机处理（IPv4 /32、IPv6 /128）。最常见的真实配置是「只有一台 nginx」，
+    // 写成 `TRUSTED_PROXY_CIDRS=172.28.0.5` 是人的本能；若不接受，运维拿到的是一条
+    // **致命启动错误**（validate.js 的启动闸），而正确写法只差三个字符——这种"几乎对了"
+    // 的失败最费时间。注意 `0.0.0.0` / `::` 也因此成为单地址而非全域网段：它们匹配不到
+    // 任何真实对端，方向是 fail-closed（判谁都不信），比反过来安全。
+    const cidrText = item.includes('/') ? item : `${item}/${item.includes(':') ? 128 : 32}`;
+    if (!parseCIDR(cidrText)) {
       errors.push(`${ENV_KEY} 第 ${i + 1} 项 ${JSON.stringify(item)} 无法解析为 CIDR 网段`);
       continue;
     }
     // 归一化后入表：判据侧与日志侧看到同一种文本，避免 2001:0DB8::/64 与
     // 2001:db8::/64 被当成两条不同网段
-    cidrs.push(normalizeCIDR(item));
+    cidrs.push(normalizeCIDR(cidrText));
   }
 
   return { configured: true, cidrs, errors };

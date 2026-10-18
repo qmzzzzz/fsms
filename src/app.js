@@ -53,6 +53,7 @@ const {
   getSnapshot,
   recordReadyz,
   METRICS_ENABLED,
+  incSecurityAlert,
 } = require('./utils/metrics');
 const ApiResponse = require('./utils/apiResponse');
 const { checkMongoReady } = require('./utils/healthChecks');
@@ -138,6 +139,16 @@ function applyTrustedProxyPolicy(app, trustProxyHops) {
         '自动封禁对象与审计来源地址（审计 F-01）。' +
         '闭合方式：把真实代理所在网段写进 TRUSTED_PROXY_CIDRS（逗号分隔 CIDR）。'
     );
+    // 日志不是信号：warn 只落到 stdout，谁在看、看没看到都不确定。补一个计数器，
+    // 由 deployment/observability/alert-rules.yml 的 `TrustedProxyBoundaryUnset`
+    // 专条告警（for: 0m，`increase(...[15m]) > 0`）。
+    //
+    // 刻意**不**复用 `SecurityFailOpenSustained`：那条规则的叙事是「依赖不可用、
+    // 持续 10 分钟未恢复」，而这里没有"恢复"这个动作——进程重启一次就 +1，
+    // 依赖全都好好的，缺的是运维的一个变量。套用那条文案会给出错误的处置指引。
+    // 也刻意**不**靠 `SecurityAlertBurst`：单次部署只写 1 条，速率型规则永远不达标。
+    // 台账登记见 src/constants/failOpenSites.js 的 OTHER_ALERT_SIGNALS。
+    incSecurityAlert('trusted_proxy_cidrs_unset', 'medium');
   }
 }
 

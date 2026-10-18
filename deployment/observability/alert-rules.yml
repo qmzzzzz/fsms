@@ -95,6 +95,30 @@ groups:
             /api/metrics 的 security_alerts_total 明细；**在恢复前不要把该护栏当作有效防线**
             （各类型的失效语义见 src/constants/failOpenSites.js）。
 
+      # ── 部署配置缺失型信号（2026-10-17，F-01）────────────────────────────
+      # 与上面两条的区别：它不是「依赖挂了」，也不是「批量事件」，而是
+      # **这一次部署没给这个变量**。判据因此是「最近 15 分钟内出现过一次」而不是
+      # 速率，且 for: 0m——配置缺失是既成事实，不需要再等 10 分钟确认它「没恢复」。
+      #
+      # 为什么不并进 SecurityFailOpenSustained：那条的文案说「依赖仍未恢复」，
+      # 而这里依赖全都好好的，缺的是运维的一个变量——错误的处置指引比没有指引更糟。
+      # 为什么不只靠 SecurityAlertBurst：单次部署只写 1 条，
+      # 速率型规则（10 分钟 ≥ 10 条）永远不达标 ⇒ 那等于没有告警。
+      - alert: TrustedProxyBoundaryUnset
+        expr: increase(security_alerts_total{type="trusted_proxy_cidrs_unset"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'TRUSTED_PROXY_CIDRS 未配置：XFF 信任边界处于兼容档'
+          description: >-
+            本实例启动时 TRUSTED_PROXY_CIDRS 为空，启用 trust proxy 时任意私网/回环对端
+            都被视为可信代理 ⇒ 同网段任一容器可直连应用端口并伪造 X-Forwarded-For，
+            IP 白名单/黑名单/限流/自动封禁/审计来源全部可被影响（F-01 未闭合）。
+            处置：确认反代所在网段并显式声明（通常只有 Nginx 一段，如 172.28.0.0/16）；
+            判据本体与兼容档的取舍见 src/utils/ipUtils.js 的 isPeerTrustedProxy 与
+            src/config/trustedProxies.js，部署侧口径见 docs/adr/ADR-009。
+
   # 自监控：可观测性链路自身的失效。这类规则不反映业务异常，反映的是
   # 「我们看到的业务数据不完整」——所以它的严重度是 warning 而非 info：
   # 数据缺失期间的其它告警判读都要打折。

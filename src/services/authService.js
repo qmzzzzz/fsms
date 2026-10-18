@@ -1285,7 +1285,7 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
 
   // 解锁必须连**临时锁定**一起清掉。两套锁定是分开的：管理员锁定改 status，
   // 暴力破解阈值只写 lockUntil（:443-446，不动 status）。而 authenticate
-  // （middleware/auth.js:302，经 assertAccountUsable）与 loginUser（:350）都只看 lockUntil 就拒绝登录。
+  // （middleware/auth.js:297，经 assertAccountUsable）与 loginUser（:350）都只看 lockUntil 就拒绝登录。
   // 因此"先被爆破锁定、再被管理员锁定"的账户，此前解锁只改回 status ⇒
   // 接口 200「用户已解锁」+ 审计 success:true，用户依然登不进来（且活令牌全部 403），
   // 运维只会去怀疑密码。与"改密假成功"同一类：**报告了没做到的事**。

@@ -283,19 +283,19 @@ function unexplainedExemptions(exemptedKeys, ledgerKeys) {
 const LIVE = [
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:229',
+    at: 'app.js:240',
     must: /sentryRequestHandler/,
     why: 'Sentry 请求处理器挂载点',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:469',
+    at: 'app.js:480',
     must: /sentryErrorHandler/,
     why: 'Sentry 错误处理器挂载点',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:473',
+    at: 'app.js:484',
     must: /app\.use\(errorHandler/,
     why: '通用 errorHandler 位置（口径是"在它之前"）',
   },
@@ -421,7 +421,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/services/alertSeveritySurvivesRender.test.js',
-    at: 'securityAlertDelivery.js:156',
+    at: 'securityAlertDelivery.js:160',
     must: /logMethod/,
     why: 'low/medium 都映射到 info 的那一行',
   },
@@ -434,43 +434,43 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:189',
+    at: 'app.js:200',
     must: /app\.set\('trust proxy'/,
     why: 'trust proxy 有效值分支的落点（原写 :96-97，那是 .filter(Boolean)）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:417',
+    at: 'app.js:428',
     must: /app\.get\('\/api'/,
     why: '/api 根路径处理器（原写 :297-298，那是 CSRF 注释）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:374-395',
+    at: 'app.js:385-406',
     must: /503[\s\S]*\.catch/,
     why: '/readyz 的 503 双路径：then 里按 mongo.ok 定码 + catch 里硬 503（原写 :258-278 是 body-parser）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:383-392',
+    at: 'app.js:394-403',
     must: /res\.status\(503\)\.json/,
     why: '头注里点名"两条失败路径"的具体行段',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:58',
+    at: 'app.js:59',
     must: /checkMongoReady/,
     why: '加载期解构（原写 :48，那是别的 require）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:229-230',
+    at: 'app.js:240-241',
     must: /sentryRequestHandler/,
     why: 'Sentry 三件套前两件（原写 :134-136）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:469',
+    at: 'app.js:480',
     must: /sentryErrorHandler/,
     why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见）',
   },
@@ -546,28 +546,28 @@ const STALE = [
     in: 'src/utils/transaction.js',
     at: 'src/index.js:446',
     owner: '他人脏文件（M）',
-    shouldRead: 'src/index.js:456',
+    shouldRead: 'src/index.js:460',
     mustAfterFix: /process\.on\('unhandledRejection'/,
   },
   {
     in: 'src/tests/utils/transactionTopology.test.js',
     at: 'src/index.js:446',
     owner: '他人脏文件（M）',
-    shouldRead: 'src/index.js:456',
+    shouldRead: 'src/index.js:460',
     mustAfterFix: /process\.on\('unhandledRejection'/,
   },
   {
     in: 'src/services/websocketService.js',
     at: 'src/index.js:446-463',
     owner: '他人脏文件（M）',
-    shouldRead: 'src/index.js:456-474',
+    shouldRead: 'src/index.js:460-478',
     mustAfterFix: /process\.on\('unhandledRejection'/,
   },
   {
     in: 'src/tests/services/websocketHandlerRejectionGuard.test.js',
     at: 'src/index.js:446-463',
     owner: '他人 staged（A）',
-    shouldRead: 'src/index.js:456-474',
+    shouldRead: 'src/index.js:460-478',
     mustAfterFix: /process\.on\('unhandledRejection'/,
   },
   {
@@ -750,7 +750,7 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
   });
 
   test('谓词有牙（正向命中 + 反向不命中），不许跟着行号走', () => {
-    const hit = citedRange('src/middleware/sentry.js', 'app.js:469');
+    const hit = citedRange('src/middleware/sentry.js', 'app.js:480');
     expect(/sentryErrorHandler/.test(hit.text)).toBe(true);
     expect(/绝不可能出现在这一行的符号ZZZ/.test(hit.text)).toBe(false);
     // 本轮之前的真实写法：auditController.js:38 是空行，同一条判据必须判它不含符号

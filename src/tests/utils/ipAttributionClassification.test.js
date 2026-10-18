@@ -120,3 +120,85 @@ describe('客户端 IP 来源分类（classifyIpAttribution）', () => {
     expect(isClientIpIdentityTrustworthy(req)).toBe(true);
   });
 });
+
+/**
+ * 配了 `TRUSTED_PROXY_CIDRS` 之后，**写侧必须与读侧同侧**（F-01 收尾，2026-10-18）
+ *
+ * 上面那条不变式说的是「未配置时 TRUSTED_PROXY 与读侧可信同时成立」——那是兼容档的
+ * 已知代价。但配置了名单之后，读侧已经收紧（私网不再自动可信），写侧若仍按
+ * `isPrivateOrLoopback(socketPeer)` 分类，就会出现自相矛盾的组合：
+ *
+ *     isClientIpIdentityTrustworthy(req) === false   // 准入侧：这个对端不是可信代理
+ *     classifyIpAttribution(req).kind   === TRUSTED_PROXY  // 惩罚侧：按可信代理处理
+ *     ⇒ resolvePunishableIp(req).punishIp === req.ip       // = 那个不可信对端自己写的值
+ *
+ * 后果不是理论上的：攻击者从同网段容器直连应用端口、自带
+ * `X-Forwarded-For: <受害者IP>`，封禁就落在受害者头上（也能靠换伪造值换限流桶）。
+ * 这正是 F-01 原文点名的「自动封禁的打击对象」，也是本次把分类改成共用
+ * `isPeerTrustedProxy` 的原因。
+ */
+describe('配了 TRUSTED_PROXY_CIDRS 后：写侧与读侧同侧（F-01 收尾）', () => {
+  const { parseTrustedProxyCidrs, toTrustedProxies } = require('../../config/trustedProxies');
+  const { resolvePunishableIp } = require('../../utils/ipUtils');
+
+  const FORGED = '203.0.113.9';
+
+  /**
+   * 与 app.js 的 `applyTrustedProxyPolicy` 同形：把解析结果注入 app 设置位。
+   * 这里直接构造 `proxies` 而不走 env + 缓存，是为了让用例之间不共享模块级状态
+   * （`resolveTrustedProxies` 是 memoize 的，env 方案必须配缓存重置钩子）。
+   */
+  const probeWithCidrs = async ({ hops, xff, cidrs }) => {
+    const app = express();
+    app.set('trust proxy', hops > 0 ? hops : false);
+    app.set('trusted proxy cidrs', toTrustedProxies(parseTrustedProxyCidrs(cidrs)));
+    app.get('/probe', (req, res) => {
+      res.json({
+        kind: classifyIpAttribution(req).kind,
+        punishIp: resolvePunishableIp(req).punishIp,
+        trustworthy: isClientIpIdentityTrustworthy(req),
+        peer: req.socket?.remoteAddress || '',
+        ip: req.ip,
+      });
+    });
+    const server = await new Promise((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    try {
+      const res = await request(server)
+        .get('/probe')
+        .set(xff === undefined ? {} : { 'X-Forwarded-For': xff });
+      return res.body;
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  };
+
+  test('对端是私网但不在名单内 ⇒ PUBLIC_PEER_HEADER（此前误判 TRUSTED_PROXY）', async () => {
+    const got = await probeWithCidrs({ hops: 1, xff: FORGED, cidrs: '172.28.0.0/16' });
+    // 前提自证：读侧确实已判"不可信"，否则这条用例钉不住"两侧矛盾"这个缺陷形状
+    expect(got.trustworthy).toBe(false);
+    expect(got.kind).toBe(IP_ATTRIBUTION_KINDS.PUBLIC_PEER_HEADER);
+  });
+
+  test('伪造头不再决定封禁目标：punishIp 落在不可伪造的 socket 对端', async () => {
+    const got = await probeWithCidrs({ hops: 1, xff: FORGED, cidrs: '172.28.0.0/16' });
+    expect(got.punishIp).not.toBe(FORGED);
+    expect(got.punishIp).toBe(got.peer);
+  });
+
+  test('反向对照：名单含对端所在网段 ⇒ 仍判 TRUSTED_PROXY（正常反代路径不得被误伤）', async () => {
+    // 对端在本机回环（supertest 从 127.0.0.1 发起），故把回环写进名单
+    const got = await probeWithCidrs({ hops: 1, xff: FORGED, cidrs: '127.0.0.0/8' });
+    expect(got.trustworthy).toBe(true);
+    expect(got.kind).toBe(IP_ATTRIBUTION_KINDS.TRUSTED_PROXY);
+    // 经可信代理时惩罚打 reportedIp 是既有裁定（互联网侧真实客户就是它）
+    expect(got.punishIp).toBe(FORGED);
+  });
+
+  test('未配置 ⇒ 兼容档行为逐字不变（仍按私网判 TRUSTED_PROXY）', async () => {
+    const got = await probeWithCidrs({ hops: 1, xff: FORGED, cidrs: undefined });
+    expect(got.trustworthy).toBe(true);
+    expect(got.kind).toBe(IP_ATTRIBUTION_KINDS.TRUSTED_PROXY);
+  });
+});

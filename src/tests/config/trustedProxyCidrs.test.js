@@ -23,6 +23,7 @@
  * 本套件钉住四类性质，每类都能因真实退化而红：
  *   1. 解析层：空项、非法文本、全域网段（0.0.0.0/0、::/0）必须被拒——
  *      全域网段等于「整个互联网都是我的可信代理」，比不配还糟；
+ *      **放宽一处**：裸地址按单主机接受（IPv4 /32、IPv6 /128），见下方用例的理由；
  *   2. 判据层：配了 CIDR 之后，**私网但不在名单内**的对端必须转为不可信
  *      （这正是修复本体；只测「名单内可信」会漏掉它）；
  *   3. 兼容层：未配置时既有四种组合的行为一字不变（防「顺手收紧」打断现网）；
@@ -106,6 +107,36 @@ describe('parseTrustedProxyCidrs：解析与拒绝面', () => {
       expect({ bad, rejected: errors.length > 0 }).toMatchObject({ bad, rejected: true });
       expect(errors.join('\n')).toContain('全域');
     }
+  });
+
+  test('裸地址按单主机接受（IPv4 /32、IPv6 /128）——单台 nginx 是最常见的真实配置', () => {
+    // 不接受的代价不是"少一个便利"，而是运维拿到一条**致命启动错误**
+    // （validate.js 的启动闸），而正确写法只差 `/32` 三个字符。
+    const v4 = parseTrustedProxyCidrs('172.28.0.5');
+    expect(v4.errors).toEqual([]);
+    expect(v4.cidrs).toEqual(['172.28.0.5/32']);
+
+    const v6 = parseTrustedProxyCidrs('2001:db8::5');
+    expect(v6.errors).toEqual([]);
+    expect(v6.cidrs).toEqual(['2001:db8::5/128']);
+  });
+
+  test('裸地址与显式网段可混排，且裸地址真的能匹配（不是"接受了但没用"）', () => {
+    const proxies = proxiesFrom('172.28.0.5,10.0.0.0/8');
+    expect(proxies.errors).toEqual([]);
+    expect(proxies.matches('172.28.0.5')).toBe(true);
+    // 同 /24 的邻居不在名单内：/32 就是单主机，不能顺带把它捎上
+    expect(proxies.matches('172.28.0.6')).toBe(false);
+    expect(proxies.matches('10.1.2.3')).toBe(true);
+  });
+
+  test('裸 `0.0.0.0` 不是全域网段：按 /32 处理（匹配不到真实对端 ⇒ fail-closed）', () => {
+    // 这条钉住"裸地址放宽"没有把「全域网段必须拒绝」那条判据顺带打开一个缺口：
+    // 0.0.0.0/0 仍被拒，而裸 0.0.0.0 只是"一个不存在的单地址"，方向是判谁都不信。
+    const bare = parseTrustedProxyCidrs('0.0.0.0');
+    expect(bare.errors).toEqual([]);
+    expect(bare.cidrs).toEqual(['0.0.0.0/32']);
+    expect(parseTrustedProxyCidrs('0.0.0.0/0').errors.length).toBeGreaterThan(0);
   });
 
   test('解析不出的文本被拒且不得静默丢弃（丢弃等于悄悄缩小信任面）', () => {

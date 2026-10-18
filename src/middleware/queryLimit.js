@@ -10,7 +10,7 @@
  */
 
 const logger = require('../utils/logger');
-// 日志里的 URL 必须过 redactUrlQuery（与 app.js:236 morgan 的 safe-url、
+// 日志里的 URL 必须过 redactUrlQuery（与 app.js:333 morgan 的 safe-url、
 // errorHandler.js:26/100/107 同一口径）：本中间件恰好在"参数可疑"的路径上打日志，
 // 未打码就会把 ?accessToken=... 这类凭据原样落盘。
 const { redactUrlQuery } = require('../utils/helpers');

@@ -266,3 +266,143 @@ describe('WS/HTTP 客户端 IP 可信边界一致性（F-B43）', () => {
     });
   });
 });
+
+/**
+ * 4. 配了 TRUSTED_PROXY_CIDRS 之后，WS 面必须跟着收紧（F-01 收尾，2026-10-18）
+ *
+ * 远端那份 F-01 实现只把 HTTP 侧接上了名单（`isClientIpIdentityTrustworthy` 读
+ * `app.get('trusted proxy cidrs')`），WS 侧的第三臂仍写死 `isPrivateOrLoopback(peer)`。
+ * 于是同一个伪造头在两侧再次分叉——只是这次的分界线从「HTTP / WS」换成了
+ * 「HTTP 已收紧 / WS 没跟上」。第 1 组用例的注释里已经写过这个判断：
+ * 把均匀缺陷修成不均匀缺陷比不修更危险，因为它让收紧看起来已经完成。
+ *
+ * 本组的口径与第 1 组一致：**不在测试里复述判据**，而是拿真实 express 的结论
+ * 与 WS 函数比对；并配反向对照（名单含对端时正常反代路径不得被误伤）。
+ */
+describe('4. 配了 TRUSTED_PROXY_CIDRS 后 WS 与 HTTP 仍同侧（F-01 收尾）', () => {
+  const trustedProxies = require('../../config/trustedProxies');
+  const { parseTrustedProxyCidrs, toTrustedProxies } = trustedProxies;
+  // 上面那个 describe 里的同名解构只在它自己的作用域内可见，这里重新取
+  const {
+    clientIpForSecurityDecision,
+    isClientIpIdentityTrustworthy,
+    isPrivateOrLoopback,
+  } = require('../../utils/ipUtils');
+  const WebSocketService = require('../../services/websocketService');
+  const FORGED = '10.0.0.5';
+
+  /**
+   * WS 侧读的是 `resolveTrustedProxies()`（env + memoize），HTTP 侧读的是注入位。
+   * 用例里两者必须来自**同一份**解析结果，故统一：env 由本函数设置，HTTP 侧用
+   * 同一段 raw 直接构造 `proxies` 注入（避免依赖 app.js 的 createApp 全量装配）。
+   */
+  const withCidrs = async (raw, fn) => {
+    const key = trustedProxies.ENV_KEY;
+    const original = process.env[key];
+    if (raw === undefined) delete process.env[key];
+    else process.env[key] = raw;
+    trustedProxies.resetTrustedProxyCache();
+    try {
+      return await fn();
+    } finally {
+      if (original === undefined) delete process.env[key];
+      else process.env[key] = original;
+      trustedProxies.resetTrustedProxyCache();
+    }
+  };
+
+  /** 与既有 probe 同构，多一个"注入名单"的动作（对应 app.js 的 applyTrustedProxyPolicy） */
+  const probeWithCidrs = async ({ hops, xff, cidrs }) => {
+    const app = express();
+    app.set('trust proxy', hops);
+    app.set('trusted proxy cidrs', toTrustedProxies(parseTrustedProxyCidrs(cidrs)));
+    let payload;
+    app.get('/probe', (req, res) => {
+      payload = {
+        httpIP: clientIpForSecurityDecision(req),
+        trustworthy: isClientIpIdentityTrustworthy(req),
+        peer: req.socket.remoteAddress,
+        headers: { ...req.headers },
+      };
+      res.json({ ok: true });
+    });
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    await new Promise((resolve, reject) => {
+      const headers = xff === undefined ? {} : { 'X-Forwarded-For': xff };
+      http
+        .get(
+          { host: '127.0.0.1', port: server.address().port, path: '/probe', headers },
+          (res2) => {
+            res2.resume();
+            res2.on('end', resolve);
+          }
+        )
+        .on('error', reject);
+    });
+    await new Promise((resolve) => server.close(resolve));
+    return payload;
+  };
+
+  test('对端私网但不在名单内：WS 也退回 socket 对端（此前只有 HTTP 收紧）', async () => {
+    const CIDRS = '203.0.113.0/24'; // 不含本机回环
+    await withCidrs(CIDRS, async () => {
+      const { httpIP, trustworthy, peer, headers } = await probeWithCidrs({
+        hops: 1,
+        xff: FORGED,
+        cidrs: CIDRS,
+      });
+
+      // 前提自证：对端确实是「私网」，否则本用例钉不住"旧的私网判据会放行"这个缺陷
+      expect(isPrivateOrLoopback(peer)).toBe(true);
+      // 前提自证：HTTP 侧确实已经收紧（这是 F-01 主体做的）
+      expect(trustworthy).toBe(false);
+
+      const wsIP = WebSocketService.resolveHandshakeIPForSecurityDecision(
+        { address: peer, headers },
+        1
+      );
+
+      // 核心断言：两侧同址。旧实现在此处会返回 FORGED（对端是私网 ⇒ 认为 XFF 可信）
+      expect(String(wsIP)).toBe(String(httpIP));
+      expect(String(wsIP)).not.toBe(FORGED);
+    });
+  });
+
+  test('反向对照：名单含对端所在网段 ⇒ WS 仍采信 XFF（正常反代路径不被误伤）', async () => {
+    const CIDRS = '127.0.0.0/8';
+    await withCidrs(CIDRS, async () => {
+      const { httpIP, trustworthy, peer, headers } = await probeWithCidrs({
+        hops: 1,
+        xff: FORGED,
+        cidrs: CIDRS,
+      });
+
+      expect(trustworthy).toBe(true);
+      expect(String(httpIP)).toBe(FORGED);
+
+      const wsIP = WebSocketService.resolveHandshakeIPForSecurityDecision(
+        { address: peer, headers },
+        1
+      );
+      expect(String(wsIP)).toBe(String(httpIP));
+      expect(String(wsIP)).toBe(FORGED);
+    });
+  });
+
+  test('未配置 ⇒ 兼容档不变：私网对端的 XFF 仍被采信（两侧同侧）', async () => {
+    await withCidrs(undefined, async () => {
+      const { httpIP, peer, headers } = await probeWithCidrs({
+        hops: 1,
+        xff: FORGED,
+        cidrs: undefined,
+      });
+      const wsIP = WebSocketService.resolveHandshakeIPForSecurityDecision(
+        { address: peer, headers },
+        1
+      );
+      expect(String(wsIP)).toBe(String(httpIP));
+      expect(String(wsIP)).toBe(FORGED);
+    });
+  });
+});

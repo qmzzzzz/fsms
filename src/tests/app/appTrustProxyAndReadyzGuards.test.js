@@ -22,18 +22,18 @@
  * 实测后逐行定位，其中的分支分两类：
  *
  *  A. **有诊断价值的真实路径**（本文件覆盖）：
- *     - trust proxy 显式有效值（app.js:189）：M-4 收紧后这是生产反代下唯一
+ *     - trust proxy 显式有效值（app.js:200）：M-4 收紧后这是生产反代下唯一
  *       让 req.ip 正确的开关。此前只测了「非法值 → 退化 1 跳」，有效值分支零验证——
  *       一旦有人写错 `app.set('trust proxy', true)`（信任全部代理，可伪造 XFF
  *       击穿 IP 限流/黑名单），现有测试不会红。
- *     - /api 根路径（app.js:417）：注释声明「不再返回接口清单」，无测试锁定；
+ *     - /api 根路径（app.js:428）：注释声明「不再返回接口清单」，无测试锁定；
  *       若将来有人改回返回清单，属未认证信息暴露，须在此红。
- *     - /readyz 的 503 双路径（app.js:383-392）：checkMongoReady 返回
+ *     - /readyz 的 503 双路径（app.js:394-403）：checkMongoReady 返回
  *       not-ok 与**抛错**两种失败。M-1 脱敏（readyzSanitize.test.js）只测了
  *       checkMongoReady 本身，未验证 HTTP 响应体真的不含驱动错误消息——本文件
  *       补上 app 级闭环。
  *
- *  B. Sentry 三件套（app.js:229-230、app.js:469）——**不补测，理由如实记录**：
+ *  B. Sentry 三件套（app.js:240-241、app.js:480）——**不补测，理由如实记录**：
  *     `sentryInitialized` 是模块级常量，要覆盖需 SENTRY_DSN + 模块重置 + 对
  *     @sentry/node 打桩三件套齐备；而它覆盖的是「SDK 自己的中间件被 app.use」，
  *     属第三方库接线，行为已验证于 middleware/sentry 的单测
@@ -49,7 +49,7 @@ const loadApp = () => {
   return require('../../app');
 };
 
-describe('§13 V-12：trust proxy 有效值分支（app.js:189）', () => {
+describe('§13 V-12：trust proxy 有效值分支（app.js:200）', () => {
   beforeEach(() => {
     jest.resetModules();
     process.env = { ...ORIGINAL_ENV };
@@ -155,7 +155,7 @@ describe('§13 V-12：trust proxy 有效值分支（app.js:189）', () => {
   });
 });
 
-describe('§13 V-12：/api 根路径不泄露接口清单（app.js:417）', () => {
+describe('§13 V-12：/api 根路径不泄露接口清单（app.js:428）', () => {
   const request = require('supertest');
   let app;
 
@@ -175,11 +175,11 @@ describe('§13 V-12：/api 根路径不泄露接口清单（app.js:417）', () =
   });
 });
 
-describe('§13 V-12：/readyz 的 503 双路径（app.js:374-395）', () => {
+describe('§13 V-12：/readyz 的 503 双路径（app.js:385-406）', () => {
   const request = require('supertest');
 
   /**
-   * app.js:58 在**加载期**解构 checkMongoReady，因此必须在 require('../../app')
+   * app.js:59 在**加载期**解构 checkMongoReady，因此必须在 require('../../app')
    * 之前替换 utils/healthChecks 的导出——加载后 spyOn 已经晚了（拿到的是原函数）。
    * 用 jest.resetModules 保证每次拿到全新的模块实例，替换互不串扰。
    */

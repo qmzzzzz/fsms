@@ -214,6 +214,24 @@ const OTHER_ALERT_SIGNALS = Object.freeze([
     level: 'high',
     why: '凭据型限流滥用（进入封禁阶梯）',
   },
+  {
+    type: 'trusted_proxy_cidrs_unset',
+    file: 'app.js',
+    level: 'medium',
+    why:
+      '启动期：已启用 trust proxy（TRUST_PROXY_HOPS>0）但未配置 TRUSTED_PROXY_CIDRS ⇒ ' +
+      'X-Forwarded-For 的可信判据回落到「对端属私网/回环」（F-01 的兼容档，' +
+      '2026-10-17 仓库负责人明确拍板：不收紧默认行为，只告警）。' +
+      '**归在信号段而不是 FAIL_OPEN_SITES，理由是判据语义不同而不是严重度**：' +
+      '那一组描述「依赖不可用导致的运行期降级」，有恢复动作、有速率含义，共用 ' +
+      'SecurityFailOpenSustained 的「持续 10 分钟未恢复」叙事；本条描述的是「这一次部署' +
+      '没给这个变量」——进程重启一次就 +1，没有任何恢复动作能让它消失（配了变量就再也不会' +
+      '发），套用那条规则的文案会给出**错误的处置指引**（依赖全都好好的，缺的是运维的一个' +
+      '变量）。告警由专条 `TrustedProxyBoundaryUnset` 承担（for: 0m，increase>0 即发），' +
+      '刻意不靠速率型的 SecurityAlertBurst——单次部署只写 1 条，那条规则永远不达标。' +
+      '另注意与 password_history_pepper_rotation 同型的恒正项问题：每次进程启动都会 +1，' +
+      '会稀释跨类型求和规则；该口径问题同属已登记的待拍板项，本台账只如实记录。',
+  },
 ]);
 
 /**
