@@ -15,7 +15,7 @@
  *     用 `runnerIsBusinessTZ` 分支回避宿主差异，这里一次跑出两个宿主的答案，把差值直接钉成 -8h。
  *  3. 欠账 B：报警报表把校验过的 ?tz 传给 `buildDateRangeFilter`
  *     （src/controllers/reportController.js:108、src/controllers/reportController.js:237），
- *     设备/巡检报表走 src/services/reportStatsService.js:34、src/services/reportStatsService.js:93
+ *     设备/巡检报表走 src/services/reportStatsService.js:34、src/services/reportStatsService.js:105
  *     的**两参**调用 ⇒ 同一个 ?tz 在两类出口一个生效一个无效（同一次请求、两个页面、两套"今天"）。
  *     这两处出口各自的文件里都写了实情（注释里有 `buildDateRangeFilter(...)` 的调用形状），
  *     所以采集器必须跑在剥注释的视图上——否则注释里的形状会被当成真调用点。

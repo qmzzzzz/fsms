@@ -415,7 +415,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/reservedWildcardPermission.test.js',
-    at: 'permissionController.js:161',
+    at: 'permissionController.js:203',
     must: /savePermission/,
     why: '"只有一个调用方"的那唯一调用点',
   },

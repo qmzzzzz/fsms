@@ -16,6 +16,132 @@ const { errText } = require('../utils/auditWriteFailure');
 const { redactUrlQuery, stripControlChars } = require('../utils/helpers');
 
 /**
+ * 各错误类型的响应函数（原 if/else 链逐条拆出，判据与文案逐字不变）
+ *
+ * 每个函数都只负责「记一条 warn + 写响应」，不承担匹配逻辑；
+ * 匹配由下方 ERROR_RULES 的 match 承担，主处理器只做一次顺序遍历。
+ */
+
+/** Mongoose 坏 ObjectId 错误 */
+const respondCastError = (err, req, res) => {
+  logger.warn(`CastError: ${err.path} - ${err.message}`);
+  return ApiResponse.error(res, '资源 ID 格式无效', 400);
+};
+
+/**
+ * Mongoose 乐观并发冲突（schema 开了 optimisticConcurrency 才会出现）：两个请求各自
+ * 加载同一文档后先后写库，后写者的 update filter（含它加载时读到的 __v）不再命中。
+ * 不映射就落到兜底分支变成 500——把"你手里那份已过期、刷新即可重试"这种**客户端可自愈**
+ * 的情况报成服务端故障，还会在日志里制造假事故。
+ * 状态码取 400 而不是 409：设备系列接口对"当前状态不允许该操作"一直回 400
+ * （既有契约用例钉着），同一业务结果不应分叉出两个码。原文只进日志不回客户端。
+ */
+const respondVersionError = (err, req, res) => {
+  logger.warn(`乐观并发冲突（文档已被其他请求变更）：${err.message}`);
+  return ApiResponse.error(res, '该记录已被其他操作变更，请刷新后重试', 400);
+};
+
+/** Mongoose 重复键错误 */
+const respondDuplicateKey = (err, req, res) => {
+  // P3-34：keyPattern 并非始终存在——驱动在部分场景（批量写错误、
+  // 旧版驱动、经序列化传递的错误对象）只给 errmsg 而无 keyPattern/keyValue。
+  // 原实现直接 Object.keys(err.keyPattern) 会在错误处理器内部抛 TypeError，
+  // 由 Express 交给默认处理器，把一个本该 400 的重复键变成 500 + 堆栈泄露。
+  const dupKeys = Object.keys(err.keyPattern || err.keyValue || {});
+  const detail =
+    dupKeys.length > 0
+      ? dupKeys.join(',')
+      : `未提供字段信息（${err.errmsg || err.message || 'unknown'})`;
+  logger.warn(`DuplicateKeyError: ${detail}`);
+  return ApiResponse.error(res, '资源已存在', 400);
+};
+
+/** Mongoose 验证错误 */
+const respondValidationError = (err, req, res, isDev) => {
+  const errors = Object.values(err.errors).map((e) => ({
+    field: e.path,
+    message: e.message,
+  }));
+  logger.warn(`ValidationError: ${JSON.stringify(errors)}`);
+  // 生产环境不返回具体字段名，避免泄露 schema 信息
+  const safeErrors = isDev ? errors : undefined;
+  return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: safeErrors });
+};
+
+/** JWT 无效 */
+const respondJsonWebTokenError = (err, req, res) => {
+  logger.warn('JsonWebTokenError');
+  return ApiResponse.unauthorized(res, '无效的认证令牌');
+};
+
+/** JWT 过期 */
+const respondTokenExpiredError = (err, req, res) => {
+  logger.warn('TokenExpiredError');
+  return ApiResponse.unauthorized(res, '认证令牌已过期');
+};
+
+/** 自定义 API 错误 */
+const respondApiError = (err, req, res) => {
+  logger.warn(`ApiError: ${err.message}`);
+  // err.code 必须抵达 errors.errorCode：前端 web-admin/src/utils/api.js 的
+  // ERROR_CODE_I18N_MAP 只认这个位置（resolveErrorMessage 读 data.errors.errorCode）。
+  // 服务层抛 ApiError(msg, status, errors, code) 时 code 原先被整个丢掉，客户端
+  // 拿不到码就只能回退到后端中文 message——英文界面显示中文。今天带 code 的抛点
+  // 只有 rbac.deniedDataScope（DATA_SCOPE_DENIED），但"丢码"与抛点个数无关。
+  const errors = err.code ? { ...(err.errors || {}), errorCode: err.code } : err.errors;
+  return res.status(err.statusCode || 400).json({
+    success: false,
+    message: err.message,
+    errors,
+  });
+};
+
+/** 请求体 JSON 解析失败（body-parser entity.parse.failed） */
+// 对外仅返回通用文案，不回显解析器内部错误细节（生产环境口径一致，不泄堆栈）
+const respondJsonParseFailed = (err, req, res) => {
+  logger.warn(`JSON 解析失败：${req.method} ${redactUrlQuery(req.originalUrl)}`);
+  return ApiResponse.codeError(res, 'JSON_PARSE_FAILED');
+};
+
+/** 请求体超过大小限制（body-parser entity.too.large，上限见 app.js 的 express.json limit） */
+// 同样只返回通用文案，不暴露具体限额配置与堆栈信息
+const respondPayloadTooLarge = (err, req, res) => {
+  logger.warn(`请求体超限：${req.method} ${redactUrlQuery(req.originalUrl)}`);
+  return ApiResponse.codeError(res, 'PAYLOAD_EXCEEDS_LIMIT');
+};
+
+/**
+ * 错误类型 → 响应函数的**有序**映射表。
+ *
+ * 顺序即优先级，必须与改造前的 if/else 链逐条对应（CastError → VersionError →
+ * 重复键 → ValidationError → JWT 两类 → isApiError → body-parser 两类）。
+ * 改动顺序会改变同一错误命中哪条分支，属语义变更，不得在"整理代码"时顺手调。
+ */
+const ERROR_RULES = [
+  { match: (err) => err.name === 'CastError', respond: respondCastError },
+  { match: (err) => err.name === 'VersionError', respond: respondVersionError },
+  { match: (err) => err.code === 11000, respond: respondDuplicateKey },
+  { match: (err) => err.name === 'ValidationError', respond: respondValidationError },
+  { match: (err) => err.name === 'JsonWebTokenError', respond: respondJsonWebTokenError },
+  { match: (err) => err.name === 'TokenExpiredError', respond: respondTokenExpiredError },
+  { match: (err) => Boolean(err.isApiError), respond: respondApiError },
+  { match: (err) => err.type === 'entity.parse.failed', respond: respondJsonParseFailed },
+  { match: (err) => err.type === 'entity.too.large', respond: respondPayloadTooLarge },
+];
+
+/**
+ * 未知错误 - 服务器内部错误
+ * 日志按环境决定详细程度；对外响应一律通用文案，不回显内部错误信息
+ */
+const logUnhandledError = (err, isDev) => {
+  if (isDev) {
+    logger.error(`UnhandledError: ${err.message}\nStack: ${err.stack}`);
+  } else {
+    logger.error(`UnhandledError: ${err.message} (${err.name})`);
+  }
+};
+
+/**
  * 全局错误处理
  */
 const errorHandler = (err, req, res, _next) => {
@@ -41,103 +167,12 @@ const errorHandler = (err, req, res, _next) => {
   // 开发模式下输出详细错误
   const isDev = process.env.NODE_ENV === 'development';
 
-  // Mongoose 坏 ObjectId 错误
-  if (err.name === 'CastError') {
-    const message = '资源 ID 格式无效';
-    logger.warn(`CastError: ${err.path} - ${err.message}`);
-    return ApiResponse.error(res, message, 400);
+  // 顺序遍历判定表：命中即交给对应的响应函数（表见文件上方 ERROR_RULES）
+  for (const rule of ERROR_RULES) {
+    if (rule.match(err)) return rule.respond(err, req, res, isDev);
   }
 
-  // Mongoose 乐观并发冲突（schema 开了 optimisticConcurrency 才会出现）：两个请求各自
-  // 加载同一文档后先后写库，后写者的 update filter（含它加载时读到的 __v）不再命中。
-  // 不映射就落到兜底分支变成 500——把"你手里那份已过期、刷新即可重试"这种**客户端可自愈**
-  // 的情况报成服务端故障，还会在日志里制造假事故。
-  // 状态码取 400 而不是 409：设备系列接口对"当前状态不允许该操作"一直回 400
-  // （既有契约用例钉着），同一业务结果不应分叉出两个码。原文只进日志不回客户端。
-  if (err.name === 'VersionError') {
-    logger.warn(`乐观并发冲突（文档已被其他请求变更）：${err.message}`);
-    return ApiResponse.error(res, '该记录已被其他操作变更，请刷新后重试', 400);
-  }
-
-  // Mongoose 重复键错误
-  if (err.code === 11000) {
-    const message = '资源已存在';
-    // P3-34：keyPattern 并非始终存在——驱动在部分场景（批量写错误、
-    // 旧版驱动、经序列化传递的错误对象）只给 errmsg 而无 keyPattern/keyValue。
-    // 原实现直接 Object.keys(err.keyPattern) 会在错误处理器内部抛 TypeError，
-    // 由 Express 交给默认处理器，把一个本该 400 的重复键变成 500 + 堆栈泄露。
-    const dupKeys = Object.keys(err.keyPattern || err.keyValue || {});
-    const detail =
-      dupKeys.length > 0
-        ? dupKeys.join(',')
-        : `未提供字段信息（${err.errmsg || err.message || 'unknown'})`;
-    logger.warn(`DuplicateKeyError: ${detail}`);
-    return ApiResponse.error(res, message, 400);
-  }
-
-  // Mongoose 验证错误
-  if (err.name === 'ValidationError') {
-    const errors = Object.values(err.errors).map((e) => ({
-      field: e.path,
-      message: e.message,
-    }));
-    logger.warn(`ValidationError: ${JSON.stringify(errors)}`);
-    // 生产环境不返回具体字段名，避免泄露 schema 信息
-    const safeErrors = isDev ? errors : undefined;
-    return ApiResponse.codeError(res, 'VALIDATION_FAILED', { fieldErrors: safeErrors });
-  }
-
-  // JWT 错误
-  if (err.name === 'JsonWebTokenError') {
-    const message = '无效的认证令牌';
-    logger.warn('JsonWebTokenError');
-    return ApiResponse.unauthorized(res, message);
-  }
-
-  if (err.name === 'TokenExpiredError') {
-    const message = '认证令牌已过期';
-    logger.warn('TokenExpiredError');
-    return ApiResponse.unauthorized(res, message);
-  }
-
-  // 自定义 API 错误
-  if (err.isApiError) {
-    logger.warn(`ApiError: ${err.message}`);
-    // err.code 必须抵达 errors.errorCode：前端 web-admin/src/utils/api.js 的
-    // ERROR_CODE_I18N_MAP 只认这个位置（resolveErrorMessage 读 data.errors.errorCode）。
-    // 服务层抛 ApiError(msg, status, errors, code) 时 code 原先被整个丢掉，客户端
-    // 拿不到码就只能回退到后端中文 message——英文界面显示中文。今天带 code 的抛点
-    // 只有 rbac.deniedDataScope（DATA_SCOPE_DENIED），但"丢码"与抛点个数无关。
-    const errors = err.code ? { ...(err.errors || {}), errorCode: err.code } : err.errors;
-    return res.status(err.statusCode || 400).json({
-      success: false,
-      message: err.message,
-      errors,
-    });
-  }
-
-  // 请求体 JSON 解析失败（body-parser entity.parse.failed）
-  // 对外仅返回通用文案，不回显解析器内部错误细节（生产环境口径一致，不泄堆栈）
-  if (err.type === 'entity.parse.failed') {
-    logger.warn(`JSON 解析失败：${req.method} ${redactUrlQuery(req.originalUrl)}`);
-    return ApiResponse.codeError(res, 'JSON_PARSE_FAILED');
-  }
-
-  // 请求体超过大小限制（body-parser entity.too.large，上限见 app.js 的 express.json limit）
-  // 同样只返回通用文案，不暴露具体限额配置与堆栈信息
-  if (err.type === 'entity.too.large') {
-    logger.warn(`请求体超限：${req.method} ${redactUrlQuery(req.originalUrl)}`);
-    return ApiResponse.codeError(res, 'PAYLOAD_EXCEEDS_LIMIT');
-  }
-
-  // 未知错误 - 服务器内部错误
-  // 日志按环境决定详细程度；对外响应一律通用文案，不回显内部错误信息
-  if (isDev) {
-    logger.error(`UnhandledError: ${err.message}\nStack: ${err.stack}`);
-  } else {
-    logger.error(`UnhandledError: ${err.message} (${err.name})`);
-  }
-
+  logUnhandledError(err, isDev);
   return ApiResponse.codeError(res, 'INTERNAL_ERROR');
 };
 

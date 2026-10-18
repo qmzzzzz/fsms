@@ -88,18 +88,24 @@ const getDeviceReportData = async (query) => {
   };
 };
 
+/** `value || fallback` 的具名形式：把「聚合结果缺省」从主流程的分支里移出去 */
+const orDefault = (value, fallback) => value || fallback;
+
+/** 完成率（整数百分比）：分母为 0 时按 0 计，与旧实现一致 */
+const completionRateOf = (completed, total) =>
+  total > 0 ? Math.round((completed / total) * 100) : 0;
+
+/** 时间窗条件：无日期过滤时不注入 planStartTime（空对象会让 $match 变成恒真） */
+const withDateFilter = (scopeFilter, dateFilter) =>
+  Object.keys(dateFilter).length > 0 ? { ...scopeFilter, planStartTime: dateFilter } : scopeFilter;
+
 const getInspectionReportData = async (query) => {
   const { startDate, endDate } = query;
   const dateFilter = buildDateRangeFilter(startDate, endDate);
   const dataScope = await getDataScope(query.userId);
   const scopeFilter = scopeFilterFor('inspection', dataScope);
 
-  const matchFilter = {
-    $match: {
-      ...scopeFilter,
-      ...(Object.keys(dateFilter).length > 0 ? { planStartTime: dateFilter } : {}),
-    },
-  };
+  const matchFilter = { $match: withDateFilter(scopeFilter, dateFilter) };
 
   // L-2：原先 7 次串行往返，同一份匹配条件下用 $facet 收敛为 1 次，
   // 仪表盘冷启动时显著降低 p95；返回结构与旧实现对齐，前端无需变更。
@@ -125,13 +131,13 @@ const getInspectionReportData = async (query) => {
     },
   ]);
 
-  const byType = facetResult?.byType || [];
-  const byStatus = facetResult?.byStatus || [];
-  const byResult = facetResult?.byResult || [];
-  const byAssignee = facetResult?.byAssignee || [];
-  const total = facetResult?.total?.[0]?.count || 0;
-  const completed = facetResult?.completed?.[0]?.count || 0;
-  const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const byType = orDefault(facetResult?.byType, []);
+  const byStatus = orDefault(facetResult?.byStatus, []);
+  const byResult = orDefault(facetResult?.byResult, []);
+  const byAssignee = orDefault(facetResult?.byAssignee, []);
+  const total = orDefault(facetResult?.total?.[0]?.count, 0);
+  const completed = orDefault(facetResult?.completed?.[0]?.count, 0);
+  const completionRate = completionRateOf(completed, total);
 
   return { byType, byStatus, byResult, total, completed, completionRate, byAssignee };
 };

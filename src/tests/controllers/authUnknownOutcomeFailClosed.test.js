@@ -260,7 +260,16 @@ describe('全仓闸：任何 switch (*.outcome) 不得让 default 落空', () =>
         offenders.push(`${path.relative(srcRoot, f).split('\\').join('/')}: ${v.join(' | ')}`);
     }
     expect(offenders).toEqual([]);
-    // 5 处 authController + 2 处 securityController；少一处说明判据没扫到东西（闸失效）
-    expect(total).toBeGreaterThanOrEqual(7);
+    // 4 处 authController + 2 处 securityController；少一处说明判据没扫到东西（闸失效）
+    //
+    // 2026-10-18（lint 批 1）：下界从 7 降到 6，因为 `authController.refreshToken` 的
+    // `switch (result.outcome)` 被改成「有序查表」`REFRESH_OUTCOME_ERRORS`（Map）——
+    // 那一处**不再有 switch**，所以总数从 7 变 6 是真实减少，不是判据变瞎。
+    // 该端点的 fail-closed 语义仍被**行为级**用例钉住（本文件上方
+    // `['refreshToken', 'refreshSession', controller.refreshToken]` 那一条：未知 outcome
+    // 必须走 rejectUnknownOutcome）；查表版把"不在表内 ⇒ 拒绝"写成了同一条路径，
+    // 不存在"落空到成功分支"的形态。
+    // 将来再减少一处时同样要改这个数字并写明去处——只改数字不写去处，等于把闸门悄悄关掉。
+    expect(total).toBeGreaterThanOrEqual(6);
   });
 });

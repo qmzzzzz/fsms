@@ -26,45 +26,60 @@ const HIGH_RISK = require('../../constants/audit').AUDIT_ERROR_RISK_LEVELS;
  * 否则近期窗会读到全部基线数据、基线窗会混入观测期数据。
  * 分桶键取 $group._id：null → 整窗一行；$dateToString → 按业务时区日期分桶。
  */
+/** 取聚合管线里某个 stage 的内容（缺失时给空对象，与真实聚合的空 stage 同形） */
+const stageOf = (pipeline, name) => pipeline.find((s) => s[name])?.[name] || {};
+
+/** 按 $match.timestamp 的 $gte/$lt 过滤：不按窗口过滤会让基线窗混入观测期数据 */
+const filterByWindow = (rows, since, until) =>
+  rows.filter((r) => {
+    const t = new Date(r.timestamp).getTime();
+    return (since === null || t >= since) && t < until;
+  });
+
+/** 分桶键：_id 为 null 表示整窗聚合，否则按「业务时区日期」分桶 */
+const bucketKeyOf = (row, byDay) =>
+  byDay ? new Date(row.timestamp).toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' }) : null;
+
+/** 按分桶键把行分组（Map 保序，与 $group 的输出顺序无关，仅供断言读取） */
+const bucketRows = (rows, byDay) => {
+  const buckets = new Map();
+  for (const r of rows) {
+    const key = bucketKeyOf(r, byDay);
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(r);
+  }
+  return buckets;
+};
+
+/** 一个桶 → 一行聚合结果（计数与基数口径复刻 dailyFeatureStages） */
+const buildBucketRow = (key, group_) => {
+  const ips = new Set(group_.map((r) => r.ip).filter((v) => v != null));
+  const fps = new Set(group_.map((r) => r.fingerprint).filter((v) => v != null));
+  return {
+    _id: key,
+    total: group_.length,
+    failures: group_.filter((r) => r.success === false).length,
+    writes: group_.filter((r) => WRITE_METHODS.includes(r.method)).length,
+    highRisk: group_.filter((r) => HIGH_RISK.includes(r.riskLevel)).length,
+    offHours: 0,
+    distinctIPs: ips.size,
+    distinctFingerprints: fps.size,
+  };
+};
+
 const mockRows = (rows) => {
   AuditLog.aggregate.mockImplementation((pipeline = []) => {
-    const match = pipeline.find((s) => s.$match)?.$match || {};
-    const group = pipeline.find((s) => s.$group)?.$group || {};
+    const match = stageOf(pipeline, '$match');
+    const group = stageOf(pipeline, '$group');
     const since = match?.timestamp?.$gte ? new Date(match.timestamp.$gte).getTime() : null;
     const until = match?.timestamp?.$lt ? new Date(match.timestamp.$lt).getTime() : Infinity;
 
-    const filtered = rows.filter((r) => {
-      const t = new Date(r.timestamp).getTime();
-      return (since === null || t >= since) && t < until;
-    });
-
-    // _id 为 null 表示整窗聚合；否则按「业务时区日期」分桶
     const byDay = group._id !== null;
-    const buckets = new Map();
-    for (const r of filtered) {
-      const key = byDay
-        ? new Date(r.timestamp).toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' })
-        : null;
-      if (!buckets.has(key)) buckets.set(key, []);
-      buckets.get(key).push(r);
-    }
+    const buckets = bucketRows(filterByWindow(rows, since, until), byDay);
 
-    const out = [];
-    for (const [key, group_] of buckets.entries()) {
-      const ips = new Set(group_.map((r) => r.ip).filter((v) => v != null));
-      const fps = new Set(group_.map((r) => r.fingerprint).filter((v) => v != null));
-      out.push({
-        _id: key,
-        total: group_.length,
-        failures: group_.filter((r) => r.success === false).length,
-        writes: group_.filter((r) => WRITE_METHODS.includes(r.method)).length,
-        highRisk: group_.filter((r) => HIGH_RISK.includes(r.riskLevel)).length,
-        offHours: 0,
-        distinctIPs: ips.size,
-        distinctFingerprints: fps.size,
-      });
-    }
-    return Promise.resolve(out);
+    return Promise.resolve(
+      [...buckets.entries()].map(([key, group_]) => buildBucketRow(key, group_))
+    );
   });
 };
 

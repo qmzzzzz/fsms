@@ -335,41 +335,49 @@ const ensureHsts = (req, res, next) => {
 // 打爆调用栈（RangeError→500 资源骚扰）；超限分支直接整体丢弃该子树
 const SANITIZE_MAX_DEPTH = 10;
 
-const deepSanitizeKeys = (obj, depth = 0) => {
-  if (!obj || typeof obj !== 'object') return;
-  // 数组需逐元素递归清洗：数组本身不携带 $ 键，但其元素对象可能携带，
-  // 直接跳过数组会让数组内对象的 $ 操作符成为漏网之鱼
-  if (Array.isArray(obj)) {
-    if (depth >= SANITIZE_MAX_DEPTH) {
-      obj.length = 0;
-      return;
-    }
-    obj.forEach((item) => deepSanitizeKeys(item, depth + 1));
+// 除 `$` 前缀与 `.` 之外还要剔除的原型链入口：JSON.parse 可产生同名自有属性，
+// 当前下游虽无对象合并消费点，显式剔除不依赖隐式前提
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** 该键是否必须删除（MongoDB 操作符/嵌套语法，或原型链入口） */
+const isForbiddenKey = (key) => key.startsWith('$') || key.includes('.') || FORBIDDEN_KEYS.has(key);
+
+/** 数组分支：逐元素递归；超深则整体丢弃该子树 */
+const sanitizeArray = (obj, depth) => {
+  if (depth >= SANITIZE_MAX_DEPTH) {
+    obj.length = 0;
     return;
   }
-  // 跳过 Date、Buffer 等特殊对象
-  if (obj instanceof Date || Buffer.isBuffer(obj)) return;
+  obj.forEach((item) => deepSanitizeKeys(item, depth + 1));
+};
+
+/** 普通对象分支：按键删除或递归；超深则整体丢弃该子树 */
+const sanitizePlainObject = (obj, depth) => {
   if (depth >= SANITIZE_MAX_DEPTH) {
     for (const k of Object.keys(obj)) delete obj[k];
     return;
   }
   for (const key of Object.keys(obj)) {
-    // 删除以 $ 开头或包含 . 的键（MongoDB 操作符/嵌套语法）；
-    // 同时剔除 __proto__/constructor——JSON.parse 可产生同名自有属性，
-    // 当前下游虽无对象合并消费点，显式剔除不依赖隐式前提
-    if (
-      key.startsWith('$') ||
-      key.includes('.') ||
-      key === '__proto__' ||
-      key === 'constructor' ||
-      key === 'prototype'
-    ) {
+    if (isForbiddenKey(key)) {
       logger.warn(`MongoDB 注入尝试被拦截：键 "${key}"`);
       delete obj[key];
     } else {
       deepSanitizeKeys(obj[key], depth + 1);
     }
   }
+};
+
+const deepSanitizeKeys = (obj, depth = 0) => {
+  if (!obj || typeof obj !== 'object') return;
+  // 数组需逐元素递归清洗：数组本身不携带 $ 键，但其元素对象可能携带，
+  // 直接跳过数组会让数组内对象的 $ 操作符成为漏网之鱼
+  if (Array.isArray(obj)) {
+    sanitizeArray(obj, depth);
+    return;
+  }
+  // 跳过 Date、Buffer 等特殊对象
+  if (obj instanceof Date || Buffer.isBuffer(obj)) return;
+  sanitizePlainObject(obj, depth);
 };
 
 const sanitizeMongo = (req, res, next) => {

@@ -1150,6 +1150,56 @@ async function changeUserPassword(userId, body, ctx) {
  * @returns {Promise<{outcome:'NOT_FOUND'|'INVALID_PHONE'|'INVALID_EMAIL'|'EMAIL_TAKEN'|'INVALID_AVATAR'|'OK'}>}
  *   OK 时附 { profile }
  */
+/** 资料入参的手机号/邮箱形态（原为函数内联字面量，取值与顺序不变） */
+const PROFILE_PHONE_RE = /^1[3-9]\d{9}$/;
+const PROFILE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * 资料入参格式校验（手机号 → 邮箱 → 头像，顺序即原实现顺序）。
+ *
+ * @returns {string|null} 拒绝时的 outcome，通过时 null
+ */
+function validateProfileInput({ email, phone, avatar }) {
+  // 验证手机号格式（如果提供）
+  if (phone && !PROFILE_PHONE_RE.test(phone)) return 'INVALID_PHONE';
+  // 验证邮箱格式（如果提供）
+  if (email && !PROFILE_EMAIL_RE.test(email)) return 'INVALID_EMAIL';
+  // 头像白名单校验：仅允许 http(s) URL、相对图片路径或 data:image 数据 URI（不含 svg，防存储型脚本注入）
+  if (avatar !== undefined && avatar !== '' && !isValidAvatar(avatar)) return 'INVALID_AVATAR';
+  return null;
+}
+
+/**
+ * 邮箱是否已被**其他**用户占用。
+ *
+ * ① `normalizedEmail !== normalizeEmailKey(user.email)` 是**普通 JS 比对**（无 setter）：
+ *    用户提交"自己邮箱的大写形态"时若不归一化就会判成"被他人占用"（实测过）。
+ * ② 查重改走 **emailKey**（A3）：email 列已加密，明文相等性在随机 IV 的密文列上
+ *    不成立。局部变量刻意叫 `normalizedEmail` 而**不叫** `emailKey`——后者现在是
+ *    schema 上的 HMAC 字段名，同名不同义极易写出 `user.emailKey = <小写明文>`
+ *    这种把明文写进检索键列的 bug（旧代码正是这个名字）。
+ */
+async function isEmailTakenByAnother(user, normalizedEmail) {
+  if (!normalizedEmail || normalizedEmail === normalizeEmailKey(user.email)) return false;
+  const existingUser = await User.findOne({ emailKey: piiSearchKey(normalizedEmail) });
+  return Boolean(existingUser);
+}
+
+/**
+ * 更新允许的字段（白名单，非黑名单）。
+ * department 不在其列——见 updateUserProfile 函数头的 H-01 说明；
+ * 它是授权范围来源，只能由管理员改。
+ */
+function assignProfileFields(user, { realName, email, phone, avatar }, normalizedEmail) {
+  if (realName !== undefined) user.realName = realName;
+  // 赋归一化后的明文（不是 emailKey）：写侧钩子负责加密并同步 HMAC 键与 n-gram，
+  // 落库的 email 是密文。这里若赋原样串，钩子也会再归一化一次——赋值取规范形态
+  // 只是让"内存里的值"与"落库明文"始终一致，便于紧邻的比对判据阅读。
+  if (email !== undefined) user.email = normalizedEmail;
+  if (phone !== undefined) user.phone = phone;
+  if (avatar !== undefined) user.avatar = avatar;
+}
+
 async function updateUserProfile(userId, body) {
   // 注意：不解构 department——即使请求体携带该字段也会被静默忽略（不报错，
   // 避免向调用方暴露"该字段不可改"的实现细节）
@@ -1162,45 +1212,17 @@ async function updateUserProfile(userId, body) {
     return { outcome: 'NOT_FOUND' };
   }
 
-  // 验证手机号格式（如果提供）
-  if (phone && !/^1[3-9]\d{9}$/.test(phone)) {
-    return { outcome: 'INVALID_PHONE' };
+  const invalid = validateProfileInput({ email, phone, avatar });
+  if (invalid) {
+    return { outcome: invalid };
   }
 
-  // 验证邮箱格式（如果提供）
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return { outcome: 'INVALID_EMAIL' };
-  }
-
-  // 检查邮箱是否已被其他用户使用
-  // ① `normalizedEmail !== normalizeEmailKey(user.email)` 是**普通 JS 比对**（无 setter）：
-  //    用户提交"自己邮箱的大写形态"时若不归一化就会判成"被他人占用"（实测过）。
-  // ② 查重改走 **emailKey**（A3）：email 列已加密，明文相等性在随机 IV 的密文列上
-  //    不成立。局部变量刻意叫 `normalizedEmail` 而**不叫** `emailKey`——后者现在是
-  //    schema 上的 HMAC 字段名，同名不同义极易写出 `user.emailKey = <小写明文>`
-  //    这种把明文写进检索键列的 bug（旧代码正是这个名字）。
   const normalizedEmail = normalizeEmailKey(email);
-  if (normalizedEmail && normalizedEmail !== normalizeEmailKey(user.email)) {
-    const existingUser = await User.findOne({ emailKey: piiSearchKey(normalizedEmail) });
-    if (existingUser) {
-      return { outcome: 'EMAIL_TAKEN' };
-    }
+  if (await isEmailTakenByAnother(user, normalizedEmail)) {
+    return { outcome: 'EMAIL_TAKEN' };
   }
 
-  // 头像白名单校验：仅允许 http(s) URL、相对图片路径或 data:image 数据 URI（不含 svg，防存储型脚本注入）
-  if (avatar !== undefined && avatar !== '' && !isValidAvatar(avatar)) {
-    return { outcome: 'INVALID_AVATAR' };
-  }
-
-  // 更新允许的字段（白名单，非黑名单）
-  // department 不在其列——见函数头 H-01 说明；它是授权范围来源，只能由管理员改
-  if (realName !== undefined) user.realName = realName;
-  // 赋归一化后的明文（不是 emailKey）：写侧钩子负责加密并同步 HMAC 键与 n-gram，
-  // 落库的 email 是密文。这里若赋原样串，钩子也会再归一化一次——赋值取规范形态
-  // 只是让"内存里的值"与"落库明文"始终一致，便于紧邻的比对判据阅读。
-  if (email !== undefined) user.email = normalizedEmail;
-  if (phone !== undefined) user.phone = phone;
-  if (avatar !== undefined) user.avatar = avatar;
+  assignProfileFields(user, { realName, email, phone, avatar }, normalizedEmail);
 
   await user.save();
 
@@ -1234,6 +1256,64 @@ async function updateUserProfile(userId, body) {
  * @param {object} ctx { operatorId, operatorUsername, ip, userAgent }
  * @returns {Promise<{outcome:'NOT_FOUND'|'FORBIDDEN_SAME_LEVEL'|'CANNOT_LOCK_SUPER_ADMIN'|'INACTIVE_UNLOCK'|'INACTIVE_LOCK'|'NOT_LOCKED'|'OK', ...}>}
  */
+/**
+ * 锁定/解锁的三类拒绝判据（层级 → 内置超管 → inactive 双向状态机），顺序即原实现顺序。
+ *
+ * @returns {string|null} 拒绝时的 outcome，通过时 null
+ */
+function checkLockTransitionAllowed(
+  user,
+  { locked, targetUserRoles, targetMaxLevel, operatorMaxLevel, operatorId }
+) {
+  // 禁止操作同级或更高级别的用户（isSelf 例外）
+  if (targetMaxLevel >= operatorMaxLevel && String(user._id) !== String(operatorId)) {
+    return 'FORBIDDEN_SAME_LEVEL';
+  }
+
+  // 禁止锁定超级管理员（无 isSelf 例外：锁定后层级校验会拦下所有解锁尝试）
+  if (locked && targetUserRoles.some(isSuperAdminRole)) {
+    return 'CANNOT_LOCK_SUPER_ADMIN';
+  }
+
+  // 仅当账户当前确实处于锁定态时才允许解锁并恢复为 active；
+  // 管理员禁用（inactive）的账户不允许借“解锁”复活，需先由管理员通过用户更新接口恢复启用
+  if (!locked && user.status === 'inactive') return 'INACTIVE_UNLOCK';
+  if (!locked && user.status !== 'locked') return 'NOT_LOCKED';
+  // 锁定方向同样拒绝已禁用账户：若允许 inactive → locked，
+  // 后续“锁定→解锁”链路会把禁用账户洗回 active，变相复活被禁用账户
+  if (locked && user.status === 'inactive') return 'INACTIVE_LOCK';
+  return null;
+}
+
+/**
+ * 状态与 lockUntil 的**写入计划**（纯函数，可单测）。
+ *
+ * 解锁必须连**临时锁定**一起清掉。两套锁定是分开的：管理员锁定改 status，
+ * 暴力破解阈值只写 lockUntil。而 authenticate（middleware/auth.js:297，经
+ * assertAccountUsable）与 loginUser（:350）都只看 lockUntil 就拒绝登录。
+ * 因此"先被爆破锁定、再被管理员锁定"的账户，此前解锁只改回 status ⇒
+ * 接口 200「用户已解锁」+ 审计 success:true，用户依然登不进来（且活令牌全部 403），
+ * 运维只会去怀疑密码。与"改密假成功"同一类：**报告了没做到的事**。
+ */
+function planLockStateChange({ locked, reason }) {
+  const plan = {
+    status: locked ? 'locked' : 'active',
+    clearTemporaryLock: !locked,
+  };
+  if (locked && reason) plan.remark = reason;
+  return plan;
+}
+
+/** 把写入计划落到文档上（只碰计划里明确列出的字段，未列出的保持原值） */
+function applyLockStatePlan(user, plan) {
+  user.status = plan.status;
+  if (plan.clearTemporaryLock) {
+    user.lockUntil = null;
+    user.failedLoginCount = 0;
+  }
+  if (plan.remark !== undefined) user.remark = plan.remark;
+}
+
 async function setUserLockStatus(userId, { locked, reason }, ctx) {
   const { operatorId, operatorUsername, ip, userAgent } = ctx;
 
@@ -1255,48 +1335,18 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
   // 直接用于 _id: {$in: ...} 会触发 CastError，导致整个接口 500）
   const operatorMaxLevel = await getOperatorMaxLevel(operatorId);
 
-  // 禁止操作同级或更高级别的用户
-  if (targetMaxLevel >= operatorMaxLevel && String(user._id) !== String(operatorId)) {
-    return { outcome: 'FORBIDDEN_SAME_LEVEL' };
+  const denial = checkLockTransitionAllowed(user, {
+    locked,
+    targetUserRoles,
+    targetMaxLevel,
+    operatorMaxLevel,
+    operatorId,
+  });
+  if (denial) {
+    return { outcome: denial };
   }
 
-  // 禁止锁定超级管理员（无 isSelf 例外：锁定后层级校验会拦下所有解锁尝试）
-  const isBuiltInSuperAdmin = targetUserRoles.some(isSuperAdminRole);
-  if (locked && isBuiltInSuperAdmin) {
-    return { outcome: 'CANNOT_LOCK_SUPER_ADMIN' };
-  }
-
-  // ===== 解锁/锁定状态保护 =====
-  // 仅当账户当前确实处于锁定态时才允许解锁并恢复为 active；
-  // 管理员禁用（inactive）的账户不允许借“解锁”复活，需先由管理员通过用户更新接口恢复启用
-  if (!locked && user.status === 'inactive') {
-    return { outcome: 'INACTIVE_UNLOCK' };
-  }
-  if (!locked && user.status !== 'locked') {
-    return { outcome: 'NOT_LOCKED' };
-  }
-  // 锁定方向同样拒绝已禁用账户：若允许 inactive → locked，
-  // 后续“锁定→解锁”链路会把禁用账户洗回 active，变相复活被禁用账户
-  if (locked && user.status === 'inactive') {
-    return { outcome: 'INACTIVE_LOCK' };
-  }
-
-  user.status = locked ? 'locked' : 'active';
-
-  // 解锁必须连**临时锁定**一起清掉。两套锁定是分开的：管理员锁定改 status，
-  // 暴力破解阈值只写 lockUntil（:443-446，不动 status）。而 authenticate
-  // （middleware/auth.js:297，经 assertAccountUsable）与 loginUser（:350）都只看 lockUntil 就拒绝登录。
-  // 因此"先被爆破锁定、再被管理员锁定"的账户，此前解锁只改回 status ⇒
-  // 接口 200「用户已解锁」+ 审计 success:true，用户依然登不进来（且活令牌全部 403），
-  // 运维只会去怀疑密码。与"改密假成功"同一类：**报告了没做到的事**。
-  if (!locked) {
-    user.lockUntil = null;
-    user.failedLoginCount = 0;
-  }
-
-  if (locked && reason) {
-    user.remark = reason;
-  }
+  applyLockStatePlan(user, planLockStateChange({ locked, reason }));
 
   await user.save();
 

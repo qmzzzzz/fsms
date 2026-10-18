@@ -16,7 +16,7 @@
  *       ① 措辞失实——`role_created`/`permission_assigned` 在**整个源码里不存在**（真实动作是
  *          `role_create`/`role_permissions`/`permission_batch` 等，constants/audit.js:60-67），
  *          且本控制器**没有任何 `AuditLog.create`**，角色/权限审计**全部**由全局中间件派生
- *          （utils/auditMeta.js:152 → middleware/security.js:953；挂载 src/app.js:319）。
+ *          （utils/auditMeta.js:152 → middleware/security.js:962；挂载 src/app.js:319）。
  *          锚点更正（2026-10-15）：本括号内三个锚点此前**全部指错位置**——`auditMeta.js:85-103`
  *          是 ACTION_SEGMENT_RE/foldRegisteredAction 的注释区（派生定义在 `:152`）、
  *          `security.js` 的旧值 `:648`（经内容保持式迁移为 `:666` → `:743`）落在

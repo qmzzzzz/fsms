@@ -1016,7 +1016,7 @@ describe('第 8 组 · 大写 :id 走单个入口', () => {
  *     AlarmService.js:181）的归一没有腿，且在当前接线下**造不出**能红的腿：调用方（守卫）
  *     已经先归一过一次，服务层这一句是幂等冗余 ⇒ 删掉它是等价变异。留着是纵深防御
  *     （新调用方不必重新想一遍口径），但要写清"这里没有腿，别把它当已覆盖"。
- *  4. permissionService.js:134（列表臂）与 permissionService.js:156（单值比对臂）由 src/tests/services/
+ *  4. permissionService.js:53（列表臂）与 permissionService.js:73（单值比对臂）由 src/tests/services/
  *     permissionParentIdCaseAndDedup.test.js（6 腿）钉。该闸台账里 parent-norm-dropped 是
  *     **已声明的等价变异**（本站点没有长度比较 ⇒ 预期存活），真正钉行为的是 parent-compare-raw
  *     （红:#2,#3,#5）。

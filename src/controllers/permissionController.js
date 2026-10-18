@@ -88,6 +88,86 @@ const createPermission = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, createdPerm, '权限创建成功', 201);
 });
 
+/** 可批量赋值的白名单字段（parent 不在其列：它要走存在性/成环/深度三道校验） */
+const UPDATABLE_PERMISSION_FIELDS = [
+  'name',
+  'description',
+  'type',
+  'module',
+  'path',
+  'method',
+  'sort',
+  'status',
+];
+
+/** 权限树环路检测的深度上限（与原实现同值） */
+const MAX_PARENT_DEPTH = 32;
+
+/** 按白名单把请求体里出现过的字段写入文档（未提供的字段保持原值） */
+const applyUpdatableFields = (permission, body) => {
+  for (const field of UPDATABLE_PERMISSION_FIELDS) {
+    if (body[field] !== undefined) permission[field] = body[field];
+  }
+};
+
+/**
+ * 从待挂载父级沿 parent 链上溯，检测「回到自身」（成环）与深度异常。
+ *
+ * @returns {Promise<'OK'|'CYCLE'|'DEPTH'>}
+ */
+const checkParentChain = async (parentExists, permissionId) => {
+  let cursor = parentExists;
+  let depth = 0;
+  while (cursor && depth < MAX_PARENT_DEPTH) {
+    if (String(cursor._id) === String(permissionId)) return 'CYCLE';
+    if (!cursor.parent) return 'OK';
+    cursor = await permissionService.getAncestorForCycleCheck(cursor.parent);
+    depth += 1;
+  }
+  return depth >= MAX_PARENT_DEPTH ? 'DEPTH' : 'OK';
+};
+
+/**
+ * 处理 parent 字段：未提供则不动；显式空值（''/null）表示清除父级、置为顶层权限；
+ * 提供非空 parent 时必须真实存在且不能指向自身、不能成环。
+ *
+ * @returns {Promise<boolean>} true 表示已拒绝并写出响应（调用方应立即 return）
+ */
+const applyParentChange = async (permission, parent, res) => {
+  if (parent === undefined) return false;
+  if (parent === null || parent === '') {
+    permission.parent = null;
+    return false;
+  }
+
+  if (String(parent) === String(permission._id)) {
+    ApiResponse.codeError(res, 'PARENT_PERMISSION_SELF');
+    return true;
+  }
+
+  const parentExists = await permissionService.getPermissionForUpdate(parent);
+  if (!parentExists) {
+    ApiResponse.codeError(res, 'PARENT_PERMISSION_NOT_FOUND');
+    return true;
+  }
+
+  const chain = await checkParentChain(parentExists, permission._id);
+  if (chain === 'CYCLE') {
+    ApiResponse.codeError(res, 'PARENT_PERMISSION_CYCLE');
+    return true;
+  }
+  if (chain === 'DEPTH') {
+    logger.warn(
+      `权限树深度超过 ${MAX_PARENT_DEPTH}，环路检测提前终止：permissionId=${permission._id}`
+    );
+    ApiResponse.codeError(res, 'PERMISSION_TREE_DEPTH_ANOMALY');
+    return true;
+  }
+
+  permission.parent = parent;
+  return false;
+};
+
 /**
  * 更新权限
  * PUT /api/permissions/:id
@@ -100,7 +180,7 @@ const updatePermission = asyncHandler(async (req, res) => {
     });
   }
 
-  const { name, description, type, module, parent, path, method, sort, status } = req.body;
+  const { parent, status } = req.body;
   const permission = await permissionService.getPermissionForUpdate(req.params.id);
   if (!permission) {
     return ApiResponse.codeError(res, 'PERMISSION_NOT_FOUND');
@@ -116,47 +196,9 @@ const updatePermission = asyncHandler(async (req, res) => {
     });
   }
 
-  // 提供非空 parent 时必须真实存在且不能指向自身；
-  // 显式传空值（''/null）表示清除父级、置为顶层权限。
-  if (parent !== undefined && parent !== null && parent !== '') {
-    if (String(parent) === String(permission._id)) {
-      return ApiResponse.codeError(res, 'PARENT_PERMISSION_SELF');
-    }
+  if (await applyParentChange(permission, parent, res)) return;
 
-    const parentExists = await permissionService.getPermissionForUpdate(parent);
-    if (!parentExists) {
-      return ApiResponse.codeError(res, 'PARENT_PERMISSION_NOT_FOUND');
-    }
-
-    const MAX_DEPTH = 32;
-    let cursor = parentExists;
-    let depth = 0;
-    while (cursor && depth < MAX_DEPTH) {
-      if (String(cursor._id) === String(permission._id)) {
-        return ApiResponse.codeError(res, 'PARENT_PERMISSION_CYCLE');
-      }
-      if (!cursor.parent) break;
-      cursor = await permissionService.getAncestorForCycleCheck(cursor.parent);
-      depth += 1;
-    }
-    if (depth >= MAX_DEPTH) {
-      logger.warn(`权限树深度超过 ${MAX_DEPTH}，环路检测提前终止：permissionId=${permission._id}`);
-      return ApiResponse.codeError(res, 'PERMISSION_TREE_DEPTH_ANOMALY');
-    }
-
-    permission.parent = parent;
-  } else if (parent !== undefined) {
-    permission.parent = null;
-  }
-
-  if (name !== undefined) permission.name = name;
-  if (description !== undefined) permission.description = description;
-  if (type !== undefined) permission.type = type;
-  if (module !== undefined) permission.module = module;
-  if (path !== undefined) permission.path = path;
-  if (method !== undefined) permission.method = method;
-  if (sort !== undefined) permission.sort = sort;
-  if (status !== undefined) permission.status = status;
+  applyUpdatableFields(permission, req.body);
 
   const updatedPerm = await permissionService.savePermission(permission);
 

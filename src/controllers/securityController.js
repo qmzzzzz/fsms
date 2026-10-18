@@ -755,6 +755,152 @@ const resetUserMfa = asyncHandler(async (req, res) => {
 });
 
 /**
+ * 概览对象的形状校验：不合法就直接写出响应并返回 true。
+ *
+ * 两条判据各自独立（先判"是不是对象"，再判"三个计数是不是数字"），
+ * 顺序不能合并——合并后一个 null 会同时命中两条，错误码就分不清了。
+ * 码字面量必须留在 codeError 调用的**第二个实参**位置上（写成字符串字面量）：改成"返回错误码字符串、
+ * 由调用方 codeError(res, shapeError)"会让 `emittedErrorCodeCoverage` 的提取器
+ * 看不见这两个码，它们会被误判成死码。
+ *
+ * @returns {boolean} true 表示已拒绝并写出响应（调用方应立即 return）
+ */
+const rejectMalformedOverview = (overview, res) => {
+  if (!overview || typeof overview !== 'object') {
+    ApiResponse.codeError(res, 'SECURITY_OVERVIEW_FORMAT_INVALID');
+    return true;
+  }
+  // 验证必要的字段
+  if (
+    typeof overview.criticalAlerts !== 'number' ||
+    typeof overview.highAlerts !== 'number' ||
+    typeof overview.failedLogins !== 'number'
+  ) {
+    ApiResponse.codeError(res, 'SECURITY_OVERVIEW_STRUCTURE_INVALID');
+    return true;
+  }
+  return false;
+};
+
+/** 非负钳位与缺省值（原实现逐字段展开，取值口径不变） */
+const clampOverviewNumbers = (overview) => {
+  // 添加默认值
+  overview.period = overview.period || `${7}天`;
+  // 确保所有数字字段都是非负数
+  overview.criticalAlerts = Math.max(0, overview.criticalAlerts);
+  overview.highAlerts = Math.max(0, overview.highAlerts);
+  overview.failedLogins = Math.max(0, overview.failedLogins);
+  // 添加额外的安全指标
+  overview.unusualAccess =
+    typeof overview.unusualAccess === 'number' ? Math.max(0, overview.unusualAccess) : 0;
+  // L-03/P3-6：riskScore 以 securityAlert.getSecurityOverview 的计算为准
+  // （unusualAccess 系数 5）。此前控制器用系数 3 整个重算覆盖，两处口径
+  // 漂移后改哪处都会被另一处静默抵消。此处仅做边界钳位，不再重算。
+  overview.riskScore = Math.min(
+    100,
+    Math.max(0, typeof overview.riskScore === 'number' ? overview.riskScore : 0)
+  );
+};
+
+/** 安全建议：三条阈值各自独立，顺序固定（前端按数组顺序展示） */
+const buildOverviewSuggestions = ({ riskScore, failedLogins, unusualAccess }) => {
+  const suggestions = [];
+  if (riskScore > 70) {
+    suggestions.push(SECURITY_SUGGESTION_CODES.HIGH_RISK_SCORE);
+  }
+  if (failedLogins > 10) {
+    suggestions.push(SECURITY_SUGGESTION_CODES.EXCESSIVE_FAILED_LOGINS);
+  }
+  if (unusualAccess > 5) {
+    suggestions.push(SECURITY_SUGGESTION_CODES.UNUSUAL_TIME_ACCESS);
+  }
+  return suggestions;
+};
+
+/**
+ * 合规指标块（阶段5.1）：审计日志合规就绪度，供合规仪表盘展示。
+ *
+ * 整块自带 try/catch：取不到就降级成 `{ error }`，而不是让外层把整个概览
+ * 变成 500——面板上"合规项取不到"远好过"安全概览整个打不开"。
+ */
+const buildComplianceSection = async () => {
+  try {
+    const { getLatestHash } = require('../utils/auditChain');
+    const auditMonitor = require('../services/auditMonitor');
+    const auditBuffer = require('../services/auditBuffer');
+    const AuditLogModel = require('../models/AuditLog');
+    const chainTailHash = await getLatestHash(AuditLogModel);
+    return {
+      // P3-46：对外展示的必须是**实际生效值**而非原始配置值。
+      // 原实现 `parseInt(...) || 180` 会把 AUDIT_RETENTION_DAYS=1 如实报成 1，
+      // 而数据库 TTL 实为 90 天——合规仪表盘与真实留存不一致，两种方向都危险：
+      // 报低了让人误以为不合规去调参，报高了则是对外虚假声明
+      retentionDays: RETENTION_DAYS,
+      // 配置被钳制/回退时一并暴露，让运维知道自己的配置未被原样采用
+      retentionConfigAdjusted: retentionWasAdjusted,
+      // 原先这里写死 `appendOnlyEnforced: true`——防篡改护栏的真实状态是
+      // models/auditLogHooks.js 里的闭包变量（测试环境可关），而对外合规面板
+      // 把它当事实陈述。现在读实际生效值；getter 缺失时让整块落到 catch 报
+      // `error`（宁可报"取不到"，也不报一个编出来的 true）。
+      appendOnlyEnforced: AuditLogModel.isAppendOnlyEnforced(),
+      monitorRunning:
+        typeof auditMonitor.isRunning === 'function' ? auditMonitor.isRunning() : false,
+      // F-125：isRunning() 只回答"定时器挂着没有"，回答不了"检测有没有在成功跑"。
+      // 定时任务最常见的静默失效形态是「面板说活着、实际每轮都失败」，
+      // 而 runs/failures/consecutiveFailures/skippedOverlaps 此前只有测试能读
+      // ——与本块 auditLoss 修的是同一个缺陷类（有指标、无出口）。
+      // 兜底走 null 而不是让它抛：这里抛 TypeError 会把整段 compliance
+      // （留存天数/链尾哈希/丢失计数）一起降级成 `{error}`，代价远大于一个字段。
+      monitorHealth: typeof auditMonitor.getHealth === 'function' ? auditMonitor.getHealth() : null,
+      walEnabled:
+        typeof auditBuffer.isWalEnabled === 'function' ? auditBuffer.isWalEnabled() : false,
+      // 审计导出没有运行期开关（路由恒挂载），所以这个键不携带信息量；
+      // 保留是为了不打破既有消费方，读它的人应当知道它恒为 true。
+      exportEnabled: true,
+      // F-215：原先写 `!!process.env.LOG_SHIPPING_URL`。那个表达式回答的是
+      // "配过这么个变量"，不是"日志正在往 SIEM 送"：变量写成不可解析的串时
+      // transport 仍会挂载成功、启动日志仍会打「日志转发已启用」，面板再说一遍
+      // 同一个误判没有任何价值（三个取值实测见 utils/logger.js 的 F-215 注释）。
+      // 现在读挂载态，判据与邻居 walEnabled / monitorRunning 同口径。
+      shippingEnabled:
+        typeof logger.isShippingEnabled === 'function' ? logger.isShippingEnabled() : false,
+      chainTailHash: chainTailHash || null,
+      // 「有没有永久缺失的审计」此前只有测试能读（getStats 无生产读取方）。
+      // 合规面板是这些指标唯一该有的地方：任何一项 >0 都意味着有一份需要取证的
+      // 完整性缺口（各键的确切含义见下方逐项注释——有的是"已丢"，有的是"会重复"）。
+      auditLoss: (() => {
+        const s = auditBuffer.getStats();
+        return {
+          droppedCount: s.droppedCount,
+          walDroppedLines: s.walDroppedLines,
+          walDiscardedLines: s.walDiscardedLines,
+          // 解析不出文档的 WAL 行：不重放也裁不掉，每次重启原地重复出现。
+          // 少了这一项，"证据在 WAL 里但永远进不了库"这条失踪路径仍是 0。
+          walCorruptLines: s.walCorruptLines,
+          // WAL 追加失败：这一项 >0 说的是"崩溃保护层已经失效"，不是"已经丢了"——
+          // 记录仍在内存缓冲里，落库成功就无损；但落库前进程退出就是永久缺失，
+          // 所以它和上面几项一样需要取证。缺了它，面板会在磁盘根本写不进去时
+          // 仍然报 walEnabled: true（追加失败的证据只有一行 warn 日志）。
+          walAppendFailures: s.walAppendFailures,
+          // 重放补号回写失败：口径与上面几项**不同**——它不是"已经少了记录"，
+          // 而是"文件里那批行仍然没有身份，下次重启会被当成新记录再落一份"
+          // （重复行 + 哈希链分叉）。放在同一块里是因为运维动作同类：取 WAL 原件核查。
+          walRewriteFailures: s.walRewriteFailures,
+          // F-217：裁剪侧失败。口径与上面三项都不同——它既不是"少了一条记录"也不是
+          // "那批行没有身份"，而是"50MB 硬上限已经越过而这一轮什么都没省下"，
+          // 也就是 R-6 正在静默失效（WAL 无界增长）。缺了它，面板在
+          // walEnabled:true + 三个计数全 0 时无法与"上限从未被触碰"区分。
+          walTrimFailures: s.walTrimFailures,
+          outageFailures: s.outageFailures,
+        };
+      })(),
+    };
+  } catch (e) {
+    return { error: '合规指标获取失败' };
+  }
+};
+
+/**
  * 获取安全概览
  * GET /api/security/overview
  */
@@ -762,47 +908,15 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
   try {
     const securityAlert = require('../services/securityAlert');
     const overview = await securityAlert.getSecurityOverview(7);
-    if (!overview || typeof overview !== 'object') {
-      return ApiResponse.codeError(res, 'SECURITY_OVERVIEW_FORMAT_INVALID');
+    if (rejectMalformedOverview(overview, res)) {
+      return;
     }
-    // 验证必要的字段
-    if (
-      typeof overview.criticalAlerts !== 'number' ||
-      typeof overview.highAlerts !== 'number' ||
-      typeof overview.failedLogins !== 'number'
-    ) {
-      return ApiResponse.codeError(res, 'SECURITY_OVERVIEW_STRUCTURE_INVALID');
-    }
-    // 添加默认值
-    overview.period = overview.period || `${7}天`;
-    // 确保所有数字字段都是非负数
-    overview.criticalAlerts = Math.max(0, overview.criticalAlerts);
-    overview.highAlerts = Math.max(0, overview.highAlerts);
-    overview.failedLogins = Math.max(0, overview.failedLogins);
-    // 添加额外的安全指标
-    overview.unusualAccess =
-      typeof overview.unusualAccess === 'number' ? Math.max(0, overview.unusualAccess) : 0;
-    // L-03/P3-6：riskScore 以 securityAlert.getSecurityOverview 的计算为准
-    // （unusualAccess 系数 5）。此前控制器用系数 3 整个重算覆盖，两处口径
-    // 漂移后改哪处都会被另一处静默抵消。此处仅做边界钳位，不再重算。
-    overview.riskScore = Math.min(
-      100,
-      Math.max(0, typeof overview.riskScore === 'number' ? overview.riskScore : 0)
-    );
+    clampOverviewNumbers(overview);
     // 添加时间戳（不包含服务器环境信息，防止信息泄露）
     overview.updatedAt = new Date().toISOString();
     overview.version = '1.0.0';
     // 添加安全建议
-    overview.suggestions = [];
-    if (overview.riskScore > 70) {
-      overview.suggestions.push(SECURITY_SUGGESTION_CODES.HIGH_RISK_SCORE);
-    }
-    if (overview.failedLogins > 10) {
-      overview.suggestions.push(SECURITY_SUGGESTION_CODES.EXCESSIVE_FAILED_LOGINS);
-    }
-    if (overview.unusualAccess > 5) {
-      overview.suggestions.push(SECURITY_SUGGESTION_CODES.UNUSUAL_TIME_ACCESS);
-    }
+    overview.suggestions = buildOverviewSuggestions(overview);
     // P3-6：原 summary.successRate = (四类事件总数 - 失败登录数) / 总数，
     // 分母混入了告警数——criticalAlerts=100、failedLogins=10 时显示 90.9%，
     // 这个"成功率"没有任何可解释的业务含义（概览里根本没有成功登录计数），
@@ -813,82 +927,7 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
       avgResponseTime: 0, // 后续可以添加平均响应时间
       maxConcurrentConnections: 0, // 后续可以添加最大并发连接数
     };
-    // 合规指标（阶段5.1）：审计日志合规就绪度，供合规仪表盘展示
-    try {
-      const { getLatestHash } = require('../utils/auditChain');
-      const auditMonitor = require('../services/auditMonitor');
-      const auditBuffer = require('../services/auditBuffer');
-      const AuditLogModel = require('../models/AuditLog');
-      const chainTailHash = await getLatestHash(AuditLogModel);
-      overview.compliance = {
-        // P3-46：对外展示的必须是**实际生效值**而非原始配置值。
-        // 原实现 `parseInt(...) || 180` 会把 AUDIT_RETENTION_DAYS=1 如实报成 1，
-        // 而数据库 TTL 实为 90 天——合规仪表盘与真实留存不一致，两种方向都危险：
-        // 报低了让人误以为不合规去调参，报高了则是对外虚假声明
-        retentionDays: RETENTION_DAYS,
-        // 配置被钳制/回退时一并暴露，让运维知道自己的配置未被原样采用
-        retentionConfigAdjusted: retentionWasAdjusted,
-        // 原先这里写死 `appendOnlyEnforced: true`——防篡改护栏的真实状态是
-        // models/auditLogHooks.js 里的闭包变量（测试环境可关），而对外合规面板
-        // 把它当事实陈述。现在读实际生效值；getter 缺失时让整块落到 catch 报
-        // `error`（宁可报"取不到"，也不报一个编出来的 true）。
-        appendOnlyEnforced: AuditLogModel.isAppendOnlyEnforced(),
-        monitorRunning:
-          typeof auditMonitor.isRunning === 'function' ? auditMonitor.isRunning() : false,
-        // F-125：isRunning() 只回答"定时器挂着没有"，回答不了"检测有没有在成功跑"。
-        // 定时任务最常见的静默失效形态是「面板说活着、实际每轮都失败」，
-        // 而 runs/failures/consecutiveFailures/skippedOverlaps 此前只有测试能读
-        // ——与本块 auditLoss 修的是同一个缺陷类（有指标、无出口）。
-        // 兜底走 null 而不是让它抛：这里抛 TypeError 会把整段 compliance
-        // （留存天数/链尾哈希/丢失计数）一起降级成 `{error}`，代价远大于一个字段。
-        monitorHealth:
-          typeof auditMonitor.getHealth === 'function' ? auditMonitor.getHealth() : null,
-        walEnabled:
-          typeof auditBuffer.isWalEnabled === 'function' ? auditBuffer.isWalEnabled() : false,
-        // 审计导出没有运行期开关（路由恒挂载），所以这个键不携带信息量；
-        // 保留是为了不打破既有消费方，读它的人应当知道它恒为 true。
-        exportEnabled: true,
-        // F-215：原先写 `!!process.env.LOG_SHIPPING_URL`。那个表达式回答的是
-        // "配过这么个变量"，不是"日志正在往 SIEM 送"：变量写成不可解析的串时
-        // transport 仍会挂载成功、启动日志仍会打「日志转发已启用」，面板再说一遍
-        // 同一个误判没有任何价值（三个取值实测见 utils/logger.js 的 F-215 注释）。
-        // 现在读挂载态，判据与邻居 walEnabled / monitorRunning 同口径。
-        shippingEnabled:
-          typeof logger.isShippingEnabled === 'function' ? logger.isShippingEnabled() : false,
-        chainTailHash: chainTailHash || null,
-        // 「有没有永久缺失的审计」此前只有测试能读（getStats 无生产读取方）。
-        // 合规面板是这些指标唯一该有的地方：任何一项 >0 都意味着有一份需要取证的
-        // 完整性缺口（各键的确切含义见下方逐项注释——有的是"已丢"，有的是"会重复"）。
-        auditLoss: (() => {
-          const s = auditBuffer.getStats();
-          return {
-            droppedCount: s.droppedCount,
-            walDroppedLines: s.walDroppedLines,
-            walDiscardedLines: s.walDiscardedLines,
-            // 解析不出文档的 WAL 行：不重放也裁不掉，每次重启原地重复出现。
-            // 少了这一项，"证据在 WAL 里但永远进不了库"这条失踪路径仍是 0。
-            walCorruptLines: s.walCorruptLines,
-            // WAL 追加失败：这一项 >0 说的是"崩溃保护层已经失效"，不是"已经丢了"——
-            // 记录仍在内存缓冲里，落库成功就无损；但落库前进程退出就是永久缺失，
-            // 所以它和上面几项一样需要取证。缺了它，面板会在磁盘根本写不进去时
-            // 仍然报 walEnabled: true（追加失败的证据只有一行 warn 日志）。
-            walAppendFailures: s.walAppendFailures,
-            // 重放补号回写失败：口径与上面几项**不同**——它不是"已经少了记录"，
-            // 而是"文件里那批行仍然没有身份，下次重启会被当成新记录再落一份"
-            // （重复行 + 哈希链分叉）。放在同一块里是因为运维动作同类：取 WAL 原件核查。
-            walRewriteFailures: s.walRewriteFailures,
-            // F-217：裁剪侧失败。口径与上面三项都不同——它既不是"少了一条记录"也不是
-            // "那批行没有身份"，而是"50MB 硬上限已经越过而这一轮什么都没省下"，
-            // 也就是 R-6 正在静默失效（WAL 无界增长）。缺了它，面板在
-            // walEnabled:true + 三个计数全 0 时无法与"上限从未被触碰"区分。
-            walTrimFailures: s.walTrimFailures,
-            outageFailures: s.outageFailures,
-          };
-        })(),
-      };
-    } catch (e) {
-      overview.compliance = { error: '合规指标获取失败' };
-    }
+    overview.compliance = await buildComplianceSection();
     return ApiResponse.success(res, overview, '获取成功');
   } catch (error) {
     logger.error(`安全概览查询失败: ${error.message}`);

@@ -98,16 +98,13 @@ const WIRED = () => classify(sourceFiles()).wired;
  * 各自的证据写在 reason 里，由下面第 2 组逐条复核（不是登记了就免检）。
  */
 const EXEMPT = [
-  {
-    rel: 'src/services/authService.js',
-    // A3：查重目标从明文列 email 改为 HMAC 检索键 emailKey（明文列已加密，
-    // 随机 IV 下相等性不成立）。局部变量叫 normalizedEmail 而非 emailKey——
-    // 后者现在是 schema 字段名，同名不同义。
-    contains: 'User.findOne({ emailKey: piiSearchKey(normalizedEmail) })',
-    reason:
-      '邮箱查重：结果只用于 if (existingUser) 判存在，文档不落地；save 的是另一个变量 user（已带排除投影）',
-    recheck: (t) => /emailKey/.test(t),
-  },
+  // 2026-10-18（lint 批 1）：原先这里登记的是 authService 里那条
+  // `User.findOne({ emailKey: piiSearchKey(normalizedEmail) })`——它当时与
+  // `user.save()` 同处 updateUserProfile 体内，采集器按「裸载入 + 近处有 save」
+  // 判成需要解释的站点。该查重已抽到独立的 `isEmailTakenByAnother(user, normalizedEmail)`：
+  // 函数体内**只有读、没有 save**，与 save 的调用点隔了一次返回，采集器不再把它当站点。
+  // 这不是把告警删掉——安全性是**变强**了（查重文档现在连"可能被顺手 save"的上下文都没有），
+  // 所以按本台账"删了不许留空条目"的规矩移除登记，理由留在这里备查。
   {
     rel: 'src/services/userService.js',
     contains: 'User.findOne(filter)',

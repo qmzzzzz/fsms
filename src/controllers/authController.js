@@ -261,6 +261,33 @@ const login = asyncHandler(async (req, res) => {
 });
 
 /**
+ * 刷新失败 outcome → 响应函数。
+ *
+ * 顺序无关（查表，不是 switch 链）；**'OK' 刻意不在表内**——不在表内即视为
+ * 「未知 outcome」，落到 fail-closed 的 rejectUnknownOutcome，绝不落到成功分支
+ * （依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查）。
+ * 用 Map 而不是普通对象：普通对象会把 'constructor'/'__proto__' 这类原型键读成真值。
+ *
+ * 值写成「直接调 codeError 的箭头函数」而不是「错误码字符串」是有意的：
+ * 码字面量必须留在 codeError 调用的**第二个实参**位置上（写成字符串字面量），否则
+ * `src/tests/emittedErrorCodeCoverage.test.js` 的提取器看不见它们，
+ * 这些码会被判成"注册了却没人发"的死码——而它们其实还在发。
+ */
+const REFRESH_OUTCOME_RESPONSES = new Map([
+  ['MISSING', (res) => ApiResponse.codeError(res, 'REFRESH_TOKEN_MISSING')],
+  ['INVALID', (res) => ApiResponse.codeError(res, 'REFRESH_TOKEN_INVALID')],
+  ['IP_DENIED', (res) => ApiResponse.codeError(res, 'REFRESH_TOKEN_REVOKED')],
+  ['REPLAYED', (res) => ApiResponse.codeError(res, 'REFRESH_TOKEN_REVOKED')],
+  ['PASSWORD_CHANGED', (res) => ApiResponse.codeError(res, 'PASSWORD_CHANGED_RELOGIN')],
+  ['VERSION_MISMATCH', (res) => ApiResponse.codeError(res, 'SESSION_EXPIRED')],
+  ['BLACKLIST_UNAVAILABLE', (res) => ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE')],
+  ['SESSION_UNAVAILABLE', (res) => ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE')],
+  ['REVOKE_UNAVAILABLE', (res) => ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE')],
+  ['SESSION_REVOKED', (res) => ApiResponse.codeError(res, 'DEVICE_SESSION_REVOKED')],
+  ['EXPIRED', (res) => ApiResponse.codeError(res, 'REFRESH_TOKEN_EXPIRED')],
+]);
+
+/**
  * 刷新 Token
  * POST /api/auth/refresh
  */
@@ -286,31 +313,9 @@ const refreshToken = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'REFRESH_TOKEN_INVALID');
   }
 
-  switch (result.outcome) {
-    case 'MISSING':
-      return ApiResponse.codeError(res, 'REFRESH_TOKEN_MISSING');
-    case 'INVALID':
-      return ApiResponse.codeError(res, 'REFRESH_TOKEN_INVALID');
-    case 'IP_DENIED':
-    case 'REPLAYED':
-      return ApiResponse.codeError(res, 'REFRESH_TOKEN_REVOKED');
-    case 'PASSWORD_CHANGED':
-      return ApiResponse.codeError(res, 'PASSWORD_CHANGED_RELOGIN');
-    case 'VERSION_MISMATCH':
-      return ApiResponse.codeError(res, 'SESSION_EXPIRED');
-    case 'BLACKLIST_UNAVAILABLE':
-    case 'SESSION_UNAVAILABLE':
-    case 'REVOKE_UNAVAILABLE':
-      return ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE');
-    case 'SESSION_REVOKED':
-      return ApiResponse.codeError(res, 'DEVICE_SESSION_REVOKED');
-    case 'EXPIRED':
-      return ApiResponse.codeError(res, 'REFRESH_TOKEN_EXPIRED');
-    case 'OK':
-      break;
-    default:
-      // 未知 outcome 一律 fail-closed（依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查），绝不落到成功分支
-      return rejectUnknownOutcome(res, 'refreshToken', result.outcome);
+  if (result.outcome !== 'OK') {
+    const respond = REFRESH_OUTCOME_RESPONSES.get(result.outcome);
+    return respond ? respond(res) : rejectUnknownOutcome(res, 'refreshToken', result.outcome);
   }
 
   // 轮换时同步轮换两个 cookie（I-01）；响应体保留 tokens 字段兼容既有消费者

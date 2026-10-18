@@ -142,7 +142,7 @@ const LEDGER = [
   },
   {
     site: 'src/services/authService.js',
-    siteLine: 1288,
+    siteLine: 1293,
     raw: '（:350）',
     status: 'DEBT',
     wrongFrom: 350,
@@ -151,14 +151,14 @@ const LEDGER = [
     from: 230,
     to: 230,
     mustRead: 'async function loginUser',
-    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动',
+    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动；2026-10-18 lint 批 1 把 setUserLockStatus 的判据/写入计划抽成具名函数（本注释所在块 +5 行）⇒ 1288→1293，指代目标 :230 不受影响',
   },
   {
     site: 'src/services/permissionService.js',
-    siteLine: 171,
+    siteLine: 90,
     raw: '（:3248）',
     status: 'EXTERNAL',
-    note: '指 mongoose 的 model.js（上一行点名 model.js:3218-3220）；本文件只有 192 行，按所在文件反解必判死锚——依赖内部行号，本闸不核，只钉站点。站点行号 169→171：父级 id 归一的注释与 require 各占几行把它推下去了（指代目标 :3248 是别仓文件，不受影响）',
+    note: '指 mongoose 的 model.js（上一行点名 model.js:3218-3220）；本文件只有 192 行，按所在文件反解必判死锚——依赖内部行号，本闸不核，只钉站点。站点行号 169→171：父级 id 归一的注释与 require 各占几行把它推下去了（指代目标 :3248 是别仓文件，不受影响）。2026-10-18 lint 批 1 把批量落库的「部分成功」注释整段搬进 insertDocsTolerant 的文档块（批量创建逻辑拆成具名函数，原 :171 处的代码块整体上移）⇒ 站点 171→90，指代目标 :3248 仍在别仓、不受影响',
   },
   {
     site: 'src/services/securityAlert.js',

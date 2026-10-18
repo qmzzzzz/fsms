@@ -132,6 +132,145 @@ const recordViolation = (req, violation, detail) => {
 };
 
 /**
+ * 1. HTTP 方法白名单
+ *
+ * @returns {boolean} true 表示已拒绝并写出响应（调用方应立即 return）
+ */
+const checkRequestMethod = (req, res) => {
+  if (!FORBIDDEN_METHODS.includes(req.method)) return false;
+  recordViolation(req, 'forbidden_method', `方法 ${req.method} 不被允许`);
+  ApiResponse.codeError(res, 'HTTP_METHOD_UNSUPPORTED', {
+    message: `不支持的请求方法：${req.method}`,
+    params: { method: req.method },
+  });
+  return true;
+};
+
+/**
+ * 单个请求头的卫生检查（头名字符集 + 头值长度）
+ *
+ * @returns {boolean} true 表示已拒绝并写出响应
+ */
+const checkSingleHeader = (req, res, name, value, maxHeaderValueLength) => {
+  // Node 已将头名小写化，此处校验字符集，拦截含控制字符/空格的畸形头名
+  if (!VALID_HEADER_NAME.test(name)) {
+    recordViolation(req, 'invalid_header_name', `非法头名：${name.slice(0, 64)}`);
+    ApiResponse.codeError(res, 'HEADER_NAME_INVALID');
+    return true;
+  }
+  const len = Array.isArray(value)
+    ? value.reduce((sum, v) => sum + String(v).length, 0)
+    : String(value ?? '').length;
+  if (len > maxHeaderValueLength) {
+    recordViolation(req, 'oversized_header', `头部 ${name} 长度 ${len} 超过上限`);
+    ApiResponse.codeError(res, 'HEADER_VALUE_TOO_LONG');
+    return true;
+  }
+  return false;
+};
+
+/**
+ * 2. 请求头卫生检查（数量上限 + 逐个头名/头值）
+ *
+ * @returns {boolean} true 表示已拒绝并写出响应
+ */
+const checkHeaderHygiene = (req, res, { maxHeaderCount, maxHeaderValueLength }) => {
+  const headerNames = Object.keys(req.headers || {});
+  if (headerNames.length > maxHeaderCount) {
+    recordViolation(
+      req,
+      'excessive_headers',
+      `头部数量 ${headerNames.length} 超过上限 ${maxHeaderCount}`
+    );
+    ApiResponse.codeError(res, 'HEADER_COUNT_EXCESSIVE');
+    return true;
+  }
+
+  for (const name of headerNames) {
+    if (checkSingleHeader(req, res, name, req.headers[name], maxHeaderValueLength)) return true;
+  }
+  return false;
+};
+
+/**
+ * 3. Host 头校验（防 Host 头注入导致的密码重置链接投毒等）
+ *    豁免只作用于这一条校验，判据与安全论证见 HOST_GATE_EXEMPT_PATHS
+ *
+ * @returns {boolean} true 表示已拒绝并写出响应
+ */
+const checkHostHeader = (req, res, { allowedHosts, fullPath }) => {
+  if (allowedHosts.length === 0) return false;
+  if (HOST_GATE_EXEMPT_PATHS.has(fullPath.toLowerCase())) return false;
+  const host = req.get('host');
+  if (host && allowedHosts.includes(host)) return false;
+  recordViolation(req, 'host_mismatch', `Host 头 ${host || '(空)'} 不在允许列表内`);
+  ApiResponse.codeError(res, 'HOST_HEADER_INVALID');
+  return true;
+};
+
+/**
+ * 4. Content-Length 上限（早于 body 解析拒绝）
+ *
+ * @returns {boolean} true 表示已拒绝并写出响应
+ */
+const checkContentLength = (req, res, maxContentLength) => {
+  const contentLengthRaw = req.get('content-length');
+  if (contentLengthRaw === undefined) return false;
+
+  const contentLength = Number(contentLengthRaw);
+  if (!Number.isFinite(contentLength) || contentLength < 0) {
+    recordViolation(req, 'invalid_content_length', `Content-Length 值非法：${contentLengthRaw}`);
+    ApiResponse.codeError(res, 'CONTENT_LENGTH_INVALID');
+    return true;
+  }
+  if (contentLength > maxContentLength) {
+    recordViolation(
+      req,
+      'payload_too_large',
+      `Content-Length ${contentLength} 超过上限 ${maxContentLength}`
+    );
+    ApiResponse.codeError(res, 'PAYLOAD_TOO_LARGE');
+    return true;
+  }
+  return false;
+};
+
+/**
+ * 5. Content-Type 校验（仅对携带 body 的写操作）
+ *
+ * @returns {boolean} true 表示已拒绝并写出响应
+ */
+const checkContentType = (req, res, { allowedContentTypes }) => {
+  if (!BODY_METHODS.includes(req.method)) return false;
+
+  const contentLength = Number(req.get('content-length') || 0);
+  // Transfer-Encoding 的值大小写不敏感（RFC 9110：token 大小写不敏感，
+  // Node 只归一头部名不归一值），且可以是列表（`gzip, chunked`）。
+  // 用严格 === 'chunked' 会让 `Transfer-Encoding: Chunked` 被当成"无 body"，
+  // 从而跳过 Content-Type 声明要求——正是本条规则要拦的请求形态。
+  const hasChunked = String(req.get('transfer-encoding') || '')
+    .split(',')
+    .some((token) => token.trim().toLowerCase() === 'chunked');
+  if (!(contentLength > 0 || hasChunked)) return false;
+
+  const contentType = req.get('content-type');
+  if (!contentType) {
+    recordViolation(req, 'missing_content_type', `${req.method} 请求未声明 Content-Type`);
+    ApiResponse.codeError(res, 'CONTENT_TYPE_MISSING');
+    return true;
+  }
+  // 只取媒体类型部分，忽略 charset / boundary 等参数
+  const mediaType = contentType.split(';')[0].trim().toLowerCase();
+  if (allowedContentTypes.includes(mediaType)) return false;
+  recordViolation(req, 'unsupported_media_type', `不支持的 Content-Type：${mediaType}`);
+  ApiResponse.codeError(res, 'CONTENT_TYPE_UNSUPPORTED', {
+    message: `不支持的 Content-Type：${mediaType}`,
+    params: { mediaType: mediaType },
+  });
+  return true;
+};
+
+/**
  * 协议合规校验中间件工厂
  *
  * @param {object} options
@@ -176,103 +315,15 @@ const protocolCompliance = (options = {}) => {
       return next();
     }
 
-    // 1. HTTP 方法白名单
-    if (FORBIDDEN_METHODS.includes(req.method)) {
-      recordViolation(req, 'forbidden_method', `方法 ${req.method} 不被允许`);
-      return ApiResponse.codeError(res, 'HTTP_METHOD_UNSUPPORTED', {
-        message: `不支持的请求方法：${req.method}`,
-        params: { method: req.method },
-      });
-    }
-
-    // 2. 请求头卫生检查
-    const headerNames = Object.keys(req.headers || {});
-    if (headerNames.length > maxHeaderCount) {
-      recordViolation(
-        req,
-        'excessive_headers',
-        `头部数量 ${headerNames.length} 超过上限 ${maxHeaderCount}`
-      );
-      return ApiResponse.codeError(res, 'HEADER_COUNT_EXCESSIVE');
-    }
-
-    for (const name of headerNames) {
-      // Node 已将头名小写化，此处校验字符集，拦截含控制字符/空格的畸形头名
-      if (!VALID_HEADER_NAME.test(name)) {
-        recordViolation(req, 'invalid_header_name', `非法头名：${name.slice(0, 64)}`);
-        return ApiResponse.codeError(res, 'HEADER_NAME_INVALID');
-      }
-      const value = req.headers[name];
-      const len = Array.isArray(value)
-        ? value.reduce((sum, v) => sum + String(v).length, 0)
-        : String(value ?? '').length;
-      if (len > maxHeaderValueLength) {
-        recordViolation(req, 'oversized_header', `头部 ${name} 长度 ${len} 超过上限`);
-        return ApiResponse.codeError(res, 'HEADER_VALUE_TOO_LONG');
-      }
-    }
-
-    // 3. Host 头校验（防 Host 头注入导致的密码重置链接投毒等）
-    //    豁免只作用于这一条校验，判据与安全论证见 HOST_GATE_EXEMPT_PATHS
-    if (allowedHosts.length > 0 && !HOST_GATE_EXEMPT_PATHS.has(fullPath.toLowerCase())) {
-      const host = req.get('host');
-      if (!host || !allowedHosts.includes(host)) {
-        recordViolation(req, 'host_mismatch', `Host 头 ${host || '(空)'} 不在允许列表内`);
-        return ApiResponse.codeError(res, 'HOST_HEADER_INVALID');
-      }
-    }
-
-    // 4. Content-Length 上限（早于 body 解析拒绝）
-    const contentLengthRaw = req.get('content-length');
-    if (contentLengthRaw !== undefined) {
-      const contentLength = Number(contentLengthRaw);
-      if (!Number.isFinite(contentLength) || contentLength < 0) {
-        recordViolation(
-          req,
-          'invalid_content_length',
-          `Content-Length 值非法：${contentLengthRaw}`
-        );
-        return ApiResponse.codeError(res, 'CONTENT_LENGTH_INVALID');
-      }
-      if (contentLength > maxContentLength) {
-        recordViolation(
-          req,
-          'payload_too_large',
-          `Content-Length ${contentLength} 超过上限 ${maxContentLength}`
-        );
-        return ApiResponse.codeError(res, 'PAYLOAD_TOO_LARGE');
-      }
-    }
-
-    // 5. Content-Type 校验（仅对携带 body 的写操作）
-    if (BODY_METHODS.includes(req.method)) {
-      const contentLength = Number(req.get('content-length') || 0);
-      // Transfer-Encoding 的值大小写不敏感（RFC 9110：token 大小写不敏感，
-      // Node 只归一头部名不归一值），且可以是列表（`gzip, chunked`）。
-      // 用严格 === 'chunked' 会让 `Transfer-Encoding: Chunked` 被当成"无 body"，
-      // 从而跳过 Content-Type 声明要求——正是本条规则要拦的请求形态。
-      const hasChunked = String(req.get('transfer-encoding') || '')
-        .split(',')
-        .some((token) => token.trim().toLowerCase() === 'chunked');
-      const hasBody = contentLength > 0 || hasChunked;
-
-      if (hasBody) {
-        const contentType = req.get('content-type');
-        if (!contentType) {
-          recordViolation(req, 'missing_content_type', `${req.method} 请求未声明 Content-Type`);
-          return ApiResponse.codeError(res, 'CONTENT_TYPE_MISSING');
-        }
-        // 只取媒体类型部分，忽略 charset / boundary 等参数
-        const mediaType = contentType.split(';')[0].trim().toLowerCase();
-        if (!allowedContentTypes.includes(mediaType)) {
-          recordViolation(req, 'unsupported_media_type', `不支持的 Content-Type：${mediaType}`);
-          return ApiResponse.codeError(res, 'CONTENT_TYPE_UNSUPPORTED', {
-            message: `不支持的 Content-Type：${mediaType}`,
-            params: { mediaType: mediaType },
-          });
-        }
-      }
-    }
+    // 五项校验按固定顺序短路（方法 → 头卫生 → Host → Content-Length → Content-Type），
+    // 每一项自带「已拒绝则写出响应并返回 true」，主函数不再承载分支细节。
+    // 顺序即语义：方法白名单最先（连方法都不认就不必再看头部），
+    // Content-Length 必须早于 Content-Type（前者是"别读流"，后者是"读什么"）。
+    if (checkRequestMethod(req, res)) return;
+    if (checkHeaderHygiene(req, res, { maxHeaderCount, maxHeaderValueLength })) return;
+    if (checkHostHeader(req, res, { allowedHosts, fullPath })) return;
+    if (checkContentLength(req, res, maxContentLength)) return;
+    if (checkContentType(req, res, { allowedContentTypes })) return;
 
     next();
   };

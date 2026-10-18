@@ -14,6 +14,98 @@ const { withListBudget, listCountOptions } = require('../utils/queryBudget');
 // 不在本文件手写 String 去重（口径见 utils/helpers 的 canonicalIdString）。
 const { uniqueIdStrings, canonicalIdString } = require('../utils/helpers');
 
+/**
+ * 列表内重复编码检测。
+ *
+ * @returns {{dupes: string[], codes: string[]}} dupes 为重复出现的编码，
+ *   codes 为去重后的全量编码（供后续 $in 查询复用同一份集合，不重复遍历）
+ */
+const collectDuplicateCodes = (permissions) => {
+  const seen = new Set();
+  const dupes = [];
+  for (const item of permissions) {
+    const code = item?.code;
+    if (seen.has(code)) dupes.push(code);
+    seen.add(code);
+  }
+  return { dupes, codes: [...seen] };
+};
+
+/** 库里已存在的编码集合 */
+const findExistingCodes = async (codes) => {
+  const rows = await Permission.find({ code: { $in: codes } })
+    .select('code')
+    .lean();
+  return new Set(rows.map((item) => item.code));
+};
+
+/**
+ * 校验父级 id：先按归一入口构造 $in 清单，再与库里读回的值比对。
+ *
+ * 大小写是这一处的真缺陷：`isMongoId` 委托给十六进制判定，大写的 24 位 hex 一样过闸，
+ * 而 `$in` 把两种写法都 cast 成同一个 12 字节 ⇒ 命中一份文档；库里读回来的
+ * `String(_id)` 恒为小写（bson toHexString）。原先这里手写 `new Set(map(String))`
+ * 只去重不转小写，于是 has(大写) miss ⇒ **真实存在的父级被判成「父级权限不存在」**，
+ * 该项静默进 skipped（不 400、不报错、响应照样 success），批量导入表现为
+ * "少建了几条权限且无人知晓"。构造清单与逐项比对必须走同一个归一入口。
+ */
+const findValidParentIds = async (permissions) => {
+  const parentIds = uniqueIdStrings(permissions.map((item) => item?.parent).filter(Boolean));
+  if (parentIds.length === 0) return new Set();
+  const rows = await Permission.find({ _id: { $in: parentIds } })
+    .select('_id')
+    .lean();
+  return new Set(rows.map((item) => String(item._id)));
+};
+
+/** 逐项分拣：已存在 / 父级不存在进 skipped，其余进待插入清单 */
+const partitionCreatable = (permissions, existingCodes, validParentIds) => {
+  const skipped = [];
+  const validDocs = [];
+
+  for (const item of permissions) {
+    if (existingCodes.has(item.code)) {
+      skipped.push({ code: item.code, reason: '已存在' });
+      continue;
+    }
+
+    const { name, code, description, type, module, parent, path, method, sort } = item;
+    if (parent && !validParentIds.has(canonicalIdString(parent))) {
+      skipped.push({ code, reason: '父级权限不存在' });
+      continue;
+    }
+    validDocs.push({ name, code, description, type, module, parent, path, method, sort });
+  }
+
+  return { skipped, validDocs };
+};
+
+/**
+ * 批量落库：部分成功时保留已插入项、失败项转 skipped。
+ *
+ * 判定用「错误形状」而非 name：驱动实际抛出的类名是 MongoBulkWriteError
+ * （node_modules/mongodb/lib/error.js 的 getter），原先写 'BulkWriteError'
+ * 永不匹配 → 真发生重名冲突时整批 500，"已插入保留、失败项转 skipped"
+ * 从未生效。mongoose 会把驱动侧 writeErrors 归一化到 err.writeErrors
+ * （model.js:3218-3220），并把未失败的文档挂到 err.insertedDocs（:3248），
+ * 因此这两个字段同时存在即"部分成功"，与类名无关，升级驱动也不会再失配。
+ */
+const insertDocsTolerant = async (validDocs, created, skipped) => {
+  try {
+    created.push(...(await Permission.insertMany(validDocs, { ordered: false })));
+  } catch (err) {
+    if (!Array.isArray(err?.writeErrors) || err.writeErrors.length === 0) throw err;
+    created.push(...(Array.isArray(err.insertedDocs) ? err.insertedDocs : []));
+    for (const writeError of err.writeErrors) {
+      const failed = validDocs[writeError.index] || {};
+      skipped.push({
+        code: failed.code ?? 'unknown',
+        reason: writeError.errmsg || '写入失败',
+      });
+    }
+  }
+};
+
 class PermissionService {
   async listPermissions({ module, type, status, page, limit }) {
     const query = {};
@@ -106,83 +198,18 @@ class PermissionService {
   }
 
   async batchCreatePermissions(permissions) {
-    const seen = new Set();
-    const dupes = [];
-    for (const item of permissions) {
-      const code = item?.code;
-      if (seen.has(code)) dupes.push(code);
-      seen.add(code);
-    }
+    const { dupes, codes } = collectDuplicateCodes(permissions);
     if (dupes.length > 0) {
       throw ApiError.badRequest(`权限列表内存在重复编码：${[...new Set(dupes)].join('、')}`);
     }
 
-    const existingCodes = new Set(
-      (
-        await Permission.find({ code: { $in: [...seen] } })
-          .select('code')
-          .lean()
-      ).map((item) => item.code)
-    );
-
-    // 大小写是这一处的真缺陷：`isMongoId` 委托给十六进制判定，大写的 24 位 hex 一样过闸，
-    // 而 `$in` 把两种写法都 cast 成同一个 12 字节 ⇒ 命中一份文档；库里读回来的
-    // `String(_id)` 恒为小写（bson toHexString）。原先这里手写 `new Set(map(String))`
-    // 只去重不转小写，于是 has(大写) miss ⇒ **真实存在的父级被判成「父级权限不存在」**，
-    // 该项静默进 skipped（不 400、不报错、响应照样 success），批量导入表现为
-    // "少建了几条权限且无人知晓"。构造清单与下面逐项比对必须走同一个归一入口。
-    const parentIds = uniqueIdStrings(permissions.map((item) => item?.parent).filter(Boolean));
-    const validParentIds = new Set(
-      parentIds.length > 0
-        ? (
-            await Permission.find({ _id: { $in: parentIds } })
-              .select('_id')
-              .lean()
-          ).map((item) => String(item._id))
-        : []
-    );
+    const existingCodes = await findExistingCodes(codes);
+    const validParentIds = await findValidParentIds(permissions);
+    const { skipped, validDocs } = partitionCreatable(permissions, existingCodes, validParentIds);
 
     const created = [];
-    const skipped = [];
-    const validDocs = [];
-
-    for (const item of permissions) {
-      if (existingCodes.has(item.code)) {
-        skipped.push({ code: item.code, reason: '已存在' });
-        continue;
-      }
-
-      const { name, code, description, type, module, parent, path, method, sort } = item;
-      if (parent && !validParentIds.has(canonicalIdString(parent))) {
-        skipped.push({ code, reason: '父级权限不存在' });
-        continue;
-      }
-      validDocs.push({ name, code, description, type, module, parent, path, method, sort });
-    }
-
     if (validDocs.length > 0) {
-      try {
-        created.push(...(await Permission.insertMany(validDocs, { ordered: false })));
-      } catch (err) {
-        // 判定用「错误形状」而非 name：驱动实际抛出的类名是 MongoBulkWriteError
-        // （node_modules/mongodb/lib/error.js 的 getter），原先写 'BulkWriteError'
-        // 永不匹配 → 真发生重名冲突时整批 500，"已插入保留、失败项转 skipped"
-        // 从未生效。mongoose 会把驱动侧 writeErrors 归一化到 err.writeErrors
-        // （model.js:3218-3220），并把未失败的文档挂到 err.insertedDocs（:3248），
-        // 因此这两个字段同时存在即"部分成功"，与类名无关，升级驱动也不会再失配。
-        if (Array.isArray(err?.writeErrors) && err.writeErrors.length > 0) {
-          created.push(...(Array.isArray(err.insertedDocs) ? err.insertedDocs : []));
-          for (const writeError of err.writeErrors) {
-            const failed = validDocs[writeError.index] || {};
-            skipped.push({
-              code: failed.code ?? 'unknown',
-              reason: writeError.errmsg || '写入失败',
-            });
-          }
-        } else {
-          throw err;
-        }
-      }
+      await insertDocsTolerant(validDocs, created, skipped);
     }
 
     return { created, skipped };
