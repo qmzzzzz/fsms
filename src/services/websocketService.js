@@ -550,28 +550,8 @@ class WebSocketService {
       // 限制算法防止 alg:none 攻击，使用统一配置而非直接读环境变量
       const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
 
-      // 令牌用途闸：refresh 令牌不得建立推送通道。access/refresh 本是两把密钥，
-      // 但 config 的"两把密钥不得相同"只在生产语义下强制；配成同值时 refresh（7 天有效、
-      // 自带 userId/tokenVersion/sid）在这条路径上能过完全部校验，
-      // 于是"access 短有效期 + 频繁换发"的窗口收缩机制对 WS 整体失效。
-      const { violatesAccessTokenPurpose } = require('../utils/tokenPurpose');
-      if (violatesAccessTokenPurpose(decoded)) {
-        logger.warn(
-          `WebSocket 认证失败（令牌用途不符 type=${String(decoded.type)}）: ${socket.id}`
-        );
-        socket.emit('auth-error', { message: '认证令牌类型不合法' });
-        socket.disconnect(true);
-        return false;
-      }
-
-      // 检查 token 是否在黑名单中
-      const { isTokenBlacklisted } = require('../middleware/tokenBlacklist');
-      if (await isTokenBlacklisted(token)) {
-        logger.warn(`WebSocket 认证失败（token 已吊销）: ${socket.id}`);
-        socket.emit('auth-error', { message: '认证令牌已失效' });
-        socket.disconnect(true);
-        return false;
-      }
+      if (this._assertHandshakeTokenPurpose(socket, decoded)) return false;
+      if (await this._assertHandshakeTokenNotRevoked(socket, token)) return false;
 
       // 校验用户当前状态、tokenVersion、allowedIPs 与临时锁定：被禁用/锁定/改密后旧连接应失效。
       // 字段集与 auth.js 的等价 select（含 lockUntil）对齐——少取一个字段就等于少一条判据。
@@ -579,12 +559,7 @@ class WebSocketService {
       const freshUser = await User.findById(decoded.userId)
         .select('username status tokenVersion passwordChangedAt allowedIPs lockUntil')
         .populate({ path: 'roles', select: 'code', match: { status: 'active' } });
-      if (!freshUser) {
-        logger.warn(`WebSocket 认证失败（用户不存在）: ${socket.id}`);
-        socket.emit('auth-error', { message: '用户不存在' });
-        socket.disconnect(true);
-        return false;
-      }
+      if (this._assertHandshakeUserExists(socket, freshUser)) return false;
       if (freshUser.status !== 'active') {
         logger.warn('WebSocket 认证失败（用户状态异常）', {
           status: freshUser.status,
@@ -598,25 +573,8 @@ class WebSocketService {
       // （写法与 _assertHandshakeIpAllowed / _assertHandshakeSessionUsable 一致，
       //  不再往 authenticateSocket 里叠第 N 个分支——该方法复杂度已在棘轮基线上）
       if (this._assertHandshakeAccountLocked(socket, freshUser)) return false;
-      // tokenVersion 必须携带且匹配：省略字段或版本不匹配均说明令牌可疑/已被强制下线
-      // 历史文档可能缺少该字段，按 schema 默认值 0 参与比对
-      const expectedTokenVersion = freshUser.tokenVersion ?? 0;
-      if (decoded.tokenVersion === undefined || decoded.tokenVersion !== expectedTokenVersion) {
-        logger.warn(`WebSocket 认证失败（tokenVersion 缺失或不匹配）: ${socket.id}`);
-        socket.emit('auth-error', { message: '会话已失效，请重新登录' });
-        socket.disconnect(true);
-        return false;
-      }
-      // 密码修改后签发的旧 token 失效
-      if (decoded.iat && freshUser.passwordChangedAt) {
-        const changedAtTs = Math.floor(new Date(freshUser.passwordChangedAt).getTime() / 1000);
-        if (decoded.iat < changedAtTs) {
-          logger.warn(`WebSocket 认证失败（密码已修改）: ${socket.id}`);
-          socket.emit('auth-error', { message: '密码已修改，请重新登录' });
-          socket.disconnect(true);
-          return false;
-        }
-      }
+      if (this._assertHandshakeTokenVersion(socket, freshUser, decoded)) return false;
+      if (this._assertHandshakePasswordFresh(socket, freshUser, decoded)) return false;
 
       // ============ P0-2 修复（2026-09-17）：补齐 HTTP 侧已有、WS 侧缺失的两道失效信号 ============
       // 审计实证：同一个 JWT 在 HTTP 侧因 allowedIPs 不匹配被 403 AUTH_IP_RANGE_DENIED、
@@ -624,10 +582,8 @@ class WebSocketService {
       // 全文 0 处引用 sid / allowedIPs / sessionService。两段校验抽为独立方法
       // （与 middleware/auth.js 的 assertIpAllowed / assertSessionUsable 同源同序），
       // 使「HTTP 拒绝的令牌，WS 也必须拒绝」。
-      const ipFailure = this._assertHandshakeIpAllowed(socket, freshUser);
-      if (ipFailure) return false;
-      const sessionFailure = await this._assertHandshakeSessionUsable(socket, decoded);
-      if (sessionFailure) return false;
+      if (this._assertHandshakeIpAllowed(socket, freshUser)) return false;
+      if (await this._assertHandshakeSessionUsable(socket, decoded)) return false;
 
       // 在途断开复检（F-188）：上面每一次 await 都是一个窗口，客户端可能已经断开。
       // disconnect 处理器此时跑过，但它按 `socket.userId` 清理，而 userId 要到下面才赋值
@@ -636,18 +592,14 @@ class WebSocketService {
       // getStats().totalUsers 长期虚高、emitPermissionSync 给已死 socket.id 逐个查库+投递、
       // MAX_CONNECTIONS_PER_PROCESS 数的是 io.sockets.sockets.size ⇒ 幽灵不占配额，计数与真实在线分叉。
       // 位置约束：必须紧贴最后一个 await、且在任何状态写入之前——中间再插 await 就重新开窗。
+      // 不抽成 _assert* 方法：websocketAuthGhostConnection 的接线闸按**文本位置**钉这两件事
+      // （复检在最后一个 await 之后、this.userConnections 之前），抽走就只剩一句注释承诺。
       if (!socket.connected) {
         logger.warn(`WebSocket 认证在途断开，作废本次认证: ${socket.id}`);
         return false;
       }
 
-      socket.userId = decoded.userId || decoded.id;
-      socket.username = decoded.username;
-      socket.roleCodes = freshUser.roles?.map((r) => r?.code).filter(Boolean) || [];
-      // 记录令牌版本：受限房间入房时用 revalidateSocket 复查，
-      // tokenVersion 被推进（改密/强制下线）即断开该长连接
-      socket.tokenVersion = decoded.tokenVersion;
-      socket.authenticated = true;
+      this._bindHandshakeIdentity(socket, decoded, freshUser);
       clearTimeout(authTimer);
 
       // 加入用户定向房间：挂载 Redis adapter 后，权限同步可经房间投递
@@ -656,12 +608,11 @@ class WebSocketService {
 
       // 认证成功后把 userId 回写到连接时以 null 占位的 clients 条目，
       // 保证 join-room / getStats / 后续统计读到真实身份
-      const clientEntry = this.clients.get(socket.id);
-      if (clientEntry) {
-        clientEntry.userId = socket.userId;
-      }
+      this._syncClientEntryUserId(socket);
 
       // 记录用户连接
+      // 这一段**必须**留在本方法体内：websocketAuthGhostConnection 的接线闸按文本位置钉
+      // 「复检在最后一个 await 之后、this.userConnections 之前」，搬进方法里那条判据就失效
       if (!this.userConnections.has(socket.userId)) {
         this.userConnections.set(socket.userId, new Set());
       }
@@ -675,6 +626,132 @@ class WebSocketService {
       socket.disconnect(true);
       return false;
     }
+  }
+
+  /**
+   * 把已认证的 userId 回写到 clients 条目（连接建立时该字段以 null 占位）。
+   *
+   * 与 userConnections 的登记分开：后者必须留在 authenticateSocket 体内（见那里的注释），
+   * 前者只是一次字段回写，抽走不影响任何位置判据。
+   *
+   * @param {import('socket.io').Socket} socket
+   */
+  _syncClientEntryUserId(socket) {
+    const clientEntry = this.clients.get(socket.id);
+    if (clientEntry) clientEntry.userId = socket.userId;
+  }
+
+  /**
+   * 认证通过后把身份写到 socket 上（原 authenticateSocket 的赋值段）。
+   *
+   * 只做赋值、不做登记：userConnections 的写入仍留在 authenticateSocket 体内，
+   * 因为 websocketAuthGhostConnection 的接线闸按**文本位置**钉「复检在最后一个 await 之后、
+   * this.userConnections 之前」——把登记一起搬走，那条判据就退化成一句注释承诺。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {object} decoded 已验证的 JWT payload
+   * @param {object} freshUser 已 populate roles 的用户文档
+   */
+  _bindHandshakeIdentity(socket, decoded, freshUser) {
+    socket.userId = decoded.userId || decoded.id;
+    socket.username = decoded.username;
+    socket.roleCodes = freshUser.roles?.map((r) => r?.code).filter(Boolean) || [];
+    // 记录令牌版本：受限房间入房时用 revalidateSocket 复查，
+    // tokenVersion 被推进（改密/强制下线）即断开该长连接
+    socket.tokenVersion = decoded.tokenVersion;
+    socket.authenticated = true;
+  }
+
+  /**
+   * 令牌用途闸：refresh 令牌不得建立推送通道。
+   *
+   * access/refresh 本是两把密钥，但 config 的"两把密钥不得相同"只在生产语义下强制；
+   * 配成同值时 refresh（7 天有效、自带 userId/tokenVersion/sid）在这条路径上能过完全部
+   * 校验，于是"access 短有效期 + 频繁换发"的窗口收缩机制对 WS 整体失效。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {object} decoded 已验证的 JWT payload
+   * @returns {boolean} true 表示已拒绝并断开连接
+   */
+  _assertHandshakeTokenPurpose(socket, decoded) {
+    const { violatesAccessTokenPurpose } = require('../utils/tokenPurpose');
+    if (!violatesAccessTokenPurpose(decoded)) return false;
+    logger.warn(`WebSocket 认证失败（令牌用途不符 type=${String(decoded.type)}）: ${socket.id}`);
+    socket.emit('auth-error', { message: '认证令牌类型不合法' });
+    socket.disconnect(true);
+    return true;
+  }
+
+  /**
+   * 令牌吊销闸：access 令牌进黑名单（登出 / 强制下线）后，WS 侧同样不得再建连。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {string} token 待校验的 JWT 原文（黑名单按原文为键）
+   * @returns {Promise<boolean>} true 表示已拒绝并断开连接
+   */
+  async _assertHandshakeTokenNotRevoked(socket, token) {
+    const { isTokenBlacklisted } = require('../middleware/tokenBlacklist');
+    if (!(await isTokenBlacklisted(token))) return false;
+    logger.warn(`WebSocket 认证失败（token 已吊销）: ${socket.id}`);
+    socket.emit('auth-error', { message: '认证令牌已失效' });
+    socket.disconnect(true);
+    return true;
+  }
+
+  /**
+   * 用户存在闸。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {object|null} freshUser 按 decoded.userId 查回的用户文档
+   * @returns {boolean} true 表示已拒绝并断开连接
+   */
+  _assertHandshakeUserExists(socket, freshUser) {
+    if (freshUser) return false;
+    logger.warn(`WebSocket 认证失败（用户不存在）: ${socket.id}`);
+    socket.emit('auth-error', { message: '用户不存在' });
+    socket.disconnect(true);
+    return true;
+  }
+
+  /**
+   * tokenVersion 闸：必须携带且匹配。
+   *
+   * 省略字段或版本不匹配均说明令牌可疑 / 已被强制下线；历史文档可能缺少该字段，
+   * 按 schema 默认值 0 参与比对（与 middleware/auth.js 同口径）。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {object} freshUser 已 select tokenVersion 的用户文档
+   * @param {object} decoded 已验证的 JWT payload
+   * @returns {boolean} true 表示已拒绝并断开连接
+   */
+  _assertHandshakeTokenVersion(socket, freshUser, decoded) {
+    const expected = freshUser.tokenVersion ?? 0;
+    if (decoded.tokenVersion !== undefined && decoded.tokenVersion === expected) return false;
+    logger.warn(`WebSocket 认证失败（tokenVersion 缺失或不匹配）: ${socket.id}`);
+    socket.emit('auth-error', { message: '会话已失效，请重新登录' });
+    socket.disconnect(true);
+    return true;
+  }
+
+  /**
+   * 改密闸：签发时间早于 passwordChangedAt 的令牌失效。
+   *
+   * 秒级比较（与 authenticate 中间件同口径）：iat 为秒、passwordChangedAt 为毫秒，
+   * 直接毫秒比较会把「改密后同一秒内签发」的令牌误判为失效。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {object} freshUser 已 select passwordChangedAt 的用户文档
+   * @param {object} decoded 已验证的 JWT payload
+   * @returns {boolean} true 表示已拒绝并断开连接
+   */
+  _assertHandshakePasswordFresh(socket, freshUser, decoded) {
+    if (!decoded.iat || !freshUser.passwordChangedAt) return false;
+    const changedAtTs = Math.floor(new Date(freshUser.passwordChangedAt).getTime() / 1000);
+    if (decoded.iat >= changedAtTs) return false;
+    logger.warn(`WebSocket 认证失败（密码已修改）: ${socket.id}`);
+    socket.emit('auth-error', { message: '密码已修改，请重新登录' });
+    socket.disconnect(true);
+    return true;
   }
 
   /**
