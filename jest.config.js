@@ -233,12 +233,19 @@ module.exports = {
     // 独立设阈的另一个作用：Jest 会把它们从 global 分组摘出，
     // 使「新增被排除文件」不会误伤与之无关的全局基线。
     './src/config/validate.js': { branches: 90, functions: 97 }, // 生产配置校验，此前整体排除
-    './src/services/initData.js': { branches: 91, functions: 97 }, // 2026-09-18 initDataLifecycle.test.js 批次（行/语句/函数 100%）
-    // 分支 95% 是当前可达上限：剩余 5 个未命中分支经穷举验证为**数据决定的结构不可达**
-    // ——initData.js 的 defaultPermissions 每条 code 都含 ":"（:551 的 else 走不到）、
-    // defaultRoles 每项都 isBuiltIn:true（:634 的 else）、rolePermissionMap 的键集
-    // 与 defaultRoles 的 code 集完全一致且每项非空（:610/:612/:621 的 `|| []`）。
-    // 基线取实测下方一档，与本源「实测下方一档」规则一致。
+    // 2026-10-19 批 3c：initData.js 按主题拆为 initData/ 目录，原单文件键拆为逐文件键
+    // （与上方 security.js 拆分同口径：Jest 对 glob 键也是逐文件判定，故逐文件列出）。
+    // 数值按拆分后全量实测重设（br -5 / fn -3，向下取整；只紧不松）：
+    // 8 个文件实测 br/fn 均 100%，seeding.js 实测 br 90.38 / fn 100。
+    './src/services/initData/adminAccount.js': { branches: 95, functions: 97 },
+    './src/services/initData/index.js': { branches: 95, functions: 97 },
+    './src/services/initData/indexes.js': { branches: 95, functions: 97 },
+    './src/services/initData/permissions.js': { branches: 95, functions: 97 },
+    './src/services/initData/permissionsBusiness.js': { branches: 95, functions: 97 },
+    './src/services/initData/permissionsSystem.js': { branches: 95, functions: 97 },
+    './src/services/initData/roles.js': { branches: 95, functions: 97 },
+    './src/services/initData/seeding.js': { branches: 85, functions: 97 },
+    './src/services/initData/systemConfig.js': { branches: 95, functions: 97 },
     // ===== 2026-09-16 第四轮：M-05 信任根的独立门槛 =====
     // filePermission.js 是「密钥载体权限已收紧」这一结论的唯一来源（M-05 修复的
     // 落点）。它在第三轮落地时**没有独立阈值**，违反本文件上文自订的规则
