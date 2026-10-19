@@ -63,7 +63,7 @@
     "mongoose": "^8.0.3",
     "morgan": "^1.12.1",
     "rate-limit-redis": "^4.3.1",
-    "socket.io": "^4.8.3",
+    "socket.io": "^4.8.4",
     "svg-captcha": "^1.4.0",
     "swagger-ui-express": "^5.0.1",
     "ua-parser-js": "1.0.41",
