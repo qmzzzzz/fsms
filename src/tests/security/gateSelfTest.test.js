@@ -463,7 +463,20 @@ describe('门禁负向自检：该红时必须红', () => {
       expect(cfg).toMatch(/global:\s*\{/);
       // E-03 纳入的两个文件必须有独立阈值（防止被 global 平均值稀释）
       expect(cfg).toMatch(/config\/validate\.js/);
-      expect(cfg).toMatch(/services\/initData\.js/);
+      // 2026-10-19 批 3c：initData.js 已拆为目录，逐个文件都不得被 global 稀释
+      for (const name of [
+        'adminAccount',
+        'index',
+        'indexes',
+        'permissions',
+        'permissionsBusiness',
+        'permissionsSystem',
+        'roles',
+        'seeding',
+        'systemConfig',
+      ]) {
+        expect(cfg).toMatch(new RegExp(`services/initData/${name}\\.js`));
+      }
     });
   });
 
