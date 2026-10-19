@@ -7,7 +7,7 @@
  *     否则『DB 挂了 + 全站裸奔』只有一条 error 日志可循」
  *   · `middleware/rateLimitStore.js:53-56`：「降级态只写日志等于没有可告警信号——
  *     `grep 日志` 不是运维动作」
- *   · `services/websocketService.js:723-725`：「fail-open 必须留 `ip_blacklist_failopen` 计数」
+ *   · `services/websocketService/handshake.js:480-482`：「fail-open 必须留 `ip_blacklist_failopen` 计数」
  *
  * 但纪律只在**注释里**，没有任何东西把「站点集合」与「每个站点的信号」钉在一起。
  * 后果实测（2026-10-09）：`services/captchaService.js` 的活跃数上限判定被跳过时，
@@ -60,16 +60,30 @@ const FAIL_OPEN_SITES = Object.freeze([
   },
   {
     type: 'ip_blacklist_failopen',
-    file: 'services/websocketService.js',
-    fn: 'authenticateSocket / 周期名单复查',
+    file: 'services/websocketService/handshake.js',
+    fn: '_assertHandshakeIpNotBanned（authenticateSocket 链路）',
     level: 'high',
     direction: 'fail-open',
-    trigger: '握手期或周期复查时名单查询抛错',
+    trigger: '握手期名单查询抛错',
     effect: '该地址放行，WS 侧名单失效（HTTP 侧可能仍拦着，两侧口径出现窗口差）',
     why:
       '与 HTTP 侧同口径（「宁可不拦，也不因一次 DB 抖动把全部实时推送踢下线」）。' +
       '**复用同一个 type 而非新造**：同一根因、同一条时间序列，' +
-      '新造一个恒真信号只会稀释告警（见该文件 :723-725 的说明）。',
+      '新造一个恒真信号只会稀释告警（见 handshake.js:480-482 的说明）。',
+    tightening: '同 HTTP 侧；另需注意两侧是不同进程路径，快照方案要保证同一份来源。',
+  },
+  {
+    type: 'ip_blacklist_failopen',
+    file: 'services/websocketService/lifecycle.js',
+    fn: '_sweepBannedIps（周期名单复查）',
+    level: 'high',
+    direction: 'fail-open',
+    trigger: '周期复查时名单查询抛错',
+    effect: '该地址放行到本次清扫结束，WS 侧名单失效（HTTP 侧可能仍拦着，两侧口径出现窗口差）',
+    why:
+      '与握手面共用 resolveHandshakeIPForSecurityDecision、同一份名单快照与同一条 fail-open 口径' +
+      '（「宁可不拦，也不因一次 DB 抖动把全部实时推送踢下线」）。**复用同一个 type 而非新造**：' +
+      '同一根因、同一条时间序列，新造一个恒真信号只会稀释告警。',
     tightening: '同 HTTP 侧；另需注意两侧是不同进程路径，快照方案要保证同一份来源。',
   },
   {

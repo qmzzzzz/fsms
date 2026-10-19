@@ -137,7 +137,7 @@ const DECL = [
     name: 'close',
     argsAnchor: 'fn?:',
     kind: 'promise',
-    hold: { rel: 'services/websocketService.js', re: /this\.io\.close\(\)/g, is: 'drop' },
+    hold: { rel: 'services/websocketService/lifecycle.js', re: /this\.io\.close\(\)/g, is: 'drop' },
     note: '同步 try 接不到它 —— 移交 F4/B#2，豁免就绑在这个事实上',
   },
   {
@@ -147,7 +147,11 @@ const DECL = [
     name: 'disconnect',
     argsAnchor: 'close?:',
     kind: 'self',
-    hold: { rel: 'services/websocketService.js', re: /socket\.disconnect\(true\)/g, is: 'drop' },
+    hold: {
+      rel: 'services/websocketService/handshake.js',
+      re: /socket\.disconnect\(true\)/g,
+      is: 'drop',
+    },
     note: '反向对照：真 API 同步（返回 this）。桩长成 Promise 同样是不符',
   },
   {
@@ -157,7 +161,11 @@ const DECL = [
     name: 'disconnect',
     argsAnchor: 'reconnect?:',
     kind: 'void',
-    hold: { rel: 'services/websocketService.js', re: /client\.disconnect\(\)/g, is: 'drop' },
+    hold: {
+      rel: 'services/websocketService/lifecycle.js',
+      re: /client\.disconnect\(\)/g,
+      is: 'drop',
+    },
     note: '反向对照：立即断开、无返回',
   },
   {
@@ -186,7 +194,9 @@ const EXEMPT = [
 
 const BINDINGS = {
   'io-close-still-sync-try': (prod) =>
-    /try\s*\{\s*this\.io\.close\(\);/.test(jsCodeOnly(prod.get('services/websocketService.js'))),
+    /try\s*\{\s*this\.io\.close\(\);/.test(
+      jsCodeOnly(prod.get('services/websocketService/lifecycle.js'))
+    ),
 };
 
 // ==================== 声明解析（返回值跑时读，不抄） ====================

@@ -153,7 +153,10 @@ describe('停用角色不参与授权判定', () => {
     // 操作者侧不变量：停用角色**不得**参与授予（auth/websocket/login-snapshot 取 roleCodes/level 时须过滤 active）。
     const OPERATOR_FILES = [
       'middleware/auth.js',
-      'services/websocketService.js',
+      // websocketService 已按主题拆分：握手链路的 roles populate 在 handshake.js，
+      // 复查链路的在 lifecycle.js——两处都是「操作者侧」，漏掉任一个不变量就只剩一半覆盖
+      'services/websocketService/handshake.js',
+      'services/websocketService/lifecycle.js',
       // authService 已按主题拆分：登录响应快照在 session.js，会话刷新的权限快照在 token.js，
       // 两者都是「操作者侧」——漏掉任一个，这个不变量就只剩一半覆盖
       'services/authService/session.js',

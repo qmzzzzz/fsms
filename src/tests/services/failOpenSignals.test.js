@@ -7,7 +7,7 @@
  *     否则『DB 挂了 + 全站裸奔』只有一条 error 日志可循」
  *   · `middleware/rateLimitStore.js:53-56`：「降级态只写日志等于没有可告警信号——
  *     `grep 日志` 不是运维动作」
- *   · `services/websocketService.js:723-725`：「fail-open 必须留 `ip_blacklist_failopen` 计数」
+ *   · `services/websocketService/handshake.js:480-482`：「fail-open 必须留 `ip_blacklist_failopen` 计数」
  *
  * 但实测有两处降级**完全没有信号**，且都属于「已修的同类漏了一处」：
  *   1. `services/captchaService.js`：Redis 就绪但计数命令报错时，上限判定被跳过。

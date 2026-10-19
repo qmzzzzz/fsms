@@ -116,7 +116,7 @@ describe('WebSocket 握手 IP 黑名单闸', () => {
   };
 
   /**
-   * WS 侧此刻实际使用的信任跳数——照 websocketService.js:167 那一行原样调用，
+   * WS 侧此刻实际使用的信任跳数——照 websocketService/handshake.js:146 那一行原样调用，
    * 不在本文件里另写一份判据。
    *
    * 留一个坑位说明：config/validate 导出的 `resolveTrustProxyHops(raw, nodeEnv)`

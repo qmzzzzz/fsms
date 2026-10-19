@@ -17,7 +17,7 @@
  *      失效只作用于当前进程 → 禁用用户/改权限后其余进程最长 60s 仍放行。
  *   5. 验证码存储（services/captchaService.js）、统计缓存（services/statsCache.js）、
  *      告警频控（services/securityAlert.js 的 alertRateLimit Map）、
- *      WebSocket 客户端表（services/websocketService.js）
+ *      WebSocket 客户端表（services/websocketService/index.js）
  *      均为进程内 Map → 跨进程不可见，一次性消费/风暴抑制不成立。
  *   6. 安全与数据面的进程内缓存（无失效广播者，多实例下各自为政到一个 TTL）：
  *      IP 封禁缓存（middleware/security/ipBlacklist.js）、部门成员缓存（services/auditScopeFilter.js）、
@@ -168,7 +168,7 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     impact: '各进程各自去重，同一事件按实例数重复告警',
   },
   {
-    module: 'services/websocketService.js',
+    module: 'services/websocketService/index.js',
     mechanism: '客户端连接表',
     impact: '跨进程无法向指定用户推送（需 socket.io adapter）',
     redisExternalized: true,

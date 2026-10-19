@@ -19,7 +19,7 @@
  *
  * F-144（投影不复制第二份）：本文件原先在"取数字段集含 lockUntil"那条用例里
  * **逐字抄了一遍**生产的 select 字符串。抄的这份不会随生产漂移——实测把
- * `websocketService.js:438` 投影里的 `lockUntil` 删掉，那条用例照旧绿（`-t` 单独跑
+ * `websocketService/handshake.js:204` 投影里的 `lockUntil` 删掉，那条用例照旧绿（`-t` 单独跑
  * `Tests: 17 skipped, 1 passed`），名字承诺的防线并不存在。现在投影改为**从生产源码
  * 解析**，并补一条结构门禁：握手判定读到的每个 `freshUser.<字段>` 必须在
  * select 投影或 populate 填充集里——那正是本文件头说的根因（"少取一个字段就等于
@@ -31,7 +31,7 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const path = require('path');
 
-const WS_SRC = path.join(__dirname, '../../services/websocketService.js');
+const WS_SRC = path.join(__dirname, '../../services/websocketService/handshake.js');
 
 /** 整行注释 + 行尾注释都剥掉：判据只能由代码满足，不能由注释满足 */
 const codeOnly = (src) =>

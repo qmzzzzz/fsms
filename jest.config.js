@@ -115,7 +115,14 @@ module.exports = {
     // 逐行的"(实测 a/b)"快照注释已全部删除——上方口径说明明确禁止在本文件写死实时数字，
     // 而实测确有 33/36 条与当轮真值相差 >1pt（最大 validate.js 注释 75 vs 实测 93.97）。
     // 要当前数字跑 `npm run test:coverage`。
-    './src/middleware/security.js': { branches: 88, functions: 84 },
+    // 2026-10-18 批 3a：security.js 按主题拆为 middleware/security/ 目录，原单文件键
+    // 拆为逐文件键（jest 对 glob 键也是逐文件判定，故逐文件列出）；数值按拆分后
+    // 全量实测重设（br -5 / fn -3，向下取整）。
+    './src/middleware/security/auditLog.js': { branches: 91, functions: 97 },
+    './src/middleware/security/index.js': { branches: 90, functions: 81 },
+    './src/middleware/security/ipBlacklist.js': { branches: 86, functions: 74 },
+    './src/middleware/security/sanitize.js': { branches: 87, functions: 97 },
+    './src/middleware/security/securityHeaders.js': { branches: 95, functions: 97 },
     './src/middleware/rateLimit.js': { branches: 77, functions: 97 }, // 2026-09-10 makeSharedStore改为同步代理包装器
     // 【2026-09-30 修正：functions 97 → 90】原值 97 是 aa92bb7（2026-09-28）按
     // 「实测 - 3pt」机械套用时**误按"实测 100%"推导**出来的，而 auth.js 的函数
@@ -172,10 +179,24 @@ module.exports = {
     './src/controllers/userController.js': { branches: 85, functions: 97 },
     './src/controllers/permissionController.js': { branches: 79, functions: 97 },
     './src/controllers/reportController.js': { branches: 89, functions: 97 }, // 2026-09-04 reportController 分支补齐批次
-    './src/services/websocketService.js': { branches: 82, functions: 90 },
+    // 2026-10-18 批 3a：websocketService.js 拆为 5 文件目录，原单文件键拆为逐文件键；
+    // 数值按拆分后全量实测重设（br -5 / fn -3，向下取整）。
+    './src/services/websocketService/handshake.js': { branches: 88, functions: 97 },
+    './src/services/websocketService/index.js': { branches: 95, functions: 97 },
+    './src/services/websocketService/lifecycle.js': { branches: 85, functions: 91 },
+    './src/services/websocketService/push.js': { branches: 77, functions: 86 },
+    './src/services/websocketService/shared.js': { branches: 95, functions: 97 },
     // ===== 2026-09-01 安全服务洼地补齐批次新增基线 =====
     //（authServiceGapA/B/C + securityPrimitivesGap + captchaGap + permissionHelperGap）
-    './src/services/authService.js': { branches: 87, functions: 73 },
+    // 2026-10-18 批 3a：authService.js 拆为 7 文件目录，原单文件键拆为逐文件键；
+    // 数值按拆分后全量实测重设（br -5 / fn -3，向下取整）。
+    './src/services/authService/failureAndMfa.js': { branches: 85, functions: 72 },
+    './src/services/authService/index.js': { branches: 95, functions: 97 },
+    './src/services/authService/login.js': { branches: 81, functions: 47 },
+    './src/services/authService/password.js': { branches: 95, functions: 97 },
+    './src/services/authService/profile.js': { branches: 93, functions: 97 },
+    './src/services/authService/session.js': { branches: 87, functions: 97 },
+    './src/services/authService/token.js': { branches: 84, functions: 97 },
     './src/services/mfaService.js': { branches: 88, functions: 91 },
     './src/services/captchaService.js': { branches: 75, functions: 87 },
     './src/utils/permissionHelper.js': { branches: 83, functions: 97 }, // 2026-09-04 按实测下方一档

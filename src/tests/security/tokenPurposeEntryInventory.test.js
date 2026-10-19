@@ -106,13 +106,13 @@ describe('入口清单：用 access 密钥验签的地方必须引用用途判�
       'src/middleware/logoutAuth.js',
       'src/services/authService/token.js',
       'src/services/tokenService.js',
-      'src/services/websocketService.js',
+      'src/services/websocketService/handshake.js',
     ]);
     // 引用判据的三份也不许缩水成两份：这里把"谁引用"当场数出来而不是只测总数
     expect(rows.filter((r) => r.guarded).map((r) => r.rel)).toEqual([
       'src/middleware/auth.js',
       'src/services/tokenService.js',
-      'src/services/websocketService.js',
+      'src/services/websocketService/handshake.js',
     ]);
   });
 

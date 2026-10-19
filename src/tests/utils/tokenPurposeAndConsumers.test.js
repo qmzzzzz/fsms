@@ -48,7 +48,7 @@ describe('判据只有一处实现', () => {
   const CONSUMERS = [
     'src/middleware/auth.js',
     'src/services/tokenService.js',
-    'src/services/websocketService.js',
+    'src/services/websocketService/handshake.js',
   ];
 
   test('三个入口都引用 utils/tokenPurpose', () => {

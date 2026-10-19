@@ -49,7 +49,7 @@ const REQUIRED_MODULES = [
   'services/sessionService.js',
   'services/reportDashboardService.js',
   'services/auditMonitor.js',
-  'services/websocketService.js',
+  'services/websocketService/index.js',
 ];
 
 /**

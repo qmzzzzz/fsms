@@ -133,7 +133,7 @@ function topLevelReads(code) {
 
 /**
  * 豁免三：既是库、又是进程入口的文件。
- * `src/config/validate.js` 被 app.js / index.js / websocketService.js require，
+ * `src/config/validate.js` 被 app.js / index.js / websocketService/handshake.js require，
  * 同时 `npm run validate` 直接执行它。把 hydrate 写在文件顶部确实能满足位置判据，
  * 但代价是 require 期覆写调用方的 process.env——本轮实测就是这么做了一次，
  * 连带打红 5 个配置套件（src/tests/setup.js 给每个 worker 预置了四把 *_FILE 临时副本，

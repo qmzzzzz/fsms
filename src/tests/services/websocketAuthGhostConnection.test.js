@@ -3,9 +3,9 @@
  *
  * 【缺陷】authenticateSocket 在登记连接映射之前要 await 三处外部状态（令牌黑名单、
  * User 查询、设备会话校验）。客户端在这段时间里断开是常态（页面刷新、网络抖动、
- * 认证超时被服务端踢）：disconnect 处理器（websocketService.js:367-379）跑的时候
+ * 认证超时被服务端踢）：disconnect 处理器（websocketService/push.js:176-188）跑的时候
  * `socket.userId` 还没赋值，于是只从 `clients` 里摘掉这条连接，`userConnections`
- * 那支判据整段跳过；等 await 回来，:511-514 仍然把这个**已经死掉的 socketId** 登记进
+ * 那支判据整段跳过；等 await 回来，:260-263 仍然把这个**已经死掉的 socketId** 登记进
  * userConnections。之后没有任何地方再清它（周期清扫只遍历 `this.clients.keys()`，
  * 除 dispose() 外没有路径再碰 userConnections）⇒ 一条永久幽灵。
  *
@@ -46,7 +46,7 @@ function jsCodeOnly(src) {
     .join('\n');
 }
 
-const WS_PATH = path.join(__dirname, '../../services/websocketService.js');
+const WS_PATH = path.join(__dirname, '../../services/websocketService/handshake.js');
 
 describe('WebSocket 认证在途断开不留幽灵连接（F-188）', () => {
   let WebSocketService;

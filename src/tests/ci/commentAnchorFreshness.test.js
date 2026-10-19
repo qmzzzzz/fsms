@@ -534,6 +534,18 @@ const LIVE = [
     must: /不做跨实例失效广播/,
     why: '同一处事实的第二个引用站点，同样必须指得到那段注释',
   },
+  {
+    in: 'src/services/websocketService/push.js',
+    at: 'src/index.js:460-478',
+    must: /process\.on\('unhandledRejection'/,
+    why: 'guardSocketHandler 文档引用的 unhandledRejection 兜底口径（2026-10-18 拆分后站点迁至 push.js）',
+  },
+  {
+    in: 'src/tests/services/websocketHandlerRejectionGuard.test.js',
+    at: 'src/index.js:460-478',
+    must: /process\.on\('unhandledRejection'/,
+    why: '同一处口径的第二个引用站点（两条既定事实之一）',
+  },
 ];
 
 /**
@@ -554,20 +566,6 @@ const STALE = [
     at: 'src/index.js:446',
     owner: '他人脏文件（M）',
     shouldRead: 'src/index.js:460',
-    mustAfterFix: /process\.on\('unhandledRejection'/,
-  },
-  {
-    in: 'src/services/websocketService.js',
-    at: 'src/index.js:446-463',
-    owner: '他人脏文件（M）',
-    shouldRead: 'src/index.js:460-478',
-    mustAfterFix: /process\.on\('unhandledRejection'/,
-  },
-  {
-    in: 'src/tests/services/websocketHandlerRejectionGuard.test.js',
-    at: 'src/index.js:446-463',
-    owner: '他人 staged（A）',
-    shouldRead: 'src/index.js:460-478',
     mustAfterFix: /process\.on\('unhandledRejection'/,
   },
   {
@@ -819,7 +817,7 @@ describe('层 4 · 规模与自排除不许静止', () => {
     expect(classify(mk(5)).resolved / 100).toBeGreaterThanOrEqual(RESOLVE_RATIO_FLOOR);
     // 登记数只许涨不许跌（跌 = 有人删了判据）；晋升一条不该把闸弄红
     expect(LIVE.length).toBeGreaterThanOrEqual(42);
-    expect(STALE.length).toBe(5);
+    expect(STALE.length).toBe(3);
   });
 
   test('本文件自身不在扫描集里（自证与真违规必须可区分）', () => {

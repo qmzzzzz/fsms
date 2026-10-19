@@ -260,7 +260,7 @@ const EXPORT_FORM_UNRECOGNISED = [
   'services/permissionService.js',
   'services/roleService.js',
   'services/userService.js',
-  'services/websocketService.js',
+  'services/websocketService/index.js',
 ].sort();
 
 function unaccountedExportFiles() {

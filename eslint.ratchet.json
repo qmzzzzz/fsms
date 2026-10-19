@@ -17,9 +17,6 @@
   "src/services/sharedCache.js": {
     "max-lines": 1
   },
-  "src/services/websocketService.js": {
-    "max-lines": 1
-  },
   "src/utils/errorCodes.js": {
     "max-lines": 1
   }

@@ -3,7 +3,7 @@
  *
  * 缺陷形态（2026-09-24 实测确认）：同一条「TRUST_PROXY_HOPS → 信任几跳」的规则
  * 写了两份——src/app.js 一份（带 MAX_TRUST_PROXY_HOPS=5 夹取），
- * src/services/websocketService.js 一份（**漏了夹取**）。
+ * src/services/websocketService/handshake.js 一份（**漏了夹取**）。
  * WS 侧把 999999 原样交给 resolveHandshakeClientIP，等价于信任整条 X-Forwarded-For，
  * 于是 allowedIPs 的握手 IP 校验按请求方自己填的地址判定 ⇒ 登录 IP 白名单在
  * 实时推送面上失效。非 production 可达：config/validate.js 的启动硬闸对

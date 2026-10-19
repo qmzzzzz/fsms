@@ -300,7 +300,7 @@ const LEDGER = {
       'controllers/authController.js:590 一处（同一端点的 access 失效分支），' +
       '返回布尔量给"是否已登录"提示',
   },
-  'services/websocketService.js#authenticateSocket': {
+  'services/websocketService/handshake.js#authenticateSocket': {
     role: 'entry',
     mint: false,
     verify: true,
@@ -399,7 +399,7 @@ describe('凭证门集合与账户复查形状（双向登记 + 判定顺序）'
       expect(body).toMatch(/lockUntil|status\s*!==|USER_STATUS\./);
     }
     // WS 门声明 lockWhere:'self' ⇒ 复查必须真的在自己函数体里（否则声明与实测相反）
-    const ws = doors.get('services/websocketService.js#authenticateSocket');
+    const ws = doors.get('services/websocketService/handshake.js#authenticateSocket');
     expect(ws.checksLock).toBe(true);
 
     // 同名委托实测有**两份实现**（本仓的命名冲突，实测不是推测）：

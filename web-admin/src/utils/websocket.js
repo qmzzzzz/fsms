@@ -1,5 +1,5 @@
 /**
- * WebSocket 服务 - 基于 socket.io-client，与后端 src/services/websocketService.js（Socket.IO）对齐
+ * WebSocket 服务 - 基于 socket.io-client，与后端 src/services/websocketService/（Socket.IO）对齐
  *
  * 相对旧版「原生 new WebSocket」实现的关键修正：
  *  1. 协议对齐：后端使用 Socket.IO（engine.io 帧），原生 WebSocket 无法完成握手与认证；

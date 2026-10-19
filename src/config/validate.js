@@ -275,7 +275,7 @@ const MAX_TRUST_PROXY_HOPS = 5;
  * 于是可以按格钉判据，也不必为「环境分叉」拉起整个 app）
  *
  * 为什么要有这一个函数：同一条取值规则原本写了两遍——
- * src/app.js 与 src/services/websocketService.js 各一份「parseInt → >0 才信任
+ * src/app.js 与 src/services/websocketService/handshake.js 各一份「parseInt → >0 才信任
  * → 否则 development 取 1 / 其余取 0」，而**只有 app.js 那一份带 MAX 夹取**。
  * 漂移的后果不是"两个数字不一致"这么轻：WS 侧把 TRUST_PROXY_HOPS=999999 原样
  * 交给 resolveHandshakeClientIP，等价于信任整条 X-Forwarded-For，握手期客户端 IP
@@ -672,7 +672,7 @@ module.exports = {
   isProductionLikeEnv,
   requiresProductionSemantics,
   normalizeNodeEnv,
-  // trust proxy 取值规则的单一来源：app.js（HTTP）与 websocketService.js（WS 握手）
+  // trust proxy 取值规则的单一来源：app.js（HTTP）与 websocketService/handshake.js（WS 握手）
   // 必须共用同一份判据与同一个上限，否则同一条请求在两侧得出不同的客户端 IP。
   MAX_TRUST_PROXY_HOPS,
   resolveTrustProxyHops,
@@ -687,7 +687,7 @@ module.exports = {
 // 正是拿这一步的退出码当"轮换后配置自洽"的证据——*_FILE 部署下那条轮换流程做不到收尾。
 //
 // 为什么不在文件顶部 hydrate（本轮真的先写成顶部方案，被自己的测试打回来了）：
-// 本文件同时是**库**（app.js / index.js / staticFrontend.js / websocketService.js 都 require 它）
+// 本文件同时是**库**（app.js / index.js / staticFrontend.js / websocketService/handshake.js 都 require 它）
 // 和**入口**，而这两种身份对 require 期的副作用要求相反。顶部写法在 require 期就覆写
 // process.env：src/tests/setup.js 给每个 worker 预置了四把 `*_FILE` 临时副本，于是
 // 「先设 env、后 require」的用例被回填悄悄改回测试密钥，实测连带打红 5 个配置套件
