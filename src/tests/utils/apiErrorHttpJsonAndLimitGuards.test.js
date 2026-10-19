@@ -23,8 +23,8 @@
  */
 
 // ---- 顶层替身（jest.mock 会被提升）------------------------------------------
-jest.mock('http', () => ({ request: jest.fn() }));
-jest.mock('https', () => ({ request: jest.fn() }));
+jest.mock('http', () => ({ ...jest.requireActual('http'), request: jest.fn() }));
+jest.mock('https', () => ({ ...jest.requireActual('https'), request: jest.fn() }));
 jest.mock('@sentry/node', () => ({
   init: jest.fn(),
   captureException: jest.fn(),
