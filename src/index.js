@@ -36,6 +36,9 @@ const auditMonitor = require('./services/auditMonitor');
 // 审计链周期自检（2026-09-30）：补上"链完整性由定时任务守护"这一方，
 // 与 auditMonitor（异常行为检测）分工，见该模块文件头
 const auditChainMonitor = require('./services/auditChainMonitor');
+// 安全哨兵用户名（canary）检测：启动期做遮蔽对账（幽灵名被真实账户占用 ⇒
+// 对应哨兵静默失效，须告警；状态经安全概览合规块暴露），详见该模块文件头
+const canaryWatch = require('./services/canaryWatch');
 // M-09：启动期重同步审计链链尾（清除崩溃遗留的幻影链尾）
 const { resyncChainTail } = require('./utils/auditChain');
 // F-103：关停链的总预算（每一步向它要自己的超时，见 gracefulShutdown 内的注释）
@@ -391,6 +394,9 @@ const startServer = async () => {
       // "篡改会留痕"成立而"痕迹会被发现"不成立；本定时器把发现从人工动作
       // 变成自动循环。窗口取最近 N 条（默认 2000），发现新断裂/缺口即告警。
       auditChainMonitor.start();
+      // 启动期哨兵用户名遮蔽对账（init 永不 reject；失败按"未检查"处理，
+      // 不影响名单匹配与登录路径，见 canaryWatch 文件头）
+      canaryWatch.init().catch(() => {});
       reminderScheduler = startReminderScheduler(24 * 60 * 60 * 1000);
 
       const scheme = process.env.ENABLE_HTTPS === 'true' ? 'https' : 'http';

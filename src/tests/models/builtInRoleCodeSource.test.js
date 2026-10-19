@@ -12,7 +12,7 @@
  *    当作内置角色走克隆分支。于是"用一个特定编码建角色"＝铸造一条不可删除、
  *    不可改名、层级冻结的记录，而这条编码名单与真正的种子名单（下一项）并不相等。
  *
- * 2) `src/services/initData.js` 的 `defaultRoles` 才是实际种入的内置角色，
+ * 2) `src/services/initData/roles.js` 的 `defaultRoles` 才是实际种入的内置角色，
  *    每条自己显式带 `isBuiltIn: true`，不依赖那份钩子名单。
  *
  * 3) 同文件的 `rolePermissionMap` 用**编码字符串作键**给出每个内置角色的权限集。
@@ -38,7 +38,8 @@ const { defaultRoles } = require('../../services/initData');
 
 const REPO_ROOT = path.join(__dirname, '..', '..', '..');
 const ROLE_SRC = path.join(REPO_ROOT, 'src', 'models', 'Role.js');
-const INIT_SRC = path.join(REPO_ROOT, 'src', 'services', 'initData.js');
+// 2026-10-19 批 3c：initData.js 拆为 services/initData/ 目录，rolePermissionMap 移至 roles.js
+const INIT_SRC = path.join(REPO_ROOT, 'src', 'services', 'initData', 'roles.js');
 
 /** 与既有单源闸同一口径：先剥注释，否则注释里抄一份名单就能把判据喂绿 */
 const stripComments = (code) => code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
@@ -55,7 +56,7 @@ function hookBuiltInCodes(src) {
   return [...m[1].matchAll(/'([^']*)'/g)].map((x) => x[1]);
 }
 
-/** initData.js 里 rolePermissionMap 的键（该常量未导出） */
+/** roles.js 里 rolePermissionMap 的键（该常量未导出，只能读源码） */
 function permissionMapKeys(src) {
   const from = src.indexOf('const rolePermissionMap = {');
   if (from < 0) return null;

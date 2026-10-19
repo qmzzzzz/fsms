@@ -17,8 +17,8 @@ const prometheusYml = read('deployment/observability/prometheus.yml');
 const alertRulesYml = read('deployment/observability/alert-rules.yml');
 const alertmanagerYml = read('deployment/observability/alertmanager.yml');
 const composeYml = read('docker-compose.yml');
-// 指标定义分布在三个文件：metrics.js 主体 + 两组单独成文件的信号
-// （metricsAuditDrops 审计丢失、metricsRuntime 运行时健康）。
+// 指标定义分布在四个文件：metrics.js 主体 + 三组单独成文件的信号
+// （metricsAuditDrops 审计丢失、metricsRuntime 运行时健康、metricsDetection 检测延迟）。
 //
 // 只读 metrics.js 会漏掉后两组；而更早的写法之所以能过，靠的是 metrics.js 的
 // **头部注释**里把 audit_records_dropped_total 列了进去——注释不是定义，
@@ -31,6 +31,7 @@ const metricsJs = [
   'src/utils/metrics.js',
   'src/utils/metricsAuditDrops.js',
   'src/utils/metricsRuntime.js',
+  'src/utils/metricsDetection.js',
 ]
   .map(read)
   .join('\n');

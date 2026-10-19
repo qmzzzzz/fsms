@@ -1,7 +1,7 @@
 /**
  * F-214：fire-and-forget 告警投递只许有一个入口，且那个入口不得静默
  *
- * 缺陷形状（2026-09-27 实测定位）：`securityAlert.js:170-185` 把
+ * 缺陷形状（2026-09-27 实测定位）：`securityAlert.js:193-204` 把
  * `dispatchNotification` 的注释写成「fire-and-forget 投递的统一入口」，
  * 内部三个检测器也确实在用它 —— 但它**没有导出**。于是外部的调用方
  * （`middleware/security.js` 的黑名单命中通知）只能用同一模块导出的裸
@@ -10,7 +10,7 @@
  * 为什么"外面包一层 try/catch"救不了它（这是本条最容易被看错的地方）：
  * `async` 函数不抛异常，它返回 rejected promise ⇒ 调用点的 `try` 永远接不住，
  * 于是那句「通知失败不影响拦截主流程」的注释在裸 void 下**不成立** ——
- * 它命中的是 `index.js:456-474` 的 unhandledRejection 分支（`:436-453` 是
+ * 它命中的是 `index.js:466-484` 的 unhandledRejection 分支（`:446-464` 是
  * uncaughtException 臂，别引错——两条臂都 `process.exit(1)`，但只有前者接拒绝），
  * 而那条分支在**所有环境**都退出：黑名单拦截路径变成整机重启。
  * （今天不可达：投递函数在 `try` 之前没有可抛点，逐条读过。所以补的是

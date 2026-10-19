@@ -1,5 +1,36 @@
 <template>
   <div class="page">
+    <!--
+      概览条（GET /devices/stats，与列表同数据范围口径）。
+      首屏拿不到统计时整条不渲染——5 张 0 卡读作「设备全好」，与「没拿到数据」不可区分；
+      已有读数后刷新失败保留上一次已知数字（赋值只在成功分支）。
+      「即将到期」卡可点击：进入到期窗口清单（7/30/90 天）。
+    -->
+    <div v-if="stats" class="device-overview">
+      <el-card
+        v-for="s in overviewCards"
+        :key="s.key"
+        shadow="hover"
+        class="mini-stat"
+        :class="{ 'is-clickable': s.clickable }"
+        @click="s.clickable && openExpiring()"
+      >
+        <div class="mini-stat-body">
+          <el-icon :size="28" :color="s.color">
+            <component :is="s.icon" />
+          </el-icon>
+          <div>
+            <div class="num">
+              {{ s.value }}
+            </div>
+            <div class="label">
+              {{ s.label }}
+            </div>
+          </div>
+        </div>
+      </el-card>
+    </div>
+
     <div class="glass filter-card">
       <el-form :inline="true" :model="filters">
         <el-form-item :label="$t('device.deviceName')">
@@ -51,9 +82,22 @@
           >
             <span>+</span> {{ $t('device.addDevice') }}
           </button>
-          <button type="button" class="glass-btn glass-btn--default" @click="loadData">
+          <button type="button" class="glass-btn glass-btn--default" @click="refreshAll">
             {{ $t('common.refresh') }}
           </button>
+          <!--
+            到期提醒入口：徽标取 summary.total（与弹窗同一次请求的数据源）。
+            达到提醒条件时数字必须可见——0 隐藏徽标是有意的（无待办不打扰）。
+          -->
+          <el-badge
+            :value="reminderSummary ? reminderSummary.total : 0"
+            :hidden="!reminderSummary || reminderSummary.total === 0"
+            class="reminder-badge-wrap"
+          >
+            <button type="button" class="glass-btn glass-btn--default" @click="openReminders">
+              {{ $t('device.openReminders') }}
+            </button>
+          </el-badge>
         </div>
       </div>
       <!-- 首屏骨架占位；数据到达后直接替换（带数据刷新时走表格内 loading） -->
@@ -84,7 +128,12 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column :label="$t('common.operation')" width="220" fixed="right">
+        <!--
+          列宽预算：新增「变更状态/维护」后同一行最多四个按钮
+          （编辑44 + 变更状态68 + 维护44 + 删除44 = 200px），
+          加单元格左右 padding 24px = 224px，原 220px 会把「删除」挤到第二行 → 240px。
+        -->
+        <el-table-column :label="$t('common.operation')" width="240" fixed="right">
           <template #default="{ row }">
             <button
               v-if="hasPerm('device:update')"
@@ -93,6 +142,28 @@
               @click="handleEdit(row)"
             >
               {{ $t('common.edit') }}
+            </button>
+            <!--
+              变更状态：可写集与后端 constants/deviceStatus 的 WRITABLE 同口径
+              （全集 − scrapped，报废走专门接口）；报废行后端必 400，不渲染。
+            -->
+            <button
+              v-if="hasPerm('device:update') && row.status !== 'scrapped'"
+              type="button"
+              class="glass-btn glass-btn--warning glass-btn--link"
+              :disabled="rowBusy === row._id"
+              @click="handleChangeStatus(row)"
+            >
+              {{ $t('device.changeStatus') }}
+            </button>
+            <!-- 维护：模型层对已报废设备拒绝一切维护记录，同样不渲染注定失败的入口 -->
+            <button
+              v-if="hasPerm('device:maintain') && row.status !== 'scrapped'"
+              type="button"
+              class="glass-btn glass-btn--info glass-btn--link"
+              @click="handleMaintain(row)"
+            >
+              {{ $t('device.maintain') }}
             </button>
             <button
               v-if="hasPerm('device:delete')"
@@ -210,19 +281,93 @@
         </button>
       </template>
     </el-dialog>
+
+    <!-- 即将到期清单（GET /devices/expiring；days ∈ 7/30/90） -->
+    <el-dialog v-model="expiring.visible" :title="$t('device.expiringTitle')" width="640px">
+      <div class="expiring-toolbar">
+        <el-radio-group v-model="expiring.days" @change="loadExpiring">
+          <el-radio-button :value="7">
+            {{ $t('device.expiringWithin', { days: 7 }) }}
+          </el-radio-button>
+          <el-radio-button :value="30">
+            {{ $t('device.expiringWithin', { days: 30 }) }}
+          </el-radio-button>
+          <el-radio-button :value="90">
+            {{ $t('device.expiringWithin', { days: 90 }) }}
+          </el-radio-button>
+        </el-radio-group>
+      </div>
+      <div v-loading="expiring.loading" class="expiring-body">
+        <div v-if="expiring.failed && expiring.list.length === 0" class="expiring-failed">
+          <span>{{ $t('messages.loadFailed') }}</span>
+          <button type="button" class="glass-btn glass-btn--sm" @click="loadExpiring">
+            {{ $t('common.refresh') }}
+          </button>
+        </div>
+        <div v-else-if="!expiring.loading && expiring.list.length === 0" class="expiring-empty">
+          {{ $t('device.expiringEmpty') }}
+        </div>
+        <template v-else>
+          <ul class="expiring-list">
+            <li v-for="(item, i) in expiring.list" :key="item._id || i" class="expiring-item">
+              <span class="expiring-code">{{ item.deviceCode }}</span>
+              <span class="expiring-name">{{ item.deviceName }}</span>
+              <span class="expiring-location">{{ formatLocation(item.location) }}</span>
+              <el-tag :type="statusType(item.status)" size="small" effect="light">
+                {{ statusText(item.status) }}
+              </el-tag>
+              <span class="expiring-date">{{ dateOnly(item.expiryDate) }}</span>
+            </li>
+          </ul>
+          <!-- F-174 截断事实：清单只回最先到期的 limit 台，total 是真实命中数 -->
+          <div v-if="expiring.hasMore" class="expiring-more">
+            {{ $t('device.expiringMoreHint', { total: expiring.total, limit: expiring.limit }) }}
+          </div>
+        </template>
+      </div>
+      <template #footer>
+        <button
+          type="button"
+          class="glass-btn glass-btn--default"
+          @click="expiring.visible = false"
+        >
+          {{ $t('common.close') }}
+        </button>
+      </template>
+    </el-dialog>
+
+    <!-- 到期提醒四档清单（数据归本视图持有，见 script 注释） -->
+    <DeviceReminderDialog
+      v-model:visible="reminder.visible"
+      :data="reminder.data"
+      :loading="reminder.loading"
+      :failed="reminder.failed"
+      @refresh="loadReminders"
+    />
+
+    <!-- 维护登记 -->
+    <DeviceMaintenanceDialog
+      v-model:visible="maintenance.visible"
+      :device="maintenance.device"
+      @saved="onMaintenanceSaved"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed, watch } from 'vue'
+import { ref, reactive, onMounted, computed, watch, h } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
+import { Box, Calendar, Timer, Tools, WarningFilled } from '@element-plus/icons-vue'
+import { ElRadioGroup, ElRadio } from 'element-plus/es/components/radio/index.mjs'
 import { api, isCanceledError } from '@/utils/api'
 import { localDateStr as sharedLocalDateStr } from '@/utils/datetime'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
+import DeviceReminderDialog from '@/components/DeviceReminderDialog.vue'
+import DeviceMaintenanceDialog from '@/components/DeviceMaintenanceDialog.vue'
 
 const { hasPerm } = usePermission()
 const { t, locale } = useI18n()
@@ -278,6 +423,12 @@ const toDateOnly = (value) => {
 const formatLocation = (loc) => {
   if (!loc) return ''
   return [loc.building, loc.floor, loc.room].filter(Boolean).join(' ') || loc.detail || ''
+}
+// 日期列（到期日等）：'-' 明确表达「缺值」，留空会被读成「没有这个字段」
+const dateOnly = (v) => {
+  if (!v) return '-'
+  const d = new Date(v)
+  return Number.isNaN(d.getTime()) ? '-' : localDateStr(d)
 }
 
 const dialog = reactive({
@@ -471,12 +622,208 @@ const resetForm = () => {
   }
 }
 
-// 语言切换时重新加载列表，状态/类型等文案随语言同步刷新
-watch(locale, () => {
-  loadData()
+// ===== 概览统计 / 到期提醒 / 到期清单 / 状态变更 / 维护登记 =====
+
+const rowBusy = ref(null)
+
+// 概览统计（GET /devices/stats）：只在成功分支赋值——首屏失败整条隐藏（0 卡会被读作
+// 「设备全好」），已有读数后的刷新失败保留上一次已知数字（陈旧但真实）
+const stats = ref(null)
+const loadStats = async () => {
+  try {
+    const res = await api.devices.getStats()
+    const payload = res?.data?.data
+    if (payload && typeof payload === 'object') stats.value = payload
+  } catch (e) {
+    if (isCanceledError(e)) return
+    // 失败静默：概览条不是操作入口，失败由「隐藏/保留旧值」表达；
+    // 拦截器已对真实请求错误统一提示，这里再弹会双提示
+  }
+}
+
+const overviewCards = computed(() => {
+  if (!stats.value) return []
+  const s = stats.value
+  return [
+    {
+      key: 'total',
+      label: t('device.totalDevices'),
+      value: s.total || 0,
+      color: '#475569',
+      icon: Box,
+    },
+    {
+      key: 'expired',
+      label: t('device.expired'),
+      value: s.expired || 0,
+      color: '#b91c1c',
+      icon: WarningFilled,
+    },
+    {
+      key: 'expiringSoon',
+      label: t('device.expiringSoon'),
+      value: s.expiringSoon || 0,
+      color: '#d97706',
+      icon: Timer,
+      clickable: true,
+    },
+    {
+      key: 'needMaintenance',
+      label: t('device.needMaintenance'),
+      value: s.needMaintenance || 0,
+      color: '#c1121f',
+      icon: Tools,
+    },
+    {
+      key: 'needSchedule',
+      label: t('device.needSchedule'),
+      value: s.needSchedule || 0,
+      color: '#64748b',
+      icon: Calendar,
+    },
+  ]
 })
 
-onMounted(loadData)
+// 到期提醒（GET /devices/reminders）：数据归本视图持有——徽标与弹窗消费同一份响应，
+// 避免「徽标一个数、弹窗另一个数」；打开时刷新，弹窗内重试走同一函数
+const reminder = reactive({ visible: false, loading: false, failed: false, data: null })
+const reminderSummary = computed(() => reminder.data?.summary || null)
+const loadReminders = async () => {
+  reminder.loading = true
+  try {
+    const res = await api.devices.getReminders()
+    reminder.data = res?.data?.data || null
+    reminder.failed = false
+  } catch (e) {
+    if (isCanceledError(e)) return
+    // 有历史数据保留旧值（徽标不闪零）；无数据才进失败态（弹窗内展示重试入口）
+    reminder.failed = true
+  } finally {
+    reminder.loading = false
+  }
+}
+const openReminders = () => {
+  reminder.visible = true
+  loadReminders()
+}
+
+// 即将到期清单（GET /devices/expiring?days=7|30|90）
+const expiring = reactive({
+  visible: false,
+  days: 30,
+  loading: false,
+  failed: false,
+  list: [],
+  total: 0,
+  hasMore: false,
+  limit: null,
+})
+// 快速切换 7/30/90 时丢弃过期响应，防止旧窗口的数据覆盖新窗口
+const expiringGuard = useLatestRequest()
+const loadExpiring = async () => {
+  const isCurrent = expiringGuard()
+  expiring.loading = true
+  expiring.failed = false
+  try {
+    const res = await api.devices.getExpiring({ days: expiring.days })
+    if (!isCurrent()) return
+    const payload = res?.data?.data
+    expiring.list = Array.isArray(payload) ? payload : []
+    const paging = res?.data?.pagination || {}
+    expiring.total = paging.total ?? expiring.list.length
+    expiring.hasMore = !!paging.hasMore
+    expiring.limit = paging.limit ?? null
+  } catch (e) {
+    if (isCanceledError(e)) return
+    if (!isCurrent()) return
+    expiring.failed = true
+    expiring.list = []
+    expiring.total = 0
+    expiring.hasMore = false
+  } finally {
+    if (isCurrent()) expiring.loading = false
+  }
+}
+const openExpiring = () => {
+  expiring.visible = true
+  expiring.days = 30
+  loadExpiring()
+}
+
+// 与后端 constants/deviceStatus 的 WRITABLE 集同口径（全集 − scrapped，报废走专门接口）
+const WRITABLE_STATUSES = ['normal', 'warning', 'fault', 'offline', 'maintenance']
+
+const handleChangeStatus = async (row) => {
+  // 重入守卫放在 await 之前（同一 tick 的双击时按钮 disabled 尚未生效）
+  if (rowBusy.value === row._id) return
+  rowBusy.value = row._id
+  try {
+    const selected = ref(row.status)
+    await ElMessageBox.confirm(
+      () =>
+        h('div', [
+          h(
+            'p',
+            { style: 'margin: 0 0 12px; font-size: 14px; color: #334155;' },
+            t('device.changeStatusConfirm', { name: row.deviceName })
+          ),
+          // 状态是 5 选 1 枚举：自由输入会产生非法值、到提交后才 400；
+          // 单选框让「可选值集合」本身成为约束（同报警页原因选择先例）
+          h(
+            ElRadioGroup,
+            {
+              modelValue: selected.value,
+              'onUpdate:modelValue': (v) => {
+                selected.value = v
+              },
+              style: 'display:flex; flex-direction:column; gap:10px; align-items:flex-start;',
+            },
+            () =>
+              WRITABLE_STATUSES.map((s) => h(ElRadio, { key: s, value: s }, () => statusText(s)))
+          ),
+        ]),
+      t('device.changeStatus'),
+      {
+        confirmButtonText: t('common.confirm'),
+        cancelButtonText: t('common.cancel'),
+        type: 'warning',
+      }
+    )
+    await api.devices.updateStatus(row._id, { status: selected.value })
+    ElMessage.success(t('device.statusSuccess'))
+    refreshAll()
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') {
+      // 错误已在拦截器统一提示
+    }
+  } finally {
+    rowBusy.value = null
+  }
+}
+
+// 维护登记：弹窗自己提交，成功后回刷新本页三块（列表/概览/提醒）
+const maintenance = reactive({ visible: false, device: null })
+const handleMaintain = (row) => {
+  maintenance.device = row
+  maintenance.visible = true
+}
+const onMaintenanceSaved = () => {
+  refreshAll()
+}
+
+// 列表 + 概览 + 提醒徽标一起刷新：三块同页展示，分开刷新会出现段间数字不一致
+const refreshAll = () => {
+  loadData()
+  loadStats()
+  loadReminders()
+}
+
+// 语言切换时重新加载列表，状态/类型等文案随语言同步刷新
+watch(locale, () => {
+  refreshAll()
+})
+
+onMounted(refreshAll)
 </script>
 
 <style scoped>
@@ -511,6 +858,107 @@ onMounted(loadData)
   justify-content: flex-end;
   margin-top: var(--xf-spacing-lg);
   font-family: var(--xf-font-body);
+}
+
+/* ===== 概览条：5 卡用 grid（el-col 的 24 格不能整除 5），卡内样式对齐报警页 mini-stat ===== */
+.device-overview {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--xf-spacing-lg);
+}
+.mini-stat.is-clickable {
+  cursor: pointer;
+}
+.mini-stat :deep(.el-card__body) {
+  padding: 16px;
+}
+.mini-stat-body {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.mini-stat-body .num {
+  font-family: var(--xf-font-display);
+  font-size: var(--xf-font-size-xl);
+  font-weight: 700;
+  letter-spacing: var(--xf-tracking-tight);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  color: var(--xf-gray-900);
+}
+.mini-stat-body .label {
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-500);
+  letter-spacing: var(--xf-tracking-wide);
+  text-transform: uppercase;
+}
+@media (max-width: 1200px) {
+  .device-overview {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+}
+
+/* ===== 即将到期弹窗 ===== */
+.expiring-toolbar {
+  margin-bottom: 12px;
+}
+.expiring-body {
+  min-height: 80px;
+}
+.expiring-failed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 0;
+  color: var(--xf-text-secondary);
+}
+.expiring-empty {
+  padding: 24px 0;
+  text-align: center;
+  color: var(--xf-text-secondary);
+}
+.expiring-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.expiring-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--xf-border-color);
+  font-size: var(--xf-font-size-sm);
+}
+.expiring-code {
+  flex: 0 0 90px;
+  color: var(--xf-text-secondary);
+}
+.expiring-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.expiring-location {
+  flex: 1 1 auto;
+  color: var(--xf-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.expiring-date {
+  flex: 0 0 90px;
+  text-align: right;
+  color: var(--xf-text-secondary);
+}
+.expiring-more {
+  padding-top: 8px;
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-warning);
 }
 
 /* ===== Apple 风格增量（交互手感层：只叠反馈与过渡，不改布局） ===== */

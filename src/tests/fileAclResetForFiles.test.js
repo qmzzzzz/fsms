@@ -11,7 +11,7 @@
  *
  * 谁受影响：两个真实调用点都收紧文件。
  *   - `scripts/generate-secrets.js:135` 逐个收紧密钥文件；
- *   - `src/services/initData.js:733` 收紧初始密码文件（这条路径**不**先重置父目录，
+ *   - `src/services/initData/adminAccount.js:46` 收紧初始密码文件（这条路径**不**先重置父目录，
  *     所以没有"目录 /T 递归重置"顺带兜底）。
  * 而 `icacls` 的现实语义下，"文件带显式 ACE"并不罕见：从别处拷贝/解压来的密钥文件、
  * 备份恢复出来的文件、或管理员手工 grant 过的文件。

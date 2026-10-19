@@ -18,6 +18,7 @@ const getStats = vi.fn()
 const start = vi.fn()
 const remove = vi.fn()
 const getById = vi.fn()
+const cancelInspection = vi.fn()
 const isCanceledError = vi.fn(() => false)
 vi.mock('@/utils/api', () => ({
   api: {
@@ -27,6 +28,7 @@ vi.mock('@/utils/api', () => ({
       start: (...a) => start(...a),
       delete: (...a) => remove(...a),
       getById: (...a) => getById(...a),
+      cancel: (...a) => cancelInspection(...a),
       review: vi.fn(),
     },
   },
@@ -36,7 +38,7 @@ vi.mock('element-plus/es/components/message/index.mjs', () => ({
   ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }))
 vi.mock('element-plus/es/components/message-box/index.mjs', () => ({
-  ElMessageBox: { confirm: vi.fn() },
+  ElMessageBox: { confirm: vi.fn(), prompt: vi.fn() },
 }))
 
 import i18n from '@/i18n'
@@ -105,6 +107,7 @@ afterEach(() => {
   start.mockReset()
   remove.mockReset()
   getById.mockReset()
+  cancelInspection.mockReset()
   isCanceledError.mockReset()
   isCanceledError.mockReturnValue(false)
   ElMessage.success.mockReset()
@@ -115,6 +118,7 @@ afterEach(() => {
   // 调用一起数（默认顺序恰好把它排在第一个确认框用例之后所以一直侥幸绿，
   // `--sequence.shuffle` 一打散就变成 "expected 1 times, but got 3 times"）。
   ElMessageBox.confirm.mockReset()
+  ElMessageBox.prompt.mockReset()
 })
 
 describe('InspectionView 计划时间列（本地时区口径）', () => {
@@ -366,6 +370,133 @@ describe('InspectionView 启动/删除（操作分支）', () => {
     click(pendingLabel.querySelector('input') || pendingLabel)
     await waitFor(() => getList.mock.calls.length === 3, { message: '筛选请求发出' })
     expect(getList.mock.calls[2][0]).toEqual({ page: 1, limit: 10, status: 'pending' })
+  })
+})
+describe('InspectionView 取消巡检（inspection:create 门控）', () => {
+  const CREATE_PERMS = [
+    'inspection:read',
+    'inspection:create',
+    'inspection:execute',
+    'inspection:delete',
+  ]
+  const rowBtns = (c, i) =>
+    Array.from(
+      c.findAll('.el-table__body-wrapper .el-table__row')[i].querySelectorAll('button')
+    ).map((b) => b.textContent.trim())
+  const rowBtn = (c, i, label) =>
+    Array.from(
+      c.findAll('.el-table__body-wrapper .el-table__row')[i].querySelectorAll('button')
+    ).find((b) => b.textContent.trim() === label)
+  const r = (id, status, over = {}) => ({
+    _id: id,
+    title: '月度巡检',
+    status,
+    planStartTime: null,
+    ...over,
+  })
+
+  test('pending 行点「取消巡检」：填原因 → cancel(_id,{reason}) + 成功提示 + 刷新列表', async () => {
+    const c = await open([r('c1', 'pending')], { perms: CREATE_PERMS })
+    expect(rowBtns(c, 0)).toContain(i18n.global.t('inspection.cancelInspection'))
+    ElMessageBox.prompt.mockResolvedValue({ value: '  计划重排  ' })
+    cancelInspection.mockResolvedValue({ data: { success: true } })
+    const before = getList.mock.calls.length
+    click(rowBtn(c, 0, i18n.global.t('inspection.cancelInspection')))
+    await waitFor(() => cancelInspection.mock.calls.length === 1, { message: '取消请求发出' })
+    // 原因 trim 后提交；标题为动作名；选填校验器上限 500 与路由 cancelValidation 同口径
+    expect(cancelInspection).toHaveBeenCalledWith('c1', { reason: '计划重排' })
+    expect(ElMessageBox.prompt.mock.calls[0][1]).toBe(i18n.global.t('inspection.cancelInspection'))
+    const opts = ElMessageBox.prompt.mock.calls[0][2]
+    expect(opts.inputType).toBe('textarea')
+    expect(typeof opts.inputValidator).toBe('function')
+    expect(opts.inputValidator('')).toBe(true)
+    expect(opts.inputValidator('x'.repeat(500))).toBe(true)
+    expect(opts.inputValidator('x'.repeat(501))).toBe(
+      i18n.global.t('inspection.cancelReasonTooLong')
+    )
+    expect(ElMessage.success).toHaveBeenCalledWith(i18n.global.t('inspection.cancelSuccess'))
+    await waitFor(() => getList.mock.calls.length > before, { message: '成功后刷新列表' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('原因选填：不填直接确认 → 载荷不含 reason（后端回落默认说明，不塞空串）', async () => {
+    const c = await open([r('c2', 'overdue')], { perms: CREATE_PERMS })
+    ElMessageBox.prompt.mockResolvedValue({ value: '' })
+    cancelInspection.mockResolvedValue({ data: { success: true } })
+    click(rowBtn(c, 0, i18n.global.t('inspection.cancelInspection')))
+    await waitFor(() => cancelInspection.mock.calls.length === 1, { message: '取消请求发出' })
+    expect(cancelInspection).toHaveBeenCalledWith('c2', {})
+    expect(c.errors).toEqual([])
+  })
+
+  test('关闭原因弹窗（取消/关闭）：不发请求、不提示成功、行锁释放', async () => {
+    const c = await open([r('c3', 'in_progress')], { perms: CREATE_PERMS })
+    ElMessageBox.prompt.mockRejectedValue('cancel')
+    click(rowBtn(c, 0, i18n.global.t('inspection.cancelInspection')))
+    await waitFor(() => ElMessageBox.prompt.mock.calls.length === 1, { message: '弹窗弹出' })
+    await flush(16)
+    expect(cancelInspection).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(rowBtn(c, 0, i18n.global.t('inspection.cancelInspection')).disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('请求失败（如已被他人完成 → 409 conflict）：不误报成功、行锁释放可重试', async () => {
+    const c = await open([r('c4', 'pending')], { perms: CREATE_PERMS })
+    ElMessageBox.prompt.mockResolvedValue({ value: '误报' })
+    cancelInspection.mockRejectedValue(new Error('conflict'))
+    click(rowBtn(c, 0, i18n.global.t('inspection.cancelInspection')))
+    await waitFor(() => cancelInspection.mock.calls.length === 1, { message: '请求发出' })
+    await waitFor(
+      () => rowBtn(c, 0, i18n.global.t('inspection.cancelInspection')).disabled === false,
+      { message: '失败后解锁' }
+    )
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('同一 tick 双击「取消巡检」：只弹一次原因框、只发一个请求', async () => {
+    const c = await open([r('c5', 'pending')], { perms: CREATE_PERMS })
+    let promptCalls = 0
+    ElMessageBox.prompt.mockImplementation(() => {
+      promptCalls += 1
+      return new Promise(() => {})
+    })
+    const btn = rowBtn(c, 0, i18n.global.t('inspection.cancelInspection'))
+    click(btn)
+    click(btn)
+    await flush(12)
+    expect(promptCalls).toBe(1)
+    expect(cancelInspection).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('终态行不渲染「取消巡检」（completed/cancelled → 后端 409），开放三档可见', async () => {
+    const c = await open(
+      [
+        r('c6', 'pending'),
+        r('c7', 'in_progress'),
+        r('c8', 'overdue'),
+        r('c9', 'completed'),
+        r('c10', 'cancelled'),
+      ],
+      { perms: CREATE_PERMS }
+    )
+    const label = i18n.global.t('inspection.cancelInspection')
+    expect(rowBtn(c, 0, label)).toBeTruthy()
+    expect(rowBtn(c, 1, label)).toBeTruthy()
+    expect(rowBtn(c, 2, label)).toBeTruthy()
+    expect(rowBtn(c, 3, label)).toBeUndefined()
+    expect(rowBtn(c, 4, label)).toBeUndefined()
+    expect(c.errors).toEqual([])
+  })
+
+  test('权限门控：无 inspection:create（有 execute/delete）不渲染；与后端路由码一致', async () => {
+    const c = await open([r('c11', 'pending')], {
+      perms: ['inspection:read', 'inspection:execute', 'inspection:delete'],
+    })
+    expect(rowBtn(c, 0, i18n.global.t('inspection.cancelInspection'))).toBeUndefined()
+    expect(c.errors).toEqual([])
   })
 })
 describe('InspectionView 复核对话框接线', () => {

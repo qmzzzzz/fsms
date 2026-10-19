@@ -91,7 +91,7 @@ const protectBuiltInRole = async function (next) {
 };
 
 // bulkWrite 侧同一条判据：只挑出删除类操作的过滤器，没有删除类操作时原样放行
-// （initData.js:721/742 的对账与授权批量写全是 updateOne，必须不受影响）
+// （services/initData/seeding.js:193/214 的对账与授权批量写全是 updateOne，必须不受影响）
 const deleteFiltersOf = (ops) =>
   (ops || [])
     .filter((o) => o && (o.deleteOne || o.deleteMany))

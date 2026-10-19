@@ -83,7 +83,13 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column :label="$t('common.operation')" width="240" fixed="right">
+        <!--
+          列宽预算：新增「标记误报」后同一行最多四个按钮
+          （pending 行：指派处理+处理完成+标记误报+详情 = 68×3+44 = 248px），
+          加单元格左右 padding 24px 需 272px——240px 会把「详情」挤到第二行。
+          位置列是 min-width 弹性列，会吸收视口富余，整表总宽不受影响。
+        -->
+        <el-table-column :label="$t('common.operation')" width="280" fixed="right">
           <template #default="{ row }">
             <!--
               handle(row) 按状态走两条不同后端接口：pending→dispatch（需 alarm:dispatch）、
@@ -111,6 +117,23 @@
               @click="resolve(row)"
             >
               {{ $t('alarm.resolve') }}
+            </button>
+            <!--
+              标记误报：门控与 arrive/resolve 同码（alarm:handle）——误报判定
+              属「处理」语义而非「派单」。状态上仅 pending/processing 开放：终态行
+              渲染出来只会吃后端 ALARM_STATUS_NOT_ALLOWED；已指派给他人时服务层
+              还会按 handler 拒绝（对象级授权），该情况保留入口让用户看到真实反馈。
+            -->
+            <button
+              v-if="
+                hasPerm('alarm:handle') && (row.status === 'pending' || row.status === 'processing')
+              "
+              type="button"
+              class="glass-btn glass-btn--warning glass-btn--link"
+              :disabled="rowBusy === row._id"
+              @click="markAsFalseAlarm(row)"
+            >
+              {{ $t('alarm.falseAlarm') }}
             </button>
             <button
               type="button"
@@ -648,6 +671,44 @@ const resolve = async (row) => {
       if (e !== 'cancel') {
         // 错误已在拦截器处理
       }
+    }
+  } finally {
+    rowBusy.value = null
+  }
+}
+
+// 标记误报（pending/processing → false_alarm；可选原因写入 handleResult 与处理日志）
+const markAsFalseAlarm = async (row) => {
+  if (row.status !== 'pending' && row.status !== 'processing') return
+  // 同 handle/resolve：首行同步判定，同一 tick 的第二次点击到达时按钮尚未 disabled
+  if (rowBusy.value === row._id) return
+
+  rowBusy.value = row._id
+  try {
+    // 单弹窗即确认：确认按钮本身就是「执行标记」的意图表达，再叠一层 confirm
+    // 只是双份摩擦（原因还是选填的）。文案里写清后果（会记入处理日志）。
+    const { value } = await ElMessageBox.prompt(
+      t('alarm.falseAlarmConfirm'),
+      t('alarm.falseAlarm'),
+      {
+        inputType: 'textarea',
+        inputPlaceholder: t('alarm.falseAlarmReasonPlaceholder'),
+        // 选填：空值放行；上限与路由 handleReasonValidation 的 1000 同口径
+        inputValidator: (v) => !v || v.trim().length <= 1000 || t('alarm.falseAlarmReasonTooLong'),
+        confirmButtonText: t('common.confirm'),
+        cancelButtonText: t('common.cancel'),
+        type: 'warning',
+      }
+    )
+
+    const reason = (value || '').trim()
+    // 空原因不塞空串（后端 trim 后只判上限，但空键与缺键语义上不同：缺键走默认说明）
+    await api.alarms.markAsFalse(row._id, reason ? { reason } : {})
+    ElMessage.success(t('alarm.falseAlarmSuccess'))
+    await refreshAll()
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') {
+      // 错误已在拦截器处理
     }
   } finally {
     rowBusy.value = null

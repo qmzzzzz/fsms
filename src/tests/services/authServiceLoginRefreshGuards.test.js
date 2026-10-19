@@ -157,6 +157,25 @@ describe('authService gap B', () => {
       expect(result.userId).toBeTruthy();
       spy.mockRestore();
     });
+
+    test('DUPLICATE - 哨兵用户名（canary）不接受注册（保留名不可进入用户集合）', async () => {
+      // 验证码是注册第一闸（服务层默认开启），照上方「OK 正常注册」用例过闸，
+      // 才能走到 canary 闸本身；对外口径与重名一致（DUPLICATE，防枚举，
+      // 不新增 outcome）。注册闸只拒名单名，不记录探测（探测的审计与告警
+      // 由登录路径的 canaryWatch 负责）。
+      const captchaService = require('../../services/captchaService');
+      const spy = jest.spyOn(captchaService, 'verify').mockResolvedValueOnce(true);
+      const result = await authService.registerUser({
+        username: 'backup',
+        email: 'backup@example.com',
+        password: PASSWORD,
+        captchaId: 'any',
+        captchaText: 'any',
+      });
+      spy.mockRestore();
+      expect(result.outcome).toBe('DUPLICATE');
+      expect(await User.findOne({ username: 'backup' }).lean()).toBeNull();
+    });
   });
 
   // ==================== loginUser ====================

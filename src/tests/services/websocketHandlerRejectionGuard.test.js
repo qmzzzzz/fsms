@@ -5,7 +5,7 @@
  * （node_modules/socket.io/dist/socket.js:697 的 `super.emitUntyped.apply(this, event)`
  * 是 process.nextTick 回调里的一条裸语句，既不赋值也不 return），所以
  * `socket.on('x', async …)` 里 reject 掉的 promise 是一个没人持有的孤儿 promise
- * ⇒ Node 判为 unhandledRejection。而本仓在 src/index.js:460-478 的口径是
+ * ⇒ Node 判为 unhandledRejection。而本仓在 src/index.js:466-484 的口径是
  * 「任何未处理拒绝 ⇒ flush 审计后 process.exit(1)」，且该处理器在所有环境都注册。
  * 两条既定事实合起来：一条长连接上的一次 promise 拒绝 = 整个进程下线。
  *

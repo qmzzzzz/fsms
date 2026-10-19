@@ -190,3 +190,34 @@ describe('RoleListPanel 事件', () => {
     expect(btn.getAttribute('title')).toBe('删除')
   })
 })
+
+describe('RoleListPanel 编辑入口（canEdit 门控）', () => {
+  test('canEdit=true：每一行都渲染编辑按钮——内置角色也渲染（描述仍可改）', async () => {
+    const c = await open({ roles: [BUILTIN, PLAIN], canEdit: true })
+    expect(c.findAll('.role-edit-btn')).toHaveLength(2)
+  })
+
+  test('canEdit=false：不渲染编辑入口', async () => {
+    const c = await open({ roles: [PLAIN], canEdit: false })
+    expect(c.findAll('.role-edit-btn')).toEqual([])
+  })
+
+  test('点击编辑：emit edit 带 role 对象本身，且**不**触发 select（stopPropagation）', async () => {
+    const onSelect = vi.fn()
+    const onEdit = vi.fn()
+    const c = await open({ roles: [PLAIN], canEdit: true, onSelect, onEdit })
+    click(c.find('.role-edit-btn'))
+    await flush(2)
+    expect(onEdit).toHaveBeenCalledTimes(1)
+    expect(onEdit.mock.calls[0][0]).toBe(PLAIN)
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('编辑按钮是 type=button 且带 title（不触发表单提交、可悬停识别）', async () => {
+    const c = await open({ roles: [PLAIN], canEdit: true })
+    const btn = c.find('.role-edit-btn')
+    expect(btn.getAttribute('type')).toBe('button')
+    expect(btn.getAttribute('title')).toBe('编辑')
+  })
+})

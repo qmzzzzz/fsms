@@ -25,6 +25,18 @@
           <span class="glass-role-item__count"
             >{{ role.userCount || 0 }}{{ $t('user.title') }}</span
           >
+          <!-- 编辑铅笔：悬停/键盘聚焦时显现（触屏常显，见样式）；内置角色也渲染——
+               内置角色仍可改描述，名称锁定由对话框内部处理 -->
+          <button
+            v-if="canEdit"
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--icon role-edit-btn"
+            :title="$t('common.edit')"
+            :aria-label="$t('common.edit')"
+            @click.stop="$emit('edit', role)"
+          >
+            ✎
+          </button>
           <button
             v-if="canDelete && !role.isBuiltIn"
             type="button"
@@ -53,9 +65,11 @@ defineProps({
   loading: { type: Boolean, default: false },
   /** 是否显示删除按钮（由视图层按 role:delete 权限传入） */
   canDelete: { type: Boolean, default: false },
+  /** 是否显示编辑入口（由视图层按 role:update 权限传入） */
+  canEdit: { type: Boolean, default: false },
 })
 
-defineEmits(['select', 'delete'])
+defineEmits(['select', 'delete', 'edit'])
 </script>
 
 <style scoped>
@@ -166,6 +180,30 @@ defineEmits(['select', 'delete'])
   font-size: 15px;
 }
 
+/* 悬停显露：常态隐藏但不占位感知负担；键盘聚焦与触屏常显（hover:none），
+   隐藏态 pointer-events:none，避免「看不见却可点」的幽灵热区 */
+.role-edit-btn {
+  width: 26px;
+  height: 26px;
+  font-size: 14px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--xf-duration-base) var(--xf-ease-standard);
+}
+
+.glass-role-item:hover .role-edit-btn,
+.glass-role-item:focus-within .role-edit-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .role-edit-btn {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 /* ========== 触屏与减动效兼容 ========== */
 @media (hover: none) {
   .glass-role-item:hover {
@@ -177,6 +215,9 @@ defineEmits(['select', 'delete'])
   .glass-role-item {
     transition: none;
     animation: none;
+  }
+  .role-edit-btn {
+    transition: none;
   }
 }
 </style>

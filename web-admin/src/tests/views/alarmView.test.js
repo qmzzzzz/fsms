@@ -23,6 +23,7 @@ const report = vi.fn()
 const dispatch = vi.fn()
 const arrive = vi.fn()
 const resolveAlarm = vi.fn()
+const markAsFalse = vi.fn()
 const isCanceledError = vi.fn(() => false)
 const confirm = vi.fn()
 const prompt = vi.fn()
@@ -36,6 +37,7 @@ vi.mock('@/utils/api', () => ({
       dispatch: (...a) => dispatch(...a),
       arrive: (...a) => arrive(...a),
       resolve: (...a) => resolveAlarm(...a),
+      markAsFalse: (...a) => markAsFalse(...a),
     },
   },
   isCanceledError: (...a) => isCanceledError(...a),
@@ -144,6 +146,7 @@ afterEach(() => {
   dispatch.mockReset()
   arrive.mockReset()
   resolveAlarm.mockReset()
+  markAsFalse.mockReset()
   isCanceledError.mockReset()
   isCanceledError.mockReturnValue(false)
   confirm.mockReset()
@@ -177,7 +180,7 @@ describe('AlarmView 列表渲染口径', () => {
       '烟雾报警',
       '张三',
       '待处理',
-      '指派处理处理完成详情',
+      '指派处理处理完成标记误报详情',
     ])
     // 时间不得是 ISO 原串（防退回 prop 直渲染 UTC）
     expect(cells(c)[0][1]).not.toContain('T')
@@ -401,7 +404,7 @@ describe('AlarmView 位置与类型显示口径', () => {
     const row = cells(c)[0]
     expect(row[3]).toBe('Smoke Alarm')
     expect(row[5]).toBe('Processing')
-    expect(row[6]).toBe('DispatchResolveDetails')
+    expect(row[6]).toBe('DispatchResolveFalse AlarmDetails')
     // 中文不得出现在英文界面（含列头与单元格）
     // 中文不得出现在列头/按钮（数据本身可以是中文姓名，不作断言）
     expect(
@@ -751,7 +754,7 @@ describe('AlarmView 权限门控（与后端 checkPermission 码逐一对应）'
     const labels = Array.from(rowOf(c, 0).querySelectorAll('button')).map((b) =>
       b.textContent.trim()
     )
-    expect(labels).toEqual(['指派处理', '处理完成', '详情'])
+    expect(labels).toEqual(['指派处理', '处理完成', '标记误报', '详情'])
   })
 
   test('回归：pending 行 + 仅 alarm:handle（无 dispatch）→ 不渲染派单入口（点击会发 /dispatch→403）', async () => {
@@ -1022,6 +1025,104 @@ describe('AlarmView 行级动作：处理完成（双确认 + 原因单选）', 
     await waitFor(() => resolveAlarm.mock.calls.length === 1, { message: '请求发出' })
     await waitFor(() => rowBtn(c, 0, '处理完成').disabled === false, { message: '失败后解锁' })
     expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+})
+describe('AlarmView 行级动作：标记误报', () => {
+  test('processing 行点「标记误报」：填原因 → markAsFalse(_id,{reason}) + 成功提示 + 刷新', async () => {
+    const c = await open([mkRow('fa1', { status: 'processing' })])
+    prompt.mockResolvedValue({ value: '  设备测试触发  ' })
+    markAsFalse.mockResolvedValue({ data: { success: true } })
+    const before = getList.mock.calls.length
+    click(rowBtn(c, 0, '标记误报'))
+    await waitFor(() => markAsFalse.mock.calls.length === 1, { message: '误报请求发出' })
+    // 原因 trim 后提交；标题复用 alarm.falseAlarm；上限与路由 handleReasonValidation 同口径
+    expect(markAsFalse).toHaveBeenCalledWith('fa1', { reason: '设备测试触发' })
+    expect(prompt.mock.calls[0][1]).toBe(i18n.global.t('alarm.falseAlarm'))
+    const opts = prompt.mock.calls[0][2]
+    expect(opts.inputType).toBe('textarea')
+    expect(typeof opts.inputValidator).toBe('function')
+    expect(opts.inputValidator('')).toBe(true)
+    expect(opts.inputValidator('x'.repeat(1000))).toBe(true)
+    expect(opts.inputValidator('x'.repeat(1001))).toBe(
+      i18n.global.t('alarm.falseAlarmReasonTooLong')
+    )
+    expect(ElMessage.success).toHaveBeenCalledWith(i18n.global.t('alarm.falseAlarmSuccess'))
+    await waitFor(() => getList.mock.calls.length > before, { message: '成功后刷新列表' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('原因选填：不填直接确认 → 载荷不含 reason（后端回落默认说明，不塞空串）', async () => {
+    const c = await open([mkRow('fa2', { status: 'processing' })])
+    prompt.mockResolvedValue({ value: '' })
+    markAsFalse.mockResolvedValue({ data: { success: true } })
+    click(rowBtn(c, 0, '标记误报'))
+    await waitFor(() => markAsFalse.mock.calls.length === 1, { message: '误报请求发出' })
+    expect(markAsFalse).toHaveBeenCalledWith('fa2', {})
+    expect(c.errors).toEqual([])
+  })
+
+  test('取消原因弹窗：不发请求、不提示成功、行锁释放', async () => {
+    const c = await open([mkRow('fa3', { status: 'processing' })])
+    prompt.mockRejectedValue('cancel')
+    click(rowBtn(c, 0, '标记误报'))
+    await waitFor(() => prompt.mock.calls.length === 1, { message: '弹窗弹出' })
+    await flush(16)
+    expect(markAsFalse).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(rowBtn(c, 0, '标记误报').disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('请求失败：不提示成功、行锁释放可重试', async () => {
+    const c = await open([mkRow('fa4', { status: 'processing' })])
+    prompt.mockResolvedValue({ value: '误报' })
+    markAsFalse.mockRejectedValue(new Error('boom'))
+    click(rowBtn(c, 0, '标记误报'))
+    await waitFor(() => markAsFalse.mock.calls.length === 1, { message: '请求发出' })
+    await waitFor(() => rowBtn(c, 0, '标记误报').disabled === false, { message: '失败后解锁' })
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('同一 tick 双击「标记误报」：只弹一次原因框、只发一个请求', async () => {
+    const c = await open([mkRow('fa5', { status: 'processing' })])
+    let promptCalls = 0
+    prompt.mockImplementation(() => {
+      promptCalls += 1
+      return new Promise(() => {})
+    })
+    const btn = rowBtn(c, 0, '标记误报')
+    click(btn)
+    click(btn)
+    await flush(12)
+    expect(promptCalls).toBe(1)
+    expect(markAsFalse).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('终态行不渲染「标记误报」入口（后端仅收 pending/processing，终态点了必吃 400）', async () => {
+    const c = await open([
+      mkRow('fa6', { status: 'resolved' }),
+      mkRow('fa7', { status: 'false_alarm' }),
+      mkRow('fa8', { status: 'cancelled' }),
+    ])
+    for (let i = 0; i < 3; i++) {
+      expect(rowBtn(c, i, '标记误报')).toBeUndefined()
+    }
+    expect(c.errors).toEqual([])
+  })
+
+  test('pending 行同样开放（未派单即确认误报是值班主场景，后端接受未指派工单）', async () => {
+    const c = await open([mkRow('fa9', { status: 'pending' })])
+    expect(rowBtn(c, 0, '标记误报')).toBeTruthy()
+  })
+
+  test('权限门控：仅 alarm:dispatch 不渲染（误报判定属 alarm:handle 语义）', async () => {
+    const c = await open([mkRow('fa10', { status: 'processing' })], {
+      perms: ['alarm:read', 'alarm:dispatch'],
+    })
+    expect(rowBtn(c, 0, '标记误报')).toBeUndefined()
     expect(c.errors).toEqual([])
   })
 })

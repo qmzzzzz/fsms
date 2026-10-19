@@ -81,6 +81,13 @@
           </el-breadcrumb>
         </div>
         <div class="navbar-right">
+          <!-- 举报异常：人人可用的安全出口（无权限码），入口在搜索左侧 -->
+          <el-tooltip :content="t('security.report')" placement="bottom">
+            <el-icon class="action-icon" @click="reportDialogVisible = true">
+              <Warning />
+            </el-icon>
+          </el-tooltip>
+
           <!-- ⌘K 全局搜索（移动端同样可点按触发） -->
           <el-tooltip :content="searchTooltip" placement="bottom">
             <el-icon class="action-icon" @click="searchPaletteRef?.open()">
@@ -215,6 +222,9 @@
 
     <!-- ⌘K 全局搜索面板 -->
     <SearchPalette ref="searchPaletteRef" :menu="menuItems" />
+
+    <!-- 举报异常对话框（顶栏入口，人人可用） -->
+    <ReportDialog v-model:visible="reportDialogVisible" />
   </div>
 </template>
 
@@ -249,6 +259,7 @@ import {
   Monitor,
   Operation,
   Search,
+  Warning,
 } from '@element-plus/icons-vue'
 import { useAuthStore, useAppStore } from '@/store'
 import { matchPermission } from '@/utils/permission'
@@ -260,6 +271,7 @@ import { prefetchRoute } from '@/utils/routePrefetch'
 import { disconnectWebSocket } from '@/utils/websocket'
 import ExitOverlay from '@/components/ExitOverlay.vue'
 import SearchPalette from '@/components/SearchPalette.vue'
+import ReportDialog from '@/components/ReportDialog.vue'
 
 const { t, locale } = useI18n()
 const route = useRoute()
@@ -486,6 +498,8 @@ const searchTooltip = computed(() => {
   const k = /mac/i.test(navigator.platform || navigator.userAgent || '') ? '⌘K' : 'Ctrl K'
   return `${t('common.search')} (${k})`
 })
+// 举报对话框开关：组件自身不持有状态，由布局层控制
+const reportDialogVisible = ref(false)
 const showExit = ref(false)
 // 登出遮罩动画结束后跳转登录页的延迟句柄（onUnmounted 里清理）
 let exitTimer = null

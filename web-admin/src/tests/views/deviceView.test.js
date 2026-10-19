@@ -8,7 +8,7 @@
  *  4. 加载失败保留旧数据 -> 用户对着过期台账做资产判断；
  *  5. 编辑回填日期口径与保存口径不一致 -> 每打开一次保存就平移一天。
  */
-import { describe, test, expect, vi, afterEach } from 'vitest'
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mountComponent, click, flush, waitFor } from '../helpers/componentHarness'
 import { useAuthStore } from '@/store'
 
@@ -16,6 +16,11 @@ const getList = vi.fn()
 const create = vi.fn()
 const update = vi.fn()
 const remove = vi.fn()
+const getStats = vi.fn()
+const getReminders = vi.fn()
+const getExpiring = vi.fn()
+const updateStatus = vi.fn()
+const addMaintenance = vi.fn()
 const isCanceledError = vi.fn(() => false)
 vi.mock('@/utils/api', () => ({
   api: {
@@ -24,6 +29,11 @@ vi.mock('@/utils/api', () => ({
       create: (...a) => create(...a),
       update: (...a) => update(...a),
       delete: (...a) => remove(...a),
+      getStats: (...a) => getStats(...a),
+      getReminders: (...a) => getReminders(...a),
+      getExpiring: (...a) => getExpiring(...a),
+      updateStatus: (...a) => updateStatus(...a),
+      addMaintenance: (...a) => addMaintenance(...a),
     },
   },
   isCanceledError: (...a) => isCanceledError(...a),
@@ -52,6 +62,54 @@ const ROW = {
   installDate: '2026-01-05T00:00:00.000Z',
 }
 const ROWS = [ROW]
+
+// 概览统计默认值：五个数字互不相同，任何错位（如 expired 用了 expiringSoon 的值）都可见
+const STATS = { total: 8, expired: 1, expiringSoon: 2, needMaintenance: 3, needSchedule: 4 }
+const REMINDERS = {
+  scannedAt: '2026-10-19T08:00:00.000Z',
+  summary: { expired: 1, expiringSoon: 1, needMaintenance: 1, needSchedule: 0, total: 3 },
+  expired: [
+    {
+      _id: 'd9',
+      deviceCode: 'EXT-009',
+      deviceName: '过期灭火器',
+      expiryDate: '2026-09-01T00:00:00.000Z',
+      status: 'warning',
+    },
+  ],
+  expiringSoon: [
+    {
+      _id: 'd8',
+      deviceCode: 'SMK-008',
+      deviceName: '临期烟感',
+      expiryDate: '2026-10-25T00:00:00.000Z',
+    },
+  ],
+  needMaintenance: [
+    {
+      _id: 'd7',
+      deviceCode: 'PMP-007',
+      deviceName: '待检水泵',
+      nextCheckDate: '2026-10-01T00:00:00.000Z',
+    },
+  ],
+  needSchedule: [],
+  limits: {
+    resultLimit: 20,
+    truncated: { expired: false, expiringSoon: false, needMaintenance: false, needSchedule: false },
+  },
+  partial: false,
+  skipped: false,
+}
+
+// 概览/提醒/清单三块都参与首屏加载：默认给成功值，失败分支由用例自行覆盖
+beforeEach(() => {
+  getStats.mockResolvedValue({ data: { data: STATS } })
+  getReminders.mockResolvedValue({ data: { data: REMINDERS } })
+  getExpiring.mockResolvedValue({
+    data: { data: [], pagination: { total: 0, hasMore: false, limit: 20 } },
+  })
+})
 
 const open = async (perms = FULL, rows = ROWS, total = rows.length) => {
   getList.mockResolvedValue({ data: { data: rows, pagination: { total } } })
@@ -119,6 +177,11 @@ afterEach(() => {
   create.mockReset()
   update.mockReset()
   remove.mockReset()
+  getStats.mockReset()
+  getReminders.mockReset()
+  getExpiring.mockReset()
+  updateStatus.mockReset()
+  addMaintenance.mockReset()
   confirm.mockReset()
   isCanceledError.mockReset()
   isCanceledError.mockReturnValue(false)
@@ -128,12 +191,20 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
+/** 表格第 i 行的全部按钮 */
+const rowBtns = (c, i = 0) =>
+  Array.from(c.findAll('.el-table__body-wrapper .el-table__row')[i].querySelectorAll('button'))
+/** 表格第 i 行按文案找按钮 */
+const rowBtn = (c, i, text) => rowBtns(c, i).find((b) => b.textContent.includes(text))
+
 describe('DeviceView 写入口权限门控', () => {
   test('只读权限：新增/编辑/删除三个入口都不渲染，但列表照常可读', async () => {
     const c = await open(['device:read'])
     expect(btn(c, '新增设备')).toBeUndefined()
     expect(btn(c, '编辑')).toBeUndefined()
     expect(btn(c, '删除')).toBeUndefined()
+    expect(btn(c, '变更状态')).toBeUndefined()
+    expect(btn(c, '维护')).toBeUndefined()
     expect(cells(c)).toHaveLength(1)
     expect(cells(c)[0].join(' ')).toContain('SMK-001')
     expect(c.errors).toEqual([])
@@ -447,6 +518,327 @@ describe('DeviceView 删除', () => {
     // 拒绝被 catch 处理（无未捕获异常进 errorHandler）、不误报成功、不双提示。
     expect(ElMessage.error).not.toHaveBeenCalled()
     expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+})
+
+describe('DeviceView 概览条', () => {
+  test('统计成功：渲染 5 张卡，数字与标签一一对应', async () => {
+    const c = await open()
+    await waitFor(() => c.find('.device-overview'), { message: '概览条渲染' })
+    const cards = c.findAll('.device-overview .mini-stat')
+    expect(cards).toHaveLength(5)
+    const text = (i) => cards[i].textContent
+    expect(text(0)).toContain('设备总数')
+    expect(text(0)).toContain('8')
+    expect(text(1)).toContain('已过期')
+    expect(text(1)).toContain('1')
+    expect(text(2)).toContain('即将到期')
+    expect(text(2)).toContain('2')
+    expect(text(3)).toContain('待维护')
+    expect(text(3)).toContain('3')
+    expect(text(4)).toContain('未排期')
+    expect(text(4)).toContain('4')
+    expect(getStats).toHaveBeenCalledTimes(1)
+    expect(c.errors).toEqual([])
+  })
+
+  test('首屏统计失败：概览条整条不渲染（5 张 0 卡会被读成「设备全好」），且不弹 toast', async () => {
+    getStats.mockRejectedValue(new Error('boom'))
+    const c = await open()
+    await flush(6)
+    expect(c.find('.device-overview')).toBeNull()
+    // 列表照常可读，失败只是概览缺席
+    expect(cells(c)).toHaveLength(1)
+    // 失败静默：错误提示归 api 拦截器（组件再弹会双提示）
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('已有读数后刷新失败：保留上一次已知数字（不清成 0）', async () => {
+    const c = await open()
+    await waitFor(() => c.find('.device-overview'), { message: '概览条渲染' })
+    getStats.mockRejectedValue(new Error('boom'))
+    click(btn(c, '刷新'))
+    await waitFor(() => getStats.mock.calls.length === 2, { message: '刷新触发第二次统计请求' })
+    await flush(6)
+    expect(c.find('.device-overview').textContent).toContain('8')
+    expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+})
+
+describe('DeviceView 即将到期清单', () => {
+  test('点击「即将到期」卡：打开清单并请求 days=30；切到 90 天按新窗口重新请求', async () => {
+    const c = await open()
+    await waitFor(() => c.find('.device-overview'), { message: '概览条渲染' })
+    click(c.findAll('.device-overview .mini-stat')[2])
+    await waitFor(() => getExpiring.mock.calls.length === 1, { message: '到期清单请求发出' })
+    expect(getExpiring.mock.calls[0][0]).toEqual({ days: 30 })
+    await waitFor(() => dlg(), { message: '清单弹窗打开' })
+    const radios = Array.from(dlg().querySelectorAll('.el-radio-button'))
+    expect(radios.map((el) => el.textContent.trim())).toEqual(['7 天内', '30 天内', '90 天内'])
+    click(radios[2].querySelector('input') || radios[2])
+    await waitFor(() => getExpiring.mock.calls.length === 2, { message: '切窗口请求发出' })
+    expect(getExpiring.mock.calls[1][0]).toEqual({ days: 90 })
+    expect(c.errors).toEqual([])
+  })
+
+  test('窗口内无设备：显示空态文案', async () => {
+    const c = await open()
+    await waitFor(() => c.find('.device-overview'), { message: '概览条渲染' })
+    click(c.findAll('.device-overview .mini-stat')[2])
+    await waitFor(() => dlg()?.querySelector('.expiring-empty'), { message: '空态渲染' })
+    expect(dlg().querySelector('.expiring-empty').textContent).toContain('没有即将到期')
+  })
+
+  test('截断（hasMore）：回显真实命中 total 与限制 limit，不得只给页内条数', async () => {
+    getExpiring.mockResolvedValue({
+      data: {
+        data: [
+          {
+            _id: 'd1',
+            deviceCode: 'SMK-001',
+            deviceName: '一层烟感',
+            status: 'normal',
+            expiryDate: '2026-10-25T00:00:00.000Z',
+          },
+        ],
+        pagination: { total: 57, hasMore: true, limit: 20 },
+      },
+    })
+    const c = await open()
+    await waitFor(() => c.find('.device-overview'), { message: '概览条渲染' })
+    click(c.findAll('.device-overview .mini-stat')[2])
+    await waitFor(() => dlg()?.querySelector('.expiring-more'), { message: '截断提示渲染' })
+    const hint = dlg().querySelector('.expiring-more').textContent
+    expect(hint).toContain('57')
+    expect(hint).toContain('20')
+    expect(c.errors).toEqual([])
+  })
+
+  test('清单加载失败：失败块展示重试入口，点击重试重新请求', async () => {
+    getExpiring.mockRejectedValue(new Error('boom'))
+    const c = await open()
+    await waitFor(() => c.find('.device-overview'), { message: '概览条渲染' })
+    click(c.findAll('.device-overview .mini-stat')[2])
+    await waitFor(() => dlg()?.querySelector('.expiring-failed'), { message: '失败块渲染' })
+    const retry = Array.from(dlg().querySelectorAll('button')).find((b) =>
+      b.textContent.includes('刷新')
+    )
+    expect(retry).toBeTruthy()
+    getExpiring.mockResolvedValue({
+      data: { data: [], pagination: { total: 0, hasMore: false, limit: 20 } },
+    })
+    click(retry)
+    await waitFor(() => getExpiring.mock.calls.length === 2, { message: '重试请求发出' })
+    await waitFor(() => dlg()?.querySelector('.expiring-empty'), { message: '重试成功回到空态' })
+    expect(c.errors).toEqual([])
+  })
+})
+
+describe('DeviceView 到期提醒入口', () => {
+  const badgeValue = (c) => {
+    const sup = c.find('.reminder-badge-wrap .el-badge__content')
+    if (!sup) return null
+    return sup.style.display === 'none' ? null : sup.textContent.trim()
+  }
+
+  test('有到期项：徽标显示 summary.total；打开弹窗触发一次刷新请求', async () => {
+    const c = await open()
+    await waitFor(() => badgeValue(c) === '3', { message: '徽标渲染总数 3' })
+    expect(getReminders).toHaveBeenCalledTimes(1) // 首屏静默拉取（徽标数据源）
+    click(btn(c, '到期提醒'))
+    await waitFor(() => getReminders.mock.calls.length === 2, { message: '打开弹窗时刷新' })
+    await waitFor(() => dlg(), { message: '提醒弹窗渲染' })
+    expect(dlg().textContent).toContain('到期提醒清单')
+    expect(c.errors).toEqual([])
+  })
+
+  test('无到期项：不显示徽标（0 不打扰）', async () => {
+    getReminders.mockResolvedValue({
+      data: {
+        data: {
+          ...REMINDERS,
+          summary: { expired: 0, expiringSoon: 0, needMaintenance: 0, needSchedule: 0, total: 0 },
+        },
+      },
+    })
+    const c = await open()
+    await waitFor(() => getReminders.mock.calls.length >= 1, { message: '提醒请求发出' })
+    await flush(6)
+    expect(badgeValue(c)).toBeNull()
+  })
+
+  test('提醒加载失败：徽标不显示；弹窗内提供失败态与重试', async () => {
+    getReminders.mockRejectedValue(new Error('boom'))
+    const c = await open()
+    await flush(6)
+    expect(badgeValue(c)).toBeNull()
+    click(btn(c, '到期提醒'))
+    await waitFor(() => dlg()?.querySelector('.reminder-failed'), { message: '弹窗失败态渲染' })
+    const retry = Array.from(dlg().querySelectorAll('button')).find((b) =>
+      b.textContent.includes('刷新')
+    )
+    getReminders.mockResolvedValue({ data: { data: REMINDERS } })
+    click(retry)
+    await waitFor(() => getReminders.mock.calls.length === 3, { message: '重试发出' })
+    await waitFor(() => dlg()?.textContent.includes('过期灭火器'), { message: '重试后清单渲染' })
+    expect(c.errors).toEqual([])
+  })
+})
+
+describe('DeviceView 变更状态', () => {
+  const WRITABLE = ['normal', 'warning', 'fault', 'offline', 'maintenance']
+
+  test('确认框带单选组（5 个可写状态，默认选中当前值）；确认后按选中值提交并回表刷新', async () => {
+    const c = await open()
+    updateStatus.mockResolvedValue({ data: { success: true } })
+    const seen = {}
+    confirm.mockImplementation((msg, title, opts) => {
+      expect(typeof msg).toBe('function')
+      const vnode = msg()
+      const group = vnode.children[1]
+      const radios = group.children.default()
+      seen.values = radios.map((r) => r.props.value)
+      seen.initial = group.props.modelValue
+      seen.title = title
+      seen.type = opts?.type
+      group.props['onUpdate:modelValue']('maintenance')
+      return Promise.resolve('confirm')
+    })
+    click(rowBtn(c, 0, '变更状态'))
+    await waitFor(() => updateStatus.mock.calls.length === 1, { message: '状态更新请求发出' })
+    expect(seen.values).toEqual(WRITABLE)
+    expect(seen.initial).toBe('normal')
+    expect(seen.title).toBe('变更状态')
+    expect(seen.type).toBe('warning')
+    expect(updateStatus.mock.calls[0][0]).toBe('d1')
+    expect(updateStatus.mock.calls[0][1]).toEqual({ status: 'maintenance' })
+    expect(ElMessage.success).toHaveBeenCalledTimes(1)
+    // 成功后列表/概览一起刷新（三块同页展示，必须同源）
+    await waitFor(() => getList.mock.calls.length === 2, { message: '列表刷新' })
+    await waitFor(() => getStats.mock.calls.length === 2, { message: '概览刷新' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('报废行：变更状态与维护入口不渲染（后端必拒的入口不出现）', async () => {
+    const c = await open(FULL, [{ ...ROW, status: 'scrapped' }])
+    expect(rowBtn(c, 0, '变更状态')).toBeUndefined()
+    expect(rowBtn(c, 0, '维护')).toBeUndefined()
+    // 编辑/删除不受影响（报废行仍可改资料/删除）
+    expect(rowBtn(c, 0, '编辑')).toBeTruthy()
+    expect(rowBtn(c, 0, '删除')).toBeTruthy()
+    expect(c.errors).toEqual([])
+  })
+
+  test('取消确认：不发 updateStatus、不弹成功；行锁释放', async () => {
+    const c = await open()
+    confirm.mockRejectedValue('cancel')
+    click(rowBtn(c, 0, '变更状态'))
+    await waitFor(() => confirm.mock.calls.length === 1, { message: '确认框弹出' })
+    await flush(10)
+    expect(updateStatus).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(rowBtn(c, 0, '变更状态').disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('updateStatus 失败：不弹成功、行锁释放（可重试）', async () => {
+    const c = await open()
+    confirm.mockResolvedValue('confirm')
+    updateStatus.mockRejectedValue(new Error('boom'))
+    click(rowBtn(c, 0, '变更状态'))
+    await waitFor(() => updateStatus.mock.calls.length === 1, { message: '请求发出' })
+    await flush(10)
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(rowBtn(c, 0, '变更状态').disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('重入：同一 tick 双击只弹一次确认框（按钮 disabled 尚未生效时的守卫）', async () => {
+    const c = await open()
+    confirm.mockImplementation(() => new Promise(() => {}))
+    const b = rowBtn(c, 0, '变更状态')
+    click(b)
+    click(b)
+    await flush(4)
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(c.errors).toEqual([])
+  })
+})
+
+describe('DeviceView 维护登记', () => {
+  const MAINTAIN_PERMS = [...FULL, 'device:maintain']
+
+  test('无 device:maintain：维护入口不渲染', async () => {
+    const c = await open()
+    expect(rowBtn(c, 0, '维护')).toBeUndefined()
+  })
+
+  test('有权限：打开维护弹窗（类型默认例行检查），提交后提示并刷新列表/概览', async () => {
+    const c = await open(MAINTAIN_PERMS)
+    addMaintenance.mockResolvedValue({ data: { success: true } })
+    const entry = rowBtn(c, 0, '维护')
+    expect(entry).toBeTruthy()
+    click(entry)
+    await waitFor(() => dlg(), { message: '维护弹窗打开' })
+    await flush(4)
+    expect(dlg().textContent).toContain('添加维护')
+    // 设备上下文带入弹窗，用户不必凭记忆核对是哪台设备
+    expect(dlg().textContent).toContain('SMK-001')
+    const textarea = dlg().querySelector('textarea')
+    expect(textarea).toBeTruthy()
+    textarea.value = '  更换压力表  '
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(4)
+    const submit = dlgFootBtn('确定')
+    expect(submit).toBeTruthy()
+    click(submit)
+    await waitFor(() => addMaintenance.mock.calls.length === 1, { message: '维护请求发出' })
+    expect(addMaintenance.mock.calls[0][0]).toBe('d1')
+    expect(addMaintenance.mock.calls[0][1]).toEqual({ content: '更换压力表', type: 'routine' })
+    expect(ElMessage.success).toHaveBeenCalledTimes(1)
+    await waitFor(() => getList.mock.calls.length === 2, { message: '列表刷新' })
+    await waitFor(() => getStats.mock.calls.length === 2, { message: '概览刷新' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('纯空格内容：本地校验拦截，不发请求（后端 trim 后必拒）', async () => {
+    const c = await open(MAINTAIN_PERMS)
+    addMaintenance.mockResolvedValue({ data: { success: true } })
+    click(rowBtn(c, 0, '维护'))
+    await waitFor(() => dlg(), { message: '维护弹窗打开' })
+    await flush(4)
+    const textarea = dlg().querySelector('textarea')
+    textarea.value = '   '
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(4)
+    click(dlgFootBtn('确定'))
+    await flush(12)
+    expect(addMaintenance).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(dlg().querySelector('.el-form-item.is-error')).toBeTruthy()
+    expect(c.errors).toEqual([])
+  })
+
+  test('提交失败：不弹成功、弹窗保持打开、可重试（submitting 复位）', async () => {
+    const c = await open(MAINTAIN_PERMS)
+    addMaintenance.mockRejectedValue(new Error('boom'))
+    click(rowBtn(c, 0, '维护'))
+    await waitFor(() => dlg(), { message: '维护弹窗打开' })
+    await flush(4)
+    const textarea = dlg().querySelector('textarea')
+    textarea.value = '更换压力表'
+    textarea.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(4)
+    click(dlgFootBtn('确定'))
+    await waitFor(() => addMaintenance.mock.calls.length === 1, { message: '请求发出' })
+    await flush(8)
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled() // 错误 toast 归拦截器
+    expect(dlg()).toBeTruthy() // 弹窗保持打开，内容不丢，可直接重试
+    const submit = dlgFootBtn('确定')
+    expect(submit.disabled).toBe(false)
     expect(c.errors).toEqual([])
   })
 })

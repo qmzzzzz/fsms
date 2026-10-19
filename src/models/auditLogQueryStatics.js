@@ -44,11 +44,20 @@ const applyQueryStatics = (schema, responseExclude) => {
     const windowStart = new Date(Date.now() - windowMinutes * 60 * 1000);
     const failureMatch = { ...scopeFilter, timestamp: { $gte: windowStart }, success: false };
 
+    // firstEventAt：本组最早一条事件的时间，用于 MTTD（检测延迟）测量。
+    // 它回答的是"这组行为从什么时候开始"，而 lag 的上界由窗口宽度决定；
+    // 没有这个字段时只能拿窗口起点近似，会把"组内已有历史事件"误算成延迟。
     const failedOperations = await aggregateWithBudget(
       this,
       [
         { $match: failureMatch },
-        { $group: { _id: '$userId', count: { $sum: 1 } } },
+        {
+          $group: {
+            _id: '$userId',
+            count: { $sum: 1 },
+            firstEventAt: { $min: '$timestamp' },
+          },
+        },
         { $match: { count: { $gte: threshold } } },
       ],
       maxTimeMS
@@ -58,7 +67,13 @@ const applyQueryStatics = (schema, responseExclude) => {
       this,
       [
         { $match: failureMatch },
-        { $group: { _id: '$ip', count: { $sum: 1 } } },
+        {
+          $group: {
+            _id: '$ip',
+            count: { $sum: 1 },
+            firstEventAt: { $min: '$timestamp' },
+          },
+        },
         { $match: { count: { $gte: threshold } } },
       ],
       maxTimeMS
@@ -78,7 +93,13 @@ const applyQueryStatics = (schema, responseExclude) => {
             $or: [{ hour: { $lt: OFF_HOURS_END } }, { hour: { $gte: OFF_HOURS_START } }],
           },
         },
-        { $group: { _id: '$userId', count: { $sum: 1 } } },
+        {
+          $group: {
+            _id: '$userId',
+            count: { $sum: 1 },
+            firstEventAt: { $min: '$timestamp' },
+          },
+        },
         // L-20：原为硬编码 5，而同一函数的 failedOperations / failedOperationsByIp
         // 都用 threshold 参数——调用方以为统一调整了阈值，实际"非常规时间访问"
         // 始终按 5 计。现统一为 threshold，与其余两路口径一致。

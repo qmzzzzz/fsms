@@ -30,8 +30,14 @@ import { mountComponent, click, flush, waitFor } from '../helpers/componentHarne
 import { useAuthStore } from '@/store'
 
 const rolesCreate = vi.fn()
+const rolesUpdate = vi.fn()
 vi.mock('@/utils/api', () => ({
-  api: { roles: { create: (...a) => rolesCreate(...a) } },
+  api: {
+    roles: {
+      create: (...a) => rolesCreate(...a),
+      update: (...a) => rolesUpdate(...a),
+    },
+  },
   isCanceledError: () => false,
 }))
 vi.mock('element-plus/es/components/message/index.mjs', () => ({
@@ -46,24 +52,34 @@ afterEach(() => {
   active?.handle.unmount()
   active = null
   rolesCreate.mockReset()
+  rolesUpdate.mockReset()
   ElMessage.success.mockReset()
 })
 
 /**
  * 带受控 visible 的宿主：RoleFormDialog 自身不持有开关状态，
  * 必须把 update:visible 接回本地 reactive 才能观察「关闭」的效果。
+ * role 传入即为编辑模式；onUpdated 记录编辑成功的回抛。
  */
-const makeHost = (initialVisible, perms = ['role:create'], onCreated = null) => {
+const makeHost = (
+  initialVisible,
+  perms = ['role:create'],
+  onCreated = null,
+  role = null,
+  onUpdated = null
+) => {
   const state = reactive({ visible: initialVisible })
   const Host = defineComponent({
     setup() {
       return () =>
         h(RoleFormDialog, {
           visible: state.visible,
+          role,
           'onUpdate:visible': (v) => {
             state.visible = v
           },
           ...(onCreated ? { onCreated } : {}),
+          ...(onUpdated ? { onUpdated } : {}),
         })
     },
   })
@@ -86,8 +102,8 @@ const typeInto = async (selector, value) => {
   return el
 }
 /** 打开对话框并等首帧渲染完成（el-dialog teleport 到 body） */
-const openDialog = async (perms, onCreated = null) => {
-  const state = makeHost(true, perms, onCreated)
+const openDialog = async (perms, onCreated = null, role = null, onUpdated = null) => {
+  const state = makeHost(true, perms, onCreated, role, onUpdated)
   await waitFor(() => dlg(), { message: '对话框渲染' })
   await flush(6)
   return state
@@ -317,5 +333,110 @@ describe('RoleFormDialog 重入防护（真实缺陷回归）', () => {
     expect(footerBtn('新增').disabled).toBe(true)
     resolveCreate({ data: { data: { _id: 'r9' } } })
     await flush(8)
+  })
+})
+
+describe('RoleFormDialog 编辑模式（role prop）', () => {
+  const ROLE_PLAIN = {
+    _id: 'r5',
+    name: '巡检员',
+    code: 'INSPECTOR',
+    description: '负责巡检',
+    isBuiltIn: false,
+  }
+  const ROLE_BUILTIN = {
+    _id: 'r1',
+    name: '管理员',
+    code: 'ADMIN',
+    description: '系统内置',
+    isBuiltIn: true,
+  }
+
+  test('传入 role：标题「编辑角色」、三字段回填、编码禁用、保存按钮由 role:update 门控', async () => {
+    await openDialog(['role:update'], null, ROLE_PLAIN)
+    expect(dlg().querySelector('.el-dialog__title').textContent.trim()).toBe('编辑角色')
+    expect(dlg().querySelector('#roleName').value).toBe('巡检员')
+    const code = dlg().querySelector('#roleCode')
+    expect(code.value).toBe('INSPECTOR')
+    // code 是寻址键（播种/迁移/授权链按它匹配），后端 updateRole 也不接受修改
+    expect(code.disabled).toBe(true)
+    expect(dlg().querySelector('#roleDescription').value).toBe('负责巡检')
+    expect(
+      Array.from(dlg().querySelectorAll('.el-dialog__footer button')).map((b) =>
+        b.textContent.trim()
+      )
+    ).toEqual(['取消', '保存'])
+    expect(active.errors).toEqual([])
+  })
+
+  test('无 role:update：保存按钮不渲染（role:create 不等于可编辑）', async () => {
+    await openDialog(['role:create'], null, ROLE_PLAIN)
+    expect(
+      Array.from(dlg().querySelectorAll('.el-dialog__footer button')).map((b) =>
+        b.textContent.trim()
+      )
+    ).toEqual(['取消'])
+  })
+
+  test('普通角色提交：PUT /roles/:id 载荷 {name, description}，成功后关闭并 emit updated', async () => {
+    rolesUpdate.mockResolvedValue({
+      data: { data: { _id: 'r5', name: '高级巡检员', code: 'INSPECTOR' } },
+    })
+    const updated = vi.fn()
+    const state = await openDialog(['role:update'], null, ROLE_PLAIN, updated)
+    await typeInto('#roleName', '高级巡检员')
+    click(footerBtn('保存'))
+    await waitFor(() => rolesUpdate.mock.calls.length === 1, { message: '更新请求' })
+    expect(rolesUpdate).toHaveBeenCalledWith('r5', {
+      name: '高级巡检员',
+      description: '负责巡检',
+    })
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '成功提示' })
+    expect(ElMessage.success).toHaveBeenCalledWith('更新成功')
+    await waitFor(() => state.visible === false, { message: '成功后关闭' })
+    await waitFor(() => updated.mock.calls.length === 1, { message: 'updated 事件' })
+    expect(updated.mock.calls[0][0]).toEqual({
+      _id: 'r5',
+      name: '高级巡检员',
+      code: 'INSPECTOR',
+    })
+    expect(active.errors).toEqual([])
+  })
+
+  test('内置角色：名称禁用并给原因；载荷不含 name（含则后端 BUILTIN_ROLE_NAME_LEVEL_LOCKED 400）', async () => {
+    rolesUpdate.mockResolvedValue({ data: { data: { ...ROLE_BUILTIN, description: '新描述' } } })
+    await openDialog(['role:update'], null, ROLE_BUILTIN)
+    expect(dlg().querySelector('#roleName').disabled).toBe(true)
+    expect(dlg().textContent).toContain('名称不可修改')
+    await typeInto('#roleDescription', '新描述')
+    click(footerBtn('保存'))
+    await waitFor(() => rolesUpdate.mock.calls.length === 1, { message: '更新请求' })
+    expect(rolesUpdate.mock.calls[0][0]).toBe('r1')
+    expect(rolesUpdate.mock.calls[0][1]).toEqual({ description: '新描述' })
+    expect(rolesUpdate.mock.calls[0][1]).not.toHaveProperty('name')
+    expect(active.errors).toEqual([])
+  })
+
+  test('更新失败：不误报成功、对话框保持打开、按钮解锁可重试', async () => {
+    rolesUpdate.mockRejectedValue(new Error('boom'))
+    const state = await openDialog(['role:update'], null, ROLE_PLAIN)
+    click(footerBtn('保存'))
+    await waitFor(() => rolesUpdate.mock.calls.length === 1, { message: '更新请求' })
+    await flush(16)
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(state.visible).toBe(true)
+    await waitFor(() => footerBtn('保存').disabled === false, { message: '按钮解锁' })
+    expect(active.errors).toEqual([])
+  })
+
+  test('关闭后重开：回到 role 的回填值（不留半截修改）', async () => {
+    const state = await openDialog(['role:update'], null, ROLE_PLAIN)
+    await typeInto('#roleName', '被改了一半')
+    click(dlg().querySelector('.el-dialog__headerbtn'))
+    await waitReal(() => state.visible === false, '对话框关闭')
+    state.visible = true
+    await flush(8)
+    expect(dlg().querySelector('#roleName').value).toBe('巡检员')
+    expect(active.errors).toEqual([])
   })
 })

@@ -14,6 +14,8 @@ const { applyAuditDataScope } = require('./auditScopeFilter');
 const { guardDetection } = require('../utils/auditWriteFailure');
 // 审计链三类告警的取值在独立常量文件（本文件 max-lines 已贴棘轮上限）
 const { AUDIT_CHAIN_ALERT_TYPES } = require('./auditChainAlertTypes');
+// 哨兵用户名告警同因独立成文件（行预算口径同上；棘轮基线条目见 eslint.ratchet.json）
+const { CANARY_ALERT_TYPES } = require('./canaryAlertTypes');
 // 告警阈值配置
 const THRESHOLDS = {
   // 暴力破解：5 次失败/5 分钟
@@ -45,6 +47,8 @@ const ALERT_TYPES = {
   RATE_LIMIT_ABUSE: 'rate_limit_abuse', // 限流触顶升级封禁（rateLimitEscalation 闭环）
   // 审计哈希链三类（2026-09-30）：定义见 auditChainAlertTypes.js，判据见 auditChainMonitor.js
   ...AUDIT_CHAIN_ALERT_TYPES,
+  // 哨兵用户名探测（2026-10-19）：定义见 canaryAlertTypes.js，判据见 canaryWatch.js
+  ...CANARY_ALERT_TYPES,
 };
 
 /**

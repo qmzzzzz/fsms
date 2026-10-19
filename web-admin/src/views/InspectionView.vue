@@ -137,6 +137,21 @@
             >
               {{ $t('inspection.review') }}
             </button>
+            <!--
+              取消巡检：权限码 inspection:create 与后端路由 checkPermission 一致
+              （不是 execute——取消属于「调度/计划」语义）。状态门控对齐后端
+              INSPECTION_OPEN_STATUSES（全集−终态 = pending/in_progress/overdue）：
+              终态行渲染出来点了必吃 409 conflict，属"注定失败"的入口。
+            -->
+            <button
+              v-if="hasPerm('inspection:create') && CANCELABLE.includes(row.status)"
+              type="button"
+              class="glass-btn glass-btn--info glass-btn--link"
+              :disabled="rowBusy === row._id"
+              @click="handleCancel(row)"
+            >
+              {{ $t('inspection.cancelInspection') }}
+            </button>
             <button
               type="button"
               class="glass-btn glass-btn--default glass-btn--link"
@@ -218,6 +233,8 @@ const { hasPerm } = usePermission()
 const { t } = useI18n()
 
 const loading = ref(false)
+// 行级操作锁：取消巡检请求进行中时禁用该行按钮（防止重复提交）
+const rowBusy = ref(null)
 const filters = reactive({ status: '' })
 const page = reactive({ current: 1, size: 10, total: 0 })
 const tableData = ref([])
@@ -268,6 +285,10 @@ const statCards = shallowRef([
 // 后端对两种跳转都放行且 actualStartTime 只记首次开工时刻。
 const STARTABLE = ['pending', 'overdue']
 const SUBMITTABLE = ['in_progress', 'overdue']
+// 「取消巡检」可进入档位，与后端 src/constants/inspection.js 的 INSPECTION_OPEN_STATUSES
+// 同口径（open = 全集 − 终态 [completed, cancelled]）。终态记录服务层抛 409 conflict，
+// 前端不渲染注定失败的入口；overdue 是时间标记不是终态，同样可取消。
+const CANCELABLE = ['pending', 'in_progress', 'overdue']
 
 // 统计是否拿到过：首屏失败（含列表本身失败导致统计没发出去）时整排换成失败块，
 // 已经显示过真实计数后再刷新失败则保留上一次已知数字（与 AlarmView 同口径）。
@@ -429,6 +450,46 @@ const handleDelete = (row) => {
       }
     })
     .catch(() => {})
+}
+
+// 取消巡检（开放档位 → cancelled；可选原因写入 executionLog 的 remark）
+const handleCancel = async (row) => {
+  if (!CANCELABLE.includes(row.status)) return
+  // 重入守卫必须首行同步判定：rowBusy 只是渲染态，同一 tick 的第二次点击
+  // 到达时按钮尚未 disabled（否则双击弹两个原因框、重复提交取消请求）
+  if (rowBusy.value === row._id) return
+
+  rowBusy.value = row._id
+  try {
+    // 单弹窗即确认：确认按钮本身就是「执行取消」的意图表达；原因选填，
+    // 上限与路由 cancelValidation 的 500 同口径（空值必须放行——选填）
+    const { value } = await ElMessageBox.prompt(
+      `${t('inspection.cancelConfirm')}「${row.title}」?`,
+      t('inspection.cancelInspection'),
+      {
+        inputType: 'textarea',
+        inputPlaceholder: t('inspection.cancelReasonPlaceholder'),
+        inputValidator: (v) => !v || v.trim().length <= 500 || t('inspection.cancelReasonTooLong'),
+        confirmButtonText: t('common.confirm'),
+        cancelButtonText: t('common.cancel'),
+        type: 'warning',
+      }
+    )
+
+    const reason = (value || '').trim()
+    // 空原因不带键（后端 optional falsy 放行，写默认说明「取消巡检」）
+    await api.inspections.cancel(row._id, reason ? { reason } : {})
+    ElMessage.success(t('inspection.cancelSuccess'))
+    loadData()
+  } catch (error) {
+    // 'cancel'/'close' 均为用户主动关闭弹窗，不视为操作失败；
+    // 其余错误已在拦截器统一提示（不重复弹泛化 toast）
+    if (error !== 'cancel' && error !== 'close') {
+      // 已由拦截器提示
+    }
+  } finally {
+    rowBusy.value = null
+  }
 }
 
 onMounted(loadData)

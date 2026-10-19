@@ -118,4 +118,18 @@ describe('createUser 数据范围闸（P0-1 建号补齐）', () => {
       });
     expect(res.status).toBe(201);
   });
+
+  test('哨兵用户名（canary）建号被拒：保留名不可进入用户集合', async () => {
+    const res = await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        username: 'backup',
+        email: `cbackup${stamp}@example.com`,
+        password: randomPassword(),
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('保留名');
+    expect(await User.countDocuments({ username: 'backup' })).toBe(0);
+  });
 });

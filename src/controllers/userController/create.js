@@ -15,6 +15,7 @@ const { isSuperAdminRole } = require('../../utils/superAdmin');
 const { piiSearchKey } = require('../../utils/piiCrypto');
 const statsCache = require('../../services/statsCache');
 const userService = require('../../services/userService');
+const canaryWatch = require('../../services/canaryWatch');
 const {
   findUnoperableGrantCodes,
   rejectForeignPeerRoles,
@@ -158,6 +159,18 @@ const createUser = asyncHandler(async (req, res) => {
   }
 
   const { username, email, realName, phone, department, roles, allowedIPs } = req.body;
+
+  // 哨兵用户名（canary）闸：系统保留名不经管理面进入用户集合（幽灵名一旦被
+  // 真实占用，对应哨兵在登录面无从触发——启动期 canaryWatch.init() 会做遮蔽
+  // 对账，但防线前移到这里）。与下方判重同为 400 文案响应（管理面可明示
+  // "保留"；注册面保持模糊，见 authService/session.js）。
+  if (canaryWatch.matchCanaryName(username)) {
+    logger.warn('建号被拒 - 用户名为安全哨兵保留名', {
+      operator: operatorTag(req),
+      username,
+    });
+    return ApiResponse.error(res, '该用户名为系统保留名，不能使用', 400);
+  }
 
   // FE-M3：管理员建号口令密文轨（encPassword，与代设明文双轨）
   const { password, rejected } = await resolveAdminSetPassword(req, res, username);

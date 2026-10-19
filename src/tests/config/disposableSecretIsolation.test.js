@@ -76,7 +76,7 @@ const PROBE = [
   `process.env.JWT_SECRET = ${JSON.stringify(DISPOSE_JWT)};`,
   "const cfg = require(path.join(REPO, 'src/config/index.js'));",
   '// REDIS_URL / ADMIN_INITIAL_PASSWORD / MONGO_ROOT_PASSWORD 在 src/config 里没有字段：',
-  '// 消费方直读 env（sharedCache/state.js:27、initData.js:801），所以 require 之后的 env 就是',
+  '// 消费方直读 env（sharedCache/state.js:27、initData/adminAccount.js:30），所以 require 之后的 env 就是',
   '// 消费方看到的那一份。断言这一层不是降级，是这几个名字唯一的可观测面。',
   '// ?? null 是必须的：JSON.stringify 会**丢掉** undefined 键，那样 r.x 恒为 undefined，',
   '// "守卫挡住了"与"夹具压根没跑"就分不开——那正是一条空断言。',
@@ -280,7 +280,10 @@ describe('宿主残留密钥与一次性 harness 的隔离', () => {
     expect({ redisCheck }).toEqual({
       redisCheck: `return (process.env.REDIS_URL || '').trim() !== '';`,
     });
-    const initData = fs.readFileSync(path.join(ROOT, 'src/services/initData.js'), 'utf8');
+    const initData = fs.readFileSync(
+      path.join(ROOT, 'src/services/initData/adminAccount.js'),
+      'utf8'
+    );
     expect({
       adminCheck: initData.match(/if \(process\.env\.ADMIN_INITIAL_PASSWORD\) \{/) !== null,
     }).toEqual({ adminCheck: true });

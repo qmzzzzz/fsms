@@ -209,6 +209,56 @@
       </div>
     </div>
 
+    <!-- 最近安全告警（GET /security/alerts，security:audit）：
+         后端信封比列表接口还多一层（ApiResponse.success 又包了一层），实际数组在
+         res.data.data.data，见 securityController/overview.js 的「已知不一致」注释。
+         失败静默且面板不出现（与统计卡同契约）：「没有告警」和「查不到」必须可区分，
+         一次瞬断不能把面板装成一片祥和的空态。 -->
+    <div v-if="alertsLoaded" class="glass alerts-card">
+      <div class="alerts-card__header">
+        <span class="alerts-card__title">{{ $t('security.recentAlerts') }}</span>
+        <div class="alerts-card__actions">
+          <span v-if="alertsMeta?.lastUpdated" class="alerts-card__meta">
+            {{ $t('security.alertsUpdatedAt', { time: formatTime(alertsMeta.lastUpdated) }) }}
+          </span>
+          <span v-if="alertsMeta?.hasMore" class="alerts-card__meta">
+            {{ $t('security.alertsHasMore', { limit: alertsMeta.limit || alerts.length }) }}
+          </span>
+          <button
+            v-if="alerts.length > ALERTS_PREVIEW_COUNT"
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            :aria-expanded="alertsExpanded"
+            @click="alertsExpanded = !alertsExpanded"
+          >
+            {{ alertsExpanded ? $t('security.collapseAlerts') : $t('security.viewAllAlerts') }}
+          </button>
+        </div>
+      </div>
+      <div v-if="alerts.length === 0" class="alerts-card__empty">
+        {{ $t('security.alertsEmpty') }}
+      </div>
+      <ul v-else class="alerts-list">
+        <li v-for="alert in visibleAlerts" :key="alert._id" class="alert-row">
+          <el-tag :type="riskType(alert.riskLevel)" size="small" class="alert-row__risk">
+            {{ riskText(alert.riskLevel) }}
+          </el-tag>
+          <span class="alert-row__action">{{ actionLabel(alert.action) }}</span>
+          <span class="alert-row__user cell-mono">
+            {{ alert.username || '-' }} · {{ alert.ip || '—' }}
+          </span>
+          <span class="alert-row__time cell-mono">{{ formatTime(alert.timestamp) }}</span>
+          <button
+            type="button"
+            class="glass-btn glass-btn--primary glass-btn--link alert-row__detail"
+            @click="viewDetail(alert)"
+          >
+            {{ $t('common.detail') }}
+          </button>
+        </li>
+      </ul>
+    </div>
+
     <!-- 日志列表 -->
     <div class="glass glass-card" style="margin-top: 16px">
       <div class="card-header" style="margin-bottom: 16px">
@@ -615,6 +665,33 @@ const loadStats = async () => {
   }
 }
 
+// ===== 最近安全告警（GET /security/alerts）=====
+// 双层信封：ApiResponse.success(res, { data, meta }) → 实际数组在 res.data.data.data。
+// 后端固定最多回 50 条（多取 1 条探测 hasMore 后截断），lastUpdated 是服务端时间。
+const ALERTS_PREVIEW_COUNT = 5
+const alerts = ref([])
+const alertsMeta = ref(null)
+const alertsLoaded = ref(false)
+const alertsExpanded = ref(false)
+const visibleAlerts = computed(() =>
+  alertsExpanded.value ? alerts.value : alerts.value.slice(0, ALERTS_PREVIEW_COUNT)
+)
+
+const loadAlerts = async () => {
+  try {
+    const res = await api.security.getAlerts()
+    const payload = res?.data?.data
+    // 结构性兜底：非预期包络一律视为失败（面板不出现），不做部分渲染
+    if (!payload || !Array.isArray(payload.data)) return
+    alerts.value = payload.data
+    alertsMeta.value = payload.meta || null
+    alertsLoaded.value = true
+  } catch (e) {
+    // 静默：与统计卡同契约——提示归 api 响应拦截器统一负责；
+    // 403 DATA_SCOPE_DENIED 等业务拒绝也不在这里另弹，避免同一次失败两条提示
+  }
+}
+
 // 链完整性核验：结论分 success / warning / error 三档，
 // 判绿依据后端的 canAttestIntact（扫全+无断+各层真跑过），不能只看 intact。
 const verifyChain = async () => {
@@ -864,6 +941,7 @@ const riskRowClass = ({ row }) => {
 onMounted(() => {
   loadData()
   loadStats()
+  loadAlerts()
 })
 </script>
 
@@ -926,6 +1004,74 @@ onMounted(() => {
   color: var(--xf-danger-strong);
   border-color: var(--xf-danger-alpha-45);
   background: var(--xf-danger-alpha-8);
+}
+/* 最近安全告警：紧凑单行列表（风险标签 / 动作 / 用户+IP / 时间 / 详情） */
+.alerts-card {
+  padding: 14px 16px;
+}
+.alerts-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.alerts-card__title {
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  letter-spacing: var(--xf-tracking-wide);
+}
+.alerts-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.alerts-card__meta {
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-500);
+  white-space: nowrap;
+}
+.alerts-card__empty {
+  padding: 6px 0;
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-gray-500);
+}
+.alerts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.alert-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--xf-border-color);
+}
+.alert-row:first-child {
+  border-top: none;
+}
+.alert-row__risk {
+  flex: none;
+}
+.alert-row__action {
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-gray-900);
+  white-space: nowrap;
+}
+.alert-row__user {
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-500);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alert-row__time {
+  margin-left: auto;
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-500);
+  white-space: nowrap;
 }
 .table-toolbar {
   font-family: var(--xf-font-body);

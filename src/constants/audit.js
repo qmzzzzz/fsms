@@ -370,6 +370,8 @@ const AUDIT_LOG_ACTIONS = [
   'user_unlocked',
   // 安全告警事件
   'brute_force_login',
+  // 哨兵用户名（canary）探测：幽灵名凭证失败（services/canaryWatch.js 写入）
+  'canary_username_attempt',
   // 限流持续触顶的升级封禁事件（rateLimitEscalation 写入，CC 防护闭环）
   'rate_limit_abuse',
   'bulk_data_export',

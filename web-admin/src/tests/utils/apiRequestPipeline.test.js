@@ -958,6 +958,13 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
       ['u1', { roles: ['r'] }],
       { data: { roles: ['r'] } },
     ],
+    [
+      'users.batchDelete',
+      'delete',
+      '/users/batch',
+      [['u1', 'u2']],
+      { data: { ids: ['u1', 'u2'] } },
+    ],
 
     ['roles.getList', 'get', '/roles', [{ page: 2 }], { params: { page: 2 } }],
     ['roles.getAll', 'get', '/roles/all', [], {}],
@@ -1002,6 +1009,7 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
     ],
     ['devices.getStats', 'get', '/devices/stats', [], {}],
     ['devices.getExpiring', 'get', '/devices/expiring', [{ days: 7 }], { params: { days: 7 } }],
+    ['devices.getReminders', 'get', '/devices/reminders', [], {}],
 
     ['alarms.getList', 'get', '/alarms', [{ page: 1 }], { params: { page: 1 } }],
     ['alarms.getById', 'get', '/alarms/a1', ['a1'], {}],
@@ -1095,6 +1103,14 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
     ],
     ['security.getIPList', 'get', '/security/ip-list', [{ page: 1 }], { params: { page: 1 } }],
     ['security.resetUserMfa', 'put', '/security/users/u1/mfa/reset', ['u1'], {}],
+    [
+      'security.lockUser',
+      'put',
+      '/security/users/u1/lock',
+      ['u1', { locked: true }],
+      { data: { locked: true } },
+    ],
+    ['security.report', 'post', '/security/report', [{ u: 1 }], { data: { u: 1 } }],
     [
       'security.addIPEntry',
       'post',

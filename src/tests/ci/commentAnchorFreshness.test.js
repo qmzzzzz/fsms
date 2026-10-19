@@ -428,7 +428,7 @@ const LIVE = [
   // —— 以下 13 条是第 17 轮 G/H 两线实测出的错锚：站点已改对，登记钉住不再漂 ——
   {
     in: 'src/utils/loggerFlush.js',
-    at: 'index.js:112',
+    at: 'index.js:115',
     must: /logger\.warn\(`收到重复/,
     why: '二次信号 handler 的 logger.warn（原写 :70，落在 docblock 的空续行上）',
   },
@@ -536,13 +536,13 @@ const LIVE = [
   },
   {
     in: 'src/services/websocketService/push.js',
-    at: 'src/index.js:460-478',
+    at: 'src/index.js:466-484',
     must: /process\.on\('unhandledRejection'/,
     why: 'guardSocketHandler 文档引用的 unhandledRejection 兜底口径（2026-10-18 拆分后站点迁至 push.js）',
   },
   {
     in: 'src/tests/services/websocketHandlerRejectionGuard.test.js',
-    at: 'src/index.js:460-478',
+    at: 'src/index.js:466-484',
     must: /process\.on\('unhandledRejection'/,
     why: '同一处口径的第二个引用站点（两条既定事实之一）',
   },
@@ -558,14 +558,14 @@ const STALE = [
     in: 'src/utils/transaction.js',
     at: 'src/index.js:446',
     owner: '他人脏文件（M）',
-    shouldRead: 'src/index.js:460',
+    shouldRead: 'src/index.js:466',
     mustAfterFix: /process\.on\('unhandledRejection'/,
   },
   {
     in: 'src/tests/utils/transactionTopology.test.js',
     at: 'src/index.js:446',
     owner: '他人脏文件（M）',
-    shouldRead: 'src/index.js:460',
+    shouldRead: 'src/index.js:466',
     mustAfterFix: /process\.on\('unhandledRejection'/,
   },
   {
@@ -704,7 +704,7 @@ describe('层 2 · 无内容锚点（空行 / 只剩注释标记；豁免 = STAL
     expect(bare.length).toBe(1);
     expect(qualified.length).toBe(1);
     expect(occurrences('src/utils/loggerFlush.js', 'index.js:70').length).toBe(0);
-    expect(occurrences('src/utils/loggerFlush.js', 'index.js:112').length).toBe(1);
+    expect(occurrences('src/utils/loggerFlush.js', 'index.js:115').length).toBe(1);
   });
 });
 

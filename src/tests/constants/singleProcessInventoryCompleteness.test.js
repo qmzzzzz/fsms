@@ -49,6 +49,7 @@ const REQUIRED_MODULES = [
   'services/sessionService.js',
   'services/reportDashboardService.js',
   'services/auditMonitor.js',
+  'services/canaryWatch.js',
   'services/websocketService/index.js',
 ];
 
@@ -72,6 +73,10 @@ const EXEMPT_MODULES = {
   // 与同族的 config/validate.js、legacyCbcGuard.js 完全同构：是「判据词表」而非进程内状态。
   'config/immutableConfigGuard.js': 'SECURITY_RELEVANT，静态字面量 Set，只读',
   'constants/breachedPasswords.js': '静态弱口令词表，只读数据',
+  // DETECTION_DIMENSION_SET：检测维度闭合集合，内容全由源码字面量决定、
+  // 逐进程恒同，只 .has()，不存在跨进程不一致。
+  'constants/detectionObjectives.js': '检测维度闭合集合，静态字面量 Set，只读',
+
   'middleware/protocolCompliance.js': 'HOST_GATE_EXEMPT_PATHS，静态字面量 Set',
   // FORBIDDEN_KEYS：原型链入口词表（__proto__/constructor/prototype），静态字面量 Set、
   // 建好后只 .has()。2026-10-18 自 middleware/security.js 拆出时随 sanitize 模块迁至本文件，
@@ -94,6 +99,7 @@ const EXEMPT_MODULES = {
     'AUDIT_FILTER_DIMENSION_FIELDS，静态字面量 Set（恒空判据的维度定义域），只读、无跨进程语义',
   'utils/metrics.js': 'Prometheus 指标注册表，按设计逐实例各一份',
   'utils/metricsAuditDrops.js': 'Prometheus 指标注册表，按设计逐实例各一份',
+  'utils/metricsDetection.js': 'Prometheus 指标注册表，按设计逐实例各一份',
   'utils/mongoFailureAttribution.js': '基础设施错误名/码词表，静态字面量 Set',
   // DEGENERATE_KEY_LITERALS：「哪些字符串算退化密钥」的判据词表，与 config/validate.js、
   // utils/mongoFailureAttribution.js 同构。登记进清单会让启动期校验对运维说「多实例部署时

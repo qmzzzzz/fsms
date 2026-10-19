@@ -27,6 +27,7 @@ const rolesGetTree = vi.fn()
 const rolesCreate = vi.fn()
 const rolesAssignPerm = vi.fn()
 const rolesDelete = vi.fn()
+const rolesUpdate = vi.fn()
 const joinRoom = vi.fn()
 const leaveRoom = vi.fn()
 const onGiveUp = vi.fn()
@@ -44,7 +45,7 @@ vi.mock('@/utils/api', () => ({
       assignPermissions: (...a) => rolesAssignPerm(...a),
       delete: (...a) => rolesDelete(...a),
       getAll: vi.fn(),
-      update: vi.fn(),
+      update: (...a) => rolesUpdate(...a),
     },
   },
   isCanceledError: () => false,
@@ -79,6 +80,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 const P_READ = ['role:read']
 const P_ALL = ['role:read', 'role:create', 'role:assign', 'role:delete']
+const P_EDIT = [...P_ALL, 'role:update']
 
 /** 权限树：单模块两条权限（24 位 ObjectId 才会被展平为真实权限节点） */
 const TREE = [
@@ -208,6 +210,7 @@ afterEach(() => {
     rolesCreate,
     rolesAssignPerm,
     rolesDelete,
+    rolesUpdate,
     joinRoom,
     leaveRoom,
     onGiveUp,
@@ -758,6 +761,58 @@ describe('RoleView 新增角色对话框', () => {
         ).disabled === false,
       '失败后提交按钮解锁'
     )
+  })
+})
+
+describe('RoleView 编辑角色（role:update 门控 + 列表行编辑）', () => {
+  test('有 role:update：行上渲染编辑铅笔；点击打开编辑对话框并预填', async () => {
+    const c = await mountRole(P_EDIT)
+    const pencil = c.findAll('.glass-role-item')[1].querySelector('.role-edit-btn')
+    expect(pencil).toBeTruthy()
+    click(pencil)
+    await flush(8)
+    const dlg = c.find('.el-dialog')
+    expect(dlg.querySelector('.el-dialog__title').textContent.trim()).toBe('编辑角色')
+    expect(dlg.querySelector('#roleName').value).toBe('巡检员')
+    expect(dlg.querySelector('#roleCode').value).toBe('INSPECTOR')
+    // code 是寻址键，编辑模式禁用
+    expect(dlg.querySelector('#roleCode').disabled).toBe(true)
+    expect(c.errors).toEqual([])
+  })
+
+  test('无 role:update：不渲染编辑铅笔（role:create/delete 不等于可编辑）', async () => {
+    const c = await mountRole(P_ALL)
+    expect(c.findAll('.role-edit-btn')).toEqual([])
+  })
+
+  test('保存改名：PUT 后列表重拉，右侧标题同步新名（currentRole 引用被刷新行替换）', async () => {
+    rolesUpdate.mockResolvedValue({
+      data: { data: { _id: 'r2', name: '巡检员改名', code: 'INSPECTOR' } },
+    })
+    const c = await mountRole(P_EDIT)
+    click(c.findAll('.glass-role-item')[1]) // 选中巡检员
+    await waitFor(() => roleTags(c).join() === '巡检员', { message: '选中巡检员' })
+    rolesGetList.mockResolvedValue({
+      data: { data: [ROLE_BUILTIN, { ...ROLE_PLAIN, name: '巡检员改名' }] },
+    })
+    click(c.findAll('.glass-role-item')[1].querySelector('.role-edit-btn'))
+    await flush(8)
+    const dlg = c.find('.el-dialog')
+    const nameInput = dlg.querySelector('#roleName')
+    nameInput.value = '巡检员改名'
+    nameInput.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(4)
+    click(
+      Array.from(dlg.querySelectorAll('.el-dialog__footer .glass-btn')).find((b) =>
+        b.textContent.includes('保存')
+      )
+    )
+    await waitFor(() => rolesUpdate.mock.calls.length === 1, { message: '更新请求' })
+    expect(rolesUpdate).toHaveBeenCalledWith('r2', { name: '巡检员改名', description: '' })
+    // 列表重拉 + 标题换成新名字（只重拉不回写会在右侧标题留下旧名）
+    await waitFor(() => rolesGetList.mock.calls.length >= 2, { message: '列表重拉' })
+    await waitFor(() => roleTags(c).join() === '巡检员改名', { message: '标题同步新名' })
+    expect(c.errors).toEqual([])
   })
 })
 

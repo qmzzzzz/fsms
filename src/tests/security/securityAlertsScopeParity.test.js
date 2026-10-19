@@ -155,12 +155,12 @@ describe('/security/alerts 的数据范围必须与 /security/audit-logs 同源'
   const get = (token, path) => request(app).get(path).set('Authorization', `Bearer ${token}`);
   /**
    * 观测面用 username：`getRecentAlerts` 的 select 白名单里没有 userId
-   * （securityAlert.js:414-421），而范围过滤恰恰是按 userId 做的。
+   * （securityAlert.js:525-527），而范围过滤恰恰是按 userId 做的。
    * 断言 username 既能在 HTTP 侧认出"这是哪个部门的人"，也顺带钉住
    * "收口用的字段与出口可见字段不是一回事"这个事实。
    */
   const rowsOf = (body) => {
-    // 控制器：ApiResponse.success(res, { data: [...], meta })（controllers/securityController/overview.js:321-333）
+    // 控制器：ApiResponse.success(res, { data: [...], meta })（controllers/securityController/overview.js:329-341）
     // ⇒ 响应体里是**双层 data**。这里写死这一层形状，不做"多种可能形状都试一遍"的兜底：
     // 兜底会把"接口返回体变了"和"范围没收口"两件事混成一条红。
     const list = body?.data?.data;

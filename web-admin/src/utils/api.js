@@ -726,6 +726,9 @@ export const api = {
     create: (data) => apiClient.post('/users', data),
     update: (id, data) => apiClient.put(`/users/${id}`, data),
     delete: (id) => apiClient.delete(`/users/${id}`),
+    // 批量删除：固定字面量 /users/batch（后端把该路由注册在 /:id 之前），ids 为 1-100 个 ID。
+    // delete 带请求体走 config.data；写方法不参与路由切换取消（UNCANCELABLE_METHODS）
+    batchDelete: (ids) => apiClient.delete('/users/batch', { data: { ids } }),
     assignRoles: (id, data) => apiClient.put(`/users/${id}/roles`, data),
   },
 
@@ -762,6 +765,7 @@ export const api = {
     addMaintenance: (id, data) => apiClient.post(`/devices/${id}/maintenance`, data),
     getStats: () => apiClient.get('/devices/stats'),
     getExpiring: (params) => apiClient.get('/devices/expiring', { params }),
+    getReminders: () => apiClient.get('/devices/reminders'),
   },
 
   // 报警管理
@@ -822,12 +826,21 @@ export const api = {
     getIPList: (params) => apiClient.get('/security/ip-list', { params }),
     // 管理员重置用户两步验证（账户救济：清除 TOTP/恢复码并强制下线）
     resetUserMfa: (userId) => apiClient.put(`/security/users/${userId}/mfa/reset`),
+    // 锁定/解锁用户（user:lock）：locked 必须是真布尔——路由 toBoolean 收口前，
+    // 字符串 'false' 会被服务层按 truthy 判成锁定。reason 可选 ≤500，锁定方向
+    // 写入 user.remark 与 user_locked 审计（服务层连带清 lockUntil 并失效权限缓存）
+    lockUser: (userId, data) => apiClient.put(`/security/users/${userId}/lock`, data),
     // 敏感字段按需揭示（step-up）：body { dataType, targetUserId?, currentPassword? | mfaCode? }
     // → data { type, masked, full }。用户列表/详情只下发脱敏值，明文只能走这一条通道
     // （服务端在此写 view_sensitive_data 审计，审计写失败即不返回明文）。
     viewSensitive: (data) => apiClient.post('/security/view-sensitive', data),
     addIPEntry: (data) => apiClient.post('/security/ip-list', data),
     removeIPEntry: (id) => apiClient.delete(`/security/ip-list/${id}`),
+    // 举报异常（人人可用，无权限码）：targetType ∈ user/device/alarm/system。
+    // 记录型必须带真实且数据范围内的 targetId（后端核验存在性+范围），system 型
+    // 禁止携带 targetId；reason 必填 1-200，description 可选 ≤500。成功后写入
+    // riskLevel:high 审计，响应 data.reportId 为审计记录 ID
+    report: (data) => apiClient.post('/security/report', data),
     // 审计链完整性核验：GET /audit-logs/verify?limit=&from=latest|earliest
     // → data { intact, breaks, byType, total, scanned, canAttestIntact, verdictCode,
     //          verdictReasons, collectionTotal }

@@ -26,10 +26,10 @@
 
 const METRICS_ENABLED = process.env.METRICS_ENABLED !== 'false';
 
-// 审计丢失/积压信号单独成文件（本文件的 max-lines 贴着 300 棘轮红线）
+// 审计丢失/运行时健康/检测延迟三组信号各自单独成文件（本文件 max-lines 贴着棘轮红线）
 const auditDropMetrics = require('./metricsAuditDrops');
-// 运行时健康信号（Mongo 就绪 / 磁盘 / 日志投递）同样单独成文件，理由同上
 const runtimeMetrics = require('./metricsRuntime');
+const detectionMetrics = require('./metricsDetection');
 
 // 延迟直方图桶（秒）：覆盖 5ms ~ 10s 的 API 时延分布
 const DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.3, 0.5, 1, 2, 5, 10];
@@ -117,8 +117,7 @@ function canAddSeries(store, currentSize) {
  */
 function normLabel(value) {
   if (value === undefined || value === null) return 'unknown';
-  const str = String(value);
-  return str === '' ? 'unknown' : str;
+  return String(value) || 'unknown';
 }
 
 function labelsKey(labels) {
@@ -242,11 +241,10 @@ const droppedOf = (store) => droppedSeries.get(store) || 0;
  * "从没截断过" 和 "这一版代码没上报这个指标"。
  */
 function formatSeriesDropped() {
-  const out = [];
-  out.push(
-    '# HELP metrics_series_dropped_total New metric series discarded by the per-store MAX_SERIES cap'
-  );
-  out.push('# TYPE metrics_series_dropped_total counter');
+  const out = [
+    '# HELP metrics_series_dropped_total New metric series discarded by the per-store MAX_SERIES cap',
+    '# TYPE metrics_series_dropped_total counter',
+  ];
   for (const store of SERIES_STORES) {
     out.push('metrics_series_dropped_total{store="' + store + '"} ' + droppedOf(store));
   }
@@ -314,7 +312,7 @@ function formatPrometheus() {
 
   lines.push(...formatSeriesDropped());
   lines.push(...auditDropMetrics.formatAuditDrops());
-  lines.push(...runtimeMetrics.formatRuntime());
+  lines.push(...runtimeMetrics.formatRuntime(), ...detectionMetrics.formatDetection());
 
   return lines.join('\n') + '\n';
 }
@@ -428,6 +426,7 @@ function getSnapshot() {
       login,
       loginSuccessRate: loginTotal > 0 ? Number((loginSuccess / loginTotal).toFixed(4)) : 0,
       mfa,
+      detection: detectionMetrics.getDetectionSnapshot(),
     },
     series: seriesStats(),
     process: {
@@ -447,6 +446,7 @@ module.exports = {
   incMfaAction,
   incAuditDrop: auditDropMetrics.incAuditDrop,
   recordReadyz: runtimeMetrics.recordReadyz,
+  recordDetection: detectionMetrics.recordDetection,
   routeLabelOf,
   formatPrometheus,
   getSnapshot,

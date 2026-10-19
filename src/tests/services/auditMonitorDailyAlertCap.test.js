@@ -10,7 +10,7 @@
  *
  * 修复前的真实缺陷（本文件主证用例在修复前必红）：
  * 频控键里带了日期（`..._failure_2026-09-24`），但 shouldSendAlert 的窗口只有
- * THRESHOLDS.alertRateLimitMs = 5 分钟（securityAlert.js:27，无 env 可调），
+ * THRESHOLDS.alertRateLimitMs = 5 分钟（securityAlert.js:33，无 env 可调），
  * 而检测间隔默认同为 5 分钟、且可配到任意大 ⇒ 键名里的日期从不参与抑制判定。
  * 只要 interval ≥ TTL，每轮都会放行 ⇒ 一个维度一天最多 ~144 条高危告警。
  * 现在由 auditMonitor 自己的 notifiedDayByDimension 兜住，与两个常量的大小关系解耦。

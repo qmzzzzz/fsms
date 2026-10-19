@@ -50,13 +50,14 @@ const UNRELATED = 'zz:some_other_perm';
 
 /**
  * 今天实测的字面量手抄分布：`src/` 下非测试目录（155 个 js）里，剥注释后
- * `'*:*'` 完整字面量的逐文件出现次数，合计 18 处 / 11 个文件。
+ * `'*:*'` 完整字面量的逐文件出现次数，合计 18 处 / 12 个文件。
  *
  * 冻到**精确相等**而不是"每文件上限"：后者在扫描器自己坏掉时（walkJs 返回目录空集、
  * stripComments 误吞全文）会静默恒绿，前者会立刻红成 `Received: {}`。对端把某处改用
  * 常量后这里会红一次，那是"把新分布显式写回来"的提醒，不是回归。
  *
- * 权威常量的定义点（utils/superAdmin.js）与种子数据（services/initData.js）各占 1、2 处，
+ * 权威常量的定义点（utils/superAdmin.js）1 处，种子数据（services/initData/
+ * permissionsBusiness.js 的权限文档 + roles.js 的授予表）2 处，
  * 是**合法**的字面量：前者是定义本身，后者是真正落库的那条权限文档与其授予表。
  */
 const WILDCARD_LITERAL_CENSUS = {
@@ -67,7 +68,8 @@ const WILDCARD_LITERAL_CENSUS = {
   'controllers/userController/update.js': 1,
   'middleware/rbac.js': 2,
   'routes/permissionRoutes.js': 2,
-  'services/initData.js': 2,
+  'services/initData/permissionsBusiness.js': 1,
+  'services/initData/roles.js': 1,
   'services/userPermissionService.js': 1,
   'utils/permissionHelper.js': 4,
   'utils/superAdmin.js': 1,

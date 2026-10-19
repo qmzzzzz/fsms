@@ -220,6 +220,14 @@ const buildComplianceSection = async () => {
           outageFailures: s.outageFailures,
         };
       })(),
+      // 哨兵用户名（canary）检测状态：count/fromEnv/checked/shadowed/configErrors。
+      // checked=false（对账未跑或失败）与 shadowed 非空（名单名被真实账户占用）
+      // 都意味着幽灵名检测可能静默失效——此前这类状态只活在启动日志里，
+      // 合规面板是它该有的出口（同 monitorHealth 的口径）。
+      canaryWatch: (() => {
+        const canaryWatch = require('../../services/canaryWatch');
+        return canaryWatch.getStatus();
+      })(),
     };
   } catch (e) {
     return { error: '合规指标获取失败' };

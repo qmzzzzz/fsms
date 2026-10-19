@@ -25,6 +25,7 @@ const usersGetList = vi.fn()
 const usersCreate = vi.fn()
 const usersUpdate = vi.fn()
 const usersDelete = vi.fn()
+const usersBatchDelete = vi.fn()
 const assignRoles = vi.fn()
 const rolesGetAll = vi.fn()
 const secGetReg = vi.fn()
@@ -34,6 +35,7 @@ const secSetReg = vi.fn()
 const secSetLogin = vi.fn()
 const secSetRegister = vi.fn()
 const resetMfa = vi.fn()
+const lockUserApi = vi.fn()
 const viewSensitive = vi.fn()
 const isCanceledError = vi.fn(() => false)
 vi.mock('@/utils/api', () => ({
@@ -43,6 +45,7 @@ vi.mock('@/utils/api', () => ({
       create: (...a) => usersCreate(...a),
       update: (...a) => usersUpdate(...a),
       delete: (...a) => usersDelete(...a),
+      batchDelete: (...a) => usersBatchDelete(...a),
       assignRoles: (...a) => assignRoles(...a),
     },
     roles: { getAll: (...a) => rolesGetAll(...a) },
@@ -54,6 +57,7 @@ vi.mock('@/utils/api', () => ({
       setLoginCaptchaConfig: (...a) => secSetLogin(...a),
       setRegisterCaptchaConfig: (...a) => secSetRegister(...a),
       resetUserMfa: (...a) => resetMfa(...a),
+      lockUser: (...a) => lockUserApi(...a),
       viewSensitive: (...a) => viewSensitive(...a),
     },
   },
@@ -65,8 +69,9 @@ vi.mock('element-plus/es/components/message/index.mjs', () => ({
   ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }))
 const confirmBox = vi.fn()
+const promptBox = vi.fn()
 vi.mock('element-plus/es/components/message-box/index.mjs', () => ({
-  ElMessageBox: { confirm: (...a) => confirmBox(...a) },
+  ElMessageBox: { confirm: (...a) => confirmBox(...a), prompt: (...a) => promptBox(...a) },
 }))
 
 import UserView from '@/views/UserView.vue'
@@ -81,6 +86,7 @@ const P_ALL = [
   'role:assign',
   'user:reset_password',
   'user:delete',
+  'user:lock',
   'security:config',
 ]
 
@@ -209,6 +215,7 @@ afterEach(() => {
     usersCreate,
     usersUpdate,
     usersDelete,
+    usersBatchDelete,
     assignRoles,
     rolesGetAll,
     secGetReg,
@@ -218,10 +225,12 @@ afterEach(() => {
     secSetLogin,
     secSetRegister,
     resetMfa,
+    lockUserApi,
     viewSensitive,
     isCanceledError,
     enc,
     confirmBox,
+    promptBox,
   ]) {
     m.mockReset()
   }
@@ -247,7 +256,7 @@ describe('UserView 写入口权限门控（同组件不同权限集对照）', (
 
   test('全权限：工具栏出现新增用户 + 三个开关，行内四类写入口齐备', async () => {
     const c = await mountUser(P_ALL)
-    expect(toolbarLabels(c)).toEqual(['新增用户', '刷新'])
+    expect(toolbarLabels(c)).toEqual(['新增用户', '批量删除', '刷新'])
     expect(c.findAll('.glass-switch')).toHaveLength(3)
     expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置MFA', '删除'])
     expect(secGetReg).toHaveBeenCalledTimes(1)
@@ -258,7 +267,7 @@ describe('UserView 写入口权限门控（同组件不同权限集对照）', (
 
   test('缺 user:create：新增按钮消失，但刷新与其余写入口仍在（差异只来自该权限）', async () => {
     const c = await mountUser(P_ALL.filter((p) => p !== 'user:create'))
-    expect(toolbarLabels(c)).toEqual(['刷新'])
+    expect(toolbarLabels(c)).toEqual(['批量删除', '刷新'])
     expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置MFA', '删除'])
   })
 
@@ -280,6 +289,8 @@ describe('UserView 写入口权限门控（同组件不同权限集对照）', (
   test('缺 user:delete：删除入口消失，重置MFA 不受影响', async () => {
     const c = await mountUser(P_ALL.filter((p) => p !== 'user:delete'))
     expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置MFA'])
+    // 批量删除按钮与选择列同受 user:delete 门控
+    expect(toolbarLabels(c)).toEqual(['新增用户', '刷新'])
   })
 
   test('缺 security:config：开关整块消失且不发配置请求（不产生 403 噪音）', async () => {
@@ -289,8 +300,8 @@ describe('UserView 写入口权限门控（同组件不同权限集对照）', (
     expect(secGetReg).not.toHaveBeenCalled()
     expect(secGetLogin).not.toHaveBeenCalled()
     expect(secGetRegister).not.toHaveBeenCalled()
-    // 有其他权限，页面主体照常
-    expect(toolbarLabels(c)).toEqual(['新增用户', '刷新'])
+    // 有其他权限，页面主体照常（批量删除来自 user:delete，不受 security:config 影响）
+    expect(toolbarLabels(c)).toEqual(['新增用户', '批量删除', '刷新'])
   })
 
   test('权限码不可错配：user:read 不能代替 user:create（拼错即失败）', async () => {
@@ -1204,6 +1215,220 @@ describe('UserView 删除与重置 MFA', () => {
     expect(resetMfa).not.toHaveBeenCalled()
     expect(ElMessage.success).not.toHaveBeenCalled()
     expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+})
+
+describe('UserView 锁定与解锁', () => {
+  /**
+   * 为什么锁定/解锁要有独立用例组：这是账户救济链路里唯一改 status 的入口，
+   * 服务层连带清 lockUntil、失效权限缓存并写 user_locked 审计（riskLevel:high）。
+   * 载荷里 locked 若被误发成字符串 'false'，后端 truthy 判定会把"解锁"执行成"锁定"；
+   * 入口若对 inactive 行渲染出来，用户只会看到必然失败的按钮（双向都被服务端拒）。
+   */
+  const ACTIVE_OTHER = { ...ROW_OTHER, status: 'active' }
+
+  test('入口显隐矩阵：active 显示锁定、locked 显示解锁；inactive 与自身行都不显示', async () => {
+    const c = await mountUser(P_ALL, [
+      { ...ACTIVE_OTHER, _id: 'a1' },
+      { ...ACTIVE_OTHER, _id: 'a2', status: 'locked' },
+      { ...ACTIVE_OTHER, _id: 'a3', status: 'inactive' },
+      ROW_SELF,
+    ])
+    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置MFA', '锁定用户', '删除'])
+    expect(rowLabels(c, 1)).toEqual(['编辑', '分配角色', '重置MFA', '解锁用户', '删除'])
+    expect(rowLabels(c, 2)).toEqual(['编辑', '分配角色', '重置MFA', '删除'])
+    expect(rowLabels(c, 3)).toEqual(['编辑', '分配角色'])
+    expect(c.errors).toEqual([])
+  })
+
+  test('缺 user:lock：active 行的锁定入口也消失（不能用 user:update 顶替）', async () => {
+    const c = await mountUser(
+      P_ALL.filter((p) => p !== 'user:lock'),
+      [ACTIVE_OTHER]
+    )
+    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置MFA', '删除'])
+  })
+
+  test('锁定：prompt 确认后 PUT {locked:true, reason}，原因修剪两端空白，成功后提示并刷新', async () => {
+    lockUserApi.mockResolvedValue({ data: { data: { status: 'locked' } } })
+    promptBox.mockResolvedValue({ value: '  安全事件处置  ' })
+    const c = await mountUser(P_ALL, [ACTIVE_OTHER])
+    usersGetList.mockClear()
+    click(rowBtn(c, '锁定用户'))
+    await waitFor(() => promptBox.mock.calls.length === 1, { message: '原因确认框已弹出' })
+    const [message, title, opts] = promptBox.mock.calls[0]
+    expect(message).toContain('bob')
+    expect(title).toBe('锁定用户')
+    expect(opts.inputPlaceholder).toContain('500')
+    // 上限口径与后端路由一致（reason ≤500，服务层写入 user.remark）：越界必须在输入校验拦住
+    expect(opts.inputValidator('x'.repeat(500))).toBe(true)
+    expect(typeof opts.inputValidator('x'.repeat(501))).toBe('string')
+    await waitFor(() => lockUserApi.mock.calls.length === 1, { message: '锁定请求' })
+    expect(lockUserApi).toHaveBeenCalledWith('u2', { locked: true, reason: '安全事件处置' })
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '锁定成功提示' })
+    expect(ElMessage.success).toHaveBeenCalledWith('账户已锁定')
+    await waitFor(() => usersGetList.mock.calls.length === 1, { message: '锁定后刷新列表' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('锁定原因可留空：空输入仍发 locked:true（reason 空串，服务层 falsy 跳过 remark）', async () => {
+    lockUserApi.mockResolvedValue({ data: { data: { status: 'locked' } } })
+    promptBox.mockResolvedValue({ value: '' })
+    const c = await mountUser(P_ALL, [ACTIVE_OTHER])
+    click(rowBtn(c, '锁定用户'))
+    await waitFor(() => lockUserApi.mock.calls.length === 1, { message: '锁定请求' })
+    expect(lockUserApi).toHaveBeenCalledWith('u2', { locked: true, reason: '' })
+  })
+
+  test('锁定取消：不发请求、不弹任何提示（静默）', async () => {
+    promptBox.mockRejectedValue('cancel')
+    const c = await mountUser(P_ALL, [ACTIVE_OTHER])
+    click(rowBtn(c, '锁定用户'))
+    await waitFor(() => promptBox.mock.calls.length === 1, { message: '原因确认框已弹出' })
+    await flush(20)
+    expect(lockUserApi).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+
+  test('解锁：confirm 确认后 PUT {locked:false}（不带原因，不发 prompt），成功文案与锁定区分', async () => {
+    lockUserApi.mockResolvedValue({ data: { data: { status: 'active' } } })
+    confirmBox.mockResolvedValue('confirm')
+    const c = await mountUser(P_ALL, [{ ...ACTIVE_OTHER, status: 'locked' }])
+    usersGetList.mockClear()
+    click(rowBtn(c, '解锁用户'))
+    await waitFor(() => confirmBox.mock.calls.length === 1, { message: '解锁确认框已弹出' })
+    expect(confirmBox.mock.calls[0][0]).toContain('bob')
+    expect(confirmBox.mock.calls[0][1]).toBe('提示')
+    await waitFor(() => lockUserApi.mock.calls.length === 1, { message: '解锁请求' })
+    expect(lockUserApi).toHaveBeenCalledWith('u2', { locked: false })
+    expect(promptBox).not.toHaveBeenCalled()
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '解锁成功提示' })
+    expect(ElMessage.success).toHaveBeenCalledWith('账户已解锁')
+    await waitFor(() => usersGetList.mock.calls.length === 1, { message: '解锁后刷新列表' })
+  })
+
+  test('锁定失败：不误报成功也不重复弹错（错误提示归拦截器），列表不刷新', async () => {
+    lockUserApi.mockRejectedValue(new Error('boom'))
+    promptBox.mockResolvedValue({ value: '' })
+    const c = await mountUser(P_ALL, [ACTIVE_OTHER])
+    usersGetList.mockClear()
+    click(rowBtn(c, '锁定用户'))
+    await waitFor(() => lockUserApi.mock.calls.length === 1, { message: '锁定请求' })
+    await flush(20)
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(usersGetList).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('重入守卫：确认框未决时重复点击不弹第二个确认框，完成后忙态解除可再操作', async () => {
+    let release
+    promptBox.mockImplementation(
+      () =>
+        new Promise((r) => {
+          release = () => r({ value: '' })
+        })
+    )
+    lockUserApi.mockResolvedValue({ data: { data: { status: 'locked' } } })
+    const c = await mountUser(P_ALL, [ACTIVE_OTHER])
+    click(rowBtn(c, '锁定用户'))
+    await flush(4)
+    expect(promptBox).toHaveBeenCalledTimes(1)
+    expect(rowBtn(c, '锁定用户').disabled).toBe(true)
+    click(rowBtn(c, '锁定用户'))
+    await flush(4)
+    expect(promptBox).toHaveBeenCalledTimes(1)
+    release()
+    await waitFor(() => lockUserApi.mock.calls.length === 1, { message: '锁定请求' })
+    await flush(8)
+    expect(lockUserApi).toHaveBeenCalledTimes(1)
+    await waitFor(() => rowBtn(c, '锁定用户').disabled === false, { message: '忙态解除' })
+  })
+})
+
+describe('UserView 批量删除', () => {
+  /** 第 n 行选择框的原生 input（EP Checkbox 的 change 由它触发） */
+  const rowCheckbox = (c, n) =>
+    c.findAll('.el-table__body-wrapper .el-table__row')[n].querySelector('.el-checkbox__original')
+
+  test('缺 user:delete：工具栏无批量删除、表格无选择列', async () => {
+    const c = await mountUser(P_ALL.filter((p) => p !== 'user:delete'))
+    expect(toolbarBtn(c, '批量删除')).toBeUndefined()
+    expect(c.findAll('.el-table__body-wrapper .el-checkbox__original')).toEqual([])
+  })
+
+  test('有 user:delete：按钮与选择列就位，空选点一下不发请求也不弹确认', async () => {
+    const c = await mountUser(P_ALL)
+    const btn = toolbarBtn(c, '批量删除')
+    expect(btn).toBeTruthy()
+    expect(btn.disabled).toBe(true)
+    expect(c.findAll('.el-table__body-wrapper .el-checkbox__original')).toHaveLength(1)
+    click(btn)
+    await flush(4)
+    expect(confirmBox).not.toHaveBeenCalled()
+    expect(usersBatchDelete).not.toHaveBeenCalled()
+  })
+
+  test('自己那行不可选（含自己的批次会被后端整批拒绝）；他人行可选', async () => {
+    const c = await mountUser(P_ALL, [ROW_SELF, ROW_OTHER])
+    const selfBox = rowCheckbox(c, 0)
+    expect(selfBox.disabled).toBe(true)
+    click(selfBox)
+    await flush(6)
+    expect(toolbarBtn(c, '批量删除').disabled).toBe(true)
+    // 对照：他人行可勾，按钮随之解锁（证明禁的是自己而非恒真）
+    click(rowCheckbox(c, 1))
+    await waitFor(() => toolbarBtn(c, '批量删除').disabled === false, {
+      message: '选中他人后按钮可用',
+    })
+  })
+
+  test('确认文案带数量；确认后 DELETE batch 携带所选 ids、成功提示并刷新列表', async () => {
+    usersBatchDelete.mockResolvedValue({ data: { data: { deleted: 1 } } })
+    confirmBox.mockResolvedValue('confirm')
+    const c = await mountUser(P_ALL, [ROW_OTHER])
+    usersGetList.mockClear()
+    click(rowCheckbox(c, 0))
+    await waitFor(() => toolbarBtn(c, '批量删除').disabled === false, { message: '选中后按钮可用' })
+    click(toolbarBtn(c, '批量删除'))
+    await waitFor(() => confirmBox.mock.calls.length === 1, { message: '确认框已弹出' })
+    expect(confirmBox.mock.calls[0][0]).toContain('1')
+    expect(confirmBox.mock.calls[0][1]).toBe('提示')
+    await waitFor(() => usersBatchDelete.mock.calls.length === 1, { message: '批量删除请求' })
+    expect(usersBatchDelete).toHaveBeenCalledWith(['u2'])
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '成功提示' })
+    expect(ElMessage.success).toHaveBeenCalledWith('已删除 1 个用户')
+    await waitFor(() => usersGetList.mock.calls.length === 1, { message: '删除后刷新列表' })
+    // 勾选清空：按钮回到禁用，防对刚删的 id 二次提交
+    await waitFor(() => toolbarBtn(c, '批量删除').disabled === true, { message: '勾选已清空' })
+  })
+
+  test('取消确认：不发请求、不弹任何提示', async () => {
+    confirmBox.mockRejectedValue('cancel')
+    const c = await mountUser(P_ALL, [ROW_OTHER])
+    click(rowCheckbox(c, 0))
+    await waitFor(() => toolbarBtn(c, '批量删除').disabled === false, { message: '选中后按钮可用' })
+    click(toolbarBtn(c, '批量删除'))
+    await waitFor(() => confirmBox.mock.calls.length === 1, { message: '确认框已弹出' })
+    await flush(20)
+    expect(usersBatchDelete).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+
+  test('失败：不误报成功，也不在组件侧重复弹错（错误提示归拦截器）', async () => {
+    usersBatchDelete.mockRejectedValue(new Error('boom'))
+    confirmBox.mockResolvedValue('confirm')
+    const c = await mountUser(P_ALL, [ROW_OTHER])
+    click(rowCheckbox(c, 0))
+    await waitFor(() => toolbarBtn(c, '批量删除').disabled === false, { message: '选中后按钮可用' })
+    click(toolbarBtn(c, '批量删除'))
+    await waitFor(() => usersBatchDelete.mock.calls.length === 1, { message: '批量删除请求' })
+    await flush(12)
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
   })
 })
 

@@ -168,6 +168,11 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     impact: '各进程各自去重，同一事件按实例数重复告警',
   },
   {
+    module: 'services/canaryWatch.js',
+    mechanism: '哨兵名当日告警去重表（notifiedDayByCanary Map）与启动期遮蔽对账状态',
+    impact: '各进程各自去重、各自对账；同一哨兵命中按实例数重复告警',
+  },
+  {
     module: 'services/websocketService/index.js',
     mechanism: '客户端连接表',
     impact: '跨进程无法向指定用户推送（需 socket.io adapter）',

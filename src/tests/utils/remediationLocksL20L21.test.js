@@ -49,6 +49,7 @@ describe('L-20 detectAnomalies 的 threshold 必须贯穿三路聚合', () => {
         category: 'system',
         userId,
         username: stamp,
+        ip: '203.0.113.20',
         success: false,
         timestamp: offHour,
       })),
@@ -72,6 +73,21 @@ describe('L-20 detectAnomalies 的 threshold 必须贯穿三路聚合', () => {
     // 若被改回硬编码 5，则 3 条不会命中，此处即红。
     expect(unusual).toBeTruthy();
     expect(unusual.count).toBe(3);
+
+    // MTTD 依赖 firstEventAt：三路聚合都必须真从库里带出组内最早事件时间。
+    // 若只改注释漏改管道，lag 会退回"窗口起点近似"，且这里拿不到 Date。
+    for (const [name, rows] of Object.entries({
+      failedOperations: r.failedOperations,
+      failedOperationsByIp: r.failedOperationsByIp,
+      unusualTimeOperations: r.unusualTimeOperations,
+    })) {
+      const row = rows.find((x) => x.count === 3);
+      expect({ name, hasFirstEventAt: row.firstEventAt instanceof Date }).toEqual({
+        name,
+        hasFirstEventAt: true,
+      });
+      expect(row.firstEventAt.getTime()).toBe(offHour.getTime());
+    }
   });
 
   test('threshold=10 时三路聚合都不命中（阈值确实生效，非恒真）', async () => {

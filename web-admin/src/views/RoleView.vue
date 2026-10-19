@@ -22,7 +22,9 @@
             :current-role="currentRole"
             :loading="loadingRoleList"
             :can-delete="hasPerm('role:delete')"
+            :can-edit="hasPerm('role:update')"
             @select="handleCurrentChange"
+            @edit="handleEdit"
             @delete="handleDelete"
           />
         </div>
@@ -132,8 +134,13 @@
       </el-col>
     </el-row>
 
-    <!-- 新增角色对话框（组件化，提交成功回调 created） -->
-    <RoleFormDialog v-model:visible="dialogVisible" @created="onRoleCreated" />
+    <!-- 角色表单对话框（新增/编辑共用；编辑时传 role 预填） -->
+    <RoleFormDialog
+      v-model:visible="dialogVisible"
+      :role="editingRole"
+      @created="onRoleCreated"
+      @updated="onRoleUpdated"
+    />
   </div>
 </template>
 
@@ -164,6 +171,8 @@ const savingPermissions = ref(false)
 const loadingTree = ref(false)
 const loadingRoleList = ref(false)
 const dialogVisible = ref(false)
+// 编辑模式的预填来源：null = 新增模式。打开编辑时指向被点的行对象
+const editingRole = ref(null)
 
 // ===== 权限编辑状态机（自本视图拆出，含勾选集合/模块列表/搜索/统计/差异显示） =====
 // D-2：完整对象同时传给 PermissionModuleCard 作渲染层状态机
@@ -185,6 +194,14 @@ const {
 } = rolePermUi
 
 const handleAdd = () => {
+  editingRole.value = null
+  dialogVisible.value = true
+}
+
+// 编辑入口（列表行 hover 铅笔）：整个 role 交给对话框预填；
+// 内置角色的名称锁定在对话框内部处理（只留 description 可改）
+const handleEdit = (row) => {
+  editingRole.value = row
   dialogVisible.value = true
 }
 
@@ -304,6 +321,16 @@ const onRoleCreated = async (newRole) => {
   if (newRole) {
     currentRole.value = newRole
     await loadRolePermissions(newRole._id)
+  }
+}
+
+// 编辑角色成功：刷新列表；若改的是当前选中角色，用刷新后的行替换引用
+// （loadRoles 只按 _id 对账存在性、不回写字段，改名后右侧标题会挂着旧对象）
+const onRoleUpdated = async (updatedRole) => {
+  await loadRoles()
+  if (updatedRole?._id && currentRole.value?._id === updatedRole._id) {
+    const fresh = roles.value.find((r) => r._id === updatedRole._id)
+    if (fresh) currentRole.value = fresh
   }
 }
 

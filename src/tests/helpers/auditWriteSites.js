@@ -9,7 +9,7 @@
  * 「两个实现都同意」的那部分。实测过的两种分叉：
  *   1) 反向闸原先用**裸正则**全文扫 `action: '...'`，于是
  *      `AuditLog.countDocuments({ action: 'login_failed' })`（controllers/securityController/overview.js:41、
- *      securityAlert.js:399）这类**只读**上下文被当成写入点计入 —— 把源码里的
+ *      securityAlert.js:466）这类**只读**上下文被当成写入点计入 —— 把源码里的
  *      'login_failed' 改成未登记的名字，反向闸照样判绿（正向闸 2 例转红）。
  *   2) 正向闸原先只认 `AuditLog.` / `auditBuffer.` 前缀，看不见模型静态方法**自身**
  *      决定的 action（recordLogin 的 `this.create({ action: 三元 })`）。

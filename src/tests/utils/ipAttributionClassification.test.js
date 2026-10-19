@@ -3,7 +3,7 @@
  *
  * 由来（2026-10-01 审计第 3 轮）：权限滥用检测曾把 `req.ip` 直接当**封禁目标**
  * （链路 rbac.js:76 → securityAlert.js 的 checkPermissionAbuse → securityAlertPermissionAbuse.js 的处置侧；
- * 裁定点现为 src/services/securityAlert.js:425 的 `attr?.punishIp`，处置入参见
+ * 裁定点现为 src/services/securityAlert.js:426 的 `attr?.punishIp`，处置入参见
  * src/services/securityAlertPermissionAbuse.js:58）。
  * 实测：`trust proxy=1` + 回环/内网对端时，请求方自带
  * `X-Forwarded-For: 203.0.113.9` 就让 `req.ip === 203.0.113.9`，而本仓读侧判据

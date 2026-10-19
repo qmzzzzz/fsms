@@ -14,6 +14,7 @@ const logger = require('../../utils/logger');
 const { isIPAllowed } = require('../../utils/ipRange');
 const { resolvePunishableIp } = require('../../utils/ipUtils');
 const { checkBruteForce } = require('../securityAlert');
+const canaryWatch = require('../canaryWatch');
 const AuditLog = require('../../models/AuditLog');
 // P0-5 后手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
 const { onAuditWriteFailure } = require('../../utils/auditWriteFailure');
@@ -102,6 +103,20 @@ async function loginUser(params, ctx) {
       onAuditWriteFailure('login_failed_audit', { user: { username } })
     );
     await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
+    // 哨兵用户名（canary）：本条分支是名单名唯一可能触发的位置（幽灵语义在
+    // canaryWatch 内构造性成立）。审计必写、告警按每哨兵每日一次频控；
+    // 函数经 guardDetection 包裹永不 reject，这里仍按防御性口径 catch。
+    await canaryWatch
+      .recordGhostAttempt({
+        username,
+        ip,
+        userAgent,
+        fingerprint,
+        method: ctx.method,
+        path: ctx.path,
+        attribution: resolvePunishableIp(ctx.req),
+      })
+      .catch(() => {});
     return { outcome: 'INVALID_CREDENTIALS' };
   }
 
@@ -281,7 +296,7 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
     await AuditLog.recordLogin(user._id, username, ip, false, userAgent, { fingerprint }).catch(
       onAuditWriteFailure('login_failed_audit', { user: { username } })
     );
-    // B-L1：与上方 212/228 行同口径——checkBruteForce 内的 DB 查询/告警落库
+    // B-L1：与上方 227/243 行同口径——checkBruteForce 内的 DB 查询/告警落库
     // 若因 DB 瞬断 reject，异常上抛会把统一 401 变成 500（破坏 M-5 防枚举口径）
     await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
     // 原子递增失败计数（$inc）：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，

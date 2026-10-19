@@ -7,7 +7,7 @@
  *   DAY_PARTS_FMT 是 en-CA + hourCycle:'h23' 的复用 formatter；
  *   businessHour 用 toLocaleString('en-GB', {hour12:false, hour:'numeric'}) 再 parseInt。
  * 最后一处的 parseInt **解析的是本地化字符串**，正是本模块 businessDateParts 注释里点名
- * 要避免的写法（「避免手工解析本地化字符串」）。businessHour 的下游是 securityAlert.js:330
+ * 要避免的写法（「避免手工解析本地化字符串」）。businessHour 的下游是 securityAlert.js:404
  * 的「非常规时间」判定：只要某套 ICU/locale 数据让 en-GB 的输出带上日期前缀
  * （'21/08/2026, 03:00:00'），parseInt 取到的就是「日」（21），3 点被判成 21 点 ⇒
  * 告警静默误报，且全仓不会有任何一处变红。

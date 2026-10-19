@@ -11,6 +11,15 @@
           >
             {{ $t('user.addUser') }}
           </button>
+          <button
+            v-if="hasPerm('user:delete')"
+            type="button"
+            class="glass-btn glass-btn--danger"
+            :disabled="selectedUsers.length === 0"
+            @click="handleBatchDelete"
+          >
+            {{ $t('common.batchDelete') }}
+          </button>
           <button type="button" class="glass-btn glass-btn--default" @click="loadData">
             {{ $t('common.refresh') }}
           </button>
@@ -105,8 +114,25 @@
         :rows="6"
         :cols="['6%', '18%', '11%', '13%', '13%', '14%', '9%', '16%']"
       />
-      <el-table v-else v-loading="loading" :data="tableData" border stripe style="width: 100%">
-        <el-table-column type="index" label="#" width="50" />
+      <el-table
+        v-else
+        v-loading="loading"
+        :data="tableData"
+        border
+        stripe
+        style="width: 100%"
+        @selection-change="handleSelectionChange"
+      >
+        <!-- 选择列只在持有 user:delete 时渲染（没权限勾了也没有可执行的操作）。
+             自己那行不可选：单删对自身隐藏按钮是同一口径，且含自己的批次会被
+             后端整批拒绝（CANNOT_DELETE_SELF）。 -->
+        <el-table-column
+          v-if="hasPerm('user:delete')"
+          type="selection"
+          width="48"
+          :selectable="canSelectRow"
+        />
+        <el-table-column type="index" label="#" width="44" />
         <el-table-column :label="$t('user.userColumn')" min-width="160">
           <template #default="{ row }">
             <div class="user-cell">
@@ -124,17 +150,17 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="realName" :label="$t('user.realName')" width="110" />
-        <el-table-column prop="department" :label="$t('user.department')" width="120" />
+        <el-table-column prop="realName" :label="$t('user.realName')" width="100" />
+        <el-table-column prop="department" :label="$t('user.department')" width="100" />
         <!-- 手机号读的是服务端下发的 phoneMasked（脱敏在 services/userService.js
              的 toMaskedAdminUser 完成）。前端不再打码：maskPhone 不幂等，
              对 `138****5678` 再打一次会得到 `****`；要看明文走编辑框里的「查看完整号码」。 -->
-        <el-table-column prop="phoneMasked" :label="$t('user.phone')" width="130">
+        <el-table-column prop="phoneMasked" :label="$t('user.phone')" width="120">
           <template #default="{ row }">
             {{ row.phoneMasked || '-' }}
           </template>
         </el-table-column>
-        <el-table-column :label="$t('user.roles')" width="150">
+        <el-table-column :label="$t('user.roles')" width="140">
           <template #default="{ row }">
             <el-tag
               v-for="r in (row.roles || []).slice(0, 2)"
@@ -146,7 +172,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="status" :label="$t('common.status')" width="90">
+        <el-table-column prop="status" :label="$t('common.status')" width="80">
           <template #default="{ row }">
             <el-tag :type="statusTagType(row.status)" effect="light">
               {{ statusLabel(row.status) }}
@@ -161,8 +187,10 @@
           </template>
         </el-table-column>
         <!-- 列宽预算：主内容区 1440-220(侧栏)-48(边距)=1172px，
-             全列合计须 ≤1172，否则固定列被推出视口（实测曾溢出 115px） -->
-        <el-table-column :label="$t('common.operation')" width="230" fixed="right">
+             全列合计须 ≤1172，否则固定列被推出视口（实测曾溢出 115px）。
+             新增「锁定/解锁」入口后为容纳第五个行内按钮，操作列 230→300，
+             其余列相应收窄以维持总预算不变 -->
+        <el-table-column :label="$t('common.operation')" width="300" fixed="right">
           <template #default="{ row }">
             <button
               v-if="hasPerm('user:update')"
@@ -187,6 +215,19 @@
               @click="handleResetMfa(row)"
             >
               {{ $t('user.resetMfa') }}
+            </button>
+            <!-- 锁定/解锁只对 active/locked 两态开放：inactive 两个方向都会被服务端拒
+                 （lockInactiveAccount / unlockInactiveAccount），预置成"看得见点不动"
+                 不如直接不渲染；自身行同删除/重置 MFA 一样隐藏（isSelf） -->
+            <button
+              v-if="canToggleLock(row)"
+              type="button"
+              class="glass-btn glass-btn--link"
+              :class="row.status === 'locked' ? 'glass-btn--success' : 'glass-btn--warning'"
+              :disabled="lockBusy === row._id"
+              @click="handleToggleLock(row)"
+            >
+              {{ row.status === 'locked' ? $t('user.unlockUser') : $t('user.lockUser') }}
             </button>
             <button
               v-if="hasPerm('user:delete') && !authStore.isSelf(row._id)"
@@ -491,6 +532,9 @@ const registrationLoading = ref(false)
 
 const tableData = ref([])
 const availableRoles = ref([])
+// 批量删除的勾选集：只覆盖当前页（loadData 重载即清空），由选择列的
+// selection-change 回填；按钮可用性只看它，是否渲染由 user:delete 决定
+const selectedUsers = ref([])
 
 const page = reactive({ current: 1, size: 10, total: 0 })
 
@@ -824,6 +868,37 @@ const handleRole = async (row) => {
   roleDialog.visible = true
 }
 
+// 批量删除：自己那行不可选（与单删对自己隐藏按钮同口径），
+// 含自己/同级/超管的批次后端整批拒绝，各错误码已在 api.js 映射好文案
+const canSelectRow = (row) => !authStore.isSelf(row._id || row.id)
+const handleSelectionChange = (rows) => {
+  selectedUsers.value = rows
+}
+
+const handleBatchDelete = async () => {
+  const ids = selectedUsers.value.map((row) => row._id || row.id)
+  if (ids.length === 0) return
+  try {
+    await ElMessageBox.confirm(
+      t('messages.batchDeleteConfirm', { count: ids.length }),
+      t('messages.confirmTitle'),
+      { type: 'warning' }
+    )
+  } catch (_) {
+    // 取消：不发请求也不提示
+    return
+  }
+  try {
+    const res = await api.users.batchDelete(ids)
+    const deleted = res?.data?.data?.deleted
+    ElMessage.success(t('messages.batchDeleteSuccess', { count: deleted ?? ids.length }))
+    selectedUsers.value = []
+    loadData()
+  } catch (_) {
+    // 失败提示归 api.js 响应拦截器（批量错误码均有 i18n 映射），组件不重复弹
+  }
+}
+
 const handleDelete = async (row) => {
   try {
     await ElMessageBox.confirm(
@@ -854,6 +929,68 @@ const handleResetMfa = async (row) => {
     loadData()
   } catch (_) {
     // 取消确认或失败原因已在拦截器提示
+  }
+}
+
+// 锁定/解锁的行级忙态：重入守卫必须在首个 await 前同步置位（ElMessageBox 弹出
+// 需要一帧，按钮的 :disabled 要等渲染才生效；同一 tick 的第二次点击/长按回车
+// 会自动重复，重复提交会弹出两次确认框）。
+const lockBusy = ref(null)
+
+// 锁定/解锁入口的显隐：权限 + 非自身 + active/locked 两态。
+// inactive 不显示——服务层对 inactive 双向拒绝（lockInactiveAccount /
+// unlockInactiveAccount），渲染出来只会把"后端不让做"伪装成"点了没反应"。
+const canToggleLock = (row) =>
+  hasPerm('user:lock') &&
+  !authStore.isSelf(row._id) &&
+  (row.status === 'active' || row.status === 'locked')
+
+// 锁定/解锁走专用接口（PUT /security/users/:userId/lock）：服务层连带清 lockUntil、
+// 失效权限缓存并写 user_locked 审计；locked 必须发真布尔（字符串 'false' 会被
+// 服务层按 truthy 判成锁定）。锁定方向原因可选（≤500，写 user.remark），
+// 解锁方向无原因。
+const handleToggleLock = async (row) => {
+  if (lockBusy.value === row._id) return
+  const locking = row.status !== 'locked'
+  lockBusy.value = row._id
+  try {
+    let reason = ''
+    if (locking) {
+      const { value } = await ElMessageBox.prompt(
+        `${t('user.lockConfirm')}「${row.username}」`,
+        t('user.lockUser'),
+        {
+          inputType: 'textarea',
+          inputPlaceholder: t('user.lockReasonPlaceholder'),
+          inputValidator: (v) => !v || v.length <= 500 || t('user.lockReasonTooLong'),
+          confirmButtonText: t('common.confirm'),
+          cancelButtonText: t('common.cancel'),
+          type: 'warning',
+        }
+      )
+      reason = (value || '').trim()
+    } else {
+      await ElMessageBox.confirm(
+        `${t('user.unlockConfirm')}「${row.username}」`,
+        t('messages.confirmTitle'),
+        {
+          confirmButtonText: t('common.confirm'),
+          cancelButtonText: t('common.cancel'),
+          type: 'warning',
+        }
+      )
+    }
+    await api.security.lockUser(
+      row._id || row.id,
+      locking ? { locked: true, reason } : { locked: false }
+    )
+    ElMessage.success(t(locking ? 'user.lockSuccess' : 'user.unlockSuccess'))
+    loadData()
+  } catch (_) {
+    // 'cancel'/'close' 是用户主动关闭（不发请求也不提示）；
+    // 真实失败的错误提示归 api.js 响应拦截器，组件不重复弹
+  } finally {
+    lockBusy.value = null
   }
 }
 

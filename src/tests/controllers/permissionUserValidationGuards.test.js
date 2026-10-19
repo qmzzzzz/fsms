@@ -157,7 +157,7 @@ describe('permission/user 控制器零散分支补齐', () => {
     secUserId = String(secUser._id);
 
     // 安全员是 level 5 ⇒ 数据范围为 self，只能管"自己创建"的账户；生产里 self 档管理员
-    // 走 POST /api/users 建号，createdBy 由服务端写入（controllers/userController/create.js:199）。
+    // 走 POST /api/users 建号，createdBy 由服务端写入（controllers/userController/create.js:212）。
     // 不给这层归属，范围闸会先拒，本该被测的层级闸/单例守卫根本走不到。
     await User.findByIdAndUpdate(superUser._id, { $set: { createdBy: secUser._id } });
 

@@ -369,13 +369,15 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
     expect(propertyExportKeys('const v = module.exports["_read"];')).toEqual([]);
   });
 
-  it('钩子总数钉死：只许减不许增（当前 30 个），且成员可点名', () => {
-    expect(hooks.length).toBe(30);
+  it('钩子总数钉死：只许减不许增（当前 32 个），且成员可点名', () => {
+    expect(hooks.length).toBe(32);
     const keys = hooks.map(keyOf);
     for (const must of [
       'services/auditBuffer.js::__resetForTest',
       'services/auditChainMonitor.js::__MIN_ROUND_BUDGET_MS',
+      'services/canaryWatch.js::__resetForTest',
       'utils/metrics.js::_counters',
+      'utils/metricsDetection.js::__resetForTest',
       'services/statsCache.js::_store',
       'utils/loginCipher.js::_resetForTests',
       // 单行导出块（`module.exports = { a, _resetForTests };`）——正则口径会整块漏掉，

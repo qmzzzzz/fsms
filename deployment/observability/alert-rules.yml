@@ -158,6 +158,29 @@ groups:
             再核对 logs/audit-buffer.*.wal 与 *.discarded 归档是否可回灌
             （见 deployment/rollback-drill.md 的审计链核对步骤）。
 
+      # 检测延迟（MTTD）未达标：异常行为从最早一条事件到被检测出来的时间
+      # 超过 1× 生效检测间隔（目标声明见 src/constants/detectionObjectives.js）。
+      # 用 increase(...{within_objective="false"}[6h]) 而不是瞬时值：
+      # 一次未达标就可能意味着有一段审计没人看，不需要等它"持续"才报。
+      # 6h 窗口是为了避免同一历史事件在滚动窗口里长期重复报警。
+      #
+      # 为什么目标不是 2×：检测窗口 = 间隔 + 60s 重叠余量，延迟天然不超过
+      # 窗口宽度；2× 目标对任何 ≥60s 的间隔都恒为绿灯（指标失去判别力）。
+      # 1× 目标下，重叠余量造成的 ≤60s 偏差是**已声明**的漏检带。
+      - alert: AuditDetectionLagOutsideObjective
+        expr: increase(detections_within_objective_total{within_objective="false"}[6h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '审计异常检测延迟未达标（dimension={{ $labels.dimension }}）'
+          description: >-
+            近 6 小时有检测结果的 MTTD 超过 1× 生效检测间隔。处置：核对
+            AUDIT_MONITOR_INTERVAL_MS 是否被调大、单轮是否因 skippedOverlaps
+            持续增长而跟不上节奏（compliance.monitorHealth），以及
+            detection_lag_skipped_total{reason} 是否在提示数据缺失。
+            指标口径见 src/constants/detectionObjectives.js。
+
   # 运行时健康（2026-09-28 补）：原有 7 条规则全部只覆盖"业务指标异常"，
   # 而"服务已经不能干活""磁盘写满""日志送不出去"这三类故障在监控侧零信号。
   #

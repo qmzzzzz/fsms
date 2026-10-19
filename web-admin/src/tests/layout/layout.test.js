@@ -35,7 +35,9 @@ import {
   Moon,
   Operation,
   Refresh,
+  Search,
   Sunny,
+  Warning,
 } from '@element-plus/icons-vue'
 import { mountComponent, click, flush, settleRouter } from '../helpers/componentHarness'
 import { useAppStore, useAuthStore } from '@/store'
@@ -46,11 +48,15 @@ import i18n from '@/i18n'
 // 不是 axios 行为本身。
 const logoutApi = vi.fn()
 const getMeApi = vi.fn()
+const reportApi = vi.fn()
 vi.mock('@/utils/api', () => ({
   api: {
     auth: {
       logout: (...args) => logoutApi(...args),
       getMe: (...args) => getMeApi(...args),
+    },
+    security: {
+      report: (...args) => reportApi(...args),
     },
   },
   isCanceledError: () => false,
@@ -950,14 +956,16 @@ describe('布局 · 顶栏入口悬停提示', () => {
 })
 
 describe('布局 · 全屏入口与刷新', () => {
-  test('环境无全屏 API：不渲染全屏入口，仅保留搜索与刷新（提示文案为「刷新」）', async () => {
+  test('环境无全屏 API：无全屏入口；独立图标为举报/搜索/刷新三个，顺序固定', async () => {
     const c = mountLayout()
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    expect(icons).toHaveLength(2)
-    expect(renderedIconPath(icons[1])).toBe(iconPath(Refresh))
-    const popper = await openByHover(icons[1], '刷新提示')
+    expect(icons).toHaveLength(3)
+    expect(renderedIconPath(icons[0])).toBe(iconPath(Warning))
+    expect(renderedIconPath(icons[1])).toBe(iconPath(Search))
+    expect(renderedIconPath(icons[2])).toBe(iconPath(Refresh))
+    const popper = await openByHover(icons[2], '刷新提示')
     expect(popper.textContent.trim()).toBe(label('common.refresh'))
   })
 
@@ -976,10 +984,10 @@ describe('布局 · 全屏入口与刷新', () => {
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    expect(icons).toHaveLength(3)
-    expect(renderedIconPath(icons[2])).toBe(iconPath(FullScreen))
+    expect(icons).toHaveLength(4)
+    expect(renderedIconPath(icons[3])).toBe(iconPath(FullScreen))
 
-    click(icons[2])
+    click(icons[3])
     expect(enterCalls).toEqual(['enter'])
     expect(exitCalls).toEqual([])
 
@@ -987,7 +995,7 @@ describe('布局 · 全屏入口与刷新', () => {
       value: document.body,
       configurable: true,
     })
-    click(icons[2])
+    click(icons[3])
     expect(exitCalls).toEqual(['exit'])
   })
 
@@ -1001,8 +1009,8 @@ describe('布局 · 全屏入口与刷新', () => {
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    expect(icons).toHaveLength(3)
-    click(icons[2])
+    expect(icons).toHaveLength(4)
+    click(icons[3])
     expect(calls).toEqual(['webkit-enter'])
     expect(c.errors).toEqual([])
   })
@@ -1018,13 +1026,13 @@ describe('布局 · 全屏入口与刷新', () => {
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    click(icons[2])
+    click(icons[3])
     await new Promise((resolve) => setTimeout(resolve, 60))
     Object.defineProperty(document, 'fullscreenElement', {
       value: document.body,
       configurable: true,
     })
-    click(icons[2])
+    click(icons[3])
     await new Promise((resolve) => setTimeout(resolve, 60))
     process.off('unhandledRejection', onUnhandled)
     expect(unhandled).toEqual([])
@@ -1046,15 +1054,15 @@ describe('布局 · 全屏入口与刷新', () => {
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    expect(icons).toHaveLength(3)
-    click(icons[2])
+    expect(icons).toHaveLength(4)
+    click(icons[3])
     expect(calls).toEqual(['moz-enter'])
 
     Object.defineProperty(document, 'mozFullScreenElement', {
       value: document.body,
       configurable: true,
     })
-    click(icons[2])
+    click(icons[3])
     expect(calls).toEqual(['moz-enter', 'moz-exit'])
     expect(c.errors).toEqual([])
   })
@@ -1073,15 +1081,15 @@ describe('布局 · 全屏入口与刷新', () => {
     await settleRouter(c.router)
     await flush(10)
     const icons = standaloneIcons(c)
-    expect(icons).toHaveLength(3)
-    click(icons[2])
+    expect(icons).toHaveLength(4)
+    click(icons[3])
     expect(calls).toEqual(['ms-enter'])
 
     Object.defineProperty(document, 'msFullscreenElement', {
       value: document.body,
       configurable: true,
     })
-    click(icons[2])
+    click(icons[3])
     expect(calls).toEqual(['ms-enter', 'ms-exit'])
     expect(c.errors).toEqual([])
   })
@@ -1092,8 +1100,26 @@ describe('布局 · 全屏入口与刷新', () => {
     const c = mountLayout()
     await settleRouter(c.router)
     await flush(10)
-    click(standaloneIcons(c)[1])
+    click(standaloneIcons(c)[2])
     expect(reload).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('布局 · 举报异常入口', () => {
+  test('举报图标：悬停出提示（文案为「举报异常」），点击打开举报对话框', async () => {
+    const c = mountLayout()
+    await settleRouter(c.router)
+    await flush(10)
+    const icon = iconByPath(c, Warning)
+    expect(icon, '举报入口应渲染在顶栏').toBeTruthy()
+    const popper = await openByHover(icon, '举报提示浮层')
+    expect(popper.textContent.trim()).toBe(label('security.report'))
+    click(icon)
+    await pollUntil(() => !!document.body.querySelector('.el-dialog'), '举报对话框打开')
+    expect(document.body.querySelector('.el-dialog__title').textContent.trim()).toBe(
+      label('security.report')
+    )
+    expect(c.errors).toEqual([])
   })
 })
 

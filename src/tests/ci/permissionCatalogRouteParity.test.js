@@ -29,7 +29,7 @@
  *   1. `checkPermission('a')` 与 `checkPermission(['a','b'])` 两种形态都要收——数组形态是
  *      "或"语义（middleware/rbac.js:64 `permissions.some`），漏收会把 `permission:tree`
  *      误判成未接线；
- *   2. 注释必须剥掉——`services/initData.js:172` 的历史注释里就写着一条
+ *   2. 注释必须剥掉——`services/initData/permissionsSystem.js:163` 的历史注释里就写着一条
  *      `checkPermission('permission:create|update|delete')`，不剥注释会把这条**根本不存在**的
  *      码算成强制点（实测：不剥时 [未入库] 由 0 变 1，且 rbac 并不按 `|` 切分）；
  *   3. 目录里的 `*:*` 与 `module:*` 是**授予侧通配**，永远不会出现在强制点里，

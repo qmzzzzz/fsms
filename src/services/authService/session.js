@@ -12,6 +12,7 @@ const Role = require('../../models/Role');
 const logger = require('../../utils/logger');
 const { validatePasswordStrength } = require('../../utils/helpers');
 const { checkUnusualTime } = require('../securityAlert');
+const canaryWatch = require('../canaryWatch');
 const AuditLog = require('../../models/AuditLog');
 // P0-5 后手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
 const { onAuditWriteFailure } = require('../../utils/auditWriteFailure');
@@ -48,6 +49,16 @@ async function registerUser(body, ctx = {}) {
   }
 
   const { username, email, realName, phone, department } = body;
+
+  // 哨兵用户名（canary）闸：系统保留名不经注册进入用户集合——幽灵名的价值
+  // 完全建立在"不可能是真账号"上，注册通过即把哨兵变成普通用户（启动期
+  // 遮蔽对账会把这种状态告警，但不该先把库写脏）。对外与重名同口径
+  // （模糊拒绝防枚举，且不新增 outcome，credentials 层 switch 不动）；
+  // 探测方的尝试会在登录路径被 canaryWatch 记录与告警。
+  if (canaryWatch.matchCanaryName(username)) {
+    logger.warn('注册被拒 - 用户名为安全哨兵保留名', { username });
+    return { outcome: 'DUPLICATE' };
+  }
 
   // ===== 口令密文轨（与明文轨双轨并存，LOGIN_ENCRYPT_STRICT=true 后明文轨由校验层关闭）=====
   let password;

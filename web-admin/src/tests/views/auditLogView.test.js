@@ -22,6 +22,7 @@ vi.mock('@/utils/api', () => ({
   // api.security 封装与 apiClient 共用同一个 get 漏斗，URL/参数断言沿用既有写法
   api: {
     security: {
+      getAlerts: () => get('/security/alerts'),
       verifyAuditChain: (params) => get('/security/audit-logs/verify', { params }),
       exportAuditLogs: (params) =>
         get('/security/audit-logs/export', { params, responseType: 'blob' }),
@@ -110,6 +111,13 @@ const openList = async (list, meta, perms = PERMS) => {
     if (url === '/security/overview') {
       return Promise.resolve({
         data: { data: { criticalAlerts: 2, highAlerts: 3, failedLogins: 4 } },
+      })
+    }
+    // 告警面板默认空数组：面板渲染成空态、展开按钮不出现，
+    // 既有用例的 DOM 断言（选择器均不与 .alerts-card 相交）不受影响
+    if (url === '/security/alerts') {
+      return Promise.resolve({
+        data: { data: { data: [], meta: { total: 0, limit: 50, hasMore: false } } },
       })
     }
     return Promise.reject(new Error('unexpected url: ' + url))
@@ -934,6 +942,134 @@ describe('AuditLogView 详情对话框', () => {
     const labels = descPairs().map((p) => p.split('::')[0])
     expect(labels).toContain('IP Address')
     expect(labels).not.toContain('IP 地址')
+    expect(c.errors).toEqual([])
+  })
+})
+
+describe('AuditLogView 最近安全告警面板', () => {
+  const alertItem = (over = {}) => ({
+    _id: 'a1',
+    timestamp: '2026-10-02T02:00:00.000Z',
+    action: 'auth_login',
+    category: 'security',
+    riskLevel: 'high',
+    username: 'bob',
+    ip: '10.0.0.8',
+    success: true,
+    ...over,
+  })
+
+  /** 挂载并等待告警面板出现（列表/统计给最小成功响应，互不干扰本组断言） */
+  const openAlerts = async (alertsList, meta) => {
+    get.mockImplementation((url) => {
+      if (url === '/security/alerts') {
+        return Promise.resolve({
+          data: { data: { data: alertsList, meta: meta || { total: alertsList.length } } },
+        })
+      }
+      if (url === '/security/audit-logs') {
+        return Promise.resolve({ data: { data: { data: [], meta: { total: 0 } } } })
+      }
+      if (url === '/security/overview') {
+        return Promise.resolve({ data: { data: {} } })
+      }
+      return Promise.reject(new Error('unexpected url: ' + url))
+    })
+    const c = mountView()
+    await waitFor(() => c.find('.alerts-card'), { message: '告警面板渲染' })
+    await flush(4)
+    return c
+  }
+
+  test('默认只显示 5 条；「展开全部」显示全部，「收起」回 5 条（aria-expanded 同步）', async () => {
+    const list = Array.from({ length: 8 }, (_, i) =>
+      alertItem({ _id: `a${i}`, username: `user${i}` })
+    )
+    const c = await openAlerts(list, { total: 8, limit: 50 })
+    expect(c.findAll('.alert-row')).toHaveLength(5)
+    const btn = c.find('.alerts-card__actions .glass-btn')
+    expect(btn.textContent.trim()).toBe('展开全部')
+    expect(btn.getAttribute('aria-expanded')).toBe('false')
+    click(btn)
+    await flush(4)
+    expect(c.findAll('.alert-row')).toHaveLength(8)
+    expect(btn.textContent.trim()).toBe('收起')
+    expect(btn.getAttribute('aria-expanded')).toBe('true')
+    click(btn)
+    await flush(4)
+    expect(c.findAll('.alert-row')).toHaveLength(5)
+    expect(c.errors).toEqual([])
+  })
+
+  test('5 条及以内不渲染展开按钮（不出现无实际作用的控件）', async () => {
+    const c = await openAlerts(Array.from({ length: 5 }, (_, i) => alertItem({ _id: `a${i}` })))
+    expect(c.findAll('.alert-row')).toHaveLength(5)
+    expect(c.find('.alerts-card__actions .glass-btn')).toBeNull()
+  })
+
+  test('空数组：面板保留并渲染空态提示（与接口失败时的「面板不出现」互为对照）', async () => {
+    const c = await openAlerts([])
+    expect(c.find('.alerts-card')).toBeTruthy()
+    expect(c.find('.alerts-card__empty').textContent.trim()).toBe('暂无安全告警')
+    expect(c.findAll('.alert-row')).toEqual([])
+    expect(c.errors).toEqual([])
+  })
+
+  test('接口失败：面板不出现、不弹 toast，列表与统计照常（失败静默）', async () => {
+    get.mockImplementation((url) => {
+      if (url === '/security/alerts') return Promise.reject(new Error('down'))
+      if (url === '/security/audit-logs') {
+        return Promise.resolve({
+          data: { data: { data: [logRow()], meta: { total: 1 } } },
+        })
+      }
+      if (url === '/security/overview') {
+        return Promise.resolve({
+          data: { data: { criticalAlerts: 2, highAlerts: 3, failedLogins: 4 } },
+        })
+      }
+      return Promise.reject(new Error('unexpected url: ' + url))
+    })
+    const c = mountView()
+    await waitFor(() => trs(c).length === 1, { message: '列表渲染' })
+    await flush(8)
+    expect(c.find('.alerts-card')).toBeNull()
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(ElMessage.warning).not.toHaveBeenCalled()
+    expect(c.findAll('.stat-value').map((e) => e.textContent.trim())).toEqual(['2', '3', '4', '1'])
+    expect(c.errors).toEqual([])
+  })
+
+  test('meta：更新时间为本地时区定长串；hasMore 时提示仅显示最近 limit 条', async () => {
+    const iso = '2026-10-02T02:00:00.000Z'
+    const c = await openAlerts([alertItem({ timestamp: iso })], {
+      total: 50,
+      limit: 50,
+      hasMore: true,
+      lastUpdated: iso,
+    })
+    const metas = c
+      .findAll('.alerts-card__meta')
+      .map((e) => e.textContent.replace(/\s+/g, ' ').trim())
+    expect(metas).toEqual([`更新于 ${localStamp(iso)}`, '仅显示最近 50 条'])
+  })
+
+  test('行内容：风险标签/动作/用户+IP/本地时间正确；点「详情」复用审计详情对话框', async () => {
+    const iso = '2026-10-02T02:00:00.000Z'
+    const c = await openAlerts([alertItem({ timestamp: iso, riskLevel: 'high' })])
+    const row = c.find('.alert-row')
+    expect(row.querySelector('.alert-row__risk').textContent.trim()).toBe('高')
+    expect(row.querySelector('.alert-row__action').textContent.trim()).toBe('用户登录')
+    expect(row.querySelector('.alert-row__user').textContent.replace(/\s+/g, ' ').trim()).toBe(
+      'bob · 10.0.0.8'
+    )
+    expect(row.querySelector('.alert-row__time').textContent.trim()).toBe(localStamp(iso))
+    click(row.querySelector('.alert-row__detail'))
+    await waitFor(() => document.body.querySelector('.el-dialog'), { message: '详情对话框打开' })
+    await flush(8)
+    const pairs = descPairs()
+    expect(pairs).toContain('操作用户::bob')
+    expect(pairs).toContain('风险等级::高')
     expect(c.errors).toEqual([])
   })
 })

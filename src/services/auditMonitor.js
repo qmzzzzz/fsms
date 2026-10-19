@@ -23,6 +23,8 @@ const securityAlert = require('./securityAlert');
 const logger = require('../utils/logger');
 const { businessDateParts } = require('../constants/timezone');
 const { readPositiveNumberEnv } = require('../utils/envNumber');
+// MTTD 记账抽成独立模块：runDetection 已接近 max-lines-per-function 棘轮上限
+const { recordDetectionLag } = require('./auditMonitorDetection');
 
 // 检测间隔（毫秒），默认 5 分钟，可通过 AUDIT_MONITOR_INTERVAL_MS 配置
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
@@ -92,7 +94,7 @@ function roundBudgetMs() {
  * 维度 → 最近一次推送所在的业务日期（如 '2026-09-24'）。
  *
  * 存在的理由：shouldSendAlert 的抑制窗口是 THRESHOLDS.alertRateLimitMs
- * （securityAlert.js:27 硬编码 5 分钟），而本模块的检测间隔默认也是 5 分钟、
+ * （securityAlert.js:33 硬编码 5 分钟），而本模块的检测间隔默认也是 5 分钟、
  * 且可经 AUDIT_MONITOR_INTERVAL_MS 配成 30s~任意值。于是"同一维度当天只推送一次"
  * 这条写在键名里的约定，实际建立在 **TTL(5min) 与 interval 的竞态** 上：
  * interval ≥ TTL 时（默认值恰好相等，实测 6 分钟即跨过）频控表项在下一轮开始前
@@ -149,6 +151,12 @@ async function runDetection() {
     // 的 reject 同样落进 catch，闭环断在推送侧也要可见）
     health.consecutiveFailures = 0;
 
+    // detectedAt 必须在 await 之后立刻取：它包含本轮聚合耗时，是真实的检测完成时刻。
+    // 所有命中维度都记账（不受下面"当日只推送一次"频控影响）——频控是通知策略，
+    // 不是"检测是否发生"的判据。
+    const detectedAt = Date.now();
+    const detection = recordDetectionLag(result, detectedAt, effectiveIntervalMs);
+
     const failedCount = result.failedOperations.length;
     // 兼容旧签名：调用方（含测试替身）可能只给两个维度
     const failedIpCount = (result.failedOperationsByIp || []).length;
@@ -203,6 +211,9 @@ async function runDetection() {
         failedOperations: result.failedOperations,
         failedOperationsByIp: result.failedOperationsByIp || [],
         unusualTimeOperations: result.unusualTimeOperations,
+        // 逐维度 MTTD 明细：目标值、实测延迟、是否达标。延迟不可得时为 null，
+        // 不伪造 0（0 会被下游读成"零延迟"）。
+        detection,
       });
     }
   } catch (err) {

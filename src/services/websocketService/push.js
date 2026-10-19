@@ -27,7 +27,7 @@ const {
  * socket.io 4.8.3 的派发路径（`node_modules/socket.io/dist/socket.js:697`
  * 的 `super.emitUntyped.apply(this, event)`）**丢弃监听器的返回值**：
  * `socket.on('x', async …)` 里 reject 掉的 promise 不会经它的手，
- * 直接成为 unhandledRejection；而本仓在 `src/index.js:460-478` 的口径是
+ * 直接成为 unhandledRejection；而本仓在 `src/index.js:466-484` 的口径是
  * 「任何未处理拒绝 ⇒ flush 审计后 `process.exit(1)`」。
  * 合起来就是：一条长连接上的一次 promise 拒绝 = 整个进程下线。
  * 同文件握手路径写的 `authenticateSocket(...).catch(() => {})`（:353）已经承认

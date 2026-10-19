@@ -431,7 +431,7 @@ describe('层 1 · 真 API 返回值形状（跑时从 node_modules 类型声明
    * 为什么单独成一条（而不是靠层 2 顺带发现）：层 2 是 `if (entry.hold)` —— hold 为 null
    * 时它整条不跑，于是"登记了形状、没登记持有点"的条目**永远绿**，而它的存在恰恰让
    * "把 await 退回裸调用"这一类改动失去检测（第 16 轮 F 线实测：mongoose/Connection.close
-   * 就是这么一条，生产 `index.js:227` 明明有 await 持有点）。
+   * 就是这么一条，生产 `index.js:230` 明明有 await 持有点）。
    * 只有 promise 型需要持有点：同步 API 的返回值不产生拒绝路径，形状判据与它无关。
    */
   test('每条 promise 型登记都必须指名一个生产持有点（hold:null 只允许同步型）', () => {
