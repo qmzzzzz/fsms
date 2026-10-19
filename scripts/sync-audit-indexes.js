@@ -96,33 +96,9 @@ function diffIndexes(declared, list) {
 const verdictLine = ({ redundant, missing, needsAction }) =>
   `冗余 ${redundant.length} / 缺失 ${missing.length} / 选项不一致 ${needsAction.length}`;
 
-const main = async () => {
-  const uri = process.env.MONGODB_URI;
-  if (!uri) {
-    console.error('未配置 MONGODB_URI，退出');
-    process.exit(1);
-  }
-
-  // 未设置白名单即拒绝（fail-closed）：索引删除不可逆，必须先显式声明目标库。
-  if (
-    !assertApplyAllowed({
-      scriptName: 'sync-audit-indexes.js',
-      dbName: dbNameFromUri(uri),
-      host: hostFromUri(uri),
-      apply: APPLY,
-    })
-  ) {
-    process.exit(2);
-  }
-
-  await mongoose.connect(uri);
-  console.log(`已连接：${mongoose.connection.host}:${mongoose.connection.port}\n`);
-
-  const AuditLog = require('../src/models/AuditLog');
-  const coll = AuditLog.collection;
-
-  // 模型声明的索引（不含 _id），附完整签名（key + 关键选项）
-  const declared = AuditLog.schema.indexes().map(([key, options]) => {
+/** 模型声明的索引（不含 _id），附完整签名（key + 关键选项） */
+function declaredIndexesOf(AuditLog) {
+  return AuditLog.schema.indexes().map(([key, options]) => {
     const opts = options || {};
     return {
       signature: keySignature(key),
@@ -131,9 +107,10 @@ const main = async () => {
       options: opts,
     };
   });
+}
 
-  const existing = await coll.indexes();
-
+/** 打印「模型声明」与「数据库实际」两份索引清单 */
+function printInventory(declared, existing) {
   console.log('=== 模型声明的索引 ===');
   declared.forEach((d) =>
     console.log(
@@ -147,10 +124,10 @@ const main = async () => {
       `  ${e.name.padEnd(34)} ${keySignature(e.key)}${e.expireAfterSeconds !== undefined ? `  TTL=${e.expireAfterSeconds}s` : ''}`
     )
   );
+}
 
-  // 以 key 签名做「有无」判断，以完整签名（key + TTL/稀疏/部分过滤/唯一）做「一致」判断
-  const { redundant, missing, needsAction } = diffIndexes(declared, existing);
-
+/** 打印差异分析三段（将被删除 / 将被创建 / 需人工处理） */
+function printDiff({ redundant, missing, needsAction }) {
   console.log('\n=== 差异分析 ===');
   console.log(`冗余索引（将被删除）：${redundant.length} 个`);
   redundant.forEach((r) => console.log(`  - ${r.name.padEnd(34)} ${keySignature(r.key)}`));
@@ -162,17 +139,21 @@ const main = async () => {
       `  ! ${e.name.padEnd(34)} 数据库=${e.fullSig}\n${' '.repeat(38)}模型  =${d.fullSig}`
     )
   );
+}
 
-  if (!APPLY) {
-    console.log(`\n当前差异：${verdictLine({ redundant, missing, needsAction })}`);
-    console.log('[演练模式] 未做任何修改。确认无误后追加 --apply 执行。');
-    if (needsAction.length > 0) {
-      console.log('[注意] 存在选项不一致的索引，--apply 不会自动处理，需按上方差异人工介入。');
-    }
-    await mongoose.disconnect();
-    return;
+/** 演练模式（默认，无 --apply）：只报告差异，恒 exit 0 */
+async function runDrill(diff) {
+  console.log(`\n当前差异：${verdictLine(diff)}`);
+  console.log('[演练模式] 未做任何修改。确认无误后追加 --apply 执行。');
+  if (diff.needsAction.length > 0) {
+    console.log('[注意] 存在选项不一致的索引，--apply 不会自动处理，需按上方差异人工介入。');
   }
+  await mongoose.disconnect();
+}
 
+/** --apply：执行创建/删除，并用**同一套判据**复核残余差异后决定退出码 */
+async function applySync(coll, declared, diff, existingCount) {
+  const { redundant, missing, needsAction } = diff;
   console.log('\n=== 执行同步 ===');
 
   let failedCount = 0;
@@ -205,7 +186,7 @@ const main = async () => {
   }
 
   const after = await coll.indexes();
-  console.log(`\n=== 同步后复核：索引数 ${existing.length} → ${after.length} ===`);
+  console.log(`\n=== 同步后复核：索引数 ${existingCount} → ${after.length} ===`);
   after.forEach((e) =>
     console.log(
       `  ${e.name.padEnd(34)} ${keySignature(e.key)}${e.expireAfterSeconds !== undefined ? `  TTL=${e.expireAfterSeconds}s` : ''}`
@@ -236,6 +217,53 @@ const main = async () => {
     process.exit(1);
   }
   console.log('\n✅ 已完全对齐：冗余 / 缺失 / 选项不一致 均为 0。');
+}
+
+/**
+ * 编排入口：护栏 → 连库 → 取两份清单 → 差分 → 演练或执行。
+ * 报告与执行细节都在上面各段里，本函数原先把这些平铺在一起，
+ * 体量越过 `max-lines-per-function` 的 100 行阈值（棘轮基线锁死不增）。
+ */
+const main = async () => {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    console.error('未配置 MONGODB_URI，退出');
+    process.exit(1);
+  }
+
+  // 未设置白名单即拒绝（fail-closed）：索引删除不可逆，必须先显式声明目标库。
+  if (
+    !assertApplyAllowed({
+      scriptName: 'sync-audit-indexes.js',
+      dbName: dbNameFromUri(uri),
+      host: hostFromUri(uri),
+      apply: APPLY,
+    })
+  ) {
+    process.exit(2);
+  }
+
+  await mongoose.connect(uri);
+  console.log(`已连接：${mongoose.connection.host}:${mongoose.connection.port}\n`);
+
+  const AuditLog = require('../src/models/AuditLog');
+  const coll = AuditLog.collection;
+
+  const declared = declaredIndexesOf(AuditLog);
+  const existing = await coll.indexes();
+
+  printInventory(declared, existing);
+
+  // 以 key 签名做「有无」判断，以完整签名（key + TTL/稀疏/部分过滤/唯一）做「一致」判断
+  const diff = diffIndexes(declared, existing);
+  printDiff(diff);
+
+  if (!APPLY) {
+    await runDrill(diff);
+    return;
+  }
+
+  await applySync(coll, declared, diff, existing.length);
 };
 
 /**

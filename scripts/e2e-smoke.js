@@ -144,11 +144,8 @@ async function waitForServer(timeoutMs) {
   throw new Error(`服务器 ${Math.round(timeoutMs / 1000)} 秒内未就绪`);
 }
 
-async function main() {
-  // ===== 1. 环境设置（必须先于 require index.js）=====
-  const { MongoMemoryServer } = require('mongodb-memory-server');
-  console.log('[E2E] 启动临时 MongoDB（内存）…');
-  const mongoMem = await MongoMemoryServer.create();
+/** 1. 环境设置（必须先于 require index.js） */
+function setupSmokeEnv(mongoMem) {
   process.env.NODE_ENV = 'development';
   process.env.PORT = String(PORT);
   process.env.MONGODB_URI = mongoMem.getUri('fire_safety_e2e');
@@ -162,17 +159,10 @@ async function main() {
   process.env.ENABLE_API_DOCS = 'false';
   process.env.AUDIT_WAL_PATH = path.join(__dirname, '..', 'logs', 'e2e-audit.wal');
   process.env.LOG_LEVEL = 'error';
+}
 
-  // ===== 2. 进程内启动完整服务器 =====
-  console.log('[E2E] 启动服务器（进程内，端口 ' + PORT + '）…');
-  require('../src/index.js');
-
-  console.log('[E2E] 等待就绪…');
-  await waitForServer(30000);
-
-  let token = null;
-
-  // ===== 3. 基础探针 =====
+/** 3. 基础探针：存活 / 就绪 / Prometheus 文本 */
+async function runProbeSteps() {
   await step('GET /health 存活探针', async () => {
     const r = await req('GET', '/health');
     if (r.status !== 200 || r.body.status !== 'ok') throw new Error('status=' + r.status);
@@ -188,8 +178,10 @@ async function main() {
     if (r.status !== 200 || !r.text.includes('http_requests_total'))
       throw new Error('status=' + r.status);
   });
+}
 
-  // ===== 4. 认证闭环 =====
+/** 4. 认证闭环：登录并把令牌交给后续相（ctx.token） */
+async function runAuthSteps(ctx) {
   await step('GET /api/auth/login-public-key 下发公钥', async () => {
     const r = await req('GET', '/api/auth/login-public-key');
     if (r.status !== 200 || !r.body.data.publicKey.includes('PUBLIC KEY'))
@@ -202,30 +194,33 @@ async function main() {
     });
     if (r.status !== 200 || !r.body.data.token)
       throw new Error('status=' + r.status + ' ' + JSON.stringify(r.body).slice(0, 120));
-    token = r.body.data.token;
+    ctx.token = r.body.data.token;
   });
 
   await step('GET /api/auth/me 会话有效', async () => {
-    const r = await req('GET', '/api/auth/me', { token });
+    const r = await req('GET', '/api/auth/me', { token: ctx.token });
     // getMe 返回 { user: {...}, permissions, menus } 嵌套形状
     if (r.status !== 200 || r.body.data.user.username !== 'admin')
       throw new Error('status=' + r.status);
   });
 
   await step('GET /api/auth/sessions 设备级会话列表', async () => {
-    const r = await req('GET', '/api/auth/sessions', { token });
+    const r = await req('GET', '/api/auth/sessions', { token: ctx.token });
     if (r.status !== 200) throw new Error('status=' + r.status);
   });
 
   await step('GET /api/metrics 面板 JSON（超管权限）', async () => {
-    const r = await req('GET', '/api/metrics', { token });
+    const r = await req('GET', '/api/metrics', { token: ctx.token });
     if (r.status !== 200) throw new Error('status=' + r.status);
     const snap = r.body.data;
     if (!snap.summary || !Array.isArray(snap.routes)) throw new Error('snapshot 结构异常');
     if (snap.summary.totalRequests < 1) throw new Error('请求计数未累积');
   });
+}
 
-  // ===== 5. 业务闭环 =====
+/** 5. 业务闭环：设备增改查删 + 登出吊销（旧令牌必须失效） */
+async function runBusinessSteps(ctx) {
+  const token = ctx.token;
   let deviceId = null;
   await step('POST /api/devices 创建设备', async () => {
     const r = await req('POST', '/api/devices', {
@@ -271,13 +266,41 @@ async function main() {
     const r = await req('GET', '/api/auth/me', { token });
     if (r.status !== 401) throw new Error('status=' + r.status + '（令牌未被吊销！）');
   });
+}
 
+/** 6. 收口：门禁自证 + 结果与退出码 */
+function reportResult() {
   selfCheckRequiredSteps('E2E');
   console.log('[E2E] 结果：' + passed + ' 通过, ' + failed + ' 失败');
   if (failed > 0) {
     console.error('[E2E] 失败步骤：' + failures.join(' / '));
     process.exitCode = 1;
   }
+}
+
+/**
+ * 编排入口：只负责按固定顺序搭环境、起服务、跑三段相。
+ * 步骤细节全部下沉到上面各 run* —— 本函数原先把这些平铺在一起，
+ * 体量越过 `max-lines-per-function` 的 100 行阈值（棘轮基线锁死不增）。
+ */
+async function main() {
+  const { MongoMemoryServer } = require('mongodb-memory-server');
+  console.log('[E2E] 启动临时 MongoDB（内存）…');
+  const mongoMem = await MongoMemoryServer.create();
+  setupSmokeEnv(mongoMem);
+
+  // ===== 2. 进程内启动完整服务器 =====
+  console.log('[E2E] 启动服务器（进程内，端口 ' + PORT + '）…');
+  require('../src/index.js');
+
+  console.log('[E2E] 等待就绪…');
+  await waitForServer(30000);
+
+  const ctx = { token: null };
+  await runProbeSteps();
+  await runAuthSteps(ctx);
+  await runBusinessSteps(ctx);
+  reportResult();
 }
 
 main()

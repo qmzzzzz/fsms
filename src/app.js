@@ -153,33 +153,36 @@ function applyTrustedProxyPolicy(app, trustProxyHops) {
 }
 
 /**
- * 创建并配置 Express 应用
- * @returns {express.Application}
+ * trust proxy 配置 + 告警 + 可信代理策略注入
+ *
+ * 抽出原因同 applyTrustedProxyPolicy：判据旁那三段长告警文案会把 createApp 顶过
+ * `max-lines-per-function` 的 100 行阈值，而它本身只是一次性的启动期配置。
+ *
+ * trust proxy（M-4 收紧默认值）：
+ * - 显式配置 TRUST_PROXY_HOPS > 0 时按其跳数信任（生产 Nginx / 开发 Vite 均为 1 跳）
+ * - 未配置时：development 默认信任 1 跳（本机 Vite 代理，仅限开发）
+ * - 其余环境（含 production）一律不信任代理头 —— 服务直连暴露时客户端可伪造
+ *   X-Forwarded-For 击穿 IP 限流/黑名单/自动封禁，必须显式声明代理拓扑后才启用
+ *
+ * 非法值（如 TRUST_PROXY_HOPS=abc）此前静默退化为「不信任代理」：反代场景下
+ * req.ip 恒为代理 IP，全站共享一个限流桶、审计 IP 全失真，且无任何线索。
+ * 生产环境已由 config/validate.js 升级为启动致命错误；此处对所有环境补运行时告警，
+ * 保证 staging/dev 的错配同样可被发现。
+ * 过大值（复审补漏）：生产环境已由 config/validate.js 的 MAX_TRUST_PROXY_HOPS=5
+ * 拦下，但该校验在 validateConfig() 开头即对非 production 早退——staging/dev
+ * 设成 999999 会被原样交给 Express。实测后果：hops 足够大时 Express 会信任
+ * XFF 链中更靠前的元素，客户端自行伪造 X-Forwarded-For 即可完全控制 req.ip
+ * （本地复现：设 999999 后请求 /probe，req.ip 直接取 XFF 首段），
+ * 等于击穿 IP 限流、IP 黑名单与审计 IP 溯源。此处对所有环境统一夹取上限。
+ *
+ * 判据本体（非法值告警条件、上限夹取、非生产缺省）已从原 createApp 函数体提升到
+ * config/validate.js 的 resolveTrustProxyHops，由本处与 WS 握手侧共用。
+ * 此前两侧各写一份且只有本处带夹取，WS 侧因此可被伪造 XFF 绕过 allowedIPs
+ * （用例 src/tests/services/websocketTrustProxyHopsParity.test.js）。
+ *
+ * @param {import('express').Express} app
  */
-function createApp() {
-  const app = express();
-
-  // trust proxy（M-4 收紧默认值）：
-  // - 显式配置 TRUST_PROXY_HOPS > 0 时按其跳数信任（生产 Nginx / 开发 Vite 均为 1 跳）
-  // - 未配置时：development 默认信任 1 跳（本机 Vite 代理，仅限开发）
-  // - 其余环境（含 production）一律不信任代理头 —— 服务直连暴露时客户端可伪造
-  //   X-Forwarded-For 击穿 IP 限流/黑名单/自动封禁，必须显式声明代理拓扑后才启用
-  //
-  // 非法值（如 TRUST_PROXY_HOPS=abc）此前静默退化为「不信任代理」：反代场景下
-  // req.ip 恒为代理 IP，全站共享一个限流桶、审计 IP 全失真，且无任何线索。
-  // 生产环境已由 config/validate.js 升级为启动致命错误；此处对所有环境补运行时告警，
-  // 保证 staging/dev 的错配同样可被发现。
-  // 过大值（本次改动复审补漏）：生产环境已由 config/validate.js 的 MAX_TRUST_PROXY_HOPS=5
-  // 拦下，但该校验在 validateConfig() 开头即对非 production 早退——staging/dev
-  // 设成 999999 会被原样交给 Express。实测后果：hops 足够大时 Express 会信任
-  // XFF 链中更靠前的元素，客户端自行伪造 X-Forwarded-For 即可完全控制 req.ip
-  // （本地复现：设 999999 后请求 /probe，req.ip 直接取 XFF 首段），
-  // 等于击穿 IP 限流、IP 黑名单与审计 IP 溯源。此处对所有环境统一夹取上限。
-  //
-  // 判据本体（非法值告警条件、上限夹取、非生产缺省）已从本函数体提升到
-  // config/validate.js 的 resolveTrustProxyHops，由本处与 WS 握手侧共用。
-  // 此前两侧各写一份且只有本处带夹取，WS 侧因此可被伪造 XFF 绕过 allowedIPs
-  // （用例 src/tests/services/websocketTrustProxyHopsParity.test.js）。
+function configureTrustProxy(app) {
   const rawTrustProxyHops = process.env.TRUST_PROXY_HOPS;
   const trustProxyHops = resolveTrustProxyHopsFromConfig(rawTrustProxyHops, config.nodeEnv);
   if (trustProxyHops.illegal) {
@@ -199,12 +202,16 @@ function createApp() {
   // 既有断言（含 src/tests/app/appTrustProxyAndReadyzGuards.test.js）读到的是 false
   app.set('trust proxy', trustProxyHops.hops > 0 ? trustProxyHops.hops : false);
   applyTrustedProxyPolicy(app, trustProxyHops);
+}
 
-  // Express 5 迁移（ADR-007）：v5 默认 query parser 收窄为 simple（嵌套查询
-  // 对象解析变化）。本仓列表接口入参虽全为扁平标量，仍显式固定为 extended
-  // 与 4.x 行为对齐，消除隐性行为差——该行删除前须重审全部 req.query 用法
-  app.set('query parser', 'extended');
-
+/**
+ * 边缘中间件：必须早于一切「参与判定或消耗资源」的闸门
+ *
+ * 顺序即语义，故本函数只做平铺不做分支——各段的理由写在各自旁边。
+ *
+ * @param {import('express').Express} app
+ */
+function installEdgeMiddleware(app) {
   // Express 默认给**每一个**响应加 `X-Powered-By: Express`。helmet 的 hidePoweredBy 能摘掉它，
   // 但 helmet 是中间件——凡是比它更早就把响应发出去的路径（IP 黑名单 403、全局限流 429）
   // 都会把这行服务器指纹带出去。关在 app 级才是单点收口：与中间件挂载顺序彻底解耦，
@@ -251,16 +258,26 @@ function createApp() {
   // - 黑名单命中立即 403，不读请求体、不做 CORS 协商，资源消耗最小
   // - 白名单在此挂 req.ipWhitelisted，后续所有限制类中间件据此豁免
   // 唯一排在它前面的是上面的 applyResponseHardening（纯写响应头，不读 body、不碰数据库）。
-  // 仅依赖 req.ip（trust proxy 已在上方配置完毕），不需要已解析的 body/query
+  // 仅依赖 req.ip（trust proxy 已在 configureTrustProxy 配置完毕），
+  // 不需要已解析的 body/query
   app.use(checkIPBlacklist);
+}
 
+/**
+ * 安全中间件主链：CORS → 限流 → body 解析 → body/query 闸门 → 审计
+ *
+ * 抽出原因同 configureTrustProxy：本函数体曾把整条闸门链压在 createApp 里，
+ * 越过 `max-lines-per-function` 的 100 行阈值。顺序本身即安全语义，逐段理由随代码同行。
+ *
+ * @param {import('express').Express} app
+ * @param {string[]} corsOrigin CORS 白名单（单一配置源，见 resolveCorsOrigins）
+ */
+function installSecurityMiddlewareChain(app, corsOrigin) {
   // ================= 中间件配置 =================
 
   // CORS 白名单配置
   // credentials:true 时 origin 必须是明确白名单；求值口径（含开发兜底与"配了但全为空项"
   // 的回落方向）集中在 resolveCorsOrigins，那里的注释即本行的事实来源。
-  const corsOrigin = resolveCorsOrigins();
-
   app.use(
     cors({
       origin: corsOrigin,
@@ -346,7 +363,7 @@ function createApp() {
   }
 
   // CSRF 纵深：写操作 Origin/Referer 白名单校验（回应外部报告 CSRF 项）
-  // 传入上方已计算的 corsOrigin 白名单（单一配置源）；无来源请求（curl/服务器间调用）放行，
+  // 传入 createApp 求值得到的 corsOrigin 白名单（单一配置源）；无来源请求（curl/服务器间调用）放行，
   // 带来源的写请求必须命中白名单，覆盖 SameSite=Lax 之外旧浏览器残余风险
   app.use('/api/', createOriginCheck(corsOrigin));
 
@@ -368,7 +385,14 @@ function createApp() {
   // /api/security/audit-logs 批量数据出口的 GET 审计——均已在默认值中定义，
   // 此处重复传参会形成两处配置源，日后易漂移不一致）
   app.use('/api/', auditLog());
+}
 
+/**
+ * 路由挂载：探针端点 → 公共发现端点 → 业务路由 → API 文档
+ *
+ * @param {import('express').Express} app
+ */
+function installRoutes(app) {
   // ================= API 路由 =================
 
   // 健康检查（最小化响应：仅存活信号，不暴露版本/数据库状态等内部信息）
@@ -458,7 +482,14 @@ function createApp() {
       res.json(swagger.openapiSpec)
     );
   }
+}
 
+/**
+ * 静态前端托管与兜底：必须位于全部业务路由之后、404 之前
+ *
+ * @param {import('express').Express} app
+ */
+function installStaticAndErrorHandling(app) {
   // 生产前端静态托管（L-1）：直接服务 web-admin 构建产物（含 SPA history 回退）。
   // 必须位于全部业务路由之后（避免吞掉 /api 等前缀）、404 兜底之前。
   // 开发环境与无产物时自动跳过，不影响 Vite 工作流与纯 API 部署
@@ -482,6 +513,34 @@ function createApp() {
 
   // 全局错误处理
   app.use(errorHandler);
+}
+
+/**
+ * 创建并配置 Express 应用
+ *
+ * 本函数刻意只做「按固定顺序调用各段安装器」一件事：
+ * 闸门顺序本身就是安全语义，逐段的判据与理由写在各自 install* 里，
+ * 抽出去后本函数短到可以一眼核完顺序，而不需要在 141 行里翻找。
+ *
+ * @returns {express.Application}
+ */
+function createApp() {
+  const app = express();
+
+  // trust proxy 必须最先配置：后面所有读 req.ip 的判据都依赖它。
+  configureTrustProxy(app);
+
+  // Express 5 迁移（ADR-007）：v5 默认 query parser 收窄为 simple（嵌套查询
+  // 对象解析变化）。本仓列表接口入参虽全为扁平标量，仍显式固定为 extended
+  // 与 4.x 行为对齐，消除隐性行为差——该行删除前须重审全部 req.query 用法
+  app.set('query parser', 'extended');
+
+  // 顺序即语义，不可调换：边缘闸门 → 安全主链 → 路由 → 静态与错误处理
+  installEdgeMiddleware(app);
+  const corsOrigin = resolveCorsOrigins();
+  installSecurityMiddlewareChain(app, corsOrigin);
+  installRoutes(app);
+  installStaticAndErrorHandling(app);
 
   return app;
 }
