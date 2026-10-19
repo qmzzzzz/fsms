@@ -3,7 +3,7 @@
   "algorithm": "sha256",
   "canonical": "json-sort-keys-compact-utf8",
   "locks": {
-    "package-lock.json": "0f4ed5849d1d1b70ecc4f4ca714eb6d61dec5a7a1b79c0ba46dfaa2c1badd2cd",
+    "package-lock.json": "fc6ed60639b54ed83714f356290159e113f65b0b52ecf128538f17c3b591c259",
     "web-admin/package-lock.json": "0d9bd21d71616595f3fcc069e69e77f23a1f441a91ab60e6ffe6d8638ae95a66"
   }
 }

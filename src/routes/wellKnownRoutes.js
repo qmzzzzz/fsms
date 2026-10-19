@@ -15,6 +15,7 @@
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = rateLimit;
 const logger = require('../utils/logger');
 const { stripControlChars } = require('../utils/helpers');
 // P-9：三个上报限流器此前是裸 MemoryStore，多副本部署时各自独立计数——
@@ -33,7 +34,7 @@ const cspReportLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 60,
   store: makeSharedStore('csp-report'),
-  keyGenerator: (req) => `csp-report:${normalizeRateLimitIp(req.ip)}`,
+  keyGenerator: (req) => `csp-report:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`,
   standardHeaders: false,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).end(),
@@ -124,7 +125,7 @@ const clientErrorLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 30,
   store: makeSharedStore('client-errors'),
-  keyGenerator: (req) => `client-errors:${normalizeRateLimitIp(req.ip)}`,
+  keyGenerator: (req) => `client-errors:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`,
   standardHeaders: false,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).end(),
@@ -242,7 +243,7 @@ const securityTxtLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 30,
   store: makeSharedStore('security-txt'),
-  keyGenerator: (req) => `security-txt:${normalizeRateLimitIp(req.ip)}`,
+  keyGenerator: (req) => `security-txt:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`,
   standardHeaders: false,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).end(),

@@ -4,6 +4,7 @@
  */
 
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = rateLimit;
 const config = require('../config');
 const logger = require('../utils/logger');
 const { normalizeIP } = require('../utils/ipUtils');
@@ -132,7 +133,7 @@ const generalLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: config.rateLimit.maxRequests,
   store: makeSharedStore('general'),
-  keyGenerator: (req) => normalizeRateLimitIp(req.ip),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(req.ip)),
   skip: skipResourceLimiter, // 白名单 IP、探针 IP、以及静态前端面（安全方法）豁免通用限流
   standardHeaders: true,
   legacyHeaders: false,
@@ -191,7 +192,7 @@ const staticSurfaceLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: STATIC_SURFACE_MAX_REQUESTS,
   store: makeSharedStore('static-surface'),
-  keyGenerator: (req) => normalizeRateLimitIp(req.ip),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(req.ip)),
   // 只在静态面计数：本桶是给静态面**补**预算的，挂到全站会把 API 请求也计进来
   skip: staticSurfaceSkip,
   standardHeaders: true,
@@ -221,7 +222,7 @@ const strictLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: 30,
   store: makeSharedStore('strict'),
-  keyGenerator: (req) => normalizeRateLimitIp(req.ip),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(req.ip)),
   skip: skipIfWhitelisted, // P3-35：资源型限流，可信 IP 豁免（口径同 generalLimiter）
   standardHeaders: true,
   legacyHeaders: false,
@@ -265,7 +266,7 @@ const loginLimiter = rateLimit({
   keyGenerator: (req) => {
     // 仅按来源 IP 限流：username 是客户端可控字段，参与组键会让攻击者通过
     // 任意轮换用户名不断获得新配额，使暴力破解防护形同虚设
-    return `login:${normalizeRateLimitIp(req.ip)}`;
+    return `login:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -311,7 +312,7 @@ const loginUserLimiter = rateLimit({
     const username = req.body?.username;
     return username
       ? `login-user:${normalizeLoginRateKey(username)}`
-      : `login-user-ip:${normalizeRateLimitIp(req.ip)}`;
+      : `login-user-ip:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -335,7 +336,7 @@ const ipLimiter = rateLimit({
   windowMs: config?.rateLimit?.ipWindowMs || 60 * 60 * 1000, // 默认 1 小时
   max: config?.rateLimit?.ipMaxRequests || 1000, // 默认每小时 1000 请求
   store: makeSharedStore('ip'),
-  keyGenerator: (req) => normalizeRateLimitIp(req.ip),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(req.ip)),
   skip: skipResourceLimiter, // 白名单 IP、探针 IP、以及静态前端面（安全方法）豁免 IP 限流
   standardHeaders: true,
   legacyHeaders: false,
@@ -376,7 +377,7 @@ const userLimiter = rateLimit({
   },
   keyGenerator: (req) => {
     // 已认证用户按 userId 限流，未认证按 IP
-    return req.user?.userId ? `user:${req.user.userId}` : `ip:${normalizeRateLimitIp(req.ip)}`;
+    return req.user?.userId ? `user:${req.user.userId}` : `ip:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -402,7 +403,7 @@ const captchaLimiter = rateLimit({
   max: 60,
   store: makeSharedStore('captcha'),
   skip: skipIfWhitelisted, // P3-35：资源型限流（防内存刷取），可信 IP 豁免
-  keyGenerator: (req) => `captcha:${normalizeRateLimitIp(req.ip)}`,
+  keyGenerator: (req) => `captcha:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
@@ -431,8 +432,8 @@ const passwordChangeLimiter = rateLimit({
   keyGenerator: (req) => {
     const userId = req.user?.userId;
     return userId
-      ? `pwd-change:${userId}:${normalizeRateLimitIp(req.ip)}`
-      : `pwd-change-ip:${normalizeRateLimitIp(req.ip)}`;
+      ? `pwd-change:${userId}:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`
+      : `pwd-change-ip:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -534,7 +535,7 @@ const registerIpLimiter = rateLimit({
   max: config.rateLimit.registerMaxRequests || 10,
   store: makeSharedStore('register-ip'),
   skip: skipIfWhitelisted, // 资源型限流，可信 IP 豁免（口径同 generalLimiter）
-  keyGenerator: (req) => `register:${normalizeRateLimitIp(req.ip)}`,
+  keyGenerator: (req) => `register:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
@@ -567,8 +568,8 @@ const reauthLimiter = rateLimit({
   keyGenerator: (req) => {
     const userId = req.user?.userId;
     return userId
-      ? `reauth:${userId}:${normalizeRateLimitIp(req.ip)}`
-      : `reauth-ip:${normalizeRateLimitIp(req.ip)}`;
+      ? `reauth:${userId}:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`
+      : `reauth-ip:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
