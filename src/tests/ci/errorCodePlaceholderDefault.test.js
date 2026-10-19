@@ -121,7 +121,10 @@ const DECLARED_DYNAMIC = [
   },
   {
     site: 'src/controllers/securityController/sensitive.js|targetViolation.code',
-    trace: { file: 'src/controllers/securityController/sensitive.js', props: ['notFound', 'outOfScope'] },
+    trace: {
+      file: 'src/controllers/securityController/sensitive.js',
+      props: ['notFound', 'outOfScope'],
+    },
     codes: [
       'ALARM_NOT_FOUND',
       'ALARM_VIEW_FORBIDDEN',

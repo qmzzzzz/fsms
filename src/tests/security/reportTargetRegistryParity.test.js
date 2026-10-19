@@ -35,7 +35,14 @@ const fs = require('fs');
 const path = require('path');
 
 const ROUTE_FILE = path.join(__dirname, '..', '..', 'routes', 'securityRoutes.js');
-const CONTROLLER_FILE = path.join(__dirname, '..', '..', 'controllers', 'securityController', 'sensitive.js');
+const CONTROLLER_FILE = path.join(
+  __dirname,
+  '..',
+  '..',
+  'controllers',
+  'securityController',
+  'sensitive.js'
+);
 
 /** 从路由源码里取 `const REPORT_TARGET_TYPES = [...]` 的字面量成员 */
 const extractRouteTypes = (src) => {
