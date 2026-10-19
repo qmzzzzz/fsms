@@ -405,6 +405,11 @@ describe('rateLimit 各限流器触发 handler 与键/豁免分支（补 46% 分
         (listeners[ev] = listeners[ev] || []).push(fn);
         return res;
       }),
+      // express-rate-limit v8 用 res.once('finish'/'close'/'error') 判定请求成败
+      once: jest.fn((ev, fn) => {
+        (listeners[ev] = listeners[ev] || []).push(fn);
+        return res;
+      }),
       emit: jest.fn((ev, ...args) => {
         (listeners[ev] || []).forEach((fn) => fn(...args));
       }),

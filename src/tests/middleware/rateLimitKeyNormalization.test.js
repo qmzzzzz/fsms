@@ -6,7 +6,8 @@
  *     同一个限流桶——名单侧（IPBlacklist）入库前归一化，限流侧若按原文组键，
  *     同一来源拿到两份配额，标称阈值名存实亡（总账 §4.4 双桶条目）。
  *  2. 接线判据（源码门禁，仓库既有 pattern）：所有以 IP 组键的限流器必须显式
- *     走 normalizeRateLimitIp，所有 IP 维度限流器的 429 handler 必须上报升级
+ *     走 normalizeRateLimitIp + ipKeyGenerator（后者按 /56 聚合 IPv6，防同一
+ *     /64 轮换地址绕过），所有 IP 维度限流器的 429 handler 必须上报升级
  *     信号。谁加新限流器忘了归一化/上报，这两条就红——比逐个跑 HTTP 集成
  *     用例便宜，且对"未来新增的限流器"同样有效。
  */
@@ -14,6 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 
+const { ipKeyGenerator } = require('express-rate-limit');
 const { normalizeRateLimitIp } = require('../../middleware/rateLimit');
 
 /** 读源码并剥掉注释：门禁只约束代码形状，不约束注释里的历史示例文字 */
@@ -61,6 +63,12 @@ describe('normalizeRateLimitIp（限流键 IP 归一化）', () => {
     expect(normalizeRateLimitIp(undefined)).toBe('unknown');
     expect(typeof normalizeRateLimitIp('')).toBe('string');
   });
+
+  test('IPv6 同 /56 的不同地址收敛到同一限流键（v8 防地址轮换）', () => {
+    const key = (ip) => ipKeyGenerator(normalizeRateLimitIp(ip));
+    expect(key('2001:db8:aaaa:bbbb::1')).toBe(key('2001:db8:aaaa:bbbb:ffff::1'));
+    expect(key('2001:db8:aaaa:bbbb::1')).not.toBe(key('2001:db8:aaaa:cccc::1'));
+  });
 });
 
 describe('限流器接线门禁（源码形状）', () => {
@@ -73,6 +81,7 @@ describe('限流器接线门禁（源码形状）', () => {
     // 归一化助手必须存在且被实际使用
     expect(src).toContain('const normalizeRateLimitIp = (ip) =>');
     expect(src.match(/normalizeRateLimitIp\(req\.ip\)/g).length).toBeGreaterThanOrEqual(9);
+    expect(src.match(/ipKeyGenerator\(/g).length).toBeGreaterThanOrEqual(9);
   });
 
   /**
@@ -84,7 +93,7 @@ describe('限流器接线门禁（源码形状）', () => {
   test('config/swagger.js 的文档限流器必须同口径组键并接共享存储', () => {
     const src = SWAGGER_SRC();
     expect(src).not.toMatch(/api-docs:\$\{req\.ip\}/);
-    expect(src).toContain("normalizeIP(req.ip) || 'unknown'");
+    expect(src).toContain("ipKeyGenerator(normalizeIP(req.ip) || 'unknown')");
     expect(src).toContain("makeSharedStore('docs')");
   });
 
@@ -102,7 +111,8 @@ describe('限流器接线门禁（源码形状）', () => {
     for (const prefix of ['csp-report', 'client-errors', 'security-txt']) {
       expect(src).toContain(`makeSharedStore('${prefix}')`);
     }
-    // 三个 keyGenerator 全部走归一化（::ffff: 双桶在日志放大类端点上同样成立）
+    // 三个 keyGenerator 全部走归一化 + IPv6 /56 聚合
     expect(src.match(/normalizeRateLimitIp\(req\.ip\)/g).length).toBe(3);
+    expect(src.match(/ipKeyGenerator\(/g).length).toBe(3);
   });
 });
