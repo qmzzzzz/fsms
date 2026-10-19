@@ -1,8 +1,8 @@
 /**
  * WebSocket 事件监听器的「拒绝臂」（2026-10-03 审计线 R11-C #1）
  *
- * 缺陷形状：socket.io 4.8.3 派发监听器时**丢弃返回值**
- * （node_modules/socket.io/dist/socket.js:697 的 `super.emitUntyped.apply(this, event)`
+ * 缺陷形状：socket.io 4.8.4 派发监听器时**丢弃返回值**
+ * （node_modules/socket.io/dist/socket.js:693 的 `super.emitUntyped.apply(this, event)`
  * 是 process.nextTick 回调里的一条裸语句，既不赋值也不 return），所以
  * `socket.on('x', async …)` 里 reject 掉的 promise 是一个没人持有的孤儿 promise
  * ⇒ Node 判为 unhandledRejection。而本仓在 src/index.js:466-484 的口径是
