@@ -118,4 +118,22 @@ describe('登录幽灵名（canary）端到端：审计 + 告警 + 对外口径�
     ).toBe(2);
     expect(canaryDispatches()).toHaveLength(1);
   });
+
+  test('检测器自身抛错：登录仍按 INVALID_CREDENTIALS 返回（catch 兜底）', async () => {
+    // 覆盖 login.js 里 canaryWatch.recordGhostAttempt(...).catch(() => {})
+    // 的兜底箭头：guardDetection 正常不会 reject，但契约漂移时不得改变拒绝口径。
+    const canaryWatch = require('../../services/canaryWatch');
+    const spy = jest
+      .spyOn(canaryWatch, 'recordGhostAttempt')
+      .mockRejectedValueOnce(new Error('canary write failed'));
+    try {
+      const result = await authService.loginUser(
+        { username: 'guest', password: PASSWORD },
+        ctx('10.20.0.6')
+      );
+      expect(result.outcome).toBe('INVALID_CREDENTIALS');
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
