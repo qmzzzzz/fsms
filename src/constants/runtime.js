@@ -20,7 +20,7 @@
  *      WebSocket 客户端表（services/websocketService.js）
  *      均为进程内 Map → 跨进程不可见，一次性消费/风暴抑制不成立。
  *   6. 安全与数据面的进程内缓存（无失效广播者，多实例下各自为政到一个 TTL）：
- *      IP 封禁缓存（middleware/security.js）、部门成员缓存（services/auditScopeFilter.js）、
+ *      IP 封禁缓存（middleware/security/ipBlacklist.js）、部门成员缓存（services/auditScopeFilter.js）、
  *      配置读取缓存（models/SystemConfig.js，TTL 30s）、名单快照（models/IPBlacklist.js，TTL 10s）、
  *      告警去重表（services/auditMonitor.js，多实例会重复告警）。
  *      前两项直接影响**鉴权与数据范围判定**，不是"数字抖动"那么轻。
@@ -122,7 +122,7 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     impact: '各进程独立计数（/metrics 的 readyz 观测值按进程呈现）',
   },
   {
-    module: 'middleware/security.js',
+    module: 'middleware/security/ipBlacklist.js',
     mechanism: 'IP 封禁缓存（ipBlockCache Map）',
     impact: 'A 实例封禁的 IP 在 B 实例仍放行，直到 B 自己的 TTL 到期',
   },

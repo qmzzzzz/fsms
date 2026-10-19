@@ -181,7 +181,7 @@ describe('镜像 COPY 集合对相对 require 的闭合性', () => {
 
   test('整目录复制不误报、目录内深层文件也算在内', () => {
     const copies = { dirs: ['src'], files: [] };
-    expect(isInImage(copies, 'src/middleware/security.js')).toBe(true);
+    expect(isInImage(copies, 'src/middleware/security/index.js')).toBe(true);
     expect(isInImage(copies, 'scripts/deploy.js')).toBe(false);
     // 前缀边界：`src` 目录不能顺手放行 `src2/...` 这种同前缀的不同目录
     expect(isInImage(copies, 'src2/x.js')).toBe(false);

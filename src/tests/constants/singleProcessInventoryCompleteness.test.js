@@ -8,7 +8,7 @@
  * 失效清单不全 ⇒ 以为没问题的那些地方其实正在出问题。
  *
  * 该清单已经漂移过一轮，且两个方向都错：
- *   - **漏**：`middleware/security.js` 的 IP 封禁缓存、`services/auditScopeFilter.js`
+ *   - **漏**：`middleware/security/ipBlacklist.js` 的 IP 封禁缓存、`services/auditScopeFilter.js`
  *     的部门成员缓存、`models/SystemConfig.js` / `models/IPBlacklist.js` 的 TTL 缓存、
  *     `services/userPermissionService.js` 的权限缓存等均未登记 —— 其中多项是
  *     **安全控件**（封禁、数据范围过滤），不是"数字抖动"。
@@ -41,7 +41,7 @@ const REQUIRED_MODULES = [
   'services/captchaService.js',
   'services/statsCache.js',
   'services/securityAlert.js',
-  'middleware/security.js',
+  'middleware/security/ipBlacklist.js',
   'services/auditScopeFilter.js',
   'models/SystemConfig.js',
   'models/IPBlacklist.js',
@@ -73,6 +73,10 @@ const EXEMPT_MODULES = {
   'config/immutableConfigGuard.js': 'SECURITY_RELEVANT，静态字面量 Set，只读',
   'constants/breachedPasswords.js': '静态弱口令词表，只读数据',
   'middleware/protocolCompliance.js': 'HOST_GATE_EXEMPT_PATHS，静态字面量 Set',
+  // FORBIDDEN_KEYS：原型链入口词表（__proto__/constructor/prototype），静态字面量 Set、
+  // 建好后只 .has()。2026-10-18 自 middleware/security.js 拆出时随 sanitize 模块迁至本文件，
+  // 与 constants/breachedPasswords.js 同为判据词表，不是进程内状态。
+  'middleware/security/sanitize.js': 'FORBIDDEN_KEYS，静态字面量 Set（原型链入口词表），只读',
   'middleware/validateObjectId.js':
     '进程内幂等守卫（WeakSet 记录已注册的 Router；Router 是 require 缓存的进程内单例），无跨进程语义',
   'routes/wellKnownRoutes.js': 'CLIENT_ERROR_KINDS，静态字面量 Set',

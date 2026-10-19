@@ -74,8 +74,8 @@ describe('审计与日志两类长期载体不得存明文凭据', () => {
       // 先自证这条正则抓得到「原样写入」的写法，否则空数组只是正则失效的假绿
       expect(RE_UNSANITIZED.test('      query: req.query,')).toBe(true);
 
-      const files = ['../middleware/security.js', '../models/auditLogWriteStatics.js'].map((rel) =>
-        path.join(__dirname, rel)
+      const files = ['../middleware/security/auditLog.js', '../models/auditLogWriteStatics.js'].map(
+        (rel) => path.join(__dirname, rel)
       );
       const offenders = [];
       for (const file of files) {
@@ -149,7 +149,10 @@ describe('审计与日志两类长期载体不得存明文凭据', () => {
       expect(RE_BODY_ON_QUERY.test('      query: sanitizeAuditBody(req.query),')).toBe(true);
 
       const offenders = [];
-      for (const rel of ['../middleware/security.js', '../models/auditLogWriteStatics.js']) {
+      for (const rel of [
+        '../middleware/security/auditLog.js',
+        '../models/auditLogWriteStatics.js',
+      ]) {
         const file = path.join(__dirname, rel);
         fs.readFileSync(file, 'utf8')
           .replace(/\r\n/g, '\n')

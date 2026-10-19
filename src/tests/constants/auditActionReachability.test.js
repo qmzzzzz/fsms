@@ -51,13 +51,13 @@ function readMounts() {
   return mounts;
 }
 
-/** security.js 的 auditGetExcludePaths（从源码读，不手抄——手抄必然漂移） */
+/** security/auditLog.js 的 auditGetExcludePaths（从源码读，不手抄——手抄必然漂移） */
 function readAuditGetExcludePaths() {
-  const secSrc = fs.readFileSync(path.join(SRC_DIR, 'middleware/security.js'), 'utf8');
+  const secSrc = fs.readFileSync(path.join(SRC_DIR, 'middleware/security/auditLog.js'), 'utf8');
   const start = secSrc.indexOf('auditGetExcludePaths = [');
   if (start < 0) {
     throw new Error(
-      'security.js 里找不到 auditGetExcludePaths 的起点：生产结构已变，守卫必须显式失败'
+      'security/auditLog.js 里找不到 auditGetExcludePaths 的起点：生产结构已变，守卫必须显式失败'
     );
   }
   // 数组成员全是字符串字面量、不含嵌套方括号 → 起点后的第一个 ']' 就是收尾。
@@ -268,7 +268,7 @@ describe('审计 action 白名单可达性技术文档（P3-62）', () => {
     expect(paths.every((p) => p.startsWith('/api/'))).toBe(true);
     // 数组本身只占源码很小一段；若哪天解析结果里混进了数组之外的字面量，
     // 数量与内容都会先在这里露出来
-    const secSrc = fs.readFileSync(path.join(SRC_DIR, 'middleware/security.js'), 'utf8');
+    const secSrc = fs.readFileSync(path.join(SRC_DIR, 'middleware/security/auditLog.js'), 'utf8');
     const start = secSrc.indexOf('auditGetExcludePaths = [');
     const end = secSrc.indexOf(']', start);
     expect(end - start).toBeLessThan(1500);

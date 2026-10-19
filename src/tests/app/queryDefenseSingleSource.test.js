@@ -187,8 +187,8 @@ describe('src/app.js 的 query 防线挂载（源码形态不变量）', () => {
   });
 
   test('sanitizeMongo 不得再遍历 req.query（写了也是空操作，留着只制造假防线）', () => {
-    // 读 security.js（sanitizeMongo 的定义处），不是 app.js（那里只有调用点）
-    const security = fs.readFileSync(path.join(ROOT, 'src', 'middleware', 'security.js'), 'utf8');
+    // 读 security/sanitize.js（sanitizeMongo 的定义处），不是 app.js（那里只有调用点）
+    const security = fs.readFileSync(path.join(ROOT, 'src', 'middleware', 'security', 'sanitize.js'), 'utf8');
     const body = stripComments(security).slice(
       stripComments(security).indexOf('const sanitizeMongo ='),
       stripComments(security).indexOf('const materializeQuery')

@@ -70,7 +70,7 @@ describe('F-214 fire-and-forget 告警投递的单一入口', () => {
   // 所以走 `await sendNotification(...)` 这条显式形态，而不是 fire-and-forget 入口。
   // 登记在这里正是本闸的设计意图：新增调用点必须显式表态"它怎么接住 promise"。
   const CHAIN_MONITOR_FILE = 'src/services/auditChainMonitor.js';
-  const BLACKLIST_CALLER = 'src/middleware/security.js';
+  const BLACKLIST_CALLER = 'src/middleware/security/ipBlacklist.js';
 
   describe('① 全仓生产码：没有第二处丢弃 promise 的 sendNotification 调用', () => {
     test('列出所有含裸调用串的文件，并逐行判定"有没有被接住"', () => {
@@ -110,7 +110,7 @@ describe('F-214 fire-and-forget 告警投递的单一入口', () => {
       expect(src.slice(from)).toMatch(/\bdispatchNotification\b/);
     });
 
-    test('middleware/security.js 的黑名单通知调用入口本体，且不再出现裸调用串', () => {
+    test('middleware/security/ipBlacklist.js 的黑名单通知调用入口本体，且不再出现裸调用串', () => {
       const src = codeView(BLACKLIST_CALLER);
       expect(src).toMatch(/\bdispatchNotification\s*\(/);
       expect(src).not.toMatch(/\bsendNotification\s*\(/);

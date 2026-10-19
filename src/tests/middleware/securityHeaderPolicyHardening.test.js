@@ -217,7 +217,7 @@ describe('A7：Trusted Types 升强制开关（TRUSTED_TYPES_ENFORCE）', () => 
 describe('CORP / Referrer-Policy 取值与五份副本一致性（P2）', () => {
   const nginx = read('deployment/nginx.conf.example');
   const vite = read('web-admin/vite.config.js');
-  const security = read('src/middleware/security.js');
+  const security = read('src/middleware/security/securityHeaders.js');
 
   test('后端实际下发的 CORP 与 Referrer-Policy 均为 same-origin', async () => {
     const res = await request(buildApp()).get('/api/anything').expect(200);

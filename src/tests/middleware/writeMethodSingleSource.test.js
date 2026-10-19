@@ -97,12 +97,12 @@ describe('写操作名单的单一事实来源', () => {
 
   test('两个消费方都改为引用它（默认 operations 与基线 writes 不再各写一份）', () => {
     const securitySrc = stripComments(
-      fs.readFileSync(path.join(SRC_ROOT, 'middleware/security.js'), 'utf8')
+      fs.readFileSync(path.join(SRC_ROOT, 'middleware/security/auditLog.js'), 'utf8')
     );
     const baselineSrc = stripComments(
       fs.readFileSync(path.join(SRC_ROOT, 'services/behaviorBaseline.js'), 'utf8')
     );
-    expect(securitySrc).toMatch(/require\('\.\/originCheck'\)/);
+    expect(securitySrc).toMatch(/require\('\.\.\/originCheck'\)/);
     expect(securitySrc).toMatch(/operations = WRITE_METHODS/);
     expect(baselineSrc).toMatch(/require\('\.\.\/middleware\/originCheck'\)/);
     expect(baselineSrc).toMatch(/\$in: \['\$method', WRITE_METHODS]/);

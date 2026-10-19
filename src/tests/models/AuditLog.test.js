@@ -354,7 +354,10 @@ describe('AuditLog 模型静态方法', () => {
 
       const PRIVATE_LIST = "'GET', 'POST', 'PUT', 'DELETE', 'PATCH'";
       const root = path.join(__dirname, '..', '..', '..');
-      for (const rel of ['src/middleware/security.js', 'src/middleware/protocolCompliance.js']) {
+      for (const rel of [
+        'src/middleware/security/auditLog.js',
+        'src/middleware/protocolCompliance.js',
+      ]) {
         const text = fs.readFileSync(path.join(root, rel), 'utf8');
         expect({ file: rel, privateList: text.includes(PRIVATE_LIST) }).toEqual({
           file: rel,

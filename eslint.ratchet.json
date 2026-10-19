@@ -11,9 +11,6 @@
   "src/docs/generate.js": {
     "max-lines": 1
   },
-  "src/middleware/security.js": {
-    "max-lines": 1
-  },
   "src/services/initData.js": {
     "max-lines": 1
   },

@@ -3,7 +3,7 @@
  *
  * ## 这份文件守的是什么
  * 本仓有一条成文纪律，在三个地方被重复声明：
- *   · `middleware/security.js:763-767`：「fail-open 放行（缓存未命中）**必须有显式可观测信号**——
+ *   · `middleware/security/ipBlacklist.js:238`：「fail-open 放行（缓存未命中）**必须有显式可观测信号**——
  *     否则『DB 挂了 + 全站裸奔』只有一条 error 日志可循」
  *   · `middleware/rateLimitStore.js:53-56`：「降级态只写日志等于没有可告警信号——
  *     `grep 日志` 不是运维动作」

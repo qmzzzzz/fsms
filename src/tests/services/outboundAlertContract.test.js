@@ -59,7 +59,7 @@ const SKIP_DIR = /(^|[/\\])(?:tests?|__tests__|node_modules)([/\\]|$)/;
 const REGISTERED_OUTBOUND_TYPES = [
   {
     type: 'ip_blacklist_hit',
-    at: 'src/middleware/security.js',
+    at: 'src/middleware/security/ipBlacklist.js',
     why: '黑名单拦截通知由中间件直接派发，未进 ALERT_TYPES；改名等于洗掉下游订阅方按类型路由的规则',
   },
   {
