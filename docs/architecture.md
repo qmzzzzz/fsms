@@ -74,7 +74,7 @@ sequenceDiagram
   Note over U,DB: 实时通道：后续 Socket.IO 连接复用 JWT 认证（含令牌黑名单校验）
 ```
 
-关键实现：`src/controllers/authController.js`（login 约 L264）、`src/utils/loginCipher.js`、`src/services/sessionService.js`；时序对齐防用户枚举（哑 bcrypt 耗时）。
+关键实现：`src/controllers/authController/credentials.js`（login 约 L140）、`src/utils/loginCipher.js`、`src/services/sessionService.js`；时序对齐防用户枚举（哑 bcrypt 耗时）。
 
 ## 3. 数据模型（ER 图）
 

@@ -139,7 +139,7 @@ describe('登出令牌提取与认证同源', () => {
 
   test('③ 静态禁令：登出里不得再自行解析 Authorization', () => {
     const src = fs
-      .readFileSync(path.resolve(__dirname, '../controllers/authController.js'), 'utf8')
+      .readFileSync(path.resolve(__dirname, '../controllers/authController/session.js'), 'utf8')
       .replace(/\r\n/g, '\n');
     const start = src.indexOf('const logout = asyncHandler');
     const end = src.indexOf('/**', start);

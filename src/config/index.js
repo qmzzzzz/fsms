@@ -67,7 +67,7 @@ module.exports = {
   // 而三处读取方读的都是顶层：
   //   · models/SystemConfig.js:215（isRegisterCaptchaEnabled 的 fallback）
   //   · models/SystemConfig.js:283-284（captchaSwitch 的静态兜底，DB 读取失败时用它）
-  //   · controllers/authController.js:150-151（/auth/captcha-status 兜底网的降级值）
+  //   · controllers/authController/credentials.js:114-115（/auth/captcha-status 兜底网的降级值）
   // ⇒ 恒为 undefined ⇒ toConfigBoolean(undefined, false) === false
   // ⇒ 注册接口的图形验证码被**静默关闭**。而 initData 从不播种该键
   // （只播种 allowPublicRegistration / loginCaptchaEnabled），所以**全新部署必然走这条 fallback**，

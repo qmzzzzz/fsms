@@ -254,7 +254,7 @@ describe('覆盖率作用域：生产分母不得含测试基建', () => {
   test('现网配置：生产文件仍被收集，4 个测试基建文件全部出局', () => {
     const patterns = cfg.collectCoverageFrom;
     expect(isCollected(patterns, 'src/services/reportStatsService.js')).toBe(true);
-    expect(isCollected(patterns, 'src/controllers/authController.js')).toBe(true);
+    expect(isCollected(patterns, 'src/controllers/authController/index.js')).toBe(true);
     for (const f of [
       'src/tests/constants.js',
       'src/tests/deploy/helpers/stubExec.js',

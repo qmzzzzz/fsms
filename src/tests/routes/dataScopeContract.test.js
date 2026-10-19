@@ -71,21 +71,43 @@ const routeOf = (blockSource) => {
   return m ? m[1] : '(未解析路径)';
 };
 
+/**
+ * controller 的取源：既可能是单文件 `XxxController.js`，也可能是拆分后的目录
+ * `XxxController/`（入口 `index.js` 只是门面，handler 本体在同目录子文件里——
+ * 拆分口径见 controllers/authController/）。目录形态返回全部非测试子文件，
+ * 让 handlerBody 逐文件找 handler 声明；找不到（不存在的 controller）返回空数组。
+ */
+const controllerSources = (controller) => {
+  const single = path.join(CONTROLLERS_DIR, `${controller}.js`);
+  if (fs.existsSync(single)) return [single];
+  const dir = path.join(CONTROLLERS_DIR, controller);
+  if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.js') && !f.endsWith('.test.js'))
+      .sort()
+      .map((f) => path.join(dir, f));
+  }
+  return [];
+};
+
 /** 取 handler 函数体（从 `const <name> = asyncHandler(` 到下一个同形态声明） */
 const handlerBody = (cache, controller, handler) => {
-  const key = `${controller}.js`;
-  if (!cache.has(key)) {
-    const file = path.join(CONTROLLERS_DIR, key);
-    cache.set(key, fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null);
+  if (!cache.has(controller)) {
+    const files = controllerSources(controller);
+    cache.set(controller, files.length ? files.map((f) => fs.readFileSync(f, 'utf8')) : null);
   }
-  const src = cache.get(key);
-  if (!src) return null;
+  const sources = cache.get(controller);
+  if (!sources) return null;
   const re = new RegExp(`^const ${handler} = asyncHandler\\(`, 'm');
-  const idx = src.search(re);
-  if (idx === -1) return null;
-  const rest = src.slice(idx + 1);
-  const nextIdx = rest.search(/^const \w+ = asyncHandler\(/m);
-  return nextIdx === -1 ? rest : rest.slice(0, nextIdx);
+  for (const src of sources) {
+    const idx = src.search(re);
+    if (idx === -1) continue;
+    const rest = src.slice(idx + 1);
+    const nextIdx = rest.search(/^const \w+ = asyncHandler\(/m);
+    return nextIdx === -1 ? rest : rest.slice(0, nextIdx);
+  }
+  return null;
 };
 
 describe('数据范围契约（ADR-008：写路由必须显式登记范围策略）', () => {

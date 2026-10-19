@@ -97,10 +97,11 @@ const EXEMPT_MODULES = {
   // PII 加密会静默失效」——那是假警报：词表内容由源码字面量决定，逐进程恒同，不存在不一致。
   'utils/piiCrypto.js': '静态字面量 Set（退化密钥字面量词表），只读、内容全由源码决定',
   // REFRESH_OUTCOME_RESPONSES：refresh 接口「outcome → 响应函数」的静态查表
-  // （2026-10-18 lint 批 1 把 switch 换成 Map）。值全是函数字面量、建好后只 .get()，
+  // （2026-10-18 lint 批 1 把 switch 换成 Map；2026-10-19 拆分 authController 后
+  // 随迁至 authController/credentials.js）。值全是函数字面量、建好后只 .get()，
   // 逐进程内容恒同 ⇒ 多实例部署不存在不一致。与 middleware/protocolCompliance.js 的
   // HOST_GATE_EXEMPT_PATHS 同族：判据词表，不是进程内状态。
-  'controllers/authController.js':
+  'controllers/authController/credentials.js':
     'REFRESH_OUTCOME_RESPONSES，outcome → 响应函数的静态查表（只读、无跨进程语义）',
 };
 

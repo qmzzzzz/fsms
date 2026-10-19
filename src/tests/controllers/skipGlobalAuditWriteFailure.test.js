@@ -271,12 +271,13 @@ function scanSensitiveActionSites() {
   return sites;
 }
 
-// 登记表：键名与计数为**实测原样**（4 处全在 authController，改密 handler 占 2 处）。
+// 登记表：键名与计数为**实测原样**（4 处原全在 authController，改密 handler 占 2 处；
+// 2026-10-19 拆分后按新文件路径登记）。
 // F-03（2026-10-17）：业务状态已改变的三处成功路径改走 services/auditOutbox.js，
 // 此处只剩「改密成功但吊销失败」这一处**诊断性**写入（业务已改、响应是 503 错误），
 // best-effort 仍是正确语义。
 const EXPECTED_SENSITIVE_REGISTRY = {
-  'controllers/authController.js#changePassword': { [GUARD_SWALLOW]: 1 },
+  'controllers/authController/profile.js#changePassword': { [GUARD_SWALLOW]: 1 },
 };
 
 /**
@@ -320,9 +321,9 @@ function scanDurableSites() {
 }
 
 const EXPECTED_DURABLE_REGISTRY = {
-  'controllers/authController.js#changePassword': { recordSensitiveActionDurably: 1 },
-  'controllers/authController.js#revokeSession': { recordSensitiveActionDurably: 1 },
-  'controllers/authController.js#revokeOtherSessions': { recordSensitiveActionDurably: 1 },
+  'controllers/authController/profile.js#changePassword': { recordSensitiveActionDurably: 1 },
+  'controllers/authController/session.js#revokeSession': { recordSensitiveActionDurably: 1 },
+  'controllers/authController/session.js#revokeOtherSessions': { recordSensitiveActionDurably: 1 },
   'controllers/ipListController.js#addIPEntry': { recordDurably: 1 },
   'controllers/ipListController.js#removeIPEntry': { recordDurably: 1 },
   'controllers/mfaController.js#mfaDisable': { recordDurably: 1 },

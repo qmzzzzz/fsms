@@ -149,7 +149,14 @@ module.exports = {
     './src/utils/encryption.js': { branches: 89, functions: 95 },
     './src/utils/auditChain.js': { branches: 83, functions: 97 },
     // 2026-08-28 批次 B（authLifecycle/authRest）后实测
-    './src/controllers/authController.js': { branches: 91, functions: 77 },
+    // 2026-10-19 批 3c：authController.js 拆为 5 文件目录，原单文件键拆为逐文件键；
+    // 数值按拆分后全量实测重设（br -5 / fn -3，向下取整）：
+    // credentials 97.05/100、session 94.73/100、profile 95.45/100、index/shared 无分支。
+    './src/controllers/authController/credentials.js': { branches: 92, functions: 97 },
+    './src/controllers/authController/index.js': { branches: 95, functions: 97 },
+    './src/controllers/authController/profile.js': { branches: 90, functions: 97 },
+    './src/controllers/authController/session.js': { branches: 89, functions: 97 },
+    './src/controllers/authController/shared.js': { branches: 95, functions: 97 },
     // 2026-08-28 securityQuick/securityDeep 后实测
     './src/controllers/securityController.js': { branches: 86, functions: 93 },
     // 设备级会话管理（登录会话）：新增模块，随功能一并补齐了

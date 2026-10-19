@@ -1,7 +1,4 @@
 {
-  "src/controllers/authController.js": {
-    "max-lines": 1
-  },
   "src/controllers/securityController.js": {
     "max-lines": 1
   },
