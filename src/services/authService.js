@@ -895,45 +895,24 @@ async function issueLoginSession(user, ctx, username) {
 }
 
 /**
- * 刷新令牌轮换（业务层）
- * @returns {Promise<{outcome:'MISSING'|'INVALID'|'IP_DENIED'|'PASSWORD_CHANGED'|'VERSION_MISMATCH'|'BLACKLIST_UNAVAILABLE'|'REPLAYED'|'REVOKE_UNAVAILABLE'|'SESSION_UNAVAILABLE'|'SESSION_REVOKED'|'EXPIRED'|'OK'}>}
- *   OK 时附 { token, refreshToken }
+ * 轮换主体的三项廉价判据：IP 范围 → 改密时间 → tokenVersion（外加取回 roles）。
+ *
+ * 顺序不是随意的：从"最便宜且最可能命中"排到"要额外一次 populate"。三条都必须与
+ * authenticate 中间件同口径，否则会出现「HTTP 拒了、refresh 还认」的第二扇门。
+ *
+ * @param {object} user 已按 decoded.userId 查回的文档
+ * @param {object} decoded 已验证的 refresh 载荷
+ * @param {{ip: string}} ctx
+ * @returns {Promise<{ok: true, roles: string[]}|{ok: false, outcome: string}>}
  */
-async function refreshSession(refreshTokenRaw, ctx) {
-  if (!refreshTokenRaw) {
-    return { outcome: 'MISSING' };
-  }
-
-  let decoded;
-  try {
-    decoded = jwt.verify(refreshTokenRaw, config.jwt.refreshSecret, { algorithms: ['HS256'] });
-  } catch (error) {
-    if (error.name === 'TokenExpiredError') {
-      return { outcome: 'EXPIRED' };
-    }
-    return { outcome: 'INVALID' };
-  }
-
-  if (decoded.type !== 'refresh') {
-    return { outcome: 'INVALID' };
-  }
-
-  // 先做廉价校验（用户状态/IP 范围/密码修改时间/tokenVersion），
-  // 最后一步才做原子消费——把「查黑名单→加黑名单」合并为一次原子抢占：
-  // 并发的两次 /refresh 只有一次能换取新令牌对，另一次进入重放检测，
-  // 消除原「检查与轮换非原子」的 TOCTOU 平行会话窗口
-  const user = await User.findById(decoded.userId);
-  if (!user || user.status !== 'active') {
-    return { outcome: 'INVALID' };
-  }
-
+async function resolveRefreshSubject(user, decoded, ctx) {
   // 修复：刷新令牌轮换时补齐 IP 访问范围校验（与登录口径一致），
   // 防止 refresh token 被窃取后从任意 IP 完成轮换导致合法用户被踢出（会话 DoS）
   if (user.allowedIPs) {
     const { allowed } = isIPAllowed(ctx.ip, user.allowedIPs);
     if (!allowed) {
       logger.warn('Refresh 拒绝 - IP 不在允许范围', { username: user.username, ip: ctx.ip });
-      return { outcome: 'IP_DENIED' };
+      return { ok: false, outcome: 'IP_DENIED' };
     }
   }
 
@@ -943,7 +922,7 @@ async function refreshSession(refreshTokenRaw, ctx) {
   if (user.passwordChangedAt && decoded.iat) {
     const passwordChangedSec = Math.floor(user.passwordChangedAt.getTime() / 1000);
     if (passwordChangedSec > decoded.iat) {
-      return { outcome: 'PASSWORD_CHANGED' };
+      return { ok: false, outcome: 'PASSWORD_CHANGED' };
     }
   }
 
@@ -959,54 +938,132 @@ async function refreshSession(refreshTokenRaw, ctx) {
   // 一律拒绝，与 authenticate 中间件口径保持一致（历史文档缺字段时按 0 参与比对）
   const expectedTokenVersion = user.tokenVersion ?? 0;
   if (decoded.tokenVersion === undefined || decoded.tokenVersion !== expectedTokenVersion) {
-    return { outcome: 'VERSION_MISMATCH' };
+    return { ok: false, outcome: 'VERSION_MISMATCH' };
   }
+  return { ok: true, roles };
+}
 
-  // 原子消费旧 refresh token（一次性使用）；已被消费 → 重放检测
+/**
+ * 重放检测命中后的处置：吊销该用户全部会话。
+ *
+ * fail-closed：吊销失败时不能按 REPLAYED「已处置」返回——攻击者会话仍然在线，
+ * 上抛 REVOKE_UNAVAILABLE 由控制器回 503，让客户端重试并触发告警，而不是静默放行。
+ *
+ * @param {object} decoded 已验证的 refresh 载荷
+ * @returns {Promise<{ok: false, outcome: string}>}
+ */
+async function revokeOnRefreshReplay(decoded) {
+  try {
+    await invalidateUserTokens(decoded.userId);
+  } catch (revokeErr) {
+    logger.error(`重放检测触发但会话吊销失败：${revokeErr.message}`, {
+      userId: decoded.userId,
+    });
+    return { ok: false, outcome: 'REVOKE_UNAVAILABLE' };
+  }
+  // 会话表须与 tokenVersion 保持一致：否则「登录会话」界面会留下一批
+  // 显示 active 但实际已不能用的僵尸记录，用户看到的信息与事实不符
+  await sessionService.revokeAllSessionsSafe(decoded.userId, 'token_reuse');
+  logger.warn('Refresh token 重放检测触发，吊销用户全部会话', { userId: decoded.userId });
+  return { ok: false, outcome: 'REPLAYED' };
+}
+
+/**
+ * 原子消费旧 refresh token（一次性使用）；已被消费 ⇒ 进入重放检测。
+ *
+ * 把「查黑名单→加黑名单」合并为一次原子抢占：并发的两次 /refresh 只有一次能换取新令牌对，
+ * 另一次进入重放检测，消除原「检查与轮换非原子」的 TOCTOU 平行会话窗口。
+ *
+ * @param {string} refreshTokenRaw
+ * @param {object} decoded 已验证的 refresh 载荷
+ * @returns {Promise<{ok: true}|{ok: false, outcome: string}>}
+ */
+async function claimRefreshToken(refreshTokenRaw, decoded) {
   let claimed = false;
   try {
     claimed = await consumeToken(refreshTokenRaw, decoded.exp);
   } catch (consumeErr) {
     logger.error(`Refresh 轮换中止 - 黑名单服务故障：${consumeErr.message}`);
-    return { outcome: 'BLACKLIST_UNAVAILABLE' };
+    return { ok: false, outcome: 'BLACKLIST_UNAVAILABLE' };
   }
-  if (!claimed) {
-    // 重放检测：已失效的 refresh token 被再次使用，可能遭到窃取 → 吊销该用户全部会话。
-    // fail-closed：吊销失败时不能按 REPLAYED「已处置」返回——攻击者会话仍然在线，
-    // 上抛 REVOKE_UNAVAILABLE 由控制器回 503，让客户端重试并触发告警，而不是静默放行
-    try {
-      await invalidateUserTokens(decoded.userId);
-    } catch (revokeErr) {
-      logger.error(`重放检测触发但会话吊销失败：${revokeErr.message}`, {
-        userId: decoded.userId,
-      });
-      return { outcome: 'REVOKE_UNAVAILABLE' };
-    }
-    // 会话表须与 tokenVersion 保持一致：否则「登录会话」界面会留下一批
-    // 显示 active 但实际已不能用的僵尸记录，用户看到的信息与事实不符
-    await sessionService.revokeAllSessionsSafe(decoded.userId, 'token_reuse');
-    logger.warn('Refresh token 重放检测触发，吊销用户全部会话', { userId: decoded.userId });
-    return { outcome: 'REPLAYED' };
+  if (claimed) return { ok: true };
+  return revokeOnRefreshReplay(decoded);
+}
+
+/**
+ * 设备级会话校验：轮换必须继承原 sid，且该会话仍须可用。
+ *
+ * 这是「踢除设备后不能复活」的关键一环 —— 若此处不校验，被踢设备手里的
+ * refresh token 依然有效，一次刷新就能换到不带 sid（或带新 sid）的令牌，
+ * 绕过整个设备级吊销机制。
+ *
+ * @param {string|null} rotateSid
+ * @returns {Promise<string|null>} 拒绝时返回 outcome，放行返回 null
+ */
+async function resolveRotationSession(rotateSid) {
+  if (!rotateSid) return null;
+  let sessionState;
+  try {
+    sessionState = await sessionService.validateSession(rotateSid);
+  } catch (sessErr) {
+    logger.error(`Refresh 轮换中止 - 会话服务故障：${sessErr.message}`);
+    return 'SESSION_UNAVAILABLE';
+  }
+  if (!sessionState.usable) {
+    logger.warn(`Refresh 拒绝 - 会话已被吊销：sid=${String(rotateSid).slice(0, 8)}…`);
+    return 'SESSION_REVOKED';
+  }
+  return null;
+}
+
+/**
+ * 刷新令牌轮换（业务层）
+ * @returns {Promise<{outcome:'MISSING'|'INVALID'|'IP_DENIED'|'PASSWORD_CHANGED'|'VERSION_MISMATCH'|'BLACKLIST_UNAVAILABLE'|'REPLAYED'|'REVOKE_UNAVAILABLE'|'SESSION_UNAVAILABLE'|'SESSION_REVOKED'|'EXPIRED'|'OK'}>}
+ *   OK 时附 { token, refreshToken }
+ */
+async function refreshSession(refreshTokenRaw, ctx) {
+  if (!refreshTokenRaw) {
+    return { outcome: 'MISSING' };
   }
 
-  // 设备级会话校验：轮换必须继承原 sid，且该会话仍须可用。
-  //
-  // 这是「踢除设备后不能复活」的关键一环 —— 若此处不校验，被踢设备手里的
-  // refresh token 依然有效，一次刷新就能换到不带 sid（或带新 sid）的令牌，
-  // 绕过整个设备级吊销机制。
+  // 验签与用途闸留在本函数体内，**不抽成 decodeRefreshToken**：credentialDoorCheckLedger
+  // 按「函数体内有没有 jwt.verify(」实测每扇门的形状，抽走之后 refreshSession 在台账里
+  // 会变成"不验签的门"，那条双向登记会红（且红得对——它守的正是"这扇门自己验不验"）。
+  let decoded;
+  try {
+    decoded = jwt.verify(refreshTokenRaw, config.jwt.refreshSecret, { algorithms: ['HS256'] });
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      return { outcome: 'EXPIRED' };
+    }
+    return { outcome: 'INVALID' };
+  }
+
+  if (decoded.type !== 'refresh') {
+    return { outcome: 'INVALID' };
+  }
+
+  // 先做廉价校验（用户状态/IP 范围/密码修改时间/tokenVersion），
+  // 最后一步才做原子消费——顺序反了会在重放检测之前就花掉一次黑名单写入
+  const user = await User.findById(decoded.userId);
+  if (!user || user.status !== 'active') {
+    return { outcome: 'INVALID' };
+  }
+
+  const subject = await resolveRefreshSubject(user, decoded, ctx);
+  if (!subject.ok) {
+    return { outcome: subject.outcome };
+  }
+
+  const claim = await claimRefreshToken(refreshTokenRaw, decoded);
+  if (!claim.ok) {
+    return { outcome: claim.outcome };
+  }
+
   const rotateSid = decoded.sid || null;
-  if (rotateSid) {
-    let sessionState;
-    try {
-      sessionState = await sessionService.validateSession(rotateSid);
-    } catch (sessErr) {
-      logger.error(`Refresh 轮换中止 - 会话服务故障：${sessErr.message}`);
-      return { outcome: 'SESSION_UNAVAILABLE' };
-    }
-    if (!sessionState.usable) {
-      logger.warn(`Refresh 拒绝 - 会话已被吊销：sid=${String(rotateSid).slice(0, 8)}…`);
-      return { outcome: 'SESSION_REVOKED' };
-    }
+  const sessionRejection = await resolveRotationSession(rotateSid);
+  if (sessionRejection) {
+    return { outcome: sessionRejection };
   }
 
   // 签发新的 access token + refresh token（携带当前 tokenVersion 与原 sid）
@@ -1014,7 +1071,7 @@ async function refreshSession(refreshTokenRaw, ctx) {
     user._id,
     user.username,
     user.email,
-    roles,
+    subject.roles,
     user.realName,
     user.tokenVersion,
     crypto.randomUUID(),
@@ -1023,6 +1080,122 @@ async function refreshSession(refreshTokenRaw, ctx) {
   const refreshToken = generateRefreshToken(user._id, user.tokenVersion, rotateSid);
 
   return { outcome: 'OK', token, refreshToken };
+}
+
+/**
+ * 解出一段口令：密文轨优先，回落到明文轨。
+ *
+ * 双轨并存期（LOGIN_ENCRYPT_STRICT=true 后明文轨由校验层关闭）两条轨解出的值同权，
+ * 后续的非空/强度/复用校验对二者一视同仁——所以这里只负责"拿到明文"，
+ * 不在这里判空（`MISSING` 要等两段都解完再判，否则"密文轨失败"会被误报成"没填"）。
+ *
+ * @param {unknown} encValue 密文轨字段值
+ * @param {unknown} plainValue 明文轨字段值
+ * @param {'PASSWORD_CURRENT'|'PASSWORD_NEW'} purpose 解密用途（参与 AAD，两段不可互换）
+ * @param {string} label 日志里的人话标签（"当前口令" / "新口令"）
+ * @param {{username: string}} ctx
+ * @returns {Promise<{ok: true, value: unknown}|{ok: false, outcome: 'ENC_INVALID'}>}
+ */
+async function resolveCredentialTrack(encValue, plainValue, purpose, label, ctx) {
+  if (typeof encValue !== 'string' || !encValue) {
+    return { ok: true, value: plainValue };
+  }
+  try {
+    return { ok: true, value: await decryptLoginCredential(encValue, purpose) };
+  } catch (err) {
+    logger.warn(`改密拒绝 - ${label}密文无效`, { username: ctx.username, code: err.code });
+    return { ok: false, outcome: 'ENC_INVALID' };
+  }
+}
+
+/**
+ * 入参层校验：非空 → 确认一致性 → 强度策略。
+ *
+ * 顺序即优先级，且"确认密码"必须在**解密之后**才判：密文轨下明文只有解完才知道
+ * （评价报告 #15 收敛点：原 securityController 内联比对，密文轨下永远比的是密文）。
+ * 客户端未携带 confirmPassword 时不强制——/api/auth/password 一直如此。
+ *
+ * @param {object} body 原始请求体
+ * @param {unknown} currentPassword 已解出的当前口令
+ * @param {unknown} newPassword 已解出的新口令
+ * @returns {{outcome: string, message?: string}|null} 拒绝时返回 outcome 对象，放行返回 null
+ */
+function validatePasswordChangeInput(body, currentPassword, newPassword) {
+  if (!currentPassword || !newPassword) {
+    return { outcome: 'MISSING' };
+  }
+  if (
+    typeof body.confirmPassword === 'string' &&
+    body.confirmPassword &&
+    body.confirmPassword !== newPassword
+  ) {
+    return { outcome: 'CONFIRM_MISMATCH' };
+  }
+  // 统一企业级密码强度策略
+  const strengthError = validatePasswordStrength(newPassword);
+  if (strengthError) {
+    return { outcome: 'WEAK', message: strengthError };
+  }
+  return null;
+}
+
+/**
+ * 账户层校验：存在 → 当前口令正确 → 与当前不同 → 不命中复用历史。
+ *
+ * 「与当前相同」（SAME_PASSWORD）与「与更早的相同」（PASSWORD_REUSED）是两件事，
+ * 错误码必须分开：合并成一个码会让用户以为自己只是没改够。A→B→A 这种两步复用
+ * 上面那条 SAME_PASSWORD 挡不住（当前口令是 B），只能靠查历史。
+ *
+ * @param {object|null} user 已 select +password +passwordHistory 的文档
+ * @param {unknown} currentPassword
+ * @param {unknown} newPassword
+ * @param {{username: string}} ctx
+ * @returns {Promise<{outcome: string, historyDepth?: number}|null>}
+ */
+async function assertPasswordRotatable(user, currentPassword, newPassword, ctx) {
+  if (!user) {
+    return { outcome: 'USER_NOT_FOUND' };
+  }
+  const isMatch = await user.comparePassword(currentPassword);
+  if (!isMatch) {
+    return { outcome: 'CURRENT_WRONG' };
+  }
+  // 检查新密码是否与旧密码相同
+  if (await user.comparePassword(newPassword)) {
+    return { outcome: 'SAME_PASSWORD' };
+  }
+  if (matchesHistory(user.passwordHistory, newPassword)) {
+    logger.warn(`改密拒绝 - 新口令命中复用历史（最近 ${HISTORY_DEPTH} 条）`, {
+      username: ctx.username,
+    });
+    return { outcome: 'PASSWORD_REUSED', historyDepth: HISTORY_DEPTH };
+  }
+  return null;
+}
+
+/**
+ * 改密后的会话收口：吊销全部会话（tokenVersion 递增 + 缓存失效）→ 收敛会话表 → 审计。
+ *
+ * fail-closed：密码已落库，吊销失败绝不能静默吞掉——旧会话是否仍有效处于未知态，
+ * 返回 REVOKE_FAILED 让控制器如实告知「已改但未吊销」，而不是用 500 掩盖部分成功。
+ * 而会话表收敛用 Safe 版本：收敛失败只是「显示不准」，不能让改密请求整体失败。
+ *
+ * @param {object} user 已落库的文档
+ * @returns {Promise<{outcome: string, username: string}>}
+ */
+async function revokeSessionsAfterPasswordChange(user) {
+  try {
+    await invalidateUserTokens(user._id);
+  } catch (revokeErr) {
+    logger.error(`改密成功但会话吊销失败：${revokeErr.message}`, { username: user.username });
+    return { outcome: 'REVOKE_FAILED', username: user.username };
+  }
+  // 会话表须与 tokenVersion 同步收敛：tokenVersion 递增已让所有令牌失效，
+  // 但会话记录若仍是 active，「登录会话」界面会列出一批实际已掉线的设备，
+  // 用户按列表判断「账号是否被别人登录着」就会得到错误结论
+  await sessionService.revokeAllSessionsSafe(user._id, 'password_changed');
+  logger.info('用户修改密码', { username: user.username });
+  return { outcome: 'OK', username: user.username };
 }
 
 /**
@@ -1037,99 +1210,50 @@ async function refreshSession(refreshTokenRaw, ctx) {
 async function changeUserPassword(userId, body, ctx) {
   // ===== 口令密文轨（与明文轨双轨并存，LOGIN_ENCRYPT_STRICT=true 后明文轨由校验层关闭）=====
   // 密文轨解密后走原有校验流程（非空/强度检查对双轨同样生效）
-  let currentPassword;
-  if (typeof body.encCurrentPassword === 'string' && body.encCurrentPassword) {
-    try {
-      currentPassword = await decryptLoginCredential(body.encCurrentPassword, 'PASSWORD_CURRENT');
-    } catch (err) {
-      logger.warn('改密拒绝 - 当前口令密文无效', { username: ctx.username, code: err.code });
-      return { outcome: 'ENC_INVALID' };
-    }
-  } else {
-    currentPassword = body.currentPassword;
+  const current = await resolveCredentialTrack(
+    body.encCurrentPassword,
+    body.currentPassword,
+    'PASSWORD_CURRENT',
+    '当前口令',
+    ctx
+  );
+  if (!current.ok) {
+    return { outcome: current.outcome };
   }
 
-  let newPassword;
-  if (typeof body.encNewPassword === 'string' && body.encNewPassword) {
-    try {
-      newPassword = await decryptLoginCredential(body.encNewPassword, 'PASSWORD_NEW');
-    } catch (err) {
-      logger.warn('改密拒绝 - 新口令密文无效', { username: ctx.username, code: err.code });
-      return { outcome: 'ENC_INVALID' };
-    }
-  } else {
-    newPassword = body.newPassword;
+  const next = await resolveCredentialTrack(
+    body.encNewPassword,
+    body.newPassword,
+    'PASSWORD_NEW',
+    '新口令',
+    ctx
+  );
+  if (!next.ok) {
+    return { outcome: next.outcome };
   }
 
-  if (!currentPassword || !newPassword) {
-    return { outcome: 'MISSING' };
-  }
-
-  // 确认密码一致性（评价报告 #15 收敛点：原 securityController 内联比对，
-  // 密文轨下明文只有解密后才知道，因此统一在解密完成后于业务层校验。
-  // 客户端未携带 confirmPassword 时不强制——/api/auth/password 一直如此）
-  if (typeof body.confirmPassword === 'string' && body.confirmPassword) {
-    if (body.confirmPassword !== newPassword) {
-      return { outcome: 'CONFIRM_MISMATCH' };
-    }
-  }
-
-  // 统一企业级密码强度策略
-  const strengthError = validatePasswordStrength(newPassword);
-  if (strengthError) {
-    return { outcome: 'WEAK', message: strengthError };
+  const inputRejection = validatePasswordChangeInput(body, current.value, next.value);
+  if (inputRejection) {
+    return inputRejection;
   }
 
   const user = await User.findById(userId).select('+password +passwordHistory');
-  if (!user) {
-    return { outcome: 'USER_NOT_FOUND' };
+  const subjectRejection = await assertPasswordRotatable(user, current.value, next.value, ctx);
+  if (subjectRejection) {
+    return subjectRejection;
   }
 
-  const isMatch = await user.comparePassword(currentPassword);
-  if (!isMatch) {
-    return { outcome: 'CURRENT_WRONG' };
-  }
-
-  // 检查新密码是否与旧密码相同
-  if (await user.comparePassword(newPassword)) {
-    return { outcome: 'SAME_PASSWORD' };
-  }
-
-  // 复用历史：A→B→A 这种两步复用上面那条 SAME_PASSWORD 挡不住（当前口令是 B），
-  // 必须查历史。两条路径互补且错误码不同——「与当前相同」与「与更早的相同」
-  // 是两件事，合并成一个码会让用户以为自己只是没改够。
-  if (matchesHistory(user.passwordHistory, newPassword)) {
-    logger.warn(`改密拒绝 - 新口令命中复用历史（最近 ${HISTORY_DEPTH} 条）`, {
-      username: ctx.username,
-    });
-    return { outcome: 'PASSWORD_REUSED', historyDepth: HISTORY_DEPTH };
-  }
-
-  user.password = newPassword;
+  // 落库留在本函数体内，**不抽成 applyPasswordChange**：passwordHistory.test.js 的接线不变量
+  // 直接按「changeUserPassword 起点之后的文本」找 `user.passwordHistory = withPrevious(`，
+  // 抽走之后那条判据会红——而它守的正是「历史真的被写进去了」，不是一次代码整理可以豁免的。
+  user.password = next.value;
   user.passwordChangedAt = new Date();
   // 记的是**刚被替换掉的旧口令**：本次比较发生在写入之前，检查对象是
   // 「候选新口令 vs 既往口令」。当前口令由上面的 SAME_PASSWORD 单独判。
-  user.passwordHistory = withPrevious(user.passwordHistory, currentPassword);
+  user.passwordHistory = withPrevious(user.passwordHistory, current.value);
   await user.save();
 
-  // 改密后立即吊销该用户全部会话（tokenVersion 递增 + 缓存失效），并审计。
-  // fail-closed：密码已落库，吊销失败绝不能静默吞掉——旧会话是否仍有效处于未知态，
-  // 返回 REVOKE_FAILED 让控制器如实告知「已改但未吊销」，而不是用 500 掩盖部分成功
-  try {
-    await invalidateUserTokens(user._id);
-  } catch (revokeErr) {
-    logger.error(`改密成功但会话吊销失败：${revokeErr.message}`, { username: user.username });
-    return { outcome: 'REVOKE_FAILED', username: user.username };
-  }
-  // 会话表须与 tokenVersion 同步收敛：tokenVersion 递增已让所有令牌失效，
-  // 但会话记录若仍是 active，「登录会话」界面会列出一批实际已掉线的设备，
-  // 用户按列表判断「账号是否被别人登录着」就会得到错误结论。
-  // 用 Safe 版本：收敛失败只是「显示不准」，不能让改密请求整体失败
-  await sessionService.revokeAllSessionsSafe(user._id, 'password_changed');
-
-  logger.info('用户修改密码', { username: user.username });
-
-  return { outcome: 'OK', username: user.username };
+  return revokeSessionsAfterPasswordChange(user);
 }
 
 /**
