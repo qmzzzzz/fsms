@@ -330,11 +330,11 @@ const EXPECTED_DURABLE_REGISTRY = {
   'controllers/mfaController.js#mfaEnable': { recordDurably: 1 },
   'controllers/mfaController.js#mfaEnroll': { recordDurably: 1 },
   'controllers/mfaController.js#regenerateRecoveryCodes': { recordDurably: 1 },
-  'controllers/securityController.js#changePasswordSecure': { recordDurably: 1 },
-  'controllers/securityController.js#resetUserMfa': { recordDurably: 1 },
-  'controllers/securityController.js#setLoginCaptchaConfig': { recordDurably: 1 },
-  'controllers/securityController.js#setRegisterCaptchaConfig': { recordDurably: 1 },
-  'controllers/securityController.js#setRegistrationConfig': { recordDurably: 1 },
+  'controllers/securityController/account.js#changePasswordSecure': { recordDurably: 1 },
+  'controllers/securityController/admin.js#resetUserMfa': { recordDurably: 1 },
+  'controllers/securityController/config.js#setLoginCaptchaConfig': { recordDurably: 1 },
+  'controllers/securityController/config.js#setRegisterCaptchaConfig': { recordDurably: 1 },
+  'controllers/securityController/config.js#setRegistrationConfig': { recordDurably: 1 },
 };
 
 // ===== 用例 =====
@@ -348,8 +348,8 @@ const EXPECTED_DURABLE_REGISTRY = {
 // 键名一律为本轮实测原样（见 zztmpctl/b88red2.txt 的 Received 块），不是推演值。
 const EXPECTED_REGISTRY = {
   'controllers/auditController.js#verifyAuditChainIntegrity': { [GUARD_SWALLOW]: 1 },
-  'controllers/securityController.js#viewSensitiveData': { [GUARD_RETHROW]: 1 },
-  'controllers/securityController.js#reportSuspiciousActivity': { [GUARD_RETHROW]: 1 },
+  'controllers/securityController/sensitive.js#viewSensitiveData': { [GUARD_RETHROW]: 1 },
+  'controllers/securityController/sensitive.js#reportSuspiciousActivity': { [GUARD_RETHROW]: 1 },
 };
 
 beforeEach(() => {
@@ -479,8 +479,8 @@ describe('skipGlobalAudit 手写审计的失败通路', () => {
       ([, guards]) => guards[GUARD_RETHROW]
     );
     expect(rethrowOnly.map(([k]) => k).sort()).toEqual([
-      'controllers/securityController.js#reportSuspiciousActivity',
-      'controllers/securityController.js#viewSensitiveData',
+      'controllers/securityController/sensitive.js#reportSuspiciousActivity',
+      'controllers/securityController/sensitive.js#viewSensitiveData',
     ]);
     expect(swallowOnly.map(([k]) => k)).toEqual([
       'controllers/auditController.js#verifyAuditChainIntegrity',

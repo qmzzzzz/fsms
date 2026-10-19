@@ -132,7 +132,7 @@ describe('接线不变量（语义对了但没接线，是这类修复最常见�
     // 用户看到的是"服务器故障"而不是"这个密码用过"，且改密静默失败
     const fs = require('fs');
     const path = require('path');
-    for (const file of ['authController/profile.js', 'securityController.js']) {
+    for (const file of ['authController/profile.js', 'securityController/account.js']) {
       const src = fs.readFileSync(path.join(__dirname, '../../controllers', file), 'utf8');
       const caseAt = src.indexOf("case 'PASSWORD_REUSED':");
       expect(caseAt).toBeGreaterThan(-1);

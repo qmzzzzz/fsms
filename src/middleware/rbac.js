@@ -96,7 +96,7 @@ const checkPermission = (requiredPermissions, logic = 'OR') => {
  * 查看他人敏感信息需 system:read；查看本人敏感信息则免鉴权（#9）
  *
  * 背景（评价报告 #9）：/api/security/view-sensitive 原实现一律要求
- * system:read，但控制器查询的是调用者本人数据（securityController.js:239
+ * system:read，但控制器查询的是调用者本人数据（controllers/securityController/sensitive.js:69
  * `User.findById(req.user.userId)`），普通角色（消防员/访客）查看本人
  * 手机号/邮箱也拿不到该权限 → 403。正确口径是：
  *   - 本人查看 → 放行（数据范围即本人，二次验证已由 requireReAuthentication 兜底）

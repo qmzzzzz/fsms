@@ -33,9 +33,15 @@ const MODELS_DIR = path.join(__dirname, '../../models');
 // controllers/ 的路径**（含子目录），总数不变。
 // 2026-10-19 批 3c-2 拆分 userController.js 后：其 0 值键随文件移除退场，
 // 新目录各文件实测 0 直连，按"未登记新 controller 一律 0 容忍"判据覆盖，无需登记。
+// 2026-10-19 批 3c-3 拆分 securityController.js 后：原 5 处直连中 3 处（User/AuditLog/
+// SystemConfig）集中进 shared.js；另 2 处函数内惰性直连随迁 admin.js（Role）与
+// overview.js（AuditLog），搬家后相对深度已同步加深一层。键名是相对 controllers/ 的
+// 路径（含子目录），总数不变。
 const GRANDFATHERED = {
   'ipListController.js': 6,
-  'securityController.js': 5,
+  'securityController/shared.js': 3,
+  'securityController/admin.js': 1,
+  'securityController/overview.js': 1,
   'reportController.js': 1,
   'roleController.js': 0,
   'authController/credentials.js': 1,

@@ -262,7 +262,7 @@ describe('批次H 工程与部署加固回归', () => {
     test('AuditLog 的 TTL 与 logger 的 maxFiles 引用同一声明（不再各自解析）', () => {
       const auditLogSrc = readRoot('src/models/AuditLog.js');
       const loggerSrc = readRoot('src/utils/logger.js');
-      const ctrlSrc = readRoot('src/controllers/securityController.js');
+      const ctrlSrc = readRoot('src/controllers/securityController/overview.js');
 
       for (const src of [auditLogSrc, loggerSrc, ctrlSrc]) {
         // 不得再出现各自 parseInt(process.env.AUDIT_RETENTION_DAYS)

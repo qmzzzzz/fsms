@@ -196,7 +196,7 @@ describe('停用角色不参与授权判定', () => {
     // maxRoleLevel([]) 返回 -Infinity，会让 `opLevel <= targetLevel` 对所有 system:read 持有者恒 false
     // → 该账号 PII 全体裸奔（真实 fail-open）。故此处反向钉死：不带 match + 空角色显式拒绝。
     const sec = fs
-      .readFileSync(path.join(root, 'controllers/securityController.js'), 'utf8')
+      .readFileSync(path.join(root, 'controllers/securityController/sensitive.js'), 'utf8')
       .replace(/\r\n/g, '\n');
     const targetPop = sec.match(/\.populate\(\{[^}]*path:\s*'roles'[^}]*\}\)/);
     expect(targetPop).not.toBeNull();

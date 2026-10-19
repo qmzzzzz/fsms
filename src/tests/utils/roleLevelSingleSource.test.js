@@ -136,7 +136,8 @@ describe('授权判定量的单一事实来源', () => {
       'src/controllers/userController/update.js',
       'src/controllers/userController/roles.js',
       'src/controllers/userController/delete.js',
-      'src/controllers/securityController.js',
+      'src/controllers/securityController/sensitive.js',
+      'src/controllers/securityController/admin.js',
       'src/controllers/rolePermissionController.js',
       'src/services/authService/profile.js',
     ];

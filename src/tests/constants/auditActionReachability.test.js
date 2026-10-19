@@ -124,7 +124,7 @@ function scanRoutes() {
  * 源码写入集合 —— 与正向对账闸**共用同一个扫描器**（helpers/auditWriteSites）。
  *
  * 原先本文件自带一套裸正则全文扫 `action: '...'`，于是**只读**上下文也被算成写入点：
- * `AuditLog.countDocuments({ action: 'login_failed' })`（securityController.js:306、
+ * `AuditLog.countDocuments({ action: 'login_failed' })`（controllers/securityController/overview.js:41、
  * securityAlert.js:399 同类）。后果不是"多算了几条"这么轻——本闸的判据是
  * 「白名单 ⊆ 可达集合」，多算的写入点会把"其实没人写"的条目洗成"可达"，于是
  * 实测把 recordLogin 源码里的 'login_failed' 改成未登记的名字，本闸 5 例照旧全绿

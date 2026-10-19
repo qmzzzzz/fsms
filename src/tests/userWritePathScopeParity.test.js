@@ -1,6 +1,6 @@
 /**
  * 被测对象：src/controllers/userController/ 的 updateUser / deleteUser / batchDeleteUsers /
- *   assignRoles，以及 src/controllers/securityController.js 的 toggleUserLock / resetUserMfa
+ *   assignRoles，以及 src/controllers/securityController/admin.js 的 toggleUserLock / resetUserMfa
  *   （用户对象六个写入口）。
  * 守护的不变式：写路径与读路径（getUserById）数据范围判定同口径——目标用户若在操作者
  *   可见域之外，六个写入口一律 403 USER_SCOPE_FORBIDDEN；可见域内的写操作不受影响
@@ -12,7 +12,7 @@
  *   两处做过"注掉守卫 → 复跑转红 → 还原字节一致"的变异复核。
  * 既往审计边界：只覆盖六个对象级写入口的范围闸。层级保护、内置超管锁、字段级范围闸
  *   （department/allowedIPs）、批量上限与 ID 格式校验由各自既有用例覆盖，本文件不重复；
- *   securityController 的 toggleUserLock 服务层逻辑（authService.setUserLockStatus）
+ *   securityController/admin.js 的 toggleUserLock 服务层逻辑（authService.setUserLockStatus）
  *   未逐行覆盖，仅验证其控制器前置闸。
  * 命名沿革：无（首版，2026-09-21 审计员 B 新增）。
  */

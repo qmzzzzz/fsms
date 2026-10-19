@@ -120,8 +120,8 @@ const DECLARED_DYNAMIC = [
     codes: ['ROLE_DELETE_HIGHER_LEVEL_FORBIDDEN', 'ROLE_UPDATE_HIGHER_LEVEL_FORBIDDEN'],
   },
   {
-    site: 'src/controllers/securityController.js|targetViolation.code',
-    trace: { file: 'src/controllers/securityController.js', props: ['notFound', 'outOfScope'] },
+    site: 'src/controllers/securityController/sensitive.js|targetViolation.code',
+    trace: { file: 'src/controllers/securityController/sensitive.js', props: ['notFound', 'outOfScope'] },
     codes: [
       'ALARM_NOT_FOUND',
       'ALARM_VIEW_FORBIDDEN',

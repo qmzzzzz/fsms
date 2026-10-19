@@ -22,8 +22,8 @@
  *     修复（2026-09-20，用户选定「最小修复」）：**仅在本文件 `dataType=email` 用例末尾加 1 条断言**
  *     （不新增文件 / 不新增用例 / 不新增场景），锁 `action:'view_sensitive_data'`
  *     + `username`(操作者) 与 `targetUsername`(被查看者) 不得混同（L-06）。
- *     原缺口实测：`securityController.js:253-266` 整段删掉后 66 套 / 717 例仍全绿（`deliverables/AGENT工作总账与待办-2026-09-21.md` §2.3 审计链与合规留痕）。
- *     复核（2026-09-20 **变异实测**，非静态）：删除 `securityController.js:253-266` 后，该 controller 的
+ *     原缺口实测：`controllers/securityController/sensitive.js:44-64` 整段删掉后 66 套 / 717 例仍全绿（`deliverables/AGENT工作总账与待办-2026-09-21.md` §2.3 审计链与合规留痕）。
+ *     复核（2026-09-20 **变异实测**，非静态）：删除 `controllers/securityController/sensitive.js:44-64` 后，该 controller 的
  *     66 套 / 717 个 related 用例**全绿**；同位置插 `throw` 则 5 条用例被杀 ⇒ 用例集确实执行该代码、
  *     只是不检查这条审计。唯一碰到该 action 的 `models/auditLogFieldRetention.test.js:74-90` 是
  *     **模型层直写**，验的是 schema 能否存 `dataType`，对删除完全不敏感。
@@ -566,7 +566,7 @@ describe('viewSensitiveData 分支补齐', () => {
     expect(res.payload.data.type).toBe('email');
     expect(res.payload.data.full).toBe('secret@example.com');
     // F-51 最小修复（2026-09-20，用户选定「最小修复」）：本操作已设 skipGlobalAudit
-    // （securityController.js:253），下面这条审计是**唯一留痕**——此前全仓无任何用例
+    // （controllers/securityController/sensitive.js:44），下面这条审计是**唯一留痕**——此前全仓无任何用例
     // 断言它落库（实测：该段整删后 66 套 / 717 例仍全绿，见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.3 审计链与合规留痕）。
     // 同时锁 L-06：username 必须是**操作者**、targetUsername 才是**被查看者**，不得混同。
     expect(mockAuditLogCreate).toHaveBeenCalledWith(

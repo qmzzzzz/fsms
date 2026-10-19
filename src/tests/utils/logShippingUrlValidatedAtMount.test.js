@@ -190,7 +190,7 @@ describe('F-215 ③：合规面板的 shippingEnabled 不再回答"配过变量"
   const bannedShape = (src) => BANNED.test(jsCodeOnly(src));
 
   test('面板字段读挂载态谓词', () => {
-    const view = codeView('src/controllers/securityController.js');
+    const view = codeView('src/controllers/securityController/overview.js');
     const from = view.indexOf('shippingEnabled:');
     expect(from).toBeGreaterThan(-1);
     expect(view.slice(from, from + 240)).toContain('logger.isShippingEnabled(');

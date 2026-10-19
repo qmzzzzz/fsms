@@ -158,7 +158,16 @@ module.exports = {
     './src/controllers/authController/session.js': { branches: 89, functions: 97 },
     './src/controllers/authController/shared.js': { branches: 95, functions: 97 },
     // 2026-08-28 securityQuick/securityDeep 后实测
-    './src/controllers/securityController.js': { branches: 86, functions: 93 },
+    // 2026-10-19 批 3c：securityController.js 拆为 7 文件目录，原单文件键拆为逐文件键；
+    // 数值按拆分后全量实测重设（br -5 / fn -3，向下取整）：
+    // account 87.09/100、admin 96.66/100、overview 91.42/100、sensitive 94.28/100，config/index/shared 无分支。
+    './src/controllers/securityController/account.js': { branches: 82, functions: 97 },
+    './src/controllers/securityController/admin.js': { branches: 91, functions: 97 },
+    './src/controllers/securityController/config.js': { branches: 95, functions: 97 },
+    './src/controllers/securityController/index.js': { branches: 95, functions: 97 },
+    './src/controllers/securityController/overview.js': { branches: 86, functions: 97 },
+    './src/controllers/securityController/sensitive.js': { branches: 89, functions: 97 },
+    './src/controllers/securityController/shared.js': { branches: 95, functions: 97 },
     // 设备级会话管理（登录会话）：新增模块，随功能一并补齐了
     // sessionService.test.js（39 例）与 sessionManagement.test.js（18 例）。
     //

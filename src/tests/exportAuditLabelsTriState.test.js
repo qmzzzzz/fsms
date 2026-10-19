@@ -16,7 +16,7 @@
  * `duration` 同族：`item.duration ? ... : '-'` 把合法的 `0`（同一毫秒内返回，
  * 缓存命中时是常态）写成「未记录时长」；而 CSV 导出走的是原样 `csvEscape`，
  * 同一个字段两分钟内的两份合规材料一个给 `0ms` 一个给 `-`。
- * 本仓已有判例认定 0 合法：`securityController.js` 的 `duration: alert.duration ?? 0`。
+ * 本仓已有判例认定 0 合法：`securityController/overview.js` 的 `duration: alert.duration ?? 0`。
  *
  * 四格：
  *   ① 档位对拍：对 success×riskLevel 的全形状矩阵，导出 label 命中集必须与

@@ -1,5 +1,5 @@
 /**
- * S5 改密密文轨分支补齐（securityController.changePasswordSecure 99-119）
+ * S5 改密密文轨分支补齐（controllers/securityController/account.js 的 changePasswordSecure）
  *
  * 并行开发为 /api/security/change-password 增加了与 /api/auth/password 同口径的
  * ECDH 信封密文轨（encCurrentPassword / encNewPassword），新增分支未测导致
