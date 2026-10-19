@@ -193,8 +193,8 @@ describe('第 2 组 · 真实站点的基数台账', () => {
     expect(wired.length).toBe(5);
     const sites = wired.map((x) => x.rel).sort();
     expect(sites).toEqual([
-      'src/services/authService.js',
-      'src/services/authService.js',
+      'src/services/authService/profile.js',
+      'src/services/authService/profile.js',
       'src/services/roleService.js',
       'src/services/userService.js',
       'src/services/userService.js',

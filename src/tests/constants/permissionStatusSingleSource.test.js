@@ -101,16 +101,19 @@ describe('引用点数量对账：原副本位置必须都已改成引用', () =
     // 答案（refresh 用 `!== 'active'`）。按枚举拒绝的后果：USER_STATUS 加一档、或裸写进一个
     // 清单外的值（备份还原）时，这两处**完整放行**而 refresh 拒绝。
     // 本文件原先的 files 清单不含这两处，所以门禁看不见它们——现在按写法对账。
-    const gate = (f) => {
+    const gate = (f, constantsRequirePath) => {
       const src = codeOnly(read(f));
       expect(src).toContain('!== USER_STATUS.ACTIVE');
-      expect(src).toContain("require('../utils/constants')");
+      expect(src).toContain(`require('${constantsRequirePath}')`);
     };
-    gate('src/services/authService.js');
-    gate('src/middleware/auth.js');
-    // 自证前提：字面量 'inactive' 在 authService 里仍然合法存在（锁定状态机 1195/1203 读它），
-    // 所以本门禁判的是"可用性判据的写法"，不是"文件里不许出现这个词"。
-    expect(codeOnly(read('src/services/authService.js'))).toContain("'inactive'");
+    // authService 已按主题拆成子模块：登录侧的可用性判据在 authService/login.js，
+    // 它的 utils/ 依赖比拆分前深一层，故 require 路径随模块层级走。
+    gate('src/services/authService/login.js', '../../utils/constants');
+    gate('src/middleware/auth.js', '../utils/constants');
+    // 自证前提：字面量 'inactive' 在 authService 里仍然合法存在（锁定状态机读它，
+    // 现落在 authService/profile.js），所以本门禁判的是「可用性判据的写法」，
+    // 不是「文件里不许出现这个词」
+    expect(codeOnly(read('src/services/authService/profile.js'))).toContain("'inactive'");
     expect(codeOnly(read('src/middleware/auth.js'))).not.toContain("'inactive'");
   });
 

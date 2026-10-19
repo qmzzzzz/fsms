@@ -154,7 +154,10 @@ describe('停用角色不参与授权判定', () => {
     const OPERATOR_FILES = [
       'middleware/auth.js',
       'services/websocketService.js',
-      'services/authService.js',
+      // authService 已按主题拆分：登录响应快照在 session.js，会话刷新的权限快照在 token.js，
+      // 两者都是「操作者侧」——漏掉任一个，这个不变量就只剩一半覆盖
+      'services/authService/session.js',
+      'services/authService/token.js',
     ];
     const root = path.join(__dirname, '..');
     const violations = [];

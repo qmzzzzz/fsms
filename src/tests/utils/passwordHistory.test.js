@@ -100,7 +100,7 @@ describe('接线不变量（语义对了但没接线，是这类修复最常见�
     // 漏了这条 ⇒ user.passwordHistory 恒为 undefined ⇒ matchesHistory 恒 false
     // ⇒ 复用防线静默归零，而下面所有语义测试仍然全绿
     const src = require('fs').readFileSync(
-      require('path').join(__dirname, '../../services/authService.js'),
+      require('path').join(__dirname, '../../services/authService/password.js'),
       'utf8'
     );
     const fn = src.slice(src.indexOf('async function changeUserPassword'));
@@ -109,7 +109,7 @@ describe('接线不变量（语义对了但没接线，是这类修复最常见�
 
   test('改密成功后必须写入被替换掉的旧口令（否则历史永远是空的）', () => {
     const src = require('fs').readFileSync(
-      require('path').join(__dirname, '../../services/authService.js'),
+      require('path').join(__dirname, '../../services/authService/password.js'),
       'utf8'
     );
     const fn = src.slice(src.indexOf('async function changeUserPassword'));

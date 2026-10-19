@@ -12,7 +12,7 @@
  *
  * 枚举结果（实测 5 处，逐条归队）：3 处引用 utils/tokenPurpose，2 处没有——
  *   · `src/middleware/logoutAuth.js:92`
- *   · `src/services/authService.js`（revokeTokensOnLogout）
+ *   · `src/services/authService/token.js`（revokeTokensOnLogout）
  * 两处都**不是**缺陷，但"不是缺陷"必须由行为证明，不能由白名单的名字证明：
  *   · 登出侧那次验签只决定"走哪条身份通路"，权威判定仍然过 `authenticate()`（用途闸在它里面），
  *     用例②实测：两把密钥配成同值时拿 refresh 当 Bearer access 打登出入口 ⇒ 401 AUTH_TOKEN_INVALID；
@@ -82,7 +82,7 @@ const inventory = () => {
 /** 豁免清单：文件 → 这条豁免的**行为根据**（下面各有一条用例证它） */
 const EXEMPTIONS = {
   'src/middleware/logoutAuth.js': '只决定走哪条身份通路，权威判定仍在 authenticate()（用例②）',
-  'src/services/authService.js': '唯一产物是写黑名单，失效方向=多吊销（用例③）',
+  'src/services/authService/token.js': '唯一产物是写黑名单，失效方向=多吊销（用例③）',
 };
 
 const rows = inventory();
@@ -104,7 +104,7 @@ describe('入口清单：用 access 密钥验签的地方必须引用用途判�
     expect(rows.map((r) => r.rel)).toEqual([
       'src/middleware/auth.js',
       'src/middleware/logoutAuth.js',
-      'src/services/authService.js',
+      'src/services/authService/token.js',
       'src/services/tokenService.js',
       'src/services/websocketService.js',
     ]);

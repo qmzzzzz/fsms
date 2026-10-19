@@ -135,7 +135,7 @@ describe('授权判定量的单一事实来源', () => {
       'src/controllers/userController.js',
       'src/controllers/securityController.js',
       'src/controllers/rolePermissionController.js',
-      'src/services/authService.js',
+      'src/services/authService/profile.js',
     ];
     for (const rel of consumers) {
       const code = stripComments(readSource(rel));

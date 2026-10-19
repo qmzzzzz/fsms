@@ -44,7 +44,7 @@ const literalToRegExp = (text) => {
 };
 
 const CONSUMERS = [
-  { file: 'services/authService.js', what: '登录侧恢复码校验（大写化后判定）' },
+  { file: 'services/authService/failureAndMfa.js', what: '登录侧恢复码校验（大写化后判定）' },
   { file: 'routes/authRoutes.js', what: '入参校验（与 6 位动态口令并列）' },
 ];
 

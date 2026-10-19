@@ -7,7 +7,7 @@
  *
  * 本轮实测（2026-10-03）：这类站点 20 处——8 处当场可证失实（DEBT）、6 处正确但未署名（LIVE）、
  * 4 处尚未复核（UNVERIFIED）、2 处指向依赖内部行号（EXTERNAL）。
- * CENSUS total=20 DEBT=8 LIVE=6 UNVERIFIED=4 EXTERNAL=2
+ * CENSUS total=20 DEBT=7 LIVE=7 UNVERIFIED=4 EXTERNAL=2
  * 上面这行不是排版：最后一条用例把它读回来和台账逐项对撞。写散文的计数会被改台账的人漏掉
  * （第 15 轮就出现过"闸对、文档写着 4 处、闸里断言 5 处"），机器可读的一行才能被闸管住。
  *
@@ -128,30 +128,28 @@ const LEDGER = [
   },
 
   {
-    site: 'src/services/authService.js',
-    siteLine: 434,
-    raw: '上方 210/233 行',
-    status: 'DEBT',
-    wrongFrom: 210,
-    wrongTo: 233,
-    referent: 'src/services/authService.js',
-    from: 254,
-    to: 320,
+    site: 'src/services/authService/login.js',
+    siteLine: 284,
+    raw: '上方 212/228 行',
+    status: 'LIVE',
+    referent: 'src/services/authService/login.js',
+    from: 212,
+    to: 228,
     mustRead: 'checkBruteForce(',
-    note: '同口径真实站点是 :254 与 :320；:210 是 @returns JSDoc 行、:233 是"查找用户"注释（他人 M，不代改）。站点与指代坐标 2026-10-09 各随本文件行数迁移：432→425、247/318→245/311（本轮把 registerUser/resolveLoginPassword 里两份手写 captcha try/catch 收口到 SystemConfig.captchaSwitch，共 -7 行；锚上写的错号 210/233 是原文，不动）。2026-10-16 A3（User.email at-rest 加密）在本文件 registerUser/updateUserProfile 的查重处共 +9 行 ⇒ 425→434、245/311→254/320。',
+    note: '锚曾长期写着「上方 210/233 行」：210 是 @returns JSDoc 行、233 是"查找用户"注释（他人 M，不代改）。2026-10-18 lint 批 3a 把 authService 拆成子模块后，两处真站点随模块头迁到 login.js 的 :212 与 :228，而 210/233 这对旧坐标恰好把这两行夹在中间——台账的「锚仍错着」判据（区间读不出真符号）从此再也证伪不了它。继续原样留着，等于把一对看起来对、其实差 2 行与 5 行的坐标固化进源码，故按本闸自身规则（改对了本闸红、要求晋升）把锚改对并晋升为 LIVE，原始错号留在本条 note 里。',
   },
   {
-    site: 'src/services/authService.js',
-    siteLine: 1417,
+    site: 'src/services/authService/profile.js',
+    siteLine: 182,
     raw: '（:350）',
     status: 'DEBT',
     wrongFrom: 350,
     wrongTo: 350,
-    referent: 'src/services/authService.js',
-    from: 230,
-    to: 230,
+    referent: 'src/services/authService/login.js',
+    from: 80,
+    to: 80,
     mustRead: 'async function loginUser',
-    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动；2026-10-18 lint 批 1 把 setUserLockStatus 的判据/写入计划抽成具名函数（本注释所在块 +5 行）⇒ 1288→1293；2026-10-18 lint 批 2 把 refreshSession / changeUserPassword 拆成具名步骤函数（两函数合计 +123 行，均在站点之上）⇒ 1293→1417，指代目标 :230 在它们之上、不受影响',
+    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动；2026-10-18 lint 批 1 把 setUserLockStatus 的判据/写入计划抽成具名函数（本注释所在块 +5 行）⇒ 1288→1293；2026-10-18 lint 批 2 把 refreshSession / changeUserPassword 拆成具名步骤函数（两函数合计 +123 行，均在站点之上）⇒ 1293→1417，指代目标 :230 在它们之上、不受影响；2026-10-18 lint 批 3a 把 authService 拆成子模块后，锚随 setUserLockStatus 落到 profile.js（1417→182），指代目标 loginUser 落到 login.js（:230→:80）——两者不再同文件，这正是本台账坚持用「文件限定坐标」而不是裸行号的原因。',
   },
   {
     site: 'src/services/permissionService.js',

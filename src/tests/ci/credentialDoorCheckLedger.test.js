@@ -4,7 +4,7 @@
  * 凭证门与账户可校验：谁在铸造/校验凭证，它有没有复查账户状态（机器差集 + 双向登记）
  *
  * 起因（第 23 轮主动审计线）：全仓有 14 个"铸造或校验凭证"的调用点，分布在 7 个文件里。
- * 其中 `services/authService.js` 的 `refreshSession` 校验了 `status !== 'active'`，
+ * 其中 `services/authService/token.js` 的 `refreshSession` 校验了 `status !== 'active'`，
  * 却**没有**校验 `lockUntil`；而另外三扇门（`loginUser`、`middleware/auth.js` 的
  * `assertAccountUsable`、websocket 票据）都校验了。这个不对称本身不是可利用漏洞
  * （refresh 换出来的 access 令牌仍会被 `assertAccountUsable` 拒掉），真正的问题是：
@@ -29,7 +29,7 @@
  * 真实树与合成反例**走同一条函数**；负控用的是"喂给采集器一张假文件表"，
  * 而不是另写一份尺子。
  *
- * 一条本仓特有的实现约束（实测，不是通用建议）：仓库行尾混用——`services/authService.js`
+ * 一条本仓特有的实现约束（实测，不是通用建议）：仓库行尾混用——`services/authService/*.js`
  * 与 `middleware/auth.js` 是 CRLF，`middleware/logoutAuth.js` 是 LF。
  * 所以本闸所有分行一律 `split(/\r?\n/)`，跨行匹配前先按目标文件自己的行尾归一；
  * 用 `split('\n')` 的静态闸在 CRLF 文件上会把 `\r` 留在行尾，`$` 锚与"整行相等"判据静默失效。
@@ -207,22 +207,22 @@ const LEDGER = {
     verdict: 'deliberate-waiver',
     why: '同上：登出入口必须对已过期/已锁定账户同样开放，否则吊销通道被账户状态挡住',
   },
-  'services/authService.js#issueRevocableTokenPair': {
+  'services/authService/session.js#issueRevocableTokenPair': {
     role: 'primitive',
     mint: true,
     verify: false,
     checksStatus: false,
     checksLock: false,
-    lockWhere: 'services/authService.js#assertAccountUsable',
+    lockWhere: 'services/authService/login.js#assertAccountUsable',
     why:
-      '签发原语，实测只有两个调用点：services/authService.js:190（registerUser） 与 services/authService.js:873（issueLoginSession）。' +
-      '登录链的账户复查在 services/authService.js:259（loginUser） 委托的 services/authService.js:339（assertAccountUsable，lockUntil 判定在 services/authService.js:365）' +
+      '签发原语，实测只有两个调用点：services/authService/session.js:107（registerUser） 与 services/authService/session.js:236（issueLoginSession）。' +
+      '登录链的账户复查在 services/authService/login.js:109（loginUser） 委托的 services/authService/login.js:189（assertAccountUsable，lockUntil 判定在 services/authService/login.js:215）' +
       '——注意 loginUser **自己函数体内没有** lockUntil/status（实测），所以委托对象必须写这道关真正落笔的函数；' +
-      '注册链的账户是本次 services/authService.js:175（User.create） 新建的文档，lockUntil 不存在。' +
+      '注册链的账户是本次 services/authService/session.js:92（User.create） 新建的文档，lockUntil 不存在。' +
       '注意本闸不做跨函数数据流：若将来把注册改成"允许认领既有账号"，没有用例会自动变红，' +
       '这条豁免要**人工**重登（这是登记式台账的固有盲区，写明以免被当成"闸会提醒我"）',
   },
-  'services/authService.js#refreshSession': {
+  'services/authService/token.js#refreshSession': {
     role: 'entry',
     mint: true,
     verify: true,
@@ -231,14 +231,14 @@ const LEDGER = {
     lockWhere: null,
     verdict: 'needs-decision',
     why:
-      '【本闸要人看的不对称，实测非推测】刷新门在自己函数体里查了 status（:924 ' +
+      '【本闸要人看的不对称，实测非推测】刷新门在自己函数体里查了 status（services/authService/token.js:175 ' +
       "`user.status !== 'active'`）、allowedIPs、passwordChangedAt、tokenVersion 与设备会话，" +
       '唯独不查 lockUntil ⇒ 临时锁定期间仍可轮换出新一对凭证。' +
       '今天不构成提权：换出来的 access 令牌一进 authenticate 就被 assertAccountUsable 的 lockUntil 分支拒掉。' +
       '这里钉的是**现状**而不是"这样才对"。补检查属行为变更（锁定用户的前端会在 10 分钟里连 cookie 都换不动），' +
       '需 owner 拍板；拍板补上之后请把本条改成 checksLock: true —— 本闸会红着提醒你别忘改台账',
   },
-  'services/authService.js#revokeOneRefreshToken': {
+  'services/authService/token.js#revokeOneRefreshToken': {
     role: 'primitive',
     mint: false,
     verify: true,
@@ -247,7 +247,7 @@ const LEDGER = {
     lockWhere: null,
     why: '吊销路径的原子消费原语：越"不检查账户状态"越好，禁用/锁定账户也必须能完成吊销',
   },
-  'services/authService.js#isForeignRefreshToken': {
+  'services/authService/token.js#isForeignRefreshToken': {
     role: 'primitive',
     mint: false,
     verify: true,
@@ -260,7 +260,7 @@ const LEDGER = {
       '否则被锁定的用户永远清不掉自己手里的令牌（比留着更危险）。' +
       '它只做判别不做消费——返回 true 时上层整次拒绝登出，一枚令牌都不会进黑名单。',
   },
-  'services/authService.js#revokeTokensOnLogout': {
+  'services/authService/token.js#revokeTokensOnLogout': {
     role: 'primitive',
     mint: false,
     verify: true,
@@ -403,10 +403,10 @@ describe('凭证门集合与账户复查形状（双向登记 + 判定顺序）'
     expect(ws.checksLock).toBe(true);
 
     // 同名委托实测有**两份实现**（本仓的命名冲突，实测不是推测）：
-    // services/authService.js:339 的 assertAccountUsable 是 async、带口令/风控入参并会写审计；
+    // services/authService/login.js:189 的 assertAccountUsable 是 async、带口令/风控入参并会写审计；
     // middleware/auth.js:283 的同名函数是同步的 res 错误码助手，只看账户档。
     // ⇒ 本闸的 lockWhere 一律要求"文件限定"，`assertAccountUsable` 这种裸名指向不了任何一处。
-    const svcBody = bodyFor(clean, 'services/authService.js#assertAccountUsable');
+    const svcBody = bodyFor(clean, 'services/authService/login.js#assertAccountUsable');
     const mwBody = bodyFor(clean, 'middleware/auth.js#assertAccountUsable');
     expect(typeof svcBody).toBe('string');
     expect(typeof mwBody).toBe('string');
@@ -426,7 +426,7 @@ describe('凭证门集合与账户复查形状（双向登记 + 判定顺序）'
       .sort();
     expect(naked).toEqual([
       'middleware/logoutAuth.js#authenticateForLogout',
-      'services/authService.js#refreshSession',
+      'services/authService/token.js#refreshSession',
       'services/tokenService.js#isAccessTokenValid',
       'services/tokenService.js#isRefreshTokenValid',
     ]);
@@ -437,7 +437,7 @@ describe('凭证门集合与账户复查形状（双向登记 + 判定顺序）'
     // 要求把它从名单里删掉（而不是留一条已经失效的"待决"记录骗过后人）。
     const needsDecision = naked.filter((k) => LEDGER[k].verdict === 'needs-decision').sort();
     expect(needsDecision).toEqual([
-      'services/authService.js#refreshSession',
+      'services/authService/token.js#refreshSession',
       'services/tokenService.js#isAccessTokenValid',
       'services/tokenService.js#isRefreshTokenValid',
     ]);
@@ -477,9 +477,9 @@ describe('凭证门集合与账户复查形状（双向登记 + 判定顺序）'
     const minting = registeredKeys.filter(
       (k) => LEDGER[k].role === 'entry' && LEDGER[k].mint && !LEDGER[k].checksLock
     );
-    expect(minting).toEqual(['services/authService.js#refreshSession']);
+    expect(minting).toEqual(['services/authService/token.js#refreshSession']);
     // 结论必须由实测支撑而不是只读台账：实测的 mint/lock 形状要与声明一致
-    const m = doors.get('services/authService.js#refreshSession');
+    const m = doors.get('services/authService/token.js#refreshSession');
     expect({ mint: m.mint, lock: m.checksLock, status: m.checksStatus }).toEqual({
       mint: true,
       lock: false,
