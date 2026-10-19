@@ -11,7 +11,7 @@
  *
  * 但实测有两处降级**完全没有信号**，且都属于「已修的同类漏了一处」：
  *   1. `services/captchaService.js`：Redis 就绪但计数命令报错时，上限判定被跳过。
- *      唯一痕迹是 `sharedCache.js:432` 的 `logger.debug`，而生产默认 `LOG_LEVEL=info`
+ *      唯一痕迹是 `sharedCache/index.js:330` 的 `logger.debug`，而生产默认 `LOG_LEVEL=info`
  *      （`utils/logger.js:85`）⇒ **debug 不落盘**。即：没有日志、没有指标、没有告警。
  *   2. `models/SystemConfig.js` 的验证码开关：DB 故障 → 静态默认（fail-open），
  *      同一个 try/catch 在 **3 个调用点**各复刻一份，全都没有信号。

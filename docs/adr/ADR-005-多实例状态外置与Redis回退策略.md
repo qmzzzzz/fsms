@@ -2,7 +2,7 @@
 
 - **状态**：已接受
 - **日期**：2026-08-30
-- **涉及**：`src/services/sharedCache.js`、`src/middleware/rateLimit.js`、`src/services/captchaService.js`、`src/utils/loginCipher.js`、`src/middleware/auth.js`、`src/services/websocketService.js`、`src/utils/auditChain.js`；优化清单 R-3 / M-1 / L-4 / A-1 / O-15
+- **涉及**：`src/services/sharedCache/`（2026-10-19 拆分自单文件）、`src/middleware/rateLimit.js`、`src/services/captchaService.js`、`src/utils/loginCipher.js`、`src/middleware/auth.js`、`src/services/websocketService.js`、`src/utils/auditChain.js`；优化清单 R-3 / M-1 / L-4 / A-1 / O-15
 
 ## 背景
 

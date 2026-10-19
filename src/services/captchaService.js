@@ -92,7 +92,7 @@ function pruneLocal() {
  *
  * 【为什么必须补这个信号，2026-10-09 实测】这条路径此前**一个信号都没有**：
  *   · 本函数 catch 里的 `logger.warn` 不可达（见下方注释，F-205 后门面返回 null 而不抛）；
- *   · 门面在「Redis 已就绪但命令抛错」时只打 `logger.debug`（sharedCache.js:432），
+ *   · 门面在「Redis 已就绪但命令抛错」时只打 `logger.debug`（sharedCache/index.js:330），
  *     而生产默认 `LOG_LEVEL=info`（utils/logger.js:85）⇒ **debug 根本不落盘**。
  * ⇒ 即「Redis 就绪但命令报错」期间，洪水护栏消失这件事在默认配置下**完全不可见**：
  *   没有日志、没有指标、没有告警。这正是本仓纪律所反对的形态

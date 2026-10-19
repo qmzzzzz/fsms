@@ -47,7 +47,7 @@
  * 且**两类同判据**：明文名字同样只能置空。
  *
  * 置空对各读取点等价于"宿主本来没配"：src/config/index.js 全是 `process.env.X || …`，
- * `sharedCache.js:52` 是 `(process.env.REDIS_URL || '').trim() !== ''`，
+ * `sharedCache/state.js:27` 是 `(process.env.REDIS_URL || '').trim() !== ''`，
  * `swagger.js:109` 是 `!(process.env.DOCS_USERNAME && process.env.DOCS_PASSWORD)`——
  * 空串在这些判据里都是假，不会把 harness 推进"配置存在但为空"的第三种状态。
  *

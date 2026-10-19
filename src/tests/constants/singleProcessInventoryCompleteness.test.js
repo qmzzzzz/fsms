@@ -81,7 +81,10 @@ const EXEMPT_MODULES = {
     '进程内幂等守卫（WeakSet 记录已注册的 Router；Router 是 require 缓存的进程内单例），无跨进程语义',
   'routes/wellKnownRoutes.js': 'CLIENT_ERROR_KINDS，静态字面量 Set',
   'services/behaviorBaseline.js': 'VOLUME_FEATURES / NON_ADDITIVE_FEATURES，静态字面量 Set',
-  'services/sharedCache.js': '共享缓存基础设施自身（memStore 是 Redis 未就绪时的回退实现）',
+  'services/sharedCache/memoryStore.js':
+    '共享缓存基础设施自身（memStore 是 Redis 未就绪时的回退实现，2026-10-19 拆分随迁）',
+  'services/sharedCache/invalidation.js':
+    '共享缓存基础设施自身（invalidationHandlers 是失效广播回调表，2026-10-19 拆分随迁）',
   'utils/auditMeta.js': 'REGISTERED_ACTIONS，由 AUDIT_LOG_ACTIONS 派生的只读集合',
   // AUDIT_FILTER_DIMENSION_FIELDS：「审计恒空参数组合判据要枚举哪几个维度」的定义域，
   // 内容全由源码字面量决定、逐进程恒同，且没有任何写入路径（只 .has()）。

@@ -174,10 +174,20 @@ const wordRe = (name) => new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\b`);
  * strictConsumersIn 的 require 匹配改窄/改宽时，真清单用例照绿、反例也照绿——判据与自证各量各的。
  */
 const looseConsumersIn = (files, h) => files.filter((f) => wordRe(h.name).test(f.src));
+/**
+ * 钩子模块的 require 可命中形态：默认认 `…/<module名>`。对 `X/index.js` 额外认目录式
+ * require（`require('….X')` 按 Node 解析规则落到 `X/index.js`）——2026-10-19 批 3c
+ * sharedCache 拆分为目录后暴露：钩子键从 `services/sharedCache.js::_resetForTests` 变成
+ * `services/sharedCache/index.js::_resetForTests`，而消费侧 require 的仍是门面目录，
+ * 只看 basename 会把真实消费判成"未配对"。
+ */
+const moduleRequireRe = (h) => {
+  const names = [h.module];
+  if (h.module === 'index' && h.rel) names.push(h.rel.split('/').slice(-2)[0]);
+  return new RegExp(`require\\([^)]*['"][^'"]*/(?:${names.join('|')})['"]`);
+};
 const strictConsumersIn = (files, h) =>
-  looseConsumersIn(files, h).filter((f) =>
-    new RegExp(`require\\([^)]*['"][^'"]*/${h.module}['"]`).test(f.src)
-  );
+  looseConsumersIn(files, h).filter((f) => moduleRequireRe(h).test(f.src));
 const looseConsumers = (h) => looseConsumersIn(consumerFiles, h);
 const strictConsumers = (h) => strictConsumersIn(consumerFiles, h);
 
@@ -466,6 +476,22 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
         testHook
       )
     ).toHaveLength(1);
+
+    // 目录式 require 与 index.js 等价：`X/index.js` 的钩子，消费侧写 `…/X` 或 `…/X/index`
+    // 都必须被严口径认下；仅前缀相同的兄弟路径（…/XExtra）不得冒充
+    const indexHook = { rel: 'services/X/index.js', name: '_resetForTests', module: 'index' };
+    const viaDir = files('d.test.js', `const s = require('../services/X');\ns._resetForTests();`);
+    const viaIndex = files(
+      'e.test.js',
+      `const s = require('../services/X/index');\ns._resetForTests();`
+    );
+    const sibling = files(
+      'f.test.js',
+      `const s = require('../services/XExtra');\ns._resetForTests();`
+    );
+    expect(strictConsumersIn(viaDir, indexHook)).toHaveLength(1);
+    expect(strictConsumersIn(viaIndex, indexHook)).toHaveLength(1);
+    expect(strictConsumersIn(sibling, indexHook)).toHaveLength(0);
   });
 
   it('注释剥离这条腿有合成反例：消费侧看行尾注释，生产侧看块注释里的赋值（真树上两类命中实测 0 处）', () => {

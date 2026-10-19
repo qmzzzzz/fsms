@@ -1,5 +1,5 @@
 /**
- * 共享缓存门面（R-3/M-1 基础设施）
+ * 共享缓存门面（R-3/M-1 基础设施；2026-10-19 批 3c 自 services/sharedCache.js 拆分）
  *
  * 问题：限流计数、验证码、权限缓存、审计链锁等关键状态全是进程内内存态，
  * 多副本部署时各实例状态互不可见——限流配额翻倍、验证码跨实例校验失败、
@@ -17,43 +17,37 @@
  * - jitterTtl：所有建议走此函数的 TTL 附加 ±10% 随机抖动，
  *   避免大批键同一时刻过期引发的缓存雪崩；
  * - EMPTY_SENTINEL：空结果哨兵值，调用方可缓存「查无结果」防穿透。
+ *
+ * 拆分说明（2026-10-19，max-lines）：原文件 409 代码行。按职责切三块——
+ * state.js（Redis 连接态与判据）、memoryStore.js（内存回退存储/容量收口/
+ * 降级留痕）、invalidation.js（L-4 失效广播）；本文件保留门面与核心读写
+ * （set/get/del/getDel/incrWithTtl/setIfAbsent）及锁装配。对外导出面逐字同序，
+ * `require('./sharedCache')` 的调用方无需改动。
  */
 
-const logger = require('../utils/logger');
-const { createLockOperations } = require('./sharedCacheLocks');
+const logger = require('../../utils/logger');
+const { createLockOperations } = require('../sharedCacheLocks');
+const { state, isRedisEnabled, isRedisConfigured, redisConnectionPassword } = require('./state');
+const {
+  memStore,
+  enforceMemCap,
+  ensureMemCleanup,
+  warnIncrDegraded,
+  resetMemoryFallback,
+} = require('./memoryStore');
+const {
+  ensureSubscriber,
+  onInvalidate,
+  publishInvalidate,
+  shutdownInvalidation,
+  resetInvalidation,
+} = require('./invalidation');
 
 /** 空结果哨兵：缓存「查无此物」防止同键反复打穿到数据库（穿透防护） */
 const EMPTY_SENTINEL = '__shared_cache_empty__';
 
-let redisClient = null; // ioredis 实例（未启用为 null）
-let redisReady = false; // 连接就绪标记（未就绪期间自动走内存回退）
-let initAttempted = false;
-
-// 失效广播（L-4）：ioredis 订阅模式连接不能再执行普通命令，
-// 故订阅端必须单独建连；未配置 Redis 时整套广播为无操作
-let subClient = null;
-const INVAL_CHANNEL = 'xf:cache:invalidate';
-const invalidationHandlers = new Set();
-
-// 内存回退存储：key -> { value, expireAt }
-const memStore = new Map();
-let memCleanupTimer = null;
-
-function isRedisEnabled() {
-  return redisClient !== null && redisReady;
-}
-
-/**
- * 部署侧是否**要求**跨实例共享状态（配了 REDIS_URL 就是要求）。
- * 与 isRedisEnabled 的区别：后者是"现在能用吗"，前者是"语义上该用哪个存储"。
- * 占位类判据（setIfAbsent）必须按前者决定能不能退回内存——见 setIfAbsent 的回退语义。
- */
-function isRedisConfigured() {
-  return (process.env.REDIS_URL || '').trim() !== '';
-}
-
 function getRedisClient() {
-  return redisClient;
+  return state.redisClient;
 }
 
 const lockOperations = createLockOperations({
@@ -61,76 +55,6 @@ const lockOperations = createLockOperations({
   isRedisEnabled,
   isRedisConfigured,
 });
-
-// S-L2（改后审计）：内存回退存储硬上限——Redis 未配置时 nonce 防重放表等
-// 可能被分布式来源推高（对照 alertRateLimit 的 P3-24 同类防护）。env 可调，默认 2 万条。
-const getMemStoreMax = () => Math.max(1000, Number(process.env.SHARED_CACHE_MEM_MAX) || 20000);
-
-let memCapRejects = 0;
-let lastMemCapWarnAt = 0;
-
-/** 饱和拒收留痕：60 秒最多一条 warn，免得拒绝本身变成日志放大器 */
-function warnMemCapSaturated() {
-  memCapRejects += 1;
-  const now = Date.now();
-  if (now - lastMemCapWarnAt < 60000) return;
-  lastMemCapWarnAt = now;
-  logger.warn(
-    `共享缓存内存表饱和（上限 ${getMemStoreMax()}，剩余全是防重放关键键）：` +
-      `累计拒绝新写入 ${memCapRejects} 次——被拒的登录按"重放"失败，普通缓存改为每次重算。` +
-      `持续出现说明有分布式来源在灌 nonce（上限可用 SHARED_CACHE_MEM_MAX 调高）`
-  );
-}
-
-/**
- * F-211：计数降级留痕。与 warnMemCapSaturated 同策略（60 秒最多一条），
- * 因为触发者是**未认证**的验证码生成——不限流的话"如实报告降级"本身就成了日志放大器。
- */
-let incrDegrades = 0;
-let lastIncrDegradeWarnAt = 0;
-
-function warnIncrDegraded(key) {
-  incrDegrades += 1;
-  const now = Date.now();
-  if (now - lastIncrDegradeWarnAt < 60000) return;
-  lastIncrDegradeWarnAt = now;
-  logger.warn(
-    `共享缓存 incr：已配置 REDIS_URL 但当前不可用，本次计数如实返回 null` +
-      `（累计 ${incrDegrades} 次，键示例 ${key}）——本进程的数字不能当全局计数用；` +
-      `持续出现说明 Redis 链路故障，此刻活跃数上限类护栏不生效`
-  );
-}
-
-/**
- * 容量收口：先清过期，再单遍淘汰普通缓存键。返回 false = 挤无可挤，
- * 调用方必须**放弃本次写入**。
- *
- * 关键键（`critical: true`，目前只有登录 nonce）在任何情况下都不参与淘汰——
- * 这是实测逼出来的口径：原实现按 Map 插入序淘汰最旧，而防重放表里的"最旧"
- * 恰恰是**仍需保护**的那一批。攻击者用服务端公钥就能造出合法信封
- * （ECDH 公钥加密不需要任何秘密），灌满内存表即可把受害者的 nonce 挤出去，
- * 随后重放 10 分钟前抓到的登录信封并拿到**明文口令**
- * （探针：上限调到下限 1000 时灌 1002 条即复现）。
- * 饱和期"新 nonce 被拒收"拒的是攻击者自己的请求，与 Redis 抖动期
- * setIfAbsent 的 fail-closed 同口径（宁可拒绝也不放行重放）；
- * 代价是这场洪水同时会把登录打成拒绝——运维可按 warn 里的提示调高 SHARED_CACHE_MEM_MAX。
- */
-function enforceMemCap() {
-  const max = getMemStoreMax();
-  if (memStore.size <= max) return true;
-  memSweep();
-  let over = memStore.size - max;
-  for (const [k, entry] of memStore) {
-    if (over <= 0) break;
-    if (!entry.critical) {
-      memStore.delete(k);
-      over -= 1;
-    }
-  }
-  const admitted = memStore.size <= max;
-  if (!admitted) warnMemCapSaturated();
-  return admitted;
-}
 
 /**
  * TTL 抖动：±10% 随机（O-15）。
@@ -143,19 +67,6 @@ function jitterTtl(ttlMs) {
   if (!Number.isFinite(ttlMs) || ttlMs <= 0) return ttlMs;
   const jitter = Math.floor(ttlMs * 0.1 * (Math.random() * 2 - 1));
   return Math.max(1, ttlMs + jitter);
-}
-
-function memSweep() {
-  const now = Date.now();
-  for (const [key, entry] of memStore) {
-    if (entry.expireAt <= now) memStore.delete(key);
-  }
-}
-
-function ensureMemCleanup() {
-  if (memCleanupTimer) return;
-  memCleanupTimer = setInterval(memSweep, 60 * 1000);
-  memCleanupTimer.unref?.();
 }
 
 /**
@@ -175,7 +86,7 @@ function ensureMemCleanup() {
  */
 function degradedMechanismHint() {
   try {
-    const { SINGLE_PROCESS_DEPENDENCIES } = require('../constants/runtime');
+    const { SINGLE_PROCESS_DEPENDENCIES } = require('../../constants/runtime');
     const list = SINGLE_PROCESS_DEPENDENCIES.filter((d) => d.redisExternalized).map(
       (d) => `${d.module}（${d.impact}）`
     );
@@ -185,56 +96,43 @@ function degradedMechanismHint() {
   }
 }
 
-/**
- * Redis 认证口令（REDIS_PASSWORD，与 REDIS_URL 同源同时机读取；支持 *_FILE 注入，
- * 见 config/secrets.js）。取值经 ioredis 的 password 选项携带——不走 URL userinfo，
- * 口令字符集就不受 percent-encoding 约束（compose 侧 secrets 文件用 base64 即可）。
- * 空值返回 undefined：不给无认证部署（本地开发/单机内存 Redis）强加 password 选项；
- * 生产侧由 config/validate.js 的认证闸保证「URL 凭据 / REDIS_PASSWORD / 显式豁免」
- * 三者必居其一，服务器端开了 requirepass 而客户端没带时 ioredis 以 NOAUTH 显式失败，
- * 不会静默降级。
- */
-function redisConnectionPassword() {
-  const password = process.env.REDIS_PASSWORD;
-  return password ? password : undefined;
-}
-
 async function initSharedCache() {
-  if (initAttempted) return;
-  initAttempted = true;
+  if (state.initAttempted) return;
+  state.initAttempted = true;
 
   const url = (process.env.REDIS_URL || '').trim();
   if (!url) return;
 
   try {
     const Redis = require('ioredis');
-    redisClient = new Redis(url, {
+    state.redisClient = new Redis(url, {
       lazyConnect: false,
       maxRetriesPerRequest: 1, // 缓存场景快速失败，回退内存，不拖住请求
       enableOfflineQueue: false,
       retryStrategy: (times) => Math.min(times * 500, 10000),
       password: redisConnectionPassword(),
     });
-    redisClient.on('error', (err) => {
-      // 只在"就绪 → 不可用"这一次转换上报（随后 redisReady=false，
+    state.redisClient.on('error', (err) => {
+      // 只在"就绪 → 不可用"这一次转换上报（随后 state.redisReady=false，
       // ioredis 的重试风暴不会再刷日志）
-      if (redisReady) {
+      if (state.redisReady) {
         logger.error(
           `共享缓存 Redis 连接异常，跨实例状态已降级为单进程语义：${err.message}。${degradedMechanismHint()}`
         );
       }
-      redisReady = false;
+      state.redisReady = false;
     });
-    redisClient.on('ready', () => {
-      if (!redisReady) logger.info('共享缓存 Redis 已就绪：限流/验证码/权限缓存进入跨实例一致模式');
-      redisReady = true;
+    state.redisClient.on('ready', () => {
+      if (!state.redisReady)
+        logger.info('共享缓存 Redis 已就绪：限流/验证码/权限缓存进入跨实例一致模式');
+      state.redisReady = true;
       ensureSubscriber();
     });
-    await redisClient.ping();
-    redisReady = true;
+    await state.redisClient.ping();
+    state.redisReady = true;
     ensureSubscriber();
   } catch (err) {
-    redisReady = false;
+    state.redisReady = false;
     logger.warn(
       `REDIS_URL 已配置但连接失败，回退进程内内存态（多实例部署将状态不一致）：${err.message}`
     );
@@ -271,9 +169,9 @@ async function set(key, value, ttlMs) {
   if (redisOn) {
     try {
       if (Number.isFinite(ttlMs) && ttlMs > 0) {
-        await redisClient.set(key, payload, 'PX', ttlMs);
+        await state.redisClient.set(key, payload, 'PX', ttlMs);
       } else {
-        await redisClient.set(key, payload);
+        await state.redisClient.set(key, payload);
       }
       return true;
     } catch (err) {
@@ -300,7 +198,7 @@ async function set(key, value, ttlMs) {
 async function get(key) {
   if (isRedisEnabled()) {
     try {
-      const raw = await redisClient.get(key);
+      const raw = await state.redisClient.get(key);
       return raw === null ? null : JSON.parse(raw);
     } catch (err) {
       logger.debug(`共享缓存 get 失败（回退内存）：${err.message}`);
@@ -319,7 +217,7 @@ async function get(key) {
 async function del(key) {
   if (isRedisEnabled()) {
     try {
-      const removed = (await redisClient.del(key)) > 0;
+      const removed = (await state.redisClient.del(key)) > 0;
       // F-204：共享层这一删之后，本进程内存里无论留着什么值都是陈旧副本（权威层已无此键）。
       // 不顺手抹掉的话，`get` 的内存回退会在下一次读抖动时把它当成共享层真值顶回来——
       // 对缓存类调用方只是命中率损失，对把键当权威状态的调用方（审计链链尾）是脏读。
@@ -358,7 +256,7 @@ function dropLocalCopy(key) {
 async function getDel(key) {
   if (isRedisEnabled()) {
     try {
-      const raw = await redisClient.getdel(key);
+      const raw = await state.redisClient.getdel(key);
       // F-204 同源缺口的另一半（`del` 那一半已经补过）：这一步之后权威层已经没有这个键
       // （或本来就没有），本进程内存里留着的那份就一定是陈旧副本——不抹掉的话，
       // 下一次读抖动会让 `get` 把它当成共享层真值顶回来。今天不被利用只是因为
@@ -427,7 +325,7 @@ async function incrWithTtl(key, ttlMs) {
   if (isRedisEnabled()) {
     try {
       const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? Math.floor(ttlMs) : 0;
-      return await redisClient.eval(INCR_WITH_TTL_SCRIPT, 1, key, String(ttl));
+      return await state.redisClient.eval(INCR_WITH_TTL_SCRIPT, 1, key, String(ttl));
     } catch (err) {
       logger.debug(`共享缓存 incr 失败（本次计数不可用，返回 null 而非本地假值）：${err.message}`);
       return null;
@@ -485,7 +383,7 @@ const { acquireLock, acquireLockBlocking, casSet } = lockOperations;
 async function setIfAbsent(key, value, ttlMs) {
   if (isRedisEnabled()) {
     try {
-      const ok = await redisClient.set(key, JSON.stringify(value), 'PX', ttlMs, 'NX');
+      const ok = await state.redisClient.set(key, JSON.stringify(value), 'PX', ttlMs, 'NX');
       return ok === 'OK';
     } catch (err) {
       logger.debug(`共享缓存 setIfAbsent 失败（按重复处理）：${err.message}`);
@@ -513,138 +411,32 @@ async function setIfAbsent(key, value, ttlMs) {
   return true;
 }
 
-/**
- * 建立失效广播的订阅连接（独立于读写连接：ioredis 订阅模式禁用普通命令）。
- * 订阅失败不影响主链路——广播缺失时各实例缓存退化为「最长自然过期」语义。
- */
-async function ensureSubscriber() {
-  if (subClient || !isRedisEnabled()) return;
-  try {
-    const Redis = require('ioredis');
-    const url = (process.env.REDIS_URL || '').trim();
-    subClient = new Redis(url, {
-      lazyConnect: false,
-      maxRetriesPerRequest: 1,
-      enableOfflineQueue: true,
-      retryStrategy: (times) => Math.min(times * 500, 10000),
-      password: redisConnectionPassword(),
-    });
-    subClient.on('error', (err) => {
-      logger.debug(`共享缓存失效广播订阅连接异常：${err.message}`);
-    });
-    subClient.on('message', (channel, raw) => {
-      if (channel !== INVAL_CHANNEL) return;
-      for (const handler of invalidationHandlers) {
-        try {
-          handler(raw);
-        } catch (err) {
-          logger.warn(`缓存失效广播处理异常（key=${raw}）：${err.message}`);
-        }
-      }
-    });
-    await subClient.subscribe(INVAL_CHANNEL);
-    logger.info('共享缓存失效广播订阅就绪：用户/权限缓存失效进入跨实例传播模式');
-  } catch (err) {
-    try {
-      subClient.disconnect();
-    } catch (_) {
-      /* 连接可能已断 */
-    }
-    subClient = null;
-    logger.warn(`共享缓存失效广播订阅失败（缓存失效退化为单实例语义）：${err.message}`);
-  }
-}
-
-/**
- * 注册远端失效回调（收到其他实例广播的失效键时执行本地失效）。
- * @param {(key: string) => void} handler
- * @returns {() => void} 注销函数
- */
-function onInvalidate(handler) {
-  invalidationHandlers.add(handler);
-  ensureSubscriber();
-  return () => invalidationHandlers.delete(handler);
-}
-
-/**
- * 广播一个失效键给所有实例（含自身，本地幂等失效无副作用）。
- * 未启用 Redis 或订阅不可用时静默跳过——单实例部署本就无需跨进程失效。
- * 发布走读写连接，不依赖 subReady（发布者不必同时是订阅者）。
- *
- * F-205：但「没配 Redis」与「配了 Redis 而它此刻不可用」不是同一件事。后者这一次
- * 广播确实丢了（其余实例上的权限/会话/统计缓存要等到自然过期才失效，30s~60s 量级），
- * 原实现在这条路径上连一行日志都不留——事故当天只能从"权限收回后还能放行"反推。
- * 读写命令失败那一路径本来就 warn（下面的 catch），缺的正是"根本没发出去"这一路。
- */
-async function publishInvalidate(key) {
-  if (!isRedisEnabled()) {
-    if (isRedisConfigured()) {
-      logger.warn(
-        `缓存失效广播未发出（Redis 已配置但当前不可用），其余实例的该键将延迟至自然过期：${key}`
-      );
-    }
-    return;
-  }
-  try {
-    await redisClient.publish(INVAL_CHANNEL, key);
-  } catch (err) {
-    // 本函数被 middleware/auth.js 的 invalidateUserCache **裸调用**（不 await），
-    // 所以"内部吞错"是硬契约：catch 体自己不能抛。
-    // `${err.message}` 在被 reject(undefined/字符串) 时会抛 TypeError ⇒ 契约破 ⇒ 全进程下线。
-    logger.warn(`缓存失效广播发布失败（其余实例最长延迟至自然过期）：${err?.message ?? err}`);
-  }
-}
-
 /** 优雅关闭（供进程退出钩子） */
 async function shutdownSharedCache() {
-  if (memCleanupTimer) {
-    clearInterval(memCleanupTimer);
-    memCleanupTimer = null;
-  }
-  memStore.clear();
-  invalidationHandlers.clear();
-  if (subClient) {
+  resetMemoryFallback();
+  await shutdownInvalidation();
+  if (state.redisClient) {
     try {
-      await subClient.quit();
+      await state.redisClient.quit();
     } catch (_) {
-      subClient.disconnect?.();
+      state.redisClient.disconnect?.();
     }
-    subClient = null;
+    state.redisClient = null;
+    state.redisReady = false;
   }
-  if (redisClient) {
-    try {
-      await redisClient.quit();
-    } catch (_) {
-      redisClient.disconnect?.();
-    }
-    redisClient = null;
-    redisReady = false;
-  }
-  initAttempted = false;
+  state.initAttempted = false;
 }
 
 /** 测试钩子：重置到未初始化状态 */
 function _resetForTests() {
-  if (subClient) {
-    subClient.disconnect?.();
+  resetInvalidation();
+  if (state.redisClient) {
+    state.redisClient.disconnect?.();
   }
-  subClient = null;
-  invalidationHandlers.clear();
-  if (redisClient) {
-    redisClient.disconnect?.();
-  }
-  redisClient = null;
-  redisReady = false;
-  initAttempted = false;
-  memStore.clear();
-  memCapRejects = 0;
-  lastMemCapWarnAt = 0;
-  incrDegrades = 0;
-  lastIncrDegradeWarnAt = 0;
-  if (memCleanupTimer) {
-    clearInterval(memCleanupTimer);
-    memCleanupTimer = null;
-  }
+  state.redisClient = null;
+  state.redisReady = false;
+  state.initAttempted = false;
+  resetMemoryFallback();
 }
 
 module.exports = {

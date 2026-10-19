@@ -6,7 +6,7 @@
  * `middleware/rateLimitStore.js:53-56`、`services/websocketService/handshake.js:480-482`）：
  * **fail-open 必须有显式可观测信号**。但纪律只在注释里——没有任何东西把
  * 「站点集合」与「每个站点的信号」钉在一起，于是第四处漏了：
- * `services/captchaService.js` 的上限判定被跳过时，唯一痕迹是 `sharedCache.js:432`
+ * `services/captchaService.js` 的上限判定被跳过时，唯一痕迹是 `sharedCache/index.js:330`
  * 的 `logger.debug`，而生产默认 `LOG_LEVEL=info`（`utils/logger.js:85`）⇒ 不落盘。
  * 没有日志、没有指标、没有告警。这就是「已修的同类漏了一处」。
  *

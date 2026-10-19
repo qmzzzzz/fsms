@@ -5,9 +5,6 @@
   "src/services/initData.js": {
     "max-lines": 1
   },
-  "src/services/sharedCache.js": {
-    "max-lines": 1
-  },
   "src/utils/errorCodes.js": {
     "max-lines": 1
   }

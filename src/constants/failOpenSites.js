@@ -11,7 +11,7 @@
  *
  * 但纪律只在**注释里**，没有任何东西把「站点集合」与「每个站点的信号」钉在一起。
  * 后果实测（2026-10-09）：`services/captchaService.js` 的活跃数上限判定被跳过时，
- * 唯一痕迹是 `sharedCache.js:432` 的 `logger.debug`，而生产默认 `LOG_LEVEL=info`
+ * 唯一痕迹是 `sharedCache/index.js:330` 的 `logger.debug`，而生产默认 `LOG_LEVEL=info`
  * （`utils/logger.js:85`）⇒ **debug 不落盘**：没有日志、没有指标、没有告警。
  * 这正是「已修的同类漏了一处」——三处注释在讲同一条纪律，第四处漏了。
  *

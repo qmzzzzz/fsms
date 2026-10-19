@@ -76,7 +76,7 @@ const PROBE = [
   `process.env.JWT_SECRET = ${JSON.stringify(DISPOSE_JWT)};`,
   "const cfg = require(path.join(REPO, 'src/config/index.js'));",
   '// REDIS_URL / ADMIN_INITIAL_PASSWORD / MONGO_ROOT_PASSWORD 在 src/config 里没有字段：',
-  '// 消费方直读 env（sharedCache.js:52、initData.js:801），所以 require 之后的 env 就是',
+  '// 消费方直读 env（sharedCache/state.js:27、initData.js:801），所以 require 之后的 env 就是',
   '// 消费方看到的那一份。断言这一层不是降级，是这几个名字唯一的可观测面。',
   '// ?? null 是必须的：JSON.stringify 会**丢掉** undefined 键，那样 r.x 恒为 undefined，',
   '// "守卫挡住了"与"夹具压根没跑"就分不开——那正是一条空断言。',
@@ -272,7 +272,10 @@ describe('宿主残留密钥与一次性 harness 的隔离', () => {
     // 而它们的判据都把空串当假 ⇒ harness 落回进程内语义/随机口令，
     // 而不是"配置存在但为空"的第三种状态。判据写法一改（例如改成 `!== undefined`），
     // 置空就会变成"已配置一个空 Redis"，本用例当场点名。
-    const sharedCache = fs.readFileSync(path.join(ROOT, 'src/services/sharedCache.js'), 'utf8');
+    const sharedCache = fs.readFileSync(
+      path.join(ROOT, 'src/services/sharedCache/state.js'),
+      'utf8'
+    );
     const redisCheck = sharedCache.match(/return \(process\.env\.REDIS_URL[^\n]*/)[0].trim();
     expect({ redisCheck }).toEqual({
       redisCheck: `return (process.env.REDIS_URL || '').trim() !== '';`,
