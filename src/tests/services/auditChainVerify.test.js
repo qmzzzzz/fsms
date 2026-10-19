@@ -492,7 +492,13 @@ describe('auditChainVerify', () => {
 
     const report = await verifyAuditChain(makeAuditLog([d2, d1, legacyMarked]), { maxRecords: 3 });
 
-    expect(report).toMatchObject({ intact: true, total: 3, legacy: 1, breaks: 0, hashComputeFailed: 0 });
+    expect(report).toMatchObject({
+      intact: true,
+      total: 3,
+      legacy: 1,
+      breaks: 0,
+      hashComputeFailed: 0,
+    });
     expect(report.byType.hash_compute_failed).toBe(0);
     expect(report.samples).toEqual([]);
   });
