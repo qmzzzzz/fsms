@@ -31,6 +31,8 @@ const MODELS_DIR = path.join(__dirname, '../../models');
 // authController/credentials.js（require('../../models')，无斜杠聚合入口）与
 // authController/profile.js（require('../../models/AuditLog')）；键名是**相对
 // controllers/ 的路径**（含子目录），总数不变。
+// 2026-10-19 批 3c-2 拆分 userController.js 后：其 0 值键随文件移除退场，
+// 新目录各文件实测 0 直连，按"未登记新 controller 一律 0 容忍"判据覆盖，无需登记。
 const GRANDFATHERED = {
   'ipListController.js': 6,
   'securityController.js': 5,
@@ -40,7 +42,6 @@ const GRANDFATHERED = {
   'authController/profile.js': 1,
   'mfaController.js': 2,
   'permissionController.js': 0,
-  'userController.js': 0,
   'auditController.js': 1,
 };
 

@@ -183,7 +183,16 @@ module.exports = {
     './src/controllers/alarmController.js': { branches: 82, functions: 97 },
     './src/controllers/inspectionController.js': { branches: 92, functions: 97 },
     './src/controllers/roleController.js': { branches: 89, functions: 96 }, // 2026-09-04 按实测下方一档
-    './src/controllers/userController.js': { branches: 85, functions: 97 },
+    // 2026-10-19 批 3c：userController.js 拆为 7 文件目录，原单文件键拆为逐文件键；
+    // 数值按拆分后全量实测重设（br -5 / fn -3，向下取整）：
+    // create 90.74/100、delete 90.9/100、read 88.23/100、shared 75/100、update 95.65/100，index/roles 无分支。
+    './src/controllers/userController/create.js': { branches: 85, functions: 97 },
+    './src/controllers/userController/delete.js': { branches: 85, functions: 97 },
+    './src/controllers/userController/index.js': { branches: 95, functions: 97 },
+    './src/controllers/userController/read.js': { branches: 83, functions: 97 },
+    './src/controllers/userController/roles.js': { branches: 95, functions: 97 },
+    './src/controllers/userController/shared.js': { branches: 70, functions: 97 },
+    './src/controllers/userController/update.js': { branches: 90, functions: 97 },
     './src/controllers/permissionController.js': { branches: 79, functions: 97 },
     './src/controllers/reportController.js': { branches: 89, functions: 97 }, // 2026-09-04 reportController 分支补齐批次
     // 2026-10-18 批 3a：websocketService.js 拆为 5 文件目录，原单文件键拆为逐文件键；

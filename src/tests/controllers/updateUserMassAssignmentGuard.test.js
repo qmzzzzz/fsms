@@ -276,7 +276,7 @@ describe('updateUser/createUser 特权字段批量赋值防护', () => {
       .readFileSync(path.resolve(__dirname, '../../routes/userRoutes.js'), 'utf8')
       .replace(/\r\n/g, '\n');
     const controllerSrc = fs
-      .readFileSync(path.resolve(__dirname, '../../controllers/userController.js'), 'utf8')
+      .readFileSync(path.resolve(__dirname, '../../controllers/userController/update.js'), 'utf8')
       .replace(/\r\n/g, '\n');
 
     /** updateUserValidation 这一段里校验过的字段名（含 mustBeString 与引用的校验器常量） */

@@ -5,7 +5,7 @@
  *
  * `src/utils/superAdmin.js` 导出 `RESERVED_WILDCARD_PERMISSION`，本意是给全仓当唯一权威值。
  * 实测（2026-09-27）生产代码里引用该常量的只有 3 个文件（roleController /
- * rolePermissionController / permissionService），另有 9 个 src 下的文件把 `'*:*'` 当字面量
+ * rolePermissionController / permissionService），另有 11 个 src 下的文件把 `'*:*'` 当字面量
  * 各写一遍、合计 18 处。这 18 处是"剥注释后按 `'*:*'` 完整字面量"计的代码视图；未剥注释的
  * 文本视图是 10 文件 20 处，多出来的两处位于 permissionService.js 与 permissionController.js
  * 的注释里（那两处不构成第二份真源，但也说明文本视图会把闸读宽）。这个分叉的危险不是"读起来难看"：
@@ -50,7 +50,7 @@ const UNRELATED = 'zz:some_other_perm';
 
 /**
  * 今天实测的字面量手抄分布：`src/` 下非测试目录（155 个 js）里，剥注释后
- * `'*:*'` 完整字面量的逐文件出现次数，合计 18 处 / 9 个文件。
+ * `'*:*'` 完整字面量的逐文件出现次数，合计 18 处 / 11 个文件。
  *
  * 冻到**精确相等**而不是"每文件上限"：后者在扫描器自己坏掉时（walkJs 返回目录空集、
  * stripComments 误吞全文）会静默恒绿，前者会立刻红成 `Received: {}`。对端把某处改用
@@ -62,7 +62,9 @@ const UNRELATED = 'zz:some_other_perm';
 const WILDCARD_LITERAL_CENSUS = {
   'controllers/permissionController.js': 1,
   'controllers/roleGuards.js': 1,
-  'controllers/userController.js': 4,
+  'controllers/userController/create.js': 1,
+  'controllers/userController/roles.js': 2,
+  'controllers/userController/update.js': 1,
   'middleware/rbac.js': 2,
   'routes/permissionRoutes.js': 2,
   'services/initData.js': 2,

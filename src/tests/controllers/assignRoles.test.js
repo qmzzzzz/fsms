@@ -686,7 +686,7 @@ describe('assignRoles 越权防护（M-01）', () => {
   });
 
   describe('createUser 权限子集闸门（建号侧 P2-8：与 assignRoles 共用同一实现）', () => {
-    // 实测依据（2026-09-24 变异 MN）：把 `userController.js` 建号侧的
+    // 实测依据（2026-09-24 变异 MN）：把 `userController/create.js` 建号侧的
     // `if (!operatorPermCodes.includes('*:*'))` 整段短路 ⇒ **全套 335 套件 / 3821 例
     // 全绿**。也就是说这道"不得授予自身不持有的权限"的闸门，此前在全仓没有任何用例
     // 经过它——assignRoles 侧有 4 条（本文件的 P2-8 与 B-2 两组），建号侧一条都没有。

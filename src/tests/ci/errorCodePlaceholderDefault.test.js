@@ -39,7 +39,7 @@
  * 现采口径见 helpers/codeErrorCallScan 的 literalValuesForProps——属性名逐字赋值的字面量，与
  * src/tests/emittedErrorCodeCoverage.test.js 的"第四通道"同源），值被换成变量时现采会报
  * nonLiteral 而不是沉默，登记集合与占位符面积必须零交且每个码仍在码表里（#18）。
- * 第 4 处（`userController.js` 的 `membershipError.code`）自己传了 message ⇒ 无需登记，#16 按
+ * 第 4 处（`userController/roles.js` 的 `membershipError.code`）自己传了 message ⇒ 无需登记，#16 按
  * "不传 message 的 opaque 站点"双向核对，多登记与漏登记都会红。
  *
  * 站点键用 `文件|码槽` 而不是 `文件:行号`：本闸这一轮已经被别人的行号漂移打过两次（见第 28 轮
@@ -106,7 +106,7 @@ const DECLARED_DEAD = ['IP_FULL_RANGE_REMOVE_SUPER_ADMIN_ONLY', 'IP_FULL_RANGE_S
  * 字符串字面量；`file:` = 只在该文件里采（表就定义在该文件时用它，别处的同名属性不算）。
  * 登记的 codes 必须与现采结果双向相等（#16），所以"表加了条目而登记没跟上"会红，
  * "登记写了源码里已经没有的码"也会红——手抄的登记表自己不会失效，对账才会。
- * userController.js 的 `membershipError.code` 不在表内：它自己传了 message。
+ * userController/roles.js 的 `membershipError.code` 不在表内：它自己传了 message。
  */
 const DECLARED_DYNAMIC = [
   {
@@ -482,7 +482,7 @@ describe('第 4 组 · 动态码槽侧（按码建的索引看不见的那两面
  *   ph-fallback-priority-flip 预测 红:#10                 实测 同 ✓（#11 照绿=判据的前置条件消失）
  *   ── 被测 src/utils/errorCodes.js（码表侧，1 条）──
  *   ph-default-becomes-template 预测 红:#7                实测 红:#6,#7 ← 偏差②
- *   ── 被测 src/controllers/userController.js（判据侧，1 条）──
+ *   ── 被测 src/controllers/userController/roles.js（判据侧，1 条）──
  *   ph-call-message-dropped   预测 红:#11                 实测 同 ✓（唯一让判据腿自己红的变异）
  *
  * 偏差①（登记非空会把原本空转的判据腿变成有牙）：DECLARED_DEAD 从"上一轮的 []"变成"两条真死码"
@@ -516,7 +516,7 @@ describe('第 4 组 · 动态码槽侧（按码建的索引看不见的那两面
  *      不是缺陷。若要审"文案与码义是否相符"，那是需要语义的另一类判据，不在文本闸能力内。
  *   3) #13 只看调用点**字面量**里的占位符；变量拼接进来的字符串看不见（需要数据流）。
  *      ph-literal-blind 红:#3 证明分类器有牙，但牙的长度止于字面量。
- *   4) `message:` 的值是**变量**时（实测 1 处：userController.js 的 membershipError.message），
+ *   4) `message:` 的值是**变量**时（实测 1 处：userController/roles.js 的 membershipError.message），
  *      本闸按 passesMessage=true 放过——那份变量文案里有没有占位符是数据流问题，文本闸判不了。
  *      这是"opaque message"面，与本轮修掉的"opaque code"面同形但更小，暂不登记（登记不了闭合集）。
  *   5) 现采器（literalValuesForProps）按"属性名逐字赋字符串字面量"取闭合集。若将来可达集改成

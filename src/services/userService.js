@@ -65,7 +65,7 @@ const DETAIL_ROLE_POPULATE = {
  * 可写字段的槽位，前端只剩两条必坏的路：
  *   1) 原样提交回填值 → `138****5678` 撞上 `userRoutes.js:110` 的 /^1[3-9]\d{9}$/ ⇒ 400；
  *   2) 那条校验是 `.optional({ values:'falsy' })`，空串照样过，而
- *      `userController.js:572` 写的是 `if (phone !== undefined) user.phone = phone`
+ *      `controllers/userController/update.js:165` 写的是 `if (phone !== undefined) user.phone = phone`
  *      ⇒ 一次"我没动手机号"的保存把号码清空。
  * 改名成 `phoneMasked` 是把"误把展示值当可写字段"变成结构上不可能，而不是靠约定。
  *
@@ -172,7 +172,7 @@ class UserService {
 
   /**
    * updateUser/assignRoles/deleteUser 的载入入口，其中 updateUser
-   * （controllers/userController.js 里 saveUser 那一步）走的是
+   * （controllers/userController/update.js 里 saveUser 那一步）走的是
    * 读-改-save：排除凭证列必须由这里带上，否则那次 save 的 $set 会把
    * mfaSecret/mfaRecoveryCodes/mfaFailCount/phoneKey/passwordHistory 写成 schema 默认值
    * （机理与"为什么必须是对象形态"见 models/User.js 的 unselectedCredentialProjection）。

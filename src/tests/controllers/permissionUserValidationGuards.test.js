@@ -24,7 +24,7 @@
  * permissionController / userController 零散分支补齐
  *
  * 【行号说明】本文件早期版本按「全量覆盖率的未覆盖分支行号」逐条标注 `L<行号>`。
- * 2026-09-16 的多轮修复（控制器抽服务、安全加固）使 userController.js 行号整体漂移，
+ * 2026-09-16 的多轮修复（控制器抽服务、安全加固）使 userController 的行号整体漂移，
  * 标注大量指向注释或空白行而失实。按「注释必须与实现同步」的要求，现改为语义描述、
  * 不再写行号——函数名与行为描述是稳定锚点，行号不是。
  *
@@ -157,7 +157,7 @@ describe('permission/user 控制器零散分支补齐', () => {
     secUserId = String(secUser._id);
 
     // 安全员是 level 5 ⇒ 数据范围为 self，只能管"自己创建"的账户；生产里 self 档管理员
-    // 走 POST /api/users 建号，createdBy 由服务端写入（userController.js:345）。
+    // 走 POST /api/users 建号，createdBy 由服务端写入（controllers/userController/create.js:199）。
     // 不给这层归属，范围闸会先拒，本该被测的层级闸/单例守卫根本走不到。
     await User.findByIdAndUpdate(superUser._id, { $set: { createdBy: secUser._id } });
 

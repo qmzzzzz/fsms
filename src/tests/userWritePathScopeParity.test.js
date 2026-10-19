@@ -1,5 +1,5 @@
 /**
- * 被测对象：src/controllers/userController.js 的 updateUser / deleteUser / batchDeleteUsers /
+ * 被测对象：src/controllers/userController/ 的 updateUser / deleteUser / batchDeleteUsers /
  *   assignRoles，以及 src/controllers/securityController.js 的 toggleUserLock / resetUserMfa
  *   （用户对象六个写入口）。
  * 守护的不变式：写路径与读路径（getUserById）数据范围判定同口径——目标用户若在操作者

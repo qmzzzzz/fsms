@@ -132,7 +132,10 @@ describe('授权判定量的单一事实来源', () => {
 
   test('消费方写法：从 permissionHelper 引用 maxRoleLevel，不得就地重定义', () => {
     const consumers = [
-      'src/controllers/userController.js',
+      'src/controllers/userController/create.js',
+      'src/controllers/userController/update.js',
+      'src/controllers/userController/roles.js',
+      'src/controllers/userController/delete.js',
       'src/controllers/securityController.js',
       'src/controllers/rolePermissionController.js',
       'src/services/authService/profile.js',

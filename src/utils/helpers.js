@@ -108,7 +108,7 @@ const normalizePagination = (page, limit, maxLimit = 500) => {
  * 于是 `["67ED…","67ed…"]` 在归一前是 2 个不同字符串、查到 1 份文档 ⇒ 一次合法的写操作被
  * 判成"有 id 不存在"；更要命的是身份自检：`requestedIds.includes(String(req.user.userId))`
  * 拿小写的操作者 id 去比大写的那一份，**"不许删除自己"的闸被换个字母大小写绕过**
- * （userController.js 批量删除）。Mongoose 的 cast 会把落库值归回小写，所以这条只影响
+ * （userController/delete.js 批量删除）。Mongoose 的 cast 会把落库值归回小写，所以这条只影响
  * "比较与集合语义"，不影响存储形态——也正因为如此，光看数据库看不出问题。
  * 只规范化 24 位十六进制：非该形状的值（口令、编码、原始 12 字节串）原样保留，
  * 否则这个"id 归一入口"会顺手改掉它不该改的字段。

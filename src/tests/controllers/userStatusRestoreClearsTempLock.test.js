@@ -1,5 +1,5 @@
 /**
- * 被测对象：src/controllers/userController.js 的 applyProfileFields（PUT /api/users/:id 的 status 写入）
+ * 被测对象：src/controllers/userController/update.js 的 applyProfileFields（PUT /api/users/:id 的 status 写入）
  * 守护的不变式：把账户恢复成可登录状态（status 变为 active 且原状态非 active）时，必须连
  *   **临时锁定**（lockUntil / failedLoginCount）一起清掉，与专用解锁接口
  *   services/authService 的 lockUser 同口径；反向不变式：普通编辑不得顺手重置爆破计数。

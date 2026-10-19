@@ -488,9 +488,9 @@ const LIVE = [
   },
   {
     in: 'src/tests/controllers/createUserScopeGate.test.js',
-    at: 'userController.js:612',
+    at: 'controllers/userController/update.js:205',
     must: /assertRecordInScope/,
-    why: 'updateUser 里的数据范围闸（原写 :326，那是另一个函数的 docblock）',
+    why: 'updateUser 里的数据范围闸（原写 :326，那是另一个函数的 docblock；2026-10-19 拆分后站点迁至 update.js）',
   },
   {
     in: 'src/tests/deploy/cliArgStrictness.test.js',

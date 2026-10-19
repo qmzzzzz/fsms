@@ -34,7 +34,7 @@ const isCommentLine = (line) => {
 };
 
 /**
- * 判据只能读代码，不能读散文。userController.js 的注释里就写着
+ * 判据只能读代码，不能读散文。userController/roles.js 的注释里就写着
  * "原子更新替代读-改-save：user.save() 会把整个文档回写" —— 不剥注释时，
  * 这句话本身就能让"该调用方会把文档存回去"判成成立（实测：去掉 saveUser(x) 那一臂后
  * 规则腿仍然绿，原因就在这行注释上）。行尾注释仍会漏进来，这是本闸承认的近似。
@@ -328,7 +328,7 @@ describe('第 3 组 · 文档外逃的跨文件闭合（行窗口看不见的那
     for (const h of escapingHelpers()) {
       const saving = consumersOf(h.name, h.rel, h.line).filter((c) => c.saving);
       if (h.wired) {
-        // 判据要有牙：findUserForUpdate 确实存在把文档存回去的调用方（userController 的 saveUser(user)）
+        // 判据要有牙：findUserForUpdate 确实存在把文档存回去的调用方（userController/update.js 的 saveUser(user)）
         expect(saving.length).toBeGreaterThanOrEqual(1);
       } else {
         expect(saving).toEqual([]);
@@ -413,7 +413,7 @@ describe('第 4 组 · 缺陷面的边界：只有 User 有 select:false 路径'
  *
  * 两处判据自纠（都由预测脱靶引出，不是先想到再补的）
  *   1) ledger-save-detector-blind 第一次只红 #10、不红 #13。查出的根因：savesVar 拿整份文件原文
- *      做正则，而 userController.js 里的**注释**就写着 `user.save()`（那句"原子更新
+ *      做正则，而 userController/roles.js 里的**注释**就写着 `user.save()`（那句"原子更新
  *      替代读-改-save"的说明）——判据把散文当成了证据。修法=先 codeText 剥注释再判，
  *      并新增腿 #4 把这条教训钉成断言（同一段文本，剥注释判 false、不剥判 true）。
  *      残余近似：行尾注释 `foo(); // user.save()` 仍会漏进来，本闸承认这一点。

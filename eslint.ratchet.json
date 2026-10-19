@@ -2,9 +2,6 @@
   "src/controllers/securityController.js": {
     "max-lines": 1
   },
-  "src/controllers/userController.js": {
-    "max-lines": 1
-  },
   "src/docs/generate.js": {
     "max-lines": 1
   },

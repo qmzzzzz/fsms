@@ -18,7 +18,7 @@
 4. 防重放：`ts` 校验 ±5 分钟窗口；`nonce` 经 `sharedCache.setIfAbsent()` 原子占位去重（Redis 就绪时跨实例生效，未配置时回退进程内去重；TTL 5 分钟）；GCM 认证标签保证篡改即失败。
 5. 降级：不支持 WebCrypto / 非 secure context 时，前端返回 null 走明文兼容轨；路由层仅在 HTTPS/localhost 下可开 `strict`。
 
-生效端点（口令解密的消费方）：登录、注册、改密、关闭 MFA。实际调用点为 `src/services/authService.js`（登录 / 注册 / 改密）与 `src/controllers/userController.js`（重置口令）、`src/controllers/mfaController.js`（关闭 MFA 前校验当前口令），均经 `decryptLoginCredential()`；`src/controllers/authController.js` 只负责用 `getPublicKeyInfo()` 下发公钥，不做解密。
+生效端点（口令解密的消费方）：登录、注册、改密、关闭 MFA。实际调用点为 `src/services/authService.js`（登录 / 注册 / 改密）与 `src/controllers/userController/`（重置口令）、`src/controllers/mfaController.js`（关闭 MFA 前校验当前口令），均经 `decryptLoginCredential()`；`src/controllers/authController.js` 只负责用 `getPublicKeyInfo()` 下发公钥，不做解密。
 
 > **2026-09-28 复核注记**：原文此处写「`authController.js` 264/122/852/1369 附近」，该行号既已漂移（`authController.js` 现仅 662 行，1369 超出文件长度），调用方归属亦有误（解密不在 authController）。已按上述实测改为符号引用。
 

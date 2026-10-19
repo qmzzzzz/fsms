@@ -270,7 +270,7 @@ describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
     ],
     ['src/controllers/rolePermissionController.js', 'permissions-cloned', 'ws', ':189/:199 同上'],
     ['src/controllers/rolePermissionController.js', 'permissions-updated', 'ws', ':269/:280 同上'],
-    ['src/controllers/userController.js', 'roles-assigned', 'ws', ':763 同上'],
+    ['src/controllers/userController/roles.js', 'roles-assigned', 'ws', ':170 同上'],
     ['src/middleware/security/securityHeaders.js', 'deny', 'helmet', ':136 helmet frameguard 选项'],
     ['src/services/AlarmService.js', 'alarm_received', 'subdoc', ':158 FireAlarm.processLog'],
     ['src/services/AlarmService.js', 'dispatched', 'subdoc', ':228 同上'],

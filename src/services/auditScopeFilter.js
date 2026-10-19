@@ -20,7 +20,7 @@ const User = require('../models/User');
 // 所以滞后窗口有方向——成员被调出后 ≤30s 内其日志对该部门管理员仍可见（偏宽），
 // 调入者则 ≤30s 内不可见（偏窄）。判为可接受的两条前提：
 //   ① 唯一能改 department 的写入口是管理员的 PUT /api/users/:id，且它前面有
-//      assertRecordInScope 的域闸（controllers/userController.js）；自助入口的字段
+//      assertRecordInScope 的域闸（controllers/userController/update.js）；自助入口的字段
 //      白名单不含 department（services/authService.updateUserProfile，H-01）。
 //      于是"被调出者"不可能自己触发这个窗口，能触发的只有本来就看得见他的管理员。
 //   ② 只影响"看我整个部门"这一条范围查询；点查某个人走下面的 findById，实时准确。

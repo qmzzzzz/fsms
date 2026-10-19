@@ -7,7 +7,7 @@
  *  2. middleware/auth 的用户缓存（TTL 60s），它填充了 req.user.roles /
  *     req.user.roleCodes —— rbac.js 的 checkRole 优先读 roleCodes，
  *     rateLimit.js 的角色配额（SUPER_ADMIN 500 / SECURITY_ADMIN 400）也读它，
- *     userController.js 的「同级角色归属」闸门以它为事实来源。
+ *     userController/roles.js 的「同级角色归属」闸门以它为事实来源。
  *
  * 修复前 updateRole 只做第 1 件事，于是与 auth.js 自己的注释直接矛盾：
  *   「停用角色后，该角色码不得继续进入 req.user.roleCodes，
