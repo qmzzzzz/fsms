@@ -177,6 +177,20 @@ function req(method, urlPath, { token, body, headers } = {}) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** 登录成功只经 httpOnly cookie 下发令牌（I-01）；断言属性并返回 access_token Cookie */
+function assertLoginCookies(r) {
+  const cookie = (r.headers['set-cookie'] || []).join('; ');
+  if (r.status !== 200 || !r.body.data || !r.body.data.user) {
+    throw new Error('status=' + r.status + ' ' + JSON.stringify(r.body).slice(0, 120));
+  }
+  if (!cookie.includes('HttpOnly') || !/Secure/i.test(cookie)) {
+    throw new Error('Cookie 缺 HttpOnly/Secure：' + cookie.slice(0, 120));
+  }
+  const access = /(?:^|; )access_token=([^;]+)/.exec(cookie);
+  if (!access) throw new Error('登录未下发令牌 Cookie：' + cookie.slice(0, 120));
+  return 'access_token=' + access[1];
+}
+
 async function waitForServer(timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -343,34 +357,27 @@ async function main() {
       throw new Error('status=' + r.status);
   });
 
-  let token = null;
+  let accessCookie = null;
   await step(
     'B6. POST /api/auth/login（admin + 初始密码；Cookie 带 Secure/HttpOnly）',
     async () => {
       const r = await req('POST', '/api/auth/login', {
         body: { username: 'admin', password: PASSWORD },
       });
-      if (r.status !== 200 || !r.body.data.token) {
-        throw new Error('status=' + r.status + ' ' + JSON.stringify(r.body).slice(0, 120));
-      }
-      token = r.body.data.token;
-      const cookie = (r.headers['set-cookie'] || []).join('; ');
-      if (!cookie.includes('HttpOnly'))
-        throw new Error('Cookie 缺 HttpOnly：' + cookie.slice(0, 120));
-      if (!/Secure/i.test(cookie))
-        throw new Error('生产模式 Cookie 缺 Secure：' + cookie.slice(0, 120));
+      accessCookie = assertLoginCookies(r);
     }
   );
+  const auth = { headers: { Cookie: accessCookie } };
 
   await step('B7. GET /api/auth/me 200（会话有效）', async () => {
-    const r = await req('GET', '/api/auth/me', { token });
+    const r = await req('GET', '/api/auth/me', auth);
     if (r.status !== 200 || !r.body.data.user) throw new Error('status=' + r.status);
   });
 
   await step('B8. POST /api/auth/logout 200 且旧令牌失效（me → 401）', async () => {
-    const out = await req('POST', '/api/auth/logout', { token, body: {} });
+    const out = await req('POST', '/api/auth/logout', { ...auth, body: {} });
     if (out.status !== 200) throw new Error('logout status=' + out.status);
-    const me = await req('GET', '/api/auth/me', { token });
+    const me = await req('GET', '/api/auth/me', auth);
     if (me.status !== 401) throw new Error('旧令牌未吊销，me status=' + me.status);
   });
 
