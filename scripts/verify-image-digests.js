@@ -65,14 +65,12 @@ const SOURCES = [
  */
 const EXPECTED = [
   {
-    ref: 'node:22.14.0-alpine',
+    ref: 'node:26.12.0-alpine',
     repo: 'library/node',
     // manifest list（OCI index）摘要，含 amd64/arm/arm64/s390x 等
-    digest: '9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944',
-    captured: '2026-10-01',
-    sources:
-      'public.ecr.aws + docker.m.daocloud.io（当日 Docker Hub 官方端点 DNS 污染不可达）；' +
-      '2026-10-04 复跑补 docker.1ms.run，三源一致',
+    digest: '6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5',
+    captured: '2026-10-20',
+    sources: 'public.ecr.aws + docker.m.daocloud.io + docker.1ms.run（三源一致）',
     sites: 'Dockerfile 的三处 FROM',
   },
   {

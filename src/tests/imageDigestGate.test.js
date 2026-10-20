@@ -119,7 +119,7 @@ const QUALIFIED_MONGO_REF = `docker.io/library/mongo@sha256:${HEX_B}`;
  * 这条是本文件曾经的盲区来源：旧脚本把 RepoDigests 原文整段写进文件，产物是
  * `FROM docker.io/library/node@sha256:…`（tag 消失），而本仓库另外两处按相反口径判：
  *   - `src/tests/security/baseImageDigestPinned.test.js` 的 FROM 判据
- *     `/^node:22\.14\.0-alpine@sha256:[0-9a-f]{64}$/`；
+ *     `/^node:26\.12\.0-alpine@sha256:[0-9a-f]{64}$/`；
  *   - `src/tests/deploy/deployScript.test.js` 把约定写成 `<repo>:<tag>@sha256:…`；
  *   - `docker-compose.yml` 的 mongo 注释明写"保留可读 tag：纯 digest 看不出版本，
  *     排障时得先 inspect 才知道跑的是哪个大版本"，真实 Dockerfile 三条 FROM 与 redis 也都是这个形态。
@@ -127,9 +127,9 @@ const QUALIFIED_MONGO_REF = `docker.io/library/mongo@sha256:${HEX_B}`;
  * 于是两道闸互不相容、却各自都绿：只有真跑一次 `--apply` 才会撞红。
  * 下面「产物同时满足钉版门禁的形态判据」那条用例就是把这个反例做成可执行断言。
  */
-const NODE_PINNED = `node:22.14.0-alpine@sha256:${HEX_A}`;
+const NODE_PINNED = `node:26.12.0-alpine@sha256:${HEX_A}`;
 const MONGO_PINNED = `mongo:6.0.20@sha256:${HEX_B}`;
-const NODE_STALE = `node:22.14.0-alpine@sha256:${HEX_OLD}`;
+const NODE_STALE = `node:26.12.0-alpine@sha256:${HEX_OLD}`;
 const MONGO_STALE = `mongo:6.0.20@sha256:${HEX_OLD}`;
 
 /** 双 digest 的坏引用：钉版失败推迟到 docker build，而文件"看起来已经钉过" */
@@ -223,8 +223,8 @@ function fixture() {
     /* Windows 上 mode 参数已足够 */
   }
   const dockerfile =
-    'FROM node:22.14.0-alpine AS builder\nRUN echo build\n' +
-    'FROM node:22.14.0-alpine AS runner\nUSER nodejs\n';
+    'FROM node:26.12.0-alpine AS builder\nRUN echo build\n' +
+    'FROM node:26.12.0-alpine AS runner\nUSER nodejs\n';
   // 注释里也放一份同样的字面串：真实 compose 就是这样（"把输出追加为
   // `image: mongo:6.0.20@sha256:<捕获值>`"），用来验"只改指令行、不改注释"。
   const compose =
@@ -302,12 +302,12 @@ const writeCompose = (fx, body) =>
 const driftCompose = (src) => src.replace(/^ {4}image: mongo:6\.0\.20$/m, '    image: mongo:9.9.9');
 const driftComposeTag = (fx) => writeCompose(fx, driftCompose(fx.compose));
 const driftDockerfileTag = (fx) =>
-  writeDockerfile(fx, fx.dockerfile.replace(/node:22\.14\.0-alpine/g, 'node:22.99.9-alpine'));
+  writeDockerfile(fx, fx.dockerfile.replace(/node:26\.12\.0-alpine/g, 'node:26.99.9-alpine'));
 
 /**
  * 把两个目标都写成**已经钉成刚捕获的 digest** 的形态（`name:tag@sha256:<hex>`）。
  * 这一臂验的是两件事，它们是同一条边界的两侧：
- *   ① 钉版行仍然把脚本常量 `FROM node:22.14.0-alpine` 当**前缀**包含，旧判据用无边界子串
+ *   ① 钉版行仍然把脚本常量 `FROM node:26.12.0-alpine` 当**前缀**包含，旧判据用无边界子串
  *      匹配 ⇒ "可改"，旧替换又无边界 ⇒ 产出 `…@sha256:<新>@sha256:<旧>` 的双 digest
  *      并打印"已替换并校验"（2026-10-03 实测复现）；现在分类器认它是"已钉"，不动；
  *   ② 两个目标**都**已钉 ⇒ 本次没有任何事可做，必须报错而不是报成功（sed 无匹配仍返回 0
@@ -315,7 +315,7 @@ const driftDockerfileTag = (fx) =>
  * 共同后置条件（文件逐字节不变 + 不留临时文件）由 checkFailure 统一执行。
  */
 const pinEverything = (fx) => {
-  writeDockerfile(fx, fx.dockerfile.replace(/node:22\.14\.0-alpine/g, NODE_PINNED));
+  writeDockerfile(fx, fx.dockerfile.replace(/node:26\.12\.0-alpine/g, NODE_PINNED));
   writeCompose(
     fx,
     fx.compose.replace(/^ {4}image: mongo:6\.0\.20$/m, `    image: ${MONGO_PINNED}`)
@@ -324,14 +324,14 @@ const pinEverything = (fx) => {
 
 /** 只钉 Dockerfile，compose 留裸 tag：本仓库 2026-10-04 的真实状态（混合仓库） */
 const pinDockerfileOnly = (fx) =>
-  writeDockerfile(fx, fx.dockerfile.replace(/node:22\.14\.0-alpine/g, NODE_PINNED));
+  writeDockerfile(fx, fx.dockerfile.replace(/node:26\.12\.0-alpine/g, NODE_PINNED));
 
 /** 两个目标都钉在**别的** digest 上：上游滚动同名 tag 之后的升级路径（待刷新） */
 const stalePinBoth = (fx) => {
   writeDockerfile(
     fx,
     `# 用法示例：docker pull ${NODE_STALE}\n` +
-      fx.dockerfile.replace(/node:22\.14\.0-alpine/g, NODE_STALE)
+      fx.dockerfile.replace(/node:26\.12\.0-alpine/g, NODE_STALE)
   );
   writeCompose(fx, fx.compose.replace(/mongo:6\.0\.20\n/, `${MONGO_STALE}\n`));
 };
@@ -341,9 +341,9 @@ const stalePinBoth = (fx) => {
  * 静默跳过的产物是一份仍指向可变 tag 的引用，外加"我跑过钉版脚本"的印象。
  */
 const platformDockerfile = (fx) =>
-  writeDockerfile(fx, 'FROM --platform=$BUILDPLATFORM node:22.14.0-alpine AS builder\n');
+  writeDockerfile(fx, 'FROM --platform=$BUILDPLATFORM node:26.12.0-alpine AS builder\n');
 const strayDockerfile = (fx) =>
-  writeDockerfile(fx, `FROM node:22.14.0-alpine @sha256:${HEX_A} AS builder\n`);
+  writeDockerfile(fx, `FROM node:26.12.0-alpine @sha256:${HEX_A} AS builder\n`);
 const taglessDockerfile = (fx) =>
   writeDockerfile(fx, `FROM docker.io/library/node@sha256:${HEX_A}\n`);
 const quotedCompose = (fx) => writeCompose(fx, 'services:\n  mongo:\n    image: "mongo:6.0.20"\n');
@@ -363,8 +363,8 @@ const varexpandCompose = (fx) =>
 const mixedPlatformDockerfile = (fx) =>
   writeDockerfile(
     fx,
-    'FROM --platform=$BUILDPLATFORM node:22.14.0-alpine AS builder\n' +
-      'FROM node:22.14.0-alpine AS runner\n'
+    'FROM --platform=$BUILDPLATFORM node:26.12.0-alpine AS builder\n' +
+      'FROM node:26.12.0-alpine AS runner\n'
   );
 const mixedVarexpandCompose = (fx) =>
   writeCompose(
@@ -568,7 +568,7 @@ const pinCorpus = [
   {
     name: '全裸 tag（本仓库改造前的形状）',
     dockerfile:
-      'FROM node:22.14.0-alpine AS builder\nRUN echo build\nFROM node:22.14.0-alpine AS runner\nUSER nodejs\n',
+      'FROM node:26.12.0-alpine AS builder\nRUN echo build\nFROM node:26.12.0-alpine AS runner\nUSER nodejs\n',
     compose:
       'services:\n  mongo:\n    # 用法示例：image: mongo:6.0.20@sha256:<捕获值>\n    image: mongo:6.0.20\n  app:\n    image: x\n',
     dfPlan: { bare: 2, refresh: 0, same: 0 },
@@ -580,7 +580,7 @@ const pinCorpus = [
   },
   {
     name: '混合仓库：Dockerfile 一半已钉、compose 整体跳过',
-    dockerfile: `FROM ${NODE_PINNED} AS builder\nRUN echo build\nFROM node:22.14.0-alpine AS runner\n`,
+    dockerfile: `FROM ${NODE_PINNED} AS builder\nRUN echo build\nFROM node:26.12.0-alpine AS runner\n`,
     compose: `services:\n  mongo:\n    image: ${MONGO_PINNED}\n`,
     dfPlan: { bare: 1, refresh: 0, same: 1 },
     cfPlan: { bare: 0, refresh: 0, same: 1 },
@@ -589,7 +589,7 @@ const pinCorpus = [
   },
   {
     name: '待刷新：注释里的示例跟着换，但别人命名空间的示例一笔不碰',
-    dockerfile: `# 用法示例：docker pull ${NODE_STALE}\nFROM ${NODE_STALE} AS builder\nFROM node:22.14.0-alpine AS runner\n`,
+    dockerfile: `# 用法示例：docker pull ${NODE_STALE}\nFROM ${NODE_STALE} AS builder\nFROM node:26.12.0-alpine AS runner\n`,
     compose:
       'services:\n  mongo:\n    # 别人的仓库：image: myorg/mongo:6.0.20@sha256:' +
       `${HEX_OLD}\n    image: mongo:6.0.20@sha256:${HEX_OLD}\n`,
@@ -669,9 +669,9 @@ group('capture-image-digests.sh 真跑行为', () => {
     // 调用序列：先 info 探活，两个 tag 都 pull 之后才 inspect，且顺序与常量表一致。
     expect(callSeq(r)).toEqual([
       'info',
-      'pull node:22.14.0-alpine',
+      'pull node:26.12.0-alpine',
       'pull mongo:6.0.20',
-      'inspect node:22.14.0-alpine',
+      'inspect node:26.12.0-alpine',
       'inspect mongo:6.0.20',
     ]);
   });
@@ -695,7 +695,7 @@ group('capture-image-digests.sh 真跑行为', () => {
     expect(r.code).not.toBe(0);
     expect(r.out).toContain('漂移');
     // compose 那一步还没跑到，Dockerfile 必须保持未改（失败要早于动作）
-    expect(r.dockerfile).toContain('node:22.99.9-alpine');
+    expect(r.dockerfile).toContain('node:26.99.9-alpine');
     // 行锚定：注释里也有同名子串，用 toContain 会假通过
     expect(r.compose).toMatch(/^ {4}image: mongo:6\.0\.20$/m);
   });
@@ -799,7 +799,7 @@ group('capture-image-digests.sh 真跑行为', () => {
     // RepoDigests 用全限定名（docker.io/library/node@sha256:…，天生不带 tag）。
     // 旧实现把整串当引用写进文件 ⇒ tag 消失，而同一条期望就写在
     // src/tests/security/baseImageDigestPinned.test.js 的 FROM 判据里
-    // （/^node:22\.14\.0-alpine@sha256:[0-9a-f]{64}$/）——照脚本的升级路径跑一次就变红。
+    // （/^node:26\.12\.0-alpine@sha256:[0-9a-f]{64}$/）——照脚本的升级路径跑一次就变红。
     // 这里把闸的判据**原样搬进来**跑在脚本产物上，两道口径再也分不开。
     const fx = fixture();
     const r = run(fx, ['--apply'], 'qualified');
@@ -810,7 +810,7 @@ group('capture-image-digests.sh 真跑行为', () => {
       .map((line) => line.slice('FROM '.length).split(' ')[0]);
     expect(fromImages).toHaveLength(2); // 非空集自证：真有两条 FROM 被检查了
     for (const image of fromImages) {
-      expect(image).toMatch(/^node:22\.14\.0-alpine@sha256:[0-9a-f]{64}$/);
+      expect(image).toMatch(/^node:26\.12\.0-alpine@sha256:[0-9a-f]{64}$/);
     }
     const mongoLine = r.compose.split(/\r?\n/).find((line) => line.startsWith('    image: mongo'));
     expect(mongoLine).toBeTruthy();
@@ -875,7 +875,7 @@ group('capture-image-digests.sh 真跑行为', () => {
     const fx = fixture();
     writeDockerfile(
       fx,
-      `FROM ${NODE_PINNED} AS builder\nRUN echo build\nFROM node:22.14.0-alpine AS runner\nUSER nodejs\n`
+      `FROM ${NODE_PINNED} AS builder\nRUN echo build\nFROM node:26.12.0-alpine AS runner\nUSER nodejs\n`
     );
     const r = run(fx, ['--apply'], 'qualified');
     expect({ code: r.code, tail: r.out.slice(-160) }).toMatchObject({ code: 0 });
@@ -894,7 +894,7 @@ group('capture-image-digests.sh 真跑行为', () => {
     // 锚定用的是"一个或多个空白"，不是常量里那一串单空格的字面串；
     // 反过来，值的位置不对（见失败矩阵）就必须停手。
     const fx = fixture();
-    writeDockerfile(fx, 'FROM  node:22.14.0-alpine  AS builder\n');
+    writeDockerfile(fx, 'FROM  node:26.12.0-alpine  AS builder\n');
     const r = run(fx, ['--apply']);
     expect({ code: r.code, tail: r.out.slice(-120) }).toMatchObject({ code: 0 });
     expect(r.dockerfile).toBe(`FROM  ${NODE_PINNED}  AS builder\n`);
@@ -910,13 +910,13 @@ group('capture-image-digests.sh 真跑行为', () => {
    */
   test('前提自证：钉版行包含 old 字面串，但 old 后紧跟 @ ⇒ 属于"已钉"而不是"可改"', () => {
     const pinnedLine = `FROM ${NODE_PINNED} AS builder`;
-    expect(pinnedLine).toContain('FROM node:22.14.0-alpine'); // 无边界子串判据会被它骗过
-    expect(pinnedLine).toMatch(/^FROM node:22\.14\.0-alpine@/); // 边界判据认它是"已钉"
-    expect(pinnedLine).not.toMatch(/^FROM node:22\.14\.0-alpine(\s|$)/m); // 后随空白或行尾才算"可改"
+    expect(pinnedLine).toContain('FROM node:26.12.0-alpine'); // 无边界子串判据会被它骗过
+    expect(pinnedLine).toMatch(/^FROM node:26\.12\.0-alpine@/); // 边界判据认它是"已钉"
+    expect(pinnedLine).not.toMatch(/^FROM node:26\.12\.0-alpine(\s|$)/m); // 后随空白或行尾才算"可改"
     expect(DOUBLE_DIGEST.test(pinnedLine)).toBe(false);
     const lookalike = pinnedLine.replace('-alpine@', '-alpine ');
-    expect(lookalike).toMatch(/^FROM node:22\.14\.0-alpine(\s|$)/m);
-    expect(lookalike).not.toMatch(/^FROM node:22\.14\.0-alpine@/);
+    expect(lookalike).toMatch(/^FROM node:26\.12\.0-alpine(\s|$)/m);
+    expect(lookalike).not.toMatch(/^FROM node:26\.12\.0-alpine@/);
     // 行为侧的同一格：把 `@` 换成空格（值仍是裸 tag、行里却多出一个游离摘要），
     // 同一个脚本就从"已钉/跳过"翻成"形态处理不了"——判据不是恒真式。
     const stray = fixture();
@@ -924,7 +924,7 @@ group('capture-image-digests.sh 真跑行为', () => {
     const r = run(stray, ['--apply']);
     expect(r.code).not.toBe(0);
     expect(r.out).toContain('处理不了');
-    expect(r.dockerfile).toContain('node:22.14.0-alpine @sha256:');
+    expect(r.dockerfile).toContain('node:26.12.0-alpine @sha256:');
   });
 
   test('无 tag 的纯 digest 引用（旧实现的产物）⇒ 拒绝，不追加第二个 digest', () => {
@@ -1037,7 +1037,7 @@ group('capture-image-digests.sh 真跑行为', () => {
       // 越界自证：被改动的每一行（按**改动前**的内容判）都必须含本脚本常量里的 tag。
       // 脚本从未声明要碰与常量无关的行（redis / prometheus / `${APP_IMAGE:-…}`），碰到了就是边界漏了。
       for (const i of changed) {
-        expect(beforeLines[i]).toMatch(/node:22\.14\.0-alpine|mongo:6\.0\.20/);
+        expect(beforeLines[i]).toMatch(/node:26\.12\.0-alpine|mongo:6\.0\.20/);
       }
       // 声明条数 ⇔ 指令行改动条数。注释里的示例跟着换是**有意为之**（那也是一条引用），
       // 所以这里只对齐指令行，注释那一笔由上面的逐字节期望产物把守。
