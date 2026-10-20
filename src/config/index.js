@@ -5,7 +5,7 @@
 
 require('dotenv').config();
 
-// P3-48：密钥文件注入必须在读取任何 process.env 之前完成。
+// 密钥文件注入必须在读取任何 process.env 之前完成。
 // 下方所有字段在模块加载时求值，若晚于此处 hydrate，拿到的会是空串。
 const { hydrateSecretsFromFiles } = require('./secrets');
 const secretHydration = hydrateSecretsFromFiles();
@@ -48,7 +48,7 @@ module.exports = {
   hmacSecret: process.env.HMAC_SECRET || '',
 
   // CORS 允许的来源（逗号分隔）
-  // P3-36：此处曾声称「未配置时反射请求来源」——与实现不符。
+  // 此处曾声称「未配置时反射请求来源」——与实现不符。
   // app.js 与 middleware/originCheck.js 在本值为空时都回退到**固定**的本地
   // 开发白名单（localhost/127.0.0.1 的 3001 与 5173），从不回显 Origin。
   // 回显来源在 credentials:true 下等于允许任意站点带凭据跨域，
@@ -86,7 +86,7 @@ module.exports = {
     // 默认 12 轮：现代 GPU 下的推荐下限（10 轮已不足以抵抗离线爆破），
     // 仅影响新哈希，存量哈希仍可校验；如需迁移可在用户下次改密时自然升级。
     //
-    // P2-39：加范围校验 10–14。原先只判 `rounds > 0`，两个方向都危险：
+    // 加范围校验 10–14。原先只判 `rounds > 0`，两个方向都危险：
     //   - 过小（如 BCRYPT_ROUNDS=4）→ 口令哈希秒破，而系统照常启动、无任何提示；
     //   - 过大（如 999）→ bcrypt 单次哈希耗时指数上升，登录接口直接变成自我 DoS
     //     （bcrypt 是同步 CPU 密集操作，会占满事件循环）。
@@ -144,13 +144,13 @@ module.exports = {
       const ttl = parseInt(process.env.STATS_CACHE_TTL, 10);
       return Number.isFinite(ttl) && ttl > 0 ? ttl : 300;
     })(),
-    // 统计缓存最大条目数（P2-40：可配，默认 500）
+    // 统计缓存最大条目数（可配，默认 500）
     statsCacheMaxSize: (() => {
       const n = parseInt(process.env.STATS_CACHE_MAX_SIZE, 10);
       return Number.isFinite(n) && n > 0 ? n : 500;
     })(),
     // 过期条目清理间隔（毫秒）
-    // P2-40：改为可配（原为硬编码 500 / 120000）。大库（数十万设备）下
+    // 改为可配（原为硬编码 500 / 120000）。大库（数十万设备）下
     // 500 条上限会让热点统计频繁被淘汰，运维需要能按内存余量上调；
     // 清理间隔在低配机器上也需要放宽以降低定时扫描频率。
     statsCacheCleanupInterval: (() => {

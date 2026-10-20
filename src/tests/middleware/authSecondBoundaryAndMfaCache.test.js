@@ -81,7 +81,7 @@ describe('认证边界（第三批审计）', () => {
 
   afterAll(async () => {
     for (const u of createdUsers) await u.deleteOne();
-    // T-1：关闭连接，避免遗留连接拖住 jest worker 优雅退出
+    // 关闭连接，避免遗留连接拖住 jest worker 优雅退出
     if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
     }

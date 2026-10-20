@@ -4,6 +4,7 @@
  */
 
 const mongoose = require('mongoose');
+const { waitFor } = require('../helpers/waitFor');
 
 describe('IPBlacklist Model', () => {
   let IPBlacklist;
@@ -121,7 +122,13 @@ describe('IPBlacklist Model', () => {
     test('过期后放行（含 CIDR 记录）', async () => {
       await IPBlacklist.blockIP('1.2.3.4', { durationMs: 1 });
       await IPBlacklist.blockIP('5.6.7.0/24', { durationMs: 1 });
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      // durationMs:1 的到期由 waitFor 轮询实际判定，不靠一段固定睡眠覆盖
+      await waitFor(
+        async () =>
+          (await IPBlacklist.isBlocked('1.2.3.4')) === false &&
+          (await IPBlacklist.isBlocked('5.6.7.8')) === false,
+        { label: '两条 1ms 封禁均已到期并放行' }
+      );
       expect(await IPBlacklist.isBlocked('1.2.3.4')).toBe(false);
       expect(await IPBlacklist.isBlocked('5.6.7.8')).toBe(false);
     });

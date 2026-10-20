@@ -7,7 +7,7 @@
  * `src/services/authService.js:536` 与 `middleware/security` 的步进实现）：
  *
  *   登录 / 步进二次验证：条件更新 `mfaLastCounter < counter` 做**原子认领**
- * ⇒ 同一时间窗的码只能用一次（P2-12 / 已修）。
+ * ⇒ 同一时间窗的码只能用一次（已修）。
  *   mfaDisable / regenerateRecoveryCodes / mfaEnable：只做
  *     `$max: { mfaLastCounter: counter }` ⇒ **只保证不把水位拉回，不拒绝已消费的窗口**。
  *

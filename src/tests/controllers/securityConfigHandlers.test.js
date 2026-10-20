@@ -40,7 +40,7 @@ jest.mock('../../models/SystemConfig', () => mockSystemConfig);
 jest.mock('../../models/AuditLog', () => mockAuditLog);
 jest.mock('../../services/auditBuffer', () => mockAuditBuffer);
 
-// P0-5 回归防护用例需要断言「审计写失败可观测」：logger.error 与 metrics 指标
+// 回归防护用例需要断言「审计写失败可观测」：logger.error 与 metrics 指标
 const mockLogger = { error: jest.fn(), warn: jest.fn(), info: jest.fn() };
 const mockIncSecurityAlert = jest.fn();
 jest.mock('../../utils/logger', () => mockLogger);
@@ -69,8 +69,8 @@ const makeCtx = (body = {}) => {
       return this;
     },
     json(data) {
-      // P1-29：记录响应写出时刻的标志值。静态断言 res.locals.skipGlobalAudit 只证明
-      // 「控制器最终置过位」，不能证明它早于响应；双写缺陷（P0-5）正是时序问题。
+      // 记录响应写出时刻的标志值。静态断言 res.locals.skipGlobalAudit 只证明
+      // 「控制器最终置过位」，不能证明它早于响应；双写缺陷正是时序问题。
       // 中间件级/端到端时序由 securityBranches.test.js 与 skipGlobalAuditTiming.test.js 锁定。
       this.flagAtJson = this.locals.skipGlobalAudit;
       this.payload = data;
@@ -214,7 +214,7 @@ describe('注册验证码开关配置', () => {
   });
 
   test('审计落库失败 ⇒ 转审计 WAL 待重放，开关仍生效且失败可观测（F-03）', async () => {
-    // P0-5 修复后 skipGlobalAudit 生效，手写审计即本操作的唯一留痕；
+    // 修复后 skipGlobalAudit 生效，手写审计即本操作的唯一留痕；
     // 若此处仍为 .catch(() => {}) 静默吞错，则开关变更在审计库中零痕迹。
     // F-03 之后语义是「先持久化再回成功」：落库失败 ⇒ 同一条文档进审计 WAL
     // （Mongo 恢复后重放）⇒ 200 才诚实。error 日志与指标照旧必须触发。

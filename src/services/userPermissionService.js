@@ -31,7 +31,7 @@
  * 未配置 REDIS_URL 时广播为无操作，退化为原「最长 30 秒自然过期」语义，行为不变。
  */
 
-// E-04：**必须**保持惰性 require，不得提到文件顶部。
+// **必须**保持惰性 require，不得提到文件顶部。
 //
 // 原因：本模块（service）↔ models/User 之间存在潜在循环依赖，
 // 顶层引入会在加载顺序不利时拿到未完成的 module.exports（undefined）。
@@ -104,6 +104,35 @@ function stopCleanup() {
 }
 
 /**
+ * 从用户文档收集生效权限码（getPermissions 与批量路径共用）
+ * 防御性 filter(Boolean)：实测 mongoose 8.24.1 不留 null 洞
+ * （见 populateMatchShape.test.js），保留以防版本改行为。
+ * @param {object} user 已 populate roles.permissions 的用户文档
+ * @returns {string[]}
+ */
+function collectPermissionCodes(user) {
+  const permissions = new Set();
+  (user.roles || []).filter(Boolean).forEach((role) => {
+    (role.permissions || []).filter(Boolean).forEach((perm) => permissions.add(perm.code));
+  });
+  return Array.from(permissions);
+}
+
+/**
+ * 取用户文档的 populate 形态（单查与批量必须完全一致，否则匹配口径会漂移）
+ */
+const PERMISSION_POPULATE = {
+  path: 'roles',
+  // 仅生效角色/权限参与授权（与 permissionHelper.getUserPermissions 同口径）：
+  // 管理员停用角色或权限项后必须立即失效，不得等缓存自然过期
+  match: { status: 'active' },
+  populate: {
+    path: 'permissions',
+    match: { status: 'active' },
+  },
+};
+
+/**
  * 获取用户完整权限编码列表（带 TTL 缓存）
  * @param {string} userId
  * @returns {Promise<string[]>}
@@ -120,16 +149,7 @@ async function getPermissions(userId) {
 
   // 查库前取号，写回时比对（见文件头 permCacheGeneration）
   const genAtRead = permCacheGeneration;
-  const user = await User.findById(key).populate({
-    path: 'roles',
-    // 仅生效角色/权限参与授权（与 permissionHelper.getUserPermissions 同口径）：
-    // 管理员停用角色或权限项后必须立即失效，不得等缓存自然过期
-    match: { status: 'active' },
-    populate: {
-      path: 'permissions',
-      match: { status: 'active' },
-    },
-  });
+  const user = await User.findById(key).populate(PERMISSION_POPULATE);
 
   if (!user) {
     // 缓存空结果短 TTL：防止不存在的 userId 反复穿透打库
@@ -138,12 +158,7 @@ async function getPermissions(userId) {
     return [];
   }
 
-  const permissions = new Set();
-  // 防御性 filter(Boolean)：实测 mongoose 8.24.1 不留 null 洞（见 populateMatchShape.test.js），保留以防版本改行为
-  user.roles.filter(Boolean).forEach((role) => {
-    (role.permissions || []).filter(Boolean).forEach((perm) => permissions.add(perm.code));
-  });
-  const perms = Array.from(permissions);
+  const perms = collectPermissionCodes(user);
 
   // 容量保护：超过上限直接清空（重建成本远低于逐条淘汰的复杂度）
   if (permCache.size >= PERM_CACHE_MAX_SIZE) permCache.clear();
@@ -155,6 +170,73 @@ async function getPermissions(userId) {
   }
 
   return perms;
+}
+
+/** 命中缓存的直接写入 result；未命中的去重后返回。 */
+function splitCachedAndMissing(userIds, now, result) {
+  const missing = [];
+  const seen = new Set();
+  for (const raw of userIds || []) {
+    if (raw === undefined || raw === null || raw === '') continue;
+    const key = String(raw);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const cached = permCache.get(key);
+    if (cached && cached.expireAt > now) {
+      result.set(key, cached.perms);
+    } else {
+      missing.push(key);
+    }
+  }
+  return missing;
+}
+
+/** 批量写回缓存与结果；查库期间发生过失效则整批不写回。 */
+function writeBackBatch(missing, byId, now, genAtRead, result) {
+  // 容量保护只需判一次：整批写回是原子的，不会出现批内反复清空
+  if (permCache.size + missing.length >= PERM_CACHE_MAX_SIZE) permCache.clear();
+
+  for (const key of missing) {
+    const user = byId.get(key);
+    const perms = user ? collectPermissionCodes(user) : [];
+    const ttl = user ? PERM_CACHE_TTL_MS : 5 * 1000;
+    if (permCacheGeneration === genAtRead) {
+      permCache.set(key, { perms, expireAt: now + ttl });
+    }
+    result.set(key, perms);
+  }
+}
+
+/**
+ * 批量获取多个用户的权限码（权限热生效推送路径，A-5）
+ *
+ * 为什么需要它：角色变更后要向「持有该角色的全部用户」下发新权限集。逐用户调用
+ * getPermissions 会在一次广播里产生 N 次串行查库（N = 在线用户数），角色下挂几百人
+ * 时推送延迟随之线性增长。这里把未命中的用户合并成**一次** `$in` 查询。
+ *
+ * 缓存语义与单查完全一致：命中直接返回；不存在用户写 5 秒空结果；有用户文档写
+ * 30 秒 TTL；查库期间发生过本地失效则整批不写回（宁可多查一趟，不种回旧权限）。
+ * 失效是全局代际推进，不存在"只失效某个用户、其余仍可写回"的细分——单查与批量
+ * 共用同一代际，判定天然一致。
+ *
+ * @param {Array<string|object>} userIds
+ * @returns {Promise<Map<string, string[]>>} key 为字符串 userId；查不到的用户映射为空数组
+ */
+async function getPermissionsForUsers(userIds) {
+  const now = Date.now();
+  const result = new Map();
+  const missing = splitCachedAndMissing(userIds, now, result);
+  if (missing.length === 0) return result;
+
+  const User = getUserModel();
+  // 查库前取号，写回时比对（与 getPermissions 同一条不变量）
+  const genAtRead = permCacheGeneration;
+  const users = await User.find({ _id: { $in: missing } }).populate(PERMISSION_POPULATE);
+  const byId = new Map((users || []).map((user) => [String(user._id), user]));
+  writeBackBatch(missing, byId, now, genAtRead, result);
+
+  return result;
 }
 
 /**
@@ -228,6 +310,7 @@ async function hasPermission(userId, permissionCode) {
 
 module.exports = {
   getPermissions,
+  getPermissionsForUsers,
   invalidatePermissionCache,
   invalidatePermissionCacheLocal,
   handleRemoteInvalidation,

@@ -2,7 +2,7 @@
 /**
  * 回滚演练结果自动留档（A8，2026-10-16）
  *
- * 缺口（deliverables/安全需求加固清单-2026-10-16.md A8 动作 1）：
+ * 缺口（A8 动作 1）：
  * 「恢复演练**定时化**（如每季度），结果**自动写入** deployment/rollback-drill-record.md」。
  *
  * 留档现状：`run-rollback-drill.js` 会产出 manifest JSON（含每个集合的快照条数、

@@ -5,7 +5,7 @@
  *   路由  deviceRoutes.updateDeviceValidation 校验 `body('deviceType').isIn(...)`
  *   服务  DeviceService.updateDevice 的 updatableFields **白名单里没有它**
  *   前端  DeviceView.vue 的 submitForm 是新建/编辑共用，编辑时总会带上 deviceType
- * ⇒ 用户改设备类型、看到绿色"更新成功"，库里没变。这与本仓 P3-14 明令禁止的
+ * ⇒ 用户改设备类型、看到绿色"更新成功"，库里没变。这与本仓明令禁止的
  *   "校验存在暗示可更新，行为必须兑现"是同一类缺陷（installDate 当初也是这个形态）。
  *
  * 因此两层都测：

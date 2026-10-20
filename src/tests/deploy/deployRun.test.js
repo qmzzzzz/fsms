@@ -74,7 +74,15 @@ function makeStage() {
  * 单独成函数：runDeploy 的分支密度已在 eslint complexity 上限（15）上，
  * 再加一个默认参数就会棘轮回退——判据抽出来既降密度，也让「规则顺序」这件事只有一处。
  */
-function buildRules({ readyz, readyzSeq, noPrevious, previousImage, failOn, compose }) {
+function buildRules({
+  readyz,
+  readyzSeq,
+  noPrevious,
+  previousImage,
+  failOn,
+  compose,
+  migrateOutput,
+}) {
   return [
     // ① 指定的失败命令（前缀命中即非零退出）
     ...failOn.map((f) => `${f}||1`),
@@ -84,7 +92,10 @@ function buildRules({ readyz, readyzSeq, noPrevious, previousImage, failOn, comp
     `docker inspect|${previousImage}|0`,
     // ④ ps -q app：默认返回一个容器 ID；noPrevious 时返回空（=首次部署）
     `${compose} ps -q app|${noPrevious ? '' : 'fake-container-id'}|0`,
-    // ⑤ 兜底：其余命令一律成功、空输出
+    // ⑤ migrate up 的 stdout：默认为空（= 本次无迁移）；O-2 用例注入
+    //    `MIGRATED UP: ...` 模拟 schema 已被本次发布改写
+    `${compose} run --rm --no-deps app node node_modules/.bin/migrate-mongo up|${migrateOutput}|0`,
+    // ⑥ 兜底：其余命令一律成功、空输出
     '*||0',
   ];
 }
@@ -107,6 +118,7 @@ function runDeploy({
   failOn = [],
   failExact = false,
   healthTimeoutMs = '400',
+  migrateOutput = '',
   args = [],
 } = {}) {
   const stage = makeStage();
@@ -118,6 +130,7 @@ function runDeploy({
     previousImage,
     failOn,
     compose,
+    migrateOutput,
   });
   const env = {
     ...process.env,
@@ -218,15 +231,44 @@ describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () 
     expect(count(r.lines, 'up -d --no-build app')).toBe(0);
   });
 
-  test('健康门禁未通过 + 有上一版本 → 自动以旧镜像再次 up -d 回滚', () => {
+  test('健康门禁未通过 + 有上一版本 + 本次无迁移 → 自动以旧镜像再次 up -d 回滚', () => {
     const r = runDeploy({ readyz: '503' });
     expect(r.code).toBe(1);
     // 回滚动作 = 第二次 up -d（第一次是发布切换）
     expect(count(r.lines, 'up -d --no-build app')).toBe(2);
     expect(r.stdout).toContain('切回上一镜像');
-    // 回滚只切镜像、不切 schema：此刻库已被迁移改写。走 stderr（失败路径判据
-    // 一律与变更日志分流），不打印出来操作员会以为「✓ 回滚后服务就绪」= 回到发布前状态。
+    // 回滚只切镜像、不回滚数据。走 stderr（失败路径判据一律与变更日志分流），
+    // 不打印出来操作员会以为「✓ 回滚后服务就绪」= 回到发布前状态。
     expect(r.stderr).toContain('回滚只切镜像');
+  });
+
+  test('O-2：健康失败 + 本次应用了迁移 → 不自动回滚（旧代码跑新 schema），转人工恢复', () => {
+    // 自动回滚只切镜像。迁移一旦执行，旧版本就跑在新库结构上：轻则启动报错，
+    // 重则按旧字段语义写坏数据——而「✓ 回滚后服务就绪」会让操作员以为已安全退回。
+    // 因此只要本次 up 了迁移，脚本必须停住并说明替代路径。
+    const r = runDeploy({
+      readyz: '503',
+      migrateOutput: 'MIGRATED UP: 20261017-add-audit-index.js',
+    });
+    expect(r.code).toBe(1);
+    // 只有发布切换那一次 up -d；没有回滚动作
+    expect(count(r.lines, 'up -d --no-build app')).toBe(1);
+    expect(r.stdout).toContain('本次应用 1 个迁移');
+    expect(r.stdout).toContain('自动回滚只切镜像、不回滚 schema');
+    // 拒绝必须给出可执行路径，而不是只说「需人工介入」
+    expect(r.stdout).toContain('expand/contract');
+    expect(r.stdout).toContain('./backups');
+    expect(r.stdout).not.toContain('切回上一镜像');
+  });
+
+  test('O-2 正对照：同一次演练里迁移输出为空 → schema 未变，自动回滚照常', () => {
+    // 与上一条只差 migrateOutput：证明拒绝来自「应用了迁移」这一事实本身，
+    // 而不是把自动回滚无条件关掉。
+    const r = runDeploy({ readyz: '503', migrateOutput: '' });
+    expect(r.code).toBe(1);
+    expect(count(r.lines, 'up -d --no-build app')).toBe(2);
+    expect(r.stdout).toContain('本次没有待应用的迁移');
+    expect(r.stdout).toContain('切回上一镜像');
   });
 
   test('首次部署（无上一版本）+ 健康失败 → 不回滚，但仍以退出码 1 收口', () => {
@@ -382,6 +424,11 @@ describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () 
       code: 0,
     });
     expect(r.stdout).toContain('前置条件校验通过');
+    // O-5：干跑输出的是真实 argv（与 deployCommands 同源），不是只有步骤描述
+    expect(r.stdout).toContain('[命令计划]');
+    expect(r.stdout).toContain('migrate-mongo up');
+    expect(r.stdout).toContain('up -d --no-build app');
+    expect(r.stdout).toMatch(/health: curl .+\/readyz/);
   });
 
   test('健康探针先失败后成功 → 属于正常发布（不得误判为失败）', () => {

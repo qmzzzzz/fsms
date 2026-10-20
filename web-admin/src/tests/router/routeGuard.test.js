@@ -218,6 +218,19 @@ describe('A. 守卫决策表', () => {
     expect(next).toHaveBeenCalledWith('/dashboard')
   })
 
+  test('未登录访问公开页（/login、/register）：不探测会话，直接放行', async () => {
+    // P-2：公开入口是匿名用户的高频路径，/auth/me 的 401 往返不应发生在这一层。
+    // 若把恢复探测重新挪到公开路由判断之前，本用例会红。
+    for (const name of ['login', 'register']) {
+      mockStore.restoreSession.mockClear()
+      const next = await runGuard(
+        mkRoute({ name, fullPath: `/${name}`, meta: { requiresAuth: false } })
+      )
+      expect(next).toHaveBeenCalledWith()
+      expect(mockStore.restoreSession, name).not.toHaveBeenCalled()
+    }
+  })
+
   test('未登录访问登录页：放行（此分支若判反，登录页自身永远进不去）', async () => {
     const next = await runGuard(mkRoute({ name: 'login', meta: { requiresAuth: false } }))
     expect(next).toHaveBeenCalledWith()

@@ -489,7 +489,7 @@ describe('观测性写入的「永不 reject」契约', () => {
       // 前提自证：广播确实发出去了，且发的是 **auth 那条键**。
       // 不能断言 toHaveBeenCalledTimes(1)：invalidateUserCacheLocal → User.invalidatePermissionCache
       // → userPermissionService.invalidatePermissionCache 自己也会广播一条 `permcache:` 键
-      //（src/services/userPermissionService.js:191），两条键同源但前缀不同、各有各的 .catch。
+      //（src/services/userPermissionService.js:273），两条键同源但前缀不同、各有各的 .catch。
       const keys = pubSpy.mock.calls.map((c) => String(c[0]));
       const authCall = keys.indexOf(`auth:user:${userId}`);
       expect(authCall).toBeGreaterThan(-1);

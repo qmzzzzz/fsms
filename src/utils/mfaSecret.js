@@ -1,5 +1,5 @@
 /**
- * MFA TOTP 种子的静态加密存储（P2-15）
+ * MFA TOTP 种子的静态加密存储
  *
  * 问题：mfaSecret 原先以明文入库，仅靠 `select: false` 从查询结果中隐藏。
  * 对照同一文档里的其它凭证——password 走 bcrypt、mfaRecoveryCodes 存

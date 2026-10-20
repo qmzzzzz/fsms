@@ -1,5 +1,5 @@
 /**
- * PII 加密迁移 / 密钥轮换（P1-②，2026-09-30；2026-10-16 扩到报警上报人电话与用户邮箱）
+ * PII 加密迁移 / 密钥轮换（2026-09-30；2026-10-16 扩到报警上报人电话与用户邮箱）
  *
  * 用法（与 resign-audit-hmac.js 同族的门禁口径：--apply 需 ALLOWED_SOURCE_DB + --yes）：
  *   node scripts/migrate-pii-encryption.js                        # 演练：只读扫描并出报告
@@ -119,7 +119,7 @@ const PII_TARGETS = [
   {
     collection: 'firealarms',
     // reporter.phone 无检索需求（全仓消费方为零）⇒ 不建 HMAC 检索键，
-    // 这是它比 users.email 便宜的地方（见 deliverables/安全需求加固清单-2026-10-16.md A1）。
+    // 这是它比 users.email 便宜的地方。
     fields: [{ path: 'reporter.phone', keyField: null, gramField: null }],
     legacyPlaintextSelfHeal: [],
   },
@@ -214,7 +214,7 @@ async function main() {
   // 轮换前快照当前主密钥（hydrate 之后）：decryptWith 在新旧两把之间切换派生源
   if (args.rotate) process.env.PII_ROTATION_CURRENT_KEY = process.env.AES_SECRET_KEY;
 
-  // M-08 / L-26 同族口径：resolveMongoUri 的回退库拒绝 + ALLOWED_SOURCE_DB 白名单
+  // 同族口径：resolveMongoUri 的回退库拒绝 + ALLOWED_SOURCE_DB 白名单
   // + 「--apply --yes」双标志，且都在 connect **之前**（被拒绝的执行不该向目标库握手）
   const { uri, dbName, host, isFallback } = resolveMongoUri({
     scriptName: 'migrate-pii-encryption.js',

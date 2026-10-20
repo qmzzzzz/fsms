@@ -140,7 +140,7 @@ const recordMfaFailure = async (user) => {
   // 原实现 `updated?.mfaFailCount ?? 1` 让 DB 故障期间第 5 次、第 50 次失败
   // 都不触发锁定；而 isMfaLocked 读的正是同一个库 ⇒ 故障持续 = 锁定能力持续消失
   // = 6 位动态口令（10^6 空间）退化成可无限在线尝试。
-  // 判据与 blacklistToken 的 P2-26 同一条：访问控制类防线观测不到时要收紧，
+  // 判据与 blacklistToken 的同一条：访问控制类防线观测不到时要收紧，
   // 不能"记不上就算没记过"。
   if (!recordFailed && updated === null) return; // 用户文档已不存在：无锁定对象
 

@@ -17,6 +17,7 @@ const logger = require('../../utils/logger');
 const { asyncHandler } = require('../../middleware/errorHandler');
 const sessionService = require('../../services/sessionService');
 const authService = require('../../services/authService');
+const roleService = require('../../services/roleService');
 // F-03（2026-10-17）：业务状态已改变的成功路径改走可靠 outbox（落库失败 ⇒ 转审计 WAL
 // 待重放），因此"返回成功"不再等于"审计可能没写上"。仍用 onAuditWriteFailure 的两处
 // （PII 查看、安全举报）是刻意的 fail-closed：它们必须"记账后重抛"，不许把结果交出去。
@@ -146,10 +147,7 @@ const resetUserMfa = asyncHandler(async (req, res) => {
   }
 
   // 层级与内置超管保护（与 toggleUserLock 同口径）
-  const Role = require('../../models/Role');
-  const targetUserRoles = await Role.find({ _id: { $in: user.roles } }).select(
-    'level code isBuiltIn'
-  );
+  const targetUserRoles = await roleService.findRolesByIds(user.roles);
   const targetMaxLevel = maxRoleLevel(targetUserRoles);
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
   if (targetMaxLevel >= operatorMaxLevel) {

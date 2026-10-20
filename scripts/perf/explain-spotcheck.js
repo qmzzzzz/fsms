@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * 重查询 explain 抽查（E-2/E-1 配套）
+ * 重查询 explain 抽查（配套）
  *
  * 对高量级列表的代表性查询跑 explain('executionStats')，
  * 把「有没有走索引、扫了多少行」变成可留档的数字，而不是靠猜。

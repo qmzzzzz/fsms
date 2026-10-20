@@ -11,6 +11,7 @@ const winston = require('winston');
 const { runWithLogContext, getLogContext, extendLogContext } = require('../../utils/logContext');
 const requestId = require('../../middleware/requestId');
 const logger = require('../../utils/logger');
+const { flushEventLoop } = require('../helpers/waitFor');
 
 describe('logContext（O-5 请求级日志关联）', () => {
   test('脱离上下文读取返回 null（定时任务/启动期日志行为不变）', () => {
@@ -24,9 +25,10 @@ describe('logContext（O-5 请求级日志关联）', () => {
     expect(getLogContext()).toBeNull(); // 退出上下文后恢复
   });
 
-  test('异步链（await/定时器）天然继承 store', async () => {
+  test('异步链（await/setImmediate）天然继承 store', async () => {
     const observed = await runWithLogContext({ requestId: 'ctx-1' }, async () => {
-      await new Promise((r) => setTimeout(r, 10));
+      // 跨过一次事件循环即可证明 ALS 在异步链上传播，不需要计时时长
+      await flushEventLoop();
       return getLogContext();
     });
     expect(observed).toEqual({ requestId: 'ctx-1' });
@@ -83,7 +85,8 @@ describe('logContext（O-5 请求级日志关联）', () => {
     test('请求中途增量合并：requestId 保留、userId 追加，异步链可见', async () => {
       const observed = await runWithLogContext({ requestId: 'r-1' }, async () => {
         extendLogContext({ userId: 'u-1' });
-        await new Promise((r) => setTimeout(r, 10));
+        // 让出事件循环即可验证合并后的上下文在异步链上可见
+        await flushEventLoop();
         return getLogContext();
       });
       expect(observed).toEqual({ requestId: 'r-1', userId: 'u-1' });

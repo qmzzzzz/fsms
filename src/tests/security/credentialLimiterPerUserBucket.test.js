@@ -32,6 +32,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { accessToken } = require('../helpers/authResponse');
 
 // trust proxy 在 createApp() 内读 env ⇒ 必须在 require('../../app') 之前设好
 const ORIG_TRUST_PROXY_HOPS = process.env.TRUST_PROXY_HOPS;
@@ -212,7 +213,7 @@ describe('凭据型限流的账号维度桶', () => {
     expect(login.status).toBe(200);
     const res = await request(app)
       .put('/api/auth/password')
-      .set('Authorization', `Bearer ${login.body.data.token}`)
+      .set('Authorization', `Bearer ${accessToken(login)}`)
       .set('X-Forwarded-For', xff(81))
       .send({ currentPassword: PASSWORD, newPassword: fresh });
     expect({ status: res.status, message: res.body?.message }).toMatchObject({ status: 200 });

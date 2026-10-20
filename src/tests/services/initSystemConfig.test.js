@@ -1,5 +1,5 @@
 /**
- * initSystemConfig 播种语义回归（P1-7）
+ * initSystemConfig 播种语义回归
  *
  * 背景（安全属性倒退）：allowPublicRegistration 原先用 SystemConfig.set 无条件
  * 覆写，每次服务重启都按 ALLOW_PUBLIC_REGISTRATION 环境变量还原。管理员通过
@@ -12,7 +12,7 @@
 
 const mongoose = require('mongoose');
 
-describe('P1-7 initSystemConfig 只播种不覆写', () => {
+describe('initSystemConfig 只播种不覆写', () => {
   let SystemConfig;
   let initSystemConfig;
 

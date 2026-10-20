@@ -30,9 +30,19 @@ const RULES = (process.env.STUB_RESPONSES || '')
     const [prefix, stdout, code] = line.split('|');
     return { prefix, stdout: stdout || '', code: Number(code || 0) };
   });
+/** 选择性记录调用方显式传入的环境变量（用于区分"切换"与"回滚切换"这类同命令不同目标） */
+const LOG_ENV = (process.env.STUB_LOG_ENV || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
-function record(file, args) {
-  if (LOG) fs.appendFileSync(LOG, file + ' ' + args.join(' ') + '\n');
+function record(file, args, opts = {}) {
+  if (!LOG) return;
+  const passedEnv = (opts && opts.env) || {};
+  const annotations = LOG_ENV.filter((name) => passedEnv[name] !== undefined)
+    .map((name) => ` [${name}=${passedEnv[name]}]`)
+    .join('');
+  fs.appendFileSync(LOG, file + ' ' + args.join(' ') + annotations + '\n');
 }
 
 /**
@@ -63,7 +73,7 @@ function resolveResult(file, args) {
 
 function makeSync() {
   return function execFileSync(file, args = [], opts = {}) {
-    record(file, args);
+    record(file, args, opts);
     const rule = resolveResult(file, args);
     if (rule.code !== 0) {
       const err = new Error(`Command failed: ${file} ${args.join(' ')}`);
@@ -108,7 +118,7 @@ real.execFile = function execFile(file, args, opts, cb) {
     cb = opts;
     opts = {};
   }
-  record(file, args || []);
+  record(file, args || [], opts);
   const rule = resolveResult(file, args || []);
   setImmediate(() => {
     if (rule.code !== 0) {
@@ -119,13 +129,13 @@ real.execFile = function execFile(file, args, opts, cb) {
     cb(null, rule.stdout, '');
   });
 };
-real.spawnSync = function spawnSync(file, args = []) {
-  record(file, args);
+real.spawnSync = function spawnSync(file, args = [], opts = {}) {
+  record(file, args, opts);
   const rule = resolveResult(file, args);
   return { status: rule.code, stdout: rule.stdout, stderr: '', signal: null, pid: 1 };
 };
-real.spawn = function spawn(file, args = []) {
-  record(file, args);
+real.spawn = function spawn(file, args = [], opts = {}) {
+  record(file, args, opts);
   const rule = resolveResult(file, args);
   const { EventEmitter } = require('events');
   const child = new EventEmitter();

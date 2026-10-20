@@ -160,7 +160,7 @@ async function main() {
     // 报告里"算 hash 失败后无哈希落库"的条数：>0 时判据拒绝 code 0。
     // 这个字段 verifyAuditChain **恒回填**，不回传不是"少一条理由"，而是把
     // 报告自己已经看见的缺口在出口处丢掉——手册正是按退出码 0 验收这一步
-    // （deployment/rollback-drill.md:111、deployment/secret-rotation.md:397），
+    // （deployment/rollback-drill.md:129、deployment/secret-rotation.md:462），
     // 于是"链尾有 N 条不可追认"也能拿到 PASS。
     // 判据对缺该字段的调用按 0 处理（不像 scanned/legacy 那样 fail-closed），
     // 所以这一行由 src/tests/verifyChainExitCode.test.js 的「判据调用方必须把报告字段回传全」钉住，漏传即红。
@@ -183,7 +183,7 @@ async function main() {
   process.exit(verdict.code);
 }
 
-// 仅在直接执行时跑（与 lint-ratchet.js 同一条 E-02 教训：无条件调用 main()
+// 仅在直接执行时跑（与 lint-ratchet.js 同一条教训：无条件调用 main()
 // 会让任何 require() 本文件的单测连带连库 + 改写退出码）。
 if (require.main === module) {
   main().catch((err) => {

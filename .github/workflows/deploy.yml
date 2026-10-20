@@ -22,7 +22,10 @@
 #
 # ⚠️ 未验证声明：本流程**从未在 GitHub Actions 上真实跑过**
 #   （本地无 GitHub 控制权，也无部署机）。结构与关键不变量已由
-#   src/tests/deploy/deployWorkflow.test.js 做静态断言，但“能不能跑通”需首次配置后实践。
+#   src/tests/deploy/deployWorkflow.test.js 做静态断言，命令拼装已抽成可单测的
+#   scripts/deployCommands.js（--dry-run 打印真实 argv），但“能不能跑通”需首次配置后实践。
+#   首次 dry_run=true 演练的步骤与留证表格见 deployment/deploy-workflow-rehearsal.md；
+#   在该文件的记录表出现真实 run URL 之前，本声明继续有效。
 name: 'Deploy'
 
 on:
@@ -198,6 +201,14 @@ jobs:
           # compose 用 `${ALLOWED_HOSTS:?}` 强制显式声明，缺它会在"切换"那步才被拒
           # （此前只下发 CORS_ORIGIN ⇒ 前置校验通过、切换时才炸）。见 deployWorkflow 自检。
           ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
+          # O-1：deployPolicy 的发布前置校验强制要求这两项显式给值——缺了会在
+          # validatePreflight 阶段以退出码 2 拒绝（此前工作流从未下发，按文档执行必失败）。
+          BACKUP_RPO_HOURS: ${{ secrets.BACKUP_RPO_HOURS }}
+          BACKUP_RTO_HOURS: ${{ secrets.BACKUP_RTO_HOURS }}
+          # 告警接收端真实配置（私有副本路径）。不配则 deployPolicy 读仓库内占位模板
+          # 并 fail-closed；演练环境可显式允许占位（S-5）。
+          ALERTMANAGER_CONFIG_PATH: ${{ secrets.ALERTMANAGER_CONFIG_PATH }}
+          ALLOW_PLACEHOLDER_ALERT_WEBHOOK: ${{ secrets.ALLOW_PLACEHOLDER_ALERT_WEBHOOK }}
           # 两个开关同样走 env：本文件的规定是 run 脚本里零 `${{ }}` 文本插值
           DRY_RUN: ${{ inputs.dry_run }}
           SKIP_BACKUP: ${{ inputs.skip_backup }}
@@ -270,10 +281,16 @@ jobs:
           CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
           # 与 self-hosted 路径同口径：compose 的 `:?` 要求两条部署路径都下发
           ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
+          # O-1：与 self-hosted 同口径，RPO/RTO 缺一即在前置校验被拒
+          BACKUP_RPO_HOURS: ${{ secrets.BACKUP_RPO_HOURS }}
+          BACKUP_RTO_HOURS: ${{ secrets.BACKUP_RTO_HOURS }}
+          ALERTMANAGER_CONFIG_PATH: ${{ secrets.ALERTMANAGER_CONFIG_PATH }}
+          ALLOW_PLACEHOLDER_ALERT_WEBHOOK: ${{ secrets.ALLOW_PLACEHOLDER_ALERT_WEBHOOK }}
           IMAGE_TAG: ${{ needs.preflight.outputs.image_ref }}
           # 与 self-hosted 同口径：deploy.js 侧拒绝非 digest 引用。
           # 注意这份 env 只到本 runner 为止，目标机上的 deploy.js 看不见它——
-          # 真正生效靠下一步把它拼进远程命令（`${:?}` 漏配即报错，不静默展开成空串）。
+          # 真正生效靠下一步把它写进经 stdin 交付的远程脚本（`${:?}` 漏配即报错，
+          # 不静默展开成空串）。
           DEPLOY_REQUIRE_DIGEST_PIN: 'true'
           DRY_RUN: ${{ inputs.dry_run }}
           SKIP_BACKUP: ${{ inputs.skip_backup }}
@@ -282,15 +299,28 @@ jobs:
           extra=""
           [[ "$DRY_RUN" == "true" ]] && extra="$extra --dry-run"
           [[ "$SKIP_BACKUP" == "true" ]] && extra="$extra --skip-backup"
-          # CORS_ORIGIN / ALLOWED_HOSTS 经 SendEnv 传入而非拼进命令串，避免它们落到
-          # 目标机的 shell 历史/进程列表里。命令串里插值的是镜像名、digest 钉闸开关、
-          # 两个部署开关与 DEPLOY_PATH：镜像名由 preflight 校验，inputs 由 workflow_call
-          # 校验，DEPLOY_PATH 由 Prepare SSH 那一步的字符集闸校验。
-          # DEPLOY_REQUIRE_DIGEST_PIN 为什么必须拼进命令串：ssh 不转发本地环境变量，
-          # SendEnv 也只在目标机 sshd 显式 AcceptEnv 该变量名时才生效（默认只放行 LANG/LC_*）。
-          # 上面 env 块里那份只到本 runner 为止——此前它从未出现在远程命令里，
-          # 于是「与 self-hosted 同口径」的兜底闸在 SSH 路径上一直是静默关闭的。
-          # 用 `${var:?}` 而非 `$var`：漏配时报错退出，而不是展开成空串让 deploy.js 把闸读成"关"。
-          ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes -o SendEnv=CORS_ORIGIN,ALLOWED_HOSTS \
-            "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd '$DEPLOY_PATH' && APP_IMAGE='$IMAGE_TAG' DEPLOY_REQUIRE_DIGEST_PIN='${DEPLOY_REQUIRE_DIGEST_PIN:?deploy-ssh 未下发 digest 钉死闸}' node scripts/deploy.js $extra"
+          # O-1：远程环境改经 **stdin 脚本**交付，不再依赖 `ssh -o SendEnv` 通道——
+          # SendEnv 只在目标机 sshd 显式 AcceptEnv 该变量名时才生效（默认只放行
+          # LANG/LC_*），此前 CORS_ORIGIN/ALLOWED_HOSTS 实际从未到达目标机，
+          # DEPLOY_REQUIRE_DIGEST_PIN 也只能拼进命令串。
+          # 现在所有变量都由 printf %q 生成可安全回读的 shell 字面量后写入脚本，
+          # 整个脚本经管道送进远程 `bash -s`：既不出现在 argv / 进程列表，
+          # 也不再要求目标机配置 AcceptEnv。`${var:?}` 保证漏配时在本地立即失败，
+          # 而不是把空串送给 deploy.js 让门禁读成"关"。
+          {
+            printf 'cd %q\n' "$DEPLOY_PATH"
+            printf 'export APP_IMAGE=%q\n' "$IMAGE_TAG"
+            printf 'export DEPLOY_REQUIRE_DIGEST_PIN=%q\n' "${DEPLOY_REQUIRE_DIGEST_PIN:?deploy-ssh 未下发 digest 钉死闸}"
+            printf 'export CORS_ORIGIN=%q\n' "${CORS_ORIGIN:?deploy-ssh 未下发 CORS_ORIGIN}"
+            printf 'export ALLOWED_HOSTS=%q\n' "${ALLOWED_HOSTS:?deploy-ssh 未下发 ALLOWED_HOSTS}"
+            printf 'export BACKUP_RPO_HOURS=%q\n' "${BACKUP_RPO_HOURS:?deploy-ssh 未下发 BACKUP_RPO_HOURS}"
+            printf 'export BACKUP_RTO_HOURS=%q\n' "${BACKUP_RTO_HOURS:?deploy-ssh 未下发 BACKUP_RTO_HOURS}"
+            if [[ -n "${ALERTMANAGER_CONFIG_PATH:-}" ]]; then
+              printf 'export ALERTMANAGER_CONFIG_PATH=%q\n' "$ALERTMANAGER_CONFIG_PATH"
+            fi
+            if [[ -n "${ALLOW_PLACEHOLDER_ALERT_WEBHOOK:-}" ]]; then
+              printf 'export ALLOW_PLACEHOLDER_ALERT_WEBHOOK=%q\n' "$ALLOW_PLACEHOLDER_ALERT_WEBHOOK"
+            fi
+            printf 'node scripts/deploy.js %s\n' "$extra"
+          } | ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s'

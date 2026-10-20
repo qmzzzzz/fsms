@@ -68,6 +68,7 @@ jest.mock('../../middleware/auth', () => ({
 }));
 jest.mock('../../services/statsCache', () => ({
   invalidateByUserId: jest.fn(),
+  invalidateAll: jest.fn(),
 }));
 
 const RealUser = jest.requireActual('../../models/User');

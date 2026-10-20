@@ -32,9 +32,14 @@
 ### T 篡改（Tampering）
 
 - 审计链：v4 字段冻结快照 + 哈希链 + HMAC（`auditFieldSetsImmutable` 门禁）；
+  周期性 HMAC 签名检查点（`services/auditChainCheckpoint.js` + `scripts/audit-chain-checkpoint.js`）
+  补上「锚点后插枝」与「尾部截断」的检出盲区；
 - 请求体：Mongo 操作符递归清洗（`sanitizeMongo`）+ `req.query` 物化（Express 5 下
   原地清洗无效，`materializeQuery` 读一次→清洗→defineProperty→回读自证）；
 - PII 列：AES-GCM 认证标签——密文被改即解密失败，不静默降级（`utils/piiCrypto.js`）。
+- 残余：检查点文件与数据库默认同机，能同时改写两者的人可一并伪造；外部锚定
+  （WORM/时间戳服务）需由运维按 `docs/architecture.md` §7 落地。检查点之后新增
+  又删除的记录，同样需更晚的检查点才能发现。
 
 ### R 抵赖（Repudiation）
 

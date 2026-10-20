@@ -4,11 +4,16 @@
  */
 
 const FireDevice = require('../models/FireDevice');
+const FireAlarm = require('../models/FireAlarm');
 const Inspection = require('../models/Inspection');
 const { getDataScope } = require('../middleware/rbac');
 const { buildDateRangeFilter } = require('../utils/helpers');
 const { scopeFilterFor } = require('./reportExportService');
 const { deviceAlertFilters } = require('../constants/deviceAlerts');
+const { BUSINESS_TIMEZONE } = require('../constants/timezone');
+
+const MS_PER_MINUTE = 1000 * 60;
+const TREND_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 // 到期窗口不再自己用定长毫秒算：`30*86400*1000` 与其余实现的 `setDate(+30)`
 // 在 31 天月份/夏令时下差最多 1 天，同一台设备在一处算"即将到期"、另一处不算。
@@ -142,4 +147,72 @@ const getInspectionReportData = async (query) => {
   return { byType, byStatus, byResult, total, completed, completionRate, byAssignee };
 };
 
-module.exports = { getDeviceReportData, getInspectionReportData };
+/**
+ * 报警报表：一次 $facet 汇总 6 个维度（A-4 自控制器下沉，聚合口径不变）。
+ * @param {{scopeFilter: object, matchStage: object}} args
+ */
+const getAlarmReportData = async ({ scopeFilter, matchStage }) => {
+  const thirtyDaysAgo = new Date(Date.now() - TREND_WINDOW_MS);
+
+  // 使用 $facet 将 6 次聚合合并为 1 次查询；顶层 $match 先应用数据范围，各分支再叠加自身过滤
+  const [facetResult] = await FireAlarm.aggregate([
+    { $match: scopeFilter },
+    {
+      $facet: {
+        // 按类型统计
+        byType: [{ $match: matchStage }, { $group: { _id: '$alarmType', count: { $sum: 1 } } }],
+        // 按状态统计
+        byStatus: [{ $match: matchStage }, { $group: { _id: '$status', count: { $sum: 1 } } }],
+        // 按级别统计
+        byLevel: [{ $match: matchStage }, { $group: { _id: '$level', count: { $sum: 1 } } }],
+        // 按原因统计（与其他分支一致叠加日期过滤，避免选了日期后口径不一致）
+        byCause: [
+          { $match: { ...matchStage, cause: { $ne: null } } },
+          { $group: { _id: '$cause', count: { $sum: 1 } } },
+        ],
+        // 按天统计（近30天）：时区取业务时区单一声明，与仪表盘「今日」同口径
+        byDay: [
+          { $match: { occurredAt: { $gte: thirtyDaysAgo } } },
+          {
+            $group: {
+              _id: {
+                $dateToString: {
+                  format: '%Y-%m-%d',
+                  date: '$occurredAt',
+                  timezone: BUSINESS_TIMEZONE,
+                },
+              },
+              count: { $sum: 1 },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ],
+        // 平均响应时间（分钟）（叠加日期过滤；receivedAt 同样加 $ne:null 守卫，
+        // 防止缺失字段的文档参与 $subtract 得到 NaN/报错拉低均值）
+        avgResponseTime: [
+          { $match: { ...matchStage, dispatchedAt: { $ne: null }, receivedAt: { $ne: null } } },
+          {
+            $group: {
+              _id: null,
+              avgMinutes: {
+                $avg: { $divide: [{ $subtract: ['$dispatchedAt', '$receivedAt'] }, MS_PER_MINUTE] },
+              },
+            },
+          },
+        ],
+      },
+    },
+  ]);
+
+  const { byType, byStatus, byLevel, byCause, byDay, avgResponseTime } = facetResult;
+  return {
+    byType,
+    byStatus,
+    byLevel,
+    byCause,
+    byDay,
+    avgResponseTime: Math.round(avgResponseTime[0]?.avgMinutes || 0),
+  };
+};
+
+module.exports = { getDeviceReportData, getInspectionReportData, getAlarmReportData };

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
  * 一键部署（D-1）：拉取镜像 → 备份 → 迁移 → 切换 → 健康门禁 → 失败自动回滚
+ * （仅当本次未应用数据库迁移时；有迁移则停住转人工恢复，见 O-2）
  *
  * 为什么需要这个脚本：
  *   此前发布是一串手敲命令（compose build / up -d / curl /health），散落在
@@ -14,8 +15,10 @@
  *   - **fail-closed**：前置条件不满足即拒绝执行，不在缺条件时「尽力而为」；
  *   - **先备份后发布**：deployment/rollback-drill.md 的铁律——没有备份的发布
  *     不具备回滚资格。备份失败即中止，不进入后续步骤；
- *   - **回滚自动触发**：健康门禁不通过时自动切回上一版本，而不是等人工发现；
- *   - **可干跑**：--dry-run 打印完整计划与判据，便于评审与演练。
+ *   - **回滚自动触发**：健康门禁不通过时自动切回上一版本——**仅限本次没有应用
+ *     数据库迁移的情况**。迁移一旦执行，旧镜像跑在新 schema 上可能写坏数据，
+ *     此时脚本停住并转人工恢复，而不是给出「已回滚」的假象（O-2）；
+ *   - **可干跑**：--dry-run 打印完整计划、判据与真实 argv（与执行同源），便于评审与演练。
  *
  * 用法：
  *   APP_IMAGE=ghcr.io/owner/repo:sha-abc1234 node scripts/deploy.js
@@ -28,7 +31,7 @@
  *   APP_IMAGE=... node scripts/deploy.js --no-rollback  # 关闭失败自动回滚
  *
  * --skip-backup 的连带后果（不是只「少一次备份」）：跳过后**本次发布失去自动回滚资格**
- * （decideRollback 会拒绝在「迁移已改写库 + 一份备份都没有」时自动切旧镜像），
+ * （decideRollback 会拒绝在「一份备份都没有」时自动切旧镜像），
  * 健康门禁失败时脚本停在人工介入路径。
  *
  * 退出码：
@@ -51,8 +54,20 @@ const {
   buildPlan,
   decideRollback,
   isSameImageRef,
+  parseAppliedMigrations,
   parseArgs,
 } = require('./deployPolicy');
+// 命令拼装只有这一处来源（O-5）：--dry-run 打印的 argv 与实际执行的是同一份构造器。
+const {
+  composeArgs,
+  buildPullInvocation,
+  buildMigrateInvocation,
+  buildUpInvocation,
+  buildProbeInvocation,
+  buildBackupInvocation,
+  buildCommandPlan,
+  formatInvocation,
+} = require('./deployCommands');
 
 // 与仓库其余入口（src/config/index.js、scripts/*.js 维护脚本）同一口径：先加载 .env。
 // 不加载会出现一个实测过的陷阱：docker compose 自己会读 .env，而本脚本是 Node，
@@ -60,9 +75,6 @@ const {
 // 后运行，会被前置校验拦下并报「APP_IMAGE 未设置」，而 compose 层面却明明能读到。
 // 已设置的真实环境变量优先（dotenv 默认不覆盖已存在的值）。
 require('dotenv').config({ path: path.join(ROOT, '.env'), quiet: true });
-
-/** 所有 compose / docker 命令的公共参数：显式指定 compose 文件，避免受 cwd 影响 */
-const COMPOSE_ARGS = ['compose', '-f', path.join(ROOT, 'docker-compose.yml')];
 
 /** 执行命令并实时透传输出；失败时抛错（由调用方决定是否降级处理） */
 function run(file, args, opts = {}) {
@@ -73,6 +85,34 @@ function run(file, args, opts = {}) {
     windowsHide: true,
     ...opts,
   });
+}
+
+/**
+ * 执行命令、捕获并回显输出；失败时先把已捕获的 stdout/stderr 打出来再抛出。
+ *
+ * 与 run() 的区别：需要解析 stdout（迁移清单）时不能直接 stdio:inherit。
+ * `docker compose run` 的 stdout 可能混有拉取/启动日志，解析方只认明确的行格式。
+ */
+function runCapture(file, args) {
+  console.log(`$ ${[file, ...args].join(' ')}`);
+  const echo = (stream, text) => {
+    if (!text) return;
+    stream.write(String(text).endsWith('\n') ? String(text) : `${text}\n`);
+  };
+  try {
+    const stdout = execFileSync(file, args, {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['inherit', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    echo(process.stdout, stdout);
+    return String(stdout || '');
+  } catch (err) {
+    echo(process.stdout, err.stdout);
+    echo(process.stderr, err.stderr);
+    throw err;
+  }
 }
 
 /** 执行命令并捕获输出（用于读取状态，失败时返回 null 而不抛出） */
@@ -98,7 +138,7 @@ function tryCapture(file, args) {
  * 首次部署（容器不存在）时返回 null，调用方据此判定「无回滚目标」。
  */
 function readCurrentImage() {
-  const id = tryCapture('docker', [...COMPOSE_ARGS, 'ps', '-q', 'app']);
+  const id = tryCapture('docker', [...composeArgs(), 'ps', '-q', 'app']);
   if (!id) return null;
   // 可能有多行（多副本），取第一行即可——本项目 app 为单副本
   const firstId = id.split(/\r?\n/).filter(Boolean)[0];
@@ -120,16 +160,8 @@ async function waitForReady({ timeoutMs, intervalMs = 2000, probeUrl }) {
   const deadline = Date.now() + timeoutMs;
   let lastReason = '尚未探测';
   while (Date.now() < deadline) {
-    const out = tryCapture('curl', [
-      '--silent',
-      '--output',
-      '/dev/null',
-      '--write-out',
-      '%{http_code}',
-      '--max-time',
-      '5',
-      probeUrl,
-    ]);
+    const probe = buildProbeInvocation(probeUrl);
+    const out = tryCapture(probe.file, probe.args);
     if (out === '200') return { ok: true, reason: 'readyz=200' };
     lastReason = out === null ? 'curl 失败（服务未监听？）' : `readyz=${out}`;
     await new Promise((r) => setTimeout(r, intervalMs));
@@ -177,7 +209,8 @@ function backupDatabase(skip) {
     // COMPOSE_FILE 必传：备份默认在 mongo 容器内执行（宿主机连不上只 expose 不 publish
     // 的服务），而 `docker compose exec` 必须指向与部署同一份 compose 文件，
     // 否则会命中另一个同名项目（脚本的 cwd 决定项目名，这里刻意不依赖 cwd）。
-    run('bash', [path.join(ROOT, 'scripts', 'backup-mongo.sh'), path.join(ROOT, 'backups')], {
+    const backup = buildBackupInvocation();
+    run(backup.file, backup.args, {
       env: {
         ...process.env,
         MONGODB_URI: uri,
@@ -195,51 +228,62 @@ function backupDatabase(skip) {
 function pullImage() {
   console.log('\n[镜像] 拉取目标镜像……');
   try {
-    run('docker', [...COMPOSE_ARGS, 'pull', 'app']);
+    const pull = buildPullInvocation();
+    run(pull.file, pull.args);
   } catch (err) {
     console.error('✗ 镜像拉取失败，中止部署（线上保持原版本运行）');
     process.exit(1);
   }
 }
 
-/** 迁移：先打印当前位点留痕，再应用；失败即中止（未切换流量）。 */
+/**
+ * 迁移：先打印当前位点留痕，再应用；失败即中止（未切换流量）。
+ * 返回本次实际应用的迁移名（来自 `MIGRATED UP:` 行），供回滚决策判断 schema 是否已变。
+ */
 function applyMigrations() {
-  const migrateArgv = [
-    ...COMPOSE_ARGS,
-    'run',
-    '--rm',
-    '--no-deps',
-    'app',
-    'node',
-    'node_modules/.bin/migrate-mongo',
-  ];
+  const status = buildMigrateInvocation('status');
+  const up = buildMigrateInvocation('up');
   console.log('\n[迁移] 当前位点：');
-  run('docker', [...migrateArgv, 'status']);
+  run(status.file, status.args);
   console.log('\n[迁移] 应用待执行迁移……');
+  let output = '';
   try {
-    run('docker', [...migrateArgv, 'up']);
+    output = runCapture(up.file, up.args);
   } catch (err) {
     console.error('✗ 迁移失败，中止部署（线上保持原版本运行，未切换流量）');
     process.exit(1);
   }
+  const applied = parseAppliedMigrations(output);
+  if (applied.length > 0) {
+    console.log(`✓ 本次应用 ${applied.length} 个迁移（schema 已变，自动回滚将转人工）：`);
+    for (const name of applied) console.log(`  · ${name}`);
+  } else {
+    console.log('· 本次没有待应用的迁移（schema 未变）');
+  }
+  return applied;
 }
 
 /**
  * 滚动切换 app 容器；失败即中止。
  *
  * 失败时不自动回滚——但必须说明此刻的状态：本步骤只在 migrate-up **成功之后**
- * 才到达，所以线上是「旧版本 + 新 schema」，且此时没有任何东西会去复检健康。
+ * 才到达，所以线上是「旧版本 + 本次迁移后的 schema」，且此时没有任何东西会去复检健康。
  * 不写出来，操作员会以为「没切成功就等于什么都没发生」。
  */
-function switchContainer() {
+function switchContainer(appliedMigrations) {
   console.log('\n[切换] 滚动更新 app 容器……');
   try {
-    run('docker', [...COMPOSE_ARGS, 'up', '-d', '--no-build', 'app']);
+    const up = buildUpInvocation();
+    run(up.file, up.args);
   } catch (err) {
     console.error('✗ 容器切换失败');
+    const schemaState =
+      appliedMigrations.length > 0
+        ? `本次已应用 ${appliedMigrations.length} 个迁移——线上旧版本正在新 schema 上运行。`
+        : '本次没有应用迁移，schema 与发布前一致。';
     console.error(
-      '⚠ 此刻状态：迁移已执行、容器未切换——线上仍是旧版本跑在新 schema 上。' +
-        '发布前的备份位于 ./backups，恢复步骤见 deployment/rollback-drill.md。'
+      `⚠ 此刻状态：迁移已执行、容器未切换——${schemaState}` +
+        '发布前的备份位于 ./backups，恢复/回退步骤见 deployment/rollback-drill.md。'
     );
     process.exit(1);
   }
@@ -249,18 +293,19 @@ function switchContainer() {
  * 回滚到指定镜像并复检健康；回滚失败不抛出（由调用方统一以退出码 1 收口）。
  * 回滚后的复检同样以 /readyz 为准——回滚成功与否要可观测，而非假定。
  *
- * 「回滚只切镜像不切 schema」必须显式打印：本函数只在 migrate-up 成功之后
- * 才可达，因此回滚完成时数据库停在**比目标镜像更新**的位点。
- * 只打印「✓ 回滚后服务就绪」会让操作员以为回到了发布前的状态，而事实并非如此。
+ * 可达性（O-2）：decideRollback 只在本次**没有应用迁移**时才放行自动回滚，
+ * 因此这里切回的镜像与当前 schema 是发布前的同一组合。仍要打印「只切镜像」：
+ * 镜像回退不会撤销新版本失败前已写入的数据，数据级恢复是另一条人工路径。
  */
 async function rollbackTo(previousImage, probeUrl, recheckTimeoutMs) {
   console.log(`\n[回滚] 切回上一镜像：${previousImage}`);
   console.error(
-    '⚠ 回滚只切镜像：本次迁移已改写数据库，切回的版本跑在更新的 schema 上。' +
-      '请逐条确认这些迁移向后兼容，否则改用 ./backups 的备份恢复（见 deployment/rollback-drill.md）。'
+    '⚠ 回滚只切镜像：本次未应用迁移，schema 与发布前一致；但新版本失败前写入的数据不会被撤销。' +
+      '若数据异常，请按 deployment/rollback-drill.md 评估是否从 ./backups 做数据级恢复。'
   );
   try {
-    run('docker', [...COMPOSE_ARGS, 'up', '-d', '--no-build', 'app'], {
+    const up = buildUpInvocation();
+    run(up.file, up.args, {
       env: { ...process.env, APP_IMAGE: previousImage },
     });
     const recheck = await waitForReady({ timeoutMs: recheckTimeoutMs, probeUrl });
@@ -272,6 +317,22 @@ async function rollbackTo(previousImage, probeUrl, recheckTimeoutMs) {
   } catch (err) {
     console.error(`✗ 回滚执行失败——需人工介入：${err.message}`);
   }
+}
+
+/**
+ * --dry-run 的计划输出：逐条打印真实 argv（与实际执行共用 deployCommands 的构造器）。
+ * 单独成函数是为了把分支留在 main() 之外——main 只表达步骤顺序。
+ */
+function printDryRunPlan(args, probeUrl) {
+  console.log('\n[命令计划] 以下 argv 与实际执行同源（--dry-run 不执行任何一条）：');
+  for (const step of buildCommandPlan({ probeUrl })) {
+    if (step.id === 'backup' && args.skipBackup) {
+      console.log('  · backup: 跳过（--skip-backup）');
+      continue;
+    }
+    console.log(`  · ${step.id}: ${formatInvocation(step)}`);
+  }
+  console.log('\n--dry-run：仅打印计划，不执行任何变更。');
 }
 
 async function main() {
@@ -305,7 +366,7 @@ async function main() {
   console.log('✓ 前置条件校验通过');
 
   if (args.dryRun) {
-    console.log('\n--dry-run：仅打印计划，不执行任何变更。');
+    printDryRunPlan(args, probeUrl);
     process.exit(0);
   }
 
@@ -317,10 +378,10 @@ async function main() {
 
   // ---- ④~⑤ 拉取镜像 + 迁移 ----
   pullImage();
-  applyMigrations();
+  const appliedMigrations = applyMigrations();
 
   // ---- ⑥ 切换 ----
-  switchContainer();
+  switchContainer(appliedMigrations);
 
   // ---- ⑦ 健康门禁 ----
   console.log(`\n[健康门禁] 轮询 ${probeUrl} ……`);
@@ -335,6 +396,7 @@ async function main() {
     backupTaken: !args.skipBackup,
     previousImage,
     targetImage: targetImageRef(),
+    appliedMigrations,
   });
   console.log(`[回滚决策] ${decision.reason}`);
 

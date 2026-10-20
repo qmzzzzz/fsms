@@ -179,6 +179,7 @@ const ERROR_CODE_I18N_MAP = {
   SECURITY_OVERVIEW_FORMAT_INVALID: 'errors.securityOverviewFormatInvalid',
   SECURITY_OVERVIEW_STRUCTURE_INVALID: 'errors.securityOverviewStructureInvalid',
   SECURITY_OVERVIEW_QUERY_FAILED: 'errors.securityOverviewQueryFailed',
+  SECURITY_OVERVIEW_DEGRADED: 'errors.securityOverviewDegraded',
   RECENT_ALERTS_EMPTY: 'errors.recentAlertsEmpty',
   RECENT_ALERTS_QUERY_FAILED: 'errors.recentAlertsQueryFailed',
   CONFIG_ALLOW_REGISTRATION_MUST_BE_BOOLEAN: 'errors.configAllowRegistrationMustBeBoolean',

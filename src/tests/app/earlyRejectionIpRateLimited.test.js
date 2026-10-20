@@ -18,6 +18,7 @@
  * 避免继承第一条用例已打满的配额（limiter 是模块级单例，桶按 req.ip 分）。
  */
 const request = require('supertest');
+const { waitFor, waitForStable, flushEventLoop } = require('../helpers/waitFor');
 
 const MAX_IP = 3;
 const FLOOD = 10;
@@ -51,32 +52,31 @@ const countViolations = (path) =>
       : { action: VIOLATION_ACTION, path: String(path).split('?')[0] }
   );
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-// 宽限期必须明显大于一次落库往返：并行门禁下写库会排队（实测单跑恒绿、全量跑读到 1 而不是 3）
-const FLUSH_GRACE_MS = 3000;
-const AWAIT_TIMEOUT_MS = 8000; // 加上宽限期仍远小于 jest 的 testTimeout(30s)
+const AWAIT_TIMEOUT_MS = 8000; // 远小于 jest 的 testTimeout(30s)
 
 /**
  * 期望值来自响应侧（谁被合规闸门放过），而不是"轮询到数字不再变"。
  *
- * 原先的稳定性轮询（每 150ms 采样，两次相等就返回）三个方向都会错：
- *  - 正向欠数：写库慢于头两次采样时，把"还没落库"当成"已经静默"⇒ 数到 1 而不是 3
- *    （全量并行跑实测；单文件跑恒绿，因为写库不排队）；
- *  - 反向假绿：`探针不产生链上写入` 这类 0 值判据，头两次采样恰好都是 0 就直接返回，
- *    之后才落库的那条（也就是防线真的漏了的那条）永远看不见；
+ * 只等"达到期望值"有三个方向的漏判：
+ *  - 正向欠数：链锁排队中的写入还没落库，期望值只是"至少"而非"恰好"，先收会漏看后到的；
+ *  - 反向假绿：`探针不产生链上写入` 这类 0 值判据，轮询立即满足，之后才落库的那条
+ *    （也就是防线真的漏了的那条）永远看不见；
  *  - 正向超额：数到 N 就收，看不见第 N+1 条——而"多一条"正是闸门放漏了一个请求的形态。
- * 三个方向都得靠时间换确定性：先等期望值到齐，再等满宽限期复查「没有更多」，取最终值交回断言。
- * 注入一条延后落库的记录即可把三错各自显形（自检记录见 deliverables/复核台账）。
+ * 故先 waitFor 到期望值，再用 flushEventLoop 让 recordViolation 的 setImmediate 投递
+ * 进入链锁，最后 waitForStable 等读数静默后取最终值交回断言（超时抛错，不返回中间值让它过）。
  */
 const awaitViolations = async (path, expected) => {
-  const deadline = Date.now() + AWAIT_TIMEOUT_MS;
-  for (;;) {
-    const n = await countViolations(path);
-    if (n >= expected || Date.now() > deadline) break;
-    await sleep(150);
-  }
-  await sleep(FLUSH_GRACE_MS);
-  return countViolations(path); // 超时也照常取数：宁可红，不"返回当前值让它过"
+  await waitFor(async () => (await countViolations(path)) >= expected, {
+    timeoutMs: AWAIT_TIMEOUT_MS,
+    label: `协议违规审计落库达到期望值（path=${path ?? '(all)'}, expected=${expected}）`,
+  });
+  // 请求虽已 await，但 recordViolation 是 setImmediate 投递：先让已排队的投递开始落库，
+  // 再确认计数不再变化——若防线真的漏了，多出来的那几条会在静默判定前显形。
+  await flushEventLoop(3);
+  return waitForStable(() => countViolations(path), {
+    intervalMs: 150,
+    label: `协议违规审计落库条数静默（path=${path ?? '(all)'}）`,
+  });
 };
 
 // 每条用例一个独立合成 IP：limiter 是模块级单例，桶按 req.ip 分（见文件头）

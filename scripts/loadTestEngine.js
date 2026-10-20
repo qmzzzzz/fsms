@@ -1,5 +1,5 @@
 /**
- * 压测引擎（E-1 基线，零依赖）
+ * 压测引擎（基线，零依赖）
  *
  * 从 scripts/load-test.js 原样搬出的「与场景无关」那一半：keepAlive 计时客户端、
  * 并发 hammer 引擎、门禁断言。此前它们与 B/C/E/D 四个相的步骤平铺在同一文件里，
@@ -106,7 +106,7 @@ function createStepRunner(counters) {
    * C（/metrics）两相在任何退化下都是"绿"的——/health 全 500、/metrics 被
    * metricsAuth 挡成 401、甚至一个请求都没发出去（total=0 ⇒ QPS=0、P95=0），
    * 都照样打印数字并写进基线文件。**一份把错误响应当吞吐量的基线比没有基线更糟**：
-   * 它看起来是"压测过了"。E-1 的口径是"测得这台机器的下界"，前提是这些请求真的成功。
+   * 它看起来是"压测过了"。口径是"测得这台机器的下界"，前提是这些请求真的成功。
    *
    * @param {string} label 步骤名前缀
    * @param {Object} r hammer() 的返回

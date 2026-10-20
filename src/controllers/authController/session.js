@@ -69,7 +69,7 @@ const getMe = asyncHandler(async (req, res) => {
  * 登出
  * POST /api/auth/logout
  *
- * P2-26 fail-closed：令牌吊销未能落库时返回 503 而非「登出成功」
+ * fail-closed：令牌吊销未能落库时返回 503 而非「登出成功」
  * （判定在 authService.revokeTokensOnLogout，语义注释见该处）。
  */
 const logout = asyncHandler(async (req, res) => {
@@ -98,13 +98,13 @@ const logout = asyncHandler(async (req, res) => {
   // 同一请求在 authenticate 那侧却是另一套：extractAccessToken 对空串**回退 cookie**并放行，
   // 于是"认证用的令牌"与"登出要吊销的令牌"不是同一个东西——登出回 200「已登出」，
   // 而那个仍然有效的访问令牌没进黑名单，一路活到自己的 TTL。
-  // 这正是 P2-26 用 LOGOUT_REVOKE_FAILED 要堵的 fail-open，被一条复制粘贴的分叉绕开。
+  // 这正是用 LOGOUT_REVOKE_FAILED 要堵的 fail-open，被一条复制粘贴的分叉绕开。
   const token = extractAccessToken(req);
   const cookies = getCookies(req);
   // 两个来源**都要**吊销。旧写法 `req.body?.refreshToken || cookies[...]` 是二选一：
   // 客户端（或中间层）只要出示一条**已轮换掉的旧串**，浏览器里那条仍在有效期的
   // refresh 令牌就永远进不了登出请求 ⇒ 接口回 200「已登出」，服务端那条线还活着，
-  // 而用户已经认为会话终止、不会再补救（P2-26 要堵的正是这类假成功）。
+  // 而用户已经认为会话终止、不会再补救（要堵的正是这类假成功）。
   const presentedRefresh = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : '';
   const cookieValue = cookies[REFRESH_COOKIE_NAME];
   const cookieRefresh = typeof cookieValue === 'string' ? cookieValue : '';

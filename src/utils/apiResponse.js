@@ -91,7 +91,7 @@ class ApiResponse {
     return this.error(res, message, statusCode, {
       errorCode: code,
       ...(options.params || {}),
-      // fieldErrors：批量/校验类错误的明细透传（P2-23：调用方须能知晓被拒原因）
+      // fieldErrors：批量/校验类错误的明细透传（调用方须能知晓被拒原因）
       ...(options.fieldErrors !== undefined ? { fieldErrors: options.fieldErrors } : {}),
     });
   }

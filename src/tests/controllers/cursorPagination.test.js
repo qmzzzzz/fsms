@@ -1,5 +1,5 @@
 /**
- * 高量级列表游标分页端到端测试（E-2）
+ * 高量级列表游标分页端到端测试
  *
  * 覆盖四个改造成游标分页的列表接口：设备 / 报警 / 巡检 / 审计日志。
  * 核心断言：逐页消费 nextCursor 能无重复、无遗漏地遍历全部记录，
@@ -12,7 +12,7 @@ const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 const { TEST_CLIENT_IP } = require('../fixtures');
 
-describe('高量级列表游标分页（E-2）', () => {
+describe('高量级列表游标分页', () => {
   let app;
   let FireDevice;
   let FireAlarm;

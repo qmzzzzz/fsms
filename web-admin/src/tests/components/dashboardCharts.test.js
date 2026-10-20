@@ -60,7 +60,6 @@ vi.mock('echarts/components', () => ({
   GraphicComponent: {},
 }))
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
-vi.mock('echarts/features', () => ({ LegacyGridContainLabel: {} }))
 
 const getAlarms = vi.fn()
 const getDevices = vi.fn()

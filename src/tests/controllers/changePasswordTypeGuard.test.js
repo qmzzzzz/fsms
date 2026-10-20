@@ -1,5 +1,5 @@
 /**
- * P1-2 回归：改密接口对非字符串 currentPassword 必须返回 400 而非 500
+ * 回归：改密接口对非字符串 currentPassword 必须返回 400 而非 500
  *
  * 背景（实测事故）：express-validator 的 notEmpty/isLength/matches 在校验前会把
  * 入参强制转成字符串，`{}` → `[object Object]` 能通过全部校验，但 req.body 中的
@@ -18,7 +18,7 @@ const request = require('supertest');
 const mongoose = require('mongoose');
 const { passwordChangeLimiter, passwordChangeUserLimiter } = require('../../middleware/rateLimit');
 
-describe('P1-2 改密接口非字符串入参防护', () => {
+describe('改密接口非字符串入参防护', () => {
   let app;
   let User;
   let user;

@@ -185,7 +185,7 @@ const scanDeviceReminders = async (options = {}) => {
 };
 
 /**
- * 标记逾期巡检（P2-19）
+ * 标记逾期巡检
  *
  * Inspection.status 定义了 'overdue' 枚举，但全仓没有任何调度器或写入路径会置它——
  * 前端按 overdue 筛选永远返回空，dashboard 的逾期数只能靠

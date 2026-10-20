@@ -104,7 +104,7 @@ describe('注册即登录的令牌必须绑定一条可吊销会话（F-175）',
     authService = require('../../services/authService');
     require('../../models/TokenBlacklist');
 
-    // 测试库是**每文件全新空库**（setup.js 的 T-1 隔离），故公开注册默认关着，
+    // 测试库是**每文件全新空库**（setup.js 的隔离），故公开注册默认关着，
     // 不开这两把闸就只会拿到 403/400，七条断言全在同一步上空跑：
     // 1) allowPublicRegistration 缺省为 false ⇒ 路由直接 403 PUBLIC_REGISTRATION_DISABLED
     // 2) registerCaptchaEnabled 缺省为 true ⇒ 无验证码字段先 400 CAPTCHA_INVALID

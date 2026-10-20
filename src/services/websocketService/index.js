@@ -1,7 +1,7 @@
 /**
  * WebSocket 服务门面（2026-10-18 自 services/websocketService.js 拆分）
  *
- * 对外形态与拆分前逐字一致：`module.exports = WebSocketService`（class），
+ * 对外形态固定为：`module.exports = WebSocketService`（class），
  * `new WebSocketService(server)` 用法不变，静态工具仍挂在类上：
  *   · WebSocketService.resolveHandshakeClientIP
  *   · WebSocketService.resolveTrustProxyHops
@@ -69,7 +69,7 @@ Object.assign(WebSocketService.prototype, handshake.methods, lifecycle.methods, 
 
 module.exports = WebSocketService;
 
-// P0-2 修复配套（2026-09-17）：导出握手 IP 解析工具，供一致性测试直接驱动，
+// 修复配套：导出握手 IP 解析工具，供一致性测试直接驱动，
 // 断言「WS 与 HTTP 在同一 trust proxy 语义下得出同一个客户端 IP」。
 // 挂在 class 上而非替换 module.exports——不改变既有 `new WebSocketService()` 用法。
 WebSocketService.resolveHandshakeClientIP = handshake.resolveHandshakeClientIP;

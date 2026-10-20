@@ -75,12 +75,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
 
   test('setAuth 写入用户与权限，但不持久化令牌', () => {
     const store = useAuthStore()
-    store.setAuth(
-      'jwt-should-not-be-stored',
-      'refresh-should-not-be-stored',
-      { username: 'alice', roles: [] },
-      ['device:read']
-    )
+    store.setAuth({ username: 'alice', roles: [] }, ['device:read'])
 
     expect(store.isAuthenticated).toBe(true)
     expect(store.currentUser.username).toBe('alice')
@@ -100,7 +95,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
 
   test('refreshPermissionsFromServer：/auth/me 往返期间登出，不得复活已失效会话（竞态）', async () => {
     const store = useAuthStore()
-    store.setAuth('t', 'r', { username: 'alice', roles: [] }, ['device:read'])
+    store.setAuth({ username: 'alice', roles: [] }, ['device:read'])
 
     // 让 getMe 挂起，手动控制 resolve，以模拟「权限刷新在途时用户点了登出」
     let releaseGetMe
@@ -140,7 +135,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
     sessionStorage.setItem('refreshToken', 'legacy-refresh')
     sessionStorage.setItem('currentUser', JSON.stringify({ username: 'stale' }))
     const store = useAuthStore()
-    store.setAuth('t', 'r', { username: 'bob' }, [])
+    store.setAuth({ username: 'bob' }, [])
     expect(sessionStorage.getItem('token')).toBeNull()
     expect(sessionStorage.getItem('refreshToken')).toBeNull()
     expect(sessionStorage.getItem('currentUser')).toBeNull()
@@ -149,7 +144,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
   test('clearAuth 清空用户/权限与两种介质的残留', () => {
     sessionStorage.setItem('token', 'legacy-token')
     const store = useAuthStore()
-    store.setAuth('t', 'r', { username: 'carol' }, ['user:read'])
+    store.setAuth({ username: 'carol' }, ['user:read'])
     store.clearAuth()
 
     expect(store.isAuthenticated).toBe(false)
@@ -230,7 +225,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
 
     test('已有本地身份时直接返回 true，不发请求', async () => {
       const store = useAuthStore()
-      store.setAuth('t', 'r', { userId: 'u-1', username: 'admin' }, [])
+      store.setAuth({ userId: 'u-1', username: 'admin' }, [])
       await expect(store.restoreSession()).resolves.toBe(true)
       expect(getMeMock).not.toHaveBeenCalled()
       expect(getSessionStatusMock).not.toHaveBeenCalled()
@@ -270,7 +265,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
         data: { success: true, data: { user: { id: 'u-1', username: 'admin' }, permissions: [] } },
       })
       const store = useAuthStore()
-      store.setAuth('t', 'r', { userId: 'u-1', username: 'admin' }, [])
+      store.setAuth({ userId: 'u-1', username: 'admin' }, [])
       store.clearAuth()
 
       await expect(store.restoreSession()).resolves.toBe(false)
@@ -283,7 +278,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
       const store = useAuthStore()
       await store.restoreSession()
 
-      store.setAuth('t', 'r', { userId: 'u-2', username: 'bob' }, [])
+      store.setAuth({ userId: 'u-2', username: 'bob' }, [])
       store.currentUser = null
 
       getMeMock.mockResolvedValueOnce({
@@ -297,7 +292,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
 
   test('其他标签页登录不同用户：本地会话立即失效并跳登录页', () => {
     const store = useAuthStore()
-    store.setAuth('t', 'r', { userId: 'u-alice', username: 'alice' }, ['device:read'])
+    store.setAuth({ userId: 'u-alice', username: 'alice' }, ['device:read'])
     expect(store.isAuthenticated).toBe(true)
 
     store.handleRemoteAuthEvent({ type: 'login', userId: 'u-admin', username: 'admin' })
@@ -311,7 +306,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
 
   test('其他标签页登录同一用户：本标签页不受影响', () => {
     const store = useAuthStore()
-    store.setAuth('t', 'r', { userId: 'u-alice', username: 'alice' }, ['device:read'])
+    store.setAuth({ userId: 'u-alice', username: 'alice' }, ['device:read'])
 
     store.handleRemoteAuthEvent({ type: 'login', userId: 'u-alice', username: 'alice' })
 
@@ -321,7 +316,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
 
   test('其他标签页登出同一用户：本标签页同步登出', () => {
     const store = useAuthStore()
-    store.setAuth('t', 'r', { userId: 'u-alice', username: 'alice' }, [])
+    store.setAuth({ userId: 'u-alice', username: 'alice' }, [])
 
     store.handleRemoteAuthEvent({ type: 'logout', userId: 'u-alice' })
 
@@ -332,7 +327,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
 
   test('其他标签页登出别的用户：本标签页不受影响', () => {
     const store = useAuthStore()
-    store.setAuth('t', 'r', { userId: 'u-alice', username: 'alice' }, [])
+    store.setAuth({ userId: 'u-alice', username: 'alice' }, [])
 
     store.handleRemoteAuthEvent({ type: 'logout', userId: 'u-bob' })
 
@@ -351,7 +346,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
   test('用户对象 id 字段名差异（id/_id）均可比对', () => {
     const store = useAuthStore()
     // /auth/me 返回 id 字段，登录响应返回 userId 字段，均应正确识别为同一用户
-    store.setAuth('t', 'r', { id: 'u-alice', username: 'alice' }, [])
+    store.setAuth({ id: 'u-alice', username: 'alice' }, [])
     store.handleRemoteAuthEvent({ type: 'login', userId: 'u-admin' })
     expect(store.isAuthenticated).toBe(false)
   })

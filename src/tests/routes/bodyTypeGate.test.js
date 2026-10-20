@@ -24,6 +24,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { accessToken } = require('../helpers/authResponse');
 const { decryptPii } = require('../../utils/piiCrypto');
 
 const stamp = `btg${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
@@ -195,7 +196,7 @@ describe('写路径的 body 类型闸门', () => {
         expect(gateFired(res, 'realName', '姓名')).toBe(true);
         expect(res.status).toBe(400);
       }
-      // P1-②：库内是密文（lean 不走 getter）——"原值不变"按解密后的口径断言
+      // 库内是密文（lean 不走 getter）——"原值不变"按解密后的口径断言
       const doc = await User.findById(target._id).lean();
       expect(decryptPii(doc.realName)).toBe('原名');
     });
@@ -335,7 +336,7 @@ describe('写路径的 body 类型闸门', () => {
         .send({ username: `${stamp}op`, password: PASSWORD });
       expect(gateFired(res, 'password', '密码')).toBe(false);
       expect(res.status).toBe(200);
-      expect(res.body.data.token).toBeTruthy();
+      expect(accessToken(res)).toBeTruthy();
     });
 
     test('17 PUT /auth/profile 的 avatar 对象值 ⇒ 400 点名', async () => {

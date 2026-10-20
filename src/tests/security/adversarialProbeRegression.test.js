@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 
 /**
- * 对抗性探针场景的**行为断言**固化（P1-30 转化）
+ * 对抗性探针场景的**行为断言**固化（转化）
  *
  * 背景：`src/tests/zzz-*.test.js`（8 个文件 / 51 test）是审计期的临时探针，
  * 全部 0 expect、只 console.log 观察结果，却被 Jest 收集并计入覆盖率分母；
@@ -13,13 +13,13 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
  *
  * 本文件把其中「唯一可复现某个 P0/高价值安全结论」的场景转为真实断言，
  * 其余场景已在既有跟踪测试中覆盖（见各用例注释引用的对应文件）。
- * 原 zzz-* 文件已删除（P1-30）。
+ * 原 zzz-* 文件已删除。
  *
  * 覆盖清单（对应被删除探针的编号与去向）：
  *  - 设备列表数据范围隔离 + 按 ID 横向越权拒绝（zzz-adversarial-r2/r4/r5）
- *  - 自助改 department 被数据范围校验拒绝（zzz-adversarial-r3/r4/r5 → P0-1 修复回归）
+ *  - 自助改 department 被数据范围校验拒绝（zzz-adversarial-r3/r4/r5 → 修复回归）
  *  - 自我锁定防护：改自身 status 被拒（zzz-adversarial-r3 R3-4）
- *  - 同部门内 allowedIPs 变更放行（zzz-adversarial-r3 R3-3，P0-1 修复口径的另一半）
+ *  - 同部门内 allowedIPs 变更放行（zzz-adversarial-r3 R3-3，修复口径的另一半）
  *  - 跨部门删除设备被拒（zzz-adversarial-r2 R2-9）
  *  - 审计不含明文口令（zzz-adversarial-r2 R2-6）
  *  - NoSQL 注入形态的登录请求（zzz-adversarial-audit P5，此前无跟踪覆盖）
@@ -27,7 +27,7 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
  *
  * 未在本文件重复的场景（已在跟踪测试中覆盖，故对应探针直接删除）：
  *  - WS 认证对「已吊销 sid」「allowedIPs 不匹配」的拒绝（zzz-adversarial-r6 →
- *    services/websocketAuthScope.test.js，P0-2 修复后由 Rawls 新建）
+ *    services/websocketAuthScope.test.js，修复后由 Rawls 新建）
  *  - XFF 伪造无法绕过 /metrics 内网判定（zzz-adversarial-r2 R2-4 →
  *    middleware/metricsAuth.test.js:97-108 同口径用例）
  *  - 部门主管访问审计日志被拒（zzz-adversarial-r2 R2-10 →
@@ -37,7 +37,7 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
  *    originCheck / infraParamRateLimitFailClosed / userPermBranches 等既有套件）
  */
 
-describe('对抗性探针场景固化（P1-30：原 zzz-* 探针 → 行为断言）', () => {
+describe('对抗性探针场景固化（原 zzz-* 探针 → 行为断言）', () => {
   let app;
   let User;
   let Role;
@@ -199,7 +199,7 @@ describe('对抗性探针场景固化（P1-30：原 zzz-* 探针 → 行为断�
     expect(list.map((d) => d.deviceCode)).not.toContain(`EAST-${stamp}`);
   });
 
-  test('P0-1 回归：自助改 department 被数据范围校验拒绝（USER_SCOPE_FIELD_FORBIDDEN）', async () => {
+  test('回归：自助改 department 被数据范围校验拒绝（USER_SCOPE_FIELD_FORBIDDEN）', async () => {
     const res = await request(app)
       .put(`/api/users/${mgr._id}`)
       .set('Authorization', `Bearer ${mgrToken}`)
@@ -212,7 +212,7 @@ describe('对抗性探针场景固化（P1-30：原 zzz-* 探针 → 行为断�
     expect(after.department).toBe('东区');
   });
 
-  test('P0-1 回归：改他人 department 跨部门同样被拒', async () => {
+  test('回归：改他人 department 跨部门同样被拒', async () => {
     const other = await User.create({
       username: `pother${stamp}`,
       email: `pother${stamp}@example.com`,
@@ -334,9 +334,9 @@ describe('对抗性探针场景固化（P1-30：原 zzz-* 探针 → 行为断�
   });
   test('数据范围口径：department 范围操作者改本部门他人 allowedIPs → 允许（本部门内）', async () => {
     // 原 zzz-adversarial-r3.test.js R3-3 的实测结论固化。
-    // P0-1 修复口径（controllers/userController/update.js:106-117）：dataScope=department 允许
+    // 修复口径（controllers/userController/update.js:106-117）：dataScope=department 允许
     // **本部门内**的 scope 字段变更；只有越部门 / self、none 范围才拒绝。
-    // 本用例锁定「同部门内放行」这一半，越界拒绝由本文件前面两条 P0-1 用例覆盖。
+    // 本用例锁定「同部门内放行」这一半，越界拒绝由本文件前面两条用例覆盖。
     // 用独立目标用户而非 mgr 自身：避免改动共享 fixture 造成用例间顺序耦合。
     const peer = await User.create({
       username: `ppeer${stamp}`,

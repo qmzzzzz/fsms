@@ -118,7 +118,9 @@ const changePwd = async () => {
       ElMessage.error(
         e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
           ? t('login.publicKeyPinMismatch')
-          : t('login.encryptionFailed')
+          : e?.code === 'INSECURE_CONTEXT'
+            ? t('login.insecureContext')
+            : t('login.encryptionFailed')
       )
       return
     }

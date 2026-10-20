@@ -12,7 +12,7 @@
  * 本文件只做再导出：调用方（含 16 个测试文件）仍从 '../services/authService'
  * 取用，不需要跟着改 require 路径。
  *
- * 原边界说明（拆分前写在 authService.js 头部，仍然成立）：
+ * 边界说明：
  * - MFA 防爆破与恢复码原语在 services/mfaService.js；
  * - 设备级会话落库/吊销在 services/sessionService.js；
  * - 令牌签发与探测在 services/tokenService.js；

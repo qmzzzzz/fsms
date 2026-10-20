@@ -16,7 +16,7 @@ const { resolveHandshakeIPForSecurityDecision, resolveTrustProxyHops } = require
 
 const methods = {
   /**
-   * 挂载 Redis adapter（R-3/M-1 收尾）：配置 REDIS_URL 且共享缓存就绪时，
+   * 挂载 Redis adapter（R-3/收尾）：配置 REDIS_URL 且共享缓存就绪时，
    * 房间/定向投递跨实例生效——权限变更推送能触达连接在其他实例上的用户。
    * 未配置时保持默认内存 adapter，单实例行为与历史完全一致。
    * 由 index.js 启动期调用；失败仅告警降级，不阻断服务。
@@ -182,7 +182,7 @@ const methods = {
   },
 
   /**
-   * 复查长连接的当前授权状态（P2-14）
+   * 复查长连接的当前授权状态
    *
    * 认证只发生在连接建立时，之后 socket.roleCodes / status / tokenVersion
    * 全是快照。长连接可存活数小时，期间用户可能被降级、停权或强制下线，
@@ -265,7 +265,7 @@ const methods = {
 
     // 降级即出房（L1-F1）：授/撤角色**不推进 tokenVersion**（只有"吊销全部会话"才推进），
     // 所以只复查 status/tokenVersion 的清扫放不倒已被降级但仍 active 的连接。
-    // P2-14 封住的是「入房」面——已驻留在 role-management 的管理员被降级后，
+    // 封住的是「入房」面——已驻留在 role-management 的管理员被降级后，
     // 若不在此主动 leave，他会在整个连接生命周期内继续收 role-updated /
     // permissions-updated 广播（内容含权限码全集），直到浏览器刷新。
     // 房间清单取自本服务自己的记账（clients.get(id).rooms，join/leave 两处维护），
@@ -286,9 +286,9 @@ const methods = {
   },
 
   /**
-   * 定期清理假死连接 + 周期授权复查（R-2，P2-14 的会话期收尾）
+   * 定期清理假死连接 + 周期授权复查（R-2，会话期收尾）
    *
-   * P2-14 只封住了「入房」面：受限房间 join-room 时 revalidateSocket 复查。
+   * 只封住了「入房」面：受限房间 join-room 时 revalidateSocket 复查。
    * 但已驻留在 role-management 房间的长连接，会话期间被降级/停权/强制下线后
    * 不会被主动移出，可继续接收 role-updated/permissions-updated 广播直至重连——
    * 破坏「停权即失效」契约。本清扫对每个已认证连接周期重查
@@ -369,7 +369,7 @@ const methods = {
     // 每轮固定串行 1000 次 DB 往返——实测 875.92ms，且因为 await 串行，
     // 这段时间事件循环被反复让出，30 秒一轮等于周期性钝化。
     // 改为单次 $in 查询后实测 5.55ms（157.8x），存活判定结果完全一致（980/980）。
-    // 明细见 deliverables/性能实测基线-2026-09-16.json。
+    // 以上为 2026-09-16 实测值。
     //
     // 去重：同一用户的多个标签页/设备会产生多个 socket，只需查一次。
     const uniqueUserIds = [...new Set(reviewable.map((s) => String(s.userId)))];

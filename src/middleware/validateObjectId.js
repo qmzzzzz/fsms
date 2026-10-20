@@ -5,7 +5,7 @@
  * 路由 :id 参数若非法，Mongoose 查询会抛 CastError 被全局错误处理兜成 500，
  * 既暴露内部信息又污染审计/告警。本中间件在参数解析阶段统一拦截，返回 400 明确提示。
  *
- * 【P2-25 关键修正】原用法 `app.param('id', handler)` 是死代码。
+ * 【关键修正】原用法 `app.param('id', handler)` 是死代码。
  * Express 4 的参数回调只对**定义它的那个 router 自身**的路由生效，不会向
  * 子 Router 传播；而本项目全部业务路由都挂在 express.Router() 子路由上
  * （app.use('/api/users', userRoutes)），因此该校验一次都不会执行。
@@ -46,7 +46,7 @@ const validateObjectIdParam = (req, res, next, value, name) => {
 };
 
 /**
- * 为一组子 Router 批量注册 ObjectId 参数校验（P2-25）
+ * 为一组子 Router 批量注册 ObjectId 参数校验
  *
  * 必须在各 Router 内部注册才会生效。逐条 param() 而非依赖 app.param()，
  * 使校验成为「路由挂载即生效」的默认行为——新增资源路由时无需记得手写

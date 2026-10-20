@@ -49,7 +49,7 @@ const {
 } = require('../src/utils/auditChain');
 const { verifyAuditChain, computeChainVerdict } = require('../src/services/auditChainVerify');
 
-// M-08 / L-26：破坏性操作护栏（fail-closed 库名白名单 + 双标志），
+// 破坏性操作护栏（fail-closed 库名白名单 + 双标志），
 // 与 resign-audit-hmac.js / run-rollback-drill.js 共用同一份声明。
 const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
 

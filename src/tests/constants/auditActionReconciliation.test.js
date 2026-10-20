@@ -1,11 +1,11 @@
 /**
- * 审计 action 自动对账（P1-11 / P3-61）
+ * 审计 action 自动对账
  *
- * 缺陷（P1-11）：\`authService.js\` 写入 action=\`account_temp_locked\` 的审计记录，
+ * 缺陷：\`authService.js\` 写入 action=\`account_temp_locked\` 的审计记录，
  * 但 \`constants/audit.js\` 的 AUDIT_LOG_ACTIONS 白名单缺此条 —— 记录在库里，
  * 而 \`utils/auditQuery.js\` 的 validateEnum(action, AUDIT_LOG_ACTIONS) 会让
  * **按该 action 筛选的查询直接 400**（"审计留痕形同虚设"：写了却查不出来）。
- * 同类漂移在 P3-11 已发生过一次（路由派生 action 滞后），本次以自动对账防复发。
+ * 同类漂移在已发生过一次（路由派生 action 滞后），本次以自动对账防复发。
  *
  * 本测试**不手写 action 列表**（手写等于把"对账"退化成"复制"）：它扫描 src/
  * 下所有审计写入调用点，从源码里**解析出实际写入的 action 字符串**，
@@ -77,7 +77,7 @@ const {
   collectEarlyRejectionAliases,
 } = require('../helpers/auditWriteSites');
 
-describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
+describe('审计 action 白名单对账', () => {
   /**
    * 注释识别的判据自证 + 反噬检查。
    *
@@ -189,6 +189,7 @@ describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
       'src/services/auditOutbox.js<recordDurably>:forward-arg',
       'src/services/auditOutbox.js<recordSensitiveActionDurably>:forward-arg',
       'src/services/auditOutbox.js<spool>:forward-arg',
+      'src/services/ipListService.js<recordPrivilegeEscalation>:forward-arg',
     ]);
   });
 
@@ -237,7 +238,7 @@ describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
     expect(resolveActionExpr('NEVER_DEFINED_HERE', ctx, "const ACTION = 'x';")).toBeNull();
   });
 
-  test('P1-11 回归：account_temp_locked 在库可查（validateEnum 白名单命中）', () => {
+  test('回归：account_temp_locked 在库可查（validateEnum 白名单命中）', () => {
     const { AUDIT_LOG_ACTIONS } = require('../../constants/audit');
     expect(AUDIT_LOG_ACTIONS).toContain('account_temp_locked');
     // 同一病症的第二次（2026-09-25 审计发现）：截断更正事件确实写进了库，但 action 没登记
@@ -308,7 +309,7 @@ describe('审计 action 白名单对账（P1-11 / P3-61）', () => {
    * 为什么必须实测而不是只在清单上写理由：主扫描器对下面四种形态的处理是**静默**的
    * （实测 2026-09-26，子代理给出形态、本轮在真实扫描器上复现）——它们既不进 written、
    * 也不进 unresolved、更不进 forwarded，于是"写进审计集合却不在白名单"这一整类
-   * （P1-11 的原始病症）从两侧都查不出来。回球闸只看"这一行有代码"，不看注释判定，
+   * （原始病症）从两侧都查不出来。回球闸只看"这一行有代码"，不看注释判定，
    * 因为注释判定本身可被伪造（行内正则字面量的 `//` 会被当成行尾注释）。
    */
   test('回球闸的牙：主扫描器静默漏掉的四种形态，回球结果必须全部看见', () => {

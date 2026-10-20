@@ -84,7 +84,7 @@ async function recordGhostAttempt({
   const canary = matchCanaryName(username);
   if (canary === null) return; // 热路径绝大多数：不是名单名，立即返回
 
-  // E-04 口径（与 checkBruteForce 同）：审计/去重都记**归一化 IP**，
+  // 口径（与 checkBruteForce 同）：审计/去重都记**归一化 IP**，
   // `::ffff:1.2.3.4` 与 `1.2.3.4` 不得成为两条记录
   const punishTarget = resolvePunishTarget(attribution, ip);
   const normalizedIp = normalizeIP(punishTarget) || punishTarget;

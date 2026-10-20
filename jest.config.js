@@ -217,7 +217,10 @@ module.exports = {
     // 数值按拆分后全量实测重设（br -5 / fn -3，向下取整）。
     './src/services/authService/failureAndMfa.js': { branches: 85, functions: 72 },
     './src/services/authService/index.js': { branches: 95, functions: 97 },
-    './src/services/authService/login.js': { branches: 81, functions: 47 },
+    // 2026-10-20 审计 P2-1：新增 authServiceLoginResidualBranches 覆盖验证码/密文/MFA/IP/
+    // 锁定边界及各拒绝路径的 catch 兜底，单套件实测 br/fn/st/l 均 100（合并不低于此）。
+    // 按「实测下方一档」取 90/90：先兑现报告要求的「登录核心函数 ≥90」。
+    './src/services/authService/login.js': { branches: 90, functions: 90 },
     './src/services/authService/password.js': { branches: 95, functions: 97 },
     './src/services/authService/profile.js': { branches: 93, functions: 97 },
     './src/services/authService/session.js': { branches: 87, functions: 97 },

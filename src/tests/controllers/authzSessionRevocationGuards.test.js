@@ -2,7 +2,7 @@
  * ──────────────────────────────────────────────────────────────────────────
  * 本文件的定位（2026-09-20 补注，由变异审计批量补齐）
  *
- * 被测对象：授权与会话（P2-8/10~15 + 恢复码过滤条件）
+ * 被测对象：授权与会话（10~15 + 恢复码过滤条件）
  * 守护的不变式：每条 403 后必须回读 DB 证明「报错且未写库」；登录失败响应体逐字节一致（防账号枚举）
  * 可证伪性：本轮未做变异实测
  * 既有评价：既往审计列为**正面记账**（真 HTTP + 真库 + 故障注入，deliverables/七维代码健康度深度审计-2026-09-18.md）
@@ -16,12 +16,13 @@
  */
 
 /**
- * 批次A 授权/会话类修复回归（P2-8/10/11/12/13/14/15 + 恢复码过滤条件失效）
+ * 批次A 授权/会话类修复回归（10/11/12/13/14/15 + 恢复码过滤条件失效）
  */
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { accessToken } = require('../helpers/authResponse');
 
 describe('授权与会话加固回归', () => {
   let app;
@@ -68,8 +69,8 @@ describe('授权与会话加固回归', () => {
       { expiresIn: '24h' }
     );
 
-  // ================= P2-8 权限子集校验 =================
-  describe('P2-8 assignRoles 权限子集校验', () => {
+  // ================= 权限子集校验 =================
+  describe('assignRoles 权限子集校验', () => {
     let opToken;
     let target;
     let deviceRole; // 操作者不持有的权限集
@@ -93,7 +94,7 @@ describe('授权与会话加固回归', () => {
       operatorId = operator._id;
 
       // 层级低于操作者（层级校验会放行），但含操作者没有的 device:delete
-      // —— 这正是 P2-8 的要害：层级不变量成立，权限却被横向放大
+      // —— 这正是要害：层级不变量成立，权限却被横向放大
       deviceRole = await seedRole('SUBSET_DEVICE_ROLE', 4, [deviceDeletePerm._id]);
       // 权限是操作者子集 —— 合法路径
       sameLevelRole = await seedRole('SUBSET_SAFE_ROLE', 4, [userReadPerm._id]);
@@ -103,7 +104,7 @@ describe('授权与会话加固回归', () => {
         email: 'subset_target@example.com',
         password: 'Qz7#Lm42vTx9',
         // 目标必须在操作者的数据范围内（本仓夹具此前一律不带 createdBy/department，
-        // 范围闸会先拒，P2-8 与目标侧层级闸根本走不到）
+        // 范围闸会先拒，与目标侧层级闸根本走不到）
         createdBy: operator._id,
         roles: [],
       });
@@ -176,7 +177,7 @@ describe('授权与会话加固回归', () => {
         email: `subset_high_${Date.now().toString(36)}@example.com`,
         password: 'Qz7#Lm42vTx9',
         // 目标必须在操作者的数据范围内（本仓夹具此前一律不带 createdBy/department，
-        // 范围闸会先拒，P2-8 与目标侧层级闸根本走不到）
+        // 范围闸会先拒，与目标侧层级闸根本走不到）
         createdBy: operatorId,
         roles: [highRole._id],
       });
@@ -197,8 +198,8 @@ describe('授权与会话加固回归', () => {
     });
   });
 
-  // ================= P2-10 / P2-11 防枚举 =================
-  describe('P2-10/11 登录响应统一化', () => {
+  // ================= 防枚举 =================
+  describe('/11 登录响应统一化', () => {
     const PASSWORD = 'Qz7#Lm42vTx9';
 
     beforeAll(async () => {
@@ -263,8 +264,8 @@ describe('授权与会话加固回归', () => {
     });
   });
 
-  // ================= P2-15 mfaSecret 静态加密 =================
-  describe('P2-15 MFA 种子加密存储', () => {
+  // ================= mfaSecret 静态加密 =================
+  describe('MFA 种子加密存储', () => {
     const {
       encryptMfaSecret,
       decryptMfaSecret,
@@ -422,7 +423,7 @@ describe('授权与会话加固回归', () => {
         .post('/api/auth/login')
         .send({ username: 'rc_replay_user', password: PASS, mfaCode: recoveryCode });
       expect(first.status).toBe(200);
-      expect(first.body.data.token).toBeTruthy();
+      expect(accessToken(first)).toBeTruthy();
 
       // 第二次重放同一恢复码 → 必须失败
       const replay = await request(app)

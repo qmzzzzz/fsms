@@ -60,6 +60,7 @@ const RUNBOOKS = [
 /** 除 MONGODB_URI 之外还必需的密钥：手写映射，见 EXTRA_ANCHOR 用例的说明 */
 const EXTRA_SECRETS = {
   'verify-audit-chain.js': ['HMAC_SECRET'],
+  'audit-chain-checkpoint.js': ['HMAC_SECRET'],
   'resign-audit-hmac.js': ['HMAC_SECRET'],
   'resign-audit-chain-v3.js': ['HMAC_SECRET'],
   'migrate-mfa-secret.js': ['AES_SECRET_KEY'],

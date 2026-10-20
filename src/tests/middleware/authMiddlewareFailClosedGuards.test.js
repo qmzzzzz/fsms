@@ -46,6 +46,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { waitFor } = require('../helpers/waitFor');
 const { USER_STATUS } = require('../../utils/constants');
 
 describe('auth 中间件分支补齐', () => {
@@ -159,15 +160,18 @@ describe('auth 中间件分支补齐', () => {
       expect(res.status).toBe(403);
       expect(res.body.message).toContain('允许访问范围');
 
-      // 审计写入在 authenticate 内是 fire-and-forget（不 await），轮询等待落库
+      // 审计写入在 authenticate 内是 fire-and-forget（不 await），waitFor 轮询到落库
       let audit = null;
-      for (let i = 0; i < 20 && !audit; i++) {
-        audit = await AuditLog.findOne({
-          action: 'ip_range_denied',
-          username: `${stamp}iprange`,
-        });
-        if (!audit) await new Promise((r) => setTimeout(r, 100));
-      }
+      await waitFor(
+        async () => {
+          audit = await AuditLog.findOne({
+            action: 'ip_range_denied',
+            username: `${stamp}iprange`,
+          });
+          return !!audit;
+        },
+        { label: 'ip_range_denied 审计落库（GET）' }
+      );
       expect(audit).toBeTruthy();
       expect(audit.riskFactors).toContain('ip_range_violation');
     });
@@ -201,14 +205,17 @@ describe('auth 中间件分支补齐', () => {
       expect(res.status).toBe(403);
 
       let fresh = null;
-      for (let i = 0; i < 20 && !fresh; i++) {
-        const rows = await AuditLog.find({
-          action: 'ip_range_denied',
-          username: `${stamp}iprange`,
-        });
-        fresh = rows.find((d) => !before.has(String(d._id))) || null;
-        if (!fresh) await new Promise((r) => setTimeout(r, 100));
-      }
+      await waitFor(
+        async () => {
+          const rows = await AuditLog.find({
+            action: 'ip_range_denied',
+            username: `${stamp}iprange`,
+          });
+          fresh = rows.find((d) => !before.has(String(d._id))) || null;
+          return !!fresh;
+        },
+        { label: 'HEAD 请求的 ip_range_denied 审计落库' }
+      );
       expect(fresh).toBeTruthy();
       // 不只是"有一行"：method 维必须逐字留住，否则事后看不出这是一次 HEAD 探测
       expect(fresh.method).toBe('HEAD');
@@ -326,8 +333,14 @@ describe('auth 中间件分支补齐', () => {
       try {
         const res = await getMe(users.evict.token);
         expect(res.status).toBe(200);
-        // morgan 在 res finish 时落日志，等待事件循环推进
-        await new Promise((r) => setTimeout(r, 100));
+        // morgan 在 res finish 时落日志：轮询到该行真的进了 transport，不猜时长
+        await waitFor(
+          () =>
+            captured.some(
+              (i) => typeof i.message === 'string' && i.message.includes('/api/auth/me')
+            ),
+          { label: 'morgan finish 日志携带 /api/auth/me' }
+        );
         const line = captured.find(
           (i) => typeof i.message === 'string' && i.message.includes('/api/auth/me')
         );

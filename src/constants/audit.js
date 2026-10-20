@@ -222,7 +222,7 @@ const cleanAuditUsername = (value) => {
 // 审计页的「日志等级」三级展示口径（由 success + riskLevel 派生，不是库里存的字段）。
 // 与 AUDIT_RISK_LEVELS 同理收成单一事实来源：查询侧（utils/auditQuery）、导出侧
 // （reportExportService 的枚举校验与 includes 闸门）原先各写一份字面量，
-// 单侧增删就会造成"查询放行、导出 400"的口径漂移（E-05 同一类）。
+// 单侧增删就会造成"查询放行、导出 400"的口径漂移（同一类）。
 const AUDIT_DISPLAY_LEVELS = ['info', 'warning', 'error'];
 
 // 审计日志 action 枚举白名单
@@ -242,7 +242,7 @@ const AUDIT_LOG_ACTIONS = [
   'auth_password',
   'auth_profile',
   'auth_logout',
-  // P3-11：认证类其余路由派生 action（GET 类多为敏感读取，POST 为状态变更）
+  // 认证类其余路由派生 action（GET 类多为敏感读取，POST 为状态变更）
   'auth_captcha',
   'auth_captcha-status',
   'auth_login-public-key',
@@ -267,7 +267,7 @@ const AUDIT_LOG_ACTIONS = [
   'permission_update',
   'permission_delete',
   'permission_batch',
-  // P3-11：角色列表兜底路由
+  // 角色列表兜底路由
   'role_all',
   // 业务类
   'device_create',
@@ -303,7 +303,7 @@ const AUDIT_LOG_ACTIONS = [
   'security_config_registerCaptchaEnabled',
   // WB-1：生产启动期密钥强度审计留痕（validate 已拦截弱密钥，此处记录「已通过」事实）
   'security_key_strength_audit',
-  // P3-11：以下派生 action 此前缺失于白名单——审计页按它们筛选会被
+  // 以下派生 action 此前缺失于白名单——审计页按它们筛选会被
   // validateEnum 打 400（记录在库里却筛不出来）。与各路由文件逐一核对：
   'security_view', // GET /api/security（无子路径兜底）
   'security_my-info', // GET /api/security/my-info
@@ -315,6 +315,9 @@ const AUDIT_LOG_ACTIONS = [
   'security_users_mfa_reset', // PUT /api/security/users/:userId/mfa/reset
   'security_audit-logs_verify', // GET /api/security/audit-logs/verify
   'security_ip-list_query', // GET /api/security/ip-list/query
+  // app.js 直接注册的 /api 级只读端点（/api、/api/metrics）：不在 ROUTE_CATEGORY_MAP
+  // 内，派生为 category=system、action=system_view。不登记则按该 action 筛选 400
+  'system_view',
   'user_stats', // GET /api/users/stats
   'user_view', // GET /api/users/:id（敏感读取审计）
   'role_view', // GET /api/roles/:id
@@ -364,7 +367,7 @@ const AUDIT_LOG_ACTIONS = [
   'session_revoked_others',
   // 用户状态事件
   'user_locked',
-  // P1-11：登录失败计数达阈值触发的 10 分钟临时锁定（authService 写入）。
+  // 登录失败计数达阈值触发的 10 分钟临时锁定（authService 写入）。
   // 此前缺失于白名单：记录在库却无法按该 action 筛选（validateEnum 打 400）
   'account_temp_locked',
   'user_unlocked',
@@ -383,7 +386,7 @@ const AUDIT_LOG_ACTIONS = [
   'ip_range_denied',
   'audit_log_query',
   'audit_chain_verify',
-  // P3-35：早于 auditLog 中间件的 403 拒绝（黑名单命中 / CSRF 来源校验失败）
+  // 早于 auditLog 中间件的 403 拒绝（黑名单命中 / CSRF 来源校验失败）
   // 与协议合规拒绝。此前这三类拒绝只进 logger，审计页无从筛选
   'ip_blacklist_blocked',
   'csrf_origin_denied',
@@ -394,7 +397,7 @@ const AUDIT_LOG_ACTIONS = [
   // 这一条是 NoSQL 操作符与资源耗尽探测的指纹，混在一起就分不出"谁在探查询参数"。
   'query_param_rejected',
   // 响应头已发出、流被中途截断时补写的更正事件（errorHandler 的 markResponseAbortedByError）。
-  // 不登记就是 P1-11 复发：记录确实落库了，但 validateEnum 对不在白名单的 action 直接 400
+  // 不登记就是复发：记录确实落库了，但 validateEnum 对不在白名单的 action 直接 400
   // ⇒ 查询与导出都筛不出它，"这次导出被截断了"这条唯一的线索变成查不到的死角。
   'response_aborted_after_headers',
   // 系统配置事件

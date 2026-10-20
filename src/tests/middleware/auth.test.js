@@ -64,16 +64,16 @@ describe('Auth Middleware', () => {
     });
 
     test('过期的 JWT 应返回 401', async () => {
-      const token = jwt.sign({ userId: '123' }, secret, { expiresIn: '0s' });
-      // 等待 token 过期
-      await new Promise((r) => setTimeout(r, 10));
+      // 直接签入已过期的 exp：不再依赖 expiresIn:'0s' + 一段固定睡眠，
+      // 无论调度多慢，verify 看到的都是确定已过期的时间点
+      const token = jwt.sign({ userId: '123', exp: Math.floor(Date.now() / 1000) - 10 }, secret);
       const res = await request(app).get('/protected').set('Authorization', `Bearer ${token}`);
       expect(res.status).toBe(401);
       // 过期与无效签名不同码：前端据此决定「静默刷新」还是「踢回登录页」
       expect(res.body.errors.errorCode).toBe('AUTH_TOKEN_EXPIRED');
     });
 
-    // P1-29 修复（本次改动复审）：原用例用**随机 ObjectId** 签令牌，而 authenticate
+    // 修复（本次改动复审）：原用例用**随机 ObjectId** 签令牌，而 authenticate
     // 第 3 步 loadValidUser 必查库、用户不存在即 401（实测 USER_NOT_FOUND_OR_DELETED）——
     // 该令牌**永远**走不到通过路径，却用 expect([200, 401]) 双可能断言兜住，
     // 于是「有效 JWT 应通过认证」这条用例实际从未验证过 200 分支（恒走 401）。
@@ -184,8 +184,8 @@ describe('Auth Middleware', () => {
     });
 
     test('应拒绝过期的 token', () => {
-      const payload = { userId: '123' };
-      const token = jwt.sign(payload, secret, { expiresIn: '0s' });
+      const payload = { userId: '123', exp: Math.floor(Date.now() / 1000) - 10 };
+      const token = jwt.sign(payload, secret);
       expect(() => jwt.verify(token, secret)).toThrow(/expired/);
     });
   });

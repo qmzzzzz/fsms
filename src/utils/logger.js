@@ -139,7 +139,7 @@ const fileFormat = productionSemantics
       printfLayout
     );
 
-// P3-46：与审计库 TTL 共用同一份留存声明。
+// 与审计库 TTL 共用同一份留存声明。
 // 原实现 `parseInt(...) || 180` 与模型侧的钳制口径不一致：
 // AUDIT_RETENTION_DAYS=1 时审计库留 90 天而日志文件只留 1 天，
 // 取证时会出现「审计记录还在、对应的原始日志已被轮转删除」；
@@ -163,7 +163,7 @@ const errorRotateTransport = new winston.transports.DailyRotateFile({
 });
 
 /**
- * 进程级异常落盘（P3-32）
+ * 进程级异常落盘
  *
  * index.js 已注册 process.on('uncaughtException'/'unhandledRejection')，
  * 但那里走的是 logger.error(message)——**堆栈在生产分支被刻意省略**
@@ -176,9 +176,9 @@ const errorRotateTransport = new winston.transports.DailyRotateFile({
  *
  * exitOnError: false 是关键——winston 配置 exceptionHandlers 后默认会
  * 自行 process.exit(1)，那会抢在 index.js 的处理器 flush 审计缓冲之前退出，
- * 把 P3-33 刚修好的「退出前落库」重新破坏掉。
+ * 把刚修好的「退出前落库」重新破坏掉。
  *
- * 测试环境（T-1）不挂载这两个处理器：winston 每次创建 logger 都会向
+ * 测试环境不挂载这两个处理器：winston 每次创建 logger 都会向
  * process 追加 uncaughtException/unhandledRejection 监听，而
  * jest.resetModules 会让本模块被反复重新执行——监听器随之累积，
  * 触发 MaxListenersExceededWarning 并拖住 worker 优雅退出。
@@ -242,7 +242,7 @@ if (shippingUrl) {
     // 这三处原为 `parseInt(env,10) || undefined`，负值会被原样采纳
     // （如 batchSize=-1 → 每批都"超限"）。fallback 传 undefined 保持既有语义：
     // 缺省时交给传输层自己的默认值。此处**不能用 logger**（正在加载 logger），
-    // 故 onInvalid 用 console.warn——与 config/index.js 的 P2-39 同一处理理由。
+    // 故 onInvalid 用 console.warn——与 config/index.js 的同一处理理由。
     const { readPositiveNumberEnv } = require('./envNumber');
     const shippingNum = (name) =>
       readPositiveNumberEnv(name, undefined, {

@@ -49,8 +49,9 @@ const siSpy = jest.spyOn(global, 'setInterval').mockImplementation((cb) => {
 });
 
 const { HttpShipperTransport, BUFFER_CAP } = require('../../utils/logShipper');
+const { waitFor, flushEventLoop } = require('../helpers/waitFor');
 
-// P2-⑨：出站目标门禁默认拒绝回环目标，而本文件的传输失败路径恰恰全部打在
+// 出站目标门禁默认拒绝回环目标，而本文件的传输失败路径恰恰全部打在
 // 127.0.0.1/localhost 的本地 dummy server 上——这些用例测的是"失败时传输层
 // 怎么表现"，不是目标门禁。显式放行回环（fail-closed 门禁的显式出口），
 // 目标门禁本身的行为由 logShipperSchemeAllowlist.test.js 钉住。
@@ -127,8 +128,8 @@ describe('HttpShipperTransport', () => {
         t.log(`msg${i}`, () => {});
       }
 
-      // flush 是异步的
-      await new Promise((r) => setTimeout(r, 100));
+      // flush 是异步投递：等 _post 真的被调用（真实完成条件，不睡固定时长）
+      await waitFor(() => postSpy.mock.calls.length > 0, { label: '满额触发 _flush' });
       expect(postSpy).toHaveBeenCalled();
       postSpy.mockRestore();
       t.close();
@@ -297,7 +298,7 @@ describe('HttpShipperTransport', () => {
           } else if (req.url === '/slow') {
             // 不响应，让客户端超时
           } else if (req.url === '/rst') {
-            // M-06 回归：发出响应头与部分响应体后立即销毁 socket。
+            // 回归：发出响应头与部分响应体后立即销毁 socket。
             // 客户端 IncomingMessage 会 emit 'error'（ECONNRESET），
             // 若 _post 未监听该事件，将变成 uncaughtException → 进程退出。
             res.writeHead(200);
@@ -363,7 +364,7 @@ describe('HttpShipperTransport', () => {
       t.close();
     });
 
-    // ==================== M-06 回归：响应流错误必须被接管 ====================
+    // ==================== 回归：响应流错误必须被接管 ====================
     // 原先 _post 的响应回调只调 res.resume() 而未监听 res.on('error')。
     // 对端在响应体传输中途断连时 IncomingMessage emit ECONNRESET；EventEmitter
     // 上无 'error' 监听器即抛未捕获异常 → index.js 处理器 process.exit(1)。
@@ -373,7 +374,7 @@ describe('HttpShipperTransport', () => {
     // 注意：不能用「服务端 RST」来触发——那条路径的 ECONNRESET 由 req.on('error')
     // 接管（已存在），测不到 res 的缺失监听器。必须直接向伪造响应流 emit('error')：
     // 若无监听器，emit 会同步抛出，正是本缺陷的可观测形态。
-    test('M-06 - 响应回调注册 error 监听器（响应中途断连不致进程退出）', async () => {
+    test('响应回调注册 error 监听器（响应中途断连不致进程退出）', async () => {
       const { EventEmitter } = require('events');
       const httpLib = require('http');
 
@@ -397,13 +398,13 @@ describe('HttpShipperTransport', () => {
         const pending = t._post(['test']);
 
         // 等响应回调被调用（此时应已注册 error 监听器）
-        await new Promise((r) => setImmediate(r));
+        await flushEventLoop();
         expect(capturedRes).not.toBeNull();
 
         // 核心断言：响应流必须注册 'error' 监听器。
         // EventEmitter 在无 'error' 监听器时 emit('error') 会**同步抛出**，
         // 在 Node 的 http 客户端里即表现为 uncaughtException → 进程退出。
-        // 这正是 M-06 缺陷的可观测形态，也是本测试的判据。
+        // 这正是缺陷的可观测形态，也是本测试的判据。
         expect(capturedRes.listenerCount('error')).toBeGreaterThanOrEqual(1);
         expect(() => capturedRes.emit('error', new Error('ECONNRESET'))).not.toThrow();
 
@@ -468,7 +469,7 @@ describe('HttpShipperTransport', () => {
       // 手动触发定时器回调
       if (tickFn) {
         tickFn();
-        await new Promise((r) => setTimeout(r, 100));
+        await waitFor(() => postSpy.mock.calls.length > 0, { label: '定时器回调触发 _flush' });
       }
 
       expect(postSpy).toHaveBeenCalled();

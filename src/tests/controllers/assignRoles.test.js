@@ -1,7 +1,7 @@
 /**
  * assignRoles 越权防护 + 超管唯一性不变量集成测试
  *
- * 背景一（M-01）：此前 assignRoles 仅校验"被分配角色的层级"，未校验"目标用户的层级"，
+ * 背景一：此前 assignRoles 仅校验"被分配角色的层级"，未校验"目标用户的层级"，
  * SECURITY_ADMIN(level 8) 可将内置超级管理员(level 10) 的角色替换为 GUEST，
  * 实现管理员权限剥离。
  *
@@ -12,7 +12,7 @@
  * 两组用例合并在同一文件：SUPER_ADMIN 的 code 有 unique 索引，
  * 拆分到不同测试文件会在并行执行时撞 E11000。
  *
- * P3-51 补记：上述 E11000 的根因已修复（src/tests/setup.js 现按
+ * 补记：上述 E11000 的根因已修复（src/tests/setup.js 现按
  * JEST_WORKER_ID 分配独立数据库，并行套件不再共享同一个库）。
  * 此处保持合并只是因为两组用例共用同一套 fixture，拆分收益不大——
  * 但「必须合并否则撞索引」这一约束已经不成立。
@@ -25,7 +25,7 @@ const SCOPE_DEPT = 'SECDEPT';
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
-describe('assignRoles 越权防护（M-01）', () => {
+describe('assignRoles 越权防护', () => {
   let app;
   let User;
   let Role;
@@ -138,7 +138,7 @@ describe('assignRoles 越权防护（M-01）', () => {
       .put(`/api/users/${superAdmin._id}/roles`)
       .set('Authorization', `Bearer ${operatorToken}`)
       .send({ roles: [String(guestRole._id)] });
-    // 实测确定行为（P1-29 修复：原为 expect([403,400]).toContain —— 400 属校验类拒绝，与本用例
+    // 实测确定行为（修复：原为 expect([403,400]).toContain —— 400 属校验类拒绝，与本用例
     // 「层级保护」语义无关，双可能断言会掩盖拦截原因的漂移且断言过宽）；实测 403 层级拒绝
     expect(res.status).toBe(403);
     expect(res.body.errors.errorCode).toBe('USER_ROLE_ASSIGN_PEER_OR_HIGHER_FORBIDDEN');
@@ -229,7 +229,7 @@ describe('assignRoles 越权防护（M-01）', () => {
         code: 'PEER_ADMIN_B',
         level: 6,
         // 权限集与 A **完全相同**（只有 code/name 不同）。原先这里多挂了 devicePerm，
-        // 于是请求先被上一层的 P2-8 权限子集校验以 PERMISSION_GRANT_FORBIDDEN 拦掉，
+        // 于是请求先被上一层的权限子集校验以 PERMISSION_GRANT_FORBIDDEN 拦掉，
         // B-2 这条「同级角色归属」闸门根本没执行过——用例只断 403，看不出是谁拦的。
         // 实测：把 userController 里 B-2 整段（含 ROLE_ASSIGN_FOREIGN_PEER_FORBIDDEN）
         // 删掉，本文件当时全绿，且该错误码在全仓测试里出现 0 次。
@@ -275,7 +275,7 @@ describe('assignRoles 越权防护（M-01）', () => {
 
     // 本组三条用例共用一个 victim，而「放行」那条会把 level 6 的角色真的写进去；
     // 此后 victim 自身的最高层级就等于操作者（6），**目标侧**层级闸
-    // （USER_ROLE_ASSIGN_PEER_OR_HIGHER_FORBIDDEN）会先于 B-2 与 P2-8 拦下请求。
+    // （USER_ROLE_ASSIGN_PEER_OR_HIGHER_FORBIDDEN）会先于 B-2 与拦下请求。
     // 原用例只断 403，看不出被哪道闸拦的，于是这条耦合在固定顺序下一直隐身；
     // 换成点名错误码的断言后，--randomize 换个 seed 就红。逐条重置起点才是正解。
     beforeEach(async () => {
@@ -297,7 +297,7 @@ describe('assignRoles 越权防护（M-01）', () => {
       expect(after.roles.map(String)).not.toContain(String(peerRoleB._id));
     });
 
-    test('同级且权限更宽时由 P2-8 先拦（闸门执行顺序的显式记录）', async () => {
+    test('同级且权限更宽时由先拦（闸门执行顺序的显式记录）', async () => {
       // 与上一条只差"角色多带一个自己没有的权限"：这一条走 PERMISSION_GRANT_FORBIDDEN。
       // 两条并排放，是为了让"谁先拦"变成被钉住的事实——将来有人调整闸门顺序或删掉
       // 其中一道，必有一条用例红，而不是像原先那样两道闸门共用一个 403 谁也分不清。
@@ -325,7 +325,7 @@ describe('assignRoles 越权防护（M-01）', () => {
 
     test('可分配低于自身层级且自己未持有的角色（不逼管理员囤积角色）', async () => {
       // 这正是最初实现误拦的路径：GUEST(level 1) 操作者并不持有，
-      // 但授予它不会给目标带来操作者没有的权限，由 P2-8 子集校验兜住。
+      // 但授予它不会给目标带来操作者没有的权限，由子集校验兜住。
       //
       // 用独立的目标账户：上一条用例已把 victim 提到 level 6（同级），
       // 复用它会先被「不得变更同级或更高级用户」的目标层级保护拦下，
@@ -504,7 +504,7 @@ describe('assignRoles 越权防护（M-01）', () => {
   });
 
   // ===== 启动期归属对账（唯一的归属写入口）=====
-  describe('角色层级双向拦截（P1-1 先降级再自挂提权链）', () => {
+  describe('角色层级双向拦截（先降级再自挂提权链）', () => {
     let richRole; // 超管预建的 level 9 富权限角色（攻击目标）
     let midToken; // 持 role:update + role:assign 的中层管理员
 
@@ -660,7 +660,7 @@ describe('assignRoles 越权防护（M-01）', () => {
 
     test('目标账户不存在时不创建账户、不抛异常', async () => {
       await withTargetUsername('no_such_admin_zz', async () => {
-        // P3-51：worker 库隔离生效后，全集合计数断言不再被并行套件干扰，
+        // worker 库隔离生效后，全集合计数断言不再被并行套件干扰，
         // 因此恢复更强的断言——「总数不变」能覆盖「创建了别的名字的账户」，
         // 而只查目标用户名覆盖不到这种情况。
         // （此前该断言随机失败：多 worker 共享单一内存库，期望 16 实得 17）
@@ -685,11 +685,11 @@ describe('assignRoles 越权防护（M-01）', () => {
     });
   });
 
-  describe('createUser 权限子集闸门（建号侧 P2-8：与 assignRoles 共用同一实现）', () => {
+  describe('createUser 权限子集闸门（建号侧与 assignRoles 共用同一实现）', () => {
     // 实测依据（2026-09-24 变异 MN）：把 `userController/create.js` 建号侧的
     // `if (!operatorPermCodes.includes('*:*'))` 整段短路 ⇒ **全套 335 套件 / 3821 例
     // 全绿**。也就是说这道"不得授予自身不持有的权限"的闸门，此前在全仓没有任何用例
-    // 经过它——assignRoles 侧有 4 条（本文件的 P2-8 与 B-2 两组），建号侧一条都没有。
+    // 经过它——assignRoles 侧有 4 条（本文件的与 B-2 两组），建号侧一条都没有。
     // 而建号与分配角色是**同一件事的两个入口**：都能把带新权限的角色挂到账号上。
     const ensurePermission = (code, name) =>
       Permission.findOneAndUpdate(

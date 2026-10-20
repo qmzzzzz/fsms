@@ -508,6 +508,8 @@ describe('WebSocket 分支补漏', () => {
       // 先 mock User.getPermissions，再 resetModules，最后 patch sharedCache
       jest.doMock(path.join(__dirname, '../../models/User'), () => ({
         getPermissions: async () => ['read:device', 'write:alarm'],
+        getPermissionsForUsers: async (ids) =>
+          new Map(ids.map((id) => [String(id), ['read:device', 'write:alarm']])),
       }));
       jest.resetModules();
 
@@ -523,8 +525,11 @@ describe('WebSocket 分支补漏', () => {
         svc.userConnections = new Map();
         const sent = [];
         svc.io = {
-          in: () => ({
-            fetchSockets: async () => [{ id: 's1' }],
+          in: (rooms) => ({
+            // 批量在线判定依赖 RemoteSocket.rooms 反查用户（A-5）
+            fetchSockets: async () => [
+              { id: 's1', rooms: Array.isArray(rooms) ? [...rooms, 's1'] : [rooms, 's1'] },
+            ],
           }),
           to: (room) => ({
             emit: (ev, data) => sent.push({ room, ev, data }),

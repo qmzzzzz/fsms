@@ -170,7 +170,7 @@ async function runDetection() {
       logger.warn(message);
 
       // 按维度分别过频控：命中的维度才参与本次改动推送。
-      // 窗口日期统一取业务时区（P3-18 单一声明 businessDateParts）：此前用
+      // 窗口日期统一取业务时区（单一声明 businessDateParts）：此前用
       // toISOString().slice(0,10) 是 UTC 日期，UTC+8 下要到北京时间 08:00 才换天，
       // 与 securityController 今日统计的本地零点口径分叉——同一自然日 08:00
       // 前后各能推一次告警，「每日一次」频控实际失效（时区口径分叉修复）。

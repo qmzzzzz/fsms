@@ -371,7 +371,7 @@ describe('backup/restore 的 MONGODB_URI_FILE 接线（每日 cron 的默认形�
     expect(r.calls).toContain('fire_safety');
   });
 
-  // ---- 凭据通道不回退（P2-27：连接串绝不上 argv）----
+  // ---- 凭据通道不回退（连接串绝不上 argv）----
 
   test('hydrate 之后凭据仍不进 argv：文件里的串只出现在 --config 内容中', () => {
     const file = secretFile(work, URI_FILE);

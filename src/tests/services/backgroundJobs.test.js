@@ -110,7 +110,7 @@ describe('后台任务与错误路径（批次 E）', () => {
   test('auditMonitor：检出高频失败用户并推送告警（含频控二次去重）', async () => {
     const monitor = require('../../services/auditMonitor');
     const securityAlert = require('../../services/securityAlert');
-    // P1-29 修复：原用例 0 断言（注释自认「不抛错即通过」），且 fixture 有缺陷——
+    // 修复：原用例 0 断言（注释自认「不抛错即通过」），且 fixture 有缺陷——
     // `userId: new ObjectId()` 写在 for 循环体内，12 条记录分属 12 个用户，
     // detectAnomalies 按 userId 分组后每组 count=1，永远够不到阈值(10)，
     // 即「高频失败」从未真正检出，「告警」也从未发生。现改为同一 userId，

@@ -57,9 +57,9 @@ const path = require('path');
 const wal = require('../../services/auditBufferWal');
 const logger = require('../../utils/logger');
 const { jsCodeOnly } = require('../helpers/jsCodeOnly');
+const { waitFor, flushEventLoop } = require('../helpers/waitFor');
 
 const SRC = path.resolve(__dirname, '..', '..');
-const tick = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * 两条尺子的唯一定义（结构闸与同族扩展集共用；此前各写一份，收窄任一份都是静默缩覆盖）。
@@ -103,7 +103,7 @@ describe('WAL 串行链：链尾 handler 自己抛 = 全进程下线', () => {
     warnSpy.mockRestore();
     errorSpy.mockRestore();
     await wal.drain();
-    await tick(0);
+    await flushEventLoop();
   });
 
   afterAll(() => {
@@ -119,7 +119,10 @@ describe('WAL 串行链：链尾 handler 自己抛 = 全进程下线', () => {
     wal.serialize(async () => {
       throw undefined;
     });
-    await tick(60);
+    // 兜底臂的日志是链上的完成信号：等它出现，而不是睡固定时长
+    await waitFor(() => text().includes('审计 WAL 链上操作失败'), {
+      label: 'serialize 兜底臂记录告警',
+    });
     expect(text()).toContain('审计 WAL 链上操作失败'); // 前提自证：兜底臂真的跑了
     expect(text()).not.toMatch(V8_BARE_READ);
   });
@@ -132,8 +135,8 @@ describe('WAL 串行链：链尾 handler 自己抛 = 全进程下线', () => {
         undefined
       );
       wal.appendLine('{"action":"probe.append"}\n');
-      await wal.drain();
-      await tick(30);
+      await wal.drain(); // 链排空 = 追加及 catch 处理已完成
+      await flushEventLoop();
 
       // 计数器必须走：它是"磁盘写不进去"在面板上唯一的可见形态
       expect(wal.getStats().walAppendFailures).toBe(1);
@@ -151,8 +154,8 @@ describe('WAL 串行链：链尾 handler 自己抛 = 全进程下线', () => {
       await expect(fs.promises.readFile(path.join(dir, 'nope'), 'utf8')).rejects.toBe(undefined);
       wal.trimBySeqs(new Set(['run-x-1']));
       wal.discardBySeqs(new Set(['run-x-2']));
-      await wal.drain();
-      await tick(30);
+      await wal.drain(); // 链排空 = 裁剪/归档臂及 catch 处理已完成
+      await flushEventLoop();
 
       // 前提自证：走到了「读不回文件」那条 error 分支，而不是在外面就早退
       expect(text()).toContain('读不回文件');

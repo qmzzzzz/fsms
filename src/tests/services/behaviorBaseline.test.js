@@ -2,7 +2,7 @@
  * 行为基线服务单测
  *
  * 通过 mock AuditLog.aggregate 隔离数据库，专注验证特征提取与偏离评估的统计逻辑。
- * P3-20 起特征聚合改在数据库侧完成（$group + $addToSet），因此这里的 mock
+ * 此后特征聚合改在数据库侧完成（$group + $addToSet），因此这里的 mock
  * 需要复刻聚合语义：按 $match 的时间窗过滤 → 按 _id 表达式分桶 → 输出计数与基数。
  */
 

@@ -500,6 +500,32 @@ describe('initData 启动播种与安全对账', () => {
       }
     });
 
+    test('B7 多实例并发首启：insertMany 抛 11000 时回查并继续，进程不退出（A-3）', async () => {
+      await resetDb();
+      await initPermissions();
+
+      // 模拟另一实例在「预查差集」与「insertMany」之间抢先写入：
+      // ordered:false 下我方文档其实都已落库，但驱动程序仍以 11000 收尾。
+      const realInsertMany = Role.insertMany.bind(Role);
+      const spy = jest.spyOn(Role, 'insertMany').mockImplementationOnce(async (docs, opts) => {
+        await realInsertMany(docs, opts);
+        throw Object.assign(new Error('E11000 duplicate key'), { code: 11000 });
+      });
+
+      let result;
+      try {
+        result = await initRoles();
+      } finally {
+        spy.mockRestore();
+      }
+
+      // 关键：不抛出 ⇒ 第二个实例不会因初始化失败而退出
+      expect(result.created).toBe(defaultRoles.length);
+      expect(await Role.countDocuments({})).toBe(defaultRoles.length);
+      // 回查到的角色照常完成权限关联（不是「插入失败就跳过」）
+      expect(await rolePermCodes('GUEST')).toEqual(GUEST_CODES);
+    });
+
     test('B6 角色创建失败必须上抛（fail-loud：不得留下权限未关联的半成品）', async () => {
       await resetDb();
       await initPermissions();
@@ -1149,7 +1175,7 @@ describe('initData 启动播种与安全对账', () => {
           expect(admin).not.toBeNull();
 
           const warns = logger.warn.mock.calls.map((c) => String(c[0])).join('\n');
-          // 收紧失败必须明说，而不是照打「已收紧」（这正是 M-05 修的误导形态）
+          // 收紧失败必须明说，而不是照打「已收紧」（这正是修的误导形态）
           expect(warns).toContain('未能收紧');
           expect(warns).toContain('icacls 执行失败');
           // 回传前缀已被剥掉，否则日志里出现双重 ⚠️ 标记
@@ -1158,7 +1184,7 @@ describe('initData 启动播种与安全对账', () => {
           const content = fs.readFileSync(path.join(dir, '.admin-initial-password'), 'utf8');
           const generated = content.match(/password: (.+)\n/)[1];
           expect(generated).toHaveLength(32);
-          // M-02 底线：收紧失败告警不得把口令当「补救办法」打印出来
+          // 底线：收紧失败告警不得把口令当「补救办法」打印出来
           expect(loggedText()).not.toContain(generated);
         });
       } finally {

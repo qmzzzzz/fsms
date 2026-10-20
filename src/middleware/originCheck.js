@@ -29,7 +29,7 @@ const { DEV_CORS_ORIGINS } = require('../utils/constants');
 // - originalUrl 的 query 可能带令牌（与 app.js 对 morgan :url 做 redactUrlQuery 同一理由）
 // - origin 本身：含 \n 即可在 printf 格式的日志里伪造整行
 const { redactUrlQuery, stripControlChars } = require('../utils/helpers');
-// P3-35：早期 403 留痕。延迟到调用时 require 以避免 middleware 目录内的
+// 早期 403 留痕。延迟到调用时 require 以避免 middleware 目录内的
 // 模块加载顺序耦合（security.js 体量大且会按需引入模型）
 const recordEarlyRejection = (req, meta) => {
   require('./security').recordEarlyRejection(req, meta);
@@ -119,7 +119,7 @@ const createOriginCheck = (allowedOrigins) => {
       logger.warn(
         `来源校验失败（空 Origin）：method=${req.method} path=${redactUrlQuery(req.originalUrl)} ip=${req.ip}`
       );
-      // P3-35：本中间件挂在 auditLog 之前（写操作必须在触达控制器前拦下），
+      // 本中间件挂在 auditLog 之前（写操作必须在触达控制器前拦下），
       // 其 403 此前只进 logger 不进审计——CSRF 探测在合规留存里毫无痕迹
       recordEarlyRejection(req, {
         action: 'csrf_origin_denied',

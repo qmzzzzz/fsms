@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * P2-17 的第二半：`dispatchAlarm` 的被指派人范围必须按 dataScope 档位**穷尽判定**
+ * 第二半：`dispatchAlarm` 的被指派人范围必须按 dataScope 档位**穷尽判定**
  *
  * 缺陷（台账 §4.1 / §7-3）：`AlarmService.dispatchAlarm` 只对
  * `dataScope.type === 'department'` 做跨部门拦截，其余档位一律放行——
@@ -12,7 +12,7 @@
  *
  * 本套件的价值在于它是**矩阵**而不是单点：四个档位 + 一个缺失态各自的判定都必须写明，
  * 少一个分支就红一条（这正是"新增档位时忘记处理"的防呆）。
- * 与 `businessStateConsistencyInvariants.test.js` 的 P2-17 用例不重复：
+ * 与 `businessStateConsistencyInvariants.test.js` 的用例不重复：
  * 那套钉的是"存在性/在职/跨部门/空部门"，本套钉的是 self/none/未传参 三条线。
  */
 

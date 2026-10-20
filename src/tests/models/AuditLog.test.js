@@ -250,7 +250,7 @@ describe('AuditLog 模型静态方法', () => {
         .indexes()
         .find(([, opts]) => opts && opts.expireAfterSeconds !== undefined);
       expect(ttl).toBeTruthy();
-      // P3-46：不再在测试里复刻解析逻辑（原为 `parseInt(...) || 180`，
+      // 不再在测试里复刻解析逻辑（原为 `parseInt(...) || 180`，
       // 与模型侧的钳制口径不同，配置为 1 时测试期望 1 天而模型实为 90 天）。
       // 改为直接比对单一声明，口径只有一处
       const { RETENTION_SECONDS, MIN_RETENTION_DAYS } = require('../../constants/retention');

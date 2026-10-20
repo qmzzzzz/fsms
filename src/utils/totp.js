@@ -36,7 +36,7 @@ function base32Encode(buf) {
 /**
  * Base32 字符串 → Buffer
  *
- * P3-26：非法字符不再静默跳过。原实现 `if (idx === -1) continue` 会把
+ * 非法字符不再静默跳过。原实现 `if (idx === -1) continue` 会把
  * `JBSWY3DPEHPK3PXP!!!!` 与 `JBSWY3DPEHPK3PXP` 解成同一个密钥，
  * 也会把用户误粘贴的整段 URL 解出一个"看起来能用"的密钥——
  * 于是 enroll 阶段的输入错误要到验证阶段才暴露，且无从定位。
@@ -120,7 +120,7 @@ function verifyTotpDetailed(secretBase32, code, window = DEFAULT_WINDOW) {
     const secretBuf = base32Decode(secretBase32);
     const counter = Math.floor(Date.now() / 1000 / STEP_SECONDS);
     const submitted = Buffer.from(code, 'utf8');
-    // P3-26：改用 crypto.timingSafeEqual 做常量时间比较。
+    // 改用 crypto.timingSafeEqual 做常量时间比较。
     // Buffer.equals 是逐字节短路比较——首字符不同即立即返回，
     // 耗时随「与正确码的公共前缀长度」变化。理论上可用于逐位猜测口令，
     // 虽然 6 位数字空间小（10^6）且有 MFA 失败计数封顶使其难以实用化，

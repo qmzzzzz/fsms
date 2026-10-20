@@ -20,7 +20,7 @@ const {
   INSPECTION_REVIEW_RESULTS,
 } = require('../constants/inspection');
 
-// P3-17：列表 query 枚举与类型校验。status/inspectionType 拼错时原先
+// 列表 query 枚举与类型校验。status/inspectionType 拼错时原先
 // 静默返回空集，assignedTo 传非 ObjectId 则触发 CastError → 400（错误语义模糊）
 // values:'falsy'：前端未选筛选时会把空串带上（status=），optional() 默认只跳过
 // undefined，空串会落入 isIn/isMongoId/isISO8601 误判 400；空串语义即「不筛选」
@@ -130,7 +130,7 @@ const createValidation = [
     .isString()
     .isLength({ max: 100 })
     .withMessage('区域不能超过 100 个字符'),
-  // P2-19：跨字段校验，与 updateValidation 同口径
+  // 跨字段校验，与 updateValidation 同口径
   body('planEndTime').custom((value, { req }) => {
     if (!value || !req.body.planStartTime) return true;
     if (new Date(value) <= new Date(req.body.planStartTime)) {
@@ -183,7 +183,7 @@ const updateValidation = [
     .isArray({ max: MAX_SUBDOC_ITEMS })
     .withMessage(`设备列表不超过 ${MAX_SUBDOC_ITEMS} 台`),
   body('devices.*').isMongoId().withMessage('设备 ID 格式无效'),
-  // P2-19：跨字段校验。原先两端只各自验 ISO8601，倒置的时间窗（end < start）
+  // 跨字段校验。原先两端只各自验 ISO8601，倒置的时间窗（end < start）
   // 可直接落库，使 dashboard/report 的 overdue 与完成率永久失真
   body('planEndTime').custom((value, { req }) => {
     if (!value || !req.body.planStartTime) return true;
@@ -337,7 +337,7 @@ router.put(
   inspectionController.completeInspection
 );
 
-// P3-16：review 此前零 body 校验——reviewComment 超长以英文 ValidationError
+// review 此前零 body 校验——reviewComment 超长以英文 ValidationError
 // 回显（Mongoose maxlength 消息），result 枚举错误值直写库
 //
 // L-05 修复：原校验写的是 body('result')，而控制器消费的是 req.body.reviewResult
@@ -371,7 +371,7 @@ router.put(
  * 取消巡检的 reason
  *
  * 兄弟端点 review 的 reviewComment 早就有 500 上限（见上方 reviewValidation，
- * P3-16），cancel 却一条规则都没挂：控制器 `const { reason } = req.body` 原样
+ *），cancel 却一条规则都没挂：控制器 `const { reason } = req.body` 原样
  * 交给 InspectionService 写进 `executionLog[].remark`。
  * Inspection 模型对该字段确实写了 maxlength: 500，但取消走的是
  * `findOneAndUpdate`——默认不跑校验器，所以那条上限在这条路上是装饰：

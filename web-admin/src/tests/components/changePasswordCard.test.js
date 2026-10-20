@@ -233,7 +233,7 @@ describe('ChangePasswordCard 成功后行为', () => {
     let store
     const c = await open((pinia) => {
       store = useAuthStore(pinia)
-      store.setAuth('t', 'r', { userId: 'u1', username: 'a' }, ['user:read'])
+      store.setAuth({ userId: 'u1', username: 'a' }, ['user:read'])
     })
     expect(store.currentUser).toBeTruthy()
     typeInto(c, 'currentPassword', 'OldPass_2026')

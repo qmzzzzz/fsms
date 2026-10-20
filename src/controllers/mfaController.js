@@ -149,7 +149,7 @@ const mfaEnroll = asyncHandler(async (req, res) => {
   if (user.mfaEnabled) return ApiResponse.codeError(res, 'MFA_ALREADY_ENABLED_NO_REPEAT');
 
   // 修复 B1：用户已 enroll 但未 enable 时返回已有密钥，避免重复生成覆盖已扫码的密钥
-  // P2-15：库内为密文，回显给认证器前必须解密（存量明文由 decryptMfaSecret 原样透传）
+  // 库内为密文，回显给认证器前必须解密（存量明文由 decryptMfaSecret 原样透传）
   if (user.mfaSecret && !user.mfaEnabled) {
     const existing = decryptMfaSecret(user.mfaSecret);
     if (existing) {

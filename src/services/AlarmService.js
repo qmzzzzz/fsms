@@ -50,7 +50,7 @@ class AlarmService {
   /**
    * 获取报警列表（含数据范围过滤和分页）
    *
-   * E-2：支持游标分页。传入 cursor 时按 occurredAt 倒序做 keyset seek，
+   * 支持游标分页。传入 cursor 时按 occurredAt 倒序做 keyset seek，
    * 不做 countDocuments（报警量大时全量 count 与深分页 skip 同为瓶颈），
    * 以 hasMore/nextCursor 表达翻页；不传 cursor 保持原 page/limit 行为。
    */
@@ -79,7 +79,7 @@ class AlarmService {
 
     // 数据范围过滤：统一走 applyDataScopeToQuery
     // （原先手写的三分支在 type==='department' 且 department 为空时全不命中 → 零过滤越权）
-    // 属主/部门字段取自 DATA_SCOPE_FIELDS 单一声明（P2-20）
+    // 属主/部门字段取自 DATA_SCOPE_FIELDS 单一声明
     // 范围不可用时 applyDataScopeToQuery 直接抛 403（#12）：不再由本处回空集——
     // 空集让调用方分不清「没有报警」与「没有可见范围」。
     applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.alarm);
@@ -188,7 +188,7 @@ class AlarmService {
   /**
    * 接收报警（手动上报）
    *
-   * P3-15：create 与 processLog 的初始条目必须一次写入。
+   * create 与 processLog 的初始条目必须一次写入。
    * 原实现先 create 再 push+save 两步非原子，第二步失败（写冲突/连接抖动）
    * 会留下一条「没有时间线起点」的火警记录，后续处置节点无从对齐。
    */
@@ -228,7 +228,7 @@ class AlarmService {
   /**
    * 受理报警（分配处理人）
    *
-   * P2-17：handlerId 必须校验「存在」与「在数据范围内」。
+   * handlerId 必须校验「存在」与「在数据范围内」。
    * 原实现仅路由层 isMongoId() 格式校验即直写：
    * - 指派一个随机 ObjectId → handler 悬空，后续 arriveAtScene/resolveAlarm
    *   因匹配不上处理人而永久卡住工单
@@ -249,7 +249,7 @@ class AlarmService {
       throw ApiError.badRequest('指定的处理人账户已被禁用或锁定');
     }
 
-    // P2-17 数据范围矩阵（2026-09-21 补全）：原先只判 department 一档，
+    // 数据范围矩阵（2026-09-21 补全）：原先只判 department 一档，
     // 于是 self 档（语义是"仅自己的数据"）可以把报警派给**任意在册用户**——
     // 连同部门都不需要，而 handler 字段正是 handleAlarm/arriveAtScene 的经办人守卫读的，
     // 等于把工单塞进别人的清单。none 档与"调用方根本没传 dataScope"同样曾经放行。
@@ -303,7 +303,7 @@ class AlarmService {
 
   /**
    * 到达现场登记（arrivedAt 为 null 或不存在才允许登记，保证幂等）
-   * M-1：仅指派的处理人本人可登记，防同范围权限者冒用他人工单
+   * 仅指派的处理人本人可登记，防同范围权限者冒用他人工单
    */
   async arriveAtScene(id, operatorId) {
     const now = new Date();
@@ -323,7 +323,7 @@ class AlarmService {
 
   /**
    * 处理完成
-   * M-1：仅指派的处理人本人可结单
+   * 仅指派的处理人本人可结单
    */
   async resolveAlarm(id, { handleResult, cause }, operatorId) {
     const now = new Date();
@@ -348,7 +348,7 @@ class AlarmService {
 
   /**
    * 标记为误报
-   * M-1：已指派（processing）时仅处理人本人可标记；未指派（pending）任何同权限者可标记
+   * 已指派（processing）时仅处理人本人可标记；未指派（pending）任何同权限者可标记
    *
    * runValidators：schema 对 handleResult 声明的 maxlength 在 update 路径上默认不生效
    * （Mongoose 只对 save 跑校验），不打开这道开关，路由层一旦漏装就没有第二道闸。
@@ -387,7 +387,7 @@ class AlarmService {
    * 取消报警
    * 评价报告 #11：补对象级授权——已指派的工单仅处理人本人可取消，
    * 未指派（pending 且无 handler）任何同数据范围者可取消。
-   * 与 markAsFalseAlarm 的 M-1 口径一致，堵住「同范围者取消他人工单」路径。
+   * 与 markAsFalseAlarm 的口径一致，堵住「同范围者取消他人工单」路径。
    *
    * reason 的长度只由路由层（handleReasonValidation）钉住：这里不开 runValidators，
    * 因为 processLog.remark 在 schema 里本就没有上限，开了也只是自我安慰；

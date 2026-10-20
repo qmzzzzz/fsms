@@ -15,6 +15,7 @@ const {
   randomPassword,
   generateEcKeyPem,
 } = require('../helpers/buildLoginEnvelope');
+const { accessToken } = require('../helpers/authResponse');
 
 describe('登录口令加密传输（密文轨）', () => {
   let app;
@@ -97,7 +98,7 @@ describe('登录口令加密传输（密文轨）', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data.user.username).toBe('enclogin_user');
-    expect(res.body.data.token).toBeTruthy();
+    expect(accessToken(res)).toBeTruthy();
 
     // 【顺序无关修复】原先把令牌存进模块级 userToken 供改密用例读取，形成隐式
     // 「本用例必须先跑」依赖；改密用例改为自建账号自行登录后本变量已无消费者。
@@ -105,7 +106,7 @@ describe('登录口令加密传输（密文轨）', () => {
     // 注册有误，truthy 断言照样通过，只有真正打一次受保护接口才暴露。
     const me = await request(app)
       .get('/api/auth/me')
-      .set('Authorization', `Bearer ${res.body.data.token}`);
+      .set('Authorization', `Bearer ${accessToken(res)}`);
     expect(me.status).toBe(200);
     // /auth/me 的用户对象嵌在 data.user（不是 data 本身），字段路径必须照实断
     expect(me.body.data.user.username).toBe('enclogin_user');
@@ -205,7 +206,7 @@ describe('登录口令加密传输（密文轨）', () => {
     const encNew = await buildLoginEnvelope(NEW_PASSWORD, { aad: 'password:new' });
     const res = await request(app)
       .put('/api/auth/password')
-      .set('Authorization', `Bearer ${chgLogin.body.data.token}`)
+      .set('Authorization', `Bearer ${accessToken(chgLogin)}`)
       .send({ encCurrentPassword: encCurrent, encNewPassword: encNew });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);

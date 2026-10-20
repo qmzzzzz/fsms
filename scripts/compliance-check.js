@@ -37,6 +37,7 @@ const {
   siemShippingVerdict,
   alertProbeVerdict,
 } = require('./complianceVerdicts');
+const { resolveAlertmanagerConfigPath } = require('./alertmanager-config-path');
 
 const checks = [];
 let allPassed = true;
@@ -57,7 +58,7 @@ function recordCheck(name, passed, detail, opts = {}) {
 // 把 `auditMonitor.start();` 前面加两个斜杠，检查项仍然报「已挂载」——
 // 门禁绿、代码里那个调用已经不存在。与本仓 nginx 契约门禁同一先例
 // （deployment 侧的门禁先在"去注释后的代码视图"上判，再断言原文与视图同结论），
-// 也与我此前修掉的 P3-46「恒真检查」是同一族：门禁的价值只在失败时指向真问题。
+// 也与我此前修掉的「恒真检查」是同一族：门禁的价值只在失败时指向真问题。
 /**
  * 把 JS 源码里的注释剥掉，只留真正会执行的文本（保留行数，便于 diff 与人工核对）。
  *
@@ -141,7 +142,7 @@ function exportRouteWired(routesSrc) {
 }
 
 // ================= 1. 留存天数配置 =================
-// P3-46：原实现先把配置钳制到 [90, 3650]，再断言「钳制结果 ≥ 90」——
+// 原实现先把配置钳制到 [90, 3650]，再断言「钳制结果 ≥ 90」——
 // 恒真检查。AUDIT_RETENTION_DAYS=1 或 -5 同样报「就绪」，
 // 一个专门用来发现配置不合规的脚本反而遮蔽了配置不合规。
 //
@@ -400,7 +401,10 @@ function checkAlertingDeliveryEndpoint() {
   try {
     const { evaluateAlertingDelivery } = require('./compliance-alerting');
     const fs = require('fs');
-    const file = path.join(__dirname, '..', 'deployment', 'observability', 'alertmanager.yml');
+    // 与部署预检、compose 校验容器共用同一解析口径（A-6）：合规检查不能再
+    // 固定读仓库模板，否则 ALERTMANAGER_CONFIG_PATH 指向真实配置时，
+    // 本项仍在评价另一份文件。
+    const file = resolveAlertmanagerConfigPath(process.env);
     const source = fs.readFileSync(file, 'utf8');
     const gateMode = process.env.ALERT_WEBHOOK_CHECK === 'production' ? 'production' : 'repo';
     const { passed, detail } = evaluateAlertingDelivery(source, gateMode);

@@ -22,7 +22,7 @@
  */
 
 // 地址解析统一走 ipUtils（内含严格形态判据），本文件不再直接依赖 ipaddr。
-// isPrivateOrLoopback 的判据本体也已迁入 ipUtils（2026-09-30，P2-9）：logShipper
+// isPrivateOrLoopback 的判据本体也已迁入 ipUtils：logShipper
 // 的出站目标门禁需要同一把尺，判据归 utils、本文件保留同名再导出以稳定既有引用。
 const { isPrivateOrLoopback } = require('../utils/ipUtils');
 const crypto = require('crypto');
@@ -33,7 +33,7 @@ const logger = require('../utils/logger');
  * 判断 IP 是否属内网/回环（Prometheus 抓取的合法网段）
  *
  * 判据本体在 `utils/ipUtils.isPrivateOrLoopback`（本文件是它的再导出与使用方）。
- * 使用契约（M-07，勿回退）：唯一调用方传的是 `req.socket.remoteAddress`——取自
+ * 使用契约（勿回退）：唯一调用方传的是 `req.socket.remoteAddress`——取自
  * TCP 连接本身、不受任何请求头影响，由 OS 给出规范形态 ⇒ 宽松数值形态
  * （`0177.0.0.1` / `0x7f.0.0.1` / `2130706433` / `127.1`，ipUtils 的严格解析
  * 一律 null ⇒ false）进不到本判定，"XFF 伪造来源伪装环回"在此不成立。
@@ -68,7 +68,7 @@ function createMetricsAuth(options = {}) {
 
     // ② 内网/回环来源放行：容器网络内 Prometheus → app:3000 零配置兼容
     //
-    // 【M-07 修复】判定必须用**不可伪造的 socket 对端地址**，不能用 req.ip。
+    // 【修复】判定必须用**不可伪造的 socket 对端地址**，不能用 req.ip。
     // req.ip 在启用 trust proxy 时会采纳 X-Forwarded-For：生产环境
     // validate.js 强制 TRUST_PROXY_HOPS，故 req.ip 必然受 XFF 影响。此时
     // 直连 app 端口的攻击者只需发送 `X-Forwarded-For: 127.0.0.1`，req.ip 即

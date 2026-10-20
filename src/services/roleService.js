@@ -38,7 +38,7 @@ class RoleService {
     //   原顺序 中位 133.57ms → 新顺序 中位 81.53ms（1.64x），结果一致（n=4500）。
     // 注意 explain 阶段序列两者相同——优化器本就会把数组层粗筛下推，
     // 收益来自 $unwind 展开行数减少，而非查询计划差异。
-    // 明细见 deliverables/性能实测基线-2026-09-16.json。
+    // 以上为 2026-09-16 实测值。
     const userCounts = await User.aggregate([
       { $match: { roles: { $in: roleIds } } },
       { $unwind: '$roles' },

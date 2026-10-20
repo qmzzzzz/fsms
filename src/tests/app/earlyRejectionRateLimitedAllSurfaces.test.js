@@ -7,7 +7,7 @@
  * 却**一条 429 都不吃**——更早那次"把限流器提到 body 解析之前"的修复只覆盖了 `/api/` 前缀，
  * 洪水面原样保留在其余路径。
  * 后果不是负载而是覆盖率：链锁全局串行，排队超时的既定结局是合法审计降级为
- * 无 hash 的 legacy 行（`utils/auditChain.js` 的 P3-19 注释自证）。
+ * 无 hash 的 legacy 行（`utils/auditChain.js` 的注释自证）。
  *
  * 判据（每个表面各自独立配额，见下面 X-Forwarded-For 的用法）：
  *   ① 前 MAX 条撞协议合规闸门（405 + HTTP_METHOD_UNSUPPORTED，拒绝语义没被限流提前改掉）；
@@ -25,6 +25,7 @@
  * 不参与任何安全判定）。
  */
 const request = require('supertest');
+const { waitForStable } = require('../helpers/waitFor');
 
 const MAX_GENERAL = 3;
 const FLOOD = 10;
@@ -62,22 +63,17 @@ const countViolationsFor = (path) =>
 
 // 等该 path 的异步落库**静默**后再取数：recordViolation 用 setImmediate 投递，create 还要过全局链锁。
 // 只"等到达到预期值"会单向假绿——先到的 MAX 条就让计数满足，后到的漏判永远看不见。
+// 故判据等"两次连续读数相同"（waitForStable），采样间隔沿用原先的 150ms。
 //
 // 计数一律取「本条用例自己的增量」，不取绝对值：审计集合是全仓共享的，而同一批
 // (action, path) 会被本文件**多条**用例写入（GET 探针用例期望 0 条、TRACE 探针用例期望 MAX 条），
 // 绝对计数等于把前置状态写成一条有序用例——`--randomize` 下三个 seed 各自复现过 1 红
 // （见台账 §91.9 / F-112 / F-185 同一类）。增量不削弱设防：探针真的开始写审计时 before≠after 立刻红。
-const settleCount = async (path, timeoutMs = 8000) => {
-  const deadline = Date.now() + timeoutMs;
-  let prev = await countViolationsFor(path);
-  for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    const now = await countViolationsFor(path);
-    if (now === prev) return now;
-    prev = now;
-    if (Date.now() > deadline) return now;
-  }
-};
+const settleCount = (path) =>
+  waitForStable(() => countViolationsFor(path), {
+    intervalMs: 150,
+    label: `协议违规审计落库条数静默（${path}）`,
+  });
 
 describe('限流挂载范围覆盖全部对外表面', () => {
   const mongoose = require('mongoose');

@@ -10,8 +10,15 @@
  * 用法：
  *   node scripts/generate-secrets.js                    # 仅打印到 stdout（默认不落盘）
  *   node scripts/generate-secrets.js --out ./secrets-new   # 写入目录（不覆盖已有文件）
+ *   node scripts/generate-secrets.js --out ./secrets --add-missing  # 只补缺失的独立密钥
  *   node scripts/generate-secrets.js --out ./secrets-new --force  # 覆盖
  *   node scripts/generate-secrets.js --env-snippet      # 额外输出 .env 形式片段
+ *
+ * --add-missing（O-4）：用于「现有部署新增了一项独立密钥」（如升级引入
+ * redis_password）。旧实现只接受 --force 整套重生成，会把 JWT/AES/HMAC/DB
+ * 全部轮换——全体下线、MFA 密文不可解密、审计 HMAC 失效。现在该模式只写
+ * 目录中缺失的文件，已有文件一个字节都不动；mongodb_uri 由 mongo_root_password
+ * 派生，三者（username/password/uri）必须同代次，缺任意一项即拒绝。
  *
  * 安全约定：
  *   - 生成结果只写向 --out 指定目录或 stdout，从不回显到日志文件；
@@ -35,9 +42,10 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const USAGE = '用法: node scripts/generate-secrets.js [--out <dir> [--force]] [--env-snippet]';
+const USAGE =
+  '用法: node scripts/generate-secrets.js [--out <dir> [--force | --add-missing]] [--env-snippet]';
 /** 本脚本接受的全部参数（--out 后面必须跟目录，其余是纯开关） */
-const KNOWN_TOKENS = ['--out', '--force', '--env-snippet', '--help', '-h'];
+const KNOWN_TOKENS = ['--out', '--force', '--add-missing', '--env-snippet', '--help', '-h'];
 
 /**
  * 拼错时给出可照抄的正确写法（返回**真实 token**，含连字符）。
@@ -69,12 +77,19 @@ const suggestFlag = (token) => {
  * （--backup-dir 缺值）立过：未知参数与缺值一律以退出码 2 拒绝，不猜。
  */
 function parseCliArgs(tokens) {
-  const parsed = { outDir: undefined, force: false, envSnippet: false, help: false };
+  const parsed = {
+    outDir: undefined,
+    force: false,
+    addMissing: false,
+    envSnippet: false,
+    help: false,
+  };
   const errors = [];
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
     if (token === '--help' || token === '-h') parsed.help = true;
     else if (token === '--force') parsed.force = true;
+    else if (token === '--add-missing') parsed.addMissing = true;
     else if (token === '--env-snippet') parsed.envSnippet = true;
     else if (token === '--out') {
       const value = tokens[i + 1];
@@ -92,6 +107,21 @@ function parseCliArgs(tokens) {
       );
     }
   }
+  // 组合校验：--add-missing 的语义完全依赖「目录里已有什么」，三组互相矛盾的
+  // 组合都在生成任何密钥之前拒绝（退出码 2），避免先打印/落盘再解释。
+  if (parsed.addMissing) {
+    if (!parsed.outDir) {
+      errors.push('--add-missing 必须与 --out <目录> 一起使用（它要检查目录里缺哪些文件）');
+    }
+    if (parsed.force) {
+      errors.push('--add-missing 与 --force 互斥：补齐不覆盖，覆盖不补齐');
+    }
+    if (parsed.envSnippet) {
+      errors.push(
+        '--add-missing 与 --env-snippet 互斥：片段会打印未写入文件的新随机值，与现有部署不符'
+      );
+    }
+  }
   return { ...parsed, errors };
 }
 
@@ -105,17 +135,23 @@ if (cli.errors.length > 0) {
   console.error(`[generate-secrets] ${USAGE}`);
   process.exit(2);
 }
-const { outDir, force, envSnippet } = cli;
+const { outDir, force, addMissing, envSnippet } = cli;
 
 // ================= 生成 =================
 const b64 = (bytes) => crypto.randomBytes(bytes).toString('base64').replace(/\n/g, '');
 const hex = (bytes) => crypto.randomBytes(bytes).toString('hex');
 
-const { privateKey: ecdhPem } = crypto.generateKeyPairSync('ec', {
+const { privateKey: ecdhPem, publicKey: ecdhPubPem } = crypto.generateKeyPairSync('ec', {
   namedCurve: 'prime256v1',
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
   publicKeyEncoding: { type: 'spki', format: 'pem' },
 });
+// S-2：前端构建期钉扎用的完整公钥指纹（SPKI DER 的 SHA-256，64 位 hex）。
+// 与 src/utils/loginCipher.js 的 publicKeySha256、scripts/login-key-pin.js 同口径。
+const ecdhPublicKeySha256 = crypto
+  .createHash('sha256')
+  .update(crypto.createPublicKey(ecdhPubPem).export({ type: 'spki', format: 'der' }))
+  .digest('hex');
 
 const mongoRootUsername = 'firesafety';
 
@@ -252,7 +288,33 @@ if (outDir) {
   // 恰好把它拉回"一整套同代次"。判齐否的那几条分支本机造不出可复现的触发形态，
   // 留着只会是一条没人证过的代码。
   const alreadyThere = Object.keys(secrets).filter((name) => fs.existsSync(path.join(dir, name)));
-  if (alreadyThere.length > 0 && !force) {
+  // mongodb_uri 由 mongo_root_password（及 username）派生，三者必须同代次。
+  // --add-missing 只在三者「全缺」或「全有」时放行；部分缺失时补谁都会错。
+  const MONGO_GROUP = ['mongo_root_username', 'mongo_root_password', 'mongodb_uri'];
+  let toWrite = Object.keys(secrets);
+  if (addMissing) {
+    const present = new Set(alreadyThere);
+    const mongoPresent = MONGO_GROUP.filter((name) => present.has(name));
+    if (mongoPresent.length > 0 && mongoPresent.length < MONGO_GROUP.length) {
+      console.error(`--add-missing 拒绝：Mongo 凭据三件套不成套：${dir}`);
+      console.error(
+        `已有：${mongoPresent.join(', ')}；缺：${MONGO_GROUP.filter((n) => !present.has(n)).join(', ')}`
+      );
+      console.error('mongodb_uri 由 mongo_root_password 拼出，补缺项会让两者分属两代随机值。');
+      console.error('请手工核对并补齐三者（保持 uri 中的口令与 mongo_root_password 一致），');
+      console.error('或用 --force 重做全套（会轮换所有密钥，须同步迁移）。');
+      process.exit(1);
+    }
+    toWrite = Object.keys(secrets).filter((name) => !present.has(name));
+    if (toWrite.length === 0) {
+      console.log(
+        `--add-missing：${dir} 已包含全部 ${Object.keys(secrets).length} 个密钥文件，无需补齐。`
+      );
+      process.exit(0);
+    }
+    console.log(`--add-missing：仅补齐 ${toWrite.length} 个缺失文件，已有文件保持原值：`);
+    console.log(`  ${toWrite.join(', ')}`);
+  } else if (alreadyThere.length > 0 && !force) {
     console.error(`--out 目录里已经有 ${alreadyThere.length} 个密钥文件：${dir}`);
     console.error(`已有：${alreadyThere.join(', ')}`);
     console.error(
@@ -260,12 +322,16 @@ if (outDir) {
     );
     console.error('分属两代随机值（前者是后者拼进去的），应用会带着对不上的连接串启动。');
     console.error('两条出路：加 --force 重做**整套**（旧值全部覆盖），或换一个空目录。');
+    console.error(
+      '只想补新增的独立密钥（如 redis_password）请用 --add-missing（不覆盖任何旧值）。'
+    );
     process.exit(1);
   }
 
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 
-  for (const [name, value] of Object.entries(secrets)) {
+  for (const name of toWrite) {
+    const value = secrets[name];
     const file = path.join(dir, name);
     fs.writeFileSync(file, value, { mode: 0o600 });
     if (isPosix) {
@@ -275,7 +341,7 @@ if (outDir) {
     console.log(`已写入 ${file}（${Buffer.byteLength(value)} 字节）`);
   }
 
-  // 【M-05 修复】Windows 上 mode/chmod 均不映射 NTFS ACL：writeFileSync 的 mode
+  // 【修复】Windows 上 mode/chmod 均不映射 NTFS ACL：writeFileSync 的 mode
   // 被忽略，chmodSync 只能粗粒度切换只读属性。因此上面的权限收紧在 Windows 上
   // 是空操作，而文件会继承父目录的宽松 ACL（实测默认含 BUILTIN\Users:(I)(RX)
   // 与 Authenticated Users:(I)(M)，即任何本地用户可读取并改写密钥文件）。
@@ -290,7 +356,7 @@ if (outDir) {
   // 目录收紧后再对目录内已写入的密钥文件逐个收紧（icacls /T 覆盖递归，这里显式复核）
   const fileFailures = [];
   if (hardened.ok) {
-    for (const [name] of Object.entries(secrets)) {
+    for (const name of toWrite) {
       const file = path.join(dir, name);
       if (!fs.existsSync(file)) continue;
       // 返回值必须收：旧写法把 hardenPath(file) 的结果整批丢掉，于是"11 个密钥文件里
@@ -322,8 +388,28 @@ if (outDir) {
     process.exitCode = 1;
   }
 
-  console.log('\n落地后请执行轮换手册中的迁移步骤（AES 先迁 mfaSecret、HMAC 重签），');
-  console.log('再重启应用。见 deployment/secret-rotation.md。');
+  // --add-missing 且 ECDH 私钥早已存在时，**不打印**本次临时生成的指纹：它与目录里
+  // 那把私钥无关，照着重建只会把前端指向一把不存在的公钥。指纹只在本次真的写了
+  // ECDH 私钥（普通生成/覆盖/补齐）时才输出。
+  if (addMissing && !toWrite.includes('login_ecdh_private_key')) {
+    console.log('\n前端构建期公钥钉扎（S-2）：ECDH 私钥未变，本次不输出指纹（沿用现有构建）。');
+  } else {
+    console.log(`\n前端构建期公钥钉扎（S-2）：VITE_LOGIN_PUBLIC_KEY_SHA256=${ecdhPublicKeySha256}`);
+    console.log('  `docker compose build` 前先 export 该变量（或写进 .env）：前端包只认这把公钥，');
+    console.log('  镜像启动时会把它与运行期私钥比对，不一致直接启动失败。轮换私钥后必须重建前端。');
+  }
+
+  if (addMissing) {
+    console.log(`\n补齐完成：本次只写入 ${toWrite.join('、')}，其余密钥文件未改动。`);
+    if (toWrite.includes('login_ecdh_private_key')) {
+      console.log('⚠ 本次补齐了 ECDH 私钥：前端必须用上面的指纹重新构建，否则登录/改密会被拒绝。');
+    }
+    console.log('新增项（如 redis_password）需重启对应服务（redis 与 app）后生效；');
+    console.log('无需执行 AES 迁移或 HMAC 重签——已有密钥未被轮换。');
+  } else {
+    console.log('\n落地后请执行轮换手册中的迁移步骤（AES 先迁 mfaSecret、HMAC 重签），');
+    console.log('再重启应用。见 deployment/secret-rotation.md。');
+  }
 } else {
   console.log('# ===== 生成结果（stdout 会留在终端历史，复制后请及时清屏）=====\n');
   for (const [name, value] of Object.entries(secrets)) {
@@ -334,7 +420,10 @@ if (outDir) {
       console.log(`${name}=${value}`);
     }
   }
-  console.log('\n提示：加 --out <dir> 可直接写入 secrets 文件（0600）。');
+  console.log(
+    `\n# 前端构建期公钥钉扎（S-2，非机密）：VITE_LOGIN_PUBLIC_KEY_SHA256=${ecdhPublicKeySha256}`
+  );
+  console.log('提示：加 --out <dir> 可直接写入 secrets 文件（0600）。');
 }
 
 if (envSnippet) {
@@ -346,6 +435,7 @@ if (envSnippet) {
   console.log(`AES_SECRET_KEY=${secrets.aes_secret_key}`);
   console.log(`HMAC_SECRET=${secrets.hmac_secret}`);
   console.log(`LOGIN_ECDH_PRIVATE_KEY=${pemOneLine}`);
+  console.log(`VITE_LOGIN_PUBLIC_KEY_SHA256=${ecdhPublicKeySha256}`);
   console.log(`ADMIN_INITIAL_PASSWORD=${secrets.admin_initial_password}`);
   console.log(`GRAFANA_ADMIN_PASSWORD=${secrets.grafana_admin_password}`);
 }

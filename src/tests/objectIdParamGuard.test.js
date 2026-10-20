@@ -1,16 +1,16 @@
 'use strict';
 
 /**
- * P2-25 回归门禁：每个挂载了 :id / :userId 路由的子 Router 都必须真的被
+ * 回归门禁：每个挂载了:id /:userId 路由的子 Router 都必须真的被
  * `applyObjectIdParams` 注册过参数校验
  *
  * 背景（`middleware/validateObjectId.js` 文件头）：原实现用 `app.param('id', ...)`，
  * 而 Express 的参数回调**不向子 Router 传播** ⇒ 该校验一次都没执行过，
- * 非法 :id 一路走到 Mongoose 才抛 CastError。P2-25 改成逐个 router 注册。
+ * 非法:id 一路走到 Mongoose 才抛 CastError。改成逐个 router 注册。
  *
  * 为什么需要本用例：注册名单是 `app.js` 里手写的一个参数列表。
  * 新增一个资源路由（或给已有 router 加 :id 参数）时，**忘记把它加进名单不会有任何报错**——
- * 表现正是 P2-25 已经付过学费的那个形态：校验静默消失、错误形态从 400 退化成 500/CastError，
+ * 表现正是已经付过学费的那个形态：校验静默消失、错误形态从 400 退化成 500/CastError，
  * 而路由里那句 `param('id').isMongoId()` 看着还在（它没被 consume，形同装饰——
  * 这一点是我本次改动实测出来的：先前我以为"没消费校验链"就是缺陷，加了 consumeValidation()
  * 才发现真正生效的是这里的 param 处理器，它在路由链之前就把请求拒掉了）。
@@ -53,7 +53,7 @@ const collectIdRoutes = (router, out) => {
   return out;
 };
 
-describe('P2-25 参数校验注册门禁', () => {
+describe('参数校验注册门禁', () => {
   let app;
   let token;
   const stamp = `p225${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);

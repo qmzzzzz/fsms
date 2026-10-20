@@ -13,7 +13,7 @@ const { MAX_TEXT_LENGTH } = require('../utils/ipRange');
 const { consumeValidation } = require('../middleware/validateQuery');
 const { USER_STATUS } = require('../utils/constants');
 
-// P3-4/P3-17：列表 query 校验。status 此前零校验直入 Mongo 过滤，
+// 列表 query 校验。status 此前零校验直入 Mongo 过滤，
 // 传入非法值只会静默返回空集；配合 queryScalarGuard（拦对象/数组形态）
 // 构成完整防线——前者防「类型」，此处防「取值」
 // values:'falsy'：前端未选状态筛选时带空串（status=），空串语义为「不筛选」

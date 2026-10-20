@@ -24,7 +24,7 @@ const {
 } = require('./shared');
 
 /**
- * P0-1 建号数据范围闸（与 updateUser 的 department 分支同源）。
+ * 建号数据范围闸（与 updateUser 的 department 分支同源）。
  * department 是「数据范围决定字段」：新建账户落入该部门后按自身部门可见数据。
  * 若允许 department/self 域操作者把新账号建到其可见域之外（例：东区管理员建 总部
  * 账号并持其口令），等价于在域外安插一个可读该域数据的账号——与 updateUser 明令
@@ -180,7 +180,7 @@ const createUser = asyncHandler(async (req, res) => {
   if (rejectInvalidIpRules(res, allowedIPs)) return;
 
   // 检查用户名是否已存在
-  // P3-30：username 判重走 collation（大小写不敏感），与唯一索引 username_ci 同口径；
+  // username 判重走 collation（大小写不敏感），与唯一索引 username_ci 同口径；
   // A3（2026-10-16）：邮箱分支改查 **emailKey**（HMAC 检索键，唯一索引）。
   // 原先查的是明文 `email_1`，而 email 列已加密——继续查明文列会恒不命中，
   // 表现为「建号时撞他人邮箱不再报 400」。两次查询仍不能合并为一次 $or：
@@ -198,7 +198,7 @@ const createUser = asyncHandler(async (req, res) => {
   if (roleCheck.rejected) return;
   const validatedRoles = roleCheck.roles;
 
-  // P0-1（建号口径补齐，与 updateUser 的 department 闸同源）：详见 guardCreateUserScope。
+  //（建号口径补齐，与 updateUser 的 department 闸同源）：详见 guardCreateUserScope。
   if (await guardCreateUserScope(req, res, department, username)) return;
 
   // 创建用户（带角色）
@@ -216,8 +216,9 @@ const createUser = asyncHandler(async (req, res) => {
 
   logger.info('管理员创建用户', { operator: req.user.username, username });
 
-  // 用户数据变更，失效操作者数据范围下的统计缓存
-  statsCache.invalidateByUserId(req.user.userId);
+  // 用户数据变更会改变所有查看者的聚合口径（总数/部门分布），必须全量失效；
+  // 只失效操作者自己的桶会让其他管理员的看板陈旧到 TTL（A-1）
+  statsCache.invalidateAll('user-create');
 
   const createdUser = await userService.getCreatedUser(user._id);
 

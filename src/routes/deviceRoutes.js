@@ -9,7 +9,7 @@ const { authenticate, checkPermission } = require('../middleware');
 const { body, param, query } = require('express-validator');
 const { mustBeString, coordinatesRules } = require('../utils/validationRules');
 const { consumeValidation } = require('../middleware/validateQuery');
-// E-05 整改：设备类型枚举此前在 createDeviceValidation / updateDeviceValidation
+// 整改：设备类型枚举此前在 createDeviceValidation / updateDeviceValidation
 // 两处内联展开，与 constants 的 DEVICE_TYPE、模型 enum、文档生成器共 4 份副本。
 // 现统一从 constants 取值——新增设备类型只需改这一处。
 // 状态两组值改由 constants/deviceStatus 透出（同一份值 + 「可写子集」这条规则只算一次）
@@ -17,7 +17,7 @@ const { DEVICE_TYPE } = require('../utils/constants');
 const { DEVICE_STATUS_VALUES, DEVICE_STATUS_WRITABLE } = require('../constants/deviceStatus');
 const DEVICE_TYPE_VALUES = Object.values(DEVICE_TYPE);
 
-// P3-17：列表 query 枚举校验。status/deviceType 拼错时原先静默返回空集，
+// 列表 query 枚举校验。status/deviceType 拼错时原先静默返回空集，
 // 枚举清单复用 utils/constants 单一声明（避免与模型 enum 漂移）
 // values:'falsy'：前端未选筛选时会把空串带上（status=），optional() 默认只跳过
 // undefined，空串会落入 isIn 误判 400；空串语义即「不筛选」，与缺省对齐
@@ -173,7 +173,7 @@ const updateDeviceValidation = [
   mustBeString('remark', '备注'),
   body('remark').optional().trim().isLength({ max: 500 }).withMessage('备注不能超过 500 个字符'),
   // L3：补齐 create 有而 update 缺的校验，checkCycle 约束 1-365 防负数破坏提醒计算
-  // status 已从可更新字段中移除（P2-16）：直写 status 会绕过生命周期状态机，
+  // status 已从可更新字段中移除：直写 status 会绕过生命周期状态机，
   // 产生「status=scrapped 但 lifecycleStage=in_use」的矛盾状态。
   // 保留校验器是为了让「传了但值非法」仍返回 400；Service 层对合法值也会显式拒绝，
   // 引导调用方改用状态变更 / 报废接口。

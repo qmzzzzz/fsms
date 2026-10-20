@@ -25,6 +25,8 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { waitFor } = require('../helpers/waitFor');
+const { isDeepStrictEqual } = require('util');
 
 describe('克隆内置角色给他人：targetUser 必须落在操作者的数据范围内', () => {
   let app;
@@ -142,16 +144,26 @@ describe('克隆内置角色给他人：targetUser 必须落在操作者的数�
    * "拒绝必须没写库"的取证方式。客户端拿到 403 不代表服务端停了手：
    * 漏掉 `return null` 的实现会先发 403、再把克隆流程走完（目标 roles 被改写 +
    * 库里多出一个克隆角色），而**只读一次**读到的很可能是写完之前那一瞬 —— 变异自检
-   * 里正是这样让"发 403 但不拦"的实现漏网的。故在 600ms 内反复采样，任一样本偏离即红。
+   * 里正是这样让"发 403 但不拦"的实现漏网的。故在 600ms 内反复采样，
+   * 任一样本偏离即红；轮询定时器收在共享 waitFor 里，不是固定睡眠。
    */
-  const stayUnchanged = async (userId, beforeRoles, beforeRoleCount) => {
-    const deadline = Date.now() + 600;
-    for (;;) {
-      expect(await rolesOf(userId)).toEqual(beforeRoles);
-      expect(await Role.countDocuments({})).toBe(beforeRoleCount);
-      if (Date.now() >= deadline) return;
-      await new Promise((resolve) => setTimeout(resolve, 60));
-    }
+  const expectUnchanged = async (userId, beforeRoles, beforeRoleCount) => {
+    let deviation = null;
+    await waitFor(
+      async () => {
+        const roles = await rolesOf(userId);
+        const count = await Role.countDocuments({});
+        if (count !== beforeRoleCount || !isDeepStrictEqual(roles, beforeRoles)) {
+          deviation = { roles, count };
+          return true;
+        }
+        return false;
+      },
+      { timeoutMs: 600, intervalMs: 60, label: '克隆越权写入（出现即失败）' }
+    ).catch(() => {});
+    expect(deviation).toBeNull();
+    expect(await rolesOf(userId)).toEqual(beforeRoles);
+    expect(await Role.countDocuments({})).toBe(beforeRoleCount);
   };
 
   test('跨部门目标用户：403 且其 roles 一字未改（缺陷现场：此前 200 + 已被换成克隆角色）', async () => {
@@ -166,7 +178,7 @@ describe('克隆内置角色给他人：targetUser 必须落在操作者的数�
 
     expect(res.status).toBe(403);
     expect(res.body.errors.errorCode).toBe('USER_SCOPE_FORBIDDEN');
-    await stayUnchanged(hqTargetId, before, roleCount);
+    await expectUnchanged(hqTargetId, before, roleCount);
   });
 
   test('同部门目标用户：合法克隆照常成功（闸不能顺手把正路也关掉）', async () => {
@@ -262,7 +274,7 @@ describe('克隆内置角色给他人：targetUser 必须落在操作者的数�
 
     expect(res.status).toBe(403);
     expect(res.body.errors.errorCode).toBe('USER_SCOPE_FORBIDDEN');
-    await stayUnchanged(String(stranger._id), before, roleCount);
+    await expectUnchanged(String(stranger._id), before, roleCount);
   });
 
   // 变异自检的反查产物：把克隆分支里那道「目标用户同级/上级」层级闸整块摘除，
@@ -283,6 +295,6 @@ describe('克隆内置角色给他人：targetUser 必须落在操作者的数�
 
     expect(res.status).toBe(403);
     expect(res.body.errors.errorCode).toBe('USER_ROLE_PERM_PEER_OR_HIGHER_FORBIDDEN');
-    await stayUnchanged(String(peer._id), before, roleCount);
+    await expectUnchanged(String(peer._id), before, roleCount);
   });
 });

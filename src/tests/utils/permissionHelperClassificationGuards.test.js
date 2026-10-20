@@ -87,7 +87,7 @@ describe('permissionHelper 分支补齐', () => {
       module: 'phother',
       status: 'active',
     });
-    // 只挂在「已停用角色」上的权限：用于 P3-8 口径的一致性断言。
+    // 只挂在「已停用角色」上的权限：用于口径的一致性断言。
     // 故意单独占一个模块 phoff——getMenuTree 的菜单可见性是**模块级**的
     // （:159 moduleHasPerm），若放在 phgap 会把这条权限泄漏进上面
     // 「按模块聚合」用例的 children 断言里（实测过，红在该用例身上，
@@ -116,7 +116,7 @@ describe('permissionHelper 分支补齐', () => {
       permissions: [permModuleWildcard._id],
     });
     // 管理员停用后的角色：三处判定（getUserRoles / hasRole / getUserPermissions）
-    // 必须把它当作「不存在」。P3-8 修了后两处，getUserRoles 是当时漏掉的第三处。
+    // 必须把它当作「不存在」。修了后两处，getUserRoles 是当时漏掉的第三处。
     const roleOff = await Role.create({
       name: 'PHGap 已停用角色',
       code: `PHGAP_ROLE_OFF_${stamp}`,
@@ -312,7 +312,7 @@ describe('permissionHelper 分支补齐', () => {
       }
     });
 
-    test('getUserRoles：停用角色不返回，与 hasRole/getUserPermissions 同口径（P3-8 第三处）', async () => {
+    test('getUserRoles：停用角色不返回，与 hasRole/getUserPermissions 同口径（第三处）', async () => {
       // 前提先钉住：库里这个用户确实挂着 2 个角色、其中 1 个是 inactive。
       // 没有这条，"match 写错导致全被过滤"也会让下面的断言变绿（假绿）。
       const raw = await User.findById(users.mixed._id).select('roles').lean();

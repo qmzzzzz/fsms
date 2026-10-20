@@ -1,7 +1,7 @@
 /**
  * WebSocket 周期清扫（R-2：会话期授权复查 + 踢出）测试
  *
- * 背景：P2-14 只封住「入房」面（受限房间 join-room 时 revalidateSocket）。
+ * 背景：只封住「入房」面（受限房间 join-room 时 revalidateSocket）。
  * 已驻留在 role-management 房间的长连接，会话中被降级/停权/强制下线后
  * 不会被主动移出——runCleanupSweep 周期重查 status/tokenVersion 命中即断开。
  *

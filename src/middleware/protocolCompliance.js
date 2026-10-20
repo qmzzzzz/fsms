@@ -27,7 +27,7 @@ const { auditPath } = require('../utils/auditMeta');
 // 在做 stripControlChars(x,512)，这里漏了——同一类写入两种口径。
 const { stripControlChars, redactUrlQuery } = require('../utils/helpers');
 const { isProbeRequest } = require('../constants/probePaths');
-// T-1：顶层引入——下方 setImmediate 回调属 fire-and-forget，可能在测试环境
+// 顶层引入——下方 setImmediate 回调属 fire-and-forget，可能在测试环境
 // 销毁后才执行，届时惰性 require 会抛「import after torn down」
 const AuditLog = require('../models/AuditLog');
 const { computeFingerprint } = require('../utils/fingerprint');
@@ -296,7 +296,7 @@ const protocolCompliance = (options = {}) => {
     const fullPath = auditPath(req);
 
     // 探针豁免（与两处限流器读同一份 constants/probePaths 判据，不在这里抄第二份）：
-    // P3-35：原默认值含 '/api/health'——本服务的健康检查挂在根路径 '/health'
+    // 原默认值含 '/api/health'——本服务的健康检查挂在根路径 '/health'
     // （见 app.js 的 app.get('/health')），'/api/health' 从不存在，是死配置。
     // 死配置的危害不只是冗余：它让人误以为「健康检查已全部豁免」，
     // 若日后新增 /api/health 而忘记回看这里，会得到一个意外豁免的端点

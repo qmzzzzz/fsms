@@ -10,6 +10,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { accessToken } = require('../helpers/authResponse');
 
 jest.mock('svg-captcha', () => ({
   create: jest.fn(() => ({ data: '<svg>mock</svg>', text: 'ABCD' })),
@@ -103,7 +104,7 @@ describe('认证生命周期（批次 B）', () => {
   const enrollAndEnable = async (username, password) => {
     const loginRes = await login(username, password);
     expect(loginRes.status).toBe(200);
-    const token = loginRes.body.data.token;
+    const token = accessToken(loginRes);
 
     const enroll = await request(app)
       .post('/api/auth/mfa/enroll')
@@ -249,7 +250,7 @@ describe('认证生命周期（批次 B）', () => {
     const { username, id } = await newMfaUser('mfa');
     void id;
     const loginRes = await login(username, PASSWORD);
-    const token = loginRes.body.data.token;
+    const token = accessToken(loginRes);
 
     const enroll1 = await request(app)
       .post('/api/auth/mfa/enroll')
@@ -296,7 +297,7 @@ describe('认证生命周期（批次 B）', () => {
     const code = hotp(base32Decode(secret), Math.floor(Date.now() / 1000 / 30) + 1);
     const withTotp = await login(username, PASSWORD).send({ mfaCode: code });
     expect(withTotp.status).toBe(200);
-    expect(withTotp.body.data.token).toBeTruthy();
+    expect(accessToken(withTotp)).toBeTruthy();
 
     // 同码重放（mfaLastCounter 已推进）→ 拒
     const replay = await login(username, PASSWORD).send({ mfaCode: code });
@@ -359,7 +360,7 @@ describe('认证生命周期（批次 B）', () => {
 
     const logout = await request(app)
       .post('/api/auth/logout')
-      .set('Authorization', `Bearer ${loginRes.body.data.token}`)
+      .set('Authorization', `Bearer ${accessToken(loginRes)}`)
       .set('Cookie', cookies)
       .send({});
     expect(logout.status).toBe(200);

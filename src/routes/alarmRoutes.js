@@ -11,7 +11,7 @@ const { mustBeString, coordinatesRules } = require('../utils/validationRules');
 const { consumeValidation } = require('../middleware/validateQuery');
 const { ALARM_LEVELS, ALARM_TYPES, ALARM_STATUSES, ALARM_CAUSES } = require('../constants/alarm');
 
-// P3-17：列表 query 枚举校验。原先 status/level/alarmType 零校验直入
+// 列表 query 枚举校验。原先 status/level/alarmType 零校验直入
 // Service 的查询条件：拼错的值不会报错，只会静默返回空集——
 // 调用方无法区分「筛选条件写错」与「确实没有数据」。
 // values:'falsy'：前端未选筛选时空串（status=）语义为「不筛选」，不应 400

@@ -291,7 +291,7 @@ describe('报废原因：空串是"提交了但没填"，不是"正常报废"', 
     }
   });
 
-  /** 每次报废都要一台独立设备：scrapped → scrapped 是非法迁移（P2-16） */
+  /** 每次报废都要一台独立设备：scrapped → scrapped 是非法迁移 */
   const createDevice = async (tag) => {
     const createRes = await authed()
       .post('/api/devices')

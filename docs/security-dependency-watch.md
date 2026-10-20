@@ -55,8 +55,15 @@
 
 ### 缺口：dev 树 advisory 对 CI 完全不可见
 
-CI 的 `security-audit` 作业两处审计都是 `npm audit --omit=dev`（后端与 web-admin 各一处），
-因此 **devDependencies 里的 advisory 永远不会让构建失败**。2026-10-09 实测：
+CI 的 `security-audit` 作业在 2026-10-09 登记时两处审计都只有 `npm audit --omit=dev`
+（后端与 web-admin 各一处），因此 **devDependencies 里的 advisory 永远不会让构建失败**。
+该缺口已在同日按下节「已采取的动作」处置；当前口径是 **prod 硬门禁 + dev 允许清单**：
+
+- prod 树：后端与 web-admin 各跑 `npm audit --omit=dev --audit-level=moderate`，有漏洞即失败；
+- dev 树：后端跑 `npm audit --json`，交 `scripts/check-audit-allowlist.js` 对照
+  `deployment/audit-allowlist.json`——未登记、登记已过期、或登记项已无对应公告，均失败。
+
+下列 35 条为登记时的实测值，保留以说明允许清单的覆盖范围：
 
 | 范围                   | 结果                              |
 | ---------------------- | --------------------------------- |
@@ -113,6 +120,22 @@ CI 的 `security-audit` 作业两处审计都是 `npm audit --omit=dev`（后端
   二者齐做实测得 **0 high**。
   ⚠️ 升 jest 30 不是免费午餐：实测 moderate 由 5 条升到 19 条（jest 自身的包被上表第二条链传染），
   且 `jest 30` 的 `@jest/transform` 仍依赖 `babel-plugin-istanbul@^8`，**清不掉** js-yaml@3 那条链。
+
+### CI 开发机隔离（S-9，2026-10-20）
+
+35 条全部位于 **devDependencies**，可达性只存在于开发/CI 工具链；生产运行时树
+（Dockerfile 的 `npm ci --omit=dev --ignore-scripts`）不含它们。为了让「不可达」
+不只是一句口头保证，执行面再钉两条：
+
+- CI 作业跑在 GitHub 托管的一次性 `ubuntu-latest`（`ci.yml` 各 job 的 `runs-on`），
+  **不在生产机或部署 runner 上执行含 dev 的 `npm ci`**。被污染的 dev 树最多影响
+  一次一次性 runner 的生命周期，随 job 结束销毁。
+- 若将来把测试迁到自托管 runner：必须与 `deploy` 标签的部署 runner **分开注册**，
+  且测试 runner 每轮从干净快照启动；否则 braces 这类 DoS 一旦被利用，受影响的
+  是持有生产凭据的宿主。
+
+复核节奏不变：`reviewBy 2027-01-31` 到期即红；上游发布补丁版本即删行/升级，
+由 `check-audit-allowlist.js` 的「登记项已无对应公告」判据强制。
 
 ## 供应链完整性锚（lockfile semantic 哈希）
 

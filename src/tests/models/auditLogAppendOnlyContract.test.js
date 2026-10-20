@@ -15,7 +15,7 @@
  */
 
 /**
- * append-only 护栏加固回归（P1-32）
+ * append-only 护栏加固回归
  *
  * 审计报告 §3.6 的两条反面结论：
  *   1. `models/AuditLog.js` **无条件导出** `_setAppendOnlyEnforced`——任何拿到模型
@@ -39,7 +39,7 @@
 
 const mongoose = require('mongoose');
 
-describe('AuditLog append-only 护栏加固（P1-32）', () => {
+describe('AuditLog append-only 护栏加固', () => {
   let AuditLog;
   const stamp = `p1l32_${Date.now().toString(36)}`;
   const withNodeEnv = async (value, fn) => {

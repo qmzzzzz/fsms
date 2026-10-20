@@ -1,5 +1,5 @@
 /**
- * WebSocket 认证范围校验（P0-2 修复锁定）
+ * WebSocket 认证范围校验（修复锁定）
  *
  * 审计实证的绕过：同一个 JWT 在 HTTP 侧被拒（allowedIPs 不匹配 → 403
  * AUTH_IP_RANGE_DENIED；设备会话已吊销 → DEVICE_SESSION_REVOKED），
@@ -16,7 +16,7 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const express = require('express');
 
-describe('WebSocket 认证范围校验（P0-2）', () => {
+describe('WebSocket 认证范围校验', () => {
   let WebSocketService;
   let User;
   let Role;

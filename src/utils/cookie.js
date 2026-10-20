@@ -4,10 +4,10 @@
  * 契约（I-01）：
  * - access_token ：值=accessToken ，path=/api       ，maxAge 与 JWT_EXPIRE 一致
  * - refresh_token：值=refreshToken，path=/api/auth  ，maxAge 与 JWT_REFRESH_EXPIRE 一致
- * - 属性：httpOnly: true、sameSite: 'strict'（P3-36 严格化，原 lax）
+ * - 属性：httpOnly: true、sameSite: 'strict'（严格化，原 lax）
  * - secure：生产环境（NODE_ENV=production）或 COOKIE_SECURE=true 时开启
  *
- * P3-36：本注释此前把 access cookie 的时长写死为 24 小时，而 config/index.js
+ * 本注释此前把 access cookie 的时长写死为 24 小时，而 config/index.js
  * 的 JWT_EXPIRE 默认值是 '2h'。注释里的具体时长必然随配置漂移，
  * 故只声明「与配置一致」这一不变量，实际取值以
  * config.jwt.expire / config.jwt.refreshExpire 为唯一事实来源。

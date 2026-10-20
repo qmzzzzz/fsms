@@ -10,7 +10,7 @@
  *   1. 停应用（或停止 MFA enroll/登录写入），避免迁移期间新数据用旧钥写入
  *   2. node scripts/migrate-mfa-secret.js --new-key-file <新KEY文件>       # 演练
  *   3. ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js \
- *        --new-key-file <新KEY文件> --apply                                # 执行（M-08：无白名单直接拒绝）
+ *        --new-key-file <新KEY文件> --apply                                # 执行（无白名单直接拒绝）
  *   4. 更新密钥载体（.env 或 secrets/aes_secret_key）为新 KEY
  *   5. 启动应用；旧 KEY 建议密封留档至确认无回滚需要后再销毁
  *
@@ -37,7 +37,7 @@ const mongoose = require('mongoose');
 const { AESCipher } = require('../src/utils/encryption');
 const { ENC_PREFIX } = require('../src/utils/mfaSecret');
 
-// M-08：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
+// 破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
 const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
 
 // 密钥来源的统一判据（--*-file 或环境变量；错误信息只点名路径，不回显内容）
@@ -225,7 +225,7 @@ const runCli = async () => {
     scriptName: 'migrate-mfa-secret.js',
   });
 
-  // M-08：fail-closed——--apply 类操作必须显式声明 ALLOWED_SOURCE_DB。
+  // fail-closed——--apply 类操作必须显式声明 ALLOWED_SOURCE_DB。
   // 原先只需单个 --apply 即可批量改写 users.mfaSecret（两因素凭据密文），
   // 且默认回退本地库。
   //

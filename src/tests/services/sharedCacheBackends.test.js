@@ -13,6 +13,20 @@
 describe('sharedCache 内存回退路径', () => {
   const cache = require('../../services/sharedCache');
 
+  /**
+   * 内存缓存的 TTL 记账用的是 Date.now()（memoryStore/index 均如此）。
+   * 用临时推进 Date.now 代替真实睡眠：只跨过 TTL 边界，不付固定时长。
+   */
+  const withClockAdvanced = async (advanceMs, fn) => {
+    const shiftedNow = Date.now() + advanceMs;
+    const spy = jest.spyOn(Date, 'now').mockReturnValue(shiftedNow);
+    try {
+      return await fn();
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
   beforeEach(() => {
     cache._resetForTests();
   });
@@ -42,8 +56,8 @@ describe('sharedCache 内存回退路径', () => {
     await expect(cache.del('k1')).resolves.toBe(false);
 
     await cache.set('k-expired', 'x', 5);
-    await new Promise((r) => setTimeout(r, 20));
-    await expect(cache.get('k-expired')).resolves.toBeNull();
+    const expired = await withClockAdvanced(10, () => cache.get('k-expired'));
+    expect(expired).toBeNull();
   });
 
   test('set 不带 TTL：永久有效（Infinity 过期点）', async () => {
@@ -57,8 +71,8 @@ describe('sharedCache 内存回退路径', () => {
 
     await cache.set('cnt-exp', 0, 5); // 占位一个即刻过期的键
     await cache.incrWithTtl('cnt-exp', 5);
-    await new Promise((r) => setTimeout(r, 20));
-    await expect(cache.incrWithTtl('cnt-exp', 5)).resolves.toBe(1); // 过期重计
+    const recount = await withClockAdvanced(10, () => cache.incrWithTtl('cnt-exp', 5));
+    expect(recount).toBe(1); // 过期重计
 
     await expect(cache.incrWithTtl('cnt-nottl')).resolves.toBe(1);
   });
@@ -68,8 +82,8 @@ describe('sharedCache 内存回退路径', () => {
     await expect(cache.setIfAbsent('nonce', 'v2', 60000)).resolves.toBe(false);
 
     await cache.setIfAbsent('nonce-exp', 'v', 5);
-    await new Promise((r) => setTimeout(r, 20));
-    await expect(cache.setIfAbsent('nonce-exp', 'v2', 5)).resolves.toBe(true);
+    const reacquired = await withClockAdvanced(10, () => cache.setIfAbsent('nonce-exp', 'v2', 5));
+    expect(reacquired).toBe(true);
   });
 
   test('无 Redis 的锁语义：acquireLock 返回哑句柄；阻塞锁与 casSet 直接拒绝', async () => {
@@ -151,9 +165,11 @@ describe('sharedCache 内存回退路径', () => {
       cache._resetForTests();
       for (let i = 0; i < 600; i++) await cache.set(`live-${i}`, i, 600000);
       for (let i = 0; i < 400; i++) await cache.set(`exp-${i}`, i, 1);
-      await new Promise((r) => setTimeout(r, 20)); // 400 条全部过期
-      await cache.set('filler', 'f', 600000); // size 1001（尚未触发 enforcement）
-      await cache.set('trigger', 't', 600000); // 此刻 enforcement 运行
+      // 把时钟推过 1ms TTL 边界（代替固定睡眠），400 条全部过期
+      await withClockAdvanced(10, async () => {
+        await cache.set('filler', 'f', 600000); // size 1001（尚未触发 enforcement）
+        await cache.set('trigger', 't', 600000); // 此刻 enforcement 运行
+      });
 
       await expect(cache.get('live-0')).resolves.toBe(0); // 最旧的健在项必须活着
       await expect(cache.get('live-599')).resolves.toBe(599);
@@ -170,8 +186,8 @@ describe('sharedCache 内存回退路径', () => {
     test('getDel：过期条目返回 null，且条目已被删除（不留垃圾）', async () => {
       cache._resetForTests();
       await cache.set('gd-exp', 'v', 1);
-      await new Promise((r) => setTimeout(r, 20));
-      await expect(cache.getDel('gd-exp')).resolves.toBeNull();
+      const expired = await withClockAdvanced(10, () => cache.getDel('gd-exp'));
+      expect(expired).toBeNull();
       // 已被删除：del 返回 false（若实现改成「先判过期再决定删」会留下垃圾）
       await expect(cache.del('gd-exp')).resolves.toBe(false);
     });

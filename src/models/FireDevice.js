@@ -6,7 +6,7 @@
 
 const mongoose = require('mongoose');
 const autoIncrement = require('../plugins/autoIncrement');
-// E-05 整改：设备类型与编号前缀此前在本文件各维护一份（与 utils/constants.js
+// 整改：设备类型与编号前缀此前在本文件各维护一份（与 utils/constants.js
 // 的同名声明三处并存）。现统一引用 constants 的单一事实来源，避免新增设备
 // 类型时漏改其中一处导致「校验通过但编号前缀取默认 OT」。
 const { DEVICE_TYPE, DEVICE_TYPE_PREFIX } = require('../utils/constants');
@@ -32,7 +32,7 @@ const fireDeviceSchema = new mongoose.Schema(
     },
     deviceType: {
       type: String,
-      // E-05：枚举值引用 utils/constants.js 的 DEVICE_TYPE（单一事实来源）。
+      // 枚举值引用 utils/constants.js 的 DEVICE_TYPE（单一事实来源）。
       enum: DEVICE_TYPE_VALUES,
       required: [true, '设备类型不能为空'],
     },

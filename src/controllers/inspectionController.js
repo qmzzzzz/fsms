@@ -18,7 +18,7 @@ const inspectionService = require('../services/InspectionService');
  * 校验巡检记录是否在当前用户数据范围内
  *
  * 字段名取自 DATA_SCOPE_FIELDS.inspection，不在这里写字面量：
- * 列表/统计/报表与单条判定必须共用同一份声明（P2-20 的原始教训）。
+ * 列表/统计/报表与单条判定必须共用同一份声明（原始教训）。
  */
 const isInspectionInScope = async (req, inspection) => {
   const { allowed } = await assertRecordInScope(
@@ -34,7 +34,7 @@ const isInspectionInScope = async (req, inspection) => {
  * 获取巡检列表
  * GET /api/inspections
  *
- * E-2：支持游标分页。传 cursor 时走 keyset seek（不带 total，
+ * 支持游标分页。传 cursor 时走 keyset seek（不带 total，
  * 响应携带 hasMore/nextCursor）；不传保持原 page/limit 语义。
  */
 const getInspections = asyncHandler(async (req, res) => {

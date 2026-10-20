@@ -165,11 +165,17 @@ router.beforeEach(async (to, from, next) => {
   const authStore = useAuthStore()
   let authenticated = authStore.isAuthenticated
 
+  // P-2：公开路由（登录/注册）在本地无身份时**不再**探测 /auth/me。
+  // 匿名用户访问 /login 是最高频入口，此前每开一个新标签页都先吃一发 401/网络往返，
+  // 只为处理「cookie 仍有效但 localStorage 被清」这一种少数场景；而该场景在进入任何
+  // 受保护页时仍会走下面的恢复逻辑，不会把会话丢掉。
+  const isPublicRoute = to.meta.requiresAuth === false
+
   // 会话恢复：本地无身份状态但浏览器可能仍持有有效 cookie（新标签页首次进入、
   // 复制 URL 直达子路径、localStorage 被清等）。此时先用 /auth/me 探测一次，
   // 探测成功即复用同一会话，避免把已登录用户误踢到登录页。
-  // 仅在「本地无身份」时探测，已登录路径零额外请求。
-  if (!authenticated) {
+  // 仅在「本地无身份且目标不是公开路由」时探测，已登录路径零额外请求。
+  if (!authenticated && !isPublicRoute) {
     authenticated = await authStore.restoreSession()
   }
 

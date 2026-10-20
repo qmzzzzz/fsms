@@ -1,5 +1,5 @@
 /**
- * 基于文件的密钥注入（P3-48）
+ * 基于文件的密钥注入
  *
  * 问题：docker-compose 此前把 JWT_SECRET / AES_SECRET_KEY / MONGODB_URI（内含
  * 数据库口令）等全部经 `environment:` 传入。容器环境变量并非机密载体：

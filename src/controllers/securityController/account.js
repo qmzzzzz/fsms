@@ -132,8 +132,8 @@ const changePasswordSecure = asyncHandler(async (req, res) => {
       // fail-closed：未知 outcome 绝不落到成功分支。
       // 原为 `default: break;` —— 业务层一旦新增 outcome 而此处忘了映射，会**静默按成功处理**
       // 并写入 password_changed 审计，把「映射表漏项」变成一条假的成功留痕。
-      // 取证：`deliverables/AGENT工作总账与待办-2026-09-21.md` §2.3 审计链与合规留痕（zzqA_changePasswordOutcomeMap 的「未知 outcome」用例
-      // 此前只是被一次无关的 ValidationError 顶成绿，源码里并没有守这条不变量）。
+      // 实证：zzqA_changePasswordOutcomeMap 的「未知 outcome」用例此前只是被一次
+      // 无关的 ValidationError 顶成绿，源码里并没有守这条不变量。
       logger.error('改密返回未知 outcome，已按失败处理', { outcome: result.outcome });
       return ApiResponse.codeError(res, 'INTERNAL_ERROR');
   }

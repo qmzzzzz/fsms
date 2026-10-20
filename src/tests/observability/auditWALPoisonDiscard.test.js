@@ -1,5 +1,5 @@
 /**
- * P1-24 回归：毒文档批丢弃后必须留下标记，重启重放不得重复处理同一批
+ * 回归：毒文档批丢弃后必须留下标记，重启重放不得重复处理同一批
  *
  * 缺陷：`auditBuffer.flush()` 在连续失败达 MAX_BATCH_RETRY 后丢弃本批（内存副本
  * 清空、droppedCount 计数），但**WAL 里的对应行原样保留**。重启时 `start()`
@@ -40,16 +40,7 @@ const auditBuffer = require('../../services/auditBuffer');
 const wal = require('../../services/auditBufferWal');
 const AuditLog = require('../../models/AuditLog');
 const { contentLevelWriteError } = require('../helpers/contentLevelWriteError');
-
-/** 轮询等待真实完成条件（替代固定 sleep） */
-async function waitFor(cond, timeoutMs = 8000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await cond()) return true;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  return false;
-}
+const { waitFor } = require('../helpers/waitFor');
 
 function makeDoc(seq) {
   return {
@@ -62,7 +53,7 @@ function makeDoc(seq) {
   };
 }
 
-describe('P1-24 毒批丢弃的 WAL 标记与重启重放', () => {
+describe('毒批丢弃的 WAL 标记与重启重放', () => {
   let tickFn = null;
   let siSpy = null;
 
@@ -149,8 +140,9 @@ describe('P1-24 毒批丢弃的 WAL 标记与重启重放', () => {
     // 毒批处理是两步：① 追加归档 ② 原子改写主 WAL 移除该行。
     // 「看到归档」不等于「主 WAL 已改写」（②排在同一条 walChain 上），
     // 因此这里必须等链排空，后续对主 WAL 的断言才是确定性的。
-    const archived = await waitFor(() => readDiscarded().includes('poison_poisoned'));
-    expect(archived).toBe(true);
+    await waitFor(() => readDiscarded().includes('poison_poisoned'), {
+      label: '毒批行归档到 .discarded',
+    });
     await wal.drain();
   }
 
@@ -179,8 +171,9 @@ describe('P1-24 毒批丢弃的 WAL 标记与重启重放', () => {
     auditBuffer.__resetForTest();
     mockTimer();
     auditBuffer.start();
-    // 给重放链一点时间结算（重放为空时不会推入任何文档）
-    await new Promise((r) => setTimeout(r, 200));
+    // 真实完成信号：重放（以及可能的归档跳过）都排在 walChain 上；排空即重放结束。
+    // 重放为空时不会推入任何文档——这是负向断言，故不轮询计数、只等链尾。
+    await wal.drain();
 
     // 关键断言：重启后缓冲仍为空——毒批没有被重新读回来
     expect(auditBuffer.getStats().bufferLength).toBe(0);
@@ -209,7 +202,7 @@ describe('P1-24 毒批丢弃的 WAL 标记与重启重放', () => {
     auditBuffer.__resetForTest();
     mockTimer();
     auditBuffer.start();
-    await new Promise((r) => setTimeout(r, 200));
+    await wal.drain(); // 重放链排空 = 已按归档序号跳过，负向断言不必等固定时长
 
     // 重放必须跳过该行：缓冲保持为空（若跳过逻辑失效，这里会是 1）
     expect(auditBuffer.getStats().bufferLength).toBe(0);
@@ -231,11 +224,13 @@ describe('P1-24 毒批丢弃的 WAL 标记与重启重放', () => {
     // 再推正常行：走真实 insertMany，应正常落库，且其 WAL 行按常规裁剪而非进归档
     auditBuffer.push(makeDoc('healthy'));
     tickFn();
-    const landed = await waitFor(async () => {
-      const n = await AuditLog.countDocuments({ username: 'poison_healthy' });
-      return n === 1;
-    });
-    expect(landed).toBe(true);
+    await waitFor(
+      async () => {
+        const n = await AuditLog.countDocuments({ username: 'poison_healthy' });
+        return n === 1;
+      },
+      { label: '正常批次落库' }
+    );
     expect(readDiscarded()).not.toContain('poison_healthy');
     expect(await AuditLog.countDocuments({ username: 'poison_poisoned' })).toBe(0);
   });

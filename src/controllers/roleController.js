@@ -12,7 +12,7 @@ const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { escapeRegExp, normalizePagination, uniqueIdStrings } = require('../utils/helpers');
 const roleService = require('../services/roleService');
-// P1-14：角色定义变更（status / permissions / 删除）会改变其持有者的权限解析
+// 角色定义变更（status / permissions / 删除）会改变其持有者的权限解析
 // 结果，而 userPermissionService 的进程内 TTL 缓存保存的正是解析结果。
 // 不失效则被停用角色的持有者最长仍按旧权限授权 30 秒（真实越权窗口）。
 const { invalidatePermissionCache } = require('../services/userPermissionService');
@@ -163,7 +163,7 @@ const createRole = asyncHandler(async (req, res) => {
     permissions: uniquePermIds,
   });
   const createdRole = await roleService.findPopulatedRole(role._id);
-  // P1-14：新建角色尚无持有者，逻辑上不影响任何已缓存用户；此处仍统一失效，
+  // 新建角色尚无持有者，逻辑上不影响任何已缓存用户；此处仍统一失效，
   // 理由见文件头——「角色写操作必失效」是一条不需要逐次推理的规则，
   // 而多失效一次的成本仅为下一次请求重新查库
   invalidatePermissionCache();
@@ -219,7 +219,7 @@ const updateRole = asyncHandler(async (req, res) => {
   await roleService.saveRole(role);
   const updatedRole = await roleService.findPopulatedRole(role._id);
 
-  // P1-14：status 变更直接改变解析结果（持有者立即失去/恢复该角色权限）
+  // status 变更直接改变解析结果（持有者立即失去/恢复该角色权限）
   invalidatePermissionCache();
 
   // 权限解析缓存失效之外，还须失效 auth.js 的用户缓存：req.user.roleCodes
@@ -236,7 +236,7 @@ const updateRole = asyncHandler(async (req, res) => {
 
   // #9：另两个写路径（createRole / deleteRole）都发了广播，唯独 updateRole 只失效
   // 进程内缓存——于是「改角色名/层级/停用」这一路前端拿不到实时刷新，RoleView 要等
-  // 下一次自然重拉。缓存失效口径（P1-14 那两步）本身没漏，此处只补缺失的那半块，
+  // 下一次自然重拉。缓存失效口径（那两步）本身没漏，此处只补缺失的那半块，
   // 属可用性/一致性，不碰越权面。事件名与 websocketService.emitRoleUpdate 的出站名
   // 一致（复数 updated），前端 RoleView.vue:392 监听同一个。
   emitWebSocketEvent(req, 'role-updated', {
@@ -283,7 +283,7 @@ const deleteRole = asyncHandler(async (req, res) => {
 
   await roleService.deleteRole(role._id);
 
-  // P1-14：删除前已校验无用户持有该角色（ROLE_IN_USE 拦截），
+  // 删除前已校验无用户持有该角色（ROLE_IN_USE 拦截），
   // 此处为防御性调用，理由同 createRole
   invalidatePermissionCache();
   logger.info(`角色已删除：${role.name}`);

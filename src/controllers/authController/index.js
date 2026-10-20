@@ -1,7 +1,7 @@
 /**
- * 认证控制器门面（2026-10-19 自单文件 `controllers/authController.js` 拆分）
+ * 认证控制器门面
  *
- * 对外导出面与拆分前**逐字一致**（14 个名字，见文件底部 module.exports），
+ * 对外导出面固定为 14 个名字（见文件底部 module.exports），
  * 路由与测试仍从 '../controllers/authController' 取用，不需要跟着改 require 路径。
  *
  * 实现按主题拆到同目录的子模块：

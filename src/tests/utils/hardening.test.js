@@ -241,7 +241,7 @@ describe('F-A6 getDataScope 停用角色不授予数据范围 + roles 数组含 
   });
 });
 
-describe('F-A7 Inspection.description/priority 不再被 strict 模式静默丢弃（P3-14 兑现）', () => {
+describe('F-A7 Inspection.description/priority 不再被 strict 模式静默丢弃（兑现）', () => {
   const Inspection = require('../../models/Inspection');
 
   test('路由/服务放行的 description/priority 真正进入文档', () => {

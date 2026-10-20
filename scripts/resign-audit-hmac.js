@@ -45,7 +45,7 @@ require('../src/config/secrets').hydrateSecretsFromFiles();
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 
-// M-08：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
+// 破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
 const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
 
 const BATCH_SIZE = 1000;
@@ -230,7 +230,7 @@ if (require.main === module) {
       scriptName: 'resign-audit-hmac.js',
     });
 
-    // M-08 / L-26：fail-closed 白名单 + 双标志，与同族脚本口径一致。
+    // fail-closed 白名单 + 双标志，与同族脚本口径一致。
     // 原先只需单个 --apply 即可批量改写 auditlogs.hmac（等于重写审计完整性
     // 证据），且默认回退本地库，误在生产 shell 执行时不会因库名不符而中止。
     //

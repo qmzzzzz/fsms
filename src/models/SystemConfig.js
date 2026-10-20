@@ -30,13 +30,6 @@ const systemConfigSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
-    // 预留位：当前**没有任何执行点读取它**（全仓 grep 无消费方），
-    // set() 也不会因此拒绝写入。要真正变成一道闸，需要连同
-    // securityController 的写回路径一起设计，别把它当成已生效的保护。
-    modifiable: {
-      type: Boolean,
-      default: true,
-    },
     // 最后修改者
     updatedBy: {
       type: mongoose.Schema.Types.ObjectId,
@@ -84,7 +77,7 @@ const toConfigBoolean = (value, fallback = false) => {
 
 // 静态方法：获取配置值（带 30 秒进程内缓存）
 //
-// P3-22 负缓存：key 不存在时同样进缓存。原实现只在 `doc` 存在时写缓存，
+// 负缓存：key 不存在时同样进缓存。原实现只在 `doc` 存在时写缓存，
 // 于是「查询一个未初始化的配置项」每次都打库——而这恰好是最高频的路径：
 // isRegistrationAllowed / isLoginCaptchaEnabled 在配置未落库时（全新部署、
 // 或配置被手工删除）会在每个登录请求上产生一次 findOne。

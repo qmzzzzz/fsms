@@ -160,7 +160,7 @@ describe('认证剩余分支（批次 B2）', () => {
   test('refresh 轮换成功 + 旧令牌重放检测触发 401', async () => {
     const loginRes = await login(superUsername, PASSWORD);
     expect(loginRes.status).toBe(200);
-    // 调试输出已移除（P1-30 关联清理）：原实现 console.error 打印完整 Set-Cookie
+    // 调试输出已移除（关联清理）：原实现 console.error 打印完整 Set-Cookie
     // 与 refresh 令牌片段，会把可复用的凭据写进 CI 日志。
     const oldRefresh = refreshOf(loginRes);
     expect(oldRefresh).toBeTruthy();

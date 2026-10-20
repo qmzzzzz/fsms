@@ -1,7 +1,7 @@
 /**
  * 业务数据保留期声明（A2，2026-10-16）
  *
- * 缺口（deliverables/安全需求加固清单-2026-10-16.md A2）：需求「数据保护 → 全生命周期」
+ * 缺口：需求「数据保护 → 全生命周期」
  * 六段里，**销毁段完全空白**——
  *   - 有保留期的：AuditLog / IPBlacklist / TokenBlacklist / UserSession（TTL 索引）；
  *   - 没有保留期的：User / FireDevice / FireAlarm / Inspection（`expireAfterSeconds` 零命中）。

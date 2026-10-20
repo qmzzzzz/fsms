@@ -25,6 +25,7 @@ const {
   checkBackupObjectives,
   buildPlan,
   isSameImageRef,
+  parseAppliedMigrations,
   decideRollback,
   parseArgs,
 } = require('../../../scripts/deployPolicy');
@@ -496,9 +497,96 @@ describe('F-159 同引用发布（:latest 这类可变标签）时的自动回�
     expect(call).not.toBeNull();
     expect(call[0]).toContain('previousImage');
     expect(call[0]).toContain('targetImage');
+    // O-2：迁移事实同样必须喂进决策（不传 ⇒ 迁移感知闸永不进入）
+    expect(call[0]).toContain('appliedMigrations');
     // 提前告警与决策必须共用同一判定；执行层不得再手写一份比较
     expect(code).toContain('isSameImageRef(');
     expect(code).not.toMatch(/previousImage\s*===/);
+  });
+});
+
+describe('O-2 迁移感知的回滚边界（自动回滚只在 schema 未变时触发）', () => {
+  const unhealthy = {
+    healthOk: false,
+    noRollback: false,
+    hasPreviousImage: true,
+    backupTaken: true,
+  };
+
+  test('parseAppliedMigrations：只认 MIGRATED UP 行，忽略容器日志与空输出', () => {
+    // migrate-mongo 14.x 每应用一个迁移打印一行；没有 --json 可依赖。
+    // 解析必须容忍 `docker compose run` 混入的其他 stdout（拉取/启动日志）。
+    const out = [
+      ' Container fsms-app-run-1  Created',
+      'MIGRATED UP: 20261017-a.js',
+      '  MIGRATED UP: 20261018-b.js  ',
+      'MIGRATED DOWN: not-an-up',
+      'some other line',
+    ].join('\r\n');
+    expect(parseAppliedMigrations(out)).toEqual(['20261017-a.js', '20261018-b.js']);
+    // 无迁移时没有任何输出 ⇒ 空数组（= schema 未变），不是 undefined/抛错
+    expect(parseAppliedMigrations('')).toEqual([]);
+    expect(parseAppliedMigrations(undefined)).toEqual([]);
+  });
+
+  test('本次应用了迁移 → 拒绝自动镜像回滚，理由说清危害并给人工路径', () => {
+    const d = decideRollback({ ...unhealthy, appliedMigrations: ['20261017-a.js'] });
+    expect(d.rollback).toBe(false);
+    expect(d.reason).toContain('1 个数据库迁移');
+    expect(d.reason).toContain('20261017-a.js');
+    // 危害要说透：旧代码 + 新 schema，而不是笼统的「有风险」
+    expect(d.reason).toContain('新库结构');
+    // 拒绝之外必须给动作：先确认兼容，再人工切；不兼容走备份恢复
+    expect(d.reason).toContain('expand/contract');
+    expect(d.reason).toContain('./backups');
+  });
+
+  test('迁移多于 3 个时只列前 3 个并以「等」收口（理由不能无限长）', () => {
+    const d = decideRollback({
+      ...unhealthy,
+      appliedMigrations: ['a.js', 'b.js', 'c.js', 'd.js'],
+    });
+    expect(d.reason).toContain('4 个数据库迁移');
+    expect(d.reason).toContain('a.js、b.js、c.js 等');
+    expect(d.reason).not.toContain('d.js');
+  });
+
+  test('无迁移（缺省 / 空数组）→ 自动回滚照常（正对照，不是无条件关门）', () => {
+    expect(decideRollback({ ...unhealthy }).rollback).toBe(true);
+    expect(decideRollback({ ...unhealthy, appliedMigrations: [] }).rollback).toBe(true);
+  });
+
+  test('迁移闸优先于「无备份」闸：即使有备份，schema 已变也不自动回滚', () => {
+    const d = decideRollback({
+      ...unhealthy,
+      backupTaken: true,
+      appliedMigrations: ['20261017-a.js'],
+    });
+    expect(d.rollback).toBe(false);
+    expect(d.reason).toContain('数据库迁移');
+    // 同时跳过备份时，解释仍以 schema 不兼容为主因（那才是即使有备份也不能自动回滚的原因）
+    const both = decideRollback({
+      ...unhealthy,
+      backupTaken: false,
+      appliedMigrations: ['20261017-a.js'],
+    });
+    expect(both.reason).toContain('数据库迁移');
+    expect(both.reason).not.toContain('跳过了备份');
+  });
+
+  test('写法门禁：deploy.js 必须解析 up 的实际输出并喂进决策', () => {
+    // 判据写对但执行层不看 migrate-mongo 的 stdout ⇒ appliedMigrations 永远为空，
+    // 迁移感知闸永不进入，测试全绿而生产照旧谎报「已回滚」。
+    const fs = require('fs');
+    const code = fs.readFileSync(
+      path.join(__dirname, '..', '..', '..', 'scripts', 'deploy.js'),
+      'utf8'
+    );
+    expect(code).toContain('parseAppliedMigrations(');
+    // 迁移清单只能来自 `up` 的实际结果：status 是执行前留痕，不能替代它。
+    // O-5 抽出命令构造器后，判据改为「up 子命令由构造器产出并被 runCapture 执行」。
+    expect(code).toMatch(/buildMigrateInvocation\('up'\)/);
+    expect(code).toMatch(/runCapture\(up\.file, up\.args\)/);
   });
 });
 

@@ -70,7 +70,7 @@ const recordAndContain = async ({ userId, username, ip, attributionKind, recentF
     }
   }
 
-  // P1-23 同口径（另两个检测器都已挂 try/catch，这里是漏网的第三处）：调用方
+  // 同口径（另两个检测器都已挂 try/catch，这里是漏网的第三处）：调用方
   // middleware/rbac.js 是 `void checkPermissionAbuse(...).catch(() => {})`，
   // 裸 await 一旦抛错（DB 瞬断/必填字段校验失败）整条 HIGH 告警会**无声消失**——
   // 既不进审计、也没有一行日志，运维与代码都无从知道权限滥用检测在掉链子。

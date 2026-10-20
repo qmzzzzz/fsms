@@ -57,7 +57,7 @@ describe('资料接口的空值分档：手机号可清空、邮箱不可清空'
       .set('Authorization', `Bearer ${tokens.get(id)}`)
       .send(body);
 
-  // P1-②：realName/phone 在库里是密文（getter 只在 mongoose 文档上生效，lean 拿到
+  // realName/phone 在库里是密文（getter 只在 mongoose 文档上生效，lean 拿到
   // 原始形态）——本用例断言的是"业务意义上的字段值"，故对密文先解密再比对；
   // 明文存量行透传，两种形态都归一到明文口径。v2 密文带 AAD 行绑定（finding：
   // 密文可跨行搬运的修复），解密必须喂回同一行的 _id 与字段名——与 User getter

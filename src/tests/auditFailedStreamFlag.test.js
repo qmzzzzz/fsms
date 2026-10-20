@@ -27,6 +27,7 @@ const request = require('supertest');
 const auditBuffer = require('../services/auditBuffer');
 const { auditLog } = require('../middleware/security');
 const errorHandler = require('../middleware/errorHandler');
+const { flushEventLoop } = require('./helpers/waitFor');
 
 describe('错误截断的响应在审计里必须是失败', () => {
   let pushSpy;
@@ -58,8 +59,8 @@ describe('错误截断的响应在审计里必须是失败', () => {
     return app;
   };
 
-  // doLog 在 setImmediate 里 push，断言前必须让出事件循环
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
+  // doLog 在 setImmediate 里 push，断言前必须让出事件循环（轮次，不承诺时长）
+  const settle = () => flushEventLoop(2);
   const pushed = () => {
     expect(pushSpy).toHaveBeenCalledTimes(1);
     return pushSpy.mock.calls[0][0];

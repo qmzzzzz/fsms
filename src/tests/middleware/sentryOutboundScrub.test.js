@@ -18,6 +18,7 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const Sentry = require('@sentry/node');
 const sentryModule = require('../../middleware/sentry');
+const { waitFor } = require('../helpers/waitFor');
 
 const { scrubOutboundEvent, SENTRY_REQUEST_INCLUDE, SENTRY_ALLOWED_REQUEST_FIELDS } = sentryModule;
 
@@ -116,11 +117,11 @@ const runArm = async ({ handlerFactory, beforeSend }) => {
     Sentry.captureException(new Error('boom-5xx'));
   });
 
-  const deadline = Date.now() + 4000;
-  while (frames.length === 0) {
-    if (Date.now() > deadline) throw new Error('探测器失效：4s 内 transport 没有收到任何 envelope');
-    await new Promise((r) => setTimeout(r, 20));
-  }
+  // 轮询到 transport 真的收到 envelope；超时即报「探测器坏了」，而不是靠猜一个时长
+  await waitFor(() => frames.length > 0, {
+    timeoutMs: 4000,
+    label: 'Sentry transport 收到 envelope（探测器有效性）',
+  });
   await Sentry.close(1000);
 
   const bytes = frames.join('\n');

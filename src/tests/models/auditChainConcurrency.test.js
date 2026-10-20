@@ -1,5 +1,5 @@
 /**
- * 审计哈希链并发测试（第三批审计 #14 / M-3 修复验证）
+ * 审计哈希链并发测试（第三批审计 #14 / 修复验证）
  * 并发创建 40 条审计记录，验证：
  * - 无分叉：链上每个 hash 最多被一条记录作为 prevHash 引用
  * - 首条 prevHash 接续库中既有链尾（或为 null）
@@ -9,7 +9,7 @@
 const mongoose = require('mongoose');
 const { TEST_CLIENT_IP } = require('../fixtures');
 
-describe('审计哈希链并发不分叉（M-3）', () => {
+describe('审计哈希链并发不分叉', () => {
   let AuditLog;
 
   beforeAll(async () => {
@@ -21,7 +21,7 @@ describe('审计哈希链并发不分叉（M-3）', () => {
 
   afterAll(async () => {
     // append-only 下无法删除；测试数据留库无副作用（审计日志本就只增）
-    // T-1：关闭连接，避免遗留连接拖住 jest worker 优雅退出
+    // 关闭连接，避免遗留连接拖住 jest worker 优雅退出
     if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
     }

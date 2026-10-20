@@ -23,7 +23,7 @@ const retryDelayMs = (attempt) => {
   return Math.round(base * (0.5 + Math.random()));
 };
 
-// 连接池与超时参数（P2-70：原为硬编码，现全部可配；缺省值保持与原先一致）。
+// 连接池与超时参数（原为硬编码，现全部可配；缺省值保持与原先一致）。
 // 各参数对性能的影响与调参方向：
 //   MONGO_MAX_POOL_SIZE       并发请求数上限的实质瓶颈（原 10 在高并发下排队等待）
 //   MONGO_MIN_POOL_SIZE       预热连接数，过低会让突发流量付出建连延迟
@@ -113,7 +113,7 @@ const connectDB = async (retries = MAX_RETRIES) => {
     logger.error(
       `数据库连接失败（已重试 ${MAX_RETRIES} 次）：${redactUriCredentials(error.message)}`
     );
-    // P1-13：等 transport 队列排空后再退出（原为紧接 exit，日志实测丢失）。
+    // 等 transport 队列排空后再退出（原为紧接 exit，日志实测丢失）。
     return exitAfterFlush(1);
   }
 };

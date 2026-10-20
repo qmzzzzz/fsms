@@ -6,7 +6,7 @@
  * 全局串行）。而 IP 级与通用限流器原先挂在它们**之后**：未认证的一个 `TRACE /api/x`
  * （十余字节）既不消耗配额、又必定产生一次链上写入 ⇒ 小请求放大成审计洪水；
  * 链锁排队超时的后果不是变慢，而是**合法审计降级为无 hash 的 legacy 行**
- * （utils/auditChain.js 的 P3-19 注释自证）。
+ * （utils/auditChain.js 的注释自证）。
  *
  * 判据：把通用配额压到 3，连发 10 条 TRACE。
  *   ① 出现 FLOOD-MAX 次 429（限流跑在合规闸门之前）；
@@ -21,6 +21,7 @@
  * resetModules 会把 mongoose 拆成两代，create 阶段报 `MongooseArray is not a function`）。
  */
 const request = require('supertest');
+const { waitForStable } = require('../helpers/waitFor');
 
 const MAX_GENERAL = 3;
 const FLOOD = 10;
@@ -48,18 +49,8 @@ const countViolations = () =>
 
 // 等异步落库**静默**后再取数：recordViolation 用 setImmediate 投递，create 还要过全局链锁。
 // 只"等到达到预期值"会造成单向假绿——把限流挪回原位时 10 条写入里前 3 条先到，
-// 计数立刻满足 `=== 3`，而后到的 7 条永远漏判。故判据必须等"两次连续读数相同"。
-const settleCount = async (timeoutMs = 8000) => {
-  const deadline = Date.now() + timeoutMs;
-  let prev = await countViolations();
-  for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    const now = await countViolations();
-    if (now === prev) return now;
-    prev = now;
-    if (Date.now() > deadline) return now;
-  }
-};
+// 计数立刻满足 `=== 3`，而后到的 7 条永远漏判。故判据必须等"两次连续读数相同"
+//（waitForStable），采样间隔沿用原先的 150ms，避免链锁排队把"暂时没写完"当成"已静默"。
 
 describe('早期拒绝与限流的顺序', () => {
   const mongoose = require('mongoose');
@@ -103,6 +94,11 @@ describe('早期拒绝与限流的顺序', () => {
     expect(responses[0].body.errors).toMatchObject({ errorCode: 'HTTP_METHOD_UNSUPPORTED' });
     // ③ 前提自证：只有过了限流闸的违规请求才产生链上写入，且这条通道真的落库
     //（否则 ② 可能是恒真的空集）
-    expect(await settleCount()).toBe(MAX_GENERAL);
+    expect(
+      await waitForStable(countViolations, {
+        intervalMs: 150,
+        label: '协议违规审计落库条数静默',
+      })
+    ).toBe(MAX_GENERAL);
   });
 });

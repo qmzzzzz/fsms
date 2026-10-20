@@ -1,5 +1,5 @@
 /**
- * PII at-rest 加密（P1-②）的行为门禁
+ * PII at-rest 加密的行为门禁
  *
  * 两个层次：
  *  A. utils/piiCrypto 纯判据真值表：随机 IV 密文不可链接、解密往返、

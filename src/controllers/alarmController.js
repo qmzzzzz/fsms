@@ -21,7 +21,7 @@ const alarmService = require('../services/AlarmService');
  * 校验报警记录是否在当前用户数据范围内
  *
  * 属主字段一律取自 DATA_SCOPE_FIELDS.alarm，不在此重复字面量：
- * 详情/操作与列表/统计/导出必须共用同一份声明，否则两条路径又会各走各的（P2-20 的原始教训）。
+ * 详情/操作与列表/统计/导出必须共用同一份声明，否则两条路径又会各走各的（原始教训）。
  */
 const isAlarmInScope = async (req, alarm) => {
   const { ownerField, departmentField } = DATA_SCOPE_FIELDS.alarm;
@@ -74,7 +74,7 @@ const canOperateAlarm = async (req, alarm) =>
  * 获取报警列表
  * GET /api/alarms
  *
- * E-2：支持游标分页。传 cursor 时走 keyset seek（不带 total，
+ * 支持游标分页。传 cursor 时走 keyset seek（不带 total，
  * 响应携带 hasMore/nextCursor）；不传保持原 page/limit 语义。
  */
 const getAlarms = asyncHandler(async (req, res) => {
@@ -240,7 +240,7 @@ const dispatchAlarm = asyncHandler(async (req, res) => {
   if (!(await isAlarmInScope(req, fullAlarm)))
     return ApiResponse.codeError(res, 'ALARM_OPERATE_FORBIDDEN');
 
-  // 传入数据范围：Service 层据此校验被指派人是否在操作者可管辖范围内（P2-17）
+  // 传入数据范围：Service 层据此校验被指派人是否在操作者可管辖范围内
   const dataScope = await getDataScope(req.user.userId);
   const updated = await alarmService.dispatchAlarm(req.params.id, handlerId, req.user.userId, {
     dataScope,

@@ -15,7 +15,7 @@
  */
 
 /**
- * 批次B 业务逻辑类修复回归（P2-16/17/19/20/21/23 + P3-10）
+ * 批次B 业务逻辑类修复回归（17/19/20/21/23 +）
  *
  * 这些缺陷的共同形态是「校验写在了没人走的路径上」或「同一语义在多处各写一遍」：
  * - 报废守卫写在模型方法里，而 Service 直接 push 数组 → 守卫从未生效
@@ -59,8 +59,8 @@ describe('批次B 业务规则加固回归', () => {
       ...over,
     });
 
-  // ================= P2-16 设备状态机双轨同步 =================
-  describe('P2-16 设备状态机', () => {
+  // ================= 设备状态机双轨同步 =================
+  describe('设备状态机', () => {
     test('updateDevice 不接受 status（显式拒绝而非静默忽略）', async () => {
       const device = await makeDevice();
       await expect(DeviceService.updateDevice(device, { status: 'fault' })).rejects.toMatchObject({
@@ -172,8 +172,8 @@ describe('批次B 业务规则加固回归', () => {
     });
   });
 
-  // ================= P2-17 handlerId 校验 =================
-  describe('P2-17 dispatchAlarm 处理人校验', () => {
+  // ================= handlerId 校验 =================
+  describe('dispatchAlarm 处理人校验', () => {
     let activeUser;
     let disabledUser;
     let otherDeptUser;
@@ -255,8 +255,8 @@ describe('批次B 业务规则加固回归', () => {
       expect(updated.status).toBe('processing');
     });
 
-    // P3-15：reportAlarm 曾是 create + save 两步写，中间崩溃留下无处理日志的报警
-    test('reportAlarm 一次写入即带初始处理日志（P3-15 原子性）', async () => {
+    // reportAlarm 曾是 create + save 两步写，中间崩溃留下无处理日志的报警
+    test('reportAlarm 一次写入即带初始处理日志（原子性）', async () => {
       const alarm = await makeAlarm();
       expect(alarm.processLog).toHaveLength(1);
       expect(alarm.processLog[0].action).toBe('alarm_received');
@@ -264,8 +264,8 @@ describe('批次B 业务规则加固回归', () => {
     });
   });
 
-  // ================= P2-19 巡检时间窗与 overdue =================
-  describe('P2-19 巡检逾期标记', () => {
+  // ================= 巡检时间窗与 overdue =================
+  describe('巡检逾期标记', () => {
     const { markOverdueInspections } = require('../../services/deviceReminder');
 
     const makeInspection = (over = {}) =>
@@ -306,8 +306,8 @@ describe('批次B 业务规则加固回归', () => {
     });
   });
 
-  // ================= P2-20 属主字段单一声明 + 数组语义 =================
-  describe('P2-20 数据范围属主口径', () => {
+  // ================= 属主字段单一声明 + 数组语义 =================
+  describe('数据范围属主口径', () => {
     const { DATA_SCOPE_FIELDS } = require('../../constants/dataScopeFields');
     const { buildDataScopeFilter, isRecordInScope } = require('../../middleware/rbac');
 
@@ -355,7 +355,7 @@ describe('批次B 业务规则加固回归', () => {
       ).toEqual({ createdBy: 'u1' });
     });
 
-    test('alarm 属主是两臂 $or：上报人与处理人都可见（P2-20 口径扩展，勿改回单臂）', () => {
+    test('alarm 属主是两臂 $or：上报人与处理人都可见（口径扩展，勿改回单臂）', () => {
       expect(
         buildDataScopeFilter(
           { type: 'self', userId: 'u1' },
@@ -419,8 +419,8 @@ describe('批次B 业务规则加固回归', () => {
     });
   });
 
-  // ================= P2-21 审计缓冲容量与重试保护 =================
-  describe('P2-21 auditBuffer 容量保护', () => {
+  // ================= 审计缓冲容量与重试保护 =================
+  describe('auditBuffer 容量保护', () => {
     const auditBuffer = require('../../services/auditBuffer');
     const AuditLog = require('../../models/AuditLog');
     const { contentLevelWriteError } = require('../helpers/contentLevelWriteError');

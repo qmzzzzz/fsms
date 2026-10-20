@@ -51,7 +51,7 @@ const reconcileTokenBlacklistIndexes = async () => {
 };
 
 /**
- * 对账 users 集合的 username 索引（P3-30）
+ * 对账 users 集合的 username 索引
  *
  * schema 从「字段级 unique」改为「显式 collation 唯一索引 username_ci」后，
  * MongoDB 里既有的 `username_1`（默认 collation，大小写敏感）不会自动消失。

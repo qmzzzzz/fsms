@@ -17,7 +17,7 @@ const {
   RESOURCE_STATUSES,
 } = require('../constants/permission');
 
-// P3-4/P3-17：列表 query 校验。module/type/status 此前零校验直入 Mongo 过滤
+// 列表 query 校验。module/type/status 此前零校验直入 Mongo 过滤
 // values:'falsy'：前端未选筛选项时带空串（type=&status=），空串语义为「不筛选」
 const listQueryValidation = [
   query('type').optional({ values: 'falsy' }).isIn(PERMISSION_TYPES).withMessage('无效的权限类型'),
@@ -103,7 +103,7 @@ const batchCreateValidation = [
     .isArray({ min: 1, max: 500 })
     .withMessage('权限条目最多 500 条，请分批提交')
     .withMessage('权限列表不能为空且单次最多 500 条'),
-  // P2-23：批量路径此前完全没有逐条校验，控制器又不消费 validationResult，
+  // 批量路径此前完全没有逐条校验，控制器又不消费 validationResult，
   // 于是 max:500 形同虚设、`*:*` 可被批量铸造、parent 悬空无人拦。
   // 逐条校验与单条创建保持同口径（校验器是唯一事实来源，控制器不再重复实现）。
   mustBeString('permissions.*.name', '权限名称'),

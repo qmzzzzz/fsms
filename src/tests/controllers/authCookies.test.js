@@ -2,7 +2,7 @@
  * I-01 httpOnly Cookie 认证迁移测试
  * 覆盖：
  * - cookie 工具函数（解析 / 时长换算 / 设置 / 清除）
- * - 登录/注册成功时下发两个令牌 cookie（响应体保留 tokens 字段）
+ * - 登录/注册成功时下发两个令牌 cookie（响应体不含 tokens 字段）
  * - authenticate 中间件 Bearer 与 cookie 双路径（同一套校验，含黑名单）
  * - 刷新接口：请求体与 refresh_token cookie 双来源，轮换时同步轮换 cookie
  * - 登出按正确 path 清除 cookie，且黑名单逻辑保留（旧令牌立即失效）
@@ -137,20 +137,22 @@ describe('httpOnly Cookie 认证集成', () => {
   const login = () =>
     request(app).post('/api/auth/login').send({ username: 'cookieuser', password: PASSWORD });
 
-  test('登录成功下发两个令牌 cookie 且响应体保留 tokens 字段', async () => {
+  test('登录成功下发两个令牌 cookie，且响应体不回传令牌（S-1）', async () => {
     const res = await login();
     expect(res.status).toBe(200);
 
-    // 响应体契约：保留 token/refreshToken（兼容现有测试与 API 消费者）
-    expect(res.body.data.token).toBeTruthy();
-    expect(res.body.data.refreshToken).toBeTruthy();
+    // S-1：JSON 里出现令牌副本会让 XSS 绕过 httpOnly，故响应体不得包含 token/refreshToken
+    expect(res.body.data.token).toBeUndefined();
+    expect(res.body.data.refreshToken).toBeUndefined();
+    expect(res.body.data.expires).toBeDefined();
 
     const cookies = parseSetCookies(res);
     expect(cookies.access_token).toBeDefined();
     expect(cookies.refresh_token).toBeDefined();
-    // cookie 值与响应体令牌一致
-    expect(cookies.access_token.value).toBe(res.body.data.token);
-    expect(cookies.refresh_token.value).toBe(res.body.data.refreshToken);
+    // 两个 cookie 都是 JWT（三段式），且互不相同
+    expect(cookies.access_token.value.split('.')).toHaveLength(3);
+    expect(cookies.refresh_token.value.split('.')).toHaveLength(3);
+    expect(cookies.access_token.value).not.toBe(cookies.refresh_token.value);
 
     // 属性契约：HttpOnly / SameSite=Lax / path / maxAge；测试环境(NODE_ENV=test)非生产且未设 COOKIE_SECURE，不应带 Secure
     for (const [name, expectedPath, expectedMaxAge] of [
@@ -168,7 +170,7 @@ describe('httpOnly Cookie 认证集成', () => {
 
   test('Bearer 与 cookie 双路径均可通过 authenticate，且 Bearer 优先', async () => {
     const loginRes = await login();
-    const { token } = loginRes.body.data;
+    const token = parseSetCookies(loginRes).access_token.value;
 
     // cookie 路径：不带 Authorization 头，仅携带 access_token cookie
     const byCookie = await request(app)
@@ -195,7 +197,7 @@ describe('httpOnly Cookie 认证集成', () => {
 
   test('cookie 路径与 Bearer 路径走同一套校验（黑名单命中同样拒绝）', async () => {
     const loginRes = await login();
-    const { token } = loginRes.body.data;
+    const token = parseSetCookies(loginRes).access_token.value;
 
     // 通过登出使该 token 进入黑名单
     const out = await request(app)
@@ -213,33 +215,33 @@ describe('httpOnly Cookie 认证集成', () => {
     expect(denied.body.errors.errorCode).toBe('AUTH_TOKEN_REVOKED');
   });
 
-  test('刷新接口：请求体来源成功且轮换两个 cookie，响应体保留 tokens 字段', async () => {
+  test('刷新接口：请求体来源成功且轮换两个 cookie，响应体不回传令牌', async () => {
     const loginRes = await login();
-    const { refreshToken } = loginRes.body.data;
+    const refreshToken = parseSetCookies(loginRes).refresh_token.value;
 
     const res = await request(app).post('/api/auth/refresh').send({ refreshToken });
     expect(res.status).toBe(200);
-    expect(res.body.data.token).toBeTruthy();
-    expect(res.body.data.refreshToken).toBeTruthy();
-    // 新令牌与旧令牌不同（轮换）
-    expect(res.body.data.refreshToken).not.toBe(refreshToken);
+    expect(res.body.data.token).toBeUndefined();
+    expect(res.body.data.refreshToken).toBeUndefined();
 
     const cookies = parseSetCookies(res);
-    expect(cookies.access_token.value).toBe(res.body.data.token);
-    expect(cookies.refresh_token.value).toBe(res.body.data.refreshToken);
+    expect(cookies.access_token.value).toBeTruthy();
+    expect(cookies.refresh_token.value).toBeTruthy();
+    // 新令牌与旧令牌不同（轮换）
+    expect(cookies.refresh_token.value).not.toBe(refreshToken);
     expect(cookies.access_token.attrs).toContain('path=/api');
     expect(cookies.refresh_token.attrs).toContain('path=/api/auth');
   });
 
   test('刷新接口：仅携带 refresh_token cookie（无请求体）同样成功', async () => {
     const loginRes = await login();
-    const { refreshToken } = loginRes.body.data;
+    const refreshToken = parseSetCookies(loginRes).refresh_token.value;
 
     const res = await request(app)
       .post('/api/auth/refresh')
       .set('Cookie', [`refresh_token=${refreshToken}`]);
     expect(res.status).toBe(200);
-    expect(res.body.data.token).toBeTruthy();
+    expect(parseSetCookies(res).access_token.value).toBeTruthy();
 
     // 旧 refresh token 已被轮换拉黑，重放应 401
     const replay = await request(app).post('/api/auth/refresh').send({ refreshToken });
@@ -254,7 +256,9 @@ describe('httpOnly Cookie 认证集成', () => {
 
   test('登出按正确 path 清除两个 cookie 且旧令牌立即失效', async () => {
     const loginRes = await login();
-    const { token, refreshToken } = loginRes.body.data;
+    const loginCookies = parseSetCookies(loginRes);
+    const token = loginCookies.access_token.value;
+    const refreshToken = loginCookies.refresh_token.value;
 
     const res = await request(app)
       .post('/api/auth/logout')

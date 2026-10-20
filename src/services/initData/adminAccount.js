@@ -1,5 +1,5 @@
 /**
- * 系统初始化数据服务 · 默认管理员创建与超管归属对账（M-02/M-05 密码落盘）
+ * 系统初始化数据服务 · 默认管理员创建与超管归属对账（密码落盘）
  * 2026-10-19 批 3c：自 src/services/initData.js 拆出（纯搬家，语义不变）。
  */
 
@@ -10,11 +10,11 @@ const logger = require('../../utils/logger');
 const { SUPER_ADMIN_ROLE_CODE, getSuperAdminUsername } = require('../../utils/superAdmin');
 
 /**
- * 落盘初始密码并**确保权限已实际收紧**（M-02 + M-05）
+ * 落盘初始密码并**确保权限已实际收紧**
  *
  * 两条安全约束同时在此满足：
- *   - M-02：密码绝不写入日志（容器 stdout 会被日志驱动持久化），只落盘到文件。
- *   - M-05：落盘后必须真正收紧权限。NTFS 不支持 POSIX 权限位，writeFileSync 的
+ *   - 密码绝不写入日志（容器 stdout 会被日志驱动持久化），只落盘到文件。
+ *   - 落盘后必须真正收紧权限。NTFS 不支持 POSIX 权限位，writeFileSync 的
  *     mode 参数在 Windows 上被忽略、chmodSync 也只能切换只读属性——此前「chmod 后
  *     忽略失败 + 日志照打权限 600」是最具误导性的失败形态：用户以为受保护，实际裸奔。
  *     现改用跨平台 utils/filePermission（Windows 走 icacls 切断继承）并**回读校验**，
@@ -59,7 +59,7 @@ function persistInitialPassword(adminPassword) {
       logger.info(`管理员初始密码已写入 ${pwdFile}，请尽快登录后修改`);
     }
   } catch (e) {
-    // M-02 修复：文件写入失败时绝不将密码明文输出到 stdout/日志
+    // 修复：文件写入失败时绝不将密码明文输出到 stdout/日志
     // （容器环境 stdout 会被日志驱动持久化，等同密码泄露）。
     // 只提示可操作的恢复途径；密码仅存在于内存，进程退出即丢失，
     // 此时应通过 ADMIN_INITIAL_PASSWORD 显式指定后重启。
@@ -92,7 +92,7 @@ const createDefaultAdmin = async () => {
   const adminPassword =
     process.env.ADMIN_INITIAL_PASSWORD || crypto.randomBytes(16).toString('hex');
 
-  // 邮箱可配置（P2-22）：原先硬编码 'admin@example.com'，而 email 有唯一索引，
+  // 邮箱可配置：原先硬编码 'admin@example.com'，而 email 有唯一索引，
   // 且 createDefaultAdmin 只按 username 判重。若在公开注册开启期间有人抢注该邮箱，
   // 后续全新环境启动时 User.create 抛 E11000 → initializeSystem rethrow → 进程退出，
   // 形成可远程触发的开机 DoS。
@@ -123,7 +123,7 @@ const createDefaultAdmin = async () => {
     //   · `email_1`：**遗留**索引（明文列），它要等 reconcileUserIndexes 四步走完
     //     才被删掉，在此之前仍会先于新索引报冲突。
     // 只认其中一个的后果是把"邮箱被抢注"误判成未知错误 → 重新抛 → 开机 DoS，
-    // 而那正是本段两层防护（P2-22）要挡的东西。
+    // 而那正是本段两层防护要挡的东西。
     const conflictKey = err?.code === 11000 ? Object.keys(err.keyPattern || {})[0] : null;
     if (conflictKey !== 'emailKey' && conflictKey !== 'email') throw err;
 

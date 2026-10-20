@@ -31,7 +31,7 @@ const cspReportEnabled = process.env.CSP_REPORT_ENABLED === 'true';
  *   ② 不再下发 report-only 头（同一个策略下发两遍，浏览器会按两条独立策略各报一次，
  *      违规计数翻倍，而"报告数"正是本开关的决策依据）。
  *
- * ⚠ 前置条件是**数据**而不是代码（deliverables/安全需求加固清单-2026-10-16.md A7）：
+ * ⚠ 前置条件是**数据**而不是代码（A7）：
  * 必须先让 `CSP_REPORT_ENABLED=true` 跑够一段时间（建议 ≥2 周），确认
  * `require-trusted-types-for` 的违规清零、或每一条都有正当豁免，再打开本开关。
  * 没跑够灰度就升强制会**直接打断前端**（且是"页面局部功能静默失效"这种最难排查的形态）。

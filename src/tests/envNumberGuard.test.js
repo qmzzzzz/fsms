@@ -3,7 +3,7 @@
 /**
  * （2026-09-19）：数值型环境变量的统一判据（负值是真值）
  *
- * 本仓已有 4 处独立修过同一类缺陷（swagger P2-37/P2-70、config P2-39、retention 钳制、
+ * 本仓已有 4 处独立修过同一类缺陷（swagger、config、retention 钳制、
  * 本次改动 的 WAL 上限），但每次就地打补丁 ⇒ 仍有漏网。本次改动把判据收进
  * `utils/envNumber`，并先接两个最要命的点：
  *  - `AUDIT_CHAIN_LOCK_TIMEOUT_MS`（审计链锁超时）
@@ -122,11 +122,9 @@ describe('审计链锁超时不再接受负值', () => {
     const started = Date.now();
     await expect(
       chain.withChainLock(
-        () =>
-          new Promise((r) => {
-            const t = setTimeout(r, 1500);
-            if (t.unref) t.unref();
-          })
+        // 永不 settle 的任务：无需 1500ms 定时器把「超时」衬出来，
+        // 锁持有超时（80ms，env 可配）本身就是被测的真实完成条件
+        () => new Promise(() => {})
       )
     ).rejects.toThrow(/持有超时/);
     const elapsed = Date.now() - started;

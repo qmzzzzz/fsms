@@ -62,7 +62,7 @@ const auditLogSchema = new mongoose.Schema(
       type: String,
     },
 
-    // P1-12：举报目标与敏感数据类型的显式声明。此前 schema 为 strict:true 且未声明
+    // 举报目标与敏感数据类型的显式声明。此前 schema 为 strict:true 且未声明
     // 这四个字段，securityController 写入的 targetType/targetId/dataType/description
     // 被静默丢弃——举报记录无法定位被举报对象、敏感查看记录无法回答「看了哪个字段」。
     // 类型与写入方对齐：
@@ -237,7 +237,7 @@ const auditLogSchema = new mongoose.Schema(
     // 为什么必须有这个字段：核验器对「无 hash 记录」只有一种解读——出现在带哈希记录
     // **之后**即判 `hash_stripped`（有人 $unset 抹哈希）。而"算 hash 失败仍落库"是
     // 完全良性的成因、且会**持续**产生（每一次链计算异常都留一批），于是真实篡改告警
-    // 被常态噪声淹没——正是 M-09「幻影链尾」同一条演化路径：反复确认是误报后，
+    // 被常态噪声淹没——正是「幻影链尾」同一条演化路径：反复确认是误报后，
     // 人开始忽略它。这个字段让核验器能把两种成因分开，噪声降级为单独的
     // hash_compute_failed 计数（仍然可见、仍然告警），不进 breaks。
     //
@@ -283,7 +283,7 @@ auditLogSchema.index({ ip: 1, timestamp: -1 });
 /**
  * username 前缀过滤的 collation 口径。
  *
- * 与 `User.USERNAME_COLLATION`（`username_ci` 唯一索引，P3-30）**同口径**：
+ * 与 `User.USERNAME_COLLATION`（`username_ci` 唯一索引）**同口径**：
  * locale `en` / strength 2 = 忽略大小写与重音。用户名在业务上是大小写不敏感的标识，
  * 审计页搜 `admin` 必须能搜到存量里的 `ADMIN`（本机实测存量确有 1 条 `ADMIN`）。
  * 两处常量由 `src/tests/models/auditUsernameIndex.test.js` 断言深度相等，防漂移。
@@ -316,7 +316,7 @@ auditLogSchema.index({ category: 1, action: 1, timestamp: -1 });
 auditLogSchema.index({ timestamp: -1, _id: -1 });
 
 // 自动过期（可配，默认 180 天）—— 降序索引同时满足查询排序与 TTL 过期
-// P3-46：留存期解析下沉到 constants/retention.js 单一声明。
+// 留存期解析下沉到 constants/retention.js 单一声明。
 // 此前本文件、logger.js、securityController.js、compliance-check.js 各自解析，
 // 三种口径并存：模型钳制到 [90,3650]，其余两处用 `|| 180`——
 // AUDIT_RETENTION_DAYS=1 时 TTL 是 90 天，而日志文件只留 1 天、合规仪表盘对外报 1 天
@@ -339,7 +339,7 @@ const AuditLogModel = mongoose.model('AuditLog', auditLogSchema);
 // 与下面的 _setAppendOnlyEnforced 不同，读侧不构成"可被关掉防护"的门，故无条件挂载。
 AuditLogModel.isAppendOnlyEnforced = isAppendOnlyEnforced;
 
-// P1-32：append-only 测试开关**仅测试环境导出**。原实现为无条件导出，
+// append-only 测试开关**仅测试环境导出**。原实现为无条件导出，
 // 生产代码只要拿到 AuditLog 模型即可在运行期关闭防篡改护栏（全仓无调用点，
 // 但这是「随时可开的门」）。注意：既有测试 AuditLogBehavior.test.js 的
 // afterAll 清理路径依赖该符号存在，故不能无条件删除；改为按环境条件挂载，

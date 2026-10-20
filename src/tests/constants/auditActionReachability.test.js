@@ -1,5 +1,5 @@
 /**
- * 审计 action 白名单「可达性技术文档」（P3-62）
+ * 审计 action 白名单「可达性技术文档」
  *
  * 审计报告 §3.4 / §11.1 指出：`constants/audit.js` 的 AUDIT_LOG_ACTIONS 共 144 条，
  * 其中一批**永不产生**——既没有「会被审计的」路由能派生出它们，也没有任何源码写入
@@ -117,6 +117,22 @@ function scanRoutes() {
       });
     }
   }
+  // app.js 直接注册的 /api 级端点（GET /api、GET /api/metrics）不属于任何
+  // routes/*.js，但同样落在 app.use('/api/', auditLog()) 之下。不纳入扫描，
+  // 它们派生的 action（system_view）会被误判为「永不产生」。
+  const appSrc = fs.readFileSync(path.join(SRC_DIR, 'app.js'), 'utf8');
+  for (const m of appSrc.matchAll(/app\.(get|post|put|patch|delete)\(\s*'(\/api(?:\/[^']*)?)'/g)) {
+    const method = m[1].toUpperCase();
+    const route = m[2];
+    const concrete = concretize(route);
+    const category = deriveCategory(concrete);
+    rows.push({
+      method,
+      route,
+      action: deriveAction(method, concrete, category),
+      audited: method === 'GET' ? !isExcluded(route) : true,
+    });
+  }
   return rows;
 }
 
@@ -216,7 +232,7 @@ const NEVER_PRODUCED = [
   'alarm_false_alarm',
 ];
 
-describe('审计 action 白名单可达性技术文档（P3-62）', () => {
+describe('审计 action 白名单可达性技术文档', () => {
   test('白名单 ⊆（路由派生可达 ∪ 源码写入可达 ∪ 技术文档登记）', () => {
     const { AUDIT_LOG_ACTIONS } = require('../../constants/audit');
     const routes = scanRoutes();

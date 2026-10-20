@@ -62,6 +62,38 @@ describe('statsCache', () => {
     });
   });
 
+  describe('invalidateAll（A-1：覆盖所有查看者）', () => {
+    test('清掉所有查看者的 stats: 键，并推进 generation', () => {
+      statsCache.set('stats:viewer-b:fp:g0', { total: 1 }, 60);
+      statsCache.set('stats:viewer-c:fp:g0', { total: 2 }, 60);
+      const before = statsCache.generation();
+
+      statsCache.invalidateAll('user-mutation');
+
+      expect(statsCache.get('stats:viewer-b:fp:g0').hit).toBe(false);
+      expect(statsCache.get('stats:viewer-c:fp:g0').hit).toBe(false);
+      // B/C 的桶不需要靠 TTL 才变新——这正是 A-1 的缺陷形态
+      expect(statsCache.generation()).toBe(before + 1);
+    });
+
+    test('不动审计汇总缓存（statsCache 同时承载 audit: 命名空间）', () => {
+      statsCache.set('audit:risk-summary:7d', { total: 3 }, 60);
+      statsCache.invalidateAll('user-mutation');
+      expect(statsCache.get('audit:risk-summary:7d').hit).toBe(true);
+    });
+
+    test('失效前进排队的旧代号写入不会复活旧值（generation 参与键）', () => {
+      // 并发窗口：请求在失效前读到 generation=0，失效后它才 set。
+      // 键里带代号 ⇒ 这笔写入落在旧代号上，新请求读新代号，永远不会命中它。
+      const staleKey = `stats:viewer-b:fp:g${statsCache.generation()}`;
+      statsCache.invalidateAll('user-mutation');
+      statsCache.set(staleKey, { total: 999 }, 60);
+      const freshKey = `stats:viewer-b:fp:g${statsCache.generation()}`;
+      expect(freshKey).not.toBe(staleKey);
+      expect(statsCache.get(freshKey).hit).toBe(false);
+    });
+  });
+
   describe('invalidateByUserId', () => {
     test('删除该用户全部缓存条目', () => {
       statsCache.set('stats:u1:a', { total: 1 }, 60);

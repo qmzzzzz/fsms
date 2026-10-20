@@ -73,7 +73,7 @@ describe('requireReAuthentication（敏感操作二次验证）', () => {
   afterAll(async () => {
     if (userNoMfa) await userNoMfa.deleteOne();
     if (userWithMfa) await userWithMfa.deleteOne();
-    // T-1：关闭连接，避免遗留连接拖住 jest worker 优雅退出
+    // 关闭连接，避免遗留连接拖住 jest worker 优雅退出
     if (mongoose.connection.readyState !== 0) {
       await mongoose.connection.close();
     }

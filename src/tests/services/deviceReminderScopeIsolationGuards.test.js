@@ -415,6 +415,9 @@ describe('deviceReminder 分支补齐', () => {
   // ===== stopReminderScheduler =====
 
   test('stop 等待循环：扫描未完成时阻塞至其收尾再返回（L222-226）', async () => {
+    // stop 的等待循环按 1 秒轮询；假定时器既保留「至少等一个轮询周期」的语义，
+    // 又不让单条用例真实睡 1 秒（真实定时器下这是本文件最慢的一条）。
+    jest.useFakeTimers();
     const handle = service.startReminderScheduler(60 * 60 * 1000);
 
     stallFind();
@@ -422,8 +425,9 @@ describe('deviceReminder 分支补齐', () => {
 
     const startedAt = Date.now();
     const stopping = service.stopReminderScheduler(handle);
-    // 1.1 秒后放行挂起的扫描，stop 应至少等待一个 1 秒轮询周期
-    setTimeout(() => drainPending(), 1100);
+    // 半个周期后放行挂起的扫描：第一次轮询（+1s）应看到 isScanning=false 而退出
+    setTimeout(() => drainPending(), 500);
+    await jest.advanceTimersByTimeAsync(1000);
     await stopping;
     const waited = Date.now() - startedAt;
 

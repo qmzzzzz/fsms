@@ -13,6 +13,7 @@
 'use strict';
 
 const path = require('path');
+const { readAlertmanagerConfig } = require('./alertmanager-config-path');
 
 /** 仓库根：密钥目录与 compose 文件都挂在这个根下（deploy.js 也要用，故一并导出） */
 const ROOT = path.resolve(__dirname, '..');
@@ -103,7 +104,7 @@ function validatePreflight(env, fsImpl) {
     }
   }
 
-  // ③ 密钥目录：9 个文件一个都不能少。
+  // ③ 密钥目录：REQUIRED_SECRET_FILES 里的每一项都不能少。
   //    缺任何一个都会让容器起不来或带空密钥运行，且失败点在启动期、
   //    现象是「服务反复重启」，排查成本高——不如在这里一次列全。
   const secretsDir = path.join(ROOT, 'secrets');
@@ -165,19 +166,12 @@ function checkAlertingEndpoint(env, fsImpl) {
   const errors = [];
   const warnings = [];
   // 文件头的「独立挂载覆盖」注入方式会改挂载点，故允许指向真实配置；
-  // 这不是绕过——指向的文件仍要过同一道判据。
-  const file =
-    (env.ALERTMANAGER_CONFIG_PATH || '').trim() ||
-    path.join(ROOT, 'deployment', 'observability', 'alertmanager.yml');
-  let source = null;
-  try {
-    if (fsImpl.existsSync(file)) source = String(fsImpl.readFileSync(file, 'utf8'));
-  } catch (_) {
-    source = null;
-  }
+  // 这不是绕过——指向的文件仍要过同一道判据。解析口径与合规检查、
+  // compose 校验容器共用 scripts/alertmanager-config-path.js（A-6）。
+  const { file, source } = readAlertmanagerConfig(env, fsImpl);
   if (source === null) {
-    // 「读不到」不能只写 warning：调用方 validatePreflight 的裁决位是 `ok = errors.length === 0`
-    // （scripts/deployPolicy.js:134），warnings 不进这个式子——
+    // 「读不到」不能只写 warning：调用方 validatePreflight 的裁决位是
+    // `errors.length === 0`（见该函数末尾的返回），warnings 不进这个式子——
     // 只进 warnings 等于让门禁在最坏的一种输入下判绿——alertmanager.yml 被删/未挂载/
     // 权限不对（catch 把 EACCES、EISDIR 一并吞成 null）时告警链必然不可用，而发布照样通过。
     // 旧注释写「不静默放行」，但它只保证"话说出了口"，没保证"门真的关上"。
@@ -281,14 +275,17 @@ function buildPlan({ skipBackup = false, noRollback = false, healthTimeoutMs = 1
   }
   steps.push({ id: 'pull', desc: '拉取目标镜像' });
   steps.push({ id: 'migrate-status', desc: '查看待应用迁移（留痕）' });
-  steps.push({ id: 'migrate-up', desc: '应用数据库迁移' });
+  steps.push({ id: 'migrate-up', desc: '应用数据库迁移（本次有迁移则禁用自动镜像回滚）' });
   steps.push({ id: 'up', desc: '滚动切换 app 容器' });
   steps.push({
     id: 'health',
     desc: `健康门禁：轮询 /readyz 至通过（上限 ${Math.round(healthTimeoutMs / 1000)}s）`,
   });
   if (!noRollback) {
-    steps.push({ id: 'rollback-on-failure', desc: '健康门禁失败时自动回滚到上一镜像' });
+    steps.push({
+      id: 'rollback-on-failure',
+      desc: '健康门禁失败且本次未应用迁移时自动回滚；有迁移则停住转人工恢复',
+    });
   }
   return steps;
 }
@@ -309,6 +306,22 @@ function isSameImageRef(a, b) {
 }
 
 /**
+ * 从 `migrate-mongo up` 的 stdout 提取本次实际应用的迁移名（O-2）。
+ *
+ * migrate-mongo 14.x 每应用一个迁移打印一行 `MIGRATED UP: <filename>`，没有
+ * 待应用迁移时什么都不打印，也没有 `--json`。部署脚本据此区分
+ * 「schema 已变」与「schema 未变」——前者禁用自动镜像回滚。
+ * 无法识别的行一律忽略：没有 `MIGRATED UP:` 证据 = 本次没有迁移被执行。
+ */
+function parseAppliedMigrations(output) {
+  return String(output || '')
+    .split(/\r?\n/)
+    .filter((line) => line.trim().startsWith('MIGRATED UP:'))
+    .map((line) => line.trim().slice('MIGRATED UP:'.length).trim())
+    .filter(Boolean);
+}
+
+/**
  * 回滚决策：给定健康门禁结果，决定是否需要回滚。
  * 单独成函数是为了让「什么情况下该回滚」可被逐条断言。
  *
@@ -317,6 +330,8 @@ function isSameImageRef(a, b) {
  * @param {string} [previousImage] 记录到的回滚目标镜像引用
  * @param {string} [targetImage] 本次要发布的目标镜像引用（APP_IMAGE）
  *   两者只用于「同引用」判定；不传时判定不生效，既有调用点语义不变。
+ * @param {string[]} [appliedMigrations] 本次 `migrate-mongo up` 实际应用的迁移文件名。
+ *   非空即表示 schema 已变，自动镜像回滚不再安全（O-2）；缺省按「未应用」处理。
  */
 function decideRollback({
   healthOk,
@@ -325,6 +340,7 @@ function decideRollback({
   backupTaken = true,
   previousImage,
   targetImage,
+  appliedMigrations = [],
 }) {
   if (healthOk) return { rollback: false, reason: '健康门禁通过' };
   if (noRollback) return { rollback: false, reason: '已显式禁用自动回滚（--no-rollback）' };
@@ -353,14 +369,30 @@ function decideRollback({
   //   → 旧版本在没有退路的新 schema 上继续写数据，写坏了连现场都取不回来。
   // 此处改为拒绝自动回滚，并给出**可执行的前置动作**（先抢救当前库，再人工回滚）。
   // 可用性此时本就已失（健康门禁未过），停在这里不会比自动回滚更糟。
+  // O-2（2026-10-20）：自动回滚只切镜像、不回滚 schema。只要本次发布执行过迁移，
+  // 旧镜像就会跑在**新的**库结构上——轻则启动报错，重则按旧字段语义写坏数据。
+  // 原先的「✓ 回滚后服务就绪」在这种场景下恰恰是最危险的假象：服务能起来，
+  // 但跑的是不兼容的代码。迁移的可逆性没有机器可读的声明，故一律按「不可自动回退」
+  // 处理，转人工确认 expand/contract 兼容性，必要时走备份恢复。
+  if (Array.isArray(appliedMigrations) && appliedMigrations.length > 0) {
+    const listed = appliedMigrations.slice(0, 3).join('、');
+    const more = appliedMigrations.length > 3 ? ' 等' : '';
+    return {
+      rollback: false,
+      reason:
+        `健康门禁未通过，但本次发布已应用 ${appliedMigrations.length} 个数据库迁移` +
+        `（${listed}${more}）。自动回滚只切镜像、不回滚 schema，旧版本将运行在新库结构上，` +
+        '可能报错或写坏数据，故不执行。请先确认这些迁移对上一版本向后兼容（expand/contract），' +
+        '再人工切回旧镜像；不兼容时用 ./backups 做数据级恢复（见 deployment/rollback-drill.md）。',
+    };
+  }
   if (!backupTaken) {
     return {
       rollback: false,
       reason:
-        '健康门禁未通过，但本次发布跳过了备份（--skip-backup）且迁移已改写数据库——' +
+        '健康门禁未通过，但本次发布跳过了备份（--skip-backup）——' +
         '按「无备份不具备回滚资格」不执行自动回滚。' +
-        '请先 bash scripts/backup-mongo.sh ./backups 抢救当前数据，' +
-        '再单独确认迁移是否向后兼容后人工回滚。',
+        '请先 bash scripts/backup-mongo.sh ./backups 抢救当前数据，再人工回滚。',
     };
   }
   return { rollback: true, reason: '健康门禁未通过且存在上一版本镜像' };
@@ -457,6 +489,7 @@ module.exports = {
   checkBackupObjectives,
   buildPlan,
   isSameImageRef,
+  parseAppliedMigrations,
   decideRollback,
   parsePositiveInt,
   parseArgs,

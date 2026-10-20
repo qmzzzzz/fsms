@@ -13,10 +13,11 @@ const {
 
 let mongoServer;
 
-// MongoDB 二进制源（2026-09-04 修复 CI）：npmmirror 的 6.0.14 历史路径已 404。
-// 恢复默认官方源，由 mongodb-memory-server 按发行版、架构与版本生成准确包名；
+// MongoDB 二进制源：默认官方源，由 mongodb-memory-server 按发行版、架构与版本生成准确包名；
 // 受限网络仍可通过 MONGOMS_DOWNLOAD_URL 显式覆盖。
-const MONGO_VERSION = '6.0.14';
+// S-3：与生产 compose / e2e-browser service 的 8.0.34 对齐（原 6.0.14 已随 6.0 线 EOL）。
+// 本地若已有其它 8.x 二进制，可用 MONGOMS_SYSTEM_BINARY 指向它，避免重复下载。
+const MONGO_VERSION = '8.0.34';
 
 module.exports = async function globalSetup() {
   // 设置环境变量。默认值统一取自 constants.js —— 与 setup.js 同源，

@@ -13,7 +13,7 @@ const {
 const AUDIT_LOG_CATEGORIES = AUDIT_CATEGORIES;
 // 原为本地字面量 `['low','medium','high','critical']`——与 constants/audit.js
 // 的 AUDIT_RISK_LEVELS 同值但各写一份。导出侧（reportExportService）引用的正是常量版，
-// 两份清单一旦单侧增删就会造成「查询 400、导出放行」的口径漂移（E-05 同一类故障）。
+// 两份清单一旦单侧增删就会造成「查询 400、导出放行」的口径漂移（同一类故障）。
 const AUDIT_LOG_RISK_LEVELS = AUDIT_RISK_LEVELS;
 // 三级展示口径（info/warning/error）同样收成 constants/audit.js 的单一事实来源。
 // 原先本文件与导出侧各写一份、只靠注释约定同口径，而 `auditFilterParity`

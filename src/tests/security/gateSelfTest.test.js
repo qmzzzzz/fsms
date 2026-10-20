@@ -121,6 +121,13 @@ describe('门禁负向自检：该红时必须红', () => {
         fs.mkdirSync(path.join(tmp, 'scripts'), { recursive: true });
         fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
         fs.mkdirSync(path.join(tmp, 'e2e'), { recursive: true });
+        fs.mkdirSync(path.join(tmp, 'migrations'), { recursive: true });
+        fs.writeFileSync(
+          path.join(tmp, 'migrate-mongo-config.js'),
+          'module.exports = {};\n',
+          'utf8'
+        );
+        fs.writeFileSync(path.join(tmp, 'migrations/dummy.js'), 'var m = 1;\n', 'utf8');
         fs.copyFileSync(
           path.join(ROOT, 'scripts/lint-ratchet.js'),
           path.join(tmp, 'scripts/lint-ratchet.js')
@@ -167,6 +174,13 @@ describe('门禁负向自检：该红时必须红', () => {
         fs.mkdirSync(path.join(tmp, 'scripts'), { recursive: true });
         fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
         fs.mkdirSync(path.join(tmp, 'e2e'), { recursive: true });
+        fs.mkdirSync(path.join(tmp, 'migrations'), { recursive: true });
+        fs.writeFileSync(
+          path.join(tmp, 'migrate-mongo-config.js'),
+          'module.exports = {};\n',
+          'utf8'
+        );
+        fs.writeFileSync(path.join(tmp, 'migrations/dummy.js'), 'var m = 1;\n', 'utf8');
         fs.copyFileSync(
           path.join(ROOT, 'scripts/lint-ratchet.js'),
           path.join(tmp, 'scripts/lint-ratchet.js')
@@ -223,6 +237,11 @@ describe('门禁负向自检：该红时必须红', () => {
         `${Array.from({ length: lines }, (_, i) => `var v${i} = ${i};`).join('\n')}\n`
       );
       write('e2e/dummy.js', 'var ok = 1;\n');
+      // lint-ratchet 的目标集与 `npm run lint` 同源，2026-10-20 起含 migrations/ 与
+      // migrate-mongo-config.js：夹具必须给出这两个目标，否则 ESLint 会因
+      // "No files matching 'migrations'" 抛错，红的原因就变成夹具故障而不是被测守卫。
+      write('migrations/dummy.js', 'var m = 1;\n');
+      write('migrate-mongo-config.js', 'module.exports = {};\n');
       const baselinePath = path.join(tmp, 'eslint.ratchet.json');
       if (baseline !== null) write('eslint.ratchet.json', baseline);
       return { tmp, script: path.join(tmp, 'scripts/lint-ratchet.js'), baselinePath };
@@ -461,7 +480,7 @@ describe('门禁负向自检：该红时必须红', () => {
       const cfg = fs.readFileSync(path.join(ROOT, 'jest.config.js'), 'utf8');
       expect(cfg).toMatch(/coverageThreshold/);
       expect(cfg).toMatch(/global:\s*\{/);
-      // E-03 纳入的两个文件必须有独立阈值（防止被 global 平均值稀释）
+      // 纳入的两个文件必须有独立阈值（防止被 global 平均值稀释）
       expect(cfg).toMatch(/config\/validate\.js/);
       // 2026-10-19 批 3c：initData.js 已拆为目录，逐个文件都不得被 global 稀释
       for (const name of [
@@ -483,7 +502,7 @@ describe('门禁负向自检：该红时必须红', () => {
   describe('前端覆盖率阈值棘轮（2026-09-18）', () => {
     it('web-admin 阈值必须贴着实测水位，不得回落到「删一半测试仍全绿」的水平', () => {
       // 背景：前端阈值原为 10.5/8/5/10.5，而当时实测已是 20.02/18.25/12.8/19.54
-      // ——门槛只有水位的一半，删掉一半测试仍然全绿，与后端 P3-49 修过的
+      // ——门槛只有水位的一半，删掉一半测试仍然全绿，与后端修过的
       // 是同一病症。2026-09-18 先上调到 19/17/11.5/18.5；补齐 InspectionView /
       // InspectionForm / InspectionReviewForm 组件用例后实测到 30.03/27.06/23.34/29.7，
       // 又上调到 28.5/25.5/21.5/28。
@@ -717,7 +736,7 @@ describe('门禁负向自检：该红时必须红', () => {
     });
   });
 
-  describe('破坏性脚本护栏（M-08 / L-26）', () => {
+  describe('破坏性脚本护栏', () => {
     it('共享护栏为 fail-closed：未设白名单即拒绝', () => {
       const src = fs.readFileSync(path.join(ROOT, 'scripts/destructiveGuard.js'), 'utf8');
       expect(src).toMatch(/ALLOWED_SOURCE_DB/);
@@ -730,7 +749,7 @@ describe('门禁负向自检：该红时必须红', () => {
         'scripts/resign-audit-hmac.js',
         'scripts/resign-audit-chain-v3.js',
         'scripts/run-rollback-drill.js',
-        // P1-20 补齐：这两个脚本原先无任何护栏（--apply 即可 dropIndex / 吊销会话）
+        // 补齐：这两个脚本原先无任何护栏（--apply 即可 dropIndex / 吊销会话）
         'scripts/revoke-user-sessions.js',
         'scripts/sync-audit-indexes.js',
       ];
@@ -742,7 +761,7 @@ describe('门禁负向自检：该红时必须红', () => {
     });
   });
 
-  describe('架构无环守卫（E-04）', () => {
+  describe('架构无环守卫', () => {
     it('无环测试真的在扫 require 图，且断言了 3 处惰性 require', () => {
       const src = fs.readFileSync(
         path.join(ROOT, 'src/tests/architecture/requireCycles.test.js'),

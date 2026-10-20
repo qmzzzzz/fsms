@@ -9,10 +9,10 @@
  * ⚠️ 既往审计指出的边界（2026-09-20 逐条**内容复核**；原报告行号已漂移，按代码特征取证）
  *   标记：[仍有效] 复核后问题依旧 / [已修复] 已被后续修复解决 / [部分有效] 仅部分成立 /
  *   [已自陈] 用例内已记录并给出保留理由。复核证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.9 测试资产。
- *   - [已修复·P1-29] `:110-119` **恒真断言**：`let cleared = 0` 从未被修改，断言 `toBe(0)`（原出处 2026-09-16 全面代码审计报告；**该报告已删除**，问题编号保留原样）
- *     复核：`:137` 已注释「原实现用 let cleared = 0 计数但从未修改，断言 toBe(0) 恒真（P1-29）」，现断真实节点内容。
- *   - [已修复·P1-29] `:426-439` 手工构造 `res.locals = { skipGlobalAudit: true }` 再调中间件 ⇒ 真实时序零覆盖（原出处 2026-09-16 全面代码审计报告；**该报告已删除**，问题编号保留原样）
- *     复核：`:456` 已注释「P1-29 修复：原用例手工构造 res.locals…」，现走真实中间件时序。
+ *   - [已修复] `:110-119` **恒真断言**：`let cleared = 0` 从未被修改，断言 `toBe(0)`（原出处 2026-09-16 全面代码审计报告；**该报告已删除**，问题编号保留原样）
+ *     复核：`:137` 已注释「原实现用 let cleared = 0 计数但从未修改，断言 toBe(0) 恒真」，现断真实节点内容。
+ *   - [已修复] `:426-439` 手工构造 `res.locals = { skipGlobalAudit: true }` 再调中间件 ⇒ 真实时序零覆盖（原出处 2026-09-16 全面代码审计报告；**该报告已删除**，问题编号保留原样）
+ *     复核：`:456` 已注释「修复：原用例手工构造 res.locals…」，现走真实中间件时序。
  *
  * 命名沿革：2026-09-20 由 `securityBranches.test.js` 更名。旧名里的
  *   Coverage / Gap / Hardening / Branch 说的是「当初为什么写它」（补覆盖率基线），
@@ -26,7 +26,7 @@
  * security.js 分支补齐
  *
  * 【行号说明】本文件早期版本按覆盖率基线逐条标注 `L<行号>`。后续多轮安全修复
- * （P0-5/P0-6 skipGlobalAudit 时序、deepSanitizeKeys 重构等）使 security.js 整体
+ * （ skipGlobalAudit 时序、deepSanitizeKeys 重构等）使 security.js 整体
  * 位移，标注大量指向注释或空白行。按「注释必须与实现同步」的要求，现改为语义
  * 描述、不再写行号。
  *
@@ -138,7 +138,7 @@ describe('security.js 分支补齐', () => {
       expect(req.body.payload).toBe('safe'); // 浅层保留
       // 逐层下钻收集节点：depth 0..9 共 10 层保留 payload；
       // depth >= SANITIZE_MAX_DEPTH(10) 的子树被整体清空（对象仍在但已无任何自有键）。
-      // 原实现用 let cleared = 0 计数但从未修改，断言 toBe(0) 恒真（P1-29）；
+      // 原实现用 let cleared = 0 计数但从未修改，断言 toBe(0) 恒真；
       // 现改为直接断言「第 11 层节点存在且键集为空」——清空行为真被触发才通过。
       const nodes = [];
       let node = req.body;
@@ -555,8 +555,8 @@ describe('security.js 分支补齐', () => {
     });
 
     test('控制器在响应前声明 skipGlobalAudit → 跳过全局审计', async () => {
-      // P1-29 修复：原用例手工构造 res.locals = { skipGlobalAudit: true } 再调中间件，
-      // 掩盖了 P0-5 的真实时序缺陷——控制器赋值发生在本中间件入口之后，入口读取
+      // 修复：原用例手工构造 res.locals = { skipGlobalAudit: true } 再调中间件，
+      // 掩盖了真实时序缺陷——控制器赋值发生在本中间件入口之后，入口读取
       // 必然早于赋值，标志 100% 失效。现改为「中间件入口之后、响应之前」赋值，
       // 并断言 auditBuffer.push 一次都没被调用（真实响应包装器上的行为）。
       const auditBuffer = require('../../services/auditBuffer');

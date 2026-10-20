@@ -79,7 +79,7 @@ class InspectionService {
   /**
    * 获取巡检列表（含数据范围过滤和分页）
    *
-   * E-2：支持游标分页。传入 cursor 时按 planStartTime 倒序做 keyset seek，
+   * 支持游标分页。传入 cursor 时按 planStartTime 倒序做 keyset seek，
    * 跳过 countDocuments，以 hasMore/nextCursor 表达翻页；
    * 不传 cursor 保持原 page/limit 行为。
    */
@@ -111,7 +111,7 @@ class InspectionService {
 
     // 数据范围过滤：统一走 applyDataScopeToQuery（同字段冲突取交集，
     // department 为空时按 deny 处理，消除「三分支全不命中→零过滤」越权）
-    // 属主/部门字段取自 DATA_SCOPE_FIELDS 单一声明（P2-20）
+    // 属主/部门字段取自 DATA_SCOPE_FIELDS 单一声明
     // 同 AlarmService：范围不可用即 403，不回空集（#12）
     applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.inspection);
 
@@ -190,7 +190,7 @@ class InspectionService {
    * 更新巡检计划（原子化：仅 pending 可修改，判定与写入同条件，防读改写竞态）
    */
   async updateInspection(inspection, updates) {
-    // P3-14：白名单补齐路由已放行的 description/remark/priority——
+    // 白名单补齐路由已放行的 description/remark/priority——
     // 原实现三字段被静默丢弃，前端「保存成功」但数据从未落库；
     // 与 deviceRoutes 的 installDate 同类问题（校验了却不在可更新列表）
     const updatableFields = [
@@ -239,7 +239,7 @@ class InspectionService {
    * 原子化（参照 AlarmService）：findOneAndUpdate + 状态前置条件，
    * 消除读改写竞态（并发两个 start 请求不再都能成功）；未命中前置条件抛 409 冲突，
    * 控制器侧 err.statusCode 分支会原样返回给调用方。
-   * M-2：仅被指派人可开始执行（未指派任何人的计划保持开放，由同权限者代执行）
+   * 仅被指派人可开始执行（未指派任何人的计划保持开放，由同权限者代执行）
    */
   async startInspection(inspection, operatorId) {
     const now = new Date();
@@ -278,7 +278,7 @@ class InspectionService {
 
   /**
    * 提交巡检结果（原子化：仅 in_progress 可提交，防并发重复提交）
-   * M-2：仅被指派人可提交结果（未指派任何人的计划保持开放）
+   * 仅被指派人可提交结果（未指派任何人的计划保持开放）
    */
   async completeInspection(inspection, { result, findings, location, remark }, operatorId) {
     const now = new Date();
@@ -319,7 +319,7 @@ class InspectionService {
 
   /**
    * 审核巡检结果（原子化：仅已完成且未审核的记录可审核，防并发重复审核）
-   * M-2：审核人与被指派人必须分离，禁止自审自批
+   * 审核人与被指派人必须分离，禁止自审自批
    */
   async reviewInspection(inspection, { reviewResult, reviewComment }, reviewerId) {
     if (!INSPECTION_REVIEW_RESULTS.includes(reviewResult)) {

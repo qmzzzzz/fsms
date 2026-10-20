@@ -35,7 +35,7 @@
  * 覆盖分支：
  *  - exportReport：format !== 'xlsx' 提前拒绝（此前仅测过 type 非法）
  *  - exportReport：日期参数非法 400（Invalid Date 会让查询在 DB 层抛错）
- *  - exportReport：audit 分支导出枚举白名单校验失败 400（P3-13 补的 level 维度）
+ *  - exportReport：audit 分支导出枚举白名单校验失败 400（补的 level 维度）
  *  - exportReport：dataScope.type === 'none' → 403 DATA_SCOPE_DENIED（#12，不再给空文件）
  *  - 路由层：持认证但缺 report:export 的业务类型导出 → 403
  *  - getDashboardStats：dataScope=none → 403 DATA_SCOPE_DENIED（#12，不再给全零看板）

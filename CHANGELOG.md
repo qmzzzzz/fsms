@@ -8,6 +8,28 @@
 
 ## [未发布]
 
+### 七维审计 2026-10-20：审计链检查点 / 固定睡眠门禁 / 运维关键路径 E2E
+
+> 按 `deliverables/七维深度审计报告-2026-10-20.md` 整改。本节只记录三项中危的**结构性**修复；
+> 其余按报告编号分散落在各模块的修复不在此逐条复述。
+
+| 项               | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S-8 审计链外部锚 | 新增 `scripts/audit-chain-checkpoint.js` 与 `src/services/auditChainCheckpoint.js`：把链头与记录数写成 HMAC 签名的 JSONL 检查点，校验时逐行验签并核对锚点。可检出分支插入 / 链头替换 / 锚点前截断 / 检查点文件被改；**残余边界**（锚点与库同机、锚点后先加后删）已在 `docs/architecture.md` §7 与 `docs/threat-model.md` 明示，不宣称完整防篡改                                                                                                                                             |
+| T-2 固定睡眠     | 新增 `src/tests/helpers/waitFor.js`（条件轮询）与 `src/tests/ci/noFixedSleepRatchet.test.js`：固定 `setTimeout` 收进棘轮，新增一处即红；真实网络/进程等待改走健康检查与事件，定时器逻辑用 fake timers                                                                                                                                                                                                                                                                                       |
+| T-1 运维 E2E     | 新增 `scripts/ops-e2e.js` 与 `scripts/ops-e2e/journeys/*` 四条旅程：告警投递探针、部署失败→自动回滚、备份→恢复→校验、跨部门越权。各自独立子进程 + 内存 Mongo + 随机端口 + 本地假 Alertmanager；CI 的 `e2e` job 新增 `npm run test:ops-e2e` 并登记进 `ciGateWiring`。浏览器 no-skip 门禁（`MIN_PASSED=32`、`skipped==0`）未改动                                                                                                                                                              |
+| O-5 部署演练     | `scripts/deployCommands.js` 抽出全部外发命令的 argv 构造（部署脚本不再自带命令字面量），`--dry-run` 打印与实际执行同源的真实命令；新增 `src/tests/deploy/deployCommands.test.js`。首次 `dry_run=true` 真实演练的步骤与留证表登记在 `deployment/deploy-workflow-rehearsal.md`——**真实 run 尚未执行**（需预发环境），未留证前 deploy.yml 的「未验证声明」保留。T-4 的预发定期演练 cron 见 `deployment/rollback-drill.md` §5.5；S-9 的 CI 开发机隔离口径见 `docs/security-dependency-watch.md` |
+| 冒烟测试修正     | I-01 改为令牌只经 httpOnly cookie 下发后，`scripts/e2e-smoke.js` 仍从响应体取 `data.token`，导致 9 步 401（CI 必红）。改为从 `Set-Cookie` 取 `access_token`，继续用 Bearer 路径覆盖 `authenticate`                                                                                                                                                                                                                                                                                          |
+
+### lint 棘轮批 1–3c：大文件目录化拆分与阈值重设（2026-10-18/19）
+
+> 本轮是**纯搬家 + 度量收敛**：`security.js`、`authService.js`、`websocketService.js`、
+> `authController.js`、`userController.js`、`securityController.js`、`sharedCache.js`、`initData.js`
+> 按职责拆入同名目录（入口文件保留原有导出形态），复杂度与函数体积告警逐批下降。
+> 业务语义未变；覆盖率/体积棘轮的键随路径迁移同步重设，并有 `coverageGateWiring` 与
+> 分层棘轮测试守住“拆分后门槛没有被悄悄放宽”。针对拆分中暴露的 `max-lines` 最后若干条，
+> 批 3a/3c 只做内容保持式迁移，未借机改行为。
+
 ### 响应头加固：X-XSS-Protection 测试守护 + Trusted Types 灰度 + CORP/Referrer-Policy 口径统一到 same-origin（2026-10-15 · 按 `deliverables/安全加固待办清单-2026-10-15.md` 的 P1+P2 逐项落地）
 
 > 清单 P1（Trusted Types report-only）与 P2（COEP 决策记录 / CORP / Referrer-Policy）四项全部落地；P3 的 CSRF 双保险按清单自陈「不做也不构成缺口；仅在明确有子域/多应用共站时做」未做（本仓 nginx 单 `server_name`、无子域前端，已复核）。

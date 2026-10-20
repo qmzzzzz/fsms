@@ -91,7 +91,7 @@ class UserService {
 
     if (filters.search) {
       const escapedSearch = escapeRegExp(filters.search.trim());
-      // P1-②：realName **暂不加密**——姓名模糊检索是用户管理的日常操作，正则对
+      // realName **暂不加密**——姓名模糊检索是用户管理的日常操作，正则对
       // 密文不成立，加密它等于砍掉这个能力。at-rest 加密当前覆盖 phone 与 email。
       //
       // A3（2026-10-16）：email 也已加密 ⇒ 原先那一支 `{ email: new RegExp(...) }`
@@ -224,7 +224,7 @@ class UserService {
   }
 
   /**
-   * 只含**生效角色 + 生效权限**的版本，专供 P2-8 子集校验的「排除集」。
+   * 只含**生效角色 + 生效权限**的版本，专供子集校验的「排除集」。
    *
    * 排除集的语义是"目标已经实际持有的权限不算本次授予行为"（否则操作者连给
    * 下级收权都做不到）。停用角色/停用权限并不实际生效，把它们算进排除集会

@@ -22,6 +22,7 @@ const mongoose = require('mongoose');
 const request = require('supertest');
 const config = require('../../config');
 const User = require('../../models/User');
+const TokenBlacklist = require('../../models/TokenBlacklist');
 const tokenService = require('../../services/tokenService');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 
@@ -53,6 +54,10 @@ describe('access 过期后的登出', () => {
     }
     const { createApp } = require('../../app');
     app = createApp();
+    // consumeToken 以 tokenHash 唯一索引为锁（见 middleware/tokenBlacklist.js）。
+    // autoIndex 在后台建索引，全量并行跑时可能晚于前几条用例就绪；届时重复插入
+    // 不再抛 E11000，本文件「登出后 refresh 必须失效」的断言会随机变红。先等索引。
+    await TokenBlacklist.init();
   });
 
   afterAll(async () => {
@@ -191,7 +196,6 @@ describe('access 过期后的登出', () => {
   test('黑名单服务故障（refresh 路径）→ 503 安全服务不可用，不得降级成笼统 500', async () => {
     const user = await makeUser('blfail');
     const refreshToken = tokenService.generateRefreshToken(user._id, user.tokenVersion || 0, null);
-    const TokenBlacklist = require('../../models/TokenBlacklist');
     const spy = jest.spyOn(TokenBlacklist, 'findOne').mockImplementation(() => {
       throw new Error('db down (故障注入)');
     });
@@ -212,7 +216,6 @@ describe('access 过期后的登出', () => {
     // 只给其中一个补口径 = 半个修复：故障语义会随客户端带没带那个过期头而不同。
     const user = await makeUser('blfailx');
     const refreshToken = tokenService.generateRefreshToken(user._id, user.tokenVersion || 0, null);
-    const TokenBlacklist = require('../../models/TokenBlacklist');
     const spy = jest.spyOn(TokenBlacklist, 'findOne').mockImplementation(() => {
       throw new Error('db down (故障注入)');
     });

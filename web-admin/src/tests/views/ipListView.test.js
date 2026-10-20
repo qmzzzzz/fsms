@@ -126,8 +126,7 @@ const pickOption = async (wrapper, label) => {
 /** 挂载并等待首屏列表落地（get 需已配置好 /security/ip-list 的响应；perms 默认放行门控） */
 const boot = async (expectedRows, perms = PERMS) => {
   active = mountComponent(IpListView, {
-    setupStore: (pinia) =>
-      useAuthStore(pinia).setAuth('t', 'r', { userId: 'u-1', username: 'admin' }, perms),
+    setupStore: (pinia) => useAuthStore(pinia).setAuth({ userId: 'u-1', username: 'admin' }, perms),
   })
   await waitFor(() => listCalls().length >= 1, { message: '名单列表请求已发出' })
   if (expectedRows !== undefined) {

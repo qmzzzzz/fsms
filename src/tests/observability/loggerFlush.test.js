@@ -1,5 +1,5 @@
 /**
- * 退出前日志落盘（P1-13）验证
+ * 退出前日志落盘验证
  *
  * 报告原文：「validate.js:259 / database.js:59 / index.js:243,304 的 exit 前加
  * flush 等待（≥100ms）」。
@@ -33,6 +33,7 @@ const {
   dateStamp,
   DEFAULT_LOG_DIR,
 } = require('../../utils/loggerFlush');
+const { flushEventLoop, waitFor } = require('../helpers/waitFor');
 
 /** 每个用例独占的临时日志目录，避免与真实 logs/ 互相干扰 */
 function makeTmpDir(tag) {
@@ -40,7 +41,7 @@ function makeTmpDir(tag) {
   return dir;
 }
 
-describe('P1-13 退出前日志落盘', () => {
+describe('退出前日志落盘', () => {
   describe('dateStamp', () => {
     test('与 winston 的 datePattern YYYY-MM-DD 同口径（含补零）', () => {
       expect(dateStamp(new Date(2026, 0, 5))).toBe('2026-01-05');
@@ -133,7 +134,7 @@ describe('P1-13 退出前日志落盘', () => {
       }
     };
 
-    test('logger.error 后立即 exit → 日志丢失（这是 P1-13 要修的现象）', () => {
+    test('logger.error 后立即 exit → 日志丢失（这是要修的现象）', () => {
       const dir = makeTmpDir('naive');
       probe('naive', dir);
       const stamp = dateStamp();
@@ -156,17 +157,27 @@ describe('P1-13 退出前日志落盘', () => {
       const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => {});
       try {
         const p = exitAfterFlush(0, { delayMs: 0 });
-        const raced = await Promise.race([
-          p.then(() => 'settled'),
-          new Promise((r) => setTimeout(() => r('pending'), 20)),
-        ]);
-        expect(raced).toBe('pending');
+        // 负向断言：只让出事件循环若干轮，p 仍不得 settle
+        // （旧写法用 20ms 定时器做 race；settle 与否与墙钟无关，与轮次有关）
+        let settled = false;
+        p.then(() => {
+          settled = true;
+        });
+        await flushEventLoop(3);
+        expect(settled).toBe(false);
+        // 让退出定时器在 mock 生效期内真正触发（0ms）——否则 finally 还原 mock 后
+        // 那枚仍在途的定时器会打到真实 process.exit，直接杀掉 jest worker。
+        await waitFor(() => mockExit.mock.calls.length === 1, {
+          label: 'exitAfterFlush 的退出定时器触发',
+        });
+        expect(mockExit).toHaveBeenCalledWith(0);
+        expect(settled).toBe(false);
       } finally {
         mockExit.mockRestore();
       }
     });
 
-    test('缺省延迟为 100ms：99ms 未退出、100ms 退出（报告 P1-13 要求 ≥100ms）', () => {
+    test('缺省延迟为 100ms：99ms 未退出、100ms 退出（报告要求 ≥100ms）', () => {
       // 【本次改动改造：源码正则 → 真实计时行为】原用例读 loggerFlush.js 源码匹配
       // `Number.isFinite(options.delayMs) ? options.delayMs : 100` 这段文本，两个方向都不可靠：
       //   · 假阳性——把 100 改成其他值、或让这段代码落进不可达分支，
@@ -291,7 +302,7 @@ describe('P1-13 退出前日志落盘', () => {
     }, 90000);
   });
 
-  describe('四处退出点已接入（报告 P1-13 点名的位置）', () => {
+  describe('四处退出点已接入（报告点名的位置）', () => {
     test('validate.js 的致命上报走同步落盘（真实执行）', () => {
       // 【本次改动改造：源码正则 → 行为断言】原用例断言 reportConfigErrors 函数体里出现
       // flushLogsSync(/process.exit(1) 字样——只要文本在，实际不落盘也绿。

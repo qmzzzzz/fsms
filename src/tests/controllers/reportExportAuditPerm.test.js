@@ -1,5 +1,5 @@
 /**
- * 报表导出的 audit 分支越权出口回归（P1-4）
+ * 报表导出的 audit 分支越权出口回归
  *
  * 背景（实测越权）：GET /api/reports/export?type=audit 只要求 report:export
  * （通常下发运营岗），而同一份数据在 /api/security/audit-logs 要求
@@ -14,7 +14,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
-describe('P1-4 /api/reports/export?type=audit 权限闸门', () => {
+describe('/api/reports/export?type=audit 权限闸门', () => {
   let app;
   let User;
   let Role;

@@ -1,5 +1,5 @@
 /**
- * 退出前日志强制落盘（P1-13）
+ * 退出前日志强制落盘
  *
  * 【问题】winston 的文件 transport 是**异步**写入：调用 logger.error() 之后立即
  * process.exit()，日志往往还停在内存队列里随进程消失。启动期配置校验失败、
@@ -124,7 +124,7 @@ function flushLogsSync(level, message, meta, options = {}) {
  * 由关闭链显式 await（见本文件 drainShippingBuffer，F-186），而不是靠把整个 logger 关掉来"顺带"完成。
  *
  * @param {number} [code=1] 退出码
- * @param {{delayMs?: number}} [options] delayMs 默认 100（报告 P1-13 要求 ≥100ms）
+ * @param {{delayMs?: number}} [options] delayMs 默认 100（报告要求 ≥100ms）
  * @returns {Promise<never>} 永不 settle
  */
 function exitAfterFlush(code = 1, options = {}) {
@@ -139,7 +139,7 @@ function exitAfterFlush(code = 1, options = {}) {
 /**
  * 关停时排空 SIEM 转发缓冲（F-186）
  *
- * 【缺陷】`HttpShipperTransport.close()` 是 F-98/P3-31 精心做出来的「按批排空 + 有界退出 +
+ * 【缺陷】`HttpShipperTransport.close()` 是 F-98/精心做出来的「按批排空 + 有界退出 +
  * 如实报剩余行数」，但它在生产里**没有任何调用点**——三个绿色用例测的全是这个没人调的方法。
  *
  * 【机制（两支探针实测，纠正了本函数初版写下的判断）】

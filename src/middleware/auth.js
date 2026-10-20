@@ -85,7 +85,7 @@ const loadValidUser = async (userId) => {
   }
 
   // 缓存容量保护
-  // P3-36：此处原注释称「删除最旧的一半」——不准确。Map 的迭代顺序是**插入顺序**，
+  // 此处原注释称「删除最旧的一半」——不准确。Map 的迭代顺序是**插入顺序**，
   // 而每次命中缓存并不重新 set（见下方 getFreshUser 的读路径），因此这里淘汰的是
   // 「最早写入的一半」而非 LRU 意义上的「最久未使用」。
   // 刻意不改成真 LRU：条目带 60s TTL，长期不用的条目本就会过期，
@@ -196,7 +196,7 @@ cacheCleanupTimer.unref?.();
 /**
  * 验证 JWT Token：将解析后的用户信息附加到 req.user，并校验用户当前是否仍有效
  *
- * E-01 整改：本函数原圈复杂度 29（报告 §八 E-01 三个目标函数之一）。
+ * 整改：本函数原圈复杂度 29（报告 §八三个目标函数之一）。
  * 按「令牌 → 账户 → 凭据新鲜度 → IP → 设备会话 → 上下文 → 错误映射」拆为
  * 6 个模块级 helper，骨架只保留编排。每个 assert* 返回「错误响应」或 null，
  * 与原有的 if (...) return ... 逐一对应，短路顺序完全保持不变。
@@ -256,8 +256,8 @@ const authenticate = async (req, res, next) => {
 };
 
 /**
- * 账户可用性校验（E-01 自 authenticate 拆出）：存在性、禁用、锁定、临时锁定。
- * 返回错误响应或 null；四处拒绝的先后顺序与拆分前一致。
+ * 账户可用性校验（自 authenticate 拆出）：存在性、禁用、锁定、临时锁定。
+ * 返回错误响应或 null；四处拒绝的先后顺序固定，不得调整。
  */
 /**
  * 令牌用途校验：refresh 令牌不得作为 access 令牌使用。
@@ -301,7 +301,7 @@ const assertAccountUsable = (freshUser, res) => {
 };
 
 /**
- * 凭据新鲜度校验（E-01 自 authenticate 拆出）：改密时间 + tokenVersion。
+ * 凭据新鲜度校验（自 authenticate 拆出）：改密时间 + tokenVersion。
  *
  * tokenVersion 强制要求字段存在——省略该字段的令牌一律拒绝，防止伪造令牌
  * 通过省略字段绕过会话吊销（改密/禁用/refresh 重放检测后的全量吊销）；
@@ -331,7 +331,7 @@ const assertCredentialFresh = (freshUser, decoded, res) => {
 };
 
 /**
- * 用户 IP 访问范围校验（E-01 自 authenticate 拆出）
+ * 用户 IP 访问范围校验（自 authenticate 拆出）
  *
  * token 有效期内换到未授权 IP 同样被拒绝，避免「登录时校验通过后换网络仍可
  * 长期使用」的绕过路径。规则为空时不限制，不影响未配置该功能的用户。
@@ -380,7 +380,7 @@ const assertIpAllowed = (freshUser, req, res) => {
 };
 
 /**
- * 设备级会话校验（E-01 自 authenticate 拆出）
+ * 设备级会话校验（自 authenticate 拆出）
  *
  * 令牌里的 sid 指向 UserSession 一条记录，用户在「登录会话」界面踢除某台设备后，
  * 该记录置为 revoked，此处即拒绝——其余设备不受影响（tokenVersion 只能全局吊销）。
@@ -410,7 +410,7 @@ const assertSessionUsable = async (decoded, req, res) => {
 };
 
 /**
- * 构造 req.user（E-01 自 authenticate 拆出）
+ * 构造 req.user（自 authenticate 拆出）
  *
  * 角色信息一律以实时加载的 freshUser 为准，不信任 token payload 中的 roles——
  * 用户角色被全部撤销后，旧 token 在有效期内不得继续携带签发时的角色快照。
@@ -446,7 +446,7 @@ const buildAuthContext = (decoded, freshUser) => {
 };
 
 /**
- * 认证异常 → 错误响应（E-01 自 authenticate 拆出）
+ * 认证异常 → 错误响应（自 authenticate 拆出）
  *
  * 黑名单/会话服务故障（fail-closed 上抛）明确返回 503 而非笼统 500，
  * 与 tokenBlacklist.isTokenBlacklisted 的注释契约一致——查不到结论时放行

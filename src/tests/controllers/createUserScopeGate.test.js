@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 
 /**
- * 回归：createUser 必须与 updateUser 同口径执行 P0-1 数据范围校验。
+ * 回归：createUser 必须与 updateUser 同口径执行数据范围校验。
  *
  * department 是「数据范围决定字段」：新建账户落入该部门后按自身部门可见数据。
  * 旧实现只有 updateUser 有闸（controllers/userController/update.js:205），createUser 直接把
@@ -18,7 +18,7 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
  * pre-fix（无闸）：三条都会 201 → 用例①红；post-fix：①绿。
  */
 
-describe('createUser 数据范围闸（P0-1 建号补齐）', () => {
+describe('createUser 数据范围闸（建号补齐）', () => {
   let app;
   let User;
   let Role;

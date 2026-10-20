@@ -4,7 +4,7 @@
 const trustedProxies = require('./trustedProxies');
 
 // 弱密钥黑名单：生产环境禁止使用这些默认值。
-// P0-4（2026-09-17）：加入 '<CHANGE_ME>' —— .env.example 的模板占位符
+// 加入 '<CHANGE_ME>' —— .env.example 的模板占位符
 // 此前形如「<替换为 openssl rand -base64 48 的输出>」（33 字符）能通过长度校验，
 // 照抄模板起生产 = JWT 密钥公开可知 = 可离线伪造任意用户（含超管）令牌。
 const WEAK_SECRETS = [
@@ -18,7 +18,7 @@ const WEAK_SECRETS = [
   '',
 ];
 
-// 占位符形态（P0-4）：模板示例值必须判弱。仅靠长度不够——
+// 占位符形态：模板示例值必须判弱。仅靠长度不够——
 // 原 `.env.example` 的 JWT 占位符长 33 字符，直接通过旧校验。
 // 【实测校准（2026-09-17）】以下模式全部要求「整串即占位符」或「命中不可随机
 // 生成的形态」，而非子串命中。子串式模式在随机 base64 上会稳定误伤——
@@ -88,7 +88,7 @@ const shannonEntropy = (value) => {
 };
 
 /**
- * 密钥强度判定（P0-4 加固）
+ * 密钥强度判定（加固）
  *
  * 判据（任一命中即判弱）：
  *   1. 空值，或命中 WEAK_SECRETS 黑名单；
@@ -145,7 +145,7 @@ function isWeakSecret(value) {
  * 因此只告警不退出——若升级为致命错误，所有依赖前置反代做 Host 校验的
  * 既有部署都会在升级后直接起不来。
  *
- * 【P1-34（2026-09-17）修正】此前本函数只有一个 ALLOWED_HOSTS 检查，而该
+ * 【修正】此前本函数只有一个 ALLOWED_HOSTS 检查，而该
  * 条件在 collectAllowedHostsErrors 已升级为致命错误后**永不可达**——
  * reportProductionWarnings 只在 errors.length === 0 时执行，而 errors 为空
  * 就意味着 ALLOWED_HOSTS 必然非空。结果是「加固项告警」这条链路整体空转。
@@ -196,7 +196,7 @@ function collectProductionWarnings() {
   // 与 2) 同型的「告警 + 计数、不阻断启动」——判据与取舍说明集中在独立模块。
   for (const w of loginEncryptWarnings()) warnings.push(w);
 
-  // M-2 的 TLS 告警已并入 validateConfig 的致命校验（M3，2026-09-11 放宽为
+  // TLS 告警已并入 validateConfig 的致命校验（M3，2026-09-11 放宽为
   // 「进程自启 HTTPS 或声明由前置反代终结」二选一），此处不再重复告警——
   // 保留会让 README / .env.example / docker-compose 的标准拓扑（TLS 由前置
   // Nginx 终结、应用明文 HTTP 反代）每次启动都刷一条与本意相悖的告警。
@@ -205,7 +205,7 @@ function collectProductionWarnings() {
 }
 
 /**
- * M-01：开启 API 文档时必须配置 Basic Auth 凭据。
+ * 开启 API 文档时必须配置 Basic Auth 凭据。
  *
  * swagger.basicAuth 已改为 fail-closed（无凭据则 503），故缺凭据不会造成
  * 匿名可读；但那是运行期兜底，配置错误应当在启动期就被拦下——否则文档
@@ -220,7 +220,7 @@ function collectProductionWarnings() {
 const TRUTHY_FLAG_VALUES = new Set(['true', '1']);
 
 /**
- * ENABLE_API_DOCS 是否开启（P2-38 单一口径）
+ * ENABLE_API_DOCS 是否开启（单一口径）
  *
  * 统一前是两套口径：
  *   - 本文件只认 'true'（'1' 不触发凭据校验）；
@@ -265,7 +265,7 @@ function validateDocsCredentials(errors) {
   }
 }
 
-// 反向代理最大信任跳数（E-01：原为 validateConfig 内的局部常量，现提到模块级，
+// 反向代理最大信任跳数（原为 validateConfig 内的局部常量，现提到模块级，
 // 供 collectTrustProxyErrors 与 collectTlsErrors 共用；同时是运行时归一函数
 // resolveTrustProxyHops 的上限，并被导出供 HTTP/WS 两侧复用）
 const MAX_TRUST_PROXY_HOPS = 5;
@@ -362,10 +362,10 @@ function requiresProductionSemantics() {
 
 // 生产环境配置校验（与 config/index.js 的 validateProductionConfig 保持一致）
 //
-// E-01 整改：本函数原圈复杂度 34（报告 §八 E-01 三个目标函数之一）。
 // 按校验域拆为 4 个「收集器」（各自只负责把错误推进 errors 数组）与 2 个「上报器」，
-// validateConfig 本体退化为顺序编排。收集器全部保持原有的 push 顺序与文案，
-// 因此 errors 数组的内容与顺序与拆分前逐字一致（测试直接断言该数组）。
+// validateConfig 本体只做顺序编排。errors 数组的内容与顺序由测试直接断言锁定，
+// 因此收集器的 push 顺序与文案属于对外契约，不能随意调整；
+// 新增校验项时，插在正确的位置并同步更新期望数组。
 function validateConfig() {
   if (!requiresProductionSemantics()) {
     // §14.20.3「最小改动档」（预授权）：`NODE_ENV` **真正未设置**（undefined）时
@@ -402,7 +402,7 @@ function validateConfig() {
   collectSecretErrors(errors);
   collectConnectionErrors(errors);
   collectAllowedHostsErrors(errors);
-  // M-01：API 文档凭据校验（抽为独立函数，避免本函数体积超标——
+  // API 文档凭据校验（抽为独立函数，避免本函数体积超标——
   // 见 eslint.ratchet.json 的 max-lines-per-function 约束）
   validateDocsCredentials(errors);
   collectTrustProxyErrors(errors);
@@ -421,16 +421,16 @@ function validateConfig() {
   if (errors.length > 0) reportConfigErrors(errors);
 
   // G6：致命项全部通过后，再输出加固项缺失告警（不阻断启动）。
-  // 注意（P1-34）：能走到这里说明 errors 为空，因此 collectProductionWarnings
+  // 注意：能走到这里说明 errors 为空，因此 collectProductionWarnings
   // 里的 ALLOWED_HOSTS 分支必然不成立——该分支只对直接调用者（测试）有效。
   reportProductionWarnings();
 }
 
 /**
- * 弱密钥校验（E-01 自 validateConfig 拆出）：四个密钥的强弱判定
+ * 弱密钥校验（自 validateConfig 拆出）：四个密钥的强弱判定
  *
- * 顺序与文案与拆分前一致——JWT / JWT_REFRESH / AES / HMAC。
- * isWeakSecret 的判据见其自身函数注释（P0-4 起为「空值 / 黑名单 / 长度 /
+ * 顺序与文案固定为 JWT / JWT_REFRESH / AES / HMAC。
+ * isWeakSecret 的判据见其自身函数注释（即「空值 / 黑名单 / 长度 /
  * 占位符形态 / 周期拼接 / 低熵」五项；「全数字」一条经实测被否，见该函数注释）。
  * 此行原称「含空值、黑名单、长度三重判定」——**失实**：既漏了实际存在的判据，
  * 又让人以为已有字符集层面的检查（这正是 .env.example 占位符能通过校验的认知根源）。
@@ -467,11 +467,11 @@ function collectSecretErrors(errors) {
 }
 
 /**
- * 连接与来源校验（E-01 自 validateConfig 拆出）：MongoDB / CORS / Redis
+ * 连接与来源校验（自 validateConfig 拆出）：MongoDB / CORS / Redis
  *
  * Redis 的 URL 解析放在这里而非独立函数：解析失败与协议不符是同一处 try/catch
  * 的两个出口，拆开会让 try 的边界与错误归属脱节。
- * 传输加密断言（P2-⑧）收口在 config/transportSecurity.js：非回环主机的
+ * 传输加密断言收口在 config/transportSecurity.js：非回环主机的
  * Mongo/Redis 不得明文过网，豁免走显式旗标（compose 的同宿主形态即豁免使用者）。
  */
 function collectConnectionErrors(errors) {
@@ -501,7 +501,7 @@ function collectConnectionErrors(errors) {
 }
 
 /**
- * Host 头白名单校验（E-01 自 validateConfig 拆出）：M3 生产必填项
+ * Host 头白名单校验（自 validateConfig 拆出）：M3 生产必填项
  */
 function collectAllowedHostsErrors(errors) {
   // M3：生产环境必须配置 ALLOWED_HOSTS（Host 头白名单校验）
@@ -513,9 +513,9 @@ function collectAllowedHostsErrors(errors) {
 }
 
 /**
- * TRUST_PROXY_HOPS 合法性校验（E-01 自 validateConfig 拆出）
+ * TRUST_PROXY_HOPS 合法性校验（自 validateConfig 拆出）
  *
- * 必须是 1..MAX_TRUST_PROXY_HOPS 的整数，不能只验存在性（AUX-01 / P2-24）：
+ * 必须是 1..MAX_TRUST_PROXY_HOPS 的整数，不能只验存在性：
  * 只验 `!process.env.TRUST_PROXY_HOPS` 时，`TRUST_PROXY_HOPS=abc` 能通过校验，
  * 运行时 parseInt → NaN → app.js 落入 `trust proxy = false`，且无任何告警。
  * 后果分两个方向，都很严重：
@@ -545,7 +545,7 @@ function collectTrustProxyErrors(errors) {
 }
 
 /**
- * TLS 终结校验（E-01 自 validateConfig 拆出；M3，2026-09-11 放宽版）
+ * TLS 终结校验（自 validateConfig 拆出；M3，2026-09-11 放宽版）
  *
  * TLS 必须在某一层终结，但「哪一层」由部署形态决定。原实现只认
  * ENABLE_HTTPS=true，与 README / .env.example / docker-compose 的目标形态直接
@@ -579,7 +579,7 @@ function collectTlsErrors(errors) {
 }
 
 /**
- * 业务时区校验（P2-36）
+ * 业务时区校验
  *
  * TZ_BUSINESS 是 IANA 时区名，constants/timezone.js 用它构造 Intl.DateTimeFormat。
  * 非法值（如 'Asia/Shangai' 拼错、'UTC+8' 这类固定偏移写法）此前**不在任何
@@ -609,16 +609,16 @@ function collectTimezoneErrors(errors) {
 }
 
 /**
- * 致命配置错误上报（E-01 自 validateConfig 拆出）
+ * 致命配置错误上报（自 validateConfig 拆出）
  *
- * L-05：走统一 logger；P1-13：退出前同步落盘（理由见函数内注释）。
+ * L-05：走统一 logger；退出前同步落盘（理由见函数内注释）。
  */
 function reportConfigErrors(errors) {
   // L-05：启动致命校验走统一 logger（不再使用 console.error），
   // 使致命配置错误同样进入结构化日志与日志收集链路。
   // 惰性引入避免 config → validate → logger → config 的加载期循环依赖。
   //
-  // P1-13：logger.error 走**异步** transport，紧接 process.exit 会丢日志
+  // logger.error 走**异步** transport，紧接 process.exit 会丢日志
   //（实测表见 utils/loggerFlush.js 的模块注释）。本函数是同步 API——
   // 测试以 expect(() => validateConfig()).toThrow('process.exit called') 断言，
   // 改成 setTimeout 会让「配置错误」变成「延迟退出」而破坏同步契约。
@@ -641,7 +641,7 @@ function reportConfigErrors(errors) {
 }
 
 /**
- * 加固项缺失告警上报（E-01 自 validateConfig 拆出；G6）
+ * 加固项缺失告警上报（自 validateConfig 拆出；G6）
  *
  * 致命项全部通过后才执行；logger 不可用时降级到 console，确保信息不丢失。
  */
@@ -681,9 +681,9 @@ module.exports = {
 // 支持直接执行：node src/config/validate.js（= `npm run validate`）
 //
 // 这一支是**独立进程入口**，不经过 src/config/index.js:11，于是没人替它把 <NAME>_FILE
-// 回填进 process.env——而容器里密钥**只**以文件挂载（P3-48，见 ./secrets.js）。
+// 回填进 process.env——而容器里密钥**只**以文件挂载（见 ./secrets.js）。
 // 不回填时 collectSecretErrors 读到 undefined，报出四条「JWT/REFRESH/AES/HMAC 必须设置
-// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:221
+// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:259
 // 正是拿这一步的退出码当"轮换后配置自洽"的证据——*_FILE 部署下那条轮换流程做不到收尾。
 //
 // 为什么不在文件顶部 hydrate（本轮真的先写成顶部方案，被自己的测试打回来了）：

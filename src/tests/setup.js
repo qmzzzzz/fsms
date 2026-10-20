@@ -62,15 +62,15 @@ if (!globalThis.__XF_TEST_SECRET_DIRS__) {
 globalThis.__XF_TEST_SECRET_DIRS__.add(testSecretDir);
 
 /**
- * 测试数据库隔离（P3-51 → T-1 加强）
+ * 测试数据库隔离（加强）
  *
- * 问题（P3-51 第一版）：globalSetup 只启动**一个** MongoMemoryServer，而
+ * 问题（第一版）：globalSetup 只启动**一个** MongoMemoryServer，而
  * `maxWorkers: '50%'` 让多个测试文件并行执行。所有 worker 连同一个库，
  * 「造数」互相可见：countDocuments 断言随机失败、固定编码撞 E11000、
  * deleteMany 顺手删掉别人正在用的数据。
  * 当时按 JEST_WORKER_ID 分配了 worker 级独立库（jest_w1、jest_w2...）。
  *
- * 残留问题（T-1）：同一 worker 内的多个测试文件**串行共用**该库。
+ * 残留问题：同一 worker 内的多个测试文件**串行共用**该库。
  * 数据残留照样跨文件传播——典型症状是上一文件写入的 IP 黑名单/
  * 账号锁定/角色变更被下一文件读到，出现「合法路径 403」这类
  * 顺序相关的偶发红，单跑该文件又永远复现不了。

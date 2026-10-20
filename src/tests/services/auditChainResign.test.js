@@ -14,7 +14,7 @@ describe('审计链重签后的当前版本不变量', () => {
     if (mongoose.connection.readyState === 0) {
       await mongoose.connect(process.env.MONGODB_URI);
     }
-    // P1-29 修复：原实现直接对**空库**跑 verifyAuditChain，并断言
+    // 修复：原实现直接对**空库**跑 verifyAuditChain，并断言
     // expect.any(Boolean) / expect.any(Number) —— 恒真断言，未验证任何行为。
     // 现改为：先用真实模型写入一批记录（pre-save 走真实链锁 + 当前 payload 口径），
     // 再断言校验结论为「零断裂」，且落库记录确实带当前版本（CURRENT_PAYLOAD_VERSION）

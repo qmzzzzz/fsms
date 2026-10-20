@@ -10,6 +10,8 @@
  * sharedCache 与 rate-limit-redis 均为文件级 mock（mock* 前缀变量供工厂引用）；
  * env 保存/恢复防泄漏。
  */
+const { waitFor } = require('../helpers/waitFor');
+
 const mockRedisClient = { call: jest.fn() };
 
 jest.mock('../../services/sharedCache', () => ({
@@ -66,6 +68,11 @@ describe('makeSharedStore 共享存储分支', () => {
     sharedCache.isRedisEnabled.mockReturnValue(false);
   });
 
+  // 后台 IIFE 在 initSharedCache 的 Promise 落地后创建 RedisStore；
+  // mock 被调用就是「后台切换已完成」的真实信号，不必猜一个固定时长。
+  const waitForRedisStore = () =>
+    waitFor(() => RedisStore.mock.calls.length > 0, { label: 'RedisStore 后台创建' });
+
   test('REDIS_URL 未配置 → 同步返回 undefined（走 express-rate-limit 默认 MemoryStore）', () => {
     delete process.env.REDIS_URL;
     expect(makeSharedStore('general')).toBeUndefined();
@@ -80,8 +87,11 @@ describe('makeSharedStore 共享存储分支', () => {
     expect(typeof store.increment).toBe('function');
     expect(typeof store.decrement).toBe('function');
     expect(typeof store.resetKey).toBe('function');
-    // 等待后台异步 initSharedCache rejection → catch 生效
-    await new Promise((r) => setTimeout(r, 50));
+    // 等待后台异步 initSharedCache rejection → catch 生效（按文案匹配，避免被别的告警提前满足）
+    await waitFor(
+      () => warnSpy.mock.calls.some((args) => String(args[0]).includes('限流共享存储初始化失败')),
+      { label: '限流共享存储初始化失败告警' }
+    );
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('限流共享存储初始化失败'));
     warnSpy.mockRestore();
   });
@@ -107,7 +117,7 @@ describe('makeSharedStore 共享存储分支', () => {
     expect(store).toBeDefined();
     expect(typeof store.increment).toBe('function');
     // 等待后台异步初始化完成，使 RedisStore 被创建
-    await new Promise((r) => setTimeout(r, 50));
+    await waitForRedisStore();
     expect(RedisStore).toHaveBeenCalledWith(expect.objectContaining({ prefix: 'rl:ip:' }));
     // sendCommand 透传到共享 Redis client.call
     const opts = RedisStore.mock.calls[RedisStore.mock.calls.length - 1][0];
@@ -126,7 +136,13 @@ describe('makeSharedStore 共享存储分支', () => {
     // 切换尚未完成（后台 IIFE 未跑完），此时 init 只记录
     store.init(options);
     // 等待后台切换完成 → initSharedCache 的 lastInitOptions 被补发给 active.init
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(
+      () => {
+        const last = RedisStore.mock.results[RedisStore.mock.results.length - 1];
+        return !!last && last.value.init.mock.calls.length > 0;
+      },
+      { label: 'RedisStore 创建并补发 init(lastInitOptions)' }
+    );
     const inst = RedisStore.mock.results[RedisStore.mock.results.length - 1].value;
     expect(inst.init).toHaveBeenCalledWith(options);
   });
@@ -136,7 +152,7 @@ describe('makeSharedStore 共享存储分支', () => {
     sharedCache.initSharedCache.mockResolvedValueOnce(undefined);
     sharedCache.isRedisEnabled.mockReturnValueOnce(true);
     const store = makeSharedStore('password');
-    await new Promise((r) => setTimeout(r, 50));
+    await waitForRedisStore();
     const options = { skipFailedRequests: false };
     store.init(options);
     const inst = RedisStore.mock.results[RedisStore.mock.results.length - 1].value;
@@ -148,7 +164,7 @@ describe('makeSharedStore 共享存储分支', () => {
     sharedCache.initSharedCache.mockResolvedValueOnce(undefined);
     sharedCache.isRedisEnabled.mockReturnValueOnce(true);
     const store = makeSharedStore('user');
-    await new Promise((r) => setTimeout(r, 50));
+    await waitForRedisStore();
     const inst = RedisStore.mock.results[RedisStore.mock.results.length - 1].value;
     inst.increment.mockResolvedValueOnce({ totalHits: 1 });
     await store.increment('key-a');
@@ -166,7 +182,7 @@ describe('makeSharedStore 共享存储分支', () => {
     const store = makeSharedStore('strict');
     // active 仍是 fallback MemoryStore（切换中）→ resetAll 不存在 → 静默
     await expect(store.resetAll()).resolves.toBeUndefined();
-    await new Promise((r) => setTimeout(r, 50));
+    await waitForRedisStore();
     const inst = RedisStore.mock.results[RedisStore.mock.results.length - 1].value;
     inst.resetAll.mockResolvedValueOnce(undefined);
     await expect(store.resetAll()).resolves.toBeUndefined();

@@ -354,6 +354,12 @@ describe('AuditLogView 列表加载与渲染', () => {
     expect(td(c, 1, 2).querySelector('.cell-sub').textContent.trim()).toBe('设备')
   })
 
+  test('system_view 兜底 action 有词表文案（GET /api、/api/metrics 会落这条）', async () => {
+    const c = await openList([logRow({ action: 'system_view', category: 'system' })])
+    expect(td(c, 0, 2).querySelector('.cell-main').textContent.trim()).toBe('查看系统信息')
+    expect(td(c, 0, 2).querySelector('.cell-sub').textContent.trim()).toBe('系统')
+  })
+
   test('请求列：method/path 渲染，事件型日志（无请求信息）显示占位符', async () => {
     const c = await openList([
       logRow({ method: 'POST', path: '/api/auth/login' }),

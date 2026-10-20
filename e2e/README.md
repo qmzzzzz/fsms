@@ -55,3 +55,17 @@ npm run test:e2e:browser
   在专用演练账号与造数环境执行，避免共享环境被自动化污染。
 - 选择器基于中文文案与 Element Plus 类名；界面改版导致漂移时，
   优先补 `data-testid` 再改用例，不要在用例里堆脆弱路径。
+
+## 运维关键路径旅程（T-1）
+
+浏览器旅程之外，`npm run test:ops-e2e` 覆盖四条**进程/数据库/脚本级**路径：
+
+| 旅程               | 证明了什么                                                                                              |
+| ------------------ | ------------------------------------------------------------------------------------------------------- |
+| `alert-delivery`   | 探针真实 HTTP 投递 → `queued-unacked` → `--ack` → `ok`；投递失败可见且退出 1                            |
+| `deploy-rollback`  | 真实 `deploy.js`：备份先于迁移、迁移先于切换；健康失败自动切回上一镜像；有迁移时拒绝自动回滚            |
+| `backup-restore`   | 真实快照 → 清空 → 回灌，`restoreVerified` 逐集合一致；ObjectId/Date 往返无损；manifest 可被留档脚本接受 |
+| `cross-department` | 完整启动 app：两个部门账号只读到本部门设备，越界详情 403 `DEVICE_VIEW_FORBIDDEN`                        |
+
+它们**不进入** Playwright 的 `skipped==0` / `MIN_PASSED` 统计，因此不会改变
+本目录的门禁数字。支持 `--only <旅程>` 与 `--keep`（保留临时目录排查）。

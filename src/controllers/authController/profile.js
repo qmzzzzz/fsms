@@ -81,7 +81,7 @@ const changePassword = asyncHandler(async (req, res) => {
     case 'OK':
       break;
     default:
-      // 未知 outcome 一律 fail-closed（依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查），绝不落到成功分支
+      // 未知 outcome 一律 fail-closed（全仓 outcome switch 普查口径），绝不落到成功分支
       return rejectUnknownOutcome(res, 'changePassword', result.outcome);
   }
 
@@ -128,7 +128,7 @@ const updateProfile = asyncHandler(async (req, res) => {
     case 'OK':
       break;
     default:
-      // 未知 outcome 一律 fail-closed（依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查），绝不落到成功分支
+      // 未知 outcome 一律 fail-closed（全仓 outcome switch 普查口径），绝不落到成功分支
       return rejectUnknownOutcome(res, 'updateProfile', result.outcome);
   }
 

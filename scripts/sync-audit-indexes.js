@@ -34,7 +34,7 @@ require('dotenv').config();
 require('../src/config/secrets').hydrateSecretsFromFiles();
 const mongoose = require('mongoose');
 
-// M-08 / P1-20：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。
+// 破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。
 // 本脚本 --apply 会 dropIndex（含删除历史遗留索引），属「--apply 类」破坏性操作。
 const { dbNameFromUri, hostFromUri, assertApplyAllowed } = require('./destructiveGuard');
 

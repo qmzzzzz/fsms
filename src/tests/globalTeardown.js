@@ -3,7 +3,7 @@
 const mongoose = require('mongoose');
 
 module.exports = async function globalTeardown() {
-  // P3-51：worker 库由 setup.js 按 JEST_WORKER_ID 分配（jest_w1、jest_w2...），
+  // worker 库由 setup.js 按 JEST_WORKER_ID 分配（jest_w1、jest_w2...），
   // 主进程的 mongoose 连接指向的是 globalSetup 里那个无库名的 URI，
   // 只 dropDatabase() 清不掉 worker 库。改为枚举并删除全部 jest_w* 库。
   //

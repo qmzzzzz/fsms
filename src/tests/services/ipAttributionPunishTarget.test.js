@@ -33,6 +33,7 @@ const {
 const AuditLog = require('../../models/AuditLog');
 const User = require('../../models/User');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { waitFor } = require('../helpers/waitFor');
 
 const stamp = Date.now().toString().slice(-7);
 // TEST-NET 地址段（192.0.2.0/24 不属 RFC1918 ⇒ isPrivateOrLoopback=false ⇒ 公网语义）
@@ -59,15 +60,6 @@ const TEST_IPS = [
 
 const originalAdd = security.addToBlacklist;
 let captured;
-
-const waitUntil = async (fn, timeoutMs = 5000) => {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (fn()) return true;
-    if (Date.now() > deadline) return false;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-};
 
 const purgeAudit = (filter) => AuditLog.deleteMany(filter, { bypassAppendOnly: true });
 
@@ -141,7 +133,9 @@ describe('限流升级 × 惩罚目标裁定', () => {
         'captcha'
       );
     }
-    expect(await waitUntil(() => captured.filter((c) => c.ip === PEER_IP).length === 1)).toBe(true);
+    await waitFor(() => captured.filter((c) => c.ip === PEER_IP).length === 1, {
+      label: '限流升级封禁落在 socket 对端',
+    });
     // 受害者/伪造值都不是打击对象
     expect(captured.filter((c) => c.ip === FORGED_A || c.ip === FORGED_B)).toHaveLength(0);
     // 审计留痕：这次的封禁依据是哪一类来源，事后必须可查
@@ -178,7 +172,9 @@ describe('checkBruteForce / checkPermissionAbuse × 惩罚目标裁定', () => {
       punishIp: BF_PEER,
       socketPeer: BF_PEER,
     });
-    expect(await waitUntil(() => captured.filter((c) => c.ip === BF_PEER).length >= 1)).toBe(true);
+    await waitFor(() => captured.filter((c) => c.ip === BF_PEER).length >= 1, {
+      label: '暴力破解封禁落在 socket 对端',
+    });
     expect(captured[0].durationMs).toBe(ESCALATION_TIERS[0]);
     const row = await AuditLog.findOne({
       action: ALERT_TYPES.BRUTE_FORCE,
@@ -213,9 +209,9 @@ describe('checkBruteForce / checkPermissionAbuse × 惩罚目标裁定', () => {
       String(abuser._id),
       resolvePunishableIp({ ip: ABUSE_FORGED, socket: { remoteAddress: ABUSE_PEER } })
     );
-    expect(await waitUntil(() => captured.filter((c) => c.ip === ABUSE_PEER).length >= 1)).toBe(
-      true
-    );
+    await waitFor(() => captured.filter((c) => c.ip === ABUSE_PEER).length >= 1, {
+      label: '权限滥用遏制封禁落在 socket 对端',
+    });
     expect(captured.filter((c) => c.ip === ABUSE_FORGED)).toHaveLength(0);
     const row = await AuditLog.findOne({
       action: ALERT_TYPES.PERMISSION_ABUSE,
@@ -252,7 +248,9 @@ describe('checkBruteForce / checkPermissionAbuse × 惩罚目标裁定', () => {
       punishIp: TRUSTED_REPORTED,
       socketPeer: '127.0.0.1',
     });
-    expect(await waitUntil(() => captured.some((c) => c.ip === TRUSTED_REPORTED))).toBe(true);
+    await waitFor(() => captured.some((c) => c.ip === TRUSTED_REPORTED), {
+      label: 'TRUSTED_PROXY 封禁落在 reportedIp',
+    });
     const trusted = await AuditLog.findOne({
       action: ALERT_TYPES.BRUTE_FORCE,
       ip: TRUSTED_REPORTED,
@@ -264,7 +262,9 @@ describe('checkBruteForce / checkPermissionAbuse × 惩罚目标裁定', () => {
       punishIp: DIRECT_IP,
       socketPeer: DIRECT_IP,
     });
-    expect(await waitUntil(() => captured.some((c) => c.ip === DIRECT_IP))).toBe(true);
+    await waitFor(() => captured.some((c) => c.ip === DIRECT_IP), {
+      label: 'DIRECT 封禁落在 reportedIp',
+    });
     const direct = await AuditLog.findOne({
       action: ALERT_TYPES.BRUTE_FORCE,
       ip: DIRECT_IP,

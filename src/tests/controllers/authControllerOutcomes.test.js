@@ -223,7 +223,7 @@ describe('login outcome 矩阵', () => {
     expect(res.cookie).not.toHaveBeenCalled();
   });
 
-  test('成功：下发 cookie 并回传 token/refreshToken/expires/user', async () => {
+  test('成功：下发 cookie 并回传 expires/user，响应体不含令牌', async () => {
     authService.loginUser.mockResolvedValue({
       outcome: 'OK',
       token: 't1',
@@ -233,8 +233,11 @@ describe('login outcome 矩阵', () => {
     const res = makeRes();
     await invoke(controller.login, makeReq(), res);
     expect(res.cookie).toHaveBeenCalledTimes(2);
-    expect(res.body.data.token).toBe('t1');
+    // S-1：令牌只经 httpOnly cookie 下发
+    expect(res.body.data.token).toBeUndefined();
+    expect(res.body.data.refreshToken).toBeUndefined();
     expect(res.body.data.expires).toBeDefined();
+    expect(res.body.data.user.username).toBe('alice');
   });
 
   test('登录上下文携带 ip/userAgent/fingerprint（风控依赖）', async () => {
@@ -287,7 +290,7 @@ describe('refreshToken outcome 矩阵', () => {
     expect(JSON.stringify(res.body)).not.toContain('ECONNREFUSED');
   });
 
-  test('成功：cookie 轮换 + 响应体保留 tokens 字段（兼容契约）', async () => {
+  test('成功：cookie 轮换，响应体不含令牌', async () => {
     authService.refreshSession.mockResolvedValue({
       outcome: 'OK',
       token: 't2',
@@ -296,7 +299,8 @@ describe('refreshToken outcome 矩阵', () => {
     const res = makeRes();
     await invoke(controller.refreshToken, makeReq({ body: { refreshToken: 'r-old' } }), res);
     expect(res.cookie).toHaveBeenCalledTimes(2);
-    expect(res.body.data.refreshToken).toBe('r2');
+    expect(res.body.data.token).toBeUndefined();
+    expect(res.body.data.refreshToken).toBeUndefined();
   });
 
   test('请求体缺 refreshToken 时回退读 refresh_token cookie', async () => {

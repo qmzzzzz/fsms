@@ -27,7 +27,7 @@ const { AUDIT_ERROR_RISK_LEVELS } = require('../../constants/audit');
 const requestWithQuery = (query) => ({ query });
 
 /**
- * E-05 回归：审计查询的筛选条件必须与导出共用同一份实现
+ * 回归：审计查询的筛选条件必须与导出共用同一份实现
  *
  * 背景：services/auditQueryService.js 曾内联维护第二份 buildAuditQuery，
  * 两份已经漂移——本地副本的 date-only 边界走服务器本地时区
@@ -39,7 +39,7 @@ const requestWithQuery = (query) => ({ query });
  *   1. 源码级断言全仓只有一处 buildAuditQuery 定义（防再次分叉）；
  *   2. 行为级断言 date-only 边界落在业务时区，不随 runner 本地时区漂移。
  */
-describe('E-05：审计查询与导出共用同一 buildAuditQuery（防口径分叉）', () => {
+describe('审计查询与导出共用同一 buildAuditQuery（防口径分叉）', () => {
   test('全仓仅 utils/auditQuery.js 定义 buildAuditQuery', () => {
     const fs = require('fs');
     const path = require('path');

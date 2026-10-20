@@ -27,7 +27,9 @@
   「没看到黑名单拦截 / 没看到限流触发 / 没看到验证码上限拒绝」都不能当作「没有被攻击」的证据，
   排查前先确认 MongoDB / Redis 是否已恢复（各类型的失效语义见 `src/constants/failOpenSites.js`）。
 - **审计中断判据**：审计落库失败会打 error 日志并计入 `audit_write_failed`——
-  「审计页没有新记录」本身就是事件（先查服务是否在写 WAL：`logs/audit.wal`）。
+  「审计页没有新记录」本身就是事件（先查服务是否在写 WAL：默认
+  `logs/audit-buffer.<库名>.wal`，或 `AUDIT_WAL_PATH` 指定的路径；多实例下每个实例
+  各写各的文件，见 `src/services/auditBufferWal.js`）。
 - **哨兵用户名（canary）探测**：审计页按 action 过滤 `canary_username_attempt`——
   名单里的幽灵名（默认 10 个攻击字典高频词，见 `src/constants/canaryAccounts.js`）
   在「用户名不存在」的登录失败上命中即落（riskLevel=critical），真实账户不会触发；

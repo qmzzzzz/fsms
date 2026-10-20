@@ -88,7 +88,7 @@ function queryLengthLimit(max = MAX_QUERY_VALUE_LENGTH) {
 }
 
 /**
- * 查询参数必须为标量（AUX-04 第二例 / P3-4 修复）
+ * 查询参数必须为标量（AUX-04 第二例 / 修复）
  *
  * 问题：Express 的 qs 解析把 `?search[$regex]=^a` 变成对象、
  * `?status=a&status=b` 变成数组。控制器却按字符串消费：
@@ -103,7 +103,7 @@ function queryLengthLimit(max = MAX_QUERY_VALUE_LENGTH) {
  * query，故一律 400 拒绝，而非静默取首值——静默取值会让
  * `?status=admin&status=x` 之类的参数污染难以察觉。
  *
- * 注意（P1-33 修正，2026-09-17；2026-09-30 收口）：原注释称「本中间件须挂在
+ * 注意（修正，2026-09-17；2026-09-30 收口）：原注释称「本中间件须挂在
  * applySecurity（含 sanitizeMongo/hpp）之后，保证看到的是清洗后的最终形态」——
  * 该前提在 Express 5 下**不成立**：req.query 是 getter（每次访问重新解析 URL 查询串），
  * sanitizeMongo/hpp 对 req.query 的原地清洗结果在下一次访问时即被丢弃。

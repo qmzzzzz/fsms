@@ -14,7 +14,7 @@
  * 没有任何东西要求它们相等（文档不是运行时，没人对账就永不红）。
  * 现在加一档只改 DEVICE_STATUS，两个出口跟着动；要再多排除一档，改这一行 filter。
  *
- * scrapped 被排除是设计而非遗漏（P2-16）：报废需要 scrapReason 并推进 lifecycleStage，
+ * scrapped 被排除是设计而非遗漏：报废需要 scrapReason 并推进 lifecycleStage，
  * 只能走 POST /api/devices/{id}/scrap；放行到通用状态接口会绕过 transitionTo 状态机，
  * 造出「status=scrapped 但 lifecycleStage=in_use」的矛盾状态（提醒与报表按 status 排除，
  * 生命周期却仍在推进）。排除的理由集中写在这里，不再依赖两处行注释各说一遍。

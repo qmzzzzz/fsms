@@ -13,7 +13,7 @@
  * 约定与本目录其他文件一致（constants/audit.js、constants/permission.js、
  * constants/ipList.js）：**由本文件提供清单，model 的 enum 指过来**，
  * 校验器与 OpenAPI 生成器再引用同一份。本文件不是「看起来像集中管理」的零引用声明——
- * 那种伪枚举正是 utils/constants.js 头部记录过的 drift 源，已在 E-05 轮删除。
+ * 那种伪枚举正是 utils/constants.js 头部记录过的 drift 源，已在轮删除。
  * 判定标准：删掉本文件后如果 model 无值可指，它就是事实来源；
  * 如果只是给 model 复制一份「说明」，它就是待删的伪枚举。
  *

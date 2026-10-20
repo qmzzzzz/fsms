@@ -14,7 +14,7 @@ const memStore = new Map();
 let memCleanupTimer = null;
 
 // S-L2（改后审计）：内存回退存储硬上限——Redis 未配置时 nonce 防重放表等
-// 可能被分布式来源推高（对照 alertRateLimit 的 P3-24 同类防护）。env 可调，默认 2 万条。
+// 可能被分布式来源推高（对照 alertRateLimit 的同类防护）。env 可调，默认 2 万条。
 const getMemStoreMax = () => Math.max(1000, Number(process.env.SHARED_CACHE_MEM_MAX) || 20000);
 
 let memCapRejects = 0;

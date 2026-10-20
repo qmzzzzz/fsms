@@ -289,6 +289,12 @@ const WRITE_CALLS = [
   // 一个"实参不是对象字面量"的写入点，反而制造 unresolved）。
   { re: /(?<!function\s)\brecordSensitiveActionDurably\(/g, kind: 'record', mode: 'object' },
   { re: /(?<!function\s)\brecordDurably\(/g, kind: 'record', mode: 'object' },
+  // A-4（2026-10-20）：IP 名单控制器不再直连模型，提权审计经
+  // services/ipListService.recordPrivilegeEscalation 转发。调用点在控制器里带着
+  // action 字面量；不扩表则它既不算写入（正向/反向都看不见），又会被回球闸判成
+  // 「未认领」。函数定义处由 lookbehind 排除，服务内部的 AuditLog.record(doc)
+  // 仍按转发形态登记。
+  { re: /(?<!function\s)\brecordPrivilegeEscalation\(/g, kind: 'record', mode: 'object' },
   // F-201：模型静态方法**自身**决定 action 的写入点（recordLogin 的三元）。
   // 前四类都以 `AuditLog.` / `auditBuffer.` 为前缀，于是这类写入整个不在对账范围内。
   { re: /\bthis\.create\(/g, kind: 'modelStatic', mode: 'object' },
@@ -419,7 +425,7 @@ function scanWriteSites(rootDir = SRC_DIR) {
  * 一个不认得的形态（`AuditLog.insertMany([{action:'x'}])`、`const log = AuditLog.record`
  * 之后再 `log({action:'x'})`、`AuditLog['record']({action:'x'})`、数组里第二个对象字面量…）
  * 是**静默**消失的：正向对账看不见它，反向对账只问"白名单里的动作有没有人写"，
- * 于是"写进库却没登记"这一整类（P1-11）从两侧都查不出来。
+ * 于是"写进库却没登记"这一整类从两侧都查不出来。
  * 本函数把判据反过来：**凡是代码里的 action 字面量都必须被某个形态认领**，
  * 认不出来就是新形态，必须显式判定（要么补进 WRITE_CALLS，要么进对账闸的排除清单）。
  *

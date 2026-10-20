@@ -54,8 +54,6 @@ import {
   GraphicComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-// echarts 6 中 grid.containLabel 需显式注册旧版兼容组件，否则控制台告警
-import { LegacyGridContainLabel } from 'echarts/features'
 
 echarts.use([
   LineChart,
@@ -66,7 +64,6 @@ echarts.use([
   GridComponent,
   GraphicComponent,
   CanvasRenderer,
-  LegacyGridContainLabel,
 ])
 
 import { usePermission } from '@/composables/usePermission'
@@ -138,7 +135,14 @@ const initCharts = (alarmTrendData, deviceTypeData, failed = {}) => {
         return `${escapeHtml(data.name)}<br/>${t('dashboard.alarmCount')}: ${escapeHtml(data.value)}`
       },
     },
-    grid: { left: '3%', right: '4%', top: '10%', bottom: '15%', containLabel: true },
+    grid: {
+      left: '3%',
+      right: '4%',
+      top: '10%',
+      bottom: '15%',
+      outerBoundsMode: 'same',
+      outerBoundsContain: 'axisLabel',
+    },
     xAxis: {
       type: 'category',
       data: dates,

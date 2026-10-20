@@ -76,17 +76,19 @@ node scripts/generate-secrets.js --env-snippet              # 本地：打印 .e
 服务端日志的 `publicKeySha256` 字段。另注意静态私钥无前向保密：一旦泄露须按
 口令泄露处置（强制改密），预案见 `SECURITY.md`「登录口令加密的密钥管理」。
 
-### ⚠️ HMAC_SECRET 的四重影响：请按这张表读，不要按小节读
+### ⚠️ HMAC_SECRET 的五重影响：请按这张表读，不要按小节读
 
-上表 HMAC_SECRET 一行只写了审计链。**`HMAC_SECRET` 在本仓有四个消费点**，
-其中只有第 1 个有迁移工具——另外三个换钥后**静默失效**：
+上表 HMAC_SECRET 一行只写了审计链。**`HMAC_SECRET` 在本仓有五个消费点**，
+其中只有第 1 个有迁移工具——另外四个换钥后都没有迁移手段（第 2~4 个**静默失效**，
+第 5 个会让检查点核验**全量报 signature_invalid**）：
 
-| #   | 消费点（路径按仓库根写全，行号会漂移、判据是文件） | 用途                      | 轮换后                 | 迁移手段                                  |
-| --- | -------------------------------------------------- | ------------------------- | ---------------------- | ----------------------------------------- |
-| 1   | `src/utils/auditChain.js:64`                       | 审计记录 `hmac` 字段      | 存量记录 hmac 全部失配 | ✅ `scripts/resign-audit-hmac.js`（重签） |
-| 2   | `src/utils/passwordHistory.js:64`                  | 口令复用历史摘要的 pepper | 历史长度归零           | ❌ 无（没有明文就无法重算）               |
-| 3   | `src/services/mfaService.js:29`                    | **备用恢复码**的 pepper   | **全部恢复码失效**     | ❌ 无                                     |
-| 4   | `src/utils/encryption.js:189`                      | `HMACSigner` 数据签名密钥 | 存量签名全部失配       | ❌ 无                                     |
+| #   | 消费点（路径按仓库根写全，行号会漂移、判据是文件） | 用途                      | 轮换后                 | 迁移手段                                       |
+| --- | -------------------------------------------------- | ------------------------- | ---------------------- | ---------------------------------------------- |
+| 1   | `src/utils/auditChain.js:64`                       | 审计记录 `hmac` 字段      | 存量记录 hmac 全部失配 | ✅ `scripts/resign-audit-hmac.js`（重签）      |
+| 2   | `src/utils/passwordHistory.js:64`                  | 口令复用历史摘要的 pepper | 历史长度归零           | ❌ 无（没有明文就无法重算）                    |
+| 3   | `src/services/mfaService.js:29`                    | **备用恢复码**的 pepper   | **全部恢复码失效**     | ❌ 无                                          |
+| 4   | `src/utils/encryption.js:189`                      | `HMACSigner` 数据签名密钥 | 存量签名全部失配       | ❌ 无                                          |
+| 5   | `src/services/auditChainCheckpoint.js:44`          | 审计链检查点签名          | 存量检查点全部验签失败 | ❌ 无（轮换前留档、轮换后另起文件，见第 5 点） |
 
 > **这张表是单一来源**：`src/tests/config/hmacSecretConsumersSingleSource.test.js`
 > 会扫描 `src/`（排除测试与配置装载面）下所有 `HMAC_SECRET` / `hmacSecret` 的消费点，
@@ -140,6 +142,29 @@ node scripts/generate-secrets.js --env-snippet              # 本地：打印 .e
 「原本有效的签名突然判为伪造」。排查方向容易走偏（先怀疑数据被篡改），
 故在此点名：**先确认轮换时间点，再判篡改**。
 
+#### 第 5 点：审计链签名检查点
+
+`services/auditChainCheckpoint.js` 用 `HMAC_SECRET` 给「某一时刻的链尾 + 记录数」
+签名（`hmacSecretOf`，见该文件第 41 行起），用于补上链内校验的两类盲区：
+已知锚点后插枝、尾部截断。
+
+换钥后**旧检查点全部验签失败**：
+`MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret node scripts/audit-chain-checkpoint.js verify`
+会逐条报 `signature_invalid` 并以退出码 1 结束。同样**先确认轮换时间点，再判篡改**。
+这里没有迁移工具，也不应有：检查点的证明力来自「旧钥签署的当时状态」，
+用新钥重签旧检查点等于把证据换成自说自话。
+
+**轮换时的操作**（与 HMAC 轮换同一窗口）：
+
+1. 轮换前在旧钥下 `create` 一个检查点，与 `audit-chain-before-rotation.log`
+   一起归档到默认路径之外（默认 `logs/audit-chain-checkpoints.jsonl`）。
+2. 换钥重启后把它移到归档目录（如 `audit-chain-checkpoints.pre-rotation.jsonl`），
+   让后续 `create` 从空文件重新起算。
+3. 首次 `create` 后跑一次 `verify`，要求退出码 0。
+
+旧文件若留在默认路径，此后每次 `verify` 都会全红——一个永远红的校验会很快
+被当成噪声忽略，等于把锚点废掉。
+
 ## AES_SECRET_KEY 轮换（必须先迁数据）
 
 ```bash
@@ -156,6 +181,19 @@ MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_
 #    （防止将演练/迁移误指向非预期库）。本文件所有 `--apply` 同理，不再逐处重复注释。
 MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
   ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key-file ./secrets/aes_secret_key.new --apply
+
+# 2b. 同一把 AES_SECRET_KEY 还派生 PII 子密钥（User.phone / User.email /
+#     FireAlarm.reporter.phone，见 src/utils/piiCrypto.js）——必须一起重加密。
+#     AES_SECRET_KEY_FILE 指向**新**钥（写入侧），旧钥只经 PII_ROTATION_OLD_AES_KEY
+#     传给脚本（该变量没有 *_FILE 形态，用命令替换避免进 argv）。
+#     漏掉这一步：换钥后手机号/邮箱无法解密，且 migrate-mfa-secret 的"成功"报告
+#     不会暴露它。
+MONGODB_URI_FILE=./secrets/mongodb_uri \
+  AES_SECRET_KEY_FILE=./secrets/aes_secret_key.new \
+  PII_ROTATION_OLD_AES_KEY="$(cat ./secrets/aes_secret_key)" \
+  ALLOWED_SOURCE_DB=<库名> node scripts/migrate-pii-encryption.js --apply --yes --rotate
+#     脚本成功后会提示清理旧钥：生产环境**必须 unset PII_ROTATION_OLD_AES_KEY**
+#     （旧钥驻留 = 轮换白做，见下文「PII 轮换旧钥必须移除」）。
 
 # 3. 换钥
 #    本地开发：更新 .env 的 AES_SECRET_KEY
@@ -225,7 +263,7 @@ echo "退出码 $?"
       那是没喂配置，不是轮换出错。宿主机侧要跑就得逐条点名 `*_FILE=./secrets/<name>`。）
 - [ ] 抽查日志无「MFA 种子解密失败」「hmac 失配」告警
 - [ ] 启动日志中出现过 `password_history_pepper_rotation` 告警（HMAC 轮换的**预期**
-      副作用，见上文「HMAC_SECRET 的四重影响」）——**换完钥的首次启动若没有它，
+      副作用，见上文「HMAC_SECRET 的五重影响」）——**换完钥的首次启动若没有它，
       说明告警链路失效或 `PASSWORD_HISTORY_DEPTH=0`，需人工确认**
 - [ ] **PII 轮换后必须 unset `PII_ROTATION_OLD_AES_KEY`**（见下节），
       且启动日志**不得**再出现 `pii_rotation_old_key_lingering` 告警

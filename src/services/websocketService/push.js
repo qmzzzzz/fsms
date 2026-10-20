@@ -47,6 +47,70 @@ const guardSocketHandler =
     }
   };
 
+/** 收集在线用户：Redis 模式按房间批取成员，本地模式直接查连接表（A-5）。 */
+async function collectOnlineUsers(io, connections, ids, redisMode) {
+  const online = new Map(); // userId -> 本地 socketId 集合（Redis 模式为 null，走房间投递）
+  if (!redisMode) {
+    for (const userId of ids) {
+      const socketIds = connections.get(userId);
+      // 不在线的用户无需重算权限：他下次登录/刷新时走 /auth/me 自然拿到最新值
+      if (socketIds && socketIds.size > 0) online.set(userId, socketIds);
+    }
+    return online;
+  }
+  const requested = new Set(ids);
+  const liveSockets = await io.in(ids.map(userRoom)).fetchSockets();
+  for (const socket of liveSockets) {
+    for (const room of socket.rooms || []) {
+      const name = String(room);
+      if (!name.startsWith('user:')) continue;
+      const userId = name.slice('user:'.length);
+      if (requested.has(userId)) online.set(userId, null);
+    }
+  }
+  return online;
+}
+
+/** 只重算在线用户的权限，一次查库；失败返回 null（前端回退 /auth/me）。 */
+async function recomputePermissions(onlineIds) {
+  if (onlineIds.length === 0) return null;
+  try {
+    // 惰性 require 保留（与历史一致）：便于测试在 require 服务后替换 User 实现。
+    const User = require('../../models/User');
+    return await User.getPermissionsForUsers(onlineIds);
+  } catch (err) {
+    logger.warn('权限同步重算失败，降级为「仅通知」', {
+      userIds: onlineIds,
+      error: err.message,
+    });
+    return null;
+  }
+}
+
+/** 按连接形态投递：Redis 走用户房间，本地逐 socket。 */
+function deliverPermissionSync(io, online, meta, permsByUser, redisMode) {
+  for (const [userId, localSocketIds] of online) {
+    const permissionCodes = permsByUser ? permsByUser.get(userId) : undefined;
+    const eventData = {
+      type: 'permission-sync',
+      timestamp: new Date().toISOString(),
+      ...meta,
+      ...(permissionCodes ? { permissionCodes } : {}),
+    };
+
+    if (redisMode) {
+      // 房间投递经 adapter 分发到所有实例上该用户的连接
+      io.to(userRoom(userId)).emit('permission-sync', eventData);
+    } else {
+      // 逐 socket 投递而非 io.to(userId)：本服务未把用户加入以 userId 命名的
+      // 房间时，userConnections 才是 userId → socketIds 的事实来源
+      for (const socketId of localSocketIds) {
+        io.to(socketId).emit('permission-sync', eventData);
+      }
+    }
+  }
+}
+
 const methods = {
   setupEventHandlers() {
     this.io.on('connection', (socket) => {
@@ -135,7 +199,7 @@ const methods = {
           }
           // 部分房间有角色要求（如 role-management 仅限管理员）
           //
-          // P2-14 修复：不得使用认证时的 socket.roleCodes 静态快照。
+          // 修复：不得使用认证时的 socket.roleCodes 静态快照。
           // 长连接可存活数小时，期间用户可能被降级/停权，而快照永不刷新——
           // 被降级的连接仍能加入 role-management 并持续接收角色/权限变更事件。
           // 受限房间在入房时强制重查数据库（同时复查 status/tokenVersion）；
@@ -249,76 +313,27 @@ const methods = {
    */
   async emitPermissionSync(userIds = [], meta = {}) {
     const ids = [...new Set((userIds || []).map((id) => String(id)).filter(Boolean))];
-    let notified = 0;
-    let offline = 0;
+    if (ids.length === 0) return { notified: 0, offline: 0 };
 
     // Redis 就绪且挂载 adapter 时，在线判定与投递都走用户房间——
     // 房间成员跨实例可见，用户连在其他实例上也能收到；
     // 未配置时保持本地连接表路径（单实例语义，与历史一致）
     const redisMode = sharedCache.isRedisEnabled();
+    const online = await collectOnlineUsers(this.io, this.userConnections, ids, redisMode);
+    const offline = ids.length - online.size;
+    const permsByUser = await recomputePermissions([...online.keys()]);
+    deliverPermissionSync(this.io, online, meta, permsByUser, redisMode);
 
-    for (const userId of ids) {
-      let localSocketIds = null;
-      if (redisMode) {
-        // fetchSockets 在挂载 redis adapter 时返回全实例的房间成员
-
-        const liveSockets = await this.io.in(userRoom(userId)).fetchSockets();
-        if (liveSockets.length === 0) {
-          offline++;
-          continue;
-        }
-      } else {
-        localSocketIds = this.userConnections.get(userId);
-        // 不在线的用户无需重算权限：他下次登录/刷新时走 /auth/me 自然拿到最新值
-        if (!localSocketIds || localSocketIds.size === 0) {
-          offline++;
-          continue;
-        }
-      }
-
-      let permissionCodes;
-      try {
-        const User = require('../../models/User');
-        permissionCodes = await User.getPermissions(userId);
-      } catch (err) {
-        // 重算失败不下发 permissionCodes：前端据「字段缺失」回退到主动拉取
-        // /auth/me（权威来源），而不是拿一份可能过期的集合去覆盖本地状态
-        logger.warn('权限同步重算失败，降级为「仅通知」', { userId, error: err.message });
-        permissionCodes = undefined;
-      }
-
-      const eventData = {
-        type: 'permission-sync',
-        timestamp: new Date().toISOString(),
-        ...meta,
-        ...(permissionCodes ? { permissionCodes } : {}),
-      };
-
-      if (redisMode) {
-        // 房间投递经 adapter 分发到所有实例上该用户的连接
-        this.io.to(userRoom(userId)).emit('permission-sync', eventData);
-      } else {
-        // 逐 socket 投递而非 io.to(userId)：本服务未把用户加入以 userId 命名的
-        // 房间时，userConnections 才是 userId → socketIds 的事实来源
-        for (const socketId of localSocketIds) {
-          this.io.to(socketId).emit('permission-sync', eventData);
-        }
-      }
-      notified++;
-    }
-
-    if (ids.length > 0) {
-      logger.info(
-        `权限同步推送完成：命中 ${notified} 人在线，${offline} 人离线（离线用户下次登录自然生效）`
-      );
-    }
-    return { notified, offline };
+    logger.info(
+      `权限同步推送完成：命中 ${online.size} 人在线，${offline} 人离线（离线用户下次登录自然生效）`
+    );
+    return { notified: online.size, offline };
   },
 
   /**
    * 向指定房间推送通知
    *
-   * P3-25：room 必须过 ALLOWED_ROOMS 白名单。当前调用面固定（仅内部服务调用），
+   * room 必须过 ALLOWED_ROOMS 白名单。当前调用面固定（仅内部服务调用），
    * 但缺少校验意味着一旦有人把 room 接到请求参数上，即可向任意房间名广播——
    * 包括 Socket.IO 用 socket.id 作为房间名的私有房间（向指定连接定向投递）。
    * 白名单校验的成本是一次数组查找，不值得省。
@@ -344,7 +359,7 @@ const methods = {
   /**
    * 获取连接统计
    *
-   * P3-25：默认只返回聚合指标，不再逐条列出 userId / 房间归属。
+   * 默认只返回聚合指标，不再逐条列出 userId / 房间归属。
    * 原实现返回全量 clients 明细——那是一份「当前在线人员及其订阅频道」清单，
    * 对运维排障价值有限，却让任何能读到该输出的人（日志、监控面板、
    * 未来可能接上的诊断接口）掌握在线人员画像。

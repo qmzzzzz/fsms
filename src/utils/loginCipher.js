@@ -21,7 +21,7 @@
  * 密文重新协商出共享密钥，即无前向保密。临时密钥对模式（见下）相反：
  * 私钥不出进程故历史密文攻不破，但重启即换钥，重启前的密文永久不可解密。
  *
- * 密钥管理：私钥经 LOGIN_ECDH_PRIVATE_KEY(_FILE) 注入（P3-48 约定），
+ * 密钥管理：私钥经 LOGIN_ECDH_PRIVATE_KEY(_FILE) 注入（约定），
  * 曲线支持 P-256 / P-384，非法曲线或非 EC 密钥直接拒绝。
  * 未配置时惰性生成临时密钥对并告警——私钥不出进程、前端按会话取公钥，
  * 重启换钥无安全损失（仅损失 keyId 诊断连续性）；但重启前产生的密文
@@ -114,8 +114,36 @@ function initFromPrivatePem(privateKeyPem) {
   return keyPair;
 }
 
+/**
+ * 构建期钉扎一致性（S-2）：镜像构建时把前端包使用的公钥指纹同时写入运行环境
+ * （LOGIN_PUBLIC_KEY_SHA256_PIN，由 Dockerfile 从同一 build-arg 注入）。
+ *
+ * 未设置时不干预（本地开发/未钉扎部署）；设置后必须完整 64 位且与当前公钥逐字相等——
+ * 任何不一致都意味着「前端只认某一把公钥，而后端在用另一把」：登录信封会全部解不开，
+ * 或（更糟）钉扎根本没进前端包而无人发现。启动即失败优于上线后才暴露。
+ */
+function assertBuildPin(kp) {
+  const pin = (process.env.LOGIN_PUBLIC_KEY_SHA256_PIN || '').trim().toLowerCase();
+  if (!pin) return;
+  if (!/^[0-9a-f]{64}$/.test(pin)) {
+    throw new Error(
+      `LOGIN_PUBLIC_KEY_SHA256_PIN 格式非法（应为完整 64 位十六进制，实际 ${JSON.stringify(pin)}）`
+    );
+  }
+  if (kp.publicKeySha256 !== pin) {
+    throw new Error(
+      '登录 ECDH 公钥与构建期钉扎指纹不一致：前端包会用另一把公钥加密，所有登录都会失败。' +
+        `构建期=${pin} 运行期=${kp.publicKeySha256}。` +
+        '请确认构建与运行使用同一把 login_ecdh_private_key（轮换后必须同步重建前端包）。'
+    );
+  }
+}
+
 function ensureKeyPair() {
-  if (keyPair) return keyPair;
+  if (keyPair) {
+    assertBuildPin(keyPair);
+    return keyPair;
+  }
 
   // dotenv 不支持多行值：允许用字面量 \n 表示 PEM 换行
   const envPem = (process.env.LOGIN_ECDH_PRIVATE_KEY || '').replace(/\\n/g, '\n').trim();
@@ -129,6 +157,7 @@ function ensureKeyPair() {
       publicKeySha256: kp.publicKeySha256,
       curve: kp.curve,
     });
+    assertBuildPin(kp);
     return kp;
   }
 
@@ -145,7 +174,20 @@ function ensureKeyPair() {
     publicKeyEncoding: { type: 'spki', format: 'pem' },
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
   });
-  return initFromPrivatePem(privateKey);
+  const kp = initFromPrivatePem(privateKey);
+  assertBuildPin(kp);
+  return kp;
+}
+
+/**
+ * 启动期钉扎校验：仅在镜像携带 LOGIN_PUBLIC_KEY_SHA256_PIN 时强制初始化密钥并比对。
+ * 由 createApp 调用——放在这里而不是首次请求公钥时，才能让「构建/运行密钥不一致」
+ * 在启动阶段就失败，而不是等用户第一次登录才发现。
+ */
+function verifyBuildPin() {
+  const pin = (process.env.LOGIN_PUBLIC_KEY_SHA256_PIN || '').trim();
+  if (!pin) return null;
+  return ensureKeyPair().publicKeySha256;
 }
 
 /** 公钥下发（GET /api/auth/login-public-key），curve 供前端 importKey 使用 */
@@ -312,5 +354,6 @@ module.exports = {
   CREDENTIAL_AAD,
   getPublicKeyInfo,
   decryptLoginCredential,
+  verifyBuildPin,
   _resetForTests,
 };
