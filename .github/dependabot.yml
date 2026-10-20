@@ -38,6 +38,10 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - 'ci'
+    groups:
+      codeql-action:
+        patterns:
+          - 'github/codeql-action*'
 
   # Dockerfile、docker-compose.yml 与 .github/workflows/ci.yml 的 service 容器里共 6 个
   # 第三方镜像引用（node:26.12.0-alpine / mongo:6.0.20 / prom/prometheus:v2.53.0 /
