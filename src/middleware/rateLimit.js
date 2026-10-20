@@ -377,6 +377,7 @@ const userLimiter = rateLimit({
   },
   keyGenerator: (req) => {
     // 已认证用户按 userId 限流，未认证按 IP
+    // prettier-ignore
     return req.user?.userId ? `user:${req.user.userId}` : `ip:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
   },
   standardHeaders: true,
