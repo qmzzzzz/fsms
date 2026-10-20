@@ -20,7 +20,7 @@ const {
   hashRecoveryCode,
 } = require('../mfaService');
 
-// 登录失败计数阈值与锁定时长（E-01：原为 loginUser 内的局部常量，现提到
+// 登录失败计数阈值与锁定时长（原为 loginUser 内的局部常量，现提到
 // 模块级，供 verifyPasswordOrTrackFailure / incrementFailedLoginCount 共用）
 const MAX_FAILED_LOGINS = 10;
 const LOCK_DURATION_MS = 10 * 60 * 1000;
@@ -40,7 +40,7 @@ const LOCK_DURATION_MS = 10 * 60 * 1000;
 const resolveFailedLoginCount = (updated) =>
   typeof updated?.failedLoginCount === 'number' ? updated.failedLoginCount : MAX_FAILED_LOGINS;
 /**
- * MFA 二期验证（E-01 自 loginUser 拆出）：TOTP 动态口令或备用恢复码二选一。
+ * MFA 二期验证（自 loginUser 拆出）：TOTP 动态口令或备用恢复码二选一。
  *
  * 独立防爆破：6 位码空间小，除 failedLoginCount 外另有 MFA 专用阈值（见
  * mfaService），锁定期间直接拒绝，攻击者持正确密码也无法对 6 位码无限尝试。
@@ -105,9 +105,9 @@ async function verifyMfaChallenge(user, { mfaCodeRaw, username, ctx }) {
 }
 
 /**
- * TOTP 动态口令校验（E-01 二级拆分，控制圈复杂度）
+ * TOTP 动态口令校验（二级拆分，控制圈复杂度）
  *
- * P2-12：重放防护必须原子。原实现「读 mfaLastCounter → 比较 → 事后无条件覆写」
+ * 重放防护必须原子。原实现「读 mfaLastCounter → 比较 → 事后无条件覆写」
  * 三步分离，两个携带同一有效验证码的并发请求都会读到旧 counter、都判定通过，
  * 造成 TOTP 双花（同一 6 位码换取两个会话）。现改为条件更新：以
  * `mfaLastCounter < counter` 为过滤条件推进，只有第一个请求能命中（DB 保证），
@@ -116,7 +116,7 @@ async function verifyMfaChallenge(user, { mfaCodeRaw, username, ctx }) {
 async function verifyTotpChallenge(user, { mfaCode, mfaUser, username, ctx }) {
   const { ip, userAgent, fingerprint } = ctx;
   const totpResult = verifyTotpDetailed(decryptMfaSecret(mfaUser?.mfaSecret), mfaCode);
-  // P2-12 修复：重放防护必须原子。原实现「读 mfaLastCounter → 比较 → 事后无条件覆写」
+  // 修复：重放防护必须原子。原实现「读 mfaLastCounter → 比较 → 事后无条件覆写」
   // 三步分离，两个携带同一有效验证码的并发请求都会读到旧 counter、都判定通过，
   // 造成 TOTP 双花（同一 6 位码换取两个会话）。
   // 现改为条件更新：以 `mfaLastCounter < counter` 为过滤条件推进，
@@ -142,7 +142,7 @@ async function verifyTotpChallenge(user, { mfaCode, mfaUser, username, ctx }) {
   const replayed = totpResult.valid && !claimedCounter;
   if (!totpResult.valid || replayed) {
     logger.warn(`登录失败 - 两步验证码${replayed ? '重放' : '错误'}`, { username });
-    // 原子递增 + 阈值锁定（与口令失败路径同口径；E-01 抽为共用 helper）
+    // 原子递增 + 阈值锁定（与口令失败路径同口径；抽为共用 helper）
     await incrementFailedLoginCount(user, { username, lockReason: 'MFA 失败累计' });
     // 独立防爆破计数（6 位码空间小，必须有独立阈值）
     await recordMfaFailure(user);
@@ -165,7 +165,7 @@ async function verifyTotpChallenge(user, { mfaCode, mfaUser, username, ctx }) {
 }
 
 /**
- * 备用恢复码校验（E-01 二级拆分，控制圈复杂度）：格式 XXXX-XXXX，命中即消费。
+ * 备用恢复码校验（二级拆分，控制圈复杂度）：格式 XXXX-XXXX，命中即消费。
  *
  * 原子消费：以「数组中仍含该摘要」为过滤条件执行 $pull 并要求命中——消除
  * check 与 pull 分离导致的并发双花窗口；未命中即视为无效。
@@ -230,7 +230,7 @@ async function verifyRecoveryCodeChallenge(user, { mfaCode, username, ctx }) {
 }
 
 /**
- * 恢复码失败统一记录（E-01 自 loginUser 内的局部闭包提到模块级）
+ * 恢复码失败统一记录（自 loginUser 内的局部闭包提到模块级）
  *
  * 与 TOTP 错误路径同口径：增量 failedLoginCount + MFA 独立计数 + 审计。
  * riskFactors/reason 由调用方区分「格式无效」与「不匹配」两种情况。
@@ -259,13 +259,13 @@ async function recordRecoveryFailure(
 }
 
 /**
- * 登录失败计数原子递增 + 阈值锁定（E-01 抽出，MFA 两条失败路径共用）
+ * 登录失败计数原子递增 + 阈值锁定（抽出，MFA 两条失败路径共用）
  *
  * $inc 由 DB 保证无丢失更新：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，
  * 丢失更新导致锁定阈值被推迟，利于爆破。阈值判定可能并发重复触发，但
  * lockUntil 覆写幂等，审计重复仅产生冗余日志，可接受。
  *
- * P1-25（2026-09-17）：补 lockExpired 重置，与口令路径
+ * 补 lockExpired 重置，与口令路径
  * （verifyPasswordOrTrackFailure 内 :403-410）对齐。MFA 两条失败路径
  * 此前只做纯 $inc：此前 10 分钟锁定刚过期时，旧计数会继续累计——
  * 解锁后仅剩 1 次试错即再次锁定，对正常用户表现为「输错一次就锁」。

@@ -411,7 +411,7 @@ describe('401 刷新链（含并发合流）', () => {
     const { apiClient, router, axios, pinia, storeMod } = await loadAll()
     pinia.setActivePinia(pinia.createPinia())
     const authStore = storeMod.useAuthStore()
-    authStore.setAuth(null, null, { userId: 'u1', username: 'alice' }, ['device:read'])
+    authStore.setAuth({ userId: 'u1', username: 'alice' }, ['device:read'])
     const clearSpy = vi.spyOn(authStore, 'clearAuth')
     vi.spyOn(axios, 'post').mockRejectedValue(new Error('down'))
     const pushSpy = vi.spyOn(router, 'push').mockResolvedValue()

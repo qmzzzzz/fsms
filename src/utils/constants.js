@@ -2,7 +2,7 @@
  * 系统常量与枚举集中管理
  *
  * 这里只放**事实来源就是本文件**的枚举（设备类型/前缀/状态、用户状态——模型侧的
- * enum 由本文件提供，见 models/FireDevice.js 的 E-05 整改）。
+ * enum 由本文件提供，见 models/FireDevice.js 的整改）。
  *
  * 曾经还有 10 个"看起来像集中管理"的枚举（ALARM_STATUS / ALARM_LEVEL /
  * INSPECTION_STATUS / INSPECTION_RESULT / REVIEW_RESULT / RISK_LEVEL /

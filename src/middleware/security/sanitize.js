@@ -13,7 +13,7 @@ const ApiResponse = require('../../utils/apiResponse');
  * 2. 数据清理 - MongoDB 注入防护
  * 清理请求中的 MongoDB 操作符，防止 NoSQL 注入
  *
- * ⚠ Express 5 前提（P1-33 修正，2026-09-17；2026-09-30 收口）：req.query 是 getter
+ * ⚠ Express 5 前提（修正，2026-09-17；2026-09-30 收口）：req.query 是 getter
  * （node_modules/express/lib/request.js 的 defineGetter(req, 'query', ...)），
  * 每次访问都重新解析 URL 查询串。因此本中间件对 req.query 的**原地赋值无效**，
  * 且实测比"下次访问才丢"更彻底——同一 handler 同一 tick 内回读就已经是全新对象。
@@ -114,7 +114,7 @@ const sanitizeMongo = (req, res, next) => {
  * 为什么必须自证（这是本中间件与「注释里说它有效」的根本区别）：
  * 物化成不生效只有两种可能——defineProperty 抛错（req 被冻结），或将来 Express 改了
  * 实现让自有属性不再遮蔽原型 getter。两者都不会有任何报错，只会让防线**静默归零**，
- * 而这正是本仓吃过一次亏的形态（P1-33：防线失效是被 e2e 白屏偶然发现的，不是被发现的）。
+ * 而这正是本仓吃过一次亏的形态（防线失效是被 e2e 白屏偶然发现，不是被发现）。
  * 所以每次物化后立即回读比对身份，不等即**拒绝本次请求**并 error 级留痕——
  * 「服务不可用」远好过「带着未清洗的 query 把请求处理下去」。
  *

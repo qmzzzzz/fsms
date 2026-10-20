@@ -2,7 +2,7 @@
  * ──────────────────────────────────────────────────────────────────────────
  * 本文件的定位（2026-09-20 补注，由变异审计批量补齐）
  *
- * 被测对象：密钥载体权限的「实际收紧 + 回读校验」闭环（M-05）
+ * 被测对象：密钥载体权限的「实际收紧 + 回读校验」闭环
  * 守护的不变式：权限必须**实际**收紧且可复核——只打印 icacls 命令等于把安全语义降级为建议
  * 可证伪性：变异实测（筛查 N=2）：杀 1/3
  * 既有评价：既往审计列为**正面记账**（记录了"原用例在被加固过的宿主上静默跳过、报绿但什么都没验"并改为用 SID 显式造前置条件，deliverables/七维代码健康度深度审计-2026-09-18.md）
@@ -16,7 +16,7 @@
  */
 
 /**
- * M-05 回归：密钥载体权限必须**实际收紧**并可复核
+ * 回归：密钥载体权限必须**实际收紧**并可复核
  *
  * 缺陷历史：
  *   - 原实现用 chmod(0600) 收紧 secrets/ 与初始密码文件。这在 NTFS 上是**空操作**，
@@ -61,7 +61,7 @@ function execIcacls(args) {
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
-describe('M-05 文件权限收紧与复核', () => {
+describe('文件权限收紧与复核', () => {
   it('hardenPath 对不存在的路径返回 ok=false，不抛异常（best-effort 契约）', () => {
     const r = hardenPath(path.join(os.tmpdir(), 'definitely-missing-' + process.pid));
     expect(r.ok).toBe(false);
@@ -184,7 +184,7 @@ describe('M-05 文件权限收紧与复核', () => {
  * src/tests/security/initDataPasswordHardening.test.js 用真实行为覆盖
  * （断言 verifyHardened(pwdFile).tightened === true），此处保留 grep 只会是冗余弱证据。
  */
-describe('M-05 调用点真的收紧（运行脚本，检查产物权限）', () => {
+describe('调用点真的收紧（运行脚本，检查产物权限）', () => {
   const { execFileSync } = require('child_process');
   const SCRIPT = path.resolve(__dirname, '../../../scripts/generate-secrets.js');
   const NODE = process.execPath;
@@ -254,7 +254,7 @@ describe('M-05 调用点真的收紧（运行脚本，检查产物权限）', ()
  * 同一份桩下旧版必须 rc=0 并打印成功行。少了这条对照，新断言红绿都可能来自环境。
  * ──────────────────────────────────────────────────────────────────────────
  */
-describe('M-05 收紧失败的出口：generate-secrets.js 非零退出并点名是哪一个', () => {
+describe('收紧失败的出口：generate-secrets.js 非零退出并点名是哪一个', () => {
   const { spawnSync, execFileSync } = require('child_process');
   const ROOT = path.resolve(__dirname, '../../..');
   const SCRIPT = path.resolve(ROOT, 'scripts/generate-secrets.js');

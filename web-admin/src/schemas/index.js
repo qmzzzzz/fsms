@@ -89,8 +89,7 @@ export const ApiEnvelopeSchema = z.looseObject({
 export const LoginResponseSchema = ApiEnvelopeSchema.extend({
   data: z
     .looseObject({
-      token: z.string().optional(),
-      refreshToken: z.string().optional(),
+      // 令牌只经 httpOnly cookie 下发，响应体不再包含 token/refreshToken
       expires: z.union([z.string(), z.number()]).optional(),
       mfaRequired: z.boolean().optional(),
       user: UserSchema.optional(),

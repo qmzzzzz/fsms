@@ -327,7 +327,7 @@ describe('F-160 封禁结果按返回值分派：日志不能说"已封禁"而�
 describe('批量导出阈值：含边界的 >= 语义', () => {
   test('恰好等于阈值必须告警，比阈值小一条不许告警', async () => {
     // userId 走 schema 的 ObjectId 关联（传字符串会被 cast 成 ValidationError，
-    // 而 P1-23 之后这个错是被 catch 掉的 ⇒ 用例假绿），所以两个样本各给一个真 ObjectId；
+    // 而之后这个错是被 catch 掉的 ⇒ 用例假绿），所以两个样本各给一个真 ObjectId；
     // 频控 key 含 userId，必须不同，否则第二条被"5 分钟内不重复告警"吃掉
     const atUser = new mongoose.Types.ObjectId();
     const belowUser = new mongoose.Types.ObjectId();

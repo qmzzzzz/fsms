@@ -15,7 +15,7 @@
  */
 
 /**
- * 批次C 基础设施类修复回归（P2-25/26/28/29/30 + P2-27 脚本门禁）
+ * 批次C 基础设施类修复回归（26/28/29/30 + 脚本门禁）
  *
  * 这批缺陷的共同点是「看起来配好了、实际没生效」：
  * - app.param 注册了却对子 Router 不生效（Express 4 语义）
@@ -32,8 +32,8 @@ const mongoose = require('mongoose');
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 
 describe('批次C 基础设施加固回归', () => {
-  // ================= P2-25 :id 参数校验真正生效 =================
-  describe('P2-25 子 Router 级 ObjectId 参数校验', () => {
+  // ================= id 参数校验真正生效 =================
+  describe('子 Router 级 ObjectId 参数校验', () => {
     let app;
 
     beforeAll(async () => {
@@ -104,8 +104,8 @@ describe('批次C 基础设施加固回归', () => {
     });
   });
 
-  // ================= P2-26 登出 fail-closed =================
-  describe('P2-26 blacklistToken fail-closed 契约', () => {
+  // ================= 登出 fail-closed =================
+  describe('blacklistToken fail-closed 契约', () => {
     test('普通持久化失败向上抛错并带明确错误码', async () => {
       jest.resetModules();
       jest.doMock('../../models/TokenBlacklist', () => ({
@@ -130,8 +130,8 @@ describe('批次C 基础设施加固回归', () => {
     });
   });
 
-  // ================= P2-27 运维脚本门禁 =================
-  describe('P2-27 运维脚本安全约定', () => {
+  // ================= 运维脚本门禁 =================
+  describe('运维脚本安全约定', () => {
     const readScript = (name) => fs.readFileSync(path.join(REPO_ROOT, 'scripts', name), 'utf8');
 
     /**
@@ -195,8 +195,8 @@ describe('批次C 基础设施加固回归', () => {
     });
   });
 
-  // ================= P2-28 dev-vite.cmd =================
-  describe('P2-28 dev-vite.cmd 文件完整性', () => {
+  // ================= dev-vite.cmd =================
+  describe('dev-vite.cmd 文件完整性', () => {
     const cmdPath = path.join(REPO_ROOT, 'dev-vite.cmd');
 
     test('不再是单行文件（原损坏形态）', () => {
@@ -225,8 +225,8 @@ describe('批次C 基础设施加固回归', () => {
     });
   });
 
-  // ================= P2-29 / P2-30 Swagger =================
-  describe('P2-29/30 API 文档出口治理', () => {
+  // ================= Swagger =================
+  describe('/30 API 文档出口治理', () => {
     const swagger = require('../../config/swagger');
 
     /**
@@ -238,7 +238,7 @@ describe('批次C 基础设施加固回归', () => {
      * createApp() 内（app.js: `if (swagger.isDocsEnabled())`）、凭据读取点在 basicAuth
      * 请求期，二者都走 process.env —— 只需改写环境变量后重新 createApp() 即可。
      *
-     * 注意：P2-26 用例调用过 jest.resetModules()，此后 require 到的 app 与
+     * 注意：用例调用过 jest.resetModules()，此后 require 到的 app 与
      * swagger 都是新副本（与文件顶部缓存的实例不同一），因此回调
      * 同时返回新副本的 swagger，供调用方操作真正生效的 docsLimiter 单例。
      */

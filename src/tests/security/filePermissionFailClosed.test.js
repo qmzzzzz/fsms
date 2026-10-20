@@ -2,7 +2,7 @@
  * ──────────────────────────────────────────────────────────────────────────
  * 本文件的定位（2026-09-20 补注，由变异审计批量补齐）
  *
- * 被测对象：utils/filePermission.js 的失败路径与跨平台分支（M-05 信任根）
+ * 被测对象：utils/filePermission.js 的失败路径与跨平台分支（信任根）
  * 守护的不变式：icacls 执行失败必须 `ok=false` 并打印可操作命令；读不出结果必须 fail-closed 判「未收紧」
  * 可证伪性：F-189 已做变异实测（脚本 D:/tmp/zz_f189_mutation.js，sha256 还原核验通过）——
  *   N0 12/12 绿；M1 提示只印授权那条 → 2 行红；M2 两步顺序颠倒 → 只有顺序断言红；
@@ -19,9 +19,9 @@
  */
 
 /**
- * M-05 补漏：filePermission.js 的失败路径与跨平台分支覆盖
+ * 补漏：filePermission.js 的失败路径与跨平台分支覆盖
  *
- * 为什么这些分支必须被覆盖：本模块是 M-05 的信任根——「密钥载体权限已收紧」
+ * 为什么这些分支必须被覆盖：本模块是信任根——「密钥载体权限已收紧」
  * 这一结论的唯一来源。它的**失败路径**恰恰是安全语义的关键处：
  *   - icacls 执行失败 → 必须 ok=false 并打印可操作命令（否则用户以为已收紧）；
  *   - 用户名缺失 → 必须跳过而非盲目执行（否则可能授予了错误的账户）；
@@ -64,7 +64,7 @@ function withTempDir(fn) {
   }
 }
 
-describe('M-05 补漏：filePermission 失败路径', () => {
+describe('补漏：filePermission 失败路径', () => {
   it('icacls 执行失败 → ok=false 且打印可操作的手动命令（不得静默）', () => {
     withTempDir((dir) => {
       const spy = jest.spyOn(cp, 'execFileSync').mockImplementation(() => {

@@ -34,7 +34,7 @@
 | `deliverables/七维代码健康度深度审计-2026-09-18.md` | 七维健康度审计原始报告           | 否       | `git:b50cb40`    |
 | `deliverables/安全需求加固清单-2026-10-16.md`       | 本轮整改的需求清单（F-01…F-15）  | 是       | 仅本地           |
 | `deliverables/安全加固待办清单-2026-10-15.md`       | 安全加固待办                     | 是       | 仅本地           |
-| `deliverables/A3-email加密实施方案-2026-10-16.md`   | 邮箱字段加密实施方案             | 是       | 仅本地           |
+| `deliverables/七维深度审计报告-2026-10-20.md`       | 2026-10-20 七维审计与整改来源    | 是       | 仅本地           |
 | `deliverables/复核台账-B会话-2026-09-24.md`         | 复核台账（B 会话）               | 否       | `git:1f11eaf^`   |
 | `deliverables/性能实测基线-2026-09-16.json`         | 性能实测基线数据                 | 是       | `git:1f11eaf^`   |
 | `deliverables/_complexity-actual.json`              | 复杂度实测基线（体积棘轮同源）   | 是       | `git:1f11eaf^`   |

@@ -12,7 +12,16 @@ services:
     # 默认值故意不带 registry：本地构建产出留在本机，不会被误推到远端。
     # 生产必须显式给 APP_IMAGE（scripts/deploy.js 的 validatePreflight 会 fail-fast 校验）。
     image: ${APP_IMAGE:-fire-safety-app:local}
-    build: .
+    build:
+      context: .
+      args:
+        # S-2：前端构建期钉扎的登录公钥指纹（64 位 hex，非机密）。
+        # 取值：scripts/generate-secrets.js 生成私钥时会打印；或
+        #   node scripts/login-key-pin.js ./secrets/login_ecdh_private_key
+        # 不设置时前端回退为运行时获取公钥（无钉扎，仍可用）。
+        # Dockerfile 会把它同时写入运行环境的 LOGIN_PUBLIC_KEY_SHA256_PIN，
+        # 启动时与私钥比对，不一致直接失败。
+        VITE_LOGIN_PUBLIC_KEY_SHA256: ${VITE_LOGIN_PUBLIC_KEY_SHA256:-}
     ports:
       # 仅绑定本机回环地址，生产由宿主 nginx 反向代理对外提供服务
       - '127.0.0.1:3000:3000'
@@ -162,7 +171,7 @@ services:
       - data-net
 
   mongo:
-    # R-5 基础镜像钉到 digest（2026-10-04 补齐：此前只钉到补丁号）
+    # R-5 基础镜像钉到 digest；2026-10-20 由 EOL 的 6.0.20 升级到 8.0.34（S-3）。
     #
     # 为什么至少要钉到补丁号：只写 `mongo:6` 时，tag 会随上游滚动，
     # 「同一份 compose 在两台机器上跑出不同的数据库版本」而无从察觉。
@@ -170,15 +179,20 @@ services:
     # 为什么补丁号还不够、要再钉 digest：tag 是**可变别名**，registry 可以在不打招呼的情况下
     # 把它指向另一批字节；钉 digest 之后「这份文件描述的镜像」才是唯一确定的那批内容。
     #
+    # 6.0 社区版已于 2025-07 结束支持，不再接收安全补丁。升级到 8.0 前须按
+    # deployment/rollback-drill.md 做 FCV 兼容性检查与备份恢复演练；8.0 的 mongosh
+    # 与 6.0 的数据文件兼容（官方支持 6.0 → 7.0 → 8.0 逐级升级，不能跳级降级）。
+    #
     # digest 不能凭记忆或推测填写（填错的现场是上线窗口才炸的 pull 失败）。本仓的取值口径：
-    #   node scripts/verify-image-digests.js --only mongo:6.0.20
+    #   node scripts/verify-image-digests.js --only mongo:8.0.34
     # 它对 registry 的 manifest 端点**自算 sha256**（不是抄响应头），并要求运营主体不同的来源
-    # 返回同一个值。2026-10-04 实测：public.ecr.aws + docker.m.daocloud.io + docker.1ms.run
-    # 三源一致，取到的是 OCI index（7 个架构条目 ⇒ 按平台各自解析，钉的是同一份清单）。
+    # 返回同一个值。2026-10-20 实测：public.ecr.aws + docker.1ms.run 一致，取到的是 OCI index
+    # （按平台各自解析，钉的是同一份清单）。同日 docker.m.daocloud.io 的 8.0.34 返回了与
+    # 该值不同的 index（其自身 8.0 tag 却指向本值），疑为镜像侧缓存分叉，未采信。
     # 有 docker 守护进程的机器上也可以走另一条既有路径：`sh scripts/capture-image-digests.sh --apply`
-    #（它 pull 之后把输出追加为 `image: mongo:6.0.20@sha256:<捕获值>`，两条路径产物同形）。
+    #（它 pull 之后把输出追加为 `image: mongo:8.0.34@sha256:<捕获值>`，两条路径产物同形）。
     # 保留可读 tag 而不是写纯 digest：纯 digest 看不出版本，排障时得先 inspect 才知道跑的是哪个大版本。
-    image: mongo:6.0.20@sha256:eb5819129dee31a32982a940b6e32c9873fed05b5e938b65f802bb96dca8753d
+    image: mongo:8.0.34@sha256:4a4ab5d4834207389e0d7270fac988e21ffedccecba77991a552f755df229907
     # 不暴露到宿主机，仅容器间通信（如需本地调试可临时改为 "127.0.0.1:27017:27017"）
     expose:
       - '27017'
@@ -289,9 +303,40 @@ services:
     networks:
       - fire-safety-net
 
+  # S-5：告警配置启动闸。一次性容器，判据与 deploy.js 前置校验同源
+  # （scripts/compliance-alerting.js）。占位/误配/读不到 ⇒ 退出 1，
+  # alertmanager 因 service_completed_successfully 不会启动。
+  alertmanager-config-check:
+    # R-5 同口径：与 Dockerfile 的 node 基础镜像同一 digest
+    # （scripts/verify-image-digests.js 的期望表）
+    image: node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
+    entrypoint: ['node', '/check/check-alertmanager-config.js']
+    command: ['/etc/alertmanager/alertmanager.yml']
+    environment:
+      ALLOW_PLACEHOLDER_ALERT_WEBHOOK: ${ALLOW_PLACEHOLDER_ALERT_WEBHOOK:-false}
+    volumes:
+      - ${ALERTMANAGER_CONFIG_PATH:-./deployment/observability/alertmanager.yml}:/etc/alertmanager/alertmanager.yml:ro
+      - ./scripts/check-alertmanager-config.js:/check/check-alertmanager-config.js:ro
+      - ./scripts/alertmanager-config-path.js:/check/alertmanager-config-path.js:ro
+      - ./scripts/compliance-alerting.js:/check/compliance-alerting.js:ro
+    restart: 'no'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
+      - fire-safety-net
+
   alertmanager:
     # G-2：告警触达链路的路由中枢（配置见 deployment/observability/alertmanager.yml，
     # 接收器 URL 为占位，生产以私有副本挂载覆盖，不入库）
+    # S-5：启动前由 alertmanager-config-check 以生产口径校验同一份配置——
+    # 直接 compose up 不再可能带着占位通道「健康」运行；演练环境需显式
+    # ALLOW_PLACEHOLDER_ALERT_WEBHOOK=true。挂载源与校验源共用
+    # ALERTMANAGER_CONFIG_PATH，避免「校验的是 A、跑的是 B」。
     # R-5 同口径：digest 取自 scripts/verify-image-digests.js（对 manifest 字节自算 sha256、≥2 个独立运营来源一致、须为 manifest list）
     # 期望表在同脚本；scripts/capture-image-digests.sh 只认 node 与 mongo，第三方命名空间（prom/…、grafana/…）不走那条路。
     image: prom/alertmanager:v0.27.0@sha256:e13b6ed5cb929eeaee733479dce55e10eb3bc2e9c4586c705a4e8da41e5eacf5
@@ -299,13 +344,16 @@ services:
       # 仅本机访问 Web UI；Prometheus 经容器网络 9093 推送告警
       - '127.0.0.1:9093:9093'
     volumes:
-      - ./deployment/observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ${ALERTMANAGER_CONFIG_PATH:-./deployment/observability/alertmanager.yml}:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager-data:/alertmanager
     command:
       - '--config.file=/etc/alertmanager/alertmanager.yml'
       - '--storage.path=/alertmanager'
     depends_on:
-      - prometheus
+      alertmanager-config-check:
+        condition: service_completed_successfully
+      prometheus:
+        condition: service_started
     restart: unless-stopped
     deploy:
       resources:

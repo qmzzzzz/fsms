@@ -56,6 +56,22 @@ docker compose down app && docker compose up -d app   # compose 已改回旧版�
 
 判定成功：/health 200、错误日志停止增长、核心旅程可用。
 
+### 3.1a 自动回滚的边界（O-2）
+
+`scripts/deploy.js` 的自动回滚**只在本次发布没有应用数据库迁移时**触发：
+它切回的是镜像，数据库结构不会跟着回退。若本次 `migrate:up` 应用过迁移
+（脚本会打印 `MIGRATED UP: <file>` 与「本次应用 N 个迁移」），健康门禁失败后
+脚本会停在原地并转人工，而不是切回旧镜像——旧代码跑在新 schema 上，轻则启动
+报错，重则按旧字段语义写坏数据，而「回滚后服务就绪」只会制造已恢复的假象。
+
+人工处置顺序：
+
+1. 确认这些迁移对上一版本是否向后兼容（推荐 expand/contract 两阶段迁移：
+   先加字段/索引、双写，再在下一版收紧）。兼容 → 按 3.1 切回旧镜像。
+2. 不兼容 → 按 3.2 评估 `migrate:down`，或按 3.3 用发布前的 `./backups` 做数据级恢复。
+
+因此：**破坏性迁移不要与新版本放在同一次发布**，否则自动回滚将永远转人工。
+
 ### 3.2 数据库结构回滚（迁移可逆时）
 
 现象：新版本带的迁移（migrate:up）引发问题，且该迁移有 down。
@@ -73,8 +89,9 @@ docker compose run --rm --no-deps app node node_modules/.bin/migrate-mongo down
 docker compose start app
 ```
 
-> 为什么不用 `npm run migrate:down`：那要求宿主机自己装了后端依赖（migrate-mongo
-> 在 package.json 的 devDependencies），而生产主机上通常只有 Docker。上面的写法与
+> 为什么不用 `npm run migrate:down`：那要求宿主机自己执行过 `npm ci`（migrate-mongo
+> 在 package.json 的 `dependencies` 里，会随应用镜像安装，但宿主机的 npm script
+> 仍需本地 `node_modules`），而生产主机上通常只有 Docker。上面的写法与
 > 部署脚本保持同一条执行路径，避免「演练跑通、真事故时跑不通」。
 
 ### 3.3 数据级回滚（最后手段，分钟级）
@@ -191,6 +208,46 @@ node scripts/backup-integrity-patrol.js --drill-only
 
 退出码：`0` 无 error 级发现 / `1` 存在 error 级发现 / `2` 未做任何判定（目录不存在等）。
 **`2` 不等于 `0`**：巡检无法执行时不能报成"就绪"。
+
+### 5.5 预发环境定期自动演练（T-4）
+
+> 现状（2026-10-20 审计 T-4）：记录里的两次演练都是开发环境专项（#1 迁移回滚、
+> #2 内存 mongod 数据快照），完整「容器 + 真库 + 切流」从未在预发跑过。
+> `dr-readiness.yml` 只判**留档时效**，它不会替你执行演练——本节的宿主 cron
+> 才是执行者，两者共用同一份记录文件。
+
+| 能力                  | 执行者                                         | 失败形态                    |
+| --------------------- | ---------------------------------------------- | --------------------------- |
+| 演练时效 ≤ 一个季度   | `.github/workflows/dr-readiness.yml`（每周一） | job 变红                    |
+| 真实演练（快照+回灌） | 预发宿主机 cron（本节命令）                    | 无新记录 ⇒ 上一条在周期后红 |
+
+预发宿主 cron（示例：每周日 02:30，与备份错开）：
+
+```bash
+# /etc/cron.d/fsms-drill（执行用户需能读 ./secrets 与写 ./backups）
+30 2 * * 0 ops cd /srv/fsms && \
+  ALLOWED_SOURCE_DB=fsms_staging MONGODB_URI_FILE=./secrets/mongodb_uri \
+  node scripts/run-rollback-drill.js --apply-source --yes >> /var/log/fsms-drill.log 2>&1 && \
+  node scripts/record-rollback-drill.js \
+    --manifest "$(ls -t backups/rollback-drill/manifest-*.json | head -1)" \
+    --operator 'staging-cron' --environment '预发（cron 自动）' --write >> /var/log/fsms-drill.log 2>&1
+```
+
+四条纪律（缺一条就不要把这条 cron 装上去）：
+
+1. `ALLOWED_SOURCE_DB` 必须是**预发库名**：`--apply-source --yes` 会清空
+   `users / roles / permissions / auditlogs` 四个集合并回灌。指向错误库就是把
+   开发数据清空；指向生产库则直接违反「破坏性动作必须有人值守」的纪律。
+2. 只允许预发/隔离库。生产环境的完整演练仍按第 4 节人工执行——
+   无人值守的破坏性恢复演练不接受「反正有备份」作为理由。
+3. `--write` 只改工作树里的 `deployment/rollback-drill-record.md`，**不会自动提交**。
+   必须有人复核 cron 日志与 manifest 后把该记录随 PR 入库；否则 CI 读不到，
+   `dr-readiness` 仍会在季度后变红——这是**预期**，不是误报。
+4. 留证：`/var/log/fsms-drill.log` 与 `backups/rollback-drill/manifest-*.json`
+   至少保留到下一次演练；失败项按第 4 节转待办。
+
+首次在预发执行后：把「演练 #N」登记进 `deployment/rollback-drill-record.md`
+（模板见该文件第一节），并在记录里注明执行者是 cron 还是人工。
 
 ## 6. 已知边界
 

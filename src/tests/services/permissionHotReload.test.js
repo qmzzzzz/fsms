@@ -37,12 +37,17 @@ describe('权限热生效：WebSocket 定向推送', () => {
     return { svc, emitted };
   };
 
-  /** 用 jest.doMock 替换 User.getPermissions 的返回（emitPermissionSync 内部惰性 require） */
+  /** 用 jest.doMock 替换 User 权限查询的返回（userPermissionService 内部惰性 require） */
   const mockUserPermissions = (impl) => {
     jest.doMock(
       path.join(__dirname, '../../models/User'),
       () => ({
         getPermissions: impl,
+        getPermissionsForUsers: async (ids) => {
+          const map = new Map();
+          for (const id of ids) map.set(String(id), await impl(id));
+          return map;
+        },
       }),
       { virtual: false }
     );

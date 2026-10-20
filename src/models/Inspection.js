@@ -29,7 +29,7 @@ const inspectionSchema = new mongoose.Schema(
       required: true,
       maxlength: [200, '巡检标题最多 200 个字符'],
     },
-    // P3-14 的白名单补齐要求这两条真正落库：路由（inspectionRoutes）校验、控制器透传、
+    // 白名单补齐要求这两条真正落库：路由（inspectionRoutes）校验、控制器透传、
     // 服务白名单都带了 description/priority，但 schema 从未声明 → strict 模式在 save 时
     // 静默丢弃，PUT 返回 200 而字段消失（同 executionLog.remark 的历史坑，见文件下方）。
     description: {
@@ -189,7 +189,7 @@ inspectionSchema.index({ 'locations.building': 1 });
 // 此前两者均无索引覆盖 → COLLSCAN。6 万巡检规模实测：
 //   { devices: id }        60,000 文档 / 139.44ms → 30 文档 / 1.37ms（101.8x）
 //   { 'findings.deviceId': id } 60,000 文档 / 155.47ms → 15 文档 / 1.21ms（128.5x）
-// 明细见 deliverables/性能实测基线-2026-09-16.json。
+// 以上为 2026-09-16 实测值。
 inspectionSchema.index({ devices: 1 });
 inspectionSchema.index({ 'findings.deviceId': 1 });
 

@@ -109,7 +109,7 @@ const IPBanEvents = {
 // 告警频率限制缓存。结构：{ alertKey: { timestamp, expiresAt } }
 const alertRateLimit = new Map();
 
-// P3-24 容量上限：alertKey 含攻击者可控内容（如 `brute_force_user_${username}`，
+// 容量上限：alertKey 含攻击者可控内容（如 `brute_force_user_${username}`，
 // username 来自登录请求体且只限长度不限字符集），攻击者轮换用户名即可驱动
 // Map 增长。已有 5 分钟过期 + 10 分钟清理定时器兜底，规模有界但界值取决于
 // 攻击速率（10 分钟内的唯一 key 数）——万级 QPS 撞库下仍可达数百万条目。
@@ -171,7 +171,7 @@ const shouldSendAlert = (alertKey) => {
     return false;
   }
 
-  // 写入前做容量保护（P3-24）
+  // 写入前做容量保护
   if (alertRateLimit.size >= ALERT_RATE_LIMIT_MAX_ENTRIES) {
     const remaining = pruneAlertRateLimit();
     if (remaining >= ALERT_RATE_LIMIT_MAX_ENTRIES) {
@@ -229,7 +229,7 @@ const checkBruteForce = async (username, ip, attribution = null) => {
 
   const maxFailures = Math.max(userFailures, ipFailures);
   if (maxFailures >= THRESHOLDS.bruteForceAttempts) {
-    // E-04 口径：告警去重键与封禁对象都必须用**归一化 IP**——
+    // 口径：告警去重键与封禁对象都必须用**归一化 IP**——
     // `::ffff:1.2.3.4` 与 `1.2.3.4` 混合出现时按原文组键会产生两个去重键，
     // 同一来源重复告警（与封禁/阶梯的两把尺问题同源）
     //
@@ -267,7 +267,7 @@ const checkBruteForce = async (username, ip, attribution = null) => {
       logger.error(`自动封禁阶梯统计失败（按第一档处理）: ${ip}, 错误: ${e.message}`);
     }
 
-    // P1-23：审计写入挂独立 try/catch。此前裸 await 位于 try 块之外，
+    // 审计写入挂独立 try/catch。此前裸 await 位于 try 块之外，
     // AuditLog.create 抛错（DB 瞬断/校验失败）会把异常上抛给调用方，
     // 下方自动封禁 try 块根本执行不到——告警审计写失败反而放过了封禁。
     // 审计失败不阻断封禁与通知，但按项目风格记录 error（不静默吞错）。
@@ -297,7 +297,7 @@ const checkBruteForce = async (username, ip, attribution = null) => {
     if (ipFailures < THRESHOLDS.bruteForceAttempts) return;
 
     try {
-      // E-04：**必须**保持惰性 require（securityAlert ↔ middleware/security
+      // **必须**保持惰性 require（securityAlert ↔ middleware/security
       // 循环依赖），提到文件顶部会在加载顺序不利时拿到未完成的导出。
       const { addToBlacklist } = require('../middleware/security');
       const tier = IPBanEvents.tierFor(priorBans);
@@ -358,7 +358,7 @@ const checkBulkExport = async (userId, username, count, operation) => {
 
   const alertKey = `bulk_export_${userId}`;
 
-  // P1-23 同口径：告警审计落库失败**不得**冒泡到调用方。checkBulkExport 被
+  // 同口径：告警审计落库失败**不得**冒泡到调用方。checkBulkExport 被
   // reportController/auditController 的导出路径 `await`，此前裸 await AuditLog.create
   // 在 DB 瞬断/校验失败时会把一次本已成功的导出顶成 500——告警是旁路增强，
   // 绝不该拖垮主流程。捕获后仍继续投递通知（告警本身重要），仅记 error 不静默。
@@ -398,7 +398,7 @@ const checkBulkExport = async (userId, username, count, operation) => {
 
 /**
  * 检测非常规时间访问
- * P3-7/P3-18：阈值与时区均取 constants/timezone 单一声明，
+ * 阈值与时区均取 constants/timezone 单一声明，
  * 与 AuditLog.detectAnomalies / behaviorBaseline 保证同口径
  */
 const checkUnusualTime = (timestamp = new Date()) => {
@@ -489,14 +489,9 @@ const getSecurityOverview = async (days = 7) => {
     };
   } catch (error) {
     logger.error(`安全概览获取失败: ${error.message}`);
-    return {
-      period: `${days}天`,
-      criticalAlerts: 0,
-      highAlerts: 0,
-      failedLogins: 0,
-      unusualAccess: 0,
-      riskScore: 0,
-    };
+    // A-2：失败不能伪装成「零风险」。调用方（安全面板）必须能区分
+    // 「确实没有告警」与「查询根本没成功」——后者按 503 明确降级。
+    return { degraded: true, period: `${days}天` };
   }
 };
 

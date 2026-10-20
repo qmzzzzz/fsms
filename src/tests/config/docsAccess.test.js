@@ -93,7 +93,7 @@ describe('API 文档门禁（swagger.js）', () => {
       next = jest.fn();
     });
 
-    // M-01：原先"未配凭据即放行"是 fail-open——文档已开启却无凭据时，
+    // 原先"未配凭据即放行"是 fail-open——文档已开启却无凭据时，
     // 攻击者无需凭据即可枚举全部端点与权限编码。现改为 fail-closed。
     test('未配置 DOCS_USERNAME/PASSWORD → 拒绝访问（503，fail-closed）', () => {
       setEnv('DOCS_USERNAME', undefined);

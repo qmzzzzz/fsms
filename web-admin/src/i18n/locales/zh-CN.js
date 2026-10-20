@@ -792,6 +792,8 @@ export default {
       'security_ip-list_query': '查询 IP 名单',
       security_report: '提交安全上报',
       security_key_strength_audit: '密钥强度审计',
+      // app.js 级只读端点（GET /api、/api/metrics）的兜底 action
+      system_view: '查看系统信息',
       // 补充事件型（拦截 / 开关 / 校验）
       csrf_origin_denied: '来源校验拦截',
       ip_blacklist_blocked: 'IP 黑名单拦截',
@@ -1010,6 +1012,9 @@ export default {
     success: '登录成功',
     failed: '登录失败，请核对用户名与密码',
     encryptionFailed: '口令加密失败，请重试后重新提交',
+    // 生产构建下 WebCrypto 不可用只可能是非 HTTPS 源：不再回退明文，直接拒绝
+    insecureContext:
+      '当前页面不是安全连接（HTTPS），无法加密口令，已阻止提交。请通过 HTTPS 访问系统',
     // 公钥指纹与构建期固定值不符：主动 MITM 或服务端轮换密钥后前端未重建
     publicKeyPinMismatch:
       '服务端安全密钥校验未通过，已阻止提交。如刚更新过服务端密钥，请刷新页面重试；如持续出现请联系管理员',
@@ -1329,6 +1334,7 @@ export default {
     securityOverviewFormatInvalid: '安全概览数据格式错误',
     securityOverviewStructureInvalid: '安全概览数据结构错误',
     securityOverviewQueryFailed: '安全概览查询失败',
+    securityOverviewDegraded: '安全概览数据暂不可用（查询失败，不代表零风险）',
     recentAlertsEmpty: '最近告警数据为空',
     recentAlertsQueryFailed: '最近告警查询失败',
     configAllowRegistrationMustBeBoolean: '参数 allowPublicRegistration 必须为布尔值',

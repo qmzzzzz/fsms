@@ -72,7 +72,7 @@ const changePasswordValidation = [
     .isString()
     .withMessage('新密码格式无效')
     .custom((value) => {
-      // P3-29：统一委托 helpers 单一强度实现（覆盖长度上限与泄露口令黑名单）
+      // 统一委托 helpers 单一强度实现（覆盖长度上限与泄露口令黑名单）
       const err = validatePasswordStrength(value);
       if (err) throw new Error(err);
       return true;
@@ -400,7 +400,7 @@ router.get(
  * 三个开关的 PUT 都不挂 body 校验：布尔契约由控制器用 `typeof x !== 'boolean'`
  * 收死，并返回**字段专属**错误码（前端 api.js 有 i18n 映射）。
  * 这里若再挂一层 `isBoolean()` + consumeValidation()，非法值会先被拦成通用的
- * VALIDATION_FAILED，反而把专属码吃掉；且不消费时它是纯装饰（P3-17 治的那个病）。
+ * VALIDATION_FAILED，反而把专属码吃掉；且不消费时它是纯装饰（治的那个病）。
  * 由 src/tests/security/systemConfigBooleanContract.test.js 钉住这条契约。
  */
 router.put(

@@ -1,5 +1,5 @@
 /**
- * AuditLog 字段留存回归（P1-12）
+ * AuditLog 字段留存回归
  *
  * 缺陷：`AuditLog` schema 为 `strict: true`，而 `targetType` / `targetId` /
  * `dataType` / `description` 四个字段**未在 schema 中声明**——写入方
@@ -22,7 +22,7 @@
 
 const mongoose = require('mongoose');
 
-describe('AuditLog 字段留存（P1-12）', () => {
+describe('AuditLog 字段留存', () => {
   let AuditLog;
   const stamp = `p1l12_${Date.now().toString(36)}`;
 
@@ -36,7 +36,7 @@ describe('AuditLog 字段留存（P1-12）', () => {
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
       // append-only 钩子会拒绝 deleteMany：测试清理走 bypassAppendOnly
-      // （仅测试环境生效，见 models/auditLogHooks.js 的 P1-32 收紧）
+      // （仅测试环境生效，见 models/auditLogHooks.js 的收紧）
       await AuditLog.deleteMany({ username: stamp }, { bypassAppendOnly: true }).catch(() => {});
       await mongoose.connection.close();
     }

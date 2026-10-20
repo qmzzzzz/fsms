@@ -1,7 +1,7 @@
 /**
  * 分层纪律棘轮（D-1a）
  *
- * 现状：controller 仍有 17 处直接 require models（绕过 service 层）。
+ * 现状：controller 仍有 8 处直接 require models（绕过 service 层）。
  * 下沉是渐进工作，但「边下沉边新增」会让收敛永远到不了——因此用棘轮锁住：
  *
  *  1. 已登记的直连文件，实测数必须**等于**基线：多了是新增直连（拦），
@@ -37,21 +37,20 @@ const MODELS_DIR = path.join(__dirname, '../../models');
 // SystemConfig）集中进 shared.js；另 2 处函数内惰性直连随迁 admin.js（Role）与
 // overview.js（AuditLog），搬家后相对深度已同步加深一层。键名是相对 controllers/ 的
 // 路径（含子目录），总数不变。
+// 2026-10-20 A-4 读路径下沉：ipListController 的 6 处（名单读写 + 操作者超管判定）
+// 整体迁入 services/ipListService.js；reportController 的报警聚合迁入
+// reportStatsService.getAlarmReportData；admin.js 的角色查询改用 roleService.findRolesByIds；
+// overview.js 删除对 AuditLog 的重复 require（改用 shared 已提供的同一模型入口）。
+// 四处实测归零，按"减到 0 后从名单移除"退场，剩余 8 处继续由棘轮锁定。
 const GRANDFATHERED = {
-  'ipListController.js': 6,
   'securityController/shared.js': 3,
-  'securityController/admin.js': 1,
-  'securityController/overview.js': 1,
-  'reportController.js': 1,
-  'roleController.js': 0,
   'authController/credentials.js': 1,
   'authController/profile.js': 1,
   'mfaController.js': 2,
-  'permissionController.js': 0,
   'auditController.js': 1,
 };
 
-const TOTAL_BASELINE = Object.values(GRANDFATHERED).reduce((a, b) => a + b, 0); // 17（与实测一致）
+const TOTAL_BASELINE = Object.values(GRANDFATHERED).reduce((a, b) => a + b, 0); // 8（与实测一致）
 
 // 计数口径（2026-10-19 改成**路径解析**，历史两版一并记下）：
 //   · 初版正则只认 require('../models/Xxx') 单引号带斜杠形态，实测漏掉无斜杠聚合入口

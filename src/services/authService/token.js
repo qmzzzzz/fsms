@@ -72,13 +72,25 @@ async function resolveRefreshSubject(user, decoded, ctx) {
 /**
  * 重放检测命中后的处置：吊销该用户全部会话。
  *
+ * 只对 `rotate` 来源的重放做全量吊销。`logout` 来源的串本就在登出时已作废：
+ * 此时令牌无法换出新会话，再触发全量吊销只会让任何拿到用户旧 refresh token
+ * 的人用一次请求踢掉其所有设备（S-6 低成本 DoS）。reason 缺失/未知（历史数据）
+ * 仍按真实重放处理——宁可多吊销，也不把无法判明来源的重放轻放过去。
+ *
  * fail-closed：吊销失败时不能按 REPLAYED「已处置」返回——攻击者会话仍然在线，
  * 上抛 REVOKE_UNAVAILABLE 由控制器回 503，让客户端重试并触发告警，而不是静默放行。
  *
  * @param {object} decoded 已验证的 refresh 载荷
+ * @param {string|null} reason 黑名单首次入库原因
  * @returns {Promise<{ok: false, outcome: string}>}
  */
-async function revokeOnRefreshReplay(decoded) {
+async function revokeOnRefreshReplay(decoded, reason) {
+  if (reason === 'logout') {
+    logger.warn('Refresh 重放 - 令牌已因登出吊销，仅拒绝本次请求', {
+      userId: decoded.userId,
+    });
+    return { ok: false, outcome: 'REPLAYED' };
+  }
   try {
     await invalidateUserTokens(decoded.userId);
   } catch (revokeErr) {
@@ -105,15 +117,15 @@ async function revokeOnRefreshReplay(decoded) {
  * @returns {Promise<{ok: true}|{ok: false, outcome: string}>}
  */
 async function claimRefreshToken(refreshTokenRaw, decoded) {
-  let claimed = false;
+  let claim;
   try {
-    claimed = await consumeToken(refreshTokenRaw, decoded.exp);
+    claim = await consumeToken(refreshTokenRaw, decoded.exp);
   } catch (consumeErr) {
     logger.error(`Refresh 轮换中止 - 黑名单服务故障：${consumeErr.message}`);
     return { ok: false, outcome: 'BLACKLIST_UNAVAILABLE' };
   }
-  if (claimed) return { ok: true };
-  return revokeOnRefreshReplay(decoded);
+  if (claim.claimed) return { ok: true };
+  return revokeOnRefreshReplay(decoded, claim.reason);
 }
 
 /**
@@ -246,7 +258,7 @@ async function revokeOneRefreshToken(token) {
   }
   if (!payload || !payload.exp) return { handled: false, failed: false };
   try {
-    await blacklistToken(token, payload.exp);
+    await blacklistToken(token, payload.exp, 'logout');
   } catch (e) {
     logger.error(`登出未能吊销 refresh token（${e.code || e.message}）：令牌在过期前仍然可用`);
     return { handled: true, failed: true };
@@ -264,7 +276,7 @@ async function revokeOneRefreshToken(token) {
  *   `body || cookie` 这种"二选一"让一条已轮换掉的旧串把在用的那条挡在身后）
  * @returns {Promise<{revokeFailed:boolean}>} revokeFailed=true 表示有令牌未能确认入库
  *
- * P2-26 fail-closed：令牌吊销未能落库时由控制器返回失败而非「登出成功」。
+ * fail-closed：令牌吊销未能落库时由控制器返回失败而非「登出成功」。
  * 原实现把 blacklistToken 的异常吞进 logger.warn 照常返回成功，于是
  * DB 瞬断期间「登出」只是清了 cookie —— 被窃取的 access token 在其剩余
  * 有效期（默认 2h）内仍可通过认证，而用户已认为会话已终止、不会再补救。

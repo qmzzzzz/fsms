@@ -94,17 +94,12 @@ describe('securityAlert delivery and failure guards', () => {
     await pending;
   });
 
-  test('returns a zeroed overview when metrics aggregation fails', async () => {
+  test('returns an explicit degraded marker when metrics aggregation fails (A-2)', async () => {
     const spy = jest.spyOn(AuditLog, 'countDocuments').mockRejectedValue(new Error('db down'));
     const overview = await securityAlert.getSecurityOverview(7);
-    expect(overview).toEqual({
-      period: expect.stringContaining('7'),
-      criticalAlerts: 0,
-      highAlerts: 0,
-      failedLogins: 0,
-      unusualAccess: 0,
-      riskScore: 0,
-    });
+    // 关键：不能返回一排 0——「零风险」与「数据不可用」是相反结论。
+    expect(overview).toEqual({ degraded: true, period: expect.stringContaining('7') });
+    expect(overview.criticalAlerts).toBeUndefined();
     spy.mockRestore();
   });
 
@@ -117,7 +112,7 @@ describe('securityAlert delivery and failure guards', () => {
   });
 
   test('checkBulkExport：告警审计落库失败不冒泡（不得把导出主流程顶成 500），且仍投递通知', async () => {
-    // P1-23 同口径回归：checkBulkExport 被 reportController/auditController 的导出路径
+    // 同口径回归：checkBulkExport 被 reportController/auditController 的导出路径
     // `await`，其内部 AuditLog.create 若抛错必须被吞（记 error），否则一次 DB 瞬断就会让
     // 本已成功的导出返 500。pre-fix（裸 await create）→ 本用例 rejects → 红。
     process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST = 'alerts.example.com';

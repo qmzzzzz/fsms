@@ -20,7 +20,7 @@
  */
 
 /**
- * 批次F 工具/密码学类修复回归（P3-26 ~ P3-36）
+ * 批次F 工具/密码学类修复回归
  *
  * 这批缺陷集中在「工具函数的边界行为」与「注释/配置与实现背离」两类。
  * 前者能直接断言（脱敏结果、解码是否抛错、口令是否被接受），
@@ -32,7 +32,7 @@ const path = require('path');
 const request = require('supertest');
 
 describe('批次F 工具与密码学加固回归', () => {
-  // T-1：P3-30 用例会打开 Mongo 连接，套件结束必须关闭，
+  // 用例会打开 Mongo 连接，套件结束必须关闭，
   // 否则遗留连接拖住 jest worker 优雅退出
   afterAll(async () => {
     const mongoose = require('mongoose');
@@ -41,8 +41,8 @@ describe('批次F 工具与密码学加固回归', () => {
     }
   });
 
-  // ================= P3-26 TOTP =================
-  describe('P3-26 TOTP 常量时间比较与 Base32 严格解码', () => {
+  // ================= TOTP =================
+  describe('TOTP 常量时间比较与 Base32 严格解码', () => {
     const { verifyTotp, generateSecret, base32Decode, hotp } = require('../../utils/totp');
     /** 生成指定时间窗的 6 位码（totp.js 未导出按 counter 生成的入口，此处组合） */
     const codeAt = (secret, counter) => hotp(base32Decode(secret), counter);
@@ -116,8 +116,8 @@ describe('批次F 工具与密码学加固回归', () => {
     });
   });
 
-  // ================= P3-27 maskIP / CBC =================
-  describe('P3-27 IP 脱敏与遗留 CBC 解密', () => {
+  // ================= maskIP / CBC =================
+  describe('IP 脱敏与遗留 CBC 解密', () => {
     const { DataMasking, aesCipher } = require('../../utils/encryption');
 
     test('IPv6 压缩写法先展开再取前 3 组（不再把接口标识当前缀）', () => {
@@ -161,8 +161,8 @@ describe('批次F 工具与密码学加固回归', () => {
     });
   });
 
-  // ================= P3-28 ipRange =================
-  describe('P3-28 ipRange 通配语法口径与文档一致', () => {
+  // ================= ipRange =================
+  describe('ipRange 通配语法口径与文档一致', () => {
     const { validateRules, isIPAllowed } = require('../../utils/ipRange');
 
     test('三段简写被判为非法片段（配置者立刻可见，不静默失效）', () => {
@@ -197,8 +197,8 @@ describe('批次F 工具与密码学加固回归', () => {
     });
   });
 
-  // ================= P3-29 密码策略 =================
-  describe('P3-29 密码字符集、长度上限与双向隔离符', () => {
+  // ================= 密码策略 =================
+  describe('密码字符集、长度上限与双向隔离符', () => {
     const {
       validatePasswordStrength,
       stripControlChars,
@@ -361,8 +361,8 @@ describe('批次F 工具与密码学加固回归', () => {
     });
   });
 
-  // ================= P3-30 username 大小写 =================
-  describe('P3-30 username 唯一索引大小写不敏感', () => {
+  // ================= username 大小写 =================
+  describe('username 唯一索引大小写不敏感', () => {
     const User = require('../../models/User');
 
     test('username 字段不再声明字段级 unique（会生成默认 collation 索引）', () => {
@@ -461,8 +461,8 @@ describe('批次F 工具与密码学加固回归', () => {
     });
   });
 
-  // ================= P3-31 logShipper =================
-  describe('P3-31 日志转发行序与缓冲断档标记', () => {
+  // ================= logShipper =================
+  describe('日志转发行序与缓冲断档标记', () => {
     const { HttpShipperTransport, BUFFER_CAP } = require('../../utils/logShipper');
 
     /** 构造一个受控的 transport：_post 由测试决定成功/失败与耗时 */
@@ -540,21 +540,32 @@ describe('批次F 工具与密码学加固回归', () => {
 
     test('close 会等待在途批次结束后再排空（关停时的行不被丢弃）', async () => {
       const sent = [];
+      // 用测试可控的 deferred 模拟「在途批次」：不靠 30ms 睡眠猜时序，
+      // 而是在断言 close 尚未完成之后由测试显式放行。
+      let releasePost;
+      const postGate = new Promise((resolve) => {
+        releasePost = resolve;
+      });
       const t = makeTransport(async (batch) => {
-        await new Promise((r) => setTimeout(r, 30));
+        await postGate;
         sent.push([...batch]);
       });
       for (let i = 0; i < 5; i++) t.log(`bye-${i}`, () => {});
       t.log('last-line', () => {});
-      await t.close();
+      const closing = t.close();
+      // 在途批次仍卡在 gate 上：close 必须等待它，而不是先返回
+      await new Promise((r) => setImmediate(r));
+      expect(sent).toHaveLength(0);
+      releasePost();
+      await closing;
       // 两批都应送出：满额那批 + close 时剩余的那批
       expect(sent.length).toBe(2);
       expect(sent[1]).toContain('last-line');
     });
   });
 
-  // ================= P3-32 日志取证与 query 脱敏 =================
-  describe('P3-32 进程级异常落盘与访问日志 query 脱敏', () => {
+  // ================= 日志取证与 query 脱敏 =================
+  describe('进程级异常落盘与访问日志 query 脱敏', () => {
     const { redactUrlQuery, SENSITIVE_QUERY_KEYS } = require('../../utils/helpers');
 
     test('敏感 query 值被打码，键名与结构保留', () => {
@@ -652,8 +663,8 @@ describe('批次F 工具与密码学加固回归', () => {
     });
   });
 
-  // ================= P3-34 errorHandler 防御 =================
-  describe('P3-34 重复键错误处理器自身的防御', () => {
+  // ================= errorHandler 防御 =================
+  describe('重复键错误处理器自身的防御', () => {
     const errorHandler = require('../../middleware/errorHandler');
 
     const buildRes = () => {
@@ -719,14 +730,14 @@ describe('批次F 工具与密码学加固回归', () => {
     });
   });
 
-  // ================= P3-35 挂载顺序、留痕与限流口径 =================
+  // ================= 挂载顺序、留痕与限流口径 =================
   //
   // 【本次改动改造：静态断言 → 行为断言】
   // 审计实测：把 generalLimiter 的 `skip: skipIfWhitelisted` 改成 `() => false`
   // （白名单豁免整体失效），旧的源码文本断言仍然全绿——因为它只检查
-  // 源码里是否出现该字符串。P3-35 整块已改为真实驱动中间件/真实 HTTP 请求，
+  // 源码里是否出现该字符串。整块已改为真实驱动中间件/真实 HTTP 请求，
   // 每个用例都能因行为退化而变红（变异验证见各用例注释）。
-  describe('P3-35 早期拒绝留痕、限流豁免口径与挂载顺序', () => {
+  describe('早期拒绝留痕、限流豁免口径与挂载顺序', () => {
     const { protocolCompliance } = require('../../middleware/protocolCompliance');
 
     /** 构造最简 req/res，直接驱动中间件（不启动 HTTP 服务） */
@@ -1114,8 +1125,8 @@ describe('批次F 工具与密码学加固回归', () => {
     });
   });
 
-  // ================= P3-36 注释/配置漂移 =================
-  describe('P3-36 注释与实现对齐', () => {
+  // ================= 注释/配置漂移 =================
+  describe('注释与实现对齐', () => {
     test('cookie.js 不再写死与 config 默认值不符的具体时长', () => {
       const source = fs.readFileSync(path.join(__dirname, '../../utils/cookie.js'), 'utf8');
       const contract = source.slice(source.indexOf('契约（I-01）'), source.indexOf('项目未引入'));

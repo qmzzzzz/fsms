@@ -3,7 +3,7 @@
  *
  * 修复背景：今日统计起点此前用 new Date(now.setHours(0,0,0,0))
  * （服务器本地时区零点，容器 TZ=Asia/Shanghai 时碰巧正确，裸跑/改 TZ
- * 即漂移），与 P3-18 业务时区声明存在分叉隐患。现统一为
+ * 即漂移），与业务时区声明存在分叉隐患。现统一为
  * businessDayBounds().start，与仪表盘/报表/告警频控的「今日」同源。
  *
  * 锁定方式：把 businessDayBounds mock 为已知窗口（北京 2026-09-02 00:00

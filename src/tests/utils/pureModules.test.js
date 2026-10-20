@@ -49,7 +49,7 @@ describe('encryption.js 缺口覆盖：DataMasking / HMACSigner / HashUtils / AE
 
     test('maskIP：IPv4 / IPv4-mapped IPv6 / 压缩与完整 IPv6 / 非法输入', () => {
       expect(DataMasking.maskIP('192.168.1.100')).toBe('192.168.*.*');
-      // IPv4-mapped IPv6 按内嵌 IPv4 语义脱敏（P3-27）
+      // IPv4-mapped IPv6 按内嵌 IPv4 语义脱敏
       expect(DataMasking.maskIP('::ffff:192.168.1.100')).toBe('192.168.*.*');
       // 压缩 IPv6：展开后保留前 3 组原文（组内文本不做归一化），缺省组补 0
       expect(DataMasking.maskIP('2001:db8::1')).toBe('2001:db8:0:****');
@@ -369,11 +369,17 @@ describe('statsCache 缺口覆盖', () => {
     expect(statsCache.get('sc:k1')).toEqual({ hit: true, data: { v: 1 } });
   });
 
-  test('TTL（秒）过期后 {hit:false}', async () => {
+  test('TTL（秒）过期后 {hit:false}', () => {
     statsCache.set('sc:ttl', { v: 2 }, 1);
     expect(statsCache.get('sc:ttl').hit).toBe(true);
-    await new Promise((r) => setTimeout(r, 1100));
-    expect(statsCache.get('sc:ttl')).toEqual({ hit: false });
+    // statsCache 的过期判据是 Date.now() ⇒ 临时推进时钟跨过 1s，不真实等待
+    const shiftedNow = Date.now() + 1001;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(shiftedNow);
+    try {
+      expect(statsCache.get('sc:ttl')).toEqual({ hit: false });
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   test('del 删除单条', () => {

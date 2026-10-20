@@ -134,7 +134,13 @@ describe('迁移目标库判据', () => {
       .replace(/\r\n/g, '\n');
     // 前提自证：这条用例的存在理由就是"部署会在容器里跑 migrate-mongo up"，
     // 哪天部署改用别的迁移方式，上面那条"未设白名单不拦"的权衡就该重新评估
-    expect(deploy).toContain("run('docker', [...migrateArgv, 'up'])");
-    expect(deploy).toContain('node_modules/.bin/migrate-mongo');
+    // O-2：up 的 stdout 必须被解析（MIGRATED UP 行决定能否自动回滚），故走 runCapture
+    // O-5：argv 组装在 deployCommands.js，deploy.js 只引用构建器
+    expect(deploy).toContain("buildMigrateInvocation('up')");
+    expect(deploy).toMatch(/runCapture\(up\.file, up\.args\)/);
+    const commands = fs
+      .readFileSync(path.join(__dirname, '../../scripts/deployCommands.js'), 'utf8')
+      .replace(/\r\n/g, '\n');
+    expect(commands).toContain('node_modules/.bin/migrate-mongo');
   });
 });

@@ -44,7 +44,7 @@ const ipBlockCacheCleanupTimer = setInterval(
   },
   5 * 60 * 1000
 );
-// P3-36：此处原注释称「setInterval(...).unref?.() 返回 undefined」——实测不成立，
+// 此处原注释称「setInterval(...).unref?.() 返回 undefined」——实测不成立，
 // Node 的 Timeout.unref() 返回 Timeout 自身（`t.unref() === t` 为 true），
 // 链式写法同样能拿到句柄。保留「先存句柄再 unref」的写法理由是可读性与
 // 可清理性：句柄需要在 gracefulShutdown 里 clearInterval，显式命名比
@@ -75,7 +75,7 @@ const invalidateIPBlockCache = (ip) => {
 };
 
 /**
- * 记录「早于 auditLog 中间件的 403 拒绝」审计（P3-35）
+ * 记录「早于 auditLog 中间件的 403 拒绝」审计
  *
  * checkIPBlacklist 与 originCheck 都挂在 auditLog 之前（必须如此：黑名单要在
  * 一切业务处理前拦下，来源校验要在写操作触达控制器前拦下）。副作用是它们的
@@ -129,7 +129,7 @@ const recordEarlyRejection = (req, meta) => {
  * XFF 即可把 req.ip 变成任意白名单 IP——该标记会被资源型限流（rateLimit.js 的
  * skipIfWhitelisted）、CSRF 来源校验（originCheck.js）、query 长度限制
  * （queryLimit.js queryLengthLimit）同时豁免，一次伪造拿到三重豁免（伪造实测
- * 口径见 tests 的 laneE/xffCredentialLimiter）。修复范式与 metricsAuth 的 M-07
+ * 口径见 tests 的 laneE/xffCredentialLimiter）。修复范式与 metricsAuth
  * 同源：安全豁免只信**不可伪造的 socket 对端**。
  *
  * 三种可发放形态（其余一律不发，宁可不豁免也不能被伪造头买通）：

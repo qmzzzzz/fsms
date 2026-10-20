@@ -1,5 +1,5 @@
 /**
- * P0-4：弱密钥校验的占位符/低熵判定
+ * 弱密钥校验的占位符/低熵判定
  *
  * 背景：审计发现 .env.example 的 JWT 占位符（'<替换为 openssl rand -base64 48 的输出>'，
  * 33 字符）能通过生产校验——旧实现只有「黑名单 + 长度 < 32」两重判定，长度足够
@@ -8,7 +8,7 @@
  * 本文件锁定两件事，且**都以 .env.example / generate-secrets.js 的真实产物为准**：
  *   1. 模板里的每一个密钥占位符必须判弱（改回可用的占位符 = 校验形同虚设）；
  *   2. scripts/generate-secrets.js 实际生成形式的高熵密钥必须判强
- *      （否则修完 P0-4 会让标准生成流程反而起不来）。
+ *      （否则修完会让标准生成流程反而起不来）。
  *
  * 与 src/tests/config/validate.test.js 的分工：那个文件用固定字面量夹具覆盖
  * validateConfig 的整体编排；本文件只管 isWeakSecret 的判定边界，
@@ -43,7 +43,7 @@ const ENV_EXAMPLE = parseEnvExample();
 // 若日后新增受校验的密钥变量，此清单必须同步——否则新变量没有占位符回归保护。
 const GUARDED_SECRET_VARS = ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'AES_SECRET_KEY', 'HMAC_SECRET'];
 
-describe('P0-4：.env.example 的密钥占位符必须判弱', () => {
+describe('.env.example 的密钥占位符必须判弱', () => {
   test('四个受校验变量都在 .env.example 中有取值（否则本文件的覆盖是假的）', () => {
     for (const name of GUARDED_SECRET_VARS) {
       // 只断 toBeDefined() 时，`JWT_SECRET=`（空值）也算过：isWeakSecret('') 返回 true，
@@ -66,7 +66,7 @@ describe('P0-4：.env.example 的密钥占位符必须判弱', () => {
   });
 });
 
-describe('P0-4：判据覆盖（占位符形态 / 低熵 / 循环拼接）', () => {
+describe('判据覆盖（占位符形态 / 低熵 / 循环拼接）', () => {
   test.each([
     ['旧模板占位符（33 字符，曾通过校验）', '<替换为 openssl rand -base64 48 的输出>'],
     ['<CHANGE_ME>', '<CHANGE_ME>'],
@@ -85,7 +85,7 @@ describe('P0-4：判据覆盖（占位符形态 / 低熵 / 循环拼接）', () 
   });
 });
 
-describe('P0-4：高熵密钥必须判强（防「修完反而起不来」）', () => {
+describe('高熵密钥必须判强（防「修完反而起不来」）', () => {
   // 样本取自 scripts/generate-secrets.js 的实际生成方式：
   //   jwt/refresh = randomBytes(48).toString('base64')  → 64 字符
   //   aes/hmac    = randomBytes(32).toString('hex')     → 64 字符
@@ -105,7 +105,7 @@ describe('P0-4：高熵密钥必须判强（防「修完反而起不来」）', 
     }
   });
 
-  test('既有测试夹具（纯小写英文短语）必须仍判强——P0-4 的已知取舍', () => {
+  test('既有测试夹具（纯小写英文短语）必须仍判强——已知取舍', () => {
     // 这些字面量在 src/tests/config/validate.test.js 里被当作「合法强密钥」，
     // 且该文件不在本次改动写集内。它们的香农熵（3.71~3.91）与真实密钥区间重叠，
     // 因此 isWeakSecret 刻意**不**按「英文短语」一刀切——详见其函数注释的
@@ -118,7 +118,7 @@ describe('P0-4：高熵密钥必须判强（防「修完反而起不来」）', 
   });
 });
 
-describe('P0-4：validateConfig 端到端——占位符必须拦住生产启动', () => {
+describe('validateConfig 端到端——占位符必须拦住生产启动', () => {
   const originalEnv = process.env;
 
   beforeEach(() => {

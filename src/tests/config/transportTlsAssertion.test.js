@@ -1,7 +1,7 @@
 /**
- * 传输加密启动断言（P2-⑧，2026-09-30）
+ * 传输加密启动断言
  *
- * 审计缺口核查（deliverables/安全缺口核查-2026-09-30.md P2-⑧）指出：
+ * 审计缺口核查（deliverables/安全缺口核查-2026-09-30.md）指出：
  * Mongo/Redis 的连接串在生产里可以指向非回环主机而完全不加密（明文过网）。
  * 同宿主 docker 网络内风险有限——所以判据是 fail-closed + **显式命名的豁免旗**：
  *   - MONGODB_URI 指向非回环主机 ⇒ URI 必须带 ?tls=true，否则启动期硬错误；
@@ -32,7 +32,7 @@ const VALID_PROD_BASELINE = () => ({
   JWT_REFRESH_SECRET: DUMMY_REFRESH,
   AES_SECRET_KEY: DUMMY_AES,
   HMAC_SECRET: DUMMY_HMAC,
-  // P2-8：合法生产基线自带传输加密
+  // 合法生产基线自带传输加密
   MONGODB_URI: 'mongodb://prod-server:27017/db?tls=true',
   CORS_ORIGIN: 'https://example.com',
   ENABLE_HTTPS: 'true',
@@ -51,7 +51,7 @@ const TOUCHED_KEYS = Object.keys(VALID_PROD_BASELINE()).concat([
   'REDIS_AUTH_EXEMPT',
 ]);
 
-describe('传输加密启动断言（P2-⑧）', () => {
+describe('传输加密启动断言', () => {
   const saved = {};
   beforeAll(() => {
     for (const key of TOUCHED_KEYS) saved[key] = process.env[key];

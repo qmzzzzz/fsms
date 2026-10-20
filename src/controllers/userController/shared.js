@@ -7,13 +7,13 @@ const logger = require('../../utils/logger');
 const { validateRules } = require('../../utils/ipRange');
 // 数据范围字段名只有一份（constants/dataScopeFields.js）。此前 getUserStats 里私抄了
 // 'createdBy'/'department'：改常量会让列表按新字段过滤、统计仍按旧字段聚合，
-// 同一用户在"我的列表"与"我的统计"上看到互相矛盾的口径——正是这个常量当初要消灭的 P2-20。
+// 同一用户在"我的列表"与"我的统计"上看到互相矛盾的口径——正是这个常量当初要消灭的。
 const { DATA_SCOPE_FIELDS } = require('../../constants/dataScopeFields');
 
 /**
  * user 资源的属主/部门字段只有一份（constants/dataScopeFields.js）。
  * 此前本文件 5 处数据范围闸手写 'createdBy'/'department'，而同文件的统计接口引用常量——
- * 常量一改就会出现"列表/详情/写路径按新字段、统计按旧字段"的口径分叉（P2-20 的原始教训）。
+ * 常量一改就会出现"列表/详情/写路径按新字段、统计按旧字段"的口径分叉（原始教训）。
  */
 const { ownerField: USER_OWNER_FIELD, departmentField: USER_DEPT_FIELD } = DATA_SCOPE_FIELDS.user;
 

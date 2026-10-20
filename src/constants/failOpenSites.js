@@ -201,7 +201,7 @@ const OTHER_ALERT_SIGNALS = Object.freeze([
       '启动期：口令历史 pepper 轮换提醒。**已知问题**：该信号在每次进程启动都会 +1，' +
       '是 `security_alerts_total` 里的恒正项，而跨类型求和规则 ' +
       '`sum(increase(security_alerts_total[10m])) >= 10` 会被它稀释（crash loop 还会冒充' +
-      '安全事件）。该口径问题已登记为待拍板（deliverables/审计复核第3轮…-2026-10-01.md §六），' +
+      '安全事件）。该口径问题尚未拍板，' +
       '本台账只如实记录，不擅自改判据。',
   },
   {

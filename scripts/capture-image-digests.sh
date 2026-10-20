@@ -19,7 +19,7 @@
 set -eu
 
 NODE_TAG="node:26.12.0-alpine"
-MONGO_TAG="mongo:6.0.20"
+MONGO_TAG="mongo:8.0.34"
 APPLY=0
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
@@ -61,7 +61,7 @@ docker pull "$MONGO_TAG"
 #
 # 返回值不是 RepoDigests 原文，而是 `$tag@sha256:<hex>`（把 digest 追加到调用方给的可读引用上）。
 # 因为 RepoDigests 的条目天生**不带 tag**——本仓 2026-10-02 实测
-# `docker inspect --format='{{index .RepoDigests 0}}' node:22.14.0-alpine`
+# `docker inspect --format='{{index .RepoDigests 0}}' node:26.12.0-alpine`
 # 得到 `docker.io/library/node@sha256:…`。旧实现把整串直接写进 Dockerfile，产物是
 # `FROM docker.io/library/node@sha256:…`：tag 整段消失，而本仓的钉版口径明确是**保留 tag**——
 #   docker-compose.yml 里 mongo 那段注释写着"保留可读 tag：纯 digest 看不出版本，
@@ -71,7 +71,7 @@ docker pull "$MONGO_TAG"
 #     `/^node:22\.14\.0-alpine@sha256:[0-9a-f]{64}$/`，deployScript.test.js 把约定写成 `<repo>:<tag>@sha256:…`。
 # 也就是说照本脚本的升级路径跑一次 `--apply`，产物会被那道闸直接判红——
 # 工具否定了它自己的产物。取尾巴追加到 tag 上，两种形态（短名 `node@…`、
-# 全限定 `docker.io/library/node@…`）都会收敛成同一个 `node:22.14.0-alpine@sha256:…`。
+# 全限定 `docker.io/library/node@…`）都会收敛成同一个 `node:26.12.0-alpine@sha256:…`。
 #
 # 追加之前必须先确认"这个 digest 确实属于这个镜像"，否则写进去的是"tag 指向别人仓库的 digest"
 # 这种根本不成立的断言，构建期 pull 才炸。仓库名对账有两处坑（2026-10-03 复核实测，两侧都踩）：
@@ -161,11 +161,11 @@ fi
 # Dockerfile 被当成"已按 digest 固定"提交上去。
 # addr/kw 是**指令定位**：只认指令行上"值的位置"那一段。
 # 实测教训有两条，根子都在把字面串当成"位置无关的子串"：
-#   ① compose 里 `image: mongo:6.0.20` 这个字面串同时出现在一段注释里（"把输出追加为
-#      `image: mongo:6.0.20@sha256:<捕获值>`"），不带行定位的全文 sed 会把注释一起改掉——
+#   ① compose 里 `image: mongo:8.0.34` 这个字面串同时出现在一段注释里（"把输出追加为
+#      `image: mongo:8.0.34@sha256:<捕获值>`"），不带行定位的全文 sed 会把注释一起改掉——
 #      注释是给人读的用法示例，改掉之后它就成了错误示例；
-#   ② 钉版形态 `node:22.14.0-alpine@sha256:9bef…` 仍然**包含**脚本常量
-#      `FROM node:22.14.0-alpine` 这个前缀，于是旧的 `grep -qF "$old"` 把"已经钉过"读成
+#   ② 钉版形态 `node:26.12.0-alpine@sha256:6f08…` 仍然**包含**脚本常量
+#      `FROM node:26.12.0-alpine` 这个前缀，于是旧的 `grep -qF "$old"` 把"已经钉过"读成
 #      "还能改"，替换再在它前面插一个新 digest ⇒ 产出 `@sha256:新@sha256:旧` 的双 digest：
 #      脚本打印"已替换并校验"，失败推迟到 `docker build`，而现场是一份"看起来已按 digest
 #      固定"的文件（2026-10-03 对着本仓真实 Dockerfile 实测复现，三条 FROM 全部中招）。
@@ -214,7 +214,7 @@ to_re() {
 #   unreach x <行号> x           含 tag 字面串、却没被取成本镜像的 token，且不在注释行里
 #                                （两类都算：整行不是指令行——引号包裹/折叠标量/序列项；
 #                                 整行是指令行但第一个字段不是该镜像的值——--platform= 前缀、
-#                                 ${VAR:-mongo:6.0.20} 这类变量展开）
+#                                 ${VAR:-mongo:8.0.34} 这类变量展开）
 # 注释行（去掉行首空白后以 `#` 开头）里的提及**不算引用**：那是给人读的示例，
 # 本脚本既不读它也不改它——Dockerfile 顶部就写着三行这样的示例。
 probe_ref() {
@@ -235,8 +235,8 @@ probe_ref() {
         tok = rest
         sub(/[ \t].*$/, "", tok)
         # 「不是本镜像的指令行」与「是本镜像但值不在可锚定的位置上」是两回事。
-        # 旧实现在这里一律 next ⇒ `FROM --platform=linux/amd64 node:22.14.0-alpine AS b` 与
-        # `image: ${MONGO_IMAGE:-mongo:6.0.20}` 被当成不相干的行放过：脚本打印
+        # 旧实现在这里一律 next ⇒ `FROM --platform=linux/amd64 node:26.12.0-alpine AS b` 与
+        # `image: ${MONGO_IMAGE:-mongo:8.0.34}` 被当成不相干的行放过：脚本打印
         # "钉好 1 条 / 已替换并校验"，文件里却**留着一条可变 tag**（2026-10-04 审计实测复现）。
         # 区分依据就是 tag 字面串在不在这一行里：不相干的引用（redis / prometheus /
         # ${APP_IMAGE:-…}）不含它，照旧一笔不碰；含它却取不到的，停手并给行号。
@@ -248,7 +248,7 @@ probe_ref() {
         sha = gsub(/@sha256:/, "@", scan)
         if (index(tok, tag) != 1) {
           if (index(tok, tag) > 0) {
-            # 带 registry / 命名空间前缀的**同名**引用（`myorg/mongo:6.0.20`）：tag 没漂移，
+            # 带 registry / 命名空间前缀的**同名**引用（`myorg/mongo:8.0.34`）：tag 没漂移，
             # 是常量对不上。旧文案把它说成"tag 与脚本常量漂移"，会把人往"改常量"的方向引，
             # 而改常量等于让本脚本去钉别人命名空间的镜像。
             print "instr", "prefixed", NR, tok
@@ -401,8 +401,8 @@ stage_ref() {
   # 先落到临时文件再原子替换：中途失败不会留下半改的目标文件。
   # 两条表达式的分工：
   #   ① 带锚定（行首 = 可选缩进 + 指令词 + 空白）的裸 tag → 追加刚捕获的 digest。
-  #      锚定是"只改值的位置"的全部保证：注释里的示例（`# 把输出追加为 image: mongo:6.0.20…`）
-  #      不在行首指令词之后，一笔不碰；旧实现用无锚定的 `s|FROM node:22.14.0-alpine|…|g`，
+  #      锚定是"只改值的位置"的全部保证：注释里的示例（`# 把输出追加为 image: mongo:8.0.34…`）
+  #      不在行首指令词之后，一笔不碰；旧实现用无锚定的 `s|FROM node:26.12.0-alpine|…|g`，
   #      而该字面串是钉版行的**前缀** ⇒ 已钉行也被改 ⇒ 双 digest（见上面的注释）。
   #   ② `tag@sha256:<64hex>` → 刚捕获的 digest：把"钉在别的 digest 上"的引用刷新，
   #      这是上游滚动同名 tag 之后的升级路径（旧实现把这种仓库直接判成不可操作）。
@@ -410,7 +410,7 @@ stage_ref() {
   #      digest 换了若只改指令行，注释就从"正确示例"变成"错误示例"——那正是本脚本
   #      要躲开的第一类失效。digest 相同时 ② 是逐字节 no-op，所以锚定行也不会被改两遍。
   #      但"全文替换"必须带**名字边界**，否则两种真实损坏（2026-10-04 审计实测）：
-  #        - 前无边界 ⇒ `myorg/mongo:6.0.20@sha256:…` 里的同名子串被当成自己的引用改掉，
+  #        - 前无边界 ⇒ `myorg/mongo:8.0.34@sha256:…` 里的同名子串被当成自己的引用改掉，
   #          注释里的别人的仓库 digest 被换成刚捕获的值 ⇒ 示例变成假证；
   #        - 后无边界 ⇒ `@sha256:` 后跟 68 位十六进制时替换掉前 64 位、留下尾巴 4 位，
   #          产出一行**看起来完全合法**的钉版引用。

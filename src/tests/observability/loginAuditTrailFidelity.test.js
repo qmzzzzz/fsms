@@ -9,7 +9,7 @@
  *    随后键被归一成 `"sign"` ⇒ 明文凭据落进 append-only、定期导 CSV 的审计集合。
  *    中间件侧一直是"先清洗后脱敏"，同一条请求两处结论相反。
  *
- * 2) `recordLogin` 从不取用调用方传的 `extra.reason`，而 M-5 把差异化响应收成统一 401
+ * 2) `recordLogin` 从不取用调用方传的 `extra.reason`，而把差异化响应收成统一 401
  *    防枚举时，注释写的是"真实原因仅记入服务端日志与审计"——审计这一环是空的。
  *
  * 3) 五处登录失败审计写失败仍用 `.catch(() => {})` 完全静默（同仓 17 处已接
@@ -130,7 +130,7 @@ describe('recordLogin 必须兑现它声称要记的东西', () => {
         { username: user.username, password: PASSWORD },
         ctx
       );
-      // 对外仍是统一 401（M-5 防枚举不许动），差别只在留存里
+      // 对外仍是统一 401（防枚举不许动），差别只在留存里
       expect(result.outcome).toBeTruthy();
       const written = await AuditLog.collection.findOne({ username: `${TAG}inactive` });
       expect(written).not.toBeNull();

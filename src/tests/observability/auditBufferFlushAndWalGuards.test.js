@@ -12,7 +12,9 @@
  *   - [已修复·核心] **F-34（Critical·治理）**：`:509-531` 把「`chainBatch` 抛错时文档仍以无哈希方式落库」**断言为期望行为**，与 `services/auditChainVerify.test.js:117-130` 合起来构成链绕过的正式背书 ⇒ **修复该绕过会让 CI 变红**（deliverables/七维代码健康度深度审计-2026-09-18.md）
  *     复核：校验端已修——`services/auditChainVerify.js:25-31`「无哈希记录不再一律算 legacy…出现在带 hash 记录之后 = 完整性无法追认，计入 breaks（type=hash_stripped）」；`services/auditChainVerify.test.js:74-89` 专项断言 `intact:false` / `legacy:0` / `byType.hash_stripped:1`。故「修复该绕过会让 CI 变红」已不成立。残留（非 Critical）：本文件 `:529` 用例标题写「无哈希方式落库」，函数体只断 `count===1`，未断哈希字段缺失。
  *   - [部分有效] `:563-656` 3 处名实不符 + 2 处 env 泄漏 + 3 处固定 sleep，而文件头宣称「已消除固定 sleep」（原出处 2026-09-16 全面代码审计报告；**该报告已删除**，问题编号保留原样）
- *     复核：env 泄漏已还原（`:498-499`→`:521-523`、`:622-623`→`:648-650` 成对 restore）；固定 sleep 仍有 `:613`（200ms）、`:822`（150ms）——`:64/:98` 属 `waitFor` 轮询，不计。
+ *     复核：env 泄漏已还原（`:498-499`→`:521-523`、`:622-623`→`:648-650` 成对 restore）；原先残留的两处固定 sleep（200ms / 150ms）
+ *     已于 2026-10-20（审计 P2-2 / T-2）改为真实完成条件：前者 `await wal.drain()`（追加链排空），
+ *     后者 `flushEventLoop()`（负向断言只让出事件循环）。行号随改动漂移，按代码特征取证。
  *
  * 命名沿革：2026-09-20 由 `auditBufferGap.test.js` 更名。旧名里的
  *   Coverage / Gap / Hardening / Branch 说的是「当初为什么写它」（补覆盖率基线），
@@ -37,8 +39,9 @@
  *    重读 AUDIT_WAL_PATH（消除「先 require 锁死路径」的跨文件竞态）；
  * 2. 全部文件断言经 auditBuffer.getWalPath() 读取，与模块行为恒一致，
  *    不再依赖 env 是否赢得模块加载顺序；
- * 3. 固定 setTimeout 等待全部替换为 waitFor 轮询断言——对真实完成条件
- *    （DB 计数/WAL 内容/stats 字段）轮询，超时 8s，消除负载敏感窗口。
+ * 3. 固定 setTimeout 等待全部替换为真实完成条件——对 DB 计数/WAL 内容/stats 字段
+ *    用 helpers/waitFor 轮询（2026-10-20 T-2 起统一走共享 helper），负向断言用
+ *    flushEventLoop，消除负载敏感窗口。
  */
 
 const fs = require('fs');
@@ -58,18 +61,7 @@ const wal = require('../../services/auditBufferWal');
 const AuditLog = require('../../models/AuditLog');
 const { TEST_CLIENT_IP } = require('../fixtures');
 const { contentLevelWriteError } = require('../helpers/contentLevelWriteError');
-
-/** 轮询等待真实完成条件（替代固定 setTimeout；全量并行负载下 8s 上限）。
- *  条件可为同步或异步（返回 Promise 会被 await——否则 Promise 恒真值，
- *  循环体永不执行，等待退化为立即通过） */
-async function waitFor(cond, timeoutMs = 8000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await cond()) return true;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  return false;
-}
+const { waitFor, waitForStable, flushEventLoop } = require('../helpers/waitFor');
 
 /** 等 WAL 异步写入链真正排空（追加/裁剪/rename 全部落盘）。
  *
@@ -84,24 +76,21 @@ async function waitFor(cond, timeoutMs = 8000) {
  * 稳定复现为「WAL 行数 0 / 缓冲计数 0」的假红。
  *
  * 修复：改为等待 wal 模块自己的串行链排空（drain 就是 flushAndStop 用的
- * 同一判据），再叠加一次「文件内容稳定」确认，语义与「追加链排空」等价且
- * 不依赖文件是否已存在。 */
+ * 同一判据），再叠加一次「文件内容稳定」确认（复用 helpers/waitFor.waitForStable），
+ * 语义与「追加链排空」等价且不依赖文件是否已存在。 */
 async function waitForWalQuiet(timeoutMs = 8000) {
   await wal.drain(); // 精确判据：walChain 上排队的 append/trim/rename 全部完成
   const p = auditBuffer.getWalPath();
-  let last = null;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    let cur;
+  const readWalContent = () => {
     try {
-      cur = fs.readFileSync(p, 'utf8');
+      return fs.readFileSync(p, 'utf8');
     } catch (_) {
-      return; // 文件不存在 = 没有待观察的写入（链已排空），无需继续等
+      return null; // 文件不存在 = 没有待观察的写入（链已排空）
     }
-    if (cur === last) return; // 内容不再变化
-    last = cur;
-    await new Promise((r) => setTimeout(r, 25));
-  }
+  };
+  if (readWalContent() === null) return;
+  // 共享 helper 轮询「连续两次读数相同」；超时会抛出带 label 的错误
+  await waitForStable(readWalContent, { timeoutMs, label: 'WAL 文件内容稳定' });
 }
 
 function makeDoc(seq) {
@@ -245,11 +234,14 @@ describe('auditBuffer 分支补齐', () => {
       // 用例（如 testuser_timer_test）留下的行污染成 101 → 轮询恒假、8s 超时。
       // 改为本条用例专属的计数范围（makeDoc(数字) → testuser_<纯数字>），
       // 与「谁先跑」无关。
-      const done = await waitFor(async () => {
-        const n = await AuditLog.countDocuments({ username: /^testuser_\d+$/ });
-        return n === 100;
-      });
-      expect(done).toBe(true);
+      // 共享 waitFor 超时会抛出带 label 的错误（原实现返回 false 再由断言转红）
+      await waitFor(
+        async () => {
+          const n = await AuditLog.countDocuments({ username: /^testuser_\d+$/ });
+          return n === 100;
+        },
+        { label: '满额 flush 的 100 条审计落库' }
+      );
     });
 
     test('定时器回调触发 flush', async () => {
@@ -440,7 +432,7 @@ describe('auditBuffer 分支补齐', () => {
 
       // 让落库转为成功，反复推定时器直到缓冲排空；幸存者从成功批次的实参里收集。
       // 仍在途的失败批次会把文档 unshift 回队首（更早的时间位置），
-      // 所以这里不能只看一次快照——收集到 bufferLength 归零为止。
+      // 所以这里不能只看一次快照——轮询到 bufferLength 归零且已有交付为止。
       const survivors = new Set();
       const collect = () => {
         for (const call of insertSpy.mock.calls) {
@@ -449,15 +441,14 @@ describe('auditBuffer 分支补齐', () => {
       };
       insertSpy.mockClear();
       insertSpy.mockResolvedValue({ acknowledged: true });
-      for (
-        let round = 0;
-        round < 40 && (auditBuffer.getStats().bufferLength > 0 || survivors.size === 0);
-        round += 1
-      ) {
-        tickFn();
-        await new Promise((r) => setTimeout(r, 25));
-        collect();
-      }
+      await waitFor(
+        () => {
+          tickFn(); // 每次轮询推一轮定时 flush；在途时 flush() 自身会忽略重入
+          collect();
+          return auditBuffer.getStats().bufferLength === 0 && survivors.size > 0;
+        },
+        { label: '成功批次全部交付且缓冲排空' }
+      );
       insertSpy.mockRestore();
 
       // 先自证"确实排干了"：否则下面的守恒/尾段断言读的都是中间态
@@ -492,8 +483,9 @@ describe('auditBuffer 分支补齐', () => {
       auditBuffer.start();
 
       // WAL 重放在 walChain 上异步执行：轮询缓冲计数（替代固定 500ms）
-      const done = await waitFor(() => auditBuffer.getStats().bufferLength >= 2);
-      expect(done).toBe(true);
+      await waitFor(() => auditBuffer.getStats().bufferLength >= 2, {
+        label: 'WAL 重放的 2 行进入缓冲',
+      });
     });
 
     test('WAL 含损坏行时跳过不阻塞启动', async () => {
@@ -511,12 +503,13 @@ describe('auditBuffer 分支补齐', () => {
 
       // 不应抛异常
       expect(() => auditBuffer.start()).not.toThrow();
-      const done = await waitFor(() => auditBuffer.getStats().bufferLength >= 1);
+      await waitFor(() => auditBuffer.getStats().bufferLength >= 1, {
+        label: '损坏行被跳过、有效行进入缓冲',
+      });
 
       const stats = auditBuffer.getStats();
       // 至少好的那行被重放了
       expect(stats.bufferLength).toBeGreaterThanOrEqual(1);
-      expect(done).toBe(true);
     });
   });
 
@@ -530,11 +523,13 @@ describe('auditBuffer 分支补齐', () => {
       auditBuffer.push(makeDoc('wal_trim'));
       tickFn();
       // 轮询「先落库、后裁剪完成」的最终状态：WAL 不再含该行
-      const done = await waitFor(async () => {
-        const n = await AuditLog.countDocuments({ username: 'testuser_wal_trim' });
-        return n === 1 && !readWal().includes('wal_trim');
-      });
-      expect(done).toBe(true);
+      await waitFor(
+        async () => {
+          const n = await AuditLog.countDocuments({ username: 'testuser_wal_trim' });
+          return n === 1 && !readWal().includes('wal_trim');
+        },
+        { label: 'WAL 行在落库后被裁剪' }
+      );
     });
   });
 
@@ -594,12 +589,13 @@ describe('auditBuffer 分支补齐', () => {
           auditBuffer.push(makeDoc(`walcap_${i}`));
         }
 
-        // 等待 walChain 上的 enforceWalLimit 执行（原有轮询保留）
-        const done = await waitFor(() => auditBuffer.getStats().walDroppedLines > 0);
+        // 等待 walChain 上的 enforceWalLimit 执行
+        await waitFor(() => auditBuffer.getStats().walDroppedLines > 0, {
+          label: 'WAL 超限裁剪计数推进',
+        });
 
         const stats = auditBuffer.getStats();
         expect(stats.walDroppedLines).toBeGreaterThan(0);
-        expect(done).toBe(true);
       } finally {
         restoreWalEnv(snap);
       }
@@ -632,8 +628,9 @@ describe('auditBuffer 分支补齐', () => {
         process.env.AUDIT_WAL_MAX_BYTES = String(lineBytes * 6); // 约 6 行必超限一次
 
         for (let i = 1; i < TOTAL; i += 1) auditBuffer.push(makeDoc(i));
-        const trimmed = await waitFor(() => auditBuffer.getStats().walDroppedLines > 0);
-        expect(trimmed).toBe(true);
+        await waitFor(() => auditBuffer.getStats().walDroppedLines > 0, {
+          label: 'WAL 超限裁剪计数推进（方向用例）',
+        });
         await wal.drain(); // 排干在途的 append/裁剪，再读终态
 
         const survivors = new Set(
@@ -759,12 +756,13 @@ describe('auditBuffer 分支补齐', () => {
 
       // flush 成功会按 __walSeq 裁剪本批；轮询裁剪完成
       tickFn();
-      const done = await waitFor(async () => {
-        const n = await AuditLog.countDocuments({ username: 'testuser_trim_edge' });
-        return n === 1 && !readWal().includes('trim_edge');
-      });
-
-      expect(done).toBe(true);
+      await waitFor(
+        async () => {
+          const n = await AuditLog.countDocuments({ username: 'testuser_trim_edge' });
+          return n === 1 && !readWal().includes('trim_edge');
+        },
+        { label: '对齐场景的 WAL 行在落库后被裁剪' }
+      );
     });
   });
 
@@ -782,14 +780,14 @@ describe('auditBuffer 分支补齐', () => {
       // push 应触发 walAppendLine → catch → logger.warn
       expect(() => auditBuffer.push(makeDoc('fs_err'))).not.toThrow();
 
-      // 等待 walChain 上的 catch 执行
-      await new Promise((r) => setTimeout(r, 200));
+      // 真实完成信号：drain 等 walChain 上这轮 append 的 catch 执行完毕
+      await wal.drain();
 
       appendSpy.mockRestore();
     });
 
     test('enforceWalLimit stat 返回非 ENOENT 错误时记录 warn 且不抛异常', async () => {
-      // P1-29 修复（本次改动复审）：原用例只有「mock + sleep 300ms + restore」，
+      // 修复（本次改动复审）：原用例只有「mock + sleep 300ms + restore」，
       // 全程零断言——把源码里的 logger.warn 整行删掉，它依然绿（实测确认）。
       // 现改为捕获 logger.warn 并断言调用参数含错误信息，落实测试名承诺的语义。
       const origMax = process.env.AUDIT_WAL_MAX_BYTES;
@@ -810,10 +808,10 @@ describe('auditBuffer 分支补齐', () => {
         auditBuffer.start();
         auditBuffer.push(makeDoc('stat_err'));
 
-        const logged = await waitFor(() =>
-          warnSpy.mock.calls.some((c) => String(c[0]).includes('WAL 大小检查失败'))
+        await waitFor(
+          () => warnSpy.mock.calls.some((c) => String(c[0]).includes('WAL 大小检查失败')),
+          { label: 'stat 失败触发 WAL 大小检查告警' }
         );
-        expect(logged).toBe(true);
         expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('EACCES'))).toBe(true);
       } finally {
         statSpy.mockRestore();
@@ -825,7 +823,7 @@ describe('auditBuffer 分支补齐', () => {
     });
 
     test('walTrimBySeqs 中 writeFile 失败触发外层 catch：记 warn 且 WAL 保持原样', async () => {
-      // P1-29 修复（本次改动复审）：原用例同样是「mock writeFile + sleep 500ms」，零断言。
+      // 修复（本次改动复审）：原用例同样是「mock writeFile + sleep 500ms」，零断言。
       // walTrimBySeqs 把整段逻辑挂在 walChain.then(...)；atomicReplaceWal 抛错会被链尾
       // 的 .catch 兜住并 warn。现断言两件事：① 确实产生了 warn（含错误消息）；
       // ② 原子替换失败后主 WAL 未被破坏（宁可留死行，不可留下半个文件）。
@@ -843,10 +841,9 @@ describe('auditBuffer 分支补齐', () => {
         .mockRejectedValue(new Error('ENOSPC: no space left'));
       try {
         tickFn();
-        const logged = await waitFor(() =>
-          warnSpy.mock.calls.some((c) => String(c[0]).includes('ENOSPC'))
-        );
-        expect(logged).toBe(true);
+        await waitFor(() => warnSpy.mock.calls.some((c) => String(c[0]).includes('ENOSPC')), {
+          label: 'writeFile 失败触发裁剪链 warn',
+        });
         // 原子替换走「临时文件 → rename」，writeFile 失败即未触碰主 WAL
         expect(readWal()).toBe(walBefore);
       } finally {
@@ -898,11 +895,13 @@ describe('auditBuffer 分支补齐', () => {
 
       // 手动 flush
       tickFn();
-      const landed = await waitFor(async () => {
-        const n = await AuditLog.countDocuments({ username: /^testuser_(wal_single|extra_)/ });
-        return n === 3;
-      });
-      expect(landed).toBe(true);
+      await waitFor(
+        async () => {
+          const n = await AuditLog.countDocuments({ username: /^testuser_(wal_single|extra_)/ });
+          return n === 3;
+        },
+        { label: '空洞场景的 3 条文档全部落库' }
+      );
 
       await auditBuffer.flush(); // 等本轮 WAL 操作排到链尾
       await wal.drain();
@@ -1001,7 +1000,9 @@ describe('auditBuffer 分支补齐', () => {
         returned = true;
       });
       try {
-        await new Promise((r) => setTimeout(r, 150));
+        // 负向断言：给 waiter 若干轮事件循环去（错误地）提前返回；真实判据
+        // `await wal.drain()` 被门闩卡住，故这里只让出事件循环、不承诺时长。
+        await flushEventLoop(3);
         expect(returned).toBe(false);
       } finally {
         release();

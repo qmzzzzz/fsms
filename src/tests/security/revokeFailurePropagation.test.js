@@ -268,4 +268,32 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
       expect(after.tokenVersion).toBe(1);
     });
   });
+
+  describe('S-6 登出后的 refresh 重放：只拒绝本次请求，不吊销全部会话', () => {
+    test('logout 来源的重放 → 401，tokenVersion 不变、原因留痕 logout', async () => {
+      const u = await makeUser('logoutreplay');
+      const refresh = generateRefreshToken(u._id, 0, null);
+
+      const logout = await request(app)
+        .post('/api/auth/logout')
+        .set('Authorization', `Bearer ${users.logoutreplay.token}`)
+        .send({ refreshToken: refresh });
+      expect(logout.status).toBe(200);
+
+      const TokenBlacklist = require('../../models/TokenBlacklist');
+      const crypto = require('crypto');
+      const stored = await TokenBlacklist.findOne({
+        tokenHash: crypto.createHash('sha256').update(refresh).digest('hex'),
+      }).lean();
+      expect(stored.reason).toBe('logout');
+
+      // 拿到「已登出但未过期」refresh 串的人重放：不得成为踢掉全部设备的杠杆
+      const replay = await request(app).post('/api/auth/refresh').send({ refreshToken: refresh });
+      expect(replay.status).toBe(401);
+      expect(replay.body.errors.errorCode).toBe('REFRESH_TOKEN_REVOKED');
+
+      const after = await User.findById(u._id).select('tokenVersion');
+      expect(after.tokenVersion).toBe(0);
+    });
+  });
 });

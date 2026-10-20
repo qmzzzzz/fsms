@@ -16,6 +16,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { accessToken, refreshToken } = require('../helpers/authResponse');
 
 describe('设备级会话管理接口（/api/auth/sessions）', () => {
   let app;
@@ -70,10 +71,12 @@ describe('设备级会话管理接口（/api/auth/sessions）', () => {
       .set('User-Agent', ua)
       .send({ username, password });
     expect(res.status).toBe(200);
-    const { token, refreshToken } = res.body.data;
+    // S-1 之后响应体不再回传令牌，只能从 httpOnly cookie 取
+    const token = accessToken(res);
+    const refresh = refreshToken(res);
     // 从令牌里取 sid：这是「令牌与会话记录是否真的绑定」的直接证据
     const sid = jwt.decode(token)?.sid || null;
-    return { token, refreshToken, sid };
+    return { token, refreshToken: refresh, sid };
   };
 
   const listSessions = (token) =>

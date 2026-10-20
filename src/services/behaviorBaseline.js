@@ -68,7 +68,7 @@ function requirePositiveDays(name, value) {
 /**
  * 单日特征的聚合管道片段（extractFeatures 与 collectDailySamples 共用）
  *
- * P3-20：改为在数据库侧聚合。原实现把窗口内**全部原始行**拉进 Node 再遍历
+ * 改为在数据库侧聚合。原实现把窗口内**全部原始行**拉进 Node 再遍历
  * （基线窗 31 天 × 高频用户可达数十万行），单次评估即造成百 MB 级瞬时内存，
  * 且并发评估会叠加。distinct 统计用 $addToSet 在库内完成，只回传聚合结果。
  *
@@ -211,9 +211,9 @@ async function collectDailySamples(userId, baselineDays, excludeRecentDays = 0) 
   // 否则观测窗自身混入基线会把均值拉向观测值，稀释偏离度
   const until = new Date(Date.now() - excludeRecentDays * 24 * 60 * 60 * 1000);
 
-  // P3-20：按天分桶改在数据库侧完成（$dateToString + $group），
+  // 按天分桶改在数据库侧完成（$dateToString + $group），
   // 只回传每天一行的聚合结果，不再把原始行拉进内存。
-  // 时区取业务时区单一声明，避免 UTC 容器下跨日错位（P3-18）
+  // 时区取业务时区单一声明，避免 UTC 容器下跨日错位
   const rows = await AuditLog.aggregate([
     { $match: { userId: toObjectId(userId), timestamp: { $gte: since, $lt: until } } },
     ...dailyFeatureStages({

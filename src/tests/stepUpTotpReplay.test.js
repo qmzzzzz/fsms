@@ -4,7 +4,7 @@
  * 修复前：`requireReAuthentication` 的 MFA 分支用裸 `verifyTotp`（只回布尔）——
  *   ① 不消费匹配到的时间窗：同一个合法码在 ±1 窗口（约 90s）内可无限次通过步进验证；
  *   ② 不记失败、不接锁定：而 6 位码空间只有 10^6，且本端点原先没有凭据型限流。
- * 仓内另外两处 TOTP 消费点（authService.verifyTotpChallenge 的 P2-12、mfaController）
+ * 仓内另外两处 TOTP 消费点（authService.verifyTotpChallenge、mfaController）
  * 都做了"原子推进 mfaLastCounter + isMfaLocked/recordMfaFailure"，
  * 本端点是唯一漏掉的一处——典型的"同一语义多处各写一遍、漏一处"。
  *

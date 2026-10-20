@@ -26,7 +26,7 @@
  *
  * 用法：
  *   node scripts/verify-image-digests.js                 # 全表核验
- *   node scripts/verify-image-digests.js --only mongo:6.0.20
+ *   node scripts/verify-image-digests.js --only mongo:8.0.34
  *   node scripts/verify-image-digests.js --min-sources 3
  * 退出码：0 全部通过；1 有来源不一致/达不到下限；2 用法错、表本身错、或**命中 0 行**（空跑）。
  * 不打印任何 header 原文，也不回显外部响应体，只打印来源名、摘要值、index 条目数与字节数。
@@ -71,7 +71,7 @@ const EXPECTED = [
     digest: '6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5',
     captured: '2026-10-20',
     sources: 'public.ecr.aws + docker.m.daocloud.io + docker.1ms.run（三源一致）',
-    sites: 'Dockerfile 的三处 FROM',
+    sites: 'Dockerfile 的三处 FROM + docker-compose.yml 的 alertmanager-config-check',
   },
   {
     ref: 'redis:7-alpine',
@@ -84,11 +84,14 @@ const EXPECTED = [
     sites: 'docker-compose.yml 的 redis',
   },
   {
-    ref: 'mongo:6.0.20',
+    ref: 'mongo:8.0.34',
     repo: 'library/mongo',
-    digest: 'eb5819129dee31a32982a940b6e32c9873fed05b5e938b65f802bb96dca8753d',
-    captured: '2026-10-04',
-    sources: 'public.ecr.aws + docker.m.daocloud.io + docker.1ms.run（三源一致，index 7 个条目）',
+    digest: '4a4ab5d4834207389e0d7270fac988e21ffedccecba77991a552f755df229907',
+    captured: '2026-10-20',
+    // 8.0.34 取代 EOL 的 6.0.20。docker.m.daocloud.io 的 8.0.34 返回了与其余源不同的
+    // index（疑为镜像侧缓存分叉，其自身 8.0 tag 又指向本值），故未采信；两个独立运营
+    // 主体的来源逐字节一致即可满足本仓的取证口径。
+    sources: 'public.ecr.aws + docker.1ms.run（两源一致；docker.m.daocloud.io 的该 tag 未采信）',
     sites: 'docker-compose.yml 的 mongo、.github/workflows/ci.yml 的 service 容器',
   },
   {
@@ -367,7 +370,7 @@ async function main(argv, table = EXPECTED) {
   let failed = 0;
   for (const entry of list) {
     // repo 必须用表里的 `entry.repo`（Hub 的仓库路径，official 镜像带 `library/` 前缀），
-    // 不能从 `ref` 切——`mongo:6.0.20` 这个短名切出来是 `mongo`，
+    // 不能从 `ref` 切——`mongo:8.0.34` 这个短名切出来是 `mongo`，
     // 而 ECR Public 上的路径是 `docker/mongo`：实测这样切会让第三个来源被当成"不托管"跳过，
     // 于是"三源一致"的取证口径悄悄退化成两源，而输出的措辞完全看不出来。
     // 这条踩坑的对账闸是 src/tests/security/imageReferenceInventory.test.js（判 repo 与 ref 互洽）。

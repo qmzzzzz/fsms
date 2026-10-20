@@ -8,10 +8,10 @@
 | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 前端   | Vue 3（Composition API）、Vite、Element Plus、Pinia、Vue Router、ECharts、Axios                                                                      |
 | 后端   | Node.js、Express、Mongoose、Socket.IO、JWT（HS256）、winston                                                                                         |
-| 数据库 | MongoDB 6.x                                                                                                                                          |
+| 数据库 | MongoDB 8.0（镜像钉 8.0.34）                                                                                                                         |
 | 安全   | helmet（CSP / Trusted Types）、三层限流 + CC 封禁阶梯、bcryptjs、字段级加密与登录信封加密、TOTP 两步验证、令牌黑名单、IP 黑 / 白名单、审计日志哈希链 |
 | 测试   | 后端 Jest + mongodb-memory-server（内存 MongoDB）；前端 Vitest；E2E Playwright                                                                       |
-| 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 20/22 矩阵测试，前端构建 24，镜像 node:22.14.0）                                          |
+| 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 22/24 矩阵测试，前端构建 24，镜像 node:26.12.0）                                          |
 | 监控   | Prometheus + Grafana + Alertmanager（docker-compose 随栈启动）、Sentry（可选）                                                                       |
 
 ## 功能特性
@@ -68,13 +68,14 @@ fsms/
 ├── deployment/                 # 部署配套：Nginx 示例 / 密钥轮换 / 回滚演练 / 备份加密 / 可观测性
 │   ├── nginx.conf.example      # Nginx 反向代理示例（TLS 终结、安全响应头、/metrics 限流）
 │   ├── secret-rotation.md      # 密钥轮换流程
-│   ├── rollback-drill.md       # 回滚演练手册
+│   ├── rollback-drill.md       # 回滚演练手册（含预发定期自动演练）
+│   ├── deploy-workflow-rehearsal.md # 部署工作流真实演练步骤与留档（O-5）
 │   ├── backup-encryption.md    # 备份加密与异地副本
 │   ├── audit-allowlist.json    # 审计对账白名单（CI 门禁共用）
 │   ├── lockfile-anchor.json    # 锁文件完整性锚点
 │   └── observability/          # 监控栈（prometheus.yml 在本子目录，非 deployment/ 根）
 │       ├── prometheus.yml      # Prometheus 抓取配置（直连后端 app:3000 的 /metrics）
-│       ├── alert-rules.yml     # 告警规则（13 条：宕机 / 5xx 错误率 / P95 延迟 / 安全告警突增等）
+│       ├── alert-rules.yml     # 告警规则（15 条：宕机 / 5xx 错误率 / P95 延迟 / 安全告警突增等）
 │       ├── alertmanager.yml    # Alertmanager 路由（按 severity 分发；通知渠道为占位，按头注释注入）
 │       └── grafana/            # Grafana 数据源与仪表盘（datasources/、dashboards/ 容器启动自动装载）
 ├── start.bat                   # Windows 一键启动脚本
@@ -87,25 +88,25 @@ fsms/
 
 ## 项目文档
 
-| 文档                                                                       | 内容                                                                                                                                              |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [docs/architecture.md](./docs/architecture.md)                             | 系统架构图、登录时序图、ER 图、部署拓扑图（Mermaid）                                                                                              |
-| [docs/threat-model.md](./docs/threat-model.md)                             | STRIDE 威胁模型：资产与信任边界、每项缓解的落地位置与残余风险                                                                                     |
-| [docs/mlps2-controls.md](./docs/mlps2-controls.md)                         | 等保 2.0（GB/T 22239-2019）控制项对照表，逐条给出可出示的证据（文件 / 测试 / 端点）                                                               |
-| [docs/incident-response.md](./docs/incident-response.md)                   | 应急响应预案：角色与升级链，每个动作绑定实际存在的端点 / 脚本 / 日志位置                                                                          |
-| [docs/multi-instance-consistency.md](./docs/multi-instance-consistency.md) | 多实例一致性清单：进程内状态、Redis 外置路径与多实例下的残余差异                                                                                  |
-| [docs/security-dependency-watch.md](./docs/security-dependency-watch.md)   | 依赖安全观察清单：需盯住的依赖、监控动作与触发条件                                                                                                |
-| [docs/adr/](./docs/adr/README.md)                                          | 架构决策记录（8 篇）：登录 ECDH 选型、审计链哈希、密钥管理、单进程锁假设、多实例 Redis 回退、高量级游标分页、Express 5 迁移评估、数据范围强制方式 |
-| [CHANGELOG.md](./CHANGELOG.md)                                             | 版本变更日志                                                                                                                                      |
+| 文档                                                                       | 内容                                                                                                                                                                                      |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [docs/architecture.md](./docs/architecture.md)                             | 系统架构图、登录时序图、ER 图、部署拓扑图（Mermaid）                                                                                                                                      |
+| [docs/threat-model.md](./docs/threat-model.md)                             | STRIDE 威胁模型：资产与信任边界、每项缓解的落地位置与残余风险                                                                                                                             |
+| [docs/mlps2-controls.md](./docs/mlps2-controls.md)                         | 等保 2.0（GB/T 22239-2019）控制项对照表，逐条给出可出示的证据（文件 / 测试 / 端点）                                                                                                       |
+| [docs/incident-response.md](./docs/incident-response.md)                   | 应急响应预案：角色与升级链，每个动作绑定实际存在的端点 / 脚本 / 日志位置                                                                                                                  |
+| [docs/multi-instance-consistency.md](./docs/multi-instance-consistency.md) | 多实例一致性清单：进程内状态、Redis 外置路径与多实例下的残余差异                                                                                                                          |
+| [docs/security-dependency-watch.md](./docs/security-dependency-watch.md)   | 依赖安全观察清单：需盯住的依赖、监控动作与触发条件                                                                                                                                        |
+| [docs/adr/](./docs/adr/README.md)                                          | 架构决策记录（9 篇，ADR-001～ADR-009）：登录 ECDH 选型、审计链哈希、密钥管理、单进程锁假设、多实例 Redis 回退、高量级游标分页、Express 5 迁移评估、数据范围强制方式、网络分段与数据面隔离 |
+| [CHANGELOG.md](./CHANGELOG.md)                                             | 版本变更日志                                                                                                                                                                              |
 
 ## 快速开始
 
 ### 环境要求
 
-- Node.js >= 20.19（CI 验证版本：20 / 22）
-  - 后端本身在 Node 18 上可运行，但 `web-admin/` 使用的 Vite 8 声明 `engines: ^20.19.0 || >=22.12.0`，
-    而 CI 的 test job 含前端构建 ⇒ 全仓统一要求 **≥ 20.19**（Node 18 已于 2025-04 EOL）。
-- MongoDB >= 5（推荐 6.x，本地安装或 Docker 均可）
+- Node.js >= 22.12.0（CI 验证版本：22 / 24）
+  - 根目录与 `web-admin/` 的 `engines` 均为 `>=22.12.0`，与 `Dockerfile` 的基础镜像（26.12.0）同口径。
+    项目要求全仓统一版本：CI 的 test job 含前端构建，Node 22 以下会在安装依赖时被 `engines` 拒绝。
+- MongoDB 8.0（本地安装或 Docker 均可；生产镜像钉 8.0.34，从 6.0 升级须逐级走 [MongoDB 大版本升级](#mongodb-大版本升级6080)）
 
 ### 方式一：Windows 一键启动
 
@@ -114,8 +115,8 @@ fsms/
 ### 方式二：手动启动
 
 ```bash
-# 1. 安装后端依赖并配置环境变量
-npm install
+# 1. 安装后端依赖并配置环境变量（npm ci 严格按锁文件安装，避免解析漂移）
+npm ci
 cp .env.example .env    # Windows: copy .env.example .env，然后编辑 .env
 
 # 2. 启动后端（开发模式，自动重启）
@@ -123,7 +124,7 @@ npm run dev             # 监听 http://localhost:3000
 
 # 3. 安装前端依赖并启动（新终端）
 cd web-admin
-npm install
+npm ci
 npm run dev             # 监听 0.0.0.0:3001（不是仅 localhost，见下节），/api 自动代理到后端
 ```
 
@@ -189,7 +190,7 @@ docker compose pull app
 docker compose up -d --no-build
 ```
 
-编排包含应用服务、MongoDB 6（仅容器内网通信，不暴露宿主机端口）与 Redis 7（同样仅内网），数据持久化到命名卷。`REDIS_URL` 由 compose 注入 `redis://redis:6379`，`NODE_ENV=production` 与 `TRUST_PROXY_HOPS` 亦已内置，均无需额外设置。完整的 secrets 生成命令（含 Mongo root 口令、需 percent-encode 的 `mongodb_uri`、Grafana 口令）见 `docker-compose.yml` 文件末尾注释。
+编排包含应用服务、MongoDB 8.0（仅容器内网通信，不暴露宿主机端口）与 Redis 7（同样仅内网），数据持久化到命名卷。`REDIS_URL` 由 compose 注入 `redis://redis:6379`，`NODE_ENV=production` 与 `TRUST_PROXY_HOPS` 亦已内置，均无需额外设置。完整的 secrets 生成命令（含 Mongo root 口令、需 percent-encode 的 `mongodb_uri`、Grafana 口令）见 `docker-compose.yml` 文件末尾注释。
 
 发布走 `node scripts/deploy.js`（前置校验 → 备份 → 迁移 → 健康检查，失败自动回滚）；密钥轮换与回滚演练见 `deployment/secret-rotation.md`、`deployment/rollback-drill.md`。
 
@@ -424,6 +425,8 @@ npm run test:watch       # 监听模式
 npm run test:e2e         # 进程内起完整服务器做全链路 HTTP 走查（走 index.js 的完整启动序列，兜住 supertest 测不到的接线问题）
 npm run test:e2e:browser # Playwright 浏览器 E2E（e2e/：登录 / 巡检-报警 / 权限审计 / MFA / 移动端 / 故障注入）
 npm run test:prod-drill  # 生产模式启动演练：弱密钥必须被拒 + 强配置完整启动链路
+npm run test:ops-e2e     # 运维关键路径 4 条：告警投递 / 部署失败自动回滚 / 备份恢复校验 / 跨部门越权
+                         #   （内存 Mongo + 随机端口 + 假 Alertmanager，无需 Docker；支持 --only / --keep）
 npm run test:load        # 压测基线（本地自测版，四相；正式压测另按部署环境执行）
 npm run validate         # 独立校验环境配置（读当前 shell 的 env；容器化部署要在容器里跑：
                          #   docker compose exec -T app npm run validate——compose 只往容器注入 *_FILE，
@@ -505,6 +508,38 @@ APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
 
 4. 升级后观察：`curl -f /readyz`、日志 `logs/error-*.log` 无新增错误、登录与核心业务冒烟。
 
+#### MongoDB 大版本升级（6.0→8.0）
+
+> 只适用于**已有 6.0 数据目录**的部署；全新安装直接使用 compose 里的 8.0.34。
+> MongoDB 官方只支持逐级升级（6.0 → 7.0 → 8.0），不能让 8.0 直接打开 6.0 的数据文件；
+> 降级不受支持，失败只能回灌备份。完整演练判据见 [deployment/rollback-drill.md](./deployment/rollback-drill.md)。
+
+```bash
+# 0) 先备份并确认归档非空、校验和可读；本次操作失败时只能靠它恢复
+docker compose stop app
+MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh ./backups
+
+# 1) 用 7.0 镜像启动同一数据卷，确认 FCV 仍是 6.0 后升到 7.0
+cat > /tmp/mongo-7.0.override.yml <<'YAML'
+services:
+  mongo:
+    image: mongo:7.0
+YAML
+docker compose -f docker-compose.yml -f /tmp/mongo-7.0.override.yml up -d mongo
+docker compose exec -T mongo sh -c 'mongosh -u "$(cat /run/secrets/mongo_root_username)" -p "$(cat /run/secrets/mongo_root_password)" --authenticationDatabase admin --quiet --eval "printjson(db.adminCommand({getParameter:1,featureCompatibilityVersion:1}))"'
+docker compose exec -T mongo sh -c 'mongosh -u "$(cat /run/secrets/mongo_root_username)" -p "$(cat /run/secrets/mongo_root_password)" --authenticationDatabase admin --quiet --eval "printjson(db.adminCommand({setFeatureCompatibilityVersion:\"7.0\",confirm:true}))"'
+
+# 2) 切回 compose 钉住的 8.0.34，再把 FCV 升到 8.0
+docker compose up -d --no-deps mongo
+docker compose exec -T mongo sh -c 'mongosh -u "$(cat /run/secrets/mongo_root_username)" -p "$(cat /run/secrets/mongo_root_password)" --authenticationDatabase admin --quiet --eval "printjson(db.adminCommand({setFeatureCompatibilityVersion:\"8.0\",confirm:true}))"'
+
+# 3) 启动应用并以就绪探针收口（/health 只是存活，不校验 Mongo）
+docker compose start app
+curl -fsS http://127.0.0.1:3000/readyz
+```
+
+每一步失败都先停应用、保留 `logs/` 与当前数据卷，按 [deployment/rollback-drill.md](./deployment/rollback-drill.md) 用备份恢复，不要在失败状态下继续升级。
+
 ### 回滚
 
 - **应用回滚**：指定上一个正常版本的镜像 tag 重新 `up -d --no-build`（`deploy.js` 在健康门禁失败时会自动做这件事）——应用无状态，会话缓存随进程消亡，用户重新登录。
@@ -540,12 +575,12 @@ APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
 浏览器按 RFC 6797 仅采纳经 HTTPS 送达的 HSTS，因此 TLS 必须在反向代理层终结，应用层无法在明文 HTTP 上提供真正的 HTTPS/HSTS。生产部署请：
 
 1. 使用受信任 CA 签发的证书，参考 `deployment/nginx.conf.example` 配置 TLS 终结、HTTP→HTTPS 跳转与全套安全响应头（HSTS / CSP / X-Frame-Options / X-Content-Type-Options / Referrer-Policy / Permissions-Policy / COOP / CORP / X-XSS-Protection）。
-2. 后端已内置 `Strict-Transport-Security` 兜底下发（`src/middleware/security.js` 的 `ensureHsts`）；前端开发/预览服务器已在 `web-admin/vite.config.js` 统一下发安全头。这些用于开发期与过渡期，生产最终以反向代理为准。
+2. 后端已内置 `Strict-Transport-Security` 兜底下发（`src/middleware/security/` 目录下的 `securityHeaders.js`，由 `index.js` 装配 `ensureHsts`）；前端开发/预览服务器已在 `web-admin/vite.config.js` 统一下发安全头。这些用于开发期与过渡期，生产最终以反向代理为准。
 3. `localhost:3000/3001` 的明文 HTTP 仅用于本地开发调试；扫描器对 localhost 的"未使用 HTTPS/HSTS"项应视为开发环境特性，生产域名以代理层 TLS 为准。
 
 ## 内容安全策略（CSP / Trusted Types）
 
-CSP 由 `src/middleware/security.js` 统一下发，Trusted Types 分两档：
+CSP 由 `src/middleware/security/` 目录（`securityHeaders.js`，经 `index.js` 装配）统一下发，Trusted Types 分两档：
 
 1. **默认（Report-Only）**：`require-trusted-types-for 'script'` 只下在 `Content-Security-Policy-Report-Only` 头里——浏览器照常执行，仅上报违规。设 `CSP_REPORT_ENABLED=true` 时违规详情 POST 到 `/csp-report`（无需认证，仅限流 + 体积上限）。
 2. **强制（`TRUSTED_TYPES_ENFORCE=true`）**：同一条指令移入主 CSP，违规写入被浏览器**直接拒绝执行**；此时 Report-Only 那条退化为 no-op，策略只下发一处（避免同一策略两个头各发一遍）。
@@ -557,7 +592,7 @@ CSP 由 `src/middleware/security.js` 统一下发，Trusted Types 分两档：
 监控配置集中在 `deployment/observability/`（注意不是 `deployment/` 根目录），`docker-compose.yml` 已挂载并随编排栈一并启动：
 
 - `deployment/observability/prometheus.yml`：Prometheus 抓取配置，直连后端 `app:3000` 的 `/metrics`（该端点在 Nginx 层按 allow 列表限流，不对公网暴露）。
-- `deployment/observability/alert-rules.yml`：13 条内置告警，分 5 组——可用性（`BackendDown` 抓取失败、`HighErrorRate` 5xx >5%）、延迟（`HighP95Latency` P95 >1s）、安全（`SecurityAlertBurst` 安全告警突增、`SecurityFailOpenSustained` fail-open 降级持续 10 分钟未恢复）、自监控（`MetricsSeriesTruncated` 指标序列触顶丢弃、`AuditRecordsDropped` 审计记录落库前丢弃）、运行时（`MongoUnavailable`、`ReadinessProbeMissing`、`DiskSpaceLow`、`DiskProbeFailing`、`LogShipperDeliveryFailing`、`LogShipperDroppingLines`）。阈值为保守初值，待压测基线落地后收紧；每条规则的失效语义与处置见规则文件内的注释。
+- `deployment/observability/alert-rules.yml`：15 条内置告警，分 5 组——可用性（`BackendDown` 抓取失败、`HighErrorRate` 5xx >5%）、延迟（`HighP95Latency` P95 >1s）、安全（`SecurityAlertBurst` 安全告警突增、`SecurityFailOpenSustained` fail-open 降级持续 10 分钟未恢复、`TrustedProxyBoundaryUnset` 代理信任边界未配置）、自监控（`MetricsSeriesTruncated` 指标序列触顶丢弃、`AuditRecordsDropped` 审计记录落库前丢弃、`AuditDetectionLagOutsideObjective` 审计异常检测延迟未达标）、运行时（`MongoUnavailable`、`ReadinessProbeMissing`、`DiskSpaceLow`、`DiskProbeFailing`、`LogShipperDeliveryFailing`、`LogShipperDroppingLines`）。阈值为保守初值，待压测基线落地后收紧；每条规则的失效语义与处置见规则文件内的注释。
 - `deployment/observability/alertmanager.yml`：告警触达链路的路由中枢，按 `severity` 分发（critical 即时通道 30 分钟重复提醒，warning 低优先级通道 4 小时），并按实例维度抑制同源重复告警。仓库内为**占位配置**，通知渠道（webhook/SMTP）按文件头注释以私有副本或模板渲染注入，敏感值不入库。两道闸门盯住"忘了注入"：部署路径由 `scripts/deploy.js` 的前置校验（占位即拒绝发布，可用 `ALERTMANAGER_CONFIG_PATH` 指向独立挂载的真实配置）；合规检查路径由 `ALERT_WEBHOOK_CHECK=production node scripts/compliance-check.js` 人工/上线前触发（CI 默认不设该变量，因为仓库模板本身必须是占位）。
 - **告警投递探针（F-09）**：上面两道闸门只判"配置里还有没有占位串"，判不出"URL 写对了但 access_token 已失效"。探针补这一环：
 

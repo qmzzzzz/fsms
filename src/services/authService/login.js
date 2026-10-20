@@ -16,7 +16,7 @@ const { resolvePunishableIp } = require('../../utils/ipUtils');
 const { checkBruteForce } = require('../securityAlert');
 const canaryWatch = require('../canaryWatch');
 const AuditLog = require('../../models/AuditLog');
-// P0-5 后手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
+// 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
 const { onAuditWriteFailure } = require('../../utils/auditWriteFailure');
 const captchaService = require('../captchaService');
 const { decryptLoginCredential } = require('../../utils/loginCipher');
@@ -34,7 +34,7 @@ const { issueLoginSession } = require('./session');
  *
  * bcryptjs 是纯 JS 实现，12 轮 compare 需数十至上百毫秒。若「用户不存在」
  * 路径直接返回、不做任何 compare，攻击者只需比较响应时间即可枚举有效用户名——
- * M-5 统一了文案和错误码，但耗时这条侧信道仍然敞开。
+ * 统一了文案和错误码，但耗时这条侧信道仍然敞开。
  *
  * 摘要在模块加载时一次性生成（随机口令，永不匹配任何真实输入），
  * 之后每次「用户不存在」都对它做一次真实 compare，使两条路径的 CPU 开销等价。
@@ -61,18 +61,10 @@ const consumeDummyPasswordTime = async (candidate) => {
   }
 };
 /**
- * 用户登录（业务层，含 MFA 二期验证）
- * @param {object} params { username, password, encPassword, mfaCode }
- * @param {object} ctx { ip, userAgent, method, path, fingerprint }
- * @returns {Promise<{outcome:'CAPTCHA_INVALID'|'ENC_INVALID'|'INVALID_CREDENTIALS'|'MFA_REQUIRED'|'MFA_ATTEMPTS_EXCEEDED'|'MFA_CODE_INVALID'|'OK'}>}
- */
-/**
- * 用户登录（业务层，含 MFA 二期验证）
+ * 用户登录（业务层，含 MFA 二期验证）。
  *
- * E-01 整改：本函数原圈复杂度 46（全仓最高，见 deliverables/_complexity-actual.json）。
- * 按「前置校验 → 账户校验 → 凭据校验 → MFA → 签发」五段拆出模块级 helper，
- * 骨架只保留编排与提前返回。所有切分线都在**无状态交接**处：helper 入参全部
- * 显式传递、不引入类或闭包捕获，函数体逐行搬运，行为与拆分前等价。
+ * 按「前置校验 → 账户校验 → 凭据校验 → MFA → 签发」五段编排；各段 helper
+ * 只通过入参取数，不共享闭包状态。
  *
  * @param {object} params { username, password, encPassword, mfaCode }
  * @param {object} ctx { ip, userAgent, method, path, fingerprint, req }
@@ -89,11 +81,11 @@ async function loginUser(params, ctx) {
 
   // ② 查用户（含 password 字段）
   // 查找用户（包括密码字段）
-  // P3-30：走 findByUsername 以匹配大小写不敏感的 username_ci 唯一索引，
+  // 走 findByUsername 以匹配大小写不敏感的 username_ci 唯一索引，
   // 否则用 `Admin` 登录会查不到 `admin` 账户（与判重口径不一致）
   const user = await User.findByUsername(username).select('+password');
   if (!user) {
-    // P2-11 修复：时序侧信道。「用户不存在」原先 0 次 bcrypt 直接返回，
+    // 修复：时序侧信道。「用户不存在」原先 0 次 bcrypt 直接返回，
     // 而「用户存在」要跑 12 轮 bcrypt（纯 JS 实现，百毫秒级），
     // 响应时间差可直接区分有效用户名——文案统一了但耗时没统一。
     // 此处对固定的哑摘要做一次等价 compare，把两条路径的 CPU 开销拉平。
@@ -120,11 +112,11 @@ async function loginUser(params, ctx) {
     return { outcome: 'INVALID_CREDENTIALS' };
   }
 
-  // ③ 账户可用性：状态 / 临时锁定 / IP 范围（三处拒绝共用 M-5 的 401 口径）
+  // ③ 账户可用性：状态 / 临时锁定 / IP 范围（三处拒绝共用 401 口径）
   const denied = await assertAccountUsable(user, { password, ctx, username });
   if (denied) return denied;
 
-  // ④ 口令校验 + 失败计数（P3-1：过期 lockUntil 视为新一轮）
+  // ④ 口令校验 + 失败计数（过期 lockUntil 视为新一轮）
   const rejected = await verifyPasswordOrTrackFailure(user, { password, username, ctx });
   if (rejected) return rejected;
 
@@ -144,7 +136,7 @@ async function loginUser(params, ctx) {
 }
 
 /**
- * 登录前置校验与口令解析（E-01 自 loginUser 拆出）
+ * 登录前置校验与口令解析（自 loginUser 拆出）
  *
  * 覆盖：验证码人机校验 → 口令密文轨/明文轨解析。这一段自带验证码开关、
  * DB 故障降级、密文解密、明文兼容四个分支，与后续「查用户 → 校验凭据 →
@@ -175,7 +167,7 @@ async function resolveLoginPassword(params, ctx, username) {
     try {
       password = await decryptLoginCredential(params.encPassword, 'LOGIN');
     } catch (err) {
-      // 时序口径：解密失败必须与「密码错误」等耗时（P2-10/P2-11 同类侧信道——
+      // 时序口径：解密失败必须与「密码错误」等耗时（同类侧信道——
       // 解密是毫秒级，不补哑 compare 会让该路径显著快于正常失败路径）
       await consumeDummyPasswordTime(params.encPassword);
       // 公钥是公开的，攻击者可自行构造合法密文——解密失败同样计入防爆破与审计
@@ -194,10 +186,10 @@ async function resolveLoginPassword(params, ctx, username) {
 }
 
 /**
- * 账户可用性校验（E-01 自 loginUser 拆出）：账户状态、临时锁定、IP 访问范围。
+ * 账户可用性校验（自 loginUser 拆出）：账户状态、临时锁定、IP 访问范围。
  *
  * 三处拒绝共用同一外部口径——一律返回与「用户名或密码错误」完全一致的 401
- * （M-5 / P2-10），真实原因只进服务端日志与审计，避免用户名枚举预言机。
+ * 真实原因只进服务端日志与审计，避免用户名枚举预言机。
  *
  * @returns {Promise<{outcome:'INVALID_CREDENTIALS'}|null>} 拒绝时返回 outcome，可用时返回 null
  */
@@ -205,7 +197,7 @@ async function assertAccountUsable(user, { password, ctx, username }) {
   const { ip, userAgent, fingerprint } = ctx;
 
   // 检查账户状态
-  // M-5：禁用/锁定账户与"用户不存在/密码错误"返回完全一致的 401 文案，
+  // 禁用/锁定账户与"用户不存在/密码错误"返回完全一致的 401 文案，
   // 防止借差异化响应枚举有效用户名；真实原因仅记入服务端日志与审计
   // 允许清单（F-162）：只有 active 可用。此前是「=== inactive || === locked」的按枚举拒绝，
   // 与同文件 refresh 的 `status !== 'active'` 是同一个概念的两个答案——
@@ -216,7 +208,7 @@ async function assertAccountUsable(user, { password, ctx, username }) {
       fingerprint,
       reason: `account_status_${user.status}`,
     }).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
-    // P2-11/M-5 的同族收口：这两条分支此前直接 return，
+    // 同族收口：这两条分支此前直接 return，
     // 一次 bcrypt 都不跑 ⇒ 「存在但被禁的账号」比「用户名不存在」快约一次
     // compare 的时间（纯 JS cost-12 ≈ 百毫秒），构成账号存在性 + 锁定态预言机，
     // 且**不需要正确口令**——等于把 ② 里花力气做的时序拉平从这个方向漏掉。
@@ -228,7 +220,7 @@ async function assertAccountUsable(user, { password, ctx, username }) {
     return { outcome: 'INVALID_CREDENTIALS' };
   }
   if (user.lockUntil && user.lockUntil > new Date()) {
-    // M-5 口径：临时锁定同样返回与"用户名或密码错误"一致的 401，
+    // 口径：临时锁定同样返回与"用户名或密码错误"一致的 401，
     // 精确剩余时间只进服务端日志——423+精确分钟数可被用于确认有效用户名
     const remainMs = user.lockUntil.getTime() - Date.now();
     logger.warn('登录拒绝 - 账户临时锁定中', {
@@ -265,9 +257,9 @@ async function assertAccountUsable(user, { password, ctx, username }) {
         riskFactors: ['ip_range_violation'],
         reason: `登录 IP 不在允许范围内（${reason}）`,
       }).catch(() => {});
-      // P2-10 修复：此前返回 403/AUTH_IP_RANGE_DENIED，构成用户名枚举预言机——
+      // 修复：此前返回 403/AUTH_IP_RANGE_DENIED，构成用户名枚举预言机——
       // 从受限 IP 之外探测即可区分「该账号存在且配了 allowedIPs」。
-      // 这与 M-5 口径（对外一律与「用户名或密码错误」完全一致）自相矛盾：
+      // 这与口径（对外一律与「用户名或密码错误」完全一致）自相矛盾：
       // 文案统一了，错误码没统一。
       // 现改为同一 401/AUTH_INVALID_CREDENTIALS，真实原因只进日志与审计；
       // 并补一次哑 compare 抹平耗时差（否则「IP 被拒」路径明显更快，侧信道依旧）。
@@ -279,9 +271,9 @@ async function assertAccountUsable(user, { password, ctx, username }) {
 }
 
 /**
- * 口令校验 + 失败计数累计（E-01 自 loginUser 拆出）
+ * 口令校验 + 失败计数累计（自 loginUser 拆出）
  *
- * P3-1：已过期的 lockUntil 视为新一轮——重置计数从 1 起算并清空过期时间戳；
+ * 已过期的 lockUntil 视为新一轮——重置计数从 1 起算并清空过期时间戳；
  * 否则解锁后仅剩 1 次试错即再次锁定，把 10 分钟窗口的配额从 10 次压到 1 次。
  *
  * @returns {Promise<{outcome:'INVALID_CREDENTIALS'}|null>} 口令错误返回 outcome，正确返回 null
@@ -296,15 +288,15 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
     await AuditLog.recordLogin(user._id, username, ip, false, userAgent, { fingerprint }).catch(
       onAuditWriteFailure('login_failed_audit', { user: { username } })
     );
-    // B-L1：与上方 227/243 行同口径——checkBruteForce 内的 DB 查询/告警落库
-    // 若因 DB 瞬断 reject，异常上抛会把统一 401 变成 500（破坏 M-5 防枚举口径）
+    // B-L1：与上方 219/235 行同口径——checkBruteForce 内的 DB 查询/告警落库
+    // 若因 DB 瞬断 reject，异常上抛会把统一 401 变成 500（破坏防枚举口径）
     await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
     // 原子递增失败计数（$inc）：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，
     // 丢失更新导致锁定阈值被推迟，利于爆破；$inc 由 DB 保证无丢失更新。
     // 返回更新后文档，据此判断是否跨过锁定阈值（阈值判定可能并发重复触发，
     // 但 lockUntil 覆写幂等，审计重复仅产生冗余日志，可接受）
     //
-    // P3-1：走到这里说明账户未处于锁定中（lockUntil 为空或已过期）。
+    // 走到这里说明账户未处于锁定中（lockUntil 为空或已过期）。
     // 若 lockUntil 已过期却只做 $inc，此前的 9 次失败会继续累计——
     // 解锁后仅剩 1 次试错即再次锁定，等效「每 10 分钟允许 1 次尝试」，
     // 把 10 分钟窗口内的爆破配额从 10 次压到 1 次（对攻击者反而是限制），

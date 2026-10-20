@@ -216,7 +216,7 @@ const LEDGER = {
     lockWhere: 'services/authService/login.js#assertAccountUsable',
     why:
       '签发原语，实测只有两个调用点：services/authService/session.js:118（registerUser） 与 services/authService/session.js:247（issueLoginSession）。' +
-      '登录链的账户复查在 services/authService/login.js:124（loginUser） 委托的 services/authService/login.js:204（assertAccountUsable，lockUntil 判定在 services/authService/login.js:230）' +
+      '登录链的账户复查在 services/authService/login.js:116（loginUser） 委托的 services/authService/login.js:196（assertAccountUsable，lockUntil 判定在 services/authService/login.js:222）' +
       '——注意 loginUser **自己函数体内没有** lockUntil/status（实测），所以委托对象必须写这道关真正落笔的函数；' +
       '注册链的账户是本次 services/authService/session.js:103（User.create） 新建的文档，lockUntil 不存在。' +
       '注意本闸不做跨函数数据流：若将来把注册改成"允许认领既有账号"，没有用例会自动变红，' +
@@ -403,7 +403,7 @@ describe('凭证门集合与账户复查形状（双向登记 + 判定顺序）'
     expect(ws.checksLock).toBe(true);
 
     // 同名委托实测有**两份实现**（本仓的命名冲突，实测不是推测）：
-    // services/authService/login.js:204 的 assertAccountUsable 是 async、带口令/风控入参并会写审计；
+    // services/authService/login.js:196 的 assertAccountUsable 是 async、带口令/风控入参并会写审计；
     // middleware/auth.js:283 的同名函数是同步的 res 错误码助手，只看账户档。
     // ⇒ 本闸的 lockWhere 一律要求"文件限定"，`assertAccountUsable` 这种裸名指向不了任何一处。
     const svcBody = bodyFor(clean, 'services/authService/login.js#assertAccountUsable');

@@ -2,7 +2,7 @@
  * 数据范围 deny 语义的跨路径一致性
  *
  * 背景：本仓库已经把数据范围的"唯一收敛点"定为 `applyDataScopeToQuery`
- * （见 middleware/rbac.js 该函数头注释的 P1-3 修复记录），它把
+ * （见 middleware/rbac.js 该函数头注释的修复记录），它把
  * "type=department 但 department 为空" 显式判为 deny。
  * 但 `buildDataScopeFilter` 对同一情形返回的是 `ownerCondition(null)`，
  * 而报表/仪表盘/统计/导出（scopeFilterFor）、设备统计（deviceController）、

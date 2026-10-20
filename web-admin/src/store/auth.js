@@ -74,8 +74,8 @@ export const useAuthStore = defineStore('auth', {
   },
 
   actions: {
-    // token/refreshToken 参数仅为兼容既有调用签名，值被忽略（令牌走 httpOnly cookie）
-    setAuth(_token, _refreshToken, user, permissions = []) {
+    // 令牌走 httpOnly cookie（JS 不可读），本 action 只接收用户与权限
+    setAuth(user, permissions = []) {
       const normalized = normalizeUser(user)
       // 权限一律归一化为 string[]：后端两种口径（code 数组 / populate 对象数组）
       // 都可能出现，而 matchPermission 只认字符串——存了对象会让所有按钮判否

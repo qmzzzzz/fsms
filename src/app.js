@@ -58,6 +58,7 @@ const {
 const ApiResponse = require('./utils/apiResponse');
 const { checkMongoReady } = require('./utils/healthChecks');
 const swagger = require('./config/swagger');
+const { verifyBuildPin: verifyLoginKeyPin } = require('./utils/loginCipher');
 
 // 导入路由
 const {
@@ -158,7 +159,7 @@ function applyTrustedProxyPolicy(app, trustProxyHops) {
  * 抽出原因同 applyTrustedProxyPolicy：判据旁那三段长告警文案会把 createApp 顶过
  * `max-lines-per-function` 的 100 行阈值，而它本身只是一次性的启动期配置。
  *
- * trust proxy（M-4 收紧默认值）：
+ * trust proxy（收紧默认值）：
  * - 显式配置 TRUST_PROXY_HOPS > 0 时按其跳数信任（生产 Nginx / 开发 Vite 均为 1 跳）
  * - 未配置时：development 默认信任 1 跳（本机 Vite 代理，仅限开发）
  * - 其余环境（含 production）一律不信任代理头 —— 服务直连暴露时客户端可伪造
@@ -225,7 +226,7 @@ function installEdgeMiddleware(app) {
   // 403/429 等早期拒绝同样计入请求指标；采集失败不影响业务响应
   app.use(metricsMiddleware);
 
-  // 子 Router 级 :id / :userId ObjectId 校验（P2-25）
+  // 子 Router 级:id /:userId ObjectId 校验
   // 原实现是 app.param('id', ...)：Express 4 的参数回调只对定义它的 router 生效，
   // 不向子 Router 传播，而全部业务路由都挂在子 Router 上 —— 该校验从未执行过
   // （实测 express 4.22.2：子 Router 路由触发次数 = 0）。
@@ -299,7 +300,7 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
   //    写一条走哈希链的审计记录（recordViolation → AuditLog.record → withChainLock）。
   //    挂在它们之后时，未认证的一个 `TRACE /api/x`（十余字节）不消耗任何配额，
   //    却能让全局链锁串行排队——把小请求放大成审计写入，且链锁超时会让合法审计
-  //    降级为无 hash 的 legacy 行（utils/auditChain.js 的 P3-19 注释自证）。
+  //    降级为无 hash 的 legacy 行（utils/auditChain.js 的注释自证）。
   //    前移后：违规请求同样计入配额，洪水先撞 429。
   // 2) 挂在 express.json + sanitizeMongo + hpp 之后时，未认证者每次请求都先让服务端
   //    付一次 JSON.parse 与递归清洗——限流只保护了数据库，没保护解析器。
@@ -319,7 +320,7 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
   app.use(staticSurfaceLimiter);
 
   // ================= 安全中间件（body 解析之前）=================
-  // P3-35：protocolCompliance 必须早于 express.json()，否则「Content-Length
+  // protocolCompliance 必须早于 express.json()，否则「Content-Length
   // 超限即拒绝、不读流」的设计意图被架空——原挂载顺序下 body 已完整解析完毕
   applyPreBodySecurity(app);
 
@@ -343,7 +344,7 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
   app.use(compression());
 
   // 日志记录
-  // P3-32：不用内置的 'combined' 预设——它的 :url token 输出完整 originalUrl，
+  // 不用内置的 'combined' 预设——它:url token 输出完整 originalUrl，
   // query string 里的令牌/口令会明文长期留存于 combined-*.log。
   // 自定义 token safe-url 复用 helpers.redactUrlQuery 打码，其余字段与 combined 一致，
   // 保证既有日志解析规则（ELK/SIEM 的 combined grok 模式）不受影响。
@@ -403,7 +404,7 @@ function installRoutes(app) {
   // 就绪探针（可观测性）：含 Mongo ping，区分「进程活着」(/health) 与「能干活」——
   // 不 ready 时编排器/LB 摘流量但保持进程运行；Docker HEALTHCHECK 仍用 /health，
   // 避免 Mongo 短暂抖动触发容器重启。
-  // M-1：对外只暴露固定枚举（ok/disconnected/timeout/unreachable/error），
+  // 对外只暴露固定枚举（ok/disconnected/timeout/unreachable/error），
   // 驱动原始错误消息仅入服务端日志——本端点不鉴权且被公网探测，
   // 回显 err.message 会泄露主机/端口/副本集/认证细节
   app.get('/readyz', (req, res) => {
@@ -472,7 +473,7 @@ function installRoutes(app) {
   // API 文档（Swagger UI）— 生产环境默认关闭，可通过 ENABLE_API_DOCS=true 开启
   // 开启后可通过 DOCS_USERNAME / DOCS_PASSWORD 设置 Basic Auth 保护
   //
-  // P2-30：docsLimiter 必须排在 basicAuth **之前**。限流器只挂 `/api/`，
+  // docsLimiter 必须排在 basicAuth **之前**。限流器只挂 `/api/`，
   // 而文档挂在根路径，此前完全落在限流之外——basicAuth 的 timingSafeEqual
   // 防住了时序侧信道却防不住无限速穷举 DOCS_USERNAME/DOCS_PASSWORD。
   // 顺序颠倒（先 basicAuth）会让每次爆破尝试都先做一次口令比对，限流失去意义。
@@ -525,6 +526,11 @@ function installStaticAndErrorHandling(app) {
  * @returns {express.Application}
  */
 function createApp() {
+  // S-2：镜像带构建期公钥指纹时，启动即校验运行密钥是否与之匹配。
+  // 未钉扎（本地开发）时为空操作；不匹配直接抛错，避免「前端只认另一把公钥」
+  // 的镜像上线后所有登录才集体失败。
+  verifyLoginKeyPin();
+
   const app = express();
 
   // trust proxy 必须最先配置：后面所有读 req.ip 的判据都依赖它。

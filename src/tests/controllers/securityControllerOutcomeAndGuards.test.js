@@ -11,8 +11,8 @@
  *   [已自陈] 用例内已记录并给出保留理由。复核证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.9 测试资产。
  *   - [部分有效·判定在别处已设防] `:361`（现形 `:395`）在**无中间件环境**断言 `res.locals.skipGlobalAudit === true`（原出处 2026-09-16 全面代码审计报告；**该报告已删除**，问题编号保留原样）
  *     变异实测更正（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）：前半句事实成立（`invoke(changePasswordSecure,…)`
- *       直调控制器、无中间件链），但原推论「⇒ **掩盖了全局审计双写缺陷（P0-5）**」**不成立**。
- *       忠实回退 P0-5（middleware/security.js 的 `skipGlobalAudit` 判定由响应时刻改回请求入口读取）
+ *       直调控制器、无中间件链），但原推论「⇒ **掩盖了全局审计双写缺陷**」**不成立**。
+ *       忠实回退（middleware/security.js 的 `skipGlobalAudit` 判定由响应时刻改回请求入口读取）
  *       → **2 套 5 例红**：controllers/skipGlobalAuditEndToEnd.test.js（3 例）
  *       + middleware/skipGlobalAuditTiming.test.js（2 例）；同点位 throw 正对照 3 例红。
  *       该缺陷已被这两套专项用例守着（前者文件头 :7-9 点名了被批评处，即为此洞而建）。
@@ -274,7 +274,7 @@ const makeCtx = (overrides = {}) => {
       return this;
     },
     json(data) {
-      // P1-29：见 securityConfigHandlers.test.js 同款说明——记录响应写出时刻的标志值，
+      // 见 securityConfigHandlers.test.js 同款说明——记录响应写出时刻的标志值，
       // 静态值断言无法区分「入口前置位」与「响应前置位」的时序差异。
       this.flagAtJson = this.locals.skipGlobalAudit;
       this.payload = data;
@@ -1011,6 +1011,18 @@ describe('getSecurityOverview 分支补齐', () => {
     } finally {
       auditMonitor.getHealth = realGetHealth;
     }
+  });
+
+  test('securityAlert 返回 degraded 时返回 503 + 明确标记，绝不渲染零风险（A-2）', async () => {
+    mockGetSecurityOverview.mockResolvedValue({ degraded: true, period: '7天' });
+    const { req, res, next } = makeCtx();
+    await invoke(getSecurityOverview, req, res, next);
+    expect(res.statusCode).toBe(503);
+    expect(res.payload.errors.errorCode).toBe('SECURITY_OVERVIEW_DEGRADED');
+    expect(res.payload.errors.degraded).toBe(true);
+    // 关键：失败不得以成功响应 + 全 0 字段出现
+    expect(res.payload.success).toBe(false);
+    expect(res.payload.data).toBeUndefined();
   });
 
   test('securityAlert.getSecurityOverview 抛异常时返回 500（行 656-657）', async () => {

@@ -163,7 +163,7 @@ describe('日志转发只允许 http/https 出站，拼错的 scheme 必须零�
   });
 });
 
-describe('出站目标门禁：私网/回环/元数据目标零投递（P2-⑨）', () => {
+describe('出站目标门禁：私网/回环/元数据目标零投递', () => {
   // scheme 合法、目标危险——这正是 scheme 白名单管不到的那一半
   const PRIVATE_TARGETS = [
     'http://169.254.169.254/latest/meta-data', // 云元数据端点（链路本地，经典 SSRF 目标）

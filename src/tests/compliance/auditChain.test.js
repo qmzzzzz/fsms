@@ -229,7 +229,7 @@ describe('审计日志合规化', () => {
 
     test('payload 白名单与 schema 双向对齐（防漂移守卫，两个方向都查）', () => {
       // 防漂移守卫。原实现只遍历 PAYLOAD_FIELDS_V3——也就是**被它监管的那份清单本身**，
-      // 于是 P1-12 给 schema 加了 targetType/targetId/dataType/description 却忘了
+      // 于是给 schema 加了 targetType/targetId/dataType/description 却忘了
       // 加进 payload 时，守卫全绿：方向错了，等于没有守卫。
       const { PAYLOAD_SCHEMA_DEFAULTS, PAYLOAD_FIELDS_V4 } = require('../../utils/auditChain');
       const paths = AuditLog.schema.paths;
@@ -431,7 +431,7 @@ describe('审计日志合规化', () => {
     });
   });
 
-  // ---------- 归一化与版本分支（P3-49：把棘轮基线抬到真实覆盖）----------
+  // ---------- 归一化与版本分支（把棘轮基线抬到真实覆盖）----------
   describe('normalizeValue 与 payload 版本分支', () => {
     /** 构造最小可用的 v1 文档（v1 字段集较窄） */
     const v1Doc = (over = {}) => ({
@@ -560,7 +560,7 @@ describe('审计日志合规化', () => {
       expect(tail).not.toBe('e'.repeat(64));
     });
 
-    // ==================== M-09：幻影链尾的启动期自愈 ====================
+    // ==================== 幻影链尾的启动期自愈 ====================
     // 成因：链尾推进在 models/auditLogHooks.js 的 pre('save') 内，而文档落库
     // 在钩子之后。进程若在「已推进链尾、尚未完成 insert」之间被强杀
     //（SIGKILL / OOM / 容器驱逐），链尾就指向一条**从未入库**的 hash。
@@ -572,7 +572,7 @@ describe('审计日志合规化', () => {
     // withChainLock 临界区，否则并发写入会算出相同 prevHash 造成**真实分叉**，
     // 比幻影链尾严重。故改为启动期自愈：index.js 在 auditBuffer.start() 后
     // 调用 resyncChainTail()，从 DB 重建真实链尾。
-    test('M-09 - 幻影链尾（指向未入库 hash）经启动期 resync 后被清除', async () => {
+    test('幻影链尾（指向未入库 hash）经启动期 resync 后被清除', async () => {
       // ① 先写入一条真实记录，作为"最后一条成功入库"的记录
       const real = await AuditLog.create({
         action: 'chain_m09_real',

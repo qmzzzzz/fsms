@@ -1,7 +1,7 @@
 /**
  * 文件权限收紧（跨平台）
  *
- * 背景（M-05）：POSIX 的 chmod 0600/0700 在 Windows/NTFS 上是**空操作**——
+ * 背景：POSIX 的 chmod 0600/0700 在 Windows/NTFS 上是**空操作**——
  * writeFileSync 的 mode 参数被忽略，chmodSync 只能粗粒度切换只读属性。
  * 于是「生成密钥 → 立刻收紧权限」这条链路在 Windows 上静默失效，
  * 文件继续继承父目录的宽松 ACL（默认 BUILTIN\Users 可读、Authenticated Users 可改），

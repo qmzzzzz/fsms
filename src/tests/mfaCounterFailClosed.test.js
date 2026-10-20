@@ -8,7 +8,7 @@
  * 把「findByIdAndUpdate 抛错」与「文档不存在」都折算成 count=1 ⇒ 永不触发锁定。
  * 而 `isMfaLocked` 读的正是同一个库，所以 DB 故障持续 = 锁定能力持续消失，
  * 6 位动态口令（10^6 空间）退化成可无限在线尝试的口令。
- * 判据不是新增的：同仓 `middleware/tokenBlacklist.blacklistToken` 的 P2-26
+ * 判据不是新增：同仓 `middleware/tokenBlacklist.blacklistToken`
  * 已经裁定过"吊销写不进必须上抛"——访问控制类防线观测不到时要收紧。
  *
  * 断言全部落在**数据库回读**上（锁定字段真的写了值），

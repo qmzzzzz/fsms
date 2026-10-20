@@ -799,6 +799,8 @@ export default {
       'security_ip-list_query': 'Query IP list',
       security_report: 'Submit security report',
       security_key_strength_audit: 'Key strength audit',
+      // App-level read-only endpoints (GET /api, /api/metrics) fall back to this action
+      system_view: 'View system info',
       // Additional event-based (blocked / switch / verify)
       csrf_origin_denied: 'Origin check denied',
       ip_blacklist_blocked: 'Blocked by IP blacklist',
@@ -1032,6 +1034,8 @@ export default {
     success: 'Login successful',
     failed: 'Login failed, please check username and password',
     encryptionFailed: 'Password encryption failed. Please retry and submit again',
+    insecureContext:
+      'This page is not served over a secure connection (HTTPS), so the password cannot be encrypted. Submission was blocked. Please access the system via HTTPS.',
     publicKeyPinMismatch:
       'Server security key verification failed; submission blocked. If the server key was just rotated, refresh the page and retry. Otherwise contact your administrator.',
     captchaRefresh: 'Click to refresh captcha',
@@ -1385,6 +1389,8 @@ export default {
     securityOverviewFormatInvalid: 'Security overview data format is invalid',
     securityOverviewStructureInvalid: 'Security overview data structure is invalid',
     securityOverviewQueryFailed: 'Failed to query security overview',
+    securityOverviewDegraded:
+      'Security overview is temporarily unavailable (query failed; not proof of zero risk)',
     recentAlertsEmpty: 'No recent alert data available',
     recentAlertsQueryFailed: 'Failed to query recent alerts',
     configAllowRegistrationMustBeBoolean: 'Parameter allowPublicRegistration must be a boolean',

@@ -113,9 +113,9 @@ function req(method, urlPath, { token, body, raw } = {}) {
           const text = Buffer.concat(chunks).toString('utf8');
           if (raw) return resolve({ status: res.statusCode, text, headers: res.headers });
           try {
-            resolve({ status: res.statusCode, body: JSON.parse(text) });
+            resolve({ status: res.statusCode, body: JSON.parse(text), headers: res.headers });
           } catch (_) {
-            resolve({ status: res.statusCode, body: text });
+            resolve({ status: res.statusCode, body: text, headers: res.headers });
           }
         });
       }
@@ -192,9 +192,21 @@ async function runAuthSteps(ctx) {
     const r = await req('POST', '/api/auth/login', {
       body: { username: 'admin', password: PASSWORD },
     });
-    if (r.status !== 200 || !r.body.data.token)
-      throw new Error('status=' + r.status + ' ' + JSON.stringify(r.body).slice(0, 120));
-    ctx.token = r.body.data.token;
+    // I-01 起响应体刻意不回传令牌（防 XSS 窃取），只经 httpOnly cookie 下发。
+    // 冒烟从 Set-Cookie 取出 access_token，继续用 Bearer 路径覆盖 authenticate。
+    const accessCookie = (r.headers['set-cookie'] || []).find((line) =>
+      line.startsWith('access_token=')
+    );
+    if (r.status !== 200 || !r.body.data.user || !accessCookie)
+      throw new Error(
+        'status=' +
+          r.status +
+          ' ' +
+          JSON.stringify(r.body).slice(0, 120) +
+          ' cookie=' +
+          !!accessCookie
+      );
+    ctx.token = accessCookie.slice('access_token='.length).split(';')[0];
   });
 
   await step('GET /api/auth/me 会话有效', async () => {

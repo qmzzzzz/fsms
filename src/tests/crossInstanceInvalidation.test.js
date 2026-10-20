@@ -146,4 +146,23 @@ describe('会话/统计缓存的跨实例失效广播', () => {
     dispatch('permcache:whatever');
     expect(statsCache.get(`stats:${userId}:fp3`).hit).toBe(true);
   });
+
+  test('statsCache.invalidateAll 广播 statscache:all，清空所有查看者（A-1）', () => {
+    publishedKeys.length = 0;
+    statsCache.set(`stats:${userId}:fpA`, { total: 1 });
+    statsCache.set('stats:other-viewer:fpB', { total: 2 });
+    statsCache.set('audit:risk-summary:7d', { total: 3 });
+
+    statsCache.invalidateAll('user-mutation');
+    expect(publishedKeys).toContain('statscache:all');
+
+    // 模拟另一实例：本地写入后收到广播，必须清掉所有 stats: 键
+    statsCache.set(`stats:${userId}:fpC`, { total: 4 });
+    statsCache.set('stats:other-viewer:fpD', { total: 5 });
+    dispatch('statscache:all');
+    expect(statsCache.get(`stats:${userId}:fpC`).hit).toBe(false);
+    expect(statsCache.get('stats:other-viewer:fpD').hit).toBe(false);
+    // 审计汇总缓存不属于统计口径，不得被顺手清掉
+    expect(statsCache.get('audit:risk-summary:7d').hit).toBe(true);
+  });
 });

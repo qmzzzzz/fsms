@@ -412,8 +412,8 @@ describe('verify-image-digests.js 的判据行为', () => {
 
   test('parseArgs：参数面的每条边界（写坏一条就会把整表核验变成"什么都没验"）', () => {
     expect(parseArgs([])).toEqual({ only: null, minSources: 2, timeoutMs: 20000 });
-    expect(parseArgs(['--only', 'mongo:6.0.20,redis:7-alpine']).only).toEqual([
-      'mongo:6.0.20',
+    expect(parseArgs(['--only', 'mongo:8.0.34,redis:7-alpine']).only).toEqual([
+      'mongo:8.0.34',
       'redis:7-alpine',
     ]);
     expect(parseArgs(['--min-sources', '3']).minSources).toBe(3);
@@ -497,9 +497,9 @@ describe('verify-image-digests.js 的判据行为', () => {
     expect(all.list).toHaveLength(EXPECTED.length);
     // 顺序来自**期望表**而不是 `--only` 的写法顺序：这条断言钉的是"过滤不改序"，
     // 否则下次有人按 --only 的顺序读输出会对不上表。
-    expect(planRuns(['--only', 'mongo:6.0.20,redis:7-alpine']).list.map((e) => e.ref)).toEqual([
+    expect(planRuns(['--only', 'mongo:8.0.34,redis:7-alpine']).list.map((e) => e.ref)).toEqual([
       'redis:7-alpine',
-      'mongo:6.0.20',
+      'mongo:8.0.34',
     ]);
     // `--only ,`：split+filter 之后是**空数组**，而空数组在 JS 里为真值 ⇒ 六行全被排除。
     // 旧实现由此打印"==> 核验 0 个引用 … 全部通过"并退 0（实测存活 M2）。

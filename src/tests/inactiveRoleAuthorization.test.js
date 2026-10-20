@@ -1,7 +1,7 @@
 /**
  * 停用角色不得继续参与授权判定
  *
- * 缺陷形态：`userPermissionService.getPermissions` 与 `permissionHelper`（P3-8 / P1-22）
+ * 缺陷形态：`userPermissionService.getPermissions` 与 `permissionHelper`
  * 早已对 populate 的 roles 加 `match:{status:'active'}`，注释写明"管理员停用角色后必须立即失效"。
  * 但同一份语义在别处被重新实现时漏掉了这个 match：
  *   middleware/auth.js                  → req.user.roleCodes（checkRole / userLimiter 的输入）

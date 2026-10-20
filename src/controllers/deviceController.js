@@ -23,7 +23,7 @@ const deviceService = require('../services/DeviceService');
 /**
  * 校验设备是否在当前用户数据范围内
  *
- * P2-20：属主字段取自 DATA_SCOPE_FIELDS 单一声明。
+ * 属主字段取自 DATA_SCOPE_FIELDS 单一声明。
  * 此前详情用 maintenanceRecord.operator、报表/导出/统计用 createdBy，
  * 同一台设备在不同接口的可见性互相矛盾（导出口径比列表宽，构成越权面）。
  */
@@ -67,7 +67,7 @@ const buildDeviceScopeFilter = (dataScope) => scopeFilterFor('device', dataScope
  * 获取设备列表
  * GET /api/devices
  *
- * E-2：支持游标分页。传 cursor 时走 keyset seek（不带 total，
+ * 支持游标分页。传 cursor 时走 keyset seek（不带 total，
  * 响应携带 hasMore/nextCursor）；不传保持原 page/limit 语义。
  */
 const getDevices = asyncHandler(async (req, res) => {

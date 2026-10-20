@@ -300,7 +300,7 @@ const hasRole = async (userId, roleCodes) => {
   try {
     const user = await User.findById(userId).populate({
       path: 'roles',
-      // P3-8：与 getUserPermissions 同口径——仅 active 角色参与判定。
+      // 与 getUserPermissions 同口径——仅 active 角色参与判定。
       // 原实现不过滤 status，管理员停用角色后 hasRole 仍返回 true，
       // 而 hasPermission 已按停用口径拒绝，同一用户两处判定互相矛盾。
       match: { status: 'active' },
@@ -327,7 +327,7 @@ const getUserRoles = async (userId) => {
   try {
     const user = await User.findById(userId).populate({
       path: 'roles',
-      // P3-8 同款口径。这里是当初漏掉的那一处：`activeRoles()` 名字像「按 status 过滤」，
+      // 同款口径。这里是当初漏掉的那一处：`activeRoles()` 名字像「按 status 过滤」，
       // 实际只做 filter(Boolean)（剔可能的 null 洞，见 activeRoles 注释），
       // 所以"下面已经过了 activeRoles"给人虚假的安全感——停用角色照样返回。
       // select 里不含 status 也不影响 match：match 是 Role 侧的查询条件，先于投影生效。
@@ -389,7 +389,7 @@ const maxRoleLevel = (roles) =>
  * @returns {Promise<number>} 最高层级（语义见 maxRoleLevel）
  */
 const getOperatorMaxLevel = async (userId) => {
-  // P1-22：补 status:'active' 过滤——与 getUserPermissions（上文 match 同源）口径一致。
+  // 补 status:'active' 过滤——与 getUserPermissions（上文 match 同源）口径一致。
   // 此前无过滤：管理员停用角色后，被停用角色仍计入操作者层级（停用即等于授权残留），
   // 层级校验会被高估而放行本应拒绝的跨层级查看/操作。
   const operator = await User.findById(userId)

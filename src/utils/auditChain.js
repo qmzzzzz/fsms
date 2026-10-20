@@ -50,7 +50,7 @@ const EMPTY_SENTINEL = sharedCache.EMPTY_SENTINEL;
  *             （见 PAYLOAD_SCHEMA_DEFAULTS）。版本号的唯一作用是消除 v2 的歧义：
  *             校验端见到 v3 即可施加严格单一口径，不再需要「试两种」。
  *  v4（当前）：在 v3 的 25 字段上补进 targetType / targetId / dataType /
- *             description。这四个字段是 P1-12 加到 schema 的（举报对象、被查看的
+ *             description。这四个字段是加到 schema 的（举报对象、被查看的
  *             敏感数据类型、操作描述），当时未同步进 payload 白名单——落库后可被
  *             任意改写而 hash/hmac/链接三层都不会红。校验端按 doc.hashVersion
  *             选择口径，v1~v3 的复算方式逐字保持不变（旧数据不会因新增版本而集体报断链）。
@@ -94,7 +94,7 @@ async function getLatestHash(model) {
   return latest && latest.hash ? latest.hash : null;
 }
 
-// ================= 哈希链并发防护（M-3 + A-1） =================
+// ================= 哈希链并发防护 =================
 // pre-save（逐条 create）与 auditBuffer.flush（批量 insertMany）原先各自
 // "读 DB 链尾 → 计算 → 写入"，两步之间可交错，导致两条记录引用同一 prevHash
 // 形成分叉，削弱防篡改验证可信度。以下用「进程内互斥 + 内存链尾指针」串行化
@@ -138,7 +138,7 @@ function invalidEnvWarning(name, raw, fallback) {
 // 双双立即超时：每次 withChainLock 都「标记链尾失效 + 抛错」，链尾永不推进，
 // 所有审计记录降级为 legacy（无 hash）落库——防篡改承诺整体失效，
 // 而日志里只会看到一条条"锁持有超时"，看不出根因是配置笔误。
-// 现与 swagger(P2-37)/config(P2-39)/retention 同一口径：只接受有限正数，否则回落默认并告警。
+// 现与 swagger/config/retention 同一口径：只接受有限正数，否则回落默认并告警。
 // 读取时机仍是模块加载期（测试按需在 require 之前设值，语义未变）。
 const CHAIN_LOCK_TIMEOUT_MS = readPositiveNumberEnv('AUDIT_CHAIN_LOCK_TIMEOUT_MS', 15000, {
   onInvalid: invalidEnvWarning,
@@ -158,7 +158,7 @@ const CHAIN_LOCK_TIMEOUT_MS = readPositiveNumberEnv('AUDIT_CHAIN_LOCK_TIMEOUT_MS
  * auditBuffer.flush 回退缓冲重试（WAL 兜底），AuditLog.create 降级为
  * legacy（无 hash）落库。审计不丢、链不分叉。
  *
- * P3-19 超时保护：原实现无超时——一旦 fn 因网络挂起（Mongo 无响应且驱动
+ * 超时保护：原实现无超时——一旦 fn 因网络挂起（Mongo 无响应且驱动
  * 未超时）永不 settle，chainLock 永远不释放，其后**所有**审计写入无限排队，
  * 表现为「服务正常但审计彻底停摆」，且无任何日志线索。
  * 现在超时即强制释放锁并标记链尾失效（下次从 DB 重新同步），

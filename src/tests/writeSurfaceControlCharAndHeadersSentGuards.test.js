@@ -28,8 +28,7 @@
  */
 
 const mongoose = require('mongoose');
-
-const flushAsync = () => new Promise((resolve) => setTimeout(resolve, 150));
+const { waitFor } = require('./helpers/waitFor');
 
 // 控制字符一律用转义写，避免本测试文件自身含不可见字节
 const UA_PAYLOAD = 'A'.repeat(4000);
@@ -102,7 +101,10 @@ describe('写入面加固：协议违规留痕 / 错误处理器 / 指标系列�
     test('构造有效：不支持的媒体类型确实触发了违规留痕（否则后面全是空集假绿）', async () => {
       const before = captured.length;
       const res = await post(UA_PAYLOAD, CT_PAYLOAD);
-      await flushAsync();
+      // 审计写入在 setImmediate 里 fire-and-forget：等真实捕获，不睡固定 150ms
+      await waitFor(() => captured.length > before, {
+        label: 'malformed_request_blocked 违规留痕',
+      });
       // 不断言具体状态码：这条载荷（4000 UA + 9000 CT）会先被 Node 的
       // 头部尺寸校验判 431，而不是走到本中间件的媒体类型分支判 415。
       // 本用例要钉的是"确实产生了一条违规留痕"，那才是清洗发生的地方。
@@ -113,16 +115,18 @@ describe('写入面加固：协议违规留痕 / 错误处理器 / 指标系列�
     });
 
     test('userAgent 被截到 512 以内且不残留控制字符', async () => {
+      const before = captured.length;
       await post(UA_PAYLOAD, CT_PAYLOAD);
-      await flushAsync();
+      await waitFor(() => captured.length > before, { label: 'userAgent 留痕捕获' });
       const { userAgent } = lastCapture();
       expect(userAgent.length).toBeLessThanOrEqual(512);
       expect(userAgent).toBe('A'.repeat(512));
     });
 
     test('reason（内嵌攻击者 Content-Type）同样被清洗限长', async () => {
+      const before = captured.length;
       await post(UA_PAYLOAD, CT_PAYLOAD);
-      await flushAsync();
+      await waitFor(() => captured.length > before, { label: 'reason 留痕捕获' });
       const { reason } = lastCapture();
       expect(reason.length).toBe(512);
       expect(reason.startsWith(String.fromCharCode(0x4e0d))).toBe(true);
@@ -130,8 +134,9 @@ describe('写入面加固：协议违规留痕 / 错误处理器 / 指标系列�
 
     test('反向保护：正常长度 UA 原样保留，合法 JSON 请求正常放行', async () => {
       const legitUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0';
+      const before = captured.length;
       await post(legitUA, CT_PAYLOAD);
-      await flushAsync();
+      await waitFor(() => captured.length > before, { label: '正常 UA 违规留痕捕获' });
       expect(lastCapture().userAgent).toBe(legitUA);
 
       const request = require('supertest');

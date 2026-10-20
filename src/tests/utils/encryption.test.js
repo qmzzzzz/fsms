@@ -228,10 +228,10 @@ describe('Encryption Utils', () => {
       expect(aesCipher.decrypt(aesCipher.encrypt(''))).toBe('');
     });
 
-    // P3-27 把 CBC 解密改成"默认拒绝"（无认证 → 填充预言机面）。这条安全控制
+    // 把 CBC 解密改成"默认拒绝"（无认证 → 填充预言机面）。这条安全控制
     // 此前完全没有用例：把 decrypt 的 `ALLOW_LEGACY_CBC_DECRYPT !== 'true'` 判断
     // 删掉，让所有历史格式默认可解，全仓无人变红。
-    test('CBC 遗留格式默认拒绝解密，仅显式开关可放行（P3-27）', () => {
+    test('CBC 遗留格式默认拒绝解密，仅显式开关可放行', () => {
       expect(() => aesCipher.decrypt('aabbccddeeff00112233445566778899:Zm9vYmFy')).toThrow(
         /拒绝解密无认证的 CBC 遗留密文/
       );

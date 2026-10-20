@@ -99,8 +99,16 @@ function deployInvokeLines(text) {
  * 为什么自托管路径上 env 块算交付：node 就在本 runner 上跑，step env 即进程 env。
  */
 function digestPinDelivered(text) {
-  const lines = deployInvokeLines(text);
-  return lines.length > 0 && lines.every((l) => /DEPLOY_REQUIRE_DIGEST_PIN='\$\{[^}]*:\?/.test(l));
+  // O-1 后 SSH 路径的交付形态：变量由 printf 写成 export 行，脚本经 `bash -s` 从
+  // stdin 进入远程进程。只扫可执行行（注释不算），并要求两半同时存在——
+  // 只有 export 行而没有 `bash -s` 等于脚本根本没送出去。
+  const lines = collectRunLines(text)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'));
+  const joined = lines.join('\n');
+  return (
+    joined.includes("printf 'export DEPLOY_REQUIRE_DIGEST_PIN=%q") && joined.includes("'bash -s'")
+  );
 }
 
 describe('D-1 部署工作流：结构与关键不变量', () => {
@@ -242,9 +250,10 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
     // 前提自证：两边的 deploy.js 调用行都确实扫到了（各只有 1 处；扫空会让判据退化成恒假/恒真）
     expect(deployInvokeLines(selfHosted).length).toBe(1);
     expect(deployInvokeLines(ssh).length).toBe(1);
-    // 自托管：node 在本 runner 上跑，step env 即进程 env ⇒ 命令串里**不该**有它
+    // 自托管：node 在本 runner 上跑，step env 即进程 env ⇒ 不需要 stdin 脚本
     expect(digestPinDelivered(selfHosted)).toBe(false);
-    // SSH：必须拼进远程命令，且用 `${var:?}`（漏配报错退出，而不是展开成空串被读成"关"）
+    // SSH：必须写进经 stdin 交付的脚本，且用 `${var:?}`（漏配报错退出，
+    // 而不是展开成空串被读成"关"）
     expect(digestPinDelivered(ssh)).toBe(true);
     // 反向自证：修复前的形态（env 块配了、远程命令串里没有）必须判 false
     expect(
@@ -256,11 +265,9 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
         ].join('\n')
       )
     ).toBe(false);
-    // 交付通道也不能改成"塞进 SendEnv"：目标机 sshd 未 AcceptEnv 该变量名时同样收不到，
-    // 而本仓的 compose `:?` 清单用例要求 SendEnv 恰好等于硬声明变量集，多一个就红。
-    const sendEnvNames =
-      ((jobBlock('deploy-ssh').match(/SendEnv=([A-Za-z0-9_,-]+)/) || [])[1] || '').split(',') || [];
-    expect(sendEnvNames).not.toContain('DEPLOY_REQUIRE_DIGEST_PIN');
+    // 交付通道不得退回 SendEnv：目标机 sshd 默认不接受这些变量名，
+    // 那条路会让门禁"配了但永远读不到"。改用 stdin 后 SendEnv 应当完全消失。
+    expect(jobBlock('deploy-ssh')).not.toMatch(/SendEnv=/);
   });
 
   test('compose 里每个 `:?` 变量都由两条部署路径下发（否则到切换那步才被拒）', () => {
@@ -285,10 +292,42 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
       }
     }
 
-    // SSH 路径还必须把它们列进 SendEnv：env 里有但没 SendEnv = 目标机收不到
-    const sendEnv = (jobBlock('deploy-ssh').match(/SendEnv=([A-Za-z0-9_,-]+)/) || [])[1];
-    expect(sendEnv).toBeTruthy();
-    expect(sendEnv.split(',').sort()).toEqual([...hard].sort());
+    // SSH 路径还必须把它们写进 stdin 脚本：env 里有但没 export 行 =
+    // 目标机上的 deploy.js 读不到（O-1 修正：旧 SendEnv 通道默认不生效）
+    const ssh = jobBlock('deploy-ssh');
+    for (const name of hard) {
+      const line = new RegExp(`printf 'export ${name}=%q`);
+      expect({ name, delivered: line.test(ssh) }).toMatchObject({ name, delivered: true });
+    }
+  });
+
+  test('O-1：发布前置校验强制的 RPO/RTO 与告警配置由两条部署路径下发', () => {
+    // deployPolicy.validatePreflight 要求 BACKUP_RPO_HOURS / BACKUP_RTO_HOURS 显式给值，
+    // 缺任一即退出码 2。工作流此前只下发 CORS_ORIGIN / ALLOWED_HOSTS，
+    // 照文档执行会在 preflight 阶段必然失败，而失败原因分散在两处。
+    for (const job of ['deploy-self-hosted', 'deploy-ssh']) {
+      const block = jobBlock(job);
+      for (const name of ['BACKUP_RPO_HOURS', 'BACKUP_RTO_HOURS']) {
+        const delivered = new RegExp(
+          `^\\s+${name}: \\$\\{\\{\\s*secrets\\.${name}\\s*\\}\\}`,
+          'm'
+        ).test(block);
+        expect({ job, name, delivered }).toMatchObject({ job, name, delivered: true });
+      }
+      // 告警配置：真实私有副本路径优先；未配置时 deployPolicy 对仓库占位模板 fail-closed
+      expect(block).toMatch(
+        /ALERTMANAGER_CONFIG_PATH: \$\{\{ secrets\.ALERTMANAGER_CONFIG_PATH \}\}/
+      );
+      expect(block).toMatch(
+        /ALLOW_PLACEHOLDER_ALERT_WEBHOOK: \$\{\{ secrets\.ALLOW_PLACEHOLDER_ALERT_WEBHOOK \}\}/
+      );
+    }
+    const ssh = jobBlock('deploy-ssh');
+    for (const name of ['BACKUP_RPO_HOURS', 'BACKUP_RTO_HOURS']) {
+      expect(ssh).toMatch(new RegExp(`printf 'export ${name}=%q`));
+      // `${var:?}`：漏配在本地立即失败，而不是把空串送去让 deploy.js 读成"未设置"
+      expect(ssh).toMatch(new RegExp(`\\$\\{${name}:\\?`));
+    }
   });
 
   test('--dry-run / --skip-backup 能透传（且不会误传空参数）', () => {
@@ -413,8 +452,9 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
     const firstSsh = block.search(/^\s*ssh /m);
     expect(firstGate).toBeGreaterThan(-1);
     expect(firstSsh).toBeGreaterThan(firstGate);
-    // 且 DEPLOY_PATH 必须真的出现在远程命令里（否则这道闸是死代码）
-    expect(block).toMatch(/cd '\$DEPLOY_PATH'/);
+    // 且 DEPLOY_PATH 必须真的出现在交付脚本里（否则这道闸是死代码）。
+    // O-1 后不再拼进远程命令串，而是经 %q 转义后写入 stdin 脚本。
+    expect(block).toMatch(/printf 'cd %q\\n' "\$DEPLOY_PATH"/);
   });
 
   // 部署编排是「备份 → 迁移 → 切镜像 → 健康门禁 → 失败自动回滚」。

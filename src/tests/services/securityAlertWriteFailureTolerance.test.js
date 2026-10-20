@@ -10,7 +10,7 @@
  *       也没有一行日志；权限滥用检测在掉链子这件事没有任何人看得见）；
  *   - 导出路径 `await` checkBulkExport ⇒ 一次 DB 瞬断会把已经成功的导出顶成 500。
  *
- * P1-23 给前两处挂了 try/catch + logger.error，本文件补的是"挂了 try/catch 却从未
+ * 给前两处挂了 try/catch + logger.error，本文件补的是"挂了 try/catch 却从未
  * 被测试钉住"这一格，同时把当初漏掉的第三处（checkPermissionAbuse）一并纳入同一
  * 条不变量：告警写不进去 ⇒ 必须留 error 痕迹，且不得把异常冒给调用方。
  * 反向对照钉住"不是改成无脑吞错"：写入成功时必须真的落库、且不打 error。

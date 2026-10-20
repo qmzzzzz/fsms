@@ -26,7 +26,7 @@ flowchart TB
     Models["Mongoose 模型（12）"]
   end
 
-  Mongo[("MongoDB 6.x")]
+  Mongo[("MongoDB 8.0")]
   Socket["Socket.IO（JWT 认证 + 房间白名单 + 连接数上限）"]
 
   Views --> Store --> Api
@@ -181,11 +181,11 @@ flowchart TB
   end
 
   subgraph DATA["data-net（bridge，internal: true）\n不接宿主 NAT、不出外网"]
-    MONGO["mongo:6.0.20\nlimits 2g·2cpu / healthcheck ping\nvolumes: mongo-data, mongo-config"]
+    MONGO["mongo:8.0.34\nlimits 2g·2cpu / healthcheck ping\nvolumes: mongo-data, mongo-config"]
     REDIS["redis:7-alpine\n限流 / 缓存 / 分布式锁\nvolumes: redis-data"]
   end
 
-  APP["app 容器（node:22.14.0-alpine 三阶段构建）\n非 root / cap_drop ALL / no-new-privileges\nlimits 1g·1.5cpu / 日志轮转 20m×5\n**双网络接入**"]
+  APP["app 容器（node:26.12.0-alpine 三阶段构建）\n非 root / cap_drop ALL / no-new-privileges\nlimits 1g·1.5cpu / 日志轮转 20m×5\n**双网络接入**"]
   APP ---|"接入：被抓取 + 出网发 webhook"| EDGE
   APP ---|"接入：唯一的数据面访问者"| DATA
   PROM -->|"抓取 app:3000/metrics"| APP
@@ -223,7 +223,7 @@ flowchart TB
 要点：
 
 - **密钥注入**：全部经 Docker secrets 文件（`*_FILE`），`environment` 只留非敏感项（见 ADR-003）
-- **镜像钉版本**：仓库内所有第三方镜像引用都已钉到 registry digest（`name:tag@sha256:<64hex>`，保留可读 tag）——Dockerfile 的 3 处 `node:22.14.0-alpine`、compose 的 mongo / redis / prometheus / alertmanager / grafana、`.github/workflows/ci.yml` 的 mongo service 容器。digest 的取值与核验口径见 `scripts/verify-image-digests.js`（对返回字节自算 sha256，且要求 ≥2 个运营主体不同的来源一致），对账闸是 `src/tests/security/imageReferenceInventory.test.js`（优化清单 R-5）
+- **镜像钉版本**：仓库内所有第三方镜像引用都已钉到 registry digest（`name:tag@sha256:<64hex>`，保留可读 tag）——Dockerfile 的 3 处 `node:26.12.0-alpine`、compose 的 mongo / redis / prometheus / alertmanager / grafana、`.github/workflows/ci.yml` 的 mongo service 容器。digest 的取值与核验口径见 `scripts/verify-image-digests.js`（对返回字节自算 sha256，且要求 ≥2 个运营主体不同的来源一致），对账闸是 `src/tests/security/imageReferenceInventory.test.js`（优化清单 R-5）
 - **Redis** 已在 compose 中实际运行（非注释态）：`redis:7-alpine` 钉了 digest，app 以 depends_on 等其健康后启动；承接限流/缓存/分布式锁（R-3/A-1）
 - **前端静态托管已落地**（L-1，P0）：由 `src/middleware/staticFrontend.js` 托管 `web-admin/dist`；通过 `SERVE_FRONTEND` 启用、`FRONTEND_DIST` 指定产物目录。内置 `/assets` 一年强缓存 immutable、`index.html` 与 `sw.js` no-cache、SPA history 回退、`.map`/`.ts` 显式拦截，并配套专项测试覆盖。
 
@@ -244,3 +244,21 @@ flowchart TB
 - 现存多步写点位：设备删除（`deleteDevice`，告警引用 → 巡检引用×2 → 设备删除）。设备报废（`scrapDevice`）的 scrapDate 补录已合并进 `transitionTo` 单次原子写（B-2），不再是多步写。
 
 > 注：本文出现的「优化清单 X-N」为建仓前遗留的历史编号（源文件 `deliverables/待优化项总清单-2026-08-29.md` 从未进入版本库且已不存在），无源可查。该编号体系已废弃，新提交一律使用 `P*/R*/T*`——详见 `CONTRIBUTING.md` §5。
+
+## 7. 审计链签名检查点（2026-10-20，审计 S-8）
+
+链内校验（`services/auditChainVerify.js`）只能证明「已读到的记录彼此链接自洽」，对两类伪造天然失明：在已知锚点后插入 `prevHash` 指向旧 hash 的分支记录，以及尾部截断。`services/auditChainCheckpoint.js` 用**带 HMAC 签名的 JSONL 检查点**补上这两类盲区：
+
+```bash
+# 定期执行（建议 cron 每小时，检查点越频繁可检出窗口越小）
+MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
+  node scripts/audit-chain-checkpoint.js create
+# 核验：签名 / 头部 hash+hmac / 锚点前记录数 / 当前链尾
+MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
+  node scripts/audit-chain-checkpoint.js verify
+```
+
+- 检查点记录 `headId/headHash/headHmac/recordCount/createdAt`，默认写 `logs/audit-chain-checkpoints.jsonl`（目录 0700、文件 0600），可用 `--file=` 改路径。
+- 检出面：检查点文件被改（`signature_invalid`）、头部被替换（`head_hash_mismatch`/`head_hmac_mismatch`）、锚点前插入或删除（`count_mismatch`）、链被截断到锚点之前或删空（`tail_rolled_back`）。
+- 未配置 `HMAC_SECRET` 时 `create` 拒绝执行、`verify` 判失败——无密钥的锚点可被随意重写，不能作为证据。
+- **残余边界**：检查点文件默认与数据库同机。只改 Mongo 不改文件会被检出；能同时改两者的人可以一起伪造。要获得外部可验证性，必须把文件（或每行签名）周期性复制到独立介质（对象存储 WORM、时间戳服务）——本模块只产出与验证锚点，不负责传输。检查点之后新增又删除的记录，本条锚点也看不见；需要更晚的检查点或外部日志留存比对。

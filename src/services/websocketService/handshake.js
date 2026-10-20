@@ -23,7 +23,7 @@ const trustedProxies = require('../../config/trustedProxies');
 const { isTemporarilyLocked, userRoom } = require('./shared');
 
 /**
- * 解析握手来源 IP（P0-2 修复，2026-09-17）
+ * 解析握手来源 IP（修复，2026-09-17）
  *
  * HTTP 侧的 IP 判定读的是 express 的 req.ip（trust proxy 语义）；WS 侧若直接取
  * TCP 对端地址，反代部署下拿到的是代理 IP，同一个 allowedIPs 规则会在两条通道上
@@ -118,7 +118,7 @@ const resolveHandshakeIPForSecurityDecision = (handshake, hops) => {
 };
 
 /**
- * 信任的代理跳数（P0-2 修复，2026-09-17；F-B42 起委托给 config/validate）
+ * 信任的代理跳数（修复，2026-09-17；F-B42 起委托给 config/validate）
  *
  * 判据（含上限 MAX_TRUST_PROXY_HOPS=5 的夹取）唯一来源是 src/config/validate.js
  * 的 resolveTrustProxyHops，本处与 src/app.js 各自调用它，于是同一条请求在 WS 与
@@ -220,7 +220,7 @@ const methods = {
       if (this._assertHandshakeTokenVersion(socket, freshUser, decoded)) return false;
       if (this._assertHandshakePasswordFresh(socket, freshUser, decoded)) return false;
 
-      // ============ P0-2 修复（2026-09-17）：补齐 HTTP 侧已有、WS 侧缺失的两道失效信号 ============
+      // ============ 修复：补齐 HTTP 侧已有、WS 侧缺失的两道失效信号 ============
       // 审计实证：同一个 JWT 在 HTTP 侧因 allowedIPs 不匹配被 403 AUTH_IP_RANGE_DENIED、
       // 或因设备会话已吊销被拒；WS 侧却认证通过并绑定 socket.userId。根因是本方法此前
       // 全文 0 处引用 sid / allowedIPs / sessionService。两段校验抽为独立方法
@@ -423,7 +423,7 @@ const methods = {
   },
 
   /**
-   * 握手 IP 访问范围校验（P0-2 修复，2026-09-17）
+   * 握手 IP 访问范围校验（修复，2026-09-17）
    *
    * 与 middleware/auth.js 的 assertIpAllowed 同源（F-B43 起包含可信边界那一半）：
    * 规则为空时不限制；配置了规则但来源 IP 解析不出或不在范围内 → 拒绝。
@@ -527,7 +527,7 @@ const methods = {
   },
 
   /**
-   * 握手设备会话状态校验（P0-2 修复，2026-09-17）
+   * 握手设备会话状态校验（修复，2026-09-17）
    *
    * 与 middleware/auth.js 的 assertSessionUsable（auth.js:341-354）同源：
    * 令牌携带 sid 时校验对应 UserSession 仍可用；未携带 sid 时跳过——功能

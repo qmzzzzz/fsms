@@ -2,9 +2,6 @@
   "src/docs/generate.js": {
     "max-lines": 1
   },
-  "src/services/securityAlert.js": {
-    "max-lines": 1
-  },
   "src/utils/errorCodes.js": {
     "max-lines": 1
   }

@@ -65,12 +65,10 @@ describe('LoginResponseSchema（/auth/login 响应）', () => {
     expect(LoginResponseSchema.safeParse({ success: true }).success).toBe(true)
   })
 
-  test('完整登录响应合法（token/refreshToken/expires 三种形态）', () => {
+  test('完整登录响应合法（expires 两种形态；令牌只走 cookie）', () => {
     expect(
       LoginResponseSchema.safeParse(
         envelope({
-          token: 't',
-          refreshToken: 'r',
           expires: 3600,
           user: { userId: 'u1', username: 'alice' },
         })

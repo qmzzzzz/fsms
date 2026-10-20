@@ -50,7 +50,7 @@ const isTemporarilyLocked = (user) => Boolean(user?.lockUntil) && user.lockUntil
 /**
  * 用户定向房间名（服务端内部房间，不经客户端 join 白名单）。
  * 挂载 Redis adapter 后，向该房间投递即可触达连接在**任一实例**上的
- * 该用户连接——跨实例权限同步的落点（R-3/M-1 收尾）。
+ * 该用户连接——跨实例权限同步的落点（R-3/收尾）。
  */
 const userRoom = (userId) => `user:${userId}`;
 

@@ -29,6 +29,7 @@
  */
 const http = require('http');
 const { postJson } = require('../../utils/httpPostJson');
+const { flushEventLoop } = require('../helpers/waitFor');
 
 describe('postJson 协议白名单（纵深防御）', () => {
   test('非 http/https 协议在建立连接之前即被拒（且不产生真连接）', async () => {
@@ -111,8 +112,10 @@ describe('postJson 绝对截止时间（慢滴漏对端不得拖死调用方）'
       ok: true,
       status: 200,
     });
-    // 结算后再等过截止点，进程不得因残留计时器报错（unref 已生效）
-    await new Promise((r) => setTimeout(r, 50));
+    // 结算后让出事件循环：若有残留计时器异常会在这一拍冒出来。
+    // 真实 HTTP server 下无法启用 jest 假定时器（会冻结 socket/服务器定时器），
+    // 因此这里只做无时长的排空，而不是固定 50ms 观察窗。
+    await flushEventLoop(2);
   });
 
   test('非 2xx 真实回包：ok=false 且带上真实状态码', async () => {

@@ -333,9 +333,10 @@ const onLogin = async () => {
   loading.value = true
   try {
     const payload = { username: loginForm.username.trim() }
-    // 口令密文轨（FE-H1）：encryptPassword 返回 null 仅限 WebCrypto 不可用
-    // （纯 HTTP 内网设计内降级）；「可用但失败」会抛错——阻断提交并提示重试
-    // 而非静默明文上行（用户重试成本为零），console.warn 留痕监控密文率
+    // 口令密文轨（FE-H1 / S-7）：encryptPassword 返回 null 仅限开发模式下
+    // WebCrypto 不可用（本地纯 HTTP 联调）；生产构建下非安全上下文会抛
+    // INSECURE_CONTEXT——阻断提交并提示启用 HTTPS，不存在明文上行。
+    // 「可用但失败」同样抛错：阻断提交并提示重试，console.warn 留痕监控密文率
     let enc
     try {
       enc = await encryptPassword(loginForm.password, 'LOGIN')
@@ -346,7 +347,9 @@ const onLogin = async () => {
       ElMessage.error(
         e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
           ? t('login.publicKeyPinMismatch')
-          : t('login.encryptionFailed')
+          : e?.code === 'INSECURE_CONTEXT'
+            ? t('login.insecureContext')
+            : t('login.encryptionFailed')
       )
       return
     }
@@ -379,8 +382,8 @@ const onLogin = async () => {
 
     // I-01：令牌由响应 Set-Cookie 写入 httpOnly cookie，此处只校验业务成功与用户信息
     if (resp.success && resp.data?.user) {
-      const { token, refreshToken, user } = resp.data
-      authStore.setAuth(token, refreshToken, user, user?.permissions || [])
+      const { user } = resp.data
+      authStore.setAuth(user, user?.permissions || [])
       ElMessage.success(t('login.success'))
       // 跳转前清理敏感字段，避免密码/动态口令残留在内存中
       loginForm.password = ''

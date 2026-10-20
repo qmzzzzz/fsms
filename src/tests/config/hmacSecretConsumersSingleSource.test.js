@@ -6,7 +6,7 @@
  *   - `deployment/secret-rotation.md` 写「**两个**消费点」（审计链 + 口令历史）；
  *   - `deliverables/AGENT工作总账与待办-*.md` 的 F-26 写「三个」（审计链 + MFA 恢复码
  *     pepper + 数据签名密钥）——**漏了口令历史**；
- *   - 真实源码是**四个**。
+ *   - 真实源码是**四个**（2026-10-20 起为**五个**：S-8 新增审计链签名检查点）。
  *
  * 清单漂移的代价很具体：运维照着手册轮换，以为收口了，而恢复码 / 口令历史 /
  * HMACSigner 三处**静默失效**（无迁移手段）。其中恢复码最阴——它是用户丢掉
@@ -46,6 +46,7 @@ const EXPECTED_CONSUMERS = [
   'src/utils/passwordHistory.js', // 口令复用历史摘要的 pepper
   'src/services/mfaService.js', // 备用恢复码的 pepper
   'src/utils/encryption.js', // HMACSigner 数据签名密钥
+  'src/services/auditChainCheckpoint.js', // 审计链签名检查点（S-8）
 ];
 
 /** 取值访问 HMAC_SECRET 的两种写法（见文件头判据说明） */
@@ -99,8 +100,8 @@ describe('HMAC_SECRET 消费点清单的单一来源', () => {
       expect(doc).toMatch(/恢复码/);
     });
 
-    test('手册必须写明消费点总数为四个（防止表格被悄悄删行）', () => {
-      expect(doc).toMatch(/四个消费点/);
+    test('手册必须写明消费点总数为五个（防止表格被悄悄删行）', () => {
+      expect(doc).toMatch(/五个消费点/);
     });
 
     test('手册必须说明"只有第 1 个有迁移工具"这一非对称事实', () => {

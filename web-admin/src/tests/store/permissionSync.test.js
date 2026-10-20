@@ -194,13 +194,13 @@ describe('authStore 权限热同步', () => {
   /** 构造已登录状态 */
   const login = (permissions = ['device:read']) => {
     const store = useAuthStore()
-    store.setAuth('t', 'r', { userId: 'u1', username: 'alice' }, permissions)
+    store.setAuth({ userId: 'u1', username: 'alice' }, permissions)
     return store
   }
 
   test('setAuth 会把 populate 对象数组归一化为 code 字符串', () => {
     const store = useAuthStore()
-    store.setAuth('t', 'r', { userId: 'u1', username: 'alice' }, [
+    store.setAuth({ userId: 'u1', username: 'alice' }, [
       { _id: 'p1', code: 'device:read' },
       { _id: 'p2', code: 'device:create' },
     ])
@@ -232,7 +232,7 @@ describe('authStore 权限热同步', () => {
     const store = useAuthStore()
     // 未登录
     expect(store.applyPermissionCodes(['a:b'])).toBe(false)
-    store.setAuth('t', 'r', { userId: 'u1', username: 'alice' }, ['device:read'])
+    store.setAuth({ userId: 'u1', username: 'alice' }, ['device:read'])
     // 入参非数组（后端漏发字段）：保留现有权限，不清空
     expect(store.applyPermissionCodes(undefined)).toBe(false)
     expect(store.permissions).toEqual(['device:read'])

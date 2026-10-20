@@ -2,9 +2,9 @@
  * 本次改动审计报告修复的综合回归
  *
  * 覆盖：
- * - P1-2  my-logs 不外泄 hmac（离线爆破通道）
- * - P1-5  审计 CSV 公式注入防护
- * - P1-7  注册开关不被环境变量覆写
+ * - my-logs 不外泄 hmac（离线爆破通道）
+ * - 审计 CSV 公式注入防护
+ * - 注册开关不被环境变量覆写
  * - AUX-01 TRUST_PROXY_HOPS 值域校验
  * - AUX-04 查询参数标量收敛（?x[$ne]=y 操作符注入 / .trim() 型 500）
  */
@@ -77,8 +77,8 @@ describe('审计报告修复综合回归', () => {
 
   const asAdmin = (path) => request(app).get(path).set('Authorization', `Bearer ${adminToken}`);
 
-  // ================= P1-2 =================
-  describe('P1-2 my-logs 不外泄 hmac', () => {
+  // ================= 审计输出脱敏 =================
+  describe('my-logs 不外泄 hmac', () => {
     test('getUserActivity 复用 RESPONSE_EXCLUDE：结果无 hmac，保留 hash', async () => {
       // /api/security/my-logs 任意登录用户可调，一次可拉 500 条。
       // 若同时给出 (hash, hmac)，攻击者离线即可穷举 HMAC_SECRET
@@ -114,8 +114,8 @@ describe('审计报告修复综合回归', () => {
     });
   });
 
-  // ================= P1-5 =================
-  describe('P1-5 审计 CSV 公式注入防护', () => {
+  // ================= CSV 公式注入 =================
+  describe('审计 CSV 公式注入防护', () => {
     test('攻击者可控的 username 中的公式被前置单引号中和', async () => {
       // 登录失败路径以原始请求体 username 入库，loginValidation 不限字符集
       const payload = "=cmd|'/c calc'!A1";
@@ -133,7 +133,7 @@ describe('审计报告修复综合回归', () => {
       const res = await asAdmin('/api/security/audit-logs/export?limit=200');
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toContain('text/csv');
-      // P3-12 起接口为流式 CSV（不再包 JSON 信封），正文直接是 CSV 文本
+      // 此后接口为流式 CSV（不再包 JSON 信封），正文直接是 CSV 文本
       const csv = res.text || '';
       expect(csv).toContain('username');
 

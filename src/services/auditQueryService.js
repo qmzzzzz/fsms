@@ -175,7 +175,7 @@ const fetchAuditOffsetPage = (query, skip, limitNum, collation) =>
     summarizeByRiskLevel(query, collation),
   ]);
 
-// E-05 整改：本文件此前内联维护了第二份 buildAuditQuery（与 utils/auditQuery.js
+// 整改：本文件此前内联维护了第二份 buildAuditQuery（与 utils/auditQuery.js
 // 逐行近似但不相同），两份实现已经漂移——本地副本的 date-only 边界仍走
 // `new Date(`${d}T00:00:00`)`（服务器本地时区），而共享实现早已改为
 // parseDateBoundary（业务时区，评价报告 #12）。后果是 UTC 容器下

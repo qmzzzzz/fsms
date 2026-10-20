@@ -250,6 +250,295 @@
           "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ]
+    },
+    {
+      "id": 39,
+      "type": "row",
+      "title": "运行时健康 / 审计完整性 / 检测时效（O-3）",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 }
+    },
+    {
+      "id": 40,
+      "type": "stat",
+      "title": "readyz 就绪判定",
+      "description": "1=ready，0=unready。唯一检查项是 Mongo ping；持续失败会触发 MongoUnavailable。",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "readyz_verdict{job=\"xf-app\"}",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "UNREADY", "color": "red" },
+                "1": { "text": "READY", "color": "green" }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 41,
+      "type": "stat",
+      "title": "readyz 判定陈旧度",
+      "description": "距上一次 /readyz 判定的秒数。>300s 触发 ReadinessProbeMissing：探针链路已断，MongoUnavailable 无法判定。",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "readyz_verdict_age_seconds{job=\"xf-app\"}",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 300 },
+              { "color": "red", "value": 600 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "审计丢弃（15m）",
+      "description": "落库前被丢弃的审计记录条数（合规空洞）。>0 触发 AuditRecordsDropped。",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(audit_records_dropped_total[15m]))",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 43,
+      "type": "stat",
+      "title": "审计缓冲积压",
+      "description": "进程内待落库的审计记录条数。持续升高通常先于 audit_records_dropped_total 增长。",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "audit_buffer_backlog_records{job=\"xf-app\"}",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 500 },
+              { "color": "red", "value": 2000 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 44,
+      "type": "stat",
+      "title": "日志丢行（10m）",
+      "description": "日志缓冲触顶后丢弃的最旧行数。>0 触发 LogShipperDroppingLines；SIEM 侧内容不可恢复。",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(log_shipper_dropped_lines_total[10m]))",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 45,
+      "type": "stat",
+      "title": "日志卷可用率",
+      "description": "disk_free/disk_total。<10% 触发 DiskSpaceLow；写满后 WAL/审计缓冲先丢数据，业务接口仍返回 200。",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "disk_free_bytes{job=\"xf-app\"} / disk_total_bytes{job=\"xf-app\"}",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.1 },
+              { "color": "green", "value": 0.2 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "timeseries",
+      "title": "审计丢弃（按原因）与缓冲积压",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "丢弃/秒 · {{reason}}",
+          "expr": "sum by (reason) (rate(audit_records_dropped_total[$__rate_interval]))",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "refId": "B",
+          "legendFormat": "缓冲积压 · {{instance}}",
+          "expr": "audit_buffer_backlog_records{job=\"xf-app\"}",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "磁盘余量与探测失败",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "可用率 · {{instance}}",
+          "expr": "disk_free_bytes{job=\"xf-app\"} / disk_total_bytes{job=\"xf-app\"}",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "refId": "B",
+          "legendFormat": "探测失败/秒 · {{instance}}",
+          "expr": "rate(disk_probe_failures_total{job=\"xf-app\"}[$__rate_interval])",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "日志投递失败与丢行",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 41 },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "批次失败/秒 · {{instance}}",
+          "expr": "rate(log_shipper_flush_failures_total{job=\"xf-app\"}[$__rate_interval])",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "refId": "B",
+          "legendFormat": "丢行/秒 · {{instance}}",
+          "expr": "rate(log_shipper_dropped_lines_total{job=\"xf-app\"}[$__rate_interval])",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "MTTD：平均检测延迟 vs 目标",
+      "description": "detection_lag_seconds 的均值（按检测维度）与生效目标。均值超出目标即触发 AuditDetectionLagOutsideObjective 的前置信号。",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 41 },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "平均延迟 · {{dimension}}",
+          "expr": "sum by (dimension) (rate(detection_lag_seconds_sum[$__rate_interval])) / sum by (dimension) (rate(detection_lag_seconds_count[$__rate_interval]))",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "refId": "B",
+          "legendFormat": "目标 · {{dimension}}",
+          "expr": "detection_objective_seconds",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "MTTD 未达标与跳过计数",
+      "description": "within_objective=false 的累计检测数（6h）与因数据缺失而无法计算延迟的跳过数。",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "未达标 · {{dimension}}",
+          "expr": "sum by (dimension) (increase(detections_within_objective_total{within_objective=\"false\"}[6h]))",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "refId": "B",
+          "legendFormat": "跳过 · {{reason}}",
+          "expr": "sum by (reason) (increase(detection_lag_skipped_total[6h]))",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 55,
+      "type": "timeseries",
+      "title": "fail-open 降级事件（按类型）",
+      "description": "与 SecurityFailOpenSustained 同一组 type。低速持续 >10m 即触发 critical；此面板用于确认是哪一层护栏、是否已恢复。",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 49 },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{type}}",
+          "expr": "sum by (type) (increase(security_alerts_total{type=~\"ip_blacklist_failopen|ratelimit_store_degraded|captcha_active_bound_lost|captcha_switch_db_fallback\"}[5m]))",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
     }
   ]
 }

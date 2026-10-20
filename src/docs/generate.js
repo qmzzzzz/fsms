@@ -1,12 +1,12 @@
 const fs = require('fs');
 const path = require('path');
-// E-05 整改：设备类型枚举此前在 deviceListParams（query）内联展开一份，与
+// 整改：设备类型枚举此前在 deviceListParams（query）内联展开一份，与
 // utils/constants.js、models/FireDevice.js、routes/deviceRoutes.js 合计 4 份副本。
 // 现统一引用 constants 的单一事实来源（本文件的 deviceType 请求体只声明 string 类型，
 // 枚举约束由模型层负责，故无需改）。
 const { DEVICE_TYPE } = require('../utils/constants');
 const DEVICE_TYPE_VALUES = Object.values(DEVICE_TYPE);
-// 同一口径（E-05 的续集）：审计页两维枚举此前在本文件与产物里各抄一份，
+// 同一口径（续集）：审计页两维枚举此前在本文件与产物里各抄一份，
 // 与 constants/audit.js 没有任何连线——常量加一档时文档会继续宣称旧的四档，
 // 调用方按文档传值换来一个 400。现在接上同一根线（openapiSync 有对账）。
 const { AUDIT_RISK_LEVELS, AUDIT_DISPLAY_LEVELS } = require('../constants/audit');
@@ -474,7 +474,7 @@ const deviceListParams = [
     in: 'query',
     schema: {
       type: 'string',
-      // E-05：引用共享枚举，避免与模型/路由校验漂移
+      // 引用共享枚举，避免与模型/路由校验漂移
       enum: DEVICE_TYPE_VALUES,
     },
   },
@@ -1113,16 +1113,16 @@ spec.paths['/api/security/config/registerCaptchaEnabled'] = {
 spec.paths['/health'] = {
   get: p('get', ['System'], '健康检查', {
     security: false,
-    // P2-46：原描述称「包含数据库连接状态」，与实现不符——app.js 的 /health
+    // 原描述称「包含数据库连接状态」，与实现不符——app.js 的 /health
     // 只回 { status: 'ok' }（刻意最小化，不暴露版本/DB 状态等内部信息）；
-    // 带 DB 连通性的是 /readyz（另有 M-1 固定枚举约束）。
+    // 带 DB 连通性的是 /readyz（另有固定枚举约束）。
     responses: ok("进程存活信号，固定返回 { status: 'ok' }"),
   }),
 };
 spec.paths['/api'] = {
   get: p('get', ['System'], 'API 根路径', {
     security: false,
-    // P2-46：原描述称「返回 API 版本和可用端点列表」，与实现不符——
+    // 原描述称「返回 API 版本和可用端点列表」，与实现不符——
     // app.js 的 /api 只回 { success: true, message: '消防管理系统 API' }；
     // 返回端点清单是刻意的安全取舍（避免未认证的信息暴露），不会再恢复。
     responses: ok('固定返回 { success: true, message }，不含端点清单'),

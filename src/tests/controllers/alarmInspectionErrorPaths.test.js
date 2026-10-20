@@ -15,7 +15,7 @@
  */
 
 /**
- * T-3：alarmController / inspectionController 错误与边界分支补齐
+ * alarmController / inspectionController 错误与边界分支补齐
  *
  * businessFlow.test.js 走通了两大业务的 happy path，但控制器的
  * 错误/边界分支覆盖偏低（inspection 39.7% / alarm 43.4%）。本套件补：
@@ -32,7 +32,7 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 
-describe('T-3 报警/巡检控制器错误与边界分支', () => {
+describe('报警/巡检控制器错误与边界分支', () => {
   let app;
   let FireAlarm;
   let Inspection;
@@ -263,7 +263,7 @@ describe('T-3 报警/巡检控制器错误与边界分支', () => {
     expect(rep.status).toBe(201);
     const id = String(rep.body.data._id || rep.body.data.id);
 
-    // pending 状态：到场/结单都不允许（M-1 需先指派）
+    // pending 状态：到场/结单都不允许（需先指派）
     expect((await admin().put(`/api/alarms/${id}/arrive`).send({})).status).toBe(409);
     expect(
       (await admin().put(`/api/alarms/${id}/resolve`).send({ handleResult: 'x' })).status

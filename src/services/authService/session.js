@@ -14,7 +14,7 @@ const { validatePasswordStrength } = require('../../utils/helpers');
 const { checkUnusualTime } = require('../securityAlert');
 const canaryWatch = require('../canaryWatch');
 const AuditLog = require('../../models/AuditLog');
-// P0-5 后手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
+// 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
 const { onAuditWriteFailure } = require('../../utils/auditWriteFailure');
 const captchaService = require('../captchaService');
 const { decryptLoginCredential } = require('../../utils/loginCipher');
@@ -24,6 +24,7 @@ const { decryptLoginCredential } = require('../../utils/loginCipher');
 const { piiSearchKey } = require('../../utils/piiCrypto');
 const sessionService = require('../sessionService');
 const { generateToken, generateRefreshToken } = require('../tokenService');
+const statsCache = require('../statsCache');
 
 /**
  * 用户注册（业务层）
@@ -79,7 +80,7 @@ async function registerUser(body, ctx = {}) {
   }
 
   // 检查用户名是否已存在（统一返回模糊提示，防止枚举探测有效用户名/邮箱）
-  // P3-30：拆成两次查询而非 $or 单查——username 判重必须带 collation（大小写不敏感），
+  // 拆成两次查询而非 $or 单查——username 判重必须带 collation（大小写不敏感），
   // 而带 collation 的查询无法命中默认 collation 的索引，合并写会让另一分支退化。
   // A3（2026-10-16）：邮箱分支改查 **emailKey**（HMAC 检索键）。原先查的是明文
   // `email_1` 索引，而 email 列已加密（随机 IV）——明文相等性在密文列上不再成立，
@@ -109,6 +110,10 @@ async function registerUser(body, ctx = {}) {
     department,
     roles: roleIds,
   });
+
+  // 公开注册同样改变总数/部门分布：所有管理员的统计缓存都必须失效（A-1），
+  // 否则新账号在面板上最长一个 TTL 不可见。
+  statsCache.invalidateAll('user-register');
 
   // 注册成功即建立会话：注册后立即登录无需再次输密码。
   // 「建立会话」得真的建立——与登录走同一段 sid + UserSession 落库（判据与降级方向
@@ -188,7 +193,7 @@ async function issueRevocableTokenPair({ user, roles, req }) {
 }
 
 /**
- * 登录成功后的收尾（E-01 自 loginUser 拆出）：非常规时间审计、登录信息更新、
+ * 登录成功后的收尾（自 loginUser 拆出）：非常规时间审计、登录信息更新、
  * 角色权限读取、令牌签发、设备会话注册与成功审计。
  *
  * 会话注册表落库失败不阻断登录，但要降级为「令牌不含可吊销会话」：若此处失败

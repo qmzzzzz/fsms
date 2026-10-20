@@ -33,7 +33,7 @@ class DeviceService {
   /**
    * 获取设备列表（含数据范围过滤和分页）
    *
-   * E-2：支持游标分页。传入 cursor 时按 deviceCode 升序做 keyset seek，
+   * 支持游标分页。传入 cursor 时按 deviceCode 升序做 keyset seek，
    * 跳过 countDocuments，以 hasMore/nextCursor 表达翻页；
    * 不传 cursor 保持原 page/limit 行为。
    */
@@ -56,7 +56,7 @@ class DeviceService {
 
     // 数据范围过滤：统一走 applyDataScopeToQuery（内部对同字段冲突用 $and 取交集，
     // 且 department 为空时按 deny 处理，不再落入「三分支全不命中→零过滤」）
-    // 属主字段取自 DATA_SCOPE_FIELDS 单一声明（P2-20），与详情/统计/导出同口径
+    // 属主字段取自 DATA_SCOPE_FIELDS 单一声明，与详情/统计/导出同口径
     // 同 AlarmService：范围不可用即 403，不回空集（#12）
     applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.device);
 
@@ -142,7 +142,7 @@ class DeviceService {
   /**
    * 更新设备信息
    *
-   * P2-16：status 从可更新白名单中移除。原实现允许通过通用更新接口直写
+   * status 从可更新白名单中移除。原实现允许通过通用更新接口直写
    * status='scrapped'，绕过模型层的 transitionTo 迁移表——结果是
    * status 已报废、而 lifecycleStage/scrapDate/scrapReason 全为空，
    * 产生「业务上已报废、生命周期上仍在用」的自相矛盾状态，
@@ -150,7 +150,7 @@ class DeviceService {
    * 状态变更统一走 updateDeviceStatus / scrapDevice。
    */
   async updateDevice(device, updates) {
-    // P3-14：installDate 补进白名单——update 路由校验了 ISO8601 格式却
+    // installDate 补进白名单——update 路由校验了 ISO8601 格式却
     // 不在可更新列表，合法值被静默丢弃（校验存在暗示可更新，行为必须兑现）
     // deviceType 同理：update 路由 :105 有 `body('deviceType').optional().isIn(...)`，
     // 而前端 DeviceView.vue 的 submitForm 是新建/编辑共用、总会带上 deviceType，
@@ -184,7 +184,7 @@ class DeviceService {
     // 服务端收到的就是"没提这个字段"。所以清空 ⇒ 发 ''，与 PUT /api/auth/profile
     // 的空值分档同一口径（见 tests/routes/profileFieldClearability.test.js）。
     // 顶层 building/floor/room 也在这里兑现：更新路由校验了它们（deviceRoutes.js:142-147）
-    // 却没人消费，属 P3-14 明令禁止的「校验存在暗示可更新」；归一方向与创建路径一致
+    // 却没人消费，属明令禁止的「校验存在暗示可更新」；归一方向与创建路径一致
     // （deviceController 的 createDevice 同样是顶层垫底、嵌套值优先）。
     const locationPatch = {};
     for (const part of ['building', 'floor', 'room', 'detail']) {
@@ -204,7 +204,7 @@ class DeviceService {
           : device.location || {};
       device.location = { ...current, ...locationPatch };
     }
-    // 显式拒绝而非静默忽略：静默忽略会让调用方以为状态已改（报告 P3-14 同类问题）
+    // 显式拒绝而非静默忽略：静默忽略会让调用方以为状态已改（报告同类问题）
     if (updates.status !== undefined && updates.status !== device.status) {
       throw ApiError.badRequest('设备状态不能通过本接口修改，请使用状态变更或报废接口');
     }
@@ -216,7 +216,7 @@ class DeviceService {
   /**
    * 更新设备状态
    *
-   * P2-16：status 与 lifecycleStage 是两套并行状态，必须同步推进。
+   * status 与 lifecycleStage 是两套并行状态，必须同步推进。
    * - 报废是终态且需要 scrapDate/scrapReason，不允许从本接口进入（改走 scrapDevice）
    * - 已报废设备不接受任何状态变更（报废即生命周期终点）
    * - maintenance 状态需要同步推进 lifecycleStage，否则两套状态永久分叉
@@ -270,7 +270,7 @@ class DeviceService {
   /**
    * 添加维护记录
    *
-   * P2-16：报废守卫此前只写在模型实例方法 addMaintenanceRecord 里，
+   * 报废守卫此前只写在模型实例方法 addMaintenanceRecord 里，
    * 而该方法从未被调用（Service 直接 push 数组），守卫形同虚设——
    * 已报废设备可继续添加维护记录，还会被算出一个「未来的下次检查日期」。
    * 此处改为委托模型方法，让守卫与检查周期推进规则成为唯一实现。
@@ -317,7 +317,7 @@ class DeviceService {
   /**
    * 设备报废
    *
-   * P2-16：委托模型的 transitionTo 状态机，复用其前置状态校验。
+   * 委托模型的 transitionTo 状态机，复用其前置状态校验。
    * 原实现直写 status/lifecycleStage/scrapDate，导致已报废设备可被重复报废
    * 并覆盖原始报废日期（审计上等于篡改报废时间）。
    * 迁移表允许 installed/in_use/maintenance/retired → scrapped，

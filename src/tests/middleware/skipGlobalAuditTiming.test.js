@@ -1,7 +1,7 @@
 /**
- * P0-5 修复锁定：res.locals.skipGlobalAudit 必须在**响应时刻**读取
+ * 修复锁定：res.locals.skipGlobalAudit 必须在**响应时刻**读取
  *
- * 缺陷（审计报告 §3.3 / §15 P0-5）：中间件原先在**请求入口**只检查一次该标志，
+ * 缺陷（审计报告 §3.3 / §15）：中间件原先在**请求入口**只检查一次该标志，
  * 而全部 11 处赋值点（securityController 8 / ipListController 2 / auditController 1）
  * 都在控制器内部、响应之前才赋值 → 入口检查永远早于赋值，标志 100% 失效，
  * 每个这类操作都被双写（控制器手写 1 条 + 全局中间件按路由再写 1 条）。
@@ -12,7 +12,7 @@
  *  2. 端到端：走真实 app + 真实控制器 POST /api/security/report，
  *     auditBuffer.push 不得再收到全局派生的 'security_report'。
  *
- * 另含 P1-33 的 queryScalarGuard 锁定（query 侧唯一真正生效的注入防线）。
+ * 另含 queryScalarGuard 锁定（query 侧唯一真正生效的注入防线）。
  */
 
 const express = require('express');
@@ -37,7 +37,7 @@ const pushedForPath = (fullPath) =>
 // ============================================================
 // 时序语义（中间件级：真实 Express 响应对象，非手工替身）
 // ============================================================
-describe('P0-5 skipGlobalAudit 时序：响应时刻读取', () => {
+describe('skipGlobalAudit 时序：响应时刻读取', () => {
   beforeEach(() => {
     spyPush.mockClear();
   });
@@ -80,7 +80,7 @@ describe('P0-5 skipGlobalAudit 时序：响应时刻读取', () => {
     expect(pushed[0].success).toBe(true);
   });
 
-  test('置标志后走 res.write/res.end（流式）同样跳过（与 P0-6 包装共存）', async () => {
+  test('置标志后走 res.write/res.end（流式）同样跳过（与包装共存）', async () => {
     const app = buildApp((req, res) => {
       res.locals.skipGlobalAudit = true;
       res.write('chunk');
@@ -112,7 +112,7 @@ describe('P0-5 skipGlobalAudit 时序：响应时刻读取', () => {
 // ============================================================
 // 端到端：真实 app + 真实控制器（POST /api/security/report）
 // ============================================================
-describe('P0-5 端到端：POST /api/security/report 不再双写', () => {
+describe('端到端：POST /api/security/report 不再双写', () => {
   let app;
   let User;
   let AuditLog;
@@ -155,7 +155,7 @@ describe('P0-5 端到端：POST /api/security/report 不再双写', () => {
     const res = await request(app)
       .post('/api/security/report')
       .set('Authorization', `Bearer ${token}`)
-      .send({ targetType: 'system', reason: 'P0-5 时序回归验证' });
+      .send({ targetType: 'system', reason: '审计时序回归验证' });
 
     expect(res.status).toBe(200);
     await tick();
@@ -178,9 +178,9 @@ describe('P0-5 端到端：POST /api/security/report 不再双写', () => {
 });
 
 // ============================================================
-// P1-33 锁定：queryScalarGuard 是 query 侧唯一真正生效的防线
+// 锁定：queryScalarGuard 是 query 侧唯一真正生效的防线
 // ============================================================
-describe('P1-33 锁定：queryScalarGuard 阻断 query 注入形态', () => {
+describe('锁定：queryScalarGuard 阻断 query 注入形态', () => {
   const buildGuardApp = () => {
     const app = express();
     // 与 src/app.js 同款设置：v5 默认 simple parser 不产出对象/数组，

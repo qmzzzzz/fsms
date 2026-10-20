@@ -4,7 +4,7 @@
  * 修复背景：runDetection 的频控 key 此前用 `new Date().toISOString().slice(0,10)`
  * （UTC 日期）拼装，UTC+8 下要到北京时间 08:00 才换天，与 securityController
  * 今日统计的零点口径分叉——同一自然日 08:00 前后各能推一次告警，
- * 「每日一次」频控实际失效。现统一为 P3-18 业务时区声明 businessDateParts().dateStr。
+ * 「每日一次」频控实际失效。现统一为业务时区声明 businessDateParts().dateStr。
  *
  * 本文件把全局时钟固定在「UTC 日期与业务时区日期分叉」的敏感时刻
  * （UTC 2026-09-01 18:00 = 北京 2026-09-02 02:00），验证频控 key 锚定

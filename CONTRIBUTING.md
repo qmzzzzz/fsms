@@ -4,18 +4,18 @@
 
 ## 1. 环境要求
 
-| 依赖    | 版本           | 说明                                |
-| ------- | -------------- | ----------------------------------- |
-| Node.js | ≥18（建议 22） | 与 `Dockerfile` 基础镜像口径一致    |
-| MongoDB | 6.x            | 本地需先启动（`net start MongoDB`） |
-| npm     | 随 Node        | 后端在根目录、前端在 `web-admin/`   |
+| 依赖    | 版本                                   | 说明                                                                         |
+| ------- | -------------------------------------- | ---------------------------------------------------------------------------- |
+| Node.js | ≥22.12.0（建议 22，CI 另测 24）        | `package.json` / `web-admin/package.json` 的 `engines` 与 Dockerfile 同口径 |
+| MongoDB | 6.x                                    | 本地需先启动（`net start MongoDB`）                                          |
+| npm     | 随 Node                                | 后端在根目录、前端在 `web-admin/`                                            |
 
 ## 2. 本地启动
 
 ```bash
-# 1. 安装依赖（前后端各一次）
-npm install
-npm --prefix web-admin install
+# 1. 安装依赖（前后端各一次；npm ci 严格按锁文件安装，与 CI 同口径）
+npm ci
+npm --prefix web-admin ci
 
 # 2. 准备环境配置
 cp .env.example .env          # 按需修改；密钥本地可留 .env，生产一律 *_FILE 注入

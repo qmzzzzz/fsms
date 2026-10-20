@@ -1,5 +1,5 @@
 /**
- * 权限缓存失效链回归（P1-14）
+ * 权限缓存失效链回归
  *
  * 背景：userPermissionService 的进程内 TTL 缓存（30s）缓存的是「用户 -> 权限编码
  * 数组」的**解析结果**，而解析过程带两个 match 条件：
@@ -17,7 +17,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
-describe('权限缓存失效链（P1-14）', () => {
+describe('权限缓存失效链', () => {
   let app;
   let User;
   let Role;

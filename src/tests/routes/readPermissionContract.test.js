@@ -112,7 +112,7 @@ const APP_GET_GUARDS = {
   'app.js /health': { guard: 'public', reason: '存活探针，只回 {status:ok}，刻意不含版本/DB 状态' },
   'app.js /readyz': {
     guard: 'public',
-    reason: '就绪探针，对外只暴露固定枚举 ok/disconnected/timeout/unreachable/error（M-1）',
+    reason: '就绪探针，对外只暴露固定枚举 ok/disconnected/timeout/unreachable/error',
   },
   'app.js /metrics': {
     guard: 'metricsAuth',
@@ -128,7 +128,7 @@ const APP_GET_GUARDS = {
   },
   'app.js /api-docs.json': {
     guard: 'swagger.basicAuth',
-    reason: '文档默认关闭，开启时 docsLimiter 在 basicAuth 之前（P2-30 顺序要求）',
+    reason: '文档默认关闭，开启时 docsLimiter 在 basicAuth 之前（顺序要求）',
   },
 };
 

@@ -46,7 +46,7 @@ const applyWriteStatics = (schema) => {
       userAgent: stripControlChars(userAgent, 512),
       sessionId: extra.sessionId || null,
       // 调用方一直在传 reason（credential_decrypt_failed / account_status_inactive /
-      // 登录 IP 不在允许范围内 …），而这里从未取用——M-5 把差异化响应文案收成了统一的 401
+      // 登录 IP 不在允许范围内 …），而这里从未取用——把差异化响应文案收成了统一的 401
       // 防枚举，注释又说"真实原因仅记入服务端日志与审计"，于是取证链的审计这一环是空的：
       // 被禁/被锁账号的登录尝试在留存里与"密码错误"完全同形。
       reason: stripControlChars(extra.reason, 200),

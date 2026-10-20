@@ -76,7 +76,7 @@ describe('Config Validation', () => {
       process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
       // HMAC_SECRET 与其他密钥同口径：>=32 字符（审计修复后不再接受 16 字符弱值）
       process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-      // P2-8（2026-09-30）：生产非回环主机必须带传输加密（tls=true / rediss:）
+      // 生产非回环主机必须带传输加密（tls=true / rediss）
       process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
       process.env.CORS_ORIGIN = 'https://example.com';
       process.env.ENABLE_HTTPS = 'true';
@@ -100,7 +100,7 @@ describe('Config Validation', () => {
       process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
       process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
       process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-      // P2-8：合法生产夹具须带传输加密（非回环主机 tls=true / rediss:）
+      // 合法生产夹具须带传输加密（非回环主机 tls=true / rediss）
       process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
       process.env.CORS_ORIGIN = 'https://example.com';
       process.env.ENABLE_HTTPS = 'true';
@@ -262,7 +262,7 @@ describe('Config Validation', () => {
         if (prevHttps === undefined) delete process.env.ENABLE_HTTPS;
         else process.env.ENABLE_HTTPS = prevHttps;
       };
-      process.env.ENABLE_HTTPS = 'true'; // 隔离 M-2 的 TLS 告警，只测 ALLOWED_HOSTS
+      process.env.ENABLE_HTTPS = 'true'; // 隔离 TLS 告警，只测 ALLOWED_HOSTS
       const { collectProductionWarnings } = require('../../config/validate');
       const warnings = collectProductionWarnings();
       restoreHttps();
@@ -295,9 +295,9 @@ describe('Config Validation', () => {
       const { collectProductionWarnings } = require('../../config/validate');
       const warnings = collectProductionWarnings();
       if (prevHttps !== undefined) process.env.ENABLE_HTTPS = prevHttps;
-      // 钉已删除的 M-2 告警的独有措辞，而非宽泛的 'TLS' 子串：2026-10-10 新增的
+      // 钉已删除的告警的独有措辞，而非宽泛的 'TLS' 子串：2026-10-10 新增的
       // 登录密文轨 strict 告警会在动机陈述里提到「TLS 配置疏漏」（config/loginEncryptGuard.js），
-      // 与 M-2 的 TLS 终结告警无关——宽子串会把合法新告警误判为回归。
+      // 与 TLS 终结告警无关——宽子串会把合法新告警误判为回归。
       expect(warnings.some((w) => w.includes('ENABLE_HTTPS 未启用'))).toBe(false);
       expect(warnings.some((w) => w.includes('明文 HTTP 提供服务'))).toBe(false);
     });

@@ -1,7 +1,7 @@
 /**
  * 「唯一留痕」写不进去时，必须既不静默也不改变业务语义（批次 88）
  *
- * 背景（P0-5 之后才成立的性质）：控制器写 `res.locals.skipGlobalAudit = true` 后，
+ * 背景（之后才成立的性质）：控制器写 `res.locals.skipGlobalAudit = true` 后，
  * 全局审计中间件在**响应时刻**读到该标志就不再补记 ⇒ 紧随其后的手写
  * `AuditLog.create(...)` 是这次操作在审计集合里的**唯一留痕**。
  * `utils/auditWriteFailure.js` 为此把纪律写死：落库失败要「不阻断主流程，但绝不静默」
@@ -238,7 +238,7 @@ function tally(sites) {
  * 实测缺陷形状（本轮修复前，四处同形）：
  *   `.catch((e) => logger.warn(\`改密审计落库失败：${e.message}\`))`
  *   ① 降到 warn ⇒ 生产 log level 下等于不留痕；② 不计 `audit_write_failed` 指标 ⇒
- *   「敏感操作没写上留痕」在监控面完全不可见（而这条指标正是 P0-5 之后建起来的）；
+ *   「敏感操作没写上留痕」在监控面完全不可见（而这条指标正是之后建起来）；
  *   ③ `e.message` 假设被 catch 的一定是 Error——本仓 `utils/auditWriteFailure.js` 的
  *   `errText` 就是为此存在（裸 reject 字符串/driver 裸对象都见过），旧写法会在这步 TypeError。
  *

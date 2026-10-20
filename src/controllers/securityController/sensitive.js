@@ -43,7 +43,7 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
 
   // 数据范围保护：查看他人时，操作者层级须**严格高于**目标用户层级
   // （目标层级 >= 操作者层级即拒绝，含同级——与 userController/rolePermissionController/
-  // authService 等其余 23 处「>= 即拒绝」口径一致，P1-21 修复，2026-09-17）。
+  // authService 等其余 23 处「>= 即拒绝」口径一致，修复，2026-09-17）。
   // 理由：敏感数据（手机号/邮箱）的横向查看不因同级而合法，同级放行等于允许
   // 平级管理员互相读取 PII；越级（target > op）更应拒绝。超管 *:* 恒通过。
   if (!isSelf) {
@@ -78,7 +78,7 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
       sensitiveData = {
         type: 'phone',
         masked: DataMasking.maskPhone(user.phone),
-        full: user.phone, // 已是明文：schema 上 phone 的 get 即 decryptPii（P1-②），不要再解一次
+        full: user.phone, // 已是明文：schema 上 phone 的 get 即 decryptPii，不要再解一次
       };
       break;
     case 'email':
@@ -97,7 +97,7 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
   // 一条记录里两个主体字段指向不同的人。该处已设 skipGlobalAudit，故这是该操作
   // 的唯一留痕——按 username 检索时会把"谁查看了谁"记为被查看者本人。
   // 现改为：username 为操作者，被查看者另存 targetUserId/targetUsername。
-  // P0-5 修复（2026-09-17）后"唯一留痕"才成立：skipGlobalAudit 由全局审计
+  // 修复后"唯一留痕"才成立：skipGlobalAudit 由全局审计
   // 中间件在**响应时刻**读取（security.js 的 doLog），下方赋值与随后
   // res.json 之间的顺序因此生效；修复前该标志在中间件入口即被检查，
   // 此处赋值永远晚于检查，本次操作会被双写。

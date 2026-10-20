@@ -24,7 +24,7 @@
  */
 
 /**
- * 批次E 架构/性能类修复回归（P3-19/20/21/22/23/24/25）
+ * 批次E 架构/性能类修复回归（20/21/22/23/24/25）
  *
  * 这批缺陷的形态与前几批不同：它们不产生错误响应，只在特定负载或部署形态下
  * 才显现（多进程链分叉、高频用户内存峰值、未初始化配置的每请求打库）。
@@ -32,8 +32,8 @@
  */
 
 describe('批次E 架构与性能加固回归', () => {
-  // ================= P3-19 单进程假设 =================
-  describe('P3-19 运行时拓扑假设集中声明', () => {
+  // ================= 单进程假设 =================
+  describe('运行时拓扑假设集中声明', () => {
     const load = () => {
       jest.resetModules();
       return require('../../constants/runtime');
@@ -125,10 +125,10 @@ describe('批次E 架构与性能加固回归', () => {
     });
   });
 
-  // ================= P3-19 审计链锁超时 =================
+  // ================= 审计链锁超时 =================
 
-  // ================= P3-64 K8s 多副本检测（Deployment 不注入环境变量）=================
-  describe('P3-64 K8s Pod 判据', () => {
+  // ================= K8s 多副本检测（Deployment 不注入环境变量）=================
+  describe('K8s Pod 判据', () => {
     // `-<数字>` 结尾的主机名太常见
     // （CI runner `runner-14`、EC2 私有 DNS 名 `ip-10-0-1-23`、`host-2024`），
     // 光凭形状当序号会把单实例机器误判成多副本。因此 parsePodOrdinal 现在还要一个
@@ -214,7 +214,7 @@ describe('批次E 架构与性能加固回归', () => {
     });
   });
 
-  describe('P3-19 审计链锁超时保护', () => {
+  describe('审计链锁超时保护', () => {
     test('fn 悬挂时锁在超时后释放，后续调用不被永久阻塞', async () => {
       jest.resetModules();
       process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = '80';
@@ -243,25 +243,34 @@ describe('批次E 架构与性能加固回归', () => {
     test('正常 fn 不受超时影响且串行化语义保持', async () => {
       jest.resetModules();
       const { withChainLock } = require('../../utils/auditChain');
+      const { flushEventLoop } = require('../helpers/waitFor');
       const order = [];
-      await Promise.all([
-        withChainLock(async () => {
-          order.push('a-start');
-          await new Promise((r) => setTimeout(r, 20));
-          order.push('a-end');
-        }),
-        withChainLock(async () => {
-          order.push('b-start');
-          order.push('b-end');
-        }),
-      ]);
+      // 用可控闸门代替 20ms 睡眠：先证明 b 在 a 持有锁期间没有开始，
+      // 再放行 a；这比「睡 20ms 后看顺序」更强，也不受调度快慢影响。
+      let releaseA;
+      const aGate = new Promise((resolve) => {
+        releaseA = resolve;
+      });
+      const first = withChainLock(async () => {
+        order.push('a-start');
+        await aGate;
+        order.push('a-end');
+      });
+      const second = withChainLock(async () => {
+        order.push('b-start');
+        order.push('b-end');
+      });
+      await flushEventLoop(2);
+      expect(order).toEqual(['a-start']);
+      releaseA();
+      await Promise.all([first, second]);
       // b 必须在 a 完成之后才开始（互斥语义）
       expect(order).toEqual(['a-start', 'a-end', 'b-start', 'b-end']);
     });
   });
 
-  // ================= P3-22 SystemConfig 负缓存 =================
-  describe('P3-22 SystemConfig 负缓存', () => {
+  // ================= SystemConfig 负缓存 =================
+  describe('SystemConfig 负缓存', () => {
     test('不存在的 key 只打库一次（第二次命中负缓存）', async () => {
       jest.resetModules();
       const SystemConfig = require('../../models/SystemConfig');
@@ -296,8 +305,8 @@ describe('批次E 架构与性能加固回归', () => {
     });
   });
 
-  // ================= P3-23 statsCache 显式启动 =================
-  describe('P3-23 statsCache 不在模块加载期启动定时器', () => {
+  // ================= statsCache 显式启动 =================
+  describe('statsCache 不在模块加载期启动定时器', () => {
     test('require 后无定时器，需显式 startCleanup', () => {
       jest.resetModules();
       const statsCache = require('../../services/statsCache');
@@ -358,8 +367,8 @@ describe('批次E 架构与性能加固回归', () => {
     });
   });
 
-  // ================= P3-24 告警频控容量上限 =================
-  describe('P3-24 告警频控表容量上限', () => {
+  // ================= 告警频控容量上限 =================
+  describe('告警频控表容量上限', () => {
     test('超过硬上限时清空，Map 不随攻击者可控的 key 无界增长', () => {
       jest.resetModules();
       process.env.ALERT_RATE_LIMIT_MAX = '50';
@@ -390,8 +399,8 @@ describe('批次E 架构与性能加固回归', () => {
     });
   });
 
-  // ================= P3-25 WebSocket 暴露面 =================
-  describe('P3-25 WebSocket 统计与推送白名单', () => {
+  // ================= WebSocket 暴露面 =================
+  describe('WebSocket 统计与推送白名单', () => {
     /** 构造最小可测的 service 实例，绕开真实 socket.io 服务器 */
     const makeService = (roomNames = []) => {
       const WebSocketService = require('../../services/websocketService');

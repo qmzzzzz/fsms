@@ -114,12 +114,64 @@ const initPermissions = async () => {
   }
 };
 
+/** 内置角色与预定义权限集对账；返回是否产生了一条收敛操作。 */
+function reconcileBuiltInRole(roleData, existing, permIdsFor, reconcileOps) {
+  if (!roleData.isBuiltIn) return false;
+  const expectedIds = permIdsFor(roleData.code).map((id) => id.toString());
+  const currentIds = (existing.permissions || []).map((p) => p.toString());
+  const needsUpdate =
+    expectedIds.length !== currentIds.length || !expectedIds.every((id) => currentIds.includes(id));
+  if (!needsUpdate) return false;
+  reconcileOps.push({
+    updateOne: {
+      filter: { _id: existing._id },
+      update: { $set: { permissions: expectedIds } },
+    },
+  });
+  logger.warn(`内置角色 ${roleData.code} 权限已对账收敛`);
+  return true;
+}
+
+/** 批量创建角色并绑定权限；多实例首启的唯一键冲突按 A-3 回查后继续。 */
+async function createRolesWithPermissions(rolesToCreate, rolePermissionsMap) {
+  let createdRoles = [];
+  try {
+    createdRoles = await Role.insertMany(rolesToCreate, { ordered: false });
+  } catch (err) {
+    // A-3：多实例同时首启时，另一实例可能已抢先写入同 code 的角色。
+    // 权限播种早已按同一口径处理 11000（见 insertMissingPermissions）；
+    // 这里若不接住，冲突实例会在初始化阶段直接退出。
+    // ordered:false 下非冲突文档已经落库，按 code 回查即可拿到「本次可见」的全集，
+    // 后续权限关联照常执行（对另一实例写过的行也是幂等收敛）。
+    if (err.code !== 11000) throw err;
+    logger.warn('角色初始化遇到并发冲突（11000），回查已落库角色后继续');
+    createdRoles = await Role.find({ code: { $in: rolesToCreate.map((r) => r.code) } })
+      .select('_id code')
+      .lean();
+  }
+
+  const bulkOps = createdRoles
+    .map((role) => {
+      const permIds = rolePermissionsMap.get(role.code);
+      if (!permIds || permIds.length === 0) return null;
+      return {
+        updateOne: {
+          filter: { _id: role._id },
+          update: { $set: { permissions: permIds } },
+        },
+      };
+    })
+    .filter(Boolean);
+  if (bulkOps.length > 0) await Role.bulkWrite(bulkOps);
+  return createdRoles.length;
+}
+
 /**
  * 初始化角色数据
  * 注意：内置角色（isBuiltIn）每次启动都会与 rolePermissionMap 对账，
  * 防止数据库残留过宽权限（如 GUEST 曾拥有 device:* 通配符）无法被收回。
  *
- * P3-21 消除 N+1：原实现对每个角色各发一次 findOne + 一次 Permission.find
+ * 消除 N+1：原实现对每个角色各发一次 findOne + 一次 Permission.find
  * （6 个角色 ≥ 12 次串行往返），且 SECURITY_ADMIN/FIRE_SUPERVISOR 的权限集
  * 高度重叠却各自重复拉取。现在改为「两次批量查询 + 内存内映射」：
  * 一次取回全部角色，一次取回全部涉及的权限，之后纯内存比对。
@@ -160,24 +212,7 @@ const initRoles = async () => {
     const existing = existingByCode.get(roleData.code);
     if (existing) {
       skipped++;
-      // 内置角色：与 rolePermissionMap 对账，强制收敛到预定义权限集
-      if (roleData.isBuiltIn) {
-        const expectedIds = permIdsFor(roleData.code).map((id) => id.toString());
-        const currentIds = (existing.permissions || []).map((p) => p.toString());
-        const needsUpdate =
-          expectedIds.length !== currentIds.length ||
-          !expectedIds.every((id) => currentIds.includes(id));
-        if (needsUpdate) {
-          reconcileOps.push({
-            updateOne: {
-              filter: { _id: existing._id },
-              update: { $set: { permissions: expectedIds } },
-            },
-          });
-          reconciled++;
-          logger.warn(`内置角色 ${roleData.code} 权限已对账收敛`);
-        }
-      }
+      if (reconcileBuiltInRole(roleData, existing, permIdsFor, reconcileOps)) reconciled++;
       continue;
     }
     rolesToCreate.push(roleData);
@@ -193,27 +228,9 @@ const initRoles = async () => {
     await Role.bulkWrite(reconcileOps);
   }
 
-  // 批量创建角色
+  // 批量创建角色并绑定权限
   if (rolesToCreate.length > 0) {
-    const createdRoles = await Role.insertMany(rolesToCreate, { ordered: false });
-
-    // 批量更新权限关联
-    const bulkOps = [];
-    for (const role of createdRoles) {
-      const permIds = rolePermissionsMap.get(role.code);
-      if (permIds && permIds.length > 0) {
-        bulkOps.push({
-          updateOne: {
-            filter: { _id: role._id },
-            update: { $set: { permissions: permIds } },
-          },
-        });
-      }
-    }
-    if (bulkOps.length > 0) {
-      await Role.bulkWrite(bulkOps);
-    }
-    created = createdRoles.length;
+    created = await createRolesWithPermissions(rolesToCreate, rolePermissionsMap);
   }
 
   logger.info(`角色初始化完成：创建 ${created} 个，对账 ${reconciled} 个，跳过 ${skipped} 个`);

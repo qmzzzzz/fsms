@@ -10,7 +10,7 @@ const Role = require('../../models/Role');
 const logger = require('../../utils/logger');
 const { isValidAvatar } = require('../../utils/helpers');
 const AuditLog = require('../../models/AuditLog');
-// P0-5 后手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
+// 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
 const { onAuditWriteFailure } = require('../../utils/auditWriteFailure');
 const { normalizeEmailKey } = require('../../utils/emailKey');
 // A3：email 已 at-rest 加密，查重不能再比对明文列（随机 IV 下相等性不成立），
@@ -242,10 +242,9 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
   // 失效用户缓存（与原实现一致：惰性 require，规避 middleware ↔ service 潜在循环）
   const { invalidateUserCache } = require('../../middleware/auth');
   invalidateUserCache(user._id);
-  // 锁定/解锁影响用户统计，目标用户与操作者（统计视角）的统计缓存均需失效
+  // 锁定/解锁可能改变活跃口径，且影响所有查看者的统计（A-1：全量失效）
   const statsCache = require('../statsCache');
-  statsCache.invalidateByUserId(user._id);
-  statsCache.invalidateByUserId(operatorId);
+  statsCache.invalidateAll('user-lock');
 
   // 注意：不将用户级锁定关联到 IP 黑名单，避免误封 NAT 出口（原样保留）
 

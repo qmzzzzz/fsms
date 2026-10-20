@@ -84,7 +84,6 @@ describe('前驱等待定时器只在真正超时时生效（F-192）', () => {
     chain.__resetForTest();
   });
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const cachedTail = {
     findOne: () => ({ sort: () => ({ lean: async () => ({ hash: 'DB-1' }) }) }),
   };
@@ -95,23 +94,31 @@ describe('前驱等待定时器只在真正超时时生效（F-192）', () => {
   };
 
   test('无超时的调用：静置超过锁超时后，链尾仍有效、代际仍未被递增', async () => {
-    await chain.getChainTail(cachedTail); // 建立内存尾
-    const gen = await chain.withChainLock(async (g) => g); // 快路径，prev 已 settle
-    await chain.advanceChainTail('a'.repeat(64), gen);
+    // 本文件不触达 DB/Mongo 驱动，只有 auditChain 的 Promise 路径，故可用假时钟把
+    // "静置 500ms（> 300ms 锁超时）"变成确定性的 advanceTimersByTime：若那枚应被
+    // clear 的前驱等待定时器仍活着，advance 会立刻让它执行副作用，下面的断言转红。
+    jest.useFakeTimers();
+    try {
+      await chain.getChainTail(cachedTail); // 建立内存尾
+      const gen = await chain.withChainLock(async (g) => g); // 快路径，prev 已 settle
+      await chain.advanceChainTail('a'.repeat(64), gen);
 
-    await sleep(500); // >300ms：只静置，期间没有任何并发、没有超时
+      jest.advanceTimersByTime(500); // >300ms：只推进时钟，期间没有任何并发、没有超时
 
-    const warnSpy = jest.spyOn(log, 'warn').mockImplementation(() => {});
-    // 同一代际的后续推进必须仍然被认作"当前代"：若输掉竞赛的定时器递增过代际，
-    // 这里会被 B-L4 守卫跳过并告警
-    await chain.advanceChainTail('b'.repeat(64), gen);
-    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('已过期'));
-    warnSpy.mockRestore();
+      const warnSpy = jest.spyOn(log, 'warn').mockImplementation(() => {});
+      // 同一代际的后续推进必须仍然被认作"当前代"：若输掉竞赛的定时器递增过代际，
+      // 这里会被 B-L4 守卫跳过并告警
+      await chain.advanceChainTail('b'.repeat(64), gen);
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('已过期'));
+      warnSpy.mockRestore();
 
-    // 链尾必须还在内存里：读库即说明它被那枚定时器抹掉了
-    await expect(chain.getChainTail(mustNotReadDb)).resolves.toBe('b'.repeat(64));
+      // 链尾必须还在内存里：读库即说明它被那枚定时器抹掉了
+      await expect(chain.getChainTail(mustNotReadDb)).resolves.toBe('b'.repeat(64));
 
-    const gen2 = await chain.withChainLock(async (g) => g);
-    expect(gen2).toBe(gen);
+      const gen2 = await chain.withChainLock(async (g) => g);
+      expect(gen2).toBe(gen);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

@@ -122,7 +122,10 @@ const FACET_RESULT = [
 jest.mock('../services/statsCache', () => ({
   get: () => ({ hit: false }),
   set: () => {},
+  // A-1：缓存键带全局代际，控制器在取键前会读 generation()
+  generation: () => 0,
   invalidateByUserId: () => {},
+  invalidateAll: () => {},
 }));
 
 jest.mock('../middleware/rbac', () => {

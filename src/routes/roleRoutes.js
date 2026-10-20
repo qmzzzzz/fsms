@@ -13,7 +13,7 @@ const { consumeValidation } = require('../middleware/validateQuery');
 // 与 Permission/Role schema 的 status enum 同源（见 constants/permission.js）
 const { RESOURCE_STATUSES } = require('../constants/permission');
 
-// P3-4/P3-17：列表 query 校验。status 此前零校验直入 Mongo 过滤
+// 列表 query 校验。status 此前零校验直入 Mongo 过滤
 // （search 因控制器 String() 强转反而安全——同类参数三种处理水平，此处统一）
 // values:'falsy'：前端未选状态筛选时带空串（status=），空串语义为「不筛选」
 const listQueryValidation = [

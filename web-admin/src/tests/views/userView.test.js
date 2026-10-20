@@ -157,7 +157,7 @@ const mountUser = async (perms, rows = [ROW_OTHER], total = rows.length) => {
     setupStore: (pinia) => {
       const s = useAuthStore(pinia)
       // 用 setAuth 一次性写入身份+权限：userId 决定「是否本人」的判定基准
-      s.setAuth('t', 'r', { userId: 'me', username: 'admin' }, perms)
+      s.setAuth({ userId: 'me', username: 'admin' }, perms)
     },
   })
   await waitFor(
@@ -348,7 +348,7 @@ describe('UserView 列表与筛选', () => {
         })
     )
     active = mountComponent(UserView, {
-      setupStore: (pinia) => useAuthStore(pinia).setAuth('t', 'r', { userId: 'me' }, P_BASE),
+      setupStore: (pinia) => useAuthStore(pinia).setAuth({ userId: 'me' }, P_BASE),
     })
     await flush(4)
     expect(active.findAll('.glass-skeleton')).toHaveLength(1)
@@ -421,7 +421,7 @@ describe('UserView 列表与筛选', () => {
       return Promise.resolve({ data: { data: [ROW_OTHER], pagination: { total: 1 } } })
     })
     active = mountComponent(UserView, {
-      setupStore: (pinia) => useAuthStore(pinia).setAuth('t', 'r', { userId: 'me' }, P_BASE),
+      setupStore: (pinia) => useAuthStore(pinia).setAuth({ userId: 'me' }, P_BASE),
     })
     await flush(4)
     click(active.find('.table-toolbar .glass-btn--default'))
@@ -462,7 +462,7 @@ describe('UserView 列表与筛选', () => {
       return Promise.resolve({ data: { data: [ROW_OTHER], pagination: { total: 1 } } })
     })
     active = mountComponent(UserView, {
-      setupStore: (pinia) => useAuthStore(pinia).setAuth('t', 'r', { userId: 'me' }, P_BASE),
+      setupStore: (pinia) => useAuthStore(pinia).setAuth({ userId: 'me' }, P_BASE),
     })
     await flush(4)
     click(active.find('.table-toolbar .glass-btn--default'))

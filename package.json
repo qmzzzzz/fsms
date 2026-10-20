@@ -3,13 +3,13 @@
   "version": "1.0.0",
   "description": "基于权限管控的消防管理系统",
   "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+    "node": ">=22.12.0"
   },
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "lint": "eslint src scripts e2e eslint.config.js",
+    "lint": "eslint src scripts migrations migrate-mongo-config.js e2e eslint.config.js",
     "lint:ratchet": "node scripts/lint-ratchet.js",
     "lint:web": "npm --prefix web-admin run lint",
     "lint:all": "npm run lint && npm run lint:ratchet && npm run lint:web",
@@ -22,6 +22,7 @@
     "test:watch": "jest --watch",
     "test:e2e": "node scripts/e2e-smoke.js",
     "test:e2e:browser": "playwright test",
+    "test:ops-e2e": "node scripts/ops-e2e.js",
     "test:prod-drill": "node scripts/production-drill.js",
     "test:load": "node scripts/load-test.js",
     "validate": "node src/config/validate.js",

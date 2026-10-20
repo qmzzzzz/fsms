@@ -8,7 +8,7 @@
  *    也不推进 tokenVersion**，于是"status 仍是 active"在被锁期间恒成立，
  *    被锁账户的实时推送通道一条都不掉。根因是取数字段集比 HTTP 侧少一个
  *    lockUntil：少取一个字段就等于少一条判据。
- * 2) 授/撤角色不推进 tokenVersion（全仓只有 middleware/tokenBlacklist.js:161
+ * 2) 授/撤角色不推进 tokenVersion（全仓只有 middleware/tokenBlacklist.js:188
  *    这一处 $inc），所以"降级但仍 active"的连接在只复查 status/tokenVersion
  *    的判定体里永远通过——已驻留 role-management 的降级管理员会在整个连接
  *    生命周期内继续收 role-updated / permissions-updated 广播。

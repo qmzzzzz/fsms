@@ -61,13 +61,22 @@ describe('会话缓存命中仍须复核过期时刻', () => {
     const first = await sessionService.validateSession(sid);
     expect(first.usable).toBe(true); // 直查：此刻确实未过期
 
-    await new Promise((r) => setTimeout(r, 2200)); // 越过 expiresAt，但仍在 15 秒缓存窗口内
-
-    // 必须证明第二次读走的是缓存（否则只是在测直查路径，修没修都绿）
+    // 把时钟推过 expiresAt，但仍在 15 秒缓存窗口内：只伪造 Date.now，
+    // 不启动假定时器（Mongo 驱动对全局假定时器敏感）。第二次读走缓存，
+    // 是否放行完全取决于缓存命中路径是否重算过期时刻。
     const findSpy = jest.spyOn(UserSession, 'findOne');
-    const again = await sessionService.validateSession(sid);
-    expect(findSpy).not.toHaveBeenCalled();
-    findSpy.mockRestore();
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 3000);
+    let again;
+    let findCalls;
+    try {
+      // 必须证明第二次读走的是缓存（否则只是在测直查路径，修没修都绿）
+      again = await sessionService.validateSession(sid);
+      findCalls = findSpy.mock.calls.length;
+    } finally {
+      nowSpy.mockRestore();
+      findSpy.mockRestore();
+    }
+    expect(findCalls).toBe(0);
 
     expect(again.usable).toBe(false);
   });

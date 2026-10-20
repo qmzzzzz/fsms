@@ -12,7 +12,7 @@ const swaggerOptions = {
   customSiteTitle: '消防巡检管理系统 API 文档',
   customfavIcon: '/favicon.ico',
   explorer: true,
-  // 【P2-29 CSP 兼容约束】不得启用 customJsStr / customJs（内联脚本）：
+  // 【CSP 兼容约束】不得启用 customJsStr / customJs（内联脚本）：
   // 全局 CSP 为 `script-src 'self'`（middleware/security.js），内联 <script>
   // 会被浏览器直接拦掉，页面白屏且只在 devtools 里报错，服务端看到的仍是 200。
   //
@@ -29,7 +29,7 @@ const swaggerOptions = {
 };
 
 /**
- * API 文档专用限流器（P2-30）
+ * API 文档专用限流器
  *
  * 原问题：限流器只挂在 `/api/`（app.js），而 /api-docs 与 /api-docs.json
  * 挂在根路径，落在所有限流之外。basicAuth 用 timingSafeEqual 防住了时序侧信道，
@@ -41,13 +41,13 @@ const swaggerOptions = {
  * 静态资源与 HTML 共用同一个桶是有意的——按 IP 计数才能真正约束爆破者。
  */
 const docsLimiter = rateLimit({
-  // P2-70：窗口同样外置（原硬编码 15 分钟）。与 max 同一口径：
+  // 窗口同样外置（原硬编码 15 分钟）。与 max 同一口径：
   // 只在「有限且为正」时采用，否则回落默认，避免 0/负值让窗口失效。
   windowMs: (() => {
     const ms = Number(process.env.DOCS_RATE_LIMIT_WINDOW_MS);
     return Number.isInteger(ms) && ms > 0 ? ms : 15 * 60 * 1000;
   })(),
-  // P2-37：原为 `Number(...) || 30`——负值（如 -1）是**真值**，会原样传给
+  // 原为 `Number(...) || 30`——负值（如 -1）是**真值**，会原样传给
   // express-rate-limit，得到「配额为负」的限流器：每个请求都被计数并立即超限，
   // 文档页 100% 429。现改为只在「有限且为正」时采用，否则回落默认 30。
   // 同时排除小数（限流器按整数比较）与非数字（Number("abc")=NaN）。
@@ -81,7 +81,7 @@ const docsLimiter = rateLimit({
 });
 
 /**
- * API 文档是否启用（P2-38：判定口径已统一到 config/validate.js）
+ * API 文档是否启用（判定口径已统一到 config/validate.js）
  *
  * 规则（实现在 validate.js 的 isDocsEnabled，此处仅转出）：
  *   - 显式设置 ENABLE_API_DOCS 时按其取值判定：'true'/'1' 为开，其余为关；
@@ -102,7 +102,7 @@ const { isDocsEnabled } = require('./validate');
 // 启动期一次性告警：文档开启但未配置 Basic Auth 凭据。
 // 告警必须放在模块加载期而非请求路径内，否则每个未带凭据的文档请求都会刷一条 warn。
 //
-// 【M-01 修复】此处原为 fail-open（未配凭据则 basicAuth 直接放行），
+// 【修复】此处原为 fail-open（未配凭据则 basicAuth 直接放行），
 // 攻击者无需凭据即可枚举全部 API 端点、请求/响应 schema 与内部权限编码。
 // 现改为 fail-closed：basicAuth 拒绝访问，生产环境另由 config/validate.js
 // 在启动期直接阻断。告警文案同步改为"已按安全策略拒绝访问"，避免误导运维
@@ -121,7 +121,7 @@ if (isDocsEnabled() && !(process.env.DOCS_USERNAME && process.env.DOCS_PASSWORD)
 /**
  * Basic Auth 中间件（fail-closed）
  *
- * 行为约定（M-01）：
+ * 行为约定：
  *   - 未配置凭据 → 拒绝（503），不再放行。理由是"文档已开启却无凭据"属配置
  *     错误，此时放行等于把全部接口契约匿名公开；失败方向应为拒绝。
  *   - 生产环境还会在启动期由 config/validate.js 直接阻断，双保险。

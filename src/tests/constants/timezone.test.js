@@ -1,5 +1,5 @@
 /**
- * 业务时区单一声明的单元测试（P3-18）
+ * 业务时区单一声明的单元测试
  *
  * 关键不变量：无论服务器本地时区是什么（容器通常 UTC），
  * businessDayBounds 返回的都必须是「业务时区那一天」的 UTC 起止瞬间。
@@ -7,7 +7,7 @@
  * 两个「今天」在 UTC 16:00-24:00 必然错位。
  */
 
-describe('业务时区收敛（P3-18）', () => {
+describe('业务时区收敛', () => {
   const load = () => {
     jest.resetModules();
     return require('../../constants/timezone');

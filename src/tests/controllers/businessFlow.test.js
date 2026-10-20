@@ -4,7 +4,7 @@
  * 三大业务此前覆盖率极低（InspectionService 7.5% / alarmController 13.2% /
  * inspectionController 14.9% / deviceController 19.1% / AlarmService 35.6%）。
  * 本文件经 HTTP 层驱动全生命周期：创建 → 列表/详情 → 状态迁移（含非法迁移拒绝）
- * → 统计 → 删除保护。报警按 M-1 指派给操作者本人以走通到场/处置全流程。
+ * → 统计 → 删除保护。报警按指派给操作者本人以走通到场/处置全流程。
  */
 
 const request = require('supertest');
@@ -129,7 +129,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
 
     const update = await authed().put(`/api/devices/${deviceId}`).send({ deviceName: '烟感_更名' });
     expect(update.status).toBe(200);
-    // status 不在可更新白名单（P2-16）：显式拒绝
+    // status 不在可更新白名单：显式拒绝
     const statusViaUpdate = await authed()
       .put(`/api/devices/${deviceId}`)
       .send({ status: 'in_use' });
@@ -247,7 +247,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
     const stats = await authed().get('/api/alarms/stats');
     expect(stats.status).toBe(200);
 
-    // M-1：到场/处置仅限被指派处理人本人 → 指派给自己走通全流程
+    // 到场/处置仅限被指派处理人本人 → 指派给自己走通全流程
     const dispatch = await authed()
       .put(`/api/alarms/${alarmId}/dispatch`)
       .send({ handlerId: selfUserId });
@@ -366,7 +366,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
     expect(start.status).toBe(200);
     expect(start.body.data.status).toBe('in_progress');
 
-    // 时间窗倒置（P2-19 关联）：planEndTime < planStartTime 被路由校验拒绝
+    // 时间窗倒置（关联）：planEndTime < planStartTime 被路由校验拒绝
     const inverted = await authed()
       .post('/api/inspections')
       .send({
@@ -393,7 +393,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
     expect(await require('../../models/Inspection').findById(inspId)).toBeNull();
   });
 
-  test('巡检：执行完成 → 自审被拒（M-2 分离）；未指派记录可审通过', async () => {
+  test('巡检：执行完成 → 自审被拒（分离）；未指派记录可审通过', async () => {
     // 场景一：执行人是自己 → 自审自批被禁止
     const ownCreate = await authed()
       .post('/api/inspections')
@@ -425,7 +425,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
       result: 'approved',
       reviewComment: '通过',
     });
-    // 自审自批禁止（M-2）：服务层条件更新不命中 → ApiError 400
+    // 自审自批禁止：服务层条件更新不命中 → ApiError 400
     expect(selfReview.status).toBe(400);
     // 自审被拒后记录必须仍停在已完成、未被写坏（拒了但没改 vs 改了才报错）
     const afterSelfReview = await require('../../models/Inspection').findById(ownId).lean();

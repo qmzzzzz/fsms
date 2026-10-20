@@ -9,7 +9,7 @@
  * + 同名 cookie 的请求：
  *   authenticate → 回退 cookie → 用 T 认证通过；
  *   logout       → token = ''  → 不回退 → 吊销调用收到空令牌 → T 不进黑名单，
- *                  但接口照样 200「登出成功」。P2-26 用 LOGOUT_REVOKE_FAILED 堵的
+ *                  但接口照样 200「登出成功」。用 LOGOUT_REVOKE_FAILED 堵的
  *                  正是这类"看起来登出了、服务端令牌还活着"，被一条复制粘贴绕开。
  *
  * 三层钉法：① 行为（真实控制器 + 真实提取器，不依赖实现细节）；

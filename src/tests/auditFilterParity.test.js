@@ -15,13 +15,13 @@
  * - 前端 `AuditLogView.buildFilterParams` 特意排除空串，注释原话是
  *   "否则空串会被后端解析为 false，导致『清空筛选=只看失败』的错误结果"——
  *   空串只是这条静默路径的一个入口，其余值走的是同一条路；
- * - 导出侧 `validateAuditExportEnums` 的 P3-13 注释：level 此前缺失校验，
+ * - 导出侧 `validateAuditExportEnums` 的注释：level 此前缺失校验，
  *   "非法值不命中派生分支被静默忽略，用户选『仅错误』却导出全量"——
  *   同一个"写错的筛选参数必须响"的裁定，level 修了、success 没修。
  *
  * 本文件的 riskLevel 清单原是本地字面量，与 constants/audit.js 的
  * AUDIT_RISK_LEVELS（导出侧引用的那份）同值但各写一份。两侧枚举清单
- * 不同源＝E-05 那类"两份实现漂移"的复发条件，这里用循环把它钉成契约。
+ * 不同源＝那类"两份实现漂移"的复发条件，这里用循环把它钉成契约。
  */
 
 const { buildAuditQuery, buildLevelCondition } = require('../utils/auditQuery');

@@ -1,12 +1,12 @@
 /**
- * 审计缓冲的 WAL 文件层（自 services/auditBuffer.js 拆出，O-3 体积棘轮 / P1-24）
+ * 审计缓冲的 WAL 文件层（自 services/auditBuffer.js 拆出，O-3 体积棘轮）
  *
  * 职责边界：本模块负责 WAL 文件的一切——路径派生、按行追加、前缀裁剪、大小上限、
  * 毒批序号与归档，以及把上述操作串行化的 walChain；内存缓冲、批量落库（flush）
- * 与进程生命周期仍在 services/auditBuffer.js。拆出原因：auditBuffer.js 在 P1-24
+ * 与进程生命周期仍在 services/auditBuffer.js。拆出原因：auditBuffer.js 在
  * 修复后超过 eslint max-lines 上限（300 行，已计 skipBlankLines/skipComments），
  * 而 eslint.ratchet.json 对其无基线（只许 0 条 warn），故按职责拆分而非放宽基线。
- * 对外行为不变：auditBuffer 的公开 API 与拆分前一致。
+ * 对外行为不变：auditBuffer 的公开 API 保持固定。
  *
  * 【WAL 兜底（G4 不丢失）】push 时同步追加一行到本地 WAL 文件，flush 落库成功后
  * 按**本批文档的 `__walSeq` 精确移除**对应的行（读文件→挑出序号命中的行→临时文件
@@ -29,7 +29,7 @@ const cap = require('./auditWalCap');
 
 // WAL 文件路径（可配），存放尚未确认落库的审计文档（每行一条 JSON）。
 //
-// 路径解析时机（T-1/auditBufferGap 抖动修复）：历史上是模块加载期 const——
+// 路径解析时机（auditBufferGap 抖动修复）：历史上是模块加载期 const——
 // Jest 并行 worker 里先 require 本模块的测试文件会锁死路径，后设
 // AUDIT_WAL_PATH 的套件被静默忽略，指向已清理目录或共享默认文件，
 // 造成跨套件 WAL 串写与断言抖动。现改为 start() 时重读 env（与
@@ -115,7 +115,7 @@ let walChain = Promise.resolve();
 // 没有这个计数时，面板上的 `walEnabled: true` 在磁盘写不进（满/权限/只读挂载）时
 // 是一句谎话——追加失败的证据只剩一行 warn 日志，而运维看的是合规面板。
 let walAppendFailures = 0;
-// ================= 毒文档批的 WAL 标记（P1-24） =================
+// ================= 毒文档批的 WAL 标记 =================
 // 背景：batch 连续失败达阈值被丢弃后，内存中已无该批文档，但其 WAL 行仍在。
 // 重启时 start() 会把这些行重新读回缓冲，再次走满 5 次失败——每重启一次
 // 重复处理一次毒批，且 WAL 里那几行永远消费不掉（行数恒多于待裁剪数）。
@@ -133,7 +133,7 @@ let walAppendFailures = 0;
 const WAL_RUN_ID =
   process.pid.toString(36) + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 let walSeqCounter = 0;
-// 累计因毒批丢弃被归档移出主 WAL 的行数（P1-24，可观测）
+// 累计因毒批丢弃被归档移出主 WAL 的行数（可观测）
 let walDiscardedLines = 0;
 // 累计"重放时解析不出文档"的行数。这类行既不重放、也没有 __walSeq 可裁，
 // 会每次重启被重新读一遍且永不清零——合规口径下"有多少取证永远进不了库"必须可见。
@@ -166,7 +166,7 @@ function getWalPath() {
 }
 
 /**
- * 读取 WAL 并切分为记录行数组（P1-24 抽出：enforceWalLimit / removeWalLinesBySeqs /
+ * 读取 WAL 并切分为记录行数组（抽出：enforceWalLimit / removeWalLinesBySeqs /
  * readWalLines 等处共用，此前各自重复一遍「split + 尾换行判定」）。
  * 与 readWalLines 的差别：尾部无换行的残缺行**保留**为最后一条记录，
  * 按行重写时才不会把它丢掉。
@@ -209,7 +209,7 @@ async function readWalRecords() {
   }
 }
 
-/** 临时文件 + 原子替换回主 WAL（P1-24 抽出，三处改写共用） */
+/** 临时文件 + 原子替换回主 WAL（抽出，三处改写共用） */
 async function atomicReplaceWal(nextContent) {
   const tmpPath = walPath + '.tmp';
   await fs.promises.writeFile(tmpPath, nextContent, 'utf8');
@@ -270,7 +270,7 @@ function walAppendLine(line) {
  * 按序号匹配从结构上消灭"错位"这个概念：只可能删到自己确认落库的那些行。
  *
  * 必须在本模块 walChain 的临界区内调用（不得自行再串 walChain，否则死锁）。
- * archive=true 时**先归档后改写**（P1-24 取证顺序）：若在两步间崩溃，归档已含证据、
+ * archive=true 时**先归档后改写**（取证顺序）：若在两步间崩溃，归档已含证据、
  * 主文件仍含这些行——重启重放按归档序号跳过，不会重复处理。
  * @param {Set<string>} seqSet 待移除行的 __walSeq 集合
  * @param {boolean} archive 是否把被移除的行追加到 <walPath>.discarded 取证归档
@@ -313,7 +313,7 @@ async function removeWalLinesBySeqs(seqSet, archive) {
   return removed.length;
 }
 
-/** 毒批丢弃入口（P1-24）：串行化在 walChain 上，失败仅告警不阻断 flush 收尾 */
+/** 毒批丢弃入口：串行化在 walChain 上，失败仅告警不阻断 flush 收尾 */
 function walDiscardBySeqs(seqs) {
   const seqSet = seqs instanceof Set ? seqs : new Set(seqs);
   walChain = walChain
@@ -364,7 +364,7 @@ async function readWalLines() {
 }
 
 /**
- * 读取毒批归档文件的全部 WAL 序号（P1-24）。文件不存在视为无归档。
+ * 读取毒批归档文件的全部 WAL 序号。文件不存在视为无归档。
  * 用途有二：① 重启重放前过滤主 WAL 中「已判定丢弃但改写未完成」的行
  * （崩溃窗口）；② 运维核对被丢弃取证的规模。
  */
@@ -395,7 +395,7 @@ async function rewriteInChain(lines) {
  * 给重放读到的、缺 `__walSeq` 的行补序号（F-97 的配套半条）。
  *
  * 为什么必须补：裁剪改成"按序号精确匹配"之后，**认不出序号的行永远不会被裁掉**。
- * 存量里没有序号的行有两类——P1-24 之前写的旧行、以及被外部工具/测试手工写入的行。
+ * 存量里没有序号的行有两类——之前写的旧行、以及被外部工具/测试手工写入的行。
  * 不补的后果不是"文件里多几行"：这些行每次重启都会被重放进缓冲，而重放文档的 `_id`
  * 是 flush 时才分配的（每次不同）⇒ **每重启一次就重复插入一份审计记录**，
  * 而且哈希链跟着一起分叉。旧实现靠"按条数裁前 N 行"顺手把它们带走了，
@@ -499,7 +499,7 @@ function isEnabled() {
 }
 
 /**
- * 给文档分配 WAL 序号（P1-24）；未启用或已有序号时不动。
+ * 给文档分配 WAL 序号；未启用或已有序号时不动。
  * 序号随 WAL 行一起落盘，毒批丢弃时按它精确匹配并移除对应行。
  */
 function assignSeq(doc) {
@@ -508,7 +508,7 @@ function assignSeq(doc) {
   doc.__walSeq = WAL_RUN_ID + '-' + walSeqCounter;
 }
 
-/** 追加一行到 WAL；未启用时跳过（等价于拆分前调用点的 `if (walEnabled)` 门控） */
+/** 追加一行到 WAL；未启用时跳过（与内存缓冲共用同一个 `walEnabled` 门控） */
 function appendLine(line) {
   if (walEnabled) walAppendLine(line);
 }

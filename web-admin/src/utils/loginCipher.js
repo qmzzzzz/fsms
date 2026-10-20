@@ -12,7 +12,8 @@
  * （ECDH 共享密钥只有双方可算），也无法重放原密文（nonce 已消费，GCM 认证防篡改）。
  *
  * 依赖 WebCrypto（crypto.subtle）——仅在 secure context（HTTPS / localhost）可用。
- * 不可用时返回 null，调用方降级明文轨（后端双轨兼容）。
+ * 不可用时：开发模式返回 null，调用方走明文轨；生产/测试构建直接抛错
+ * （code=INSECURE_CONTEXT），调用方阻断提交，不存在明文上行（S-7）。
  */
 import axios from 'axios'
 import { reportDegradation } from '@/utils/errorReporter'
@@ -89,14 +90,16 @@ async function ensurePublicKey(force = false) {
   // 指纹最短 16 位hex（64bit）：再短可被离线穷举碰撞，失去钉扎意义。
   const pin = (import.meta.env.VITE_LOGIN_PUBLIC_KEY_SHA256 || '').trim().toLowerCase()
   if (pin) {
-    if (!/^[0-9a-f]{16,64}$/.test(pin)) {
+    // 只接受完整 64 位指纹：截断前缀会降低离线穷举成本，且让「构建期钉扎是否生效」
+    // 多出一个人为可调弱的旋钮——钉扎要么是完整摘要，要么没有。
+    if (!/^[0-9a-f]{64}$/.test(pin)) {
       throw new Error(
-        'VITE_LOGIN_PUBLIC_KEY_SHA256 格式无效：应为 16-64 位十六进制指纹（服务端启动日志的 publicKeySha256）'
+        'VITE_LOGIN_PUBLIC_KEY_SHA256 格式无效：应为完整 64 位十六进制指纹（服务端启动日志的 publicKeySha256）'
       )
     }
     const digest = await crypto.subtle.digest('SHA-256', pemToBytes(pem))
     const fingerprint = toHex(new Uint8Array(digest))
-    if (!fingerprint.startsWith(pin)) {
+    if (fingerprint !== pin) {
       const err = new Error(
         'login public key fingerprint mismatch：取到的公钥与构建期固定值不符（可能遭中间人替换，或服务端已轮换密钥但前端包未随之重建）'
       )
@@ -128,12 +131,13 @@ export const invalidatePublicKeyCache = () => {
  *   作为 AES-GCM 的 additionalData 参与认证——信封只能用于对应端点。
  *   未知键抛错（fail-closed，不退回无 AAD 加密）。
  *
- * 失败语义（FE-H1）：
- * - 返回 null：仅限 WebCrypto 不可用（非 secure context，如纯 HTTP 内网）——
- *   调用方走明文轨（后端双轨兼容），属设计内降级；
- * - 抛错：WebCrypto 可用但加密本应成功而失败（公钥网络故障/算法异常/
- *   用途键非法）——**调用方不得降级明文**，应阻断提交并提示重试
- *   （用户重试成本为零），并经 console.warn 留痕便于监控密文率。
+ * 失败语义（FE-H1，S-7）：
+ * - 返回 null：仅限**开发模式**（`vite dev`）且 WebCrypto 不可用（非 secure context）——
+ *   调用方走明文轨，方便本地纯 HTTP 联调；生产/预览/测试构建一律不提供明文回退；
+ * - 抛错：
+ *   - WebCrypto 不可用且非开发模式 → code=INSECURE_CONTEXT，调用方提示启用 HTTPS；
+ *   - WebCrypto 可用但加密本应成功而失败（公钥网络故障/算法异常/用途键非法）
+ *     → **调用方不得降级明文**，应阻断提交并提示重试（用户重试成本为零）。
  */
 export async function encryptPassword(password, purpose) {
   const aad = CREDENTIAL_PURPOSE[purpose]
@@ -141,9 +145,15 @@ export async function encryptPassword(password, purpose) {
     throw new Error('encryptPassword: 未知用途键 ' + purpose + '（CREDENTIAL_PURPOSE 未定义）')
   }
   if (!isTransportCryptoAvailable()) {
-    // P1-18：非 secure context（纯 HTTP 内网）下全部口令走明文轨。降级是设计内的，
-    // 但此前无任何可观测信号——注释所称「便于监控密文率」无法实现。此处上报一次，
-    // 使明文轨占比在留档/收集端可见（同一描述 5s 内折叠，不会因多表单提交刷爆缓冲）。
+    // 生产构建没有 WebCrypto 只可能是部署在非 HTTPS 源上。此时回退明文会把口令
+    // 暴露在同一信道上，与「口令密文轨」的声明相冲突——宁可拒绝登录，也不静默降级。
+    if (import.meta.env.MODE !== 'development') {
+      const err = new Error('非安全上下文（HTTPS）下 WebCrypto 不可用，已拒绝以明文提交口令')
+      err.code = 'INSECURE_CONTEXT'
+      throw err
+    }
+    // P1-18：开发模式下仍保留降级，但必须留可观测信号——此前无任何上报，
+    // 注释所称「便于监控密文率」无法实现。同一描述 5s 内折叠，不会刷爆缓冲。
     reportDegradation('loginCipher: WebCrypto 不可用，口令降级为明文轨上行', {
       reason: 'insecure-context-or-unsupported-browser',
     })

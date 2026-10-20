@@ -9,6 +9,7 @@
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { waitFor, flushEventLoop } = require('../helpers/waitFor');
 
 describe('WebSocket 全流程（批次 D2）', () => {
   let User;
@@ -109,16 +110,7 @@ describe('WebSocket 全流程（批次 D2）', () => {
     return socket;
   };
 
-  const tick = () => new Promise((r) => setTimeout(r, 80));
-
-  // 确定性等待：认证异步链受 DB 延迟影响，固定 sleep 偶发抖动
-  const waitFor = async (cond, timeoutMs = 3000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (!cond() && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    return cond();
-  };
+  // 认证异步链受 DB 延迟影响：统一轮询真实完成条件（waitFor 超时会带 label 报错）
 
   test('握手认证成功 → 注册连接与用户映射', async () => {
     const { svc, state, socketRegistry } = makeService();
@@ -254,7 +246,7 @@ describe('WebSocket 全流程（批次 D2）', () => {
     };
     socketRegistry.set(unauth.id, unauth);
     state.connectionCb(unauth);
-    await tick();
+    await flushEventLoop();
     await unauthListeners['join-room']('alarm');
     expect(unauth.emitted.some((e) => /请先完成认证/.test(e.data?.message || ''))).toBe(true);
   });
@@ -312,6 +304,10 @@ describe('WebSocket 全流程（批次 D2）', () => {
     const permCalls = { n: 0 };
     jest.doMock('../../models/User', () => ({
       getPermissions: async () => {
+        permCalls.n += 1;
+        throw new Error('db down');
+      },
+      getPermissionsForUsers: async () => {
         permCalls.n += 1;
         throw new Error('db down');
       },

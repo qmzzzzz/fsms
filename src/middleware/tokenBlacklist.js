@@ -14,16 +14,21 @@ const hashToken = (token) => crypto.createHash('sha256').update(token).digest('h
 /**
  * 将令牌加入黑名单（持久化到 MongoDB，存储哈希而非明文）
  *
- * fail-closed（P2-26）：写入失败必须向上抛错。原实现只记日志便返回，
+ * fail-closed：写入失败必须向上抛错。原实现只记日志便返回，
  * 于是「登出成功」与「令牌已吊销」脱钩——DB 瞬断期间被窃取的 access token
  * 在其剩余有效期（默认 2h）内持续可用，而用户已看到登出成功、不会再采取补救。
  * 同文件的 consumeToken 对同类失败刻意 fail-closed，两者契约必须一致。
  *
+ * reason 用于区分吊销来源（`logout` / `rotate`）：refresh 重放检测只对
+ * `rotate` 做全量会话吊销，登出后的旧串重放仅拒绝本次请求（S-6）。
+ * `$setOnInsert` 保证已存在的 `rotate` 记录不会被一次「登出」改写成 `logout`。
+ *
  * @param {string} token - JWT Token
  * @param {number} exp - 令牌过期时间（秒级时间戳）
+ * @param {'logout'|'rotate'} [reason='logout'] - 吊销原因
  * @throws {Error} code=BLACKLIST_PERSIST_FAILED 写入未确认
  */
-const blacklistToken = async (token, exp) => {
+const blacklistToken = async (token, exp, reason = 'logout') => {
   const expiryMs = exp * 1000;
   // 已过期的令牌无需入库：它本身已不可用，写入只会徒增集合体积
   if (expiryMs <= Date.now()) return;
@@ -32,7 +37,14 @@ const blacklistToken = async (token, exp) => {
     const tokenHash = hashToken(token);
     await TokenBlacklistModel.findOneAndUpdate(
       { tokenHash },
-      { tokenHash, expiresAt: new Date(expiryMs), createdAt: new Date() },
+      {
+        $setOnInsert: {
+          tokenHash,
+          expiresAt: new Date(expiryMs),
+          createdAt: new Date(),
+          reason,
+        },
+      },
       { upsert: true, new: true }
     );
     logger.info(`Token 已加入黑名单`, { tokenHash: tokenHash.slice(0, 16) + '...' });
@@ -82,15 +94,20 @@ const isTokenBlacklisted = async (token) => {
 
 /**
  * 原子消费一次性令牌（refresh 轮换专用）：
- * 以 tokenHash 唯一索引为锁，插入成功即获得所有权（返回 true）；
- * 命中 tokenHash 唯一键冲突说明令牌已被先前/并发请求消费（返回 false，
- * 调用方走重放检测）。
+ * 以 tokenHash 唯一索引为锁，插入成功即获得所有权（返回 { claimed: true }）；
+ * 命中 tokenHash 唯一键冲突说明令牌已被先前/并发请求消费，回查既有记录的
+ * reason 一并返回（{ claimed: false, reason }），调用方据此区分处置：
+ *   - `rotate`：轮换后的真实重放，吊销该用户全部会话（fail-closed）
+ *   - `logout`：登出后的旧串重放，令牌本就已作废，仅拒绝本次请求即可
+ *   - 缺失/未知（历史数据）：按真实重放处理，宁可多吊销也不放过
+ * 若不回查 reason，任何拿到「已登出但未过期」refresh token 的人都能靠一次
+ * 重放把该用户所有设备踢下线，形成低成本 DoS（S-6）。
  *
  * 将「查黑名单 → 再加黑名单」两步合并为一步原子抢占，消除轮换 TOCTOU：
  * 并发的两次 /refresh 只有一次能换取新令牌对，另一次必然进入重放处理。
  *
- * fail-closed：持久化失败时向上抛错，调用方拒绝轮换——宁可让用户重新登录，
- * 也不允许旧 refresh token 在黑名单未落库的情况下继续可用。
+ * fail-closed：持久化或重放查证失败时向上抛错，调用方拒绝轮换——宁可让用户
+ * 重新登录，也不允许旧 refresh token 在黑名单未落库的情况下继续可用。
  *
  * 重要：E11000 必须按 keyPattern 区分来源，不能一律当作重放。
  * 历史遗留的 `token_1` 唯一索引（旧 schema 存明文 token）会让所有新文档
@@ -100,7 +117,8 @@ const isTokenBlacklisted = async (token) => {
  *
  * @param {string} token - JWT refresh token
  * @param {number} exp - 令牌过期时间（秒级时间戳）
- * @returns {boolean} true=本次消费成功；false=令牌已被消费过（真实重放）
+ * @returns {Promise<{claimed: true}|{claimed: false, reason: string|null}>}
+ *   claimed=true 本次消费成功；claimed=false 令牌已被消费过，reason 为首次入库原因
  */
 const consumeToken = async (token, exp) => {
   const tokenHash = hashToken(token);
@@ -115,13 +133,22 @@ const consumeToken = async (token, exp) => {
     logger.info(`Refresh token 已原子消费并加入黑名单`, {
       tokenHash: tokenHash.slice(0, 16) + '...',
     });
-    return true;
+    return { claimed: true };
   } catch (err) {
     if (err.code === 11000) {
       const conflictedKey = Object.keys(err.keyPattern || {})[0];
       if (conflictedKey === 'tokenHash') {
-        // 真实重放：同一 refresh token 被二次使用
-        return false;
+        // 令牌已被消费过：回查首次入库原因，供调用方决定处置强度。
+        // 查证失败必须上抛（fail-closed），不能默认按 logout 轻放。
+        try {
+          const existing = await TokenBlacklistModel.findOne({ tokenHash }).select('reason').lean();
+          return { claimed: false, reason: existing?.reason || null };
+        } catch (lookupErr) {
+          logger.error(`Refresh token 重放查证失败：${lookupErr.message}`);
+          const serviceErr = new Error('Token blacklist lookup failed');
+          serviceErr.code = 'BLACKLIST_SERVICE_UNAVAILABLE';
+          throw serviceErr;
+        }
       }
       // 非 tokenHash 冲突（如遗留 token_1 索引的 null 键）：基础设施异常，
       // 不能当作重放——否则会误吊销合法用户的全部会话
@@ -154,7 +181,7 @@ const consumeToken = async (token, exp) => {
  */
 const invalidateUserTokens = async (userId) => {
   try {
-    // E-04：**必须**保持惰性 require。middleware/auth ↔ tokenBlacklist
+    // **必须**保持惰性 require。middleware/auth ↔ tokenBlacklist
     // 互为依赖，顶层引入会在加载顺序不利时拿到空模块。
     const User = require('../models/User');
     await User.findByIdAndUpdate(userId, {
@@ -166,7 +193,7 @@ const invalidateUserTokens = async (userId) => {
     throw err;
   }
   // 缓存清除失败不影响吊销结果（最长 60s 自然过期），不纳入上方事务性失败
-  // E-04：**必须**保持惰性 require（auth ↔ tokenBlacklist 循环依赖），
+  // **必须**保持惰性 require（auth ↔ tokenBlacklist 循环依赖），
   // 提到文件顶部会让本模块在 auth 尚未完成导出时被加载。
   const { invalidateUserCache } = require('./auth');
   invalidateUserCache(userId);

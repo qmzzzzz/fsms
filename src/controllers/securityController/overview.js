@@ -22,7 +22,7 @@ const { SECURITY_SUGGESTION_CODES } = require('../../constants/securitySuggestio
  * GET /api/security/stats
  */
 const getSecurityStats = asyncHandler(async (req, res) => {
-  // 「今日」起点统一取业务时区零点（P3-18 单一声明 businessDayBounds）：
+  // 「今日」起点统一取业务时区零点（单一声明 businessDayBounds）：
   // 原 setHours(0,0,0,0) 依赖服务器本地时区（容器 TZ=Asia/Shanghai 时碰巧正确，
   // 但裸跑/改 TZ 即漂移），与 auditMonitor 告警频控、仪表盘/报表的「今日」
   // 存在分叉隐患。businessDayBounds().start 与全站「今日」口径同源。
@@ -119,7 +119,7 @@ const clampOverviewNumbers = (overview) => {
   // 添加额外的安全指标
   overview.unusualAccess =
     typeof overview.unusualAccess === 'number' ? Math.max(0, overview.unusualAccess) : 0;
-  // L-03/P3-6：riskScore 以 securityAlert.getSecurityOverview 的计算为准
+  // L-03/riskScore 以 securityAlert.getSecurityOverview 的计算为准
   // （unusualAccess 系数 5）。此前控制器用系数 3 整个重算覆盖，两处口径
   // 漂移后改哪处都会被另一处静默抵消。此处仅做边界钳位，不再重算。
   overview.riskScore = Math.min(
@@ -154,10 +154,11 @@ const buildComplianceSection = async () => {
     const { getLatestHash } = require('../../utils/auditChain');
     const auditMonitor = require('../../services/auditMonitor');
     const auditBuffer = require('../../services/auditBuffer');
-    const AuditLogModel = require('../../models/AuditLog');
+    // 同一文件的模型入口已由 shared 提供；此处复用，不再二次 require（A-4）
+    const AuditLogModel = AuditLog;
     const chainTailHash = await getLatestHash(AuditLogModel);
     return {
-      // P3-46：对外展示的必须是**实际生效值**而非原始配置值。
+      // 对外展示的必须是**实际生效值**而非原始配置值。
       // 原实现 `parseInt(...) || 180` 会把 AUDIT_RETENTION_DAYS=1 如实报成 1，
       // 而数据库 TTL 实为 90 天——合规仪表盘与真实留存不一致，两种方向都危险：
       // 报低了让人误以为不合规去调参，报高了则是对外虚假声明
@@ -242,6 +243,13 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
   try {
     const securityAlert = require('../../services/securityAlert');
     const overview = await securityAlert.getSecurityOverview(7);
+    // A-2：服务层查询失败时返回 degraded，而不是补齐全 0 字段。必须先于形状校验：
+    // 让「数据不可用」显式表现为 503，而不是一张写着 0 风险的面板。
+    if (overview && overview.degraded === true) {
+      return ApiResponse.codeError(res, 'SECURITY_OVERVIEW_DEGRADED', {
+        params: { degraded: true },
+      });
+    }
     if (rejectMalformedOverview(overview, res)) {
       return;
     }
@@ -251,7 +259,7 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
     overview.version = '1.0.0';
     // 添加安全建议
     overview.suggestions = buildOverviewSuggestions(overview);
-    // P3-6：原 summary.successRate = (四类事件总数 - 失败登录数) / 总数，
+    // 原 summary.successRate = (四类事件总数 - 失败登录数) / 总数，
     // 分母混入了告警数——criticalAlerts=100、failedLogins=10 时显示 90.9%，
     // 这个"成功率"没有任何可解释的业务含义（概览里根本没有成功登录计数），
     // 且全仓无任何消费者。直接移除，而非补查询去圆一个伪指标。
@@ -285,7 +293,7 @@ const getRecentAlerts = asyncHandler(async (req, res) => {
     // 据实计算 hasMore 后再截断到页大小，保证返回体与元数据一致
     const hasMore = alertsRaw.length > ALERTS_PAGE_SIZE;
     const alerts = alertsRaw.slice(0, ALERTS_PAGE_SIZE);
-    // M-03 修复：仅校验结构性必需字段（_id/timestamp/action）。
+    // 修复：仅校验结构性必需字段（_id/timestamp/action）。
     // 原 15 字段全量非空强校验会把缺少任一可选字段（userAgent/statusCode/duration 等）
     // 的合法告警静默丢弃，造成安全告警漏报（监控盲区）。
     const validAlerts = alerts

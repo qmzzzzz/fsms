@@ -1,8 +1,8 @@
 /**
- * 依赖图无环断言（E-04）
+ * 依赖图无环断言
  *
  * 背景：仓内有 3 处**故意**使用「函数内 require」以打破循环依赖的地方，
- * 报告 E-04 记录了这一事实，并给出两条整改路径：补注释，或加架构测试断言
+ * 报告记录了这一事实，并给出两条整改路径：补注释，或加架构测试断言
  * 依赖图无环。本文件选择后者——注释只能提醒读代码的人，无法阻止
  * 「把 require 提到文件顶部」这种看起来无害的重构（那会引入加载顺序 bug：
  * 拿到的 module.exports 尚不完整，症状是 undefined 而非报错，极难定位）。
@@ -105,7 +105,7 @@ const surveyRequires = (modules) => {
   return { total, unresolved };
 };
 
-describe('依赖图无环断言（E-04）', () => {
+describe('依赖图无环断言', () => {
   const files = collectSourceFiles(SRC_DIR);
   const known = new Set(files.map((f) => path.normalize(f)));
   const modules = files.map((f) => ({ file: f, source: fs.readFileSync(f, 'utf8') }));

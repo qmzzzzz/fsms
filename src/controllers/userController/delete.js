@@ -66,9 +66,8 @@ const deleteUser = asyncHandler(async (req, res) => {
   // 失效缓存
 
   invalidateUserCache(userId);
-  // 统计缓存：目标用户与操作者（统计视角）均需失效
-  statsCache.invalidateByUserId(userId);
-  statsCache.invalidateByUserId(req.user.userId);
+  // 统计缓存：删除改变所有查看者的聚合口径，必须全量失效（A-1）
+  statsCache.invalidateAll('user-delete');
 
   logger.info('用户已删除', { username: user.username });
 
@@ -169,9 +168,8 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
   // 批量失效缓存
 
   requestedIds.forEach(invalidateUserCache);
-  requestedIds.forEach((id) => statsCache.invalidateByUserId(id));
-  // 统计缓存：操作者（统计视角）也需要同步失效
-  statsCache.invalidateByUserId(req.user.userId);
+  // 统计缓存：批量删除同样影响所有查看者，一次全量失效即可（A-1）
+  statsCache.invalidateAll('user-bulk-delete');
 
   logger.info(`批量删除用户：${result.deletedCount} 个`);
 

@@ -400,7 +400,7 @@ const ipQueryCondition = (ip) => {
 /**
  * IP 是否属内网/回环 —— metrics 来源判定与出站目标门禁共用的同一把尺。
  *
- * 自 metricsAuth.js 迁入（2026-09-30，P2-9）：它原是 metricsAuth 的私有判据，
+ * 自 metricsAuth.js 迁入：它原是 metricsAuth 的私有判据，
  * logShipper 的出站目标门禁需要同一把尺，而 middleware → utils 反向 require 会
  * 破坏分层，故按「判据归 utils、消费方各取」收口；metricsAuth 保留同名再导出。
  * 语义与迁入前逐字一致：parseIP（严格形态）解析不出/形态有歧义 ⇒ false——

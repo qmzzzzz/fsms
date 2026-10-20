@@ -62,7 +62,7 @@ describe('验证码服务分支（captchaService.js）', () => {
   });
 
   test('startCaptchaCleanup 幂等：二次调用不重复注册，stop 后可重新注册', () => {
-    // P1-29 修复（本次改动复审）：原用例只有连续 start/stop 调用，零断言——
+    // 修复（本次改动复审）：原用例只有连续 start/stop 调用，零断言——
     // 测试名承诺的「二次调用直接返回」从未被验证（把 :56 的 if (cleanupTimer) return
     // 整行删掉，用例照样绿）。现用 setInterval spy 观察真实注册次数。
     const siSpy = jest.spyOn(global, 'setInterval');

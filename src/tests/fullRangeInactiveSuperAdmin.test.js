@@ -1,7 +1,7 @@
 /**
  * 全网段名单守卫只认「生效的内置超管」（回归 F-118）
  *
- * guardFullRangeCIDR（添加侧）与 removeIPEntry 的 P2-13 对称约束（删除侧）
+ * guardFullRangeCIDR（添加侧）与 removeIPEntry 的对称约束（删除侧）
  * 共用 operatorIsSuperAdmin()。该查询此前写作
  *   .populate('roles', 'code isBuiltIn')
  * 字符串形式的 populate **无法携带 match**，因此被停用（inactive）的
@@ -134,7 +134,7 @@ describe('全网段名单守卫：停用超管不再等于超管', () => {
     expect(await IPBlacklist.countDocuments({ ip: FULL_RANGE })).toBe(0);
   });
 
-  test('删除侧：全网段条目存在时，停用超管不得将其移除（P2-13 对称约束）', async () => {
+  test('删除侧：全网段条目存在时，停用超管不得将其移除（对称约束）', async () => {
     await setSuperStatus('active');
     expect((await addFullRange()).status).toBe(200);
     const entry = await IPBlacklist.findOne({ ip: FULL_RANGE, type: 'white' });

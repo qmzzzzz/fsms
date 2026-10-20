@@ -77,10 +77,11 @@ describe('P1-18：降级路径上报', () => {
     }
   })
 
-  test('loginCipher：WebCrypto 不可用时上报降级且返回 null（端到端）', async () => {
+  test('loginCipher：开发模式 + WebCrypto 不可用时上报降级且返回 null（端到端）', async () => {
     // 本 vitest 环境已提供 crypto.subtle，需临时改写以复现「非 secure context」
     const savedCrypto = globalThis.crypto
     Object.defineProperty(globalThis, 'crypto', { value: {}, configurable: true })
+    vi.stubEnv('MODE', 'development')
     try {
       const { encryptPassword, isTransportCryptoAvailable } = await import('@/utils/loginCipher')
       expect(isTransportCryptoAvailable()).toBe(false)
@@ -93,13 +94,32 @@ describe('P1-18：降级路径上报', () => {
       expect(entry.message).toContain('WebCrypto 不可用')
       expect(entry.reason).toBe('insecure-context-or-unsupported-browser')
     } finally {
+      vi.unstubAllEnvs()
       Object.defineProperty(globalThis, 'crypto', { value: savedCrypto, configurable: true })
     }
   })
-  test('loginCipher 的降级语义未变：仍返回 null（调用方走明文轨）', () => {
+  test('S-7：生产构建 + WebCrypto 不可用 → 抛 INSECURE_CONTEXT，绝不返回 null', async () => {
+    const savedCrypto = globalThis.crypto
+    Object.defineProperty(globalThis, 'crypto', { value: {}, configurable: true })
+    vi.stubEnv('MODE', 'production')
+    try {
+      const { encryptPassword } = await import('@/utils/loginCipher')
+      clearLoggedErrors()
+      await expect(encryptPassword('Aa1!probe-degrade', 'LOGIN')).rejects.toMatchObject({
+        code: 'INSECURE_CONTEXT',
+      })
+      // 拒绝路径不是「降级」：不应再上报明文轨降级信号（否则监控会误判为已放行）
+      expect(getLoggedErrors().find((e) => e.kind === 'degrade')).toBeUndefined()
+    } finally {
+      vi.unstubAllEnvs()
+      Object.defineProperty(globalThis, 'crypto', { value: savedCrypto, configurable: true })
+    }
+  })
+  test('loginCipher 的语义分层：开发模式 return null，其余模式抛 INSECURE_CONTEXT', () => {
     const src = readSrc('utils/loginCipher.js')
-    // 上报后必须仍 return null，否则调用方会把它当「加密成功」
     const block = src.slice(src.indexOf('isTransportCryptoAvailable()'))
+    expect(block).toContain("import.meta.env.MODE !== 'development'")
+    expect(block).toContain('INSECURE_CONTEXT')
     expect(block).toContain('reportDegradation(')
     expect(block).toContain('return null')
   })

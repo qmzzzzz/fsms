@@ -101,7 +101,7 @@ describe('canaryWatch 幽灵名检测', () => {
     );
     expect(row.reason).toBe('canary_username_probe');
     expect(row.body.canary).toBe('root');
-    expect(row.ip).toBe('10.9.8.7'); // ::ffff: 已归一化（E-04 口径）
+    expect(row.ip).toBe('10.9.8.7'); // ::ffff: 已归一化（口径）
     expect(row.userAgent).toBe('probe-agent');
     expect(row.fingerprint).toBe('fp-canary');
     expect(row.method).toBe('POST');

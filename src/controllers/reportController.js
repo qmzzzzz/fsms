@@ -54,7 +54,6 @@ const rejectInvalidReportDates = (res, startDate, endDate) => {
   }
   return false;
 };
-const FireAlarm = require('../models/FireAlarm');
 const {
   scopeFilterFor,
   buildExportQuery,
@@ -71,11 +70,6 @@ const { clientIpForSecurityDecision } = require('../utils/ipUtils');
 const { streamExportRows, writeExportWorkbook } = require('../services/reportWorkbookService');
 const dashboardService = require('../services/reportDashboardService');
 const reportStatsService = require('../services/reportStatsService');
-
-// ── 常量 ─────────────────────────────────────────────────────────────────────
-const MS_PER_MINUTE = 1000 * 60; // 毫秒 → 分钟
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const TREND_WINDOW_MS = 30 * MS_PER_DAY; // 趋势统计窗口（30 天）
 
 /**
  * 获取综合仪表盘统计
@@ -114,76 +108,13 @@ const getAlarmReport = asyncHandler(async (req, res) => {
   const dateFilter = buildDateRangeFilter(startDate, endDate, tz);
 
   const matchStage = Object.keys(dateFilter).length > 0 ? { occurredAt: dateFilter } : {};
-  const thirtyDaysAgo = new Date(Date.now() - TREND_WINDOW_MS);
 
   // 数据范围过滤（与 dashboard/export 口径一致，防止报表统计越权）
   const dataScope = await getDataScope(req.user.userId);
   const scopeFilter = scopeFilterFor('alarm', dataScope);
 
-  // 使用 $facet 将 6 次聚合合并为 1 次查询；顶层 $match 先应用数据范围，各分支再叠加自身过滤
-  const [facetResult] = await FireAlarm.aggregate([
-    { $match: scopeFilter },
-    {
-      $facet: {
-        // 按类型统计
-        byType: [{ $match: matchStage }, { $group: { _id: '$alarmType', count: { $sum: 1 } } }],
-        // 按状态统计
-        byStatus: [{ $match: matchStage }, { $group: { _id: '$status', count: { $sum: 1 } } }],
-        // 按级别统计
-        byLevel: [{ $match: matchStage }, { $group: { _id: '$level', count: { $sum: 1 } } }],
-        // 按原因统计（与其他分支一致叠加日期过滤，避免选了日期后口径不一致）
-        byCause: [
-          { $match: { ...matchStage, cause: { $ne: null } } },
-          { $group: { _id: '$cause', count: { $sum: 1 } } },
-        ],
-        // 按天统计（近30天）：时区取业务时区单一声明，与仪表盘「今日」同口径（P3-18）
-        byDay: [
-          { $match: { occurredAt: { $gte: thirtyDaysAgo } } },
-          {
-            $group: {
-              _id: {
-                $dateToString: {
-                  format: '%Y-%m-%d',
-                  date: '$occurredAt',
-                  timezone: BUSINESS_TIMEZONE,
-                },
-              },
-              count: { $sum: 1 },
-            },
-          },
-          { $sort: { _id: 1 } },
-        ],
-        // 平均响应时间（分钟）（叠加日期过滤；receivedAt 同样加 $ne:null 守卫，
-        // 防止缺失字段的文档参与 $subtract 得到 NaN/报错拉低均值）
-        avgResponseTime: [
-          { $match: { ...matchStage, dispatchedAt: { $ne: null }, receivedAt: { $ne: null } } },
-          {
-            $group: {
-              _id: null,
-              avgMinutes: {
-                $avg: { $divide: [{ $subtract: ['$dispatchedAt', '$receivedAt'] }, MS_PER_MINUTE] },
-              },
-            },
-          },
-        ],
-      },
-    },
-  ]);
-
-  const { byType, byStatus, byLevel, byCause, byDay, avgResponseTime } = facetResult;
-
-  return ApiResponse.success(
-    res,
-    {
-      byType,
-      byStatus,
-      byLevel,
-      byCause,
-      byDay,
-      avgResponseTime: Math.round(avgResponseTime[0]?.avgMinutes || 0),
-    },
-    '获取报警报表成功'
-  );
+  const data = await reportStatsService.getAlarmReportData({ scopeFilter, matchStage });
+  return ApiResponse.success(res, data, '获取报警报表成功');
 });
 
 /**
@@ -249,7 +180,7 @@ const auditFullPiiExportIfAny = async (req, type, total, maskPii) => {
  * services/reportExportService.js，此处只保留参数校验、权限闸与编排。
  */
 const exportReport = asyncHandler(async (req, res) => {
-  // P3-13：audit 分支补 ip/userId 筛选参数（与 /security/audit-logs 查询接口同参），
+  // audit 分支补 ip/userId 筛选参数（与 /security/audit-logs 查询接口同参），
   // 此前导出接口不支持这两个维度——列表筛出 20 条、导出却是全量，「导出即所见」破缺
   const {
     type = 'alarms',
@@ -304,7 +235,7 @@ const exportReport = asyncHandler(async (req, res) => {
 
   // audit 分支枚举白名单校验：与 /security/audit-logs 查询接口同一份枚举清单，
   // 防止拼错的 action/category/riskLevel/level 被静默忽略而放大导出范围。
-  // P3-13：level 此前缺失校验——非法值不命中派生分支被静默忽略，
+  // level 此前缺失校验——非法值不命中派生分支被静默忽略，
   // 用户选「仅错误」却导出全量，且无任何提示
   if (type === 'audit') {
     try {

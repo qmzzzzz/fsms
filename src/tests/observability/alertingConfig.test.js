@@ -136,8 +136,9 @@ describe('告警链路配置一致性（G-2）', () => {
     test('alertmanager 服务使用钉版镜像且配置只读挂载', () => {
       const serviceBlock = composeYml.slice(composeYml.indexOf('alertmanager:'));
       expect(serviceBlock).toMatch(/image:\s*prom\/alertmanager:v[\d.]+/); // 钉版，禁 latest
-      expect(composeYml).toContain(
-        './deployment/observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro'
+      // S-5：挂载源与启动闸共用 ALERTMANAGER_CONFIG_PATH，避免「校验 A、运行 B」
+      expect(serviceBlock).toContain(
+        '${ALERTMANAGER_CONFIG_PATH:-./deployment/observability/alertmanager.yml}:/etc/alertmanager/alertmanager.yml:ro'
       );
     });
 

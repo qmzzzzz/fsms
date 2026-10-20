@@ -11,14 +11,14 @@
  *   一条 __log_shipper_gap__ 标记行，使 SIEM 侧能看到「这里丢了 N 行」；
  *   标记行由本实例随机签发的身份字段认领，形状照抄的业务日志不算标记
  * - 非可靠网络：单次 flush 失败将整批放回缓冲头部重试（保留未发送行）
- * - 串行发送：同一时刻只允许一个 flush 在途（P3-31）。定时 flush 与满额
+ * - 串行发送：同一时刻只允许一个 flush 在途。定时 flush 与满额
  *   flush 若并发，两批各自 splice 出不同区段，失败方 unshift 回头部时会
  *   排到已成功发送的较新批之后 —— SIEM 收到的行序与产生顺序不一致，
  *   而日志行序正是事件重建与关联分析的基础
  *
  * 环境变量：
  *   LOG_SHIPPING_URL          必填，目标 HTTP(S) 端点（拒绝内网/回环/链路本地
- *                             目标——云元数据端点是经典 SSRF 目标；见 P2-⑨）
+ *                             目标——云元数据端点是经典 SSRF 目标；见上文）
  *   LOG_SHIPPING_TOKEN        可选，Bearer 鉴权
  *   LOG_SHIPPING_BATCH        满额条数，默认 100
  *   LOG_SHIPPING_INTERVAL_MS  定时毫秒，默认 5000
@@ -123,7 +123,7 @@ function resolveShippingTarget(rawUrl) {
 }
 
 /**
- * 出站目标门禁（P2-⑨，2026-09-30）：scheme 只回答"加不加密"，不回答"发到哪"。
+ * 出站目标门禁：scheme 只回答"加不加密"，不回答"发到哪"。
  * `http://169.254.169.254/latest/meta-data` 是**合法** http:，却是云元数据端点
  * （经典 SSRF 目标）；私网/回环目标同理——日志批 + Bearer 令牌发给内网某台机器
  * 的误配置不该零告警地成立。判据与 metricsAuth 的来源判定同一把尺
@@ -182,7 +182,7 @@ class HttpShipperTransport extends TransportStream {
     // 见 readGapLine——标记行落在自由格式的日志缓冲里，形状可被业务日志仿造，
     // 所以"是不是标记"必须由这个值决定，而不是由文案形状决定。
     this.gapAuth = crypto.randomBytes(16).toString('hex');
-    // P3-31：flush 串行化闩。定时器与满额触发是两个独立入口，
+    // flush 串行化闩。定时器与满额触发是两个独立入口，
     // 并发进入会各自 splice 出不同区段，破坏行序
     this._flushing = false;
     this._startTimer();
@@ -191,7 +191,7 @@ class HttpShipperTransport extends TransportStream {
   /**
    * 缓冲超限裁剪：丢最旧，并在缓冲头部维护**一条可累计的**断档标记
    *
-   * P3-31：原实现只是 splice 掉最旧行，下游完全无法感知丢失——
+   * 原实现只是 splice 掉最旧行，下游完全无法感知丢失——
    * SIEM 上看到的是一段连续日志，中间少了 N 行且无任何痕迹，
    * 事件重建时会得出错误结论（「这段时间没有异常请求」）。
    *
@@ -259,7 +259,7 @@ class HttpShipperTransport extends TransportStream {
   }
 
   async _flush() {
-    // P3-31：在途 flush 期间直接返回，保证同一时刻只有一批在网络上，
+    // 在途 flush 期间直接返回，保证同一时刻只有一批在网络上，
     // 失败批 unshift 回头部后仍是缓冲中最旧的一段，行序得以保持
     if (this._flushing) return;
     if (this.buffer.length === 0) return;
@@ -325,7 +325,7 @@ class HttpShipperTransport extends TransportStream {
           timeout: this.timeoutMs,
         },
         (res) => {
-          // 【M-06 修复】必须先接管响应流错误：对端在响应体传输中途断连时
+          // 【修复】必须先接管响应流错误：对端在响应体传输中途断连时
           // IncomingMessage 会 emit 'error'（典型 ECONNRESET），无监听器即
           // uncaughtException → index.js 的处理器会 process.exit(1)。
           // 后果：一个不稳定的日志后端可反复打死业务进程（重启后又重试投递，
@@ -366,11 +366,11 @@ class HttpShipperTransport extends TransportStream {
         setTimeout(resolve, ms).unref?.();
       });
     const deadline = Date.now() + this.timeoutMs + 1000;
-    // P3-31：串行闩会让 close 期间的 _flush 直接返回。等在途批次结束后再排空，
+    // 串行闩会让 close 期间的 _flush 直接返回。等在途批次结束后再排空，
     // 否则关闭时缓冲里的行会被静默丢弃（关停正是最需要日志的时刻）
     while (this._flushing && Date.now() < deadline) await sleep(20);
 
-    // P3-31 的第二半（本次修）：一次 _flush 只发 batchSize 行（默认 100），
+    // 第二半（本次修）：一次 _flush 只发 batchSize 行（默认 100），
     // 而缓冲上限是 BUFFER_CAP=5000 ⇒ 原先 close() 只冲**一批**就返回，
     // 进程随后退出，剩下最多 4900 行**无声消失**——失败路径有 console.error，
     // 这条没有，所以谁都不知道丢了。关停时丢的往往正是"为什么关停"的那条线索。

@@ -70,6 +70,14 @@ deliverables
 secrets
 secrets-*
 
+# S-4：测试树不进构建上下文。builder 是 `COPY src/ ./src/`、runtime 再原样复制，
+# 原先 598 个测试文件（约 14.8 万行，含夹具与故障注入细节）全部进了生产镜像。
+# 镜像构建从不执行测试（测试在 CI test job），它们没有任何运行期消费方。
+src/tests
+web-admin/src/tests
+web-admin/tests
+e2e
+
 # 自签名 TLS 证书同理（仅本地开发使用）
 certs
 

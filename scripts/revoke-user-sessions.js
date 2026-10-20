@@ -14,7 +14,7 @@
  *   1. tokenVersion +1 —— 所有已签发的该用户 JWT 立即失效（鉴权每请求校验）；
  *   2. revokeAllSessions —— 吊销 UserSession 中该用户全部活跃会话（含 WebSocket 侧）。
  *
- * 约定（P2-27 运维脚本安全惯例）：默认演练、显式 --apply 才动手；
+ * 约定（运维脚本安全惯例）：默认演练、显式 --apply 才动手；
  * 连接串只从环境/`.env` 读取，不接受命令行传入。
  */
 
@@ -26,7 +26,7 @@ require('dotenv').config();
 require('../src/config/secrets').hydrateSecretsFromFiles();
 const mongoose = require('mongoose');
 
-// M-08 / P1-20：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。
+// 破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。
 // 本脚本会 +1 tokenVersion 并吊销目标用户全部会话，属「--apply 类」破坏性操作。
 const { dbNameFromUri, hostFromUri, assertApplyAllowed } = require('./destructiveGuard');
 

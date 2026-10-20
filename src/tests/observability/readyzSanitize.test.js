@@ -1,7 +1,7 @@
 /**
- * M-1 回归：/readyz 就绪探针错误信息脱敏
+ * 回归：/readyz 就绪探针错误信息脱敏
  *
- * 背景（2026-09-02 综合评估报告 M-1）：/readyz 曾把 Mongo 驱动的原始
+ * 背景（2026-09-02 综合评估报告）：/readyz 曾把 Mongo 驱动的原始
  * err.message 直接放进响应体 checks.mongo。该端点不鉴权且被公网 LB 探测，
  * 驱动错误消息可泄露主机/端口/副本集名/认证失败原因等内部拓扑情报。
  *
@@ -14,7 +14,7 @@
 const mongoose = require('mongoose');
 const { checkMongoReady, __resetReadyCacheForTest } = require('../../utils/healthChecks');
 
-describe('M-1 /readyz 错误信息脱敏（checkMongoReady reason 枚举）', () => {
+describe('/readyz 错误信息脱敏（checkMongoReady reason 枚举）', () => {
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
       await mongoose.connect(process.env.MONGODB_URI);

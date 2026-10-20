@@ -1,7 +1,7 @@
 /**
  * 检测器"用来观测的那次查询"自己失败时，不得把检测整块静默关掉
  *
- * 三个安全告警检测器都做过"失败不冒泡"的收口（P1-23：审计落库挂 try/catch；
+ * 三个安全告警检测器都做过"失败不冒泡"的收口（审计落库挂 try/catch；
  * 投递走有留痕的 dispatchNotification）。但**入口处的计数查询一直是裸 await**：
  *
  *   - checkBruteForce：`Promise.all([countDocuments, countDocuments])`

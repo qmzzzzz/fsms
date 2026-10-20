@@ -72,7 +72,7 @@ const assignRoles = asyncHandler(async (req, res) => {
 
   // 此前仅校验"被分配角色"的层级，未校验"目标用户"的层级，
   // 导致低层级管理员可剥离同级/更高级用户（含内置超管）的角色
-  // M-01 修复：目标用户层级保护（口径对齐 updateUser/deleteUser/toggleUserLock）
+  // 修复：目标用户层级保护（口径对齐 updateUser/deleteUser/toggleUserLock）
   const targetUserRoles = await userService.findRolesByIds(user.roles, 'level code isBuiltIn');
   const targetUserMaxLevel = maxRoleLevel(targetUserRoles);
 
@@ -97,7 +97,7 @@ const assignRoles = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'USER_ROLE_ASSIGN_PEER_OR_HIGHER_FORBIDDEN');
   }
 
-  // ===== P2-8 修复：权限子集校验 =====
+  // ===== 修复：权限子集校验 =====
   // 仅比 level 是不够的。createRole 的"授予权限必须自身持有"落在
   // src/controllers/roleController.js:147-150，assignPermissions 的同一条校验落在
   // src/controllers/rolePermissionController.js:106（由 src/controllers/rolePermissionController.js:215 调用）——
@@ -156,9 +156,8 @@ const assignRoles = asyncHandler(async (req, res) => {
   // 角色变更后失效缓存
 
   invalidateUserCache(user._id);
-  // 统计缓存：目标用户与操作者（统计视角）均需失效
-  statsCache.invalidateByUserId(user._id);
-  statsCache.invalidateByUserId(req.user.userId);
+  // 统计缓存：角色分布影响所有查看者的聚合口径，必须全量失效（A-1）
+  statsCache.invalidateAll('user-roles');
 
   const updatedUser = await userService.getUpdatedUser(user._id);
 

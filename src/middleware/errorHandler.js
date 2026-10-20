@@ -43,7 +43,7 @@ const respondVersionError = (err, req, res) => {
 
 /** Mongoose 重复键错误 */
 const respondDuplicateKey = (err, req, res) => {
-  // P3-34：keyPattern 并非始终存在——驱动在部分场景（批量写错误、
+  // keyPattern 并非始终存在——驱动在部分场景（批量写错误、
   // 旧版驱动、经序列化传递的错误对象）只给 errmsg 而无 keyPattern/keyValue。
   // 原实现直接 Object.keys(err.keyPattern) 会在错误处理器内部抛 TypeError，
   // 由 Express 交给默认处理器，把一个本该 400 的重复键变成 500 + 堆栈泄露。

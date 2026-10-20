@@ -1,5 +1,5 @@
 /**
- * 配置项外置与安全取值边界（P2-37 / P2-39 / P2-40 / P2-49）
+ * 配置项外置与安全取值边界
  *
  * 报告 §15 P2 清单里这几条同属「硬编码参数外置 + 危险取值不得静默放行」，
  * 合并到一个文件便于对照。每条都附**能失败**的断言（见各用例注释里的变异手法）。
@@ -29,7 +29,7 @@ function loadConfigWith(env) {
   return JSON.parse(out);
 }
 
-describe('P2-39 bcryptRounds 范围校验（10–14）', () => {
+describe('bcryptRounds 范围校验（10–14）', () => {
   test('过小（4）回落 12：低轮数哈希可被离线秒破，不得静默采用', () => {
     expect(loadConfigWith({ BCRYPT_ROUNDS: '4' }).bcryptRounds).toBe(12);
   });
@@ -67,7 +67,7 @@ describe('P2-39 bcryptRounds 范围校验（10–14）', () => {
   });
 });
 
-describe('P2-40 统计缓存参数可配', () => {
+describe('统计缓存参数可配', () => {
   test('STATS_CACHE_MAX_SIZE / STATS_CACHE_CLEANUP_INTERVAL 生效', () => {
     const c = loadConfigWith({
       STATS_CACHE_MAX_SIZE: '2000',
@@ -90,7 +90,7 @@ describe('P2-40 统计缓存参数可配', () => {
   });
 });
 
-describe('P2-37 DOCS_RATE_LIMIT_MAX 负值处理', () => {
+describe('DOCS_RATE_LIMIT_MAX 负值处理', () => {
   test('负值不再直接传给限流器（原写法 Number(...) || 30 会让负值生效 → 全部 429）', () => {
     const src = read('src/config/swagger.js');
     // 变异验证：把这段改回 `Number(process.env.DOCS_RATE_LIMIT_MAX) || 30` → 本用例红
@@ -145,7 +145,7 @@ describe('P2-37 DOCS_RATE_LIMIT_MAX 负值处理', () => {
   });
 });
 
-describe('P2-49 redis 镜像钉 digest', () => {
+describe('redis 镜像钉 digest', () => {
   test('redis 服务使用 digest 引用而非浮动标签', () => {
     const yml = read('docker-compose.yml');
     const m = yml.match(/^\s*image: (redis:[^\s#]+)$/m);

@@ -124,14 +124,16 @@ const getUserStats = asyncHandler(async (req, res) => {
   // 与"这个账号没有可见范围"，而这两件的后续动作相反（#12 选项①：一律 403）。
   const scopeFilter = scopeFilterFor('user', dataScope);
 
-  // 统计缓存：缓存键由用户 ID + 数据范围稳定摘要组成，保证按用户+数据范围隔离
   const crypto = require('crypto');
   const scopeFingerprint = crypto
     .createHash('sha1')
     .update(JSON.stringify(scopeFilter))
     .digest('hex')
     .slice(0, 12);
-  const cacheKey = `stats:${req.user.userId}:${scopeFingerprint}`;
+  // 统计缓存：缓存键由用户 ID + 数据范围稳定摘要 + 全局失效代号组成。
+  // 代号（A-1）让任何用户写操作都能一次性作废**所有查看者**的旧缓存：
+  // 仅按被改用户 id 失效删不掉管理员 B/C 的桶，他们最坏要等 TTL 才看到新数字。
+  const cacheKey = `stats:${req.user.userId}:${scopeFingerprint}:g${statsCache.generation()}`;
 
   // 命中缓存直接返回，避免数据库往返
   const cached = statsCache.get(cacheKey);

@@ -302,7 +302,7 @@ describe('rbac.js 分支补齐', () => {
       expect(query['location.building']).toBeUndefined();
     });
 
-    test('department 为空 → 抛 403 显式 deny（P1-3 零过滤越权入口的回归）', () => {
+    test('department 为空 → 抛 403 显式 deny（零过滤越权入口的回归）', () => {
       const query = {};
       // #12 之后 deny 的形态是抛 ApiError(403, DATA_SCOPE_DENIED)，不再返回 false：
       // false 返回值没有任何机制保证每个调用方都检查它（#12 的出发点）。

@@ -65,7 +65,7 @@ const collationOptionsForExport = (query) =>
   hasUsernamePrefixCondition(query) ? { collation: AuditLog.AUDIT_USERNAME_COLLATION } : {};
 
 /**
- * 按资源类型生成数据范围过滤条件（P2-20 单一口径入口）
+ * 按资源类型生成数据范围过滤条件（单一口径入口）
  *
  * 此前每个统计/导出分支各自硬编码属主字段，设备资源在列表用
  * maintenanceRecord.operator、在报表用 createdBy，两套口径导致
@@ -394,7 +394,7 @@ const buildAuditExportQuery = ({
     // 的真值表继续作为第二道保险。
     auditQuery.success = parseSuccessFilter(success);
   }
-  // P3-13：补齐 ip/userId 维度，与 /security/audit-logs 查询口径一致。
+  // 补齐 ip/userId 维度，与 /security/audit-logs 查询口径一致。
   // 变体集合改由 ipUtils.ipQueryCondition 统一推导（规范 + 原始 + IPv4 的
   // ::ffff: 映射形态），两侧共用一份实现——各写一份正是查询/导出漂移的来源。
   if (ip) {
@@ -445,7 +445,7 @@ const buildExportQuery = (type, ctx) => {
 /**
  * audit 分支枚举白名单校验：与 /security/audit-logs 查询接口同一份枚举清单，
  * 防止拼错的 action/category/riskLevel/level 被静默忽略而放大导出范围。
- * P3-13：level 此前缺失校验——非法值不命中派生分支被静默忽略，
+ * level 此前缺失校验——非法值不命中派生分支被静默忽略，
  * 用户选「仅错误」却导出全量，且无任何提示
  * @throws {Error} 非法枚举值（消息可直接回给调用方）
  */

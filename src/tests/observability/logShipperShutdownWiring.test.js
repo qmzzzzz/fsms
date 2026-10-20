@@ -3,7 +3,7 @@
 /**
  * F-186：SIEM 转发缓冲的排空必须**真的接在关停链上**
  *
- * 【缺陷】`HttpShipperTransport.close()`（P3-31 + F-98：按批排空、有界退出、如实报剩余
+ * 【缺陷】`HttpShipperTransport.close()`（按批排空、有界退出、如实报剩余
  * 行数）在生产里**没有任何调用点** ⇒ 关停时缓冲里最多 `BUFFER_CAP` 行日志一行都不送达
  * SIEM，而且**无声**（丢的恰恰是"为什么要关闭 / 为什么崩"那几行）。F-98 那三条用例全绿，
  * 测的却是一个没人调用的方法——⑤⑥ 钉"接上了"，⑦⑧ 钉"接上的是对的东西"。
@@ -62,6 +62,7 @@ const path = require('path');
 
 const { HttpShipperTransport } = require('../../utils/logShipper');
 const { drainShippingBuffer, bestEffortDrain } = require('../../utils/loggerFlush');
+const { waitFor } = require('../helpers/waitFor');
 
 const REPO_ROOT = path.join(__dirname, '..', '..', '..');
 
@@ -144,11 +145,10 @@ describe('关停链排空 SIEM 转发缓冲（F-186）', () => {
     // （logShipper.js:212-214），所以在途那批此刻已经不在缓冲里了。
     expect(sent).toHaveLength(0);
 
-    // 收尾：放行那次被放弃的排空，证明放弃不留半成品状态（也避免跨用例悬挂）
+    // 收尾：放行那次被放弃的排空，证明放弃不留半成品状态（也避免跨用例悬挂）。
+    // 真实完成条件：被放弃的 _flush 会在门闩放行后继续把剩余批次送完。
     release();
-    for (let i = 0; i < 60 && sent.flat().length < 4; i += 1) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    await waitFor(() => sent.flat().length === 4, { label: '被放弃的排空在放行后送完全部 4 行' });
     expect(sent.flat()).toEqual(['s0', 's1', 's2', 's3']);
 
     // —— N0 控制臂：同一夹具、同一调用形状，只是额度给够 ⇒ 必须 drained 且全送达。
@@ -253,7 +253,6 @@ describe('关停链排空 SIEM 转发缓冲（F-186）', () => {
 
   test('⑦ logger.end() 触发 close() 却不等它 ⇒ 单靠 end() 不保证送达（探针实测的用例化）', async () => {
     const winston = require('winston');
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const t = makeTransport({ batchSize: 5 });
     const sent = [];
     let inFlight = 0;
@@ -280,11 +279,11 @@ describe('关停链排空 SIEM 转发缓冲（F-186）', () => {
       for (let i = 0; i < 12; i += 1) logger.info(`e${i}`);
       // 行是异步流过 pipe-chain 的：先等 12 行全部到达 transport 侧，
       // 否则下面测的是"根本没东西可排"，closeCalls 与 sent 都不成立。
-      for (let i = 0; i < 100 && accounted() < 12; i += 1) await sleep(10);
+      await waitFor(() => accounted() === 12, { label: '12 行全部到达 transport 侧' });
       expect(accounted()).toBe(12); // 前提自证（缓冲 + 在途 + 已送达 = 写入总数）
 
       logger.end();
-      for (let i = 0; i < 100 && closeCalls === 0; i += 1) await sleep(10);
+      await waitFor(() => closeCalls > 0, { label: "logger.end() 经 'unpipe' 触发 close()" });
 
       // 可达性：end() 经 'finish' → pipe 收尾的 'unpipe' 确实调到了 close()（对侧 F-98 的观测）
       expect(closeCalls).toBe(1);

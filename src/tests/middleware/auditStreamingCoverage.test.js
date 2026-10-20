@@ -1,7 +1,7 @@
 /**
- * P0-6 / P1-10 修复锁定：审计响应包装的流式路径与脱敏深度窗口
+ * 修复锁定：审计响应包装的流式路径与脱敏深度窗口
  *
- * P0-6（审计报告 §3.4）：全局审计中间件原先只包装 res.json/res.send，而导出接口
+ *（审计报告 §3.4）：全局审计中间件原先只包装 res.json/res.send，而导出接口
  * 走 res.write/res.end（auditExportService）或 workbook.xlsx.write(res)
  * （reportWorkbookService）——实测两个导出接口真实下载成功但 auditBuffer 计数为 0。
  * 修复后包装 write/end，本文件锁定：
@@ -11,7 +11,7 @@
  *   - 端到端：GET /api/reports/export 与 GET /api/security/audit-logs/export
  *     真实下载并各留 1 条审计。
  *
- * P1-10（审计报告 §3.7）：审计体脱敏的 depth > 6 分支原先原样返回子树，
+ *（审计报告 §3.7）：审计体脱敏的 depth > 6 分支原先原样返回子树，
  * 7/8/9 层嵌套的明文口令因此进入 auditBuffer。修复后锁定：
  *   - 7/8/9 层（乃至任意更深层）的明文口令不得出现在 push 入参中；
  *   - 中间件脱敏结果与 models/auditLogSanitizer.sanitizeAuditBody 逐字节一致
@@ -36,9 +36,9 @@ const pushedDocs = () => spyPush.mock.calls.map(([doc]) => doc).filter(Boolean);
 const pushedForPath = (fullPath) => pushedDocs().filter((doc) => doc.path === fullPath);
 
 // ============================================================
-// P0-6：流式响应包装
+// 流式响应包装
 // ============================================================
-describe('P0-6 响应包装覆盖 res.write/res.end', () => {
+describe('响应包装覆盖 res.write/res.end', () => {
   beforeEach(() => {
     spyPush.mockClear();
   });
@@ -166,9 +166,9 @@ describe('P0-6 响应包装覆盖 res.write/res.end', () => {
 });
 
 // ============================================================
-// P0-6 端到端：两个导出接口
+// 端到端：两个导出接口
 // ============================================================
-describe('P0-6 端到端：导出接口真实下载并留痕', () => {
+describe('端到端：导出接口真实下载并留痕', () => {
   let app;
   let User;
   let Role;
@@ -302,9 +302,9 @@ describe('P0-6 端到端：导出接口真实下载并留痕', () => {
 });
 
 // ============================================================
-// P1-10：脱敏深度窗口
+// 脱敏深度窗口
 // ============================================================
-describe('P1-10 审计体脱敏：超深嵌套不泄漏明文', () => {
+describe('审计体脱敏：超深嵌套不泄漏明文', () => {
   const SECRET = 'P@ssw0rd-Deep-Nested-Must-Not-Leak';
 
   /** layers 层包裹，password 叶子位于 depth = layers */

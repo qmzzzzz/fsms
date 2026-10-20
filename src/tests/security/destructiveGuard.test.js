@@ -1,5 +1,5 @@
 /**
- * 破坏性脚本护栏测试（M-08）
+ * 破坏性脚本护栏测试
  *
  * 背景：仓库内多个脚本会批量改写/删除数据，护栏口径原先不一致——
  * run-rollback-drill 需双标志 + 库名白名单，而 resign-audit-hmac /
@@ -29,7 +29,7 @@ const {
   assertApplyAllowed,
 } = require('../../../scripts/destructiveGuard');
 
-describe('destructiveGuard（M-08 破坏性脚本护栏）', () => {
+describe('destructiveGuard（破坏性脚本护栏）', () => {
   const ORIG = {};
   const KEYS = ['MONGODB_URI', 'ALLOWED_SOURCE_DB'];
   let origExitCode;
@@ -120,7 +120,7 @@ describe('destructiveGuard（M-08 破坏性脚本护栏）', () => {
       expect(process.exitCode).toBeUndefined();
     });
 
-    // ---- 核心：M-08 的 fail-open → fail-closed ----
+    // ---- 核心：fail-open → fail-closed ----
     test('apply=true 但未设置 ALLOWED_SOURCE_DB → 拒绝（原先静默放行）', () => {
       const ok = assertApplyAllowed({
         scriptName: 'x.js',

@@ -27,6 +27,7 @@
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { waitFor } = require('../helpers/waitFor');
 
 describe('mfaService / tokenService 安全原语分支补齐', () => {
   let User;
@@ -105,15 +106,18 @@ describe('mfaService / tokenService 安全原语分支补齐', () => {
       expect(after.mfaLockUntil).toBeTruthy();
       expect(after.mfaLockUntil.getTime()).toBeGreaterThan(Date.now());
 
-      // 审计为 fire-and-forget，轮询等待落库
+      // 审计为 fire-and-forget：轮询真实落库条件，而不是固定睡 100ms×20
       let audit = null;
-      for (let i = 0; i < 20 && !audit; i++) {
-        audit = await AuditLog.findOne({
-          action: 'mfa_attempt_locked',
-          username: userDoc.username,
-        });
-        if (!audit) await new Promise((r) => setTimeout(r, 100));
-      }
+      await waitFor(
+        async () => {
+          audit = await AuditLog.findOne({
+            action: 'mfa_attempt_locked',
+            username: userDoc.username,
+          });
+          return !!audit;
+        },
+        { label: 'mfa_attempt_locked 审计行落库' }
+      );
       expect(audit).toBeTruthy();
       expect(audit.riskFactors).toContain('mfa_bruteforce');
     });

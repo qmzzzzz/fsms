@@ -36,11 +36,11 @@ const CI_ENFORCED_GATE_SCRIPTS = [
   'scripts/check-utf8.js',
   'scripts/lint-ratchet.js',
   'scripts/check-bundle-budget.js',
-  // P2-⑫ 安装脚本登记门禁：Dockerfile 的 `npm ci --omit=dev --ignore-scripts` 与
+  // 安装脚本登记门禁：Dockerfile 的 `npm ci --omit=dev --ignore-scripts` 与
   // ci.yml 的 --ignore-scripts 之所以安全，直接依赖这一档在跑；删掉 security-audit
   // 里的两处调用不会惊动任何别的测试，故登记在此。
   'scripts/check-prod-install-scripts.js',
-  // P2-⑩ 供应链完整性锚（2026-09-30）：把「上次人工拍板时锁文件长什么样」固化成
+  // 供应链完整性锚：把「上次人工拍板时锁文件长什么样」固化成
   // semantic 哈希写进 deployment/lockfile-anchor.json。删掉 security-audit 里那一步
   // 同样不会惊动任何别的测试——而它挡的是「PR 夹带改 integrity 字段」这类
   // audit 全绿、CVE 为空、只能靠人眼发现的改动，故登记在此。
@@ -49,6 +49,10 @@ const CI_ENFORCED_GATE_SCRIPTS = [
   // 登记前它们确实被 CI 执行着——但登记才有红可报：删掉那两步今天不会惊动任何人。
   'scripts/e2e-smoke.js',
   'scripts/production-drill.js',
+  // T-1：四条运维关键路径（告警投递 / 部署回滚 / 备份恢复 / 跨部门越权）。
+  // 与冒烟同型：删掉 ci.yml 里 `npm run test:ops-e2e` 那一步不会惊动任何别的测试，
+  // 而它守的正是「部署失败自动回滚」「备份真能回灌」这类只有事故现场才暴露的路径。
+  'scripts/ops-e2e.js',
   // 含 dev 的依赖审计门禁（2026-10-09）：security-audit 里原本两处 audit 都是
   // --omit=dev，dev 树的 advisory 对门禁完全不可见（实测含 dev 35 条 / 30 high，
   // 而 --omit=dev 为 0）。删掉那一步不会惊动任何别的测试，故登记在此。
@@ -58,6 +62,10 @@ const CI_ENFORCED_GATE_SCRIPTS = [
   // 测试——而它挡的是「手册写了每季度一次、实际一年没练过」这类只在事故现场
   // 才暴露的缺口（恢复能力未经实证，却没有任何信号）。故登记在此。
   'scripts/backup-integrity-patrol.js',
+  // S-2：登录公钥指纹在 build job 里由该脚本从私钥算出，作为构建参数钉进前端包。
+  // 删掉 ci.yml 的 `Compute login key pin` 步骤不会惊动任何别的测试——而失效的
+  // 结果是钉扎悄悄变成空值（只留一条 warning），前端包不再与运行期私钥绑定。
+  'scripts/login-key-pin.js',
 ];
 
 /** 剥掉整行注释与行尾注释，只留真正会执行的内容 */

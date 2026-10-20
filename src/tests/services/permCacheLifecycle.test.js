@@ -100,9 +100,15 @@ describe('userPermissionService 缓存生命周期', () => {
         await service.getPermissions(realUser._id);
         expect(findByIdSpy).toHaveBeenCalledTimes(2); // 仍命中缓存
 
-        // 等短 TTL（5s）过期后再触发：过期条目被回收（if 真分支），新鲜条目保留
-        await new Promise((r) => setTimeout(r, 5200));
-        cleanupTick();
+        // 把时钟推到短 TTL（5s）之后：过期条目被回收（if 真分支），新鲜条目保留。
+        // 只在校验清理回调期间伪造 Date.now（该回调不碰 DB）；立刻恢复，
+        // 后续 getPermissions 的 DB 往返仍走真实时钟。
+        const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 6000);
+        try {
+          cleanupTick();
+        } finally {
+          nowSpy.mockRestore();
+        }
 
         await service.getPermissions(realUser._id);
         expect(findByIdSpy).toHaveBeenCalledTimes(2); // 未过期条目未被误删

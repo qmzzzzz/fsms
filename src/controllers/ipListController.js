@@ -7,8 +7,6 @@
 
 const { validationResult } = require('express-validator');
 const { safeFieldErrors } = require('../utils/validationRules');
-const User = require('../models/User');
-const AuditLog = require('../models/AuditLog');
 const ApiResponse = require('../utils/apiResponse');
 // 名单类型取值与 models/IPBlacklist 的 enum、securityRoutes 的 isIn 同源
 const { IP_LIST_TYPES } = require('../constants/ipList');
@@ -25,13 +23,14 @@ const {
   lenientAddressHint,
 } = require('../utils/ipUtils');
 const { auditPath } = require('../utils/auditMeta');
-const { isSuperAdminRole } = require('../utils/superAdmin');
 const { invalidateIPBlockCache } = require('../middleware/security');
 // F-03（2026-10-17）：IP 黑白名单变更属于**安全配置**且业务状态已落库 ⇒ 审计必须先持久化
 // （DB 或审计 WAL）才允许回成功；落库失败时转 WAL 待重放，不再"回成功但可能零留痕"。
 const { recordDurably } = require('../services/auditOutbox');
 // 归属地展示增强（locate fail-soft 且带缓存；CIDR 网段条目无单一归属，返回 null）
 const ipLocationService = require('../services/ipLocationService');
+// A-4：名单读写与操作者超管判定下沉 service，控制器不再直连模型
+const ipListService = require('../services/ipListService');
 
 /**
  * 获取 IP 黑白名单列表
@@ -39,7 +38,7 @@ const ipLocationService = require('../services/ipLocationService');
  * 同时返回黑/白名单总数，前端无需再发一次不带 type 的请求做计数
  */
 const getIPList = asyncHandler(async (req, res) => {
-  // P3-5：路由挂了校验链却从不消费结果——?type=<script> 不命中
+  // 路由挂了校验链却从不消费结果——?type=<script> 不命中
   // black/white 分支后 filter.type 根本不设置，静默退化成"全量返回"，
   // 调用方以为在查某个名单实际拿到两个名单的混合分页，计数也对不上。
   const errors = validationResult(req);
@@ -50,7 +49,6 @@ const getIPList = asyncHandler(async (req, res) => {
   }
 
   const { type, page = 1, limit = 20 } = req.query;
-  const IPBlacklistModel = require('../models/IPBlacklist');
 
   const now = new Date();
   const activeFilter = { $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }] };
@@ -63,16 +61,12 @@ const getIPList = asyncHandler(async (req, res) => {
 
   const { page: pageNum, limit: limitNum } = normalizePagination(page, limit, 200);
 
-  const [list, total, blackCount, whiteCount] = await Promise.all([
-    IPBlacklistModel.find(filter)
-      .sort({ createdAt: -1 })
-      .skip((pageNum - 1) * limitNum)
-      .limit(limitNum)
-      .lean(),
-    IPBlacklistModel.countDocuments(filter),
-    IPBlacklistModel.countDocuments({ ...activeFilter, type: 'black' }),
-    IPBlacklistModel.countDocuments({ ...activeFilter, type: 'white' }),
-  ]);
+  const { list, total, blackCount, whiteCount } = await ipListService.listEntries({
+    filter,
+    activeFilter,
+    page: pageNum,
+    limit: limitNum,
+  });
 
   return ApiResponse.success(
     res,
@@ -128,12 +122,7 @@ const queryIPMatch = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'IP_SINGLE_REQUIRED');
   }
 
-  const IPBlacklistModel = require('../models/IPBlacklist');
-
-  const [blackMatches, whiteMatches] = await Promise.all([
-    IPBlacklistModel.matchIP(rawIP, 'black'),
-    IPBlacklistModel.matchIP(rawIP, 'white'),
-  ]);
+  const { blackMatches, whiteMatches } = await ipListService.matchEntries(rawIP);
 
   // 最终判定：白名单优先（豁免黑名单与限流）> 黑名单拦截 > 未命中放行
   const verdict =
@@ -189,42 +178,23 @@ const normalizeListEntryRequest = (res, { ip, type, durationHours }) => {
 };
 
 /**
- * 操作者是否为内置超级管理员——添加侧与删除侧共用同一判据。
- *
- * 只认生效角色，口径与 auth.js buildAuthContext、rbac.js 的回退查询一致。
- * 字符串形式的 populate 无法携带 match，故必须写成对象形式：
- * 否则「直连数据库把 SUPER_ADMIN 置为 inactive」之后，其持有者仍被判定为超管，
- * 依然可以加白 0.0.0.0/0 让黑名单与限流整体失效——正是本文件守卫要防的结局。
- * 接口侧改内置角色 status 已被 roleGuards.js 的 BUILTIN_ROLE_STATUS_LOCKED 挡住，
- * 因此这条属纵深防御；注释保留原因，免得后人把它当冗余删掉。
- * 防御性说明：实测 mongoose 8.24.1 对 populate+match 未命中的引用是**丢弃元素**（不留 null），
- * 故 isSuperAdminRole 的 !!role 判空今天是冗余；保留它以防未来版本改为留 null 洞
- * （形状由 src/tests/populateMatchShape.test.js 钉住，升级会先红）。
- */
-const operatorIsSuperAdmin = async (userId) => {
-  const operator = await User.findById(userId)
-    .populate({ path: 'roles', select: 'code isBuiltIn', match: { status: 'active' } })
-    .lean();
-  return (operator?.roles || []).some(isSuperAdminRole);
-};
-
-/**
  * 全网段（0.0.0.0/0、::/0）收口：此类条目一次性命中所有客户端——
  * 加黑导致全站拒服且管理员自己也无法登录解除；加白使黑名单与限流整体失效。
  * 故仅允许内置超级管理员配置，且两种结局都留高危痕迹（拒绝侧记 privilege_escalation）。
+ * 「操作者是否为内置超管」的判定（只认生效角色）在 ipListService（A-4）。
  * @returns {Promise<boolean>} true 表示已写出拒绝响应，调用方应立即 return
  */
 const guardFullRangeCIDR = async (req, res, { normalizedIP, type }) => {
   if (!isFullRangeCIDR(normalizedIP)) return false;
 
-  const isSuperAdmin = await operatorIsSuperAdmin(req.user.userId);
+  const isSuperAdmin = await ipListService.operatorIsSuperAdmin(req.user.userId);
 
   if (!isSuperAdmin) {
     logger.warn('非超级管理员尝试添加全网段名单', {
       ip: normalizedIP,
       operator: req.user.username,
     });
-    AuditLog.record({
+    ipListService.recordPrivilegeEscalation({
       action: 'privilege_escalation',
       category: 'security',
       userId: req.user.userId,
@@ -275,7 +245,6 @@ const addIPEntry = asyncHandler(async (req, res) => {
 
   if (await guardFullRangeCIDR(req, res, { normalizedIP, type })) return;
 
-  const IPBlacklistModel = require('../models/IPBlacklist');
   const durationMs = hours > 0 ? hours * 60 * 60 * 1000 : 0;
 
   // 白名单优先于黑名单：
@@ -284,7 +253,7 @@ const addIPEntry = asyncHandler(async (req, res) => {
   //   传入 CIDR 时会解析失败返回 false，使网段形式绕过冲突检测
   // - 加入白名单时，自动解除同 IP 的黑名单记录（信任优先，保持名单语义无矛盾）
   if (type === 'black') {
-    const covering = await IPBlacklistModel.findCoveringEntries(normalizedIP, 'white');
+    const covering = await ipListService.findCoveringEntries(normalizedIP, 'white');
     if (covering.length > 0) {
       const coveredBy = covering.map((e) => e.ip).join('、');
       return ApiResponse.codeError(res, 'IP_COVERED_BY_WHITELIST', {
@@ -293,12 +262,12 @@ const addIPEntry = asyncHandler(async (req, res) => {
       });
     }
   } else if (type === 'white') {
-    await IPBlacklistModel.unblockIP(normalizedIP, 'black');
+    await ipListService.unblockIP(normalizedIP, 'black');
     // 加白后立即失效降级封禁缓存，避免 DB 故障期沿用陈旧封禁判定误拦可信 IP
     invalidateIPBlockCache(normalizedIP);
   }
 
-  const entry = await IPBlacklistModel.blockIP(normalizedIP, {
+  const entry = await ipListService.blockIP(normalizedIP, {
     type,
     reason: String(reason).slice(0, 200),
     durationMs,
@@ -347,25 +316,24 @@ const removeIPEntry = asyncHandler(async (req, res) => {
   }
 
   const { id } = req.params;
-  const IPBlacklistModel = require('../models/IPBlacklist');
 
-  const entry = await IPBlacklistModel.findById(id);
+  const entry = await ipListService.findEntryById(id);
   if (!entry) {
     return ApiResponse.codeError(res, 'IP_LIST_ENTRY_NOT_FOUND');
   }
 
-  // ===== P2-13 修复：删除侧的对称约束 =====
+  // ===== 修复：删除侧的对称约束 =====
   // addIPEntry 对全网段（0.0.0.0/0 等）做了「仅内置超管可添加」的收口，
   // 删除侧却完全没有对等约束——持 security:config 的低阶管理员可先拆掉
   // 超管配置的全网段白名单（该白名单是限流豁免/信任标记的前提），
   // 再塞入恶意黑名单，等效于绕过整个 IP 管控体系。
   // 保护的不变量：谁能添加，才能删除。
   if (isFullRangeCIDR(entry.ip)) {
-    const isSuperAdmin = await operatorIsSuperAdmin(req.user.userId);
+    const isSuperAdmin = await ipListService.operatorIsSuperAdmin(req.user.userId);
 
     if (!isSuperAdmin) {
       logger.warn('非超级管理员尝试删除全网段名单', { ip: entry.ip, operator: req.user.username });
-      AuditLog.record({
+      ipListService.recordPrivilegeEscalation({
         action: 'privilege_escalation',
         category: 'security',
         userId: req.user.userId,
@@ -394,7 +362,7 @@ const removeIPEntry = asyncHandler(async (req, res) => {
   }
 
   // removeById 内含名单快照失效，保证下一次匹配立即读到删除结果
-  await IPBlacklistModel.removeById(id, entry.type);
+  await ipListService.removeEntry(id, entry.type);
 
   // 解除黑名单后必须同步失效降级封禁缓存，
   // 否则 DB 故障期该 IP 仍会被陈旧缓存拦截（表现为「界面已解封但依然 403」）

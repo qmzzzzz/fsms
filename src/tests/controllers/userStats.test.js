@@ -68,10 +68,11 @@ describe('/api/users/stats 统计缓存', () => {
   const getStats = () =>
     request(app).get('/api/users/stats').set('Authorization', `Bearer ${adminToken}`);
 
-  const cacheKeysOfAdmin = () => {
-    const prefix = `stats:${admin._id}:`;
+  const cacheKeysOf = (id) => {
+    const prefix = `stats:${id}:`;
     return [...statsCache._store.keys()].filter((k) => k.startsWith(prefix));
   };
+  const cacheKeysOfAdmin = () => cacheKeysOf(admin._id);
 
   test('首次请求执行查询并写入缓存，二次请求命中缓存', async () => {
     // 自包含前置：统计缓存是进程内共享 Map，其他用例可能已写入本用户的缓存。
@@ -153,6 +154,43 @@ describe('/api/users/stats 统计缓存', () => {
     const after = await getStats();
     expect(after.status).toBe(200);
     expect(cacheKeysOfAdmin().length).toBe(1);
+  });
+
+  test('A-1：管理员 A 的写操作会让管理员 B 的统计缓存同样立即失效', async () => {
+    // 修复前的键是 stats:{查看者id}:…，失效只删 stats:{被改用户id}: 前缀——
+    // 也就是说 A 改完用户后，B 的看板要等 TTL 才变，业务上最长可见 1 小时口径漂移。
+    const otherAdmin = await User.create({
+      username: 'stats_admin_b',
+      email: 'stats_admin_b@example.com',
+      password: 'Test@1234567',
+      roles: [admin.roles[0]],
+    });
+    const otherToken = jwt.sign(
+      { userId: String(otherAdmin._id), username: 'stats_admin_b', tokenVersion: 0 },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    await getStats();
+    await request(app)
+      .get('/api/users/stats')
+      .set('Authorization', `Bearer ${otherToken}`)
+      .expect(200);
+    expect(cacheKeysOfAdmin().length).toBe(1);
+    expect(cacheKeysOf(otherAdmin._id).length).toBe(1);
+
+    await request(app)
+      .post('/api/users')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        username: 'stats_newuser_b',
+        email: 'stats_newuser_b@example.com',
+        password: 'Vn6$Rw83pKx5',
+      })
+      .expect(201);
+
+    expect(cacheKeysOfAdmin().length).toBe(0);
+    expect(cacheKeysOf(otherAdmin._id).length).toBe(0);
   });
 
   test('删除用户后缓存失效', async () => {

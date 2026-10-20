@@ -16,6 +16,7 @@ const os = require('os');
 const path = require('path');
 const { TEST_CLIENT_IP } = require('../fixtures');
 const logger = require('../../utils/logger');
+const { waitFor } = require('../helpers/waitFor');
 
 describe('审计 WAL 大小硬上限（R-6）', () => {
   let tmpDir;
@@ -72,11 +73,9 @@ describe('审计 WAL 大小硬上限（R-6）', () => {
     }
 
     // enforcement 在 walChain 上异步执行：轮询等待丢弃计数器推进
-    const deadline = Date.now() + 5000;
-    while (auditBuffer.getStats().walDroppedLines === 0 && Date.now() < deadline) {
-      // walChain 链式任务在微任务/IO 后推进，让出事件循环
-      await new Promise((r) => setTimeout(r, 50));
-    }
+    await waitFor(() => auditBuffer.getStats().walDroppedLines > 0, {
+      label: 'WAL 超限裁剪计数推进',
+    });
     // 必须排干整条链再量：轮询只等到"第一次丢弃"，此时后面几次追加还排在 walChain 上。
     // 实测（2026-09-26 全量并行跑）：stat 抓到过链中途的 348 字节，而同一条用例单独跑
     // 4/4 绿 ⇒ 那次红是判据在测"还没落盘的写入"，不是上限语义变了。

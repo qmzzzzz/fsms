@@ -1,7 +1,7 @@
 /**
- * 手写审计写入失败处理器（P0-5 回归防护）单测
+ * 手写审计写入失败处理器（回归防护）单测
  *
- * 为什么需要：P0-5 修复后 `res.locals.skipGlobalAudit` 真正生效，「控制器手写
+ * 为什么需要：修复后 `res.locals.skipGlobalAudit` 真正生效，「控制器手写
  * AuditLog.create」成为该类操作在审计库中的**唯一留痕**。修复前该标志恒失效、
  * 全局中间件总会补记一条，故控制器侧 `.catch(() => {})` 静默吞错仍有兜底；
  * 修复后同样的静默吞错会让整个操作**零留痕**且无任何可观测信号。
@@ -38,7 +38,7 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-describe('onAuditWriteFailure（P0-5 回归防护）', () => {
+describe('onAuditWriteFailure（回归防护）', () => {
   test('写 error 日志：含 {审计写入失败} 前缀、auditAction 与 operator', () => {
     const req = { user: { username: 'alice' } };
     onAuditWriteFailure('security_config_change', req)(new Error('mongo down'));

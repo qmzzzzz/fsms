@@ -1,7 +1,7 @@
 /**
- * 备份加密契约（P1-①，2026-09-30）
+ * 备份加密契约
  *
- * deliverables/安全缺口核查-2026-09-30.md P1-①：备份归档（全量业务库，含 PII
+ * deliverables/安全缺口核查-2026-09-30.md 备份归档（全量业务库，含 PII
  * 与审计集合）此前明文落盘、无校验和、无异地副本。修复后的契约：
  *   - 默认 gpg 非对称加密（BACKUP_ENCRYPTION=gpg）：备份宿主机只放公钥，
  *     私钥托管异地；唯一明文出口是 BACKUP_ENCRYPTION=plaintext-acknowledged，
@@ -31,7 +31,7 @@ const RESTORE = path.join(ROOT, 'scripts/restore-mongo.sh');
 
 const read = (p) => fs.readFileSync(p, 'utf8');
 
-describe('备份加密契约（P1-①）', () => {
+describe('备份加密契约', () => {
   test('三个脚本都能被 bash 解析（语法错误只会在真正要备份/恢复时才暴露）', () => {
     for (const p of [CRYPTO, BACKUP, RESTORE]) {
       expect(execFileSync('bash', ['-n', p], { encoding: 'utf8' })).toBe('');

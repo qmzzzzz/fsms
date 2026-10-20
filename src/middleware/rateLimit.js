@@ -73,7 +73,7 @@ const noteRateLimitHit = (req, limiterName) => {
 // 标记只在可信边界内发放（security.js isWhitelistExemptionTrustworthy）：
 // 公网直连伪造一跳 XFF 冒充白名单 IP 拿不到标记，资源型限流不会被买通
 //
-// P3-35：豁免范围有明确边界，不是「所有限流器都加上」——
+// 豁免范围有明确边界，不是「所有限流器都加上」——
 // - 资源型限流（generalLimiter/ipLimiter/userLimiter/strictLimiter/captchaLimiter）：
 //   目的是防滥用与资源保护，可信 IP 豁免；此前 strictLimiter/captchaLimiter 漏挂，
 //   表现为「加白后导出/验证码仍被限流」，运维只能靠调大 max 绕过，等于全局放宽
@@ -457,7 +457,7 @@ const passwordChangeLimiter = rateLimit({
  * "单账号 5 次/15 分钟"实际变成"单账号 × 每个源 IP 各 5 次"。
  * 两条独立放大路径：
  *   · 代理池/NAT 后面的真·多源 IP（不需要任何伪造）；
- *   · `TRUST_PROXY_HOPS>0` 时（生产 compose 默认 1 跳，`app.js:203`）
+ *   · `TRUST_PROXY_HOPS>0` 时（生产 compose 默认 1 跳，`app.js:204`）
  *     能直连应用端口的主体（同网段容器、宿主进程、SSRF 跳转）用
  *     `X-Forwarded-For` 任意编造 req.ip——实测伪造一跳即可让 req.ip 变成 1.2.3.4，
  *     审计行记录的来源 IP 与 `password_changed` 溯源同被写成假值。

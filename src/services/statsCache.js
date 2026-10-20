@@ -15,20 +15,28 @@ const store = new Map();
 // 最近访问时间（用于超过上限时清除最旧条目）
 const lastAccess = new Map();
 
+/**
+ * 全量失效代号（A-1）。
+ *
+ * 缓存键是「查看者 id + 范围摘要」，一次用户变更会改变**所有查看者**看到的聚合数字，
+ * 但按用户前缀失效只能删被改者自己的桶——管理员 B/C 的缓存原样保留到 TTL 到期。
+ * 每次用户写操作让 generation +1，键里带上它：旧代键从此不会再被读取，
+ * 同时（清库之后）并发请求即使在失效前排到新代号也写不回一个会被读到的旧值。
+ */
+let generation = 0;
+
 let cleanupTimer = null;
 
 /**
  * 陈旧窗口的上界（秒）。
  *
- * 存在的理由不是"防呆"，而是这条链路里唯一真实存在的防线：`STATS_CACHE_TTL` 只校验
- * "有限正数"（src/config/index.js 的 statsCacheTtl），配成一年也不会被拒；而那句
- * 用来给长 TTL 背书的注释——"写路径已有 invalidateByUserId 主动失效"——按现网键形
- * 并不成立。缓存键是 `stats:{查看者id}:{范围摘要}`（controllers/userController/read.js:134），
- * 失效只删 `stats:{被改用户id}:` 前缀（本文件 invalidateByUserIdLocal）⇒ 除了被改者
- * 本人以外，其他管理员的桶一条都删不掉；公开注册与角色改名更是根本不触达失效。
- * 也就是说：多数情况下"多久变新"完全由 TTL 决定，所以 TTL 必须有界。
+ * 存在的理由不是"防呆"，而是这条链路里最后一道有界性：`STATS_CACHE_TTL` 只校验
+ * "有限正数"（src/config/index.js 的 statsCacheTtl），配成一年也不会被拒。
+ * A-1 修复后，用户写操作统一走 invalidateAll（generation 推进 + 清 stats: 键 + 广播），
+ * 覆盖所有查看者；TTL 不再是"唯一失效手段"，但仍必须有限——进程崩溃重启、
+ * 广播通道断开等场景下，陈旧窗口只能由它收口。
  * 上界取 3600 秒：派生统计在 1 小时内不可见变化已经是可感知的口径漂移，再长就是
- * 把缓存当成快照，而它没有任何版本号能保证一致性。
+ * 把缓存当成快照，而它没有任何跨重启的版本号能保证一致性。
  */
 const MAX_TTL_SECONDS = 3600;
 
@@ -38,7 +46,7 @@ const clampTtlSeconds = (seconds, source) => {
   // 否则他以为配的是 1 年，实际是 1 小时——这类静默夹取正是本仓反复要防的形态
   logger.warn(
     `统计缓存 TTL 被夹到上界 ${MAX_TTL_SECONDS} 秒（请求值 ${seconds} 秒，来源 ${source}）；` +
-      '失效广播按查看者键前缀匹配，覆盖不到其他查看者，因此不能让 TTL 充当无限期的快照'
+      '主动失效依赖进程内 generation 与广播，跨重启/断链期间只能靠 TTL 收口'
   );
   return MAX_TTL_SECONDS;
 };
@@ -86,7 +94,7 @@ function set(cacheKey, data, ttl) {
     const ttlSeconds =
       Number.isFinite(ttl) && ttl > 0 ? clampTtlSeconds(ttl, '调用方传入的 ttl') : configTtlSeconds;
     const ttlMs = ttlSeconds * 1000;
-    // P3-23：写入路径上做容量兜底。定时清理改为显式启动（不再模块加载即启动），
+    // 写入路径上做容量兜底。定时清理改为显式启动（不再模块加载即启动），
     // 若调用方忘记 startCleanup()，仅靠 get() 的惰性过期无法回收「写入后再没被
     // 读取过」的键——那类键会永久滞留。此处在越界时同步触发一次清理。
     if (store.size >= config.cache.statsCacheMaxSize) sweepExpired();
@@ -149,8 +157,44 @@ function invalidateByUserId(userId) {
   });
 }
 
+/**
+ * 全量失效（本地）：清掉所有 `stats:` 键并推进 generation。
+ * 只清统计命名空间——本模块同时承载审计汇总缓存（键前缀 `audit:`），
+ * 用户变更与它无关，不应顺手清掉。
+ */
+function invalidateAllLocal(reason) {
+  try {
+    generation += 1;
+    let removed = 0;
+    for (const key of [...store.keys()]) {
+      if (!key.startsWith('stats:')) continue;
+      store.delete(key);
+      lastAccess.delete(key);
+      removed += 1;
+    }
+    logger.info('统计缓存全量失效', { reason, removed, generation });
+  } catch (err) {
+    logger.warn(`统计缓存全量失效异常: ${err.message}`);
+  }
+}
+
+/**
+ * 全量失效（含跨实例广播）。任何用户写操作都应走这里，而不是按 id 失效：
+ * 变更影响的是「所有查看者」的聚合口径（总数/活跃数/部门/角色分布）。
+ */
+function invalidateAll(reason = 'user-mutation') {
+  invalidateAllLocal(reason);
+  sharedCache.publishInvalidate(`${STATS_INVAL_PREFIX}all`).catch(() => {
+    /* 发布失败退化为自然过期，不阻断主流程 */
+  });
+}
+
 function handleRemoteStatsInvalidation(raw) {
   if (typeof raw !== 'string' || !raw.startsWith(STATS_INVAL_PREFIX)) return;
+  if (raw === `${STATS_INVAL_PREFIX}all`) {
+    invalidateAllLocal('remote');
+    return;
+  }
   invalidateByUserIdLocal(raw.slice(STATS_INVAL_PREFIX.length));
 }
 
@@ -210,7 +254,7 @@ function stopCleanup() {
   }
 }
 
-// P3-23：不在模块加载期启动定时器。
+// 不在模块加载期启动定时器。
 // 本仓库对其余后台任务（auditBuffer / auditMonitor / reminderScheduler /
 // alertCleanup / captchaCleanup）一律采用「index.js 显式 start()」模式，
 // 唯独此处 require 即副作用——测试、脚本、CLI 工具只要 require 到任何
@@ -229,6 +273,8 @@ module.exports = {
   set,
   del,
   invalidateByUserId,
+  invalidateAll,
+  generation: () => generation,
   sweepExpired,
   startCleanup,
   stopCleanup,

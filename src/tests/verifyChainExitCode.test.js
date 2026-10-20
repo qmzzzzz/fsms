@@ -489,7 +489,7 @@ describe('verify-audit-chain 退出码', () => {
   //   真实形态见 AuditLog.hashFailure 的字段注释）。报告里 hashComputeFailed=1、breaks=0，
   //   而 CLI 构造 verdict 时没有回传该字段 ⇒ 判据拿不到缺口 ⇒
   //   「VERDICT: PASS（全量、无断裂、hmac 已校验）」exit 0。手册正是按退出码 0 验收的
-  //   （deployment/rollback-drill.md:111-112、deployment/secret-rotation.md:397），
+  //   （deployment/rollback-drill.md:129、deployment/secret-rotation.md:462），
   //   于是缺口穿过验收。判据本身的这一格早有覆盖
   //   （src/tests/services/auditChainGuardedIntegrity.test.js 的 B 组），
   //   缺的是**出口到判据这一段**——所以本用例走真 CLI，不走 computeVerdict。

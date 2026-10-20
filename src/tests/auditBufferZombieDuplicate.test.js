@@ -41,18 +41,10 @@ process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = '150';
 const auditBuffer = require('../services/auditBuffer');
 const wal = require('../services/auditBufferWal');
 const AuditLog = require('../models/AuditLog');
+const { waitFor, flushEventLoop } = require('./helpers/waitFor');
 
+/** 测试替身：模拟"慢 DB"（insertMany 延迟 > 链锁超时），不是同步等待 */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** 轮询等待条件成立（上限 8s），替代固定等待 */
-async function waitFor(cond, timeoutMs = 8000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await cond()) return true;
-    await sleep(25);
-  }
-  return false;
-}
 
 const countTag = async (tag) =>
   AuditLog.countDocuments({ username: new RegExp(`^zzombie_${tag}_`) });
@@ -233,9 +225,10 @@ describe('链锁超时与僵尸写入的重复落库', () => {
     // 去掉这一步，本用例会红到超时（批次留在缓冲里等下一轮撞 11000）。
     expect(await waitFor(() => auditBuffer.getStats().bufferLength === 0)).toBe(true);
     expect(await countTag('retract')).toBe(2);
-    // 撤回之后不再有第二次插入：重复的可能性从源头消失
+    // 撤回之后不再有第二次插入：重复的可能性从源头消失。
+    // 负向断言：flush() 已 await 完全部落库工作，这里只让出事件循环确认没有"事后"插入。
     await auditBuffer.flush();
-    await sleep(300);
+    await flushEventLoop(3);
     expect(await countTag('retract')).toBe(2);
   });
 

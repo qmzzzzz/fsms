@@ -26,7 +26,7 @@
  * `start()`。这与真实重启的差别只在"不重建模块对象"，对本测试要断言的
  * 「磁盘 WAL 状态 → 落库条数」映射无影响。
  *
- * 隔离：独立 mkdtemp + 独立 AUDIT_WAL_PATH（T-1 修复后 start() 会重读 env）。
+ * 隔离：独立 mkdtemp + 独立 AUDIT_WAL_PATH（修复后 start() 会重读 env）。
  * ⚠️ 写 WAL 文件前必须先 start()：`getWalPath()` 在 startup() 之前返回的是
  * 模块加载期的**默认派生路径**（auditBufferWal.js 的 `let walPath = deriveDefaultWalPath()`），
  * 只有 start() → wal.startup() 之后才切到本套件 mkdtemp 下的路径。
@@ -50,16 +50,7 @@ process.env.AUDIT_WAL_STAT_INTERVAL = '1000';
 const auditBuffer = require('../../services/auditBuffer');
 const wal = require('../../services/auditBufferWal');
 const AuditLog = require('../../models/AuditLog');
-
-/** 轮询等待真实完成条件 */
-async function waitFor(cond, timeoutMs = 8000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await cond()) return true;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  return false;
-}
+const { waitFor, waitForStable, flushEventLoop } = require('../helpers/waitFor');
 
 /** 等 WAL 异步写入链真正排空（追加/裁剪/rename 全部落盘）。
  *
@@ -74,24 +65,20 @@ async function waitFor(cond, timeoutMs = 8000) {
  * 稳定复现为「WAL 行数 0 / 缓冲计数 0」的假红。
  *
  * 修复：改为等待 wal 模块自己的串行链排空（drain 就是 flushAndStop 用的
- * 同一判据），再叠加一次「文件内容稳定」确认，语义与「追加链排空」等价且
- * 不依赖文件是否已存在。 */
+ * 同一判据），再叠加一次「文件内容稳定」确认（复用 helpers/waitFor.waitForStable），
+ * 语义与「追加链排空」等价且不依赖文件是否已存在。 */
 async function waitForWalQuiet(timeoutMs = 8000) {
   await wal.drain(); // 精确判据：walChain 上排队的 append/trim/rename 全部完成
   const p = walPath();
-  let last = null;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    let cur;
+  const readWalContent = () => {
     try {
-      cur = fs.readFileSync(p, 'utf8');
+      return fs.readFileSync(p, 'utf8');
     } catch (_) {
-      return; // 文件不存在 = 没有待观察的写入（链已排空），无需继续等
+      return null; // 文件不存在 = 没有待观察的写入（链已排空）
     }
-    if (cur === last) return; // 内容不再变化
-    last = cur;
-    await new Promise((r) => setTimeout(r, 25));
-  }
+  };
+  if (readWalContent() === null) return;
+  await waitForStable(readWalContent, { timeoutMs, label: 'WAL 文件内容稳定' });
 }
 
 /**
@@ -191,14 +178,16 @@ describe('§13 V-8 WAL 重放幂等性边界', () => {
     tick();
 
     const ok = await waitFor(
-      async () => (await AuditLog.countDocuments({ username: new RegExp(`^${tag}_`) })) === 3
+      async () => (await AuditLog.countDocuments({ username: new RegExp(`^${tag}_`) })) === 3,
+      { label: '重启后重放的 3 条落库且不重复' }
     );
     expect(ok).toBe(true);
     expect(await AuditLog.countDocuments({ username: new RegExp(`^${tag}_`) })).toBe(3);
     // 落库成功后 WAL 被裁剪（前缀消费），残留为空 —— 这是"不会重复"的机制原因
     // 裁剪排在 walChain 上（异步），轮询等待而非立即读取
-    const trimmed = await waitFor(() => fs.readFileSync(walPath(), 'utf8').trim() === '');
-    expect(trimmed).toBe(true);
+    await waitFor(() => fs.readFileSync(walPath(), 'utf8').trim() === '', {
+      label: '落库后 WAL 被裁剪为空',
+    });
   });
 
   test('用例 2：落库成功但 WAL 未裁剪即「崩溃」→ 重放整批再插一份（已知边界，非回归）', async () => {
@@ -214,7 +203,8 @@ describe('§13 V-8 WAL 重放幂等性边界', () => {
     tick1();
 
     const inserted = await waitFor(
-      async () => (await AuditLog.countDocuments({ username: new RegExp(`^${tag}_`) })) === 3
+      async () => (await AuditLog.countDocuments({ username: new RegExp(`^${tag}_`) })) === 3,
+      { label: '第 1 轮 3 条落库' }
     );
     expect(inserted).toBe(true);
 
@@ -231,7 +221,8 @@ describe('§13 V-8 WAL 重放幂等性边界', () => {
     tick2();
 
     const duplicated = await waitFor(
-      async () => (await AuditLog.countDocuments({ username: `${tag}_0` })) === 2
+      async () => (await AuditLog.countDocuments({ username: `${tag}_0` })) === 2,
+      { label: '重放导致同一内容出现第 2 条（已知边界）' }
     );
     expect(duplicated).toBe(true);
     expect(await AuditLog.countDocuments({ username: `${tag}_0` })).toBe(2);
@@ -294,7 +285,9 @@ describe('§13 V-8 WAL 重放幂等性边界', () => {
       returned = true;
     });
     try {
-      await new Promise((r) => setTimeout(r, 150));
+      // 负向断言：给 waiter 若干轮事件循环去（错误地）提前返回；真实判据
+      // `await wal.drain()` 被门闩卡住，故这里只让出事件循环、不承诺时长。
+      await flushEventLoop(3);
       expect(returned).toBe(false);
     } finally {
       release();

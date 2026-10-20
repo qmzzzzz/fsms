@@ -29,7 +29,7 @@ let readyCache = null; // { at: number, result: {ok, reason, detail} }
  * 检查 MongoDB 是否可服务（readyState + admin ping 双确认）
  * ping 带 1.5s 超时：探针响应必须快，DB 悬挂时宁可快速报 unready
  *
- * M-1：返回 { ok, reason, detail } 双轨——reason 是固定枚举
+ * 返回 { ok, reason, detail } 双轨——reason 是固定枚举
  * （'ok'|'disconnected'|'timeout'|'unreachable'），供 /readyz 对外暴露；
  * detail 含驱动原始错误消息（可能泄露主机/端口/副本集/认证细节），
  * **只允许进服务端日志，不得出现在响应体中**。该端点通常不鉴权且被

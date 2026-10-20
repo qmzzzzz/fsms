@@ -1,26 +1,27 @@
 # 多阶段构建
 #
 # R-5 基础镜像版本固定：
-# 全部 node 阶段都必须钉到补丁号，不能只写 `node:22-alpine`。
+# 全部 node 阶段都必须钉到补丁号，不能只写 `node:26-alpine`。
 # 浮动 tag 的后果不是「拿到新版本」而是「不同时间构建出不同的镜像」——
 # 出安全问题时无法回答「上线那版用的是哪个 Node」。
 #
-# 已钉 digest（捕获日期 2026-10-01，来源与核验方式见下）：
+# 已钉 digest（捕获日期 2026-10-20，来源与核验方式见下）：
 # 下面三处 FROM 钉在同一 manifest list digest 上：
-#   node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
+#   node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
 # digest 是多架构 OCI image index（含 linux/amd64 与 linux/arm64 等平台条目）。
 # 来源：Docker Hub 官方 tag API（hub.docker.com/v2/...）在捕获当日于本网络不可达
-# （DNS 污染），改用两条相互独立的 registry 通道核验并要求逐字节一致：
+# （DNS 污染），改用相互独立的 registry 通道核验并要求逐字节一致：
 #   a) docker.m.daocloud.io（Docker Hub 的 pull-through 镜像）按 tag 取 manifest，
 #      Docker-Content-Digest = 上述值，且对返回字节本地自算 sha256 与之相等；
 #   b) AWS ECR Public 的 docker/library/node（Docker 官方 library 镜像的 AWS 侧
-#      重发布）按同 tag 取 manifest，返回字节与 a) 逐字节一致（cmp 通过）。
-# digest 是内容寻址的：字节一致 ⇒ 两条通道讲的是同一个上游镜像。
+#      重发布）与 docker.1ms.run 按同 tag 取 manifest，返回字节与 a) 逐字节一致。
+# digest 是内容寻址的：字节一致 ⇒ 各通道讲的是同一个上游镜像。
 # **三个阶段必须保持同一 digest**：否则 builder 与 runtime 的 libc/OpenSSL
 # 可能不同版本，原生模块在运行时才暴露不兼容。
+# 26.12.0 为 2026-10-20 升级后的钉版版本（CI 矩阵 22.x/24.x，engines >=22.12.0）。
 # 部署机复验（一条命令确认该 digest 存在且与 tag 当前指向一致）：
-#   docker pull node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
-#   docker inspect --format='{{index .RepoDigests 0}}' node:22.14.0-alpine@sha256:9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944
+#   docker pull node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
+#   docker inspect --format='{{index .RepoDigests 0}}' node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
 # scripts/capture-image-digests.sh 仍是部署机侧的复核工具：升级基础镜像时用它
 # 重新捕获 digest，并在同一次改动里同步更新三处 FROM 与
 # src/tests/security/baseImageDigestPinned.test.js 的钉版字面量（该测试把
@@ -71,7 +72,7 @@ COPY web-admin/package*.json ./
 # web-admin 依赖树内带 install 脚本的只有 @parcel/watcher（经 vite→sass 引入，
 # node_modules 实测命中；其 install 是原生绑定的按需编译，缺脚本时 npm 落可选
 # 预编译平台包），且它是 devDependency——本阶段不跑 vitest（测试在 CI frontend-build job）。
-# 本镜像的 node:22.14.0-alpine 在 linux-musl-x64 平台确有 @parcel/watcher 预编译包可回落，
+# 该 node 基础镜像在 linux-musl-x64 平台确有 @parcel/watcher 预编译包可回落，
 # 故 --ignore-scripts 安全。若未来引入「mac/win 本地构建镜像」，该假设需重新评估。
 RUN npm ci --ignore-scripts && npm cache clean --force
 # ⚠ 源码必须在 npm ci **之后**、build 之前进镜像：2026-09-30 供应链批次重写本阶段
@@ -79,6 +80,11 @@ RUN npm ci --ignore-scripts && npm cache clean --force
 # `npm run build` 跑在只有 node_modules 的 /web 里，vite 连入口模块都解析不到，
 # exit 1（CI build job 实测）。缓存优化的标准序：package 文件先行，源码后置。
 COPY web-admin/ ./
+# S-2：登录公钥指纹构建期钉扎。前端只能从 import.meta.env 读到它，必须由构建参数注入；
+# 同一值还会写进 runtime 阶段的 LOGIN_PUBLIC_KEY_SHA256_PIN，由服务启动时比对当前密钥。
+# 未传时为空（本地开发），生产/CI 从 login_ecdh_private_key 计算后传入。
+ARG VITE_LOGIN_PUBLIC_KEY_SHA256=
+ENV VITE_LOGIN_PUBLIC_KEY_SHA256=$VITE_LOGIN_PUBLIC_KEY_SHA256
 # vite.config.js 已显式 sourcemap: false（L-1/I-3），产物不含源码映射
 RUN npm run build
 
@@ -98,11 +104,20 @@ FROM node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb
 ARG GIT_SHA=unknown
 ARG BUILD_DATE=unknown
 ARG APP_VERSION=unknown
+# S-2：与 web-builder 同一 build-arg，转成运行期指纹后由 src/utils/loginCipher.js
+# 在 createApp 时校验——构建用的公钥与运行注入的私钥不一致时启动即失败，
+# 而不是等用户登录才发现「前端只认另一把钥匙」。
+ARG VITE_LOGIN_PUBLIC_KEY_SHA256=
+ENV LOGIN_PUBLIC_KEY_SHA256_PIN=$VITE_LOGIN_PUBLIC_KEY_SHA256
 LABEL org.opencontainers.image.revision=$GIT_SHA \
       org.opencontainers.image.created=$BUILD_DATE \
       org.opencontainers.image.version=$APP_VERSION \
       org.opencontainers.image.title="fire-safety-rbac-system" \
       org.opencontainers.image.source="https://github.com/qmzzzzz/fsms"
+
+# O-6：镜像自身声明生产环境。此前只靠 compose 注入 NODE_ENV，直接 `docker run`
+# 或换编排器时所有 production 分支（安全校验、cookie Secure 等）都会静默失效。
+ENV NODE_ENV=production
 
 WORKDIR /app
 
@@ -113,21 +128,14 @@ RUN apk add --no-cache dumb-init tzdata
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# 从 builder 阶段复制源代码
-COPY --from=builder --chown=nodejs:nodejs /app/src ./src
-# D-3：迁移目录与配置（见 builder 阶段说明）
-COPY --from=builder --chown=nodejs:nodejs /app/migrations ./migrations
-COPY --from=builder --chown=nodejs:nodejs /app/migrate-mongo-config.js ./
-# 运行期加载 migrate-mongo-config.js 需要它（见 builder 阶段说明）。
-# 只复制这一个文件，不把整个 scripts/ 塞进镜像：里面的 --apply 破坏性运维脚本
-# 一旦被容器里任何一条命令路径引用到，就等于把"改库开关"分发到生产实例上。
-COPY --from=builder --chown=nodejs:nodejs /app/scripts/destructiveGuard.js ./scripts/
-COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
-
 # 前端构建产物（L-1 静态托管）：默认路径与 src/middleware/staticFrontend.js
 # 的 resolveDistDir 一致（/app/web-admin/dist）。NODE_ENV=production 且产物
 # 存在时自动启用；改用 Nginx 托管时在 compose 设 SERVE_FRONTEND=false
 COPY --from=web-builder --chown=nodejs:nodejs /web/dist ./web-admin/dist
+
+# 先装依赖、后拷源码（P-1）：npm ci 只依赖 package*.json，原顺序把 src/ 放在
+# 安装层之前，任何一行业务代码改动都会击穿 node_modules 缓存，构建时间成倍增加。
+COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
 
 # 日志目录必须预建并归属 nodejs：
 # src/utils/logger.js 在模块加载时同步执行 fs.mkdirSync('/app/logs')，
@@ -148,6 +156,16 @@ RUN mkdir -p /app/logs && chown -R nodejs:nodejs /app/logs
 # （如 migrate-mongo 写临时状态、npm 更新缓存）。
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force && \
     chown -R nodejs:nodejs node_modules
+
+# 从 builder 阶段复制源代码（放在依赖安装之后，见上面的 P-1 说明）
+COPY --from=builder --chown=nodejs:nodejs /app/src ./src
+# D-3：迁移目录与配置（见 builder 阶段说明）
+COPY --from=builder --chown=nodejs:nodejs /app/migrations ./migrations
+COPY --from=builder --chown=nodejs:nodejs /app/migrate-mongo-config.js ./
+# 运行期加载 migrate-mongo-config.js 需要它（见 builder 阶段说明）。
+# 只复制这一个文件，不把整个 scripts/ 塞进镜像：里面的 --apply 破坏性运维脚本
+# 一旦被容器里任何一条命令路径引用到，就等于把"改库开关"分发到生产实例上。
+COPY --from=builder --chown=nodejs:nodejs /app/scripts/destructiveGuard.js ./scripts/
 
 # ===== D-3 / F-02：迁移执行器 =====
 # migrate-mongo 是**部署期**要用的工具（scripts/deploy.js 的 migrate status/up 步骤），

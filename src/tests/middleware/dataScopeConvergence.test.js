@@ -1,5 +1,5 @@
 /**
- * P1-3 / P2-9 回归：数据范围过滤的唯一收敛点 applyDataScopeToQuery
+ * 回归：数据范围过滤的唯一收敛点 applyDataScopeToQuery
  *
  * 背景（实测越权）：三个 Service（Alarm/Device/Inspection）与 userController
  * 各自手写了 `if (type==='department' && dataScope.department) {...}

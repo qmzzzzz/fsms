@@ -16,16 +16,17 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # 挂死的 job 会一直占着 runner（矩阵 2 个 Node × 覆盖率作业），
+    # 45 分钟是本仓全量 Jest + 覆盖率的上界；超时即失败，不静默耗资源。
+    timeout-minutes: 45
 
     strategy:
       matrix:
-        # Node 18 于 2025-04 EOL，2026-09-28 移除。原因是**结构性必红**，与公开仓额度无关：
-        # 本 job 第 5 步要构建前端，而 web-admin 的 Vite ^8.1.4 其 engines 为
-        # `^20.19.0 || >=22.12.0` ⇒ Node 18 下 `vite build` 必失败，且失败会 fail-fast
-        # 把 lint / format / 编码 / 合规 / 测试等后续 9 步全部 skip（该版本等于什么都没验）。
-        # 历史上「Node 18 两类失败」（时区断言、teardown 后静默 exit 1）此前确已闭合，
-        # 但 Vite 8 的 engines 是第三类，且在 18 上不可能通过。
-        node-version: [20.x, 22.x]
+        # Node 18 于 2025-04 EOL（2026-09-28 移除），Node 20 于 2026-04 EOL（2026-10-20
+        # 移除，S-3）：CI 继续跑 EOL 版本等于把「新 CVE 无官方补丁」的运行时当作发布基线。
+        # 现在矩阵是 22.x（维护期 LTS）与 24.x（当前 LTS），与 package.json 的
+        # engines `>=22.12.0` 覆盖 22.x/24.x；Dockerfile 基础镜像为 node:26.12.0（26.x 尚未进矩阵）。
+        node-version: [22.x, 24.x]
 
     steps:
       # persist-credentials: false：不把 GITHUB_TOKEN 留在 .git/config。本工作流没有任何
@@ -176,16 +177,17 @@ jobs:
 
   security-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Use Node.js 20.x
+      - name: Use Node.js 22.x
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 20.x
+          node-version: 22.x
 
       - name: Audit backend dependencies
         # I-M3：取消 continue-on-error——高危依赖告警直接让 job 失败（硬门禁）；
@@ -253,6 +255,7 @@ jobs:
 
   secret-scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     # 本仓库的默认工作流权限是「仅 contents/packages 只读」这一档，未显式声明的
     # 作用域一律为 none。gitleaks 在 pull_request 事件下要调
@@ -314,6 +317,7 @@ jobs:
 
   frontend-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     # 时区必须钉死：web-admin 有一组断言测的就是「界面按**本地**时区口径格式化」
     # （views/reportView 的「日期区间按本地日期串提交」、views/ipListView 的
@@ -392,16 +396,17 @@ jobs:
     # 是 supertest 套件测不到的接线层兜底；prod-drill 另验生产门禁。
     # 两脚本自带随机强密钥与内存 Mongo，无需额外 service 容器。
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Use Node.js 20.x
+      - name: Use Node.js 22.x
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 20.x
+          node-version: 22.x
 
       # 加 --ignore-scripts 的安全性判据：本 job 只跑 e2e-smoke / production-drill
       # 两个脚本，二者自带随机强密钥与**内存 Mongo**（见上方 job 注释）——但内存 Mongo
@@ -417,20 +422,27 @@ jobs:
       - name: Run production drill（生产模式演练 9 步）
         run: npm run test:prod-drill
 
+      # T-1：四条运维关键路径（告警投递 / 部署回滚 / 备份恢复 / 跨部门越权）
+      # 各自在独立子进程中跑，用内存 Mongo、随机端口与本地假 Alertmanager，
+      # 不依赖 Docker / 真实告警通道。与浏览器旅程分开，不影响 no-skip 门禁。
+      - name: Run ops journeys（运维关键路径 4 条）
+        run: npm run test:ops-e2e
+
   e2e-browser:
     # 评价报告 H1：浏览器旅程为发布镜像硬门禁。桌面与移动端旅程
     # 已在本地真实栈稳定通过；MFA 旅程继续按环境能力跳过。
     runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     services:
       mongo:
-        # 评价报告 #18：mongo 版本口径统一到生产 compose 的钉版 6.0.20
-        # 2026-10-04 补 digest：service 容器同样是第三方供应链输入——上游把 6.0.20 这个可变
-        # tag 指向另一批字节时，测试是在"另一个 mongod"上跑绿的，而 CI 日志看不出区别。
+        # 评价报告 #18：mongo 版本口径统一到生产 compose 的钉版 8.0.34（S-3：6.0 已 EOL）
+        # digest：service 容器同样是第三方供应链输入——上游把这个 tag 指向另一批字节时，
+        # 测试是在"另一个 mongod"上跑绿的，而 CI 日志看不出区别。
         # 取值口径（自算 sha256 + ≥2 个运营主体不同的来源一致）见 docker-compose.yml 的
         # mongo 段注释与 scripts/verify-image-digests.js 的期望表；三方对账闸是
         # src/tests/security/imageReferenceInventory.test.js，这里漏改即红。
-        image: mongo:6.0.20@sha256:eb5819129dee31a32982a940b6e32c9873fed05b5e938b65f802bb96dca8753d
+        image: mongo:8.0.34@sha256:4a4ab5d4834207389e0d7270fac988e21ffedccecba77991a552f755df229907
         ports:
           - 27017:27017
 
@@ -439,12 +451,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Use Node.js 20.x
+      - name: Use Node.js 22.x
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 20.x
+          node-version: 22.x
 
-      # 加 --ignore-scripts 的安全性判据：本 job 的 Mongo 来自上面的 mongo:6.0.20
+      # 加 --ignore-scripts 的安全性判据：本 job 的 Mongo 来自上面的 mongo:8.0.34
       # service 容器（真实 mongod），**不使用** devDeps 的 mongodb-memory-server，
       # 全量安装的 devDeps 只是为了让 playwright 与各脚本能 require（CI 用不到
       # mongodb-memory-server 的 postinstall 预下载）。故这里可以安全跳过安装脚本。
@@ -604,6 +616,7 @@ jobs:
     # 前端 lint 或 vitest 覆盖率失败时，含缺陷前端的镜像不得推送到 GHCR。
     needs: [test, e2e, e2e-browser, secret-scan, security-audit, frontend-build]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # main 分支推 latest；v* 标签发布版本镜像（R-7）
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     # job 级 permissions 覆盖工作流级顶层（顶层 contents: read 只读兜底）：
@@ -654,6 +667,21 @@ jobs:
         id: builddate
         run: echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
+      # S-2：前端包在构建期钉扎登录公钥指纹，运行期再与同一把私钥比对。
+      # 未配置 secret 时输出空（不钉扎，仍可部署）；配置了但解析失败则本步红。
+      - name: Compute login key pin
+        id: loginpin
+        env:
+          LOGIN_ECDH_PRIVATE_KEY: ${{ secrets.LOGIN_ECDH_PRIVATE_KEY }}
+        run: |
+          PIN="$(node scripts/login-key-pin.js)"
+          echo "pin=${PIN}" >> "$GITHUB_OUTPUT"
+          if [ -z "$PIN" ]; then
+            echo "::warning::LOGIN_ECDH_PRIVATE_KEY 未配置——镜像不做登录公钥钉扎"
+          else
+            echo "登录公钥钉扎指纹：${PIN}"
+          fi
+
       - name: Build and push Docker image
         id: push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
@@ -667,6 +695,7 @@ jobs:
             GIT_SHA=${{ github.sha }}
             BUILD_DATE=${{ steps.builddate.outputs.date }}
             APP_VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+            VITE_LOGIN_PUBLIC_KEY_SHA256=${{ steps.loginpin.outputs.pin }}
           # P2-⑩：SLSA provenance 证明（构建来源与参数随镜像一同入 GHCR）
           provenance: true
           cache-from: type=gha

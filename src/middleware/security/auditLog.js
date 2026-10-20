@@ -24,7 +24,7 @@ const { isBodySensitiveKey, sanitizeAuditQuery } = require('../../models/auditLo
  * 校验等）由控制器手写 AuditLog.create 并置 res.locals.skipGlobalAudit，跳过
  * 本中间件，避免同一操作产生两条重复记录。该标志共 11 处赋值点
  * （securityController 8 / ipListController 2 / auditController 1，2026-09-17 实测）。
- * P0-5 修复（2026-09-17）：标志必须在**响应时刻**读取（见 doLog）——控制器赋值
+ * 修复：标志必须在**响应时刻**读取（见 doLog）——控制器赋值
  * 发生在本中间件入口之后，入口处读取必然早于赋值。原实现正是在入口只读一次，
  * 标志 100% 失效：每个这类操作都被双写（控制器手写 1 条 + 本中间件按路由再写
  * 1 条，且两条 action/category 不同）。
@@ -61,7 +61,7 @@ const auditLog = (options = {}) => {
     excludePaths = ['/api/auth/login', '/api/auth/refresh'],
     // GET/HEAD 敏感读取的**豁免清单**：默认全量审计，命中才跳过（口径与反转依据
     // 见本中间件头部注释）；GET 审计不记录请求体。
-    // P0-6 修复（2026-09-17）历史备注：导出类响应只经过 write/end 而非 json/send，
+    // 修复历史备注：导出类响应只经过 write/end 而非 json/send，
     // 响应包装现覆盖 write/end——本反转不影响该修复，报表/审计导出照常被审计。
     auditGetExcludePaths = [
       // a) 预认证/登录流程面
@@ -118,7 +118,7 @@ const auditLog = (options = {}) => {
     // 且 res.send 内部会再调 res.end，绑定后行为与原生一致。
     const originalJson = res.json.bind(res);
     const originalSend = res.send.bind(res);
-    // P0-6：导出类响应只经过 write/end，不经 json/send。部分响应替身
+    // 导出类响应只经过 write/end，不经 json/send。部分响应替身
     // （如既有测试的 makeRes()）没有这两个方法，缺失时不包装。
     const originalWrite = typeof res.write === 'function' ? res.write.bind(res) : null;
     const originalEnd = typeof res.end === 'function' ? res.end.bind(res) : null;
@@ -131,7 +131,7 @@ const auditLog = (options = {}) => {
       if (logged) return; // 防止重复记录
       logged = true;
 
-      // P0-5 修复（2026-09-17）：skipGlobalAudit 在**响应时刻**读取。
+      // 修复：skipGlobalAudit 在**响应时刻**读取。
       // 原实现在中间件入口只检查一次，而 11 处赋值点都在控制器内部、响应之前
       // 才写 res.locals —— 入口检查永远早于赋值，标志 100% 失效，每个这类操作
       // 都被双写（控制器手写 1 条 + 本中间件按路由再写 1 条，action/category 不同）。
@@ -150,7 +150,7 @@ const auditLog = (options = {}) => {
       const abortedAfterHeaders = Boolean(res.locals && res.locals.responseAbortedByError);
       const success = res.statusCode < 400 && !abortedAfterHeaders;
       // 告诉错误处理器"这条审计已经落出去了"：流式响应在**第一个 chunk** 时就记一条
-      // （P0-6 的刻意设计，崩溃也不丢记录），且 auditBuffer.push 会同步写 WAL，
+      // （刻意设计，崩溃也不丢记录），且 auditBuffer.push 会同步写 WAL，
       // 之后再改内存对象只会让 WAL 与库不一致。所以事后失败只能追加一条更正事件，
       // 不能就地翻转——这正是 append-only 审计的正确形态。
       if (res.locals) res.locals.auditRecordWritten = true;
@@ -173,7 +173,7 @@ const auditLog = (options = {}) => {
       return originalSend(body);
     };
 
-    // P0-6 修复（2026-09-17）：导出接口绕过 json/send——
+    // 修复：导出接口绕过 json/send——
     //   - services/auditExportService.js 直接 res.write(...) / res.end()
     //   - services/reportWorkbookService.js 走 workbook.xlsx.write(res)
     //     （ExcelJS 内部同样是 res.write/res.end）
@@ -203,9 +203,9 @@ const auditLog = (options = {}) => {
 /**
  * 构造并投递一条请求型审计记录（doLog 的 setImmediate 回调体抽出）
  *
- * 抽出原因：该回调体内联在 auditLog 工厂函数里，使函数体达 117 行、doLog 达 64 行，
- * 双双顶爆体积棘轮（max-lines-per-function 100 行）。eslint.ratchet.json 只许降不许升，
- * 故按仓库既有约定拆为模块级函数；本函数即原回调体，逐行搬运、未改行为。
+ * 抽出原因：该回调体内联在 auditLog 工厂函数里，会使函数体与 doLog 超出体积阈值，
+ * 故按仓库既有约定拆为模块级函数。eslint.ratchet.json 只许降不许升，
+ * 本函数只承载该回调体，读取时机与行为不变。
  *
  * 读取时机（抽出前后完全一致，勿提前快照）：
  *   - action/category/success/duration/fullPath/isGetAudit 由调用方在**响应时刻**固化后传入；
@@ -213,7 +213,7 @@ const auditLog = (options = {}) => {
  *     res.statusMessage 仍在本函数执行时（setImmediate 回调时刻）读取。
  *
  * 脱敏口径：SENSITIVE_KEYS 取自 models/auditLogSanitizer（单一事实来源），深度上限与
- * 该模块 MAX_SANITIZE_DEPTH 对齐（P1-10：超限返回占位文案，不得原样返回子树）。
+ * 该模块 MAX_SANITIZE_DEPTH 对齐（超限返回占位文案，不得原样返回子树）。
  *
  * @param {object} ctx 由 doLog 传入的响应时刻上下文
  * @returns {void}
@@ -269,7 +269,7 @@ const persistAuditRecord = (ctx) => {
           // 脱敏敏感字段（递归处理嵌套对象与数组，防止嵌套的密码/令牌明文入库）
           // #10：判定函数来自 models/auditLogSanitizer 单一事实来源（含 secret/apikey，
           // 且与它同样先删键名噪声再比子串）
-          // P1-10 修复（2026-09-17）：深度超限**不得原样返回子树**。
+          // 修复：深度超限**不得原样返回子树**。
           // 原实现 `depth > 6` 时 return value，而 sanitizeMongo 的
           // SANITIZE_MAX_DEPTH = 10（本文件上方）——7/8/9 层嵌套的明文
           // 口令因此绕过脱敏进入 auditBuffer（漏网窗口宽 3 层）。

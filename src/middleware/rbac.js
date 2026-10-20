@@ -377,7 +377,7 @@ const assertRecordInScope = async (req, doc, ownerField, departmentField) => {
 /**
  * 把数据范围约束合并进已有的 Mongoose 查询对象（Service 层列表/统计通用）
  *
- * 存在必要性（P1-3 修复）：三个 Service（Alarm/Device/Inspection）各自手写了
+ * 存在必要性（修复）：三个 Service（Alarm/Device/Inspection）各自手写了
  * `if (type==='department' && dataScope.department) {...} else if (type==='self')
  * {...} else if (type==='none') {return 空}` 的副本。当 type==='department'
  * 但 department 为空串/null（用户未填部门，业务常见）时，三个分支全不命中 →

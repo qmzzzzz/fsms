@@ -10,7 +10,7 @@ const rateLimit = require('express-rate-limit');
 const logger = require('../utils/logger');
 
 /**
- * 限流存储工厂（R-3/M-1）
+ * 限流存储工厂
  *
  * 默认 MemoryStore 的计数是**每实例一份**：多副本 + 负载均衡时，
  * 同一客户端的配额在每个实例各算一遍，等效于把上限放大 N 倍，

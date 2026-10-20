@@ -16,7 +16,7 @@ const connectDB = require('./config/database');
 const logger = require('./utils/logger');
 const { exitAfterFlush, bestEffortDrain } = require('./utils/loggerFlush');
 
-// P3-48：密钥文件注入的结果在 config 加载期产生（早于 logger 可用），
+// 密钥文件注入的结果在 config 加载期产生（早于 logger 可用），
 // 此处补记日志。只记变量名不记值。
 if (config.secretHydration) {
   const { loaded, warnings } = config.secretHydration;
@@ -39,7 +39,7 @@ const auditChainMonitor = require('./services/auditChainMonitor');
 // 安全哨兵用户名（canary）检测：启动期做遮蔽对账（幽灵名被真实账户占用 ⇒
 // 对应哨兵静默失效，须告警；状态经安全概览合规块暴露），详见该模块文件头
 const canaryWatch = require('./services/canaryWatch');
-// M-09：启动期重同步审计链链尾（清除崩溃遗留的幻影链尾）
+// 启动期重同步审计链链尾（清除崩溃遗留的幻影链尾）
 const { resyncChainTail } = require('./utils/auditChain');
 // F-103：关停链的总预算（每一步向它要自己的超时，见 gracefulShutdown 内的注释）
 const shutdownBudget = require('./utils/shutdownBudget');
@@ -101,7 +101,7 @@ const runStep = async (name, fn, capMs) => {
 /**
  * 优雅关闭：关闭 WS → 停止接收新 HTTP 连接 → 停止调度器 → 关闭 DB → 退出
  *
- * P3-33 异常隔离：原实现把各步骤直接写在一条 async 流程里，任一步抛错
+ * 异常隔离：原实现把各步骤直接写在一条 async 流程里，任一步抛错
  * 即中断整条清理链——例如 wsServiceInstance.dispose() 抛错会导致
  * 审计缓冲永不 flush（最后一批审计彻底丢失）、DB 连接不正常关闭。
  * 现在每步用 runStep 包裹：单步失败只记录并继续，保证「审计落库」与
@@ -113,7 +113,7 @@ const gracefulShutdown = async (signal) => {
   // 直接以非零码终止，避免卡死的清理步骤无限拖住进程
   if (shuttingDown) {
     logger.warn(`收到重复 ${signal} 信号，跳过剩余清理并强制退出`);
-    // P1-13：强制退出路径同样需要留痕（这条日志解释了为何「跳过清理」）
+    // 强制退出路径同样需要留痕（这条日志解释了为何「跳过清理」）
     return exitAfterFlush(1);
   }
   shuttingDown = true;
@@ -251,7 +251,7 @@ const gracefulShutdown = async (signal) => {
     });
   });
 
-  // P1-13：正常关闭路径同样要让日志落地——延时 500ms 让 winston 的异步 transport
+  // 正常关闭路径同样要让日志落地——延时 500ms 让 winston 的异步 transport
   // 把队列写完再 exit。这里**不调用** logger.end()（F-187：end() 对落盘零收益，
   // 却会让这 500ms 窗口内的任何一条日志同步抛 ERR_STREAM_WRITE_AFTER_END）；
   // SIEM 缓冲的排空也不靠它，由上一步显式 await close() 完成。
@@ -270,7 +270,7 @@ const startServer = async () => {
     // 先于运行时拓扑校验执行，使校验能据 Redis 是否就绪区分已外置/仍单进程的机制。
     await sharedCache.initSharedCache();
 
-    // 运行时拓扑校验（P3-19）：本服务十余处机制依赖单进程假设
+    // 运行时拓扑校验：本服务十余处机制依赖单进程假设
     // （审计哈希链、审计 WAL、限流计数、用户缓存等），
     // 检测到多进程迹象时在启动日志里列出确切的失效清单
     assertSingleProcessAssumptions();
@@ -325,7 +325,7 @@ const startServer = async () => {
         // 显式要求 HTTPS（ENABLE_HTTPS=true）却加载失败时，禁止静默降级为明文 HTTP：
         // 降级会让令牌/Cookie 以明文传输，属于安全策略失效，直接非零退出交由运维介入
         logger.error(`TLS 证书加载失败（cert=${tlsCert}, key=${tlsKey}）：${tlsErr.message}`);
-        // P1-13：启动期致命错误最需要取证，等日志落盘后再退出
+        // 启动期致命错误最需要取证，等日志落盘后再退出
         return exitAfterFlush(1);
       }
     } else {
@@ -340,11 +340,11 @@ const startServer = async () => {
       } else {
         logger.error(`HTTP 服务器监听出错：${err ? err.message : err}`);
       }
-      // P1-13：端口占用等监听错误必须留痕，等日志落盘后再退出
+      // 端口占用等监听错误必须留痕，等日志落盘后再退出
       return exitAfterFlush(1);
     });
 
-    // 【M-09】启动期从 DB 重同步审计链链尾，清除可能的「幻影链尾」。
+    // 【】启动期从 DB 重同步审计链链尾，清除可能的「幻影链尾」。
     //
     // 成因：链尾推进发生在 ODM 的 pre('save') 钩子内（见 models/auditLogHooks.js），
     // 而文档落库在钩子之后。若进程恰在「已推进链尾、尚未完成 insert」之间被强杀
@@ -382,7 +382,7 @@ const startServer = async () => {
       // 启动后台清理任务
       startAlertCleanup();
       startCaptchaCleanup();
-      // 统计缓存定时清理（P3-23：原为模块加载期自启动，现与其余后台任务口径一致）
+      // 统计缓存定时清理（原为模块加载期自启动，现与其余后台任务口径一致）
       statsCache.startCleanup();
       // 权限缓存定时清理（报告 O-4：与其余后台任务 start*/stop* 口径一致）
       userPermissionService.startCleanup();
@@ -423,7 +423,7 @@ const startServer = async () => {
     process.on('SIGINT', () => gracefulShutdown('SIGINT'));
   } catch (error) {
     logger.error(`服务器启动失败：${error.message}`);
-    // P1-13：等日志落盘后再退出。原为紧接 process.exit(1)，而 winston 的
+    // 等日志落盘后再退出。原为紧接 process.exit(1)，而 winston 的
     // 文件 transport 是异步的——「服务器启动失败」这条最关键的日志实测会丢。
     return exitAfterFlush(1);
   }
@@ -440,7 +440,7 @@ const startServer = async () => {
 // unhandledRejection（见 utils/loggerFlush.js 的 bestEffortDrain 注释）。
 const CRASH_DRAIN_BUDGET_MS = 500;
 
-// P3-33：进程即将退出前必须 flush 审计缓冲——内存里可能有上百条已确认
+// 进程即将退出前必须 flush 审计缓冲——内存里可能有上百条已确认
 // 响应给客户端、但尚未落库的审计记录，直接 exit 会让它们随进程消失
 // （WAL 能在下次启动重放，但重放依赖进程能正常再启动，不能作为唯一保障）。
 process.on('uncaughtException', (error) => {

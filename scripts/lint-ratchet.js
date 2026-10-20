@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * ESLint 体积 / 复杂度棘轮（O-3 第六档 + E-02 第七档）
+ * ESLint 体积 / 复杂度棘轮（O-3 第六档 + 第七档）
  *
  * 背景：max-lines / max-lines-per-function（体积，第六档）与 complexity
- * （圈复杂度，E-02 第七档）以 warn 级接入（eslint.config.js）。这类债
+ * （圈复杂度，第七档）以 warn 级接入（eslint.config.js）。这类债
  * 与 linter 错误性质不同——后者清零即收，前者须随瘦身/拆函数逐步消化，
  * 因此不走「清零提 error」，而是逐文件计数基线：
  *
@@ -63,7 +63,14 @@ const BASELINE_PATH = path.join(repoRoot, 'eslint.ratchet.json');
 // npm run lint 打印、计入"45 warning"的观感，却**不进棘轮账本**——此后它随便长都不红。
 // 曾有 e2e 被漏掉（本文件实测目标集与 lint 目标集的一致性由
 // src/tests/security/gateSelfTest.test.js 钉住，改一处漏一处会立即转红）。
-const LINT_TARGETS = ['src', 'scripts', 'e2e', 'eslint.config.js'];
+const LINT_TARGETS = [
+  'src',
+  'scripts',
+  'migrations',
+  'migrate-mongo-config.js',
+  'e2e',
+  'eslint.config.js',
+];
 
 /** 路径统一为仓库相对 + 正斜杠，保证基线跨端（Windows/CI）可比 */
 const toRepoRelative = (filePath) => path.relative(repoRoot, filePath).replace(/\\/g, '/');
@@ -310,7 +317,7 @@ const main = async () => {
   console.log(`[lint-ratchet] 通过：${Object.keys(current).length} 个含 warn 文件均未超过基线。`);
 };
 
-// E-02 加固（2026-09-16）：仅在直接执行时跑 main，并导出纯函数供单测。
+// 加固：仅在直接执行时跑 main，并导出纯函数供单测。
 // 原实现 `main()` 在文件尾部无条件调用——任何 `require()` 本模块的代码
 // （单测、工具链）都会连带跑一遍全量 ESLint 并在有回退时 process.exit(1)，
 // 把「引个工具」变成「可能拖垮调用方进程」。与 L-24 的生成器副作用同源。

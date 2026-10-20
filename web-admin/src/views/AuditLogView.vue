@@ -661,7 +661,10 @@ const loadStats = async () => {
       statsLoaded.value = true
     }
   } catch (e) {
-    // 统计加载失败，静默处理
+    // A-2：概览查询失败（503 degraded）时隐藏统计卡片，不渲染一排 0——
+    // 「零风险」与「数据不可用」是相反结论。提示由 api 响应拦截器统一负责。
+    statsLoaded.value = false
+    compliance.value = null
   }
 }
 

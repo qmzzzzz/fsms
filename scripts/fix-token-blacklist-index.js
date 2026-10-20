@@ -27,7 +27,7 @@ require('dotenv').config();
 require('../src/config/secrets').hydrateSecretsFromFiles();
 const mongoose = require('mongoose');
 
-// M-08：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
+// 破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明
 const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
 
 const APPLY = process.argv.includes('--apply');
@@ -78,7 +78,7 @@ async function cleanupOrphans(coll, countedBefore) {
   const { uri, dbName, host, isFallback } = resolveMongoUri({
     scriptName: 'fix-token-blacklist-index.js',
   });
-  // M-08：fail-closed——--apply 类操作必须显式声明 ALLOWED_SOURCE_DB。
+  // fail-closed——--apply 类操作必须显式声明 ALLOWED_SOURCE_DB。
   // 原先只需单个 --apply 即可删除索引与历史文档，且默认回退本地库。
   //
   // 顺序要求（本次改动修的正是不一致的那一维）：白名单校验必须在 connect **之前**。

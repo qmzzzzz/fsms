@@ -47,8 +47,8 @@ describe('errorCodes 注册表', () => {
     expect(validateRegistry()).toEqual([]);
   });
 
-  test('关键防枚举路径使用统一凭证码（M-5）：三种账户状态真实登录返回同一码', async () => {
-    // M-5 口径（2026-09-15 收紧后对齐）：登录/凭据校验失败一律返回
+  test('关键防枚举路径使用统一凭证码：三种账户状态真实登录返回同一码', async () => {
+    // 口径（2026-09-15 收紧后对齐）：登录/凭据校验失败一律返回
     // AUTH_INVALID_CREDENTIALS。注册表中的 ACCOUNT_DISABLED/LOCKED 等码
     // 仅供管理端操作与前端结构化错误映射使用。
     const forbiddenCodes = ['AUTH_ACCOUNT_INACTIVE', 'AUTH_ACCOUNT_LOCKED'];

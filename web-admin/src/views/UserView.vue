@@ -910,7 +910,9 @@ const handleDelete = async (row) => {
     ElMessage.success(t('messages.deleteSuccess'))
     loadData()
   } catch (e) {
-    if (e !== 'cancel') {
+    // Element Plus 的取消与右上角关闭都以字符串 reject（'cancel' / 'close'），
+    // 二者都是「用户没做决定」，不是删除失败；只有其它异常才提示。
+    if (!['cancel', 'close'].includes(e)) {
       ElMessage.error(t('messages.deleteFailed'))
     }
   }
@@ -1029,7 +1031,9 @@ const submitForm = async () => {
         ElMessage.error(
           e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
             ? t('login.publicKeyPinMismatch')
-            : t('login.encryptionFailed')
+            : e?.code === 'INSECURE_CONTEXT'
+              ? t('login.insecureContext')
+              : t('login.encryptionFailed')
         )
         return 'BLOCKED'
       })

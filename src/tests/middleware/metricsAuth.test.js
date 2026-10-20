@@ -20,7 +20,7 @@ const logger = require('../../utils/logger');
  * @param token  METRICS_TOKEN（''=未配置）
  * @param peerIp 可选：模拟 TCP 对端地址。
  *
- * 【M-07 后测试口径变更】内网判定已从 req.ip（受 X-Forwarded-For 影响）
+ * 【此后测试口径变更】内网判定已从 req.ip（受 X-Forwarded-For 影响）
  * 改为 req.socket.remoteAddress（取自 TCP 连接，不可伪造）。因此**不能再
  * 用 X-Forwarded-For 模拟"来自公网"**——那正是被修复的绕过向量。改为
  * 覆写 socket.remoteAddress 来模拟真实对端；XFF 保留仅用于验证它已失效。
@@ -94,18 +94,18 @@ describe('metricsAuth /metrics 应用层鉴权纵深', () => {
       expect(res.body.success).toBe(false);
     });
 
-    // ==================== M-07 回归：XFF 不可再绕过内网判定 ====================
+    // ==================== 回归：XFF 不可再绕过内网判定 ====================
     // 修复前判定用 req.ip，而 req.ip 在 trust proxy 下采纳 X-Forwarded-For：
     // 直连 app 端口的攻击者发 `X-Forwarded-For: 127.0.0.1` 即被判为内网来源，
     // 跳过令牌校验，可读取 QPS/延迟/错误计数与安全告警计数（侦察面）。
     // 修复后判定改用 req.socket.remoteAddress（取自 TCP 连接，不可伪造）。
-    test('M-07 - 伪造 X-Forwarded-For: 127.0.0.1 无法伪装内网（socket 为公网 → 401）', async () => {
+    test('伪造 X-Forwarded-For: 127.0.0.1 无法伪装内网（socket 为公网 → 401）', async () => {
       const res = await request(externalApp).get('/metrics').set('X-Forwarded-For', '127.0.0.1');
       expect(res.status).toBe(401);
       expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
     });
 
-    test('M-07 - 反向验证：socket 为回环、XFF 为公网 → 仍放行（判定只看 socket）', async () => {
+    test('反向验证：socket 为回环、XFF 为公网 → 仍放行（判定只看 socket）', async () => {
       const res = await request(app).get('/metrics').set('X-Forwarded-For', '8.8.8.8');
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ok: true });

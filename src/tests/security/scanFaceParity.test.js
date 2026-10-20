@@ -11,8 +11,9 @@
  *
  * 本闸只登记、不改门禁脚本：把 6 个旁路收进 lint 目标集要同时改 `package.json` 的 `scripts.lint`
  * 与 `scripts/lint-ratchet.js` 的 `LINT_TARGETS`（只改前者会让 `gateSelfTest.test.js` 的
- * "棘轮必须覆盖每个 lint 目标"立刻红），而 `scripts/lint-ratchet.js` 有 +152 行未提交的在途改动
- * 待独立评审（见台账批次 62 的"门禁脚本自身的在途改动待独立评审"）。修法已作为交接项给出。
+ * "棘轮必须覆盖每个 lint 目标"立刻红）。2026-10-20 审计整改已按这条路径把 `migrations/` 五个
+ * 迁移与 `migrate-mongo-config.js` 收进两条 lane，登记表随之下调；剩余两条旁路（
+ * `playwright.config.js`、有理由除外的 `scripts/perf/k6-*.js`）仍按双向判据钉住。
  *
  * 登记表是**双向**的：新增一个未登记的旁路文件即红；旁路被真的修好之后，残留的登记项同样即红
  * （届时删掉那几行即可，不要删用例）。
@@ -39,12 +40,6 @@ const SKIP_DIRS = new Set([
  * 且理由必须能在 `eslint.config.js` 的 `ignores` 里找到实据（见用例 5）。
  */
 const LINT_BLIND = [
-  { file: 'migrations/20260830000000-backfill-token-version.js', because: '' },
-  { file: 'migrations/20260831000000-reconcile-audit-index-options.js', because: '' },
-  { file: 'migrations/20260919000000-reconcile-audit-ttl-to-retention.js', because: '' },
-  { file: 'migrations/20260926000000-cursor-tiebreak-compound-indexes.js', because: '' },
-  { file: 'migrations/20260928000000-audit-username-ci-index.js', because: '' },
-  { file: 'migrate-mongo-config.js', because: '' },
   { file: 'playwright.config.js', because: '' },
   { file: 'scripts/perf/k6-core-journeys.js', because: 'scripts/perf/k6-*.js' },
 ];
@@ -223,10 +218,11 @@ describe('lint 与 format 两条门禁的扫描面必须同源', () => {
       expect(ESLINT_IGNORES).toContain(e.because);
       expect(isIgnoredBy(e.file, [e.because])).toBe(true);
     }
-    // 无理由的债也要有数：当前 8 条旁路里 7 条待修（交接项），这个数字只该往下走。
+    // 无理由的债也要有数：当前 2 条旁路里 1 条待修（`playwright.config.js`），这个数字只该往下走。
     // 2026-09-28 由 6→7：补记 20260928000000 迁移文件入库时漏掉的登记（当时被
     // test job 的 18.x fail-fast 连坐掩盖，红灯从未真正跑到这里）。
-    expect(LINT_BLIND.filter((e) => !e.because)).toHaveLength(7);
+    // 2026-10-20 由 7→1：迁移与 migrate-mongo-config.js 已并入 lint + 棘轮目标集。
+    expect(LINT_BLIND.filter((e) => !e.because)).toHaveLength(1);
     // 前端 lane 的忽略表是**按文本抽**出来的（ESM 在 jest 的 CJS 运行时 require 不动）。
     // 抽取会静默少读：不判"抽到了几条"，而是判"文件里有这个键 ⇒ 抽取器一定不空"。
     // 缺了这条，哪天 ignores 写成 `ignores: getIgnores()` 或换行形制变了，抽取器返回 []，

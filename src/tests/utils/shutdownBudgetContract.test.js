@@ -35,6 +35,7 @@ const path = require('path');
 
 const REPO_ROOT = path.join(__dirname, '..', '..', '..');
 const shutdownBudget = require('../../utils/shutdownBudget');
+const { flushEventLoop } = require('../helpers/waitFor');
 
 /**
  * 取 docker-compose.yml 里 app 服务的块：按两空格缩进的服务名切块，再用 APP_IMAGE 认出它。
@@ -364,8 +365,9 @@ describe('关停链总预算与部署窗口的契约（F-103）', () => {
       const abandoned = await guardStep(late, 5);
       expect(abandoned.timedOut).toBe(true);
       rejectLate(new Error('late rejection after abandonment'));
-      await new Promise((r2) => setTimeout(r2, 50));
-      await new Promise((r2) => setImmediate(r2));
+      // 让出事件循环若干轮：unhandledRejection 在微任务清空后的下一拍触发，
+      // 不需要（也不应该）用固定 50ms 窗口观察
+      await flushEventLoop(3);
       expect(seen).toEqual([]);
     } finally {
       process.removeListener('unhandledRejection', onHideal);

@@ -52,7 +52,7 @@ const PAYLOAD_FIELDS_V2 = [
 const PAYLOAD_FIELDS_V3 = [...PAYLOAD_FIELDS_V2];
 
 /**
- * v4：补进 P1-12 加到 schema 却从未进哈希的四个字段
+ * v4：补进加到 schema 却从未进哈希的四个字段
  * （targetType / targetId / dataType / description）。
  * 这四字段承载「谁举报了谁 / 看了哪类敏感数据 / 操作描述」，正是取证要看的值；
  * 不在 payload 里就意味着落库后可被任意改写而三层校验一层都不会红。

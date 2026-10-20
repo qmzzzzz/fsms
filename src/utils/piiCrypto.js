@@ -1,7 +1,7 @@
 /**
- * PII 字段加密（P1-②，2026-09-30）——at-rest 加密的单一事实来源
+ * PII 字段加密——at-rest 加密的单一事实来源
  *
- * 审计缺口核查（deliverables/安全缺口核查-2026-09-30.md P1-②）指出：
+ * 审计缺口：
  * realName/phone 以明文入库，且 utils/encryption.js 的消费点全部是密钥/MFA
  * secret，没有一处用于业务 PII —— 一旦库文件或备份泄露，PII 即刻可用
  * （个保法第 51 条要求加密/去标识化）。

@@ -1,5 +1,5 @@
 /**
- * P1-1 回归：refresh 轮换不得因遗留唯一索引被误判为「重放」
+ * 回归：refresh 轮换不得因遗留唯一索引被误判为「重放」
  *
  * 背景（实测事故）：tokenblacklists 集合残留旧 schema 的 `token_1` 唯一索引
  * （旧版本存明文 token，改为 tokenHash 后索引未删）。新文档一律不含 token 字段，
@@ -46,15 +46,24 @@ const dupKeyError = (keyPattern, indexName) => {
 
 const futureExpSec = () => Math.floor(Date.now() / 1000) + 3600;
 
-describe('P1-1 refresh 轮换：E11000 来源区分', () => {
+/** 让 findOne({tokenHash}).select('reason').lean() 返回指定既有记录 */
+const mockExistingEntry = (doc) => {
+  TokenBlacklistModel.findOne.mockReturnValueOnce({
+    select: jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(doc),
+    }),
+  });
+};
+
+describe('refresh 轮换：E11000 来源区分', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
   describe('consumeToken', () => {
-    test('插入成功即取得令牌所有权（返回 true）', async () => {
+    test('插入成功即取得令牌所有权（返回 claimed=true）', async () => {
       TokenBlacklistModel.create.mockResolvedValueOnce({});
-      await expect(consumeToken('rt-fresh', futureExpSec())).resolves.toBe(true);
+      await expect(consumeToken('rt-fresh', futureExpSec())).resolves.toEqual({ claimed: true });
 
       // 落库的是哈希而非明文，且标记 reason=rotate 以区分登出
       const doc = TokenBlacklistModel.create.mock.calls[0][0];
@@ -63,11 +72,51 @@ describe('P1-1 refresh 轮换：E11000 来源区分', () => {
       expect(doc.reason).toBe('rotate');
     });
 
-    test('tokenHash 冲突判定为真实重放（返回 false）', async () => {
+    test('tokenHash 冲突且首次原因为 rotate → 真实重放', async () => {
       TokenBlacklistModel.create.mockRejectedValueOnce(
         dupKeyError({ tokenHash: 1 }, 'tokenHash_1')
       );
-      await expect(consumeToken('rt-replayed', futureExpSec())).resolves.toBe(false);
+      mockExistingEntry({ reason: 'rotate' });
+      await expect(consumeToken('rt-replayed', futureExpSec())).resolves.toEqual({
+        claimed: false,
+        reason: 'rotate',
+      });
+    });
+
+    test('tokenHash 冲突且首次原因为 logout → 仅登出后旧串重放（S-6）', async () => {
+      TokenBlacklistModel.create.mockRejectedValueOnce(
+        dupKeyError({ tokenHash: 1 }, 'tokenHash_1')
+      );
+      mockExistingEntry({ reason: 'logout' });
+      await expect(consumeToken('rt-logged-out', futureExpSec())).resolves.toEqual({
+        claimed: false,
+        reason: 'logout',
+      });
+    });
+
+    test('既有记录缺 reason（历史数据）→ reason=null，调用方按重放 fail-closed', async () => {
+      TokenBlacklistModel.create.mockRejectedValueOnce(
+        dupKeyError({ tokenHash: 1 }, 'tokenHash_1')
+      );
+      mockExistingEntry({});
+      await expect(consumeToken('rt-legacy-doc', futureExpSec())).resolves.toEqual({
+        claimed: false,
+        reason: null,
+      });
+    });
+
+    test('重放查证失败向上抛错，不得默认按 logout 轻放', async () => {
+      TokenBlacklistModel.create.mockRejectedValueOnce(
+        dupKeyError({ tokenHash: 1 }, 'tokenHash_1')
+      );
+      TokenBlacklistModel.findOne.mockImplementationOnce(() => ({
+        select: jest.fn().mockReturnValue({
+          lean: jest.fn().mockRejectedValue(new Error('read preference timeout')),
+        }),
+      }));
+      await expect(consumeToken('rt-lookup-down', futureExpSec())).rejects.toMatchObject({
+        code: 'BLACKLIST_SERVICE_UNAVAILABLE',
+      });
     });
 
     test('遗留 token_1 冲突抛 BLACKLIST_INDEX_CONFLICT，绝不降级为重放', async () => {
@@ -99,6 +148,26 @@ describe('P1-1 refresh 轮换：E11000 来源区分', () => {
   });
 
   describe('blacklistToken', () => {
+    test('默认以 logout 入库，且用 $setOnInsert 不覆盖既有 rotate 原因（S-6）', async () => {
+      TokenBlacklistModel.findOneAndUpdate.mockResolvedValueOnce({});
+      await blacklistToken('rt-on-logout', futureExpSec());
+
+      const [filter, update, options] = TokenBlacklistModel.findOneAndUpdate.mock.calls[0];
+      expect(filter).toEqual({ tokenHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      expect(update.$setOnInsert).toMatchObject({ reason: 'logout' });
+      // 不允许 $set 覆盖：否则登出会把「轮换产生的重放」降级成可轻放的 logout
+      expect(update.$set).toBeUndefined();
+      expect(options).toMatchObject({ upsert: true });
+    });
+
+    test('可显式指定 reason=rotate', async () => {
+      TokenBlacklistModel.findOneAndUpdate.mockResolvedValueOnce({});
+      await blacklistToken('rt-explicit', futureExpSec(), 'rotate');
+      expect(TokenBlacklistModel.findOneAndUpdate.mock.calls[0][1].$setOnInsert.reason).toBe(
+        'rotate'
+      );
+    });
+
     test('tokenHash 冲突视为已在黑名单，静默返回且不记 error', async () => {
       TokenBlacklistModel.findOneAndUpdate.mockRejectedValueOnce(
         dupKeyError({ tokenHash: 1 }, 'tokenHash_1')
@@ -107,7 +176,7 @@ describe('P1-1 refresh 轮换：E11000 来源区分', () => {
       expect(logger.error).not.toHaveBeenCalled();
     });
 
-    test('非 tokenHash 冲突须抛错（P2-26 fail-closed：登出未生效不得报成功）', async () => {
+    test('非 tokenHash 冲突须抛错（fail-closed：登出未生效不得报成功）', async () => {
       TokenBlacklistModel.findOneAndUpdate.mockRejectedValueOnce(
         dupKeyError({ token: 1 }, 'token_1')
       );
@@ -132,7 +201,7 @@ describe('P1-1 refresh 轮换：E11000 来源区分', () => {
   });
 });
 
-describe('P1-1 启动期对账：reconcileTokenBlacklistIndexes', () => {
+describe('启动期对账：reconcileTokenBlacklistIndexes', () => {
   let reconcileTokenBlacklistIndexes;
   let collectionSpy;
 

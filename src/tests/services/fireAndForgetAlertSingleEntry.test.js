@@ -30,6 +30,7 @@
 const fs = require('fs');
 const path = require('path');
 const { jsCodeOnly } = require('../helpers/jsCodeOnly');
+const { flushEventLoop } = require('../helpers/waitFor');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 
@@ -145,7 +146,8 @@ describe('F-214 fire-and-forget 告警投递的单一入口', () => {
     test('reject 时记一条带告警类型的 error（"告警机器自己崩了"必须可见）', async () => {
       const { dispatch, spy } = loadFacade(jest.fn().mockRejectedValue(new Error('日志器不可用')));
       dispatch('unit_probe_type', 'critical', '探针消息', { probe: true });
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // 投递是 fire-and-forget：只让出事件循环若干轮，不承诺时长
+      await flushEventLoop(3);
       const msgs = spy.mock.calls.map((c) => String(c[0]));
       expect(msgs.some((m) => m.includes('unit_probe_type'))).toBe(true);
     });
@@ -153,7 +155,8 @@ describe('F-214 fire-and-forget 告警投递的单一入口', () => {
     test('对照臂：投递成功时不得出现该 error（上一条不是恒真）', async () => {
       const { dispatch, spy } = loadFacade(jest.fn().mockResolvedValue(undefined));
       dispatch('unit_probe_ok', 'critical', '探针消息', { probe: true });
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // 成功路径同样只需排空投递链（不得用固定时长掩盖「没投递」）
+      await flushEventLoop(3);
       const msgs = spy.mock.calls.map((c) => String(c[0]));
       expect(msgs.some((m) => m.includes('unit_probe_ok'))).toBe(false);
     });

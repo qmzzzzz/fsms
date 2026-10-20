@@ -20,7 +20,7 @@ function escapeHtml(str) {
  * 头像字段白名单校验（统一入口，供个人资料/管理员更新用户复用）
  * 允许：http(s) URL、/ 开头的相对图片路径、data:image 数据 URI（不含 svg，防存储型脚本注入）
  *
- * P3-9：相对路径分支必须拒绝协议相对地址（//evil.com/x.png）。
+ * 相对路径分支必须拒绝协议相对地址（evil.com/x.png）。
  * 原字符类 [\w\-./] 包含 /，导致 //evil.com/x.png 整体命中"站内路径"，
  * 浏览器按当前协议解析后会向第三方域发起请求（头像 URL 可用于
  * 去匿名化追踪查看者 IP/时区）。(?!\/) 保证 / 后不再跟 /。
@@ -132,7 +132,7 @@ const uniqueIdStrings = (list) =>
   Array.isArray(list) ? [...new Set(list.map(canonicalIdString))] : [];
 
 /**
- * 密码策略常量（P3-29）
+ * 密码策略常量
  *
  * PASSWORD_SPECIAL_REGEX 覆盖全部 ASCII 可打印标点，四段区间依次为：
  *   ! - /   (0x21-0x2F)   : - @  (0x3A-0x40)
@@ -204,7 +204,7 @@ const isBreachedPassword = (password) => {
  */
 const validatePasswordStrength = (password) => {
   if (!password || typeof password !== 'string') return '密码不能为空';
-  // P3-29：长度上限必须在复杂度规则之前判定——正则遍历超长串本身就是开销，
+  // 长度上限必须在复杂度规则之前判定——正则遍历超长串本身就是开销，
   // 且 bcrypt 的 72 字节截断会让「超长口令」的后缀失效（等价口令绕过）
   if (password.length > PASSWORD_MAX_LENGTH) {
     return `密码长度不能超过 ${PASSWORD_MAX_LENGTH} 个字符`;
@@ -382,7 +382,7 @@ const stripControlChars = (value, maxLength = 1024) => {
   if (typeof value !== 'string') return value;
   // C0/C1 控制字符 + DEL + Unicode 行终止符（\u2028/\u2029）与双向控制符（\u202A-\u202E），
   // 后者同样可注入日志伪造多行输出或篡改终端显示方向。
-  // P3-29 补：\u2066-\u2069 是 Unicode 6.3 新增的双向隔离符（LRI/RLI/FSI/PDI），
+  // 补：\u2066-\u2069 是 Unicode 6.3 新增的双向隔离符（LRI/RLI/FSI/PDI），
   // 与 \u202A-\u202E 同属 Bidi 控制类，可实现 Trojan Source 式的显示顺序篡改，
   // 原区间上界停在 \u202E 恰好漏掉这四个码点
   // eslint-disable-next-line no-control-regex
@@ -430,7 +430,7 @@ const stripControlCharsDeep = (value, depth = 0) => {
 
 /**
  * 访问日志中需要打码的 query 参数名（小写、按整键/下划线边界匹配）
- * P3-32：morgan combined 会把完整 URL（含 query string）写入访问日志。
+ * morgan combined 会把完整 URL（含 query string）写入访问日志。
  * 审计日志的 body 有 SENSITIVE_KEYS 脱敏，query 却只做了控制字符清洗——
  * 一旦有接口以 query 传令牌/口令（导出下载链接、找回密码链接、第三方回调），
  * 明文就长期留存在 combined-*.log 里，且该文件的读取权限通常宽于审计库。

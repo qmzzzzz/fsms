@@ -86,7 +86,7 @@ const rejectPeerOrHigherTarget = async (req, res, { targetRoles, isSelf }) => {
 };
 
 /**
- * 数据范围闸（P0-1）：department 与 allowedIPs 都是「决定谁能看见什么/从哪能访问」的
+ * 数据范围闸：department 与 allowedIPs 都是「决定谁能看见什么/从哪能访问」的
  * 归属字段，不得由可见域之外的操作者改写。
  *
  * 背景（已端到端复现的跨部门越权链）：本接口此前只有层级校验（isSelf 例外 +
@@ -232,13 +232,12 @@ const updateUser = asyncHandler(async (req, res) => {
 
   await userService.saveUser(user);
 
-  // 用户状态变更时失效缓存（P3-3：解锁同样必须失效——
+  // 统计缓存：状态/部门变更都会改变所有查看者的聚合口径（A-1 全量失效）
+  statsCache.invalidateAll('user-update');
+  // 用户状态变更时失效缓存（解锁同样必须失效——
   // 原实现只对「变为非 active」失效，锁定/禁用解除后 authenticate 的
   // 60s 缓存仍持有旧的 status，合法用户最长 1 分钟仍被拒）
   if (status !== undefined) {
-    // 统计缓存：状态变更影响统计口径，目标用户与操作者（统计视角）均需失效
-    statsCache.invalidateByUserId(user._id);
-    statsCache.invalidateByUserId(req.user.userId);
     invalidateUserCache(user._id);
   }
 

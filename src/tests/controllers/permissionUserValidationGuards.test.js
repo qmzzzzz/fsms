@@ -9,8 +9,8 @@
  * ⚠️ 既往审计指出的边界（2026-09-20 逐条**内容复核**；原报告行号已漂移，按代码特征取证）
  *   标记：[仍有效] 复核后问题依旧 / [已修复] 已被后续修复解决 / [部分有效] 仅部分成立 /
  *   [已自陈] 用例内已记录并给出保留理由。复核证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.9 测试资产。
- *   - [已修复·P1-29] `:350-357` **双可能断言** `expect([403,200]).toContain(res.status)`——用例名声称验证越权拦截，实际允许 200 通过（原出处 2026-09-16 全面代码审计报告；**该报告已删除**，问题编号保留原样）
- *     复核：`:423` 已注释「P1-29 修复：原为 expect([403,200]).toContain —— 允许越权成功通过」，现为实测确定行为断言。
+ *   - [已修复] `:350-357` **双可能断言** `expect([403,200]).toContain(res.status)`——用例名声称验证越权拦截，实际允许 200 通过（原出处 2026-09-16 全面代码审计报告；**该报告已删除**，问题编号保留原样）
+ *     复核：`:423` 已注释「修复：原为 expect([403,200]).toContain —— 允许越权成功通过」，现为实测确定行为断言。
  *
  * 命名沿革：2026-09-20 由 `userPermBranches.test.js` 更名。旧名里的
  *   Coverage / Gap / Hardening / Branch 说的是「当初为什么写它」（补覆盖率基线），
@@ -430,7 +430,7 @@ describe('permission/user 控制器零散分支补齐', () => {
     test('getUserById：数据范围外用户 → 403 横向越权拦截', async () => {
       const outsiderId = globalThis.__upbFixtures.outsiderId;
       const res = await sec.get(`/api/users/${outsiderId}`);
-      // 实测确定行为（P1-29 修复：原为 expect([403,200]).toContain —— 允许越权成功通过）；
+      // 实测确定行为（修复：原为 expect([403,200]).toContain —— 允许越权成功通过）；
       // 安全员（level 5 → dataScope=self）读其他部门用户 → assertRecordInScope 拒绝
       expect(res.status).toBe(403);
       expect(res.body.errors.errorCode).toBe('USER_VIEW_FORBIDDEN');

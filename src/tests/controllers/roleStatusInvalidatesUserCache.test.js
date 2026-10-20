@@ -3,7 +3,7 @@
  *
  * 角色 status 变更会改变两类授权输入的解析结果：
  *  1. userPermissionService 的「用户 -> 权限码」解析缓存（TTL 30s）
- *     —— 由 P1-14 失效，permissionCacheInvalidation.test.js 已覆盖。
+ *     —— 已失效，permissionCacheInvalidation.test.js 已覆盖。
  *  2. middleware/auth 的用户缓存（TTL 60s），它填充了 req.user.roles /
  *     req.user.roleCodes —— rbac.js 的 checkRole 优先读 roleCodes，
  *     rateLimit.js 的角色配额（SUPER_ADMIN 500 / SECURITY_ADMIN 400）也读它，

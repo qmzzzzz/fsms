@@ -8,13 +8,13 @@
  * - 默认只演练 DRILL/SHADOW 库。源库带 --apply-source 才允许清空回滚，
  *   避免误连生产库造成破坏。
  *
- * 评价报告 #21（破坏性脚本护栏）/ M-08：
+ * 评价报告 #21（破坏性脚本护栏）/
  * - 库名白名单（**fail-closed**）：--apply-source 只允许作用于显式列入
  *   ALLOWED_SOURCE_DB 白名单的库。**未设置白名单即拒绝执行**——原先未设置时
  *   等于不校验，与「默认安全、显式放开」相反，已修正；
  * - 目标库回显：执行前打印实际连接的数据库名，人工核对一眼可辨；
  * - 二次确认：--apply-source 需再传 --yes 才真正落斧（CI 里显式带 --yes）；
- * - **顺序纪律（M-08）**：--yes 与白名单两条护栏都在 `mongoose.connect` **之前**
+ * - **顺序纪律**：--yes 与白名单两条护栏都在 `mongoose.connect` **之前**
  *   求值，被拒绝的执行不向目标库发起任何 TCP/鉴权握手（与同族脚本同序）。
  */
 
@@ -28,7 +28,7 @@ const path = require('path');
 const zlib = require('zlib');
 const mongoose = require('mongoose');
 
-// M-08：破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。
+// 破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。
 // dbNameFromUri / hostFromUri 供"护栏前移"用：库名/主机必须从 URI 解析，
 // 不能取 connect 之后的 mongoose.connection.name（那正是"护栏晚于 connect"的来源）。
 const { assertApplyAllowed, dbNameFromUri, hostFromUri } = require('./destructiveGuard');
@@ -77,9 +77,9 @@ function parseArgs(argv) {
   return args;
 }
 
-/** #21 / M-08：源库白名单——生产库名必须显式列入才允许 --apply-source
+/** #21 / 源库白名单——生产库名必须显式列入才允许 --apply-source
  *
- * 【M-08 修复】原实现为 fail-open：
+ * 【修复】原实现为 fail-open：
  *   `if (allowList.length > 0 && !allowList.includes(dbName))`
  * 未设置 ALLOWED_SOURCE_DB 时 allowList 为空 → 条件恒假 → **白名单形同不存在**，
  * 与函数注释承诺的「默认安全、显式放开」相反。现改用共享护栏（fail-closed）：
@@ -150,7 +150,7 @@ async function restoreCollection(collection, file) {
 }
 
 /**
- * M-08 **顺序纪律**：--yes 与库名白名单两条护栏必须在**任何** TCP/鉴权握手之前求值。
+ * **顺序纪律**：--yes 与库名白名单两条护栏必须在**任何** TCP/鉴权握手之前求值。
  *
  * 原实现是「connect → 打印目标库 → 校验 --yes → 校验白名单」⇒ 一次"被拒绝的执行"
  * 仍然对目标库（可能就是生产库）完成了连接；库不可达时脚本卡在 30s serverSelection
@@ -202,7 +202,7 @@ if (require.main === module) {
       process.exit(2);
     }
 
-    // M-08 顺序纪律：护栏先于 connect（实现与理由见 assertDrillGuards 注释）。
+    // 顺序纪律：护栏先于 connect（实现与理由见 assertDrillGuards 注释）。
     assertDrillGuards({ applySource, confirmYes, uri });
 
     await fs.mkdir(backupDir, { recursive: true });
@@ -268,6 +268,6 @@ if (require.main === module) {
   });
 }
 
-// E-02 同型：导出纯函数供单测（不触发破坏性 IIFE），锁定 ObjectId/Date 往返无损
+// 同型：导出纯函数供单测（不触发破坏性 IIFE），锁定 ObjectId/Date 往返无损
 // 与参数解析的严格性（未知参数/缺值必须报错，不能静默变成一次真落斧）。
 module.exports = { toSerializable, fromSerializable, parseArgs };

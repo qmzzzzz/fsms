@@ -56,8 +56,16 @@ describe('占位类判据不回退内存', () => {
     await expect(cache.get('nonce-single')).resolves.toBe('v1');
 
     await cache.setIfAbsent('nonce-exp', 'v', 4);
-    await new Promise((r) => setTimeout(r, 12));
-    await expect(cache.setIfAbsent('nonce-exp', 'v2', 4)).resolves.toBe(true);
+    // TTL 记账走 Date.now()：推过 4ms 边界即可，无需真实睡眠
+    const shiftedNow = Date.now() + 10;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(shiftedNow);
+    let reacquired;
+    try {
+      reacquired = await cache.setIfAbsent('nonce-exp', 'v2', 4);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(reacquired).toBe(true);
   });
 
   test('边界：真正的缓存读写在同样状态下仍回退内存；计数类判据收紧（F-211）', async () => {

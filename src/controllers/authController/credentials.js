@@ -47,7 +47,7 @@ const register = asyncHandler(async (req, res) => {
     case 'OK':
       break;
     default:
-      // 未知 outcome 一律 fail-closed（依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查），绝不落到成功分支
+      // 未知 outcome 一律 fail-closed（全仓 outcome switch 普查口径），绝不落到成功分支
       return rejectUnknownOutcome(res, 'register', result.outcome);
   }
 
@@ -197,19 +197,18 @@ const login = asyncHandler(async (req, res) => {
     case 'OK':
       break;
     default:
-      // 未知 outcome 一律 fail-closed（依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查），绝不落到成功分支
+      // 未知 outcome 一律 fail-closed（全仓 outcome switch 普查口径），绝不落到成功分支
       return rejectUnknownOutcome(res, 'login', result.outcome);
   }
 
-  // I-01：登录成功同时通过 httpOnly cookie 下发两个令牌；
-  // 响应体保留 token/refreshToken 字段以兼容现有测试与 API 消费者
+  // I-01：登录成功只通过 httpOnly cookie 下发两个令牌。
+  // 响应体刻意不回传令牌——JS 可读的副本会让 XSS 绕过 httpOnly 直接窃取 refresh token，
+  // 而前端自 I-01 起只从 cookie 取身份（web-admin store/auth.js），回传没有任何消费方。
   setAuthCookies(res, result.token, result.refreshToken);
 
   return ApiResponse.success(
     res,
     {
-      token: result.token,
-      refreshToken: result.refreshToken,
       expires: config.jwt.expire,
       user: result.user,
     },
@@ -222,7 +221,7 @@ const login = asyncHandler(async (req, res) => {
  *
  * 顺序无关（查表，不是 switch 链）；**'OK' 刻意不在表内**——不在表内即视为
  * 「未知 outcome」，落到 fail-closed 的 rejectUnknownOutcome，绝不落到成功分支
- * （依据 `deliverables/AGENT工作总账与待办-2026-09-21.md` §14.6 全仓 outcome switch 普查）。
+ * （全仓 outcome switch 普查口径）。
  * 用 Map 而不是普通对象：普通对象会把 'constructor'/'__proto__' 这类原型键读成真值。
  *
  * 值写成「直接调 codeError 的箭头函数」而不是「错误码字符串」是有意的：
@@ -265,7 +264,7 @@ const refreshToken = asyncHandler(async (req, res) => {
   try {
     result = await authService.refreshSession(refreshTokenRaw, { ip: req.ip });
   } catch (error) {
-    // 与拆分前口径一致：刷新链路上的任何未预期异常（含数据库故障）
+    // 刷新链路上的任何未预期异常（含数据库故障）
     // 一律按「无效的刷新令牌」拒绝，不把内部错误细节暴露给客户端
     return ApiResponse.codeError(res, 'REFRESH_TOKEN_INVALID');
   }
@@ -275,18 +274,10 @@ const refreshToken = asyncHandler(async (req, res) => {
     return respond ? respond(res) : rejectUnknownOutcome(res, 'refreshToken', result.outcome);
   }
 
-  // 轮换时同步轮换两个 cookie（I-01）；响应体保留 tokens 字段兼容既有消费者
+  // 轮换时同步轮换两个 cookie（I-01）；令牌同样不进响应体（见 login 的成功分支）
   setAuthCookies(res, result.token, result.refreshToken);
 
-  return ApiResponse.success(
-    res,
-    {
-      token: result.token,
-      refreshToken: result.refreshToken,
-      expires: config.jwt.expire,
-    },
-    'Token 刷新成功'
-  );
+  return ApiResponse.success(res, { expires: config.jwt.expire }, 'Token 刷新成功');
 });
 
 module.exports = {

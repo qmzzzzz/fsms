@@ -195,8 +195,6 @@ describe('LoginView 成功路径', () => {
       data: {
         success: true,
         data: {
-          token: 'T',
-          refreshToken: 'R',
           user: { _id: 'u1', username: 'alice', permissions: ['device:read'] },
         },
       },

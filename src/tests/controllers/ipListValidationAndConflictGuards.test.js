@@ -35,6 +35,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { waitFor } = require('../helpers/waitFor');
 
 describe('ipListController 分支补齐', () => {
   let app;
@@ -55,24 +56,28 @@ describe('ipListController 分支补齐', () => {
    *
    * 两点必须说清，否则这条判据是假的：
    *  - AuditLog.record 是 fire-and-forget（控制器不 await），响应回来时落库可能还在路上，
-   *    所以要轮询；轮询不到就是 null，由用例断红——不做"等不到就跳过"。
+   *    所以用 waitFor 轮询到该行真实出现；等不到就由 waitFor 抛超时错误——
+   *    不做"等不到就跳过"，也不返回 null 让断言在别处含糊转红。
    *  - username 带 stamp，本套件之外没有同名人，因此查到的就是这次 403 留下的痕迹。
    *    再加 method 收窄：POST/DELETE 两条用例共用同一操作员，否则后者会读到前者。
    */
   const findEscalationAudit = async (method) => {
     const AuditLog = require('../../models/AuditLog');
-    for (let i = 0; i < 80; i += 1) {
-      const doc = await AuditLog.findOne({
-        username: secUserName,
-        action: 'privilege_escalation',
-        method,
-      })
-        .sort({ _id: -1 })
-        .lean();
-      if (doc) return doc;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    return null;
+    let doc = null;
+    await waitFor(
+      async () => {
+        doc = await AuditLog.findOne({
+          username: secUserName,
+          action: 'privilege_escalation',
+          method,
+        })
+          .sort({ _id: -1 })
+          .lean();
+        return !!doc;
+      },
+      { label: `越权审计落库（method=${method}, username=${secUserName}）` }
+    );
+    return doc;
   };
 
   beforeAll(async () => {
@@ -173,7 +178,7 @@ describe('ipListController 分支补齐', () => {
     request(app).post(url).set('Authorization', `Bearer ${secToken}`).send(body);
   const secDel = (url) => request(app).delete(url).set('Authorization', `Bearer ${secToken}`);
 
-  test('GET ?type=非法值 → 路由校验链 400（P3-5：校验结果必须被消费）', async () => {
+  test('GET ?type=非法值 → 路由校验链 400（校验结果必须被消费）', async () => {
     const res = await superGet('/api/security/ip-list?type=bogus').set(
       'Authorization',
       `Bearer ${superToken}`

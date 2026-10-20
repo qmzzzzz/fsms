@@ -46,6 +46,7 @@ const {
   BAN_ESCALATION_WINDOW_MS,
 } = require('../../services/securityAlert');
 const AuditLog = require('../../models/AuditLog');
+const { waitFor, flushEventLoop } = require('../helpers/waitFor');
 
 const stamp = Date.now().toString().slice(-7);
 // 每条用例独占一个 IP（见文件头「隔离纪律 1」）：一个键只归一条用例，不复用
@@ -75,16 +76,6 @@ let banResult;
  * 用例的 beforeEach 之后才 push 进来（见文件头「隔离纪律 2」）。
  */
 const bansFor = (ip) => banCalls.filter((c) => c.ip === ip);
-
-/** 轮询等待升级链路落地（fire-and-forget，中间是真实 DB 往返） */
-const waitUntil = async (fn, timeoutMs = 5000) => {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (fn()) return true;
-    if (Date.now() > deadline) return false;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-};
 
 /** 驱动一次限流触发（429 路径的入参形状，仅 ip 被用到） */
 const hit = (ip, limiter = 'general') => escalation.noteRateLimitHit({ ip }, limiter);
@@ -145,8 +136,8 @@ describe('rateLimitEscalation：按信号分类（本次重构的核心）', () 
     flood(IPS.auth, 'strict', authThreshold + 2);
 
     expect(escalation.peekIp(IPS.auth)[CLASS_AUTH].total).toBeGreaterThanOrEqual(authThreshold);
-    // 给异步链路留时间：这里不该有任何封禁动作
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    // 已认证类升级分支只同步记指标/日志，不启动异步链路；让出事件循环后断言
+    await flushEventLoop(2);
     expect(bansFor(IPS.auth)).toHaveLength(0);
     expect(
       await AuditLog.countDocuments({
@@ -162,7 +153,7 @@ describe('rateLimitEscalation：按信号分类（本次重构的核心）', () 
     // 同时给 volume 桶一点压力但远不到 100
     flood(IPS.anonMixed, 'general', 5);
 
-    expect(await waitUntil(() => bansFor(IPS.anonMixed).length === 1)).toBe(true);
+    await waitFor(() => bansFor(IPS.anonMixed).length === 1, { label: 'ANON 封禁落地' });
     const state = escalation.peekIp(IPS.anonMixed);
     expect(state[CLASS_ANON_ABUSE].total).toBeGreaterThanOrEqual(anonThreshold);
     expect(state[CLASS_VOLUME].total).toBe(5);
@@ -172,7 +163,7 @@ describe('rateLimitEscalation：按信号分类（本次重构的核心）', () 
   test('反证混检保护：体量打满不会顺带把 ANON 也推到点', async () => {
     // 只打 general：ANON 桶必须仍是 0 次
     flood(IPS.volume, 'general', volumeThreshold + 1);
-    expect(await waitUntil(() => bansFor(IPS.volume).length === 1)).toBe(true);
+    await waitFor(() => bansFor(IPS.volume).length === 1, { label: 'VOLUME 封禁落地' });
     const state = escalation.peekIp(IPS.volume);
     expect(state[CLASS_ANON_ABUSE].total).toBe(0);
     expect(state[CLASS_VOLUME].total).toBeGreaterThanOrEqual(volumeThreshold);
@@ -190,7 +181,7 @@ describe('rateLimitEscalation：令牌桶语义（取代固定窗口）', () => 
   test('阈值内只计数，不写审计、不封禁', async () => {
     flood(IPS.anon, 'captcha', anonThreshold);
     expect(escalation.peekIp(IPS.anon)[CLASS_ANON_ABUSE].total).toBe(anonThreshold);
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await flushEventLoop(2);
     expect(bansFor(IPS.anon)).toHaveLength(0);
     expect(
       await AuditLog.countDocuments({ action: ALERT_TYPES.RATE_LIMIT_ABUSE, ip: IPS.anon })
@@ -200,7 +191,7 @@ describe('rateLimitEscalation：令牌桶语义（取代固定窗口）', () => 
   test('达阈值（净消耗到负）：审计落库 + addToBlacklist 第一档 1h + auto 来源', async () => {
     flood(IPS.failsoft, 'login-ip', anonThreshold + 1);
 
-    expect(await waitUntil(() => bansFor(IPS.failsoft).length === 1)).toBe(true);
+    await waitFor(() => bansFor(IPS.failsoft).length === 1, { label: 'fail-soft 封禁落地' });
     expect(bansFor(IPS.failsoft)[0]).toMatchObject({
       ip: IPS.failsoft,
       durationMs: ESCALATION_TIERS[0],
@@ -223,7 +214,7 @@ describe('rateLimitEscalation：令牌桶语义（取代固定窗口）', () => 
     // 这条审计行恰好落在后者的 250ms 等待窗口内，count=1 打红。
     flood(IPS.mix, 'captcha', 4);
     flood(IPS.mix, 'register', anonThreshold - 3);
-    expect(await waitUntil(() => bansFor(IPS.mix).length === 1)).toBe(true);
+    await waitFor(() => bansFor(IPS.mix).length === 1, { label: '混合构成封禁落地' });
 
     const row = await AuditLog.findOne({
       action: ALERT_TYPES.RATE_LIMIT_ABUSE,
@@ -238,11 +229,12 @@ describe('rateLimitEscalation：令牌桶语义（取代固定窗口）', () => 
 
   test('每窗口只升级一次，且升级后压力被记住（不再重置计数）', async () => {
     flood(IPS.notif, 'captcha', anonThreshold + 5);
-    expect(await waitUntil(() => bansFor(IPS.notif).length === 1)).toBe(true);
+    await waitFor(() => bansFor(IPS.notif).length === 1, { label: '通知频控封禁落地' });
 
     // 同窗口内继续冲：不得二次升级
     flood(IPS.notif, 'captcha', anonThreshold + 5);
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    // 同窗口的第二次 flood 在窗口闸处同步返回，不会启动新的异步链路
+    await flushEventLoop(2);
     expect(bansFor(IPS.notif)).toHaveLength(1);
     // 计数**不清零**：原实现 `entry.count = 0; windowStart = now` 会让封禁失败的
     // 攻击者白拿一整个新窗口
@@ -264,7 +256,7 @@ describe('rateLimitEscalation：令牌桶语义（取代固定窗口）', () => 
 
     // 最后一击让净消耗转负 → 封禁动作落在归一化地址上
     hit(ip, 'captcha');
-    expect(await waitUntil(() => bansFor(ip).length === 1)).toBe(true);
+    await waitFor(() => bansFor(ip).length === 1, { label: '封禁调用落地' });
     expect(bansFor(ip)[0].ip).toBe(ip);
   });
 
@@ -289,7 +281,7 @@ describe('rateLimitEscalation：令牌桶语义（取代固定窗口）', () => 
     ).toBe(1);
 
     flood(IPS.ladder, 'register', anonThreshold + 1);
-    expect(await waitUntil(() => bansFor(IPS.ladder).length === 1)).toBe(true);
+    await waitFor(() => bansFor(IPS.ladder).length === 1, { label: '封禁调用落地' });
     expect(bansFor(IPS.ladder)[0].durationMs).toBe(ESCALATION_TIERS[1]);
   });
 
@@ -297,7 +289,7 @@ describe('rateLimitEscalation：令牌桶语义（取代固定窗口）', () => 
     banResult = { banned: false, reason: 'whitelisted' };
     flood(IPS.retry, 'captcha', anonThreshold + 1);
 
-    expect(await waitUntil(() => bansFor(IPS.retry).length === 1)).toBe(true);
+    await waitFor(() => bansFor(IPS.retry).length === 1, { label: '封禁调用落地' });
     const row = await AuditLog.findOne({
       action: ALERT_TYPES.RATE_LIMIT_ABUSE,
       ip: IPS.retry,
@@ -321,7 +313,7 @@ describe('rateLimitEscalation：令牌桶语义（取代固定窗口）', () => 
     flood(IPS.notif2, 'register', anonThreshold + 1);
 
     // 封禁照执行……
-    expect(await waitUntil(() => bansFor(IPS.notif2).length === 1)).toBe(true);
+    await waitFor(() => bansFor(IPS.notif2).length === 1, { label: '封禁调用落地' });
     // ……审计也照写。审计行是**阶梯的事件源**，漏写会让阶梯永远停在第一档，
     // 于是反复触发的 IP 每次都只被封 1 小时，而日志照打"第 N 档"。
     expect(

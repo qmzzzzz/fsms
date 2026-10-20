@@ -9,9 +9,9 @@
  * 【WAL 兜底（G4 不丢失）】的 WAL 文件层已拆至 services/auditBufferWal.js（O-3 体积棘轮，
  * 2026-09-17）：本模块保留内存缓冲、批量落库（flush）与进程生命周期，WAL 的路径派生、
  * 按行追加、前缀裁剪、大小上限、毒批序号与归档、以及串行化它们的 walChain 由 wal 模块负责。
- * 对外行为与拆分前一致：push 时同步追加 WAL 行，flush 落库成功后按**该批文档的
+ * 对外行为约定：push 时同步追加 WAL 行，flush 落库成功后按**该批文档的
  * `__walSeq` 精确移除对应行**（F-97：原先按落库条数裁前 N 行，有空洞时会误删未落库行），
- * 崩溃后 start() 重放 WAL 残留（先按毒批归档序号过滤，P1-24）。
+ * 崩溃后 start() 重放 WAL 残留（先按毒批归档序号过滤）。
  */
 
 const mongoose = require('mongoose');
@@ -39,7 +39,7 @@ const BUFFER_LIMIT = 100;
 // 定时落库间隔（毫秒）
 const FLUSH_INTERVAL_MS = 2000;
 
-// ================= 容量与重试保护（P2-21） =================
+// ================= 容量与重试保护 =================
 // 缓冲硬上限：Mongo 中断期间每 2s flush 失败整批回退，高流量下缓冲无界增长会 OOM。
 // 达到上限后丢弃最旧记录（WAL 里仍有对应行，崩溃后可重放；比整进程 OOM 可接受）。
 // 原先写作 Number(env) || 10000，而**负值是真值**——
@@ -123,7 +123,7 @@ const flushStrikes = new WeakMap();
 let outageFailures = 0;
 
 /**
- * 分块回退到缓冲头部（P2-21）
+ * 分块回退到缓冲头部
  *
  * 不用 `buffer.unshift(...docs)`：spread 会把每个元素作为独立实参压栈，
  * 数十万级时超过 V8 的参数数量上限直接抛 RangeError，整批审计永久丢失。
@@ -231,7 +231,7 @@ function handleFlushFailure(err, docs) {
     const { doomed, kept } = settleContentFaultStrikes(retryDocs);
     if (doomed.length > 0) {
       noteDropped(doomed.length, 'poison_doc');
-      // P1-24：丢弃批次的内存副本后，同步把其 WAL 行归档移出主文件，
+      // 丢弃批次的内存副本后，同步把其 WAL 行归档移出主文件，
       // 否则每次重启都重放同一批毒文档、再走满 5 次失败、再丢一次。
       // 按 __walSeq 精确匹配（不按行序），不误伤同文件中其他待落库的行。
       const discardSeqs = new Set(doomed.map((d) => d && d.__walSeq).filter(Boolean));
@@ -432,7 +432,7 @@ async function flush() {
  * @param {object} doc AuditLog 文档
  */
 function push(doc) {
-  // P1-24：分配 WAL 序号（已有则复用——重放/回退重试的文档必须保留原序号，
+  // 分配 WAL 序号（已有则复用——重放/回退重试的文档必须保留原序号，
   // 否则「毒批丢弃后按序号移除对应 WAL 行」匹配不上）。序号分配逻辑在 wal 模块。
   wal.assignSeq(doc);
   buffer.push(doc);
@@ -440,7 +440,7 @@ function push(doc) {
   // 缺行终止符会让多次 push 连成单个巨型"行"，崩溃重放 JSON.parse 失败、
   // 按行裁剪/超限丢弃全部退化（R-6 实施时由测试暴露的既有缺陷，一并修复）
   wal.appendLine(JSON.stringify(doc) + '\n');
-  // 容量保护：DB 长时间不可用时缓冲会无界增长（P2-21）
+  // 容量保护：DB 长时间不可用时缓冲会无界增长
   enforceBufferLimit();
   if (buffer.length >= BUFFER_LIMIT) {
     flush().catch((err) => logger.warn(`审计日志落库触发异常：${errText(err)}`));
@@ -461,14 +461,14 @@ function push(doc) {
  */
 function start() {
   if (flushTimer) return;
-  // 路径重读（T-1/auditBufferGap 抖动修复）+ L-28 按库名派生：均落在 wal.startup 内。
+  // 路径重读（auditBufferGap 抖动修复）+ L-28 按库名派生：均落在 wal.startup 内。
   wal.startup(process.env.AUDIT_WAL_PATH);
 
   wal.serialize(
     async () => {
       const lines = await wal.readLines();
       if (!lines.length) return;
-      // P1-24：先按毒批归档过滤——上一次运行判定丢弃、但归档改写未完成的
+      // 先按毒批归档过滤——上一次运行判定丢弃、但归档改写未完成的
       // 行（崩溃窗口）在此被跳过，避免重启后重复处理毒批。
       const discarded = await wal.readDiscardedSeqs();
       let skippedDiscarded = 0;
@@ -490,7 +490,7 @@ function start() {
         );
       }
       logger.info(`审计 WAL 重放 ${replayed} 条遗留记录`);
-      // 重放同样受硬上限约束：崩溃前积压的 WAL 可能远超内存承载（P2-21）
+      // 重放同样受硬上限约束：崩溃前积压的 WAL 可能远超内存承载
       enforceBufferLimit();
     },
     (e) => logger.warn(`审计 WAL 启动重放失败：${errText(e)}`)
@@ -587,7 +587,7 @@ function getWalPath() {
 }
 
 /**
- * 缓冲运行指标（P2-21）
+ * 缓冲运行指标
  * droppedCount 必须可观测：静默丢弃审计数据在合规上等同于篡改。
  */
 function getStats() {

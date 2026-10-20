@@ -200,10 +200,10 @@ describe('auditMeta（审计元数据派生）', () => {
     });
   });
 
-  // P3-11 回归：AUDIT_LOG_ACTIONS 白名单曾滞后于路由——记录在库里、
+  // 回归：AUDIT_LOG_ACTIONS 白名单曾滞后于路由——记录在库里、
   // 审计页却筛不出来（validateEnum 打 400）。此用例把「路由可派生出的一切
   // action」与「审计筛选白名单」做交叉核对，新增路由而忘补白名单时立即失败。
-  describe('AUDIT_LOG_ACTIONS 与路由派生 action 对齐（P3-11）', () => {
+  describe('AUDIT_LOG_ACTIONS 与路由派生 action 对齐', () => {
     // 从各路由文件静态提取路径模式，模拟 deriveAction 的清洗规则生成候选 action。
     //
     // 【本块原先的注释写着"静态提取而非逐个手写：保证未来新增路由自动纳入比对范围"，

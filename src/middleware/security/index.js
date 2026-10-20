@@ -1,7 +1,7 @@
 /**
- * 安全增强中间件门面（2026-10-18 自单文件 `middleware/security.js` 拆分）
+ * 安全增强中间件门面
  *
- * 对外导出面与拆分前**逐字一致**（23 个名字，见文件底部 module.exports），所有
+ * 对外导出面固定为 23 个名字（见文件底部 module.exports），所有
  * `require('../middleware/security')` 的调用方无需改动。实现分布：
  *   · securityHeaders.js —— CSP/helmet/HSTS/Permissions-Policy/Reporting-Endpoints/Trusted Types
  *   · sanitize.js        —— sanitizeMongo / materializeQuery
@@ -89,7 +89,7 @@ const requireReAuthentication = () => {
       // 原实现走裸 `verifyTotp`（只回布尔），既不烧时间窗计数器也不记失败，
       // 于是同一个合法码在 ±1 窗口（约 90s）内可**无限次重放**通过步进验证，
       // 且错误尝试不计数、不锁定——而 6 位码空间只有 10^6。
-      // 现对齐仓内既有两处实现：authService.verifyTotpChallenge 的 P2-12 原子消费
+      // 现对齐仓内既有两处实现：authService.verifyTotpChallenge 的原子消费
       // （以 `mfaLastCounter < counter` 为条件的更新，只有第一个请求能命中，
       //  并发双花由 DB 兜底），以及 mfaService 的失败计数 + 阈值锁定。
       // 与登录共用同一个 mfaLastCounter 字段是有意的：同一个码不得在两个上下文各用一次。
@@ -274,7 +274,7 @@ const assertAuditCategoryConsistency = () => {
 };
 
 /**
- * 挂载「不依赖已解析 body」的安全中间件（P3-35）
+ * 挂载「不依赖已解析 body」的安全中间件
  *
  * 拆分原因：protocolCompliance 的设计意图之一是「Content-Length 超限早于 body
  * 解析即拒绝，避免无谓读流」，但此前整个 applySecurity 挂在 express.json()
@@ -326,7 +326,7 @@ const applyResponseHardening = (app) => {
 };
 
 /**
- * 挂载「需要已解析 body/query」的安全中间件（P3-35）
+ * 挂载「需要已解析 body/query」的安全中间件
  *
  * 注意：checkIPBlacklist 已移至 app.js 中 CORS 之前独立挂载（见 app.js），
  * 是全站最早的访问控制闸门——黑名单在 body 解析/CORS/安全头/限流之前即拒绝，

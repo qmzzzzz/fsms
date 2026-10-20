@@ -1,5 +1,5 @@
 /**
- * 启动期配置守卫（P2-36 时区 / P2-38 文档开关口径 / P1-34 加固项告警）
+ * 启动期配置守卫（时区 / 文档开关口径 / 加固项告警）
  *
  * 与 src/tests/config/validate.test.js 的分工：那个文件覆盖 validateConfig 的
  * 既有编排（错误收集顺序、文案、TLS 二选一）；本文件覆盖 2026-09-17 新增/修正的
@@ -8,7 +8,7 @@
 
 const ORIGINAL_ENV = process.env;
 
-describe('P2-36：TZ_BUSINESS 启动期校验', () => {
+describe('TZ_BUSINESS 启动期校验', () => {
   beforeEach(() => {
     jest.resetModules();
     process.env = { ...ORIGINAL_ENV };
@@ -136,7 +136,7 @@ describe('P2-36：TZ_BUSINESS 启动期校验', () => {
   });
 });
 
-describe('P2-38：ENABLE_API_DOCS 判定口径统一', () => {
+describe('ENABLE_API_DOCS 判定口径统一', () => {
   beforeEach(() => {
     jest.resetModules();
     process.env = { ...ORIGINAL_ENV };
@@ -222,7 +222,7 @@ describe('P2-38：ENABLE_API_DOCS 判定口径统一', () => {
   });
 });
 
-describe('P1-34：加固项告警真正可达', () => {
+describe('加固项告警真正可达', () => {
   beforeEach(() => {
     jest.resetModules();
     process.env = { ...ORIGINAL_ENV };
@@ -237,7 +237,7 @@ describe('P1-34：加固项告警真正可达', () => {
   /**
    * 只保留「加固项缺失」告警，剔除恒定在场的配置代价类告警。
    *
-   * 为什么要剔除而不是放宽计数：本组用例的主题是 **P1-34「加固项告警真正可达」**，
+   * 为什么要剔除而不是放宽计数：本组用例的主题是 **「加固项告警真正可达」**，
    * 而以下两条都是**恒定在场**的告警——它们描述的是配置组合的既有代价，不是"加固项缺失"。
    * 把它们算进总数会让本组每条用例都被污染：实测 2026-09-30 新增 immutable 档位
    * （口令历史 pepper 轮换）告警后，本文件 4 条用例连带变红；2026-10-10 新增
@@ -309,7 +309,7 @@ describe('P1-34：加固项告警真正可达', () => {
     process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
     process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
     process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
-    // P2-8：合法生产夹具须带传输加密（非回环主机 tls=true / rediss:）
+    // 合法生产夹具须带传输加密（非回环主机 tls=true / rediss）
     process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
     process.env.CORS_ORIGIN = 'https://example.com';
     process.env.ENABLE_HTTPS = 'true';
@@ -425,7 +425,7 @@ describe('validate.js 降级通道：flushLogsSync/logger 不可用时信息不�
     }
   });
 });
-describe('P2-35：.env.example 必须覆盖配置层读取的全部变量', () => {
+describe('.env.example 必须覆盖配置层读取的全部变量', () => {
   // 缺口检测：配置层（src/config/）里任何被读取的变量，若模板中完全没有出现，
   // 运维就无从知道它存在——只能去读源码。本用例是「补齐 44 个未文档化变量」
   // 那类问题的回归闸门：新增配置项忘了写模板即变红。
@@ -467,7 +467,7 @@ describe('P2-35：.env.example 必须覆盖配置层读取的全部变量', () =
    * 一个变量名"被读取"的三种**字面量**形态：
    *   process.env.NAME / process.env['NAME'] / envInt('NAME', 20) 这一族辅助函数实参。
    * 第三条不是锦上添花：`src/config/database.js` 的五个 `MONGO_*` 全走 `envInt('…')`
-   * （:39-43），只看点号形态时这五个真实开关对闸是隐形的——它恰好是 P2-35 点名要防的那类。
+   * （:39-43），只看点号形态时这五个真实开关对闸是隐形的——它恰好是点名要防的那类。
    *
    * 刻意**不含**动态拼接（`process.env[`${n}_FILE`]`、`envInt(name)` 里的形参）：
    * 那类读取的键名只存在于名单常量里，正则永远只能看到变量名。硬凑一条"能匹配
@@ -613,7 +613,7 @@ describe('P2-35：.env.example 必须覆盖配置层读取的全部变量', () =
     expect(secretsCode).toMatch(/FILE_BACKED_SECRETS/); // 前提自证：它确实还是动态那一族
   });
 
-  test('P2-35 点名的四个关键变量确实在模板中（防误删）', () => {
+  test('点名的四个关键变量确实在模板中（防误删）', () => {
     const env = fs.readFileSync(path.join(ROOT, '.env.example'), 'utf8');
     for (const name of [
       'TZ_BUSINESS',

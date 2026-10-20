@@ -438,7 +438,14 @@ const loadChartData = async () => {
           axisLabel: { color: theme.axisLabelColor },
           splitLine: { lineStyle: { color: theme.splitLineColor } },
         },
-        grid: { left: '3%', right: '4%', bottom: '10%', containLabel: true },
+        // ECharts 6：containLabel 的等价写法（旧选项会在控制台告警）
+        grid: {
+          left: '3%',
+          right: '4%',
+          bottom: '10%',
+          outerBoundsMode: 'same',
+          outerBoundsContain: 'axisLabel',
+        },
         series: [
           {
             type: 'bar',

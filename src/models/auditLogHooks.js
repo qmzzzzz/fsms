@@ -30,7 +30,7 @@ const APPEND_ONLY_HOOKS = [
 ];
 
 const applyHooks = (schema, logger) => {
-  // P1-32：护栏状态为模块内部状态，**不再无条件暴露开关**。原先导出
+  // 护栏状态为模块内部状态，**不再无条件暴露开关**。原先导出
   // setAppendOnlyEnforced 后，任何拿到 AuditLog 模型的生产代码都可在运行期
   // 关闭 append-only 防篡改护栏（全仓当前无生产调用点，但门不该存在）。
   // 现仅在测试环境保留开关（AuditLogBehavior.test.js 的清理路径依赖它），
@@ -75,7 +75,7 @@ const applyHooks = (schema, logger) => {
         this.hash = computeHash(prevHash, payload);
         this.hmac = computeHmac(this.hash);
         this.hashVersion = CURRENT_PAYLOAD_VERSION;
-        // 【M-09】链尾推进刻意留在 pre('save')，与哈希计算同处一把 withChainLock
+        // 【】链尾推进刻意留在 pre('save')，与哈希计算同处一把 withChainLock
         // 临界区内。原因：
         //   ① 若移到 post('save')，锁无法跨 pre/post 两个钩子持有，并发写入会
         //      读到相同链尾、算出相同 prevHash → **真实分叉**，比幻影链尾严重；
@@ -86,7 +86,7 @@ const applyHooks = (schema, logger) => {
         // resyncChainTail()，从 DB 重建真实链尾。故完整性校验不会产生持续假阳性。
         // 次序不可颠倒（index.js 的 resyncChainTail() 在 :297、auditBuffer.start()
         // 在 :315）：自愈必须早于任何审计写入，否则新写入会立刻把链尾推回幻影值。
-        // 修改此处前请先阅读 src/index.js 中的 M-09 说明。
+        // 修改此处前请先阅读 src/index.js 中的说明。
         await advanceChainTail(this.hash, generation);
         this.$__chainAdvancedFrom = prevHash;
       });
@@ -127,7 +127,7 @@ const applyHooks = (schema, logger) => {
   schema.pre(APPEND_ONLY_HOOKS, function (next) {
     if (!appendOnlyEnforced) return next();
     const options = (this.getOptions && this.getOptions()) || {};
-    // P1-32：bypassAppendOnly 原先接受任意真值即放行（运行时关闭护栏的后门）。
+    // bypassAppendOnly 原先接受任意真值即放行（运行时关闭护栏的后门）。
     // 现收紧为「仅测试环境 + 显式传入布尔 true」才放行：
     //   - 未传 / 传 false / 非布尔（如 'true'、1）一律拦截；
     //   - 生产环境（NODE_ENV !== 'test'）无论传什么都不放行。
@@ -137,7 +137,7 @@ const applyHooks = (schema, logger) => {
     next(new Error('审计日志为 append-only，禁止修改/删除'));
   });
   // 合规出口需要报告**实际生效值**：护栏是上面的闭包变量，外部原先无从读取
-  // （`setAppendOnlyEnforced` 又按 P1-32 只在测试环境导出）。给一个只读 getter，
+  // （`setAppendOnlyEnforced` 又按只在测试环境导出）。给一个只读 getter，
   // 让 securityController 的 compliance 面板不必再写死 true。
   return { setAppendOnlyEnforced, isAppendOnlyEnforced: () => appendOnlyEnforced };
 };

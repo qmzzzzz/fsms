@@ -115,7 +115,7 @@ function precastBatch(docs, sink) {
   for (const d of rejectedDocs) sink.clearStrike(d);
   const seqs = walSeqsOf(rejectedDocs);
   const droppedTotal = sink.addDropped(rejectedDocs.length);
-  // P1-24 的取证顺序在这里同样成立：先归档再改主文件，否则每次重启都重放同一批、
+  // 取证顺序在这里同样成立：先归档再改主文件，否则每次重启都重放同一批、
   // 再走一遍预检、再丢一次，而 .discarded 里始终没有它们。
   if (seqs.size > 0) wal.discardBySeqs(seqs);
   logger.error(rejectMessage(rejected, seqs, droppedTotal));
@@ -176,7 +176,7 @@ function walSeqsOf(docs) {
  *  ① 打标：给**尚未拿到 hash** 的文档写 `hashFailure`。核验器对"无 hash 记录"
  *     只有一种解读——出现在带哈希记录之后即判 hash_stripped（人为抹除）。
  *     而"算 hash 抛错仍落库"是良性且会持续产生的成因，不打标就会让真实篡改告警
- *     淹没在常态噪声里（M-09「幻影链尾」的同一条演化路径）。
+ *     淹没在常态噪声里（「幻影链尾」的同一条演化路径）。
  *     只标没有 hash 的那些：chainBatch 逐条串链，抛错时前若干条已算出 hash
  *     （构成一段合法链，父链来自真实链尾），它们不该被一起降级。
  *  ② 链尾推进：把已串链**前缀**的链尾取出来返回。原实现在抛错时整批不推进，但

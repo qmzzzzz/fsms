@@ -12,12 +12,12 @@ const config = require('../config');
 // userService 的过滤白名单不认识它而**静默丢掉整个 status 条件**（返回全量而非 400），
 // 保存侧则被本 enum 拒。三处同源后这类分叉不再可能。
 const { USER_STATUS } = require('../utils/constants');
-// P1-②：PII at-rest 加密（读侧解密 / 写侧加密 / 检索键），判据收口在 utils/piiCrypto.js
+// PII at-rest 加密（读侧解密 / 写侧加密 / 检索键），判据收口在 utils/piiCrypto.js
 // piiSubstringKeys 是 A3 为「加密后仍要按邮箱片段搜索」补的子串盲索引（n-gram）
 const { encryptPii, decryptPii, piiSearchKey, piiSubstringKeys } = require('../utils/piiCrypto');
 
 /**
- * 用户名比较口径（P3-30）
+ * 用户名比较口径
  *
  * strength: 2 = 大小写不敏感、重音敏感。用于 username 的唯一索引与所有
  * 「按用户名查找」的查询，使 Admin / admin / ADMIN 在系统中视为同一标识。
@@ -39,7 +39,7 @@ const userSchema = new mongoose.Schema(
     username: {
       type: String,
       required: [true, '用户名不能为空'],
-      // P3-30：unique 不在字段上声明——字段级 unique 生成的是默认 collation
+      // unique 不在字段上声明——字段级 unique 生成的是默认 collation
       // （二进制比较）的索引，Admin/admin 可并存。改为下方 schema.index()
       // 显式带 USERNAME_COLLATION 注册大小写不敏感唯一索引
       trim: true,
@@ -57,7 +57,7 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, '邮箱不能为空'],
       // A3（2026-10-16）：email 转为 at-rest 加密。原先挂在字段上的四个约束里有
-      // 三个会直接炸（逐条实测，见 deliverables/A3-email加密实施方案-2026-10-16.md §2）：
+      // 三个会直接炸（逐条实测）：
       //   · unique   → 搬到 emailKey 的唯一索引（明文列随机 IV，密文上不可能唯一）
       //   · lowercase→ **必须摘掉**：它是每次赋值都生效的 setter，而 pre('validate')
       //     钩子里的 `this.email = encryptPii(...)` 是一次普通赋值 ⇒ 刚写进去的
@@ -99,7 +99,7 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, '密码不能为空'],
       minlength: [12, '密码至少 12 个字符'],
-      // P3-29：补长度上限。Mongoose 在 schema 构造时即注册 validate 为 pre('save')，
+      // 补长度上限。Mongoose 在 schema 构造时即注册 validate 为 pre('save')，
       // 因此校验先于下方的哈希钩子执行 —— 此处约束的是明文而非 60 字符的 bcrypt 哈希。
       // 上限取 bcrypt 的 72 字节硬边界：超出部分被 bcrypt 静默丢弃，
       // 意味着「合法口令 + 任意长后缀」可通过验证（等价口令），
@@ -116,7 +116,7 @@ const userSchema = new mongoose.Schema(
       select: false, // 默认不返回密码字段
     },
 
-    // 个人信息（P1-②；A3 2026-10-16 扩到 email）
+    // 个人信息（A3 2026-10-16 扩到 email）
     // realName 仍保持明文：姓名**片段模糊检索**是用户列表的日常能力，正则对
     // 密文不成立，加密它等于砍掉该能力；转入加密需先给姓名检索另立方案
     // （email 的做法是 piiSubstringKeys 的 n-gram 盲索引，可直接复用）。
@@ -283,7 +283,7 @@ const userSchema = new mongoose.Schema(
   }
 );
 
-// P1-②：PII 字段的明文只在 getter 里（存储侧是密文）。Mongoose 的 toObject/
+// PII 字段的明文只在 getter 里（存储侧是密文）。Mongoose 的 toObject/
 // toJSON **默认不套字段 getter**——不开这两项，res.json / toObject 走到的地方
 // （用户管理、资料、populate 出来的"经办人姓名"……）全都输出密文。
 // 实测（zzz 探针）：doc.realName 是明文、toJSON 是密文——这是接线不变量，
@@ -292,7 +292,7 @@ userSchema.set('toJSON', { getters: true });
 userSchema.set('toObject', { getters: true });
 
 // 索引优化
-// P3-30：username 唯一索引显式带 collation（大小写不敏感），
+// username 唯一索引显式带 collation（大小写不敏感），
 // 名称固定为 username_ci 以便与旧的 username_1 区分、供启动期对账识别
 userSchema.index(
   { username: 1 },
@@ -302,7 +302,7 @@ userSchema.index({ status: 1 });
 userSchema.index({ department: 1 });
 userSchema.index({ roles: 1 });
 userSchema.index({ createdAt: -1 });
-// P1-② 检索键索引：按手机号找回用户走 phoneKey（realName 暂不加密、保持
+// 检索键索引：按手机号找回用户走 phoneKey（realName 暂不加密、保持
 // 正则模糊检索，无检索键）。非唯一：手机号本就没有唯一约束（保持现状）。
 // 接线状态（2026-10-01 逐行复核，grep 实测）：**已供未接**——非测试代码里 phoneKey
 // 只出现在 schema 声明、本索引、-phoneKey 响应投影、pre('validate') 写入与迁移脚本
@@ -366,7 +366,7 @@ const USER_RESPONSE_EXCLUDE_FIELDS = [
   // requireReAuthentication + 严格更高级别 + 审计写失败即不发明文）被这个默认值架空。
   // 与 -phoneKey 同规格：排在这里是"默认不许外泄"，不是"某处正在用"。
   '-phone',
-  // P1-② 检索键：相等性预言机（拿一个手机号问"系统里有没有人用"），
+  // 检索键：相等性预言机（拿一个手机号问"系统里有没有人用"），
   // 对外响应与内部状态同规格排除。需要读它的一侧必须显式 select('+phoneKey')，
   // 而那样的读侧目前不存在（接线状态见本文件 phoneKey 索引处的注释）——
   // 排在这里是"默认不许外泄"，不是"某处正在用"。
@@ -402,7 +402,7 @@ const USER_RESPONSE_EXCLUDE_PHONE_VISIBLE = USER_RESPONSE_EXCLUDE_FIELDS.filter(
 userSchema.statics.RESPONSE_EXCLUDE = USER_RESPONSE_EXCLUDE;
 userSchema.statics.RESPONSE_EXCLUDE_PHONE_VISIBLE = USER_RESPONSE_EXCLUDE_PHONE_VISIBLE;
 
-// P3-30：用户名比较口径对外暴露，供控制器/脚本按同一 collation 查询
+// 用户名比较口径对外暴露，供控制器/脚本按同一 collation 查询
 userSchema.statics.USERNAME_COLLATION = USERNAME_COLLATION;
 
 /**
@@ -455,7 +455,7 @@ userSchema.statics.findByUsername = function (username) {
   return this.findOne({ username }).collation(USERNAME_COLLATION);
 };
 
-// P1-②：PII 字段写入侧收口（加密 + 检索键同步 + 明文期格式校验）
+// PII 字段写入侧收口（加密 + 检索键同步 + 明文期格式校验）
 // 只在字段被修改时动作：未修改的行重复 save 不重加密——随机 IV 下重加密会
 // 无谓改写密文，让 updatedAt 漂移、审计上出现"没有变更的变更"。
 // 手机号格式校验在这里（加密之前）而不是 schema validator：validate 阶段
@@ -552,6 +552,9 @@ userSchema.pre('save', async function (next) {
 const userPermissionService = require('../services/userPermissionService');
 userSchema.statics.getPermissions = function (userId) {
   return userPermissionService.getPermissions(userId);
+};
+userSchema.statics.getPermissionsForUsers = function (userIds) {
+  return userPermissionService.getPermissionsForUsers(userIds);
 };
 userSchema.statics.invalidatePermissionCache = function (userId) {
   return userPermissionService.invalidatePermissionCache(userId);
