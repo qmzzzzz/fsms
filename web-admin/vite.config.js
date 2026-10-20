@@ -428,6 +428,11 @@ export default defineConfig(({ command, mode }) => {
       environment: 'jsdom',
       include: ['src/tests/**/*.test.js'],
       globals: false,
+      // Vitest 5 将 clearMocks 默认值由 false 改为 true：每个用例前清空 mock
+      // 调用记录，导致 beforeAll 里建立的 spy 在用例中断言不到历史调用
+      // （webVitals.test.js 的 TTFB 断言即因此失败）。本仓测试均按 v4 语义编写，
+      // 显式锁回 false，避免升级顺带改写全仓 mock 语义。
+      clearMocks: false,
       // 组件测试能力（2026-09-18）：.vue 单文件组件经 vue() 插件编译后，
       // 其 import 的 element-plus 组件会连带 `import '.../style/css'`，
       // 而 vitest 默认把 node_modules 依赖外部化给 Node 原生 ESM 加载，
