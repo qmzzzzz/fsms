@@ -127,7 +127,7 @@ jobs:
       #   ③ 把 <repo>@sha256:… 传给两条部署路径：deploy.js 全程只 pull/up 这个引用
       #      （deployPolicy 侧另有 DEPLOY_REQUIRE_DIGEST_PIN 闸兜底）。
       - name: Install cosign
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Resolve digest and verify signature (keyless)
         id: verify
