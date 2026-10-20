@@ -678,7 +678,7 @@ jobs:
       - name: Generate SBOM (CycloneDX)
         # v0 是移动 tag，实测指向 main 上未发布的提交；按仓库「钉 digest」标准钉到
         # 最新发布的补丁 tag commit（上游再发版时显式改这里，而非被动跟随移动 tag）。
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
           format: cyclonedx-json
