@@ -64,7 +64,7 @@ jobs:
       # 便于事后回看本次扫描的原始输出，保留 5 天。
       # 用 v6 而非 v4/v5：v4 与 v5 的运行时为 node20，v6 起为 node24。
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: SARIF file
           path: results.sarif
