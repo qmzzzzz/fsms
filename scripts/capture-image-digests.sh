@@ -18,7 +18,7 @@
 
 set -eu
 
-NODE_TAG="node:22.14.0-alpine"
+NODE_TAG="node:26.12.0-alpine"
 MONGO_TAG="mongo:6.0.20"
 APPLY=0
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

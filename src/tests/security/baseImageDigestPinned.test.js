@@ -22,11 +22,10 @@
  * 这条工具链漂移不变量，以及最早落地的两条字面量。
  *
  * 【第 4 条为什么是字面量】digest 是**外部落的事实**，不是可复算逻辑：它来自
- * 2026-10-01 对 registry 的双源核验——docker.m.daocloud.io（Docker Hub 的
- * pull-through 镜像）与 AWS ECR Public 的 docker/library/node 各自按 tag
- * 22.14.0-alpine 取到的 manifest 字节逐字节一致，且本地对返回字节自算的 sha256
- * 与 Docker-Content-Digest 相等（内容寻址自证；当日 Docker Hub 官方 tag API 在
- * 本网络不可达：DNS 污染）。2026-10-04 复跑补了第三个来源 docker.1ms.run，三源一致。
+ * 2026-10-20 对 registry 的三源核验——docker.m.daocloud.io（Docker Hub 的
+ * pull-through 镜像）、AWS ECR Public 的 docker/library/node 与 docker.1ms.run
+ * 各自按 tag 26.12.0-alpine 取到的 manifest 字节逐字节一致，且本地对返回字节
+ * 自算的 sha256 与期望值相等（内容寻址自证；Docker Hub 官方端点在本网络不可达）。
  * 任何代码都无法从仓库内重新推导出这个值，所以只能以字面量 + 来源注释的方式钉进门禁。
  *
  * 【升级基础镜像的两条路径】① 不需要 docker：`node scripts/verify-image-digests.js`
@@ -47,10 +46,10 @@ const ROOT = path.resolve(__dirname, '../../..');
 const DOCKERFILE = fs.readFileSync(path.join(ROOT, 'Dockerfile'), 'utf8');
 const COMPOSE = fs.readFileSync(path.join(ROOT, 'docker-compose.yml'), 'utf8');
 
-// 2026-10-01 双源核验（来源与核验方式见文件头）。node:22.14.0-alpine 的
+// 2026-10-20 三源核验（来源与核验方式见文件头）。node:26.12.0-alpine 的
 // manifest list digest（多架构 OCI image index，含 linux/amd64 与 linux/arm64）。
-const PINNED_NODE_DIGEST = '9bef0ef1e268f60627da9ba7d7605e8831d5b56ad07487d24d1aa386336d1944';
-const PINNED_NODE_REF = `node:22.14.0-alpine@sha256:${PINNED_NODE_DIGEST}`;
+const PINNED_NODE_DIGEST = '6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5';
+const PINNED_NODE_REF = `node:26.12.0-alpine@sha256:${PINNED_NODE_DIGEST}`;
 
 /** 解析 Dockerfile 的 FROM 指令行：跳过注释行，容忍前导空白 */
 function fromLines(content) {
@@ -82,7 +81,7 @@ describe('基础镜像 digest 钉版门禁（真实 Dockerfile / docker-compose.
     const stages = fromLines(DOCKERFILE).map(parseFrom);
     expect(stages.length).toBeGreaterThan(0);
     for (const { image } of stages) {
-      expect(image).toMatch(/^node:22\.14\.0-alpine@sha256:[0-9a-f]{64}$/);
+      expect(image).toMatch(/^node:26\.12\.0-alpine@sha256:[0-9a-f]{64}$/);
       expect(image).toBe(PINNED_NODE_REF);
     }
   });
