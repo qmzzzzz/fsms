@@ -25,7 +25,7 @@
   "type": "module",
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
-    "@sentry/vue": "^10.72.0",
+    "@sentry/vue": "^11.8.0",
     "axios": "^1.18.1",
     "echarts": "^6.1.0",
     "element-plus": "^2.14.5",
