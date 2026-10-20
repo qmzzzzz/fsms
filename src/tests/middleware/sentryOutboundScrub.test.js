@@ -480,7 +480,7 @@ describe('装配实参（Sentry.init / Handlers.requestHandler 收到什么）',
   });
 
   it('isSentryInitialized 是单向开关：初始化后为 true，未配置 DSN 不翻它', () => {
-    // wellKnownRoutes.js:169 拿它决定要不要走 Sentry 分支。
+    // wellKnownRoutes.js:178 拿它决定要不要走 Sentry 分支。
     // 这里先读当前值再断言"不变"，而不是断言初始为 false —— 同一文件里别的用例会真的调用
     // initSentry，写成断言 false 就是一条文件内顺序耦合（--randomize 迟早翻红）。
     const before = sentryModule.isSentryInitialized();
