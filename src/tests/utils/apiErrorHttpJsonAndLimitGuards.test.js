@@ -23,8 +23,8 @@
  */
 
 // ---- 顶层替身（jest.mock 会被提升）------------------------------------------
-jest.mock('http', () => ({ request: jest.fn() }));
-jest.mock('https', () => ({ request: jest.fn() }));
+jest.mock('http', () => ({ ...jest.requireActual('http'), request: jest.fn() }));
+jest.mock('https', () => ({ ...jest.requireActual('https'), request: jest.fn() }));
 jest.mock('@sentry/node', () => ({
   init: jest.fn(),
   captureException: jest.fn(),
@@ -402,6 +402,11 @@ describe('rateLimit 各限流器触发 handler 与键/豁免分支（补 46% 分
       }),
       setHeader: jest.fn(),
       on: jest.fn((ev, fn) => {
+        (listeners[ev] = listeners[ev] || []).push(fn);
+        return res;
+      }),
+      // express-rate-limit v8 用 res.once('finish'/'close'/'error') 判定请求成败
+      once: jest.fn((ev, fn) => {
         (listeners[ev] = listeners[ev] || []).push(fn);
         return res;
       }),

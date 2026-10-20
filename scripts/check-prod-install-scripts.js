@@ -60,6 +60,12 @@ const DEV_INSTALL_SCRIPT_ALLOWLIST = {
   fsevents:
     'optional 且 os:["darwin"]——仅 macOS 安装；其 install 脚本编译/选取文件系统观察原生绑定。' +
     '在 Linux CI 与 linux 镜像上根本不会被安装，属平台性噪音而非可利用面。',
+  '@parcel/watcher':
+    'install 脚本在预编译产物缺失时从源码构建文件监视原生绑定；仅 dev 树（Jest 30 文件监视），' +
+    '生产镜像不安装 devDependencies，CI 仍由 npm ci --ignore-scripts 兜底。',
+  'unrs-resolver':
+    'postinstall 下载与当前平台匹配的 Rust 模块解析 native binding；仅 dev 树（Jest 30 解析器），' +
+    '包内固定下载源，生产镜像不安装 devDependencies。',
 };
 
 /** `node_modules/@scope/name` / `node_modules/name` / `node_modules/a/node_modules/name` → 包名 */

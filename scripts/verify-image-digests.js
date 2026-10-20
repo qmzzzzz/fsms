@@ -65,10 +65,10 @@ const SOURCES = [
  */
 const EXPECTED = [
   {
-    ref: 'node:22.23.3-alpine',
+    ref: 'node:26.12.0-alpine',
     repo: 'library/node',
     // manifest list（OCI index）摘要，含 amd64/arm/arm64/s390x 等
-    digest: '0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402',
+    digest: '6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5',
     captured: '2026-10-20',
     sources: 'public.ecr.aws + docker.m.daocloud.io + docker.1ms.run（三源一致）',
     sites: 'Dockerfile 的三处 FROM + docker-compose.yml 的 alertmanager-config-check',

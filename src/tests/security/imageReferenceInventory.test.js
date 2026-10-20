@@ -237,10 +237,10 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
       'grafana/grafana:11.1.0',
       'mongo:8.0.34',
       'mongo:8.0.34',
-      'node:22.23.3-alpine',
-      'node:22.23.3-alpine',
-      'node:22.23.3-alpine',
-      'node:22.23.3-alpine',
+      'node:26.12.0-alpine',
+      'node:26.12.0-alpine',
+      'node:26.12.0-alpine',
+      'node:26.12.0-alpine',
       'prom/alertmanager:v0.27.0',
       'prom/prometheus:v2.53.0',
       'redis:7-alpine',
@@ -440,7 +440,7 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
     );
     expect(repeats.map(([nameTag]) => nameTag).sort()).toEqual([
       'mongo:8.0.34',
-      'node:22.23.3-alpine',
+      'node:26.12.0-alpine',
     ]);
   });
 
@@ -511,7 +511,7 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
     // 而这条只有跑一次 --apply 才暴露；本用例把它提前到静态对账。
     const src = fs.readFileSync(path.join(ROOT, 'scripts', 'capture-image-digests.sh'), 'utf8');
     const consts = [...src.matchAll(/^(NODE_TAG|MONGO_TAG)="([^"]+)"/gm)].map((m) => m[2]);
-    expect(consts).toEqual(['node:22.23.3-alpine', 'mongo:8.0.34']);
+    expect(consts).toEqual(['node:26.12.0-alpine', 'mongo:8.0.34']);
     for (const c of consts) {
       expect(EXPECTED.some((e) => e.ref === c)).toBe(true);
     }
@@ -534,7 +534,7 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
     );
     const m = gate.match(/const PINNED_NODE_DIGEST = '([0-9a-f]{64})'/);
     expect(m).toBeTruthy();
-    const node = EXPECTED.find((e) => e.ref === 'node:22.23.3-alpine');
+    const node = EXPECTED.find((e) => e.ref === 'node:26.12.0-alpine');
     expect(node).toBeTruthy();
     expect(m[1]).toBe(node.digest);
     // redis 在那道闸里是按形态判的（只要求带 @sha256），这里补上值对账：

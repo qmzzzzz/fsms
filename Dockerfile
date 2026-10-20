@@ -1,13 +1,13 @@
 # 多阶段构建
 #
 # R-5 基础镜像版本固定：
-# 全部 node 阶段都必须钉到补丁号，不能只写 `node:22-alpine`。
+# 全部 node 阶段都必须钉到补丁号，不能只写 `node:26-alpine`。
 # 浮动 tag 的后果不是「拿到新版本」而是「不同时间构建出不同的镜像」——
 # 出安全问题时无法回答「上线那版用的是哪个 Node」。
 #
 # 已钉 digest（捕获日期 2026-10-20，来源与核验方式见下）：
 # 下面三处 FROM 钉在同一 manifest list digest 上：
-#   node:22.23.3-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+#   node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
 # digest 是多架构 OCI image index（含 linux/amd64 与 linux/arm64 等平台条目）。
 # 来源：Docker Hub 官方 tag API（hub.docker.com/v2/...）在捕获当日于本网络不可达
 # （DNS 污染），改用相互独立的 registry 通道核验并要求逐字节一致：
@@ -18,18 +18,17 @@
 # digest 是内容寻址的：字节一致 ⇒ 各通道讲的是同一个上游镜像。
 # **三个阶段必须保持同一 digest**：否则 builder 与 runtime 的 libc/OpenSSL
 # 可能不同版本，原生模块在运行时才暴露不兼容。
-# 22.23.3 是 2026-10-20 时 22.x 线的最新补丁（原 22.14.0 落后多个安全补丁位）；
-# 22.x 进入维护期后应重新评估升级到 24.x LTS，而不是继续跟随 22 线。
+# 26.12.0 为 2026-10-20 升级后的钉版版本（CI 矩阵 22.x/24.x，engines >=22.12.0）。
 # 部署机复验（一条命令确认该 digest 存在且与 tag 当前指向一致）：
-#   docker pull node:22.23.3-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
-#   docker inspect --format='{{index .RepoDigests 0}}' node:22.23.3-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+#   docker pull node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
+#   docker inspect --format='{{index .RepoDigests 0}}' node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
 # scripts/capture-image-digests.sh 仍是部署机侧的复核工具：升级基础镜像时用它
 # 重新捕获 digest，并在同一次改动里同步更新三处 FROM 与
 # src/tests/security/baseImageDigestPinned.test.js 的钉版字面量（该测试把
 # digest 钉成门禁，只改 FROM 不改测试会红灯）。
 
 # Builder 阶段
-FROM node:22.23.3-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS builder
+FROM node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5 AS builder
 
 WORKDIR /app
 
@@ -65,7 +64,7 @@ COPY package*.json ./
 
 # 前端构建阶段（L-1）：产出 web-admin/dist，供后端 express 静态托管
 # （或挂载给 Nginx 托管，二选一）。与后端同版本基础镜像，避免工具链漂移。
-FROM node:22.23.3-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS web-builder
+FROM node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5 AS web-builder
 
 WORKDIR /web
 COPY web-admin/package*.json ./
@@ -73,7 +72,7 @@ COPY web-admin/package*.json ./
 # web-admin 依赖树内带 install 脚本的只有 @parcel/watcher（经 vite→sass 引入，
 # node_modules 实测命中；其 install 是原生绑定的按需编译，缺脚本时 npm 落可选
 # 预编译平台包），且它是 devDependency——本阶段不跑 vitest（测试在 CI frontend-build job）。
-# 本镜像的 node:22.23.3-alpine 在 linux-musl-x64 平台确有 @parcel/watcher 预编译包可回落，
+# 该 node 基础镜像在 linux-musl-x64 平台确有 @parcel/watcher 预编译包可回落，
 # 故 --ignore-scripts 安全。若未来引入「mac/win 本地构建镜像」，该假设需重新评估。
 RUN npm ci --ignore-scripts && npm cache clean --force
 # ⚠ 源码必须在 npm ci **之后**、build 之前进镜像：2026-09-30 供应链批次重写本阶段
@@ -90,7 +89,7 @@ ENV VITE_LOGIN_PUBLIC_KEY_SHA256=$VITE_LOGIN_PUBLIC_KEY_SHA256
 RUN npm run build
 
 # Runtime 阶段（digest 须与 builder 完全一致，见顶部说明）
-FROM node:22.23.3-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+FROM node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
 
 # ===== 构建元数据（D-2）=====
 # 为什么需要：镜像推到 registry 后，tag 可以被覆盖、也可以被人为改指。

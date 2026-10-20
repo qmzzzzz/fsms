@@ -11,7 +11,7 @@
 | 数据库 | MongoDB 8.0（镜像钉 8.0.34）                                                                                                                         |
 | 安全   | helmet（CSP / Trusted Types）、三层限流 + CC 封禁阶梯、bcryptjs、字段级加密与登录信封加密、TOTP 两步验证、令牌黑名单、IP 黑 / 白名单、审计日志哈希链 |
 | 测试   | 后端 Jest + mongodb-memory-server（内存 MongoDB）；前端 Vitest；E2E Playwright                                                                       |
-| 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 22/24 矩阵测试，前端构建 24，镜像 node:22.23.3）                                          |
+| 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 22/24 矩阵测试，前端构建 24，镜像 node:26.12.0）                                          |
 | 监控   | Prometheus + Grafana + Alertmanager（docker-compose 随栈启动）、Sentry（可选）                                                                       |
 
 ## 功能特性
@@ -104,7 +104,7 @@ fsms/
 ### 环境要求
 
 - Node.js >= 22.12.0（CI 验证版本：22 / 24）
-  - 根目录与 `web-admin/` 的 `engines` 均为 `>=22.12.0`，与 `Dockerfile` 的基础镜像（22.23.3）同口径。
+  - 根目录与 `web-admin/` 的 `engines` 均为 `>=22.12.0`，与 `Dockerfile` 的基础镜像（26.12.0）同口径。
     项目要求全仓统一版本：CI 的 test job 含前端构建，Node 22 以下会在安装依赖时被 `engines` 拒绝。
 - MongoDB 8.0（本地安装或 Docker 均可；生产镜像钉 8.0.34，从 6.0 升级须逐级走 [MongoDB 大版本升级](#mongodb-大版本升级6080)）
 

@@ -119,7 +119,7 @@ describe('S-5 Compose 接线：校验容器必须真正挡在 alertmanager 前�
     const i = COMPOSE.indexOf('\n  alertmanager-config-check:');
     const j = COMPOSE.indexOf('\n  alertmanager:', i);
     const block = COMPOSE.slice(i, j);
-    expect(block).toMatch(/image:\s*node:22\.23\.3-alpine@sha256:[0-9a-f]{64}/);
+    expect(block).toMatch(/image:\s*node:26\.12\.0-alpine@sha256:[0-9a-f]{64}/);
     for (const name of [
       'check-alertmanager-config.js',
       'alertmanager-config-path.js',

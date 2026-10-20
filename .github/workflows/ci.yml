@@ -25,7 +25,7 @@ jobs:
         # Node 18 于 2025-04 EOL（2026-09-28 移除），Node 20 于 2026-04 EOL（2026-10-20
         # 移除，S-3）：CI 继续跑 EOL 版本等于把「新 CVE 无官方补丁」的运行时当作发布基线。
         # 现在矩阵是 22.x（维护期 LTS）与 24.x（当前 LTS），与 package.json 的
-        # engines `>=22.12.0`、Dockerfile 的 node:22.23.3 落在同一条区间。
+        # engines `>=22.12.0` 覆盖 22.x/24.x；Dockerfile 基础镜像为 node:26.12.0（26.x 尚未进矩阵）。
         node-version: [22.x, 24.x]
 
     steps:
@@ -167,7 +167,7 @@ jobs:
 
       - name: Upload backend coverage
         if: matrix.node-version == '22.x'
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage/lcov.info
           # 配置 CODECOV_TOKEN 后上传即生效；未配置时私有仓上传必然失败，
@@ -382,7 +382,7 @@ jobs:
         run: npm run build:budget
 
       - name: Upload frontend coverage
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./web-admin/coverage/lcov.info
           # 同后端口径：配置 CODECOV_TOKEN 后上传即生效，未配置时尽力而为；
@@ -632,7 +632,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # R-7：登录 GitHub Container Registry（使用工作流内置 GITHUB_TOKEN，
       # 无需额外仓库密钥；镜像默认私有，按需在同仓库设置可见性）
@@ -707,7 +707,7 @@ jobs:
       - name: Generate SBOM (CycloneDX)
         # v0 是移动 tag，实测指向 main 上未发布的提交；按仓库「钉 digest」标准钉到
         # 最新发布的补丁 tag commit（上游再发版时显式改这里，而非被动跟随移动 tag）。
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
           format: cyclonedx-json
@@ -721,7 +721,7 @@ jobs:
           upload-artifact: false
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-cyclonedx
           path: sbom.cdx.json

@@ -790,6 +790,10 @@ describe('批次F 工具与密码学加固回归', () => {
           (listeners[ev] = listeners[ev] || []).push(fn);
           return this;
         },
+        once(ev, fn) {
+          (listeners[ev] = listeners[ev] || []).push(fn);
+          return this;
+        },
         emit(ev, ...args) {
           (listeners[ev] || []).forEach((fn) => fn(...args));
         },
