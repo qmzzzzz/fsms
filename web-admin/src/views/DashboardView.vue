@@ -299,28 +299,33 @@ const loadDashboardData = async () => {
 
     // 过期响应直接丢弃：否则慢的旧请求会覆盖新值
     if (!isCurrent()) return
-    if (reportRes.data.success) {
-      const d = reportRes.data.data
-      const userStats = userRes?.data?.data || {}
-
-      const values = {
-        totalDevices: d.devices?.total || 0,
-        onlineDevices: d.devices?.online || 0,
-        pendingAlarms: d.alarms?.pending || 0,
-        // 取「活跃用户数」（本卡的既有语义，见 dashboardView.test.js 的用例名
-        // "active 优先于 total"）。用 `??` 而不是 `||`：active 为 0 是**合法读数**
-        // （全部账号被停用/锁定），`||` 会把它当成缺字段退回 total，
-        // 于是"20 个账号里 0 个能用"这种最该被看见的状态显示成了 20。
-        systemUsers: userRes === null ? '-' : (userStats.active ?? userStats.total ?? 0),
-      }
-      stats.value = STAT_THEMES.map((theme) => ({
-        title: t(`dashboard.${theme.key}`),
-        value: values[theme.key],
-        color: theme.color,
-        icon: theme.icon,
-      }))
-      statsLoadError.value = false
+    // S-3：HTTP 200 + success:false 也是失败（后端在业务层拒绝了本次统计）。
+    // 原实现只在 success 为真时赋值，假值分支静默溜走：占位符 '-' 保留、警示条不出现，
+    // 用户看到的是"加载完了但什么都没有"，与真实失败不可区分。
+    if (!reportRes?.data?.success) {
+      statsLoadError.value = true
+      return
     }
+    const d = reportRes.data.data
+    const userStats = userRes?.data?.data || {}
+
+    const values = {
+      totalDevices: d.devices?.total || 0,
+      onlineDevices: d.devices?.online || 0,
+      pendingAlarms: d.alarms?.pending || 0,
+      // 取「活跃用户数」（本卡的既有语义，见 dashboardView.test.js 的用例名
+      // "active 优先于 total"）。用 `??` 而不是 `||`：active 为 0 是**合法读数**
+      // （全部账号被停用/锁定），`||` 会把它当成缺字段退回 total，
+      // 于是"20 个账号里 0 个能用"这种最该被看见的状态显示成了 20。
+      systemUsers: userRes === null ? '-' : (userStats.active ?? userStats.total ?? 0),
+    }
+    stats.value = STAT_THEMES.map((theme) => ({
+      title: t(`dashboard.${theme.key}`),
+      value: values[theme.key],
+      color: theme.color,
+      icon: theme.icon,
+    }))
+    statsLoadError.value = false
   } catch (e) {
     // B-3：失败给一次非阻断式提示，避免骨架屏消失后页面静默显示 0 值；
     // FE-L1：路由切换取消（abort）不提示——用户已到达新页面，假错误训练用户忽略红框

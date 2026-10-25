@@ -104,35 +104,63 @@ async function runBaselinePhases(ctx) {
   ctx.metrics = metrics;
 }
 
-/** 登录取 token → 建暴力破解靶用户 → E 相（已认证业务端点跑到用户级配额） */
+/**
+ * 从 Set-Cookie 里取出 access_token 并拼成 Cookie 头
+ *
+ * 登录响应体**没有** token（I-01：只下发 httpOnly Cookie，响应体刻意不回传，
+ * 否则 JS 可读的副本会让 XSS 绕过 httpOnly）。原脚本读 `body.data.token`，
+ * 在认证改造后必然抛错 ⇒ E/D 两相从未真正跑过（2026-10-25 七维审计 P-4）。
+ * 这里不依赖 cookie jar：显式拼头，与 k6 脚本同一口径（Secure cookie 在
+ * http:// 目标下会被自动 jar 丢弃，显式回放才能稳定复现）。
+ *
+ * @param {string|string[]|undefined} setCookie res.headers['set-cookie']
+ * @returns {string} 形如 `access_token=...`；缺失时返回空串
+ */
+function accessCookieFrom(setCookie) {
+  const list = Array.isArray(setCookie) ? setCookie : [setCookie].filter(Boolean);
+  for (const raw of list) {
+    const m = /(?:^|[,\s])access_token=([^;]+)/.exec(String(raw));
+    if (m) return 'access_token=' + m[1];
+  }
+  return '';
+}
+
+/** 登录取 cookie → 建暴力破解靶用户 → E 相（已认证业务端点跑到用户级配额） */
 async function runAuthenticatedPhase(ctx) {
-  console.log('[LOAD] 登录取 token + 创建暴力破解靶用户（须在 E 相耗尽配额前完成）…');
+  console.log('[LOAD] 登录取 Cookie + 创建暴力破解靶用户（须在 E 相耗尽配额前完成）…');
   await step('登录（admin）', async () => {
     const r = await req('POST', '/api/auth/login', {
       body: { username: 'admin', password: PASSWORD },
     });
-    if (r.status !== 200 || !r.body.data.token) throw new Error('status=' + r.status);
-    ctx.token = r.body.data.token;
+    const cookie = accessCookieFrom(r.headers && r.headers['set-cookie']);
+    if (r.status !== 200 || !cookie) {
+      throw new Error('status=' + r.status + '，Set-Cookie 里没有 access_token');
+    }
+    ctx.cookie = cookie;
   });
 
   // 专用一次性用户（保护 admin 不被锁定）；密码满足强度策略（14 字符混合）。
   // 必须在 E 相之前创建——E 相会耗尽 admin 的用户级配额（500/15min），
   // 之后 POST /api/users 会 429。
   const bfPassword = 'Bf' + String.fromCharCode(33) + crypto.randomBytes(6).toString('hex') + 'Dd4';
-  await step('D0. 创建暴力破解靶用户', async () => {
-    const r = await req('POST', '/api/users', {
-      token: ctx.token,
-      body: { username: 'loadbf', email: 'loadbf@example.com', password: bfPassword },
+  ctx.bfUsers = ['loadbf', 'loadbf2'];
+  for (const username of ctx.bfUsers) {
+    await step('D0. 创建暴力破解靶用户 ' + username, async () => {
+      const r = await req('POST', '/api/users', {
+        cookie: ctx.cookie,
+        body: { username, email: username + '@example.com', password: bfPassword },
+      });
+      if (![200, 201].includes(r.status))
+        throw new Error('status=' + r.status + ' ' + JSON.stringify(r.body).slice(0, 120));
     });
-    if (![200, 201].includes(r.status))
-      throw new Error('status=' + r.status + ' ' + JSON.stringify(r.body).slice(0, 120));
-  });
+  }
+  ctx.bfPassword = bfPassword;
 
   console.log('[LOAD] E 相：已认证 /api/devices（C=20，跑到用户级配额触发 429 或 20s）…');
   const devices = await hammer({
     name: 'devices-authed',
     path: '/api/devices?limit=20&page=1',
-    token: ctx.token,
+    cookie: ctx.cookie,
     concurrency: 20,
     durationMs: 20000,
     stopOnStatus: 429,
@@ -155,32 +183,39 @@ async function runAuthenticatedPhase(ctx) {
 
 /** D + D+：暴力破解防护链与封禁的连带影响（必须最后跑——封禁会波及同 IP 后续全部请求） */
 async function runBruteForcePhase(ctx) {
-  console.log('[LOAD] D 相：暴力破解防护链（专用用户错误口令 ×12，串行）…');
+  console.log('[LOAD] D 相：暴力破解防护链（两个靶用户交替错误口令，串行）…');
+  // #21 之后 IP 封禁的前置信号是「同一 IP 失败过 ≥2 个不同账号」（password spraying
+  // 形态）；单账号刷满只走账户锁定与账号限流，**不封 IP**。原脚本只打一个用户名，
+  // 于是在新策略下永远等不到 403——断言红不是因为防线坏了，而是因为脚本还在演旧剧本。
   const bfResults = [];
   let sawBan = false;
   for (let i = 0; i < 12; i++) {
+    const username = ctx.bfUsers[i % ctx.bfUsers.length];
     const r = await req('POST', '/api/auth/login', {
-      body: { username: 'loadbf', password: 'Wrong!' + i + 'x' },
+      body: { username, password: 'Wrong!' + i + 'x' },
     });
-    bfResults.push(r.status);
+    bfResults.push({ username, status: r.status });
     if (r.status === 403) {
       sawBan = true;
       break;
     }
   }
-  await step('D. 暴力破解链：≥5 次 401 后 IP 自动封禁 403', async () => {
-    const count401 = bfResults.filter((s) => s === 401).length;
+  await step('D. 暴力破解链：跨 2 账号累计 ≥5 次 401 后 IP 自动封禁 403', async () => {
+    const count401 = bfResults.filter((x) => x.status === 401).length;
+    const distinct = new Set(bfResults.filter((x) => x.status === 401).map((x) => x.username));
     if (count401 < 5) throw new Error('401 次数不足 5：' + JSON.stringify(bfResults));
+    if (distinct.size < 2)
+      throw new Error('401 只覆盖一个账号，未形成跨账号信号：' + JSON.stringify(bfResults));
     if (!sawBan) throw new Error('未观察到 IP 自动封禁 403：' + JSON.stringify(bfResults));
     baseline.phases['brute-force-chain'] = {
       sequence: bfResults,
-      finding: '5 次失败阈值触发 IP 自动封禁（先于登录限流器 10 次阈值生效）',
+      finding: '跨 2 个账号累计 5 次失败触发 IP 自动封禁（单账号只锁账号，不封 IP）',
     };
   });
 
   // 封禁后的连带验证（最后做，不影响前面各相）
   await step('D+. 封禁后同 IP 业务请求一并 403（黑名单全局生效）', async () => {
-    const r = await req('GET', '/api/devices?limit=5', { token: ctx.token });
+    const r = await req('GET', '/api/devices?limit=5', { cookie: ctx.cookie });
     if (r.status !== 403)
       throw new Error('期望 403，实得 ' + r.status + '（自动封禁未覆盖业务端点？）');
   });
@@ -225,7 +260,7 @@ async function main() {
   // 预热：20 次 /health（JIT/keepAlive 连接池）
   await Promise.all(Array.from({ length: 20 }, () => req('GET', '/health')));
 
-  const ctx = { health: null, metrics: null, devices: null, token: null };
+  const ctx = { health: null, metrics: null, devices: null, cookie: null, bfUsers: [] };
   await runBaselinePhases(ctx);
   await runAuthenticatedPhase(ctx);
   await runBruteForcePhase(ctx);

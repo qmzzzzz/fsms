@@ -107,6 +107,11 @@ fsms/
   - 根目录与 `web-admin/` 的 `engines` 均为 `>=22.12.0`，与 `Dockerfile` 的基础镜像（26.12.0）同口径。
     项目要求全仓统一版本：CI 的 test job 含前端构建，Node 22 以下会在安装依赖时被 `engines` 拒绝。
 - MongoDB 8.0（本地安装或 Docker 均可；生产镜像钉 8.0.34，从 6.0 升级须逐级走 [MongoDB 大版本升级](#mongodb-大版本升级6080)）
+- **MongoDB 副本集（生产硬性前置，不是"建议"）**：角色/凭证、审计配套更新等多集合写入依赖
+  多文档事务。standalone 单机下事务不可用，应用会把它们降级为**顺序写**，并在启动日志与
+  `/readyz` 的 `checks.transactions` 里标注 `standalone`——顺序写中途失败会残留跨集合不一致，
+  且这种不一致不会被任何单集合校验发现。本地开发用 standalone 可以；**生产必须部署副本集**
+  （单节点副本集即可，`docker-compose.yml` 默认就是），不要拿 standalone 跑生产。
 
 ### 方式一：Windows 一键启动
 

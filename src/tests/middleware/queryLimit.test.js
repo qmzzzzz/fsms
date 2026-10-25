@@ -72,7 +72,7 @@ describe('queryLengthLimit 中间件', () => {
     const buildScalarApp = () => {
       const { queryScalarGuard } = require('../../middleware/queryLimit');
       const app = express();
-      // 必须与生产同形：app.js:536 显式把 query parser 设回 'extended'（Express 5 默认
+      // 必须与生产同形：app.js:592 显式把 query parser 设回 'extended'（Express 5 默认
       // 收窄为 simple，会让 `status[$ne]=1` 停在字符串上）。不设这行时本用例是**假绿**
       // ——中间件根本看不到对象形态，实测返回 200。
       app.set('query parser', 'extended');

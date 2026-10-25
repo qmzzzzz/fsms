@@ -17,7 +17,15 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '../../..');
-const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+/**
+ * 读文档并**统一行尾**再断言
+ *
+ * 仓内 .md 没有 .gitattributes 约束，Windows 工作区（core.autocrlf=true）落地是 CRLF，
+ * Linux CI 检出是 LF。断言里写 `\\\n`（bash 续行）这种跨行判据在 CRLF 上必然假红——
+ * 2026-10-25 实测：同一份文档在 Windows 上红、在 CI 上绿，红的是判据不是文档。
+ * 行尾是**检出形态**而非内容事实，故在读入口归一，别让每条断言各自记得处理。
+ */
+const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 const exists = (rel) => fs.existsSync(path.join(ROOT, rel));
 
 describe('文档与代码对账（D-1～D-4）', () => {
@@ -80,6 +88,15 @@ describe('文档与代码对账（D-1～D-4）', () => {
     const engine = pkg.engines.node.match(/(\d+)\.(\d+)/);
     expect(engine).toBeTruthy();
     expect(read('CONTRIBUTING.md')).toContain(`≥${engine[1]}.${engine[2]}`);
+
+    // Q-5：命令示例里出现字面 `\n` 时，复制到终端会执行一个名为 `n` 的命令。
+    // 这里只抽检恢复码失效这条安全关键命令：换行必须是 bash 续行（反斜杠 + 真换行），
+    // 且脚本名与 --apply --yes 必须出现在续行后的同一逻辑命令里。
+    const rotation = read('deployment/secret-rotation.md');
+    expect(rotation).not.toMatch(/MONGODB_URI_FILE=[^\n`]*\\n`/);
+    expect(rotation).toMatch(
+      /MONGODB_URI_FILE=\.\/secrets\/mongodb_uri \\\n\s+node scripts\/invalidate-mfa-recovery-codes\.js --apply --yes/
+    );
   });
 
   test('D-4：ADR-003 已记录 AES 的 PII 用途、轮换旧钥与 .env 现状', () => {

@@ -127,12 +127,19 @@ describe('运行时健康信号：挂钩真的接上了（集成，不测自己�
 describe('运行时健康信号：app.js 的 /readyz 必须真的记录判定', () => {
   const appJs = read('src/app.js');
   // 判定值必须同时反映 Mongo 与 Redis：只记 mongo.ok 会让 Redis 挂掉的实例
-  // 在指标面显示为 ready（与响应体 503 自相矛盾）
+  // 在指标面显示为 ready（与响应体 503 自相矛盾）。
+  // A-2 之后多了一档「拓扑阻断」（多实例 + 无分布式审计锁），因此这里**不**绑定
+  // 具体的三元表达式形状（那是格式，改一次缩进就假红），只钉住三件语义：
+  //   ① 同一个 recordReadyz(...) 调用里出现 ready ? 'ok' : …
+  //   ② 该调用的失败分支读到了 mongo.ok ? redis.reason : mongo.reason
+  //   ③ 拓扑阻断的 reason 也被带进判定
   const readyVerdict =
-    /recordReadyz\(ready \? 'ok' : mongo\.ok \? redis\.reason : mongo\.reason, ready\)/;
+    /recordReadyz\(\s*ready\s*\?\s*'ok'\s*:[\s\S]*?mongo\.ok\s*\?\s*redis\.reason\s*:\s*mongo\.reason[\s\S]*?,\s*ready\s*\)/;
+  const topologyVerdict = /topologyBlocker\s*\?\s*topologyBlocker\.reason/;
 
   test('两个分支（成功 / 异常）都必须落指标，且判定覆盖 Mongo + Redis', () => {
     expect(appJs).toMatch(readyVerdict);
+    expect(appJs).toMatch(topologyVerdict);
     expect(appJs).toMatch(/recordReadyz\('error', false\)/);
     // 必须从 utils/metrics 导入，而不是另开一条路径
     expect(appJs).toMatch(/recordReadyz,/);
@@ -140,8 +147,14 @@ describe('运行时健康信号：app.js 的 /readyz 必须真的记录判定', 
   });
 
   test('判据可失败：把 recordReadyz 调用去掉，同一正则必须报出来', () => {
-    const stripped = appJs.replace(readyVerdict, '').replace(/recordReadyz\('error', false\)/g, '');
+    const stripped = appJs
+      .replace(readyVerdict, '')
+      // topologyVerdict 在响应体的 checks.topology 里也有一份（那是同一个判据的对外投影），
+      // 反证必须把它一并抹掉，否则「抹掉 recordReadyz 后仍为真」会被误读成判据没牙
+      .replace(new RegExp(topologyVerdict.source, 'g'), '')
+      .replace(/recordReadyz\('error', false\)/g, '');
     expect(readyVerdict.test(stripped)).toBe(false);
+    expect(topologyVerdict.test(stripped)).toBe(false);
     expect(/recordReadyz\('error', false\)/.test(stripped)).toBe(false);
   });
 });

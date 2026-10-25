@@ -266,6 +266,10 @@ describe('refreshToken outcome 矩阵', () => {
     ['BLACKLIST_UNAVAILABLE', 503, '安全服务暂不可用，请稍后重试'],
     ['SESSION_UNAVAILABLE', 503, '安全服务暂不可用，请稍后重试'],
     ['REVOKE_UNAVAILABLE', 503, '安全服务暂不可用，请稍后重试'],
+    // 临时锁定窗口内的 refresh 必须与 login 同口径拒绝，不得靠旧 refresh 续期
+    ['ACCOUNT_LOCKED', 401, '账户已被锁定，请联系管理员'],
+    // 并发轮换的败者：仅拒绝本次，不吊销（服务层已保证只拒本次）
+    ['CONCURRENT', 503, '安全服务暂不可用，请稍后重试'],
   ])('outcome=%s → %i', async (outcome, expectedStatus, expectedMessage) => {
     authService.refreshSession.mockResolvedValue({ outcome });
     const res = makeRes();
@@ -288,6 +292,14 @@ describe('refreshToken outcome 矩阵', () => {
     expect(res.statusCode).toBe(401);
     expect(res.body.message).toBe('无效的刷新令牌');
     expect(JSON.stringify(res.body)).not.toContain('ECONNREFUSED');
+  });
+
+  test('请求体校验失败：400 且不触达 service', async () => {
+    const res = makeRes();
+    await invoke(controller.refreshToken, makeReq({ _invalid: true }), res);
+    expect(res.statusCode).toBe(400);
+    expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(authService.refreshSession).not.toHaveBeenCalled();
   });
 
   test('成功：cookie 轮换，响应体不含令牌', async () => {

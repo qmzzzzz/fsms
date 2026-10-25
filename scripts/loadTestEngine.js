@@ -21,13 +21,19 @@ const http = require('http');
 /**
  * keepAlive 客户端 + 计时请求
  *
+ * `cookie` 与 `token` 是两条并存的凭据通道，但**登录只能拿到 cookie**：
+ * I-01 之后 /api/auth/login 只下发 httpOnly Cookie、响应体不再回传令牌，
+ * 所以压测脚本必须从 Set-Cookie 里取 access_token 再显式回放（k6 脚本同理，
+ * 见 scripts/perf/k6-core-journeys.js）。Bearer 保留给"外部已持有令牌"的调用方，
+ * 本仓的 load-test 不走这条腿。
+ *
  * @param {string} base 目标基址（如 http://127.0.0.1:3777）
  * @returns {{req: Function, sleep: Function}}
  */
 function createHttpClient(base) {
   const agent = new http.Agent({ keepAlive: true, maxSockets: 256 });
 
-  function req(method, urlPath, { token, body } = {}) {
+  function req(method, urlPath, { token, cookie, body } = {}) {
     return new Promise((resolve, reject) => {
       const payload = body ? JSON.stringify(body) : null;
       const started = process.hrtime.bigint();
@@ -41,7 +47,8 @@ function createHttpClient(base) {
             payload
               ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
               : {},
-            token ? { Authorization: 'Bearer ' + token } : {}
+            token ? { Authorization: 'Bearer ' + token } : {},
+            cookie ? { Cookie: cookie } : {}
           ),
           timeout: 10000,
         },
@@ -158,6 +165,7 @@ function createLoadEngine({ base, counters, baseline }) {
     path: urlPath,
     method = 'GET',
     token,
+    cookie,
     body,
     concurrency,
     durationMs,
@@ -173,7 +181,7 @@ function createLoadEngine({ base, counters, baseline }) {
     const worker = async () => {
       while (!stopped && Date.now() < deadline && total < maxRequests) {
         try {
-          const r = await req(method, urlPath, { token, body });
+          const r = await req(method, urlPath, { token, cookie, body });
           total += 1;
           latencies.push(r.ms);
           byStatus[r.status] = (byStatus[r.status] || 0) + 1;

@@ -145,6 +145,12 @@ jobs:
       - name: Run format check (prettier)
         run: npm run format:check
 
+      # D-1（2026-10-25 七维审计）：OpenAPI 产物由生成器产出，必须与已提交的
+      # src/docs/openapi.json 一致。只比对「路由 ∈ 文档」不够——生成器新增字段
+      # 却没重跑、或产物被手工改动，都会让文档与实现悄悄分叉。
+      - name: Check OpenAPI artifact drift
+        run: npm run docs:check
+
       # 编码门禁：源码必须是 UTF-8 且不含乱码指纹（GBK 混入 / U+FFFD / mojibake）。
       # 2026-09-19 实证过"脚本存在但没有任何工作流引用它"的腐化形态——
       # 一道没人调用的门禁比没有更糟：它给出已设防的错觉。

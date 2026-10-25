@@ -105,6 +105,101 @@ const surveyRequires = (modules) => {
   return { total, unresolved };
 };
 
+/**
+ * Tarjan 强连通分量（只返回"真环"：节点数 > 1，或带自环的单点）
+ *
+ * 独立成函数而不是内联，是为了让判据能被合成图反证（见用例里的正向/反向自证）。
+ * 入参是 Map<节点, 邻居数组>，与真实文件系统无关。
+ * @param {Map<string, string[]>} graph
+ * @returns {string[][]} 每个分量的节点（顺序取决于出栈次序，调用方自行排序）
+ */
+const stronglyConnected = (graph) => {
+  const index = new Map();
+  const low = new Map();
+  const onStack = new Set();
+  const stack = [];
+  const out = [];
+  let counter = 0;
+
+  const connect = (v) => {
+    index.set(v, counter);
+    low.set(v, counter);
+    counter += 1;
+    stack.push(v);
+    onStack.add(v);
+    for (const w of graph.get(v) || []) {
+      if (!index.has(w)) {
+        connect(w);
+        low.set(v, Math.min(low.get(v), low.get(w)));
+      } else if (onStack.has(w)) {
+        low.set(v, Math.min(low.get(v), index.get(w)));
+      }
+    }
+    if (low.get(v) === index.get(v)) {
+      const comp = [];
+      let w;
+      do {
+        w = stack.pop();
+        onStack.delete(w);
+        comp.push(w);
+      } while (w !== v);
+      const selfLoop = (graph.get(v) || []).includes(v);
+      if (comp.length > 1 || selfLoop) out.push(comp);
+    }
+  };
+
+  for (const v of graph.keys()) {
+    if (!index.has(v)) connect(v);
+  }
+  return out;
+};
+
+/** 已登记的惰性环分量（2026-10-25 实测：4 个分量 / 40 个模块 / 122 条简单环） */
+const LAZY_SCC = [
+  [
+    'config/deploymentCredentialGuards.js',
+    'config/immutableConfigGuard.js',
+    'config/index.js',
+    'config/legacyCbcGuard.js',
+    'config/loginEncryptGuard.js',
+    'config/validate.js',
+    'constants/runtime.js',
+    'models/AuditLog.js',
+    'models/auditLogHooks.js',
+    'models/auditLogWriteStatics.js',
+    'services/auditBuffer.js',
+    'services/auditBufferDocs.js',
+    'services/auditBufferWal.js',
+    'services/auditWalCap.js',
+    'services/auditWalPermissions.js',
+    'services/sharedCache/index.js',
+    'services/sharedCache/invalidation.js',
+    'services/sharedCache/memoryStore.js',
+    'services/sharedCacheLocks.js',
+    'utils/auditChain.js',
+    'utils/auditWriteFailure.js',
+    'utils/logger.js',
+    'utils/loggerFlush.js',
+    'utils/metrics.js',
+    'utils/metricsAuditDrops.js',
+    'utils/passwordHistory.js',
+  ],
+  ['middleware/auth.js', 'middleware/tokenBlacklist.js'],
+  [
+    'middleware/originCheck.js',
+    'middleware/protocolCompliance.js',
+    'middleware/rbac.js',
+    'middleware/security/auditLog.js',
+    'middleware/security/index.js',
+    'middleware/security/ipBlacklist.js',
+    'services/auditScopeFilter.js',
+    'services/securityAlert.js',
+    'services/securityAlertIpBans.js',
+    'services/securityAlertPermissionAbuse.js',
+  ],
+  ['models/User.js', 'services/userPermissionService.js'],
+];
+
 describe('依赖图无环断言', () => {
   const files = collectSourceFiles(SRC_DIR);
   const known = new Set(files.map((f) => path.normalize(f)));
@@ -181,6 +276,60 @@ describe('依赖图无环断言', () => {
     }
 
     expect(cycles).toEqual([]);
+  });
+
+  /**
+   * 惰性 require 带来的环：**允许存在，但必须被清点**
+   *
+   * 上面那条"模块级无环"只统计顶层边——函数体内的 require 是有意用来打断环的，
+   * 于是它们在静态图里是"隐形的"，而这正是风险所在：环仍然存在，只是被推迟到
+   * 调用时刻才结算。谁把其中一条 require 提到顶层，或者在上游模块顶层读对方的
+   * 导出，拿到的就是半初始化的对象（症状是 undefined，不报错）。
+   *
+   * 判据取**强连通分量（SCC）**而不是"环的条数"：同一条回路在环枚举下会被重复
+   * 计数（实测该图有 70 条简单环，却只落在 4 个分量里），条数随枚举顺序与深度上限
+   * 漂移，分量是唯一且与遍历顺序无关的不变量。2026-10-25 七维审计写的"19 条"
+   * 就是环枚举口径下的一个数，本用例以分量口径取代它（见报告 §4.2 的更正）。
+   *
+   * 分量成员被**逐条登记**：新增一个惰性环、或某条惰性边被提回顶层（分量消失），
+   * 都会让本用例变红并要求重新审视，而不是悄悄通过。
+   */
+  test('惰性 require 形成的强连通分量必须与登记一致', () => {
+    const graph = new Map();
+    for (const f of files) {
+      const deps = extractRelativeRequires(fs.readFileSync(f, 'utf8'))
+        .map((rel) => resolveDep(f, rel))
+        .filter((d) => d && known.has(d));
+      graph.set(
+        path.normalize(f),
+        deps.map((d) => path.normalize(d))
+      );
+    }
+
+    const actual = stronglyConnected(graph)
+      .map((comp) => comp.map((p) => relOf(p)).sort())
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1));
+
+    expect(actual).toEqual(LAZY_SCC.map((comp) => [...comp].sort()));
+
+    // 前提自证：判据对"真环"必须报出来，否则上面那条只是空转
+    expect(
+      stronglyConnected(
+        new Map([
+          ['a', ['b']],
+          ['b', ['a']],
+        ])
+      ).map((comp) => comp.sort())
+    ).toEqual([['a', 'b']]);
+    // 反向自证：单向链不是环
+    expect(
+      stronglyConnected(
+        new Map([
+          ['a', ['b']],
+          ['b', []],
+        ])
+      )
+    ).toEqual([]);
   });
 
   test('5 处关键惰性 require 仍在函数体内（未被提到顶层）', () => {

@@ -256,11 +256,20 @@ describe('DashboardView 骨架屏 → 内容直换', () => {
     expect(active.errors).toEqual([])
   })
 
-  test('success=false 的响应不覆盖占位值（不把 - 变成 0）', async () => {
+  test('success=false 的响应不覆盖占位值（不把 - 变成 0），且显示可重试的警示条', async () => {
     const c = await open(ALL, { dashboard: { data: { success: false, data: {} } } })
     expect(statValues(c)).toEqual(['-', '-', '-', '-'])
+    // S-3：HTTP 200 + success:false 若静默溜走，用户看到的只是"加载完了但没有数据"；
+    // 必须有常驻警示条解释失败并提供恢复入口。
+    expect(c.find('.dashboard-alert')).not.toBeNull()
     expect(ElMessage.error).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
+
+    // 重试成功后占位值被真实读数替换、警示条撤场
+    getDashboard.mockResolvedValue(okDashboard())
+    c.find('.dashboard-alert button').click()
+    await waitFor(() => c.find('.dashboard-alert') === null, { message: '重试成功后警示条消失' })
+    expect(statValues(c)).toEqual(['10', '7', '3', '4'])
   })
 
   test('切换语言后统计卡标题实时跟随（zh → en 字面量）', async () => {

@@ -283,21 +283,21 @@ function unexplainedExemptions(exemptedKeys, ledgerKeys) {
 const LIVE = [
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:249',
+    at: 'app.js:250',
     must: /sentryRequestHandler/,
     why: 'Sentry 请求处理器挂载点',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:546',
+    at: 'app.js:562',
     must: /sentryErrorHandler/,
-    why: 'Sentry 错误处理器挂载点（2026-10-25 整改后为 :546）',
+    why: 'Sentry 错误处理器挂载点（2026-10-25 整改后为 :546；同日后 prettier 收口再迁 :562）',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:550',
+    at: 'app.js:566',
     must: /app\.use\(errorHandler/,
-    why: '通用 errorHandler 位置（口径是"在它之前"）',
+    why: '通用 errorHandler 位置（口径是"在它之前"；prettier 收口后迁 :566）',
   },
   {
     in: 'src/controllers/reportController.js',
@@ -349,7 +349,7 @@ const LIVE = [
   },
   {
     in: 'src/config/validate.js',
-    at: 'deployment/secret-rotation.md:297',
+    at: 'deployment/secret-rotation.md:302',
     must: /docker compose exec -T app npm run validate/,
     why: '手册把本步退出码当"轮换后配置自洽"的证据（裸 `npm run validate` 上下两行都有，必须连带容器命令才唯一；2026-10-25 审计整改后手册扩写使行号迁至 :297）',
   },
@@ -434,25 +434,25 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:205',
+    at: 'app.js:206',
     must: /app\.set\('trust proxy'/,
     why: 'trust proxy 有效值分支的落点（原写 :96-97，那是 .filter(Boolean)；2026-10-25 整改后为 :205）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:487',
+    at: 'app.js:503',
     must: /app\.get\('\/api'/,
     why: '/api 根路径处理器（原写 :297-298，那是 CSRF 注释；2026-10-25 整改后为 :487）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:435-457',
+    at: 'app.js:435-482',
     must: /503[\s\S]*\.catch/,
     why: '/readyz 的 503 双路径：then 里按 mongo.ok 定码 + catch 里硬 503（原写 :258-278 是 body-parser；2026-10-25 整改后为 :435-457）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:460',
+    at: 'app.js:476',
     must: /res\.status\(503\)\.json/,
     why: '头注里点名"两条失败路径"的具体行段（catch 臂的硬 503；2026-10-25 整改后为 :460）',
   },
@@ -464,13 +464,13 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:249-250',
+    at: 'app.js:250-251',
     must: /sentryRequestHandler/,
     why: 'Sentry 三件套前两件（原写 :134-136；2026-10-25 整改后为 :249-250）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:546',
+    at: 'app.js:562',
     must: /sentryErrorHandler/,
     why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见；2026-10-25 整改后为 :546）',
   },
@@ -500,7 +500,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/config/scriptSecretHydration.test.js',
-    at: 'deployment/secret-rotation.md:297',
+    at: 'deployment/secret-rotation.md:302',
     must: /docker compose exec -T app npm run validate/,
     why: '"拿这一步退出码当证据"的那一步（本轮把 :156 两处一并改对，原 :156 是空行；2026-10-25 整改后手册扩写使行号迁至 :297）',
   },
@@ -695,11 +695,11 @@ describe('层 2 · 无内容锚点（空行 / 只剩注释标记；豁免 = STAL
     // 是同一条判据最好的现成样本；去掉 occurrences 的前导边界这条就会红。
     const bare = occurrences(
       'src/tests/config/scriptSecretHydration.test.js',
-      'secret-rotation.md:297'
+      'secret-rotation.md:302'
     );
     const qualified = occurrences(
       'src/tests/config/scriptSecretHydration.test.js',
-      'deployment/secret-rotation.md:297'
+      'deployment/secret-rotation.md:302'
     );
     expect(bare.length).toBe(1);
     expect(qualified.length).toBe(1);
@@ -748,7 +748,7 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
   });
 
   test('谓词有牙（正向命中 + 反向不命中），不许跟着行号走', () => {
-    const hit = citedRange('src/middleware/sentry.js', 'app.js:546');
+    const hit = citedRange('src/middleware/sentry.js', 'app.js:562');
     expect(/sentryErrorHandler/.test(hit.text)).toBe(true);
     expect(/绝不可能出现在这一行的符号ZZZ/.test(hit.text)).toBe(false);
     // 本轮之前的真实写法：auditController.js:38 是空行，同一条判据必须判它不含符号

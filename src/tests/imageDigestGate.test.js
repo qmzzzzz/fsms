@@ -1087,7 +1087,14 @@ group('capture-image-digests.sh 真跑行为', () => {
         'set -u',
         '"$1" "$2" --root="$3" > "$4" 2>&1 &',
         'pid=$!',
-        'sleep 1',
+        // 时机不靠"睡固定秒数"：Windows/MSYS 上 spawn 一个 sh + 解释脚本 + 起替身
+        // 实测要 2–3 秒，而 CI 的 Linux 只要几十毫秒——写死 1 秒等于把「本机慢」判成
+        // 「脚本没被叫醒」（2026-10-25 实测：delay=1 时替身日志为空，delay=3 时就有
+        // docker info，其余断言全绿）。改成**等替身留下第一行日志再发信号**：
+        // 那一刻脚本必然已在运行，且离第一次落笔（预演临时文件）还差整段 capture+分类，
+        // 判据比"睡 1 秒"更强而不是更松。上限 20 秒只是防挂死。
+        'i=0',
+        'while [ "$i" -lt 20 ] && [ ! -s "$5" ]; do sleep 1; i=$((i+1)); done',
         'kill -TERM "$pid" 2>/dev/null || echo KILLFAILED',
         'wait "$pid"',
         'printf "RC=%s\\n" "$?"',
@@ -1100,7 +1107,7 @@ group('capture-image-digests.sh 真跑行为', () => {
       STUB_LOG: fx.log,
       DOCKER_STUB_SLEEP: '1',
     };
-    const d = spawnSync(SH, [drive, SH, SCRIPT, fx.dir, out], { env, encoding: 'utf8' });
+    const d = spawnSync(SH, [drive, SH, SCRIPT, fx.dir, out, fx.log], { env, encoding: 'utf8' });
     // 驱动脚本的 stdout 只有 printf 那一行。`wait` 被信号打断时，shell 会把作业终止语写到
     // **自己的 stderr**：实测 dash（CI 的 /bin/sh）给出 stdout="RC=143"、stderr="Terminated"，
     // 两流一拼就是 "RC=143\nTerminated"，`$` 锚点必然落空——那不是脚本没退出，是把 shell 的

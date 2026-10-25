@@ -252,3 +252,54 @@ describe('reauth ticket HTTP 强制', () => {
     );
   });
 });
+
+describe('T-2：签发控制器的会话绑定分支（分支覆盖 50% 的那一格）', () => {
+  /**
+   * `req.user.sessionId ?? null` 是控制器里唯一的真实分支：
+   * 令牌没有 sid（改造前签发的存量令牌 / 未走设备会话的调用方）时，
+   * 票据必须按「未绑定会话」签发——即 null 只能匹配 null，不能退化成"任何会话都认"。
+   * 该分支此前无任何用例，覆盖率停在 50%（2026-10-25 七维审计 T-2）。
+   */
+  const fakeRes = () => {
+    const captured = {};
+    const res = {
+      status(code) {
+        captured.status = code;
+        return res;
+      },
+      json(body) {
+        captured.body = body;
+        return res;
+      },
+    };
+    return { res, captured };
+  };
+
+  test('令牌无 sessionId：按未绑定会话签发，且不认任何具体会话', async () => {
+    const { issueReauthTicket: handler } = require('../../controllers/securityController/reauth');
+    const { res, captured } = fakeRes();
+    await handler({ user: { userId: `nosid-${stamp}` } }, res);
+
+    expect(captured.status).toBe(200);
+    const { ticket } = captured.body.data;
+    expect(verifyReauthTicket(ticket, { userId: `nosid-${stamp}`, sessionId: null })).toBe(true);
+    // 反向：绑定 null 的票据不得被某个具体会话冒用
+    expect(verifyReauthTicket(ticket, { userId: `nosid-${stamp}`, sessionId: 'sid-x' })).toBe(
+      false
+    );
+  });
+
+  test('令牌带 sessionId：票据绑定该会话，换个 sid 即失败', async () => {
+    const { issueReauthTicket: handler } = require('../../controllers/securityController/reauth');
+    const { res, captured } = fakeRes();
+    await handler({ user: { userId: `withsid-${stamp}`, sessionId: 'sid-y' } }, res);
+
+    const { ticket } = captured.body.data;
+    expect(verifyReauthTicket(ticket, { userId: `withsid-${stamp}`, sessionId: 'sid-y' })).toBe(
+      true
+    );
+    expect(verifyReauthTicket(ticket, { userId: `withsid-${stamp}`, sessionId: 'sid-z' })).toBe(
+      false
+    );
+  });
+});

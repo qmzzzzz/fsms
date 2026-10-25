@@ -28,7 +28,16 @@
  * 失效广播（sharedCache.publishInvalidate / onInvalidate，Redis pub/sub）：
  *  - 本地失效（invalidatePermissionCache）发生时同步广播失效键给所有实例；
  *  - 收到广播的实例做**本地**失效（不再二次广播，避免实例间互相触发成环）。
- * 未配置 REDIS_URL 时广播为无操作，退化为原「最长 30 秒自然过期」语义，行为不变。
+ *
+ * ================= 降级期 TTL 策略（P-3） =================
+ * 「没配 REDIS_URL」（静态单实例，A-2 的就绪闸会拦住疑似多实例部署）与
+ * 「配了 REDIS_URL 但当前不可用」（本应多实例、失效广播此刻断绝）不是一回事：
+ *  - 前者本地失效就是全部真相，30 秒 TTL 只影响性能，维持原语义；
+ *  - 后者其它实例收不到失效广播，只能等自然过期，30 秒即最长越权窗口。
+ * 因此在 `isRedisConfigured() && !isRedisEnabled()` 期间把写回 TTL 压到
+ * 2 秒（读路径也按同一口径判定，降级前写下的 30 秒条目会立即过期），
+ * 把「收回的权限仍被放行」的跨实例窗口从 30 秒收敛到 ≤2 秒。代价是降级
+ * 期间权限查询回表变频繁——安全系统优先选收敛而不是命中率。
  */
 
 // **必须**保持惰性 require，不得提到文件顶部。
@@ -64,9 +73,45 @@ const sharedCache = require('./sharedCache');
  */
 let permCacheGeneration = 0;
 
-const permCache = new Map(); // userId -> { perms, expireAt }
+const permCache = new Map(); // userId -> { perms, cachedAt, ttlMs, expireAt }
 const PERM_CACHE_TTL_MS = 30 * 1000;
+// P-3：共享失效通道断绝期间的最长收敛窗口（见文件头「降级期 TTL 策略」）
+const PERM_CACHE_DEGRADED_TTL_MS = 2 * 1000;
+const PERM_CACHE_MISS_TTL_MS = 5 * 1000;
 const PERM_CACHE_MAX_SIZE = 2000;
+
+/**
+ * 跨实例失效是否处于「部署上要求、但此刻用不了」的降级态
+ *
+ * 只认「配了 REDIS_URL 且连接未就绪」：完全没配是静态单实例，
+ * 本地失效即全部真相，不需要为跨实例窗口牺牲命中率。
+ */
+function sharedInvalidationUnavailable() {
+  return sharedCache.isRedisConfigured() && !sharedCache.isRedisEnabled();
+}
+
+/** 按当前降级态收敛 TTL（正常态原样返回） */
+function effectiveCacheTtlMs(ttlMs) {
+  return sharedInvalidationUnavailable() ? Math.min(ttlMs, PERM_CACHE_DEGRADED_TTL_MS) : ttlMs;
+}
+
+/**
+ * 条目是否仍新鲜
+ *
+ * 不能只看 expireAt：降级前写下的条目 expireAt 还指向 30 秒后，
+ * 若只按写入时的 TTL 判断，Redis 刚断开的瞬间仍会放行整段旧权限。
+ * 这里用 `cachedAt + 当前口径 TTL` 复核，使降级立即生效。
+ */
+function isEntryFresh(entry, now) {
+  if (!entry || entry.expireAt <= now) return false;
+  return now - entry.cachedAt < effectiveCacheTtlMs(entry.ttlMs);
+}
+
+/** 统一写入口：TTL 在写入当拍按降级态定死 */
+function setCacheEntry(key, perms, now, baseTtlMs) {
+  const ttlMs = effectiveCacheTtlMs(baseTtlMs);
+  permCache.set(key, { perms, cachedAt: now, ttlMs, expireAt: now + ttlMs });
+}
 
 // 失效广播键命名空间（L-4）：sharedCache 的失效通道是多业务共享的，
 // 用统一前缀隔离权限缓存的键，接收端只处理本前缀，互不干扰。
@@ -87,7 +132,8 @@ function startCleanup() {
   permCacheCleanupTimer = setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of permCache.entries()) {
-      if (entry.expireAt <= now) permCache.delete(key);
+      // 用新鲜度口径而非 expireAt：降级后长 TTL 条目也要被回收
+      if (!isEntryFresh(entry, now)) permCache.delete(key);
     }
   }, PERM_CACHE_TTL_MS);
   if (permCacheCleanupTimer && permCacheCleanupTimer.unref) permCacheCleanupTimer.unref();
@@ -143,7 +189,7 @@ async function getPermissions(userId) {
   const now = Date.now();
 
   const cached = permCache.get(key);
-  if (cached && cached.expireAt > now) {
+  if (isEntryFresh(cached, now)) {
     return cached.perms;
   }
 
@@ -154,7 +200,7 @@ async function getPermissions(userId) {
   if (!user) {
     // 缓存空结果短 TTL：防止不存在的 userId 反复穿透打库
     if (permCache.size >= PERM_CACHE_MAX_SIZE) permCache.clear();
-    permCache.set(key, { perms: [], expireAt: now + 5 * 1000 });
+    setCacheEntry(key, [], now, PERM_CACHE_MISS_TTL_MS);
     return [];
   }
 
@@ -166,7 +212,7 @@ async function getPermissions(userId) {
   // 缓存它等于把刚 delete 掉的条目重新种回去（收回的权限继续放行到 TTL 到期）。
   // 宁可这次不缓存、让下一个请求再查一趟库。
   if (permCacheGeneration === genAtRead) {
-    permCache.set(key, { perms, expireAt: now + PERM_CACHE_TTL_MS });
+    setCacheEntry(key, perms, now, PERM_CACHE_TTL_MS);
   }
 
   return perms;
@@ -183,7 +229,7 @@ function splitCachedAndMissing(userIds, now, result) {
     seen.add(key);
 
     const cached = permCache.get(key);
-    if (cached && cached.expireAt > now) {
+    if (isEntryFresh(cached, now)) {
       result.set(key, cached.perms);
     } else {
       missing.push(key);
@@ -200,9 +246,9 @@ function writeBackBatch(missing, byId, now, genAtRead, result) {
   for (const key of missing) {
     const user = byId.get(key);
     const perms = user ? collectPermissionCodes(user) : [];
-    const ttl = user ? PERM_CACHE_TTL_MS : 5 * 1000;
+    const ttl = user ? PERM_CACHE_TTL_MS : PERM_CACHE_MISS_TTL_MS;
     if (permCacheGeneration === genAtRead) {
-      permCache.set(key, { perms, expireAt: now + ttl });
+      setCacheEntry(key, perms, now, ttl);
     }
     result.set(key, perms);
   }
@@ -317,4 +363,7 @@ module.exports = {
   hasPermission,
   startCleanup,
   stopCleanup,
+  // P-3 策略参数：测试据此断言降级/正常两档 TTL，避免复制魔数
+  PERM_CACHE_TTL_MS,
+  PERM_CACHE_DEGRADED_TTL_MS,
 };

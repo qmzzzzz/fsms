@@ -57,6 +57,7 @@ const {
 } = require('./utils/metrics');
 const ApiResponse = require('./utils/apiResponse');
 const { checkMongoReady, checkRedisReady } = require('./utils/healthChecks');
+const { multiInstanceReadinessBlocker } = require('./constants/runtime');
 const { getTransactionTopology } = require('./utils/transaction');
 const swagger = require('./config/swagger');
 const { verifyBuildPin: verifyLoginKeyPin } = require('./utils/loginCipher');
@@ -434,15 +435,29 @@ function installRoutes(app) {
   app.get('/readyz', (req, res) => {
     Promise.all([checkMongoReady(), checkRedisReady()])
       .then(([mongo, redis]) => {
-        const ready = mongo.ok && redis.ok;
+        // A-2：多实例且没有分布式审计锁 ⇒ 审计链会分叉，实例不得接流量。
+        // 固定枚举对外，拓扑细节只进日志（本端点不鉴权）。
+        const topologyBlocker = multiInstanceReadinessBlocker();
+        const ready = mongo.ok && redis.ok && !topologyBlocker;
         // 就绪判定落进指标：/readyz 是「能不能干活」的唯一权威判据，
         // 而它此前只在响应体里出现一次——LB 摘了流量，监控面板却全绿。
-        recordReadyz(ready ? 'ok' : mongo.ok ? redis.reason : mongo.reason, ready);
+        // 未就绪原因按拓扑阻断 > redis > mongo 取一条（对外仍是固定枚举）。
+        // 写成 `?.` + `??` 而不是嵌套三元：后者被 prettier 展开成九行级联，
+        // 读起来比判据本身还长，且同一个判据在这里只该有一处表达。
+        recordReadyz(
+          ready ? 'ok' : (topologyBlocker?.reason ?? (mongo.ok ? redis.reason : mongo.reason)),
+          ready
+        );
         if (!mongo.ok) {
           logger.warn(`就绪探针未通过（mongo=${mongo.reason}）：${mongo.detail}`);
         }
         if (!redis.ok) {
           logger.warn(`就绪探针未通过（redis=${redis.reason}）：${redis.detail}`);
+        }
+        if (topologyBlocker) {
+          logger.error(
+            `就绪探针未通过（topology=${topologyBlocker.reason}）：${topologyBlocker.detail}`
+          );
         }
         res.status(ready ? 200 : 503).json({
           status: ready ? 'ready' : 'unready',
@@ -450,6 +465,7 @@ function installRoutes(app) {
             mongo: mongo.ok ? 'ok' : mongo.reason,
             redis: redis.reason,
             transactions: transactionMarker(),
+            topology: topologyBlocker ? topologyBlocker.reason : 'ok',
           },
           timestamp: new Date().toISOString(),
         });

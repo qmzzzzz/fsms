@@ -22,18 +22,18 @@
  * 实测后逐行定位，其中的分支分两类：
  *
  *  A. **有诊断价值的真实路径**（本文件覆盖）：
- *     - trust proxy 显式有效值（app.js:205）：收紧后这是生产反代下唯一
+ *     - trust proxy 显式有效值（app.js:206）：收紧后这是生产反代下唯一
  *       让 req.ip 正确的开关。此前只测了「非法值 → 退化 1 跳」，有效值分支零验证——
  *       一旦有人写错 `app.set('trust proxy', true)`（信任全部代理，可伪造 XFF
  *       击穿 IP 限流/黑名单），现有测试不会红。
- *     - /api 根路径（app.js:487）：注释声明「不再返回接口清单」，无测试锁定；
+ *     - /api 根路径（app.js:503）：注释声明「不再返回接口清单」，无测试锁定；
  *       若将来有人改回返回清单，属未认证信息暴露，须在此红。
- *     - /readyz 的 503 双路径（app.js:447、app.js:460）：checkMongoReady 返回
+ *     - /readyz 的 503 双路径（app.js:462、app.js:476）：checkMongoReady 返回
  *       not-ok 与**抛错**两种失败。脱敏（readyzSanitize.test.js）只测了
  *       checkMongoReady 本身，未验证 HTTP 响应体真的不含驱动错误消息——本文件
  *       补上 app 级闭环。
  *
- *  B. Sentry 三件套（app.js:249-250、app.js:546）——**不补测，理由如实记录**：
+ *  B. Sentry 三件套（app.js:250-251、app.js:562）——**不补测，理由如实记录**：
  *     `sentryInitialized` 是模块级常量，要覆盖需 SENTRY_DSN + 模块重置 + 对
  *     @sentry/node 打桩三件套齐备；而它覆盖的是「SDK 自己的中间件被 app.use」，
  *     属第三方库接线，行为已验证于 middleware/sentry 的单测
@@ -43,13 +43,32 @@
 
 const ORIGINAL_ENV = process.env;
 
+/**
+ * 收尾：把审计中间件排队的 setImmediate 回调放完
+ *
+ * `middleware/security/auditLog.js` 的 doLog 用 `setImmediate(() =>
+ * persistAuditRecord(...))` 异步落库，而 persistAuditRecord **内部**才惰性
+ * require `utils/fingerprint` 与 `services/auditBuffer`。本文件的请求只要
+ * 落在被审计的路由上，就会留下一个待执行的回调；文件跑完、Jest 拆掉环境后
+ * 它才被调度，require 拿到 undefined ⇒
+ *   `TypeError: Cannot destructure property 'computeFingerprint' of 'require(...)'`
+ * 该异常发生在测试框架之外，**直接崩掉 worker**（CI 表现是
+ * `Test order independence (randomized)` 步骤里 `Jest worker encountered 4 child
+ * process exceptions, exceeding retry limit`，而同一文件按默认顺序却全绿）。
+ *
+ * 只等一个 tick 就够：惰性 require 是回调体的第一段同步代码。
+ */
+afterAll(async () => {
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
 /** 重载 app 模块（config/app 均在加载期读 env，必须先设 env 再 require） */
 const loadApp = () => {
   jest.resetModules();
   return require('../../app');
 };
 
-describe('§13 V-12：trust proxy 有效值分支（app.js:205）', () => {
+describe('§13 V-12：trust proxy 有效值分支（app.js:206）', () => {
   beforeEach(() => {
     jest.resetModules();
     process.env = { ...ORIGINAL_ENV };
@@ -155,7 +174,7 @@ describe('§13 V-12：trust proxy 有效值分支（app.js:205）', () => {
   });
 });
 
-describe('§13 V-12：/api 根路径不泄露接口清单（app.js:487）', () => {
+describe('§13 V-12：/api 根路径不泄露接口清单（app.js:503）', () => {
   const request = require('supertest');
   let app;
 
@@ -175,7 +194,7 @@ describe('§13 V-12：/api 根路径不泄露接口清单（app.js:487）', () =
   });
 });
 
-describe('§13 V-12：/readyz 的 503 双路径（app.js:435-457）', () => {
+describe('§13 V-12：/readyz 的 503 双路径（app.js:435-482）', () => {
   const request = require('supertest');
 
   /**
@@ -273,5 +292,97 @@ describe('§13 V-12：/readyz 的 503 双路径（app.js:435-457）', () => {
     expect(res.body.checks.redis).toBe('unreachable');
     expect(JSON.stringify(res.body)).not.toContain('10.8.8.8');
     expect(JSON.stringify(res.body)).not.toContain('redis-prod');
+  });
+});
+
+describe('A-2：多实例检测不到分布式锁时 /readyz fail-closed', () => {
+  const request = require('supertest');
+  const TOPOLOGY_SIGNAL_KEYS = [
+    'INSTANCE_COUNT',
+    'REPLICAS',
+    'RUNTIME_INSTANCE_COUNT',
+    'NODE_APP_INSTANCE',
+    'instances',
+  ];
+  let savedSignals;
+  let redisEnabledSpy;
+
+  /**
+   * 与上一组同一套路：加载期替换探针，避免真实 Mongo/Redis 状态干扰。
+   * Redis 就绪与否由 runtime.multiInstanceReadinessBlocker 在请求期读取，
+   * 因此这里对 sharedCache.isRedisEnabled 打桩即可（app 与测试共享同一模块实例）。
+   */
+  const loadAppWithProbe = () => {
+    jest.resetModules();
+    require('mongoose').set('bufferTimeoutMS', 300);
+    const healthChecks = require('../../utils/healthChecks');
+    healthChecks.checkMongoReady = jest.fn(async () => ({ ok: true, reason: 'ok', detail: '' }));
+    healthChecks.checkRedisReady = jest.fn(async () => ({ ok: true, reason: 'ok', detail: '' }));
+    return require('../../app').createApp();
+  };
+
+  const setSignals = (values) => {
+    for (const key of TOPOLOGY_SIGNAL_KEYS) delete process.env[key];
+    Object.assign(process.env, values);
+  };
+
+  beforeEach(() => {
+    savedSignals = Object.fromEntries(TOPOLOGY_SIGNAL_KEYS.map((k) => [k, process.env[k]]));
+    process.env.NODE_ENV = 'development';
+    setSignals({});
+  });
+
+  afterEach(() => {
+    for (const key of TOPOLOGY_SIGNAL_KEYS) {
+      if (savedSignals[key] === undefined) delete process.env[key];
+      else process.env[key] = savedSignals[key];
+    }
+    if (redisEnabledSpy) redisEnabledSpy.mockRestore();
+    redisEnabledSpy = null;
+    jest.resetModules();
+  });
+
+  test('检测到多实例且 Redis 未就绪：503，checks.topology 用固定枚举', async () => {
+    process.env.INSTANCE_COUNT = '2';
+    const app = loadAppWithProbe();
+    redisEnabledSpy = jest
+      .spyOn(require('../../services/sharedCache'), 'isRedisEnabled')
+      .mockReturnValue(false);
+
+    const res = await request(app).get('/readyz');
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('unready');
+    expect(res.body.checks.mongo).toBe('ok');
+    expect(res.body.checks.topology).toBe('multi_instance_without_distributed_lock');
+    // 检测依据（环境变量名/取值）属于部署拓扑细节，不得回显到未认证端点
+    expect(JSON.stringify(res.body)).not.toContain('INSTANCE_COUNT');
+  });
+
+  test('检测到多实例但 Redis 已就绪：分布式审计锁可用，正常 ready', async () => {
+    process.env.INSTANCE_COUNT = '2';
+    const app = loadAppWithProbe();
+    redisEnabledSpy = jest
+      .spyOn(require('../../services/sharedCache'), 'isRedisEnabled')
+      .mockReturnValue(true);
+
+    const res = await request(app).get('/readyz');
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ready');
+    expect(res.body.checks.topology).toBe('ok');
+  });
+
+  test('未检测到多实例：即使 Redis 未就绪也 ready（不误伤单实例部署）', async () => {
+    const app = loadAppWithProbe();
+    redisEnabledSpy = jest
+      .spyOn(require('../../services/sharedCache'), 'isRedisEnabled')
+      .mockReturnValue(false);
+
+    const res = await request(app).get('/readyz');
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ready');
+    expect(res.body.checks.topology).toBe('ok');
   });
 });

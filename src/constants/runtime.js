@@ -400,6 +400,27 @@ function resolveUnprovenReason(reasons, pod) {
 }
 
 /**
+ * 共享缓存（Redis）是否就绪
+ *
+ * 惰性 require 是**必须**的，不得提到文件顶部：sharedCache/index.js 的
+ * degradedMechanismHint() 会在函数内反向 require 本模块取 SINGLE_PROCESS_DEPENDENCIES
+ * （它那边也有同一条注释），顶层化会把这条互相依赖变成加载期环。
+ *
+ * 抽成函数而不是两处各写一遍：`assertSingleProcessAssumptions` 与
+ * `multiInstanceReadinessBlocker` 判的是同一件事（审计链分布式锁是否真的可用），
+ * 两处各写一份的话，将来任何一侧改了"什么算就绪"，另一侧会静默沿用旧口径。
+ *
+ * @returns {boolean}
+ */
+function sharedCacheReady() {
+  try {
+    return require('../services/sharedCache').isRedisEnabled();
+  } catch (_) {
+    return false; // 模块不可用 ⇒ 视为未就绪（保守方向）
+  }
+}
+
+/**
  * 启动期校验单进程假设
  *
  * 不阻断启动：多实例部署下服务本身可用，只是上述机制降级；
@@ -425,12 +446,7 @@ function assertSingleProcessAssumptions() {
   }
 
   // 懒加载：避免在模块加载期耦合共享缓存（其初始化在启动流程中显式完成）
-  let redisReady = false;
-  try {
-    redisReady = require('../services/sharedCache').isRedisEnabled();
-  } catch (_) {
-    /* 共享缓存不可用时按未就绪处理 */
-  }
+  const redisReady = sharedCacheReady();
 
   const stillSingle = SINGLE_PROCESS_DEPENDENCIES.filter(
     (d) => !(redisReady && d.redisExternalized)
@@ -475,10 +491,35 @@ function assertSingleProcessAssumptions() {
   return result;
 }
 
+/**
+ * A-2：多实例部署的就绪闸
+ *
+ * 审计哈希链的写序只在单写者下成立。检测到多实例迹象时，若共享缓存（Redis）
+ * 未就绪 ⇒ 审计链分布式锁（utils/auditChain 的 acquireLockBlocking）根本不启用，
+ * 多个实例会各自推进链尾并分叉。此时不能再"打条日志照常接流量"：
+ * /readyz 必须不就绪，让编排器/LB 把实例摘掉。
+ *
+ * 只在 suspected 档拦截；unproven 档（K8s Deployment 无法自证单副本）仍按
+ * assertSingleProcessAssumptions 的口径 warn，否则会把正常单副本 Deployment
+ * 误摘流量。Redis 就绪即视为分布式审计锁可用（auditChain 的判据同源）。
+ *
+ * @returns {{reason: string, detail: string}|null} null 表示可正常就绪
+ */
+function multiInstanceReadinessBlocker() {
+  const result = detectMultiProcess();
+  if (!result.suspected) return null;
+  if (sharedCacheReady()) return null;
+  return {
+    reason: 'multi_instance_without_distributed_lock',
+    detail: result.reasons.join('；'),
+  };
+}
+
 module.exports = {
   SINGLE_PROCESS_DEPENDENCIES,
   parsePodOrdinal,
   detectMultiProcess,
   assertSingleProcessAssumptions,
   readDeclaredInstanceCount,
+  multiInstanceReadinessBlocker,
 };

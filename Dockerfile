@@ -18,7 +18,7 @@
 # digest 是内容寻址的：字节一致 ⇒ 各通道讲的是同一个上游镜像。
 # **三个阶段必须保持同一 digest**：否则 builder 与 runtime 的 libc/OpenSSL
 # 可能不同版本，原生模块在运行时才暴露不兼容。
-# 26.12.0 为 2026-10-20 升级后的钉版版本（CI 矩阵 22.x/24.x，engines >=22.12.0）。
+# 26.12.0 为 2026-10-20 升级后的钉版版本（CI 矩阵 22.x/24.x/26.x，engines >=22.12.0）。
 # 部署机复验（一条命令确认该 digest 存在且与 tag 当前指向一致）：
 #   docker pull node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
 #   docker inspect --format='{{index .RepoDigests 0}}' node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
