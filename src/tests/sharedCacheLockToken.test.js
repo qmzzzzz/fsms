@@ -105,6 +105,38 @@ describe('锁令牌与降级可见性', () => {
     }
   });
 
+  test('锁句柄可续租：延长 PX 且只在令牌仍属于自己时返回 true', async () => {
+    const client = fakeClient();
+    const { acquireLockBlocking } = makeLocks({ enabled: true, configured: true, client });
+    const handle = await acquireLockBlocking('lock:zombie', 30000, 1);
+
+    await expect(handle.renew(30000)).resolves.toBe(true);
+    const renewCall = client.calls.at(-1);
+    expect(renewCall).toMatchObject({ op: 'eval', key: 'lock:zombie' });
+    expect(renewCall.script).toContain('pexpire');
+    expect(renewCall.args).toEqual([expect.stringMatching(/^[0-9a-f]{32}$/), '30000']);
+
+    // 令牌不匹配（脚本返回 0）⇒ false：不能把丢锁谎报成续租成功
+    client.eval = async () => 0;
+    await expect(handle.renew(30000)).resolves.toBe(false);
+  });
+
+  test('续租命令抛错 ⇒ 返回 false 并告警（租约可能已被其他实例接管）', async () => {
+    const client = fakeClient();
+    client.eval = async () => {
+      throw new Error('redis down');
+    };
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const { acquireLockBlocking } = makeLocks({ enabled: true, configured: true, client });
+      const handle = await acquireLockBlocking('lock:zombie', 30000, 1);
+      await expect(handle.renew(30000)).resolves.toBe(false);
+      expect(warnSpy.mock.calls.map((c) => c.join(' ')).join('\n')).toContain('续租失败');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   test('三原语在链路不可用时的极性差异被固定下来（防被"统一"成错误方向）', async () => {
     const client = fakeClient();
     const opts = { enabled: false, configured: true, client };

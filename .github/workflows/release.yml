@@ -1,18 +1,27 @@
-# 发布（tag → GitHub Release）
+# 发布（CI 成功 → GitHub Release）
 #
-# 为什么需要它：此前打了 v* 标签只有 ci.yml 会推一个带版本号的镜像，
+# 为什么需要它：打了 v* 标签只有 ci.yml 会推一个带版本号的镜像，
 # 但**没有 Release 记录**——“这个版本改了什么”只能去翻 commit 历史。
 # CHANGELOG.md 已按 Keep a Changelog 维护，本流程把它变成发布时自动生成的 Release Notes——
 # 避免“发布时手写一份、CHANGELOG 里另一份”的两处漂移。
+#
+# ── 为什么改成 workflow_run 而不是直接监听 tag（2026-10-24 审计 P2）──
+# 旧实现与 ci.yml 同时被 tag 触发，两者互不等待：CI / security-audit / 镜像构建 /
+# cosign 签名任何一环失败，Release 照样发出去——发布记录与已验证产物不同源。
+# 现在以「CI 工作流成功完成」为前置条件：
+#   - 只接受 conclusion == success；
+#   - 只接受 push 事件、本仓库（不是 fork）、head_branch 形如 v*；
+#   - 再对 tag 做一次 fail-closed 校验：tag 必须存在且指向 CI 实际构建的提交。
+# Release 失败不会反向影响 CI，但绝不会出现「CI 红了、Release 绿了」。
 #
 # fail-closed：tag 对应的 CHANGELOG 章节找不到 → **直接失败**，不发一个
 # 内容为空的 Release。空 Release 比没有 Release 更糟：它看起来像“这个版本没什么可说的”。
 name: 'Release'
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
 
 # 工作流级仅 read；发 Release 所需的 contents: write 下放到 job
 permissions:
@@ -20,15 +29,50 @@ permissions:
 
 jobs:
   release:
+    # CI 成功 + tag push + 本仓库 + v* 才进入；其余情况直接跳过（不是失败）。
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
     runs-on: ubuntu-latest
     permissions:
       contents: write # 创建 Release（与仓库默认权限隔离，只给这一步）
+    env:
+      # workflow_run 上下文里 GITHUB_REF_NAME 是默认分支，不是 tag；
+      # 触发这一次 CI 的 tag 在 head_branch 里。
+      RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
     steps:
       # persist-credentials: false：本流程不 git push（发 Release 走 API token，
-      # 由 action-gh-release 自行消费 GITHUB_TOKEN），.git/config 里的凭据是纯外泄面
+      # 由 action-gh-release 自行消费 GITHUB_TOKEN），.git/config 里的凭据是纯外泄面。
+      # ref 钉到 CI 实际构建的那个提交；fetch-depth: 0 让下面的 tag 校验能取到完整对象。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      # tag 必须存在且指向 CI 构建的提交。head_branch 形如 v* 只是必要条件：
+      # 同名分支、被移动过的 tag 都不能让 Release 指向未经 CI 验证的代码。
+      - name: Verify tag points at the CI-tested commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::非法的 tag 名：$RELEASE_TAG"
+            exit 1
+          fi
+          if ! git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" 2>/dev/null; then
+            echo "::error::远端不存在 tag ${RELEASE_TAG}：拒绝发布"
+            exit 1
+          fi
+          actual="$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
+          if [[ "$actual" != "$EXPECTED_SHA" ]]; then
+            echo "::error::tag ${RELEASE_TAG} 指向 ${actual}，但 CI 验证的是 ${EXPECTED_SHA}"
+            exit 1
+          fi
 
       - name: Extract release notes from CHANGELOG
         id: notes
@@ -37,7 +81,7 @@ jobs:
         # 一段 awk 就够，而多引一个 action 就多一份供应链面。
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           # 允许 [1.2.3] 与 [1.2.3] - YYYY-MM-DD 两种写法
           start="$(grep -n -m1 -E "^## \\[${version}\\]" CHANGELOG.md | cut -d: -f1 || true)"
           if [[ -z "$start" ]]; then
@@ -55,10 +99,12 @@ jobs:
           echo "path=release-notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        # 用 v2（当前维护中的大版本）；文件名与 tag 同名，let Release 与 tag 一一对应
+        # tag_name 必须显式给：workflow_run 上下文里的 github.ref 是默认分支，
+        # 不指定会让 action 把 Release 挂到 main 上。
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
           body_path: ${{ steps.notes.outputs.path }}
           draft: false
           prerelease: false

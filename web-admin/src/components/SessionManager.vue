@@ -1,7 +1,7 @@
 <template>
   <div class="session-manager">
     <div class="session-toolbar">
-      <span class="session-summary">
+      <span v-if="!(loadError && sessions.length === 0)" class="session-summary">
         {{ t('session.activeCount', { count: sessions.length }) }}
       </span>
       <div class="session-actions">
@@ -16,13 +16,35 @@
         <button
           type="button"
           class="glass-btn glass-btn--danger glass-btn--sm"
-          :disabled="loading || otherCount === 0 || revokingOthers"
+          :disabled="loading || loadError || otherCount === 0 || revokingOthers"
           @click="revokeOthers"
         >
           {{ t('session.revokeOthers') }}
         </button>
       </div>
     </div>
+
+    <!-- 加载失败必须显式告知：仅清空列表会让「加载失败」与「真的没有其他设备」
+         长得一模一样；已有数据时保留旧值并标注为上次数据，避免把可用信息也清掉 -->
+    <el-alert
+      v-if="loadError"
+      :title="sessions.length > 0 ? t('session.staleData') : t('session.loadError')"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="session-alert session-load-error"
+    >
+      <template #default>
+        <button
+          type="button"
+          class="glass-btn glass-btn--default glass-btn--sm"
+          :disabled="loading"
+          @click="load"
+        >
+          {{ t('common.retry') }}
+        </button>
+      </template>
+    </el-alert>
 
     <!--
       当前令牌不含 sid 时的提示：功能上线前签发的令牌没有 sid，
@@ -38,7 +60,7 @@
     />
 
     <GlassSkeleton v-if="loading" variant="table" :rows="3" />
-    <el-empty v-else-if="sessions.length === 0" :description="t('session.empty')" />
+    <el-empty v-else-if="sessions.length === 0 && !loadError" :description="t('session.empty')" />
     <ul v-else class="session-list">
       <li
         v-for="item in sessions"
@@ -158,6 +180,9 @@ const { t } = useI18n()
 
 const sessions = ref([])
 const loading = ref(true)
+// 加载/刷新失败标记：与「没有会话」区分开。失败时保留已有列表并标注为上次数据，
+// 仅首次加载失败时列表为空——此时由错误提示接管，不能再显示「暂无会话」。
+const loadError = ref(false)
 const revoking = ref('')
 // 撤销"其它所有会话"的在途锁：revokeOtherSessions 是幂等批处理，但 DELETE 期间
 // loading=false、otherCount 未刷新 → 按钮仍可点，连点会第二次调用返回 revokedCount:0，
@@ -254,9 +279,11 @@ const load = async () => {
     // 显式判断 === false：字段缺失（旧后端）时不应触发提示，
     // 用 `!resp.data?.currentSidPresent` 会把 undefined 也当成「不含 sid」
     currentSidPresent.value = resp.data?.currentSidPresent !== false
+    loadError.value = false
   } catch (_) {
-    // 错误提示已由拦截器统一处理；此处清空避免展示上一次的过期数据
-    sessions.value = []
+    // 错误提示已由拦截器统一处理；此处标记失败并保留已有数据（刷新失败时
+    // 清空列表会让用户误以为其他设备都已掉线）
+    loadError.value = true
   } finally {
     loading.value = false
   }

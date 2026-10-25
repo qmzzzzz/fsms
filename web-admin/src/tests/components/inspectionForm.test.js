@@ -35,6 +35,7 @@ vi.mock('@/utils/api', () => ({
     users: { getList: (...a) => searchUsersApi(...a) },
   },
   isCanceledError: () => false,
+  isHandledApiError: () => false,
 }))
 vi.mock('element-plus/es/components/message/index.mjs', () => ({
   ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },

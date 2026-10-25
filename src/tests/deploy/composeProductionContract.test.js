@@ -63,7 +63,17 @@ const STRONG_DUMMY = 'Zq7!Wn4#Rt9$Yp2@Ks6&Lm8*Vc3^Bh5%Jf1Nx0Kd';
 
 /** 取出 app 服务 environment 段的 KEY=VALUE（结束边界取 app 自己的 secrets: 段） */
 function readAppEnvironment() {
-  const text = fs.readFileSync(COMPOSE, 'utf8');
+  return readAppEnvironmentFrom(fs.readFileSync(COMPOSE, 'utf8'));
+}
+
+/**
+ * 同上，但入参是 compose 文本。
+ *
+ * 存在理由不是复用：下面的可证伪用例要拿**改过的文本**复跑同一条判据
+ * （删掉一行、改一个默认值语法），否则断言只能证明"当前文件长这样"，
+ * 证明不了"判据真的会报错"。
+ */
+function readAppEnvironmentFrom(text) {
   const envAt = text.indexOf('\n    environment:');
   if (envAt < 0) throw new Error('docker-compose.yml 里找不到 app 的 environment 段');
   const endAt = text.indexOf('\n    secrets:', envAt);
@@ -82,8 +92,21 @@ function readAppEnvironment() {
 }
 
 /**
+ * `${VAR:?}` 的替身值必须**形状正确**，不能一律用强随机串。
+ *
+ * 2026-10-24 审计后 CORS_ORIGIN / TRUSTED_PROXY_CIDRS 会真的被解析：
+ * 用 `STRONG_DUMMY:VAR` 那种串喂进去，红的是"替身不像真实配置"，不是被测契约。
+ * 这里给每个强制项一个该拓扑下**合法**的样例值（与 README/.env.example 同形）。
+ */
+const INTERPOLATION_SAMPLES = Object.freeze({
+  CORS_ORIGIN: 'https://admin.example.com',
+  ALLOWED_HOSTS: 'admin.example.com',
+  TRUSTED_PROXY_CIDRS: '172.28.0.0/16',
+});
+
+/**
  * 展开 compose 的插值语法为「部署方实际会拿到的值」：
- *   ${VAR:?提示} → 强制外部输入，用强随机替身（等价于运维确实给了值）
+ *   ${VAR:?提示} → 强制外部输入，用形状正确的替身（等价于运维确实给了值）
  *   ${VAR:-默认} → 未显式配置时的默认值
  *   /run/secrets/x → 落一个临时文件，让 *_FILE 注入路径真实可读
  */
@@ -113,9 +136,12 @@ function materialize(raw, tmpDir) {
   const interpolation = raw.match(/^\$\{([A-Z0-9_]+)(?::?[-?][^}]*)?\}$/);
   if (interpolation) {
     const def = raw.match(/:-([^}]*)\}/);
-    // 未给默认值时按变量名单独造替身：多个 `${X:?}` 共用同一个值会互相"撞库"，
+    if (def) return def[1];
+    const sample = INTERPOLATION_SAMPLES[interpolation[1]];
+    if (sample !== undefined) return sample;
+    // 其余 `${X:?}` 按变量名单独造替身：多个强制项共用同一个值会互相"撞库"，
     // 让按值比较的判据（如两把 JWT 密钥不得相同）测到替身而不是被测拓扑
-    return def ? def[1] : `${STRONG_DUMMY}:${interpolation[1]}`;
+    return `${STRONG_DUMMY}:${interpolation[1]}`;
   }
   return raw;
 }
@@ -275,6 +301,12 @@ describe('docker-compose 生产环境变量契约', () => {
     'REDIS_PASSWORD',
     'REDIS_PASSWORD_FILE',
     'ADMIN_INITIAL_PASSWORD_FILE',
+    // 2026-10-24 审计：/metrics 鉴权令牌与 TLS/环境闸的三个显式开关
+    'METRICS_TOKEN',
+    'METRICS_TOKEN_FILE',
+    'TLS_TERMINATED_UPSTREAM',
+    'REQUIRE_PRODUCTION_CONFIG',
+    'TRUSTED_PROXY_CIDRS',
   ];
   const saved = {};
   let tmpDir;
@@ -301,6 +333,8 @@ describe('docker-compose 生产环境变量契约', () => {
       LOGIN_ECDH_PRIVATE_KEY_FILE: 'LOGIN_ECDH_PRIVATE_KEY',
       // 2026-10-01 认证闸：compose 拓扑的 redis 凭据经同一 *_FILE 注入路径进入
       REDIS_PASSWORD_FILE: 'REDIS_PASSWORD',
+      // 2026-10-24 审计：#6 的闭合口——compose 必须能把 METRICS_TOKEN 真的传进容器
+      METRICS_TOKEN_FILE: 'METRICS_TOKEN',
     };
     for (const [fileVar, target] of Object.entries(fileMap)) {
       if (process.env[fileVar]) {
@@ -517,5 +551,71 @@ describe('docker-compose 生产环境变量契约', () => {
         () => ''
       ).refs
     ).toEqual([]);
+  });
+});
+
+/**
+ * TRUSTED_PROXY_CIDRS 的「部署可达性」契约（F-01 闭合口，2026-10-21）
+ *
+ * 这不是"变量名出现过"式的静态断言，而是钉一条**部署链**：
+ *   · 代码层写着「闭合方式只有一个：配置 TRUSTED_PROXY_CIDRS」（utils/ipUtils.js），
+ *     未配置时判据退回「对端属私网/回环即可信」；
+ *   · README 的上线清单要求"已按反向代理实际所在网段设置"；
+ *   · 但 compose 是实际部署入口 —— environment 段不传它，运维在 .env 里配了
+ *     也进不了容器，判据静默退回兼容档，而清单会显示"已做"。
+ *
+ * 两个方向都要钉住：
+ *   · **必须传**：漏传 ⇒ 配了等于没配（2026-10-21 实测的缺陷形态，
+ *     见 deliverables/预发动态验证-核对结论-2026-10-21.md）；
+ *   · **必须是 `:?` 而不是 `:-`**（2026-10-24 审计修正）：`:-` 默认留空有两个
+ *     叠加问题——(a) README 上线清单写着"已按反向代理实际所在网段设置"，
+ *     而留空时判据静默退回「私网/回环即可信」的兼容档，配置意图与实际不符；
+ *     (b) 空串在解析侧等价于未配置，运维无法从部署入口区分"我确实选择兼容档"
+ *     与"我忘了配置"。`config/trustedProxies.js` 的运行时判据对非 compose
+ *     部署仍保持兼容档（不传即兼容），但**本仓的生产部署入口**要求显式声明：
+ *     要么给网段，要么在部署前明确删掉这一行并记录理由。
+ */
+describe('TRUSTED_PROXY_CIDRS 必须在部署入口上真实可达（F-01 闭合口）', () => {
+  /** 返回问题描述数组（空数组＝契约成立），供"真文件"与"改坏文本"两侧共用 */
+  const problemsOf = (text) => {
+    const problems = [];
+    const raw = readAppEnvironmentFrom(text).TRUSTED_PROXY_CIDRS;
+    if (raw === undefined) {
+      problems.push('app environment 没有 TRUSTED_PROXY_CIDRS：.env 里配了也进不了容器');
+      return problems;
+    }
+    if (!/^\$\{TRUSTED_PROXY_CIDRS:\?[^}]*\}$/.test(raw)) {
+      problems.push(
+        `TRUSTED_PROXY_CIDRS 必须写成 \${TRUSTED_PROXY_CIDRS:?...}（强制显式），实际是 ${raw}`
+      );
+    }
+    return problems;
+  };
+
+  test('compose 强制该变量显式配置（缺省不得静默退化为兼容档）', () => {
+    expect(problemsOf(fs.readFileSync(COMPOSE, 'utf8'))).toEqual([]);
+
+    // 形状自证：替换值必须是"该拓扑下合法的 CIDR"，否则下面的校验通过是假绿
+    const { parseTrustedProxyCidrs } = require('../../config/trustedProxies');
+    const sample = materialize('${TRUSTED_PROXY_CIDRS:?必须配置}', null);
+    expect(parseTrustedProxyCidrs(sample).errors).toEqual([]);
+    expect(parseTrustedProxyCidrs(sample).configured).toBe(true);
+  });
+
+  test('可证伪：删掉这一行、或改回默认留空的 `:-`，判据都必须报错', () => {
+    const text = fs.readFileSync(COMPOSE, 'utf8');
+
+    // 行尾按 `\r?\n` 取：本仓 docker-compose.yml 是 CRLF，而 src/** 里有 LF-only 文件，
+    // 把 `\n` 硬编码进锚点会静默零命中（替换没发生 ⇒ 下面的"可证伪"变成恒真）。
+    const removed = text.replace(
+      /\r?\n[ \t]*- TRUSTED_PROXY_CIDRS=\$\{TRUSTED_PROXY_CIDRS:\?[^}]*\}\r?\n/,
+      '\n'
+    );
+    expect(removed).not.toBe(text); // 前提：替换真的发生了（否则下面等于没测）
+    expect(problemsOf(removed).length).toBeGreaterThan(0);
+
+    const loosened = text.replace(/\$\{TRUSTED_PROXY_CIDRS:\?[^}]*\}/, '${TRUSTED_PROXY_CIDRS:-}');
+    expect(loosened).not.toBe(text);
+    expect(problemsOf(loosened).length).toBeGreaterThan(0);
   });
 });

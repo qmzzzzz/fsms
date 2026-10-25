@@ -197,7 +197,7 @@ describe('websocket.js（P1-27）', () => {
     expect(svc.reconnectExhausted).toBe(true)
   })
 
-  test('joinRoom：未连接只登记，已连接立即 emit；连接/重连后自动重新 join', async () => {
+  test('joinRoom 等待 authenticated：认证前不发包，认证后补发，重连后重新等待', async () => {
     const sock = new FakeSocket()
     ioMock.mockReturnValue(sock)
     const { WebSocketService } = await loadModule()
@@ -208,18 +208,63 @@ describe('websocket.js（P1-27）', () => {
 
     svc.connect()
     sock.connected = true
-    svc.joinRoom('devices') // 已连接：立即 emit
-    expect(sock.emitted).toEqual([['join-room', 'devices']])
+    sock.fire('connect')
+    // 传输层已连通 ≠ 服务端鉴权完成：此时 emit 会被服务端拒绝且不会重试
+    expect(sock.emitted).toHaveLength(0)
 
-    // 重连（同一 socket 实例上再次触发 connect）→ 两个房间都要重新 join
+    sock.fire('authenticated')
+    expect(sock.emitted).toEqual([['join-room', 'alarms']])
+
+    svc.joinRoom('devices') // 已认证：立即 emit
+    expect(sock.emitted).toEqual([
+      ['join-room', 'alarms'],
+      ['join-room', 'devices'],
+    ])
+
+    // 重连 → connect 重置认证态，必须等新的 authenticated 才补发房间
     sock.emitted = []
     sock.fire('connect')
+    expect(sock.emitted).toHaveLength(0)
+    sock.fire('authenticated')
     expect(sock.emitted).toEqual(
       expect.arrayContaining([
         ['join-room', 'alarms'],
         ['join-room', 'devices'],
       ])
     )
+  })
+
+  test('auth-error：清除认证态、标记不可恢复、上报降级并通知 onGiveUp', async () => {
+    const sock = new FakeSocket()
+    ioMock.mockReturnValue(sock)
+    const { WebSocketService } = await loadModule()
+    reportDegradation.mockClear()
+
+    const svc = new WebSocketService('http://ws.example')
+    const giveUp = vi.fn()
+    svc.onGiveUp(giveUp)
+    svc.connect()
+    sock.connected = true
+    sock.fire('connect')
+    sock.fire('authenticated')
+    expect(svc.authenticated).toBe(true)
+
+    sock.fire('auth-error', { message: '认证令牌已失效' })
+
+    expect(svc.authenticated).toBe(false)
+    // 服务端随后 disconnect(true)，socket.io-client 不会自动重连 ⇒ 通道已不可自愈
+    expect(svc.reconnectExhausted).toBe(true)
+    expect(giveUp).toHaveBeenCalledTimes(1)
+    expect(reportDegradation).toHaveBeenCalledTimes(1)
+    expect(reportDegradation.mock.calls[0][1]).toMatchObject({
+      reason: '认证令牌已失效',
+      url: 'http://ws.example',
+    })
+
+    // 认证失败后即使底层仍标记 connected，也不得再发 join-room
+    sock.emitted = []
+    svc.joinRoom('devices')
+    expect(sock.emitted).toHaveLength(0)
   })
 
   test('joinRoom 空值忽略', async () => {
@@ -247,6 +292,7 @@ describe('websocket.js（P1-27）', () => {
     svc.connect()
     sock.connected = true
     sock.fire('connect')
+    sock.fire('authenticated')
     expect(sock.emitted).toEqual(
       expect.arrayContaining([
         ['join-room', 'alarms'],
@@ -262,6 +308,7 @@ describe('websocket.js（P1-27）', () => {
     // 重连后只重新 join 仍声明着的房间，被撤销的不得复活
     sock.emitted = []
     sock.fire('connect')
+    sock.fire('authenticated')
     expect(sock.emitted).toEqual([['join-room', 'devices']])
   })
 
@@ -285,6 +332,7 @@ describe('websocket.js（P1-27）', () => {
     svc.connect()
     sock.connected = true
     sock.fire('connect')
+    sock.fire('authenticated')
     expect(sock.emitted).toEqual([])
   })
   test('消息分发：已连接时 on/off 注册与解绑都同步到 socket', async () => {
@@ -390,11 +438,14 @@ describe('websocket.js（P1-27）', () => {
     svc.on('x', () => {})
     svc.connect()
     sock.fire('connect')
+    sock.fire('authenticated')
+    expect(svc.authenticated).toBe(true)
 
     const managerHandlers = sock.io.handlers.get('reconnect_failed')
     expect(managerHandlers).toHaveLength(1)
 
     svc.disconnect()
+    expect(svc.authenticated).toBe(false)
     // manager 级监听已解绑（否则下次 connect 会重复注册，提示弹多次）
     expect(sock.io.handlers.get('reconnect_failed')).toHaveLength(0)
     expect(sock.disconnectCalls).toBe(1)

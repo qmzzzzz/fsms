@@ -29,6 +29,10 @@ const intervalSpy = jest.spyOn(global, 'setInterval').mockImplementation((cb) =>
 
 const { HttpShipperTransport } = require('../../utils/logShipper');
 
+// 本套件以本地 http dummy 端点验证"排空/预算"行为，与出站加密判据无关：
+// 2026-10-24 起 http 需显式放宽（生产启动闸仍会在带令牌时拒绝）。
+process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
+
 afterAll(() => intervalSpy.mockRestore());
 
 function makeTransport(overrides = {}) {

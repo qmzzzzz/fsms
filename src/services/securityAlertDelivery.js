@@ -5,6 +5,7 @@
 
 const logger = require('../utils/logger');
 const { incSecurityAlert } = require('../utils/metrics');
+const { resolvePinnedTarget } = require('./webhookTargetResolver');
 // F-04（2026-10-17）：生产判定必须与 validate.js 的归一判据同源。
 // 用字面量比较时 `NODE_ENV=prod`（生产硬闸全开）在这条告警里被当成开发环境 ⇒
 // 「webhook 已配置但没设 allowlist」这条最重要的生产告警**一声不响**。
@@ -20,9 +21,9 @@ if (
 ) {
   logger.error(
     'SECURITY_ALERT_WEBHOOK 已配置但未设置 SECURITY_ALERT_WEBHOOK_ALLOWLIST：' +
-      '此时**不会** fail-closed——字面量内网地址（loopback/私网/linkLocal/ULA/CGNAT/保留段）' +
-      '仍被网域检查拦下，但**域名型目标不做解析**，其内网指向无防护' +
-      '（DNS 重绑定 / 内网域名可绕过本层）；若目标为明文 http，告警载荷还将明文外发。' +
+      '字面量内网地址（loopback/私网/linkLocal/ULA/CGNAT/保留段）与**域名解析出的**内网地址' +
+      '都会被拦下（投递前解析并钉住 IP，见 webhookTargetResolver），但任何公网主机都可以成为目标；' +
+      '若目标为明文 http，告警载荷还将明文外发。' +
       '生产环境请设置 SECURITY_ALERT_WEBHOOK_ALLOWLIST 显式声明 webhook 主机（并优先 https）'
   );
 }
@@ -46,8 +47,8 @@ const ALLOWED_WEBHOOK_IP_RANGE = 'unicast';
 
 // 判断一个主机名（可能是 IP 字面量）是否**不属于**允许投递的地址范围。
 // 返回 true=禁止；false=全局单播公网地址。非 IP 字面量（域名）返回 false，
-// 由上层 ALLOWLIST 白名单与网络层约束——域名的内网指向无法在解析前判定，
-// 这一残余风险已由文件头的启动告警明示。
+// 由上层 ALLOWLIST 白名单约束，域名解析出的地址另由 webhookTargetResolver
+// 逐个过本函数后再钉住（防 DNS 重绑定），见 sendNotification。
 // 绕过点（SSRF 内网探测）：
 //  1) IPv6 字面量在 URL 里带方括号（new URL('http://[::1]/').hostname === '[::1]'）——
 //     方括号不在 `[0-9a-f.:]` 字符集里，若不剥离，[::1]（loopback）、[fd00::1]（ULA）、
@@ -146,14 +147,38 @@ const buildWebhookBody = ({ alertType, level, message, payload }) =>
     alert: payload,
   });
 
+/**
+ * 签名头：HMAC 覆盖「时间戳.随机数.请求体」。
+ *
+ * 只签 body 时，任何抓到一次请求的人都可以原样重放（签名始终有效）。
+ * 接收方必须校验时间戳在容忍窗口内、并去重 nonce，二者缺一不可；
+ * 时间戳与 nonce 必须参与签名，否则可被单独篡改。
+ */
 const signedHeaders = (body) => {
   const headers = {};
   const secret = process.env.SECURITY_ALERT_WEBHOOK_SECRET;
   if (!secret) return headers;
   const crypto = require('crypto');
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = crypto.randomBytes(16).toString('hex');
+  headers['X-Webhook-Timestamp'] = timestamp;
+  headers['X-Webhook-Nonce'] = nonce;
   headers['X-Webhook-Signature'] =
-    `sha256=${crypto.createHmac('sha256', secret).update(body).digest('hex')}`;
+    'sha256=' +
+    crypto.createHmac('sha256', secret).update(`${timestamp}.${nonce}.${body}`).digest('hex');
   return headers;
+};
+
+/**
+ * 把已校验的解析结果钉进 http 客户端：连接期不再查询 DNS。
+ * 兼容 Node 在 `all: true` 与默认模式下两种回调签名。
+ */
+const pinnedLookup = (address, family) => (hostname, options, callback) => {
+  if (options && options.all) {
+    callback(null, [{ address, family }]);
+    return;
+  }
+  callback(null, address, family);
 };
 
 const sendNotification = async (alertType, level, message, data) => {
@@ -186,6 +211,13 @@ const sendNotification = async (alertType, level, message, data) => {
   if ((levelOrder[level] || 0) < (levelOrder[minLevel] || 3)) return;
   if (!isWebhookTargetAllowed(webhookUrl)) return;
 
+  // 校验与投递之间不能再解析一次，否则域名可被换到内网（DNS 重绑定）
+  const pinned = await resolvePinnedTarget(
+    new URL(webhookUrl).hostname.toLowerCase(),
+    isForbiddenIpLiteral
+  );
+  if (!pinned.ok) return;
+
   const body = buildWebhookBody({ alertType, level, message, payload });
   const headers = signedHeaders(body);
   const { postJson } = require('../utils/httpPostJson');
@@ -199,7 +231,9 @@ const sendNotification = async (alertType, level, message, data) => {
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        const response = await postJson(webhookUrl, headers, body, 5000);
+        const response = await postJson(webhookUrl, headers, body, 5000, {
+          lookup: pinnedLookup(pinned.address, pinned.family),
+        });
         if (response.ok) return;
         logger.warn(`安全告警投递失败：HTTP ${response.status}（第 ${attempt}/${maxAttempts} 次）`);
       } catch (error) {

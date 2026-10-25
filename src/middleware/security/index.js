@@ -1,7 +1,7 @@
 /**
  * 安全增强中间件门面
  *
- * 对外导出面固定为 23 个名字（见文件底部 module.exports），所有
+ * 对外导出面固定为 24 个名字（见文件底部 module.exports），所有
  * `require('../middleware/security')` 的调用方无需改动。实现分布：
  *   · securityHeaders.js —— CSP/helmet/HSTS/Permissions-Policy/Reporting-Endpoints/Trusted Types
  *   · sanitize.js        —— sanitizeMongo / materializeQuery
@@ -15,7 +15,9 @@
 
 const logger = require('../../utils/logger');
 const ApiResponse = require('../../utils/apiResponse');
+const config = require('../../config');
 const { ROUTE_CATEGORY_MAP } = require('../../utils/auditMeta');
+const { requireReauthTicket } = require('./reauthTicket');
 
 const securityHeadersModule = require('./securityHeaders');
 const {
@@ -53,98 +55,218 @@ const preventHPP = hpp({
 });
 
 /**
+ * 步进验证的密码通道（#5/#6）
+ *
+ * 单独抽出有两个原因：① 外层中间件同时承载密码与 MFA 两条通道，内联后圈复杂度
+ * 超过 lint 体积棘轮的上限；② 「MFA 已开启时密码不得单独放行」与 MFA 通道的
+ * 失败锁必须共用同一份判据，抽成单入口才能保证两条通道以后不会各自漂移。
+ *
+ * @returns {Promise<{errorCode?: string}>} 空对象表示通过；errorCode 为应返回的错误码
+ */
+async function verifyReauthPassword(req, currentPassword) {
+  const User = require('../../models/User');
+  const mfaService = require('../../services/mfaService');
+  const user = await User.findById(req.user.userId).select('+password mfaEnabled +mfaFailCount');
+  if (!user) return { errorCode: 'USER_NOT_FOUND' };
+
+  // 已开启 MFA 时密码只是单因子：会话劫持者通常也能拿到密码（钓鱼/复用），
+  // 若这里放行，步进验证就退化成"有会话 + 有密码"即可，第二因子被整体旁路。
+  // 与 /mfa/disable 同一口径：MFA 开启后，敏感操作必须证明持有第二因子。
+  if (user.mfaEnabled) {
+    logger.warn('敏感操作二次验证被拒（已开启 MFA，禁止仅凭密码）', {
+      username: req.user.username,
+    });
+    return { errorCode: 'REAUTH_MFA_REQUIRED' };
+  }
+  // 与 MFA 分支共用同一把失败锁：密码路径原先只写一条 warn，不进计数、
+  // 不触发锁定，等于留下「猜中会话后无限次在线试密码」的旁路。
+  // 计数只在锁定未生效时才有意义——锁定期内直接拒绝，连比较都不做。
+  if (await mfaService.isMfaLocked(user._id)) {
+    logger.warn('敏感操作二次验证被拒（密码通道临时锁定中）', {
+      username: req.user.username,
+    });
+    return { errorCode: 'MFA_ATTEMPTS_EXCEEDED' };
+  }
+  if (!(await user.comparePassword(currentPassword))) {
+    await mfaService.recordMfaFailure(user);
+    logger.warn('敏感操作二次验证失败（密码错误）', { username: req.user.username });
+    return { errorCode: 'REAUTH_PASSWORD_INCORRECT' };
+  }
+  // 与 MFA 通道同口径：验证成功必须清零。失败计数是共享的，若成功不清零，
+  // 用户几次误输后即使本次通过，计数仍贴着阈值，下一次误输立即再锁 10 分钟。
+  if (user.mfaFailCount > 0) await mfaService.resetMfaFailures(user._id);
+  return {};
+}
+
+/**
+ * 解析步进验证口令：密文轨优先，回落明文轨。
+ *
+ * 与 login/change-password 同口径（src/utils/loginCipher.js 的 PASSWORD_CURRENT
+ * 用途绑定）：信封只能用于当前口令场景，跨端点重放由 AAD 拒绝。密文无效一律
+ * fail-closed（AUTH_ENCRYPTED_CREDENTIAL_INVALID），绝不回落到同请求里的明文——
+ * 否则攻击者可以提交一个坏信封把服务端逼回明文比较路径。
+ *
+ * @param {import('express').Request} req
+ * @returns {Promise<{ok:true,password:unknown}|{ok:false,errorCode:string}>}
+ */
+async function resolveReauthPassword(req) {
+  const { encCurrentPassword, currentPassword } = req.body || {};
+  if (typeof encCurrentPassword !== 'string' || !encCurrentPassword) {
+    return { ok: true, password: currentPassword };
+  }
+  const { decryptLoginCredential } = require('../../utils/loginCipher');
+  try {
+    return {
+      ok: true,
+      password: await decryptLoginCredential(encCurrentPassword, 'PASSWORD_CURRENT'),
+    };
+  } catch (err) {
+    logger.warn('敏感操作二次验证被拒（口令密文无效）', {
+      username: req.user?.username,
+      code: err?.code,
+    });
+    return { ok: false, errorCode: 'AUTH_ENCRYPTED_CREDENTIAL_INVALID' };
+  }
+}
+
+/**
+ * 步进验证请求体的形态判定（#5/#6）
+ *
+ * 三层互斥守卫（缺凭证 / 明文密文并存 / 明文轨类型）与下方的密码、MFA 通道
+ * 没有耦合，析出后主链只剩通道分派——否则圈复杂度会超过 lint 体积棘轮上限。
+ *
+ * `|| {}` 不是防御性冗余：Express 5 在 JSON 解析器跳过时把 req.body 留成
+ * undefined（v4 恒为 {}），对 undefined 解构抛 TypeError 并被中间件的 catch 吞成 500——
+ * "客户端根本没带凭证"这一正常拒绝因此伪装成服务端故障（还按 UnhandledError 记 error 日志）。
+ *
+ * @returns {{errorCode:string, message?:string}|{channel:'password'|'mfa'}}
+ */
+const isNonEmptyString = (value) => typeof value === 'string' && value.length > 0;
+
+function classifyReauthRequest(req) {
+  const { currentPassword, encCurrentPassword, mfaCode } = req.body || {};
+  const hasEncPassword = isNonEmptyString(encCurrentPassword);
+
+  if (config.loginEncryptStrict) {
+    // 密文与明文并存：strict 模式下视为协议违规（与 authRoutes 的
+    // rejectEncPlaintextCoexistence 同口径）。非 strict 灰度期维持「密文优先、
+    // 明文被忽略」的既有兼容行为。
+    if (hasEncPassword && currentPassword) {
+      return { errorCode: 'VALIDATION_FAILED', message: '已提供口令密文，禁止同时携带明文口令' };
+    }
+    // strict 模式下拒绝纯明文轨：前端未完成加密改造时不能靠明文继续通过。
+    if (!hasEncPassword && currentPassword) {
+      return {
+        errorCode: 'VALIDATION_FAILED',
+        message: '服务端已启用口令加密传输，请刷新页面后重试',
+      };
+    }
+  }
+  if (!hasEncPassword && !currentPassword && !mfaCode) {
+    return { errorCode: 'REAUTH_REQUIRED' };
+  }
+  // 明文轨类型收敛：对象/数组直达 bcrypt.compare 会抛 TypeError 并被兜底 catch
+  // 伪装成服务端故障（REAUTH_PROCESS_FAILED），这里按客户端错误拒绝。
+  if (currentPassword && (typeof currentPassword !== 'string' || currentPassword.length > 128)) {
+    return { errorCode: 'VALIDATION_FAILED', message: '密码格式无效' };
+  }
+  return { channel: hasEncPassword || currentPassword ? 'password' : 'mfa' };
+}
+
+/**
+ * 步进验证的 MFA 通道（I-06）
+ *
+ * 原实现走裸 `verifyTotp`（只回布尔），既不烧时间窗计数器也不记失败，
+ * 于是同一个合法码在 ±1 窗口（约 90s）内可**无限次重放**通过步进验证，
+ * 且错误尝试不计数、不锁定——而 6 位码空间只有 10^6。
+ * 现对齐仓内既有两处实现：authService.verifyTotpChallenge 的原子消费
+ * （以 `mfaLastCounter < counter` 为条件的更新，只有第一个请求能命中，
+ *  并发双花由 DB 兜底），以及 mfaService 的失败计数 + 阈值锁定。
+ * 与登录共用同一个 mfaLastCounter 字段是有意的：同一个码不得在两个上下文各用一次。
+ *
+ * @returns {Promise<{errorCode?: string}>} 空对象表示通过
+ */
+async function verifyReauthMfa(req) {
+  const User = require('../../models/User');
+  const mfaService = require('../../services/mfaService');
+  const { verifyTotpDetailed } = require('../../utils/totp');
+  const { decryptMfaSecret } = require('../../utils/mfaSecret');
+
+  if (await mfaService.isMfaLocked(req.user.userId)) {
+    logger.warn('敏感操作二次验证被拒（MFA 通道临时锁定中）', {
+      username: req.user.username,
+    });
+    return { errorCode: 'MFA_ATTEMPTS_EXCEEDED' };
+  }
+
+  const user = await User.findById(req.user.userId).select('+mfaSecret');
+  if (!user) return { errorCode: 'USER_NOT_FOUND' };
+  if (!user.mfaEnabled) return { errorCode: 'REAUTH_MFA_NOT_ENABLED' };
+
+  // 库内 mfaSecret 为 AES-GCM 密文（存量明文由 decryptMfaSecret 原样透传）
+  // mfaCode 此处必为真值：上面的守卫要求"密码与验证码至少有一个"，而密码分支已 return。
+  const totpResult = verifyTotpDetailed(
+    decryptMfaSecret(user.mfaSecret),
+    String(req.body.mfaCode).trim()
+  );
+  let claimedCounter = false;
+  if (totpResult.valid) {
+    const advanced = await User.findOneAndUpdate(
+      {
+        _id: user._id,
+        $or: [
+          { mfaLastCounter: { $lt: totpResult.counter } },
+          { mfaLastCounter: { $exists: false } },
+          { mfaLastCounter: null },
+        ],
+      },
+      { $set: { mfaLastCounter: totpResult.counter } },
+      { new: true }
+    ).catch(() => null);
+    claimedCounter = !!advanced;
+  }
+  if (!totpResult.valid || !claimedCounter) {
+    // 重放与口令错误同样计入失败并按同一码拒绝：不向调用方区分
+    // "码正确但已消费"，否则本端点又变成一个验证码探测面。
+    await mfaService.recordMfaFailure(user);
+    logger.warn('敏感操作二次验证失败（MFA 验证码错误或重放）', {
+      username: req.user.username,
+      replayed: totpResult.valid && !claimedCounter,
+    });
+    return { errorCode: 'REAUTH_MFA_INCORRECT' };
+  }
+  await mfaService.resetMfaFailures(user._id);
+  return {};
+}
+
+/**
  * 5. 敏感操作二次验证中间件
  * 对于敏感操作要求提供当前密码或 MFA 验证码，防止会话劫持后被冒用
  */
 const requireReAuthentication = () => {
   return async (req, res, next) => {
     try {
-      // `|| {}` 不是防御性冗余：Express 5 在 JSON 解析器跳过时把 req.body 留成
-      // undefined（v4 恒为 {}），对 undefined 解构抛 TypeError 并被下面的 catch 吞成 500——
-      // "客户端根本没带凭证"这一正常拒绝因此伪装成服务端故障（还按 UnhandledError 记 error 日志）。
-      const { currentPassword, mfaCode } = req.body || {};
-
-      if (!currentPassword && !mfaCode) {
-        return ApiResponse.codeError(res, 'REAUTH_REQUIRED');
-      }
-
-      // 优先校验当前密码
-      if (currentPassword) {
-        const User = require('../../models/User');
-        const user = await User.findById(req.user.userId).select('+password');
-        if (!user) {
-          return ApiResponse.codeError(res, 'USER_NOT_FOUND');
-        }
-        const isValid = await user.comparePassword(currentPassword);
-        if (!isValid) {
-          logger.warn('敏感操作二次验证失败（密码错误）', { username: req.user.username });
-          return ApiResponse.codeError(res, 'REAUTH_PASSWORD_INCORRECT');
-        }
-        req.reAuthenticated = true;
-        return next();
-      }
-
-      // MFA 动态口令校验（I-06）：仅对已开启两步验证的用户生效
-      //
-      // 原实现走裸 `verifyTotp`（只回布尔），既不烧时间窗计数器也不记失败，
-      // 于是同一个合法码在 ±1 窗口（约 90s）内可**无限次重放**通过步进验证，
-      // 且错误尝试不计数、不锁定——而 6 位码空间只有 10^6。
-      // 现对齐仓内既有两处实现：authService.verifyTotpChallenge 的原子消费
-      // （以 `mfaLastCounter < counter` 为条件的更新，只有第一个请求能命中，
-      //  并发双花由 DB 兜底），以及 mfaService 的失败计数 + 阈值锁定。
-      // 与登录共用同一个 mfaLastCounter 字段是有意的：同一个码不得在两个上下文各用一次。
-      const { verifyTotpDetailed } = require('../../utils/totp');
-      const { decryptMfaSecret } = require('../../utils/mfaSecret');
-      const mfaService = require('../../services/mfaService');
-      const User = require('../../models/User');
-
-      if (await mfaService.isMfaLocked(req.user.userId)) {
-        logger.warn('敏感操作二次验证被拒（MFA 通道临时锁定中）', {
-          username: req.user.username,
+      const classified = classifyReauthRequest(req);
+      if (classified.errorCode) {
+        return ApiResponse.codeError(res, classified.errorCode, {
+          ...(classified.message ? { message: classified.message } : {}),
         });
-        return ApiResponse.codeError(res, 'MFA_ATTEMPTS_EXCEEDED');
       }
 
-      const user = await User.findById(req.user.userId).select('+mfaSecret');
-      if (!user) {
-        return ApiResponse.codeError(res, 'USER_NOT_FOUND');
+      // 两条通道共用同一个失败出口：密码轨与 MFA 轨各写一份
+      // `if (errorCode) codeError(res, errorCode)` 时，同一文件出现两个同文本
+      // 动态码槽，登记的站点键无法区分它们（errorCodePlaceholderDefault #16）。
+      // 合并后失败形状只有一个，槽文本也只剩一处。
+      let failed;
+      // 优先校验当前密码——但仅限**未开启 MFA** 的账户（判据见 verifyReauthPassword）
+      if (classified.channel === 'password') {
+        const resolved = await resolveReauthPassword(req);
+        if (!resolved.ok) return ApiResponse.codeError(res, resolved.errorCode);
+        failed = await verifyReauthPassword(req, resolved.password);
+      } else {
+        failed = await verifyReauthMfa(req);
       }
-      if (!user.mfaEnabled) {
-        return ApiResponse.codeError(res, 'REAUTH_MFA_NOT_ENABLED');
-      }
-      // 库内 mfaSecret 为 AES-GCM 密文（存量明文由 decryptMfaSecret 原样透传）
-      // mfaCode 此处必为真值：上面的守卫要求"密码与验证码至少有一个"，而密码分支已 return。
-      const totpResult = verifyTotpDetailed(
-        decryptMfaSecret(user.mfaSecret),
-        String(mfaCode).trim()
-      );
-      let claimedCounter = false;
-      if (totpResult.valid) {
-        const advanced = await User.findOneAndUpdate(
-          {
-            _id: user._id,
-            $or: [
-              { mfaLastCounter: { $lt: totpResult.counter } },
-              { mfaLastCounter: { $exists: false } },
-              { mfaLastCounter: null },
-            ],
-          },
-          { $set: { mfaLastCounter: totpResult.counter } },
-          { new: true }
-        ).catch(() => null);
-        claimedCounter = !!advanced;
-      }
-      if (!totpResult.valid || !claimedCounter) {
-        // 重放与口令错误同样计入失败并按同一码拒绝：不向调用方区分
-        // "码正确但已消费"，否则本端点又变成一个验证码探测面。
-        await mfaService.recordMfaFailure(user);
-        logger.warn('敏感操作二次验证失败（MFA 验证码错误或重放）', {
-          username: req.user.username,
-          replayed: totpResult.valid && !claimedCounter,
-        });
-        return ApiResponse.codeError(res, 'REAUTH_MFA_INCORRECT');
-      }
-      await mfaService.resetMfaFailures(user._id);
+      if (failed.errorCode) return ApiResponse.codeError(res, failed.errorCode);
       req.reAuthenticated = true;
       return next();
     } catch (error) {
@@ -364,6 +486,7 @@ module.exports = {
   materializeQuery,
   preventHPP,
   requireReAuthentication,
+  requireReauthTicket,
   checkIPBlacklist,
   isWhitelistExemptionTrustworthy,
   addToBlacklist,

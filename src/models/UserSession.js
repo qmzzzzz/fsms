@@ -38,7 +38,7 @@ const { stripControlChars } = require('../utils/helpers');
  *
  * 【为什么用 `set` 改写而不是 `runValidators: true`】实测后者会让整条 `$set` 因 ValidationError
  * 被拒——连带 `lastSeenAt` 一起不写，会话活跃度从此停摆。为一个观测字段做 fail-closed 自伤
- * 正是 createSession 那条注释（sessionService.js:271-274）已经避过的坑。
+ * 正是 createSession 那条注释（sessionService.js:272-274）已经避过的坑。
  * `set` 在 update 的 `$set` 上同样执行（实测），所以它一处管住 create 与 touch 两条路径。
  *
  * 【危害定级】`lastIp` 上没有索引（实测本集合的索引是 _id / sid / status / fingerprint /
@@ -87,7 +87,9 @@ const userSessionSchema = new mongoose.Schema({
     type: String,
     enum: ['active', 'revoked', 'expired'],
     default: 'active',
-    index: true,
+    // 不单独建索引：全仓 status 查询都同时带 userId（会话列表/吊销）或 sid（按会话操作），
+    // 单字段索引永远不是最优选择，只会给每次会话写入多维护一棵 B 树。
+    // 存量库里的 status_1 由迁移 20261021000000 删除（autoIndex 不会自动回收）。
   },
 
   // ===== 设备识别信息（供用户辨认「这是哪台设备」）=====

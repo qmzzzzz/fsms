@@ -388,6 +388,14 @@ describe('authService gap C - catch handler coverage', () => {
 
     test('REPLAYED + invalidateUserTokens 成功 + revokeAllSessionsSafe 执行 → lines 719-731', async () => {
       const user = await makeUser('creplay');
+      // 无 sid 的 refresh 已一律拒绝（authService/token.js:263），走不到重放分支；
+      // 必须建一条真实设备会话，并把 sid 签进令牌。
+      const sid = crypto.randomUUID();
+      await sessionService.createSession({
+        userId: user._id,
+        req: { ip: '127.0.0.1', get: () => 'jest-replay' },
+        sid,
+      });
       // Sign two identical refresh tokens (same jti won't happen naturally, so we reuse one)
       const token = jwt.sign(
         {
@@ -395,13 +403,22 @@ describe('authService gap C - catch handler coverage', () => {
           type: 'refresh',
           tokenVersion: user.tokenVersion ?? 0,
           jti: crypto.randomUUID(),
+          sid,
         },
         getRefreshSecret(),
         { expiresIn: '7d' }
       );
 
       // First refresh consumes the token (succeeds)
-      const _r1 = await authService.refreshSession(token, defaultCtx());
+      const r1 = await authService.refreshSession(token, defaultCtx());
+      expect(r1.outcome).toBe('OK');
+      // 10 秒内的 rotate 二次使用被判为并发轮换（CONCURRENT），不是真实重放；
+      // 把首次消费时刻拨到宽限窗口之外，才真正落到 REPLAYED 分支。
+      const TokenBlacklist = require('../../models/TokenBlacklist');
+      await TokenBlacklist.updateOne(
+        { tokenHash: crypto.createHash('sha256').update(token).digest('hex') },
+        { $set: { createdAt: new Date(Date.now() - 60_000) } }
+      );
       // Second refresh with same token → replayed
       const r2 = await authService.refreshSession(token, defaultCtx());
       expect(r2.outcome).toBe('REPLAYED');
@@ -475,9 +492,15 @@ describe('authService gap C - catch handler coverage', () => {
   describe('loginUser - checkBruteForce / 锁定写入故障注入', () => {
     test('口令错误 + AuditLog.countDocuments 失败 → checkBruteForce 的 catch 吞错，仍 401 口径（line 301）', async () => {
       const user = await makeUser('bf1');
-      const spy = jest
-        .spyOn(AuditLog, 'countDocuments')
-        .mockRejectedValueOnce(new Error('db transient down'));
+      // 主计数链现在是 `countDocuments(...).collation(...)`：直接 mockRejectedValueOnce
+      // 返回的是 Promise，拿不到 .collation 会先抛 TypeError，注入的 DB 故障根本没被走到；
+      // 且那个没人 await 的 rejected Promise 还会被 Jest 记成 unhandled rejection。
+      // 替身按真实 Query 的形状返回「可链式、await 时 reject」的对象。
+      const rejected = Promise.reject(new Error('db transient down'));
+      rejected.catch(() => {});
+      const spy = jest.spyOn(AuditLog, 'countDocuments').mockImplementationOnce(() => ({
+        collation: () => rejected,
+      }));
       const result = await authService.loginUser(
         { username: user.username, password: `${PASSWORD}x` },
         defaultCtx()

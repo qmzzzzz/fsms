@@ -77,6 +77,14 @@ const inspectionSchema = new mongoose.Schema(
       },
     ],
 
+    // 创建人（L-01）：self 数据范围的定义是"自己创建/负责的数据"，巡检此前只有
+    // assignedTo（负责），创建者一旦把计划指派给别人就从自己的列表里消失，
+    // 也无法再查看/维护自己创建的计划。与 FireAlarm.reporter.userId 同义。
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+    },
+
     // 时间计划
     planStartTime: {
       type: Date,
@@ -181,7 +189,10 @@ inspectionSchema.index({ status: 1, planStartTime: -1 });
 // 带 status 等值筛选的那条走 `{status:1,planStartTime:-1}` 后再做一次子集内排序：
 // 正确性优先——旧口径下等值块跨页会漏记录，"快但丢数据"不是可接受的取舍。
 inspectionSchema.index({ planStartTime: -1, _id: -1 });
-inspectionSchema.index({ assignedTo: 1 });
+// 列表的数据范围/筛选是「assignedTo（或 createdBy）等值 + planStartTime,_id 倒序」：
+// 单字段索引只能定位等值块，块内仍要阻塞排序；self 档是两字段 $or，两臂各需一条复合索引。
+inspectionSchema.index({ assignedTo: 1, planStartTime: -1, _id: -1 });
+inspectionSchema.index({ createdBy: 1, planStartTime: -1, _id: -1 });
 inspectionSchema.index({ 'locations.building': 1 });
 
 // L-22：设备删除级联（DeviceService.deleteDevice）的两条 updateMany——

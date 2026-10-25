@@ -17,7 +17,7 @@
  * 【为什么判据落在「探针」而不是 countDocuments】
  * `limit+1` 的探针与清单同源于同一次查询：不多一次往返，也不给「计数与清单来自两个
  * 窗口」留余地（计数与清单分窗比没有计数更糟——边界上的设备会被数进去却没列出来）。
- * 同一条约定已写进 `auditExportService.js:61`（多取一条当探针）、
+ * 同一条约定已写进 `auditExportService.js:71`（多取一条当探针）、
  * `reportWorkbookService.js:13`（恰好等于上限不得误报截断）、`models/FireDevice.js:235`。
  *
  * 【夹具口径】

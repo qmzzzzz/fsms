@@ -21,8 +21,8 @@
  *     只有这一层抓得住"行号仍在范围内但指错了地方"。新增登记的正确姿势与
  *     stubReturnTypeParity 同一条：**先说出这一行凭什么算证据（符号名），再来登记**。
  *     3b 谓词必须**局部唯一**：登记的符号在被引区间外的最近出现必须 ≥ 6 行。
- *     否则"漂 3 行"照样绿——本轮实测到 `DeviceService.js:420` 的 `/countDocuments/`
- *     全文件命中 10 处、最近距离 3 行（:423），`/npm run validate/` 最近距离 1 行。
+ *     否则"漂 3 行"照样绿——本轮实测到 `DeviceService.js:502` 的 `/countDocuments(/`
+ *     全文件命中 2 处、最近距离 394 行（:108），`/npm run validate/` 最近距离 1 行。
  *     （行号随 #11 查询预算折行漂移，锚与台账随迁。）
  *     这样的登记只是装饰，必须写成能区分邻行的形态。
  *
@@ -283,25 +283,25 @@ function unexplainedExemptions(exemptedKeys, ledgerKeys) {
 const LIVE = [
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:248',
+    at: 'app.js:249',
     must: /sentryRequestHandler/,
     why: 'Sentry 请求处理器挂载点',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:512',
+    at: 'app.js:546',
     must: /sentryErrorHandler/,
-    why: 'Sentry 错误处理器挂载点',
+    why: 'Sentry 错误处理器挂载点（2026-10-25 整改后为 :546）',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:516',
+    at: 'app.js:550',
     must: /app\.use\(errorHandler/,
     why: '通用 errorHandler 位置（口径是"在它之前"）',
   },
   {
     in: 'src/controllers/reportController.js',
-    at: 'auditController.js:43',
+    at: 'auditController.js:44',
     must: /applyAuditDataScope/,
     why: '审计列表的数据范围判据',
   },
@@ -319,21 +319,21 @@ const LIVE = [
   },
   {
     in: 'src/services/reportExportService.js',
-    at: 'Inspection.js:179',
+    at: 'Inspection.js:187',
     must: /排序键可重复/,
     why: '不变式出处二',
   },
   {
     in: 'src/services/reportExportService.js',
-    at: 'AuditLog.js:309',
+    at: 'AuditLog.js:323-330',
     must: /timestamp: -1, _id: -1/,
     why: '不变式出处三',
   },
   {
     in: 'src/services/reportExportService.js',
-    at: 'AlarmService.js:118',
+    at: 'AlarmService.js:120',
     must: /\.sort\(\{ occurredAt: -1, _id: -1 \}\)/,
-    why: '列表侧实际用的全序（报警）',
+    why: '列表侧实际用的全序（报警，2026-10-25 审计整改后在 :120）',
   },
   {
     in: 'src/services/reportExportService.js',
@@ -349,9 +349,9 @@ const LIVE = [
   },
   {
     in: 'src/config/validate.js',
-    at: 'deployment/secret-rotation.md:259',
+    at: 'deployment/secret-rotation.md:297',
     must: /docker compose exec -T app npm run validate/,
-    why: '手册把本步退出码当"轮换后配置自洽"的证据（裸 `npm run validate` 上下两行都有，必须连带容器命令才唯一）',
+    why: '手册把本步退出码当"轮换后配置自洽"的证据（裸 `npm run validate` 上下两行都有，必须连带容器命令才唯一；2026-10-25 审计整改后手册扩写使行号迁至 :297）',
   },
   {
     in: 'src/tests/controllers/reportExportRowOrderAndCells.test.js',
@@ -361,7 +361,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/auditExportDataScope.test.js',
-    at: 'auditController.js:43',
+    at: 'auditController.js:44',
     must: /applyAuditDataScope/,
     why: 'audit-logs 端点确实过数据范围',
   },
@@ -373,7 +373,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/controllers/auditExportManifestBytes.test.js',
-    at: 'auditController.js:43',
+    at: 'auditController.js:44',
     must: /applyAuditDataScope/,
     why: '"删掉这行不会有任何测试变红"指的就是这一行',
   },
@@ -385,13 +385,13 @@ const LIVE = [
   },
   {
     in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
-    at: 'DeviceService.js:419',
-    must: /countDocuments\(\{ \.\.\.scoped, \.\.\.alert\.needMaintenance \}, listCountOptions\(\)\)/,
-    why: '同一档判据专门跑计数（:423/:424 是同符号的另两处，谓词必须区分得开；行号随 #11 查询预算折行漂移）',
+    at: 'DeviceService.js:445',
+    must: /\btotal: \[\{ \$count: 'n' \}\]/,
+    why: '同一档判据专门跑计数：getDeviceStats 收敛为一次 $facet，total 臂在 :445（谓词取整行，避免与其余五档 $count 混淆；行号随 #11 查询预算折行漂移）',
   },
   {
     in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
-    at: 'auditExportService.js:69',
+    at: 'auditExportService.js:71',
     must: /多取一条/,
     why: 'truncated 判定精确的探针写法',
   },
@@ -403,13 +403,13 @@ const LIVE = [
   },
   {
     in: 'src/tests/edge/edgeCases.test.js',
-    at: 'auditController.js:25',
+    at: 'auditController.js:26',
     must: /try \{/,
     why: '导出路径的外层 try',
   },
   {
     in: 'src/tests/edge/edgeCases.test.js',
-    at: 'auditController.js:68',
+    at: 'auditController.js:69',
     must: /catch \(error\)/,
     why: '接住拒绝并给 AUDIT_EXPORT_FAILED 的那条 catch',
   },
@@ -421,7 +421,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/services/alertSeveritySurvivesRender.test.js',
-    at: 'securityAlertDelivery.js:160',
+    at: 'securityAlertDelivery.js:185',
     must: /logMethod/,
     why: 'low/medium 都映射到 info 的那一行',
   },
@@ -434,27 +434,27 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:204',
+    at: 'app.js:205',
     must: /app\.set\('trust proxy'/,
-    why: 'trust proxy 有效值分支的落点（原写 :96-97，那是 .filter(Boolean)）',
+    why: 'trust proxy 有效值分支的落点（原写 :96-97，那是 .filter(Boolean)；2026-10-25 整改后为 :205）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:453',
+    at: 'app.js:487',
     must: /app\.get\('\/api'/,
-    why: '/api 根路径处理器（原写 :297-298，那是 CSRF 注释）',
+    why: '/api 根路径处理器（原写 :297-298，那是 CSRF 注释；2026-10-25 整改后为 :487）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:410-434',
+    at: 'app.js:435-457',
     must: /503[\s\S]*\.catch/,
-    why: '/readyz 的 503 双路径：then 里按 mongo.ok 定码 + catch 里硬 503（原写 :258-278 是 body-parser）',
+    why: '/readyz 的 503 双路径：then 里按 mongo.ok 定码 + catch 里硬 503（原写 :258-278 是 body-parser；2026-10-25 整改后为 :435-457）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:419-430',
+    at: 'app.js:460',
     must: /res\.status\(503\)\.json/,
-    why: '头注里点名"两条失败路径"的具体行段',
+    why: '头注里点名"两条失败路径"的具体行段（catch 臂的硬 503；2026-10-25 整改后为 :460）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
@@ -464,21 +464,21 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:248-249',
+    at: 'app.js:249-250',
     must: /sentryRequestHandler/,
-    why: 'Sentry 三件套前两件（原写 :134-136）',
+    why: 'Sentry 三件套前两件（原写 :134-136；2026-10-25 整改后为 :249-250）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:512',
+    at: 'app.js:546',
     must: /sentryErrorHandler/,
-    why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见）',
+    why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见；2026-10-25 整改后为 :546）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'src/config/validate.js:370',
+    at: 'src/config/validate.js:375',
     must: /requiresProductionSemantics/,
-    why: 'validateConfig() 首行的非生产早退（原写 :264，那是 MAX_TRUST_PROXY_HOPS 常量）',
+    why: 'validateConfig() 首行的非生产早退（原写 :264，那是 MAX_TRUST_PROXY_HOPS 常量；2026-10-25 整改后为 :375）',
   },
   {
     in: 'src/tests/controllers/auditSummaryCache.test.js',
@@ -488,9 +488,9 @@ const LIVE = [
   },
   {
     in: 'src/tests/controllers/createUserScopeGate.test.js',
-    at: 'controllers/userController/update.js:205',
+    at: 'controllers/userController/update.js:221',
     must: /assertRecordInScope/,
-    why: 'updateUser 里的数据范围闸（原写 :326，那是另一个函数的 docblock；2026-10-19 拆分后站点迁至 update.js）',
+    why: 'updateUser 里的数据范围闸（原写 :326，那是另一个函数的 docblock；2026-10-19 拆分后站点迁至 update.js；2026-10-25 整改后为 :221）',
   },
   {
     in: 'src/tests/deploy/cliArgStrictness.test.js',
@@ -500,9 +500,9 @@ const LIVE = [
   },
   {
     in: 'src/tests/config/scriptSecretHydration.test.js',
-    at: 'deployment/secret-rotation.md:259',
+    at: 'deployment/secret-rotation.md:297',
     must: /docker compose exec -T app npm run validate/,
-    why: '"拿这一步退出码当证据"的那一步（本轮把 :156 两处一并改对，原 :156 是空行）',
+    why: '"拿这一步退出码当证据"的那一步（本轮把 :156 两处一并改对，原 :156 是空行；2026-10-25 整改后手册扩写使行号迁至 :297）',
   },
   {
     in: 'src/constants/runtime.js',
@@ -558,21 +558,21 @@ const STALE = [
     in: 'src/utils/transaction.js',
     at: 'src/index.js:446',
     owner: '他人脏文件（M）',
-    shouldRead: 'src/index.js:466',
+    shouldRead: 'src/index.js:469',
     mustAfterFix: /process\.on\('unhandledRejection'/,
   },
   {
     in: 'src/tests/utils/transactionTopology.test.js',
     at: 'src/index.js:446',
     owner: '他人脏文件（M）',
-    shouldRead: 'src/index.js:466',
+    shouldRead: 'src/index.js:469',
     mustAfterFix: /process\.on\('unhandledRejection'/,
   },
   {
     in: 'src/tests/observability/loggerFlush.test.js',
     at: 'database.js:59',
     owner: '他人脏文件（M）',
-    shouldRead: 'src/config/database.js:117',
+    shouldRead: 'src/config/database.js:124',
     mustAfterFix: /exitAfterFlush\(1\)/,
   },
 ];
@@ -695,11 +695,11 @@ describe('层 2 · 无内容锚点（空行 / 只剩注释标记；豁免 = STAL
     // 是同一条判据最好的现成样本；去掉 occurrences 的前导边界这条就会红。
     const bare = occurrences(
       'src/tests/config/scriptSecretHydration.test.js',
-      'secret-rotation.md:259'
+      'secret-rotation.md:297'
     );
     const qualified = occurrences(
       'src/tests/config/scriptSecretHydration.test.js',
-      'deployment/secret-rotation.md:259'
+      'deployment/secret-rotation.md:297'
     );
     expect(bare.length).toBe(1);
     expect(qualified.length).toBe(1);
@@ -738,17 +738,17 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
     // 这正是第 26 轮台账 M2 抓到的洞（阈值写两遍，放松判据抓不到）。
     const weakened = {
       in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
-      at: 'DeviceService.js:424',
-      must: /countDocuments/,
+      at: 'DeviceService.js:438',
+      must: /\$count/,
     };
     expect(mustNearestOutside(weakened)).toBeLessThan(UNIQ_GAP);
     expect(toothlessRegistrations([weakened])).toHaveLength(1);
     // 正向自证：收紧后的同一条必须一条都不报（两向都过，才不是只验失败态）
-    expect(toothlessRegistrations([LIVE.find((e) => e.at === 'DeviceService.js:419')])).toEqual([]);
+    expect(toothlessRegistrations([LIVE.find((e) => e.at === 'DeviceService.js:445')])).toEqual([]);
   });
 
   test('谓词有牙（正向命中 + 反向不命中），不许跟着行号走', () => {
-    const hit = citedRange('src/middleware/sentry.js', 'app.js:512');
+    const hit = citedRange('src/middleware/sentry.js', 'app.js:546');
     expect(/sentryErrorHandler/.test(hit.text)).toBe(true);
     expect(/绝不可能出现在这一行的符号ZZZ/.test(hit.text)).toBe(false);
     // 本轮之前的真实写法：auditController.js:38 是空行，同一条判据必须判它不含符号
@@ -760,8 +760,8 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
     );
     expect(drifted).not.toBeNull();
     expect(/applyAuditDataScope/.test(drifted.text)).toBe(false);
-    // 反向：修好的 :43 必须含符号（两向都过，才不是只验失败态）
-    expect(/applyAuditDataScope/.test(rangeText('auditController.js', 43, 43).text)).toBe(true);
+    // 反向：修好的 :44 必须含符号（两向都过，才不是只验失败态）
+    expect(/applyAuditDataScope/.test(rangeText('auditController.js', 44, 44).text)).toBe(true);
   });
 
   test('晋升目标预登记有牙：STALE 改对才绿，改成一个仍不对的行号一样红', () => {

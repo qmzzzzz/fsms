@@ -111,6 +111,8 @@ const rolePermissionMap = {
     'inspection:read',
     'report:read',
     'report:export',
+    // 刻意**不**授予 pii:export：未脱敏导出还需二次验证，属专项授权。
+    // 默认连安全管理员也只拿掩码档；确需全文导出时由超管在角色编辑页显式授予。
   ],
 
   // 审计监督员（level 9）：**只读**审计与安全统计，无任何写权限（A6 职责分离）

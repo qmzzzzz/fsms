@@ -2,7 +2,7 @@
  * 数据库口令 → 连接串 这条链的「驱动真的收得下」契约
  *
  * 断裂点（真实存在过，不是假想）：`docker-compose.yml` 头注释里的手抄版用
- * `openssl rand -base64 32` 生成 `mongo_root_password`，再用
+ * `openssl rand -base64 32` 生成库口令（当时的 `mongo_root_password`），再用
  * `printf 'mongodb://%s:%s@...'` 把它直接拼进 userinfo 段。base64 字符集含 `/`
  * （32 字节输出约一半概率出现），而驱动对未转义的 `/` `:` `#` `?` 在发起网络之前
  * 就抛 `MongoParseError: Password contains unescaped characters` ⇒ 应用启动即退出。
@@ -164,8 +164,9 @@ describe('docker-compose 手抄版：字符集与组合方式必须自洽', () =
   const lines = commentedRecipeLines(fs.readFileSync(COMPOSE_FILE, 'utf8'));
 
   test('三条配方都解析得到（解析锚点失效要红，不能变成"没有配方所以全通过"）', () => {
-    const password = findRecipe(lines, 'mongo_root_password');
-    const username = findRecipe(lines, 'mongo_root_username');
+    // 连接串里嵌入的是**应用账号**（2026-10-24 审计：应用不再以 root 连库）
+    const password = findRecipe(lines, 'mongo_app_password');
+    const username = findRecipe(lines, 'mongo_app_username');
     const uri = findRecipe(lines, 'mongodb_uri');
     expect(typeof password).toBe('string');
     expect(typeof username).toBe('string');
@@ -174,8 +175,8 @@ describe('docker-compose 手抄版：字符集与组合方式必须自洽', () =
     expect(uriTemplateOf(lines)).toBeTruthy();
   });
 
-  test('mongo_root_password 的整个字符集逐字符被驱动原始接受', async () => {
-    const recipe = parseOpensslRecipe(findRecipe(lines, 'mongo_root_password'));
+  test('mongo_app_password 的整个字符集逐字符被驱动原始接受', async () => {
+    const recipe = parseOpensslRecipe(findRecipe(lines, 'mongo_app_password'));
     expect(recipe).toBeTruthy();
     const charset = ALPHABETS[recipe.encoding];
     expect(typeof charset).toBe('string');
@@ -197,15 +198,15 @@ describe('docker-compose 手抄版：字符集与组合方式必须自洽', () =
     );
     if (/encodeURIComponent|urlencode|jq .*@uri/.test(uriLine)) {
       // 另一种自洽写法：字符集不限，但组合时转义——仍要求它读的就是这两个密钥文件
-      expect(operands).toEqual(['mongo_root_username', 'mongo_root_password']);
+      expect(operands).toEqual(['mongo_app_username', 'mongo_app_password']);
       return;
     }
     const template = uriTemplateOf(lines);
     expect(template).toBeTruthy();
-    expect(operands).toEqual(['mongo_root_username', 'mongo_root_password']);
+    expect(operands).toEqual(['mongo_app_username', 'mongo_app_password']);
 
-    const userChars = charsetOfRecipe(lines, 'mongo_root_username');
-    const passChars = charsetOfRecipe(lines, 'mongo_root_password');
+    const userChars = charsetOfRecipe(lines, 'mongo_app_username');
+    const passChars = charsetOfRecipe(lines, 'mongo_app_password');
     expect(typeof userChars).toBe('string');
     expect(typeof passChars).toBe('string');
 
@@ -238,9 +239,9 @@ describe('docker-compose 手抄版：字符集与组合方式必须自洽', () =
   });
 
   test('两条路径的口令熵一致（换编码可以，缩水不行）', () => {
-    const hand = parseOpensslRecipe(findRecipe(lines, 'mongo_root_password'));
+    const hand = parseOpensslRecipe(findRecipe(lines, 'mongo_app_password'));
     const generator =
-      /mongo_root_password:\s*(b64|hex)\((\d+)\)/.exec(fs.readFileSync(GENERATOR_FILE, 'utf8')) ||
+      /mongo_app_password:\s*(b64|hex)\((\d+)\)/.exec(fs.readFileSync(GENERATOR_FILE, 'utf8')) ||
       [];
     expect(hand).toBeTruthy();
     expect(generator[2]).toBeTruthy();
@@ -256,8 +257,8 @@ describe('scripts/generate-secrets.js 真实产物', () => {
         encoding: 'utf8',
         cwd: repoRoot,
       });
-      const passwordFile = fs.readFileSync(path.join(dir, 'mongo_root_password'), 'utf8');
-      const usernameFile = fs.readFileSync(path.join(dir, 'mongo_root_username'), 'utf8');
+      const passwordFile = fs.readFileSync(path.join(dir, 'mongo_app_password'), 'utf8');
+      const usernameFile = fs.readFileSync(path.join(dir, 'mongo_app_username'), 'utf8');
       const uri = fs.readFileSync(path.join(dir, 'mongodb_uri'), 'utf8');
 
       expect(await probeUri(uri)).toEqual({
@@ -282,9 +283,9 @@ describe('scripts/generate-secrets.js 真实产物', () => {
     const calls = [...assignment.matchAll(/encodeURIComponent\((secrets\.[a-z_]+)\)/g)].map(
       (m) => m[1]
     );
-    expect(calls).toEqual(['secrets.mongo_root_username', 'secrets.mongo_root_password']);
+    expect(calls).toEqual(['secrets.mongo_app_username', 'secrets.mongo_app_password']);
     expect(assignment.replace(/encodeURIComponent\([^)]*\)/g, '')).not.toMatch(
-      /secrets\.mongo_root/
+      /secrets\.mongo_(app|root)_/
     );
   });
 });

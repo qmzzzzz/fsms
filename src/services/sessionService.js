@@ -35,8 +35,11 @@ const sharedCache = require('./sharedCache');
 const ipLocationService = require('./ipLocationService');
 const UserSession = require('../models/UserSession');
 const { computeFingerprint } = require('../utils/fingerprint');
+const { sessionClientIp } = require('../utils/ipUtils');
 const { durationToMs } = require('../utils/cookie');
 const config = require('../config');
+const { onSessionRevoked, notifySessionRevoked } = require('./sessionRevocationEvents');
+const { MAX_ACTIVE_SESSIONS_PER_USER, enforceSessionCap } = require('./sessionCap');
 
 /**
  * 会话校验缓存（进程内，短 TTL）
@@ -268,10 +271,11 @@ sharedCache.onInvalidate(handleRemoteSessionInvalidation);
 const createSession = async ({ userId, req, sid = newSid() }) => {
   const ua = String(req?.get?.('user-agent') || '').slice(0, 512);
   const device = parseUserAgent(ua);
-  // 与 UA 同样截断：schema 的 ip 字段 maxlength=64，而 TRUST_PROXY_HOPS>=1 时
-  // req.ip 可被直连者用超长 XFF 拼出来——不截断会让 UserSession.create 抛
-  // ValidationError 把整个登录打成 500（fail-closed 自伤，攻击面零收益）
-  const ip = req?.ip ? String(req.ip).slice(0, 64) : null;
+  // 与 UA 同样截断：schema 的 ip 字段 maxlength=64，而可信边界外的地址可能来自
+  // 超长伪造头——不截断会让 UserSession.create 抛 ValidationError 把整个登录打成 500
+  // （fail-closed 自伤，攻击面零收益）。取值走安全裁决地址：信任链内的 req.ip，
+  // 边界外退回不可伪造的 socket 对端（会话 IP 是设备识别维度，不能由请求方自选）。
+  const ip = sessionClientIp(req);
   // 会话有效期对齐 refresh token：access token 会在此期间反复轮换，
   // 会话的真实存续上限由 refresh 决定
   const ttlMs = durationToMs(config.jwt.refreshExpire, 7 * 24 * 60 * 60 * 1000);
@@ -297,6 +301,12 @@ const createSession = async ({ userId, req, sid = newSid() }) => {
     sid: sid.slice(0, 8),
     device: describeDevice(device) || 'unknown',
   });
+  // 配额收敛失败不影响本次登录：新会话本身可被设备级吊销
+  try {
+    await enforceSessionCap({ userId, keepSid: sid, invalidateSession: invalidateSessionCache });
+  } catch (capErr) {
+    logger.warn(`会话配额收敛失败（不影响本次登录）：${capErr.message}`);
+  }
   return { sid, session };
 };
 
@@ -392,9 +402,10 @@ const touchSession = async (sid, req) => {
     // 先占位再写库：并发请求下避免同时穿透节流
     lastTouchAt.set(key, now);
     guardCacheSize();
+    // 与 createSession 同口径：安全裁决地址 + 64 字符截断（伪造头不得写入会话）
     await UserSession.updateOne(
       { sid: key, status: 'active' },
-      { $set: { lastSeenAt: new Date(), lastIp: req?.ip || null } }
+      { $set: { lastSeenAt: new Date(), lastIp: sessionClientIp(req) } }
     );
     return true;
   } catch (err) {
@@ -435,6 +446,12 @@ const revokeSession = async ({ sid, userId, reason = 'user_revoked' }) => {
   invalidateSessionCache(sid);
   if (revoked) {
     logger.info('会话已吊销', { userId, sid: String(sid).slice(0, 8), reason });
+    notifySessionRevoked({
+      sids: [String(sid)],
+      userId: String(userId),
+      all: false,
+      reason,
+    });
   }
   return revoked;
 };
@@ -456,16 +473,30 @@ const revokeOtherSessions = async ({ userId, exceptSid = null, reason = 'user_re
   const filter = { userId, status: 'active' };
   if (exceptSid) filter.sid = { $ne: String(exceptSid) };
 
-  // 先取出待吊销的 sid：updateMany 不返回被改文档，而缓存必须按 sid 精确清除
-  const targets = await UserSession.find(filter).select('sid').lean();
-  if (targets.length === 0) return 0;
-
+  // 用同一个 revokedAt 作本批次的标记：updateMany 不返回被改文档，而预取
+  // sid 快照会漏掉「快照之后、更新之前」新建的会话——它们已被本次 updateMany
+  // 一并吊销，却收不到 WS 通知。落库后按批次标记回查实际被吊销的 sid。
+  const revokedAt = new Date();
   const result = await UserSession.updateMany(filter, {
-    $set: { status: 'revoked', revokedAt: new Date(), revokeReason: reason },
+    $set: { status: 'revoked', revokedAt, revokeReason: reason },
   });
-  for (const t of targets) invalidateSessionCache(t.sid);
+  // 清空带代际保护（sessionCacheGeneration），in-flight 写回会被作废，
+  // 不会把旧结论重新种回来。
+  clearSessionCache();
 
   const count = result.modifiedCount || 0;
+  if (count > 0) {
+    const revoked = await UserSession.find(
+      { userId, status: 'revoked', revokedAt, revokeReason: reason },
+      'sid'
+    ).lean();
+    notifySessionRevoked({
+      sids: revoked.map((t) => String(t.sid)),
+      userId: String(userId),
+      all: false,
+      reason,
+    });
+  }
   logger.info('批量吊销会话', { userId, count, reason });
   return count;
 };
@@ -483,15 +514,19 @@ const revokeOtherSessions = async ({ userId, exceptSid = null, reason = 'user_re
  */
 const revokeAllSessions = async (userId, reason = 'password_changed') => {
   if (!userId) return 0;
-  const targets = await UserSession.find({ userId, status: 'active' }).select('sid').lean();
-  if (targets.length === 0) return 0;
-
   const result = await UserSession.updateMany(
     { userId, status: 'active' },
     { $set: { status: 'revoked', revokedAt: new Date(), revokeReason: reason } }
   );
-  for (const t of targets) invalidateSessionCache(t.sid);
+  // 清除全部缓存而不是只清预先取出的 sid 快照：快照之后新建、
+  // 已被 updateMany 吊销的会话同样不能再命中旧缓存。
+  clearSessionCache();
   const count = result.modifiedCount || 0;
+  if (count > 0) {
+    // all=true：连同没有 sid 的旧令牌连接一起按 userId 断开——全局吊销的语义
+    // 本来就覆盖它们（tokenVersion 已被推进），没必要等周期清扫。
+    notifySessionRevoked({ sids: [], userId: String(userId), all: true, reason });
+  }
   logger.info('全部会话已吊销', { userId, count, reason });
   return count;
 };
@@ -565,11 +600,9 @@ const listSessions = async ({ userId, currentSid = null }) => {
     logger.warn(`过期会话状态收敛失败：${err.message}`);
   }
 
-  const docs = await UserSession.find({
-    userId,
-    status: 'active',
-    expiresAt: { $gt: now },
-  }).sort({ lastSeenAt: -1 });
+  const docs = await UserSession.find({ userId, status: 'active', expiresAt: { $gt: now } })
+    .sort({ lastSeenAt: -1 })
+    .limit(MAX_ACTIVE_SESSIONS_PER_USER);
 
   return docs.map((d) => {
     const json = d.toClientJSON(currentSid);
@@ -596,7 +629,9 @@ module.exports = {
   listSessions,
   invalidateSessionCache,
   clearSessionCache,
+  onSessionRevoked,
   // 常量导出供测试断言，避免测试里重复写魔法数字
   SESSION_CACHE_TTL,
   TOUCH_THROTTLE_MS,
+  MAX_ACTIVE_SESSIONS_PER_USER,
 };

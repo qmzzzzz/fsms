@@ -64,7 +64,7 @@ describe('cookie 工具函数', () => {
 
     const access = calls.find((c) => c.name === 'access_token');
     expect(access.value).toBe('AT');
-    expect(access.opts.path).toBe('/api');
+    expect(access.opts.path).toBe('/');
     expect(access.opts.httpOnly).toBe(true);
     expect(access.opts.sameSite).toBe('strict');
     expect(access.opts.maxAge).toBe(durationToMs(require('../../config').jwt.expire, 0));
@@ -80,7 +80,7 @@ describe('cookie 工具函数', () => {
     const fakeRes = { clearCookie: (name, opts) => calls.push({ name, opts }) };
     clearAuthCookies(fakeRes);
     expect(calls).toHaveLength(2);
-    expect(calls.find((c) => c.name === 'access_token').opts.path).toBe('/api');
+    expect(calls.find((c) => c.name === 'access_token').opts.path).toBe('/');
     expect(calls.find((c) => c.name === 'refresh_token').opts.path).toBe('/api/auth');
   });
 });
@@ -156,7 +156,7 @@ describe('httpOnly Cookie 认证集成', () => {
 
     // 属性契约：HttpOnly / SameSite=Lax / path / maxAge；测试环境(NODE_ENV=test)非生产且未设 COOKIE_SECURE，不应带 Secure
     for (const [name, expectedPath, expectedMaxAge] of [
-      ['access_token', '/api', accessMaxAgeSec()],
+      ['access_token', '/', accessMaxAgeSec()],
       ['refresh_token', '/api/auth', refreshMaxAgeSec()],
     ]) {
       const { attrs } = cookies[name];
@@ -229,7 +229,7 @@ describe('httpOnly Cookie 认证集成', () => {
     expect(cookies.refresh_token.value).toBeTruthy();
     // 新令牌与旧令牌不同（轮换）
     expect(cookies.refresh_token.value).not.toBe(refreshToken);
-    expect(cookies.access_token.attrs).toContain('path=/api');
+    expect(cookies.access_token.attrs).toContain('path=/');
     expect(cookies.refresh_token.attrs).toContain('path=/api/auth');
   });
 
@@ -243,9 +243,11 @@ describe('httpOnly Cookie 认证集成', () => {
     expect(res.status).toBe(200);
     expect(parseSetCookies(res).access_token.value).toBeTruthy();
 
-    // 旧 refresh token 已被轮换拉黑，重放应 401
+    // 旧 refresh token 已被轮换拉黑；紧随其后的重放属并发竞争 ⇒ 503 仅拒绝本次，
+    // 不触发全量吊销（超过宽限窗口的重放仍有 revokeFailurePropagation 等用例覆盖）
     const replay = await request(app).post('/api/auth/refresh').send({ refreshToken });
-    expect(replay.status).toBe(401);
+    expect(replay.status).toBe(503);
+    expect(replay.body.errors.errorCode).toBe('SECURITY_SERVICE_UNAVAILABLE');
   });
 
   test('刷新接口：无任何令牌来源返回 400', async () => {
@@ -269,7 +271,7 @@ describe('httpOnly Cookie 认证集成', () => {
     // 清除 cookie：max-age=0（或过期时间在过去）且 path 与下发时一致
     expect(cookies.access_token).toBeDefined();
     expect(cookies.refresh_token).toBeDefined();
-    expect(cookies.access_token.attrs).toContain('path=/api');
+    expect(cookies.access_token.attrs).toContain('path=/');
     expect(cookies.refresh_token.attrs).toContain('path=/api/auth');
     for (const name of ['access_token', 'refresh_token']) {
       const cleared =
@@ -302,7 +304,7 @@ describe('httpOnly Cookie 认证集成', () => {
     expect(cookies.access_token).toBeDefined();
     expect(cookies.refresh_token).toBeDefined();
     expect(cookies.access_token.attrs).toContain('httponly');
-    expect(cookies.access_token.attrs).toContain('path=/api');
+    expect(cookies.access_token.attrs).toContain('path=/');
     expect(cookies.refresh_token.attrs).toContain('path=/api/auth');
 
     // 注册后 cookie 即可直接访问受保护接口

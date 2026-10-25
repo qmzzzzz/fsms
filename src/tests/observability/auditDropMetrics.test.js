@@ -81,14 +81,22 @@ describe('Top-6 ② 渲染口径：恒定行（含 0），面板不必区分"没
     metrics._auditDrops.clear();
   });
 
-  test('四个 reason 各一行（即使全为 0）+ 积压 gauge 一行', () => {
+  test('五个 reason 各一行（即使全为 0）+ 积压/拒绝裁剪 gauge 各一行', () => {
     const out = metrics.formatPrometheus();
-    for (const reason of ['buffer_overflow', 'poison_doc', 'precast', 'other']) {
+    for (const reason of [
+      'buffer_overflow',
+      'poison_doc',
+      'precast',
+      'wal_durable_lost',
+      'other',
+    ]) {
       expect(out).toContain(`audit_records_dropped_total{reason="${reason}"} 0`);
     }
     expect(out).toMatch(/^audit_buffer_backlog_records \d+$/m);
+    expect(out).toMatch(/^audit_wal_durable_trim_refusals_total \d+$/m);
     expect(out).toContain('# TYPE audit_records_dropped_total counter');
     expect(out).toContain('# TYPE audit_buffer_backlog_records gauge');
+    expect(out).toContain('# TYPE audit_wal_durable_trim_refusals_total counter');
   });
 
   test('上报后的数值出现在文本里（文本与内部计数同源）', () => {

@@ -29,6 +29,7 @@ vi.mock('@/utils/api', () => ({
     delete: (...a) => del(...a),
   },
   isCanceledError: (e) => Boolean(e && e.code === 'ERR_CANCELED'),
+  isHandledApiError: () => false,
   resolveErrorMessage: () => '码化文案',
 }))
 vi.mock('element-plus/es/components/message/index.mjs', () => ({
@@ -339,7 +340,7 @@ describe('IpListView 列表加载与渲染', () => {
     expect(c.find('.empty-tip').textContent.trim()).toBe('暂无白名单记录')
   })
 
-  test('列表加载失败：提示「加载失败」、清空列表与总数并显示空态', async () => {
+  test('列表刷新失败：保留上次数据并标注陈旧，提供重试（不再伪装成空名单）', async () => {
     let n = 0
     get.mockImplementation(() => {
       n += 1
@@ -351,15 +352,38 @@ describe('IpListView 列表加载与渲染', () => {
     click(
       Array.from(c.findAll('.table-toolbar button')).find((b) => b.textContent.trim() === '刷新')
     )
-    // 契约对齐 alarmView：加载失败由 api.js 响应拦截器统一提示，组件只清态。
-    // 原断言把组件那条 error 钉成契约（`calls.length === 1`），于是双提示被锁死。
-    await waitFor(() => trs(c).length === 0, { message: '失败后列表清空' })
+    // 契约对齐 alarmView：加载失败由 api.js 响应拦截器统一提示，组件不重复弹。
+    // 但组件必须给出常驻错误态——保留旧数据并明确标注「上次加载的数据」，
+    // 否则界面与「名单确实为空」完全一样。
+    await waitFor(() => c.find('.load-error') !== null, { message: '失败提示出现' })
     await flush(6)
     expect(ElMessage.error).not.toHaveBeenCalled()
-    expect(trs(c)).toHaveLength(0)
-    expect(c.find('.empty-tip').textContent.trim()).toBe('暂无黑名单记录')
-    expect(c.find('.el-pagination__total').textContent.replace(/[^0-9]/g, '')).toBe('0')
+    expect(trs(c)).toHaveLength(1)
+    expect(c.find('.empty-tip')).toBeNull()
+    expect(c.find('.load-error').textContent).toContain('上次加载的数据')
+    expect(c.find('.el-pagination__total').textContent.replace(/[^0-9]/g, '')).toBe('42')
     expect(c.errors).toEqual([])
+
+    const calls = get.mock.calls.length
+    c.find('.load-error button').click()
+    await flush(10)
+    expect(get.mock.calls.length).toBe(calls + 1)
+  })
+
+  test('首次加载失败：显示「无法加载名单数据」而非「暂无名单」，并可重试', async () => {
+    get.mockRejectedValueOnce(new Error('down'))
+    const c = await boot(0)
+    await waitFor(() => c.find('.load-error') !== null, { message: '失败提示出现' })
+    expect(c.find('.load-error').textContent).toContain('无法加载名单数据')
+    expect(trs(c)).toHaveLength(0)
+    // 空态文案必须改成错误，不能显示「暂无黑名单记录」
+    expect(c.find('.empty-tip').textContent.trim()).toBe('无法加载名单数据，请重试')
+    expect(c.errors).toEqual([])
+
+    get.mockResolvedValueOnce(listBody([ipRow()], { total: 1, black: 1, white: 0 }))
+    c.find('.load-error button').click()
+    await waitFor(() => trs(c).length === 1, { message: '重试后数据落地' })
+    expect(c.find('.load-error')).toBeNull()
   })
 
   test('路由 abort 的在途请求：静默失败不弹错误（FE-L1）', async () => {

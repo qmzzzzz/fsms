@@ -18,6 +18,7 @@ const jwt = require('jsonwebtoken');
 const request = require('supertest');
 
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 const { AUDIT_CATEGORIES } = require('../../constants/audit');
 
 const stamp = `zzpp${Date.now()}`.replace(/[^a-z0-9]/g, '').slice(0, 8);
@@ -38,7 +39,8 @@ describe('审计导出参数错误：xlsx 与 CSV 同口径', () => {
     request(app)
       .get('/api/security/audit-logs/export')
       .query(params)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .set(reauthHeaders(token));
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);

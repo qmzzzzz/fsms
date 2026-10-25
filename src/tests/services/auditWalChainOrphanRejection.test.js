@@ -13,7 +13,7 @@
  * 本模块 12 处 catch/链尾 handler 全是裸读 `e.message` / `e.code`。被拒值为非 Error 时
  * （undefined / null / 字符串 / 无 message 的对象）这些语句自己抛 TypeError。后果分三档，
  * 本文件按档给判据：
- *   · 最重：`serialize()` 的默认兜底臂（:521）—— 抛出的 TypeError 让 walChain 变成孤儿
+ *   · 最重：`serialize()` 的默认兜底臂（:493）—— 抛出的 TypeError 让 walChain 变成孤儿
  *     ⇒ 全进程下线；
  *   · 次重：链中断（append 失败后 `.then(() => cap.afterAppend)` 被跳过 ⇒ 这一轮的大小
  *     抽查与裁剪没做）；
@@ -39,10 +39,10 @@
  *     错误行号指向 reject 那一行）。本文件因此**不需要**自建探针，且这一条断言由测试框架兜住；
  *     台账 22 的 M1（把 errText 退回裸读）就是这条前提的实证：链尾一抛 ⇒ serialize 那条用例变红。
  *   L7-结构闸：整文件（剥注释视图）里 `e|err|error . message|code|name|stack` 必须为 0 命中；
- *     全总化只认一处实现（不许自带 `const errText = (`）；`${errText(e)}` 恰好 10 处
+ *     全总化只认一处实现（不许自带 `const errText = (`）；`${errText(e)}` 恰好 12 处
  *     （计数写成容忍 prettier 折行的形式：第一版写死 `${errText(e)}`，被 prettier 把
  *     超长那处拆成 `errText(\n e\n )` 后立刻少了一个，正是这条计数该抓的形态漂移）；
- *     `.catch((e) =>` 恰好 5 处、`.catch(` 恰好 7 处（形态漂移时"扫不到东西"和
+ *     `.catch((e) =>` 恰好 6 处、`.catch(` 恰好 9 处（形态漂移时"扫不到东西"和
  *     "本来就干净"在 toEqual([]) 上不可区分，只有计数能分开）。扫描器对植入的反例字符串
  *     必须命中，否则空判据。
  *
@@ -181,9 +181,9 @@ describe('WAL 串行链：链尾 handler 自己抛 = 全进程下线', () => {
     // 站点计数钉死。形式容忍 prettier 折行（`${errText(\n e\n )}`）：
     // 第一版写死单行形式，prettier 把超长那处拆行后计数从 10 掉到 9 —— 那是格式不是判据，
     // 所以尺子要卡在"语义站点"上，而不是卡在换行上。尺子同样取自模块级（只有一份定义）。
-    expect((src.match(TOTALIZED_SITE) || []).length).toBe(10);
-    expect((src.match(/\.catch\(\(e\) =>/g) || []).length).toBe(5);
-    expect((src.match(/\.catch\(/g) || []).length).toBe(7);
+    expect((src.match(TOTALIZED_SITE) || []).length).toBe(12);
+    expect((src.match(/\.catch\(\(e\) =>/g) || []).length).toBe(6);
+    expect((src.match(/\.catch\(/g) || []).length).toBe(9);
 
     // 扫描器反向自证：**同一把尺子**对植入的反例必须命中。旧写法在这里另抄一条正则
     // （`(?:e|err)`，既不含 error 也不是 BARE_READ），于是把模块级两条尺子的 alternation 收窄
@@ -213,9 +213,11 @@ describe('WAL 串行链：链尾 handler 自己抛 = 全进程下线', () => {
     //   catch 体里。把整文件塞进零裸读名单会把两种契约混成一条判据（实测第一版就是这么红的：
     //   18 处命中全是响应整形那一路），所以按臂切段判。
     const REGISTRY = [
-      { rel: 'services/auditBufferWal.js', scope: 'file', sites: 10 },
-      { rel: 'services/auditWalCap.js', scope: 'file', sites: 2 },
-      { rel: 'services/sharedCacheLocks.js', scope: 'file', sites: 3 },
+      { rel: 'services/auditBufferWal.js', scope: 'file', sites: 12 },
+      { rel: 'services/auditWalCap.js', scope: 'file', sites: 3 },
+      // 4 个站点：续租 / getLock / 阻塞锁 / casSet（2026-10-21 新增的 casSet 臂已用 errText，
+      // 计数随之 +1——这正是本闸的作用：新增 catch 臂必须显式改这一行，不能悄悄混进来）
+      { rel: 'services/sharedCacheLocks.js', scope: 'file', sites: 4 },
       { rel: 'utils/permissionSync.js', scope: 'file', sites: 1 },
       {
         rel: 'middleware/errorHandler.js',

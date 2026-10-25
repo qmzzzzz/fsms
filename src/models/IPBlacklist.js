@@ -224,6 +224,11 @@ ipBlacklistSchema.statics.matchIP = async function (clientIp, type) {
   return findMatchingEntries.call(this, clientIp, type);
 };
 
+// 静态方法：取指定类型的名单快照（供覆盖判定等热路径复用同一份 10s TTL 缓存）
+ipBlacklistSchema.statics.getSnapshot = async function (type) {
+  return getSnapshot.call(this, type);
+};
+
 // 静态方法：查找覆盖指定条目的名单记录（支持「网段被更宽网段覆盖」的判断）
 // 用于管理面冲突检测：isBlocked/isWhitelisted 只接受单地址，
 // 传入 CIDR 时客户端侧解析失败会返回 false，导致白名单优先规则对网段形式失效
@@ -296,9 +301,12 @@ ipBlacklistSchema.statics.unblockIP = async function (rawIp, type) {
 
 // 静态方法：按 _id 移除单条名单记录（管理面删除入口，附带快照失效）
 ipBlacklistSchema.statics.removeById = async function (id, type) {
-  const result = await this.deleteOne({ _id: id });
-  invalidateSnapshot(type);
-  return result;
+  // 用 findOneAndDelete 而不是 deleteOne：按 _id 删除时以文档自身的 type 为准，
+  // 调用方传入的快照类型只是"读的时候"的快照，与最终命中的文档可能不一致。
+  // findOneAndDelete 的 post 钩子会清空全部快照，不需要再按 type 猜。
+  const removed = await this.findOneAndDelete({ _id: id });
+  if (!removed) invalidateSnapshot(type);
+  return { deletedCount: removed ? 1 : 0 };
 };
 
 // 静态方法：使名单快照缓存失效（写路径变更后调用，保证下一次匹配读到最新数据）

@@ -2,10 +2,19 @@
  * Cookie 工具 —— httpOnly 令牌 Cookie 契约的唯一实现位置
  *
  * 契约（I-01）：
- * - access_token ：值=accessToken ，path=/api       ，maxAge 与 JWT_EXPIRE 一致
+ * - access_token ：值=accessToken ，path=/          ，maxAge 与 JWT_EXPIRE 一致
  * - refresh_token：值=refreshToken，path=/api/auth  ，maxAge 与 JWT_REFRESH_EXPIRE 一致
  * - 属性：httpOnly: true、sameSite: 'strict'（严格化，原 lax）
  * - secure：生产环境（NODE_ENV=production）或 COOKIE_SECURE=true 时开启
+ *
+ * access cookie 的 path 必须是 `/`，不能收窄到 `/api`：Socket.IO 的握手请求打在
+ * `/socket.io/`（服务端默认 path，见 services/websocketService/index.js；Nginx 也是
+ * 独立 location），path=/api 的 cookie **不会**随该请求发出。而前端拿不到令牌本体
+ * （httpOnly + 响应体不回传），无法改用 handshake.auth 兜底 ⇒ 握手必然匿名，
+ * WebSocket 鉴权整体失效（services/websocketService/handshake.js 只认 auth.token
+ * 或 access_token cookie）。path 本来就不是 httpOnly cookie 的安全边界（XSS 可以
+ * 直接发请求，读不到值也不妨碍利用），SameSite=strict 仍负责跨站请求的防护。
+ * refresh cookie 保持在 /api/auth：只有刷新/登出需要它。
  *
  * 本注释此前把 access cookie 的时长写死为 24 小时，而 config/index.js
  * 的 JWT_EXPIRE 默认值是 '2h'。注释里的具体时长必然随配置漂移，
@@ -19,7 +28,7 @@ const config = require('../config');
 
 const ACCESS_COOKIE_NAME = 'access_token';
 const REFRESH_COOKIE_NAME = 'refresh_token';
-const ACCESS_COOKIE_PATH = '/api';
+const ACCESS_COOKIE_PATH = '/';
 const REFRESH_COOKIE_PATH = '/api/auth';
 
 /**
@@ -67,7 +76,7 @@ const getCookies = (req) => {
  *
  * 单位集合必须与 jsonwebtoken 自己那套（它依赖的 `ms`）同集，一处不能少：同一个配置值
  * 有两个解释器——令牌的 `exp` 由 `ms` 解析，而 cookie 的 `maxAge` 与会话行的 `expiresAt`
- * （sessionService.js:273）由本函数解析。少认一个单位不是报错，而是**静默回落到 fallbackMs**：
+ * （sessionService.js:278）由本函数解析。少认一个单位不是报错，而是**静默回落到 fallbackMs**：
  * 实测 `'2 weeks'` 在令牌侧是 336h、在改造前的本函数是 168h（回退默认值），于是会话行比
  * 它绑定的 refresh 令牌早死七天，第 7～14 天每次刷新都吃 DEVICE_SESSION_REVOKED。
  * `'1y'` 更隐蔽：`ms` 用儒略年（365.25 天），原先写 365 会让两侧每年差 6 小时。
@@ -165,23 +174,34 @@ const baseCookieOptions = () => ({
 });
 
 /**
- * 登录/注册/刷新成功后下发两个令牌 cookie
+ * 登录/注册/刷新成功后下发令牌 cookie
+ *
+ * refreshToken 为 null 表示本次是降级签发（设备会话注册失败，只发 access）：
+ * 此时必须**清除**可能残留的旧 refresh cookie，否则浏览器里上一账号/上一次
+ * 登录的 refresh 会继续被 /api/auth/refresh 接受，降级就变成了"静默复用旧会话"。
+ *
  * @param {import('express').Response} res
  * @param {string} accessToken
- * @param {string} refreshToken
+ * @param {string|null} refreshToken
  */
 const setAuthCookies = (res, accessToken, refreshToken) => {
   if (!res || typeof res.cookie !== 'function') return;
-  res.cookie(ACCESS_COOKIE_NAME, accessToken, {
-    ...baseCookieOptions(),
-    path: ACCESS_COOKIE_PATH,
-    maxAge: durationToMs(config.jwt.expire, 24 * 60 * 60 * 1000),
-  });
-  res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
-    ...baseCookieOptions(),
-    path: REFRESH_COOKIE_PATH,
-    maxAge: durationToMs(config.jwt.refreshExpire, 7 * 24 * 60 * 60 * 1000),
-  });
+  if (accessToken) {
+    res.cookie(ACCESS_COOKIE_NAME, accessToken, {
+      ...baseCookieOptions(),
+      path: ACCESS_COOKIE_PATH,
+      maxAge: durationToMs(config.jwt.expire, 24 * 60 * 60 * 1000),
+    });
+  }
+  if (refreshToken) {
+    res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
+      ...baseCookieOptions(),
+      path: REFRESH_COOKIE_PATH,
+      maxAge: durationToMs(config.jwt.refreshExpire, 7 * 24 * 60 * 60 * 1000),
+    });
+    return;
+  }
+  res.clearCookie(REFRESH_COOKIE_NAME, { ...baseCookieOptions(), path: REFRESH_COOKIE_PATH });
 };
 
 /**

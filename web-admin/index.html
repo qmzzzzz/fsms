@@ -9,14 +9,12 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="消防管理" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="apple-touch-icon" href="/favicon.svg" />
-    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- 资源一律走 BASE_URL：子路径部署（/admin/）下根绝对路径会 404；
+         manifest 链接由 vite-plugin-pwa 按 base 自动注入，此处不再手写（否则重复两个） -->
+    <link rel="icon" type="image/svg+xml" href="%BASE_URL%favicon.svg" />
+    <link rel="apple-touch-icon" href="%BASE_URL%favicon.svg" />
     <!-- 外链保证生产 CSP(script-src 'self') 也允许首帧主题脚本执行 -->
-    <script src="/theme-bootstrap.js"></script>
-    <!-- 字体预连接：global.css 通过 CSP 允许的 fonts.googleapis.com 加载 Sora/DM Sans/JetBrains Mono -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <script src="%BASE_URL%theme-bootstrap.js"></script>
     <title>消防安全管理系统</title>
   </head>
   <body>

@@ -4,7 +4,10 @@
  *
  * 被测对象：alarmController / inspectionController 的错误与边界分支
  * 守护的不变式：不存在记录 404、数据范围外 403（含正向对照）、非法状态迁移 409、路由校验 400 必须按契约落点
- * 可证伪性：变异实测（N=8 + flake 守卫 + `--no-cache`）：alarmController 杀 5/12、inspectionController 杀 4/12，基线 15 passed
+ * 可证伪性：2026-09-20 变异基线（N=8）：alarmController 杀 5/12、inspectionController 杀 4/12。
+ *   2026-10-21 强化后定向复核（断言改为精确 状态码+errorCode+字段路径+落库状态，含正向对照）：
+ *   删除 cancelAlarm 的 canOperateAlarm 守卫、删除 updateInspection 的 isInspectionInScope 守卫，
+ *   对应用例均转红（200 而非 403），不再出现“越权也返回成功却全绿”
  *
  * 命名沿革：2026-09-20 由 `alarmInspectionEdge.test.js` 更名。旧名里的
  *   Coverage / Gap / Hardening / Branch 说的是「当初为什么写它」（补覆盖率基线），
@@ -86,7 +89,19 @@ describe('报警/巡检控制器错误与边界分支', () => {
     );
 
     // ===== self 范围用户（level 4 + 具名权限）：制造 403 与正向对照 =====
-    const permCodes = ['alarm:read', 'alarm:create', 'inspection:read', 'inspection:create'];
+    // 写端点的权限必须真的授予：否则请求先被 checkPermission 拦成 PERMISSION_DENIED，
+    // 控制器的数据范围闸根本跑不到——那会把「范围闸没设防」测成「权限层挡住了」。
+    const permCodes = [
+      'alarm:read',
+      'alarm:create',
+      'alarm:dispatch',
+      'alarm:handle',
+      'inspection:read',
+      'inspection:create',
+      'inspection:execute',
+      'inspection:review',
+      'inspection:delete',
+    ];
     const permIds = [];
     for (const code of permCodes) {
       const existed = await Permission.findOne({ code });
@@ -164,20 +179,54 @@ describe('报警/巡检控制器错误与边界分支', () => {
       handler(req, res, reject);
     });
 
+  const errorCodeOf = (res) =>
+    res.body && res.body.errors && res.body.errors.errorCode ? res.body.errors.errorCode : null;
+
+  // 只断 404/409 状态码时，把错误码改坏、或删掉某条端点的存在性判断
+  //（落到别的 404 出口）都能保持绿色。统一用「状态 + 错误码」成对断言。
+  const expectStatusAndCode = (res, status, code) => {
+    expect({ status: res.status, code: errorCodeOf(res) }).toEqual({ status, code });
+  };
+
+  // 服务层抛出的 ApiError 没有业务错误码，但 message 是专门写给调用方的语义
+  //（如「已开始的巡检计划不能修改」）。只断状态码会让文案被压成通用错误仍全绿。
+  const expectStatusAndMessage = (res, status, message) => {
+    expect({ status: res.status, message: res.body && res.body.message }).toEqual({
+      status,
+      message,
+    });
+  };
+
   // ==================== 报警：404 / 400 ====================
 
-  test('报警：不存在的 ObjectId 在全部端点返回 404', async () => {
+  test('报警：不存在的 ObjectId 在全部端点返回 404 且错误码一致', async () => {
     const id = ghostId();
-    expect((await admin().get(`/api/alarms/${id}`)).status).toBe(404);
-    expect(
-      (await admin().put(`/api/alarms/${id}/dispatch`).send({ handlerId: adminId })).status
-    ).toBe(404);
-    expect((await admin().put(`/api/alarms/${id}/arrive`).send({})).status).toBe(404);
-    expect(
-      (await admin().put(`/api/alarms/${id}/resolve`).send({ handleResult: 'x' })).status
-    ).toBe(404);
-    expect((await admin().put(`/api/alarms/${id}/false-alarm`).send({})).status).toBe(404);
-    expect((await admin().put(`/api/alarms/${id}/cancel`).send({})).status).toBe(404);
+    expectStatusAndCode(await admin().get(`/api/alarms/${id}`), 404, 'ALARM_NOT_FOUND');
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${id}/dispatch`).send({ handlerId: adminId }),
+      404,
+      'ALARM_NOT_FOUND'
+    );
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${id}/arrive`).send({}),
+      404,
+      'ALARM_NOT_FOUND'
+    );
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${id}/resolve`).send({ handleResult: 'x' }),
+      404,
+      'ALARM_NOT_FOUND'
+    );
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${id}/false-alarm`).send({}),
+      404,
+      'ALARM_NOT_FOUND'
+    );
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${id}/cancel`).send({}),
+      404,
+      'ALARM_NOT_FOUND'
+    );
   });
 
   test('报警：非法 :id 格式被路由校验拒绝（400）', async () => {
@@ -205,6 +254,7 @@ describe('报警/巡检控制器错误与边界分支', () => {
         alarmType: 'other',
         description: `校验载体_${stamp}`,
         level: 'info',
+        location: { building: 'A栋' },
       });
     const alarmId = String(rep.body.data._id || rep.body.data.id);
     const dispatch = await admin()
@@ -217,10 +267,12 @@ describe('报警/巡检控制器错误与边界分支', () => {
     const resolve = await admin()
       .put(`/api/alarms/${alarmId}/resolve`)
       .send({ handleResult: 'ok', cause: 'bogus' });
-    expect(resolve.status).toBe(400);
+    expectStatusAndCode(resolve, 400, 'VALIDATION_FAILED');
+    expect(resolve.body.errors.fieldErrors[0].path).toBe('cause');
     // 列表：status 非法枚举（路由层）
     const list = await admin().get('/api/alarms?status=bogus');
-    expect(list.status).toBe(400);
+    expectStatusAndCode(list, 400, 'VALIDATION_FAILED');
+    expect(list.body.errors.fieldErrors[0].path).toBe('status');
     // 收尾
     await admin().put(`/api/alarms/${alarmId}/cancel`).send({ reason: stamp });
   });
@@ -259,15 +311,22 @@ describe('报警/巡检控制器错误与边界分支', () => {
         alarmType: 'other',
         description: `状态机_${stamp}`,
         level: 'info',
+        location: { building: 'A栋' },
       });
     expect(rep.status).toBe(201);
     const id = String(rep.body.data._id || rep.body.data.id);
 
     // pending 状态：到场/结单都不允许（需先指派）
-    expect((await admin().put(`/api/alarms/${id}/arrive`).send({})).status).toBe(409);
-    expect(
-      (await admin().put(`/api/alarms/${id}/resolve`).send({ handleResult: 'x' })).status
-    ).toBe(409);
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${id}/arrive`).send({}),
+      409,
+      'ALARM_STATUS_NOT_ALLOWED_SHORT'
+    );
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${id}/resolve`).send({ handleResult: 'x' }),
+      409,
+      'ALARM_STATUS_NOT_ALLOWED'
+    );
 
     // 走通 pending → processing → resolved
     expect(
@@ -283,13 +342,21 @@ describe('报警/巡检控制器错误与边界分支', () => {
     ).toBe(200);
 
     // resolved 之后：指派/误报/取消全部冲突
-    expect(
-      (await admin().put(`/api/alarms/${id}/dispatch`).send({ handlerId: adminId })).status
-    ).toBe(409);
-    expect((await admin().put(`/api/alarms/${id}/false-alarm`).send({ reason: 'x' })).status).toBe(
-      409
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${id}/dispatch`).send({ handlerId: adminId }),
+      409,
+      'ALARM_ALREADY_HANDLED'
     );
-    expect((await admin().put(`/api/alarms/${id}/cancel`).send({ reason: 'x' })).status).toBe(409);
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${id}/false-alarm`).send({ reason: 'x' }),
+      409,
+      'ALARM_STATUS_NOT_ALLOWED'
+    );
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${id}/cancel`).send({ reason: 'x' }),
+      409,
+      'ALARM_STATUS_NOT_ALLOWED'
+    );
   });
 
   test('#11 对象级授权：pending+已指派（脏状态/并发窗口）仅处理人本人可取消', async () => {
@@ -312,14 +379,49 @@ describe('报警/巡检控制器错误与边界分支', () => {
     });
 
     // 非处理人（admin 持 *:* 通过权限层，但对象级归属不匹配）→ 409
-    expect(
-      (await admin().put(`/api/alarms/${others._id}/cancel`).send({ reason: '越权取消' })).status
-    ).toBe(409);
+    expectStatusAndCode(
+      await admin().put(`/api/alarms/${others._id}/cancel`).send({ reason: '越权取消' }),
+      409,
+      'ALARM_STATUS_NOT_ALLOWED'
+    );
+    // 拒绝后不得写库：脏状态记录仍是 pending、handler 仍指向原处理人
+    const untouched = await FireAlarm.findById(others._id).lean();
+    expect(untouched.status).toBe('pending');
+    expect(String(untouched.handler)).toBe(scopedUserId);
 
     // 处理人本人取消 → 200
     expect(
       (await admin().put(`/api/alarms/${mine._id}/cancel`).send({ reason: '本人取消' })).status
     ).toBe(200);
+    // 正向对照必须真的落库，而不是"响应 200、状态没变"
+    const cancelled = await FireAlarm.findById(mine._id).lean();
+    expect(cancelled.status).toBe('cancelled');
+  });
+
+  test('报警：误报标记走通并落库（正向对照，防止“一律拒绝”也算绿）', async () => {
+    const rep = await admin()
+      .post('/api/alarms/report')
+      .send({
+        alarmType: 'other',
+        description: `误报正向_${stamp}`,
+        level: 'info',
+        location: { building: 'A栋' },
+      });
+    expect(rep.status).toBe(201);
+    const id = String(rep.body.data._id || rep.body.data.id);
+
+    expect(
+      (await admin().put(`/api/alarms/${id}/dispatch`).send({ handlerId: adminId })).status
+    ).toBe(200);
+    expect((await admin().put(`/api/alarms/${id}/arrive`).send({})).status).toBe(200);
+
+    const reason = `误报说明_${stamp}`;
+    expect((await admin().put(`/api/alarms/${id}/false-alarm`).send({ reason })).status).toBe(200);
+    const stored = await FireAlarm.findById(id).lean();
+    expect({ status: stored.status, handleResult: stored.handleResult }).toEqual({
+      status: 'false_alarm',
+      handleResult: reason,
+    });
   });
 
   // ==================== 报警：数据范围 403 ====================
@@ -332,14 +434,44 @@ describe('报警/巡检控制器错误与边界分支', () => {
         alarmType: 'other',
         description: `他人报警_${stamp}`,
         level: 'info',
+        location: { building: 'A栋' },
       });
     expect(foreign.status).toBe(201);
     const foreignId = String(foreign.body.data._id || foreign.body.data.id);
-    expect((await scoped().get(`/api/alarms/${foreignId}`)).status).toBe(403);
-    // 点名数据范围拒绝码：与「无权操作（PERMISSION_DENIED）」区分，前者是范围闸、后者是权限闸
-    expect((await scoped().get(`/api/alarms/${foreignId}`)).body.errors.errorCode).toBe(
+    expectStatusAndCode(
+      await scoped().get(`/api/alarms/${foreignId}`),
+      403,
       'ALARM_VIEW_FORBIDDEN'
     );
+    // 写端点必须由控制器自己的数据范围/归属闸拦下（权限已在角色里授予，
+    // 若这里的 code 变成 PERMISSION_DENIED，说明拦点根本不是范围闸）。
+    for (const [label, send] of [
+      [
+        'dispatch',
+        () => scoped().put(`/api/alarms/${foreignId}/dispatch`).send({ handlerId: adminId }),
+      ],
+      ['arrive', () => scoped().put(`/api/alarms/${foreignId}/arrive`).send({})],
+      [
+        'resolve',
+        () => scoped().put(`/api/alarms/${foreignId}/resolve`).send({ handleResult: 'x' }),
+      ],
+      [
+        'false-alarm',
+        () => scoped().put(`/api/alarms/${foreignId}/false-alarm`).send({ reason: 'x' }),
+      ],
+      ['cancel', () => scoped().put(`/api/alarms/${foreignId}/cancel`).send({ reason: 'x' })],
+    ]) {
+      const res = await send();
+      expect({ label, status: res.status, code: errorCodeOf(res) }).toEqual({
+        label,
+        status: 403,
+        code: 'ALARM_OPERATE_FORBIDDEN',
+      });
+    }
+    // 全部被拒后记录必须原样：未指派、未终结
+    const foreignAfter = await FireAlarm.findById(foreignId).lean();
+    expect(foreignAfter.status).toBe('pending');
+    expect(foreignAfter.handler == null).toBe(true);
 
     // 自己的记录（正向对照：范围校验不得过严）
     const own = await scoped()
@@ -348,6 +480,7 @@ describe('报警/巡检控制器错误与边界分支', () => {
         alarmType: 'other',
         description: `本人报警_${stamp}`,
         level: 'info',
+        location: { building: 'A栋' },
       });
     expect(own.status).toBe(201);
     const ownId = String(own.body.data._id || own.body.data.id);
@@ -357,27 +490,47 @@ describe('报警/巡检控制器错误与边界分支', () => {
 
   // ==================== 巡检：404 / 400 ====================
 
-  test('巡检：不存在的 ObjectId 在全部端点返回 404', async () => {
+  test('巡检：不存在的 ObjectId 在全部端点返回 404 且错误码一致', async () => {
     const id = ghostId();
-    expect((await admin().get(`/api/inspections/${id}`)).status).toBe(404);
-    expect((await admin().put(`/api/inspections/${id}`).send({ description: 'x' })).status).toBe(
-      404
+    expectStatusAndCode(await admin().get(`/api/inspections/${id}`), 404, 'INSPECTION_NOT_FOUND');
+    expectStatusAndCode(
+      await admin().put(`/api/inspections/${id}`).send({ description: 'x' }),
+      404,
+      'INSPECTION_NOT_FOUND'
     );
-    expect((await admin().put(`/api/inspections/${id}/start`).send({})).status).toBe(404);
-    expect(
-      (await admin().put(`/api/inspections/${id}/complete`).send({ result: 'normal' })).status
-    ).toBe(404);
-    expect(
-      (await admin().put(`/api/inspections/${id}/review`).send({ reviewResult: 'approved' })).status
-    ).toBe(404);
-    expect((await admin().put(`/api/inspections/${id}/cancel`).send({ reason: 'x' })).status).toBe(
-      404
+    expectStatusAndCode(
+      await admin().put(`/api/inspections/${id}/start`).send({}),
+      404,
+      'INSPECTION_NOT_FOUND'
     );
-    expect((await admin().delete(`/api/inspections/${id}`)).status).toBe(404);
+    expectStatusAndCode(
+      await admin().put(`/api/inspections/${id}/complete`).send({ result: 'normal' }),
+      404,
+      'INSPECTION_NOT_FOUND'
+    );
+    expectStatusAndCode(
+      await admin().put(`/api/inspections/${id}/review`).send({ reviewResult: 'approved' }),
+      404,
+      'INSPECTION_NOT_FOUND'
+    );
+    expectStatusAndCode(
+      await admin().put(`/api/inspections/${id}/cancel`).send({ reason: 'x' }),
+      404,
+      'INSPECTION_NOT_FOUND'
+    );
+    expectStatusAndCode(
+      await admin().delete(`/api/inspections/${id}`),
+      404,
+      'INSPECTION_NOT_FOUND'
+    );
   });
 
   test('巡检：非法 :id 格式与错误枚举被路由校验拒绝（400）', async () => {
-    expect((await admin().get('/api/inspections/not-an-objectid')).status).toBe(400);
+    expectStatusAndCode(
+      await admin().get('/api/inspections/not-an-objectid'),
+      400,
+      'PARAM_MUST_BE_VALID_OBJECT_ID'
+    );
     // update：inspectionType 非法枚举
     const create = await admin()
       .post('/api/inspections')
@@ -390,17 +543,21 @@ describe('报警/巡检控制器错误与边界分支', () => {
       });
     expect(create.status).toBe(201);
     const id = String(create.body.data._id || create.body.data.id);
-    expect(
-      (await admin().put(`/api/inspections/${id}`).send({ inspectionType: 'bogus' })).status
-    ).toBe(400);
+    const badUpdate = await admin().put(`/api/inspections/${id}`).send({ inspectionType: 'bogus' });
+    expectStatusAndCode(badUpdate, 400, 'VALIDATION_FAILED');
+    expect(badUpdate.body.errors.fieldErrors[0].path).toBe('inspectionType');
     // complete：result 非法枚举
-    expect(
-      (await admin().put(`/api/inspections/${id}/complete`).send({ result: 'bogus' })).status
-    ).toBe(400);
-    // review：result 非法枚举
-    expect(
-      (await admin().put(`/api/inspections/${id}/review`).send({ result: 'bogus' })).status
-    ).toBe(400);
+    const badComplete = await admin()
+      .put(`/api/inspections/${id}/complete`)
+      .send({ result: 'bogus' });
+    expectStatusAndCode(badComplete, 400, 'VALIDATION_FAILED');
+    expect(badComplete.body.errors.fieldErrors[0].path).toBe('result');
+    // review：reviewResult 非法枚举（控制器消费的是 reviewResult，不是 result）
+    const badReview = await admin()
+      .put(`/api/inspections/${id}/review`)
+      .send({ reviewResult: 'bogus' });
+    expectStatusAndCode(badReview, 400, 'VALIDATION_FAILED');
+    expect(badReview.body.errors.fieldErrors[0].path).toBe('reviewResult');
     await admin().delete(`/api/inspections/${id}`);
   });
 
@@ -443,40 +600,60 @@ describe('报警/巡检控制器错误与边界分支', () => {
   test('巡检：已开始不可更新（400）、重复开始冲突（409）', async () => {
     const id = await createInspection('更新拒绝');
     expect((await admin().put(`/api/inspections/${id}/start`).send({})).status).toBe(200);
-    // 更新：服务层抛 badRequest → 控制器 catch → err.statusCode=400
-    // 三条均由服务层抛错经控制器 catch 兜底，响应文案统一为「操作失败」
-    // （实测 errors 为 null，controller 不透出内部错误细节）；此处只断言状态码，
-    // 语义区分由状态码本身承担：400=状态不允许、409=转移冲突。
-    expect((await admin().put(`/api/inspections/${id}`).send({ description: 'x' })).status).toBe(
-      400
+    // 更新：服务层抛 badRequest → errorHandler 透出专门文案（F-173 后不再压成“操作失败”）
+    expectStatusAndMessage(
+      await admin().put(`/api/inspections/${id}`).send({ description: 'x' }),
+      400,
+      '已开始的巡检计划不能修改'
     );
-    // 重复开始：服务层抛 conflict → 控制器 catch → 409
-    expect((await admin().put(`/api/inspections/${id}/start`).send({})).status).toBe(409);
+    // 重复开始：服务层抛 conflict → 409
+    expectStatusAndMessage(
+      await admin().put(`/api/inspections/${id}/start`).send({}),
+      409,
+      '巡检当前状态不允许执行或您不是被指派人'
+    );
     // in_progress 不允许删除（服务层 badRequest → 400）
-    expect((await admin().delete(`/api/inspections/${id}`)).status).toBe(400);
+    expectStatusAndMessage(
+      await admin().delete(`/api/inspections/${id}`),
+      400,
+      '正在执行的巡检不能删除'
+    );
     // 收尾：先完成再取消不可行（已完成不能取消），直接置回删除路径
-    await admin().put(`/api/inspections/${id}/complete`).send({ result: 'normal' });
+    expect(
+      (await admin().put(`/api/inspections/${id}/complete`).send({ result: 'normal' })).status
+    ).toBe(200);
+    const completed = await Inspection.findById(id).lean();
+    expect({ status: completed.status, result: completed.result }).toEqual({
+      status: 'completed',
+      result: 'normal',
+    });
   });
 
   test('巡检：pending 直接提交 → 409；已完成再取消/再审 → 409', async () => {
     const id = await createInspection('状态冲突');
     // 未开始不能提交
-    expect(
-      (await admin().put(`/api/inspections/${id}/complete`).send({ result: 'normal' })).status
-    ).toBe(409);
+    expectStatusAndMessage(
+      await admin().put(`/api/inspections/${id}/complete`).send({ result: 'normal' }),
+      409,
+      '巡检未开始、已完成或您不是被指派人'
+    );
     // 走通 start → complete
     expect((await admin().put(`/api/inspections/${id}/start`).send({})).status).toBe(200);
     expect(
       (await admin().put(`/api/inspections/${id}/complete`).send({ result: 'normal' })).status
     ).toBe(200);
     // 已完成：取消冲突
-    expect((await admin().put(`/api/inspections/${id}/cancel`).send({ reason: 'x' })).status).toBe(
-      409
+    expectStatusAndMessage(
+      await admin().put(`/api/inspections/${id}/cancel`).send({ reason: 'x' }),
+      409,
+      '已完成或已取消的巡检不能重复操作'
     );
-    // 审核：reviewResult 非法值由服务层拒绝（路由仅校验 result 字段）→ 400
-    expect(
-      (await admin().put(`/api/inspections/${id}/review`).send({ reviewResult: 'bogus' })).status
-    ).toBe(400);
+    // 审核：reviewResult 缺省的语义由服务层拒绝（路由只校验存在时的枚举）→ 400
+    expectStatusAndMessage(
+      await admin().put(`/api/inspections/${id}/review`).send({}),
+      400,
+      '审核结论必须为 approved（通过）或 rejected（不通过）'
+    );
     // 正常审核通过后重复审核冲突
     expect(
       (
@@ -485,13 +662,15 @@ describe('报警/巡检控制器错误与边界分支', () => {
           .send({ result: 'approved', reviewResult: 'approved' })
       ).status
     ).toBe(200);
-    expect(
-      (
-        await admin()
-          .put(`/api/inspections/${id}/review`)
-          .send({ result: 'approved', reviewResult: 'approved' })
-      ).status
-    ).toBe(409);
+    const reviewed = await Inspection.findById(id).lean();
+    expect(reviewed.reviewResult).toBe('approved');
+    expectStatusAndMessage(
+      await admin()
+        .put(`/api/inspections/${id}/review`)
+        .send({ result: 'approved', reviewResult: 'approved' }),
+      409,
+      '只能审核已完成且未审核的巡检，且被指派人不能自审'
+    );
   });
 
   // ==================== 巡检：数据范围 403 ====================
@@ -510,16 +689,39 @@ describe('报警/巡检控制器错误与边界分支', () => {
       });
     expect(foreign.status).toBe(201);
     const foreignId = String(foreign.body.data._id || foreign.body.data.id);
-    expect((await scoped().get(`/api/inspections/${foreignId}`)).status).toBe(403);
-    // 读取与开始执行走的是不同守卫：读取报 INSPECTION_VIEW_FORBIDDEN，
-    // start 落回通用 PERMISSION_DENIED（更新侧的统一出口）
-    expect((await scoped().get(`/api/inspections/${foreignId}`)).body.errors.errorCode).toBe(
+    expectStatusAndCode(
+      await scoped().get(`/api/inspections/${foreignId}`),
+      403,
       'INSPECTION_VIEW_FORBIDDEN'
     );
-    expect((await scoped().put(`/api/inspections/${foreignId}/start`).send({})).status).toBe(403);
-    expect(
-      (await scoped().put(`/api/inspections/${foreignId}/start`).send({})).body.errors.errorCode
-    ).toBe('PERMISSION_DENIED');
+    // 写端点：角色已授予对应权限，因此必须由控制器的 INSPECTION_OPERATE_FORBIDDEN
+    // 拦下。若这里变成 PERMISSION_DENIED，说明权限层先挡了，范围闸根本没被测到。
+    for (const [label, send] of [
+      ['update', () => scoped().put(`/api/inspections/${foreignId}`).send({ description: 'x' })],
+      ['start', () => scoped().put(`/api/inspections/${foreignId}/start`).send({})],
+      [
+        'complete',
+        () => scoped().put(`/api/inspections/${foreignId}/complete`).send({ result: 'normal' }),
+      ],
+      [
+        'review',
+        () =>
+          scoped().put(`/api/inspections/${foreignId}/review`).send({ reviewResult: 'approved' }),
+      ],
+      ['cancel', () => scoped().put(`/api/inspections/${foreignId}/cancel`).send({ reason: 'x' })],
+      ['delete', () => scoped().delete(`/api/inspections/${foreignId}`)],
+    ]) {
+      const res = await send();
+      expect({ label, status: res.status, code: errorCodeOf(res) }).toEqual({
+        label,
+        status: 403,
+        code: 'INSPECTION_OPERATE_FORBIDDEN',
+      });
+    }
+    // 全部被拒后计划必须原样：仍 pending、执行人未被改动
+    const foreignAfter = await Inspection.findById(foreignId).lean();
+    expect(foreignAfter.status).toBe('pending');
+    expect(foreignAfter.assignedTo.map(String)).toEqual([adminId]);
 
     // 自己参与的计划（正向对照）
     const own = await admin()
@@ -535,6 +737,26 @@ describe('报警/巡检控制器错误与边界分支', () => {
     expect(own.status).toBe(201);
     const ownId = String(own.body.data._id || own.body.data.id);
     expect((await scoped().get(`/api/inspections/${ownId}`)).status).toBe(200);
+  });
+
+  test('巡检：更新/取消/删除在合法状态走通并落库（正向对照）', async () => {
+    const updateId = await createInspection('正向更新');
+    const description = `更新描述_${stamp}`;
+    expect((await admin().put(`/api/inspections/${updateId}`).send({ description })).status).toBe(
+      200
+    );
+    expect((await Inspection.findById(updateId).lean()).description).toBe(description);
+
+    const cancelId = await createInspection('正向取消');
+    const reason = `取消原因_${stamp}`;
+    expect((await admin().put(`/api/inspections/${cancelId}/cancel`).send({ reason })).status).toBe(
+      200
+    );
+    expect((await Inspection.findById(cancelId).lean()).status).toBe('cancelled');
+
+    const deleteId = await createInspection('正向删除');
+    expect((await admin().delete(`/api/inspections/${deleteId}`)).status).toBe(200);
+    expect(await Inspection.findById(deleteId).lean()).toBeNull();
   });
 
   // ==================== 路由层拦不到的控制器防御分支（直接调用） ====================

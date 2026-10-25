@@ -19,92 +19,17 @@
  */
 
 const fs = require('fs');
-const path = require('path');
 const logger = require('../utils/logger');
 // 全总化只有一处实现（utils/auditWriteFailure 导出，判据归一处）：本模块的 catch 体
 // 大多直接挂在 walChain 的末端——链尾一旦被这些语句自己抛断，就留下一个**无人持有**
 // 的 rejection，而 src/index.js 的 unhandledRejection 在任何环境都 process.exit(1)。
 const { errText } = require('../utils/auditWriteFailure');
 const cap = require('./auditWalCap');
+const walPerm = require('./auditWalPermissions');
+const { deriveDefaultWalPath } = require('./auditWalPath');
 
 // WAL 文件路径（可配），存放尚未确认落库的审计文档（每行一条 JSON）。
-//
-// 路径解析时机（auditBufferGap 抖动修复）：历史上是模块加载期 const——
-// Jest 并行 worker 里先 require 本模块的测试文件会锁死路径，后设
-// AUDIT_WAL_PATH 的套件被静默忽略，指向已清理目录或共享默认文件，
-// 造成跨套件 WAL 串写与断言抖动。现改为 start() 时重读 env（与
-// AUDIT_WAL_MAX_BYTES 的运行期读法同语义）：每次启动都可重指向，
-// 生产环境一次启动一个路径不受影响；测试套件按 worker 独立 mkdtemp。
-/**
- * 默认 WAL 路径：**按目标库名派生**，避免多进程共享同一份 WAL。
- *
- * L-28 修复（2026-09-16）：原默认值为固定的 `logs/audit-buffer.wal`，
- * 只要两个进程 cwd 相同（典型场景：同一台机上跑 dev 实例 + 脚本 + 测试),
- * 就会往同一个文件里追加各自的行。后果不是「互相覆盖」而是更隐蔽的
- * **交叉重放**：A 进程崩溃后重启，会把 B 进程尚未落库的行也读进自己的
- * 缓冲并落库——而 B 进程仍在运行、稍后也会落库同一批 → 审计记录**重复插入**，
- * 哈希链随之出现分叉，verify-audit-chain 报 chain_break。
- *
- * 派生规则（三层，后者覆盖前者）：
- *   1. 显式 AUDIT_WAL_PATH → 完全按运维指定（最高优先级，保持向后兼容）
- *   2. 有 MONGODB_URI → logs/audit-buffer.<dbName>.wal（各库各一份，天然隔离）
- *   3. 都没有 → logs/audit-buffer.wal（历史默认值，单实例场景行为不变）
- *
- * 为什么用库名而不是 pid：WAL 的唯一用途是**跨重启**崩溃恢复，
- * pid 命名的文件在进程死掉后就再也无人认领，等于放弃了 WAL 的全部价值。
- * 库名是「同一份审计数据」的天然标识，重启前后保持不变。
- */
-function deriveDefaultWalPath() {
-  const uri = process.env.MONGODB_URI;
-  let dbName = '';
-  if (uri) {
-    try {
-      // 取 URI path 段的库名：mongodb://host:port/<db>?opts
-      // 不用 URL 解析：mongodb:// 不是标准 scheme，URL 会误判 user:pass 部分
-      const m = String(uri).match(/^[a-z+]+:\/\/[^/]*\/([^?/]+)/i);
-      if (m && m[1]) dbName = dbNameToFileSegment(decodeURIComponent(m[1]));
-    } catch {
-      /* 解析失败回退到历史默认值，不因路径问题阻断启动 */
-    }
-  }
-  const base = path.join(__dirname, '../../logs/audit-buffer');
-  return dbName ? `${base}.${dbName}.wal` : `${base}.wal`;
-}
-/**
- * 库名 → 文件名安全片段（L-30）。
- *
- * 缺陷（本函数抽出的原因）：库名直接拼进文件名，而 URI 里的库名要经
- * decodeURIComponent 还原（`%2F` 就是 `/`）。于是 `mongodb://h/db%2F..%2Fevil`
- * 会让 WAL 落到 `logs/audit-buffer.db/../../evil.wal`——实测更深一级的
- * `db%2F..%2F..%2Fevil` 直接逃出 `logs/` 到仓库根。**文件名可被 URI 控制 =
- * 任意相对路径写**，攻击面不需要本地权限，只要有人能影响 MONGODB_URI。
- *
- * 编码选择：用 encodeURIComponent 做**单射**转义（`%` 仍保留、大小写敏感），
- * 而不是「非法字符一律替换成下划线」——后者不单射：`db/x` 与 `db_x`、
- * `a b` 与 `a_b` 都会映射到同一文件，等于把 L-28 刚消除的**交叉重放**
- * 又从另一条路引回来（两个不同的库共写一份 WAL）。宁可文件名难看，不可歧义。
- *
- * 对合法库名的行为：MongoDB 库名约束里不含 `/ \ : * ? " < > |` 等字符
- * （本文档不引用具体版本条款，只按「白名单字符恒等」这一可验证性质陈述），
- * 因此本函数对真实库名是**恒等变换**——`fire_safety_db` → `fire_safety_db`。
- * 唯一补一刀的是 `*`：encodeURIComponent 不转义它，而它在 NTFS 上是非法字符。
- *
- * @param {string} raw 已 decodeURIComponent 的库名
- * @returns {string} 可安全拼进文件名的片段；无法安全化时返回空串（回退默认路径）
- */
-function dbNameToFileSegment(raw) {
-  const name = String(raw);
-  if (!name) return '';
-  // '*' 是 encodeURIComponent 的保留字符（不转义）但为 Windows 非法文件名字符，
-  // 单独补转义；其余非法字符（/ \ : ? " < > | 空格 控制符）它已全部转义
-  const encoded = encodeURIComponent(name).replace(/\*/g, '%2A');
-  // 兜底断言：转义后仍含路径分隔符或相对路径片段 → 拒绝，回退默认路径
-  // （encodeURIComponent 的正确性不该被"信任"，这是 fail-closed 的第二道闸）
-  if (encoded.includes('/') || encoded.includes('\\')) return '';
-  if (encoded === '.' || encoded === '..') return '';
-  return encoded;
-}
-
+// 路径派生规则见 auditWalPath；start() 每次重读 AUDIT_WAL_PATH。
 let walPath = deriveDefaultWalPath();
 
 let walEnabled = false;
@@ -145,17 +70,6 @@ let walRewriteFailures = 0;
 // 上一次读取 WAL 时文件尾是否缺行尾换行（撕裂写或外部写手才会造成）。
 // 缺了它，下一次 append 会把新记录直接拼在残行之后 ⇒ 两条记录同时不可恢复。
 let walTailIncomplete = false;
-
-function ensureLogsDir() {
-  const dir = path.dirname(walPath);
-  if (!fs.existsSync(dir)) {
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-    } catch {
-      /* logger 已确保 logs 存在，忽略 */
-    }
-  }
-}
 
 /**
  * 当前 WAL 文件路径（导出供测试断言与运维核对）
@@ -212,7 +126,7 @@ async function readWalRecords() {
 /** 临时文件 + 原子替换回主 WAL（抽出，三处改写共用） */
 async function atomicReplaceWal(nextContent) {
   const tmpPath = walPath + '.tmp';
-  await fs.promises.writeFile(tmpPath, nextContent, 'utf8');
+  await fs.promises.writeFile(tmpPath, nextContent, { encoding: 'utf8', mode: 0o600 });
   await fs.promises.rename(tmpPath, walPath);
 }
 
@@ -238,7 +152,7 @@ function walSeqOf(line) {
 function walAppendLine(line) {
   const payload = typeof line === 'string' && line.endsWith('\n') ? line : `${line}\n`;
   walChain = walChain
-    .then(() => fs.promises.appendFile(walPath, payload, 'utf8'))
+    .then(() => fs.promises.appendFile(walPath, payload, { encoding: 'utf8', mode: 0o600 }))
     // 只给 appendFile 挂这一层 catch：计数口径必须是"这一行没落盘"。
     // 若与下面的大小抽查共用 catch，enforceWalLimit 的 stat/rename 失败也会记进来，
     // 面板上就分不清"写不进去"和"抽查出错"。级别保持 warn（不升 error）：磁盘满时
@@ -306,7 +220,10 @@ async function removeWalLinesBySeqs(seqSet, archive) {
   if (removed.length === 0) return 0;
 
   if (archive) {
-    await fs.promises.appendFile(walPath + '.discarded', removed.join('\n') + '\n', 'utf8');
+    await fs.promises.appendFile(walPath + '.discarded', removed.join('\n') + '\n', {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
     walDiscardedLines += removed.length;
   }
   await atomicReplaceWal(kept.length ? kept.join('\n') + '\n' : '');
@@ -420,11 +337,17 @@ async function stampReplaySeqs(lines, onDoc) {
     if (doc && typeof doc === 'object') {
       if (!doc.__walSeq) {
         assignSeq(doc); // walEnabled 在 startup() 之后恒真，序号在此刻分配并随行回写
+        // 注意顺序：回写行必须在剥掉 `__walDurable` **之前** 序列化，
+        // 否则这条补号行会丢掉"已 fsync"的标记，下一轮超限裁剪就会优先把它丢掉。
         out.push(JSON.stringify(doc));
         dirty = true;
       } else {
         out.push(line);
       }
+      // `__walDurable` 是 WAL 行级的记账字段，不是审计文档的字段：
+      // 它只用于超限裁剪判断优先级，不能随重放文档进 Mongo（schema 外字段）。
+      // `__walSeq` 则必须保留——裁剪按序号精确匹配，剥掉就永远裁不掉。
+      delete doc.__walDurable;
       onDoc(doc);
     } else {
       // 解析不出文档（JSON 抛错，或解析出数字/字符串/null 这类非对象）：
@@ -484,8 +407,16 @@ async function stampReplaySeqs(lines, onDoc) {
  */
 function startup(envPath) {
   walPath = envPath || deriveDefaultWalPath();
-  ensureLogsDir();
-  walEnabled = true;
+  const writable = walPerm.ensureWalDirWritable(walPath);
+  walPerm.hardenWalArtifacts(walPath);
+  walEnabled = writable;
+  if (!writable) {
+    logger.error(
+      `审计 WAL 未启用：${walPath} 不可写。敏感操作的可靠 outbox 将 fail-closed（重抛），` +
+        '普通审计仍会进内存缓冲并在数据库恢复后尝试落库。'
+    );
+  }
+  return writable;
 }
 
 /** 关闭写入（stop() 调用）；已排入 walChain 的操作仍会执行完 */
@@ -511,6 +442,47 @@ function assignSeq(doc) {
 /** 追加一行到 WAL；未启用时跳过（与内存缓冲共用同一个 `walEnabled` 门控） */
 function appendLine(line) {
   if (walEnabled) walAppendLine(line);
+}
+
+/**
+ * **可等待且 fsync 的** WAL 追加：敏感操作 outbox 的"先落盘再回成功"依赖它。
+ *
+ * 与 appendLine 的区别：
+ *  - 返回 Promise<boolean>，调用方必须等它 resolve 才能声称已留痕；
+ *  - 每条记录 open → write → fsync → close，崩溃不会丢页缓存里的最后一条；
+ *  - 失败返回 false（不 reject），并计入 walAppendFailures；调用方据此 fail-closed。
+ *
+ * 仍然串行在 walChain 上，与普通追加/裁剪互斥，避免行交错。
+ *
+ * @param {string} line
+ * @returns {Promise<boolean>}
+ */
+function appendLineDurable(line) {
+  if (!walEnabled) return Promise.resolve(false);
+  const payload = typeof line === 'string' && line.endsWith('\n') ? line : `${line}\n`;
+  const task = walChain.then(async () => {
+    let handle;
+    try {
+      handle = await fs.promises.open(walPath, 'a', 0o600);
+      await handle.writeFile(payload, { encoding: 'utf8' });
+      await handle.sync();
+      return true;
+    } catch (e) {
+      walAppendFailures += 1;
+      logger.error(
+        `审计 WAL 持久化失败（累计 ${walAppendFailures} 次）：${errText(e)}——` +
+          '本条敏感操作审计未落盘，调用方必须 fail-closed'
+      );
+      return false;
+    } finally {
+      if (handle) await handle.close().catch(() => {});
+    }
+  });
+  // 链尾只承接"追加后的上限抽查"，不把结果暴露给调用方；失败已在上面记账。
+  walChain = task
+    .then((ok) => (ok ? cap.afterAppend({ walPath, readWalRecords, atomicReplaceWal }) : undefined))
+    .catch((e) => logger.warn(`审计 WAL 追加链后续操作失败：${errText(e)}`));
+  return task;
 }
 
 /**
@@ -560,6 +532,7 @@ module.exports = {
   isEnabled,
   assignSeq,
   appendLine,
+  appendLineDurable,
   trimBySeqs: walTrimBySeqs,
   discardBySeqs: walDiscardBySeqs,
   stampReplaySeqs,

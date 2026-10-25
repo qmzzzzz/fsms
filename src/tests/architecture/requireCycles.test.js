@@ -1,7 +1,7 @@
 /**
  * 依赖图无环断言
  *
- * 背景：仓内有 3 处**故意**使用「函数内 require」以打破循环依赖的地方，
+ * 背景：仓内有 5 处**故意**使用「函数内 require」以打破循环依赖的地方，
  * 报告记录了这一事实，并给出两条整改路径：补注释，或加架构测试断言
  * 依赖图无环。本文件选择后者——注释只能提醒读代码的人，无法阻止
  * 「把 require 提到文件顶部」这种看起来无害的重构（那会引入加载顺序 bug：
@@ -10,7 +10,7 @@
  * 本测试做四件事：
  *   1. 静态解析 src 下所有模块的 require 边，断言不存在环；
  *      （环的存在说明某处惰性 require 被误提到顶层）
- *   2. 断言 3 处关键惰性 require 仍在函数体内（即未被提到顶层）；
+ *   2. 断言 5 处关键惰性 require 仍在函数体内（即未被提到顶层）；
  *   3. 断言这些模块可以被正常加载——静态分析看不见的加载顺序问题，
  *      由「真实 require 一遍」兜住。
  *   4. 断言每条相对 require 都能解析到真实文件（F-193）——前三条都建立在
@@ -183,8 +183,10 @@ describe('依赖图无环断言', () => {
     expect(cycles).toEqual([]);
   });
 
-  test('3 处关键惰性 require 仍在函数体内（未被提到顶层）', () => {
+  test('5 处关键惰性 require 仍在函数体内（未被提到顶层）', () => {
     // 每项：[文件, 必须出现在函数体内(缩进)的片段, 说明]
+    // securityAlert 的封禁/滥用臂在 2026-10-21 拆成兄弟模块，惰性 require 随各自
+    // 的封禁调用点落位——逐个钉住，避免某一次拆分把它提回顶层。
     const LAZY = [
       [
         'services/userPermissionService.js',
@@ -193,9 +195,19 @@ describe('依赖图无环断言', () => {
       ],
       ['middleware/tokenBlacklist.js', "require('./auth')", 'auth ↔ tokenBlacklist 循环依赖'],
       [
-        'services/securityAlert.js',
+        'services/securityAlertIpBans.js',
         "require('../middleware/security')",
-        'securityAlert ↔ security 循环依赖',
+        'securityAlert 封禁臂 ↔ security 循环依赖',
+      ],
+      [
+        'services/securityAlertPermissionAbuse.js',
+        "require('../middleware/security')",
+        '权限滥用封禁臂 ↔ security 循环依赖',
+      ],
+      [
+        'services/rateLimitEscalationBan.js',
+        "require('../middleware/security')",
+        '限流升级封禁臂 ↔ security 循环依赖',
       ],
     ];
 

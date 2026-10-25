@@ -3,7 +3,7 @@
  *
  * 【缺陷】authenticateSocket 在登记连接映射之前要 await 三处外部状态（令牌黑名单、
  * User 查询、设备会话校验）。客户端在这段时间里断开是常态（页面刷新、网络抖动、
- * 认证超时被服务端踢）：disconnect 处理器（websocketService/push.js:176-188）跑的时候
+ * 认证超时被服务端踢）：disconnect 处理器（websocketService/push.js:305-319）跑的时候
  * `socket.userId` 还没赋值，于是只从 `clients` 里摘掉这条连接，`userConnections`
  * 那支判据整段跳过；等 await 回来，:260-263 仍然把这个**已经死掉的 socketId** 登记进
  * userConnections。之后没有任何地方再清它（周期清扫只遍历 `this.clients.keys()`，
@@ -174,6 +174,12 @@ describe('WebSocket 认证在途断开不留幽灵连接（F-188）', () => {
     // ②的判据是"这里没有痕迹"，所以先证明正常路径确实留痕迹
     expect(svc.userConnections.get(String(user._id)).has(socket.id)).toBe(true);
     expect(svc.clients.get(socket.id).userId).toBe(String(user._id));
+    // 认证完成信号：客户端必须收到它才发起 join-room（CONNECT 包早于异步认证完成下发，
+    // 客户端若在 'connect' 里立刻入房会被服务端按 authenticated=false 拒绝且不重试）
+    expect(socket.emitted).toContainEqual({
+      ev: 'authenticated',
+      data: { userId: String(user._id) },
+    });
   });
 
   // first = middleware/tokenBlacklist.isTokenBlacklisted（链上第一个 await）

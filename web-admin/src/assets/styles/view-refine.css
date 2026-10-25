@@ -596,6 +596,38 @@ html.dark
   color: var(--xf-text-muted);
 }
 
+/* 可见关闭入口：取代原 ESC 键帽（ESC 仍能关，但不作 UI 展示，见 SearchPalette.vue 头注释） */
+.search-palette__close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 14px;
+  color: var(--xf-text-muted);
+  cursor: pointer;
+  transition:
+    color var(--apple-duration-fast) ease,
+    background-color var(--apple-duration-fast) ease,
+    border-color var(--apple-duration-fast) ease;
+}
+
+.search-palette__close:hover {
+  background: var(--xf-gray-50);
+  border-color: var(--xf-border-color);
+  color: var(--xf-text-primary);
+}
+
+.search-palette__close:focus-visible {
+  outline: 2px solid var(--xf-primary);
+  outline-offset: 2px;
+}
+
 /* kbd 按键帽：1px 描边 + 底部加粗模拟机械键帽厚度 */
 .search-palette__kbd {
   flex: none;

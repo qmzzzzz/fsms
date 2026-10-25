@@ -489,8 +489,11 @@ describe('api.auth 会话方法', () => {
   //   但覆盖面不同——变异实测：去掉 encodeURIComponent 时本文件与
   //   apiRequestPipeline.test.js「全部端点的动词与路径符合后端契约」都会变红，
   //   两者互为独立证据（前者防本仓调用方，后者防契约表漂移），故保留。
-  test('sid 经 encodeURIComponent 后拼接（路径参数不裸拼）', () => {
-    expect(source).toContain('`/auth/sessions/${encodeURIComponent(sid)}`')
+  test('sid 经 encodePathSegment（encodeURIComponent）后拼接（路径参数不裸拼）', () => {
+    expect(source).toContain(
+      'const encodePathSegment = (value) => encodeURIComponent(String(value))'
+    )
+    expect(source).toContain('`/auth/sessions/${encodePathSegment(sid)}`')
   })
 
   test('退出其他设备走固定字面量路径，不复用 :sid 分支', () => {
@@ -893,15 +896,37 @@ describe('SessionManager 真实交互（确认框 / 吊销 / 展开）', () => {
     expect(c.find('.session-alert')).toBeNull()
   })
 
-  test('加载失败：列表清空并渲染空态（不展示上一次的过期数据）', async () => {
+  test('首次加载失败：显示错误提示与重试，不再伪装成「暂无会话」', async () => {
     listSessions.mockRejectedValue(new Error('network'))
     mounted = mountComponent(SessionManager, {
       initialRoute: '/profile',
       routes: [{ path: '/profile', component: { render: () => null } }],
     })
-    await waitFor(() => mounted.find('.el-empty') !== null, { message: '空态渲染' })
+    await waitFor(() => mounted.find('.session-load-error') !== null, { message: '错误提示渲染' })
     expect(mounted.findAll('.session-item').length).toBe(0)
+    // 空态不能与失败同时出现：那会把「没加载出来」说成「没有设备登录」
+    expect(mounted.find('.el-empty')).toBeNull()
+    expect(mounted.find('.session-load-error').textContent).toContain('无法加载登录会话')
     expect(mounted.errors).toEqual([])
+
+    const calls = listSessions.mock.calls.length
+    mounted.find('.session-load-error button').click()
+    await flush(8)
+    expect(listSessions.mock.calls.length).toBe(calls + 1)
+  })
+
+  test('刷新失败但已有数据：保留列表并标注为上次数据（不清空成「无会话」）', async () => {
+    const c = await renderSessions([otherRow()])
+    expect(c.findAll('.session-item').length).toBe(1)
+
+    listSessions.mockRejectedValue(new Error('network'))
+    click(c.findAll('.session-actions button')[0])
+    await waitFor(() => c.find('.session-load-error') !== null, { message: '陈旧数据提示' })
+    await flush(6)
+    expect(c.findAll('.session-item').length).toBe(1)
+    expect(c.find('.session-load-error').textContent).toContain('上次加载的数据')
+    expect(c.find('.el-empty')).toBeNull()
+    expect(c.errors).toEqual([])
   })
 
   test('设备类型映射图标：mobile/tablet/desktop/未知 四种都渲染出图标且互不相同', async () => {

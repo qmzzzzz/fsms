@@ -13,6 +13,7 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
 describe('安全管理核心接口（冲 100%）', () => {
   let app;
   let adminToken;
+  let adminPassword;
   const stamp = `sc${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
 
   beforeAll(async () => {
@@ -37,10 +38,11 @@ describe('安全管理核心接口（冲 100%）', () => {
       isBuiltIn: false,
       permissions: [wildcardPerm._id],
     });
+    adminPassword = randomPassword();
     const admin = await User.create({
       username: `scadmin${stamp}`,
       email: `scadmin${stamp}@example.com`,
-      password: randomPassword(),
+      password: adminPassword,
       roles: [superRole._id],
     });
 
@@ -90,7 +92,7 @@ describe('安全管理核心接口（冲 100%）', () => {
     const flip = !before.body.data.allowPublicRegistration;
     const set = await authed()
       .put('/api/security/config/allowPublicRegistration')
-      .send({ allowPublicRegistration: flip });
+      .send({ allowPublicRegistration: flip, currentPassword: adminPassword });
     expect(set.status).toBe(200);
 
     const after = await authed().get('/api/security/config/allowPublicRegistration');
@@ -98,7 +100,7 @@ describe('安全管理核心接口（冲 100%）', () => {
 
     const bad = await authed()
       .put('/api/security/config/allowPublicRegistration')
-      .send({ allowPublicRegistration: 'yes' });
+      .send({ allowPublicRegistration: 'yes', currentPassword: adminPassword });
     expect(bad.status).toBe(400);
   });
 
@@ -109,7 +111,7 @@ describe('安全管理核心接口（冲 100%）', () => {
     const flip = !before.body.data.loginCaptchaEnabled;
     const set = await authed()
       .put('/api/security/config/loginCaptchaEnabled')
-      .send({ loginCaptchaEnabled: flip });
+      .send({ loginCaptchaEnabled: flip, currentPassword: adminPassword });
     expect(set.status).toBe(200);
 
     const after = await authed().get('/api/security/config/loginCaptchaEnabled');

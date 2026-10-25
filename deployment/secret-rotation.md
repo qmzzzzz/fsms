@@ -12,6 +12,21 @@ node scripts/generate-secrets.js --out ./secrets-new        # 生产：写入 06
 node scripts/generate-secrets.js --env-snippet              # 本地：打印 .env 片段
 ```
 
+### 宿主 0600 与容器 UID 1001 的权限适配（2026-10-24）
+
+`generate-secrets.js` 把文件写成 0600、目录 0700，属主是执行部署的用户。
+compose 的 `secrets: file:` 在 Linux 上是 bind mount，容器内保留宿主文件的
+属主/权限；而镜像里的应用用户是 UID 1001（nodejs），直接读
+`/run/secrets/*` 会 EACCES。`secrets:` 的 `uid/gid/mode` 对 file 型 secret
+不生效，因此 app 服务在 compose 里以 `user: "0:0"` 启动镜像入口脚本
+`docker/app-entrypoint.sh`：脚本把 `/run/secrets/*` 复制到 tmpfs
+`/run/app-secrets`、收紧到 0400、chown 给 nodejs，重写 `*_FILE` 指针后
+`su-exec` 降权。应用进程与 PID 1 仍是 nodejs，root 只存在于启动复制窗口。
+不要把宿主机密钥改成 0644 来「绕过」——那会让 at-rest 保护实质降级；
+也不要把 compose 里 app 的 `user: "0:0"`、`cap_add` 或 `/run/app-secrets`
+tmpfs 删掉，三者是这条链的组成部分（契约见
+`src/tests/deploy/appSecretEntrypoint.test.js`）。
+
 ## 执行位置与 `*_FILE` 前缀（本手册所有命令行的前提，不是可选说明）
 
 本手册里的 `node scripts/…` 与 `./scripts/….sh` 一律在**宿主机**执行，原因有两条，
@@ -53,14 +68,37 @@ node scripts/generate-secrets.js --env-snippet              # 本地：打印 .e
 
 ## 各密钥轮换影响面
 
-| 密钥                   | 轮换影响                                    | 是否需要数据迁移           |
-| ---------------------- | ------------------------------------------- | -------------------------- |
-| JWT_SECRET             | 全部访问令牌立即失效，用户重新登录          | 否                         |
-| JWT_REFRESH_SECRET     | 全部刷新令牌失效，会话需重建                | 否                         |
-| AES_SECRET_KEY         | **存量 mfaSecret 无法解密，MFA 登录恒失败** | 是（先迁移后换钥）         |
-| HMAC_SECRET            | 存量审计记录 hmac 校验失配                  | 是（用新钥重签，无需旧钥） |
-| LOGIN_ECDH_PRIVATE_KEY | 无迁移；钉扎部署须同步重建前端包（见下）    | 否                         |
-| MONGODB_URI / 口令     | 需同步改 Mongo 账户，属数据库运维动作       | 不适用                     |
+| 密钥                   | 轮换影响                                                                     | 是否需要数据迁移           |
+| ---------------------- | ---------------------------------------------------------------------------- | -------------------------- |
+| JWT_SECRET             | 全部访问令牌立即失效，用户重新登录                                           | 否                         |
+| JWT_REFRESH_SECRET     | 全部刷新令牌失效，会话需重建                                                 | 否                         |
+| AES_SECRET_KEY         | **存量 mfaSecret 无法解密，MFA 登录恒失败**                                  | 是（先迁移后换钥）         |
+| HMAC_SECRET            | 存量审计记录 hmac 校验失配                                                   | 是（用新钥重签，无需旧钥） |
+| LOGIN_ECDH_PRIVATE_KEY | 无迁移；钉扎部署须同步重建前端包（见下）                                     | 否                         |
+| MONGODB_URI / 口令     | 需同步改 Mongo 账户，属数据库运维动作                                        | 不适用                     |
+| MONGO_KEYFILE          | 副本集内部认证凭据；单节点重启即生效，**多成员必须同批替换**（见下）         | 否                         |
+| METRICS_TOKEN          | `/metrics` 的 Bearer 令牌；旧令牌立即失效（Prometheus 需同步换读同一份文件） | 否                         |
+
+`MONGO_KEYFILE` 一行的机制补笔：该文件由 compose 的 `mongo_keyfile` secret 挂载，
+mongod 启动前由 entrypoint 复制到 `/tmp/mongo.key` 并收紧到 0400
+（docker secret 本身是 0444，MongoDB 会以 "permissions on ... are too open" 拒绝）。
+它不是应用侧密钥——`src/config/secrets.js` 的 `FILE_BACKED_SECRETS` 里没有它，
+轮换它**不需要**重启 app，只需重启 mongo（重启期间应用会短暂连不上，走重连）。
+
+轮换步骤与单/多成员的差别：
+
+- **单节点副本集**（本仓默认形态）：替换 `./secrets/mongo_keyfile` 后
+  `docker compose up -d --force-recreate mongo` 即可，数据与副本集配置不受影响。
+- **多成员副本集**：成员间用同一 keyfile 做 SCRAM 认证，任一侧不一致就会心跳
+  `Unauthorized`、副本集失去 primary。必须同批替换并重启全部成员，不能滚动。
+  需要无停机轮换时，改用 keyfile 的**多密钥序列**格式（YAML 数组），先追加新钥、
+  全量重启、再删旧钥——见 MongoDB "Rotate Keys for Self-Managed Replica Sets"。
+
+`METRICS_TOKEN` 一行的机制补笔：该令牌由 compose 的 `metrics_token` secret
+经 `METRICS_TOKEN_FILE` 注入 app（`FILE_BACKED_SECRETS` 在列），轮换＝替换
+`./secrets/metrics_token` 并重建 app。**Prometheus 侧**若启用了
+`bearer_token_file`，须指向同一份文件并重启 prometheus（shipped 配置以容器私网
+来源放行，不依赖令牌；令牌用于反代/跨网段抓取）。
 
 `LOGIN_ECDH_PRIVATE_KEY` 一行的机制补笔：该私钥由 compose 的
 `login_ecdh_private_key` secret 经 `LOGIN_ECDH_PRIVATE_KEY_FILE` 注入

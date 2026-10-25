@@ -117,9 +117,9 @@ const buildSecurityHeaders = (mode) => {
     'Content-Security-Policy': [
       "default-src 'self'",
       scriptSrc,
-      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
-      "font-src 'self' data: https://fonts.gstatic.com",
+      "font-src 'self' data:",
       connectSrc,
       "object-src 'none'",
       "base-uri 'self'",
@@ -511,27 +511,19 @@ export default defineConfig(({ command, mode }) => {
           theme_color: '#c1121f',
           background_color: '#0a0f1a',
           display: 'standalone',
-          start_url: '/',
-          scope: '/',
+          // 相对地址按 manifest 自身位置解析：子路径部署（/admin/）下
+          // 硬编码 '/' 会把 PWA 启动页与作用域指到站点根，安装后打开空白页
+          start_url: '.',
+          scope: '.',
           orientation: 'portrait-primary',
           icons: [
-            { src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' },
+            { src: 'favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' },
           ],
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2,webmanifest}'],
           // 仅缓存静态资源：/api 响应含用户、角色、审计等敏感数据，
           // 写入 Cache Storage 后可被 DevTools 读取且登出后仍驻留，故不做运行时缓存
-          runtimeCaching: [
-            {
-              urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
-              handler: 'CacheFirst',
-              options: {
-                cacheName: 'google-fonts-cache',
-                expiration: { maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 365 },
-              },
-            },
-          ],
         },
       }),
     ],
@@ -544,7 +536,9 @@ export default defineConfig(({ command, mode }) => {
       postcss: './postcss.config.js',
     },
     server: {
-      host: '0.0.0.0', // ← 修改：允许局域网/热点设备访问
+      // 默认只监听回环地址：0.0.0.0 会把带 HMR/源码映射的 dev server
+      // 暴露到整个局域网。确需手机真机联调时显式执行 `vite --host 0.0.0.0`。
+      host: '127.0.0.1',
       port: 3001,
       // 收紧 dev server CORS（回应外部报告 #2）：Vite 默认用宽松正则反射任意
       // localhost 系 Origin（含 *.localhost 子域），显式收敛为开发白名单。
@@ -615,7 +609,8 @@ export default defineConfig(({ command, mode }) => {
       },
     },
     preview: {
-      host: '0.0.0.0', // ← 修改：preview 模式同样允许外部访问
+      // 同 dev server：默认不对外监听，需要外部访问时用 `vite preview --host 0.0.0.0`
+      host: '127.0.0.1',
       port: 3001,
       headers: buildSecurityHeaders(mode),
       fs: {

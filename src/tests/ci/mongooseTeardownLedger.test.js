@@ -10,8 +10,8 @@
  * 于是"这轮门禁到底过没过"在最需要看结果的时候看不见。
  *
  * 普查（纯 node，可复跑：见交付文档里的脚本）：249 个套件调用 mongoose.connect，
- * 228 个自己关，**21 个从不关**；本轮把其中 17 个干净的补齐（含 1 个"空壳守卫"），
- * 剩 4 个是他人脏文件，登记在下方 LEDGER，由本人修。
+ * 228 个自己关，**21 个从不关**；本轮把其中 18 个干净的补齐（含 1 个"空壳守卫"），
+ * 剩 3 个是他人脏文件，登记在下方 LEDGER，由本人修。
  *
  * 本闸的射程与它的下界（第 21 轮补测，全部实测）：采集口径只有
  * `CONNECTS = /mongoose\.connect\s*\(/` 一条，所以 ① 经 helper 连库的套件看不见，
@@ -108,11 +108,6 @@ function emptyReadyStateShells(text) {
  * 留着会在"站点已修"这条用例里红，防止台账变成可以无限堆积的豁免筐。
  */
 const LEDGER = [
-  {
-    rel: 'src/tests/ci/fieldErrorsEgressGate.test.js',
-    owner: '他人 staged（A）',
-    note: '并行 agent 本轮新建的门禁套件，不代改；在文件末尾补 root 级 afterAll 内 await mongoose.connection.close()',
-  },
   {
     rel: 'src/tests/controllers/reportExportRowOrderAndCells.test.js',
     owner: '他人脏文件（M）',

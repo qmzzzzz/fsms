@@ -29,6 +29,7 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
   let Role;
   let Permission;
   let generateRefreshToken;
+  let sessionService;
   let superToken;
   const PASSWORD = randomPassword();
   const stamp = `rv${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
@@ -52,6 +53,27 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
     return user;
   };
 
+  /** 建一条真实设备会话并签发绑定它的 refresh token（无 sid 的 refresh 现会被直接拒绝） */
+  const refreshFor = async (u, label) => {
+    const sid = `${stamp}${label}`;
+    await sessionService.createSession({
+      userId: u._id,
+      req: { ip: '127.0.0.1', get: () => 'jest-revoke-test' },
+      sid,
+    });
+    return generateRefreshToken(u._id, 0, sid);
+  };
+
+  /** 把黑名单条目的消费时刻拨到并发宽限窗口之外，使重放被当作真实重放 */
+  const backdateConsumption = async (token) => {
+    const TokenBlacklist = require('../../models/TokenBlacklist');
+    const crypto = require('crypto');
+    await TokenBlacklist.updateOne(
+      { tokenHash: crypto.createHash('sha256').update(token).digest('hex') },
+      { $set: { createdAt: new Date(Date.now() - 60_000) } }
+    );
+  };
+
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
       await mongoose.connect(process.env.MONGODB_URI);
@@ -62,6 +84,7 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
     require('../../models/TokenBlacklist');
     require('../../models/AuditLog');
     ({ generateRefreshToken } = require('../../services/tokenService'));
+    sessionService = require('../../services/sessionService');
 
     const wildcardPerm = await Permission.findOneAndUpdate(
       { code: '*:*' },
@@ -173,7 +196,8 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
       try {
         res = await request(app)
           .put(`/api/security/users/${v._id}/mfa/reset`)
-          .set('Authorization', `Bearer ${superToken}`);
+          .set('Authorization', `Bearer ${superToken}`)
+          .send({ currentPassword: PASSWORD });
       } finally {
         spy.mockRestore();
       }
@@ -195,13 +219,27 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
         if (update && update.$inc) return originalFindByIdAndUpdate(id, update); // 吊销真实落库
         return Promise.reject(new Error('db down (S1 故障注入：MFA 清除)'));
       });
+      // M-02：清除 MFA 改为带快照条件更新（findOneAndUpdate），故障注入需覆盖新写点。
+      // findByIdAndUpdate 内部会委托 findOneAndUpdate，因此只拦"带 mfaEnabled 条件"的那次，
+      // 否则吊销（$inc）也会被一起打断，测到的就不是"吊销成功但清除失败"这一格。
+      const originalFindOneAndUpdate = User.findOneAndUpdate.bind(User);
+      const clearSpy = jest
+        .spyOn(User, 'findOneAndUpdate')
+        .mockImplementation(function (filter, update, options) {
+          if (filter && filter.mfaEnabled === true) {
+            return Promise.reject(new Error('db down (S1 故障注入：MFA 清除)'));
+          }
+          return originalFindOneAndUpdate(filter, update, options);
+        });
       let res;
       try {
         res = await request(app)
           .put(`/api/security/users/${v._id}/mfa/reset`)
-          .set('Authorization', `Bearer ${superToken}`);
+          .set('Authorization', `Bearer ${superToken}`)
+          .send({ currentPassword: PASSWORD });
       } finally {
         spy.mockRestore();
+        clearSpy.mockRestore();
       }
 
       expect(res.status).toBe(503);
@@ -216,7 +254,8 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
       const v = users.victimC;
       const res = await request(app)
         .put(`/api/security/users/${v._id}/mfa/reset`)
-        .set('Authorization', `Bearer ${superToken}`);
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ currentPassword: PASSWORD });
 
       expect(res.status).toBe(200);
       expect(res.body.data.mfaEnabled).toBe(false);
@@ -230,11 +269,12 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
   describe('刷新轮换重放检测：吊销失败不得被 401 掩盖', () => {
     test('重放触发但吊销失败 → 503「安全服务暂不可用」', async () => {
       const u = users.replayA;
-      const token = generateRefreshToken(u._id, 0, null);
+      const token = await refreshFor(u, 'replayA');
 
       // 首次刷新正常消费该令牌；同一令牌再次使用即触发重放检测
       const first = await request(app).post('/api/auth/refresh').send({ refreshToken: token });
       expect(first.status).toBe(200);
+      await backdateConsumption(token);
 
       const spy = jest
         .spyOn(User, 'findByIdAndUpdate')
@@ -255,10 +295,11 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
 
     test('健康重放 → 401 且 tokenVersion 递增（对照组）', async () => {
       const u = users.replayB;
-      const token = generateRefreshToken(u._id, 0, null);
+      const token = await refreshFor(u, 'replayB');
 
       const first = await request(app).post('/api/auth/refresh').send({ refreshToken: token });
       expect(first.status).toBe(200);
+      await backdateConsumption(token);
 
       const replay = await request(app).post('/api/auth/refresh').send({ refreshToken: token });
       expect(replay.status).toBe(401);
@@ -272,7 +313,7 @@ describe('S1 invalidateUserTokens 吊销失败的错误传播', () => {
   describe('S-6 登出后的 refresh 重放：只拒绝本次请求，不吊销全部会话', () => {
     test('logout 来源的重放 → 401，tokenVersion 不变、原因留痕 logout', async () => {
       const u = await makeUser('logoutreplay');
-      const refresh = generateRefreshToken(u._id, 0, null);
+      const refresh = await refreshFor(u, 'logoutreplay');
 
       const logout = await request(app)
         .post('/api/auth/logout')

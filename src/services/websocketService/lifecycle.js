@@ -2,8 +2,9 @@
  * WebSocket 连接生命周期与周期复查（2026-10-18 自 services/websocketService.js 拆出）
  *
  * Redis adapter 挂载/回收、优雅关闭、周期清扫（AuthGhost/授权复查/运行期 IP 封禁
- * 复查 _sweepBannedIps）与 revalidateSocket。方法是 mixin 形态，由 index.js 挂到
- * WebSocketService.prototype，对外只有门面可见。
+ * 复查 _sweepBannedIps）与 revalidateSocket。设备会话吊销的处置在
+ * sessionRevocation.js（_sweepRevokedSessions 由本文件周期清扫调用）。
+ * 方法是 mixin 形态，由 index.js 挂到 WebSocketService.prototype，对外只有门面可见。
  *
  * fail-open 计数（ip_blacklist_failopen）站点之一落于本文件（_sweepBannedIps），
  * 台账见 constants/failOpenSites.js；另一处握手站点在 handshake.js。
@@ -64,6 +65,12 @@ const methods = {
       clearInterval(this._cleanupTimer);
       this._cleanupTimer = null;
     }
+    // 注销会话吊销监听：#2 的监听由构造器登记，不注销会在 dispose 后继续持有本实例
+    if (this._offSessionRevoked) {
+      this._offSessionRevoked();
+      this._offSessionRevoked = null;
+    }
+
     // 断开所有客户端连接
     for (const [socketId] of this.clients) {
       const socket = this.io.sockets.sockets.get(socketId);
@@ -71,6 +78,7 @@ const methods = {
     }
     this.clients.clear();
     this.userConnections.clear();
+    this.unauthConnectionsByIp?.clear();
 
     // 回收 Redis adapter 专用连接（无 adapter 时为空数组，无副作用）
     for (const client of this._adapterClients) {
@@ -204,7 +212,17 @@ const methods = {
       const fresh = await User.findById(socket.userId)
         .select('status tokenVersion lockUntil')
         .populate({ path: 'roles', select: 'code', match: { status: 'active' } });
-      return this._applyRevalidation(socket, fresh);
+      // 设备会话闸（#2）：sid 存在时复查 UserSession 本身是否仍可用。
+      // 与握手期 _assertHandshakeSessionUsable 同口径——无 sid 的旧令牌跳过，
+      // 否则上线前签发的令牌会因「查不到会话」在每次入房时被踢。
+      // validateSession 在 DB 故障时抛 SESSION_SERVICE_UNAVAILABLE，由外层 catch
+      // 按 fail-closed 拒绝入房（与既有语义一致），不会放行受限房间。
+      let sessionState = null;
+      if (socket.sid) {
+        const { validateSession } = require('../sessionService');
+        sessionState = await validateSession(socket.sid);
+      }
+      return this._applyRevalidation(socket, fresh, sessionState);
     } catch (err) {
       // fail-closed：复查不可用时不得放行受限房间
       logger.error(`WebSocket 授权复查异常，按拒绝处理: ${socket.id} - ${err.message}`);
@@ -223,9 +241,10 @@ const methods = {
    *
    * @param {import('socket.io').Socket} socket
    * @param {object|null} fresh 该 socket.userId 对应的最新用户文档（已 populate roles.code）
+   * @param {{usable: boolean}|null} [sessionState] 设备会话复查结果（无 sid 时为 null）
    * @returns {{ok: boolean, roleCodes: string[]}}
    */
-  _applyRevalidation(socket, fresh) {
+  _applyRevalidation(socket, fresh, sessionState = null) {
     const kick = (message, logMsg) => {
       logger.warn(logMsg);
       socket.emit('auth-error', { message });
@@ -256,6 +275,14 @@ const methods = {
       return kick(
         '会话已失效，请重新登录',
         `WebSocket 复查失败（tokenVersion 已推进）: ${socket.id}`
+      );
+    }
+    // 设备会话吊销（#2）：只影响一台设备，因此既不推进 tokenVersion 也不改 status。
+    // 少了这一条臂，「踢除该设备」对已建立的实时通道不生效。
+    if (sessionState && !sessionState.usable) {
+      return kick(
+        '该设备会话已失效，请重新登录',
+        `WebSocket 复查失败（设备会话已吊销或不存在）: ${socket.id}`
       );
     }
 
@@ -315,11 +342,12 @@ const methods = {
    * 执行一轮清扫（清理失效记录 + 运行期封禁复查 + 已认证连接授权复查）
    * 独立成方法便于测试直接驱动（不必等 30s 定时器）
    *
-   * 三趟顺序固定，每趟的早退互不影响：
+   * 各趟顺序固定，每趟的早退互不影响：
    *  1. 纯内存回收 + 收集待查清单（不碰库）
-   *  1.5. 名单复查（被拉黑的连接当场断开，不再进入授权复查）
+   *  1.5. 名单复查（被拉黑的连接当场断开）
+   *  1.6. 设备会话复查（已吊销/过期的连接当场断开，#2）
    *  2. 单次 $in 批量授权复查
-   * 名单复查排在授权批量查询之前，是为了让 User.find 抖动那一轮仍能完成遏制。
+   * 名单/会话复查排在授权批量查询之前，是为了让 User.find 抖动那一轮仍能完成遏制。
    */
   async runCleanupSweep() {
     let cleanedCount = 0;
@@ -355,7 +383,13 @@ const methods = {
     // （L-29 的教训：不得 for...await 逐连接打库）。
     const banPass = await this._sweepBannedIps(pending);
     kickedCount += banPass.kicked;
-    const reviewable = banPass.alive;
+
+    // 第 1.6 趟：设备会话复查（#2）。与下一趟的用户复查是两条独立的失效信号：
+    // revokeSession 只改 UserSession，不改 status/tokenVersion。本趟 DB 故障时
+    // fail-open 保留连接，且不阻断随后的授权复查（两者各自取数、各自兜底）。
+    const sessionPass = await this._sweepRevokedSessions(banPass.alive);
+    kickedCount += sessionPass.kicked;
+    const reviewable = sessionPass.alive;
 
     if (reviewable.length === 0) {
       this._logSweepResult(cleanedCount, kickedCount);

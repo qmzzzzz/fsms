@@ -13,10 +13,11 @@
  *      缺凭据会在 setup() 立刻失败——匿名打读路径只会测到 401 快速路径，
  * 跑满全程也只得到一个解释成本极高的红色阈值
  *
- * 认证口径：显式带 `Authorization: Bearer <token>`，不依赖 k6 的
- * 自动 cookie jar。因为服务端在 NODE_ENV=production 下把令牌 cookie 标成
- * Secure，用 `BASE_URL=http://…` 打生产镜像时 cookie 会被浏览器规则丢弃，
- * 于是「压测目标 = 生产构建」这条路会静默退化成未认证压测。
+ * 认证口径：登录只经 httpOnly Cookie 下发令牌（登录响应体不含 token），
+ * 因此这里显式从 Set-Cookie 提取并用 `Cookie` 头回放，不依赖 k6 的自动
+ * cookie jar——服务端在 NODE_ENV=production 下把令牌 cookie 标成 Secure，
+ * 用 `BASE_URL=http://…` 打生产镜像时自动 jar 会按规则丢弃它，导致
+ * 「压测目标 = 生产构建」静默退化成未认证压测。
  *
  * 运行：
  *   k6 run -e BASE_URL=http://127.0.0.1:3000 scripts/perf/k6-core-journeys.js
@@ -65,7 +66,7 @@ export const options = {
 };
 
 // k6 的模块作用域即 VU 作用域：每个 VU 各持一份登录态，互不串号。
-let authToken = '';
+let authCookie = '';
 
 export function setup() {
   if (!USERNAME || !PASSWORD) {
@@ -82,22 +83,26 @@ function login() {
     JSON.stringify({ username: USERNAME, password: PASSWORD }),
     { headers: { 'Content-Type': 'application/json' }, tags: { name: 'POST /auth/login' } }
   );
-  // 令牌在 data.token：ApiResponse.success 的信封是 {success, message, data}，
-  // 取 res.json('token') 拿到的是顶层键（不存在）⇒ 恒 undefined ⇒ 每次迭代都在
-  // `if (!login()) return` 处早退，读路径 0 样本，而报表看起来"跑完了"。
+  // 登录令牌只在 httpOnly Cookie 里（credentials.js 明确不回传 body.token）。
+  // 从 Set-Cookie 回放，不能取 res.json('data.token')：那是恒 undefined 的旧口径，
+  // 会让每次迭代在 `if (!login()) return` 处早退、读路径 0 样本却报表"跑完了"。
+  // 不用可选链：兼容较老版本的 k6 运行时
+  const accessCookie = res.cookies && res.cookies['access_token'];
+  const refreshCookie = res.cookies && res.cookies['refresh_token'];
+  const access = accessCookie && accessCookie[0] ? accessCookie[0].value : '';
+  const refresh = refreshCookie && refreshCookie[0] ? refreshCookie[0].value : '';
   const ok = check(res, {
     登录成功: (r) => r.status === 200 || r.status === 201,
-    登录返回令牌: (r) => Boolean(r.json('data.token')),
+    '登录下发双 Cookie': () => Boolean(access && refresh),
   });
-  const token = ok ? res.json('data.token') : '';
-  loginFailures.add(!(ok && token));
-  if (ok && token) authToken = String(token);
-  return Boolean(token);
+  loginFailures.add(!ok);
+  if (ok) authCookie = `access_token=${access}; refresh_token=${refresh}`;
+  return Boolean(ok && authCookie);
 }
 
 function getJson(path, tag, trend) {
   const res = http.get(`${BASE_URL}${path}`, {
-    headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+    headers: authCookie ? { Cookie: authCookie } : {},
     tags: { name: tag },
   });
   const ok = check(res, {

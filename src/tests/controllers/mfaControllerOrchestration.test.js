@@ -15,6 +15,14 @@ jest.mock('../../models/AuditLog', () => ({
 jest.mock('../../services/mfaService', () => {
   // 纯函数（因子路径判定、TOTP 因子验证）走真实实现：在测试里再手写一遍判定，
   // 就是"两份口径靠注释保持一致"的老毛病；被断言的行为仍由下面的 spy 控制。
+  //
+  // 【2026-10-24 复核：claimTotpWindow 被 mock 成 true 会不会让"认领失败"不可见】
+  // 本文件确实看不到该分支，但这不是缺口——职责已经分到三个文件，各有各的介质：
+  //   · 本文件（单元）：分支编排——重复开启 / 码错 / 缺凭据 / 缺第二因子。
+  //   · mfaReplayGuardMax.test.js（单元）：认领失败必须拒绝开启，且**先认领再写库**。
+  //   · mfaLifecycleTotpClaim.test.js 与 mfaWriteCasConcurrency.test.js（真实 Mongo）：
+  //     `mfaLastCounter` 条件更新的原子性、并发交错、重放被拒。
+  // 所以在**这里**再断言一次认领语义只会重复，不会增加可证伪性。
   const actual = jest.requireActual('../../services/mfaService');
   return {
     ...actual,
@@ -120,16 +128,13 @@ describe('mfaController 安全编排分支', () => {
     expect(res.body.errors.errorCode).toBe('MFA_CODE_FORMAT');
   });
 
-  test('mfaDisable 在关闭密文无效时拒绝且不改动用户', async () => {
+  test('mfaDisable 仅提供密码密文时拒绝：密码不再是可单独放行的第二因子', async () => {
     whenUserFound({
       _id: 'u1',
       mfaEnabled: true,
       mfaSecret: 'enc',
       comparePassword: jest.fn(),
     });
-    decryptLoginCredential.mockRejectedValueOnce(
-      Object.assign(new Error('bad envelope'), { code: 'ENVELOPE_FORMAT' })
-    );
 
     const res = await invoke(
       controller.mfaDisable,
@@ -137,12 +142,13 @@ describe('mfaController 安全编排分支', () => {
       makeRes()
     );
 
-    expect(res.statusCode).toBe(400);
-    expect(res.body.errors.errorCode).toBe('AUTH_ENCRYPTED_CREDENTIAL_INVALID');
+    expect(res.statusCode).toBe(403);
+    expect(res.body.errors.errorCode).toBe('MFA_SECOND_FACTOR_REQUIRED');
+    expect(decryptLoginCredential).not.toHaveBeenCalled();
     expect(User.findByIdAndUpdate).not.toHaveBeenCalled();
   });
 
-  test('mfaDisable 在既无动态码也无登录密码时拒绝', async () => {
+  test('mfaDisable 在既无动态码也无恢复码时拒绝', async () => {
     whenUserFound({
       _id: 'u1',
       mfaEnabled: true,
@@ -153,7 +159,7 @@ describe('mfaController 安全编排分支', () => {
     const res = await invoke(controller.mfaDisable, makeReq(), makeRes());
 
     expect(res.statusCode).toBe(403);
-    expect(res.body.errors.errorCode).toBe('MFA_VERIFY_FAILED');
+    expect(res.body.errors.errorCode).toBe('MFA_SECOND_FACTOR_REQUIRED');
     expect(User.findByIdAndUpdate).not.toHaveBeenCalled();
   });
 });

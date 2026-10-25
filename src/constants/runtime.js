@@ -154,6 +154,11 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     redisExternalized: true,
   },
   {
+    module: 'services/sessionRevocationEvents.js',
+    mechanism: '会话吊销进程内通知总线（listeners Set）',
+    impact: 'A 实例的吊销不会即时通知 B 实例的 WebSocket 连接；由周期清扫按库复查兜底',
+  },
+  {
     module: 'services/reportDashboardService.js',
     mechanism: '仪表盘缓存（dashboardCache Map，刻意不接失效广播）',
     impact:

@@ -3,8 +3,9 @@ const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = rateLimit;
 // 限流键的 IP 归一化与共享存储：判据取 utils（config → middleware/rateLimit 会绕成
 // config/index ↔ rateLimit 的加载环，而 rateLimitStore 只依赖 express-rate-limit/logger）
-const { normalizeIP } = require('../utils/ipUtils');
+const { normalizeIP, clientIpForSecurityDecision } = require('../utils/ipUtils');
 const { makeSharedStore } = require('../middleware/rateLimitStore');
+const { redactUrlQuery } = require('../utils/helpers');
 const openapiSpec = require('../docs/openapi.json');
 
 const swaggerOptions = {
@@ -62,13 +63,15 @@ const docsLimiter = rateLimit({
   // 与其余 IP 维度限流器同一把尺：归一化失败并到共享占位键而不回退原文——原文取自
   // 请求方写的 X-Forwarded-For，换一个垃圾文本就换一个全新桶，本限流器存在的理由
   // （拦文档口令穷举）会被逐请求换桶清零；`::ffff:1.2.3.4` 与 `1.2.3.4` 也曾各得一份配额。
-  keyGenerator: (req) => `api-docs:${ipKeyGenerator(normalizeIP(req.ip) || 'unknown')}`,
+  // 文档口令穷举者若来自边界外并自带 XFF，按安全裁决地址组键才不会逐请求换桶。
+  keyGenerator: (req) =>
+    `api-docs:${ipKeyGenerator(normalizeIP(clientIpForSecurityDecision(req)) || 'unknown')}`,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
     try {
       require('../utils/logger').warn(
-        `API 文档限流触发：${req.ip} - ${req.method} ${req.originalUrl}`
+        `API 文档限流触发：${clientIpForSecurityDecision(req)} - ${req.method} ${redactUrlQuery(req.originalUrl)}`
       );
     } catch (_) {
       /* logger 不可用时静默 */

@@ -1,15 +1,16 @@
 'use strict';
 
 /**
- * GET /api/security/stats 的"异常行为"两路聚合必须按操作者数据范围收口
+ * GET /api/security/stats（及 /overview）的所有聚合出口必须按操作者数据范围收口
  *
- * 缺陷本体：`getSecurityStats`（controllers/securityController/overview.js:24）里
- * 今日登录数 / 今日失败数 / 高危操作数是**全局聚合**（是否随范围收窄属另一条口径，
- * 本用例不管），但 `AuditLog.detectAnomalies()` 是 `$group:{_id:'$userId'}`
- * ——返回体里就是"哪些用户在一小时内失败了 ≥5 次"，是**行级**信息的聚合出口。
- * 同权限码下的 /security/alerts 已经收口，这个出口没收：
- * 部门档安全管理员（SECURITY_ADMIN 是 level 8 ⇒ department 档）由此拿到全系统
- * 其他人的 userId + 失败次数，等于把审计页的收口绕开。
+ * 缺陷本体（同一类的两批出口）：
+ *  1) `AuditLog.detectAnomalies()` 是 `$group:{_id:'$userId'}`——返回体里就是
+ *     "哪些用户在一小时内失败了 ≥5 次"，是**行级**信息的聚合出口。同权限码下的
+ *     /security/alerts 已收口，这个出口曾没收：部门档安全管理员（SECURITY_ADMIN
+ *     是 level 8 ⇒ department 档）由此拿到全系统其他人的 userId + 失败次数。
+ *  2) 今日登录数 / 今日失败数 / 高危操作数，以及 /overview 的四个计数与派生 riskScore
+ *     也曾经是全局聚合：department 档管理员能读出全系统的失败登录/高危告警数。
+ *     2026-10-24 起统一经 applyAuditDataScope 收口，本文件同时钉住收口与同源。
  *
  * 判据分工（缺一条就留有假绿空间）：
  * 1. 泄漏判据：部门 A 的安全管理员不得在 failedOperationUsers 里看到部门 B 的用户；
@@ -19,10 +20,14 @@
  * 4. 部门档却没有部门 ⇒ 403 DATA_SCOPE_DENIED（#12 之后 deny 的落点，与
  *    auditScopeFilter / applyDataScopeToQuery / scopeFilterFor 三处同判据同形态）；
  * 5. 静态方法默认不收口：`detectAnomalies()` 不带 scopeFilter 仍看全库——
- *    auditMonitor 定时任务必须对任意部门的用户都报警，不能被这次改动顺带削弱。
+ *    auditMonitor 定时任务必须对任意部门的用户都报警，不能被这次改动顺带削弱；
+ * 6. 计数判据：/stats 的三项今日计数与 securityLevel 只统计范围内行——部门 A
+ *    不得被部门 B 的 21 次失败顶成 high；
+ * 7. 概览判据：/overview 的 critical/high/failed/unusual 与派生 riskScore 同口径。
  *
- * 只断言 failedOperationUsers：unusualTimeOperations 的判据是"业务时区的非工作时段"，
- * 结果集随用例运行时刻漂移，拿它做断言会变成一条时好时坏的假判据。
+ * 计数用"文件级独立空库"做精确断言（tests/setup.js 为每个测试文件建新库）；
+ * 只对 failedOperationUsers 断言集合，不断言 unusualTimeOperations 的行——后者
+ * 的判据是"业务时区的非工作时段"，结果集随用例运行时刻漂移。
  */
 
 const request = require('supertest');
@@ -52,7 +57,7 @@ const tokenFor = (user) =>
     { expiresIn: '24h' }
   );
 
-describe('GET /security/stats 的异常行为聚合按数据范围收口', () => {
+describe('GET /security/stats 与 /overview 的全部聚合按数据范围收口', () => {
   let app;
   let User;
   let AuditLog;
@@ -79,6 +84,8 @@ describe('GET /security/stats 的异常行为聚合按数据范围收口', () =>
       );
     const wildcard = await upsertPerm('*:*', 'system');
     const statsPerm = await upsertPerm('security:stats', 'security');
+    // /overview 挂的是 security:audit（与真实 SECURITY_ADMIN 的两码组合一致）
+    const auditPerm = await upsertPerm('security:audit', 'security');
 
     const superRole = await Role.create({
       name: `全档${stamp}`,
@@ -90,7 +97,7 @@ describe('GET /security/stats 的异常行为聚合按数据范围收口', () =>
       name: `部门安全档${stamp}`,
       code: `ZZSTSEC${stamp}`,
       level: 8,
-      permissions: [statsPerm._id],
+      permissions: [statsPerm._id, auditPerm._id],
     });
 
     const root = await mkUser(User, 'stroot', { roles: [superRole._id] });
@@ -119,6 +126,40 @@ describe('GET /security/stats 的异常行为聚合按数据范围收口', () =>
         });
       }
     }
+    // 计数面样本（与异常检测样本分开：ACTION 不参与今日登录/高危计数）：
+    // 部门 A：1 成功 / 2 失败 / 1 high；部门 B：1 成功 / 21 失败 / 1 critical。
+    // 21 > securityLevel 的失败阈值 20 ⇒ 只有 all 档应为 high。
+    const countRow = (subj, extra) => ({
+      category: 'auth',
+      username: subj.username,
+      userId: subj._id,
+      ip: `203.0.113.${subj === subjA ? 31 : 32}`,
+      timestamp: now,
+      ...extra,
+    });
+    rows.push(countRow(subjA, { action: 'login_success', success: true, riskLevel: 'low' }));
+    rows.push(countRow(subjA, { action: 'login_failed', success: false }));
+    rows.push(countRow(subjA, { action: 'login_failed', success: false }));
+    rows.push(
+      countRow(subjA, {
+        action: 'zz_count_high',
+        category: 'security',
+        success: false,
+        riskLevel: 'high',
+      })
+    );
+    rows.push(countRow(subjB, { action: 'login_success', success: true, riskLevel: 'low' }));
+    for (let i = 0; i < 21; i++) {
+      rows.push(countRow(subjB, { action: 'login_failed', success: false }));
+    }
+    rows.push(
+      countRow(subjB, {
+        action: 'zz_count_critical',
+        category: 'security',
+        success: false,
+        riskLevel: 'critical',
+      })
+    );
     await AuditLog.insertMany(rows);
 
     const { createApp } = require('../../app');
@@ -127,12 +168,17 @@ describe('GET /security/stats 的异常行为聚合按数据范围收口', () =>
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
-      await AuditLog.deleteMany({ action: ACTION }, { bypassAppendOnly: true }).catch(() => {});
+      await AuditLog.deleteMany(
+        { username: new RegExp(`^st.*${stamp}$`) },
+        { bypassAppendOnly: true }
+      ).catch(() => {});
       await User.deleteMany({ username: new RegExp(`^st.*${stamp}$`) }).catch(() => {});
       const Role = require('../../models/Role');
       const Permission = require('../../models/Permission');
       await Role.deleteMany({ code: new RegExp(`^ZZST(SUPER|SEC)${stamp}$`) }).catch(() => {});
-      await Permission.deleteMany({ code: 'security:stats' }).catch(() => {});
+      await Permission.deleteMany({ code: { $in: ['security:stats', 'security:audit'] } }).catch(
+        () => {}
+      );
       await mongoose.connection.close();
     }
   });
@@ -217,5 +263,67 @@ describe('GET /security/stats 的异常行为聚合按数据范围收口', () =>
     const ids = all.failedOperations.map((r) => String(r._id));
     expect(ids).toContain(String(subjA._id));
     expect(ids).toContain(String(subjB._id));
+  });
+
+  test('6 计数判据：今日三项计数与 securityLevel 只统计范围内行', async () => {
+    const statsOf = async (token) => {
+      const res = await request(app)
+        .get('/api/security/stats')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(200);
+      return res.body.data;
+    };
+
+    // 部门 A 自造 1 成功 / 2 失败 / 1 高危；部门 B 的 21 次失败与 critical 不得计入
+    const deptA = await statsOf(deptAToken);
+    expect(deptA.overview).toEqual({
+      todayLogins: 1,
+      todayFailedLogins: 2,
+      highRiskOperations: 1,
+    });
+    expect(deptA.securityLevel).toBe('normal');
+
+    // all 档：2 登录 / 23 失败 / 2 高危；23 > 20 ⇒ high
+    // （若计数仍为全局，部门 A 也会被部门 B 的 21 次失败顶成 high）
+    const all = await statsOf(allToken);
+    expect(all.overview).toEqual({
+      todayLogins: 2,
+      todayFailedLogins: 23,
+      highRiskOperations: 2,
+    });
+    expect(all.securityLevel).toBe('high');
+  });
+
+  test('7 概览判据：四项计数与 riskScore 与范围同源', async () => {
+    const overviewOf = async (token) => {
+      const res = await request(app)
+        .get('/api/security/overview')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(200);
+      return res.body.data;
+    };
+
+    const deptA = await overviewOf(deptAToken);
+    expect(deptA.criticalAlerts).toBe(0);
+    expect(deptA.highAlerts).toBe(1);
+    expect(deptA.failedLogins).toBe(2);
+    expect(deptA.unusualAccess).toBe(0);
+    // 与 securityAlert.getSecurityOverview 的公式同值：0*10 + 1*5 + 2*2 + 0*5
+    expect(deptA.riskScore).toBe(9);
+
+    const all = await overviewOf(allToken);
+    expect(all.criticalAlerts).toBe(1);
+    expect(all.highAlerts).toBe(1);
+    expect(all.failedLogins).toBe(23);
+    // 1*10 + 1*5 + 23*2 + 0*5
+    expect(all.riskScore).toBe(61);
+  });
+
+  test('8 部门档拿不到部门 ⇒ /overview 403（范围解析失败原样上冒，不折成 503）', async () => {
+    const res = await request(app)
+      .get('/api/security/overview')
+      .set('Authorization', `Bearer ${noDeptToken}`);
+    expect(res.status).toBe(403);
+    expect(res.body.errors.errorCode).toBe('DATA_SCOPE_DENIED');
   });
 });

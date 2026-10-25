@@ -15,6 +15,8 @@
 
 jest.mock('../../models/User', () => ({
   findByUsername: jest.fn(),
+  // 过期锁重置走条件写（lockUntil:{$lte:now}），miss 后才回落到 $inc
+  findOneAndUpdate: jest.fn(),
   findByIdAndUpdate: jest.fn(),
 }));
 jest.mock('../../models/AuditLog', () => ({
@@ -168,6 +170,7 @@ describe('账户可用性：兜底失败不改变 401 口径', () => {
       lockUntil: new Date(Date.now() - 1_000),
       comparePassword: jest.fn().mockResolvedValue(false),
     });
+    User.findOneAndUpdate.mockResolvedValueOnce({ failedLoginCount: 1 });
     User.findByIdAndUpdate.mockResolvedValue({ failedLoginCount: 1 });
 
     await expect(loginUser({ username: 'alice', password: 'wrong' }, CTX)).resolves.toEqual({
@@ -175,11 +178,14 @@ describe('账户可用性：兜底失败不改变 401 口径', () => {
     });
     // 能走到 comparePassword 即证明 IP 允许分支放行（否则在上一步就 401）
     expect(currentUser.comparePassword).toHaveBeenCalledWith('wrong');
-    expect(User.findByIdAndUpdate).toHaveBeenCalledWith(
-      currentUser._id,
+    // 过期锁的重置走条件写：只有 lockUntil 仍 ≤ now 的请求能把计数清零，
+    // 并发失败者 miss 后落到 $inc（否则并发全部写成 1，阈值永远到不了）。
+    expect(User.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: currentUser._id, lockUntil: { $lte: expect.any(Date) } },
       { $set: { failedLoginCount: 1, lockUntil: null } },
       { new: true }
     );
+    expect(User.findByIdAndUpdate).not.toHaveBeenCalled();
   });
 });
 

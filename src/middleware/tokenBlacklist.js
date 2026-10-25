@@ -117,8 +117,9 @@ const isTokenBlacklisted = async (token) => {
  *
  * @param {string} token - JWT refresh token
  * @param {number} exp - 令牌过期时间（秒级时间戳）
- * @returns {Promise<{claimed: true}|{claimed: false, reason: string|null}>}
- *   claimed=true 本次消费成功；claimed=false 令牌已被消费过，reason 为首次入库原因
+ * @returns {Promise<{claimed: true}|{claimed: false, reason: string|null, consumedAt: Date|null}>}
+ *   claimed=true 本次消费成功；claimed=false 令牌已被消费过，reason 为首次入库原因，
+ *   consumedAt 为首次消费时间（调用方据此区分并发竞争与真实重放）
  */
 const consumeToken = async (token, exp) => {
   const tokenHash = hashToken(token);
@@ -138,11 +139,17 @@ const consumeToken = async (token, exp) => {
     if (err.code === 11000) {
       const conflictedKey = Object.keys(err.keyPattern || {})[0];
       if (conflictedKey === 'tokenHash') {
-        // 令牌已被消费过：回查首次入库原因，供调用方决定处置强度。
+        // 令牌已被消费过：回查首次入库原因与时刻，供调用方决定处置强度。
         // 查证失败必须上抛（fail-closed），不能默认按 logout 轻放。
         try {
-          const existing = await TokenBlacklistModel.findOne({ tokenHash }).select('reason').lean();
-          return { claimed: false, reason: existing?.reason || null };
+          const existing = await TokenBlacklistModel.findOne({ tokenHash })
+            .select('reason createdAt')
+            .lean();
+          return {
+            claimed: false,
+            reason: existing?.reason || null,
+            consumedAt: existing?.createdAt || null,
+          };
         } catch (lookupErr) {
           logger.error(`Refresh token 重放查证失败：${lookupErr.message}`);
           const serviceErr = new Error('Token blacklist lookup failed');

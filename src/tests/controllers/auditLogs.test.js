@@ -8,6 +8,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { TEST_CLIENT_IP } = require('../fixtures');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 describe('/api/security/audit-logs 查询优化', () => {
   let app;
@@ -122,7 +123,10 @@ describe('/api/security/audit-logs 查询优化', () => {
   });
 
   const queryLogs = (qs = '') =>
-    request(app).get(`/api/security/audit-logs?${qs}`).set('Authorization', `Bearer ${adminToken}`);
+    request(app)
+      .get(`/api/security/audit-logs?${qs}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set(reauthHeaders(adminToken));
 
   const daysAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 

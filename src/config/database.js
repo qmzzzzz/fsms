@@ -30,6 +30,9 @@ const retryDelayMs = (attempt) => {
 //   MONGO_SERVER_SELECTION_TIMEOUT_MS  初始选主超时：过大会让「连不上」迟迟不报错
 //   MONGO_SOCKET_TIMEOUT_MS   空闲 socket 超时：过小会在慢查询上误断
 //   MONGO_HEARTBEAT_MS        心跳频率：过低增加无谓流量
+//   MONGO_WAIT_QUEUE_TIMEOUT_MS  池满时请求排队上限：不设则无限等待，
+//                              Mongo 变慢/池被慢查询占满时请求会一直挂着直到
+//                              socket 超时（默认 0=无限等待，正是雪崩的形状）
 // 解析失败或非正值一律回落默认，避免把 0/负值传给驱动（驱动行为未定义）。
 const envInt = (name, fallback) => {
   const n = parseInt(process.env[name], 10);
@@ -41,6 +44,9 @@ const minPoolSize = envInt('MONGO_MIN_POOL_SIZE', 2);
 const serverSelectionTimeoutMS = envInt('MONGO_SERVER_SELECTION_TIMEOUT_MS', 5000);
 const socketTimeoutMS = envInt('MONGO_SOCKET_TIMEOUT_MS', 45000);
 const heartbeatFrequencyMS = envInt('MONGO_HEARTBEAT_MS', 10000);
+// 与 queries 自身的 maxTimeMS（LIST_QUERY_BUDGET_MS 默认 10s）同量级：
+// 让"等连接"和"跑查询"共用一份时间预算，而不是两层无上限叠加。
+const waitQueueTimeoutMS = envInt('MONGO_WAIT_QUEUE_TIMEOUT_MS', 10000);
 
 /**
  * 连接失败日志的凭据脱敏
@@ -96,6 +102,7 @@ const connectDB = async (retries = MAX_RETRIES) => {
       heartbeatFrequencyMS, // 心跳频率（MONGO_HEARTBEAT_MS）
       maxPoolSize, // 连接池上限（MONGO_MAX_POOL_SIZE）
       minPoolSize, // 连接池预热（MONGO_MIN_POOL_SIZE）
+      waitQueueTimeoutMS, // 池满排队上限（MONGO_WAIT_QUEUE_TIMEOUT_MS）
     });
 
     logger.info(`MongoDB 连接成功：${conn.connection.host}:${conn.connection.port}`);

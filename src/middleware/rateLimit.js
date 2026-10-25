@@ -7,7 +7,7 @@ const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = rateLimit;
 const config = require('../config');
 const logger = require('../utils/logger');
-const { normalizeIP } = require('../utils/ipUtils');
+const { normalizeIP, clientIpForSecurityDecision } = require('../utils/ipUtils');
 const { SUPER_ADMIN_ROLE_CODE } = require('../utils/superAdmin');
 const { makeSharedStore } = require('./rateLimitStore');
 const { isProbeRequest } = require('../constants/probePaths');
@@ -133,7 +133,7 @@ const generalLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: config.rateLimit.maxRequests,
   store: makeSharedStore('general'),
-  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(req.ip)),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req))),
   skip: skipResourceLimiter, // 白名单 IP、探针 IP、以及静态前端面（安全方法）豁免通用限流
   standardHeaders: true,
   legacyHeaders: false,
@@ -143,7 +143,7 @@ const generalLimiter = rateLimit({
   },
   handler: (req, res, _next) => {
     noteRateLimitHit(req, 'general');
-    logger.warn(`限流触发：${req.ip} - ${req.method} ${req.path}`);
+    logger.warn(`限流触发：${clientIpForSecurityDecision(req)} - ${req.method} ${req.path}`);
     res.status(429).json({
       success: false,
       message: '请求过于频繁，请稍后再试',
@@ -192,7 +192,7 @@ const staticSurfaceLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: STATIC_SURFACE_MAX_REQUESTS,
   store: makeSharedStore('static-surface'),
-  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(req.ip)),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req))),
   // 只在静态面计数：本桶是给静态面**补**预算的，挂到全站会把 API 请求也计进来
   skip: staticSurfaceSkip,
   standardHeaders: true,
@@ -205,7 +205,7 @@ const staticSurfaceLimiter = rateLimit({
     // 刻意**不**接 noteRateLimitHit：CC 升级服务的阶梯是按"IP 触顶即封"设计的，
     // 而静态面被限流绝大多数是 NAT 出口聚合的结果（一个人多刷几个标签页就可能撞上），
     // 接到封禁阶梯上就是把误封风险从"一个 IP"放大到"一整个办公室"。
-    logger.warn(`静态面限流触发：${req.ip} - ${req.method} ${req.path}`);
+    logger.warn(`静态面限流触发：${clientIpForSecurityDecision(req)} - ${req.method} ${req.path}`);
     res.status(429).json({
       success: false,
       message: '静态资源请求过于频繁，请稍后再试',
@@ -222,7 +222,7 @@ const strictLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   max: 30,
   store: makeSharedStore('strict'),
-  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(req.ip)),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req))),
   skip: skipIfWhitelisted, // P3-35：资源型限流，可信 IP 豁免（口径同 generalLimiter）
   standardHeaders: true,
   legacyHeaders: false,
@@ -232,7 +232,7 @@ const strictLimiter = rateLimit({
   },
   handler: (req, res, _next) => {
     noteRateLimitHit(req, 'strict');
-    logger.warn(`严格限流触发：${req.ip} - ${req.method} ${req.path}`);
+    logger.warn(`严格限流触发：${clientIpForSecurityDecision(req)} - ${req.method} ${req.path}`);
     res.status(429).json({
       success: false,
       message: '操作过于频繁，请稍后再试',
@@ -266,7 +266,7 @@ const loginLimiter = rateLimit({
   keyGenerator: (req) => {
     // 仅按来源 IP 限流：username 是客户端可控字段，参与组键会让攻击者通过
     // 任意轮换用户名不断获得新配额，使暴力破解防护形同虚设
-    return `login:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
+    return `login:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -276,7 +276,10 @@ const loginLimiter = rateLimit({
   },
   handler: (req, res, _next) => {
     noteRateLimitHit(req, 'login-ip');
-    logger.warn('登录限流触发', { ip: req.ip, username: req.body?.username });
+    logger.warn('登录限流触发', {
+      ip: clientIpForSecurityDecision(req),
+      username: req.body?.username,
+    });
     res.status(429).json({
       success: false,
       message: '登录尝试次数过多，请稍后再试',
@@ -312,13 +315,13 @@ const loginUserLimiter = rateLimit({
     const username = req.body?.username;
     return username
       ? `login-user:${normalizeLoginRateKey(username)}`
-      : `login-user-ip:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
+      : `login-user-ip:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
     logger.warn(
-      `登录账号维度限流触发：username=${req.body?.username || '-'}, ip=${req.ip}（可能存在分布式撞单账号攻击）`
+      `登录账号维度限流触发：username=${req.body?.username || '-'}, ip=${clientIpForSecurityDecision(req)}（可能存在分布式撞单账号攻击）`
     );
     res.status(429).json({
       success: false,
@@ -336,7 +339,7 @@ const ipLimiter = rateLimit({
   windowMs: config?.rateLimit?.ipWindowMs || 60 * 60 * 1000, // 默认 1 小时
   max: config?.rateLimit?.ipMaxRequests || 1000, // 默认每小时 1000 请求
   store: makeSharedStore('ip'),
-  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(req.ip)),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req))),
   skip: skipResourceLimiter, // 白名单 IP、探针 IP、以及静态前端面（安全方法）豁免 IP 限流
   standardHeaders: true,
   legacyHeaders: false,
@@ -378,7 +381,7 @@ const userLimiter = rateLimit({
   keyGenerator: (req) => {
     // 已认证用户按 userId 限流，未认证按 IP
     // prettier-ignore
-    return req.user?.userId ? `user:${req.user.userId}` : `ip:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
+    return req.user?.userId ? `user:${req.user.userId}` : `ip:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -386,7 +389,10 @@ const userLimiter = rateLimit({
     // 升级信号只看 IP 维度：按 userId 组键的触顶是已认证用户的配额问题，
     // 封 IP 会误伤同源的其他用户
     if (!req.user?.userId) noteRateLimitHit(req, 'user-ip');
-    logger.warn('用户级限流触发', { userId: req.user?.userId || '-', ip: req.ip });
+    logger.warn('用户级限流触发', {
+      userId: req.user?.userId || '-',
+      ip: clientIpForSecurityDecision(req),
+    });
     res.status(429).json({
       success: false,
       message: '操作过于频繁，请稍后再试',
@@ -404,12 +410,13 @@ const captchaLimiter = rateLimit({
   max: 60,
   store: makeSharedStore('captcha'),
   skip: skipIfWhitelisted, // P3-35：资源型限流（防内存刷取），可信 IP 豁免
-  keyGenerator: (req) => `captcha:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`,
+  keyGenerator: (req) =>
+    `captcha:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
     noteRateLimitHit(req, 'captcha');
-    logger.warn(`验证码限流触发：${req.ip}`);
+    logger.warn(`验证码限流触发：${clientIpForSecurityDecision(req)}`);
     res.status(429).json({
       success: false,
       message: '验证码获取过于频繁，请稍后再试',
@@ -433,13 +440,16 @@ const passwordChangeLimiter = rateLimit({
   keyGenerator: (req) => {
     const userId = req.user?.userId;
     return userId
-      ? `pwd-change:${userId}:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`
-      : `pwd-change-ip:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
+      ? `pwd-change:${userId}:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`
+      : `pwd-change-ip:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
-    logger.warn('改密限流触发', { userId: req.user?.userId || '-', ip: req.ip });
+    logger.warn('改密限流触发', {
+      userId: req.user?.userId || '-',
+      ip: clientIpForSecurityDecision(req),
+    });
     res.status(429).json({
       success: false,
       message: '密码修改操作过于频繁，请稍后再试',
@@ -483,7 +493,10 @@ function makeUserBucketLimiter(prefix, message, max = 5) {
     standardHeaders: true,
     legacyHeaders: false,
     handler: (req, res) => {
-      logger.warn(`${prefix} 账号维度限流触发`, { userId: req.user?.userId || '-', ip: req.ip });
+      logger.warn(`${prefix} 账号维度限流触发`, {
+        userId: req.user?.userId || '-',
+        ip: clientIpForSecurityDecision(req),
+      });
       res.status(429).json({ success: false, message });
     },
   });
@@ -527,8 +540,19 @@ const securityReportUserLimiter = makeUserBucketLimiter(
  * 注意 req.ip 的可信度取决于部署：`TRUST_PROXY_HOPS>0`（生产 compose 默认 1）时
  * req.ip 取自 X-Forwarded-For，能直连应用端口者可伪造；注册是无凭证的公开入口，
  * 键里没有任何攻击者不可控的量，因此本限流器的那条"不受 XFF 影响"的老注释不成立，
- * 已按实际口径改写。真正的缓解在 nginx 侧（覆盖式 `X-Forwarded-For $remote_addr`）
- * 与"不信任直连"的部署边界上。
+ * 已按实际口径改写。
+ *
+ * 【2026-10-21 更正：原文把缓解措施写错了】此处原写「真正的缓解在 nginx 侧（覆盖式
+ * `X-Forwarded-For $remote_addr`）」，但仓库唯一的反代示例用的是**追加式**
+ * `$proxy_add_x_forwarded_for`（deployment/nginx.conf.example:277）。回源实测
+ * （deliverables/probe-xff-hops.js，真 express 5.3.0 + proxy-addr 2.0.8）：
+ *   · hops=1 且对端真是代理时，追加式取最右一段 = 真实客户端，**正确**；
+ *   · hops=1 但对端不是代理（容器网络内直连 app:3000）时，`req.ip` 直接等于
+ *     请求方自写的那一段——「覆盖式」在这里根本没发生，伪造完全成功。
+ * 所以「覆盖还是追加」不是关键，**「对端是不是代理」才是**；唯一能判这件事的是
+ * `TRUSTED_PROXY_CIDRS`（显式网段名单，见 utils/ipUtils.isPeerTrustedProxy）。
+ * 未配置时判据退回「对端属私网/回环即可信」，容器内直连仍可伪造——这是已登记的
+ * 残余风险（F-01），不是本注释能提供的缓解。
  * 默认：10 次/5 分钟/IP，超限返回 429 + Retry-After（express-rate-limit 自动带）
  */
 const registerIpLimiter = rateLimit({
@@ -536,12 +560,13 @@ const registerIpLimiter = rateLimit({
   max: config.rateLimit.registerMaxRequests || 10,
   store: makeSharedStore('register-ip'),
   skip: skipIfWhitelisted, // 资源型限流，可信 IP 豁免（口径同 generalLimiter）
-  keyGenerator: (req) => `register:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`,
+  keyGenerator: (req) =>
+    `register:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
     noteRateLimitHit(req, 'register');
-    logger.warn(`注册 IP 限流触发：${req.ip}（可能存在批量注册滥用）`);
+    logger.warn(`注册 IP 限流触发：${clientIpForSecurityDecision(req)}（可能存在批量注册滥用）`);
     res.status(429).json({
       success: false,
       message: '注册过于频繁，请稍后再试',
@@ -569,13 +594,16 @@ const reauthLimiter = rateLimit({
   keyGenerator: (req) => {
     const userId = req.user?.userId;
     return userId
-      ? `reauth:${userId}:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`
-      : `reauth-ip:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`;
+      ? `reauth:${userId}:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`
+      : `reauth-ip:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
-    logger.warn('二次验证限流触发', { userId: req.user?.userId || '-', ip: req.ip });
+    logger.warn('二次验证限流触发', {
+      userId: req.user?.userId || '-',
+      ip: clientIpForSecurityDecision(req),
+    });
     res.status(429).json({
       success: false,
       message: '二次验证尝试过于频繁，请稍后再试',

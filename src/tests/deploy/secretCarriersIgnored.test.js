@@ -224,7 +224,7 @@ describe('generate-secrets.js 的 --out 前置闸（端到端跑真 git）', () 
   });
 
   test('目录里已有密钥时不再"缺哪个补哪个"：第二次运行拒绝，--force 才重做整套', () => {
-    // 混合代次的实际形状：mongodb_uri 是把 mongo_root_password 拼进去生成的。
+    // 混合代次的实际形状：mongodb_uri 是把 mongo_app_password 拼进去生成的。
     // 上一代的密码 + 这一代的 URI 同时躺在"新代次"目录里 ⇒ mongo 用旧口令建用户、
     // 应用用对不上号的连接串连库，轮换"成功"结束后第一次连库就认证失败。
     // 用仓库外的临时目录：这里的判点是前置检查 B，不是忽略规则。
@@ -237,13 +237,13 @@ describe('generate-secrets.js 的 --out 前置闸（端到端跑真 git）', () 
     expect(second.stderr).toMatch(/mongodb_uri/);
     expect(second.stdout + second.stderr).not.toMatch(/BEGIN [A-Z ]*PRIVATE KEY/);
     // --force 重做整套之后，"同一代次"这条不变量必须真的成立：mongodb_uri 里拼的就是
-    // 同目录那份 mongo_root_password。之所以现场验一次：整条前置检查 B 的理由就是这一对
+    // 同目录那份 mongo_app_password。之所以现场验一次：整条前置检查 B 的理由就是这一对
     // 字段的耦合，把它写成注释而不测，下一个改动生成器的人看不见承重墙。
     const forced = runGen(target, ['--force']);
     expect({ status: forced.status, stderr: forced.stderr.slice(0, 200) }).toMatchObject({
       status: 0,
     });
-    const pw = fs.readFileSync(path.join(target, 'mongo_root_password'), 'utf8');
+    const pw = fs.readFileSync(path.join(target, 'mongo_app_password'), 'utf8');
     const uri = fs.readFileSync(path.join(target, 'mongodb_uri'), 'utf8');
     expect(uri).toContain(encodeURIComponent(pw));
   });

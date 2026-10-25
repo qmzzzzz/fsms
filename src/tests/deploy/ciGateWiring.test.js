@@ -40,6 +40,10 @@ const CI_ENFORCED_GATE_SCRIPTS = [
   // ci.yml 的 --ignore-scripts 之所以安全，直接依赖这一档在跑；删掉 security-audit
   // 里的两处调用不会惊动任何别的测试，故登记在此。
   'scripts/check-prod-install-scripts.js',
+  // P2（2026-10-24）：CI 的 mongod 改为「仓库内 SHA-256 锚定 → 预置 →
+  // MONGOMS_SYSTEM_BINARY」。删掉 provisioning 步骤不会让 tests 立刻变红——
+  // 它们会静默回退到安装期的 postinstall 下载（无独立校验），正是本条要防的失效。
+  'scripts/provision-mongod.js',
   // 供应链完整性锚：把「上次人工拍板时锁文件长什么样」固化成
   // semantic 哈希写进 deployment/lockfile-anchor.json。删掉 security-audit 里那一步
   // 同样不会惊动任何别的测试——而它挡的是「PR 夹带改 integrity 字段」这类

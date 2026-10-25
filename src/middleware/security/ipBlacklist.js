@@ -12,10 +12,14 @@
 
 const logger = require('../../utils/logger');
 const ApiResponse = require('../../utils/apiResponse');
-const { normalizeIP, isClientIpIdentityTrustworthy } = require('../../utils/ipUtils');
+const {
+  normalizeIP,
+  isClientIpIdentityTrustworthy,
+  auditClientAddress,
+} = require('../../utils/ipUtils');
 const AuditLog = require('../../models/AuditLog');
 const { computeFingerprint } = require('../../utils/fingerprint');
-const { stripControlChars } = require('../../utils/helpers');
+const { stripControlChars, redactUrlQuery } = require('../../utils/helpers');
 const { auditPath } = require('../../utils/auditMeta');
 
 /**
@@ -107,7 +111,7 @@ const recordEarlyRejection = (req, meta) => {
         // 而这类探测恰恰是安全信号——事后看不出它是 HEAD。
         method: req.method,
         path: auditPath(req),
-        ip: req.ip,
+        ...auditClientAddress(req),
         userAgent: stripControlChars(req.get('user-agent'), 512),
         statusCode: meta.statusCode || 403,
         success: false,
@@ -137,7 +141,16 @@ const recordEarlyRejection = (req, meta) => {
  *  2) 请求未携带 X-Forwarded-For：即使 trust proxy 开着，req.ip 也只能是 socket 对端；
  *  3) trust proxy 开启且携带 XFF：req.ip 来自请求头，只有 socket 对端属于
  *     内网/回环（即 nginx/容器网络等基础设施，与 metricsAuth 的放行口径一致）时，
- *     该 XFF 才是可信代理写入的（生产 nginx 覆写 `X-Forwarded-For $remote_addr`）。
+ *     该 XFF 才是可信代理写入的。
+ *
+ * 【2026-10-21 更正】原文在此写「生产 nginx 覆写 `X-Forwarded-For $remote_addr`」，
+ * 与仓库唯一示例配置不符：deployment/nginx.conf.example:277 用的是**追加式**
+ * `$proxy_add_x_forwarded_for`。回源实测（deliverables/probe-xff-hops.js）表明
+ * 追加式在 hops=1 下同样正确（取最右一段即真实客户端），所以这里不是"配置写错了"，
+ * 而是**这条注释把缓解依据记在了错误的事实上**：一旦有人据此认为"我们是覆盖式，
+ * 多信一跳也无妨"把 TRUST_PROXY_HOPS 调到 2，请求方预置的那一段就会被当成客户端
+ * （实测 req.ip=1.2.3.4、判为可信）。真正的判据是「对端是不是代理」，即
+ * TRUSTED_PROXY_CIDRS，与覆盖/追加无关。
  * 经 nginx 的正常流量命中 3) ⇒ 白名单不受影响；公网直连+伪造 XFF 落 3) 拒绝侧 ⇒ 豁免不可用（探针 E/A）。
  * 但 3) 认的是"任意内网/回环对端"而非"被指定的代理"：容器网络里的直连方伪造一跳即可同时免黑名单+拿豁免（探针 D）。
  *
@@ -209,7 +222,8 @@ const checkIPBlacklist = async (req, res, next) => {
         if (shouldSendAlert('blacklist_hit_' + clientIP)) {
           dispatchNotification('ip_blacklist_hit', 'high', '黑名单 IP 访问被拦截：' + clientIP, {
             ip: clientIP,
-            path: req.originalUrl,
+            // 通知会离开本进程（webhook），query 里的令牌不能随 path 外发
+            path: redactUrlQuery(req.originalUrl),
           });
         }
       } catch (_) {

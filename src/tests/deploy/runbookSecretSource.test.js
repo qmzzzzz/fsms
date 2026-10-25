@@ -65,6 +65,9 @@ const EXTRA_SECRETS = {
   'resign-audit-chain-v3.js': ['HMAC_SECRET'],
   'migrate-mfa-secret.js': ['AES_SECRET_KEY'],
   'migrate-pii-encryption.js': ['AES_SECRET_KEY'],
+  // 2026-10-21：演练快照改为 AES-256-GCM 后，缺主密钥会 exit 2（fail-closed）。
+  // 手册里的 cron 示例必须自带来源，否则预发演练会在密钥未注入时静默失败。
+  'run-rollback-drill.js': ['AES_SECRET_KEY'],
 };
 
 const INV_G =

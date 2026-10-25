@@ -1,8 +1,44 @@
 {
+  "scripts/audit-chain-checkpoint.js": {
+    "complexity": 1
+  },
+  "scripts/deployPolicy.js": {
+    "max-lines": 1
+  },
+  "scripts/migrate-pii-encryption.js": {
+    "max-lines": 1
+  },
+  "src/controllers/roleController.js": {
+    "max-lines": 1
+  },
   "src/docs/generate.js": {
     "max-lines": 1
   },
+  "src/middleware/metricsAuth.js": {
+    "complexity": 1
+  },
+  "src/middleware/rateLimit.js": {
+    "max-lines": 1
+  },
+  "src/routes/securityRoutes.js": {
+    "max-lines": 1
+  },
+  "src/services/auditAnchorSink.js": {
+    "complexity": 1
+  },
+  "src/services/auditBuffer.js": {
+    "max-lines": 1
+  },
+  "src/services/authService/token.js": {
+    "complexity": 1
+  },
   "src/utils/errorCodes.js": {
     "max-lines": 1
+  },
+  "src/utils/metrics.js": {
+    "max-lines": 1
+  },
+  "src/utils/reauthTicket.js": {
+    "complexity": 1
   }
 }

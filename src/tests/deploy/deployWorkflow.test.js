@@ -197,6 +197,30 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
     expect(ssh).not.toMatch(/--password|sshpass/);
   });
 
+  test('SSH 主机密钥 fail-closed：缺 DEPLOY_KNOWN_HOSTS 直接失败，不退 TOFU', () => {
+    // 2026-10-24 审计 P2：旧实现在 known_hosts 缺失时只 warning 并退回
+    // StrictHostKeyChecking=accept-new——首次见到的密钥被无条件信任，
+    // 中间人可冒充部署主机。现在必须：① preflight 在任何环境交互前拒绝；
+    // ② Configure SSH 二次拒绝；③ 可执行段里不得再出现 accept-new。
+    const execLines = collectRunLines(src)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'));
+    // 只拦「真的把 accept-new 交给 ssh」的行；错误提示文字里提到该词不算放行
+    expect(execLines.filter((l) => /StrictHostKeyChecking=accept-new/.test(l))).toEqual([]);
+
+    const preflightRun = runScriptOf('preflight');
+    expect(preflightRun).toMatch(/DEPLOY_KNOWN_HOSTS/);
+    expect(preflightRun).toMatch(/exit 1/);
+
+    const ssh = jobBlock('deploy-ssh');
+    expect(ssh).toMatch(/DEPLOY_KNOWN_HOSTS: \$\{\{ secrets\.DEPLOY_KNOWN_HOSTS \}\}/);
+    // 缺少即失败（而非 warning）
+    expect(ssh).toMatch(/if \[\[ -z "\$\{DEPLOY_KNOWN_HOSTS:-\}" \]\]/);
+    expect(ssh).toMatch(/StrictHostKeyChecking=yes/);
+    // 正向锁住：确实把主机密钥落盘（否则 StrictHostKeyChecking=yes 会必然失败）
+    expect(ssh).toMatch(/printf '%s\\n' "\$DEPLOY_KNOWN_HOSTS" > ~\/\.ssh\/known_hosts/);
+  });
+
   test('真正调用 scripts/deploy.js（而不是在 workflow 里重写一遍部署判据）', () => {
     // 判据只能保留在一处：脚本里的前置校验/顺序/健康门禁已被
     // src/tests/deploy/deployScript.test.js 与 deployRun.test.js 覆盖；workflow 再实现一遍就会两处漂移。

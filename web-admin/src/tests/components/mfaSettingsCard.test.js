@@ -35,6 +35,7 @@ const mfaEnroll = vi.fn()
 const mfaEnable = vi.fn()
 const mfaDisable = vi.fn()
 const regenerateRecoveryCodes = vi.fn()
+const encryptPassword = vi.fn()
 
 vi.mock('@/utils/api', () => ({
   api: {
@@ -48,6 +49,7 @@ vi.mock('@/utils/api', () => ({
   },
   isCanceledError: () => false,
 }))
+vi.mock('@/utils/loginCipher', () => ({ encryptPassword: (...a) => encryptPassword(...a) }))
 vi.mock('element-plus/es/components/message/index.mjs', () => ({
   ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
@@ -67,6 +69,8 @@ const URI = 'otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP&issuer=xf'
 /** 后端 /auth/mfa/enable 与 /auth/mfa/recovery-codes 都生成 10 个（mfaController.js:189 / :78） */
 const CODES10 = Array.from({ length: 10 }, (_, i) => `CODE-${i + 1}`)
 const NEW_CODES = ['NEW1-AAAA', 'NEW2-BBBB', 'NEW3-CCCC']
+/** 登记/开启共用的当前密码（服务端二次验证凭据；前端只做非空门禁） */
+const PASSWORD = 'Aa1!aaaaaaaaaaaaaaaa'
 
 const BTN = {
   start: '开启两步验证',
@@ -132,6 +136,16 @@ const waitForDialog = async (want, message) => {
   throw new Error(`等待对话框${want ? '打开' : '关闭'}超时：${message}`)
 }
 
+/** 恢复码明文离开 DOM（destroy-on-close 要等关闭动画结束才销毁内容） */
+const waitForCodesGone = async (message) => {
+  const deadline = Date.now() + 2500
+  while (Date.now() < deadline) {
+    if (document.querySelectorAll('.recovery-code').length === 0) return
+    await sleep(25)
+  }
+  throw new Error(`等待恢复码明文移除超时：${message}`)
+}
+
 /** 挂载并等首次状态查询落定 */
 const open = async (status = statusOff()) => {
   getMfaStatus.mockResolvedValue(status)
@@ -147,6 +161,7 @@ const open = async (status = statusOff()) => {
 /** 从未开启视图推进到「密钥已生成」视图 */
 const enroll = async (c) => {
   mfaEnroll.mockResolvedValue(enrollOk())
+  await setInput(c.find('input'), PASSWORD)
   click(findButton(c, BTN.start))
   await waitFor(() => c.find('.mfa-secret') !== null, { message: '密钥视图渲染' })
   await flush(2)
@@ -163,6 +178,7 @@ const enableToOnView = async (c, codes = CODES10) => {
 
 beforeEach(() => {
   toCanvas = vi.spyOn(QRCode, 'toCanvas').mockResolvedValue(undefined)
+  encryptPassword.mockResolvedValue('enc-envelope')
 })
 
 afterEach(() => {
@@ -175,6 +191,7 @@ afterEach(() => {
   mfaEnable.mockReset()
   mfaDisable.mockReset()
   regenerateRecoveryCodes.mockReset()
+  encryptPassword.mockReset()
   ElMessage.success.mockReset()
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
@@ -210,14 +227,35 @@ describe('MfaSettingsCard 状态查询与视图互斥', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('状态查询失败：按未开启降级展示，不崩、不抛 Vue 错误', async () => {
+  test('状态查询失败：显式错误态 + 重试入口，不得按「未开启」展示开启流程', async () => {
     getMfaStatus.mockRejectedValue(new Error('network'))
     active = mountComponent(MfaSettingsCard, {})
     await waitFor(() => getMfaStatus.mock.calls.length === 1, { message: '状态查询发出' })
     await flush(6)
     const c = active
-    expect(findButton(c, BTN.start)).toBeTruthy()
+    // 查询失败时真实状态未知：既可能已开启也可能未开启。继续渲染开启流程会
+    // 诱导已开启用户重复 enroll，且让关闭入口消失。
+    expect(findButtonText(c, BTN.start)).toBeUndefined()
     expect(findButtonText(c, BTN.disable)).toBeUndefined()
+    expect(c.find('.el-alert--error')).not.toBe(null)
+    expect(c.text()).toContain('无法获取两步验证状态')
+    const retry = findButton(c, '重试')
+    getMfaStatus.mockResolvedValue(statusOn(10))
+    click(retry)
+    await waitFor(() => findButtonText(c, BTN.disable) !== undefined, {
+      message: '重试成功后进入已开启视图',
+    })
+    expect(getMfaStatus).toHaveBeenCalledTimes(2)
+    expect(c.errors).toEqual([])
+  })
+
+  test('状态查询 200 {success:false}：按未知态处理，不得渲染成「未开启」诱导重复登记', async () => {
+    const c = await open({ data: { success: false, message: '状态暂不可用' } })
+    // HTTP 2xx 但业务失败：data 可能缺失/过期，据此渲染开启流程会骗已开启用户重复 enroll
+    expect(findButtonText(c, BTN.start)).toBeUndefined()
+    expect(findButtonText(c, BTN.disable)).toBeUndefined()
+    expect(c.find('.el-alert--error')).not.toBe(null)
+    expect(c.text()).toContain('无法获取两步验证状态')
     expect(c.errors).toEqual([])
   })
 
@@ -254,6 +292,10 @@ describe('MfaSettingsCard 注册与二维码', () => {
     const c = await open(statusOff())
     await enroll(c)
     expect(mfaEnroll).toHaveBeenCalledTimes(1)
+    // 服务端 enroll 需要当前密码做二次验证（M-05）：前端必须以密文轨提交
+    // （PASSWORD_CURRENT 用途），仅开发模式加密降级时才回退明文字段。
+    expect(encryptPassword).toHaveBeenCalledWith(PASSWORD, 'PASSWORD_CURRENT')
+    expect(mfaEnroll.mock.calls[0][0]).toEqual({ encCurrentPassword: 'enc-envelope' })
     expect(c.find('.mfa-secret').textContent.trim()).toBe(SECRET)
     const uri = c.find('.mfa-uri')
     expect(uri.textContent.trim()).toBe(URI)
@@ -280,9 +322,48 @@ describe('MfaSettingsCard 注册与二维码', () => {
     expect(opts.color.light).toBe('#ffffff')
   })
 
+  test('未填写当前密码：本地拦截，不发注册/启用请求（服务端二次验证会拒绝）', async () => {
+    const c = await open(statusOff())
+    click(findButton(c, BTN.start))
+    await flush(4)
+    expect(mfaEnroll).not.toHaveBeenCalled()
+    expect(ElMessage.warning.mock.calls.map((a) => a[0])).toEqual(['请输入当前登录密码'])
+    expect(c.find('.mfa-secret')).toBe(null)
+  })
+
+  test('登记口令加密失败：阻断提交、不发请求、不静默明文上行', async () => {
+    encryptPassword.mockRejectedValue(
+      Object.assign(new Error('no webcrypto'), { code: 'INSECURE_CONTEXT' })
+    )
+    const c = await open(statusOff())
+    await setInput(c.find('input'), PASSWORD)
+    click(findButton(c, BTN.start))
+    await flush(10)
+    expect(mfaEnroll).not.toHaveBeenCalled()
+    expect(ElMessage.error.mock.calls.map((a) => a[0])).toEqual([
+      '当前页面不是安全连接（HTTPS），无法加密口令，已阻止提交。请通过 HTTPS 访问系统',
+    ])
+    // busy 必须复位，用户可在修正环境后重试
+    expect(findButton(c, BTN.start).disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('开发模式加密降级（encryptPassword 返回 null）：回退明文字段，不阻断登记', async () => {
+    encryptPassword.mockResolvedValue(null)
+    mfaEnroll.mockResolvedValue(enrollOk())
+    const c = await open(statusOff())
+    await setInput(c.find('input'), PASSWORD)
+    click(findButton(c, BTN.start))
+    await waitFor(() => mfaEnroll.mock.calls.length === 1, { message: '注册请求发出' })
+    expect(mfaEnroll.mock.calls[0][0]).toEqual({ currentPassword: PASSWORD })
+    await waitFor(() => c.find('.mfa-secret') !== null, { message: '密钥视图渲染' })
+    expect(c.errors).toEqual([])
+  })
+
   test('注册响应缺 secret（success 但无密钥）：不得进入密钥视图、不得误报已生成', async () => {
     const c = await open(statusOff())
     mfaEnroll.mockResolvedValue({ data: { success: true, data: {} } })
+    await setInput(c.find('input'), PASSWORD)
     click(findButton(c, BTN.start))
     await flush(10)
     expect(mfaEnroll).toHaveBeenCalledTimes(1)
@@ -296,6 +377,7 @@ describe('MfaSettingsCard 注册与二维码', () => {
     mfaEnroll.mockResolvedValue({
       data: { success: false, data: { secret: SECRET, otpauthUri: URI } },
     })
+    await setInput(c.find('input'), PASSWORD)
     click(findButton(c, BTN.start))
     await waitFor(() => mfaEnroll.mock.calls.length === 1, { message: '注册请求发出' })
     await flush(10)
@@ -329,7 +411,10 @@ describe('MfaSettingsCard 启用流程与恢复码', () => {
     await setInput(input, '  123456  ')
     click(findButton(c, BTN.enable))
     await waitFor(() => mfaEnable.mock.calls.length === 1, { message: '启用请求发出' })
-    expect(mfaEnable.mock.calls[0][0]).toEqual({ mfaCode: '123456' })
+    expect(mfaEnable.mock.calls[0][0]).toEqual({
+      mfaCode: '123456',
+      encCurrentPassword: 'enc-envelope',
+    })
     await waitFor(() => findButtonText(c, BTN.disable) !== undefined, { message: '切到已开启视图' })
     // 密钥/URI/确认码必须清空：留在 DOM 里等于把 TOTP 种子明文长期摆在页面上
     expect(c.find('.mfa-secret')).toBe(null)
@@ -402,6 +487,28 @@ describe('MfaSettingsCard 启用流程与恢复码', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('开启返回 200 {success:false}：不切已开启视图、不弹恢复码、不清密钥（即使响应带码）', async () => {
+    const c = await open(statusOff())
+    await enroll(c)
+    // 关键夹具：失败响应里塞了恢复码。若组件只看 2xx、不校验 success，
+    // 就会把这次「服务端拒绝」显示成已开启，并把码弹给用户。
+    mfaEnable.mockResolvedValue({
+      data: { success: false, message: '当前密码不正确', data: { recoveryCodes: CODES10 } },
+    })
+    await setInput(c.find('input'), '123456')
+    click(findButton(c, BTN.enable))
+    await waitFor(() => mfaEnable.mock.calls.length === 1, { message: '启用请求发出' })
+    await flush(10)
+    expect(ElMessage.error.mock.calls.map((a) => a[0])).toEqual(['当前密码不正确'])
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(dialogVisible()).toBe(false)
+    expect(findButtonText(c, BTN.disable)).toBeUndefined()
+    // 密钥视图必须原样保留：用户改完口令/验证码可以就地重试
+    expect(c.find('.mfa-secret').textContent.trim()).toBe(SECRET)
+    expect(findButton(c, BTN.enable).disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
   test('Enter 提交开启（enterSubmit 契约）：组词中的 Enter 不提交，普通 Enter 提交', async () => {
     const c = await open(statusOff())
     await enroll(c)
@@ -414,7 +521,10 @@ describe('MfaSettingsCard 启用流程与恢复码', () => {
     expect(mfaEnable).not.toHaveBeenCalled()
     pressEnter(input)
     await waitFor(() => mfaEnable.mock.calls.length === 1, { message: '普通 Enter 提交' })
-    expect(mfaEnable.mock.calls[0][0]).toEqual({ mfaCode: '123456' })
+    expect(mfaEnable.mock.calls[0][0]).toEqual({
+      mfaCode: '123456',
+      encCurrentPassword: 'enc-envelope',
+    })
   })
 
   test('已开启 + Enter 提交关闭：提交裁剪后的码并切回未开启视图', async () => {
@@ -483,8 +593,12 @@ describe('MfaSettingsCard 启用流程与恢复码', () => {
     await setInput(disableInput, '654321')
     click(findButton(c, BTN.disable))
     await waitFor(() => findButtonText(c, BTN.start) !== undefined, { message: '切回未开启视图' })
-    // 未开启视图没有任何验证码输入框（v-if/v-else 整体切换，旧节点已脱离文档）
-    expect(c.findAll('input')).toHaveLength(0)
+    // 未开启视图不再残留任何验证码输入框；仅剩登记所需的密码输入（且为空，
+    // 上一次的密码已在 enable 成功时清除，不得被下一次开启复用）
+    const resetInputs = c.findAll('input')
+    expect(resetInputs).toHaveLength(1)
+    expect(resetInputs[0].getAttribute('type')).toBe('password')
+    expect(resetInputs[0].value).toBe('')
     // 重新开启到已开启视图：新渲染的关闭码输入框不得带着上一次用过的码
     await enroll(c)
     await enableToOnView(c, NEW_CODES)
@@ -511,6 +625,63 @@ describe('MfaSettingsCard 启用流程与恢复码', () => {
     expect(disableInput.value).toBe('999999')
     expect(findButton(c, BTN.disable).disabled).toBe(false)
     expect(c.errors).toEqual([])
+  })
+
+  test('关闭返回 200 {success:false}：不切回未开启视图、不谎报成功、输入保留', async () => {
+    const c = await open(statusOn(10))
+    mfaDisable.mockResolvedValue({ data: { success: false, message: '动态验证码错误' } })
+    const disableInput = c.findAll('input')[0]
+    await setInput(disableInput, '999999')
+    click(findButton(c, BTN.disable))
+    await waitFor(() => mfaDisable.mock.calls.length === 1, { message: '关闭请求发出' })
+    await flush(10)
+    expect(ElMessage.error.mock.calls.map((a) => a[0])).toEqual(['动态验证码错误'])
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    // 服务端仍处于已开启：本地不得抢先展示「已关闭」，否则用户以为保护已撤销
+    expect(findButton(c, BTN.disable)).toBeTruthy()
+    expect(findButtonText(c, BTN.start)).toBeUndefined()
+    expect(disableInput.value).toBe('999999')
+    expect(findButton(c, BTN.disable).disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('使用备用恢复码关闭：归一化大小写/空格/缺失连字符后提交 recoveryCode', async () => {
+    const c = await open(statusOn(2))
+    mfaDisable.mockResolvedValue({ data: { success: true } })
+    click(findButton(c, '使用备用恢复码关闭'))
+    await flush(3)
+    const input = c.findAll('input')[0]
+    expect(input.placeholder).toBe('输入 XXXX-XXXX 格式的备用恢复码')
+    expect(input.getAttribute('maxlength')).toBe('9')
+    // 后端 normalizeDisableFactor 只去空白、转大写，不补连字符；前端替用户补齐
+    await setInput(input, ' abcd 2345 ')
+    pressEnter(input)
+    await waitFor(() => mfaDisable.mock.calls.length === 1, { message: '恢复码关闭请求发出' })
+    expect(mfaDisable.mock.calls[0][0]).toEqual({ recoveryCode: 'ABCD-2345' })
+    await waitFor(() => findButtonText(c, BTN.start) !== undefined, { message: '切回未开启视图' })
+    expect(ElMessage.success.mock.calls[0][0]).toBe('两步验证已关闭')
+    expect(c.errors).toEqual([])
+  })
+
+  test('恢复码格式非法（易混字符/长度不符）：本地警告且不发请求', async () => {
+    const c = await open(statusOn(2))
+    click(findButton(c, '使用备用恢复码关闭'))
+    await flush(3)
+    const input = c.findAll('input')[0]
+    for (const bad of ['1111-1111', 'IIII-IIII', 'ABCD-234', 'ABCD2345X']) {
+      await setInput(input, bad)
+      click(findButton(c, BTN.disable))
+      await flush(4)
+    }
+    expect(mfaDisable).not.toHaveBeenCalled()
+    expect(ElMessage.warning.mock.calls.map((a) => a[0])).toEqual(
+      Array(4).fill('请输入 XXXX-XXXX 格式的备用恢复码')
+    )
+    // 切回动态口令模式后输入清空，不把恢复码当 6 位码发出去
+    click(findButton(c, '改用动态验证码'))
+    await flush(3)
+    expect(c.findAll('input')[0].value).toBe('')
+    expect(c.findAll('input')[0].placeholder).toBe('输入动态验证码以关闭')
   })
 })
 
@@ -554,6 +725,29 @@ describe('MfaSettingsCard 恢复码再生成', () => {
     expect(ElMessage.error.mock.calls.map((a) => a[0])).toEqual(['未获取到新的恢复码，请稍后重试'])
     expect(ElMessage.success).not.toHaveBeenCalled()
     expect(dialogVisible()).toBe(false)
+    expect(regenInput.value).toBe('112233')
+    expect(findButton(c, BTN.regen).disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('再生成返回 200 {success:false}：不弹窗、不采用响应里的码、输入保留', async () => {
+    const c = await open(statusOn(10))
+    // 失败响应也带了 recoveryCodes：只看 2xx 会把未生效的新码弹给用户，
+    // 用户保存后发现旧码仍有效、新码全废，等于丢了唯一一份可用恢复码。
+    regenerateRecoveryCodes.mockResolvedValue({
+      data: { success: false, message: '动态验证码错误', data: { recoveryCodes: NEW_CODES } },
+    })
+    const regenInput = c.findAll('input')[1]
+    await setInput(regenInput, '112233')
+    click(findButton(c, BTN.regen))
+    await waitFor(() => regenerateRecoveryCodes.mock.calls.length === 1, {
+      message: '再生成请求发出',
+    })
+    await flush(10)
+    expect(ElMessage.error.mock.calls.map((a) => a[0])).toEqual(['动态验证码错误'])
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(dialogVisible()).toBe(false)
+    expect(document.querySelectorAll('.recovery-code')).toHaveLength(0)
     expect(regenInput.value).toBe('112233')
     expect(findButton(c, BTN.regen).disabled).toBe(false)
     expect(c.errors).toEqual([])
@@ -644,18 +838,19 @@ describe('MfaSettingsCard 恢复码对话框防误关', () => {
     expect(document.querySelectorAll('.el-dialog__headerbtn')).toHaveLength(0)
   })
 
-  test('点击「我已保存」直接关闭（不再二次确认），关闭后恢复码对用户不可见', async () => {
+  test('点击「我已保存」直接关闭（不再二次确认），关闭后恢复码明文离开 DOM', async () => {
     await openDialog()
     const buttons = dialogFooterButtons()
     expect(buttons.map((b) => b.textContent.trim())).toEqual(['复制', '我已保存'])
     buttons[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
     await waitForDialog(false, '点击我已保存')
     expect(ElMessageBox.confirm).not.toHaveBeenCalled()
-    // 注意：Element Plus 关闭是 v-show 隐藏（overlay display:none），DOM 里的
-    // .recovery-code 明文仍在（见报告「未修复观察项」，与内存中 mfa.recoveryCodes
-    // 的生命周期一致，未按缺陷处理）。这里断言的是用户可见性这一真实契约。
-    expect(overlayEl().style.display).toBe('none')
-    expect(window.getComputedStyle(overlayEl()).display).toBe('none')
+    // 用户按下「我已保存」后就不再有任何合法读取场景：明文既不能留在隐藏 DOM
+    // （v-show 只是 display:none，XSS/扩展/共享屏幕仍可读），也不能留在 reactive
+    // 数组里。destroy-on-close 负责前者，@closed 的 clearRecoveryCodes 负责后者。
+    expect(dialogVisible()).toBe(false)
+    await waitForCodesGone('点击我已保存')
+    expect(document.querySelectorAll('.recovery-code')).toHaveLength(0)
   })
 
   test('弹窗打开期间组件卸载：DOM 中不留任何恢复码明文（append-to-body 也不得泄漏）', async () => {
@@ -788,6 +983,7 @@ describe('MfaSettingsCard 复制（Clipboard API / 降级 / 失败如实上报�
   test('URI 缺失（后端未返回 otpauthUri）：复制按钮点下去必须无任何反馈，不得谎报已复制', async () => {
     const c = await open(statusOff())
     mfaEnroll.mockResolvedValue({ data: { success: true, data: { secret: SECRET } } })
+    await setInput(c.find('input'), PASSWORD)
     click(findButton(c, BTN.start))
     await waitFor(() => c.find('.mfa-secret') !== null, { message: '密钥视图渲染' })
     expect(c.find('.mfa-uri').textContent.trim()).toBe('')
@@ -827,6 +1023,7 @@ describe('MfaSettingsCard 在途重入保护（Enter 与按钮共用 busy 语义
         })
     )
     const start = findButton(c, BTN.start)
+    await setInput(c.find('input'), PASSWORD)
     // 同一宏任务内连点两次：Vue 的 DOM 更新要到 nextTick 才落盘，
     // 此刻按钮的 disabled 仍是旧值（实测 false），两次 click 都会真实派发
     // ——物理双击的两次事件在事件循环里就是这样排布的，属真实用户可达路径。
@@ -834,6 +1031,9 @@ describe('MfaSettingsCard 在途重入保护（Enter 与按钮共用 busy 语义
     click(start)
     expect(start.disabled).toBe(false)
     click(start)
+    // 口令加密引入了一次异步等待：请求调用落在微任务里，先推几轮再断言。
+    // 两次 click 都在同一宏任务内到达，第二次仍必须被同步置位的 busy 拦下。
+    await flush(4)
     expect(mfaEnroll).toHaveBeenCalledTimes(1)
     await sleep(10)
     // 落到后续宏任务后，按钮已被 :disabled="mfa.busy" 禁用

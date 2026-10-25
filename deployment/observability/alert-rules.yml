@@ -19,11 +19,15 @@ groups:
           description: 'Prometheus 连续 1 分钟无法抓取后端指标，服务可能已不可用。'
 
       # 5xx 错误率：5 分钟窗口内超过 5%
+      # 必须 `sum by (instance)`：bare `sum(...)` 会把**全部**标签丢掉（含 instance），
+      # 后果是多实例部署时只剩一条无主的时间序列——告警分不清是哪台机器出错，
+      # 面板上也无法按实例下钻；annotations 里的 {{ $labels.instance }} 会是空串。
+      # （不写 `by (instance)` 的写法在单实例环境下"看起来正常"，正是它长期没被发现的原因。）
       - alert: HighErrorRate
         expr: |
-          sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+          sum by (instance) (rate(http_requests_total{status_code=~"5.."}[5m]))
             /
-          sum(rate(http_requests_total[5m])) > 0.05
+          sum by (instance) (rate(http_requests_total[5m])) > 0.05
         for: 2m
         labels:
           severity: critical
@@ -33,25 +37,26 @@ groups:
 
   - name: xf-latency
     rules:
-      # P95 延迟：5 分钟窗口超过 1s（直方图按全站聚合）
+      # P95 延迟：5 分钟窗口超过 1s（按实例聚合，告警需能指出具体实例）
       - alert: HighP95Latency
         expr: |
           histogram_quantile(0.95,
-            sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+            sum by (instance, le) (rate(http_request_duration_seconds_bucket[5m]))
           ) > 1
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: '全站 P95 延迟超过 1s'
+          summary: '实例 {{ $labels.instance }} 的 P95 延迟超过 1s'
           description: '近 5 分钟 P95 = {{ $value | humanizeDuration }}，持续 5 分钟。'
 
   - name: xf-security
     rules:
       # 安全告警事件：10 分钟内新增 ≥ 10 条即视为异常突发
       # （零星探测属常态噪音，批量出现才是事件）
+      # 同 HighErrorRate：按 instance 聚合，否则多实例会被合并成一条无主告警。
       - alert: SecurityAlertBurst
-        expr: sum(increase(security_alerts_total[10m])) >= 10
+        expr: sum by (instance) (increase(security_alerts_total[10m])) >= 10
         for: 0m
         labels:
           severity: warning
@@ -83,7 +88,7 @@ groups:
       # （黑名单 fail-closed = 库挂时全量请求无法验证 = 全站拒绝；验证码 fail-closed
       # = 没人能登录）。是否收紧是产品决策，不是告警规则能代做的。
       - alert: SecurityFailOpenSustained
-        expr: increase(security_alerts_total{type=~"ip_blacklist_failopen|ratelimit_store_degraded|captcha_active_bound_lost|captcha_switch_db_fallback"}[5m]) > 0
+        expr: increase(security_alerts_total{type=~"ip_blacklist_failopen|ratelimit_store_degraded|captcha_active_bound_lost|captcha_switch_db_fallback|audit_wal_permission_not_tightened"}[5m]) > 0
         for: 10m
         labels:
           severity: critical
@@ -145,6 +150,9 @@ groups:
       # 三条丢弃路径（缓冲超硬上限裁剪 / 毒文档整批丢弃 / 预铸造拒收）统一计入
       # audit_records_dropped_total{reason}；WAL 里通常仍有对应行可重放，
       # 但"能不能重放"要人去查，所以这里按 critical 报。
+      # 2026-10-21 新增第四条：{reason="wal_durable_lost"}——WAL 超限裁剪在显式开关下
+      # 丢掉了 `__walDurable` 行。它比其余三条更重：那些行背后是"敏感操作已回成功"，
+      # 且 `.discarded` 永不回灌 ⇒ 不是"可能还能重放"，是确定永久不入库。
       - alert: AuditRecordsDropped
         expr: increase(audit_records_dropped_total[15m]) > 0
         for: 0m
@@ -157,6 +165,26 @@ groups:
             处置：先确认 MongoDB 可用性与缓冲积压（audit_buffer_backlog_records），
             再核对 logs/audit-buffer.*.wal 与 *.discarded 归档是否可回灌
             （见 deployment/rollback-drill.md 的审计链核对步骤）。
+            reason="wal_durable_lost" 另需按合规事件上报：这些是已向调用方
+            返回成功、已 fsync 的敏感操作审计，不会自动回灌。
+
+      # 反向信号（2026-10-21）：WAL 超限时**拒绝**裁剪已 fsync 的敏感行。
+      # 没有记录丢失，代价是 WAL 继续增长 ⇒ 磁盘会被写满。必须在写满前被看见，
+      # 否则"为了保护审计"最终变成"服务整体不可写"。告警级别低于上面那条：
+      # 前者是已经丢了，这里是还来得及。
+      - alert: AuditWalTrimRefused
+        expr: increase(audit_wal_durable_trim_refusals_total[30m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '审计 WAL 超限但拒绝裁剪（已 fsync 的敏感行占满，WAL 正在无界增长）'
+          description: >-
+            auditWalCap 在超限时只找到不足一半的普通行，按默认策略拒绝裁剪
+            `__walDurable` 行。处置：优先恢复 MongoDB 连通性让缓冲落库（WAL 行随
+            落库被按序号回收）；同时确认 WAL 所在卷剩余空间。确需以磁盘可用性优先，
+            显式设置 AUDIT_WAL_ALLOW_DURABLE_TRIM=true（会记 wal_durable_lost 并触发
+            AuditRecordsDropped critical 告警）。
 
       # 检测延迟（MTTD）未达标：异常行为从最早一条事件到被检测出来的时间
       # 超过 1× 生效检测间隔（目标声明见 src/constants/detectionObjectives.js）。
@@ -193,8 +221,8 @@ groups:
       # /readyz 判定失败 = 编排器/LB 正在摘流量。它是"能干活"的唯一权威判据，
       # 而 /readyz 的唯一检查项就是 Mongo ping（见 src/app.js 的处理器），
       # 所以这条等价于「MongoDB 不可用」。持续 2 分钟才报：Mongo 短暂抖动会让
-      # /readyz 瞬时 503，那属常态（Docker HEALTHCHECK 用 /health 正是为了
-      # 不因抖动重启容器）。
+      # /readyz 瞬时 503，那属常态（Docker HEALTHCHECK 每周期也探 /readyz 是为了
+      # 让 verdict 持续新鲜，但容器健康仍按 /health 判，不因抖动重启容器）。
       - alert: MongoUnavailable
         expr: readyz_verdict{job="xf-app"} == 0
         for: 2m
@@ -220,8 +248,9 @@ groups:
           summary: '就绪探针没有在跑（从未被探测，或已停止 5 分钟以上）'
           description: >-
             readyz_verdict 无样本或已陈旧，此时 MongoUnavailable 无法被判定，
-            监控侧对"服务能不能干活"是盲的。排查方向：LB/编排器的 probe 配置
-            是否被改动、/readyz 是否被网关误拦。
+            监控侧对"服务能不能干活"是盲的。默认探测点是 Docker HEALTHCHECK
+            （每 30s 并行探 /readyz 与 /health）。排查方向：HEALTHCHECK 是否被改动、
+            /readyz 是否被网关误拦。
 
       # 日志卷余量 < 10%：日志目录（WAL / 审计缓冲 / 日志）写不进去时，
       # 最先出现的不是报错而是"静默丢数据"——审计留痕出现空洞。

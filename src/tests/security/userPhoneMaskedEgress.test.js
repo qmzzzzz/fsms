@@ -1,18 +1,20 @@
 /**
- * 用户管理读路径不得下发手机号明文（2026-10-02 审计落地）
+ * 用户管理读路径不得下发 PII 明文（手机号 / 邮箱；2026-10-02 起，2026-10-24 扩到 email）
  *
- * 缺陷形状：`User.phone` 的 schema getter 会**透明解密**（models/User.js 的 phone 声明），
- * 而对外响应投影 `RESPONSE_EXCLUDE` 当初只排了凭证与内部安全状态，**没排 phone**。
- * 于是 `GET /api/users` 一次请求就把整个可见域的完整手机号交给任何持 `user:read` 的账号：
- * 无二次验证、无 `system:read`、不写 `view_sensitive_data` 审计——仓里专门为此建的合规通道
+ * 缺陷形状：`User.phone` / `User.email` 的 schema getter 会**透明解密**（models/User.js
+ * 的字段声明），而对外响应投影 `RESPONSE_EXCLUDE` 最初只排了凭证与内部安全状态，
+ * **没排 phone/email**。于是 `GET /api/users` 一次请求就把整个可见域的完整 PII
+ * 交给任何持 `user:read` 的账号：无二次验证、无 `system:read`、不写
+ * `view_sensitive_data` 审计——仓里专门为此建的合规通道
  * （POST /api/security/view-sensitive：reauthLimiter + requireReAuthentication +
  * 严格更高级别 + 审计写失败即不发明文）被这个默认值整个架空。Alarm 域的同型缺陷
  * （handler.phone / reporter.phone）已分别由 alarmDetailHandlerPii、alarmReporterPhoneEgress 收口。
  *
  * 修法是"默认排除 + 唯一变体 + 当场脱敏"三层：
- *   RESPONSE_EXCLUDE 含 `-phone`（新增用户读路径默认拿不到明文）；
- *   管理员表格要显示脱敏号码，只能取 RESPONSE_EXCLUDE_PHONE_VISIBLE，
- *   且取到后必须过 toMaskedAdminUser —— 明文进、`phoneMasked` 出，`phone` 键被删。
+ *   RESPONSE_EXCLUDE 含 `-phone` / `-email`（新增用户读路径默认拿不到明文）；
+ *   管理员表格要显示脱敏号码与邮箱，只能取 RESPONSE_EXCLUDE_PII_VISIBLE，
+ *   且取到后必须过 toMaskedAdminUser —— 明文进、`phoneMasked` / `emailMasked` 出，
+ *   `phone` / `email` 键被删。
  *
  * 为什么把字段**改名**成 phoneMasked 而不是沿用 my-info 的 `phone: 脱敏值`：
  * 用户列表的值会回填编辑表单，展示值占住可写字段的槽位就只有两条必坏的路——
@@ -27,6 +29,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { DataMasking } = require('../../utils/encryption');
 
 const OP_PHONE = '13711112222';
 const TARGET_PHONE = '13900001122';
@@ -48,6 +51,11 @@ describe('用户管理读路径的手机号口径', () => {
   const opName = `upmop${stamp}`;
   const tgName = `upmtg${stamp}`;
   const newName = `upmnew${stamp}`;
+  const opEmail = `${opName}@example.com`;
+  const targetEmail = `${tgName}@example.com`;
+  const newEmail = `${newName}@example.com`;
+  const mutantEmail = `upmmut${stamp}@example.com`;
+  const maskEmail = (email) => DataMasking.maskEmail(email);
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
@@ -80,7 +88,7 @@ describe('用户管理读路径的手机号口径', () => {
     });
     operator = await User.create({
       username: opName,
-      email: `${opName}@example.com`,
+      email: opEmail,
       password,
       phone: OP_PHONE,
       roles: [superRole._id],
@@ -90,7 +98,7 @@ describe('用户管理读路径的手机号口径', () => {
     // 会打乱**文件内**用例顺序（3 seed 实测的套内顺序耦合），共享可变夹具就是隐患。
     mutant = await User.create({
       username: `upmmut${stamp}`,
-      email: `upmmut${stamp}@example.com`,
+      email: mutantEmail,
       password,
       realName: '可变体',
       phone: TARGET_PHONE,
@@ -99,7 +107,7 @@ describe('用户管理读路径的手机号口径', () => {
     });
     target = await User.create({
       username: tgName,
-      email: `${tgName}@example.com`,
+      email: targetEmail,
       password,
       realName: '被管对象甲',
       phone: TARGET_PHONE,
@@ -132,79 +140,113 @@ describe('用户管理读路径的手机号口径', () => {
   const authed = (method, url) =>
     request(app)[method](url).set('Authorization', `Bearer ${operatorToken}`);
 
-  // 一条通用判据：`phone` 这个键不存在、`phoneMasked` 是期望的脱敏形态、
-  // 序列化后的响应体不含指定明文。三条各有各的用处——只判"不含明文"的话，
-  // 把字段整个删掉也能通过，而表格要显示脱敏号码是这次改动的功能的一半。
+  // 一条通用判据：`phone`/`email` 这两个键不存在、`phoneMasked`/`emailMasked`
+  // 是期望的脱敏形态、序列化后的响应体不含指定明文。四条各有各的用处——只判"不含明文"
+  // 的话，把字段整个删掉也能通过，而表格要显示脱敏值才是这次改动的功能的一半。
   // 数组写法是为了失败时能一眼看出是哪条用例、哪个字段。
-  const expectMaskedShape = (payload, label, { plain, masked }) => {
+  const expectMaskedShape = (payload, label, { plain, masked, plainEmail, maskedEmail }) => {
     expect([label, 'phone' in payload]).toEqual([label, false]);
     expect([label, payload.phoneMasked]).toEqual([label, masked]);
+    expect([label, 'email' in payload]).toEqual([label, false]);
+    expect([label, payload.emailMasked]).toEqual([label, maskedEmail]);
     expect(JSON.stringify(payload)).not.toContain(plain);
+    expect(JSON.stringify(payload)).not.toContain(plainEmail);
   };
 
   test('夹具自证：明文确实进了库，且不带投影的读法确实会把明文交出去', async () => {
     // 这是"对侧"证据。没有它，下面的 not.toContain 可能只是因为
-    // 手机号压根没写进去，或 getter 根本没解密。
+    // PII 压根没写进去，或 getter 根本没解密。
     const stored = await User.collection.findOne({ _id: target._id });
     expect(String(stored.phone)).toMatch(/^enc\./); // at-rest 是密文
+    expect(String(stored.email)).toMatch(/^enc\./);
     const raw = await User.findById(target._id); // 无投影：正是缺陷的读法
     expect(raw.phone).toBe(TARGET_PHONE); // getter 透明解密
+    expect(raw.email).toBe(targetEmail);
     expect(JSON.stringify(raw.toJSON())).toContain(TARGET_PHONE);
+    expect(JSON.stringify(raw.toJSON())).toContain(targetEmail);
   });
 
-  test('两条响应投影只相差 -phone 一项（变体必须由同一张字段表派生）', () => {
+  test('两条响应投影只相差 -phone / -email 两项（变体必须由同一张字段表派生）', () => {
     const excluded = User.RESPONSE_EXCLUDE.split(' ');
-    const visible = User.RESPONSE_EXCLUDE_PHONE_VISIBLE.split(' ');
+    const visible = User.RESPONSE_EXCLUDE_PII_VISIBLE.split(' ');
     expect(excluded).toContain('-phone'); // 默认不许外泄
+    expect(excluded).toContain('-email');
     // 手写第二张清单（而不是派生）会在清单演化时静默漏掉某一项
-    expect(excluded.filter((field) => !visible.includes(field))).toEqual(['-phone']);
+    expect(excluded.filter((field) => !visible.includes(field))).toEqual(['-phone', '-email']);
   });
 
-  test('列表：每行只有 phoneMasked，整个响应体不含明文', async () => {
+  test('列表：每行只有脱敏 PII，整个响应体不含明文', async () => {
     const res = await authed('get', `/api/users?search=${stamp}&limit=50`);
     expect(res.status).toBe(200);
     const row = res.body.data.find((u) => u.username === tgName);
     expect(row).toBeTruthy();
-    expectMaskedShape(row, '列表行', { plain: TARGET_PHONE, masked: MASK_TARGET });
+    expectMaskedShape(row, '列表行', {
+      plain: TARGET_PHONE,
+      masked: MASK_TARGET,
+      plainEmail: targetEmail,
+      maskedEmail: maskEmail(targetEmail),
+    });
     expect(JSON.stringify(res.body)).not.toContain(TARGET_PHONE);
+    expect(JSON.stringify(res.body)).not.toContain(targetEmail);
   });
 
   test('详情：与列表同口径（只修列表等于给按 ID 的读路径留旁路）', async () => {
     const res = await authed('get', `/api/users/${target._id}`);
     expect(res.status).toBe(200);
-    expectMaskedShape(res.body.data, '详情', { plain: TARGET_PHONE, masked: MASK_TARGET });
+    expectMaskedShape(res.body.data, '详情', {
+      plain: TARGET_PHONE,
+      masked: MASK_TARGET,
+      plainEmail: targetEmail,
+      maskedEmail: maskEmail(targetEmail),
+    });
   });
 
   test('建号回显：提交进去的明文不会原样回到响应里，写入仍接受明文', async () => {
     const res = await authed('post', '/api/users').send({
       username: newName,
-      email: `${newName}@example.com`,
+      email: newEmail,
       password: `Aa1!${stamp}New`,
       realName: '新建对象',
       phone: NEW_PHONE,
       department: '',
     });
     expect(res.status).toBe(201);
-    expectMaskedShape(res.body.data, '建号回显', { plain: NEW_PHONE, masked: MASK_NEW });
+    expectMaskedShape(res.body.data, '建号回显', {
+      plain: NEW_PHONE,
+      masked: MASK_NEW,
+      plainEmail: newEmail,
+      maskedEmail: maskEmail(newEmail),
+    });
     const stored = await User.collection.findOne({ username: newName });
     expect(String(stored.phone)).toMatch(/^enc\./);
+    expect(String(stored.email)).toMatch(/^enc\./);
   });
 
   test('改号与角色分配回显：另外两条出口同样只给脱敏值', async () => {
     const put = await authed('put', `/api/users/${mutant._id}`).send({ phone: NEW_PHONE });
     expect(put.status).toBe(200);
-    expectMaskedShape(put.body.data, '改号回显', { plain: NEW_PHONE, masked: MASK_NEW });
+    expectMaskedShape(put.body.data, '改号回显', {
+      plain: NEW_PHONE,
+      masked: MASK_NEW,
+      plainEmail: mutantEmail,
+      maskedEmail: maskEmail(mutantEmail),
+    });
 
     const roles = await authed('put', `/api/users/${mutant._id}/roles`).send({
       roles: [lowRoleId],
     });
     expect(roles.status).toBe(200);
-    expectMaskedShape(roles.body.data, '角色回显', { plain: NEW_PHONE, masked: MASK_NEW });
+    expectMaskedShape(roles.body.data, '角色回显', {
+      plain: NEW_PHONE,
+      masked: MASK_NEW,
+      plainEmail: mutantEmail,
+      maskedEmail: maskEmail(mutantEmail),
+    });
     // 按 _id 比对：Role.code 有入库前大写化的 setter，比字符串容易看错口径
     expect(roles.body.data.roles.map((r) => String(r._id))).toEqual([lowRoleId]);
   });
 
-  test('边界自证：省略 phone 不等于清空，提交脱敏串一定被拒且不落库', async () => {
+  test('边界自证：省略 phone/email 不等于清空，提交脱敏电话一定被拒且不落库', async () => {
     // 前端"脏字段才提交"的全部理由压在这两条判据上：
     // 省略键 = 保持原值；把列表里的展示值当可写值提交 = 被路由正则拒掉。
     const untouched = await authed('put', `/api/users/${mutant._id}`).send({
@@ -212,6 +254,7 @@ describe('用户管理读路径的手机号口径', () => {
     });
     expect(untouched.status).toBe(200);
     expect((await User.findById(mutant._id)).phone).toBe(NEW_PHONE); // 上一用例写入的值还在
+    expect((await User.findById(mutant._id)).email).toBe(mutantEmail);
 
     const masked = await authed('put', `/api/users/${mutant._id}`).send({ phone: MASK_TARGET });
     expect(masked.status).toBe(400);
@@ -270,7 +313,7 @@ describe('用户管理读路径的手机号口径', () => {
 
   test('源码文本闸：取明文的投影与脱敏函数必须成对出现', () => {
     // 判据落在源码而非只有一次运行结果：将来新增一条用户读路径、用了
-    // RESPONSE_EXCLUDE_PHONE_VISIBLE 却忘记过 toMaskedAdminUser，上面所有用例
+    // RESPONSE_EXCLUDE_PII_VISIBLE 却忘记过 toMaskedAdminUser，上面所有用例
     // 都可能依旧全绿（它们各自只覆盖已知的那几条路径），这条不会。
     const fs = require('fs');
     const path = require('path');
@@ -278,14 +321,15 @@ describe('用户管理读路径的手机号口径', () => {
       path.join(__dirname, '..', '..', 'services', 'userService.js'),
       'utf8'
     );
-    const sites = [...src.matchAll(/RESPONSE_EXCLUDE_PHONE_VISIBLE/g)];
+    const sites = [...src.matchAll(/RESPONSE_EXCLUDE_PII_VISIBLE/g)];
     expect(sites.length).toBeGreaterThanOrEqual(4);
     const starts = sites.map((m) => m.index);
     const chunks = starts.map((s, i) =>
       src.slice(s, i + 1 < starts.length ? starts[i + 1] : s + 700)
     );
     expect(chunks.filter((chunk) => !chunk.includes('toMaskedAdminUser'))).toEqual([]);
-    // 脱敏函数自身：明文键必须被删掉——"打了码"和"没下发"是两回事
+    // 脱敏函数自身：两个明文键都必须被删掉——"打了码"和"没下发"是两回事
     expect(src).toMatch(/delete obj\.phone;/);
+    expect(src).toMatch(/delete obj\.email;/);
   });
 });

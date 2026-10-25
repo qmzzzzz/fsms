@@ -29,8 +29,15 @@ const PERMISSION_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', '*'];
 // Permission / Role 共用的启用-停用二态
 const RESOURCE_STATUSES = ['active', 'inactive'];
 
+// 内置角色编码（保留）。
+// 模型按这批 code 标记 isBuiltIn（不可删除、名称/层级/状态冻结）；创建路径必须
+// 拒绝它们，否则未播种的 ADMIN / USER 可被铸成一条永久占位的“内置”角色。
+// SUPER_ADMIN 通常已存在，但同样列入保留集：是否存在不应由播种状态决定。
+const RESERVED_BUILTIN_ROLE_CODES = ['SUPER_ADMIN', 'ADMIN', 'USER'];
+
 module.exports = {
   PERMISSION_TYPES,
   PERMISSION_METHODS,
   RESOURCE_STATUSES,
+  RESERVED_BUILTIN_ROLE_CODES,
 };

@@ -6,7 +6,12 @@
         <el-card
           shadow="hover"
           class="report-card"
+          role="button"
+          tabindex="0"
+          :aria-label="card.title"
           @click="card.path ? $router.push(card.path) : showExportDialog()"
+          @keydown.enter.self.prevent="card.path ? $router.push(card.path) : showExportDialog()"
+          @keydown.space.self.prevent="card.path ? $router.push(card.path) : showExportDialog()"
         >
           <div class="report-card-body">
             <el-icon :size="36" :color="card.color">
@@ -154,6 +159,37 @@
             style="width: 100%"
           />
         </el-form-item>
+        <!-- L-17：未脱敏导出是比 report:export 更窄的提权路径，入口只在持 pii:export 时出现。
+             勾选后必须提供当前口令或 MFA 验证码（服务端 requireReAuthentication 强制）。 -->
+        <el-form-item v-if="canExportUnmasked" :label="$t('report.exportScope')">
+          <el-checkbox v-model="exportDialog.unmasked">
+            {{ $t('report.exportUnmasked') }}
+          </el-checkbox>
+          <div class="reauth-hint">{{ $t('report.exportUnmaskedHint') }}</div>
+        </el-form-item>
+        <template v-if="canExportUnmasked && exportDialog.unmasked">
+          <el-form-item :label="$t('auth.currentPassword')">
+            <el-input
+              v-model="exportDialog.password"
+              type="password"
+              show-password
+              autocomplete="current-password"
+              :placeholder="$t('report.exportPasswordPlaceholder')"
+              @keydown.enter.prevent="enterSubmit($event, handleExport)"
+            />
+          </el-form-item>
+          <el-form-item :label="$t('auth.mfaCode')">
+            <el-input
+              v-model="exportDialog.mfaCode"
+              maxlength="6"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              :placeholder="$t('report.exportMfaPlaceholder')"
+              @keydown.enter.prevent="enterSubmit($event, handleExport)"
+            />
+          </el-form-item>
+          <div class="reauth-hint">{{ $t('report.exportReauthHint') }}</div>
+        </template>
       </el-form>
       <template #footer>
         <button
@@ -199,6 +235,8 @@ const loading = ref(true)
 echarts.use([PieChart, BarChart, TooltipComponent, LegendComponent, GridComponent, CanvasRenderer])
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api, isCanceledError } from '@/utils/api'
+import { encryptPassword } from '@/utils/loginCipher'
+import { enterSubmit } from '@/utils/enterSubmit'
 
 const reportCards = computed(() =>
   [
@@ -499,15 +537,37 @@ const exportDialog = reactive({
   visible: false,
   type: 'alarms',
   dateRange: null,
+  unmasked: false,
+  password: '',
+  mfaCode: '',
 })
 
 const exporting = ref(false)
+
+// 未脱敏导出只对携带姓名的报表存在（当前 UI 仅开放报警报表），且必须持 pii:export。
+// 服务端仍会独立校验权限与二次验证——这个 computed 只决定入口是否出现。
+const canExportUnmasked = computed(() => hasPerm('pii:export') && exportDialog.type === 'alarms')
 
 const showExportDialog = () => {
   exportDialog.visible = true
   exportDialog.type = 'alarms'
   exportDialog.dateRange = null
+  exportDialog.unmasked = false
+  exportDialog.password = ''
+  exportDialog.mfaCode = ''
 }
+
+// 切到无姓名列的报表时收起未脱敏选项，避免把上一次填的凭据带去另一类导出
+watch(
+  () => exportDialog.type,
+  (type) => {
+    if (type !== 'alarms') {
+      exportDialog.unmasked = false
+      exportDialog.password = ''
+      exportDialog.mfaCode = ''
+    }
+  }
+)
 
 // 报表类型 → 中文文件名前缀(与服务端 sheetName 保持一致)
 // 键必须与导出对话框里的 el-radio value 一一对应：当前只有 alarms/devices
@@ -537,7 +597,48 @@ const extractErrorMessage = async (data, fallback) => {
   return data?.message || fallback
 }
 
+/**
+ * 组装未脱敏导出的二次验证凭据
+ *
+ * 与 UserView 的步进验证同口径：动态码优先（6 位数字先就地校验），
+ * 否则当前口令走 PASSWORD_CURRENT 密文轨。加密失败必须阻断，
+ * 不得静默降级为明文上行（与服务端 fail-closed 口径一致）。
+ *
+ * @returns {Promise<object|null>} 凭据对象；null = 已在本地提示并应中止
+ */
+const buildExportCredential = async () => {
+  const mfaCode = exportDialog.mfaCode.trim()
+  if (!exportDialog.password && !mfaCode) {
+    ElMessage.warning(t('report.reauthCredentialRequired'))
+    return null
+  }
+  if (mfaCode && !/^\d{6}$/.test(mfaCode)) {
+    ElMessage.warning(t('profile.mfaCodeInvalid'))
+    return null
+  }
+  if (mfaCode) return { mfaCode }
+  try {
+    const enc = await encryptPassword(exportDialog.password, 'PASSWORD_CURRENT')
+    return enc ? { encCurrentPassword: enc } : { currentPassword: exportDialog.password }
+  } catch (e) {
+    console.warn('[loginCipher] 导出二次验证口令加密失败，已阻断提交：', e?.message)
+    ElMessage.error(
+      e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
+        ? t('login.publicKeyPinMismatch')
+        : e?.code === 'INSECURE_CONTEXT'
+          ? t('login.insecureContext')
+          : t('login.encryptionFailed')
+    )
+    return null
+  }
+}
+
 const handleExport = async () => {
+  const unmasked = canExportUnmasked.value && exportDialog.unmasked
+  // 凭据在发请求前定稿：失败提示期间对话框仍开着，用户可以直接重试
+  const credential = unmasked ? await buildExportCredential() : null
+  if (unmasked && !credential) return
+
   exporting.value = true
   try {
     const params = {
@@ -550,7 +651,9 @@ const handleExport = async () => {
     }
 
     // responseType: 'blob' 时,Blob 在 response.data,response 本身是完整 axios 响应对象
-    const response = await api.reports.export(params)
+    const response = unmasked
+      ? await api.reports.exportPii(params, credential)
+      : await api.reports.export(params)
     const blob = response.data
 
     // 后端返回 JSON 错误而非 Excel 时,提前给出明确提示
@@ -631,6 +734,8 @@ const loadOverview = async () => {
   }
 }
 
+let unmounted = false
+
 onMounted(async () => {
   loading.value = true
   // 先注册 resize 监听再进入 await 流程，确保任何提前返回的路径下监听器都已就位
@@ -638,13 +743,17 @@ onMounted(async () => {
   // 先加载概览数据，骨架替换为真实内容后再初始化图表并渲染图表数据
   // （图表 setOption 依赖 echarts 实例，实例必须在 DOM 就绪后创建）
   await loadOverview()
+  // 请求返回前路由已切走：继续执行会在已卸载的组件上初始化图表并再发图表请求
+  if (unmounted) return
   loading.value = false
   await nextTick()
+  if (unmounted) return
   initCharts()
   await loadChartData()
 })
 
 onUnmounted(() => {
+  unmounted = true
   window.removeEventListener('resize', throttledResize)
   if (resizeTimer) clearTimeout(resizeTimer)
   aChart?.dispose && aChart.dispose()
@@ -666,6 +775,11 @@ onUnmounted(() => {
     transform var(--xf-duration-base) var(--xf-ease-glass),
     box-shadow var(--xf-duration-base) var(--xf-ease-standard);
   animation: page-enter 0.4s var(--xf-ease-glass) both;
+}
+
+.report-card:focus-visible {
+  outline: 2px solid var(--xf-primary);
+  outline-offset: 2px;
 }
 
 .report-card:hover {
@@ -701,6 +815,14 @@ onUnmounted(() => {
   font-weight: 600;
   font-size: var(--xf-font-size-md);
   color: var(--xf-gray-900);
+}
+
+.reauth-hint {
+  width: 100%;
+  margin-top: 4px;
+  font-size: var(--xf-font-size-xs, 12px);
+  line-height: 1.5;
+  color: var(--xf-gray-500, #909399);
 }
 
 .card-desc {

@@ -60,6 +60,10 @@
 
 const { TEST_CLIENT_IP } = require('../fixtures');
 
+// 持久化路径由 outbox 直接等 WAL fsync；本套件把 auditBuffer 整个换成替身，
+// 这里把真实 WAL 的落盘入口也桩掉，否则 spool 会因套件没跑 start() 而被判失败。
+jest.spyOn(require('../../services/auditBufferWal'), 'appendLineDurable').mockResolvedValue(true);
+
 // ===== mock 声明区（必须在 require 控制器之前） =====
 
 // 对象级范围闸（本轮新加）经 rbac.assertRecordInScope → getDataScope →
@@ -69,6 +73,13 @@ const { TEST_CLIENT_IP } = require('../fixtures');
 jest.mock('../../middleware/rbac', () => ({
   ...jest.requireActual('../../middleware/rbac'),
   assertRecordInScope: jest.fn(async () => ({ allowed: true, dataScope: { type: 'all' } })),
+}));
+
+// 数据范围翻译器：getSecurityStats / getSecurityOverview 现在对聚合出口统一收口。
+// 本套件是"结论/分支映射"的单元级用例且不连库，范围解析会走真实 rbac → User 查询；
+// 范围口径本身由 security/statsAnomalyScope 的真库用例钉住，这里放行成 all 档。
+jest.mock('../../services/auditScopeFilter', () => ({
+  applyAuditDataScope: jest.fn(async () => ({ query: {}, dataScope: { type: 'all' } })),
 }));
 
 // User 模型 mock
@@ -127,8 +138,12 @@ jest.mock('../../utils/encryption', () => ({
 }));
 
 // helpers mock
+// 必须保留真实模块的其余导出：constants/audit 的审计文本闸在模块加载时解构
+// stripControlChars，桩里缺这个符号会让 auditClientAddress 在铸造期抛
+// TypeError（测到的是桩不忠，不是被测分支）。
 const mockValidatePasswordStrength = jest.fn();
 jest.mock('../../utils/helpers', () => ({
+  ...jest.requireActual('../../utils/helpers'),
   validatePasswordStrength: (...args) => mockValidatePasswordStrength(...args),
 }));
 

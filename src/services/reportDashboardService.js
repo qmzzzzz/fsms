@@ -14,6 +14,7 @@ const { deviceAlertFilters } = require('../constants/deviceAlerts');
 // 超期统计的两条腿共用清单（F-151）：status:'overdue' 是已改写的，另一条是「该改写但还没轮到」
 // 的开放计划——这个口径必须与 deviceReminder.markOverdueInspections 完全同源。
 const { INSPECTION_OVERDUE_MARKABLE_STATUSES } = require('../constants/inspection');
+const { listAggregateOptions } = require('../utils/queryBudget');
 
 // 进程内 Map 缓存，**不做跨实例失效广播**——与 services/statsCache.js 的策略刻意不同，
 // 不是漏接：statsCache 有 publishInvalidate()（:155）走共享通道，而这里只靠 30s TTL。
@@ -67,82 +68,100 @@ const EMPTY_DASHBOARD = {
 };
 
 const collectDashboardFacets = async (filters, now, startOfDay, endOfDay) => {
-  const [deviceFacet] = await FireDevice.aggregate([
-    { $match: filters.device },
-    {
-      $facet: {
-        total: [{ $count: 'n' }],
-        online: [{ $match: { status: 'normal' } }, { $count: 'n' }],
-        fault: [{ $match: { status: { $in: ['fault', 'warning'] } } }, { $count: 'n' }],
-        needMaintenance: [
-          // 口径与 stats/reminders/报表同源（含 scrapped 排除）：
-          // 这里原先写 `status: {$ne:'maintenance'}`，于是同一台报废设备
-          // 在仪表盘"待维护"里计数、在提醒清单里却不出现，同一响应自相矛盾。
-          { $match: deviceAlertFilters(now).needMaintenance },
-          { $count: 'n' },
-        ],
-        byType: [{ $group: { _id: '$deviceType', count: { $sum: 1 } } }, { $sort: { count: -1 } }],
-      },
-    },
-  ]);
-
-  const [alarmFacet] = await FireAlarm.aggregate([
-    { $match: filters.alarm },
-    {
-      $facet: {
-        total: [{ $count: 'n' }],
-        pending: [{ $match: { status: 'pending' } }, { $count: 'n' }],
-        today: [{ $match: { occurredAt: { $gte: startOfDay } } }, { $count: 'n' }],
-        byLevel: [{ $group: { _id: '$level', count: { $sum: 1 } } }],
-        avgResponse: [
-          { $match: { dispatchedAt: { $ne: null }, receivedAt: { $ne: null } } },
-          {
-            $group: {
-              _id: null,
-              avgMinutes: {
-                $avg: { $divide: [{ $subtract: ['$dispatchedAt', '$receivedAt'] }, MS_PER_MINUTE] },
-              },
-            },
+  // 三条聚合互不依赖：串行执行会把冷启动延迟叠加成三倍（缓存未命中的首屏）。
+  // 统一挂 maxTimeMS，避免某一条退化到全表扫描时无限占用连接池。
+  const [[deviceFacet], [alarmFacet], [inspectionFacet]] = await Promise.all([
+    FireDevice.aggregate(
+      [
+        { $match: filters.device },
+        {
+          $facet: {
+            total: [{ $count: 'n' }],
+            online: [{ $match: { status: 'normal' } }, { $count: 'n' }],
+            fault: [{ $match: { status: { $in: ['fault', 'warning'] } } }, { $count: 'n' }],
+            needMaintenance: [
+              // 口径与 stats/reminders/报表同源（含 scrapped 排除）：
+              // 这里原先写 `status: {$ne:'maintenance'}`，于是同一台报废设备
+              // 在仪表盘"待维护"里计数、在提醒清单里却不出现，同一响应自相矛盾。
+              { $match: deviceAlertFilters(now).needMaintenance },
+              { $count: 'n' },
+            ],
+            byType: [
+              { $group: { _id: '$deviceType', count: { $sum: 1 } } },
+              { $sort: { count: -1 } },
+            ],
           },
-        ],
-      },
-    },
-  ]);
+        },
+      ],
+      listAggregateOptions()
+    ),
 
-  const [inspectionFacet] = await Inspection.aggregate([
-    { $match: filters.inspection },
-    {
-      $facet: {
-        total: [{ $count: 'n' }],
-        pending: [{ $match: { status: 'pending' } }, { $count: 'n' }],
-        overdue: [
-          {
-            $match: {
-              $or: [
-                { status: 'overdue' },
-                {
-                  status: { $in: INSPECTION_OVERDUE_MARKABLE_STATUSES },
-                  planEndTime: { $lte: now },
+    FireAlarm.aggregate(
+      [
+        { $match: filters.alarm },
+        {
+          $facet: {
+            total: [{ $count: 'n' }],
+            pending: [{ $match: { status: 'pending' } }, { $count: 'n' }],
+            today: [{ $match: { occurredAt: { $gte: startOfDay } } }, { $count: 'n' }],
+            byLevel: [{ $group: { _id: '$level', count: { $sum: 1 } } }],
+            avgResponse: [
+              { $match: { dispatchedAt: { $ne: null }, receivedAt: { $ne: null } } },
+              {
+                $group: {
+                  _id: null,
+                  avgMinutes: {
+                    $avg: {
+                      $divide: [{ $subtract: ['$dispatchedAt', '$receivedAt'] }, MS_PER_MINUTE],
+                    },
+                  },
                 },
-              ],
-            },
+              },
+            ],
           },
-          { $count: 'n' },
-        ],
-        today: [
-          {
-            $match: {
-              $or: [
-                { actualStartTime: { $gte: startOfDay } },
-                { planStartTime: { $gte: startOfDay, $lte: endOfDay } },
-              ],
-            },
+        },
+      ],
+      listAggregateOptions()
+    ),
+
+    Inspection.aggregate(
+      [
+        { $match: filters.inspection },
+        {
+          $facet: {
+            total: [{ $count: 'n' }],
+            pending: [{ $match: { status: 'pending' } }, { $count: 'n' }],
+            overdue: [
+              {
+                $match: {
+                  $or: [
+                    { status: 'overdue' },
+                    {
+                      status: { $in: INSPECTION_OVERDUE_MARKABLE_STATUSES },
+                      planEndTime: { $lte: now },
+                    },
+                  ],
+                },
+              },
+              { $count: 'n' },
+            ],
+            today: [
+              {
+                $match: {
+                  $or: [
+                    { actualStartTime: { $gte: startOfDay } },
+                    { planStartTime: { $gte: startOfDay, $lte: endOfDay } },
+                  ],
+                },
+              },
+              { $count: 'n' },
+            ],
+            completed: [{ $match: { status: 'completed' } }, { $count: 'n' }],
           },
-          { $count: 'n' },
-        ],
-        completed: [{ $match: { status: 'completed' } }, { $count: 'n' }],
-      },
-    },
+        },
+      ],
+      listAggregateOptions()
+    ),
   ]);
 
   return { deviceFacet, alarmFacet, inspectionFacet };

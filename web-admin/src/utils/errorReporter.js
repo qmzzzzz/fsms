@@ -209,20 +209,45 @@ function truncate(value, max) {
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
+// 错误消息/堆栈里可能内嵌完整 URL（如 "GET https://x/y?token=..."）：
+// 逐个抽出按 query/hash 规则打码后再截断，避免凭据经自由文本字段绕过 redactUrl
+function redactInlineUrls(value) {
+  const text = typeof value === 'string' ? value : String(value ?? '')
+  return text.replace(/https?:\/\/[^\s"'<>]+/gi, (url) => redactUrl(url))
+}
+
+// extra 来自各调用点，键名不受控：先按 URL 字段打码，且它不得覆盖 record
+// 自己生成的受控字段（否则 { url: 原始地址 } 会盖掉已脱敏的 entry.url）
+function sanitizeExtra(extra) {
+  if (!extra || typeof extra !== 'object') return {}
+  const safe = {}
+  for (const [key, value] of Object.entries(extra)) {
+    if (key === 'url' || key === 'file') {
+      const text = typeof value === 'string' ? value : String(value ?? '')
+      safe[key] = truncate(redactUrl(text), MAX_MESSAGE_LEN)
+    } else if (typeof value === 'string') {
+      safe[key] = truncate(value, MAX_MESSAGE_LEN)
+    } else {
+      safe[key] = value
+    }
+  }
+  return safe
+}
+
 function entryKey(entry) {
   return `${entry.kind}|${entry.message}|${(entry.stack || '').slice(0, 120)}`
 }
 
 function record(kind, message, stack = '', extra = {}) {
   const entry = {
+    ...sanitizeExtra(extra),
     t: new Date().toISOString(),
     kind,
-    message: truncate(message, MAX_MESSAGE_LEN),
-    stack: truncate(stack, MAX_STACK_LEN),
+    message: truncate(redactInlineUrls(message), MAX_MESSAGE_LEN),
+    stack: truncate(redactInlineUrls(stack), MAX_STACK_LEN),
     // L-11：原为 location.href 原样留档，query/hash 里的凭据会随之落盘并外发
     url: redactUrl(location.href),
     count: 1,
-    ...extra,
   }
 
   // 同一错误短时间重复触发（如渲染循环报错）只累计计数，避免刷爆缓冲

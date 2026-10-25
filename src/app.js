@@ -56,7 +56,8 @@ const {
   incSecurityAlert,
 } = require('./utils/metrics');
 const ApiResponse = require('./utils/apiResponse');
-const { checkMongoReady } = require('./utils/healthChecks');
+const { checkMongoReady, checkRedisReady } = require('./utils/healthChecks');
+const { getTransactionTopology } = require('./utils/transaction');
 const swagger = require('./config/swagger');
 const { verifyBuildPin: verifyLoginKeyPin } = require('./utils/loginCipher');
 
@@ -346,13 +347,18 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
   // 日志记录
   // 不用内置的 'combined' 预设——它:url token 输出完整 originalUrl，
   // query string 里的令牌/口令会明文长期留存于 combined-*.log。
-  // 自定义 token safe-url 复用 helpers.redactUrlQuery 打码，其余字段与 combined 一致，
-  // 保证既有日志解析规则（ELK/SIEM 的 combined grok 模式）不受影响。
+  // 自定义 token safe-url / safe-referrer 复用 helpers.redactUrlQuery 打码，其余字段与
+  // combined 一致，保证既有日志解析规则（ELK/SIEM 的 combined grok 模式）不受影响。
+  // Referer 是客户端可控的完整 URL，同样可能携带 query 令牌，不能只护 :url。
   morgan.token('safe-url', (req) => redactUrlQuery(req.originalUrl || req.url));
+  morgan.token('safe-referrer', (req) => {
+    const referrer = req.get('referrer');
+    return referrer ? redactUrlQuery(referrer) : undefined;
+  });
   const COMBINED_SAFE_FORMAT =
     ':remote-addr - :remote-user [:date[clf]] ' +
     '":method :safe-url HTTP/:http-version" :status :res[content-length] ' +
-    '":referrer" ":user-agent"';
+    '":safe-referrer" ":user-agent"';
   if (config.nodeEnv === 'development') {
     app.use(morgan('dev'));
   } else {
@@ -389,6 +395,20 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
 }
 
 /**
+ * 事务能力的对外标记（固定枚举，不暴露拓扑细节）
+ *
+ * standalone 只降级不摘流量：读路径与单集合写仍然可用，把 /readyz 判成
+ * unready 会让 LB 把整个实例下线，损失远大于「跨集合写非原子」本身。
+ * 标记为 degraded 供监控告警，是否升级为摘流量由部署方决定。
+ */
+const transactionMarker = () => {
+  const current = getTransactionTopology();
+  if (current === 'replica-set') return 'enabled';
+  if (current === 'standalone') return 'degraded';
+  return 'unknown';
+};
+
+/**
  * 路由挂载：探针端点 → 公共发现端点 → 业务路由 → API 文档
  *
  * @param {import('express').Express} app
@@ -401,24 +421,36 @@ function installRoutes(app) {
     res.status(200).json({ status: 'ok' });
   });
 
-  // 就绪探针（可观测性）：含 Mongo ping，区分「进程活着」(/health) 与「能干活」——
-  // 不 ready 时编排器/LB 摘流量但保持进程运行；Docker HEALTHCHECK 仍用 /health，
-  // 避免 Mongo 短暂抖动触发容器重启。
-  // 对外只暴露固定枚举（ok/disconnected/timeout/unreachable/error），
+  // 就绪探针（可观测性）：含 Mongo + Redis ping，区分「进程活着」(/health) 与「能干活」——
+  // 不 ready 时编排器/LB 摘流量但保持进程运行；Docker HEALTHCHECK 每周期同时探
+  // /readyz（保证持续产生 readyz_verdict）与 /health（退出码仍取存活），
+  // 避免 Mongo 短暂抖动把容器判成不健康。
+  // Redis 是生产强制项（限流计数/失效广播/审计链锁都依赖它）：只探 Mongo 会让
+  // Redis 挂掉的实例继续接流量，并在多实例下静默退化为进程内语义。
+  // checks.redis=not_configured 表示本部署未要求 Redis（本地/单机），不算故障。
+  // 对外只暴露固定枚举（ok/disconnected/timeout/unreachable/not_configured/error），
   // 驱动原始错误消息仅入服务端日志——本端点不鉴权且被公网探测，
   // 回显 err.message 会泄露主机/端口/副本集/认证细节
   app.get('/readyz', (req, res) => {
-    checkMongoReady()
-      .then((mongo) => {
-        // 就绪判定落进指标：/readyz 是「Mongo 能不能干活」的唯一权威判据，
+    Promise.all([checkMongoReady(), checkRedisReady()])
+      .then(([mongo, redis]) => {
+        const ready = mongo.ok && redis.ok;
+        // 就绪判定落进指标：/readyz 是「能不能干活」的唯一权威判据，
         // 而它此前只在响应体里出现一次——LB 摘了流量，监控面板却全绿。
-        recordReadyz(mongo.ok ? 'ok' : mongo.reason, mongo.ok);
+        recordReadyz(ready ? 'ok' : mongo.ok ? redis.reason : mongo.reason, ready);
         if (!mongo.ok) {
           logger.warn(`就绪探针未通过（mongo=${mongo.reason}）：${mongo.detail}`);
         }
-        res.status(mongo.ok ? 200 : 503).json({
-          status: mongo.ok ? 'ready' : 'unready',
-          checks: { mongo: mongo.ok ? 'ok' : mongo.reason },
+        if (!redis.ok) {
+          logger.warn(`就绪探针未通过（redis=${redis.reason}）：${redis.detail}`);
+        }
+        res.status(ready ? 200 : 503).json({
+          status: ready ? 'ready' : 'unready',
+          checks: {
+            mongo: mongo.ok ? 'ok' : mongo.reason,
+            redis: redis.reason,
+            transactions: transactionMarker(),
+          },
           timestamp: new Date().toISOString(),
         });
       })
@@ -427,7 +459,7 @@ function installRoutes(app) {
         logger.warn(`就绪探针检查异常：${err.message}`);
         res.status(503).json({
           status: 'unready',
-          checks: { mongo: 'error' },
+          checks: { mongo: 'error', redis: 'error', transactions: transactionMarker() },
           timestamp: new Date().toISOString(),
         });
       });
@@ -438,6 +470,8 @@ function installRoutes(app) {
   // 应用层鉴权纵深：内网/回环放行 + 可选 METRICS_TOKEN（Bearer），
   // 作为 Nginx 网络层限源之外的第二道防线——Nginx 配置漂移或有人
   // 从容器网络直连 app:3000 时，运行情报不至于裸奔（fail-safe 到拒绝）。
+  // 声明了反代（TRUST_PROXY_HOPS>0）时，经代理的回环请求必须携带令牌：
+  // 否则 ACL 漂移后到达应用层的请求与合法抓取完全同形，第二道防线形同虚设。
   if (METRICS_ENABLED) {
     app.get('/metrics', metricsAuth, metricsEndpoint);
   }

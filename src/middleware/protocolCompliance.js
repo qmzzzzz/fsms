@@ -31,6 +31,7 @@ const { isProbeRequest } = require('../constants/probePaths');
 // 销毁后才执行，届时惰性 require 会抛「import after torn down」
 const AuditLog = require('../models/AuditLog');
 const { computeFingerprint } = require('../utils/fingerprint');
+const { auditClientAddress } = require('../utils/ipUtils');
 
 // 允许的媒体类型（写操作）
 const DEFAULT_ALLOWED_CONTENT_TYPES = [
@@ -115,7 +116,7 @@ const recordViolation = (req, violation, detail) => {
         // 原先这里私抄一份 5 动词白名单，与另两处写入点各自漂移。
         method: req.method,
         path: auditPath(req),
-        ip: req.ip,
+        ...auditClientAddress(req),
         userAgent: stripControlChars(req.get('user-agent'), 512),
         success: false,
         riskLevel: 'medium',

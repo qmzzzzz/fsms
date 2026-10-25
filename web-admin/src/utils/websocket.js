@@ -44,7 +44,17 @@ export class WebSocketService {
     this.socket = null
     this.handlers = new Map()
     this.isConnecting = false
+    /**
+     * 服务端是否已完成握手鉴权（收到 `authenticated` 事件）
+     *
+     * 传输层 'connect' 只表示 Socket.IO 连接建立，服务端此时的异步认证链
+     * （黑名单/用户/会话查询）尚未结束。join-room 必须等这个标志为真再发，
+     * 否则会被服务端以「请先完成认证」拒绝且不会重试。
+     */
+    this.authenticated = false
     this._onConnect = null
+    this._onAuthenticated = null
+    this._onAuthError = null
     this._onConnectError = null
     this._onDisconnect = null
     this._onReconnectFailed = null
@@ -76,6 +86,9 @@ export class WebSocketService {
    * 只是角色变更、报警推送等实时更新再也不来了。用户看到的是
    * 「过期数据」而不是「连接断开」——比明确报错危险得多，
    * 因为他会基于陈旧数据做决策。
+   *
+   * 握手认证失败（auth-error）同样触发：服务端随后会主动断开，而 socket.io-client
+   * 对「io server disconnect」不会自动重连，通道同样不可自愈。
    * @param {() => void} handler 失败回调
    * @returns {void}
    */
@@ -94,7 +107,9 @@ export class WebSocketService {
   joinRoom(room) {
     if (!room) return
     this.rooms.add(room)
-    if (this.socket && this.socket.connected) {
+    // 认证完成前不发包：服务端会拒绝未认证的 join-room 且不重试。
+    // 认证完成后由 _onAuthenticated 统一补发（含连接进行中声明的房间）。
+    if (this.socket && this.socket.connected && this.authenticated) {
       this.socket.emit('join-room', room)
     }
   }
@@ -142,9 +157,32 @@ export class WebSocketService {
         this.reconnectExhausted = false
         // I-01：认证由握手 cookie 完成（withCredentials 自动携带 access_token，
         // 后端校验通过后 socket.authenticated=true），无需再发送令牌。
-        // 重连后 socket id 已变，服务端房间成员表按 socket id 记录，
-        // 必须重新 join 声明过的全部房间，否则重连后再也收不到房间广播
+        // 传输层刚连通 ≠ 服务端鉴权完成，房间加入统一推迟到 `authenticated`。
+        this.authenticated = false
+      }
+
+      // 【认证完成】服务端在 authenticateSocket 成功后发出，这是唯一允许 join-room 的时点。
+      // 重连后 socket id 已变，服务端房间成员表按 socket id 记录，必须重新 join。
+      this._onAuthenticated = () => {
+        this.authenticated = true
         this.rooms.forEach((room) => this.socket.emit('join-room', room))
+      }
+
+      // 【认证失败】服务端随后会 disconnect(true)；socket.io-client 对「服务端主动断开」
+      // 不会自动重连，若不处理，连接会静默死亡（页面照常显示，推送永不再来）。
+      this._onAuthError = (payload) => {
+        this.isConnecting = false
+        this.authenticated = false
+        this.reconnectExhausted = true
+        reportDegradation('websocket: 握手认证失败，实时推送不可用', {
+          reason: payload?.message || 'unknown',
+          url: this.url,
+        })
+        if (this._onGiveUp) {
+          try {
+            this._onGiveUp()
+          } catch (_) {}
+        }
       }
 
       this._onConnectError = () => {
@@ -154,6 +192,7 @@ export class WebSocketService {
 
       this._onDisconnect = () => {
         this.isConnecting = false
+        this.authenticated = false
       }
 
       // P3-43：重连次数耗尽 → 标记失效并通知调用方。
@@ -171,6 +210,8 @@ export class WebSocketService {
       }
 
       this.socket.on('connect', this._onConnect)
+      this.socket.on('authenticated', this._onAuthenticated)
+      this.socket.on('auth-error', this._onAuthError)
       this.socket.on('connect_error', this._onConnectError)
       this.socket.on('disconnect', this._onDisconnect)
       // io.on 而非 socket.on：reconnect_failed 由 manager 派发
@@ -247,6 +288,8 @@ export class WebSocketService {
   disconnect() {
     if (this.socket) {
       if (this._onConnect) this.socket.off('connect', this._onConnect)
+      if (this._onAuthenticated) this.socket.off('authenticated', this._onAuthenticated)
+      if (this._onAuthError) this.socket.off('auth-error', this._onAuthError)
       if (this._onConnectError) this.socket.off('connect_error', this._onConnectError)
       if (this._onDisconnect) this.socket.off('disconnect', this._onDisconnect)
       // P3-43：manager 级监听必须单独解绑——socket.removeAllListeners() 只清
@@ -262,6 +305,7 @@ export class WebSocketService {
       this.socket = null
     }
     this.handlers.clear()
+    this.authenticated = false
     this._onGiveUp = null
     this.reconnectExhausted = false
     this.rooms.clear()

@@ -394,6 +394,21 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.body.message).toContain('无权创建高于自身层级的角色');
   });
 
+  test('createRole: 内置保留编码 ADMIN / USER 不得用于创建自定义角色', async () => {
+    for (const code of ['ADMIN', 'USER']) {
+      const res = await authed(midToken)
+        .post('/api/roles')
+        .send({ name: `保留编码_${code}_${stamp}`, code, level: 1 });
+      expect(res.status).toBe(400);
+      expect(res.body.errors.errorCode).toBe('ROLE_CODE_RESERVED');
+    }
+    // 未被铸造：库里不存在这两条“内置”角色
+    const Role = require('../../models/Role');
+    expect(await Role.countDocuments({ code: { $in: ['ADMIN', 'USER'] }, isBuiltIn: true })).toBe(
+      0
+    );
+  });
+
   test('createRole: non-superadmin lacking permission subset → 403 (lines 213-218)', async () => {
     // Mid operator has role:* perms but not rcg*:* — try assigning rcg perm
     const res = await authed(midToken)
@@ -480,6 +495,79 @@ describe('roleController 覆盖率补齐', () => {
     expect(res.status).toBe(403);
     expect(res.body.message).toContain('无权变更高于自身层级的角色');
     await Role.findByIdAndDelete(highRole._id).catch(() => {});
+  });
+
+  // M-04：同级角色同样是"别人的角色"。此前只拦 level > operatorMaxLevel，
+  // level-5 操作员可以停用/降级另一名 level-5 管理员所辖的角色。
+  test('updateRole: 非超管改写同级角色 → 403（M-04 同级保护）', async () => {
+    const peerRole = await Role.create({
+      name: '同级_RCG',
+      code: `PEER_RCG_${stamp.toUpperCase()}`,
+      level: 5,
+      isBuiltIn: false,
+    });
+    const res = await authed(midToken)
+      .put(`/api/roles/${peerRole._id}`)
+      .send({ status: 'inactive' });
+    expect(res.status).toBe(403);
+    expect(res.body.errors.errorCode).toBe('ROLE_UPDATE_HIGHER_LEVEL_FORBIDDEN');
+    const after = await Role.findById(peerRole._id);
+    expect(after.status).toBe('active');
+    await Role.findByIdAndDelete(peerRole._id).catch(() => {});
+  });
+
+  // 恢复停用角色 = 把角色上的权限重新发给全部持有者。只校验 level 不够：
+  // 低层级管理员可以把「别人授过权限、随后被停用」的角色整体点亮。
+  test('updateRole: 恢复停用角色必须重新校验权限子集 → 403', async () => {
+    const dormant = await Role.create({
+      name: '停用越权_RCG',
+      code: `DORMANT_RCG_${stamp.toUpperCase()}`,
+      level: 3,
+      isBuiltIn: false,
+      status: 'inactive',
+      // mid 操作者不持有该权限：status:'active' 不得绕过「不得授予自己没有的权限」
+      permissions: [permReadId],
+    });
+
+    const res = await authed(midToken).put(`/api/roles/${dormant._id}`).send({ status: 'active' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.errors.errorCode).toBe('PERMISSION_ASSIGN_FORBIDDEN');
+    const after = await Role.findById(dormant._id);
+    expect(after.status).toBe('inactive');
+    await Role.findByIdAndDelete(dormant._id).catch(() => {});
+  });
+
+  test('updateRole: 恢复停用角色且权限是操作者子集 → 200（守卫不得误伤）', async () => {
+    const roleRead = await Permission.findOne({ code: 'role:read' });
+    const dormant = await Role.create({
+      name: '停用合法_RCG',
+      code: `DORMANTOK_RCG_${stamp.toUpperCase()}`,
+      level: 3,
+      isBuiltIn: false,
+      status: 'inactive',
+      permissions: [roleRead._id],
+    });
+
+    const res = await authed(midToken).put(`/api/roles/${dormant._id}`).send({ status: 'active' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('active');
+    await Role.findByIdAndDelete(dormant._id).catch(() => {});
+  });
+
+  test('deleteRole: 非超管删除同级角色 → 403（M-04 同级保护）', async () => {
+    const peerRole = await Role.create({
+      name: '同级删除_RCG',
+      code: `PEERDEL_RCG_${stamp.toUpperCase()}`,
+      level: 5,
+      isBuiltIn: false,
+    });
+    const res = await authed(midToken).delete(`/api/roles/${peerRole._id}`);
+    expect(res.status).toBe(403);
+    expect(res.body.errors.errorCode).toBe('ROLE_DELETE_HIGHER_LEVEL_FORBIDDEN');
+    expect(await Role.findById(peerRole._id)).not.toBeNull();
+    await Role.findByIdAndDelete(peerRole._id).catch(() => {});
   });
 
   // ===================== assignPermissions error branches =====================

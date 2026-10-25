@@ -73,12 +73,38 @@ receivers:
       - url: 'https://hooks.example.com/<替换为warning通知通道access_token>'
         send_resolved: true
 
-# 可选：critical 告警触发时抑制同一实例的 warning，避免同源告警重复轰炸。
-# 当前规则集中 BackendDown(critical) 挂掉时 HighP95Latency(warning) 必然伴随，
-# 按实例维度抑制是安全的；如后续规则语义变化再按需收紧 equal 维度。
-inhibit_rules:
-  - source_matchers:
-      - severity="critical"
-    target_matchers:
-      - severity="warning"
-    equal: ['instance']
+# ============================================================
+# inhibit_rules：**刻意留空**（2026-10-24）
+#
+# 此前这里是「任何 critical 抑制同一实例的任何 warning」，理由是
+# 「BackendDown(critical) 挂掉时 HighP95Latency(warning) 必然伴随」。
+# 复核后该规则有三个独立问题，因此整体移除而不是调参：
+#
+# 1) 原始理由是**事实错误**。BackendDown 判据是 up{job="xf-app"} == 0，
+#    即抓取失败。目标一旦停止导出指标，http_request_duration_seconds_bucket
+#    就没有新样本，rate() 在 5 分钟 lookback 之后返回空 ⇒ HighP95Latency
+#    **不会**因为后端挂掉而触发（它只可能在崩溃前本就高延迟时靠残留样本
+#    再亮几分钟）。所以这条抑制要挡的"伴随告警"根本不存在。
+#
+# 2) 就算它存在，`equal: ['instance']` 也匹配不到。Alertmanager 的 equal
+#    要求该标签在源与目标**两侧都存在**才比较；缺一侧即不抑制。当前规则集
+#    里 ReadinessProbeMissing 的 absent() 分支只产出 {job="xf-app"}
+#    （absent() 只回填选择器里的标签），没有 instance —— 而这恰恰是
+#    "后端真的挂了"时唯一会亮的伴随告警。即：想挡的那条永远挡不到。
+#    （早前 HighErrorRate / SecurityAlertBurst 用 bare sum(...) 时同理：
+#    聚合后 instance 被整体丢弃。该问题已在 alert-rules.yml 侧修为
+#    `sum by (instance)`，理由改为"告警要能指出是哪台机器"，与本文件无关。）
+#
+# 3) 若它真能生效，**危害大于收益**。按 severity 全局抑制意味着
+#    AuditRecordsDropped(critical) 会压掉同实例的 DiskSpaceLow(warning)——
+#    而磁盘写满很可能正是审计丢失的**根因**，把可执行的处置信号静默掉，
+#    等于让值班从"去清磁盘"退化成"不知道为什么在丢审计"。
+#    同理 MongoUnavailable 会压掉 DiskSpaceLow / DiskProbeFailing。
+#
+# 结论：当前规则集里没有一对"目标告警是源告警的纯后果、且两者标签可对齐"
+# 的组合，因此不设抑制。新增抑制必须同时满足三条，否则宁可不加：
+#   a. source/target 用 alertname 精确指定，不用 severity 一刀切；
+#   b. 能说清 target 是 source 的**后果**而非独立故障（独立信号不得压）；
+#   c. equal 里的标签在两侧**必然存在**（absent() 产出的告警默认不满足）。
+# 契约由 src/tests/observability/alertingConfig.test.js 把守。
+inhibit_rules: []

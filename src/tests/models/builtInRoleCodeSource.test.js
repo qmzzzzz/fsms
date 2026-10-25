@@ -5,9 +5,10 @@
  *
  * 三个地方各自写着"哪些编码是内置角色"，没有任何一条行为用例能把它们对齐：
  *
- * 1) `src/models/Role.js` 的 pre('save') 钩子里有一份局部常量 `builtInCodes`，
- *    命中就把 `isBuiltIn` 强行置真——**不看调用方传了什么**。而 `isBuiltIn` 是
- *    一组硬后果的开关：删除被 `Role.js` 自己的删除护栏拒（"内置角色不可删除"）、
+ * 1) `src/constants/permission.js` 的 `RESERVED_BUILTIN_ROLE_CODES` 是内置角色编码的
+ *    唯一来源，`src/models/Role.js` 的 pre('save') 钩子引用它，命中就把 `isBuiltIn`
+ *    强行置真——**不看调用方传了什么**。而 `isBuiltIn` 是一
+ *    组硬后果的开关：删除被 `Role.js` 自己的删除护栏拒（"内置角色不可删除"）、
  *    改名与改层级被 `roleGuards.js` 拒、按用户授权限时被 `rolePermissionController.js`
  *    当作内置角色走克隆分支。于是"用一个特定编码建角色"＝铸造一条不可删除、
  *    不可改名、层级冻结的记录，而这条编码名单与真正的种子名单（下一项）并不相等。
@@ -38,6 +39,7 @@ const { defaultRoles } = require('../../services/initData');
 
 const REPO_ROOT = path.join(__dirname, '..', '..', '..');
 const ROLE_SRC = path.join(REPO_ROOT, 'src', 'models', 'Role.js');
+const PERM_SRC = path.join(REPO_ROOT, 'src', 'constants', 'permission.js');
 // 2026-10-19 批 3c：initData.js 拆为 services/initData/ 目录，rolePermissionMap 移至 roles.js
 const INIT_SRC = path.join(REPO_ROOT, 'src', 'services', 'initData', 'roles.js');
 
@@ -49,9 +51,9 @@ const codeOnly = (file) => stripComments(fs.readFileSync(file, 'utf8'));
 /** 合成样本与真实源码共用同一步预处理，避免"自证的是另一条路径" */
 const codeLike = (text) => stripComments(text);
 
-/** Role.js 里 pre('save') 那份局部名单（它是函数体内的 const，取不出 import，只能读源码） */
-function hookBuiltInCodes(src) {
-  const m = /const builtInCodes = \[([^\]]*)\]/.exec(src);
+/** constants/permission.js 里的保留编码名单（唯一来源；Role.js 的钩子引用它） */
+function reservedBuiltInCodes(src) {
+  const m = /const RESERVED_BUILTIN_ROLE_CODES = \[([^\]]*)\]/.exec(src);
   if (!m) return null;
   return [...m[1].matchAll(/'([^']*)'/g)].map((x) => x[1]);
 }
@@ -109,6 +111,7 @@ const straysOf = (codes, allowed) => [...new Set(codes)].filter((c) => !allowed.
 
 describe('内置角色编码的三处真源', () => {
   let roleSrc;
+  let permSrc;
   let initSrc;
   let hookCodes;
   let mapKeys;
@@ -121,8 +124,9 @@ describe('内置角色编码的三处真源', () => {
       await mongoose.connect(process.env.MONGODB_URI);
     }
     roleSrc = codeOnly(ROLE_SRC);
+    permSrc = codeOnly(PERM_SRC);
     initSrc = codeOnly(INIT_SRC);
-    hookCodes = hookBuiltInCodes(roleSrc);
+    hookCodes = reservedBuiltInCodes(permSrc);
     mapKeys = permissionMapKeys(initSrc);
     seededCodes = defaultRoles.map((r) => r.code);
     seededBuiltInCodes = defaultRoles.filter((r) => r.isBuiltIn).map((r) => r.code);
@@ -135,11 +139,13 @@ describe('内置角色编码的三处真源', () => {
     if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
   });
 
-  test('提取器自证：合成脏样本抓得到、注释里的不算、锚点没被挪走', () => {
+  test('提取器自证：合成脏样本抓得到、注释里的不算、锚点没被挪走、钩子确实引用单一来源', () => {
     // 判据靠源码解析 ⇒ 先证明解析器有牙，否则三处真源全被"读不到"骗成绿。
     // 合成样本走与真实源码**完全相同**的管道（剥注释 → 提取），否则自证的是另一条代码路径。
     expect(
-      hookBuiltInCodes(codeLike("  const builtInCodes = ['SUPER_ADMIN', 'ZZ_FAKE_ONE'];"))
+      reservedBuiltInCodes(
+        codeLike("  const RESERVED_BUILTIN_ROLE_CODES = ['SUPER_ADMIN', 'ZZ_FAKE_ONE'];")
+      )
     ).toEqual(['SUPER_ADMIN', 'ZZ_FAKE_ONE']);
     expect(
       permissionMapKeys(
@@ -148,13 +154,20 @@ describe('内置角色编码的三处真源', () => {
     ).toEqual(['ZZ_FAKE_ONE', 'ZZ_FAKE_TWO']);
 
     // 注释里抄一份名单不算命中（本文件自己的注释就抄了 ADMIN/USER 这些字样）
-    expect(hookBuiltInCodes(codeLike('/* const builtInCodes = [] */'))).toBeNull();
+    expect(
+      reservedBuiltInCodes(codeLike('/* const RESERVED_BUILTIN_ROLE_CODES = [] */'))
+    ).toBeNull();
     expect(
       permissionMapKeys(codeLike('/* const rolePermissionMap = {\n  NOPE: [\n}; */'))
     ).toBeNull();
     // 反向：真实源码里这两个锚点确实各只有一处定义
-    expect(roleSrc.match(/const builtInCodes = \[/g) || []).toHaveLength(1);
+    expect(permSrc.match(/const RESERVED_BUILTIN_ROLE_CODES = \[/g) || []).toHaveLength(1);
     expect(initSrc.match(/const rolePermissionMap = \{/g) || []).toHaveLength(1);
+    // 单一来源必须真的被钩子引用：只定义不接线时，编码名单改了也不会影响 isBuiltIn
+    expect(roleSrc).toMatch(
+      /const \{[^}]*RESERVED_BUILTIN_ROLE_CODES[^}]*\} = require\('\.\.\/constants\/permission'\)/
+    );
+    expect(roleSrc).toMatch(/RESERVED_BUILTIN_ROLE_CODES\.includes\(this\.code\)/);
   });
 
   test('rolePermissionMap 的键与 defaultRoles 的编码集合必须完全相等（否则启动即清空该角色权限）', () => {

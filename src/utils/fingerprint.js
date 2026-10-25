@@ -14,7 +14,7 @@
  */
 
 const crypto = require('crypto');
-const { normalizeIP } = require('./ipUtils');
+const { normalizeIP, clientIpForSecurityDecision } = require('./ipUtils');
 
 const MAX_HEADER_LEN = 512;
 
@@ -85,7 +85,9 @@ const computeFingerprint = (req) => {
   const ua = String(req.get('user-agent') || '').slice(0, MAX_HEADER_LEN);
   const lang = String(req.get('accept-language') || '').slice(0, MAX_HEADER_LEN);
   const enc = String(req.get('accept-encoding') || '').slice(0, MAX_HEADER_LEN);
-  const seg = ipSegment(req.ip);
+  // 与准入/审计同一把尺：能伪造 XFF 的直连者不能靠换头把指纹切成多个，
+  // 否则「同一 sessionId 指纹突变」这条盗用判定会被一条请求头直接买通。
+  const seg = ipSegment(clientIpForSecurityDecision(req));
 
   // 全部特征为空说明请求头被完全剥离（异常客户端），不产出无意义的固定指纹
   if (!ua && !lang && !enc && !seg) return null;

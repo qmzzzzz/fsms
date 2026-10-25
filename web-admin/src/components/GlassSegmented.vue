@@ -4,18 +4,21 @@
     class="glass-segmented"
     :class="{ 'glass-segmented--sm': size === 'sm' }"
     role="tablist"
+    aria-orientation="horizontal"
     :aria-label="ariaLabel || undefined"
+    @keydown="onKeydown"
   >
     <!-- 透镜滑块：绝对定位，随激活项平滑滑动 -->
     <div ref="thumbRef" class="glass-segmented__thumb" aria-hidden="true" />
     <button
-      v-for="opt in options"
+      v-for="(opt, index) in options"
       :key="opt.value"
       type="button"
       class="glass-segmented__item"
       :class="{ 'is-active': modelValue === opt.value }"
       role="tab"
       :aria-selected="modelValue === opt.value"
+      :tabindex="index === tabStopIndex ? 0 : -1"
       :data-value="opt.value"
       @click="select(opt.value)"
     >
@@ -28,7 +31,7 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 
 /**
  * 苹果液态玻璃分段控件（滑动透镜滑块版）
@@ -70,6 +73,41 @@ const select = (value) => {
   if (props.modelValue === value) return
   emit('update:modelValue', value)
   emit('change', value)
+}
+
+// roving tabindex：整组分段只占一个 Tab 位；无选中项时落在首项，避免整组无法键盘进入
+const tabStopIndex = computed(() => {
+  const index = props.options.findIndex((opt) => opt.value === props.modelValue)
+  return index === -1 ? 0 : index
+})
+
+// 横向 tablist 键盘语义：左右方向键循环切换，Home/End 跳到首/末项。
+// 切换即激活（自动激活模式），与点击行为共用 select，事件契约保持一致。
+const onKeydown = (event) => {
+  const len = props.options.length
+  if (!len) return
+  let nextIndex
+  switch (event.key) {
+    case 'ArrowLeft':
+      nextIndex = (tabStopIndex.value - 1 + len) % len
+      break
+    case 'ArrowRight':
+      nextIndex = (tabStopIndex.value + 1) % len
+      break
+    case 'Home':
+      nextIndex = 0
+      break
+    case 'End':
+      nextIndex = len - 1
+      break
+    default:
+      return
+  }
+  event.preventDefault()
+  select(props.options[nextIndex].value)
+  nextTick(() => {
+    trackRef.value?.querySelectorAll('.glass-segmented__item')[nextIndex]?.focus()
+  })
 }
 
 watch(

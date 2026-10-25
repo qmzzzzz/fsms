@@ -93,14 +93,15 @@ describe('O-4 generate-secrets --add-missing', () => {
 
   test('Mongo 三件套部分缺失：拒绝补齐（uri 与 password 不能分属两代）', () => {
     seedFullSet();
-    fs.rmSync(path.join(dir, 'mongo_root_password'));
+    // 应用账号口令是 URI 的派生源（2026-10-24 审计后应用不再以 root 连库）
+    fs.rmSync(path.join(dir, 'mongo_app_password'));
 
     const r = run(['--out', dir, '--add-missing']);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('Mongo 凭据三件套不成套');
     expect(r.stderr).toContain('mongodb_uri');
     // 拒绝必须发生在落盘之前：缺失文件没有被悄悄补上
-    expect(fs.existsSync(path.join(dir, 'mongo_root_password'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'mongo_app_password'))).toBe(false);
   });
 
   test('空目录 + --add-missing：等价于整套生成（三件套全缺时允许一致生成）', () => {
@@ -110,9 +111,11 @@ describe('O-4 generate-secrets --add-missing', () => {
     const names = fs.readdirSync(dir);
     expect(names).toContain('mongodb_uri');
     expect(names).toContain('mongo_root_password');
+    expect(names).toContain('mongo_app_password');
     expect(names).toContain('redis_password');
     const uri = read(dir, 'mongodb_uri');
-    expect(uri).toContain(encodeURIComponent(read(dir, 'mongo_root_password')));
+    expect(uri).toContain(encodeURIComponent(read(dir, 'mongo_app_password')));
+    expect(uri).toContain('authSource=fire_safety_db');
   });
 
   test.each([

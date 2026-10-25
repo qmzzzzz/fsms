@@ -1,0 +1,31 @@
+# 高爆炸半径路径的所有者（2026-10-24 审计 P3）
+#
+# 这些文件的改动不是普通业务代码：一个字符就能让门禁失效、让 CI 执行未审代码、
+# 或改变发布产物的信任链。列在这里的目的是让 diff 在合并前**必须**由指定人过目。
+#
+# 注意：CODEOWNERS 只负责「请求评审」。要真正阻断合并，仓库还需要在分支保护里
+# 勾选 "Require review from Code Owners"——否则本文件只是一条不会生效的声明。
+# 单人仓库下这是「防自己手滑」而非多角色审批：改动仍会在 PR diff 里现形。
+
+# CI/CD：工作流定义、动作钉版、依赖机器人
+/.github/workflows/ @qmzzzzz
+/.github/CODEOWNERS @qmzzzzz
+/.github/dependabot.yml @qmzzzzz
+
+# 供应链信任锚：任何改动都等于重新定义「什么算已审」
+/deployment/audit-allowlist.json @qmzzzzz
+/deployment/lockfile-anchor.json @qmzzzzz
+/deployment/mongod-artifacts.json @qmzzzzz
+/deployment/ip2region-checksum.json @qmzzzzz
+/eslint.ratchet.json @qmzzzzz
+
+# 门禁脚本本身：改坏判据不会让任何业务测试变红
+/scripts/check-* @qmzzzzz
+/scripts/provision-mongod.js @qmzzzzz
+/scripts/update-ip2region.js @qmzzzzz
+
+# 依赖分辨率与镜像构建
+/package-lock.json @qmzzzzz
+/web-admin/package-lock.json @qmzzzzz
+/Dockerfile @qmzzzzz
+/docker-compose.yml @qmzzzzz

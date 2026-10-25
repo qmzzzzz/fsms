@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const { assert, createJourney, listFiles, readJson, runNode } = require('../lib');
@@ -18,6 +19,10 @@ const REQUIRED_MARKERS = [
 
 const OID = mongoose.Types.ObjectId;
 const CREATED_AT = '2026-10-20T08:30:00.000Z';
+// 快照自 2026-10-21 起强制 AES-256-GCM（缺密钥 fail-closed 退出 2）。
+// 本旅程在 isolateDisposableSecrets 之后运行，宿主的 AES_SECRET_KEY 已被置空，
+// 必须自带一把一次性密钥，否则演练必然卡在"缺少 AES_SECRET_KEY"。
+const DRILL_AES_KEY = crypto.randomBytes(32).toString('hex');
 
 function seedDocuments() {
   const roleId = new OID();
@@ -91,7 +96,12 @@ function runDrill(root, drillDir, uri, allowedSourceDb) {
     ['--apply-source', '--yes', '--backup-dir', drillDir],
     {
       timeoutMs: 120000,
-      env: { ...process.env, MONGODB_URI: uri, ALLOWED_SOURCE_DB: allowedSourceDb },
+      env: {
+        ...process.env,
+        MONGODB_URI: uri,
+        ALLOWED_SOURCE_DB: allowedSourceDb,
+        AES_SECRET_KEY: DRILL_AES_KEY,
+      },
     }
   );
 }
@@ -112,10 +122,24 @@ async function assertTypeFaithful(db, manifest, drillDir) {
   assert.equal(a.profile.level, 3);
   assert.deepEqual(a.profile.tags, ['night']);
 
+  // 独立按文件格式解密（不借用演练脚本自己的 decrypt），
+  // 否则加解密同错（例如两边一起退回明文）会自证通过。
   const snapshot = path.join(drillDir, manifest.collections.users.file);
-  const raw = zlib.gunzipSync(fs.readFileSync(snapshot)).toString('utf8');
-  assert.match(raw, /"\$oid"/, '快照必须以 EJSON 编码 ObjectId');
-  assert.match(raw, /"\$date"/, '快照必须以 EJSON 编码 Date');
+  const raw = fs.readFileSync(snapshot);
+  assert.ok(
+    raw.subarray(0, 8).equals(Buffer.from('FSMSBK1\n')),
+    '快照必须带加密魔数（gzip 不是加密）'
+  );
+  assert.doesNotMatch(raw.toString('latin1'), /"\$oid"/, '密文中不得出现明文 EJSON');
+  const key = crypto.createHash('sha256').update(DRILL_AES_KEY).digest();
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, raw.subarray(8, 20), {
+    authTagLength: 16,
+  });
+  decipher.setAuthTag(raw.subarray(20, 36));
+  const payload = Buffer.concat([decipher.update(raw.subarray(36)), decipher.final()]);
+  const text = zlib.gunzipSync(payload).toString('utf8');
+  assert.match(text, /"\$oid"/, '快照必须以 EJSON 编码 ObjectId');
+  assert.match(text, /"\$date"/, '快照必须以 EJSON 编码 Date');
 }
 
 async function main(config) {

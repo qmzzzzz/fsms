@@ -136,8 +136,9 @@ describe('mfaService 静默写入失败必须留痕', () => {
         mfaFailCount: mfaService.MFA_MAX_FAILS,
         mfaLockUntil: new Date(Date.now() - 60 * 1000),
       });
+      // 惰性清零走条件写 updateOne（锁定时刻 + 计数快照），不再是 findByIdAndUpdate
       const spy = jest
-        .spyOn(User, 'findByIdAndUpdate')
+        .spyOn(User, 'updateOne')
         .mockImplementation(() => rejectCatchOnly('db down (故障注入：惰性清零)'));
 
       try {

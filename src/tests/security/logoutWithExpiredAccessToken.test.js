@@ -24,6 +24,7 @@ const config = require('../../config');
 const User = require('../../models/User');
 const TokenBlacklist = require('../../models/TokenBlacklist');
 const tokenService = require('../../services/tokenService');
+const sessionService = require('../../services/sessionService');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 
 const PASSWORD = randomPassword();
@@ -76,6 +77,23 @@ describe('access 过期后的登出', () => {
     return user;
   };
 
+  let sessionSeq = 0;
+
+  /**
+   * 建一条真实设备会话并签发绑定它的 refresh token。
+   * 无 sid 的 refresh 现在会被 /refresh 直接判 INVALID（见 authService/token.js:263），
+   * 用它做「登出后是否还能换发」的负向断言会因错误原因而假绿。
+   */
+  const refreshFor = async (user, label) => {
+    const sid = `${TAG}-${label}-${++sessionSeq}`;
+    await sessionService.createSession({
+      userId: user._id,
+      req: { ip: '127.0.0.1', get: () => 'jest-logout' },
+      sid,
+    });
+    return tokenService.generateRefreshToken(user._id, user.tokenVersion || 0, sid);
+  };
+
   /**
    * 返回状态码而不是布尔值：/api/auth/refresh 挂着 strictLimiter，
    * 若把 429 也当成"令牌已失效"，负向断言就会因为限流而假绿。
@@ -89,7 +107,7 @@ describe('access 过期后的登出', () => {
 
   test('★ 过期 access + 有效 refresh：登出成功，且该 refresh 立刻不能再换发', async () => {
     const user = await makeUser('expiredaccess');
-    const refreshToken = tokenService.generateRefreshToken(user._id, user.tokenVersion || 0, null);
+    const refreshToken = await refreshFor(user, 'expiredaccess');
     // 前提自证用**无副作用**的方式：/api/auth/refresh 是单次消费的（轮换会把旧令牌
     // 拉进黑名单），拿它做"登出前还活着"的检查会直接把本用例的场景毁掉。
     expect(jwt.verify(refreshToken, config.jwt.refreshSecret, { algorithms: ['HS256'] }).type).toBe(
@@ -111,7 +129,7 @@ describe('access 过期后的登出', () => {
 
   test('完全没有 access 令牌时，凭有效 refresh 也能登出（cookie 之外的 API 客户端形态）', async () => {
     const user = await makeUser('noaccess');
-    const refreshToken = tokenService.generateRefreshToken(user._id, user.tokenVersion || 0, null);
+    const refreshToken = await refreshFor(user, 'noaccess');
     const res = await request(app).post('/api/auth/logout').send({ refreshToken });
     expect(res.status).toBe(200);
     expect(await refreshStatus(refreshToken)).not.toBe(200);
@@ -162,7 +180,7 @@ describe('access 过期后的登出', () => {
 
   test('已被吊销的 refresh 不能再当登出凭据（不给出"重复登出仍成功"的口子）', async () => {
     const user = await makeUser('alreadyrevoked');
-    const refreshToken = tokenService.generateRefreshToken(user._id, user.tokenVersion || 0, null);
+    const refreshToken = await refreshFor(user, 'alreadyrevoked');
     const first = await request(app).post('/api/auth/logout').send({ refreshToken });
     expect(first.status).toBe(200);
     const second = await request(app).post('/api/auth/logout').send({ refreshToken });
@@ -179,7 +197,7 @@ describe('access 过期后的登出', () => {
       user.realName,
       user.tokenVersion || 0
     );
-    const refreshToken = tokenService.generateRefreshToken(user._id, user.tokenVersion || 0, null);
+    const refreshToken = await refreshFor(user, 'healthy');
     const res = await request(app)
       .post('/api/auth/logout')
       .set('Authorization', `Bearer ${fresh}`)
@@ -195,7 +213,7 @@ describe('access 过期后的登出', () => {
   // 也让运维在告警面上看不到"安全服务不可用"这条真实原因。
   test('黑名单服务故障（refresh 路径）→ 503 安全服务不可用，不得降级成笼统 500', async () => {
     const user = await makeUser('blfail');
-    const refreshToken = tokenService.generateRefreshToken(user._id, user.tokenVersion || 0, null);
+    const refreshToken = await refreshFor(user, 'blfail');
     const spy = jest.spyOn(TokenBlacklist, 'findOne').mockImplementation(() => {
       throw new Error('db down (故障注入)');
     });
@@ -215,7 +233,7 @@ describe('access 过期后的登出', () => {
     // authorizeByRefreshToken 有两个调用点（无 access / access 已过期）。
     // 只给其中一个补口径 = 半个修复：故障语义会随客户端带没带那个过期头而不同。
     const user = await makeUser('blfailx');
-    const refreshToken = tokenService.generateRefreshToken(user._id, user.tokenVersion || 0, null);
+    const refreshToken = await refreshFor(user, 'blfailx');
     const spy = jest.spyOn(TokenBlacklist, 'findOne').mockImplementation(() => {
       throw new Error('db down (故障注入)');
     });

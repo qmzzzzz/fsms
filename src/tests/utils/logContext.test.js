@@ -49,18 +49,43 @@ describe('logContext（O-5 请求级日志关联）', () => {
     app.get('/probe', (req, res) => {
       res.json({
         reqId: req.id,
-        ctxRequestId: getLogContext()?.requestId ?? null,
-        headerId: req.get('X-Request-Id'),
+        clientRequestId: req.clientRequestId ?? null,
+        ctx: getLogContext() ?? null,
       });
     });
 
-    // 客户端传入 X-Request-Id 时复用
+    // 客户端传入 X-Request-Id：**不得**成为关联主键，只作为独立的 clientRequestId 进日志上下文。
+    // 旧断言（`reqId === 'client-id-1'`）是"复用客户端值"时期的契约，与现实现相反：
+    // 复用等于让攻击者自选一个看起来像服务端签发的 ID（甚至与他人请求撞号），
+    // 事后按 reqId 取证无法区分两条链路。此处的三条断言正是那次反转的门禁。
     const res = await request(app).get('/probe').set('X-Request-Id', 'client-id-1');
     expect(res.status).toBe(200);
-    expect(res.body.reqId).toBe('client-id-1');
-    expect(res.body.headerId).toBe('client-id-1');
+    expect(res.body.reqId).toMatch(/^[0-9a-f]{16}$/);
+    expect(res.body.reqId).not.toBe('client-id-1');
+    // 响应头必须是服务端生成的那个值（回显客户端值等于把伪造 ID 洗白成"服务端签发"）
+    expect(res.headers['x-request-id']).toBe(res.body.reqId);
+    // 但客户端值不能丢：跨服务关联要用它，故另存 req.clientRequestId 并进 ALS 上下文
+    expect(res.body.clientRequestId).toBe('client-id-1');
+    expect(res.body.ctx.clientRequestId).toBe('client-id-1');
     // 关键断言：ALS 上下文与请求 ID 一致 → logger format 注入的是正确值
-    expect(res.body.ctxRequestId).toBe('client-id-1');
+    expect(res.body.ctx.requestId).toBe(res.body.reqId);
+  });
+
+  test('不合规的客户端 X-Request-Id 一律丢弃，且不污染 req.id', async () => {
+    const app = express();
+    app.use(requestId);
+    app.get('/probe', (req, res) => {
+      res.json({ reqId: req.id, clientRequestId: req.clientRequestId ?? null });
+    });
+
+    // 含空格（日志注入面）与超长（放大面）两种形态都必须被 CLIENT_ID_RE 挡掉
+    const bad = await request(app).get('/probe').set('X-Request-Id', 'id with space');
+    expect(bad.body.clientRequestId).toBeNull();
+    expect(bad.body.reqId).toMatch(/^[0-9a-f]{16}$/);
+
+    const tooLong = await request(app).get('/probe').set('X-Request-Id', 'a'.repeat(65));
+    expect(tooLong.body.clientRequestId).toBeNull();
+    expect(tooLong.body.reqId).toMatch(/^[0-9a-f]{16}$/);
   });
 
   test('未传 X-Request-Id 时生成新 ID 并同样进入上下文', async () => {

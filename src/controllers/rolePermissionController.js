@@ -4,6 +4,7 @@
  */
 
 const { validationResult } = require('express-validator');
+const crypto = require('crypto');
 const { safeFieldErrors } = require('../utils/validationRules');
 const mongoose = require('mongoose');
 const ApiResponse = require('../utils/apiResponse');
@@ -21,6 +22,7 @@ const { assertRecordInScope } = require('../middleware/rbac');
 const { uniqueIdStrings } = require('../utils/helpers');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const roleService = require('../services/roleService');
+const userService = require('../services/userService');
 
 const emitWebSocketEvent = (req, eventType, data) => {
   const wsService = req.app.get('wsService');
@@ -61,7 +63,10 @@ const validatePermissionTargets = async (req, res, role, permissions, targetUser
     return null;
   }
 
-  const validPerms = await roleService.findPermissionsByIds(uniquePermIds, 'code');
+  // L-05：停用权限不得被授予（恢复启用时越权会静默落地）
+  const validPerms = await roleService.findPermissionsByIds(uniquePermIds, 'code', {
+    activeOnly: true,
+  });
   if (validPerms.length !== uniquePermIds.length) {
     ApiResponse.codeError(res, 'PERMISSION_ID_INVALID');
     return null;
@@ -166,10 +171,20 @@ const findTargetUserInScope = async (req, res, role, targetUserId, operatorMaxLe
   return targetUser;
 };
 
+/**
+ * 克隆标签：角色 name/code 都是 50 字符上限且唯一。
+ * 原实现只用毫秒时间戳做后缀，同一用户重复克隆同一内置角色时 name 完全相同，
+ * 第二次会撞唯一索引 500；把随机段一并编进去，并截断基名保证总长不越界。
+ */
+const buildCloneLabel = (base) => {
+  const suffix = `${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`.toUpperCase();
+  return `${base.slice(0, 50 - suffix.length - 1)}_${suffix}`;
+};
+
 const cloneBuiltInRoleForUser = async (req, res, role, targetUser, uniquePermIds) => {
-  const clonedCode = `${role.code}_${Date.now().toString(36).toUpperCase()}`;
+  const clonedCode = buildCloneLabel(role.code);
   const clonedRole = await roleService.createRole({
-    name: `${role.name}_${targetUser.username}`,
+    name: buildCloneLabel(`${role.name}_${targetUser.username}`),
     code: clonedCode,
     description: `由内置角色 ${role.name} 克隆，仅用于用户 ${targetUser.username}`,
     level: role.level,
@@ -177,10 +192,26 @@ const cloneBuiltInRoleForUser = async (req, res, role, targetUser, uniquePermIds
     permissions: uniquePermIds,
   });
 
+  // L-13：克隆落库后复验权限仍存在且生效（删除权限采用「先删后查引用」，
+  // 本请求若在删除前通过校验、删除后才落库，这里会看到缺失）
+  const activePerms = await roleService.findPermissionsByIds(uniquePermIds, '_id', {
+    activeOnly: true,
+  });
+  if (activePerms.length !== uniquePermIds.length) {
+    await roleService.deleteRole(clonedRole._id);
+    return ApiResponse.codeError(res, 'PERMISSION_ID_INVALID');
+  }
+
   const newRoleIds = targetUser.roles.map((roleId) =>
     roleId.toString() === role._id.toString() ? clonedRole._id : roleId
   );
-  await roleService.updateUserRoles(targetUser._id, newRoleIds);
+  // L-12：克隆角色与用户角色集必须同进同退。用户角色集被并发修改时撤销本次克隆，
+  // 避免留下一个无人持有的孤儿角色；CAS 过滤器用载入时的 roles 快照。
+  const updated = await userService.updateRoles(targetUser._id, newRoleIds, targetUser.roles || []);
+  if (!updated) {
+    await roleService.deleteRole(clonedRole._id);
+    return ApiResponse.codeError(res, 'USER_STATE_CONFLICT');
+  }
   invalidateUserCache(targetUser._id);
 
   const updatedRole = await roleService.findPopulatedRole(clonedRole._id);
@@ -259,8 +290,27 @@ const assignPermissions = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'SUPER_ADMIN_ROLE_PERMISSIONS_LOCKED');
   }
 
-  role.permissions = uniquePermIds;
-  await roleService.saveRole(role);
+  // L-04：CAS 写回。过滤器带载入时的 permissions 快照，
+  // 并发授权会 miss 而不是把对方的集合整个覆盖掉。
+  const previousPermissions = role.permissions;
+  const saved = await roleService.updateRolePermissions(
+    role._id,
+    uniquePermIds,
+    previousPermissions
+  );
+  if (!saved) {
+    const stillExists = await roleService.findRoleForUpdate(role._id);
+    return ApiResponse.codeError(res, stillExists ? 'ROLE_STATE_CONFLICT' : 'ROLE_NOT_FOUND');
+  }
+  // L-13：写后复验权限仍存在且生效。删除权限的请求采用「先删后查引用」，
+  // 本请求若在删除前通过校验、删除后才落库，这里会看到缺失并回滚。
+  const activePerms = await roleService.findPermissionsByIds(uniquePermIds, '_id', {
+    activeOnly: true,
+  });
+  if (activePerms.length !== uniquePermIds.length) {
+    await roleService.updateRolePermissions(role._id, previousPermissions, uniquePermIds);
+    return ApiResponse.codeError(res, 'PERMISSION_ID_INVALID');
+  }
   const affectedUsers = await roleService.listUsersWithRole(role._id);
   affectedUsers.forEach((user) => invalidateUserCache(user._id));
 

@@ -149,6 +149,9 @@ describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
     expect(securityAlert.shouldSendAlert(`brute_force_ip_${ip}`)).toBe(false);
 
     await seedFailures(username, ip);
+    // #21：IP 封禁的前置信号是"同一 IP 失败过 ≥2 个不同账号"；
+    // 陪跑账号提供该信号，主账号的频控键仍被真实 shouldSendAlert 占着。
+    await seedFailures(`${username}_peer`, ip);
     await securityAlert.checkBruteForce(username, ip);
 
     // 修复前：频控命中 ⇒ 直接 return ⇒ 一条审计都没有、封禁一次都不做
@@ -169,6 +172,8 @@ describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
     // 第一次触发：封禁"未生效"（模拟白名单命中 / 写库失败）
     banResult = { banned: false, reason: 'persist_failed' };
     await seedFailures(username, ip);
+    // #21 多账号信号：只影响"该不该封"，不影响本条要钉的"频控不得吞掉重试"
+    await seedFailures(`${username}_peer`, ip);
     await securityAlert.checkBruteForce(username, ip);
     expect(banCalls).toHaveLength(1);
     expect(banCalls[0].durationMs).toBe(ESCALATION_TIERS[0]);
@@ -336,7 +341,7 @@ describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
 describe('写法门禁：shouldSendAlert 必须排在审计与封禁之后', () => {
   const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 
-  test('checkBruteForce：首个 shouldSendAlert 晚于 AuditLog.create 与 addToBlacklist', () => {
+  test('checkBruteForce：首个 shouldSendAlert 晚于 AuditLog.create 与封禁', () => {
     const src = stripComments(
       fs.readFileSync(path.join(__dirname, '..', '..', 'services', 'securityAlert.js'), 'utf8')
     );
@@ -346,7 +351,9 @@ describe('写法门禁：shouldSendAlert 必须排在审计与封禁之后', () 
 
     const gate = body.indexOf('shouldSendAlert(');
     const audit = body.indexOf('await AuditLog.create(');
-    const ban = body.indexOf('await addToBlacklist(');
+    // 封禁动作已拆到 securityAlertIpBans.js；这里的判据是"处置调用点"，
+    // 不是"addToBlacklist 字面量出现在哪个文件"。
+    const ban = body.indexOf('applyBruteForceIpBan(');
     expect(gate).toBeGreaterThan(-1);
     expect(audit).toBeGreaterThan(-1);
     expect(ban).toBeGreaterThan(-1);

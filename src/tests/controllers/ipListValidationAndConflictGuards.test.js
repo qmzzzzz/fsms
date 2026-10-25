@@ -60,8 +60,10 @@ describe('ipListController 分支补齐', () => {
    *    不做"等不到就跳过"，也不返回 null 让断言在别处含糊转红。
    *  - username 带 stamp，本套件之外没有同名人，因此查到的就是这次 403 留下的痕迹。
    *    再加 method 收窄：POST/DELETE 两条用例共用同一操作员，否则后者会读到前者。
+   *    分片删除用例又各留一条 DELETE 审计（body.ip 不同），故调用方还必须按
+   *    body.ip 再收窄一次——只按 method 轮询会被同套件里更早的拒绝记录冒充。
    */
-  const findEscalationAudit = async (method) => {
+  const findEscalationAudit = async (method, extraFilter = {}) => {
     const AuditLog = require('../../models/AuditLog');
     let doc = null;
     await waitFor(
@@ -70,6 +72,7 @@ describe('ipListController 分支补齐', () => {
           username: secUserName,
           action: 'privilege_escalation',
           method,
+          ...extraFilter,
         })
           .sort({ _id: -1 })
           .lean();
@@ -265,6 +268,48 @@ describe('ipListController 分支补齐', () => {
     });
   });
 
+  test('POST 分片铺满地址族（两条 /1）→ 与 /0 同等收口，非超管 403', async () => {
+    // 单条 0.0.0.0/1 只是半张网，可以正常加入；但第二条 /1 补齐后并集等价于
+    // 0.0.0.0/0。只按单条 bits===0 判定的守卫会在这里静默放行。
+    const first = await request(app)
+      .post('/api/security/ip-list')
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ ip: '0.0.0.0/1', type: 'white', reason: '分支补齐-分片前置' });
+    expect(first.status).toBe(200);
+
+    try {
+      const res = await secPost('/api/security/ip-list', { ip: '128.0.0.0/1', type: 'white' });
+      expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('FULL_RANGE_FORBIDDEN');
+
+      // 越权审计按 body.ip 精确认领：同一操作员上一条 POST 审计（/0 用例）还在库里，
+      // 只按 method 轮询会立刻命中旧行，把「本次拒绝是否留痕」断成假绿。
+      const AuditLog = require('../../models/AuditLog');
+      let audit = null;
+      await waitFor(
+        async () => {
+          audit = await AuditLog.findOne({
+            username: secUserName,
+            action: 'privilege_escalation',
+            method: 'POST',
+            'body.ip': '128.0.0.0/1',
+          }).lean();
+          return !!audit;
+        },
+        { label: '分片铺满地址族的越权审计落库' }
+      );
+      expect(audit.riskFactors).toEqual(['full_range_cidr_attempt']);
+      expect(audit.riskLevel).toBe('critical');
+    } finally {
+      const id = first.body?.data?._id;
+      if (id) {
+        await request(app)
+          .delete(`/api/security/ip-list/${id}`)
+          .set('Authorization', `Bearer ${superToken}`);
+      }
+    }
+  });
+
   test('POST 加黑被白名单覆盖 → 400 冲突，信任标记不可被封禁覆盖', async () => {
     // 前置：超管加白 10.0.0.0/8
     const white = await request(app)
@@ -302,7 +347,7 @@ describe('ipListController 分支补齐', () => {
     expect(res.body.errors.errorCode).toBe('FULL_RANGE_FORBIDDEN');
     // 删除侧的对称约束同样要留高危痕迹：这条记录与添加侧共用 riskFactors 前缀，
     // 只在后缀上区分（removal），写错一个词 SIEM 侧就把"拆防线"当成"加防线未遂"。
-    const audit = await findEscalationAudit('DELETE');
+    const audit = await findEscalationAudit('DELETE', { 'body.ip': '0.0.0.0/0' });
     expect(audit).not.toBeNull();
     expect({
       riskLevel: audit.riskLevel,
@@ -315,5 +360,101 @@ describe('ipListController 分支补齐', () => {
       success: false,
       path: `/api/security/ip-list/${fullId}`,
     });
+  });
+
+  /**
+   * 分片删除守卫：两条 /1 各自都只是半张网，单条 bits===0 判据会放行逐个删除，
+   * 于是非超管能把超管配置的全覆盖状态拆掉。删除侧必须和添加侧一样看并集，
+   * 但只拦「删掉后覆盖率下降」的那一步——冗余条目不影响覆盖，不应误伤。
+   */
+  const addPairAsSuper = async (pair) => {
+    const ids = [];
+    for (const ip of pair) {
+      const res = await request(app)
+        .post('/api/security/ip-list')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ ip, type: 'white', reason: '分支补齐-分片删除前置' });
+      expect(res.status).toBe(200);
+      ids.push(res.body?.data?._id);
+    }
+    return ids;
+  };
+
+  const expectRemovalGuarded = async (pair, targetIp) => {
+    const ids = await addPairAsSuper(pair);
+    try {
+      const targetId = ids[0];
+      expect(targetId).toBeTruthy();
+
+      const res = await secDel(`/api/security/ip-list/${targetId}`);
+      expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('FULL_RANGE_FORBIDDEN');
+      // 「拒绝」必须是"仍在"，而不是"删了但回 403"
+      expect(await IPBlacklist.countDocuments({ _id: targetId })).toBe(1);
+
+      // 同一操作员在 /0 用例里也留过 DELETE 审计，按 body.ip 精确认领本次拒绝
+      const AuditLog = require('../../models/AuditLog');
+      let audit = null;
+      await waitFor(
+        async () => {
+          audit = await AuditLog.findOne({
+            username: secUserName,
+            action: 'privilege_escalation',
+            method: 'DELETE',
+            'body.ip': targetIp,
+          }).lean();
+          return !!audit;
+        },
+        { label: `分片删除的越权审计落库（${targetIp}）` }
+      );
+      expect(audit.riskFactors).toEqual(['full_range_cidr_removal_attempt']);
+      expect(audit.riskLevel).toBe('critical');
+    } finally {
+      for (const id of ids) {
+        if (!id) continue;
+        await request(app)
+          .delete(`/api/security/ip-list/${id}`)
+          .set('Authorization', `Bearer ${superToken}`);
+      }
+    }
+  };
+
+  test('DELETE 分片铺满 IPv4（两条 /1）by 非超管 → 403（删除侧同样看并集）', async () => {
+    await expectRemovalGuarded(['0.0.0.0/1', '128.0.0.0/1'], '0.0.0.0/1');
+  });
+
+  test('DELETE 分片铺满 IPv6（两条 /1）by 非超管 → 403', async () => {
+    await expectRemovalGuarded(['::/1', '8000::/1'], '::/1');
+  });
+
+  test('DELETE 全覆盖名单中的冗余条目 → 不受守卫误伤', async () => {
+    // /0 已铺满，再挂一条 /1 只是冗余。删除 /1 不会降低覆盖率 ⇒ 非超管应放行。
+    const ids = [];
+    try {
+      for (const [ip, reason] of [
+        ['0.0.0.0/0', '分支补齐-全覆盖前置'],
+        ['0.0.0.0/1', '分支补齐-冗余前置'],
+      ]) {
+        const res = await request(app)
+          .post('/api/security/ip-list')
+          .set('Authorization', `Bearer ${superToken}`)
+          .send({ ip, type: 'white', reason });
+        expect(res.status).toBe(200);
+        ids.push(res.body?.data?._id);
+      }
+
+      const res = await secDel(`/api/security/ip-list/${ids[1]}`);
+      expect(res.status).toBe(200);
+      expect(await IPBlacklist.countDocuments({ _id: ids[1] })).toBe(0);
+      // 全覆盖条目本身仍在
+      expect(await IPBlacklist.countDocuments({ _id: ids[0] })).toBe(1);
+    } finally {
+      for (const id of ids) {
+        if (!id) continue;
+        await request(app)
+          .delete(`/api/security/ip-list/${id}`)
+          .set('Authorization', `Bearer ${superToken}`);
+      }
+    }
   });
 });

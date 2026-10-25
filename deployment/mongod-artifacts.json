@@ -1,0 +1,14 @@
+{
+  "note": "CI 测试用 mongod 的独立信任锚。scripts/provision-mongod.js 会按平台下载并逐字校验 sha256，然后通过 MONGOMS_SYSTEM_BINARY 交给 mongodb-memory-server——安装期的 postinstall 因此完全不需要执行（CI 全部 npm ci --ignore-scripts）。sha256 是提交时人工核对过的不可变锚：上游换包、镜像源投毒、MITM 都会在下载后校验失败。新增平台/版本时必须在评审里核对官方发布页并更新本表，禁止通配。",
+  "artifacts": [
+    {
+      "platform": "linux",
+      "arch": "x64",
+      "distro": "ubuntu2404",
+      "version": "8.0.34",
+      "url": "https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2404-8.0.34.tgz",
+      "sha256": "3e55cdcf7013fbc805d29d8195230df4b23c7688733ee15ad58ac6bc2a416611",
+      "binary": "mongodb-linux-x86_64-ubuntu2404-8.0.34/bin/mongod"
+    }
+  ]
+}

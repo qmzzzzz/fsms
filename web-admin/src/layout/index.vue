@@ -11,11 +11,14 @@
     class="app-wrapper"
     :class="{ 'mobile-sidebar-open': mobileSidebarOpen }"
     :inert="showExit ? '' : null"
+    @keydown.esc="mobileSidebarOpen = false"
   >
-    <!-- 移动端遮罩 -->
-    <div
+    <!-- 移动端遮罩：用原生 button 承载点击/键盘关闭，避免只有一个不可聚焦的 div -->
+    <button
       v-if="isMobile && mobileSidebarOpen"
+      type="button"
       class="mobile-overlay"
+      :aria-label="t('layout.closeSidebar')"
       @click="mobileSidebarOpen = false"
     />
 
@@ -70,7 +73,15 @@
     <div class="main-container">
       <header class="navbar">
         <div class="navbar-left">
-          <el-icon class="collapse-btn" @click="handleToggleSidebar">
+          <el-icon
+            class="collapse-btn"
+            role="button"
+            tabindex="0"
+            :aria-label="isCollapse ? t('layout.expandSidebar') : t('layout.collapseSidebar')"
+            @click="handleToggleSidebar"
+            @keydown.enter.prevent="handleToggleSidebar"
+            @keydown.space.prevent="handleToggleSidebar"
+          >
             <Expand v-if="isCollapse" /><Fold v-else />
           </el-icon>
           <el-breadcrumb separator="/" class="tech-hide-mobile">
@@ -83,14 +94,30 @@
         <div class="navbar-right">
           <!-- 举报异常：人人可用的安全出口（无权限码），入口在搜索左侧 -->
           <el-tooltip :content="t('security.report')" placement="bottom">
-            <el-icon class="action-icon" @click="reportDialogVisible = true">
+            <el-icon
+              class="action-icon"
+              role="button"
+              tabindex="0"
+              :aria-label="t('security.report')"
+              @click="reportDialogVisible = true"
+              @keydown.enter.prevent="reportDialogVisible = true"
+              @keydown.space.prevent="reportDialogVisible = true"
+            >
               <Warning />
             </el-icon>
           </el-tooltip>
 
           <!-- ⌘K 全局搜索（移动端同样可点按触发） -->
           <el-tooltip :content="searchTooltip" placement="bottom">
-            <el-icon class="action-icon" @click="searchPaletteRef?.open()">
+            <el-icon
+              class="action-icon"
+              role="button"
+              tabindex="0"
+              :aria-label="t('common.searchPalette')"
+              @click="searchPaletteRef?.open()"
+              @keydown.enter.prevent="searchPaletteRef?.open()"
+              @keydown.space.prevent="searchPaletteRef?.open()"
+            >
               <Search />
             </el-icon>
           </el-tooltip>
@@ -106,7 +133,14 @@
               @command="handleLanguageChange"
               @visible-change="onPrefMenuVisible"
             >
-              <el-icon class="action-icon">
+              <el-icon
+                class="action-icon"
+                role="button"
+                tabindex="0"
+                :aria-label="t('common.language')"
+                @keydown.enter.prevent="$event.currentTarget.click()"
+                @keydown.space.prevent="$event.currentTarget.click()"
+              >
                 <Operation />
               </el-icon>
               <template #dropdown>
@@ -129,7 +163,14 @@
               @command="handleThemeChange"
               @visible-change="onPrefMenuVisible"
             >
-              <el-icon class="action-icon">
+              <el-icon
+                class="action-icon"
+                role="button"
+                tabindex="0"
+                :aria-label="t('common.theme')"
+                @keydown.enter.prevent="$event.currentTarget.click()"
+                @keydown.space.prevent="$event.currentTarget.click()"
+              >
                 <Monitor v-if="themeMode === 'system'" />
                 <Sunny v-else-if="themeMode === 'light'" />
                 <Moon v-else />
@@ -159,7 +200,15 @@
           </el-tooltip>
 
           <el-tooltip :content="t('common.refresh')" placement="bottom">
-            <el-icon class="action-icon" @click="refresh">
+            <el-icon
+              class="action-icon"
+              role="button"
+              tabindex="0"
+              :aria-label="t('common.refresh')"
+              @click="refresh"
+              @keydown.enter.prevent="refresh"
+              @keydown.space.prevent="refresh"
+            >
               <Refresh />
             </el-icon>
           </el-tooltip>
@@ -169,7 +218,15 @@
             placement="bottom"
             class="tech-hide-mobile"
           >
-            <el-icon class="action-icon" @click="toggleFullScreen">
+            <el-icon
+              class="action-icon"
+              role="button"
+              tabindex="0"
+              :aria-label="$t('layout.fullscreen')"
+              @click="toggleFullScreen"
+              @keydown.enter.prevent="toggleFullScreen"
+              @keydown.space.prevent="toggleFullScreen"
+            >
               <FullScreen />
             </el-icon>
           </el-tooltip>
@@ -524,16 +581,15 @@ const handleCommand = (command) => {
 
           // 服务端登出使 token 进入黑名单，成功后才清本地状态。
           //
-          // 后端 P2-26 起，令牌吊销未落库会返回 503/LOGOUT_REVOKE_FAILED——
-          // 此时**不能**清本地状态并跳登录页：那会让用户以为已登出，
-          // 而服务端令牌在其剩余有效期内仍然可用（被窃取即持续可用）。
-          // 保持登录态并提示重试，是把「未完成」如实呈现给用户。
-          // 其余失败（网络不可达、令牌已过期的 401）仍完成本地登出，
-          // 避免用户卡在无法操作的已登录态。
+          // 令牌在 httpOnly Cookie 中，JS 无法自行清除：只有服务端明确答复
+          // 「会话已不可用」（401/403）时，本地登出才不会留下仍可恢复的服务端会话。
+          // 网络错误 / 5xx（含 503）时令牌可能仍然有效，若清本地并提示成功，
+          // 用户会误以为已登出，刷新页面后 Cookie 又会让会话复活。
           try {
             await api.auth.logout()
           } catch (err) {
-            if (err?.response?.status === 503) {
+            const status = err?.response?.status
+            if (status !== 401 && status !== 403) {
               // 提示已由 api 响应拦截器按错误码本地化输出，此处仅中止登出
               showExit.value = false
               return
@@ -607,6 +663,15 @@ const handleCommand = (command) => {
   background: rgba(0, 0, 0, 0.5);
   z-index: 150;
   backdrop-filter: blur(2px);
+  /* 原生 button 只借语义，不借外观 */
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.mobile-overlay:focus-visible {
+  outline: 2px solid var(--xf-primary);
+  outline-offset: -4px;
 }
 
 /* ===== Logo ===== */
@@ -788,6 +853,13 @@ const handleCommand = (command) => {
 .collapse-btn:hover {
   color: var(--xf-primary);
   background: var(--xf-primary-alpha-8);
+}
+
+.collapse-btn:focus-visible,
+.action-icon:focus-visible {
+  outline: 2px solid var(--xf-primary);
+  outline-offset: 2px;
+  color: var(--xf-primary);
 }
 
 .navbar-right {

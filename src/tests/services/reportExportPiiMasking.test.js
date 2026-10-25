@@ -102,11 +102,31 @@ describe('A4 接线闸（只登记不接线 = 缺陷）', () => {
     expect(wb).toContain('createSafeTransform(EXPORT_ROW_TRANSFORMS[type],{maskPii})');
   });
 
-  test('控制器：脱敏档由 system:read 判定，且把 maskPii 交给 writeExportWorkbook', () => {
+  test('控制器：脱敏档由 pii:export 判定，且把 maskPii 交给 writeExportWorkbook', () => {
     const ctrl = squash('../../controllers/reportController.js');
-    expect(ctrl).toContain("hasPermission(req.user.userId,'system:read')");
+    // L-17：判据从 system:read 收窄为 pii:export（只读管理员不再顺带拿全文导出权）
+    expect(ctrl).toContain("hasPermission(req.user.userId,'pii:export')");
+    expect(ctrl).not.toContain("hasPermission(req.user.userId,'system:read')");
+    expect(ctrl).toContain('if(req.forceMaskPii)returntrue');
     expect(ctrl).toContain('constmaskPii=awaitresolveExportMasking(req,type)');
     expect(ctrl).toContain('...collationOptions,maskPii,}');
+  });
+
+  test('路由：GET 恒掩码，未脱敏只经 POST /export/pii 且叠加 pii:export + 二次验证', () => {
+    const routes = squash('../../routes/reportRoutes.js');
+    // GET 必须挂 forceMaskPii —— 否则持 pii:export 的会话可绕过步进验证直接 GET 全文
+    expect(routes).toContain(
+      "checkPermission('report:export'),strictLimiter,forceMaskPii,reportController.exportReport"
+    );
+    // POST 的权限与二次验证一个都不能少
+    expect(routes).toContain("router.post('/export/pii',authenticate,requirePiiExportType,");
+    expect(routes).toContain(
+      "checkPermission('report:export'),checkPermission('pii:export'),requireReAuthentication(),reportController.exportReport"
+    );
+    // 类型闸必须在二次验证之前：注定 400 的请求不得消耗凭据尝试
+    expect(routes.indexOf('requirePiiExportType')).toBeLessThan(
+      routes.indexOf('requireReAuthentication()')
+    );
   });
 
   test('控制器：全文导出路径必须留痕（提权路径不能被静默放过）', () => {

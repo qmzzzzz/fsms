@@ -25,6 +25,9 @@
 
 const { HttpShipperTransport, BUFFER_CAP } = require('../../utils/logShipper');
 
+// http 端点仅用于让请求失败/成功，与出站加密判据无关（见 resolveShippingTarget）
+process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
+
 const gapOf = (line) => {
   try {
     const o = JSON.parse(line);

@@ -187,6 +187,13 @@ describe('校验错误出站面：value 一律不出站', () => {
       app = createApp();
     });
 
+    afterAll(async () => {
+      // 本套件是全仓扫描门禁，自己开/复用了 mongoose 连接就要自己收口；
+      // 不关会让 jest 进程挂在打开的 TCP 句柄上（本文件此前跑完不退出）。
+      const mongoose = require('mongoose');
+      if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+    });
+
     it('登录口令超长 ⇒ 400 且点名 password（前提）+ 响应全文不含该口令', async () => {
       // repeat(3) = 180 字符 > 登录链的 max 128（实测：128 → 401，129 → 400 密码长度异常）
       const res = await request(app)
@@ -219,7 +226,7 @@ describe('校验错误出站面：value 一律不出站', () => {
 
     it('前提自证：扫描器扫到了真实站点（格式漂移时它会静默返回空）', () => {
       // 包装出站是本仓主流写法，数量级掉了就说明 fieldErrors 的书写形态变了，扫描器需同步
-      expect(egressSites.filter((s) => isWrapped(s.expr))).toHaveLength(47);
+      expect(egressSites.filter((s) => isWrapped(s.expr))).toHaveLength(48);
       expect(arraySites.length + egressSites.length).toBeGreaterThan(50);
     });
 

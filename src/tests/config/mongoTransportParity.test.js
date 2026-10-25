@@ -91,7 +91,7 @@ function callHelper(fn, arg) {
  * `mongodb://u:p@db.internal:27017?appname=bob@127.0.0.1:27017` 在解析器里**不报错**，
  * 读出来是 hosts=["db.internal:27017"]：备份安静地连到宿主机名上，退出码却可以是 0。
  *
- * 取 `mongoose.mongo`（src/config/database.js:51 讨论的那份内嵌
+ * 取 `mongoose.mongo`（src/config/database.js:57 讨论的那份内嵌
  * mongodb-connection-string-url）而不是顶层包：本仓已实测过两份版本的行为不一致
  * （报错回显形态不同），而应用侧真正的消费点是 mongoose。`new MongoClient(uri)` 在
  * 构造期就解析连接串、不做任何 I/O（不 connect 就不留句柄）。

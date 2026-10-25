@@ -276,6 +276,9 @@ const startServer = async () => {
     assertSingleProcessAssumptions();
 
     await connectDB();
+    // 启动期事务拓扑体检：standalone 部署在启动日志里显式告警（error 级），
+    // 并通过 /readyz 的 checks.transactions 对外可见；不阻断启动。
+    await require('./utils/transaction').reportTransactionTopology();
     await initializeSystem();
 
     // WB-1：生产密钥强度审计留痕。弱密钥已在 config/validate.js 以阻断级拦截，

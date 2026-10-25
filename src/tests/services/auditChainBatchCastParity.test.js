@@ -5,6 +5,7 @@ const {
   chainBatch,
 } = require('../../utils/auditChain');
 const { AUDIT_HTTP_METHODS } = require('../../constants/audit');
+const mongoose = require('mongoose');
 
 const AuditLog = require('../../models/AuditLog');
 
@@ -117,18 +118,88 @@ describe('批量审计写入：被哈希的形态必须等于落库的形态', (
     expect(docs[2].prevHash).toBe(docs[1].hash);
   });
 
-  it.failing(
-    '登记（本批不修）：clientInfo/location 的多余子键同样在铸造时被剥掉 ⇒ 同一类永久假篡改',
-    () => {
-      // 今天 src 里没有这两个字段的写入者（只有 schema 声明与 payload 清单），
-      // 所以这是「潜在面」而非「在跑的路径」；闸一旦有人接上就会复现同一形态。
-      // 用 it.failing 钉住：哪天有人开始写 clientInfo 并修好铸造时机，本例会「意外通过」，
-      // 逼着来摘标记，而不是等到整库变红才发现。
-      const docs = [baseRecord({ clientInfo: { browser: 'x', os: 'y', device: 'z', gps: '1,2' } })];
+  it('clientInfo/location 的多余子键在铸造前被剥除 ⇒ 不再产生永久假篡改', () => {
+    // 今天 src 里没有这两个字段的写入者（只有 schema 声明与 payload 清单），
+    // 所以这是「潜在面」而非「在跑的路径」。判据必须钉在铸造之前：
+    // 只剥落库侧、哈希侧仍带着多余子键，读回复算就会永久失配。
+    const rawClientInfo = {
+      browser: 'x',
+      os: 'y',
+      device: 'z',
+      reportedIp: ' 203.0.113.7 ',
+      socketPeer: '198.51.100.9',
+      gps: '1,2',
+    };
+    const rawLocation = {
+      country: 'CN',
+      province: 'GD',
+      city: 'SZ',
+      latitude: 22.5,
+      extra: { ignored: true },
+    };
+    const docs = [baseRecord({ clientInfo: rawClientInfo, location: rawLocation })];
+    chainBatch(docs, null);
+
+    // 内存里就是落库形态：未知子键已删除，reportedIp 的空白已按 schema 闸修剪
+    expect(docs[0].clientInfo).toEqual({
+      browser: 'x',
+      os: 'y',
+      device: 'z',
+      reportedIp: '203.0.113.7',
+      socketPeer: '198.51.100.9',
+    });
+    expect(docs[0].location).toEqual({ country: 'CN', province: 'GD', city: 'SZ' });
+    expect(selfVerify(docs[0]).same).toBe(true);
+  });
+
+  describe('真实落库往返（insertMany 铸造后再读回）', () => {
+    beforeAll(async () => {
+      if (mongoose.connection.readyState === 0) {
+        await mongoose.connect(process.env.MONGODB_URI);
+      }
+    });
+
+    afterAll(async () => {
+      if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+    });
+
+    it('clientInfo/location 多余子键被剥除后，读回文档重算仍等于落库 hash', async () => {
+      const docs = [
+        baseRecord({
+          clientInfo: {
+            browser: 'Chrome',
+            os: 'Windows',
+            device: 'desktop',
+            reportedIp: ' 203.0.113.7 ',
+            socketPeer: '198.51.100.9',
+            gps: '1,2',
+          },
+          location: {
+            country: 'CN',
+            province: 'GD',
+            city: 'SZ',
+            latitude: 22.5,
+            extra: { ignored: true },
+          },
+        }),
+      ];
       chainBatch(docs, null);
-      expect(selfVerify(docs[0]).same).toBe(true);
-    }
-  );
+      const written = await AuditLog.insertMany(docs);
+      const stored = await AuditLog.findById(written[0]._id).lean();
+
+      expect(stored.clientInfo).toEqual({
+        browser: 'Chrome',
+        os: 'Windows',
+        device: 'desktop',
+        reportedIp: '203.0.113.7',
+        socketPeer: '198.51.100.9',
+      });
+      expect(stored.location).toEqual({ country: 'CN', province: 'GD', city: 'SZ' });
+      expect(computeHash(stored.prevHash, canonicalPayload(stored, CURRENT_PAYLOAD_VERSION))).toBe(
+        stored.hash
+      );
+    });
+  });
 
   /**
    * ip 是这个缺陷家族的第 2 个已修实例（2026-10-01 第 5 轮补界）。

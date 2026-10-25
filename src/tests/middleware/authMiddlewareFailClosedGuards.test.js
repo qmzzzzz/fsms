@@ -4,18 +4,29 @@
  *
  * 被测对象：auth 中间件的账户状态拦截、IP 范围拒绝、fail-closed 故障映射、缓存淘汰
  * 守护的不变式：账户 inactive/locked/lockUntil 必须拦截；黑名单/会话服务故障必须 fail-closed 而非放行
- * 可证伪性：本轮未做变异实测
+ * 可证伪性：2026-10-24 复测过（架空「本地缓存标记失效」两行 ⇒ 1 例红，见下方 [已修复] 条）；
+ *   2026-09-20 首次实测时同一变异下 11 例全绿（已随该条一并记录）。
  *
  * ⚠️ 既往审计指出的边界（2026-09-20 逐条**内容复核**；原报告行号已漂移，按代码特征取证）
  *   标记：[仍有效] 复核后问题依旧 / [已修复] 已被后续修复解决 / [部分有效] 仅部分成立 /
  *   [已自陈] 用例内已记录并给出保留理由。复核证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.9 测试资产。
- *   - [仍有效·已实测] `:248-278` 三条 `not.toThrow()` 却从不检查缓存是否真被清 ⇒ 跨实例权限失效静默失效时全绿（deliverables/七维代码健康度深度审计-2026-09-18.md）
- *     复核（2026-09-20 **变异实测**，行号已漂移到 `:269-299`）：**成立**。只架空「本地缓存标记失效」
+ *   - [已修复·2026-10-24] `:269-299` 三条 `not.toThrow()` 却从不检查缓存是否真被清 ⇒ 跨实例权限失效静默失效时全绿（deliverables/七维代码健康度深度审计-2026-09-18.md）
+ *     复核（2026-09-20 **变异实测**，行号已漂移到 `:269-299`）：成立。只架空「本地缓存标记失效」
  *     （`cached.invalidatedAt = now` 与 `userCache.set(...)`），保留联动失效与告警 → 本文件 11 例**全绿**。
  *     该用例自己的注释（`:295`）就写着「匹配前缀 → 本地失效（**无异常即通过**）」。
  *     ⚠️ 但**不要把"整函数 no-op"也当成不设防**：那样会被 `:217-234`「权限缓存联动失效失败仅告警」
  *     的 `logger.warn` 断言杀掉——**粗粒度变异测的是"模块有没有人管"，细粒度才测这条具体不变量**。
  *     证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法。
+ *     **修复（2026-10-24）**：改为对**可观察后果**断言，不再用 `not.toThrow()` 表达"失效成功"：
+ *       · 「本地用户缓存」组新增用例：一次请求预热缓存 → 绕过应用层把库里 status 改成
+ *         inactive → 未失效时仍 200（先证明缓存确实在生效）→ `invalidateUserCache` 后
+ *         必须 401。失效逻辑被架空时该用例必红。
+ *       · 「跨实例失效广播接收器」用例：匹配前缀的键不再只断言不抛，而是要求
+ *         `User.invalidatePermissionCache` 被以该 userId 调用（这是"本地失效真的执行了"
+ *         的可观察副作用）；不匹配前缀/非字符串键则要求它**一次都不被调用**
+ *         （旧断言对"把 else 分支写反"完全免疫）。
+ *     **变异复测（同一手法，2026-10-24）**：只架空上述两行后，本文件 1 例变红
+ *     （`失效后下一次请求必须重新查库`），不再全绿。
  *
  * 命名沿革：2026-09-20 由 `authMiddlewareGap.test.js` 更名。旧名里的
  *   Coverage / Gap / Hardening / Branch 说的是「当初为什么写它」（补覆盖率基线），
@@ -296,6 +307,40 @@ describe('auth 中间件分支补齐', () => {
       expect(String(res.body.data.user.id)).toBe(String(users.evict._id));
     });
 
+    /**
+     * 【2026-10-24 加强】此前本文件对「缓存失效」只有三条 `not.toThrow()`
+     * （文件末尾「跨实例失效广播接收器」用例）。它们只能证明"没抛异常"，而
+     * 失效逻辑被整体架空（`cached.invalidatedAt = now` 与 `userCache.set(...)`
+     * 都不写）时同样不抛——文件头自陈的变异实测正是「只架空这两行 ⇒ 本文件
+     * 11 例全绿」。所以这里换成对**可观察后果**的断言：失效之后下一次请求必须
+     * 真的回到数据库，而不是继续吃 60s TTL 里的旧快照。
+     *
+     * 为什么用「库里改成 inactive」当探针：它是缓存失效在安全语义上的唯一目的
+     * （禁用/改密要立即生效）。断言状态码而不是内部 Map，改实现不会误伤，
+     * 但把失效改成 no-op 一定红。
+     */
+    test('失效后下一次请求必须重新查库：库里改成 inactive 立即生效（不等 60s TTL）', async () => {
+      const { invalidateUserCache } = require('../../middleware/auth');
+      const uid = String(users.evict._id);
+      // 1) 一次请求把该用户灌进本地缓存
+      expect((await getMe(users.evict.token)).status).toBe(200);
+      // 2) 绕过应用层直接改库（模拟另一实例或后台脚本的变更）
+      await User.findByIdAndUpdate(uid, { status: USER_STATUS.INACTIVE });
+      try {
+        // 3) 未失效时仍命中旧缓存 ⇒ 先证明「缓存确实在生效」。
+        //    没有这一条，第 4 步可能只是"每次请求都没走缓存"造成的假象。
+        expect((await getMe(users.evict.token)).status).toBe(200);
+        // 4) 失效后必须立刻看到新状态
+        invalidateUserCache(uid);
+        const after = await getMe(users.evict.token);
+        expect(after.status).toBe(401);
+        expect(after.body.message).toContain('已被禁用');
+      } finally {
+        await User.findByIdAndUpdate(uid, { status: USER_STATUS.ACTIVE });
+        invalidateUserCache(uid);
+      }
+    });
+
     test('权限缓存联动失效失败仅告警，不阻断主流程', () => {
       const logger = require('../../utils/logger');
       const userSpy = jest.spyOn(User, 'invalidatePermissionCache').mockImplementation(() => {
@@ -380,10 +425,27 @@ describe('auth 中间件分支补齐', () => {
       jest.dontMock('../../services/sharedCache');
 
       expect(typeof captured).toBe('function');
-      // 匹配前缀 → 本地失效（无异常即通过）；不匹配键与非字符串键一律忽略
-      expect(() => captured('auth:user:receiver-broadcast-id')).not.toThrow();
-      expect(() => captured('other:prefix')).not.toThrow();
-      expect(() => captured(123)).not.toThrow();
+      // 【2026-10-24 加强】匹配前缀的键不能只断言 not.toThrow()：失效逻辑被架空时
+      // 同样不抛（文件头自陈的变异实测就是这一条）。这里改用**可观察副作用**——
+      // invalidateUserCacheLocal 必然联动调用 User.invalidatePermissionCache，
+      // 它没被调用就说明"本地失效"这段根本没执行。
+      const hitSpy = jest.spyOn(User, 'invalidatePermissionCache').mockImplementation(() => {});
+      try {
+        expect(() => captured('auth:user:receiver-broadcast-id')).not.toThrow();
+        expect(hitSpy).toHaveBeenCalledWith('receiver-broadcast-id');
+      } finally {
+        hitSpy.mockRestore();
+      }
+      // 不匹配前缀与非字符串键：不仅要"不抛"，还**不得产生任何失效副作用**
+      // （旧断言只有 not.toThrow，"把 else 分支写反"这种改动照样全绿）
+      const missSpy = jest.spyOn(User, 'invalidatePermissionCache').mockImplementation(() => {});
+      try {
+        expect(() => captured('other:prefix')).not.toThrow();
+        expect(() => captured(123)).not.toThrow();
+        expect(missSpy).not.toHaveBeenCalled();
+      } finally {
+        missSpy.mockRestore();
+      }
     });
   });
 });

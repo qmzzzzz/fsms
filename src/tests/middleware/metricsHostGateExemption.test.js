@@ -36,6 +36,13 @@ const ROOT = path.join(__dirname, '..', '..', '..');
 const ALLOWED_HOST = 'fsms.example.com';
 
 /**
+ * 反代拓扑（TRUST_PROXY_HOPS=1）下 /metrics 必须携带令牌：回环对端是 Nginx
+ * 而不是抓取方，应用层没有其他可用区分度。真实应用用例按 shipped 部署的
+ * 方式配置 METRICS_TOKEN，而不是绕开这道闸。
+ */
+const METRICS_TOKEN = 'probe-metrics-token-for-host-gate-test';
+
+/**
  * 抓取方实际发出的 Host —— 从 shipped 配置解析，不手抄。
  *
  * 手抄成 'app:3000' 会让本文件在 prometheus.yml 改了采集目标后继续绿灯，
@@ -201,7 +208,7 @@ describe('真实应用 + shipped 监控配置：部署链必须真的能抓起�
       SAVED[k] = process.env[k];
     });
     process.env.ALLOWED_HOSTS = ALLOWED_HOST;
-    delete process.env.METRICS_TOKEN;
+    process.env.METRICS_TOKEN = METRICS_TOKEN;
     process.env.TRUST_PROXY_HOPS = '1';
     // Host 闸门每次拒绝都写一条链上审计；不连库的话这些写入会各自挂满
     // 10s 缓冲超时（本文件曾因此慢 30s 并让 worker 强制退出）
@@ -225,8 +232,11 @@ describe('真实应用 + shipped 监控配置：部署链必须真的能抓起�
     }
   });
 
-  test('以 prometheus.yml 的 target 作为 Host 抓真实 /metrics：拿到 Prometheus 文本', async () => {
-    const res = await request(app).get(SCRAPE.metricsPath).set('Host', SCRAPE.host);
+  test('以 prometheus.yml 的 target 作为 Host + 反代令牌抓真实 /metrics：拿到 Prometheus 文本', async () => {
+    const res = await request(app)
+      .get(SCRAPE.metricsPath)
+      .set('Host', SCRAPE.host)
+      .set('Authorization', `Bearer ${METRICS_TOKEN}`);
     expect(res.status).toBe(200);
     expect(res.text).toContain('# HELP http_requests_total');
   });
@@ -240,7 +250,10 @@ describe('真实应用 + shipped 监控配置：部署链必须真的能抓起�
   test('Host 头在 /metrics 响应里没有输出面（豁免安全性的前提）', async () => {
     // 前提若哪天不成立（有人把 Host 写进指标标签/文本注释），Host 头注入就重新有了
     // 落点，本条先用红把改动挡住，逼改动方回头重估豁免
-    const res = await request(app).get('/metrics').set('Host', SCRAPE.host);
+    const res = await request(app)
+      .get('/metrics')
+      .set('Host', SCRAPE.host)
+      .set('Authorization', `Bearer ${METRICS_TOKEN}`);
     expect(res.status).toBe(200);
     expect(res.text).not.toContain(SCRAPE.host);
     expect(res.text).not.toContain(ALLOWED_HOST);

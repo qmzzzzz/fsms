@@ -45,21 +45,54 @@ describe('captchaService 分支补齐', () => {
     expect(result.svg).toContain('<svg');
   });
 
-  test('Redis 模式下活跃数超限 → 拒绝生成（防刷取）', async () => {
+  test('Redis 模式全局活跃数超限 → 拒绝生成，并归还本次预占的双配额', async () => {
     jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(true);
-    jest.spyOn(sharedCache, 'incrWithTtl').mockResolvedValue(10001);
-    await expect(captchaService.generate()).resolves.toBeNull();
+    jest.spyOn(sharedCache, 'incrWithTtl').mockResolvedValueOnce(1).mockResolvedValueOnce(10001);
+    const decrSpy = jest.spyOn(sharedCache, 'decrWithFloorZero').mockResolvedValue(0);
+    await expect(captchaService.generate({ ip: '203.0.113.7' })).resolves.toBeNull();
+    // 先加后减：被拒绝的请求不得把全局计数继续推高（#8）
+    expect(decrSpy).toHaveBeenCalledTimes(2);
   });
 
-  test('Redis 模式正常生成：走共享存储（带抖动 TTL）', async () => {
+  test('Redis 模式单 IP 超限 → 不触全局键即拒绝（少数 IP 不能打满全局）', async () => {
+    jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(true);
+    const incrSpy = jest.spyOn(sharedCache, 'incrWithTtl').mockResolvedValueOnce(21);
+    jest.spyOn(sharedCache, 'decrWithFloorZero').mockResolvedValue(0);
+    await expect(captchaService.generate({ ip: '203.0.113.8' })).resolves.toBeNull();
+    expect(incrSpy).toHaveBeenCalledTimes(1);
+    expect(incrSpy.mock.calls[0][0]).toMatch(/^captcha:active-count:ip:/);
+  });
+
+  test('Redis 模式正常生成：走共享存储（带抖动 TTL）并记录所属 IP 桶', async () => {
     const setSpy = jest.spyOn(sharedCache, 'set').mockResolvedValue(true);
     jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(true);
     jest.spyOn(sharedCache, 'incrWithTtl').mockResolvedValue(1);
-    const result = await captchaService.generate();
+    const result = await captchaService.generate({ ip: '203.0.113.9' });
     expect(result).toBeTruthy();
     expect(setSpy).toHaveBeenCalledTimes(1);
-    const [key] = setSpy.mock.calls[0];
+    const [key, entry] = setSpy.mock.calls[0];
     expect(key).toMatch(/^captcha:/);
+    expect(entry.ipKey).toMatch(/^captcha:active-count:ip:[0-9a-f]{16}$/);
+  });
+
+  test('内存模式：同一 IP 活跃数达到配额后拒绝，其他 IP 不受影响', async () => {
+    jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(false);
+    for (let i = 0; i < 20; i += 1) {
+      await expect(captchaService.generate({ ip: '203.0.113.10' })).resolves.toBeTruthy();
+    }
+    await expect(captchaService.generate({ ip: '203.0.113.10' })).resolves.toBeNull();
+    await expect(captchaService.generate({ ip: '203.0.113.11' })).resolves.toBeTruthy();
+  });
+
+  test('内存模式：消费（即使校验失败）后归还配额，可再次生成', async () => {
+    jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(false);
+    const ip = '203.0.113.12';
+    const issued = [];
+    for (let i = 0; i < 20; i += 1) issued.push(await captchaService.generate({ ip }));
+    await expect(captchaService.generate({ ip })).resolves.toBeNull();
+    // 校验失败同样删除条目（一次性语义），配额必须随之归还
+    await expect(captchaService.verify(issued[0].captchaId, 'WRONG')).resolves.toBe(false);
+    await expect(captchaService.generate({ ip })).resolves.toBeTruthy();
   });
 
   describe('Redis 模式校验（一次性消费语义）', () => {
@@ -68,26 +101,33 @@ describe('captchaService 分支补齐', () => {
       jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(true);
       return {
         getDelSpy: jest.spyOn(sharedCache, 'getDel'),
+        decrSpy: jest.spyOn(sharedCache, 'decrWithFloorZero').mockResolvedValue(0),
       };
     };
 
-    test('命中且文本匹配（大小写不敏感 + 去空白）→ true，且取删即消费', async () => {
-      const { getDelSpy } = setupRedisMode();
-      getDelSpy.mockResolvedValue({ text: 'AbCd' });
+    test('命中且文本匹配（大小写不敏感 + 去空白）→ true，且取删即消费、双配额归还', async () => {
+      const { getDelSpy, decrSpy } = setupRedisMode();
+      getDelSpy.mockResolvedValue({ text: 'AbCd', ipKey: 'captcha:active-count:ip:abc' });
       await expect(captchaService.verify('cid-1', '  aBcD ')).resolves.toBe(true);
       expect(getDelSpy).toHaveBeenCalledWith('captcha:cid-1');
+      expect(decrSpy.mock.calls).toEqual([
+        ['captcha:active-count'],
+        ['captcha:active-count:ip:abc'],
+      ]);
     });
 
-    test('条目不存在 → false', async () => {
-      const { getDelSpy } = setupRedisMode();
+    test('条目不存在 → false，且不得凭空递减计数器', async () => {
+      const { getDelSpy, decrSpy } = setupRedisMode();
       getDelSpy.mockResolvedValue(null);
       await expect(captchaService.verify('cid-2', 'AAAA')).resolves.toBe(false);
+      expect(decrSpy).not.toHaveBeenCalled();
     });
 
-    test('条目 text 非字符串（脏数据）→ false', async () => {
-      const { getDelSpy } = setupRedisMode();
-      getDelSpy.mockResolvedValue({ text: 1234 });
+    test('条目 text 非字符串（脏数据）→ false，但条目已消费，配额仍要归还', async () => {
+      const { getDelSpy, decrSpy } = setupRedisMode();
+      getDelSpy.mockResolvedValue({ text: 1234, ipKey: null });
       await expect(captchaService.verify('cid-3', '1234')).resolves.toBe(false);
+      expect(decrSpy.mock.calls).toEqual([['captcha:active-count']]);
     });
 
     test('取删抛错 → 按未通过处理（fail-closed，不悬挂验证码）', async () => {
@@ -97,12 +137,15 @@ describe('captchaService 分支补齐', () => {
       expect(getDelSpy).toHaveBeenCalledWith('captcha:cid-4');
     });
 
-    test('captchaId 撞活跃计数保留键(active-count) → false，且绝不触达 getDel', async () => {
-      // 越界值会让 entryKey('active-count') === COUNT_KEY，getDel 一旦执行就把
-      // 活跃计数键删掉、重置 generate 的洪水面护栏。闸门须在触存储前拦下。
+    test('captchaId 撞活跃计数保留键（全局或按 IP）→ false，且绝不触达 getDel', async () => {
+      // 越界值会让 entryKey(captchaId) 撞上计数器键，getDel 一旦执行就把
+      // 活跃计数删掉、重置 generate 的洪水面护栏。闸门须在触存储前拦下。
       const { getDelSpy } = setupRedisMode();
       getDelSpy.mockResolvedValue({ text: 'AbCd' }); // 即便存储里有值也不该被读到
       await expect(captchaService.verify('active-count', 'AbCd')).resolves.toBe(false);
+      await expect(captchaService.verify('active-count:ip:deadbeefdeadbeef', 'AbCd')).resolves.toBe(
+        false
+      );
       expect(getDelSpy).not.toHaveBeenCalled();
     });
   });

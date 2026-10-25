@@ -21,9 +21,11 @@ const https = require('https');
  * @param {object} headers 请求头
  * @param {string} body 已序列化的请求体
  * @param {number} [timeoutMs=5000] 超时毫秒（空闲超时 + 绝对截止共用）
+ * @param {{lookup?: Function}} [options] 连接选项；`lookup` 用于把 DNS 解析结果钉死
+ *   （调用方已完成地址校验，连接期不得再次解析）
  * @returns {Promise<{ok: boolean, status: number}>}
  */
-function postJson(rawUrl, headers, body, timeoutMs = 5000) {
+function postJson(rawUrl, headers, body, timeoutMs = 5000, options = {}) {
   return new Promise((resolve, reject) => {
     let target;
     try {
@@ -61,6 +63,7 @@ function postJson(rawUrl, headers, body, timeoutMs = 5000) {
           ...headers,
         },
         timeout: timeoutMs,
+        ...(typeof options.lookup === 'function' ? { lookup: options.lookup } : {}),
       },
       (res) => {
         // 消费响应体（释放 socket），状态码交由调用方判定。

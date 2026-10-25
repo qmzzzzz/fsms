@@ -12,7 +12,7 @@
  *                                                                 #   **绝不触碰明文列**（可在线、可重复跑）
  *   ALLOWED_SOURCE_DB=<库名> node scripts/migrate-pii-encryption.js --encrypt --apply --yes
  *                                                                 # 【阶段 4】只加密明文列（键在同一次 $set 里同步）
- *   ALLOWED_SOURCE_DB=<库名> PII_ROTATION_OLD_AES_KEY=<旧KEY> \
+ *   ALLOWED_SOURCE_DB=<库名> PII_ROTATION_OLD_AES_KEY_FILE=<旧KEY文件> \
  *     node scripts/migrate-pii-encryption.js --apply --yes --rotate
  *                                                                 # 用旧主密钥解密 → 当前主密钥重加密（v2）
  *
@@ -51,6 +51,7 @@
 
 const mongoose = require('mongoose');
 require('../src/config/secrets').hydrateSecretsFromFiles();
+const { parseFlags } = require('./cliFlagPolicy');
 const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
 const {
   encryptPii,
@@ -62,22 +63,28 @@ const {
   VERSION_PREFIX_V2,
 } = require('../src/utils/piiCrypto');
 
-function parseArgs() {
-  const args = {
-    apply: false,
-    confirmYes: false,
-    rotate: false,
-    keysOnly: false,
-    encryptOnly: false,
+/** 本脚本接受的开关（闭合集合；新增开关必须同步这里，否则被当未知参数拒绝） */
+const MODE_FLAGS = ['--apply', '--yes', '--rotate', '--keys-only', '--encrypt'];
+
+/**
+ * 未知参数不得「当没看见」（判据与 `deploy.js --dryrun` 同一口径，实现共用 cliFlagPolicy）。
+ *
+ * 原实现是五个独立 `if`：`--keys-onl`（少一个字母）不报错 ⇒ `keysOnly` 保持 false
+ * ⇒ 脚本退化为**默认全量模式**（加密列 + 回填检索键 + 升级 v1），而操作者以为只补键。
+ * 一个字母的差距，方向从"只读扫描"变成"批量改写 PII 列"。
+ */
+function parseArgs(argv = process.argv.slice(2)) {
+  const { flags, errors } = parseFlags(argv, MODE_FLAGS);
+  return {
+    args: {
+      apply: flags.has('--apply'),
+      confirmYes: flags.has('--yes'),
+      rotate: flags.has('--rotate'),
+      keysOnly: flags.has('--keys-only'),
+      encryptOnly: flags.has('--encrypt'),
+    },
+    errors,
   };
-  for (const a of process.argv.slice(2)) {
-    if (a === '--apply') args.apply = true;
-    if (a === '--yes') args.confirmYes = true;
-    if (a === '--rotate') args.rotate = true;
-    if (a === '--keys-only') args.keysOnly = true;
-    if (a === '--encrypt') args.encryptOnly = true;
-  }
-  return args;
 }
 
 /** 判断一个值是否已是本模块的密文形态（迁移与轮换共用的分拣判据；v1/v2 都算） */
@@ -201,13 +208,27 @@ function assertModeArgs(args) {
     process.exit(2);
   }
   if (args.rotate && !process.env.PII_ROTATION_OLD_AES_KEY) {
-    console.error('Error: --rotate 需要 PII_ROTATION_OLD_AES_KEY=<轮换前的 AES_SECRET_KEY>');
+    console.error(
+      'Error: --rotate 需要 PII_ROTATION_OLD_AES_KEY=<轮换前的 AES_SECRET_KEY>，' +
+        '或 PII_ROTATION_OLD_AES_KEY_FILE=<密钥文件>（推荐，避免落进 shell 历史）'
+    );
     process.exit(1);
   }
 }
 
 async function main() {
-  const args = parseArgs();
+  const { args, errors } = parseArgs();
+  // 参数错误必须在**任何副作用之前**拒绝：连 assertModeArgs 的档位互斥判据都依赖
+  // args 为真，拼错的档位会让互斥判据同时失效（两个都是 false ⇒ 判据全过）。
+  if (errors.length) {
+    const usage = `\n用法：node scripts/migrate-pii-encryption.js [${MODE_FLAGS.join('] [')}]`;
+    console.error(
+      '错误：参数无法识别，已拒绝执行（未连接数据库、未读写任何记录）：\n  ' +
+        errors.join('\n  ') +
+        usage
+    );
+    process.exit(2);
+  }
   assertModeArgs(args);
   // 主密钥判据见 assertMasterKeyUsable 的头注释：必须在连库与快照当前密钥**之前**响
   assertMasterKeyUsable();
@@ -459,12 +480,16 @@ async function scanAndRewrite(coll, target, args) {
   return stats;
 }
 
-// 轮换模式在连接前快照当前主密钥：decryptWith 在新旧之间临时切换环境变量
-if (process.argv.includes('--rotate')) {
-  process.env.PII_ROTATION_CURRENT_KEY = process.env.AES_SECRET_KEY;
+// 只在被直接执行时运行。
+// 原实现是无条件 `main()`：任何 `require('./migrate-pii-encryption')`（测试、复用
+// parseArgs 的其他脚本、编辑器插件）都会**立刻连库并开始扫描改写**——
+// 一个"读一眼参数解析"的动作触发批量改写 PII 列，是这个脚本最不该有的默认行为。
+// 同时把 `--rotate` 的密钥快照挪进 main（它在连接前本来就会再做一次）。
+if (require.main === module) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+module.exports = { parseArgs, MODE_FLAGS, PII_TARGETS };

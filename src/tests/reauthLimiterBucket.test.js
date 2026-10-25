@@ -68,6 +68,13 @@ describe('二次验证限流与改密限流互不污染', () => {
     }
     await reauthUserLimiter.resetKey(`reauth-user:${String(user._id)}`);
     await passwordChangeUserLimiter.resetKey(`pwd-change-user:${String(user._id)}`);
+    // 限流桶之外还有一把**跨用例**的凭据失败锁：错误口令会让 recordMfaFailure
+    // 写 mfaFailCount，5 次后置 mfaLockUntil。不清它，下一条用例的 429 可能来自
+    // 凭据锁定而不是限流桶——本文件要断言的隔离性就失去区分力。
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { mfaFailCount: 0, mfaLockUntil: null, failedLoginCount: 0, lockUntil: null } }
+    );
   });
 
   const stepUp = () =>

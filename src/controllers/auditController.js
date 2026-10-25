@@ -19,6 +19,7 @@ const {
 const { buildAuditQuery } = require('../utils/auditQuery');
 const { queryAuditLogs, applyAuditDataScope } = require('../services/auditQueryService');
 const { auditPath } = require('../utils/auditMeta');
+const { auditClientAddress } = require('../utils/ipUtils');
 const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
 
 const exportAuditLogs = asyncHandler(async (req, res) => {
@@ -176,7 +177,7 @@ const verifyAuditChainIntegrity = asyncHandler(async (req, res) => {
     path: auditPath(req),
     // 只记结论摘要，不记 samples（含 hash 明文，无需二次落库）
     body: { total: report.total, breaks: report.breaks, byType: report.byType },
-    ip: req.ip,
+    ...auditClientAddress(req),
     userAgent: req.get('user-agent'),
     success: true,
     // 只有判据给出 code=0（全量、无断裂、各层都真跑过、有记录可验）才有资格记 low：

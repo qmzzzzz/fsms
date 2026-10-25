@@ -94,7 +94,11 @@ describe('误报/取消的 reason 长度上限（路由层 + update 校验）', 
     const res = await request(app)
       .post('/api/alarms/report')
       .set('Authorization', `Bearer ${tokenAll}`)
-      .send({ alarmType: 'smoke', description: `ZZHR 上报 ${stamp}` });
+      .send({
+        alarmType: 'smoke',
+        description: `ZZHR 上报 ${stamp}`,
+        location: { building: 'A栋' },
+      });
     expect(res.status).toBe(201);
     return res.body.data._id;
   };

@@ -30,6 +30,9 @@ services:
     # 值打印到 CI 日志、子进程无条件继承、/proc/<pid>/environ 同 uid 可读。
     # 改用 secrets 挂载到 /run/secrets/<name>，应用侧由 config/secrets.js
     # 读取 <NAME>_FILE 指向的文件并注入（Docker/K8s 通用约定）。
+    # file 型 secret 是 bind mount，宿主 0600 的属主不是 UID 1001；镜像入口
+    # 脚本会把它们复制到 tmpfs 并 chown 给 nodejs，再把 *_FILE 重写到副本路径。
+    # 相关编排（user/cap_add/tmpfs）见本服务下方「文件型 secret 的权限适配」段。
     # 此处只保留非敏感配置项。
     environment:
       - NODE_ENV=production
@@ -39,13 +42,38 @@ services:
       # 进程会先被 OOM Killer 杀掉而非触发 GC —— 表现为无日志的突然重启
       - NODE_OPTIONS=--max-old-space-size=768
       - TRUST_PROXY_HOPS=${TRUST_PROXY_HOPS:-1}
+      # F-01 的闭合口：可信代理网段（逗号分隔 CIDR，如 172.28.0.0/16）。
+      #
+      # 本文件此前**从未把该变量传入容器**：运维照 .env.example 与 README 配好它，
+      # 容器里读到的仍是 undefined，判据静默退回「对端属私网/回环即可信」——
+      # 而 README 的上线清单里写着「已按反向代理实际所在网段设置」，清单会显示
+      # "已做"、实际根本没生效。这正是该变量本身要防的那类形态（配置意图与
+      # 实际不符），所以它必须在部署入口上真实可达。
+      #
+      # 2026-10-24 审计：原先默认留空，未配置时判据退回「对端属私网/回环即可信」——
+      # 同网任一容器都能伪造 X-Forwarded-For 影响 IP 白名单/限流/封禁/审计来源。
+      # 兼容档不再作为默认：必须显式给出反代所在网段（宿主 nginx 的发布面 / bridge 网段）。
+      # 确无反向代理的部署应显式声明 ALLOWED_HOSTS 并接受本项为实际客户端网段，
+      # 而不是留空让"任何私网对端"都被信任。
+      - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:?TRUSTED_PROXY_CIDRS 必须显式配置为反向代理所在网段（如 172.28.0.0/16）；留空等于信任所有私网对端的 X-Forwarded-For}
+      # 2026-10-24 审计（P2，TLS 判据失效）：TLS 终结层必须显式声明。
+      # 本 compose 的标准拓扑是宿主 nginx 终结 TLS（deployment/nginx.conf.example），
+      # 因此默认沿用上游声明；进程自启 HTTPS 的部署应改为设置 ENABLE_HTTPS=true。
+      - TLS_TERMINATED_UPSTREAM=${TLS_TERMINATED_UPSTREAM:-true}
+      # 生产配置硬闸的显式声明（2026-10-24 审计）：NODE_ENV 拼错/漏配时，
+      # 应用宁可拒绝启动，也不要以"开发语义"零校验跑生产。
+      - REQUIRE_PRODUCTION_CONFIG=true
+      # 登录口令密文轨（2026-10-24 审计）：此前 compose 不透传该变量，运维在 .env
+      # 里设为 true 也进不了容器，标准部署因此永远关不掉明文口令字段。
+      # 纯 HTTP 内网部署（无 secure context）才保持 false。
+      - LOGIN_ENCRYPT_STRICT=${LOGIN_ENCRYPT_STRICT:-false}
       - CORS_ORIGIN=${CORS_ORIGIN:?CORS_ORIGIN 必须显式配置（如 https://admin.example.com，多个用逗号分隔）}
       # Host 头白名单（生产必填，见 src/config/validate.js 的 collectAllowedHostsErrors）。
       # 本文件此前从未提供这一项，而 NODE_ENV=production 下缺失即**启动失败**——
       # 也就是照这份 compose 起的服务永远进不到监听阶段（部署链断裂）。
       # 与 CORS_ORIGIN 同用 `:?` 强制显式声明：给默认值等于把真实域名漏在门外。
       # 值为逗号分隔的 host（可带端口，如 fsms.example.com,api.example.com:443）；
-      # 健康检查 /health 已在 protocolCompliance 的 skipPaths 中豁免，
+      # 健康检查 /health 与 /readyz 都在探针豁免清单（PROBE_PATHS）中，
       # 无需把 localhost 写进来。
       # /metrics 同理：Prometheus 按 `deployment/observability/prometheus.yml` 的 targets 直连
       # 容器服务名（Host: app:3000）抓取，该形态已由 HOST_GATE_EXEMPT_PATHS 单独豁免 Host 一项。
@@ -53,8 +81,10 @@ services:
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:?ALLOWED_HOSTS 必须显式配置（如 fsms.example.com，多个用逗号分隔）}
       # 审计留存天数（合规区间 90..3650，留空取默认 180）
       - AUDIT_RETENTION_DAYS=${AUDIT_RETENTION_DAYS:-180}
-      # 业务数据保留期（F-07）：口径 180 天，留空则**不建 TTL**（数据永久保留，
-      # 合规检查会判不通过）。见 src/constants/businessRetention.js 的四道闸。
+      # 业务数据保留期（F-07）：业务口径 180 天。下面的 `:-180` 使**未设置或留空**
+      # 都启用 180 天 TTL（到期不可逆删除）；若确需不建 TTL，必须修改本文件去掉
+      # `:-180` 默认值（仅把宿主机变量设为空无效），合规检查会判不通过。
+      # 见 src/constants/businessRetention.js 的四道闸。
       - BUSINESS_RETENTION_DAYS_FIRE_ALARM=${BUSINESS_RETENTION_DAYS_FIRE_ALARM:-180}
       - BUSINESS_RETENTION_DAYS_INSPECTION=${BUSINESS_RETENTION_DAYS_INSPECTION:-180}
       - BUSINESS_RETENTION_DAYS_FIRE_DEVICE=${BUSINESS_RETENTION_DAYS_FIRE_DEVICE:-180}
@@ -93,6 +123,10 @@ services:
       # （sharedCache / websocketService）以 ioredis password 选项携带。
       # validate.js 生产闸：URL 凭据 / REDIS_PASSWORD / 显式豁免三者必居其一。
       - REDIS_PASSWORD_FILE=/run/secrets/redis_password
+      # /metrics 鉴权令牌（2026-10-24 审计）：此前 compose 不透传 METRICS_TOKEN，
+      # 运维在 .env 里配了也进不了容器 ⇒ 任何同网容器都能读取负载与安全告警计数。
+      # 经 secrets 注入（不走 environment，理由同上方 P3-48）。
+      - METRICS_TOKEN_FILE=/run/secrets/metrics_token
     secrets:
       - jwt_secret
       - jwt_refresh_secret
@@ -102,12 +136,34 @@ services:
       - admin_initial_password
       - login_ecdh_private_key
       - redis_password
+      - metrics_token
     depends_on:
       mongo:
         condition: service_healthy
+      # 副本集必须已 initiate 才能开事务。等这一步完成而不是只等 mongo healthy：
+      # healthcheck 是 ping，未初始化的 mongod 同样回 ok，app 会先起来再连不上。
+      mongo-rs-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # ===== 健康检查：**刻意不在本文件声明**（2026-10-24 复核）=====
+    # 本服务块里看不到 healthcheck，与 mongo/redis 不一致，但这不是漏配：
+    # 健康检查由**镜像**提供（Dockerfile 的 HEALTHCHECK --interval=30s），
+    # Compose 在服务未声明 healthcheck 时原样继承镜像里的那一条。mongo/redis
+    # 之所以要在这里写，是因为它们的官方镜像不带 HEALTHCHECK。
+    #
+    # 为什么不在 compose 里再抄一遍：两处声明会分叉——镜像侧那条同时探
+    # /readyz（供 readyz_verdict 持续产生）与 /health（决定退出码），compose 侧
+    # 手写一条往往只探 /health，一旦后者生效就会把镜像侧的口径整体顶掉，
+    # 表现为「容器健康但 readyz_verdict 从不产生」，MongoUnavailable 恒不触发。
+    # 判据与理由见 Dockerfile:194-202 与 src/tests/deploy/dockerHealthcheckReadyz.test.js。
+    #
+    # 因此：**不要在这里添加 healthcheck**（尤其不要写 `disable: true`）。
+    # 本服务目前也没有 depends_on 的下游（nginx 在宿主侧，不在本编排内），
+    # 不需要 service_healthy 门控；若将来加了依赖 app 的服务，直接引用
+    # `condition: service_healthy` 即可——继承来的健康检查足以支撑该条件。
+    # 契约由 src/tests/deploy/composeAppHealthcheck.test.js 把守。
     # ===== F-103：优雅关闭的部署侧契约（与代码侧总预算是同一份约定的两端）=====
     #
     # 此前本服务**没有** stop_grace_period ⇒ Docker/Compose 按默认 10 s 发 SIGKILL，
@@ -142,23 +198,49 @@ services:
       options:
         max-size: 20m
         max-file: '5'
-    # 禁止通过 setuid 提权：容器内已是非 root（Dockerfile 的 USER nodejs），
-    # 本项封住「进程内漏洞 → setuid 二进制 → root」这条路径
+    # ===== 文件型 secret 的权限适配（2026-10-24）=====
+    # compose 的 `secrets: file:` 在 Linux 上是 bind mount（Compose issue #9648），
+    # 容器内保留宿主文件的属主/权限；generate-secrets.js 产出的 0600 文件属主是
+    # 部署用户，而镜像里的应用用户是 UID 1001（nodejs）——直接读 /run/secrets/*
+    # 会 EACCES。`secrets:` 的 uid/gid/mode 对 file 型 secret 不生效，把宿主权限
+    # 降成 0644 又牺牲 at-rest 保护，因此改由镜像入口脚本在启动时复制到 tmpfs：
+    #
+    #   user: "0:0"  —— 只让入口脚本拿到复制/改属主的权限；
+    #   cap_add      —— 入口脚本的最小能力集（见下），复制完成后 su-exec 降权；
+    #   tmpfs        —— /run/app-secrets，副本 0400、属主 nodejs，容器删除即消失。
+    #
+    # 应用进程本身仍是非 root（nodejs）。不要删掉这三项中的任何一项：
+    # 删 user ⇒ 脚本无权读宿主 0600 文件；删 CHOWN/DAC_OVERRIDE ⇒ 无法改属主/读源文件；
+    # 删 SETUID/SETGID ⇒ su-exec 无法降权，应用会以 root 运行（比现状更糟）。
+    user: '0:0'
+    # 禁止通过 setuid 提权：入口脚本以 root 完成密钥复制后立即 su-exec 降权，
+    # 应用进程是非 root（nodejs）。本项封住「进程内漏洞 → setuid 二进制 → root」
+    # 这条路径；su-exec 只降权，不通过 setuid 二进制提权。
     security_opt:
       - no-new-privileges:true
-    # 丢弃全部 Linux capability：本服务只监听 3000（非特权端口）、
-    # 读写自己的 logs 目录，不需要任何 capability。
-    # 保留一个不需要的 capability 就是给容器逃逸留一级台阶。
+    # 丢弃全部 Linux capability，再只补回入口脚本启动阶段必需的四项：
+    #   DAC_OVERRIDE —— 读宿主 0600 的 secret 源文件；
+    #   CHOWN        —— 把副本改属 nodejs；
+    #   SETUID/SETGID—— su-exec 降权到 nodejs。
+    # 不补 FOWNER：脚本先 chmod（此时 root 仍是属主）再 chown，不需要它。
+    # NET_RAW/SYS_ADMIN 等逃逸常用能力仍全部剥夺。
     cap_drop:
       - ALL
-    # C-1：只读根文件系统。镜像内所有路径不可写，写入被收敛到两处：
-    #   /app/logs —— 命名卷，winston 日志与审计 WAL（audit-buffer.wal）
-    #   /tmp      —— tmpfs，node/依赖的临时文件
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    # C-1：只读根文件系统。镜像内所有路径不可写，写入被收敛到三处：
+    #   /app/logs          —— 命名卷，winston 日志与审计 WAL（audit-buffer.wal）
+    #   /tmp               —— tmpfs，node/依赖的临时文件
+    #   /run/app-secrets   —— tmpfs，入口脚本的密钥只读副本（见上）
     # 任何「往镜像目录写文件」的漏洞利用（落地 webshell、篡改源码）
     # 都会被只读挂载直接挡下，且不需要应用改代码。
     read_only: true
     tmpfs:
       - /tmp
+      - /run/app-secrets
     volumes:
       - app-logs:/app/logs
     networks:
@@ -196,6 +278,44 @@ services:
     # 不暴露到宿主机，仅容器间通信（如需本地调试可临时改为 "127.0.0.1:27017:27017"）
     expose:
       - '27017'
+    # ===== 单节点副本集：事务的前提 =====
+    # 跨集合多步写（设备删除的报警/巡检引用清理、用户删除的会话/角色清理、
+    # 权限删除的角色引用清理）依赖 MongoDB 事务，而事务只在副本集或 mongos 上可用。
+    # 本文件此前是裸 standalone：应用侧 src/utils/transaction.js 探测到 Single 拓扑后
+    # 会**降级为顺序执行**，中途失败留下「引用已清、主体还在」的中间态——不会丢数据，
+    # 但需要人工重试，且启动日志只有一条 error、/readyz 标 degraded，容易被忽略。
+    #
+    # 单节点副本集在单机上不增加进程数，只多一份 oplog（默认上限为磁盘的 5%），
+    # 是 MongoDB 官方对单机生产部署的推荐形态。`--bind_ip_all` 由官方镜像默认提供，
+    # 此处不必重复。
+    #
+    # 注意：仅加这个参数**不会**自动成为副本集——必须执行一次 rs.initiate()，
+    # 由下方 mongo-rs-init 一次性容器完成，app 通过 service_completed_successfully 等它。
+    # 只加参数不 initiate 时 mongod 会停在未初始化状态，应用连不上（这是刻意的 fail-loud：
+    # 宁可起不来，也不要在"看起来正常"的情况下静默失去事务保证）。
+    #
+    # ===== keyFile 不是可选项 =====
+    # MongoDB 5.x 起，`--replSet` + 启用授权（本服务由 MONGO_INITDB_ROOT_* 自动 `--auth`）
+    # 若缺 keyFile，mongod **启动即失败**：
+    #   BadValue: security.keyFile is required when authorization is enabled with replica sets
+    # 单节点副本集同样要过这道检查，所以这里必须挂 keyfile。
+    #
+    # 为什么要在 entrypoint 里复制一次：docker secret 挂载是 0444，而 MongoDB 拒绝
+    # group/world 可读的 keyfile（"permissions on ... are too open"）。直接指向
+    # /run/secrets/mongo_keyfile 会起不来。故复制到 tmpfs 并收紧到 0400，
+    # 属主设为 mongodb（mongod 经 gosu 降权后要能读）。复制以 root 执行，
+    # 依赖已补回的 CHOWN/DAC_OVERRIDE 两项 capability。
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -eu
+        cp /run/secrets/mongo_keyfile /tmp/mongo.key
+        chown mongodb:mongodb /tmp/mongo.key
+        chmod 400 /tmp/mongo.key
+        exec /usr/local/bin/docker-entrypoint.sh "$$@"
+      - --
+    command: ['--replSet', 'rs0', '--keyFile', '/tmp/mongo.key']
     volumes:
       - mongo-data:/data/db
       - mongo-config:/data/configdb
@@ -208,8 +328,26 @@ services:
     secrets:
       - mongo_root_username
       - mongo_root_password
+      - mongo_keyfile
+    # ===== 健康检查必须真的过一道认证 =====
+    # 原判据是 `mongosh localhost:27017/test` 不带凭据：它对**未授权**的实例同样回 ok，
+    # 于是「mongod 起来了但认证/授权坏了（root 用户没建出来、keyFile 不匹配、
+    # 库级权限缺失）」这种形态会被判健康，rs-init 照常去建账号再失败，
+    # 表象是 app 反复重启而健康状态一直绿——探针在说谎，排查方向被引到别处。
+    #
+    # 现在用 root 凭据从 secret 文件读入（不进 environment / argv），并显式断言 ping 的 ok。
+    # 凭据错误 ⇒ 恒 unhealthy ⇒ rs-init 不启动 ⇒ app 不启动（fail-loud，不静默降级）。
+    # 首次初始化的窗口由 start_period 覆盖：MONGO_INITDB_ROOT_* 会先建好 root 用户，
+    # 之后带凭据的 ping 才能通过。
     healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --host 127.0.0.1:27017
+          --username "$$(cat /run/secrets/mongo_root_username)"
+          --password "$$(cat /run/secrets/mongo_root_password)"
+          --authenticationDatabase admin
+          --eval 'if (db.runCommand({ ping: 1 }).ok !== 1) quit(1)'
       interval: 10s
       timeout: 10s
       retries: 5
@@ -255,6 +393,105 @@ services:
       - SETUID
     networks:
       # 只入数据面（internal 网络，见文末）：监控栈与宿主发布面都摸不到 mongo
+      - data-net
+
+  # ===== 副本集初始化（一次性，幂等）=====
+  #
+  # 为什么是独立容器而不是写进 mongo 的 healthcheck：healthcheck 每个周期都跑，
+  # 把副作用塞进去等于让「健康探测」同时是「变更操作」——排障时分不清一条失败
+  # 是"库不健康"还是"initiate 没成"，而且失败会被 restart 策略反复重试。
+  #
+  # 为什么需要 root 凭据：mongod 已有用户时 localhost exception 不再适用，
+  # rs.initiate 必须认证。密码从 secret 文件读入 shell 变量再传给 mongosh，
+  # 不出现在 entrypoint（`docker inspect` 看不到），仅在容器内进程列表短暂可见
+  # ——该容器内没有其他进程，且用后即退出。
+  #
+  # 幂等性：已初始化时 rs.status() 成功 ⇒ 打印后退出 0，重复 `docker compose up`
+  # 不会报错、不会重建副本集配置。
+  mongo-rs-init:
+    # R-5 同口径：与上方 mongo 完全同一个 digest，避免 init 容器与 mongod 版本漂移
+    image: mongo:8.0.34@sha256:4a4ab5d4834207389e0d7270fac988e21ffedccecba77991a552f755df229907
+    depends_on:
+      mongo:
+        condition: service_healthy
+    # 一次性任务：失败不重启（失败即整体不启动，见 app 的 depends_on），
+    # 成功也不保留容器
+    restart: 'no'
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -eu
+        U="$$(cat /run/secrets/mongo_root_username)"
+        P="$$(cat /run/secrets/mongo_root_password)"
+        AU="$$(cat /run/secrets/mongo_app_username)"
+        AP="$$(cat /run/secrets/mongo_app_password)"
+        APP_U="$$AU" APP_P="$$AP" mongosh --host mongo:27017 --username "$$U" --password "$$P" \
+          --authenticationDatabase admin --quiet --eval '
+          try {
+            rs.status();
+            print("replica set 已初始化，跳过 initiate");
+          } catch (e) {
+            rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "mongo:27017" }] });
+            print("replica set 初始化已发起");
+          }
+          // initiate 返回不代表可写：成员还要走 STARTUP -> STARTUP2 -> PRIMARY。
+          // 不在这里等，app 会在选主窗口内连上却拿不到 primary，白跑一轮
+          // serverSelectionTimeoutMS（5s）+ 重试。等就绪再退出，让 depends_on 有意义。
+          for (let i = 0; i < 60; i++) {
+            const st = rs.status();
+            if (st.members && st.members.some((m) => m.stateStr === "PRIMARY")) {
+              print("primary 就绪");
+              i = 999;
+              break;
+            }
+            sleep(500);
+          }
+          if (i !== 999) { print("等待 primary 超时（30s）"); quit(1); }
+
+          // 应用专用账号（2026-10-24 审计，P2）：只授 fire_safety_db 的 readWrite。
+          // 幂等：已存在则同步口令与角色（轮换 secret 后重跑本容器即可生效）。
+          const appDb = db.getSiblingDB("fire_safety_db");
+          const appUser = process.env.APP_U;
+          const appPass = process.env.APP_P;
+          if (appDb.getUser(appUser)) {
+            appDb.updateUser(appUser, {
+              pwd: appPass,
+              roles: [{ role: "readWrite", db: "fire_safety_db" }],
+            });
+            print("应用账号已存在，口令/角色已同步");
+          } else {
+            appDb.createUser({
+              user: appUser,
+              pwd: appPass,
+              roles: [{ role: "readWrite", db: "fire_safety_db" }],
+            });
+            print("应用账号已创建");
+          }
+        '
+        # 用应用凭据真建一次连：凭据/授权不对 ⇒ 本容器退出非零 ⇒ app 不会启动。
+        # 这比 healthcheck 更强的点在于它验证的正是应用将使用的那个账号。
+        mongosh --host mongo:27017 --username "$$AU" --password "$$AP" \
+          --authenticationDatabase fire_safety_db --quiet \
+          --eval 'if (db.runCommand({ ping: 1 }).ok !== 1) quit(1);'
+    secrets:
+      - mongo_root_username
+      - mongo_root_password
+      - mongo_app_username
+      - mongo_app_password
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: '2'
+    networks:
       - data-net
 
   # ===== G-2 指标消费端：Prometheus 抓取 + Grafana 看板/告警 =====
@@ -438,23 +675,29 @@ services:
       - '6379'
     # 认证（2026-10-01 审计 finding：redis 此前无任何认证，且与监控栈同网——
     # Grafana 任意数据源 URL 即一条无密码写路径：删黑名单键 = 撤销封禁、
-    # 清限流计数 = 解除封顶）。requirepass 读自挂载的 secret 文件：口令不进
-    # command 字面量（docker inspect 可见）、不进 environment；$$ 是 compose
-    # 转义，容器内 shell 展开 $(cat …)。应用侧凭据由 REDIS_PASSWORD_FILE 注入
-    # （见 app 服务与 sharedCache.redisConnectionPassword）。
+    # 清限流计数 = 解除封顶）。
+    # 2026-10-24 审计：口令不再经 `--requirepass "$(cat …)"` 进入进程参数——
+    # shell 展开后 PID 1 的 /proc/1/cmdline 里就是明文口令，同容器任何能读 /proc
+    # 的进程都能拿到。改为先写 /tmp/redis.conf（umask 077，tmpfs），再以配置文件名启动。
     command:
       - /bin/sh
       - -c
-      - 'exec redis-server --appendonly yes --requirepass "$$(cat /run/secrets/redis_password)"'
+      - |
+        set -eu
+        umask 077
+        printf 'appendonly yes\nrequirepass %s\n' "$$(cat /run/secrets/redis_password)" > /tmp/redis.conf
+        exec redis-server /tmp/redis.conf
     secrets:
       - redis_password
     healthcheck:
       # requirepass 开启后 PING 会回 NOAUTH——必须带口令探测，且 grep -q PONG
-      # 把「redis-cli 对错误回包退出 0」的口子堵死（NOAUTH 也算失败）
+      # 把「redis-cli 对错误回包退出 0」的口子堵死（NOAUTH 也算失败）。
+      # REDISCLI_AUTH 走环境变量而非 -a：-a 的口令会出现在 healthcheck 进程的
+      # argv 里（/proc/<pid>/cmdline），REDISCLI_AUTH 不会。
       test:
         [
           'CMD-SHELL',
-          'redis-cli --no-auth-warning -a "$$(cat /run/secrets/redis_password)" ping | grep -q PONG',
+          'REDISCLI_AUTH="$$(cat /run/secrets/redis_password)" redis-cli ping | grep -q PONG',
         ]
       interval: 10s
       timeout: 5s
@@ -505,20 +748,29 @@ services:
 #   # redis_password 用 -base64 即可：应用侧走 ioredis 的 password 选项（不进 URL
 #   # userinfo），字符集不受 percent-encoding 约束
 #   openssl rand -base64 32 | tr -d '\n' > ./secrets/redis_password
-#   printf 'firesafety'  > ./secrets/mongo_root_username
-#   # mongo_root_password 必须用 -hex：它要内嵌进 mongodb_uri 的 userinfo 段，
+#   printf 'firesafety_root' > ./secrets/mongo_root_username
+#   openssl rand -hex 32     | tr -d '\n' > ./secrets/mongo_root_password
+#   # 应用专用库账号（2026-10-24 审计，P2）：应用**不再**用 root 连库。
+#   # 该账号由 mongo-rs-init 幂等创建，只授 fire_safety_db 的 readWrite；
+#   # root 凭据仅留给初始化容器与管理操作。
+#   printf 'firesafety_app'  > ./secrets/mongo_app_username
+#   # mongo_app_password 必须用 -hex：它要内嵌进 mongodb_uri 的 userinfo 段，
 #   # 而 base64 字符集含 '/'（实测 32 字节 base64 约一半概率出现），驱动对未转义的
 #   # '/' ':' '#' '?' 直接抛 "Password contains unescaped characters" ⇒ 应用启动即退出。
 #   # 熵不变（两者都是 32 字节随机数），只是编码换 URL 安全集。
-#   openssl rand -hex 32     | tr -d '\n' > ./secrets/mongo_root_password
+#   openssl rand -hex 32     | tr -d '\n' > ./secrets/mongo_app_password
 #   openssl rand -base64 24 | tr -d '\n' > ./secrets/admin_initial_password
 #   openssl rand -base64 32 | tr -d '\n' > ./secrets/grafana_admin_password
-#   # mongodb_uri 需内嵌上面的用户名与口令：用户名/口令走的是 URL userinfo，
+#   # /metrics 鉴权令牌（2026-10-24 审计）：app 侧 METRICS_TOKEN_FILE，
+#   # Prometheus 侧 bearertoken 读取同一份文件。
+#   openssl rand -hex 32     | tr -d '\n' > ./secrets/metrics_token
+#   # mongodb_uri 需内嵌**应用账号**的用户名与口令：它们走 URL userinfo，
 #   # 上面已把口令限制在 hex 字符集，因此这里可以直接拼接；若改用其它字符集
 #   # （base64 等），必须先 percent-encode —— scripts/generate-secrets.js 就是走
 #   # encodeURIComponent 那条路，两种写法都由用例把"拼出来的串必须被驱动接受"钉住。
-#   printf 'mongodb://%s:%s@mongo:27017/fire_safety_db?authSource=admin' \
-#     "$(cat ./secrets/mongo_root_username)" "$(cat ./secrets/mongo_root_password)" \
+#   # authSource=fire_safety_db：该账号建在业务库下，不是 admin 库。
+#   printf 'mongodb://%s:%s@mongo:27017/fire_safety_db?authSource=fire_safety_db' \
+#     "$(cat ./secrets/mongo_app_username)" "$(cat ./secrets/mongo_app_password)" \
 #     > ./secrets/mongodb_uri
 #   chmod 600 ./secrets/*
 #
@@ -553,12 +805,31 @@ secrets:
     file: ./secrets/mongo_root_username
   mongo_root_password:
     file: ./secrets/mongo_root_password
+  # 副本集内部认证 keyfile。MongoDB 5.x 起 `--replSet` + 授权缺它**启动即失败**
+  # （BadValue: security.keyFile is required when authorization is enabled with
+  # replica sets），单节点副本集也一样。由 scripts/generate-secrets.js 产出。
+  mongo_keyfile:
+    file: ./secrets/mongo_keyfile
+  # 应用专用库账号（2026-10-24 审计，P2）：应用此前直接用 root 连库，
+  # 任何一处在查询/日志/备份脚本里泄露连接串都等于交出整实例的完全控制
+  # （含 admin 库：可改用户、关审计、删库）。现由 mongo-rs-init 幂等创建/同步
+  # 该账号，只授 fire_safety_db 的 readWrite；应用连接串以它为主体
+  # （authSource=fire_safety_db）。这两个文件同时被 mongo-rs-init 消费。
+  mongo_app_username:
+    file: ./secrets/mongo_app_username
+  mongo_app_password:
+    file: ./secrets/mongo_app_password
   grafana_admin_password:
     file: ./secrets/grafana_admin_password
   # Redis 认证口令（2026-10-01 审计 finding）：redis 侧 --requirepass 与 app 侧
   # REDIS_PASSWORD_FILE 共用这一份。生成命令见本文件头部注释块
   redis_password:
     file: ./secrets/redis_password
+  # /metrics 鉴权令牌（2026-10-24 审计）：generate-secrets.js 产出 hex(32)。
+  # 部署侧 Prometheus 以 bearer_token_file 读取同一份文件（见
+  # deployment/observability/prometheus.yml 的 scrape_configs 注释）。
+  metrics_token:
+    file: ./secrets/metrics_token
 
 volumes:
   mongo-data:

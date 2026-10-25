@@ -63,8 +63,9 @@ curl -fsS http://127.0.0.1:3000/health
 | `20260919000000-reconcile-audit-ttl-to-retention.js` | **明确不回滚** | 脚本只打印理由：把留存期改回旧值可能更短，且**已被 TTL 删除的审计记录无法恢复**                                                                                                                                               |
 | `20260926000000-cursor-tiebreak-compound-indexes.js` | 真实回滚       | 删除本次建立的复合 tiebreak 索引（并按 `replaceSingle` 还原被替换的单列索引）                                                                                                                                                 |
 | `20260928000000-audit-username-ci-index.js`          | 真实回滚       | 删除 `username_ci_timestamp` 索引（不存在则跳过）                                                                                                                                                                             |
+| `20261021000000-query-performance-indexes.js`        | 真实回滚       | 删除本次新增的复合索引，并按旧形态建回 `nextCheckDate_1` / `assignedTo_1` / `level_1` / `status_1`                                                                                                                            |
 
-⇒ 5 个迁移里 **2 个不撤销变更**。规划回退前请先读对应迁移文件的 `down()` 与文件头注释，**不要只看本表**（本表是导读，迁移文件才是事实来源）。
+⇒ 6 个迁移里 **2 个不撤销变更**。规划回退前请先读对应迁移文件的 `down()` 与文件头注释，**不要只看本表**（本表是导读，迁移文件才是事实来源）。
 
 注意事项：
 

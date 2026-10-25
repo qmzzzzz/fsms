@@ -5,7 +5,8 @@
 
 const Inspection = require('../models/Inspection');
 const logger = require('../utils/logger');
-const { escapeRegExp, parseDateBoundary } = require('../utils/helpers');
+const { parseDateBoundary, uniqueIdStrings } = require('../utils/helpers');
+const { normalizeSearchTerm, substringPattern } = require('../utils/searchPatterns');
 const { withListBudget, listCountOptions, listAggregateOptions } = require('../utils/queryBudget');
 const {
   encodeCursor,
@@ -115,16 +116,16 @@ class InspectionService {
     // 同 AlarmService：范围不可用即 403，不回空集（#12）
     applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.inspection);
 
-    if (search) {
-      const escaped = escapeRegExp(search);
+    const searchTerm = normalizeSearchTerm(search);
+    if (searchTerm) {
       // 预防性统一（inspection 当前属主声明是单字段 assignedTo ⇒ 范围条件今天不占 $or，
       // 所以这不是在修一个现网缺陷）：但一旦有人把 ownerField 改成数组（device、alarm 已经是），
       // 直接 `query.$or = [...]` 就会静默吃掉数据范围条件。三处列表口径共用同一个合并器，
       // 新资源就不会再踩第三次（详见 utils/scopeCast.js）。
       applySearchCondition(query, {
         $or: [
-          { title: new RegExp(escaped, 'i') },
-          { 'locations.building': new RegExp(escaped, 'i') },
+          { title: substringPattern(searchTerm) },
+          { 'locations.building': substringPattern(searchTerm) },
         ],
       });
     }
@@ -179,11 +180,21 @@ class InspectionService {
 
   /**
    * 创建巡检计划
+   * createdBy 由控制器从 req.user 注入，不放进客户端可控的白名单字段。
    */
-  async createInspection(fields) {
-    const inspection = await Inspection.create({ ...fields, status: 'pending' });
+  async createInspection(fields, createdBy) {
+    const inspection = await Inspection.create({ ...fields, createdBy, status: 'pending' });
     logger.info(`巡检计划已创建：${inspection.title}`);
     return inspection;
+  }
+
+  /** 摘掉已不存在设备的引用（写后复验收口；删除侧清理早于本次写入，覆盖不到窗口内新引用） */
+  async removeMissingDeviceRefs(inspectionId, ids) {
+    const list = uniqueIdStrings(ids);
+    if (list.length === 0) return;
+    const op = { $pull: { devices: { $in: list } }, $unset: { 'findings.$[elem].deviceId': 1 } };
+    const arrayFilters = [{ 'elem.deviceId': { $in: list } }];
+    await Inspection.updateOne({ _id: inspectionId }, op, { arrayFilters });
   }
 
   /**

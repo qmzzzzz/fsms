@@ -126,21 +126,22 @@ describe('运行时健康信号：挂钩真的接上了（集成，不测自己�
 
 describe('运行时健康信号：app.js 的 /readyz 必须真的记录判定', () => {
   const appJs = read('src/app.js');
+  // 判定值必须同时反映 Mongo 与 Redis：只记 mongo.ok 会让 Redis 挂掉的实例
+  // 在指标面显示为 ready（与响应体 503 自相矛盾）
+  const readyVerdict =
+    /recordReadyz\(ready \? 'ok' : mongo\.ok \? redis\.reason : mongo\.reason, ready\)/;
 
-  test('两个分支（成功 / 异常）都必须落指标', () => {
-    expect(appJs).toMatch(/recordReadyz\(mongo\.ok \? 'ok' : mongo\.reason, mongo\.ok\)/);
+  test('两个分支（成功 / 异常）都必须落指标，且判定覆盖 Mongo + Redis', () => {
+    expect(appJs).toMatch(readyVerdict);
     expect(appJs).toMatch(/recordReadyz\('error', false\)/);
     // 必须从 utils/metrics 导入，而不是另开一条路径
     expect(appJs).toMatch(/recordReadyz,/);
+    expect(appJs).toMatch(/checkRedisReady/);
   });
 
   test('判据可失败：把 recordReadyz 调用去掉，同一正则必须报出来', () => {
-    const stripped = appJs
-      .replace(/recordReadyz\(mongo\.ok \? 'ok' : mongo\.reason, mongo\.ok\)/g, '')
-      .replace(/recordReadyz\('error', false\)/g, '');
-    expect(/recordReadyz\(mongo\.ok \? 'ok' : mongo\.reason, mongo\.ok\)/.test(stripped)).toBe(
-      false
-    );
+    const stripped = appJs.replace(readyVerdict, '').replace(/recordReadyz\('error', false\)/g, '');
+    expect(readyVerdict.test(stripped)).toBe(false);
     expect(/recordReadyz\('error', false\)/.test(stripped)).toBe(false);
   });
 });

@@ -3,6 +3,10 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # 版本 tag 必须触发 CI：build job 的 v* 分支负责推 :<tag> 镜像，
+    # 若 push 只监听 branches，tag 事件根本不进入本工作流，那段构建逻辑是死代码，
+    # release.yml 却会在同一个 tag 上发 Release——出现"有 Release、无对应版本镜像"。
+    tags: ['v*']
   pull_request:
     branches: [main, develop]
 
@@ -13,8 +17,57 @@ on:
 permissions:
   contents: read
 
+# 工作流级环境变量：@scarf/scarf 的 postinstall 是遥测上报。CI 已全部
+# `npm ci --ignore-scripts`，这里再显式关掉，避免将来某个作业漏加标志时
+# 又把安装计数发到第三方。
+env:
+  SCARF_ANALYTICS: 'false'
+
 jobs:
+  # 供应链策略闸（2026-10-24 审计 P2）：**只读锁文件，不做任何安装**。
+  #
+  # 此前的结构缺陷：security-audit 与 test/frontend-build/e2e 平行运行，而后者
+  # 先执行 `npm ci`（安装脚本会跑）——策略闸即使判红，恶意/被投毒的安装脚本
+  # 也已经在 runner 上执行过了。门禁必须在**任何安装动作之前**完成。
+  #
+  # 本作业只 checkout + 跑两个零依赖脚本：安装脚本登记册（两份 lockfile）
+  # 与锁文件完整性锚。所有会安装依赖的作业都 needs 它。
+  dependency-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 22.x
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          # 不使用 npm cache：本作业刻意不安装依赖，cache 只会制造无关的写操作。
+          node-version: 22.x
+
+      # P2-⑫：安装脚本必须显式登记（fail-closed + 显式白名单），分两档。
+      # 比 --ignore-scripts 更强：ignore-scripts 只让本机跳过，树里有没有脚本没人看；
+      # 这里把不变量变成 CI 硬门禁——新增带 install 脚本的依赖必须登记理由。
+      # 判据来源是 lockfile 的 packages 段（npm ls --json 不含 scripts 字段）。
+      # --all 覆盖**两份**锁文件（后端 + web-admin）；登记键是 name@version + integrity，
+      # 同名包的未来版本不会自动获得豁免。
+      - name: Check install scripts in both lockfiles (no install)
+        run: node scripts/check-prod-install-scripts.js --all
+
+      # 供应链完整性锚：lockfile 的 semantic 哈希必须与 deployment/lockfile-anchor.json 一致。
+      # 本仓的其余检测面（npm audit / Dependabot / CodeQL / gitleaks / install-script 门禁）
+      # 全部只回答「这个包有没有已知 CVE」，于是**lockfile 被静默篡改**毫无检测：
+      # PR 夹带改 integrity、本地误跑 npm install 改分辨率、CI 缓存污染。本步把它变成硬门禁。
+      # 口径是 JSON 递归排序 + 紧凑序列化后的 SHA-256（**不是原始字节哈希**）：开发机 CRLF、
+      # CI ubuntu LF，raw 口径会在 CI 上恒假红，而假红第一次出现就会被消化掉（方案 §1.3 实测）。
+      # 覆盖后端与 web-admin 两份锁文件；zznpmtest/ 未入库，刻意不纳入。
+      # 注意：它挡不了"上游包本身被投毒且 lockfile/integrity 未变"，也**不是 SBOM**。
+      - name: Verify lockfile integrity anchor
+        run: node scripts/check-lockfile-integrity.js --verify
+
   test:
+    needs: dependency-policy
     runs-on: ubuntu-latest
     # 挂死的 job 会一直占着 runner（矩阵 2 个 Node × 覆盖率作业），
     # 45 分钟是本仓全量 Jest + 覆盖率的上界；超时即失败，不静默耗资源。
@@ -24,9 +77,17 @@ jobs:
       matrix:
         # Node 18 于 2025-04 EOL（2026-09-28 移除），Node 20 于 2026-04 EOL（2026-10-20
         # 移除，S-3）：CI 继续跑 EOL 版本等于把「新 CVE 无官方补丁」的运行时当作发布基线。
-        # 现在矩阵是 22.x（维护期 LTS）与 24.x（当前 LTS），与 package.json 的
-        # engines `>=22.12.0` 覆盖 22.x/24.x；Dockerfile 基础镜像为 node:26.12.0（26.x 尚未进矩阵）。
-        node-version: [22.x, 24.x]
+        #
+        # 2026-10-24 加入 26.x：**镜像里跑哪个大版本，矩阵里就必须有哪个大版本**。
+        # 此前矩阵只有 22.x/24.x，而 Dockerfile 三个 FROM 全是 node:26.12.0 ——
+        # 也就是说"实际发布到生产的那条运行时"从未被任何 CI 用例执行过。
+        # 这不是风格问题：22/24 全绿而 26 上某条路径炸，只有上线时才会知道。
+        # 22.x 仍保留：它是 package.json `engines >=22.12.0` 的**下界**，声明支持的
+        # 最低线必须被实测；24.x 是当前 LTS。三者覆盖 下界 / LTS / 发布基线。
+        #
+        # 该对齐由 src/tests/deploy/nodeRuntimeMatrixParity.test.js 把守：
+        # 改 Dockerfile 的 node 主版本却不同步矩阵（或反之）会直接红灯。
+        node-version: [22.x, 24.x, 26.x]
 
     steps:
       # persist-credentials: false：不把 GITHUB_TOKEN 留在 .git/config。本工作流没有任何
@@ -46,15 +107,20 @@ jobs:
             package-lock.json
             web-admin/package-lock.json
 
-      # 刻意**不加** --ignore-scripts：下方的 `npm test` 需要内存 MongoDB。
-      # devDeps 里唯一带 install 脚本的 mongodb-memory-server 的 postinstall 负责预下载
-      # mongod 二进制；若在此跳过，下载会延迟到 jest worker 内首次 create 时才发生——
-      # 本仓库已有实证记录（见下方 --forceExit 注释）：mongodb-memory-server 子进程
-      # 句柄与 jest 主进程退出存在清理竞态。把「安装期的一次性二进制下载」挪进测试进程
-      # 会新增一个不可控的时序面；而本 job 装的是 devDeps，其供应链面本就由 security-audit
-      # 里的安装脚本硬门禁守着，两相权衡不加更稳。
+      # 2026-10-24 审计 P2：CI **不再执行任何安装脚本**。
+      # 此前这里刻意不加 --ignore-scripts，理由是 mongodb-memory-server 的 postinstall
+      # 需要预下载 mongod。代价是「上游/中间人给了什么二进制就执行什么」——其 MD5
+      # 来自同一个 host，且 globalSetup 为兼容镜像源把 checkMD5 关掉了。现在改由
+      # 下一步用仓库内 SHA-256 锚定预置二进制，安装脚本一律跳过。
+      # 其余 devDeps 的安装脚本（unrs-resolver / @parcel/watcher）只是原生绑定的兜底：
+      # 平台绑定由 optionalDependencies 提供，忽略脚本不影响 Jest 解析。
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
+
+      - name: Provision SHA-256 pinned mongod
+        # 只输出二进制路径；下载/校验日志走 stderr。MONGOMS_SYSTEM_BINARY 会让
+        # mongodb-memory-server 跳过一切下载与 postinstall。
+        run: echo "MONGOMS_SYSTEM_BINARY=$(node scripts/provision-mongod.js)" >> "$GITHUB_ENV"
 
       # 体积预算的端到端断言（src/tests/deploy/bundleBudget.test.js 的「真实产物」部分）
       # 需要真实的 web-admin/dist；而 dist 是构建产物、已被 .gitignore 排除，CI 上不存在。
@@ -62,7 +128,7 @@ jobs:
       # 因此这里真构建一次，使断言在 CI 上同样成立。
       - name: Build frontend (bundle budget tests need real dist)
         run: |
-          npm --prefix web-admin ci
+          npm --prefix web-admin ci --ignore-scripts
           npm --prefix web-admin run build
 
       - name: Run lint
@@ -126,6 +192,11 @@ jobs:
       # 此门禁用固定 seed 跑一轮随机顺序：seed 固定 → 结果可复现（不是抽奖式门禁），
       # 又足以覆盖与默认顺序不同的排列。
       #
+      # 2026-10-21 修正：Jest 的 --randomize 只打乱**文件内**用例顺序，文件顺序
+      # 始终是默认值（CI 此前只覆盖了「用例」这一半）。src/tests/testSequencer.js
+      # 读取 JEST_FILE_SEED，用同一个 seed 做文件级 Fisher-Yates；两半合起来才
+      # 覆盖「文件/用例的执行次序」。seed 未设置时 sequencer 沿用默认顺序。
+      #
       # 2026-09-18 起把"一个 seed"改成"多个 seed"（当前三个）：单 seed 只能证明"这一种
       # 排列"通过，而顺序耦合是概率性的——当天实测两个真实耦合都在默认 seed 下隐身、换 seed 才红：
       #   seed 777001 → assignRoles 三条用例共用一个 victim，"放行"那条把 level 6
@@ -142,8 +213,8 @@ jobs:
         run: |
           fail=0
           for seed in 20260917 31337 777001; do
-            echo "::group::jest --randomize --seed=$seed"
-            npx jest --randomize --seed="$seed" --forceExit || fail=1
+            echo "::group::jest --randomize --seed=$seed (file seed=$seed)"
+            JEST_FILE_SEED="$seed" npx jest --randomize --seed="$seed" --forceExit || fail=1
             echo "::endgroup::"
           done
           exit "$fail"
@@ -176,6 +247,7 @@ jobs:
           fail_ci_if_error: false
 
   security-audit:
+    needs: dependency-policy
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -198,20 +270,8 @@ jobs:
           echo "### Backend npm audit" >> "$GITHUB_STEP_SUMMARY"
           tail -3 audit-backend.txt >> "$GITHUB_STEP_SUMMARY" || true
 
-      # P2-⑫：安装脚本必须显式登记（fail-closed + 显式白名单），分两档。
-      # 比 --ignore-scripts 更强：ignore-scripts 只让本机跳过，树里有没有脚本没人看；
-      # 这里把不变量变成 CI 硬门禁——新增带 install 脚本的依赖必须登记理由。
-      # 判据来源是 package-lock.json 的 packages 段（npm ls --json 不含 scripts 字段）；
-      # 该 job 因上游 `npm audit` 已隐式装好依赖，锁文件必然就位。
-      - name: Check prod dependency install scripts
-        # 生产树：Dockerfile runtime 阶段 `npm ci --omit=dev --ignore-scripts` 的安全性
-        # 由这一档保证——它证明忽略脚本后的生产闭包里根本没有脚本需要忽略。
-        run: node scripts/check-prod-install-scripts.js --omit=dev
-
-      - name: Check dev dependency install scripts
-        # dev 树：devDeps 的安装脚本会在开发机与 test/e2e 作业上真实执行（那里刻意不加
-        # --ignore-scripts，因为测试需要 mongod），是真实供应链风险面，必须显式登记。
-        run: node scripts/check-prod-install-scripts.js --scan
+      # 安装脚本登记册与锁文件完整性锚已前移到 dependency-policy 作业
+      # （必须在任何 `npm ci` 之前跑）；本作业只做 advisory 判定。
 
       # dev 树的 **advisory** 此前对门禁完全不可见：上面两处 audit 都是 --omit=dev。
       # 2026-10-09 实测含 dev 35 条（30 high / 5 moderate），而 --omit=dev 为 0 ——
@@ -242,16 +302,14 @@ jobs:
           echo "### Web-admin npm audit" >> "$GITHUB_STEP_SUMMARY"
           tail -3 ../audit-web.txt >> "$GITHUB_STEP_SUMMARY" || true
 
-      # 供应链完整性锚：lockfile 的 semantic 哈希必须与 deployment/lockfile-anchor.json 一致。
-      # 本仓的其余检测面（npm audit / Dependabot / CodeQL / gitleaks / install-script 门禁）
-      # 全部只回答「这个包有没有已知 CVE」，于是**lockfile 被静默篡改**毫无检测：
-      # PR 夹带改 integrity、本地误跑 npm install 改分辨率、CI 缓存污染。本步把它变成硬门禁。
-      # 口径是 JSON 递归排序 + 紧凑序列化后的 SHA-256（**不是原始字节哈希**）：开发机 CRLF、
-      # CI ubuntu LF，raw 口径会在 CI 上恒假红，而假红第一次出现就会被消化掉（方案 §1.3 实测）。
-      # 覆盖后端与 web-admin 两份锁文件；zznpmtest/ 未入库，刻意不纳入。
-      # 注意：它挡不了"上游包本身被投毒且 lockfile/integrity 未变"，也**不是 SBOM**。
-      - name: Verify lockfile integrity anchor
-        run: node scripts/check-lockfile-integrity.js --verify
+      # 前端 dev 树此前完全不在门禁内（上面只审 --omit=dev）：vitest 4.1.11 的
+      # 3 条 moderate 可以长期存在而 CI 全绿。与后端同口径——含 dev 的完整树
+      # 走同一份允许清单（清单为空即零容忍），未登记 / 过期 / 陈旧一律 fail-closed。
+      - name: Audit ALL web-admin dependencies incl. dev (allowlist gate)
+        working-directory: web-admin
+        run: |
+          npm audit --audit-level=moderate --json > .audit-all.json || true
+          node ../scripts/check-audit-allowlist.js --report .audit-all.json
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -316,6 +374,7 @@ jobs:
           BASE_REF: ${{ steps.gitleaks-base.outputs.ref }}
 
   frontend-build:
+    needs: dependency-policy
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -345,7 +404,9 @@ jobs:
 
       - name: Install dependencies
         working-directory: web-admin
-        run: npm ci
+        # P2：前端树里唯一的安装脚本是 optional/darwin 的 fsevents（Linux 不安装）。
+        # 显式忽略脚本，保证 CI 的安装期零脚本执行。
+        run: npm ci --ignore-scripts
 
       # 七维终评（代码质量）补门禁：前端 ESLint 与后端 lint 同级硬门禁。
       # 此前仅本地有 lint:web 脚本而 CI 未跑，前端代码风格/错误靠自觉；
@@ -395,6 +456,7 @@ jobs:
     # （dotenv→强校验→密钥注入→播种→监听→WebSocket/调度器/审计缓冲），
     # 是 supertest 套件测不到的接线层兜底；prod-drill 另验生产门禁。
     # 两脚本自带随机强密钥与内存 Mongo，无需额外 service 容器。
+    needs: dependency-policy
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -408,13 +470,13 @@ jobs:
         with:
           node-version: 22.x
 
-      # 加 --ignore-scripts 的安全性判据：本 job 只跑 e2e-smoke / production-drill
-      # 两个脚本，二者自带随机强密钥与**内存 Mongo**（见上方 job 注释）——但内存 Mongo
-      # 正是 devDeps 里的 mongodb-memory-server，其 postinstall 负责预下载 mongod。
-      # 与 test job 同理：跳过脚本会把下载延迟进脚本进程本身，故**同样保持不加**。
-      # 若将来确需在此省掉 devDeps 安装脚本，前提是先把 mongod 二进制显式预置为不变量。
+      # P2：与 test job 同口径——安装脚本一律跳过，mongod 由仓库内 SHA-256
+      # 锚定预置后经 MONGOMS_SYSTEM_BINARY 注入。
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
+
+      - name: Provision SHA-256 pinned mongod
+        run: echo "MONGOMS_SYSTEM_BINARY=$(node scripts/provision-mongod.js)" >> "$GITHUB_ENV"
 
       - name: Run E2E smoke（完整启动序列 14 步）
         run: npm run test:e2e
@@ -431,6 +493,7 @@ jobs:
   e2e-browser:
     # 评价报告 H1：浏览器旅程为发布镜像硬门禁。桌面与移动端旅程
     # 已在本地真实栈稳定通过；MFA 旅程继续按环境能力跳过。
+    needs: dependency-policy
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -465,7 +528,7 @@ jobs:
 
       - name: Install frontend dependencies and build
         run: |
-          npm --prefix web-admin ci
+          npm --prefix web-admin ci --ignore-scripts
           npm --prefix web-admin run build
 
       - name: Install Playwright Chromium
@@ -608,6 +671,39 @@ jobs:
       # 而公开仓库的 workflow artifact 匿名即可下载——等于把管理员会话态交给任何路过的人。
       # trace 仍按原样落在 runner 本地 outputDir（test-results/）供失败取证；本地跑同栈后
       # 用 `npx playwright show-report` 查看 HTML 报告。
+
+  # 审计 P3：镜像此前只在 main / v* 上构建 ⇒ Dockerfile 写坏（缺文件、构建期
+  # npm ci 失败、基础镜像不可用）要到合并后才暴露，而那时 latest 已经指向新镜像。
+  # 本作业在 PR 上**只构建不推送**，把镜像构建纳入合并前门禁；真正带签名/SBOM
+  # 的发布仍走下方 build（push: true），两者共用同一 Dockerfile 与 build-args 口径。
+  container-build:
+    if: github.event_name == 'pull_request'
+    needs: dependency-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: false
+          # 不推送就不需要 registry 凭据；标签只用于本地标识本次 PR 构建。
+          tags: fsms:pr-${{ github.event.pull_request.number }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            APP_VERSION=pr-${{ github.event.pull_request.number }}
+          # PR 缓存与发布构建分开 scope：避免开发中的 Dockerfile 层把 main 的
+          # 缓存逐出，同时 PR 之间仍可复用（fork PR 无写权限时退化为不写，不阻断）。
+          cache-from: type=gha,scope=container-build
+          cache-to: type=gha,mode=max,scope=container-build
 
   build:
     # I-M2：镜像构建/推送串联 e2e、secret-scan 与 security-audit——

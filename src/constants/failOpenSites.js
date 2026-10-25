@@ -18,7 +18,7 @@
  * ## 台账的结构（三段，各有各的判据）
  *  1. `FAIL_OPEN_SITES` —— 降级即护栏失效的站点，**必须**有信号，且信号必须被告警规则覆盖；
  *  2. `OTHER_ALERT_SIGNALS` —— 其余 `incSecurityAlert` 站点（安全事件上报，不是降级）；
- *  3. `PASS_THROUGH` —— 动态转发 type 的两处（投递门面与指标定义本体），无法静态枚举。
+ *  3. `PASS_THROUGH` —— 动态 type 的调用点（投递门面、模板串拼装、局部包装器），无法静态枚举。
  *
  * 完整性由 `src/tests/ci/failOpenLedgerGate.test.js` 双向钉住：
  * 新增一个 `incSecurityAlert` 站点而没进本台账 ⇒ 红；台账里登记了但代码里没有 ⇒ 红。
@@ -102,6 +102,24 @@ const FAIL_OPEN_SITES = Object.freeze([
     tightening:
       '收紧方向应落在「配额换算」而不是「拒绝」：降级时按实例数折算阈值，' +
       '而不是维持原阈值。未做——需要部署侧提供实例数。',
+  },
+  {
+    type: 'audit_wal_permission_not_tightened',
+    file: 'services/auditWalPermissions.js',
+    fn: 'hardenTarget',
+    level: 'high',
+    direction: 'fail-open',
+    trigger: '启动期对 WAL 目录/文件执行 0700/0600 收紧后回读校验未通过',
+    effect:
+      'WAL 继续可用（best-effort 语义），但同机其他账户可能读取或改写尚未落库的审计取证——' +
+      '护栏没生效，进程却按“已收紧”继续运行',
+    why:
+      '刻意不阻断启动：WAL 不可用会让审计写入整体退化，代价大于本机权限窗口；' +
+      '但“调用过 chmod/icacls”不能自证权限已生效，所以回读失败必须发独立安全告警，' +
+      '由运维在窗口内人工核查，而不是只留一条 error 日志（日志不是告警面）。',
+    tightening:
+      '可收紧方向：回读失败时把 WAL 切到“仅本进程可写”的临时目录并拒绝复用旧文件；' +
+      '未做——需要先确认切换过程中在途 outbox 的迁移口径。',
   },
   {
     type: 'captcha_active_bound_lost',
@@ -229,6 +247,14 @@ const OTHER_ALERT_SIGNALS = Object.freeze([
     why: '凭据型限流滥用（进入封禁阶梯）',
   },
   {
+    type: 'ws_inbound_throttled',
+    file: 'services/websocketService/inboundThrottle.js',
+    level: 'medium',
+    why:
+      'WebSocket 入站事件持续超速、连接已被断开——是**正常防护动作**（限流生效），' +
+      '不是降级或护栏失效，因此归信号段而不是 FAIL_OPEN_SITES。',
+  },
+  {
     type: 'trusted_proxy_cidrs_unset',
     file: 'app.js',
     level: 'medium',
@@ -262,6 +288,20 @@ const PASS_THROUGH = Object.freeze([
     file: 'services/securityAlertDelivery.js',
     arg: 'alertType',
     why: '告警投递门面：type 由调用方给出（`incSecurityAlert(alertType, level)`）',
+  },
+  {
+    file: 'services/captchaService.js',
+    arg: '`captcha_${scope}_cap_reached`',
+    why:
+      '模板串拼装：type 随 scope（login/register）取值，静态采集器只认单引号字面量；' +
+      '同文件的静态站点 captcha_active_bound_lost 已单独登记在 FAIL_OPEN_SITES。',
+  },
+  {
+    file: 'services/initialPasswordFile.js',
+    arg: 'type',
+    why:
+      '局部包装器：alert(type) 把 type 作为形参转发；采集器不做跨行/跨函数解析，' +
+      '唯一调用点传的是 admin_initial_password_file_delete_failed 字面量。',
   },
 ]);
 

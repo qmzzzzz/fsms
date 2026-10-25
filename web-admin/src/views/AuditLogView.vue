@@ -398,6 +398,13 @@
       </div>
     </div>
 
+    <!-- 审计读取二次验证（P3-2）：票据缺失/过期时弹出，验过后重放被拦下的动作 -->
+    <ReauthDialog
+      v-model="reauthVisible"
+      :submitting="reauthSubmitting"
+      @submit="handleReauthSubmit"
+    />
+
     <!-- 详情对话框 -->
     <!-- append-to-body：传送至 body，避免任何祖先 transform/filter 改变 fixed 遮罩的定位基准 -->
     <el-dialog
@@ -507,11 +514,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api, apiClient, isCanceledError, resolveErrorMessage } from '@/utils/api'
+import { getReauthTicket, storeReauthTicket } from '@/utils/reauthTicket'
+import ReauthDialog from '@/components/ReauthDialog.vue'
 import { formatTime, localDateStr } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { usePermission } from '@/composables/usePermission'
@@ -557,7 +566,16 @@ const verifying = ref(false)
 const auditLossTotal = computed(() => {
   const s = compliance.value?.auditLoss
   if (!s) return 0
-  return (s.droppedCount || 0) + (s.walDroppedLines || 0) + (s.walDiscardedLines || 0)
+  // walDurableDropped 计入总数：它不是"取证缺失"而是"承诺缺失"
+  // （已向调用方回成功却永久不入库），严重度不低于其它项，不能从总数里漏掉。
+  // walDurableTrimRefusals 不计入：它表示"拒绝裁剪、WAL 在增长"，
+  // 此刻还没有丢记录，混进"已丢失"会误导处置方向（要扩容而不是取证）。
+  return (
+    (s.droppedCount || 0) +
+    (s.walDroppedLines || 0) +
+    (s.walDiscardedLines || 0) +
+    (s.walDurableDropped || 0)
+  )
 })
 
 const auditLossDetail = computed(() => {
@@ -567,6 +585,8 @@ const auditLossDetail = computed(() => {
   if (s.droppedCount) parts.push(`dropped ${s.droppedCount}`)
   if (s.walDroppedLines) parts.push(`walDropped ${s.walDroppedLines}`)
   if (s.walDiscardedLines) parts.push(`walDiscarded ${s.walDiscardedLines}`)
+  if (s.walDurableDropped) parts.push(`durableLost ${s.walDurableDropped}`)
+  if (s.walDurableTrimRefusals) parts.push(`durableTrimRefused ${s.walDurableTrimRefusals}`)
   return parts.join(' / ')
 })
 
@@ -605,7 +625,66 @@ const buildFilterParams = () => {
 // 竞态守卫：快速筛选/翻页时丢弃过期的旧响应，防止旧数据覆盖新结果
 const listGuard = useLatestRequest()
 
+// ===== 审计读取二次验证票据（P3-2）=====
+// 后端对 audit-logs / alerts / audit-logs/export 要求短期票据（5 分钟）。
+// 页面统一在此收口：无票据 → 先弹框，验过后重放被拦下的动作。
+const REAUTH_TICKET_ERROR_CODES = ['REAUTH_TICKET_REQUIRED', 'REAUTH_TICKET_INVALID']
+const reauthVisible = ref(false)
+const reauthSubmitting = ref(false)
+// 按 tag 去重：首屏 logs+alerts 同时被拦只弹一次框；连续筛选也不会堆叠重放
+const pendingReauthTags = new Set()
+
+const requireReauth = (tag) => {
+  pendingReauthTags.add(tag)
+  reauthVisible.value = true
+}
+
+const readReauthErrorCode = async (e) => {
+  const data = e?.response?.data
+  if (data?.errors?.errorCode) return data.errors.errorCode
+  // 导出请求 responseType 为 blob，错误 JSON 也被包成 Blob
+  if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    try {
+      return JSON.parse(await data.text())?.errors?.errorCode || ''
+    } catch (_) {
+      return ''
+    }
+  }
+  return ''
+}
+
+const handleReauthSubmit = async (credential) => {
+  reauthSubmitting.value = true
+  try {
+    const res = await api.security.createReauthTicket(credential)
+    const issued = res?.data?.data
+    if (!issued?.ticket) return
+    storeReauthTicket(issued.ticket, issued.expiresIn)
+    const tags = [...pendingReauthTags]
+    pendingReauthTags.clear()
+    reauthVisible.value = false
+    for (const tag of tags) {
+      if (tag === 'logs') loadData()
+      else if (tag === 'alerts') loadAlerts()
+      else if (tag === 'forensic') exportForensic()
+    }
+  } catch (_) {
+    // 凭据错误等提示由 api 响应拦截器统一输出；弹层保持打开便于重试
+  } finally {
+    reauthSubmitting.value = false
+  }
+}
+
+watch(reauthVisible, (visible) => {
+  // 用户取消：放弃本轮被拦下的动作，避免下次验证后重放早已过期的操作
+  if (!visible) pendingReauthTags.clear()
+})
+
 const loadData = async () => {
+  if (!getReauthTicket()) {
+    requireReauth('logs')
+    return
+  }
   const isCurrent = listGuard()
   loading.value = true
   try {
@@ -615,7 +694,7 @@ const loadData = async () => {
       ...buildFilterParams(),
     }
 
-    const res = await apiClient.get('/security/audit-logs', { params })
+    const res = await api.security.queryAuditLogs(params)
     if (!isCurrent()) return
     // 后端返回结构：{ success: true, data: { data: [logs], meta: {...} }, message: '...' }
     const result = res.data?.data
@@ -625,6 +704,11 @@ const loadData = async () => {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
     if (isCanceledError(e)) return
     if (!isCurrent()) return
+    // 票据过期：重新验证后重放本次查询，不当作业务失败提示
+    if (REAUTH_TICKET_ERROR_CODES.includes(await readReauthErrorCode(e))) {
+      requireReauth('logs')
+      return
+    }
     // P2-3：加载失败只清态，**提示由 api.js 响应拦截器统一负责**（与 alarmView 同契约）。
     // 此前组件这里再弹一条 messages.loadFailed，同一次失败会弹两条：
     // 拦截器的具体文案（400/403/404/429/5xx/网络错误）+ 组件的泛化文案。
@@ -681,6 +765,10 @@ const visibleAlerts = computed(() =>
 )
 
 const loadAlerts = async () => {
+  if (!getReauthTicket()) {
+    requireReauth('alerts')
+    return
+  }
   try {
     const res = await api.security.getAlerts()
     const payload = res?.data?.data
@@ -690,8 +778,10 @@ const loadAlerts = async () => {
     alertsMeta.value = payload.meta || null
     alertsLoaded.value = true
   } catch (e) {
-    // 静默：与统计卡同契约——提示归 api 响应拦截器统一负责；
-    // 403 DATA_SCOPE_DENIED 等业务拒绝也不在这里另弹，避免同一次失败两条提示
+    // 票据过期：重新验证后重放；其余失败静默（与统计卡同契约，提示归拦截器）
+    if (REAUTH_TICKET_ERROR_CODES.includes(await readReauthErrorCode(e))) {
+      requireReauth('alerts')
+    }
   }
 }
 
@@ -831,6 +921,10 @@ const exportLogs = async () => {
 const forensicExporting = ref(false)
 
 const exportForensic = async () => {
+  if (!getReauthTicket()) {
+    requireReauth('forensic')
+    return
+  }
   forensicExporting.value = true
   try {
     const response = await api.security.exportAuditLogs(buildFilterParams())
@@ -866,6 +960,11 @@ const exportForensic = async () => {
     ElMessage.success(t('messages.exportSuccess'))
   } catch (e) {
     if (isCanceledError(e)) return
+    // 票据过期：不当作导出失败，重新验证后重放
+    if (REAUTH_TICKET_ERROR_CODES.includes(await readReauthErrorCode(e))) {
+      requireReauth('forensic')
+      return
+    }
     ElMessage.error(await extractBlobErrorMessage(e?.response?.data, t('messages.exportFailed')))
   } finally {
     forensicExporting.value = false

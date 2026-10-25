@@ -2,10 +2,10 @@
 
 ## 支持的版本
 
-| 版本 | 支持状态 |
-| --- | --- |
+| 版本               | 支持状态        |
+| ------------------ | --------------- |
 | 1.0.x（main 分支） | ✅ 接收安全修复 |
-| < 1.0 | ❌ 不再维护 |
+| < 1.0              | ❌ 不再维护     |
 
 ## 报告漏洞
 
@@ -20,12 +20,12 @@
 
 ### 响应时限（工作日）
 
-| 阶段 | 目标 |
-| --- | --- |
-| 确认收到 | 48 小时内 |
-| 初步分诊（定级 + 排期） | 7 天内 |
-| High/Critical 修复发布 | 30 天内 |
-| Medium/Low 修复发布 | 下一迭代 |
+| 阶段                    | 目标      |
+| ----------------------- | --------- |
+| 确认收到                | 48 小时内 |
+| 初步分诊（定级 + 排期） | 7 天内    |
+| High/Critical 修复发布  | 30 天内   |
+| Medium/Low 修复发布     | 下一迭代  |
 
 修复发布后，与报告者协商公开披露的时间与署名意愿；默认在 CHANGELOG 安全条目中致谢（可匿名）。
 
@@ -42,7 +42,8 @@
 
 ## 自检基线
 
-本项目定期执行：`npm audit --omit=dev --audit-level=moderate`（CI security-audit job，阈值 2026-09-16 起由 `high` 收紧至 `moderate`）、Gitleaks 全量密钥扫描、`node scripts/compliance-check.js` 合规自检。已归档的渗透/白盒报告结论见 `deliverables/`。
+本项目定期执行：`npm audit --omit=dev --audit-level=moderate`（CI security-audit job，阈值 2026-09-16 起由 `high` 收紧至 `moderate`）、Gitleaks 增量密钥扫描（push / PR 提交范围；历史全量扫描不在 CI 内）、`node scripts/compliance-check.js` 合规自检。已归档的渗透/白盒报告结论见 `deliverables/`。
+
 ## 登录口令加密的密钥管理（ECDH）
 
 登录/注册/改密等口令走 ECDH 信封密文轨（背景见 `docs/adr/ADR-001-登录口令ECDH信封加密.md`）。该轨道有两种密钥模式，取舍截然相反，运维须知晓：

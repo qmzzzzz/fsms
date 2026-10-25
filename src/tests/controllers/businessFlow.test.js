@@ -276,6 +276,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
         alarmType: 'patrol_find',
         description: `误报闭环_${stamp}`,
         level: 'info',
+        location: { building: 'A栋' },
       });
     expect(a1.status).toBe(201);
     // 上报后必须落到 pending 且已带初始处理日志：只断 201 时，
@@ -318,6 +319,7 @@ describe('业务闭环：设备 / 报警 / 巡检（冲 100%）', () => {
         alarmType: 'phone_report',
         description: `取消闭环_${stamp}`,
         level: 'info',
+        location: { building: 'A栋' },
       });
     const cancelId = String(a2.body.data._id || a2.body.data.id);
     const cancel = await authed()

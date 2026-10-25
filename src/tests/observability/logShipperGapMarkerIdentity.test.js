@@ -26,6 +26,9 @@
 
 const { HttpShipperTransport, BUFFER_CAP } = require('../../utils/logShipper');
 
+// http 端点仅用于让请求失败/成功，与出站加密判据无关（见 resolveShippingTarget）
+process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
+
 const AUTH_FIELD = '__log_shipper_gap_auth__';
 const COUNT_FIELD = '__log_shipper_gap__';
 // 假标记里的独特串：用它判断"这一行有没有被当标记带走/报告出去"。

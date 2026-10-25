@@ -134,6 +134,40 @@ const DECLARED_DYNAMIC = [
       'USER_SCOPE_FORBIDDEN',
     ],
   },
+  // 二次验证中间件把「通道判定 / 口令解析 / 口令或 MFA 校验」的码集中在三个
+  // 具名返回值里，调用点只做 codeError(res, xxx.errorCode) 转发。码本身是字面量
+  // 且都在码表内；登记的是这条动态槽的全部可达集，防它日后扩出未登记的码。
+  {
+    site: 'src/middleware/security/index.js|resolved.errorCode',
+    trace: { file: 'src/middleware/security/index.js', props: ['errorCode'] },
+    codes: [
+      'AUTH_ENCRYPTED_CREDENTIAL_INVALID',
+      'MFA_ATTEMPTS_EXCEEDED',
+      'REAUTH_MFA_INCORRECT',
+      'REAUTH_MFA_NOT_ENABLED',
+      'REAUTH_MFA_REQUIRED',
+      'REAUTH_PASSWORD_INCORRECT',
+      'REAUTH_REQUIRED',
+      'USER_NOT_FOUND',
+      'VALIDATION_FAILED',
+    ],
+  },
+  {
+    // 密码轨与 MFA 轨合并后的统一失败出口（两处同文本 errorCode 槽会撞站点键）
+    site: 'src/middleware/security/index.js|failed.errorCode',
+    trace: { file: 'src/middleware/security/index.js', props: ['errorCode'] },
+    codes: [
+      'AUTH_ENCRYPTED_CREDENTIAL_INVALID',
+      'MFA_ATTEMPTS_EXCEEDED',
+      'REAUTH_MFA_INCORRECT',
+      'REAUTH_MFA_NOT_ENABLED',
+      'REAUTH_MFA_REQUIRED',
+      'REAUTH_PASSWORD_INCORRECT',
+      'REAUTH_REQUIRED',
+      'USER_NOT_FOUND',
+      'VALIDATION_FAILED',
+    ],
+  },
 ];
 
 /** 站点身份：文件 + 码槽文本（见上注释：为什么不用行号） */

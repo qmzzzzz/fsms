@@ -13,7 +13,12 @@ const FireAlarm = require('../models/FireAlarm');
 const Inspection = require('../models/Inspection');
 const logger = require('../utils/logger');
 const { withListBudget, listCountOptions, listAggregateOptions } = require('../utils/queryBudget');
-const { escapeRegExp, uniqueIdStrings } = require('../utils/helpers');
+const { uniqueIdStrings } = require('../utils/helpers');
+const {
+  normalizeSearchTerm,
+  substringPattern,
+  upperCodePrefixPattern,
+} = require('../utils/searchPatterns');
 const {
   encodeCursor,
   decodeCursor,
@@ -60,15 +65,20 @@ class DeviceService {
     // 同 AlarmService：范围不可用即 403，不回空集（#12）
     applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.device);
 
-    if (search) {
-      const escaped = escapeRegExp(search);
+    const searchTerm = normalizeSearchTerm(search);
+    if (searchTerm) {
       // 合并而非赋值：device 的属主声明是数组
       // （createdBy ∪ maintenanceRecord.operator，见 constants/dataScopeFields.js），
       // self 范围下 applyDataScopeToQuery 已把 $or 用作数据范围条件，
       // 直接 `query.$or = [...]` 会把范围条件整条替换掉 ⇒ 越权可见全组织设备。
       // 判据与实现统一收在 utils/scopeCast.js（报警/巡检同族，三处共用一个合并器）。
+      // deviceCode 入库即大写（schema uppercase:true）⇒ 搜索词同步大写并锚定，
+      // 这样能命中大小写敏感的唯一索引；deviceName 是自由文本，保持子串。
       applySearchCondition(query, {
-        $or: [{ deviceName: new RegExp(escaped, 'i') }, { deviceCode: new RegExp(escaped, 'i') }],
+        $or: [
+          { deviceName: substringPattern(searchTerm) },
+          { deviceCode: upperCodePrefixPattern(searchTerm) },
+        ],
       });
     }
 
@@ -128,6 +138,25 @@ class DeviceService {
     return FireDevice.find({ _id: { $in: list } })
       .select('createdBy maintenanceRecord.operator location.building')
       .lean();
+  }
+
+  /**
+   * 给定 id 中**已不存在**的设备（写后复验用）
+   *
+   * 设备删除先把 FireAlarm/Inspection 里的引用清掉、再删设备（deleteDevice），
+   * 但"校验设备存在 → 写入引用"之间的窗口不受该事务保护：清理已经跑完、
+   * 设备还没删（或刚删）时落库的引用会悬空。引用写入方在写完后调用本方法
+   * 自查一次，把窗口内消失的设备从记录里摘掉。
+   * @returns {Promise<string[]>} 缺失的 id（保持去重后的顺序）
+   */
+  async findMissingIds(ids) {
+    const list = uniqueIdStrings(ids);
+    if (list.length === 0) return [];
+    const found = await FireDevice.find({ _id: { $in: list } })
+      .select('_id')
+      .lean();
+    const existing = new Set(found.map((doc) => String(doc._id)));
+    return list.filter((id) => !existing.has(String(id)));
   }
 
   /**
@@ -390,51 +419,46 @@ class DeviceService {
     // 判定时刻只取一次：跨秒抖动会让"同一响应里的两个档"用两个now
     const now = new Date();
     const alert = deviceAlertFilters(now);
-    const [
-      byType,
-      byStatus,
-      needMaintenance,
-      needSchedule,
-      expiringSoon,
-      expired,
-      expiryUnknown,
-      total,
-    ] = await Promise.all([
-      FireDevice.aggregate(
-        [
-          { $match: scoped },
-          { $group: { _id: '$deviceType', count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-        ],
-        listAggregateOptions()
-      ),
-      FireDevice.aggregate(
-        [
-          { $match: scoped },
-          { $group: { _id: '$status', count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-        ],
-        listAggregateOptions()
-      ),
-      FireDevice.countDocuments({ ...scoped, ...alert.needMaintenance }, listCountOptions()),
-      // 从未录入过检查日的设备没有排期，$lte 判据永远不命中它——
-      // 单列一档而不是并入 needMaintenance，是为了不改变既有指标的含义
-      FireDevice.countDocuments({ ...scoped, ...alert.needSchedule }, listCountOptions()),
-      FireDevice.countDocuments({ ...scoped, ...alert.expiringSoon }, listCountOptions()),
-      FireDevice.countDocuments({ ...scoped, ...alert.expired }, listCountOptions()),
-      FireDevice.countDocuments({ ...scoped, ...alert.expiryUnknown }, listCountOptions()),
-      FireDevice.countDocuments(scoped, listCountOptions()),
-    ]);
+    // 一次 $facet 收敛全部计数：原先 2 条聚合 + 6 条 countDocuments 并发发出，
+    // 各自读取不同时刻的快照——同一响应里 total 与 byStatus 之和可能对不上。
+    // $facet 内共享同一次顶层 $match 与同一份快照，口径天然一致，连接池占用也减半。
+    const [facet] = await FireDevice.aggregate(
+      [
+        { $match: scoped },
+        {
+          $facet: {
+            byType: [
+              { $group: { _id: '$deviceType', count: { $sum: 1 } } },
+              { $sort: { count: -1 } },
+            ],
+            byStatus: [
+              { $group: { _id: '$status', count: { $sum: 1 } } },
+              { $sort: { count: -1 } },
+            ],
+            needMaintenance: [{ $match: alert.needMaintenance }, { $count: 'n' }],
+            // 从未录入过检查日的设备没有排期，$lte 判据永远不命中它——
+            // 单列一档而不是并入 needMaintenance，是为了不改变既有指标的含义
+            needSchedule: [{ $match: alert.needSchedule }, { $count: 'n' }],
+            expiringSoon: [{ $match: alert.expiringSoon }, { $count: 'n' }],
+            expired: [{ $match: alert.expired }, { $count: 'n' }],
+            expiryUnknown: [{ $match: alert.expiryUnknown }, { $count: 'n' }],
+            total: [{ $count: 'n' }],
+          },
+        },
+      ],
+      listAggregateOptions()
+    );
 
+    const countOf = (arm) => facet?.[arm]?.[0]?.n || 0;
     return {
-      total,
-      byType,
-      byStatus,
-      needMaintenance,
-      needSchedule,
-      expiringSoon,
-      expired,
-      expiryUnknown,
+      total: countOf('total'),
+      byType: facet?.byType || [],
+      byStatus: facet?.byStatus || [],
+      needMaintenance: countOf('needMaintenance'),
+      needSchedule: countOf('needSchedule'),
+      expiringSoon: countOf('expiringSoon'),
+      expired: countOf('expired'),
+      expiryUnknown: countOf('expiryUnknown'),
     };
   }
 

@@ -40,6 +40,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const dns = require('dns');
 const { jsCodeOnly } = require('../helpers/jsCodeOnly');
 const { AUDIT_RISK_LEVELS } = require('../../constants/audit');
 
@@ -153,11 +154,16 @@ const LEVEL_VALUES = Object.values(ALERT_LEVELS);
 describe('出站告警：档位词表、投递名次表、调用点闭包', () => {
   const WEBHOOK = 'https://alert.example.invalid/hook';
   let infoSpy;
+  let dnsLookup;
 
   beforeEach(() => {
     postJson.mockReset();
     postJson.mockResolvedValue({ ok: true });
     infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
+    // 投递前对域名做解析校验并钉住地址（DNS 重绑定防护）；用例不出网
+    dnsLookup = jest
+      .spyOn(dns.promises, 'lookup')
+      .mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     process.env.SECURITY_ALERT_WEBHOOK = WEBHOOK;
     process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST = '';
     // 阈值压到词表的最低档：这样"能不能投递"就只由名次表说了算
@@ -166,6 +172,7 @@ describe('出站告警：档位词表、投递名次表、调用点闭包', () =
 
   afterEach(() => {
     infoSpy.mockRestore();
+    dnsLookup.mockRestore();
     delete process.env.SECURITY_ALERT_WEBHOOK;
     delete process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST;
     delete process.env.SECURITY_ALERT_MIN_LEVEL;

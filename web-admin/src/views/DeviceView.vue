@@ -13,7 +13,12 @@
         shadow="hover"
         class="mini-stat"
         :class="{ 'is-clickable': s.clickable }"
+        :role="s.clickable ? 'button' : undefined"
+        :tabindex="s.clickable ? 0 : undefined"
+        :aria-label="s.clickable ? s.label : undefined"
         @click="s.clickable && openExpiring()"
+        @keydown.enter.self.prevent="s.clickable && openExpiring()"
+        @keydown.space.self.prevent="s.clickable && openExpiring()"
       >
         <div class="mini-stat-body">
           <el-icon :size="28" :color="s.color">
@@ -868,6 +873,10 @@ onMounted(refreshAll)
 }
 .mini-stat.is-clickable {
   cursor: pointer;
+}
+.mini-stat.is-clickable:focus-visible {
+  outline: 2px solid var(--xf-primary);
+  outline-offset: 2px;
 }
 .mini-stat :deep(.el-card__body) {
   padding: 16px;

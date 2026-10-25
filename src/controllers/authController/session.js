@@ -16,12 +16,7 @@ const logger = require('../../utils/logger');
 const { asyncHandler } = require('../../middleware/errorHandler');
 // 令牌提取的唯一实现（authenticate 用的就是它）；登出必须与认证同源，见 logout 注释
 const { extractAccessToken } = require('../../middleware/auth');
-const {
-  clearAuthCookies,
-  getCookies,
-  REFRESH_COOKIE_NAME,
-  ACCESS_COOKIE_NAME,
-} = require('../../utils/cookie');
+const { clearAuthCookies, getCookies, REFRESH_COOKIE_NAME } = require('../../utils/cookie');
 const sessionService = require('../../services/sessionService');
 const authService = require('../../services/authService');
 const { recordSensitiveActionDurably } = require('../../services/auditOutbox');
@@ -176,7 +171,9 @@ const logout = asyncHandler(async (req, res) => {
  */
 const getSessionStatus = asyncHandler(async (req, res) => {
   const cookies = getCookies(req);
-  const accessToken = cookies[ACCESS_COOKIE_NAME];
+  // 与 authenticate/logout 同源（Bearer 或 httpOnly Cookie）：只读 Cookie 时，
+  // 走 Authorization 头的客户端会被误判为未登录，登录页据此再次自行跳转/提示。
+  const accessToken = extractAccessToken(req);
   const refreshTokenRaw = cookies[REFRESH_COOKIE_NAME];
 
   let authenticated = false;

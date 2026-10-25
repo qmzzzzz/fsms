@@ -314,9 +314,20 @@ describe('补漏：filePermission 失败路径', () => {
     withTempDir((dir) => {
       const { r, calls } = run('win32', { target: dir, isDir: true });
       expect(r.ok).toBe(true);
+      // 授予**不得带 /T**：那会把 (OI)(CI) 继承专用 ACE 写进每个子文件，子文件 DACL
+      // 因此被清空（实测 EPERM）。递归清理由 reset 的 /T 完成，子文件继承目录授予。
       expect(calls).toEqual([
         ['icacls', [dir, '/reset', '/T', '/C', '/Q']],
-        ['icacls', [dir, '/inheritance:r', '/grant:r', `${user}:(OI)(CI)F`, '/T', '/C', '/Q']],
+        ['icacls', [dir, '/inheritance:r', '/grant:r', `${user}:(OI)(CI)F`]],
+      ]);
+    });
+
+    withTempDir((dir) => {
+      const { r, calls } = run('win32', { target: dir, isDir: true, recursive: false });
+      expect(r.ok).toBe(true);
+      expect(calls).toEqual([
+        ['icacls', [dir, '/reset']],
+        ['icacls', [dir, '/inheritance:r', '/grant:r', `${user}:(OI)(CI)F`]],
       ]);
     });
 

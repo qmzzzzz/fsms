@@ -96,9 +96,9 @@ const EXPORT_SHEET_NAMES = {
 // 模型 + 排序 + populate + 字段裁剪配置（选择投影在查询阶段生效）
 //
 // 排序必须是**全序**，且与对应列表接口同序——这是仓库既有不变式，不是新约定：
-// FireAlarm.js:242 / Inspection.js:179 / AuditLog.js:309 三处都写明"排序键取值可重复
+// FireAlarm.js:242 / Inspection.js:187 / AuditLog.js:323-330 三处都写明"排序键取值可重复
 // ⇒ 必须有同向 `_id` 次级键"，并为此建了 `{key:-1,_id:-1}` 索引；列表侧
-// AlarmService.js:118、InspectionService.js:146、auditQueryService.js:154 用的就是它。
+// AlarmService.js:120、InspectionService.js:146、auditQueryService.js:154 用的就是它。
 // 导出原先只写 `{occurredAt:-1}` / `{planStartTime:-1}` / `{timestamp:-1}`，于是：
 //   1. 同一毫秒内的并列行由查询计划决定先后 ⇒ 撞上限时"前 5000 行"取到哪一批
 //      不确定，同一条筛选重跑两次可以给出两份不同的合规材料；
@@ -107,7 +107,7 @@ const EXPORT_SHEET_NAMES = {
 //   3. `{occurredAt:-1,_id:1}` 这种混合方向排序用不上那条复合索引，退化成
 //      5001 条的阻塞式内存排序。
 // deviceCode 例外：模型上 `unique:true`（FireDevice.js:22），取值不可能重复，
-// 故不需要次级键——同一判断见 DeviceService.js:84、cursorPagination.js:45。
+// 故不需要次级键——同一判断见 DeviceService.js:94、cursorPagination.js:45。
 const EXPORT_MODEL_CONFIG = {
   alarms: {
     model: FireAlarm,

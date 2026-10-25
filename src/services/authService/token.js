@@ -9,6 +9,7 @@
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const User = require('../../models/User');
+const AuditLog = require('../../models/AuditLog');
 const config = require('../../config');
 const logger = require('../../utils/logger');
 const { isIPAllowed } = require('../../utils/ipRange');
@@ -19,6 +20,65 @@ const {
 } = require('../../middleware/tokenBlacklist');
 const sessionService = require('../sessionService');
 const { generateToken, generateRefreshToken } = require('../tokenService');
+const { awaitAuditWrite } = require('../../utils/auditWriteFailure');
+
+/**
+ * 并发轮换宽限窗口：消费时间落在该窗口内的 `rotate` 重放视为并发竞争，
+ * 只拒绝本次请求、不触发全量吊销（见 revokeOnRefreshReplay）。
+ * 取值需大于一次正常 refresh 往返，又远小于人工重放取证的时间尺度。
+ */
+const ROTATE_REPLAY_GRACE_MS = 10 * 1000;
+
+/**
+ * 刷新链路的事件型审计（全局审计中间件显式排除 /api/auth/refresh 的替代留痕）。
+ *
+ * 只写「已识别出用户」的结局：MISSING/EXPIRED/INVALID 发生在验签或查用户之前，
+ * 没有可信的操作者身份，写进去只能得到 anonymous 噪声（与登录面把预认证流量
+ * 交给 login_failed/封禁事件承担是同一口径）。成功与重放/吊销是审计报告的
+ * 重点：前者回答「谁还在续期」，后者回答「谁偷了 refresh token、踢了哪些设备」。
+ *
+ * 失败不阻断刷新（与全仓侧路审计纪律一致），但会等一个有上限的落库往返：
+ * 与登录成功同理，fire-and-forget 会在进程重启时丢掉「已续期」这一事实。
+ *
+ * @param {string} outcome refreshSession 的结局
+ * @param {object} user 已查回且状态通过的用户文档
+ * @param {object} decoded 已验证的 refresh 载荷
+ * @param {object} ctx `{ ip, userAgent, fingerprint }`（ip 必须是边界可信值）
+ * @param {{revokedAllSessions?: boolean}} [detail] 重放处置细节
+ * @returns {Promise<void>}
+ */
+async function recordRefreshAudit(outcome, user, decoded, ctx = {}, detail = {}) {
+  const success = outcome === 'OK';
+  // REPLAYED 无论是否触发全量吊销都是高危信号：能拿旧串来换新令牌本身就是窃用征兆。
+  // REVOKE_UNAVAILABLE 更严重——攻击者会话仍在，吊销没有发生。
+  const highRisk = outcome === 'REPLAYED' || outcome === 'REVOKE_UNAVAILABLE';
+  const riskFactors = [];
+  if (!success) riskFactors.push('refresh_token_rejected');
+  if (highRisk) riskFactors.push('refresh_token_replay');
+  if (detail.revokedAllSessions) riskFactors.push('all_sessions_revoked');
+
+  await awaitAuditWrite(
+    AuditLog.create({
+      action: success ? 'auth_refresh' : 'auth_refresh_failed',
+      category: 'auth',
+      userId: user._id,
+      username: user.username,
+      ip: ctx.ip,
+      userAgent: ctx.userAgent,
+      sessionId: decoded?.sid || null,
+      fingerprint: ctx.fingerprint,
+      success,
+      riskLevel: success ? 'low' : highRisk ? 'high' : outcome === 'CONCURRENT' ? 'low' : 'medium',
+      riskFactors,
+      reason: success ? undefined : outcome,
+      body: success
+        ? undefined
+        : { outcome, revokedAllSessions: Boolean(detail.revokedAllSessions) },
+    }),
+    success ? 'refresh_success_audit' : 'refresh_failed_audit',
+    { user }
+  );
+}
 
 /**
  * 轮换主体的三项廉价判据：IP 范围 → 改密时间 → tokenVersion（外加取回 roles）。
@@ -82,14 +142,30 @@ async function resolveRefreshSubject(user, decoded, ctx) {
  *
  * @param {object} decoded 已验证的 refresh 载荷
  * @param {string|null} reason 黑名单首次入库原因
+ * @param {Date|string|null} consumedAt 该令牌首次被消费的时间（黑名单 createdAt）
  * @returns {Promise<{ok: false, outcome: string}>}
  */
-async function revokeOnRefreshReplay(decoded, reason) {
+async function revokeOnRefreshReplay(decoded, reason, consumedAt) {
   if (reason === 'logout') {
     logger.warn('Refresh 重放 - 令牌已因登出吊销，仅拒绝本次请求', {
       userId: decoded.userId,
     });
-    return { ok: false, outcome: 'REPLAYED' };
+    return { ok: false, outcome: 'REPLAYED', revokedAllSessions: false };
+  }
+  // 并发轮换宽限：同一客户端（多标签页、前端重试）几乎同时发出两次 /refresh 时，
+  // 先到者已消费旧串，后到者本质是并发竞争而非窃取重放。此前一律全量吊销，
+  // 表现为用户正常操作却被全网踢下线。窗口内只拒绝本次；窗口外仍是真实重放。
+  const consumedMs = consumedAt ? new Date(consumedAt).getTime() : NaN;
+  if (
+    reason === 'rotate' &&
+    Number.isFinite(consumedMs) &&
+    Date.now() - consumedMs <= ROTATE_REPLAY_GRACE_MS
+  ) {
+    logger.warn('Refresh 并发轮换 - 旧令牌刚被消费，仅拒绝本次请求', {
+      userId: decoded.userId,
+      ageMs: Date.now() - consumedMs,
+    });
+    return { ok: false, outcome: 'CONCURRENT', revokedAllSessions: false };
   }
   try {
     await invalidateUserTokens(decoded.userId);
@@ -97,13 +173,13 @@ async function revokeOnRefreshReplay(decoded, reason) {
     logger.error(`重放检测触发但会话吊销失败：${revokeErr.message}`, {
       userId: decoded.userId,
     });
-    return { ok: false, outcome: 'REVOKE_UNAVAILABLE' };
+    return { ok: false, outcome: 'REVOKE_UNAVAILABLE', revokedAllSessions: false };
   }
   // 会话表须与 tokenVersion 保持一致：否则「登录会话」界面会留下一批
   // 显示 active 但实际已不能用的僵尸记录，用户看到的信息与事实不符
   await sessionService.revokeAllSessionsSafe(decoded.userId, 'token_reuse');
   logger.warn('Refresh token 重放检测触发，吊销用户全部会话', { userId: decoded.userId });
-  return { ok: false, outcome: 'REPLAYED' };
+  return { ok: false, outcome: 'REPLAYED', revokedAllSessions: true };
 }
 
 /**
@@ -125,7 +201,7 @@ async function claimRefreshToken(refreshTokenRaw, decoded) {
     return { ok: false, outcome: 'BLACKLIST_UNAVAILABLE' };
   }
   if (claim.claimed) return { ok: true };
-  return revokeOnRefreshReplay(decoded, claim.reason);
+  return revokeOnRefreshReplay(decoded, claim.reason, claim.consumedAt);
 }
 
 /**
@@ -135,11 +211,10 @@ async function claimRefreshToken(refreshTokenRaw, decoded) {
  * refresh token 依然有效，一次刷新就能换到不带 sid（或带新 sid）的令牌，
  * 绕过整个设备级吊销机制。
  *
- * @param {string|null} rotateSid
+ * @param {string} rotateSid
  * @returns {Promise<string|null>} 拒绝时返回 outcome，放行返回 null
  */
 async function resolveRotationSession(rotateSid) {
-  if (!rotateSid) return null;
   let sessionState;
   try {
     sessionState = await sessionService.validateSession(rotateSid);
@@ -156,7 +231,7 @@ async function resolveRotationSession(rotateSid) {
 
 /**
  * 刷新令牌轮换（业务层）
- * @returns {Promise<{outcome:'MISSING'|'INVALID'|'IP_DENIED'|'PASSWORD_CHANGED'|'VERSION_MISMATCH'|'BLACKLIST_UNAVAILABLE'|'REPLAYED'|'REVOKE_UNAVAILABLE'|'SESSION_UNAVAILABLE'|'SESSION_REVOKED'|'EXPIRED'|'OK'}>}
+ * @returns {Promise<{outcome:'MISSING'|'INVALID'|'IP_DENIED'|'PASSWORD_CHANGED'|'VERSION_MISMATCH'|'BLACKLIST_UNAVAILABLE'|'REPLAYED'|'CONCURRENT'|'REVOKE_UNAVAILABLE'|'SESSION_UNAVAILABLE'|'SESSION_REVOKED'|'ACCOUNT_LOCKED'|'EXPIRED'|'OK'}>}
  *   OK 时附 { token, refreshToken }
  */
 async function refreshSession(refreshTokenRaw, ctx) {
@@ -181,27 +256,53 @@ async function refreshSession(refreshTokenRaw, ctx) {
     return { outcome: 'INVALID' };
   }
 
+  // 无 sid 的 refresh 一律拒绝：轮换出的每一对新令牌都继承同一个 sid，
+  // 没有 sid 的血统无法被「踢除设备」终止，还能每次自我续期（见
+  // issueRevocableTokenPair 的降级说明）。会话注册失败时现已只发 access，
+  // 能走到这里的只剩设备会话功能上线前签发、本应自然过期的旧串。
+  if (!decoded.sid) {
+    logger.warn('Refresh 拒绝 - 令牌未绑定设备会话', { userId: decoded.userId });
+    return { outcome: 'INVALID' };
+  }
+
   // 先做廉价校验（用户状态/IP 范围/密码修改时间/tokenVersion），
   // 最后一步才做原子消费——顺序反了会在重放检测之前就花掉一次黑名单写入
   const user = await User.findById(decoded.userId);
   if (!user || user.status !== 'active') {
+    // 用户不存在/已停用：载荷里的 userId 无法对应到可信操作者，按匿名噪声不落审计
     return { outcome: 'INVALID' };
+  }
+
+  // 从这一步起每个结局都写事件型审计（全局审计已排除 /api/auth/refresh）；
+  // 失败不阻断刷新，见 recordRefreshAudit 的有界等待说明
+  const deny = async (outcome, detail) => {
+    await recordRefreshAudit(outcome, user, decoded, ctx, detail);
+    return { outcome };
+  };
+
+  // 临时锁定（lockUntil）与 loginUser / authenticate 同口径：锁定窗口内
+  // refresh 不得续期。此前只查 status，被爆破锁定（status 仍为 active）的
+  // 账户手里的 refresh 仍能换出新 access，而新 access 会被中间件拒绝，
+  // 客户端表现为反复刷新、始终 403。直接拒绝并给出可区分的码，让客户端
+  // 回登录页而不是空转。
+  if (user.lockUntil && user.lockUntil > new Date()) {
+    return deny('ACCOUNT_LOCKED');
   }
 
   const subject = await resolveRefreshSubject(user, decoded, ctx);
   if (!subject.ok) {
-    return { outcome: subject.outcome };
+    return deny(subject.outcome);
   }
 
   const claim = await claimRefreshToken(refreshTokenRaw, decoded);
   if (!claim.ok) {
-    return { outcome: claim.outcome };
+    return deny(claim.outcome, { revokedAllSessions: claim.revokedAllSessions });
   }
 
-  const rotateSid = decoded.sid || null;
+  const rotateSid = decoded.sid;
   const sessionRejection = await resolveRotationSession(rotateSid);
   if (sessionRejection) {
-    return { outcome: sessionRejection };
+    return deny(sessionRejection);
   }
 
   // 签发新的 access token + refresh token（携带当前 tokenVersion 与原 sid）
@@ -217,6 +318,7 @@ async function refreshSession(refreshTokenRaw, ctx) {
   );
   const refreshToken = generateRefreshToken(user._id, user.tokenVersion, rotateSid);
 
+  await recordRefreshAudit('OK', user, decoded, ctx);
   return { outcome: 'OK', token, refreshToken };
 }
 /**

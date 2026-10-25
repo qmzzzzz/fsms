@@ -40,6 +40,9 @@
 | `deliverables/_complexity-actual.json`              | 复杂度实测基线（体积棘轮同源）   | 是       | `git:1f11eaf^`   |
 | `deliverables/mutation-harness-breached-matcher.js` | 变异测试夹具（命中判定）         | 是       | 仅本地           |
 | `deliverables/probe-matcher-behavior.js`            | 命中判定行为探针                 | 是       | 仅本地           |
+| `deliverables/probe-xff-hops.js`                    | X-Forwarded-For 回源实测探针     | 是       | 仅本地           |
+| `deliverables/七维审计终稿-核验版-2026-10-21.md`    | 2026-10-21 七维审计核验稿        | 是       | 仅本地           |
+| `deliverables/预发动态验证-核对结论-2026-10-21.md`  | 预发环境动态验证核对结论         | 是       | 仅本地           |
 | `deliverables/安全缺口核查-2026-09-30.md`           | 安全缺口核查                     | 否       | **已断链**       |
 | `deliverables/待优化项总清单-2026-08-29.md`         | 待优化项总清单                   | 否       | **已断链**       |
 | `deliverables/审计与迭代汇总-2026-09-28.md`         | 审计与迭代汇总（含取回方式说明） | 否       | **已断链**       |

@@ -245,6 +245,9 @@ const methods = {
 
       this._bindHandshakeIdentity(socket, decoded, freshUser);
       clearTimeout(authTimer);
+      // 认证成功即归还按 IP 的未认证名额（#9）：该配额限制的是"同时挂着一堆
+      // 尚未认证的连接"，不限制正常用户的累计登录次数；断开路径会再调一次，幂等。
+      this._releaseUnauthenticatedSlot(socket);
 
       // 加入用户定向房间：挂载 Redis adapter 后，权限同步可经房间投递
       // 触达连接在任一实例上的该用户（未挂 adapter 时即本实例房间，无副作用）
@@ -261,6 +264,16 @@ const methods = {
         this.userConnections.set(socket.userId, new Set());
       }
       this.userConnections.get(socket.userId).add(socket.id);
+
+      // 【认证完成信号】客户端据此才发起 join-room。
+      //
+      // Socket.IO 的 CONNECT 包在 connection 回调之前就已下发（node_modules/socket.io/
+      // dist/namespace.js 中 `socket._onconnect()` 先于 `emitReserved("connection")`），
+      // 而本方法的 await 链（黑名单/用户/会话查询）此时通常尚未结束。客户端若在
+      // 'connect' 事件里立刻 emit join-room，服务端会按 `socket.authenticated === false`
+      // 回一条 error 且**不会重试**——受限房间（role-management）就此静默丢成员。
+      // 位置：必须在本方法所有状态写入之后发，客户端收到时入房必定会被接受。
+      socket.emit('authenticated', { userId: socket.userId });
 
       logger.info('WebSocket 认证成功', { userId: socket.userId, socketId: socket.id });
       return true;
@@ -303,6 +316,10 @@ const methods = {
     // 记录令牌版本：受限房间入房时用 revalidateSocket 复查，
     // tokenVersion 被推进（改密/强制下线）即断开该长连接
     socket.tokenVersion = decoded.tokenVersion;
+    // 记录设备会话标识（#2）：设备级吊销不推进 tokenVersion、不改 status，
+    // 只有拿着 sid 才能在吊销发生时就地找到并断开对应长连接（见 _handleSessionRevoked）。
+    // 无 sid 的旧令牌保持 null：周期清扫据此跳过会话复查，与握手期闸同口径。
+    socket.sid = decoded.sid ? String(decoded.sid) : null;
     socket.authenticated = true;
   },
 

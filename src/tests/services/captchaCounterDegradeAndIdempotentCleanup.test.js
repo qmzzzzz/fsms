@@ -2,8 +2,9 @@
  * ──────────────────────────────────────────────────────────────────────────
  * 本文件的定位（2026-09-20 补注，由变异审计批量补齐）
  *
- * 被测对象：captchaService：计数器故障降级、清理定时器幂等
- * 守护的不变式：计数器异常时必须告警，且**生成不受影响**；`startCaptchaCleanup` 二次调用必须直接返回
+ * 被测对象：captchaService：内存模式与共享计数器解耦、清理定时器幂等
+ * 守护的不变式：内存模式不依赖 incrWithTtl（故障也不影响生成、不产生假告警）；
+ *   `startCaptchaCleanup` 二次调用必须直接返回
  * 可证伪性：本轮未做变异实测
  *
  * 【2026-10-09 更正不变式表述】原写作「计数器异常必须告警并**退化为内存上限判断**」——
@@ -26,9 +27,9 @@
 /**
  * 验证码服务分支——行为化测试
  *
- * 覆盖 captchaService.js 的两类此前未触达行为（2026-09-05 覆盖率复核）：
- *   1. 计数器故障降级：sharedCache.incrWithTtl 异常 → 告警 + 退化为
- *      内存上限判断，生成不受影响；
+ * 覆盖 captchaService.js 的两类行为：
+ *   1. 内存模式不读共享计数器（上限判据是 localStore 与 per-IP 计数），
+ *      incrWithTtl 故障既不影响生成、也不该产生"上限丢失"的假信号；
  *   2. 清理定时器防重入：startCaptchaCleanup 二次调用直接返回（幂等）。
  *
  * sharedCache 以 spyOn 注入故障；定时器用后即停，不向 worker 泄漏句柄。
@@ -43,7 +44,7 @@ describe('验证码服务分支（captchaService.js）', () => {
     captcha = require('../../services/captchaService');
   });
 
-  test('incrWithTtl 异常 → 降级为内存上限判断，验证码仍正常生成', async () => {
+  test('内存模式不依赖 incrWithTtl：计数后端故障不影响生成', async () => {
     const errSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
     const incrSpy = jest
       .spyOn(sharedCache, 'incrWithTtl')
@@ -54,7 +55,9 @@ describe('验证码服务分支（captchaService.js）', () => {
 
     expect(result).toHaveProperty('captchaId');
     expect(result.svg).toContain('<svg');
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('验证码计数器异常'));
+    // 内存模式的上限判据与共享计数器无关，根本不该触达它
+    expect(incrSpy).not.toHaveBeenCalled();
+    expect(errSpy).not.toHaveBeenCalledWith(expect.stringContaining('验证码计数器异常'));
 
     incrSpy.mockRestore();
     redisSpy.mockRestore();

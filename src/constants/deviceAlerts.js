@@ -42,7 +42,7 @@ const DEFAULT_EXPIRING_DAYS = 30;
  * 在代码里有个名字，从而能被响应体引用（`DeviceService.getExpiringDevices` 的
  * `{devices,total}` 与控制器 `pagination.total`）。判据与用例：
  * `src/tests/controllers/deviceExpiringTruncation.test.js`（F-174）。
- * 与 `models/FireDevice.js:235`、`auditExportService.js:61`、
+ * 与 `models/FireDevice.js:235`、`auditExportService.js:71`、
  * `reportWorkbookService.js:13` 同一条约定：截断必须可数，不能拿数组长度假装"这就是全部"。
  */
 const EXPIRING_LIST_LIMIT = 50;

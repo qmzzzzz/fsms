@@ -3,6 +3,7 @@ import { matchPermission } from '@/utils/permission'
 import { broadcastAuthChange } from '@/utils/sessionSync'
 import { toPermissionCodes } from '@/schemas'
 import { safeStorage, safeLocal, readSessionState } from './storage'
+import { clearReauthTicket } from '@/utils/reauthTicket'
 
 /**
  * 归一化用户对象形状（P3-38）
@@ -25,25 +26,62 @@ import { safeStorage, safeLocal, readSessionState } from './storage'
 export const normalizeUser = (user) => {
   // 只接受「普通对象」。标量（true / "1" / 123）或数组经 JSON.parse 也能还原成真值，
   // 若原样返回：currentUser 变成真值 → isAuthenticated 误判为已登录 → 路由放行进入空壳，
-  // 而 restoreSession 的 `if (this.currentUser) return true` 又会永久短路 /auth/me 自愈，
+  // 而 restoreSession 的 `if (this.currentUser)` 又会永久短路 /auth/me 自愈，
   // 用户卡在「无菜单无按钮」的状态直到手动清存储。截断/配额部分的写入或历史脏值即可触发。
   if (!user || typeof user !== 'object' || Array.isArray(user)) return null
   const id = user.userId ?? user.id ?? user._id ?? null
-  if (id === null) return { ...user }
+  // 没有可用 id 的对象不是身份：返回 {...user} 会让 isAuthenticated 判真、
+  // 路由放行，而所有「是否本人」判断恒为 false。此类形状漂移必须 fail-closed。
+  if (id === null || id === undefined || String(id).trim() === '') return null
   const idStr = String(id)
   return { ...user, userId: idStr, id: idStr, _id: idStr }
+}
+
+/**
+ * 写入 localStorage 的身份投影（P2：localStorage 里的 PII）
+ *
+ * 内存中的 currentUser 需要 email / realName / department 等字段供界面直接渲染，
+ * 但**持久化**只需要够用来做「看起来还登录着」的骨架：身份 id、账号名、角色。
+ *
+ * 共用设备上任何同源脚本（XSS、恶意扩展、别的标签页里的调试代码）都能读
+ * localStorage；httpOnly cookie 的全部收益就在「JS 读不到凭证」——把
+ * email/realName/phone 明文摆进同一作用域，等于把收益退掉一半，而收益是
+ * 拿「不用 localStorage 存 token」换来的。
+ *
+ * 丢掉的字段不影响正确性：路由守卫在每次页面加载都 `await restoreSession()`
+ * （`sessionVerified` 不持久化，恒为 false），受保护视图挂载时内存里已是
+ * /auth/me 的完整对象。localStorage 里的这份只是「上次见到的身份」提示。
+ */
+const PERSISTED_USER_FIELDS = ['userId', 'id', '_id', 'username', 'roles']
+
+/**
+ * @param {object|null} user 归一化后的用户对象
+ * @returns {object|null} 只含非 PII 字段的投影（用于持久化，不用于渲染）
+ */
+export const toPersistedUser = (user) => {
+  if (!user || typeof user !== 'object' || Array.isArray(user)) return null
+  const out = {}
+  for (const key of PERSISTED_USER_FIELDS) {
+    if (user[key] !== undefined) out[key] = user[key]
+  }
+  return out
 }
 
 // 用户认证 Store
 export const useAuthStore = defineStore('auth', {
   state: () => ({
-    // I-01 httpOnly cookie 方案：令牌不进 JS 可读存储，由浏览器按 path 自动携带；
-    // currentUser/permissions 为非敏感界面状态，存 localStorage 与 cookie 的
-    // 浏览器级作用域对齐（新标签页、复制 URL、子路径直达均复用同一会话），
-    // cookie 失效时首个 401 会触发刷新/登出闭环
+    // I-01 httpOnly cookie 方案：令牌不进 JS 可读存储，由浏览器按 path 自动携带。
+    // currentUser 存 localStorage 是为了让「新标签页 / 复制 URL 直达」有一个身份骨架，
+    // 但它**不是非敏感数据**：后端登录响应含 email / realName。故持久化只走
+    // toPersistedUser 的白名单投影（id + 账号名 + 角色），PII 只留在内存里。
+    // cookie 失效时首个 401 会触发刷新/登出闭环。
     // P3-38：读取时也归一化——迁移前存下的旧形状（缺 _id/userId）需就地补齐
     currentUser: normalizeUser(readSessionState('currentUser')) || null,
     permissions: toPermissionCodes(readSessionState('permissions')),
+    // 本页面生命周期内是否已由服务端确认过身份。localStorage 可被改写/截断，
+    // 其中的 currentUser 只代表「上次见到的身份」，不能当作已认证事实；
+    // 路由守卫据此在每次页面加载后至少向服务端核对一次。
+    sessionVerified: false,
     // 会话恢复的在途 Promise：多个守卫/请求并发触发时只探测一次 /auth/me
     restorePromise: null,
     // 本次页面加载内是否已探测过且失败（负缓存）：匿名用户在 /login 与
@@ -75,16 +113,20 @@ export const useAuthStore = defineStore('auth', {
 
   actions: {
     // 令牌走 httpOnly cookie（JS 不可读），本 action 只接收用户与权限
+    // @returns {boolean} 写入是否成功（用户对象缺少可用 id 时拒绝写入）
     setAuth(user, permissions = []) {
       const normalized = normalizeUser(user)
+      if (!normalized) return false
       // 权限一律归一化为 string[]：后端两种口径（code 数组 / populate 对象数组）
       // 都可能出现，而 matchPermission 只认字符串——存了对象会让所有按钮判否
       const codes = toPermissionCodes(permissions)
       this.currentUser = normalized
       this.permissions = codes
+      // 登录响应由服务端签发，身份与权限同源，直接视为已核实
+      this.sessionVerified = true
       // 登录成功即重置负缓存：下次若本地状态丢失仍应允许探测恢复
       this.restoreFailed = false
-      safeLocal.setJSON('currentUser', normalized)
+      safeLocal.setJSON('currentUser', toPersistedUser(normalized))
       safeLocal.setJSON('permissions', codes)
       // 清理 I-01 迁移前写入 sessionStorage 的旧令牌与旧会话状态残留
       safeStorage.remove('token')
@@ -93,20 +135,26 @@ export const useAuthStore = defineStore('auth', {
       safeStorage.remove('permissions')
       // 通知其他标签页：cookie 身份已切换为该用户
       broadcastAuthChange('login', normalized)
+      return true
     },
 
+    // @returns {boolean} 写入是否成功（形状漂移的用户对象不得覆盖现有身份）
     setCurrentUser(user) {
       // P3-38：ProfileView 用 /auth/me 的形状（只有 id）覆盖此处，
       // 不归一化会让 userId/_id 丢失，「是否本人」判断随之失效
       const normalized = normalizeUser(user)
+      if (!normalized) return false
       this.currentUser = normalized
-      safeLocal.setJSON('currentUser', normalized)
+      safeLocal.setJSON('currentUser', toPersistedUser(normalized))
+      return true
     },
 
     setPermissions(permissions) {
+      if (!Array.isArray(permissions)) return false
       const codes = toPermissionCodes(permissions)
       this.permissions = codes
       safeLocal.setJSON('permissions', codes)
+      return true
     },
 
     /**
@@ -155,11 +203,16 @@ export const useAuthStore = defineStore('auth', {
         // 永久短路，用户再也无法自动恢复），并让界面以已失效身份继续显示。
         if (this.currentUser !== epoch) return false
 
+        // 写 store 前先校验服务端形状：/auth/me 缺 id 或 permissions 非数组属于
+        // schema 漂移，此时写入会把界面置于「已登录但无法确定身份/权限」的半坏状态。
+        // 保留现有状态并返回失败，等待下一次权威刷新。
         const normalized = normalizeUser(resp.data.user)
+        if (!normalized || !Array.isArray(resp.data.permissions)) return false
         const codes = toPermissionCodes(resp.data.permissions)
         this.currentUser = normalized
         this.permissions = codes
-        safeLocal.setJSON('currentUser', normalized)
+        this.sessionVerified = true
+        safeLocal.setJSON('currentUser', toPersistedUser(normalized))
         safeLocal.setJSON('permissions', codes)
         return true
       } catch (_) {
@@ -211,9 +264,22 @@ export const useAuthStore = defineStore('auth', {
       // 串行两步 = 最坏 30s 才放行（用户对着原页面以为卡死）。探测本身是轻量只读，
       // 10s 足够慢网通过，且与 doRefreshToken 的既有超时同口径。
       const RESTORE_TIMEOUT = 10000
-      if (this.currentUser) return true
+      // 只有「本页已由服务端确认」才允许短路。localStorage 中的 currentUser 可被
+      // 改写/残留，不能仅凭它为真就跳过核实（否则登出后残留的身份永远不会被发现）。
+      if (this.currentUser && this.sessionVerified) return true
       if (this.restoreFailed) return false
       if (this.restorePromise) return this.restorePromise
+
+      const hadCachedIdentity = !!this.currentUser
+      const epoch = this.currentUser
+      /** 明确未登录/身份不可信时清除本地缓存身份（不广播：其他标签页各自会核实） */
+      const dropStaleIdentity = () => {
+        this.currentUser = null
+        this.permissions = []
+        this.sessionVerified = false
+        safeLocal.remove('currentUser')
+        safeLocal.remove('permissions')
+      }
 
       this.restorePromise = (async () => {
         try {
@@ -225,6 +291,7 @@ export const useAuthStore = defineStore('auth', {
           const { data: statusResp } = await api.auth.getSessionStatus({ timeout: RESTORE_TIMEOUT })
           if (!statusResp?.success || !statusResp.data?.authenticated) {
             this.restoreFailed = true
+            if (hadCachedIdentity) dropStaleIdentity()
             return false
           }
           // 第二步：确认有有效会话后，再拉取完整用户信息。
@@ -233,16 +300,27 @@ export const useAuthStore = defineStore('auth', {
           const { data: resp } = await api.auth.getMe({ silent401: true, timeout: RESTORE_TIMEOUT })
           if (!resp?.success || !resp.data?.user) {
             this.restoreFailed = true
+            if (hadCachedIdentity) dropStaleIdentity()
             return false
           }
+          // 核实期间用户可能已登出/切换账号：此时不得把旧结果写回
+          if (hadCachedIdentity && this.currentUser !== epoch) return false
 
           const { user, permissions } = resp.data
           // 与 login 响应的 user 对象口径对齐：/auth/me 返回 id，登录返回 userId
           // （P3-38：归一化统一补齐 userId/id/_id 三个别名）
+          // 形状漂移（缺 id / permissions 非数组）时宁可不写：写进去只会得到
+          // 「已登录但无法判断身份/权限」的半坏界面，且本地缓存会继续传播该脏值。
           const normalized = normalizeUser(user)
+          if (!normalized || !Array.isArray(permissions)) {
+            this.restoreFailed = true
+            if (hadCachedIdentity) dropStaleIdentity()
+            return false
+          }
           this.currentUser = normalized
           this.permissions = toPermissionCodes(permissions)
-          safeLocal.setJSON('currentUser', normalized)
+          this.sessionVerified = true
+          safeLocal.setJSON('currentUser', toPersistedUser(normalized))
           safeLocal.setJSON('permissions', this.permissions)
           // 不广播 login：这不是身份切换，只是本标签页补齐状态，
           // 广播会让其他标签页误判为「另一账号登录」而自我失效
@@ -261,6 +339,14 @@ export const useAuthStore = defineStore('auth', {
           const isDefiniteAnswer = typeof status === 'number' && status >= 400 && status < 500
           if (isDefiniteAnswer) {
             this.restoreFailed = true
+            // 401/403 明确表示会话不可用：连同本地缓存身份一起清除
+            if (hadCachedIdentity && (status === 401 || status === 403)) {
+              dropStaleIdentity()
+            }
+          } else if (hadCachedIdentity) {
+            // 网络/5xx：无法核实，但后端仍是最终鉴权方（所有请求带 cookie）。
+            // 保留已有身份与页面，下一次路由切换会继续尝试核实（sessionVerified 仍为 false）。
+            return true
           }
           return false
         } finally {
@@ -280,6 +366,9 @@ export const useAuthStore = defineStore('auth', {
       // 主动登出/会话失效后禁止再自动探测恢复：若登出请求未能清干净 cookie，
       // 路由守卫的恢复探测会把刚被清掉的会话又「救」回来
       this.restoreFailed = true
+      this.sessionVerified = false
+      // 票据是绑定账号+会话的短期凭证，登出后必须就地销毁（内存态，不落盘）
+      clearReauthTicket()
       safeLocal.remove('currentUser')
       safeLocal.remove('permissions')
       // 兼容清理 I-01 迁移前的旧令牌与旧介质残留
@@ -322,6 +411,9 @@ export const useAuthStore = defineStore('auth', {
       this.permissions = []
       // 身份已被覆盖/终止，禁止本页再探测恢复
       this.restoreFailed = true
+      this.sessionVerified = false
+      // 旧会话的二次验证票据不能留给下一个身份使用
+      clearReauthTicket()
       safeLocal.remove('currentUser')
       safeLocal.remove('permissions')
       safeStorage.remove('currentUser')

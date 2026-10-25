@@ -3,7 +3,7 @@
  *
  * 背景：scripts/compliance-check.js 的「审计导出接口」检查曾长期误报
  * 「exportAuditLogs 未定义」——因为它查的是 securityController，
- * 而该函数实际位于 auditController.js（securityRoutes.js:248 引用）。
+ * 而该函数实际位于 auditController.js（securityRoutes.js:388 引用）。
  *
  * 门禁指向错位置的红灯比没有门禁更危险：它会训练出「红灯可忽略」的习惯。
  * 本测试把「门禁必须能对真实代码判绿」固化为回归断言。

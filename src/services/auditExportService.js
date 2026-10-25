@@ -6,9 +6,11 @@ const AuditLog = require('../models/AuditLog');
 const { withCollation } = require('../utils/auditQuery');
 const { listCountOptions } = require('../utils/queryBudget');
 const { sanitizeSpreadsheetCell } = require('../utils/helpers');
+const { getHmacSecret } = require('../utils/auditChain');
 
 const EXPORT_HARD_LIMIT = 50000;
 const MANIFEST_LINE_PREFIX = '#__MANIFEST__:';
+const MANIFEST_SIGNATURE_VERSION = 1;
 // 表头与数据行必须来自同一份列清单。此前表头是一串字面量、行是另一份数组字面量，
 // 两侧各自增删一列都不会报错，只会让导出 CSV 全体列错位——而这份文件是防篡改链的交付凭证。
 const EXPORT_CSV_COLUMNS = [
@@ -191,6 +193,56 @@ const streamAuditExport = async (query, res, collation) => {
   };
 };
 
+// 稳定序列化：签名端与校验端必须逐字节一致，不能依赖对象键的插入顺序
+const stableJson = (value) => {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const body = Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(',');
+    return `{${body}}`;
+  }
+  return JSON.stringify(value);
+};
+
+/**
+ * manifest 被签名的字节：版本域分隔 + 去掉 signature 后的稳定 JSON。
+ * 覆盖 generatedAt（时间戳）、csvSha256（文件字节）与全部声明字段；
+ * 域分隔前缀防止同一把 HMAC 密钥下的跨协议签名复用。
+ */
+const manifestSigningPayload = (manifest) =>
+  `audit-export-manifest:v${MANIFEST_SIGNATURE_VERSION}\n${stableJson(manifest)}`;
+
+/**
+ * 用审计链同一把 HMAC_SECRET 给 manifest 签名。
+ *
+ * 为什么 manifest 必须有密钥签名：csvSha256 与 sha256 都能被任何拿到文件的人
+ * 重新计算——它们只能证明"文件与声明自洽"，证明不了声明出自服务端。有 DB 写权限
+ * 的篡改者可以改记录、重算链哈希、再改 manifest 里的两个摘要，无密钥校验永远通过。
+ * HMAC 是这条离线交付链上唯一持有密钥的锚点。
+ *
+ * @returns {object|null} 未配置 HMAC_SECRET 时返回 null（manifest 不带签名）
+ */
+const signAuditExportManifest = (manifest) => {
+  const secret = getHmacSecret();
+  if (!secret) return null;
+  const keyId = crypto
+    .createHmac('sha256', secret)
+    .update('audit-export-manifest-key-id', 'utf8')
+    .digest('hex')
+    .slice(0, 16);
+  return {
+    version: MANIFEST_SIGNATURE_VERSION,
+    algorithm: 'hmac-sha256',
+    keyId,
+    value: crypto
+      .createHmac('sha256', secret)
+      .update(manifestSigningPayload(manifest), 'utf8')
+      .digest('hex'),
+  };
+};
+
 const buildAuditExportManifest = (counters) => {
   const manifest = {
     recordCount: counters.recordCount,
@@ -219,6 +271,9 @@ const buildAuditExportManifest = (counters) => {
     const gap = `哈希链摘要只覆盖 ${counters.chainRecords}/${counters.recordCount} 条，其余记录无 hash 字段`;
     manifest.notice = manifest.notice ? `${manifest.notice}；${gap}` : gap;
   }
+  // 签名最后挂：必须覆盖上面所有按条件追加的字段（truncated/notice/覆盖缺口）
+  const signature = signAuditExportManifest(manifest);
+  if (signature) manifest.signature = signature;
   return manifest;
 };
 
@@ -226,7 +281,10 @@ module.exports = {
   buildAuditExportManifest,
   sendAuditExportHeaders,
   streamAuditExport,
+  manifestSigningPayload,
+  signAuditExportManifest,
   MANIFEST_LINE_PREFIX,
+  MANIFEST_SIGNATURE_VERSION,
   EXPORT_CSV_HEADER,
   EXPORT_CSV_COLUMNS,
 };

@@ -13,6 +13,7 @@
         type="button"
         class="glass-btn glass-btn--link glass-btn--sm module-toggle-btn"
         :class="ui.moduleState(module) === 'full' ? 'glass-btn--default' : 'glass-btn--primary'"
+        :disabled="!canAssign"
         @click="ui.toggleModule(module)"
       >
         {{ ui.moduleState(module) === 'full' ? $t('role.clearModule') : $t('role.selectModule') }}
@@ -46,6 +47,7 @@
         }"
         :title="ui.permTooltip(perm)"
         :aria-pressed="ui.isPermChecked(perm._id)"
+        :disabled="!canAssign"
         @click="ui.togglePerm(perm._id)"
       >
         <span class="glass-perm-btn__check">
@@ -77,6 +79,12 @@ defineProps({
    * 函数内部读取响应式引用，模板渲染依赖自动建立，勾选变化实时重绘。
    */
   ui: { type: Object, required: true },
+  /**
+   * 是否持有 role:assign。false 时所有勾选/全选入口禁用——
+   * 后端写接口本来就要求该权限，前端若仍可编辑，用户会得到
+   * 「可以改、但保存按钮不存在」的误导状态（还会触发未保存离开确认）。
+   */
+  canAssign: { type: Boolean, default: false },
 })
 </script>
 
@@ -228,7 +236,7 @@ defineProps({
     opacity var(--xf-duration-base) var(--xf-ease-standard);
 }
 
-.glass-perm-btn:hover {
+.glass-perm-btn:hover:not(:disabled) {
   background-color: rgba(255, 255, 255, 0.68);
   border-color: var(--xf-border-glass-strong);
   box-shadow:
@@ -237,7 +245,7 @@ defineProps({
   transform: translateY(-1px);
 }
 
-.glass-perm-btn:active {
+.glass-perm-btn:active:not(:disabled) {
   transform: translateY(0);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.6),
@@ -248,6 +256,16 @@ defineProps({
 .glass-perm-btn:focus-visible {
   outline: 2px solid var(--xf-primary-alpha-45);
   outline-offset: 1px;
+}
+
+/* 无 role:assign：入口保持可见（让用户知道有哪些权限），但不可编辑 */
+.glass-perm-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.glass-perm-btn.is-on:disabled {
+  opacity: 0.75;
 }
 
 /* 已启用：红色染色玻璃（与全局主按钮同源） */
@@ -261,7 +279,7 @@ defineProps({
   text-shadow: var(--xf-text-shadow-dark);
 }
 
-.glass-perm-btn.is-on:hover {
+.glass-perm-btn.is-on:hover:not(:disabled) {
   background-image: var(--xf-gradient-primary-hover);
   border-color: var(--xf-primary-alpha-55);
   box-shadow: var(--xf-glass-edge-color-hover), var(--xf-shadow-primary-strong);
@@ -275,7 +293,7 @@ defineProps({
   opacity: 0.78;
 }
 
-.glass-perm-btn.is-removed:hover {
+.glass-perm-btn.is-removed:hover:not(:disabled) {
   opacity: 1;
   border-color: var(--xf-warning);
   transform: translateY(-1px);

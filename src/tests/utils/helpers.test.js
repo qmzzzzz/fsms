@@ -316,6 +316,9 @@ describe('Helper Utils', () => {
       expect(sanitizeSpreadsheetCell('-2')).toBe("'-2");
       expect(sanitizeSpreadsheetCell('@SUM(A1)')).toBe("'@SUM(A1)");
       expect(sanitizeSpreadsheetCell('\tx')).toBe("'\tx");
+      // LF：多段拼接后危险前缀会落到第二位，Excel 忽略前导换行后仍按公式解析
+      expect(sanitizeSpreadsheetCell('\n=1+1')).toBe("'\n=1+1");
+      expect(sanitizeSpreadsheetCell('\r=1+1')).toBe("'\r=1+1");
     });
 
     test('普通文本与非字符串不受影响', () => {

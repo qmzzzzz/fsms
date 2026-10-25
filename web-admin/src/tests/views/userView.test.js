@@ -62,6 +62,9 @@ vi.mock('@/utils/api', () => ({
     },
   },
   isCanceledError: (...a) => isCanceledError(...a),
+  // 与 api.js 同一判据：只有走过响应拦截器的 axios 错误才算已提示。
+  // 写成恒 false 会让「不重复弹第二条」的分支永远测不到——普通 Error 仍应由组件补文案。
+  isHandledApiError: (e) => e?.isAxiosError === true && !e?.config?.silent401,
 }))
 const enc = vi.fn((v) => Promise.resolve('ENC:' + v))
 vi.mock('@/utils/loginCipher', () => ({ encryptPassword: (...a) => enc(...a) }))
@@ -88,12 +91,15 @@ const P_ALL = [
   'user:delete',
   'user:lock',
   'security:config',
+  'system:read',
 ]
+/** 揭示他人手机号所需的权限组合：user:update 提供编辑入口，system:read 与后端闸门对齐 */
+const P_REVEAL = ['user:read', 'user:update', 'system:read']
 
 const ROW_SELF = {
   _id: 'me',
   username: 'admin',
-  email: 'admin@x.com',
+  emailMasked: 'a****n@x.com',
   roles: [],
   status: 'active',
   mfaEnabled: true,
@@ -101,10 +107,11 @@ const ROW_SELF = {
 const ROW_OTHER = {
   _id: 'u2',
   username: 'bob',
-  email: 'b@x.com',
+  // 夹具按服务端真实响应构造：管理员读接口不再下发明文 email，只给脱敏的
+  // emailMasked（services/userService.js 的 toMaskedAdminUser）。
+  emailMasked: 'b****@x.com',
   realName: '鲍勃',
   department: '设备科',
-  // 夹具按**服务端真实响应**构造：管理员读接口已不下发明文 phone，只给脱敏的
   // phoneMasked（services/userService.js 的 toMaskedAdminUser）。视图若仍按旧契约
   // 读 row.phone，手机号列会渲染成 '-'，下面的列断言即失败。
   phoneMasked: '139****0000',
@@ -206,6 +213,24 @@ const footerBtn = (dlg, text) =>
   )
 /** 当前打开对话框的 overlay（用于断言关闭） */
 const overlayOf = (c) => c.findAll('.el-overlay').find((o) => o.querySelector('.el-dialog__title'))
+
+/** 通用二次验证弹层（P3-2）：append-to-body，按标题从 document 取 */
+const stepUpDlg = () =>
+  Array.from(document.body.querySelectorAll('.el-dialog')).find((d) => {
+    const title = d.querySelector('.el-dialog__title')
+    return title && title.textContent.trim() === '验证身份'
+  })
+
+/** 填当前密码并确认（loginCipher 已 mock 成 ENC: 前缀） */
+const completeStepUp = async (password = 'secret') => {
+  await waitFor(() => stepUpDlg(), { message: '二次验证弹层打开' })
+  const input = stepUpDlg().querySelector('input')
+  input.value = password
+  input.dispatchEvent(new window.Event('input', { bubbles: true }))
+  await flush(2)
+  click(footerBtn(stepUpDlg(), '确定'))
+  await flush(8)
+}
 
 afterEach(() => {
   active?.handle.unmount()
@@ -624,12 +649,14 @@ describe('UserView 编辑用户对话框', () => {
   }
 
   test('回填该行字段、用户名只读、不出现密码字段（编辑不改密）', async () => {
-    const c = await mountUser(['user:read', 'user:update'])
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     expect(c.find('.el-dialog__title').textContent.trim()).toBe('编辑用户')
     expect(fieldByLabel(dlg, '用户名').value).toBe('bob')
     expect(fieldByLabel(dlg, '用户名').disabled).toBe(true)
-    expect(fieldByLabel(dlg, '邮箱').value).toBe('b@x.com')
+    // 邮箱与手机号同口径：行上只有 emailMasked，展示值不能回填成可写字段。
+    expect(fieldByLabel(dlg, '邮箱').value).toBe('')
+    expect(dlg.textContent).toContain('留空表示不修改邮箱')
     expect(fieldByLabel(dlg, '真实姓名').value).toBe('鲍勃')
     expect(fieldByLabel(dlg, '部门').value).toBe('设备科')
     // 手机号**不回填**：行上只有脱敏展示值，回填等于把 `139****0000` 塞进可写字段，
@@ -642,7 +669,7 @@ describe('UserView 编辑用户对话框', () => {
 
   test('提交更新：PUT 到该行 _id，载荷含改后字段、不含密码与角色', async () => {
     usersUpdate.mockResolvedValue({ data: { success: true } })
-    const c = await mountUser(['user:read', 'user:update'])
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     await setField(dlg, '真实姓名', '鲍勃二世')
     await setField(dlg, '手机号', '13811112222')
@@ -650,13 +677,15 @@ describe('UserView 编辑用户对话框', () => {
     await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求' })
     expect(usersUpdate).toHaveBeenCalledWith('u2', {
       username: 'bob',
-      email: 'b@x.com',
       realName: '鲍勃二世',
       department: '设备科',
       phone: '13811112222',
       status: 'inactive',
       allowedIPs: '10.0.0.1',
     })
+    // 邮箱未在本对话框改动：键必须缺失（服务端以 undefined 判定"不修改"），
+    // 不能把行上的 emailMasked 当值提交，也不能发空串。
+    expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('email')
     expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('password')
     await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '更新成功提示' })
     expect(ElMessage.success).toHaveBeenCalledWith('更新成功')
@@ -665,11 +694,31 @@ describe('UserView 编辑用户对话框', () => {
 
   test('更新失败：提示更新失败且对话框保持打开（与创建失败文案区分）', async () => {
     usersUpdate.mockRejectedValue(new Error('boom'))
-    const c = await mountUser(['user:read', 'user:update'])
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     click(footerBtn(dlg, '保存'))
     await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '更新失败提示' })
     expect(ElMessage.error).toHaveBeenCalledWith('更新失败')
+    expect(overlayOf(c).style.display).not.toBe('none')
+    expect(c.errors).toEqual([])
+  })
+
+  test('更新失败（已过拦截器的 axios 错误）：不重复弹第二条泛化文案', async () => {
+    // 真实响应拦截器已经按 errorCode 弹过一次；组件再补「更新失败」会让用户
+    // 看到两条互相矛盾的提示，且泛化文案往往后到、盖住真正有用的那条。
+    usersUpdate.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 409'), {
+        isAxiosError: true,
+        config: {},
+        response: { status: 409, data: { success: false, message: '邮箱已被占用' } },
+      })
+    )
+    const c = await mountUser(P_REVEAL)
+    const dlg = await openEdit(c)
+    click(footerBtn(dlg, '保存'))
+    await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求发出' })
+    await flush(6)
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(overlayOf(c).style.display).not.toBe('none')
     expect(c.errors).toEqual([])
   })
@@ -714,7 +763,13 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
     Array.from(revealDlg().querySelectorAll('.el-dialog__footer .glass-btn')).find((b) =>
       b.textContent.includes('查看完整号码')
     )
+  /** 口令与动态码按模式二选一渲染，当前模式下只有一个输入框 */
   const revealPasswordInput = () => revealDlg().querySelector('input')
+  const revealModeBtn = () => revealDlg().querySelector('.reveal-mode-toggle')
+  const toggleRevealMode = async () => {
+    click(revealModeBtn())
+    await flush(2)
+  }
   const revealCancel = () =>
     Array.from(revealDlg().querySelectorAll('.el-dialog__footer .glass-btn')).find((b) =>
       b.textContent.includes('取消')
@@ -737,9 +792,19 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
     el.dispatchEvent(new window.Event('input', { bubbles: true }))
     await flush(2)
   }
+  const typeRevealMfa = async (value) => {
+    const el = revealPasswordInput()
+    el.value = value
+    el.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(2)
+  }
+  // 真实 axios 响应形状：业务成功与否由外层 data.success 表达，组件必须检查它。
   const revealOk = () =>
     viewSensitive.mockResolvedValue({
-      data: { data: { type: 'phone', masked: '139****0000', full: FULL_PHONE } },
+      data: {
+        success: true,
+        data: { type: 'phone', masked: '139****0000', full: FULL_PHONE },
+      },
     })
 
   /** 第 n 行的「编辑」按钮：rowBtn 命中的是全文档第一个，双行夹具必须按行定位 */
@@ -767,7 +832,10 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
         settle = resolve
       })
     )
-    return (full) => settle({ data: { data: { type: 'phone', masked: '139****0000', full } } })
+    return (full) =>
+      settle({
+        data: { success: true, data: { type: 'phone', masked: '139****0000', full } },
+      })
   }
 
   test('列表手机号列渲染服务端脱敏值（读的是 phoneMasked）', async () => {
@@ -777,14 +845,45 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
     expect(row.textContent).toContain('139****0000')
   })
 
+  test('列表邮箱列渲染服务端脱敏值（读的是 emailMasked，不是 email）', async () => {
+    const c = await mountUser(['user:read'])
+    const row = c.findAll('.el-table__body-wrapper .el-table__row')[0]
+    expect(row.textContent).toContain('b****@x.com')
+    expect(row.textContent).not.toContain('b@x.com')
+  })
+
   test('新增对话框没有揭示入口（无现值可揭示）', async () => {
     const c = await mountUser(['user:read', 'user:create'])
     const dlg = await openAdd(c)
     expect(revealEntry(dlg)).toBeUndefined()
   })
 
+  test('非本人且无 system:read：揭示入口不渲染（否则点开必是后端 403）', async () => {
+    const c = await mountUser(
+      P_REVEAL.filter((p) => p !== 'system:read'),
+      [ROW_OTHER]
+    )
+    const dlg = await openEdit(c)
+    // 正例：编辑框本身是打开的、手机号输入框在（否则「没有入口」可能只是因为框没开）
+    expect(fieldByLabel(dlg, '手机号')).not.toBe(null)
+    expect(revealEntry(dlg)).toBeUndefined()
+  })
+
+  test('本人无需 system:read 也能揭示：入口保留并指向自己', async () => {
+    revealOk()
+    const c = await mountUser(['user:read', 'user:update'], [ROW_SELF])
+    const dlg = await openEdit(c)
+    expect(revealEntry(dlg)).not.toBeUndefined()
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await typeRevealPassword('CurrentP@ss')
+    click(revealConfirm())
+    await waitFor(() => viewSensitive.mock.calls.length === 1, { message: '揭示请求发出' })
+    expect(viewSensitive.mock.calls[0][0].targetUserId).toBe('me')
+  })
+
   test('空口令不发请求：确认按钮禁用，点击不消耗 step-up 配额', async () => {
-    const c = await mountUser(['user:read', 'user:update'])
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     click(revealEntry(dlg))
     await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
@@ -797,7 +896,7 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
 
   test('揭示：带口令与目标用户调 view-sensitive，明文进输入框并切换提示语', async () => {
     revealOk()
-    const c = await mountUser(['user:read', 'user:update'])
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     click(revealEntry(dlg))
     await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
@@ -810,17 +909,66 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
     expect(viewSensitive).toHaveBeenCalledWith({
       dataType: 'phone',
       targetUserId: 'u2',
-      currentPassword: 'CurrentP@ss',
+      encCurrentPassword: 'ENC:CurrentP@ss',
     })
+    expect(enc).toHaveBeenCalledWith('CurrentP@ss', 'PASSWORD_CURRENT')
     // 弹层收起，提示语从「留空表示不修改」切到「已载入完整号码…」
     await waitFor(() => revealHidden(), { message: 'step-up 弹层关闭' })
     expect(c.find('.el-dialog').textContent).toContain('已载入完整号码')
   })
 
+  test('切到动态验证码模式：只提交 mfaCode，已输入的口令被清空而非静默丢弃', async () => {
+    revealOk()
+    const c = await mountUser(P_REVEAL)
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    // 默认是口令模式：先输入一个口令，再显式切换，证明切换会把它清掉
+    await typeRevealPassword('CurrentP@ss')
+    expect(revealModeBtn().textContent).toContain('改用动态验证码')
+    await toggleRevealMode()
+    expect(revealModeBtn().textContent).toContain('改用登录密码')
+    expect(revealPasswordInput().value).toBe('')
+    expect(revealPasswordInput().getAttribute('inputmode')).toBe('numeric')
+    await typeRevealMfa('123456')
+    expect(revealConfirm().disabled).toBe(false)
+    click(revealConfirm())
+    await waitFor(() => fieldByLabel(c.find('.el-dialog'), '手机号').value === FULL_PHONE, {
+      message: '明文回填到手机号输入框',
+    })
+    expect(viewSensitive).toHaveBeenCalledWith({
+      dataType: 'phone',
+      targetUserId: 'u2',
+      mfaCode: '123456',
+    })
+    // 当前模式的凭据只有一个：口令绝不会被静默丢弃后又跟着码一起上行
+    expect(viewSensitive.mock.calls[0][0]).not.toHaveProperty('currentPassword')
+    expect(viewSensitive.mock.calls[0][0]).not.toHaveProperty('encCurrentPassword')
+  })
+
+  test('MFA 码格式非法（5 位/含字母）：本地拦下不发请求，不白占 reauth 限流配额', async () => {
+    const c = await mountUser(P_REVEAL)
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await toggleRevealMode()
+    for (const bad of ['12345', '12345a']) {
+      await typeRevealMfa(bad)
+      click(revealConfirm())
+      await flush(4)
+    }
+    expect(viewSensitive).not.toHaveBeenCalled()
+    expect(ElMessage.warning.mock.calls.map((a) => a[0])).toEqual([
+      '请输入 6 位数字验证码',
+      '请输入 6 位数字验证码',
+    ])
+    expect(revealHidden()).toBe(false)
+  })
+
   test('揭示后不改：PUT 载荷不含 phone 键（看完等于没看）', async () => {
     revealOk()
     usersUpdate.mockResolvedValue({ data: { success: true } })
-    const c = await mountUser(['user:read', 'user:update'])
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     click(revealEntry(dlg))
     await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
@@ -839,7 +987,7 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
   test('揭示后删空再保存：phone 以空串上行（这是真正的"清空号码"）', async () => {
     revealOk()
     usersUpdate.mockResolvedValue({ data: { success: true } })
-    const c = await mountUser(['user:read', 'user:update'])
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     click(revealEntry(dlg))
     await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
@@ -855,9 +1003,11 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
   })
 
   test('揭示到一个空号码：提示语切到"已载入"，但值没变就仍不发 phone 键', async () => {
-    viewSensitive.mockResolvedValue({ data: { data: { type: 'phone', masked: '', full: '' } } })
+    viewSensitive.mockResolvedValue({
+      data: { success: true, data: { type: 'phone', masked: '', full: '' } },
+    })
     usersUpdate.mockResolvedValue({ data: { success: true } })
-    const c = await mountUser(['user:read', 'user:update'])
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     click(revealEntry(dlg))
     await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
@@ -879,7 +1029,7 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
   test('揭示失败：输入框不被污染，随后的保存也不会带出半截号码', async () => {
     viewSensitive.mockRejectedValue(new Error('boom'))
     usersUpdate.mockResolvedValue({ data: { success: true } })
-    const c = await mountUser(['user:read', 'user:update'])
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     click(revealEntry(dlg))
     await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
@@ -898,12 +1048,38 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
     expect(usersUpdate.mock.calls[0][1].realName).toBe('鲍勃二世')
   })
 
-  test('取消后重开：上一次的口令不残留（确认按钮回到禁用态）', async () => {
-    const c = await mountUser(['user:read', 'user:update'])
+  test('揭示返回 200 {success:false}：按失败处理（不写基线、报错、清掉已判错的动态码）', async () => {
+    viewSensitive.mockResolvedValue({ data: { success: false, message: '动态验证码已失效' } })
+    usersUpdate.mockResolvedValue({ data: { success: true } })
+    const c = await mountUser(P_REVEAL)
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await toggleRevealMode()
+    await typeRevealMfa('123456')
+    click(revealConfirm())
+    await waitFor(() => viewSensitive.mock.calls.length === 1, { message: 'step-up 请求发出' })
+    await flush(6)
+    expect(ElMessage.error.mock.calls.map((a) => a[0])).toEqual(['动态验证码已失效'])
+    expect(fieldByLabel(c.find('.el-dialog'), '手机号').value).toBe('')
+    // 业务失败不收起弹层，且被判错的码不留在输入框里（重试时不会原样再送一次）
+    expect(revealHidden()).toBe(false)
+    expect(revealPasswordInput().value).toBe('')
+    await setField(c.find('.el-dialog'), '真实姓名', '鲍勃二世')
+    click(footerBtn(c.find('.el-dialog'), '保存'))
+    await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求' })
+    // 基线仍是 null ⇒ 这次"没看到"不会被当成"看到了空号码"
+    expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('phone')
+  })
+
+  test('取消后重开：凭据与模式都回到默认（确认按钮禁用）', async () => {
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     click(revealEntry(dlg))
     await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
     await typeRevealPassword('CurrentP@ss')
+    await toggleRevealMode()
+    await typeRevealMfa('123456')
     expect(revealConfirm().disabled).toBe(false)
     click(revealCancel())
     await settleDom()
@@ -911,11 +1087,14 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
     await waitFor(() => revealOpen(), { message: 'step-up 弹层重新打开' })
     expect(revealConfirm().disabled).toBe(true)
     expect(revealPasswordInput().value).toBe('')
+    // 模式也回到口令：按钮此时提示的是「改用动态验证码」
+    expect(revealModeBtn().textContent).toContain('改用动态验证码')
+    expect(revealPasswordInput().getAttribute('type')).toBe('password')
     expect(viewSensitive).not.toHaveBeenCalled()
   })
 
   test('关掉编辑对话框时 step-up 弹层一并收起（不留悬空密码框）', async () => {
-    const c = await mountUser(['user:read', 'user:update'])
+    const c = await mountUser(P_REVEAL)
     const dlg = await openEdit(c)
     click(revealEntry(dlg))
     await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
@@ -926,11 +1105,37 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
     expect(revealHidden()).toBe(true)
   })
 
+  test('取消 step-up 后在途响应仍会落地：明文不得写回已取消的编辑框', async () => {
+    const deliver = holdReveal()
+    usersUpdate.mockResolvedValue({ data: { success: true } })
+    const c = await mountUser(P_REVEAL)
+    const dlg = await openEdit(c)
+    click(revealEntry(dlg))
+    await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
+    await typeRevealPassword('CurrentP@ss')
+    click(revealConfirm())
+    await waitFor(() => viewSensitive.mock.calls.length === 1, { message: 'step-up 请求发出' })
+    // 用户显式取消（不是切到别的行）：请求仍在飞
+    click(revealCancel())
+    await settleDom()
+    expect(revealHidden()).toBe(true)
+    deliver(FULL_PHONE)
+    await flush(8)
+    // 编辑框还开着，但它属于"从没揭示过"：值空、基线 null
+    expect(fieldByLabel(c.find('.el-dialog'), '手机号').value).toBe('')
+    expect(c.find('.el-dialog').textContent).toContain('留空表示不修改')
+    await setField(c.find('.el-dialog'), '真实姓名', '鲍勃二世')
+    click(footerBtn(c.find('.el-dialog'), '保存'))
+    await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求' })
+    // 基线没被写成明文 ⇒ 不发 phone 键（发了就等于把取消后"偷看到"的值写进库）
+    expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('phone')
+  })
+
   test('迟到的揭示结果不写进另一行的表单（否则删空保存会抹掉对方号码）', async () => {
     const carol = { ...ROW_OTHER, _id: 'u3', username: 'carol', phoneMasked: '137****7777' }
     const deliver = holdReveal()
     usersUpdate.mockResolvedValue({ data: { success: true } })
-    const c = await mountUser(['user:read', 'user:update'], [ROW_OTHER, carol])
+    const c = await mountUser(P_REVEAL, [ROW_OTHER, carol])
     const bob = await openEditRow(c, 0)
     click(revealEntry(bob))
     await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
@@ -960,7 +1165,7 @@ describe('UserView 手机号脱敏列与按需揭示（step-up + 脏判定）', 
 
   test('迟到的揭示结果也不写进新增表单（新账号会带上别人的号码）', async () => {
     const deliver = holdReveal()
-    const c = await mountUser(['user:read', 'user:create', 'user:update'])
+    const c = await mountUser(['user:read', 'user:create', 'user:update', 'system:read'])
     const dlg = await openEdit(c)
     click(revealEntry(dlg))
     await waitFor(() => revealOpen(), { message: 'step-up 弹层打开' })
@@ -1097,7 +1302,6 @@ describe('UserView 账户状态呈现（后端三值枚举不得塌缩成两值�
     await waitFor(() => usersUpdate.mock.calls.length === 1, { message: '更新请求' })
     expect(usersUpdate).toHaveBeenCalledWith('u2', {
       username: 'bob',
-      email: 'b@x.com',
       realName: '鲍勃二世',
       department: '设备科',
       status: 'locked',
@@ -1106,6 +1310,7 @@ describe('UserView 账户状态呈现（后端三值枚举不得塌缩成两值�
     // 顺带钉住手机号的新契约：未揭示明文就**不发** phone 键
     //（userController.js 用 `phone !== undefined` 判是否落库，发 '' 等于清空号码）
     expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('phone')
+    expect(usersUpdate.mock.calls[0][1]).not.toHaveProperty('email')
   })
 })
 
@@ -1194,14 +1399,17 @@ describe('UserView 删除与重置 MFA', () => {
     expect(ElMessage.error).not.toHaveBeenCalled()
   })
 
-  test('重置 MFA：确认后 PUT 该用户，成功后提示与删除文案区分', async () => {
+  test('重置 MFA：确认后需二次验证，通过后 PUT 该用户，成功后提示与删除文案区分', async () => {
     resetMfa.mockResolvedValue({ data: { success: true } })
     confirmBox.mockResolvedValue('confirm')
     const c = await mountUser(['user:read', 'user:reset_password'])
     click(rowBtn(c, '重置MFA'))
+    await waitFor(() => confirmBox.mock.calls.length === 1, { message: '确认框已弹出' })
+    await completeStepUp()
     await waitFor(() => resetMfa.mock.calls.length === 1, { message: '重置请求' })
     expect(confirmBox.mock.calls[0][0]).toContain('bob')
-    expect(resetMfa).toHaveBeenCalledWith('u2')
+    // P3-2：凭据随写请求上行，不能发出"无凭据必被拒"的请求
+    expect(resetMfa).toHaveBeenCalledWith('u2', { encCurrentPassword: 'ENC:secret' })
     await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '重置成功提示' })
     expect(ElMessage.success).toHaveBeenCalledWith('两步验证已重置')
   })
@@ -1442,21 +1650,33 @@ describe('UserView 安全开关', () => {
     ])
   })
 
-  test('点击开关：按翻转后的目标值提交（三个开关各自独立）', async () => {
+  test('点击开关：先完成二次验证，再按翻转后的目标值提交（三个开关各自独立）', async () => {
     secSetReg.mockResolvedValue({ data: { success: true } })
     secSetLogin.mockResolvedValue({ data: { success: true } })
     secSetRegister.mockResolvedValue({ data: { success: true } })
     const c = await mountUser(P_ALL)
     const switches = c.findAll('.glass-switch')
     click(switches[0])
+    await completeStepUp()
     await waitFor(() => secSetReg.mock.calls.length === 1, { message: '注册开关请求' })
-    expect(secSetReg).toHaveBeenCalledWith({ allowPublicRegistration: false })
+    expect(secSetReg).toHaveBeenCalledWith({
+      allowPublicRegistration: false,
+      encCurrentPassword: 'ENC:secret',
+    })
     click(switches[1])
+    await completeStepUp()
     await waitFor(() => secSetLogin.mock.calls.length === 1, { message: '登录验证码开关请求' })
-    expect(secSetLogin).toHaveBeenCalledWith({ loginCaptchaEnabled: true })
+    expect(secSetLogin).toHaveBeenCalledWith({
+      loginCaptchaEnabled: true,
+      encCurrentPassword: 'ENC:secret',
+    })
     click(switches[2])
+    await completeStepUp()
     await waitFor(() => secSetRegister.mock.calls.length === 1, { message: '注册验证码开关请求' })
-    expect(secSetRegister).toHaveBeenCalledWith({ registerCaptchaEnabled: false })
+    expect(secSetRegister).toHaveBeenCalledWith({
+      registerCaptchaEnabled: false,
+      encCurrentPassword: 'ENC:secret',
+    })
     expect(c.findAll('.glass-switch__label').map((e) => e.textContent.trim())).toEqual([
       '禁用',
       '登录验证码 ON',
@@ -1465,12 +1685,24 @@ describe('UserView 安全开关', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('取消二次验证：开关回滚到原值，不发任何配置写请求', async () => {
+    const c = await mountUser(P_ALL)
+    click(c.findAll('.glass-switch')[0])
+    await waitFor(() => stepUpDlg(), { message: '二次验证弹层打开' })
+    click(footerBtn(stepUpDlg(), '取消'))
+    await flush(8)
+    expect(secSetReg).not.toHaveBeenCalled()
+    expect(c.findAll('.glass-switch__label')[0].textContent.trim()).toBe('公开注册')
+    expect(c.findAll('.glass-switch')[0].className).toContain('glass-switch--checked')
+  })
+
   test('注册开关失败同样回滚（三个开关各自独立，不能只回滚其中一个）', async () => {
     secSetReg.mockRejectedValue({ response: { data: { message: '服务端拒绝' } } })
     const c = await mountUser(P_ALL)
     const sw = c.findAll('.glass-switch')[0]
     expect(sw.className).toContain('glass-switch--checked')
     click(sw)
+    await completeStepUp()
     await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '失败提示' })
     expect(c.findAll('.glass-switch__label')[0].textContent.trim()).toBe('公开注册')
     expect(c.findAll('.glass-switch')[0].className).toContain('glass-switch--checked')
@@ -1481,6 +1713,7 @@ describe('UserView 安全开关', () => {
     const c = await mountUser(P_ALL)
     expect(c.findAll('.glass-switch__label')[2].textContent.trim()).toBe('注册验证码 ON')
     click(c.findAll('.glass-switch')[2])
+    await completeStepUp()
     await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '失败提示' })
     expect(c.findAll('.glass-switch__label')[2].textContent.trim()).toBe('注册验证码 ON')
     expect(c.findAll('.glass-switch')[2].className).toContain('glass-switch--checked')
@@ -1490,6 +1723,7 @@ describe('UserView 安全开关', () => {
     secSetLogin.mockRejectedValue({ response: { data: { message: '服务端拒绝' } } })
     const c = await mountUser(P_ALL)
     click(c.findAll('.glass-switch')[1])
+    await completeStepUp()
     await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '失败提示' })
     expect(ElMessage.error).toHaveBeenCalledWith('服务端拒绝')
     expect(c.findAll('.glass-switch__label')[1].textContent.trim()).toBe('登录验证码 OFF')
@@ -1503,7 +1737,8 @@ describe('UserView 列表渲染细节', () => {
       c.findAll('.el-table__body-wrapper .el-table__row')[0].querySelectorAll('td')
     ).map((td) => td.textContent.replace(/\s+/g, ' ').trim())
     expect(cells[1]).toContain('bob')
-    expect(cells[1]).toContain('b@x.com')
+    expect(cells[1]).toContain('b****@x.com')
+    expect(cells[1]).not.toContain('b@x.com')
     expect(cells.some((x) => x === '鲍勃')).toBe(true)
     expect(cells.some((x) => x === '设备科')).toBe(true)
     expect(cells.some((x) => x === '管理员')).toBe(true)

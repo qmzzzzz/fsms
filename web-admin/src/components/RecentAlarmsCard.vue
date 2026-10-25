@@ -15,7 +15,27 @@
         </button>
       </div>
     </template>
-    <el-table :data="rows" style="width: 100%">
+    <!-- 加载失败必须显式可见：空表无法与「确实没有报警」区分。
+         有旧数据时标注为上次数据并保留，首次加载失败则只显示错误提示。 -->
+    <el-alert
+      v-if="error"
+      :title="rows.length > 0 ? $t('dashboard.alarmsStale') : $t('dashboard.alarmsLoadFailed')"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="alarm-alert"
+    >
+      <template #default>
+        <button
+          type="button"
+          class="glass-btn glass-btn--default glass-btn--sm"
+          @click="$emit('retry')"
+        >
+          {{ $t('common.retry') }}
+        </button>
+      </template>
+    </el-alert>
+    <el-table v-if="!(error && rows.length === 0)" :data="rows" style="width: 100%">
       <el-table-column prop="time" :label="$t('common.createTime')" width="180" />
       <el-table-column prop="location" :label="$t('alarm.location')" />
       <el-table-column prop="type" :label="$t('alarm.alarmType')" width="120">
@@ -42,7 +62,11 @@ import { ArrowRight } from '@element-plus/icons-vue'
 defineProps({
   /** 已映射为展示结构的报警行：{ time, location, type, tagType, status, statusType } */
   rows: { type: Array, default: () => [] },
+  /** 最近一次加载/刷新是否失败（为 true 时显示错误或陈旧数据提示） */
+  error: { type: Boolean, default: false },
 })
+
+defineEmits(['retry'])
 </script>
 
 <style scoped>
@@ -60,4 +84,7 @@ defineProps({
 
 /* ===== 报警记录卡片 =====
    不加入场动画：与图表区同理，骨架直换零位移（D-2） */
+.alarm-alert {
+  margin-bottom: 12px;
+}
 </style>

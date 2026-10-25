@@ -11,11 +11,16 @@
  *     （供跨网段抓取/经代理收敛出口的场景，与 Nginx 白名单互不依赖）；
  *  2. 来源 IP 属内网/回环（含 IPv4-mapped IPv6）→ 放行，
  *     保持「本机与容器网络 Prometheus 直连」零配置兼容；
+ *     例外：`TRUST_PROXY_HOPS > 0` 时**回环对端必须携带令牌**。该拓扑下回环
+ *     对端是反代本身而不是抓取方，任何穿过 Nginx 的请求（含 ACL 漂移后
+ *     放行的公网请求）在应用层都长得和抓取完全一样——不要求令牌，这道
+ *     第二防线就等于不存在。容器网络直连（非回环私网）仍按零配置放行。
  *  3. 其余（公网来源、无法解析的来源、token 缺失/错误）→ 401 拒绝。
  *
  * 配置说明：
  *  - METRICS_TOKEN（可选）：openssl rand -hex 32 生成。未配置时退化为
- *    「仅内网放行」，绝不因缺省而 fail-open 到公网可读；
+ *    「仅内网放行」，绝不因缺省而 fail-open 到公网可读；声明了反代
+ *    （TRUST_PROXY_HOPS>0）时，经反代访问 /metrics 必须配置并携带它；
  *  - 令牌比较用 timingSafeEqual 防时序侧信道；长度不等先短路
  *    （timingSafeEqual 仅接受等长输入；长度差异最多暴露「令牌长度」这一
  *     无关紧要的信息，而全等长路径才是逐字节比较的防侧信道主体）。
@@ -24,10 +29,23 @@
 // 地址解析统一走 ipUtils（内含严格形态判据），本文件不再直接依赖 ipaddr。
 // isPrivateOrLoopback 的判据本体也已迁入 ipUtils：logShipper
 // 的出站目标门禁需要同一把尺，判据归 utils、本文件保留同名再导出以稳定既有引用。
-const { isPrivateOrLoopback } = require('../utils/ipUtils');
+const { isPrivateOrLoopback, parseIP } = require('../utils/ipUtils');
 const crypto = require('crypto');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
+
+/**
+ * 是否回环地址（含 IPv4-mapped IPv6）——只回答"对端是不是本机"。
+ * 与 isPrivateOrLoopback 分开：反代场景下回环与私网的可信含义不同（见文件头）。
+ */
+function isLoopbackAddress(rawIp) {
+  const ip = parseIP(String(rawIp || ''));
+  if (!ip) return false;
+  if (ip.kind() === 'ipv6' && ip.range() === 'ipv4Mapped') {
+    return ip.toIPv4Address().range() === 'loopback';
+  }
+  return ip.range() === 'loopback';
+}
 
 /**
  * 判断 IP 是否属内网/回环（Prometheus 抓取的合法网段）
@@ -50,12 +68,18 @@ function safeTokenEqual(provided, expected) {
 /**
  * 中间件工厂：token 在工厂调用时固化（进程启动期确定），
  * 既避免每请求读 env 的开销，也让测试可用不同 token 独立构建实例
- * @param {string|{token?: string}} [options] 直接传 token 字符串（测试便捷）
- *   或 { token } 选项对象；缺省读 METRICS_TOKEN
+ * @param {string|{token?: string, trustProxyHops?: number|string}} [options] 直接传 token 字符串（测试便捷）
+ *   或 { token, trustProxyHops } 选项对象；缺省读 METRICS_TOKEN / TRUST_PROXY_HOPS
  */
 function createMetricsAuth(options = {}) {
   const opts = typeof options === 'string' ? { token: options } : options || {};
   const token = opts.token !== undefined ? String(opts.token) : process.env.METRICS_TOKEN || '';
+  // 与 config/validate 的运行时归一同一语义：非正整数/缺省都当作"未声明反代"。
+  // 非法值不在这里告警——启动期 config/validate 已按同一个判据报错。
+  const rawHops =
+    opts.trustProxyHops !== undefined ? opts.trustProxyHops : process.env.TRUST_PROXY_HOPS;
+  const parsedHops = parseInt(String(rawHops ?? '').trim(), 10);
+  const behindProxy = Number.isInteger(parsedHops) && parsedHops > 0;
 
   return function metricsAuth(req, res, next) {
     const authHeader = req.headers.authorization || '';
@@ -79,6 +103,19 @@ function createMetricsAuth(options = {}) {
     //
     // req.socket.remoteAddress 取自 TCP 连接本身，不受任何请求头影响。
     const peerIp = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+
+    // ②a 反代声明生效时，回环对端是反代而不是抓取方：此时"来自回环"不提供任何
+    // 区分度（公网请求经 Nginx 转发同样以 127.0.0.1 到达），必须靠令牌区分。
+    // 容器网络直连（非回环私网）不在此列，保持 shipped prometheus.yml 的
+    // `app:3000` 直抓无需额外配置。
+    if (behindProxy && isLoopbackAddress(peerIp)) {
+      logger.warn('metrics 端点拒绝：反代拓扑下的回环请求缺少有效 METRICS_TOKEN', {
+        peer: peerIp,
+        reqIp: req.ip || 'unknown',
+      });
+      return ApiResponse.codeError(res, 'METRICS_INTERNAL_ONLY');
+    }
+
     if (isPrivateOrLoopback(peerIp)) {
       return next();
     }

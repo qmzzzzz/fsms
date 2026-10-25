@@ -195,8 +195,8 @@
       <button
         type="button"
         class="glass-btn glass-btn--primary"
-        :class="{ 'is-loading': loading }"
-        :disabled="loading"
+        :class="{ 'is-loading': loading || submitting }"
+        :disabled="loading || submitting"
         @click="handleSubmit"
       >
         {{ $t('inspectionResult.submitBtn') }}
@@ -209,7 +209,7 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
-import { api } from '@/utils/api'
+import { api, isHandledApiError } from '@/utils/api'
 
 const { t } = useI18n()
 
@@ -236,6 +236,8 @@ const visible = computed({
 })
 
 const loading = ref(false)
+// 同步重入锁：loading 要等异步校验完成后才置位，同一 tick 连点会重复提交
+const submitting = ref(false)
 const deviceOptions = ref([])
 
 // 设备下拉的缺数据状态：partial = 后端还有没下发的设备，failed = 请求本身失败。
@@ -390,55 +392,67 @@ const loadDevices = async () => {
 // 提交表单
 const handleSubmit = async () => {
   if (!formRef.value) return
+  // 重入防护必须同步置位：loading 要等异步校验回调里才置位，同一 tick 连点
+  // 会在校验窗口内产生多次提交（巡检结果重复上报）
+  if (submitting.value) return
+  submitting.value = true
 
-  // 如果结果不是正常，确保每个问题都有必填字段
-  if (form.result !== 'normal') {
-    const hasEmptyField = form.findings.some(
-      (finding) => !finding.deviceId || !finding.issue || !finding.severity || !finding.suggestion
-    )
+  try {
+    // 如果结果不是正常，确保每个问题都有必填字段
+    if (form.result !== 'normal') {
+      const hasEmptyField = form.findings.some(
+        (finding) => !finding.deviceId || !finding.issue || !finding.severity || !finding.suggestion
+      )
 
-    if (hasEmptyField) {
-      ElMessage.warning(t('inspectionResult.allIssuesIncompleteMsg'))
-      return
-    }
-  }
-
-  await formRef.value.validate(async (valid) => {
-    if (valid) {
-      loading.value = true
-      try {
-        // 如果结果正常，清空问题列表
-        const submitData = {
-          result: form.result,
-          location: form.location,
-          remark: form.remark,
-        }
-
-        if (form.result !== 'normal') {
-          // 转换findings数据结构以匹配后端期望的格式
-          submitData.findings = form.findings.map((finding) => ({
-            deviceId: finding.deviceId, // 前端传递的是ObjectId字符串，后端可以直接处理
-            issue: finding.issue,
-            severity: finding.severity,
-            // P3-45：photo 现为用户录入的地址，原样提交。
-            // 此前这里有 `!startsWith('blob:')` 过滤——那是为了兜住上传空转
-            // 产生的假地址，改为地址录入后不再需要，且过滤会让合法地址被误删。
-            photo: String(finding.photo || '').trim(),
-            suggestion: finding.suggestion,
-          }))
-        }
-
-        await api.inspections.complete(props.inspectionId, submitData)
-        ElMessage.success(t('inspectionResult.submitSuccessMsg'))
-        visible.value = false
-        emit('success')
-      } catch (error) {
-        ElMessage.error(t('common.submitFailedRetry'))
-      } finally {
-        loading.value = false
+      if (hasEmptyField) {
+        ElMessage.warning(t('inspectionResult.allIssuesIncompleteMsg'))
+        return
       }
     }
-  })
+
+    try {
+      await formRef.value.validate()
+    } catch (_) {
+      return
+    }
+
+    loading.value = true
+    try {
+      // 如果结果正常，清空问题列表
+      const submitData = {
+        result: form.result,
+        location: form.location,
+        remark: form.remark,
+      }
+
+      if (form.result !== 'normal') {
+        // 转换findings数据结构以匹配后端期望的格式
+        submitData.findings = form.findings.map((finding) => ({
+          deviceId: finding.deviceId, // 前端传递的是ObjectId字符串，后端可以直接处理
+          issue: finding.issue,
+          severity: finding.severity,
+          // P3-45：photo 现为用户录入的地址，原样提交。
+          // 此前这里有 `!startsWith('blob:')` 过滤——那是为了兜住上传空转
+          // 产生的假地址，改为地址录入后不再需要，且过滤会让合法地址被误删。
+          photo: String(finding.photo || '').trim(),
+          suggestion: finding.suggestion,
+        }))
+      }
+
+      await api.inspections.complete(props.inspectionId, submitData)
+      ElMessage.success(t('inspectionResult.submitSuccessMsg'))
+      visible.value = false
+      emit('success')
+    } catch (error) {
+      // 具体原因已由响应拦截器提示，组件不再叠加一条泛化「提交失败」
+      if (!isHandledApiError(error)) ElMessage.error(t('common.submitFailedRetry'))
+    } finally {
+      loading.value = false
+    }
+  } finally {
+    // 校验不通过 / 请求失败 / 成功都必须解锁，否则按钮永久失效
+    submitting.value = false
+  }
 }
 
 // 关闭对话框

@@ -145,6 +145,23 @@ describe('run-rollback-drill.js --apply-source 的自查与护栏', () => {
     });
   });
 
+  test('1b 快照落盘为 AES-256-GCM 密文：不带 FSMSBK1 魔数的归档一个都没有', async () => {
+    await seed();
+    const r = run(['--apply-source', '--yes', '--backup-dir', backupDir]);
+    expect(r.status).toBe(0);
+
+    const archives = fs.readdirSync(backupDir).filter((f) => f.endsWith('.ndjson.gz.enc'));
+    // 四个集合各一份，缺一份说明某个集合绕过了加密写出
+    expect(archives.length).toBeGreaterThanOrEqual(COLLECTIONS.length);
+    for (const f of archives) {
+      const head = fs.readFileSync(path.join(backupDir, f)).subarray(0, 8).toString('utf8');
+      expect(head).toBe('FSMSBK1\n');
+    }
+    // 反向断言：不得同时留下"看起来是 gzip"的明文快照。
+    // 只看 .enc 存在不够——旧实现同时写两份也能通过上面那条。
+    expect(fs.readdirSync(backupDir).filter((f) => f.endsWith('.ndjson.gz'))).toEqual([]);
+  });
+
   test('2 落盘 manifest 与 stdout 同口径（演练记录要能事后复核）', async () => {
     await seed();
     const r = run(['--apply-source', '--yes', '--backup-dir', backupDir]);
@@ -159,6 +176,8 @@ describe('run-rollback-drill.js --apply-source 的自查与护栏', () => {
       fs.readFileSync(path.join(backupDir, files[files.length - 1]), 'utf8')
     );
     expect(latest.restoreVerified).toBe(true);
+    // 演练留档本身必须能回答"这次备份加没加密"
+    expect(latest.encrypted).toBe(true);
     // 快照数与回灌数都必须在文件里——只有 documents 的 manifest 无法自证
     for (const name of COLLECTIONS) {
       expect(latest.collections[name].restored).toBe(SEED_COUNTS[name]);

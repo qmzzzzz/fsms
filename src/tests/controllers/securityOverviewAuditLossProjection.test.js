@@ -53,6 +53,12 @@ jest.mock('../../middleware/errorHandler', () => ({
   asyncHandler: (fn) => fn,
 }));
 
+// 控制器对聚合出口统一做数据范围收口；本套件不连库，范围解析放行成 all 档
+// （口径由 security/statsAnomalyScope 的真库用例钉住）。
+jest.mock('../../services/auditScopeFilter', () => ({
+  applyAuditDataScope: jest.fn(async () => ({ query: {}, dataScope: { type: 'all' } })),
+}));
+
 const { getSecurityOverview } = require('../../controllers/securityController');
 
 // ===== 夹具 =====
@@ -60,9 +66,19 @@ const { getSecurityOverview } = require('../../controllers/securityController');
 /**
  * 缓冲侧（非 WAL 层）的"取证计数"键名。它们不符合 `wal*Lines` / `wal*Failures`
  * 的命名约定，只能逐个点名——点名处越少越好，所以 WAL 层的键一律走命名判据。
- * 新增一个 WAL 计数键时**不需要**动这里：命名判据会自动要求它被投影。
+ * 新增一个符合约定的 WAL 计数键时**不需要**动这里：命名判据会自动要求它被投影。
+ *
+ * `walDurableDropped` / `walDurableTrimRefusals`（2026-10-21）：它们是"承诺缺失"
+ * 而非"取证缺失"，因此刻意**不**叫 `*Lines` / `*Failures`——把两种后果混在
+ * 一个命名族里，面板上就再也分不开"丢了一条取证"和"丢了一条已回成功的审计"。
+ * 代价是必须在此点名，这是有意的取舍。
  */
-const LEGACY_LOSS_KEYS = ['droppedCount', 'outageFailures'];
+const LEGACY_LOSS_KEYS = [
+  'droppedCount',
+  'outageFailures',
+  'walDurableDropped',
+  'walDurableTrimRefusals',
+];
 
 /** 一个键是不是"合规面板必须报出来的取证计数"——判据只写这一处，用例全部复用它 */
 const isLossCounterKey = (k) => /^wal.*(Lines|Failures)$/.test(k) || LEGACY_LOSS_KEYS.includes(k);
@@ -91,7 +107,8 @@ const makeCtx = () => {
       return this;
     },
   };
-  return { req: {}, res, next: jest.fn() };
+  // 真实链路里 authenticate 必先填充 req.user；聚合出口按 userId 解析数据范围
+  return { req: { user: { userId: 'u-test' } }, res, next: jest.fn() };
 };
 
 /** 用 Proxy 记下控制器投影读了 stats 的哪些键 */
@@ -193,6 +210,8 @@ describe('合规面板 auditLoss 投影（WAL 损坏行必须可见）', () => {
       'walDiscardedLines',
       'walCorruptLines',
       'walAppendFailures',
+      'walDurableDropped',
+      'walDurableTrimRefusals',
       'droppedCount',
       'outageFailures',
       'bufferLength',
@@ -206,6 +225,8 @@ describe('合规面板 auditLoss 投影（WAL 损坏行必须可见）', () => {
       'walDiscardedLines',
       'walCorruptLines',
       'walAppendFailures',
+      'walDurableDropped',
+      'walDurableTrimRefusals',
       'droppedCount',
       'outageFailures',
     ]);

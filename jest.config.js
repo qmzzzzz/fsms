@@ -17,6 +17,10 @@ module.exports = {
   // 每个测试文件运行前同步设置环境变量
   setupFiles: ['<rootDir>/src/tests/setup.js'],
 
+  // 文件级乱序：--randomize 只打乱文件内用例顺序，文件顺序由 JEST_FILE_SEED 驱动。
+  // 未设置该变量时沿用 Jest 默认顺序，本地 npm test 行为不变。
+  testSequencer: '<rootDir>/src/tests/testSequencer.js',
+
   // 每个测试用例的默认超时（毫秒）
   testTimeout: 30000,
 
@@ -260,6 +264,25 @@ module.exports = {
     // 基线取「实测下方一档」；分支留 2pt 余量是因为该分支依赖 icacls 输出解析，
     // 未来若新增解析形态，余量可吸收格式差异而不误红灯。
     './src/utils/filePermission.js': { branches: 92, functions: 97 },
+    // ===== 2026-10-21 审计 P2-2：安全关键模块独立门槛 =====
+    // 这 9 个模块此前只有 global 均值兜底：删除整个专属套件仍可能被其它文件的
+    // 高覆盖率稀释而保持绿灯。数值按上方唯一规则取「2026-10-21 全量实测 - 5pt(分支)
+    // / -3pt(函数)，向下取整」，实测分别为：
+    //   mfaController 62.50/100、sessionRevocation 76.32/100、auditBuffer 96.51/88.89、
+    //   auditBufferWal 90.11/87.18、auditOutbox 86.67/100、auditChainMonitor 88.89/77.78、
+    //   rateLimitEscalation 86.36/75.00、rateLimitEscalationBan 91.67/100、
+    //   webhookTargetResolver 72.73/100。
+    // 独立设阈后这些文件会从 global 组摘出；按同一份 lcov 重算，global 组反而
+    // 从 br 87.60 / fn 95.08 / ln 96.42 升到 88.02 / 96.06 / 96.67，不会误伤全局基线。
+    './src/controllers/mfaController.js': { branches: 57, functions: 97 },
+    './src/services/websocketService/sessionRevocation.js': { branches: 71, functions: 97 },
+    './src/services/auditBuffer.js': { branches: 91, functions: 85 },
+    './src/services/auditBufferWal.js': { branches: 85, functions: 84 },
+    './src/services/auditOutbox.js': { branches: 81, functions: 97 },
+    './src/services/auditChainMonitor.js': { branches: 83, functions: 74 },
+    './src/services/rateLimitEscalation.js': { branches: 81, functions: 72 },
+    './src/services/rateLimitEscalationBan.js': { branches: 86, functions: 97 },
+    './src/services/webhookTargetResolver.js': { branches: 67, functions: 97 },
   },
 
   // 测试文件命名约定

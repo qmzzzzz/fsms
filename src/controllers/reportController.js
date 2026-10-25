@@ -133,10 +133,12 @@ const getInspectionReport = asyncHandler(async (req, res) => {
 });
 
 /**
- * A4（2026-10-16）：解析本次导出的脱敏档位。
+ * A4（2026-10-16）/ L-17（2026-10-21）：解析本次导出的脱敏档位。
  *
- * 默认掩码，持 `system:read` 者才拿全文——与 User PII 的揭示门槛同源
- * （initData.js 的 SECURITY_ADMIN 注释：「查看他人敏感信息需 system:read」）。
+ * 默认掩码；只有同时满足「持 pii:export」与「经 POST /reports/export/pii 的二次验证」
+ * 才输出全文。GET 导出由路由置 `req.forceMaskPii`，即使调用方持有 pii:export
+ * 也只能拿到掩码档——否则拿到口令的会话可以绕过步进验证直接 GET 全量姓名。
+ *
  * 只有携带真实姓名的报表类型参与（PII_NAME_EXPORT_TYPES），其余类型一律 false，
  * 不做多余的权限查询。
  *
@@ -148,7 +150,8 @@ const getInspectionReport = asyncHandler(async (req, res) => {
  */
 const resolveExportMasking = async (req, type) => {
   if (!PII_NAME_EXPORT_TYPES.includes(type)) return false;
-  const canViewFullPii = await hasPermission(req.user.userId, 'system:read');
+  if (req.forceMaskPii) return true;
+  const canViewFullPii = await hasPermission(req.user.userId, 'pii:export');
   return !canViewFullPii;
 };
 
@@ -174,7 +177,7 @@ const auditFullPiiExportIfAny = async (req, type, total, maskPii) => {
 
 /**
  * 导出报表数据
- * GET /api/reports/export
+ * GET /api/reports/export（掩码档） / POST /api/reports/export/pii（未脱敏，二次验证）
  *
  * O-1 重构：配置/查询构建/枚举校验/流式写出/workbook 编排均在
  * services/reportExportService.js，此处只保留参数校验、权限闸与编排。
@@ -279,7 +282,7 @@ const exportReport = asyncHandler(async (req, res) => {
   // audit 类型必须叠加与「列表 / CSV 导出」同一份数据范围判据（auditScopeFilter）。
   // 此处原先的注释写着"审计无部门/属主字段，语义上只能全局或禁止"，而 AuditLog.userId
   // 正是审计列表用来过滤的字段：self 档只见自己、department 档只见本部门成员
-  // （auditController.js:43 与 auditQueryService.js:320 都调用了 applyAuditDataScope）。
+  // （auditController.js:44 与 auditQueryService.js:320 都调用了 applyAuditDataScope）。
   // 少这一道就是：列表只看得到本部门，xlsx 却导出全库所有人的 IP/路径/操作
   // ——导出集比可见集宽，属本仓反复出现的"同一条判据的第二处实现漏抄"。
   if (type === 'audit') {
@@ -294,7 +297,8 @@ const exportReport = asyncHandler(async (req, res) => {
   const exportTotal = await EXPORT_MODEL_CONFIG[type].model.countDocuments(query, collationOptions);
   await checkBulkExport(req.user.userId, req.user.username, exportTotal, `report_export_${type}`);
 
-  // A4：携带真实姓名的报表默认脱敏（持 system:read 者全文），全文导出单独留痕
+  // A4/L-17：携带真实姓名的报表默认脱敏；GET 恒为掩码档，全文导出只经
+  // POST /export/pii 且需 pii:export + 二次验证（全文导出单独留痕）
   const maskPii = await resolveExportMasking(req, type);
   await writeExportWorkbook(res, {
     type,

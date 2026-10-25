@@ -605,14 +605,16 @@ const matchesAnyPathPrefix = (prefixes, fullPath) =>
 
 /**
  * 电子表格公式注入防护（OWASP Formula Injection）
- * 以 = + - @ 或 Tab/CR 开头的单元格文本在 Excel/WPS/CSV 消费方可能被当作公式执行，
- * 统一前置单引号使其强制作为文本处理
+ * 以 = + - @ 或 Tab/CR/LF 开头的单元格文本在 Excel/WPS/CSV 消费方可能被当作公式执行，
+ * 统一前置单引号使其强制作为文本处理。
+ * LF 必须在内：单元格值由多段拼出时，前置段以换行结尾会让最终文本以 `\n=` 开头，
+ * 只挡 Tab/CR 的判据会原样放行（Excel 打开时忽略前导换行后仍按公式解析）。
  * @param {any} value 单元格值
  * @returns {any} 非字符串原样返回；危险前缀字符串返回加固后的值
  */
 const sanitizeSpreadsheetCell = (value) => {
   if (typeof value !== 'string' || value.length === 0) return value;
-  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return /^[=+\-@\t\r\n]/.test(value) ? `'${value}` : value;
 };
 
 module.exports = {

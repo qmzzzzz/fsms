@@ -147,6 +147,16 @@ function routeLabelOf(req) {
   return 'unmatched';
 }
 
+// method 是请求行里**完全由客户端决定**的 token（Node 的 HTTP 解析器接受任意扩展方法），
+// 直接当标签值等于每换一个动词就新建一条 series：`FOO1`、`FOO2`… 几千个请求就能
+// 打满 MAX_SERIES，把真实流量的指标挤掉。收成闭集，闭集外的动词统一记 OTHER
+// ——保留“存在非标准方法”这一信号，但不再让它决定基数。
+const METRIC_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+function methodLabelOf(method) {
+  const upper = String(method || 'GET').toUpperCase();
+  return METRIC_METHODS.has(upper) ? upper : 'OTHER';
+}
+
 /**
  * HTTP 指标采集中间件：请求结束时记录计数与延迟。
  * 挂载点在所有业务中间件之前（IP 黑名单/限流器产生的 403/429 同样计数）。
@@ -156,7 +166,7 @@ function metricsMiddleware(req, res, next) {
   res.on('finish', () => {
     try {
       const labels = {
-        method: (req.method || 'GET').toUpperCase(),
+        method: methodLabelOf(req.method),
         route: routeLabelOf(req),
         status_code: String(res.statusCode),
       };

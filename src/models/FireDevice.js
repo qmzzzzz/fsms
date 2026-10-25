@@ -184,7 +184,13 @@ fireDeviceSchema.index({ 'maintenanceRecord.operator': 1 });
 fireDeviceSchema.index({ 'location.building': 1, 'location.floor': 1 });
 fireDeviceSchema.index({ lifecycleStage: 1, status: 1 });
 fireDeviceSchema.index({ expiryDate: 1 });
-fireDeviceSchema.index({ nextCheckDate: 1 });
+// 设备列表的「状态筛选 + deviceCode 排序」高频组合：仅有 deviceCode 单字段索引时，
+// 带 status 的查询要在索引里回表过滤，数据量上来后退化为扫描大量非命中项。
+fireDeviceSchema.index({ status: 1, deviceCode: 1 });
+// 提醒扫描的「未排期」档：filter 命中 nextCheckDate:null，排序按 installDate,_id 升序。
+// 原单字段 {nextCheckDate:1} 只能定位 null 块、块内仍要阻塞排序（整档同值），
+// 由本复合索引的最左前缀整体取代 ⇒ 替换而非并存。
+fireDeviceSchema.index({ nextCheckDate: 1, installDate: 1, _id: 1 });
 
 // 业务数据保留期（F-07，2026-10-17）：口径见 constants/businessRetention.js（180 天），
 // 开关是 BUSINESS_RETENTION_DAYS_FIRE_DEVICE；未配置时不建 TTL。

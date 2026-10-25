@@ -143,8 +143,10 @@
                 <div class="uname">
                   {{ row.username }}
                 </div>
-                <div class="uemail" :title="row.email">
-                  {{ row.email }}
+                <!-- 邮箱与手机号同口径：服务端只给脱敏后的 emailMasked，
+                     它同样是展示值，不能当可写字段回填编辑表单。 -->
+                <div class="uemail" :title="row.emailMasked">
+                  {{ row.emailMasked || '-' }}
                 </div>
               </div>
             </div>
@@ -273,9 +275,14 @@
         <el-form-item :label="$t('auth.email')" prop="email">
           <el-input
             v-model="dialog.form.email"
-            :placeholder="$t('register.emailPlaceholder')"
+            :placeholder="
+              dialog.isEdit ? $t('user.emailKeepBlank') : $t('register.emailPlaceholder')
+            "
             maxlength="254"
           />
+          <div v-if="dialog.isEdit" class="phone-field__hint">
+            {{ $t('user.emailKeepBlank') }}
+          </div>
         </el-form-item>
         <el-form-item v-if="!dialog.isEdit" :label="$t('auth.password')" prop="password">
           <el-input
@@ -311,7 +318,7 @@
               maxlength="20"
             />
             <button
-              v-if="dialog.isEdit"
+              v-if="dialog.isEdit && canRevealPhone"
               type="button"
               class="glass-btn glass-btn--link glass-btn--primary phone-field__reveal"
               @click="openReveal"
@@ -432,11 +439,12 @@
       width="420px"
       append-to-body
       :close-on-click-modal="false"
+      @close="invalidateRevealRequest"
       @closed="resetReveal"
     >
       <p class="reveal-hint">{{ $t('user.revealPhoneHint') }}</p>
       <el-form @submit.prevent>
-        <el-form-item>
+        <el-form-item v-if="reveal.mode === 'password'">
           <el-input
             v-model="reveal.password"
             type="password"
@@ -446,35 +454,67 @@
             @keydown.enter.prevent="enterSubmit($event, doReveal)"
           />
         </el-form-item>
+        <!-- 已开启 MFA 的账号在服务端被拒绝「仅凭密码」通过步进验证（REAUTH_MFA_REQUIRED），
+             必须给出第二因子入口，否则这类管理员在本页永远看不到明文号码。
+             两种凭据走显式模式而不是同屏二选一：两个框都填时若按优先级静默取一个，
+             用户会以为另一个也在参与校验，重试时还可能连续撞 MFA 失败计数。 -->
+        <el-form-item v-else>
+          <el-input
+            v-model="reveal.mfaCode"
+            maxlength="6"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            :placeholder="$t('user.revealMfaPlaceholder')"
+            @keydown.enter.prevent="enterSubmit($event, doReveal)"
+          />
+        </el-form-item>
+        <button
+          type="button"
+          class="glass-btn glass-btn--link reveal-mode-toggle"
+          :disabled="reveal.submitting"
+          @click="toggleRevealMode"
+        >
+          {{ reveal.mode === 'mfa' ? $t('user.revealUsePassword') : $t('user.revealUseMfa') }}
+        </button>
       </el-form>
       <template #footer>
-        <button type="button" class="glass-btn glass-btn--default" @click="reveal.visible = false">
+        <button type="button" class="glass-btn glass-btn--default" @click="cancelReveal">
           {{ $t('common.cancel') }}
         </button>
-        <!-- 空口令不发请求：服务端必定 REAUTH_REQUIRED，白占一次 reauth 限流配额 -->
+        <!-- 空凭据不发请求：服务端必定 REAUTH_REQUIRED，白占一次 reauth 限流配额 -->
         <button
           type="button"
           class="glass-btn glass-btn--primary"
-          :disabled="reveal.submitting || !reveal.password"
+          :disabled="
+            reveal.submitting || (reveal.mode === 'mfa' ? !reveal.mfaCode.trim() : !reveal.password)
+          "
           @click="doReveal"
         >
           {{ $t('user.revealPhone') }}
         </button>
       </template>
     </el-dialog>
+
+    <!-- 敏感写操作二次验证（P3-2）：重置 MFA / 注册与验证码开关 -->
+    <ReauthDialog
+      v-model="stepUpVisible"
+      :submitting="stepUpSubmitting"
+      @submit="handleStepUpSubmit"
+    />
   </div>
 </template>
 
 <script setup>
-import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
+import { computed, ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Search, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
-import { api, isCanceledError } from '@/utils/api'
+import { api, isCanceledError, isHandledApiError } from '@/utils/api'
 import { encryptPassword } from '@/utils/loginCipher'
 import { passwordStrengthRule } from '@/utils/password'
 import { enterSubmit } from '@/utils/enterSubmit'
+import ReauthDialog from '@/components/ReauthDialog.vue'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useAuthStore } from '@/store'
@@ -514,6 +554,9 @@ const statusTagType = (status) => (USER_STATUS_META[status] || {}).type || 'info
 // 是否正在编辑自己的账号：状态下拉整框禁用（locked 置灰仍保留——锁定/解锁走 PUT
 // /security/users/:id/lock 专用接口，见 statusOptions 上方注释；对自身则连选都不能选）
 const editingSelf = computed(() => dialog.isEdit && authStore.isSelf(dialog.form._id))
+// 揭示入口与后端 checkViewSensitivePermission 同口径：查看他人明文需 system:read，
+// 本人查看由 step-up 兜底。缺该权限的自定义角色原先也看得到入口，点下去必然 403。
+const canRevealPhone = computed(() => authStore.isSelf(dialog.form._id) || hasPerm('system:read'))
 const statusOptions = computed(() =>
   Object.entries(USER_STATUS_META).map(([value, meta]) => ({
     value,
@@ -582,7 +625,11 @@ const dialog = reactive({
       { pattern: /^[a-zA-Z0-9_]+$/, message: t('validation.usernamePattern'), trigger: 'blur' },
     ],
     email: [
-      { required: true, message: t('validation.emailRequired'), trigger: 'blur' },
+      // 编辑时不回填（服务端只给 emailMasked），留空=不修改；创建时仍必填。
+      // 非空时一律校验格式，避免"留空跳过"变成绕过格式校验的旁路。
+      ...(dialog.isEdit
+        ? []
+        : [{ required: true, message: t('validation.emailRequired'), trigger: 'blur' }]),
       { type: 'email', message: t('validation.emailInvalid'), trigger: 'blur' },
     ],
     password: [
@@ -669,23 +716,78 @@ const loadRegistrationConfig = async () => {
   }
 }
 
-// 切换注册开关
-const handleRegistrationToggle = async (val) => {
-  const prev = registrationEnabled.value
-  registrationEnabled.value = val
-  registrationLoading.value = true
+// ===== 敏感写操作二次验证（P3-2）=====
+// 后端对「重置用户 MFA」与三类安全配置开关要求重新验证身份（密码 / MFA 码）。
+// 统一收口成一次弹框：requestStepUp 挂起动作，验证通过后执行 run；
+// 取消或业务失败时执行 cancel 回滚乐观状态。
+const stepUpVisible = ref(false)
+const stepUpSubmitting = ref(false)
+const stepUpAction = ref(null)
+
+const requestStepUp = (action) => {
+  stepUpAction.value = action
+  stepUpVisible.value = true
+}
+
+const isReauthError = (e) =>
+  String(e?.response?.data?.errors?.errorCode || '').startsWith('REAUTH_')
+
+const closeStepUp = (rollback) => {
+  const action = stepUpAction.value
+  stepUpAction.value = null
+  stepUpVisible.value = false
+  if (rollback) action?.cancel?.()
+}
+
+// 取消（含右上角关闭）：放弃动作并回滚，不能把乐观更新的开关留在"假成功"状态
+watch(stepUpVisible, (visible) => {
+  if (visible) return
+  const action = stepUpAction.value
+  stepUpAction.value = null
+  action?.cancel?.()
+})
+
+const handleStepUpSubmit = async (credential) => {
+  const action = stepUpAction.value
+  if (!action) return
+  stepUpSubmitting.value = true
   try {
-    await api.security.setRegistrationConfig({ allowPublicRegistration: val })
-    ElMessage.success(
-      `${val ? t('common.enabled') : t('common.disabled')} ${t('security.allowPublicRegistration')}`
-    )
+    await action.run(credential)
+    closeStepUp(false)
   } catch (e) {
-    // 失败时回滚开关状态
-    registrationEnabled.value = prev
-    ElMessage.error(e?.response?.data?.message || t('common.failed'))
+    // 凭据错误留在弹层里改错重试（提示由拦截器统一输出）；
+    // 其它失败说明动作已确定失败，关闭弹层并回滚
+    if (!isReauthError(e)) closeStepUp(true)
   } finally {
-    registrationLoading.value = false
+    stepUpSubmitting.value = false
   }
+}
+
+// 切换注册开关
+const handleRegistrationToggle = (val) => {
+  const prev = registrationEnabled.value
+  // 乐观翻转：开关立即可见；取消验证或请求失败都会回滚
+  registrationEnabled.value = val
+  requestStepUp({
+    run: async (credential) => {
+      registrationLoading.value = true
+      try {
+        await api.security.setRegistrationConfig({ allowPublicRegistration: val, ...credential })
+        ElMessage.success(
+          `${val ? t('common.enabled') : t('common.disabled')} ${t('security.allowPublicRegistration')}`
+        )
+      } catch (e) {
+        if (!isHandledApiError(e)) ElMessage.error(e?.response?.data?.message || t('common.failed'))
+        throw e
+      } finally {
+        registrationLoading.value = false
+      }
+    },
+    cancel: () => {
+      registrationEnabled.value = prev
+      registrationLoading.value = false
+    },
+  })
 }
 
 // 登录验证码开关
@@ -703,22 +805,29 @@ const loadLoginCaptchaConfig = async () => {
 }
 
 // 切换登录验证码开关
-const handleLoginCaptchaToggle = async (val) => {
+const handleLoginCaptchaToggle = (val) => {
   const prev = loginCaptchaEnabled.value
   loginCaptchaEnabled.value = val
-  loginCaptchaLoading.value = true
-  try {
-    await api.security.setLoginCaptchaConfig({ loginCaptchaEnabled: val })
-    ElMessage.success(
-      `${val ? t('common.enabled') : t('common.disabled')} ${t('security.loginCaptcha')}`
-    )
-  } catch (e) {
-    // 失败时回滚开关状态
-    loginCaptchaEnabled.value = prev
-    ElMessage.error(e?.response?.data?.message || t('common.failed'))
-  } finally {
-    loginCaptchaLoading.value = false
-  }
+  requestStepUp({
+    run: async (credential) => {
+      loginCaptchaLoading.value = true
+      try {
+        await api.security.setLoginCaptchaConfig({ loginCaptchaEnabled: val, ...credential })
+        ElMessage.success(
+          `${val ? t('common.enabled') : t('common.disabled')} ${t('security.loginCaptcha')}`
+        )
+      } catch (e) {
+        if (!isHandledApiError(e)) ElMessage.error(e?.response?.data?.message || t('common.failed'))
+        throw e
+      } finally {
+        loginCaptchaLoading.value = false
+      }
+    },
+    cancel: () => {
+      loginCaptchaEnabled.value = prev
+      loginCaptchaLoading.value = false
+    },
+  })
 }
 
 // 注册验证码开关
@@ -736,21 +845,29 @@ const loadRegisterCaptchaConfig = async () => {
 }
 
 // 切换注册验证码开关
-const handleRegisterCaptchaToggle = async (val) => {
+const handleRegisterCaptchaToggle = (val) => {
   const prev = registerCaptchaEnabled.value
   registerCaptchaEnabled.value = val
-  registerCaptchaLoading.value = true
-  try {
-    await api.security.setRegisterCaptchaConfig({ registerCaptchaEnabled: val })
-    ElMessage.success(
-      `${val ? t('common.enabled') : t('common.disabled')} ${t('security.registerCaptcha')}`
-    )
-  } catch (e) {
-    registerCaptchaEnabled.value = prev
-    ElMessage.error(e?.response?.data?.message || t('common.failed'))
-  } finally {
-    registerCaptchaLoading.value = false
-  }
+  requestStepUp({
+    run: async (credential) => {
+      registerCaptchaLoading.value = true
+      try {
+        await api.security.setRegisterCaptchaConfig({ registerCaptchaEnabled: val, ...credential })
+        ElMessage.success(
+          `${val ? t('common.enabled') : t('common.disabled')} ${t('security.registerCaptcha')}`
+        )
+      } catch (e) {
+        if (!isHandledApiError(e)) ElMessage.error(e?.response?.data?.message || t('common.failed'))
+        throw e
+      } finally {
+        registerCaptchaLoading.value = false
+      }
+    },
+    cancel: () => {
+      registerCaptchaEnabled.value = prev
+      registerCaptchaLoading.value = false
+    },
+  })
 }
 
 const loadAvailableRoles = async () => {
@@ -785,7 +902,9 @@ const handleEdit = (row) => {
   dialog.isEdit = true
   dialog.form._id = row._id
   dialog.form.username = row.username
-  dialog.form.email = row.email
+  // 邮箱**不回填**：列表给的是脱敏展示值（emailMasked），回填等于把展示值
+  // 当成可写字段；留空提交时下面的 payload 会省略该键，服务端按"不修改"处理。
+  dialog.form.email = ''
   dialog.form.realName = row.realName || ''
   dialog.form.department = row.department || ''
   // 手机号**不回填**：列表给的是脱敏展示值（phoneMasked），把它当可写字段塞进表单
@@ -800,63 +919,135 @@ const handleEdit = (row) => {
 
 // 手机号按需揭示（step-up）的独立弹层状态。
 // 明文在管理端只有一个出口：POST /api/security/view-sensitive——服务端先做当前口令
-// （或 TOTP）复检，再写一条 view_sensitive_data 审计，且审计写入失败就不返回明文。
-// 所以这里只传口令，不在本地做任何"能不能看"的判断。
+// 或 TOTP 复检，再写一条 view_sensitive_data 审计，且审计写入失败就不返回明文。
+// 所以这里只传凭据，不在本地做任何"能不能看"的判断。
+// 口令与动态验证码走显式模式：同屏两个输入框时，原先"填了码就以码为准"会静默
+// 丢弃口令，用户以为两者都校验了；现在切到哪个模式就只提交哪个凭据。
 const reveal = reactive({
   visible: false,
   submitting: false,
+  mode: 'password',
   password: '',
+  mfaCode: '',
   userId: null,
 })
 
-// 口令的唯一清理点是下面 el-dialog 的 @closed，openReveal 只负责带入目标用户：
+// 在途请求代号：取消/关闭 step-up 时立即 +1，迟到的响应不再写回表单。
+// 只比目标用户不够——用户显式取消后响应仍会落地，明文会出现在已关闭的编辑框里。
+let revealEpoch = 0
+const invalidateRevealRequest = () => {
+  revealEpoch += 1
+}
+
+// 凭据的唯一清理点是下面 el-dialog 的 @closed，openReveal 只负责带入目标用户：
 // 两处都清是冗余，且冗余的那处永远测不到（清理逻辑被改坏时测试照样绿）。
 const openReveal = () => {
+  invalidateRevealRequest()
   reveal.userId = dialog.form._id
   reveal.visible = true
 }
 
-// 绑 el-dialog 的 @closed（动画结束、已离开 DOM）而不是 @close：
-// 口令在请求还在飞的瞬间被清掉会让 doReveal 的守卫提前失败。
-const resetReveal = () => {
+// 取消要同步作废在途请求：@closed 还要等离开动画，这段窗口足够响应落地。
+const cancelReveal = () => {
+  invalidateRevealRequest()
+  reveal.visible = false
+}
+
+const toggleRevealMode = () => {
+  reveal.mode = reveal.mode === 'mfa' ? 'password' : 'mfa'
+  // 切走后的凭据不得残留：避免用户误以为它仍参与校验，也避免误提交旧码。
   reveal.password = ''
+  reveal.mfaCode = ''
+}
+
+// 绑 el-dialog 的 @closed（动画结束、已离开 DOM）而不是 @close：
+// @close 只作废在途请求（invalidateRevealRequest），这里做最终清理。
+const resetReveal = () => {
+  invalidateRevealRequest()
+  reveal.mode = 'password'
+  reveal.password = ''
+  reveal.mfaCode = ''
   reveal.userId = null
   reveal.submitting = false
 }
 
 const doReveal = async () => {
-  if (!reveal.password) return
+  if (reveal.submitting) return
+  const mode = reveal.mode
+  const password = mode === 'password' ? reveal.password : ''
+  const mfaCode = mode === 'mfa' ? reveal.mfaCode.trim() : ''
+  if (mode === 'password' ? !password : !mfaCode) return
+  // 动态口令有固定形状：填了但不是 6 位数字就地拦下，不把明显无效的码当密码发出去。
+  if (mfaCode && !/^\d{6}$/.test(mfaCode)) {
+    ElMessage.warning(t('profile.mfaCodeInvalid'))
+    return
+  }
   // 目标在发请求前定稿：step-up 弹层一关，下面的 resetReveal 就会把 reveal.userId 清空，
   // 那时再读它已经认不出"这份明文属于哪一行"。
   const targetUserId = reveal.userId
+  const epoch = revealEpoch
   reveal.submitting = true
   try {
+    // 当前口令走密文轨（PASSWORD_CURRENT 用途）：与服务端 requireReAuthentication
+    // 的解密用途一致。加密失败必须阻断，不得静默降级为明文上行。
+    let credential
+    if (mode === 'mfa') {
+      credential = { mfaCode }
+    } else {
+      try {
+        const enc = await encryptPassword(password, 'PASSWORD_CURRENT')
+        credential = enc ? { encCurrentPassword: enc } : { currentPassword: password }
+      } catch (e) {
+        console.warn('[loginCipher] 二次验证口令加密失败，已阻断提交：', e?.message)
+        ElMessage.error(
+          e?.code === 'PUBLIC_KEY_PIN_MISMATCH'
+            ? t('login.publicKeyPinMismatch')
+            : e?.code === 'INSECURE_CONTEXT'
+              ? t('login.insecureContext')
+              : t('login.encryptionFailed')
+        )
+        return
+      }
+    }
+    // 取消可能发生在口令加密期间：此时已经没有回填目标，不再白占一次 reauth 配额。
+    if (epoch !== revealEpoch) return
     const res = await api.security.viewSensitive({
       dataType: 'phone',
       targetUserId,
-      currentPassword: reveal.password,
+      ...credential,
     })
-    // 迟到写入守卫：请求飞行期间用户可能已经 ESC 掉 step-up、关掉编辑框、
+    // 迟到写入守卫：请求飞行期间用户可能已经 ESC 掉 step-up、关掉编辑框，
     // 甚至点了另一行的「编辑」。少这一道判断，A 的明文就会写进 B 的表单，
     // 基线（phoneBaseline）也一起变成 A 的号码 —— 用户照着"清空即删除"的提示
     // 删空再保存，抹掉的就是 B 的真实号码。
-    // 只比 _id 就够：关掉编辑框会走 resetForm（_id 归 null），新增框同样是 null，
-    // 所以"还开着、还是这一行"是唯一能放行写入的状态。
+    // epoch 先判：用户显式取消后即使目标没变，响应也不得再写回编辑框。
+    if (epoch !== revealEpoch) return
     if (dialog.form._id !== targetUserId) {
       reveal.visible = false
       return
     }
+    // 只看 HTTP 2xx 不够：200 {success:false} 时 data.full 可能仍是旧值/空值，
+    // 写进基线会把"没看到"伪装成"看到了"。
+    const body = res?.data
+    if (body?.success !== true) {
+      if (mode === 'mfa') reveal.mfaCode = ''
+      ElMessage.error(body?.message || t('common.failed'))
+      return
+    }
     // full 可能为空串（该用户从未填过号码）：此时基线也是空串，
     // 与"没揭示过"的 null 区分开，下面的提示文案据此切换。
-    const full = res?.data?.data?.full ?? ''
+    const full = body?.data?.full ?? ''
     dialog.form.phone = full
     dialog.phoneBaseline = full
     reveal.visible = false
   } catch (_) {
     // 口令错 / 权限不足 / 限流 / 需要 MFA 都由 api.js 拦截器按 errorCode 弹一次，
     // 组件不再重复提示；失败时输入框保持原样（空），不会写入半截值。
+    // 动态码失败后清空：重试时不该把刚被判错的码原样再送一次（会继续累加失败计数）。
+    if (epoch === revealEpoch && mode === 'mfa') reveal.mfaCode = ''
   } finally {
-    reveal.submitting = false
+    // 取消/重开后旧请求不得清掉新请求的忙态。
+    if (epoch === revealEpoch) reveal.submitting = false
   }
 }
 
@@ -913,7 +1104,7 @@ const handleDelete = async (row) => {
     // Element Plus 的取消与右上角关闭都以字符串 reject（'cancel' / 'close'），
     // 二者都是「用户没做决定」，不是删除失败；只有其它异常才提示。
     if (!['cancel', 'close'].includes(e)) {
-      ElMessage.error(t('messages.deleteFailed'))
+      if (!isHandledApiError(e)) ElMessage.error(t('messages.deleteFailed'))
     }
   }
 }
@@ -926,12 +1117,16 @@ const handleResetMfa = async (row) => {
       t('messages.confirmTitle'),
       { type: 'warning' }
     )
-    await api.security.resetUserMfa(row._id || row.id)
-    ElMessage.success(t('user.resetMfaSuccess'))
-    loadData()
   } catch (_) {
-    // 取消确认或失败原因已在拦截器提示
+    return // 用户取消确认
   }
+  requestStepUp({
+    run: async (credential) => {
+      await api.security.resetUserMfa(row._id || row.id, credential)
+      ElMessage.success(t('user.resetMfaSuccess'))
+      loadData()
+    },
+  })
 }
 
 // 锁定/解锁的行级忙态：重入守卫必须在首个 await 前同步置位（ElMessageBox 弹出
@@ -1008,11 +1203,15 @@ const submitForm = async () => {
   try {
     const payload = {
       username: dialog.form.username,
-      email: dialog.form.email,
       realName: dialog.form.realName,
       department: dialog.form.department,
       status: dialog.form.status,
       allowedIPs: dialog.form.allowedIPs,
+    }
+    // 邮箱与手机号同口径：编辑框不回填展示值，留空=不修改（服务端以键缺失判定）；
+    // 创建时必填校验保证这里非空。
+    if (!dialog.isEdit || dialog.form.email) {
+      payload.email = dialog.form.email
     }
     // 手机号**只在动过时才发**：userController.js 落库用的是 `if (phone !== undefined)`，
     // 键缺失才是 no-op，传空串等于清空号码；而编辑框已不再回填明文（列表只给 phoneMasked）。
@@ -1049,7 +1248,10 @@ const submitForm = async () => {
     dialog.visible = false
     loadData()
   } catch (e) {
-    ElMessage.error(dialog.isEdit ? t('messages.updateFailed') : t('messages.createFailed'))
+    // 具体原因已由响应拦截器提示；仅未经过拦截器的异常（测试替身/本地逻辑）才补泛化文案
+    if (!isHandledApiError(e)) {
+      ElMessage.error(dialog.isEdit ? t('messages.updateFailed') : t('messages.createFailed'))
+    }
   } finally {
     dialog.submitting = false
   }
@@ -1065,7 +1267,7 @@ const submitRoleAssignment = async () => {
     roleDialog.visible = false
     loadData()
   } catch (e) {
-    ElMessage.error(t('messages.saveFailed'))
+    if (!isHandledApiError(e)) ElMessage.error(t('messages.saveFailed'))
   } finally {
     roleDialog.submitting = false
   }
@@ -1086,6 +1288,9 @@ const resetForm = () => {
   dialog.phoneBaseline = null
   // 编辑对话框被关掉时，挂在它下面的 step-up 弹层（append-to-body，独立渲染）
   // 不会跟着消失——不主动收就会留一个悬空的密码框。
+  // 同步作废在途请求：关编辑框到 step-up 收到 close 事件之间隔着一次渲染，
+  // 响应若落在这段窗口里，明文会写回一个正在关闭的表单。
+  invalidateRevealRequest()
   reveal.visible = false
   if (formRef.value) {
     formRef.value.clearValidate()
@@ -1165,6 +1370,9 @@ onUnmounted(() => {
   font-size: var(--xf-font-size-sm, 13px);
   line-height: 1.6;
   color: var(--xf-gray-600, #6b7280);
+}
+.reveal-mode-toggle {
+  margin-top: -6px;
 }
 .glass-card {
   animation: page-enter 0.4s var(--xf-ease-glass) both;

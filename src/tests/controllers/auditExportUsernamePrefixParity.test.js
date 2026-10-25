@@ -43,6 +43,7 @@ const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 const AuditLog = require('../../models/AuditLog');
 const { buildExportQuery } = require('../../services/reportExportService');
@@ -256,7 +257,8 @@ describe('审计 xlsx 导出的 username 前缀 + collation 口径', () => {
         });
       const csvRes = await request(app)
         .get(`/api/security/audit-logs/export?username=${FILTER}`)
-        .set('Authorization', `Bearer ${superToken}`);
+        .set('Authorization', `Bearer ${superToken}`)
+        .set(reauthHeaders(superToken));
       expect(csvRes.status).toBe(200);
       expect(usernamesFromCsv(csvRes.text).sort()).toEqual([...usernames.ciMatches].sort());
       const cols = await columnsFromWorkbook(xlsxRes.body);
@@ -266,7 +268,8 @@ describe('审计 xlsx 导出的 username 前缀 + collation 口径', () => {
     test('列表接口在同一参数下命中数一致（导出即所见，含总数）', async () => {
       const res = await request(app)
         .get(`/api/security/audit-logs?username=${FILTER}&page=1&limit=50`)
-        .set('Authorization', `Bearer ${superToken}`);
+        .set('Authorization', `Bearer ${superToken}`)
+        .set(reauthHeaders(superToken));
       expect(res.status).toBe(200);
       // 响应信封：body.data = { data: [行…], meta: { total, count, … } }
       const payload = res.body.data || {};

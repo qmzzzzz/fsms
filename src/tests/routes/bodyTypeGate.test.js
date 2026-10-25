@@ -116,7 +116,7 @@ describe('写路径的 body 类型闸门', () => {
       deviceCode: `${stamp}dc${label}`,
       deviceName: `${stamp}设备${label}`,
       deviceType: 'extinguisher',
-      building: 'A栋',
+      location: { building: 'A栋' },
       // installDate 在模型里是 required（FireDevice 的 schema），缺了它连夹具都建不起来
       installDate: new Date(),
     });

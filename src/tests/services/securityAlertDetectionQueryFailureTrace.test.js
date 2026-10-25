@@ -86,11 +86,22 @@ describe('检测器的观测查询失败必须留痕（不静默降级）', () =
     select: () => ({ lean: () => promise }),
   });
 
+  /**
+   * countDocuments 的链式形态：用户名维度计数带 `.collation(...)`（#22 大小写不敏感），
+   * 桩若只返回裸 Promise，检测器会在 `.collation` 上抛 TypeError——测到的是桩不忠，
+   * 而不是它想钉的"计数查询失败"。
+   */
+  const countQuery = (value) => {
+    const promise = value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
+    promise.collation = () => promise;
+    return promise;
+  };
+
   describe('暴力破解检测', () => {
     test('计数查询抛错 ⇒ 不冒泡给调用方，但必须留下"本轮不检测"的痕迹', async () => {
       const spy = jest
         .spyOn(AuditLog, 'countDocuments')
-        .mockRejectedValue(new Error('模拟计数查询失败'));
+        .mockImplementation(() => countQuery(new Error('模拟计数查询失败')));
 
       await expect(
         securityAlert.checkBruteForce(`${stamp}_bf_db_down`, '198.51.100.21')
@@ -104,7 +115,7 @@ describe('检测器的观测查询失败必须留痕（不静默降级）', () =
     });
 
     test('反向对照：计数正常但未达阈值 ⇒ 不得出现降级痕迹', async () => {
-      jest.spyOn(AuditLog, 'countDocuments').mockResolvedValue(0);
+      jest.spyOn(AuditLog, 'countDocuments').mockImplementation(() => countQuery(0));
 
       await securityAlert.checkBruteForce(`${stamp}_bf_below_threshold`, '198.51.100.22');
 
@@ -114,7 +125,9 @@ describe('检测器的观测查询失败必须留痕（不静默降级）', () =
 
     test('反向对照：计数正常且达标 ⇒ 走完整告警链路而不是降级分支', async () => {
       sendNotification.mockResolvedValue(undefined);
-      jest.spyOn(AuditLog, 'countDocuments').mockResolvedValue(THRESHOLDS.bruteForceAttempts + 2);
+      jest
+        .spyOn(AuditLog, 'countDocuments')
+        .mockImplementation(() => countQuery(THRESHOLDS.bruteForceAttempts + 2));
 
       await securityAlert.checkBruteForce(`${stamp}_bf_reaches_alert`, '198.51.100.27');
       await new Promise((r) => setImmediate(r));

@@ -181,7 +181,10 @@ describe('用户对象写路径的数据范围闸（与读路径同口径）', (
   });
 
   test('resetUserMfa：域外目标 403', async () => {
-    const res = await authed('put', `/api/security/users/${outTarget._id}/mfa/reset`).send({});
+    // P3-2：路由先要求二次验证，凭据必须随请求上行，否则拿到的总是 REAUTH_REQUIRED
+    const res = await authed('put', `/api/security/users/${outTarget._id}/mfa/reset`).send({
+      currentPassword: `Aa1!${stamp}Test`,
+    });
     expect(res.status).toBe(403);
     expect(res.body.errors.errorCode).toBe('USER_SCOPE_FORBIDDEN');
   });

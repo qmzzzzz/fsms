@@ -61,6 +61,9 @@ const fs = require('fs');
 const path = require('path');
 
 const { HttpShipperTransport } = require('../../utils/logShipper');
+
+// http 端点仅用于让请求失败/成功，与出站加密判据无关（见 resolveShippingTarget）
+process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
 const { drainShippingBuffer, bestEffortDrain } = require('../../utils/loggerFlush');
 const { waitFor } = require('../helpers/waitFor');
 

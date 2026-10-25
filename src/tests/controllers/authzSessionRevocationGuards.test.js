@@ -325,7 +325,8 @@ describe('授权与会话加固回归', () => {
 
       const res = await request(app)
         .post('/api/auth/mfa/enroll')
-        .set('Authorization', `Bearer ${token}`);
+        .set('Authorization', `Bearer ${token}`)
+        .send({ currentPassword: 'Qz7#Lm42vTx9' });
       expect(res.status).toBe(200);
       const plainSecret = res.body.data.secret;
       expect(plainSecret).toMatch(/^[A-Z2-7]+$/);
@@ -349,7 +350,8 @@ describe('授权与会话加固回归', () => {
 
       const enroll = await request(app)
         .post('/api/auth/mfa/enroll')
-        .set('Authorization', `Bearer ${token}`);
+        .set('Authorization', `Bearer ${token}`)
+        .send({ currentPassword: 'Qz7#Lm42vTx9' });
       const secret = enroll.body.data.secret;
 
       const counter = Math.floor(Date.now() / 1000 / 30);
@@ -358,7 +360,7 @@ describe('授权与会话加固回归', () => {
       const enable = await request(app)
         .post('/api/auth/mfa/enable')
         .set('Authorization', `Bearer ${token}`)
-        .send({ mfaCode: code });
+        .send({ mfaCode: code, currentPassword: 'Qz7#Lm42vTx9' });
 
       expect(enable.status).toBe(200);
       expect(enable.body.data.enabled).toBe(true);
@@ -381,7 +383,8 @@ describe('授权与会话加固回归', () => {
 
       const enroll = await request(app)
         .post('/api/auth/mfa/enroll')
-        .set('Authorization', `Bearer ${token}`);
+        .set('Authorization', `Bearer ${token}`)
+        .send({ currentPassword: password });
       const secret = enroll.body.data.secret;
 
       const counter = Math.floor(Date.now() / 1000 / 30);
@@ -390,7 +393,7 @@ describe('授权与会话加固回归', () => {
       const enable = await request(app)
         .post('/api/auth/mfa/enable')
         .set('Authorization', `Bearer ${token}`)
-        .send({ mfaCode: code });
+        .send({ mfaCode: code, currentPassword: password });
 
       return { user: u, recoveryCodes: enable.body.data.recoveryCodes };
     };

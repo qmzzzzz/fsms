@@ -19,6 +19,7 @@ const ApiResponse = require('../utils/apiResponse');
 const permissionHelper = require('../utils/permissionHelper');
 const logger = require('../utils/logger');
 const roleService = require('../services/roleService');
+const { RESERVED_WILDCARD_PERMISSION } = require('../utils/superAdmin');
 const { getDataScope } = require('../middleware/rbac');
 
 // 取值清单与 Permission/Role schema、roleRoutes/permissionRoutes 的 isIn 同源
@@ -65,7 +66,15 @@ const applyRoleScopeToQuery = async (
   };
 };
 
-/** 跨层级操作守卫：非 ALL 范围的操作者不得处置比自己层级高的角色 */
+/**
+ * 跨层级操作守卫：非 ALL 范围的操作者不得处置**同级或更高**层级的角色。
+ *
+ * 同级曾经放行：`role.level > operatorMaxLevel` 只拦更高一级，于是 level-8 管理员
+ * 可以停用/改名/降级另一名 level-8 管理员所辖的自定义角色——角色是权限的载体，
+ * 同级之间互不隶属，改写对方的角色本身就是越权（也与 rolePermissionController
+ * 的 `role.level >= operatorMaxLevel` 同级保护口径不一致：那一侧早已按 >= 拦）。
+ * 同级判定采用严格小于：只有严格低于操作者层级的角色才在其管辖范围内。
+ */
 const guardRoleWithinOperatorLevel = async ({
   res,
   role,
@@ -79,7 +88,7 @@ const guardRoleWithinOperatorLevel = async ({
     return true;
   }
   if (dataScope.type === 'all') return false;
-  if ((role.level || 0) > (await authority.maxLevel())) {
+  if ((role.level || 0) >= (await authority.maxLevel())) {
     ApiResponse.codeError(res, higherLevelCode);
     return true;
   }
@@ -136,6 +145,45 @@ const guardRoleLevelTarget = async ({ req, res, role, level, authority }) => {
   return false;
 };
 
+/**
+ * 恢复停用角色 = 把该角色已挂的全部权限重新发给所有持有者。
+ *
+ * 权限分配接口（rolePermissionController）本来就要求操作者「能授予角色上的每一项权限」，
+ * 但 `PUT /roles/:id` 只改 status 时绕过了那条判据：早先被有权者授过权限、随后被停用的
+ * 角色，任何能改写该角色的低层级管理员都能用 `status:'active'` 把它整体点亮——
+ * 包括自己并不持有的权限。这与「不得授予自己没有的权限」是同一条规则的两个入口，
+ * 故在恢复时复用同一份子集判据与错误码（不新增码，前端无需改映射）。
+ *
+ * 超管 `*:*` 豁免：与其余授予路径一致，超管本就持有全部权限。
+ * 停用的权限同样参与判定：权限恢复启用后它们会重新生效，恢复角色时放行等于
+ * 给未来的越权留一条已经批准的路径（fail-closed）。
+ */
+const guardRoleReactivationPermissions = async ({ req, res, role, status }) => {
+  if (status !== 'active' || role.status === 'active') return false;
+
+  const operatorPermCodes = await roleService.getOperatorPermissions(req.user.userId);
+  if (operatorPermCodes.includes(RESERVED_WILDCARD_PERMISSION)) return false;
+
+  const permissionIds = (role.permissions || []).filter(Boolean);
+  if (permissionIds.length === 0) return false;
+
+  const permissions = await roleService.findPermissionsByIds(permissionIds, 'code');
+  const lacking = permissions
+    .filter((perm) => !permissionHelper.matchesPermissionCodes(operatorPermCodes, perm.code))
+    .map((perm) => perm.code);
+  if (lacking.length === 0) return false;
+
+  logger.warn(
+    `角色恢复被拒：operator=${req.user.username || req.user.userId} ` +
+      `role=${role.code}(L${role.level}) 含操作者不具备的权限 ${lacking.join('、')}`
+  );
+  ApiResponse.codeError(res, 'PERMISSION_ASSIGN_FORBIDDEN', {
+    message: `无权恢复含以下权限的角色：${lacking.join('、')}`,
+    params: { permissions: lacking.join('、') },
+  });
+  return true;
+};
+
 /** PATCH 语义应用可编辑字段：undefined 表示"不改"，与 null/空串区分；名称为空必须在赋值前拒掉 */
 const applyRoleEditableFields = ({ res, role, name, description, level, status }) => {
   if (name !== undefined && !String(name).trim()) {
@@ -157,5 +205,6 @@ module.exports = {
   guardBuiltInNameOrLevel,
   guardRoleStatusValue,
   guardRoleLevelTarget,
+  guardRoleReactivationPermissions,
   applyRoleEditableFields,
 };

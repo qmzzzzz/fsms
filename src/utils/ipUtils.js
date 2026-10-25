@@ -15,6 +15,7 @@
  */
 
 const ipaddr = require('ipaddr.js');
+const { auditIpOrUndefined } = require('../constants/audit');
 
 /**
  * 规范 IPv4 文本判据——拦截 ipaddr 的「宽松数值形态」
@@ -510,6 +511,19 @@ function clientIpForSecurityDecision(req) {
 }
 
 /**
+ * 会话记录用的客户端地址：安全裁决地址 + 64 字符截断。
+ * 会话 IP 用于设备识别，不能由请求方自选的 XFF 决定；截断上限与
+ * UserSession.ip 的 schema maxlength 同源（超长值会让 create 抛 ValidationError）。
+ *
+ * @param {import('express').Request|null|undefined} req
+ * @returns {string|null}
+ */
+const sessionClientIp = (req) => {
+  const ip = req ? clientIpForSecurityDecision(req) : undefined;
+  return ip ? String(ip).slice(0, 64) : null;
+};
+
+/**
  * 客户端 IP 的**来源分类**——回答「这个地址是谁写的」。
  *
  * 与 `isClientIpIdentityTrustworthy` 的分工不是重复，而是方向不同：那一把尺问
@@ -622,11 +636,43 @@ const ipAttributionRiskFactors = (kind) =>
  */
 const resolvePunishTarget = (attribution, fallbackIp) => attribution?.punishIp ?? fallbackIp;
 
+/**
+ * 审计写入的客户端地址字段：`ip` 取安全裁决地址，`clientInfo` 同时留痕
+ * 「请求声称的地址」与「TCP 对端」。
+ *
+ * 为什么不是直接把 `req.ip` 写进审计：trust proxy 下它是请求方自己写的 X-Forwarded-For
+ * （见 classifyIpAttribution），一条伪造头就能让取证记录指向任意地址。安全裁决地址
+ * 在边界外退到不可伪造的 socket 对端；同时保留 reportedIp 才能让事后看出
+ * 「这次请求带着与对端不一致的转发头」，而不是把伪造值静默丢掉。
+ *
+ * clientInfo 的两个子字段都经 `auditIpOrUndefined`（与 schema 的 ip 闸同一份实现）：
+ * 它们参与审计哈希，若在算哈希前不做与落库相同的清洗，就会出现永久 hash_mismatch。
+ * 空值不落键——哈希端的 stableStringify 会把 undefined 序列化为 null，而 Mongoose
+ * 会丢弃 undefined 键，两者形态不一致同样会假报篡改。
+ *
+ * @param {import('express').Request} req
+ * @returns {{ip: string|undefined, clientInfo: {reportedIp?: string, socketPeer?: string}}}
+ */
+const auditClientAddress = (req) => {
+  const { punishIp, reportedIp, socketPeer } = resolvePunishableIp(req || {});
+  const ip = auditIpOrUndefined(punishIp);
+  const clientInfo = {};
+  const reported = auditIpOrUndefined(reportedIp);
+  const peer = auditIpOrUndefined(socketPeer);
+  if (reported) clientInfo.reportedIp = reported;
+  if (peer) clientInfo.socketPeer = peer;
+  // 空对象不落键：canonicalPayload 会序列化出 `{}`，而 Mongoose 对空嵌套对象
+  // 的落库形态不稳定（可能整键丢弃）⇒ 哈希与库内文档形态不一致会假报篡改。
+  return Object.keys(clientInfo).length > 0 ? { ip, clientInfo } : { ip };
+};
+
 module.exports = {
+  auditClientAddress,
   isPrivateOrLoopback,
   isPeerTrustedProxy,
   isClientIpIdentityTrustworthy,
   clientIpForSecurityDecision,
+  sessionClientIp,
   classifyIpAttribution,
   resolvePunishableIp,
   ipAttributionRiskFactors,

@@ -145,6 +145,8 @@ function runDeploy({
   // compose 里同为 `:?` 硬声明项，preflight 现在会一起校验，不补这一行会让
   // 本套件全部用例卡在退出码 2（那正是「早于任何变更就拒绝」的证据，但不是被测路径）
   env.ALLOWED_HOSTS = 'fsms.example.com';
+  // 2026-10-24：compose 新增的 `:?` 强制项（默认留空会静默退化为代理兼容档）
+  env.TRUSTED_PROXY_CIDRS = '172.28.0.0/16';
   // 告警接收端指向本 stage 里那份"已注入"的配置（理由见 makeStage）
   env.ALERTMANAGER_CONFIG_PATH = stage.alertmanager;
   // F-08（2026-10-17）：preflight 现在要求发布显式给出恢复目标，且不得宽于声明值
@@ -363,6 +365,7 @@ describe('D-1 部署脚本实际发起的命令序列（端到端观测）', () 
         'APP_IMAGE=ghcr.io/qmzzzzz/fsms:sha-fromdotenv',
         'CORS_ORIGIN=https://from-dotenv.example.com',
         'ALLOWED_HOSTS=from-dotenv.example.com',
+        'TRUSTED_PROXY_CIDRS=172.28.0.0/16',
         // F-08：preflight 的恢复目标校验同样只认这里给的来源
         'BACKUP_RPO_HOURS=24',
         'BACKUP_RTO_HOURS=4',

@@ -155,6 +155,20 @@ const auditLogSchema = new mongoose.Schema(
       browser: String,
       os: String,
       device: String,
+      // 客户端地址的双留痕（口径见 utils/ipUtils.auditClientAddress）：
+      // reportedIp 是 req.ip（trust proxy 下可能来自请求方自写的 XFF），
+      // socketPeer 是 TCP 对端。两者不一致即说明本次请求带了转发头——
+      // 只记安全裁决地址会丢掉这个事实，只记 req.ip 则会把伪造值当证据。
+      // 与 ip 同族走 auditIpOrUndefined（上界 + 控制字符中和），且必须参与哈希：
+      // 二者都挂在 clientInfo 下，payload 的 V2+ 整对象纳入哈希，无需升版本。
+      reportedIp: {
+        type: String,
+        set: auditIpOrUndefined,
+      },
+      socketPeer: {
+        type: String,
+        set: auditIpOrUndefined,
+      },
     },
 
     // 地理位置（可选）

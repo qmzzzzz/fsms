@@ -22,18 +22,18 @@
  * 实测后逐行定位，其中的分支分两类：
  *
  *  A. **有诊断价值的真实路径**（本文件覆盖）：
- *     - trust proxy 显式有效值（app.js:204）：收紧后这是生产反代下唯一
+ *     - trust proxy 显式有效值（app.js:205）：收紧后这是生产反代下唯一
  *       让 req.ip 正确的开关。此前只测了「非法值 → 退化 1 跳」，有效值分支零验证——
  *       一旦有人写错 `app.set('trust proxy', true)`（信任全部代理，可伪造 XFF
  *       击穿 IP 限流/黑名单），现有测试不会红。
- *     - /api 根路径（app.js:453）：注释声明「不再返回接口清单」，无测试锁定；
+ *     - /api 根路径（app.js:487）：注释声明「不再返回接口清单」，无测试锁定；
  *       若将来有人改回返回清单，属未认证信息暴露，须在此红。
- *     - /readyz 的 503 双路径（app.js:419-430）：checkMongoReady 返回
+ *     - /readyz 的 503 双路径（app.js:447、app.js:460）：checkMongoReady 返回
  *       not-ok 与**抛错**两种失败。脱敏（readyzSanitize.test.js）只测了
  *       checkMongoReady 本身，未验证 HTTP 响应体真的不含驱动错误消息——本文件
  *       补上 app 级闭环。
  *
- *  B. Sentry 三件套（app.js:248-249、app.js:512）——**不补测，理由如实记录**：
+ *  B. Sentry 三件套（app.js:249-250、app.js:546）——**不补测，理由如实记录**：
  *     `sentryInitialized` 是模块级常量，要覆盖需 SENTRY_DSN + 模块重置 + 对
  *     @sentry/node 打桩三件套齐备；而它覆盖的是「SDK 自己的中间件被 app.use」，
  *     属第三方库接线，行为已验证于 middleware/sentry 的单测
@@ -49,7 +49,7 @@ const loadApp = () => {
   return require('../../app');
 };
 
-describe('§13 V-12：trust proxy 有效值分支（app.js:204）', () => {
+describe('§13 V-12：trust proxy 有效值分支（app.js:205）', () => {
   beforeEach(() => {
     jest.resetModules();
     process.env = { ...ORIGINAL_ENV };
@@ -99,7 +99,7 @@ describe('§13 V-12：trust proxy 有效值分支（app.js:204）', () => {
   // §8.3 点名场景「Trust proxy 过大值」——本次改动复审补测 + 补漏
   // ============================================================
   // 为什么必须测：config/validate.js 有 MAX_TRUST_PROXY_HOPS=5 的上限校验，
-  // 但 validateConfig() 首行即对非 production 早退（src/config/validate.js:370），
+  // 但 validateConfig() 首行即对非 production 早退（src/config/validate.js:375），
   // 因此 staging/dev 可以绕过该闸门。而 app.js 原先对 parseInt 结果不做上界
   // 判断，超上限值被原样交给 Express。实测（2026-09-17，Node 24）：
   //   app.set('trust proxy', 999999) + XFF: "1.1.1.1, 2.2.2.2, ..."
@@ -155,7 +155,7 @@ describe('§13 V-12：trust proxy 有效值分支（app.js:204）', () => {
   });
 });
 
-describe('§13 V-12：/api 根路径不泄露接口清单（app.js:453）', () => {
+describe('§13 V-12：/api 根路径不泄露接口清单（app.js:487）', () => {
   const request = require('supertest');
   let app;
 
@@ -175,7 +175,7 @@ describe('§13 V-12：/api 根路径不泄露接口清单（app.js:453）', () =
   });
 });
 
-describe('§13 V-12：/readyz 的 503 双路径（app.js:410-434）', () => {
+describe('§13 V-12：/readyz 的 503 双路径（app.js:435-457）', () => {
   const request = require('supertest');
 
   /**
@@ -183,7 +183,10 @@ describe('§13 V-12：/readyz 的 503 双路径（app.js:410-434）', () => {
    * 之前替换 utils/healthChecks 的导出——加载后 spyOn 已经晚了（拿到的是原函数）。
    * 用 jest.resetModules 保证每次拿到全新的模块实例，替换互不串扰。
    */
-  const loadAppWithProbe = (probeImpl) => {
+  const loadAppWithProbe = (
+    probeImpl,
+    redisImpl = async () => ({ ok: true, reason: 'not_configured', detail: '' })
+  ) => {
     jest.resetModules();
     // 性能：resetModules 后拿到全新 mongoose 实例（与 globalSetup 的连接不共享），
     // 无连接时 IP 黑名单查询默认 buffer 等 10s——本组用例会白等近 50 秒。
@@ -192,6 +195,9 @@ describe('§13 V-12：/readyz 的 503 双路径（app.js:410-434）', () => {
     require('mongoose').set('bufferTimeoutMS', 300);
     const healthChecks = require('../../utils/healthChecks');
     healthChecks.checkMongoReady = jest.fn(probeImpl);
+    // Redis 在测试环境未配置（not_configured）是合法就绪态；显式桩掉，
+    // 避免宿主/CI 恰好设了 REDIS_URL 时把本组用例拖成 503
+    healthChecks.checkRedisReady = jest.fn(redisImpl);
     const { createApp } = require('../../app');
     return createApp();
   };
@@ -250,5 +256,22 @@ describe('§13 V-12：/readyz 的 503 双路径（app.js:410-434）', () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('ready');
     expect(res.body.checks.mongo).toBe('ok');
+  });
+
+  test('Redis 未就绪：即使 Mongo ok 也 503，原始错误只进日志', async () => {
+    const leaked = 'connect ECONNREFUSED 10.8.8.8:6379 (redis-prod)';
+    const app = loadAppWithProbe(
+      async () => ({ ok: true, reason: 'ok', detail: '' }),
+      async () => ({ ok: false, reason: 'unreachable', detail: leaked })
+    );
+
+    const res = await request(app).get('/readyz');
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('unready');
+    expect(res.body.checks.mongo).toBe('ok');
+    expect(res.body.checks.redis).toBe('unreachable');
+    expect(JSON.stringify(res.body)).not.toContain('10.8.8.8');
+    expect(JSON.stringify(res.body)).not.toContain('redis-prod');
   });
 });

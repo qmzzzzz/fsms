@@ -14,12 +14,15 @@ const logger = require('../../utils/logger');
 const sharedCache = require('../sharedCache');
 const {
   MAX_CONNECTIONS_PER_PROCESS,
+  MAX_UNAUTHENTICATED_PER_IP,
   AUTH_TIMEOUT,
   ALLOWED_ROOMS,
   ROOM_ROLE_REQUIREMENTS,
   roomRolesSatisfied,
   userRoom,
 } = require('./shared');
+const { resolveHandshakeIPForSecurityDecision, resolveTrustProxyHops } = require('./handshake');
+const { installInboundThrottle } = require('./inboundThrottle');
 
 /**
  * 给 async 事件监听器挂上拒绝臂
@@ -112,20 +115,88 @@ function deliverPermissionSync(io, online, meta, permsByUser, redisMode) {
 }
 
 const methods = {
+  /**
+   * 占用一个未认证连接名额（#9）。
+   *
+   * 取不到来源地址时不计数（与握手 IP 闸同口径：无地址就无从归属，
+   * 强行记到某个共享桶里只会误伤）；命名空间是「IP → 未认证连接数」，
+   * 由本服务的连接生命周期维护，不跨实例——跨实例的全局配额需要共享计数，
+   * 属已知缺口（与 MAX_CONNECTIONS_PER_PROCESS 的 capacityScope 注释同源）。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @param {string|null} ip
+   * @returns {boolean} 是否取得名额（false 表示应拒绝该连接）
+   */
+  _acquireUnauthenticatedSlot(socket, ip) {
+    if (!ip) return true;
+    const current = this.unauthConnectionsByIp.get(ip) || 0;
+    if (current >= MAX_UNAUTHENTICATED_PER_IP) return false;
+    this.unauthConnectionsByIp.set(ip, current + 1);
+    socket.unauthIp = ip;
+    socket.unauthSlotHeld = true;
+    return true;
+  },
+
+  /**
+   * 归还未认证连接名额（幂等：认证成功与断开各调一次，第二次是 no-op）。
+   * @param {import('socket.io').Socket} socket
+   */
+  _releaseUnauthenticatedSlot(socket) {
+    if (!socket?.unauthSlotHeld) return;
+    socket.unauthSlotHeld = false;
+    const ip = socket.unauthIp;
+    const current = this.unauthConnectionsByIp.get(ip) || 0;
+    if (current <= 1) this.unauthConnectionsByIp.delete(ip);
+    else this.unauthConnectionsByIp.set(ip, current - 1);
+  },
+
+  /**
+   * 连接准入：进程总连接上限 + 未认证连接的按来源 IP 配额（#9）。
+   * 返回 false 时调用方应立即 return（本方法已通知并断开该连接）。
+   *
+   * @param {import('socket.io').Socket} socket
+   * @returns {boolean}
+   */
+  _admitConnection(socket) {
+    // 使用实际 TCP 连接数而非 clients Map 大小：connection 回调触发时
+    // io.sockets.sockets.size 已计入当前这条新连接，故用「>」判断
+    // （含自身恰好等于上限时放行），确保实际允许的最大并发恰为 MAX_CONNECTIONS_PER_PROCESS
+    const currentConnections = this.io.sockets.sockets.size;
+    if (currentConnections > MAX_CONNECTIONS_PER_PROCESS) {
+      logger.warn(
+        `WebSocket 连接数达到上限 ${MAX_CONNECTIONS_PER_PROCESS}，拒绝新连接: ${socket.id}`
+      );
+      socket.emit('error', { message: '连接数已满，请稍后重试' });
+      socket.disconnect(true);
+      return false;
+    }
+
+    // #9：未认证连接的按来源 IP 配额。必须早于认证流程——本闸挡的正是
+    // "大量尚未认证的连接"；认证成功后名额由 authenticateSocket 释放，
+    // 因此正常用户（NAT 后的多设备/多标签页）不受累计登录次数影响。
+    const handshakeIp = resolveHandshakeIPForSecurityDecision(
+      socket.handshake,
+      resolveTrustProxyHops()
+    );
+    if (this._acquireUnauthenticatedSlot(socket, handshakeIp)) return true;
+
+    logger.warn(`WebSocket 未认证连接数超过单 IP 上限 ${MAX_UNAUTHENTICATED_PER_IP}，拒绝新连接`, {
+      socketId: socket.id,
+      ip: handshakeIp,
+    });
+    socket.emit('error', { message: '连接数已满，请稍后重试' });
+    socket.disconnect(true);
+    return false;
+  },
+
   setupEventHandlers() {
     this.io.on('connection', (socket) => {
-      // 连接数上限检查：使用实际 TCP 连接数而非 clients Map 大小。
-      // 注意 connection 回调触发时 io.sockets.sockets.size 已计入当前这条新连接，
-      // 故用「>」判断（含自身恰好等于上限时放行），确保实际允许的最大并发恰为 MAX_CONNECTIONS_PER_PROCESS
-      const currentConnections = this.io.sockets.sockets.size;
-      if (currentConnections > MAX_CONNECTIONS_PER_PROCESS) {
-        logger.warn(
-          `WebSocket 连接数达到上限 ${MAX_CONNECTIONS_PER_PROCESS}，拒绝新连接: ${socket.id}`
-        );
-        socket.emit('error', { message: '连接数已满，请稍后重试' });
-        socket.disconnect(true);
-        return;
-      }
+      if (!this._admitConnection(socket)) return;
+
+      // 入站事件限流（P1）：挂 socket.use —— 所有客户端→服务端事件的唯一必经点。
+      // 必须在注册任何 socket.on 之前装好：晚装的那几个事件在装配窗口内不受约束，
+      // 而 join-room 正是要挡的那一个（每条事件背后一次库查询）。
+      installInboundThrottle(socket);
 
       // 立即注册到 clients Map（用于后续统计和限制检查）
       this.clients.set(socket.id, {
@@ -240,6 +311,8 @@ const methods = {
       socket.on('disconnect', (reason) => {
         logger.debug(`Client disconnected: ${socket.id}, reason: ${reason}`);
         clearTimeout(authTimer);
+        // 未认证就断开的连接要归还 IP 配额（认证成功时已提前释放，释放是幂等的）
+        this._releaseUnauthenticatedSlot(socket);
         this.clients.delete(socket.id);
 
         // 清理用户连接映射

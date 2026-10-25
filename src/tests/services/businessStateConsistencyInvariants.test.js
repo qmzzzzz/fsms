@@ -335,17 +335,8 @@ describe('批次B 业务规则加固回归', () => {
     });
 
     test('单字段属主保持原有等值语义（不被数组改造带偏）', () => {
-      // 用 inspection（assignedTo，至今是单字段）而不是 alarm：alarm 的 ownerField 已从
-      // 'reporter.userId' 扩成 ['reporter.userId','handler']（被派单的人也该在列表里看到，
-      // 见 constants/dataScopeFields.js:24-33），再拿它断"等值语义"就是把实现变更当回归。
+      // user 的 ownerField 仍是标量；设备/报警/巡检都已扩成双属主数组。
       // 本例要钉的是真命题：**声明成标量的资源，范围条件必须还是等值，不多包一层 $or**。
-      expect(
-        buildDataScopeFilter(
-          { type: 'self', userId: 'u1' },
-          DATA_SCOPE_FIELDS.inspection.ownerField,
-          DATA_SCOPE_FIELDS.inspection.departmentField
-        )
-      ).toEqual({ assignedTo: 'u1' });
       expect(
         buildDataScopeFilter(
           { type: 'self', userId: 'u1' },
@@ -353,6 +344,16 @@ describe('批次B 业务规则加固回归', () => {
           DATA_SCOPE_FIELDS.user.departmentField
         )
       ).toEqual({ createdBy: 'u1' });
+    });
+
+    test('inspection 属主是两臂 $or：执行人与创建人都可见（与 alarm 同口径）', () => {
+      expect(
+        buildDataScopeFilter(
+          { type: 'self', userId: 'u1' },
+          DATA_SCOPE_FIELDS.inspection.ownerField,
+          DATA_SCOPE_FIELDS.inspection.departmentField
+        )
+      ).toEqual({ $or: [{ assignedTo: 'u1' }, { createdBy: 'u1' }] });
     });
 
     test('alarm 属主是两臂 $or：上报人与处理人都可见（口径扩展，勿改回单臂）', () => {

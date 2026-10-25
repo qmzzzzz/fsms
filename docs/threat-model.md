@@ -24,7 +24,7 @@
 
 - 口令登录：bcrypt + 登录限流 + 失败锁定（`account_temp_locked`）+ MFA 全链路
   （enroll/challenge/recovery-code，`services/mfaService.js`）；
-- 会话：access 15min / refresh 7d 双密钥（`validate.js` 强制两钥不同），
+- 会话：access 2h（`JWT_EXPIRE` 默认值）/ refresh 7d 双密钥（`validate.js` 强制两钥不同），
   tokenVersion 全局吊销、设备级会话吊销（sid）；
 - 冒充管理员：超管角色唯一性由 `utils/superAdmin.js` 强制（克隆角色被拒）。
 - 残余：凭据在别处泄露（转 3.4 应急）。
@@ -73,12 +73,16 @@
 
 - lockfile 钉版 + `npm audit` 硬门禁 + dependency-review + CodeQL + gitleaks；
 - SBOM（CycloneDX）随构建产出、镜像 cosign keyless 签名 + SLSA provenance；
-- 安装脚本登记门禁（`scripts/check-prod-install-scripts.js`，判据取 `package-lock.json`）：
+- 安装脚本登记门禁（`scripts/check-prod-install-scripts.js`，判据取**两份** lockfile）：
   生产树（非 dev 条目，如 `@scarf/scarf` 经 swagger-ui-dist 传递引入）零容忍、
-  dev 树（如 `mongodb-memory-server` 预下载 mongod）逐个评审登记；两档均在 CI 硬门禁；
+  dev 树（如 `mongodb-memory-server` 预下载 mongod）逐个评审登记，登记键为
+  `name@version + integrity`（同名包的未来版本不会自动豁免）；两档均在 CI 硬门禁，
+  且位于 **任何 `npm ci` 之前**（`dependency-policy` 作业）；CI 安装一律 `--ignore-scripts`，
+  mongod 改由 `deployment/mongod-artifacts.json` 的 SHA-256 锚预置；
 - `save-exact=true`（`.npmrc`）从源头杜绝 caret 漂移；
 - **lockfile 完整性锚**（`scripts/check-lockfile-integrity.js` + `deployment/lockfile-anchor.json`）：
-  把「上次人工拍板时锁文件长什么样」固化成 semantic 哈希写进版本库，任何改动必在 diff 现形。
+  把「上次人工拍板时锁文件长什么样」固化成 semantic 哈希写进版本库，任何改动必在 diff 现形；
+  与安装脚本登记同属 `dependency-policy` 作业（安装前判定）；
   **与上面的 SBOM 互补而非替代**——SBOM/provenance 是**构建时产出**，描述「这次构建用了什么、
   来自哪里」，但不比对「与上次是否一致」：一个夹带改 `integrity` 字段的 PR 会被 SBOM
   忠实记录、被 `provenance` 证明「来自这次构建」，**没有任何一环能发现「它变了」**。

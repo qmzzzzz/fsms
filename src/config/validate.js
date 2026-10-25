@@ -2,6 +2,9 @@
 // 本文件只把它的结论接到启动闸上。依赖方向 config → utils（trustedProxies 依赖
 // utils/ipUtils 的 CIDR 原语），与 config/swagger.js 同向，不构成环。
 const trustedProxies = require('./trustedProxies');
+// 部署凭据强度 / CORS 来源 / 告警 webhook 配置三组启动闸（2026-10-24 审计），
+// 判据与取值理由见该文件头注释；独立成模块以避开本文件的体积棘轮。
+const deploymentGuards = require('./deploymentCredentialGuards');
 
 // 弱密钥黑名单：生产环境禁止使用这些默认值。
 // 加入 '<CHANGE_ME>' —— .env.example 的模板占位符
@@ -260,8 +263,10 @@ function validateDocsCredentials(errors) {
       'ENABLE_API_DOCS=true 时必须同时配置 DOCS_USERNAME 与 DOCS_PASSWORD：' +
         '否则 API 文档将按 fail-closed 拒绝访问（配置错误应在启动期暴露，而非运行期静默失效）'
     );
-  } else if (docsPass.length < 16) {
-    errors.push('DOCS_PASSWORD 至少 16 字符（API 文档暴露全部接口契约与权限编码，需强口令）');
+  } else if (docsPass.length < 32 || isWeakSecret(docsPass)) {
+    errors.push(
+      'DOCS_PASSWORD 必须是至少 32 字符的强随机值（API 文档暴露全部接口契约与权限编码，需强口令）'
+    );
   }
 }
 
@@ -368,6 +373,12 @@ function requiresProductionSemantics() {
 // 新增校验项时，插在正确的位置并同步更新期望数组。
 function validateConfig() {
   if (!requiresProductionSemantics()) {
+    // 2026-10-24 审计：声明了生产语义却落在开发家族 ⇒ 拒绝启动（判据在 guards 模块）
+    const envMismatch = deploymentGuards.productionSemanticsMismatch();
+    if (envMismatch) {
+      reportConfigErrors([envMismatch]);
+      return;
+    }
     // §14.20.3「最小改动档」（预授权）：`NODE_ENV` **真正未设置**（undefined）时
     // normalizeNodeEnv() 归一为 development ⇒ 整套生产硬闸（弱密钥/ALLOWED_HOSTS/
     // REDIS_URL/TLS）静默跳过、零日志、零退出码，而它恰是最常见的误配
@@ -400,6 +411,9 @@ function validateConfig() {
   }
 
   collectSecretErrors(errors);
+  // 运维凭据强度（Redis / metrics / 告警 webhook / 日志外发）与 webhook 配置完整性：
+  // 原先只有"有没有"的判据，弱口令与占位符在启动期不可区分。
+  deploymentGuards.collectRuntimeCredentialGuards(errors);
   collectConnectionErrors(errors);
   collectAllowedHostsErrors(errors);
   // API 文档凭据校验（抽为独立函数，避免本函数体积超标——
@@ -478,12 +492,8 @@ function collectConnectionErrors(errors) {
   // Mongo/Redis 的 host 侧判据（含既有的 localhost 拒绝）收口在 transportSecurity
   require('./transportSecurity').collectTransportErrors(errors);
 
-  if (!process.env.CORS_ORIGIN) {
-    errors.push('CORS_ORIGIN 必须设置（禁止通配符）');
-  }
-  if ((process.env.CORS_ORIGIN || '').split(',').includes('*')) {
-    errors.push('CORS_ORIGIN 禁止使用通配符');
-  }
+  // CORS 来源逐项解析：缺项 / 通配符 / 非完整来源 / 生产 http 来源
+  deploymentGuards.collectCorsOriginErrors(errors);
 
   const redisUrl = (process.env.REDIS_URL || '').trim();
   if (!redisUrl) {
@@ -531,7 +541,7 @@ function collectTrustProxyErrors(errors) {
     errors.push('TRUST_PROXY_HOPS 必须设置（反向代理层数，用于正确获取客户端真实 IP）');
   } else if (!/^\d+$/.test(String(rawHops).trim())) {
     errors.push(
-      `TRUST_PROXY_HOPS 必须是正整数（当前值：${rawHops}），非法值会静默退化为「不信任代理」`
+      `TRUST_PROXY_HOPS 必须是正整数（当前值：${rawHops}），非法值会导致生产启动失败（fail-closed）`
     );
   } else {
     const hops = parseInt(rawHops, 10);
@@ -554,26 +564,25 @@ function collectTrustProxyErrors(errors) {
  * 自起 HTTPS（见 src/index.js 的 HTTPS 分支），证书缺失时直接拒绝启动。
  * 结果是：文档推荐的生产拓扑无法通过生产校验（演练与 CI e2e 一并变红）。
  *
- * 放宽后的判定：以下二者之一成立即可，二者皆无才判致命——
+ * 放宽后的判定（2026-10-24 收紧为显式声明）：以下二者之一成立即可——
  *   a) 进程自启 HTTPS：ENABLE_HTTPS === 'true'（需自备证书）；
- *   b) 声明由前置反代终结：TRUST_PROXY_HOPS 为 1..MAX_TRUST_PROXY_HOPS 的整数
- *      且 ALLOWED_HOSTS 已配置（反代场景的基本前提，两者本身也已是生产必填）。
- * 注意：这是「声明式」判定，应用无从验证反代是否真的终结了 TLS。若日后要收紧为
- * 显式声明，可引入专用开关（如 TLS_TERMINATED_UPSTREAM=true）并在部署清单固化。
+ *   b) 部署方显式声明：TLS_TERMINATED_UPSTREAM === 'true'。
+ * 「反代场景」不能用 TRUST_PROXY_HOPS 合法 + ALLOWED_HOSTS 非空来推断：这两项
+ * 本身已是生产必填，用它们推断等于让 TLS 判据恒真（审计 P2，2026-10-24）。
+ * 注意：这是「声明式」判定，应用无从验证反代是否真的终结了 TLS；但显式声明
+ * 至少把"这份部署声称自己终结了 TLS"变成一条可审计的配置事实，而不是隐式推断。
  */
 function collectTlsErrors(errors) {
   const tlsInProcess = process.env.ENABLE_HTTPS === 'true';
-  const hopsForTls = parseInt(String(process.env.TRUST_PROXY_HOPS || '').trim(), 10);
-  const tlsTerminatedUpstream =
-    Number.isInteger(hopsForTls) &&
-    hopsForTls >= 1 &&
-    hopsForTls <= MAX_TRUST_PROXY_HOPS &&
-    !!(process.env.ALLOWED_HOSTS || '').trim();
+  // 2026-10-24 审计：原判据从 TRUST_PROXY_HOPS + ALLOWED_HOSTS 推断上游终结 TLS，
+  // 而这两项在别处已必填 ⇒ 判据恒真、明文反代照样启动。现改为部署方显式声明。
+  const tlsTerminatedUpstream = process.env.TLS_TERMINATED_UPSTREAM === 'true';
   if (!tlsInProcess && !tlsTerminatedUpstream) {
     errors.push(
-      'TLS 未在任一层终结：需 ENABLE_HTTPS=true（进程自启 HTTPS，需自备证书），' +
-        '或声明由前置反代终结（TRUST_PROXY_HOPS 取 1..5 且配置 ALLOWED_HOSTS）。' +
-        '二者皆无时，登录口令的 ECDH 加密无法抵御主动 MITM'
+      'TLS 终结层未声明：需 ENABLE_HTTPS=true（进程自启 HTTPS，需自备证书），' +
+        '或 TLS_TERMINATED_UPSTREAM=true（声明由前置反代终结 TLS）。' +
+        'TRUST_PROXY_HOPS 与 ALLOWED_HOSTS 已另有必填校验，不能再拿它们推断 TLS——' +
+        '否则只提供明文 HTTP 的反代部署也会通过启动闸，口令的 ECDH 交换可被主动 MITM'
     );
   }
 }
@@ -683,7 +692,7 @@ module.exports = {
 // 这一支是**独立进程入口**，不经过 src/config/index.js:11，于是没人替它把 <NAME>_FILE
 // 回填进 process.env——而容器里密钥**只**以文件挂载（见 ./secrets.js）。
 // 不回填时 collectSecretErrors 读到 undefined，报出四条「JWT/REFRESH/AES/HMAC 必须设置
-// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:259
+// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:297
 // 正是拿这一步的退出码当"轮换后配置自洽"的证据——*_FILE 部署下那条轮换流程做不到收尾。
 //
 // 为什么不在文件顶部 hydrate（本轮真的先写成顶部方案，被自己的测试打回来了）：

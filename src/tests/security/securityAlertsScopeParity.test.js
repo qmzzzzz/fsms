@@ -29,6 +29,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 const stamp = `zsa${Date.now()}`.slice(-12);
 const PASSWORD = 'Zz!pTg7mKq9xLd4nBv2Rf8sY';
@@ -121,6 +122,8 @@ describe('/security/alerts 的数据范围必须与 /security/audit-logs 同源'
         ip: '203.0.113.11',
         success: false,
         timestamp: now,
+        // 供“出口不得回传 body”用例自证：库里确实有 body，响应里必须看不到
+        body: { zzProbe: 'alert-probe-body-A' },
       },
       {
         action: 'zz_alert_probe',
@@ -131,6 +134,7 @@ describe('/security/alerts 的数据范围必须与 /security/audit-logs 同源'
         ip: '203.0.113.12',
         success: false,
         timestamp: now,
+        body: { zzProbe: 'alert-probe-body-B' },
       },
     ]);
 
@@ -152,10 +156,11 @@ describe('/security/alerts 的数据范围必须与 /security/audit-logs 同源'
     }
   });
 
-  const get = (token, path) => request(app).get(path).set('Authorization', `Bearer ${token}`);
+  const get = (token, path) =>
+    request(app).get(path).set('Authorization', `Bearer ${token}`).set(reauthHeaders(token));
   /**
    * 观测面用 username：`getRecentAlerts` 的 select 白名单里没有 userId
-   * （securityAlert.js:525-527），而范围过滤恰恰是按 userId 做的。
+   * （securityAlert.js:477-481），而范围过滤恰恰是按 userId 做的。
    * 断言 username 既能在 HTTP 侧认出"这是哪个部门的人"，也顺带钉住
    * "收口用的字段与出口可见字段不是一回事"这个事实。
    */
@@ -228,5 +233,26 @@ describe('/security/alerts 的数据范围必须与 /security/audit-logs 同源'
     const rootId = (await User.findOne({ username: `zsaroot${stamp}` }))._id.toString();
     const rows = await securityAlert.getRecentAlerts(50, rootId);
     expect(rows.map((r) => String(r.username))).toContain(subjB.username);
+  });
+
+  test('出口投影不得含审计 body：与 /audit-logs 同口径（仅元数据）', async () => {
+    const securityAlert = require('../../services/securityAlert');
+    const rootId = (await User.findOne({ username: `zsaroot${stamp}` }))._id.toString();
+    const rows = await securityAlert.getRecentAlerts(50, rootId);
+    const probeRows = rows.filter((r) => probeNames().includes(String(r.username)));
+    // 前提自证：确实有被测行，否则空数组会让"没有 body"这条断言自动成立
+    expect(probeRows.length).toBeGreaterThan(0);
+    for (const row of probeRows) {
+      expect(row).not.toHaveProperty('body');
+      expect(row).not.toHaveProperty('params');
+      expect(row).not.toHaveProperty('query');
+      expect(row).not.toHaveProperty('hmac');
+    }
+
+    const res = await get(allToken, '/api/security/alerts');
+    expect(res.status).toBe(200);
+    for (const row of res.body?.data?.data || []) {
+      expect(row).not.toHaveProperty('body');
+    }
   });
 });

@@ -10,6 +10,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 describe('安全管理深覆盖（批次 C）', () => {
   let app;
@@ -130,7 +131,9 @@ describe('安全管理深覆盖（批次 C）', () => {
   test('统计/概览/告警/个人日志', async () => {
     expect((await authed().get('/api/security/stats')).status).toBe(200);
     expect((await authed().get('/api/security/overview')).status).toBe(200);
-    expect((await authed().get('/api/security/alerts')).status).toBe(200);
+    expect((await authed().get('/api/security/alerts').set(reauthHeaders(superToken))).status).toBe(
+      200
+    );
     expect((await authed().get('/api/security/my-logs?limit=10')).status).toBe(200);
   });
 
@@ -302,15 +305,20 @@ describe('安全管理深覆盖（批次 C）', () => {
       action: 'admin_reset_mfa',
       targetUserId: victimId,
     });
-    const noMfa = await authed().put(`/api/security/users/${lowUserId}/mfa/reset`);
+    const noMfa = await authed()
+      .put(`/api/security/users/${lowUserId}/mfa/reset`)
+      .send({ currentPassword: PASSWORD });
     expect(noMfa.status).toBe(400);
 
     const selfReset = await request(app)
       .put(`/api/security/users/${superUserId}/mfa/reset`)
-      .set('Authorization', `Bearer ${superToken}`);
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ currentPassword: PASSWORD });
     expect(selfReset.status).toBe(400);
 
-    const ok = await authed().put(`/api/security/users/${victimId}/mfa/reset`);
+    const ok = await authed()
+      .put(`/api/security/users/${victimId}/mfa/reset`)
+      .send({ currentPassword: PASSWORD });
     expect(ok.status).toBe(200);
     expect(ok.body.data.mfaEnabled).toBe(false);
     // 重置 MFA 必须真的落一条 admin_reset_mfa 审计（唯一留痕）
@@ -321,7 +329,8 @@ describe('安全管理深覆盖（批次 C）', () => {
     const superTarget = await User.findOne({ username: `sdsuper${stamp}` });
     const selfResetAgain = await request(app)
       .put(`/api/security/users/${superTarget._id}/mfa/reset`)
-      .set('Authorization', `Bearer ${superToken}`);
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ currentPassword: PASSWORD });
     // 自身不走管理接口重置（应在 MFA 状态检查前被 400 拦下）
     expect(selfResetAgain.status).toBe(400);
 
@@ -335,7 +344,8 @@ describe('安全管理深覆盖（批次 C）', () => {
     });
     const resetSuper2 = await request(app)
       .put(`/api/security/users/${super2._id}/mfa/reset`)
-      .set('Authorization', `Bearer ${superToken}`);
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ currentPassword: PASSWORD });
     expect(resetSuper2.status).toBe(403);
   });
 
@@ -408,13 +418,19 @@ describe('安全管理深覆盖（批次 C）', () => {
   });
 
   test('审计日志：查询（含非法枚举 400）/验证/导出 CSV', async () => {
+    await authed()
+      .get('/api/security/audit-logs?category=user&page=1&limit=10')
+      .set(reauthHeaders(superToken))
+      .expect(200);
     expect(
-      (await authed().get('/api/security/audit-logs?category=user&page=1&limit=10')).status
-    ).toBe(200);
-    expect((await authed().get('/api/security/audit-logs?category=bogus')).status).toBe(400);
+      (await authed().get('/api/security/audit-logs?category=bogus').set(reauthHeaders(superToken)))
+        .status
+    ).toBe(400);
     expect((await authed().get('/api/security/audit-logs/verify?limit=50')).status).toBe(200);
 
-    const csv = await authed().get('/api/security/audit-logs/export?limit=50');
+    const csv = await authed()
+      .get('/api/security/audit-logs/export?limit=50')
+      .set(reauthHeaders(superToken));
     expect(csv.status).toBe(200);
     expect(csv.headers['content-type']).toContain('text/csv');
   });

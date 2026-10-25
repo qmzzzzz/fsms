@@ -190,6 +190,7 @@ describe('审计 action 白名单对账', () => {
       'src/services/auditOutbox.js<recordSensitiveActionDurably>:forward-arg',
       'src/services/auditOutbox.js<spool>:forward-arg',
       'src/services/ipListService.js<recordPrivilegeEscalation>:forward-arg',
+      'src/services/mfaService.js<recordMfaFailureAudit>:forward-arg',
     ]);
   });
 

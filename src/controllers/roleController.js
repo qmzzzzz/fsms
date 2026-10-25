@@ -8,9 +8,11 @@ const { safeFieldErrors } = require('../utils/validationRules');
 const ApiResponse = require('../utils/apiResponse');
 const { getOperatorMaxLevel, matchesPermissionCodes } = require('../utils/permissionHelper');
 const { RESERVED_WILDCARD_PERMISSION } = require('../utils/superAdmin');
+const { RESERVED_BUILTIN_ROLE_CODES } = require('../constants/permission');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { escapeRegExp, normalizePagination, uniqueIdStrings } = require('../utils/helpers');
+const { normalizePagination, uniqueIdStrings } = require('../utils/helpers');
+const searchPatterns = require('../utils/searchPatterns');
 const roleService = require('../services/roleService');
 // 角色定义变更（status / permissions / 删除）会改变其持有者的权限解析
 // 结果，而 userPermissionService 的进程内 TTL 缓存保存的正是解析结果。
@@ -27,6 +29,7 @@ const {
   guardBuiltInNameOrLevel,
   guardRoleStatusValue,
   guardRoleLevelTarget,
+  guardRoleReactivationPermissions,
   applyRoleEditableFields,
 } = require('./roleGuards');
 
@@ -41,11 +44,13 @@ const getRoles = asyncHandler(async (req, res) => {
   const { page = 1, limit = 10, status, search } = req.query;
   const query = {};
   if (status) query.status = status;
-  if (search) {
-    const escapedSearch = escapeRegExp(search);
+  const searchTerm = searchPatterns.normalizeSearchTerm(search);
+  if (searchTerm) {
+    // code 入库即大写（schema uppercase:true）⇒ 搜索词同步大写并锚定前缀；
+    // name 是自由文本，保持子串匹配。
     query.$or = [
-      { name: new RegExp(escapedSearch, 'i') },
-      { code: new RegExp(escapedSearch, 'i') },
+      { name: searchPatterns.substringPattern(searchTerm) },
+      { code: searchPatterns.upperCodePrefixPattern(searchTerm) },
     ];
   }
 
@@ -97,6 +102,11 @@ const createRole = asyncHandler(async (req, res) => {
   }
 
   const { name, code, description, level, permissions } = req.body;
+  // 保留编码先于查重：ADMIN / USER 未播种，查重放行会把它们铸成
+  // 不可删、名称/层级/状态冻结的内置角色（models/Role.js 的 isBuiltIn 判据）。
+  if (RESERVED_BUILTIN_ROLE_CODES.includes(String(code).trim().toUpperCase())) {
+    return ApiResponse.codeError(res, 'ROLE_CODE_RESERVED');
+  }
   const existing = await roleService.findRoleByCode(code);
   if (existing) {
     return ApiResponse.codeError(res, 'ROLE_CODE_TAKEN');
@@ -114,7 +124,10 @@ const createRole = asyncHandler(async (req, res) => {
   // 重复 ID 不算非法）；落库也用这份去重结果，避免"校验看 A、写入看 B"。
   const uniquePermIds = uniqueIdStrings(permissions);
   if (uniquePermIds.length > 0) {
-    const validPerms = await roleService.findPermissionsByIds(uniquePermIds);
+    // L-05：停用权限不得被挂到新角色上
+    const validPerms = await roleService.findPermissionsByIds(uniquePermIds, 'code', {
+      activeOnly: true,
+    });
 
     // 存在性校验：查到的条数必须等于提交的条数。
     //
@@ -162,6 +175,20 @@ const createRole = asyncHandler(async (req, res) => {
     level,
     permissions: uniquePermIds,
   });
+
+  // L-13：建角色落库后复验权限仍存在且生效。删除权限的请求采用「先删后查引用」，
+  // 本请求若在删除前通过校验、删除后才落库，这里会看到缺失并撤销刚建的角色，
+  // 而不是留下一条指向已删权限的悬空引用。
+  if (uniquePermIds.length > 0) {
+    const stillActive = await roleService.findPermissionsByIds(uniquePermIds, '_id', {
+      activeOnly: true,
+    });
+    if (stillActive.length !== uniquePermIds.length) {
+      await roleService.deleteRole(role._id);
+      return ApiResponse.codeError(res, 'PERMISSION_ID_INVALID');
+    }
+  }
+
   const createdRole = await roleService.findPopulatedRole(role._id);
   // 新建角色尚无持有者，逻辑上不影响任何已缓存用户；此处仍统一失效，
   // 理由见文件头——「角色写操作必失效」是一条不需要逐次推理的规则，
@@ -212,6 +239,9 @@ const updateRole = asyncHandler(async (req, res) => {
   if (guardBuiltInNameOrLevel({ res, role, name, level })) return;
   if (guardRoleStatusValue({ res, role, status })) return;
   if (await guardRoleLevelTarget({ req, res, role, level, authority })) return;
+  // 恢复停用角色会把角色上的全部权限重新发给持有者，判据与权限分配接口同一条：
+  // 不得「授予」自己没有的权限（applyRoleEditableFields 会改写 status，故在此之前）
+  if (await guardRoleReactivationPermissions({ req, res, role, status })) return;
   // applyRoleEditableFields 会就地改写 role.status，故变更前的值必须在此取快照
   const previousStatus = role.status;
   if (applyRoleEditableFields({ res, role, name, description, level, status })) return;
@@ -273,15 +303,22 @@ const deleteRole = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'BUILTIN_ROLE_NOT_DELETABLE');
   }
 
-  const userCount = await roleService.countUsersWithRole(role._id);
-  if (userCount > 0) {
+  // L-03：先原子停用再统计，堵住「统计为 0 → 有人被授予该角色 → 删除」的窗口。
+  // 编排细节见 roleService.deleteRoleIfUnused。
+  const outcome = await roleService.deleteRoleIfUnused(role._id);
+  if (outcome.status === 'not_found') {
+    return ApiResponse.codeError(res, 'ROLE_NOT_FOUND');
+  }
+  if (outcome.status === 'in_use') {
     return ApiResponse.codeError(res, 'ROLE_IN_USE', {
-      message: `有 ${userCount} 个用户正在使用该角色，请先移除这些用户的角色`,
-      params: { userCount: userCount },
+      message: `有 ${outcome.userCount} 个用户正在使用该角色，请先移除这些用户的角色`,
+      params: { userCount: outcome.userCount },
     });
   }
-
-  await roleService.deleteRole(role._id);
+  if (outcome.status === 'conflict') {
+    logger.warn('角色删除时状态已被并发修改，保留该角色', { role: role.name });
+    return ApiResponse.codeError(res, 'ROLE_STATE_CONFLICT');
+  }
 
   // 删除前已校验无用户持有该角色（ROLE_IN_USE 拦截），
   // 此处为防御性调用，理由同 createRole

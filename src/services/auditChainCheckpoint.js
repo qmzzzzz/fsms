@@ -17,6 +17,9 @@
  *   · 检查点文件默认落在本机 logs/；**能同时改 Mongo 与该文件的人**可以重写两者。
  *     真正的外部锚定需要把文件（或每行 signature/tailDigest）周期性复制到
  *     WORM/对象存储/时间戳服务；本模块只负责产出可验证的锚点，不做传输。
+ *     ⇒ 传输由 `auditAnchorSink` 负责，核验侧的「双向比对」由本模块的
+ *     `compareAnchors` 负责（2026-10-24 补）。两者缺一，上面的攻击路径（改链 →
+ *     删检查点文件 → 重新 create）就仍然成立且**不需要 HMAC_SECRET**。
  *   · 检查点之间的窗口内插入分支，只有落在下一次检查点计数差内的部分能被发现；
  *     检查点越频繁，可检出窗口越小。
  *   · 检查点**之后**新增又删掉的记录无法被这一条锚点发现（链尾仍等于锚点）。
@@ -212,14 +215,131 @@ async function checkTail(AuditLog, last, errors) {
 }
 
 /**
+ * 本地检查点集合与**外部锚点副本**的双向比对（2026-10-24，P1 外锚）。
+ *
+ * 为什么必须有这一项：上面所有检查都只看「本地文件 + 当前库」这一对，而这两者
+ * 同属一个主权边界。攻击者改完链、删掉检查点文件、再跑一次 `create`，就能为被
+ * 篡改后的链尾重新签出一个**完全自洽**的检查点集合——`signature_invalid` /
+ * `count_mismatch` / `tail_rolled_back` 一个都不会触发，因为文件里已经没有旧锚点
+ * 了。这条路径**不需要 HMAC_SECRET**（签名由服务自己算）。
+ *
+ * 只有把旧锚点留在受保护数据之外，才能看见「本地少了什么」：
+ *   · 外部有、本地无 ⇒ anchor_missing_local：文件被删除 / 截断 / 整体重写。
+ *   · 外部签名验不过 ⇒ anchor_signature_invalid：外部副本本身被动过，不能当锚点，
+ *     也不能因为「验不过所以跳过」就静默放过（跳过等于给篡改留静默位）。
+ *   · 本地有、外部无 ⇒ 只记 `pending`，**不判错**：正常情况就是「刚 create、还没
+ *     ship」。判红会让每个尚未配置 ship 的部署常红，从而把这条告警训练成噪音。
+ *   · 外部为空 ⇒ no_external_anchors：空存储证明不了任何事，不能读成「无失配」。
+ *
+ * 比对用 `signature` 作为锚点身份（它覆盖 version/createdAt/headId/headHash/
+ * headHmac/recordCount 全部字段），因此不依赖外部存储的行序或索引——外部存储被
+ * 重排、被并行 ship 追加出重复行，都不影响判定。
+ *
+ * @param {{localEntries: Array<{line:number, record:object}>, externalAnchors: object[], secret?: string}} input
+ * @returns {{errors: Array<{line:number|null, type:string, message:string}>, pending: object[], externalValid: object[]}}
+ */
+function compareAnchors({ localEntries = [], externalAnchors = [], secret } = {}) {
+  const hmacSecret = hmacSecretOf(secret);
+  const errors = [];
+  const pending = [];
+  const externalValid = [];
+
+  if (!Array.isArray(externalAnchors) || externalAnchors.length === 0) {
+    return {
+      errors: [
+        {
+          line: null,
+          type: 'no_external_anchors',
+          message: '锚点存储为空：外锚比对无从进行（空存储不能当作「无失配」）',
+        },
+      ],
+      pending,
+      externalValid,
+    };
+  }
+
+  // 本地先自筛一遍：验不过的本地行已由 checkSignature 报 signature_invalid，
+  // 这里不再重复计一次，否则同一处篡改会出现两条错误。
+  const localSignatures = new Set();
+  const localBadLines = new Set();
+  for (const { line, record } of localEntries) {
+    if (
+      record &&
+      record.signature === signCheckpoint(record, hmacSecret) &&
+      record.version === CHECKPOINT_VERSION
+    ) {
+      localSignatures.add(record.signature);
+    } else {
+      localBadLines.add(line);
+    }
+  }
+
+  const externalSignatures = new Set();
+  externalAnchors.forEach((record, idx) => {
+    const position = idx + 1;
+    if (!record || typeof record !== 'object' || typeof record.signature !== 'string') {
+      errors.push({
+        line: null,
+        type: 'anchor_signature_invalid',
+        message: `外部锚点第 ${position} 条不是可识别的检查点记录`,
+      });
+      return;
+    }
+    if (record.signature !== signCheckpoint(record, hmacSecret)) {
+      errors.push({
+        line: null,
+        type: 'anchor_signature_invalid',
+        message: `外部锚点第 ${position} 条签名不匹配（外部副本被改写，或 HMAC_SECRET 已轮换）`,
+      });
+      return;
+    }
+    if (record.version !== CHECKPOINT_VERSION) {
+      errors.push({
+        line: null,
+        type: 'anchor_version_unsupported',
+        message: `外部锚点第 ${position} 条版本不支持：${record.version}`,
+      });
+      return;
+    }
+    externalValid.push(record);
+    externalSignatures.add(record.signature);
+    if (!localSignatures.has(record.signature)) {
+      errors.push({
+        line: null,
+        type: 'anchor_missing_local',
+        message:
+          `外部锚点 ${record.headId || '(空链)'}（${record.createdAt}，计数 ${record.recordCount}）` +
+          '在本地检查点文件中缺失 —— 本地检查点被删除、截断或重写（重新锚定）',
+      });
+    }
+  });
+
+  for (const { line, record } of localEntries) {
+    if (localBadLines.has(line)) continue;
+    if (!externalSignatures.has(record.signature)) {
+      pending.push({ line, headId: record.headId, createdAt: record.createdAt });
+    }
+  }
+
+  return { errors, pending, externalValid };
+}
+
+/**
  * 校验全部检查点。
  *
- * @returns {Promise<{ok: boolean, checked: number, errors: Array<{line:number|null,type:string,message:string}>}>}
+ * `externalAnchors` 为 `undefined` 时不比对（向后兼容，输出形状与旧版逐字一致）；
+ * 传入数组（含空数组）才比对——空数组会被判 `no_external_anchors` 而非通过。
+ *
+ * @returns {Promise<{ok: boolean, checked: number, errors: Array<{line:number|null,type:string,message:string}>,
+ *   anchors?: {compared:number, pending:number, externalValid:number}}>}
  */
-async function verifyCheckpoints({ model, filePath, secret } = {}) {
+async function verifyCheckpoints({ model, filePath, secret, externalAnchors } = {}) {
   const hmacSecret = hmacSecretOf(secret);
   const AuditLog = model || require('../models/AuditLog');
   const errors = [];
+  const anchorsCompared = Array.isArray(externalAnchors);
+  let anchorResult = null;
+
   const fail = (type, message) => ({
     ok: false,
     checked: 0,
@@ -233,7 +353,22 @@ async function verifyCheckpoints({ model, filePath, secret } = {}) {
     return fail('file_unreadable', err.message);
   }
   if (!hmacSecret) return fail('hmac_not_configured', '未配置 HMAC_SECRET，无法验证检查点签名');
-  if (entries.length === 0) return fail('no_checkpoints', '没有检查点可验证');
+
+  if (anchorsCompared) {
+    anchorResult = compareAnchors({ localEntries: entries, externalAnchors, secret: hmacSecret });
+    errors.push(...anchorResult.errors);
+  }
+
+  // 本地一条都没有：可能是从没建过检查点，也可能是被删了。
+  // 有外部锚点为证时 compareAnchors 已经逐条报了 anchor_missing_local（每条外部锚点
+  // 都「本地缺失」），这里不再补一条重复的摘要；只有「一条有效外部锚点都没有」时才
+  // 补 no_checkpoints，免得两种完全不同的现场被折叠成同一句。
+  if (entries.length === 0) {
+    if (!anchorResult || anchorResult.externalValid.length === 0) {
+      errors.push({ line: null, type: 'no_checkpoints', message: '没有检查点可验证' });
+    }
+    return assemble(errors, 0);
+  }
 
   let previous = null;
   for (const { line, record } of entries) {
@@ -244,15 +379,31 @@ async function verifyCheckpoints({ model, filePath, secret } = {}) {
   }
   await checkTail(AuditLog, previous && previous.record, errors);
 
-  return { ok: errors.length === 0, checked: entries.length, errors };
+  return assemble(errors, entries.length);
+
+  function assemble(collected, checked) {
+    const out = { ok: collected.length === 0, checked, errors: collected };
+    // 只在真的比对过时才带 anchors 键：旧调用方与旧断言按「无此键」比较，
+    // 无条件加一个 null 会破坏 `toEqual({ok, checked, errors})` 的既有契约。
+    if (anchorResult) {
+      out.anchors = {
+        compared: externalAnchors.length,
+        pending: anchorResult.pending.length,
+        externalValid: anchorResult.externalValid.length,
+      };
+    }
+    return out;
+  }
 }
 
 module.exports = {
   DEFAULT_CHECKPOINT_FILE,
   CHECKPOINT_VERSION,
   canonicalCheckpoint,
+  hmacSecretOf,
   signCheckpoint,
   createCheckpoint,
   readCheckpoints,
+  compareAnchors,
   verifyCheckpoints,
 };

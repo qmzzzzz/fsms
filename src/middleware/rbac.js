@@ -96,7 +96,7 @@ const checkPermission = (requiredPermissions, logic = 'OR') => {
  * 查看他人敏感信息需 system:read；查看本人敏感信息则免鉴权（#9）
  *
  * 背景（评价报告 #9）：/api/security/view-sensitive 原实现一律要求
- * system:read，但控制器查询的是调用者本人数据（controllers/securityController/sensitive.js:69
+ * system:read，但控制器查询的是调用者本人数据（controllers/securityController/sensitive.js:89
  * `User.findById(req.user.userId)`），普通角色（消防员/访客）查看本人
  * 手机号/邮箱也拿不到该权限 → 403。正确口径是：
  *   - 本人查看 → 放行（数据范围即本人，二次验证已由 requireReAuthentication 兜底）
@@ -355,6 +355,54 @@ const isRecordInScope = (dataScope, doc, { ownerField, departmentField, userId }
 };
 
 /**
+ * 与 `isRecordInScope` **逐臂同值**的查询过滤器（用于"列出我范围内的记录"）
+ *
+ * 为什么不能直接用 `buildDataScopeFilter`：两者的 self/department 臂在边界上并不等价。
+ *   · `isRecordInScope` 有一条短路——`type !== 'none'` 时 `doc._id === 本人 userId`
+ *     恒为 true（自己的记录永远在自己范围内）；`buildDataScopeFilter` 没有这条，
+ *     于是 `user` 类型（属主臂是 createdBy）会把自己那条 User 记录筛掉，
+ *     表现为「下拉里找不到自己」而直接提交却能通过核验——假 deny 只让用户
+ *     "选不到"，日志里看不出任何异常。
+ *   · department 档且 `dataScope.department` 为空时，`buildDataScopeFilter` 返回
+ *     `{_id: null}`（全 deny），`isRecordInScope` 仍然放行本人那条记录。
+ *
+ * 消费方是 `GET /api/security/report-targets`（举报对象候选）：候选集必须与
+ * `resolveReportTargetViolation` 的核验判据同值，否则会出现「选得到却提交 403」
+ * 或「能通过却选不到」。改动本函数时必须同步改 `isRecordInScope`（同值关系由
+ * tests/security/reportTargetCandidates.test.js 的对照用例盯着）。
+ *
+ * 缺失判据一律 deny（与同模块其余函数同向）：没有 dataScope、没有 userId、
+ * 或者需要的那条臂缺字段时，只是少一个可匹配分支，绝不退化成 `{}` 全量放行。
+ *
+ * @param {Object} dataScope getDataScope 的返回值
+ * @param {Object} fields { ownerField, departmentField, userId }
+ * @returns {Object} Mongoose 查询条件
+ */
+const buildRecordScopeFilter = (dataScope, { ownerField, departmentField, userId } = {}) => {
+  if (!dataScope) return { _id: null };
+  if (dataScope.type === 'all') return {};
+  // 'none' 必须排在 _id 短路之前：不能因为"是自己的记录"就拿到任何可见集
+  if (dataScope.type === 'none') return { _id: null };
+  if (!userId) return { _id: null };
+
+  const arms = [{ _id: userId }];
+  if (dataScope.type === 'department') {
+    // 精确匹配（非 RegExp），与 buildDataScopeFilter 的防注入口径一致
+    if (departmentField && dataScope.department) {
+      arms.push({ [departmentField]: dataScope.department });
+    }
+  } else if (dataScope.type === 'self') {
+    // 属主臂用**传入的 userId**而非 dataScope.userId：isRecordInScope 就是这么取的，
+    // 换成 dataScope.userId 会在该字段缺失时凭空多出一处 deny。
+    if (ownerField) {
+      const fields = Array.isArray(ownerField) ? ownerField : [ownerField];
+      fields.forEach((f) => arms.push({ [f]: userId }));
+    }
+  }
+  return arms.length === 1 ? arms[0] : { $or: arms };
+};
+
+/**
  * 便捷方法：加载数据范围并校验单条记录是否在范围内
  * 封装了 getDataScope + isRecordInScope 的重复模式，减少控制器样板代码
  *
@@ -507,6 +555,7 @@ module.exports = {
   isDataScopeDenied,
   deniedDataScope,
   isRecordInScope,
+  buildRecordScopeFilter,
   assertRecordInScope,
   isDepartmentValueAllowed,
 };

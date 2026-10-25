@@ -65,7 +65,7 @@ const REQUIRED_PROXY_HEADERS = ['host', 'x-real-ip', 'x-forwarded-for', 'x-forwa
 /** 不要求反代的根路径端点，附理由（出现新条目必须在此登记理由，否则测试红） */
 const NON_PROXIED = {
   '/': 'SPA 静态入口：由 nginx 的 root + try_files 直接服务，不进后端',
-  '/readyz': '就绪探针：容器/编排健康检查直连 3000，刻意不对公网暴露',
+  '/readyz': '就绪探针：容器/编排健康检查直连 3000；对外由 `= /readyz` 显式 404 拒绝',
   '/api-docs': 'Swagger UI：生产默认关闭（ENABLE_API_DOCS 门禁），反代等于对外常开文档',
   '/api-docs.json': '同上，OpenAPI 文档体',
 };
@@ -261,6 +261,27 @@ describe('deployment/nginx.conf.example 反代契约', () => {
   test('豁免反代的端点必须真实存在于路由表（防例外清单腐化）', () => {
     const existing = new Set(rootBackendPaths());
     for (const p of Object.keys(NON_PROXIED)) expect(existing.has(p)).toBe(true);
+  });
+
+  test('/readyz 必须被显式 404 拒绝，不得退化成 200 的 SPA HTML（假绿探针）', () => {
+    // 只把 /readyz 登记进 NON_PROXIED 是**不够**的：那条豁免只表达"不需要反代"，
+    // 而 location / 的 try_files 会把它退成 200 + index.html。实测后果不是"少了个
+    // 端点"，而是外部拨测/云监控配了这个地址后**永远绿**——它探的是 nginx 能否
+    // 返回 HTML，不是 MongoDB 可不可达。所以配置里必须有一条显式拒绝的 location，
+    // 光有注释不算（本文件此前正是"注释声称不对外、配置上毫无指令"的形态）。
+    const loc = matchLocation('/readyz', locations);
+    expect(loc).toBeDefined();
+    expect(loc.modifier).toBe('='); // 精确匹配：`/readyz/` 之类变体不落入本块
+    expect(loc.pattern).toBe('/readyz');
+    expect(loc.proxied).toBe(false); // 绝不能反代到后端（那才是真的对公网暴露）
+    expect(/^[ \t]*return[ \t]+404[ \t]*;/m.test(loc.body)).toBe(true);
+
+    // 可证伪：抽掉该块后同一路径必须落回 SPA 兜底——证明上面的断言不是空跑，
+    // 也证明"没有这条 location 时确实是 200 HTML"这个前提成立。
+    const without = locations.filter((l) => l.pattern !== '/readyz');
+    const fallback = matchLocation('/readyz', without);
+    expect(fallback.pattern).toBe('/');
+    expect(fallback.proxied).toBe(false);
   });
 
   test('80→443 跳转目标为字面域名，不得使用请求可控的 $host', () => {
@@ -512,6 +533,31 @@ describe('静态直出 CSP（finding #6）与边缘资源闸/443 兜底（findin
     expect(findEdgeGateGaps(text)).toEqual([]);
     // 后端对齐前提自证：client_max_body_size 1m 对齐的是这行 body parser 限额
     expect(read('src/app.js')).toMatch(/express\.json\(\{ limit: '1mb' \}\)/);
+  });
+
+  test('访问日志不得记录查询串（2026-10-24 审计：一次性凭据会随 URL 落盘）', () => {
+    // nginx 默认 combined 含 $request（完整 URI，含 ?args）。重置令牌/验证码等
+    // 一次性凭据常在查询串里，落进磁盘日志即可被读日志的人重放。
+    const m = /log_format\s+(\w+)\s+([\s\S]*?);/.exec(code);
+    // 前提自证：必须有自定义格式，否则走的是 nginx 内置 combined（本用例的判据对象不存在）
+    expect(m).toBeTruthy();
+    const [, name, format] = m;
+    expect(format).toContain('$request_method');
+    expect(format).toContain('$uri');
+    expect(format).toContain('$server_protocol');
+    // $request 与 $args 都会把查询串写进日志
+    expect(format).not.toContain('$request ');
+    expect(format).not.toContain('$request"');
+    expect(format).not.toContain('$args');
+    // 显式 access_log 指向该格式（定义了却不用＝默认格式照旧）
+    expect(code).toMatch(new RegExp(`access_log\\s+\\S+\\s+${name}\\s*;`));
+
+    // 可证伪：把 $uri 换回 $request 必须被上面的判据抓住
+    const mutated = text.replace('"$request_method $uri $server_protocol"', '"$request"');
+    expect(mutated).not.toBe(text);
+    const mutatedFormat = /log_format\s+\w+\s+([\s\S]*?);/.exec(codeView(mutated))[1];
+    expect(mutatedFormat).toContain('$request');
+    expect(mutatedFormat).not.toContain('$uri');
   });
 
   test('limit_req 只落在 /api 两条入口（nodelay + 429），socket.io 刻意豁免（#10）', () => {

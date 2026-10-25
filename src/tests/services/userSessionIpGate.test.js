@@ -18,7 +18,7 @@ const mongoose = require('mongoose');
  * 【修法与备选方案的分野】用 schema 的 `set` 而不是 `runValidators: true`：
  * 实测后者会让整条 `$set` 因 ValidationError 被拒——连带 `lastSeenAt` 一起不写，
  * 会话活跃度从此停摆；为一个观测字段做 fail-closed 自伤，正是 createSession
- * 注释（sessionService.js:271-274）已经避过的坑。`set` 在 update 的 `$set` 上同样执行
+ * 注释（sessionService.js:272-274）已经避过的坑。`set` 在 update 的 `$set` 上同样执行
  * （实测），一处管住 create 与 touch 两条路径。
  */
 
@@ -171,7 +171,10 @@ describe('UserSession 的 ip / lastIp 闸（请求方可控文本的存储边界
       .replace(/^\s*\/\/.*$/gm, '');
     const body = src.slice(src.indexOf('const touchSession'), src.indexOf('const revokeSession'));
     expect(body.includes('runValidators')).toBe(false);
-    // 前提自证：这段里确实有那条 $set，否则上面的断言会因为"切片切错"而假绿
-    expect(/lastIp:\s*req\?\.ip/.test(body)).toBe(true);
+    // 前提自证：这段里确实有那条 $set，否则上面的断言会因为"切片切错"而假绿。
+    // 取值必须是安全裁决地址（sessionClientIp），不得回退 raw req.ip——后者在
+    // trust proxy 下可由请求方自写，会话 IP 是设备识别维度。
+    expect(/lastIp:\s*sessionClientIp\(req\)/.test(body)).toBe(true);
+    expect(/req\?\.ip/.test(body)).toBe(false);
   });
 });

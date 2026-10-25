@@ -4,10 +4,10 @@
  * 凭证门与账户可校验：谁在铸造/校验凭证，它有没有复查账户状态（机器差集 + 双向登记）
  *
  * 起因（第 23 轮主动审计线）：全仓有 14 个"铸造或校验凭证"的调用点，分布在 7 个文件里。
- * 其中 `services/authService/token.js` 的 `refreshSession` 校验了 `status !== 'active'`，
+ * 其中 `services/authService/token.js` 的 `refreshSession` 当时校验了 `status !== 'active'`，
  * 却**没有**校验 `lockUntil`；而另外三扇门（`loginUser`、`middleware/auth.js` 的
- * `assertAccountUsable`、websocket 票据）都校验了。这个不对称本身不是可利用漏洞
- * （refresh 换出来的 access 令牌仍会被 `assertAccountUsable` 拒掉），真正的问题是：
+ * `assertAccountUsable`、websocket 票据）都校验了。该不对称已补齐（refreshSession 与两个
+ * tokenService 探测门现在都查 lockUntil），真正的问题是：
  * **没有任何东西把"门的集合"与"每扇门该做哪些复查"钉在一起**，所以它到底是决策还是疏漏，
  * 只有同时读过四个函数的人才能回答——而下一扇新门（新的铸造点）出现时，没人会想起来问。
  *
@@ -19,8 +19,8 @@
  *  2. 把"门集合"与"每扇门的复查形状"**双向**钉死：多一扇没登记的门要红，
  *     少一扇（把门改名/搬走而不动台账）也要红；台账里声明的
  *     `{mint, checksStatus, checksLock}` 必须等于代码里实测到的，否则红。
- *     ⇒ 谁给 `refreshSession` 补上 `lockUntil` 检查，本闸立刻红着要求他把豁免条目删掉，
- *     而不是让一条过期豁免永久留在表里（登记即接线）。
+ *     ⇒ 谁给某扇门补上/删掉复查，本闸立刻红着要求台账同步（refreshSession 的
+ *     豁免就是这样删掉的），而不是让一条过期豁免永久留在表里（登记即接线）。
  *  3. 钉住 `assertAccountUsable` 的**判定顺序**：`middleware/auth.js` 的注释写着
  *     "顺序不能颠倒：locked 必须在兜底分支之前，否则锁定账户拿到『已禁用』文案"。
  *     这句是纯文字承诺，今天没有任何用例能因它被违反而变红。本闸把它做成可杀判据。
@@ -98,12 +98,42 @@ const NOT_A_FUNCTION = new Set([
   'var',
 ]);
 
+/**
+ * `start` 起的花括号块是否真的包住了 `target` 行。
+ *
+ * 为什么需要：`enclosingFunction` 只向上找"最近的函数形态行"，而函数体内可以先定义
+ * 一个内联箭头助手（如 `refreshSession` 里的 `const deny = async (...) => {...}`）。
+ * 助手的签名行同样是 `const X = async (...) =>`，会被当成"包住铸造点的函数"，
+ * 于是 generateToken 那一行被归到 `#deny` 名下、凭空多出一扇没有凭据操作的门
+ * （2026-10-25 实测：`services/authService/token.js#deny` + 台账 TypeError）。
+ * 判据必须是"该函数的块真的延伸到这个行"，而不是"它出现在上面"。
+ */
+function spansLine(lines, start, target) {
+  let depth = 0;
+  let seen = false;
+  for (let i = start; i < lines.length; i += 1) {
+    for (const ch of lines[i]) {
+      if (ch === '{') {
+        depth += 1;
+        seen = true;
+      } else if (ch === '}') depth -= 1;
+    }
+    if (seen && depth <= 0) return target <= i;
+  }
+  return false;
+}
+
 /** 向上找包住房第一行的函数名与其起始行 */
 function enclosingFunction(lines, idx) {
   for (let i = idx; i >= 0; i -= 1) {
     for (const re of FN_FORMS) {
       const m = lines[i].match(re);
-      if (m && !NOT_A_FUNCTION.has(m[1]) && !MINT_OR_VERIFY.test(lines[i]))
+      if (
+        m &&
+        !NOT_A_FUNCTION.has(m[1]) &&
+        !MINT_OR_VERIFY.test(lines[i]) &&
+        spansLine(lines, i, idx)
+      )
         return { name: m[1], start: i };
     }
   }
@@ -215,10 +245,10 @@ const LEDGER = {
     checksLock: false,
     lockWhere: 'services/authService/login.js#assertAccountUsable',
     why:
-      '签发原语，实测只有两个调用点：services/authService/session.js:118（registerUser） 与 services/authService/session.js:247（issueLoginSession）。' +
+      '签发原语，实测只有两个调用点：services/authService/session.js:127（registerUser） 与 services/authService/session.js:259（issueLoginSession）。' +
       '登录链的账户复查在 services/authService/login.js:116（loginUser） 委托的 services/authService/login.js:196（assertAccountUsable，lockUntil 判定在 services/authService/login.js:222）' +
       '——注意 loginUser **自己函数体内没有** lockUntil/status（实测），所以委托对象必须写这道关真正落笔的函数；' +
-      '注册链的账户是本次 services/authService/session.js:103（User.create） 新建的文档，lockUntil 不存在。' +
+      '注册链的账户是本次 services/authService/session.js:109（User.create） 新建的文档，lockUntil 不存在。' +
       '注意本闸不做跨函数数据流：若将来把注册改成"允许认领既有账号"，没有用例会自动变红，' +
       '这条豁免要**人工**重登（这是登记式台账的固有盲区，写明以免被当成"闸会提醒我"）',
   },
@@ -227,16 +257,13 @@ const LEDGER = {
     mint: true,
     verify: true,
     checksStatus: true,
-    checksLock: false,
-    lockWhere: null,
-    verdict: 'needs-decision',
+    checksLock: true,
+    lockWhere: 'self',
     why:
-      '【本闸要人看的不对称，实测非推测】刷新门在自己函数体里查了 status（services/authService/token.js:175 ' +
-      "`user.status !== 'active'`）、allowedIPs、passwordChangedAt、tokenVersion 与设备会话，" +
-      '唯独不查 lockUntil ⇒ 临时锁定期间仍可轮换出新一对凭证。' +
-      '今天不构成提权：换出来的 access 令牌一进 authenticate 就被 assertAccountUsable 的 lockUntil 分支拒掉。' +
-      '这里钉的是**现状**而不是"这样才对"。补检查属行为变更（锁定用户的前端会在 10 分钟里连 cookie 都换不动），' +
-      '需 owner 拍板；拍板补上之后请把本条改成 checksLock: true —— 本闸会红着提醒你别忘改台账',
+      '刷新门在自己的函数体里查 status、lockUntil、allowedIPs、passwordChangedAt、tokenVersion 与设备会话。' +
+      'lockUntil 检查在本轮补齐：临时锁定期间 refresh 此前仍能轮换出新一对凭证，' +
+      '换出来的 access 虽会被 authenticate 拒掉，但客户端会陷入"刷新成功却始终 403"的空转；' +
+      '现在直接以 ACCOUNT_LOCKED 拒绝，与 loginUser / authenticate 同口径',
   },
   'services/authService/token.js#revokeOneRefreshToken': {
     role: 'primitive',
@@ -274,31 +301,21 @@ const LEDGER = {
     mint: false,
     verify: true,
     checksStatus: true,
-    checksLock: false,
-    lockWhere: null,
-    verdict: 'needs-decision',
+    checksLock: true,
+    lockWhere: 'self',
     why:
-      '第二个同形不对称（本轮实测才发现，原先我只知道 refresh 这一处）：它查了 ' +
-      "`user.status !== 'active'`（services/tokenService.js:85-86）却不查 lockUntil。" +
-      '调用点本轮已复核（上一条登记里写的"未复核"是当时的状态，现已补齐）：全仓只有 ' +
-      'controllers/authController/session.js:183 一处，属于 GET /api/auth/session 的会话预筛，' +
-      '它把返回值直接当作 `authenticated` 布尔量，不签发/不轮换/不吊销（该端点注释自陈' +
-      '"安全结论以 getMe 为准"）。⇒ 影响面钉死为"锁定账户在该端点被报成已登录，' +
-      '随后 getMe 才 401"，不是凭证可达性放开。要不要在这两个布尔预检里补 lockUntil，' +
-      '与 refreshSession 是同一个口径决定，所以三条一起登记为 needs-decision',
+      '会话状态预筛：本轮补齐 lockUntil 与设备会话状态（有 sid 时必须指向可用会话），' +
+      '与 authenticate 同口径。此前锁定账户在该端点被报成已登录、已踢设备也仍显示在线，' +
+      '要等 getMe 才纠正',
   },
   'services/tokenService.js#isRefreshTokenValid': {
     role: 'entry',
     mint: false,
     verify: true,
     checksStatus: true,
-    checksLock: false,
-    lockWhere: null,
-    verdict: 'needs-decision',
-    why:
-      '同上（:102-103 同一形状）：查 status 不查 lockUntil。调用点实测只有 ' +
-      'controllers/authController/session.js:185 一处（同一端点的 access 失效分支），' +
-      '返回布尔量给"是否已登录"提示',
+    checksLock: true,
+    lockWhere: 'self',
+    why: '同上：补齐 lockUntil、设备会话状态，并拒绝无 sid 的 refresh（该类令牌无法被设备级吊销终止）',
   },
   'services/websocketService/handshake.js#authenticateSocket': {
     role: 'entry',
@@ -361,6 +378,24 @@ describe('凭证门集合与账户复查形状（双向登记 + 判定顺序）'
     ]);
     expect([...synthetic.keys()].sort()).toEqual(['x/history.js#realDoor']);
     expect(synthetic.has('x/history.js#withComment')).toBe(false);
+
+    // 嵌套助手回归：内联箭头助手的签名行不得把真正的铸造点抢走
+    const nested = collectDoors([
+      {
+        name: 'x/nested.js',
+        text: [
+          'async function outer() {',
+          '  const deny = async (outcome) => {',
+          '    return { outcome };',
+          '  };',
+          '  const token = generateToken(user);',
+          '  return deny("OK"), token;',
+          '}',
+        ].join('\n'),
+      },
+    ]);
+    expect([...nested.keys()]).toEqual(['x/nested.js#outer']);
+    expect(nested.get('x/nested.js#outer').mint).toBe(true);
   });
 
   test('门集合双向相等：新增一扇没登记的门要红，把门改名/搬走而不动台账也要红', () => {
@@ -415,7 +450,7 @@ describe('凭证门集合与账户复查形状（双向登记 + 判定顺序）'
     expect(mwBody).not.toMatch(/\bpassword\b/);
   });
 
-  test('裸门名单：实测「自己体内无 lockUntil、也没有委托对象」的 entry 门精确 4 条，且每条必须带 verdict', () => {
+  test('裸门名单：实测「自己体内无 lockUntil、也没有委托对象」的 entry 门精确 1 条（登出豁免）', () => {
     // 用**实测形状**筛，不用台账声明筛（声明由第 3 条用例与实测对齐；这里再走一遍采集器口径）
     const naked = measuredKeys
       .filter((k) => {
@@ -424,27 +459,24 @@ describe('凭证门集合与账户复查形状（双向登记 + 判定顺序）'
         return d.role === 'entry' && m && !m.checksLock && !d.lockWhere;
       })
       .sort();
-    expect(naked).toEqual([
-      'middleware/logoutAuth.js#authenticateForLogout',
-      'services/authService/token.js#refreshSession',
-      'services/tokenService.js#isAccessTokenValid',
-      'services/tokenService.js#isRefreshTokenValid',
-    ]);
+    expect(naked).toEqual(['middleware/logoutAuth.js#authenticateForLogout']);
     for (const k of naked) expect(VERDICTS).toContain(LEDGER[k].verdict);
 
-    // needs-decision 三条是一个可实测的同形家族：**查了 status 却不查 lockUntil**。
-    // 这条判据的用处：给这三扇门的任意一扇补上 lockUntil 检查，本用例立刻红，
-    // 要求把它从名单里删掉（而不是留一条已经失效的"待决"记录骗过后人）。
+    // needs-decision 家族已清零：refreshSession 与两个 tokenService 探测门本轮都补上了
+    // lockUntil 检查（台账同步改为 checksLock:true / lockWhere:'self'）。
+    // 若将来有人删掉其中任一检查，第 3 条实测形状断言会先红；这里保留空名单，
+    // 让"又出现一扇缺 lockUntil 的裸门"必须显式登记 verdict 而不是悄悄混入。
     const needsDecision = naked.filter((k) => LEDGER[k].verdict === 'needs-decision').sort();
-    expect(needsDecision).toEqual([
+    expect(needsDecision).toEqual([]);
+
+    // 反向对照：三扇已补检查的门必须是由实测判为 checksLock:true（不是只改了台账）
+    for (const key of [
       'services/authService/token.js#refreshSession',
       'services/tokenService.js#isAccessTokenValid',
       'services/tokenService.js#isRefreshTokenValid',
-    ]);
-    for (const k of needsDecision) {
-      expect(doors.get(k).checksStatus).toBe(true);
-      // verdict 不是换个名字的注释：理由里必须点明缺的是哪道关
-      expect(LEDGER[k].why).toMatch(/lockUntil/);
+    ]) {
+      expect(doors.get(key).checksLock).toBe(true);
+      expect(doors.get(key).checksStatus).toBe(true);
     }
 
     // deliberate-waiver 反过来必须"两样都不查"（实测），否则"必须对不可用账户开放"这条理由不成立；
@@ -473,16 +505,16 @@ describe('凭证门集合与账户复查形状（双向登记 + 判定顺序）'
     expect(body.slice(iTemp, iTemp + 120)).toMatch(/ACCOUNT_TEMP_LOCKED/);
   });
 
-  test('refreshSession 是唯一"受理客户端凭证 + 铸造新凭证 + 不看 lockUntil"的 entry 门——多于一条即红', () => {
+  test('"受理客户端凭证 + 铸造新凭证"的 entry 门不得绕过 lockUntil——出现一条即红', () => {
     const minting = registeredKeys.filter(
       (k) => LEDGER[k].role === 'entry' && LEDGER[k].mint && !LEDGER[k].checksLock
     );
-    expect(minting).toEqual(['services/authService/token.js#refreshSession']);
+    expect(minting).toEqual([]);
     // 结论必须由实测支撑而不是只读台账：实测的 mint/lock 形状要与声明一致
     const m = doors.get('services/authService/token.js#refreshSession');
     expect({ mint: m.mint, lock: m.checksLock, status: m.checksStatus }).toEqual({
       mint: true,
-      lock: false,
+      lock: true,
       status: true,
     });
   });

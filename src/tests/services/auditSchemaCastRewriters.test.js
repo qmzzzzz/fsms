@@ -14,7 +14,7 @@ const AuditLog = require('../../models/AuditLog');
  * `set` / `trim` / `lowercase` / `uppercase`（后三者连 `find` 的查询条件都会被改写），
  * 全都长得像"无害的字符串整理"。
  *
- * 【实测形状（写判据之前先量，不凭印象）】`AuditLog.schema` 上有 41 条路径，其中 6 条是
+ * 【实测形状（写判据之前先量，不凭印象）】`AuditLog.schema` 上有 44 条路径，其中 8 条是
  * 点号叶子（`clientInfo.browser` 等），0 条 Embedded 真子文档；`clientInfo` / `location` 作为
  * **父路径在 schema.paths 里并不存在**（嵌套对象字面量被 mongoose 摊平），而它们两个确实进了
  * 哈希载荷。⇒ 嵌套**对象字面量**的叶子由 `eachPath` 自己摊平报出，不需要递归；递归分支只为
@@ -34,7 +34,14 @@ const CAST_TIME_REWRITE_OPTIONS = ['set', 'trim', 'lowercase', 'uppercase'];
  * 每一项都必须能在 `src/utils/auditChain.js` 的 `chainBatch` 里找到对应代码，
  * 由下面「接线」那条用例负责证明——不是靠注释自觉。
  */
-const MIRRORED_IN_BATCH_PATH = ['ip', 'method', 'userAgent', 'username'];
+const MIRRORED_IN_BATCH_PATH = [
+  'ip',
+  'method',
+  'userAgent',
+  'username',
+  'clientInfo.reportedIp',
+  'clientInfo.socketPeer',
+];
 
 /** 递归收集 schema 路径；返回 {name, options}，嵌套对象为点号路径，Embedded 走 pat.schema */
 function collectPaths(schema, prefix = '', out = []) {
@@ -137,16 +144,23 @@ describe('审计 schema 的铸造期改写器必须逐条登记并在批量路�
     // 剥掉注释再判：本仓已经三次被"注释里写着、代码里没有"骗过
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     const batchBody = code.slice(code.indexOf('function chainBatch'));
+    // 点号叶子在 chainBatch 里是「遍历子键 + 整体写回」：只验叶子名出现还不够，
+    // 必须同时证明清洗结果被写回 doc.clientInfo（否则只是读了没落）。
+    const dottedHandled = (name) => {
+      const leaf = name.split('.').pop();
+      return new RegExp(`'${leaf}'`).test(batchBody) && /doc\.clientInfo\s*=/.test(batchBody);
+    };
     for (const name of MIRRORED_IN_BATCH_PATH) {
-      expect({ path: name, handled: new RegExp(`doc\\.${name}\\s*=`).test(batchBody) }).toEqual({
-        path: name,
-        handled: true,
-      });
+      const handled = name.includes('.')
+        ? dottedHandled(name)
+        : new RegExp(`doc\\.${name}\\s*=`).test(batchBody);
+      expect({ path: name, handled }).toEqual({ path: name, handled: true });
     }
     // 前提自证：登记表被清空时这条不许"因为无项可查而通过"
     expect(MIRRORED_IN_BATCH_PATH.length).toBeGreaterThan(0);
     // 判据反向自证：把登记项换成一个没接线的路径必须为 false
     expect(new RegExp('doc\\.pathNotRewrittenAtAll\\s*=').test(batchBody)).toBe(false);
+    expect(dottedHandled('clientInfo.notHandledAtAll')).toBe(false);
   });
 
   it('method 的降级判据与 schema 用的是同一份实现（防止两处各写一遍再漂移）', () => {

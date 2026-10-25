@@ -18,8 +18,10 @@
 import { describe, test, expect, beforeEach, afterEach } from 'vitest'
 import { mountComponent, flush } from './helpers/componentHarness'
 import i18n from '@/i18n'
-import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
-import en from 'element-plus/dist/locale/en.mjs'
+// 必须与 App.vue 用同一入口解析语言包：dist/locale 与 es/locale/lang 是两份
+// 不同模块实例，身份断言（toBe）会因「内容相同但不是同一对象」而失败。
+import zhCn from 'element-plus/es/locale/lang/zh-cn.mjs'
+import en from 'element-plus/es/locale/lang/en.mjs'
 
 const App = (await import('@/App.vue')).default
 

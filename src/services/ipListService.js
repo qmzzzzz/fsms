@@ -46,6 +46,24 @@ const findEntryById = (id) => IPBlacklist.findById(id);
 const removeEntry = (id, type) => IPBlacklist.removeById(id, type);
 
 /**
+ * 取某类型名单当前**仍生效**的条目文本，供「并集是否铺满地址族」判定用。
+ *
+ * 走模型快照（10s TTL）而不是直查：覆盖判定与管理面运行期匹配必须读同一份口径，
+ * 且该判定处在添加路径的请求热路径上。过期条目在快照里可能尚未被惰性清理，
+ * 故这里显式按 expiresAt 过滤——已过期的条目早已不参与匹配，不能拿来凑满覆盖。
+ * 顺序无关（调用方会做区间排序），返回值只带 ip 字符串，不暴露其余字段。
+ * @param {'black'|'white'} type
+ * @returns {Promise<string[]>}
+ */
+async function listActiveEntryIps(type) {
+  const entries = await IPBlacklist.getSnapshot(type);
+  const now = Date.now();
+  return entries
+    .filter((entry) => entry.ip && (!entry.expiresAt || new Date(entry.expiresAt).getTime() > now))
+    .map((entry) => entry.ip);
+}
+
+/**
  * 操作者是否为内置超级管理员——只认生效角色，口径与 auth.js buildAuthContext、
  * rbac.js 的回退查询一致。字符串形式的 populate 无法携带 match，故必须写成对象形式：
  * 否则「直连数据库把 SUPER_ADMIN 置为 inactive」之后，其持有者仍被判定为超管。
@@ -75,6 +93,7 @@ module.exports = {
   blockIP,
   findEntryById,
   removeEntry,
+  listActiveEntryIps,
   operatorIsSuperAdmin,
   recordPrivilegeEscalation,
 };

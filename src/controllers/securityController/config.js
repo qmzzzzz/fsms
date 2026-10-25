@@ -7,6 +7,7 @@ const { SystemConfig } = require('./shared');
 const ApiResponse = require('../../utils/apiResponse');
 const logger = require('../../utils/logger');
 const { asyncHandler } = require('../../middleware/errorHandler');
+const { auditClientAddress } = require('../../utils/ipUtils');
 // F-03（2026-10-17）：业务状态已改变的成功路径改走可靠 outbox（落库失败 ⇒ 转审计 WAL
 // 待重放），因此"返回成功"不再等于"审计可能没写上"。仍用 onAuditWriteFailure 的两处
 // （PII 查看、安全举报）是刻意的 fail-closed：它们必须"记账后重抛"，不许把结果交出去。
@@ -52,7 +53,7 @@ const setRegistrationConfig = asyncHandler(async (req, res) => {
       category: 'system',
       userId: req.user.userId,
       username: req.user.username,
-      ip: req.ip,
+      ...auditClientAddress(req),
       userAgent: req.get('user-agent'),
       success: true,
       riskLevel: 'medium',
@@ -112,7 +113,7 @@ const setLoginCaptchaConfig = asyncHandler(async (req, res) => {
       category: 'system',
       userId: req.user.userId,
       username: req.user.username,
-      ip: req.ip,
+      ...auditClientAddress(req),
       userAgent: req.get('user-agent'),
       success: true,
       riskLevel: 'medium',
@@ -172,7 +173,7 @@ const setRegisterCaptchaConfig = asyncHandler(async (req, res) => {
       category: 'system',
       userId: req.user.userId,
       username: req.user.username,
-      ip: req.ip,
+      ...auditClientAddress(req),
       userAgent: req.get('user-agent'),
       success: true,
       riskLevel: 'medium',

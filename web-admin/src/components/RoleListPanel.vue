@@ -15,7 +15,12 @@
         :key="role._id"
         class="glass-role-item"
         :class="{ 'glass-role-item--active': currentRole?._id === role._id }"
+        role="button"
+        tabindex="0"
+        :aria-pressed="currentRole?._id === role._id"
         @click="$emit('select', role)"
+        @keydown.enter.self.prevent="$emit('select', role)"
+        @keydown.space.self.prevent="$emit('select', role)"
       >
         <div class="glass-role-item__info">
           <span class="glass-role-item__name">{{ role.name }}</span>
@@ -42,6 +47,7 @@
             type="button"
             class="glass-btn glass-btn--danger glass-btn--icon role-delete-btn"
             :title="$t('common.delete')"
+            :aria-label="$t('common.delete')"
             @click.stop="$emit('delete', role)"
           >
             ×
@@ -112,6 +118,11 @@ defineEmits(['select', 'delete', 'edit'])
   background: var(--xf-bg-glass-strong);
   transform: translateX(3px);
   box-shadow: var(--xf-shadow-md);
+}
+
+.glass-role-item:focus-visible {
+  outline: 2px solid var(--xf-primary);
+  outline-offset: 2px;
 }
 
 .glass-role-item--active {

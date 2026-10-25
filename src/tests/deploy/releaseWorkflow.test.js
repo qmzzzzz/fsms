@@ -151,8 +151,41 @@ describe('D-1 发布工作流：抽取逻辑与结构不变量', () => {
     }
   });
 
-  test('tag 触发且限定 v*（避免任意 tag 都发 Release）', () => {
-    expect(src).toMatch(/tags:\s*\r?\n\s*- 'v\*'/);
+  // 2026-10-24 审计 P2：Release 不再与 CI 平行地被 tag 触发。
+  // 旧形态下 CI/security-audit/镜像构建/签名任一失败，Release 仍会发出。
+  test('以 CI workflow_run 完成为触发，而不是直接监听 tag', () => {
+    expect(src).toMatch(/workflow_run:/);
+    expect(src).toMatch(/workflows:\s*\['CI'\]/);
+    expect(src).toMatch(/types:\s*\[completed\]/);
+    // 不得再直接监听 push/tags（那会绕开 CI 结论）
+    const onBlock = src.slice(src.indexOf('on:'), src.indexOf('permissions:'));
+    expect(onBlock).not.toMatch(/^\s{2}push:/m);
+    expect(onBlock).not.toMatch(/tags:/);
+  });
+
+  test('失败或非本仓 fork 的 CI 不得触发 Release（fail-closed 前置条件）', () => {
+    expect(src).toMatch(/workflow_run\.conclusion == 'success'/);
+    expect(src).toMatch(/workflow_run\.event == 'push'/);
+    expect(src).toMatch(/workflow_run\.head_repository\.full_name == github\.repository/);
+    expect(src).toMatch(/startsWith\(github\.event\.workflow_run\.head_branch, 'v'\)/);
+  });
+
+  test('tag 必须存在且指向 CI 实际验证的提交（防止移动 tag / 同名分支）', () => {
+    expect(src).toMatch(/ref:\s*\$\{\{\s*github\.event\.workflow_run\.head_sha\s*\}\}/);
+    expect(src).toMatch(/git fetch --force origin "refs\/tags\/\$\{RELEASE_TAG\}/);
+    expect(src).toMatch(/git rev-list -n 1 "refs\/tags\/\$\{RELEASE_TAG\}"/);
+    expect(src).toMatch(/EXPECTED_SHA/);
+    // 校验段必须有真实的失败退出（不是只打印）
+    const block = src.slice(src.indexOf('Verify tag points'), src.indexOf('Extract release notes'));
+    expect((block.match(/exit 1/g) || []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('Release 显式绑定 tag（workflow_run 下 github.ref 是默认分支）', () => {
+    expect(src).toMatch(/tag_name:\s*\$\{\{\s*env\.RELEASE_TAG\s*\}\}/);
+    expect(src).toMatch(/RELEASE_TAG:\s*\$\{\{\s*github\.event\.workflow_run\.head_branch\s*\}\}/);
+    // 版本号从 RELEASE_TAG 取，不能再用 GITHUB_REF_NAME
+    expect(src).toMatch(/version="\$\{RELEASE_TAG#v\}"/);
+    expect(src).not.toMatch(/version="\$\{GITHUB_REF_NAME#v\}"/);
   });
 
   test('权限隔离：工作流级 read，contents: write 只给 release job', () => {

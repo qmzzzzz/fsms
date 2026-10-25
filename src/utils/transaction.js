@@ -32,6 +32,9 @@ let degradeWarned = false;
 // 探测结果缓存：hello 是一次网络往返，进程内只需探一次（连接拓扑不会热切换）
 let cachedSupport = null;
 
+// 最近一次探测到的拓扑（供启动告警与 /readyz 标记消费；未探测过为 unknown）
+let topology = 'unknown';
+
 /**
  * 探测当前拓扑是否支持事务。
  *
@@ -111,6 +114,53 @@ async function withTransaction(fn, options = {}) {
 function _resetForTests() {
   degradeWarned = false;
   cachedSupport = null;
+  topology = 'unknown';
 }
 
-module.exports = { withTransaction, _resetForTests };
+/**
+ * 启动期拓扑体检：把「事务是否可用」从请求期隐式降级变成启动日志里的显式事实。
+ *
+ * 为什么不能只靠 withTransaction 里的那次告警：它要等到第一次多集合写（如删除设备）
+ * 才触发，且是 warn 级——生产上 standalone 意味着一致性退化为「按顺序写、失败留残骸」，
+ * 这是部署形态缺陷，应该在进程起来的那一刻就可见，而不是等出事时翻日志。
+ *
+ * 探测结果同时写进 cachedSupport，使启动后的 withTransaction 复用同一次 hello；
+ * 探测失败不缓存（沿用 detectTransactionSupport 的 fail-loud + 可自愈策略）。
+ *
+ * @returns {Promise<'replica-set'|'standalone'|'unknown'>}
+ */
+async function reportTransactionTopology() {
+  try {
+    const hello = await mongoose.connection.client.db('admin').command({ hello: 1 });
+    const supported = Boolean(hello.setName) || hello.msg === 'isdbgrid';
+    cachedSupport = supported;
+    topology = supported ? 'replica-set' : 'standalone';
+
+    if (supported) {
+      logger.info('MongoDB 拓扑支持事务（副本集/mongos）：多集合写入走事务');
+    } else {
+      // 生产部署选错形态会直接损失跨集合原子性，故用 error 级；同进程不再重复告警
+      degradeWarned = true;
+      logger.error(
+        'MongoDB standalone 拓扑：事务不可用，多集合写入降级为顺序写，失败可能残留跨集合不一致；生产请部署副本集'
+      );
+    }
+    return topology;
+  } catch (err) {
+    topology = 'unknown';
+    logger.warn(`启动期事务拓扑探测失败（不影响启动，/readyz 标记 unknown）：${err.message}`);
+    return topology;
+  }
+}
+
+/** 最近一次拓扑探测结果：'replica-set' | 'standalone' | 'unknown' */
+function getTransactionTopology() {
+  return topology;
+}
+
+module.exports = {
+  withTransaction,
+  reportTransactionTopology,
+  getTransactionTopology,
+  _resetForTests,
+};

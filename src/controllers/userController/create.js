@@ -18,6 +18,7 @@ const userService = require('../../services/userService');
 const canaryWatch = require('../../services/canaryWatch');
 const {
   findUnoperableGrantCodes,
+  findGrantViolationAfterWrite,
   rejectForeignPeerRoles,
   operatorTag,
   rejectInvalidIpRules,
@@ -62,7 +63,7 @@ async function guardCreateUserScope(req, res, department, username) {
  *  5) 不得授予自身未持有的**同级**角色（B-2，判据见 rejectForeignPeerRoles）。
  *     这一道原先只有 assignRoles 有：同一个人改别人角色会被拦、建个新账户挂同一个
  *     角色则放行，两条轨口径不一致 ⇒ 松的那条就是实际口径。
- * @returns {Promise<{roles: Array, rejected: boolean}>}
+ * @returns {Promise<{roles: Array, rejected: boolean, operatorMaxLevel?: number, operatorPermCodes?: string[]}>}
  */
 const validateRolesForCreate = async (req, res, roles) => {
   if (!roles || roles.length === 0) return { roles: [], rejected: false };
@@ -72,6 +73,8 @@ const validateRolesForCreate = async (req, res, roles) => {
 
   const targetRoles = await userService.findRolesByIds(requestedRoles, 'level code isBuiltIn', {
     lean: true,
+    // L-05：停用角色不得作为建号授予项
+    activeOnly: true,
   });
   if (targetRoles.length !== requestedRoles.length) {
     ApiResponse.codeError(res, 'ROLE_NOT_FOUND_IN_LIST');
@@ -116,7 +119,7 @@ const validateRolesForCreate = async (req, res, roles) => {
       return { rejected: true };
     }
   }
-  return { roles: requestedRoles, rejected: false };
+  return { roles: requestedRoles, rejected: false, operatorMaxLevel, operatorPermCodes };
 };
 
 /**
@@ -213,6 +216,48 @@ const createUser = asyncHandler(async (req, res) => {
     roles: validatedRoles,
     allowedIPs: allowedIPs || '',
   });
+
+  // L-03：建号落库后复验角色仍存在且生效。角色删除采用「先停用再统计持有者」，
+  // 本请求若在停用前通过校验、停用后才落库，这里会看到缺失并撤销刚建的账号，
+  // 避免新账号带着悬空角色进入系统。
+  //
+  // 同一趟把「角色在窗口内被改强」也复验掉：updateRole 抬高 level 或
+  // assignPermissions 扩张权限发生在建号判定之后时，校验看到的是旧定义。
+  // 复验用重新读到的角色文档重判层级与权限子集，不通过则删除刚建的账号。
+  if (validatedRoles.length > 0) {
+    const freshRoleDocs = await userService.findRolesByIds(
+      validatedRoles,
+      'level code permissions',
+      {
+        activeOnly: true,
+        populate: { path: 'permissions', select: 'code' },
+      }
+    );
+    const violation = findGrantViolationAfterWrite({
+      operatorPermCodes: roleCheck.operatorPermCodes,
+      operatorMaxLevel: roleCheck.operatorMaxLevel,
+      grantRoleDocs: freshRoleDocs,
+      expectedCount: validatedRoles.length,
+    });
+    if (violation) {
+      await userService.deleteById(user._id);
+      statsCache.invalidateAll('user-create-rollback');
+      logger.warn(
+        `建号写后复验失败，已撤销新账户：newUser=${username} code=${violation.code}` +
+          (violation.lacking ? ` 缺少权限=${violation.lacking.join(',')}` : '')
+      );
+      return ApiResponse.codeError(
+        res,
+        violation.code,
+        violation.lacking
+          ? {
+              message: `无权授予以下权限：${violation.lacking.join('、')}`,
+              params: { permissions: violation.lacking.join('、') },
+            }
+          : undefined
+      );
+    }
+  }
 
   logger.info('管理员创建用户', { operator: req.user.username, username });
 

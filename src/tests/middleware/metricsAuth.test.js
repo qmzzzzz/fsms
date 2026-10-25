@@ -25,7 +25,7 @@ const logger = require('../../utils/logger');
  * 用 X-Forwarded-For 模拟"来自公网"**——那正是被修复的绕过向量。改为
  * 覆写 socket.remoteAddress 来模拟真实对端；XFF 保留仅用于验证它已失效。
  */
-function buildApp(token, peerIp) {
+function buildApp(token, peerIp, extra = {}) {
   const app = express();
   // 仍信任代理头：生产环境 TRUST_PROXY_HOPS 必然启用，需复现该前提
   app.set('trust proxy', true);
@@ -40,7 +40,7 @@ function buildApp(token, peerIp) {
       next();
     });
   }
-  app.get('/metrics', createMetricsAuth(token), (req, res) => {
+  app.get('/metrics', createMetricsAuth({ token, ...extra }), (req, res) => {
     res.json({ ok: true });
   });
   return app;
@@ -107,6 +107,41 @@ describe('metricsAuth /metrics 应用层鉴权纵深', () => {
 
     test('反向验证：socket 为回环、XFF 为公网 → 仍放行（判定只看 socket）', async () => {
       const res = await request(app).get('/metrics').set('X-Forwarded-For', '8.8.8.8');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
+    });
+  });
+
+  describe('反代拓扑（TRUST_PROXY_HOPS>0）：回环对端必须携带令牌', () => {
+    const PROXY_TOKEN = 'p'.repeat(64);
+    const proxied = buildApp('', undefined, { trustProxyHops: 1 });
+    const proxiedAuthed = buildApp(PROXY_TOKEN, undefined, { trustProxyHops: 1 });
+    const proxiedPrivate = buildApp('', '172.18.0.5', { trustProxyHops: 1 });
+
+    test('回环来源（Nginx 转发）+ 无令牌 → 401，不再被当作本机抓取放行', async () => {
+      const res = await request(proxied).get('/metrics');
+      expect(res.status).toBe(401);
+      expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
+    });
+
+    test('回环来源 + 正确令牌 → 200（经代理的合法抓取路径）', async () => {
+      const res = await request(proxiedAuthed)
+        .get('/metrics')
+        .set('Authorization', `Bearer ${PROXY_TOKEN}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
+    });
+
+    test('回环来源 + 错误令牌 → 401', async () => {
+      const res = await request(proxiedAuthed)
+        .get('/metrics')
+        .set('Authorization', `Bearer ${'q'.repeat(64)}`);
+      expect(res.status).toBe(401);
+      expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
+    });
+
+    test('容器网络私网直抓仍无需令牌（shipped prometheus.yml 的 app:3000 路径）', async () => {
+      const res = await request(proxiedPrivate).get('/metrics');
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ok: true });
     });

@@ -25,6 +25,7 @@ jest.mock('../../utils/logger', () => ({
 jest.mock('../../utils/httpPostJson', () => ({ postJson: jest.fn() }));
 
 const AuditLog = require('../../models/AuditLog');
+const dns = require('dns');
 const securityAlert = require('../../services/securityAlert');
 const auditMonitor = require('../../services/auditMonitor');
 const detectionMetrics = require('../../utils/metricsDetection');
@@ -193,6 +194,10 @@ describe('auditMonitor MTTD 记账', () => {
     process.env.SECURITY_ALERT_MIN_LEVEL = 'low';
     process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST = 'hooks.example.invalid';
     postJson.mockResolvedValue({ ok: true, status: 200 });
+    // 投递前解析并校验域名地址（DNS 钉扎）；单测不出网
+    const dnsLookup = jest
+      .spyOn(dns.promises, 'lookup')
+      .mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
 
     const detection = [
       {
@@ -212,6 +217,7 @@ describe('auditMonitor MTTD 记账', () => {
       const body = JSON.parse(postJson.mock.calls[0][2]);
       expect(body.alert.detection).toEqual(detection);
     } finally {
+      dnsLookup.mockRestore();
       for (const [key, value] of Object.entries({
         SECURITY_ALERT_WEBHOOK: saved.webhook,
         SECURITY_ALERT_MIN_LEVEL: saved.min,

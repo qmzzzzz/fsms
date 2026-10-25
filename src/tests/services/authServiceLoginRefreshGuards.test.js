@@ -35,6 +35,9 @@
  *   refreshSession: 655, 661, 676-679, 712-713, 745-746, 749-750
  */
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -301,7 +304,7 @@ describe('authService gap B', () => {
     // 做过确定性触发 + 行为级断言（该文件的 mockUnusualMode）。
     // 本文件不重复造同一场景，避免同一条不变量两处实现漂移。
 
-    test('OK - sessionService.createSession 失败时降级为无 sid 令牌', async () => {
+    test('OK - sessionService.createSession 失败时降级为仅 access（不签 refresh）', async () => {
       const user = await makeUser('sessfail');
       const spy = jest
         .spyOn(sessionService, 'createSession')
@@ -312,6 +315,8 @@ describe('authService gap B', () => {
       );
       expect(result.outcome).toBe('OK');
       expect(result.token).toBeTruthy();
+      // 无 sid 的 refresh 无法被设备级吊销终止，还会每次轮换自我续期
+      expect(result.refreshToken).toBeNull();
       spy.mockRestore();
     });
 
@@ -330,6 +335,32 @@ describe('authService gap B', () => {
       );
       expect(result.outcome).toBe('OK');
       spy.mockRestore();
+    });
+
+    test('OK - 默认管理员首次登录成功后删除初始口令文件', async () => {
+      const user = await makeUser('initpwd');
+      const oldName = process.env.SUPER_ADMIN_USERNAME;
+      const oldCwd = process.cwd();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'initpwd-login-'));
+      process.env.SUPER_ADMIN_USERNAME = user.username;
+      process.chdir(dir);
+      try {
+        const file = path.join(dir, '.admin-initial-password');
+        fs.writeFileSync(file, 'username: x\npassword: y\n');
+
+        const result = await authService.loginUser(
+          { username: user.username, password: PASSWORD },
+          defaultCtx()
+        );
+
+        expect(result.outcome).toBe('OK');
+        expect(fs.existsSync(file)).toBe(false);
+      } finally {
+        process.chdir(oldCwd);
+        fs.rmSync(dir, { recursive: true, force: true });
+        if (oldName === undefined) delete process.env.SUPER_ADMIN_USERNAME;
+        else process.env.SUPER_ADMIN_USERNAME = oldName;
+      }
     });
   });
 
@@ -381,6 +412,39 @@ describe('authService gap B', () => {
       expect(result.outcome).toBe('INVALID');
     });
 
+    test('INVALID - refresh 未绑定设备会话（无 sid）', async () => {
+      const user = await makeUser('rfnosid');
+      const token = jwt.sign(
+        {
+          userId: String(user._id),
+          type: 'refresh',
+          tokenVersion: user.tokenVersion ?? 0,
+        },
+        getRefreshSecret(),
+        { expiresIn: '24h' }
+      );
+      const result = await authService.refreshSession(token, defaultCtx());
+      expect(result.outcome).toBe('INVALID');
+    });
+
+    test('ACCOUNT_LOCKED - 临时锁定窗口内 refresh 不得续期', async () => {
+      const user = await makeUser('rftmplock', {
+        lockUntil: new Date(Date.now() + 10 * 60 * 1000),
+      });
+      const token = jwt.sign(
+        {
+          userId: String(user._id),
+          type: 'refresh',
+          tokenVersion: user.tokenVersion ?? 0,
+          sid: crypto.randomUUID(),
+        },
+        getRefreshSecret(),
+        { expiresIn: '24h' }
+      );
+      const result = await authService.refreshSession(token, defaultCtx());
+      expect(result.outcome).toBe('ACCOUNT_LOCKED');
+    });
+
     test('IP_DENIED - refresh 时 IP 不在 allowedIPs 范围', async () => {
       const user = await makeUser('rfip', { allowedIPs: '10.99.99.99' });
       const token = jwt.sign(
@@ -388,6 +452,7 @@ describe('authService gap B', () => {
           userId: String(user._id),
           type: 'refresh',
           tokenVersion: user.tokenVersion ?? 0,
+          sid: crypto.randomUUID(),
         },
         getRefreshSecret(),
         { expiresIn: '24h' }
@@ -403,6 +468,7 @@ describe('authService gap B', () => {
           userId: String(user._id),
           type: 'refresh',
           tokenVersion: user.tokenVersion ?? 0,
+          sid: crypto.randomUUID(),
         },
         getRefreshSecret(),
         { expiresIn: '24h' }
@@ -467,6 +533,7 @@ describe('authService gap B', () => {
           userId: String(user._id),
           type: 'refresh',
           tokenVersion: user.tokenVersion ?? 0,
+          sid: crypto.randomUUID(),
           iat: Math.floor(Date.now() / 1000) - 3600,
         },
         getRefreshSecret(),
@@ -485,6 +552,7 @@ describe('authService gap B', () => {
           userId: String(user._id),
           type: 'refresh',
           tokenVersion: 999,
+          sid: crypto.randomUUID(),
         },
         getRefreshSecret(),
         { expiresIn: '24h' }

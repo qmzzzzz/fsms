@@ -23,12 +23,14 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 const LOCKFILE = path.join(ROOT, 'package-lock.json');
+const WEB_LOCKFILE = path.join(ROOT, 'web-admin', 'package-lock.json');
 const SCRIPT = path.join(ROOT, 'scripts', 'check-prod-install-scripts.js');
 
 /** 被测对象的真判据（不许在本文件里另写一份） */
 const { evaluate, PROD_INSTALL_SCRIPT_ALLOWLIST, DEV_INSTALL_SCRIPT_ALLOWLIST } = require(SCRIPT);
 
 const lock = JSON.parse(fs.readFileSync(LOCKFILE, 'utf8'));
+const webLock = JSON.parse(fs.readFileSync(WEB_LOCKFILE, 'utf8'));
 
 /** names(evaluate 结果的 all) 便于断言 */
 const namesOf = (r) => r.all.map((x) => x.name).sort();
@@ -101,6 +103,43 @@ describe('安装脚本门禁：判据可证伪且与登记册一致', () => {
 
   test('scoped 包名解析正确（@scarf/scarf 不是被截成 scarf）', () => {
     expect(namesOf(evaluate(lock, true))).toContain('@scarf/scarf');
+  });
+
+  // —— 登记键必须钉到版本 + integrity（2026-10-24 审计） ——
+  // 旧实现只比包名：同名包的下一个版本自动获得豁免。下面两条变异分别改版本、
+  // 改 integrity，判据都必须转红；否则「未来版本自动放行」的洞仍然开着。
+  test('反向对照：同名包换了版本必须判红（名字不再自动豁免未来版本）', () => {
+    const tampered = JSON.parse(JSON.stringify(lock));
+    tampered.packages['node_modules/@scarf/scarf'].version = '9.9.9';
+    const r = evaluate(tampered, true);
+    expect(r.offenders.map((x) => `${x.name}@${x.version}`)).toContain('@scarf/scarf@9.9.9');
+  });
+
+  test('反向对照：同版本换了 tarball（integrity 漂移）必须判红', () => {
+    const tampered = JSON.parse(JSON.stringify(lock));
+    tampered.packages['node_modules/@scarf/scarf'].integrity = 'sha512-REPLACED';
+    const r = evaluate(tampered, true);
+    expect(r.offenders.map((x) => x.name)).toContain('@scarf/scarf');
+  });
+
+  test('反向对照：锁文件条目缺 integrity 时不得被登记项吞掉（fail-closed）', () => {
+    const tampered = JSON.parse(JSON.stringify(lock));
+    delete tampered.packages['node_modules/@scarf/scarf'].integrity;
+    expect(evaluate(tampered, true).offenders.map((x) => x.name)).toContain('@scarf/scarf');
+  });
+
+  // —— web-admin 锁文件此前完全不在扫描面内 ——
+  test('web-admin 锁文件：生产树零安装脚本，dev 树仅有已登记的 fsevents', () => {
+    const prod = evaluate(webLock, true);
+    expect(prod.all).toEqual([]);
+    const dev = evaluate(webLock, false);
+    expect(dev.all.map((x) => x.name)).toEqual(['fsevents']);
+    expect(dev.offenders).toEqual([]);
+  });
+
+  test('前提自证：web-admin 锁文件确实带 hasInstallScript 标记', () => {
+    const marked = Object.values(webLock.packages || {}).filter((m) => m && m.hasInstallScript);
+    expect(marked.length).toBeGreaterThan(0);
   });
 
   test('判据本身被 require 时不执行 CLI（否则测试进程会被 process.exit 带走）', () => {

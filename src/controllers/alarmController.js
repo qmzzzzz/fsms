@@ -15,6 +15,7 @@ const {
 } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const { normalizePagination, isValidDateParam } = require('../utils/helpers');
+const logger = require('../utils/logger');
 const alarmService = require('../services/AlarmService');
 
 /**
@@ -160,6 +161,49 @@ const getAlarmById = asyncHandler(async (req, res) => {
 });
 
 /**
+ * 报警写入侧的位置收口（M-03）。
+ *
+ * deviceId 只过了 isMongoId（格式），这里补「存在 + 在本账号数据范围内」：
+ * FireAlarm.deviceId 是 ref→FireDevice，且 getAlarmById 会 populate 出
+ * deviceCode/deviceName/deviceType。于是
+ *   · 指向不存在的设备 ⇒ 引用静默悬空，工单上没有可核对的点位，
+ *     详情接口还会把那个 _id 原样回给每一个能看到这条报警的人；
+ *   · 指向他人设备 ⇒ 报警一旦落到对方部门清单里，对方按正常读路径就能看到；
+ *     更直接的是**上报方自己** GET 这条报警即可读到他人设备的编码/名称/类型
+ *     （读路径本身判定正确，洞在写入侧没收口）。
+ * 判据不另起一份：复用 assertRecordInScope + DATA_SCOPE_FIELDS.device，
+ * 与 deviceController 的 isDeviceInScope 同一来源。
+ *
+ * 设备报警继承设备楼栋：location.building 就是报警的 departmentField，
+ * 缺失时这条报警不会进入任何部门档的列表/统计/导出；设备上明明有楼栋，
+ * 不在写入侧补全等于让"关联了设备"的报警反而更容易变成隐形工单。
+ *
+ * @returns {Promise<{ location?: Object, rejected?: boolean }>} rejected 表示已写出拒绝响应
+ */
+const resolveAlarmLocation = async (req, res, deviceId, location) => {
+  if (!deviceId) return { location };
+
+  const deviceService = require('../services/DeviceService');
+  const [device] = await deviceService.findScopeFieldsByIds([deviceId]);
+  if (!device) {
+    ApiResponse.codeError(res, 'DEVICE_NOT_FOUND');
+    return { rejected: true };
+  }
+  const { ownerField, departmentField } = DATA_SCOPE_FIELDS.device;
+  const { allowed } = await assertRecordInScope(req, device, ownerField, departmentField);
+  if (!allowed) {
+    ApiResponse.codeError(res, 'DEVICE_VIEW_FORBIDDEN');
+    return { rejected: true };
+  }
+
+  const deviceBuilding = device.location && device.location.building;
+  if (!(location && location.building) && deviceBuilding) {
+    return { location: { ...(location || {}), building: deviceBuilding } };
+  }
+  return { location };
+};
+
+/**
  * 接收报警（手动上报）
  * POST /api/alarms/report
  */
@@ -172,24 +216,13 @@ const reportAlarm = asyncHandler(async (req, res) => {
 
   const { alarmType, level, location, description, deviceId, reporter } = req.body;
 
-  // deviceId 只过了 isMongoId（格式），这里补「存在 + 在本账号数据范围内」：
-  // FireAlarm.deviceId 是 ref→FireDevice，且 getAlarmById 会 populate 出
-  // deviceCode/deviceName/deviceType。于是
-  //   · 指向不存在的设备 ⇒ 引用静默悬空，工单上没有可核对的点位，
-  //     详情接口还会把那个 _id 原样回给每一个能看到这条报警的人；
-  //   · 指向他人设备 ⇒ 报警一旦落到对方部门清单里，对方按正常读路径就能看到；
-  //     更直接的是**上报方自己** GET 这条报警即可读到他人设备的编码/名称/类型
-  //     （读路径本身判定正确，洞在写入侧没收口）。
-  // 判据不另起一份：复用 assertRecordInScope + DATA_SCOPE_FIELDS.device，
-  // 与 deviceController 的 isDeviceInScope 同一来源。
-  if (deviceId) {
-    const deviceService = require('../services/DeviceService');
-    const [device] = await deviceService.findScopeFieldsByIds([deviceId]);
-    if (!device) return ApiResponse.codeError(res, 'DEVICE_NOT_FOUND');
-    const { ownerField, departmentField } = DATA_SCOPE_FIELDS.device;
-    const { allowed } = await assertRecordInScope(req, device, ownerField, departmentField);
-    if (!allowed) return ApiResponse.codeError(res, 'DEVICE_VIEW_FORBIDDEN');
-  }
+  const { location: effectiveLocation, rejected } = await resolveAlarmLocation(
+    req,
+    res,
+    deviceId,
+    location
+  );
+  if (rejected) return;
 
   // location.building 就是 DATA_SCOPE_FIELDS.alarm 的 departmentField——报警落到哪个部门的
   // 清单/统计/导出里，完全由这个字段决定。上面已经拦了"别把工单挂到别人设备上"，
@@ -197,19 +230,23 @@ const reportAlarm = asyncHandler(async (req, res) => {
   // 报警列表里投毒（读路径判得对，洞在写入侧不收口）。
   // 判据复用 rbac.isDepartmentValueAllowed，与 deviceController.rejectOutOfScopeBuilding
   // 同一档位语义（self 档放行，不因填了位置就把自己锁死）。
-  const reportedBuilding = location && location.building;
-  if (reportedBuilding) {
-    const dataScope = await getDataScope(req.user.userId);
-    if (!isDepartmentValueAllowed(dataScope, reportedBuilding))
-      return ApiResponse.codeError(res, 'ALARM_OPERATE_FORBIDDEN', {
-        message: `无权在其他楼栋上报报警：${reportedBuilding}`,
-      });
+  // M-03：楼栋缺失则是反方向——手工报警不填楼栋会落成一条部门档整体看不到的
+  // "隐形工单"（self 档上报人自己可见，但负责处置的部门看不到）。写侧直接拒绝，
+  // 设备报警已在上面继承设备楼栋。
+  const reportedBuilding = effectiveLocation && effectiveLocation.building;
+  if (!reportedBuilding) {
+    return ApiResponse.codeError(res, 'ALARM_BUILDING_REQUIRED');
   }
+  const dataScope = await getDataScope(req.user.userId);
+  if (!isDepartmentValueAllowed(dataScope, reportedBuilding))
+    return ApiResponse.codeError(res, 'ALARM_OPERATE_FORBIDDEN', {
+      message: `无权在其他楼栋上报报警：${reportedBuilding}`,
+    });
 
   const alarm = await alarmService.reportAlarm({
     alarmType,
     level,
-    location,
+    location: effectiveLocation,
     description,
     deviceId,
     reporterName: reporter?.name,
@@ -217,6 +254,23 @@ const reportAlarm = asyncHandler(async (req, res) => {
     userId: req.user.userId,
     username: req.user.realName || req.user.username,
   });
+
+  // 设备在「校验存在 → 写入」窗口内被删除时，reportAlarm 会留下悬空的 deviceId：
+  // 删除侧的清理已经跑完（它早于本次写入），populate 出来就是 null。
+  // 落库后再确认一次；设备确实没了就摘掉引用，报警本身保留（火警事实不因设备
+  // 台账变动而消失）。删除侧与写入侧各让一步，窗口才真正闭合。
+  if (deviceId) {
+    const deviceService = require('../services/DeviceService');
+    const missing = await deviceService.findMissingIds([deviceId]);
+    if (missing.length > 0) {
+      await alarmService.detachDevice(alarm._id, deviceId);
+      alarm.deviceId = undefined;
+      logger.warn('报警写入后设备已不存在，已摘除设备引用', {
+        alarmId: String(alarm._id),
+        deviceId: String(deviceId),
+      });
+    }
+  }
 
   return ApiResponse.success(res, alarm, '报警接收成功', 201);
 });

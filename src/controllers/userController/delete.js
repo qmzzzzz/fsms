@@ -7,13 +7,25 @@ const ApiResponse = require('../../utils/apiResponse');
 const { getOperatorMaxLevel, maxRoleLevel } = require('../../utils/permissionHelper');
 const logger = require('../../utils/logger');
 const { asyncHandler } = require('../../middleware/errorHandler');
-const { assertRecordInScope } = require('../../middleware/rbac');
+const { assertRecordInScope, getDataScope, isRecordInScope } = require('../../middleware/rbac');
 const { uniqueIdStrings } = require('../../utils/helpers');
 const { isSuperAdminRole } = require('../../utils/superAdmin');
 const statsCache = require('../../services/statsCache');
 const { invalidateUserCache } = require('../../middleware/auth');
 const userService = require('../../services/userService');
 const { USER_OWNER_FIELD, USER_DEPT_FIELD, operatorTag } = require('./shared');
+
+/**
+ * 写后置判定所依据的状态快照（M-01）：范围判据用 createdBy/department，
+ * 层级与超管判据用 roles。三者都必须参与条件删除，否则判定与写入之间
+ * 任一字段被改动，删除仍按旧结论落地。
+ */
+const stateSnapshot = (user) => {
+  const snapshot = { roles: user.roles || [] };
+  if (user.department !== undefined) snapshot.department = user.department;
+  if (user.createdBy !== undefined) snapshot.createdBy = user.createdBy;
+  return snapshot;
+};
 
 /**
  * 删除用户
@@ -61,7 +73,10 @@ const deleteUser = asyncHandler(async (req, res) => {
   }
 
   const userId = user._id;
-  await userService.deleteById(req.params.id);
+  const deleted = await userService.deleteById(req.params.id, stateSnapshot(user));
+  if (!deleted) {
+    return ApiResponse.codeError(res, 'USER_STATE_CONFLICT');
+  }
 
   // 失效缓存
 
@@ -73,6 +88,23 @@ const deleteUser = asyncHandler(async (req, res) => {
 
   return ApiResponse.success(res, null, '用户删除成功');
 });
+
+/**
+ * M-01：按判定时的状态快照做条件删除。
+ * 快照缺失（两次读之间用户消失）与条件不匹配（判定后被改角色/部门/归属）
+ * 一律返回 null，由调用方映射为 409——绝不能让 undefined 快照退化成无条件删除。
+ */
+const deleteBatchWithSnapshots = async (requestedIds, snapshots) => {
+  const snapshotById = new Map(snapshots.map((s) => [String(s._id), stateSnapshot(s)]));
+  const expectedByTarget = new Map(requestedIds.map((id) => [id, snapshotById.get(id)]));
+  if (requestedIds.some((id) => !expectedByTarget.get(id))) return null;
+  try {
+    return await userService.deleteMany({ _id: { $in: requestedIds } }, expectedByTarget);
+  } catch (err) {
+    if (err.code === 'USER_STATE_CONFLICT') return null;
+    throw err;
+  }
+};
 
 /**
  * 批量删除用户
@@ -121,20 +153,25 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
 
   // 层级保护：批量目标中包含同级或更高级别用户时整体拒绝（与单个删除口径一致）
   const operatorMaxLevel = await getOperatorMaxLevel(req.user.userId);
-  const targets = await userService.findBatchUsers(requestedIds);
+  const [targets, snapshots] = await Promise.all([
+    userService.findBatchUsers(requestedIds),
+    userService.findUserSnapshots(requestedIds),
+  ]);
   if (targets.length !== requestedIds.length) {
     return ApiResponse.codeError(res, 'USER_ID_NOT_FOUND_IN_LIST');
   }
   const oversized = targets.find((t) => maxRoleLevel(t.roles) >= operatorMaxLevel);
 
-  // 数据范围闸：任一目标越出可见域即整批拒绝（批量接口不得成为单对象保护的绕过路径）
+  // 数据范围闸：任一目标越出可见域即整批拒绝（批量接口不得成为单对象保护的绕过路径）。
+  // 范围只加载一次：assertRecordInScope 每次都会重新查用户/角色（N 次往返），
+  // 批量上限 50 时就是 50 次重复查询，且同一请求内范围不可能变化。
+  const dataScope = await getDataScope(req.user.userId);
   for (const target of targets) {
-    const { allowed: batchTargetInScope } = await assertRecordInScope(
-      req,
-      target,
-      USER_OWNER_FIELD,
-      USER_DEPT_FIELD
-    );
+    const batchTargetInScope = isRecordInScope(dataScope, target, {
+      ownerField: USER_OWNER_FIELD,
+      departmentField: USER_DEPT_FIELD,
+      userId: req.user.userId,
+    });
     if (!batchTargetInScope) {
       return ApiResponse.codeError(res, 'USER_SCOPE_FORBIDDEN', {
         message: `无权操作用户：${target.username}（超出您的数据范围）`,
@@ -163,7 +200,10 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
     });
   }
 
-  const result = await userService.deleteMany({ _id: { $in: requestedIds } });
+  // M-01：逐个目标带快照条件删除；任一目标在判定后被改角色/改部门/改归属，
+  // 整批以 409 中止（副本集下事务回滚），不让批量接口把单对象的保护绕过去
+  const result = await deleteBatchWithSnapshots(requestedIds, snapshots);
+  if (!result) return ApiResponse.codeError(res, 'USER_STATE_CONFLICT');
 
   // 批量失效缓存
 

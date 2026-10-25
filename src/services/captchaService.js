@@ -12,6 +12,9 @@
  * - 一次性消费：verify 无论成功与否都删除记录，杜绝同一验证码重放/爆破
  * - 大小写不敏感比对，5 分钟有效
  * - 上限保护 + 过期清理，防止恶意刷取撑爆存储
+ * - 全局上限之外再加**单 IP 活跃配额**，并把计数还给「成功生成 / 消费」：
+ *   只靠全局上限时，分布式刷取可以把计数顶满，让所有用户的登录/注册验证码
+ *   一起不可用（#8）；拒绝路径也不得计数，否则洪水本身会把上限维持住。
  *
  * 注意：generate/verify 自 R-3 起为异步 API（共享存储读取必须异步），
  * 调用方需 await。
@@ -35,21 +38,40 @@ const CAPTCHA_CONFIG = {
 };
 
 const CAPTCHA_TTL_MS = 5 * 60 * 1000; // 有效期 5 分钟
-const MAX_ACTIVE_ENTRIES = 10000; // 活跃上限保护
+const MAX_ACTIVE_ENTRIES = 10000; // 全局活跃上限（存储保护）
+// 单 IP 活跃配额：把「打满全局」的成本从 ~167 个源地址（60 次/5 分钟/IP）
+// 抬到 **500 个**（MAX_ACTIVE_ENTRIES / MAX_ACTIVE_ENTRIES_PER_IP = 10000 / 20）。
+// 【2026-10-24 更正：原文写"上千个"，与这两个常量对不上】按 10000/20 算是 500；
+// 且 20 小于 captchaLimiter 的 60 次/5 分钟，所以 20 才是先触发的那条 —— 两者
+// 一起决定了"打满需要 500 个源、每个源 20 枚"。这个数字直接决定要不要继续加固，
+// 写成两倍会让人低估风险。
+// 正常用户同一时刻只需 1-2 枚，重试也有余量。
+const MAX_ACTIVE_ENTRIES_PER_IP = 20;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 过期清理周期
 
-// 内存回退存储：仅未启用 Redis 时使用（captchaId → { text, expiresAt }）
+// 内存回退存储：仅未启用 Redis 时使用（captchaId → { text, ipKey, expiresAt }）
 const localStore = new Map();
+// 内存模式下的单 IP 活跃数（与 localStore 同生命周期，校验/过期时同步归还）
+const localIpCounts = new Map();
 
 // 清理定时器引用（由 startCaptchaCleanup 显式启动，模式同 securityAlert）
 let cleanupTimer = null;
+// 上限告警日志的节流时刻：指标每次都记，日志每分钟一条，避免洪水期自造日志风暴
+let lastCapWarnAt = 0;
 
 const entryKey = (captchaId) => `captcha:${captchaId}`;
 const COUNT_KEY = 'captcha:active-count';
-// 保留键判定：entryKey(x) === COUNT_KEY 当且仅当 x === 'active-count'。
-// 客户端可自由提交 captchaId，若不拦此值，verify 的 getDel 会删掉活跃计数键
-// （见 verify）。合法 captchaId 恒为 crypto.randomUUID()，永不会取此值。
-const collidesWithCountKey = (captchaId) => entryKey(String(captchaId)) === COUNT_KEY;
+// 保留键判定：所有以 active-count 开头的 captchaId 都会撞进计数器键命名空间
+// （全局键 captcha:active-count 与按 IP 键 captcha:active-count:ip:*）。
+// 客户端可自由提交 captchaId，若不拦，verify 的 getDel 会删掉计数键（见 verify）。
+// 合法 captchaId 恒为 crypto.randomUUID()，永不会取此值。
+const collidesWithCountKey = (captchaId) => String(captchaId).startsWith('active-count');
+// IP 只以摘要进入键名：避免把地址原文写进共享存储与日志，同时保持定长。
+const ipScopeOf = (ip) => {
+  const text = typeof ip === 'string' ? ip.trim() : '';
+  return text ? crypto.createHash('sha256').update(text).digest('hex').slice(0, 16) : 'unknown';
+};
+const ipCountKey = (scope) => `captcha:active-count:ip:${scope}`;
 
 /**
  * 启动过期验证码的定期清理（每 5 分钟一次）
@@ -58,14 +80,7 @@ const collidesWithCountKey = (captchaId) => entryKey(String(captchaId)) === COUN
  */
 const startCaptchaCleanup = () => {
   if (cleanupTimer) return;
-  cleanupTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [key, value] of localStore.entries()) {
-      if (value.expiresAt <= now) {
-        localStore.delete(key);
-      }
-    }
-  }, CLEANUP_INTERVAL_MS);
+  cleanupTimer = setInterval(pruneLocal, CLEANUP_INTERVAL_MS);
   // 不阻塞 Node 进程退出（与 auditMonitor/securityAlert 同策略）
   cleanupTimer.unref?.();
 };
@@ -80,10 +95,24 @@ const stopCaptchaCleanup = () => {
   }
 };
 
+/**
+ * 归还一条内存模式验证码占用的单 IP 配额。
+ * 条目离开 localStore 的每条路径都要调用（校验消费 / 过期清理），否则配额只增不减。
+ */
+function releaseLocalIp(ipKey) {
+  if (!ipKey) return;
+  const remaining = (localIpCounts.get(ipKey) || 1) - 1;
+  if (remaining > 0) localIpCounts.set(ipKey, remaining);
+  else localIpCounts.delete(ipKey);
+}
+
 function pruneLocal() {
   const now = Date.now();
   for (const [key, value] of localStore.entries()) {
-    if (value.expiresAt <= now) localStore.delete(key);
+    if (value.expiresAt <= now) {
+      localStore.delete(key);
+      releaseLocalIp(value.ipKey);
+    }
   }
 }
 
@@ -121,56 +150,98 @@ const noteActiveBoundLost = () => {
 };
 
 /**
- * 生成验证码
- * @returns {Promise<{ captchaId: string, svg: string } | null>} 超出上限时返回 null
+ * 活跃数达到上限时的统一信号出口（log + 安全告警计数）。
+ * 指标每次都记（洪水期靠它看量级）；日志按分钟节流——被拒绝的请求本身
+ * 可能每秒数百条，逐条 warn 会在告警之外再造一次日志风暴。
  */
-const generate = async () => {
-  // 上限保护：活跃计数（窗口=验证码 TTL）超限即拒绝，防恶意刷取撑爆存储
-  let active;
+const noteCapReached = (scope) => {
   try {
-    active = await sharedCache.incrWithTtl(COUNT_KEY, CAPTCHA_TTL_MS);
-  } catch (err) {
-    // 计数器不可用时的真实行为，按模式分两种，别写成一种口径：
-    //  - 内存模式：上限判据本来就是 localStore.size，与计数器无关 ⇒ 等价于"照常按内存判"；
-    //  - Redis 模式：拿不到计数就**没有**上限判定可用（active===null 时下面那个分支放行），
-    //    此时洪水保护只剩 captchaLimiter（60 次/5 分钟/IP）与条目 TTL 两层。
-    // 刻意不 fail-closed：验证码是登录前置，Redis 抖动不该把合法用户挡在门外。
-    // F-205 之后这条 catch 实际上到不了：门面在「Redis 启用但命令抛错」时不再回退
-    // 进程内计数，而是**如实返回 null**（走上面的 active===null 分支）。留着是因为
-    // 成本为零、方向明确（门面内部若改成抛错，这里的行为仍然是上面写的那两种）。
-    // 注意：**信号不在本 catch 里发**，而在下面 active===null 的决策点——那条路
-    // 才是实际可达的降级路径，catch 不可达（见 noteActiveBoundLost 的说明）。
-    logger.warn(`验证码计数器异常，本次不启用活跃数上限判定：${err.message}`);
-    active = null;
+    require('../utils/metrics').incSecurityAlert(`captcha_${scope}_cap_reached`, 'high');
+  } catch (_) {
+    /* 指标端不可用不影响拒绝方向 */
+  }
+  const now = Date.now();
+  if (now - lastCapWarnAt < 60 * 1000) return;
+  lastCapWarnAt = now;
+  const limit = scope === 'ip' ? MAX_ACTIVE_ENTRIES_PER_IP : MAX_ACTIVE_ENTRIES;
+  logger.warn(
+    `验证码活跃数已达${scope === 'ip' ? '单 IP' : '全局'}上限（${limit}），拒绝生成，疑似异常刷取`
+  );
+};
+
+/**
+ * Redis 模式下的双配额预占。
+ *
+ * 超限时必须把本次刚加上的那一格减回去：被拒绝的请求如果继续计数，
+ * 计数器会被洪水本身越推越高（#8 的放大器），攻击停止后还要等满一个窗口。
+ * 计数读取失败时与全局上限同一降级方向（放行）——验证码是登录前置，
+ * Redis 抖动不该把合法用户挡在门外。
+ *
+ * @returns {Promise<{ok: boolean, reject?: 'ip'|'global'}>}
+ */
+const reserveRedisCapacity = async (ipKey) => {
+  const perIp = await sharedCache.incrWithTtl(ipKey, CAPTCHA_TTL_MS);
+  if (perIp === null) {
+    noteActiveBoundLost();
+    return { ok: true };
+  }
+  if (perIp > MAX_ACTIVE_ENTRIES_PER_IP) {
+    await sharedCache.decrWithFloorZero(ipKey);
+    return { ok: false, reject: 'ip' };
   }
 
-  if (sharedCache.isRedisEnabled()) {
-    if (active === null) {
-      // 上限判定被跳过 = fail-open。此处是**唯一可达**的降级路径，信号必须打在这里。
-      noteActiveBoundLost();
-    } else if (active > MAX_ACTIVE_ENTRIES) {
-      logger.warn(`验证码存储已达上限（${MAX_ACTIVE_ENTRIES}），拒绝生成，疑似异常刷取`);
+  const active = await sharedCache.incrWithTtl(COUNT_KEY, CAPTCHA_TTL_MS);
+  if (active === null) {
+    await sharedCache.decrWithFloorZero(ipKey);
+    noteActiveBoundLost();
+    return { ok: true };
+  }
+  if (active > MAX_ACTIVE_ENTRIES) {
+    await sharedCache.decrWithFloorZero(ipKey);
+    await sharedCache.decrWithFloorZero(COUNT_KEY);
+    return { ok: false, reject: 'global' };
+  }
+  return { ok: true };
+};
+
+/**
+ * 生成验证码
+ * @param {{ ip?: string }} [options] 客户端来源 IP（用于单 IP 活跃配额；缺省归入 unknown 桶）
+ * @returns {Promise<{ captchaId: string, svg: string } | null>} 超出上限时返回 null
+ */
+const generate = async ({ ip } = {}) => {
+  const ipKey = ipCountKey(ipScopeOf(ip));
+  const redis = sharedCache.isRedisEnabled();
+
+  if (redis) {
+    const reserved = await reserveRedisCapacity(ipKey);
+    if (!reserved.ok) {
+      noteCapReached(reserved.reject);
       return null;
     }
   } else {
+    // 先清过期再判：否则「过期条目占着配额」会把合法用户挡在上限外
+    pruneLocal();
+    if ((localIpCounts.get(ipKey) || 0) >= MAX_ACTIVE_ENTRIES_PER_IP) {
+      noteCapReached('ip');
+      return null;
+    }
     if (localStore.size >= MAX_ACTIVE_ENTRIES) {
-      pruneLocal();
-      if (localStore.size >= MAX_ACTIVE_ENTRIES) {
-        logger.warn(`验证码存储已达上限（${MAX_ACTIVE_ENTRIES}），拒绝生成，疑似异常刷取`);
-        return null;
-      }
+      noteCapReached('global');
+      return null;
     }
   }
 
   const captcha = svgCaptcha.create(CAPTCHA_CONFIG);
   const captchaId = crypto.randomUUID();
-  const entry = { text: captcha.text };
+  const entry = { text: captcha.text, ipKey };
 
-  if (sharedCache.isRedisEnabled()) {
+  if (redis) {
     // TTL 带抖动：避免大批验证码同一时刻过期（O-15）；一次性语义不受影响
     await sharedCache.set(entryKey(captchaId), entry, sharedCache.jitterTtl(CAPTCHA_TTL_MS));
   } else {
     localStore.set(captchaId, { ...entry, expiresAt: Date.now() + CAPTCHA_TTL_MS });
+    localIpCounts.set(ipKey, (localIpCounts.get(ipKey) || 0) + 1);
   }
 
   return { captchaId, svg: captcha.data };
@@ -185,9 +256,9 @@ const generate = async () => {
 const verify = async (captchaId, inputText) => {
   if (!captchaId || !inputText) return false;
 
-  // 保留键闸门（须在触存储之前）：Redis 模式下 captchaId='active-count' 会让
-  // entryKey 正好撞上活跃计数键 COUNT_KEY，getDel 把它删掉 → generate 的
-  // MAX_ACTIVE_ENTRIES 洪水面护栏被反复重置归零。合法 captchaId 恒为 UUID，
+  // 保留键闸门（须在触存储之前）：captchaId 以 'active-count' 开头会让
+  // entryKey 撞上全局或按 IP 的活跃计数键，getDel 把它删掉 → generate 的
+  // 洪水面护栏被反复重置归零。合法 captchaId 恒为 UUID，
   // 故此闸门不误伤真实流程，仅把该越界值按「校验失败」fail-closed 处理。
   if (collidesWithCountKey(captchaId)) return false;
 
@@ -195,7 +266,11 @@ const verify = async (captchaId, inputText) => {
     // 评价报告低危项：原 get→del 两步在并发下同一验证码可被消费两次（双花）。
     // 改用原子取删 GETDEL（sharedCache.getDel）：取值与删除在同一命令内完成。
     const entry = await sharedCache.getDel(entryKey(captchaId)).catch(() => null);
-    if (!entry || typeof entry.text !== 'string') return false;
+    if (!entry) return false;
+    // 条目已离开存储 ⇒ 无论比对结果如何，都要归还它占用的双配额
+    await sharedCache.decrWithFloorZero(COUNT_KEY);
+    if (entry.ipKey) await sharedCache.decrWithFloorZero(entry.ipKey);
+    if (typeof entry.text !== 'string') return false;
     return String(inputText).trim().toLowerCase() === entry.text.toLowerCase();
   }
 
@@ -203,6 +278,7 @@ const verify = async (captchaId, inputText) => {
   localStore.delete(captchaId);
 
   if (!entry) return false; // 不存在（已用过/不存在）
+  releaseLocalIp(entry.ipKey);
   if (Date.now() > entry.expiresAt) return false; // 已过期
 
   return String(inputText).trim().toLowerCase() === entry.text.toLowerCase();
@@ -211,6 +287,8 @@ const verify = async (captchaId, inputText) => {
 /** 测试钩子：清空本地回退存储 */
 const _resetForTests = () => {
   localStore.clear();
+  localIpCounts.clear();
+  lastCapWarnAt = 0;
 };
 
 module.exports = {

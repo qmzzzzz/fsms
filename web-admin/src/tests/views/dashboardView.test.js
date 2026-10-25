@@ -776,18 +776,43 @@ describe('DashboardView 失败与取消路径', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('最近报警加载失败：卡片保留空表、统计卡不受牵连；提示归拦截器，组件不弹（P2-3）', async () => {
+  test('最近报警加载失败：卡片显示错误与重试，统计卡不受牵连；提示归拦截器（P2-3）', async () => {
     const c = await open(ALL, { alarmsReject: new Error('alarms down') })
     // 可等待的终态是主加载成功（统计卡由 - 占位变成真实读数，单调不可逆）。
-    // 报警那一路失败后**不再改任何状态**（提示归拦截器），因此没有状态变化可等，
-    // 只能等主加载落地后额外 flush，再断言它的副作用边界。
     await waitFor(() => statValues(c)[0] === '10', { message: '统计卡已填充' })
     await flush(10)
     expect(ElMessage.error).not.toHaveBeenCalled()
     expect(statValues(c)).toEqual(['10', '7', '3', '4'])
     expect(alarmRows(c)).toEqual([])
-    expect(c.findAll('.alarm-card .el-table')).toHaveLength(1)
+    // 首次加载失败：不能再显示一张空表（与「真的没有报警」不可区分），
+    // 由错误提示接管，并给出重试入口
+    expect(c.findAll('.alarm-card .el-table')).toHaveLength(0)
+    const alert = c.find('.alarm-card .alarm-alert')
+    expect(alert).not.toBeNull()
+    expect(alert.textContent).toContain('最近报警加载失败')
+    // 统计那一路成功，不得被牵连出错误提示
+    expect(c.findAll('.dashboard-alert')).toHaveLength(0)
     expect(c.errors).toEqual([])
+
+    const calls = getAlarms.mock.calls.length
+    alert.querySelector('button').click()
+    await flush(10)
+    expect(getAlarms.mock.calls.length).toBe(calls + 1)
+  })
+
+  test('统计数据加载失败：页面级警示与重试入口，重试成功后警示消失', async () => {
+    const c = await open(ALL, { dashboardReject: new Error('dashboard down') })
+    await flush(10)
+    expect(statValues(c)).toEqual(['-', '-', '-', '-'])
+    const alert = c.find('.dashboard-alert')
+    expect(alert).not.toBeNull()
+    expect(alert.textContent).toContain('统计数据加载失败')
+    expect(c.errors).toEqual([])
+
+    getDashboard.mockResolvedValue(okDashboard())
+    alert.querySelector('button').click()
+    await waitFor(() => statValues(c)[0] === '10', { message: '重试后统计卡填充' })
+    expect(c.find('.dashboard-alert')).toBeNull()
   })
 
   test('用户统计失败：不弹错（其余数据源已成功），第四卡回落到未知占位 -', async () => {

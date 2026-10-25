@@ -10,7 +10,7 @@
  *   标记：[仍有效] 复核后问题依旧 / [已修复] 已被后续修复解决 / [部分有效] 仅部分成立 /
  *   [已自陈] 用例内已记录并给出保留理由。复核证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.9 测试资产。
  *   - [仍有效·已实测] `:299-307`（现形 `:320`）标题写「携带 Bearer token」而测试服务端从不读该头；`:383-388` 标题写「HTTPS 协议选择」而 `_post` 分支根本没被调用（deliverables/七维代码健康度深度审计-2026-09-18.md）
- *     变异实测确认（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）：让 utils/logShipper.js:180
+ *     变异实测确认（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）：让 utils/logShipper.js:316
  *       **永不写 `Authorization` 头** → 本文件 **27/27 全绿**；同点位 throw 正对照杀 **5 例**
  *       （含「携带 Bearer token」用例本身）⇒ 该标题**确未**被断言。用例 `:325` 自陈
  *       「服务端不校验，只是确认不报错」。⚠️ HTTPS 选择那半条见下条（2026-09-20 已静态确认）。
@@ -56,6 +56,8 @@ const { waitFor, flushEventLoop } = require('../helpers/waitFor');
 // 怎么表现"，不是目标门禁。显式放行回环（fail-closed 门禁的显式出口），
 // 目标门禁本身的行为由 logShipperSchemeAllowlist.test.js 钉住。
 process.env.LOG_SHIPPING_ALLOW_PRIVATE_HOSTS = '127.0.0.1,localhost,::1';
+// 2026-10-24 起 http 端点需显式放宽（生产启动闸仍拒绝"明文 + Bearer"组合）
+process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
 
 afterAll(() => {
   siSpy.mockRestore();

@@ -11,7 +11,7 @@
 import { useAuthStore } from './auth'
 import { useAppStore } from './app'
 
-export { useAuthStore, normalizeUser } from './auth'
+export { useAuthStore, normalizeUser, toPersistedUser } from './auth'
 export { useAppStore } from './app'
 export { safeStorage, safeLocal, readSessionState } from './storage'
 

@@ -624,6 +624,25 @@ describe('恢复演练时效判定（A8 动作 1 的可执行形态）', () => {
     expect(evaluateDrillRecency({ dates: ['2026-05-01'], now: NOW }).ok).toBe(false);
   });
 
+  test('非法日期与未来日期 fail-closed（NaN/负数不能绕过逾期判定）', () => {
+    const invalid = evaluateDrillRecency({ dates: ['2026-13-40'], now: NOW });
+    expect(invalid.ok).toBe(false);
+    expect(invalid.code).toBe('drill_date_invalid');
+
+    // 2026-09-31 / 2026-02-30 会被 Date.parse 归一化成 10-01 / 03-02，
+    // 若不回读校验，一条不存在的"最近演练"日期就能骗过时效判定。
+    for (const date of ['2026-09-31', '2026-02-30']) {
+      const normalized = evaluateDrillRecency({ dates: [date], now: NOW });
+      expect(normalized.ok).toBe(false);
+      expect(normalized.code).toBe('drill_date_invalid');
+    }
+
+    const future = evaluateDrillRecency({ dates: ['2027-01-01'], now: NOW });
+    expect(future.ok).toBe(false);
+    expect(future.code).toBe('drill_date_future');
+    expect(future.ageDays).toBeLessThan(0);
+  });
+
   test('留档不可读 ⇒ error（读不到不等于没逾期）', async () => {
     const report = await runPatrol({
       backupDir: BACKUP_DIR,

@@ -5,7 +5,8 @@
 
 const FireAlarm = require('../models/FireAlarm');
 const logger = require('../utils/logger');
-const { escapeRegExp, parseDateBoundary, uniqueIdStrings } = require('../utils/helpers');
+const { parseDateBoundary, uniqueIdStrings } = require('../utils/helpers');
+const { normalizeSearchTerm, substringPattern, prefixPattern } = require('../utils/searchPatterns');
 // 短别名：长名单调用点会超 printWidth 被 prettier 折行，而本文件 max-lines 贴基线
 const {
   withListBudget,
@@ -84,17 +85,18 @@ class AlarmService {
     // 空集让调用方分不清「没有报警」与「没有可见范围」。
     applyDataScopeToQuery(query, dataScope, DATA_SCOPE_FIELDS.alarm);
 
-    if (search) {
-      const escaped = escapeRegExp(search);
+    const searchTerm = normalizeSearchTerm(search);
+    if (searchTerm) {
       // 必须走 applySearchCondition 而不是直接 query.$or = [...]：
       // alarm 的属主声明是数组（reporter.userId ∪ handler），self 范围下
       // applyDataScopeToQuery 已经把 $or 用作范围条件，直接赋值会把它整条覆盖，
       // 等于「带 search 的报警列表不做数据范围过滤」。详见 utils/scopeCast.js。
       applySearchCondition(query, {
         $or: [
-          { alarmCode: new RegExp(escaped, 'i') },
-          { description: new RegExp(escaped, 'i') },
-          { 'location.building': new RegExp(escaped, 'i') },
+          // 编号是标识符：锚定前缀可走索引；描述/楼栋是自由文本，保持子串
+          { alarmCode: prefixPattern(searchTerm) },
+          { description: substringPattern(searchTerm) },
+          { 'location.building': substringPattern(searchTerm) },
         ],
       });
     }
@@ -223,6 +225,15 @@ class AlarmService {
 
     logger.warn(`新火警报警：${alarm.alarmCode} - ${alarm.description}`);
     return alarm;
+  }
+
+  /**
+   * 摘掉一条报警上的设备引用（设备在"校验 → 落库"窗口内被删除时的收口）
+   *
+   * 条件写 `deviceId`：不覆盖期间被其他请求改过的关联。调用方负责日志。
+   */
+  async detachDevice(alarmId, deviceId) {
+    await FireAlarm.updateOne({ _id: alarmId, deviceId }, { $unset: { deviceId: 1 } });
   }
 
   /**

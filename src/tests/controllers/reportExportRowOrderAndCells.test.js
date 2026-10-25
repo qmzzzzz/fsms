@@ -5,7 +5,7 @@
  * `EXPORT_MODEL_CONFIG` 的 sort 原先只写主排序键（`{occurredAt:-1}` / `{timestamp:-1}`
  * / `{planStartTime:-1}`），而 populate 分支"取 id"那条腿又补了一个**反向**的 `_id: 1`。
  * 仓库既有不变式不是新约定：「排序键取值可重复 ⇒ 必须有同向 `_id` 次级键」
- * （models/FireAlarm.js:242、models/Inspection.js:179、models/AuditLog.js:309 三处写明，
+ * （models/FireAlarm.js:242、models/Inspection.js:187、models/AuditLog.js:309 三处写明，
  * 复合索引也按 `{key:-1,_id:-1}` 建），列表服务层用的正是它
  * （AlarmService.js:118、InspectionService.js:146、auditQueryService.js:154），
  * 并由 tests/explainSpotcheckContract.test.js:66-71 逐字段钉住那四份排序。
@@ -147,6 +147,16 @@ describe('xlsx 导出的行序与单元格文本', () => {
       },
     ]);
 
+    // 位置由 building/floor/room 拼接：building 以换行开头时，单元格首字符是 \n
+    // 而不是 =，只看首字符的加固判据会放行，危险前缀被藏到第二位。
+    await FireAlarm.create({
+      alarmType: 'smoke',
+      description: `NL-${stamp}`,
+      occurredAt: TIE_TIME,
+      status: 'pending',
+      location: { building: '\n=1+1' },
+    });
+
     // 审计侧：一条"没有 success / 没有 duration"的记录（suspicious_report 等直写点的常态）
     await AuditLog.create({
       action: 'suspicious_report',
@@ -180,6 +190,7 @@ describe('xlsx 导出的行序与单元格文本', () => {
     const FireAlarm = require('../../models/FireAlarm');
     await FireAlarm.deleteMany({ description: new RegExp(`^TIE-${stamp}`) }).catch(() => {});
     await FireAlarm.deleteMany({ description: new RegExp(`^=1\\+1 ${stamp}$`) }).catch(() => {});
+    await FireAlarm.deleteMany({ description: new RegExp(`^NL-${stamp}$`) }).catch(() => {});
     await AuditLog.deleteMany({ ip: MARKER_IP }, { bypassAppendOnly: true }).catch(() => {});
     const User = require('../../models/User');
     const Role = require('../../models/Role');
@@ -247,6 +258,13 @@ describe('xlsx 导出的行序与单元格文本', () => {
     // 正向对照：外部输入以 `=` 开头仍必须加固成 `'=…`（放行的只有占位符）
     const payload = rows.find((r) => r.description.includes('=1+1'));
     expect(payload.description).toBe(`'=1+1 ${stamp}`);
+  });
+
+  test('④b 位置拼接值以换行开头也必须加固（LF 不得把危险前缀藏到第二位）', async () => {
+    const cols = await exportXlsx('type=alarms');
+    const idx = cols['描述'].findIndex((d) => d === `NL-${stamp}`);
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(cols['报警位置'][idx]).toBe(`'\n=1+1`);
   });
 
   test('⑤ 审计表：缺字段是 `-`，duration=0 是 `0ms`（两态不得塌成一个）', async () => {

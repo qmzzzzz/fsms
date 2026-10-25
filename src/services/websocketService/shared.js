@@ -33,6 +33,49 @@ const HEARTBEAT_TIMEOUT = 60000; // 60秒超时断开
 const AUTH_TIMEOUT = 30000; // 连接后 30 秒内必须完成认证，否则强制断开
 
 /**
+ * 单个来源 IP 允许同时持有的**未认证**连接数（#9）
+ *
+ * 认证超时（30s）只保证未认证连接不会永久占用名额，挡不住的是"在超时前
+ * 短时间灌入大量连接"：全局上限 1000 是单进程共享的，一个来源用 1000 条
+ * 未认证连接就能把本进程配额打满，已登录用户的重连全部被拒——一条低成本的
+ * 拒绝服务路径，且无需任何凭据。
+ *
+ * 上限按「IP + 未认证」计，认证成功即释放名额：NAT/代理出口后的多个正常
+ * 用户只要完成认证就不受此闸影响；真正被限制的是"同时挂着一堆还没认证的
+ * 连接"这一攻击形态。取值高于单用户正常并发（多标签页/多设备）一个量级。
+ *
+ * 地址取 resolveHandshakeIPForSecurityDecision（与 allowedIPs/黑名单同一把
+ * 安全裁决尺）：公网直连者无法用伪造 XFF 把连接拆到任意"新 IP"上绕过配额。
+ */
+const MAX_UNAUTHENTICATED_PER_IP = 10;
+
+/**
+ * 入站事件令牌桶（P1，2026-10-24）
+ *
+ * 为什么需要：连接层那三个闸（进程总连接数 / 未认证 IP 配额 / 认证超时）都数的是
+ * **连接**，对"一条已认证连接里的事件频率"完全无感。而 `join-room` 在
+ * `ROOM_ROLE_REQUIREMENTS` 命中时会在**角色判定之前**先调 `revalidateSocket`
+ * （一次 User 查询 + 一次 UserSession 查询，见 push.js 的 join-room 分支）——
+ * 于是任何已认证用户都能把 `join-room 'role-management'` 当成免费的库查询放大器：
+ * 他不需要 admin 角色，因为在拿到"无权加入"之前，查询已经付过了。
+ * 一条连接每秒发几千次，就是每秒几千次库查询，而这条路径不受任何限流约束。
+ *
+ * 为什么是令牌桶而不是固定窗口：固定窗口在窗口边界允许 2× 突发（上一窗口末尾
+ * 一次、下一窗口开头一次），而这里要挡的正是"突发"。令牌桶的突发额度由
+ * CAPACITY 明确给定，稳态由 REFILL 明确给定，两个数都可解释。
+ *
+ * 取值依据（正常客户端一生只发 1 次 auth + ≤4 次 join-room，房间加入后长期保持）：
+ *   · CAPACITY 20  —— 重连抖动时连发几轮也够用（每轮 5 个事件）
+ *   · REFILL 2/s   —— 远高于任何正常交互；同时把"1000 条连接同时超速"的
+ *                     最坏库查询量压到 2000/s 量级
+ *   · MAX_VIOLATIONS 30 —— 连续 30 次被拒（约 15 秒持续超速）才断开；
+ *                     计数在成功消费一次后归零，所以偶发超速不会累积到断开
+ */
+const WS_INBOUND_BUCKET_CAPACITY = 20;
+const WS_INBOUND_REFILL_PER_SEC = 2;
+const WS_INBOUND_MAX_VIOLATIONS = 30;
+
+/**
  * 账户是否处于「临时锁定」中（暴力破解阈值写入，10 分钟后自动失效）。
  *
  * 判据与 HTTP 侧同源：`src/middleware/auth.js` 的 `assertAccountUsable` 用
@@ -81,9 +124,13 @@ const roomRolesSatisfied = (room, roleCodes) => {
 
 module.exports = {
   MAX_CONNECTIONS_PER_PROCESS,
+  MAX_UNAUTHENTICATED_PER_IP,
   HEARTBEAT_INTERVAL,
   HEARTBEAT_TIMEOUT,
   AUTH_TIMEOUT,
+  WS_INBOUND_BUCKET_CAPACITY,
+  WS_INBOUND_REFILL_PER_SEC,
+  WS_INBOUND_MAX_VIOLATIONS,
   isTemporarilyLocked,
   userRoom,
   ALLOWED_ROOMS,

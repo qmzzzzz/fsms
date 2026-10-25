@@ -60,8 +60,11 @@ CI 的 `security-audit` 作业在 2026-10-09 登记时两处审计都只有 `npm
 该缺口已在同日按下节「已采取的动作」处置；当前口径是 **prod 硬门禁 + dev 允许清单**：
 
 - prod 树：后端与 web-admin 各跑 `npm audit --omit=dev --audit-level=moderate`，有漏洞即失败；
-- dev 树：后端跑 `npm audit --json`，交 `scripts/check-audit-allowlist.js` 对照
-  `deployment/audit-allowlist.json`——未登记、登记已过期、或登记项已无对应公告，均失败。
+- 完整树（含 dev）：后端与 web-admin **各**跑 `npm audit --json`，交
+  `scripts/check-audit-allowlist.js` 对照 `deployment/audit-allowlist.json`——
+  未登记、登记已过期、或登记项已无对应公告，均失败。
+  （2026-10-24 审计补齐 web-admin：此前只有后端走允许清单，前端 dev 树的
+  vitest 链 advisory 可以长期存在而 CI 全绿。）
 
 下列 35 条为登记时的实测值，保留以说明允许清单的覆盖范围：
 
@@ -151,7 +154,7 @@ CI 的 `security-audit` 作业在 2026-10-09 登记时两处审计都只有 `npm
   （`dependency-review.yml` 只比对「新引入的依赖有无漏洞」，**不校验锁文件与上次是否一致**）。
 
 本锚把「上次人工拍板时锁文件长什么样」固化为 `deployment/lockfile-anchor.json` 里的
-semantic 哈希，CI 的 `security-audit` 作业每次比对。
+semantic 哈希，CI 的 `dependency-policy` 作业在**任何 `npm ci` 之前**每次比对。
 
 ### 口径：semantic 哈希，不是原始字节哈希
 
@@ -181,8 +184,10 @@ checkout，而 `.gitattributes` 对 `package-lock.json` 无规则。实测
   这一类只有「SBOM + 来源证明 + CVE 面」能挡，本锚不声称覆盖。
 - ✗ **它不是 SBOM。** 本锚是**篡改检测**（「依赖树自上次拍板以来有没有被改动」）；
   SBOM 是**合规与追溯**（「我声明用了哪些组件、什么版本、什么许可证」）。
-  二者互补、不互相替代。**当前仓库仍然没有合规意义上的 SBOM**——组件清单/许可证/
-  来源证明都不在本锚的输出里，请勿把「有了完整性锚」误当成「有了 SBOM」。
+  二者互补、不互相替代。**本锚本身不是 SBOM**——组件清单/许可证/来源证明都不在
+  它的输出里；合规意义上的 CycloneDX SBOM 由构建 job 单独产出并上传
+  （`.github/workflows/ci.yml` 的 `Generate SBOM` + `Upload SBOM artifact`），
+  请勿把「有了完整性锚」误当成「有了 SBOM」。
 
 ## 通用约定
 
@@ -193,6 +198,7 @@ checkout，而 `.gitattributes` 对 `package-lock.json` 无规则。实测
   该目录**不进版本库**（见 `CONTRIBUTING.md` §9）⇒ 例外必须在 PR 描述里同步摘要。
 - **CI 阈值**：`security-audit` job 使用 `--audit-level=moderate`（2026-09-16 起）。
   即 moderate 及以上 advisory 一律阻断合并，不再区分「高危才拦」。
-  该阈值对**两处 `--omit=dev` 审计**生效；**dev 树**由 2026-10-09 新增的
-  「含 dev 依赖审计门禁」（`scripts/check-audit-allowlist.js` + `deployment/audit-allowlist.json`）
-  覆盖，阈值同为 moderate，但无补丁项走**显式登记**而非直接阻断。
+  当前共四处：后端与 web-admin 各自的 `--omit=dev` 生产树硬门禁，以及同样两处
+  **完整树**（含 dev）经「含 dev 依赖审计门禁」（`scripts/check-audit-allowlist.js` +
+  `deployment/audit-allowlist.json`）判定。完整树阈值同为 moderate，但无补丁项走
+  **显式登记**而非直接阻断；未登记 / 过期 / 已陈旧一律失败。

@@ -6,6 +6,7 @@ const { readPositiveNumberEnv } = require('./envNumber');
 // 仅依赖 logger，无循环依赖，可顶层引入。未配置 REDIS_URL 时
 // isRedisEnabled() 恒为 false，下列分布式路径全部回退为原进程内语义。
 const sharedCache = require('../services/sharedCache');
+const fence = require('./auditChainFence');
 const {
   PAYLOAD_FIELDS_V1,
   PAYLOAD_FIELDS_V2,
@@ -74,9 +75,7 @@ function computeHmac(hash) {
 }
 
 /** 是否配置了 HMAC 密钥（校验脚本据此决定是否执行 hmac 校验） */
-function isHmacConfigured() {
-  return !!getHmacSecret();
-}
+const isHmacConfigured = () => !!getHmacSecret();
 
 /**
  * 取最新链尾（仅用于首次初始化链尾，见 getChainTail）。
@@ -112,6 +111,8 @@ let chainLock = Promise.resolve();
 // 超时的「僵尸 fn」稍后调用 advanceChainTail 时因代际过期被跳过，
 // 不再用过期 hash 覆写已重同步的链尾；代价是下一次操作从 DB 重同步
 let chainGeneration = 0;
+// 僵尸写入冻结窗口的状态机在 auditChainFence（本文件受体积棘轮约束）：
+// 超时后本地拒绝新写入、跨实例保持并续租锁，僵尸落定重同步后再解冻。
 /**
  * F-184b：共享链尾是否**不可信**（上一次推进只写进了本进程内存、Redis 没收）。
  *
@@ -126,8 +127,7 @@ let sharedTailUntrusted = false;
 /** 非法数值配置的告警（本变量只在模块加载期读一次，无需去重） */
 function invalidEnvWarning(name, raw, fallback) {
   logger.error(
-    `${name}=${JSON.stringify(raw)} 非法（须为正的毫秒数），已按默认 ${fallback}ms 处理；` +
-      '负值或零会让审计链锁立即判定超时 ⇒ 链尾永不推进、全部审计降级为无哈希落库'
+    `${name}=${JSON.stringify(raw)} 非法（须为正的毫秒数），已按默认 ${fallback}ms 处理；负值或零会让审计链锁立即判定超时 ⇒ 链尾永不推进、全部审计降级为无哈希落库`
   );
 }
 
@@ -161,8 +161,11 @@ const CHAIN_LOCK_TIMEOUT_MS = readPositiveNumberEnv('AUDIT_CHAIN_LOCK_TIMEOUT_MS
  * 超时保护：原实现无超时——一旦 fn 因网络挂起（Mongo 无响应且驱动
  * 未超时）永不 settle，chainLock 永远不释放，其后**所有**审计写入无限排队，
  * 表现为「服务正常但审计彻底停摆」，且无任何日志线索。
- * 现在超时即强制释放锁并标记链尾失效（下次从 DB 重新同步），
- * 宁可让该批次以 legacy 形式落库，也不能让审计链整体死锁。
+ * 现在超时即释放**进程内排队**并让本批以错误回退（缓冲重试 / legacy 落库），
+ * 不让审计链整体死锁；但 fn 本身无法取消，超时后它仍是「僵尸写入」。
+ * 因此超时同时冻结后续链写入，直到僵尸 fn 落定并完成 DB 重同步
+ * （本地 chainFrozen + 跨实例保持并续租分布式锁），否则后一批会与僵尸
+ * 从同一父哈希各写一条 —— 链分叉不可自动修复，比一次降级严重得多。
  */
 function withChainLock(fn) {
   const prev = chainLock;
@@ -189,10 +192,13 @@ function withChainLock(fn) {
       waitTimer = setTimeout(() => {
         // B-L5：前驱超时放行时同样标记链尾失效并递增代际——
         // 重叠的后继与挂起的前驱，其 advanceChainTail 均因代际过期被跳过，
-        // 直到任一操作从 DB 重同步；代价是一次额外重同步
+        // 直到任一操作从 DB 重同步；代价是一次额外重同步。
+        // 前驱的 fn 可能仍在飞（它就是挂起本身）：冻结后继写入，等前驱落定。
+        // 通常情况下前驱自己的持锁超时先触发并负责解冻；这里兜住定时器调度乱序。
         chainTailLoaded = false;
         chainTail = null;
         chainGeneration += 1;
+        fence.freeze();
         resolve();
       }, CHAIN_LOCK_TIMEOUT_MS);
       if (waitTimer.unref) waitTimer.unref();
@@ -205,6 +211,10 @@ function withChainLock(fn) {
 
   return waitPrev
     .then(async () => {
+      // 僵尸冻结窗口：上一持有者超时后 fn 仍在飞行，链尾状态未知。
+      // 此时进入临界区会与僵尸共享同一父哈希 ⇒ 分叉，直接失败让调用方回退。
+      fence.check();
+
       // A-1：进程内锁已就绪后叠加跨实例分布式锁
       let distLock = null;
       if (sharedCache.isRedisEnabled()) {
@@ -226,6 +236,7 @@ function withChainLock(fn) {
       }
 
       let timer = null;
+      let timedOut = false;
       const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => {
           // 链尾可能已被 fn 部分推进，无法判断其状态 → 标记失效，下次从 DB 重同步；
@@ -233,12 +244,14 @@ function withChainLock(fn) {
           chainTailLoaded = false;
           chainTail = null;
           chainGeneration += 1;
+          // 冻结下一批，直到僵尸 fn 真正落定（见 auditChainFence）
+          timedOut = true;
+          fence.freeze();
           if (sharedCache.isRedisEnabled()) {
             resyncChainTail(); // 永不 reject（内部吞错），尽力而为地清除共享链尾
           }
-          reject(
-            new Error(`审计链锁持有超时（${CHAIN_LOCK_TIMEOUT_MS}ms），已强制释放并标记链尾失效`)
-          );
+          const reason = `审计链锁持有超时（${CHAIN_LOCK_TIMEOUT_MS}ms），已冻结后续链写入并等待僵尸任务落定`;
+          reject(new Error(reason));
         }, CHAIN_LOCK_TIMEOUT_MS);
         if (timer.unref) timer.unref();
       });
@@ -246,30 +259,34 @@ function withChainLock(fn) {
       // B-L4：fn 以当前代际调用——持锁超时递增代际后，僵尸 fn 稍后的
       // advanceChainTail 因代际过期被跳过
       const gen = chainGeneration;
+      const work = Promise.resolve().then(() => fn(gen));
 
       try {
-        return await Promise.race([Promise.resolve().then(() => fn(gen)), timeout]);
+        return await Promise.race([work, timeout]);
       } finally {
         if (timer) clearTimeout(timer);
-        if (distLock) {
-          try {
-            await distLock.release();
-          } catch (_) {
-            /* 锁会随 PX 到期，释放失败不致命 */
+        if (!timedOut) {
+          if (distLock) {
+            try {
+              await distLock.release();
+            } catch (_) {
+              /* 锁会随 PX 到期，释放失败不致命 */
+            }
           }
+        } else {
+          // 超时的是锁，不是 fn：work 仍在后台跑且随时可能提交。
+          // 分布式锁不释放并续租，直到僵尸落定；重同步必须先于解冻。
+          fence.waitForZombie(work, distLock, {
+            ttlMs: CHAIN_LOCK_TIMEOUT_MS,
+            resync: async () => {
+              if (sharedCache.isRedisEnabled()) sharedTailUntrusted = true;
+              await resyncChainTail();
+            },
+          });
         }
       }
     })
-    .then(
-      (v) => {
-        release();
-        return v;
-      },
-      (e) => {
-        release();
-        throw e;
-      }
-    );
+    .finally(() => release());
 }
 
 /**
@@ -357,8 +374,7 @@ async function advanceChainTail(hash, gen = chainGeneration) {
       chainTail = hash;
       chainTailLoaded = true;
       logger.error(
-        '审计链共享链尾未能写入 Redis（只落到本进程内存），此后每批改从 DB 重读链尾：' +
-          '继续信任共享层旧尾会让本实例与其他实例在同一父哈希上各写一条 ⇒ 链分叉（F-184a 起分叉会计入 chain_fork）'
+        '审计链共享链尾未能写入 Redis（只落到本进程内存），此后每批改从 DB 重读链尾：继续信任共享层旧尾会让本实例与其他实例在同一父哈希上各写一条 ⇒ 链分叉（F-184a 起分叉会计入 chain_fork）'
       );
     }
     return;
@@ -399,15 +415,9 @@ async function resyncChainTail() {
   // 就是这枚幻影尾，而调用方（auditBuffer 的部分落库自愈入口）只调本函数、不再手工清。
   chainTail = null;
   chainTailLoaded = false;
-  if (sharedCache.isRedisEnabled()) {
-    try {
-      await sharedCache.del(CHAIN_TAIL_KEY);
-    } catch (_) {
-      // 删除失败：共享链尾残留，下次 getChainTail 不会从 DB 重读——属降级，
-      // 但「链尾失效」本就是自愈入口的尽力而为语义，吞错避免 fire-and-forget
-      // 路径产生 unhandled rejection
-    }
-  }
+  // 删除失败：共享链尾残留属降级，但「链尾失效」本就是尽力而为的自愈入口，
+  // 吞错避免 fire-and-forget 路径产生 unhandled rejection
+  if (sharedCache.isRedisEnabled()) await sharedCache.del(CHAIN_TAIL_KEY).catch(() => {});
 }
 
 /**
@@ -436,6 +446,29 @@ const PAYLOAD_SCHEMA_DEFAULTS = {
   riskLevel: () => 'low',
   riskFactors: () => [],
 };
+
+// 子文档的 schema 字段集（与 AuditLog.js 的 clientInfo / location 声明同步）。
+// 批量路径先算哈希、insertMany 才铸造：未声明的子键会被 Mongoose 剥掉，
+// 若被哈希的对象仍带着它，落库读回重算必然 hash_mismatch（永久假篡改）。
+// 因此必须在算哈希前把子对象投影成 schema 会保留的形态——未知子键删除，
+// 已知但值为 undefined 的键也删除（stableStringify 会把 undefined 写成 null，
+// 而 Mongoose 会丢弃该键，两侧同样分叉）。
+const AUDIT_CLIENT_INFO_FIELDS = Object.freeze([
+  'browser',
+  'os',
+  'device',
+  'reportedIp',
+  'socketPeer',
+]);
+const AUDIT_LOCATION_FIELDS = Object.freeze(['country', 'province', 'city']);
+
+function projectSubdocument(source, allowedFields) {
+  const projected = {};
+  for (const field of allowedFields) {
+    if (source[field] !== undefined) projected[field] = source[field];
+  }
+  return projected;
+}
 
 /**
  * 批量串链：为 docs 按序计算 prevHash/hash/hmac 并标记 payload 版本。
@@ -474,6 +507,26 @@ function chainBatch(docs, startPrevHash) {
     // U+FFFD（61 fffd 62）⇒ 读回复算必然 hash_mismatch。实测形态见
     // tests/services/auditUsernameCastGate.test.js（闸前后各一条，反向对照）。
     doc.username = cleanAuditUsername(doc.username);
+    // clientInfo 整对象在 payload V2+ 里，其 ip 子字段与顶层 ip 同族：
+    // 必须在这里做与 schema set 相同的清洗，否则超长/带控制字符的 XFF
+    // 会带着原样进哈希、落库时被剪到 64 ⇒ 永久 hash_mismatch。
+    // undefined 键要删掉而不是留着：canonicalPayload 的 stableStringify
+    // 把 undefined 序列化为 null，Mongoose 却会丢弃该键，两侧形态不一致。
+    // 先按 schema 字段集投影：未声明子键（如 gps）必须在这里删除，
+    // 否则被哈希的形态带着它、insertMany 铸造时被剥掉，读回复算必然失配。
+    if (doc.clientInfo && typeof doc.clientInfo === 'object') {
+      const clientInfo = projectSubdocument(doc.clientInfo, AUDIT_CLIENT_INFO_FIELDS);
+      for (const key of ['reportedIp', 'socketPeer']) {
+        const cleaned = auditIpOrUndefined(clientInfo[key]);
+        if (cleaned === undefined) delete clientInfo[key];
+        else clientInfo[key] = cleaned;
+      }
+      doc.clientInfo = clientInfo;
+    }
+    // location 同理：schema 只声明 country/province/city，多余子键会在铸造时消失。
+    if (doc.location && typeof doc.location === 'object') {
+      doc.location = projectSubdocument(doc.location, AUDIT_LOCATION_FIELDS);
+    }
 
     doc.prevHash = prevHash;
     const payload = canonicalPayload(doc, CURRENT_PAYLOAD_VERSION);
@@ -495,6 +548,7 @@ function __resetForTest() {
   chainTail = null;
   chainTailLoaded = false;
   chainGeneration = 0;
+  fence.reset();
   sharedTailUntrusted = false;
 }
 
@@ -509,6 +563,7 @@ module.exports = {
   canonicalPayloadV2LegacyBatch,
   computeHash,
   computeHmac,
+  getHmacSecret,
   isHmacConfigured,
   getLatestHash,
   chainBatch,
@@ -517,5 +572,6 @@ module.exports = {
   advanceChainTail,
   rollbackChainTail,
   resyncChainTail,
+  isChainFrozen: fence.isFrozen,
   __resetForTest,
 };

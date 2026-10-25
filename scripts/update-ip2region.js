@@ -16,14 +16,34 @@
  * 源自数据生成器的稳定事实而非某条具体记录——防止把 HTML 错误页/截断文件
  * 当成数据替换进仓库（本仓 check:utf8 等门禁也不会拦二进制，只能靠这里自证）。
  */
+const crypto = require('crypto');
 const fs = require('fs');
 const https = require('https');
+const path = require('path');
 const zlib = require('zlib');
 
 const searcher = require('../src/utils/ip2regionSearcher');
 
 const TARGET = searcher.DATA_FILE;
 const USER_AGENT = 'fsms-update-ip2region/1.0';
+const CHECKSUM_FILE = path.resolve(__dirname, '..', 'deployment', 'ip2region-checksum.json');
+
+/** 读内容锚；缺失/畸形一律抛错（fail-closed，不回退到"信任即用"） */
+const loadPin = () => {
+  const pin = JSON.parse(fs.readFileSync(CHECKSUM_FILE, 'utf8'));
+  if (!/^[0-9a-f]{64}$/.test(pin.sha256) || !Number.isInteger(pin.bytes)) {
+    throw new Error(`${CHECKSUM_FILE} 形状非法（需要 sha256 64 位 hex 与整数 bytes）`);
+  }
+  return pin;
+};
+
+/** 纯函数：比对 buffer 与内容锚；返回 {ok, actual}，便于测试构造变异样本 */
+const checkPin = (buffer, pin) => ({
+  ok: buffer.length === pin.bytes && digest(buffer) === pin.sha256,
+  actual: { bytes: buffer.length, sha256: digest(buffer) },
+});
+
+const digest = (buffer) => crypto.createHash('sha256').update(buffer).digest('hex');
 
 const SOURCES = [
   {
@@ -131,8 +151,18 @@ const extractXdbFromNpmTarball = async () => {
 };
 
 const main = async () => {
+  const pin = loadPin();
   if (process.argv.includes('--check')) {
-    verifyBuffer(fs.readFileSync(TARGET), '当前数据');
+    const current = fs.readFileSync(TARGET);
+    const result = checkPin(current, pin);
+    if (!result.ok) {
+      throw new Error(
+        `当前数据与内容锚不一致（期望 ${pin.bytes} 字节 / ${pin.sha256}，` +
+          `实际 ${result.actual.bytes} 字节 / ${result.actual.sha256}）`
+      );
+    }
+    verifyBuffer(current, '当前数据');
+    console.log('✅ 内容锚一致');
     return;
   }
 
@@ -158,14 +188,41 @@ const main = async () => {
     return;
   }
 
+  // 内容锚闸：结构探针只能证明"格式像数据"，证明不了"字节就是我们要的那份"。
+  // 新数据与锚不一致时必须显式 --accept-new-checksum（一次人工拍板），
+  // 否则拒绝落盘——上游/镜像被投毒时不会静默进入版本库。
+  const result = checkPin(buffer, pin);
+  const acceptNew = process.argv.includes('--accept-new-checksum');
+  if (!result.ok && !acceptNew) {
+    console.error(
+      `新数据与内容锚不一致（期望 ${pin.bytes} 字节 / ${pin.sha256}，` +
+        `实际 ${result.actual.bytes} 字节 / ${result.actual.sha256}）。`
+    );
+    console.error('确认这是上游正常更新后，重跑并加 --accept-new-checksum；变更须随提交评审。');
+    process.exitCode = 1;
+    return;
+  }
+
   // 原子替换：先写同目录临时文件再 rename，中途断电/被杀不会留下半截数据
   const tmp = `${TARGET}.tmp`;
   fs.writeFileSync(tmp, buffer);
   fs.renameSync(tmp, TARGET);
+  if (!result.ok) {
+    const next = { ...pin, bytes: result.actual.bytes, sha256: result.actual.sha256 };
+    const tmpPin = `${CHECKSUM_FILE}.tmp`;
+    fs.writeFileSync(tmpPin, `${JSON.stringify(next, null, 2)}\n`);
+    fs.renameSync(tmpPin, CHECKSUM_FILE);
+    console.log(`内容锚已更新：${result.actual.bytes} 字节 / ${result.actual.sha256}`);
+  }
   console.log(`已更新 ${TARGET}（${buffer.length} 字节）。建议提交本次数据变更。`);
 };
 
-main().catch((err) => {
-  console.error(`更新失败：${err.message}`);
-  process.exitCode = 1;
-});
+// 作为脚本执行时才跑 CLI；被 require 时只暴露纯函数供测试构造变异样本。
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`更新失败：${err.message}`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { checkPin, digest, loadPin, CHECKSUM_FILE };

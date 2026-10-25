@@ -34,6 +34,7 @@ describe('mfaService / tokenService 安全原语分支补齐', () => {
   let AuditLog;
   let mfaService;
   let tokenService;
+  let sessionService;
   const PASSWORD = randomPassword();
   const stamp = `sp${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
 
@@ -55,12 +56,15 @@ describe('mfaService / tokenService 安全原语分支补齐', () => {
     AuditLog = require('../../models/AuditLog');
     mfaService = require('../../services/mfaService');
     tokenService = require('../../services/tokenService');
+    sessionService = require('../../services/sessionService');
   });
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
       await User.deleteMany({ username: new RegExp(`^${stamp}`) }).catch(() => {});
       await AuditLog.deleteMany({ username: new RegExp(`^${stamp}`) }).catch(() => {});
+      const UserSession = require('../../models/UserSession');
+      await UserSession.deleteMany({ sid: new RegExp(`^${stamp}`) }).catch(() => {});
       await mongoose.connection.close();
     }
   });
@@ -213,26 +217,43 @@ describe('mfaService / tokenService 安全原语分支补齐', () => {
   });
 
   describe('tokenService 轻量探测', () => {
+    // refresh 现必须绑定可用设备会话：签发前先落一条，sid 前缀供 afterAll 清理
+    const boundRefresh = async (u, label, version = 0) => {
+      const sid = `${stamp}${label}`;
+      await sessionService.createSession({
+        userId: u._id,
+        req: { ip: '127.0.0.1', get: () => 'jest-token-probe' },
+        sid,
+      });
+      return tokenService.generateRefreshToken(u._id, version, sid);
+    };
+
     test('isAccessTokenValid：畸形令牌吞错返回 false', async () => {
       await expect(tokenService.isAccessTokenValid('not-a-jwt')).resolves.toBe(false);
     });
 
     test('isRefreshTokenValid：有效令牌 → true', async () => {
       const u = await makeUser('refreshok');
-      const token = tokenService.generateRefreshToken(u._id, 0, null);
+      const token = await boundRefresh(u, 'refreshok');
       await expect(tokenService.isRefreshTokenValid(token)).resolves.toBe(true);
+    });
+
+    test('isRefreshTokenValid：无 sid 的旧式令牌 → false', async () => {
+      const u = await makeUser('refreshnosid');
+      const token = tokenService.generateRefreshToken(u._id, 0, null);
+      await expect(tokenService.isRefreshTokenValid(token)).resolves.toBe(false);
     });
 
     test('isRefreshTokenValid：非 active 用户 → false', async () => {
       const u = await makeUser('refreshlocked', { status: 'locked' });
-      const token = tokenService.generateRefreshToken(u._id, 0, null);
+      const token = await boundRefresh(u, 'refreshlocked');
       await expect(tokenService.isRefreshTokenValid(token)).resolves.toBe(false);
     });
 
     test('isRefreshTokenValid：tokenVersion 不匹配 → false', async () => {
       const u = await makeUser('refreshver');
+      const token = await boundRefresh(u, 'refreshver');
       await User.findByIdAndUpdate(u._id, { $inc: { tokenVersion: 1 } });
-      const token = tokenService.generateRefreshToken(u._id, 0, null);
       await expect(tokenService.isRefreshTokenValid(token)).resolves.toBe(false);
     });
 
@@ -242,7 +263,7 @@ describe('mfaService / tokenService 安全原语分支补齐', () => {
 
     test('isRefreshTokenValid：已删除用户 → false', async () => {
       const u = await makeUser('refreshgone');
-      const token = tokenService.generateRefreshToken(u._id, 0, null);
+      const token = await boundRefresh(u, 'refreshgone');
       await User.deleteOne({ _id: u._id });
       await expect(tokenService.isRefreshTokenValid(token)).resolves.toBe(false);
     });

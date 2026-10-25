@@ -50,6 +50,7 @@ const {
   addToBlacklist,
   invalidateIPBlockCache,
   requireReAuthentication,
+  requireReauthTicket,
   fileUploadSecurity,
 } = require('./security');
 
@@ -105,6 +106,7 @@ module.exports = {
   addToBlacklist,
   invalidateIPBlockCache,
   requireReAuthentication,
+  requireReauthTicket,
   fileUploadSecurity,
 
   // L-21：原先游离于统一导出面之外的四个中间件（app.js 曾各自独立 require）

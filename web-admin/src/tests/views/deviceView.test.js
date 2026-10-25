@@ -543,6 +543,31 @@ describe('DeviceView 概览条', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('「即将到期」卡键盘可达：button 语义 + aria-label，Enter 打开清单；非可点击卡不伪装按钮', async () => {
+    // 防退化：去掉 role/tabindex/keydown → 键盘用户无法打开到期清单，
+    // aria-label 缺失 → 读屏只念数字。
+    const c = await open()
+    await waitFor(() => c.find('.device-overview'), { message: '概览条渲染' })
+    const cards = c.findAll('.device-overview .mini-stat')
+    const clickable = cards[2]
+    expect(clickable.getAttribute('role')).toBe('button')
+    expect(clickable.getAttribute('tabindex')).toBe('0')
+    expect(clickable.getAttribute('aria-label')).toBe(
+      clickable.querySelector('.label').textContent.trim()
+    )
+    // 其余四张只是读数展示：不得进入 Tab 序列
+    for (const card of [cards[0], cards[1], cards[3], cards[4]]) {
+      expect(card.getAttribute('role')).toBeNull()
+      expect(card.getAttribute('tabindex')).toBeNull()
+    }
+
+    clickable.dispatchEvent(
+      new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    )
+    await waitFor(() => getExpiring.mock.calls.length === 1, { message: 'Enter 打开到期清单' })
+    expect(c.errors).toEqual([])
+  })
+
   test('首屏统计失败：概览条整条不渲染（5 张 0 卡会被读成「设备全好」），且不弹 toast', async () => {
     getStats.mockRejectedValue(new Error('boom'))
     const c = await open()

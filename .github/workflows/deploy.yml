@@ -161,11 +161,20 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         # fail-closed：两种模式都不成立时**拒绝执行**，
         # 而不是“没配密钥就跳过部署并报绿”——后者会让人以为已发布。
         run: |
           set -euo pipefail
           if [[ -n "${DEPLOY_HOST:-}" && -n "${DEPLOY_SSH_KEY:-}" ]]; then
+            # 2026-10-24 审计 P2：主机密钥是 SSH 模式的必要条件，不是“建议”。
+            # 未配置时旧实现只 warning 并退回 accept-new（TOFU）——首次见到的
+            # 密钥被无条件信任，中间人可冒充部署主机、截获部署命令与配置。
+            # 这里在**任何环境交互之前**拒绝，避免走到部署 job 才发现。
+            if [[ -z "${DEPLOY_KNOWN_HOSTS:-}" ]]; then
+              echo "::error::SSH 模式必须配置 DEPLOY_KNOWN_HOSTS（部署主机公钥）；拒绝以 TOFU 模式连接。"
+              exit 1
+            fi
             echo "mode=ssh" >> "$GITHUB_OUTPUT"
             echo "部署方式：SSH（DEPLOY_HOST 已配置）"
             exit 0
@@ -201,6 +210,9 @@ jobs:
           # compose 用 `${ALLOWED_HOSTS:?}` 强制显式声明，缺它会在"切换"那步才被拒
           # （此前只下发 CORS_ORIGIN ⇒ 前置校验通过、切换时才炸）。见 deployWorkflow 自检。
           ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
+          # 2026-10-24 审计：compose 用 `${TRUSTED_PROXY_CIDRS:?...}` 强制显式声明——
+          # 默认留空会让代理判据静默退回兼容档。与 ALLOWED_HOSTS 同口径下发。
+          TRUSTED_PROXY_CIDRS: ${{ secrets.TRUSTED_PROXY_CIDRS }}
           # O-1：deployPolicy 的发布前置校验强制要求这两项显式给值——缺了会在
           # validatePreflight 阶段以退出码 2 拒绝（此前工作流从未下发，按文档执行必失败）。
           BACKUP_RPO_HOURS: ${{ secrets.BACKUP_RPO_HOURS }}
@@ -233,9 +245,10 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        # 密钥走 stdin 写入，不出现在命令行（命令行会进进程列表）；
-        # known_hosts 必选：不配就退回 StrictHostKeyChecking=accept-new，
-        # 首次连接会靠 TOFU（依赖首次见到的密钥）。生产建议配上。
+        # 密钥走 stdin 写入，不出现在命令行（命令行会进进程列表）。
+        # known_hosts **必选且 fail-closed**：旧实现在未配置时只 warning 并退回
+        # accept-new（TOFU），首次见到的密钥被无条件信任。现在缺少即失败，
+        # 只允许 StrictHostKeyChecking=yes。
         run: |
           set -euo pipefail
           # 三个 secret 随后都要拼进 ssh：DEPLOY_PATH 落在远程命令的**单引号**里
@@ -261,14 +274,13 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
-          if [[ -n "${DEPLOY_KNOWN_HOSTS:-}" ]]; then
-            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
-            chmod 644 ~/.ssh/known_hosts
-            echo "OPTIONS=-o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
-          else
-            echo "::warning::未配 DEPLOY_KNOWN_HOSTS：本次连接使用 TOFU（accept-new），建议后续补上以防中间人。"
-            echo "OPTIONS=-o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+          if [[ -z "${DEPLOY_KNOWN_HOSTS:-}" ]]; then
+            echo "::error::DEPLOY_KNOWN_HOSTS 为空：拒绝以 TOFU（accept-new）模式连接部署主机。"
+            exit 1
           fi
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          echo "OPTIONS=-o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
           # 失败则连接层就会拒绝（fail-closed）
           ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" -- echo "ssh ok"
@@ -281,6 +293,7 @@ jobs:
           CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
           # 与 self-hosted 路径同口径：compose 的 `:?` 要求两条部署路径都下发
           ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
+          TRUSTED_PROXY_CIDRS: ${{ secrets.TRUSTED_PROXY_CIDRS }}
           # O-1：与 self-hosted 同口径，RPO/RTO 缺一即在前置校验被拒
           BACKUP_RPO_HOURS: ${{ secrets.BACKUP_RPO_HOURS }}
           BACKUP_RTO_HOURS: ${{ secrets.BACKUP_RTO_HOURS }}
@@ -308,11 +321,18 @@ jobs:
           # 也不再要求目标机配置 AcceptEnv。`${var:?}` 保证漏配时在本地立即失败，
           # 而不是把空串送给 deploy.js 让门禁读成"关"。
           {
+            # 远程脚本此前只 cd + node scripts/deploy.js：部署机上的仓库副本可以是
+            # 任意旧版本，digest/回滚/健康门禁逻辑会静默使用旧实现。先把工作树钉到
+            # 本次工作流对应的提交，fetch/checkout 失败即中止（set -e）。
+            printf 'set -euo pipefail\n'
             printf 'cd %q\n' "$DEPLOY_PATH"
+            printf 'git fetch --prune origin %q\n' "$GITHUB_REF"
+            printf 'git checkout --detach %q\n' "$GITHUB_SHA"
             printf 'export APP_IMAGE=%q\n' "$IMAGE_TAG"
             printf 'export DEPLOY_REQUIRE_DIGEST_PIN=%q\n' "${DEPLOY_REQUIRE_DIGEST_PIN:?deploy-ssh 未下发 digest 钉死闸}"
             printf 'export CORS_ORIGIN=%q\n' "${CORS_ORIGIN:?deploy-ssh 未下发 CORS_ORIGIN}"
             printf 'export ALLOWED_HOSTS=%q\n' "${ALLOWED_HOSTS:?deploy-ssh 未下发 ALLOWED_HOSTS}"
+            printf 'export TRUSTED_PROXY_CIDRS=%q\n' "${TRUSTED_PROXY_CIDRS:?deploy-ssh 未下发 TRUSTED_PROXY_CIDRS}"
             printf 'export BACKUP_RPO_HOURS=%q\n' "${BACKUP_RPO_HOURS:?deploy-ssh 未下发 BACKUP_RPO_HOURS}"
             printf 'export BACKUP_RTO_HOURS=%q\n' "${BACKUP_RTO_HOURS:?deploy-ssh 未下发 BACKUP_RTO_HOURS}"
             if [[ -n "${ALERTMANAGER_CONFIG_PATH:-}" ]]; then

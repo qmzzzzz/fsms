@@ -358,6 +358,42 @@ async function incrWithTtl(key, ttlMs) {
   return entry.value;
 }
 
+/**
+ * 原子自减 + 下界 0（计数器回收用途，与 incrWithTtl 配对）。
+ *
+ * 不回收「因超限而被拒绝」的那次自增，计数器就会随攻击流量单调上涨：
+ * 验证码的全局上限一旦被顶满，即使攻击停了也要等整个 TTL 窗口才恢复——
+ * 而窗口内的持续请求还会反复重置/维持它。与 incr 同口径（F-211）：
+ * 配了共享层就绝不拿本地值冒充全局计数，命令失败返回 null 由调用方决定降级方向。
+ */
+const DECR_FLOOR_ZERO_SCRIPT = `
+local v = redis.call('DECR', KEYS[1])
+if v >= 0 then return v end
+local pttl = redis.call('PTTL', KEYS[1])
+redis.call('SET', KEYS[1], 0)
+if pttl > 0 then redis.call('PEXPIRE', KEYS[1], pttl) end
+return 0
+`;
+
+async function decrWithFloorZero(key) {
+  if (isRedisEnabled()) {
+    try {
+      return await state.redisClient.eval(DECR_FLOOR_ZERO_SCRIPT, 1, key);
+    } catch (err) {
+      logger.debug(`共享缓存 decr 失败（本次回收未生效）：${err.message}`);
+      return null;
+    }
+  }
+  if (isRedisConfigured()) {
+    warnIncrDegraded(key);
+    return null;
+  }
+  // 回收路径不新增内存，无需 ensureMemCleanup；过期条目按 0 处理即可
+  const entry = memStore.get(key);
+  if (!entry || entry.expireAt <= Date.now()) return 0;
+  return (entry.value = Math.max(0, entry.value - 1));
+}
+
 const { acquireLock, acquireLockBlocking, casSet } = lockOperations;
 
 /**
@@ -454,6 +490,7 @@ module.exports = {
   dropLocalCopy,
   getDel,
   incrWithTtl,
+  decrWithFloorZero,
   setIfAbsent,
   acquireLock,
   acquireLockBlocking,

@@ -166,6 +166,19 @@ describe('checkBruteForce / checkPermissionAbuse × 惩罚目标裁定', () => {
         timestamp: new Date(),
       });
     }
+    // IP 封禁要求多账号信号（单账号失败交给账户锁定/账号限流），
+    // 同一上报 IP 再播种第二个账号，才走「跨账号失败 ⇒ 封 IP」这条腿。
+    for (let i = 0; i < 3; i += 1) {
+      rows.push({
+        action: 'login_failed',
+        category: 'auth',
+        username: `zzattrbf2_${stamp}`,
+        ip: BF_REPORTED,
+        success: false,
+        riskLevel: 'low',
+        timestamp: new Date(),
+      });
+    }
     await AuditLog.insertMany(rows);
     await checkBruteForce(`zzattrbf_${stamp}`, BF_REPORTED, {
       kind: IP_ATTRIBUTION_KINDS.PUBLIC_PEER_HEADER,
@@ -234,6 +247,18 @@ describe('checkBruteForce / checkPermissionAbuse × 惩罚目标裁定', () => {
           action: 'login_failed',
           category: 'auth',
           username: user,
+          ip,
+          success: false,
+          riskLevel: 'low',
+          timestamp: new Date(),
+        });
+      }
+      // 同上：多账号信号是 IP 封禁的前置条件，每个 IP 再补第二个账号的失败
+      for (let i = 0; i < 3; i += 1) {
+        rows.push({
+          action: 'login_failed',
+          category: 'auth',
+          username: `${user}b`,
           ip,
           success: false,
           riskLevel: 'low',

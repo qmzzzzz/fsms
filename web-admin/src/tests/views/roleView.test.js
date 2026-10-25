@@ -77,6 +77,7 @@ vi.mock('element-plus/es/components/notification/index.mjs', () => ({
 
 import RoleView from '@/views/RoleView.vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
+import i18n from '@/i18n'
 
 const P_READ = ['role:read']
 const P_ALL = ['role:read', 'role:create', 'role:assign', 'role:delete']
@@ -286,6 +287,56 @@ describe('RoleView 写入口权限门控（同组件不同权限集对照）', (
     expect(items[1].querySelector('.role-delete-btn')).toBeTruthy()
     expect(items[1].querySelector('.glass-role-item__builtin')).toBeNull()
   })
+
+  test('仅 role:read（无 role:assign）：权限项与模块全选均禁用，点击不产生未保存变更', async () => {
+    const c = await mountRole(P_READ, [ROLE_BUILTIN], {
+      r1: [{ _id: 'aaaaaaaaaaaaaaaaaaaaaaaa' }],
+    })
+    const btns = c.findAll('.glass-perm-btn')
+    expect(btns).toHaveLength(2)
+    expect(btns.every((b) => b.disabled)).toBe(true)
+    expect(c.find('.module-toggle-btn').disabled).toBe(true)
+    // 点击（harness 对 disabled 元素直接跳过，等同浏览器行为）不得改勾选态
+    click(btns[1])
+    click(c.find('.module-toggle-btn'))
+    await flush(4)
+    expect(permOn(c)).toEqual([true, false])
+    expect(c.find('.unsaved-hint')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+})
+
+describe('RoleView 权限目录 403 降级', () => {
+  test('无 permission:read|tree：403 后展示说明而非空目录，切角色与广播都不再重试', async () => {
+    const forbidden = { response: { status: 403 } }
+    rolesGetList.mockResolvedValue({ data: { data: [ROLE_BUILTIN, ROLE_PLAIN] } })
+    rolesGetTree.mockRejectedValue(forbidden)
+    rolesGetById.mockImplementation((id) =>
+      Promise.resolve({ data: { data: { _id: id, name: id, permissions: [] } } })
+    )
+    active = mountComponent(RoleView, {
+      // 持 role:assign（保存按钮会出现）但没有目录读权限：正是 403 降级的目标人群
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(['role:read', 'role:assign']),
+    })
+    await waitFor(() => active.find('.perm-unavailable'), { message: '403 说明块渲染' })
+    // 不能把「无权查看」渲染成看似正常的空目录
+    expect(active.findAll('.glass-module-card')).toHaveLength(0)
+    expect(active.find('.perm-unavailable').textContent).toContain('无权查看权限目录')
+    // 保存权限按钮此时也不可用（没有目录，保存空集合会误清角色权限）
+    expect(active.find('.header-actions .glass-btn--primary').disabled).toBe(true)
+
+    // 首屏两条并行链路可能各打一次目录接口；此后不得再有新请求
+    rolesGetTree.mockClear()
+    click(active.findAll('.glass-role-item')[1])
+    await waitFor(() => rolesGetById.mock.calls.length >= 2, { message: '切角色完成' })
+    await flush(6)
+    const permsUpdated = wsOn.mock.calls.find((x) => x[0] === 'permissions-updated')[1]
+    permsUpdated()
+    await flush(6)
+    expect(rolesGetTree).not.toHaveBeenCalled()
+    expect(active.find('.perm-unavailable')).toBeTruthy()
+    expect(active.errors).toEqual([])
+  })
 })
 
 describe('RoleView 角色列表与选中态', () => {
@@ -318,8 +369,41 @@ describe('RoleView 角色列表与选中态', () => {
     expect(permOn(c)).toEqual([false, true])
   })
 
+  test('角色项键盘可达：button 语义 + aria-pressed；Enter/空格切换选中，删除按钮有 aria-label', async () => {
+    // 防退化：角色项只绑 @click、外层是 div → Tab 无法到达，键盘用户不能切换角色；
+    // 删除按钮只有图标 → 读屏念不出「删除」。
+    const c = await mountRole(P_ALL, [ROLE_BUILTIN, ROLE_PLAIN], {
+      r1: [],
+      r2: [],
+    })
+    const first = c.findAll('.glass-role-item')[0]
+    expect(first.getAttribute('role')).toBe('button')
+    expect(first.getAttribute('tabindex')).toBe('0')
+    expect(first.getAttribute('aria-pressed')).toBe('true')
+    expect(c.findAll('.glass-role-item')[1].getAttribute('aria-pressed')).toBe('false')
+
+    const second = c.findAll('.glass-role-item')[1]
+    second.dispatchEvent(
+      new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    )
+    await waitFor(() => rolesGetById.mock.calls.length === 2, { message: 'Enter 切换角色' })
+    await flush(6)
+    expect(c.findAll('.glass-role-item')[1].getAttribute('aria-pressed')).toBe('true')
+    expect(c.findAll('.glass-role-item')[0].getAttribute('aria-pressed')).toBe('false')
+
+    c.findAll('.glass-role-item')[0].dispatchEvent(
+      new window.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true })
+    )
+    await waitFor(() => rolesGetById.mock.calls.length === 3, { message: '空格切回原角色' })
+
+    const del = c.findAll('.glass-role-item')[1].querySelector('.role-delete-btn')
+    expect(del.getAttribute('aria-label')).toBe(i18n.global.t('common.delete'))
+    expect(c.errors).toEqual([])
+  })
+
   test('有未保存修改时切换角色：先确认；取消则留在原角色且不丢编辑，确认才切换', async () => {
-    const c = await mountRole(P_READ, [ROLE_BUILTIN, ROLE_PLAIN], {
+    // 需要 role:assign 才能点选权限项（无该权限时按钮 disabled，见只读用例）
+    const c = await mountRole(P_ALL, [ROLE_BUILTIN, ROLE_PLAIN], {
       r1: [{ _id: 'aaaaaaaaaaaaaaaaaaaaaaaa' }],
       r2: [{ _id: 'bbbbbbbbbbbbbbbbbbbbbbbb' }],
     })
@@ -906,7 +990,7 @@ describe('RoleView 删除角色', () => {
 })
 describe('RoleView 未保存变更的离开防护', () => {
   test('有未保存修改时刷新页面：beforeunload 被 preventDefault；无修改时不拦截', async () => {
-    const c = await mountRole(P_READ)
+    const c = await mountRole(P_ALL)
     const before = new window.Event('beforeunload', { cancelable: true })
     window.dispatchEvent(before)
     expect(before.defaultPrevented).toBe(false)
@@ -919,7 +1003,7 @@ describe('RoleView 未保存变更的离开防护', () => {
   })
 
   test('卸载后不再拦截 beforeunload（监听被摘掉，不泄漏）', async () => {
-    const c = await mountRole(P_READ)
+    const c = await mountRole(P_ALL)
     click(c.findAll('.glass-perm-btn')[0])
     await flush(4)
     c.handle.unmount()
@@ -943,7 +1027,7 @@ describe('RoleView 未保存变更的离开防护', () => {
     active = mountComponent(Host, {
       routes,
       initialRoute: '/roles',
-      setupStore: (pinia) => useAuthStore(pinia).setPermissions(P_READ),
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(P_ALL),
     })
     await waitFor(() => active.findAll('.glass-module-card').length === 1, { message: '卡片' })
     await flush(4)

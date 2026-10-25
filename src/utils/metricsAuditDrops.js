@@ -19,7 +19,18 @@
 // reason 是**闭合集合**：绝不按调用方传的自由文本建 series，
 // 否则又成了"用高基数计数器监控高基数"（与 metrics_series_dropped_total 的
 // SERIES_STORES 同一条纪律）。'other' 收口未知取值，让拼错的 reason 不静默消失。
-const AUDIT_DROP_REASONS = ['buffer_overflow', 'poison_doc', 'precast', 'other'];
+// `wal_durable_lost`（2026-10-21 补）：WAL 超限裁剪在**显式开关**下丢掉了
+// `__walDurable` 行。它与上面三个 reason 的性质不同——那些丢的是"尽力而为"的
+// 缓冲记录（WAL 里通常还有行可重放），这里丢的是**已经向调用方回成功、
+// 且已 fsync 过**的敏感操作审计：`.discarded` 永不回灌 ⇒ 永久不入库。
+// 因此它必须能触发 AuditRecordsDropped（critical），而不是只出现在合规面板 JSON 里。
+const AUDIT_DROP_REASONS = [
+  'buffer_overflow',
+  'poison_doc',
+  'precast',
+  'wal_durable_lost',
+  'other',
+];
 const auditDrops = new Map(); // reason -> 累计丢弃条数
 
 /**
@@ -59,6 +70,24 @@ function auditBacklog() {
 }
 
 /**
+ * 「拒绝裁剪 durable 行」的累计次数（2026-10-21）。
+ *
+ * 它与 `audit_records_dropped_total` 是**相反方向**的信号：这里没有丢记录，
+ * 而是严格模式为了不推翻持久化承诺，宁让 WAL 继续超限。后果是磁盘无界增长，
+ * 所以必须在写满磁盘之前就被看见——不能只在合规面板 JSON 里等人工巡检。
+ *
+ * 拉取时取值（同 auditBacklog 的理由）：计数在 auditWalCap 模块内，多处变化，
+ * 逐个同步点上报必漏。取不到时回 0，抓取指标绝不影响业务。
+ */
+function walDurableTrimRefusals() {
+  try {
+    return require('../services/auditWalCap').getStats().walDurableTrimRefusals || 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+/**
  * 渲染本组信号：reason 恒定各一行（含 0）。
  *
  * 打 0 而不是"没有丢弃就不输出"：PromQL 里「series 不存在」与「series 为 0」
@@ -81,6 +110,11 @@ function formatAuditDrops() {
   );
   out.push('# TYPE audit_buffer_backlog_records gauge');
   out.push('audit_buffer_backlog_records ' + auditBacklog());
+  out.push(
+    '# HELP audit_wal_durable_trim_refusals_total Times WAL trim refused to drop fsynced durable lines (WAL grows unbounded)'
+  );
+  out.push('# TYPE audit_wal_durable_trim_refusals_total counter');
+  out.push('audit_wal_durable_trim_refusals_total ' + walDurableTrimRefusals());
   return out;
 }
 

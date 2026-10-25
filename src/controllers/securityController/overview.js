@@ -28,35 +28,42 @@ const getSecurityStats = asyncHandler(async (req, res) => {
   // 存在分叉隐患。businessDayBounds().start 与全站「今日」口径同源。
   const { start: today } = businessDayBounds();
 
-  // 今日登录统计
-  const todayLogins = await AuditLog.countDocuments({
-    category: 'auth',
-    action: 'login_success',
-    timestamp: { $gte: today },
-  });
+  // 数据范围：本接口的**全部**出口都按操作者范围收口。三个今日计数此前是全局聚合，
+  // 而 SECURITY_ADMIN 是 level 8 ⇒ department 档，于是 /audit-logs、/alerts 已按部门
+  // 收口、这里仍能读出全系统的失败登录/高危操作次数。计数与异常聚合共用同一份基础
+  // 条件（applyAuditDataScope），口径不在这里另翻一遍。
+  const { query: scopeFilter } = await applyAuditDataScope({}, req.user.userId);
 
-  // 今日失败登录统计
-  const todayFailedLogins = await AuditLog.countDocuments({
-    category: 'auth',
-    action: 'login_failed',
-    timestamp: { $gte: today },
-  });
-
-  // 高风险操作统计
-  const highRiskOps = await AuditLog.countDocuments({
-    riskLevel: { $in: AUDIT_ERROR_RISK_LEVELS },
-    timestamp: { $gte: today },
-  });
+  const [todayLogins, todayFailedLogins, highRiskOps] = await Promise.all([
+    // 今日登录统计
+    AuditLog.countDocuments({
+      ...scopeFilter,
+      category: 'auth',
+      action: 'login_success',
+      timestamp: { $gte: today },
+    }),
+    // 今日失败登录统计
+    AuditLog.countDocuments({
+      ...scopeFilter,
+      category: 'auth',
+      action: 'login_failed',
+      timestamp: { $gte: today },
+    }),
+    // 高风险操作统计
+    AuditLog.countDocuments({
+      ...scopeFilter,
+      riskLevel: { $in: AUDIT_ERROR_RISK_LEVELS },
+      timestamp: { $gte: today },
+    }),
+  ]);
 
   // 异常行为检测
   // 两路聚合都按 userId 分组，返回体里就是"哪些用户"——与 /security/alerts 的行级
-  // 列表同性质，故走同一个范围翻译器（口径见 F-B12）。上方的今日登录/高危次数是
-  // 全局聚合，是否随范围收窄属另一条口径，此处未动。
-  const { query: anomalyScope } = await applyAuditDataScope({}, req.user.userId);
+  // 列表同性质，故与上面的计数走同一个范围翻译器（口径见 F-B12）。
   const anomalies = await AuditLog.detectAnomalies({
     windowMinutes: 60,
     threshold: 5,
-    scopeFilter: anomalyScope,
+    scopeFilter,
   });
 
   // 被封禁 IP 数量
@@ -218,6 +225,15 @@ const buildComplianceSection = async () => {
           // 也就是 R-6 正在静默失效（WAL 无界增长）。缺了它，面板在
           // walEnabled:true + 三个计数全 0 时无法与"上限从未被触碰"区分。
           walTrimFailures: s.walTrimFailures,
+          // 2026-10-21：超限裁剪的「承诺侧」两项。口径与上面所有项都不同——
+          // 前面几项丢的是**取证**（尽力而为的普通行），这两项丢的是**承诺**：
+          // `auditOutbox` 已经向调用方回了成功，行也 fsync 过，但被移出主 WAL
+          // 且 `.discarded` 永不回灌 ⇒ 这些操作永久不入库。
+          // walDurableDropped > 0 必须按合规事件上报并核查缺失区间；
+          // walDurableTrimRefusals > 0 表示严格模式正在拒绝裁剪、WAL 无界增长
+          // （磁盘风险），两条的处置动作完全不同，故分开报。
+          walDurableDropped: s.walDurableDropped,
+          walDurableTrimRefusals: s.walDurableTrimRefusals,
           outageFailures: s.outageFailures,
         };
       })(),
@@ -242,7 +258,11 @@ const buildComplianceSection = async () => {
 const getSecurityOverview = asyncHandler(async (req, res) => {
   try {
     const securityAlert = require('../../services/securityAlert');
-    const overview = await securityAlert.getSecurityOverview(7);
+    // 四个计数与 /alerts、/audit-logs 同权限码，必须同源收口——否则部门档管理员
+    // 能从概览读出全系统的失败登录/高危告警数。范围解析失败（403）由下面的 catch
+    // 原样上冒。
+    const { query: scopeFilter } = await applyAuditDataScope({}, req.user.userId);
+    const overview = await securityAlert.getSecurityOverview(7, scopeFilter);
     // A-2：服务层查询失败时返回 degraded，而不是补齐全 0 字段。必须先于形状校验：
     // 让「数据不可用」显式表现为 503，而不是一张写着 0 风险的面板。
     if (overview && overview.degraded === true) {
@@ -272,6 +292,9 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
     overview.compliance = await buildComplianceSection();
     return ApiResponse.success(res, overview, '获取成功');
   } catch (error) {
+    // 数据范围不可用（403 DATA_SCOPE_DENIED）必须原样上冒，理由同 getRecentAlerts：
+    // 包成 500 会把"这个账号没有可见范围"表现为"服务端故障"。
+    if (error.isApiError) throw error;
     logger.error(`安全概览查询失败: ${error.message}`);
     return ApiResponse.codeError(res, 'SECURITY_OVERVIEW_QUERY_FAILED');
   }

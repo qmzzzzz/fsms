@@ -34,6 +34,7 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 const { TEST_CLIENT_IP } = require('../fixtures');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 // 每页 5 条 × 24 条夹具 ⇒ 5 页（5/5/5/5/4）
 const PAGE_SIZE = 5;
@@ -142,7 +143,11 @@ describe('等值排序键的游标连续性', () => {
     }
   });
 
-  const authed = (url) => request(app).get(url).set('Authorization', `Bearer ${adminToken}`);
+  const authed = (url) =>
+    request(app)
+      .get(url)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set(reauthHeaders(adminToken));
 
   /**
    * 逐页消费 nextCursor；记录每页的 hasMore，用于证明"提前收敛"。

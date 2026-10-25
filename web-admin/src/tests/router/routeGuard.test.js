@@ -35,6 +35,8 @@ import i18n from '@/i18n'
 
 const mockStore = {
   isAuthenticated: false,
+  // 已核实标记：守卫据此决定是否还要向服务端确认身份
+  sessionVerified: false,
   permissions: [],
   restoreSession: vi.fn(async () => false),
 }
@@ -106,6 +108,9 @@ beforeAll(async () => {
 
 beforeEach(() => {
   mockStore.isAuthenticated = false
+  // 匿名用户：核不核实都会走 restoreSession（由 isAuthenticated 决定），此处置 true
+  // 只是让「手动设为已登录」的用例保持既有语义，需要验证的用例会自己置 false。
+  mockStore.sessionVerified = true
   mockStore.permissions = []
   mockStore.restoreSession.mockReset()
   mockStore.restoreSession.mockResolvedValue(false)
@@ -210,6 +215,29 @@ describe('A. 守卫决策表', () => {
     const next = await runGuard(mkRoute())
     expect(mockStore.restoreSession).not.toHaveBeenCalled()
     expect(next).toHaveBeenCalledWith()
+  })
+
+  test('本地有缓存身份但本页尚未向服务端核实：先探测再放行', async () => {
+    // localStorage 里的 currentUser 不是凭证：刷新页面后必须先由服务端确认会话，
+    // 否则残留/伪造的缓存身份可以直接进入受保护页面。
+    mockStore.isAuthenticated = true
+    mockStore.sessionVerified = false
+    mockStore.permissions = ['user:read']
+    mockStore.restoreSession.mockResolvedValue(true)
+
+    const next = await runGuard(mkRoute())
+    expect(mockStore.restoreSession).toHaveBeenCalledTimes(1)
+    expect(next).toHaveBeenCalledWith()
+  })
+
+  test('缓存身份被服务端否定（探测返回 false）：踢回登录页', async () => {
+    mockStore.isAuthenticated = true
+    mockStore.sessionVerified = false
+    mockStore.permissions = ['user:read']
+    mockStore.restoreSession.mockResolvedValue(false)
+
+    const next = await runGuard(mkRoute())
+    expect(next).toHaveBeenCalledWith('/login')
   })
 
   test('已登录访问登录页：跳首页（否则用户会看到一个已登录状态下的登录表单）', async () => {

@@ -69,8 +69,21 @@ const generateRefreshToken = (userId, tokenVersion = 0, sid = null) => {
 };
 
 /**
+ * 设备会话状态（与 authenticate / refreshSession 同口径）：
+ * 带 sid 的令牌必须指向一条仍可用的会话；无 sid 的历史令牌按中间件的
+ * 兼容口径放行（它们最长活过一个 access TTL，refresh 侧已不再续期）。
+ */
+const isSessionUsable = async (sid) => {
+  if (!sid) return true;
+  const { validateSession } = require('./sessionService');
+  const state = await validateSession(sid);
+  return state.usable;
+};
+
+/**
  * 判断 access token 是否仍有效（吞错，失败即 false）
- * 与 authenticate 中间件同口径的核心校验：签名 / 黑名单 / 用户状态 / tokenVersion。
+ * 与 authenticate 中间件同口径的核心校验：签名 / 黑名单 / 用户状态 /
+ * 临时锁定 / tokenVersion / 设备会话状态。
  * 不校验 passwordChangedAt 与 IP 范围——探测仅做「是否已登录」的预筛，
  * 真正的安全校验仍由后续 getMe（走 authenticate）兜底。
  */
@@ -82,9 +95,11 @@ const isAccessTokenValid = async (token) => {
     // 判据与 authenticate 中间件同一份（见 utils/tokenPurpose）。
     if (violatesAccessTokenPurpose(decoded)) return false;
     if (await isTokenBlacklisted(token)) return false;
-    const user = await User.findById(decoded.userId).select('status tokenVersion').lean();
+    const user = await User.findById(decoded.userId).select('status tokenVersion lockUntil').lean();
     if (!user || user.status !== 'active') return false;
-    return decoded.tokenVersion === (user.tokenVersion ?? 0);
+    if (user.lockUntil && user.lockUntil > new Date()) return false;
+    if (decoded.tokenVersion !== (user.tokenVersion ?? 0)) return false;
+    return isSessionUsable(decoded.sid);
   } catch (_) {
     return false;
   }
@@ -92,16 +107,21 @@ const isAccessTokenValid = async (token) => {
 
 /**
  * 判断 refresh token 是否仍有效（吞错，失败即 false）
- * 与 refreshToken 控制器同口径：refreshSecret 签名 / type / 黑名单 / 用户状态 / tokenVersion。
+ * 与 refreshSession 同口径：refreshSecret 签名 / type / 设备会话绑定 /
+ * 黑名单 / 用户状态 / 临时锁定 / tokenVersion / 会话可用性。
  */
 const isRefreshTokenValid = async (token) => {
   try {
     const decoded = jwt.verify(token, config.jwt.refreshSecret, { algorithms: ['HS256'] });
     if (decoded.type !== 'refresh') return false;
+    // 无 sid 的 refresh 不可再续期（见 authService/token.js 的 refreshSession）
+    if (!decoded.sid) return false;
     if (await isTokenBlacklisted(token)) return false;
-    const user = await User.findById(decoded.userId).select('status tokenVersion').lean();
+    const user = await User.findById(decoded.userId).select('status tokenVersion lockUntil').lean();
     if (!user || user.status !== 'active') return false;
-    return decoded.tokenVersion === (user.tokenVersion ?? 0);
+    if (user.lockUntil && user.lockUntil > new Date()) return false;
+    if (decoded.tokenVersion !== (user.tokenVersion ?? 0)) return false;
+    return isSessionUsable(decoded.sid);
   } catch (_) {
     return false;
   }

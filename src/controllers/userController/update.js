@@ -181,6 +181,22 @@ const applyProfileFields = (
 };
 
 /**
+ * 停用/锁定账户时释放"进行中的指派"：与删号同一出口。
+ * 不释放的后果见 userService.releaseOpenAssignments 的注释——processing 的
+ * 报警只认 handler，单元素 assignedTo 的巡检只认被指派人，而这两条路径都不会
+ * 接受一个不可登录的账户；工单既关不掉也转不出去。退回 pending / 空 assignedTo
+ * 才是本系统"无人认领"的既有语义，其他有权限的人可以立即接手。
+ * 用最终状态判定（而非"本次发生了状态转换"）：写入成功后若释放失败，
+ * 客户端重试同一请求会再次执行到这里，释放是幂等的 updateMany。
+ */
+const releaseAssignmentsWhenDisabled = async (status, user) => {
+  if (status === undefined || status === 'active') return;
+  await userService.releaseOpenAssignments([user._id], null, {
+    remark: '处理人账户已停用或锁定，工单退回待指派池',
+  });
+};
+
+/**
  * 更新用户信息
  * PUT /api/users/:id
  */
@@ -228,9 +244,34 @@ const updateUser = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'EMAIL_TAKEN_SHORT');
   }
 
+  // 恢复可登录状态与专用解锁接口同口径：先吊销旧令牌再落库，否则禁用/锁定
+  // 期间被窃取的令牌会在账户恢复瞬间重新生效。fail-closed：吊销失败则不恢复，
+  // 状态保持原样（仍不可登录），管理员可安全重试。
+  const restoringAccess = status === 'active' && user.status !== 'active';
+  if (restoringAccess) {
+    const { invalidateUserTokens } = require('../../middleware/tokenBlacklist');
+    try {
+      await invalidateUserTokens(user._id);
+    } catch (revokeErr) {
+      logger.error(`恢复账户中止 - 会话吊销失败：${revokeErr.message}`, {
+        username: user.username,
+        operator: operatorTag(req),
+      });
+      return ApiResponse.codeError(res, 'SESSION_REVOKE_SERVICE_UNAVAILABLE');
+    }
+  }
+
   applyProfileFields(user, { realName, email, phone, department, avatar, status, allowedIPs });
 
   await userService.saveUser(user);
+
+  await releaseAssignmentsWhenDisabled(status, user);
+
+  // 会话表与 tokenVersion 同步收敛（fail-soft：防线已由 tokenVersion 保证）
+  if (restoringAccess) {
+    const sessionService = require('../../services/sessionService');
+    await sessionService.revokeAllSessionsSafe(user._id, 'access_restored');
+  }
 
   // 统计缓存：状态/部门变更都会改变所有查看者的聚合口径（A-1 全量失效）
   statsCache.invalidateAll('user-update');

@@ -45,6 +45,10 @@ describe('explain-spotcheck 退出码契约', () => {
           call.limit = n;
           return q;
         },
+        maxTimeMS: (n) => {
+          call.maxTimeMS = n;
+          return q;
+        },
         explain: (verb) => {
           call.verb = verb;
           return Promise.resolve({});
@@ -70,6 +74,7 @@ describe('explain-spotcheck 退出码契约', () => {
       { timestamp: -1, _id: -1 },
     ]);
     expect(seen.every((s) => s.limit === spot.PAGE_SIZE)).toBe(true);
+    expect(seen.every((s) => s.maxTimeMS > 0)).toBe(true);
     expect(seen.every((s) => s.verb === 'executionStats')).toBe(true);
     expect(seen.every((s) => s.limit > 0)).toBe(true);
     // 前提自证：还原生效，mongoose.model 未被测试污染

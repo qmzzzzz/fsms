@@ -1,11 +1,16 @@
 /**
- * R-H2 回归：暴力破解自动封禁的判据必须只看 IP 维度
+ * 暴力破解自动封禁的判据回归
  *
- * 缺陷（总账 R-H2）：checkBruteForce 以 `max(userFailures, ipFailures)` 达标即进入
- * 封禁分支，而封禁对象是**当前请求的 IP**——分布式撞单账号（多 IP 各自少量尝试
- * 同一账号）会让账号维度达标，此时把"可能只贡献了 1 次失败的当前 IP"封 1 小时，
- * NAT 出口后的无辜用户陪绑（受害者本人换个网络登录一次即被封）。
- * 修复后：告警/审计照发（双维度都是真实攻击信号），封禁只在 `ipFailures` 达标时执行。
+ * 第一层（R-H2）：封禁只在 **IP 维度自己刷满** 时执行。`max(userFailures, ipFailures)`
+ * 达标只说明"有攻击"，分布式撞单账号时当前 IP 可能只贡献 1 次失败——封它是 NAT 陪绑。
+ *
+ * 第二层（#21，2026-10-21）：IP 维度刷满也不再无条件封禁——
+ *  - 单账号失败（distinct < 2）交给账户锁定 + loginUserLimiter，IP 只告警；
+ *  - 近 7 天有 ≥3 个不同账号成功登录的共享出口，首次触发只告警（一次宽限）；
+ *  - 跳过封禁的告警行写 body.ipBanApplied:false，且**不得**抬升后续封禁档位。
+ *
+ * 第三层（#22）：账户维度计数与 User.findByUsername 同口径（大小写不敏感），
+ * 否则轮换大小写即可让同一账户永远到不了阈值。
  */
 
 const mongoose = require('mongoose');
@@ -20,12 +25,26 @@ const {
 const AuditLog = require('../../models/AuditLog');
 
 const stamp = Date.now().toString().slice(-7);
+const ipFor = (offset) => `198.51.100.${(Number(stamp) % 40) + offset}`;
 // 攻击者使用的多个源 IP（各自低于 IP 维度阈值）
-const ATTACK_IP_1 = `198.51.100.${(Number(stamp) % 100) + 40}`;
-const ATTACK_IP_2 = `198.51.100.${(Number(stamp) % 100) + 41}`;
+const ATTACK_IP_1 = ipFor(100);
+const ATTACK_IP_2 = ipFor(101);
 // 撞库进行中，受害者本人的真实来源 IP（仅 1 次失败——他自己输错了密码）
-const VICTIM_IP = `203.0.113.${(Number(stamp) % 200) + 30}`;
+const VICTIM_IP = ipFor(102);
+const SINGLE_ACCOUNT_IP = ipFor(103);
+const LADDER_IP = ipFor(104);
+const SHARED_EGRESS_IP = ipFor(105);
+const CASE_IP = ipFor(106);
 const USER = `zzrh2_${stamp}`;
+const USER_B = `${USER}_b`;
+const USER_C = `${USER}_c`;
+const USER_D = `${USER}_d`;
+const USER_E = `${USER}_e`;
+const USER_F = `${USER}_f`;
+const USER_G = `${USER}_g`;
+const CASE_USER = `zzcase_${stamp}`;
+const CASE_VARIANTS = [CASE_USER, CASE_USER.toLowerCase(), CASE_USER.toUpperCase()];
+const SEEDED_USERS = [USER, USER_B, USER_C, USER_D, USER_E, USER_F, USER_G, ...CASE_VARIANTS];
 
 const originalAdd = security.addToBlacklist;
 let banCalls;
@@ -40,15 +59,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   security.addToBlacklist = originalAdd;
-  // 第二例的账号名是 `${USER}_b`（IP 维度对照臂），精确等值清不到会泄漏
-  // 5+1 条审计行污染共享测试库（ip=ATTACK_IP_1 的行会干扰后续阶梯用例）
-  await AuditLog.deleteMany(
-    {
-      username: { $in: [USER, `${USER}_b`, `${USER}_c`] },
-      action: { $in: ['login_failed', ALERT_TYPES.BRUTE_FORCE] },
-    },
-    { bypassAppendOnly: true }
-  );
+  // 清理本套件种下的全部行（失败记录 + 成功登录 + 告警），避免污染共享测试库的
+  // ip 维度计数（distinctAccounts/sharedEgress 都按 ip 查询，跨套件泄漏会改变判据）
+  await AuditLog.deleteMany({ username: { $in: SEEDED_USERS } }, { bypassAppendOnly: true });
   if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
 });
 
@@ -67,6 +80,22 @@ const seedFailure = (username, ip) =>
     riskLevel: 'low',
     timestamp: new Date(),
   });
+
+/** 塞一条成功登录审计（共享出口信号的来源） */
+const seedSuccess = (username, ip) =>
+  AuditLog.create({
+    action: 'login_success',
+    category: 'auth',
+    username,
+    ip,
+    success: true,
+    riskLevel: 'low',
+    timestamp: new Date(),
+  });
+
+const seedFailures = async (pairs) => {
+  for (const [username, ip] of pairs) await seedFailure(username, ip);
+};
 
 describe('checkBruteForce 封禁判据（R-H2：只看 IP 维度）', () => {
   test('账号维度达标而 IP 维度未达标：不封禁当前 IP，但告警审计照写', async () => {
@@ -88,42 +117,140 @@ describe('checkBruteForce 封禁判据（R-H2：只看 IP 维度）', () => {
       ip: VICTIM_IP,
     }).lean();
     expect(alert).toBeTruthy();
+    // IP 维度未达标 → 即使多账号信号成立也不封，且行上明确标注未执行
+    expect(alert.body.ipBanApplied).toBe(false);
   });
 
-  test('IP 维度达标：封禁照常执行（修复不削弱既有防线）', async () => {
-    for (let i = 0; i < THRESHOLDS.bruteForceAttempts; i += 1) {
-      await seedFailure(`${USER}_b`, ATTACK_IP_1);
-    }
-    await checkBruteForce(`${USER}_b`, ATTACK_IP_1);
+  test('IP 维度达标且跨账号：封禁照常执行（修复不削弱既有防线）', async () => {
+    // 两个不同账号各贡献一部分失败：这是 password spraying 的确定性信号
+    await seedFailures([
+      [USER_B, ATTACK_IP_1],
+      [USER_D, ATTACK_IP_1],
+      [USER_B, ATTACK_IP_1],
+      [USER_D, ATTACK_IP_1],
+      [USER_B, ATTACK_IP_1],
+    ]);
+    await checkBruteForce(USER_B, ATTACK_IP_1);
 
     expect(banCalls).toHaveLength(1);
     expect(banCalls[0].ip).toBe(ATTACK_IP_1);
     expect(banCalls[0].source).toBe('auto');
   });
+});
 
-  test('阶梯事件源只认「该 IP 自己刷满」的行：IP 维度未达标的告警行不得抬升后续封禁档位', async () => {
+describe('checkBruteForce 多账号与共享出口判据（#21）', () => {
+  test('单账号刷满 5 次：只告警不封 IP，审计标注 skipped_single_account', async () => {
+    for (let i = 0; i < THRESHOLDS.bruteForceAttempts; i += 1) {
+      await seedFailure(USER_E, SINGLE_ACCOUNT_IP);
+    }
+    await checkBruteForce(USER_E, SINGLE_ACCOUNT_IP);
+
+    expect(banCalls).toHaveLength(0);
+    const alert = await AuditLog.findOne({
+      action: ALERT_TYPES.BRUTE_FORCE,
+      username: USER_E,
+      ip: SINGLE_ACCOUNT_IP,
+    }).lean();
+    expect(alert).toBeTruthy();
+    expect(alert.body).toMatchObject({
+      ipAttempts: THRESHOLDS.bruteForceAttempts,
+      distinctAccounts: 1,
+      ipBanApplied: false,
+      ipBanOutcome: 'skipped_single_account',
+    });
+    expect(alert.riskFactors).toContain('ip_ban_skipped_single_account');
+  });
+
+  test('共享出口首次触发只告警；第二次触发恢复封禁（宽限只有一次）', async () => {
+    // 该 IP 近 7 天有 3 个不同账号成功登录 → 判定为 NAT/办公出口
+    await seedSuccess(USER, SHARED_EGRESS_IP);
+    await seedSuccess(USER_B, SHARED_EGRESS_IP);
+    await seedSuccess(USER_C, SHARED_EGRESS_IP);
+    // 首次跨账号失败：2 个账号共 5 次
+    await seedFailures([
+      [USER_D, SHARED_EGRESS_IP],
+      [USER_E, SHARED_EGRESS_IP],
+      [USER_D, SHARED_EGRESS_IP],
+      [USER_E, SHARED_EGRESS_IP],
+      [USER_D, SHARED_EGRESS_IP],
+    ]);
+    await checkBruteForce(USER_D, SHARED_EGRESS_IP);
+
+    expect(banCalls).toHaveLength(0);
+    const first = await AuditLog.findOne({
+      action: ALERT_TYPES.BRUTE_FORCE,
+      ip: SHARED_EGRESS_IP,
+    }).lean();
+    expect(first.body).toMatchObject({
+      sharedEgressAccounts: 3,
+      ipBanApplied: false,
+      ipBanOutcome: 'skipped_shared_egress',
+    });
+
+    // 第二次跨账号失败（另外两个账号）：宽限已用完，必须真的封
+    await seedFailures([
+      [USER_F, SHARED_EGRESS_IP],
+      [USER_G, SHARED_EGRESS_IP],
+      [USER_F, SHARED_EGRESS_IP],
+      [USER_G, SHARED_EGRESS_IP],
+      [USER_F, SHARED_EGRESS_IP],
+    ]);
+    await checkBruteForce(USER_F, SHARED_EGRESS_IP);
+
+    expect(banCalls).toHaveLength(1);
+    expect(banCalls[0].ip).toBe(SHARED_EGRESS_IP);
+    // 首次只告警未封 → 不抬档，仍是第一档
+    expect(banCalls[0].durationMs).toBe(ESCALATION_TIERS[0]);
+  });
+});
+
+describe('checkBruteForce 账户维度计数口径（#22）', () => {
+  test('同一账户的大小写变体合并计数（与 User.findByUsername 同口径）', async () => {
+    // 轮换大小写共 5 次：若按原文分桶，userAttempts 只有 1–2，永远到不了阈值
+    await seedFailure(CASE_USER, CASE_IP);
+    await seedFailure(CASE_USER.toLowerCase(), CASE_IP);
+    await seedFailure(CASE_USER.toUpperCase(), CASE_IP);
+    await seedFailure(CASE_USER, CASE_IP);
+    await seedFailure(CASE_USER.toLowerCase(), CASE_IP);
+
+    await checkBruteForce(CASE_USER.toUpperCase(), CASE_IP);
+
+    const alert = await AuditLog.findOne({
+      action: ALERT_TYPES.BRUTE_FORCE,
+      ip: CASE_IP,
+    }).lean();
+    expect(alert).toBeTruthy();
+    expect(alert.body.userAttempts).toBe(THRESHOLDS.bruteForceAttempts);
+  });
+});
+
+describe('checkBruteForce 阶梯事件源（R-H2 续）', () => {
+  test('IP 维度未达标的告警行不得抬升后续封禁档位', async () => {
     // 场景：受害 IP 在分布式撞库期间被写过一条 ipFailures=1 的告警行（上一例
     // 同款形态），之后有人用同一 IP 真实刷满 5 次失败——若 countPrior 把那行
     // 也算"封禁事件"，本次会直接跳到第二档（4h），无辜 IP 陪绑被放大。
-    const ip = `203.0.113.${(Number(stamp) % 200) + 40}`;
-    const victimUser = `${USER}_c`;
+    const victimUser = USER_C;
     // 模拟历史遗留：一条 ip 维度未达标的告警行（body.ipAttempts=1）
     await AuditLog.create({
       action: ALERT_TYPES.BRUTE_FORCE,
       category: 'auth',
       username: victimUser,
-      ip,
+      ip: LADDER_IP,
       riskLevel: 'critical',
       riskFactors: [`登录失败次数超标 (账户:${THRESHOLDS.bruteForceAttempts}, IP:1)`],
       body: { userAttempts: THRESHOLDS.bruteForceAttempts, ipAttempts: 1, window: '5 分钟' },
       timestamp: new Date(),
     });
 
-    // 该 IP 现在真实刷满 5 次 → 本次是它第一次"够格"的封禁事件
-    for (let i = 0; i < THRESHOLDS.bruteForceAttempts; i += 1) {
-      await seedFailure(victimUser, ip);
-    }
-    await checkBruteForce(victimUser, ip);
+    // 该 IP 现在跨两个账号真实刷满 5 次 → 本次是它第一次"够格"的封禁事件
+    await seedFailures([
+      [victimUser, LADDER_IP],
+      [USER_G, LADDER_IP],
+      [victimUser, LADDER_IP],
+      [USER_G, LADDER_IP],
+      [victimUser, LADDER_IP],
+    ]);
+    await checkBruteForce(victimUser, LADDER_IP);
 
     expect(banCalls).toHaveLength(1);
     // 没被历史告警行抬档：仍是第一档 1h

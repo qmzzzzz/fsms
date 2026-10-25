@@ -97,6 +97,27 @@ describe('拦截器状态码覆盖（P1-15）', () => {
     expect(lastCall(ElMessage.error)).toBe(i18n.global.t('errors.captchaServiceUnavailable'))
   })
 
+  test('票据 401（REAUTH_TICKET_REQUIRED）：不得触发刷新链或强制登出', async () => {
+    const refreshSpy = vi.spyOn(apiClient, 'post')
+    await respondWith(401, { errors: { errorCode: 'REAUTH_TICKET_REQUIRED' } })
+    // 票据缺失只是「需要二次验证」：不提示、不刷新、不跳登录；由页面弹框取票
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(ElMessage.warning).not.toHaveBeenCalled()
+    expect(refreshSpy).not.toHaveBeenCalled()
+    refreshSpy.mockRestore()
+  })
+
+  test('票据 401（blob 错误体）也能识别，不因 responseType=blob 误判成会话失效', async () => {
+    const blob = new Blob([JSON.stringify({ errors: { errorCode: 'REAUTH_TICKET_INVALID' } })], {
+      type: 'application/json',
+    })
+    const refreshSpy = vi.spyOn(apiClient, 'post')
+    await respondWith(401, blob)
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(refreshSpy).not.toHaveBeenCalled()
+    refreshSpy.mockRestore()
+  })
+
   test('状态码集合与后端注册表一致（新增码引入新状态码时本测试会红）', () => {
     const statuses = [...new Set(Object.values(ERROR_CODES).map((d) => d.status))].sort(
       (a, b) => a - b

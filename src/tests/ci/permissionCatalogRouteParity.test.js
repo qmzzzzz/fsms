@@ -22,7 +22,7 @@
  * 每条 reason 都是实测（对应接口的真实 checkPermission 实参），不是推测：
  *   - `device:scrap`   → `PUT /api/devices/:id/scrap` 实为 `device:update`（routes/deviceRoutes.js:362）
  *   - `device:stats`   → `GET /api/devices/stats` 实为 `device:read`（routes/deviceRoutes.js:240）
- *   - `alarm:stats`    → `GET /api/alarms/stats` 实为 `alarm:read`（routes/alarmRoutes.js:125）
+ *   - `alarm:stats`    → `GET /api/alarms/stats` 实为 `alarm:read`（routes/alarmRoutes.js:131）
  *   - `user:assign_role` → `PUT /api/users/:id/roles` 实为 `role:assign`（routes/userRoutes.js:214）
  *
  * 扫描口径（三条都是必要的，缺一条就会得出错的差集）：

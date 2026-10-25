@@ -302,14 +302,28 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
     // 把 10 分钟窗口内的爆破配额从 10 次压到 1 次（对攻击者反而是限制），
     // 对正常用户则是输错一次就锁。已过期的 lockUntil 视为新一轮：
     // 重置计数从 1 起算并清除过期时间戳（与 MFA 计数路径同款修复）。
-    const lockExpired = user.lockUntil && user.lockUntil <= new Date();
-    const updated = await User.findByIdAndUpdate(
-      user._id,
-      lockExpired
-        ? { $set: { failedLoginCount: 1, lockUntil: null } }
-        : { $inc: { failedLoginCount: 1 } },
-      { new: true }
-    ).catch(() => null);
+    //
+    // 重置必须是条件写：此前按陈旧快照直接 `$set failedLoginCount:1`，
+    // 并发失败（例如攻击者同时发 10 个请求）在锁定刚过期时会全部写 1，
+    // 计数永远到不了 MAX_FAILED_LOGINS。条件写只让**第一个**请求重置，
+    // 其余请求在 miss 后走 $inc，计数仍然逐次累加。
+    const now = new Date();
+    const lockExpired = user.lockUntil && user.lockUntil <= now;
+    let updated = null;
+    if (lockExpired) {
+      updated = await User.findOneAndUpdate(
+        { _id: user._id, lockUntil: { $lte: now } },
+        { $set: { failedLoginCount: 1, lockUntil: null } },
+        { new: true }
+      ).catch(() => null);
+    }
+    if (!updated) {
+      updated = await User.findByIdAndUpdate(
+        user._id,
+        { $inc: { failedLoginCount: 1 } },
+        { new: true }
+      ).catch(() => null);
+    }
     // 计数不可观测时的取舍见 resolveFailedLoginCount 的定义处（fail-closed）
     const newCount = resolveFailedLoginCount(updated);
     if (newCount >= MAX_FAILED_LOGINS) {
@@ -325,6 +339,12 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
         lockApplied = false;
         logger.error(`账户临时锁定写入失败（防爆破防线未生效）：${err.message}`, { username });
       });
+      if (lockApplied) {
+        // 锁定生效后必须失效认证缓存：authenticate 读的是缓存快照（TTL 60s），
+        // 不失效则已签发的 access token 在窗口内仍能带着旧 lockUntil 通过校验。
+        const { invalidateUserCache } = require('../../middleware/auth');
+        invalidateUserCache(user._id);
+      }
       logger.warn('账户临时锁定', {
         username,
         failedCount: newCount,

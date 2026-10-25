@@ -250,7 +250,9 @@ fireAlarmSchema.index({ status: 1, occurredAt: -1 });
 fireAlarmSchema.index({ handler: 1, occurredAt: -1 });
 fireAlarmSchema.index({ 'reporter.userId': 1, occurredAt: -1 });
 fireAlarmSchema.index({ 'location.building': 1, occurredAt: -1 });
-fireAlarmSchema.index({ level: 1 });
+// 等级筛选 + 时间倒序：单字段 {level:1} 只能定位等值块，块内排序仍要阻塞排序。
+// 列表统一按 {occurredAt:-1,_id:-1} 排序，故复合索引带同向次序键，由最左前缀取代单字段。
+fireAlarmSchema.index({ level: 1, occurredAt: -1, _id: -1 });
 fireAlarmSchema.index({ alarmType: 1, occurredAt: -1 });
 // L-22：设备删除级联（DeviceService.deleteDevice）按 deviceId 反查并 $unset 引用。
 // 此前无索引覆盖 → COLLSCAN。12 万告警规模实测：扫 12 万文档 / 204.54ms，

@@ -33,12 +33,22 @@ const REQUIRED_SECRET_FILES = [
   'login_ecdh_private_key',
   'mongo_root_username',
   'mongo_root_password',
+  // 副本集内部认证 keyfile：MongoDB 5.x 起 `--replSet` + 授权缺它启动即失败
+  // （BadValue: security.keyFile is required when authorization is enabled with
+  // replica sets），单节点副本集同样如此。缺文件时 mongo 容器起不来，
+  // 而 compose 的 secrets 段是 `file:` 挂载，缺文件会让 compose 在创建阶段就拒绝——
+  // 提前到部署前置校验里点名，比让运维在切换窗口看 compose 报错好。
+  'mongo_keyfile',
+  // 应用专用库账号（2026-10-24 审计，P2）：应用不再以 root 连库（rs-init 消费）
+  'mongo_app_username',
+  'mongo_app_password',
   'grafana_admin_password',
   // Redis 认证口令（2026-10-01 审计 finding）：compose secrets 段与 redis/app
   // 两个消费方共用；缺文件时 redis 容器 requirepass 拿到空串、应用侧 NOAUTH，
   // 都在启动期才暴露——这里提前一个窗口拦下。与 compose 的一致性由
   // src/tests/deploy/deployScript.test.js 双向把守
   'redis_password',
+  'metrics_token', // 2026-10-24 审计：/metrics 鉴权令牌，compose 经 METRICS_TOKEN_FILE 注入 app
 ];
 
 /** compose 里用 `${VAR:?}` 硬声明的环境变量名 → 缺失时的提示语 */
@@ -48,6 +58,7 @@ const REQUIRED_COMPOSE_ENV = Object.freeze([
     'ALLOWED_HOSTS',
     'Host 头白名单，逗号分隔（如 fsms.example.com）；NODE_ENV=production 下缺失即启动失败',
   ],
+  ['TRUSTED_PROXY_CIDRS', '可信反向代理网段，逗号分隔 CIDR（如 172.28.0.0/16）'], // compose 已改 `:?`
 ]);
 
 /**

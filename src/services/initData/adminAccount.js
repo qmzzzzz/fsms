@@ -8,6 +8,9 @@ const Role = require('../../models/Role');
 const User = require('../../models/User');
 const logger = require('../../utils/logger');
 const { SUPER_ADMIN_ROLE_CODE, getSuperAdminUsername } = require('../../utils/superAdmin');
+const { validatePasswordStrength } = require('../../utils/helpers');
+const { requiresProductionSemantics } = require('../../config/validate');
+const initialPasswordFile = require('../initialPasswordFile');
 
 /**
  * 落盘初始密码并**确保权限已实际收紧**
@@ -23,51 +26,195 @@ const { SUPER_ADMIN_ROLE_CODE, getSuperAdminUsername } = require('../../utils/su
  * 抽成独立函数而非内联：createDefaultAdmin 已接近复杂度阈值，
  * 内联这段会让它超标（lint:ratchet 实测 0 → 1）。
  *
+ * fail-closed：写入或权限收紧任一失败 ⇒ 删除明文文件并返回 false，
+ * 由调用方回滚管理员创建并中止启动。留下一个“权限未知”的明文口令文件，
+ * 比暂时无法登录更危险——运维可用 ADMIN_INITIAL_PASSWORD 注入后重试。
+ *
  * @param {string} adminPassword 已生成或来自环境变量的管理员口令
+ * @returns {boolean} 口令是否已在安全载体中就绪（环境变量注入也算）
  */
 function persistInitialPassword(adminPassword) {
   // 显式由环境变量注入时，不落盘（运维已知晓口令，落盘反而多一处泄露面）
   if (process.env.ADMIN_INITIAL_PASSWORD) {
     logger.warn('*** 请及时修改默认管理员密码！***');
-    return;
+    return true;
   }
 
+  const fs = require('fs');
+  const pwdFile = initialPasswordFile.filePath();
   try {
-    const fs = require('fs');
-    const path = require('path');
-    const pwdFile = path.join(process.cwd(), '.admin-initial-password');
     fs.writeFileSync(
       pwdFile,
       `username: ${getSuperAdminUsername()}\npassword: ${adminPassword}\n`,
       { mode: 0o600 }
     );
-
-    const { hardenPath, verifyHardened } = require('../../utils/filePermission');
-    const hardened = hardenPath(pwdFile, {
-      // 去掉文件权限助手加的前缀符号（⚠️ + 空格），避免日志里出现双重告警标记
-      log: (m) => logger.warn(m.replace(/^\u26a0\ufe0f?\s*/, '')),
-    });
-    const check = verifyHardened(pwdFile);
-
-    if (hardened.ok && check.tightened) {
-      logger.info(`管理员初始密码已写入 ${pwdFile}（已收紧权限并复核通过），请尽快登录后修改`);
-    } else {
-      logger.warn(
-        `管理员初始密码文件权限**未能收紧**（${hardened.detail || check.evidence}）：` +
-          `${pwdFile} 可能对本机其他用户可读，请立即手动收紧或改用 ADMIN_INITIAL_PASSWORD 注入`
-      );
-      logger.info(`管理员初始密码已写入 ${pwdFile}，请尽快登录后修改`);
-    }
   } catch (e) {
     // 修复：文件写入失败时绝不将密码明文输出到 stdout/日志
     // （容器环境 stdout 会被日志驱动持久化，等同密码泄露）。
-    // 只提示可操作的恢复途径；密码仅存在于内存，进程退出即丢失，
-    // 此时应通过 ADMIN_INITIAL_PASSWORD 显式指定后重启。
+    // 只提示可操作的恢复途径；密码仅存在于内存，进程退出即丢失。
     logger.error(
-      `初始密码文件写入失败（${e.message}）。请停止服务，通过环境变量 ADMIN_INITIAL_PASSWORD ` +
-        '显式指定管理员初始密码后重新启动；切勿从日志中查找密码（密码未被记录）。'
+      `初始密码文件写入失败（${e.message}）。请设置 ADMIN_INITIAL_PASSWORD 环境变量后重启；` +
+        '切勿从日志中查找密码（密码未被记录）。'
+    );
+    try {
+      require('../../utils/metrics').incSecurityAlert(
+        'admin_initial_password_write_failed',
+        'high'
+      );
+    } catch {
+      /* 指标端不可用不影响告警日志 */
+    }
+    return false;
+  }
+
+  const { hardenPath, verifyHardened } = require('../../utils/filePermission');
+  const hardened = hardenPath(pwdFile, {
+    // 去掉文件权限助手加的前缀符号（⚠️ + 空格），避免日志里出现双重告警标记
+    log: (m) => logger.warn(m.replace(/^\u26a0\ufe0f?\s*/, '')),
+  });
+  const check = verifyHardened(pwdFile);
+
+  if (hardened.ok && check.tightened) {
+    logger.info(`管理员初始密码已写入 ${pwdFile}（已收紧权限并复核通过），请尽快登录后修改`);
+    return true;
+  }
+
+  let removed = false;
+  try {
+    fs.unlinkSync(pwdFile);
+    removed = true;
+  } catch (e) {
+    logger.error(`权限收紧失败后删除明文口令文件也失败（${pwdFile}）：${e.message}`);
+  }
+  logger.error(
+    `管理员初始密码文件权限**未能收紧**（${hardened.detail || check.evidence}）：` +
+      (removed
+        ? '已删除该明文文件并回滚本次管理员创建。'
+        : `${pwdFile} 仍含明文口令，请立即手动删除。`) +
+      '请设置 ADMIN_INITIAL_PASSWORD 环境变量后重启'
+  );
+  try {
+    require('../../utils/metrics').incSecurityAlert(
+      'admin_initial_password_permission_not_tightened',
+      'high'
+    );
+  } catch {
+    /* 指标端不可用不影响告警日志 */
+  }
+  return false;
+}
+
+/** 初始口令无法安全保存时回滚刚创建的管理员（返回是否回滚成功） */
+async function rollbackDefaultAdmin(admin) {
+  try {
+    await User.deleteOne({ _id: admin._id });
+    logger.error(`默认管理员创建已回滚（_id=${admin._id}）：初始口令未能安全保存`);
+    return true;
+  } catch (e) {
+    logger.error(
+      `默认管理员回滚失败（${e.message}）：账户 ${admin._id} 仍存在但口令未知，请手动删除后重试`
+    );
+    return false;
+  }
+}
+
+/** 生成满足口令策略的随机初始口令（128 位随机段 + 四类字符） */
+const generateInitialAdminPassword = () => `Aa1!${crypto.randomBytes(14).toString('hex')}`;
+
+/**
+ * 解析默认管理员口令：显式注入值在生产语义下必须过与建号/改密相同的强度校验，
+ * 未注入时生成满足策略的随机口令。
+ */
+const resolveInitialAdminPassword = () => {
+  const explicitPassword = process.env.ADMIN_INITIAL_PASSWORD;
+  if (!explicitPassword) return generateInitialAdminPassword();
+
+  if (requiresProductionSemantics()) {
+    const strengthError = validatePasswordStrength(explicitPassword);
+    if (strengthError) {
+      throw new Error(
+        `ADMIN_INITIAL_PASSWORD 不满足口令强度要求：${strengthError}。` +
+          '请改用至少 12 位、含大小写/数字/特殊字符且不在常见泄露口令表中的值后重启'
+      );
+    }
+  }
+  return explicitPassword;
+};
+
+/**
+ * 并发首次启动时的同名账户复用。
+ *
+ * 「判重 → 创建」之间另一实例（或滚动部署的新 Pod）可能已经建好同名账户，
+ * User.create 于是抛 username 唯一键冲突。这不是错误：复用赢家的账户即可。
+ * 但**不得**继续 persistInitialPassword —— 本实例生成的口令与赢家账户的实际
+ * 口令不同，写下去等于给运维一份永远登录不上的凭据，还会覆盖赢家已落盘的
+ * 那份。返回 null 表示读不到赢家（不吞错，由调用方重新抛出原始错误）。
+ */
+async function findConcurrentAdminWinner(username) {
+  const winner = await User.findByUsername(username);
+  if (!winner) return null;
+  logger.warn('并发首次启动：默认管理员已由另一实例创建，本实例复用该账户且不覆盖初始口令文件');
+  return winner;
+}
+
+/**
+ * 默认管理员创建的唯一键冲突处理。
+ *
+ * 两类冲突：
+ *  - username：并发创建，复用赢家（createdHere=false，跳过硬编码口令落盘）；
+ *  - emailKey/email：邮箱被外部注册抢注，降级到唯一后备邮箱后重建。
+ *    两个键名都要认——`emailKey_1` 是新索引，`email_1` 是遗留明文索引，
+ *    后者要等 reconcileUserIndexes 四步走完才被删掉。只认一个会把
+ *    "邮箱被抢注"误判成未知错误 → 重新抛 → 开机 DoS。
+ * @returns {Promise<{admin: object, createdHere: boolean}>}
+ */
+async function resolveAdminCreateConflict(err, { username, desiredEmail, createWith }) {
+  const conflictKey = err?.code === 11000 ? Object.keys(err.keyPattern || {})[0] : null;
+
+  if (conflictKey === 'username') {
+    const winner = await findConcurrentAdminWinner(username);
+    if (winner) return { admin: winner, createdHere: false };
+    throw err;
+  }
+
+  if (conflictKey !== 'emailKey' && conflictKey !== 'email') throw err;
+
+  const fallbackEmail = `admin+${Date.now().toString(36)}@localhost.invalid`;
+  logger.warn(
+    `默认管理员邮箱 ${desiredEmail} 已被占用（可能被外部注册抢占），` +
+      `降级使用 ${fallbackEmail} 以避免启动失败；请登录后修改为真实邮箱`
+  );
+  try {
+    return { admin: await createWith(fallbackEmail), createdHere: true };
+  } catch (fallbackErr) {
+    const winner =
+      fallbackErr?.code === 11000 && Object.keys(fallbackErr.keyPattern || {})[0] === 'username'
+        ? await findConcurrentAdminWinner(username)
+        : null;
+    if (winner) return { admin: winner, createdHere: false };
+    throw fallbackErr;
+  }
+}
+
+/**
+ * 初始口令落盘 + 失败回滚。
+ *
+ * createdHere=false（复用了并发实例创建的账户）时必须直接返回：
+ * 口令文件属于真正创建账户的那个实例，这里没有可落盘的口令。
+ */
+async function finalizeDefaultAdmin(admin, adminPassword, createdHere) {
+  if (!createdHere) return admin;
+
+  logger.info('默认管理员账户已创建', { username: getSuperAdminUsername() });
+  if (!persistInitialPassword(adminPassword)) {
+    const rolledBack = await rollbackDefaultAdmin(admin);
+    throw new Error(
+      '初始管理员口令未能安全保存（写入或权限收紧失败）。' +
+        (rolledBack ? '本次管理员创建已回滚，' : '自动回滚失败，请手动删除默认管理员账户，') +
+        '请设置 ADMIN_INITIAL_PASSWORD 环境变量后重启'
     );
   }
+  return admin;
 }
 
 /**
@@ -88,9 +235,9 @@ const createDefaultAdmin = async () => {
     return existingAdmin;
   }
 
-  // 默认管理员密码：优先从环境变量读取，未配置时生成随机强密码
-  const adminPassword =
-    process.env.ADMIN_INITIAL_PASSWORD || crypto.randomBytes(16).toString('hex');
+  // 显式注入值在生产语义下必须过硬性强度校验——否则 `password1234` 这类
+  // 12 位弱口令会被直接播种成 SUPER_ADMIN，而等保证据却写着"初始口令强校验"。
+  const adminPassword = resolveInitialAdminPassword();
 
   // 邮箱可配置：原先硬编码 'admin@example.com'，而 email 有唯一索引，
   // 且 createDefaultAdmin 只按 username 判重。若在公开注册开启期间有人抢注该邮箱，
@@ -114,31 +261,18 @@ const createDefaultAdmin = async () => {
   // 创建时一并写入 roles，单次落库：原先「create 后再 save 绑定角色」的两步写
   // 在两步之间进程中断会留下无角色的 admin 账户（登录后权限为空）
   let admin;
+  let createdHere = true;
   try {
     admin = await createWith(desiredEmail);
   } catch (err) {
-    // 仅对**邮箱唯一键**冲突降级；其他错误（含 username 冲突）照常抛出。
-    // A3：冲突键名有两个可能的来源，必须都认——
-    //   · `emailKey_1`：新索引（schema 上 email 的唯一约束已搬到检索键列）；
-    //   · `email_1`：**遗留**索引（明文列），它要等 reconcileUserIndexes 四步走完
-    //     才被删掉，在此之前仍会先于新索引报冲突。
-    // 只认其中一个的后果是把"邮箱被抢注"误判成未知错误 → 重新抛 → 开机 DoS，
-    // 而那正是本段两层防护要挡的东西。
-    const conflictKey = err?.code === 11000 ? Object.keys(err.keyPattern || {})[0] : null;
-    if (conflictKey !== 'emailKey' && conflictKey !== 'email') throw err;
-
-    const fallbackEmail = `admin+${Date.now().toString(36)}@localhost.invalid`;
-    logger.warn(
-      `默认管理员邮箱 ${desiredEmail} 已被占用（可能被外部注册抢占），` +
-        `降级使用 ${fallbackEmail} 以避免启动失败；请登录后修改为真实邮箱`
-    );
-    admin = await createWith(fallbackEmail);
+    ({ admin, createdHere } = await resolveAdminCreateConflict(err, {
+      username,
+      desiredEmail,
+      createWith,
+    }));
   }
 
-  logger.info('默认管理员账户已创建', { username: getSuperAdminUsername() });
-  persistInitialPassword(adminPassword);
-
-  return admin;
+  return finalizeDefaultAdmin(admin, adminPassword, createdHere);
 };
 
 /**

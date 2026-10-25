@@ -2,7 +2,8 @@
  * userController 写路径共享件：数据范围字段名 + 跨 create/update/roles/delete 复用的写守卫。
  */
 const ApiResponse = require('../../utils/apiResponse');
-const { matchesPermissionCodes } = require('../../utils/permissionHelper');
+const { matchesPermissionCodes, maxRoleLevel } = require('../../utils/permissionHelper');
+const { RESERVED_WILDCARD_PERMISSION } = require('../../utils/superAdmin');
 const logger = require('../../utils/logger');
 const { validateRules } = require('../../utils/ipRange');
 // 数据范围字段名只有一份（constants/dataScopeFields.js）。此前 getUserStats 里私抄了
@@ -45,6 +46,38 @@ const findUnoperableGrantCodes = (operatorPermCodes, grantRoleDocs, currentRoleD
     for (const code of permissionCodesOfRoles(currentRoleDocs)) granting.delete(code);
   }
   return [...granting].filter((code) => !matchesPermissionCodes(operatorPermCodes, code));
+};
+
+/**
+ * 授予写入**之后**的复验（TOCTOU 收口）
+ *
+ * assignRoles / createUser 的层级与权限子集判定都发生在写入之前，而
+ * updateRole（改 level）与 assignPermissions（扩权限）是两条独立请求。
+ * 并发时角色可以在"判定通过"与"角色落库"之间被抬高/扩权，于是本次授予
+ * 超出操作者实际权限。写后复验用**重新读取的角色文档**再判一次，
+ * 不成立就由调用方回滚（角色分配）或删除新账户（建号）。
+ *
+ * 角色在窗口内被删除时同样视为不成立：文档数对不上，按"角色不存在"处理，
+ * 不能因为少读到一个高等级角色就按更低层级放行。
+ *
+ * @returns {{code: string, lacking?: string[]}|null} null = 复验通过
+ */
+const findGrantViolationAfterWrite = ({
+  operatorPermCodes,
+  operatorMaxLevel,
+  grantRoleDocs,
+  currentRoleDocs,
+  expectedCount,
+}) => {
+  if (!Array.isArray(grantRoleDocs) || grantRoleDocs.length !== expectedCount) {
+    return { code: 'ROLE_ID_INVALID' };
+  }
+  if (maxRoleLevel(grantRoleDocs) > operatorMaxLevel) {
+    return { code: 'ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN' };
+  }
+  if ((operatorPermCodes || []).includes(RESERVED_WILDCARD_PERMISSION)) return null;
+  const lacking = findUnoperableGrantCodes(operatorPermCodes || [], grantRoleDocs, currentRoleDocs);
+  return lacking.length > 0 ? { code: 'PERMISSION_GRANT_FORBIDDEN', lacking } : null;
 };
 
 /**
@@ -121,6 +154,7 @@ module.exports = {
   USER_OWNER_FIELD,
   USER_DEPT_FIELD,
   findUnoperableGrantCodes,
+  findGrantViolationAfterWrite,
   rejectInvalidIpRules,
   operatorTag,
   rejectForeignPeerRoles,

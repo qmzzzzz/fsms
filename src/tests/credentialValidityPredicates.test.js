@@ -29,6 +29,7 @@ describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）'
   let Permission;
   let tokenService;
   let tokenBlacklist;
+  let sessionService;
   const stamp = `zzcv${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
 
   beforeAll(async () => {
@@ -41,6 +42,7 @@ describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）'
     Permission = require('../models/Permission');
     tokenService = require('../services/tokenService');
     tokenBlacklist = require('../middleware/tokenBlacklist');
+    sessionService = require('../services/sessionService');
   });
 
   afterAll(async () => {
@@ -109,6 +111,7 @@ describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）'
 
   describe('tokenService 两个探测函数 —— 每个拒绝原因各自为 false', () => {
     let uid;
+    let sid;
     let token; // 合法 access
     let refresh; // 合法 refresh
 
@@ -139,13 +142,21 @@ describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）'
         tokenVersion: 2,
       });
       uid = u._id;
+      // 合法 refresh 必须绑定一条真实可用会话（无 sid 的 refresh 现已被拒绝）
+      sid = `${stamp}-rf`;
+      await UserSession.create({
+        sid,
+        userId: uid,
+        status: 'active',
+        expiresAt: new Date(Date.now() + 3600_000),
+      });
       token = signAccess({
         userId: String(uid),
         username: u.username,
         roles: ['x'],
         tokenVersion: 2,
       });
-      refresh = signRefresh({ userId: String(uid), type: 'refresh', tokenVersion: 2 });
+      refresh = signRefresh({ userId: String(uid), type: 'refresh', tokenVersion: 2, sid });
     });
 
     test('配置前置：两套密钥都存在且不同（否则下面的"用错密钥"用例毫无意义）', () => {
@@ -176,7 +187,7 @@ describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）'
       await expect(tokenService.isRefreshTokenValid(wrongType)).resolves.toBe(false);
       // 反向对照：同一 payload 补上 type=refresh 就必须通过（证明上面的 false 来自 type 判断，
       // 而不是密钥/用户态/tokenVersion 之类共同前提）
-      const right = signRefresh({ userId: String(uid), type: 'refresh', tokenVersion: 2 });
+      const right = signRefresh({ userId: String(uid), type: 'refresh', tokenVersion: 2, sid });
       await expect(tokenService.isRefreshTokenValid(right)).resolves.toBe(true);
     });
 
@@ -192,7 +203,12 @@ describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）'
 
     test('tokenVersion 不匹配（改密/强制下线后）⇒ 两个探测都 false', async () => {
       const stale = signAccess({ userId: String(uid), tokenVersion: 1 });
-      const staleRefresh = signRefresh({ userId: String(uid), type: 'refresh', tokenVersion: 1 });
+      const staleRefresh = signRefresh({
+        userId: String(uid),
+        type: 'refresh',
+        tokenVersion: 1,
+        sid,
+      });
       await expect(tokenService.isAccessTokenValid(stale)).resolves.toBe(false);
       await expect(tokenService.isRefreshTokenValid(staleRefresh)).resolves.toBe(false);
     });
@@ -231,6 +247,7 @@ describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）'
         type: 'refresh',
         tokenVersion: 2,
         jti: `${stamp}-bl-refresh`,
+        sid,
       });
       await tokenBlacklist.blacklistToken(blAccess, Math.floor(Date.now() / 1000) + 3600);
       await expect(tokenService.isAccessTokenValid(blAccess)).resolves.toBe(false);
@@ -238,6 +255,51 @@ describe('凭证有效性判据（UserSession.isUsable / tokenService 探测）'
       await expect(tokenService.isRefreshTokenValid(blRefresh)).resolves.toBe(true);
       await tokenBlacklist.blacklistToken(blRefresh, Math.floor(Date.now() / 1000) + 3600);
       await expect(tokenService.isRefreshTokenValid(blRefresh)).resolves.toBe(false);
+    });
+
+    test('无 sid 的 refresh ⇒ false（不可被设备级吊销终止的血统不再续期）', async () => {
+      const noSid = signRefresh({ userId: String(uid), type: 'refresh', tokenVersion: 2 });
+      await expect(tokenService.isRefreshTokenValid(noSid)).resolves.toBe(false);
+    });
+
+    test('临时锁定（lockUntil 未到期）⇒ 两个探测都 false，解除后恢复', async () => {
+      await User.updateOne({ _id: uid }, { $set: { lockUntil: new Date(Date.now() + 60_000) } });
+      try {
+        await expect(tokenService.isAccessTokenValid(token)).resolves.toBe(false);
+        await expect(tokenService.isRefreshTokenValid(refresh)).resolves.toBe(false);
+      } finally {
+        await User.updateOne({ _id: uid }, { $set: { lockUntil: null } });
+      }
+      await expect(tokenService.isAccessTokenValid(token)).resolves.toBe(true);
+    });
+
+    /**
+     * 会话状态必须由探测函数自己判：只查 status/tokenVersion 时，
+     * 被踢设备的令牌在 /api/auth/session 里仍被报成"已登录"。
+     * 走 sessionService.revokeSession 而不是裸 updateOne——后者绕过缓存失效，
+     * 会让本用例读到 15 秒内的旧结论。
+     */
+    test('设备会话被吊销 ⇒ 绑定该 sid 的 access/refresh 均为 false', async () => {
+      const revokedSid = `${stamp}-revoked`;
+      await UserSession.create({
+        sid: revokedSid,
+        userId: uid,
+        status: 'active',
+        expiresAt: new Date(Date.now() + 3600_000),
+      });
+      const access = signAccess({ userId: String(uid), tokenVersion: 2, sid: revokedSid });
+      const refreshBound = signRefresh({
+        userId: String(uid),
+        type: 'refresh',
+        tokenVersion: 2,
+        sid: revokedSid,
+      });
+      await expect(tokenService.isAccessTokenValid(access)).resolves.toBe(true);
+      await expect(tokenService.isRefreshTokenValid(refreshBound)).resolves.toBe(true);
+
+      await sessionService.revokeSession({ sid: revokedSid, userId: uid, reason: 'test' });
+      await expect(tokenService.isAccessTokenValid(access)).resolves.toBe(false);
+      await expect(tokenService.isRefreshTokenValid(refreshBound)).resolves.toBe(false);
     });
   });
 });

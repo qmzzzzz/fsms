@@ -5,7 +5,7 @@
  *
  * k6 脚本不在 jest 里执行（仓库里没有 k6 运行时），所以这里做两件能真正证伪的事：
  *  1) 语法：拷成 .mjs 交给 `node --check` 解析——改坏 ESM 语法必红；
- *  2) 结构：把「这次修掉的三条」钉在代码上（缺凭据即停、显式 Bearer、
+ *  2) 结构：把「这次修掉的三条」钉在代码上（缺凭据即停、显式 Cookie 回放、
  *     登录失败不再往下打），并自带负向自证，避免退化成恒绿的文本断言。
  *
  * 踩过的坑（已写进 code 视图）：注释里会解释「原来错在哪」，
@@ -46,9 +46,15 @@ describe('k6 核心旅程脚本契约', () => {
     );
   });
 
-  test('凭据以显式 Bearer 下发，不再依赖自动 cookie jar', () => {
-    expect(code).toMatch(/Authorization:\s*`Bearer \$\{authToken\}`/);
-    expect(code).toMatch(/http\.get\([\s\S]{0,200}Authorization/);
+  test('凭据以显式 Cookie 头回放，不依赖自动 cookie jar', () => {
+    // 登录令牌只经 httpOnly Cookie 下发（响应体没有 token），因此压测脚本必须
+    // 从 Set-Cookie 提取再用 Cookie 头回放；显式写头而不是依赖 k6 自动 jar，
+    // 是因为生产镜像的 Secure cookie 在 http:// 目标下会被自动 jar 丢弃。
+    expect(code).toMatch(/res\.cookies\['access_token'\]/);
+    expect(code).toMatch(/Cookie:\s*authCookie/);
+    expect(code).toMatch(/http\.get\([\s\S]{0,200}Cookie/);
+    // 反向自证：Bearer 是旧的错误口径（登录响应体不含 token），留着会再次静默早退
+    expect(code).not.toMatch(/Authorization/);
     // 死代码 jarCookies 是「以为要手工管 cookie」的痕迹，留着会误导下一个改脚本的人
     expect(code).not.toMatch(/jarCookies/);
     // 负向自证：视图里没有 cookie API，说明判据不是靠巧合通过

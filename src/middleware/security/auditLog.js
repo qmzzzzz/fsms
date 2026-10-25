@@ -13,6 +13,7 @@ const {
   matchesAnyPathPrefix,
 } = require('../../utils/helpers');
 const { auditPath, deriveAuditMeta } = require('../../utils/auditMeta');
+const { auditClientAddress } = require('../../utils/ipUtils');
 const { isBodySensitiveKey, sanitizeAuditQuery } = require('../../models/auditLogSanitizer');
 
 /**
@@ -83,7 +84,8 @@ const auditLog = (options = {}) => {
     // 审计用的规范路径（含 /api 前缀，已去查询串）
     const fullPath = auditPath(req);
 
-    // 跳过不需要审计的路径（登录/刷新由 authController 写专用事件型审计，
+    // 跳过不需要审计的路径（登录/刷新由 authService 写专用事件型审计：
+    // 登录成败走 recordLogin，刷新的成功/重放/拒绝走 recordRefreshAudit；
     // 此处必须用 fullPath 判断，否则排除失效会产生 anonymous 的重复记录）
     if (matchesAnyPathPrefix(excludePaths, fullPath)) {
       return next();
@@ -310,7 +312,8 @@ const persistAuditRecord = (ctx) => {
     statusCode: res.statusCode,
     success,
     errorMessage: success ? undefined : stripControlChars(res.statusMessage, 512),
-    ip: req.ip,
+    // ip 只取可信边界内的判定地址；上报值/对端留在 clientInfo 供取证
+    ...auditClientAddress(req),
     userAgent: safeUserAgent,
     duration,
   });

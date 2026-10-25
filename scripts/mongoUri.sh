@@ -40,7 +40,7 @@
 #      （mongodump/mongorestore 的 Go 驱动本机不可测，方向上应与 WHATWG 同侧；那是**推断**，
 #      所以判据取两侧都拒绝：第二个裸 `@` 一律硬拒，不赌哪个读者是对的。）
 # 所以取段判据改成按**参考解析器怎么读主机段**来定（顶层 mongodb 内嵌的
-# mongodb-connection-string-url；本仓按同一族包钉行为的另一处是 src/config/database.js:51，
+# mongodb-connection-string-url；本仓按同一族包钉行为的另一处是 src/config/database.js:57-58，
 # 那里判的是它的报错形态）。三条正面规则 + 一条兜底：
 #   · authority 终止于**第一个** `/`、`?` 或 `#`（RFC 3986 与该包 hosts 段的字符类同一口径），
 #     凭据与主机的分界取**第一个** `@`（该包的 username/password 字符类都不含 `@`）；

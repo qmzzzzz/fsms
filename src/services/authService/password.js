@@ -12,6 +12,7 @@ const { matchesHistory, withPrevious, HISTORY_DEPTH } = require('../../utils/pas
 const { invalidateUserTokens } = require('../../middleware/tokenBlacklist');
 const { decryptLoginCredential } = require('../../utils/loginCipher');
 const sessionService = require('../sessionService');
+const initialPasswordFile = require('../initialPasswordFile');
 
 /**
  * 解出一段口令：密文轨优先，回落到明文轨。
@@ -183,6 +184,9 @@ async function changeUserPassword(userId, body, ctx) {
   // 「候选新口令 vs 既往口令」。当前口令由上面的 SAME_PASSWORD 单独判。
   user.passwordHistory = withPrevious(user.passwordHistory, current.value);
   await user.save();
+
+  // 口令已变 ⇒ 初始口令作废；即使随后的会话吊销失败也必须销毁该文件
+  initialPasswordFile.consume(user.username, '修改密码');
 
   return revokeSessionsAfterPasswordChange(user);
 }

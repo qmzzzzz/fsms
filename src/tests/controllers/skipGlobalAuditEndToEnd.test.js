@@ -39,6 +39,7 @@ describe('端到端：skipGlobalAudit 命中路径不再双写', () => {
   let AuditLog;
   let admin;
   let adminToken;
+  let adminPassword;
   const stamp = `p05e2e${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
 
   beforeAll(async () => {
@@ -84,10 +85,11 @@ describe('端到端：skipGlobalAudit 命中路径不再双写', () => {
       status: 'active',
       permissions: [pConfig._id, pUpdate._id],
     });
+    adminPassword = randomPassword();
     admin = await User.create({
       username: `p05e2e${stamp}`,
       email: `p05e2e${stamp}@example.com`,
-      password: randomPassword(),
+      password: adminPassword,
       status: 'active',
       department: '总部',
       roles: [adminRole._id],
@@ -133,7 +135,7 @@ describe('端到端：skipGlobalAudit 命中路径不再双写', () => {
     const res = await request(app)
       .put('/api/security/config/loginCaptchaEnabled')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ loginCaptchaEnabled: true });
+      .send({ loginCaptchaEnabled: true, currentPassword: adminPassword });
 
     expect(res.status).toBe(200);
     expect(res.body.data.loginCaptchaEnabled).toBe(true);
@@ -157,7 +159,7 @@ describe('端到端：skipGlobalAudit 命中路径不再双写', () => {
     const res = await request(app)
       .put('/api/security/config/registerCaptchaEnabled')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ registerCaptchaEnabled: false });
+      .send({ registerCaptchaEnabled: false, currentPassword: adminPassword });
 
     expect(res.status).toBe(200);
 

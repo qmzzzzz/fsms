@@ -21,6 +21,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 describe('audit export boundaries', () => {
   let app;
@@ -98,7 +99,8 @@ describe('audit export boundaries', () => {
     const response = await request(app)
       .get('/api/security/audit-logs/export')
       .query({ action: 'auth_login' })
-      .set('Authorization', `Bearer ${operatorToken}`);
+      .set('Authorization', `Bearer ${operatorToken}`)
+      .set(reauthHeaders(operatorToken));
 
     expect(response.status).toBe(200);
     expect(response.headers['x-audit-truncated']).toBeUndefined();

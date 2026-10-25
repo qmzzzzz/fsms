@@ -203,14 +203,6 @@ const INDIRECT_EXPORT = [
     premise: '...dashboardService.__test',
     reason: 'reportController.__test 展开复用本模块 __test，用例 require 的是 controller',
   },
-  {
-    rel: 'utils/metricsAuditDrops.js',
-    name: '_auditDrops',
-    via: 'utils/metrics.js',
-    premise: '_auditDrops: auditDropMetrics._auditDrops',
-    reason:
-      'metrics.js 汇总转发出站指标钩子，用例经 metrics 门面消费（src/tests/observability/auditDropMetrics.test.js）',
-  },
 ];
 
 const keyOf = (h) => `${h.rel}::${h.name}`;
@@ -369,8 +361,8 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
     expect(propertyExportKeys('const v = module.exports["_read"];')).toEqual([]);
   });
 
-  it('钩子总数钉死：只许减不许增（当前 32 个），且成员可点名', () => {
-    expect(hooks.length).toBe(32);
+  it('钩子总数钉死：只许减不许增（当前 33 个），且成员可点名', () => {
+    expect(hooks.length).toBe(33);
     const keys = hooks.map(keyOf);
     for (const must of [
       'services/auditBuffer.js::__resetForTest',
@@ -381,9 +373,11 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
       'services/statsCache.js::_store',
       'utils/loginCipher.js::_resetForTests',
       // 单行导出块（`module.exports = { a, _resetForTests };`）——正则口径会整块漏掉，
-      // 实测漏掉 utils/transaction.js:102 与 utils/metricsAuditDrops.js:87 两处
+      // 实测漏掉 utils/transaction.js:102 与 utils/metricsAuditDrops.js:121 两处
       'utils/transaction.js::_resetForTests',
       'utils/metricsAuditDrops.js::_auditDrops',
+      // 每连接入站令牌桶：用例直接 require 本模块读桶状态（不再经 metrics 门面间接消费）
+      'services/websocketService/inboundThrottle.js::_peekState',
     ])
       expect(keys).toContain(must);
   });

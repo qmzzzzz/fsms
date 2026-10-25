@@ -12,7 +12,31 @@ const { getDataScope, assertRecordInScope } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const { rejectOutOfScopeReferences, normalizeInspectionRefLists } = require('./inspectionGuards');
 const { normalizePagination, isValidDateParam } = require('../utils/helpers');
+const logger = require('../utils/logger');
 const inspectionService = require('../services/InspectionService');
+
+/**
+ * 写后复验设备引用：把"校验存在 → 落库"窗口内被删除的设备摘掉。
+ *
+ * 设备删除侧（DeviceService.deleteDevice）在自己的事务里清引用，但它清理时
+ * 本次引用还没写进库；窗口内落库的引用于是悬空（populate 出 null，报表里
+ * 设备列/台账对不上）。写入方落库后自查一次并摘除，两侧合起来才覆盖整个窗口。
+ *
+ * @returns {Promise<Set<string>>} 已摘除的 id（供调用方同步内存中的响应文档）
+ */
+const stripMissingDeviceRefs = async (inspectionId, deviceIds) => {
+  const ids = (deviceIds || []).filter(Boolean);
+  if (ids.length === 0) return new Set();
+  const deviceService = require('../services/DeviceService');
+  const missing = await deviceService.findMissingIds(ids);
+  if (missing.length === 0) return new Set();
+  await inspectionService.removeMissingDeviceRefs(inspectionId, missing);
+  logger.warn('巡检写入后设备已不存在，已摘除悬空引用', {
+    inspectionId: String(inspectionId),
+    missing,
+  });
+  return new Set(missing.map(String));
+};
 
 /**
  * 校验巡检记录是否在当前用户数据范围内
@@ -158,7 +182,11 @@ const createInspection = asyncHandler(async (req, res) => {
   if (await rejectUnusableAssignees(res, allowedFields.assignedTo)) return undefined;
   if (await rejectOutOfScopeReferences(req, res, allowedFields)) return undefined;
 
-  const inspection = await inspectionService.createInspection(allowedFields);
+  const inspection = await inspectionService.createInspection(allowedFields, req.user.userId);
+  const missingDevices = await stripMissingDeviceRefs(inspection._id, allowedFields.devices);
+  if (missingDevices.size > 0 && Array.isArray(inspection.devices)) {
+    inspection.devices = inspection.devices.filter((id) => !missingDevices.has(String(id)));
+  }
   return ApiResponse.success(res, inspection, '巡检计划创建成功', 201);
 });
 
@@ -234,6 +262,12 @@ const updateInspection = asyncHandler(async (req, res) => {
   // asyncHandler 的 JSDoc 就是这个意思："避免在 async 函数中使用 try-catch"。
   // 钉住：src/tests/controllers/deviceStatusErrorMapping.test.js（同一映射面）
   const updated = await inspectionService.updateInspection(inspection, updates);
+  const missingDevices = await stripMissingDeviceRefs(updated._id, updates.devices);
+  if (missingDevices.size > 0 && Array.isArray(updated.devices)) {
+    updated.devices = updated.devices.filter(
+      (device) => device && !missingDevices.has(String(device._id || device))
+    );
+  }
   return ApiResponse.success(res, updated, '巡检计划更新成功');
 });
 
@@ -287,6 +321,10 @@ const completeInspection = asyncHandler(async (req, res) => {
     inspection,
     { result, findings, location, remark },
     req.user.userId
+  );
+  await stripMissingDeviceRefs(
+    updated._id,
+    (Array.isArray(findings) ? findings : []).map((f) => f && f.deviceId)
   );
   return ApiResponse.success(res, updated, '巡检结果提交成功');
 });

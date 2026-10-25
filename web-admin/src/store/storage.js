@@ -11,7 +11,7 @@
  * 安全读写 sessionStorage（兼容隐私模式下的 Edge / Firefox / Chrome）
  *
  * 认证令牌已迁移至 httpOnly cookie（I-01）：login/refresh 由后端 Set-Cookie 下发
- * access_token(path=/api) 与 refresh_token(path=/api/auth)，JS 完全不可读，
+ * access_token(path=/) 与 refresh_token(path=/api/auth)，JS 完全不可读，
  * XSS 无法窃取。此处仅存放 currentUser/permissions 等非敏感界面状态，
  * 支撑刷新页面后的路由守卫与权限判断；真实鉴权始终由后端按 cookie 校验。
  */

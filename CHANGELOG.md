@@ -8,6 +8,111 @@
 
 ## [未发布]
 
+### 告警抑制规则移除、nginx 显式拒绝 `/readyz`、Node 运行时进 CI 矩阵、5 条"假绿"测试逐条复核（2026-10-24）
+
+> 审计第二批 6 项。其中 **2 项经复核不成立**（compose app 的 healthcheck、两个"假绿"测试），
+> 记录在下方表格的对应行——不修一个不存在的问题，与修一个真问题同等重要。
+
+| 项                            | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 告警抑制规则（移除）          | `alertmanager.yml` 原为「任何 critical 抑制同实例任何 warning，`equal:['instance']`」，理由写的是「BackendDown 时 HighP95Latency 必然伴随」。复核后整条移除，三条理由写进文件：①该理由**事实错误**——目标停止导出指标后 `rate()` 无样本，延迟告警根本不会触发；②即便成立，`equal:['instance']` 也匹配不到 `ReadinessProbeMissing` 的 `absent()` 分支（`absent()` 只回填选择器里的 `job`），而那正是"后端真挂了"时唯一会亮的伴随告警；③若真能生效，`AuditRecordsDropped`(critical) 会压掉同实例 `DiskSpaceLow`(warning)——把**根因**信号静默掉。同时留了新增抑制的三条门槛（alertname 精确 / target 是 source 的纯后果 / equal 标签两侧必然存在）                                                                          |
+| 告警标签（修）                | `alert-rules.yml` 的 `HighErrorRate`、`SecurityAlertBurst` 由 bare `sum(...)` 改为 `sum by (instance)`。理由不是"为了让抑制能匹配"（那条规则已移除），而是多实例部署下 bare `sum` 会把全部标签丢掉：告警分不清哪台机器出错、面板无法按实例下钻、`{{ $labels.instance }}` 渲染成空串。单实例环境里这个缺陷"看起来完全正常"，所以只能靠契约测试钉住                                                                                                                                                                                                                                                                                                                                                                       |
+| nginx `/readyz`（修）         | `deployment/nginx.conf.example` 此前只有注释「/readyz 刻意不对外」，配置上无任何对应指令 ⇒ 落进 `location /` 的 `try_files` 返回 **200 + index.html**。外部拨测配了这个地址会**恒判健康**（它探的是 nginx 能否返回 HTML，不是 Mongo 可不可达）。新增 `location = /readyz { return 404; }`：精确匹配、不反代、用 404 而非 403（403 等于确认"该路径存在且被保护"）                                                                                                                                                                                                                                                                                                                                                        |
+| compose healthcheck（不成立） | `docker-compose.yml` 的 app 服务确实没有 `healthcheck`，但**不是缺陷**：健康检查来自镜像（`Dockerfile:201` 的 `HEALTHCHECK --interval=30s`），Compose 在服务未声明时原样继承；mongo/redis 要在 compose 里写，是因为它们的官方镜像不带。**反过来补一条是有害的**——compose 侧手写的通常只探 `/health`，会整体顶掉镜像侧"并行探 `/readyz` + `/health`、退出码只取 health"的口径。已补契约测试钉住该形态，compose 该块内写明不要补的理由                                                                                                                                                                                                                                                                                    |
+| Node 运行时（修）             | 生产镜像 `node:26.12.0-alpine`，CI 矩阵只有 `22.x/24.x` ⇒ **实际发布到生产的运行时从未被任何 CI 用例执行过**。矩阵加 `26.x`（`[22.x, 24.x, 26.x]`，分别对应 `engines` 下界 / 当前 LTS / 发布基线），并新增 `nodeRuntimeMatrixParity.test.js` 把"镜像主版本 ∈ 矩阵、三处 FROM 一致、`engines` 下界 ∈ 矩阵"钉成闸门。选加矩阵而非降镜像版本：后者要回退一次四天前做过三源核验的升级，前者只增加验证、不改生产行为                                                                                                                                                                                                                                                                                                         |
+| 前端 PII（修）                | `web-admin` 的 `currentUser` 落 localStorage 时改为白名单投影（`userId`/`id`/`_id`/`username`/`roles`），不再写入 `email`/`realName`/`phone` 等 PII。httpOnly cookie 的收益此前被明文 PII 抵消。新增 `authPersistenceNoPii.test.js` 6 例：白名单闭合性、登录与 `/auth/me` 两条路径不落 PII、内存态仍保留完整字段、刷新后身份骨架可用、历史脏数据被覆盖                                                                                                                                                                                                                                                                                                                                                                  |
+| 5 条"假绿"测试                | 3 条成立并已修（见下），2 条不成立。①`authMiddlewareFailClosedGuards`：三条 `not.toThrow()` 换成可观察后果（库里改 inactive → 失效后必须 401），**变异复测**从"11 例全绿"变为"1 例红"；②`User.test.js`：从"字段存在"改为按**选项值**断言（10 个凭证字段 `select:false`、西里尔同形字 `аdmin` 必须被拒、72 **字节**边界、`status.enum` 与 `USER_STATUS` 同源、`username_ci` 的 collation）；③`mfaReplayGuardMax`：补"先认领再写库"的顺序断言（原断言对换序完全免疫）。**不成立**的 2 条：`mfaControllerOrchestration` 的认领失败分支已在 `mfaReplayGuardMax:118` 覆盖；`securityConfigHandlers` 的读回一致已由 `systemConfigBooleanContract.test.js`（真实 Mongo）覆盖——两处都在文件头写明了分工，避免同一结论被再次提出 |
+| 契约测试                      | 新增 `composeAppHealthcheck.test.js`（5 例）、`nodeRuntimeMatrixParity.test.js`（5 例）、`authPersistenceNoPii.test.js`（6 例）；`nginxProxyContract` +1 例、`alertingConfig` +6 例。三处变异实测：`return 404`→`200` 变红、`sum by (instance)`→bare `sum(` 红 2 例、给 app 补 healthcheck 变红 1 例                                                                                                                                                                                                                                                                                                                                                                                                                    |
+
+### WS 绕过探针改为两个单违规场景，并要求拒绝理由可归因（2026-10-24）
+
+> 审计 P2：`scripts/audit-probes/ws-session-bypass.cjs` 只用一个令牌，**同时**带
+> 「已吊销会话」与「非白名单 IP」两条违规，判据是"收到任何 `auth-error` 就算拒绝"。
+> 于是它只证明了**至少一条**控制在生效：把 `sid` 校验删掉、只留 IP 校验，探针照样
+> `exit 0` 报"P0-2 修复在位"。对一个有两条独立控制项的漏洞，"至少一条"不是证据。
+> 另外 HTTP 侧只 `console.log` 状态码、从不校验，一个 500 或"因别的原因 401"也会被
+> 当成有效对照。
+
+| 项            | 内容                                                                                                                                                                                                                                         |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 场景拆分      | 拆成 `session_revoked`（会话已吊销 + IP 不限制）与 `ip_not_allowed`（会话正常 + IP 不在白名单），每个场景只带一条违规。两个用户、两个会话、两个令牌，`allowedIPs` 与 `sessionStatus` 互斥地只坏一个                                          |
+| 理由归因      | `decideVerdict` 新增 `expected` 参数：必须收到 `auth-error` **且文案匹配本场景那条控制**才判 `rejected`。不匹配、或调用方未声明期望 → `inconclusive`（exit 2），不再算通过。帧里没有错误码，文案是唯一通道，故文案改动会让探针变红而不是变绿 |
+| HTTP 前置对照 | 改为断言 `status + errorCode`（`401/DEVICE_SESSION_REVOKED`、`403/AUTH_IP_RANGE_DENIED`）。不符即判 `inconclusive`：同一令牌在 HTTP 侧不是因本场景那条规则被拒时，WS 侧的"被拒"无法归因                                                      |
+| 服务端观察    | 不再取 `[...clients.values()][0]`（多场景同进程时会拿到上一场景的残留或未认证占位条目），改为按**本场景 userId** 精确匹配；第 5 步同时打印实际收到的下行帧，让证据可见                                                                       |
+| 体积          | `makeClients` 的 get/post 合并为一个 `send(method, path, body)`，抵消新增逻辑，维持 `max-lines` 300 以内                                                                                                                                     |
+| 测试          | `src/tests/wsProbeVerdict.test.js` 6 例 → 9 例：新增「理由不匹配 ⇒ 不可判定」「两场景理由互不通用（互为反例）」「未声明期望理由 ⇒ 不可判定」，并钉住场景表仍是两个单违规场景                                                                 |
+| 可证伪性      | 实测三组：① 两条控制都摘 → `bypass,bypass exit=1`；② **只摘 IP 校验** → `rejected,bypass exit=1`（旧判据在这种情形下会给 exit 0）；③ 恢复后 → `rejected,rejected exit=0`，两场景各自拿到自己的 `auth-error` 帧                               |
+
+### MFA 关闭与恢复码重生成改为条件写（CAS）（2026-10-24）
+
+> 审计 P2：`mfaController.js` 四个状态变更写点里，`mfaEnroll`（:174）与 `mfaEnable`（:273）
+> 已是条件写，注释还写着「下发即生效，不得被并发请求静默回收」；而
+> `regenerateRecoveryCodes`（:104）与 `mfaDisable`（:368）仍是 `findByIdAndUpdate(_id)`
+> **无条件覆盖**。同一份文件里同一条不变量，修了两处漏了两处。
+
+| 项         | 内容                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 重生成 CAS | 过滤条件改为 `{_id, mfaEnabled:true, 旧码组全等}`。两次并发重生成携带**相邻窗口**的不同码时两次 `claimTotpWindow` 都会成功（窗口不同不算重放），后到者原会顶掉先到者刚下发的 10 张——调用方已抄走的那组全部作废，而两个响应都宣称"已生成"。空数组分支用 `$in: [[], null]` 覆盖"字段缺失"的历史文档（Mongoose 读时补 `default:[]`，库里没有该字段，直接写 `[]` 会永不命中 ⇒ 这类用户永久 409） |
+| 关闭 CAS   | 过滤条件改为 `{_id, mfaEnabled:true, **本次验证过的 mfaSecret**}`。验证是对 `user.mfaSecret` 解密后做的；该字段被并发 enroll/enable 换掉后，无条件写仍会 `mfaEnabled:false + mfaSecret:''`，把本次从未证明过控制权的**新登记**一起清掉，审计还记成"用户关闭 MFA"                                                                                                                             |
+| 落空归因   | 两处 CAS 落空后重读一次：已关 → `MFA_NOT_ENABLED`（不再记第二条"成功关闭"审计）、码组被换 → `USER_STATE_CONFLICT`、无 MFA → `MFA_NOT_ENABLED_NO_CODES`。**落空时绝不返回本次生成的码**——它们从未生效                                                                                                                                                                                         |
+| 分层       | `mfaDisable` 的第二因子判定（TOTP 优先 / 恢复码兜底）移入 `mfaService.verifyDisableFactor`：这是"什么算验证通过"的领域判定，controller 只该决定"通过后写什么、失败回什么码"。顺带把控制器压回 `max-lines` 300 以内                                                                                                                                                                           |
+| 测试       | 新增 `src/tests/controllers/mfaWriteCasConcurrency.test.js`（4 例，**真实 Mongo**，用闸门制造确定性交错而非 sleep）：① 并发重生成恰好一次 200，且成功响应下发的 10 张码**逐张**能对上库内摘要；② 关闭与新登记并发时旧密钥的验证不得清掉新登记；③ 缺 `mfaRecoveryCodes` 字段的历史文档仍可重生成；④ 无并发时两端点照常成功（CAS 不得把正当用户挡在门外）                                      |
+| 可证伪性   | 已做变异验证：把两处过滤条件临时改回 `{_id}` 后，用例 ①② 立即变红（实测 `Expected length: 1 / Received length: 2`，两份响应各带一组不同的 10 张码），用例 ③④ 保持绿 —— 说明断言钉的是 CAS 本身，不是环境                                                                                                                                                                                     |
+
+### 迁移脚本参数严格化，且不再在 require 时连库（2026-10-21）
+
+> 审计 P2：`scripts/migrate-pii-encryption.js` 用五个独立 `if` 解析开关，未知参数一律当没看见。
+> `--keys-onl`（少一个字母）不会报错，`keysOnly` 保持 false ⇒ 退化为**默认全量模式**
+> （加密列 + 回填检索键 + 升级 v1），而操作者以为只补键。同一文件还在模块顶层无条件
+> `main()`：任何 `require()` 都会立刻连库并扫描改写 PII。
+
+| 项         | 内容                                                                                                                                                                                                                                                                                                                                        |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 参数严格化 | 新增 `scripts/cliFlagPolicy.js`（本仓第四份「开关白名单」实现，抽出来共用）：`parseFlags(argv, allowed)` 把白名单外 token 全部收进 `errors`；建议用**编辑距离 ≤ 2**（全等抹平法对"少一个字母"永不命中，而那正是最危险的误输）。`migrate-pii-encryption.parseArgs(argv)` 返回 `{args, errors}`，`main()` 在**任何副作用之前**以退出码 2 拒绝 |
+| 顶层执行   | `main()` 改为 `if (require.main === module)`；`--rotate` 的密钥快照本就在 `main()` 内有等价语句，删掉顶层重复。`parseArgs` / `MODE_FLAGS` / `PII_TARGETS` 导出供测试                                                                                                                                                                        |
+| 文档闸     | `runbookSecretSource.test.js` 的 `EXTRA_SECRETS` 补 `run-rollback-drill.js: ['AES_SECRET_KEY']`——快照加密后缺密钥即 exit 2，手册 cron 必须自带来源，否则预发演练静默失败                                                                                                                                                                    |
+| 测试       | `src/tests/deploy/cliArgStrictness.test.js` 增用例 19-23（合法全给不误伤 / 拼错必须报错且不猜真 / 位置参数拒绝 / 子进程实测退出码 2 且不连库 / `require` 不触发 `main`）；同时把 `generate-secrets` 的密钥清单钉数补上 `mongo_keyfile`（并行改动新增，钉数按设计要求显式确认）                                                              |
+
+### 举报对话框改为可搜索对象选择器（2026-10-21）
+
+> 缺陷（可用性）：举报对话框把「对象 ID」摆给用户填 24 位 ObjectId，而一线人员拿不到该值
+> —— 它只出现在接口响应里，界面上从不显示。记录型举报（用户/设备/报警记录）实际不可用。
+
+| 项       | 内容                                                                                                                                                                                                                                                                     |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 前端控件 | `ReportDialog.vue` 的记录型目标由 ID 输入框改为远程搜索下拉：界面只出现名称/编号，`targetId` 作为选中值随载荷上行、用户不可见。输入防抖 300ms（每次输入只落一条审计）、请求序号防「后发先至」覆盖、选中项在候选刷新后仍保留标签                                          |
+| 新端点   | `GET /api/security/report-targets?type=&keyword=`：免权限码（举报对全员开放），候选集按**举报人数据范围**过滤，每类上限 20 条；投影不含 phone/email、报警描述、上报人姓名                                                                                                |
+| 同判据   | 新增 `rbac.buildRecordScopeFilter`，与核验侧的 `isRecordInScope` **逐臂同值**（含「本人 `_id` 短路」、department 缺失仍放行本人、`none` 一律 deny）。`buildDataScopeFilter` 在这两处边界上并不等价——直接复用它会出现「下拉里选不到自己」或「选得到却提交 403」           |
+| 限流     | 候选查询消耗 `authenticate` 内的账号级 userLimiter（200/15min），与举报提交的独立 20 次写配额分开：搜索不会吃掉提交配额（否则 429 文案会指向「提交过于频繁」，根因不可见）                                                                                               |
+| 文档     | `src/docs/generate.js` 补 `/api/security/report-targets` 并重生成产物；端点经 `securityRoutes` 直接注册（不走 `router.use` 子挂载——openapiSync 的采集对子挂载是盲区，塞进去等于绕过文档门禁）                                                                            |
+| 测试     | 新增 `src/tests/security/reportTargetCandidates.test.js`（16 例：免权限码可达 / 范围一致性 / **候选与提交核验同值** / 最小投影 / 参数边界 / 20 条上限与独立配额）；`web-admin/src/tests/components/reportDialog.test.js` 重写为 13 例，含「界面上不出现对象 ID」回归锚点 |
+
+### 审计 WAL 裁剪按持久化承诺分级 + 回滚演练备份加密（2026-10-21）
+
+> 按 `deliverables/七维审计终稿-核验版-2026-10-21.md` 的两项 P1 整改。
+> 旧结论「outbox 先落 WAL 名不副实」已在工作树中修复（`auditOutbox.js` 已 `await appendLineDurable` 并 fsync），
+> 但**裁剪侧**仍会把这些已 fsync 的行按位置丢出主 WAL，本节点修的是这一半。
+
+| 项           | 内容                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WAL 裁剪分级 | `auditOutbox.js` 写出的行带 `__walDurable`；`auditWalCap.enforceWalLimit` 改为**普通行优先丢、durable 行默认不丢**。普通行不足时记 `walDurableTrimRefusals` 并停手（WAL 继续超限，这是有意取舍），只有显式 `AUDIT_WAL_ALLOW_DURABLE_TRIM=true` 才裁 durable 并计 `walDurableDropped`。理由：`.discarded` 永不回灌，按位置裁剪等于把「已回成功」改成「落盘但永久不入库」 |
+| 重放剥离     | `auditBufferWal.stampReplaySeqs` 在交给缓冲前删除 `__walDurable`（保留 `__walSeq`），避免 WAL 记账字段进入 Mongo 文档；回写补号行在删除**之前**序列化，否则会丢标记                                                                                                                                                                                                     |
+| 面板投影     | `securityController/overview.js` 的 `auditLoss` 新增两项；`AuditLogView.vue` 的 `auditLossTotal` 计入 `walDurableDropped`（承诺缺失），`walDurableTrimRefusals` 只进明细（此刻尚未丢记录，处置方向是扩容而非取证）                                                                                                                                                      |
+| 演练备份加密 | `run-rollback-drill.js` 由明文 gzip 改为 gzip 后 AES-256-GCM（魔数 `FSMSBK1`，密钥由 `AES_SECRET_KEY` 派生），缺密钥直接退出、不退回明文；`.discarded` 同族：`restoreCollection` 按魔数识别，改造前的明文快照仍可回灌但显式告警                                                                                                                                         |
+| 可观测性     | `metricsAuditDrops` 新增 reason `wal_durable_lost`（由 `auditWalCap` 在显式开关裁掉 durable 行时上报，自动被既有 `AuditRecordsDropped` critical 规则覆盖）；新增计数器 `audit_wal_durable_trim_refusals_total` 与告警 `AuditWalTrimRefused`（warning）——「拒绝裁剪」意味着 WAL 无界增长，必须在写满磁盘前可见                                                           |
+| 文档对齐     | `deployment/backup-encryption.md` 删除「单人拿不到完整链」这一与设计矛盾的断言，改为「默认无口令私钥下该控制不成立」并给出两条可兑现路径（口令分离 / 人员分离）；`deployment/rollback-drill.md` 的 cron 示例补 `AES_SECRET_KEY_FILE`，并新增第 5 条纪律（缺密钥退出码 2 是 fail-closed，不是配置错误）                                                                  |
+| 测试         | 新增 `src/tests/services/auditWalDurableTrim.test.js`（5 例：durable 全留 / 拒绝裁剪 / 显式放开 / 全 durable 不动文件 / 重放剥字段，含两条 Prometheus 上报断言）；`rollbackDrillRestoreVerification.test.js` 增「归档必须带 FSMSBK1 魔数且不得同时留下明文 .ndjson.gz」与 `manifest.encrypted` 断言；`auditDropMetrics.test.js` 的 reason 闭合集合断言扩到五项          |
+
+### 搜索面板新增可见关闭按钮、隐藏 ESC 提示（2026-10-21）
+
+> 全屏态下 ESC 先被浏览器用于退出全屏（`keydown` 的 `preventDefault` 拦不住），把 ESC 当关闭卖点展示会误导；改为「按钮是可见入口，ESC 静默保留」。
+
+| 项         | 内容                                                                                                                                                                                                                                 |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 组件行为   | `web-admin/src/components/SearchPalette.vue` 输入行右侧新增 `.search-palette__close` 按钮（`aria-label`/`title` 取 `common.close`，纳入既有 Tab 焦点陷阱）。ESC、遮罩点击、⌘K/Ctrl+K 再次按下仍照旧可关闭，只是 ESC 不再出现在 UI 上 |
+| 提示与词表 | 页脚去掉 `ESC 关闭` 提示、输入行去掉 ESC 键帽（页脚只剩 ↑↓ 与 ↵）；随之无引用的 `common.searchHintClose` 从中英词表删除（两语言同步，键位仍对齐）                                                                                    |
+| 测试       | `web-admin/src/tests/components/searchPalette.test.js` 新增「关闭按钮可关」与「UI 无 ESC 字样（kbd 与页脚）」断言；ESC 关闭与焦点归还用例保持原契约                                                                                  |
+
 ### 七维审计 2026-10-20：审计链检查点 / 固定睡眠门禁 / 运维关键路径 E2E
 
 > 按 `deliverables/七维深度审计报告-2026-10-20.md` 整改。本节只记录三项中危的**结构性**修复；

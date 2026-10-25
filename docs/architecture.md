@@ -185,7 +185,7 @@ flowchart TB
     REDIS["redis:7-alpine\n限流 / 缓存 / 分布式锁\nvolumes: redis-data"]
   end
 
-  APP["app 容器（node:26.12.0-alpine 三阶段构建）\n非 root / cap_drop ALL / no-new-privileges\nlimits 1g·1.5cpu / 日志轮转 20m×5\n**双网络接入**"]
+  APP["app 容器（node:26.12.0-alpine 三阶段构建）\n入口 root 复制 secret 后 su-exec 降权 / 应用进程非 root\ncap_drop ALL + 最小 cap_add / no-new-privileges\nlimits 1g·1.5cpu / 日志轮转 20m×5\n**双网络接入**"]
   APP ---|"接入：被抓取 + 出网发 webhook"| EDGE
   APP ---|"接入：唯一的数据面访问者"| DATA
   PROM -->|"抓取 app:3000/metrics"| APP
@@ -239,7 +239,11 @@ flowchart TB
 
 - **单集合写**：一律依赖 MongoDB 单文档原子性，不引入事务。
 - **跨集合多步写**：必须经 `src/utils/transaction.js` 的 `withTransaction` 包裹——副本集/分片拓扑走 session 事务（任一步失败整体回滚）；standalone 拓扑按能力探测**确定性降级**为顺序执行并告警一次（不靠「先写失败再重试」误判能力），此时多集合一致性依赖应用层写入顺序。
-- **生产部署**：按副本集部署（docker-compose 的 mongo 为单节点，扩容副本集后事务自动生效，无需改代码）。
+- **生产部署**：`docker-compose.yml` 的 mongo 已配置为**单节点副本集**（`--replSet rs0` + `--keyFile`），由一次性容器 `mongo-rs-init` 幂等地执行 `rs.initiate()`，app 通过 `service_completed_successfully` 等它选出 primary 后才启动。扩容为多成员副本集时事务自动生效，无需改代码。
+  - `--keyFile` 不是可选项：MongoDB 5.x 起，副本集 + 授权（本服务由 `MONGO_INITDB_ROOT_*` 自动 `--auth`）缺 keyFile 会直接启动失败（`BadValue: security.keyFile is required when authorization is enabled with replica sets`），单节点同样如此。密钥由 `scripts/generate-secrets.js` 产出为 `secrets/mongo_keyfile`。
+  - 此前该文件写的是「mongo 为单节点」但实际是 **standalone**：`withTransaction` 会降级为顺序写，跨集合写中途失败留下「引用已清、主体还在」的中间态。本次修正后默认部署即具备事务原子性。
+  - 存量部署升级（已有 `mongo-data` 卷）：直接 `docker compose up -d` 即可——`mongo-rs-init` 会自动 initiate 并等到 primary 就绪。验证：`docker compose logs mongo-rs-init` 末行为「primary 就绪」，且 `docker compose exec mongo mongosh --quiet --eval 'rs.status().ok'` 返回 `1`。standalone 数据目录可直接成为单节点副本集成员，数据不受影响；但升级期间 mongo 有数十秒不可写，应放在维护窗口内。
+  - 若**清空**过 `mongo-data` 卷，`mongo-rs-init` 的已完成状态不会被自动重置，需显式重建：`docker compose up -d --force-recreate mongo-rs-init`。否则 app 会连到一个未初始化的 mongod。
 - **新增多步写决策顺序**：能否退化为单集合原子写 → 不能则 `withTransaction` → 仍不能则补偿逻辑，禁止裸的多步顺序写。
 - 现存多步写点位：设备删除（`deleteDevice`，告警引用 → 巡检引用×2 → 设备删除）。设备报废（`scrapDevice`）的 scrapDate 补录已合并进 `transitionTo` 单次原子写（B-2），不再是多步写。
 

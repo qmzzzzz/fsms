@@ -26,14 +26,78 @@ require('../src/config/secrets').hydrateSecretsFromFiles();
 const fs = require('fs/promises');
 const path = require('path');
 const zlib = require('zlib');
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 
 // 破坏性操作护栏（fail-closed 库名白名单），与同族脚本共用同一份声明。
 // dbNameFromUri / hostFromUri 供"护栏前移"用：库名/主机必须从 URI 解析，
 // 不能取 connect 之后的 mongoose.connection.name（那正是"护栏晚于 connect"的来源）。
 const { assertApplyAllowed, dbNameFromUri, hostFromUri } = require('./destructiveGuard');
+const { hardenPath } = require('../src/utils/filePermission');
 
 const COLLECTIONS = ['users', 'roles', 'permissions', 'auditlogs'];
+
+/**
+ * 快照加密（2026-10-21）。
+ *
+ * 背景：快照含 `users`（口令哈希、手机号、邮箱）与 `auditlogs` 全量记录。
+ * 原实现只做 gzip —— gzip **不是加密**，`0600` 只挡住同机其他用户，
+ * 挡不住"备份被拷到共享盘 / 上传工单 / 留在 CI artifact"这条实际路径。
+ * 审计结论（P1）：`COLLECTIONS` 含 PII 集合 + 明文落盘 = 一次演练即一次 PII 落地。
+ *
+ * 文件格式（自带魔数，便于与旧明文快照区分）：
+ *   "FSMSBK1\n" (8) | iv (12) | authTag (16) | AES-256-GCM 密文
+ * 密钥由 `AES_SECRET_KEY` 经 sha256 派生（与 `src/utils/encryption.js` 的
+ * AESCipher 同一派生方式），因此运维只需要记住一把主密钥。
+ *
+ * **fail-closed**：缺主密钥时直接退出，绝不退回明文写出——
+ * 「加密配置缺失就悄悄不加密」正是这条 P1 的成因。
+ */
+const BACKUP_MAGIC = Buffer.from('FSMSBK1\n', 'utf8');
+const GCM_IV_LEN = 12;
+const GCM_TAG_LEN = 16;
+
+function backupKey() {
+  // 惰性取 config：require 期不碰 config 的校验逻辑，缺密钥时只在真正写/读备份时暴露
+  const secret = process.env.AES_SECRET_KEY || require('../src/config').aesSecret;
+  if (!secret) {
+    console.error(
+      '错误：缺少 AES_SECRET_KEY，拒绝写出/读取 PII 快照。\n' +
+        '  本脚本不再产出明文备份（gzip 不是加密）。请先配置 AES_SECRET_KEY（openssl rand -hex 32）。'
+    );
+    process.exit(2);
+  }
+  return crypto.createHash('sha256').update(String(secret)).digest();
+}
+
+/** gzip 后的明文 → 加密字节流（含魔数头） */
+function encryptBackup(plainGzip) {
+  const iv = crypto.randomBytes(GCM_IV_LEN);
+  const cipher = crypto.createCipheriv('aes-256-gcm', backupKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(plainGzip), cipher.final()]);
+  return Buffer.concat([BACKUP_MAGIC, iv, cipher.getAuthTag(), ciphertext]);
+}
+
+/**
+ * 加密字节流 → gzip 明文。
+ * 返回 `null` 表示"这不是加密快照"（无魔数），由调用方按旧明文格式处理，
+ * 使改造前留下的快照仍可回灌。认不出魔数**不等于**可以直接当明文用——
+ * 调用方必须显式走旧格式分支并告警，而不是在这里静默放行。
+ */
+function decryptBackup(raw) {
+  if (raw.length < BACKUP_MAGIC.length + GCM_IV_LEN + GCM_TAG_LEN) return null;
+  if (!raw.subarray(0, BACKUP_MAGIC.length).equals(BACKUP_MAGIC)) return null;
+  const iv = raw.subarray(BACKUP_MAGIC.length, BACKUP_MAGIC.length + GCM_IV_LEN);
+  const tagStart = BACKUP_MAGIC.length + GCM_IV_LEN;
+  const tag = raw.subarray(tagStart, tagStart + GCM_TAG_LEN);
+  const ciphertext = raw.subarray(tagStart + GCM_TAG_LEN);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', backupKey(), iv, {
+    authTagLength: GCM_TAG_LEN,
+  });
+  decipher.setAuthTag(tag);
+  // GCM 认证失败（密钥不对/密文被改）在这里抛出——不降级、不猜测，直接失败
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
 
 function parseArgs(argv) {
   const args = {
@@ -133,13 +197,30 @@ function fromSerializable(value) {
 
 async function backupCollection(collection, file) {
   const docs = await collection.find({}).toArray();
-  await fs.writeFile(file, zlib.gzipSync(JSON.stringify(docs.map(toSerializable))));
+  // 快照含 users / auditlogs 明文 PII：先 gzip（体积）再 AES-256-GCM（机密性 + 完整性）。
+  // 顺序不能反——先加密再压缩几乎压不动。
+  // 文件必须是 0600（Windows 走 ACL 收紧）：mode 只在创建时生效，已有文件由 hardenPath 兜底。
+  const payload = encryptBackup(zlib.gzipSync(JSON.stringify(docs.map(toSerializable))));
+  await fs.writeFile(file, payload, {
+    mode: 0o600,
+  });
+  hardenPath(file, { isDir: false, log: (m) => console.warn(m) });
   return docs.length;
 }
 
 async function restoreCollection(collection, file) {
   const raw = await fs.readFile(file);
-  const docs = JSON.parse(zlib.gunzipSync(raw).toString('utf8')).map(fromSerializable);
+  const decrypted = decryptBackup(raw);
+  // 无魔数 ⇒ 改造前留下的明文快照。仍允许回灌（否则存量备份直接作废），
+  // 但必须显式告警：这类文件意味着 PII 曾经以明文落过盘，属于需要处置的遗留物。
+  if (decrypted === null) {
+    console.warn(
+      `⚠ 快照「${path.basename(file)}」是改造前的**未加密**格式（无 FSMSBK1 魔数），` +
+        '本次按明文回灌。回灌完成后请立即删除该文件并核查其历史副本。'
+    );
+  }
+  const payload = decrypted === null ? raw : decrypted;
+  const docs = JSON.parse(zlib.gunzipSync(payload).toString('utf8')).map(fromSerializable);
   if (docs.length === 0) return 0;
   const prepared = docs.map((doc) => {
     const { _id, ...rest } = doc;
@@ -164,19 +245,21 @@ async function restoreCollection(collection, file) {
  * @returns {void} 通过则正常返回；不通过直接 process.exit(2)
  */
 function assertDrillGuards({ applySource, confirmYes, uri }) {
-  if (!applySource) return;
-
   const targetDbName = dbNameFromUri(uri);
   const targetHost = hostFromUri(uri);
 
-  if (!confirmYes) {
+  // 快照模式同样要过白名单：它虽然不写库，但会把 users / auditlogs 全量导出到
+  // 本地 gzip。默认 URI 指向生产时，一次"只看一眼"的演练就是一次 PII 落地。
+  // 因此库名白名单（ALLOWED_SOURCE_DB）对两种模式都必需；--yes 只约束写路径。
+  if (!assertSourceDbAllowed(targetDbName, targetHost)) {
+    process.exit(2);
+  }
+
+  if (applySource && !confirmYes) {
     console.error(
       `错误：--apply-source 将对库「${targetDbName || '(未解析出库名)'}」执行 deleteMany + 回灌，` +
         `需再传 --yes 确认。如非预期请立即中断。`
     );
-    process.exit(2);
-  }
-  if (!assertSourceDbAllowed(targetDbName, targetHost)) {
     process.exit(2);
   }
 }
@@ -205,7 +288,13 @@ if (require.main === module) {
     // 顺序纪律：护栏先于 connect（实现与理由见 assertDrillGuards 注释）。
     assertDrillGuards({ applySource, confirmYes, uri });
 
-    await fs.mkdir(backupDir, { recursive: true });
+    await fs.mkdir(backupDir, { recursive: true, mode: 0o700 });
+    hardenPath(backupDir, { isDir: true, log: (m) => console.warn(m) });
+    console.warn(
+      `快照目录「${backupDir}」已用 AES-256-GCM 加密（密钥派生自 AES_SECRET_KEY）；` +
+        '仍请在演练结束后立即删除，勿拷贝到共享盘或提交到仓库——' +
+        '加密只保护"文件离开本机"这一环，不保护本机上的密钥。'
+    );
     await mongoose.connect(uri);
     const database = mongoose.connection.db;
     const dbName = mongoose.connection.name;
@@ -214,17 +303,22 @@ if (require.main === module) {
     console.log(`>>> 目标数据库：${dbName}（--apply-source=${applySource}）`);
     warnIfDbNameMismatch(dbNameFromUri(uri), dbName);
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const manifest = { uri: dbName, timestamp, collections: {} };
+    // encrypted 进 manifest：回灌侧据此判断"该文件本应带魔数"，
+    // 也让演练留档本身能回答"这次备份到底加没加密"。
+    const manifest = { uri: dbName, timestamp, encrypted: true, collections: {} };
 
     for (const name of COLLECTIONS) {
       const source = database.collection(name);
-      const backupFile = path.join(backupDir, `${name}-${timestamp}.ndjson.gz`);
+      // 后缀保留 .ndjson.gz 是为了让既有清理脚本/文档仍能按老模式匹配，
+      // 再追加 .enc 标明这是密文（不是能直接 gunzip 的 gzip）。
+      const backupFile = path.join(backupDir, `${name}-${timestamp}.ndjson.gz.enc`);
       manifest.collections[name] = { file: path.basename(backupFile), documents: 0 };
       manifest.collections[name].documents = await backupCollection(source, backupFile);
     }
 
     const manifestFile = path.join(backupDir, `manifest-${timestamp}.json`);
-    await fs.writeFile(manifestFile, JSON.stringify(manifest, null, 2));
+    await fs.writeFile(manifestFile, JSON.stringify(manifest, null, 2), { mode: 0o600 });
+    hardenPath(manifestFile, { isDir: false, log: (m) => console.warn(m) });
 
     if (applySource) {
       for (const name of COLLECTIONS) {
@@ -253,7 +347,10 @@ if (require.main === module) {
       }
       // 验证结果补写回 manifest：它必须先于清空落盘（作为恢复抓手），
       // 再随结论更新一次，让落盘产物与 stdout 报告同口径。
-      await fs.writeFile(manifestFile, JSON.stringify({ ...manifest, applySource }, null, 2));
+      await fs.writeFile(manifestFile, JSON.stringify({ ...manifest, applySource }, null, 2), {
+        mode: 0o600,
+      });
+      hardenPath(manifestFile, { isDir: false, log: (m) => console.warn(m) });
     }
 
     console.log(JSON.stringify({ ...manifest, applySource }, null, 2));

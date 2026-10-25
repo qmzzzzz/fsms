@@ -9,6 +9,7 @@ const sensitive = require('./sensitive');
 const overview = require('./overview');
 const admin = require('./admin');
 const config = require('./config');
+const reauth = require('./reauth');
 
 module.exports = {
   getMySecurityInfo: account.getMySecurityInfo,
@@ -17,6 +18,7 @@ module.exports = {
   viewSensitiveData: sensitive.viewSensitiveData,
   getSecurityStats: overview.getSecurityStats,
   reportSuspiciousActivity: sensitive.reportSuspiciousActivity,
+  listReportTargets: sensitive.listReportTargets,
   getMyLogs: account.getMyLogs,
   toggleUserLock: admin.toggleUserLock,
   resetUserMfa: admin.resetUserMfa,
@@ -28,4 +30,6 @@ module.exports = {
   setLoginCaptchaConfig: config.setLoginCaptchaConfig,
   getRegisterCaptchaConfig: config.getRegisterCaptchaConfig,
   setRegisterCaptchaConfig: config.setRegisterCaptchaConfig,
+  // 审计读取的短时票据：步进验证通过后签发，供 GET 类审计端点在 TTL 内复用
+  issueReauthTicket: reauth.issueReauthTicket,
 };

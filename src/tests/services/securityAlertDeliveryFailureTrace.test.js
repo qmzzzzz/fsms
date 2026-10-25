@@ -88,6 +88,13 @@ describe('告警投递失败必须留痕（不静默）', () => {
   /** 让投递入口本身抛（模拟告警机器坏了，而不是 webhook 超时） */
   const deliveryExplodes = () => sendNotification.mockRejectedValue(new Error('模拟投递器崩溃'));
 
+  /** countDocuments 的链式形态：用户名维度带 `.collation(...)`（#22 大小写不敏感） */
+  const countQuery = (value) => {
+    const promise = Promise.resolve(value);
+    promise.collation = () => promise;
+    return promise;
+  };
+
   describe('权限滥用', () => {
     test('投递器抛错 ⇒ logger.error 留痕，且不把异常冒给 fire-and-forget 的调用方', async () => {
       deliveryExplodes();
@@ -152,7 +159,9 @@ describe('告警投递失败必须留痕（不静默）', () => {
   describe('暴力破解', () => {
     test('CRITICAL 告警的投递器抛错同样必须留痕（最高级别告警不许静默消失）', async () => {
       deliveryExplodes();
-      jest.spyOn(AuditLog, 'countDocuments').mockResolvedValue(THRESHOLDS.bruteForceAttempts + 3);
+      jest
+        .spyOn(AuditLog, 'countDocuments')
+        .mockImplementation(() => countQuery(THRESHOLDS.bruteForceAttempts + 3));
 
       const username = users.get('brute').username;
       await expect(
@@ -166,7 +175,9 @@ describe('告警投递失败必须留痕（不静默）', () => {
 
     test('反向对照：投递正常完成时不得出现投递失败痕迹', async () => {
       sendNotification.mockResolvedValue(undefined);
-      jest.spyOn(AuditLog, 'countDocuments').mockResolvedValue(THRESHOLDS.bruteForceAttempts + 3);
+      jest
+        .spyOn(AuditLog, 'countDocuments')
+        .mockImplementation(() => countQuery(THRESHOLDS.bruteForceAttempts + 3));
 
       await securityAlert.checkBruteForce(users.get('brute_ok').username, '198.51.100.8');
       await new Promise((r) => setImmediate(r));

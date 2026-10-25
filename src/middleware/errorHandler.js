@@ -14,6 +14,7 @@ const { errText } = require('../utils/auditWriteFailure');
 // 错误路径同样是攻击者可稳定触发的写日志入口，没理由例外。
 // stripControlChars 用于更正事件的 reason：定长截断必须在清洗之内完成（同批次 34 的不变量）。
 const { redactUrlQuery, stripControlChars } = require('../utils/helpers');
+const { auditClientAddress } = require('../utils/ipUtils');
 
 /**
  * 各错误类型的响应函数（原 if/else 链逐条拆出，判据与文案逐字不变）
@@ -224,7 +225,7 @@ function markResponseAbortedByError(req, res, reason) {
       method: req.method,
       path,
       body: { reason: stripControlChars(String(text), 512), reqId: req.id || null },
-      ip: req.ip,
+      ...auditClientAddress(req),
       statusCode: res.statusCode,
       success: false,
       riskLevel: 'medium',

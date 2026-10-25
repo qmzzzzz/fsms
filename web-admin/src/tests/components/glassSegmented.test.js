@@ -138,6 +138,59 @@ describe('GlassSegmented 选择事件契约', () => {
   })
 })
 
+describe('GlassSegmented 键盘交互（tablist 语义）', () => {
+  const keyOn = (el, key) =>
+    el.dispatchEvent(new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+
+  test('roving tabindex：只有当前项可 Tab 到；无选中项时首项兜底', async () => {
+    const c = mount({ options, modelValue: 'pending' })
+    await flush(2)
+    expect(c.findAll('.glass-segmented__item').map((el) => el.getAttribute('tabindex'))).toEqual([
+      '-1',
+      '0',
+      '-1',
+    ])
+    c.handle.unmount()
+    active = null
+
+    const empty = mount({ options })
+    await flush(2)
+    expect(
+      empty.findAll('.glass-segmented__item').map((el) => el.getAttribute('tabindex'))
+    ).toEqual(['0', '-1', '-1'])
+  })
+
+  test('方向键循环切换并同步焦点；Home/End 跳首末项（自动激活）', async () => {
+    const model = ref('all')
+    const c = mountComponent(makeHost(options, model), {})
+    active = c
+    await flush(3)
+    const items = () => c.findAll('.glass-segmented__item')
+
+    keyOn(items()[0], 'ArrowRight')
+    await flush(3)
+    expect(model.value).toBe('pending')
+    expect(document.activeElement).toBe(items()[1])
+    expect(items()[1].getAttribute('tabindex')).toBe('0')
+
+    keyOn(items()[1], 'ArrowLeft')
+    await flush(3)
+    expect(model.value).toBe('all')
+    expect(document.activeElement).toBe(items()[0])
+
+    keyOn(items()[0], 'ArrowLeft') // 首项向左越界 → 末项
+    await flush(3)
+    expect(model.value).toBe('done')
+
+    keyOn(items()[2], 'Home')
+    await flush(3)
+    expect(model.value).toBe('all')
+    keyOn(items()[0], 'End')
+    await flush(3)
+    expect(model.value).toBe('done')
+  })
+})
+
 describe('GlassSegmented 选中态与计数徽标', () => {
   test('is-active 类与 aria-selected 随 modelValue 变化（单选项）', async () => {
     const c = mount({ options, modelValue: 'pending' })

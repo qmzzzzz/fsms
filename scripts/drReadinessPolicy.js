@@ -72,8 +72,37 @@ function evaluateDrillRecency({
         '「每季度至少一次」这条要求目前**没有执行者**，恢复能力未经任何实证。',
     };
   }
-  const ts = Date.parse(`${lastDrillDate}T00:00:00Z`);
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(lastDrillDate);
+  const ts = parts ? Date.UTC(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3])) : NaN;
+  // Date.parse 会把 2026-09-31 之类不存在的日期归一化成 10-01，
+  // 让一条手滑写错的记录看起来仍然新鲜；回读 ISO 串必须与原文逐字一致。
+  const roundTripped = Number.isFinite(ts) ? new Date(ts).toISOString().slice(0, 10) : null;
   const ageDays = (now - ts) / 86400000;
+  // 非法日期（如 2026-13-40）Date.parse 返回 NaN，而 `NaN > intervalDays` 恒为 false；
+  // 未来日期让 ageDays 为负，同样绕过逾期判定。两者都必须 fail-closed，否则
+  // 一条手滑写错的留档就能让"从未演练"看起来永远新鲜。
+  if (!parts || roundTripped !== lastDrillDate || !Number.isFinite(ts) || Number.isNaN(ageDays)) {
+    return {
+      ok: false,
+      code: 'drill_date_invalid',
+      lastDrillDate,
+      ageDays: null,
+      intervalDays,
+      message: `演练留档中的日期「${lastDrillDate}」无法解析，不能据此判定演练时效`,
+    };
+  }
+  if (ageDays < 0) {
+    return {
+      ok: false,
+      code: 'drill_date_future',
+      lastDrillDate,
+      ageDays,
+      intervalDays,
+      message:
+        `演练留档中的日期「${lastDrillDate}」晚于当前时间（${ageDays.toFixed(0)} 天），` +
+        '未来日期不能作为"最近演练"的证据',
+    };
+  }
   if (ageDays > intervalDays) {
     return {
       ok: false,

@@ -72,25 +72,29 @@ describe('refresh 轮换：E11000 来源区分', () => {
       expect(doc.reason).toBe('rotate');
     });
 
-    test('tokenHash 冲突且首次原因为 rotate → 真实重放', async () => {
+    test('tokenHash 冲突且首次原因为 rotate → 真实重放（附首次消费时刻）', async () => {
+      const consumedAt = new Date('2026-10-20T08:00:00Z');
       TokenBlacklistModel.create.mockRejectedValueOnce(
         dupKeyError({ tokenHash: 1 }, 'tokenHash_1')
       );
-      mockExistingEntry({ reason: 'rotate' });
+      mockExistingEntry({ reason: 'rotate', createdAt: consumedAt });
       await expect(consumeToken('rt-replayed', futureExpSec())).resolves.toEqual({
         claimed: false,
         reason: 'rotate',
+        consumedAt,
       });
     });
 
     test('tokenHash 冲突且首次原因为 logout → 仅登出后旧串重放（S-6）', async () => {
+      const consumedAt = new Date('2026-10-20T09:00:00Z');
       TokenBlacklistModel.create.mockRejectedValueOnce(
         dupKeyError({ tokenHash: 1 }, 'tokenHash_1')
       );
-      mockExistingEntry({ reason: 'logout' });
+      mockExistingEntry({ reason: 'logout', createdAt: consumedAt });
       await expect(consumeToken('rt-logged-out', futureExpSec())).resolves.toEqual({
         claimed: false,
         reason: 'logout',
+        consumedAt,
       });
     });
 
@@ -102,6 +106,8 @@ describe('refresh 轮换：E11000 来源区分', () => {
       await expect(consumeToken('rt-legacy-doc', futureExpSec())).resolves.toEqual({
         claimed: false,
         reason: null,
+        // 缺 createdAt 的历史行不能伪造"刚刚消费"，否则会落进并发宽限窗口
+        consumedAt: null,
       });
     });
 

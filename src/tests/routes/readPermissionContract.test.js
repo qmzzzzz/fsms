@@ -100,6 +100,8 @@ const SELF_ONLY_ALLOWLIST = {
   'securityRoutes.js /my-info': '本人安全设置（getMySecurityInfo: req.user.userId）',
   'securityRoutes.js /bindings': '本人邮箱/手机绑定（getAccountBindings: req.user.userId）',
   'securityRoutes.js /my-logs': '本人操作日志（getMyLogs 只接 days/limit/category）',
+  'securityRoutes.js /report-targets':
+    '举报对象候选集：无目标用户入参，候选集由 buildRecordScopeFilter 按举报人数据范围收敛，且为最小投影（列表端点本就不按权限码收口，见路由块内 PERMISSION-EXEMPT）',
 };
 
 /**

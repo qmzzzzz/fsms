@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
+const { auditClientAddress } = require('../utils/ipUtils');
 
 // MFA 验证码连续失败阈值与锁定时长（独立于 failedLoginCount：
 // 覆盖登录 MFA 步骤、关闭 MFA、重新生成恢复码等所有验证码校验路径）
@@ -104,14 +105,29 @@ const generateRecoveryCodes = (count = 10) => {
  * 锁定自然到期时惰性清零失败计数：否则计数停留在阈值上，
  * 合法用户到期后手滑一次即立即再锁，等效"每 10 分钟仅一次试错"。 */
 const isMfaLocked = async (userId) => {
-  const u = await User.findById(userId).select('mfaLockUntil');
+  const u = await User.findById(userId).select('mfaLockUntil mfaFailCount');
   if (!u || !u.mfaLockUntil) return false;
   if (u.mfaLockUntil > new Date()) return true;
   // 已过期：惰性重置，解除放大效应。
   // 清零写不进库时必须留痕：静默失败会让计数停留在阈值上，用户到期后手滑
   // 一次即立即再锁（正是本函数想避免的"每 10 分钟仅一次试错"），而运维从
   // 日志上看不到防线为什么在反复锁人——只有一遍遍的 warn，没有根因。
-  await User.findByIdAndUpdate(userId, { mfaFailCount: 0, mfaLockUntil: null }).catch((err) => {
+  //
+  // 条件写（锁定时刻 + 计数快照）：读到这里之后若并发记录了一次 MFA 失败，
+  // mfaFailCount 已变，本次清零必须 miss——否则会把刚记下的失败抹掉。
+  // 无条件 `$set` 时，"读旧计数 → 并发 $inc → 清零" 会让攻击者的失败
+  // 不计入阈值（MFA 防爆破被削弱）。miss 不算故障，静默返回即可。
+  // 历史文档可能没有 mfaFailCount 字段：读取时的 default:0 不等于库里存了 0，
+  // 因此 0 要同时匹配「缺失」。
+  const expectedCount = typeof u.mfaFailCount === 'number' ? u.mfaFailCount : 0;
+  await User.updateOne(
+    {
+      _id: userId,
+      mfaLockUntil: u.mfaLockUntil,
+      mfaFailCount: expectedCount === 0 ? { $in: [0, null] } : expectedCount,
+    },
+    { $set: { mfaFailCount: 0, mfaLockUntil: null } }
+  ).catch((err) => {
     logger.error(`MFA 过期锁定的惰性清零失败（下次误一次即立即再锁）：${err.message}`, {
       userId: String(userId),
     });
@@ -232,7 +248,7 @@ const claimTotpWindow = async (userId, counter) => {
  *
  * 两个字段必须是**布尔**：原先写成 `!codePath && typeof x === 'string' && x`，
  * `&&` 的求值结果是最后一个操作数，于是 passwordPath 里装的是**登录口令明文本身**。
- * 现网调用方（mfaController.js:321）只做真值判断，所以分支行为碰巧没错——
+ * 当时的调用方只做真值判断，所以分支行为碰巧没错——
  * 但"碰巧没错"不是判据：这个返回值一旦被记日志、进审计载荷或回给前端（它的字段名
  * 看着就像布尔，扩散时没人会犹豫），口令就明文出现在那里。形状说谎的地方，
  * 迟早会有人按它说的形状去用。
@@ -266,6 +282,108 @@ const verifyTotpFactor = async (user, mfaCode) => {
   return { verified, method };
 };
 
+/**
+ * MFA 失败路径审计（业务状态未改变，故 best-effort：不阻断主流程）。
+ * success 路径（状态已改变）必须走 controllers 里的 recordDurably。
+ */
+function recordMfaFailureAudit(req, user, { action, riskLevel, riskFactors, reason }) {
+  const entry = {
+    action,
+    category: 'auth',
+    userId: user._id,
+    username: user.username,
+    ...auditClientAddress(req),
+    userAgent: req.get('user-agent'),
+    success: false,
+    riskLevel,
+    riskFactors,
+    reason,
+  };
+  // action 由调用方选择，本层只转发文档（审计对账的 forwarding 账已登记此站点）
+  return AuditLog.record(entry).catch(() => {});
+}
+
+/**
+ * 关闭 MFA 的失败留痕。重放（口令正确但窗口已被消费）单独成因子：它是
+ * "攻击者手上有真实口令 + 会话可疑"的强信号，与"输错一位数字"在告警口径上
+ * 不能混为一谈。`second_factor_missing` 单独成因子而不是混进"码错误"：
+ * 它标记的是旧客户端/探测者仍在尝试仅凭登录密码关闭第二因子。
+ */
+const recordMfaDisableFailure = (req, user, verifyMethod) => {
+  const failureRiskFactor = {
+    mfa_code: 'mfa_code_invalid',
+    mfa_code_replayed: 'mfa_code_replayed',
+    recovery_code_invalid: 'recovery_code_invalid',
+    second_factor_missing: 'mfa_second_factor_missing',
+  }[verifyMethod];
+  return recordMfaFailureAudit(req, user, {
+    action: 'mfa_verify_failed',
+    riskLevel: verifyMethod === 'mfa_code' ? 'medium' : 'high',
+    riskFactors: [failureRiskFactor || 'mfa_code_invalid'],
+    reason: `关闭两步验证身份验证失败（方式：${verifyMethod || '未知'}）`,
+  });
+};
+
+/**
+ * 关闭 MFA 的第二因子入参归一：动态口令优先，恢复码大小写不敏感
+ * （生成侧只有大写字母表），去掉空白后按字母表严格判定。
+ * 两者是"二选一"，不是叠加。
+ */
+const normalizeDisableFactor = (body) => {
+  const mfaCode = typeof body.mfaCode === 'string' ? body.mfaCode : '';
+  const recoveryCode = typeof body.recoveryCode === 'string' ? body.recoveryCode : '';
+  const codePath = /^\d{6}$/.test(mfaCode.trim());
+  const normalizedRecoveryCode = recoveryCode.trim().toUpperCase().replace(/\s/g, '');
+  const recoveryPath = !codePath && isRecoveryCodeFormat(normalizedRecoveryCode);
+  return { mfaCode, normalizedCode: normalizedRecoveryCode, codePath, recoveryPath };
+};
+
+/**
+ * 关闭 MFA 的成功审计：状态已改变，必须持久化后才允许回成功（F-03）。
+ */
+const recordMfaDisableSuccess = async (req, user, verifyMethod) => {
+  const { recordDurably } = require('./auditOutbox');
+  const usedRecoveryCode = verifyMethod === 'recovery_code';
+  await recordDurably(
+    {
+      action: 'mfa_disable',
+      category: 'auth',
+      userId: user._id,
+      username: user.username,
+      ...auditClientAddress(req),
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'high',
+      riskFactors: usedRecoveryCode ? ['mfa_disabled', 'recovery_code_used'] : ['mfa_disabled'],
+      reason: usedRecoveryCode ? '使用备用恢复码关闭两步验证（已消费一枚恢复码）' : '关闭两步验证',
+    },
+    { auditAction: 'mfa_disable', req }
+  );
+};
+
+/**
+ * MFA 开关变更后吊销**其他设备**的会话，保留当前会话（fail-soft）。
+ *
+ * 不用 invalidateUserTokens：递增 tokenVersion 会连带当前会话一起失效，
+ * 用户刚开启 MFA 就被踢下线。无 sid 的旧令牌无法定向保留当前会话，跳过。
+ * 失败只留 error 痕迹，不阻断主流程——MFA 状态已落库。
+ */
+const revokeOtherSessionsAfterMfaChange = async ({ userId, exceptSid, username, reason }) => {
+  if (!exceptSid) return;
+  try {
+    const count = await require('./sessionService').revokeOtherSessions({
+      userId,
+      exceptSid,
+      reason,
+    });
+    if (count > 0) {
+      logger.warn('MFA 状态变更后已吊销其他设备会话', { username, reason, count });
+    }
+  } catch (err) {
+    logger.error(`MFA 状态已变更，但吊销其他会话失败：${err.message}`, { username, reason });
+  }
+};
+
 module.exports = {
   MFA_MAX_FAILS,
   MFA_LOCK_MS,
@@ -281,4 +399,9 @@ module.exports = {
   claimTotpWindow,
   resolveMfaFactorPaths,
   verifyTotpFactor,
+  recordMfaFailureAudit,
+  recordMfaDisableFailure,
+  normalizeDisableFactor,
+  recordMfaDisableSuccess,
+  revokeOtherSessionsAfterMfaChange,
 };

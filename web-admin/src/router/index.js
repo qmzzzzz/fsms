@@ -174,8 +174,12 @@ router.beforeEach(async (to, from, next) => {
   // 会话恢复：本地无身份状态但浏览器可能仍持有有效 cookie（新标签页首次进入、
   // 复制 URL 直达子路径、localStorage 被清等）。此时先用 /auth/me 探测一次，
   // 探测成功即复用同一会话，避免把已登录用户误踢到登录页。
-  // 仅在「本地无身份且目标不是公开路由」时探测，已登录路径零额外请求。
-  if (!authenticated && !isPublicRoute) {
+  //
+  // 身份校验（P3-38 / 无 id 用户对象）：localStorage 里的 currentUser 只是**界面缓存**，
+  // 不是登录凭证——它可以被手工写入、也可能是旧版本留下的脏形状。仅当本页生命周期内
+  // 已向服务端核实过（sessionVerified）才直接放行；否则即便本地有身份也要探测一次，
+  // 由服务端确认该会话真实存在。公开路由仍不探测（匿名入口不做无谓往返）。
+  if (!isPublicRoute && (!authenticated || !authStore.sessionVerified)) {
     authenticated = await authStore.restoreSession()
   }
 

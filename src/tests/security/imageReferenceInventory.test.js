@@ -215,15 +215,15 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
       '.github/workflows/release.yml',
       '.github/workflows/scorecard.yml',
     ]);
-    // 12 = Dockerfile 3 处 FROM + compose 7 条 image（S-5 新增 alertmanager 配置校验器）
+    // 13 = Dockerfile 3 处 FROM + compose 8 条 image（S-5 告警配置校验器、P2 备份副本）
     // + ci.yml 2 条 image；其余 workflow 0 条。
     // 新增一个带镜像的 workflow 会同时改这里与下面的 byFile ⇒ 逼着改动的人把新引用登记进表。
-    expect(all).toHaveLength(12);
+    expect(all).toHaveLength(13);
     const byFile = {};
     for (const r of all) byFile[r.file] = (byFile[r.file] || 0) + 1;
     expect(byFile).toEqual({
       Dockerfile: 3,
-      'docker-compose.yml': 7,
+      'docker-compose.yml': 8,
       '.github/workflows/ci.yml': 2,
     });
     // 例外清单的条数同样是判据：新增一条"带变量的引用"必须显式改这里。
@@ -231,10 +231,11 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
       '${APP_IMAGE:-fire-safety-app:local}',
       '${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}',
     ]);
-    expect(registryRefs).toHaveLength(10);
+    expect(registryRefs).toHaveLength(11);
     // 引用面本身（哪个文件钉的是哪个 name:tag）：digest 由期望表那侧对账，这里只管"谁在哪"。
     expect(parsedRefs.map((r) => r.nameTag).sort()).toEqual([
       'grafana/grafana:11.1.0',
+      'mongo:8.0.34',
       'mongo:8.0.34',
       'mongo:8.0.34',
       'node:26.12.0-alpine',
@@ -498,12 +499,13 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
         if (!files.includes(f)) expect(e.sites.includes(f)).toBe(false);
       }
     }
-    // ⑤ 表与扫描面的引用点总数也要对上：10 个引用点 = node 四处（Dockerfile 三处 FROM
-    //    + compose 的告警配置校验器）+ mongo 两处（compose 与 CI service）+ 其余四条各一处。
+    // ⑤ 表与扫描面的引用点总数也要对上：11 个引用点 = node 四处（Dockerfile 三处 FROM
+    //    + compose 的告警配置校验器）+ mongo 三处（compose 主实例、compose 备份副本
+    //    与 CI service）+ 其余四条各一处。
     const occurrences = EXPECTED.map(
       (e) => parsedRefs.filter((r) => r.nameTag === e.ref).length
     ).sort();
-    expect(occurrences).toEqual([1, 1, 1, 1, 2, 4]);
+    expect(occurrences).toEqual([1, 1, 1, 1, 3, 4]);
   });
 
   test('capture-image-digests.sh 的常量与期望表同源（脚本改得了的每一条都在表里）', () => {

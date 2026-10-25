@@ -8,10 +8,12 @@
         @keydown.esc.prevent="close"
       >
         <div
+          ref="dialogRef"
           class="search-palette"
           role="dialog"
           aria-modal="true"
           :aria-label="t('common.searchPalette')"
+          @keydown.tab="trapFocus"
         >
           <div class="search-palette__input-row">
             <el-icon class="search-palette__input-icon"><Search /></el-icon>
@@ -29,7 +31,16 @@
               @keydown.up.prevent="move(-1)"
               @keydown.enter.prevent="runActive"
             />
-            <kbd class="search-palette__kbd">ESC</kbd>
+            <!-- 可见关闭入口：ESC 虽然也能关，但不作 UI 展示（全屏态 ESC 先归 UA，见文件头注释） -->
+            <button
+              type="button"
+              class="search-palette__close"
+              :aria-label="t('common.close')"
+              :title="t('common.close')"
+              @click="close"
+            >
+              <el-icon><Close /></el-icon>
+            </button>
           </div>
 
           <div
@@ -102,9 +113,6 @@
             <span class="search-palette__hint">
               <kbd class="search-palette__kbd">↵</kbd>{{ t('common.searchHintOpen') }}
             </span>
-            <span class="search-palette__hint">
-              <kbd class="search-palette__kbd">ESC</kbd>{{ t('common.searchHintClose') }}
-            </span>
           </div>
         </div>
       </div>
@@ -119,11 +127,24 @@
  * 数据来源：layout 传入的权限过滤后菜单（props.menu），加上主题/语言/刷新快捷操作。
  * 匹配范围：当前语言标题 + 另一语言标题 + 路由路径（如中文界面输入 "users" 也能命中）。
  * 打开方式：⌘K / Ctrl+K 全局热键（组件内自注册），或父组件调用 expose 的 open()。
+ * 关闭方式：关闭按钮、点遮罩空白、ESC、或再次按 ⌘K / Ctrl+K。
+ *   其中 ESC 与关闭按钮**等价可用**，但界面上不展示 ESC 提示：浏览器全屏态下
+ *   ESC 先被 UA 用于退出全屏（keydown 的 preventDefault 拦不住），同一按键会
+ *   「退出全屏 + 关面板」，把 ESC 当卖点展示会误导用户。按钮才是可见入口。
  */
 import { computed, nextTick, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { Search, Check, Sunny, Moon, Monitor, Operation, Refresh } from '@element-plus/icons-vue'
+import {
+  Search,
+  Close,
+  Check,
+  Sunny,
+  Moon,
+  Monitor,
+  Operation,
+  Refresh,
+} from '@element-plus/icons-vue'
 import { useAppStore } from '@/store'
 import { setLocale } from '@/i18n'
 import { haptic } from '@/utils/haptic'
@@ -143,6 +164,9 @@ const query = ref('')
 const activeIndex = ref(0)
 const inputRef = ref(null)
 const listRef = ref(null)
+const dialogRef = ref(null)
+// 打开前的焦点位置：关闭时归还，键盘用户不会在面板消失后被丢回文档开头
+let previouslyFocused = null
 
 // 另一语言词表：跨语言检索（中文界面搜英文别名/路径，反之亦然）
 const altMessages = computed(() => (locale.value === 'zh-CN' ? enUS : zhCN))
@@ -296,9 +320,29 @@ const runActive = () => {
   if (item) run(item)
 }
 
-// 打开时重置状态并聚焦输入框；关闭时归还焦点由浏览器自然处理
+// Tab 不得把焦点带出模态框：在首尾两个可聚焦元素之间循环
+const trapFocus = (event) => {
+  const focusables = Array.from(
+    dialogRef.value?.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+    ) || []
+  )
+  if (focusables.length === 0) return
+  const first = focusables[0]
+  const last = focusables[focusables.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+// 打开时重置状态并聚焦输入框；关闭时把焦点还给打开前所在元素
 watch(open, async (val) => {
   if (val) {
+    previouslyFocused = document.activeElement
     query.value = ''
     activeIndex.value = 0
     document.body.style.overflow = 'hidden'
@@ -306,6 +350,12 @@ watch(open, async (val) => {
     inputRef.value?.focus()
   } else {
     document.body.style.overflow = ''
+    const target = previouslyFocused
+    previouslyFocused = null
+    await nextTick()
+    if (target && typeof target.focus === 'function' && document.contains(target)) {
+      target.focus()
+    }
   }
 })
 
@@ -314,7 +364,7 @@ watch(normalized, () => {
   activeIndex.value = 0
 })
 
-// 全局热键：⌘K（macOS）/ Ctrl+K（其他平台），再次按下或 ESC 关闭
+// 全局热键：⌘K（macOS）/ Ctrl+K（其他平台），再次按下关闭；ESC 由遮罩上的 esc 监听处理
 const isMac =
   typeof navigator !== 'undefined' && /mac/i.test(navigator.platform || navigator.userAgent || '')
 

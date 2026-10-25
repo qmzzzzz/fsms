@@ -229,6 +229,18 @@ describe('后台任务与错误路径（批次 E）', () => {
         timestamp: new Date(),
       });
     }
+    // IP 封禁要求多账号信号（单账号失败交给账户锁定/账号限流），
+    // 因此同一 IP 再播种第二个账号的失败，才能触发自动封禁这条腿。
+    for (let i = 0; i < 5; i++) {
+      docs.push({
+        action: 'login_failed',
+        category: 'auth',
+        username: `bf2${stamp}`,
+        ip: '203.0.113.210',
+        success: false,
+        timestamp: new Date(),
+      });
+    }
     await AuditLog.insertMany(docs);
 
     await securityAlert.checkBruteForce(bfUser, '203.0.113.210');

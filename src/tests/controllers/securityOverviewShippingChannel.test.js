@@ -39,6 +39,12 @@ jest.mock('../../middleware/errorHandler', () => ({
   asyncHandler: (fn) => fn,
 }));
 
+// 控制器对聚合出口统一做数据范围收口；本套件不连库，范围解析放行成 all 档
+// （口径由 security/statsAnomalyScope 的真库用例钉住）。
+jest.mock('../../services/auditScopeFilter', () => ({
+  applyAuditDataScope: jest.fn(async () => ({ query: {}, dataScope: { type: 'all' } })),
+}));
+
 const mockIsShippingEnabled = jest.fn(() => false);
 jest.mock('../../utils/logger', () => ({
   info: jest.fn(),
@@ -81,7 +87,8 @@ const makeCtx = () => {
       return this;
     },
   };
-  return { req: {}, res, next: jest.fn() };
+  // 真实链路里 authenticate 必先填充 req.user；聚合出口按 userId 解析数据范围
+  return { req: { user: { userId: 'u-test' } }, res, next: jest.fn() };
 };
 
 const callOverview = async () => {

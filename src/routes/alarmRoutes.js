@@ -36,19 +36,25 @@ const reportAlarmValidation = [
     .isLength({ min: 1, max: 500 })
     .withMessage('报警描述长度应为 1-500 个字符'),
   body('location').optional().isObject(),
+  // location 各段直接参与 xlsx 导出的拼接：不 trim 时前导换行会原样落库，
+  // 导出单元格就变成 "\n=..."，而公式注入加固只看首字符，换行把危险前缀藏到了第二位。
+  // 同时也能让 "  ZZQAR-A  " 与部门字段按同一文本比较，不再因空白被数据范围闸误拒。
   body('location.building')
     .optional()
     .isString()
+    .trim()
     .isLength({ max: 100 })
     .withMessage('楼栋不能超过 100 个字符'),
   body('location.floor')
     .optional()
     .isString()
+    .trim()
     .isLength({ max: 50 })
     .withMessage('楼层不能超过 50 个字符'),
   body('location.room')
     .optional()
     .isString()
+    .trim()
     .isLength({ max: 100 })
     .withMessage('房间不能超过 100 个字符'),
   body('location.detail')

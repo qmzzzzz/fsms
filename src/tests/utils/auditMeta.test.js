@@ -269,7 +269,7 @@ describe('auditMeta（审计元数据派生）', () => {
       // 这条用例自己承担三件事，缺任何一条，上面那条"缺口为空"都可能是恒真的：
       //  ① 目录普查：新增路由文件必须显式表态（进扫描集或进 ROUTE_EXEMPT）；
       //  ② 豁免不留幽灵：ROUTE_EXEMPT 里的文件名必须真的还在目录里（改名/删除要同步）；
-      //  ③ 抽取基线：派生 action 的条数钉死（实测 88）。抽取正则一旦因为写法变化
+      //  ③ 抽取基线：派生 action 的条数钉死（实测 91）。抽取正则一旦因为写法变化
       //     返回空集或半集，①②与缺口判据会一起变成空转，只有这一条会响。
       const dir = routeFilesInDir();
       expect(dir).toEqual([...collectRouteFiles(), ...Object.keys(ROUTE_EXEMPT)].sort());
@@ -278,7 +278,7 @@ describe('auditMeta（审计元数据派生）', () => {
       for (const reason of Object.values(ROUTE_EXEMPT)) {
         expect(reason.trim().length).toBeGreaterThan(4); // 豁免必须带理由，不许空占位
       }
-      expect(collectActions().size).toBe(88);
+      expect(collectActions().size).toBe(91);
     });
 
     test('全部路由派生型 action 均在 AUDIT_LOG_ACTIONS 白名单内', () => {

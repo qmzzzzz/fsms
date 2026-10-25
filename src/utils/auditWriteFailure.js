@@ -36,6 +36,10 @@ const logger = require('./logger');
  */
 const errText = (err) => (err && err.message ? err.message : err);
 
+/** 关键审计写入的最长等待：足够一次正常落库，又不至于把登录接口挂死 */
+const AUDIT_WRITE_WAIT_MS = 1000;
+const AUDIT_WRITE_TIMEOUT = Symbol('audit-write-timeout');
+
 /**
  * 生成 `.catch()` 处理器
  * @param {string} auditAction 便于检索的审计动作标识（非 AuditLog 的 action 枚举值）
@@ -79,6 +83,50 @@ const onAuditWriteFailureRethrow = (auditAction, req) => (err) => {
   onAuditWriteFailure(auditAction, req)(err);
   throw err;
 };
+
+/**
+ * 有界等待一次**关键**审计写入（如登录成功）：成功返回，失败/超时记账后返回。
+ *
+ * 为什么不能只是 `.catch(...)`：fire-and-forget 之下，响应会在审计落库前发出，
+ * 进程随即重启/崩溃时这条「谁在何时登录成功」就永久缺失，而调用方已经宣称成功。
+ * 但也不能无限等待——审计库卡住时登录接口会一直挂着。折中是等一个上限：
+ * 正常情况下多等一次写库往返；超时则如实记账（日志 + 指标），不阻断登录。
+ *
+ * 契约与 onAuditWriteFailure 一致：**永不 reject、不改业务语义**。
+ * 两条实现细节沿用 shutdownBudget.guardStep 的经验：
+ *  1) 超时后原 promise 若再 reject，必须当场接住，否则成为 unhandledRejection；
+ *  2) 闸的定时器要 unref，别让事件循环为一个已放弃的等待多活 timeoutMs。
+ *
+ * @param {Promise} write 已经在写的审计 promise
+ * @param {string} auditAction 检索用标识
+ * @param {object} [req] 用于取操作者用户名
+ * @param {number} [timeoutMs] 最多等多久
+ * @returns {Promise<void>}
+ */
+async function awaitAuditWrite(write, auditAction, req, timeoutMs = AUDIT_WRITE_WAIT_MS) {
+  const settled = Promise.resolve(write).then(
+    () => null,
+    (err) => err || new Error('审计写入失败（无错误对象）')
+  );
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(AUDIT_WRITE_TIMEOUT), timeoutMs);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  });
+  try {
+    const result = await Promise.race([settled, timeout]);
+    if (result === AUDIT_WRITE_TIMEOUT) {
+      onAuditWriteFailure(
+        auditAction,
+        req
+      )(new Error(`等待审计写入超时（${timeoutMs}ms），后续失败仍会单独记账`));
+    } else if (result) {
+      onAuditWriteFailure(auditAction, req)(result);
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /**
  * 安全检测函数的统一"不外抛"外壳
@@ -126,4 +174,10 @@ const guardDetection =
 // services/auditBuffer.js 与 services/auditMonitor.js 原先各自抄了一份箭头
 // （2026-10-03 收敛到这里，两份副本已删）。导出它而不是再留私有副本，是因为
 // 复制品会各自漂移——观测代码里最坏的一种漂移是"记账时自己抛"。
-module.exports = { onAuditWriteFailure, onAuditWriteFailureRethrow, guardDetection, errText };
+module.exports = {
+  onAuditWriteFailure,
+  onAuditWriteFailureRethrow,
+  awaitAuditWrite,
+  guardDetection,
+  errText,
+};

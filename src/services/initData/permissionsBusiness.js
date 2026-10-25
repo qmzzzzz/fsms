@@ -172,6 +172,25 @@ const businessPermissions = [
     module: 'report',
     path: '/reports',
   },
+  // L-17：未脱敏（真实姓名）导出是比 report:export 更窄的一条提权路径。
+  // 仅持有 report:export 只能拿到掩码档；未脱敏导出另需 pii:export + 二次验证。
+  // pii:* 是模块根（权限树与播种都要求每个 code 前缀有对应通配符），
+  // module 沿用 report：可授予面仍归在「报表统计」下，不新增界面模块。
+  {
+    name: '未脱敏导出菜单',
+    code: 'pii:*',
+    type: 'menu',
+    module: 'report',
+    path: '/reports',
+  },
+  {
+    name: '导出未脱敏个人数据',
+    code: 'pii:export',
+    type: 'button',
+    module: 'report',
+    path: '/reports',
+    description: '允许导出含真实姓名的报表，仍需二次验证',
+  },
 
   // ================= 超级权限 =================
   { name: '全部权限', code: '*:*', type: 'api', module: 'system', parent: null },

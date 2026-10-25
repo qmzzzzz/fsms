@@ -16,6 +16,7 @@ const captchaService = require('../../services/captchaService');
 const { setAuthCookies, getCookies, REFRESH_COOKIE_NAME } = require('../../utils/cookie');
 const { getPublicKeyInfo } = require('../../utils/loginCipher');
 const { computeFingerprint } = require('../../utils/fingerprint');
+const { clientIpForSecurityDecision } = require('../../utils/ipUtils');
 const authService = require('../../services/authService');
 const metrics = require('../../utils/metrics');
 const { rejectUnknownOutcome } = require('./shared');
@@ -72,8 +73,10 @@ const register = asyncHandler(async (req, res) => {
  * GET /api/auth/captcha
  */
 const getCaptcha = asyncHandler(async (req, res) => {
-  // R-3 迁移后 generate 为异步 API（共享存储读取必须异步）
-  const captcha = await captchaService.generate();
+  // R-3 迁移后 generate 为异步 API（共享存储读取必须异步）。
+  // IP 用与登录/审计同一把「可信来源」尺子：XFF 可伪造时不拿它当配额键，
+  // 否则单 IP 上限反而成了换头即绕的摆设。
+  const captcha = await captchaService.generate({ ip: clientIpForSecurityDecision(req) });
   if (!captcha) {
     return ApiResponse.codeError(res, 'CAPTCHA_SERVICE_UNAVAILABLE');
   }
@@ -156,7 +159,9 @@ const login = asyncHandler(async (req, res) => {
     },
     {
       req,
-      ip: req.ip,
+      // allowedIPs 与审计都必须用边界可信的客户端身份，而不是可被直连者用
+      // X-Forwarded-For 伪造的 req.ip（中间件侧判据见 middleware/auth.js 的 assertIpAllowed）
+      ip: clientIpForSecurityDecision(req),
       userAgent: req.get('user-agent'),
       method: req.method,
       path: auditPath(req),
@@ -241,6 +246,11 @@ const REFRESH_OUTCOME_RESPONSES = new Map([
   ['REVOKE_UNAVAILABLE', (res) => ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE')],
   ['SESSION_REVOKED', (res) => ApiResponse.codeError(res, 'DEVICE_SESSION_REVOKED')],
   ['EXPIRED', (res) => ApiResponse.codeError(res, 'REFRESH_TOKEN_EXPIRED')],
+  ['ACCOUNT_LOCKED', (res) => ApiResponse.codeError(res, 'ACCOUNT_LOCKED')],
+  // 并发轮换的败者：旧串刚被同一客户端的另一请求消费，仅拒绝本次、不吊销。
+  // 复用安全服务不可用码而不是新增一个码：前端映射表与 i18n 需要同步改动，
+  // 且这里对客户端的语义就是「这次刷新没成功，请重试/重新登录」。
+  ['CONCURRENT', (res) => ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE')],
 ]);
 
 /**
@@ -262,7 +272,13 @@ const refreshToken = asyncHandler(async (req, res) => {
 
   let result;
   try {
-    result = await authService.refreshSession(refreshTokenRaw, { ip: req.ip });
+    result = await authService.refreshSession(refreshTokenRaw, {
+      // 与登录同口径：IP 取边界可信值（XFF 仅在 trust proxy 层数内可信），
+      // UA/指纹仅用于事件型审计，不影响轮换裁决
+      ip: clientIpForSecurityDecision(req),
+      userAgent: req.get('user-agent'),
+      fingerprint: computeFingerprint(req),
+    });
   } catch (error) {
     // 刷新链路上的任何未预期异常（含数据库故障）
     // 一律按「无效的刷新令牌」拒绝，不把内部错误细节暴露给客户端

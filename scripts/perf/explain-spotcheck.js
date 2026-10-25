@@ -9,9 +9,10 @@
  * 用法：
  *   node scripts/perf/explain-spotcheck.js          # 需 MONGODB_URI（走 .env）
  *
- * 只读脚本：只执行 explain，不改数据；除 Mongoose autoIndex 本来就会建的
- * 声明式索引外不额外建索引（脚本只等待其构建完成，见 main 里的 init()）；
- * 输出 IXSCAN/COLLSCAN 与 totalDocsExamined，COLLSCAN 即需要补索引的信号。
+ * 只读脚本：只执行 explain，不改数据，也不建索引——连接显式关闭 autoIndex，
+ * 不再等 Model.init() 构建索引；输出 IXSCAN/COLLSCAN 与 totalDocsExamined，
+ * COLLSCAN 即需要补索引的信号。生产模式（NODE_ENV=production）下还需显式
+ * 设置 ALLOW_EXPLAIN_PROD=true 才允许连接，避免误对生产库跑重查询。
  *
  * 退出码契约（复核只看这个，不看措辞）：
  *   0 = 每个用例都拿到了「可判定」的执行计划（计划里含 IXSCAN 或 COLLSCAN），且无 COLLSCAN
@@ -41,6 +42,9 @@ require('../../src/models/FireDevice');
 require('../../src/models/AuditLog');
 
 const PAGE_SIZE = 20;
+// explain 在缺索引或集合很大时可能跑很久；单条查询的上界必须显式给，
+// 否则一个 COLLSCAN 会拖住整次抽查，看起来像脚本挂死。
+const EXPLAIN_TIMEOUT_MS = 30000;
 
 /**
  * 用例的 sort 必须与**服务层调用点的 .sort() 逐字段一致**，否则这里量到的是
@@ -76,7 +80,13 @@ const cases = [
 ];
 
 function runCase(c) {
-  return mongoose.model(c.model).find({}).sort(c.sort).limit(PAGE_SIZE).explain('executionStats');
+  return mongoose
+    .model(c.model)
+    .find({})
+    .sort(c.sort)
+    .limit(PAGE_SIZE)
+    .maxTimeMS(EXPLAIN_TIMEOUT_MS)
+    .explain('executionStats');
 }
 
 function stageOf(node) {
@@ -147,17 +157,28 @@ async function main() {
   const uri = process.env.MONGODB_URI;
   if (!uri) throw new Error('缺少 MONGODB_URI（.env 或环境变量）');
 
-  await mongoose.connect(uri);
-  console.log(`目标库：${mongoose.connection.name}\n`);
-
-  // Mongoose 的 autoIndex 在连接后于后台构建模型声明过的索引；不等它们落地就 explain，
-  // 索引可能尚未可见 → 报出假 COLLSCAN。init() 只是等同步完成，不新建声明之外的索引。
-  await Promise.all(cases.map((c) => mongoose.model(c.model).init()));
-
+  let connected = false;
   let collscan = 0;
   let inconclusive = 0;
   let zeroTouch = 0;
   try {
+    // autoIndex:false 是只读承诺的一部分：默认的 true 会在连接后让 Mongoose
+    // 后台构建模型声明的索引（含 TTL），一次"只读抽查"因此可能改写生产库。
+    await mongoose.connect(uri, {
+      autoIndex: false,
+      serverSelectionTimeoutMS: 10000,
+    });
+    connected = true;
+
+    const dbName = mongoose.connection.name;
+    if (process.env.NODE_ENV === 'production' && process.env.ALLOW_EXPLAIN_PROD !== 'true') {
+      throw new Error(
+        `目标库「${dbName}」处于生产模式：本脚本会执行重查询，` +
+          '如确认只读抽查，请显式设置 ALLOW_EXPLAIN_PROD=true 后重试'
+      );
+    }
+    console.log(`目标库：${dbName}\n`);
+
     for (const c of cases) {
       try {
         const s = summarize(await runCase(c));
@@ -185,7 +206,10 @@ async function main() {
       }
     }
   } finally {
-    await mongoose.disconnect();
+    // 连接/生产库确认失败时也要收尾；已在主流程中断开则 readyState 为 0。
+    if (connected && mongoose.connection.readyState !== 0) {
+      await mongoose.disconnect().catch(() => {});
+    }
   }
 
   const verdict = decideExit({ total: cases.length, collscan, inconclusive, zeroTouch });

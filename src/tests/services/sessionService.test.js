@@ -408,6 +408,43 @@ describe('sessionService（设备级会话服务）', () => {
       expect(await sessionService.revokeOtherSessions({ userId: userA })).toBe(1);
       expect((await sessionService.validateSession(s1.sid)).usable).toBe(false);
     });
+
+    test('WS 通知覆盖更新前一刻新建的会话（不再依赖预取快照）', async () => {
+      const { onSessionRevoked } = require('../../services/sessionRevocationEvents');
+      const events = [];
+      const off = onSessionRevoked((event) => events.push(event));
+      const originalUpdateMany = UserSession.updateMany.bind(UserSession);
+      const ghostSid = `ghost-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      // 在 updateMany 真正执行前插入一条会话：模拟「预取快照之后、更新之前」
+      // 并发登录建出的会话。旧实现只通知快照里的 sid，会漏掉这条。
+      jest
+        .spyOn(UserSession, 'updateMany')
+        .mockImplementationOnce(async (filter, update, options) => {
+          await UserSession.create({
+            sid: ghostSid,
+            userId: userA,
+            status: 'active',
+            expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+          });
+          return originalUpdateMany(filter, update, options);
+        });
+
+      try {
+        const current = await sessionService.createSession({ userId: userA, req: fakeReq() });
+        const count = await sessionService.revokeOtherSessions({
+          userId: userA,
+          exceptSid: current.sid,
+        });
+
+        expect(count).toBe(1);
+        expect((await UserSession.findOne({ sid: ghostSid })).status).toBe('revoked');
+        const notified = events.flatMap((event) => event.sids || []);
+        expect(notified).toContain(ghostSid);
+      } finally {
+        off();
+        jest.restoreAllMocks();
+      }
+    });
   });
 
   describe('revokeAllSessions（全局吊销时收敛会话表）', () => {

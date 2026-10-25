@@ -917,7 +917,13 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
     ['auth.updateProfile', 'put', '/auth/profile', [{ u: 1 }], { data: { u: 1 } }],
     ['auth.refreshToken', 'post', '/auth/refresh', [{ u: 1 }], { data: { u: 1 } }],
     ['auth.getMfaStatus', 'get', '/auth/mfa/status', [], {}],
-    ['auth.mfaEnroll', 'post', '/auth/mfa/enroll', [], {}],
+    [
+      'auth.mfaEnroll',
+      'post',
+      '/auth/mfa/enroll',
+      [{ currentPassword: 'x' }],
+      { data: { currentPassword: 'x' } },
+    ],
     [
       'auth.mfaEnable',
       'post',
@@ -1067,6 +1073,18 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
       [{ format: 'xlsx' }],
       { params: { format: 'xlsx' }, responseType: 'blob' },
     ],
+    // L-17：未脱敏导出是 POST（凭据不进 URL），筛选参数仍走 query
+    [
+      'reports.exportPii',
+      'post',
+      '/reports/export/pii',
+      [{ type: 'alarms' }, { mfaCode: '123456' }],
+      {
+        params: { type: 'alarms' },
+        data: { mfaCode: '123456' },
+        responseType: 'blob',
+      },
+    ],
 
     ['security.getOverview', 'get', '/security/overview', [], {}],
     ['security.getAlerts', 'get', '/security/alerts', [], {}],
@@ -1147,6 +1165,43 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
       expect(cfg.silent401 ?? null, label).toBe(extra.silent401 ?? null)
     }
     expect(calls).toHaveLength(ENTRIES.length)
+  })
+
+  test('路径参数统一编码：特殊字符不得改变 URL 结构（各模块抽样）', async () => {
+    // 防退化：裸拼 `${id}` → id 含 /?# 时会命中另一条路由或截断 query，
+    // 最坏情况是把用户可控字符串提到上级路径（如 id='../../admin'）。
+    // 抽样覆盖每个带路径参数的模块，避免只测 auth 后其余模块回归。
+    const { api, apiClient } = await loadAll()
+    const calls = []
+    apiClient.defaults.adapter = (config) => {
+      calls.push(config)
+      return Promise.resolve(jsonOk(config))
+    }
+    const special = 'a/b?c#d'
+    const enc = 'a%2Fb%3Fc%23d'
+    const cases = [
+      ['auth.revokeSession', [special], `/auth/sessions/${enc}`],
+      ['users.getById', [special], `/users/${enc}`],
+      ['users.update', [special, {}], `/users/${enc}`],
+      ['users.assignRoles', [special, {}], `/users/${enc}/roles`],
+      ['roles.getById', [special], `/roles/${enc}`],
+      ['roles.assignPermissions', [special, {}], `/roles/${enc}/permissions`],
+      ['permissions.update', [special, {}], `/permissions/${enc}`],
+      ['devices.updateStatus', [special, {}], `/devices/${enc}/status`],
+      ['devices.addMaintenance', [special, {}], `/devices/${enc}/maintenance`],
+      ['alarms.dispatch', [special, {}], `/alarms/${enc}/dispatch`],
+      ['alarms.arrive', [special], `/alarms/${enc}/arrive`],
+      ['inspections.complete', [special, {}], `/inspections/${enc}/complete`],
+      ['inspections.delete', [special], `/inspections/${enc}`],
+      ['security.resetUserMfa', [special], `/security/users/${enc}/mfa/reset`],
+      ['security.removeIPEntry', [special], `/security/ip-list/${enc}`],
+    ]
+    for (const [path, args, url] of cases) {
+      const fn = path.split('.').reduce((obj, key) => obj[key], api)
+      await fn(...args)
+      expect(calls.at(-1).url, path).toBe(url)
+    }
+    expect(calls).toHaveLength(cases.length)
   })
 
   test('导出形态：具名 apiClient 与默认导出同一实例（全站 import 口径）', async () => {

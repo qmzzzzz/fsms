@@ -428,7 +428,9 @@ describe('RegisterView 分步导航与提交的同步锁（H1 / H7）', () => {
   /** 开验证码并走到第 3 步：H7 的可观测面是验证码是否被重载 */
   const openRegisterWithCaptcha = async () => {
     getCaptchaStatus.mockResolvedValue({ data: { data: { registerCaptchaEnabled: true } } })
-    getCaptcha.mockResolvedValue({ data: { data: { captchaId: 'c1', svg: '<svg/>' } } })
+    getCaptcha.mockResolvedValue({
+      data: { success: true, data: { captchaId: 'c1', svg: '<svg/>' } },
+    })
     active = mountComponent(RegisterView, { initialRoute: '/register', routes: ROUTES })
     await waitFor(() => getCaptchaStatus.mock.calls.length > 0, { message: '验证码状态查询' })
     await flush(8)
@@ -479,6 +481,32 @@ describe('RegisterView 分步导航与提交的同步锁（H1 / H7）', () => {
     // 用户刚填对的验证码被清掉并重载。修复后单独一层 try 后 return，不碰验证码。
     expect(getCaptcha.mock.calls.length).toBe(before)
     expect(c.find('#captcha').value).toBe('a1b2')
+    expect(c.errors).toEqual([])
+  })
+
+  test('验证码图片可键盘刷新：button 语义 + aria-label，Enter/空格均触发换图', async () => {
+    // 防退化：只绑 @click 的 <img> 不可聚焦 → 键盘/读屏用户无法换验证码，
+    // 只能整页刷新重来。
+    const c = await openRegisterWithCaptcha()
+    await waitFor(() => c.find('.register-card__captcha-img'), { message: '验证码图片渲染' })
+    const img = c.find('.register-card__captcha-img')
+    expect(img.tagName).toBe('IMG')
+    expect(img.getAttribute('role')).toBe('button')
+    expect(img.getAttribute('tabindex')).toBe('0')
+    expect(img.getAttribute('aria-label')).toBeTruthy()
+
+    const before = getCaptcha.mock.calls.length
+    img.dispatchEvent(
+      new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    )
+    await waitFor(() => getCaptcha.mock.calls.length > before, { message: 'Enter 换图' })
+    await flush(8)
+
+    const afterEnter = getCaptcha.mock.calls.length
+    img.dispatchEvent(
+      new window.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true })
+    )
+    await waitFor(() => getCaptcha.mock.calls.length > afterEnter, { message: '空格换图' })
     expect(c.errors).toEqual([])
   })
 })

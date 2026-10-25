@@ -11,6 +11,18 @@
  *
  * 这些处理器只依赖 SystemConfig / AuditLog 两个模型，用 jest.mock 替换后
  * 可脱离数据库直接调用，成本远低于起 supertest + 内存库。
+ *
+ * 【2026-10-24 复核：本文件 mock 掉 SystemConfig 是否等于"没有状态回读"】
+ * 不是。审计提法「成功路径只断言 set 被调用、无状态回读」在**本文件**成立，
+ * 但在**套件**层面不成立——真实读回由两条独立用例覆盖，职责是分开的：
+ *   · 本文件（单元）：控制器**接线**——参数透传、缓存失效调用、专用审计与
+ *     skipGlobalAudit 时序、审计失败转 WAL / WAL 不可用则 500。
+ *   · `src/tests/security/systemConfigBooleanContract.test.js`（真实 Mongo +
+ *     supertest）：**读回一致**——先 GET 预热 30s 缓存，再 PUT 相反值，再 GET
+ *     必须看到新值；少调一次 invalidate*Cache 即红。
+ * 所以这里**不要**再补一条"PUT 之后 GET 拿到新值"的用例：SystemConfig 是替身，
+ * 那样只能证明替身自己记住了值（循环论证），反而制造一条新的假绿。
+ * 真正需要新增的判据应当加在 systemConfigBooleanContract.test.js（真实介质）里。
  */
 
 const mockSystemConfig = {
@@ -57,6 +69,10 @@ const {
   setRegisterCaptchaConfig,
 } = require('../../controllers/securityController');
 const { TEST_CLIENT_IP } = require('../fixtures');
+
+// 持久化路径由 outbox 直接等 WAL fsync；本套件把 auditBuffer 整个换成替身，
+// 这里把真实 WAL 的落盘入口也桩掉，否则 spool 会因套件没跑 start() 而被判失败。
+jest.spyOn(require('../../services/auditBufferWal'), 'appendLineDurable').mockResolvedValue(true);
 
 /** 构造最小 req/res 替身；res 记录 status 与 json 载荷供断言 */
 const makeCtx = (body = {}) => {

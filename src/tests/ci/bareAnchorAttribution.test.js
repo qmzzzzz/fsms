@@ -7,7 +7,7 @@
  *
  * 本轮实测（2026-10-03）：这类站点 20 处——8 处当场可证失实（DEBT）、6 处正确但未署名（LIVE）、
  * 4 处尚未复核（UNVERIFIED）、2 处指向依赖内部行号（EXTERNAL）。
- * CENSUS total=20 DEBT=7 LIVE=7 UNVERIFIED=4 EXTERNAL=2
+ * CENSUS total=16 DEBT=3 LIVE=7 UNVERIFIED=4 EXTERNAL=2
  * 上面这行不是排版：最后一条用例把它读回来和台账逐项对撞。写散文的计数会被改台账的人漏掉
  * （第 15 轮就出现过"闸对、文档写着 4 处、闸里断言 5 处"），机器可读的一行才能被闸管住。
  *
@@ -140,7 +140,7 @@ const LEDGER = [
   },
   {
     site: 'src/services/authService/profile.js',
-    siteLine: 182,
+    siteLine: 183,
     raw: '（:350）',
     status: 'DEBT',
     wrongFrom: 350,
@@ -149,79 +149,27 @@ const LEDGER = [
     from: 73,
     to: 73,
     mustRead: 'async function loginUser',
-    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动；2026-10-18 lint 批 1 把 setUserLockStatus 的判据/写入计划抽成具名函数（本注释所在块 +5 行）⇒ 1288→1293；2026-10-18 lint 批 2 把 refreshSession / changeUserPassword 拆成具名步骤函数（两函数合计 +123 行，均在站点之上）⇒ 1293→1417，指代目标 :230 在它们之上、不受影响；2026-10-18 lint 批 3a 把 authService 拆成子模块后，锚随 setUserLockStatus 落到 profile.js（1417→182），指代目标 loginUser 落到 login.js（:230→:80）——两者不再同文件，这正是本台账坚持用「文件限定坐标」而不是裸行号的原因。2026-10-19 哨兵用户名（canary）批在 login.js 模块头 :16 后 +1 行（require），指代目标 80→81；错号 :350 在 profile.js、不受影响。2026-10-20 删除重复 JSDoc（-8 行）：指代目标 81→73；错号 :350 仍在 profile.js、不受影响。',
+    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动；2026-10-18 lint 批 1 把 setUserLockStatus 的判据/写入计划抽成具名函数（本注释所在块 +5 行）⇒ 1288→1293；2026-10-18 lint 批 2 把 refreshSession / changeUserPassword 拆成具名步骤函数（两函数合计 +123 行，均在站点之上）⇒ 1293→1417，指代目标 :230 在它们之上、不受影响；2026-10-18 lint 批 3a 把 authService 拆成子模块后，锚随 setUserLockStatus 落到 profile.js（1417→182），指代目标 loginUser 落到 login.js（:230→:80）——两者不再同文件，这正是本台账坚持用「文件限定坐标」而不是裸行号的原因。2026-10-19 哨兵用户名（canary）批在 login.js 模块头 :16 后 +1 行（require），指代目标 80→81；错号 :350 在 profile.js、不受影响。2026-10-20 删除重复 JSDoc（-8 行）：指代目标 81→73；错号 :350 仍在 profile.js、不受影响。2026-10-21 解锁吊销会话批在模块头 +1 行（sessionService require）：站点 182→183；错号与指代目标均不受影响。',
   },
   {
     site: 'src/services/permissionService.js',
-    siteLine: 90,
+    siteLine: 132,
     raw: '（:3248）',
     status: 'EXTERNAL',
-    note: '指 mongoose 的 model.js（上一行点名 model.js:3218-3220）；本文件只有 192 行，按所在文件反解必判死锚——依赖内部行号，本闸不核，只钉站点。站点行号 169→171：父级 id 归一的注释与 require 各占几行把它推下去了（指代目标 :3248 是别仓文件，不受影响）。2026-10-18 lint 批 1 把批量落库的「部分成功」注释整段搬进 insertDocsTolerant 的文档块（批量创建逻辑拆成具名函数，原 :171 处的代码块整体上移）⇒ 站点 171→90，指代目标 :3248 仍在别仓、不受影响',
-  },
-  {
-    site: 'src/services/securityAlert.js',
-    siteLine: 59,
-    raw: '（:266）',
-    status: 'DEBT',
-    wrongFrom: 266,
-    wrongTo: 266,
-    referent: 'src/models/IPBlacklist.js',
-    from: 269,
-    to: 269,
-    mustRead: '$setOnInsert',
-    note: '$setOnInsert: { createdAt } 实在 :269（他人 M）；2026-10-19 哨兵批文件头两处各 +2 行（共 +4）：站点 55→59，错号与真号均未动',
-  },
-  {
-    site: 'src/services/securityAlert.js',
-    siteLine: 59,
-    raw: '（:89）',
-    status: 'DEBT',
-    wrongFrom: 89,
-    wrongTo: 89,
-    referent: 'src/models/IPBlacklist.js',
-    from: 92,
-    to: 92,
-    mustRead: 'expireAfterSeconds',
-    note: 'TTL 索引实在 :92（他人 M）；2026-10-19 哨兵批文件头两处各 +2 行（共 +4）：站点 55→59，错号与真号均未动',
-  },
-  {
-    site: 'src/services/securityAlert.js',
-    siteLine: 257,
-    raw: '（:266）',
-    status: 'DEBT',
-    wrongFrom: 266,
-    wrongTo: 266,
-    referent: 'src/models/IPBlacklist.js',
-    from: 269,
-    to: 269,
-    mustRead: '$setOnInsert',
-    note: ':59 那条错锚的第二处复制（他人 M）；2026-10-19 哨兵批文件头两处各 +2 行（共 +4）：站点 253→257，错号与真号均未动',
-  },
-  {
-    site: 'src/services/securityAlert.js',
-    siteLine: 257,
-    raw: '（:89）',
-    status: 'DEBT',
-    wrongFrom: 89,
-    wrongTo: 89,
-    referent: 'src/models/IPBlacklist.js',
-    from: 92,
-    to: 92,
-    mustRead: 'expireAfterSeconds',
-    note: ':59 那条错锚的第二处复制（他人 M）；2026-10-19 哨兵批文件头两处各 +2 行（共 +4）：站点 253→257，错号与真号均未动',
+    note: '指 mongoose 的 model.js（上一行点名 model.js:3218-3220）；本文件只有 192 行，按所在文件反解必判死锚——依赖内部行号，本闸不核，只钉站点。站点行号 169→171：父级 id 归一的注释与 require 各占几行把它推下去了（指代目标 :3248 是别仓文件，不受影响）。2026-10-18 lint 批 1 把批量落库的「部分成功」注释整段搬进 insertDocsTolerant 的文档块（批量创建逻辑拆成具名函数，原 :171 处的代码块整体上移）⇒ 站点 171→90；2026-10-21 审计整改在文件上方新增注释 ⇒ 站点 90→132，指代目标 :3248 仍在别仓、不受影响',
   },
   {
     site: 'src/services/websocketService/push.js',
-    siteLine: 33,
+    siteLine: 36,
     raw: '（:353）',
     status: 'DEBT',
     wrongFrom: 353,
     wrongTo: 353,
     referent: 'src/services/websocketService/push.js',
-    from: 164,
-    to: 164,
+    from: 235,
+    to: 235,
     mustRead: 'this.authenticateSocket(',
-    note: '原文写「同文件」，:353 实为连接数上限分支的 return;（他人 M）。2026-10-18 websocketService 按主题拆分后站点迁至 push.js（guardSocketHandler 文档与真实注册点现同居一文件），真指代同步迁至 push.js:100-101；2026-10-20 A-5 权限同步批在文件上方插入 collectOnlineUsers 等具名步骤（+64 行），真指代 100-101→164。历史上站点 204→213→230→238、真指代 390-391→399-400→416-417→426-427：F-01（2026-10-17）把 `isPrivateOrLoopback(peer)` 换成 `isPeerTrustedAsProxy({...})` 并补了说明（+9 行）；2026-10-18 收敛到远端实现时判据定名为 isPeerTrustedProxy(peer, proxies) 由 HTTP/WS/封禁分类三处共用，文件头再 +8 行；同日 F-13 给连接上限常量补了 17 行说明并改名（+17 行）',
+    note: '原文写「同文件」，:353 实为连接数上限分支的 return;（他人 M）。2026-10-18 websocketService 按主题拆分后站点迁至 push.js（guardSocketHandler 文档与真实注册点现同居一文件），真指代同步迁至 push.js:100-101；2026-10-20 A-5 权限同步批在文件上方插入 collectOnlineUsers 等具名步骤（+64 行），真指代 100-101→164；2026-10-21 #9 未认证连接配额批把准入块抽为 _admitConnection（+65 行），站点 33→35、真指代 164→229；2026-10-25 七维审计整改在站点上方再 +1 行 ⇒ 站点 35→36、真指代 229→235。历史上站点 204→213→230→238、真指代 390-391→399-400→416-417→426-427：F-01（2026-10-17）把 `isPrivateOrLoopback(peer)` 换成 `isPeerTrustedAsProxy({...})` 并补了说明（+9 行）；2026-10-18 收敛到远端实现时判据定名为 isPeerTrustedProxy(peer, proxies) 由 HTTP/WS/封禁分类三处共用，文件头再 +8 行；同日 F-13 给连接上限常量补了 17 行说明并改名（+17 行）',
   },
   {
     site: 'src/tests/services/websocketHandlerRejectionGuard.test.js',
@@ -231,10 +179,10 @@ const LEDGER = [
     wrongFrom: 353,
     wrongTo: 353,
     referent: 'src/services/websocketService/push.js',
-    from: 164,
-    to: 164,
+    from: 235,
+    to: 235,
     mustRead: 'this.authenticateSocket(',
-    note: '把上一条的错锚当设计前提抄了一遍；本文件仅 283 行，:353 在本文件里越界（他人 A）。真指代随上一条同步迁移 390-391→399-400→416-417→426-427→（2026-10-18 拆分）push.js:100-101→（2026-10-20 A-5）:164（同一份事实，两处引用）',
+    note: '把上一条的错锚当设计前提抄了一遍；本文件仅 283 行，:353 在本文件里越界（他人 A）。真指代随上一条同步迁移 390-391→399-400→416-417→426-427→（2026-10-18 拆分）push.js:100-101→（2026-10-20 A-5）:164→（2026-10-21 #9 配额批）:229→（2026-10-25 审计整改 +1 行）:235（同一份事实，两处引用）',
   },
 
   {
@@ -250,25 +198,25 @@ const LEDGER = [
   },
   {
     site: 'src/services/reportDashboardService.js',
-    siteLine: 19,
+    siteLine: 20,
     raw: '（:155）',
     status: 'LIVE',
     referent: 'src/services/statsCache.js',
     from: 155,
     to: 155,
     mustRead: 'publishInvalidate(',
-    note: 'invalidateByUserId 体内确实在 :155 调 publishInvalidate（原 112-114，被 TTL 上界新增的 33 行推下；2026-10-20 A-1 的 generation/invalidateAll 追加行再推至 :155）',
+    note: 'invalidateByUserId 体内确实在 :155 调 publishInvalidate（原 112-114，被 TTL 上界新增的 33 行推下；2026-10-20 A-1 的 generation/invalidateAll 追加行再推至 :155）。站点 19→20：2026-10-25 审计整改在文件头补了一行说明',
   },
   {
     site: 'src/tests/ci/commentAnchorFreshness.test.js',
     siteLine: 25,
-    raw: '（:423）',
+    raw: '（:108）',
     status: 'LIVE',
     referent: 'src/services/DeviceService.js',
-    from: 423,
-    to: 423,
+    from: 108,
+    to: 108,
     mustRead: 'countDocuments(',
-    note: '原文点名 DeviceService.js，:416 是该符号距被引行最近的一次出现',
+    note: '上一行点名 DeviceService.js:502，这里回指同符号的另一处 :108（用于度量谓词的局部唯一性）。2026-10-25 审计整改后 #11 查询预算使该符号只剩 :108/:502 两处，回指坐标随之从 :423 改为 :108',
   },
   {
     site: 'src/tests/config/startupGuards.test.js',
@@ -295,13 +243,13 @@ const LEDGER = [
   {
     site: 'src/tests/services/auditWalChainOrphanRejection.test.js',
     siteLine: 16,
-    raw: '（:521）',
+    raw: '（:493）',
     status: 'LIVE',
     referent: 'src/services/auditBufferWal.js',
-    from: 521,
-    to: 521,
+    from: 493,
+    to: 493,
     mustRead: 'onError ||',
-    note: 'serialize() 的默认兜底臂；文件已从 utils/auditBuffer.js 迁到 services/auditBufferWal.js（第 4 族），行号仍对',
+    note: 'serialize() 的默认兜底臂；文件已从 utils/auditBuffer.js 迁到 services/auditBufferWal.js（第 4 族），2026-10-21 拆分 WAL 路径/目录模块后迁到 :487；2026-10-25 审计整改在文件上方 +6 行 ⇒ :493',
   },
 
   {
@@ -313,14 +261,14 @@ const LEDGER = [
   },
   {
     site: 'web-admin/src/tests/components/mfaSettingsCard.test.js',
-    siteLine: 1038,
+    siteLine: 1238,
     raw: '（:26）',
     status: 'UNVERIFIED',
-    note: '同一行两处裸锚之一，未核',
+    note: '同一行两处裸锚之一，未核；2026-10-21 MFA 设置卡用例扩张把站点从 1038 推至 1066，同日后半段用例继续扩张再推至 1154；2026-10-25 审计整改再扩张至 1238',
   },
   {
     site: 'web-admin/src/tests/components/mfaSettingsCard.test.js',
-    siteLine: 1038,
+    siteLine: 1238,
     raw: '（:50）',
     status: 'UNVERIFIED',
     note: '同上；若按"本文件"反解则落在 :50 的 `}))` 上，属无内容形态——正是自动解析会判错的地方',
@@ -483,8 +431,10 @@ describe('第 5 族 · 回指式裸行锚', () => {
     const bareKeys = new Set(ALL_SITES.map((c) => c.key));
     const overlap = attributed.filter((a) => bareKeys.has(keyOf(a)));
     expect(overlap.map(keyOf)).toEqual([]);
-    // 两边合起来才是全集：任何一边被改成恒假，这里的地板就会红
-    expect(bareKeys.size).toBeGreaterThanOrEqual(18);
+    // 两边合起来才是全集：任何一边被改成恒假，这里的地板就会红。
+    // 2026-10-21：securityAlert.js 的四处裸锚随封禁判据拆到 securityAlertIpBans.js，
+    // 拆出时直接写成署名锚（IPBlacklist.js:95/269/92），四处欠账同时清掉 ⇒ 地板 18→16。
+    expect(bareKeys.size).toBeGreaterThanOrEqual(16);
     expect(attributed.length).toBeGreaterThanOrEqual(200);
   });
 
@@ -493,8 +443,8 @@ describe('第 5 族 · 回指式裸行锚', () => {
     // 自动解析给出的指代（同块最近 token = src/index.js）里没有那个符号 ⇒ 会判成死锚
     expect(hasSymbol('src/index.js', wal.from, wal.to, 'onError ||')).toBe(false);
     // 真实指代在另一个文件里、行号完全正确 ⇒ 只有作者登记才给得出来
-    expect(contentFreeKind('src/services/auditBufferWal.js', 521, 521)).toBeNull();
-    expect(hasSymbol('src/services/auditBufferWal.js', 521, 521, 'onError ||')).toBe(true);
+    expect(contentFreeKind('src/services/auditBufferWal.js', 493, 493)).toBeNull();
+    expect(hasSymbol('src/services/auditBufferWal.js', 493, 493, 'onError ||')).toBe(true);
     for (const e of byStatus('LIVE').concat(byStatus('DEBT'))) {
       expect(typeof e.referent).toBe('string');
       expect(e.from).toBeGreaterThan(0);

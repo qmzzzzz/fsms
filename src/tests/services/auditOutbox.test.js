@@ -30,8 +30,14 @@ jest.mock('../../services/auditBuffer', () => ({
   isWalEnabled: jest.fn(() => true),
 }));
 
+jest.mock('../../services/auditBufferWal', () => ({
+  assignSeq: jest.fn(),
+  appendLineDurable: jest.fn(() => Promise.resolve(true)),
+}));
+
 const AuditLog = require('../../models/AuditLog');
 const auditBuffer = require('../../services/auditBuffer');
+const wal = require('../../services/auditBufferWal');
 const logger = require('../../utils/logger');
 const metrics = require('../../utils/metrics');
 const { recordDurably, recordSensitiveActionDurably } = require('../../services/auditOutbox');
@@ -63,6 +69,7 @@ describe('F-03 审计可靠 outbox', () => {
     const doc = await recordDurably(validEntry(), { auditAction: 'password_changed' });
     expect(doc).toEqual({ _id: 'audit-1' });
     expect(auditBuffer.push).not.toHaveBeenCalled();
+    expect(wal.appendLineDurable).not.toHaveBeenCalled();
     expect(metrics.incSecurityAlert).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalled();
   });
@@ -73,9 +80,14 @@ describe('F-03 审计可靠 outbox', () => {
 
     // 调用方据此继续回成功——前提是文档已经进了可重放的介质
     expect(doc).toBeNull();
-    expect(auditBuffer.push).toHaveBeenCalledTimes(1);
-    const spooled = auditBuffer.push.mock.calls[0][0];
-    expect(spooled).toMatchObject({ action: 'password_changed', category: 'auth' });
+    expect(wal.appendLineDurable).toHaveBeenCalledTimes(1);
+    const line = wal.appendLineDurable.mock.calls[0][0];
+    expect(JSON.parse(line)).toMatchObject({ action: 'password_changed', category: 'auth' });
+    // 已等待 WAL 落盘，进缓冲时不得再 fire-and-forget 追加一次（否则 WAL 行重复）
+    expect(auditBuffer.push).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'password_changed', category: 'auth' }),
+      true
+    );
 
     // 不静默：error 日志 + high 档指标 + 一条"已补偿"的 warn
     expect(metrics.incSecurityAlert).toHaveBeenCalledWith('audit_write_failed', 'high');
@@ -92,6 +104,19 @@ describe('F-03 审计可靠 outbox', () => {
       recordDurably({ action: 'not-a-real-action', category: 'nope' }, { auditAction: 'x' })
     ).rejects.toThrow('validation failed');
     expect(auditBuffer.push).not.toHaveBeenCalled();
+    expect(wal.appendLineDurable).not.toHaveBeenCalled();
+  });
+
+  test('落库失败 + WAL 追加失败 ⇒ 重抛（fsync 没成功就不能声称已留痕）', async () => {
+    AuditLog.create.mockRejectedValue(new Error('db down'));
+    wal.appendLineDurable.mockResolvedValueOnce(false);
+
+    await expect(recordDurably(validEntry(), { auditAction: 'password_changed' })).rejects.toThrow(
+      'db down'
+    );
+    expect(wal.appendLineDurable).toHaveBeenCalledTimes(1);
+    // fsync 没成功 ⇒ 绝不能进缓冲（否则重放会把它当已持久化）
+    expect(auditBuffer.push).not.toHaveBeenCalled();
   });
 
   test('落库失败 + WAL 未启用 ⇒ 重抛（没有可靠介质就不许声称已留痕）', async () => {
@@ -101,6 +126,7 @@ describe('F-03 审计可靠 outbox', () => {
       'db down'
     );
     expect(auditBuffer.push).not.toHaveBeenCalled();
+    expect(wal.appendLineDurable).not.toHaveBeenCalled();
   });
 
   test('recordSensitiveActionDurably 复用模型上的字段构造（口径不分叉）', async () => {

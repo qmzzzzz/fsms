@@ -36,6 +36,8 @@ const validEnv = () => ({
   CORS_ORIGIN: 'https://admin.example.com',
   // 与 CORS_ORIGIN 同为 compose 的 `:?` 硬声明项，缺一即 compose 拒绝整个项目
   ALLOWED_HOSTS: 'fsms.example.com',
+  // 2026-10-24 审计：默认留空会让代理判据静默退回兼容档，部署入口改为强制显式
+  TRUSTED_PROXY_CIDRS: '172.28.0.0/16',
   // F-08（2026-10-17）：发布路径要求显式给出恢复目标，且不得宽于声明值。
   // 这两个值必须与 src/constants/backupObjectives.js 的 declaredHours 一致；
   // 不一致时 checkBackupObjectives 会拒绝发布（判据见该函数的三条）。

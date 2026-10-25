@@ -122,11 +122,26 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 # 安装 dumb-init 处理信号 + tzdata 时区支持
-RUN apk add --no-cache dumb-init tzdata
+# su-exec：入口脚本把 file secret 复制/收紧/改属主后，用它降回 nodejs。
+# 不用 gosu/setpriv：Alpine 官方仓库里 su-exec 最小，且只做 setgroups+setuid/setgid。
+RUN apk add --no-cache dumb-init tzdata su-exec
 
 # 创建非 root 用户
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
+
+# ===== 文件型 secret 的权限适配（2026-10-24）=====
+# compose 的 `secrets: file:` 在 Linux 上是 bind mount，容器内保留宿主文件的
+# 属主/权限；generate-secrets.js 产出的 0600 文件属主是部署用户，UID 1001 的
+# nodejs 读不到。`secrets:` 的 uid/gid/mode 对 file 型 secret 不生效，因此由
+# 入口脚本在启动时复制到 tmpfs、收紧到 0400、chown 给 nodejs，再把 *_FILE
+# 指针重写到副本路径，最后 su-exec 降权。应用进程与 dumb-init 仍是 nodejs。
+#
+# 镜像默认仍是 USER nodejs（直接 docker run 时脚本走非 root 分支，只校验可读性）；
+# 生产编排用 app 服务的 `user: "0:0"` 让脚本拿到复制所需的权限。见
+# docker-compose.yml 该服务的 user/cap_add/tmpfs，以及入口脚本头注释。
+COPY docker/app-entrypoint.sh /usr/local/bin/app-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/app-entrypoint.sh
 
 # 前端构建产物（L-1 静态托管）：默认路径与 src/middleware/staticFrontend.js
 # 的 resolveDistDir 一致（/app/web-admin/dist）。NODE_ENV=production 且产物
@@ -185,16 +200,28 @@ COPY --from=builder --chown=nodejs:nodejs /app/scripts/destructiveGuard.js ./scr
 #     `check-prod-install-scripts.js --omit=dev` 未登记命中仍为 0。
 # 迁移文件与配置的 COPY 见上面 builder 阶段的 D-3 段。
 
-# 切换到非 root 用户
+# 镜像默认以非 root 启动。直接 docker run 时入口脚本走非 root 分支
+# （只校验 *_FILE 指针可读，不做复制）；compose 的 `user: "0:0"` 会让
+# 入口脚本以 root 完成密钥复制后再 su-exec 降回 nodejs。应用进程始终是
+# UID 1001，root 只存在于入口脚本的短暂窗口。
 USER nodejs
 
 # 暴露端口
 EXPOSE 3000
 
-# 健康检查
+# 健康检查：每个周期同时打 /readyz 与 /health，但**退出码只由 /health 决定**。
+#   - /readyz 是生产环境中唯一的周期性就绪探测点：Prometheus 只抓 /metrics，
+#     若不在这里触发，readyz_verdict 在持续运行期永远不产生——MongoUnavailable
+#     无法判定，而 ReadinessProbeMissing（absent/陈旧）会对一个健康实例恒告警。
+#   - 容器健康语义仍取 /health（进程存活）：Mongo 短暂抖动只应表现为
+#     readyz_verdict=0 触发 MongoUnavailable，不应把容器标成不健康甚至被编排器重启。
+#   两个请求并行、各自 5s 上限（/readyz 的 Mongo ping 上限 1.5s），总耗时小于 timeout。
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD node -e "const http=require('http');const r=http.get('http://localhost:3000/health',res=>process.exit(res.statusCode===200?0:1));r.on('error',()=>process.exit(1));r.setTimeout(5000,()=>process.exit(1));"
+  CMD node -e "const http=require('http');const get=p=>new Promise(r=>{const q=http.get('http://localhost:3000'+p,s=>{s.resume();s.on('end',()=>r(s.statusCode))});q.on('error',()=>r(0));q.setTimeout(5000,()=>{q.destroy();r(0)})});Promise.all([get('/readyz'),get('/health')]).then(([,health])=>process.exit(health===200?0:1));"
 
-# 使用 dumb-init 作为 PID 1
-ENTRYPOINT ["dumb-init", "--"]
+# 入口脚本负责 file secret 的权限适配，并在 exec 应用前降权。它自己会把
+# dumb-init 拉起作为 PID 1（root 分支经 su-exec 以 nodejs 身份，非 root 分支
+# 直接以当前用户），所以这里不再把 dumb-init 放在 ENTRYPOINT——否则 root
+# 分支会在降权后再 fork 一层，PID 1 的属主/信号链多一段。
+ENTRYPOINT ["/usr/local/bin/app-entrypoint.sh"]
 CMD ["node", "src/index.js"]

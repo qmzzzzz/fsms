@@ -82,7 +82,7 @@ let active = null
  * 只保留这一处 defineComponent（factory 内），避免 vue/one-component-per-file 告警；
  * stub 场景经同一个 factory 换一份 build 实现，因此不需要第二个组件。
  */
-const makeHost = (build) =>
+const makeHost = (build, canAssign = true) =>
   defineComponent({
     setup() {
       const state = build()
@@ -90,7 +90,9 @@ const makeHost = (build) =>
         const list = state.modules()
         return h(
           'div',
-          list.map((m) => h(PermissionModuleCard, { key: m.module, module: m, ui: state.ui }))
+          list.map((m) =>
+            h(PermissionModuleCard, { key: m.module, module: m, ui: state.ui, canAssign })
+          )
         )
       }
     },
@@ -405,6 +407,32 @@ describe('PermissionModuleCard 点击回传契约（把原始对象/原始 id �
     ).toEqual(['↺', '', ''])
     expect(permView(permBtns(c)[0]).badge).toBe('移除')
     expect(permView(permBtns(c)[2]).badge).toBe(null)
+  })
+})
+
+describe('PermissionModuleCard 无 role:assign：只读', () => {
+  test('canAssign=false：模块全选与权限项均禁用，点击不改变状态、不产生未保存标记', async () => {
+    const c = (active = mountComponent(
+      makeHost(() => {
+        const instance = useRolePermissions()
+        instance.setTree(TREE3)
+        instance.setChecked([ID1])
+        ui = instance
+        return { ui: instance, modules: () => [instance.filteredModules.value[0]] }
+      }, false)
+    ))
+    await flush(3)
+
+    expect(permBtns(c).every((el) => el.disabled)).toBe(true)
+    expect(toggleBtn(c).disabled).toBe(true)
+
+    const before = [...ui.checkedPermIds.value]
+    click(permBtns(c)[1])
+    click(toggleBtn(c))
+    await flush(3)
+
+    expect([...ui.checkedPermIds.value]).toEqual(before)
+    expect(ui.hasUnsavedChanges.value).toBe(false)
   })
 })
 

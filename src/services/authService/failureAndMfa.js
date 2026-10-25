@@ -276,14 +276,27 @@ async function recordRecoveryFailure(
  * @returns {Promise<number>} 递增后的失败计数
  */
 async function incrementFailedLoginCount(user, { username, lockReason }) {
-  const lockExpired = user.lockUntil && user.lockUntil <= new Date();
-  const updated = await User.findByIdAndUpdate(
-    user._id,
-    lockExpired
-      ? { $set: { failedLoginCount: 1, lockUntil: null } }
-      : { $inc: { failedLoginCount: 1 } },
-    { new: true }
-  ).catch(() => null);
+  // 与口令主路径同一条条件写：锁定刚过期时只允许第一个请求把计数重置为 1，
+  // 其余并发请求 miss 后走 $inc，避免「并发失败全部写成 1、阈值永远到不了」。
+  // 用 `$lte: now` 而不是精确快照：另一个请求已把 lockUntil 清空时也不命中，
+  // 自然落到 $inc；若已被重新锁定（未来时间），同样不命中——保持逐次累加。
+  const now = new Date();
+  const lockExpired = user.lockUntil && user.lockUntil <= now;
+  let updated = null;
+  if (lockExpired) {
+    updated = await User.findOneAndUpdate(
+      { _id: user._id, lockUntil: { $lte: now } },
+      { $set: { failedLoginCount: 1, lockUntil: null } },
+      { new: true }
+    ).catch(() => null);
+  }
+  if (!updated) {
+    updated = await User.findByIdAndUpdate(
+      user._id,
+      { $inc: { failedLoginCount: 1 } },
+      { new: true }
+    ).catch(() => null);
+  }
   const newCount = resolveFailedLoginCount(updated);
   if (newCount >= MAX_FAILED_LOGINS) {
     // 与上面 checkBruteForce 里的同一条修法（本函数是它的第二条登录失败路径）：
@@ -295,6 +308,12 @@ async function incrementFailedLoginCount(user, { username, lockReason }) {
       lockApplied = false;
       logger.error(`账户临时锁定写入失败（防爆破防线未生效）：${err.message}`, { username });
     });
+    if (lockApplied) {
+      // 与口令主路径同口径：锁定写入后失效认证缓存，避免旧 access token
+      // 在缓存 TTL（60s）内继续通过 lockUntil 校验。
+      const { invalidateUserCache } = require('../../middleware/auth');
+      invalidateUserCache(user._id);
+    }
     logger.warn(`账户临时锁定（${lockReason}）`, {
       username,
       failedCount: newCount,

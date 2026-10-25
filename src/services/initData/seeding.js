@@ -47,8 +47,29 @@ const initPermissions = async () => {
   logger.info('开始初始化权限数据...');
 
   try {
-    // 查询已存在的权限 code
-    const existingCodes = (await Permission.find({}).select('code').lean()).map((p) => p.code);
+    // 查询已存在的权限 code（**含软删除**）：
+    //   · 软删除文档仍占用 code 唯一索引，不能再次 insert；
+    //   · 目录内的内置权限被软删除后，启动播种必须把它恢复成正常态，
+    //     否则一次误删会永久丢掉该权限，且重启也无法自愈。
+    const existingDocs = await Permission.find({}, null, { includeDeleted: true })
+      .select('code deletedAt')
+      .lean();
+    const existingCodes = existingDocs.map((p) => p.code);
+
+    const catalogCodes = new Set(defaultPermissions.map((p) => p.code));
+    const softDeletedBuiltIns = existingDocs
+      .filter((p) => catalogCodes.has(p.code) && p.deletedAt)
+      .map((p) => p._id);
+    if (softDeletedBuiltIns.length > 0) {
+      await Permission.updateMany(
+        { _id: { $in: softDeletedBuiltIns } },
+        { $set: { deletedAt: null } }
+      );
+      logger.warn(
+        `权限初始化恢复 ${softDeletedBuiltIns.length} 个被软删除的内置权限（deletedAt 置回 null）`
+      );
+    }
+
     const toInsert = defaultPermissions
       .filter((p) => !existingCodes.includes(p.code))
       .map((p) => ({ ...p, parent: null })); // 先全部置为 null，后续统一关联

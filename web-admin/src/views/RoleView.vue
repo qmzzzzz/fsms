@@ -55,10 +55,10 @@
                 {{ $t('common.reset') }}
               </button>
               <button
-                v-if="hasPerm('role:assign')"
+                v-if="canAssign"
                 type="button"
                 class="glass-btn glass-btn--primary glass-btn--sm"
-                :disabled="savingPermissions"
+                :disabled="savingPermissions || treeForbidden"
                 @click="savePermissions"
               >
                 {{ savingPermissions ? $t('common.adding') : $t('role.assignPermissions') }}
@@ -73,62 +73,72 @@
           </div>
 
           <template v-else>
-            <!-- 统计摘要 + 权限搜索 -->
-            <div class="perm-toolbar">
-              <div class="perm-summary">
-                <span class="perm-summary__item">
-                  {{ $t('role.permTotal') }} <b>{{ totalPermCount }}</b>
-                </span>
-                <span class="perm-summary__item is-on">
-                  {{ $t('role.permEnabled') }} <b>{{ checkedCount }}</b>
-                </span>
-                <span v-if="addedCount > 0" class="perm-summary__item is-added">
-                  {{ $t('role.permAdded') }} <b>+{{ addedCount }}</b>
-                </span>
-                <span v-if="removedCount > 0" class="perm-summary__item is-removed">
-                  {{ $t('role.permRemoved') }} <b>-{{ removedCount }}</b>
-                </span>
-              </div>
-              <el-input
-                v-model="permSearch"
-                :placeholder="$t('role.searchPerm')"
-                maxlength="50"
-                clearable
-                size="small"
-                class="perm-search"
-              >
-                <template #prefix>
-                  <el-icon><Search /></el-icon>
-                </template>
-              </el-input>
+            <!-- 无 permission:read / permission:tree：目录接口会 403，
+                 只展示角色元数据，不再渲染空树误导用户 -->
+            <div v-if="treeForbidden" class="perm-unavailable">
+              <div class="perm-unavailable__icon">🔒</div>
+              <p>{{ $t('role.permTreeForbidden') }}</p>
             </div>
 
-            <!-- 权限模块网格 -->
-            <div v-if="loadingTree && moduleList.length === 0" class="module-grid">
-              <GlassSkeleton
-                v-for="i in 4"
-                :key="i"
-                variant="table"
-                :rows="3"
-                :cols="['55%', '45%']"
-                style="height: 100%"
-              />
-            </div>
-            <div v-loading="loadingTree" class="module-grid">
-              <!-- 权限模块卡片（D-2 拆为 PermissionModuleCard 组件，
-                   useRolePermissions 状态机经 ui 属性传入） -->
-              <PermissionModuleCard
-                v-for="module in filteredModules"
-                :key="module.module"
-                :module="module"
-                :ui="rolePermUi"
-              />
-
-              <!-- 搜索无结果 -->
-              <div v-if="filteredModules.length === 0 && !loadingTree" class="perm-empty-search">
-                {{ $t('role.noPermFound') }}「{{ permSearch }}」
+            <template v-else>
+              <!-- 统计摘要 + 权限搜索 -->
+              <div class="perm-toolbar">
+                <div class="perm-summary">
+                  <span class="perm-summary__item">
+                    {{ $t('role.permTotal') }} <b>{{ totalPermCount }}</b>
+                  </span>
+                  <span class="perm-summary__item is-on">
+                    {{ $t('role.permEnabled') }} <b>{{ checkedCount }}</b>
+                  </span>
+                  <span v-if="addedCount > 0" class="perm-summary__item is-added">
+                    {{ $t('role.permAdded') }} <b>+{{ addedCount }}</b>
+                  </span>
+                  <span v-if="removedCount > 0" class="perm-summary__item is-removed">
+                    {{ $t('role.permRemoved') }} <b>-{{ removedCount }}</b>
+                  </span>
+                </div>
+                <el-input
+                  v-model="permSearch"
+                  :placeholder="$t('role.searchPerm')"
+                  maxlength="50"
+                  clearable
+                  size="small"
+                  class="perm-search"
+                >
+                  <template #prefix>
+                    <el-icon><Search /></el-icon>
+                  </template>
+                </el-input>
               </div>
-            </div>
+
+              <!-- 权限模块网格 -->
+              <div v-if="loadingTree && moduleList.length === 0" class="module-grid">
+                <GlassSkeleton
+                  v-for="i in 4"
+                  :key="i"
+                  variant="table"
+                  :rows="3"
+                  :cols="['55%', '45%']"
+                  style="height: 100%"
+                />
+              </div>
+              <div v-loading="loadingTree" class="module-grid">
+                <!-- 权限模块卡片（D-2 拆为 PermissionModuleCard 组件，
+                     useRolePermissions 状态机经 ui 属性传入） -->
+                <PermissionModuleCard
+                  v-for="module in filteredModules"
+                  :key="module.module"
+                  :module="module"
+                  :ui="rolePermUi"
+                  :can-assign="canAssign"
+                />
+
+                <!-- 搜索无结果 -->
+                <div v-if="filteredModules.length === 0 && !loadingTree" class="perm-empty-search">
+                  {{ $t('role.noPermFound') }}「{{ permSearch }}」
+                </div>
+              </div>
+            </template>
           </template>
         </div>
       </el-col>
@@ -145,7 +155,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
@@ -165,10 +175,19 @@ import PermissionModuleCard from '@/components/PermissionModuleCard.vue'
 const { t } = useI18n()
 const { hasPerm } = usePermission()
 
+// 写权限与「目录读权限」是两件事：路由只要求 role:read，而权限树接口要求
+// permission:read | permission:tree。仅持 role:read 的自定义角色能进本页，
+// 但拿不到目录 —— 此时渲染角色元数据而不是一棵空树。
+const canAssign = computed(() => hasPerm('role:assign'))
+const canViewPermissionTree = computed(
+  () => hasPerm('permission:read') || hasPerm('permission:tree')
+)
+
 const roles = ref([])
 const currentRole = ref(null)
 const savingPermissions = ref(false)
 const loadingTree = ref(false)
+const treeForbidden = ref(false)
 const loadingRoleList = ref(false)
 const dialogVisible = ref(false)
 // 编辑模式的预填来源：null = 新增模式。打开编辑时指向被点的行对象
@@ -239,12 +258,24 @@ const loadRoles = async (forceSelect = false) => {
 
 // 加载权限树
 const loadPermissionTree = async () => {
+  // 403 后不再无脑重试（切角色、permissions-updated 都会走到这里）：
+  // 只有当前用户后来真的拿到了目录读权限（权限热同步更新 store）才值得再试一次。
+  if (treeForbidden.value) {
+    if (!canViewPermissionTree.value) {
+      setTree([])
+      return
+    }
+    treeForbidden.value = false
+  }
   loadingTree.value = true
   try {
     const res = await api.roles.getPermissionTree()
     setTree(res?.data?.data)
   } catch (e) {
-    // 失败原因已在拦截器统一提示
+    // 目录接口要求 permission:read | permission:tree，而本页只要求 role:read。
+    // 仅持 role:read 的自定义角色拿到 403 属预期结果，不是加载故障——
+    // 标记后停止重试，并在面板里说明原因，避免把「无权查看」渲染成「空目录」。
+    if (e?.response?.status === 403) treeForbidden.value = true
     setTree([])
   } finally {
     loadingTree.value = false
@@ -626,6 +657,29 @@ onUnmounted(() => {
 .empty-state p {
   font-size: var(--xf-font-size-base);
   margin: 0;
+}
+
+/* ===== 权限目录不可用（仅 role:read，缺 permission:read/permission:tree） ===== */
+.perm-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 64px 20px;
+  text-align: center;
+  color: var(--xf-gray-400);
+}
+
+.perm-unavailable__icon {
+  font-size: 40px;
+  margin-bottom: var(--xf-spacing-md);
+}
+
+.perm-unavailable p {
+  font-size: var(--xf-font-size-base);
+  line-height: 1.6;
+  margin: 0;
+  max-width: 440px;
 }
 
 /* ========== 统计摘要 + 搜索工具条 ========== */

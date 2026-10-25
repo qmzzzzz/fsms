@@ -17,6 +17,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 const encode = (payload) => Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
 
@@ -117,7 +118,8 @@ describe('审计日志游标的 400/500 分界', () => {
     request(app)
       .get('/api/security/audit-logs')
       .query({ cursor })
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .set(reauthHeaders(token));
 
   test('前置事实：decodeCursor 会放行这种载荷（缺陷不在解码层，而在错误分层）', () => {
     const { decodeCursor } = require('../../utils/cursorPagination');
@@ -142,7 +144,8 @@ describe('审计日志游标的 400/500 分界', () => {
     const page = await request(app)
       .get('/api/security/audit-logs')
       .query({ limit: 1 })
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .set(reauthHeaders(token));
     expect(page.status).toBe(200);
     const docs = page.body.data.data;
     expect(docs).toHaveLength(1);

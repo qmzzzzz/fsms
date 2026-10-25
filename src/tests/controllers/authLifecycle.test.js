@@ -108,14 +108,15 @@ describe('认证生命周期（批次 B）', () => {
 
     const enroll = await request(app)
       .post('/api/auth/mfa/enroll')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .send({ currentPassword: password });
     expect(enroll.status).toBe(200);
     const { secret } = enroll.body.data;
 
     const enable = await request(app)
       .post('/api/auth/mfa/enable')
       .set('Authorization', `Bearer ${token}`)
-      .send({ mfaCode: currentTotp(secret) });
+      .send({ mfaCode: currentTotp(secret), currentPassword: password });
     expect(enable.status).toBe(200);
     return { token, secret, recoveryCodes: enable.body.data.recoveryCodes };
   };
@@ -254,26 +255,28 @@ describe('认证生命周期（批次 B）', () => {
 
     const enroll1 = await request(app)
       .post('/api/auth/mfa/enroll')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .send({ currentPassword: PASSWORD });
     expect(enroll1.status).toBe(200);
     const { secret } = enroll1.body.data;
 
     // 重复 enroll：B1 修复——返回已有密钥不覆盖
     const enroll2 = await request(app)
       .post('/api/auth/mfa/enroll')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .send({ currentPassword: PASSWORD });
     expect(enroll2.body.data.secret).toBe(secret);
 
     const badEnable = await request(app)
       .post('/api/auth/mfa/enable')
       .set('Authorization', `Bearer ${token}`)
-      .send({ mfaCode: '000000' });
+      .send({ mfaCode: '000000', currentPassword: PASSWORD });
     expect(badEnable.status).toBe(400);
 
     const enable = await request(app)
       .post('/api/auth/mfa/enable')
       .set('Authorization', `Bearer ${token}`)
-      .send({ mfaCode: currentTotp(secret) });
+      .send({ mfaCode: currentTotp(secret), currentPassword: PASSWORD });
     expect(enable.status).toBe(200);
     expect(enable.body.data.recoveryCodes).toHaveLength(10);
 
@@ -320,11 +323,9 @@ describe('认证生命周期（批次 B）', () => {
     expect(reused.body.errors?.errorCode).toBe('MFA_CODE_INVALID');
   });
 
-  test('MFA 关闭：错误口令 403；密码路径错误 403 / 正确关闭', async () => {
+  test('MFA 关闭：错误口令 403；密码独走被拒（需第二因子），恢复码可关闭', async () => {
     const { username } = await newMfaUser('mdis');
-    const { token, secret, recoveryCodes } = await enrollAndEnable(username, PASSWORD);
-    void secret;
-    void recoveryCodes;
+    const { token, recoveryCodes } = await enrollAndEnable(username, PASSWORD);
 
     const badCode = await request(app)
       .post('/api/auth/mfa/disable')
@@ -332,18 +333,30 @@ describe('认证生命周期（批次 B）', () => {
       .send({ mfaCode: '000000' });
     expect(badCode.status).toBe(403);
 
+    // 密码不再是合法的关闭因子：MFA 已开启时必须出示 TOTP 或恢复码
     const badPwd = await request(app)
       .post('/api/auth/mfa/disable')
       .set('Authorization', `Bearer ${token}`)
       .send({ currentPassword: 'Wrong!Pass1xy' });
     expect(badPwd.status).toBe(403);
+    expect(badPwd.body.errors?.errorCode).toBe('MFA_SECOND_FACTOR_REQUIRED');
 
-    const goodPwd = await request(app)
+    const passwordOnly = await request(app)
       .post('/api/auth/mfa/disable')
       .set('Authorization', `Bearer ${token}`)
       .send({ currentPassword: PASSWORD });
-    expect(goodPwd.status).toBe(200);
-    expect(goodPwd.body.data.enabled).toBe(false);
+    expect(passwordOnly.status).toBe(403);
+    expect(passwordOnly.body.errors?.errorCode).toBe('MFA_SECOND_FACTOR_REQUIRED');
+    // 被拒路径必须零副作用：MFA 仍然开启
+    const stillEnabled = await User.findOne({ username }).select('mfaEnabled');
+    expect(stillEnabled.mfaEnabled).toBe(true);
+
+    const viaRecovery = await request(app)
+      .post('/api/auth/mfa/disable')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ recoveryCode: recoveryCodes[0] });
+    expect(viaRecovery.status).toBe(200);
+    expect(viaRecovery.body.data.enabled).toBe(false);
   });
 
   // ================= 会话探测 / 登出 / 刷新 =================
@@ -377,12 +390,14 @@ describe('认证生命周期（批次 B）', () => {
     const refresh = await request(app).post('/api/auth/refresh').set('Cookie', cookies).send({});
     expect(refresh.status).toBe(200);
 
-    // 旧 refresh 已被轮换消费（重放检测 → 401）
+    // 旧 refresh 已被轮换消费；紧接的重放属并发竞争 ⇒ 503，仅拒绝本次
+    // （超过宽限窗口的重放会走全量吊销，见 authRest / revokeFailurePropagation）
     const replay = await request(app)
       .post('/api/auth/refresh')
       .set('Cookie', REFRESH_COOKIE_NAME + '=' + oldRefresh)
       .send({});
-    expect(replay.status).toBe(401);
+    expect(replay.status).toBe(503);
+    expect(replay.body.errors.errorCode).toBe('SECURITY_SERVICE_UNAVAILABLE');
 
     // access cookie 常量引用（避免扫描器把 cookie 名误判为凭据字面量）
     expect(ACCESS_COOKIE_NAME).toBe('access_token');

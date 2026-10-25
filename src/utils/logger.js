@@ -217,6 +217,18 @@ logger.add(
 );
 
 const shippingUrl = process.env.LOG_SHIPPING_URL;
+
+/**
+ * 转发目标的可展示形态：只保留 scheme+host+port 与 pathname。
+ *
+ * 原样打印 `LOG_SHIPPING_URL` 会把 `https://user:pass@siem/…?token=…` 的凭据
+ * 抄进本地日志（SIEM 侧日志常被集中收集/导出，凭据会二次扩散）。userinfo 与
+ * query 对"发到哪"没有解释力，只是常见的密钥挂载位，故展示时直接丢掉。
+ */
+function shippingDisplayUrl(parsed) {
+  return `${parsed.origin}${parsed.pathname}`;
+}
+
 // 实际挂载成功的 transport 实例；null 表示"没挂"。isShippingEnabled() 以它为准。
 let shippingTransport = null;
 if (shippingUrl) {
@@ -238,7 +250,7 @@ if (shippingUrl) {
     // 静默降级成明文出站），该轮注释点名的残留——"运维看到的仍是『日志转发已启用』"
     // ——就是这里。解析放在数值读取**之前**：一条已经死了的配置不该再刷三条
     // LOG_SHIPPING_BATCH 之类的告警，操作员只需要看到一句"挂载失败：原因"。
-    resolveShippingTarget(shippingUrl);
+    const target = resolveShippingTarget(shippingUrl);
     // 这三处原为 `parseInt(env,10) || undefined`，负值会被原样采纳
     // （如 batchSize=-1 → 每批都"超限"）。fallback 传 undefined 保持既有语义：
     // 缺省时交给传输层自己的默认值。此处**不能用 logger**（正在加载 logger），
@@ -259,7 +271,7 @@ if (shippingUrl) {
     });
     logger.add(transport);
     shippingTransport = transport;
-    logger.info(`日志转发已启用 → ${shippingUrl}`);
+    logger.info(`日志转发已启用 → ${shippingDisplayUrl(target.parsed)}`);
   } catch (e) {
     // 此时 logger 本体（文件+console transport）已可用，走 logger.warn 保持口径统一（报告 O-7）
     logger.warn(`日志转发 transport 挂载失败：${e.message}`);

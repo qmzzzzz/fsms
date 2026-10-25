@@ -69,20 +69,20 @@ describe('revokeSessionSafe（sessionService:462-468）', () => {
   });
 });
 
-describe('revokeAllSessionsSafe（sessionService:482-489）', () => {
+describe('revokeAllSessionsSafe（sessionService:563-570）', () => {
   test('DB 抛错 → 返回 0 并留痕（改密/重置 MFA 场景：令牌已由 tokenVersion 全局失效）', async () => {
-    UserSession.find.mockReturnValueOnce({
-      lean: () => rejectWith('db down'),
-    });
+    UserSession.updateMany.mockReturnValueOnce(rejectWith('db down'));
     await expect(revokeAllSessionsSafe('u3', 'password_changed')).resolves.toBe(0);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('会话表收敛失败'));
   });
 });
 
-describe('listSessions 的惰性过期收敛（sessionService:505-514）', () => {
+describe('listSessions 的惰性过期收敛（sessionService:588-597）', () => {
   test('过期状态收敛写失败 → 列表照常返回，不被辅助性写操作阻断', async () => {
     UserSession.updateMany.mockReturnValueOnce(rejectWith('concurrency wrote conflict'));
-    UserSession.find.mockReturnValueOnce({ sort: () => Promise.resolve([]) });
+    UserSession.find.mockReturnValueOnce({
+      sort: () => ({ limit: () => Promise.resolve([]) }),
+    });
     await expect(listSessions({ userId: 'u4' })).resolves.toEqual([]);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('过期会话状态收敛失败'));
   });

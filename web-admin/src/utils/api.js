@@ -3,13 +3,15 @@
  * 负责与后端 API 通信
  *
  * 认证方案（I-01 httpOnly cookie）：
- * - 令牌由后端 Set-Cookie 下发：access_token(path=/api, 24h) 与
- *   refresh_token(path=/api/auth, 7d)，均 httpOnly + SameSite=Lax，JS 不可读，
- *   XSS 无法窃取；请求经同源代理（dev Vite / 生产 Nginx）自动携带。
+ * - 令牌由后端 Set-Cookie 下发：access_token(path=/, 与 JWT_EXPIRE 一致) 与
+ *   refresh_token(path=/api/auth, 与 JWT_REFRESH_EXPIRE 一致)，均 httpOnly + SameSite=Strict，
+ *   JS 不可读，XSS 无法窃取；请求经同源代理（dev Vite / 生产 Nginx）自动携带。
+ *   access_token 的 path 必须是 `/`：Socket.IO 握手打在 /socket.io/，/api 作用域的
+ *   cookie 不会随该请求发出，WebSocket 鉴权会整体失效。
  * - withCredentials=true：确保未来前端与 API 分域部署时 cookie 仍随请求发送。
  *
  * CSRF 说明：
- * - SameSite=Lax 下跨站 POST/PUT/DELETE 不携带 cookie，经典 CSRF 已被阻断；
+ * - SameSite=Strict 下跨站请求不携带 cookie，经典 CSRF 已被阻断；
  * - 全部写请求均为 JSON Content-Type，无法由表单跨站伪造。
  */
 
@@ -19,6 +21,7 @@ import router from '@/router'
 import i18n from '@/i18n'
 // FE-M1：密文被拒时统一失效公钥缓存（loginCipher 仅依赖 axios，无循环）
 import { invalidatePublicKeyCache } from '@/utils/loginCipher'
+import { getReauthTicket, clearReauthTicket } from '@/utils/reauthTicket'
 import {
   ApiEnvelopeSchema,
   AuthMeResponseSchema,
@@ -89,6 +92,7 @@ const ERROR_CODE_I18N_MAP = {
   ALARM_STATUS_NOT_ALLOWED_SHORT: 'errors.alarmStatusNotAllowedShort',
   ALARM_HANDLE_RESULT_REQUIRED: 'errors.alarmHandleResultRequired',
   ALARM_STATUS_NOT_ALLOWED: 'errors.alarmStatusNotAllowed',
+  ALARM_BUILDING_REQUIRED: 'errors.alarmBuildingRequired',
   UNAUTHORIZED_ACCESS: 'errors.unauthorizedAccess',
   AUDIT_EXPORT_FAILED: 'errors.auditExportFailed',
   LIMIT_MUST_BE_POSITIVE_INT: 'errors.limitMustBePositiveInt',
@@ -104,6 +108,7 @@ const ERROR_CODE_I18N_MAP = {
   REFRESH_TOKEN_EXPIRED: 'errors.refreshTokenExpired',
   PASSWORD_CURRENT_AND_NEW_REQUIRED: 'errors.passwordCurrentAndNewRequired',
   USER_NOT_FOUND_OR_DELETED: 'errors.userNotFoundOrDeleted',
+  USER_STATE_CONFLICT: 'errors.userStateConflict',
   PASSWORD_CURRENT_INCORRECT: 'errors.passwordCurrentIncorrect',
   PASSWORD_SAME_AS_OLD: 'errors.passwordSameAsOld',
   PASSWORD_CHANGED_REVOKE_FAILED: 'errors.passwordChangedRevokeFailed',
@@ -138,6 +143,7 @@ const ERROR_CODE_I18N_MAP = {
   ROLE_NOT_FOUND: 'errors.roleNotFound',
   ROLE_VIEW_FORBIDDEN: 'errors.roleViewForbidden',
   ROLE_CODE_TAKEN: 'errors.roleCodeTaken',
+  ROLE_CODE_RESERVED: 'errors.roleCodeReserved',
   ROLE_CREATE_HIGHER_LEVEL_FORBIDDEN: 'errors.roleCreateHigherLevelForbidden',
   CANNOT_GRANT_WILDCARD_PERMISSION: 'errors.cannotGrantWildcardPermission',
   PERMISSION_GRANT_FORBIDDEN: 'errors.permissionGrantForbidden',
@@ -152,6 +158,7 @@ const ERROR_CODE_I18N_MAP = {
   ROLE_DELETE_HIGHER_LEVEL_FORBIDDEN: 'errors.roleDeleteHigherLevelForbidden',
   BUILTIN_ROLE_NOT_DELETABLE: 'errors.builtinRoleNotDeletable',
   ROLE_IN_USE: 'errors.roleInUse',
+  ROLE_STATE_CONFLICT: 'errors.roleStateConflict',
   PERMISSION_ID_REQUIRED: 'errors.permissionIdRequired',
   PERMISSION_ID_INVALID: 'errors.permissionIdInvalid',
   ROLE_PERM_PEER_OR_HIGHER_FORBIDDEN: 'errors.rolePermPeerOrHigherForbidden',
@@ -165,6 +172,7 @@ const ERROR_CODE_I18N_MAP = {
   PASSWORD_SAME_AS_CURRENT: 'errors.passwordSameAsCurrent',
   PASSWORD_REUSED_IN_HISTORY: 'errors.passwordReusedInHistory',
   SENSITIVE_VIEW_HIGHER_LEVEL_FORBIDDEN: 'errors.sensitiveViewHigherLevelForbidden',
+  SENSITIVE_VIEW_OUT_OF_SCOPE: 'errors.sensitiveViewOutOfScope',
   UNSUPPORTED_DATA_TYPE: 'errors.unsupportedDataType',
   REPORT_TARGET_AND_REASON_REQUIRED: 'errors.reportTargetAndReasonRequired',
   USER_OPERATE_PEER_OR_HIGHER_FORBIDDEN: 'errors.userOperatePeerOrHigherForbidden',
@@ -234,7 +242,11 @@ const ERROR_CODE_I18N_MAP = {
   REAUTH_PASSWORD_INCORRECT: 'errors.reauthPasswordIncorrect',
   REAUTH_MFA_NOT_ENABLED: 'errors.reauthMfaNotEnabled',
   REAUTH_MFA_INCORRECT: 'errors.reauthMfaIncorrect',
+  REAUTH_MFA_REQUIRED: 'errors.reauthMfaRequired',
   REAUTH_PROCESS_FAILED: 'errors.reauthProcessFailed',
+  REAUTH_TICKET_REQUIRED: 'errors.reauthTicketRequired',
+  REAUTH_TICKET_INVALID: 'errors.reauthTicketInvalid',
+  MFA_SECOND_FACTOR_REQUIRED: 'errors.mfaSecondFactorRequired',
   IP_BLOCKED: 'errors.ipBlocked',
   UPLOAD_FILE_TOO_LARGE: 'errors.uploadFileTooLarge',
   UPLOAD_TYPE_NOT_ALLOWED: 'errors.uploadTypeNotAllowed',
@@ -278,6 +290,35 @@ const apiClient = axios.create({
     'Content-Type': 'application/json',
   },
 })
+
+// 审计读取票据：由 POST /security/reauth 换取，仅存内存。
+// 无票据时返回空头，让请求按契约拿 401 REAUTH_TICKET_REQUIRED，
+// 由页面统一弹二次验证框（而不是在拦截器里静默重放写请求）。
+const reauthTicketHeaders = () => {
+  const ticket = getReauthTicket()
+  return ticket ? { 'X-Reauth-Ticket': ticket } : {}
+}
+
+// 「需要二次验证」的两个 401 与「登录态失效」是不同语义：前者绝不能触发
+// 令牌刷新链或强制登出，否则一次票据过期就会把用户踢回登录页。
+const REAUTH_TICKET_ERROR_CODES = ['REAUTH_TICKET_REQUIRED', 'REAUTH_TICKET_INVALID']
+
+/**
+ * 从错误响应体读 errorCode；导出类请求 responseType 为 blob，
+ * 错误 JSON 也被包成 Blob —— 不先解包就既认不出票据 401，
+ * 也看不清后端真正返回的错误码。
+ */
+const readErrorCode = async (data) => {
+  if (data?.errors?.errorCode) return data.errors.errorCode
+  if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    try {
+      return JSON.parse(await data.text())?.errors?.errorCode || ''
+    } catch (_) {
+      return ''
+    }
+  }
+  return ''
+}
 
 // ========== Token 自动刷新机制 ==========
 // 防止并发刷新：多个 401 请求同时触发时，只执行一次刷新，其余等待结果
@@ -348,6 +389,19 @@ const UNCANCELABLE_METHODS = new Set(['post', 'put', 'patch', 'delete'])
 // FE-L1：取消错误判定助手——路由切换 abort 在途请求后，视图 catch 应据此
 // 跳过「加载失败」提示（用户已到达新页面，弹假错误会训练用户忽略红框）
 export const isCanceledError = (e) => e?.code === 'ERR_CANCELED' || e?.name === 'CanceledError'
+
+/**
+ * 该错误是否已由响应拦截器向用户提示过（用于避免同一次失败弹两条）
+ *
+ * 响应拦截器对所有非取消的 HTTP/网络错误都会弹一次具体文案（400/403/404/5xx/网络等）；
+ * 组件若在 catch 里再弹一条「操作失败」，用户看到的是「具体原因 + 泛化文案」两条，
+ * 且泛化文案往往后到、盖住真正有用的那条。
+ *
+ * 仅以 axios 错误标记判断，而不是「有 response 就算」：非 axios 的异常（组件自身逻辑、
+ * 加解密工具）没有走过拦截器，仍应由调用方提示。silent401 是调用方显式要求静默的
+ * 预期结果（会话探测），同样不应由组件补提示。
+ */
+export const isHandledApiError = (e) => e?.isAxiosError === true && !e?.config?.silent401
 
 export const cancelAllPendingRequests = (message = t('common.routeChangeCancel')) => {
   let cancelled = 0
@@ -512,6 +566,16 @@ apiClient.interceptors.response.use(
 
     if (error.response) {
       const { status, data, config } = error.response
+
+      // 票据缺失/过期 → 交由页面弹二次验证框并重放请求：
+      // 不刷新令牌、不弹「登录已过期」、不跳登录页。
+      // 票据被服务端拒绝（如重启换 HMAC 密钥后本地票据仍"未过期"）时清掉本地副本，
+      // 否则页面以为还有票据而不会重新弹框。
+      const incomingErrorCode = await readErrorCode(data)
+      if (status === 401 && REAUTH_TICKET_ERROR_CODES.includes(incomingErrorCode)) {
+        if (incomingErrorCode === 'REAUTH_TICKET_INVALID') clearReauthTicket()
+        return Promise.reject(error)
+      }
 
       // FE-M1：密文被拒（服务端重启换钥/密钥轮换）——统一在此清公钥缓存，
       // 登录/注册/改密三个口令入口全部自愈（原先只接在 LoginView）。
@@ -686,6 +750,10 @@ apiClient.interceptors.response.use(
   }
 )
 
+// 路径参数统一编码：ID 直接拼进 URL 时，'/'、'?'、'#' 等字符会改变路由语义
+//（如 id='a/b' 命中另一条路由）。即使当前取值来自服务端 UUID，也不应依赖这一点。
+const encodePathSegment = (value) => encodeURIComponent(String(value))
+
 // API 方法封装
 export const api = {
   // 认证相关
@@ -705,15 +773,15 @@ export const api = {
     refreshToken: (data) => apiClient.post('/auth/refresh', data),
     // MFA 两步验证（I-06）
     getMfaStatus: () => apiClient.get('/auth/mfa/status'),
-    mfaEnroll: () => apiClient.post('/auth/mfa/enroll'),
+    mfaEnroll: (data) => apiClient.post('/auth/mfa/enroll', data),
     mfaEnable: (data) => apiClient.post('/auth/mfa/enable', data),
     mfaDisable: (data) => apiClient.post('/auth/mfa/disable', data),
     regenerateRecoveryCodes: (data) => apiClient.post('/auth/mfa/recovery-codes', data),
     // 设备级会话管理（登录会话）
     listSessions: () => apiClient.get('/auth/sessions'),
-    // sid 由服务端下发（UUID），此处仍做一次 encodeURIComponent：
+    // sid 由服务端下发（UUID），此处仍做一次编码：
     // 路径参数直接拼接是注入面，即使当前取值可信也不应依赖「上游一定干净」
-    revokeSession: (sid) => apiClient.delete(`/auth/sessions/${encodeURIComponent(sid)}`),
+    revokeSession: (sid) => apiClient.delete(`/auth/sessions/${encodePathSegment(sid)}`),
     // 必须是固定字面量而非 revokeSession('others')：后端按注册顺序区分两条路由，
     // 走 :sid 分支会被 UUID 校验拒为 400
     revokeOtherSessions: () => apiClient.delete('/auth/sessions/others'),
@@ -722,48 +790,50 @@ export const api = {
   // 用户管理
   users: {
     getList: (params) => apiClient.get('/users', { params }),
-    getById: (id) => apiClient.get(`/users/${id}`),
+    getById: (id) => apiClient.get(`/users/${encodePathSegment(id)}`),
     getStats: () => apiClient.get('/users/stats'),
     create: (data) => apiClient.post('/users', data),
-    update: (id, data) => apiClient.put(`/users/${id}`, data),
-    delete: (id) => apiClient.delete(`/users/${id}`),
+    update: (id, data) => apiClient.put(`/users/${encodePathSegment(id)}`, data),
+    delete: (id) => apiClient.delete(`/users/${encodePathSegment(id)}`),
     // 批量删除：固定字面量 /users/batch（后端把该路由注册在 /:id 之前），ids 为 1-100 个 ID。
     // delete 带请求体走 config.data；写方法不参与路由切换取消（UNCANCELABLE_METHODS）
     batchDelete: (ids) => apiClient.delete('/users/batch', { data: { ids } }),
-    assignRoles: (id, data) => apiClient.put(`/users/${id}/roles`, data),
+    assignRoles: (id, data) => apiClient.put(`/users/${encodePathSegment(id)}/roles`, data),
   },
 
   // 角色管理
   roles: {
     getList: (params) => apiClient.get('/roles', { params }),
     getAll: () => apiClient.get('/roles/all'),
-    getById: (id) => apiClient.get(`/roles/${id}`),
+    getById: (id) => apiClient.get(`/roles/${encodePathSegment(id)}`),
     create: (data) => apiClient.post('/roles', data),
-    update: (id, data) => apiClient.put(`/roles/${id}`, data),
-    delete: (id) => apiClient.delete(`/roles/${id}`),
-    assignPermissions: (id, data) => apiClient.put(`/roles/${id}/permissions`, data),
+    update: (id, data) => apiClient.put(`/roles/${encodePathSegment(id)}`, data),
+    delete: (id) => apiClient.delete(`/roles/${encodePathSegment(id)}`),
+    assignPermissions: (id, data) =>
+      apiClient.put(`/roles/${encodePathSegment(id)}/permissions`, data),
     getPermissionTree: () => apiClient.get('/roles/permissions/tree'),
   },
 
   // 权限管理
   permissions: {
     getList: (params) => apiClient.get('/permissions', { params }),
-    getById: (id) => apiClient.get(`/permissions/${id}`),
+    getById: (id) => apiClient.get(`/permissions/${encodePathSegment(id)}`),
     create: (data) => apiClient.post('/permissions', data),
-    update: (id, data) => apiClient.put(`/permissions/${id}`, data),
-    delete: (id) => apiClient.delete(`/permissions/${id}`),
+    update: (id, data) => apiClient.put(`/permissions/${encodePathSegment(id)}`, data),
+    delete: (id) => apiClient.delete(`/permissions/${encodePathSegment(id)}`),
     batchCreate: (data) => apiClient.post('/permissions/batch', data),
   },
 
   // 设备管理
   devices: {
     getList: (params) => apiClient.get('/devices', { params }),
-    getById: (id) => apiClient.get(`/devices/${id}`),
+    getById: (id) => apiClient.get(`/devices/${encodePathSegment(id)}`),
     create: (data) => apiClient.post('/devices', data),
-    update: (id, data) => apiClient.put(`/devices/${id}`, data),
-    delete: (id) => apiClient.delete(`/devices/${id}`),
-    updateStatus: (id, data) => apiClient.put(`/devices/${id}/status`, data),
-    addMaintenance: (id, data) => apiClient.post(`/devices/${id}/maintenance`, data),
+    update: (id, data) => apiClient.put(`/devices/${encodePathSegment(id)}`, data),
+    delete: (id) => apiClient.delete(`/devices/${encodePathSegment(id)}`),
+    updateStatus: (id, data) => apiClient.put(`/devices/${encodePathSegment(id)}/status`, data),
+    addMaintenance: (id, data) =>
+      apiClient.post(`/devices/${encodePathSegment(id)}/maintenance`, data),
     getStats: () => apiClient.get('/devices/stats'),
     getExpiring: (params) => apiClient.get('/devices/expiring', { params }),
     getReminders: () => apiClient.get('/devices/reminders'),
@@ -772,26 +842,26 @@ export const api = {
   // 报警管理
   alarms: {
     getList: (params) => apiClient.get('/alarms', { params }),
-    getById: (id) => apiClient.get(`/alarms/${id}`),
+    getById: (id) => apiClient.get(`/alarms/${encodePathSegment(id)}`),
     report: (data) => apiClient.post('/alarms/report', data),
-    dispatch: (id, data) => apiClient.put(`/alarms/${id}/dispatch`, data),
-    arrive: (id) => apiClient.put(`/alarms/${id}/arrive`),
-    resolve: (id, data) => apiClient.put(`/alarms/${id}/resolve`, data),
-    markAsFalse: (id, data) => apiClient.put(`/alarms/${id}/false-alarm`, data),
+    dispatch: (id, data) => apiClient.put(`/alarms/${encodePathSegment(id)}/dispatch`, data),
+    arrive: (id) => apiClient.put(`/alarms/${encodePathSegment(id)}/arrive`),
+    resolve: (id, data) => apiClient.put(`/alarms/${encodePathSegment(id)}/resolve`, data),
+    markAsFalse: (id, data) => apiClient.put(`/alarms/${encodePathSegment(id)}/false-alarm`, data),
     getStats: (params) => apiClient.get('/alarms/stats', { params }),
   },
 
   // 巡检管理
   inspections: {
     getList: (params) => apiClient.get('/inspections', { params }),
-    getById: (id) => apiClient.get(`/inspections/${id}`),
+    getById: (id) => apiClient.get(`/inspections/${encodePathSegment(id)}`),
     create: (data) => apiClient.post('/inspections', data),
-    update: (id, data) => apiClient.put(`/inspections/${id}`, data),
-    start: (id) => apiClient.put(`/inspections/${id}/start`),
-    complete: (id, data) => apiClient.put(`/inspections/${id}/complete`, data),
-    review: (id, data) => apiClient.put(`/inspections/${id}/review`, data),
-    cancel: (id, data) => apiClient.put(`/inspections/${id}/cancel`, data),
-    delete: (id) => apiClient.delete(`/inspections/${id}`),
+    update: (id, data) => apiClient.put(`/inspections/${encodePathSegment(id)}`, data),
+    start: (id) => apiClient.put(`/inspections/${encodePathSegment(id)}/start`),
+    complete: (id, data) => apiClient.put(`/inspections/${encodePathSegment(id)}/complete`, data),
+    review: (id, data) => apiClient.put(`/inspections/${encodePathSegment(id)}/review`, data),
+    cancel: (id, data) => apiClient.put(`/inspections/${encodePathSegment(id)}/cancel`, data),
+    delete: (id) => apiClient.delete(`/inspections/${encodePathSegment(id)}`),
     getStats: () => apiClient.get('/inspections/stats'),
   },
 
@@ -808,13 +878,23 @@ export const api = {
         params,
         responseType: 'blob',
       }),
+    // L-17：未脱敏导出必须走 POST（凭据不进 URL）并携带当前口令/MFA 码
+    exportPii: (params, credential) =>
+      apiClient.post('/reports/export/pii', credential, {
+        params,
+        responseType: 'blob',
+      }),
   },
 
   // 安全管理
   security: {
     getOverview: () => apiClient.get('/security/overview'),
-    getAlerts: () => apiClient.get('/security/alerts'),
-    queryAuditLogs: (params) => apiClient.get('/security/audit-logs', { params }),
+    getAlerts: () => apiClient.get('/security/alerts', { headers: reauthTicketHeaders() }),
+    queryAuditLogs: (params) =>
+      apiClient.get('/security/audit-logs', { params, headers: reauthTicketHeaders() }),
+    // 二次验证换取审计读取票据（5 分钟）。body 同写操作：{ currentPassword |
+    // encCurrentPassword | mfaCode }。票据只进内存，登出即丢弃。
+    createReauthTicket: (credential) => apiClient.post('/security/reauth', credential),
     getRegistrationConfig: () => apiClient.get('/security/config/allowPublicRegistration'),
     setRegistrationConfig: (data) =>
       apiClient.put('/security/config/allowPublicRegistration', data),
@@ -825,18 +905,27 @@ export const api = {
       apiClient.put('/security/config/registerCaptchaEnabled', data),
     // IP 黑白名单管理
     getIPList: (params) => apiClient.get('/security/ip-list', { params }),
-    // 管理员重置用户两步验证（账户救济：清除 TOTP/恢复码并强制下线）
-    resetUserMfa: (userId) => apiClient.put(`/security/users/${userId}/mfa/reset`),
+    // 管理员重置用户两步验证（账户救济：清除 TOTP/恢复码并强制下线）。
+    // 需操作者本人二次验证：data 为 { currentPassword | encCurrentPassword | mfaCode }。
+    resetUserMfa: (userId, data) =>
+      apiClient.put(`/security/users/${encodePathSegment(userId)}/mfa/reset`, data),
     // 锁定/解锁用户（user:lock）：locked 必须是真布尔——路由 toBoolean 收口前，
     // 字符串 'false' 会被服务层按 truthy 判成锁定。reason 可选 ≤500，锁定方向
     // 写入 user.remark 与 user_locked 审计（服务层连带清 lockUntil 并失效权限缓存）
-    lockUser: (userId, data) => apiClient.put(`/security/users/${userId}/lock`, data),
+    lockUser: (userId, data) =>
+      apiClient.put(`/security/users/${encodePathSegment(userId)}/lock`, data),
     // 敏感字段按需揭示（step-up）：body { dataType, targetUserId?, currentPassword? | mfaCode? }
     // → data { type, masked, full }。用户列表/详情只下发脱敏值，明文只能走这一条通道
     // （服务端在此写 view_sensitive_data 审计，审计写失败即不返回明文）。
     viewSensitive: (data) => apiClient.post('/security/view-sensitive', data),
     addIPEntry: (data) => apiClient.post('/security/ip-list', data),
-    removeIPEntry: (id) => apiClient.delete(`/security/ip-list/${id}`),
+    removeIPEntry: (id) => apiClient.delete(`/security/ip-list/${encodePathSegment(id)}`),
+    // 举报对象候选（GET /security/report-targets?type=&keyword=）→ data { items }
+    // 免权限码（举报对全员开放），但候选集已被服务端按**举报人数据范围**过滤，
+    // 判据与提交时的目标核验同源；items 只含 id/kind/code/name/detail（报警另有
+    // occurredAt），不含 phone/email、报警描述、上报人姓名。
+    // type ∈ user/device/alarm（system 不指向具体对象，没有候选）。
+    searchReportTargets: (params) => apiClient.get('/security/report-targets', { params }),
     // 举报异常（人人可用，无权限码）：targetType ∈ user/device/alarm/system。
     // 记录型必须带真实且数据范围内的 targetId（后端核验存在性+范围），system 型
     // 禁止携带 targetId；reason 必填 1-200，description 可选 ≤500。成功后写入
@@ -850,7 +939,11 @@ export const api = {
     // 取证级导出：CSV + 签名 manifest（尾部注释行 + X-Audit-Manifest-* 响应头），
     // 截断时带 X-Audit-Truncated: true。与 /reports/export?type=audit 的 xlsx 报表定位不同。
     exportAuditLogs: (params) =>
-      apiClient.get('/security/audit-logs/export', { params, responseType: 'blob' }),
+      apiClient.get('/security/audit-logs/export', {
+        params,
+        responseType: 'blob',
+        headers: reauthTicketHeaders(),
+      }),
     // 系统安全统计（管理员，需 security:stats）
     getSecurityStats: () => apiClient.get('/security/stats'),
     // 个人安全信息 / 账号绑定 / 个人操作日志（本人数据，无权限码门控）

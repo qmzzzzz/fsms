@@ -224,6 +224,26 @@
               <p class="register-card__hint">
                 {{ $t('register.confirmHint') }}
               </p>
+              <!-- 验证码状态查询失败：注册验证码默认开启，不能因为「查不到」就跳过；
+                   若服务端确实要求验证码，用户会在提交时被拒绝且没有填写入口。 -->
+              <el-alert
+                v-if="captchaStatus === 'error'"
+                :title="$t('login.captchaStatusFailed')"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="register-card__captcha-error"
+              >
+                <template #default>
+                  <button
+                    type="button"
+                    class="glass-btn glass-btn--default glass-btn--sm"
+                    @click="loadCaptchaStatus"
+                  >
+                    {{ $t('common.retry') }}
+                  </button>
+                </template>
+              </el-alert>
               <el-form-item
                 v-if="captchaEnabled"
                 :label="$t('register.captchaTitle')"
@@ -246,12 +266,22 @@
                     class="register-card__captcha-img"
                     :alt="$t('auth.captcha')"
                     :title="$t('login.captchaRefresh')"
+                    :aria-label="$t('login.captchaRefresh')"
+                    role="button"
+                    tabindex="0"
                     @click="loadCaptcha"
+                    @keydown.enter.prevent="loadCaptcha"
+                    @keydown.space.prevent="loadCaptcha"
                   />
                   <div
                     v-else
                     class="register-card__captcha-img register-card__captcha-placeholder"
+                    role="button"
+                    tabindex="0"
+                    :aria-label="$t('login.captchaRefresh')"
                     @click="loadCaptcha"
+                    @keydown.enter.prevent="loadCaptcha"
+                    @keydown.space.prevent="loadCaptcha"
                   >
                     {{ $t('login.captchaLoading') }}
                   </div>
@@ -299,7 +329,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElNotification } from 'element-plus/es/components/notification/index.mjs'
 import { useRouter } from 'vue-router'
@@ -432,6 +462,10 @@ watch(
 const captchaEnabled = ref(false)
 const captchaId = ref('')
 const captchaImg = ref('')
+// 验证码状态：loading / ready / error。error 时既不假定开启（没有图可填）
+// 也不假定关闭（注册验证码默认开启）——必须先重试拿到确定答案才能提交。
+const captchaStatus = ref('loading')
+let captchaStatusPromise = null
 
 const loadCaptcha = async () => {
   // 先清空再拉取（与 LoginView.loadCaptcha 同口径）：验证码是一次性消费，失败的刷新
@@ -452,16 +486,26 @@ const loadCaptcha = async () => {
 }
 
 const loadCaptchaStatus = async () => {
-  try {
-    const { data: resp } = await api.auth.getCaptchaStatus()
-    captchaEnabled.value = !!resp.data?.registerCaptchaEnabled
-    if (captchaEnabled.value) {
-      loadCaptcha()
+  if (captchaStatusPromise) return captchaStatusPromise
+  captchaStatus.value = 'loading'
+  captchaStatusPromise = (async () => {
+    try {
+      const { data: resp } = await api.auth.getCaptchaStatus()
+      captchaEnabled.value = !!resp.data?.registerCaptchaEnabled
+      captchaStatus.value = 'ready'
+      // 等图片就绪再返回：提交前的兜底重试拿到 ready 后应能直接带上 captchaId
+      if (captchaEnabled.value) await loadCaptcha()
+      return true
+    } catch (_) {
+      // 不能默认关闭：注册验证码默认开启，跳过校验的提交只会被后端拒绝
+      captchaEnabled.value = false
+      captchaStatus.value = 'error'
+      return false
+    } finally {
+      captchaStatusPromise = null
     }
-  } catch (_) {
-    // 状态查询失败按默认关闭处理
-    captchaEnabled.value = false
-  }
+  })()
+  return captchaStatusPromise
 }
 
 onMounted(() => {
@@ -564,6 +608,16 @@ const onRegister = async () => {
   submitting.value = true
   haptic(10)
   try {
+    // 验证码配置未知时先重试查询：拿到确定答案、且表单项按最新开关渲染后再整表校验，
+    // 否则「刚查到验证码开启」这一次的校验会漏掉尚未挂载的验证码字段
+    if (captchaStatus.value !== 'ready') {
+      const ok = await loadCaptchaStatus()
+      if (!ok) {
+        ElMessage.error(t('login.captchaStatusFailed'))
+        return
+      }
+      await nextTick()
+    }
     // 提交前整表校验：分步校验只覆盖走过的步骤，用户可能通过回退跳过某步。
     // 单独一层 try：它的 reject 不能落进下面「任何失败都换验证码」的分支——
     // 整表校验失败与请求失败是两件事，前者该保留用户已填对的验证码
@@ -575,6 +629,12 @@ const onRegister = async () => {
     }
 
     loading.value = true
+
+    // 开启验证码但图片尚未就绪：本次提交必然缺 captchaId，拦下并指向占位图重试
+    if (captchaEnabled.value && !captchaId.value) {
+      ElMessage.warning(t('login.captchaLoading'))
+      return
+    }
 
     // 口令密文轨（FE-H1）：null 仅限 WebCrypto 不可用（设计内降级）；
     // 「可用但失败」抛错时阻断提交并提示重试，不静默明文上行
@@ -1160,6 +1220,15 @@ html.dark .register-steps__item.is-done .register-steps__index {
   gap: 10px;
   width: 100%;
   align-items: center;
+}
+
+.register-card__captcha-error {
+  margin-bottom: 16px;
+}
+
+.register-card__captcha-img:focus-visible {
+  outline: 2px solid var(--xf-primary);
+  outline-offset: 2px;
 }
 
 .register-card__captcha .el-input {

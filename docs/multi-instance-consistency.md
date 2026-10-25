@@ -64,12 +64,12 @@ K8s 多副本下**无从得知**自己不是唯一实例。修前这里只置 `k
 
 ## 五、容量模型（F-13：连接上限是**每进程**的）
 
-`services/websocketService.js` 的 `MAX_CONNECTIONS = 1000` 数的是
+`services/websocketService/shared.js` 的 `MAX_CONNECTIONS_PER_PROCESS = 1000` 数的是
 `io.sockets.sockets.size`，即**单个 Socket.IO 进程**的在线连接数。
 多副本时每个实例都能各自达到 1000，**整体没有统一上限**：
 
 ```
-可承载连接总数 ≈ 实例数 × MAX_CONNECTIONS
+可承载连接总数 ≈ 实例数 × MAX_CONNECTIONS_PER_PROCESS
 ```
 
 - 反向代理 / Ingress 侧的总连接配额必须按这个乘积设置（Nginx `worker_connections`、

@@ -105,7 +105,10 @@ describe('安全开关写入契约（非布尔一律拒）+ 读回一致', () =>
   });
 
   const put = (path, body) =>
-    request(app).put(path).set('Authorization', `Bearer ${token}`).send(body);
+    request(app)
+      .put(path)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...body, currentPassword: PASSWORD });
   const get = (path) => request(app).get(path).set('Authorization', `Bearer ${token}`);
 
   test.each(SWITCHES.map((s) => ({ ...s, title: s.field })))(

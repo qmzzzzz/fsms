@@ -21,7 +21,11 @@ const {
   isFullRangeCIDR,
   isAmbiguousIpText,
   lenientAddressHint,
+  auditClientAddress,
 } = require('../utils/ipUtils');
+// 并集覆盖判定单独成文件（ipUtils 已贴 max-lines 棘轮）：两条 /1 合起来等价于 /0，
+// 单条判据拦不住「分片铺满整个地址族」的写法。
+const { cidrUnionCoversAll, cidrRemovalBreaksFullCoverage } = require('../utils/cidrCoverage');
 const { auditPath } = require('../utils/auditMeta');
 const { invalidateIPBlockCache } = require('../middleware/security');
 // F-03（2026-10-17）：IP 黑白名单变更属于**安全配置**且业务状态已落库 ⇒ 审计必须先持久化
@@ -185,13 +189,26 @@ const normalizeListEntryRequest = (res, { ip, type, durationHours }) => {
  * @returns {Promise<boolean>} true 表示已写出拒绝响应，调用方应立即 return
  */
 const guardFullRangeCIDR = async (req, res, { normalizedIP, type }) => {
-  if (!isFullRangeCIDR(normalizedIP)) return false;
+  // 单条 /0 直接命中；否则看「加入后」同类型名单的并集是否铺满某个地址族。
+  // 后者不是冗余：两条 /1（或任意互补分片）合起来等价于 /0，单条判据全都能过。
+  let coveredFamilies;
+  if (isFullRangeCIDR(normalizedIP)) {
+    coveredFamilies = [normalizedIP.includes(':') ? 'IPv6' : 'IPv4'];
+  } else {
+    const existing = await ipListService.listActiveEntryIps(type);
+    const coverage = cidrUnionCoversAll([...existing, normalizedIP]);
+    coveredFamilies = [coverage.ipv4 && 'IPv4', coverage.ipv6 && 'IPv6'].filter(Boolean);
+  }
+  if (coveredFamilies.length === 0) return false;
 
+  const scope = coveredFamilies.join('/');
   const isSuperAdmin = await ipListService.operatorIsSuperAdmin(req.user.userId);
 
   if (!isSuperAdmin) {
     logger.warn('非超级管理员尝试添加全网段名单', {
       ip: normalizedIP,
+      type,
+      coveredFamilies,
       operator: req.user.username,
     });
     ipListService.recordPrivilegeEscalation({
@@ -201,16 +218,16 @@ const guardFullRangeCIDR = async (req, res, { normalizedIP, type }) => {
       username: req.user.username,
       method: req.method,
       path: auditPath(req),
-      ip: req.ip,
+      ...auditClientAddress(req),
       userAgent: req.get('user-agent'),
       body: { ip: normalizedIP, type },
       success: false,
       riskLevel: 'critical',
       riskFactors: ['full_range_cidr_attempt'],
-      reason: `尝试将全网段 ${normalizedIP} 加入${type === 'black' ? '黑' : '白'}名单，权限不足`,
+      reason: `尝试将 ${normalizedIP} 加入${type === 'black' ? '黑' : '白'}名单（加入后覆盖全部 ${scope} 地址），权限不足`,
     });
     ApiResponse.codeError(res, 'FULL_RANGE_FORBIDDEN', {
-      message: `全网段（${normalizedIP}）会命中所有 IP，仅超级管理员可配置；如需限制特定范围请使用更精确的网段`,
+      message: `该条目加入后，名单中的网段组合将覆盖全部 ${scope} 地址，会命中所有 IP；仅超级管理员可配置。如需限制特定范围请使用更精确的网段`,
       params: { ip: normalizedIP },
     });
     return true;
@@ -219,6 +236,7 @@ const guardFullRangeCIDR = async (req, res, { normalizedIP, type }) => {
   logger.warn('超级管理员正在添加全网段名单', {
     ip: normalizedIP,
     type,
+    coveredFamilies,
     operator: req.user.username,
   });
   return false;
@@ -261,10 +279,6 @@ const addIPEntry = asyncHandler(async (req, res) => {
         params: { coveredBy: coveredBy },
       });
     }
-  } else if (type === 'white') {
-    await ipListService.unblockIP(normalizedIP, 'black');
-    // 加白后立即失效降级封禁缓存，避免 DB 故障期沿用陈旧封禁判定误拦可信 IP
-    invalidateIPBlockCache(normalizedIP);
   }
 
   const entry = await ipListService.blockIP(normalizedIP, {
@@ -273,6 +287,15 @@ const addIPEntry = asyncHandler(async (req, res) => {
     durationMs,
     source: 'manual',
   });
+
+  // L-14：先落白名单、再解除黑名单。反序（先解黑再写白）在写白失败时会
+  // 留下一个「已解除封禁」的 IP——失败方向是放行（fail-open）。
+  // 本序在解除失败时白名单已经生效，运行期白名单优先，重试也是幂等的。
+  if (type === 'white') {
+    await ipListService.unblockIP(normalizedIP, 'black');
+    // 加白后立即失效降级封禁缓存，避免 DB 故障期沿用陈旧封禁判定误拦可信 IP
+    invalidateIPBlockCache(normalizedIP);
+  }
 
   // 审计日志
   res.locals.skipGlobalAudit = true;
@@ -285,7 +308,7 @@ const addIPEntry = asyncHandler(async (req, res) => {
       method: req.method,
       path: auditPath(req),
       body: { ip: normalizedIP, type, reason, durationHours: hours },
-      ip: req.ip,
+      ...auditClientAddress(req),
       userAgent: req.get('user-agent'),
       success: true,
       riskLevel: type === 'black' ? 'medium' : 'high',
@@ -328,11 +351,26 @@ const removeIPEntry = asyncHandler(async (req, res) => {
   // 超管配置的全网段白名单（该白名单是限流豁免/信任标记的前提），
   // 再塞入恶意黑名单，等效于绕过整个 IP 管控体系。
   // 保护的不变量：谁能添加，才能删除。
-  if (isFullRangeCIDR(entry.ip)) {
+  //
+  // 判据必须是**并集**而不是单条 bits===0：两条互补的 /1 合起来等价于 /0，
+  // 逐个删除时每一条都只是半张网，单条判据全都放行。这里只拦「删掉之后
+  // 覆盖率下降」的那一步——全覆盖名单里一条冗余 /24 被删掉不会触发，避免误伤。
+  // 覆盖判定与添加侧共用 cidrCoverage，读的也是同一份生效名单快照。
+  const activeIps = await ipListService.listActiveEntryIps(entry.type);
+  const broken = cidrRemovalBreaksFullCoverage(activeIps, entry.ip);
+  const coveredFamilies = [broken.ipv4 && 'IPv4', broken.ipv6 && 'IPv6'].filter(Boolean);
+
+  if (coveredFamilies.length > 0) {
+    const scope = coveredFamilies.join('/');
     const isSuperAdmin = await ipListService.operatorIsSuperAdmin(req.user.userId);
 
     if (!isSuperAdmin) {
-      logger.warn('非超级管理员尝试删除全网段名单', { ip: entry.ip, operator: req.user.username });
+      logger.warn('非超级管理员尝试删除全网段名单', {
+        ip: entry.ip,
+        type: entry.type,
+        coveredFamilies,
+        operator: req.user.username,
+      });
       ipListService.recordPrivilegeEscalation({
         action: 'privilege_escalation',
         category: 'security',
@@ -340,16 +378,16 @@ const removeIPEntry = asyncHandler(async (req, res) => {
         username: req.user.username,
         method: req.method,
         path: auditPath(req),
-        ip: req.ip,
+        ...auditClientAddress(req),
         userAgent: req.get('user-agent'),
         body: { ip: entry.ip, type: entry.type },
         success: false,
         riskLevel: 'critical',
         riskFactors: ['full_range_cidr_removal_attempt'],
-        reason: `尝试移除全网段 ${entry.ip} 的${entry.type === 'black' ? '黑' : '白'}名单，权限不足`,
+        reason: `尝试移除铺满 ${scope} 地址的名单条目 ${entry.ip}（该条目是全覆盖的组成部分），权限不足`,
       });
       return ApiResponse.codeError(res, 'FULL_RANGE_FORBIDDEN', {
-        message: `全网段（${entry.ip}）名单仅超级管理员可移除：它是限流豁免与信任标记的前提，移除会影响全部 IP 的访问控制`,
+        message: `该条目是当前${entry.type === 'black' ? '黑' : '白'}名单覆盖全部 ${scope} 地址的组成部分，移除后覆盖将不再完整；仅超级管理员可移除`,
         params: { ip: entry.ip },
       });
     }
@@ -357,6 +395,7 @@ const removeIPEntry = asyncHandler(async (req, res) => {
     logger.warn('超级管理员正在移除全网段名单', {
       ip: entry.ip,
       type: entry.type,
+      coveredFamilies,
       operator: req.user.username,
     });
   }
@@ -381,7 +420,7 @@ const removeIPEntry = asyncHandler(async (req, res) => {
       method: req.method,
       path: auditPath(req),
       body: { ip: entry.ip, type: entry.type },
-      ip: req.ip,
+      ...auditClientAddress(req),
       userAgent: req.get('user-agent'),
       success: true,
       riskLevel: 'medium',

@@ -16,10 +16,22 @@ const { guardDetection } = require('../utils/auditWriteFailure');
 const { AUDIT_CHAIN_ALERT_TYPES } = require('./auditChainAlertTypes');
 // 哨兵用户名告警同因独立成文件（行预算口径同上；棘轮基线条目见 eslint.ratchet.json）
 const { CANARY_ALERT_TYPES } = require('./canaryAlertTypes');
+// 封禁阶梯与 IP 封禁判据独立成文件：本文件 max-lines 已贴棘轮上限，
+// 且「该不该封这个 IP」与「告警怎么发」是两条正交职责（详见该模块头注释）
+const {
+  BAN_EVENT_ACTIONS,
+  BRUTE_FORCE_ATTEMPTS,
+  BAN_ESCALATION_WINDOW_MS,
+  ESCALATION_TIERS,
+  IPBanEvents,
+  collectBruteForceSignals,
+  applyBruteForceIpBan,
+  logIpBanSkipped,
+} = require('./securityAlertIpBans');
 // 告警阈值配置
 const THRESHOLDS = {
   // 暴力破解：5 次失败/5 分钟
-  bruteForceAttempts: 5,
+  bruteForceAttempts: BRUTE_FORCE_ATTEMPTS,
   bruteForceWindowMs: 5 * 60 * 1000,
 
   // 批量操作阈值
@@ -38,11 +50,11 @@ const ALERT_LEVELS = { LOW: 'low', MEDIUM: 'medium', HIGH: 'high', CRITICAL: 'cr
 
 // 告警类型
 const ALERT_TYPES = {
-  BRUTE_FORCE: 'brute_force_login',
+  BRUTE_FORCE: BAN_EVENT_ACTIONS.BRUTE_FORCE,
   PRIVILEGE_ESCALATION: 'privilege_escalation',
   BULK_EXPORT: 'bulk_data_export',
   UNUSUAL_TIME: 'unusual_time_access',
-  PERMISSION_ABUSE: 'permission_abuse',
+  PERMISSION_ABUSE: BAN_EVENT_ACTIONS.PERMISSION_ABUSE,
   SUSPICIOUS_IP: 'suspicious_ip_activity',
   RATE_LIMIT_ABUSE: 'rate_limit_abuse', // 限流触顶升级封禁（rateLimitEscalation 闭环）
   // 审计哈希链三类（2026-09-30）：定义见 auditChainAlertTypes.js，判据见 auditChainMonitor.js
@@ -52,59 +64,10 @@ const ALERT_TYPES = {
 };
 
 /**
- * 自动封禁阶梯（渐进式封禁时长）与其事件计数
- *
- * 事件源必须是 append-only 的审计日志，而不是 ipblacklist 集合：
- * 该集合上 (ip,type) 唯一（models/IPBlacklist.js:92），blockIP 走 findOneAndUpdate +
- * $setOnInsert:createdAt（:266），且 TTL 索引（:89）到期即删档 ⇒ 同一 IP 任何时刻
- * 最多只剩一条 ⇒ 在它上面 countDocuments 恒 ≤1，第三/四档（24 小时、7 天）永不可达，
- * 而日志照打"第 N 次"——运维以为阶梯在工作。
- *
- * 窗口定 30 天依赖一条前提：审计至少得留 30 天，否则"30 天内的封禁次数"没有数据支撑。
- * 该前提由 constants/retention.js 的 MIN_RETENTION_DAYS=90 保证（AUDIT_RETENTION_DAYS
- * 会被钳制到 ≥90，配不出更短的值）。这里不写运行期 Math.min 兜底——在 90 天下它是死分支；
- * 改由用例盯住不变量（tests/services/securityAlertBanLadder.test.js）：
- * 谁把留存下限调到 30 天以下、或把窗口拉到留存之外，那条用例就红。
+ * 自动封禁阶梯（渐进式封禁时长）与其事件计数已迁至 securityAlertIpBans.js：
+ * 本文件只消费其导出的 ESCALATION_TIERS / IPBanEvents / resolveIpBanDecision。
+ * 迁移理由与「为什么事件源必须是审计」见该模块头注释（行预算：本文件贴 max-lines）。
  */
-const BAN_ESCALATION_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
-const ESCALATION_TIERS = [
-  1 * 60 * 60 * 1000,
-  4 * 60 * 60 * 1000,
-  24 * 60 * 60 * 1000,
-  7 * 24 * 60 * 60 * 1000,
-];
-const IPBanEvents = {
-  windowMs: () => BAN_ESCALATION_WINDOW_MS,
-  countPrior: (normalizedIp) =>
-    AuditLog.countDocuments({
-      action: ALERT_TYPES.BRUTE_FORCE,
-      ip: normalizedIp,
-      timestamp: { $gte: new Date(Date.now() - IPBanEvents.windowMs()) },
-      // R-H2 之后"一条 brute_force_login 审计"不再等价于"一次封禁动作"：
-      // 账号维度达标（分布式撞单账号）而 IP 维度未达标时也落一条告警行（当前
-      // 请求 IP 可能只贡献了 1 次失败）。这类行若计入阶梯，受害者的 IP 攒几行
-      // 后会被无辜升档到 4h/24h/7d。body.ipAttempts 是该行落库时即写入的
-      // "IP 维度失败次数"，只有 ≥ 阈值的行才配代表"这个 IP 自己刷满过一次"。
-      'body.ipAttempts': { $gte: THRESHOLDS.bruteForceAttempts },
-    }),
-  /** 首次触发 = 第 1 档；每多一次历史事件升一档，封顶第 4 档 */
-  tierFor: (priorBans) => Math.min(Math.max(priorBans, 0), ESCALATION_TIERS.length - 1),
-  /**
-   * 权限滥用的阶梯事件源（2026-09-30 补遏制时新增）。
-   *
-   * 与 countPrior 分账的理由：`body.ipAttempts` 那套过滤只对暴力破解有意义
-   * （它要剔掉"账号维度达标、IP 维度未达标"的告警行）。权限滥用没有维度之分——
-   * 每写一条 permission_abuse 审计就对应一次封禁动作，直接计数即可。
-   *
-   * 复用同一组时长档位（ESCALATION_TIERS）与同一个 windowMs：两本账、一套阶梯。
-   */
-  countPermissionAbusePrior: (normalizedIp) =>
-    AuditLog.countDocuments({
-      action: ALERT_TYPES.PERMISSION_ABUSE,
-      ip: normalizedIp,
-      timestamp: { $gte: new Date(Date.now() - IPBanEvents.windowMs()) },
-    }),
-};
 
 // 告警频率限制缓存。结构：{ alertKey: { timestamp, expiresAt } }
 const alertRateLimit = new Map();
@@ -214,12 +177,15 @@ const checkBruteForce = async (username, ip, attribution = null) => {
   const windowStart = new Date(Date.now() - THRESHOLDS.bruteForceWindowMs);
 
   // 双维度计数：账户维度 + IP 维度，任一达到阈值即告警
+  // 账户维度必须与 User.findByUsername 同口径（大小写不敏感 collation）：
+  // 否则 `Admin` / `admin` / `ADMIN` 各占一个计数桶，攻击者只要轮换大小写，
+  // 同一账户的失败次数就永远到不了阈值，而账户锁定仍按同一个账户生效。
   const [userFailures, ipFailures] = await Promise.all([
     AuditLog.countDocuments({
       username,
       action: { $in: ['login_failed', 'auth_failed'] },
       timestamp: { $gte: windowStart },
-    }),
+    }).collation(AuditLog.AUDIT_USERNAME_COLLATION),
     AuditLog.countDocuments({
       ip,
       action: { $in: ['login_failed', 'auth_failed'] },
@@ -250,22 +216,19 @@ const checkBruteForce = async (username, ip, attribution = null) => {
     // 换个网络登录一次即被封 1 小时）。账号维度的攻击由账户锁定 + loginUserLimiter
     // 兜底；IP 封禁只对「这个 IP 自己刷满了失败」的确定性信号执行。
 
-    // 渐进式封禁的"第几次"必须在**本次告警落库之前**统计：
-    // 每次穿过这个分支 = 一条 brute_force_login 审计 + 一次封禁动作（频控只挡通知，
-    // 不再挡这条路径），所以"历史上这个 IP 触发过几条该审计"就是封禁事件数。
-    // 为什么不数 ipblacklist 集合：该集合上 (ip,type) 唯一（models/IPBlacklist.js:92），
-    // blockIP 用 findOneAndUpdate + $setOnInsert:createdAt（:266），且 TTL 索引（:89）
-    // 到期即删档 ⇒ 同一 IP 任何时刻最多只剩一条 ⇒ countDocuments 恒 ≤1，
-    // 第三/四档（24 小时、7 天）永不可达，而日志照打"第 N 次"——运维以为阶梯在工作。
-    // 审计是 append-only 的，是唯一能承载"事件次数"的现存存储。
-    // 代价：窗口受审计留存期约束，留存配得比 30 天短时阶梯窗口随之收窄（不假装是 30 天）。
-    let priorBans = 0;
-    try {
-      priorBans = await IPBanEvents.countPrior(normalizedIp);
-    } catch (e) {
-      // 统计失败按第一档处理（宁可少封不可不封），但必须留痕：阶梯退化是可观测的
-      logger.error(`自动封禁阶梯统计失败（按第一档处理）: ${ip}, 错误: ${e.message}`);
-    }
+    // IP 封禁的前置信号（2026-10-21 #21）：单账号失败交给账户锁定/账号限流，
+    // 只有跨账号失败才封 IP；共享出口首次触发只告警。判据见 securityAlertIpBans。
+    // 两组计数键不同：失败信号数的是 login_failed 审计行（ip 列 = 上报 ip），
+    // 阶梯数的是本模块落库的告警行（ip 列 = 归一化 IP）。混用任一侧都会让
+    // 对应判据恒为 0：前者在 PUBLIC_PEER_HEADER 下不存在该值，后者跨
+    // `::ffff:x` / `x` 时不共链。
+    const { distinctAccounts, sharedEgressAccounts, priorBans, ipBanOutcome, ipBanApplied } =
+      await collectBruteForceSignals({
+        reportedIp: ip,
+        normalizedIp,
+        windowStart,
+        fallbackIp: ip,
+      });
 
     // 审计写入挂独立 try/catch。此前裸 await 位于 try 块之外，
     // AuditLog.create 抛错（DB 瞬断/校验失败）会把异常上抛给调用方，
@@ -280,10 +243,19 @@ const checkBruteForce = async (username, ip, attribution = null) => {
         riskLevel: ALERT_LEVELS.CRITICAL,
         riskFactors: [
           `登录失败次数超标 (账户:${userFailures}, IP:${ipFailures})`,
+          ...(ipBanApplied ? [] : [`ip_ban_${ipBanOutcome}`]),
           // 封禁留痕（口径见 ipUtils.ipAttributionRiskFactors）
           ...ipAttributionRiskFactors(attribution?.kind),
         ],
-        body: { userAttempts: userFailures, ipAttempts: ipFailures, window: '5 分钟' },
+        body: {
+          userAttempts: userFailures,
+          ipAttempts: ipFailures,
+          window: '5 分钟',
+          distinctAccounts,
+          sharedEgressAccounts,
+          ipBanApplied,
+          ipBanOutcome,
+        },
       });
     } catch (e) {
       logger.error(`暴力破解告警审计落库失败（封禁流程继续）: ${e.message}`);
@@ -296,25 +268,16 @@ const checkBruteForce = async (username, ip, attribution = null) => {
     // （body 的 ipAttempts 即判据），封禁只对「这个 IP 自己刷满了失败」执行
     if (ipFailures < THRESHOLDS.bruteForceAttempts) return;
 
-    try {
-      // **必须**保持惰性 require（securityAlert ↔ middleware/security
-      // 循环依赖），提到文件顶部会在加载顺序不利时拿到未完成的导出。
-      const { addToBlacklist } = require('../middleware/security');
-      const tier = IPBanEvents.tierFor(priorBans);
-      const tierReason = `brute_force_auto_ban_tier${tier + 1}`;
-      // addToBlacklist 自己 catch 掉所有失败、从不抛错 ⇒ "await 正常返回"绝不等于"封禁生效"。
-      // 修复前这里无条件打「渐进式封禁 IP x：第 N 次，封禁 X 小时」，而白名单命中、地址解析失败、
-      // 黑名单写库失败三条路径下**一条记录都没有**：运维读到"已封 7 天"以为攻击者被挡住，
-      // 实际上该 IP 还在自由撞库（纸面防线）。封禁结果只能按返回值分派，不能按异常分派。
-      // 成功行不带时长：addToBlacklist 自己会打「封禁时长：N秒」，两处各写一遍必然漂移。
-      const result = await addToBlacklist(normalizedIp, ESCALATION_TIERS[tier], tierReason, 'auto');
-      if (result?.banned) logger.warn(`渐进式封禁 ${normalizedIp} 第 ${priorBans + 1} 次`);
-      else
-        logger.error(
-          `自动封禁未生效 ${normalizedIp}（${result?.reason ?? 'no_result'}）请人工封禁或核对白名单`
-        );
-    } catch (e) {
-      logger.error(`自动封禁 IP 失败: ${ip}, 错误: ${e.message}`);
+    if (ipBanApplied) {
+      await applyBruteForceIpBan({ normalizedIp, priorBans, fallbackIp: ip });
+    } else {
+      logIpBanSkipped({
+        outcome: ipBanOutcome,
+        normalizedIp,
+        ipFailures,
+        distinctAccounts,
+        sharedEgressAccounts,
+      });
     }
 
     // ============ 处置与通知解耦（2026-09-30，与 rateLimitEscalationBan 同一修法）============
@@ -340,7 +303,7 @@ const checkBruteForce = async (username, ip, attribution = null) => {
         ALERT_TYPES.BRUTE_FORCE,
         ALERT_LEVELS.CRITICAL,
         `检测到暴力破解攻击：用户 ${username}，IP ${ip}`,
-        { username, ip, attempts: maxFailures }
+        { username, ip, attempts: maxFailures, distinctAccounts, ipBanApplied }
       );
     }
   }
@@ -455,19 +418,29 @@ const checkPermissionAbuse = async (userId, attribution) => {
 
 /**
  * 获取安全概览（管理员仪表盘）
+ *
+ * scopeFilter 由调用方注入（默认空 = 全库）：HTTP 路径必须传入
+ * `applyAuditDataScope` 的结果——这四个计数与 /security/alerts、/audit-logs
+ * 是同一权限码下的出口，范围口径必须同源。默认空只服务于内部/定时调用方，
+ * 与 `AuditLog.detectAnomalies` 的 scopeFilter 约定一致。
+ *
+ * @param {number} days 统计窗口（天）
+ * @param {object} scopeFilter Mongo 查询条件（通常来自 applyAuditDataScope）
  */
-const getSecurityOverview = async (days = 7) => {
+const getSecurityOverview = async (days = 7, scopeFilter = {}) => {
   try {
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
+    const withinWindow = { timestamp: { $gte: since } };
     const [criticalAlerts, highAlerts, failedLogins, unusualAccess] = await Promise.all([
-      AuditLog.countDocuments({ riskLevel: 'critical', timestamp: { $gte: since } }),
-      AuditLog.countDocuments({ riskLevel: 'high', timestamp: { $gte: since } }),
-      AuditLog.countDocuments({ action: 'login_failed', timestamp: { $gte: since } }),
+      AuditLog.countDocuments({ ...scopeFilter, riskLevel: 'critical', ...withinWindow }),
+      AuditLog.countDocuments({ ...scopeFilter, riskLevel: 'high', ...withinWindow }),
+      AuditLog.countDocuments({ ...scopeFilter, action: 'login_failed', ...withinWindow }),
       // riskFactors 是数组字段，用 $in 匹配数组中是否包含非常规时间访问标记
       AuditLog.countDocuments({
+        ...scopeFilter,
         riskFactors: { $in: ['unusual_time', 'unusual_time_access'] },
-        timestamp: { $gte: since },
+        ...withinWindow,
       }),
     ]);
 
@@ -502,7 +475,7 @@ const getSecurityOverview = async (days = 7) => {
  * `security:audit`（routes/securityRoutes.js:235 / :276），而 /audit-logs 走
  * `applyAuditDataScope`（auditQueryService.js:217）。此前本函数不带范围条件，
  * 于是 level 8 的 SECURITY_ADMIN（initData 的口径：level ≥7 只有本部门范围）
- * 可以从这里读出全系统的高危审计行（username/ip/path/body）——
+ * 可以从这里读出全系统的高危审计行（username/ip/path）——
  * 把审计日志按部门收口的努力被同一权限下的另一个出口整体绕过。
  *
  * `operatorId` 缺省 ⇒ 一条不给（fail-closed）：没有操作者上下文就无从谈"可见范围"，
@@ -514,11 +487,14 @@ const getRecentAlerts = async (limit = 50, operatorId = null) => {
     { riskLevel: { $in: AUDIT_ERROR_RISK_LEVELS } },
     operatorId
   );
+  // 投影与 GET /security/audit-logs 同口径：只给元数据，不含 body/params/query/hmac。
+  // body 经 sanitizer 仍可能残留业务上下文与其他 PII，而审计列表/导出明确不返回它；
+  // 同权限下的告警卡片不应成为更宽的那个出口。
   return await AuditLog.find(query)
     .sort({ timestamp: -1 })
     .limit(limit)
     .select(
-      'action category riskLevel username ip timestamp body method path statusCode success duration userAgent'
+      'action category riskLevel username ip timestamp method path statusCode success duration userAgent'
     )
     .lean();
 };

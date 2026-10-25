@@ -9,6 +9,7 @@ const authController = require('../controllers/authController');
 const mfaController = require('../controllers/mfaController');
 const { authenticate } = require('../middleware/auth');
 const { authenticateForLogout } = require('../middleware/logoutAuth');
+const { requireReAuthentication } = require('../middleware/security');
 const {
   loginLimiter,
   loginUserLimiter,
@@ -181,7 +182,15 @@ const mfaDisableValidation = [
     .withMessage('两步验证码格式无效')
     .isLength({ max: 16 })
     .withMessage('两步验证码长度异常'),
-  // 密文轨：ECDH 信封（优先）
+  // 第二因子之二：备用恢复码（XXXX-XXXX）。格式细节由控制器按
+  // mfaService.isRecoveryCodeFormat 判定（与生成侧同一字母表），此处只收敛类型与长度。
+  body('recoveryCode')
+    .optional({ values: 'falsy' })
+    .isString()
+    .withMessage('备用恢复码格式无效')
+    .isLength({ max: 16 })
+    .withMessage('备用恢复码长度异常'),
+  // 密文轨：ECDH 信封（优先，仅为兼容旧客户端保留；密码不再是可单独放行的因子）
   encPasswordField('encCurrentPassword'),
   rejectEncPlaintextCoexistence('encCurrentPassword', 'currentPassword'),
   // 明文轨：仅未携带密文字段时生效（灰度兼容）
@@ -390,12 +399,22 @@ router.get('/mfa/status', authenticate, mfaController.getMfaStatus);
  * @desc    生成 MFA 密钥（开启第一步，返回 secret 与 otpauth URI）
  * @access  Private
  *
- * G3 复核结论：该接口不读取任何请求体/查询/路径参数（控制器仅用 req.user.userId），
- * 无外部可控输入面，故无需 express-validator。此注释用于说明「无校验器」是
- * 有意为之而非遗漏。
+ * G3 复核结论：控制器本身不读取任何请求体/查询/路径参数（仅用 req.user.userId）。
+ * 请求体中的 currentPassword / encCurrentPassword 由 requireReAuthentication 消费：
+ * 密文轨解密失败一律 AUTH_ENCRYPTED_CREDENTIAL_INVALID（fail-closed），strict 模式
+ * 下拒绝明文轨与密文/明文并存——该策略收敛在中间件，enroll/enable 无需重复声明校验器。
  */
-router.post('/mfa/enroll', authenticate, strictLimiter, mfaController.mfaEnroll);
-// PERMISSION-EXEMPT: 本人资源：为本人注册 MFA
+// 二次验证（当前密码）不是可选项：会话被劫持后，攻击者若能直接 enroll，
+// 就把自己的认证器绑进受害者账户，再 enable 即形成持久化接管。
+// 此步 MFA 尚未开启，requireReAuthentication 只接受密码——正是本端点的正确因子。
+router.post(
+  '/mfa/enroll',
+  authenticate,
+  strictLimiter,
+  requireReAuthentication(),
+  mfaController.mfaEnroll
+);
+// PERMISSION-EXEMPT: 本人资源：为本人注册 MFA（需二次验证）
 
 /**
  * @route   POST /api/auth/mfa/enable
@@ -416,18 +435,16 @@ router.post(
   // 危害面确有界（爆破成功也只是给攻击者自己的账号开 MFA），但限流器挂载的
   // 一致性本身就是可核查的安全属性——漏挂的那一个端点永远是最先被扫到的。
   strictLimiter,
+  // 确认开启是**真正改变安全状态**的一步：会话劫持者若只凭 mfaCode 就能启用，
+  // 等于用受害者刚扫过的密钥把自己的认证器锁进账户（受害者此后无法登录）。
+  // 此处追加当前密码复检；MFA 尚未开启，密码是唯一可用的独立因子。
+  requireReAuthentication(),
   body('mfaCode')
     .trim()
     .matches(/^\d{6}$/)
     .withMessage('两步验证码应为 6 位数字'),
   mfaController.mfaEnable
   // PERMISSION-EXEMPT: 本人资源：启用本人 MFA（需二次验证）
-
-  // PERMISSION-EXEMPT: 本人资源：为本人注册 MFA
-
-  // PERMISSION-EXEMPT: 会话生命周期：吊销当前调用者自己的会话
-
-  // PERMISSION-EXEMPT: 本人资源：authenticate 已确定身份，资料对象恒为本人
 );
 
 /**

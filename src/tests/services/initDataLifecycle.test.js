@@ -1157,9 +1157,10 @@ describe('initData 启动播种与安全对账', () => {
       });
     };
 
-    test('F1 权限收紧失败时：如实告警「未能收紧」且绝不把口令打进日志', async () => {
+    test('F1 权限收紧失败：删除明文文件、回滚管理员并中止启动，且口令绝不进日志', async () => {
       await seedFreshAdminState();
       const filePermission = require('../../utils/filePermission');
+      const metrics = require('../../utils/metrics');
       const hardenSpy = jest.spyOn(filePermission, 'hardenPath').mockImplementation((_p, opts) => {
         // filePermission 的约定：告警经 opts.log 回传，且带 ⚠️ 前缀
         if (opts && typeof opts.log === 'function') opts.log('\u26a0\ufe0f icacls 执行失败');
@@ -1168,28 +1169,34 @@ describe('initData 启动播种与安全对账', () => {
       const verifySpy = jest
         .spyOn(filePermission, 'verifyHardened')
         .mockReturnValue({ tightened: false, evidence: 'ACE 主体 3 条' });
+      const alertSpy = jest.spyOn(metrics, 'incSecurityAlert').mockImplementation(() => {});
 
       try {
         await inTempCwd(async (dir) => {
-          const admin = await createDefaultAdmin();
-          expect(admin).not.toBeNull();
+          // fail-closed：权限未能确认收紧 ⇒ 不留下明文文件，也不留下口令未知的管理员
+          await expect(createDefaultAdmin()).rejects.toThrow('未能安全保存');
+          expect(fs.existsSync(path.join(dir, '.admin-initial-password'))).toBe(false);
+          expect(await User.findByUsername('admin')).toBeNull();
 
           const warns = logger.warn.mock.calls.map((c) => String(c[0])).join('\n');
           // 收紧失败必须明说，而不是照打「已收紧」（这正是修的误导形态）
-          expect(warns).toContain('未能收紧');
           expect(warns).toContain('icacls 执行失败');
           // 回传前缀已被剥掉，否则日志里出现双重 ⚠️ 标记
           expect(warns).not.toContain('\u26a0\ufe0f icacls');
-
-          const content = fs.readFileSync(path.join(dir, '.admin-initial-password'), 'utf8');
-          const generated = content.match(/password: (.+)\n/)[1];
-          expect(generated).toHaveLength(32);
-          // 底线：收紧失败告警不得把口令当「补救办法」打印出来
-          expect(loggedText()).not.toContain(generated);
+          const errors = logger.error.mock.calls.map((c) => String(c[0])).join('\n');
+          expect(errors).toContain('未能收紧');
+          expect(errors).toContain('已删除该明文文件');
+          expect(alertSpy).toHaveBeenCalledWith(
+            'admin_initial_password_permission_not_tightened',
+            'high'
+          );
+          // 底线：告警不得把口令当「补救办法」打印出来
+          expect(loggedText()).not.toMatch(/password: [0-9a-f]{32}/);
         });
       } finally {
         hardenSpy.mockRestore();
         verifySpy.mockRestore();
+        alertSpy.mockRestore();
       }
     });
 
@@ -1204,10 +1211,11 @@ describe('initData 启动播种与安全对账', () => {
         .mockReturnValue({ tightened: false, evidence: 'ACE 主体 2 条' });
 
       try {
-        await inTempCwd(async () => {
-          await createDefaultAdmin();
+        await inTempCwd(async (dir) => {
+          await expect(createDefaultAdmin()).rejects.toThrow('未能安全保存');
           // detail 为空时必须回退到 evidence，否则告警里没有任何可诊断线索
           expect(loggedText()).toContain('ACE 主体 2 条');
+          expect(fs.existsSync(path.join(dir, '.admin-initial-password'))).toBe(false);
         });
       } finally {
         hardenSpy.mockRestore();

@@ -24,6 +24,9 @@
  *   revokeTokensOnLogout: 936, 942-943, 956, 962-963
  */
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
@@ -240,6 +243,33 @@ describe('authService gap A', () => {
       );
       expect(result.outcome).toBe('OK');
       expect(result.username).toBe(user.username);
+    });
+
+    test('OK - 默认管理员改密后删除初始口令文件（旧口令已作废）', async () => {
+      const user = await makeUser('cpinitpwd');
+      const oldName = process.env.SUPER_ADMIN_USERNAME;
+      const oldCwd = process.cwd();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'initpwd-change-'));
+      process.env.SUPER_ADMIN_USERNAME = user.username;
+      process.chdir(dir);
+      try {
+        const file = path.join(dir, '.admin-initial-password');
+        fs.writeFileSync(file, 'username: x\npassword: y\n');
+
+        const result = await authService.changeUserPassword(
+          user._id,
+          { currentPassword: PASSWORD, newPassword: randomPassword() },
+          { username: user.username }
+        );
+
+        expect(result.outcome).toBe('OK');
+        expect(fs.existsSync(file)).toBe(false);
+      } finally {
+        process.chdir(oldCwd);
+        fs.rmSync(dir, { recursive: true, force: true });
+        if (oldName === undefined) delete process.env.SUPER_ADMIN_USERNAME;
+        else process.env.SUPER_ADMIN_USERNAME = oldName;
+      }
     });
 
     test('ENC_INVALID - encCurrentPassword 解密失败', async () => {

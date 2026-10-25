@@ -18,6 +18,8 @@
  * 判据分工：
  * 1. 端到端驱动 checkBruteForce 四次 ⇒ 时长必须是 1h/4h/24h/7d（旧实现四次全是 1h）；
  *    用不同 username 绕开 5 分钟 IP 频控（闸是"任一 key 放行即继续"的 OR 语义）；
+ *    #21 之后每轮还必须凑出 ≥2 个不同的失败账号，否则 IP 封禁按设计跳过——夹具
+ *    用 `seedMultiAccountFailures` 显式提供这个信号，而不是让用例替新策略"放水"。
  * 2. 反向对照：全新 IP 必须仍是第一档，否则"一律拉到最高档"也能让第 1 条绿；
  * 3. 归一化共用：::ffff:x 与 x 必须落在同一条阶梯上（否则计数恒 0，等于没有阶梯）；
  * 4. 统计抛错时封禁照做、按第一档（不能"统计失败就干脆不封"）；
@@ -121,11 +123,21 @@ const seedFailures = async (username, ip) => {
   await AuditLog.insertMany(rows);
 };
 
+/**
+ * #21 的 IP 封禁前置信号：同一 IP 在窗口内失败过 ≥2 个不同账号。
+ * 主账号之外再塞一个陪跑账号——否则这些"阶梯"用例会被单账号跳过策略
+ * 正确地拦下，测到的是 0 次封禁而不是档位。
+ */
+const seedMultiAccountFailures = async (username, ip) => {
+  await seedFailures(username, ip);
+  await seedFailures(`${username}_peer`, ip);
+};
+
 describe('自动封禁阶梯：四档都必须可达', () => {
   test('端到端：同一 IP 连续四次触发 ⇒ 1h/4h/24h/7d，第五次仍封顶 7d', async () => {
     await startChainAtZero(targetIp);
     for (let round = 1; round <= 5; round += 1) {
-      await seedFailures(`zzbf${round}_${stamp}`, targetIp);
+      await seedMultiAccountFailures(`zzbf${round}_${stamp}`, targetIp);
       await checkBruteForce(`zzbf${round}_${stamp}`, targetIp);
     }
     expect(captured).toHaveLength(5);
@@ -149,7 +161,7 @@ describe('自动封禁阶梯：四档都必须可达', () => {
 
   test('反向对照：全新的 IP 仍是第一档（判据不是"一律拉到最高"）', async () => {
     await startChainAtZero(FRESH_IP);
-    await seedFailures(`zzbffresh_${stamp}`, FRESH_IP);
+    await seedMultiAccountFailures(`zzbffresh_${stamp}`, FRESH_IP);
     await checkBruteForce(`zzbffresh_${stamp}`, FRESH_IP);
     expect(captured).toHaveLength(1);
     expect(captured[0].durationMs).toBe(1 * HOUR);
@@ -180,7 +192,10 @@ describe('自动封禁阶梯：四档都必须可达', () => {
     );
     expect(await IPBanEvents.countPrior(targetIp)).toBe(4);
 
-    await seedFailures(`zzbfv6_${stamp}`, `::ffff:${targetIp}`);
+    // 多账号信号按**归一化 IP** 查询，而 IP 维度失败次数按**上报原文**查询：
+    // 两侧各塞一份，才能同时满足「ipFailures 达到阈值」与「distinctAccounts ≥ 2」。
+    await seedMultiAccountFailures(`zzbfv6_${stamp}`, `::ffff:${targetIp}`);
+    await seedMultiAccountFailures(`zzbfv6n_${stamp}`, targetIp);
     await checkBruteForce(`zzbfv6_${stamp}`, `::ffff:${targetIp}`);
     expect(captured).toHaveLength(1);
     // 4 条前序 ⇒ 第 5 次落到封顶档；::ffff: 若另起一条链，这里会是第一档 1h
@@ -193,12 +208,14 @@ describe('自动封禁阶梯：四档都必须可达', () => {
     // 攻击者交替使用两种形态即可让计数恒为 0，阶梯照样只剩第一档。
     await startChainAtZero(MAP_IP);
     const v6form = `::ffff:${MAP_IP}`;
-    await seedFailures(`zzbfmap1_${stamp}`, v6form);
+    await seedMultiAccountFailures(`zzbfmap1_${stamp}`, v6form);
+    // 多账号信号按归一化 IP 查询：mapped 形态的失败行必须同时以归一化形态存在
+    await seedMultiAccountFailures(`zzbfmap1n_${stamp}`, MAP_IP);
     await checkBruteForce(`zzbfmap1_${stamp}`, v6form);
     expect(captured.map((c) => c.durationMs)).toEqual([1 * HOUR]);
 
     captured.length = 0;
-    await seedFailures(`zzbfmap2_${stamp}`, MAP_IP);
+    await seedMultiAccountFailures(`zzbfmap2_${stamp}`, MAP_IP);
     await checkBruteForce(`zzbfmap2_${stamp}`, MAP_IP);
     expect(captured.map((c) => c.durationMs)).toEqual([4 * HOUR]);
     expect(captured[0].reason).toBe('brute_force_auto_ban_tier2');
@@ -207,7 +224,7 @@ describe('自动封禁阶梯：四档都必须可达', () => {
   test('统计失败 ⇒ 按第一档照封，而不是跳过封禁', async () => {
     // 只坏阶梯的计数：checkBruteForce 开头的失败次数统计必须照常工作，
     // 否则这条测的是"整个函数抛异常"而不是"阶梯降级"
-    await seedFailures(`zzbferr_${stamp}`, ERR_IP);
+    await seedMultiAccountFailures(`zzbferr_${stamp}`, ERR_IP);
     const spy = jest.spyOn(IPBanEvents, 'countPrior').mockRejectedValue(new Error('db down'));
     try {
       await checkBruteForce(`zzbferr_${stamp}`, ERR_IP);
@@ -259,7 +276,7 @@ describe('F-160 封禁结果按返回值分派：日志不能说"已封禁"而�
   /** 一次独立的触发：用户名与 IP 都必须唯一，否则被 5 分钟告警频控吃掉 */
   const trigger = async (n, ip) => {
     const username = `zzbf_f160_${n}_${stamp}`;
-    await seedFailures(username, ip);
+    await seedMultiAccountFailures(username, ip);
     await checkBruteForce(username, ip);
   };
 
@@ -308,8 +325,10 @@ describe('F-160 封禁结果按返回值分派：日志不能说"已封禁"而�
 
   test('写法门禁：成功日志必须在 banned 判定之后，不许无条件打', () => {
     // 行为四条 + 这条文本闸：文本闸不是替代，它钉的是"别再退回 await 即成功"这个写法。
+    // 封禁动作在 2026-10-21 拆到 securityAlertIpBans.js（securityAlert.js 的行预算已贴棘轮上限），
+    // 判据必须跟着实现走，否则会退化成"守着一个已经没有这段代码的文件"。
     const src = fs.readFileSync(
-      path.join(__dirname, '..', '..', 'services', 'securityAlert.js'),
+      path.join(__dirname, '..', '..', 'services', 'securityAlertIpBans.js'),
       'utf8'
     );
     const from = src.indexOf('await addToBlacklist(');

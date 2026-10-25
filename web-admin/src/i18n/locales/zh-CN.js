@@ -1,6 +1,9 @@
 export default {
   layout: {
     fullscreen: '全屏',
+    expandSidebar: '展开侧边栏',
+    collapseSidebar: '收起侧边栏',
+    closeSidebar: '关闭侧边栏',
   },
   auditLog: {
     catAuthLogin: '认证登录',
@@ -148,6 +151,7 @@ export default {
     close: '关闭',
     refresh: '刷新',
     refreshing: '正在刷新…',
+    retry: '重试',
     pullToRefresh: '下拉刷新',
     export: '导出',
     import: '导入',
@@ -183,7 +187,6 @@ export default {
     searchNoResults: '无匹配结果',
     searchHintNavigate: '选择',
     searchHintOpen: '打开',
-    searchHintClose: '关闭',
     // abort 在途请求的默认原因：调试用，由 cancelAllPendingRequests 默认参数经
     // t() 取用，避免硬编码中文（第 34 轮 L2）
     routeChangeCancel: '路由切换，取消在途请求',
@@ -431,13 +434,18 @@ export default {
     userColumn: '用户',
     username: '用户名',
     email: '邮箱',
+    emailKeepBlank: '留空表示不修改邮箱',
     realName: '真实姓名',
     phone: '手机号',
     phoneKeepBlank: '留空表示不修改',
     phoneAfterReveal: '已载入完整号码：改动即覆盖，清空并提交即删除',
     revealPhone: '查看完整号码',
     revealPhoneTitle: '验证身份以查看手机号',
-    revealPhoneHint: '输入当前登录密码进行二次验证；本次查看会写入安全审计。',
+    revealPhoneHint:
+      '输入当前登录密码，或切换到动态验证码（已开启 MFA 时）；本次查看会写入安全审计。',
+    revealMfaPlaceholder: '输入 6 位动态验证码（已开启 MFA 时）',
+    revealUseMfa: '改用动态验证码',
+    revealUsePassword: '改用登录密码',
     department: '部门',
     status: '状态',
     roles: '角色',
@@ -488,6 +496,8 @@ export default {
     permAdded: '本次新增',
     permRemoved: '本次移除',
     noPermFound: '未找到匹配的权限',
+    permTreeForbidden:
+      '当前账号无权查看权限目录（需要 permission:read 或 permission:tree），仅显示角色基本信息。',
     codePlaceholder: '如：SUPER_ADMIN，只能大写字母和下划线',
     moduleFull: '已全选',
     modulePartial: '部分启用',
@@ -523,6 +533,13 @@ export default {
     endDate: '结束日期',
     avgResponseTime: '平均响应时长',
     deviceOnlineRate: '设备在线率',
+    exportScope: '导出范围',
+    exportUnmasked: '导出未脱敏数据（含真实姓名）',
+    exportUnmaskedHint: '需要未脱敏导出权限；导出前必须完成二次验证。',
+    exportPasswordPlaceholder: '当前账户密码',
+    exportMfaPlaceholder: '6 位动态验证码（已开启 MFA 时必填）',
+    exportReauthHint: '未开启 MFA 时填写当前密码；已开启 MFA 时必须填写认证器中的动态验证码。',
+    reauthCredentialRequired: '请填写当前密码或 6 位动态验证码',
   },
   security: {
     title: '安全管理',
@@ -539,9 +556,12 @@ export default {
     reportTargetDevice: '设备',
     reportTargetAlarm: '报警记录',
     reportTargetSystem: '系统问题',
-    reportTargetId: '对象 ID',
-    reportTargetIdPlaceholder: '粘贴该记录的 24 位 ObjectId（仅限你数据范围内的记录）',
-    reportTargetIdInvalid: '目标 ID 格式无效（应为 24 位十六进制字符）',
+    // 用户认的是名称/编号，不是 24 位 ObjectId —— 具体对象一律用可搜索下拉选，
+    // 界面上不出现 ID（值仍在载荷里，只是不给用户看）
+    reportTargetRecord: '具体对象',
+    reportTargetRecordPlaceholder: '输入名称或编号搜索',
+    reportTargetRecordLoading: '正在加载…',
+    reportTargetRecordEmpty: '你的数据范围内没有可选对象，可改选「系统问题」并用文字描述',
     reportReason: '举报原因',
     reportReasonPlaceholder: '请简要描述异常行为（1-200 字）',
     reportDescription: '补充说明',
@@ -611,6 +631,8 @@ export default {
   ipList: {
     invalidFormat: 'IP 或网段格式不正确',
     typeSwitchLabel: '名单类型切换',
+    loadError: '无法加载名单数据，请重试',
+    staleData: '名单刷新失败，以下为上次加载的数据',
   },
   // IP 归属地展示（后端只出稳定码，文案归词表，见 src/constants/ipLocationCodes.js）
   ipLocation: {
@@ -847,6 +869,8 @@ export default {
     mfaIntro:
       '开启后，登录时除密码外还需输入认证器（如 Google Authenticator）生成的 6 位动态验证码，可显著降低密码泄露导致的账户被盗风险',
     mfaStart: '开启两步验证',
+    mfaPasswordPlaceholder: '输入当前登录密码以验证身份',
+    mfaPasswordRequired: '请输入当前登录密码',
     mfaSecret: '密钥',
     mfaQrcode: '扫码添加',
     mfaManualUri: '手动录入',
@@ -869,6 +893,13 @@ export default {
     recoveryEmptyError: '未获取到新的恢复码，请稍后重试',
     recoveryMissingWarn: '开启成功但未返回备用恢复码，可用数量已归零，请重新生成',
     mfaCodeInvalid: '请输入 6 位数字验证码',
+    mfaStatusError: '无法获取两步验证状态，为避免误操作已暂时禁用相关入口',
+    mfaStatusRetry: '重试',
+    mfaUseRecoveryCode: '使用备用恢复码关闭',
+    mfaUseTotp: '改用动态验证码',
+    mfaRecoveryCode: '备用恢复码',
+    mfaRecoveryPlaceholder: '输入 XXXX-XXXX 格式的备用恢复码',
+    mfaRecoveryInvalid: '请输入 XXXX-XXXX 格式的备用恢复码',
   },
   // 设备级登录会话（个人资料页「登录会话」卡片）
   session: {
@@ -899,6 +930,8 @@ export default {
     cannotRevokeCurrent: '本设备请使用「退出登录」结束会话',
     noCurrentSidHint:
       '当前登录凭证签发于本功能上线之前，列表中不会标记「本设备」。重新登录一次即可完整管理。',
+    loadError: '无法加载登录会话，请重试',
+    staleData: '会话列表刷新失败，以下为上次加载的数据',
   },
   // 个人自助安全面（B 组端点接线：/security/my-info、/security/bindings、/security/my-logs）
   // 三块都是「本人数据、无权限码门控」的自助信息，挂在个人资料页「安全设置」栏下。
@@ -1020,6 +1053,7 @@ export default {
       '服务端安全密钥校验未通过，已阻止提交。如刚更新过服务端密钥，请刷新页面重试；如持续出现请联系管理员',
     captchaRefresh: '点击刷新验证码',
     captchaLoading: '加载中…',
+    captchaStatusFailed: '无法确认验证码配置，暂时无法提交，请重试',
     docTitle: '消防安全管理系统 - 用户登录',
     sessionReplaced: '检测到其他标签页登录了新账号，当前会话已失效，请重新登录',
     sessionEnded: '您已在其他标签页退出登录',
@@ -1089,7 +1123,7 @@ export default {
     roleCodePattern: '角色编码仅支持大写字母与下划线（输入会自动转为大写）',
     locationLen: '报警位置长度应为 1-100 个字符',
     descriptionLen: '报警描述长度应为 1-500 个字符',
-    reportTargetIdRequired: '请输入被举报对象的 ID',
+    reportTargetIdRequired: '请选择被举报的具体对象',
     reportReasonRequired: '请填写举报原因',
     reportReasonLen: '举报原因长度应为 1-200 个字符',
   },
@@ -1109,6 +1143,9 @@ export default {
     deviceTypeDist: '设备类型分布',
     recentAlarms: '最近报警记录',
     viewAll: '查看全部',
+    statsLoadFailed: '统计数据加载失败，请重试',
+    alarmsLoadFailed: '最近报警加载失败，请重试',
+    alarmsStale: '最近报警刷新失败，以下为上次加载的数据',
     alarmCount: '报警数量',
     deviceCount: '设备数量',
     smokeAlarm: '烟雾报警',
@@ -1182,6 +1219,11 @@ export default {
   },
   // 后端错误码文案（errors.errorCode → i18n key 映射见 utils/api.js）
   // 与后端 src/utils/errorCodes.js 注册表保持同义；文案以注册表为准
+  reauth: {
+    title: '验证身份',
+    hint: '该操作涉及敏感数据或安全配置，需要重新验证身份。请提供当前密码或 MFA 动态口令。',
+  },
+
   errors: {
     fullRangeForbidden: '全网段名单仅超级管理员可配置或移除',
     authInvalidCredentials: '用户名或密码错误',
@@ -1236,6 +1278,7 @@ export default {
     alarmStatusNotAllowedShort: '报警状态不允许此操作',
     alarmHandleResultRequired: '请提供处理结果描述',
     alarmStatusNotAllowed: '该报警当前状态不允许此操作',
+    alarmBuildingRequired: '请提供报警所在楼栋；关联设备时可自动继承设备楼栋',
     unauthorizedAccess: '未授权访问',
     auditExportFailed: '审计日志导出失败',
     limitMustBePositiveInt: 'limit 必须是正整数',
@@ -1251,6 +1294,7 @@ export default {
     refreshTokenExpired: '刷新令牌已过期，请重新登录',
     passwordCurrentAndNewRequired: '请提供当前密码和新密码',
     userNotFoundOrDeleted: '用户不存在或已被删除',
+    userStateConflict: '用户状态已被其他操作修改，请刷新后重试',
     passwordCurrentIncorrect: '当前密码错误',
     passwordSameAsOld: '新密码不能与旧密码相同',
     passwordChangedRevokeFailed:
@@ -1303,6 +1347,7 @@ export default {
     roleDeleteHigherLevelForbidden: '无权删除高于自身层级的角色',
     builtinRoleNotDeletable: '内置角色不可删除',
     roleInUse: '有 {userCount} 个用户正在使用该角色，请先移除这些用户的角色',
+    roleStateConflict: '角色状态已被其他操作修改，请刷新后重试',
     permissionIdRequired: '请提供至少一个有效的权限 ID',
     permissionIdInvalid: '存在无效的权限 ID',
     rolePermPeerOrHigherForbidden: '无权修改等于或高于自身层级的角色权限',
@@ -1319,6 +1364,7 @@ export default {
     // 运维调了 PASSWORD_HISTORY_DEPTH 之后文案自动跟着变
     passwordReusedInHistory: '新密码不能与最近 {historyDepth} 条使用过的密码相同',
     sensitiveViewHigherLevelForbidden: '无权查看更高层级用户的敏感信息',
+    sensitiveViewOutOfScope: '无权查看该用户（超出您的数据范围）',
     unsupportedDataType: '不支持的数据类型',
     reportTargetAndReasonRequired: '请提供目标类型和原因',
     userOperatePeerOrHigherForbidden: '无权操作同级或更高级别的用户',
@@ -1384,12 +1430,17 @@ export default {
     permissionDenied: '您没有执行此操作的权限',
     permissionCheckFailed: '权限验证过程出错',
     roleNotAllowed: '您的角色无权执行此操作',
+    roleCodeReserved: '该角色编码为内置保留编码，不能用于自定义角色',
     roleCheckFailed: '角色验证过程出错',
     reauthRequired: '敏感操作需要重新验证身份，请提供当前密码或 MFA 验证码',
     reauthPasswordIncorrect: '当前密码错误，验证未通过',
     reauthMfaNotEnabled: '未开启两步验证，请使用当前密码验证',
     reauthMfaIncorrect: 'MFA 验证码错误，验证未通过',
+    reauthMfaRequired: '已开启两步验证，请使用动态口令完成验证',
     reauthProcessFailed: '身份验证过程出错',
+    reauthTicketRequired: '查看审计数据需要先完成二次验证',
+    reauthTicketInvalid: '二次验证票据无效或已过期，请重新验证',
+    mfaSecondFactorRequired: '关闭两步验证需提供动态口令或备用恢复码（密码不能单独作为第二因子）',
     ipBlocked: '您的 IP 已被禁止访问',
     uploadFileTooLarge: '文件 {filename} 超过最大限制 {maxSize}MB',
     uploadTypeNotAllowed: '不允许的文件类型：{mimetype}',

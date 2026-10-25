@@ -47,6 +47,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 // 唯一前缀：夹具设备与用户都带它，别的套件的行进不了本次查询结果集
 const PREFIX = 'zzdsc';
@@ -185,7 +186,8 @@ describe('数据范围不可用的每一条读出口都必须回 403 DATA_SCOPE_
     }
   });
 
-  const get = (token, path) => request(app).get(path).set('Authorization', `Bearer ${token}`);
+  const get = (token, path) =>
+    request(app).get(path).set('Authorization', `Bearer ${token}`).set(reauthHeaders(token));
 
   // ===== 正向：无部门的管理员，每条出口都必须 403 + errorCode =====
   test.each(DENIED_ENDPOINTS)('%s ⇒ 403 DATA_SCOPE_DENIED', async (path) => {

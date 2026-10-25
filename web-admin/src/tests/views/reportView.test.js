@@ -15,11 +15,14 @@ import { mountComponent, click, flush, waitFor } from '../helpers/componentHarne
 import { useAuthStore } from '@/store'
 
 const exportReport = vi.fn()
+const exportPii = vi.fn()
 const getDashboard = vi.fn()
 vi.mock('@/utils/api', () => ({
   api: {
     reports: {
       export: (...a) => exportReport(...a),
+      // L-17：未脱敏导出走独立 POST，凭据不进 URL
+      exportPii: (...a) => exportPii(...a),
       getDashboard: (...a) => getDashboard(...a),
       getAlarms: vi.fn(() => Promise.resolve({ data: { data: [] } })),
       getDevices: vi.fn(() => Promise.resolve({ data: { data: [] } })),
@@ -27,13 +30,18 @@ vi.mock('@/utils/api', () => ({
   },
   isCanceledError: () => false,
 }))
+// 口令信封需要 WebCrypto 与公钥；本套件只关心"加密后提交、明文不上行"
+const encryptPassword = vi.fn(async (password, purpose) => `envelope:${purpose}:${password}`)
+vi.mock('@/utils/loginCipher', () => ({
+  encryptPassword: (...a) => encryptPassword(...a),
+}))
 vi.mock('element-plus/es/components/message/index.mjs', () => ({
   ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }))
 // echarts 在 jsdom 无 canvas：替身掉 init 与 use，本文件只测导出链路
 vi.mock('echarts/core', () => ({
   use: vi.fn(),
-  init: () => ({ setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn() }),
+  init: vi.fn(() => ({ setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn() })),
 }))
 vi.mock('echarts/charts', () => ({ PieChart: {}, BarChart: {} }))
 vi.mock('echarts/components', () => ({
@@ -44,6 +52,7 @@ vi.mock('echarts/components', () => ({
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
 
 import ReportView from '@/views/ReportView.vue'
+import { init as echartsInit } from 'echarts/core'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import i18n from '@/i18n'
 
@@ -83,7 +92,10 @@ afterEach(() => {
   active?.handle.unmount()
   active = null
   exportReport.mockReset()
+  exportPii.mockReset()
+  encryptPassword.mockClear()
   getDashboard.mockReset()
+  echartsInit.mockClear()
   ElMessage.success.mockReset()
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
@@ -306,6 +318,32 @@ describe('ReportView 导出错误处理', () => {
   })
 })
 
+describe('ReportView 卸载守卫', () => {
+  test('挂载后立即离开：概览响应返回时不再初始化图表（DOM 已销毁）', async () => {
+    // 防退化：去掉 onMounted 的 unmounted 检查 → 慢请求返回后对已卸载的
+    // ref 调 echarts.init，控制台抛错且图表实例泄漏。
+    let resolveDashboard
+    getDashboard.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDashboard = resolve
+        })
+    )
+    const c = mountComponent(ReportView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(EXPORT_PERMS),
+    })
+    c.handle.unmount()
+
+    resolveDashboard({
+      data: { success: true, data: { devices: {}, alarms: {}, inspections: {} } },
+    })
+    await flush(12)
+
+    expect(echartsInit).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+})
+
 /**
  * 报表页的「这份文件不完整」提示（与审计页同一条后端契约）。
  *
@@ -348,6 +386,145 @@ describe('ReportView 导出完整性提示', () => {
     expect(ElMessage.success).toHaveBeenCalledTimes(1)
   })
 })
+/**
+ * L-17：未脱敏导出（含真实姓名）必须同时满足
+ *   · 权限：pii:export（入口只在持有时出现）
+ *   · 二次验证：当前口令或 6 位 MFA 码，走 POST /reports/export/pii
+ * GET 导出恒为掩码档，因此"有 pii:export"也不得让 GET 输出全文。
+ */
+describe('ReportView 未脱敏导出（L-17 权限 + 二次验证）', () => {
+  const PII_PERMS = [...EXPORT_PERMS, 'pii:export']
+
+  const unmaskedCheckbox = (dlg) =>
+    Array.from(dlg.querySelectorAll('.el-checkbox'))
+      .find((label) => label.textContent.includes('未脱敏'))
+      ?.querySelector('input[type="checkbox"]')
+
+  const setInput = async (input, value) => {
+    expect(input, '凭据输入框未渲染').toBeTruthy()
+    input.value = value
+    input.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(6)
+  }
+
+  const mfaInput = (dlg) => dlg.querySelector('input[autocomplete="one-time-code"]')
+  const passwordInput = (dlg) => dlg.querySelector('input[type="password"]')
+
+  const stubDownload = () => {
+    const createUrl = vi.spyOn(window.URL, 'createObjectURL').mockReturnValue('blob:fake')
+    const revokeUrl = vi.spyOn(window.URL, 'revokeObjectURL').mockImplementation(() => {})
+    return () => {
+      createUrl.mockRestore()
+      revokeUrl.mockRestore()
+    }
+  }
+
+  test('无 pii:export：未脱敏选项不渲染（入口消失，而非勾了才 403）', async () => {
+    const c = await open(EXPORT_PERMS)
+    const dlg = await openDialog(c)
+    expect(unmaskedCheckbox(dlg)).toBeFalsy()
+    expect(mfaInput(dlg)).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('持 pii:export：选项出现；勾选后空凭据不发请求并提示', async () => {
+    exportPii.mockResolvedValue({ data: new Blob(['x'], { type: 'application/vnd.ms-excel' }) })
+    const c = await open(PII_PERMS)
+    const dlg = await openDialog(c)
+    const checkbox = unmaskedCheckbox(dlg)
+    expect(checkbox).toBeTruthy()
+    click(checkbox)
+    await flush(6)
+
+    click(confirmBtn())
+    await waitFor(() => ElMessage.warning.mock.calls.length === 1, { message: '空凭据提示' })
+    expect(ElMessage.warning.mock.calls[0][0]).toBe(
+      i18n.global.t('report.reauthCredentialRequired')
+    )
+    expect(exportPii).not.toHaveBeenCalled()
+    expect(exportReport).not.toHaveBeenCalled()
+  })
+
+  test('MFA 码路径：走 exportPii，凭据在请求体、筛选参数在 query', async () => {
+    const restore = stubDownload()
+    exportPii.mockResolvedValue({ data: new Blob(['x'], { type: 'application/vnd.ms-excel' }) })
+    const c = await open(PII_PERMS)
+    const dlg = await openDialog(c)
+    click(unmaskedCheckbox(dlg))
+    await flush(6)
+    await setInput(mfaInput(dlg), '123456')
+
+    click(confirmBtn())
+    await waitFor(() => exportPii.mock.calls.length === 1, { message: '未脱敏导出请求发出' })
+    expect(exportPii.mock.calls[0][0]).toEqual({ type: 'alarms' })
+    expect(exportPii.mock.calls[0][1]).toEqual({ mfaCode: '123456' })
+    // 掩码档的 GET 不得被顺带调用：两条路径的权限与留痕口径不同
+    expect(exportReport).not.toHaveBeenCalled()
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '导出成功' })
+    restore()
+  })
+
+  test('口令路径：密文信封上行（PASSWORD_CURRENT），明文不出现在凭据里', async () => {
+    const restore = stubDownload()
+    exportPii.mockResolvedValue({ data: new Blob(['x'], { type: 'application/vnd.ms-excel' }) })
+    const c = await open(PII_PERMS)
+    const dlg = await openDialog(c)
+    click(unmaskedCheckbox(dlg))
+    await flush(6)
+    await setInput(passwordInput(dlg), 'p@ss-9876')
+
+    click(confirmBtn())
+    await waitFor(() => exportPii.mock.calls.length === 1, { message: '未脱敏导出请求发出' })
+    expect(encryptPassword).toHaveBeenCalledWith('p@ss-9876', 'PASSWORD_CURRENT')
+    expect(exportPii.mock.calls[0][1]).toEqual({
+      encCurrentPassword: 'envelope:PASSWORD_CURRENT:p@ss-9876',
+    })
+    expect(exportPii.mock.calls[0][1]).not.toHaveProperty('currentPassword')
+    restore()
+  })
+
+  test('MFA 码形状非法：本地拦下，不发请求（不白占一次 reauth 配额）', async () => {
+    const c = await open(PII_PERMS)
+    const dlg = await openDialog(c)
+    click(unmaskedCheckbox(dlg))
+    await flush(6)
+    await setInput(mfaInput(dlg), '12345')
+
+    click(confirmBtn())
+    await waitFor(() => ElMessage.warning.mock.calls.length === 1, { message: '形状校验提示' })
+    expect(ElMessage.warning.mock.calls[0][0]).toBe(i18n.global.t('profile.mfaCodeInvalid'))
+    expect(exportPii).not.toHaveBeenCalled()
+  })
+
+  test('切到设备报表：未脱敏选项收起并复位，确认后仍走掩码 GET', async () => {
+    exportReport.mockResolvedValue({
+      data: new Blob(['x'], { type: 'application/vnd.ms-excel' }),
+    })
+    const restore = stubDownload()
+    const c = await open(PII_PERMS)
+    const dlg = await openDialog(c)
+    click(unmaskedCheckbox(dlg))
+    await flush(6)
+    expect(mfaInput(dlg)).toBeTruthy()
+
+    const deviceRadio = Array.from(dlg.querySelectorAll('.el-radio')).find((r) =>
+      r.textContent.includes('设备')
+    )
+    deviceRadio
+      .querySelector('input[type="radio"]')
+      .dispatchEvent(new window.Event('change', { bubbles: true }))
+    await flush(8)
+
+    expect(unmaskedCheckbox(dlg)).toBeFalsy()
+    expect(mfaInput(dlg)).toBeNull()
+    click(confirmBtn())
+    await waitFor(() => exportReport.mock.calls.length === 1, { message: '掩码导出请求发出' })
+    expect(exportReport.mock.calls[0][0].type).toBe('devices')
+    expect(exportPii).not.toHaveBeenCalled()
+    restore()
+  })
+})
+
 describe('ReportView 导出文件名前缀对账（第 34 轮 L7）', () => {
   /**
    * 背景：exportTypeNames 曾有 inspections/audit 两个键，而导出对话框的

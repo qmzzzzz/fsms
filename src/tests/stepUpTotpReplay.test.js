@@ -149,13 +149,15 @@ describe('步进二次验证（/api/security/view-sensitive）的 TOTP 消费语
     expect(after.mfaLockUntil).toBeNull();
   });
 
-  test('密码分支仍按原语义工作（本用例只动 MFA 分支，不得波及 currentPassword 路径）', async () => {
+  test('已开启 MFA 时仅凭密码必须被拒（密码是单因子，不得旁路第二因子）', async () => {
     const mw = requireReAuthentication();
-    const ok = await runMiddleware(mw, uid, username, { currentPassword: 'Aa1!aaaaaaaaaaaaaaaa' });
-    expect(ok.nextCalled).toBe(true);
-
-    const bad = await runMiddleware(mw, uid, username, { currentPassword: 'wrong-password-1' });
-    expect(bad.nextCalled).toBe(false);
-    expect(bad.code).toBe('REAUTH_PASSWORD_INCORRECT');
+    const r = await runMiddleware(mw, uid, username, {
+      currentPassword: 'Aa1!aaaaaaaaaaaaaaaa',
+    });
+    expect(r.nextCalled).toBe(false);
+    expect(r.code).toBe('REAUTH_MFA_REQUIRED');
+    // 正确密码也不得触发计数（不是在猜密码，只是走了已关闭的路径）
+    const after = await User.findById(uid).select('mfaFailCount');
+    expect(after.mfaFailCount).toBe(0);
   });
 });

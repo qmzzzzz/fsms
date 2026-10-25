@@ -248,10 +248,8 @@ describe('注册即登录的令牌必须绑定一条可吊销会话（F-175）',
       expect(result.token).toEqual(expect.any(String));
       expect(result.sid).toBeNull();
       expect(result.sessionRegistered).toBe(false);
-      // 降级签发的令牌必须"看起来就没有会话"，而不是带一个查不到的 sid
-      expect(
-        jwt.verify(result.refreshToken, config.jwt.refreshSecret, { algorithms: ['HS256'] }).sid
-      ).toBeUndefined();
+      // 降级签发只发 access：无 sid 的 refresh 无法被设备级吊销终止，还会自我续期
+      expect(result.refreshToken).toBeNull();
       expect(await UserSession.countDocuments({ userId: result.userId })).toBe(0);
     } finally {
       spy.mockRestore();

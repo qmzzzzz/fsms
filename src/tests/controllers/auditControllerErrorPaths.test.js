@@ -37,6 +37,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const logger = require('../../utils/logger');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 // 控制器内是 inline require，jest.mock 的工厂对 inline require 同样生效
 const mockVerifyAuditChain = jest.fn();
@@ -111,7 +112,11 @@ describe('auditController 导出失败与断链审计', () => {
     mockVerifyAuditChain.mockReset();
   });
 
-  const authed = (url) => request(app).get(url).set('Authorization', `Bearer ${operatorToken}`);
+  const authed = (url) =>
+    request(app)
+      .get(url)
+      .set('Authorization', `Bearer ${operatorToken}`)
+      .set(reauthHeaders(operatorToken));
 
   describe('导出筛选参数非法 → 400（auditController.js:28-32）', () => {
     test('startDate 非法 → 400 且回显「开始日期格式错误」（不得 500）', async () => {

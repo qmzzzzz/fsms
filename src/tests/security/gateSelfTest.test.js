@@ -695,6 +695,9 @@ describe('门禁负向自检：该红时必须红', () => {
       // 分别只在 777001 / 31337 下暴露）。因此这里断的是循环形态而不是单行命令。
       expect(ci).toMatch(/for seed in [\d\s]+; do/);
       expect(ci).toMatch(/npx jest --randomize --seed="\$seed"/);
+      // --randomize 只打乱文件内用例；文件顺序必须由 JEST_FILE_SEED 单独驱动。
+      // 两半缺一：门禁声称覆盖「文件/用例」却只跑其中一半（2026-10-21 审计 P2-1）。
+      expect(ci).toMatch(/JEST_FILE_SEED="\$seed" npx jest --randomize --seed="\$seed"/);
       // 回归样本 seed 不得被删减
       const seedList = ci.match(/for seed in ([\d\s]+); do/);
       expect(seedList).toBeTruthy();

@@ -23,6 +23,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 const auditBuffer = require('../../services/auditBuffer');
 const { auditLog } = require('../../middleware/security');
@@ -240,7 +241,10 @@ describe('端到端：导出接口真实下载并留痕', () => {
   });
 
   const get = (key, url) =>
-    request(app).get(url).set('Authorization', `Bearer ${actors[key].token}`);
+    request(app)
+      .get(url)
+      .set('Authorization', `Bearer ${actors[key].token}`)
+      .set(reauthHeaders(actors[key].token));
 
   // 401 在本应用有 5 个来源（缺令牌/签名无效/已过期/被吊销/处理失败），只断 status
   // 时分不清"真回归"与"环境偶发"，故把 errorCode 一并纳入断言对象：失败信息自带答案。

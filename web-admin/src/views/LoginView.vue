@@ -35,6 +35,27 @@
           <AuthPrefs class="login-card__lang" />
         </div>
 
+        <!-- 验证码状态查询失败：不能默认「关闭」继续放行——若服务端实际开启验证码，
+             界面既无输入框也无图片，用户提交只会被后端拒绝且无从自救。 -->
+        <el-alert
+          v-if="captchaStatus === 'error'"
+          :title="$t('login.captchaStatusFailed')"
+          type="warning"
+          :closable="false"
+          show-icon
+          class="login-card__captcha-error"
+        >
+          <template #default>
+            <button
+              type="button"
+              class="glass-btn glass-btn--default glass-btn--sm"
+              @click="loadCaptchaStatus"
+            >
+              {{ $t('common.retry') }}
+            </button>
+          </template>
+        </el-alert>
+
         <el-form
           ref="loginFormRef"
           :model="loginForm"
@@ -241,6 +262,10 @@ const mfaRequired = ref(false)
 const captchaEnabled = ref(false)
 const captchaId = ref('')
 const captchaImg = ref('')
+// 验证码状态：loading / ready / error。error 时既不能假定开启（没有图可填），
+// 也不能假定关闭（服务端可能要求验证码）——必须先重试拿到确定答案才能提交。
+const captchaStatus = ref('loading')
+let captchaStatusPromise = null
 
 const loadCaptcha = async () => {
   // 先清空再拉取：getCaptcha 走 apiClient，失败时拦截器已统一提示。后端 captchaService
@@ -261,16 +286,29 @@ const loadCaptcha = async () => {
 }
 
 const loadCaptchaStatus = async () => {
-  try {
-    const { data: resp } = await api.auth.getCaptchaStatus()
-    captchaEnabled.value = !!resp.data?.loginCaptchaEnabled
-    if (captchaEnabled.value) {
-      loadCaptcha()
+  // 去重：挂载时自动查询与用户点「重试」可能并发，避免同一时刻发两次
+  if (captchaStatusPromise) return captchaStatusPromise
+  captchaStatus.value = 'loading'
+  captchaStatusPromise = (async () => {
+    try {
+      const { data: resp } = await api.auth.getCaptchaStatus()
+      captchaEnabled.value = !!resp.data?.loginCaptchaEnabled
+      captchaStatus.value = 'ready'
+      // 等图片就绪再返回：调用方（提交前的兜底重试）拿到 ready 后应能直接带上 captchaId
+      if (captchaEnabled.value) await loadCaptcha()
+      return true
+    } catch (_) {
+      // 不能默认关闭：验证码若实际开启，界面既没有输入框也没有图片，
+      // 用户提交只会被后端拒绝且无从自救。保持 enabled=false（没有图不能展示输入框），
+      // 但把状态标为 error，由表单上方的警示条提供重试入口，并阻止提交。
+      captchaEnabled.value = false
+      captchaStatus.value = 'error'
+      return false
+    } finally {
+      captchaStatusPromise = null
     }
-  } catch (_) {
-    // 状态查询失败按默认关闭处理，登录不受影响
-    captchaEnabled.value = false
-  }
+  })()
+  return captchaStatusPromise
 }
 
 onMounted(() => {
@@ -332,6 +370,20 @@ const onLogin = async () => {
 
   loading.value = true
   try {
+    // 验证码配置未知时先重试查询：拿到确定答案才允许提交（见 loadCaptchaStatus 注释）
+    if (captchaStatus.value !== 'ready') {
+      const ok = await loadCaptchaStatus()
+      if (!ok) {
+        ElMessage.error(t('login.captchaStatusFailed'))
+        return
+      }
+    }
+    // 开启验证码但图片尚未就绪（加载中/加载失败）：本次提交必然缺 captchaId，
+    // 直接拦下并指向占位图上的「点击重试」，不给后端制造一次无意义失败
+    if (captchaEnabled.value && !captchaId.value) {
+      ElMessage.warning(t('login.captchaLoading'))
+      return
+    }
     const payload = { username: loginForm.username.trim() }
     // 口令密文轨（FE-H1 / S-7）：encryptPassword 返回 null 仅限开发模式下
     // WebCrypto 不可用（本地纯 HTTP 联调）；生产构建下非安全上下文会抛
@@ -383,7 +435,17 @@ const onLogin = async () => {
     // I-01：令牌由响应 Set-Cookie 写入 httpOnly cookie，此处只校验业务成功与用户信息
     if (resp.success && resp.data?.user) {
       const { user } = resp.data
-      authStore.setAuth(user, user?.permissions || [])
+      // setAuth 会校验身份形状（缺 id 的对象一律拒绝）。不检查返回值的话，
+      // 一个 id 缺失的响应会被当作登录成功跳转，随后守卫按「未认证」把用户踢回登录页，
+      // 用户只看到一闪而过的成功提示，完全不知道发生了什么。
+      if (!authStore.setAuth(user, user?.permissions || [])) {
+        ElMessage.error(t('login.failed'))
+        if (captchaEnabled.value) {
+          loginForm.captchaText = ''
+          loadCaptcha()
+        }
+        return
+      }
       ElMessage.success(t('login.success'))
       // 跳转前清理敏感字段，避免密码/动态口令残留在内存中
       loginForm.password = ''
@@ -672,6 +734,10 @@ html.dark .login__grid {
   gap: 10px;
   width: 100%;
   align-items: center;
+}
+
+.login-card__captcha-error {
+  margin-bottom: 16px;
 }
 
 .login-card__captcha .el-input {

@@ -30,12 +30,16 @@ const mongoose = require('mongoose');
 
 const mockFindById = jest.fn();
 const mockFindOne = jest.fn();
+const mockFindByIdAndUpdate = jest.fn();
 jest.mock('../../models/User', () => {
   const actual = jest.requireActual('../../models/User');
   return {
     ...actual,
     findById: (...args) => mockFindById(...args),
     findOne: (...args) => mockFindOne(...args),
+    // 解锁路径会经 invalidateUserTokens 递增 tokenVersion；不桩掉会打到
+    // 未连接的 Mongoose 模型上，把「解锁成功」误判成 REVOKE_UNAVAILABLE。
+    findByIdAndUpdate: (...args) => mockFindByIdAndUpdate(...args),
   };
 });
 
@@ -74,6 +78,12 @@ jest.mock('../../services/statsCache', () => ({
 const RealUser = jest.requireActual('../../models/User');
 const authService = require('../../services/authService');
 const userService = require('../../services/userService');
+const sessionService = require('../../services/sessionService');
+
+// setUserLockStatus 的锁定/解锁尾部副作用（释放指派、吊销会话）都要连库：
+// 本套件不连库，走真实现会缓冲到 Mongoose 超时后才把错误交给用例。
+jest.spyOn(userService, 'releaseOpenAssignments').mockResolvedValue(undefined);
+jest.spyOn(sessionService, 'revokeAllSessionsSafe').mockResolvedValue(undefined);
 
 /**
  * 凭证/检索键列清单：这里是**独立字面量**，不从 helper 取。
@@ -175,6 +185,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockFindById.mockImplementation(() => fakeQuery());
   mockFindOne.mockImplementation(() => fakeQuery());
+  mockFindByIdAndUpdate.mockResolvedValue(null);
   mockRoleFind.mockImplementation(() => {
     const roles = [
       { _id: new mongoose.Types.ObjectId(), level: 1, code: 'GUEST', isBuiltIn: false },

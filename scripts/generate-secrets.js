@@ -17,8 +17,8 @@
  * --add-missing（O-4）：用于「现有部署新增了一项独立密钥」（如升级引入
  * redis_password）。旧实现只接受 --force 整套重生成，会把 JWT/AES/HMAC/DB
  * 全部轮换——全体下线、MFA 密文不可解密、审计 HMAC 失效。现在该模式只写
- * 目录中缺失的文件，已有文件一个字节都不动；mongodb_uri 由 mongo_root_password
- * 派生，三者（username/password/uri）必须同代次，缺任意一项即拒绝。
+ * 目录中缺失的文件，已有文件一个字节都不动；mongodb_uri 由应用账号
+ * （mongo_app_username/mongo_app_password）派生，三者必须同代次，缺任意一项即拒绝。
  *
  * 安全约定：
  *   - 生成结果只写向 --out 指定目录或 stdout，从不回显到日志文件；
@@ -30,7 +30,7 @@
  *     判不了（目标不在仓库里 / 机器没装 git）时只说明"没判成"，不拦——拦下一条轮换路径
  *     换来的安全性是负的；
  *   - 目录里已经躺着密钥文件时不再"缺哪个补哪个"：那会产出混合代次的一套，
- *     而 `mongodb_uri` 里拼的就是 `mongo_root_password`，两代混在一起应用连不上库。
+ *     而 `mongodb_uri` 里拼的就是 `mongo_app_password`，两代混在一起应用连不上库。
  *     要么 --force 重做整套，要么换一个空目录；
  *   - 文件一律 0600，目录 0700（非 Windows 平台）。
  */
@@ -154,6 +154,9 @@ const ecdhPublicKeySha256 = crypto
   .digest('hex');
 
 const mongoRootUsername = 'firesafety';
+// 2026-10-24 审计（P2）：应用不得以 root 连库。root 只保留给初始化/备份管理，
+// 应用使用仅对 fire_safety_db 有 readWrite 的专用账号（由 mongo-rs-init 幂等创建）。
+const mongoAppUsername = 'firesafety_app';
 
 const secrets = {
   jwt_secret: b64(48),
@@ -163,6 +166,24 @@ const secrets = {
   login_ecdh_private_key: ecdhPem,
   mongo_root_username: mongoRootUsername,
   mongo_root_password: b64(32),
+  // 应用专用数据库账号（仅 fire_safety_db 的 readWrite）。口令用 hex：
+  // 它要内嵌进 mongodb_uri 的 userinfo 段，base64 的 '/' ':' '#' '?' 未转义会被
+  // 驱动直接拒绝（见 composeMongodbUriSecretRecipe.test.js 的实测）。
+  mongo_app_username: mongoAppUsername,
+  mongo_app_password: hex(32),
+  // 副本集内部认证用的 keyfile（mongo 的 --keyFile）。
+  //
+  // 为什么必须有：MongoDB 5.x 起，`--replSet` + 启用授权（本仓由
+  // MONGO_INITDB_ROOT_USERNAME/PASSWORD 自动触发 `--auth`）若没有 keyFile，
+  // mongod **启动即失败**：`BadValue: security.keyFile is required when
+  // authorization is enabled with replica sets`。4.x 尚可，5.x 起是硬要求。
+  // 这与成员数量无关——单节点副本集同样要过这道启动检查。
+  //
+  // 长度口径：官方要求 6..1024 字符、且只含 base64 字符集。b64(512) 产出 684 字符，
+  // 落在区间内且留足熵。不要改成 hex——hex 也在 base64 字符集内，但没必要换编码。
+  // 文件权限由写入循环统一收成 0600；容器内还会再复制到 tmpfs 并收紧到 0400
+  // （MongoDB 拒绝 group/world 可读的 keyfile，而 docker secret 挂载是 0444）。
+  mongo_keyfile: b64(512),
   admin_initial_password: b64(24),
   // Grafana 初始管理员口令：docker-compose.yml 的 grafana 服务经
   // GF_SECURITY_ADMIN_PASSWORD__FILE 指向 ./secrets/grafana_admin_password。
@@ -174,13 +195,17 @@ const secrets = {
   // REDIS_PASSWORD_FILE 共用。b64(32) 即可——应用侧走 ioredis 的 password 选项，
   // 不进 URL userinfo，字符集不受 percent-encoding 约束
   redis_password: b64(32),
+  // /metrics 鉴权令牌（2026-10-24 审计）：app 经 METRICS_TOKEN_FILE 读取，
+  // Prometheus 经 bearer_token_file 读取同一份文件。
+  metrics_token: hex(32),
 };
 
-// mongodb_uri 依赖上面两项，拼接时必须用生成值而非占位符
+// mongodb_uri 依赖应用账号（不是 root）：应用被攻破/NoSQL 注入时只能碰
+// fire_safety_db，不能 dropDatabase / createUser / 读其它库。
 secrets.mongodb_uri =
-  `mongodb://${encodeURIComponent(secrets.mongo_root_username)}` +
-  `:${encodeURIComponent(secrets.mongo_root_password)}` +
-  '@mongo:27017/fire_safety_db?authSource=admin';
+  `mongodb://${encodeURIComponent(secrets.mongo_app_username)}` +
+  `:${encodeURIComponent(secrets.mongo_app_password)}` +
+  '@mongo:27017/fire_safety_db?authSource=fire_safety_db';
 
 // ================= 自检：全部满足 config/validate.js 的强度门槛 =================
 const strengthChecks = [
@@ -191,6 +216,8 @@ const strengthChecks = [
   ['admin_initial_password', secrets.admin_initial_password.length >= 16],
   ['grafana_admin_password', secrets.grafana_admin_password.length >= 16],
   ['redis_password', secrets.redis_password.length >= 16],
+  ['mongo_app_password', secrets.mongo_app_password.length >= 32],
+  ['metrics_token', secrets.metrics_token.length >= 32],
 ];
 const weak = strengthChecks.filter(([, ok]) => !ok).map(([name]) => name);
 if (weak.length > 0) {
@@ -279,8 +306,8 @@ if (outDir) {
   // ---- 前置检查 B：目录里已有密钥时不再"缺哪个补哪个" ----
   // 原实现在写入循环里逐个 `已存在，跳过` ⇒ 一次中断后的重跑会产出一个**混合代次**目录：
   // 已存在的是上一代随机值，缺的那几个是这一代。多数密钥彼此独立，混着看不出问题，
-  // 但 `mongodb_uri` 是把 `mongo_root_password` 拼进去生成的——上一代的密码 + 这一代的 URI
-  // 会同时躺在这个目录里。mongo 初始化用的是 `mongo_root_password`，应用连的是 `mongodb_uri`，
+  // 但 `mongodb_uri` 是把 `mongo_app_password` 拼进去生成的——上一代的密码 + 这一代的 URI
+  // 会同时躺在这个目录里。mongo-rs-init 用文件里的应用账号口令建号，应用连的是 `mongodb_uri`，
   // 于是轮换"成功"结束、应用第一次连库就认证失败，而现场证据是两份都是刚生成的 0600 文件。
   // 现在要么整套覆盖（--force），要么不动（拒绝），不存在半新半旧这一档。
   // 写入中途挂掉（磁盘满/权限）时 writeFileSync 直接抛出、进程非零退出，留下的也是半个目录——
@@ -288,9 +315,10 @@ if (outDir) {
   // 恰好把它拉回"一整套同代次"。判齐否的那几条分支本机造不出可复现的触发形态，
   // 留着只会是一条没人证过的代码。
   const alreadyThere = Object.keys(secrets).filter((name) => fs.existsSync(path.join(dir, name)));
-  // mongodb_uri 由 mongo_root_password（及 username）派生，三者必须同代次。
+  // mongodb_uri 由应用账号（mongo_app_username/password）派生，三者必须同代次。
   // --add-missing 只在三者「全缺」或「全有」时放行；部分缺失时补谁都会错。
-  const MONGO_GROUP = ['mongo_root_username', 'mongo_root_password', 'mongodb_uri'];
+  // root 凭据不在此列：它只被 mongo 初始化与 mongo-rs-init 使用，与 URI 无派生关系。
+  const MONGO_GROUP = ['mongo_app_username', 'mongo_app_password', 'mongodb_uri'];
   let toWrite = Object.keys(secrets);
   if (addMissing) {
     const present = new Set(alreadyThere);
@@ -300,8 +328,8 @@ if (outDir) {
       console.error(
         `已有：${mongoPresent.join(', ')}；缺：${MONGO_GROUP.filter((n) => !present.has(n)).join(', ')}`
       );
-      console.error('mongodb_uri 由 mongo_root_password 拼出，补缺项会让两者分属两代随机值。');
-      console.error('请手工核对并补齐三者（保持 uri 中的口令与 mongo_root_password 一致），');
+      console.error('mongodb_uri 由 mongo_app_password 拼出，补缺项会让两者分属两代随机值。');
+      console.error('请手工核对并补齐三者（保持 uri 中的口令与 mongo_app_password 一致），');
       console.error('或用 --force 重做全套（会轮换所有密钥，须同步迁移）。');
       process.exit(1);
     }
@@ -318,7 +346,7 @@ if (outDir) {
     console.error(`--out 目录里已经有 ${alreadyThere.length} 个密钥文件：${dir}`);
     console.error(`已有：${alreadyThere.join(', ')}`);
     console.error(
-      '不再"缺哪个补哪个"：那样产出的目录里，`mongodb_uri` 可能与 `mongo_root_password`'
+      '不再"缺哪个补哪个"：那样产出的目录里，`mongodb_uri` 可能与 `mongo_app_password`'
     );
     console.error('分属两代随机值（前者是后者拼进去的），应用会带着对不上的连接串启动。');
     console.error('两条出路：加 --force 重做**整套**（旧值全部覆盖），或换一个空目录。');

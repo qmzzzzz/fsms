@@ -34,7 +34,10 @@ const DATA_SCOPE_FIELDS = {
     departmentField: 'location.building',
   },
   inspection: {
-    ownerField: 'assignedTo',
+    // assignedTo：负责执行的人；createdBy：创建计划的人。
+    // 只保留 assignedTo 时，self 档创建者把计划指派给别人后，自己创建的计划
+    // 会从列表/详情里整体消失（与 alarm 的 reporter/handler 双属主同一条教训）。
+    ownerField: ['assignedTo', 'createdBy'],
     departmentField: 'locations.building',
   },
   user: {

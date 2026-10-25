@@ -215,7 +215,17 @@ describe('批次E 架构与性能加固回归', () => {
   });
 
   describe('审计链锁超时保护', () => {
-    test('fn 悬挂时锁在超时后释放，后续调用不被永久阻塞', async () => {
+    /**
+     * 契约在 B-L5 之后反转了：此前断言「超时即释放锁、后续调用照常继续」，而这正是
+     * 分叉的来源——超时只停止等待，fn 仍在飞；后续批次从同一个旧尾续链，僵尸一旦
+     * 落库就是「一父两子」。现在超时后必须冻结本进程的链写入，直到僵尸落定并重同步。
+     *
+     * 这里用**永不 settle** 的 fn 钉住最坏边界：冻结会一直持续到进程重启（jest 用
+     * resetModules 模拟），而不是被一个假的宽限计时器悄悄解除——解除的瞬间就等于
+     * 放行一条可能与僵尸共享父哈希的新链。真实驱动操作有 serverSelectionTimeoutMS
+     * 等上限，不会无限悬挂；审计写入此时留在缓冲/WAL，优先保证链完整性。
+     */
+    test('fn 悬挂持锁超时 → 后续写入被冻结拒绝，不得从旧尾续链', async () => {
       jest.resetModules();
       process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS = '80';
       const { withChainLock } = require('../../utils/auditChain');
@@ -223,18 +233,21 @@ describe('批次E 架构与性能加固回归', () => {
       // 第一个持有者永不 settle（模拟 Mongo 无响应）
       const hung = withChainLock(() => new Promise(() => {})).catch((e) => e);
 
-      // 第二个调用必须能在超时窗口后拿到锁并正常完成
-      const started = Date.now();
-      const result = await withChainLock(() => Promise.resolve('ok'));
-      const waited = Date.now() - started;
-
-      expect(result).toBe('ok');
-      // 等待时间不应远超超时阈值（宽松上界，避免 CI 抖动误报）
-      expect(waited).toBeLessThan(2000);
+      // 超时后的第二次调用必须立刻被冻结窗口拒绝，且 fn 一次都不能执行
+      const nextFn = jest.fn().mockResolvedValue('ok');
+      await expect(withChainLock(nextFn)).rejects.toThrow(/冻结窗口/);
+      expect(nextFn).not.toHaveBeenCalled();
 
       const hungErr = await hung;
       expect(hungErr).toBeInstanceOf(Error);
       expect(hungErr.message).toContain('超时');
+
+      // 冻结是进程内状态：新进程（新模块实例）不应继承上一进程的悬挂窗口
+      jest.resetModules();
+      const fresh = require('../../utils/auditChain');
+      await expect(fresh.withChainLock(() => Promise.resolve('after-restart'))).resolves.toBe(
+        'after-restart'
+      );
 
       delete process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
       jest.resetModules();

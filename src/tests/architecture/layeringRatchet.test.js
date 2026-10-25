@@ -42,15 +42,17 @@ const MODELS_DIR = path.join(__dirname, '../../models');
 // reportStatsService.getAlarmReportData；admin.js 的角色查询改用 roleService.findRolesByIds；
 // overview.js 删除对 AuditLog 的重复 require（改用 shared 已提供的同一模型入口）。
 // 四处实测归零，按"减到 0 后从名单移除"退场，剩余 8 处继续由棘轮锁定。
+// 2026-10-21 MFA 审计与恢复码原语下沉 mfaService：mfaController 不再直连
+// models/AuditLog，实测 2→1，同步收紧申报值。
 const GRANDFATHERED = {
   'securityController/shared.js': 3,
   'authController/credentials.js': 1,
   'authController/profile.js': 1,
-  'mfaController.js': 2,
+  'mfaController.js': 1,
   'auditController.js': 1,
 };
 
-const TOTAL_BASELINE = Object.values(GRANDFATHERED).reduce((a, b) => a + b, 0); // 8（与实测一致）
+const TOTAL_BASELINE = Object.values(GRANDFATHERED).reduce((a, b) => a + b, 0); // 7（与实测一致）
 
 // 计数口径（2026-10-19 改成**路径解析**，历史两版一并记下）：
 //   · 初版正则只认 require('../models/Xxx') 单引号带斜杠形态，实测漏掉无斜杠聚合入口

@@ -207,6 +207,16 @@ jest.mock('../../services/userService', () => {
         roles: pickUnique(mockStore.roles, u.roles),
       }))
     ),
+    // M-01：批量删除的条件写需要原始 roles/范围字段快照（findBatchUsers 的 roles
+    // 已被 populate 成文档，不能直接用作数组等值过滤值）
+    findUserSnapshots: jest.fn(async (ids) =>
+      pickUnique(mockStore.users, ids).map((u) => ({
+        _id: u._id,
+        roles: [...(u.roles || [])],
+        department: u.department,
+        createdBy: u.createdBy,
+      }))
+    ),
     deleteMany: jest.fn(async (filter) => {
       const requested = ((filter && filter._id && filter._id.$in) || []).map(castId);
       const existing = [...new Set(requested)].filter((id) => mockStore.users[id]);
@@ -281,6 +291,13 @@ jest.mock('../../services/InspectionService', () => ({
   updateInspection: jest.fn(async (inspection, updates) => ({ ...inspection, ...updates })),
 }));
 
+// 控制器在落库后会调 DeviceService.findMissingIds 做写后复验（悬空引用摘除）。
+// 本套件不连库，若让它走真实实现，Mongoose 会缓冲到超时再把错误交给 next——
+// 这里按"设备全部仍在"桩成空缺失集，写后复验的分支由巡检侧自己的用例覆盖。
+jest.mock('../../services/DeviceService', () => ({
+  findMissingIds: jest.fn(async () => []),
+}));
+
 jest.mock('../../controllers/inspectionGuards', () => {
   const actual = jest.requireActual('../../controllers/inspectionGuards');
   return {
@@ -314,6 +331,12 @@ jest.mock('../../services/roleService', () => {
     // #39 断言的就是它——"校验看 A、写入看 B"这种半修复只有在这里才现形。
     saveRole: jest.fn(async (role) => {
       mockStore.savedRole = { _id: role._id, permissions: role.permissions };
+      return mockStore.savedRole;
+    }),
+    // L-04 起权限集合走 CAS 写回（带载入快照）；本替身同样只记录最终写入的那一份，
+    // 让 #39 的「校验看 A、写入看 B」判据在改道后继续有效。
+    updateRolePermissions: jest.fn(async (id, permissions) => {
+      mockStore.savedRole = { _id: id, permissions };
       return mockStore.savedRole;
     }),
     listUsersWithRole: jest.fn(async () => []),
@@ -601,6 +624,19 @@ describe('第 4 组 · DELETE /api/users/batch 的重复 id', () => {
     const res = await batch([mockIds.peerA, 'not-hex', mockIds.peerA]);
     expect(errorCodeOf(res)).toBe('USER_ID_FORMAT_INVALID_IN_LIST');
     expect(userService.findBatchUsers.mock.calls.length).toBe(0);
+  });
+
+  test('两次读取之间用户消失导致快照缺失 → 409，不得退化成无条件删除', async () => {
+    // findBatchUsers 与 findUserSnapshots 并行执行；快照查询晚于用户被删除时
+    // Map 里是 undefined，展开后过滤条件只剩 { _id }（fail-open）。
+    const defaultSnapshots = userService.findUserSnapshots.getMockImplementation();
+    userService.findUserSnapshots.mockImplementationOnce(async (ids) =>
+      (await defaultSnapshots(ids)).filter((s) => String(s._id) !== mockIds.peerA)
+    );
+
+    const res = await batch([mockIds.peerA, mockIds.peerB]);
+    expect(errorCodeOf(res)).toBe('USER_STATE_CONFLICT');
+    expect(userService.deleteMany.mock.calls.length).toBe(0);
   });
 });
 
@@ -1012,11 +1048,11 @@ describe('第 8 组 · 大写 :id 走单个入口', () => {
  *  2. roleController.js:115 的权限 id 归一由 src/tests/controllers/
  *     roleCreatePermissionExistence.test.js 钉住"去重"，**没有大小写腿**——把 uniqueIdStrings
  *     换回 `new Set(map(String))` 那一套腿照样绿。该文件是并行 agent 的已提交用例，改动前需协调。
- *  3. 三处 service 侧 `findScopeFieldsByIds`（userService.js:219、DeviceService.js:127、
+ *  3. 三处 service 侧 `findScopeFieldsByIds`（userService.js:278、DeviceService.js:135、
  *     AlarmService.js:181）的归一没有腿，且在当前接线下**造不出**能红的腿：调用方（守卫）
  *     已经先归一过一次，服务层这一句是幂等冗余 ⇒ 删掉它是等价变异。留着是纵深防御
  *     （新调用方不必重新想一遍口径），但要写清"这里没有腿，别把它当已覆盖"。
- *  4. permissionService.js:53（列表臂）与 permissionService.js:73（单值比对臂）由 src/tests/services/
+ *  4. permissionService.js:95（列表臂）与 permissionService.js:115（单值比对臂）由 src/tests/services/
  *     permissionParentIdCaseAndDedup.test.js（6 腿）钉。该闸台账里 parent-norm-dropped 是
  *     **已声明的等价变异**（本站点没有长度比较 ⇒ 预期存活），真正钉行为的是 parent-compare-raw
  *     （红:#2,#3,#5）。

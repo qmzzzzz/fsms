@@ -31,7 +31,7 @@ const isWindows = process.platform === 'win32';
 /**
  * 收紧单个路径的权限
  * @param {string} target 文件或目录的路径
- * @param {{ isDir?: boolean, log?: (msg: string) => void }} [opts]
+ * @param {{ isDir?: boolean, recursive?: boolean, log?: (msg: string) => void }} [opts]
  * @returns {{ ok: boolean, method: string, detail: string }}
  */
 function hardenPath(target, opts = {}) {
@@ -65,10 +65,17 @@ function hardenPath(target, opts = {}) {
   // "显式 ACE 存活"的半套收紧（F-189）。共用 argv 后二者不可能再分叉。
   // 提示用解析后的真实用户名而不是 `%USERNAME%`：后者只在 cmd.exe 里展开，
   // 粘进 PowerShell（如今 Windows 开发机的默认 shell）会原样传给 icacls 并失败。
-  const dirFlags = isDir ? ['/T', '/C', '/Q'] : [];
+  // recursive=false：目录只收紧自身，不 reset 子项——用于目录与其它文件共享
+  // （如 logs/ 下的 WAL）的场景；需要清除子文件显式 ACE 时由调用方逐个收紧。
+  const recursive = opts.recursive !== false;
+  const resetFlags = isDir && recursive ? ['/T', '/C', '/Q'] : [];
   const ace = isDir ? '(OI)(CI)F' : 'F';
-  const resetArgv = [target, '/reset', ...dirFlags];
-  const grantArgv = [target, '/inheritance:r', '/grant:r', `${user}:${ace}`, ...dirFlags];
+  const resetArgv = [target, '/reset', ...resetFlags];
+  // 目录的授予**不得带 /T**：/T 会把 (OI)(CI) 继承专用 ACE 直接写进每个子文件，
+  // 而该 ACE 对文件自身不生效 ⇒ 子文件 DACL 被清空，连所有者都打不开（实测 EPERM，
+  // 仓库 logs/ 下的日志文件全部中招）。递归清理由 reset 的 /T 完成；子文件随后从
+  // 目录继承本条授予。
+  const grantArgv = [target, '/inheritance:r', '/grant:r', `${user}:${ace}`];
   const execOpts = { stdio: 'pipe', windowsHide: true };
   // 渲染成**可直接粘贴**的命令行：开关原样、含空格的参数（路径、用户名）加引号。
   const show = (argv) => `icacls ${argv.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ')}`;

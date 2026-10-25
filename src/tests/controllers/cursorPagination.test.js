@@ -10,6 +10,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 const { TEST_CLIENT_IP } = require('../fixtures');
 
 describe('高量级列表游标分页', () => {
@@ -127,7 +128,11 @@ describe('高量级列表游标分页', () => {
   });
 
   const authed = () => ({
-    get: (url) => request(app).get(url).set('Authorization', `Bearer ${adminToken}`),
+    get: (url) =>
+      request(app)
+        .get(url)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .set(reauthHeaders(adminToken)),
   });
 
   /**
@@ -159,7 +164,8 @@ describe('高量级列表游标分页', () => {
   };
 
   test('设备列表：游标遍历无重复无遗漏，deviceCode 升序', async () => {
-    const { collected, pages } = await walkCursor(`/api/devices?search=${stamp}`, 3, {
+    // 设备编码搜索是锚定前缀（P2-6：命中 deviceCode 唯一索引），造数前缀是 CT-<stamp>
+    const { collected, pages } = await walkCursor(`/api/devices?search=CT-${stamp}`, 3, {
       itemsOf: (body) => body.data,
       cursorOf: (body) => body.pagination.nextCursor,
     });
@@ -248,11 +254,11 @@ describe('高量级列表游标分页', () => {
   });
 
   test('游标模式响应不携带 total（设备/报警/巡检）', async () => {
-    const first = await authed().get(`/api/devices?search=${stamp}&limit=3`);
+    const first = await authed().get(`/api/devices?search=CT-${stamp}&limit=3`);
     const cursor = first.body.pagination.nextCursor;
     expect(cursor).toBeTruthy();
     const second = await authed().get(
-      `/api/devices?search=${stamp}&limit=3&cursor=${encodeURIComponent(cursor)}`
+      `/api/devices?search=CT-${stamp}&limit=3&cursor=${encodeURIComponent(cursor)}`
     );
     expect(second.status).toBe(200);
     expect(second.body.pagination.total).toBeNull();

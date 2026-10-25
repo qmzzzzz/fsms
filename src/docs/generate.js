@@ -78,6 +78,27 @@ function body(schema, required = true) {
   return { required, content: { 'application/json': { schema } } };
 }
 
+// 二次验证凭据：写操作（重置 MFA / 安全开关）与签发审计票据共用字段。
+const reauthCredentialProperties = {
+  currentPassword: {
+    type: 'string',
+    description: '当前密码（与 encCurrentPassword、mfaCode 三选一）',
+  },
+  encCurrentPassword: { type: 'string', description: 'ECDH 信封加密后的当前密码' },
+  mfaCode: {
+    type: 'string',
+    pattern: '^\\d{6}$',
+    description: '6 位 TOTP 动态口令（已开启 MFA 时必用）',
+  },
+};
+const reauthTicketHeader = {
+  name: 'X-Reauth-Ticket',
+  in: 'header',
+  required: true,
+  schema: { type: 'string' },
+  description: 'POST /api/security/reauth 换取的短时票据（5 分钟，绑定账号与会话）',
+};
+
 // ==================== Auth ====================
 spec.paths['/api/auth/register'] = {
   post: p('post', ['Auth'], '用户注册', {
@@ -317,7 +338,11 @@ spec.paths['/api/users'] = {
       required: ['username', 'email', 'password'],
       properties: {
         username: { type: 'string' },
-        email: { type: 'string' },
+        email: {
+          type: 'string',
+          description:
+            '创建必填；更新时可省略（键缺失=不修改）。用户列表/详情/建号/改号/角色回显只返回 emailMasked，不含明文',
+        },
         password: { type: 'string' },
         realName: { type: 'string' },
         // 写入收明文、读出只给脱敏值：这个不对称是刻意的，理由见
@@ -872,6 +897,36 @@ spec.paths['/api/reports/export'] = {
   }),
 };
 
+// L-17：未脱敏导出只走 POST —— 凭据不能进 URL（日志/Referer 泄漏），
+// 且必须与 GET 的掩码档分开，避免持会话者绕过步进验证批量拉真实姓名。
+spec.paths['/api/reports/export/pii'] = {
+  post: p('post', ['Reports'], '导出未脱敏报表（真实姓名，需二次验证）', {
+    description:
+      '仅支持 alarms/inspections；需 report:export + pii:export，请求体携带当前密码或 MFA 码',
+    parameters: [
+      {
+        name: 'type',
+        in: 'query',
+        required: true,
+        schema: { type: 'string', enum: ['alarms', 'inspections'] },
+      },
+      ...dateRangeParams,
+    ],
+    requestBody: body(
+      {
+        type: 'object',
+        properties: reauthCredentialProperties,
+      },
+      false
+    ),
+    responses: {
+      200: { description: '返回未脱敏 Excel 文件流' },
+      400: { description: '报表类型不支持或凭据格式无效' },
+      429: { description: '请求过于频繁' },
+    },
+  }),
+};
+
 // ==================== Security ====================
 spec.paths['/api/security/my-info'] = {
   get: p('get', ['Security'], '获取当前用户安全信息', {
@@ -900,6 +955,26 @@ spec.paths['/api/security/bindings'] = {
   }),
 };
 
+spec.paths['/api/security/reauth'] = {
+  post: p('post', ['Security'], '完成二次验证并换取审计读取票据', {
+    description:
+      '审计读取端点（/alerts、/audit-logs、/audit-logs/export）需携带 X-Reauth-Ticket。' +
+      '本端点校验当前密码或 MFA 动态口令，成功后返回 5 分钟有效、绑定账号与会话的票据。',
+    requestBody: body(
+      {
+        type: 'object',
+        properties: reauthCredentialProperties,
+      },
+      false
+    ),
+    responses: {
+      ...ok('返回 { ticket, expiresIn }'),
+      ...forbidden,
+      400: { description: '凭据格式无效' },
+    },
+  }),
+};
+
 spec.paths['/api/security/view-sensitive'] = {
   post: p('post', ['Security'], '查看敏感数据（需二次验证）', {
     requestBody: body({
@@ -914,6 +989,24 @@ spec.paths['/api/security/view-sensitive'] = {
 spec.paths['/api/security/stats'] = {
   get: p('get', ['Security'], '获取系统安全统计（管理员）', {
     responses: ok('返回今日登录数、失败登录数、高风险操作数、异常行为'),
+  }),
+};
+
+// 举报对话框的对象选择器取数：免权限码（举报对全员开放），但候选集已被
+// **举报人数据范围**过滤，判据与 POST /report 的目标核验同源（buildRecordScopeFilter
+// ↔ isRecordInScope）。system 不指向具体对象，不在 type 枚举内。
+spec.paths['/api/security/report-targets'] = {
+  get: p('get', ['Security'], '列出当前用户数据范围内可举报的对象', {
+    parameters: [
+      {
+        name: 'type',
+        in: 'query',
+        required: true,
+        schema: { type: 'string', enum: ['user', 'device', 'alarm'] },
+      },
+      { name: 'keyword', in: 'query', schema: { type: 'string', maxLength: 100 } },
+    ],
+    responses: ok('返回候选对象列表（id / kind / code / name / detail，报警另有 occurredAt）'),
   }),
 };
 
@@ -969,12 +1062,16 @@ spec.paths['/api/security/overview'] = {
   }),
 };
 spec.paths['/api/security/alerts'] = {
-  get: p('get', ['Security'], '获取最近安全告警', { responses: ok('返回最近50条告警') }),
+  get: p('get', ['Security'], '获取最近安全告警', {
+    parameters: [reauthTicketHeader],
+    responses: { ...ok('返回最近50条告警'), 401: { description: '缺少或无效的二次验证票据' } },
+  }),
 };
 
 spec.paths['/api/security/audit-logs'] = {
   get: p('get', ['Security'], '查询审计日志（多维度筛选）', {
     parameters: [
+      reauthTicketHeader,
       { name: 'page', in: 'query', schema: { type: 'integer', default: 1 } },
       { name: 'limit', in: 'query', schema: { type: 'integer', default: 20, maximum: 1000 } },
       { name: 'startDate', in: 'query', schema: { type: 'string' } },
@@ -1007,7 +1104,7 @@ spec.paths['/api/security/config/allowPublicRegistration'] = {
     requestBody: body({
       type: 'object',
       required: ['allowPublicRegistration'],
-      properties: { allowPublicRegistration: { type: 'boolean' } },
+      properties: { allowPublicRegistration: { type: 'boolean' }, ...reauthCredentialProperties },
     }),
   }),
 };
@@ -1020,7 +1117,7 @@ spec.paths['/api/security/config/loginCaptchaEnabled'] = {
     requestBody: body({
       type: 'object',
       required: ['loginCaptchaEnabled'],
-      properties: { loginCaptchaEnabled: { type: 'boolean' } },
+      properties: { loginCaptchaEnabled: { type: 'boolean' }, ...reauthCredentialProperties },
     }),
   }),
 };
@@ -1069,11 +1166,13 @@ spec.paths['/api/security/ip-list/query'] = {
 // L-24：以下 4 个端点此前只存在于产物、生成器中缺失（同上方 Auth 块）。
 spec.paths['/api/security/users/{userId}/mfa/reset'] = {
   put: p('put', ['Security'], '管理员重置用户两步验证（清除密钥/恢复码并强制下线）', {
+    description: '清除他人第二因子属账户接管级操作，要求操作者本人通过一次二次验证。',
     parameters: [{ name: 'userId', in: 'path', required: true, schema: { type: 'string' } }],
+    requestBody: body({ type: 'object', properties: reauthCredentialProperties }, false),
     responses: {
       ...ok('两步验证已重置'),
       400: { description: '未开启 MFA / 目标为自身' },
-      403: { description: '同级或更高层级 / 内置超管' },
+      403: { description: '同级或更高层级 / 内置超管 / 二次验证未通过' },
     },
   }),
 };
@@ -1088,6 +1187,7 @@ spec.paths['/api/security/audit-logs/verify'] = {
 spec.paths['/api/security/audit-logs/export'] = {
   get: p('get', ['Security'], '导出审计日志（CSV + sha256 签名 manifest，流式输出）', {
     parameters: [
+      reauthTicketHeader,
       { name: 'limit', in: 'query', schema: { type: 'integer' } },
       { name: 'from', in: 'query', schema: { type: 'string' } },
     ],
@@ -1103,7 +1203,7 @@ spec.paths['/api/security/config/registerCaptchaEnabled'] = {
     requestBody: body({
       type: 'object',
       required: ['registerCaptchaEnabled'],
-      properties: { registerCaptchaEnabled: { type: 'boolean' } },
+      properties: { registerCaptchaEnabled: { type: 'boolean' }, ...reauthCredentialProperties },
     }),
     responses: ok('开关已更新'),
   }),

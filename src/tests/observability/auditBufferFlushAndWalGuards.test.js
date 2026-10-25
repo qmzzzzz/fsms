@@ -29,7 +29,7 @@
  *
  * 目标：将 branches 从 ~30% 提到 >=75%。
  * 覆盖路径：flush 成功/失败/毒文档隔离、WAL trim/replay、缓冲硬上限裁剪、
- * ensureLogsDir、定时器回调、isWalEnabled、getStats。
+ * ensureWalDirWritable（auditWalPermissions）、定时器回调、isWalEnabled、getStats。
  *
  * 约束：不用 jest.useFakeTimers（与 mongodb-memory-server 冲突），
  * 改用 spyOn(setInterval) 捕获回调后手动触发。
@@ -546,8 +546,8 @@ describe('auditBuffer 分支补齐', () => {
     });
   });
 
-  // ---- ensureLogsDir ----
-  describe('ensureLogsDir', () => {
+  // ---- ensureWalDirWritable ----
+  describe('WAL 目录可写性', () => {
     test('WAL 目录已存在时 start 不报错', () => {
       mockTimer();
       expect(() => auditBuffer.start()).not.toThrow();
@@ -719,7 +719,7 @@ describe('auditBuffer 分支补齐', () => {
   });
 
   // ---- WAL 目录不存在时 start 自动创建 ----
-  describe('ensureLogsDir 创建目录', () => {
+  describe('WAL 目录自动创建', () => {
     test('WAL 父目录不存在时 start 自动 mkdirSync', () => {
       // 【顺序无关修复】原用例删的是 auditBuffer.getWalPath() 的目录，但在
       // startup() 之前该函数返回**模块加载期的默认派生路径**（仓库 logs/），

@@ -1,30 +1,22 @@
 /**
- * 回归：`mfaEnable` 必须以「单调推进」方式记录 mfaLastCounter。
+ * 回归：`mfaEnable` 必须**原子认领** TOTP 时间窗，不得再用 `$max`。
  *
- * verifyTotp 有 ±1 窗口（utils/totp.js），因此本端点校验通过的码可能是
- * 比登录/step-up 已推进值更低的时间窗。旧实现无条件覆写
- * `mfaLastCounter: totpResult.counter` 会把登录侧条件更新
- * （authService.js:536，`mfaLastCounter < counter`）刚刚推进的守卫拉回，
- * 令那条已消费的码在其残余有效期内重放换第二个会话——即 TOTP 双花。
- *
- * 本测把不变式钉死：写库时必须用 `$max:{mfaLastCounter}`，且不得再出现
- * 顶层 `mfaLastCounter` 直接赋值。pre-fix（顶层赋值）→ 红；post-fix（$max）→ 绿。
- *
- * 范围修订（2026-09-19）：本文件标题原是"MFA 生命周期端点"，但用例只覆盖
- * `mfaEnable`，而那正是**唯一**该用 $max 的端点——`mfaDisable` 与
- * `regenerateRecoveryCodes` 已升级为「原子认领」（$lt 条件更新 + 不命中即拒绝），
- * 因为 $max 从不拒绝请求，等于水位的码（登录刚消费掉的那个）照样能冒关 MFA /
- * 铸 10 张恢复码。mfaEnable 没有这个洞：口令校验之前 `MFA_ALREADY_ENABLED`
- * 已把"启用态"挡掉，且开启动作本身不授予访问 ⇒ 无状态可双花。
- * 那两处的门禁在 `mfaLifecycleTotpClaim.test.js`（行为）与
- * `mfaTotpClaimImplementation.test.js`（计数不翻倍 / 审计可区分 / fail-closed）。
- * 若有人把这里的 $max "顺手统一"成认领，本文件会红——那是提示不是回归：
- * 请先确认 mfaEnable 真的出现了可双花的状态，再一起改三处。
+ * 历史：另外两个生命周期端点（disable / regenerate）早已改为 claimTotpWindow，
+ * 本端点曾保留 `$max`。当时的理由是"校验前 MFA_ALREADY_ENABLED 已挡掉启用态，
+ * 开启动作本身不授予访问 ⇒ 无状态可双花"。这个理由漏了两条真实路径：
+ *   ① 并发两次 enable 携带同一个码：两次校验都通过，`$max` 从不拒绝任何请求；
+ *   ② 账号关闭 MFA 后重新 enroll/enable 时 mfaLastCounter 仍保留上一次生命周期的
+ *      水位（disable 有意不清），等于水位的旧窗口在 `$max` 下照样能通过。
+ * 现与 disable / regenerate / 登录统一为 claimTotpWindow：同一时间窗只能用一次，
+ * 互斥由 DB 条件更新保证。本文件把该选择钉死：用 $max 或顶层赋值 → 红。
  */
 
 jest.mock('../../models/User', () => ({
   findById: jest.fn(() => ({ select: jest.fn() })),
   findByIdAndUpdate: jest.fn(() => Promise.resolve()),
+  // enable 用条件更新（mfaEnabled:false + 同一密钥）兜住"相邻窗口的并发 enable"，
+  // 默认返回命中的文档；认领失败用例里不应被调用。
+  findOneAndUpdate: jest.fn(() => Promise.resolve({ _id: 'u1', mfaEnabled: true })),
 }));
 jest.mock('../../models/AuditLog', () => ({
   record: jest.fn(() => Promise.resolve()),
@@ -32,13 +24,18 @@ jest.mock('../../models/AuditLog', () => ({
   buildSensitiveActionDoc: jest.fn(() => ({ action: 'mfa_enable', category: 'auth' })),
   create: jest.fn(() => Promise.resolve()),
 }));
-jest.mock('../../services/mfaService', () => ({
-  hashRecoveryCode: jest.fn((c) => `hash:${c}`),
-  generateRecoveryCodes: jest.fn(() => ['r1', 'r2']),
-  isMfaLocked: jest.fn(() => Promise.resolve(false)),
-  recordMfaFailure: jest.fn(),
-  resetMfaFailures: jest.fn(() => Promise.resolve()),
-}));
+jest.mock('../../services/mfaService', () => {
+  const actual = jest.requireActual('../../services/mfaService');
+  return {
+    ...actual,
+    hashRecoveryCode: jest.fn((c) => `hash:${c}`),
+    generateRecoveryCodes: jest.fn(() => ['r1', 'r2']),
+    isMfaLocked: jest.fn(() => Promise.resolve(false)),
+    recordMfaFailure: jest.fn(),
+    resetMfaFailures: jest.fn(() => Promise.resolve()),
+    claimTotpWindow: jest.fn(() => Promise.resolve(true)),
+  };
+});
 jest.mock('../../utils/mfaSecret', () => ({
   decryptMfaSecret: jest.fn(() => 'plain-secret'),
   encryptMfaSecret: jest.fn(),
@@ -48,7 +45,6 @@ jest.mock('../../utils/totp', () => ({
   otpauthUri: jest.fn(() => 'otpauth://totp/x'),
   verifyTotpDetailed: jest.fn(),
 }));
-jest.mock('../../utils/loginCipher', () => ({ decryptLoginCredential: jest.fn() }));
 jest.mock('../../middleware/auth', () => ({ invalidateUserCache: jest.fn() }));
 jest.mock('../../utils/logger', () => ({
   info: jest.fn(),
@@ -59,6 +55,7 @@ jest.mock('../../utils/logger', () => ({
 jest.mock('../../utils/metrics', () => ({ incMfaAction: jest.fn() }));
 
 const User = require('../../models/User');
+const mfaService = require('../../services/mfaService');
 const { verifyTotpDetailed } = require('../../utils/totp');
 const controller = require('../../controllers/mfaController');
 
@@ -72,16 +69,17 @@ const makeRes = () => {
     res.body = b;
     return res;
   });
-  res.cookie = jest.fn();
   return res;
 };
 
 const run = async (fn, req) => {
+  const res = makeRes();
   const next = jest.fn((e) => {
     if (e) throw e;
   });
-  await fn(req, makeRes(), next);
+  await fn(req, res, next);
   await new Promise((r) => setImmediate(r));
+  return res;
 };
 
 beforeEach(() => {
@@ -93,9 +91,9 @@ beforeEach(() => {
   }));
 });
 
-describe('MFA 端点 mfaLastCounter 单调推进（防 TOTP 重放守卫被拉回）', () => {
-  test('mfaEnable 成功时用 $max 记录时间窗，不再顶层直接赋值', async () => {
-    // 模拟：本端点消费的是较低窗口 N=555（登录此前已推进到更高值，$max 不得拉回）
+describe('MFA 端点原子认领时间窗（防 TOTP 重放）', () => {
+  test('mfaEnable 成功时用 claimTotpWindow 认领，且不再写 mfaLastCounter', async () => {
+    // 模拟：本端点消费的是较低窗口 N=555（登录此前已推进到更高值）
     verifyTotpDetailed.mockReturnValue({ valid: true, counter: 555 });
 
     await run(controller.mfaEnable, {
@@ -105,28 +103,39 @@ describe('MFA 端点 mfaLastCounter 单调推进（防 TOTP 重放守卫被拉�
       user: { userId: 'u1', username: 'alice' },
     });
 
-    expect(User.findByIdAndUpdate).toHaveBeenCalledTimes(1);
-    const update = User.findByIdAndUpdate.mock.calls[0][1];
-    expect(update.mfaEnabled).toBe(true);
-    // 核心不变式：单调推进
-    expect(update.$max).toEqual({ mfaLastCounter: 555 });
-    // 且绝不能退回旧的顶层无条件覆写
+    expect(mfaService.claimTotpWindow).toHaveBeenCalledWith('u1', 555);
+    expect(User.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    const [filter, update] = User.findOneAndUpdate.mock.calls[0];
+    // 条件更新：只有"仍未开启且密钥未被换掉"时才能落库
+    expect(filter).toMatchObject({ _id: 'u1', mfaEnabled: false, mfaSecret: 'enc' });
+    expect(update.$set.mfaEnabled).toBe(true);
+    // 水位由 claim 推进；此处再写一次会重新制造"验证与写库之间"的窗口
+    expect(update.$max).toBeUndefined();
+    expect(update.$set.mfaLastCounter).toBeUndefined();
     expect(update.mfaLastCounter).toBeUndefined();
+    // 【2026-10-24 补】顺序也是一条安全判据：必须**先认领再写库**。
+    // 反过来的话，两个并发请求可以双双通过校验、双双写库成功，认领只是事后记账——
+    // 这正是本文件要防的双花，而上面的断言（各自都成立）对顺序完全不敏感。
+    expect(mfaService.claimTotpWindow.mock.invocationCallOrder[0]).toBeLessThan(
+      User.findOneAndUpdate.mock.invocationCallOrder[0]
+    );
   });
 
-  test('verifyTotp 返回 null 计数器时仍不应出现顶层 mfaLastCounter 覆写', async () => {
-    // 边界：counter 合法但为 0（窗口序号可为小值），$max 仍应包裹它
+  test('认领失败（窗口已被消费）时不得开启 MFA', async () => {
     verifyTotpDetailed.mockReturnValue({ valid: true, counter: 0 });
+    mfaService.claimTotpWindow.mockResolvedValueOnce(false);
 
-    await run(controller.mfaEnable, {
+    const res = await run(controller.mfaEnable, {
       body: { mfaCode: '000000' },
       ip: '127.0.0.1',
       get: () => 'jest',
       user: { userId: 'u1', username: 'alice' },
     });
 
-    const update = User.findByIdAndUpdate.mock.calls[0][1];
-    expect(update.$max).toEqual({ mfaLastCounter: 0 });
-    expect(update.mfaLastCounter).toBeUndefined();
+    expect(mfaService.recordMfaFailure).toHaveBeenCalledTimes(1);
+    expect(User.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(User.findByIdAndUpdate).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(400);
+    expect(res.body.errors.errorCode).toBe('MFA_CODE_INVALID_SYNC');
   });
 });

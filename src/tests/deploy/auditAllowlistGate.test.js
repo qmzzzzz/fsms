@@ -34,6 +34,31 @@ const SCRIPT = path.join(ROOT, 'scripts', 'check-audit-allowlist.js');
 const { evaluate, collectRootAdvisories, loadAllowlist, advisoryId } = require(SCRIPT);
 
 const allowlist = loadAllowlist(ALLOWLIST);
+
+/**
+ * 历史登记形状：两项曾因「上游无补丁」进入清单，2026-10-24 复核时
+ * npm audit 已不再报告它们，按判据③从现网清单删除。判据本身仍需这两项做夹具，
+ * 否则「过期/陈旧」两条反向用例会退化成空跑。
+ */
+const HISTORIC_ALLOWLIST = {
+  threshold: 'moderate',
+  entries: [
+    {
+      id: 'GHSA-vfj7-8cjw-p6xm',
+      reviewBy: '2027-01-31',
+      noPatch: true,
+      reason: '历史夹具：braces 栈耗尽 DoS，登记时上游无修复版本，用于验证清单判据。',
+      reachability: '历史夹具：braces 仅被 jest CLI 与 nodemon ignore 配置使用，非远程可控。',
+    },
+    {
+      id: 'GHSA-hp3w-g68c-fv3c',
+      reviewBy: '2027-01-31',
+      noPatch: true,
+      reason: '历史夹具：sprintf-js 无界精度 DoS，登记时上游无修复版本，用于验证清单判据。',
+      reachability: '历史夹具：argparse 仅在 js-yaml CLI 路径加载，jest 运行时不经过该链。',
+    },
+  ],
+};
 const TODAY = '2026-10-09';
 
 /** 造一个 audit 报告片段：pkg → via 列表（字符串=传递依赖，对象=根因公告） */
@@ -66,12 +91,9 @@ const REAL_SHAPE = reportOf({
 const ids = (list) => list.map((x) => x.id);
 
 describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () => {
-  test('前提自证：清单读到了、阈值是 moderate、两条已知根因都在册（读空会让本套件整条恒绿）', () => {
+  test('前提自证：清单读到了、阈值是 moderate、存量项字段完备（清空也合法）', () => {
     expect(allowlist.threshold).toBe('moderate');
-    expect(allowlist.entries.length).toBeGreaterThanOrEqual(2);
-    expect(ids(allowlist.entries)).toEqual(
-      expect.arrayContaining(['GHSA-vfj7-8cjw-p6xm', 'GHSA-hp3w-g68c-fv3c'])
-    );
+    expect(Array.isArray(allowlist.entries)).toBe(true);
     // 登记项必须带理由与可达性判断——只有 id 的清单等于静默放行
     for (const e of allowlist.entries) {
       expect(String(e.reason).length).toBeGreaterThan(80);
@@ -89,12 +111,17 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
     expect(roots[0].severity).toBe('high');
   });
 
-  test('正向：与实测同形的报告在现网清单下通过（未登记 0 / 未过期 / 未陈旧）', () => {
-    const r = evaluate({ report: REAL_SHAPE, allowlist, today: TODAY });
+  test('正向：历史登记形状的报告通过（未登记 0 / 未过期 / 未陈旧）', () => {
+    const r = evaluate({ report: REAL_SHAPE, allowlist: HISTORIC_ALLOWLIST, today: TODAY });
     expect(r.gate).toHaveLength(2);
     expect(r.offenders).toEqual([]);
     expect(r.expired).toEqual([]);
     expect(r.stale).toEqual([]);
+  });
+
+  test('现网清单已清空：任何达阈值公告都必须阻断（空清单不等于放行）', () => {
+    const r = evaluate({ report: REAL_SHAPE, allowlist, today: TODAY });
+    expect(ids(r.offenders).sort()).toEqual(['GHSA-hp3w-g68c-fv3c', 'GHSA-vfj7-8cjw-p6xm']);
   });
 
   // —— 判据①未登记 ——
@@ -104,7 +131,7 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
       ...REAL_SHAPE.vulnerabilities,
       zzq: { severity: 'high', via: [advisory('GHSA-zzzz-zzzz-zzzz', 'zzq', 'high')] },
     });
-    const r = evaluate({ report: tampered, allowlist, today: TODAY });
+    const r = evaluate({ report: tampered, allowlist: HISTORIC_ALLOWLIST, today: TODAY });
     expect(ids(r.offenders)).toEqual(['GHSA-zzzz-zzzz-zzzz']);
   });
 
@@ -121,13 +148,13 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
 
   // —— 判据②已过期 ——
   test('反向对照：清单项过期必须判红（登记不是永久豁免）', () => {
-    const r = evaluate({ report: REAL_SHAPE, allowlist, today: '2027-12-31' });
+    const r = evaluate({ report: REAL_SHAPE, allowlist: HISTORIC_ALLOWLIST, today: '2027-12-31' });
     expect(ids(r.expired).sort()).toEqual(['GHSA-hp3w-g68c-fv3c', 'GHSA-vfj7-8cjw-p6xm']);
     expect(r.offenders).toEqual([]); // 过期与未登记是两条独立判据
   });
 
   test('边界：reviewBy 当天不算过期（比较是 < 而不是 <=）', () => {
-    const r = evaluate({ report: REAL_SHAPE, allowlist, today: '2027-01-31' });
+    const r = evaluate({ report: REAL_SHAPE, allowlist: HISTORIC_ALLOWLIST, today: '2027-01-31' });
     expect(r.expired).toEqual([]);
   });
 
@@ -135,7 +162,7 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
   // 变异实测：把 `!gateIds.has(e.id)` 改成 `gateIds.has(e.id)`，本条必须变红。
   test('反向对照：上游修好后清单未删行必须判红（防清单只增不减）', () => {
     const clean = reportOf({});
-    const r = evaluate({ report: clean, allowlist, today: TODAY });
+    const r = evaluate({ report: clean, allowlist: HISTORIC_ALLOWLIST, today: TODAY });
     expect(ids(r.stale).sort()).toEqual(['GHSA-hp3w-g68c-fv3c', 'GHSA-vfj7-8cjw-p6xm']);
   });
 
@@ -148,7 +175,7 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
         via: [advisory('GHSA-hp3w-g68c-fv3c', 'sprintf-js', 'moderate')],
       },
     });
-    const r = evaluate({ report: downgraded, allowlist, today: TODAY });
+    const r = evaluate({ report: downgraded, allowlist: HISTORIC_ALLOWLIST, today: TODAY });
     expect(ids(r.stale)).toEqual(['GHSA-vfj7-8cjw-p6xm']);
     expect(r.offenders).toEqual([]);
   });

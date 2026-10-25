@@ -22,7 +22,8 @@ const { readPositiveNumberEnv } = require('../utils/envNumber');
 
 // WAL 硬上限（字节）：DB 长时间不可用且高流量时 WAL 持续增长（磁盘写放大，报告 R-6）。
 // 超限丢弃最旧一半行（与 BUFFER_HARD_LIMIT 丢最旧同向的止损策略）并告警。
-// 被丢弃行的文档若仍在缓冲中会照常落库，其 WAL 行由该批成功落库时的按序号裁剪回收；
+// 丢弃对象按持久化承诺分级：普通行优先，`__walDurable` 行默认不丢（详见 enforceWalLimit）。
+// 被丢弃的普通行，其文档若仍在缓冲中会照常落库，WAL 行由该批成功落库时的按序号裁剪回收；
 // 对应文档已被 BUFFER_HARD_LIMIT 丢弃的行，本就是纯取证残留。
 // 运行期读 env 便于测试注入小阈值；默认 50MB。
 const DEFAULT_WAL_MAX_BYTES = 50 * 1024 * 1024;
@@ -85,6 +86,35 @@ let walDroppedLines = 0;
 // 需要**目录**可写 —— 目录权限、目录配额、上一次以别的 uid 留下的 .tmp 不属主，三种都够。
 // （本机未实测：Windows 上 fs.chmodSync 是空操作，POSIX 权限分裂复现不出来，属不变式论证。）
 let walTrimFailures = 0;
+// 已按显式开关丢弃的「已 fsync 敏感行」条数。与 walDroppedLines 分开：
+// 前者是"取证缺失"，后者里混着"承诺缺失"，合规口径上不是一回事。
+let walDurableDropped = 0;
+// 因普通行不足而拒绝裁剪 durable 行的次数。非零即表示 WAL 正在无界增长，
+// 是比 walTrimFailures 更严重的信号（后者是"想裁没裁成"，这里是"按策略不裁"）。
+let walDurableTrimRefusals = 0;
+
+/**
+ * 该 WAL 行是否携带「已向调用方承诺持久化」的标记（由 auditOutbox 写出）。
+ * 解析失败按**普通行**处理：坏行本来就会被裁，且它不构成任何承诺。
+ * @param {string} line
+ * @returns {boolean}
+ */
+function isDurableLine(line) {
+  try {
+    const doc = JSON.parse(line);
+    return Boolean(doc) && doc.__walDurable === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 是否允许以磁盘可用性优先、丢弃已 fsync 的敏感行。默认 **false**。
+ * 运行期读 env：测试可逐用例注入，且运维改开关不必重启构建。
+ */
+function allowDurableTrim() {
+  return String(process.env.AUDIT_WAL_ALLOW_DURABLE_TRIM || '').toLowerCase() === 'true';
+}
 /** 推进裁剪计数并返回拼好"累计 N 次"的文案；级别留给调用点（同一族的三条路径严重程度不同） */
 const noteTrimFailure = (msg) => {
   walTrimFailures += 1;
@@ -93,8 +123,18 @@ const noteTrimFailure = (msg) => {
 
 /**
  * WAL 大小硬上限保护（R-6）：超过 getWalMaxBytes() 丢弃最旧一半行并告警。
- * 串行化在宿主的 walChain 上（与追加/裁剪互斥）；只保留较新一半——
- * 较新行对应的文档大概率仍在缓冲中等待落库，优先保住可落库数据的账目完整。
+ * 串行化在宿主的 walChain 上（与追加/裁剪互斥）。
+ *
+ * **丢弃对象按持久化承诺分级**（2026-10-21 修正）：
+ *  - 普通行（`auditBuffer.push` 写出，尽力而为）优先丢，最旧优先；
+ *  - `__walDurable` 行（`auditOutbox` 写出，背后是"敏感操作已回成功"）默认**不丢**。
+ *    普通行不足以完成本轮目标时，记 `walDurableTrimRefusals` 并停手，
+ *    只有显式 `AUDIT_WAL_ALLOW_DURABLE_TRIM=true` 才允许裁，且计入 `walDurableDropped`。
+ *
+ * 旧实现按**位置**丢最旧一半，理由是"较新行对应的文档大概率仍在缓冲中"。
+ * 那个理由对普通行成立，对 durable 行不成立：它们的承诺是"已 fsync 即已持久化"，
+ * 而 `.discarded` 永不回灌 ⇒ 按位置裁剪等于把承诺改成"落盘但永久不入库"。
+ * 「大概率」不能作为合规链路的正确性前提，故改为按标记分级。
  */
 async function enforceWalLimit({ walPath, readWalRecords, atomicReplaceWal }) {
   let stat;
@@ -115,12 +155,73 @@ async function enforceWalLimit({ walPath, readWalRecords, atomicReplaceWal }) {
     logger.error(noteTrimFailure(`审计 WAL 已超限但读不回内容，本轮未裁剪：${walPath}`));
     return;
   }
-  if (wal.records.length < 2) return; // 单行超限无「一半」可弃，刻意不计（留给外部取证）
+  const records = wal.records;
+  if (records.length < 2) return; // 单行超限无「一半」可弃，刻意不计（留给外部取证）
 
-  const keepFrom = Math.floor(wal.records.length / 2);
-  const dropped = keepFrom;
+  // 丢一半仍是止损口径（R-6 的产品语义不变），但**丢哪一半**现在按持久化承诺分级。
+  //
+  // 分级动因：`auditOutbox` 写出的行带 `__walDurable`——那一行背后是"敏感操作已回成功"，
+  // 即对调用方的持久化承诺。按位置丢最旧一半会把这些行静默移出主 WAL，而
+  // `.discarded` 是**永不回灌**的取证归档（见 auditBuffer 的 start() 注释与
+  // readDiscardedSeqs 的用法：只读序号用于跳过，不读内容重放）。
+  // 于是"已 fsync"退化成"已落盘但永久不入库"——恰好推翻 outbox 的唯一承诺。
+  //
+  // 因此：普通行（`push` 写入，尽力而为）优先丢，durable 行默认不丢。
+  // 全解析一次是必要的：既要挑出候选，也要在拒绝裁剪时给出"durable 行还剩多少"。
+  // 成本与上面 readWalRecords 读整个文件同量级，且只在超限路径上发生。
+  const dropTarget = Math.floor(records.length / 2);
+  const normalIdx = [];
+  const durableIdx = [];
+  records.forEach((line, i) => {
+    (isDurableLine(line) ? durableIdx : normalIdx).push(i);
+  });
+
+  const dropIdx = normalIdx.slice(0, dropTarget);
+  const shortfall = dropTarget - dropIdx.length;
+  let durableDropped = 0;
+
+  if (shortfall > 0) {
+    if (!allowDurableTrim()) {
+      // 严格模式：普通行不够就停手。文件会继续超限，这是**有意的**取舍——
+      // 以磁盘可用性换"不静默推翻已承诺的持久化"，把决定权显式交回运维。
+      walDurableTrimRefusals += 1;
+      logger.error(
+        `审计 WAL 超过硬上限，但可裁的普通行只有 ${dropIdx.length} 条，` +
+          `不足以完成本轮 ${dropTarget} 条的目标；默认策略**拒绝裁剪 ${durableIdx.length} 条` +
+          `已 fsync 的敏感审计行**（累计拒绝 ${walDurableTrimRefusals} 次）。` +
+          '这些行对应已向调用方返回成功的操作，裁掉即「承诺已持久化却永久不入库」。' +
+          '请立即恢复数据库连通性或扩容 WAL；确需以磁盘可用性优先，' +
+          '显式设置 AUDIT_WAL_ALLOW_DURABLE_TRIM=true（会同时记 walDurableDropped）'
+      );
+      if (!dropIdx.length) return; // 一条普通行都没有：本轮不动文件，避免空归档
+    } else {
+      dropIdx.push(...durableIdx.slice(0, shortfall));
+      durableDropped = shortfall;
+    }
+  }
+
+  const dropSet = new Set(dropIdx);
+  const droppedLines = records.filter((_, i) => dropSet.has(i));
+  const keptLines = records.filter((_, i) => !dropSet.has(i));
+  if (!droppedLines.length) return;
+
   try {
-    await atomicReplaceWal(`${wal.records.slice(keepFrom).join('\n')}\n`);
+    // 先归档再裁剪：这些行即将从主 WAL 消失，但它们是取证记录，不能只计一个
+    // dropped 数字就丢。归档失败 ⇒ 放弃本轮裁剪（宁可文件超限，也不丢证据）。
+    await fs.promises.appendFile(walPath + '.discarded', `${droppedLines.join('\n')}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+  } catch (e) {
+    logger.error(
+      noteTrimFailure(
+        `审计 WAL 超限裁剪前归档失败：${errText(e)}——本轮不裁剪，主 WAL 继续超限（取证优先）`
+      )
+    );
+    return;
+  }
+  try {
+    await atomicReplaceWal(`${keptLines.join('\n')}\n`);
   } catch (e) {
     // 就地消化、不再冒泡到"追加链后续操作失败"那条 catch：那条的口径是"追加链上
     // 有后续操作炸了"，把裁剪失败混进去就等于把 walTrimFailures 与追加侧计数重新焊在一起，
@@ -134,10 +235,25 @@ async function enforceWalLimit({ walPath, readWalRecords, atomicReplaceWal }) {
     return;
   }
 
-  walDroppedLines += dropped;
+  walDroppedLines += droppedLines.length;
+  if (durableDropped > 0) {
+    // 与上面那条拒绝日志同一件事的两面：拒绝是"没丢"，这里是"按显式开关丢了"。
+    // 单独计数，面板上才能把"取证缺失"与"承诺缺失"分开。
+    walDurableDropped += durableDropped;
+    // 同时打进 Prometheus：这条路径的严重度高于其余三个 drop reason
+    // （丢的是已 fsync 且已回成功的敏感审计），必须能触发 AuditRecordsDropped，
+    // 而不是只等有人打开合规面板才发现。
+    require('../utils/metricsAuditDrops').incAuditDrop('wal_durable_lost', durableDropped);
+    logger.error(
+      `审计 WAL 超限裁剪已按 AUDIT_WAL_ALLOW_DURABLE_TRIM 丢弃 ${durableDropped} 条` +
+        `**已 fsync 的敏感审计行**（累计 ${walDurableDropped} 条）——` +
+        '这些操作曾向调用方返回成功，现仅存于 .discarded 取证归档、不会自动回灌。' +
+        '请按合规事件上报并核查缺失区间'
+    );
+  }
   logger.error(
-    `审计 WAL 超过硬上限（${stat.size} > ${maxBytes} 字节），已丢弃最旧 ${dropped} 行（累计 ${walDroppedLines} 行）。` +
-      '数据库可能长时间不可用，请立即排查'
+    `审计 WAL 超过硬上限（${stat.size} > ${maxBytes} 字节），已丢弃最旧 ${droppedLines.length} 行` +
+      `（归档到 ${walPath}.discarded，累计 ${walDroppedLines} 行）。数据库可能长时间不可用，请立即排查`
   );
 }
 
@@ -153,7 +269,12 @@ function afterAppend(deps) {
 
 /** 上限侧运行指标（由宿主 auditBufferWal.getStats 展开，面板字段名不变） */
 function getStats() {
-  return { walDroppedLines, walTrimFailures };
+  return {
+    walDroppedLines,
+    walTrimFailures,
+    walDurableDropped,
+    walDurableTrimRefusals,
+  };
 }
 
 /**
@@ -169,6 +290,11 @@ function resetCounters() {
   walAppendCount = 0;
   walDroppedLines = 0;
   walTrimFailures = 0;
+  walDurableDropped = 0;
+  walDurableTrimRefusals = 0;
 }
 
-module.exports = { afterAppend, getStats, resetCounters };
+// `enforceWalLimit` 一并导出：宿主只在 afterAppend 里调它，但它的分级判据
+// （普通行优先 / durable 行默认不裁）无法通过 afterAppend 的节流相位稳定驱动，
+// 单测需要直接调用。生产代码不得绕过 afterAppend 自行调用（会破坏抽查节流）。
+module.exports = { afterAppend, enforceWalLimit, getStats, resetCounters };

@@ -3,7 +3,7 @@
  * （scripts/devSecretIsolation.js 与 scripts/{e2e-smoke,load-test,production-drill}.js）
  *
  * 为什么值得一个专门闸：`src/config/index.js:10-11` 在 require 期就 hydrate，而冲突规则
- * 是**文件优先**（`src/config/secrets.js:134` 无条件 `process.env[name] = value`）。
+ * 是**文件优先**（`src/config/secrets.js:137` 无条件 `process.env[name] = value`）。
  * 三个 harness 的形状是「先设一次性 env，再 require ../src/index.js」，所以只要宿主上
  * 还有 `*_FILE`，回填就会把一次性 `MONGODB_URI` 覆写成真实库连接串——**并且不报错**。
  * 后果不是冒烟变红，是**写**：`npm run test:e2e` 往生产/开发库播种管理员、建用户、发告警，
@@ -76,7 +76,7 @@ const PROBE = [
   `process.env.JWT_SECRET = ${JSON.stringify(DISPOSE_JWT)};`,
   "const cfg = require(path.join(REPO, 'src/config/index.js'));",
   '// REDIS_URL / ADMIN_INITIAL_PASSWORD / MONGO_ROOT_PASSWORD 在 src/config 里没有字段：',
-  '// 消费方直读 env（sharedCache/state.js:27、initData/adminAccount.js:30），所以 require 之后的 env 就是',
+  '// 消费方直读 env（sharedCache/state.js:27、initData/adminAccount.js:36），所以 require 之后的 env 就是',
   '// 消费方看到的那一份。断言这一层不是降级，是这几个名字唯一的可观测面。',
   '// ?? null 是必须的：JSON.stringify 会**丢掉** undefined 键，那样 r.x 恒为 undefined，',
   '// "守卫挡住了"与"夹具压根没跑"就分不开——那正是一条空断言。',

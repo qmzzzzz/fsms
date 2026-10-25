@@ -15,6 +15,7 @@ const {
   checkPermission,
   checkViewSensitivePermission,
   requireReAuthentication,
+  requireReauthTicket,
 } = require('../middleware');
 const { body, param, query } = require('express-validator');
 const { mustBeString } = require('../utils/validationRules');
@@ -50,6 +51,38 @@ const encPasswordField = (field) =>
     .withMessage('口令密文格式无效')
     .isLength({ max: 1024 })
     .withMessage('口令密文长度异常');
+
+// strict 模式下 enc 与明文字段并存视为协议违规（与 authRoutes 同口径）
+const rejectEncPlaintextCoexistence = (encField, plainField) =>
+  body(plainField).custom((value, { req }) => {
+    if (config.loginEncryptStrict && req.body[encField] && value !== undefined && value !== '') {
+      throw new Error(`已提供口令密文（${encField}），禁止同时携带明文字段（${plainField}）`);
+    }
+    return true;
+  });
+
+// 二次验证凭据的共享校验链：签发审计票据的 POST /reauth、管理员写操作
+// （重置 MFA / 三个安全开关）共用一套字段契约。requireReAuthentication
+// 自身在缺凭据时返回 REAUTH_REQUIRED，这里只拦"格式无效"的凭据，避免
+// 坏格式请求把口令比对/失败计数/验证码烧毁逻辑走一遍。
+const reauthCredentialValidation = [
+  encPasswordField('encCurrentPassword'),
+  rejectEncPlaintextCoexistence('encCurrentPassword', 'currentPassword'),
+  body('currentPassword')
+    .if((value, { req }) => !req.body.encCurrentPassword)
+    .optional({ values: 'falsy' })
+    .isString()
+    .withMessage('密码格式无效')
+    .isLength({ max: 128 })
+    .withMessage('密码长度异常')
+    .custom(rejectPlaintextInStrict),
+  body('mfaCode')
+    .optional({ values: 'falsy' })
+    .isString()
+    .withMessage('验证码格式无效')
+    .matches(/^\d{6}$/)
+    .withMessage('验证码应为 6 位数字'),
+];
 
 // 验证规则
 // isString() 前置：express-validator 会把对象/数组先强转字符串再跑后续校验，
@@ -177,6 +210,28 @@ router.put(
 router.get('/bindings', authenticate, securityController.getAccountBindings);
 
 /**
+ * @route   POST /api/security/reauth
+ * @desc    完成一次二次验证并换取短时审计读取票据（5 分钟，绑定账号与会话）
+ * @access  Private
+ *
+ * 为什么需要票据：GET 类审计端点无法携带口令（会出现在 URL/日志里），
+ * 而每次翻页/筛选都弹一次密码框也不可用。票据是无状态 HMAC 签名串，
+ * 服务端不落库；退出登录/切换账号时前端丢弃即可，过期由 exp 兜底。
+ */
+router.post(
+  '/reauth',
+  authenticate,
+  reauthLimiter,
+  reauthUserLimiter,
+  reauthCredentialValidation,
+  consumeValidation(),
+  requireReAuthentication(),
+  // PERMISSION-EXEMPT: 本人资源：票据只由 authenticate 判定的 req.user 签发，
+  // 且前置 requireReAuthentication 已完成凭据步进，无任何目标用户入参。
+  securityController.issueReauthTicket
+);
+
+/**
  * @route   POST /api/security/view-sensitive
  * @desc    查看敏感数据（需要二次验证）
  * @access  Private
@@ -219,6 +274,18 @@ router.post(
     .optional({ values: 'falsy' })
     .isMongoId()
     .withMessage('目标用户 ID 格式无效'),
+  // step-up 口令密文轨：前端用 PASSWORD_CURRENT 用途加密当前口令，服务端在
+  // requireReAuthentication 中解密；密文无效一律 fail-closed，不回落明文。
+  encPasswordField('encCurrentPassword'),
+  rejectEncPlaintextCoexistence('encCurrentPassword', 'currentPassword'),
+  body('currentPassword')
+    .if((value, { req }) => !req.body.encCurrentPassword)
+    .optional({ values: 'falsy' })
+    .isString()
+    .withMessage('密码格式无效')
+    .isLength({ max: 128 })
+    .withMessage('密码长度异常')
+    .custom(rejectPlaintextInStrict),
   consumeValidation(),
   requireReAuthentication(),
   securityController.viewSensitiveData
@@ -235,6 +302,32 @@ router.get(
   checkPermission('security:stats'),
   securityController.getSecurityStats
 );
+
+/**
+ * @route   GET /api/security/report-targets
+ * @desc    列出"我数据范围内的可举报对象"（举报对话框的对象选择器取数）
+ * @access  Private
+ *
+ * 为什么要这个端点：举报对话框原先把「对象 ID」摆给用户填 24 位 ObjectId，
+ * 而一线人员拿不到该值 —— 记录型举报实际不可用。
+ *
+ * 为什么不复用 /users、/devices、/alarms：那三个列表分别要求
+ * `user:read` / `device:read` / `alarm:read`，而举报入口刻意对全员开放；
+ * 复用会让没有读权限的人打开下拉就吃 403，比"填不出 ID"更糟。
+ *
+ * 候选集与提交核验**同判据**（控制器用 buildRecordScopeFilter，与
+ * resolveReportTargetViolation 的 isRecordInScope 逐臂同值），因此不存在
+ * "选得到却提交 403"或"能通过却选不到"。type 白名单不在这里重复声明：
+ * 控制器对未知 type 已 fail-closed 返回 400（listReportTargets 的 !kind 分支），
+ * 而记录型清单的单一来源是本文件的 REPORT_RECORD_TYPES（reportTargetRegistryParity 盯着）。
+ * 限流由 authenticate 内的账号级 userLimiter 承担（200/15min），与举报提交的
+ * 独立 20 次写配额分开——搜索不会吃掉提交配额。
+ */
+router.get('/report-targets', authenticate, securityController.listReportTargets);
+// PERMISSION-EXEMPT: 与 POST /report 同源——它是举报的前置步骤，挂权限码
+// 会让一线人员根本选不到对象。约束由"候选集 = 举报人数据范围"（与提交核验
+// 同一判据）+ 最小投影（不含 phone/email、报警描述、上报人姓名）+ 账号级
+// userLimiter 承担，而不是把入口藏起来。
 
 /**
  * @route   POST /api/security/report
@@ -309,7 +402,16 @@ router.put(
   authenticate,
   checkPermission('user:reset_password'),
   strictLimiter,
+  // 清除他人 TOTP 是账户接管级操作：权限码之外再要求操作者本人当场
+  // 通过一次口令/MFA 验证，避免会话被借用时直接摘掉受害者的第二因子。
+  // 不叠加 reauthLimiter：该桶与 /view-sensitive 共用（5 次/15 分钟），
+  // 会让"看几次本人联系方式再重置 MFA"的正常管理动作直接 429。
+  // 暴力猜口令由 requireReAuthentication 内部的共享 MFA 失败锁兜底
+  //（5 次失败 → 10 分钟锁定），与 /auth/mfa/disable 的口径一致。
   param('userId').isMongoId().withMessage('用户 ID 格式无效'),
+  ...reauthCredentialValidation,
+  consumeValidation(),
+  requireReAuthentication(),
   securityController.resetUserMfa
 );
 
@@ -335,6 +437,9 @@ router.get(
   '/alerts',
   authenticate,
   checkPermission('security:audit'),
+  // 审计数据的读取需要短时票据（POST /reauth 换取），见文件顶部说明。
+  // 权限码在前：无权限者得到 403，不泄露"票据是否有效"。
+  requireReauthTicket(),
   securityController.getRecentAlerts
 );
 
@@ -363,6 +468,7 @@ router.get(
   '/audit-logs/export',
   authenticate,
   checkPermission('security:audit'),
+  requireReauthTicket(),
   strictLimiter,
   auditController.exportAuditLogs
 );
@@ -376,6 +482,7 @@ router.get(
   '/audit-logs',
   authenticate,
   checkPermission('security:audit'),
+  requireReauthTicket(),
   auditController.queryAuditLogs
 );
 
@@ -397,16 +504,23 @@ router.get(
  * @access  Private [security:config]
  */
 /**
- * 三个开关的 PUT 都不挂 body 校验：布尔契约由控制器用 `typeof x !== 'boolean'`
+ * 三个开关的 PUT 都不挂 bool 校验：布尔契约由控制器用 `typeof x !== 'boolean'`
  * 收死，并返回**字段专属**错误码（前端 api.js 有 i18n 映射）。
  * 这里若再挂一层 `isBoolean()` + consumeValidation()，非法值会先被拦成通用的
  * VALIDATION_FAILED，反而把专属码吃掉；且不消费时它是纯装饰（治的那个病）。
  * 由 src/tests/security/systemConfigBooleanContract.test.js 钉住这条契约。
+ * 二次验证凭据（password / mfaCode）仍挂校验并消费：它不属于 bool 契约，
+ * 坏格式凭据不应进入 requireReAuthentication 的比对与失败计数路径。
+ * 不叠加 reauthLimiter：理由同 PUT /users/:userId/mfa/reset——失败计数与
+ * 共享 MFA 失败锁已覆盖暴力猜口令，而共用 5 次桶会误伤正常管理操作。
  */
 router.put(
   '/config/allowPublicRegistration',
   authenticate,
   checkPermission('security:config'),
+  ...reauthCredentialValidation,
+  consumeValidation(),
+  requireReAuthentication(),
   securityController.setRegistrationConfig
 );
 
@@ -431,6 +545,9 @@ router.put(
   '/config/loginCaptchaEnabled',
   authenticate,
   checkPermission('security:config'),
+  ...reauthCredentialValidation,
+  consumeValidation(),
+  requireReAuthentication(),
   securityController.setLoginCaptchaConfig
 );
 
@@ -455,6 +572,9 @@ router.put(
   '/config/registerCaptchaEnabled',
   authenticate,
   checkPermission('security:config'),
+  ...reauthCredentialValidation,
+  consumeValidation(),
+  requireReAuthentication(),
   securityController.setRegisterCaptchaConfig
 );
 

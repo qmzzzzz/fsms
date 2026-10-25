@@ -22,11 +22,34 @@
         <button
           type="button"
           class="glass-btn glass-btn--default"
+          :disabled="loading"
           @click="queryMode ? clearQuery() : loadData()"
         >
           {{ $t('common.refresh') }}
         </button>
       </div>
+
+      <!-- 加载失败必须显式可见：此前失败只清空数据，界面与「名单确实为空」完全一样，
+           用户会误以为封禁/白名单被清空。已有数据时保留并标注为上次数据。 -->
+      <el-alert
+        v-if="loadError"
+        :title="tableData.length > 0 ? $t('ipList.staleData') : $t('ipList.loadError')"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="load-error"
+      >
+        <template #default>
+          <button
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            :disabled="loading"
+            @click="queryMode ? handleQuery() : loadData()"
+          >
+            {{ $t('common.retry') }}
+          </button>
+        </template>
+      </el-alert>
 
       <!-- IP 命中查询：输入单地址，命中结果直接落入下方地址管理表格，便于对封禁 IP 直接操作 -->
       <div class="query-bar">
@@ -140,11 +163,13 @@
         <template #empty>
           <div v-if="!loading" class="empty-tip">
             {{
-              queryMode
-                ? $t('security.noMatchFound')
-                : listType === 'black'
-                  ? $t('security.noBlacklist')
-                  : $t('security.noWhitelist')
+              loadError
+                ? $t('ipList.loadError')
+                : queryMode
+                  ? $t('security.noMatchFound')
+                  : listType === 'black'
+                    ? $t('security.noBlacklist')
+                    : $t('security.noWhitelist')
             }}
           </div>
         </template>
@@ -249,7 +274,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { usePermission } from '@/composables/usePermission'
-import { apiClient, isCanceledError } from '@/utils/api'
+import { apiClient, isCanceledError, isHandledApiError } from '@/utils/api'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import GlassSegmented from '@/components/GlassSegmented.vue'
 
@@ -259,6 +284,8 @@ const { t } = useI18n()
 const { hasPerm } = usePermission()
 
 const loading = ref(false)
+// 名单加载失败标记：区分「加载失败」与「名单为空」，失败时保留上次数据并提示可重试
+const loadError = ref(false)
 const adding = ref(false)
 const listType = ref('black')
 const tableData = ref([])
@@ -350,6 +377,7 @@ const handleQuery = async () => {
     const res = await apiClient.get('/security/ip-list/query', { params: { ip } })
     queryResult.value = res?.data?.data || null
     queryMode.value = true
+    loadError.value = false
     // 默认切换到存在命中的名单类型（用户当前选择优先），避免表格误显示空态
     if (queryResult.value) {
       const hasBlack = (queryResult.value.blackMatches || []).length > 0
@@ -440,6 +468,7 @@ const loadData = async () => {
     page.total = payload.pagination?.total || tableData.value.length
     blackCount.value = payload.counts?.black || 0
     whiteCount.value = payload.counts?.white || 0
+    loadError.value = false
   } catch (e) {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
     if (isCanceledError(e)) return
@@ -447,8 +476,12 @@ const loadData = async () => {
     // P2-3：加载失败只清态，**提示由 api.js 响应拦截器统一负责**（与 alarmView 同契约）。
     // 此前组件这里再弹一条 messages.loadFailed，同一次失败会弹两条：
     // 拦截器的具体文案（400/403/404/429/5xx/网络错误）+ 组件的泛化文案。
-    tableData.value = []
-    page.total = 0
+    //
+    // 但「只清态」不能把失败伪装成空表：保留上次数据并标记 loadError，
+    // 由页头警示条明确告知是「刷新失败/加载失败」。首次加载失败时表为空，
+    // 空态文案也改为错误提示，不再显示「暂无名单」。
+    loadError.value = true
+    if (tableData.value.length === 0) page.total = 0
   } finally {
     if (isCurrent()) loading.value = false
   }
@@ -521,7 +554,8 @@ const handleRemove = async (row) => {
   } catch (e) {
     if (e !== 'cancel' && e !== 'close') {
       // O-6: 点右上角 X(close) 亦属用户主动放弃，不误报删除失败
-      ElMessage.error(t('messages.deleteFailed'))
+      // 具体原因已由响应拦截器提示，组件不再叠加一条泛化「删除失败」
+      if (!isHandledApiError(e)) ElMessage.error(t('messages.deleteFailed'))
     }
   }
 }
@@ -572,6 +606,9 @@ onMounted(() => {
   letter-spacing: var(--xf-tracking-wide);
 }
 .add-form {
+  margin-bottom: var(--xf-spacing-md);
+}
+.load-error {
   margin-bottom: var(--xf-spacing-md);
 }
 .ip-cell {

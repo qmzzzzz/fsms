@@ -23,6 +23,17 @@ else
 end
 `;
 
+// 续租：只有令牌仍属于自己才延长 PX。用于「调用方超时但临界区 fn 仍在飞行」
+// 的僵尸窗口——此时锁不能释放，否则其他实例会从同一旧链尾续链（分叉）；
+// 进程崩溃时续租停止，锁按最后一个 PX 自然到期。
+const LOCK_RENEW_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("pexpire", KEYS[1], ARGV[2])
+else
+  return 0
+end
+`;
+
 const CAS_SET_SCRIPT = `
 if redis.call("get", KEYS[1]) == ARGV[1] then
   redis.call("set", KEYS[1], ARGV[2])
@@ -43,6 +54,22 @@ const createLockOperations = ({ getRedisClient, isRedisEnabled, isRedisConfigure
 
   const createLockHandle = (lockKey, token) => ({
     release: () => releaseLockSafely(lockKey, token),
+    /** @returns {Promise<boolean>} 是否确认续租成功（令牌仍归本持有者） */
+    renew: async (ttlMs) => {
+      try {
+        const renewed = await getRedisClient().eval(
+          LOCK_RENEW_SCRIPT,
+          1,
+          lockKey,
+          token,
+          String(ttlMs)
+        );
+        return renewed === 1;
+      } catch (error) {
+        logger.warn(`共享缓存锁续租失败（${lockKey} 的租约可能被其他实例接管）：${errText(error)}`);
+        return false;
+      }
+    },
   });
 
   // 锁令牌是"谁持有这把锁"的唯一凭据：释放脚本按字符串相等比较。

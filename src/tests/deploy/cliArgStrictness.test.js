@@ -238,9 +238,18 @@ describe('scripts/generate-secrets.js：参数手误不得把密钥打进 stdout
       'grafana_admin_password',
       'hmac_secret',
       'login_ecdh_private_key',
+      // 2026-10-21：compose 的 mongod --keyfile 需要它（副本集内部认证）。
+      // 这条钉住清单的意义正在于此——脚本多产出一个密钥文件时必须在这里显式确认。
+      'mongo_keyfile',
+      // 2026-10-24 审计（P2）：应用专用库账号，URI 以它为主体（authSource=fire_safety_db）
+      'mongo_app_password',
+      'mongo_app_username',
       'mongo_root_password',
       'mongo_root_username',
       'mongodb_uri',
+      // 2026-10-24 审计：/metrics 鉴权令牌（app 侧 METRICS_TOKEN_FILE，
+      // Prometheus 侧 bearer_token_file 共用同一份）
+      'metrics_token',
       'jwt_refresh_secret',
       'jwt_secret',
       // 2026-10-01 审计 finding：redis 认证口令（compose 的 redis --requirepass
@@ -248,5 +257,68 @@ describe('scripts/generate-secrets.js：参数手误不得把密钥打进 stdout
       'redis_password',
     ].sort();
     expect(fs.readdirSync(out).sort()).toEqual(expected);
+  });
+});
+
+describe('scripts/migrate-pii-encryption.js：拼错档位不得退化为全量改写', () => {
+  const MIGRATE_SCRIPT = path.join(ROOT, 'scripts/migrate-pii-encryption.js');
+  const {
+    parseArgs: parseMigrateArgs,
+    MODE_FLAGS,
+  } = require('../../../scripts/migrate-pii-encryption');
+
+  test('19 五个合法开关全给：不报错且逐项置真（闸门不反向误伤）', () => {
+    const { args, errors } = parseMigrateArgs([
+      '--apply',
+      '--yes',
+      '--rotate',
+      '--keys-only',
+      '--encrypt',
+    ]);
+    expect(errors).toEqual([]);
+    expect(args).toMatchObject({
+      apply: true,
+      confirmYes: true,
+      rotate: true,
+      keysOnly: true,
+      encryptOnly: true,
+    });
+    expect(MODE_FLAGS).toEqual(['--apply', '--yes', '--rotate', '--keys-only', '--encrypt']);
+  });
+
+  test('20 --keys-onl（少一个字母）必须报错，且绝不让 keysOnly 保持 false 后"照常全量跑"', () => {
+    // 这是本用例的全部价值：修复前 keysOnly 为 false ⇒ 退化成默认全量模式
+    // （加密列 + 回填检索键 + 升级 v1），而操作者以为只补键。
+    const { args, errors } = parseMigrateArgs(['--keys-onl']);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('--keys-onl');
+    expect(errors[0]).toContain('是否想写 --keys-only');
+    expect(args.keysOnly).toBe(false); // 报错由调用方拒绝执行，这里只证明没被"猜"成真
+  });
+
+  test('21 无相似形状的未知参数：不凭空建议；位置参数同样拒绝', () => {
+    const { errors } = parseMigrateArgs(['--frobnicate', 'production']);
+    expect(errors).toHaveLength(2);
+    expect(errors.join('\n')).toContain('--frobnicate');
+    expect(errors.join('\n')).toContain('production');
+    expect(errors.join('\n')).not.toContain('是否想写');
+  });
+
+  test('22 子进程实测：退出码 2、不连库（stderr 不提 mongodb），文案可照抄', () => {
+    const r = runNode(MIGRATE_SCRIPT, ['--keys-onl']);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('--keys-only');
+    expect(r.stderr).not.toMatch(/mongodb:\/\/|connect ECONNREFUSED/);
+  });
+
+  test('23 require 本模块不得触发 main（否则"读一眼参数解析"会连库改写 PII）', () => {
+    const r = spawnSync(
+      process.execPath,
+      ['-e', "require('./scripts/migrate-pii-encryption'); console.log('LOADED');"],
+      { cwd: ROOT, encoding: 'utf8', timeout: 60000 }
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('LOADED');
+    expect(r.stderr).not.toMatch(/mongodb:\/\/|ECONNREFUSED/);
   });
 });

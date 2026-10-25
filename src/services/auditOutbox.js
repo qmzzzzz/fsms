@@ -40,14 +40,15 @@
 
 const logger = require('../utils/logger');
 const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
+const wal = require('./auditBufferWal');
 
 /**
  * 把一条审计文档追加进审计 WAL（同步落盘）。
  *
  * @param {object} entry 审计文档
- * @returns {{spooled: boolean, reason: string|null}}
+ * @returns {Promise<{spooled: boolean, reason: string|null}>}
  */
-function spool(entry) {
+async function spool(entry) {
   const AuditLog = require('../models/AuditLog');
   const auditBuffer = require('./auditBuffer');
 
@@ -66,8 +67,21 @@ function spool(entry) {
 
   if (!auditBuffer.isWalEnabled()) return { spooled: false, reason: 'wal_disabled' };
 
-  // 写回铸后形态：__walSeq 由 push 分配，批量路径再铸一次是幂等的
-  auditBuffer.push(doc);
+  // 必须等 WAL fsync 成功：appendLineDurable 失败时调用方据此重抛。
+  // 普通 push 的 fire-and-forget 不能支撑"回成功 ⇒ 已持久化"。
+  // 序号要在序列化前分配，WAL 行才带 __walSeq；push(doc, true) 复用该序号、
+  // 跳过重复追加，只负责把文档放进内存缓冲。
+  wal.assignSeq(doc);
+  // `__walDurable`：这一行背后是对调用方的**持久化承诺**（本函数 resolve 后，敏感操作
+  // 就回了成功）。WAL 超限裁剪必须据此区分——普通 `push` 写出的行是"尽力而为"，
+  // 丢了只损失取证；这一行丢了则是"已回成功却永久不入库"。
+  // 标记只写进 WAL 行、不写进 doc：doc 随后进内存缓冲并 insertMany，
+  // 多带一个 schema 外字段会被 mongoose strict 剔除，但没必要让它多走一趟。
+  // 重放侧（stampReplaySeqs）解析后会剥掉该字段，语义与 `__walSeq` 同构。
+  const line = JSON.stringify({ ...doc, __walDurable: true }) + '\n';
+  const appended = await wal.appendLineDurable(line);
+  if (!appended) return { spooled: false, reason: 'wal_append_failed' };
+  auditBuffer.push(doc, true);
   return { spooled: true, reason: null };
 }
 
@@ -84,7 +98,7 @@ async function recordDurably(entry, { auditAction, req } = {}) {
   try {
     return await AuditLog.create(entry);
   } catch (err) {
-    const result = spool(entry);
+    const result = await spool(entry);
     onAuditWriteFailure(auditAction, req)(err);
     if (!result.spooled) throw err;
     // 这条 warn 是"补偿已发生"的唯一正常路径留痕：error 日志说的是失败，

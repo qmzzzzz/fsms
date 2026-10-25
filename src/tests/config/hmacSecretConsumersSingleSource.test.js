@@ -49,8 +49,15 @@ const EXPECTED_CONSUMERS = [
   'src/services/auditChainCheckpoint.js', // 审计链签名检查点（S-8）
 ];
 
-/** 取值访问 HMAC_SECRET 的两种写法（见文件头判据说明） */
-const KEY_ACCESS_PATTERN = /hmacSecret|process\.env\.HMAC_SECRET/;
+/**
+ * 取值访问 HMAC_SECRET 的两种写法（见文件头判据说明）。
+ * 只认「从配置/环境**读出**密钥」这一形态：`hmacSecretOf(...)` 把已取出的密钥当参数
+ * 传递给下游（auditAnchorSink、auditChainVerify）不是新消费点——密钥来源仍是
+ * auditChainCheckpoint / auditChain。按裸标识符 `hmacSecret` 匹配会把这类下游
+ * 全部卷进清单，轮换手册就得为同一把钥写多行，反而稀释"真正需要轮换预案"的那五个。
+ */
+const KEY_ACCESS_PATTERN =
+  /require\(['"]\.\.\/config['"]\)\.hmacSecret|config\.hmacSecret|process\.env\.HMAC_SECRET/;
 
 /** 递归收集 src 下的 .js（排除测试与配置装载面） */
 const collectSourceFiles = (dir) => {

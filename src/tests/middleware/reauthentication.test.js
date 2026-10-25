@@ -11,6 +11,7 @@ const request = require('supertest');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const { generateSecret, hotp, base32Decode } = require('../../utils/totp');
+const { buildLoginEnvelope } = require('../helpers/buildLoginEnvelope');
 
 // 满足强度策略（大小写+数字+特殊字符）的随机口令；可用环境变量覆盖
 const buildTestPassword = () =>
@@ -94,6 +95,19 @@ describe('requireReAuthentication（敏感操作二次验证）', () => {
     expect(res.body.reAuthenticated).toBe(true);
   });
 
+  test('密码通道成功后清零共享失败计数（与 MFA 通道同口径）', async () => {
+    // 失败计数与 MFA 通道共享：成功不清零时，计数会一直贴着阈值，
+    // 用户下一次误输就被立刻锁 10 分钟。
+    await User.updateOne({ _id: userNoMfa._id }, { $set: { mfaFailCount: 3 } });
+    const res = await request(app).post('/sensitive').send({
+      __targetUserId: userNoMfa._id,
+      currentPassword: testPassword,
+    });
+    expect(res.status).toBe(200);
+    const fresh = await User.findById(userNoMfa._id).select('+mfaFailCount');
+    expect(fresh.mfaFailCount).toBe(0);
+  });
+
   test('当前密码错误 → 403', async () => {
     const res = await request(app)
       .post('/sensitive')
@@ -103,6 +117,66 @@ describe('requireReAuthentication（敏感操作二次验证）', () => {
       });
     expect(res.status).toBe(403);
     expect(res.body.message).toContain('当前密码错误');
+  });
+
+  test('当前口令密文（PASSWORD_CURRENT 用途）正确 → 通过，明文不上行', async () => {
+    const encCurrentPassword = await buildLoginEnvelope(testPassword, {
+      aad: 'password:current',
+    });
+    const res = await request(app).post('/sensitive').send({
+      __targetUserId: userNoMfa._id,
+      encCurrentPassword,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.reAuthenticated).toBe(true);
+  });
+
+  test('当前口令密文正确但用户密码错误 → 403（解密后仍走真实比对）', async () => {
+    const encCurrentPassword = await buildLoginEnvelope(
+      `W!r0ng${crypto.randomBytes(6).toString('hex')}`,
+      {
+        aad: 'password:current',
+      }
+    );
+    const res = await request(app).post('/sensitive').send({
+      __targetUserId: userNoMfa._id,
+      encCurrentPassword,
+    });
+    expect(res.status).toBe(403);
+    expect(res.body.message).toContain('当前密码错误');
+  });
+
+  test('密文用途不符（用 LOGIN 信封冒充 step-up）→ 400，不得回落明文放行', async () => {
+    // AAD 绑定点端用途：跨端点重放必须认证失败。同请求再带正确明文也不得
+    // 触发「解密失败 → 退回明文」的降级路径（否则坏信封可绕过密文轨）。
+    const encCurrentPassword = await buildLoginEnvelope(testPassword, { aad: 'login' });
+    const res = await request(app).post('/sensitive').send({
+      __targetUserId: userNoMfa._id,
+      encCurrentPassword,
+      currentPassword: testPassword,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.errors?.errorCode).toBe('AUTH_ENCRYPTED_CREDENTIAL_INVALID');
+    expect(res.body.reAuthenticated).not.toBe(true);
+  });
+
+  test('畸形密文信封 → 400 AUTH_ENCRYPTED_CREDENTIAL_INVALID（fail-closed）', async () => {
+    const res = await request(app).post('/sensitive').send({
+      __targetUserId: userNoMfa._id,
+      encCurrentPassword: '!!!not-an-envelope!!!',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.errors?.errorCode).toBe('AUTH_ENCRYPTED_CREDENTIAL_INVALID');
+  });
+
+  test('已开启 MFA 的用户仅提供正确密码 → 403，必须使用动态口令', async () => {
+    const res = await request(app).post('/sensitive').send({
+      __targetUserId: userWithMfa._id,
+      currentPassword: testPassword,
+    });
+    expect(res.status).toBe(403);
+    expect(res.body.message).toContain('动态口令');
+    expect(res.body.reAuthenticated).not.toBe(true);
   });
 
   test('MFA 动态口令正确（已开启用户）→ 通过', async () => {

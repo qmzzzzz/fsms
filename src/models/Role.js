@@ -4,7 +4,7 @@
  */
 
 const mongoose = require('mongoose');
-const { RESOURCE_STATUSES } = require('../constants/permission');
+const { RESOURCE_STATUSES, RESERVED_BUILTIN_ROLE_CODES } = require('../constants/permission');
 
 const roleSchema = new mongoose.Schema(
   {
@@ -58,17 +58,30 @@ const roleSchema = new mongoose.Schema(
       enum: RESOURCE_STATUSES,
       default: 'active',
     },
+
+    // 删除流程的中断恢复标记（select:false，不下发前端）：
+    // 置 inactive 前用聚合管道原子记录原状态；删除失败/进程中断后由启动对账恢复。
+    deletionPreviousStatus: {
+      type: String,
+      enum: RESOURCE_STATUSES,
+      select: false,
+    },
+    deletionStartedAt: {
+      type: Date,
+      select: false,
+    },
   },
   {
     timestamps: true,
+    // 角色编辑是典型的读-改-save：两个管理员并发改权限时，后者不应静默
+    // 覆盖前者刚写下的结果（VersionError → 400，见 errorHandler）。
+    optimisticConcurrency: true,
   }
 );
 
-// 预保存钩子：确保内置角色标记
+// 预保存钩子：确保内置角色标记（编码清单见 constants/permission.js）
 roleSchema.pre('save', function (next) {
-  // 内置角色编码前缀
-  const builtInCodes = ['SUPER_ADMIN', 'ADMIN', 'USER'];
-  if (builtInCodes.includes(this.code)) {
+  if (RESERVED_BUILTIN_ROLE_CODES.includes(this.code)) {
     this.isBuiltIn = true;
   }
   next();

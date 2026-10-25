@@ -12,6 +12,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 describe('审计报告修复综合回归', () => {
   let app;
@@ -75,7 +76,11 @@ describe('审计报告修复综合回归', () => {
     }
   });
 
-  const asAdmin = (path) => request(app).get(path).set('Authorization', `Bearer ${adminToken}`);
+  const asAdmin = (path) =>
+    request(app)
+      .get(path)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set(reauthHeaders(adminToken));
 
   // ================= 审计输出脱敏 =================
   describe('my-logs 不外泄 hmac', () => {

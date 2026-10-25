@@ -31,7 +31,8 @@
  *   (a) 未显式注入 ADMIN_INITIAL_PASSWORD 时，密码必须落盘且**权限已收紧**；
  *   (b) 已显式注入时（运维已知晓口令），不落盘——少一处泄露面；
  *   (c) 无论收紧成败，**密码明文绝不进入日志**（容器 stdout 会被
- *       日志驱动持久化，等同泄露）。
+ *       日志驱动持久化，等同泄露）；
+ *   (d) 生产语义下显式注入的弱口令必须拒绝，自动生成的口令必须满足同一策略。
  *
  * (c) 是本套件最关键的断言：它是「收紧失败」与「日志泄露」两害相权时的
  * 底线——收紧可以失败并告警，密码不得因告警而泄露。
@@ -53,6 +54,7 @@ jest.mock('../../utils/logger', () => ({
 }));
 
 const logger = require('../../utils/logger');
+const { validatePasswordStrength } = require('../../utils/helpers');
 const { createDefaultAdmin } = require('../../services/initData');
 
 const SUPER_ADMIN_ROLE_CODE = 'SUPER_ADMIN';
@@ -150,13 +152,48 @@ describe('初始密码落盘与权限收紧闭环', () => {
         expect(fs.existsSync(pwdFile)).toBe(true);
 
         const content = fs.readFileSync(pwdFile, 'utf8');
-        expect(content).toMatch(/^username: admin\npassword: [0-9a-f]{32}\n$/);
+        expect(content).toMatch(/^username: admin\npassword: Aa1![0-9a-f]{28}\n$/);
+        // 自动生成的口令必须与建号/改密走同一强度策略
+        expect(validatePasswordStrength(content.match(/password: (.+)\n/)[1])).toBeNull();
 
         // 收紧闭环：校验函数必须判为已收紧（失败即本用例红，
         // 这正是「伪修复」与「真收紧」的分界线）
         const { verifyHardened } = require('../../utils/filePermission');
         expect(verifyHardened(pwdFile).tightened).toBe(true);
       });
+    });
+
+    it('生产语义下显式注入弱口令时拒绝创建（fail-closed）', async () => {
+      await seedFreshAdminState();
+      const originalNodeEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      process.env.ADMIN_INITIAL_PASSWORD = 'password1234';
+
+      try {
+        await inTempCwd(async () => {
+          await expect(createDefaultAdmin()).rejects.toThrow(/不满足口令强度要求/);
+          expect(await User.findByUsername('admin')).toBeNull();
+        });
+      } finally {
+        process.env.NODE_ENV = originalNodeEnv;
+      }
+    });
+
+    it('生产语义下显式注入强口令时正常创建', async () => {
+      await seedFreshAdminState();
+      const originalNodeEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      process.env.ADMIN_INITIAL_PASSWORD = 'Pr0d-Strong-Pass-1!';
+
+      try {
+        await inTempCwd(async (dir) => {
+          const admin = await createDefaultAdmin();
+          userIds.push(admin._id);
+          expect(fs.existsSync(path.join(dir, '.admin-initial-password'))).toBe(false);
+        });
+      } finally {
+        process.env.NODE_ENV = originalNodeEnv;
+      }
     });
   });
 
@@ -189,16 +226,18 @@ describe('初始密码落盘与权限收紧闭环', () => {
       };
 
       try {
-        await inTempCwd(async () => {
-          const admin = await createDefaultAdmin();
-          userIds.push(admin._id);
+        await inTempCwd(async (dir) => {
+          // fail-closed：口令无法安全落盘 ⇒ 回滚管理员创建并中止启动
+          await expect(createDefaultAdmin()).rejects.toThrow('未能安全保存');
 
           const text = loggedText();
           // 不得把口令当作「补救办法」打印出来
-          expect(text).not.toMatch(/password: [0-9a-f]{32}/);
+          expect(text).not.toMatch(/password: Aa1![0-9a-f]{28}/);
           // 必须指引到环境变量注入这条可操作的恢复路径
           expect(text).toContain('ADMIN_INITIAL_PASSWORD');
           expect(logger.error).toHaveBeenCalled();
+          expect(fs.existsSync(path.join(dir, '.admin-initial-password'))).toBe(false);
+          expect(await User.findByUsername('admin')).toBeNull();
         });
       } finally {
         fs.writeFileSync = originalWrite;

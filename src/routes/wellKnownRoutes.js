@@ -17,12 +17,13 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = rateLimit;
 const logger = require('../utils/logger');
-const { stripControlChars } = require('../utils/helpers');
+const { stripControlChars, redactUrlQuery } = require('../utils/helpers');
 // P-9：三个上报限流器此前是裸 MemoryStore，多副本部署时各自独立计数——
 // 攻击者对每个副本各刷满配额，N 副本 = N 倍日志放大，与 /api 侧限流器的
 // 共享口径不一致。接入同一个 makeSharedStore（无 Redis 时行为不变）。
 const { makeSharedStore } = require('../middleware/rateLimitStore');
 const { normalizeRateLimitIp } = require('../middleware/rateLimit');
+const { clientIpForSecurityDecision } = require('../utils/ipUtils');
 const { captureException, isSentryInitialized } = require('../middleware/sentry');
 
 /**
@@ -34,7 +35,8 @@ const cspReportLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 60,
   store: makeSharedStore('csp-report'),
-  keyGenerator: (req) => `csp-report:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`,
+  keyGenerator: (req) =>
+    `csp-report:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
   standardHeaders: false,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).end(),
@@ -104,10 +106,11 @@ router.post('/csp-report', cspReportLimiter, cspReportParser, (req, res) => {
     // 单个错误配置的第三方脚本即可产生持续流量，落审计集合会污染合规留存。
     logger.warn('CSP 违规上报', {
       directive: truncate(directive, 64),
-      blockedUri: truncate(blockedUri),
-      documentUri: truncate(documentUri),
+      // 两个 URI 都是页面可构造的完整 URL，query 里可能带令牌；与访问日志同一套打码
+      blockedUri: truncate(redactUrlQuery(blockedUri)),
+      documentUri: truncate(redactUrlQuery(documentUri)),
       disposition: truncate(disposition, 16),
-      ip: req.ip,
+      ip: clientIpForSecurityDecision(req),
       userAgent: truncate(req.get('user-agent'), 200),
     });
   } catch (e) {
@@ -125,7 +128,8 @@ const clientErrorLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 30,
   store: makeSharedStore('client-errors'),
-  keyGenerator: (req) => `client-errors:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`,
+  keyGenerator: (req) =>
+    `client-errors:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
   standardHeaders: false,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).end(),
@@ -161,9 +165,10 @@ router.post('/client-errors', clientErrorLimiter, (req, res) => {
         kind,
         message,
         stack: truncate(entry.stack, 2000),
-        pageUrl: truncate(entry.url, 300),
+        // 该 URL 会同时进日志与 Sentry，先按访问日志口径打码 query 凭据
+        pageUrl: truncate(redactUrlQuery(entry.url), 300),
         count: Number.isFinite(entry.count) ? Math.min(entry.count, 10000) : 1,
-        ip: req.ip,
+        ip: clientIpForSecurityDecision(req),
         userAgent: truncate(req.get('user-agent'), 200),
       };
 
@@ -243,7 +248,8 @@ const securityTxtLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 30,
   store: makeSharedStore('security-txt'),
-  keyGenerator: (req) => `security-txt:${ipKeyGenerator(normalizeRateLimitIp(req.ip))}`,
+  keyGenerator: (req) =>
+    `security-txt:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
   standardHeaders: false,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).end(),

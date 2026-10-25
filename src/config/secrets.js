@@ -46,6 +46,9 @@ const FILE_BACKED_SECRETS = Object.freeze([
   // I-L2（改后审计）：运行期敏感值同样支持 *_FILE 注入
   'METRICS_TOKEN',
   'SECURITY_ALERT_WEBHOOK_SECRET',
+  // 事故处置脚本 migrate-pii-encryption.js --rotate 的上一把 PII 主密钥。
+  // 只允许命令行内联会让它落进 shell history 与进程 argv，处置现场同样应走 *_FILE。
+  'PII_ROTATION_OLD_AES_KEY',
 ]);
 
 /**

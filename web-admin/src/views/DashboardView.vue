@@ -52,6 +52,27 @@
       <!-- 欢迎卡片（D-2 拆为 DashboardWelcome 组件，时钟生命周期组件自理） -->
       <DashboardWelcome :current-user="currentUser" />
 
+      <!-- 统计加载失败必须显式提示：失败时卡片保留 '-' 占位（不伪造 0），
+           但仅靠占位符无法说明原因，也没有恢复入口 -->
+      <el-alert
+        v-if="statsLoadError"
+        :title="$t('dashboard.statsLoadFailed')"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="dashboard-alert"
+      >
+        <template #default>
+          <button
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            @click="loadDashboardData"
+          >
+            {{ $t('common.retry') }}
+          </button>
+        </template>
+      </el-alert>
+
       <!-- 数据卡片（P3-39：无 report:read 时整块不渲染，避免显示一排「-」占位） -->
       <el-row v-if="canReadReport" :gutter="20" class="stat-row">
         <el-col v-for="(item, i) in stats" :key="item.title" :xs="12" :sm="12" :md="6">
@@ -83,7 +104,12 @@
       <DashboardCharts v-if="canShowCharts" ref="chartsRef" />
 
       <!-- 最近报警（D-2 拆为 RecentAlarmsCard 纯渲染组件；P3-39：无 alarm:read 不渲染） -->
-      <RecentAlarmsCard v-if="canReadAlarm" :rows="recentAlarms" />
+      <RecentAlarmsCard
+        v-if="canReadAlarm"
+        :rows="recentAlarms"
+        :error="alarmLoadError"
+        @retry="loadRecentAlarms"
+      />
 
       <!-- 安全统计（管理员，需 security:stats；无该权限整卡不渲染也不请求） -->
       <SecurityStatsCard v-if="canReadSecurityStats" ref="securityStatsRef" />
@@ -210,6 +236,10 @@ const statDisplay = useCountUp(stats)
 
 const recentAlarms = ref([])
 const loading = ref(true)
+// 统计/报警加载失败标记：失败时统计卡保留 '-' 占位、报警表保留旧数据，
+// 由页面警示条明确「加载失败/上次数据」并提供重试入口
+const statsLoadError = ref(false)
+const alarmLoadError = ref(false)
 
 // 请求新鲜度守卫：5 分钟定时刷新与 visibilitychange 恢复可能交叠，
 // 先发出的慢响应若后返回，会把统计卡与报警表覆盖成旧值（实测复现：
@@ -289,6 +319,7 @@ const loadDashboardData = async () => {
         color: theme.color,
         icon: theme.icon,
       }))
+      statsLoadError.value = false
     }
   } catch (e) {
     // B-3：失败给一次非阻断式提示，避免骨架屏消失后页面静默显示 0 值；
@@ -300,6 +331,8 @@ const loadDashboardData = async () => {
     // P2-3：组件不再弹 toast，提示由 api.js 响应拦截器统一负责（拦截器给的是具体
     // 原因：服务端错误/网络错误/服务端 message，组件这条只是重复的泛化文案）。
     // 本视图的组件侧常驻信号是**统计卡保留 - 占位**（不伪造 0）——失败与真的为 0 可区分。
+    // 另有页面级警示条与重试按钮，保证失败不是只在几秒后消失的 toast 里出现过。
+    statsLoadError.value = true
   }
 }
 
@@ -335,14 +368,16 @@ const loadRecentAlarms = async () => {
                 : 'info',
       }))
       .slice(0, 5)
+    alarmLoadError.value = false
   } catch (e) {
     // B-3：失败给一次非阻断式提示；FE-L1：取消不提示
     if (isCanceledError(e)) return
     // 与主加载同理：过期请求的失败不得在新鲜数据上盖假红框
     if (!isCurrent()) return
     // P2-3：同主加载——提示归 api.js 响应拦截器，组件只清态。
-    // 已知边界（非本次引入）：RecentAlarmsCard 只收 rows，失败后卡片显示空表，
-    // 与「真的没有报警」不可区分；拦截器 toast 是唯一线索且会自行消失。
+    // 但卡片必须能区分「确实没有报警」与「没加载出来」：失败时保留旧数据
+    // 并显示错误/陈旧提示与重试入口（RecentAlarmsCard 的 error 属性）。
+    alarmLoadError.value = true
   }
 }
 

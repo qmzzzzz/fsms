@@ -69,7 +69,8 @@ describe('设备/报警写入：路由与模型的约束一致性', () => {
   const newAlarm = (description, location) => ({
     alarmType: 'smoke',
     description,
-    location,
+    // M-03：楼栋是报警的部门归属字段，手工报警必须携带
+    location: { building: 'A栋', ...location },
   });
 
   /** 存在性只按编码查（大写形态，见文件头），不按被校验的字段查 */

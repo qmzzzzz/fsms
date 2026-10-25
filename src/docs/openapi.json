@@ -668,7 +668,8 @@
                     "type": "string"
                   },
                   "email": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "创建必填；更新时可省略（键缺失=不修改）。用户列表/详情/建号/改号/角色回显只返回 emailMasked，不含明文"
                   },
                   "password": {
                     "type": "string"
@@ -2729,6 +2730,79 @@
         }
       }
     },
+    "/api/reports/export/pii": {
+      "post": {
+        "tags": ["Reports"],
+        "summary": "导出未脱敏报表（真实姓名，需二次验证）",
+        "description": "仅支持 alarms/inspections；需 report:export + pii:export，请求体携带当前密码或 MFA 码",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": ["alarms", "inspections"]
+            }
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "currentPassword": {
+                    "type": "string",
+                    "description": "当前密码（与 encCurrentPassword、mfaCode 三选一）"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "ECDH 信封加密后的当前密码"
+                  },
+                  "mfaCode": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "description": "6 位 TOTP 动态口令（已开启 MFA 时必用）"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回未脱敏 Excel 文件流"
+          },
+          "400": {
+            "description": "报表类型不支持或凭据格式无效"
+          },
+          "429": {
+            "description": "请求过于频繁"
+          }
+        }
+      }
+    },
     "/api/security/my-info": {
       "get": {
         "tags": ["Security"],
@@ -2799,6 +2873,54 @@
         }
       }
     },
+    "/api/security/reauth": {
+      "post": {
+        "tags": ["Security"],
+        "summary": "完成二次验证并换取审计读取票据",
+        "description": "审计读取端点（/alerts、/audit-logs、/audit-logs/export）需携带 X-Reauth-Ticket。本端点校验当前密码或 MFA 动态口令，成功后返回 5 分钟有效、绑定账号与会话的票据。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "currentPassword": {
+                    "type": "string",
+                    "description": "当前密码（与 encCurrentPassword、mfaCode 三选一）"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "ECDH 信封加密后的当前密码"
+                  },
+                  "mfaCode": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "description": "6 位 TOTP 动态口令（已开启 MFA 时必用）"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回 { ticket, expiresIn }"
+          },
+          "400": {
+            "description": "凭据格式无效"
+          },
+          "403": {
+            "description": "无权限"
+          }
+        }
+      }
+    },
     "/api/security/view-sensitive": {
       "post": {
         "tags": ["Security"],
@@ -2844,6 +2966,41 @@
         "responses": {
           "200": {
             "description": "返回今日登录数、失败登录数、高风险操作数、异常行为"
+          }
+        }
+      }
+    },
+    "/api/security/report-targets": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "列出当前用户数据范围内可举报的对象",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": ["user", "device", "alarm"]
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回候选对象列表（id / kind / code / name / detail，报警另有 occurredAt）"
           }
         }
       }
@@ -3012,9 +3169,23 @@
             "bearerAuth": []
           }
         ],
+        "parameters": [
+          {
+            "name": "X-Reauth-Ticket",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "POST /api/security/reauth 换取的短时票据（5 分钟，绑定账号与会话）"
+          }
+        ],
         "responses": {
           "200": {
             "description": "返回最近50条告警"
+          },
+          "401": {
+            "description": "缺少或无效的二次验证票据"
           }
         }
       }
@@ -3029,6 +3200,15 @@
           }
         ],
         "parameters": [
+          {
+            "name": "X-Reauth-Ticket",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "POST /api/security/reauth 换取的短时票据（5 分钟，绑定账号与会话）"
+          },
           {
             "name": "page",
             "in": "query",
@@ -3160,6 +3340,19 @@
                 "properties": {
                   "allowPublicRegistration": {
                     "type": "boolean"
+                  },
+                  "currentPassword": {
+                    "type": "string",
+                    "description": "当前密码（与 encCurrentPassword、mfaCode 三选一）"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "ECDH 信封加密后的当前密码"
+                  },
+                  "mfaCode": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "description": "6 位 TOTP 动态口令（已开启 MFA 时必用）"
                   }
                 }
               }
@@ -3206,6 +3399,19 @@
                 "properties": {
                   "loginCaptchaEnabled": {
                     "type": "boolean"
+                  },
+                  "currentPassword": {
+                    "type": "string",
+                    "description": "当前密码（与 encCurrentPassword、mfaCode 三选一）"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "ECDH 信封加密后的当前密码"
+                  },
+                  "mfaCode": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "description": "6 位 TOTP 动态口令（已开启 MFA 时必用）"
                   }
                 }
               }
@@ -3353,6 +3559,7 @@
       "put": {
         "tags": ["Security"],
         "summary": "管理员重置用户两步验证（清除密钥/恢复码并强制下线）",
+        "description": "清除他人第二因子属账户接管级操作，要求操作者本人通过一次二次验证。",
         "security": [
           {
             "bearerAuth": []
@@ -3368,6 +3575,31 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "currentPassword": {
+                    "type": "string",
+                    "description": "当前密码（与 encCurrentPassword、mfaCode 三选一）"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "ECDH 信封加密后的当前密码"
+                  },
+                  "mfaCode": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "description": "6 位 TOTP 动态口令（已开启 MFA 时必用）"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "两步验证已重置"
@@ -3376,7 +3608,7 @@
             "description": "未开启 MFA / 目标为自身"
           },
           "403": {
-            "description": "同级或更高层级 / 内置超管"
+            "description": "同级或更高层级 / 内置超管 / 二次验证未通过"
           }
         }
       }
@@ -3416,6 +3648,15 @@
           }
         ],
         "parameters": [
+          {
+            "name": "X-Reauth-Ticket",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "POST /api/security/reauth 换取的短时票据（5 分钟，绑定账号与会话）"
+          },
           {
             "name": "limit",
             "in": "query",
@@ -3471,6 +3712,19 @@
                 "properties": {
                   "registerCaptchaEnabled": {
                     "type": "boolean"
+                  },
+                  "currentPassword": {
+                    "type": "string",
+                    "description": "当前密码（与 encCurrentPassword、mfaCode 三选一）"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "ECDH 信封加密后的当前密码"
+                  },
+                  "mfaCode": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "description": "6 位 TOTP 动态口令（已开启 MFA 时必用）"
                   }
                 }
               }

@@ -62,6 +62,10 @@ afterEach(() => {
 
 const { HttpShipperTransport } = require('../utils/logShipper');
 
+// 本文件用本地 http 目标验证 scheme 白名单与目标门禁；2026-10-24 起明文 http
+// 需显式放宽（生产启动闸另有一档：带 Bearer 令牌时连放宽也不允许）。
+process.env.LOG_SHIPPING_ALLOW_INSECURE = 'true';
+
 function makeTransport(url, token = 'ZZSENTINEL_TOKEN') {
   return new HttpShipperTransport({
     url,
@@ -156,6 +160,20 @@ describe('日志转发只允许 http/https 出站，拼错的 scheme 必须零�
     await t._post(['line-1']).catch(() => {});
     t.close();
     expect(httpSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('未显式设置 LOG_SHIPPING_ALLOW_INSECURE 时明文 http 零投递', async () => {
+    const saved = process.env.LOG_SHIPPING_ALLOW_INSECURE;
+    delete process.env.LOG_SHIPPING_ALLOW_INSECURE;
+    try {
+      const { err } = await tryPost('http://siem.internal/logs');
+      expect(err).toBeDefined();
+      expect(err.message).toContain('LOG_SHIPPING_ALLOW_INSECURE');
+      expect(httpSpy).not.toHaveBeenCalled();
+      expect(httpsSpy).not.toHaveBeenCalled();
+    } finally {
+      process.env.LOG_SHIPPING_ALLOW_INSECURE = saved;
+    }
   });
 
   test('取数有效：拒绝清单非空，放行与拒绝两侧都有断言（防空集恒绿）', () => {

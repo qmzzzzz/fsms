@@ -6,6 +6,7 @@
 const logger = require('../../utils/logger');
 const { initPermissions, initRoles } = require('./seeding');
 const { createDefaultAdmin, reconcileSuperAdmin } = require('./adminAccount');
+const roleService = require('../roleService');
 const {
   reconcileUserIndexes,
   reconcileTokenBlacklistIndexes,
@@ -19,6 +20,9 @@ const initializeSystem = async () => {
   try {
     await initPermissions();
     await initRoles();
+    // 删除中断对账：上一次进程若在「停用 → 统计 → 删除/恢复」之间退出，
+    // 角色会停在 inactive；必须尽早还原，否则用户登录后直接失去权限。
+    await roleService.reconcileInterruptedRoleDeletions();
     // users 索引对账（username + email 两件事）须在任何写入 users 之前：
     // ① createDefaultAdmin 依赖 findByUsername 的 collation 判重，索引缺失时该查询
     //    会退化为全表扫描；② A3 的 emailKey_1 切换若拖到建号之后，本进程内新建的

@@ -11,6 +11,7 @@ const { buildDateRangeFilter } = require('../utils/helpers');
 const { scopeFilterFor } = require('./reportExportService');
 const { deviceAlertFilters } = require('../constants/deviceAlerts');
 const { BUSINESS_TIMEZONE } = require('../constants/timezone');
+const { withListBudget, listCountOptions, listAggregateOptions } = require('../utils/queryBudget');
 
 const MS_PER_MINUTE = 1000 * 60;
 const TREND_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -52,31 +53,34 @@ const getDeviceReportData = async (query) => {
   };
 
   const [facetResult, expiringSoon, expiringSoonTotal] = await Promise.all([
-    FireDevice.aggregate([
-      { $match: baseMatch },
-      {
-        $facet: {
-          byType: [
-            { $group: { _id: '$deviceType', count: { $sum: 1 } } },
-            { $sort: { count: -1 } },
-          ],
-          byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
-          byBuilding: [
-            { $group: { _id: '$location.building', count: { $sum: 1 } } },
-            { $sort: { count: -1 } },
-          ],
-          maintenanceTotal: [
-            { $unwind: '$maintenanceRecord' },
-            { $group: { _id: null, count: { $sum: 1 } } },
-          ],
+    FireDevice.aggregate(
+      [
+        { $match: baseMatch },
+        {
+          $facet: {
+            byType: [
+              { $group: { _id: '$deviceType', count: { $sum: 1 } } },
+              { $sort: { count: -1 } },
+            ],
+            byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+            byBuilding: [
+              { $group: { _id: '$location.building', count: { $sum: 1 } } },
+              { $sort: { count: -1 } },
+            ],
+            maintenanceTotal: [
+              { $unwind: '$maintenanceRecord' },
+              { $group: { _id: null, count: { $sum: 1 } } },
+            ],
+          },
         },
-      },
-    ]),
-    FireDevice.find(expiringFilter)
+      ],
+      listAggregateOptions()
+    ),
+    withListBudget(FireDevice.find(expiringFilter))
       .select('deviceCode deviceName deviceType expiryDate location')
       .sort({ expiryDate: 1 })
       .limit(EXPIRING_REPORT_LIMIT),
-    FireDevice.countDocuments(expiringFilter),
+    FireDevice.countDocuments(expiringFilter, listCountOptions()),
   ]);
 
   const { byType, byStatus, byBuilding, maintenanceTotal } = facetResult[0];
@@ -114,27 +118,30 @@ const getInspectionReportData = async (query) => {
 
   // L-2：原先 7 次串行往返，同一份匹配条件下用 $facet 收敛为 1 次，
   // 仪表盘冷启动时显著降低 p95；返回结构与旧实现对齐，前端无需变更。
-  const [facetResult] = await Inspection.aggregate([
-    matchFilter,
-    {
-      $facet: {
-        byType: [{ $group: { _id: '$inspectionType', count: { $sum: 1 } } }],
-        byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
-        byResult: [
-          { $match: { status: 'completed' } },
-          { $group: { _id: '$result', count: { $sum: 1 } } },
-        ],
-        total: [{ $count: 'count' }],
-        completed: [{ $match: { status: 'completed' } }, { $count: 'count' }],
-        byAssignee: [
-          { $unwind: '$assignedTo' },
-          { $group: { _id: '$assignedTo', count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-          { $limit: 10 },
-        ],
+  const [facetResult] = await Inspection.aggregate(
+    [
+      matchFilter,
+      {
+        $facet: {
+          byType: [{ $group: { _id: '$inspectionType', count: { $sum: 1 } } }],
+          byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+          byResult: [
+            { $match: { status: 'completed' } },
+            { $group: { _id: '$result', count: { $sum: 1 } } },
+          ],
+          total: [{ $count: 'count' }],
+          completed: [{ $match: { status: 'completed' } }, { $count: 'count' }],
+          byAssignee: [
+            { $unwind: '$assignedTo' },
+            { $group: { _id: '$assignedTo', count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: 10 },
+          ],
+        },
       },
-    },
-  ]);
+    ],
+    listAggregateOptions()
+  );
 
   const byType = orDefault(facetResult?.byType, []);
   const byStatus = orDefault(facetResult?.byStatus, []);
@@ -155,54 +162,59 @@ const getAlarmReportData = async ({ scopeFilter, matchStage }) => {
   const thirtyDaysAgo = new Date(Date.now() - TREND_WINDOW_MS);
 
   // 使用 $facet 将 6 次聚合合并为 1 次查询；顶层 $match 先应用数据范围，各分支再叠加自身过滤
-  const [facetResult] = await FireAlarm.aggregate([
-    { $match: scopeFilter },
-    {
-      $facet: {
-        // 按类型统计
-        byType: [{ $match: matchStage }, { $group: { _id: '$alarmType', count: { $sum: 1 } } }],
-        // 按状态统计
-        byStatus: [{ $match: matchStage }, { $group: { _id: '$status', count: { $sum: 1 } } }],
-        // 按级别统计
-        byLevel: [{ $match: matchStage }, { $group: { _id: '$level', count: { $sum: 1 } } }],
-        // 按原因统计（与其他分支一致叠加日期过滤，避免选了日期后口径不一致）
-        byCause: [
-          { $match: { ...matchStage, cause: { $ne: null } } },
-          { $group: { _id: '$cause', count: { $sum: 1 } } },
-        ],
-        // 按天统计（近30天）：时区取业务时区单一声明，与仪表盘「今日」同口径
-        byDay: [
-          { $match: { occurredAt: { $gte: thirtyDaysAgo } } },
-          {
-            $group: {
-              _id: {
-                $dateToString: {
-                  format: '%Y-%m-%d',
-                  date: '$occurredAt',
-                  timezone: BUSINESS_TIMEZONE,
+  const [facetResult] = await FireAlarm.aggregate(
+    [
+      { $match: scopeFilter },
+      {
+        $facet: {
+          // 按类型统计
+          byType: [{ $match: matchStage }, { $group: { _id: '$alarmType', count: { $sum: 1 } } }],
+          // 按状态统计
+          byStatus: [{ $match: matchStage }, { $group: { _id: '$status', count: { $sum: 1 } } }],
+          // 按级别统计
+          byLevel: [{ $match: matchStage }, { $group: { _id: '$level', count: { $sum: 1 } } }],
+          // 按原因统计（与其他分支一致叠加日期过滤，避免选了日期后口径不一致）
+          byCause: [
+            { $match: { ...matchStage, cause: { $ne: null } } },
+            { $group: { _id: '$cause', count: { $sum: 1 } } },
+          ],
+          // 按天统计（近30天）：时区取业务时区单一声明，与仪表盘「今日」同口径
+          byDay: [
+            { $match: { occurredAt: { $gte: thirtyDaysAgo } } },
+            {
+              $group: {
+                _id: {
+                  $dateToString: {
+                    format: '%Y-%m-%d',
+                    date: '$occurredAt',
+                    timezone: BUSINESS_TIMEZONE,
+                  },
+                },
+                count: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+          ],
+          // 平均响应时间（分钟）（叠加日期过滤；receivedAt 同样加 $ne:null 守卫，
+          // 防止缺失字段的文档参与 $subtract 得到 NaN/报错拉低均值）
+          avgResponseTime: [
+            { $match: { ...matchStage, dispatchedAt: { $ne: null }, receivedAt: { $ne: null } } },
+            {
+              $group: {
+                _id: null,
+                avgMinutes: {
+                  $avg: {
+                    $divide: [{ $subtract: ['$dispatchedAt', '$receivedAt'] }, MS_PER_MINUTE],
+                  },
                 },
               },
-              count: { $sum: 1 },
             },
-          },
-          { $sort: { _id: 1 } },
-        ],
-        // 平均响应时间（分钟）（叠加日期过滤；receivedAt 同样加 $ne:null 守卫，
-        // 防止缺失字段的文档参与 $subtract 得到 NaN/报错拉低均值）
-        avgResponseTime: [
-          { $match: { ...matchStage, dispatchedAt: { $ne: null }, receivedAt: { $ne: null } } },
-          {
-            $group: {
-              _id: null,
-              avgMinutes: {
-                $avg: { $divide: [{ $subtract: ['$dispatchedAt', '$receivedAt'] }, MS_PER_MINUTE] },
-              },
-            },
-          },
-        ],
+          ],
+        },
       },
-    },
-  ]);
+    ],
+    listAggregateOptions()
+  );
 
   const { byType, byStatus, byLevel, byCause, byDay, avgResponseTime } = facetResult;
   return {

@@ -11,9 +11,11 @@ const { DataMasking } = require('../../utils/encryption');
 const logger = require('../../utils/logger');
 const { asyncHandler } = require('../../middleware/errorHandler');
 const authService = require('../../services/authService');
+const { auditClientAddress } = require('../../utils/ipUtils');
 // 安全建议码表（i18n）：后端只出稳定码，文案归前端词表——原先这里直接拼中文句子，
 // 英文界面下无从翻译。见 constants/securitySuggestions.js 文件头。
 const { SECURITY_SUGGESTION_CODES } = require('../../constants/securitySuggestions');
+const { AUDIT_CATEGORIES } = require('../../constants/audit');
 // F-03（2026-10-17）：业务状态已改变的成功路径改走可靠 outbox（落库失败 ⇒ 转审计 WAL
 // 待重放），因此"返回成功"不再等于"审计可能没写上"。仍用 onAuditWriteFailure 的两处
 // （PII 查看、安全举报）是刻意的 fail-closed：它们必须"记账后重抛"，不许把结果交出去。
@@ -29,6 +31,9 @@ const getMySecurityInfo = asyncHandler(async (req, res) => {
   const user = await User.findById(userId).select(
     'username email phone lastLoginAt createdAt status'
   );
+  // 令牌有效但用户已被删除（并发删除/软清理）：下面直接解引用 user.lastLoginAt，
+  // 缺此守卫会抛 TypeError 变成 500，且把真实语义（会话已无主体）掩盖成服务端故障。
+  if (!user) return ApiResponse.codeError(res, 'AUTH_USER_NOT_FOUND');
 
   // 获取最近登录记录
   const recentLogins = await AuditLog.find({
@@ -149,7 +154,7 @@ const changePasswordSecure = asyncHandler(async (req, res) => {
       category: 'auth',
       userId: req.user.userId,
       username: result.username,
-      ip: req.ip,
+      ...auditClientAddress(req),
       userAgent: req.get('user-agent'),
       success: true,
     },
@@ -165,6 +170,8 @@ const changePasswordSecure = asyncHandler(async (req, res) => {
  */
 const getAccountBindings = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user.userId).select('email phone department status');
+  // 同 getMySecurityInfo：用户已被删除时下方 user.email 会抛 TypeError（500）
+  if (!user) return ApiResponse.codeError(res, 'AUTH_USER_NOT_FOUND');
 
   return ApiResponse.success(
     res,
@@ -205,6 +212,15 @@ const getAccountBindings = asyncHandler(async (req, res) => {
  */
 const getMyLogs = asyncHandler(async (req, res) => {
   const { days = 7, limit = 50, category } = req.query;
+
+  // L-20：category 直接进 Mongo 查询条件，必须按注册表收口。
+  // extended query parser 会把 `category[$ne]=x` 解析成对象；不校验就原样下传，
+  // 等于把「按类别过滤」变成可注入的查询操作符（同时也是 500 的入口）。
+  if (category && !AUDIT_CATEGORIES.includes(category)) {
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: [{ path: 'category', msg: '不支持的操作类别' }],
+    });
+  }
 
   // limit 解析为整数并限界：非法输入（非数字/小于 1）回退本接口默认值 50，
   // 上限 500，避免客户端传入任意大值或 NaN 直传 Mongo limit()

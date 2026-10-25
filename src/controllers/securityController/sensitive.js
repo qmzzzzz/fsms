@@ -8,7 +8,11 @@ const { validationResult } = require('express-validator');
 const { safeFieldErrors } = require('../../utils/validationRules');
 const ApiResponse = require('../../utils/apiResponse');
 const { getOperatorMaxLevel, maxRoleLevel } = require('../../utils/permissionHelper');
-const { assertRecordInScope } = require('../../middleware/rbac');
+const {
+  assertRecordInScope,
+  buildRecordScopeFilter,
+  getDataScope,
+} = require('../../middleware/rbac');
 // 举报目标核验的域字段取自同一份声明（constants/dataScopeFields.js）。
 const { DATA_SCOPE_FIELDS } = require('../../constants/dataScopeFields');
 const { DataMasking } = require('../../utils/encryption');
@@ -18,10 +22,12 @@ const { asyncHandler } = require('../../middleware/errorHandler');
 const userService = require('../../services/userService');
 const deviceService = require('../../services/DeviceService');
 const alarmService = require('../../services/AlarmService');
+// 候选列举走独立服务：三个业务 service 已贴 max-lines 上限，且查询口径完全同构
+const reportTargetService = require('../../services/reportTargetService');
 const { onAuditWriteFailureRethrow } = require('../../utils/auditWriteFailure');
 // 安全判定与 PII 查看留痕的客户端地址只有一个口径（utils/ipUtils.js）：
 // `req.ip` 在开着 trust proxy 时取自请求方自己写的 X-Forwarded-For。
-const { clientIpForSecurityDecision } = require('../../utils/ipUtils');
+const { auditClientAddress } = require('../../utils/ipUtils');
 
 /**
  * 查看敏感数据（需要二次验证）
@@ -49,7 +55,9 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
   if (!isSelf) {
     const opLevel = await getOperatorMaxLevel(req.user.userId);
     const targetUser = await User.findById(targetUserId)
-      .select('roles')
+      // 数据范围闸需要的属主/部门字段与层级字段同一次查出：少一列就会让
+      // department/self 档把目标判成越权（假 deny），或在缺失字段上 fail-open。
+      .select('roles department createdBy')
       .populate({ path: 'roles', select: 'level' })
       .lean();
     if (!targetUser) {
@@ -63,6 +71,24 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
     // 故：无角色（无法确认其层级）从严拒绝；否则仍要求操作者严格高于目标。两处均 fail-closed。
     if (targetRoles.length === 0 || opLevel <= targetLevel) {
       return ApiResponse.codeError(res, 'SENSITIVE_VIEW_HIGHER_LEVEL_FORBIDDEN');
+    }
+
+    // 层级闸只回答"能不能管这一档人"，不回答"这个人归不归我管"：
+    // 部门管理员持有 system:read 且层级高于外部门普通用户，原先仅凭层级比较即可
+    // 跨部门读取手机号/邮箱。数据范围必须与列表/详情/写路径同一判据——字段取自
+    // DATA_SCOPE_FIELDS 单一声明，闸门复用 rbac.assertRecordInScope，避免再抄一份。
+    const { allowed } = await assertRecordInScope(
+      req,
+      targetUser,
+      DATA_SCOPE_FIELDS.user.ownerField,
+      DATA_SCOPE_FIELDS.user.departmentField
+    );
+    if (!allowed) {
+      logger.warn('敏感信息查看被拒（超出数据范围）', {
+        operator: req.user.username,
+        targetUserId,
+      });
+      return ApiResponse.codeError(res, 'SENSITIVE_VIEW_OUT_OF_SCOPE');
     }
   }
 
@@ -115,7 +141,9 @@ const viewSensitiveData = asyncHandler(async (req, res) => {
     // 读别人手机号的人可以顺手挑一个写进取证记录（auth.js 的 IP 范围拒绝审计早就
     // 用 clientIpForSecurityDecision 了，全仓唯一的 PII 查看留痕却漏了它 —— 同一件事
     // 两种口径，两边会互相"证明"对方没问题）。
-    ip: clientIpForSecurityDecision(req),
+    // auditClientAddress 在同一个安全裁决地址之上，另留 reportedIp/socketPeer
+    // （clientInfo）供取证：只记裁决地址会丢掉"对方声称是谁"这个事实。
+    ...auditClientAddress(req),
     userAgent: req.get('user-agent'),
     success: true,
     riskLevel: 'medium',
@@ -196,6 +224,126 @@ async function resolveReportTargetViolation(req, targetType, targetId) {
 }
 
 /**
+ * 举报对象候选的每类上限
+ *
+ * 20 是"够认出来"与"不给批量拖库留通道"的交点：远程搜索按输入停顿触发，
+ * 用户通常在前几条里就能认出目标；再大就变成"一次请求取走一页人名/设备"。
+ * 不导出——判据要能在上限被改动时变红（测试断言 items.length ≤ 20）。
+ */
+const REPORT_TARGET_CANDIDATE_LIMIT = 20;
+
+/** 位置子字段拼成一行人话（设备与报警同形，缺哪段就少哪段） */
+const formatLocationLabel = (location) => {
+  if (!location || typeof location !== 'object') return '';
+  return [location.building, location.floor, location.room]
+    .filter((v) => typeof v === 'string' && v.trim() !== '')
+    .join(' · ');
+};
+
+/**
+ * 举报对象候选的三类取数配置
+ *
+ * 与 `REPORT_TARGET_KINDS` 刻意分成两张表：那张表服务于**提交时的事实核验**
+ * （按 id 反查 + 越权码），这张服务于**候选列举**（按范围查 + 展示字段）。
+ * 合并成一张会让"只改其中一侧"看起来无害，而两侧的字段集合本来就不该相同——
+ * 核验需要属主/部门臂，列举需要的是用户认得出的名称。
+ *
+ * 两张表的 `fields` 都指向 `DATA_SCOPE_FIELDS` 的同一份声明：候选与核验
+ * 必须同判据，否则会出现「下拉里选得到、提交却 403」。
+ */
+const REPORT_TARGET_CANDIDATE_KINDS = {
+  user: {
+    fields: DATA_SCOPE_FIELDS.user,
+    toItem: (doc) => ({
+      id: String(doc._id),
+      kind: 'user',
+      code: doc.username || '',
+      name: doc.realName || '',
+      detail: doc.department || '',
+    }),
+  },
+  device: {
+    fields: DATA_SCOPE_FIELDS.device,
+    toItem: (doc) => ({
+      id: String(doc._id),
+      kind: 'device',
+      code: doc.deviceCode || '',
+      name: doc.deviceName || '',
+      detail: formatLocationLabel(doc.location),
+    }),
+  },
+  alarm: {
+    fields: DATA_SCOPE_FIELDS.alarm,
+    toItem: (doc) => ({
+      id: String(doc._id),
+      kind: 'alarm',
+      code: doc.alarmCode || '',
+      // name 放稳定码（alarmType），中文映射在前端：后端只出稳定码是本仓既有口径
+      name: doc.alarmType || '',
+      detail: formatLocationLabel(doc.location),
+      occurredAt: doc.occurredAt || null,
+    }),
+  },
+};
+
+/**
+ * 列出"我数据范围内的可举报对象"（GET /api/security/report-targets）
+ *
+ * 存在理由：举报对话框原先把「对象 ID」直接交给用户填 24 位 ObjectId，
+ * 而一线人员拿不到这个值——功能上等价于不可用。本端点让前端把那个输入框
+ * 换成"可搜索的对象选择器"。
+ *
+ * 安全边界（为什么这个端点敢不挂权限码）：
+ *  · 它**不是**新的信息面，而是把已有信息收窄后复用——候选人只来自
+ *    举报人自己的数据范围，判据与提交时的 `resolveReportTargetViolation`
+ *    同源（`buildRecordScopeFilter` ↔ `isRecordInScope` 逐臂同值）；
+ *  · 返回字段是"能认出是哪一条"的最小集：用户只给 username/realName/department，
+ *    设备只给编号/名称/位置，报警只给编号/类型/位置/时间。phone/email、
+ *    报警描述、上报人姓名一律不出现在候选里；
+ *  · 账号级限流（`authenticate` 内的 `userLimiter`，普通用户 200/15min）压住
+ *    枚举速率。这里**不另开专用桶**：候选集本身已被数据范围过滤，能枚举到的
+ *    就是自己本来能看到的记录；再叠一个 60/15min 的桶只会让正常填写搜索
+ *    （一次输入 3-8 次请求）更容易撞 429。
+ *
+ * 为什么仍然要单独开端点、而不是让前端调 /users、/devices、/alarms：
+ * 那三个列表都要求 `user:read` / `device:read` / `alarm:read`，而举报入口
+ * 刻意对全员开放。复用列表接口会让没有读权限的一线人员打开下拉就吃 403——
+ * 比现在"填不出 ID"更糟：连提交入口都断了。
+ */
+const listReportTargets = asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: safeFieldErrors(errors),
+    });
+  }
+
+  const kind = REPORT_TARGET_CANDIDATE_KINDS[req.query.type];
+  if (!kind) {
+    // 路由层 isIn 已拦；这里是"新增类型只改了一侧"时的 fail-closed 兜底
+    return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
+      fieldErrors: [{ field: 'type', message: '无效的目标类型' }],
+    });
+  }
+
+  const dataScope = await getDataScope(req.user.userId);
+  const filter = buildRecordScopeFilter(dataScope, {
+    ownerField: kind.fields.ownerField,
+    departmentField: kind.fields.departmentField,
+    userId: req.user.userId,
+  });
+
+  const docs = await reportTargetService.search({
+    type: req.query.type,
+    filter,
+    keyword: req.query.keyword,
+    limit: REPORT_TARGET_CANDIDATE_LIMIT,
+  });
+
+  return ApiResponse.success(res, { items: docs.map(kind.toItem) });
+});
+
+/**
  * 举报异常行为
  * POST /api/security/report
  */
@@ -237,7 +385,7 @@ const reportSuspiciousActivity = asyncHandler(async (req, res) => {
     targetId,
     reason,
     description,
-    ip: req.ip,
+    ...auditClientAddress(req),
     userAgent: req.get('user-agent'),
     riskLevel: 'high',
     // 用重抛档而不是吞错档（档位表见 utils/auditWriteFailure.js）：`reportId` 取自
@@ -257,5 +405,6 @@ const reportSuspiciousActivity = asyncHandler(async (req, res) => {
 
 module.exports = {
   viewSensitiveData,
+  listReportTargets,
   reportSuspiciousActivity,
 };

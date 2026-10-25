@@ -16,9 +16,9 @@
  *
  * 同一份代码里就有反证：本服务的**兄弟接口** `GET /api/devices`（deviceController.js:106）
  * 走 `ApiResponse.paginated`，如实带 `total`/`totalPages`；`getDeviceStats` 为同一档判据
- * 专门跑 `countDocuments`（DeviceService.js:419）——"到期设备到底有多少台"一直是系统要
+ * 专门跑计数（DeviceService.js:445 的 `$facet.total`）——"到期设备到底有多少台"一直是系统要
  * 回答的问题，只有清单这条路把它丢了。本仓另有多处已把同一约定写进注释：
- * `auditExportService.js:69`（多取一条当探针，"truncated 判定精确"）、
+ * `auditExportService.js:71`（多取一条当探针，"truncated 判定精确"）、
  * `reportWorkbookService.js:20`（恰好等于上限不得误报截断）、
  * `models/FireDevice.js:235`（"截断必须可数，不能拿数组长度假装这就是全部历史"）。
  *

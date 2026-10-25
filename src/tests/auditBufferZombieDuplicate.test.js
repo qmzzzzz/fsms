@@ -200,6 +200,44 @@ describe('链锁超时与僵尸写入的重复落库', () => {
     expect(await countTag('slow')).toBe(3);
   });
 
+  test('★ 僵尸未落定时，另一批不得从旧尾续链（同父两子的链分叉）', async () => {
+    const box = slowInsertMany(800);
+    for (const d of makeDocs('forka', 3)) auditBuffer.push(d);
+    await auditBuffer.flush(); // 150ms 锁超时，insertMany 仍在后台跑
+    expect(await waitFor(() => box.calls >= 1)).toBe(true);
+
+    // 僵尸写入在飞：此时再来一批。修复前它会读到僵尸写之前的 DB 尾，
+    // 与僵尸批次共享同一个父哈希；两边各自自洽，verify 看不出分叉。
+    for (const d of makeDocs('forkb', 2)) auditBuffer.push(d);
+    await auditBuffer.flush();
+    // 冻结窗口：A 的超时回退 3 条 + B 的 2 条都原样留在缓冲，且绝不能调用 insertMany
+    expect(box.calls).toBe(1);
+    expect(auditBuffer.getStats().bufferLength).toBe(5);
+    expect(await countTag('forkb')).toBe(0);
+
+    // 僵尸落定（解冻 + 强制重同步）后再尝试；flush 失败是预期的冻结回退
+    expect(
+      await waitFor(async () => {
+        await auditBuffer.flush();
+        return (await countTag('forkb')) === 2;
+      })
+    ).toBe(true);
+    expect(await countTag('forka')).toBe(3);
+
+    const a = await AuditLog.find({ username: /^zzombie_forka_/ })
+      .sort({ _id: 1 })
+      .lean();
+    const b = await AuditLog.find({ username: /^zzombie_forkb_/ })
+      .sort({ _id: 1 })
+      .lean();
+    expect(a).toHaveLength(3);
+    expect(b).toHaveLength(2);
+    // 关键判据：B 从 A 的末尾续链，而不是与 A 共享同一个父哈希
+    expect(b[0].prevHash).toBe(a[2].hash);
+    expect(b[1].prevHash).toBe(b[0].hash);
+    expect(b[0].prevHash).not.toBe(a[0].prevHash);
+  });
+
   test('幂等重放不得计入毒文档失败次数（否则早已落库的记录会被"丢弃"并虚增 droppedCount）', async () => {
     slowInsertMany(600);
     for (const d of makeDocs('poison', 2)) auditBuffer.push(d);

@@ -16,6 +16,7 @@ import { describe, test, expect, vi, afterEach } from 'vitest'
 import { mountComponent, flush, click, waitFor } from '../helpers/componentHarness'
 
 const get = vi.fn()
+const createTicket = vi.fn()
 const isCanceledError = vi.fn(() => false)
 vi.mock('@/utils/api', () => ({
   apiClient: { get: (...a) => get(...a), post: vi.fn(), delete: vi.fn() },
@@ -23,6 +24,8 @@ vi.mock('@/utils/api', () => ({
   api: {
     security: {
       getAlerts: () => get('/security/alerts'),
+      queryAuditLogs: (params) => get('/security/audit-logs', { params }),
+      createReauthTicket: (...a) => createTicket(...a),
       verifyAuditChain: (params) => get('/security/audit-logs/verify', { params }),
       exportAuditLogs: (params) =>
         get('/security/audit-logs/export', { params, responseType: 'blob' }),
@@ -31,6 +34,8 @@ vi.mock('@/utils/api', () => ({
   isCanceledError: (...a) => isCanceledError(...a),
   resolveErrorMessage: () => '码化文案',
 }))
+const encryptPassword = vi.fn((v) => Promise.resolve('ENC:' + v))
+vi.mock('@/utils/loginCipher', () => ({ encryptPassword: (...a) => encryptPassword(...a) }))
 vi.mock('element-plus/es/components/message/index.mjs', () => ({
   ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }))
@@ -41,6 +46,7 @@ vi.mock('element-plus/es/components/message-box/index.mjs', () => ({
 import AuditLogView from '@/views/AuditLogView.vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { useAuthStore } from '@/store'
+import { storeReauthTicket, clearReauthTicket, getReauthTicket } from '@/utils/reauthTicket'
 import i18n from '@/i18n'
 
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -60,6 +66,8 @@ const logRow = (over = {}) => ({
 })
 
 const mountView = (perms = PERMS) => {
+  // P3-2：审计读取需短期票据，既有用例验证的是「拿到票据之后」的行为
+  storeReauthTicket('test-ticket', 300)
   active = mountComponent(AuditLogView, {
     setupStore: (pinia) => useAuthStore(pinia).setPermissions(perms),
   })
@@ -192,6 +200,8 @@ afterEach(() => {
   active?.handle.unmount()
   active = null
   get.mockReset()
+  createTicket.mockReset()
+  encryptPassword.mockImplementation((v) => Promise.resolve('ENC:' + v))
   isCanceledError.mockReset()
   isCanceledError.mockReturnValue(false)
   ElMessage.success.mockReset()
@@ -201,6 +211,7 @@ afterEach(() => {
   // P2-5 的用例会切到 en-US 验证标签跟随语言：不复位就会泄漏给后续用例
   // （它们默认按 zh-CN 断言），表现为「单跑绿、连跑红」的次序耦合。
   i18n.global.locale.value = 'zh-CN'
+  clearReauthTicket()
 })
 
 describe('AuditLogView 列表加载与渲染', () => {
@@ -906,7 +917,12 @@ describe('AuditLogView 详情对话框', () => {
 
   test('详情对话框：点「关闭」后遮罩隐藏且无 Vue 错误', async () => {
     const c = await openDetail([logRow()])
-    const overlay = document.body.querySelector('.el-overlay')
+    // 页内还有 ReauthDialog 的常驻（隐藏）遮罩，必须按标题定位详情自己的 overlay
+    const overlay = Array.from(document.body.querySelectorAll('.el-overlay')).find(
+      (o) =>
+        o.querySelector('.el-dialog__title')?.textContent.trim() ===
+        i18n.global.t('security.auditLogs')
+    )
     expect(overlay.style.display).toBe('')
     const closeBtn = Array.from(
       document.body.querySelectorAll('.el-dialog__footer .glass-btn')
@@ -1077,5 +1093,87 @@ describe('AuditLogView 最近安全告警面板', () => {
     expect(pairs).toContain('操作用户::bob')
     expect(pairs).toContain('风险等级::高')
     expect(c.errors).toEqual([])
+  })
+})
+
+describe('AuditLogView 审计读取票据（P3-2）', () => {
+  /** 二次验证弹层（append-to-body）：按标题定位 */
+  const stepUpDlg = () =>
+    Array.from(document.body.querySelectorAll('.el-dialog')).find(
+      (d) => d.querySelector('.el-dialog__title')?.textContent.trim() === '验证身份'
+    )
+
+  const fillAndConfirm = async (password = 'secret') => {
+    await waitFor(() => stepUpDlg(), { message: '二次验证弹层打开' })
+    const dlg = stepUpDlg()
+    const input = dlg.querySelector('input')
+    input.value = password
+    input.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(2)
+    const confirm = Array.from(dlg.querySelectorAll('.el-dialog__footer .glass-btn')).find(
+      (b) => b.textContent.trim() === '确定'
+    )
+    expect(confirm).toBeTruthy()
+    click(confirm)
+  }
+
+  const mockReads = (onLogs) => {
+    get.mockImplementation((url) => {
+      if (url === '/security/audit-logs') return onLogs()
+      if (url === '/security/overview') return Promise.resolve({ data: { data: {} } })
+      if (url === '/security/alerts') {
+        return Promise.resolve({
+          data: { data: { data: [], meta: { total: 0, limit: 50, hasMore: false } } },
+        })
+      }
+      return Promise.reject(new Error('unexpected url: ' + url))
+    })
+  }
+
+  test('无票据：不发审计请求，先弹二次验证；通过后换票并重放列表与告警', async () => {
+    clearReauthTicket()
+    createTicket.mockResolvedValue({ data: { data: { ticket: 't1', expiresIn: 300 } } })
+    mockReads(() => Promise.resolve({ data: { data: { data: [logRow()], meta: { total: 1 } } } }))
+    const c = mountComponent(AuditLogView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(PERMS),
+    })
+    active = c
+    await flush(6)
+    expect(logCalls()).toHaveLength(0)
+    await fillAndConfirm()
+    await waitFor(() => logCalls().length === 1, { message: '换票后重放列表请求' })
+    await waitFor(() => get.mock.calls.some((x) => x[0] === '/security/alerts'), {
+      message: '换票后重放告警请求',
+    })
+    expect(createTicket).toHaveBeenCalledWith({ encCurrentPassword: 'ENC:secret' })
+    expect(getReauthTicket()).toBe('t1')
+    expect(trs(c)).toHaveLength(1)
+    expect(c.errors).toEqual([])
+  })
+
+  test('票据被服务端拒绝：重新弹框换票并重放，不当作加载失败提示', async () => {
+    let attempts = 0
+    // 本地票据仍在有效期内，但服务端已不认（例如重启换了签名密钥）
+    storeReauthTicket('stale-ticket', 300)
+    createTicket.mockResolvedValue({ data: { data: { ticket: 't2', expiresIn: 300 } } })
+    mockReads(() => {
+      attempts += 1
+      if (attempts === 1) {
+        return Promise.reject({
+          response: { data: { errors: { errorCode: 'REAUTH_TICKET_INVALID' } } },
+        })
+      }
+      return Promise.resolve({ data: { data: { data: [logRow()], meta: { total: 1 } } } })
+    })
+    const c = mountComponent(AuditLogView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(PERMS),
+    })
+    active = c
+    await waitFor(() => logCalls().length === 1, { message: '首次列表请求被拒' })
+    await fillAndConfirm()
+    await waitFor(() => logCalls().length === 2, { message: '换票后重放列表请求' })
+    expect(getReauthTicket()).toBe('t2')
+    expect(trs(c)).toHaveLength(1)
+    expect(ElMessage.error).not.toHaveBeenCalled()
   })
 })

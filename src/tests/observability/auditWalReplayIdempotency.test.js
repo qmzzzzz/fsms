@@ -28,7 +28,8 @@
  *
  * 隔离：独立 mkdtemp + 独立 AUDIT_WAL_PATH（修复后 start() 会重读 env）。
  * ⚠️ 写 WAL 文件前必须先 start()：`getWalPath()` 在 startup() 之前返回的是
- * 模块加载期的**默认派生路径**（auditBufferWal.js 的 `let walPath = deriveDefaultWalPath()`），
+ * 模块加载期的**默认派生路径**（auditBufferWal.js 的 `let walPath = deriveDefaultWalPath()`；
+ * 函数实体在 auditWalPath.js），
  * 只有 start() → wal.startup() 之后才切到本套件 mkdtemp 下的路径。
  * 本文件用 `walPath()` 辅助函数把这件事封装掉：先确保已 startup，再取路径。
  * 不使用 jest.useFakeTimers（与 mongodb-memory-server 冲突），用 spyOn(setInterval)
@@ -84,7 +85,7 @@ async function waitForWalQuiet(timeoutMs = 8000) {
 /**
  * WAL 路径（beforeAll 已通过一次 start() 把它 pin 到本套件的 mkdtemp 下）。
  * 背景：`getWalPath()` 在 `startup()` 之前返回模块加载期的默认派生路径
- * （auditBufferWal.js 的 `let walPath = deriveDefaultWalPath()`）——直接写那个
+ * （auditBufferWal.js 的 `let walPath = deriveDefaultWalPath()`，函数实体在 auditWalPath.js）——直接写那个
  * 文件等于白写，模块根本不会读它。
  */
 const walPath = () => auditBuffer.getWalPath();

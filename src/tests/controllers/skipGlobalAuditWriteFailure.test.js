@@ -326,15 +326,15 @@ const EXPECTED_DURABLE_REGISTRY = {
   'controllers/authController/session.js#revokeOtherSessions': { recordSensitiveActionDurably: 1 },
   'controllers/ipListController.js#addIPEntry': { recordDurably: 1 },
   'controllers/ipListController.js#removeIPEntry': { recordDurably: 1 },
-  'controllers/mfaController.js#mfaDisable': { recordDurably: 1 },
   'controllers/mfaController.js#mfaEnable': { recordDurably: 1 },
   'controllers/mfaController.js#mfaEnroll': { recordDurably: 1 },
   'controllers/mfaController.js#regenerateRecoveryCodes': { recordDurably: 1 },
   'controllers/securityController/account.js#changePasswordSecure': { recordDurably: 1 },
-  'controllers/securityController/admin.js#resetUserMfa': { recordDurably: 1 },
+  'controllers/securityController/admin.js#recordAdminMfaReset': { recordDurably: 1 },
   'controllers/securityController/config.js#setLoginCaptchaConfig': { recordDurably: 1 },
   'controllers/securityController/config.js#setRegisterCaptchaConfig': { recordDurably: 1 },
   'controllers/securityController/config.js#setRegistrationConfig': { recordDurably: 1 },
+  'services/mfaService.js#recordMfaDisableSuccess': { recordDurably: 1 },
 };
 
 // ===== 用例 =====

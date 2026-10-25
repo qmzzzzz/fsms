@@ -73,7 +73,7 @@ const loadValidUser = async (userId) => {
   // 必须 select allowedIPs 用于每请求的 IP 访问范围校验
   const user = await User.findById(userId)
     .select(
-      'username email status roles passwordChangedAt lastLoginAt tokenVersion allowedIPs failedLoginCount lockUntil'
+      'username email realName status roles passwordChangedAt lastLoginAt tokenVersion allowedIPs failedLoginCount lockUntil'
     )
     // 仅生效角色参与授权判定（与 userPermissionService / permissionHelper 同口径）：
     // 停用角色后，该角色码不得继续进入 req.user.roleCodes，
@@ -414,6 +414,9 @@ const assertSessionUsable = async (decoded, req, res) => {
  *
  * 角色信息一律以实时加载的 freshUser 为准，不信任 token payload 中的 roles——
  * 用户角色被全部撤销后，旧 token 在有效期内不得继续携带签发时的角色快照。
+ * 身份展示字段（username/email/realName）同样取自 freshUser：载荷里的副本
+ * 从签发起就不再更新，用户改名/改邮箱后审计与报警上报会长期记录旧值；
+ * 且载荷由客户端可读，任何以 token 内身份做授权判断或留痕的口径都应改为查库值。
  */
 const buildAuthContext = (decoded, freshUser) => {
   let freshRoles = [];
@@ -432,11 +435,11 @@ const buildAuthContext = (decoded, freshUser) => {
   }
   return {
     userId: decoded.userId,
-    username: decoded.username,
-    email: decoded.email,
+    username: freshUser.username,
+    email: freshUser.email,
     roles: freshRoles,
     roleCodes: freshRoleCodes, // 供 userLimiter 等中间件使用，实时角色
-    realName: decoded.realName, // 用于报警上报时记录真实姓名
+    realName: freshUser.realName, // 用于报警上报时记录真实姓名
     sessionId: decoded.jti || null,
     // 设备会话标识：会话管理接口据此标记「本设备」并禁止误踢自己
     sid: decoded.sid || null,

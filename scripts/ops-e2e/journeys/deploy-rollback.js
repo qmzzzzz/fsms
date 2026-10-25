@@ -65,6 +65,7 @@ function runDeploy(root, stage, { readyz, migrateOutput }) {
       APP_IMAGE: TARGET_IMAGE,
       CORS_ORIGIN: 'https://admin.example.com',
       ALLOWED_HOSTS: 'fsms.example.com',
+      TRUSTED_PROXY_CIDRS: '172.28.0.0/16',
       ALERTMANAGER_CONFIG_PATH: stage.alertmanager,
       BACKUP_RPO_HOURS: '24',
       BACKUP_RTO_HOURS: '4',

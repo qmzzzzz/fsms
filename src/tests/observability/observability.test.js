@@ -8,6 +8,7 @@
 
 const request = require('supertest');
 const crypto = require('crypto');
+const dns = require('dns');
 const jwt = require('jsonwebtoken');
 
 jest.mock('../../utils/httpPostJson', () => ({
@@ -150,6 +151,7 @@ describe('sendNotification 投递矩阵（webhook 成熟化）', () => {
     'SECURITY_ALERT_WEBHOOK_ALLOWLIST',
   ];
   let savedEnv;
+  let dnsLookup;
 
   beforeAll(() => {
     savedEnv = {};
@@ -171,6 +173,14 @@ describe('sendNotification 投递矩阵（webhook 成熟化）', () => {
     delete process.env.SECURITY_ALERT_MIN_LEVEL;
     delete process.env.SECURITY_ALERT_WEBHOOK_SECRET;
     delete process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST;
+    // 域名型目标投递前会解析并校验地址（DNS 钉扎）；单测不出网，给一个公网结果
+    dnsLookup = jest
+      .spyOn(dns.promises, 'lookup')
+      .mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+  });
+
+  afterEach(() => {
+    dnsLookup.mockRestore();
   });
 
   test('未配置 SECURITY_ALERT_WEBHOOK 时完全不投递', async () => {
@@ -215,7 +225,7 @@ describe('sendNotification 投递矩阵（webhook 成熟化）', () => {
     expect(postJson).toHaveBeenCalledTimes(2);
   });
 
-  test('配置 SECURITY_ALERT_WEBHOOK_SECRET 时携带 HMAC 签名头', async () => {
+  test('配置 SECURITY_ALERT_WEBHOOK_SECRET 时携带 HMAC 签名头（覆盖时间戳+随机数）', async () => {
     const secret = 'test-webhook-secret';
     process.env.SECURITY_ALERT_WEBHOOK = 'https://hooks.example.com/hook';
     process.env.SECURITY_ALERT_WEBHOOK_SECRET = secret;
@@ -224,7 +234,13 @@ describe('sendNotification 投递矩阵（webhook 成熟化）', () => {
     await securityAlert.sendNotification('brute_force_login', 'critical', '签名测试');
 
     const [, headers, body] = postJson.mock.calls[0];
-    const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(body).digest('hex');
+    const timestamp = headers['X-Webhook-Timestamp'];
+    const nonce = headers['X-Webhook-Nonce'];
+    expect(timestamp).toMatch(/^\d+$/);
+    expect(nonce).toMatch(/^[0-9a-f]{32}$/);
+    const expected =
+      'sha256=' +
+      crypto.createHmac('sha256', secret).update(`${timestamp}.${nonce}.${body}`).digest('hex');
     expect(headers['X-Webhook-Signature']).toBe(expected);
   });
 

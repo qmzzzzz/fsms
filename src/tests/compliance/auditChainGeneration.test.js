@@ -6,6 +6,8 @@
  * 棘轮，同一套用例本地 100%）。本套件用直接函数调用 + 极小锁超时环境变量
  * 把相关分支变成确定性覆盖，不再依赖竞态是否碰巧发生。
  */
+const { waitFor } = require('../helpers/waitFor');
+
 describe('auditChain 链尾代际守卫（B-L4/B-L5）', () => {
   const ORIG_LOCK_TIMEOUT = process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
   const ORIG_REDIS_URL = process.env.REDIS_URL;
@@ -42,15 +44,28 @@ describe('auditChain 链尾代际守卫（B-L4/B-L5）', () => {
     warnSpy.mockRestore();
   });
 
-  test('fn 悬挂持锁超时 → 强制释放并拒绝，代际递增使初始代际过期（B-L5）', async () => {
-    await expect(auditChain.withChainLock(() => new Promise(() => {}))).rejects.toThrow(
-      /锁持有超时/
-    );
+  test('fn 悬挂持锁超时 → 冻结后续写入直到僵尸落定（防一父两子分叉，B-L5）', async () => {
+    let finishZombie;
+    const hang = new Promise((resolve) => {
+      finishZombie = resolve;
+    });
+    await expect(auditChain.withChainLock(() => hang)).rejects.toThrow(/锁持有超时/);
+
+    // 僵尸未落定：下一批必须立即失败，不能从「僵尸写之前」的旧尾续链
+    const nextFn = jest.fn().mockResolvedValue('next');
+    await expect(auditChain.withChainLock(nextFn)).rejects.toThrow(/冻结窗口/);
+    expect(nextFn).not.toHaveBeenCalled();
+
     // 超时路径已递增代际：初始代际 0 已过期 → 对应的僵尸推进被跳过
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
     await auditChain.advanceChainTail('b'.repeat(64), 0);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('代际 0 已过期'));
     warnSpy.mockRestore();
+
+    // 僵尸落定 → 强制重同步并解冻，链写入恢复
+    finishZombie('zombie-done');
+    await waitFor(() => auditChain.isChainFrozen() === false, { label: '僵尸落定后解冻' });
+    await expect(auditChain.withChainLock(async () => 'after')).resolves.toBe('after');
   });
 });
 

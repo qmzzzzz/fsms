@@ -8,6 +8,7 @@
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 const { REFRESH_COOKIE_NAME, ACCESS_COOKIE_NAME } = require('../../utils/cookie');
@@ -134,7 +135,12 @@ describe('认证剩余分支（批次 B2）', () => {
       .post('/api/auth/refresh')
       .send({
         refreshToken: jwt.sign(
-          { userId: superUserId, type: 'refresh', tokenVersion: 99 },
+          {
+            userId: superUserId,
+            type: 'refresh',
+            tokenVersion: 99,
+            sid: crypto.randomUUID(),
+          },
           process.env.JWT_REFRESH_SECRET,
           { expiresIn: '24h' }
         ),
@@ -157,7 +163,7 @@ describe('认证剩余分支（批次 B2）', () => {
     expect(ghostUser.body.errors.errorCode).toBe('REFRESH_TOKEN_INVALID');
   });
 
-  test('refresh 轮换成功 + 旧令牌重放检测触发 401', async () => {
+  test('refresh 轮换成功 + 并发重放仅拒绝 + 超过宽限的重放触发全量吊销', async () => {
     const loginRes = await login(superUsername, PASSWORD);
     expect(loginRes.status).toBe(200);
     // 调试输出已移除（关联清理）：原实现 console.error 打印完整 Set-Cookie
@@ -168,9 +174,24 @@ describe('认证剩余分支（批次 B2）', () => {
     const rotated = await request(app).post('/api/auth/refresh').send({ refreshToken: oldRefresh });
     expect(rotated.status).toBe(200);
 
-    // 重放已被轮换消费的旧 refresh → 重放检测分支 → 401
+    // 宽限窗口内的重放（前端多标签页/重试并发）→ 只拒绝本次，不得全量吊销：
+    // 此前这种正常竞争会把该用户所有设备一起踢下线。
+    const concurrent = await request(app)
+      .post('/api/auth/refresh')
+      .send({ refreshToken: oldRefresh });
+    expect(concurrent.status).toBe(503);
+    expect(concurrent.body.errors.errorCode).toBe('SECURITY_SERVICE_UNAVAILABLE');
+    expect((await User.findById(superUserId).select('tokenVersion')).tokenVersion ?? 0).toBe(0);
+
+    // 把消费时刻拨到宽限窗口之外：同一条旧串现在代表真实重放
+    const TokenBlacklist = require('../../models/TokenBlacklist');
+    await TokenBlacklist.updateOne(
+      { tokenHash: crypto.createHash('sha256').update(oldRefresh).digest('hex') },
+      { $set: { createdAt: new Date(Date.now() - 60_000) } }
+    );
     const replay = await request(app).post('/api/auth/refresh').send({ refreshToken: oldRefresh });
     expect(replay.status).toBe(401);
+    expect(replay.body.errors.errorCode).toBe('REFRESH_TOKEN_REVOKED');
 
     // 重放触发了全量吊销（tokenVersion 递增）：按库内新版本重签操作者令牌
     const fresh = await User.findById(superUserId).select('username tokenVersion');
@@ -211,19 +232,20 @@ describe('认证剩余分支（批次 B2）', () => {
     const noEnroll = await request(app)
       .post('/api/auth/mfa/enable')
       .set('Authorization', `Bearer ${superToken}`)
-      .send({ mfaCode: '123456' });
+      .send({ mfaCode: '123456', currentPassword: PASSWORD });
     expect(noEnroll.status).toBe(400);
     // 三个 400 各点名一个码：未 enroll / 码格式错 / 已开启重复 enroll 是三种不同契约
     expect(noEnroll.body.errors.errorCode).toBe('MFA_SECRET_MISSING');
 
     const enroll = await request(app)
       .post('/api/auth/mfa/enroll')
-      .set('Authorization', `Bearer ${superToken}`);
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ currentPassword: PASSWORD });
     expect(enroll.status).toBe(200);
     const badFormat = await request(app)
       .post('/api/auth/mfa/enable')
       .set('Authorization', `Bearer ${superToken}`)
-      .send({ mfaCode: 'abcdef' });
+      .send({ mfaCode: 'abcdef', currentPassword: PASSWORD });
     expect(badFormat.status).toBe(400);
     expect(badFormat.body.errors.errorCode).toBe('MFA_CODE_FORMAT');
 
@@ -233,12 +255,18 @@ describe('认证剩余分支（批次 B2）', () => {
     const enabled = await request(app)
       .post('/api/auth/mfa/enable')
       .set('Authorization', `Bearer ${superToken}`)
-      .send({ mfaCode: nextCode });
+      .send({ mfaCode: nextCode, currentPassword: PASSWORD });
     expect(enabled.status).toBe(200);
 
+    // MFA 已开启后密码不再是可用因子：重复 enroll 必须用第二因子（TOTP）过
+    // requireReAuthentication，控制器才可能给出「已开启不可重复」的业务拒绝。
+    // 先清零水位，否则 enable 刚消费的窗口会让同一个码被判重放（400 但错因不同）。
+    await User.findByIdAndUpdate(superUserId, { mfaLastCounter: 0 });
+    const reauthCode = hotp(base32Decode(secret), Math.floor(Date.now() / 1000 / 30) + 1);
     const reEnroll = await request(app)
       .post('/api/auth/mfa/enroll')
-      .set('Authorization', `Bearer ${superToken}`);
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ mfaCode: reauthCode });
     expect(reEnroll.status).toBe(400);
     expect(reEnroll.body.errors.errorCode).toBe('MFA_ALREADY_ENABLED_NO_REPEAT');
 
@@ -247,20 +275,22 @@ describe('认证剩余分支（批次 B2）', () => {
       mfaEnabled: false,
       mfaSecret: '',
       mfaRecoveryCodes: [],
+      mfaLastCounter: 0,
     });
   });
 
   test('恢复码重生成：错误口令 400 + 正确口令 200 且旧码作废', async () => {
     const enroll = await request(app)
       .post('/api/auth/mfa/enroll')
-      .set('Authorization', `Bearer ${superToken}`);
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ currentPassword: PASSWORD });
     const secret = enroll.body.data.secret;
     const { hotp, base32Decode } = require('../../utils/totp');
     const code = hotp(base32Decode(secret), Math.floor(Date.now() / 1000 / 30) + 1);
     const enabled = await request(app)
       .post('/api/auth/mfa/enable')
       .set('Authorization', `Bearer ${superToken}`)
-      .send({ mfaCode: code });
+      .send({ mfaCode: code, currentPassword: PASSWORD });
     const oldCodes = enabled.body.data.recoveryCodes;
 
     // 确定性：enable 已消费 enable 时刻窗口的 counter，+2 码未必落在当前 ±1

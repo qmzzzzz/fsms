@@ -30,6 +30,8 @@ const BASE = 'http://127.0.0.1:' + PORT;
 const ROOT = path.resolve(__dirname, '..');
 // 运行期组装（无凭据字面量）：大小写+数字+特殊符+随机段
 const PASSWORD = 'Prd' + String.fromCharCode(33) + crypto.randomBytes(6).toString('hex') + 'Bb2';
+// 反代拓扑下回环抓取必须带令牌（metricsAuth 判据：TRUST_PROXY_HOPS>0 + 回环对端）
+const METRICS_TOKEN = crypto.randomBytes(32).toString('hex');
 
 let passed = 0;
 let failed = 0;
@@ -136,7 +138,7 @@ function selfCheckRequiredSteps(label) {
   return false;
 }
 
-function req(method, urlPath, { token, body, headers } = {}) {
+function req(method, urlPath, { token, cookie, body, headers } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : null;
     const req = http.request(
@@ -151,6 +153,7 @@ function req(method, urlPath, { token, body, headers } = {}) {
             ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
             : {},
           token ? { Authorization: 'Bearer ' + token } : {},
+          cookie ? { Cookie: cookie } : {},
           headers || {}
         ),
         timeout: 10000,
@@ -231,7 +234,11 @@ function runNegativePhase() {
  */
 async function assertHostGateArmed() {
   const FOREIGN_HOST = 'app:3000';
-  const scraped = await req('GET', '/metrics', { headers: { Host: FOREIGN_HOST } });
+  // 反代拓扑下回环抓取必须带令牌，否则 401 会把「Host 豁免是否生效」这一格测成假红
+  const scraped = await req('GET', '/metrics', {
+    token: METRICS_TOKEN,
+    headers: { Host: FOREIGN_HOST },
+  });
   // 要的是**样本行**而不是指标名：注册即输出 `# HELP http_requests_total`，
   // 所以只搜名字时"采集中间件被摘掉 / series 全被上限丢弃"这类空 exposition 也是绿的，
   // 而那恰好是本条要防的监控链路失效形态。取一个前面步骤真的打过的路由。
@@ -268,6 +275,17 @@ async function assertHostGateArmed() {
   }
 }
 
+/** 从登录响应里取出可回放的 Cookie，并校验安全属性（缺一项即抛） */
+function loginCookieOf(r) {
+  const cookies = r.headers['set-cookie'] || [];
+  const joined = cookies.join('; ');
+  const miss = ['access_token=', 'refresh_token=', 'HttpOnly', 'Secure'].filter(
+    (needle) => !joined.includes(needle)
+  );
+  if (miss.length) throw new Error(`登录 Cookie 缺 ${miss.join('、')}：` + joined.slice(0, 120));
+  return cookies.map((c) => c.split(';')[0]).join('; ');
+}
+
 async function main() {
   const { MongoMemoryServer } = require('mongodb-memory-server');
   console.log('[DRILL] A 阶段：弱密钥拒绝（Worker 隔离）…');
@@ -296,8 +314,13 @@ async function main() {
   process.env.AES_SECRET_KEY = crypto.randomBytes(48).toString('hex');
   process.env.HMAC_SECRET = crypto.randomBytes(48).toString('hex');
   process.env.ADMIN_INITIAL_PASSWORD = PASSWORD;
-  process.env.CORS_ORIGIN = BASE;
+  // 生产闸要求声明 TLS 终结层与 https 来源（deploymentCredentialGuards）：
+  // 演练本身在本机明文端口上跑，按真实部署拓扑（前置反代终结 TLS）声明即可，
+  // 请求仍直连 BASE；CORS 来源与实际请求的 Origin 无关，只参与启动校验。
+  process.env.TLS_TERMINATED_UPSTREAM = 'true';
+  process.env.CORS_ORIGIN = 'https://127.0.0.1:' + PORT;
   process.env.TRUST_PROXY_HOPS = '1';
+  process.env.METRICS_TOKEN = METRICS_TOKEN;
   // 消除 G6 告警噪声：演练声明 Host 白名单（无前置反代场景的本机域名）
   process.env.ALLOWED_HOSTS = '127.0.0.1:' + PORT;
   process.env.ALLOW_PUBLIC_REGISTRATION = 'false';
@@ -322,9 +345,15 @@ async function main() {
     if (r.status !== 200 || r.body.status !== 'ok') throw new Error('status=' + r.status);
   });
 
-  await step('B2. GET /readyz 200（Mongo ping）', async () => {
+  // 演练不启真实 Redis（CI 的 e2e 作业也没有 redis service），而新就绪判据要求
+  // REDIS_URL 配置后必须 ping 通 ⇒ 本步断言的是**如实降级**：Mongo 正常、redis
+  // disconnected、整体 unready。把「依赖不可达」报成 200 才是探针失效。
+  await step('B2. GET /readyz 在 Redis 不可达时如实报 unready（Mongo ok）', async () => {
     const r = await req('GET', '/readyz');
-    if (r.status !== 200 || r.body.checks.mongo !== 'ok') throw new Error(JSON.stringify(r.body));
+    const { mongo, redis } = r.body.checks || {};
+    if (r.status !== 503 || r.body.status !== 'unready' || mongo !== 'ok' || redis === 'ok') {
+      throw new Error(JSON.stringify(r.body));
+    }
   });
 
   await step('B3. HSTS 响应头下发（ensureHsts 兜底）', async () => {
@@ -337,40 +366,38 @@ async function main() {
     if (r.status !== 404) throw new Error('生产环境文档未关闭，status=' + r.status);
   });
 
-  await step('B5. GET /metrics 200（回环 metricsAuth 放行）', async () => {
-    const r = await req('GET', '/metrics');
+  await step('B5. GET /metrics 200（反代拓扑下回环请求凭 Bearer 令牌放行）', async () => {
+    const r = await req('GET', '/metrics', { token: METRICS_TOKEN });
     if (r.status !== 200 || !r.text.includes('http_requests_total'))
       throw new Error('status=' + r.status);
   });
 
-  let token = null;
+  // 登录只经 httpOnly Cookie 下发令牌（credentials.js 登录成功分支不回传 token），
+  // 因此演练必须像浏览器一样把 Set-Cookie 回放；从响应体取 token 必然 undefined。
+  let authCookie = null;
   await step(
     'B6. POST /api/auth/login（admin + 初始密码；Cookie 带 Secure/HttpOnly）',
     async () => {
       const r = await req('POST', '/api/auth/login', {
         body: { username: 'admin', password: PASSWORD },
       });
-      if (r.status !== 200 || !r.body.data.token) {
+      if (r.status !== 200 || !r.body?.data?.user) {
         throw new Error('status=' + r.status + ' ' + JSON.stringify(r.body).slice(0, 120));
       }
-      token = r.body.data.token;
-      const cookie = (r.headers['set-cookie'] || []).join('; ');
-      if (!cookie.includes('HttpOnly'))
-        throw new Error('Cookie 缺 HttpOnly：' + cookie.slice(0, 120));
-      if (!/Secure/i.test(cookie))
-        throw new Error('生产模式 Cookie 缺 Secure：' + cookie.slice(0, 120));
+      authCookie = loginCookieOf(r);
     }
   );
 
   await step('B7. GET /api/auth/me 200（会话有效）', async () => {
-    const r = await req('GET', '/api/auth/me', { token });
-    if (r.status !== 200 || !r.body.data.user) throw new Error('status=' + r.status);
+    const r = await req('GET', '/api/auth/me', { cookie: authCookie });
+    if (!authCookie) throw new Error('B6 未取得登录 Cookie');
+    if (r.status !== 200 || !r.body?.data?.user) throw new Error('status=' + r.status);
   });
 
   await step('B8. POST /api/auth/logout 200 且旧令牌失效（me → 401）', async () => {
-    const out = await req('POST', '/api/auth/logout', { token, body: {} });
+    const out = await req('POST', '/api/auth/logout', { cookie: authCookie, body: {} });
     if (out.status !== 200) throw new Error('logout status=' + out.status);
-    const me = await req('GET', '/api/auth/me', { token });
+    const me = await req('GET', '/api/auth/me', { cookie: authCookie });
     if (me.status !== 401) throw new Error('旧令牌未吊销，me status=' + me.status);
   });
 

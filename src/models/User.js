@@ -280,6 +280,10 @@ const userSchema = new mongoose.Schema(
   },
   {
     timestamps: true, // 自动添加 createdAt 和 updatedAt
+    // 与 FireDevice 同口径：读-改-save 的并发编辑用 __v 做前态校验，
+    // 后提交者抛 VersionError（errorHandler 统一映射 400），而不是静默覆盖。
+    // 仅影响 save() 路径；findByIdAndUpdate 等原子更新不受影响。
+    optimisticConcurrency: true,
   }
 );
 
@@ -344,10 +348,10 @@ userSchema.index({ emailGrams: 1 }, { background: true, name: 'emailGrams_1' });
  * 保留 allowedIPs：用户管理界面编辑表单需回填该字段（UserView.handleEdit），
  * 且仅 user:read 权限者可见，属功能必需而非泄露。
  *
- * 清单是一张字段表而不是拼好的字符串：RESPONSE_EXCLUDE_PHONE_VISIBLE 要从同一张表
+ * 清单是一张字段表而不是拼好的字符串：RESPONSE_EXCLUDE_PII_VISIBLE 要从同一张表
  * 派生（下面解释为什么要这个变体）。写成字符串手术（`base.replace(' -phone','')`）
  * 的话，将来清单里多一个空格、多个 `-phone` 别名，都会静默失效——而"静默失效"
- * 在这一项上等于把明文手机号放回去。
+ * 在这一项上等于把明文 PII 放回去。
  */
 const USER_RESPONSE_EXCLUDE_FIELDS = [
   '-password',
@@ -375,32 +379,36 @@ const USER_RESPONSE_EXCLUDE_FIELDS = [
   // 的预言机，且它现在是**唯一索引**，泄露还能反推"该邮箱已被占用"。
   // emailGrams 同理：它是 email 的 n-gram 指纹集合，泄露等于把"该行邮箱包含哪些
   // 片段"整份交出去（3-gram 足以让持库者做片段级别的碰撞/猜测）。
-  // ⚠️ **刻意不加 `-email`**：email 是用户管理的展示与表单回填字段（与 phone 的
-  // 处置不同——phone 有专门的合规查看通道，email 没有）。加密只是让它在库里
-  // 是密文，读侧的 getter 照常透明解密，响应形状与加密前逐字段一致。
   '-emailKey',
   '-emailGrams',
+  // PII（2026-10-24）：email 与 phone 同规格——默认不出现在用户读响应里。
+  // 它与 phone 一样有专门的合规查看通道（POST /api/security/view-sensitive 的
+  // dataType:'email'，需要二次验证并写 view_sensitive_data 审计）；用户管理只需要
+  // 脱敏展示值，没有理由让一次持 user:read 的 GET 绕开那条通道。
+  '-email',
   '-__v',
 ];
 
 const USER_RESPONSE_EXCLUDE = USER_RESPONSE_EXCLUDE_FIELDS.join(' ');
 
 /**
- * 唯一允许把**明文** phone 读进进程的对外投影：同一张字段表、只少 `-phone` 一项。
+ * 唯一允许把**明文 PII**（phone / email）读进进程的对外投影：同一张字段表、
+ * 只少 `-phone` / `-email` 两项。
  *
- * 存在的理由是展示需求而非读取需求：用户管理表格要显示脱敏号码（`138****5678`），
- * 而脱敏必须在拿到明文的那一侧算——密文列随机 IV、逐行不同，对密文打码什么也读不出。
+ * 存在的理由是展示需求而非读取需求：用户管理表格要显示脱敏号码与邮箱
+ * （`138****5678` / `a****z@example.com`），而脱敏必须在拿到明文的那一侧算——
+ * 密文列随机 IV、逐行不同，对密文打码什么也读不出。
  * 代价是这条投影本身是个危险物：取到明文的每一行都必须立刻过
  * `services/userService.js` 的 `toMaskedAdminUser`，否则等于把明文重新装回响应。
  * 所以变体与主清单同源派生，并由 `tests/security/userPhoneMaskedEgress.test.js`
  * 的源码闸盯着"新增了用户读路径却没过脱敏"这一种漂移。
  */
-const USER_RESPONSE_EXCLUDE_PHONE_VISIBLE = USER_RESPONSE_EXCLUDE_FIELDS.filter(
-  (field) => field !== '-phone'
+const USER_RESPONSE_EXCLUDE_PII_VISIBLE = USER_RESPONSE_EXCLUDE_FIELDS.filter(
+  (field) => field !== '-phone' && field !== '-email'
 ).join(' ');
 
 userSchema.statics.RESPONSE_EXCLUDE = USER_RESPONSE_EXCLUDE;
-userSchema.statics.RESPONSE_EXCLUDE_PHONE_VISIBLE = USER_RESPONSE_EXCLUDE_PHONE_VISIBLE;
+userSchema.statics.RESPONSE_EXCLUDE_PII_VISIBLE = USER_RESPONSE_EXCLUDE_PII_VISIBLE;
 
 // 用户名比较口径对外暴露，供控制器/脚本按同一 collation 查询
 userSchema.statics.USERNAME_COLLATION = USERNAME_COLLATION;

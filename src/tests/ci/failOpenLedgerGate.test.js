@@ -154,8 +154,14 @@ describe('fail-open 台账完整性：信号站点必须被登记、登记必须
     // 台账自身必须被排除，且排除不能因为文件名写错而静默失效
     expect(listProdFiles().map(relOf)).toContain(LEDGER_FILE);
     expect(CALLS.some((c) => c.file === LEDGER_FILE)).toBe(false);
-    // 动态转发点：实测只有投递门面一处
-    expect(DYNAMIC_CALLS.map((c) => c.file).sort()).toEqual(['services/securityAlertDelivery.js']);
+    // 动态转发点：投递门面 + 模板串拼装（captchaService）+ 局部包装器（initialPasswordFile）
+    expect(DYNAMIC_CALLS.map((c) => c.file).sort()).toEqual(
+      [
+        'services/captchaService.js',
+        'services/initialPasswordFile.js',
+        'services/securityAlertDelivery.js',
+      ].sort()
+    );
 
     // 反向对照：合成输入走**同一条** collectAlertCalls
     const synthetic = collectAlertCalls([

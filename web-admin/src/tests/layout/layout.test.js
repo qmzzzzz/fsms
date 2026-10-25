@@ -512,6 +512,67 @@ describe('布局 · 移动端抽屉', () => {
   })
 })
 
+describe('布局 · 顶栏与遮罩键盘可达', () => {
+  const keydown = (el, key) => {
+    el.dispatchEvent(new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+  }
+
+  test('顶栏图标具备 button 语义与 aria-label，Enter / 空格触发同一动作', async () => {
+    // 防退化：图标只绑 @click → 键盘用户完全无法搜索/刷新/全屏；
+    // 缺 aria-label → 读屏只念 "image"。
+    const reload = vi.fn()
+    vi.stubGlobal('location', { ...window.location, reload })
+    const c = mountLayout()
+    await settleRouter(c.router)
+    await flush(10)
+    const icons = standaloneIcons(c)
+    expect(icons.length).toBeGreaterThanOrEqual(3)
+    for (const icon of icons) {
+      expect(icon.getAttribute('role')).toBe('button')
+      expect(icon.getAttribute('tabindex')).toBe('0')
+      expect(icon.getAttribute('aria-label')).toBeTruthy()
+    }
+    keydown(icons[2], 'Enter')
+    expect(reload).toHaveBeenCalledTimes(1)
+    keydown(icons[2], ' ')
+    expect(reload).toHaveBeenCalledTimes(2)
+    expect(c.errors).toEqual([])
+  })
+
+  test('折叠按钮带随状态变化的 aria-label，Enter 可切换折叠', async () => {
+    const c = mountLayout({ collapsed: false })
+    await settleRouter(c.router)
+    await flush(10)
+    const btn = c.find('.collapse-btn')
+    expect(btn.getAttribute('role')).toBe('button')
+    expect(btn.getAttribute('tabindex')).toBe('0')
+    expect(btn.getAttribute('aria-label')).toBe(label('layout.collapseSidebar'))
+
+    keydown(btn, 'Enter')
+    await flush(6)
+    expect(currentApp.sidebarCollapsed).toBe(true)
+    expect(btn.getAttribute('aria-label')).toBe(label('layout.expandSidebar'))
+  })
+
+  test('移动端遮罩是原生 button（可聚焦关闭），Esc 关闭抽屉', async () => {
+    window.innerWidth = 500
+    const c = mountLayout()
+    await settleRouter(c.router)
+    await flush(10)
+    click(c.find('.collapse-btn'))
+    await pollUntil(() => !!c.find('.mobile-overlay'), '遮罩出现')
+
+    const overlay = c.find('.mobile-overlay')
+    expect(overlay.tagName).toBe('BUTTON')
+    expect(overlay.getAttribute('type')).toBe('button')
+    expect(overlay.getAttribute('aria-label')).toBe(label('layout.closeSidebar'))
+
+    keydown(c.find('.app-wrapper'), 'Escape')
+    await pollUntil(() => !c.find('.mobile-overlay'), 'Esc 后遮罩消失')
+    expect(c.errors).toEqual([])
+  })
+})
+
 describe('布局 · 主题切换', () => {
   test('主题图标随 themeMode 三态切换（system → Monitor / light → Sunny / dark → Moon）', async () => {
     for (const [mode, icon] of [
@@ -687,7 +748,7 @@ describe('布局 · 用户信息与登出', () => {
     expect(ElMessage.success).not.toHaveBeenCalled()
   })
 
-  test('登出遇网络失败（非 503）：按设计完成本地登出，避免卡在不可操作的已登录态', async () => {
+  test('登出遇网络失败（非 401/403）：保持登录态，不制造可被 Cookie 恢复的假登出', async () => {
     logoutApi.mockImplementationOnce(() => Promise.reject(new Error('network down')))
     const c = mountLayout()
     await settleRouter(c.router)
@@ -695,9 +756,14 @@ describe('布局 · 用户信息与登出', () => {
     const popper = await openByHover(c.find('.user-dropdown'), '用户菜单')
 
     click(dropdownItem(popper, label('auth.logout')))
-    await pollUntil(() => c.router.currentRoute.value.path === '/login', '跳转登录页')
-    expect(currentAuth.currentUser).toBeNull()
-    expect(disconnectWs).toHaveBeenCalledTimes(1)
+    await pollUntil(() => logoutApi.mock.calls.length === 1, '调用登出接口')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    await flush(20)
+
+    expect(c.router.currentRoute.value.path).toBe('/dashboard')
+    expect(currentAuth.currentUser).toEqual({ username: 'alice' })
+    expect(disconnectWs).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
   })
 
   test('取消确认：不发登出请求、不登出、不产生未处理 Promise 拒绝', async () => {

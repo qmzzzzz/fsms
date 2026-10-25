@@ -6,6 +6,8 @@
 const Permission = require('../models/Permission');
 const Role = require('../models/Role');
 const ApiError = require('../utils/ApiError');
+const logger = require('../utils/logger');
+const { withTransaction } = require('../utils/transaction');
 // 保留通配码只在 utils/superAdmin 声明一次；路由的"不得铸造"与本文件的"不得停用"
 // 必须是同一个值，否则两处防线会各拦一半。
 const { RESERVED_WILDCARD_PERMISSION: RESERVED_WILDCARD } = require('../utils/superAdmin');
@@ -31,12 +33,52 @@ const collectDuplicateCodes = (permissions) => {
   return { dupes, codes: [...seen] };
 };
 
-/** 库里已存在的编码集合 */
+/**
+ * 库里已存在的编码集合（**含软删除**）
+ *
+ * 软删除不释放 code 的唯一索引，所以已删除文档占用的编码同样不能再插入。
+ * 不把它们查出来，insertMany 会以 11000 收尾，把"编码被已删除的权限占用"
+ * 误报成驱动写入失败。
+ */
 const findExistingCodes = async (codes) => {
   const rows = await Permission.find({ code: { $in: codes } })
+    .setOptions({ includeDeleted: true })
     .select('code')
     .lean();
   return new Set(rows.map((item) => item.code));
+};
+
+/** session 为 null（standalone 降级）时不设置会话，避免把 null 透给驱动 */
+const withSession = (query, session) => (session ? query.session(session) : query);
+
+/**
+ * 撤销软删除标记；失败时把完整文档写进日志供人工恢复。
+ *
+ * 只用于无事务（standalone）的补偿路径：文档始终留在库里，
+ * 即使这里失败也不会丢数据，但必须让运维能从日志里拿到重建/恢复所需的全部字段。
+ *
+ * @param {object} doc 被本次删除认领的权限文档
+ * @param {{childrenCount:number, refCount:number}} reason 复核结果，便于定位冲突来源
+ * @returns {Promise<boolean>} 是否恢复成功
+ */
+const restoreSoftDeletedPermission = async (doc, reason) => {
+  try {
+    const result = await Permission.updateOne({ _id: doc._id }, { $set: { deletedAt: null } });
+    if (result.matchedCount === 1) return true;
+    logger.error('权限软删除恢复未命中任何文档（可能被并发物理删除），请人工核查', {
+      permissionId: String(doc._id),
+      ...reason,
+      permission: doc.toObject(),
+    });
+  } catch (error) {
+    logger.error('权限软删除恢复失败，请人工将 deletedAt 置回 null', {
+      permissionId: String(doc._id),
+      ...reason,
+      permission: doc.toObject(),
+      error: error.message,
+    });
+  }
+  return false;
 };
 
 /**
@@ -131,9 +173,17 @@ class PermissionService {
 
   async createPermission(fields) {
     const { parent } = fields;
-    const existing = await Permission.findOne({ code: fields.code });
+    // 含软删除：编码被已删除权限占用时不能走到 create（唯一索引会抛 11000），
+    // 必须给出可理解的 400 而不是 500。
+    const existing = await Permission.findOne({ code: fields.code }).setOptions({
+      includeDeleted: true,
+    });
     if (existing) {
-      throw ApiError.badRequest('权限编码已存在');
+      throw ApiError.badRequest(
+        existing.deletedAt
+          ? '权限编码已被一个已删除的权限占用，请更换编码或恢复原权限'
+          : '权限编码已存在'
+      );
     }
 
     if (parent) {
@@ -183,18 +233,58 @@ class PermissionService {
     return this.getPermissionById(permission._id);
   }
 
+  /**
+   * 删除权限 —— 软删除，根治「先删后复核」的恢复失败窗口。
+   *
+   * 原实现先 `findByIdAndDelete` 再复核引用，冲突时用 `Permission.create(removed.toObject())`
+   * 恢复：一旦恢复本身失败（进程崩溃、写超时、并发重建同 code），权限就真的没了，
+   * 而 Role.permissions 里还留着指向已不存在文档的悬空 id。
+   *
+   * 现在删除 = 打上 `deletedAt`，文档永不离开集合，因此不存在"恢复失败导致数据丢失"：
+   *   · 副本集：整个「占位 → 复核 → 提交」在一个事务里，冲突时事务回滚即恢复；
+   *   · standalone：没有事务，冲突时就地撤销 deletedAt；撤销失败文档仍在库里
+   *     （只是处于已删除状态），并把完整文档写入日志供人工恢复。
+   *
+   * 删除后的文档对默认查询不可见（模型层 pre(/^find/) / countDocuments 过滤器），
+   * 角色 populate、权限树、授权判定都不会再看到它。code 的唯一索引仍被占用，
+   * 内置权限由 initPermissions 在下次启动时自动恢复。
+   *
+   * @param {string} id 权限 ID
+   * @returns {Promise<boolean>} false = 文档不存在或已处于删除态
+   */
   async deletePermission(id) {
-    const childrenCount = await Permission.countDocuments({ parent: id });
-    if (childrenCount > 0) {
-      throw ApiError.badRequest(`该权限下有 ${childrenCount} 个子权限，请先删除子权限`);
-    }
+    const removed = await withTransaction(async (session) => {
+      const options = { new: true };
+      if (session) options.session = session;
+      // 原子认领：只有 deletedAt 仍为 null 的文档能进入复核；并发删除只有一个能继续。
+      const doc = await Permission.findOneAndUpdate(
+        { _id: id, deletedAt: null },
+        { $set: { deletedAt: new Date() } },
+        options
+      );
+      if (!doc) return null;
 
-    const refCount = await Role.countDocuments({ permissions: id });
-    if (refCount > 0) {
+      const [childrenCount, refCount] = await Promise.all([
+        withSession(Permission.countDocuments({ parent: id }), session),
+        withSession(Role.countDocuments({ permissions: id }), session),
+      ]);
+
+      if (childrenCount === 0 && refCount === 0) return doc;
+
+      // standalone 无事务回滚，必须显式撤销软删除；副本集交给事务 abort。
+      if (!session && !(await restoreSoftDeletedPermission(doc, { childrenCount, refCount }))) {
+        throw ApiError.serverError(
+          `权限 ${id} 的删除复核未通过且自动恢复失败，该权限仍处于软删除状态，` +
+            '请人工恢复（完整文档已写入服务端日志）'
+        );
+      }
+      if (childrenCount > 0) {
+        throw ApiError.badRequest(`该权限下有 ${childrenCount} 个子权限，请先删除子权限`);
+      }
       throw ApiError.badRequest(`该权限已被 ${refCount} 个角色引用，请先解除引用后再删除`);
-    }
+    });
 
-    await Permission.findByIdAndDelete(id);
+    return Boolean(removed);
   }
 
   async batchCreatePermissions(permissions) {

@@ -25,6 +25,9 @@
  *   LOG_SHIPPING_TIMEOUT_MS   单次请求超时，默认 5000
  *   LOG_SHIPPING_ALLOW_PRIVATE_HOSTS  可选，逗号分隔的主机名/IP/网段，
  *                             显式放行内网 SIEM 目标（默认一律拒绝私网目标）
+ *   LOG_SHIPPING_ALLOW_INSECURE       可选，必须显式设为 true 才允许无令牌的
+ *                             明文 http 目标；配置了 LOG_SHIPPING_TOKEN 时一律拒绝
+ *                             http（Bearer 不得明文出站）
  */
 
 const TransportStream = require('winston-transport');
@@ -114,6 +117,15 @@ function resolveShippingTarget(rawUrl) {
   } catch (e) {
     // 消息文案是既有契约（用例断言 `无效的 LOG_SHIPPING_URL`），不得改动
     throw new Error(`无效的 LOG_SHIPPING_URL：${e.message}`);
+  }
+  // 明文 http 的判据（2026-10-24 审计）：scheme 白名单只保证"不是拼错的协议"，
+  // 不保证链路加密。日志批可能含请求上下文/审计线索，Bearer 令牌更是直接凭据。
+  // 运行期只认显式放宽（LOG_SHIPPING_ALLOW_INSECURE=true）；生产启动期另有更严
+  // 的判据（src/config/deploymentCredentialGuards.js）：带令牌时连放宽也不允许。
+  if (parsed.protocol === 'http:' && process.env.LOG_SHIPPING_ALLOW_INSECURE !== 'true') {
+    throw new Error(
+      'LOG_SHIPPING_URL 必须是 https://（日志内容不得明文出站）；确需明文端点时显式设置 LOG_SHIPPING_ALLOW_INSECURE=true'
+    );
   }
   if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
     assertPublicShippingTarget(parsed);

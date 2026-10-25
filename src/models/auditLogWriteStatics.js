@@ -4,6 +4,7 @@
 
 const logger = require('../utils/logger');
 const { auditPath } = require('../utils/auditMeta');
+const { auditClientAddress } = require('../utils/ipUtils');
 const { computeFingerprint } = require('../utils/fingerprint');
 const { sanitizeAuditBody, sanitizeAuditQuery } = require('./auditLogSanitizer');
 const { stripControlChars, stripControlCharsDeep } = require('../utils/helpers');
@@ -123,7 +124,7 @@ const applyWriteStatics = (schema) => {
       body: sanitizeAuditBody(req.body),
       statusCode: res.statusCode,
       success: res.statusCode < 400,
-      ip: req.ip,
+      ...auditClientAddress(req),
       userAgent: stripControlChars(req.get('user-agent'), 512),
       sessionId: req.user?.sessionId || null,
       fingerprint: computeFingerprint(req),

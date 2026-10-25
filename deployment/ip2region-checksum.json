@@ -1,0 +1,6 @@
+{
+  "note": "src/data/ip2region.xdb 的内容锚。scripts/update-ip2region.js --check 会逐字校验；更新数据时必须显式传 --accept-new-checksum 并随提交评审本文件的 diff。没有这层锚时，任何一个数据源（Gitee/GitHub/jsDelivr/npm）被投毒或中间人替换，都会把任意字节写进仓库——结构探针只能挡 HTML 错误页，挡不住「格式合法但内容被污染」的数据。",
+  "file": "src/data/ip2region.xdb",
+  "bytes": 11070083,
+  "sha256": "867b619b567f51bb9dd3c384a4cbf7c33e71a178aa58f13201499aadaf2cf78e"
+}

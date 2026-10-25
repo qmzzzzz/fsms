@@ -99,7 +99,11 @@ const ERROR_CODES = {
   MFA_SECRET_MISSING: { status: 400, message: '请先生成两步验证密钥' },
   MFA_CODE_FORMAT: { status: 400, message: '请输入 6 位验证码' },
   MFA_CODE_INVALID_SYNC: { status: 400, message: '验证码错误，请确认认证器时间同步后重试' },
-  MFA_VERIFY_FAILED: { status: 403, message: '身份验证失败，请提供正确的动态口令或登录密码' },
+  MFA_VERIFY_FAILED: { status: 403, message: '身份验证失败，请提供正确的动态口令或备用恢复码' },
+  MFA_SECOND_FACTOR_REQUIRED: {
+    status: 403,
+    message: '关闭两步验证需提供动态口令或备用恢复码（密码不能单独作为第二因子）',
+  },
   MFA_ATTEMPTS_EXCEEDED: { status: 429, message: '验证尝试次数过多，请 10 分钟后再试' },
   MFA_REGEN_CODE_INVALID: { status: 400, message: '验证码错误，请重试' },
 
@@ -197,6 +201,10 @@ const ERROR_CODES = {
   ALARM_OPERATE_FORBIDDEN: {
     status: 403,
     message: '无权操作该报警记录',
+  },
+  ALARM_BUILDING_REQUIRED: {
+    status: 400,
+    message: '请提供报警所在楼栋；关联设备时可自动继承设备楼栋',
   },
   ALARM_ALREADY_HANDLED: {
     status: 409,
@@ -420,6 +428,10 @@ const ERROR_CODES = {
     status: 400,
     message: '角色编码已存在',
   },
+  ROLE_CODE_RESERVED: {
+    status: 400,
+    message: '该角色编码为内置保留编码，不能用于自定义角色',
+  },
   ROLE_CREATE_HIGHER_LEVEL_FORBIDDEN: {
     status: 403,
     message: '无权创建高于自身层级的角色',
@@ -476,6 +488,10 @@ const ERROR_CODES = {
     status: 400,
     message: '有 ${userCount} 个用户正在使用该角色，请先移除这些用户的角色',
   },
+  ROLE_STATE_CONFLICT: {
+    status: 409,
+    message: '角色状态已被其他操作修改，请刷新后重试',
+  },
   PERMISSION_ID_REQUIRED: {
     status: 400,
     message: '请提供至少一个有效的权限 ID',
@@ -523,6 +539,10 @@ const ERROR_CODES = {
   SENSITIVE_VIEW_HIGHER_LEVEL_FORBIDDEN: {
     status: 403,
     message: '无权查看更高层级用户的敏感信息',
+  },
+  SENSITIVE_VIEW_OUT_OF_SCOPE: {
+    status: 403,
+    message: '无权查看该用户（超出您的数据范围）',
   },
   UNSUPPORTED_DATA_TYPE: {
     status: 400,
@@ -682,6 +702,10 @@ const ERROR_CODES = {
     status: 400,
     message: '包含不存在的用户 ID',
   },
+  USER_STATE_CONFLICT: {
+    status: 409,
+    message: '用户状态已被其他操作修改，请刷新后重试',
+  },
   BATCH_DELETE_PEER_OR_HIGHER_FORBIDDEN: {
     status: 403,
     message: '无权删除同级或更高级别的用户：${oversized.username}',
@@ -798,6 +822,10 @@ const ERROR_CODES = {
     status: 403,
     message: '未开启两步验证，请使用当前密码验证',
   },
+  REAUTH_MFA_REQUIRED: {
+    status: 403,
+    message: '已开启两步验证，请使用动态口令完成验证',
+  },
   REAUTH_MFA_INCORRECT: {
     status: 403,
     message: 'MFA 验证码错误，验证未通过',
@@ -805,6 +833,14 @@ const ERROR_CODES = {
   REAUTH_PROCESS_FAILED: {
     status: 500,
     message: '身份验证过程出错',
+  },
+  REAUTH_TICKET_REQUIRED: {
+    status: 401,
+    message: '查看审计数据需要先完成二次验证',
+  },
+  REAUTH_TICKET_INVALID: {
+    status: 401,
+    message: '二次验证票据无效或已过期，请重新验证',
   },
   IP_BLOCKED: {
     status: 403,

@@ -86,15 +86,40 @@ describe('captchaService：活跃数上限判定被跳过时必须留信号', ()
     expect(result).toHaveProperty('captchaId');
   });
 
-  test('Redis 正常且已超限 → 拒绝生成（返回 null），但**不得**误报为"上限丢失"', async () => {
+  test('Redis 正常且全局已超限 → 拒绝生成（null）、归还双配额、且不误报"上限丢失"', async () => {
     jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(true);
-    jest.spyOn(sharedCache, 'incrWithTtl').mockResolvedValue(10001); // MAX_ACTIVE_ENTRIES = 10000
+    jest
+      .spyOn(sharedCache, 'incrWithTtl')
+      .mockResolvedValueOnce(1) // 单 IP 预占
+      .mockResolvedValueOnce(10001); // 全局超过 MAX_ACTIVE_ENTRIES=10000
+    const decrSpy = jest.spyOn(sharedCache, 'decrWithFloorZero').mockResolvedValue(0);
 
     const result = await captcha.generate();
 
     expect(result).toBeNull();
+    // 被拒绝的请求必须把刚预占的两格减回去，否则洪水本身会把计数维持在上限
+    expect(decrSpy).toHaveBeenCalledTimes(2);
+    expect(ALERT_CALLS(alertSpy, 'captcha_global_cap_reached')).toEqual([
+      { type: 'captcha_global_cap_reached', level: 'high' },
+    ]);
     // 「被上限拦住」与「上限失效」是两个相反的事件，不能混用同一个告警类型
     expect(ALERT_CALLS(alertSpy, 'captcha_active_bound_lost')).toEqual([]);
+  });
+
+  test('Redis 正常且单 IP 已超限 → 不触全局计数即拒绝，避免少数 IP 打满全局', async () => {
+    jest.spyOn(sharedCache, 'isRedisEnabled').mockReturnValue(true);
+    const incrSpy = jest.spyOn(sharedCache, 'incrWithTtl').mockResolvedValueOnce(21);
+    const decrSpy = jest.spyOn(sharedCache, 'decrWithFloorZero').mockResolvedValue(0);
+
+    const result = await captcha.generate();
+
+    expect(result).toBeNull();
+    expect(incrSpy).toHaveBeenCalledTimes(1);
+    expect(incrSpy.mock.calls[0][0]).toMatch(/^captcha:active-count:ip:/);
+    expect(decrSpy).toHaveBeenCalledTimes(1);
+    expect(ALERT_CALLS(alertSpy, 'captcha_ip_cap_reached')).toEqual([
+      { type: 'captcha_ip_cap_reached', level: 'high' },
+    ]);
   });
 });
 

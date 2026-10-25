@@ -227,13 +227,14 @@ node scripts/backup-integrity-patrol.js --drill-only
 # /etc/cron.d/fsms-drill（执行用户需能读 ./secrets 与写 ./backups）
 30 2 * * 0 ops cd /srv/fsms && \
   ALLOWED_SOURCE_DB=fsms_staging MONGODB_URI_FILE=./secrets/mongodb_uri \
+  AES_SECRET_KEY_FILE=./secrets/aes_secret_key \
   node scripts/run-rollback-drill.js --apply-source --yes >> /var/log/fsms-drill.log 2>&1 && \
   node scripts/record-rollback-drill.js \
     --manifest "$(ls -t backups/rollback-drill/manifest-*.json | head -1)" \
     --operator 'staging-cron' --environment '预发（cron 自动）' --write >> /var/log/fsms-drill.log 2>&1
 ```
 
-四条纪律（缺一条就不要把这条 cron 装上去）：
+五条纪律（缺一条就不要把这条 cron 装上去）：
 
 1. `ALLOWED_SOURCE_DB` 必须是**预发库名**：`--apply-source --yes` 会清空
    `users / roles / permissions / auditlogs` 四个集合并回灌。指向错误库就是把
@@ -245,6 +246,10 @@ node scripts/backup-integrity-patrol.js --drill-only
    `dr-readiness` 仍会在季度后变红——这是**预期**，不是误报。
 4. 留证：`/var/log/fsms-drill.log` 与 `backups/rollback-drill/manifest-*.json`
    至少保留到下一次演练；失败项按第 4 节转待办。
+5. **必须能取到 `AES_SECRET_KEY`**（上例走 `AES_SECRET_KEY_FILE`）。快照自 2026-10-21 起
+   为 AES-256-GCM 密文（`*.ndjson.gz.enc`，魔数 `FSMSBK1`），密钥缺失时脚本
+   **直接退出码 2、不产出任何文件**——这是有意的 fail-closed，不是配置错误。
+   密钥轮换后旧快照仍需用旧密钥解密，轮换窗口内不要清理尚未回灌的快照。
 
 首次在预发执行后：把「演练 #N」登记进 `deployment/rollback-drill-record.md`
 （模板见该文件第一节），并在记录里注明执行者是 cron 还是人工。

@@ -36,6 +36,9 @@ const castLookup = (ids) => [...new Set((ids || []).map((id) => String(id).toLow
 
 jest.mock('../../models/Permission', () => {
   const chain = (docs) => ({
+    // 服务层对 code 去重查询设置了 includeDeleted（软删权限的 code 仍占唯一索引），
+    // 替身只需支持链式调用，不涉及本闸的 _id 归一判据。
+    setOptions: () => chain(docs),
     select: () => ({ lean: async () => docs }),
   });
   return {

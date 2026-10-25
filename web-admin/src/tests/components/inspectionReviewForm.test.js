@@ -26,6 +26,7 @@ vi.mock('@/utils/api', () => ({
     },
   },
   isCanceledError: (...a) => isCanceledError(...a),
+  isHandledApiError: () => false,
 }))
 vi.mock('element-plus/es/components/message/index.mjs', () => ({
   ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },

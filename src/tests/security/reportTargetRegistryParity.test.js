@@ -3,7 +3,7 @@
  * （2026-10-03 审计线，针对并行 Agent 的 `27f4243`）
  *
  * 缺陷形状是**清单漂移**，不是当前行为错误：
- *   · 路由 `src/routes/securityRoutes.js:94` 自己写了一份
+ *   · 路由 `src/routes/securityRoutes.js:103` 自己写了一份
  *     `REPORT_TARGET_TYPES = ['user','device','alarm','system']`；
  *   · 控制器 `src/controllers/securityController.js` 另写了一份
  *     `REPORT_TARGET_KINDS = { user, device, alarm }`（system 刻意缺席）；
@@ -19,7 +19,7 @@
  * 不会有人想到要去动控制器。（同一形状的先例：第 11 轮"user:lock 控制器要、路由闸不要"。）
  *
  * 与仓内既有做法一致的两点：
- *  1) 派生而非抄第二份清单——`RESPONSE_EXCLUDE_PHONE_VISIBLE` 那条用例钉的就是
+ *  1) 派生而非抄第二份清单——`RESPONSE_EXCLUDE_PII_VISIBLE` 那条用例钉的就是
  *     "变体必须由同一张字段表派生"，这里钉 `REPORT_RECORD_TYPES` 必须由
  *     `REPORT_TARGET_TYPES.filter(...)` 派生；
  *  2) 文本闸自带反向自证（合成样本）：判据本身可能是恒真的（路径写错、锚点没命中、

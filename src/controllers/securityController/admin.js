@@ -13,6 +13,7 @@ const { assertRecordInScope } = require('../../middleware/rbac');
 // 'createdBy'/'department'，与 userController 引用的同一常量脱钩。
 const { DATA_SCOPE_FIELDS } = require('../../constants/dataScopeFields');
 const { isSuperAdminRole } = require('../../utils/superAdmin');
+const { clientIpForSecurityDecision, auditClientAddress } = require('../../utils/ipUtils');
 const logger = require('../../utils/logger');
 const { asyncHandler } = require('../../middleware/errorHandler');
 const sessionService = require('../../services/sessionService');
@@ -65,7 +66,7 @@ const toggleUserLock = asyncHandler(async (req, res) => {
     {
       operatorId: req.user.userId,
       operatorUsername: req.user.username,
-      ip: req.ip,
+      ip: clientIpForSecurityDecision(req),
       userAgent: req.get('user-agent'),
     }
   );
@@ -83,6 +84,9 @@ const toggleUserLock = asyncHandler(async (req, res) => {
       return ApiResponse.codeError(res, 'LOCK_INACTIVE_ACCOUNT');
     case 'NOT_LOCKED':
       return ApiResponse.codeError(res, 'ACCOUNT_NOT_LOCKED');
+    case 'REVOKE_UNAVAILABLE':
+      // 解锁前吊销旧令牌失败：fail-closed，账户仍保持锁定，可安全重试
+      return ApiResponse.codeError(res, 'SESSION_REVOKE_SERVICE_UNAVAILABLE');
     case 'OK':
       break;
     default:
@@ -103,6 +107,29 @@ const toggleUserLock = asyncHandler(async (req, res) => {
     `用户已${locked ? '锁定' : '解锁'}`
   );
 });
+
+/**
+ * F-03：管理员重置 MFA 已生效（并已强制下线）⇒ 审计先持久化再回成功
+ */
+const recordAdminMfaReset = async (req, user) => {
+  await recordDurably(
+    {
+      action: 'admin_reset_mfa',
+      category: 'security',
+      userId: req.user.userId,
+      username: req.user.username,
+      targetUserId: user._id,
+      targetUsername: user.username,
+      ...auditClientAddress(req),
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'high',
+      riskFactors: ['admin_mfa_reset'],
+      reason: `管理员重置用户 ${user.username} 的两步验证并强制下线`,
+    },
+    { auditAction: 'admin_reset_mfa', req }
+  );
+};
 
 /**
  * 管理员重置用户两步验证（MFA）
@@ -175,13 +202,26 @@ const resetUserMfa = asyncHandler(async (req, res) => {
   }
 
   try {
-    await User.findByIdAndUpdate(user._id, {
-      mfaEnabled: false,
-      mfaSecret: '',
-      mfaRecoveryCodes: [],
-      mfaFailCount: 0,
-      mfaLockUntil: null,
-    });
+    // M-02：条件更新带上判定时的 roles 快照——若目标在层级/超管校验之后被
+    // 提权，清除 MFA 就等于把一名同级/更高权限账户的防护拆掉。mfaEnabled:true
+    // 同时防止并发的第二次重置把另一次已完成的救济覆盖。
+    const cleared = await User.findOneAndUpdate(
+      { _id: user._id, roles: user.roles || [], mfaEnabled: true },
+      {
+        mfaEnabled: false,
+        mfaSecret: '',
+        mfaRecoveryCodes: [],
+        mfaFailCount: 0,
+        mfaLockUntil: null,
+      }
+    );
+    if (!cleared) {
+      logger.warn('重置 MFA 中止 - 目标状态已变更', {
+        username: user.username,
+        operator: req.user.username,
+      });
+      return ApiResponse.codeError(res, 'USER_STATE_CONFLICT');
+    }
   } catch (clearErr) {
     // 吊销已生效（用户已强制下线），仅 MFA 清除失败——该方向仍是安全的
     // （两步验证保持开启），但响应不能假装整体成功，须告知管理员重试
@@ -197,24 +237,7 @@ const resetUserMfa = asyncHandler(async (req, res) => {
   await sessionService.revokeAllSessionsSafe(user._id, 'admin_revoked');
 
   res.locals.skipGlobalAudit = true;
-  // F-03：管理员重置 MFA 已生效（并已强制下线）⇒ 审计先持久化再回成功
-  await recordDurably(
-    {
-      action: 'admin_reset_mfa',
-      category: 'security',
-      userId: req.user.userId,
-      username: req.user.username,
-      targetUserId: user._id,
-      targetUsername: user.username,
-      ip: req.ip,
-      userAgent: req.get('user-agent'),
-      success: true,
-      riskLevel: 'high',
-      riskFactors: ['admin_mfa_reset'],
-      reason: `管理员重置用户 ${user.username} 的两步验证并强制下线`,
-    },
-    { auditAction: 'admin_reset_mfa', req }
-  );
+  await recordAdminMfaReset(req, user);
 
   logger.warn('管理员重置 MFA', { username: user.username, operator: req.user.username });
 

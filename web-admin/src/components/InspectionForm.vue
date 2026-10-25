@@ -228,7 +228,7 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
-import { api } from '@/utils/api'
+import { api, isHandledApiError } from '@/utils/api'
 import { toLocalWallClock } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 
@@ -526,7 +526,8 @@ const handleSubmit = async () => {
         visible.value = false
         emit('success')
       } catch (error) {
-        ElMessage.error(t('common.submitFailedRetry'))
+        // 具体原因（字段校验/权限/冲突）已由响应拦截器提示，不再叠加泛化文案
+        if (!isHandledApiError(error)) ElMessage.error(t('common.submitFailedRetry'))
       } finally {
         loading.value = false
       }

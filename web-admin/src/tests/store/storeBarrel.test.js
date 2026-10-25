@@ -30,6 +30,7 @@ describe('store/index.js barrel 契约', () => {
       'readSessionState',
       'safeLocal',
       'safeStorage',
+      'toPersistedUser',
       'useAppStore',
       'useAuthStore',
     ])

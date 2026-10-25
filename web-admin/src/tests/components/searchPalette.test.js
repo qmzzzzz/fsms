@@ -9,7 +9,8 @@
  *  3. 键盘导航：↑↓ 在扁平列表上循环移动，is-active 与 aria-activedescendant 同步；
  *  4. 执行：回车跑当前项、点击跑所点项——视图走 router.push，动作走 run()
  *     （切主题/切语言等），执行后关闭并给一次 haptic；
- *  5. 关闭：ESC 或点遮罩空白处；点面板内部不关闭；
+ *  5. 关闭：关闭按钮、ESC、点遮罩空白处三者都关闭；点面板内部不关闭；
+ *     **ESC 不在 UI 上展示**（全屏态 ESC 先归 UA，不作卖点），页脚只剩 ↑↓/↵；
  *  6. 卸载：摘掉全局热键监听，打开状态下还原 body 滚动锁。
  */
 import { describe, test, expect, vi, afterEach, beforeEach } from 'vitest'
@@ -192,10 +193,17 @@ describe('SearchPalette 全局搜索面板', () => {
     await pollUntil(() => !palette(), '动作执行后关闭')
   })
 
-  test('点击条目执行；点面板内部不关闭；ESC 与点遮罩关闭', async () => {
+  test('点击条目执行；点面板内部不关闭；关闭按钮与 ESC 都能关闭；UI 不展示 ESC 提示', async () => {
     const c = await mountPalette()
     hotkey()
     await pollUntil(() => !!palette(), '面板打开')
+
+    // ESC 仍是可用入口，但界面不得出现 ESC 字样（键帽/页脚提示都不展示）
+    const escText = Array.from(document.body.querySelectorAll('kbd')).map((el) =>
+      el.textContent.trim()
+    )
+    expect(escText).not.toContain('ESC')
+    expect(document.body.querySelector('.search-palette__footer').textContent).not.toContain('ESC')
 
     click(items()[1]) // 角色权限
     await pollUntil(() => c.router.currentRoute.value.path === '/system/roles', '点击跳转')
@@ -212,9 +220,54 @@ describe('SearchPalette 全局搜索面板', () => {
 
     hotkey()
     await pollUntil(() => !!palette(), '面板再次打开')
+    const closeBtn = document.body.querySelector('.search-palette__close')
+    expect(closeBtn).toBeTruthy()
+    expect(closeBtn.getAttribute('aria-label')).toBe('关闭')
+    click(closeBtn)
+    await pollUntil(() => !palette(), '关闭按钮关闭')
+
+    hotkey()
+    await pollUntil(() => !!palette(), '面板再次打开')
     click(document.body.querySelector('.search-palette__overlay')) // 点遮罩空白
     await pollUntil(() => !palette(), '遮罩点击关闭')
     expect(c.errors).toEqual([])
+  })
+
+  test('焦点陷阱：Tab/Shift+Tab 在面板首尾循环；关闭后焦点归还打开前元素', async () => {
+    const trigger = document.createElement('button')
+    trigger.textContent = 'trigger'
+    document.body.appendChild(trigger)
+    trigger.focus()
+
+    await mountPalette()
+    hotkey()
+    await pollUntil(() => !!palette(), '面板打开')
+    await pollUntil(() => document.activeElement === input(), '输入框聚焦')
+    expect(document.activeElement).toBe(input())
+
+    // 首元素 Shift+Tab → 末项（不得逃出模态框）
+    input().dispatchEvent(
+      new window.KeyboardEvent('keydown', {
+        key: 'Tab',
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+    )
+    await flush(2)
+    expect(document.activeElement).toBe(items()[items().length - 1])
+
+    // 末项 Tab → 首元素
+    items()[items().length - 1].dispatchEvent(
+      new window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    )
+    await flush(2)
+    expect(document.activeElement).toBe(input())
+
+    keyOnInput('Escape')
+    await pollUntil(() => !palette(), 'ESC 关闭')
+    await pollUntil(() => document.activeElement === trigger, '焦点归还触发元素')
+    trigger.remove()
   })
 
   test('卸载：摘掉全局热键监听，打开状态下还原 body 滚动锁', async () => {

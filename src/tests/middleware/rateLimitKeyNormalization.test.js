@@ -72,16 +72,20 @@ describe('normalizeRateLimitIp（限流键 IP 归一化）', () => {
 });
 
 describe('限流器接线门禁（源码形状）', () => {
-  test('rateLimit.js 不允许任何未经归一化的 req.ip 键拼装', () => {
+  test('rateLimit.js 不允许任何未经归一化/未经可信边界裁定的 req.ip 键拼装', () => {
     const src = RATE_LIMIT_SRC();
     // `:${req.ip}` / `=> req.ip` 两种形态都会造成 ::ffff: 双桶；
-    // 归一化调用点写作 normalizeRateLimitIp(req.ip)
+    // 归一化调用点写作 normalizeRateLimitIp(clientIpForSecurityDecision(req))：
+    // 组键身份必须与准入裁决同一把尺，否则边界外自写 XFF 可逐请求换桶。
     expect(src).not.toMatch(/:\$\{req\.ip\}/);
     expect(src).not.toMatch(/keyGenerator: \(req\) => req\.ip/);
+    expect(src).not.toMatch(/normalizeRateLimitIp\(req\.ip\)/);
     // 归一化助手必须存在且被实际使用
     expect(src).toContain('const normalizeRateLimitIp = (ip) =>');
-    expect(src.match(/normalizeRateLimitIp\(req\.ip\)/g).length).toBeGreaterThanOrEqual(9);
-    expect(src.match(/ipKeyGenerator\(/g).length).toBeGreaterThanOrEqual(9);
+    expect(
+      src.match(/normalizeRateLimitIp\(clientIpForSecurityDecision\(req\)\)/g).length
+    ).toBeGreaterThanOrEqual(13);
+    expect(src.match(/ipKeyGenerator\(/g).length).toBeGreaterThanOrEqual(13);
   });
 
   /**
@@ -93,7 +97,9 @@ describe('限流器接线门禁（源码形状）', () => {
   test('config/swagger.js 的文档限流器必须同口径组键并接共享存储', () => {
     const src = SWAGGER_SRC();
     expect(src).not.toMatch(/api-docs:\$\{req\.ip\}/);
-    expect(src).toContain("ipKeyGenerator(normalizeIP(req.ip) || 'unknown')");
+    expect(src).toContain(
+      "ipKeyGenerator(normalizeIP(clientIpForSecurityDecision(req)) || 'unknown')"
+    );
     expect(src).toContain("makeSharedStore('docs')");
   });
 
@@ -111,8 +117,8 @@ describe('限流器接线门禁（源码形状）', () => {
     for (const prefix of ['csp-report', 'client-errors', 'security-txt']) {
       expect(src).toContain(`makeSharedStore('${prefix}')`);
     }
-    // 三个 keyGenerator 全部走归一化 + IPv6 /56 聚合
-    expect(src.match(/normalizeRateLimitIp\(req\.ip\)/g).length).toBe(3);
+    // 三个 keyGenerator 全部走安全裁决地址 + 归一化 + IPv6 /56 聚合
+    expect(src.match(/normalizeRateLimitIp\(clientIpForSecurityDecision\(req\)\)/g).length).toBe(3);
     expect(src.match(/ipKeyGenerator\(/g).length).toBe(3);
   });
 });

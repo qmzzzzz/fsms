@@ -24,7 +24,7 @@ const getUsers = asyncHandler(async (req, res) => {
   const safeSort = validateSort(sort, {
     allowedFields: [
       'username',
-      'email',
+      // email 不在白名单：字段已加密存储，按密文排序既无业务含义又退化为全表阻塞排序
       'realName',
       'status',
       'department',
@@ -41,6 +41,10 @@ const getUsers = asyncHandler(async (req, res) => {
     dataScope
   );
 
+  // L-11：归一必须在 roleFound 分支之前。空角色结果同样要回报规范分页，
+  // 原写法直接把 parseInt 的 NaN/越界值写进响应元数据，与正常分支自相矛盾。
+  const { page: pageNum, limit: limitNum } = normalizePagination(page, limit);
+
   // 只剩 roleFound 一判：scopeAllowed 已随 #12 改成"范围不可用即 403"
   // （applyDataScopeToQuery 抛错，errorHandler 统一映射），控制器不再回空分页。
   if (!roleFound) {
@@ -48,17 +52,14 @@ const getUsers = asyncHandler(async (req, res) => {
       res,
       [],
       {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
         total: 0,
         totalPages: 0,
       },
       '获取用户列表成功'
     );
   }
-
-  // 规范化分页参数（统一限界）
-  const { page: pageNum, limit: limitNum } = normalizePagination(page, limit);
 
   // 执行查询
   const { users, count } = await userService.listUsers(query, safeSort, pageNum, limitNum);
@@ -171,12 +172,15 @@ const getUserStats = asyncHandler(async (req, res) => {
         ],
         // 按角色统计（口径对齐 byDepartment：仅统计 active 用户，
         // 此前 byDepartment 只算 active 而 byRole 算全部，两个维度基数不一致）
+        // L-19：只列出生效角色。停用角色不产生任何权限，把它算进分布会让
+        // 「角色人数」与权限解析口径矛盾（停用角色下的用户看似仍有归属）。
         byRole: [
           { $match: { status: 'active' } },
           { $unwind: '$roles' },
           { $group: { _id: '$roles', count: { $sum: 1 } } },
           { $lookup: { from: 'roles', localField: '_id', foreignField: '_id', as: 'role' } },
           { $unwind: '$role' },
+          { $match: { 'role.status': 'active' } },
           {
             $project: {
               _id: 0,

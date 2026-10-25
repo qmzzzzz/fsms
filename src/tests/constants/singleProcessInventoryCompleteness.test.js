@@ -112,6 +112,8 @@ const EXEMPT_MODULES = {
   // HOST_GATE_EXEMPT_PATHS 同族：判据词表，不是进程内状态。
   'controllers/authController/credentials.js':
     'REFRESH_OUTCOME_RESPONSES，outcome → 响应函数的静态查表（只读、无跨进程语义）',
+  'services/websocketService/inboundThrottle.js':
+    'buckets: Map<Socket, {count, windowStart}>，状态绑定单条 Socket 连接、只存在于单进程，无跨实例语义',
 };
 
 /** 递归收集 src 下全部非测试 .js 文件 */

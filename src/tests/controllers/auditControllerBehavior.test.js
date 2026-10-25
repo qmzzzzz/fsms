@@ -1,6 +1,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 describe('auditController endpoint behavior', () => {
   let app;
@@ -55,7 +56,11 @@ describe('auditController endpoint behavior', () => {
     }
   });
 
-  const authed = (url) => request(app).get(url).set('Authorization', `Bearer ${operatorToken}`);
+  const authed = (url) =>
+    request(app)
+      .get(url)
+      .set('Authorization', `Bearer ${operatorToken}`)
+      .set(reauthHeaders(operatorToken));
 
   test('returns an explicit empty offset page for an unmatched filter', async () => {
     const res = await authed(`/api/security/audit-logs?username=does-not-exist-${stamp}&limit=10`);

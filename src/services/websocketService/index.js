@@ -7,7 +7,8 @@
  *   · WebSocketService.resolveTrustProxyHops
  *   · WebSocketService.resolveHandshakeIPForSecurityDecision
  * 实现分布：shared（常量/谓词）、handshake（握手认证）、lifecycle（连接生命周期
- * 与周期复查）、push（事件分发）——方法以 mixin 挂回 prototype，`this` 语义不变。
+ * 与周期复查）、sessionRevocation（设备会话吊销处置）、push（事件分发）——
+ * 方法以 mixin 挂回 prototype，`this` 语义不变。
  */
 
 const socketIo = require('socket.io');
@@ -16,6 +17,7 @@ const config = require('../../config');
 const { HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT } = require('./shared');
 const handshake = require('./handshake');
 const lifecycle = require('./lifecycle');
+const sessionRevocation = require('./sessionRevocation');
 const push = require('./push');
 
 class WebSocketService {
@@ -55,9 +57,19 @@ class WebSocketService {
 
     this.clients = new Map();
     this.userConnections = new Map(); // userId -> Set of socketIds
+    // #9：来源 IP -> 尚未认证的连接数（认证成功或断开即归还）
+    this.unauthConnectionsByIp = new Map();
     this._cleanupTimer = null;
     this._sweepRunning = false; // R-2 周期复查防重入标志
     this._adapterClients = []; // Redis adapter 专用连接（dispose 时回收）
+    // #2：设备会话吊销后立即断开对应长连接。跨实例吊销由周期清扫兜底
+    // （revokeSession 的广播只承载缓存失效语义，订阅方不应据此推断吊销成立）。
+    // 惰性 require：sessionService 在模块加载期会向 sharedCache 注册失效处理器，
+    // 顶层引入会让「只使用原型方法的单元测试」连带产生这条模块级副作用。
+    const sessionService = require('../sessionService');
+    this._offSessionRevoked = sessionService.onSessionRevoked((event) =>
+      this._handleSessionRevoked(event)
+    );
     this.setupEventHandlers();
     this.setupConnectionCleanup();
 
@@ -65,7 +77,13 @@ class WebSocketService {
   }
 }
 
-Object.assign(WebSocketService.prototype, handshake.methods, lifecycle.methods, push.methods);
+Object.assign(
+  WebSocketService.prototype,
+  handshake.methods,
+  lifecycle.methods,
+  sessionRevocation.methods,
+  push.methods
+);
 
 module.exports = WebSocketService;
 

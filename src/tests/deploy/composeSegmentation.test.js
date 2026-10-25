@@ -36,7 +36,7 @@ describe('compose 数据面分段与 Redis 认证合同', () => {
 
   // ── Redis 认证 ──────────────────────────────────────────────────────────
 
-  test('redis 的 command 必须带 requirepass，且口令读自挂载的 secret 文件（不进字面量/environment）', () => {
+  test('redis 的认证口令必须来自 secret 文件，且**不得进入进程 argv**', () => {
     const block = serviceBlock('redis');
     // 可执行形态（command 列表内），不是注释里的“用法示例”
     const exec = block
@@ -44,13 +44,17 @@ describe('compose 数据面分段与 Redis 认证合同', () => {
       .map((l) => l.trim())
       .filter((l) => l && !l.startsWith('#'))
       .join('\n');
-    expect(exec).toContain('--requirepass');
+    // 口令不允许以字面量出现：唯一合法形态是运行时 $(cat /run/secrets/…) 展开
     expect(exec).toContain('/run/secrets/redis_password');
-    // 口令不允许以字面量出现：唯一合法形态是运行时 $(cat …) 展开
-    expect(exec).toMatch(/requirepass "\$\$\(cat \/run\/secrets\/redis_password\)"/);
+    expect(exec).toMatch(/requirepass %s/);
+    // 2026-10-24 审计：`--requirepass "$(cat …)"` 经 shell 展开后，明文口令就躺在
+    // PID 1 的 /proc/1/cmdline 里。必须走配置文件（tmpfs、umask 077）。
+    expect(exec).not.toContain('--requirepass');
+    expect(exec).toMatch(/umask 077/);
+    expect(exec).toMatch(/exec redis-server \/tmp\/redis\.conf/);
   });
 
-  test('redis 的 healthcheck 必须带认证（否则 requirepass 开启后健康检查必挂）', () => {
+  test('redis 的 healthcheck 必须带认证，且口令走 REDISCLI_AUTH 而非 -a', () => {
     const block = serviceBlock('redis');
     const exec = block
       .split(/\r?\n/)
@@ -58,8 +62,10 @@ describe('compose 数据面分段与 Redis 认证合同', () => {
       .filter((l) => l && !l.startsWith('#'))
       .join('\n');
     expect(exec).toMatch(
-      /redis-cli --no-auth-warning -a "\$\$\(cat \/run\/secrets\/redis_password\)" ping \| grep -q PONG/
+      /REDISCLI_AUTH="\$\$\(cat \/run\/secrets\/redis_password\)" redis-cli ping \| grep -q PONG/
     );
+    // -a 会把口令放进 healthcheck 进程的 argv（/proc/<pid>/cmdline）
+    expect(exec).not.toMatch(/redis-cli[^\n]*\s-a\s/);
   });
 
   test('app 侧凭据经 REDIS_PASSWORD_FILE 注入，且两个服务都挂 redis_password secret', () => {

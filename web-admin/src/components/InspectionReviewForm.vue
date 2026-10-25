@@ -70,8 +70,8 @@
       <button
         type="button"
         class="glass-btn glass-btn--primary"
-        :class="{ 'is-loading': loading }"
-        :disabled="loading"
+        :class="{ 'is-loading': loading || submitting }"
+        :disabled="loading || submitting"
         @click="handleSubmit"
       >
         {{ $t('inspection.submitReviewBtn') }}
@@ -84,7 +84,7 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
-import { api, isCanceledError } from '@/utils/api'
+import { api, isCanceledError, isHandledApiError } from '@/utils/api'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 // 本地时区口径（O-3 单一事实来源）：直接插值会把 ISO UTC 串原样渲染，
 // 东八区 09:00 显示成 01:00 —— InspectionView.vue:94-96 同一修法
@@ -111,6 +111,8 @@ const visible = computed({
 })
 
 const loading = ref(false)
+// 同步重入锁：loading 要等异步校验完成后才置位，同一 tick 连点会重复提交审核
+const submitting = ref(false)
 const inspectionData = ref(null)
 const detailRequest = useLatestRequest()
 
@@ -184,33 +186,44 @@ const loadInspectionDetail = async () => {
   } catch (error) {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
     if (isCanceledError(error)) return
-    ElMessage.error(t('inspectionReview.loadFailedMsg'))
+    // 具体原因已由响应拦截器提示，组件不再叠加一条泛化「加载失败」
+    if (!isHandledApiError(error)) ElMessage.error(t('inspectionReview.loadFailedMsg'))
   }
 }
 
 // 提交审核
 const handleSubmit = async () => {
   if (!formRef.value) return
+  if (submitting.value) return
+  submitting.value = true
 
-  await formRef.value.validate(async (valid) => {
-    if (valid) {
-      loading.value = true
-      try {
-        await api.inspections.review(props.inspectionId, {
-          reviewComment: form.reviewComment,
-          // 审核结论必须随载荷提交，否则后端无法得知通过/不通过
-          reviewResult: form.result,
-        })
-        ElMessage.success(t('inspectionReview.submitSuccessMsg'))
-        visible.value = false
-        emit('success')
-      } catch (error) {
-        ElMessage.error(t('common.submitFailedRetry'))
-      } finally {
-        loading.value = false
-      }
+  try {
+    try {
+      await formRef.value.validate()
+    } catch (_) {
+      return
     }
-  })
+
+    loading.value = true
+    try {
+      await api.inspections.review(props.inspectionId, {
+        reviewComment: form.reviewComment,
+        // 审核结论必须随载荷提交，否则后端无法得知通过/不通过
+        reviewResult: form.result,
+      })
+      ElMessage.success(t('inspectionReview.submitSuccessMsg'))
+      visible.value = false
+      emit('success')
+    } catch (error) {
+      // 具体原因已由响应拦截器提示，组件不再叠加一条泛化「提交失败」
+      if (!isHandledApiError(error)) ElMessage.error(t('common.submitFailedRetry'))
+    } finally {
+      loading.value = false
+    }
+  } finally {
+    // 校验不通过 / 请求失败 / 成功都必须解锁，否则按钮永久失效
+    submitting.value = false
+  }
 }
 
 // 关闭对话框

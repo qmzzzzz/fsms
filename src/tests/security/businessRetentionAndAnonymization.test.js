@@ -8,8 +8,8 @@
  *
  * 本轮交付的是**骨架**（口径待业务方给）：
  *   ① 保留期：可查的单一事实来源 + 与 constants/retention.js 同源的严格解析/钳制/告警，
- *      但**默认不启用**（`declaredDays` 全为 null ⇒ 不建 TTL）。本文件钉住
- *      "口径未定 ⇒ 不许建索引"这条 fail-closed 判据，以及"不许静默定数字"的形态；
+ *      业务口径为 180 天；是否建 TTL 由 `BUSINESS_RETENTION_DAYS_*` 决定
+ *      （未配置则不建）。本文件钉住"口径与开关两道闸"及严格解析判据；
  *   ② 删除权：`anonymizeById` 的抹除/保留清单与幂等性。
  *
  * 可证伪点：解析判据全部用 `90x` / `1e3` / `''` 这类**parseInt 会静默放过**的输入，
@@ -48,7 +48,7 @@ describe('业务数据保留期声明（A2）', () => {
     expect(MAX_RETENTION_DAYS).toBe(3650);
   });
 
-  test('默认（无环境变量）：不启用 TTL——业务口径未定时不得替业务定数字', () => {
+  test('默认（无环境变量）：不建 TTL——开关未配置时不启动物理删除', () => {
     for (const p of BUSINESS_RETENTION_POLICY) {
       const r = resolveBusinessRetention(p.modelName);
       expect({ m: p.modelName, enabled: r.enabled, eff: r.effectiveDays }).toEqual({

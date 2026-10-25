@@ -12,6 +12,7 @@ import {
   getLoggedErrors,
   clearLoggedErrors,
   redactUrl,
+  reportDegradation,
 } from '@/utils/errorReporter'
 
 const app = { config: {} }
@@ -114,6 +115,62 @@ describe('errorReporter 全局错误兜底', () => {
 
     expect(getLoggedErrors()).toHaveLength(0)
     expect(JSON.parse(localStorage.getItem('fsrbac.errorLog'))).toHaveLength(0)
+  })
+
+  describe('上报字段收口（extra 覆盖 / 内联 URL）', () => {
+    test('extra 不得覆盖受控字段：kind/message/url/count 保持模块口径', () => {
+      // 防退化：`{ ...extra, t, kind, ... }` 顺序被反转 → 调用方（或降级点传入的
+      // 服务端字符串）可把 url 写成未脱敏值，绕开 L-11 直接落盘并外发。
+      reportDegradation('degrade probe', {
+        kind: 'vue',
+        message: 'forged',
+        url: 'https://evil.example/cb?token=leak',
+        count: 99,
+        reason: 'test',
+      })
+
+      const entry = getLoggedErrors().at(-1)
+      expect(entry.kind).toBe('degrade')
+      expect(entry.message).toBe('degrade probe')
+      expect(entry.url).toBe(redactUrl(location.href))
+      expect(entry.count).toBe(1)
+      // 非保留键照常保留（排障上下文不能因收口被丢掉）
+      expect(entry.reason).toBe('test')
+    })
+
+    test('message / stack 中内联 URL 的敏感参数同样打码', () => {
+      // 运行时错误文案常把接口 URL 拼进 message（如 "POST https://...?token=..."），
+      // 只脱敏 entry.url 不足以拦住这条路径。
+      reportDegradation('POST https://api.example.com/cb?token=leak&page=2 failed')
+
+      const err = new Error('boom')
+      err.stack = 'Error: boom\n    at https://cdn.example.com/a.js?access_token=stackleak'
+      const event = new Event('unhandledrejection')
+      event.reason = err
+      window.dispatchEvent(event)
+
+      const messageEntry = getLoggedErrors().find((e) => e.kind === 'degrade')
+      expect(messageEntry.message).toContain('token=***')
+      expect(messageEntry.message).not.toContain('leak')
+      expect(messageEntry.message).toContain('page=2')
+
+      const stackEntry = getLoggedErrors().find((e) => e.kind === 'promise')
+      expect(stackEntry.stack).toContain('access_token=***')
+      expect(stackEntry.stack).not.toContain('stackleak')
+    })
+
+    test('window error 的 file 字段按 URL 脱敏（不只 message）', () => {
+      window.dispatchEvent(
+        new ErrorEvent('error', {
+          message: 'cdn boom',
+          filename: 'https://cdn.example.com/app.js?token=fileleak',
+        })
+      )
+
+      const entry = getLoggedErrors().find((e) => e.kind === 'window')
+      expect(entry.file).toContain('token=***')
+      expect(entry.file).not.toContain('fileleak')
+    })
   })
 
   // L-11：上报 URL 不得携带明文凭据。

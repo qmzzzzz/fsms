@@ -393,22 +393,36 @@ describe('Config Validation', () => {
       expect(runProd().exited).toBe(false);
     });
 
-    test('b) 声明由前置反代终结（TRUST_PROXY_HOPS=1 + ALLOWED_HOSTS）→ 通过', () => {
+    test('b) 显式声明由前置反代终结 TLS（TLS_TERMINATED_UPSTREAM=true）→ 通过', () => {
       setValidProdEnv();
       delete process.env.ENABLE_HTTPS;
+      process.env.TLS_TERMINATED_UPSTREAM = 'true';
       process.env.TRUST_PROXY_HOPS = '1';
       process.env.ALLOWED_HOSTS = 'api.example.com';
       expect(runProd().exited).toBe(false);
     });
 
+    test('b2) 只有 hops + ALLOWED_HOSTS 不再算 TLS 声明 → 启动致命错误', () => {
+      // 2026-10-24 审计：这两项本来就是生产必填，拿它们推断 TLS 会让判据恒真。
+      setValidProdEnv();
+      delete process.env.ENABLE_HTTPS;
+      delete process.env.TLS_TERMINATED_UPSTREAM;
+      process.env.TRUST_PROXY_HOPS = '1';
+      process.env.ALLOWED_HOSTS = 'api.example.com';
+      const { exited, messages } = runProd();
+      expect(exited).toBe(true);
+      expect(messages).toContain('TLS 终结层未声明');
+    });
+
     test('c) 二者皆无（有 hops 但无 ALLOWED_HOSTS）→ 启动致命错误', () => {
       setValidProdEnv();
       delete process.env.ENABLE_HTTPS;
+      delete process.env.TLS_TERMINATED_UPSTREAM;
       process.env.TRUST_PROXY_HOPS = '1';
       delete process.env.ALLOWED_HOSTS;
       const { exited, messages } = runProd();
       expect(exited).toBe(true);
-      expect(messages).toContain('TLS 未在任一层终结');
+      expect(messages).toContain('TLS 终结层未声明');
     });
   });
 });

@@ -15,8 +15,8 @@
  * 3. **认领写库失败时必须拒绝**（fail-closed）。`.catch(() => null)` 与登录侧同形；
  *    若有人改成"写不进去就当认领成功"，重放守卫在 DB 故障期整体失效且不留痕迹。
  *
- * 另加一条反向保护：口令轨（currentPassword）不得被认领逻辑波及——
- * 它本来就不消费任何 TOTP 窗口，改动若把水位一起写了，属于越界。
+ * 另加第二因子边界：仅凭登录密码不得关闭 MFA（密码是单因子，不能旁路
+ * 已开启的第二因子）；恢复码路径则必须原子消费且不消费 TOTP 水位。
  */
 
 const mongoose = require('mongoose');
@@ -65,6 +65,8 @@ describe('zzqA 认领实现的选择性判据', () => {
     });
     return res;
   };
+
+  const errorCode = (res) => res.body?.errors?.errorCode;
 
   const readState = () =>
     User.findById(uid).select('+mfaRecoveryCodes mfaFailCount mfaLastCounter mfaEnabled');
@@ -195,17 +197,35 @@ describe('zzqA 认领实现的选择性判据', () => {
     });
   });
 
-  describe('4. 反向保护：口令轨不被认领逻辑波及', () => {
-    test('用 currentPassword 关闭 MFA 成功，且不消费任何 TOTP 窗口', async () => {
+  describe('4. 第二因子边界：密码不得单独关闭 MFA；恢复码路径不消费 TOTP 窗口', () => {
+    test('仅提供 currentPassword 必须被拒，且不得改动任何状态', async () => {
       const watermark = CURRENT_WINDOW() - 5;
       await User.findByIdAndUpdate(uid, { mfaLastCounter: watermark });
       const res = await call('mfaDisable', {
         currentPassword: 'Aa1!aaaaaaaaaaaaaaaa',
       });
+      expect(res.statusCode).toBe(403);
+      expect(errorCode(res)).toBe('MFA_SECOND_FACTOR_REQUIRED');
+      const after = await readState();
+      expect(after.mfaEnabled).toBe(true);
+      // 拒绝必须是零副作用：水位不得被"顺手 $max/认领"改写
+      expect(after.mfaLastCounter).toBe(watermark);
+    });
+
+    test('恢复码可关闭 MFA：原子消费该码，且不消费任何 TOTP 窗口', async () => {
+      const { hashRecoveryCode } = require('../../services/mfaService');
+      const watermark = CURRENT_WINDOW() - 5;
+      await User.findByIdAndUpdate(uid, {
+        mfaLastCounter: watermark,
+        mfaRecoveryCodes: [hashRecoveryCode('ABCD-EFGH')],
+      });
+
+      const res = await call('mfaDisable', { recoveryCode: 'abcd-efgh' });
       expect(res.statusCode).toBe(200);
+
       const after = await readState();
       expect(after.mfaEnabled).toBe(false);
-      // 密码路径与水位无关：不得被"顺手 $max/认领"改写
+      expect(after.mfaRecoveryCodes).toHaveLength(0);
       expect(after.mfaLastCounter).toBe(watermark);
     });
   });

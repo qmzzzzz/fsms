@@ -20,6 +20,7 @@ const { piiSearchKey } = require('../../utils/piiCrypto');
 // O-2 下沉引入：管理员锁定/解锁的层级与内置超管校验（纯工具模块，无循环依赖）
 const { getOperatorMaxLevel, maxRoleLevel } = require('../../utils/permissionHelper');
 const { isSuperAdminRole } = require('../../utils/superAdmin');
+const sessionService = require('../sessionService');
 
 /**
  * 更新个人资料（业务层）
@@ -143,7 +144,7 @@ async function updateUserProfile(userId, body) {
  * @param {string} userId 目标用户 ID
  * @param {object} params { locked: boolean, reason?: string }
  * @param {object} ctx { operatorId, operatorUsername, ip, userAgent }
- * @returns {Promise<{outcome:'NOT_FOUND'|'FORBIDDEN_SAME_LEVEL'|'CANNOT_LOCK_SUPER_ADMIN'|'INACTIVE_UNLOCK'|'INACTIVE_LOCK'|'NOT_LOCKED'|'OK', ...}>}
+ * @returns {Promise<{outcome:'NOT_FOUND'|'FORBIDDEN_SAME_LEVEL'|'CANNOT_LOCK_SUPER_ADMIN'|'INACTIVE_UNLOCK'|'INACTIVE_LOCK'|'NOT_LOCKED'|'REVOKE_UNAVAILABLE'|'OK', ...}>}
  */
 /**
  * 锁定/解锁的三类拒绝判据（层级 → 内置超管 → inactive 双向状态机），顺序即原实现顺序。
@@ -237,7 +238,40 @@ async function setUserLockStatus(userId, { locked, reason }, ctx) {
 
   applyLockStatePlan(user, planLockStateChange({ locked, reason }));
 
+  // 解锁会重新打开登录闸门：先吊销锁定前签发的全部令牌，再落库恢复。
+  // 否则锁定期间被窃取的 access/refresh 会在解锁瞬间重新生效——锁定本该
+  // 连同旧凭据一起作废，而此前只改 status，旧令牌在解锁后原样复活。
+  // fail-closed：吊销失败则不解锁（控制器回 503），账户保持锁定可安全重试。
+  if (!locked) {
+    const { invalidateUserTokens } = require('../../middleware/tokenBlacklist');
+    try {
+      await invalidateUserTokens(user._id);
+    } catch (revokeErr) {
+      logger.error(`解锁中止 - 会话吊销失败：${revokeErr.message}`, {
+        username: user.username,
+        operator: operatorUsername,
+      });
+      return { outcome: 'REVOKE_UNAVAILABLE' };
+    }
+  }
+
   await user.save();
+
+  // 锁定账户同样要释放进行中的指派（与 updateUser 的停用路径、删号路径同一出口）。
+  // 锁定态下 arrive/resolve/start 都以"操作者 === 处理人/被指派人"为条件，
+  // 而锁定账户无法登录 ⇒ 工单没有出口。解锁后重新接单即可，释放本身不回滚。
+  // 放在 save 之后：写入失败时不得提前把指派清掉；重试同一请求仍会走到这里。
+  if (locked) {
+    await require('../userService').releaseOpenAssignments([user._id], null, {
+      remark: '处理人账户已锁定，工单退回待指派池',
+    });
+  }
+
+  // 会话表与 tokenVersion 同步收敛：否则「登录会话」界面仍列出一批
+  // 显示 active 但实际已失效的设备（fail-soft：防线已由 tokenVersion 保证）
+  if (!locked) {
+    await sessionService.revokeAllSessionsSafe(user._id, 'access_restored');
+  }
 
   // 失效用户缓存（与原实现一致：惰性 require，规避 middleware ↔ service 潜在循环）
   const { invalidateUserCache } = require('../../middleware/auth');

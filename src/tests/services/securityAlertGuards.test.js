@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const dns = require('dns');
 
 jest.mock('../../utils/httpPostJson', () => ({
   postJson: jest.fn(),
@@ -8,6 +9,7 @@ describe('securityAlert delivery and failure guards', () => {
   let securityAlert;
   let postJson;
   let AuditLog;
+  let dnsLookup;
   const originalWebhook = process.env.SECURITY_ALERT_WEBHOOK;
   const originalAllowlist = process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST;
   const originalConcurrency = process.env.SECURITY_ALERT_MAX_CONCURRENT;
@@ -37,6 +39,14 @@ describe('securityAlert delivery and failure guards', () => {
     postJson.mockResolvedValue({ ok: true });
     process.env.SECURITY_ALERT_WEBHOOK = 'https://alerts.example.com/hook';
     delete process.env.SECURITY_ALERT_WEBHOOK_ALLOWLIST;
+    // 投递前会对域名做解析校验并钉住地址（DNS 重绑定防护）；单测不出网
+    dnsLookup = jest
+      .spyOn(dns.promises, 'lookup')
+      .mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+  });
+
+  afterEach(() => {
+    if (dnsLookup) dnsLookup.mockRestore();
   });
 
   test('skips malformed and non-http endpoints before making a request', async () => {
@@ -85,6 +95,8 @@ describe('securityAlert delivery and failure guards', () => {
     );
 
     const pending = securityAlert.sendNotification('brute_force_login', 'high', 'pending', {});
+    // 投递前先等待域名解析（已 mock 为立即 resolve），让 postJson 落地
+    await new Promise((resolve) => setImmediate(resolve));
     expect(postJson).toHaveBeenCalledTimes(1);
 
     await securityAlert.sendNotification('brute_force_login', 'high', 'skipped', {});

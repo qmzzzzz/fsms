@@ -22,9 +22,9 @@ jobs:
   dependency-review:
     runs-on: ubuntu-latest
     steps:
-      # dependency-review 依赖仓库的 Dependency graph；账号级开关关闭时 action 会直接
-      # 报错，导致每个 PR 永久红。先探测 SBOM 接口，不可用则 warning 并跳过，
-      # 开启后无需改代码即可恢复真实检查。
+      # dependency-review 依赖仓库的 Dependency graph。此前不可用只 warning + skip：
+      # 一次账号级开关变化就能让供应链门禁静默变成"永远通过"。现在改为 fail-closed——
+      # 探测失败直接让 PR 红，直到 Dependency graph 恢复；安全门禁不允许 fail-open。
       - name: Check dependency graph availability
         id: graph
         env:
@@ -37,8 +37,8 @@ jobs:
           if [ "$code" = "200" ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Dependency graph unavailable (HTTP $code), dependency review skipped"
+            echo "::error::Dependency graph unavailable (HTTP $code); refusing to skip dependency review"
+            exit 1
           fi
 
       - name: Checkout repository

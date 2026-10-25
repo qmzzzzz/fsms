@@ -58,6 +58,11 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
     expect(normalizeUser([{ userId: 'x' }])).toBeNull()
     expect(normalizeUser(null)).toBeNull()
     expect(normalizeUser(undefined)).toBeNull()
+    // 缺 id 的对象不是可用的身份：后续「是否本人」判断、跨标签页比对全靠 id，
+    // 放行只会得到一个「已登录但无法判断是谁」的半坏状态
+    expect(normalizeUser({ username: 'a' })).toBeNull()
+    expect(normalizeUser({ userId: '', username: 'a' })).toBeNull()
+    expect(normalizeUser({ userId: '  ', username: 'a' })).toBeNull()
     // 正常对象仍按原语义补齐 id 别名（回归零副作用）
     expect(normalizeUser({ userId: 5, username: 'a' })).toMatchObject({
       userId: '5',
@@ -75,7 +80,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
 
   test('setAuth 写入用户与权限，但不持久化令牌', () => {
     const store = useAuthStore()
-    store.setAuth({ username: 'alice', roles: [] }, ['device:read'])
+    store.setAuth({ userId: 'u-alice', username: 'alice', roles: [] }, ['device:read'])
 
     expect(store.isAuthenticated).toBe(true)
     expect(store.currentUser.username).toBe('alice')
@@ -95,7 +100,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
 
   test('refreshPermissionsFromServer：/auth/me 往返期间登出，不得复活已失效会话（竞态）', async () => {
     const store = useAuthStore()
-    store.setAuth({ username: 'alice', roles: [] }, ['device:read'])
+    store.setAuth({ userId: 'u-alice', username: 'alice', roles: [] }, ['device:read'])
 
     // 让 getMe 挂起，手动控制 resolve，以模拟「权限刷新在途时用户点了登出」
     let releaseGetMe
@@ -106,7 +111,10 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
             res({
               data: {
                 success: true,
-                data: { user: { username: 'alice', roles: [] }, permissions: ['device:read'] },
+                data: {
+                  user: { userId: 'u-alice', username: 'alice', roles: [] },
+                  permissions: ['device:read'],
+                },
               },
             })
         })
@@ -135,7 +143,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
     sessionStorage.setItem('refreshToken', 'legacy-refresh')
     sessionStorage.setItem('currentUser', JSON.stringify({ username: 'stale' }))
     const store = useAuthStore()
-    store.setAuth({ username: 'bob' }, [])
+    store.setAuth({ userId: 'u-bob', username: 'bob' }, [])
     expect(sessionStorage.getItem('token')).toBeNull()
     expect(sessionStorage.getItem('refreshToken')).toBeNull()
     expect(sessionStorage.getItem('currentUser')).toBeNull()
@@ -144,7 +152,7 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
   test('clearAuth 清空用户/权限与两种介质的残留', () => {
     sessionStorage.setItem('token', 'legacy-token')
     const store = useAuthStore()
-    store.setAuth({ username: 'carol' }, ['user:read'])
+    store.setAuth({ userId: 'u-carol', username: 'carol' }, ['user:read'])
     store.clearAuth()
 
     expect(store.isAuthenticated).toBe(false)
@@ -156,17 +164,37 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
     expect(sessionStorage.getItem('token')).toBeNull()
   })
 
-  test('刷新页面恢复：localStorage 中的 currentUser 重建已登录态', () => {
-    localStorage.setItem('currentUser', JSON.stringify({ username: 'dave' }))
+  test('刷新页面恢复：localStorage 中的 currentUser 重建已登录态（但未核实）', () => {
+    localStorage.setItem('currentUser', JSON.stringify({ userId: 'u-dave', username: 'dave' }))
     localStorage.setItem('permissions', JSON.stringify(['device:read']))
     const store = useAuthStore()
     expect(store.isAuthenticated).toBe(true)
     expect(store.hasPermission('device:read')).toBe(true)
+    // 本地缓存只恢复界面，不代表已向服务端核实过——守卫仍须探测一次
+    expect(store.sessionVerified).toBe(false)
+  })
+
+  test('localStorage 中的身份缺 id 时不重建登录态（脏缓存不得伪装已登录）', () => {
+    localStorage.setItem('currentUser', JSON.stringify({ username: 'ghost' }))
+    const store = useAuthStore()
+    expect(store.currentUser).toBeNull()
+    expect(store.isAuthenticated).toBe(false)
+  })
+
+  test('setAuth 拒绝缺 id 的用户对象，且不写入本地缓存', () => {
+    const store = useAuthStore()
+    expect(store.setAuth({ username: 'no-id' }, ['user:read'])).toBe(false)
+    expect(store.isAuthenticated).toBe(false)
+    expect(localStorage.getItem('currentUser')).toBeNull()
+    expect(localStorage.getItem('permissions')).toBeNull()
   })
 
   test('旧版 sessionStorage 会话状态被就地迁移到 localStorage', () => {
     // 改介质前已登录的标签页：状态在 sessionStorage，不迁移会被判为未登录
-    sessionStorage.setItem('currentUser', JSON.stringify({ username: 'legacy_user' }))
+    sessionStorage.setItem(
+      'currentUser',
+      JSON.stringify({ userId: 'u-legacy', username: 'legacy_user' })
+    )
     sessionStorage.setItem('permissions', JSON.stringify(['user:read']))
 
     const store = useAuthStore()
@@ -229,6 +257,66 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
       await expect(store.restoreSession()).resolves.toBe(true)
       expect(getMeMock).not.toHaveBeenCalled()
       expect(getSessionStatusMock).not.toHaveBeenCalled()
+    })
+
+    test('页面加载后的缓存身份未核实：仍须向服务端确认后才允许放行', async () => {
+      localStorage.setItem('currentUser', JSON.stringify({ userId: 'u-1', username: 'admin' }))
+      localStorage.setItem('permissions', JSON.stringify(['user:read']))
+      mockSessionAuthenticated()
+      getMeMock.mockResolvedValue({
+        data: { success: true, data: { user: { id: 'u-1', username: 'admin' }, permissions: [] } },
+      })
+
+      const store = useAuthStore()
+      // 缓存只恢复界面，不代表会话真实有效
+      expect(store.isAuthenticated).toBe(true)
+      expect(store.sessionVerified).toBe(false)
+
+      await expect(store.restoreSession()).resolves.toBe(true)
+      expect(getSessionStatusMock).toHaveBeenCalledTimes(1)
+      expect(getMeMock).toHaveBeenCalledTimes(1)
+      expect(store.sessionVerified).toBe(true)
+    })
+
+    test('缓存身份被服务端否定：清除本地身份，不得继续显示已登录', async () => {
+      localStorage.setItem('currentUser', JSON.stringify({ userId: 'u-ghost', username: 'ghost' }))
+      localStorage.setItem('permissions', JSON.stringify(['user:read']))
+      getSessionStatusMock.mockResolvedValue({
+        data: { success: true, data: { authenticated: false } },
+      })
+
+      const store = useAuthStore()
+      await expect(store.restoreSession()).resolves.toBe(false)
+
+      expect(store.isAuthenticated).toBe(false)
+      expect(store.permissions).toEqual([])
+      expect(localStorage.getItem('currentUser')).toBeNull()
+      expect(localStorage.getItem('permissions')).toBeNull()
+      expect(getMeMock).not.toHaveBeenCalled()
+    })
+
+    test('缓存在 401 时同样被清除（refresh 链条走不通）', async () => {
+      localStorage.setItem('currentUser', JSON.stringify({ userId: 'u-1', username: 'admin' }))
+      mockSessionAuthenticated()
+      getMeMock.mockRejectedValue({ response: { status: 401 } })
+
+      const store = useAuthStore()
+      await expect(store.restoreSession()).resolves.toBe(false)
+      expect(store.currentUser).toBeNull()
+      expect(localStorage.getItem('currentUser')).toBeNull()
+    })
+
+    test('网络不可达且本地有缓存身份：保留界面但标记未核实，下次路由再试', async () => {
+      localStorage.setItem('currentUser', JSON.stringify({ userId: 'u-1', username: 'admin' }))
+      getSessionStatusMock.mockRejectedValue({ message: 'Network Error' })
+
+      const store = useAuthStore()
+      await expect(store.restoreSession()).resolves.toBe(true)
+      // 后端仍是最终鉴权方（请求都带 cookie），不应因一次网络抖动把人踢下线
+      expect(store.isAuthenticated).toBe(true)
+      // 但没核实过就不能算已核实，下一次路由守卫仍会重试
+      expect(store.sessionVerified).toBe(false)
+      expect(store.restoreFailed).toBe(false)
     })
 
     test('并发调用只探测一次（守卫与在途请求同时触发）', async () => {

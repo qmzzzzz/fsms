@@ -56,6 +56,18 @@ client_max_body_size 1m;
 #   - 10m 共享内存 ≈ 16 万个 IPv4 客户端状态（每状态约 64B），裸 IP 粒度足够公网面。
 limit_req_zone $binary_remote_addr zone=api_perip:10m rate=10r/s;
 
+# ===== 访问日志：只记路径，不记查询串（2026-10-24 审计 finding）=====
+# nginx 默认的 combined 格式含 `$request`，即「方法 + 完整 URI + 协议」——查询串
+# 一并落盘。本系统里查询串可能携带一次性凭据（密码重置令牌、邮件验证 token、
+# 登录票据），它们会被轮转进日志文件并按留存期长期存在，读日志的人即可重放。
+# `$uri` 是归一化后的**路径**，不含 `?args`；排障确需参数时临时加 `$args`，
+# 排查完撤掉（长期开启等于把同一份凭据再抄一遍到磁盘）。
+# 反向代理到后端时后端仍会看到完整 URI，这里只约束「nginx 自己写什么」。
+log_format fsms_no_query '$remote_addr - $remote_user [$time_local] '
+                         '"$request_method $uri $server_protocol" '
+                         '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
+access_log /var/log/nginx/access.log fsms_no_query;
+
 # HTTP -> HTTPS 强制跳转
 server {
     listen 80;
@@ -258,9 +270,12 @@ server {
     #   - proxy_read_timeout：/api 两条入口显式钉住默认 60s（见其块内注释），
     #     其余短请求块沿用同一默认值；socket.io 300s 是僵死连接回收闸（见其块）。
 
-    # ===== Prometheus /metrics（无鉴权端点，必须限制抓取来源） =====
-    # 应用侧该端点不带认证（设计给 Prometheus 抓取），暴露公网等于泄露
-    # QPS/延迟/安全告警计数等运行情报。按实际监控主机/网段调整 allow 列表。
+    # ===== Prometheus /metrics（无 Nginx 层鉴权端点，必须限制抓取来源） =====
+    # 应用侧默认只放行内网/回环来源；但本 Nginx 转发到后端时对端恒为回环，
+    # 故 TRUST_PROXY_HOPS>0 下应用层要求经代理的 /metrics 携带 METRICS_TOKEN：
+    # 抓取方需发送 `Authorization: Bearer $METRICS_TOKEN`，否则一律 401。
+    # 容器网络内 Prometheus 直连 app:3000（shipped prometheus.yml）不受影响。
+    # 按实际监控主机/网段调整 allow 列表。
     location = /metrics {
         allow 127.0.0.1;
         allow 10.0.0.0/8;        # ← 改成实际监控采集网段
@@ -359,7 +374,7 @@ server {
 
     # /health 本身在 protocolCompliance 的 skipPaths 内（Host 校验豁免），
     # 这里仍按同一口径补齐四条：豁免是中间件的默认参数而非契约，且探针的
-    # 来源 IP 同样要进审计。/readyz 刻意不对外（容器健康检查直连 3000）。
+    # 来源 IP 同样要进审计。/readyz 刻意不对外——见下方 `= /readyz` 块。
     location /health {
         # connect/send 超时口径见上方「反向代理头」段落（finding #10）
         proxy_connect_timeout 5s;
@@ -371,10 +386,30 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    # ===== 就绪探针：显式 404，不得落到 SPA 兜底（2026-10-24）=====
+    # 此前本文件只写了「/readyz 刻意不对外」的**注释**，配置上却没有任何对应指令：
+    # /readyz 匹配不到任何 location，落进 location / 的 try_files ⇒ 返回
+    # **200 + SPA 的 index.html**。两种真实伤害：
+    #   1. 假绿探针：外部拨测/云监控若配了这个地址，会永远绿——它实际探的是
+    #      "nginx 能不能返回 index.html"，而不是"MongoDB 可不可达"。健康检查
+    #      永远成功比没有健康检查更坏（编排器永远不会摘流量）。
+    #   2. 承诺与配置相反：注释声称已关闭，部署方据此认为该端点不可达，
+    #      于是也不会去核对它是否真的被关闭。
+    # 为什么是 404 而不是 403：403 等于向扫描器确认"这个路径存在且被保护"，
+    # 与上方 .map/.ts 的处理同口径，不提供存在性信号。
+    # 为什么可以直接拒：容器 HEALTHCHECK 与 compose 探针直连 app:3000，
+    # 不经过本文件（见 Dockerfile 的 HEALTHCHECK 与 docker-compose.yml）。
+    # 若将来确需外部 LB 探 /readyz，**不要删掉本块**——改成 allow 白名单 + proxy_pass
+    # （参考 `= /metrics` 的写法），删掉即回到 200 HTML 的假绿。
+    # 契约由 src/tests/deploy/nginxProxyContract.test.js 把守。
+    location = /readyz {
+        return 404;
+    }
+
     # ===== WebSocket（wss，同源） =====
     # 刻意**不加** limit_req（finding #10 范围说明）：WebSocket/长轮询是长连接语义，
     # 握手后消息复用同一逻辑连接，按请求数计的令牌桶表达不了「连接数」，还会误伤
-    # long-polling 兜底传输；此处的资源闸是应用侧 MAX_CONNECTIONS=1000 与下方
+    # long-polling 兜底传输；此处的资源闸是应用侧 MAX_CONNECTIONS_PER_PROCESS=1000（单进程）与下方
     # 300s 读超时（回收僵死连接），语义各自对位。
     location /socket.io/ {
         proxy_pass http://127.0.0.1:3000;

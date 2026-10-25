@@ -14,7 +14,8 @@ const { withTransaction } = require('../utils/transaction');
 const userPermissionService = require('./userPermissionService');
 const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
-const { escapeRegExp, uniqueIdStrings } = require('../utils/helpers');
+const { uniqueIdStrings } = require('../utils/helpers');
+const { normalizeSearchTerm, substringPattern, prefixPattern } = require('../utils/searchPatterns');
 // A3：email 加密后，用户列表的「按邮箱片段搜索」改走 n-gram 子串盲索引
 const { piiSubstringKeys } = require('../utils/piiCrypto');
 const { DataMasking } = require('../utils/encryption');
@@ -57,7 +58,8 @@ const DETAIL_ROLE_POPULATE = {
 };
 
 /**
- * 管理员读用户响应的手机号口径：明文只在这里存在过一瞬，出去的是 `phoneMasked`。
+ * 管理员读用户响应的 PII 口径：明文只在这里存在过一瞬，出去的是
+ * `phoneMasked` / `emailMasked`。
  *
  * 为什么不沿用仓里已有的形状（`controllers/securityController/account.js:68` 的 my-info 就是
  * `phone: maskPhone(...)`）：my-info 是只读面板，而用户列表的值会**回填编辑表单**
@@ -69,19 +71,29 @@ const DETAIL_ROLE_POPULATE = {
  *      ⇒ 一次"我没动手机号"的保存把号码清空。
  * 改名成 `phoneMasked` 是把"误把展示值当可写字段"变成结构上不可能，而不是靠约定。
  *
+ * email 同规格：更新接口对它是 `if (email !== undefined)`，键缺失才是不修改；
+ * 把脱敏值回填进去会直接撞上 `userRoutes.js:99` 的 `.isEmail()`。
+ *
  * 另一个不能两头各打一次的理由：`DataMasking.maskPhone` **不幂等**——
  * `138****5678` 再打一次得到 `****`（两条锚定正则都不命中，落到兜底分支）。
  * 所以打码点只有这里一个，前端只渲染。
  *
  * 返回 POJO 而非文档对象是刻意的：`toJSON()` 的输出与改造前的响应体逐字段同形
- * （getters 已开），差别只在 phone → phoneMasked；调用方（userController）只读属性
- * 与序列化，不碰文档方法。
+ * （getters 已开），差别只在 phone → phoneMasked、email → emailMasked；
+ * 调用方（userController）只读属性与序列化，不碰文档方法。
  */
 function toMaskedAdminUser(doc) {
   if (!doc) return doc;
   const obj = typeof doc.toJSON === 'function' ? doc.toJSON() : { ...doc };
   obj.phoneMasked = DataMasking.maskPhone(obj.phone);
   delete obj.phone;
+  // maskEmail 对「无 @ / 本地部分为空」的形态按既有契约原样返回——它是展示函数，
+  // 不是 egress 闸门。用户管理响应不能沿用这条例外：库里一旦有历史脏数据，
+  // 原样返回就是整串明文。认不出邮箱形态时按兜底打码。
+  const email = obj.email;
+  const maskedEmail = DataMasking.maskEmail(email);
+  obj.emailMasked = email && maskedEmail === String(email) ? '****' : maskedEmail;
+  delete obj.email;
   return obj;
 }
 
@@ -89,8 +101,8 @@ class UserService {
   async buildListQuery(filters, dataScope) {
     const query = {};
 
-    if (filters.search) {
-      const escapedSearch = escapeRegExp(filters.search.trim());
+    const searchTerm = normalizeSearchTerm(filters.search);
+    if (searchTerm) {
       // realName **暂不加密**——姓名模糊检索是用户管理的日常操作，正则对
       // 密文不成立，加密它等于砍掉这个能力。at-rest 加密当前覆盖 phone 与 email。
       //
@@ -99,15 +111,17 @@ class UserService {
       // 「按邮箱片段找人」会无声消失。改走 emailGrams 子串盲索引：
       // 每行登记自己包含的全部 3-gram HMAC，查询侧切同样粒度求 $all 交集。
       // 判据与已知边界（它给的是**候选超集**而非精确子串）见 piiCrypto.piiSubstringKeys。
+      //
+      // username 是标识符 ⇒ 锚定前缀（可走索引）；realName 是自由文本 ⇒ 子串。
       query.$or = [
-        { username: new RegExp(escapedSearch, 'i') },
-        { realName: new RegExp(escapedSearch, 'i') },
+        { username: prefixPattern(searchTerm) },
+        { realName: substringPattern(searchTerm) },
       ];
       // ⚠️ 长度不足 3 的搜索串切不出 gram，piiSubstringKeys 返回 `[]`；
       // 而 `{ emailGrams: { $all: [] } }` 在 MongoDB 里**匹配全部文档**——
       // 无条件塞进 $or 会让「搜 2 个字符」退化成「返回所有用户」。
       // 故空数组必须走"该分支不参与 $or"，这是本处唯一的正确写法。
-      const emailGrams = piiSubstringKeys(filters.search);
+      const emailGrams = piiSubstringKeys(searchTerm);
       if (emailGrams.length > 0) {
         query.$or.push({ emailGrams: { $all: emailGrams } });
       }
@@ -136,14 +150,20 @@ class UserService {
   }
 
   async listUsers(query, sort, page, limit) {
+    const listQuery = withListBudget(User.find(query))
+      .populate(SIMPLE_ROLE_POPULATE)
+      .select(User.RESPONSE_EXCLUDE_PII_VISIBLE)
+      .sort(sort)
+      .limit(limit)
+      .skip((page - 1) * limit);
+    // username 的唯一索引 username_ci 带大小写不敏感 collation：查询不声明同一
+    // collation 时该索引无法参与排序（会退化成阻塞排序）。仅在按 username 排序时
+    // 声明，避免无谓改变其他排序/过滤的字符比较口径（$regex 仍保留 'i'，语义不变）。
+    if (Object.prototype.hasOwnProperty.call(sort, 'username')) {
+      listQuery.collation(User.USERNAME_COLLATION);
+    }
     const [users, count] = await Promise.all([
-      withListBudget(User.find(query))
-        .populate(SIMPLE_ROLE_POPULATE)
-        .select(User.RESPONSE_EXCLUDE_PHONE_VISIBLE)
-        .sort(sort)
-        .limit(limit)
-        .skip((page - 1) * limit)
-        .then((docs) => docs.map(toMaskedAdminUser)),
+      listQuery.then((docs) => docs.map(toMaskedAdminUser)),
       User.countDocuments(query, listCountOptions()),
     ]);
     return { users, count };
@@ -152,21 +172,21 @@ class UserService {
   async getUserDetail(id) {
     const user = await User.findById(id)
       .populate(DETAIL_ROLE_POPULATE)
-      .select(User.RESPONSE_EXCLUDE_PHONE_VISIBLE);
+      .select(User.RESPONSE_EXCLUDE_PII_VISIBLE);
     return toMaskedAdminUser(user);
   }
 
   async getCreatedUser(id) {
     const user = await User.findById(id)
       .populate(SIMPLE_ROLE_POPULATE)
-      .select(User.RESPONSE_EXCLUDE_PHONE_VISIBLE);
+      .select(User.RESPONSE_EXCLUDE_PII_VISIBLE);
     return toMaskedAdminUser(user);
   }
 
   async getUpdatedUser(id) {
     const user = await User.findById(id)
       .populate(SIMPLE_ROLE_POPULATE)
-      .select(User.RESPONSE_EXCLUDE_PHONE_VISIBLE);
+      .select(User.RESPONSE_EXCLUDE_PII_VISIBLE);
     return toMaskedAdminUser(user);
   }
 
@@ -197,8 +217,24 @@ class UserService {
     return user.save();
   }
 
-  updateRoles(userId, roles) {
-    return User.findByIdAndUpdate(userId, { $set: { roles } });
+  /**
+   * 角色写入（L-06）：带上调用方校验时看到的 roles 快照做条件更新。
+   * 无快照时保持旧语义（无条件写），既有调用方与测试不受影响。
+   *
+   * `$inc __v` 不是装饰：updateUser / setUserLockStatus 走的是「先按快照做层级/
+   * 超管判定，再 user.save()」，而 User schema 开了 optimisticConcurrency，
+   * save() 的过滤条件正是载入时的 __v。update query 不会自动推进版本号，
+   * 不在这里显式递增，并发改掉目标角色后那次 save() 仍会命中 ⇒ 用旧角色集
+   * 得出的授权结论被继续执行（提权/越权改状态）。推进 __v 让后到的 save()
+   * 抛 VersionError，由 errorHandler 映射为「刷新重试」。
+   * @returns {Promise<object|null>} null = 角色已被并发修改，控制器应回 409
+   */
+  updateRoles(userId, roles, expectedRoles) {
+    const update = { $set: { roles }, $inc: { __v: 1 } };
+    if (!expectedRoles) {
+      return User.findByIdAndUpdate(userId, update);
+    }
+    return User.findOneAndUpdate({ _id: userId, roles: expectedRoles }, update, { new: true });
   }
 
   getPermissions(userId) {
@@ -209,8 +245,16 @@ class UserService {
     return Role.findOne({ code });
   }
 
+  /**
+   * 按 id 取角色。activeOnly 供授予路径使用（L-05）：停用角色不得再被分配，
+   * 否则角色恢复启用时，早已挂在其上的账户会静默获得权限。
+   * 读路径/层级判定保持默认（不过滤），否则目标用户持有一个停用的高等级角色时，
+   * 保护判定会按其"实际生效"的低层级放行，反而放宽了对象保护。
+   */
   findRolesByIds(ids, select = 'level code isBuiltIn', options = {}) {
-    let query = Role.find({ _id: { $in: ids } }).select(select);
+    const filter = { _id: { $in: ids } };
+    if (options.activeOnly) filter.status = 'active';
+    let query = Role.find(filter).select(select);
     if (options.populate) query = query.populate(options.populate);
     if (options.lean) query = query.lean();
     return query;
@@ -291,11 +335,13 @@ class UserService {
    *
    * @param {Array} userIds 被删用户 id
    * @param {object|null} session 事务会话（standalone 降级时为 null）
+   * @param {object} [options] { remark } 过程记录文案；账户被停用/锁定而非删除时由调用方覆盖
    */
-  async releaseOpenAssignments(userIds, session = null) {
+  async releaseOpenAssignments(userIds, session = null, options = {}) {
     if (!userIds || userIds.length === 0) return;
     const opts = session ? { session } : {};
     const now = new Date();
+    const remark = options.remark || '处理人账户已删除，工单退回待指派池';
     // 报警：处理中的退回待指派池并留痕。只认 processing ——
     // 全仓唯一的 handler 写入点是 AlarmService.dispatchAlarm，它把 handler 与
     // status:'processing' 写在同一条原子更新里，于是"pending 却挂着 handler"
@@ -309,7 +355,7 @@ class UserService {
             time: now,
             action: 'handler_released',
             operator: null,
-            remark: '处理人账户已删除，工单退回待指派池',
+            remark,
           },
         },
       },
@@ -324,20 +370,63 @@ class UserService {
     );
   }
 
-  async deleteById(id) {
+  /**
+   * 删除用户（M-01）：expected 是控制器做范围/层级/超管判定时读到的状态快照。
+   * 条件删除保证"判定所依据的那份状态"就是"被删除的那份状态"——否则目标在
+   * 判定之后被提权/改部门，删除仍会按旧结论执行。
+   * @param {object} [expected] 形如 { roles, department, createdBy } 的过滤片段
+   * @returns {Promise<object|null>} null = 状态已变，未删除任何数据
+   */
+  async deleteById(id, expected) {
     let deleted = null;
     await withTransaction(async (session) => {
       const opts = session ? { session } : {};
-      deleted = await User.findByIdAndDelete(id, opts);
-      await this.releaseOpenAssignments([id], session);
+      const filter = expected ? { _id: id, ...expected } : { _id: id };
+      deleted = expected
+        ? await User.findOneAndDelete(filter, opts)
+        : await User.findByIdAndDelete(id, opts);
+      if (!deleted) return;
+      await this.releaseOpenAssignments([deleted._id], session);
     });
     return deleted;
   }
 
-  async deleteMany(filter) {
+  /**
+   * 批量删除的快照查询：findBatchUsers 的 roles 已被 populate 成角色文档，
+   * 不能直接当条件删除的过滤值（数组等值比较需要原始 ObjectId 列表）。
+   */
+  findUserSnapshots(ids) {
+    if (!ids || ids.length === 0) return Promise.resolve([]);
+    return User.find({ _id: { $in: ids } })
+      .select('roles department createdBy')
+      .lean();
+  }
+
+  /**
+   * 批量删除（M-01）：expectedByTarget 为 Map<id, 快照>。逐个条件删除，
+   * 任一目标状态已变即抛错中止事务（副本集下整批回滚），不留下"删了一半"。
+   * @param {object} filter 无条件删除时的过滤条件
+   * @param {Map<string, object>} [expectedByTarget]
+   */
+  async deleteMany(filter, expectedByTarget) {
     let result = null;
     await withTransaction(async (session) => {
       const opts = session ? { session } : {};
+      if (expectedByTarget) {
+        const ids = [];
+        for (const [id, snapshot] of expectedByTarget) {
+          const deleted = await User.findOneAndDelete({ _id: id, ...snapshot }, opts);
+          if (!deleted) {
+            const err = new Error('批量删除中止：目标用户状态已变更');
+            err.code = 'USER_STATE_CONFLICT';
+            throw err;
+          }
+          ids.push(deleted._id);
+        }
+        result = { deletedCount: ids.length, acknowledged: true };
+        await this.releaseOpenAssignments(ids, session);
+        return;
+      }
       // 先取 id：删除之后就再也不知道曾指向谁（级联必须以 id 列表为准）
       const affected = await User.find(filter, '_id').lean();
       const ids = affected.map((doc) => doc._id);

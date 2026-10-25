@@ -1,6 +1,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { reauthHeaders } = require('../helpers/reauthTicket');
 
 describe('audit log data scope', () => {
   let app;
@@ -141,7 +142,8 @@ describe('audit log data scope', () => {
     const token = makeToken(users.departmentOperator);
     const res = await request(app)
       .get('/api/security/audit-logs?action=login_success&limit=20')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .set(reauthHeaders(token));
 
     expect(res.status).toBe(200);
     const usernames = res.body.data.data.map((item) => item.username);
@@ -155,7 +157,8 @@ describe('audit log data scope', () => {
     const token = makeToken(users.selfOperator);
     const res = await request(app)
       .get('/api/security/audit-logs?action=login_success&limit=20')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .set(reauthHeaders(token));
 
     expect(res.status).toBe(200);
     expect(res.body.data.data.map((item) => item.username)).toEqual([users.selfOperator.username]);
@@ -166,7 +169,8 @@ describe('audit log data scope', () => {
     const token = makeToken(users.guestOperator);
     const res = await request(app)
       .get('/api/security/audit-logs?action=login_success&limit=20')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .set(reauthHeaders(token));
 
     // 访客档（level < LEVEL_SELF）数据范围是 {type:'none'}：不可用即 403，
     // 不再给 HTTP 200 + 空页。#12 选项①——空页让调用方分不清「今天没有日志」
@@ -182,7 +186,8 @@ describe('audit log data scope', () => {
     const token = makeToken(users.departmentOperator);
     const res = await request(app)
       .get('/api/security/audit-logs/export?action=login_success')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .set(reauthHeaders(token));
 
     expect(res.status).toBe(200);
     expect(res.text).toContain(users.actorA.username);

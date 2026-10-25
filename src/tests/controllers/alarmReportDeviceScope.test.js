@@ -103,18 +103,35 @@ describe('reportAlarm 的 deviceId 存在性与数据范围闸', () => {
 
   const alarmCount = () => FireAlarm.countDocuments({ description: '测试上报' });
 
-  test('范围内设备可上报：201 且 deviceId 落库', async () => {
+  test('范围内设备可上报：201 且 deviceId 落库，楼栋自动继承设备楼栋', async () => {
     const res = await report(tokenDept, { deviceId: String(devA._id) });
     expect(res.status).toBe(201);
     expect(String(res.body.data.deviceId)).toBe(String(devA._id));
+    // M-03：楼栋是报警的部门归属字段，设备报警必须继承设备楼栋，
+    // 否则这条报警在部门档的列表/统计/导出里整体不可见
+    expect(res.body.data.location.building).toBe(DEPT_A);
   });
 
-  test('不传 deviceId 不受影响（闸只管可选字段）', async () => {
+  test('location 各段入库前去除首尾空白（范围闸与导出拼接看同一文本）', async () => {
+    // 修复前 building 原样入库：'  ZZQAR-A  ' 与部门字段不相等会被范围闸判 403，
+    // 而即便绕过，导出拼接出的单元格也可能以空白/换行开头。
+    const res = await report(tokenDept, {
+      location: { building: `  ${DEPT_A}  `, floor: ' 3 ', room: ' 301 ' },
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.data.location).toMatchObject({
+      building: DEPT_A,
+      floor: '3',
+      room: '301',
+    });
+  });
+
+  test('手工报警未填楼栋：400 ALARM_BUILDING_REQUIRED，且不留下隐形工单', async () => {
     const before = await alarmCount();
     const res = await report(tokenDept, {});
-    expect(res.status).toBe(201);
-    expect(res.body.data.deviceId).toBeUndefined();
-    expect(await alarmCount()).toBe(before + 1);
+    expect(res.status).toBe(400);
+    expect(res.body.errors.errorCode).toBe('ALARM_BUILDING_REQUIRED');
+    expect(await alarmCount()).toBe(before);
   });
 
   test('不存在的设备：DEVICE_NOT_FOUND，且不留下一条悬空报警', async () => {
@@ -221,8 +238,11 @@ describe('reportAlarm 的 deviceId 存在性与数据范围闸', () => {
     expect(res.status).toBe(201);
   });
 
-  test('未填楼栋不受影响（闸只管本次真的写了值的字段）', async () => {
+  test('手工报警只填楼层不填楼栋：同样 400（楼栋才是部门归属字段）', async () => {
+    const before = await alarmCount();
     const res = await report(tokenDept, { location: { floor: '2F' } });
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(400);
+    expect(res.body.errors.errorCode).toBe('ALARM_BUILDING_REQUIRED');
+    expect(await alarmCount()).toBe(before);
   });
 });

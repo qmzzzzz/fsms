@@ -146,8 +146,7 @@ function enforceBufferLimit() {
   buffer.splice(0, overflow);
   noteDropped(overflow, 'buffer_overflow');
   logger.error(
-    `审计缓冲超过硬上限 ${BUFFER_HARD_LIMIT}，已丢弃最旧 ${overflow} 条（累计 ${droppedCount} 条）。` +
-      '数据库可能长时间不可用，请立即排查；这些记录的 WAL 行仍在磁盘上'
+    `审计缓冲超过硬上限 ${BUFFER_HARD_LIMIT}，已丢弃最旧 ${overflow} 条（累计 ${droppedCount} 条）。数据库可能长时间不可用，请立即排查；这些记录的 WAL 行仍在磁盘上`
   );
   return overflow;
 }
@@ -298,6 +297,12 @@ function handleFlushFailure(err, docs) {
  */
 async function flush() {
   if (flushing || buffer.length === 0) return;
+  // 僵尸冻结窗口内不取批次：否则批次被拿在手里时僵尸恰好落库并撤回，撤回会漏掉它们，
+  // 解冻后这批"已落库的旧对象"会与真正的新记录同批重算链，新记录链接到幻影 hash。
+  if (require('../utils/auditChain').isChainFrozen()) {
+    logger.debug('审计链处于僵尸写入冻结窗口：本轮 flush 跳过，记录留在缓冲与 WAL');
+    return;
+  }
   flushing = true;
   const batch = buffer.splice(0, buffer.length);
   // 这批文档此刻**既不在缓冲也未落库**：关停排空必须把它们计入 residual，
@@ -430,8 +435,9 @@ async function flush() {
 /**
  * 压入一条审计记录；缓冲满额立即触发异步落库
  * @param {object} doc AuditLog 文档
+ * @param {boolean} walAppended 调用方已完成**可等待**的 WAL 追加（outbox 持久化路径）
  */
-function push(doc) {
+function push(doc, walAppended = false) {
   // 分配 WAL 序号（已有则复用——重放/回退重试的文档必须保留原序号，
   // 否则「毒批丢弃后按序号移除对应 WAL 行」匹配不上）。序号分配逻辑在 wal 模块。
   wal.assignSeq(doc);
@@ -439,7 +445,7 @@ function push(doc) {
   // 行必须以 \n 结尾：readWalLines/walTrimLines/enforceWalLimit 均按行解析，
   // 缺行终止符会让多次 push 连成单个巨型"行"，崩溃重放 JSON.parse 失败、
   // 按行裁剪/超限丢弃全部退化（R-6 实施时由测试暴露的既有缺陷，一并修复）
-  wal.appendLine(JSON.stringify(doc) + '\n');
+  if (!walAppended) wal.appendLine(JSON.stringify(doc) + '\n');
   // 容量保护：DB 长时间不可用时缓冲会无界增长
   enforceBufferLimit();
   if (buffer.length >= BUFFER_LIMIT) {

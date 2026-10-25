@@ -15,7 +15,7 @@ const { checkUnusualTime } = require('../securityAlert');
 const canaryWatch = require('../canaryWatch');
 const AuditLog = require('../../models/AuditLog');
 // 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
-const { onAuditWriteFailure } = require('../../utils/auditWriteFailure');
+const { onAuditWriteFailure, awaitAuditWrite } = require('../../utils/auditWriteFailure');
 const captchaService = require('../captchaService');
 const { decryptLoginCredential } = require('../../utils/loginCipher');
 // A3：email 已 at-rest 加密，查重不能再比对明文列（随机 IV 下相等性不成立），
@@ -25,6 +25,7 @@ const { piiSearchKey } = require('../../utils/piiCrypto');
 const sessionService = require('../sessionService');
 const { generateToken, generateRefreshToken } = require('../tokenService');
 const statsCache = require('../statsCache');
+const initialPasswordFile = require('../initialPasswordFile');
 
 /**
  * 用户注册（业务层）
@@ -49,7 +50,11 @@ async function registerUser(body, ctx = {}) {
     return { outcome: 'CAPTCHA_INVALID' };
   }
 
-  const { username, email, realName, phone, department } = body;
+  // department 刻意不解构：它是数据范围的唯一来源（middleware/rbac.js 以
+  // user.department 构造部门域 dataScope），公开注册若能自带部门，任何访客
+  // 都能把新账号投放到目标部门，借部门隔离边界读取该部门数据。
+  // 部门归属只能由管理员经 userController 创建/更新接口写入。
+  const { username, email, realName, phone } = body;
 
   // 哨兵用户名（canary）闸：系统保留名不经注册进入用户集合——幽灵名的价值
   // 完全建立在"不可能是真账号"上，注册通过即把哨兵变成普通用户（启动期
@@ -107,7 +112,6 @@ async function registerUser(body, ctx = {}) {
     password,
     realName,
     phone,
-    department,
     roles: roleIds,
   });
 
@@ -156,8 +160,11 @@ async function registerUser(body, ctx = {}) {
  *
  * 降级方向是"少给一份可吊销性"而不是"拒绝这次登录/注册"，理由见
  * issueLoginSession 的 JSDoc；`sid` 返回 null 让调用方能看得见降级发生了。
+ * 会话注册失败时**不签发 refresh**（refreshToken 为 null）：无 sid 的刷新令牌
+ * 无法被设备级吊销终止，还会每次轮换自我续期。只发 access 时这次登录最长
+ * 活过一个 access TTL，之后自然要求重新登录。
  *
- * @returns {Promise<{token:string, refreshToken:string, sessionId:string, sid:string|null, sessionRegistered:boolean}>}
+ * @returns {Promise<{token:string, refreshToken:string|null, sessionId:string, sid:string|null, sessionRegistered:boolean}>}
  */
 async function issueRevocableTokenPair({ user, roles, req }) {
   // 同一个 UUID 同时作为审计用的 sessionId 与会话表的 sid：两者语义一致（都标识本次
@@ -169,7 +176,7 @@ async function issueRevocableTokenPair({ user, roles, req }) {
     await sessionService.createSession({ userId: user._id, req, sid: sessionId });
     sessionRegistered = true;
   } catch (e) {
-    logger.error(`会话注册失败（本次签发降级为无设备级吊销能力）：${e.message}`, {
+    logger.error(`会话注册失败（本次签发降级为仅 access）：${e.message}`, {
       userId: String(user._id),
     });
   }
@@ -185,7 +192,7 @@ async function issueRevocableTokenPair({ user, roles, req }) {
       sessionId,
       sid
     ),
-    refreshToken: generateRefreshToken(user._id, tokenVersion, sid),
+    refreshToken: sid ? generateRefreshToken(user._id, tokenVersion, sid) : null,
     sessionId,
     sid,
     sessionRegistered,
@@ -253,9 +260,15 @@ async function issueLoginSession(user, ctx, username) {
 
   logger.info('用户登录成功', { username });
 
-  // 操作溯源：记录登录成功
-  AuditLog.recordLogin(user._id, username, ip, true, userAgent, { sessionId, fingerprint }).catch(
-    onAuditWriteFailure('login_success_audit', { user: { username } })
+  // 默认管理员已成功登录 ⇒ 初始口令文件完成使命（一次性凭据，不再留在磁盘上）
+  initialPasswordFile.consume(user.username, '首次登录');
+
+  // 操作溯源：记录登录成功。必须在下发令牌前等到落库（有上限）——fire-and-forget
+  // 会让响应先于审计发出，进程随即重启时「谁登录成功过」永久缺失，而客户端已拿到令牌
+  await awaitAuditWrite(
+    AuditLog.recordLogin(user._id, username, ip, true, userAgent, { sessionId, fingerprint }),
+    'login_success_audit',
+    { user: { username } }
   );
 
   return {
