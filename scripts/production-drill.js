@@ -245,17 +245,16 @@ async function assertHostGateArmed() {
   const hasSample = /http_requests_total\{[^}]*route="\/api\/auth/.test(scraped.text);
   if (scraped.status !== 200 || !hasSample) {
     throw new Error(
-      `Host=${FOREIGN_HOST} 的抓取未拿到已采到的请求样本（status=${scraped.status}）：` +
-        '生产 ALLOWED_HOSTS 只填对外域名时监控链路恒红'
+      `Host=${FOREIGN_HOST} 抓取未拿到样本（status=${scraped.status}）：监控链路会恒红`
     );
   }
   const blocked = await req('GET', '/api/auth/me', { headers: { Host: FOREIGN_HOST } });
   // 判据要的是 400 而不是 401：401 说明请求穿过了 Host 闸门、死在认证，即闸门没武装
   const code = blocked.body && blocked.body.errors && blocked.body.errors.errorCode;
   if (blocked.status !== 400 || code !== 'HOST_HEADER_INVALID') {
+    const got = JSON.stringify(blocked.body).slice(0, 120);
     throw new Error(
-      `Host=${FOREIGN_HOST} 的 /api 请求未判 HOST_HEADER_INVALID 400，` +
-        `实得 ${blocked.status} ${JSON.stringify(blocked.body).slice(0, 120)}`
+      `Host=${FOREIGN_HOST} /api 未判 400 HOST_HEADER_INVALID：实得 ${blocked.status} ${got}`
     );
   }
   // 第三格：豁免只免 Host 这一项。把 /metrics 并进 skipPaths（= 免掉整条协议校验，
@@ -265,12 +264,8 @@ async function assertHostGateArmed() {
   const traceCode = trace.body && trace.body.errors && trace.body.errors.errorCode;
   if (trace.status !== 405 || traceCode !== 'HTTP_METHOD_UNSUPPORTED') {
     throw new Error(
-      'TRACE /metrics 实得 ' +
-        trace.status +
-        ' ' +
-        String(traceCode) +
-        '（期望 405 HTTP_METHOD_UNSUPPORTED）：/metrics 逃过了方法白名单，' +
-        '说明它被并进了 skipPaths 而不是只免 Host 一项'
+      `TRACE /metrics 实得 ${trace.status} ${traceCode}（期望 405 HTTP_METHOD_UNSUPPORTED）：` +
+        '/metrics 逃过了方法白名单，说明被并进 skipPaths 而非只免 Host'
     );
   }
 }
@@ -291,13 +286,8 @@ async function main() {
   console.log('[DRILL] A 阶段：弱密钥拒绝（Worker 隔离）…');
   const neg = await runNegativePhase();
   await step('A. 弱密钥被生产校验拒绝（exit 1 + 明确错误信息）', async () => {
-    if (neg.code !== 1) {
-      throw new Error(
-        '期望 exit 1，实得 ' +
-          neg.code +
-          (neg.errText.includes('NEGATIVE-PHASE-NOT-REJECTED') ? '（弱密钥未被拦截！）' : '')
-      );
-    }
+    const hint = neg.errText.includes('NEGATIVE-PHASE-NOT-REJECTED') ? '（弱密钥未被拦截！）' : '';
+    if (neg.code !== 1) throw new Error('期望 exit 1，实得 ' + neg.code + hint);
     if (!neg.errText.includes('JWT_SECRET')) {
       throw new Error('错误信息未包含 JWT_SECRET 说明，实际输出截断：' + neg.errText.slice(0, 200));
     }
@@ -375,22 +365,18 @@ async function main() {
   // 登录只经 httpOnly Cookie 下发令牌（credentials.js 登录成功分支不回传 token），
   // 因此演练必须像浏览器一样把 Set-Cookie 回放；从响应体取 token 必然 undefined。
   let authCookie = null;
-  await step(
-    'B6. POST /api/auth/login（admin + 初始密码；Cookie 带 Secure/HttpOnly）',
-    async () => {
-      const r = await req('POST', '/api/auth/login', {
-        body: { username: 'admin', password: PASSWORD },
-      });
-      if (r.status !== 200 || !r.body?.data?.user) {
-        throw new Error('status=' + r.status + ' ' + JSON.stringify(r.body).slice(0, 120));
-      }
-      authCookie = loginCookieOf(r);
+  await step('B6. POST /api/auth/login（Cookie 带 Secure/HttpOnly）', async () => {
+    const r = await req('POST', '/api/auth/login', {
+      body: { username: 'admin', password: PASSWORD },
+    });
+    if (r.status !== 200 || !r.body?.data?.user) {
+      throw new Error('status=' + r.status + ' ' + JSON.stringify(r.body).slice(0, 120));
     }
-  );
+    authCookie = loginCookieOf(r);
+  });
 
   await step('B7. GET /api/auth/me 200（会话有效）', async () => {
     const r = await req('GET', '/api/auth/me', { cookie: authCookie });
-    if (!authCookie) throw new Error('B6 未取得登录 Cookie');
     if (r.status !== 200 || !r.body?.data?.user) throw new Error('status=' + r.status);
   });
 
@@ -401,10 +387,7 @@ async function main() {
     if (me.status !== 401) throw new Error('旧令牌未吊销，me status=' + me.status);
   });
 
-  await step(
-    'B9. Host 闸门反向对照：抓取 Host 下 /metrics 放行、/api 仍拦、只免 Host 一项',
-    assertHostGateArmed
-  );
+  await step('B9. Host 闸门反向对照：/metrics 放行、/api 拦、只免 Host', assertHostGateArmed);
 
   assertLibraryErrorClean();
 
