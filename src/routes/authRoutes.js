@@ -425,7 +425,7 @@ router.post(
 // 它自己 `typeof req.body.mfaCode === 'string' ? trim() : ''` + `/^\d{6}$/` 判定并返回
 // **字段专属**的 MFA_CODE_FORMAT（前端 web-admin/src/utils/api.js:56 有 i18n 映射）。
 // 补 consumeValidation() 会把专属码吃成通用 VALIDATION_FAILED，并打红
-// authRest.test.js:228 / mfaControllerOrchestration.test.js:120。（`trim()` 仍会执行。）
+// authRest.test.js:247 / mfaControllerOrchestration.test.js:120。（`trim()` 仍会执行。）
 router.post(
   '/mfa/enable',
   authenticate,
