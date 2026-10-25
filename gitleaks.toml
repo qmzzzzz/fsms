@@ -1,0 +1,8 @@
+# gitleaks-action 会自动读取仓库根部的 gitleaks.toml（无点号）。
+# 只扩展默认规则并放行测试夹具里的固定假 token，不放宽任何真实凭据的检测。
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "测试夹具中的假 webhook token（dingtalk / 企业微信），非真实凭据"
+regexes = ['''0f1e2d3c4b5a6978''']

@@ -4,6 +4,6 @@
   "canonical": "json-sort-keys-compact-utf8",
   "locks": {
     "package-lock.json": "f8cbf9203277332cba91f8f567f2d2cfc89f014f17611b491df9d82fc659dcc1",
-    "web-admin/package-lock.json": "2d6f7f0c62e208cb79f87fa9d8d2229f1de9ce16f9be81d4145c93b28fa90493"
+    "web-admin/package-lock.json": "9cfa83da1e1b2012e38a2723b0dcb5cc5ae41fd3c822bfa567a666c86c13f9d1"
   }
 }
