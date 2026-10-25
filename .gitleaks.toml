@@ -1,4 +1,5 @@
-# gitleaks-action 会自动读取仓库根部的 gitleaks.toml（无点号）。
+# gitleaks 只自动读取 `.gitleaks.toml`（带点号）；无点号的文件会被静默忽略，
+# 门禁看起来配好了、实际仍在用默认规则（2026-10-25 CI 实证）。
 # 只扩展默认规则并放行测试夹具里的固定假 token，不放宽任何真实凭据的检测。
 [extend]
 useDefault = true

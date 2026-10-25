@@ -6,7 +6,7 @@
  */
 
 const { test, expect } = require('@playwright/test');
-const { loginViaUI, expectLoggedIn } = require('./helpers/auth');
+const { loginViaUI, expectLoggedIn, passStepUp } = require('./helpers/auth');
 
 const USER = process.env.E2E_USER;
 const PASS = process.env.E2E_PASS;
@@ -48,6 +48,8 @@ test('角色页可达且权限树渲染（需要相应权限，403 时跳过）'
 
 test('审计日志可追溯到本次登录动作', async ({ page }) => {
   await page.goto('/audit-logs');
+  // 审计读取需要短期票据：先过「验证身份」再等表格，否则只会在弹层背后等 15 秒
+  await passStepUp(page, PASS);
   const table = page.locator('.el-table');
   const forbidden = page.getByText(/无权|403|没有权限/);
   await Promise.race([

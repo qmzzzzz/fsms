@@ -21,4 +21,22 @@ async function expectLoggedIn(page) {
   await page.waitForURL(/\/dashboard(?:\?.*)?$/, { timeout: 20_000 });
 }
 
-module.exports = { loginViaUI, expectLoggedIn };
+/**
+ * 通过敏感读取的 step-up 二次验证（P3-2）。
+ *
+ * 审计/告警等页面在没有短期票据时会先弹「验证身份」，填当前口令换取票据后才拉数据。
+ * 账号无对应权限或已有票据时不会弹层，直接返回即可（后续断言自行处理 403/表格）。
+ */
+async function passStepUp(page, password) {
+  const dialog = page.locator('.el-dialog').filter({ hasText: '验证身份' });
+  const appeared = await dialog
+    .waitFor({ state: 'visible', timeout: 5_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!appeared) return;
+  await dialog.locator('input[type="password"]').fill(password);
+  await dialog.getByRole('button', { name: /^确\s*定$/ }).click();
+  await dialog.waitFor({ state: 'hidden', timeout: 20_000 });
+}
+
+module.exports = { loginViaUI, expectLoggedIn, passStepUp };

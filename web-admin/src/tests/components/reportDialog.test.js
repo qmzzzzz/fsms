@@ -215,7 +215,12 @@ describe('ReportDialog 对象候选与提交载荷', () => {
     expect(targetsApi).toHaveBeenLastCalledWith({ type: 'user', keyword: '' })
 
     click(recordSelectWrapper())
-    await waitReal(() => dropdownItems().length >= 2, '候选展开')
+    // 必须等**候选本身**出现：类型下拉的浮层在切换后还会短暂保持可见，
+    // 只判「有 ≥2 个选项」会被它的 4 个类型项提前满足，断言随即落到错误浮层上。
+    await waitReal(
+      () => dropdownItems().some((el) => el.textContent.trim() === '张三（zhangsan）'),
+      '候选展开'
+    )
     const labels = dropdownItems().map((el) => el.textContent.trim())
     expect(labels).toContain('张三（zhangsan）')
     expect(labels.some((l) => l.includes('5f2b8c9d1e4a3b6c7d8e9f01'))).toBe(false)
