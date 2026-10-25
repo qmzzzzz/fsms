@@ -51,6 +51,9 @@ describe('文件级乱序 sequencer', () => {
 
   test('同一 seed 可复现，且不同于默认顺序', () => {
     const sizes = Array.from({ length: 24 }, (_, index) => 100 - index * 3);
+    // CI 自身就带 JEST_FILE_SEED；不先清掉的话「默认顺序」会按同一个 seed 洗一遍，
+    // 与 first 恒等——这条判据在 seed=20260917 的那一轮里正是这样变红的。
+    delete process.env[seedEnv];
     const defaultOrder = new Sequencer({}).sort(fakeTests(sizes)).map((test) => test.path);
 
     process.env[seedEnv] = '20260917';

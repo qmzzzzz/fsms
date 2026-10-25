@@ -21,8 +21,8 @@ describe('安全管理深覆盖（批次 C）', () => {
   let AuditLog;
   let superToken; // 内置超管操作者
   let superUserId;
-  let lowToken; // 低层级用户（被操作对象）
   let lowUserId;
+  let selfToken; // 本人敏感信息查看专用用户
   let chgToken; // 改密专用用户
   let chgUserId;
   let victimId; // MFA 待重置对象
@@ -75,16 +75,24 @@ describe('安全管理深覆盖（批次 C）', () => {
       password: PASSWORD,
     });
     lowUserId = String(lowUser._id);
-    lowToken = jwt.sign(
-      { userId: lowUserId, username: lowUser.username, tokenVersion: 0 },
+
+    // 本人敏感信息查看专用用户（顺序无关）：lock/unlock 用例会吊销被操作账号的全部
+    // 会话（invalidateUserTokens 递增 tokenVersion），与 lowUser 共用会让 #9 的
+    // lowToken 在随机顺序下先失效 → 401 假红。
+    const selfUser = await User.create({
+      username: `sdself${stamp}`,
+      email: `sdself${stamp}@example.com`,
+      password: PASSWORD,
+    });
+    selfToken = jwt.sign(
+      { userId: String(selfUser._id), username: selfUser.username, tokenVersion: 0 },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
 
     // 改密专用用户（顺序无关）：改密会写 passwordChangedAt 并递增 tokenVersion
-    // （invalidateUserTokens 全量吊销）。若与 lowUser 共用账号，#10「强化改密」先跑时
-    // #9「本人敏感信息查看」持有的 lowToken 会被连带吊销 → 401 假红。
-    // 凭据状态属账号私有，改密用例自建账号，不向其他用例外溢。
+    // （invalidateUserTokens 全量吊销），不能与被 lock/unlock 用例吊销会话的
+    // lowUser 共用账号。凭据状态属账号私有，用例自建账号，不向其他用例外溢。
     const chgUser = await User.create({
       username: `sdchg${stamp}`,
       email: `sdchg${stamp}@example.com`,
@@ -112,9 +120,9 @@ describe('安全管理深覆盖（批次 C）', () => {
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
-      await User.deleteMany({ username: new RegExp(`^sd(super|low|victim|chg)${stamp}$`) }).catch(
-        () => {}
-      );
+      await User.deleteMany({
+        username: new RegExp(`^sd(super|low|self|victim|chg)${stamp}$`),
+      }).catch(() => {});
       await IPBlacklist.deleteMany({ ip: new RegExp(`^203\\.0\\.113\\.`) }).catch(() => {});
       await IPBlacklist.deleteMany({ ip: '0.0.0.0/0' }).catch(() => {});
       await mongoose.connection.close();
@@ -182,18 +190,18 @@ describe('安全管理深覆盖（批次 C）', () => {
   });
 
   test('#9 普通用户（无 system:read）经二次验证可查看本人敏感信息；查看他人被拒', async () => {
-    // 本人：lowToken 无 system:read，但查的是自己 → 免鉴权放行 → requireReAuthentication 通过后 200
+    // 本人：selfToken 无 system:read，但查的是自己 → 免鉴权放行 → requireReAuthentication 通过后 200
     const selfOk = await request(app)
       .post('/api/security/view-sensitive')
-      .set('Authorization', `Bearer ${lowToken}`)
+      .set('Authorization', `Bearer ${selfToken}`)
       .send({ dataType: 'email', currentPassword: PASSWORD });
     expect(selfOk.status).toBe(200);
-    expect(selfOk.body.data.full).toBe(`sdlow${stamp}@example.com`);
+    expect(selfOk.body.data.full).toBe(`sdself${stamp}@example.com`);
 
-    // 他人：lowToken 查 victim → 需 system:read → 403
+    // 他人：selfToken 查 victim → 需 system:read → 403
     const otherForbidden = await request(app)
       .post('/api/security/view-sensitive')
-      .set('Authorization', `Bearer ${lowToken}`)
+      .set('Authorization', `Bearer ${selfToken}`)
       .send({ dataType: 'email', targetUserId: victimId, currentPassword: PASSWORD });
     expect(otherForbidden.status).toBe(403);
   });

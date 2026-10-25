@@ -169,6 +169,9 @@ describe('securityController.viewSensitiveData 数据范围分支', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockFindByIdQueue = [];
+    // clearAllMocks 只清调用记录、不清 mockResolvedValue：上一 describe 结尾留下的
+    // `allowed:false` 会在随机顺序下漏进本组，把「层级足够」的用例顶成 403。
+    rbac.assertRecordInScope.mockResolvedValue({ allowed: true });
   });
 
   const reqOf = (body) => ({

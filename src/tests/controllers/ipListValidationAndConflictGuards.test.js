@@ -342,24 +342,34 @@ describe('ipListController 分支补齐', () => {
     const fullId = full.body?.data?._id || full.body?.data?.id;
     if (fullId) createdIds.push(fullId);
 
-    const res = await secDel(`/api/security/ip-list/${fullId}`);
-    expect(res.status).toBe(403);
-    expect(res.body.errors.errorCode).toBe('FULL_RANGE_FORBIDDEN');
-    // 删除侧的对称约束同样要留高危痕迹：这条记录与添加侧共用 riskFactors 前缀，
-    // 只在后缀上区分（removal），写错一个词 SIEM 侧就把"拆防线"当成"加防线未遂"。
-    const audit = await findEscalationAudit('DELETE', { 'body.ip': '0.0.0.0/0' });
-    expect(audit).not.toBeNull();
-    expect({
-      riskLevel: audit.riskLevel,
-      riskFactors: audit.riskFactors,
-      success: audit.success,
-      path: audit.path,
-    }).toEqual({
-      riskLevel: 'critical',
-      riskFactors: ['full_range_cidr_removal_attempt'],
-      success: false,
-      path: `/api/security/ip-list/${fullId}`,
-    });
+    try {
+      const res = await secDel(`/api/security/ip-list/${fullId}`);
+      expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('FULL_RANGE_FORBIDDEN');
+      // 删除侧的对称约束同样要留高危痕迹：这条记录与添加侧共用 riskFactors 前缀，
+      // 只在后缀上区分（removal），写错一个词 SIEM 侧就把"拆防线"当成"加防线未遂"。
+      const audit = await findEscalationAudit('DELETE', { 'body.ip': '0.0.0.0/0' });
+      expect(audit).not.toBeNull();
+      expect({
+        riskLevel: audit.riskLevel,
+        riskFactors: audit.riskFactors,
+        success: audit.success,
+        path: audit.path,
+      }).toEqual({
+        riskLevel: 'critical',
+        riskFactors: ['full_range_cidr_removal_attempt'],
+        success: false,
+        path: `/api/security/ip-list/${fullId}`,
+      });
+    } finally {
+      // 前置的全网段黑名单必须收回：留到后续用例会把「加黑被白名单覆盖 → 400」
+      // 的并集判据提前顶成 403（随机顺序实测）。超管删除不受全网段守卫限制。
+      if (fullId) {
+        await request(app)
+          .delete(`/api/security/ip-list/${fullId}`)
+          .set('Authorization', `Bearer ${superToken}`);
+      }
+    }
   });
 
   /**

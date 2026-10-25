@@ -31,6 +31,22 @@ describe('认证剩余分支（批次 B2）', () => {
     return pair ? decodeURIComponent(pair.split('=').slice(1).join('=')) : null;
   };
 
+  /**
+   * MFA 状态归零：TOTP 水位（mfaLastCounter）是账号级持久状态，上一条 MFA 用例
+   * 在同一 30 秒窗口消费过 ctr+1 后，下一条用例即便换了密钥、码值也算重放
+   * （claimTotpWindow 只比较 counter）→ enable 被顶成 400。每条 MFA 用例先从
+   * 确定状态起步，不依赖执行顺序。
+   */
+  const resetMfaState = () =>
+    User.findByIdAndUpdate(superUserId, {
+      mfaEnabled: false,
+      mfaSecret: '',
+      mfaRecoveryCodes: [],
+      mfaLastCounter: 0,
+      mfaFailCount: 0,
+      mfaLockUntil: null,
+    });
+
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
       await mongoose.connect(process.env.MONGODB_URI);
@@ -229,6 +245,7 @@ describe('认证剩余分支（批次 B2）', () => {
   });
 
   test('MFA enable/enroll 边界：未 enroll enable 400 / 格式错误 400 / 已开启重复 enroll', async () => {
+    await resetMfaState();
     const noEnroll = await request(app)
       .post('/api/auth/mfa/enable')
       .set('Authorization', `Bearer ${superToken}`)
@@ -280,6 +297,7 @@ describe('认证剩余分支（批次 B2）', () => {
   });
 
   test('恢复码重生成：错误口令 400 + 正确口令 200 且旧码作废', async () => {
+    await resetMfaState();
     const enroll = await request(app)
       .post('/api/auth/mfa/enroll')
       .set('Authorization', `Bearer ${superToken}`)
