@@ -243,6 +243,62 @@ describe('初始密码落盘与权限收紧闭环', () => {
         fs.writeFileSync = originalWrite;
       }
     });
+
+    it('权限收紧失败且明文文件删不掉时，日志必须点明文件仍含明文并给出人工处置', async () => {
+      await seedFreshAdminState();
+      delete process.env.ADMIN_INITIAL_PASSWORD;
+
+      const filePermission = require('../../utils/filePermission');
+      const harden = jest
+        .spyOn(filePermission, 'hardenPath')
+        .mockReturnValue({ ok: false, detail: 'chmod failed' });
+      const verify = jest
+        .spyOn(filePermission, 'verifyHardened')
+        .mockReturnValue({ tightened: false, evidence: 'still 644' });
+      const originalUnlink = fs.unlinkSync;
+      fs.unlinkSync = () => {
+        throw new Error('file locked');
+      };
+
+      try {
+        await inTempCwd(async () => {
+          // 删除失败只能改变"是否已回滚"的文案，不能改变 fail-closed 的结论
+          await expect(createDefaultAdmin()).rejects.toThrow('未能安全保存');
+          expect(await User.findByUsername('admin')).toBeNull();
+          const text = loggedText();
+          expect(text).toContain('删除明文口令文件也失败');
+          expect(text).toContain('仍含明文口令');
+        });
+      } finally {
+        fs.unlinkSync = originalUnlink;
+        harden.mockRestore();
+        verify.mockRestore();
+      }
+    });
+
+    it('口令已落盘但回滚也失败时，错误文案必须指向人工删除而不是宣称已回滚', async () => {
+      await seedFreshAdminState();
+      delete process.env.ADMIN_INITIAL_PASSWORD;
+
+      const originalWrite = fs.writeFileSync;
+      fs.writeFileSync = () => {
+        throw new Error('EACCES: permission denied (simulated)');
+      };
+      const deleteSpy = jest
+        .spyOn(User, 'deleteOne')
+        .mockRejectedValueOnce(new Error('primary unavailable'));
+
+      try {
+        await inTempCwd(async () => {
+          await expect(createDefaultAdmin()).rejects.toThrow(/自动回滚失败/);
+          expect(loggedText()).toContain('默认管理员回滚失败');
+        });
+      } finally {
+        fs.writeFileSync = originalWrite;
+        deleteSpy.mockRestore();
+        await User.deleteMany({ username: 'admin' });
+      }
+    });
   });
 
   describe('前置分支：不满足创建条件时既不建号也不落盘', () => {

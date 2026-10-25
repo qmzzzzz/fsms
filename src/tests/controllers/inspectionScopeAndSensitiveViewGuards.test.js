@@ -44,15 +44,26 @@
 
 const mockInspectionService = {
   getInspectionById: jest.fn(),
+  createInspection: jest.fn(),
   updateInspection: jest.fn(),
   startInspection: jest.fn(),
   completeInspection: jest.fn(),
   reviewInspection: jest.fn(),
   cancelInspection: jest.fn(),
   deleteInspection: jest.fn(),
+  removeMissingDeviceRefs: jest.fn(),
 };
 
 jest.mock('../../services/InspectionService', () => mockInspectionService);
+
+// 写后复验的悬空设备摘除（控制器在 create/update 落库后调用）
+const mockDeviceService = {
+  findMissingIds: jest.fn(async () => []),
+  // 写入口的范围闸会按 id 取一次设备范围字段；本套件的 getDataScope 固定为 all，
+  // 只要条数与请求一致即可放行。
+  findScopeFieldsByIds: jest.fn(async (ids) => ids.map((id) => ({ _id: id }))),
+};
+jest.mock('../../services/DeviceService', () => mockDeviceService);
 
 jest.mock('../../middleware/rbac', () => ({
   ...jest.requireActual('../../middleware/rbac'),
@@ -64,8 +75,12 @@ jest.mock('../../middleware/rbac', () => ({
   getDataScope: jest.fn(async () => ({ type: 'all' })),
 }));
 
+// 校验结果可切换：默认通过，个别用例用 mockReturnValueOnce 制造 400 分支。
+// 原先写死 `isEmpty: () => true`，sensitive.js 的两处 VALIDATION_FAILED 分支
+// 在整套扫描里无人可达（覆盖率实测把它们记成未覆盖）。
+const mockValidationResult = jest.fn(() => ({ isEmpty: () => true, array: () => [] }));
 jest.mock('express-validator', () => ({
-  validationResult: () => ({ isEmpty: () => true, array: () => [] }),
+  validationResult: (...args) => mockValidationResult(...args),
 }));
 
 const mockPermissionHelper = {
@@ -77,6 +92,9 @@ const mockPermissionHelper = {
 };
 
 jest.mock('../../utils/permissionHelper', () => mockPermissionHelper);
+
+const mockReportTargetService = { search: jest.fn() };
+jest.mock('../../services/reportTargetService', () => mockReportTargetService);
 
 const mockUserDoc = { _id: 'u_self', phone: '13800138000', email: 'a@b.c' };
 // findById 双用：查目标（select/populate/lean 链）与查 user 本体
@@ -165,6 +183,97 @@ describe('inspectionController 写端点越权分支（6 处 403）', () => {
   });
 });
 
+describe('inspectionController 入参校验（7 个写端点）', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockValidationResult.mockReturnValueOnce({
+      isEmpty: () => false,
+      array: () => [{ path: 'x', msg: 'invalid' }],
+    });
+  });
+
+  const handlers = [
+    ['createInspection', () => inspectionController.createInspection],
+    ['updateInspection', () => inspectionController.updateInspection],
+    ['startInspection', () => inspectionController.startInspection],
+    ['completeInspection', () => inspectionController.completeInspection],
+    ['reviewInspection', () => inspectionController.reviewInspection],
+    ['cancelInspection', () => inspectionController.cancelInspection],
+    ['deleteInspection', () => inspectionController.deleteInspection],
+  ];
+
+  for (const [name, getHandler] of handlers) {
+    test(`${name}：校验失败 → 400 且不读库`, async () => {
+      const res = makeRes();
+      await getHandler()(
+        { params: { id: 'insp1' }, body: {}, query: {}, user: { userId: 'u_op' } },
+        res
+      );
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+      expect(mockInspectionService.getInspectionById).not.toHaveBeenCalled();
+    });
+  }
+});
+
+describe('inspectionController 写后悬空设备摘除', () => {
+  // 写入口先过 mongoose.isValidObjectId 的格式闸，夹具必须是合法 24 位十六进制
+  const D1 = '64b000000000000000000001';
+  const D2 = '64b000000000000000000002';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    rbac.assertRecordInScope.mockResolvedValue({ allowed: true });
+    mockDeviceService.findMissingIds.mockResolvedValue([]);
+    mockInspectionService.removeMissingDeviceRefs.mockResolvedValue(undefined);
+  });
+
+  const reqOf = (body = {}) => ({
+    params: { id: 'insp1' },
+    body,
+    query: {},
+    user: { userId: 'u_op', username: 'op' },
+  });
+
+  test('创建：无悬空设备 → 不摘除，原样返回', async () => {
+    mockInspectionService.createInspection.mockResolvedValue({
+      _id: 'insp1',
+      devices: [D1],
+    });
+    const res = makeRes();
+    await inspectionController.createInspection(reqOf({ title: 'x', devices: [D1] }), res);
+    expect(mockInspectionService.removeMissingDeviceRefs).not.toHaveBeenCalled();
+    expect(res.body.data.devices).toEqual([D1]);
+  });
+
+  test('创建：窗口内设备被删 → 摘除悬空引用后再响应', async () => {
+    mockDeviceService.findMissingIds.mockResolvedValue([D2]);
+    mockInspectionService.createInspection.mockResolvedValue({
+      _id: 'insp1',
+      devices: [D1, D2],
+    });
+    const res = makeRes();
+    await inspectionController.createInspection(reqOf({ title: 'x', devices: [D1, D2] }), res);
+    expect(mockInspectionService.removeMissingDeviceRefs).toHaveBeenCalledWith('insp1', [D2]);
+    expect(res.status).toHaveBeenCalledWith(201);
+    expect(res.body.data.devices).toEqual([D1]);
+  });
+
+  test('更新：populate 为 null 的悬空项一并摘除', async () => {
+    mockInspectionService.getInspectionById.mockResolvedValue({ _id: 'insp1' });
+    mockDeviceService.findMissingIds.mockResolvedValue([D2]);
+    mockInspectionService.updateInspection.mockResolvedValue({
+      _id: 'insp1',
+      devices: [{ _id: D1 }, null, { _id: D2 }],
+    });
+    const res = makeRes();
+    await inspectionController.updateInspection(reqOf({ devices: [D1, D2] }), res);
+    expect(mockInspectionService.removeMissingDeviceRefs).toHaveBeenCalledWith('insp1', [D2]);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.body.data.devices).toEqual([{ _id: D1 }]);
+  });
+});
+
 describe('securityController.viewSensitiveData 数据范围分支', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -228,10 +337,145 @@ describe('securityController.viewSensitiveData 数据范围分支', () => {
     expect(res.status).toHaveBeenCalledWith(400);
   });
 
+  test('查他人：目标文档缺 roles 字段 → fail-closed 403', async () => {
+    mockPermissionHelper.getOperatorMaxLevel.mockResolvedValue(9);
+    // 老文档/迁移中的数据可能根本没有 roles 数组：`targetUser.roles || []` 兜底后
+    // 空角色集必须按 fail-closed 拒绝，而不是让 maxRoleLevel 的 -Infinity 放行。
+    mockFindByIdQueue = [
+      { __chained: true, value: { department: 'DEPT_A', createdBy: 'someone' } },
+    ];
+    const res = makeRes();
+    await securityController.viewSensitiveData(
+      reqOf({ dataType: 'phone', targetUserId: 'u_no_roles' }),
+      res
+    );
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.body.errors.errorCode).toBe('SENSITIVE_VIEW_HIGHER_LEVEL_FORBIDDEN');
+    expect(User.findById).toHaveBeenCalledTimes(1);
+  });
+
+  test('入参校验失败 → 400 且不查任何用户', async () => {
+    mockValidationResult.mockReturnValueOnce({
+      isEmpty: () => false,
+      array: () => [{ path: 'dataType', msg: 'invalid' }],
+    });
+    const res = makeRes();
+    await securityController.viewSensitiveData(reqOf({ dataType: 'phone' }), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(User.findById).not.toHaveBeenCalled();
+  });
+
+  test('查他人：层级足够但超出数据范围 → 403（层级闸不代替范围闸）', async () => {
+    mockPermissionHelper.getOperatorMaxLevel.mockResolvedValue(9);
+    rbac.assertRecordInScope.mockResolvedValue({ allowed: false });
+    mockFindByIdQueue = [
+      {
+        __chained: true,
+        value: { roles: [{ level: 7 }], department: 'OTHER_DEPT', createdBy: 'someone' },
+      },
+    ];
+    const res = makeRes();
+    await securityController.viewSensitiveData(
+      reqOf({ dataType: 'phone', targetUserId: 'u_other_dept' }),
+      res
+    );
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.body.errors.errorCode).toBe('SENSITIVE_VIEW_OUT_OF_SCOPE');
+    // 越权请求不得读到明文手机号的响应体
+    expect(res.body.data).toBeUndefined();
+  });
+
   test('本人查看 phone → 200', async () => {
     mockFindByIdQueue = [{ value: mockUserDoc }];
     const res = makeRes();
     await securityController.viewSensitiveData(reqOf({ dataType: 'phone' }), res);
     expect(res.status).toHaveBeenCalledWith(200);
+  });
+});
+
+describe('securityController.listReportTargets 入参校验', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('validator 拒绝 → 400 且不触发候选查询', async () => {
+    mockValidationResult.mockReturnValueOnce({
+      isEmpty: () => false,
+      array: () => [{ path: 'type', msg: 'invalid' }],
+    });
+    const res = makeRes();
+    await securityController.listReportTargets(
+      { query: { type: 'device' }, user: { userId: 'u_op' } },
+      res
+    );
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(mockReportTargetService.search).not.toHaveBeenCalled();
+  });
+
+  test('未知类型 → 400（路由 isIn 之外的 fail-closed 兜底）', async () => {
+    const res = makeRes();
+    await securityController.listReportTargets(
+      { query: { type: 'unknown' }, user: { userId: 'u_op' } },
+      res
+    );
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(mockReportTargetService.search).not.toHaveBeenCalled();
+  });
+
+  test('user 候选：缺省字段回退空串，不返回 undefined', async () => {
+    mockReportTargetService.search.mockResolvedValue([{ _id: 'u1' }]);
+    const res = makeRes();
+    await securityController.listReportTargets(
+      { query: { type: 'user' }, user: { userId: 'u_op' } },
+      res
+    );
+    expect(res.body.data.items).toEqual([
+      { id: 'u1', kind: 'user', code: '', name: '', detail: '' },
+    ]);
+  });
+
+  test('device 候选：位置缺失/异形时 detail 为空串', async () => {
+    mockReportTargetService.search.mockResolvedValue([
+      { _id: 'd1' },
+      { _id: 'd2', location: null },
+      { _id: 'd3', location: 'B栋' },
+      { _id: 'd4', location: { building: 'A栋', floor: '', room: '  ' } },
+    ]);
+    const res = makeRes();
+    await securityController.listReportTargets(
+      { query: { type: 'device' }, user: { userId: 'u_op' } },
+      res
+    );
+    expect(res.body.data.items.map((i) => i.detail)).toEqual(['', '', '', 'A栋']);
+    expect(res.body.data.items[0]).toEqual({
+      id: 'd1',
+      kind: 'device',
+      code: '',
+      name: '',
+      detail: '',
+    });
+  });
+
+  test('alarm 候选：缺省码/类型/时间回退稳定空值', async () => {
+    mockReportTargetService.search.mockResolvedValue([
+      { _id: 'a1', location: { building: 'A栋', floor: '3', room: '301' } },
+    ]);
+    const res = makeRes();
+    await securityController.listReportTargets(
+      { query: { type: 'alarm' }, user: { userId: 'u_op' } },
+      res
+    );
+    expect(res.body.data.items).toEqual([
+      {
+        id: 'a1',
+        kind: 'alarm',
+        code: '',
+        name: '',
+        detail: 'A栋 · 3 · 301',
+        occurredAt: null,
+      },
+    ]);
   });
 });

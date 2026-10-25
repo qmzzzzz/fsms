@@ -11,6 +11,8 @@ describe('userController data scope and encrypted credentials', () => {
   let Permission;
   let operator;
   let operatorToken;
+  let adminToken;
+  let guestRole;
   const stamp = `ucb${Date.now().toString(36)}`;
 
   beforeAll(async () => {
@@ -48,15 +50,52 @@ describe('userController data scope and encrypted credentials', () => {
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
+
+    // 高权限操作者：数据范围 all + 权限子集足够，用于覆盖密文建号成功路径与写后回滚
+    const adminRole = await Role.create({
+      name: 'User behavior admin',
+      code: `UCB_ADMIN_${stamp}`,
+      level: 9,
+      permissions: [readPermission._id, createPermission._id],
+    });
+    guestRole = await Role.create({
+      name: 'User behavior guest',
+      code: `UCB_GUEST_${stamp}`,
+      level: 1,
+      permissions: [readPermission._id],
+    });
+    const admin = await User.create({
+      username: `ucbadmin${stamp}`,
+      email: `ucbadmin${stamp}@example.com`,
+      password: `Aa1!${stamp}Test`,
+      department: 'UCB-DEPT',
+      roles: [adminRole._id],
+    });
+    adminToken = jwt.sign(
+      { userId: String(admin._id), username: admin.username, tokenVersion: 0 },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
     app = require('../../app').createApp();
   });
 
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
       await User.deleteMany({
-        username: { $in: [`ucboperator${stamp}`, `ucbtarget${stamp}`] },
+        username: {
+          $in: [
+            `ucboperator${stamp}`,
+            `ucbadmin${stamp}`,
+            `ucbtarget${stamp}`,
+            `ucbenctarget${stamp}`,
+            `ucbrollback${stamp}`,
+            `ucbpermrollback${stamp}`,
+          ],
+        },
       }).catch(() => {});
-      await Role.deleteOne({ code: `UCB_ROLE_${stamp}` }).catch(() => {});
+      await Role.deleteMany({
+        code: { $in: [`UCB_ROLE_${stamp}`, `UCB_ADMIN_${stamp}`, `UCB_GUEST_${stamp}`] },
+      }).catch(() => {});
       await mongoose.connection.close();
     }
   });
@@ -107,5 +146,82 @@ describe('userController data scope and encrypted credentials', () => {
         errors: expect.objectContaining({ errorCode: 'AUTH_ENCRYPTED_CREDENTIAL_INVALID' }),
       })
     );
+  });
+
+  describe('密文建号成功路径与写后回滚', () => {
+    const userService = require('../../services/userService');
+    const adminCall = (method, url) =>
+      request(app)[method](url).set('Authorization', `Bearer ${adminToken}`);
+    const PASSWORD_VALUE = 'N3w-Strong-Pass!';
+
+    afterEach(() => jest.restoreAllMocks());
+
+    test('合法密文口令解密并完成建号（201，落库口令即解密结果）', async () => {
+      const username = `ucbenctarget${stamp}`;
+      const encPassword = await buildLoginEnvelope(PASSWORD_VALUE, { aad: 'user:create' });
+
+      const res = await adminCall('post', '/api/users').send({
+        username,
+        email: `${username}@example.com`,
+        encPassword,
+      });
+
+      expect(res.status).toBe(201);
+      const created = await User.findByUsername(username).select('+password');
+      expect(await created.comparePassword(PASSWORD_VALUE)).toBe(true);
+    });
+
+    test('建号后角色被抬高 ⇒ 撤销新账户（TOCTOU 回滚）', async () => {
+      const username = `ucbrollback${stamp}`;
+      const encPassword = await buildLoginEnvelope(PASSWORD_VALUE, { aad: 'user:create' });
+      const original = userService.findRolesByIds.bind(userService);
+      jest.spyOn(userService, 'findRolesByIds').mockImplementation((...args) => {
+        // 建号路径只有写后复验会按 'level code permissions' 读取
+        if (args[1] === 'level code permissions') {
+          return Promise.resolve([{ ...guestRole.toObject(), level: 11 }]);
+        }
+        return original(...args);
+      });
+
+      const res = await adminCall('post', '/api/users').send({
+        username,
+        email: `${username}@example.com`,
+        encPassword,
+        roles: [String(guestRole._id)],
+      });
+
+      expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN');
+      expect(await User.findByUsername(username)).toBeNull();
+    });
+
+    test('建号后角色权限被扩张 ⇒ 撤销新账户并回传缺失权限', async () => {
+      const username = `ucbpermrollback${stamp}`;
+      const encPassword = await buildLoginEnvelope(PASSWORD_VALUE, { aad: 'user:create' });
+      const original = userService.findRolesByIds.bind(userService);
+      jest.spyOn(userService, 'findRolesByIds').mockImplementation((...args) => {
+        if (args[1] === 'level code permissions') {
+          return Promise.resolve([
+            {
+              ...guestRole.toObject(),
+              permissions: [{ _id: 'perm-x', code: 'security:config' }],
+            },
+          ]);
+        }
+        return original(...args);
+      });
+
+      const res = await adminCall('post', '/api/users').send({
+        username,
+        email: `${username}@example.com`,
+        encPassword,
+        roles: [String(guestRole._id)],
+      });
+
+      expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('PERMISSION_GRANT_FORBIDDEN');
+      expect(res.body.errors.permissions).toContain('security:config');
+      expect(await User.findByUsername(username)).toBeNull();
+    });
   });
 });

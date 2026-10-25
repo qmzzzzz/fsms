@@ -75,4 +75,24 @@ describe('默认管理员的并发首启冲突', () => {
     expect(User.create).toHaveBeenCalledTimes(2);
     expect(initialPasswordFile.filePath).not.toHaveBeenCalled();
   });
+
+  test('email 冲突后后备重建失败（非唯一键）⇒ 上抛后备错误，不当作已创建', async () => {
+    const fallbackError = new Error('write failed');
+    User.findByUsername.mockResolvedValue(null);
+    User.create.mockRejectedValueOnce(duplicate('emailKey')).mockRejectedValueOnce(fallbackError);
+
+    await expect(createDefaultAdmin()).rejects.toBe(fallbackError);
+    expect(initialPasswordFile.filePath).not.toHaveBeenCalled();
+  });
+
+  test('后备重建再撞 emailKey 时不再找赢家，原样上抛（无法定位并发创建者）', async () => {
+    User.findByUsername.mockResolvedValue(null);
+    User.create
+      .mockRejectedValueOnce(duplicate('emailKey'))
+      .mockRejectedValueOnce(duplicate('emailKey'));
+
+    await expect(createDefaultAdmin()).rejects.toMatchObject({ code: 11000 });
+    // 只有首次判重那一次查询，后备冲突不是 username 冲突，不该再查赢家
+    expect(User.findByUsername).toHaveBeenCalledTimes(1);
+  });
 });

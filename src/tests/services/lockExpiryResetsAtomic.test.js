@@ -123,6 +123,62 @@ describe('过期锁定的清零是条件写', () => {
     expect(spy.mock.calls.some(([id]) => String(id) === String(user._id))).toBe(true);
   });
 
+  test('过期锁定 CAS 写入失败时退回 $inc（catch → null），不得把计数重置为 1', async () => {
+    // 条件写本身失败（写关注失败/主从切换）时 catch 落到 null，
+    // 后续必须走 $inc 继续累加；若把 catch 改成吞掉并返回旧快照，
+    // 阈值就永远到不了——与 fail-closed 口径相反。
+    const user = await mkUser('casreject', {
+      failedLoginCount: 9,
+      lockUntil: new Date(Date.now() - 60 * 1000),
+    });
+    const snapshot = await User.findById(user._id);
+    const spy = jest
+      .spyOn(User, 'findOneAndUpdate')
+      .mockRejectedValue(new Error('write concern failed'));
+
+    try {
+      const count = await failureAndMfa.incrementFailedLoginCount(snapshot, {
+        username: user.username,
+        lockReason: 'test',
+      });
+      expect(count).toBe(10);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('锁定写入失败时不得失效缓存，也不得把 lockUntil 当成已落库', async () => {
+    // 第 1 次 findByIdAndUpdate 是 $inc，第 2 次是写 lockUntil。
+    // 第 2 次失败时 lockApplied=false：缓存不能失效（没有要失效的锁定），
+    // 库里也必须是"未锁定"的真实状态，审计里的 lockApplied 才是可核对的。
+    const user = await mkUser('lockwritefail', { failedLoginCount: 9 });
+    const snapshot = await User.findById(user._id);
+    const original = User.findByIdAndUpdate.bind(User);
+    let calls = 0;
+    const spy = jest.spyOn(User, 'findByIdAndUpdate').mockImplementation((...args) => {
+      calls += 1;
+      if (calls === 2) return Promise.reject(new Error('write failed'));
+      return original(...args);
+    });
+    const invalidate = jest
+      .spyOn(require('../../middleware/auth'), 'invalidateUserCache')
+      .mockImplementation(() => {});
+
+    try {
+      const count = await failureAndMfa.incrementFailedLoginCount(snapshot, {
+        username: user.username,
+        lockReason: 'test',
+      });
+      expect(count).toBe(10);
+      expect(invalidate).not.toHaveBeenCalled();
+      const after = await User.findById(user._id).select('lockUntil');
+      expect(after.lockUntil).toBeNull();
+    } finally {
+      spy.mockRestore();
+      invalidate.mockRestore();
+    }
+  });
+
   test('isMfaLocked：读到的计数快照在清零前已变（并发又失败一次）时不得把新失败抹掉', async () => {
     const expiredAt = new Date(Date.now() - 60 * 1000);
     const user = await mkUser('mfalock', { mfaFailCount: 5, mfaLockUntil: expiredAt });

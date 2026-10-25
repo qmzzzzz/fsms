@@ -41,6 +41,7 @@ const {
   buildDataScopeFilter,
   applyDataScopeToQuery,
   isRecordInScope,
+  buildRecordScopeFilter,
 } = require('../../middleware/rbac');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 
@@ -188,6 +189,25 @@ describe('rbac.js 分支补齐', () => {
       expect(next).toHaveBeenCalled();
       expect(findById).not.toHaveBeenCalled();
     });
+
+    test('回退查库抛错 → 500 ROLE_CHECK_FAILED，不把异常抛给上层', async () => {
+      jest.spyOn(User, 'findById').mockReturnValue({
+        populate: jest.fn().mockReturnThis(),
+        lean: jest.fn().mockRejectedValue(new Error('db down')),
+      });
+      const req = makeReq();
+      const res = makeRes();
+      const next = jest.fn();
+      await checkRole('OPERATOR')(req, res, next);
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(500);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          errors: expect.objectContaining({ errorCode: 'ROLE_CHECK_FAILED' }),
+        })
+      );
+    });
   });
 
   describe('getDataScope（真实 DB：level 阈值边界）', () => {
@@ -283,6 +303,35 @@ describe('rbac.js 分支补齐', () => {
 
     test('none → 永不匹配条件 { _id: null }', () => {
       expect(buildDataScopeFilter({ type: 'none' })).toEqual({ _id: null });
+    });
+  });
+
+  describe('buildRecordScopeFilter（举报候选的数据范围臂）', () => {
+    test('department 档：本人 _id 短路 + 部门等值臂合并为 $or', () => {
+      expect(
+        buildRecordScopeFilter(
+          { type: 'department', department: 'A栋' },
+          { ownerField: 'createdBy', departmentField: 'location.building', userId: 'u1' }
+        )
+      ).toEqual({ $or: [{ _id: 'u1' }, { 'location.building': 'A栋' }] });
+    });
+
+    test('department 档但 departmentField 缺失 ⇒ 只保留本人短路臂', () => {
+      expect(
+        buildRecordScopeFilter(
+          { type: 'department', department: 'A栋' },
+          { ownerField: 'createdBy', userId: 'u1' }
+        )
+      ).toEqual({ _id: 'u1' });
+    });
+
+    test('department 档但 scope 无部门值 ⇒ 只保留本人短路臂', () => {
+      expect(
+        buildRecordScopeFilter(
+          { type: 'department' },
+          { ownerField: 'createdBy', departmentField: 'location.building', userId: 'u1' }
+        )
+      ).toEqual({ _id: 'u1' });
     });
   });
 

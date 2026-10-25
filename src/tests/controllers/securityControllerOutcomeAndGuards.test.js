@@ -85,9 +85,11 @@ jest.mock('../../services/auditScopeFilter', () => ({
 // User 模型 mock
 const mockUserFindById = jest.fn();
 const mockUserFindByIdAndUpdate = jest.fn();
+const mockUserFindOneAndUpdate = jest.fn();
 jest.mock('../../models/User', () => ({
   findById: (...args) => mockUserFindById(...args),
   findByIdAndUpdate: (...args) => mockUserFindByIdAndUpdate(...args),
+  findOneAndUpdate: (...args) => mockUserFindOneAndUpdate(...args),
   // 与真实模型同形：载入端（authService.setUserLockStatus / updateUserProfile、
   // userService/roleService 的 findUserForUpdate）会调它构造"排除凭证列"的投影。
   // 桩缺这个符号 ⇒ 生产代码抛 TypeError，用例测到的是崩溃而不是它想钉的分支。
@@ -274,6 +276,7 @@ const {
   resetUserMfa,
   getSecurityOverview,
   getRecentAlerts,
+  getMyLogs,
 } = require('../../controllers/securityController');
 
 // ===== 辅助工具 =====
@@ -387,6 +390,18 @@ describe('getMySecurityInfo 分支补齐', () => {
     expect(res.payload.data.recentLogins.length).toBe(allLogins.length);
     expect(res.payload.data.recentLogins[0].ip).toBeTruthy();
   });
+
+  test('令牌有效但用户已被删除 ⇒ 404 AUTH_USER_NOT_FOUND（不是 500）', async () => {
+    mockUserFindById.mockReturnValue({ select: jest.fn().mockResolvedValue(null) });
+
+    const { req, res, next } = makeCtx({ user: { userId: 'u-gone', username: 'gone' } });
+    await invoke(getMySecurityInfo, req, res, next);
+
+    expect(res.statusCode).toBe(404);
+    expect(res.payload.errors.errorCode).toBe('AUTH_USER_NOT_FOUND');
+    // 不得继续解引用 user.lastLoginAt 之后的查询
+    expect(mockAuditLogFind).not.toHaveBeenCalled();
+  });
 });
 
 // ============================================================
@@ -433,6 +448,55 @@ describe('getAccountBindings 占位符口径', () => {
     // 真实部门名是**业务数据**，原样透传（中文在这里是数据，不是占位文案）
     expect(dept.value).toBe('消防科');
     expect(dept.verified).toBe(true);
+  });
+
+  test('令牌有效但用户已被删除 ⇒ 404 AUTH_USER_NOT_FOUND（不是 500）', async () => {
+    mockUserFindById.mockReturnValue({ select: jest.fn().mockResolvedValue(null) });
+
+    const { req, res, next } = makeCtx();
+    await invoke(getAccountBindings, req, res, next);
+
+    expect(res.statusCode).toBe(404);
+    expect(res.payload.errors.errorCode).toBe('AUTH_USER_NOT_FOUND');
+  });
+});
+
+// ============================================================
+// getMyLogs 的查询参数收口（category 直接进 Mongo 条件）
+// ============================================================
+describe('getMyLogs 参数收口', () => {
+  test.each([
+    ['不在注册表内的字符串', 'bogus'],
+    // extended query parser 会把 category[$ne]=x 解析成对象；原样下传等于查询注入
+    ['操作符对象', { $ne: 'auth' }],
+  ])('%s → 400 VALIDATION_FAILED 且不触达查询', async (_label, category) => {
+    const { req, res, next } = makeCtx({ query: { category } });
+    await invoke(getMyLogs, req, res, next);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.payload.errors.errorCode).toBe('VALIDATION_FAILED');
+    expect(mockAuditLogGetUserActivity).not.toHaveBeenCalled();
+  });
+
+  test('limit/days 非法（非数字或 <1）⇒ 钳回默认值 50/7，不把 NaN 传给 Mongo', async () => {
+    const { req, res, next } = makeCtx({ query: { limit: 'abc', days: '0' } });
+    await invoke(getMyLogs, req, res, next);
+
+    expect(res.payload.success).toBe(true);
+    expect(mockAuditLogGetUserActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ limit: 50, days: 7 })
+    );
+  });
+
+  test('limit/days 超上限 ⇒ 分别钳到 500/365', async () => {
+    const { req, res, next } = makeCtx({ query: { limit: '99999', days: '99999' } });
+    await invoke(getMyLogs, req, res, next);
+
+    expect(mockAuditLogGetUserActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ limit: 500, days: 365 })
+    );
   });
 });
 
@@ -491,6 +555,16 @@ describe('changePasswordSecure 分支补齐（委托 authService 后的映射）
     await invoke(changePasswordSecure, req, res, next);
     expect(res.statusCode).toBe(400);
     expect(res.payload.message).toBe('新密码不能与当前密码相同');
+  });
+
+  test('PASSWORD_REUSED → 400 并透出历史深度（前端据此提示换口令）', async () => {
+    mockChangeUserPassword.mockResolvedValue({ outcome: 'PASSWORD_REUSED', historyDepth: 5 });
+    const { req, res, next } = makeCtx({ body: { currentPassword: 'x', newPassword: 'y' } });
+    await invoke(changePasswordSecure, req, res, next);
+    expect(res.statusCode).toBe(400);
+    expect(res.payload.errors.errorCode).toBe('PASSWORD_REUSED_IN_HISTORY');
+    // codeError 把 options.params 展开进 errors（见 ApiResponse.codeError）
+    expect(res.payload.errors.historyDepth).toBe(5);
   });
 
   test('ENC_INVALID → codeError 统一错误码', async () => {
@@ -762,6 +836,38 @@ describe('toggleUserLock 分支补齐', () => {
       spy.mockRestore();
     }
   });
+
+  test('服务层回报 NOT_FOUND（预检与写入之间账户被删）→ 404，不按成功处理', async () => {
+    const authServiceReal = require('../../services/authService');
+    const spy = jest
+      .spyOn(authServiceReal, 'setUserLockStatus')
+      .mockResolvedValueOnce({ outcome: 'NOT_FOUND' });
+    try {
+      const { ctx } = makeLockCtx(true);
+      await invoke(toggleUserLock, ctx.req, ctx.res, ctx.next);
+      expect(ctx.res.statusCode).toBe(404);
+      expect(ctx.res.payload.errors.errorCode).toBe('USER_NOT_FOUND');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('解锁时旧令牌吊销失败 → 503 且账户保持锁定（fail-closed 可重试）', async () => {
+    const authServiceReal = require('../../services/authService');
+    const spy = jest
+      .spyOn(authServiceReal, 'setUserLockStatus')
+      .mockResolvedValueOnce({ outcome: 'REVOKE_UNAVAILABLE' });
+    try {
+      const { ctx } = makeLockCtx(false);
+      await invoke(toggleUserLock, ctx.req, ctx.res, ctx.next);
+      expect(ctx.res.statusCode).toBe(503);
+      expect(ctx.res.payload.errors.errorCode).toBe('SESSION_REVOKE_SERVICE_UNAVAILABLE');
+      // 响应不能说「已解锁」：吊销没完成时旧会话仍在线
+      expect(ctx.res.payload.success).toBeFalsy();
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 // ============================================================
@@ -821,6 +927,56 @@ describe('resetUserMfa 分支补齐', () => {
     // codeError 将错误码放在 errors.errorCode，断言命中了行 517 分支即可
     expect(res.payload.errors).toBeTruthy();
     expect(res.payload.errors.errorCode).toBe('CANNOT_RESET_MFA_SUPER_ADMIN');
+  });
+
+  test('条件写 miss（校验后目标状态/角色被改）→ USER_STATE_CONFLICT，不伪造成功审计', async () => {
+    mockUserFindById.mockResolvedValue({
+      _id: 'mfa-target-id',
+      username: 'mfaTarget',
+      mfaEnabled: true,
+      roles: ['role-user'],
+    });
+    mockRoleFind.mockReturnValue({
+      select: jest.fn().mockResolvedValue([{ level: 1, code: 'USER', isBuiltIn: false }]),
+    });
+    mockGetOperatorMaxLevel.mockResolvedValue(10);
+    // 快照不匹配/已被并发重置：Mongo 条件更新命中 0 行
+    mockUserFindOneAndUpdate.mockResolvedValue(null);
+
+    const { req, res, next } = makeCtx({
+      params: { userId: 'mfa-target-id' },
+      user: { userId: 'operator-id', username: 'operator' },
+    });
+    await invoke(resetUserMfa, req, res, next);
+
+    expect(res.payload.errors.errorCode).toBe('USER_STATE_CONFLICT');
+    // 吊销已发生但 MFA 未清：不得写「已重置」的成功审计
+    expect(mockAuditLogCreate).not.toHaveBeenCalled();
+  });
+
+  test('目标无角色集（历史/直连写入）⇒ 条件写按空快照，不把 undefined 传进 Mongo', async () => {
+    // roles 缺失时 `roles: undefined` 在 Mongo 查询里等价于 `{roles: null}`，
+    // 匹配不到任何真文档——重置会静默变成「永远 CONFLICT」。空数组才是正确快照。
+    mockUserFindById.mockResolvedValue({
+      _id: 'mfa-noroles-id',
+      username: 'mfaNoRoles',
+      mfaEnabled: true,
+    });
+    mockRoleFind.mockReturnValue({ select: jest.fn().mockResolvedValue([]) });
+    mockGetOperatorMaxLevel.mockResolvedValue(10);
+    mockUserFindOneAndUpdate.mockResolvedValue({ _id: 'mfa-noroles-id' });
+
+    const { req, res, next } = makeCtx({
+      params: { userId: 'mfa-noroles-id' },
+      user: { userId: 'operator-id', username: 'operator' },
+    });
+    await invoke(resetUserMfa, req, res, next);
+
+    expect(mockUserFindOneAndUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ roles: [] }),
+      expect.anything()
+    );
+    expect(res.payload.success).toBe(true);
   });
 });
 

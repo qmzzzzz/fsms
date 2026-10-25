@@ -784,4 +784,131 @@ describe('assignRoles 越权防护', () => {
       expect(created.roles.map(String)).toContain(String(narrowRole._id));
     });
   });
+
+  describe('写后复验的 TOCTOU 回滚', () => {
+    const userService = require('../../services/userService');
+
+    const assign = (roles) =>
+      request(app)
+        .put(`/api/users/${lowUser._id}/roles`)
+        .set('Authorization', `Bearer ${operatorToken}`)
+        .send({ roles });
+
+    beforeEach(async () => {
+      await User.updateOne({ _id: lowUser._id }, { $set: { roles: [] } });
+    });
+
+    afterEach(async () => {
+      jest.restoreAllMocks();
+      await User.updateOne({ _id: lowUser._id }, { $set: { roles: [] } });
+    });
+
+    // 判定通过 → 落库之间角色被 updateRole 抬高：写后复验必须把角色集写回快照。
+    // 同时模拟 CAS 回滚 miss（并发又改了角色），逼出「无条件写回」这条兜底。
+    test('落库后角色被抬高 ⇒ 回滚到快照；CAS miss 时改为无条件写回', async () => {
+      const originalFind = userService.findRolesByIds.bind(userService);
+      let permissionReads = 0;
+      const findSpy = jest.spyOn(userService, 'findRolesByIds').mockImplementation((...args) => {
+        const projection = args[1];
+        if (projection === 'level code permissions') {
+          permissionReads += 1;
+          // 第 1 次是前置校验，第 2 次是写后复验；后者看到被抬高的等级
+          if (permissionReads === 2) {
+            return Promise.resolve([{ ...guestRole.toObject(), level: 11 }]);
+          }
+        }
+        return originalFind(...args);
+      });
+
+      const originalUpdate = userService.updateRoles.bind(userService);
+      let updateCalls = 0;
+      jest.spyOn(userService, 'updateRoles').mockImplementation((...args) => {
+        updateCalls += 1;
+        if (updateCalls === 2) return Promise.resolve(null);
+        return originalUpdate(...args);
+      });
+
+      try {
+        const res = await assign([String(guestRole._id)]);
+
+        expect(res.status).toBe(403);
+        expect(res.body.errors.errorCode).toBe('ROLE_ASSIGN_HIGHER_LEVEL_FORBIDDEN');
+        expect(updateCalls).toBe(3);
+        const after = await User.findById(lowUser._id);
+        expect(after.roles).toHaveLength(0);
+      } finally {
+        findSpy.mockRestore();
+      }
+    });
+
+    test('落库后角色权限被扩张 ⇒ 回滚并回传缺失权限清单', async () => {
+      const originalFind = userService.findRolesByIds.bind(userService);
+      let permissionReads = 0;
+      jest.spyOn(userService, 'findRolesByIds').mockImplementation((...args) => {
+        if (args[1] === 'level code permissions') {
+          permissionReads += 1;
+          if (permissionReads === 2) {
+            return Promise.resolve([
+              {
+                ...guestRole.toObject(),
+                permissions: [{ _id: 'perm-x', code: 'security:config' }],
+              },
+            ]);
+          }
+        }
+        return originalFind(...args);
+      });
+
+      const res = await assign([String(guestRole._id)]);
+
+      expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('PERMISSION_GRANT_FORBIDDEN');
+      expect(res.body.errors.permissions).toContain('security:config');
+      const after = await User.findById(lowUser._id);
+      expect(after.roles).toHaveLength(0);
+    });
+
+    test('目标用户 roles 缺失（历史文档）⇒ 落库快照按空数组，不把 null 传进条件写', async () => {
+      // roles 是后来才加进 schema 的列：老文档/直连写入可能整列缺失。
+      // `user.roles || []` 的右侧只有在 null/undefined 时才走到——否则
+      // `$in: null` 在 Mongo 里匹配不到真文档，这次授予会静默变成永远 CONFLICT。
+      jest.spyOn(userService, 'findUserForUpdate').mockResolvedValue({
+        _id: lowUser._id,
+        username: lowUser.username,
+        roles: null,
+        department: SCOPE_DEPT,
+        createdBy: operator._id,
+      });
+      jest.spyOn(userService, 'findRolesByIds').mockImplementation((ids, projection) => {
+        // 目标用户的旧角色集（ids 为 null）为空；候选角色（ids 为数组）为 GUEST
+        if (projection === 'level code isBuiltIn') {
+          return Promise.resolve(Array.isArray(ids) ? [guestRole] : []);
+        }
+        return Promise.resolve([guestRole]);
+      });
+      const updateSpy = jest
+        .spyOn(userService, 'updateRoles')
+        .mockResolvedValue({ _id: lowUser._id });
+      jest.spyOn(userService, 'findActiveRolePermissionDocs').mockResolvedValue([]);
+      jest
+        .spyOn(userService, 'getUpdatedUser')
+        .mockResolvedValue({ _id: lowUser._id, username: lowUser.username });
+
+      const res = await assign([String(guestRole._id)]);
+
+      expect(res.status).toBe(200);
+      expect(updateSpy).toHaveBeenCalledWith(lowUser._id, [String(guestRole._id)], []);
+    });
+
+    test('首次落库 CAS miss ⇒ 409 USER_STATE_CONFLICT（不把并发改动当成功）', async () => {
+      jest.spyOn(userService, 'updateRoles').mockResolvedValueOnce(null);
+
+      const res = await assign([String(guestRole._id)]);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.errors.errorCode).toBe('USER_STATE_CONFLICT');
+      const after = await User.findById(lowUser._id);
+      expect(after.roles).toHaveLength(0);
+    });
+  });
 });

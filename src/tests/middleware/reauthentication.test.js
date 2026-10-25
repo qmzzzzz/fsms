@@ -108,6 +108,26 @@ describe('requireReAuthentication（敏感操作二次验证）', () => {
     expect(fresh.mfaFailCount).toBe(0);
   });
 
+  test('密码通道处于 MFA 失败锁定期内 → 429，连比对都不做', async () => {
+    // 密码通道与 MFA 通道共用同一把失败锁：锁定期内必须先拒，否则
+    // 「猜中会话 + 在线猜密码」仍可无限次尝试（MFA 锁定形同虚设）。
+    await User.updateOne(
+      { _id: userNoMfa._id },
+      { $set: { mfaLockUntil: new Date(Date.now() + 60 * 1000) } }
+    );
+    try {
+      const res = await request(app).post('/sensitive').send({
+        __targetUserId: userNoMfa._id,
+        currentPassword: testPassword,
+      });
+      expect(res.status).toBe(429);
+      expect(res.body.errors?.errorCode).toBe('MFA_ATTEMPTS_EXCEEDED');
+      expect(res.body.reAuthenticated).not.toBe(true);
+    } finally {
+      await User.updateOne({ _id: userNoMfa._id }, { $set: { mfaLockUntil: null } });
+    }
+  });
+
   test('当前密码错误 → 403', async () => {
     const res = await request(app)
       .post('/sensitive')
@@ -211,6 +231,15 @@ describe('requireReAuthentication（敏感操作二次验证）', () => {
       __targetUserId: new mongoose.Types.ObjectId().toString(),
       currentPassword: testPassword,
     });
+    expect(res.status).toBe(401);
+    expect(res.body.message).toContain('用户不存在');
+    expect(res.body.reAuthenticated).not.toBe(true);
+  });
+
+  test('MFA 通道：令牌签发后用户被删除 → 401，不得放行', async () => {
+    const res = await request(app)
+      .post('/sensitive')
+      .send({ __targetUserId: new mongoose.Types.ObjectId().toString(), mfaCode: '123456' });
     expect(res.status).toBe(401);
     expect(res.body.message).toContain('用户不存在');
     expect(res.body.reAuthenticated).not.toBe(true);
