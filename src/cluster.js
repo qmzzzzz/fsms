@@ -1,35 +1,18 @@
 'use strict';
 
 /**
- * Node 原生 cluster 多进程入口（可选，默认不启用）
- *
- * 何时使用：单机 CPU 多核、已外置 Redis（REDIS_URL）且希望把 HTTP 吞吐
- * 按核数扩展时。设 CLUSTER_WORKERS=N（N>1）后，用本文件代替 src/index.js
- * 启动（例如 `node src/cluster.js`），primary 进程 fork N 个 worker，
- * 每个监听同一端口（内核负载均衡）。
- *
- * 何时**不要**使用：
- * - 未外置 Redis：审计哈希链写序、限流计数、权限缓存失效等机制依赖单进程
- *   假设（清单见 constants/runtime.js 的 SINGLE_PROCESS_DEPENDENCIES）。
- *   detectMultiProcess 会识别 cluster worker 并触发 assertSingleProcessAssumptions
- *   的 error 级清单告警；/readyz 侧 multiInstanceReadinessBlocker 在 Redis
- *   未就绪时会直接不就绪（这是刻意的：多进程 + 无分布式锁的审计链必分叉）。
- * - 容器化部署：直接加副本数（K8s replicas / compose 实例数）更干净，
- *   本文件面向的是"单机跑满多核"这一中间形态。
- *
- * 与 PM2 的关系：PM2 cluster 模式（pm2 start src/index.js -i max）等效，
- * 且 detectMultiProcess 同样认得 NODE_APP_INSTANCE。本文件是零额外依赖
- * 的原生等价物。
- *
- * 稳定性语义：
- * - worker 异常退出：primary 记 error 并补 fork（exit 非 0 / 非显式 kill）；
- * - SIGTERM/SIGINT：primary 先停 fork 循环，再向所有 worker 转发信号，
- *   worker 内 index.js 已有的 gracefulShutdown 负责真正的排空关闭；
- * - worker 的启动失败（如 Mongo 不可达）走 index.js 自身的非零退出，
- *   primary 据退出码补拉，日志里可见完整脉络。
+ * 可选的多进程入口：CLUSTER_WORKERS>1 时 primary fork N 个 worker，否则透传单进程。
+ * 前提是已外置 Redis——审计哈希链写序、限流计数、权限缓存失效假定单进程
+ * （见 constants/runtime.js），detectMultiProcess 会告警、/readyz 会不就绪。
+ * 多副本部署（K8s replicas / compose 实例数）优于本文件；PM2 cluster 等效。
+ * worker 异常退出由 primary 补 fork；SIGTERM/SIGINT 先停 fork 再转发，
+ * worker 的 gracefulShutdown 负责排空，primary 以 CLUSTER_SHUTDOWN_GRACE_MS 兜底。
  */
 
 const cluster = require('cluster');
+const { hydrateSecretsFromFiles } = require('./config/secrets');
+
+hydrateSecretsFromFiles();
 
 const resolveWorkerCount = () => {
   const configured = parseInt(process.env.CLUSTER_WORKERS, 10);

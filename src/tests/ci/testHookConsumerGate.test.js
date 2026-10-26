@@ -361,10 +361,13 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
     expect(propertyExportKeys('const v = module.exports["_read"];')).toEqual([]);
   });
 
-  it('钩子总数钉死：只许减不许增（当前 35 个），且成员可点名', () => {
-    expect(hooks.length).toBe(35);
+  it('钩子总数钉死：只许减不许增（当前 36 个），且成员可点名', () => {
+    expect(hooks.length).toBe(36);
     const keys = hooks.map(keyOf);
     for (const must of [
+      // worker 线程池是模块级单例：强制 worker 模式的用例必须能 terminate 并复位池，
+      // 否则线程句柄会留给后续套件（随机顺序门禁下尤其明显）。
+      'utils/bcryptWorkerPool.js::_shutdownForTests',
       'services/auditBuffer.js::__resetForTest',
       'services/auditChainMonitor.js::__MIN_ROUND_BUDGET_MS',
       'services/canaryWatch.js::__resetForTest',

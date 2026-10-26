@@ -19,7 +19,6 @@ const AuditLog = require('../../models/AuditLog');
 // 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
 const { onAuditWriteFailure } = require('../../utils/auditWriteFailure');
 const captchaService = require('../captchaService');
-// bcrypt 卸载到 worker 线程（测试环境自动回退进程内实现，见模块头注释）
 const bcryptWorker = require('../../utils/bcryptWorkerPool');
 const { decryptLoginCredential } = require('../../utils/loginCipher');
 const { USER_STATUS } = require('../../utils/constants');

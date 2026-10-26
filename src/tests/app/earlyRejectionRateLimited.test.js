@@ -21,7 +21,7 @@
  * resetModules 会把 mongoose 拆成两代，create 阶段报 `MongooseArray is not a function`）。
  */
 const request = require('supertest');
-const { waitForStable } = require('../helpers/waitFor');
+const { waitFor, waitForStable, flushEventLoop } = require('../helpers/waitFor');
 
 const MAX_GENERAL = 3;
 const FLOOD = 10;
@@ -48,9 +48,19 @@ const countViolations = () =>
   require('../../models/AuditLog').countDocuments({ action: VIOLATION_ACTION });
 
 // 等异步落库**静默**后再取数：recordViolation 用 setImmediate 投递，create 还要过全局链锁。
-// 只"等到达到预期值"会造成单向假绿——把限流挪回原位时 10 条写入里前 3 条先到，
-// 计数立刻满足 `=== 3`，而后到的 7 条永远漏判。故判据必须等"两次连续读数相同"
-//（waitForStable），采样间隔沿用原先的 150ms，避免链锁排队把"暂时没写完"当成"已静默"。
+// 只"等到达到预期值"会造成单向假绿（前 MAX 条先到即收，后到的漏判看不见）；
+// 只等静默又会在链锁排队时把"还没写完"的 0 当成终值。故先等达到期望值，
+// 让已排队的投递进入链锁，再等两次连续读数相同。
+const awaitViolations = async () => {
+  await waitFor(async () => (await countViolations()) >= MAX_GENERAL, {
+    label: `协议违规审计落库达到期望值（expected=${MAX_GENERAL}）`,
+  });
+  await flushEventLoop(3);
+  return waitForStable(countViolations, {
+    intervalMs: 150,
+    label: '协议违规审计落库条数静默',
+  });
+};
 
 describe('早期拒绝与限流的顺序', () => {
   const mongoose = require('mongoose');
@@ -94,11 +104,6 @@ describe('早期拒绝与限流的顺序', () => {
     expect(responses[0].body.errors).toMatchObject({ errorCode: 'HTTP_METHOD_UNSUPPORTED' });
     // ③ 前提自证：只有过了限流闸的违规请求才产生链上写入，且这条通道真的落库
     //（否则 ② 可能是恒真的空集）
-    expect(
-      await waitForStable(countViolations, {
-        intervalMs: 150,
-        label: '协议违规审计落库条数静默',
-      })
-    ).toBe(MAX_GENERAL);
+    expect(await awaitViolations()).toBe(MAX_GENERAL);
   });
 });

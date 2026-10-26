@@ -1,42 +1,16 @@
 /**
- * NODE_ENV 归一与"生产语义"判定（从 config/validate.js 抽出，2026-10-26）
+ * NODE_ENV 归一与"生产语义"判定（零 require 的叶子模块，供 logger 等低层设施使用）。
  *
- * ## 为什么单独成文件（A-1 去环）
- * 这三个函数原本住在 `config/validate.js` 里，而 `utils/logger.js` 顶层
- * `require('../config/validate')` 只为取 `requiresProductionSemantics`——
- * 于是**日志工具反过来把整个配置校验图拉进了自己的加载链**
- * （validate → deploymentCredentialGuards / legacyCbcGuard / loginEncryptGuard
- *  → metrics / passwordHistory → …），并在依赖图上形成 logger ↔ config 的环。
+ * 判据（fail-closed）：
+ *   - development/dev/local/test/ci：允许跳过致命校验；
+ *   - staging/stage：同样跳过（ADR-005 的环境边界）；
+ *   - production/prod/live：执行硬闸；
+ *   - 其余任何值（含配了但为空的 `NODE_ENV=`）→ 也执行硬闸并额外报一条致命错。
+ * 空值不得回落 development：猜错的代价必须是"启动不起来"，而不是"生产以零校验启动"。
  *
- * 方向是错的：日志是最底层的诊断设施，它不该依赖"配置是否合法"这一层。
- * 把判据搬到**零 require 的叶子模块**后：
- *   - `logger.js` → `config/envSemantics`（叶子），不再触达 validate；
- *   - `validate.js` 继续 re-export 这三个函数，对外契约不变
- *     （`config/immutableConfigGuard`、`app.js`、`index.js` 等调用点一行不用改）。
- *
- * ## 判据（fail-closed）原文保留如下
- *
- * 原先整套生产硬闸的入口是 `nodeEnv !== 'production'` 的字面量比较，等于把
- * 「弱密钥能否启动 / 有无 ALLOWED_HOSTS / 有无 REDIS_URL / API 文档是否默认打开」
- * 全部押在一个字符串的拼写上。实测：
- *   NODE_ENV=prod JWT_SECRET=change-this-secret（就在 WEAK_SECRETS 黑名单里）
- *   → validateConfig() 直接 return，进程零校验启动；
- *   同一环境把值改成 production → 报 8 条致命并 exit(1)。
- * `prod` / `Production` / `" production "` 都是真实部署里常见的写法，
- * 而失败的表象是"CI 与本地全绿"，没有任何信号。
- *
- * 判据：
- *   - 开发家族（development/dev/local/test/ci）→ 允许跳过致命校验（保持既有语义）；
- *   - 预发家族（staging/stage）→ 同样跳过（ADR-005 明确的环境边界，见
- *     src/tests/nodeEnvGateFailsClosed.test.js 对该行为的既有断言）；
- *   - 生产家族（production/prod/live）→ 执行硬闸；
- *   - **其余任何值 → 也执行硬闸并额外报一条致命错**：猜错的代价必须是
- *     "启动不起来"，而不是"生产以零校验启动"。"其余任何值"包含**配了但为空**
- *     （`NODE_ENV=`）——那是部署脚本里最常见的失误，不是"没配"（F-216）。
- *
- * **本文件不得 require 任何模块**：一旦引入依赖，它就不再是叶子，
- * 抽出来就白做了（`logger` 会重新被拉进配置图）。这条约束由
- * `src/tests/architecture/requireCycles.test.js` 的分量登记间接守护。
+ * 本文件不得 require 任何模块：一旦引入依赖就不再是叶子，logger 会重新被拉进配置图
+ * （由 src/tests/architecture/requireCycles.test.js 的分量登记守护）。
+ * validate.js 继续 re-export 本模块三个函数，对外契约不变。
  */
 
 'use strict';

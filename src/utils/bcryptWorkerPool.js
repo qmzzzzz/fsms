@@ -3,29 +3,19 @@
 /**
  * bcrypt worker 线程池：hash / compare / genSalt 的同形异步门面
  *
- * 为什么：bcryptjs 是纯 JS 实现，cost-12 一次 compare 约百毫秒。其异步 API
- * 只是把同步计算切片、用 setImmediate 让出事件循环——「卡不死但很慢」，
- * CPU 时间仍在主线程上消耗。登录/改密/MFA 等路径每次都要付这笔账，
- * 高并发登录时事件循环长期处于高负载，拖慢所有接口（含 /health 探针）。
+ * bcryptjs 的异步 API 只是把同步计算切片让出事件循环，CPU 仍在主线程上；
+ * 本模块把计算卸载到常驻 worker（数量 = min(CPU, 4)，`BCRYPT_WORKERS` 覆盖），
+ * 主线程只做消息往返，登录吞吐可按核扩展。
  *
- * 做什么：把 bcrypt 计算卸载到常驻 worker 线程（数量 = min(CPU, 4)，可用
- * BCRYPT_WORKERS 覆盖），主线程只做消息往返。多 worker 之间可并行，
- * 等效于给登录吞吐加了「核数」倍的水平扩展，且不再占用主线程 CPU。
- *
- * 兼容性策略（重要）：
+ * 回退进程内 bcryptjs 的条件（保持测试与可用性语义）：
  * - 测试环境（NODE_ENV=test / JEST_WORKER_ID / VITEST）与
- *   BCRYPT_WORKER_THREADS=0 时**回退进程内 bcryptjs**。现有测试大量依赖
- *   jest.mock('bcryptjs') / jest.spyOn(bcrypt, 'compare') 数调用次数
- *   （loginTimingParity 的时序侧信道判据就是数 compare），跨线程后 mock
- *   无法生效，回退保证测试语义不变。
- * - worker 初始化/运行失败（受限环境、线程崩溃）同样静默回退进程内实现，
- *   登录可用性优先于性能。
- * - API 与 bcryptjs 的 Promise 形态一致（hash/compare/genSalt），
- *   调用方（models/User.js、authService/login.js）零语义改动。
+ *   `BCRYPT_WORKER_THREADS=0`：现有测试用 jest.mock('bcryptjs') 数调用次数
+ *   （loginTimingParity 的时序侧信道判据），跨线程后 mock 不生效；
+ * - worker 初始化/运行失败：登录可用性优先于性能。
+ * 两种实现的 Promise 形态一致，调用方零语义改动。
  *
- * 关停语义：worker 全部 unref()，不阻止进程退出；index.js 的精细关停
- * 流程无需感知本池（关停期间若有在途 compare，进程退出时线程随之销毁，
- * 结果本就不会被任何调用方等待到——与进程内实现的崩溃语义等价）。
+ * 关停：worker 全部 unref()，不阻止进程退出；关停期间的在途 compare 随线程
+ * 销毁，与进程内实现的崩溃语义等价，index.js 的精细关停无需感知本池。
  */
 const os = require('os');
 const path = require('path');

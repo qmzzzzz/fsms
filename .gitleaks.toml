@@ -4,10 +4,9 @@
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "测试夹具中的假 webhook token（dingtalk / 企业微信），非真实凭据"
-regexes = ['''0f1e2d3c4b5a6978''']
-
-[[allowlists]]
-description = "测试夹具中的假口令密文（base64 明文 fake-envelope），非真实凭据"
-regexes = ['''ZmFrZS1lbnZlbG9wZQ==''']
+# 全局允许清单是**单数表** `[allowlist]`（gitleaks 8.24 config.Config.Allowlist）。
+# `[[allowlists]]` 只在 `[[rules]]` 下有效，写在全局会被静默忽略：配置看着配好了，
+# 实际一条都没放行——2026-10-26 本地用 8.24.3 复扫实证。
+[allowlist]
+description = "测试夹具中的假凭据（webhook token / 口令密文），非真实凭据"
+regexes = ['''0f1e2d3c4b5a6978''', '''ZmFrZS1lbnZlbG9wZQ==''']

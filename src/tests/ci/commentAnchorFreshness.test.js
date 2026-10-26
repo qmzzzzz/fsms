@@ -385,9 +385,9 @@ const LIVE = [
   },
   {
     in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
-    at: 'deviceStatsService.js:82',
+    at: 'deviceStatsService.js:67',
     must: /\btotal: \[\{ \$count: 'n' \}\]/,
-    why: '同一档判据专门跑计数：getDeviceStats 收敛为一次 $facet，total 臂在 :82（谓词取整行，避免与其余五档 $count 混淆；逻辑抽到 deviceStatsService 以守住 max-lines 棘轮）',
+    why: '同一档判据专门跑计数：getDeviceStats 收敛为一次 $facet，total 臂在 :67（谓词取整行，避免与其余五档 $count 混淆；逻辑抽到 deviceStatsService 以守住 max-lines 棘轮）',
   },
   {
     in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
@@ -738,13 +738,13 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
     // 这正是第 26 轮台账 M2 抓到的洞（阈值写两遍，放松判据抓不到）。
     const weakened = {
       in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
-      at: 'deviceStatsService.js:82',
+      at: 'deviceStatsService.js:67',
       must: /\$count/,
     };
     expect(mustNearestOutside(weakened)).toBeLessThan(UNIQ_GAP);
     expect(toothlessRegistrations([weakened])).toHaveLength(1);
     // 正向自证：收紧后的同一条必须一条都不报（两向都过，才不是只验失败态）
-    expect(toothlessRegistrations([LIVE.find((e) => e.at === 'deviceStatsService.js:82')])).toEqual(
+    expect(toothlessRegistrations([LIVE.find((e) => e.at === 'deviceStatsService.js:67')])).toEqual(
       []
     );
   });

@@ -7,6 +7,12 @@
       "total": 565,
       "ratio": 0.49380530973451325
     },
+    "src/cluster.js": {
+      "comment": 16,
+      "code": 57,
+      "total": 73,
+      "ratio": 0.2191780821917808
+    },
     "src/config/database.js": {
       "comment": 69,
       "code": 63,
@@ -20,10 +26,10 @@
       "ratio": 0.25630252100840334
     },
     "src/config/envSemantics.js": {
-      "comment": 56,
+      "comment": 30,
       "code": 25,
-      "total": 81,
-      "ratio": 0.691358024691358
+      "total": 55,
+      "ratio": 0.5454545454545454
     },
     "src/config/immutableConfigGuard.js": {
       "comment": 126,
@@ -332,10 +338,10 @@
       "ratio": 0.18181818181818182
     },
     "src/controllers/securityController/overview.js": {
-      "comment": 149,
-      "code": 231,
-      "total": 380,
-      "ratio": 0.39210526315789473
+      "comment": 143,
+      "code": 227,
+      "total": 370,
+      "ratio": 0.3864864864864865
     },
     "src/controllers/securityController/reauth.js": {
       "comment": 6,
@@ -686,10 +692,10 @@
       "ratio": 0.3188405797101449
     },
     "src/routes/authRoutes.js": {
-      "comment": 218,
+      "comment": 216,
       "code": 278,
-      "total": 496,
-      "ratio": 0.43951612903225806
+      "total": 494,
+      "ratio": 0.43724696356275305
     },
     "src/routes/deviceRoutes.js": {
       "comment": 104,
@@ -837,9 +843,9 @@
     },
     "src/services/auditQueryService.js": {
       "comment": 103,
-      "code": 233,
-      "total": 336,
-      "ratio": 0.30654761904761907
+      "code": 227,
+      "total": 330,
+      "ratio": 0.31212121212121213
     },
     "src/services/auditScopeFilter.js": {
       "comment": 54,
@@ -938,10 +944,16 @@
       "ratio": 0.3711340206185567
     },
     "src/services/DeviceService.js": {
-      "comment": 180,
-      "code": 300,
-      "total": 480,
-      "ratio": 0.375
+      "comment": 163,
+      "code": 260,
+      "total": 423,
+      "ratio": 0.38534278959810875
+    },
+    "src/services/deviceStatsService.js": {
+      "comment": 11,
+      "code": 72,
+      "total": 83,
+      "ratio": 0.13253012048192772
     },
     "src/services/exportConcurrency.js": {
       "comment": 81,
@@ -1166,10 +1178,10 @@
       "ratio": 0.19285714285714287
     },
     "src/services/statsCache.js": {
-      "comment": 98,
-      "code": 163,
-      "total": 261,
-      "ratio": 0.37547892720306514
+      "comment": 97,
+      "code": 191,
+      "total": 288,
+      "ratio": 0.3368055555555556
     },
     "src/services/tokenService.js": {
       "comment": 48,
@@ -1245,9 +1257,9 @@
     },
     "src/utils/apiResponse.js": {
       "comment": 59,
-      "code": 63,
-      "total": 122,
-      "ratio": 0.48360655737704916
+      "code": 71,
+      "total": 130,
+      "ratio": 0.45384615384615384
     },
     "src/utils/auditChain.js": {
       "comment": 248,
@@ -1284,6 +1296,18 @@
       "code": 62,
       "total": 175,
       "ratio": 0.6457142857142857
+    },
+    "src/utils/bcryptWorkerPool.js": {
+      "comment": 29,
+      "code": 107,
+      "total": 136,
+      "ratio": 0.21323529411764705
+    },
+    "src/utils/bcryptWorkerThread.js": {
+      "comment": 5,
+      "code": 16,
+      "total": 21,
+      "ratio": 0.23809523809523808
     },
     "src/utils/cidrCoverage.js": {
       "comment": 40,
@@ -1418,10 +1442,10 @@
       "ratio": 0.7222222222222222
     },
     "src/utils/logPiiMask.js": {
-      "comment": 95,
+      "comment": 78,
       "code": 131,
-      "total": 226,
-      "ratio": 0.42035398230088494
+      "total": 209,
+      "ratio": 0.37320574162679426
     },
     "src/utils/logShipper.js": {
       "comment": 166,
@@ -1551,8 +1575,8 @@
     }
   },
   "total": {
-    "comment": 22426,
-    "code": 34798,
-    "ratio": 0.3919
+    "comment": 22418,
+    "code": 35036,
+    "ratio": 0.3902
   }
 }
