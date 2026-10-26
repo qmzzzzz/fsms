@@ -7,3 +7,7 @@ useDefault = true
 [[allowlists]]
 description = "测试夹具中的假 webhook token（dingtalk / 企业微信），非真实凭据"
 regexes = ['''0f1e2d3c4b5a6978''']
+
+[[allowlists]]
+description = "测试夹具中的假口令密文（base64 明文 fake-envelope），非真实凭据"
+regexes = ['''ZmFrZS1lbnZlbG9wZQ==''']

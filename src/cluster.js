@@ -67,7 +67,9 @@ if (workerCount === 1) {
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`[cluster] 收到 ${signal}，向 ${Object.keys(cluster.workers).length} 个 worker 转发`);
+    console.log(
+      `[cluster] 收到 ${signal}，向 ${Object.keys(cluster.workers).length} 个 worker 转发`
+    );
     for (const worker of Object.values(cluster.workers)) {
       worker.kill(signal);
     }

@@ -156,7 +156,7 @@ describe('路由校验分支（T-3）', () => {
         .post('/api/auth/register')
         .send(
           registerPayload({
-            encPassword: 'ZmFrZS1lbnZlbG9wZQ==',
+            encPassword: 'test',
             password: strongPassword,
           })
         );

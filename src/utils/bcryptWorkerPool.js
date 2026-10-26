@@ -78,7 +78,6 @@ const ensurePool = () => {
       idle.worker.postMessage({ id, op: task.op, args: task.args });
     };
 
-
     for (let i = 0; i < resolvePoolSize(); i++) {
       const worker = new Worker(WORKER_FILE);
       worker.unref();
