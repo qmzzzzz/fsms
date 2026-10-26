@@ -765,26 +765,23 @@ describe('门禁负向自检：该红时必须红', () => {
   });
 
   describe('架构无环守卫', () => {
-    it('无环测试真的在扫 require 图，且断言了 3 处惰性 require', () => {
+    it('无环测试真的在扫 require 图，分量清单不可被清空', () => {
       const src = fs.readFileSync(
         path.join(ROOT, 'src/tests/architecture/requireCycles.test.js'),
         'utf8'
       );
-      // 【收紧】原先只匹配 /`require/` 与 /`环|cycle/i` 两个泛化正则：
-      // 把 LAZY 数组清空（循环体变成 for (const ... of [])）仍然绿，
-      // 标题承诺的「断言了 3 处惰性 require」根本没被检验（变异验证 SURVIVED）。
-      // 现改为检查三条惰性 require 片段与「缩进即函数体内」的判据都在。
-      expect(src).toMatch(/const LAZY = \[/);
-      expect(src).toMatch(/return require\('\.{2}\/models\/User'\);/);
-      expect(src).toMatch(/require\('\.\/auth'\)/);
-      expect(src).toMatch(/require\('\.{2}\/middleware\/security'\)/);
-      // 「在函数体内」的判据是缩进检查，缺了它这条用例就退化为「文本存在」
-      expect(src).toContain('indented: /^\\s+\\S/.test(hit)');
-      // 不得把 LAZY 迭代清空成空数组（会静默跳过全部三条检查）
-      expect(src).not.toMatch(/of\s+\[\]\s*\)/);
+      // 2026-10-26 A-1：最后一处手写的「3 处惰性 require」清单已随环消除而删除，
+      // 判据改为钉住**分量清单本身**——它现在是唯一的登记面，清空它等于让
+      // 「新增惰性环」静默通过。旧断言匹配的是已不存在的 LAZY 数组与三条 require 片段。
+      expect(src).toMatch(/const LAZY_SCC = \[/);
+      // 分量清单不得被写成空数组（空清单 + 空实测会让 toEqual 空转成绿）
+      expect(src).not.toMatch(/const LAZY_SCC = \[\s*\]/);
+      // 真实图 → 登记清单的比对，以及 Tarjan 自证都必须在
+      expect(src).toMatch(/expect\(actual\)\.toEqual\(LAZY_SCC\.map/);
+      expect(src).toMatch(/stronglyConnected\(/);
       // 静态图断言与真实加载兜底都必须在
       expect(src).toMatch(/expect\(cycles\)\.toEqual\(\[\]\)/);
-      expect(src).toMatch(/not.toThrow()/);
+      expect(src).toMatch(/not\.toThrow\(\)/);
     });
   });
 

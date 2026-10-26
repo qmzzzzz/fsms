@@ -37,10 +37,13 @@ describe('权限热生效：WebSocket 定向推送', () => {
     return { svc, emitted };
   };
 
-  /** 用 jest.doMock 替换 User 权限查询的返回（userPermissionService 内部惰性 require） */
+  /**
+   * 用 jest.doMock 替换权限服务的返回（push.js 顶层 require 它；此前 mock 的是
+   * models/User 的静态转发，A-1 删除该转发后 mock 面随之下移到 service）
+   */
   const mockUserPermissions = (impl) => {
     jest.doMock(
-      path.join(__dirname, '../../models/User'),
+      path.join(__dirname, '../../services/userPermissionService'),
       () => ({
         getPermissions: impl,
         getPermissionsForUsers: async (ids) => {
@@ -55,7 +58,7 @@ describe('权限热生效：WebSocket 定向推送', () => {
 
   afterEach(() => {
     jest.resetModules();
-    jest.dontMock(path.join(__dirname, '../../models/User'));
+    jest.dontMock(path.join(__dirname, '../../services/userPermissionService'));
   });
 
   test('emitPermissionUpdate 的事件名与前端监听一致（复数 permissions-updated）', () => {
@@ -392,12 +395,12 @@ describe('控制器侧：事件分派与定向同步（真实 HTTP 驱动）', (
     // \u704c\u5165\u7f13\u5b58\uff1a\u6b64\u65f6\u76ee\u6807\u7528\u6237\u62e5\u6709 hotreload:read
     expect(await userPermissionService.getPermissions(target._id)).toContain('hotreload:read');
 
-    // \u8ba9 emitPermissionSync \u771f\u5b9e\u91cd\u7b97\u5e76\u8bb0\u5f55\u7ed3\u679c\uff08\u800c\u4e0d\u662f\u76f4\u63a5\u8c03 User.getPermissions\uff09
+    // \u8ba9 emitPermissionSync \u771f\u5b9e\u91cd\u7b97\u5e76\u8bb0\u5f55\u7ed3\u679c\uff08\u800c\u4e0d\u662f\u76f4\u63a5\u8c03 service \u7684\u7f13\u5b58\u67e5\u8be2\uff09
     const seen = [];
     wsService.emitPermissionSync.mockImplementation(async (userIds) => {
       const ids = [...new Set((userIds || []).map((id) => String(id)).filter(Boolean))];
       for (const id of ids) {
-        seen.push({ id, perms: await User.getPermissions(id) });
+        seen.push({ id, perms: await userPermissionService.getPermissions(id) });
       }
       return { notified: ids.length, offline: 0 };
     });

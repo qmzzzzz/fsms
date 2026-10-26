@@ -37,10 +37,10 @@ const REQUIRED_MODULES = [
   'utils/auditChain.js',
   'services/auditBuffer.js',
   'middleware/rateLimit.js',
-  'middleware/auth.js',
+  'middleware/userAuthCache.js',
   'services/captchaService.js',
   'services/statsCache.js',
-  'services/securityAlert.js',
+  'services/alertDispatch.js',
   'middleware/security/ipBlacklist.js',
   'services/auditScopeFilter.js',
   'models/SystemConfig.js',
@@ -69,6 +69,11 @@ const MUST_NOT_INCLUDE = ['mfaService', 'mfaLastCounter', 'UserSession'];
  */
 const EXEMPT_MODULES = {
   'config/validate.js': '静态字面量 Set（环境别名 / 真值词表），只读',
+  // DEV/PROD/STAGING_ENV_ALIASES：2026-10-26 为拆 A-1 的 require 环，把环境别名词表
+  // 从 config/validate.js 原样搬到本叶子模块（validate.js 改为 re-export）。同一批 Set、
+  // 同一份理由 ⇒ 豁免随迁，而不是新增一条豁免。
+  'config/envSemantics.js':
+    '静态字面量 Set（环境别名 / 真值词表，自 config/validate.js 迁出），只读',
   // SECURITY_RELEVANT，静态字面量 Set（哪些 immutable 档位项该计入安全告警面），只读。
   // 与同族的 config/validate.js、legacyCbcGuard.js 完全同构：是「判据词表」而非进程内状态。
   'config/immutableConfigGuard.js': 'SECURITY_RELEVANT，静态字面量 Set，只读',
@@ -86,6 +91,12 @@ const EXEMPT_MODULES = {
     '进程内幂等守卫（WeakSet 记录已注册的 Router；Router 是 require 缓存的进程内单例），无跨进程语义',
   'routes/wellKnownRoutes.js': 'CLIENT_ERROR_KINDS，静态字面量 Set',
   'services/behaviorBaseline.js': 'VOLUME_FEATURES / NON_ADDITIVE_FEATURES，静态字面量 Set',
+  // warned：`warnOnce(key)` 的去重簿，只记「这条越界告警已经打过」，避免每次读 env 都刷屏。
+  // 它的内容按设计就该逐进程各一份（每个实例都该把自己的那一次告警打出来），
+  // 跨实例不一致的后果仅仅是"多打一条日志"或"少打一条日志"，不是任何机制静默失效。
+  // 登记进清单会让启动期对运维说「多实例部署时导出并发上限会失效」——那是假警报。
+  'services/exportConcurrency.js':
+    'warned：warnOnce 的日志去重簿，按设计逐进程各一份，无跨进程语义',
   'services/sharedCache/memoryStore.js':
     '共享缓存基础设施自身（memStore 是 Redis 未就绪时的回退实现，2026-10-19 拆分随迁）',
   'services/sharedCache/invalidation.js':
@@ -105,6 +116,10 @@ const EXEMPT_MODULES = {
   // utils/mongoFailureAttribution.js 同构。登记进清单会让启动期校验对运维说「多实例部署时
   // PII 加密会静默失效」——那是假警报：词表内容由源码字面量决定，逐进程恒同，不存在不一致。
   'utils/piiCrypto.js': '静态字面量 Set（退化密钥字面量词表），只读、内容全由源码决定',
+  // SENSITIVE_KEYS / STRUCTURAL_KEYS：日志脱敏的「哪些键名算敏感」「哪些键名是结构性
+  // 标识不该掩」两张判据词表。与 utils/piiCrypto.js、middleware/security/sanitize.js 同构：
+  // 内容全由源码字面量决定、逐进程恒同、建好后只 .has()，没有任何写入路径。
+  'utils/logPiiMask.js': 'SENSITIVE_KEYS / STRUCTURAL_KEYS，静态字面量 Set（脱敏判据词表），只读',
   // REFRESH_OUTCOME_RESPONSES：refresh 接口「outcome → 响应函数」的静态查表
   // （2026-10-18 lint 批 1 把 switch 换成 Map；2026-10-19 拆分 authController 后
   // 随迁至 authController/credentials.js）。值全是函数字面量、建好后只 .get()，

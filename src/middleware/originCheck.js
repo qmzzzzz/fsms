@@ -29,17 +29,10 @@ const { DEV_CORS_ORIGINS } = require('../utils/constants');
 // - originalUrl 的 query 可能带令牌（与 app.js 对 morgan :url 做 redactUrlQuery 同一理由）
 // - origin 本身：含 \n 即可在 printf 格式的日志里伪造整行
 const { redactUrlQuery, stripControlChars } = require('../utils/helpers');
-// 早期 403 留痕。延迟到调用时 require 以避免 middleware 目录内的
-// 模块加载顺序耦合（security.js 体量大且会按需引入模型）
-const recordEarlyRejection = (req, meta) => {
-  require('./security').recordEarlyRejection(req, meta);
-};
-
-// 需要校验来源的写方法（与 auditLog 的写操作口径一致 —— 这句话此前是**约定**而不是
-// 事实：auditLog 的默认 operations、behaviorBaseline 的 writes 聚合各自又写了一遍同样的
-// 四个方法，任一处增删就会出现"CSRF 拦了但没审计"或反之。现由本数组作单一事实来源，
-// 冻结是为了让它能安全地作为默认值被共享（否则某个调用方 push 一下就同时改掉了 CSRF 闸）。
-const WRITE_METHODS = Object.freeze(['POST', 'PUT', 'PATCH', 'DELETE']);
+// 早期 403 留痕：直连实现模块，不再经 security/index 门面。
+// 门面会拉入 IP 黑名单与告警链，而这里只需要一条影子审计写入。
+const { recordEarlyRejection } = require('./security/earlyRejection');
+const { WRITE_METHODS } = require('./httpMethods');
 
 /**
  * 解析请求来源：优先 Origin 头；缺失时回退从 Referer 提取 origin

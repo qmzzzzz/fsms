@@ -160,19 +160,19 @@ describe('/security/alerts 的数据范围必须与 /security/audit-logs 同源'
     request(app).get(path).set('Authorization', `Bearer ${token}`).set(reauthHeaders(token));
   /**
    * 观测面用 username：`getRecentAlerts` 的 select 白名单里没有 userId
-   * （securityAlert.js:477-481），而范围过滤恰恰是按 userId 做的。
+   * （securityAlert.js:384-386），而范围过滤恰恰是按 userId 做的。
    * 断言 username 既能在 HTTP 侧认出"这是哪个部门的人"，也顺带钉住
    * "收口用的字段与出口可见字段不是一回事"这个事实。
    */
   const rowsOf = (body) => {
-    // 控制器：ApiResponse.success(res, { data: [...], meta })（controllers/securityController/overview.js:329-341）
-    // ⇒ 响应体里是**双层 data**。这里写死这一层形状，不做"多种可能形状都试一遍"的兜底：
+    // 控制器：ApiResponse.successWithMeta ⇒ data 是数组本身，meta 与它平级（单层信封）。
+    // 这里写死这一层形状，不做"多种可能形状都试一遍"的兜底：
     // 兜底会把"接口返回体变了"和"范围没收口"两件事混成一条红。
-    const list = body?.data?.data;
+    const list = body?.data;
     expect(Array.isArray(list)).toBe(true);
     return list.map((r) => String(r.username ?? '')).filter(Boolean);
   };
-  /** 参照实现：/audit-logs 走的就是这一个翻译器（auditQueryService.js:217） */
+  /** 参照实现：/audit-logs 走的就是这一个翻译器（auditQueryService.js:314） */
   const scopedProbeNames = async (operatorId) => {
     const { applyAuditDataScope } = require('../../services/auditScopeFilter');
     const { query } = await applyAuditDataScope({ action: 'zz_alert_probe' }, operatorId);
@@ -251,7 +251,7 @@ describe('/security/alerts 的数据范围必须与 /security/audit-logs 同源'
 
     const res = await get(allToken, '/api/security/alerts');
     expect(res.status).toBe(200);
-    for (const row of res.body?.data?.data || []) {
+    for (const row of res.body?.data || []) {
       expect(row).not.toHaveProperty('body');
     }
   });

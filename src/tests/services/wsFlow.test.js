@@ -302,11 +302,9 @@ describe('WebSocket 全流程（批次 D2）', () => {
     // 改用 isolateModules 隔离注册表：只让本次 require 用桩，全局注册表与已连接
     // 的 mongoose 保持原样（与 originCheck/authMiddlewareGap 的收口一致）。
     const permCalls = { n: 0 };
-    jest.doMock('../../models/User', () => ({
-      getPermissions: async () => {
-        permCalls.n += 1;
-        throw new Error('db down');
-      },
+    // A-1 之后 push.js 在顶层 require userPermissionService（不再是函数体内惰性
+    // require User 的静态方法）⇒ 桩必须打在服务上，否则重算成功、不走降级分支。
+    jest.doMock('../../services/userPermissionService', () => ({
       getPermissionsForUsers: async () => {
         permCalls.n += 1;
         throw new Error('db down');
@@ -339,6 +337,6 @@ describe('WebSocket 全流程（批次 D2）', () => {
     expect(permCalls.n).toBe(1);
     expect(sent[0].data.permissionCodes).toBeUndefined();
 
-    jest.dontMock('../../models/User');
+    jest.dontMock('../../services/userPermissionService');
   });
 });

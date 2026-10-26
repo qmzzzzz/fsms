@@ -207,22 +207,20 @@ const queryAuditCursorPage = async (req, res, query, { limitNum, cursorQuery, co
   try {
     const [docs, summaryAgg] = await fetchAuditCursorPage(cursorQuery, query, limitNum, collation);
     const { items, hasMore, nextCursor } = buildCursorResult(docs, limitNum, 'timestamp');
-    return ApiResponse.success(
+    return ApiResponse.successWithMeta(
       res,
+      withIpLocation(items),
       {
-        data: withIpLocation(items),
-        meta: {
-          page: null,
-          limit: limitNum,
-          total: null,
-          totalPages: null,
-          hasNext: hasMore,
-          hasPrev: true,
-          nextCursor,
-          lastUpdated: new Date().toISOString(),
-          count: items.length,
-          summary: buildAuditSummary(summaryAgg),
-        },
+        page: null,
+        limit: limitNum,
+        total: null,
+        totalPages: null,
+        hasNext: hasMore,
+        hasPrev: true,
+        nextCursor,
+        lastUpdated: new Date().toISOString(),
+        count: items.length,
+        summary: buildAuditSummary(summaryAgg),
       },
       '获取成功'
     );
@@ -240,21 +238,19 @@ const queryAuditOffsetPage = async (req, res, query, { pageNum, limitNum, collat
       collation
     );
     if (total === 0) {
-      return ApiResponse.success(
+      return ApiResponse.successWithMeta(
         res,
+        [],
         {
-          data: [],
-          meta: {
-            page: pageNum,
-            limit: limitNum,
-            total: 0,
-            totalPages: 0,
-            hasNext: false,
-            hasPrev: false,
-            lastUpdated: new Date().toISOString(),
-            count: 0,
-            summary: { critical: 0, high: 0, medium: 0, low: 0 },
-          },
+          page: pageNum,
+          limit: limitNum,
+          total: 0,
+          totalPages: 0,
+          hasNext: false,
+          hasPrev: false,
+          lastUpdated: new Date().toISOString(),
+          count: 0,
+          summary: { critical: 0, high: 0, medium: 0, low: 0 },
         },
         '获取成功'
       );
@@ -268,25 +264,23 @@ const queryAuditOffsetPage = async (req, res, query, { pageNum, limitNum, collat
     );
     const hasNext = pageNum * limitNum < total;
     const lastLog = logs[logs.length - 1];
-    return ApiResponse.success(
+    return ApiResponse.successWithMeta(
       res,
+      withIpLocation(logs),
       {
-        data: withIpLocation(logs),
-        meta: {
-          page: pageNum,
-          limit: limitNum,
-          total,
-          totalPages: Math.ceil(total / limitNum),
-          hasNext,
-          hasPrev: pageNum > 1,
-          nextCursor:
-            hasNext && lastLog
-              ? encodeCursor({ v: lastLog.timestamp, id: String(lastLog._id) })
-              : null,
-          lastUpdated: new Date().toISOString(),
-          count: logs.length,
-          summary: buildAuditSummary(summaryAgg),
-        },
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+        hasNext,
+        hasPrev: pageNum > 1,
+        nextCursor:
+          hasNext && lastLog
+            ? encodeCursor({ v: lastLog.timestamp, id: String(lastLog._id) })
+            : null,
+        lastUpdated: new Date().toISOString(),
+        count: logs.length,
+        summary: buildAuditSummary(summaryAgg),
       },
       '获取成功'
     );

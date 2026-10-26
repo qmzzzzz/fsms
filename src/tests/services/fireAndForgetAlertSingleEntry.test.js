@@ -64,7 +64,9 @@ const isHandledCall = (line) =>
   line.includes('.catch(') || /await\s+(?:[\w$]+\.)*sendNotification\s*\(/.test(line);
 
 describe('F-214 fire-and-forget 告警投递的单一入口', () => {
-  const ENTRY_FILE = 'src/services/securityAlert.js';
+  // 投递入口本体已迁到 alertDispatch.js（A-1 解开 securityAlert ↔ permissionAbuse
+  // 的惰性环时抽出频控与投递）；securityAlert 仅再导出 dispatchNotification。
+  const ENTRY_FILE = 'src/services/alertDispatch.js';
   const AWAITER_FILE = 'src/services/auditMonitor.js';
   // 第二个 await 侧调用点（2026-09-30 新增审计链周期核验时引入）：同 auditMonitor 的
   // 口径——它要拿投递结果做自己的记账（lastAlertFingerprint / 当日配额），

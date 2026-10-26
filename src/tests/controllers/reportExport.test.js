@@ -149,4 +149,42 @@ describe('报表与导出（批次 D1）', () => {
     // 非法 type 点名 REPORT_TYPE_UNSUPPORTED，与参数格式错误（VALIDATION_FAILED）区分
     expect(bad.body.errors.errorCode).toBe('REPORT_TYPE_UNSUPPORTED');
   });
+
+  /**
+   * P-2：导出并发闸（2026-10-26）
+   *
+   * 上限压到 1、队列压到 0，先手动占住唯一槽位，再发一次真实导出请求：
+   * 必须 **429 + Retry-After + EXPORT_BUSY**，而不是排队或 500。
+   *
+   * 反向对照不可省：释放槽位后同一个请求必须 200 且真是 xlsx 附件。
+   * 只断言"429"的话，接口整体坏掉（例如路由 404、守卫 403）也能被读成
+   * "闸生效了"——这是本仓反复强调的"判据必须能被反证"。
+   */
+  test('P-2：并发已满且队列为 0 ⇒ 429（EXPORT_BUSY + Retry-After），释放后恢复 200', async () => {
+    const gate = require('../../services/exportConcurrency');
+    const KEYS = ['EXPORT_MAX_CONCURRENCY', 'EXPORT_MAX_QUEUE', 'EXPORT_QUEUE_TIMEOUT_MS'];
+    const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+    process.env.EXPORT_MAX_CONCURRENCY = '1';
+    process.env.EXPORT_MAX_QUEUE = '0';
+    process.env.EXPORT_QUEUE_TIMEOUT_MS = '1000';
+    gate.__resetForTest();
+    const release = await gate.acquireExportSlot();
+    try {
+      const busy = await get('/api/reports/export?type=devices&format=xlsx');
+      expect(busy.status).toBe(429);
+      expect(busy.body.errors.errorCode).toBe('EXPORT_BUSY');
+      expect(busy.headers['retry-after']).toBe('1');
+
+      release();
+      const ok = await get('/api/reports/export?type=devices&format=xlsx');
+      expect(ok.status).toBe(200);
+      expect(ok.headers['content-type']).toContain('spreadsheetml');
+    } finally {
+      gate.__resetForTest();
+      for (const key of KEYS) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
+  });
 });

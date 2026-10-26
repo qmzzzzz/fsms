@@ -505,8 +505,8 @@ describe('WebSocket 分支补漏', () => {
 
     test('Redis 模式下有活跃连接时通过房间投递 permission-sync', async () => {
       // redisMode=true 且 fetchSockets 非空 → 经 io.to(userRoom).emit 投递
-      // 先 mock User.getPermissions，再 resetModules，最后 patch sharedCache
-      jest.doMock(path.join(__dirname, '../../models/User'), () => ({
+      // 先 mock 权限服务（push.js 顶层依赖它），再 resetModules，最后 patch sharedCache
+      jest.doMock(path.join(__dirname, '../../services/userPermissionService'), () => ({
         getPermissions: async () => ['read:device', 'write:alarm'],
         getPermissionsForUsers: async (ids) =>
           new Map(ids.map((id) => [String(id), ['read:device', 'write:alarm']])),
@@ -544,7 +544,7 @@ describe('WebSocket 分支补漏', () => {
         expect(sent[0].data.permissionCodes).toEqual(['read:device', 'write:alarm']);
       } finally {
         sharedCache.isRedisEnabled = origIsRedisEnabled;
-        jest.dontMock(path.join(__dirname, '../../models/User'));
+        jest.dontMock(path.join(__dirname, '../../services/userPermissionService'));
         jest.resetModules();
       }
     });

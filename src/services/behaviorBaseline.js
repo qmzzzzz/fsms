@@ -25,7 +25,7 @@ const logger = require('../utils/logger');
 const { BUSINESS_TIMEZONE, OFF_HOURS_START, OFF_HOURS_END } = require('../constants/timezone');
 // 写方法名单的单一事实来源就是 CSRF 那道闸用的同一份（原此处第三份拷贝，
 // 任一处增删会让"基线里的 writes"与"被拦/被审计的写操作"口径分叉）
-const WRITE_METHODS = require('../middleware/originCheck').WRITE_METHODS;
+const { WRITE_METHODS } = require('../middleware/httpMethods');
 // 高危档同样不许在这儿复述一遍（F-149）：本服务的 highRisk 计数与审计页 level=error、
 // 告警取数、概览高危次数共用 constants/audit.js 由有序等级表切出来的同一段。
 const { AUDIT_ERROR_RISK_LEVELS } = require('../constants/audit');

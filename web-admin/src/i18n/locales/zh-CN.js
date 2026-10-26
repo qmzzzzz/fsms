@@ -1329,6 +1329,7 @@ export default {
     permissionTreeDepthAnomaly: '权限树层级异常，请联系管理员核查父级引用',
     permissionListInvalid: '请提供有效的权限列表',
     exportFormatUnsupported: '不支持的导出格式: {format}',
+    exportBusy: '导出任务繁忙，请稍后重试',
     reportTypeUnsupported: '不支持的报表类型',
     roleNotFound: '角色不存在',
     roleViewForbidden: '无权查看该角色',

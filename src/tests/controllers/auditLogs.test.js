@@ -158,7 +158,7 @@ describe('/api/security/audit-logs 查询优化', () => {
   test('合法 category 正确过滤', async () => {
     const res = await queryLogs('category=user');
     expect(res.status).toBe(200);
-    expect(res.body.data.data.every((l) => l.category === 'user')).toBe(true);
+    expect(res.body.data.every((l) => l.category === 'user')).toBe(true);
   });
 
   test('新增的 security / report 分类为合法取值', async () => {
@@ -168,7 +168,7 @@ describe('/api/security/audit-logs 查询优化', () => {
       // 「合法取值」的判据是查询真的跑通并返回列表结构，
       // 而非被枚举白名单静默降级/空手而归
       expect(res.body.success).toBe(true);
-      expect(Array.isArray(res.body.data.data)).toBe(true);
+      expect(Array.isArray(res.body.data)).toBe(true);
     }
   });
 
@@ -176,25 +176,25 @@ describe('/api/security/audit-logs 查询优化', () => {
     const res = await queryLogs('action=login_success&riskLevel=low&level=info');
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.data.data.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.data.length).toBeGreaterThanOrEqual(1);
     // 未传筛选参数返回全量数据
     const all = await queryLogs();
     expect(all.status).toBe(200);
-    expect(all.body.data.data.length).toBeGreaterThanOrEqual(3);
+    expect(all.body.data.length).toBeGreaterThanOrEqual(3);
   });
 
   test('组合筛选正确不遗漏不混淆', async () => {
     const res = await queryLogs('riskLevel=high&action=user_delete');
     expect(res.status).toBe(200);
-    expect(res.body.data.data.length).toBe(1);
-    expect(res.body.data.data[0].action).toBe('user_delete');
-    expect(res.body.data.data[0].riskLevel).toBe('high');
+    expect(res.body.data.length).toBe(1);
+    expect(res.body.data[0].action).toBe('user_delete');
+    expect(res.body.data[0].riskLevel).toBe('high');
   });
 
   test('无排序参数时结果按 timestamp 降序', async () => {
     const res = await queryLogs();
     expect(res.status).toBe(200);
-    const timestamps = res.body.data.data.map((d) => new Date(d.timestamp).getTime());
+    const timestamps = res.body.data.map((d) => new Date(d.timestamp).getTime());
     const sorted = [...timestamps].sort((a, b) => b - a);
     expect(timestamps).toEqual(sorted);
   });
@@ -202,7 +202,7 @@ describe('/api/security/audit-logs 查询优化', () => {
   test('limit 超过上限被截断至 1000', async () => {
     const res = await queryLogs('limit=50000');
     expect(res.status).toBe(200);
-    expect(res.body.data.meta.limit).toBe(1000);
+    expect(res.body.meta.limit).toBe(1000);
   });
 
   test('username 正则特殊字符被转义匹配', async () => {
@@ -210,8 +210,8 @@ describe('/api/security/audit-logs 查询优化', () => {
     expect(res.status).toBe(200);
     // 查询条件中的 . 应被 escapeRegExp 转义为字面字符：部分匹配 user.a / user.a+，
     // 但绝不能把 userXa 当作 user.a 匹配到（未转义时 . 通配会命中）
-    expect(res.body.data.data.length).toBeGreaterThanOrEqual(1);
-    expect(res.body.data.data.some((d) => d.username === 'userXa')).toBe(false);
+    expect(res.body.data.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.data.some((d) => d.username === 'userXa')).toBe(false);
   });
 
   test('超大时间范围触发 X-Performance-Warning 响应头且查询正常', async () => {
@@ -228,7 +228,7 @@ describe('/api/security/audit-logs 查询优化', () => {
     // 原实现在这里直接早退（`if (!startDate || !endDate) return;`），于是唯一
     // "必然全表扫"的形态反而是唯一不声明的那一格
     expect(res.headers['x-performance-warning']).toBe('no_time_window');
-    expect(Array.isArray(res.body.data.data)).toBe(true);
+    expect(Array.isArray(res.body.data)).toBe(true);
   });
 
   test('只给一端也算没有时间窗（上界缺失 = 扫到当下）', async () => {
@@ -259,7 +259,7 @@ describe('/api/security/audit-logs 查询优化', () => {
   test('合法 userId 正常过滤', async () => {
     const res = await queryLogs(`userId=${admin._id}`);
     expect(res.status).toBe(200);
-    expect(res.body.data.data.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.data.length).toBeGreaterThanOrEqual(1);
   });
 
   test('非法 ip 返回 400', async () => {
@@ -272,11 +272,11 @@ describe('/api/security/audit-logs 查询优化', () => {
     // 固件中以 TEST_CLIENT_IP 落库，用映射形态查询也应命中
     const direct = await queryLogs(`ip=${TEST_CLIENT_IP}`);
     expect(direct.status).toBe(200);
-    expect(direct.body.data.data.length).toBeGreaterThanOrEqual(1);
+    expect(direct.body.data.length).toBeGreaterThanOrEqual(1);
 
     const mapped = await queryLogs(`ip=::ffff:${TEST_CLIENT_IP}`);
     expect(mapped.status).toBe(200);
-    expect(mapped.body.data.data.length).toBeGreaterThanOrEqual(1);
+    expect(mapped.body.data.length).toBeGreaterThanOrEqual(1);
   });
 
   test('响应不外泄 hmac（阻断 HMAC 离线爆破通道），但保留 hash/prevHash', async () => {
@@ -297,7 +297,7 @@ describe('/api/security/audit-logs 查询优化', () => {
 
     const res = await queryLogs('username=hmac_probe_user&limit=10');
     expect(res.status).toBe(200);
-    const hit = res.body.data.data.find((l) => l._id === String(created._id));
+    const hit = res.body.data.find((l) => l._id === String(created._id));
     expect(hit).toBeDefined();
 
     // hmac = HMAC-SHA256(HMAC_SECRET, hash)。与同响应中的 hash 组成明文—标签对，

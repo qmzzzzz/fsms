@@ -32,12 +32,17 @@ const attachRequestContext = winston.format((info) => {
 // （等于凭空多一行可伪造的日志），json 才会转义；且只有 json 模式让
 // service/hostname/requestId 保持成可被 ELK/log-shipper 解析的字段。
 // 判据必须与 cookie Secure、API 文档默认位同一套"未识别即按生产办"的语义
-// （见 config/validate.requiresProductionSemantics 的说明），不能押在字面量
-// 'production' 上：`NODE_ENV=prod` 这一路此前是"配置按生产校验、cookie 带 Secure、
+// （见 config/envSemantics 的说明），不能押在字面量 'production' 上：
+// `NODE_ENV=prod` 这一路此前是"配置按生产校验、cookie 带 Secure、
 // 文档关闭，日志却退回 printf"——恰好把最容易配错的部署变成唯一不可解析的格式。
-// 无环说明：validate.js 顶层不 require 任何模块（logger 只在校验函数内惰性取），
-// 所以这里可以顶层取。
-const { requiresProductionSemantics } = require('../config/validate');
+//
+// A-1（2026-10-26）：此前这里 require 的是 `../config/validate`。方向是错的——
+// 日志是最底层的诊断设施，却为一个判据把**整张配置校验图**拉进了自己的加载链
+// （validate → deploymentCredentialGuards / legacyCbcGuard / loginEncryptGuard
+// → metrics / passwordHistory → …），并在依赖图上形成 logger ↔ config 的环。
+// 判据已搬到零 require 的叶子模块 config/envSemantics.js，validate 侧 re-export，
+// 对外契约不变。
+const { requiresProductionSemantics } = require('../config/envSemantics');
 const productionSemantics = requiresProductionSemantics();
 
 // 落盘前的统一清洗（同类，但落在最后一道边界上）：
@@ -51,6 +56,11 @@ const productionSemantics = requiresProductionSemantics();
 // （Bidi 类，可篡改终端显示顺序），所以两种模式都需要这条，不是只补 dev。
 const MAX_LOG_MESSAGE_CHARS = 8192;
 const MAX_LOG_FIELD_CHARS = 1024;
+// O-1（2026-10-26）：PII 掩码与凭据脱敏。判据与"哪些键算凭据"的完整理由见
+// utils/logPiiMask.js 头部注释——那里同时写明了**为什么不能**把掩码加到审计库上。
+// 位置在 stripControlChars **之后**：先按原长度截断再掩码，掩码后的文本只会更短，
+// 不会出现"截断把半掩的号码切成两截、正则再也认不出"的形状。
+const { maskLogInfo, isMaskEnabled } = require('./logPiiMask');
 // 纯函数形态：winston format 只是它的一层包装。
 // 单独导出是为了能被确定性单元测试直接调用——走"真写文件再读回来"的断言
 // 依赖 daily-rotate 的异步落盘时序与本地时区文件名，实测在同机其它套件并发时
@@ -63,7 +73,7 @@ const sanitizeLogInfo = (info) => {
     if (key === 'message' || typeof value !== 'string') continue;
     info[key] = stripControlChars(value, MAX_LOG_FIELD_CHARS);
   }
-  return info;
+  return maskLogInfo(info);
 };
 const sanitizeLogRecords = winston.format(sanitizeLogInfo);
 
@@ -215,6 +225,17 @@ logger.add(
     format: consoleFormat,
   })
 );
+
+// O-1：关掉 PII 掩码必须在日志里留痕。
+// 否则它会变成一个"没人记得的静默例外"——半年后有人问"日志里为什么有完整手机号"，
+// 答案是某次排查时关掉就再没打开，而这件事在任何地方都没有记录。
+if (!isMaskEnabled()) {
+  const message =
+    'LOG_PII_MASK=false：运行日志的 PII 掩码与凭据脱敏已关闭，' +
+    'email/手机号/身份证与 password/token 类字段将原样落盘';
+  if (productionSemantics) logger.error(message);
+  else logger.warn(message);
+}
 
 const shippingUrl = process.env.LOG_SHIPPING_URL;
 

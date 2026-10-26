@@ -66,8 +66,8 @@ describe('auditController endpoint behavior', () => {
     const res = await authed(`/api/security/audit-logs?username=does-not-exist-${stamp}&limit=10`);
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.data.data).toEqual([]);
-    expect(res.body.data.meta).toMatchObject({ total: 0, totalPages: 0 });
+    expect(res.body.data).toEqual([]);
+    expect(res.body.meta).toMatchObject({ total: 0, totalPages: 0 });
   });
 
   test('rejects invalid integrity-verification parameters before querying', async () => {

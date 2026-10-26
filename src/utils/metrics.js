@@ -16,6 +16,8 @@
  * - readyz_verdict / readyz_verdict_age_seconds / readyz_checks_total{result}：就绪判定
  * - disk_free_bytes{path} / disk_total_bytes{path} / disk_probe_failures_total：日志卷余量
  * - log_shipper_flush_failures_total / log_shipper_dropped_lines_total：日志投递失败与丢行
+ * - export_inflight / export_queued / export_rejected_total{reason}：报表导出并发闸（P-2）
+ * - ws_connections / ws_inbound_throttled_total / ws_inbound_disconnects_total：WebSocket 容量信号（O-2）
  *
  * route 标签取「路由模板」而非原始 URL：匹配到具体路由时用 baseUrl+path
  * （如 /api/devices/:id），未匹配（404）统一记 unmatched——防止把用户可控
@@ -439,6 +441,10 @@ function getSnapshot() {
       detection: detectionMetrics.getDetectionSnapshot(),
     },
     series: seriesStats(),
+    // 导出并发闸（P-2）：在途/排队/拒绝，与 /metrics 文本同源（metricsRuntime）
+    export: runtimeMetrics.getExportSnapshot(),
+    // WebSocket 容量信号（O-2）：连接数拉取式取值，入站丢弃/断开为推送计数
+    ws: runtimeMetrics.getWsSnapshot(),
     process: {
       uptimeSeconds: Math.floor(process.uptime()),
       rssMB: Number((mem.rss / 1024 / 1024).toFixed(1)),

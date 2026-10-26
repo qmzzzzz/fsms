@@ -58,7 +58,7 @@ const {
 const ApiResponse = require('./utils/apiResponse');
 const { checkMongoReady, checkRedisReady } = require('./utils/healthChecks');
 const { multiInstanceReadinessBlocker } = require('./constants/runtime');
-const { getTransactionTopology } = require('./utils/transaction');
+const { getTransactionTopology, transactionReadinessBlocker } = require('./utils/transaction');
 const swagger = require('./config/swagger');
 const { verifyBuildPin: verifyLoginKeyPin } = require('./utils/loginCipher');
 
@@ -398,9 +398,15 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
 /**
  * 事务能力的对外标记（固定枚举，不暴露拓扑细节）
  *
- * standalone 只降级不摘流量：读路径与单集合写仍然可用，把 /readyz 判成
+ * ~~standalone 只降级不摘流量：读路径与单集合写仍然可用，把 /readyz 判成
  * unready 会让 LB 把整个实例下线，损失远大于「跨集合写非原子」本身。
- * 标记为 degraded 供监控告警，是否升级为摘流量由部署方决定。
+ * 标记为 degraded 供监控告警，是否升级为摘流量由部署方决定。~~
+ *
+ * **2026-10-26 更正（P-1）**：上一段的取舍只在「多集合写是少数路径」时成立，
+ * 它漏了失败形态——顺序写中途失败会残留跨集合不一致（幽灵告警、悬空巡检引用），
+ * 且没有任何自动修复路径。生产语义下 standalone 现在**参与就绪判定**
+ * （`transactionReadinessBlocker`，`/readyz` 503）；本标记仍只表达"能力档位"，
+ * 两者分工不变：标记说「事务可用性如何」，闸说「这个实例该不该接流量」。
  */
 const transactionMarker = () => {
   const current = getTransactionTopology();
@@ -436,8 +442,12 @@ function installRoutes(app) {
     Promise.all([checkMongoReady(), checkRedisReady()])
       .then(([mongo, redis]) => {
         // A-2：多实例且没有分布式审计锁 ⇒ 审计链会分叉，实例不得接流量。
+        // P-1：生产语义下 standalone ⇒ 多集合写非原子且失败留残骸，同样不得接流量。
+        // 两者都是「拓扑缺陷」，合并到同一个对外字段；优先级取多实例——
+        // 它同时影响审计链与限流计数，且修法（补 Redis）与事务拓扑无关，
+        // 同时命中时先说更严重的那条，避免运维修完副本集才发现还有第二道。
         // 固定枚举对外，拓扑细节只进日志（本端点不鉴权）。
-        const topologyBlocker = multiInstanceReadinessBlocker();
+        const topologyBlocker = multiInstanceReadinessBlocker() ?? transactionReadinessBlocker();
         const ready = mongo.ok && redis.ok && !topologyBlocker;
         // 就绪判定落进指标：/readyz 是「能不能干活」的唯一权威判据，
         // 而它此前只在响应体里出现一次——LB 摘了流量，监控面板却全绿。

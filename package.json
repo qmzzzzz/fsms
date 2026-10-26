@@ -37,7 +37,8 @@
     "migrate:create": "migrate-mongo create",
     "migrate:status": "migrate-mongo status",
     "migrate:up": "migrate-mongo up",
-    "migrate:down": "migrate-mongo down"
+    "migrate:down": "migrate-mongo down",
+    "start:cluster": "node src/cluster.js"
   },
   "keywords": [
     "fire-safety",

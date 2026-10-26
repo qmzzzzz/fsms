@@ -271,11 +271,10 @@ describe('审计 xlsx 导出的 username 前缀 + collation 口径', () => {
         .set('Authorization', `Bearer ${superToken}`)
         .set(reauthHeaders(superToken));
       expect(res.status).toBe(200);
-      // 响应信封：body.data = { data: [行…], meta: { total, count, … } }
-      const payload = res.body.data || {};
-      const rows = payload.data || [];
+      // 响应信封（单层）：body.data = [行…]，body.meta = { total, count, … }
+      const rows = res.body.data || [];
       expect(rows.map((d) => d.username).sort()).toEqual([...usernames.ciMatches].sort());
-      expect(payload.meta.total).toBe(usernames.ciMatches.length);
+      expect(res.body.meta.total).toBe(usernames.ciMatches.length);
     });
   });
 

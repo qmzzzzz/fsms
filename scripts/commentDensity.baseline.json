@@ -1,0 +1,1558 @@
+{
+  "note": "注释密度棘轮基线（生产代码：src/** 排除 src/tests/**）。只许收紧；新增文件密度上限见 scripts/commentDensity.js 的 NEW_FILE_MAX。",
+  "files": {
+    "src/app.js": {
+      "comment": 279,
+      "code": 286,
+      "total": 565,
+      "ratio": 0.49380530973451325
+    },
+    "src/config/database.js": {
+      "comment": 69,
+      "code": 63,
+      "total": 132,
+      "ratio": 0.5227272727272727
+    },
+    "src/config/deploymentCredentialGuards.js": {
+      "comment": 61,
+      "code": 177,
+      "total": 238,
+      "ratio": 0.25630252100840334
+    },
+    "src/config/envSemantics.js": {
+      "comment": 56,
+      "code": 25,
+      "total": 81,
+      "ratio": 0.691358024691358
+    },
+    "src/config/immutableConfigGuard.js": {
+      "comment": 126,
+      "code": 89,
+      "total": 215,
+      "ratio": 0.586046511627907
+    },
+    "src/config/index.js": {
+      "comment": 72,
+      "code": 84,
+      "total": 156,
+      "ratio": 0.46153846153846156
+    },
+    "src/config/legacyCbcGuard.js": {
+      "comment": 48,
+      "code": 26,
+      "total": 74,
+      "ratio": 0.6486486486486487
+    },
+    "src/config/loginEncryptGuard.js": {
+      "comment": 40,
+      "code": 25,
+      "total": 65,
+      "ratio": 0.6153846153846154
+    },
+    "src/config/secrets.js": {
+      "comment": 67,
+      "code": 64,
+      "total": 131,
+      "ratio": 0.5114503816793893
+    },
+    "src/config/swagger.js": {
+      "comment": 84,
+      "code": 107,
+      "total": 191,
+      "ratio": 0.4397905759162304
+    },
+    "src/config/transportSecurity.js": {
+      "comment": 55,
+      "code": 78,
+      "total": 133,
+      "ratio": 0.41353383458646614
+    },
+    "src/config/trustedProxies.js": {
+      "comment": 65,
+      "code": 60,
+      "total": 125,
+      "ratio": 0.52
+    },
+    "src/config/validate.js": {
+      "comment": 333,
+      "code": 289,
+      "total": 622,
+      "ratio": 0.5353697749196141
+    },
+    "src/constants/alarm.js": {
+      "comment": 28,
+      "code": 12,
+      "total": 40,
+      "ratio": 0.7
+    },
+    "src/constants/audit.js": {
+      "comment": 213,
+      "code": 217,
+      "total": 430,
+      "ratio": 0.49534883720930234
+    },
+    "src/constants/backupObjectives.js": {
+      "comment": 118,
+      "code": 166,
+      "total": 284,
+      "ratio": 0.4154929577464789
+    },
+    "src/constants/breachedPasswords.js": {
+      "comment": 46,
+      "code": 126,
+      "total": 172,
+      "ratio": 0.26744186046511625
+    },
+    "src/constants/businessRetention.js": {
+      "comment": 104,
+      "code": 142,
+      "total": 246,
+      "ratio": 0.42276422764227645
+    },
+    "src/constants/canaryAccounts.js": {
+      "comment": 50,
+      "code": 52,
+      "total": 102,
+      "ratio": 0.49019607843137253
+    },
+    "src/constants/dataScopeFields.js": {
+      "comment": 28,
+      "code": 19,
+      "total": 47,
+      "ratio": 0.5957446808510638
+    },
+    "src/constants/detectionObjectives.js": {
+      "comment": 31,
+      "code": 37,
+      "total": 68,
+      "ratio": 0.45588235294117646
+    },
+    "src/constants/deviceAlerts.js": {
+      "comment": 73,
+      "code": 50,
+      "total": 123,
+      "ratio": 0.5934959349593496
+    },
+    "src/constants/deviceStatus.js": {
+      "comment": 23,
+      "code": 4,
+      "total": 27,
+      "ratio": 0.8518518518518519
+    },
+    "src/constants/failOpenSites.js": {
+      "comment": 60,
+      "code": 253,
+      "total": 313,
+      "ratio": 0.19169329073482427
+    },
+    "src/constants/inspection.js": {
+      "comment": 69,
+      "code": 26,
+      "total": 95,
+      "ratio": 0.7263157894736842
+    },
+    "src/constants/ipList.js": {
+      "comment": 21,
+      "code": 2,
+      "total": 23,
+      "ratio": 0.9130434782608695
+    },
+    "src/constants/ipLocationCodes.js": {
+      "comment": 28,
+      "code": 5,
+      "total": 33,
+      "ratio": 0.8484848484848485
+    },
+    "src/constants/permission.js": {
+      "comment": 28,
+      "code": 10,
+      "total": 38,
+      "ratio": 0.7368421052631579
+    },
+    "src/constants/probePaths.js": {
+      "comment": 45,
+      "code": 10,
+      "total": 55,
+      "ratio": 0.8181818181818182
+    },
+    "src/constants/reportExportLabels.js": {
+      "comment": 15,
+      "code": 46,
+      "total": 61,
+      "ratio": 0.2459016393442623
+    },
+    "src/constants/retention.js": {
+      "comment": 44,
+      "code": 39,
+      "total": 83,
+      "ratio": 0.5301204819277109
+    },
+    "src/constants/runtime.js": {
+      "comment": 219,
+      "code": 286,
+      "total": 505,
+      "ratio": 0.43366336633663366
+    },
+    "src/constants/securitySuggestions.js": {
+      "comment": 31,
+      "code": 9,
+      "total": 40,
+      "ratio": 0.775
+    },
+    "src/constants/timezone.js": {
+      "comment": 166,
+      "code": 108,
+      "total": 274,
+      "ratio": 0.6058394160583942
+    },
+    "src/controllers/alarmController.js": {
+      "comment": 113,
+      "code": 289,
+      "total": 402,
+      "ratio": 0.2810945273631841
+    },
+    "src/controllers/auditController.js": {
+      "comment": 72,
+      "code": 131,
+      "total": 203,
+      "ratio": 0.35467980295566504
+    },
+    "src/controllers/authController/credentials.js": {
+      "comment": 93,
+      "code": 191,
+      "total": 284,
+      "ratio": 0.3274647887323944
+    },
+    "src/controllers/authController/index.js": {
+      "comment": 24,
+      "code": 33,
+      "total": 57,
+      "ratio": 0.42105263157894735
+    },
+    "src/controllers/authController/profile.js": {
+      "comment": 34,
+      "code": 96,
+      "total": 130,
+      "ratio": 0.26153846153846155
+    },
+    "src/controllers/authController/session.js": {
+      "comment": 112,
+      "code": 159,
+      "total": 271,
+      "ratio": 0.4132841328413284
+    },
+    "src/controllers/authController/shared.js": {
+      "comment": 15,
+      "code": 7,
+      "total": 22,
+      "ratio": 0.6818181818181818
+    },
+    "src/controllers/deviceController.js": {
+      "comment": 114,
+      "code": 247,
+      "total": 361,
+      "ratio": 0.3157894736842105
+    },
+    "src/controllers/inspectionController.js": {
+      "comment": 119,
+      "code": 274,
+      "total": 393,
+      "ratio": 0.30279898218829515
+    },
+    "src/controllers/inspectionGuards.js": {
+      "comment": 71,
+      "code": 91,
+      "total": 162,
+      "ratio": 0.4382716049382716
+    },
+    "src/controllers/ipListController.js": {
+      "comment": 101,
+      "code": 297,
+      "total": 398,
+      "ratio": 0.2537688442211055
+    },
+    "src/controllers/mfaController.js": {
+      "comment": 85,
+      "code": 299,
+      "total": 384,
+      "ratio": 0.22135416666666666
+    },
+    "src/controllers/permissionController.js": {
+      "comment": 56,
+      "code": 179,
+      "total": 235,
+      "ratio": 0.23829787234042554
+    },
+    "src/controllers/reportController.js": {
+      "comment": 144,
+      "code": 204,
+      "total": 348,
+      "ratio": 0.41379310344827586
+    },
+    "src/controllers/roleController.js": {
+      "comment": 61,
+      "code": 304,
+      "total": 365,
+      "ratio": 0.16712328767123288
+    },
+    "src/controllers/roleGuards.js": {
+      "comment": 61,
+      "code": 132,
+      "total": 193,
+      "ratio": 0.3160621761658031
+    },
+    "src/controllers/rolePermissionController.js": {
+      "comment": 44,
+      "code": 264,
+      "total": 308,
+      "ratio": 0.14285714285714285
+    },
+    "src/controllers/securityController/account.js": {
+      "comment": 58,
+      "code": 169,
+      "total": 227,
+      "ratio": 0.2555066079295154
+    },
+    "src/controllers/securityController/admin.js": {
+      "comment": 48,
+      "code": 189,
+      "total": 237,
+      "ratio": 0.20253164556962025
+    },
+    "src/controllers/securityController/config.js": {
+      "comment": 40,
+      "code": 140,
+      "total": 180,
+      "ratio": 0.2222222222222222
+    },
+    "src/controllers/securityController/index.js": {
+      "comment": 6,
+      "code": 27,
+      "total": 33,
+      "ratio": 0.18181818181818182
+    },
+    "src/controllers/securityController/overview.js": {
+      "comment": 149,
+      "code": 231,
+      "total": 380,
+      "ratio": 0.39210526315789473
+    },
+    "src/controllers/securityController/reauth.js": {
+      "comment": 6,
+      "code": 11,
+      "total": 17,
+      "ratio": 0.35294117647058826
+    },
+    "src/controllers/securityController/sensitive.js": {
+      "comment": 132,
+      "code": 250,
+      "total": 382,
+      "ratio": 0.34554973821989526
+    },
+    "src/controllers/securityController/shared.js": {
+      "comment": 6,
+      "code": 4,
+      "total": 10,
+      "ratio": 0.6
+    },
+    "src/controllers/userController/create.js": {
+      "comment": 66,
+      "code": 186,
+      "total": 252,
+      "ratio": 0.2619047619047619
+    },
+    "src/controllers/userController/delete.js": {
+      "comment": 43,
+      "code": 147,
+      "total": 190,
+      "ratio": 0.22631578947368422
+    },
+    "src/controllers/userController/index.js": {
+      "comment": 4,
+      "code": 15,
+      "total": 19,
+      "ratio": 0.21052631578947367
+    },
+    "src/controllers/userController/read.js": {
+      "comment": 55,
+      "code": 130,
+      "total": 185,
+      "ratio": 0.2972972972972973
+    },
+    "src/controllers/userController/roles.js": {
+      "comment": 73,
+      "code": 169,
+      "total": 242,
+      "ratio": 0.30165289256198347
+    },
+    "src/controllers/userController/shared.js": {
+      "comment": 70,
+      "code": 82,
+      "total": 152,
+      "ratio": 0.4605263157894737
+    },
+    "src/controllers/userController/update.js": {
+      "comment": 89,
+      "code": 178,
+      "total": 267,
+      "ratio": 0.3333333333333333
+    },
+    "src/docs/generate.js": {
+      "comment": 70,
+      "code": 1110,
+      "total": 1180,
+      "ratio": 0.059322033898305086
+    },
+    "src/index.js": {
+      "comment": 179,
+      "code": 275,
+      "total": 454,
+      "ratio": 0.394273127753304
+    },
+    "src/middleware/auth.js": {
+      "comment": 159,
+      "code": 222,
+      "total": 381,
+      "ratio": 0.41732283464566927
+    },
+    "src/middleware/dataScope.js": {
+      "comment": 55,
+      "code": 43,
+      "total": 98,
+      "ratio": 0.5612244897959183
+    },
+    "src/middleware/errorHandler.js": {
+      "comment": 95,
+      "code": 126,
+      "total": 221,
+      "ratio": 0.4298642533936652
+    },
+    "src/middleware/httpMethods.js": {
+      "comment": 10,
+      "code": 2,
+      "total": 12,
+      "ratio": 0.8333333333333334
+    },
+    "src/middleware/index.js": {
+      "comment": 18,
+      "code": 87,
+      "total": 105,
+      "ratio": 0.17142857142857143
+    },
+    "src/middleware/logoutAuth.js": {
+      "comment": 38,
+      "code": 62,
+      "total": 100,
+      "ratio": 0.38
+    },
+    "src/middleware/metricsAuth.js": {
+      "comment": 72,
+      "code": 51,
+      "total": 123,
+      "ratio": 0.5853658536585366
+    },
+    "src/middleware/originCheck.js": {
+      "comment": 58,
+      "code": 72,
+      "total": 130,
+      "ratio": 0.4461538461538462
+    },
+    "src/middleware/protocolCompliance.js": {
+      "comment": 143,
+      "code": 170,
+      "total": 313,
+      "ratio": 0.45686900958466453
+    },
+    "src/middleware/queryLimit.js": {
+      "comment": 73,
+      "code": 77,
+      "total": 150,
+      "ratio": 0.4866666666666667
+    },
+    "src/middleware/rateLimit.js": {
+      "comment": 296,
+      "code": 317,
+      "total": 613,
+      "ratio": 0.4828711256117455
+    },
+    "src/middleware/rateLimitStore.js": {
+      "comment": 85,
+      "code": 95,
+      "total": 180,
+      "ratio": 0.4722222222222222
+    },
+    "src/middleware/rbac.js": {
+      "comment": 190,
+      "code": 248,
+      "total": 438,
+      "ratio": 0.4337899543378995
+    },
+    "src/middleware/requestId.js": {
+      "comment": 22,
+      "code": 16,
+      "total": 38,
+      "ratio": 0.5789473684210527
+    },
+    "src/middleware/security/auditLog.js": {
+      "comment": 162,
+      "code": 142,
+      "total": 304,
+      "ratio": 0.5328947368421053
+    },
+    "src/middleware/security/earlyRejection.js": {
+      "comment": 29,
+      "code": 32,
+      "total": 61,
+      "ratio": 0.47540983606557374
+    },
+    "src/middleware/security/index.js": {
+      "comment": 188,
+      "code": 281,
+      "total": 469,
+      "ratio": 0.40085287846481876
+    },
+    "src/middleware/security/ipBlacklist.js": {
+      "comment": 113,
+      "code": 96,
+      "total": 209,
+      "ratio": 0.5406698564593302
+    },
+    "src/middleware/security/ipBlacklistStore.js": {
+      "comment": 24,
+      "code": 31,
+      "total": 55,
+      "ratio": 0.43636363636363634
+    },
+    "src/middleware/security/reauthTicket.js": {
+      "comment": 8,
+      "code": 29,
+      "total": 37,
+      "ratio": 0.21621621621621623
+    },
+    "src/middleware/security/sanitize.js": {
+      "comment": 88,
+      "code": 85,
+      "total": 173,
+      "ratio": 0.5086705202312138
+    },
+    "src/middleware/security/securityHeaders.js": {
+      "comment": 102,
+      "code": 109,
+      "total": 211,
+      "ratio": 0.4834123222748815
+    },
+    "src/middleware/sentry.js": {
+      "comment": 107,
+      "code": 89,
+      "total": 196,
+      "ratio": 0.5459183673469388
+    },
+    "src/middleware/staticFrontend.js": {
+      "comment": 89,
+      "code": 92,
+      "total": 181,
+      "ratio": 0.49171270718232046
+    },
+    "src/middleware/tokenBlacklist.js": {
+      "comment": 83,
+      "code": 124,
+      "total": 207,
+      "ratio": 0.40096618357487923
+    },
+    "src/middleware/userAuthCache.js": {
+      "comment": 51,
+      "code": 67,
+      "total": 118,
+      "ratio": 0.4322033898305085
+    },
+    "src/middleware/validateObjectId.js": {
+      "comment": 48,
+      "code": 24,
+      "total": 72,
+      "ratio": 0.6666666666666666
+    },
+    "src/middleware/validateQuery.js": {
+      "comment": 19,
+      "code": 13,
+      "total": 32,
+      "ratio": 0.59375
+    },
+    "src/models/AuditLog.js": {
+      "comment": 142,
+      "code": 199,
+      "total": 341,
+      "ratio": 0.41642228739002934
+    },
+    "src/models/auditLogHooks.js": {
+      "comment": 49,
+      "code": 86,
+      "total": 135,
+      "ratio": 0.362962962962963
+    },
+    "src/models/auditLogQueryStatics.js": {
+      "comment": 25,
+      "code": 80,
+      "total": 105,
+      "ratio": 0.23809523809523808
+    },
+    "src/models/auditLogSanitizer.js": {
+      "comment": 33,
+      "code": 37,
+      "total": 70,
+      "ratio": 0.4714285714285714
+    },
+    "src/models/auditLogWriteStatics.js": {
+      "comment": 43,
+      "code": 99,
+      "total": 142,
+      "ratio": 0.3028169014084507
+    },
+    "src/models/FireAlarm.js": {
+      "comment": 92,
+      "code": 166,
+      "total": 258,
+      "ratio": 0.35658914728682173
+    },
+    "src/models/FireDevice.js": {
+      "comment": 84,
+      "code": 229,
+      "total": 313,
+      "ratio": 0.268370607028754
+    },
+    "src/models/index.js": {
+      "comment": 3,
+      "code": 24,
+      "total": 27,
+      "ratio": 0.1111111111111111
+    },
+    "src/models/Inspection.js": {
+      "comment": 46,
+      "code": 158,
+      "total": 204,
+      "ratio": 0.22549019607843138
+    },
+    "src/models/IPBlacklist.js": {
+      "comment": 106,
+      "code": 194,
+      "total": 300,
+      "ratio": 0.35333333333333333
+    },
+    "src/models/Permission.js": {
+      "comment": 23,
+      "code": 80,
+      "total": 103,
+      "ratio": 0.22330097087378642
+    },
+    "src/models/Role.js": {
+      "comment": 28,
+      "code": 94,
+      "total": 122,
+      "ratio": 0.22950819672131148
+    },
+    "src/models/SystemConfig.js": {
+      "comment": 97,
+      "code": 164,
+      "total": 261,
+      "ratio": 0.3716475095785441
+    },
+    "src/models/TokenBlacklist.js": {
+      "comment": 5,
+      "code": 27,
+      "total": 32,
+      "ratio": 0.15625
+    },
+    "src/models/User.js": {
+      "comment": 268,
+      "code": 278,
+      "total": 546,
+      "ratio": 0.4908424908424908
+    },
+    "src/models/UserSession.js": {
+      "comment": 149,
+      "code": 129,
+      "total": 278,
+      "ratio": 0.5359712230215827
+    },
+    "src/plugins/autoIncrement.js": {
+      "comment": 80,
+      "code": 106,
+      "total": 186,
+      "ratio": 0.43010752688172044
+    },
+    "src/routes/alarmRoutes.js": {
+      "comment": 66,
+      "code": 141,
+      "total": 207,
+      "ratio": 0.3188405797101449
+    },
+    "src/routes/authRoutes.js": {
+      "comment": 218,
+      "code": 278,
+      "total": 496,
+      "ratio": 0.43951612903225806
+    },
+    "src/routes/deviceRoutes.js": {
+      "comment": 104,
+      "code": 243,
+      "total": 347,
+      "ratio": 0.29971181556195964
+    },
+    "src/routes/index.js": {
+      "comment": 3,
+      "code": 22,
+      "total": 25,
+      "ratio": 0.12
+    },
+    "src/routes/inspectionRoutes.js": {
+      "comment": 114,
+      "code": 287,
+      "total": 401,
+      "ratio": 0.28428927680798005
+    },
+    "src/routes/permissionRoutes.js": {
+      "comment": 56,
+      "code": 176,
+      "total": 232,
+      "ratio": 0.2413793103448276
+    },
+    "src/routes/reportRoutes.js": {
+      "comment": 57,
+      "code": 66,
+      "total": 123,
+      "ratio": 0.4634146341463415
+    },
+    "src/routes/roleRoutes.js": {
+      "comment": 73,
+      "code": 109,
+      "total": 182,
+      "ratio": 0.4010989010989011
+    },
+    "src/routes/securityRoutes.js": {
+      "comment": 281,
+      "code": 344,
+      "total": 625,
+      "ratio": 0.4496
+    },
+    "src/routes/userRoutes.js": {
+      "comment": 75,
+      "code": 160,
+      "total": 235,
+      "ratio": 0.3191489361702128
+    },
+    "src/routes/wellKnownRoutes.js": {
+      "comment": 92,
+      "code": 160,
+      "total": 252,
+      "ratio": 0.36507936507936506
+    },
+    "src/services/AlarmService.js": {
+      "comment": 156,
+      "code": 299,
+      "total": 455,
+      "ratio": 0.34285714285714286
+    },
+    "src/services/alertDispatch.js": {
+      "comment": 47,
+      "code": 64,
+      "total": 111,
+      "ratio": 0.42342342342342343
+    },
+    "src/services/alertTypes.js": {
+      "comment": 11,
+      "code": 16,
+      "total": 27,
+      "ratio": 0.4074074074074074
+    },
+    "src/services/auditAnchorSink.js": {
+      "comment": 98,
+      "code": 277,
+      "total": 375,
+      "ratio": 0.2613333333333333
+    },
+    "src/services/auditBuffer.js": {
+      "comment": 315,
+      "code": 302,
+      "total": 617,
+      "ratio": 0.5105348460291734
+    },
+    "src/services/auditBufferDocs.js": {
+      "comment": 134,
+      "code": 117,
+      "total": 251,
+      "ratio": 0.5338645418326693
+    },
+    "src/services/auditBufferWal.js": {
+      "comment": 220,
+      "code": 296,
+      "total": 516,
+      "ratio": 0.4263565891472868
+    },
+    "src/services/auditChainAlertTypes.js": {
+      "comment": 20,
+      "code": 6,
+      "total": 26,
+      "ratio": 0.7692307692307693
+    },
+    "src/services/auditChainCheckpoint.js": {
+      "comment": 87,
+      "code": 291,
+      "total": 378,
+      "ratio": 0.23015873015873015
+    },
+    "src/services/auditChainMonitor.js": {
+      "comment": 169,
+      "code": 221,
+      "total": 390,
+      "ratio": 0.43333333333333335
+    },
+    "src/services/auditChainVerify.js": {
+      "comment": 337,
+      "code": 295,
+      "total": 632,
+      "ratio": 0.5332278481012658
+    },
+    "src/services/auditExportService.js": {
+      "comment": 67,
+      "code": 210,
+      "total": 277,
+      "ratio": 0.24187725631768953
+    },
+    "src/services/auditMonitor.js": {
+      "comment": 150,
+      "code": 160,
+      "total": 310,
+      "ratio": 0.4838709677419355
+    },
+    "src/services/auditMonitorDetection.js": {
+      "comment": 29,
+      "code": 45,
+      "total": 74,
+      "ratio": 0.3918918918918919
+    },
+    "src/services/auditOutbox.js": {
+      "comment": 77,
+      "code": 58,
+      "total": 135,
+      "ratio": 0.5703703703703704
+    },
+    "src/services/auditQueryService.js": {
+      "comment": 103,
+      "code": 233,
+      "total": 336,
+      "ratio": 0.30654761904761907
+    },
+    "src/services/auditScopeFilter.js": {
+      "comment": 54,
+      "code": 66,
+      "total": 120,
+      "ratio": 0.45
+    },
+    "src/services/auditWalCap.js": {
+      "comment": 127,
+      "code": 155,
+      "total": 282,
+      "ratio": 0.450354609929078
+    },
+    "src/services/auditWalPath.js": {
+      "comment": 58,
+      "code": 23,
+      "total": 81,
+      "ratio": 0.7160493827160493
+    },
+    "src/services/auditWalPermissions.js": {
+      "comment": 27,
+      "code": 46,
+      "total": 73,
+      "ratio": 0.3698630136986301
+    },
+    "src/services/authService/failureAndMfa.js": {
+      "comment": 111,
+      "code": 207,
+      "total": 318,
+      "ratio": 0.3490566037735849
+    },
+    "src/services/authService/index.js": {
+      "comment": 21,
+      "code": 14,
+      "total": 35,
+      "ratio": 0.6
+    },
+    "src/services/authService/login.js": {
+      "comment": 143,
+      "code": 218,
+      "total": 361,
+      "ratio": 0.3961218836565097
+    },
+    "src/services/authService/password.js": {
+      "comment": 77,
+      "code": 106,
+      "total": 183,
+      "ratio": 0.4207650273224044
+    },
+    "src/services/authService/profile.js": {
+      "comment": 117,
+      "code": 164,
+      "total": 281,
+      "ratio": 0.41637010676156583
+    },
+    "src/services/authService/session.js": {
+      "comment": 96,
+      "code": 174,
+      "total": 270,
+      "ratio": 0.35555555555555557
+    },
+    "src/services/authService/token.js": {
+      "comment": 156,
+      "code": 250,
+      "total": 406,
+      "ratio": 0.3842364532019704
+    },
+    "src/services/behaviorBaseline.js": {
+      "comment": 124,
+      "code": 249,
+      "total": 373,
+      "ratio": 0.3324396782841823
+    },
+    "src/services/canaryAlertTypes.js": {
+      "comment": 18,
+      "code": 4,
+      "total": 22,
+      "ratio": 0.8181818181818182
+    },
+    "src/services/canaryWatch.js": {
+      "comment": 68,
+      "code": 116,
+      "total": 184,
+      "ratio": 0.3695652173913043
+    },
+    "src/services/captchaService.js": {
+      "comment": 111,
+      "code": 162,
+      "total": 273,
+      "ratio": 0.4065934065934066
+    },
+    "src/services/deviceReminder.js": {
+      "comment": 108,
+      "code": 183,
+      "total": 291,
+      "ratio": 0.3711340206185567
+    },
+    "src/services/DeviceService.js": {
+      "comment": 180,
+      "code": 300,
+      "total": 480,
+      "ratio": 0.375
+    },
+    "src/services/exportConcurrency.js": {
+      "comment": 81,
+      "code": 134,
+      "total": 215,
+      "ratio": 0.3767441860465116
+    },
+    "src/services/initData/adminAccount.js": {
+      "comment": 103,
+      "code": 232,
+      "total": 335,
+      "ratio": 0.3074626865671642
+    },
+    "src/services/initData/index.js": {
+      "comment": 13,
+      "code": 42,
+      "total": 55,
+      "ratio": 0.23636363636363636
+    },
+    "src/services/initData/indexes.js": {
+      "comment": 92,
+      "code": 135,
+      "total": 227,
+      "ratio": 0.4052863436123348
+    },
+    "src/services/initData/permissions.js": {
+      "comment": 4,
+      "code": 4,
+      "total": 8,
+      "ratio": 0.5
+    },
+    "src/services/initData/permissionsBusiness.js": {
+      "comment": 13,
+      "code": 180,
+      "total": 193,
+      "ratio": 0.06735751295336788
+    },
+    "src/services/initData/permissionsSystem.js": {
+      "comment": 27,
+      "code": 201,
+      "total": 228,
+      "ratio": 0.11842105263157894
+    },
+    "src/services/initData/roles.js": {
+      "comment": 57,
+      "code": 100,
+      "total": 157,
+      "ratio": 0.3630573248407643
+    },
+    "src/services/initData/seeding.js": {
+      "comment": 62,
+      "code": 173,
+      "total": 235,
+      "ratio": 0.26382978723404255
+    },
+    "src/services/initData/systemConfig.js": {
+      "comment": 19,
+      "code": 32,
+      "total": 51,
+      "ratio": 0.37254901960784315
+    },
+    "src/services/initialPasswordFile.js": {
+      "comment": 17,
+      "code": 31,
+      "total": 48,
+      "ratio": 0.3541666666666667
+    },
+    "src/services/InspectionService.js": {
+      "comment": 142,
+      "code": 300,
+      "total": 442,
+      "ratio": 0.3212669683257919
+    },
+    "src/services/ipListService.js": {
+      "comment": 33,
+      "code": 58,
+      "total": 91,
+      "ratio": 0.3626373626373626
+    },
+    "src/services/ipLocationService.js": {
+      "comment": 51,
+      "code": 52,
+      "total": 103,
+      "ratio": 0.49514563106796117
+    },
+    "src/services/mfaDisable.js": {
+      "comment": 51,
+      "code": 92,
+      "total": 143,
+      "ratio": 0.35664335664335667
+    },
+    "src/services/mfaService.js": {
+      "comment": 143,
+      "code": 242,
+      "total": 385,
+      "ratio": 0.37142857142857144
+    },
+    "src/services/permissionService.js": {
+      "comment": 90,
+      "code": 187,
+      "total": 277,
+      "ratio": 0.3249097472924188
+    },
+    "src/services/rateLimitEscalation.js": {
+      "comment": 129,
+      "code": 210,
+      "total": 339,
+      "ratio": 0.3805309734513274
+    },
+    "src/services/rateLimitEscalationBan.js": {
+      "comment": 59,
+      "code": 92,
+      "total": 151,
+      "ratio": 0.39072847682119205
+    },
+    "src/services/reportDashboardService.js": {
+      "comment": 20,
+      "code": 202,
+      "total": 222,
+      "ratio": 0.09009009009009009
+    },
+    "src/services/reportExportService.js": {
+      "comment": 205,
+      "code": 290,
+      "total": 495,
+      "ratio": 0.41414141414141414
+    },
+    "src/services/reportStatsService.js": {
+      "comment": 41,
+      "code": 168,
+      "total": 209,
+      "ratio": 0.19617224880382775
+    },
+    "src/services/reportTargetService.js": {
+      "comment": 40,
+      "code": 46,
+      "total": 86,
+      "ratio": 0.46511627906976744
+    },
+    "src/services/reportWorkbookService.js": {
+      "comment": 85,
+      "code": 149,
+      "total": 234,
+      "ratio": 0.36324786324786323
+    },
+    "src/services/roleService.js": {
+      "comment": 55,
+      "code": 164,
+      "total": 219,
+      "ratio": 0.2511415525114155
+    },
+    "src/services/securityAlert.js": {
+      "comment": 159,
+      "code": 230,
+      "total": 389,
+      "ratio": 0.4087403598971722
+    },
+    "src/services/securityAlertDelivery.js": {
+      "comment": 66,
+      "code": 162,
+      "total": 228,
+      "ratio": 0.2894736842105263
+    },
+    "src/services/securityAlertIpBans.js": {
+      "comment": 112,
+      "code": 161,
+      "total": 273,
+      "ratio": 0.41025641025641024
+    },
+    "src/services/securityAlertPermissionAbuse.js": {
+      "comment": 59,
+      "code": 64,
+      "total": 123,
+      "ratio": 0.4796747967479675
+    },
+    "src/services/sessionCap.js": {
+      "comment": 20,
+      "code": 33,
+      "total": 53,
+      "ratio": 0.37735849056603776
+    },
+    "src/services/sessionRevocationEvents.js": {
+      "comment": 18,
+      "code": 16,
+      "total": 34,
+      "ratio": 0.5294117647058824
+    },
+    "src/services/sessionService.js": {
+      "comment": 296,
+      "code": 298,
+      "total": 594,
+      "ratio": 0.4983164983164983
+    },
+    "src/services/sharedCache/index.js": {
+      "comment": 179,
+      "code": 299,
+      "total": 478,
+      "ratio": 0.37447698744769875
+    },
+    "src/services/sharedCache/invalidation.js": {
+      "comment": 34,
+      "code": 86,
+      "total": 120,
+      "ratio": 0.2833333333333333
+    },
+    "src/services/sharedCache/memoryStore.js": {
+      "comment": 31,
+      "code": 75,
+      "total": 106,
+      "ratio": 0.29245283018867924
+    },
+    "src/services/sharedCache/state.js": {
+      "comment": 23,
+      "code": 21,
+      "total": 44,
+      "ratio": 0.5227272727272727
+    },
+    "src/services/sharedCacheLocks.js": {
+      "comment": 27,
+      "code": 113,
+      "total": 140,
+      "ratio": 0.19285714285714287
+    },
+    "src/services/statsCache.js": {
+      "comment": 98,
+      "code": 163,
+      "total": 261,
+      "ratio": 0.37547892720306514
+    },
+    "src/services/tokenService.js": {
+      "comment": 48,
+      "code": 80,
+      "total": 128,
+      "ratio": 0.375
+    },
+    "src/services/userPermissionService.js": {
+      "comment": 171,
+      "code": 164,
+      "total": 335,
+      "ratio": 0.5104477611940299
+    },
+    "src/services/userService.js": {
+      "comment": 212,
+      "code": 265,
+      "total": 477,
+      "ratio": 0.4444444444444444
+    },
+    "src/services/webhookTargetResolver.js": {
+      "comment": 19,
+      "code": 56,
+      "total": 75,
+      "ratio": 0.25333333333333335
+    },
+    "src/services/websocketService/handshake.js": {
+      "comment": 308,
+      "code": 240,
+      "total": 548,
+      "ratio": 0.5620437956204379
+    },
+    "src/services/websocketService/inboundThrottle.js": {
+      "comment": 71,
+      "code": 139,
+      "total": 210,
+      "ratio": 0.3380952380952381
+    },
+    "src/services/websocketService/index.js": {
+      "comment": 34,
+      "code": 64,
+      "total": 98,
+      "ratio": 0.3469387755102041
+    },
+    "src/services/websocketService/lifecycle.js": {
+      "comment": 168,
+      "code": 260,
+      "total": 428,
+      "ratio": 0.3925233644859813
+    },
+    "src/services/websocketService/push.js": {
+      "comment": 150,
+      "code": 279,
+      "total": 429,
+      "ratio": 0.34965034965034963
+    },
+    "src/services/websocketService/sessionRevocation.js": {
+      "comment": 59,
+      "code": 84,
+      "total": 143,
+      "ratio": 0.4125874125874126
+    },
+    "src/services/websocketService/shared.js": {
+      "comment": 93,
+      "code": 37,
+      "total": 130,
+      "ratio": 0.7153846153846154
+    },
+    "src/utils/ApiError.js": {
+      "comment": 13,
+      "code": 33,
+      "total": 46,
+      "ratio": 0.2826086956521739
+    },
+    "src/utils/apiResponse.js": {
+      "comment": 59,
+      "code": 63,
+      "total": 122,
+      "ratio": 0.48360655737704916
+    },
+    "src/utils/auditChain.js": {
+      "comment": 248,
+      "code": 299,
+      "total": 547,
+      "ratio": 0.453382084095064
+    },
+    "src/utils/auditChainFence.js": {
+      "comment": 27,
+      "code": 40,
+      "total": 67,
+      "ratio": 0.40298507462686567
+    },
+    "src/utils/auditChainPayload.js": {
+      "comment": 33,
+      "code": 133,
+      "total": 166,
+      "ratio": 0.19879518072289157
+    },
+    "src/utils/auditMeta.js": {
+      "comment": 92,
+      "code": 61,
+      "total": 153,
+      "ratio": 0.6013071895424836
+    },
+    "src/utils/auditQuery.js": {
+      "comment": 176,
+      "code": 199,
+      "total": 375,
+      "ratio": 0.4693333333333333
+    },
+    "src/utils/auditWriteFailure.js": {
+      "comment": 113,
+      "code": 62,
+      "total": 175,
+      "ratio": 0.6457142857142857
+    },
+    "src/utils/cidrCoverage.js": {
+      "comment": 40,
+      "code": 57,
+      "total": 97,
+      "ratio": 0.41237113402061853
+    },
+    "src/utils/constants.js": {
+      "comment": 43,
+      "code": 50,
+      "total": 93,
+      "ratio": 0.46236559139784944
+    },
+    "src/utils/cookie.js": {
+      "comment": 90,
+      "code": 127,
+      "total": 217,
+      "ratio": 0.4147465437788018
+    },
+    "src/utils/cursorPagination.js": {
+      "comment": 176,
+      "code": 108,
+      "total": 284,
+      "ratio": 0.6197183098591549
+    },
+    "src/utils/dateFormat.js": {
+      "comment": 16,
+      "code": 8,
+      "total": 24,
+      "ratio": 0.6666666666666666
+    },
+    "src/utils/emailKey.js": {
+      "comment": 16,
+      "code": 2,
+      "total": 18,
+      "ratio": 0.8888888888888888
+    },
+    "src/utils/encryption.js": {
+      "comment": 207,
+      "code": 281,
+      "total": 488,
+      "ratio": 0.42418032786885246
+    },
+    "src/utils/envNumber.js": {
+      "comment": 27,
+      "code": 11,
+      "total": 38,
+      "ratio": 0.7105263157894737
+    },
+    "src/utils/errorCodes.js": {
+      "comment": 101,
+      "code": 804,
+      "total": 905,
+      "ratio": 0.11160220994475138
+    },
+    "src/utils/filePermission.js": {
+      "comment": 75,
+      "code": 85,
+      "total": 160,
+      "ratio": 0.46875
+    },
+    "src/utils/fingerprint.js": {
+      "comment": 59,
+      "code": 38,
+      "total": 97,
+      "ratio": 0.6082474226804123
+    },
+    "src/utils/healthChecks.js": {
+      "comment": 51,
+      "code": 106,
+      "total": 157,
+      "ratio": 0.3248407643312102
+    },
+    "src/utils/helpers.js": {
+      "comment": 334,
+      "code": 282,
+      "total": 616,
+      "ratio": 0.5422077922077922
+    },
+    "src/utils/httpPostJson.js": {
+      "comment": 35,
+      "code": 66,
+      "total": 101,
+      "ratio": 0.3465346534653465
+    },
+    "src/utils/ip2regionSearcher.js": {
+      "comment": 70,
+      "code": 99,
+      "total": 169,
+      "ratio": 0.41420118343195267
+    },
+    "src/utils/ipRange.js": {
+      "comment": 119,
+      "code": 180,
+      "total": 299,
+      "ratio": 0.3979933110367893
+    },
+    "src/utils/ipUtils.js": {
+      "comment": 385,
+      "code": 266,
+      "total": 651,
+      "ratio": 0.5913978494623656
+    },
+    "src/utils/logContext.js": {
+      "comment": 26,
+      "code": 9,
+      "total": 35,
+      "ratio": 0.7428571428571429
+    },
+    "src/utils/logger.js": {
+      "comment": 126,
+      "code": 175,
+      "total": 301,
+      "ratio": 0.4186046511627907
+    },
+    "src/utils/loggerFlush.js": {
+      "comment": 147,
+      "code": 125,
+      "total": 272,
+      "ratio": 0.5404411764705882
+    },
+    "src/utils/loginCipher.js": {
+      "comment": 111,
+      "code": 224,
+      "total": 335,
+      "ratio": 0.33134328358208953
+    },
+    "src/utils/logPaths.js": {
+      "comment": 13,
+      "code": 5,
+      "total": 18,
+      "ratio": 0.7222222222222222
+    },
+    "src/utils/logPiiMask.js": {
+      "comment": 95,
+      "code": 131,
+      "total": 226,
+      "ratio": 0.42035398230088494
+    },
+    "src/utils/logShipper.js": {
+      "comment": 166,
+      "code": 233,
+      "total": 399,
+      "ratio": 0.41604010025062654
+    },
+    "src/utils/metrics.js": {
+      "comment": 138,
+      "code": 307,
+      "total": 445,
+      "ratio": 0.3101123595505618
+    },
+    "src/utils/metricsAuditDrops.js": {
+      "comment": 59,
+      "code": 55,
+      "total": 114,
+      "ratio": 0.5175438596491229
+    },
+    "src/utils/metricsDetection.js": {
+      "comment": 40,
+      "code": 130,
+      "total": 170,
+      "ratio": 0.23529411764705882
+    },
+    "src/utils/metricsRuntime.js": {
+      "comment": 95,
+      "code": 212,
+      "total": 307,
+      "ratio": 0.30944625407166126
+    },
+    "src/utils/mfaSecret.js": {
+      "comment": 49,
+      "code": 37,
+      "total": 86,
+      "ratio": 0.5697674418604651
+    },
+    "src/utils/mongoFailureAttribution.js": {
+      "comment": 113,
+      "code": 117,
+      "total": 230,
+      "ratio": 0.49130434782608695
+    },
+    "src/utils/passwordHistory.js": {
+      "comment": 71,
+      "code": 65,
+      "total": 136,
+      "ratio": 0.5220588235294118
+    },
+    "src/utils/permissionHelper.js": {
+      "comment": 140,
+      "code": 239,
+      "total": 379,
+      "ratio": 0.36939313984168864
+    },
+    "src/utils/permissionSync.js": {
+      "comment": 21,
+      "code": 12,
+      "total": 33,
+      "ratio": 0.6363636363636364
+    },
+    "src/utils/piiCrypto.js": {
+      "comment": 142,
+      "code": 122,
+      "total": 264,
+      "ratio": 0.5378787878787878
+    },
+    "src/utils/queryBudget.js": {
+      "comment": 26,
+      "code": 25,
+      "total": 51,
+      "ratio": 0.5098039215686274
+    },
+    "src/utils/reauthTicket.js": {
+      "comment": 29,
+      "code": 49,
+      "total": 78,
+      "ratio": 0.3717948717948718
+    },
+    "src/utils/scopeCast.js": {
+      "comment": 56,
+      "code": 29,
+      "total": 85,
+      "ratio": 0.6588235294117647
+    },
+    "src/utils/searchPatterns.js": {
+      "comment": 21,
+      "code": 16,
+      "total": 37,
+      "ratio": 0.5675675675675675
+    },
+    "src/utils/shutdownBudget.js": {
+      "comment": 61,
+      "code": 54,
+      "total": 115,
+      "ratio": 0.5304347826086957
+    },
+    "src/utils/superAdmin.js": {
+      "comment": 63,
+      "code": 34,
+      "total": 97,
+      "ratio": 0.6494845360824743
+    },
+    "src/utils/tokenPurpose.js": {
+      "comment": 23,
+      "code": 6,
+      "total": 29,
+      "ratio": 0.7931034482758621
+    },
+    "src/utils/totp.js": {
+      "comment": 57,
+      "code": 109,
+      "total": 166,
+      "ratio": 0.3433734939759036
+    },
+    "src/utils/transaction.js": {
+      "comment": 107,
+      "code": 104,
+      "total": 211,
+      "ratio": 0.5071090047393365
+    },
+    "src/utils/validationRules.js": {
+      "comment": 78,
+      "code": 42,
+      "total": 120,
+      "ratio": 0.65
+    }
+  },
+  "total": {
+    "comment": 22426,
+    "code": 34798,
+    "ratio": 0.3919
+  }
+}

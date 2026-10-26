@@ -4,7 +4,7 @@
  */
 
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('../utils/bcryptWorkerPool');
 const config = require('../config');
 // 账户状态取值全集只有一份（utils/constants.js 的 USER_STATUS）。
 // 此前这里是私抄 `['active','inactive','locked']`，而 userRoutes 的查询校验已经用的是
@@ -553,23 +553,13 @@ userSchema.pre('save', async function (next) {
   }
 });
 
-// ================= 权限查询与缓存（I-08 已拆出） =================
-// 权限聚合查询、进程内 TTL 缓存与失效管理移至 services/userPermissionService，
-// User 模型回归纯数据 schema（字段 + 密码哈希钩子 + 密码比对）；
-// 下方保留薄代理转发以兼容既有调用方（将逐步迁移至直接引用 service）。
-const userPermissionService = require('../services/userPermissionService');
-userSchema.statics.getPermissions = function (userId) {
-  return userPermissionService.getPermissions(userId);
-};
-userSchema.statics.getPermissionsForUsers = function (userIds) {
-  return userPermissionService.getPermissionsForUsers(userIds);
-};
-userSchema.statics.invalidatePermissionCache = function (userId) {
-  return userPermissionService.invalidatePermissionCache(userId);
-};
-userSchema.statics.hasPermission = function (userId, permissionCode) {
-  return userPermissionService.hasPermission(userId, permissionCode);
-};
+// ================= 权限查询与缓存（已迁出） =================
+// 权限聚合查询、进程内 TTL 缓存与失效管理在 services/userPermissionService，
+// User 模型保持纯数据 schema（字段 + 密码哈希钩子 + 密码比对）。
+// 2026-10-26：删除了此处的薄代理（getPermissions/getPermissionsForUsers/
+// invalidatePermissionCache/hasPermission 及实例方法）。代理的存在让
+// models/User 顶层 require 权限服务，而服务又要查 User 模型，构成双向依赖；
+// 调用方已全部改为直接引用 service。
 
 // 实例方法：验证密码
 // 纵深防御：bcrypt.compare 对非字符串入参抛 TypeError（异步拒绝），
@@ -581,11 +571,6 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
     return false;
   }
   return await bcrypt.compare(candidatePassword, this.password);
-};
-
-// 实例方法：获取该用户完整权限列表（委托 service）
-userSchema.methods.getPermissions = async function () {
-  return userPermissionService.getPermissions(this._id);
 };
 
 module.exports = mongoose.model('User', userSchema);

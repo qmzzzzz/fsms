@@ -1375,6 +1375,7 @@ export default {
       'Abnormal permission tree depth; please ask an administrator to check parent references',
     permissionListInvalid: 'Please provide a valid permission list',
     exportFormatUnsupported: 'Unsupported export format: {format}',
+    exportBusy: 'Export is busy right now. Please try again shortly.',
     reportTypeUnsupported: 'Unsupported report type',
     roleNotFound: 'Role not found',
     roleViewForbidden: 'Not allowed to view this role',

@@ -19,12 +19,11 @@
 
 const mongoose = require('mongoose');
 
-jest.mock('../../middleware/rbac', () => {
-  // #12 之后 auditScopeFilter 还要用 isDataScopeDenied / deniedDataScope 两个导出。
-  // 从真实模块取，不在测试里重抄一遍判据——重抄就是第二处会漂移的实现。
-  // 只把 getDataScope 换成 jest.fn：本套件要数的是 User.distinct 的次数，
-  // 让 getDataScope 照实打库只会把计数搅乱。
-  const actual = jest.requireActual('../../middleware/rbac');
+jest.mock('../../middleware/dataScope', () => {
+  // auditScopeFilter 直连叶子模块 dataScope（A-1 解环后的依赖方向，rbac 仅再导出）。
+  // 从真实模块取判据，不在测试里重抄一遍；只把 getDataScope 换成 jest.fn——
+  // 本套件要数的是 User.distinct 的次数，让 getDataScope 照实打库只会把计数搅乱。
+  const actual = jest.requireActual('../../middleware/dataScope');
   return {
     isDataScopeDenied: actual.isDataScopeDenied,
     deniedDataScope: actual.deniedDataScope,
@@ -34,7 +33,7 @@ jest.mock('../../middleware/rbac', () => {
 
 describe('auditScopeFilter 部门成员缓存的上界', () => {
   const CACHE_MAX = 500;
-  let rbac;
+  let dataScope;
   let User;
   let applyAuditDataScope;
   let distinct;
@@ -42,7 +41,7 @@ describe('auditScopeFilter 部门成员缓存的上界', () => {
   const oneId = new mongoose.Types.ObjectId();
 
   beforeAll(() => {
-    rbac = require('../../middleware/rbac');
+    dataScope = require('../../middleware/dataScope');
     User = require('../../models/User');
     // 缓存条目按"部门名"分键，写满 501 个部门即可跨过上限
     applyAuditDataScope = require('../../services/auditScopeFilter').applyAuditDataScope;
@@ -54,7 +53,7 @@ describe('auditScopeFilter 部门成员缓存的上界', () => {
   });
 
   const queryFor = async (department) => {
-    rbac.getDataScope.mockResolvedValue({ type: 'department', department });
+    dataScope.getDataScope.mockResolvedValue({ type: 'department', department });
     return applyAuditDataScope({}, 'operator-x');
   };
 

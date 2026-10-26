@@ -105,6 +105,14 @@ function takeInboundSlot(socket, event, now = Date.now()) {
 
   state.violations += 1;
   state.throttled += 1;
+  // O-2：丢弃必须可观测。**只在这里**计，不在上方 `state.closed` 的静默分支计——
+  // 已断开连接的后续包若也计数，一次攻击会产出 N 条指标（同 noteThrottleDisconnect
+  // 里"按连接计一次"的理由），处置动作自己变成放大器。
+  try {
+    require('../../utils/metricsRuntime').incWsInboundThrottled();
+  } catch (_) {
+    /* 指标端不可用不影响限流方向 */
+  }
   const firstViolation = state.violations === 1;
   return {
     allowed: false,
@@ -131,6 +139,13 @@ function noteThrottleDisconnect(socket, state, event) {
     require('../../utils/metrics').incSecurityAlert('ws_inbound_throttled', 'medium');
   } catch (_) {
     /* 指标端不可用不影响断开方向 */
+  }
+  try {
+    // O-2：与上面的安全告警分开记——告警是"有人在打"的事件，这个计数是容量/健康信号，
+    // 两者消费方不同（前者进 alert-rules，后者进面板与容量规划）。
+    require('../../utils/metricsRuntime').incWsInboundDisconnect();
+  } catch (_) {
+    /* 同上 */
   }
 }
 

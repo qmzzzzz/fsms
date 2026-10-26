@@ -8,7 +8,6 @@ const config = require('../config');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
 const AuditLog = require('../models/AuditLog');
-const sharedCache = require('../services/sharedCache');
 const { isTokenBlacklisted } = require('./tokenBlacklist');
 const sessionService = require('../services/sessionService');
 const { isIPAllowed } = require('../utils/ipRange');
@@ -18,6 +17,15 @@ const { getCookies, ACCESS_COOKIE_NAME } = require('../utils/cookie');
 const { violatesAccessTokenPurpose } = require('../utils/tokenPurpose');
 const { USER_STATUS } = require('../utils/constants');
 const { extendLogContext } = require('../utils/logContext');
+// 本地缓存与跨实例失效广播独立成叶子模块：tokenBlacklist 吊销令牌后要失效本缓存，
+// 若仍从本文件取用就会与 auth 顶层的 isTokenBlacklisted 形成双向依赖。
+const {
+  USER_CACHE_TTL,
+  getCacheEntry,
+  setCacheEntry,
+  deleteCacheEntry,
+  invalidateUserCache,
+} = require('./userAuthCache');
 
 /**
  * 提取访问令牌（I-01 双路径）：
@@ -36,23 +44,14 @@ const extractAccessToken = (req) => {
   return cookies[ACCESS_COOKIE_NAME] || null;
 };
 
-// 用户缓存：避免每次请求都查库。键为 userId，值为 { user, expireAt, invalidatedAt }
-// 本地热缓存，TTL 60 秒；失效事件经共享缓存广播跨实例传播（L-4）：
-// 配置 REDIS_URL 时任一实例禁用/锁定/改密后，所有实例立即标记本地条目失效；
-// 未配置时退化为单实例语义（最长 60 秒自然过期，与历史行为一致）。
-const userCache = new Map();
-const USER_CACHE_TTL = 60 * 1000;
-const MAX_CACHE_SIZE = 1000; // 防止无限增长
-// 失效广播键前缀：跨实例共用同一命名，收到即对该用户执行本地失效
-const USER_CACHE_INVALIDATE_PREFIX = 'auth:user:';
-
 /**
  * 查询并校验用户有效性（带短缓存）
+ * 缓存本体与失效广播见 userAuthCache.js（TTL 60 秒）。
  * @returns {Object|null} 用户基础信息对象，校验失败返回 null
  */
 const loadValidUser = async (userId) => {
   const now = Date.now();
-  const cached = userCache.get(userId);
+  const cached = getCacheEntry(userId);
 
   // 检查缓存是否有效且未被主动失效
   if (cached && cached.expireAt > now) {
@@ -80,34 +79,19 @@ const loadValidUser = async (userId) => {
     // 否则 checkRole 与 userLimiter 会按已作废的角色放行/限流。
     .populate({ path: 'roles', select: 'code', match: { status: 'active' } });
   if (!user) {
-    userCache.delete(userId);
+    deleteCacheEntry(userId);
     return null;
   }
 
-  // 缓存容量保护
-  // 此处原注释称「删除最旧的一半」——不准确。Map 的迭代顺序是**插入顺序**，
-  // 而每次命中缓存并不重新 set（见下方 getFreshUser 的读路径），因此这里淘汰的是
-  // 「最早写入的一半」而非 LRU 意义上的「最久未使用」。
-  // 刻意不改成真 LRU：条目带 60s TTL，长期不用的条目本就会过期，
-  // 而按插入序批量淘汰的实现更简单、无额外记账开销。注释与实现对齐即可，
-  // 否则日后有人依据「LRU」假设去调容量或做性能推算会得出错误结论。
-  if (userCache.size > MAX_CACHE_SIZE) {
-    let deleted = 0;
-    for (const key of userCache.keys()) {
-      userCache.delete(key);
-      if (++deleted >= MAX_CACHE_SIZE / 2) break;
-    }
-  }
-
-  // 查询期间是否发生了主动失效
-  const existing = userCache.get(userId);
+  // 查询期间是否发生了主动失效（容量淘汰在 setCacheEntry 内处理）
+  const existing = getCacheEntry(userId);
   const invalidatedDuringQuery = !!(
     existing &&
     existing.invalidatedAt &&
     existing.invalidatedAt >= queryStartedAt
   );
 
-  userCache.set(userId, {
+  setCacheEntry(userId, {
     user,
     expireAt: Date.now() + USER_CACHE_TTL,
     // 若失效发生在查询期间，本次读取的数据可能已过期：保留失效标记且 loadedAt 归零，
@@ -117,81 +101,6 @@ const loadValidUser = async (userId) => {
   });
   return user;
 };
-
-/**
- * 本地失效某个用户的缓存（改密、禁用、锁定时调用；
- * 也是收到其他实例失效广播时的执行路径）
- * 使用 invalidatedAt 时间戳来确保失效操作不会被后续的缓存更新覆盖
- */
-const invalidateUserCacheLocal = (userId) => {
-  const id = String(userId);
-  const now = Date.now();
-  const cached = userCache.get(id);
-
-  if (cached) {
-    // 只标记失效，不清除缓存条目，这样即使有竞态请求也不会重新填充有效数据
-    cached.invalidatedAt = now;
-  } else {
-    // 如果没有缓存，创建一个失效标记，防止后续请求直接填充缓存
-    userCache.set(id, {
-      user: null,
-      expireAt: now + USER_CACHE_TTL,
-      loadedAt: 0,
-      invalidatedAt: now,
-    });
-  }
-
-  // 联动失效「权限结果缓存」（User.getPermissions 的进程内 TTL 缓存，P-01 性能优化）。
-  // 角色权限变更（assignPermissions）/ 用户角色变更（assignRoles）后必须立即失效，
-  // 否则该用户仍会命中旧权限缓存最长 30 秒，导致权限调整延迟生效、存在安全窗口。
-  // 惰性引入 User，避免与模型层形成模块加载期循环依赖。
-  try {
-    const User = require('../models/User');
-    User.invalidatePermissionCache(id);
-  } catch (err) {
-    // 失效失败不应阻断主流程；权限缓存最多 30 秒后自然过期，仅记录告警
-    logger.warn('权限缓存联动失效失败', { userId: id, error: err.message });
-  }
-};
-
-// 订阅跨实例失效广播（L-4）：其他实例发布 'auth:user:<id>' 时，
-// 本实例执行同一套本地失效。广播含自身发布（幂等，重复失效无副作用）。
-// 未配置 REDIS_URL 时 onInvalidate 为空操作，行为与单实例历史一致。
-sharedCache.onInvalidate((key) => {
-  if (typeof key === 'string' && key.startsWith(USER_CACHE_INVALIDATE_PREFIX)) {
-    invalidateUserCacheLocal(key.slice(USER_CACHE_INVALIDATE_PREFIX.length));
-  }
-});
-
-/**
- * 主动失效某个用户的缓存（改密、禁用、锁定时调用）：
- * 先本地失效，再经共享缓存广播给其余实例。
- * 广播为尽力而为（内部吞错），失败时其余实例最长延迟至自然过期。
- *
- * publishInvalidate 是 async 而本函数是同步的：调用点（roleController / rolePermissionController /
- * initData）都不 await 本函数，所以那条 promise 必须由这里持有——本仓的 unhandledRejection
- * 兜底在所有环境都 process.exit(1)，一次无人持有的拒绝 = 全进程下线。
- * 判据：src/tests/services/observabilityWritesNeverReject.test.js
- */
-const invalidateUserCache = (userId) => {
-  invalidateUserCacheLocal(userId);
-  sharedCache
-    .publishInvalidate(USER_CACHE_INVALIDATE_PREFIX + String(userId))
-    .catch((err) => logger.warn(`缓存失效广播异常（不阻断本次操作）：${err?.message ?? err}`));
-};
-
-/**
- * 定期清理过期缓存条目（每 30 秒）
- */
-const cacheCleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [key, value] of userCache.entries()) {
-    if (value.expireAt <= now) {
-      userCache.delete(key);
-    }
-  }
-}, 30000);
-cacheCleanupTimer.unref?.();
 
 /**
  * 验证 JWT Token：将解析后的用户信息附加到 req.user，并校验用户当前是否仍有效

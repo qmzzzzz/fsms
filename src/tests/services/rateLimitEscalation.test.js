@@ -32,7 +32,7 @@
 
 const mongoose = require('mongoose');
 
-const security = require('../../middleware/security');
+const ipBlacklistStore = require('../../middleware/security/ipBlacklistStore');
 const escalation = require('../../services/rateLimitEscalation');
 const {
   CLASS_ANON_ABUSE,
@@ -65,7 +65,7 @@ const IPS = {
 };
 const ALL_TEST_IPS = Object.values(IPS).flatMap((ip) => [ip, `::ffff:${ip}`]);
 
-const originalAdd = security.addToBlacklist;
+const originalAdd = ipBlacklistStore.addToBlacklist;
 let banCalls;
 let banResult;
 
@@ -91,14 +91,14 @@ const authThreshold = SIGNAL_CLASSES[CLASS_AUTH].threshold;
 
 beforeAll(async () => {
   if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
-  security.addToBlacklist = jest.fn(async (ip, durationMs, reason, source) => {
+  ipBlacklistStore.addToBlacklist = jest.fn(async (ip, durationMs, reason, source) => {
     banCalls.push({ ip, durationMs, reason, source });
     return banResult;
   });
 });
 
 afterAll(async () => {
-  security.addToBlacklist = originalAdd;
+  ipBlacklistStore.addToBlacklist = originalAdd;
   await AuditLog.deleteMany(
     { action: ALERT_TYPES.RATE_LIMIT_ABUSE, ip: { $in: ALL_TEST_IPS } },
     { bypassAppendOnly: true }
@@ -111,7 +111,7 @@ afterAll(async () => {
 beforeEach(() => {
   banCalls = [];
   banResult = { banned: true, normalizedIp: 'ok' };
-  security.addToBlacklist.mockImplementation(async (ip, durationMs, reason, source) => {
+  ipBlacklistStore.addToBlacklist.mockImplementation(async (ip, durationMs, reason, source) => {
     banCalls.push({ ip, durationMs, reason, source });
     return banResult;
   });

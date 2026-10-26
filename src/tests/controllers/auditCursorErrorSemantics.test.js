@@ -147,20 +147,20 @@ describe('审计日志游标的 400/500 分界', () => {
       .set('Authorization', `Bearer ${token}`)
       .set(reauthHeaders(token));
     expect(page.status).toBe(200);
-    const docs = page.body.data.data;
+    const docs = page.body.data;
     expect(docs).toHaveLength(1);
 
     const { encodeCursor } = require('../../utils/cursorPagination');
     const cursor = encodeCursor({ v: docs[0].timestamp, id: String(docs[0]._id) });
     const next = await query(cursor);
     expect(next.status).toBe(200);
-    expect(next.body.data.meta.total).toBeNull();
+    expect(next.body.meta.total).toBeNull();
     // 这里的判据不能假设库里只有我那两条夹具：全量并发时同一集合被其它套件追加，
     // 精确「剩 0 条」乃至「hasNext=false」都不成立（实测首版就红在剩 0 条）。
     // 确定性成立的是位置关系——续翻页必须严格排在锚点之后
     // （时间不晚于锚点、且不重复锚点自己）。
     const anchorAt = new Date(docs[0].timestamp).getTime();
-    for (const row of next.body.data.data) {
+    for (const row of next.body.data) {
       expect(new Date(row.timestamp).getTime()).toBeLessThanOrEqual(anchorAt);
       expect(String(row._id)).not.toBe(String(docs[0]._id));
     }

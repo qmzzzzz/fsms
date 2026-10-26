@@ -43,6 +43,12 @@ import { mountComponent, click, flush, settleRouter } from '../helpers/component
 import { useAppStore, useAuthStore } from '@/store'
 import i18n from '@/i18n'
 
+// 与 Element Plus .el-menu--collapse 的宽度公式一字不差（默认 64px）。
+// layout/index.vue 的 SIDEBAR_COLLAPSED_WIDTH 与本常量必须同源：
+// 硬编码 64px 会在主题改 el 变量 / 组件库改默认值时与菜单实际宽度脱节。
+const SIDEBAR_COLLAPSED_WIDTH =
+  'calc(var(--el-menu-icon-width) + var(--el-menu-base-level-padding) * 2)'
+
 // ── 依赖替身 ────────────────────────────────────────────────────────────────
 // 登出接口与 /auth/me 用可编程替身：本套件要断言的是「什么时候调、失败怎么办」，
 // 不是 axios 行为本身。
@@ -373,7 +379,7 @@ describe('布局 · 菜单渲染与权限过滤', () => {
 })
 
 describe('布局 · 折叠与展开', () => {
-  test('桌面点击折叠：写 store、收窄到 64px、logo 文案隐藏、图标切为 Expand、菜单进入折叠态', async () => {
+  test('桌面点击折叠：写 store、收窄到折叠宽度（与 el-menu--collapse 同源）、logo 文案隐藏、图标切为 Expand、菜单进入折叠态', async () => {
     const c = mountLayout()
     await settleRouter(c.router)
     await flush(10)
@@ -384,7 +390,7 @@ describe('布局 · 折叠与展开', () => {
     click(c.find('.collapse-btn'))
     await pollUntil(() => currentApp.sidebarCollapsed === true, 'store 折叠态')
     await pollUntil(
-      () => c.find('.sidebar').getAttribute('style').includes('width: 64px'),
+      () => c.find('.sidebar').getAttribute('style').includes(`width: ${SIDEBAR_COLLAPSED_WIDTH}`),
       '侧栏宽度'
     )
     expect(c.find('.logo-text').style.display).toBe('none')
@@ -398,11 +404,11 @@ describe('布局 · 折叠与展开', () => {
     )
   })
 
-  test('store 初始 collapsed=true：挂载即为 64px 折叠态（状态源是 store 而非组件内 ref）', async () => {
+  test('store 初始 collapsed=true：挂载即为折叠宽度（状态源是 store 而非组件内 ref）', async () => {
     const c = mountLayout({ collapsed: true })
     await settleRouter(c.router)
     await flush(10)
-    expect(c.find('.sidebar').getAttribute('style')).toContain('width: 64px')
+    expect(c.find('.sidebar').getAttribute('style')).toContain(`width: ${SIDEBAR_COLLAPSED_WIDTH}`)
     expect(c.find('.logo-text').style.display).toBe('none')
     expect(renderedIconPath(c.find('.collapse-btn'))).toBe(iconPath(Expand))
   })
@@ -1259,6 +1265,10 @@ describe('布局 · 权限热同步接线', () => {
  */
 describe('布局 · 顶栏图标盒模型静态不变量（jsdom 不注入 SFC 样式，只能读源码）', () => {
   const source = readFileSync(resolve(__dirname, '../../layout/index.vue'), 'utf8')
+  const elMenuCss = readFileSync(
+    resolve(__dirname, '../../../node_modules/element-plus/theme-chalk/el-menu.css'),
+    'utf8'
+  )
   const ruleBlock = (cls) => {
     const m = source.match(new RegExp('\\.' + cls + '\\s*\\{[^}]*\\}'))
     return m ? m[0] : ''
@@ -1273,6 +1283,18 @@ describe('布局 · 顶栏图标盒模型静态不变量（jsdom 不注入 SFC �
   test('padding 本身保留——修的是盒模型，不是把热区删掉', () => {
     expect(ruleBlock('collapse-btn')).toContain('padding: 6px')
     expect(ruleBlock('action-icon')).toContain('padding: 6px')
+  })
+
+  test('侧栏折叠宽度公式与 Element Plus .el-menu--collapse 同源（防硬编码脱节）', () => {
+    // 压缩产物里形如 .el-menu--collapse{width:calc(...)}；公式被组件库
+    // 改动（换变量名/换结构）时这里会红，提醒同步 SIDEBAR_COLLAPSED_WIDTH。
+    // 忽略空白差异，只比公式本体。
+    const collapseRule = elMenuCss.match(/\.el-menu--collapse\{width:([^}]+)\}/)
+    expect(collapseRule).toBeTruthy()
+    const fromElementPlus = collapseRule[1].replace(/\s+/g, '')
+    const fromLayout = source.match(/SIDEBAR_COLLAPSED_WIDTH =\s*\n?\s*'([^']+)'/)?.[1]
+    expect(fromLayout).toBeTruthy()
+    expect(fromLayout.replace(/\s+/g, '')).toBe(fromElementPlus)
   })
 
   test('触屏热区规则带父级选择器，特异性压过 480px 断点', () => {

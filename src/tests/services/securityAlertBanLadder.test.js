@@ -44,7 +44,9 @@ const {
   THRESHOLDS,
 } = require('../../services/securityAlert');
 const AuditLog = require('../../models/AuditLog');
-const security = require('../../middleware/security');
+// A-1：封禁原语直连叶子模块（securityAlertIpBans 不再经 security 门面），
+// 测试替换点随之迁移。
+const ipBlacklistStore = require('../../middleware/security/ipBlacklistStore');
 
 const HOUR = 60 * 60 * 1000;
 const stamp = Date.now().toString().slice(-7);
@@ -53,7 +55,7 @@ const FRESH_IP = '198.51.100.77';
 const ERR_IP = '192.0.2.44';
 const MAP_IP = '192.0.2.88';
 
-const originalAdd = security.addToBlacklist;
+const originalAdd = ipBlacklistStore.addToBlacklist;
 let captured;
 // F-160：addToBlacklist 的返回值就是"到底封成没有"的唯一事实源，逐条用例改写它
 let banResult;
@@ -78,13 +80,13 @@ const startChainAtZero = async (ip) => {
 
 beforeAll(async () => {
   if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
-  security.addToBlacklist = jest.fn(async (ip, durationMs, reason, source) => {
+  ipBlacklistStore.addToBlacklist = jest.fn(async (ip, durationMs, reason, source) => {
     captured.push({ ip, durationMs, reason, source });
     return banResult;
   });
 });
 afterAll(async () => {
-  security.addToBlacklist = originalAdd;
+  ipBlacklistStore.addToBlacklist = originalAdd;
   await purge({ username: /^zz(bf|be)/ });
   await purge({
     ip: {

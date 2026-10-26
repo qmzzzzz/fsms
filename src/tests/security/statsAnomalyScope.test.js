@@ -189,7 +189,7 @@ describe('GET /security/stats 与 /overview 的全部聚合按数据范围收口
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
     // 控制器 ApiResponse.success(res, {overview, anomalies, securityLevel})
-    // ⇒ 数据在 body.data 一层（不像 /alerts 那样再套一层 data）；
+    // ⇒ 数据在 body.data 一层；
     // 这里写死形状，不做"多种可能形状都试一遍"的兜底。
     const list = res.body.data.anomalies.failedOperationUsers;
     expect(Array.isArray(list)).toBe(true);

@@ -12,7 +12,7 @@ const {
 const FireAlarm = require('../models/FireAlarm');
 const Inspection = require('../models/Inspection');
 const logger = require('../utils/logger');
-const { withListBudget, listCountOptions, listAggregateOptions } = require('../utils/queryBudget');
+const { withListBudget, listCountOptions } = require('../utils/queryBudget');
 const { uniqueIdStrings } = require('../utils/helpers');
 const {
   normalizeSearchTerm,
@@ -27,10 +27,12 @@ const {
 } = require('../utils/cursorPagination');
 const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
-const { castScopeObjectIds, applySearchCondition } = require('../utils/scopeCast');
+const { applySearchCondition } = require('../utils/scopeCast');
 const ApiError = require('../utils/ApiError');
 const { DEVICE_STATUS } = require('../utils/constants');
 const { withTransaction } = require('../utils/transaction');
+const statsCache = require('./statsCache');
+const deviceStatsService = require('./deviceStatsService');
 
 const VALID_STATUSES = Object.values(DEVICE_STATUS);
 
@@ -164,6 +166,7 @@ class DeviceService {
    */
   async createDevice(fields, createdBy) {
     const device = await FireDevice.create({ ...fields, createdBy });
+    statsCache.invalidateDeviceStats('device-create');
     logger.info(`消防设备已创建：${device.deviceCode}`);
     return device;
   }
@@ -238,6 +241,7 @@ class DeviceService {
       throw ApiError.badRequest('设备状态不能通过本接口修改，请使用状态变更或报废接口');
     }
     await device.save();
+    statsCache.invalidateDeviceStats('device-update');
     logger.info(`设备信息已更新：${device.deviceCode}`);
     return device;
   }
@@ -275,6 +279,7 @@ class DeviceService {
       try {
         // transitionTo 内部会 save()，无需重复保存
         await device.transitionTo(targetStage);
+        statsCache.invalidateDeviceStats('device-status');
         logger.info(
           `设备状态已更新：${device.deviceCode} -> ${status}（生命周期 -> ${targetStage}）`
         );
@@ -292,6 +297,7 @@ class DeviceService {
     }
 
     await device.save();
+    statsCache.invalidateDeviceStats('device-status');
     logger.info(`设备状态已更新：${device.deviceCode} -> ${status}`);
     return device;
   }
@@ -310,6 +316,7 @@ class DeviceService {
     }
     // 委托模型方法：内含报废守卫 + 「仅检查类记录推进检查周期」的业务规则
     await device.addMaintenanceRecord({ content, operator: operatorId, type });
+    statsCache.invalidateDeviceStats('device-maintenance');
     logger.info(`设备维护记录已添加：${device.deviceCode}`);
     return device;
   }
@@ -340,6 +347,7 @@ class DeviceService {
       );
       await FireDevice.findByIdAndDelete(device._id, opts);
     });
+    statsCache.invalidateDeviceStats('device-delete');
     logger.info(`设备已删除：${device.deviceCode}`);
   }
 
@@ -387,79 +395,13 @@ class DeviceService {
     }
 
     logger.info(`设备已报废：${device.deviceCode}`);
+    statsCache.invalidateDeviceStats('device-scrap');
     return device;
   }
 
-  /**
-   * 获取设备统计（应用数据范围过滤，口径与列表/详情一致）
-   *
-   * 两处收口：
-   *  1. 漏传即 deny：原缺省 `scopeFilter = {}` 与 type:'all' 返回的 `{}` 无法区分，
-   *     于是任何漏传都静默变成"全组织设备统计"。改为无默认值：undefined → 零结果；
-   *     真正的 all 由调用方显式传 `{}`（buildDataScopeFilter 对 all 就是返回 `{}`）。
-   *  2. 聚合前归一化 ObjectId：device 的 ownerField 是数组
-   *     ['createdBy','maintenanceRecord.operator'] ⇒ self 范围产出
-   *     `{$or:[{createdBy:'<hex 字符串>'},...]}`。countDocuments 会 cast、
-   *     aggregate 不会 ⇒ total>0 而 byType/byStatus 全空。
-   */
+  /** 统计口径（漏传即 deny、聚合前 cast）与缓存见 services/deviceStatsService.js */
   async getDeviceStats(scopeFilter) {
-    if (!scopeFilter) {
-      return {
-        total: 0,
-        byType: [],
-        byStatus: [],
-        needMaintenance: 0,
-        needSchedule: 0,
-        expiringSoon: 0,
-        expired: 0,
-        expiryUnknown: 0,
-      };
-    }
-    const scoped = castScopeObjectIds(scopeFilter);
-    // 判定时刻只取一次：跨秒抖动会让"同一响应里的两个档"用两个now
-    const now = new Date();
-    const alert = deviceAlertFilters(now);
-    // 一次 $facet 收敛全部计数：原先 2 条聚合 + 6 条 countDocuments 并发发出，
-    // 各自读取不同时刻的快照——同一响应里 total 与 byStatus 之和可能对不上。
-    // $facet 内共享同一次顶层 $match 与同一份快照，口径天然一致，连接池占用也减半。
-    const [facet] = await FireDevice.aggregate(
-      [
-        { $match: scoped },
-        {
-          $facet: {
-            byType: [
-              { $group: { _id: '$deviceType', count: { $sum: 1 } } },
-              { $sort: { count: -1 } },
-            ],
-            byStatus: [
-              { $group: { _id: '$status', count: { $sum: 1 } } },
-              { $sort: { count: -1 } },
-            ],
-            needMaintenance: [{ $match: alert.needMaintenance }, { $count: 'n' }],
-            // 从未录入过检查日的设备没有排期，$lte 判据永远不命中它——
-            // 单列一档而不是并入 needMaintenance，是为了不改变既有指标的含义
-            needSchedule: [{ $match: alert.needSchedule }, { $count: 'n' }],
-            expiringSoon: [{ $match: alert.expiringSoon }, { $count: 'n' }],
-            expired: [{ $match: alert.expired }, { $count: 'n' }],
-            expiryUnknown: [{ $match: alert.expiryUnknown }, { $count: 'n' }],
-            total: [{ $count: 'n' }],
-          },
-        },
-      ],
-      listAggregateOptions()
-    );
-
-    const countOf = (arm) => facet?.[arm]?.[0]?.n || 0;
-    return {
-      total: countOf('total'),
-      byType: facet?.byType || [],
-      byStatus: facet?.byStatus || [],
-      needMaintenance: countOf('needMaintenance'),
-      needSchedule: countOf('needSchedule'),
-      expiringSoon: countOf('expiringSoon'),
-      expired: countOf('expired'),
-      expiryUnknown: countOf('expiryUnknown'),
-    };
+    return deviceStatsService.getDeviceStats(scopeFilter);
   }
 
   /**

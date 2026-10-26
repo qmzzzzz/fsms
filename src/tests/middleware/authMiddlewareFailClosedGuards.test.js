@@ -343,9 +343,12 @@ describe('auth 中间件分支补齐', () => {
 
     test('权限缓存联动失效失败仅告警，不阻断主流程', () => {
       const logger = require('../../utils/logger');
-      const userSpy = jest.spyOn(User, 'invalidatePermissionCache').mockImplementation(() => {
-        throw new Error('perm cache down (故障注入)');
-      });
+      const userPermissionService = require('../../services/userPermissionService');
+      const userSpy = jest
+        .spyOn(userPermissionService, 'invalidatePermissionCache')
+        .mockImplementation(() => {
+          throw new Error('perm cache down (故障注入)');
+        });
       const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
       try {
         const { invalidateUserCache } = require('../../middleware/auth');
@@ -400,13 +403,14 @@ describe('auth 中间件分支补齐', () => {
 
   describe('跨实例失效广播接收器（无 Redis 环境下直接驱动回调）', () => {
     test('仅对匹配前缀的字符串键执行本地失效，其余忽略', () => {
-      let captured = null;
+      const handlers = [];
+      let authCache = null;
       jest.doMock('../../services/sharedCache', () => {
         const actual = jest.requireActual('../../services/sharedCache');
         return {
           ...actual,
           onInvalidate: (handler) => {
-            captured = handler;
+            handlers.push(handler);
             return () => {};
           },
         };
@@ -421,31 +425,29 @@ describe('auth 中间件分支补齐', () => {
       // 隔离注册表只让本次 require 用桩，全局注册表与已连接连接保持原样。
       jest.isolateModules(() => {
         require('../../middleware/auth');
+        authCache = require('../../middleware/userAuthCache');
       });
       jest.dontMock('../../services/sharedCache');
 
-      expect(typeof captured).toBe('function');
-      // 【2026-10-24 加强】匹配前缀的键不能只断言 not.toThrow()：失效逻辑被架空时
-      // 同样不抛（文件头自陈的变异实测就是这一条）。这里改用**可观察副作用**——
-      // invalidateUserCacheLocal 必然联动调用 User.invalidatePermissionCache，
-      // 它没被调用就说明"本地失效"这段根本没执行。
-      const hitSpy = jest.spyOn(User, 'invalidatePermissionCache').mockImplementation(() => {});
-      try {
-        expect(() => captured('auth:user:receiver-broadcast-id')).not.toThrow();
-        expect(hitSpy).toHaveBeenCalledWith('receiver-broadcast-id');
-      } finally {
-        hitSpy.mockRestore();
-      }
+      // 广播可能有多个订阅者（IP 黑名单缓存也订阅同一门面），且注册顺序随模块图
+      // 变化——不能只驱动「最后一个」。这里逐个驱动，断言的是 userAuthCache 自己的
+      // **可观察副作用**（缓存条目被标记失效），与谁先注册无关。
+      expect(handlers.length).toBeGreaterThan(0);
+      const drive = (key) =>
+        handlers.forEach((handler) => expect(() => handler(key)).not.toThrow());
+
+      drive('auth:user:receiver-broadcast-id');
+      const entry = authCache.getCacheEntry('receiver-broadcast-id');
+      expect(entry).toBeTruthy();
+      expect(entry.user).toBeNull();
+      expect(entry.invalidatedAt).toBeGreaterThan(0);
+
       // 不匹配前缀与非字符串键：不仅要"不抛"，还**不得产生任何失效副作用**
       // （旧断言只有 not.toThrow，"把 else 分支写反"这种改动照样全绿）
-      const missSpy = jest.spyOn(User, 'invalidatePermissionCache').mockImplementation(() => {});
-      try {
-        expect(() => captured('other:prefix')).not.toThrow();
-        expect(() => captured(123)).not.toThrow();
-        expect(missSpy).not.toHaveBeenCalled();
-      } finally {
-        missSpy.mockRestore();
-      }
+      drive('other:prefix');
+      drive(123);
+      expect(authCache.getCacheEntry('other:prefix')).toBeUndefined();
+      expect(authCache.getCacheEntry('123')).toBeUndefined();
     });
   });
 });

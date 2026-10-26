@@ -146,7 +146,7 @@ describe('audit log data scope', () => {
       .set(reauthHeaders(token));
 
     expect(res.status).toBe(200);
-    const usernames = res.body.data.data.map((item) => item.username);
+    const usernames = res.body.data.map((item) => item.username);
     expect(usernames).toContain(users.actorA.username);
     expect(usernames).toContain(users.selfOperator.username);
     expect(usernames).not.toContain(users.actorB.username);
@@ -161,7 +161,7 @@ describe('audit log data scope', () => {
       .set(reauthHeaders(token));
 
     expect(res.status).toBe(200);
-    expect(res.body.data.data.map((item) => item.username)).toEqual([users.selfOperator.username]);
+    expect(res.body.data.map((item) => item.username)).toEqual([users.selfOperator.username]);
   });
 
   test('guests get an explicitly denied audit page (403 DATA_SCOPE_DENIED)', async () => {

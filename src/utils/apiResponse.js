@@ -22,12 +22,21 @@ class ApiResponse {
     });
   }
 
+  /** 数组 + 同级 meta：data 保持单层（禁止 success(res, {data, meta}) 的双层信封） */
+  static successWithMeta(res, data = null, meta = null, message = '获取成功', statusCode = 200) {
+    return res.status(statusCode).json({
+      success: true,
+      message,
+      data,
+      ...(meta ? { meta } : {}),
+    });
+  }
+
   /**
    * 分页成功响应
    * @param {Object} res - Express response 对象
    * @param {Array} data - 数据数组
-   * @param {Object} pagination - 分页信息（游标模式可携带 hasMore/nextCursor，
-   *   此时 total/totalPages 为 null——游标分页不做 countDocuments 全量统计）
+   * @param {Object} pagination - 分页信息（游标模式带 hasMore/nextCursor，不做全量 count）
    * @param {string} message - 成功消息
    */
   static paginated(res, data, pagination, message = '获取成功') {

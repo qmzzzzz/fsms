@@ -8,20 +8,21 @@
  * `behaviorBaseline` 的 writes 聚合（行为基线算哪些是写）。
  * 三条判据在语义上必须同进同退——任一处单独加一个方法，就会出现
  * "被 CSRF 拦下但没进审计"或"基线把某类写当读"的静默口径分叉。
- * 现由 `originCheck.WRITE_METHODS` 作单一事实来源（且冻结，才能安全当默认值共享）。
+ * 现由零依赖叶子 `middleware/httpMethods.js` 的 `WRITE_METHODS` 作单一事实来源
+ * （冻结，才能安全当默认值共享）；originCheck 只再导出。
  *
  * 本文件是**漂移守卫**：扫描源码里"元素集合恰好等于这四个方法"的字符串数组字面量，
- * 命中的声明点必须只有 originCheck.js 一处。
+ * 命中的声明点必须只有 httpMethods.js 一处。
  * 注意扫描前先剥掉注释：文本判据在注释上假绿过两次（本仓前科），
  * 所以第 1 条用例先自证提取器"抓得到合成脏样本、不误伤合法样本、注释里的不算"。
  */
 
 const fs = require('fs');
 const path = require('path');
-const { WRITE_METHODS } = require('../../middleware/originCheck');
+const { WRITE_METHODS } = require('../../middleware/httpMethods');
 
 const SRC_ROOT = path.join(__dirname, '..', '..');
-const CANONICAL = 'src/middleware/originCheck.js';
+const CANONICAL = 'src/middleware/httpMethods.js';
 const WRITE_SET = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 const stripComments = (code) => code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
@@ -77,7 +78,7 @@ describe('写操作名单的单一事实来源', () => {
     ).toBe(0);
   });
 
-  test('全仓生产代码里，写操作字面量只允许出现在 originCheck.js', () => {
+  test('全仓生产代码里，写操作字面量只允许出现在 httpMethods.js', () => {
     const hits = [];
     for (const file of walkJs(SRC_ROOT)) {
       const rel = path.relative(path.join(SRC_ROOT, '..'), file).split(path.sep).join('/');
@@ -102,9 +103,9 @@ describe('写操作名单的单一事实来源', () => {
     const baselineSrc = stripComments(
       fs.readFileSync(path.join(SRC_ROOT, 'services/behaviorBaseline.js'), 'utf8')
     );
-    expect(securitySrc).toMatch(/require\('\.\.\/originCheck'\)/);
+    expect(securitySrc).toMatch(/require\('\.\.\/httpMethods'\)/);
     expect(securitySrc).toMatch(/operations = WRITE_METHODS/);
-    expect(baselineSrc).toMatch(/require\('\.\.\/middleware\/originCheck'\)/);
+    expect(baselineSrc).toMatch(/require\('\.\.\/middleware\/httpMethods'\)/);
     expect(baselineSrc).toMatch(/\$in: \['\$method', WRITE_METHODS]/);
   });
 });

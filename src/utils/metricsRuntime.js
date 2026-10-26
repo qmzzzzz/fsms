@@ -90,6 +90,137 @@ let diskAt = 0;
 let diskRows = null;
 let diskProbeFailures = 0;
 
+/**
+ * 报表导出并发闸（P-2）：在途/排队/拒绝三个信号
+ *
+ * 为什么必须补：导出此前无并发上限，OOM 会杀掉整个进程——而"进程突然消失"在
+ * Prometheus 侧只表现为 target down，看不出是导出压垮的。有了这三个量，
+ * 「导出把内存打满」在事发前就是一条可见曲线。
+ *
+ * inflight/queued 是 gauge（状态推送，不是累计）；rejected 是 counter（闭合原因集）。
+ * 三个都**恒定输出含 0**：与 series_dropped 同一理由——「从没拒绝过」与
+ * 「这一版没上报这个指标」在 PromQL 里是两种状态。
+ */
+const EXPORT_REJECT_REASONS = ['queue_full', 'timeout'];
+let exportInflight = 0;
+let exportQueued = 0;
+const exportRejected = new Map(); // reason -> 累计次数
+
+/** 导出闸每次状态变化推送（services/exportConcurrency 调用） */
+function setExportGauges({ inflight, queued }) {
+  try {
+    if (Number.isFinite(inflight)) exportInflight = Math.max(0, inflight);
+    if (Number.isFinite(queued)) exportQueued = Math.max(0, queued);
+  } catch (_) {
+    /* 采集失败绝不影响导出主流程 */
+  }
+}
+
+/** 拒绝原因收成闭集：闭集外的值并入 timeout 之外的 'other' 会把基数问题带回来，直接丢弃 */
+function incExportRejected(reason) {
+  try {
+    if (!EXPORT_REJECT_REASONS.includes(reason)) return;
+    exportRejected.set(reason, (exportRejected.get(reason) || 0) + 1);
+  } catch (_) {
+    /* 同上 */
+  }
+}
+
+function formatExport() {
+  const out = [
+    '# HELP export_inflight Report export requests currently holding a concurrency slot',
+    '# TYPE export_inflight gauge',
+    'export_inflight ' + exportInflight,
+    '# HELP export_queued Report export requests waiting for a slot',
+    '# TYPE export_queued gauge',
+    'export_queued ' + exportQueued,
+    '# HELP export_rejected_total Report export requests rejected by the concurrency gate',
+    '# TYPE export_rejected_total counter',
+  ];
+  for (const reason of EXPORT_REJECT_REASONS) {
+    out.push('export_rejected_total{reason="' + reason + '"} ' + (exportRejected.get(reason) || 0));
+  }
+  return out;
+}
+
+/** JSON 快照侧同一事实（面板读这份，口径必须与文本一致） */
+function getExportSnapshot() {
+  const rejected = {};
+  for (const reason of EXPORT_REJECT_REASONS) rejected[reason] = exportRejected.get(reason) || 0;
+  return { inflight: exportInflight, queued: exportQueued, rejected };
+}
+
+/**
+ * WebSocket 连接数与入站丢弃（O-2）
+ *
+ * 连接数用**拉取式**：`websocketService` 在构造时把 `() => clients.size` 注册进来，
+ * 抓取时现算。推送式需要在连接表的每个增删点各调一次（实测 4 处），漏一处就永久偏移
+ * 且没有任何断言会红——这正是"同一判据的第二处实现"最容易出事的形状。
+ *
+ * 入站丢弃用**推送式**：丢弃发生在 `inboundThrottle.takeInboundSlot` 的拒绝分支，
+ * 事件点唯一，且那里本来就知道"这一次是丢弃还是静默"（已断开的连接后续包不计数，
+ * 否则一次攻击会产出 N 条指标，处置动作自己变成放大器——该判据见 inboundThrottle）。
+ */
+let wsConnectionSource = null;
+let wsInboundThrottled = 0;
+let wsInboundDisconnects = 0;
+
+/** websocketService 构造时注册取值函数（只允许一个源：多源会让读数取决于调用顺序） */
+function registerWsConnectionSource(source) {
+  if (typeof source === 'function') wsConnectionSource = source;
+}
+
+function currentWsConnections() {
+  if (!wsConnectionSource) return 0;
+  try {
+    const value = wsConnectionSource();
+    return Number.isFinite(value) ? Math.max(0, value) : 0;
+  } catch (_) {
+    return 0; // 服务正在销毁：读不到就报 0，而不是让整个 /metrics 500
+  }
+}
+
+/** 一个入站包因超速被丢弃（不含"已断开连接"后的静默丢弃） */
+function incWsInboundThrottled() {
+  try {
+    wsInboundThrottled += 1;
+  } catch (_) {
+    /* 采集失败不影响限流方向 */
+  }
+}
+
+/** 一条连接因持续超速被断开（按连接计一次，不按包计） */
+function incWsInboundDisconnect() {
+  try {
+    wsInboundDisconnects += 1;
+  } catch (_) {
+    /* 同上 */
+  }
+}
+
+function formatWs() {
+  return [
+    '# HELP ws_connections WebSocket connections currently tracked by this process',
+    '# TYPE ws_connections gauge',
+    'ws_connections ' + currentWsConnections(),
+    '# HELP ws_inbound_throttled_total Inbound WebSocket packets dropped by the per-socket throttle',
+    '# TYPE ws_inbound_throttled_total counter',
+    'ws_inbound_throttled_total ' + wsInboundThrottled,
+    '# HELP ws_inbound_disconnects_total Connections dropped after repeated inbound throttling',
+    '# TYPE ws_inbound_disconnects_total counter',
+    'ws_inbound_disconnects_total ' + wsInboundDisconnects,
+  ];
+}
+
+/** JSON 快照侧同一事实 */
+function getWsSnapshot() {
+  return {
+    connections: currentWsConnections(),
+    inboundThrottled: wsInboundThrottled,
+    inboundDisconnects: wsInboundDisconnects,
+  };
+}
+
 function probeDisk() {
   const now = Date.now();
   if (now - diskAt < DISK_TTL_MS) return diskRows;
@@ -166,7 +297,7 @@ function formatShipper() {
 
 /** 渲染本组全部信号（供 metrics.formatPrometheus 拼接） */
 function formatRuntime() {
-  return [...formatReadyz(), ...formatDisk(), ...formatShipper()];
+  return [...formatReadyz(), ...formatDisk(), ...formatShipper(), ...formatExport(), ...formatWs()];
 }
 
 /** 仅供测试重置（生产不调用） */
@@ -178,13 +309,27 @@ function __resetForTest() {
   diskAt = 0;
   diskRows = null;
   diskProbeFailures = 0;
+  exportInflight = 0;
+  exportQueued = 0;
+  exportRejected.clear();
+  wsConnectionSource = null;
+  wsInboundThrottled = 0;
+  wsInboundDisconnects = 0;
 }
 
 module.exports = {
   READYZ_RESULTS,
+  EXPORT_REJECT_REASONS,
   recordReadyz,
   incLogShipperFlushFailure,
   incLogShipperDroppedLines,
+  setExportGauges,
+  incExportRejected,
+  getExportSnapshot,
+  registerWsConnectionSource,
+  incWsInboundThrottled,
+  incWsInboundDisconnect,
+  getWsSnapshot,
   formatRuntime,
   __resetForTest,
 };

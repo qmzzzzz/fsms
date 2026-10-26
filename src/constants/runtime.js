@@ -13,7 +13,7 @@
  *      前缀裁剪按各自条数进行 → 账目错乱、可能丢行。
  *   3. 限流（middleware/rateLimit.js，express-rate-limit 默认 MemoryStore）
  *      每进程独立计数 → 实际配额被放大 N 倍，暴力破解防护按比例削弱。
- *   4. 用户/权限缓存（middleware/auth.js invalidateUserCache）
+ *   4. 用户/权限缓存（middleware/userAuthCache.js invalidateUserCache，auth 中间件使用）
  *      失效只作用于当前进程 → 禁用用户/改权限后其余进程最长 60s 仍放行。
  *   5. 验证码存储（services/captchaService.js）、统计缓存（services/statsCache.js）、
  *      告警频控（services/securityAlert.js 的 alertRateLimit Map）、
@@ -69,7 +69,10 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     redisExternalized: true,
   },
   {
-    module: 'middleware/auth.js',
+    // A-1：用户缓存已自 middleware/auth.js 抽成叶子模块（auth 与 tokenBlacklist
+    // 共用），TTL 常量随缓存本体落在 userAuthCache.js —— 清单必须指向持有常量的文件，
+    // 否则「声称 60s」在 auth.js 里找不到对应 TTL（runtimeInventoryClaims 会红）。
+    module: 'middleware/userAuthCache.js',
     mechanism: '用户缓存 invalidateUserCache',
     impact: '缓存失效不跨进程，禁用/改权限最长延迟 60s',
     redisExternalized: true,
@@ -84,8 +87,8 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     module: 'services/statsCache.js',
     mechanism: '统计缓存 Map',
     impact: '各进程数据不一致（仅表现为数字抖动）',
-    // 与 middleware/auth.js 的 userCache 同一模式：缓存本体在进程内，
-    // 失效经 sharedCache 广播（statsCache.js:155 publishInvalidate / statsCache.js:201 onInvalidate）。
+    // 与 middleware/userAuthCache.js 的 userCache 同一模式：缓存本体在进程内，
+    // 失效经 sharedCache 广播（statsCache.js:159 publishInvalidate / statsCache.js:230 onInvalidate）。
     // 两处行号都写全文件名：`A.js:114 / :124` 这种延续写法门禁只看得见前者（裸 `:124` 没有文件名），
     // 于是第二条永远不被核对——本仓的口径是"引用要机器判，就把文件名重复一遍"。
     // 此前漏标 ⇒ Redis 就绪时仍被报成"将静默降级"，属假警报
@@ -93,7 +96,10 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     redisExternalized: true,
   },
   {
-    module: 'services/securityAlert.js',
+    // A-1：告警频控 Map 已自 services/securityAlert.js 抽到 alertDispatch.js
+    // （与 alertTypes 一起解开 securityAlert ↔ permissionAbuse 的惰性环），
+    // 登记项随实现落点迁移，避免清单指向一个已经不再持状态的模块。
+    module: 'services/alertDispatch.js',
     mechanism: 'alertRateLimit Map',
     impact: '风暴抑制按进程计，告警量被放大',
   },

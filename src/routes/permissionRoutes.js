@@ -24,7 +24,7 @@ const listQueryValidation = [
   query('status').optional({ values: 'falsy' }).isIn(RESOURCE_STATUSES).withMessage('无效的状态值'),
   query('module').optional().trim().isLength({ max: 50 }).withMessage('模块名不能超过 50 个字符'),
   query('page').optional().isInt({ min: 1 }).withMessage('页码无效'),
-  query('limit').optional().isInt({ min: 1, max: 500 }).withMessage('每页数量应在 1-500'),
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('每页数量应在 1-100'),
 ];
 
 // 路径参数 :id 必须是合法 ObjectId，否则会被 errorHandler 转成"资源 ID 格式无效"

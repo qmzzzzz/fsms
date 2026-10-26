@@ -107,7 +107,7 @@ const EXPORT_SHEET_NAMES = {
 //   3. `{occurredAt:-1,_id:1}` 这种混合方向排序用不上那条复合索引，退化成
 //      5001 条的阻塞式内存排序。
 // deviceCode 例外：模型上 `unique:true`（FireDevice.js:22），取值不可能重复，
-// 故不需要次级键——同一判断见 DeviceService.js:94、cursorPagination.js:45。
+// 故不需要次级键——同一判断见 DeviceService.js:96、cursorPagination.js:45。
 const EXPORT_MODEL_CONFIG = {
   alarms: {
     model: FireAlarm,

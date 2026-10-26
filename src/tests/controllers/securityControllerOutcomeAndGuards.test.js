@@ -1261,7 +1261,7 @@ describe('getRecentAlerts 分支补齐', () => {
     await invoke(getRecentAlerts, req, res, next);
 
     expect(res.statusCode).toBe(200);
-    const meta = res.payload.data.meta;
+    const meta = res.payload.meta;
     // 有效告警 4 条（第 5 条缺 _id 被过滤）
     expect(meta.summary.total).toBe(4);
     expect(meta.summary.critical).toBe(1);
@@ -1279,7 +1279,7 @@ describe('getRecentAlerts 分支补齐', () => {
     ).toEqual([...AUDIT_RISK_LEVELS].sort());
     expect(AUDIT_RISK_LEVELS.reduce((n, l) => n + meta.summary[l], 0)).toBe(meta.summary.total);
     // 可选字段兜底
-    const items = res.payload.data.data;
+    const items = res.payload.data;
     const anonymousItem = items.find((i) => i._id === 'a3');
     expect(anonymousItem.username).toBe('anonymous');
     expect(anonymousItem.category).toBe('unknown');

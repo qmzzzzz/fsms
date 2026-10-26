@@ -23,6 +23,7 @@ const {
 } = require('./shared');
 const { resolveHandshakeIPForSecurityDecision, resolveTrustProxyHops } = require('./handshake');
 const { installInboundThrottle } = require('./inboundThrottle');
+const userPermissionService = require('../userPermissionService');
 
 /**
  * 给 async 事件监听器挂上拒绝臂
@@ -78,9 +79,7 @@ async function collectOnlineUsers(io, connections, ids, redisMode) {
 async function recomputePermissions(onlineIds) {
   if (onlineIds.length === 0) return null;
   try {
-    // 惰性 require 保留（与历史一致）：便于测试在 require 服务后替换 User 实现。
-    const User = require('../../models/User');
-    return await User.getPermissionsForUsers(onlineIds);
+    return await userPermissionService.getPermissionsForUsers(onlineIds);
   } catch (err) {
     logger.warn('权限同步重算失败，降级为「仅通知」', {
       userIds: onlineIds,

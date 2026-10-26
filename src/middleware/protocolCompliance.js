@@ -83,10 +83,10 @@ const FORBIDDEN_METHODS = ['TRACE', 'TRACK', 'CONNECT'];
 const HOST_GATE_EXEMPT_PATHS = new Set(['/metrics']);
 
 // 需要 Content-Type 声明的方法
-// 写方法清单全仓只有一份（originCheck 导出）。本文件此前自列 3 项、少 DELETE，
+// 写方法清单全仓只有一份（middleware/httpMethods.js）。本文件此前自列 3 项、少 DELETE，
 // 而 express.json 对 DELETE 同样解析 body ⇒ 携带 JSON 载荷的 DELETE 跳过媒体类型闸门，
 // 两道防线对同一种请求的口径相反。
-const { WRITE_METHODS: BODY_METHODS } = require('./originCheck');
+const { WRITE_METHODS: BODY_METHODS } = require('./httpMethods');
 
 // 合法 HTTP 头名字符集（RFC 7230 token）
 const VALID_HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;

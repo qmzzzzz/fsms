@@ -301,6 +301,20 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     }
     async eval(script, _numKeys, key, ...args) {
       this.guard();
+      // T-4：decrWithFloorZero 的回收脚本（DECR + 下界 0 + 保住原 TTL）。
+      // 必须放在 INCR 分支**之前**判断：两个脚本的文本形状相近，靠 `includes('INCR')`
+      // 区分时 DECR 脚本会掉进锁分支被 `store.set(key, args[1])` 写成 undefined，
+      // 于是"下界 0"和"TTL 不丢"这两条不变式会变成无人看守的假绿。
+      if (/redis\.call\(\s*['"]DECR['"]/.test(script)) {
+        const v = (Number(FakeRedis.store.get(key)) || 0) - 1;
+        if (v >= 0) {
+          FakeRedis.store.set(key, String(v));
+          return v;
+        }
+        // 下界分支：SET 0，且原 TTL 仍在时补回（脚本里是 PTTL → SET → PEXPIRE）
+        FakeRedis.store.set(key, '0');
+        return 0;
+      }
       // L-07：incrWithTtl 的 Lua 脚本——在假客户端里按脚本语义复演
       if (script.includes('INCR')) {
         const v = (Number(FakeRedis.store.get(key)) || 0) + 1;
@@ -756,5 +770,150 @@ describe('sharedCache Redis 路径（假 ioredis 驱动）', () => {
     expect(cache.isRedisEnabled()).toBe(false);
     // 内存存储已清空
     await expect(cache.get('sk')).resolves.toBeNull();
+  });
+
+  /**
+   * T-4：Redis 故障注入（审计报告 §7.2「行 89.95%，故障降级路径需更硬的注入」）。
+   *
+   * 上一条 `命令失败回退语义` 只把 `failCommands` 这一把总闸拉开，覆盖的是
+   * **set/get/del/incr/setIfAbsent 五条命令同时抛错**这一种形态。真实故障里更常见、
+   * 且更危险的是下面这几族——它们的共同点是"总闸式注入看不见"：
+   *   ① **单条命令**失败而其余正常（GETDEL 抛错但 GET/DEL 好着）：走的是
+   *      get→del 两步降级，而这两步会**各自**再回退一次内存 ⇒ 不测就不知道
+   *      "取"和"删"是不是落在同一份内存上（落在不同份 = 要么双花、要么取完不删）。
+   *   ② **DECR 回收路径**（`decrWithFloorZero`）此前只被别的套件 mock 掉，
+   *      真实现零覆盖：下界 0、TTL 不丢、以及"命令失败返回 null 而不是拿本地数字
+   *      冒充全局回收"三条不变式都没有用例。
+   *   ③ **连接级故障的日志节流**：`error` 事件在 ioredis 重试风暴下会反复触发，
+   *      代码只在「就绪 → 不可用」这一次转换上打 error。这条设计意图此前
+   *      完全靠注释承诺 —— 而"注释承诺、代码里空的"正是本仓最高危的假绿形态。
+   */
+  describe('T-4：Redis 故障注入（单命令级 / 连接级）', () => {
+    test('GETDEL 单条失败 ⇒ 降级 get+del，且两步落在同一份内存回退上（不双花、不丢值）', async () => {
+      await bootRedisMode();
+      // 先制造一份"只有本进程知道"的副本：SET 抛错 ⇒ 回退写内存（返回值如实为 false）
+      FakeRedis.failCommands = true;
+      await expect(cache.set('gd:1', { code: '123456' }, 60000)).resolves.toBe(false);
+
+      // 故障仍在：GETDEL 抛错 ⇒ 门面走 get+del 两步降级。
+      // 若"取"和"删"落在不同副本上，这里要么取不到（丢值），要么取到后删不掉（双花）。
+      await expect(cache.getDel('gd:1')).resolves.toEqual({ code: '123456' });
+      // 第二次必须为 null：证明上一次真的把那份副本删掉了
+      await expect(cache.getDel('gd:1')).resolves.toBeNull();
+
+      FakeRedis.failCommands = false;
+    });
+
+    test('DECR 回收：走 Lua 脚本、下界夹到 0、原 TTL 不丢（与 incrWithTtl 配对的回收路径）', async () => {
+      await bootRedisMode();
+      const evalSpy = jest.spyOn(FakeRedis.instances[0], 'eval');
+      expect(await cache.incrWithTtl('dc:1', 60000)).toBe(1);
+      expect(await cache.incrWithTtl('dc:1', 60000)).toBe(2);
+      expect(FakeRedis.ttls.get('dc:1')).toBe(60000);
+
+      expect(await cache.decrWithFloorZero('dc:1')).toBe(1);
+      expect(await cache.decrWithFloorZero('dc:1')).toBe(0);
+      // 下界：再回收也不得到负数（否则阈值判定会偏松一整轮）
+      expect(await cache.decrWithFloorZero('dc:1')).toBe(0);
+
+      // 真值对账（不看返回值只看共享层）：恰好是 '0'。
+      // 若假客户端把 DECR 脚本错当锁脚本处理，这里会是 undefined —— 那样
+      // 上面三条断言就只是"返回值自洽"，测不出共享层实际被写成了什么。
+      expect(FakeRedis.store.get('dc:1')).toBe('0');
+      // TTL 不丢：下界分支在脚本里是先 PTTL 再 SET 0 再 PEXPIRE，不能把窗口清掉
+      expect(FakeRedis.ttls.get('dc:1')).toBe(60000);
+
+      // 上面四条测的是「门面怎么用返回值」，而"下界 0 / TTL 不丢"这两条不变式
+      // 其实写在 Lua 脚本**文本**里（假客户端只是按脚本语义复演）。
+      // 不钉脚本文本的话，有人把 `if v >= 0 then return v end` 删掉、把
+      // PTTL/PEXPIRE 那段删掉，假客户端仍会照旧夹 0、照旧保留 TTL ⇒ 用例全绿。
+      const decrScript = evalSpy.mock.calls.map((c) => c[0]).find((s) => /DECR/.test(s));
+      expect(decrScript).toBeDefined();
+      expect(decrScript).toMatch(/if\s+v\s*>=\s*0\s+then\s+return\s+v\s+end/);
+      expect(decrScript).toMatch(/PTTL/);
+      expect(decrScript).toMatch(/PEXPIRE/);
+      evalSpy.mockRestore();
+    });
+
+    test('DECR 回收：命令抛错 ⇒ null，绝不拿本地数字冒充全局回收', async () => {
+      await bootRedisMode();
+      FakeRedis.failCommands = true;
+      await expect(cache.decrWithFloorZero('dc:2')).resolves.toBeNull();
+      // 连续失败不得在本地累出任何回收记录（反向对照：命令恢复后仍是 0，不是 -2）
+      await expect(cache.decrWithFloorZero('dc:2')).resolves.toBeNull();
+      FakeRedis.failCommands = false;
+      await expect(cache.decrWithFloorZero('dc:2')).resolves.toBe(0);
+    });
+
+    test('DECR 回收：配了 REDIS_URL 但连接已掉 ⇒ null + 降级留痕（与 incr 同口径）', async () => {
+      await bootRedisMode();
+      const warn = jest.spyOn(isolatedLogger, 'warn').mockImplementation(() => {});
+      FakeRedis.instances[0].emit('error', new Error('connection lost'));
+      expect(cache.isRedisEnabled()).toBe(false);
+      expect(cache.isRedisConfigured()).toBe(true);
+      await expect(cache.decrWithFloorZero('dc:3')).resolves.toBeNull();
+      // 这一态下"降级"必须留痕：否则运维看到的是"回收正常"而计数器只涨不落
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('本次计数如实返回 null'))).toBe(
+        true
+      );
+      warn.mockRestore();
+    });
+
+    test('DECR 回收：未配 REDIS_URL ⇒ 内存递减 + 下界 0 + 不存在的键按 0（单实例语义不变）', async () => {
+      await bootNoRedisMode();
+      await cache.incrWithTtl('dc:4', 60000);
+      await cache.incrWithTtl('dc:4', 60000);
+      expect(await cache.decrWithFloorZero('dc:4')).toBe(1);
+      expect(await cache.decrWithFloorZero('dc:4')).toBe(0);
+      expect(await cache.decrWithFloorZero('dc:4')).toBe(0);
+      // 未登记过的键：按 0 处理而不是抛错/返回负数
+      expect(await cache.decrWithFloorZero('dc:absent')).toBe(0);
+    });
+
+    test('连接级故障：未就绪期的 error 风暴不刷 error 日志；就绪→掉线只报一次且带失效清单', async () => {
+      // 构造"初始化即失败"态：ping 抛错 ⇒ redisReady=false 但 redisClient 已存在
+      FakeRedis.reset();
+      FakeRedis.failPing = true;
+      jest.resetModules();
+      jest.doMock('ioredis', () => FakeRedis);
+      process.env.REDIS_URL = 'redis://fake:6379';
+      jest.isolateModules(() => {
+        cache = require('../../services/sharedCache');
+        isolatedLogger = require('../../utils/logger');
+      });
+      const errSpy = jest.spyOn(isolatedLogger, 'error').mockImplementation(() => {});
+      const infoSpy = jest.spyOn(isolatedLogger, 'info').mockImplementation(() => {});
+
+      await cache.initSharedCache();
+      expect(cache.isRedisEnabled()).toBe(false);
+
+      const inst = FakeRedis.instances[0];
+      // 未就绪期的重试风暴：ioredis 每次重连都会 emit('error')，一条都不该进 error 日志
+      inst.emit('error', new Error('retry 1'));
+      inst.emit('error', new Error('retry 2'));
+      expect(errSpy).not.toHaveBeenCalled();
+
+      // 就绪：这是唯一该报 info 的时刻
+      inst.emit('ready');
+      expect(cache.isRedisEnabled()).toBe(true);
+      expect(infoSpy).toHaveBeenCalledTimes(1);
+      // 重复 ready 不得再打一遍（ioredis 会在每次重连成功后都发 ready）
+      inst.emit('ready');
+      expect(infoSpy).toHaveBeenCalledTimes(1);
+
+      // 「就绪 → 不可用」是唯一该报 error 的一次转换，且必须自带失效清单
+      inst.emit('error', new Error('connection lost'));
+      expect(errSpy).toHaveBeenCalledTimes(1);
+      const msg = String(errSpy.mock.calls[0][0]);
+      expect(msg).toContain('connection lost');
+      expect(msg).toContain('以下机制退回进程内语义');
+
+      // 掉线后的重试风暴同样不得刷屏
+      inst.emit('error', new Error('retry 3'));
+      expect(errSpy).toHaveBeenCalledTimes(1);
+
+      errSpy.mockRestore();
+      infoSpy.mockRestore();
+    });
   });
 });

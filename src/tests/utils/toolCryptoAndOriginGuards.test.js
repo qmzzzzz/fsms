@@ -1170,18 +1170,22 @@ describe('批次F 工具与密码学加固回归', () => {
       clearInterval(timer);
     });
 
-    test('auth.js 缓存淘汰注释与「插入序」实现一致，不再声称 LRU', () => {
+    test('用户缓存淘汰注释与「插入序」实现一致，不再声称 LRU', () => {
+      // 缓存本体随 A-1 抽到 userAuthCache.js（auth 与 tokenBlacklist 共用叶子）。
       // 【本次改动加固】原断言只查「插入顺序」字样与一行否定式——把注释改回
       // 「此处原注释称 LRU——按最近使用淘汰」后仍绿（「插入顺序」四字还在）。
       // 现要求错误说法处于**显式否定语境**，并保留对实现事实的陈述。
-      const source = fs.readFileSync(path.join(__dirname, '../../middleware/auth.js'), 'utf8');
+      const source = fs.readFileSync(
+        path.join(__dirname, '../../middleware/userAuthCache.js'),
+        'utf8'
+      );
       const block = source.slice(
-        source.indexOf('// 缓存容量保护'),
-        source.indexOf('// 查询期间是否发生了主动失效')
+        source.indexOf('容量保护说明'),
+        source.indexOf('const setCacheEntry')
       );
       expect(block).toMatch(/插入顺序/);
-      // 错误说法必须被点名否定：原注释的「删除最旧的一半」不准确
-      expect(block).toMatch(/原注释称「删除最旧的一半」——不准确/);
+      // 实现事实：淘汰最早写入的一半，而不是 LRU 语义
+      expect(block).toMatch(/最早写入的一半/);
       expect(block).toMatch(/而非 LRU 意义上的「最久未使用」/);
       // 不得残留任何肯定式 LRU 声明
       expect(block).not.toMatch(/按最近使用淘汰/);

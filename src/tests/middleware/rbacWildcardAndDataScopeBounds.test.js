@@ -44,6 +44,7 @@ const {
   buildRecordScopeFilter,
 } = require('../../middleware/rbac');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const userPermissionService = require('../../services/userPermissionService');
 
 // ---- mock res/next 工具 ----
 const makeRes = () => {
@@ -78,15 +79,18 @@ describe('rbac.js 分支补齐', () => {
     }
   });
 
-  describe('checkPermission（mock User.getPermissions）', () => {
+  describe('checkPermission（mock userPermissionService.getPermissions）', () => {
     const makeReq = () => ({ user: { userId: new mongoose.Types.ObjectId().toString() } });
 
     afterEach(() => {
       jest.restoreAllMocks();
     });
 
+    const stubPermissions = (codes) =>
+      jest.spyOn(userPermissionService, 'getPermissions').mockResolvedValue(codes);
+
     test('模块通配符命中：持有 device:* 时通过 device:read 检查', async () => {
-      jest.spyOn(User, 'getPermissions').mockResolvedValue(['device:*']);
+      stubPermissions(['device:*']);
       const req = makeReq();
       const res = makeRes();
       const next = jest.fn();
@@ -96,7 +100,7 @@ describe('rbac.js 分支补齐', () => {
     });
 
     test('模块通配符不命中：持有 alarm:* 时请求 device:read → 403', async () => {
-      jest.spyOn(User, 'getPermissions').mockResolvedValue(['alarm:*']);
+      stubPermissions(['alarm:*']);
       const req = makeReq();
       const res = makeRes();
       const next = jest.fn();
@@ -106,7 +110,7 @@ describe('rbac.js 分支补齐', () => {
     });
 
     test('AND 逻辑：两个权限都持有才通过，缺一即 403', async () => {
-      jest.spyOn(User, 'getPermissions').mockResolvedValue(['user:read', 'user:export']);
+      stubPermissions(['user:read', 'user:export']);
       const req = makeReq();
       const res = makeRes();
 
@@ -121,7 +125,7 @@ describe('rbac.js 分支补齐', () => {
     });
 
     test('精确匹配命中：无需通配符直接通过', async () => {
-      jest.spyOn(User, 'getPermissions').mockResolvedValue(['user:read']);
+      stubPermissions(['user:read']);
       const req = makeReq();
       const res = makeRes();
       const next = jest.fn();
@@ -130,7 +134,7 @@ describe('rbac.js 分支补齐', () => {
     });
 
     test('超管通配：持有 *:* 时任意权限检查直接通过', async () => {
-      jest.spyOn(User, 'getPermissions').mockResolvedValue(['*:*']);
+      stubPermissions(['*:*']);
       const req = makeReq();
       const res = makeRes();
       const next = jest.fn();

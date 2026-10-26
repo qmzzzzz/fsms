@@ -16,10 +16,12 @@
 const path = require('path');
 
 // 数据范围翻译与失败注入无关，固定为 all 以免依赖库内角色播种
-// isDataScopeDenied / deniedDataScope 从真实模块取（#12 之后 auditScopeFilter 也要用
-// 这两个导出）：不在测试里重抄判据，重抄就是第二处会漂移的实现。
-jest.mock('../../middleware/rbac', () => {
-  const actual = jest.requireActual('../../middleware/rbac');
+// isDataScopeDenied / deniedDataScope 从真实模块取（auditScopeFilter 也用它俩）：
+// 不在测试里重抄判据，重抄就是第二处会漂移的实现。
+// 桩必须打在 middleware/dataScope（auditScopeFilter 的叶子依赖）：mock rbac 无效，
+// 真实 getDataScope 会去查未连接的 Mongo —— 表现为用例 10s 超时且日志为空。
+jest.mock('../../middleware/dataScope', () => {
+  const actual = jest.requireActual('../../middleware/dataScope');
   return {
     isDataScopeDenied: actual.isDataScopeDenied,
     deniedDataScope: actual.deniedDataScope,

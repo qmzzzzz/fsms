@@ -1,8 +1,6 @@
 /**
- * 统计缓存模块
- * 基于内存 Map、带 TTL 的进程内缓存，为 /api/users/stats 提供缓存底座。
- * 提供 get / set / del / invalidateByUserId 四个操作，任何内部异常均降级为
- * { hit: false }，让调用方走直接查库路径，保证可用性优先。
+ * 统计缓存模块：进程内 Map + TTL，为 /api/users/stats、设备统计与审计风险汇总提供底座。
+ * 任何内部异常均降级为 { hit: false }，让调用方走直接查库路径（可用性优先）。
  */
 
 const config = require('../config');
@@ -24,6 +22,12 @@ const lastAccess = new Map();
  * 同时（清库之后）并发请求即使在失效前排到新代号也写不回一个会被读到的旧值。
  */
 let generation = 0;
+
+// 设备统计代际（同 generation）：失效前排到的请求即使晚于失效落盘，也只能写进旧代键
+let deviceGeneration = 0;
+
+const DEVICE_STATS_PREFIX = 'devstats:';
+const DEVICE_STATS_INVAL_CHANNEL = 'statscache:devices';
 
 let cleanupTimer = null;
 
@@ -189,8 +193,33 @@ function invalidateAll(reason = 'user-mutation') {
   });
 }
 
+function invalidateDeviceStatsLocal(reason) {
+  try {
+    deviceGeneration += 1;
+    let removed = 0;
+    for (const key of [...store.keys()]) {
+      if (!key.startsWith(DEVICE_STATS_PREFIX)) continue;
+      store.delete(key);
+      lastAccess.delete(key);
+      removed += 1;
+    }
+    logger.info('设备统计缓存失效', { reason, removed, generation: deviceGeneration });
+  } catch (err) {
+    logger.warn(`设备统计缓存失效异常: ${err.message}`);
+  }
+}
+
+function invalidateDeviceStats(reason = 'device-mutation') {
+  invalidateDeviceStatsLocal(reason);
+  sharedCache.publishInvalidate(DEVICE_STATS_INVAL_CHANNEL).catch(() => {});
+}
+
 function handleRemoteStatsInvalidation(raw) {
   if (typeof raw !== 'string' || !raw.startsWith(STATS_INVAL_PREFIX)) return;
+  if (raw === DEVICE_STATS_INVAL_CHANNEL) {
+    invalidateDeviceStatsLocal('remote');
+    return;
+  }
   if (raw === `${STATS_INVAL_PREFIX}all`) {
     invalidateAllLocal('remote');
     return;
@@ -275,6 +304,8 @@ module.exports = {
   invalidateByUserId,
   invalidateAll,
   generation: () => generation,
+  deviceGeneration: () => deviceGeneration,
+  invalidateDeviceStats,
   sweepExpired,
   startCleanup,
   stopCleanup,

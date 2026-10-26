@@ -15,8 +15,12 @@ jest.mock('../../utils/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+// onInvalidate：userPermissionService 在**加载期**注册远端失效回调（websocketService
+// 顶层引入它），桩缺这个函数会让本文件在 require 阶段就抛 TypeError。
 jest.mock('../../services/sharedCache', () => ({
   isRedisEnabled: jest.fn(() => true),
+  isRedisConfigured: jest.fn(() => true),
+  onInvalidate: jest.fn(),
   getRedisClient: jest.fn(() => 'redis-client'),
   // 订阅端与主连接同源的取密函数（2816d68 Redis 认证）。桩返回哨兵值而不是 undefined：
   // 只有能断言「这个值确实进了 new Redis 的 options.password」，才证伪「adapter 客户端

@@ -139,6 +139,7 @@ const ERROR_CODE_I18N_MAP = {
   PERMISSION_TREE_DEPTH_ANOMALY: 'errors.permissionTreeDepthAnomaly',
   PERMISSION_LIST_INVALID: 'errors.permissionListInvalid',
   EXPORT_FORMAT_UNSUPPORTED: 'errors.exportFormatUnsupported',
+  EXPORT_BUSY: 'errors.exportBusy',
   REPORT_TYPE_UNSUPPORTED: 'errors.reportTypeUnsupported',
   ROLE_NOT_FOUND: 'errors.roleNotFound',
   ROLE_VIEW_FORBIDDEN: 'errors.roleViewForbidden',

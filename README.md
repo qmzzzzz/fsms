@@ -88,16 +88,16 @@ fsms/
 
 ## 项目文档
 
-| 文档                                                                       | 内容                                                                                                                                                                                      |
-| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [docs/architecture.md](./docs/architecture.md)                             | 系统架构图、登录时序图、ER 图、部署拓扑图（Mermaid）                                                                                                                                      |
-| [docs/threat-model.md](./docs/threat-model.md)                             | STRIDE 威胁模型：资产与信任边界、每项缓解的落地位置与残余风险                                                                                                                             |
-| [docs/mlps2-controls.md](./docs/mlps2-controls.md)                         | 等保 2.0（GB/T 22239-2019）控制项对照表，逐条给出可出示的证据（文件 / 测试 / 端点）                                                                                                       |
-| [docs/incident-response.md](./docs/incident-response.md)                   | 应急响应预案：角色与升级链，每个动作绑定实际存在的端点 / 脚本 / 日志位置                                                                                                                  |
-| [docs/multi-instance-consistency.md](./docs/multi-instance-consistency.md) | 多实例一致性清单：进程内状态、Redis 外置路径与多实例下的残余差异                                                                                                                          |
-| [docs/security-dependency-watch.md](./docs/security-dependency-watch.md)   | 依赖安全观察清单：需盯住的依赖、监控动作与触发条件                                                                                                                                        |
-| [docs/adr/](./docs/adr/README.md)                                          | 架构决策记录（9 篇，ADR-001～ADR-009）：登录 ECDH 选型、审计链哈希、密钥管理、单进程锁假设、多实例 Redis 回退、高量级游标分页、Express 5 迁移评估、数据范围强制方式、网络分段与数据面隔离 |
-| [CHANGELOG.md](./CHANGELOG.md)                                             | 版本变更日志                                                                                                                                                                              |
+| 文档                                                                       | 内容                                                                                                                                                                                                                             |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [docs/architecture.md](./docs/architecture.md)                             | 系统架构图、登录时序图、ER 图、部署拓扑图（Mermaid）                                                                                                                                                                             |
+| [docs/threat-model.md](./docs/threat-model.md)                             | STRIDE 威胁模型：资产与信任边界、每项缓解的落地位置与残余风险                                                                                                                                                                    |
+| [docs/mlps2-controls.md](./docs/mlps2-controls.md)                         | 等保 2.0（GB/T 22239-2019）控制项对照表，逐条给出可出示的证据（文件 / 测试 / 端点）                                                                                                                                              |
+| [docs/incident-response.md](./docs/incident-response.md)                   | 应急响应预案：角色与升级链，每个动作绑定实际存在的端点 / 脚本 / 日志位置                                                                                                                                                         |
+| [docs/multi-instance-consistency.md](./docs/multi-instance-consistency.md) | 多实例一致性清单：进程内状态、Redis 外置路径与多实例下的残余差异                                                                                                                                                                 |
+| [docs/security-dependency-watch.md](./docs/security-dependency-watch.md)   | 依赖安全观察清单：需盯住的依赖、监控动作与触发条件                                                                                                                                                                               |
+| [docs/adr/](./docs/adr/README.md)                                          | 架构决策记录（11 篇，ADR-001～ADR-011）：登录 ECDH 选型、审计链哈希、密钥管理、单进程锁假设、多实例 Redis 回退、高量级游标分页、Express 5 迁移评估、数据范围强制方式、网络分段与数据面隔离、不引入分布式追踪的适用边界、注释治理 |
+| [CHANGELOG.md](./CHANGELOG.md)                                             | 版本变更日志                                                                                                                                                                                                                     |
 
 ## 快速开始
 
@@ -112,6 +112,9 @@ fsms/
   `/readyz` 的 `checks.transactions` 里标注 `standalone`——顺序写中途失败会残留跨集合不一致，
   且这种不一致不会被任何单集合校验发现。本地开发用 standalone 可以；**生产必须部署副本集**
   （单节点副本集即可，`docker-compose.yml` 默认就是），不要拿 standalone 跑生产。
+  生产语义（含 `NODE_ENV` 未识别）下检测到 standalone 时，`/readyz` 直接返回 **503**
+  （`checks.topology=transactions_degraded`），让编排器/LB 摘流量——不阻断进程启动，
+  修好拓扑后探针自动转绿。开发/测试/预发不受此闸影响。
 
 ### 方式一：Windows 一键启动
 

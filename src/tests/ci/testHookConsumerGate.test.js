@@ -361,8 +361,8 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
     expect(propertyExportKeys('const v = module.exports["_read"];')).toEqual([]);
   });
 
-  it('钩子总数钉死：只许减不许增（当前 33 个），且成员可点名', () => {
-    expect(hooks.length).toBe(33);
+  it('钩子总数钉死：只许减不许增（当前 35 个），且成员可点名', () => {
+    expect(hooks.length).toBe(35);
     const keys = hooks.map(keyOf);
     for (const must of [
       'services/auditBuffer.js::__resetForTest',
@@ -378,6 +378,12 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
       'utils/metricsAuditDrops.js::_auditDrops',
       // 每连接入站令牌桶：用例直接 require 本模块读桶状态（不再经 metrics 门面间接消费）
       'services/websocketService/inboundThrottle.js::_peekState',
+      // P-1：事务拓扑探测要能在单测里"假装连的是 standalone / 副本集"，否则
+      // `/readyz` 的 fail-closed 分支只能靠真起一个单机 Mongo 才测得到。
+      'utils/transaction.js::_setTopologyForTest',
+      // P-2：导出并发闸的槽位/队列是模块级单例，套件之间必须能复位，
+      // 否则前一个用例占住的槽位会让后一个用例随机排队超时（随机顺序门禁下必现）。
+      'services/exportConcurrency.js::__resetForTest',
     ])
       expect(keys).toContain(must);
   });

@@ -8,6 +8,9 @@
 
 const mongoose = require('mongoose');
 const User = require('../models/User');
+// 数据范围三件套直接取叶子模块（rbac.js 只是再导出）：经 rbac 取用会把本模块
+// 拉进 `securityAlert → auditScopeFilter → rbac → securityAlert` 的惰性环。
+const { getDataScope, isDataScopeDenied, deniedDataScope } = require('../middleware/dataScope');
 
 // 评价报告 #22：部门成员集缓存——原实现每次请求都 User.distinct 拉全部门
 // 用户 id 进 $in，大部门下查询放大且每请求重复计算。成员变化低频，
@@ -59,10 +62,7 @@ const getDepartmentMemberIds = async (department) => {
 /** 无条件拒绝：显式空 $in，语义为「该范围下不可见任何记录」 */
 const deniedAuditQuery = (query) => ({ ...query, _id: { $in: [] } });
 
-const { isDataScopeDenied, deniedDataScope } = require('../middleware/rbac');
-
 const applyAuditDataScope = async (query, operatorId) => {
-  const { getDataScope } = require('../middleware/rbac');
   const dataScope = await getDataScope(operatorId);
   // #12：范围不可用即 403（与 applyDataScopeToQuery 同一把尺、同一个错码），
   // 不再由本处回"查不到任何记录"的空集——空集让调用方分不清「没有审计记录」

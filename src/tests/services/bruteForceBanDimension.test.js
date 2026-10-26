@@ -15,7 +15,7 @@
 
 const mongoose = require('mongoose');
 
-const security = require('../../middleware/security');
+const ipBlacklistStore = require('../../middleware/security/ipBlacklistStore');
 const {
   checkBruteForce,
   ALERT_TYPES,
@@ -46,19 +46,19 @@ const CASE_USER = `zzcase_${stamp}`;
 const CASE_VARIANTS = [CASE_USER, CASE_USER.toLowerCase(), CASE_USER.toUpperCase()];
 const SEEDED_USERS = [USER, USER_B, USER_C, USER_D, USER_E, USER_F, USER_G, ...CASE_VARIANTS];
 
-const originalAdd = security.addToBlacklist;
+const originalAdd = ipBlacklistStore.addToBlacklist;
 let banCalls;
 
 beforeAll(async () => {
   if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
-  security.addToBlacklist = jest.fn(async (ip, durationMs, reason, source) => {
+  ipBlacklistStore.addToBlacklist = jest.fn(async (ip, durationMs, reason, source) => {
     banCalls.push({ ip, durationMs, reason, source });
     return { banned: true, normalizedIp: ip };
   });
 });
 
 afterAll(async () => {
-  security.addToBlacklist = originalAdd;
+  ipBlacklistStore.addToBlacklist = originalAdd;
   // 清理本套件种下的全部行（失败记录 + 成功登录 + 告警），避免污染共享测试库的
   // ip 维度计数（distinctAccounts/sharedEgress 都按 ip 查询，跨套件泄漏会改变判据）
   await AuditLog.deleteMany({ username: { $in: SEEDED_USERS } }, { bypassAppendOnly: true });

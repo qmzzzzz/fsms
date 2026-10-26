@@ -19,6 +19,8 @@ const AuditLog = require('../../models/AuditLog');
 // 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
 const { onAuditWriteFailure } = require('../../utils/auditWriteFailure');
 const captchaService = require('../captchaService');
+// bcrypt 卸载到 worker 线程（测试环境自动回退进程内实现，见模块头注释）
+const bcryptWorker = require('../../utils/bcryptWorkerPool');
 const { decryptLoginCredential } = require('../../utils/loginCipher');
 const { USER_STATUS } = require('../../utils/constants');
 const {
@@ -43,16 +45,15 @@ const { issueLoginSession } = require('./session');
 let _dummyPasswordHash = null;
 const consumeDummyPasswordTime = async (candidate) => {
   try {
-    const bcrypt = require('bcryptjs');
     if (!_dummyPasswordHash) {
-      _dummyPasswordHash = await bcrypt.hash(
+      _dummyPasswordHash = await bcryptWorker.hash(
         crypto.randomBytes(24).toString('hex'),
         config.bcryptRounds
       );
     }
     // 入参可能是非字符串（校验器已挡住大部分，此处纵深防御）；
     // 统一转成字符串保证 compare 一定执行到底，不提前抛错缩短耗时
-    await bcrypt.compare(
+    await bcryptWorker.compare(
       typeof candidate === 'string' ? candidate : String(candidate ?? ''),
       _dummyPasswordHash
     );

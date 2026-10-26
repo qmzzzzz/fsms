@@ -21,8 +21,8 @@
  *     只有这一层抓得住"行号仍在范围内但指错了地方"。新增登记的正确姿势与
  *     stubReturnTypeParity 同一条：**先说出这一行凭什么算证据（符号名），再来登记**。
  *     3b 谓词必须**局部唯一**：登记的符号在被引区间外的最近出现必须 ≥ 6 行。
- *     否则"漂 3 行"照样绿——本轮实测到 `DeviceService.js:502` 的 `/countDocuments(/`
- *     全文件命中 2 处、最近距离 394 行（:108），`/npm run validate/` 最近距离 1 行。
+ *     否则"漂 3 行"照样绿——本轮实测到 `DeviceService.js:444` 的 `/countDocuments(/`
+ *     全文件命中 2 处、最近距离 334 行（:110），`/npm run validate/` 最近距离 1 行。
  *     （行号随 #11 查询预算折行漂移，锚与台账随迁。）
  *     这样的登记只是装饰，必须写成能区分邻行的形态。
  *
@@ -289,15 +289,15 @@ const LIVE = [
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:562',
+    at: 'app.js:572',
     must: /sentryErrorHandler/,
-    why: 'Sentry 错误处理器挂载点（2026-10-25 整改后为 :546；同日后 prettier 收口再迁 :562）',
+    why: 'Sentry 错误处理器挂载点（2026-10-25 整改后为 :546；同日后 prettier 收口再迁 :562；2026-10-26 P-1 整改 /readyz 后迁 :572）',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:566',
+    at: 'app.js:576',
     must: /app\.use\(errorHandler/,
-    why: '通用 errorHandler 位置（口径是"在它之前"；prettier 收口后迁 :566）',
+    why: '通用 errorHandler 位置（口径是"在它之前"；prettier 收口后迁 :566；2026-10-26 P-1 整改 /readyz 后迁 :576）',
   },
   {
     in: 'src/controllers/reportController.js',
@@ -307,9 +307,9 @@ const LIVE = [
   },
   {
     in: 'src/controllers/reportController.js',
-    at: 'auditQueryService.js:320',
+    at: 'auditQueryService.js:314',
     must: /applyAuditDataScope/,
-    why: '同一条判据的第二处调用（17 轮实测原先写的 :200 是无关注释）',
+    why: '同一条判据的第二处调用（17 轮实测原先写的 :200 是无关注释；2026-10-26 统一信封后迁 :314）',
   },
   {
     in: 'src/services/reportExportService.js',
@@ -367,7 +367,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/auditExportDataScope.test.js',
-    at: 'auditQueryService.js:320',
+    at: 'auditQueryService.js:314',
     must: /applyAuditDataScope/,
     why: '审计列表侧同一判据',
   },
@@ -385,9 +385,9 @@ const LIVE = [
   },
   {
     in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
-    at: 'DeviceService.js:445',
+    at: 'deviceStatsService.js:82',
     must: /\btotal: \[\{ \$count: 'n' \}\]/,
-    why: '同一档判据专门跑计数：getDeviceStats 收敛为一次 $facet，total 臂在 :445（谓词取整行，避免与其余五档 $count 混淆；行号随 #11 查询预算折行漂移）',
+    why: '同一档判据专门跑计数：getDeviceStats 收敛为一次 $facet，total 臂在 :82（谓词取整行，避免与其余五档 $count 混淆；逻辑抽到 deviceStatsService 以守住 max-lines 棘轮）',
   },
   {
     in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
@@ -440,19 +440,19 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:503',
+    at: 'app.js:513',
     must: /app\.get\('\/api'/,
-    why: '/api 根路径处理器（原写 :297-298，那是 CSRF 注释；2026-10-25 整改后为 :487）',
+    why: '/api 根路径处理器（原写 :297-298，那是 CSRF 注释；2026-10-25 整改后为 :487；2026-10-26 P-1 整改 /readyz 后迁 :513）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:435-482',
+    at: 'app.js:441-492',
     must: /503[\s\S]*\.catch/,
     why: '/readyz 的 503 双路径：then 里按 mongo.ok 定码 + catch 里硬 503（原写 :258-278 是 body-parser；2026-10-25 整改后为 :435-457）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:476',
+    at: 'app.js:486',
     must: /res\.status\(503\)\.json/,
     why: '头注里点名"两条失败路径"的具体行段（catch 臂的硬 503；2026-10-25 整改后为 :460）',
   },
@@ -470,15 +470,15 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:562',
+    at: 'app.js:572',
     must: /sentryErrorHandler/,
     why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见；2026-10-25 整改后为 :546）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'src/config/validate.js:375',
+    at: 'src/config/validate.js:328',
     must: /requiresProductionSemantics/,
-    why: 'validateConfig() 首行的非生产早退（原写 :264，那是 MAX_TRUST_PROXY_HOPS 常量；2026-10-25 整改后为 :375）',
+    why: 'validateConfig() 首行的非生产早退（原写 :264，那是 MAX_TRUST_PROXY_HOPS 常量；2026-10-25 整改后为 :375；2026-10-26 A-1 抽 envSemantics 后迁 :328）',
   },
   {
     in: 'src/tests/controllers/auditSummaryCache.test.js',
@@ -512,15 +512,15 @@ const LIVE = [
   },
   {
     in: 'src/constants/runtime.js',
-    at: 'statsCache.js:155',
+    at: 'statsCache.js:159',
     must: /sharedCache\.publishInvalidate\(/,
-    why: '清单注释钉住的发布端行号（它是有行号的事实，就该被行号判据管着）；原 :114，被本轮 TTL 上界那段新增行推下 33 行，A-1 的 generation/invalidateAll 追加行再推后',
+    why: '清单注释钉住的发布端行号（它是有行号的事实，就该被行号判据管着）；原 :114，被 TTL 上界与 A-1 追加行推至 :155，2026-10-26 设备统计失效段先推至 :166，随后注释密度棘轮压缩该段再回到 :159',
   },
   {
     in: 'src/constants/runtime.js',
-    at: 'statsCache.js:201',
+    at: 'statsCache.js:230',
     must: /sharedCache\.onInvalidate\(/,
-    why: '清单注释钉住的消费端行号；原 :124，被 TTL 上界与 S-8/invalidateAll 追加行推后',
+    why: '清单注释钉住的消费端行号；原 :124，被 TTL 上界与 S-8/invalidateAll 追加行推至 :201，2026-10-26 设备统计失效段先推至 :246，随后注释密度棘轮压缩该段再回到 :230',
   },
   {
     in: 'src/tests/utils/auditFilterCombination.test.js',
@@ -738,17 +738,19 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
     // 这正是第 26 轮台账 M2 抓到的洞（阈值写两遍，放松判据抓不到）。
     const weakened = {
       in: 'src/tests/controllers/deviceExpiringTruncation.test.js',
-      at: 'DeviceService.js:438',
+      at: 'deviceStatsService.js:82',
       must: /\$count/,
     };
     expect(mustNearestOutside(weakened)).toBeLessThan(UNIQ_GAP);
     expect(toothlessRegistrations([weakened])).toHaveLength(1);
     // 正向自证：收紧后的同一条必须一条都不报（两向都过，才不是只验失败态）
-    expect(toothlessRegistrations([LIVE.find((e) => e.at === 'DeviceService.js:445')])).toEqual([]);
+    expect(toothlessRegistrations([LIVE.find((e) => e.at === 'deviceStatsService.js:82')])).toEqual(
+      []
+    );
   });
 
   test('谓词有牙（正向命中 + 反向不命中），不许跟着行号走', () => {
-    const hit = citedRange('src/middleware/sentry.js', 'app.js:562');
+    const hit = citedRange('src/middleware/sentry.js', 'app.js:572');
     expect(/sentryErrorHandler/.test(hit.text)).toBe(true);
     expect(/绝不可能出现在这一行的符号ZZZ/.test(hit.text)).toBe(false);
     // 本轮之前的真实写法：auditController.js:38 是空行，同一条判据必须判它不含符号

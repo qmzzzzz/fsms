@@ -14,8 +14,10 @@
 
 const mockPermissionRbac = { getDataScope: jest.fn() };
 
-jest.mock('../../middleware/rbac', () => ({
-  ...jest.requireActual('../../middleware/rbac'),
+// auditScopeFilter 直连叶子模块 middleware/dataScope（A-1 为解开
+// securityAlert → auditScopeFilter → rbac → securityAlert 的环），mock 目标随之迁移。
+jest.mock('../../middleware/dataScope', () => ({
+  ...jest.requireActual('../../middleware/dataScope'),
   getDataScope: (...a) => mockPermissionRbac.getDataScope(...a),
 }));
 

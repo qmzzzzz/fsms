@@ -34,6 +34,10 @@
  */
 const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
+// 直连封禁原语叶子模块（门面会反向拉回本告警链，形成惰性环）。
+// 调用时取属性（薄包装），不解构：测试据此替换封禁结果，解构会在加载期固化绑定。
+const ipBlacklistStore = require('../middleware/security/ipBlacklistStore');
+const addToBlacklist = (...args) => ipBlacklistStore.addToBlacklist(...args);
 
 // 与 securityAlert.ALERT_TYPES 的同名取值必须一致；单独声明是为了避免
 // securityAlertIpBans ← securityAlert ← securityAlertIpBans 的循环依赖。
@@ -233,9 +237,6 @@ const collectBruteForceSignals = async ({ reportedIp, normalizedIp, windowStart,
  */
 const applyBruteForceIpBan = async ({ normalizedIp, priorBans, fallbackIp }) => {
   try {
-    // **必须**保持惰性 require（middleware/security ↔ securityAlert 循环依赖），
-    // 提到文件顶部会在加载顺序不利时拿到未完成的导出。
-    const { addToBlacklist } = require('../middleware/security');
     const tier = IPBanEvents.tierFor(priorBans);
     const result = await addToBlacklist(
       normalizedIp,

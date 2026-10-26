@@ -210,10 +210,9 @@
     </div>
 
     <!-- 最近安全告警（GET /security/alerts，security:audit）：
-         后端信封比列表接口还多一层（ApiResponse.success 又包了一层），实际数组在
-         res.data.data.data，见 securityController/overview.js 的「已知不一致」注释。
-         失败静默且面板不出现（与统计卡同契约）：「没有告警」和「查不到」必须可区分，
-         一次瞬断不能把面板装成一片祥和的空态。 -->
+         后端为单层信封 { data: [alerts], meta: {...} }，数组在 res.data.data，
+         元数据在 res.data.meta。失败静默且面板不出现（与统计卡同契约）：
+         「没有告警」和「查不到」必须可区分，一次瞬断不能把面板装成一片祥和的空态。 -->
     <div v-if="alertsLoaded" class="glass alerts-card">
       <div class="alerts-card__header">
         <span class="alerts-card__title">{{ $t('security.recentAlerts') }}</span>
@@ -696,10 +695,9 @@ const loadData = async () => {
 
     const res = await api.security.queryAuditLogs(params)
     if (!isCurrent()) return
-    // 后端返回结构：{ success: true, data: { data: [logs], meta: {...} }, message: '...' }
-    const result = res.data?.data
-    logs.value = result?.data || []
-    total.value = result?.meta?.total || 0
+    // 后端返回结构：{ success: true, message, data: [logs], meta: {...} }
+    logs.value = res.data?.data || []
+    total.value = res.data?.meta?.total || 0
   } catch (e) {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
     if (isCanceledError(e)) return
@@ -753,8 +751,9 @@ const loadStats = async () => {
 }
 
 // ===== 最近安全告警（GET /security/alerts）=====
-// 双层信封：ApiResponse.success(res, { data, meta }) → 实际数组在 res.data.data.data。
-// 后端固定最多回 50 条（多取 1 条探测 hasMore 后截断），lastUpdated 是服务端时间。
+// 单层信封：{ success, message, data: [alerts], meta } → 数组在 res.data.data，
+// 元数据在 res.data.meta。后端固定最多回 50 条（多取 1 条探测 hasMore 后截断），
+// lastUpdated 是服务端时间。
 const ALERTS_PREVIEW_COUNT = 5
 const alerts = ref([])
 const alertsMeta = ref(null)
@@ -771,11 +770,10 @@ const loadAlerts = async () => {
   }
   try {
     const res = await api.security.getAlerts()
-    const payload = res?.data?.data
     // 结构性兜底：非预期包络一律视为失败（面板不出现），不做部分渲染
-    if (!payload || !Array.isArray(payload.data)) return
-    alerts.value = payload.data
-    alertsMeta.value = payload.meta || null
+    if (!Array.isArray(res?.data?.data)) return
+    alerts.value = res.data.data
+    alertsMeta.value = res.data.meta || null
     alertsLoaded.value = true
   } catch (e) {
     // 票据过期：重新验证后重放；其余失败静默（与统计卡同契约，提示归拦截器）

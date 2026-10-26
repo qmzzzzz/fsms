@@ -113,7 +113,7 @@ const openList = async (list, meta, perms = PERMS) => {
   get.mockImplementation((url) => {
     if (url === '/security/audit-logs') {
       return Promise.resolve({
-        data: { data: { data: list, meta: meta || { total: list.length } } },
+        data: { data: list, meta: meta || { total: list.length } },
       })
     }
     if (url === '/security/overview') {
@@ -125,7 +125,7 @@ const openList = async (list, meta, perms = PERMS) => {
     // 既有用例的 DOM 断言（选择器均不与 .alerts-card 相交）不受影响
     if (url === '/security/alerts') {
       return Promise.resolve({
-        data: { data: { data: [], meta: { total: 0, limit: 50, hasMore: false } } },
+        data: { data: [], meta: { total: 0, limit: 50, hasMore: false } },
       })
     }
     return Promise.reject(new Error('unexpected url: ' + url))
@@ -559,9 +559,9 @@ describe('AuditLogView 失败路径与竞态', () => {
     await waitFor(() => pending.length === 1, { message: '首个列表请求在途' })
     click(c.findAll('.glass-btn-group button')[0])
     await waitFor(() => pending.length === 2, { message: '第二个列表请求在途' })
-    pending[1]({ data: { data: { data: [logRow({ username: 'NEW' })], meta: { total: 1 } } } })
+    pending[1]({ data: { data: [logRow({ username: 'NEW' })], meta: { total: 1 } } })
     await waitFor(() => trs(c).length === 1, { message: '新结果落地' })
-    pending[0]({ data: { data: { data: [logRow({ username: 'OLD' })], meta: { total: 9 } } } })
+    pending[0]({ data: { data: [logRow({ username: 'OLD' })], meta: { total: 9 } } })
     await flush(20)
     expect(td(c, 0, 1).querySelector('.cell-main').textContent.trim()).toBe('NEW')
     expect(totalDigits(c)).toBe('1')
@@ -570,7 +570,7 @@ describe('AuditLogView 失败路径与竞态', () => {
   test('统计接口失败：不渲染统计卡，列表照常可用且不弹错误', async () => {
     get.mockImplementation((url) => {
       if (url === '/security/audit-logs') {
-        return Promise.resolve({ data: { data: { data: [logRow()], meta: { total: 1 } } } })
+        return Promise.resolve({ data: { data: [logRow()], meta: { total: 1 } } })
       }
       return Promise.reject(new Error('overview down'))
     })
@@ -622,7 +622,7 @@ describe('AuditLogView 导出', () => {
     try {
       get.mockImplementation((url) => {
         if (url === '/security/audit-logs') {
-          return Promise.resolve({ data: { data: { data: [], meta: { total: 0 } } } })
+          return Promise.resolve({ data: { data: [], meta: { total: 0 } } })
         }
         if (url === '/security/overview') return Promise.resolve({ data: { data: {} } })
         if (url === '/reports/export') {
@@ -684,7 +684,7 @@ describe('AuditLogView 导出', () => {
     try {
       get.mockImplementation((url) => {
         if (url === '/security/audit-logs') {
-          return Promise.resolve({ data: { data: { data: [], meta: { total: 0 } } } })
+          return Promise.resolve({ data: { data: [], meta: { total: 0 } } })
         }
         if (url === '/security/overview') return Promise.resolve({ data: { data: {} } })
         if (url === '/reports/export') {
@@ -721,7 +721,7 @@ describe('AuditLogView 导出', () => {
     let resolveExport
     get.mockImplementation((url) => {
       if (url === '/security/audit-logs') {
-        return Promise.resolve({ data: { data: { data: [], meta: { total: 0 } } } })
+        return Promise.resolve({ data: { data: [], meta: { total: 0 } } })
       }
       if (url === '/security/overview') return Promise.resolve({ data: { data: {} } })
       if (url === '/reports/export') return new Promise((r) => (resolveExport = r))
@@ -751,7 +751,7 @@ describe('AuditLogView 导出', () => {
     try {
       get.mockImplementation((url) => {
         if (url === '/security/audit-logs') {
-          return Promise.resolve({ data: { data: { data: [], meta: { total: 0 } } } })
+          return Promise.resolve({ data: { data: [], meta: { total: 0 } } })
         }
         if (url === '/security/overview') return Promise.resolve({ data: { data: {} } })
         if (url === '/security/audit-logs/export') {
@@ -795,7 +795,7 @@ describe('AuditLogView 导出', () => {
     const { ElMessageBox } = await import('element-plus/es/components/message-box/index.mjs')
     get.mockImplementation((url) => {
       if (url === '/security/audit-logs') {
-        return Promise.resolve({ data: { data: { data: [], meta: { total: 0 } } } })
+        return Promise.resolve({ data: { data: [], meta: { total: 0 } } })
       }
       if (url === '/security/overview') {
         return Promise.resolve({
@@ -986,11 +986,11 @@ describe('AuditLogView 最近安全告警面板', () => {
     get.mockImplementation((url) => {
       if (url === '/security/alerts') {
         return Promise.resolve({
-          data: { data: { data: alertsList, meta: meta || { total: alertsList.length } } },
+          data: { data: alertsList, meta: meta || { total: alertsList.length } },
         })
       }
       if (url === '/security/audit-logs') {
-        return Promise.resolve({ data: { data: { data: [], meta: { total: 0 } } } })
+        return Promise.resolve({ data: { data: [], meta: { total: 0 } } })
       }
       if (url === '/security/overview') {
         return Promise.resolve({ data: { data: {} } })
@@ -1042,7 +1042,7 @@ describe('AuditLogView 最近安全告警面板', () => {
       if (url === '/security/alerts') return Promise.reject(new Error('down'))
       if (url === '/security/audit-logs') {
         return Promise.resolve({
-          data: { data: { data: [logRow()], meta: { total: 1 } } },
+          data: { data: [logRow()], meta: { total: 1 } },
         })
       }
       if (url === '/security/overview') {
@@ -1123,7 +1123,7 @@ describe('AuditLogView 审计读取票据（P3-2）', () => {
       if (url === '/security/overview') return Promise.resolve({ data: { data: {} } })
       if (url === '/security/alerts') {
         return Promise.resolve({
-          data: { data: { data: [], meta: { total: 0, limit: 50, hasMore: false } } },
+          data: { data: [], meta: { total: 0, limit: 50, hasMore: false } },
         })
       }
       return Promise.reject(new Error('unexpected url: ' + url))
@@ -1133,7 +1133,7 @@ describe('AuditLogView 审计读取票据（P3-2）', () => {
   test('无票据：不发审计请求，先弹二次验证；通过后换票并重放列表与告警', async () => {
     clearReauthTicket()
     createTicket.mockResolvedValue({ data: { data: { ticket: 't1', expiresIn: 300 } } })
-    mockReads(() => Promise.resolve({ data: { data: { data: [logRow()], meta: { total: 1 } } } }))
+    mockReads(() => Promise.resolve({ data: { data: [logRow()], meta: { total: 1 } } }))
     const c = mountComponent(AuditLogView, {
       setupStore: (pinia) => useAuthStore(pinia).setPermissions(PERMS),
     })
@@ -1163,7 +1163,7 @@ describe('AuditLogView 审计读取票据（P3-2）', () => {
           response: { data: { errors: { errorCode: 'REAUTH_TICKET_INVALID' } } },
         })
       }
-      return Promise.resolve({ data: { data: { data: [logRow()], meta: { total: 1 } } } })
+      return Promise.resolve({ data: { data: [logRow()], meta: { total: 1 } } })
     })
     const c = mountComponent(AuditLogView, {
       setupStore: (pinia) => useAuthStore(pinia).setPermissions(PERMS),

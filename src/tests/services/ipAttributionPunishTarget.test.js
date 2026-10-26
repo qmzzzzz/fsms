@@ -20,7 +20,7 @@
 const mongoose = require('mongoose');
 
 const { resolvePunishableIp, IP_ATTRIBUTION_KINDS } = require('../../utils/ipUtils');
-const security = require('../../middleware/security');
+const ipBlacklistStore = require('../../middleware/security/ipBlacklistStore');
 const escalation = require('../../services/rateLimitEscalation');
 const {
   checkBruteForce,
@@ -58,21 +58,21 @@ const TEST_IPS = [
   ABUSE_FORGED,
 ];
 
-const originalAdd = security.addToBlacklist;
+const originalAdd = ipBlacklistStore.addToBlacklist;
 let captured;
 
 const purgeAudit = (filter) => AuditLog.deleteMany(filter, { bypassAppendOnly: true });
 
 beforeAll(async () => {
   if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
-  security.addToBlacklist = jest.fn(async (ip, durationMs, reason, source) => {
+  ipBlacklistStore.addToBlacklist = jest.fn(async (ip, durationMs, reason, source) => {
     captured.push({ ip, durationMs, reason, source });
     return { banned: true, normalizedIp: ip };
   });
 });
 
 afterAll(async () => {
-  security.addToBlacklist = originalAdd;
+  ipBlacklistStore.addToBlacklist = originalAdd;
   await purgeAudit({
     $or: [{ ip: { $in: TEST_IPS } }, { username: /^zzattr/ }],
   });

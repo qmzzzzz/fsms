@@ -279,7 +279,7 @@ describe('F-A8 getDataScope 的 jsdoc 阈值必须与 LEVEL_* 常量同源（文
   const fs = require('fs');
   const path = require('path');
   const SRC = fs
-    .readFileSync(path.join(__dirname, '../../middleware/rbac.js'), 'utf8')
+    .readFileSync(path.join(__dirname, '../../middleware/dataScope.js'), 'utf8')
     .split(/\r?\n/);
 
   // 代码侧：`const LEVEL_XXX = <int>;`

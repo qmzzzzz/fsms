@@ -15,6 +15,10 @@ const {
 const { auditPath, deriveAuditMeta } = require('../../utils/auditMeta');
 const { auditClientAddress } = require('../../utils/ipUtils');
 const { isBodySensitiveKey, sanitizeAuditQuery } = require('../../models/auditLogSanitizer');
+// 写操作口径的单一事实来源（原此处再写一遍四个方法名，与 originCheck 的 CSRF 闸
+// 各自漂移过：一处加了方法，另一处就出现"拦了但没审计"/"审计了但没拦"）。
+// 抽成零依赖叶子后不再需要惰性 require originCheck（那曾是一条真实环）。
+const { WRITE_METHODS } = require('../httpMethods');
 
 /**
  * 8. 审计日志中间件
@@ -52,12 +56,8 @@ const { isBodySensitiveKey, sanitizeAuditQuery } = require('../../models/auditLo
  * 的 GET 探测也会留痕（与既有 /api/users 行为一致），这正是探测证据。
  */
 const auditLog = (options = {}) => {
-  // 延迟 require：originCheck 顶层就 require 了本模块（recordEarlyRejection），
-  // 反向在顶层 require 会成环拿到半初始化导出
-  const { WRITE_METHODS } = require('../originCheck');
   const {
-    // 写操作口径的单一事实来源（原此处再写一遍四个方法名，与 originCheck 的 CSRF 闸
-    // 各自漂移过：一处加了方法，另一处就出现"拦了但没审计"/"审计了但没拦"）
+    // 写操作口径的单一事实来源（定义见 middleware/httpMethods.js）
     operations = WRITE_METHODS,
     excludePaths = ['/api/auth/login', '/api/auth/refresh'],
     // GET/HEAD 敏感读取的**豁免清单**：默认全量审计，命中才跳过（口径与反转依据

@@ -7,6 +7,9 @@
 const crypto = require('crypto');
 const logger = require('../utils/logger');
 const TokenBlacklistModel = require('../models/TokenBlacklist');
+// 用户缓存失效已抽到叶子模块：此前这里在函数体内惰性引用 auth，与 auth 顶层的
+// isTokenBlacklisted 构成双向依赖；现在两侧都只单向引用 userAuthCache。
+const { invalidateUserCache } = require('./userAuthCache');
 
 // 使用 SHA-256 哈希存储 token，防止数据库泄露后 token 被直接复用
 const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
@@ -200,9 +203,6 @@ const invalidateUserTokens = async (userId) => {
     throw err;
   }
   // 缓存清除失败不影响吊销结果（最长 60s 自然过期），不纳入上方事务性失败
-  // **必须**保持惰性 require（auth ↔ tokenBlacklist 循环依赖），
-  // 提到文件顶部会让本模块在 auth 尚未完成导出时被加载。
-  const { invalidateUserCache } = require('./auth');
   invalidateUserCache(userId);
   logger.info('用户所有令牌已失效（tokenVersion 递增）', { userId });
 };

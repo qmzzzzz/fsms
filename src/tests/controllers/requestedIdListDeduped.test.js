@@ -1048,7 +1048,7 @@ describe('第 8 组 · 大写 :id 走单个入口', () => {
  *  2. roleController.js:115 的权限 id 归一由 src/tests/controllers/
  *     roleCreatePermissionExistence.test.js 钉住"去重"，**没有大小写腿**——把 uniqueIdStrings
  *     换回 `new Set(map(String))` 那一套腿照样绿。该文件是并行 agent 的已提交用例，改动前需协调。
- *  3. 三处 service 侧 `findScopeFieldsByIds`（userService.js:278、DeviceService.js:135、
+ *  3. 三处 service 侧 `findScopeFieldsByIds`（userService.js:278、DeviceService.js:137、
  *     AlarmService.js:181）的归一没有腿，且在当前接线下**造不出**能红的腿：调用方（守卫）
  *     已经先归一过一次，服务层这一句是幂等冗余 ⇒ 删掉它是等价变异。留着是纵深防御
  *     （新调用方不必重新想一遍口径），但要写清"这里没有腿，别把它当已覆盖"。

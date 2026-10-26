@@ -66,9 +66,6 @@ const getSecurityStats = asyncHandler(async (req, res) => {
     scopeFilter,
   });
 
-  // 被封禁 IP 数量
-  // （实际应从 Redis 或其他存储中获取）
-
   return ApiResponse.success(
     res,
     {
@@ -283,12 +280,9 @@ const getSecurityOverview = asyncHandler(async (req, res) => {
     // 分母混入了告警数——criticalAlerts=100、failedLogins=10 时显示 90.9%，
     // 这个"成功率"没有任何可解释的业务含义（概览里根本没有成功登录计数），
     // 且全仓无任何消费者。直接移除，而非补查询去圆一个伪指标。
-    // 添加性能指标
-    overview.performance = {
-      lastQueryTime: 0, // 后续可以添加实际查询时间
-      avgResponseTime: 0, // 后续可以添加平均响应时间
-      maxConcurrentConnections: 0, // 后续可以添加最大并发连接数
-    };
+    // A-2 同口径：原 performance 三个字段恒发 0（无任何消费方），
+    // 会把"没采集"渲染成"0ms/0 并发"，与「失败显 `-` 而非 0」相悖，一并移除；
+    // 真实延迟/错误率已在 /metrics 暴露，需要时应新增字段而不是先发零值。
     overview.compliance = await buildComplianceSection();
     return ApiResponse.success(res, overview, '获取成功');
   } catch (error) {
@@ -356,10 +350,11 @@ const getRecentAlerts = asyncHandler(async (req, res) => {
       ),
       total: validAlerts.length,
     };
-    // 添加元数据
-    const response = {
-      data: limitedAlerts,
-      meta: {
+    // 添加元数据（data 与 meta 平级：避免 data.data 双层信封）
+    return ApiResponse.successWithMeta(
+      res,
+      limitedAlerts,
+      {
         total: limitedAlerts.length,
         page: 1,
         limit: ALERTS_PAGE_SIZE,
@@ -368,8 +363,8 @@ const getRecentAlerts = asyncHandler(async (req, res) => {
         count: limitedAlerts.length,
         summary,
       },
-    };
-    return ApiResponse.success(res, response, '获取成功');
+      '获取成功'
+    );
   } catch (error) {
     // 数据范围不可用（403 DATA_SCOPE_DENIED）必须原样上冒：包成 500 会让
     // "这个账号没有可见范围"表现为"服务端故障"，客户端于是重试一个永远不会
@@ -380,13 +375,6 @@ const getRecentAlerts = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'RECENT_ALERTS_QUERY_FAILED');
   }
 });
-
-/**
- * ⚠ 已知不一致（本次不改，待统一）：
- * queryAuditLogs / exportAuditLogs / getRecentAlerts 返回体为 { data: {...}, meta } 结构，
- * 经 ApiResponse.success 再包一层后出现 data.data 双层信封，
- * 与其他接口的单层 data 信封不一致；属 API 契约变更，需与前端协同后统一调整。
- */
 
 module.exports = {
   getSecurityStats,

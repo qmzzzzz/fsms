@@ -412,6 +412,13 @@ const ERROR_CODES = {
     status: 400,
     message: '不支持的导出格式: ${format}',
   },
+  // P-2：导出并发闸拒绝。429 而不是 503——503 的语义是"本实例不可用"，
+  // 会让客户端/网关把它当成服务故障并触发更激进的重试；导出忙是**容量**问题，
+  // 配合 Retry-After 让调用方按节奏退避才是对的。
+  EXPORT_BUSY: {
+    status: 429,
+    message: '导出任务繁忙，请稍后重试',
+  },
   REPORT_TYPE_UNSUPPORTED: {
     status: 400,
     message: '不支持的报表类型',

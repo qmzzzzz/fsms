@@ -8,6 +8,65 @@
 
 ## [未发布]
 
+### 审计第五轮复核：逐条回源码验证、修成立项、登记不成立与暂缓项（2026-10-26）
+
+> 承接 `deliverables/audit-2026-10-26/audit-report.md`（复核基线 `4a1bdae` + 工作区）。
+> 先把 P1/P2/P3 全部结论逐条回到当前源码与实跑结果复核，再只修验证成立的部分；
+> 报告补第九节复核记录。**不修不存在的问题，也不沿用报告里的数字。**
+
+| 项                          | 复核结论     | 处理                                                                                                                                                                                                                                                                                              |
+| --------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1-1 工作区卫生             | 成立         | 删除 `.jest-*`/`.vitest-*` 日志、`.ci-repro.log`、`.tmp-probe.json` 与 4 个 `.lint-ratchet-selftest-*` 残骸；`.env` 的 `HMAC_SECRET` 19 → 43 字符（dev 文件、gitignored；本地既有审计 HMAC/二次验证票据随之不可验，重登即恢复）。`logs/`、`.mimosa/`、`CHANGELOG.md.bak` 是运行产物且已忽略，保留 |
+| P2-1 假 performance 指标    | 成立         | 删除 `overview.performance` 三字段（无消费方且与 A-2「不可用≠零值」冲突），真实指标仍在 `/metrics`                                                                                                                                                                                                |
+| P2-2 `data.data` 双层信封   | **部分成立** | 审计列表（游标/偏移两臂）与 `getRecentAlerts` 改用新增的 `ApiResponse.successWithMeta`（`data`/`meta` 平级），前端 `AuditLogView` 同步；`exportAuditLogs` 是流式 CSV，不经 `ApiResponse`，报告把它算进来不准确                                                                                    |
+| P2-3 权限列表上限           | 成立         | `permissionRoutes` 的 `limit` 500 → 100                                                                                                                                                                                                                                                           |
+| P2-4 authRoutes 错位注释    | 成立         | 删除两处错贴的 PERMISSION-EXEMPT 注释（`refresh` 在 `:325`）                                                                                                                                                                                                                                      |
+| P2-6 设备统计无缓存         | 成立         | 新增 `services/deviceStatsService.js`：`scopeFilter` 序列化键 + 15s TTL + 单次 8 臂 `$facet`；7 条写路径统一 `invalidateDeviceStats`（代际防旧值写回 + `sharedCache` 跨实例广播）。`DeviceService` 只留委派，守住 max-lines 棘轮                                                                  |
+| P3-3 wellKnown 未入 OpenAPI | **不成立**   | `openapiSync` 两条用例明文钉住「wellKnownRoutes 属于豁免面（不进 `openapi.json`，且豁免有据）」，是有测试保护的设计而非漏登记                                                                                                                                                                     |
+| P2-5 / P3-1/2/4/5/6/8       | 暂缓         | warning 全在棘轮基线内、0 error；拆分与产品/运维决策按报告原路径排期                                                                                                                                                                                                                              |
+| 锚点与密度同步              | 必做         | `DeviceService.js:445→deviceStatsService.js:82`、`auditQueryService.js:320→:314`、`statsCache.js:155/201→:159/:230`、`DeviceService` 计数 `:108/:502→:110/:444`；7 处引用注释与 2 个消费方断言同步；`statsCache`/`apiResponse` 注释压回密度基线（98→97、59→59）                                   |
+| 验收                        | —            | 全量 `jest` **644/644 套件、7,956/7,956 例**；前端 `auditLogView` 44/44；`lint` 0 error/14 warn、`lint:ratchet`/`format:check`/`docs:check`（86 path / 105 operation）全绿；锚点两闸 28/28、`commentDensityRatchet` 5/5、路由契约 44/44                                                           |
+
+---
+
+### 审计第四轮：惰性环 4 → 1 个分量、台账单源化、注释治理落 ADR-011（2026-10-26）
+
+> 承接 `deliverables/audit-2026-10-25/audit-report.md` §15.2 如实登记的「A-1 剩余三个分量未做」，
+> 并一并收口 **Q-3/T-6**（多份台账各自手抄实现清单）与 **Q-1**（生产注释混入变更史）。
+> 报告补第 16 节。所有修复先复现红点再改，没有放宽任何断言。
+
+| 项               | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A-1 惰性环清零   | 强连通分量 **4 → 1**、模块 **36 → 22**。新叶子：`middleware/userAuthCache.js`（用户缓存与失效广播，断 `auth ↔ tokenBlacklist`）、`middleware/dataScope.js`、`middleware/httpMethods.js`、`middleware/security/ipBlacklistStore.js`（封禁原语）、`middleware/security/earlyRejection.js`（早拒绝审计）、`services/alertTypes.js`、`services/alertDispatch.js`（告警链断环）。`models/User.js` 删除三个权限薄代理，调用方直接走 `userPermissionService`。`LAZY_SCC` 只剩 config/audit/metrics 22 模块，保留理由写在 `requireCycles` 头 |
+| A-1 行为保持     | `addToBlacklist` 在两个封禁模块保留**调用时取属性**的薄包装（解构会在加载期固化绑定，测试就无法替换封禁结果）；F-160 的 `await addToBlacklist(` 文本门禁继续命中。6 个封禁/升级套件的注入点迁移到 `ipBlacklistStore`，是跟随唯一写入原语，不是放宽断言                                                                                                                                                                                                                                                                               |
+| Q-3/T-6 台账单源 | 写方法名单收敛到 `middleware/httpMethods.js`（originCheck / security/auditLog / protocolCompliance / behaviorBaseline 四处不再各抄一份）；审计分类测试改为引用 `constants/audit.js` 的 `AUDIT_CATEGORIES`；Redis 降级失效清单改为从 `SINGLE_PROCESS_DEPENDENCIES` 过滤派生                                                                                                                                                                                                                                                           |
+| Q-1 注释治理     | 新增 `docs/adr/ADR-011-注释治理-源码只保留当前约束.md`：源码只写当前约束与不明显的 Why，变更史归 CHANGELOG、权衡归 ADR、锚点优先符号。`securityHeaders.js` 整行注释 180 → **102**（生产注释 22,504 → **22,426** 行，−78）                                                                                                                                                                                                                                                                                                            |
+| Q-1 密度棘轮     | 新增 `scripts/commentDensity.js` + `scripts/commentDensity.baseline.json`（258 文件 / 22,426 注释 / 34,798 代码）与 `src/tests/ci/commentDensityRatchet.test.js`（5 例：统计面自证、只降不升、新文件密度 ≤ 30%、反向对照、总量对账）。`--update-baseline` 遇回归直接拒绝                                                                                                                                                                                                                                                             |
+| 棘轮实测         | A-1 给两个封禁模块各加 1 行说明后，棘轮立即报 2 处回归并拒绝收紧基线；按 Q-1 口径把 3 行历史压成 2 行后才写回基线——证明它不是「写完就绿」的摆设                                                                                                                                                                                                                                                                                                                                                                                      |
+| 测试重定向       | `auditScopeFilterDeptCache` / `edgeCases` / `auditQueryOperationCatch` 的桩从 `middleware/rbac` 改到 `middleware/dataScope`（后者才是 `auditScopeFilter` 的叶子依赖；旧桩失效时真实查询打未连接 Mongo，表现为 10s 超时且日志为空）；`websocketRedisAdapter` 的 `sharedCache` 桩补 `onInvalidate`（`userPermissionService` 在加载期注册）；`sharedCacheDegradationLog` 改为派生清单（手抄版已漂移成 `middleware/auth.js`）；`reportPiiExportStepUp` 的审计断言改为轮询到真实落库（全量并发下响应先回、行尚未可见）                    |
+| 验收             | 全量 `jest` **643/643 套件、7,950/7,950 例全绿**；`requireCycles` 6/6、`commentDensityRatchet` 5/5、封禁链 57 例、定向回归 179 例全绿；`npm run lint` / `lint:ratchet` 0 error（14 条既有 warning 未超基线）、`docs:check`（86 path / 105 operation）与 `format:check` 一致                                                                                                                                                                                                                                                          |
+
+---
+
+### 审计剩余项收口：事务拓扑 fail-closed、导出并发闸、日志 PII 掩码、运行指标补齐（2026-10-26）
+
+> 承接 `deliverables/audit-2026-10-25/audit-report.md` §14.5 的"仍未处置"清单。
+> 本轮把 `P-1`/`P-2`/`O-1`/`O-2`/`O-3`/`T-3`/`T-4` 做掉，`A-1` 解掉一个强连通分量
+> （40 → 36 模块），剩余三个分量属需改所有权的重构，**只登记不改结构**（报告 §15.2）。
+
+| 项                       | 内容                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P-1 事务拓扑 fail-closed | 生产语义下探测到 `standalone`（多集合写非原子、失败留残骸）⇒ `/readyz` 判 503（`checks.topology=transactions_degraded`），**不阻断启动**。判据落在 `utils/transaction.js` 的 `transactionReadinessBlocker()`，与既有的多实例闸合并成单一 `topologyBlocker`，同时命中时**多实例优先**（它同时影响审计链与限流计数，且修法与事务拓扑无关）                                      |
+| P-2 导出并发闸           | 新增 `services/exportConcurrency.js`：上限 2 / 有界队列 8 / 排队超时 30s，全部可经 `EXPORT_MAX_CONCURRENCY`、`EXPORT_MAX_QUEUE`、`EXPORT_QUEUE_TIMEOUT_MS` 调整并在越界时**钳制 + 一次性告警**。队列满或超时 → 429 `EXPORT_BUSY` + `Retry-After`。释放幂等、槽位**移交**给 waiter（不"先减再加"，避免空窗被第三个请求插队）                                                   |
+| O-1 日志 PII 集中掩码    | 新增 `utils/logPiiMask.js`，接在 `logger.sanitizeLogInfo` 末尾（清洗 → 截断 → 掩码）。判定顺序 **email → 身份证 → 手机号**（身份证必须先于手机号，否则 18 位号码会被手机号正则切碎）；键名用闭合集 + 后缀判定，**刻意不含 `token`** 后缀以免误伤 `tokenVersion`；`requestId`/`userId`/`socketId` 作为结构性标识不掩。`LOG_PII_MASK=false` 可关，关闭时在生产语义下落一条 warn |
+| O-2 运行指标补齐         | 新增 `export_inflight`、`export_queued`、`export_rejected_total{reason}`、`ws_connections`、`ws_inbound_throttled_total`、`ws_inbound_disconnects_total`。WS 连接数用**拉取式** `registerWsConnectionSource`（4 处增删点任一漏推都会让 gauge 长期偏高，拉取式免掉这个失效面）；文本与 JSON 快照两通道同源                                                                     |
+| O-3 tracing 适用边界     | 新增 `docs/adr/ADR-010-不引入分布式追踪的适用边界.md`：把 `requestId` 能覆盖什么、跨进程边界为何断在这里、什么条件下该重新评估，写成可证伪的判据而不是"暂时不做"                                                                                                                                                                                                              |
+| A-1 惰性环（部分）       | 抽出零 require 叶子 `src/config/envSemantics.js`（环境别名/生产语义判据），`config/validate.js` 改为 re-export。实测强连通分量 40 → **36** 模块，`requireCycles` 的 `LAZY_SCC[0]` 26 → **22**                                                                                                                                                                                 |
+| T-3 路由分支补测         | 新增 `routes/routeGuardBranches.test.js` 9 例：strict 档两条守卫（明文注册被拒、enc+明文并存被拒）与改密接口、巡检时间窗倒置、`POST /reports/export/pii` 类型白名单、创建用户口令 64 字符上限，均带反向对照                                                                                                                                                                   |
+| T-4 sharedCache 故障注入 | 41 → **47** 例，覆盖三类"总闸式注入看不见"的形态：单条命令失败（`GETDEL` 抛错走 get→del 降级，两步必须落在同一份内存回退上）、`DECR` 回收路径（真实现此前零覆盖）、连接级故障的**日志节流**（未就绪期的重试风暴不得刷 error 日志）。三处逐一做变异，确认变红后还原                                                                                                            |
+
+---
+
 ### 七维审计复核：把「报告结论」逐条回源码验证，再修真正成立的那几条（2026-10-25）
 
 > `deliverables/audit-2026-10-25/audit-report.md` 的基线是 `01e08f7`。复核时 HEAD 已是

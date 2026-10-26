@@ -219,11 +219,9 @@ function resolveActionExpr(expr, ctx, src) {
 /**
  * `recordEarlyRejection` 的**一跳转发别名**。
  *
- * 实测存在两例，都是为了让"审计写入晚于本中间件"的顺序问题不成立而延迟 require 的同层包装：
- *   - `middleware/queryLimit.js:40` 的
- *     `const recordQueryRejection = (req, meta) => { require('./security').recordEarlyRejection(req, meta); }`
- *   - `middleware/originCheck.js:29` 的**同名**包装 `const recordEarlyRejection = ...`
- *     （按名字全文匹配调用点，故它对 action 收集是幂等的；别名清单仍把它列出，见对账闸用例）。
+ * 实测存在一例：`middleware/queryLimit.js` 的
+ * `const recordQueryRejection = (req, meta) => { require('./security').recordEarlyRejection(req, meta); }`
+ * （延迟 require 的同层包装）。originCheck 的同名包装已随 A-1 的叶子模块抽取删除。
  * 只认「实参整体是标识符」的转发定义：一个恰好给 recordEarlyRejection 传字面量的普通函数
  * 不算别名（那样别名集会随写法无限长大，反而把打孔面扩大）。
  * 不认别名 ⇒ 它的 action 字面量对正向对账完全隐形：实测把 `'query_param_rejected'` 改名，

@@ -23,7 +23,11 @@
     />
 
     <!-- 侧边栏 -->
-    <aside class="sidebar" :class="{ 'sidebar-mobile': isMobile }" :style="sidebarStyle">
+    <aside
+      class="sidebar"
+      :class="{ 'sidebar-mobile': isMobile, 'sidebar-collapsed': isCollapse }"
+      :style="sidebarStyle"
+    >
       <div class="logo">
         <el-icon class="logo-icon">
           <Flag />
@@ -440,6 +444,16 @@ onUnmounted(() => {
   if (exitTimer) clearTimeout(exitTimer)
 })
 
+// 折叠宽度不硬编码 64px，而是复用 Element Plus 自身的折叠宽度公式：
+// .el-menu--collapse { width: calc(var(--el-menu-icon-width)
+//   + var(--el-menu-base-level-padding) * 2) }（默认 24 + 2×20 = 64px）。
+// 两个变量定义在 el-menu.css 的 :root 上，侧栏内联样式可直接引用；
+// aside 与内部 el-menu 由同一公式驱动，主题调整 el 变量或后续版本改
+// 默认值时二者不会脱节。若 Element Plus 连公式本身都改了，静态不变量
+// 测试会红（对比 node_modules 里的 el-menu.css），提醒同步这里。
+const SIDEBAR_COLLAPSED_WIDTH =
+  'calc(var(--el-menu-icon-width) + var(--el-menu-base-level-padding) * 2)'
+
 const sidebarStyle = computed(() => {
   if (isMobile.value) {
     return {
@@ -447,7 +461,7 @@ const sidebarStyle = computed(() => {
       width: '240px',
     }
   }
-  return { width: isCollapse.value ? '64px' : '220px' }
+  return { width: isCollapse.value ? SIDEBAR_COLLAPSED_WIDTH : '220px' }
 })
 
 const activeMenu = computed(() => route.path)
@@ -630,21 +644,40 @@ const handleCommand = (command) => {
     100% 100%,
     var(--xf-tech-grid-size) var(--xf-tech-grid-size);
   transition: width 0.35s var(--xf-ease-glass);
+  display: flex;
+  flex-direction: column;
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: none;
   -ms-overflow-style: none;
   position: sticky;
-  top: 0;
-  height: 100vh;
-  height: 100dvh;
+  /* 悬浮面板：四周离屏一圈，不与视口贴边 */
+  top: var(--xf-spacing-lg);
+  margin: var(--xf-spacing-lg);
+  height: calc(100vh - 2 * var(--xf-spacing-lg));
+  height: calc(100dvh - 2 * var(--xf-spacing-lg));
   z-index: 100;
-  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.15);
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: var(--xf-shadow-lg);
+  /* 圆角与主区 el-card 面板同规格（--xf-radius-lg） */
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--xf-radius-lg);
 }
 
 .sidebar::-webkit-scrollbar {
   display: none;
+}
+
+/* 平板横屏（769–1024px）：这一段没有侧栏中间态，折叠态 64px 侧栏加
+   双侧 16px 离屏边距共占 96px，追求紧凑的用户空间利用一般。此段把
+   边距收到 10px（找回 12px 宽度与高度）；悬浮观感主要来自 box-shadow
+   与圆角而非边距大小，视觉不受影响。 */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .sidebar {
+    top: var(--xf-spacing-md);
+    margin: var(--xf-spacing-md);
+    height: calc(100vh - 2 * var(--xf-spacing-md));
+    height: calc(100dvh - 2 * var(--xf-spacing-md));
+  }
 }
 
 /* 移动端侧边栏：抽屉式 */
@@ -652,6 +685,13 @@ const handleCommand = (command) => {
   position: fixed;
   left: 0;
   top: 0;
+  /* 抽屉保持贴左全高：避免 translateX(-100%) 因外边距露出侧边残影 */
+  margin: 0;
+  height: 100vh;
+  height: 100dvh;
+  border: none;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 0 var(--xf-radius-lg) var(--xf-radius-lg) 0;
   z-index: 200;
   transition: transform 0.3s var(--xf-ease-glass);
   box-shadow: 4px 0 32px rgba(0, 0, 0, 0.4);
@@ -679,13 +719,20 @@ const handleCommand = (command) => {
   height: 64px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 12px;
+  justify-content: flex-start;
+  /* 与菜单项内容起点对齐：margin-inline + padding-inline = 12px */
+  gap: var(--xf-spacing-sm);
+  padding-inline: calc(var(--xf-spacing-sm) * 2) var(--xf-spacing-sm);
   color: #fff;
   background: linear-gradient(135deg, #c1121f 0%, #7d0c14 100%);
   flex-shrink: 0;
   position: relative;
   overflow: hidden;
+}
+
+.sidebar-collapsed .logo {
+  justify-content: center;
+  padding-inline: 0;
 }
 
 .logo::after {
@@ -697,14 +744,14 @@ const handleCommand = (command) => {
 }
 
 .logo-icon {
-  font-size: 24px;
+  font-size: var(--xf-font-size-lg);
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
   z-index: 1;
 }
 
 .logo-text {
   font-family: var(--xf-font-display);
-  font-size: 15px;
+  font-size: var(--xf-font-size-base);
   font-weight: 700;
   white-space: nowrap;
   letter-spacing: var(--xf-tracking-wide);
@@ -715,18 +762,55 @@ const handleCommand = (command) => {
 /* ===== 菜单 ===== */
 .sidebar-menu {
   border-right: none;
-  height: calc(100vh - 64px);
-  height: calc(100dvh - 64px);
-  border-radius: 0;
+  flex: 1;
+  min-height: 0;
+  /* 首行/末行与面板边缘留白 */
+  padding-block: var(--xf-spacing-sm);
   background: transparent !important;
 }
 
 .sidebar-menu :deep(.el-menu-item),
 .sidebar-menu :deep(.el-sub-menu__title) {
-  margin: 2px 8px;
+  /* 上下留白保证点击空间；组间间距见下方子项收紧规则 */
+  margin-block: var(--xf-spacing-sm);
+  margin-inline: var(--xf-spacing-sm);
+  padding-inline: var(--xf-spacing-sm);
   border-radius: var(--xf-radius-sm);
+  font-size: var(--xf-font-size-base);
   color: #94a3b8;
   transition: all var(--xf-duration-base) var(--xf-ease-standard);
+}
+
+/* 图标略小于文字，并保留图文间隙；不影响子菜单展开箭头 */
+.sidebar-menu :deep(.el-menu-item .el-icon:not(.el-sub-menu__icon-arrow)),
+.sidebar-menu :deep(.el-sub-menu__title .el-icon:not(.el-sub-menu__icon-arrow)) {
+  font-size: var(--xf-font-size-sm);
+  width: var(--xf-font-size-lg);
+  margin-right: var(--xf-spacing-sm);
+}
+
+/* 同一子菜单内的子项收紧间距并缩进，与顶层项区分 */
+.sidebar-menu :deep(.el-sub-menu .el-menu-item) {
+  margin-block: calc(var(--xf-spacing-xs) / 2);
+  padding-inline-start: var(--xf-spacing-lg);
+}
+
+/* 折叠态：仅剩图标，去掉内外边距并居中 */
+.sidebar-menu.el-menu--collapse :deep(.el-menu-item),
+.sidebar-menu.el-menu--collapse :deep(.el-sub-menu__title) {
+  margin-inline: 0;
+  padding-inline: 0;
+  justify-content: center;
+}
+
+.sidebar-menu.el-menu--collapse :deep(.el-icon) {
+  margin-right: 0;
+}
+
+/* 折叠态图标经由 tooltip 触发层渲染：去掉其默认左内边距并居中 */
+.sidebar-menu.el-menu--collapse :deep(.el-menu-tooltip__trigger) {
+  padding: 0;
+  justify-content: center;
 }
 
 .sidebar-menu :deep(.el-menu-item:hover),
@@ -782,7 +866,7 @@ const handleCommand = (command) => {
 }
 
 .pull-indicator__text {
-  font-size: 12px;
+  font-size: var(--xf-font-size-xs);
   color: var(--xf-text-secondary);
   background: var(--xf-bg-card);
   padding: 6px 12px;
@@ -841,7 +925,7 @@ const handleCommand = (command) => {
    padding 才真正长在图标外围（触屏 2×13 = 46×46）。
  */
 .collapse-btn {
-  font-size: 20px;
+  font-size: var(--xf-font-size-xl);
   cursor: pointer;
   color: var(--xf-gray-500);
   transition: all var(--xf-duration-base) var(--xf-ease-standard);
@@ -865,12 +949,12 @@ const handleCommand = (command) => {
 .navbar-right {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--xf-spacing-lg);
 }
 
 /* 同 .collapse-btn：content-box 才能让 padding 长在 1em 图标外围而不是吃掉它 */
 .action-icon {
-  font-size: 18px;
+  font-size: var(--xf-font-size-lg);
   cursor: pointer;
   color: var(--xf-gray-500);
   transition: all var(--xf-duration-base) var(--xf-ease-standard);
@@ -895,7 +979,7 @@ const handleCommand = (command) => {
 .user-dropdown {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--xf-spacing-md);
   cursor: pointer;
   outline: none;
   padding: 4px 12px 4px 4px;
@@ -917,7 +1001,7 @@ const handleCommand = (command) => {
 
 .user-name {
   font-family: var(--xf-font-body);
-  font-size: 14px;
+  font-size: var(--xf-font-size-base);
   color: var(--xf-gray-700);
   font-weight: 600;
 }
@@ -1108,6 +1192,13 @@ const handleCommand = (command) => {
     opacity: 1;
   }
 }
+
+/* 悬浮面板没有 prefers-reduced-transparency 降级，是权衡后的决定而非遗漏：
+   面板背景本身是不透明渐变，仅有的半透明元素（1px 边框、hover/激活底色、
+   阴影、0.03 alpha 的网格纹理）全部叠在不透明底上，不存在内容透过面板
+   造成可读性损失；真正含 backdrop-filter 的 navbar / 抽屉遮罩 / 弹层已由
+   全局降级（apple-refine.css §19）覆盖。日后若把面板改成磨砂材质，必须
+   在此补 @media (prefers-reduced-transparency: reduce) 换不透明实底。 */
 
 /* 无障碍降级 */
 @media (prefers-reduced-motion: reduce) {

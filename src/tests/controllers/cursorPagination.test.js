@@ -209,14 +209,14 @@ describe('高量级列表游标分页', () => {
     const first = await authed().get(`/api/security/audit-logs?username=${auditSeedUser}&limit=3`);
     expect(first.status).toBe(200);
     // 未传 cursor：保持 offset 语义，total 可用
-    expect(first.body.data.meta.total).toBe(8);
+    expect(first.body.meta.total).toBe(8);
 
     const { collected } = await walkCursor(
       `/api/security/audit-logs?username=${auditSeedUser}`,
       3,
       {
-        itemsOf: (body) => body.data.data,
-        cursorOf: (body) => body.data.meta.nextCursor,
+        itemsOf: (body) => body.data,
+        cursorOf: (body) => body.meta.nextCursor,
       }
     );
     expect(collected).toHaveLength(8);
@@ -228,13 +228,13 @@ describe('高量级列表游标分页', () => {
     // 【静默跳过修正】原先 3 条断言包在 if (nextCursor) 里：守卫一旦为假，
     // 这三条永不执行而用例照样绿。nextCursor 非空是后续断言的前提，先钉死它。
     // 实测：该用户 8 条审计 + limit=3 → 首页必然给出 nextCursor。
-    expect(first.body.data.meta.nextCursor).toBeTruthy();
+    expect(first.body.meta.nextCursor).toBeTruthy();
     const cursorPage = await authed().get(
-      `/api/security/audit-logs?username=${auditSeedUser}&limit=3&cursor=${encodeURIComponent(first.body.data.meta.nextCursor)}`
+      `/api/security/audit-logs?username=${auditSeedUser}&limit=3&cursor=${encodeURIComponent(first.body.meta.nextCursor)}`
     );
     expect(cursorPage.status).toBe(200);
-    expect(cursorPage.body.data.meta.total).toBeNull();
-    expect(cursorPage.body.data.meta.hasPrev).toBe(true);
+    expect(cursorPage.body.meta.total).toBeNull();
+    expect(cursorPage.body.meta.hasPrev).toBe(true);
   });
 
   test('无效游标一律 400', async () => {

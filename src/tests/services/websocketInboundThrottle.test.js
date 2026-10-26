@@ -279,4 +279,72 @@ describe('WebSocket 入站事件限流', () => {
     expect(socket.emitted).toHaveLength(0);
     expect(warnSpy).not.toHaveBeenCalled();
   });
+
+  /**
+   * O-2：入站丢弃与断开必须进运行指标（2026-10-26）
+   *
+   * 此前这两个量只体现在 `incSecurityAlert('ws_inbound_throttled')` 一条**安全告警**里：
+   * 告警回答"是不是有人在打"，回答不了"这一小时丢了多少包、断了几条连接"——
+   * 而容量规划与"限流阈值是不是定太紧"恰恰要看后者。两者消费方不同，不能合并。
+   *
+   * 判据不写死"50 个包 = 30 次丢弃"：真实速率补充会让精确值随机器快慢漂移。
+   * 改为与桶内部真值（`_peekState`）对账 —— 指标必须与状态机同源，
+   * 且**静默分支不得计数**（否则一次攻击把指标放大成噪声，同上面那条用例的方向）。
+   */
+  describe('O-2：丢弃/断开计入运行指标', () => {
+    const runtimeMetrics = require('../../utils/metricsRuntime');
+
+    beforeEach(() => {
+      runtimeMetrics.__resetForTest();
+    });
+
+    test('被丢弃的包与因超速断开分别计数，且与桶内部真值一致', () => {
+      const socket = makeSocket('ws-o2-1');
+      installInboundThrottle(socket);
+      socket.on('join-room', () => {});
+
+      const burst = WS_INBOUND_BUCKET_CAPACITY + WS_INBOUND_MAX_VIOLATIONS;
+      for (let i = 0; i < burst; i += 1) socket.deliver('join-room', 'alarm');
+
+      const state = _peekState(socket);
+      expect(state.closed).toBe(true);
+      // 指标与状态机同源：不是"大概 30 次"，而是与 state.throttled 逐字相等
+      expect(runtimeMetrics.getWsSnapshot().inboundThrottled).toBe(state.throttled);
+      expect(state.throttled).toBeGreaterThanOrEqual(WS_INBOUND_MAX_VIOLATIONS - 1);
+      expect(runtimeMetrics.getWsSnapshot().inboundDisconnects).toBe(1);
+
+      // 断开后的在途包静默丢弃：两个计数都不许再涨（否则处置动作变成放大器）
+      const before = runtimeMetrics.getWsSnapshot();
+      for (let i = 0; i < 5; i += 1) socket.deliver('join-room', 'alarm');
+      expect(runtimeMetrics.getWsSnapshot()).toEqual(before);
+    });
+
+    test('文本与快照同源：同一时刻两处读数一致', () => {
+      const socket = makeSocket('ws-o2-2');
+      installInboundThrottle(socket);
+      socket.on('join-room', () => {});
+      const burst = WS_INBOUND_BUCKET_CAPACITY + WS_INBOUND_MAX_VIOLATIONS;
+      for (let i = 0; i < burst; i += 1) socket.deliver('join-room', 'alarm');
+
+      const snap = runtimeMetrics.getWsSnapshot();
+      const text = runtimeMetrics.formatRuntime().join('\n');
+      expect(text).toContain(`ws_inbound_throttled_total ${snap.inboundThrottled}`);
+      expect(text).toContain(`ws_inbound_disconnects_total ${snap.inboundDisconnects}`);
+      // 连接数拉取式：没注册源时报 0，而不是让 /metrics 500
+      expect(text).toContain('ws_connections 0');
+    });
+
+    test('连接数 gauge 是拉取式：注册源后读数跟随，源抛错时退化为 0', () => {
+      let size = 3;
+      runtimeMetrics.registerWsConnectionSource(() => size);
+      expect(runtimeMetrics.getWsSnapshot().connections).toBe(3);
+      size = 7;
+      expect(runtimeMetrics.getWsSnapshot().connections).toBe(7);
+
+      runtimeMetrics.registerWsConnectionSource(() => {
+        throw new Error('服务已销毁');
+      });
+      expect(runtimeMetrics.getWsSnapshot().connections).toBe(0);
+    });
+  });
 });

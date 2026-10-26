@@ -14,19 +14,10 @@ const {
   deriveAuditMeta,
 } = require('../../utils/auditMeta');
 
-// 与 models/AuditLog.js 的 category enum 保持同步
-const CATEGORY_ENUM = [
-  'auth',
-  'user',
-  'role',
-  'permission',
-  'device',
-  'alarm',
-  'inspection',
-  'security',
-  'report',
-  'system',
-];
+// 单一事实来源：constants/audit.js 的 AUDIT_CATEGORIES（模型 enum 与派生取值全集都引用它）。
+// 不再手抄一份——手抄副本会在新增分类时与产品和模型同时漂移，而这正是 E-* 那类
+// 「审计记录被 ValidationError 静默丢弃」的成因。
+const { AUDIT_CATEGORIES: CATEGORY_ENUM } = require('../../constants/audit');
 
 const OID = '6a587774afeb797dd4de03e3';
 

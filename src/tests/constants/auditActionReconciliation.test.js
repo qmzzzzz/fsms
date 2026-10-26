@@ -160,10 +160,7 @@ describe('审计 action 白名单对账', () => {
   test('经一跳别名写入的 action 在对账集合里', () => {
     const { written, unresolved } = scanWriteSites();
     expect(unresolved).toEqual([]);
-    expect([...collectEarlyRejectionAliases()].sort()).toEqual([
-      'recordEarlyRejection',
-      'recordQueryRejection',
-    ]);
+    expect([...collectEarlyRejectionAliases()].sort()).toEqual(['recordQueryRejection']);
     expect(written.has('query_param_rejected')).toBe(true);
   });
 
@@ -273,7 +270,7 @@ describe('审计 action 白名单对账', () => {
     ['src/controllers/rolePermissionController.js', 'permissions-cloned', 'ws', ':189/:199 同上'],
     ['src/controllers/rolePermissionController.js', 'permissions-updated', 'ws', ':269/:280 同上'],
     ['src/controllers/userController/roles.js', 'roles-assigned', 'ws', ':170 同上'],
-    ['src/middleware/security/securityHeaders.js', 'deny', 'helmet', ':136 helmet frameguard 选项'],
+    ['src/middleware/security/securityHeaders.js', 'deny', 'helmet', ':103 helmet frameguard 选项'],
     ['src/services/AlarmService.js', 'alarm_received', 'subdoc', ':158 FireAlarm.processLog'],
     ['src/services/AlarmService.js', 'dispatched', 'subdoc', ':228 同上'],
     ['src/services/AlarmService.js', 'arrived', 'subdoc', ':252 同上'],

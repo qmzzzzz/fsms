@@ -101,9 +101,9 @@ describe('告警审计落库失败的处理', () => {
     // 封禁链路显式桩掉：本用例的命题是"审计写入成功 ⇒ 不打 error"，
     // 不该被"这个 IP 恰好能不能被封"污染（2026-09-30 起 checkPermissionAbuse
     // 会在审计之后封 IP，真实调用 addToBlacklist 时白名单/写库结果会让本断言变脆）。
-    const security = require('../../middleware/security');
+    const ipBlacklistStore = require('../../middleware/security/ipBlacklistStore');
     const addSpy = jest
-      .spyOn(security, 'addToBlacklist')
+      .spyOn(ipBlacklistStore, 'addToBlacklist')
       .mockResolvedValue({ banned: true, normalizedIp: '203.0.113.10' });
     try {
       const okUser = users.get('ok');

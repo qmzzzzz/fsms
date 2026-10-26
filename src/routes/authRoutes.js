@@ -359,8 +359,6 @@ router.put(
   changePasswordValidation,
   authController.changePassword
   // PERMISSION-EXEMPT: 本人资源：authenticate 已确定身份，改密对象恒为本人
-
-  // PERMISSION-EXEMPT: 公共端点（刷新令牌轮换，黑名单fail-closed）
 );
 
 /**
@@ -525,8 +523,6 @@ router.delete(
   sessionSidValidation,
   authController.revokeSession
   // PERMISSION-EXEMPT: 本人资源：吊销本人指定会话（服务层校验归属）
-
-  // PERMISSION-EXEMPT: 本人资源：吊销本人其他会话
 );
 
 module.exports = router;

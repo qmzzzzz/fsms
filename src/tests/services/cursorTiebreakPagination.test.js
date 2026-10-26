@@ -186,10 +186,10 @@ describe('等值排序键的游标连续性', () => {
     hasMoreOf: (body) => body.pagination.hasMore,
   };
   const auditShape = {
-    itemsOf: (body) => body.data.data,
-    cursorOf: (body) => body.data.meta.nextCursor,
+    itemsOf: (body) => body.data,
+    cursorOf: (body) => body.meta.nextCursor,
     // 审计接口的续翻标志叫 hasNext（其余三个列表叫 hasMore），此处按各自口径取
-    hasMoreOf: (body) => body.data.meta.hasNext,
+    hasMoreOf: (body) => body.meta.hasNext,
   };
 
   /**

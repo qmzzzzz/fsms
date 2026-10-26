@@ -26,14 +26,14 @@
  *       让 req.ip 正确的开关。此前只测了「非法值 → 退化 1 跳」，有效值分支零验证——
  *       一旦有人写错 `app.set('trust proxy', true)`（信任全部代理，可伪造 XFF
  *       击穿 IP 限流/黑名单），现有测试不会红。
- *     - /api 根路径（app.js:503）：注释声明「不再返回接口清单」，无测试锁定；
+ *     - /api 根路径（app.js:513）：注释声明「不再返回接口清单」，无测试锁定；
  *       若将来有人改回返回清单，属未认证信息暴露，须在此红。
- *     - /readyz 的 503 双路径（app.js:462、app.js:476）：checkMongoReady 返回
+ *     - /readyz 的 503 双路径（app.js:472、app.js:486）：checkMongoReady 返回
  *       not-ok 与**抛错**两种失败。脱敏（readyzSanitize.test.js）只测了
  *       checkMongoReady 本身，未验证 HTTP 响应体真的不含驱动错误消息——本文件
  *       补上 app 级闭环。
  *
- *  B. Sentry 三件套（app.js:250-251、app.js:562）——**不补测，理由如实记录**：
+ *  B. Sentry 三件套（app.js:250-251、app.js:572）——**不补测，理由如实记录**：
  *     `sentryInitialized` 是模块级常量，要覆盖需 SENTRY_DSN + 模块重置 + 对
  *     @sentry/node 打桩三件套齐备；而它覆盖的是「SDK 自己的中间件被 app.use」，
  *     属第三方库接线，行为已验证于 middleware/sentry 的单测
@@ -118,7 +118,7 @@ describe('§13 V-12：trust proxy 有效值分支（app.js:206）', () => {
   // §8.3 点名场景「Trust proxy 过大值」——本次改动复审补测 + 补漏
   // ============================================================
   // 为什么必须测：config/validate.js 有 MAX_TRUST_PROXY_HOPS=5 的上限校验，
-  // 但 validateConfig() 首行即对非 production 早退（src/config/validate.js:375），
+  // 但 validateConfig() 首行即对非 production 早退（src/config/validate.js:328），
   // 因此 staging/dev 可以绕过该闸门。而 app.js 原先对 parseInt 结果不做上界
   // 判断，超上限值被原样交给 Express。实测（2026-09-17，Node 24）：
   //   app.set('trust proxy', 999999) + XFF: "1.1.1.1, 2.2.2.2, ..."
@@ -174,7 +174,7 @@ describe('§13 V-12：trust proxy 有效值分支（app.js:206）', () => {
   });
 });
 
-describe('§13 V-12：/api 根路径不泄露接口清单（app.js:503）', () => {
+describe('§13 V-12：/api 根路径不泄露接口清单（app.js:513）', () => {
   const request = require('supertest');
   let app;
 
@@ -194,7 +194,7 @@ describe('§13 V-12：/api 根路径不泄露接口清单（app.js:503）', () =
   });
 });
 
-describe('§13 V-12：/readyz 的 503 双路径（app.js:435-482）', () => {
+describe('§13 V-12：/readyz 的 503 双路径（app.js:441-492）', () => {
   const request = require('supertest');
 
   /**
@@ -384,5 +384,105 @@ describe('A-2：多实例检测不到分布式锁时 /readyz fail-closed', () =>
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('ready');
     expect(res.body.checks.topology).toBe('ok');
+  });
+});
+
+/**
+ * P-1（2026-10-26）：生产语义下 standalone 事务拓扑必须 fail-closed
+ *
+ * 此前 standalone 只标 `checks.transactions=degraded`、不参与就绪判定，理由写在
+ * `app.js` 的 `transactionMarker` 注释里（"摘流量损失大于非原子本身"）。该理由漏了
+ * 失败形态：顺序写中途失败会残留跨集合不一致且无自动修复路径。这里钉住四条：
+ *   ① 生产 + standalone ⇒ 503，对外是固定枚举（不回显拓扑细节）；
+ *   ② 生产 + 副本集 ⇒ 200（不误伤正确部署）；
+ *   ③ 开发/测试 + standalone ⇒ 200（本地 mongodb-memory-server 就是单节点）；
+ *   ④ 同时命中多实例闸 ⇒ 先说更严重的那条（多实例优先）。
+ *
+ * 拓扑用 `_setTopologyForTest` 直接设定：真实拓扑由启动探测写入模块级变量，
+ * 为了验一条就绪闸去起单节点副本集，成本远大于收益。
+ */
+describe('P-1：生产语义下 standalone 事务拓扑 fail-closed', () => {
+  const request = require('supertest');
+  const SIGNAL_KEYS = ['INSTANCE_COUNT', 'REPLICAS', 'RUNTIME_INSTANCE_COUNT', 'NODE_APP_INSTANCE'];
+  let savedEnv;
+
+  const loadApp = () => {
+    jest.resetModules();
+    require('mongoose').set('bufferTimeoutMS', 300);
+    const healthChecks = require('../../utils/healthChecks');
+    healthChecks.checkMongoReady = jest.fn(async () => ({ ok: true, reason: 'ok', detail: '' }));
+    healthChecks.checkRedisReady = jest.fn(async () => ({ ok: true, reason: 'ok', detail: '' }));
+    return require('../../app').createApp();
+  };
+
+  // 必须在本轮 resetModules 之后取模块：否则拿到的是上一轮的实例，
+  // 设进去的拓扑对 app.js 持有的那份模块不可见（钩子静默无效）。
+  const setTopology = (value) => require('../../utils/transaction')._setTopologyForTest(value);
+
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(['NODE_ENV', ...SIGNAL_KEYS].map((k) => [k, process.env[k]]));
+    for (const key of SIGNAL_KEYS) delete process.env[key];
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    jest.resetModules();
+  });
+
+  test('生产 + standalone：503，checks.topology 用固定枚举且不回显拓扑细节', async () => {
+    process.env.NODE_ENV = 'production';
+    const app = loadApp();
+    setTopology('standalone');
+
+    const res = await request(app).get('/readyz');
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('unready');
+    expect(res.body.checks.mongo).toBe('ok');
+    expect(res.body.checks.transactions).toBe('degraded');
+    expect(res.body.checks.topology).toBe('transactions_degraded');
+    // detail 里带"生产请部署副本集"这类运维指引，只该进日志
+    expect(JSON.stringify(res.body)).not.toContain('mongos');
+  });
+
+  test('生产 + 副本集：200（正确部署不得被误伤）', async () => {
+    process.env.NODE_ENV = 'production';
+    const app = loadApp();
+    setTopology('replica-set');
+
+    const res = await request(app).get('/readyz');
+
+    expect(res.status).toBe(200);
+    expect(res.body.checks.transactions).toBe('enabled');
+    expect(res.body.checks.topology).toBe('ok');
+  });
+
+  test('开发/测试 + standalone：200（本地单节点是常态，不得摘流量）', async () => {
+    process.env.NODE_ENV = 'development';
+    const app = loadApp();
+    setTopology('standalone');
+
+    const res = await request(app).get('/readyz');
+
+    expect(res.status).toBe(200);
+    // 降级事实仍然如实标出：不阻断就绪 ≠ 假装事务可用
+    expect(res.body.checks.transactions).toBe('degraded');
+    expect(res.body.checks.topology).toBe('ok');
+  });
+
+  test('同时命中多实例闸：多实例优先（修法不同，先说更严重的那条）', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.INSTANCE_COUNT = '2';
+    const app = loadApp();
+    setTopology('standalone');
+    jest.spyOn(require('../../services/sharedCache'), 'isRedisEnabled').mockReturnValue(false);
+
+    const res = await request(app).get('/readyz');
+
+    expect(res.status).toBe(503);
+    expect(res.body.checks.topology).toBe('multi_instance_without_distributed_lock');
   });
 });

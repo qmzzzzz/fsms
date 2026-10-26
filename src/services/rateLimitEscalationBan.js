@@ -108,8 +108,8 @@ const escalateIp = async (normalizedIp, detail) => {
   await recordEscalation(normalizedIp, detail);
 
   try {
-    // 惰性 require 断 securityAlert ↔ middleware/security 的循环依赖（同 checkBruteForce）
-    const { addToBlacklist } = require('../middleware/security');
+    // 封禁原语直连叶子模块（同 checkBruteForce / permissionAbuse）
+    const { addToBlacklist } = require('../middleware/security/ipBlacklistStore');
     // 阶梯钳制复用 securityAlert 的 IPBanEvents.tierFor（两本账各自计数——
     // brute_force 行与 rate_limit_abuse 行分账，只是共用同一组时长档位）
     const tier = IPBanEvents.tierFor(priorBans);

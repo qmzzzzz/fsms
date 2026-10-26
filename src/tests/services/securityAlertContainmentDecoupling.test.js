@@ -37,7 +37,7 @@ jest.mock('../../services/securityAlertDelivery', () => ({
   isWebhookTargetAllowed: jest.fn(() => true),
 }));
 
-const security = require('../../middleware/security');
+const ipBlacklistStore = require('../../middleware/security/ipBlacklistStore');
 const securityAlert = require('../../services/securityAlert');
 const AuditLog = require('../../models/AuditLog');
 const IPBlacklist = require('../../models/IPBlacklist');
@@ -47,7 +47,7 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
 const { ALERT_TYPES, THRESHOLDS, ESCALATION_TIERS, IPBanEvents } = securityAlert;
 const stamp = Date.now().toString().slice(-7);
 
-const originalAdd = security.addToBlacklist;
+const originalAdd = ipBlacklistStore.addToBlacklist;
 let banCalls = [];
 let banResult = { banned: true, normalizedIp: null };
 
@@ -108,7 +108,7 @@ describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
   });
 
   afterAll(async () => {
-    security.addToBlacklist = originalAdd;
+    ipBlacklistStore.addToBlacklist = originalAdd;
     const ips = Object.values(IPS);
     await purge({
       $or: [
@@ -129,7 +129,7 @@ describe('处置与通知解耦：频控不得挡住审计与封禁', () => {
   beforeEach(() => {
     banCalls = [];
     banResult = { banned: true, normalizedIp: null };
-    security.addToBlacklist = jest.fn(async (ip, durationMs, reason, source) => {
+    ipBlacklistStore.addToBlacklist = jest.fn(async (ip, durationMs, reason, source) => {
       banCalls.push({ ip, durationMs, reason, source });
       return banResult;
     });

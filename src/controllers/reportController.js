@@ -68,6 +68,9 @@ const {
 // 请求方自己写的 X-Forwarded-For，读 PII 的人可以顺手挑一个写进取证记录。
 const { clientIpForSecurityDecision } = require('../utils/ipUtils');
 const { streamExportRows, writeExportWorkbook } = require('../services/reportWorkbookService');
+// P-2：导出并发闸。上限 2 + 有界排队，超限回 429（EXPORT_BUSY + Retry-After）。
+// 闸本身的状态机与指标见该模块头部注释——它必须能被独立证伪，所以不塞进本文件。
+const { acquireExportSlot, ExportBusyError } = require('../services/exportConcurrency');
 const dashboardService = require('../services/reportDashboardService');
 const reportStatsService = require('../services/reportStatsService');
 
@@ -182,6 +185,43 @@ const auditFullPiiExportIfAny = async (req, type, total, maskPii) => {
  * O-1 重构：配置/查询构建/枚举校验/流式写出/workbook 编排均在
  * services/reportExportService.js，此处只保留参数校验、权限闸与编排。
  */
+/**
+ * P-2：在导出并发槽位内执行 work；拿不到槽位就回 429 并结束。
+ *
+ * 抽成独立函数有两个原因，都不是洁癖：
+ *   ① `exportReport` 的圈复杂度贴着棘轮基线，多一个 try/catch 就会多一条 warn
+ *      （`lint:ratchet` 只许降不许升）。把分支收进这里，编排函数保持原形状。
+ *   ② 「闸拒绝」与「导出过程出错」必须走两条路：后者交给全局错误处理器
+ *      （500 + 脱敏日志），混进同一分支会把真实故障说成"忙，请重试"——
+ *      用户重试到天荒地老也不会好，而告警里只看到一片 429。
+ *
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {() => Promise<unknown>} work
+ * @returns {Promise<unknown>} work 的结果，或 429 响应（此时 work 未执行）
+ */
+const withExportSlot = async (req, res, work) => {
+  let release;
+  try {
+    release = await acquireExportSlot();
+  } catch (err) {
+    if (!(err instanceof ExportBusyError)) throw err;
+    logger.warn(
+      `导出并发已满，请求被拒：user=${req.user.username || req.user.userId} ` +
+        `reason=${err.reason} retryAfter=${err.retryAfterSeconds}s`
+    );
+    res.setHeader('Retry-After', String(err.retryAfterSeconds));
+    return ApiResponse.codeError(res, 'EXPORT_BUSY');
+  }
+  try {
+    return await work();
+  } finally {
+    // 客户端中断时 writeExportWorkbook 会抛错，槽位必须在这一刻归还：
+    // 泄漏一个槽位等于永久少一半导出能力（上限只有 2）。
+    release();
+  }
+};
+
 const exportReport = asyncHandler(async (req, res) => {
   // audit 分支补 ip/userId 筛选参数（与 /security/audit-logs 查询接口同参），
   // 此前导出接口不支持这两个维度——列表筛出 20 条、导出却是全量，「导出即所见」破缺
@@ -282,32 +322,40 @@ const exportReport = asyncHandler(async (req, res) => {
   // audit 类型必须叠加与「列表 / CSV 导出」同一份数据范围判据（auditScopeFilter）。
   // 此处原先的注释写着"审计无部门/属主字段，语义上只能全局或禁止"，而 AuditLog.userId
   // 正是审计列表用来过滤的字段：self 档只见自己、department 档只见本部门成员
-  // （auditController.js:44 与 auditQueryService.js:320 都调用了 applyAuditDataScope）。
+  // （auditController.js:44 与 auditQueryService.js:314 都调用了 applyAuditDataScope）。
   // 少这一道就是：列表只看得到本部门，xlsx 却导出全库所有人的 IP/路径/操作
   // ——导出集比可见集宽，属本仓反复出现的"同一条判据的第二处实现漏抄"。
   if (type === 'audit') {
     ({ query } = await applyAuditDataScope(query, req.user.userId));
   }
 
-  // 批量导出检测：导出前统计命中行数，超过阈值触发高危审计与告警（补齐导出审计盲区）
-  const { checkBulkExport } = require('../services/securityAlert');
-  // 同一个 options 对象喂给计数腿与取数腿：两条腿若挂了不同口径的 collation，
-  // "命中数"与"写出行数"就对不上，而脚注只会说"缺行"，说不出其实是口径不一致。
-  const collationOptions = collationOptionsForExport(query);
-  const exportTotal = await EXPORT_MODEL_CONFIG[type].model.countDocuments(query, collationOptions);
-  await checkBulkExport(req.user.userId, req.user.username, exportTotal, `report_export_${type}`);
+  // P-2：槽位在**计数之前**拿。计数虽轻，但"导出压垮进程"的入口就是这条链，
+  // 把整条链纳入并发预算，而不是只挡住最重的那一步。
+  return withExportSlot(req, res, async () => {
+    // 批量导出检测：导出前统计命中行数，超过阈值触发高危审计与告警（补齐导出审计盲区）。
+    // 惰性 require 保留原样：securityAlert 的加载链会反向拉到本链路上的模块（A-1）。
+    const { checkBulkExport } = require('../services/securityAlert');
+    // 同一个 options 对象喂给计数腿与取数腿：两条腿若挂了不同口径的 collation，
+    // "命中数"与"写出行数"就对不上，而脚注只会说"缺行"，说不出其实是口径不一致。
+    const collationOptions = collationOptionsForExport(query);
+    const exportTotal = await EXPORT_MODEL_CONFIG[type].model.countDocuments(
+      query,
+      collationOptions
+    );
+    await checkBulkExport(req.user.userId, req.user.username, exportTotal, `report_export_${type}`);
 
-  // A4/L-17：携带真实姓名的报表默认脱敏；GET 恒为掩码档，全文导出只经
-  // POST /export/pii 且需 pii:export + 二次验证（全文导出单独留痕）
-  const maskPii = await resolveExportMasking(req, type);
-  await writeExportWorkbook(res, {
-    type,
-    query,
-    total: exportTotal,
-    ...collationOptions,
-    maskPii,
+    // A4/L-17：携带真实姓名的报表默认脱敏；GET 恒为掩码档，全文导出只经
+    // POST /export/pii 且需 pii:export + 二次验证（全文导出单独留痕）
+    const maskPii = await resolveExportMasking(req, type);
+    await writeExportWorkbook(res, {
+      type,
+      query,
+      total: exportTotal,
+      ...collationOptions,
+      maskPii,
+    });
+    await auditFullPiiExportIfAny(req, type, exportTotal, maskPii);
   });
-  await auditFullPiiExportIfAny(req, type, exportTotal, maskPii);
 });
 
 module.exports = {

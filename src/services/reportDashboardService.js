@@ -17,7 +17,7 @@ const { INSPECTION_OVERDUE_MARKABLE_STATUSES } = require('../constants/inspectio
 const { listAggregateOptions } = require('../utils/queryBudget');
 
 // 进程内 Map 缓存，**不做跨实例失效广播**——与 services/statsCache.js 的策略刻意不同，
-// 不是漏接：statsCache 有 publishInvalidate()（:155）走共享通道，而这里只靠 30s TTL。
+// 不是漏接：statsCache 有 publishInvalidate()（:159）走共享通道，而这里只靠 30s TTL。
 // 理由：仪表盘是聚合统计，跨实例最多滞后一个 TTL（30s），且读多写少；
 // 接共享通道会让这条读路径多一个 Redis 依赖与一次网络往返，收益不抵成本。
 // 若将来要求"改完立刻全实例一致"，改法是两条腿一起接：写侧 sharedCache.publishInvalidate()、

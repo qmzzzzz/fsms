@@ -57,6 +57,11 @@ class WebSocketService {
 
     this.clients = new Map();
     this.userConnections = new Map(); // userId -> Set of socketIds
+    // O-2：连接数是**拉取式** gauge —— 把取值函数注册给指标层，抓取时现算。
+    // 不用"在 set/delete/clear 处各推一次"：连接表的增删有 4 处（push.js 的
+    // set/delete、lifecycle.js 的清扫与 dispose 的 clear），漏掉任何一处都会让
+    // gauge 永久偏移，而且不会有任何测试变红。注册取值函数则天然无漂移。
+    require('../../utils/metricsRuntime').registerWsConnectionSource(() => this.clients.size);
     // #9：来源 IP -> 尚未认证的连接数（认证成功或断开即归还）
     this.unauthConnectionsByIp = new Map();
     this._cleanupTimer = null;

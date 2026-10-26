@@ -1,21 +1,22 @@
 'use strict';
 
 /**
- * 授权判定同口径：同一用户 + 同一权限码，四条路径必须给出同一个答案
+ * 授权判定同口径：同一用户 + 同一权限码，三条路径必须给出同一个答案
  *
- * 仓内"用户是否拥有权限 X"这件事有四个入口，各自独立实现：
+ * 仓内"用户是否拥有权限 X"这件事有三个入口，各自独立实现：
  *   1) `utils/permissionHelper.hasPermission`（走自己的 getUserPermissions 聚合）
  *   2) `services/userPermissionService.hasPermission`（走带 TTL 缓存的 getPermissions）
- *   3) `models/User.hasPermission` 静态方法（2 的转发）
- *   4) `utils/permissionHelper.matchesPermissionCodes(codes, X)`（数组级判据，
+ *   3) `utils/permissionHelper.matchesPermissionCodes(codes, X)`（数组级判据，
  *      角色/用户控制器用它校验"能不能授予自己没有的权限"）
- * 今天四条语义一致（精确码 / `*:*` / `模块:*`；且两侧都只认 status=active 的角色与权限项）。
- * 但它们是**两份聚合 + 两份通配判定**分散在三个文件里——本仓已经为"两份实现漂移"
+ * （原第 4 条 `models/User.hasPermission` 静态转发已在 A-1 整改中删除：
+ *  User 模型回归纯数据 schema，调用方直连 service，见 models/User.js 尾注。）
+ * 今天三条语义一致（精确码 / `*:*` / `模块:*`；且都只认 status=active 的角色与权限项）。
+ * 但它们是**两份聚合 + 两份通配判定**分散在文件里——本仓已经为"两份实现漂移"
  * 付过一次学费（auditQuery 的本地副本让查询与导出在同一天差 8 小时）。
  * 授权判定漂移的后果不是数据错，而是越权或误拒，所以先把等价性钉住：
  * 任何人以后只改其中一条路径，这里会红。
  *
- * 夹具特意包含**停用角色**与**停用权限项**：状态过滤是这四条路径最容易走偏的一格
+ * 夹具特意包含**停用角色**与**停用权限项**：状态过滤是这几条路径最容易走偏的一格
  * （停用即失权是注释里承诺的语义），只测活跃数据等于没测。
  */
 
@@ -97,13 +98,12 @@ describe('授权判定四路径同口径', () => {
   });
 
   /** 四条路径各自的判定 */
-  const fourPaths = async (userId, code) => {
+  const threePaths = async (userId, code) => {
     const a = await helper.hasPermission(userId, code);
     const b = await userPermService.hasPermission(userId, code);
-    const c = await User.hasPermission(userId, code);
     const codes = await userPermService.getPermissions(userId);
     const d = helper.matchesPermissionCodes(codes, code);
-    return { helper: a, service: b, userModel: c, arrayJudge: d };
+    return { helper: a, service: b, arrayJudge: d };
   };
 
   // 语义锚点：true/false 都是**人算过的期望**，不是"四路径互相一致"的自我循环
@@ -129,19 +129,18 @@ describe('授权判定四路径同口径', () => {
   ];
 
   test.each(MATRIX)(
-    '$code ⇒ $want（$why）：四条路径必须给出同一个答案',
+    '$code ⇒ $want（$why）：三条路径必须给出同一个答案',
     async ({ user, code, want }) => {
       const uid = user()._id;
-      expect(await fourPaths(uid, code)).toEqual({
+      expect(await threePaths(uid, code)).toEqual({
         helper: want,
         service: want,
-        userModel: want,
         arrayJudge: want,
       });
     }
   );
 
-  test('前提自证：矩阵里 true 与 false 都出现过（防"四路径恒 false"式全绿）', async () => {
+  test('前提自证：矩阵里 true 与 false 都出现过（防"三路径恒 false"式全绿）', async () => {
     const trues = MATRIX.filter((m) => m.want).length;
     const falses = MATRIX.filter((m) => !m.want).length;
     expect(trues).toBeGreaterThan(0);
@@ -152,14 +151,13 @@ describe('授权判定四路径同口径', () => {
     const uid = activeUser._id;
     // 先让缓存里存一份
     expect(await userPermService.hasPermission(uid, 'zzpd:list')).toBe(true);
-    // 停用那条权限项 ⇒ 全局失效后四条路径都必须改口
+    // 停用那条权限项 ⇒ 全局失效后三条路径都必须改口
     // 按 _id 定位：同码权限可能别处也有，按 code 更新会打偏甚至误伤别人的夹具
     await Permission.updateOne({ _id: pListId }, { $set: { status: 'inactive' } });
     userPermService.invalidatePermissionCache();
-    expect(await fourPaths(uid, 'zzpd:list')).toEqual({
+    expect(await threePaths(uid, 'zzpd:list')).toEqual({
       helper: false,
       service: false,
-      userModel: false,
       arrayJudge: false,
     });
     await Permission.updateOne({ _id: pListId }, { $set: { status: 'active' } });

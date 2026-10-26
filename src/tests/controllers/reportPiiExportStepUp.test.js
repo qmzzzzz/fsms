@@ -17,6 +17,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { waitFor } = require('../helpers/waitFor');
 
 describe('未脱敏 PII 导出：pii:export + 二次验证（L-17）', () => {
   const stamp = String(Date.now())
@@ -206,12 +207,21 @@ describe('未脱敏 PII 导出：pii:export + 二次验证（L-17）', () => {
     const columns = await columnsFromWorkbook(res.buffer);
     expect(columns['处理人']).toEqual([REAL_NAME]);
 
-    // 提权路径必须可回答"谁在什么时候导出了全文"
-    const audit = await AuditLog.findOne({
-      action: 'view_sensitive_data',
-      username: piiUser.username,
-      'body.masked': false,
-    }).lean();
+    // 提权路径必须可回答"谁在什么时候导出了全文"。
+    // 审计经 auditBuffer 异步落库：响应先回，行在并行 worker 下可能尚未可见，
+    // 轮询到真实条件成立，而不是靠固定睡眠赌时延。
+    let audit = null;
+    await waitFor(
+      async () => {
+        audit = await AuditLog.findOne({
+          action: 'view_sensitive_data',
+          username: piiUser.username,
+          'body.masked': false,
+        }).lean();
+        return Boolean(audit);
+      },
+      { label: 'view_sensitive_data 审计落库' }
+    );
     expect(audit).toBeTruthy();
     expect(audit.body).toMatchObject({ type: 'alarms', masked: false });
     expect(audit.dataType).toBe('export_realname');

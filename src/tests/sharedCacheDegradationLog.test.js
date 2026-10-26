@@ -87,19 +87,21 @@ describe('Redis 降级时刻的失效清单', () => {
     const logged = spy.mock.calls.map((c) => c.join(' ')).join('\n');
     expect(logged).toContain('降级为单进程语义');
     expect(logged).toContain('connection reset by peer');
-    // 清单必须具体到模块名，且只列"此前靠 Redis 保持一致"的那些
-    // 注：验证码存储的模块路径原写作 `utils/captchaStore`（该文件并不存在），
-    // 已更正为真实文件 `services/captchaService.js`。
-    for (const mod of [
-      'utils/auditChain.js',
-      'middleware/rateLimit.js',
-      'services/captchaService.js',
-      'middleware/auth.js',
-    ]) {
-      expect(logged).toContain(mod);
+    // Q-3：期望清单从生产侧单一事实来源派生，不再手抄。手抄版本此前已漂移过一次：
+    // 用户缓存自 auth.js 抽到 userAuthCache.js 后，本用例仍断言旧路径。
+    const { SINGLE_PROCESS_DEPENDENCIES } = require('../constants/runtime');
+    const externalized = SINGLE_PROCESS_DEPENDENCIES.filter((d) => d.redisExternalized);
+    const stillLocal = SINGLE_PROCESS_DEPENDENCIES.filter((d) => !d.redisExternalized);
+    // 两侧都非空：任一为空都会让下面的循环/否定断言空转
+    expect(externalized.length).toBeGreaterThan(0);
+    expect(stillLocal.length).toBeGreaterThan(0);
+    for (const d of externalized) {
+      expect(logged).toContain(d.module);
     }
     // 仍然单进程的机制（如审计缓冲 WAL）不该出现在这条降级消息里——它本来就没外置
-    expect(logged).not.toContain('services/auditBuffer.js');
+    for (const d of stillLocal) {
+      expect(logged).not.toContain(d.module);
+    }
     spy.mockRestore();
   });
 

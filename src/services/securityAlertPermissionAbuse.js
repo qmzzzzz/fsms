@@ -33,14 +33,13 @@
 const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
 const { normalizeIP, ipAttributionRiskFactors } = require('../utils/ipUtils');
-const {
-  ALERT_LEVELS,
-  ALERT_TYPES,
-  ESCALATION_TIERS,
-  dispatchNotification,
-  shouldSendAlert,
-  IPBanEvents,
-} = require('./securityAlert');
+// 依赖全部指向叶子模块（枚举 / 频控投递 / 封禁阶梯 / 封禁原语），避开与 securityAlert 的双向依赖。
+const { ALERT_LEVELS, ALERT_TYPES } = require('./alertTypes');
+const { dispatchNotification, shouldSendAlert } = require('./alertDispatch');
+const { ESCALATION_TIERS, IPBanEvents } = require('./securityAlertIpBans');
+const ipBlacklistStore = require('../middleware/security/ipBlacklistStore');
+// 调用时取属性（薄包装）：测试据此替换封禁结果，解构会在加载期固化绑定。
+const addToBlacklist = (...args) => ipBlacklistStore.addToBlacklist(...args);
 
 /**
  * 记录一次已确认的权限滥用，并对来源 IP 执行渐进式封禁。
@@ -97,8 +96,6 @@ const recordAndContain = async ({ userId, username, ip, attributionKind, recentF
   // 遏制：频控只约束通知，不挡封禁（否则封禁失败时的重试被吞、阶梯事件源缺行）
   if (hasIp) {
     try {
-      // 惰性 require：循环依赖同 checkBruteForce（securityAlert ↔ middleware/security）
-      const { addToBlacklist } = require('../middleware/security');
       const tier = IPBanEvents.tierFor(priorBans);
       const result = await addToBlacklist(
         normalizedIp,

@@ -12,15 +12,12 @@
 
 const logger = require('../../utils/logger');
 const ApiResponse = require('../../utils/apiResponse');
-const {
-  normalizeIP,
-  isClientIpIdentityTrustworthy,
-  auditClientAddress,
-} = require('../../utils/ipUtils');
-const AuditLog = require('../../models/AuditLog');
-const { computeFingerprint } = require('../../utils/fingerprint');
-const { stripControlChars, redactUrlQuery } = require('../../utils/helpers');
-const { auditPath } = require('../../utils/auditMeta');
+const { normalizeIP, isClientIpIdentityTrustworthy } = require('../../utils/ipUtils');
+const { redactUrlQuery } = require('../../utils/helpers');
+// 两个原语各自独立成叶子模块：自动封禁臂与 originCheck 直接引用它们，
+// 避免为了一个函数经 security/index 门面绕回告警链（见那两个模块的头注释）。
+const { recordEarlyRejection } = require('./earlyRejection');
+const { addToBlacklist } = require('./ipBlacklistStore');
 
 /**
  * 6. IP 黑白名单检查（全站最高优先级访问控制闸门）
@@ -76,53 +73,6 @@ const invalidateIPBlockCache = (ip) => {
     return;
   }
   ipBlockCache.delete(ipCacheKey(ip));
-};
-
-/**
- * 记录「早于 auditLog 中间件的 403 拒绝」审计
- *
- * checkIPBlacklist 与 originCheck 都挂在 auditLog 之前（必须如此：黑名单要在
- * 一切业务处理前拦下，来源校验要在写操作触达控制器前拦下）。副作用是它们的
- * 403 完全不进审计——攻击探测最密集的这段流量在合规留存里是一片空白，
- * 事后既无法统计封禁命中，也无法证明拦截曾生效。
- *
- * 直写 AuditLog.record 而不走 auditBuffer：这类事件量小且属安全信号，
- * 需要即时可查（暴力探测检测也依赖实时性），与 ip_range_denied 同口径。
- * @param {import('express').Request} req
- * @param {{action: string, reason: string, riskFactors: string[], riskLevel?: string, statusCode?: number}} meta
- *        statusCode 缺省 403（黑名单/来源这两类都是拒绝式 403）；
- *        查询形态守卫那类是 400，必须传真实值——审计里记错状态码，
- *        等于让事后统计把"畸形请求被拒"算成"越权被拒"。
- * @returns {void}
- */
-const recordEarlyRejection = (req, meta) => {
-  setImmediate(() => {
-    try {
-      AuditLog.record({
-        action: meta.action,
-        category: 'security',
-        userId: req.user?.userId,
-        username: req.user?.username || 'anonymous',
-        sessionId: req.user?.sessionId || null,
-        fingerprint: computeFingerprint(req),
-        // method 原样交下去：取值全集与"越枚举怎么办"由 AuditLog schema
-        // （constants/audit.js 的 AUDIT_HTTP_METHODS + setter）单点决定。
-        // 原先这里私抄一份 5 动词白名单，把 HEAD/OPTIONS 探测**静默降级成无 method 的记录**，
-        // 而这类探测恰恰是安全信号——事后看不出它是 HEAD。
-        method: req.method,
-        path: auditPath(req),
-        ...auditClientAddress(req),
-        userAgent: stripControlChars(req.get('user-agent'), 512),
-        statusCode: meta.statusCode || 403,
-        success: false,
-        riskLevel: meta.riskLevel || 'medium',
-        riskFactors: meta.riskFactors,
-        reason: stripControlChars(meta.reason, 512),
-      });
-    } catch (e) {
-      logger.debug(`早期拒绝审计写入跳过：${e.message}`);
-    }
-  });
 };
 
 /**
@@ -264,53 +214,6 @@ const checkIPBlacklist = async (req, res, next) => {
   next();
 };
 
-/**
- * 动态添加 IP 到黑名单（持久化到 MongoDB）
- * 入库前归一化 IP：Node 在 IPv6 栈下 req.ip 形如 ::ffff:1.2.3.4，
- * 若原样入库会与管理员手动录入的 1.2.3.4 产生两条指向同一地址的记录
- * （复合唯一索引 { ip, type } 按文本判重，无法拦截），导致解封时漏删。
- * @param {string} ip - 要封禁的 IP
- * @param {number} durationMs - 封禁时长（毫秒），默认 1 小时
- * @param {string} reason - 封禁原因
- * @param {string} source - 封禁来源（manual/auto）
- * @returns {Promise<{banned: boolean, reason?: string, normalizedIp?: string}>}
- *   本函数**从不抛错**（内部自己 catch 掉持久化失败），所以"await 正常返回"绝不等于"封禁生效"。
- *   成功与否只能靠这个返回值判断，调用方不得按"没抛异常"记成功：
- *   - `{banned:true, normalizedIp}`：黑名单已落库；
- *   - `{banned:false, reason}`：一条记录都没写，reason ∈ unparsable_ip / whitelisted / persist_failed。
- */
-const addToBlacklist = async (
-  ip,
-  durationMs = 3600000,
-  reason = 'security_policy',
-  source = 'manual'
-) => {
-  try {
-    const IPBlacklist = require('../../models/IPBlacklist');
-
-    const normalizedIp = normalizeIP(ip);
-    if (!normalizedIp) {
-      logger.warn(`IP 黑名单添加跳过：无法解析的地址 ${ip}`);
-      return { banned: false, reason: 'unparsable_ip' };
-    }
-
-    // 白名单优先：信任 IP 不做自动封禁（如内网监控探针等可信来源的高频请求）
-    const whitelisted = await IPBlacklist.isWhitelisted(normalizedIp).catch(() => false);
-    if (whitelisted) {
-      logger.info(`IP ${normalizedIp} 在白名单中，跳过自动封禁`);
-      return { banned: false, reason: 'whitelisted' };
-    }
-
-    await IPBlacklist.blockIP(normalizedIp, { reason, durationMs, source });
-    logger.warn(
-      `IP 已加入黑名单：${normalizedIp}, 封禁时长：${durationMs / 1000}秒, 原因：${reason}`
-    );
-    return { banned: true, normalizedIp };
-  } catch (err) {
-    logger.error(`IP 黑名单添加失败：${ip}, 错误：${err.message}`);
-    return { banned: false, reason: 'persist_failed' };
-  }
-};
 module.exports = {
   checkIPBlacklist,
   isWhitelistExemptionTrustworthy,
