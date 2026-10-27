@@ -105,7 +105,9 @@
   .el-input__wrapper,
   .el-textarea__inner,
   .el-select__wrapper,
-  .el-table .el-table__row {
+  .el-table .el-table__row,
+  /* glass-card 是普通 div（非 el-card），各列表页的 page-enter 入场需在此一并降级 */
+  .glass-card {
     transition: opacity 150ms ease !important;
     animation: none !important;
   }

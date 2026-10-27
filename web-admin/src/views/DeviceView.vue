@@ -846,9 +846,9 @@ onMounted(refreshAll)
     border-color var(--xf-duration-base) var(--xf-ease-standard);
 }
 .glass-card {
-  transition:
-    box-shadow var(--xf-duration-base) var(--xf-ease-standard),
-    border-color var(--xf-duration-base) var(--xf-ease-standard);
+  transition: box-shadow var(--xf-duration-base) var(--xf-ease-standard);
+  /* 与其余列表页同口径的入场：卡片先浮入，内部表格行再逐级错开（view-refine.css） */
+  animation: page-enter 0.4s var(--xf-ease-glass) both;
 }
 .table-toolbar {
   display: flex;

@@ -1036,9 +1036,13 @@ a:hover {
   background: var(--xf-bg-glass);
   backdrop-filter: blur(24px) saturate(180%);
   -webkit-backdrop-filter: blur(24px) saturate(180%);
-  border: 1px solid var(--xf-glass-border);
+  /* 灰调实色描边 → 近白受光边 + 分层投影：边缘仍有定义，但观感是"磨出来的"而非"画出来的" */
+  border: 1px solid rgba(255, 255, 255, 0.6);
   border-radius: var(--xf-radius-xl);
-  box-shadow: var(--xf-glass-edge), var(--xf-shadow-xl);
+  box-shadow:
+    var(--xf-glass-edge),
+    0 1px 2px rgba(15, 23, 42, 0.05),
+    var(--xf-shadow-xl);
   padding: var(--xf-spacing-xl);
   transition: all var(--xf-duration-base) var(--xf-ease-standard);
 }
@@ -1160,20 +1164,25 @@ a:hover {
    高科技 Element Plus 深度覆盖（表格·卡片·对话框·表单·分页·标签）
    ========================================================================== */
 
-/* ===== el-card：高科技面板 ===== */
+/* ===== el-card：高科技面板 =====
+   多层柔和阴影取代生硬描边：近处 1px 接触影负责边缘定义，远处大半径低透明影
+   负责浮起感；hover 两层同步加深而非硬改边框色。 */
 .el-card {
-  border: 1px solid var(--xf-border-color);
+  border: none;
   border-radius: var(--xf-radius-lg);
   background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  transition:
-    box-shadow var(--xf-duration-base) var(--xf-ease-standard),
-    border-color var(--xf-duration-base) var(--xf-ease-standard);
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.05),
+    0 8px 24px -8px rgba(15, 23, 42, 0.08);
+  transition: box-shadow var(--xf-duration-base) var(--xf-ease-standard);
 }
 
 .el-card:hover {
-  box-shadow: var(--xf-shadow-md);
+  box-shadow:
+    0 2px 4px rgba(15, 23, 42, 0.06),
+    0 16px 40px -12px rgba(15, 23, 42, 0.14);
 }
 
 .el-card__header {
@@ -1188,6 +1197,24 @@ a:hover {
 
 .el-card__body {
   padding: 20px;
+}
+
+/* ===== 等宽数字兜底：表格数值、分页页码、徽标计数统一 tabular-nums，
+   数字刷新/翻页时位宽恒定、不左右跳动（各视图统计卡已自行声明，此处覆盖公共组件） ===== */
+.el-table td.el-table__cell,
+.el-pagination,
+.el-badge__content {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 标题平衡换行：多行标题各行长度趋匀、避免末行孤词。
+   text-wrap 可继承，单行标题无视觉差异；仅挂在标题类元素上，不放大到容器 ===== */
+.el-card__header,
+.el-dialog__title,
+.el-message-box__title,
+.welcome-card,
+.card-header {
+  text-wrap: balance;
 }
 
 /* ===== el-table：高科技数据表格 ===== */

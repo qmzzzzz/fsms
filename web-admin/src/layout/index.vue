@@ -769,16 +769,38 @@ const handleCommand = (command) => {
   background: transparent !important;
 }
 
+/* 展开态内边距改由组件库变量驱动：Element Plus 竖向菜单的 padding-left 规则
+   .el-menu--vertical:not(.el-menu--collapse):not(.el-menu--popup-container) .el-menu-item
+   特异性 (0,4,0) 高于本文件任何 :deep 选择器（(0,3,0)，且 --el-menu-level 由组件
+   内联样式提供），直接声明 padding 会被盖掉——修复前实际渲染为左 20px、右 6px，
+   图标起点比 logo 右移 14px。改为赋值变量后组件库 calc() 产出我们的值：
+   顶层 padding-left = 6px，与 margin-inline 6px 合计 12px，与 logo 内容起点对齐；
+   子项每级缩进 10px（图标起点 22px，较父项内缩 10px）；子菜单标题右内边距
+   calc(6px + 24px) 恰好给绝对定位箭头（right 同步变为 6px）留出位置。
+   折叠态刻意不挂这两个变量：--el-menu-base-level-padding 还参与 .el-menu--collapse
+   宽度公式（aside 折叠宽度与其同源），改动会让折叠 rail 与菜单宽度脱节。 */
+.sidebar-menu:not(.el-menu--collapse) {
+  --el-menu-base-level-padding: var(--xf-spacing-sm);
+  --el-menu-level-padding: var(--xf-spacing-md);
+}
+
 .sidebar-menu :deep(.el-menu-item),
 .sidebar-menu :deep(.el-sub-menu__title) {
-  /* 上下留白保证点击空间；组间间距见下方子项收紧规则 */
+  /* 上下留白保证点击空间（行高 56px + 上下各 6px 间隔）；分组节奏见下方两条规则 */
   margin-block: var(--xf-spacing-sm);
   margin-inline: var(--xf-spacing-sm);
-  padding-inline: var(--xf-spacing-sm);
-  border-radius: var(--xf-radius-sm);
+  /* 同心圆角：内层 = 外层(侧栏 lg 16px) − 内边距(sm 6px) = 10px，
+     与外层圆角同圆心收敛，拐角处不"打架" */
+  border-radius: calc(var(--xf-radius-lg) - var(--xf-spacing-sm));
   font-size: var(--xf-font-size-base);
   color: #94a3b8;
   transition: all var(--xf-duration-base) var(--xf-ease-standard);
+}
+
+/* 顶层项与子项的右内边距：组件库只在低特异性混合器里给了 20px 默认值，
+   左内边距已由上方变量产出 6px/16px，这里补齐右侧使水平留白对称 */
+.sidebar-menu:not(.el-menu--collapse) :deep(.el-menu-item) {
+  padding-right: var(--xf-spacing-sm);
 }
 
 /* 图标略小于文字，并保留图文间隙；不影响子菜单展开箭头 */
@@ -789,10 +811,18 @@ const handleCommand = (command) => {
   margin-right: var(--xf-spacing-sm);
 }
 
-/* 同一子菜单内的子项收紧间距并缩进，与顶层项区分 */
+/* 同组收紧：子项纵向间隔 2px（顶层项为 6px）；缩进由 --el-menu-level-padding
+   驱动（子项 padding-left 16px），不再单独声明——旧值特异性不足从未生效 */
 .sidebar-menu :deep(.el-sub-menu .el-menu-item) {
   margin-block: calc(var(--xf-spacing-xs) / 2);
-  padding-inline-start: var(--xf-spacing-lg);
+}
+
+/* 不同组拉大：子菜单组与相邻项之间 10px（> 常规 6px），组边界一眼可辨。
+   兄弟纵向外边距折叠取较大者，组内子项的 2px 不会抵消这里的 10px */
+.sidebar-menu :deep(.el-menu-item + .el-sub-menu),
+.sidebar-menu :deep(.el-sub-menu + .el-menu-item),
+.sidebar-menu :deep(.el-sub-menu + .el-sub-menu) {
+  margin-top: var(--xf-spacing-md);
 }
 
 /* 折叠态：仅剩图标，去掉内外边距并居中 */
@@ -803,8 +833,16 @@ const handleCommand = (command) => {
   justify-content: center;
 }
 
-.sidebar-menu.el-menu--collapse :deep(.el-icon) {
+/* 折叠态图标：去掉图文间隙、恢复 18px 图标 / 24px 图标盒（折叠后无文字，
+   "图标略小于文字"不适用；24px 与折叠宽度公式里的 icon-width 同源）。
+   选择器必须带 .el-menu-item/.el-sub-menu__title 抬到与上方图标规则相同的
+   (0,5,0) 且位置靠后才能覆盖——裸 :deep(.el-icon) 只有 (0,4,0)，
+   margin-right: 6px 会残留，图标偏离中线 3px */
+.sidebar-menu.el-menu--collapse :deep(.el-menu-item .el-icon),
+.sidebar-menu.el-menu--collapse :deep(.el-sub-menu__title .el-icon) {
   margin-right: 0;
+  width: var(--el-menu-icon-width);
+  font-size: var(--xf-font-size-lg);
 }
 
 /* 折叠态图标经由 tooltip 触发层渲染：去掉其默认左内边距并居中 */

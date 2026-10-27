@@ -72,7 +72,18 @@ html.dark body {
 /* 暗色下 Element Plus 组件覆盖 */
 html.dark .el-card {
   background: rgba(30, 41, 59, 0.85);
-  border-color: var(--xf-border-color);
+  /* 暗色下投影近乎不可见：保留 5% 白发丝边维持边缘可读（非生硬实线），
+     叠加分层柔和黑影补足浮起感，与亮色模式同一阴影语言 */
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 8px 24px -8px rgba(0, 0, 0, 0.5);
+}
+
+html.dark .el-card:hover {
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.45),
+    0 16px 40px -12px rgba(0, 0, 0, 0.55);
 }
 
 html.dark .el-card__header {
