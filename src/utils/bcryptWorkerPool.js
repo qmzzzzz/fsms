@@ -3,9 +3,8 @@
 /**
  * bcrypt worker 线程池：hash / compare / genSalt 的同形异步门面
  *
- * bcryptjs 的异步 API 只是把同步计算切片让出事件循环，CPU 仍在主线程上；
- * 本模块把计算卸载到常驻 worker（数量 = min(CPU, 4)，`BCRYPT_WORKERS` 覆盖），
- * 主线程只做消息往返，登录吞吐可按核扩展。
+ * bcryptjs 的异步 API 只是把同步计算切片让出事件循环，CPU 仍在主线程上；本模块把计算
+ * 卸载到常驻 worker（数量 = min(CPU, 4)，`BCRYPT_WORKERS` 覆盖），主线程只做消息往返。
  *
  * 回退进程内 bcryptjs 的条件（保持测试与可用性语义）：
  * - 测试环境（NODE_ENV=test / JEST_WORKER_ID / VITEST）与
@@ -70,7 +69,6 @@ const ensurePool = () => {
 
     for (let i = 0; i < resolvePoolSize(); i++) {
       const worker = new Worker(WORKER_FILE);
-      worker.unref();
       const entry = { worker, inflight: new Map(), seq: 0 };
 
       worker.on('message', (msg) => {
@@ -83,9 +81,8 @@ const ensurePool = () => {
         pump();
       });
 
-      // 线程崩溃：在途任务按失败结算，并把该 worker 摘除。
-      // 摘除后剩余 worker 仍在；全灭则置 initFailed 永久回退进程内实现
-      //（比反复重建线程池更可预期，且登录路径绝不能因池问题而 500）。
+      // 线程崩溃：在途任务按失败结算并摘除该 worker；全灭则置 initFailed 永久回退
+      // 进程内实现（比反复重建线程池更可预期，且登录路径绝不能因池问题而 500）。
       const kill = (label) => {
         for (const task of entry.inflight.values()) {
           task.reject(new Error(`bcrypt worker ${label}`));
@@ -115,6 +112,10 @@ const ensurePool = () => {
       worker.on('exit', (code) => {
         if (code !== 0) kill(`exit(${code})`);
       });
+
+      // 必须排在全部监听之后：给 MessagePort 加 message 监听会把端口重新 ref 住，
+      // 先 unref 再挂监听等于没 unref —— 短命进程（脚本 / CLI / CI 种子）将永不退出。
+      worker.unref();
 
       workers.push(entry);
     }
