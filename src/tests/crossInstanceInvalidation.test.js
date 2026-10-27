@@ -165,4 +165,36 @@ describe('会话/统计缓存的跨实例失效广播', () => {
     // 审计汇总缓存不属于统计口径，不得被顺手清掉
     expect(statsCache.get('audit:risk-summary:7d').hit).toBe(true);
   });
+
+  test('设备统计走独立通道 statscache:devices，且只清 devstats: 前缀（P2-6）', () => {
+    publishedKeys.length = 0;
+    statsCache.set('devstats:dept:7d', { total: 1 });
+    statsCache.set(`stats:${userId}:fpE`, { total: 2 });
+    const beforeGen = statsCache.deviceGeneration();
+
+    statsCache.invalidateDeviceStats(); // 不传 reason：走默认值
+    expect(publishedKeys).toContain('statscache:devices');
+    expect(statsCache.get('devstats:dept:7d').hit).toBe(false);
+    // 用户统计口径与设备口径是两把锁：清设备缓存不得顺手清掉用户统计
+    expect(statsCache.get(`stats:${userId}:fpE`).hit).toBe(true);
+    expect(statsCache.deviceGeneration()).toBe(beforeGen + 1);
+
+    // 模拟另一实例收到广播：同样只清设备键，且代际各自前推
+    statsCache.set('devstats:dept:30d', { total: 3 });
+    dispatch('statscache:devices');
+    expect(statsCache.get('devstats:dept:30d').hit).toBe(false);
+    expect(statsCache.get(`stats:${userId}:fpE`).hit).toBe(true);
+    expect(statsCache.deviceGeneration()).toBe(beforeGen + 2);
+  });
+
+  test('广播发布失败不得阻断本地失效（跨实例是尽力而为，本地必须成立）', async () => {
+    const sharedCache = require('../services/sharedCache');
+    sharedCache.publishInvalidate.mockRejectedValueOnce(new Error('redis down'));
+
+    statsCache.set('devstats:dept:1d', { total: 9 });
+    expect(() => statsCache.invalidateDeviceStats('publish-fail')).not.toThrow();
+    // catch 分支要等一个微任务才结算；在此之前本地失效已经生效
+    expect(statsCache.get('devstats:dept:1d').hit).toBe(false);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
 });

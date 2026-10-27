@@ -52,6 +52,7 @@ const {
   ensureHsts,
   checkIPBlacklist,
   addToBlacklist,
+  invalidateIPBlockCache,
   fileUploadSecurity,
   auditLog,
 } = require('../../middleware/security');
@@ -383,6 +384,29 @@ describe('security.js 分支补齐', () => {
       await checkIPBlacklist(makeReq({ ip: '198.51.100.22' }), res, next);
       expect(next).toHaveBeenCalled();
       expect(res.statusCode).toBeUndefined();
+    });
+
+    test('名单变更传入无法解析的地址 → 落共享占位键，不得清空降级缓存', async () => {
+      // 先让该 IP 进入降级缓存（DB 正常 + 命中黑名单）
+      jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(false);
+      jest.spyOn(IPBlacklist, 'isBlocked').mockResolvedValue(true);
+      await checkIPBlacklist(makeReq({ ip: '198.51.100.31' }), makeRes(), jest.fn());
+
+      // 名单变更可能回传无法解析的地址（库里的脏数据）。缓存键归一化失败时
+      // 只能落到**共享占位键**：按原文建键会把缓存撑成无上限键集，而顺手全清
+      // 又会让 DB 故障期失去唯一的拦截依据。
+      invalidateIPBlockCache('not-an-ip');
+
+      jest.restoreAllMocks();
+      jest.spyOn(IPBlacklist, 'isWhitelisted').mockRejectedValue(new Error('db down'));
+      jest.spyOn(IPBlacklist, 'isBlocked').mockRejectedValue(new Error('db down'));
+      const res = makeRes();
+      const next = jest.fn();
+      await checkIPBlacklist(makeReq({ ip: '198.51.100.31' }), res, next);
+
+      // 判据：降级缓存仍命中 ⇒ 照旧拦截。若实现改成"无法解析即全清"，这里变放行。
+      expect(res.statusCode).toBe(403);
+      expect(next).not.toHaveBeenCalled();
     });
   });
 

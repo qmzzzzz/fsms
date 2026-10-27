@@ -346,5 +346,26 @@ describe('WebSocket 入站事件限流', () => {
       });
       expect(runtimeMetrics.getWsSnapshot().connections).toBe(0);
     });
+
+    test('真实 WebSocketService 注册的源就是 clients.size（拉取式，不依赖增删点推送）', () => {
+      const http = require('http');
+      const WebSocketService = require('../../services/websocketService');
+      const server = http.createServer();
+      const svc = new WebSocketService(server);
+
+      try {
+        expect(runtimeMetrics.getWsSnapshot().connections).toBe(0);
+        // 直接改 Map 而不走任何"连接建立/断开"的推送路径：只有拉取式实现才能跟上
+        svc.clients.set('ws-gauge-a', {});
+        svc.clients.set('ws-gauge-b', {});
+        expect(runtimeMetrics.getWsSnapshot().connections).toBe(2);
+        svc.clients.delete('ws-gauge-a');
+        expect(runtimeMetrics.getWsSnapshot().connections).toBe(1);
+        expect(runtimeMetrics.formatRuntime().join('\n')).toContain('ws_connections 1');
+      } finally {
+        svc.dispose();
+        server.close(() => {});
+      }
+    });
   });
 });
