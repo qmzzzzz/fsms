@@ -134,7 +134,7 @@ function applyTrustedProxyPolicy(app, trustProxyHops) {
   if (trustProxyHops.hops > 0 && !proxies.configured) {
     // 残余风险提示位：启用代理头信任却未声明代理网段 ⇒ 判据回落到「对端属私网/回环即可信」，
     // 同容器网络内任意进程伪造一条 XFF 即可冒用。M-2：生产环境按 `error` 打印、其余 `warn`（不阻断启动）。
-    (config.nodeEnv === 'production' ? logger.error : logger.warn)(
+    (require('./config/validate').requiresProductionSemantics() ? logger.error : logger.warn)(
       `已启用 trust proxy（TRUST_PROXY_HOPS=${trustProxyHops.hops}）但未配置 ` +
         'TRUSTED_PROXY_CIDRS：X-Forwarded-For 的可信判据目前只看「对端是否属私网/回环」，' +
         '而私网是位置不是代理身份——同一容器网络内的任意服务直连应用端口并自带该头，' +
