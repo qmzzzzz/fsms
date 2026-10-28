@@ -68,7 +68,15 @@ jobs:
 
   test:
     needs: dependency-policy
-    runs-on: ubuntu-latest
+    # 2026-10-28：钉 22.04，**不跟 ubuntu-latest**。GitHub 自镜像 20261018.339.1 起把内核抬到
+    # 7.0.0-1017-azure（`/proc/version_signature` 实为上游 7.0.14），而 MongoDB 8.0.x 只读
+    # `uname -r`（得 7.0.0），误判进 SERVER-121912 的「6.19–7.0.13 不兼容区间」，启动即以
+    # fatal 12257600 退出——**与本仓代码无关**，是上游误报（修在 SERVER-131779，8.0.35 才有；
+    # 见 actions/runner-images#15005，GitHub 给出的临时变通就是回 22.04）。已实测该闸编进
+    # 官方 tarball 里的 mongod（二进制内可直接检索到该 fatal 串），所以换二进制绕不过去。
+    # 本 job 的 mongod 由 mongod-artifacts.json 的 ubuntu2204 条目供给（2404 包要求 glibc 2.39，
+    # 22.04 的 2.35 跑不了）。回滚条件：MongoDB 8.0.35 发布并完成 digest/sha256 对账。
+    runs-on: ubuntu-22.04
     # 挂死的 job 会一直占着 runner（矩阵 2 个 Node × 覆盖率作业），
     # 45 分钟是本仓全量 Jest + 覆盖率的上界；超时即失败，不静默耗资源。
     timeout-minutes: 45
@@ -463,7 +471,8 @@ jobs:
     # 是 supertest 套件测不到的接线层兜底；prod-drill 另验生产门禁。
     # 两脚本自带随机强密钥与内存 Mongo，无需额外 service 容器。
     needs: dependency-policy
-    runs-on: ubuntu-latest
+    # 同上（见 test job 的内核误报说明）：本 job 也起真实 mongod，必须避开 7.0.0-1017 内核。
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     steps:
@@ -500,7 +509,10 @@ jobs:
     # 评价报告 H1：浏览器旅程为发布镜像硬门禁。桌面与移动端旅程
     # 已在本地真实栈稳定通过；MFA 旅程继续按环境能力跳过。
     needs: dependency-policy
-    runs-on: ubuntu-latest
+    # 同上（见 test job 的内核误报说明）。本 job 的 Mongo 是 **service 容器**，与宿主共用内核，
+    # 换镜像/换二进制都不解决——只能换内核。失败表现是容器日志里 fatal 12257600、
+    # 步骤停在 Start full stack（后端 ECONNREFUSED 127.0.0.1:27017），极易误判成服务起不来。
+    runs-on: ubuntu-22.04
     timeout-minutes: 40
 
     services:

@@ -130,9 +130,10 @@ CI 的 `security-audit` 作业在 2026-10-09 登记时两处审计都只有 `npm
 （Dockerfile 的 `npm ci --omit=dev --ignore-scripts`）不含它们。为了让「不可达」
 不只是一句口头保证，执行面再钉两条：
 
-- CI 作业跑在 GitHub 托管的一次性 `ubuntu-latest`（`ci.yml` 各 job 的 `runs-on`），
-  **不在生产机或部署 runner 上执行含 dev 的 `npm ci`**。被污染的 dev 树最多影响
-  一次一次性 runner 的生命周期，随 job 结束销毁。
+- CI 作业跑在 GitHub 托管的一次性 Ubuntu runner（`ci.yml` 各 job 的 `runs-on`：默认
+  `ubuntu-latest`，仅需真实 mongod 的 `test`/`e2e`/`e2e-browser` 钉 `ubuntu-22.04`，
+  原因见 ci.yml 内 2026-10-28 的内核误报说明），**不在生产机或部署 runner 上执行含
+  dev 的 `npm ci`**。被污染的 dev 树最多影响一次一次性 runner 的生命周期，随 job 结束销毁。
 - 若将来把测试迁到自托管 runner：必须与 `deploy` 标签的部署 runner **分开注册**，
   且测试 runner 每轮从干净快照启动；否则 braces 这类 DoS 一旦被利用，受影响的
   是持有生产凭据的宿主。

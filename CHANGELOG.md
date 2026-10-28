@@ -21,6 +21,32 @@
 - 测试：新增 `web-admin/src/tests/bundling/devProxyForwardedFor.test.js`，对三个代理块
   分别钉住「透传 / 多值拼接 / 回落」三条契约。
 
+---
+
+### CI 修复：runner 内核误报导致 e2e-browser 起不来 Mongo（2026-10-28）
+
+> 现象：`CI` 的 `e2e-browser` 在 **Start full stack** 步骤失败，后端日志是
+> `connect ECONNREFUSED 127.0.0.1:27017`，看起来像服务没起来；`test`/`e2e` 全绿。
+> 定位到真正原因不在本仓代码：
+
+- **根因**：GitHub 自镜像 `20261018.339.1` 起把内核抬到 `7.0.0-1017-azure`，其
+  `/proc/version_signature` 实为上游 **7.0.14**；而 MongoDB 8.0.x 只读 `uname -r`（得 `7.0.0`），
+  误判进 SERVER-121912 的「6.19–7.0.13 不兼容区间」，启动即以 fatal `12257600` 退出。
+  上游误报修在 SERVER-131779，**8.0.34 没有**（8.0.x 最新即 8.0.34，2026-10-13 发布）。
+  旁证：同一次运行里 `e2e` 落在旧镜像 `20261012.334` 上，同一份 mongod 8.0.34 正常启动并通过。
+  外部登记：`actions/runner-images#15005`（open，GitHub 工程师给出的临时变通即回 `ubuntu-22.04`）。
+- **为什么换二进制绕不过**：把官方 tarball（sha256 与仓内锚一致）解开后，该 fatal 串在 `mongod`
+  二进制内可直接检索到——闸是编进 mongod 的，不是 Docker 镜像特有的。故 `test`/`e2e` 的
+  `MONGOMS_SYSTEM_BINARY` 路径同样会在新内核上失败，只是尚未落到新内核宿主机而已。
+- **修法**：`test`/`e2e`/`e2e-browser` 三个用真实 mongod 的 job 钉 `runs-on: ubuntu-22.04`
+  （其余 job 保持 `ubuntu-latest`）；`deployment/mongod-artifacts.json` 增补 `ubuntu2204` 条目
+  （2404 包要求 glibc 2.39，22.04 的 2.35 跑不了），sha256 `8eef2a82…c7aced43` 取
+  `downloads.mongodb.org/current.json` 官方值与自算字节哈希**逐字一致**的双锚。
+  不动的部分：mongo 镜像仍钉 8.0.34 及其 digest（生产 compose 口径不变），三方对账闸不受影响。
+- **回滚条件**：MongoDB 8.0.35 发布并完成 digest/sha256 对账，或 runner 内核进入 ≥7.0.14 区间。
+
+---
+
 ### 审计第五轮复核：逐条回源码验证、修成立项、登记不成立与暂缓项（2026-10-26）
 
 > 承接 `deliverables/audit-2026-10-26/audit-report.md`（复核基线 `4a1bdae` + 工作区）。
