@@ -68,6 +68,24 @@ describe('reauth ticket 本体', () => {
     expect(verifyReauthTicket('', { userId, sessionId: 'sid-A' })).toBe(false);
     expect(verifyReauthTicket(null, { userId, sessionId: 'sid-A' })).toBe(false);
   });
+
+  /**
+   * 域分离（M-1）：签名输入带固定域前缀，与「同一把 HMAC_SECRET 的其它用途」
+   * 在字节层面隔开。此前的签名输入是裸 base64url(body)，与审计链检查点等
+   * 其余 HMAC 用途同构。用例钉住：**不含域前缀**的签名（即改造前的旧口径）
+   * 必须被判无效——否则这次加固就等于只在注释里成立。
+   */
+  test('签名绑定域前缀：裸 body 的签名（旧口径）一律无效', () => {
+    const { hmacSigner } = require('../../utils/encryption');
+    const { ticket } = issueReauthTicket({ userId, sessionId: 'sid-A' });
+    const [body] = ticket.split('.');
+
+    // 旧口径（直接签 body，不带域前缀）伪造不了本系统认可的票据
+    const legacySig = hmacSigner.sign(body);
+    expect(verifyReauthTicket(`${body}.${legacySig}`, { userId, sessionId: 'sid-A' })).toBe(false);
+    // 反向对照：带域前缀的签名被接受（证明拒绝来自域前缀、而非别的判据）
+    expect(hmacSigner.verify(`reauth-ticket:v1:${body}`, ticket.split('.')[1])).toBe(true);
+  });
 });
 
 describe('reauth ticket HTTP 强制', () => {

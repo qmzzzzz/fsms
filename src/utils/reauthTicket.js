@@ -19,10 +19,29 @@ const { hmacSigner } = require('./encryption');
 const REAUTH_TICKET_TTL_MS = 5 * 60 * 1000;
 const REAUTH_TICKET_TTL_SECONDS = Math.floor(REAUTH_TICKET_TTL_MS / 1000);
 
+/**
+ * 签名域前缀（domain separation）。
+ *
+ * 本票据与审计链检查点（services/auditChainCheckpoint.js）共用同一把 HMAC_SECRET，
+ * 且双方的签名输入都曾是「裸字节」，没有一个把两条用途隔开的固定前缀。密钥用途
+ * 不分离的代价：一旦哪天某处的签名/原文泄漏，两种协议的原语同构，界面上互相
+ * "可迁移解读"的空间就变大。加一个固定域前缀后，同一密钥在两条用途上产出的
+ * 签名字节流从**输入层面**就不同构——伪造一类凭据的签名不可能在另一类上成立。
+ *
+ * 前缀只进签名输入、不进线路格式：票据仍是 `body.signature`，body 仍是
+ * base64url(JSON)。因此对前端（只当作不透明串透传）与既有用例零影响。
+ * 审计链检查点侧未同步改动——它的格式受 CHECKPOINT_VERSION 约束，改签名输入
+ * 必须连带升版本并处理存量锚点文件，属独立迁移项（见该模块头注释），不在本次范围。
+ */
+const REAUTH_TICKET_DOMAIN = 'reauth-ticket:v1:';
+
 const normalizeSid = (sessionId) => (sessionId ? String(sessionId) : null);
 
 const encodePayload = (payload) =>
   Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+
+/** 参与签名的字节流：域前缀 + 线路体。签发与校验必须共用本函数，避免两处拼法漂移 */
+const signedPayload = (body) => REAUTH_TICKET_DOMAIN + body;
 
 const isPlainObject = (value) =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -42,7 +61,7 @@ function issueReauthTicket({ userId, sessionId = null }, now = Date.now()) {
   };
   const body = encodePayload(payload);
   return {
-    ticket: `${body}.${hmacSigner.sign(body)}`,
+    ticket: `${body}.${hmacSigner.sign(signedPayload(body))}`,
     expiresIn: REAUTH_TICKET_TTL_SECONDS,
   };
 }
@@ -62,7 +81,7 @@ function verifyReauthTicket(ticket, { userId, sessionId = null }, now = Date.now
 
   const body = ticket.slice(0, firstDot);
   const signature = ticket.slice(firstDot + 1);
-  if (!hmacSigner.verify(body, signature)) return false;
+  if (!hmacSigner.verify(signedPayload(body), signature)) return false;
 
   let payload;
   try {

@@ -134,15 +134,27 @@ function applyTrustedProxyPolicy(app, trustProxyHops) {
   if (trustProxyHops.hops > 0 && !proxies.configured) {
     // 残余风险的唯一提示位：启用了代理头信任却没声明代理网段 ⇒ 判据回落到
     // 「对端属私网/回环即可信」，同容器网络内任意进程伪造一条 XFF 即可冒用。
-    logger.warn(
+    //
+    // 严重度分档（2026-10-28 审计 M-2 的处置，仅增强告警、**不阻断启动**）：
+    // 生产环境升为 `error` 级 + high 计数，其余环境维持 `warn` + medium。
+    // 为什么不是启动致命错误：**默认不收紧**是 2026-10-17 仓库负责人明确拍板的取舍
+    // （见 config/trustedProxies.js 头注释）——不能让一次安全修复打断所有现存部署；
+    // 而 compose 入口已用 `${TRUSTED_PROXY_CIDRS:?…}` 在编排层强制（docker-compose.yml
+    // 与 tests/deploy/composeProductionContract.test.js 钉住），应用层再升致命闸只会
+    // 惩罚非 compose 的存量部署，与那条决策直接冲突。故这里只把「可见度」提上去：
+    // error 级进 SIEM 错误流，配合同一个计数器喂 TrustedProxyBoundaryUnset 告警专条。
+    const isProduction = config.nodeEnv === 'production';
+    const message =
       `已启用 trust proxy（TRUST_PROXY_HOPS=${trustProxyHops.hops}）但未配置 ` +
-        'TRUSTED_PROXY_CIDRS：X-Forwarded-For 的可信判据目前只看「对端是否属私网/回环」，' +
-        '而私网是位置不是代理身份——同一容器网络内的任意服务直连应用端口并自带该头，' +
-        '与真实反向代理在应用视角完全同形，可据此影响 IP 白名单/黑名单、三层限流配额、' +
-        '自动封禁对象与审计来源地址（审计 F-01）。' +
-        '闭合方式：把真实代理所在网段写进 TRUSTED_PROXY_CIDRS（逗号分隔 CIDR）。'
-    );
-    // 日志不是信号：warn 只落到 stdout，谁在看、看没看到都不确定。补一个计数器，
+      'TRUSTED_PROXY_CIDRS：X-Forwarded-For 的可信判据目前只看「对端是否属私网/回环」，' +
+      '而私网是位置不是代理身份——同一容器网络内的任意服务直连应用端口并自带该头，' +
+      '与真实反向代理在应用视角完全同形，可据此影响 IP 白名单/黑名单、三层限流配额、' +
+      '自动封禁对象与审计来源地址（审计 F-01）。' +
+      '闭合方式：把真实代理所在网段写进 TRUSTED_PROXY_CIDRS（逗号分隔 CIDR）。' +
+      (isProduction ? '【生产环境】当前处于已接受的残余风险态，请尽快补齐该变量。' : '');
+    if (isProduction) logger.error(message);
+    else logger.warn(message);
+    // 日志不是信号：只落到 stdout，谁在看、看没看到都不确定。补一个计数器，
     // 由 deployment/observability/alert-rules.yml 的 `TrustedProxyBoundaryUnset`
     // 专条告警（for: 0m，`increase(...[15m]) > 0`）。
     //
@@ -151,7 +163,7 @@ function applyTrustedProxyPolicy(app, trustProxyHops) {
     // 依赖全都好好的，缺的是运维的一个变量。套用那条文案会给出错误的处置指引。
     // 也刻意**不**靠 `SecurityAlertBurst`：单次部署只写 1 条，速率型规则永远不达标。
     // 台账登记见 src/constants/failOpenSites.js 的 OTHER_ALERT_SIGNALS。
-    incSecurityAlert('trusted_proxy_cidrs_unset', 'medium');
+    incSecurityAlert('trusted_proxy_cidrs_unset', isProduction ? 'high' : 'medium');
   }
 }
 
