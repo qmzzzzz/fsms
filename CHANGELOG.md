@@ -8,6 +8,19 @@
 
 ## [未发布]
 
+### 修复（2026-10-28 · dev 代理覆盖上游 X-Forwarded-For，审计与限流只见内网地址）
+
+> 现象：经外层反代/预览网关访问时，后端审计与限流记录的客户端 IP 恒为
+> `127.0.0.1`/`::1`，真实地址丢失。
+
+- 根因：`web-admin/vite.config.js` 的 dev 代理无条件用 `req.socket.remoteAddress`
+  覆盖 `X-Forwarded-For`。外层代理已经把真实 IP 写进该头，而它连 Vite 的对端是回环
+  地址，覆盖等于把真实地址抹掉。
+- 修复：`/api`、`/client-errors`、`/socket.io/` 三个代理块统一改为「上游有 XFF 则
+  原样透传（数组形态拼接），缺失才回落 socket 对端」。本地直连 dev server 的行为不变。
+- 测试：新增 `web-admin/src/tests/bundling/devProxyForwardedFor.test.js`，对三个代理块
+  分别钉住「透传 / 多值拼接 / 回落」三条契约。
+
 ### 审计第五轮复核：逐条回源码验证、修成立项、登记不成立与暂缓项（2026-10-26）
 
 > 承接 `deliverables/audit-2026-10-26/audit-report.md`（复核基线 `4a1bdae` + 工作区）。

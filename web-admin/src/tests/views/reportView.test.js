@@ -208,7 +208,11 @@ describe('ReportView 导出参数', () => {
     expect(params.startDate).not.toContain('T')
     expect(params.endDate).not.toContain('Z')
     expect(params.startDate <= params.endDate).toBe(true)
-    // 本地口径自检：东八区下 toISOString 会把当天 00:00 退到前一天
+    // 本地口径自检：东八区下 toISOString 会把当天 00:00 退到前一天。
+    // TZ 必须显式钉住：CI 是 UTC，本地日期与 UTC 日期恒等，下面的自检会恒红；
+    // 而实现改回 toISOString 也判不出来。vi.stubEnv 依赖 TZ 未进 V8 时区缓存，
+    // 故 vitest.config 里另加了 `for (const tz of ['UTC','Asia/Shanghai'])` 的项目矩阵。
+    vi.stubEnv('TZ', 'Asia/Shanghai')
     const d = new Date(2026, 0, 5, 1, 30, 0)
     const p2 = (n) => String(n).padStart(2, '0')
     const localOf = (x) => x.getFullYear() + '-' + p2(x.getMonth() + 1) + '-' + p2(x.getDate())

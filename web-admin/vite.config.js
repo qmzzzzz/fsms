@@ -545,6 +545,9 @@ export default defineConfig(({ command, mode }) => {
       // 暴露到整个局域网。确需手机真机联调时显式执行 `vite --host 0.0.0.0`。
       host: '127.0.0.1',
       port: 3001,
+      // 预览域名放行：open preview 经代理访问时 Host 不是 localhost，
+      // Vite 的 Host 校验会把请求挡成 403。
+      allowedHosts: ['.monkeycode-ai.online'],
       // 收紧 dev server CORS（回应外部报告 #2）：Vite 默认用宽松正则反射任意
       // localhost 系 Origin（含 *.localhost 子域），显式收敛为开发白名单。
       // 同源访问（含局域网 IP 直连本页面加载模块/HMR）不经 CORS 校验，不受影响；
@@ -586,12 +589,20 @@ export default defineConfig(({ command, mode }) => {
         '/api': {
           target: 'http://localhost:3000',
           changeOrigin: true,
-          // http-proxy 默认不设置 X-Forwarded-For，需手动透传浏览器侧真实地址，
-          // 否则后端（已开启 trust proxy）只能取到代理回环地址 ::1/127.0.0.1
+          // X-Forwarded-For 透传：**优先沿用上游已带的头**，缺失时才回落 socket 对端。
+          //
+          // 原先是无条件用 `req.socket.remoteAddress` 覆盖：当上游还有一层反向代理
+          // （如预览网关 / Nginx）时，该层已经把真实客户端 IP 写进 XFF，而它连 Vite
+          // 的对端是回环地址 —— 覆盖等于把真实地址抹成 ::1/127.0.0.1，后端（已开启
+          // trust proxy）与审计看到的全是内网地址。改为「有则透传、无则回落」后，
+          // 直连 dev server 的本地调试行为不变，经上游代理访问时拿到的才是真实 IP。
           configure: (proxy) => {
             proxy.on('proxyReq', (proxyReq, req) => {
-              const clientIp = req.socket.remoteAddress
-              if (clientIp) proxyReq.setHeader('x-forwarded-for', clientIp)
+              const forwarded = req.headers['x-forwarded-for']
+              const value = Array.isArray(forwarded)
+                ? forwarded.join(', ')
+                : forwarded || req.socket.remoteAddress
+              if (value) proxyReq.setHeader('x-forwarded-for', value)
             })
           },
         },
@@ -599,6 +610,15 @@ export default defineConfig(({ command, mode }) => {
         '/client-errors': {
           target: 'http://localhost:3000',
           changeOrigin: true,
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq, req) => {
+              const forwarded = req.headers['x-forwarded-for']
+              const value = Array.isArray(forwarded)
+                ? forwarded.join(', ')
+                : forwarded || req.socket.remoteAddress
+              if (value) proxyReq.setHeader('x-forwarded-for', value)
+            })
+          },
         },
         '/socket.io/': {
           target: 'http://localhost:3000',
@@ -606,8 +626,11 @@ export default defineConfig(({ command, mode }) => {
           changeOrigin: true,
           configure: (proxy) => {
             proxy.on('proxyReqWs', (proxyReq, req) => {
-              const clientIp = req.socket.remoteAddress
-              if (clientIp) proxyReq.setHeader('x-forwarded-for', clientIp)
+              const forwarded = req.headers['x-forwarded-for']
+              const value = Array.isArray(forwarded)
+                ? forwarded.join(', ')
+                : forwarded || req.socket.remoteAddress
+              if (value) proxyReq.setHeader('x-forwarded-for', value)
             })
           },
         },

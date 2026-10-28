@@ -253,6 +253,9 @@ describe('IpListView 列表加载与渲染', () => {
   })
 
   test('时间列本地时区口径：生效时间与创建时间都不是 ISO 原串', async () => {
+    // UTC 机器上构造不出「本地 ≠ UTC」的样本，故显式固定为东八区；
+    // 否则下方前提自检在 CI（TZ=UTC）恒红，而实现改成 toISOString 也判不出来。
+    vi.stubEnv('TZ', 'Asia/Shanghai')
     const expires = '2026-10-01T01:00:00.000Z'
     const created = '2026-09-01T23:30:15.000Z'
     const c = await openList([ipRow({ expiresAt: expires, createdAt: created })])
