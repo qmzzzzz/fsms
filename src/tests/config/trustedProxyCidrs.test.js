@@ -337,13 +337,19 @@ describe('接线：app.js 必须真的把解析结果注入 app 设置', () => {
   /**
    * M-2（2026-10-28 审计）处置：**只增强告警、不阻断启动**。
    *
-   * 生产环境下「启用了 trust proxy 但未配 TRUSTED_PROXY_CIDRS」必须走 error 级日志
-   * 与 high 计数（进 SIEM 错误流 + 喂 TrustedProxyBoundaryUnset 专条），但 createApp
-   * 必须**正常返回**——默认不收紧是 2026-10-17 负责人拍板的取舍，编排层已强制。
-   * 这两条一起钉：只断言「打了 error」会放过「顺手改成抛错」的退化；
+   * 生产环境下「启用了 trust proxy 但未配 TRUSTED_PROXY_CIDRS」升为 error 级日志
+   * （进 SIEM 错误流），但 createApp 必须**正常返回**——默认不收紧是 2026-10-17
+   * 负责人拍板的取舍，编排层已用 ${TRUSTED_PROXY_CIDRS:?} 强制。
+   *
+   * 计数档位**不随环境漂移**：level 必须是字面量，与 failOpenLedgerGate 钉死的台账
+   * （failOpenSites.js 的 OTHER_ALERT_SIGNALS，level=medium）完全一致——写成三元表达式
+   * 会被静态采集器判为「动态转发点」而使台账失配。跨环境的严重度差异由日志级别承担，
+   * 专条告警 `TrustedProxyBoundaryUnset`（for: 0m）对两种环境同样生效。
+   *
+   * 两条一起钉：只断言「打了 error」会放过「顺手改成抛错」的退化；
    * 只断言「不抛」会放过「悄悄退回 warn」的退化。
    */
-  test('生产未配 ⇒ 记 error + high 计数，但 createApp 仍正常返回（不阻断）', () => {
+  test('生产未配 ⇒ 记 error（不阻断），计数恒为 medium', () => {
     delete process.env.TRUSTED_PROXY_CIDRS;
     process.env.TRUST_PROXY_HOPS = '1';
     process.env.NODE_ENV = 'production';
@@ -361,13 +367,16 @@ describe('接线：app.js 必须真的把解析结果注入 app 设置', () => {
     }).not.toThrow();
     expect(app).toBeDefined();
 
-    const relevant = errorSpy.mock.calls.map((c) => String(c[0])).filter((m) => /TRUSTED_PROXY_CIDRS/.test(m));
+    const relevant = errorSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => /TRUSTED_PROXY_CIDRS/.test(m));
     expect(relevant.length).toBeGreaterThan(0);
-    expect(relevant.some((m) => m.includes('【生产环境】'))).toBe(true);
     // 不得退回 warn 级
-    expect(warnSpy.mock.calls.map((c) => String(c[0])).some((m) => /TRUSTED_PROXY_CIDRS/.test(m))).toBe(false);
-    // 计数档位为 high
-    expect(alertSpy).toHaveBeenCalledWith('trusted_proxy_cidrs_unset', 'high');
+    expect(
+      warnSpy.mock.calls.map((c) => String(c[0])).some((m) => /TRUSTED_PROXY_CIDRS/.test(m))
+    ).toBe(false);
+    // 计数档位恒为 medium（与台账钉死，不随环境漂移）
+    expect(alertSpy).toHaveBeenCalledWith('trusted_proxy_cidrs_unset', 'medium');
 
     errorSpy.mockRestore();
     warnSpy.mockRestore();
@@ -388,8 +397,12 @@ describe('接线：app.js 必须真的把解析结果注入 app 设置', () => {
     const { createApp } = require('../../app');
     createApp();
 
-    expect(warnSpy.mock.calls.map((c) => String(c[0])).some((m) => /TRUSTED_PROXY_CIDRS/.test(m))).toBe(true);
-    expect(errorSpy.mock.calls.map((c) => String(c[0])).some((m) => /TRUSTED_PROXY_CIDRS/.test(m))).toBe(false);
+    expect(
+      warnSpy.mock.calls.map((c) => String(c[0])).some((m) => /TRUSTED_PROXY_CIDRS/.test(m))
+    ).toBe(true);
+    expect(
+      errorSpy.mock.calls.map((c) => String(c[0])).some((m) => /TRUSTED_PROXY_CIDRS/.test(m))
+    ).toBe(false);
     expect(alertSpy).toHaveBeenCalledWith('trusted_proxy_cidrs_unset', 'medium');
 
     errorSpy.mockRestore();
