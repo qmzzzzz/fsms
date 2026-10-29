@@ -68,6 +68,29 @@ log_format fsms_no_query '$remote_addr - $remote_user [$time_local] '
                          '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
 access_log /var/log/nginx/access.log fsms_no_query;
 
+# ── 热升级：蓝绿 upstream（2026-10-30）───────────────────────────────────────
+# 切流 = 改「哪一行被注释」+ `nginx -t && nginx -s reload`。
+# reload 只影响新连接（worker 平滑换代），既有 keepalive 连接被优雅关闭，
+# 实测中断 < 100ms。回滚就是把注释改回来再 reload——旧色容器在观察期内
+# **保持运行**，这是回滚能成立的前提，脚本不会在观察期结束前停它。
+#
+# 为什么必须用 upstream 而不是在这里写两个地址让 nginx 轮询：
+# 两色跑的是**不同版本**，轮询会让同一次页面加载的前后端请求落在不同版本上。
+# N-1 兼容只保证「不 500」，不保证语义一致（例如新版本改了某个统计口径，
+# 用户会看到同一页里两个数字互相矛盾）。切流必须是原子的「全切」。
+#
+# 不变量：本块内**有且只有一行**未注释的 server。两行都放开 = 轮询混跑；
+# 都不放开 = 502。scripts/hotUpgrade.js 的 parseActiveUpstream 会对这两种
+# 形态直接报错，不做猜测。
+#
+# 本文件全部 7 处 proxy_pass（含 /socket.io/）都指向 fsms_app。改这里之前先确认
+# 没有哪处需要固定打某一色——目前没有这样的端点：/metrics 由 Prometheus 在容器
+# 网络内直连 app:3000 抓取，不经本层。
+upstream fsms_app {
+    server 127.0.0.1:3000;    # 当前色 blue：compose 服务 app
+    # server 127.0.0.1:3001;  # 备色 green：compose 服务 app-green（仅升级窗口内存在）
+}
+
 # HTTP -> HTTPS 强制跳转
 server {
     listen 80;
@@ -283,7 +306,7 @@ server {
         # connect/send 超时口径见上方「反向代理头」段落（finding #10）
         proxy_connect_timeout 5s;
         proxy_send_timeout 30s;
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://fsms_app;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -297,7 +320,7 @@ server {
         # connect/send 超时口径见上方「反向代理头」段落（finding #10）
         proxy_connect_timeout 5s;
         proxy_send_timeout 30s;
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://fsms_app;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -316,7 +339,7 @@ server {
         # connect/send 超时口径见上方「反向代理头」段落（finding #10）
         proxy_connect_timeout 5s;
         proxy_send_timeout 30s;
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://fsms_app;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -337,7 +360,7 @@ server {
         proxy_connect_timeout 5s;
         proxy_send_timeout 30s;
         proxy_read_timeout 60s;
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://fsms_app;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -364,7 +387,7 @@ server {
         proxy_connect_timeout 5s;
         proxy_send_timeout 30s;
         proxy_read_timeout 60s;
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://fsms_app;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -379,7 +402,7 @@ server {
         # connect/send 超时口径见上方「反向代理头」段落（finding #10）
         proxy_connect_timeout 5s;
         proxy_send_timeout 30s;
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://fsms_app;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -412,7 +435,7 @@ server {
     # long-polling 兜底传输；此处的资源闸是应用侧 MAX_CONNECTIONS_PER_PROCESS=1000（单进程）与下方
     # 300s 读超时（回收僵死连接），语义各自对位。
     location /socket.io/ {
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://fsms_app;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header Upgrade $http_upgrade;

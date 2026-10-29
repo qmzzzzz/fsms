@@ -252,6 +252,39 @@ services:
       - fire-safety-net
       - data-net
 
+  # ── 热升级备色（2026-10-30）──────────────────────────────────────────────
+  # 升级时同时在线的是「当前色 app（3000）」+「备色 app-green（3001）」，
+  # nginx 的 upstream 指向哪一色，流量就去哪一色。切流即改 upstream + reload，
+  # 回滚就是把 upstream 改回来——旧容器在观察期内不销毁，这是回滚的前提。
+  #
+  # 为什么用 profile 而不是常驻两个服务：不加 `--profile green` 时本服务根本
+  # 不参与 `docker compose up`，现有单色部署的启动行为、端口占用、资源占用
+  # 全部不变。只有升级窗口内才显式 `--profile green up -d app-green`。
+  #
+  # 为什么 extends 而不是复制一整段：app 段的 secrets / tmpfs / user / cap_add /
+  # read_only 是安全边界（F-15、P3-48），复制一份就必然漂移——两色跑在
+  # 不同安全配置下，切换后才暴露差异。extends 保证两色逐字段同构，只差
+  # 镜像与端口。
+  app-green:
+    extends:
+      service: app
+    profiles: ['green']
+    # 新版本镜像必须显式给。这里**不能**回落到 APP_IMAGE：回落等于「升级时把
+    # 当前版本再起一份」，脚本会以为自己在升级，实际两色跑同一份代码，
+    # 切流后什么都没变，而审计里写着「升级成功」。
+    #
+    # 也不用 `${APP_IMAGE_NEXT:?...}`：compose 在**profile 过滤之前**就做变量插值，
+    # 加必填断言会让日常 `docker compose up`（不启用 green）直接失败。
+    # 故退到一个人为构造、绝不可能存在的 tag：真有人绕过脚本手动起备色，
+    # 会立刻卡在 pull 阶段（响亮失败），而不是安静地跑起一个错版本。
+    image: ${APP_IMAGE_NEXT:-fire-safety-app:green-unset-by-script}
+    ports: !override
+      # 仅回环，与 app 同口径；宿主 nginx 通过 upstream 访问。
+      # `!override` 不是装饰：compose 的 extends 对 sequences 做的是**合并**而不是
+      # 替换（2026-10-30 实测：不加它，备色同时 publish 3000 与 3001，与 app 抢端口，
+      # 升级窗口内第二个容器直接起不来）。标签由 compose 自己解析，测试不读这个文件。
+      - '127.0.0.1:3001:3000'
+
   mongo:
     # R-5 基础镜像钉到 digest；2026-10-20 由 EOL 的 6.0.20 升级到 8.0.34（S-3）。
     #

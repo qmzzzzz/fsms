@@ -133,14 +133,21 @@ describe('compose 端口暴露面闸门', () => {
       .filter((line) => !line.trim().startsWith('#'))
       .join('\n');
 
-  /** 取某服务 ports: 下的条目（支持块状与内联 `ports: [...]` 两种写法） */
+  /**
+   * 取某服务 ports: 下的条目（支持块状与内联 `ports: [...]` 两种写法）
+   *
+   * 必须容忍 `ports: !override`：热升级的备色服务（app-green）用它把继承来的
+   * 端口**替换**掉（extends 对 sequences 是合并，不加 !override 会同时 publish
+   * 3000 与 3001）。不认这个形态时，解析结果会是「没有端口」——闸门于是
+   * 对着一个 publish 了端口的服务报「干净」，正是它本该拦住的那类假绿。
+   */
   const publishedPorts = (block) => {
     const lines = stripComments(block).split(/\r?\n/);
     const out = [];
     let inPorts = false;
     let portsIndent = -1;
     for (const line of lines) {
-      const inline = /^(\s*)ports:\s*\[(.+)\]\s*$/.exec(line);
+      const inline = /^(\s*)ports:\s*(?:!override\s*)?\[(.+)\]\s*$/.exec(line);
       if (inline) {
         out.push(
           ...inline[2]
@@ -150,7 +157,7 @@ describe('compose 端口暴露面闸门', () => {
         );
         continue;
       }
-      const blockStart = /^(\s*)ports:\s*$/.exec(line);
+      const blockStart = /^(\s*)ports:\s*(?:!override\s*)?$/.exec(line);
       if (blockStart) {
         inPorts = true;
         portsIndent = blockStart[1].length;
@@ -173,15 +180,18 @@ describe('compose 端口暴露面闸门', () => {
     return out;
   };
 
-  test('前提自证：四个对外服务都能解析出 publish 端口（解析器退化时下面的断言是空集假绿）', () => {
-    for (const s of ['app', 'prometheus', 'alertmanager', 'grafana']) {
+  test('前提自证：五个对外服务都能解析出 publish 端口（解析器退化时下面的断言是空集假绿）', () => {
+    for (const s of ['app', 'app-green', 'prometheus', 'alertmanager', 'grafana']) {
       expect(publishedPorts(serviceBlock(s)).length).toBeGreaterThan(0);
     }
   });
 
   test('任何 publish 到宿主机的端口都必须绑 127.0.0.1（裸端口等于 0.0.0.0）', () => {
     const offenders = [];
-    for (const s of ['app', 'prometheus', 'alertmanager', 'grafana']) {
+    // app-green 必须在内：它是热升级窗口内唯一新增的暴露面，
+    // 写成 `3001:3001` 就等于给备色开了 0.0.0.0 入口，而它只在升级时才存在，
+    // 平时没人会注意到
+    for (const s of ['app', 'app-green', 'prometheus', 'alertmanager', 'grafana']) {
       for (const entry of publishedPorts(serviceBlock(s))) {
         if (!entry.startsWith('127.0.0.1:')) offenders.push(`${s}: ${entry}`);
       }
