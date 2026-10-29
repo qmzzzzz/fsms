@@ -37,6 +37,17 @@ function isProductionLikeEnv() {
 }
 
 /**
+ * Whether runtime behavior should use development diagnostics/defaults.
+ * Keep this separate from `requiresProductionSemantics()`: staging is
+ * intentionally non-production for hard validation, but it must not inherit
+ * local CORS fallbacks or verbose development error output.
+ */
+function isDevelopmentLikeEnv(value) {
+  const env = value === undefined ? normalizeNodeEnv() : String(value).trim().toLowerCase();
+  return DEV_ENV_ALIASES.has(env);
+}
+
+/**
  * 该环境是否必须按生产语义行事（生产家族 + 一切无法识别的值）。
  *
  * 这是"fail-closed"唯一落点：凡按字面量 'production' 分叉的**安全**开关
@@ -57,5 +68,6 @@ module.exports = {
   STAGING_ENV_ALIASES,
   normalizeNodeEnv,
   isProductionLikeEnv,
+  isDevelopmentLikeEnv,
   requiresProductionSemantics,
 };

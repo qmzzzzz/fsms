@@ -252,11 +252,18 @@ describe('WebSocket 分支补漏', () => {
     afterEach(() => {
       jest.dontMock(path.join(__dirname, '../../models/User'));
       jest.dontMock(path.join(__dirname, '../../middleware/tokenBlacklist'));
+      jest.dontMock(require.resolve('../../models/IPBlacklist'));
       jest.resetModules();
     });
 
     /** 构造最小 service 实例（跳过构造器） */
     const makeService = () => {
+      // 真实 Socket.IO 握手先经过黑名单闸；认证分支测试只关心 JWT/用户判定，
+      // 因而显式提供“地址未被封禁”的模型响应，避免误把数据库未连接当成测试目标。
+      jest.doMock(require.resolve('../../models/IPBlacklist'), () => ({
+        isWhitelisted: jest.fn().mockResolvedValue(false),
+        isBlocked: jest.fn().mockResolvedValue(false),
+      }));
       const WebSocketService = require('../../services/websocketService');
       const svc = Object.create(WebSocketService.prototype);
       svc.clients = new Map();
@@ -269,6 +276,9 @@ describe('WebSocket 分支补漏', () => {
       const socket = {
         id: id || 'sock-auth-fail',
         authenticated: false,
+        // Socket.IO always supplies handshake.address; keep the fixture
+        // realistic now that missing client IPs fail closed before JWT checks.
+        handshake: { address: '127.0.0.1', headers: {} },
         emitted: [],
         connected: true,
         emit: (ev, data) => socket.emitted.push({ ev, data }),

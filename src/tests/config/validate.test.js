@@ -22,6 +22,20 @@ describe('Config Validation', () => {
       expect(() => validateConfig()).not.toThrow();
     });
 
+    test('should fail closed when NODE_ENV is not set', () => {
+      delete process.env.NODE_ENV;
+      const { validateConfig } = require('../../config/validate');
+      const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+      const mockError = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+      expect(() => validateConfig()).toThrow('process.exit called');
+
+      mockExit.mockRestore();
+      mockError.mockRestore();
+    });
+
     test('should throw in production with missing JWT_SECRET', () => {
       process.env.NODE_ENV = 'production';
       process.env.JWT_SECRET = '';
@@ -85,6 +99,7 @@ describe('Config Validation', () => {
       // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
       process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
       process.env.TRUST_PROXY_HOPS = '1';
+      process.env.TRUSTED_PROXY_CIDRS = '172.28.0.0/16';
 
       const { validateConfig } = require('../../config/validate');
 
@@ -108,6 +123,7 @@ describe('Config Validation', () => {
       process.env.REDIS_URL = 'rediss://redis.example.com:6379';
       // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
       process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
+      process.env.TRUSTED_PROXY_CIDRS = '172.28.0.0/16';
     };
 
     /** 以指定 TRUST_PROXY_HOPS 跑校验，返回收集到的错误消息 */
@@ -213,8 +229,10 @@ describe('Config Validation', () => {
       return { exited, messages: messages.join('\n') };
     };
 
-    test('未配置不是错误：本项选填，未配时判据退回既有行为（由 app.js 打 WARN）', () => {
-      expect(runWith(undefined).exited).toBe(false);
+    test('未配置时生产启动失败：必须显式声明可信代理网段', () => {
+      const result = runWith(undefined);
+      expect(result.exited).toBe(true);
+      expect(result.messages).toContain('TRUSTED_PROXY_CIDRS');
     });
 
     test('合法网段（IPv4 与 IPv6 混排）通过', () => {
@@ -358,6 +376,7 @@ describe('Config Validation', () => {
       process.env.REDIS_URL = 'rediss://redis.example.com:6379';
       // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
       process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
+      process.env.TRUSTED_PROXY_CIDRS = '172.28.0.0/16';
     };
 
     /** 跑一次生产校验，返回 { exited, messages } */

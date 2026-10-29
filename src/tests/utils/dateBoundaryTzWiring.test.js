@@ -13,19 +13,12 @@
  *     两者不冲突，但后者至今没有任何地方记账。）
  *     测法：不改本进程 `process.env.TZ`，而是另起子进程注入 TZ——`src/tests/illegalCalendarDayWithTime.test.js`
  *     用 `runnerIsBusinessTZ` 分支回避宿主差异，这里一次跑出两个宿主的答案，把差值直接钉成 -8h。
- *  3. 欠账 B：报警报表把校验过的 ?tz 传给 `buildDateRangeFilter`
- *     （src/controllers/reportController.js:108、src/controllers/reportController.js:217），
- *     设备/巡检报表走 src/services/reportStatsService.js:34、src/services/reportStatsService.js:105
- *     的**两参**调用 ⇒ 同一个 ?tz 在两类出口一个生效一个无效（同一次请求、两个页面、两套"今天"）。
- *     这两处出口各自的文件里都写了实情（注释里有 `buildDateRangeFilter(...)` 的调用形状），
- *     所以采集器必须跑在剥注释的视图上——否则注释里的形状会被当成真调用点。
+ *  3. 所有报表出口都把控制器校验过的 ?tz 传给 `buildDateRangeFilter`，
+ *     设备、巡检和报警统计使用同一套日期边界。
  *
- * 本闸不"顺手修"这两条，理由不是省事：
+ * 欠账 A 仍保持既有兼容语义，理由不是省事：
  *  - 改 A 是**对外契约变更**（一批现存的无偏移时间串会换窗口），需要拍板；
- *  - 改 B 需要控制器把已校验的 tz 下传给 stats service，而 `reportController.js` 此刻在他人手里是脏文件；
- *    在 service 里再校验一次等于把"什么时区合法"写两份（本仓反复踩过的口径漂移源）。
- * 所以这里把两条钉成**可数的欠账**：形状一变（修好了、修歪了、或新增同类出口）闸就红，
- * 逼回来更新台账，而不是让它们在注释里过期。
+ *  - 时区仍只在控制器解析一次，service 仅消费已校验的值，避免重复定义合法时区。
  */
 const { execFileSync } = require('child_process');
 const fs = require('fs');
@@ -109,8 +102,8 @@ const dateFilterCallSites = () => {
 };
 
 /**
- * 欠账判据：调用点没把 tz 传下去（<3 参）**且**该文件自己不解析 ?tz。
- * 真清单与合成形状反证都走这一个函数——判据与接线只有一份定义。
+ * 接线判据：每个报表调用点都必须把 tz 作为第三参传下去，
+ * 或在调用文件内完成等价解析。真清单与合成形状反证都走这一个函数。
  */
 const tzWiringGaps = (sites) =>
   sites
@@ -154,14 +147,11 @@ describe('日期边界与 ?tz 接线', () => {
     );
   });
 
-  test('欠账 B 有台账：同一 ?tz 在各类报表出口的接线状态必须逐条可数', () => {
+  test('同一 ?tz 在各类报表出口统一接线', () => {
     const sites = dateFilterCallSites();
     // 普查规模地板：调用点数掉下来说明扫描器瞎了（改名/换写法），不是问题消失了
     expect(sites.length).toBeGreaterThanOrEqual(4);
-    expect(tzWiringGaps(sites)).toEqual([
-      'services/reportStatsService.js (2 参)',
-      'services/reportStatsService.js (2 参)',
-    ]);
+    expect(tzWiringGaps(sites)).toEqual([]);
     // 三种形状各钉一次，走同一个 tzWiringGaps（不另写一遍条件）
     const shape = (arity, resolvesTz) =>
       tzWiringGaps([
@@ -174,7 +164,7 @@ describe('日期边界与 ?tz 接线', () => {
       ]);
     expect(shape(3, false)).toEqual([]); // 传了 tz ⇒ 无欠账
     expect(shape(2, true)).toEqual([]); // 自己解析 ⇒ 无欠账
-    expect(shape(2, false)).toEqual(['synthetic.js (2 参)']); // 两参且不解析 ⇒ 记欠账
+    expect(shape(2, false)).toEqual(['synthetic.js (2 参)']); // 两参且不解析 ⇒ 识别为缺口
     // 没建模的形态保守不参与（嵌套实参不许被数成 2 参而误记欠账）
     expect(tzWiringGaps([{ module: 'synthetic.js', arity: 1, unparsed: true, code: '' }])).toEqual(
       []
@@ -219,14 +209,14 @@ describe('日期边界与 ?tz 接线', () => {
     ).toEqual([
       'controllers/reportController.js:3',
       'controllers/reportController.js:3',
-      'services/reportStatsService.js:2',
-      'services/reportStatsService.js:2',
+      'services/reportStatsService.js:3',
+      'services/reportStatsService.js:3',
     ]);
   });
 
   test('接线：真实调用点的 code 视图确实来自文件（采集器不挂在空气上）', () => {
     const stats = codeViewOf('services/reportStatsService.js');
-    expect(stats).toMatch(/buildDateRangeFilter\(startDate, endDate\)/);
+    expect(stats).toMatch(/buildDateRangeFilter\(startDate, endDate, tz\)/);
     expect(/resolveQueryTimezone/.test(stats)).toBe(false);
     const ctrl = codeViewOf('controllers/reportController.js');
     expect(ctrl).toMatch(/buildDateRangeFilter\(startDate, endDate, tz\)/);

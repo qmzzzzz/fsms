@@ -483,6 +483,7 @@ router.get(
   authenticate,
   checkPermission('security:audit'),
   requireReauthTicket(),
+  strictLimiter,
   auditController.queryAuditLogs
 );
 

@@ -9,6 +9,21 @@ require('dotenv').config();
 // 下方所有字段在模块加载时求值，若晚于此处 hydrate，拿到的会是空串。
 const { hydrateSecretsFromFiles } = require('./secrets');
 const secretHydration = hydrateSecretsFromFiles();
+const { requiresProductionSemantics } = require('./envSemantics');
+
+// 限流参数是安全边界，不应因为误配成极端值而静默关闭保护或占满内存。
+// 开发/测试环境保留原有可调范围，方便高配额集成测试；生产语义下越界直接拒绝启动。
+const parseRateLimitParam = (name, fallback, min, max) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  const valid = Number.isInteger(value) && value >= min && value <= max;
+  if (!valid && requiresProductionSemantics()) {
+    throw new Error(`${name} 必须是 ${min} 到 ${max} 之间的整数`);
+  }
+  if (Number.isInteger(value) && value > 0) return value;
+  return fallback;
+};
 
 module.exports = {
   // 密钥注入结果（供 index.js 启动期输出日志，此处不能 require logger——
@@ -105,33 +120,32 @@ module.exports = {
   })(),
   rateLimit: {
     windowMs: (() => {
-      const ms = parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10);
-      return Number.isFinite(ms) && ms > 0 ? ms : 15 * 60 * 1000;
+      return parseRateLimitParam('RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000, 1000, 24 * 60 * 60 * 1000);
     })(),
     maxRequests: (() => {
-      const max = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10);
-      return Number.isFinite(max) && max > 0 ? max : 300;
+      return parseRateLimitParam('RATE_LIMIT_MAX_REQUESTS', 300, 1, 10000);
     })(),
     // 基于客户端 IP 的限流（默认与 middleware/rateLimit.js 兼容：1000 次/小时）
     ipWindowMs: (() => {
-      const ms = parseInt(process.env.RATE_LIMIT_IP_WINDOW_MS, 10);
-      return Number.isFinite(ms) && ms > 0 ? ms : 60 * 60 * 1000;
+      return parseRateLimitParam(
+        'RATE_LIMIT_IP_WINDOW_MS',
+        60 * 60 * 1000,
+        1000,
+        24 * 60 * 60 * 1000
+      );
     })(),
     ipMaxRequests: (() => {
-      const max = parseInt(process.env.RATE_LIMIT_IP_MAX_REQUESTS, 10);
-      return Number.isFinite(max) && max > 0 ? max : 1000;
+      return parseRateLimitParam('RATE_LIMIT_IP_MAX_REQUESTS', 1000, 1, 100000);
     })(),
     // 注：`registerCaptchaEnabled` **不在**本子对象内——它属于顶层，见上方注释。
     // 曾经写在这里，导致三处顶层读取恒为 undefined、注册验证码被静默关闭。
     // 本子对象只放**限流**参数（下面两项），不放开关。
     // 注册 IP 限流阈值（默认 10 次/5 分钟/IP）
     registerWindowMs: (() => {
-      const ms = parseInt(process.env.REGISTER_IP_WINDOW_MS, 10);
-      return Number.isFinite(ms) && ms > 0 ? ms : 5 * 60 * 1000;
+      return parseRateLimitParam('REGISTER_IP_WINDOW_MS', 5 * 60 * 1000, 1000, 24 * 60 * 60 * 1000);
     })(),
     registerMaxRequests: (() => {
-      const max = parseInt(process.env.REGISTER_IP_MAX_REQUESTS, 10);
-      return Number.isFinite(max) && max > 0 ? max : 10;
+      return parseRateLimitParam('REGISTER_IP_MAX_REQUESTS', 10, 1, 1000);
     })(),
   },
 

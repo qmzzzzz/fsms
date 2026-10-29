@@ -20,6 +20,7 @@ const AUDIT_LOG_RISK_LEVELS = AUDIT_RISK_LEVELS;
 // 当时钉的是**它自己那三份字面量**（此文件的清单、导出侧的清单、测试里再抄一遍），
 // 于是"某侧偷偷多一档"并不会让门禁转红——现在由该测试逐项比对两侧行为。
 const AUDIT_LOG_LEVELS = AUDIT_DISPLAY_LEVELS;
+const AUDIT_LOG_MAX_RANGE_DAYS = 365;
 
 /**
  * success 过滤项的严格解析。
@@ -167,6 +168,16 @@ const assertFiltersValid = ({
   }
   if (!isValidDateParam(endDate)) {
     throw new Error('结束日期格式错误');
+  }
+  if (startDate && endDate) {
+    const rangeDays =
+      (parseDateBoundary(endDate, 'end').getTime() -
+        parseDateBoundary(startDate, 'start').getTime()) /
+      (24 * 60 * 60 * 1000);
+    if (rangeDays < 0) throw new Error('结束日期不能早于开始日期');
+    if (rangeDays > AUDIT_LOG_MAX_RANGE_DAYS) {
+      throw new Error(`审计日志查询时间范围不能超过 ${AUDIT_LOG_MAX_RANGE_DAYS} 天`);
+    }
   }
 
   validateEnum(action, AUDIT_LOG_ACTIONS, 'action');

@@ -10,8 +10,8 @@
  * 本文件锁四件事：
  *  1. 被禁地址连不上（且**在任何查库之前**就被拒，见下）；
  *  2. 未列黑的地址照常认证成功 —— 反向保护，防止把闸做成恒拒绝；
- *  3. 白名单优先与 fail-open 口径和 HTTP 侧一致：名单查询抛错时放行，
- *     但必须留下可观测信号（复用同一条 ip_blacklist_failopen 计数）；
+ *  3. 白名单优先；名单查询抛错时新建连接 fail-closed，并留下可观测信号
+ *     （复用同一条 ip_blacklist_failopen 计数）；
  *  4. 封禁判定与 allowedIPs 判定用的是**同一个客户端 IP**。这条最容易漂：
  *     两处各自取址时，HTTP 侧封的、WS 侧拦的、WS 侧放行判断的会是三个值。
  *     断言按 resolveTrustProxyHops() 的实际取值分支，两种形态都必须只由
@@ -260,11 +260,11 @@ describe('WebSocket 握手 IP 黑名单闸', () => {
     });
   });
 
-  describe('_assertHandshakeIpNotBanned 本体：与 HTTP 侧对齐的两种降级', () => {
+  describe('_assertHandshakeIpNotBanned 本体：依赖异常时新建连接 fail-closed', () => {
     const call = (socket) =>
       Object.create(WebSocketService.prototype)._assertHandshakeIpNotBanned(socket);
 
-    test('名单查询抛错 → fail-open 放行，但必须计入 ip_blacklist_failopen', async () => {
+    test('名单查询抛错 → fail-closed 拒绝，但必须计入 ip_blacklist_failopen', async () => {
       const before = failOpenTotal();
       jest.spyOn(IPBlacklist, 'isBlocked').mockRejectedValue(new Error('db down'));
       jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(false);
@@ -272,17 +272,18 @@ describe('WebSocket 握手 IP 黑名单闸', () => {
 
       const rejected = await call(socket);
 
-      expect(rejected).toBe(false);
-      expect(socket.connected).toBe(true);
-      expect(socket.emitted).toHaveLength(0);
-      // 放行不等于无声：评价报告 #7 的同一条纪律——fail-open 必须有显式信号。
-      // 复用 HTTP 侧的计数类型（同一根因同一条时间序列），不新造恒真信号。
+      expect(rejected).toBe(true);
+      expect(socket.connected).toBe(false);
+      expect(authErrorOf(socket).data.message).toContain('校验暂不可用');
+      // 拒绝也不能无声：依赖故障仍复用既有计数类型，保证安全告警时间序列不断。
       expect(failOpenTotal()).toBeGreaterThan(before);
     });
 
-    test('取不到任何地址 → 放行（与 checkIPBlacklist 的 clientIP 缺失同口径）', async () => {
+    test('取不到任何地址 → fail-closed 拒绝新连接', async () => {
       const socket = makeSocket('x', { address: null });
-      expect(await call(socket)).toBe(false);
+      expect(await call(socket)).toBe(true);
+      expect(socket.connected).toBe(false);
+      expect(authErrorOf(socket).data.message).toContain('网络来源');
     });
 
     test('命中黑名单 → 断开并回执，返回 true 表示"已处理"', async () => {

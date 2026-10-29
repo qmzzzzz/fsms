@@ -5,6 +5,7 @@
 
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
+const { isDevelopmentLikeEnv } = require('../config/envSemantics');
 // 这一路是"更正审计写入失败"的兜底日志：写成裸读 err.message 时，非 Error 的被拒值会把
 // 兜底本身变成新的抛出源。本处 catch 包的是同步调用（require + push），今天只会拿到
 // Error，但同一仓的口径不按"今天可达"打折——措辞不会自己变好。
@@ -166,7 +167,7 @@ const errorHandler = (err, req, res, _next) => {
   }
 
   // 开发模式下输出详细错误
-  const isDev = process.env.NODE_ENV === 'development';
+  const isDev = isDevelopmentLikeEnv();
 
   // 顺序遍历判定表：命中即交给对应的响应函数（表见文件上方 ERROR_RULES）
   for (const rule of ERROR_RULES) {

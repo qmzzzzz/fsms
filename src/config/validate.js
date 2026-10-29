@@ -325,29 +325,22 @@ const {
 // 因此收集器的 push 顺序与文案属于对外契约，不能随意调整；
 // 新增校验项时，插在正确的位置并同步更新期望数组。
 function validateConfig() {
+  // NODE_ENV 是生产硬闸的选择开关。缺失时不能把裸跑入口当成开发环境，
+  // 否则弱密钥、Host、Redis 和 TLS 校验会全部被跳过；开发脚本必须显式设置
+  // NODE_ENV=development，生产入口必须显式设置 production/prod/live。
+  if (process.env.NODE_ENV === undefined) {
+    reportConfigErrors([
+      'NODE_ENV 必须显式设置（development/dev/local/test/ci/staging 或 production/prod/live），' +
+        '未设置时拒绝启动，避免以开发语义跳过生产安全校验',
+    ]);
+    return;
+  }
   if (!requiresProductionSemantics()) {
     // 2026-10-24 审计：声明了生产语义却落在开发家族 ⇒ 拒绝启动（判据在 guards 模块）
     const envMismatch = deploymentGuards.productionSemanticsMismatch();
     if (envMismatch) {
       reportConfigErrors([envMismatch]);
       return;
-    }
-    // §14.20.3「最小改动档」（预授权）：`NODE_ENV` **真正未设置**（undefined）时
-    // normalizeNodeEnv() 归一为 development ⇒ 整套生产硬闸（弱密钥/ALLOWED_HOSTS/
-    // REDIS_URL/TLS）静默跳过、零日志、零退出码，而它恰是最常见的误配
-    // （K8s 未声明 / docker run 不带 -e / 直接 node src/index.js）。
-    // 这里补一条显式告警，让该部署至少在启动日志里留痕。
-    // 注意 `NODE_ENV=`（空串）**不走这条**：F-216 已让它按生产办并报致命错
-    // （nodeEnvGateFailsClosed.test.js:114）。
-    if (process.env.NODE_ENV === undefined) {
-      const message =
-        'NODE_ENV 未设置：按 development 处理，生产硬闸（弱密钥/ALLOWED_HOSTS/REDIS_URL/TLS）已全部跳过';
-      try {
-        // 不能顶层 require logger（validate → logger → config 构成加载期环），惰性取。
-        require('../utils/logger').warn(message);
-      } catch (_) {
-        console.warn(message);
-      }
     }
     return;
   }
@@ -373,13 +366,11 @@ function validateConfig() {
   // 见 eslint.ratchet.json 的 max-lines-per-function 约束）
   validateDocsCredentials(errors);
   collectTrustProxyErrors(errors);
-  // F-01：TRUSTED_PROXY_CIDRS 选填，未配置不是错误（判据退回「对端属私网/回环即可信」，
-  // 由 app.js 打 WARN 提示收紧）；但**配了就必须配得对**——空项、解析不出、全域网段
-  // （0.0.0.0/0、::/0，等于宣布整个互联网都是可信代理，比不配更糟）三类非法值，
-  // 逐条判据与理由见 config/trustedProxies.js。运行时判据侧已 fail-closed，但那表现为
-  // 「反代后所有请求都不可信」、归因困难，故在启动期升级为致命错误。
-  // 刻意写成两行内联而非新增包装函数：本文件计入 max-lines 的行数是 297/300，
-  // 加一个函数（4 行）+ 导出（1 行）会新增 max-lines warn 并打红 lint:ratchet。
+  // F-01：生产启用 TRUST_PROXY_HOPS 时必须显式配置 TRUSTED_PROXY_CIDRS，禁止把
+  // 「对端属私网/回环」当成代理身份；但**配了就必须配得对**——空项、解析不出、
+  // 全域网段（0.0.0.0/0、::/0，等于宣布整个互联网都是可信代理）三类非法值，
+  // 逐条判据与理由见 config/trustedProxies.js。非生产环境仍保留兼容回退，便于本地
+  // 开发直接调用 createApp；生产入口在这里硬失败，避免安全边界只靠日志提醒。
   const rawTrustedProxyCidrs = process.env[trustedProxies.ENV_KEY];
   errors.push(...trustedProxies.parseTrustedProxyCidrs(rawTrustedProxyCidrs).errors);
   collectTlsErrors(errors);
@@ -490,6 +481,7 @@ function collectAllowedHostsErrors(errors) {
  */
 function collectTrustProxyErrors(errors) {
   const rawHops = process.env.TRUST_PROXY_HOPS;
+  let validHops = false;
   if (!rawHops || !String(rawHops).trim()) {
     errors.push('TRUST_PROXY_HOPS 必须设置（反向代理层数，用于正确获取客户端真实 IP）');
   } else if (!/^\d+$/.test(String(rawHops).trim())) {
@@ -502,6 +494,20 @@ function collectTrustProxyErrors(errors) {
       errors.push(
         `TRUST_PROXY_HOPS 必须在 1..${MAX_TRUST_PROXY_HOPS} 之间（当前值：${hops}）。` +
           '过小会让 req.ip 恒为代理 IP，过大会允许客户端伪造 X-Forwarded-For 轮换 IP 绕过限流'
+      );
+    } else {
+      validHops = true;
+    }
+  }
+
+  // 一旦生产启用了 trust proxy，必须同时声明真实代理网段；仅按私网/回环
+  // 判断对端身份会允许同一容器网络内的其他服务伪造 X-Forwarded-For。
+  if (requiresProductionSemantics() && validHops) {
+    const trusted = trustedProxies.parseTrustedProxyCidrs(process.env[trustedProxies.ENV_KEY]);
+    if (!trusted.configured) {
+      errors.push(
+        'TRUSTED_PROXY_CIDRS 必须配置：生产启用 TRUST_PROXY_HOPS 时，必须显式声明可信反向代理网段，' +
+          '禁止按私网/回环地址回退信任'
       );
     }
   }

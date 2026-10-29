@@ -10,6 +10,7 @@ const morgan = require('morgan');
 const compression = require('compression');
 
 const config = require('./config');
+const { isDevelopmentLikeEnv } = require('./config/envSemantics');
 const {
   MAX_TRUST_PROXY_HOPS,
   resolveTrustProxyHops: resolveTrustProxyHopsFromConfig,
@@ -104,7 +105,7 @@ function resolveCorsOrigins(cfg = config) {
   // 仅 development 允许本地兜底，staging/production 必须显式配置，
   // 防止误部署后把本地开发源放进线上白名单。
   if (parsed.length > 0) return parsed;
-  return cfg.nodeEnv === 'development' ? [...DEV_CORS_ORIGINS] : [];
+  return isDevelopmentLikeEnv(cfg.nodeEnv) ? [...DEV_CORS_ORIGINS] : [];
 }
 
 /**
@@ -360,7 +361,13 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
     ':remote-addr - :remote-user [:date[clf]] ' +
     '":method :safe-url HTTP/:http-version" :status :res[content-length] ' +
     '":safe-referrer" ":user-agent"';
-  if (config.nodeEnv === 'development') {
+  // Tests/CI remain on the structured stream so redaction and request-context
+  // assertions observe the same logger path as staging/production. Only the
+  // interactive development aliases use morgan's human-readable stdout mode.
+  const envName = String(config.nodeEnv || '')
+    .trim()
+    .toLowerCase();
+  if (isDevelopmentLikeEnv() && envName !== 'test' && envName !== 'ci') {
     app.use(morgan('dev'));
   } else {
     app.use(

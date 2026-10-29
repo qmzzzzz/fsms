@@ -33,6 +33,7 @@ describe('TZ_BUSINESS 启动期校验', () => {
     // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
     process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
     process.env.TRUST_PROXY_HOPS = '1';
+    process.env.TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
   };
 
   /** 跑一次生产校验，返回 { exited, messages } */
@@ -199,6 +200,7 @@ describe('ENABLE_API_DOCS 判定口径统一', () => {
     // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
     process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
     process.env.TRUST_PROXY_HOPS = '1';
+    process.env.TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
     delete process.env.DOCS_USERNAME;
     delete process.env.DOCS_PASSWORD;
 
@@ -318,6 +320,7 @@ describe('加固项告警真正可达', () => {
     // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
     process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
     process.env.TRUST_PROXY_HOPS = '1';
+    process.env.TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
     process.env.ALLOW_PUBLIC_REGISTRATION = 'true';
 
     const { validateConfig } = require('../../config/validate');
@@ -404,6 +407,7 @@ describe('validate.js 降级通道：flushLogsSync/logger 不可用时信息不�
     // 2026-10-01 Redis 认证闸：合法生产夹具须带凭据（compose 走 REDIS_PASSWORD_FILE 同值形态）
     process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
     process.env.TRUST_PROXY_HOPS = '1';
+    process.env.TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
     process.env.LOG_LEVEL = 'debug'; // 命中加固项告警
     jest.doMock('../../utils/logger', () => ({
       error: () => {},

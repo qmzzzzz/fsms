@@ -493,10 +493,9 @@ const methods = {
    *    已与真实 express 比对过的 resolveHandshakeClientIP（见 websocketAuthScope / trustProxyHopsParity）。
    *    两侧不同尺会让"HTTP 侧封的 IP"与"WS 侧查的 IP"不是同一个值，闸形同虚设。
    *  - 白名单优先：与 checkIPBlacklist 一致，命中白名单即豁免黑名单。
-   *  - 取不到地址 / 名单查询抛错 ⇒ fail-open 放行，与 HTTP 侧同口径
-   *    （宁可不拦，也不因一次 DB 抖动把全部实时推送踢下线）；但 fail-open 必须留
-   *    显式可观测信号（评价报告 #7 的同一条纪律），故复用 HTTP 侧的
-   *    ip_blacklist_failopen 计数——同一根因、同一条时间序列，不新造恒真信号。
+   *  - 取不到地址 / 名单查询抛错 ⇒ 新建连接 fail-closed，避免黑名单依赖不可用时
+   *    被封 IP 继续建立实时通道；仍复用 HTTP 侧的 ip_blacklist_failopen 计数，
+   *    让依赖故障继续进入既有安全告警时间序列。
    *
    * 已闭合的部分（2026-10-01 第 4 轮补齐）：本闸只在建立连接时生效，而 HTTP 侧是
    * 逐请求复查——一条已建立的 socket 是长连接，封禁发生在建连之后时它会存活到自然断开。
@@ -512,7 +511,12 @@ const methods = {
       socket.handshake,
       resolveTrustProxyHops()
     );
-    if (!clientIP) return false;
+    if (!clientIP) {
+      logger.error(`WebSocket 握手无法确定客户端 IP，拒绝连接：${socket.id}`);
+      socket.emit('auth-error', { message: '无法验证网络来源，请稍后重试' });
+      socket.disconnect(true);
+      return true;
+    }
 
     const IPBlacklist = require('../../models/IPBlacklist');
     let whitelisted = false;
@@ -523,14 +527,16 @@ const methods = {
         IPBlacklist.isWhitelisted(clientIP),
         IPBlacklist.isBlocked(clientIP),
       ]);
-    } catch (err) {
-      logger.error(`WebSocket 握手名单查询失败，fail-open 放行：${socket.id} ${err.message}`);
+    } catch {
+      logger.error(`WebSocket 握手名单查询失败，fail-closed 拒绝连接：${socket.id}`);
       try {
         require('../../utils/metrics').incSecurityAlert('ip_blacklist_failopen', 'high');
       } catch (_) {
-        /* 指标端不可用不影响放行主流程 */
+        /* 指标端不可用不影响拒绝主流程 */
       }
-      return false;
+      socket.emit('auth-error', { message: '网络黑名单校验暂不可用，请稍后重试' });
+      socket.disconnect(true);
+      return true;
     }
 
     if (whitelisted || !blocked) return false;

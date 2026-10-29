@@ -89,10 +89,12 @@ const getDashboardStats = asyncHandler(async (req, res) => {
  */
 const getDeviceReport = asyncHandler(async (req, res) => {
   const { startDate, endDate } = req.query;
-  if (rejectInvalidReportDates(res, startDate, endDate)) return;
+  const tz = resolveQueryTimezone(req, res);
+  if (tz === null || rejectInvalidReportDates(res, startDate, endDate)) return;
 
   const data = await reportStatsService.getDeviceReportData({
     ...req.query,
+    tz,
     userId: req.user.userId,
   });
   return ApiResponse.success(res, data, '获取设备报表成功');
@@ -126,10 +128,12 @@ const getAlarmReport = asyncHandler(async (req, res) => {
  */
 const getInspectionReport = asyncHandler(async (req, res) => {
   const { startDate, endDate } = req.query;
-  if (rejectInvalidReportDates(res, startDate, endDate)) return;
+  const tz = resolveQueryTimezone(req, res);
+  if (tz === null || rejectInvalidReportDates(res, startDate, endDate)) return;
 
   const data = await reportStatsService.getInspectionReportData({
     ...req.query,
+    tz,
     userId: req.user.userId,
   });
   return ApiResponse.success(res, data, '获取巡检报表成功');

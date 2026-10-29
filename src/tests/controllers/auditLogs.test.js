@@ -214,12 +214,12 @@ describe('/api/security/audit-logs 查询优化', () => {
     expect(res.body.data.some((d) => d.username === 'userXa')).toBe(false);
   });
 
-  test('超大时间范围触发 X-Performance-Warning 响应头且查询正常', async () => {
+  test('超过最大时间范围直接拒绝，避免无界审计扫描', async () => {
     const start = daysAgo(400);
     const end = daysAgo(10);
     const res = await queryLogs(`startDate=${start}&endDate=${end}`);
-    expect(res.status).toBe(200);
-    expect(res.headers['x-performance-warning']).toBe('query_range_too_large');
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('不能超过 365 天');
   });
 
   test('完全没有时间窗（审计页默认视图）⇒ 声明 no_time_window，且这一格必然扫满留存期', async () => {

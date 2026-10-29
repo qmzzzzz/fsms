@@ -149,15 +149,15 @@ const FAIL_OPEN_SITES = Object.freeze([
     trigger: '读取验证码开关时数据库不可用',
     effect:
       'login 键：静态默认 `LOGIN_CAPTCHA_ENABLED` 默认 false ⇒ **fail-open**（登录验证码被关掉）；' +
-      'register 键：静态默认 `REGISTER_CAPTCHA_ENABLED` 默认 true ⇒ **fail-closed**（注册仍需验证码）',
+      'register 键：开发/测试沿用静态默认，生产语义强制 true ⇒ **fail-closed**（注册仍需验证码）',
     why:
-      '方向由各键的静态默认决定，不是一个统一方向——所以本条的 direction 是 mixed，' +
+      '方向由开关种类与环境共同决定，不是一个统一方向——所以本条的 direction 是 mixed，' +
       '不写成 fail-open 蒙混过去。登录侧降级后仍有 loginLimiter（凭据型限流）与' +
-      '暴力破解检测兜底，故定 medium 而非 high。',
+      '暴力破解检测兜底，故定 medium 而非 high；注册侧已在生产语义下收紧为 fail-closed。',
     tightening:
       '真正该做的是**收敛降级动作本身**：此前同一个 try/catch 在 3 个调用点各复刻一份、' +
-      '全都没有信号，已收口到 `captchaSwitch(kind)`。是否要把 login 侧改成 fail-closed ' +
-      '属产品决策（会把 Redis/Mongo 抖动传导为「没人能登录」）。',
+      '全都没有信号，已收口到 `captchaSwitch(kind)`；register 生产侧已强制开启。是否要把 ' +
+      'login 侧也改成 fail-closed 属产品决策（会把 Redis/Mongo 抖动传导为「没人能登录」）。',
   },
 ]);
 

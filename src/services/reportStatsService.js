@@ -31,13 +31,9 @@ const TREND_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
  */
 const EXPIRING_REPORT_LIMIT = 20;
 
-// 日期边界这里的时区口径不是漏接：service 层拿不到 req，也就没有 resolveQueryTimezone 可解析 ?tz，
-// 所以本文件的 buildDateRangeFilter(startDate, endDate) 一律两参 ⇒ date-only 落业务时区。
-// 报警报表那条链（controllers/reportController.js）把校验过的 tz 传成了第三参，于是同一个 ?tz
-// 在两类出口一个生效一个无效——已登记为欠账 B，判据见 src/tests/utils/dateBoundaryTzWiring.test.js。
 const getDeviceReportData = async (query) => {
-  const { startDate, endDate } = query;
-  const dateFilter = buildDateRangeFilter(startDate, endDate);
+  const { startDate, endDate, tz } = query;
+  const dateFilter = buildDateRangeFilter(startDate, endDate, tz);
   const dataScope = await getDataScope(query.userId);
   const scopeFilter = scopeFilterFor('device', dataScope);
 
@@ -109,8 +105,8 @@ const withDateFilter = (scopeFilter, dateFilter) =>
   Object.keys(dateFilter).length > 0 ? { ...scopeFilter, planStartTime: dateFilter } : scopeFilter;
 
 const getInspectionReportData = async (query) => {
-  const { startDate, endDate } = query;
-  const dateFilter = buildDateRangeFilter(startDate, endDate);
+  const { startDate, endDate, tz } = query;
+  const dateFilter = buildDateRangeFilter(startDate, endDate, tz);
   const dataScope = await getDataScope(query.userId);
   const scopeFilter = scopeFilterFor('inspection', dataScope);
 

@@ -4,6 +4,7 @@
  */
 
 const mongoose = require('mongoose');
+const { requiresProductionSemantics } = require('../config/envSemantics');
 
 const systemConfigSchema = new mongoose.Schema(
   {
@@ -248,7 +249,7 @@ const signalCaptchaSwitchFallback = (kind) => {
   }
   try {
     require('../utils/logger').warn(
-      `验证码开关读取失败，降级为静态配置（fail-open）：${kind}CaptchaEnabled`
+      `验证码开关读取失败，按环境降级策略处理：${kind}CaptchaEnabled`
     );
   } catch (_) {
     /* 日志端不可用不影响开关读取 */
@@ -281,6 +282,9 @@ systemConfigSchema.statics.captchaSwitch = async function (kind) {
       : await this.isRegisterCaptchaEnabled();
   } catch (_) {
     signalCaptchaSwitchFallback(kind);
+    // 注册验证码是批量注册防线：生产环境读取动态开关失败时必须保持开启，
+    // 不能因为数据库抖动把保护降成静态的 false。登录验证码沿用兼容期的静态兜底。
+    if (kind === 'register' && requiresProductionSemantics()) return true;
     return fallback;
   }
 };

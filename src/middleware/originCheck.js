@@ -23,6 +23,7 @@
  */
 
 const config = require('../config');
+const { isDevelopmentLikeEnv } = require('../config/envSemantics');
 const logger = require('../utils/logger');
 const { DEV_CORS_ORIGINS } = require('../utils/constants');
 // 本中间件在认证之前就会被触发，两条拒绝日志都含**攻击者全控**的内容：
@@ -77,7 +78,7 @@ const createOriginCheck = (allowedOrigins) => {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
-  } else if (config.nodeEnv === 'development') {
+  } else if (isDevelopmentLikeEnv(config.nodeEnv)) {
     whitelist = [...DEV_CORS_ORIGINS];
   } else {
     whitelist = [];
