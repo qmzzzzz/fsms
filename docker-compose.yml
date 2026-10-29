@@ -567,6 +567,41 @@ services:
     networks:
       - fire-safety-net
 
+  # F-15：file 型 secret/config 的宿主权限不能假定与容器 nobody 一致。
+  # 先由一次性 root 初始化容器复制到命名卷并明确设为 nobody 可读，
+  # Alertmanager 只读消费该副本，避免 0600 的宿主私有文件让真实服务启动失败。
+  alertmanager-config-init:
+    image: node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
+    entrypoint: ['sh', '-c']
+    command:
+      - >-
+        set -eu;
+        tmp=/etc/alertmanager/.alertmanager.yml.tmp;
+        cp /source/alertmanager.yml "$${tmp}";
+        chown 65534:65534 "$${tmp}";
+        chmod 0440 "$${tmp}";
+        mv "$${tmp}" /etc/alertmanager/alertmanager.yml
+    volumes:
+      - ${ALERTMANAGER_CONFIG_PATH:-./deployment/observability/alertmanager.yml}:/source/alertmanager.yml:ro
+      - alertmanager-config:/etc/alertmanager
+    depends_on:
+      alertmanager-config-check:
+        condition: service_completed_successfully
+    restart: 'no'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
+      - fire-safety-net
+
   alertmanager:
     # G-2：告警触达链路的路由中枢（配置见 deployment/observability/alertmanager.yml，
     # 接收器 URL 为占位，生产以私有副本挂载覆盖，不入库）
@@ -581,13 +616,15 @@ services:
       # 仅本机访问 Web UI；Prometheus 经容器网络 9093 推送告警
       - '127.0.0.1:9093:9093'
     volumes:
-      - ${ALERTMANAGER_CONFIG_PATH:-./deployment/observability/alertmanager.yml}:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-config:/etc/alertmanager:ro
       - alertmanager-data:/alertmanager
     command:
       - '--config.file=/etc/alertmanager/alertmanager.yml'
       - '--storage.path=/alertmanager'
     depends_on:
       alertmanager-config-check:
+        condition: service_completed_successfully
+      alertmanager-config-init:
         condition: service_completed_successfully
       prometheus:
         condition: service_started
@@ -622,19 +659,22 @@ services:
     environment:
       # 初始管理员口令走宿主环境变量（同 CORS_ORIGIN 的强制显式约定）；
       # 首次登录后应立即在界面内更换
-      # Grafana 官方镜像支持 Docker Secret 专用 __FILE 后缀，避免口令进入 environment
-      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_admin_password
+      # Grafana 官方镜像支持 __FILE；文件由 grafana-secret-init 复制到命名卷，
+      # 以 UID 472 可读的 0440 权限提供，避免宿主 0600 属主导致启动失败。
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana/admin_password
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
     volumes:
       - grafana-data:/var/lib/grafana
+      - grafana-secrets:/run/secrets/grafana:ro
       - ./deployment/observability/grafana/datasources:/etc/grafana/provisioning/datasources:ro
       - ./deployment/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    secrets:
-      - grafana_admin_password
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_started
+      grafana-secret-init:
+        condition: service_completed_successfully
     restart: unless-stopped
     deploy:
       resources:
@@ -659,6 +699,38 @@ services:
     networks:
       - fire-safety-net
 
+  # F-13：把宿主 Docker secret 复制到 Grafana 运行时命名卷并设为官方 UID 472
+  # 可读。Grafana 本身保持默认非 root 用户运行。
+  grafana-secret-init:
+    image: node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
+    entrypoint: ['sh', '-c']
+    command:
+      - >-
+        set -eu;
+        tmp=/run/grafana-secrets/.admin_password.tmp;
+        cp /run/secrets/grafana_admin_password "$${tmp}";
+        chown 472:472 "$${tmp}";
+        chmod 0440 "$${tmp}";
+        mv "$${tmp}" /run/grafana-secrets/admin_password
+    volumes:
+      - grafana-secrets:/run/grafana-secrets
+    secrets:
+      - grafana_admin_password
+    restart: 'no'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
+      - fire-safety-net
+
   redis:
     # R-5 同口径：钉补丁号 + digest。P2-49：钉 digest（7-alpine 标签会随上游重建
     # 而漂移，无法复现同一镜像）。
@@ -679,16 +751,21 @@ services:
     # 2026-10-24 审计：口令不再经 `--requirepass "$(cat …)"` 进入进程参数——
     # shell 展开后 PID 1 的 /proc/1/cmdline 里就是明文口令，同容器任何能读 /proc
     # 的进程都能拿到。改为先写 /tmp/redis.conf（umask 077，tmpfs），再以配置文件名启动。
+    user: redis
     command:
       - /bin/sh
       - -c
       - |
         set -eu
         umask 077
-        printf 'appendonly yes\nrequirepass %s\n' "$$(cat /run/secrets/redis_password)" > /tmp/redis.conf
+        printf 'appendonly yes\nrequirepass %s\n' "$$(cat /run/secrets/redis/redis_password)" > /tmp/redis.conf
         exec redis-server /tmp/redis.conf
-    secrets:
-      - redis_password
+    volumes:
+      - redis-secrets:/run/secrets/redis:ro
+      - redis-data:/data
+    depends_on:
+      redis-secret-init:
+        condition: service_completed_successfully
     healthcheck:
       # requirepass 开启后 PING 会回 NOAUTH——必须带口令探测，且 grep -q PONG
       # 把「redis-cli 对错误回包退出 0」的口子堵死（NOAUTH 也算失败）。
@@ -697,7 +774,7 @@ services:
       test:
         [
           'CMD-SHELL',
-          'REDISCLI_AUTH="$$(cat /run/secrets/redis_password)" redis-cli ping | grep -q PONG',
+          'REDISCLI_AUTH="$$(cat /run/secrets/redis/redis_password)" redis-cli ping | grep -q PONG',
         ]
       interval: 10s
       timeout: 5s
@@ -723,11 +800,43 @@ services:
     read_only: true
     tmpfs:
       - /tmp
-    volumes:
-      - redis-data:/data
     networks:
       # 只入数据面（internal 网络）：应用侧唯一，监控栈与宿主发布面都摸不到。
       # 有限流/封禁状态承载，上面还有无差别命令面——网络可达面必须最小。
+      - data-net
+
+  # F-14：官方 Redis entrypoint 只会在首参数为 redis-server 时自动降权。
+  # 这里先由 root 初始化容器复制 secret，再让最终 redis 服务显式以 redis 用户运行。
+  redis-secret-init:
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - >-
+        set -eu;
+        uid=$$(id -u redis);
+        gid=$$(id -g redis);
+        tmp=/run/redis-secrets/.redis_password.tmp;
+        cp /run/secrets/redis_password "$${tmp}";
+        chown "$${uid}:$${gid}" "$${tmp}";
+        chmod 0440 "$${tmp}";
+        mv "$${tmp}" /run/redis-secrets/redis_password
+    volumes:
+      - redis-secrets:/run/redis-secrets
+    secrets:
+      - redis_password
+    restart: 'no'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
       - data-net
 
 # ============================================================
@@ -838,6 +947,7 @@ volumes:
   # Redis 存活；appendonly 开启时数据落此卷，重启不丢黑名单/计数状态。
   # 不备份——重启后可从 DB 重建，属可再生缓存（见 docs/adr/ADR-005）
   redis-data:
+  redis-secrets:
   # C-1：app 只读根下的日志卷（与 mongo 数据卷不同，日志可再生，
   # 灾难恢复时不需要它，但正常运行期必须持久（审计 WAL 在此）
   app-logs:
@@ -846,7 +956,9 @@ volumes:
   # alertmanager-data 同理（静默/通知状态，重启不丢静默记录）
   prometheus-data:
   grafana-data:
+  grafana-secrets:
   alertmanager-data:
+  alertmanager-config:
   # redis-data:
 
 networks:

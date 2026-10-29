@@ -176,6 +176,7 @@ jobs:
         # src/constants/businessRetention.js 的 declaredDays、backupObjectives.js 的
         # declaredHours 一致——任一处漂移都会让本条红（生效值不得宽于声明值）。
         env:
+          COMPLIANCE_STRICT: '1'
           BUSINESS_RETENTION_DAYS_FIRE_ALARM: '180'
           BUSINESS_RETENTION_DAYS_INSPECTION: '180'
           BUSINESS_RETENTION_DAYS_FIRE_DEVICE: '180'
@@ -553,7 +554,6 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Start full stack
-        id: full-stack
         env:
           MONGODB_URI: mongodb://127.0.0.1:27017/fsms_browser_e2e
           LOGIN_CAPTCHA_ENABLED: 'false'
@@ -564,6 +564,11 @@ jobs:
           E2E_MFA_SEED="JBSWY3DPEHPK3PXP"
           # AES 密钥生成一次，服务端与 MFA 种子加密脚本共用（否则密文解不开）
           E2E_AES_KEY="$(openssl rand -hex 32)"
+          # 仅在 runner 临时目录中保存跨 step 的测试凭据；不写 GITHUB_OUTPUT，
+          # 避免密码和 MFA 种子进入 job output/后续步骤元数据。
+          umask 077
+          E2E_SECRETS_FILE="$RUNNER_TEMP/fsms-e2e-secrets"
+          printf 'E2E_TEST_PASSWORD=%q\nE2E_MFA_SEED=%q\n' "$E2E_TEST_PASSWORD" "$E2E_MFA_SEED" > "$E2E_SECRETS_FILE"
           export E2E_TEST_PASSWORD
           NODE_ENV=development \
           PORT=3000 \
@@ -580,8 +585,6 @@ jobs:
           LOG_LEVEL=warn \
           node src/index.js > logs-browser-e2e-backend.log 2>&1 &
           echo "$!" > browser-e2e-backend.pid
-          echo "password=$E2E_TEST_PASSWORD" >> "$GITHUB_OUTPUT"
-          echo "mfa-seed=$E2E_MFA_SEED" >> "$GITHUB_OUTPUT"
 
           for i in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:3000/readyz >/dev/null; then
@@ -634,13 +637,26 @@ jobs:
         env:
           E2E_BASE_URL: http://127.0.0.1:3000
           E2E_USER: admin
-          E2E_PASS: ${{ steps.full-stack.outputs.password }}
-          # 评价报告 #16：MFA 旅程用独立账号 mfa_e2e——种子在上一环节点脚本
-          # 写入该账户（AES 密文），TOTP 码由 journey 内按种子实时生成
-          E2E_MFA_USER: mfa_e2e
-          E2E_MFA_PASS: ${{ steps.full-stack.outputs.password }}
-          E2E_MFA_SECRET: ${{ steps.full-stack.outputs.mfa-seed }}
         run: |
+          set -euo pipefail
+          E2E_SECRETS_FILE="$RUNNER_TEMP/fsms-e2e-secrets"
+          if [[ ! -r "$E2E_SECRETS_FILE" ]]; then
+            echo "::error::E2E 临时凭据文件不存在，拒绝运行浏览器旅程。"
+            exit 1
+          fi
+          # shellcheck disable=SC1090
+          source "$E2E_SECRETS_FILE"
+          export E2E_PASS="$E2E_TEST_PASSWORD"
+          # 评价报告 #16：MFA 旅程用独立账号 mfa_e2e——种子在上一环节点脚本
+          # 写入该账户（AES 密文），TOTP 码由 journey 内按种子实时生成。
+          export E2E_MFA_USER=mfa_e2e
+          export E2E_MFA_PASS="$E2E_TEST_PASSWORD"
+          export E2E_MFA_SECRET="$E2E_MFA_SEED"
+          cleanup() {
+            unset E2E_TEST_PASSWORD E2E_MFA_SEED E2E_PASS E2E_MFA_PASS E2E_MFA_SECRET
+            rm -f "$E2E_SECRETS_FILE"
+          }
+          trap cleanup EXIT
           set -o pipefail
           npm run test:e2e:browser -- --workers=1 --project=desktop-chromium --project=mobile-chrome 2>&1 | tee playwright-run.log
 
@@ -683,6 +699,10 @@ jobs:
             }
             console.log('E2E 门禁通过：passed=' + passed + '（下界 ' + MIN_PASSED + '） skipped=0');
           "
+
+      - name: Cleanup E2E temporary credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/fsms-e2e-secrets"
 
       # 刻意不上传 playwright-report/（安全审计 #9）：失败 trace（playwright.config.js
       # 的 trace: retain-on-failure）嵌有管理员界面的 DOM 与 localStorage 里的 JWT，

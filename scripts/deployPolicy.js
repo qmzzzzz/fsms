@@ -18,6 +18,18 @@ const { readAlertmanagerConfig } = require('./alertmanager-config-path');
 /** 仓库根：密钥目录与 compose 文件都挂在这个根下（deploy.js 也要用，故一并导出） */
 const ROOT = path.resolve(__dirname, '..');
 
+/**
+ * 解析部署密钥目录。
+ *
+ * 生产工作流必须把密钥放在 checkout 目录之外，并通过 FSMS_SECRETS_DIR 指向它；
+ * 未设置时保留仓库内 ./secrets 作为本地手工部署兼容路径。这样 actions/checkout
+ * 可以安全地清理工作树，不会为了保留密钥而把旧的未跟踪文件带入下一次发布。
+ */
+const resolveSecretsDir = (env = process.env) => {
+  const configured = typeof env.FSMS_SECRETS_DIR === 'string' ? env.FSMS_SECRETS_DIR.trim() : '';
+  return configured ? path.resolve(configured) : path.join(ROOT, 'secrets');
+};
+
 /** 部署所需的密钥文件名（与 docker-compose.yml 的 secrets 段一一对应） */
 const REQUIRED_SECRET_FILES = [
   'jwt_secret',
@@ -60,6 +72,45 @@ const REQUIRED_COMPOSE_ENV = Object.freeze([
   ],
   ['TRUSTED_PROXY_CIDRS', '可信反向代理网段，逗号分隔 CIDR（如 172.28.0.0/16）'], // compose 已改 `:?`
 ]);
+
+/**
+ * 部署密钥目录校验（从 validatePreflight 拆出，避免新增密钥路径分支推高复杂度）。
+ * 返回错误文本而不是直接改调用方数组，保持判据函数纯函数语义。
+ */
+function validateSecretsPreflight(env, fsImpl) {
+  const errors = [];
+  const configured = typeof env.FSMS_SECRETS_DIR === 'string' ? env.FSMS_SECRETS_DIR.trim() : '';
+  const secretsDir = resolveSecretsDir(env);
+
+  if (configured) {
+    const rootDir = path.resolve(ROOT);
+    const rootPrefix = `${rootDir}${path.sep}`;
+    if (!path.isAbsolute(configured)) {
+      errors.push('FSMS_SECRETS_DIR 必须是 checkout 目录之外的绝对路径');
+    } else if (secretsDir === rootDir || secretsDir.startsWith(rootPrefix)) {
+      errors.push('FSMS_SECRETS_DIR 必须位于 checkout 目录之外，禁止把生产密钥留在工作树内');
+    }
+  }
+
+  if (!fsImpl.existsSync(secretsDir)) {
+    errors.push(
+      `密钥目录不存在：${secretsDir}（先执行 node scripts/generate-secrets.js --out ./secrets）`
+    );
+    return errors;
+  }
+
+  const missing = [];
+  for (const name of REQUIRED_SECRET_FILES) {
+    const filePath = path.join(secretsDir, name);
+    if (!fsImpl.existsSync(filePath)) {
+      missing.push(name);
+    } else if (fsImpl.readFileSync(filePath, 'utf8').trim() === '') {
+      missing.push(`${name}（内容为空）`);
+    }
+  }
+  if (missing.length > 0) errors.push(`密钥文件缺失或为空：${missing.join(', ')}`);
+  return errors;
+}
 
 /**
  * 校验前置条件。返回 { ok, errors, warnings }——**不打印、不退出**，
@@ -118,26 +169,7 @@ function validatePreflight(env, fsImpl) {
   // ③ 密钥目录：REQUIRED_SECRET_FILES 里的每一项都不能少。
   //    缺任何一个都会让容器起不来或带空密钥运行，且失败点在启动期、
   //    现象是「服务反复重启」，排查成本高——不如在这里一次列全。
-  const secretsDir = path.join(ROOT, 'secrets');
-  if (!fsImpl.existsSync(secretsDir)) {
-    errors.push(
-      `密钥目录不存在：${secretsDir}（先执行 node scripts/generate-secrets.js --out ./secrets）`
-    );
-  } else {
-    const missing = [];
-    for (const name of REQUIRED_SECRET_FILES) {
-      const p = path.join(secretsDir, name);
-      if (!fsImpl.existsSync(p)) {
-        missing.push(name);
-      } else if (fsImpl.readFileSync(p, 'utf8').trim() === '') {
-        // 空文件比缺文件更隐蔽：文件存在、compose 校验通过、应用却拿到空串
-        missing.push(`${name}（内容为空）`);
-      }
-    }
-    if (missing.length > 0) {
-      errors.push(`密钥文件缺失或为空：${missing.join(', ')}`);
-    }
-  }
+  errors.push(...validateSecretsPreflight(env, fsImpl));
 
   const alerting = checkAlertingEndpoint(env, fsImpl);
   errors.push(...alerting.errors);
@@ -493,6 +525,7 @@ function parseArgs(argv, env = process.env) {
 
 module.exports = {
   ROOT,
+  resolveSecretsDir,
   REQUIRED_SECRET_FILES,
   REQUIRED_COMPOSE_ENV,
   validatePreflight,

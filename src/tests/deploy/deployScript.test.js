@@ -18,6 +18,7 @@
 const path = require('path');
 const {
   ROOT,
+  resolveSecretsDir,
   REQUIRED_SECRET_FILES,
   REQUIRED_COMPOSE_ENV,
   validatePreflight,
@@ -102,6 +103,25 @@ describe('D-1 部署前置校验：fail-closed', () => {
   test('全部条件满足时放行', () => {
     const r = validatePreflight(validEnv(), okFs());
     expect(r).toEqual({ ok: true, errors: [], warnings: [] });
+  });
+
+  test('FSMS_SECRETS_DIR 可把生产密钥放在 checkout 之外', () => {
+    const externalRoot = path.join(ROOT, '..', 'fsms-deploy-secrets-fixture');
+    const env = { ...validEnv(), FSMS_SECRETS_DIR: path.join(externalRoot, 'secrets') };
+    const files = {
+      ...fullSecrets(externalRoot),
+      [AM_PATH]: configuredAlertmanager(),
+    };
+
+    expect(resolveSecretsDir(env)).toBe(path.resolve(externalRoot, 'secrets'));
+    expect(validatePreflight(env, fakeFs(files))).toEqual({ ok: true, errors: [], warnings: [] });
+  });
+
+  test('FSMS_SECRETS_DIR 指向 checkout 内部时拒绝部署', () => {
+    const env = { ...validEnv(), FSMS_SECRETS_DIR: path.join(ROOT, 'secrets') };
+    const r = validatePreflight(env, okFs());
+    expect(r.ok).toBe(false);
+    expect(r.errors.join('\n')).toContain('checkout 目录之外');
   });
 
   test('APP_IMAGE 缺失即拒绝（不去猜镜像）', () => {

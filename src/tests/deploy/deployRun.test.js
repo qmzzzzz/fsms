@@ -139,6 +139,7 @@ function runDeploy({
     STUB_LOG: stage.log,
     STUB_RESPONSES: stage.rules.join('\n'),
     STUB_SECRETS_DIR: stage.secrets,
+    FSMS_SECRETS_DIR: stage.secrets,
   };
   env.APP_IMAGE = TARGET_IMAGE;
   env.CORS_ORIGIN = 'https://admin.example.com';

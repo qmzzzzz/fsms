@@ -190,12 +190,15 @@ jobs:
     runs-on: [self-hosted, deploy]
     environment: ${{ inputs.environment }}
     steps:
-      - name: Checkout (deploy host keeps the repo)
+      - name: Checkout (clean deployment workspace)
         # persist-credentials: false：不把 GITHUB_TOKEN 留在部署机的 .git/config
         # （部署不需要 git push；SHA 钉版与仓库「钉 digest」标准一致）。
+        # 密钥通过 FSMS_SECRETS_DIR 指向 checkout 目录之外，工作树可以安全清理，
+        # 旧的未跟踪文件不会跨版本残留并参与部署。
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          clean: true
 
       # 直接调脚本：备份 / 迁移 / 切换 / 健康门禁 / 失败回滚全在脚本内，
       # 工作流不重复实现一遍判据（否则两处逻辑会漂移）。
@@ -206,6 +209,8 @@ jobs:
           APP_IMAGE: ${{ needs.preflight.outputs.image_ref }}
           # 最后一道闸：deploy.js 侧拒绝一切非 digest 引用（含误配直传 tag）
           DEPLOY_REQUIRE_DIGEST_PIN: 'true'
+          # 必须指向 checkout 目录之外的宿主机密钥目录；缺失时 deploy.js 前置校验失败。
+          FSMS_SECRETS_DIR: ${{ secrets.FSMS_SECRETS_DIR }}
           CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
           # compose 用 `${ALLOWED_HOSTS:?}` 强制显式声明，缺它会在"切换"那步才被拒
           # （此前只下发 CORS_ORIGIN ⇒ 前置校验通过、切换时才炸）。见 deployWorkflow 自检。
@@ -245,6 +250,7 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          FSMS_SECRETS_DIR: ${{ secrets.FSMS_SECRETS_DIR }}
         # 密钥走 stdin 写入，不出现在命令行（命令行会进进程列表）。
         # known_hosts **必选且 fail-closed**：旧实现在未配置时只 warning 并退回
         # accept-new（TOFU），首次见到的密钥被无条件信任。现在缺少即失败，
@@ -280,9 +286,9 @@ jobs:
           fi
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
-          echo "OPTIONS=-o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+          ssh_opts=(-o StrictHostKeyChecking=yes)
           # 失败则连接层就会拒绝（fail-closed）
-          ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes \
+          ssh "${ssh_opts[@]}" -i ~/.ssh/id_deploy -o BatchMode=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" -- echo "ssh ok"
 
       - name: Run deploy.js on the host
@@ -290,6 +296,7 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          FSMS_SECRETS_DIR: ${{ secrets.FSMS_SECRETS_DIR }}
           CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
           # 与 self-hosted 路径同口径：compose 的 `:?` 要求两条部署路径都下发
           ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
@@ -320,6 +327,7 @@ jobs:
           # 整个脚本经管道送进远程 `bash -s`：既不出现在 argv / 进程列表，
           # 也不再要求目标机配置 AcceptEnv。`${var:?}` 保证漏配时在本地立即失败，
           # 而不是把空串送给 deploy.js 让门禁读成"关"。
+          ssh_opts=(-o StrictHostKeyChecking=yes)
           {
             # 远程脚本此前只 cd + node scripts/deploy.js：部署机上的仓库副本可以是
             # 任意旧版本，digest/回滚/健康门禁逻辑会静默使用旧实现。先把工作树钉到
@@ -330,6 +338,7 @@ jobs:
             printf 'git checkout --detach %q\n' "$GITHUB_SHA"
             printf 'export APP_IMAGE=%q\n' "$IMAGE_TAG"
             printf 'export DEPLOY_REQUIRE_DIGEST_PIN=%q\n' "${DEPLOY_REQUIRE_DIGEST_PIN:?deploy-ssh 未下发 digest 钉死闸}"
+            printf 'export FSMS_SECRETS_DIR=%q\n' "${FSMS_SECRETS_DIR:?deploy-ssh 未下发 FSMS_SECRETS_DIR}"
             printf 'export CORS_ORIGIN=%q\n' "${CORS_ORIGIN:?deploy-ssh 未下发 CORS_ORIGIN}"
             printf 'export ALLOWED_HOSTS=%q\n' "${ALLOWED_HOSTS:?deploy-ssh 未下发 ALLOWED_HOSTS}"
             printf 'export TRUSTED_PROXY_CIDRS=%q\n' "${TRUSTED_PROXY_CIDRS:?deploy-ssh 未下发 TRUSTED_PROXY_CIDRS}"
@@ -342,5 +351,5 @@ jobs:
               printf 'export ALLOW_PLACEHOLDER_ALERT_WEBHOOK=%q\n' "$ALLOW_PLACEHOLDER_ALERT_WEBHOOK"
             fi
             printf 'node scripts/deploy.js %s\n' "$extra"
-          } | ssh $OPTIONS -i ~/.ssh/id_deploy -o BatchMode=yes \
+          } | ssh "${ssh_opts[@]}" -i ~/.ssh/id_deploy -o BatchMode=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s'

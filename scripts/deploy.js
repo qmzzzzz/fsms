@@ -50,6 +50,7 @@ const path = require('path');
 // 判据全部在 deployPolicy.js：本文件只负责执行外部命令、呈现结果、决定退出码。
 const {
   ROOT,
+  resolveSecretsDir,
   validatePreflight,
   buildPlan,
   decideRollback,
@@ -203,7 +204,9 @@ function backupDatabase(skip) {
     console.warn('⚠ 已跳过备份（--skip-backup）——本次发布不具备数据级回滚能力');
     return;
   }
-  const uri = fs.readFileSync(path.join(ROOT, 'secrets', 'mongodb_uri'), 'utf8').trim();
+  const uri = fs
+    .readFileSync(path.join(resolveSecretsDir(process.env), 'mongodb_uri'), 'utf8')
+    .trim();
   console.log('\n[备份] 全量备份数据库……');
   try {
     // COMPOSE_FILE 必传：备份默认在 mongo 容器内执行（宿主机连不上只 expose 不 publish

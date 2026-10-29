@@ -4,6 +4,7 @@
  *
  * 用法:
  *   node scripts/compliance-check.js
+ *   node scripts/compliance-check.js --strict
  *
  * 检查项:
  *   1. 留存天数配置（AUDIT_RETENTION_DAYS，默认 180）
@@ -494,7 +495,7 @@ function runAllChecks() {
   // 所以分两档：仓库态输出 notReady 信息（allPassed 仍可绿）；COMPLIANCE_STRICT=1
   // （部署/发布流程使用）时 notReady 非空即阻断。
   const notReady = checks.filter((c) => c.notReady).map((c) => c.name);
-  const strict = process.env.COMPLIANCE_STRICT === '1';
+  const strict = process.env.COMPLIANCE_STRICT === '1' || process.argv.includes('--strict');
   if (strict && notReady.length > 0) allPassed = false;
 
   // 输出 JSON 结果

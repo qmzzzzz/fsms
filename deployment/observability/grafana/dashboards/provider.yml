@@ -5,7 +5,9 @@ providers:
   - name: xf-dashboards
     folder: 消防安全
     type: file
-    disableDeletion: false
-    allowUiUpdates: true
+    # 文件 provisioning 是唯一事实来源；目录以只读方式挂载，
+    # 因此禁止 UI 删除或写入看似成功、重启后又消失的修改。
+    disableDeletion: true
+    allowUiUpdates: false
     options:
       path: /var/lib/grafana/dashboards
