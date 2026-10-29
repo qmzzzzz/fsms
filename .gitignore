@@ -97,6 +97,19 @@ secrets-*/
 # 工具/会话内部状态（非项目代码，不入库）
 .mimosa/
 
+# 本地浏览器/审计会话与导出物（不得提交；文件中的会话、凭据和业务数据仍须单独撤销/清理）
+/auth_state.json
+/audit_logs_p1.json
+/get_token.js
+/login_test.js
+/relogin.js
+/runtime.js
+/test_page.js
+/bundle.js
+/vue.js
+/export_*.xlsx
+/screenshot_*.png
+
 # 会话工具生成的完整性快照（引用被忽略文件，新克隆无法复现，不入库）
 .merkle-snapshot.json
 

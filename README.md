@@ -128,27 +128,27 @@ npm ci
 cp .env.example .env    # Windows: copy .env.example .env，然后编辑 .env
 
 # 2. 启动后端（开发模式，自动重启）
+$env:NODE_ENV = 'development'  # PowerShell；后端入口要求显式选择环境语义
 npm run dev             # 监听 http://localhost:3000
 
 # 3. 安装前端依赖并启动（新终端）
 cd web-admin
 npm ci
-npm run dev             # 监听 0.0.0.0:3001（不是仅 localhost，见下节），/api 自动代理到后端
+npm run dev             # 默认监听 127.0.0.1:3001，/api 自动代理到后端
 ```
 
 访问 `http://localhost:3001/login` 进入登录页；访问 `http://localhost:3000/health` 检查后端状态。
 
 ### 开发/预览服务器的暴露边界（重要）
 
-`web-admin/vite.config.js` 把**开发**与**预览**两个服务器都显式绑定到 `0.0.0.0`
-（`server.host` 与 `preview.host`，两处都带 `// ← 修改：允许局域网/热点设备访问` 注释）——
-目的是让手机在热点/局域网下直连真机调试。代价是**同网段任何设备**都能访问它，
-所以必须清楚这两个服务器各自暴露了什么：
+`web-admin/vite.config.js` 默认把**开发**与**预览**两个服务器绑定到回环地址，
+避免未打包源码和 HMR 端点被同网段访问。需要手机或局域网设备联调时，才显式传入
+`--host 0.0.0.0`，并在 `VITE_ALLOWED_HOSTS` 中列出确切的预览 Host；不要用整个第三方子域通配符。
 
-| 命令              | 监听           | 暴露内容                                                                        | 可否对外 |
-| ----------------- | -------------- | ------------------------------------------------------------------------------- | -------- |
-| `npm run dev`     | `0.0.0.0:3001` | **未打包的源码**（按模块即时转换后下发）、HMR 客户端与 WebSocket、Vite 内部端点 | 否       |
-| `npm run preview` | `0.0.0.0:3001` | `dist/` 构建产物（`sourcemap: false`，不含 `.map`）                             | 否       |
+| 命令              | 监听             | 暴露内容                                                                        | 可否对外 |
+| ----------------- | ---------------- | ------------------------------------------------------------------------------- | -------- |
+| `npm run dev`     | `127.0.0.1:3001` | **未打包的源码**（按模块即时转换后下发）、HMR 客户端与 WebSocket、Vite 内部端点 | 否       |
+| `npm run preview` | `127.0.0.1:3001` | `dist/` 构建产物（`sourcemap: false`，不含 `.map`）                             | 否       |
 
 **dev 服务器会下发源码。** 它有一份敏感文件名黑名单（`SENSITIVE_FILE_PATTERNS` +
 `server.fs.deny`），覆盖 `.env`、`package(-lock).json`、`pnpm-lock.yaml`、`.git/`、
@@ -160,8 +160,8 @@ npm run dev             # 监听 0.0.0.0:3001（不是仅 localhost，见下节�
 
 因此：
 
-1. **不要把 3001 映射到公网**——不要绑到云主机公网 IP、不要在路由器做端口转发、
-   不要经反向代理把 dev/preview 发布出去（反代会把 `0.0.0.0` 的可达面直接放大到公网）。
+1. **不要把 3001 映射到公网**——不要绑定云主机公网 IP、不要在路由器做端口转发、
+   不要经反向代理把 dev/preview 发布出去。显式 `--host 0.0.0.0` 只用于受控局域网联调。
 2. 需要对外演示时用**生产构建**（`npm run build` 后由后端静态托管或 nginx 托管 `dist/`），
    而不是 `npm run preview`。preview 的用途是「本地验收构建产物」；`sourcemap: false`
    只保证**产物**不带源码映射，**不代表 preview 服务器本身可以对外**。
@@ -174,11 +174,11 @@ npm run dev             # 监听 0.0.0.0:3001（不是仅 localhost，见下节�
 - 文档页面：`http://localhost:3000/api-docs`
 - 原始规范：`http://localhost:3000/api-docs.json`（OpenAPI 3.0）
 
-涵盖 10 个模块共 102 个接口（83 个 path / 102 个 operation），支持在线调试（需先通过 `/api/auth/login` 获取 token 并在页面右上角 Authorize 中填入）。
+涵盖 10 个模块共 105 个接口（86 个 path / 105 个 operation），支持在线调试（需先通过 `/api/auth/login` 获取 token 并在页面右上角 Authorize 中填入）。
 
 **安全说明**：生产环境默认关闭 API 文档，需显式设置 `ENABLE_API_DOCS=true` 才会暴露。开启后建议同时设置 `DOCS_USERNAME` 和 `DOCS_PASSWORD` 启用 Basic Auth 保护，并在网络层限制仅内网/ VPN 访问。
 
-### 方式三：Docker Compose（生产推荐）
+### 方式三：Docker Compose（本地/预发布验证）
 
 compose 的密钥**不走环境变量**（`docker inspect` 会完整回显 `Config.Env`），而是以 Docker secret 挂载到 `/run/secrets/<name>`，由应用侧 `*_FILE` 读取。file 型 secret 在 Linux 上是 bind mount，会保留宿主文件的属主/权限；`generate-secrets.js` 产出的 0600 文件属主是部署用户，镜像里的 UID 1001 读不到，因此 app 服务的入口脚本会以 root 复制到 tmpfs、chown 给 nodejs，再把 `*_FILE` 重写到副本路径并降权运行——compose 里的 `user: "0:0"` 与 `cap_add` 是这条链的一部分，不要删。下面三步缺一不可：
 
@@ -191,8 +191,8 @@ node scripts/generate-secrets.js --out ./secrets
 export CORS_ORIGIN=https://admin.example.com   # 前端站点地址，多个逗号分隔，禁止通配符
 export ALLOWED_HOSTS=fsms.example.com          # Host 头白名单，多个逗号分隔
 
-# 3) 生产必须显式指定带版本 tag 的镜像（前置校验会 fail-fast 拦下本地默认 tag）
-export APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234
+# 3) 本地或预发布验证时显式指定不可变镜像 digest
+export APP_IMAGE=ghcr.io/<owner>/<repo>@sha256:<64位digest>
 
 docker compose pull app
 docker compose up -d --no-build
@@ -200,7 +200,7 @@ docker compose up -d --no-build
 
 编排包含应用服务、MongoDB 8.0（仅容器内网通信，不暴露宿主机端口）与 Redis 7（同样仅内网），数据持久化到命名卷。`REDIS_URL` 由 compose 注入 `redis://redis:6379`，`NODE_ENV=production` 与 `TRUST_PROXY_HOPS` 亦已内置，均无需额外设置。完整的 secrets 生成命令（含 Mongo root 与**应用专用库账号**口令、需 percent-encode 的 `mongodb_uri`、Grafana 口令、`metrics_token`）见 `docker-compose.yml` 文件末尾注释。应用以 `firesafety_app` 连接（仅 `fire_safety_db` 的 `readWrite`），root 凭据只用于初始化容器与管理操作。
 
-发布走 `node scripts/deploy.js`（前置校验 → 备份 → 迁移 → 健康检查，失败自动回滚）；密钥轮换与回滚演练见 `deployment/secret-rotation.md`、`deployment/rollback-drill.md`。
+生产发布只能走 `node scripts/deploy.js`（前置校验 → 备份 → 迁移 → 健康检查，失败自动回滚）。生产环境不要把 `docker compose up` 当作发布入口：它不会执行备份、迁移、就绪探针、签名校验或失败回滚。密钥轮换与回滚演练见 `deployment/secret-rotation.md`、`deployment/rollback-drill.md`。
 
 ## 环境变量
 
@@ -444,7 +444,10 @@ npm run validate         # 独立校验环境配置（读当前 shell 的 env；
                          #   docker compose exec -T app npm run validate——compose 只往容器注入 *_FILE，
                          #   宿主机 shell 里这些变量是空的，在宿主机跑会得到"缺密钥"的红）
 npm run lint:ratchet     # ESLint 棘轮（复杂度/行数只许降不许升）；format:check 为 Prettier 检查——均为 CI 硬门禁
-npm run security:audit   # npm audit（high 及以上，忽略 devDependencies）+ 合规检查
+npm run security:audit   # 后端/前端生产依赖审计（high 及以上）+ 含 dev 的根目录审计 + strict 合规检查
+npm run security:audit:backend:prod   # 仅后端生产依赖（忽略 devDependencies）
+npm run security:audit:frontend:prod  # 仅 web-admin 生产依赖（忽略 devDependencies）
+npm run security:audit:all            # 后端/前端生产依赖 + 根目录完整依赖审计
 npm run migrate:status   # 数据库迁移（migrate-mongo：status / up / down / create）
 ```
 
@@ -494,8 +497,8 @@ curl -f http://localhost:3000/health
 > 先备份（失败即中止）→ 拉取指定镜像 → 应用迁移 → 切换 → `/readyz` 健康门禁 → 失败自动回滚。
 
 ```bash
-# APP_IMAGE 必须是带版本 tag 的镜像（如 :sha-abc1234），不接受本地开发默认值
-APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 node scripts/deploy.js
+# APP_IMAGE 必须是不可变的镜像 digest，不接受本地开发默认值
+APP_IMAGE=ghcr.io/<owner>/<repo>@sha256:<64位digest> node scripts/deploy.js
 
 # 演练 / 评审：只打印计划与判据，不做任何变更
 APP_IMAGE=... node scripts/deploy.js --dry-run
@@ -511,11 +514,12 @@ APP_IMAGE=... node scripts/deploy.js --dry-run
 
 1. **升级前必备份**：按上节执行一次全量备份并确认备份文件非空。
 2. 拉取新版本代码后运行全量测试确认基线：`npm test`（后端）与 `cd web-admin && npm test`（前端）。
-3. 拉取 CI 产出的镜像并切换（数据在命名卷中，重启容器不影响数据）：
+3. 本地/预发布验证才可用 Compose 拉取并切换（数据在命名卷中，重启容器不影响数据）。
+   生产环境不要执行下面两条旁路命令，必须由 `node scripts/deploy.js` 完成签名、备份、迁移、就绪探针和回滚门禁：
 
 ```bash
-APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose pull app
-APP_IMAGE=ghcr.io/<owner>/<repo>:sha-abc1234 docker compose up -d --no-build app
+APP_IMAGE=ghcr.io/<owner>/<repo>@sha256:<64位digest> docker compose pull app
+APP_IMAGE=ghcr.io/<owner>/<repo>@sha256:<64位digest> docker compose up -d --no-build app
 ```
 
 4. 升级后观察：`curl -f /readyz`、日志 `logs/error-*.log` 无新增错误、登录与核心业务冒烟。
@@ -554,7 +558,7 @@ curl -fsS http://127.0.0.1:3000/readyz
 
 ### 回滚
 
-- **应用回滚**：指定上一个正常版本的镜像 tag 重新 `up -d --no-build`（`deploy.js` 在健康门禁失败时会自动做这件事）——应用无状态，会话缓存随进程消亡，用户重新登录。
+- **应用回滚**：指定上一个正常版本的镜像 digest 重新 `up -d --no-build`（`deploy.js` 在健康门禁失败时会自动做这件事）——应用无状态，会话缓存随进程消亡，用户重新登录。
 - **数据回滚**：仅当新版本已发生不兼容写入时才需要。先停应用，按"恢复"节流程回灌升级前的备份，再把应用也回滚到对应版本。
 - 回滚后必须排查根因并保留当时的 `logs/` 与审计日志（AuditLog 集合）用于追溯。
 - 完整演练流程（含验收判据与记录表单）见 [deployment/rollback-drill.md](./deployment/rollback-drill.md)。
@@ -563,6 +567,7 @@ curl -fsS http://127.0.0.1:3000/readyz
 
 生产环境启动时会强制校验以下配置，不满足将直接拒绝启动：
 
+- [ ] `NODE_ENV` 已显式设置为 `production`/`prod`/`live`（未设置时拒绝启动，不按开发环境放行）
 - [ ] `JWT_SECRET`、`JWT_REFRESH_SECRET`、`AES_SECRET_KEY` 均为 ≥32 字符的强随机密钥
 - [ ] `JWT_SECRET` 与 `JWT_REFRESH_SECRET` **取值不同**（同值会让 7 天有效期的 refresh 令牌可直接当 access 令牌用，短有效期收缩访问窗口的机制整体失效）
 - [ ] `HMAC_SECRET` 已设置
@@ -574,6 +579,7 @@ curl -fsS http://127.0.0.1:3000/readyz
 - [ ] `ALLOWED_HOSTS` 已配置为对外域名（Host 头白名单；缺失即拒绝启动，compose 亦以 `${ALLOWED_HOSTS:?}` 硬声明）
 - [ ] `TRUST_PROXY_HOPS` 已按反向代理层数设置（1..5 的正整数，非法值会导致生产启动失败（fail-closed））
 - [ ] `TRUSTED_PROXY_CIDRS` 已按反向代理实际所在网段设置——compose 已把该项设为强制（缺失即 `up` 失败）；未设置时 XFF 的可信判据只看「对端是否在私网」，同一容器网络内任意服务可伪造（见审计 F-01）
+- [ ] 自托管/SSH 部署已设置 `FSMS_SECRETS_DIR`，并让它指向 checkout 目录之外、权限收紧的密钥目录；部署工作流会清理 checkout，不能再依赖仓库内残留的 `./secrets`
 - [ ] `ALLOW_PUBLIC_REGISTRATION` 保持 `false`
 - [ ] 已修改默认管理员初始密码
 - [ ] 若 `ENABLE_API_DOCS=true`：`DOCS_USERNAME` / `DOCS_PASSWORD` 已设置，且口令 ≥16 字符（文档暴露全部接口契约与权限编码）
