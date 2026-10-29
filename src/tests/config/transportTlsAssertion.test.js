@@ -41,6 +41,11 @@ const VALID_PROD_BASELINE = () => ({
   // 2026-10-01 认证闸：生产 compose 拓扑经 REDIS_PASSWORD_FILE 注入（同值形态）
   REDIS_PASSWORD: DUMMY_REDIS_AUTH,
   TRUST_PROXY_HOPS: '1',
+  // 2026-10-30 补齐：生产语义下 TRUST_PROXY_HOPS>0 时 TRUSTED_PROXY_CIDRS 是**致命项**
+  // （config/validate 的 F-01 闸）。本基线此前缺这一项，于是"合法生产配置"根本过不了
+  // 校验——本文件的九条用例因此整片变红。上一轮补夹具时改了 startupGuards 等四处，
+  // 漏了这里，属同一条判据的第五个夹具（同类漏一处的典型）。
+  TRUSTED_PROXY_CIDRS: '172.28.0.0/16',
 });
 
 const TOUCHED_KEYS = Object.keys(VALID_PROD_BASELINE()).concat([

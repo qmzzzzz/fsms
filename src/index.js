@@ -9,12 +9,14 @@
 
 // 生产环境配置校验（在数据库连接之前执行）
 const config = require('./config');
+const { isDevelopmentLikeEnv } = require('./config/envSemantics');
 config.validateProductionConfig();
 
 const mongoose = require('mongoose');
 const connectDB = require('./config/database');
 const logger = require('./utils/logger');
 const { exitAfterFlush, bestEffortDrain } = require('./utils/loggerFlush');
+const { collectMongoAuthWarnings } = require('./config/transportSecurity');
 
 // 密钥文件注入的结果在 config 加载期产生（早于 logger 可用），
 // 此处补记日志。只记变量名不记值。
@@ -25,6 +27,11 @@ if (config.secretHydration) {
   }
   warnings.forEach((w) => logger.warn(`密钥配置告警：${w}`));
 }
+
+// Mongo 认证缺口：**只告警，不阻断启动**（判据与取舍见 config/transportSecurity.js）。
+// 刻意放在这里而不是 validateConfig 的生产告警里：H-1 命中的正是**非生产**的预览实例，
+// 只对生产环境告警等于对真正出事的那套环境保持沉默。
+collectMongoAuthWarnings().forEach((w) => logger.warn(`安全加固告警：${w}`));
 
 const { createApp } = require('./app');
 const { initializeSystem } = require('./services/initData');
@@ -447,7 +454,7 @@ const CRASH_DRAIN_BUDGET_MS = 500;
 // 响应给客户端、但尚未落库的审计记录，直接 exit 会让它们随进程消失
 // （WAL 能在下次启动重放，但重放依赖进程能正常再启动，不能作为唯一保障）。
 process.on('uncaughtException', (error) => {
-  if (config.nodeEnv === 'development') {
+  if (isDevelopmentLikeEnv()) {
     logger.error(`未捕获的异常：${error.message}`);
     logger.error(error.stack);
   } else {
@@ -467,7 +474,7 @@ process.on('uncaughtException', (error) => {
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  if (config.nodeEnv === 'development') {
+  if (isDevelopmentLikeEnv()) {
     logger.error(`未处理的 Promise 拒绝：${reason}`);
   } else {
     const err = reason instanceof Error ? reason : new Error(String(reason));

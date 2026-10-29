@@ -467,4 +467,21 @@ describe('ipListController 分支补齐', () => {
       }
     }
   });
+
+  test('POST 携带未知字段 → 400 且点名该字段，且不落库（拼错时长字段名不得静默变永久封禁）', async () => {
+    // 实测过的坏结果：客户端把时长写成 duration / expiresIn / hours，express 不报错、
+    // controller 取不到 durationHours ⇒ 归一化成 0 ⇒ 永久封禁，界面与审计里都看不出差别。
+    // 判据取三条：状态码 400、fieldErrors 点名拼错的键、库里确实没有这条记录。
+    const typoIP = '203.0.113.77';
+    const res = await secPost('/api/security/ip-list', {
+      ip: typoIP,
+      type: 'black',
+      duration: 24,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors?.errorCode).toBe('VALIDATION_FAILED');
+    expect(res.body.errors.fieldErrors.map((e) => e.path)).toContain('duration');
+    expect(await IPBlacklist.countDocuments({ ip: typoIP })).toBe(0);
+  });
 });

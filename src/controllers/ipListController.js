@@ -10,6 +10,7 @@ const { safeFieldErrors } = require('../utils/validationRules');
 const ApiResponse = require('../utils/apiResponse');
 // 名单类型取值与 models/IPBlacklist 的 enum、securityRoutes 的 isIn 同源
 const { IP_LIST_TYPES } = require('../constants/ipList');
+const { rejectUnknownWriteFields } = require('./ipListWriteGuards');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { normalizePagination } = require('../utils/helpers');
@@ -254,6 +255,10 @@ const addIPEntry = asyncHandler(async (req, res) => {
       fieldErrors: safeFieldErrors(errors),
     });
   }
+
+  // 未知字段闸门排在取值之前：先确认"调用方说的字段我们都认识"，
+  // 再谈"值是否合法"，否则拼错字段名会被当成"没传"而落到永久默认值（判据见该模块）
+  if (rejectUnknownWriteFields(res, req.body)) return;
 
   const { ip, type = 'black', reason = 'manual_configuration', durationHours = 0 } = req.body;
 

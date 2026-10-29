@@ -45,7 +45,7 @@ describe('compose 数据面分段与 Redis 认证合同', () => {
       .filter((l) => l && !l.startsWith('#'))
       .join('\n');
     // 口令不允许以字面量出现：唯一合法形态是运行时 $(cat /run/secrets/…) 展开
-    expect(exec).toContain('/run/secrets/redis_password');
+    expect(exec).toMatch(/\/run\/secrets\/redis(?:\/redis_password|_password)/);
     expect(exec).toMatch(/requirepass %s/);
     // 2026-10-24 审计：`--requirepass "$(cat …)"` 经 shell 展开后，明文口令就躺在
     // PID 1 的 /proc/1/cmdline 里。必须走配置文件（tmpfs、umask 077）。
@@ -62,22 +62,23 @@ describe('compose 数据面分段与 Redis 认证合同', () => {
       .filter((l) => l && !l.startsWith('#'))
       .join('\n');
     expect(exec).toMatch(
-      /REDISCLI_AUTH="\$\$\(cat \/run\/secrets\/redis_password\)" redis-cli ping \| grep -q PONG/
+      /REDISCLI_AUTH="\$\$\(cat \/run\/secrets\/redis(?:\/redis_password|_password)\)" redis-cli ping \| grep -q PONG/
     );
     // -a 会把口令放进 healthcheck 进程的 argv（/proc/<pid>/cmdline）
     expect(exec).not.toMatch(/redis-cli[^\n]*\s-a\s/);
   });
 
-  test('app 侧凭据经 REDIS_PASSWORD_FILE 注入，且两个服务都挂 redis_password secret', () => {
+  test('app 与 Redis 初始化链路都经 redis_password secret 注入', () => {
     const app = serviceBlock('app');
     expect(app).toMatch(/- REDIS_PASSWORD_FILE=\/run\/secrets\/redis_password/);
-    // 顶层 secrets 段声明 + 两个消费服务挂载，缺一边 = 容器起来就缺文件
+    // 顶层 secrets 段声明 + app/初始化容器挂载，缺一边 = 容器起来就缺文件。
     //（缩进用 {2}/{4} 显式量化，绕开 no-regex-spaces）
     expect(YML).toMatch(/^ {2}redis_password:\r?$/m);
     expect(YML).toMatch(/^ {4}file: \.\/secrets\/redis_password\r?$/m);
-    for (const s of ['app', 'redis']) {
+    for (const s of ['app', 'redis-secret-init']) {
       expect(serviceBlock(s)).toMatch(/- redis_password\r?/);
     }
+    expect(serviceBlock('redis')).toMatch(/redis-secrets:\/run\/secrets\/redis:ro/);
   });
 
   // ── 数据面分段 ──────────────────────────────────────────────────────────
@@ -106,6 +107,101 @@ describe('compose 数据面分段与 Redis 认证合同', () => {
       const block = serviceBlock(s);
       const nets = block.slice(block.indexOf('networks:'));
       expect(nets).not.toMatch(/- data-net/);
+    }
+  });
+});
+
+/**
+ * 端口暴露面闸门（H-1，2026-10-29 二轮渗透）
+ *
+ * 事故形态：被测试例的 mongod 绑在 0.0.0.0:27017 且未开 auth，任何对端可零凭据
+ * 接管全库。本仓 compose 目前是 `expose`（仅容器间）而非 `publish`（到宿主机），
+ * 但**没有任何断言盯着这一点**——为本地调试临时加一行 `27017:27017` 再提交，
+ * 应用照常能跑，暴露面静默扩大，与 Redis 认证那条的失效形态完全同类。
+ *
+ * 两条闸：
+ *   1. 任何 publish 到宿主机的端口都必须绑 127.0.0.1（裸 `3000:3000` 等于 0.0.0.0）；
+ *   2. mongo / redis 一律不得 publish，只允许 expose 自己的端口。
+ *
+ * 能力边界：静态文本断言，不跑真实 docker；「能不能起」仍由演练覆盖。
+ */
+describe('compose 端口暴露面闸门', () => {
+  /** 去掉整行注释：注释里常写示例端口（mongo 段就有一句"可临时改为 127.0.0.1:27017:27017"） */
+  const stripComments = (text) =>
+    text
+      .split(/\r?\n/)
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+
+  /** 取某服务 ports: 下的条目（支持块状与内联 `ports: [...]` 两种写法） */
+  const publishedPorts = (block) => {
+    const lines = stripComments(block).split(/\r?\n/);
+    const out = [];
+    let inPorts = false;
+    let portsIndent = -1;
+    for (const line of lines) {
+      const inline = /^(\s*)ports:\s*\[(.+)\]\s*$/.exec(line);
+      if (inline) {
+        out.push(
+          ...inline[2]
+            .split(',')
+            .map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
+            .filter(Boolean)
+        );
+        continue;
+      }
+      const blockStart = /^(\s*)ports:\s*$/.exec(line);
+      if (blockStart) {
+        inPorts = true;
+        portsIndent = blockStart[1].length;
+        continue;
+      }
+      if (!inPorts) continue;
+      if (line.trim() === '') continue;
+      const indent = line.match(/^\s*/)[0].length;
+      if (indent <= portsIndent) {
+        inPorts = false;
+        continue;
+      }
+      out.push(
+        line
+          .trim()
+          .replace(/^-\s*/, '')
+          .replace(/^['"]|['"]$/g, '')
+      );
+    }
+    return out;
+  };
+
+  test('前提自证：四个对外服务都能解析出 publish 端口（解析器退化时下面的断言是空集假绿）', () => {
+    for (const s of ['app', 'prometheus', 'alertmanager', 'grafana']) {
+      expect(publishedPorts(serviceBlock(s)).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('任何 publish 到宿主机的端口都必须绑 127.0.0.1（裸端口等于 0.0.0.0）', () => {
+    const offenders = [];
+    for (const s of ['app', 'prometheus', 'alertmanager', 'grafana']) {
+      for (const entry of publishedPorts(serviceBlock(s))) {
+        if (!entry.startsWith('127.0.0.1:')) offenders.push(`${s}: ${entry}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test('mongo / redis 只 expose 不 publish（H-1 的形态就是把 27017 publish 出去）', () => {
+    expect(publishedPorts(serviceBlock('mongo'))).toEqual([]);
+    expect(publishedPorts(serviceBlock('redis'))).toEqual([]);
+    expect(stripComments(serviceBlock('mongo'))).toMatch(/^\s*expose:\s*$/m);
+    expect(stripComments(serviceBlock('mongo'))).toContain("'27017'");
+    expect(stripComments(serviceBlock('redis'))).toMatch(/^\s*expose:\s*$/m);
+    expect(stripComments(serviceBlock('redis'))).toContain("'6379'");
+  });
+
+  test('全文件不得出现数据面端口的宿主映射（含 0.0.0.0 与裸端口两种写法）', () => {
+    const exec = stripComments(YML);
+    for (const pattern of [/27017:27017/, /6379:6379/, /0\.0\.0\.0:27017/, /0\.0\.0\.0:6379/]) {
+      expect(exec).not.toMatch(pattern);
     }
   });
 });

@@ -139,4 +139,46 @@ const collectTransportErrors = (errors) => {
   collectRedisAuthErrors(errors, parsedRedisUrl);
 };
 
-module.exports = { collectTransportErrors, isLoopbackHostname, uriHostname };
+/**
+ * Mongo 认证缺口告警（**只告警，不阻断启动**）
+ *
+ * 由来（H-1，2026-10-29 二轮渗透）：被测试例的形态是「mongod 未开 auth +
+ * 应用连接串不带凭据」，于是任何能到达 27017 的对端都能读写全库——克隆 admin
+ * 插后门、删封禁记录、整链伪造审计。上面的「不得 localhost」与 TLS 断言解决的是
+ * 「连到哪」和「链路是否被窃听」，**都不解决「谁都能连上」**；同一份配置里
+ * Redis 早就有认证闸（collectRedisAuthErrors），Mongo 侧是漏项。
+ *
+ * 为什么这里不升级成 fail-closed：本仓生产拓扑经 compose 注入的 URI 确实带凭据
+ * （scripts/generate-secrets.js），但**存量部署与开发/预览实例**普遍是无凭据直连
+ * 本机 mongod。把它做成致命闸等于下一次重启直接停机，而修复动作（建账号、改
+ * mongod.cfg、重启数据库、同步 URI）必须与运维同步进行。故本轮只做 loud warning，
+ * 让缺口每次启动都可见；是否升级为致命闸由部署侧就绪后再定。
+ *
+ * 判据只认 userinfo 里同时有用户名与口令（`u:p@`）。只写用户名（`u@`）不算：
+ * 驱动会当无口令处理，对未开 auth 的实例照样连得上。
+ *
+ * @returns {string[]} 告警文案数组（空数组 = 无缺口）
+ */
+const collectMongoAuthWarnings = () => {
+  const mongoUri = (process.env.MONGODB_URI || '').trim();
+  if (!mongoUri) return [];
+  const hasCredentials = /^mongodb(\+srv)?:\/\/[^/@:]+:[^/@]*@/i.test(mongoUri);
+  if (hasCredentials) return [];
+  // 显式豁免：受信内网里确实跑免认证 mongod 的部署，用命名旗标把噪声关掉。
+  // 与 REDIS_AUTH_EXEMPT 同一形态——豁免必须"说出来"，而不是靠没配凭据蒙混。
+  if (process.env.MONGODB_AUTH_EXEMPT === 'true') return [];
+
+  return [
+    'MONGODB_URI 未携带凭据（应形如 mongodb://<user>:<pass>@<host>/<db>?authSource=...）：' +
+      '若 mongod 未开 authorization，任何能到达 27017 的对端都可读写全库——' +
+      '克隆管理员、插后门账号、删封禁记录、伪造审计链。TLS 只保护链路，不解决这个问题。' +
+      '受信内网的免认证部署请显式设置 MONGODB_AUTH_EXEMPT=true 并在部署文档记录拓扑依据。',
+  ];
+};
+
+module.exports = {
+  collectTransportErrors,
+  collectMongoAuthWarnings,
+  isLoopbackHostname,
+  uriHostname,
+};

@@ -54,10 +54,17 @@ describe('路由校验分支（T-3）', () => {
     require('../../models/TokenBlacklist');
     require('../../models/AuditLog');
 
-    // 注册开关默认是"关"（库里无 doc ⇒ false），而 `POST /register` 的处理器在
-    // **校验结果被消费之前**就返回 403 PUBLIC_REGISTRATION_DISABLED —— 于是
-    // authRoutes 那两条 strict 守卫永远执行不到。这里临时打开注册（并在 afterAll
-    // 还原），让校验链真正走到 validationResult。
+    // 注册开关默认是"关"（库里无 doc ⇒ false）。开关守卫
+    // （`requireRegistrationEnabled`）排在 `registerValidation` **之前**，关闭态直接
+    // 403，校验链整条不执行 —— 本套件要断言的 strict 守卫文案也就无从产生。
+    // 这里临时打开注册（并在 afterAll 还原），让请求真正走到
+    // registerValidation → 控制器内的 validationResult。
+    //
+    // 2026-10-29 更正：本注释原文是「处理器在校验结果被消费之前就返回 403，于是
+    // authRoutes 那两条 strict 守卫永远执行不到」。前半句讲的是**消费**，后半句却
+    // 断言**执行**——当时校验器排在开关之前，守卫每次请求都会跑，只是结果被 403
+    // 丢弃，所以那半句是错的。顺序修正后（开关前置）它才成立，故按现状改写；
+    // 顺序本身由 `registerSwitchOrder.test.js` 盯住。
     SystemConfig = require('../../models/SystemConfig');
     originalRegistrationConfig = await SystemConfig.findOne({
       key: 'allowPublicRegistration',

@@ -240,33 +240,48 @@ const updateProfileValidation = [
 ];
 
 // 路由定义
+// 注册开关：支持运行时动态切换（数据库持久化 + 30 秒缓存）
+// 启动时先使用静态配置，运行时通过 SystemConfig 动态覆盖
+//
+// 【顺序契约】strictLimiter → registerIpLimiter → requireRegistrationEnabled
+//            → registerValidation → 控制器（控制器内消费 validationResult）
+//
+// 为什么开关必须排在 `registerValidation` **之前**：开关关闭时唯一还会被执行的
+// 逻辑就是校验链本身（passwordStrengthCheck / normalizeEmail / 各条自定义守卫），
+// 它们的结果随后被 403 丢弃——纯属白跑。这不构成"响应层泄露校验规则"（403 分支
+// 不返回 fieldErrors），但会让"注册已关闭"的实例持续为每个请求做无意义校验，
+// 且让读代码的人误以为关闭态连校验器都不会进（旧测试注释正是这么写的，已更正）。
+//
+// 为什么开关**不能**排到限流器之前：本守卫要读数据库（30s 缓存），
+// 放到限流器前面等于给未认证入口开一个无节流的 DB 探针。
+const requireRegistrationEnabled = async (req, res, next) => {
+  try {
+    const { SystemConfig } = require('../models');
+    const allowed = await SystemConfig.isRegistrationAllowed();
+    if (!allowed) {
+      return ApiResponse.codeError(res, 'PUBLIC_REGISTRATION_DISABLED');
+    }
+    return next();
+  } catch (err) {
+    // 数据库故障时无法确认注册开关，fail-closed 直接拒绝：
+    // 原「降级到静态配置放行」并不成立——register 本身依赖数据库，
+    // 放行只会把失败推迟为 500，不如在此明确返回 503
+    return ApiResponse.codeError(res, 'REGISTER_SERVICE_UNAVAILABLE');
+  }
+};
+
 /**
  * @route   POST /api/auth/register
  * @desc    用户注册
  * @access  Public
  */
-// 注册开关：支持运行时动态切换（数据库持久化 + 30 秒缓存）
-// 启动时先使用静态配置，运行时通过 SystemConfig 动态覆盖
 router.post(
   '/register',
   strictLimiter,
   registerIpLimiter,
+  requireRegistrationEnabled,
   registerValidation,
-  async (req, res, next) => {
-    try {
-      const { SystemConfig } = require('../models');
-      const allowed = await SystemConfig.isRegistrationAllowed();
-      if (!allowed) {
-        return ApiResponse.codeError(res, 'PUBLIC_REGISTRATION_DISABLED');
-      }
-      return authController.register(req, res, next);
-    } catch (err) {
-      // 数据库故障时无法确认注册开关，fail-closed 直接拒绝：
-      // 原「降级到静态配置放行」并不成立——register 本身依赖数据库，
-      // 放行只会把失败推迟为 500，不如在此明确返回 503
-      return ApiResponse.codeError(res, 'REGISTER_SERVICE_UNAVAILABLE');
-    }
-  }
+  authController.register
   // PERMISSION-EXEMPT: 公共端点（注册开关+限流管控），无资源所有者
   // SCOPE-EXEMPT: 未认证端点，无调用者身份可据以划定数据范围；
   // 创建的是全新用户记录，不存在「他人既有资源」这一越权对象
