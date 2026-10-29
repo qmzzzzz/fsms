@@ -21,6 +21,49 @@ const FLUSH_INTERVAL_MS = 10000
 const DEDUPE_WINDOW_MS = 5000
 const MAX_MESSAGE_LEN = 500
 const MAX_STACK_LEN = 2000
+const MAX_SANITIZE_DEPTH = 4
+const MAX_SANITIZE_KEYS = 32
+const MAX_SANITIZE_ITEMS = 20
+
+// F-03 生命周期与体积上限。
+// 条数上限（MAX_STORED）只挡住"写得多"，挡不住"写得旧"和"单条特别大"：
+//   · 缓冲按条数滚动、不按时间过期时，一条上周的 `?token=...` 会一直躺在
+//     localStorage 里，直到被 50 条新错误挤掉为止——排障价值早就没了，
+//     泄露窗口却一直开着；
+//   · message/stack 各自截断、extra 递归清洗，但 50 条叠加仍可能吃满配额，
+//     而写入失败时 persist 静默吞掉异常（配额满 = 一条都留不下）。
+// 两道闸都在落盘与加载时生效，且"至少保留一条最新现场"——宁可少留历史，
+// 也不能把刚发生的错误一起裁掉。
+const MAX_ENTRY_AGE_MS = 7 * 24 * 60 * 60 * 1000
+const MAX_STORED_BYTES = 128 * 1024
+
+// 错误对象经常是 AxiosError 的普通对象副本。请求配置、请求/响应对象和
+// body/header 是排障时最容易携带口令、令牌和 Cookie 的部分，不能进入任何
+// 本地缓冲或外发负载。这里按键整体丢弃，而不是把值替换成 ***，避免
+// config.data 等深层结构被误认为可安全保留。
+const DROPPED_OBJECT_KEYS = new Set([
+  'config',
+  'data',
+  'headers',
+  'request',
+  'response',
+  'cookie',
+  'cookies',
+])
+
+// 普通对象 rejection 只保留错误摘要字段。detail 允许保留，
+// 但其嵌套值仍会经过同一递归清洗，既保留定位信息又不复制任意业务对象。
+const SAFE_REASON_KEYS = new Set([
+  'name',
+  'message',
+  'code',
+  'status',
+  'status_text',
+  'url',
+  'pathname',
+  'detail',
+  'type',
+])
 
 // L-11：上报 URL 前对 query/hash 做敏感值打码。
 //
@@ -186,17 +229,55 @@ function forwardToSentry(entry) {
   })
 }
 
+/**
+ * 按保留期与体积预算裁剪缓冲（纯函数，便于直接测边界）
+ *
+ * 顺序有意义：先按时间淘汰（过期条目无论多新都该走），再按体积从最旧开始丢，
+ * 直到落回预算内。`length > 1` 的守卫保证最新一条永远留下——把"刚出错"的现场
+ * 和"上周的旧账"一起裁掉，等于用生命周期限制毁掉排障能力。
+ *
+ * 时间戳不可解析（历史格式或人工写入）时**不**按时间淘汰：读不懂时间不等于
+ * 证据该删，它仍受条数与体积上限约束。
+ * @param {Array<object>} entries 现有缓冲（按时间升序）
+ * @returns {Array<object>} 裁剪后的新数组（不改入参）
+ */
+function pruneEntries(entries) {
+  const now = Date.now()
+  const fresh = entries.filter((entry) => {
+    const ts = Date.parse(entry && entry.t)
+    return Number.isNaN(ts) ? true : now - ts <= MAX_ENTRY_AGE_MS
+  })
+  while (fresh.length > 1 && JSON.stringify(fresh).length > MAX_STORED_BYTES) {
+    fresh.shift()
+  }
+  return fresh
+}
+
 function loadStored() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     const parsed = raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    const loaded = parsed
+      .slice(-MAX_STORED)
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+        const safe = sanitizeValue(entry)
+        return safe && typeof safe === 'object' && !Array.isArray(safe) ? safe : null
+      })
+      .filter(Boolean)
+    // 加载时就要裁：条数滚动只发生在 push 路径，过期条目否则会被原样写回，
+    // 一直占着配额直到被新错误挤掉
+    return pruneEntries(loaded)
   } catch (_) {
     return []
   }
 }
 
 function persist() {
+  // 落盘前裁一次：既保证配额不被旧账吃掉，也保证"已经写进 localStorage 的东西"
+  // 满足保留期承诺（只在上报侧打码、不在存储侧过期，等于泄露窗口无限长）
+  stored = pruneEntries(stored)
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(stored))
   } catch (_) {
@@ -213,25 +294,178 @@ function truncate(value, max) {
 // 逐个抽出按 query/hash 规则打码后再截断，避免凭据经自由文本字段绕过 redactUrl
 function redactInlineUrls(value) {
   const text = typeof value === 'string' ? value : String(value ?? '')
-  return text.replace(/https?:\/\/[^\s"'<>]+/gi, (url) => redactUrl(url))
+  return (
+    text
+      .replace(/https?:\/\/[^\s"'<>]+/gi, (url) => redactUrl(url))
+      // API errors often contain a relative endpoint (`POST /auth/refresh?...`).
+      // Handle it as well so absolute-URL-only matching cannot leave a token in
+      // a short message or stack.
+      .replace(/\/[^\s"'<>?#]+(?:\?[^\s"'<>#]*)?(?:#[^\s"'<>]*)?/g, (url) =>
+        url.includes('?') || url.includes('#') ? redactUrl(url) : url
+      )
+      .replace(/#[^\s"'<>]+/g, (hash) => redactUrl(hash))
+  )
+}
+
+const normalizeObjectKey = (key) =>
+  String(key)
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '')
+
+const isSensitiveObjectKey = (key) => {
+  const normalized = normalizeObjectKey(key)
+  if (DROPPED_OBJECT_KEYS.has(normalized)) return true
+  // `code` is a safe error code, but mfaCode/accessCode and similar compound
+  // fields are credentials and must still be discarded.
+  if (normalized === 'code') return false
+  return (
+    SENSITIVE_QUERY_KEYS.some(
+      (s) =>
+        normalized === s ||
+        normalized.endsWith(`_${s}`) ||
+        normalized.startsWith(`${s}_`) ||
+        normalized.includes(`_${s}_`)
+    ) ||
+    [
+      'password',
+      'currentpassword',
+      'newpassword',
+      'mfacode',
+      'token',
+      'refreshtoken',
+      'secret',
+      'apikey',
+    ].some((s) => normalized.replace(/_/g, '').includes(s))
+  )
+}
+
+// Error messages can contain a serialized fragment such as
+// `password=...` even when the surrounding value is only a string. Keep this
+// last-resort scrub in addition to object-key filtering and URL redaction.
+function redactSensitiveText(value) {
+  const text = typeof value === 'string' ? value : String(value ?? '')
+  return text
+    .replace(
+      /["']?(password|passwd|pwd|access[_-]?token|refresh[_-]?token|token|secret|api[_-]?key|authorization|cookie|enc[_-]?password)["']?\s*([:=])\s*(?:"[^"]*"|'[^']*'|[^\s,;}&]+)/gi,
+      '$1$2***'
+    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\-/]+=*/gi, 'Bearer ***')
+}
+
+function safePathname(value) {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  try {
+    const origin =
+      typeof location !== 'undefined' && location.origin ? location.origin : 'http://localhost'
+    return new URL(value, origin).pathname || '/'
+  } catch (_) {
+    // Keep only the path prefix when an invalid URL is supplied. Query/hash
+    // content is intentionally discarded rather than returned for debugging.
+    return truncate(value.split(/[?#]/, 1)[0], MAX_MESSAGE_LEN)
+  }
+}
+
+function sanitizeValue(value, depth = 0, seen = new WeakSet(), key = '') {
+  if (value === null || value === undefined) return value
+  if (typeof value === 'string') {
+    const text =
+      key === 'url' || key === 'file' || key === 'href'
+        ? redactUrl(value)
+        : redactSensitiveText(redactInlineUrls(value))
+    // stack 必须用更宽的上限：record 阶段按 MAX_STACK_LEN(2000) 截断并落盘，
+    // 若加载时按 MAX_MESSAGE_LEN(500) 再截一次，同一份留档在刷新前后内容不同
+    // （内存里 2000 字符、读回只剩 500），排障时对不上号。
+    return truncate(text, key === 'stack' ? MAX_STACK_LEN : MAX_MESSAGE_LEN)
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value
+  if (typeof value === 'bigint') return String(value)
+  if (typeof value !== 'object') return String(value)
+  if (depth >= MAX_SANITIZE_DEPTH) return '[深度超限]'
+  if (seen.has(value)) return '[循环引用]'
+  seen.add(value)
+
+  try {
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? '[无效时间]' : value.toISOString()
+    }
+    if (Array.isArray(value)) {
+      return value.slice(0, MAX_SANITIZE_ITEMS).map((item) => sanitizeValue(item, depth + 1, seen))
+    }
+
+    const cleaned = {}
+    let count = 0
+    for (const [childKey, childValue] of Object.entries(value)) {
+      if (count >= MAX_SANITIZE_KEYS || childKey === 'toJSON') break
+      if (isSensitiveObjectKey(childKey)) continue
+      Object.defineProperty(cleaned, childKey, {
+        value: sanitizeValue(childValue, depth + 1, seen, normalizeObjectKey(childKey)),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
+      count += 1
+    }
+    return cleaned
+  } catch (_) {
+    return '[不可序列化]'
+  } finally {
+    seen.delete(value)
+  }
+}
+
+function sanitizeReasonObject(reason) {
+  const isAxiosLike =
+    reason?.isAxiosError === true ||
+    reason?.name === 'AxiosError' ||
+    Object.prototype.hasOwnProperty.call(reason, 'config') ||
+    Object.prototype.hasOwnProperty.call(reason, 'request') ||
+    Object.prototype.hasOwnProperty.call(reason, 'response')
+
+  if (!isAxiosLike) {
+    const safe = {}
+    for (const [key, value] of Object.entries(reason)) {
+      const normalized = normalizeObjectKey(key)
+      if (!SAFE_REASON_KEYS.has(normalized) || isSensitiveObjectKey(key)) continue
+      Object.defineProperty(safe, key, {
+        value: sanitizeValue(value, 0, new WeakSet(), normalized),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
+    }
+    return safe
+  }
+
+  const safe = {}
+  const response = reason.response && typeof reason.response === 'object' ? reason.response : null
+  const config = reason.config && typeof reason.config === 'object' ? reason.config : null
+  const set = (key, value) => {
+    if (value === undefined || value === null || value === '') return
+    Object.defineProperty(safe, key, {
+      value: key === 'url' ? safePathname(value) : sanitizeValue(value, 0, new WeakSet(), key),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+  }
+
+  set('name', reason.name)
+  set('code', reason.code)
+  set('status', reason.status ?? response?.status)
+  set('statusText', reason.statusText ?? response?.statusText)
+  set('message', reason.message)
+  set('url', reason.url ?? config?.url ?? response?.config?.url)
+  return safe
 }
 
 // extra 来自各调用点，键名不受控：先按 URL 字段打码，且它不得覆盖 record
 // 自己生成的受控字段（否则 { url: 原始地址 } 会盖掉已脱敏的 entry.url）
 function sanitizeExtra(extra) {
   if (!extra || typeof extra !== 'object') return {}
-  const safe = {}
-  for (const [key, value] of Object.entries(extra)) {
-    if (key === 'url' || key === 'file') {
-      const text = typeof value === 'string' ? value : String(value ?? '')
-      safe[key] = truncate(redactUrl(text), MAX_MESSAGE_LEN)
-    } else if (typeof value === 'string') {
-      safe[key] = truncate(value, MAX_MESSAGE_LEN)
-    } else {
-      safe[key] = value
-    }
-  }
-  return safe
+  const safe = sanitizeValue(extra)
+  return safe && typeof safe === 'object' && !Array.isArray(safe) ? safe : {}
 }
 
 function entryKey(entry) {
@@ -243,8 +477,8 @@ function record(kind, message, stack = '', extra = {}) {
     ...sanitizeExtra(extra),
     t: new Date().toISOString(),
     kind,
-    message: truncate(redactInlineUrls(message), MAX_MESSAGE_LEN),
-    stack: truncate(redactInlineUrls(stack), MAX_STACK_LEN),
+    message: truncate(redactSensitiveText(redactInlineUrls(message)), MAX_MESSAGE_LEN),
+    stack: truncate(redactSensitiveText(redactInlineUrls(stack)), MAX_STACK_LEN),
     // L-11：原为 location.href 原样留档，query/hash 里的凭据会随之落盘并外发
     url: redactUrl(location.href),
     count: 1,
@@ -329,15 +563,23 @@ function flush() {
 export const __isFlushInFlight = () => flushInFlight
 
 function describeReason(reason) {
-  if (reason instanceof Error) return { message: reason.message, stack: reason.stack || '' }
-  if (typeof reason === 'object' && reason !== null) {
-    try {
-      return { message: JSON.stringify(reason), stack: '' }
-    } catch (_) {
-      return { message: String(reason), stack: '' }
+  if (reason instanceof Error) {
+    return {
+      message: redactSensitiveText(reason.message),
+      stack: redactSensitiveText(reason.stack || ''),
     }
   }
-  return { message: String(reason), stack: '' }
+  if (typeof reason === 'object' && reason !== null) {
+    try {
+      const safe = sanitizeReasonObject(reason)
+      const message = JSON.stringify(safe)
+      const stack = typeof reason.stack === 'string' ? redactSensitiveText(reason.stack) : ''
+      return { message: message === '{}' ? '[object Object]' : message, stack }
+    } catch (_) {
+      return { message: redactSensitiveText(String(reason)), stack: '' }
+    }
+  }
+  return { message: redactSensitiveText(String(reason)), stack: '' }
 }
 
 export function initErrorHandling(app) {
@@ -345,8 +587,14 @@ export function initErrorHandling(app) {
 
   app.config.errorHandler = (error, _instance, info) => {
     const message = error instanceof Error ? error.message : String(error)
-    record('vue', message, error instanceof Error ? error.stack || '' : '', { info })
-    console.error('[errorHandler]', info, error)
+    const stack = error instanceof Error ? error.stack || '' : ''
+    record('vue', message, stack, { info })
+    // 控制台也可能被浏览器扩展、远程调试或支持工具采集，不能直接打印
+    // AxiosError（其中可能挂着 config/data/headers/request/response）。
+    console.error('[errorHandler]', info, {
+      message: truncate(redactSensitiveText(redactInlineUrls(message)), MAX_MESSAGE_LEN),
+      stack: truncate(redactSensitiveText(redactInlineUrls(stack)), MAX_STACK_LEN),
+    })
   }
 
   window.addEventListener(

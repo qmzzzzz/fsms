@@ -385,3 +385,174 @@ describe('errorReporter 缓冲与负载边界（H-1）', () => {
     expect(captureMessage).not.toHaveBeenCalled()
   })
 })
+
+describe('F-03：rejection reason 与嵌套上下文安全摘要', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  const fixtures = [
+    [
+      '登录失败',
+      {
+        name: 'AxiosError',
+        code: 'ERR_BAD_REQUEST',
+        message: 'login failed',
+        config: {
+          url: 'https://api.example.test/auth/login?next=%2Fhome',
+          data: { username: 'alice', password: 'login-password' },
+          headers: { Authorization: 'Bearer login-token' },
+        },
+        response: { status: 401, statusText: 'Unauthorized', data: { token: 'response-token' } },
+        request: { socket: { cookie: 'session-cookie' } },
+      },
+      '/auth/login',
+      ['login-password', 'login-token', 'response-token', 'session-cookie'],
+    ],
+    [
+      '修改密码失败',
+      {
+        name: 'AxiosError',
+        code: 'ERR_BAD_REQUEST',
+        message: 'password update failed',
+        config: {
+          url: '/api/auth/password',
+          data: { currentPassword: 'old-password', newPassword: 'new-password' },
+          headers: { authorization: 'Bearer password-token' },
+        },
+        response: { status: 400, data: { detail: 'password rejected' } },
+      },
+      '/api/auth/password',
+      ['old-password', 'new-password', 'password-token'],
+    ],
+    [
+      '刷新 token 失败',
+      {
+        name: 'AxiosError',
+        code: 'ERR_BAD_RESPONSE',
+        message: 'refresh failed',
+        config: {
+          url: '/api/auth/refresh?refresh_token=refresh-url-token',
+          data: { refreshToken: 'refresh-body-token' },
+        },
+        response: { status: 401 },
+      },
+      '/api/auth/refresh',
+      ['refresh-url-token', 'refresh-body-token'],
+    ],
+    [
+      '普通对象 rejection',
+      {
+        code: 'VALIDATION_FAILED',
+        detail: { field: 'password', message: 'invalid value' },
+        metadata: { token: 'generic-token' },
+        arbitrary: 'must be dropped',
+      },
+      undefined,
+      ['generic-token', 'must be dropped'],
+    ],
+  ]
+
+  test.each(fixtures)(
+    '%s 只保留安全摘要，并且本地与出站负载都无敏感值',
+    async (_label, reason, expectedPath, secrets) => {
+      const fetchMock = vi.fn(() => Promise.resolve({ ok: true }))
+      vi.stubGlobal('fetch', fetchMock)
+      Object.defineProperty(navigator, 'sendBeacon', { value: undefined, configurable: true })
+      const { mod } = await setup({ reportUrl: 'https://collect.example/ingest' })
+
+      const event = new Event('unhandledrejection')
+      event.reason = reason
+      window.dispatchEvent(event)
+
+      const entry = mod.getLoggedErrors().find((item) => item.kind === 'promise')
+      expect(entry).toBeDefined()
+      const stored = localStorage.getItem('fsrbac.errorLog')
+      expect(stored).toBeTruthy()
+      triggerFlush()
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+      const payload = fetchMock.mock.calls[0][1].body
+
+      for (const secret of secrets) {
+        expect(stored).not.toContain(secret)
+        expect(payload).not.toContain(secret)
+        expect(JSON.stringify(entry)).not.toContain(secret)
+      }
+      expect(entry.message).not.toContain('config')
+      expect(entry.message).not.toContain('request')
+      expect(entry.message).not.toContain('response')
+      expect(entry.message).not.toContain('headers')
+      expect(entry.message).not.toContain('data')
+
+      const summary = JSON.parse(entry.message)
+      if (expectedPath) {
+        expect(summary.url).toBe(expectedPath)
+        expect(summary.status).toBeDefined()
+      } else {
+        expect(summary.code).toBe('VALIDATION_FAILED')
+        expect(summary.detail).toEqual({ field: 'password', message: 'invalid value' })
+        expect(summary.arbitrary).toBeUndefined()
+      }
+    }
+  )
+
+  test('reportDegradation 的嵌套 extra 也递归清洗', async () => {
+    const { mod } = await setup()
+    mod.reportDegradation('nested context', {
+      context: { password: 'nested-password', safe: 'kept' },
+      attempts: [{ authorization: 'nested-token', count: 1 }],
+    })
+
+    const entry = mod.getLoggedErrors()[0]
+    expect(entry.context).toEqual({ safe: 'kept' })
+    expect(entry.attempts).toEqual([{ count: 1 }])
+    expect(JSON.stringify(entry)).not.toContain('nested-password')
+    expect(JSON.stringify(entry)).not.toContain('nested-token')
+  })
+
+  test('读取旧版 localStorage 缓冲时也清洗历史敏感字段', async () => {
+    localStorage.setItem(
+      'fsrbac.errorLog',
+      JSON.stringify([
+        {
+          kind: 'promise',
+          message: '{"config":{"data":{"password":"old-password"}}}',
+          stack: 'at /auth/refresh?refresh_token=old-token',
+          url: '/auth/login?token=old-url-token',
+          config: { data: { password: 'old-password' } },
+        },
+      ])
+    )
+
+    const { mod } = await setup()
+    const entries = mod.getLoggedErrors()
+    expect(entries).toHaveLength(1)
+    expect(JSON.stringify(entries)).not.toContain('old-password')
+    expect(JSON.stringify(entries)).not.toContain('old-token')
+    expect(JSON.stringify(entries)).not.toContain('old-url-token')
+    expect(entries[0].url).toBe('/auth/login?token=***')
+  })
+
+  test('Vue errorHandler 不把带 config 的原始错误对象写入控制台', async () => {
+    const { app } = await setup()
+    const error = new Error('login failed password=console-password')
+    error.config = {
+      data: { password: 'console-password' },
+      headers: { authorization: 'console-token' },
+    }
+
+    app.config.errorHandler(error, null, 'render')
+
+    const consoleArgs = console.error.mock.calls.at(-1)
+    expect(JSON.stringify(consoleArgs)).not.toContain('console-password')
+    expect(JSON.stringify(consoleArgs)).not.toContain('console-token')
+    expect(consoleArgs[2]).not.toHaveProperty('config')
+  })
+})
