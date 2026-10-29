@@ -20,6 +20,9 @@ import i18n from './i18n'
 import { useAppStore, useAuthStore } from './store'
 import { initSessionSync } from './utils/sessionSync'
 import { initErrorHandling } from './utils/errorReporter'
+import { registerSW } from 'virtual:pwa-register'
+import { markUpdateAvailable, setUpdateApplier } from './utils/updateNotice'
+import { startVersionWatcher } from './utils/versionWatcher'
 
 // 全局样式
 import '@/assets/styles/global.css'
@@ -76,3 +79,22 @@ app.use(i18n)
 
 // 挂载应用
 app.mount('#app')
+
+// —— 热升级（2026-10-30）——
+// 两条来源汇到同一处 updateNotice，界面由 UpdateNoticeBar 消费：
+//   1. SW 报 onNeedRefresh：前端资源本身有新版本；
+//   2. /api/version 的 buildId 与本页不一致：服务端已换版（蓝绿切流）。
+// 只有 PROD 才装配：开发态没有 APP_BUILD_ID，比对只会产生噪音；
+// 而 vite dev 下也不存在可注册的 SW（见上方清理逻辑）。
+if (import.meta.env.PROD) {
+  // registerType 已改为 'prompt'（vite.config.js），新 SW 会停在 waiting，
+  // 必须由 updateSW(true) 显式激活后再 reload——直接 location.reload() 有可能
+  // 又拿回旧缓存，表现为「点了刷新还是旧界面」。
+  const updateSW = registerSW({
+    onNeedRefresh() {
+      markUpdateAvailable('service-worker')
+    },
+  })
+  setUpdateApplier(() => updateSW(true))
+  startVersionWatcher()
+}

@@ -1,5 +1,7 @@
 <template>
   <el-config-provider :locale="epLocale">
+    <!-- 热升级提示条：服务端换版或前端资源有新版本时出现在底部，由用户决定何时刷新 -->
+    <UpdateNoticeBar />
     <router-view />
   </el-config-provider>
 </template>
@@ -7,6 +9,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import UpdateNoticeBar from '@/components/UpdateNoticeBar.vue'
 // 必须走 es/locale/lang 深路径：Element Plus 的 useLocale 内部已静态引入
 // es/locale/lang/en.mjs 作为缺省语言，若这里再从 dist/locale 引入，同一份
 // 语言包会在首屏打包两遍（实测 en 重复约 4.7KB 源码，直接顶爆首屏 gzip 预算）。

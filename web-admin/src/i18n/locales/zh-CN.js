@@ -191,6 +191,12 @@ export default {
     // t() 取用，避免硬编码中文（第 34 轮 L2）
     routeChangeCancel: '路由切换，取消在途请求',
   },
+  // 热升级提示：服务端已换版或前端资源有新版本时出现在底部
+  updateNotice: {
+    message: '系统已更新到新版本，刷新后生效',
+    refresh: '立即刷新',
+    dismiss: '稍后再说',
+  },
   nav: {
     dashboard: '仪表盘',
     devices: '设备管理',

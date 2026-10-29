@@ -81,6 +81,7 @@ declare module 'vue' {
     SecurityInfoCard: typeof import('./components/SecurityInfoCard.vue')['default']
     SecurityStatsCard: typeof import('./components/SecurityStatsCard.vue')['default']
     SessionManager: typeof import('./components/SessionManager.vue')['default']
+    UpdateNoticeBar: typeof import('./components/UpdateNoticeBar.vue')['default']
   }
   export interface GlobalDirectives {
     vLoading: typeof import('element-plus/es/components/loading/index.mjs')['ElLoadingDirective']

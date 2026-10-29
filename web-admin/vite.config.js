@@ -432,6 +432,15 @@ export default defineConfig(({ command, mode }) => {
     fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')
   ).version
 
+  // 构建标识（热升级的比对键）：必须与后端 GET /api/version 返回的 buildId 同源，
+  // 否则前端会一直认为「服务端是另一个版本」而反复提示刷新。
+  //
+  // 来源只有一处：构建期的 APP_BUILD_ID（Dockerfile 把 CI 的 GIT_SHA 同时传给
+  // 前端构建阶段与运行时阶段）。取不到时用 'dev'——**刻意不是时间戳**：
+  // 时间戳每次构建都不同，本地 `npm run build` 出来的包拿去连生产时会立刻误报更新；
+  // 'dev' 被 isComparableBuildId 判为不可比对，watcher 直接不启动。
+  const appBuildId = (process.env.APP_BUILD_ID || '').trim() || 'dev'
+
   // L1/L2 见 hardenDevServerPlugin；此处注册 L3 进程级兜底
   registerProcessGuard(command)
 
@@ -453,6 +462,7 @@ export default defineConfig(({ command, mode }) => {
     // 版本号单一事实来源（见上方 pkgVersion）：编译期常量替换，组件内不得再手抄
     define: {
       __APP_VERSION__: JSON.stringify(pkgVersion),
+      __APP_BUILD_ID__: JSON.stringify(appBuildId),
     },
     // vitest 配置（I-02 前端测试基线）：jsdom 提供 localStorage/document，
     // alias 与构建共用；PWA/安全头等插件仅服务 dev/build，测试不加载
@@ -537,7 +547,20 @@ export default defineConfig(({ command, mode }) => {
         dts: 'src/components.d.ts',
       }),
       VitePWA({
-        registerType: 'autoUpdate',
+        // 'prompt' + 手动注册（见 main.js 的 registerSW）。
+        //
+        // 原为 'autoUpdate'：SW 自行 skipWaiting + clientsClaim，并在 controllerchange
+        // 时**自动整页 reload**。用户正在填巡检表/报警单时会被直接刷掉，数据丢失且
+        // 毫无提示。升级频率低时这个坑不容易被撞见；一旦启用蓝绿热升级（一天可能数次），
+        // 它会变成常态事故。故改为「新版本就绪 → 提示 → 用户点了才生效」。
+        //
+        // 代价：新版本不再自动生效，依赖用户点「立即刷新」。为此 main.js 另外挂了
+        // GET /api/version 轮询，并在标签页重新可见时补查一次——服务端换版
+        // （蓝绿切流）即使 SW 没感知到，也能提示出来。
+        registerType: 'prompt',
+        // 手动注册：由 main.js 的 registerSW 接管（需要 onNeedRefresh 回调）。
+        // 保留 'auto' 会让同一份 SW 被注册两次（插件注入的内联脚本 + 我们的调用）。
+        injectRegister: null,
         // favicon.svg 与 manifest.webmanifest 已由下方 globPatterns 覆盖；
         // includeAssets 重复添加会导致生成的 SW 预缓存列表冲突。
         includeAssets: [],

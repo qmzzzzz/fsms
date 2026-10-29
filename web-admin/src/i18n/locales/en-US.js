@@ -185,6 +185,12 @@ export default {
     searchHintOpen: 'to open',
     routeChangeCancel: 'Route change, cancelling in-flight requests',
   },
+  // Hot-upgrade prompt: shown at the bottom when the server or the app shell has a new build
+  updateNotice: {
+    message: 'A new version is available. Refresh to apply it.',
+    refresh: 'Refresh now',
+    dismiss: 'Later',
+  },
   nav: {
     dashboard: 'Dashboard',
     devices: 'Devices',

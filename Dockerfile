@@ -85,6 +85,15 @@ COPY web-admin/ ./
 # 未传时为空（本地开发），生产/CI 从 login_ecdh_private_key 计算后传入。
 ARG VITE_LOGIN_PUBLIC_KEY_SHA256=
 ENV VITE_LOGIN_PUBLIC_KEY_SHA256=$VITE_LOGIN_PUBLIC_KEY_SHA256
+# 热升级：前端构建标识必须与运行时 GET /api/version 的 buildId **同源**，
+# 否则前端会一直认为「服务端是另一个版本」而反复提示刷新（或反过来永远不提示）。
+# 同源的做法就是两边都取 CI 传进来的同一个 GIT_SHA：
+#   · 这里把它作为 APP_BUILD_ID 传给 vite，编译期常量 __APP_BUILD_ID__；
+#   · runtime 阶段把它设为运行期 ENV，由 src/config/buildInfo.js 读取。
+# ARG 是「按阶段」生效的，所以本阶段必须重新声明一次（CI 的 build-args 对所有
+# 同名 ARG 同时生效，不需要改 workflow）。
+ARG GIT_SHA=unknown
+ENV APP_BUILD_ID=$GIT_SHA
 # vite.config.js 已显式 sourcemap: false（L-1/I-3），产物不含源码映射
 RUN npm run build
 
@@ -104,6 +113,13 @@ FROM node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb
 ARG GIT_SHA=unknown
 ARG BUILD_DATE=unknown
 ARG APP_VERSION=unknown
+# 热升级：把构建标识落到**运行期环境**，供 src/config/buildInfo.js 读取，
+# 由 GET /api/version 返回。必须与 web-builder 阶段的 APP_BUILD_ID 同源
+# （同一个 GIT_SHA），否则前端比对会恒为「不一致」而反复提示刷新。
+# 默认 unknown 会被 isComparableBuildId 判为不可比对 —— 本地 `docker build .`
+# 不传参时前端不会误报，这是刻意的。
+ENV APP_BUILD_ID=$GIT_SHA \
+    APP_BUILD_TIME=$BUILD_DATE
 # S-2：与 web-builder 同一 build-arg，转成运行期指纹后由 src/utils/loginCipher.js
 # 在 createApp 时校验——构建用的公钥与运行注入的私钥不一致时启动即失败，
 # 而不是等用户登录才发现「前端只认另一把钥匙」。
