@@ -122,6 +122,29 @@ describe('useCountUp 数字滚动', () => {
     expect(display.value).toEqual([42])
   })
 
+  test('统计数组缩短时取消移除项的 rAF 并裁剪旧显示槽位', async () => {
+    vi.resetModules()
+    vi.stubEnv('MODE', 'development')
+    const { useCountUp: devUseCountUp } = await import('@/composables/useCountUp')
+    const stats = ref([{ value: 0 }, { value: 0 }])
+    let display = null
+    await mountComposable(() => {
+      display = devUseCountUp(stats, { duration: 600 })
+    })
+    const { frames, cancelSpy } = installRafQueue()
+
+    stats.value = [{ value: 100 }, { value: 200 }]
+    await flush(2)
+    expect(frames).toHaveLength(2)
+    const removedId = frames[1].id
+
+    stats.value = [{ value: 50 }]
+    await flush(2)
+    expect(display.value).toHaveLength(1)
+    expect(cancelSpy).toHaveBeenCalledWith(removedId)
+    expect(frames.some((frame) => frame.id === removedId)).toBe(false)
+  })
+
   test('prefers-reduced-motion：development 模式下也直给终值，不建 rAF', async () => {
     vi.resetModules()
     vi.stubEnv('MODE', 'development')

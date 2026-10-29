@@ -607,6 +607,11 @@ export default {
     reasonPlaceholder: 'Optional, e.g. ops egress, attack source',
     addToBlacklist: 'Add to Blacklist',
     addToWhitelist: 'Add to Whitelist',
+    switchListConfirm: 'Move {ip} to the {target}?',
+    switchSuccess: '{ip} was added to the {target}',
+    switchFailed: 'List switch failed. Please retry.',
+    switchRestoreFailed:
+      'The switch failed and the original whitelist could not be restored. Review this IP immediately.',
     autoDetect: 'Auto-detected',
     manualConfig: 'Manual',
     effectiveStatus: 'Status',

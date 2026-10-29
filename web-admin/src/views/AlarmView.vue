@@ -494,65 +494,70 @@ const resetReportForm = () => {
 // 提交报警
 const submitReport = async () => {
   if (!reportFormRef.value) return
+  if (reportDialog.submitting) return
 
-  await reportFormRef.value.validate(async (valid) => {
+  reportDialog.submitting = true
+  try {
+    let valid = false
+    try {
+      valid = await reportFormRef.value.validate()
+    } catch (_) {
+      return
+    }
     if (!valid) return
 
-    reportDialog.submitting = true
-    try {
-      // 解析位置信息（支持格式："A栋3楼配电室" / "A 栋 3 楼 配电室"，自动忽略空白）
-      const parseLocation = (str) => {
-        const s = String(str || '')
-          .trim()
-          .replace(/\s+/g, '')
-        if (!s) return null
-        const firstDigit = s.search(/\d/)
-        // 无数字：整串视为建筑/区域名
-        if (firstDigit === -1) return { building: s, floor: '', room: '' }
-        const building = s.slice(0, firstDigit)
-        const rest = s.slice(firstDigit)
-        // 楼层 = 楼栋后的连续数字（可带 层/楼/F 后缀），其余为房间/位置描述
-        const floorMatch = rest.match(/^(\d+)(?:\s*(?:层|楼|F))?(.*)$/)
-        if (!building || !floorMatch) {
-          return { building: s, floor: '', room: '' }
-        }
-        return {
-          building,
-          floor: floorMatch[1] ? `${floorMatch[1]}层` : '',
-          room: floorMatch[2] || '',
-        }
+    // 解析位置信息（支持格式："A栋3楼配电室" / "A 栋 3 楼 配电室"，自动忽略空白）
+    const parseLocation = (str) => {
+      const s = String(str || '')
+        .trim()
+        .replace(/\s+/g, '')
+      if (!s) return null
+      const firstDigit = s.search(/\d/)
+      // 无数字：整串视为建筑/区域名
+      if (firstDigit === -1) return { building: s, floor: '', room: '' }
+      const building = s.slice(0, firstDigit)
+      const rest = s.slice(firstDigit)
+      // 楼层 = 楼栋后的连续数字（可带 层/楼/F 后缀），其余为房间/位置描述
+      const floorMatch = rest.match(/^(\d+)(?:\s*(?:层|楼|F))?(.*)$/)
+      if (!building || !floorMatch) {
+        return { building: s, floor: '', room: '' }
       }
-      const location = parseLocation(reportForm.location)
-
-      const payload = {
-        alarmType: reportForm.alarmType,
-        level: 'warning', // 默认级别为警告
-        description: reportForm.description,
-        occurredAt: new Date(), // 报警发生时间
+      return {
+        building,
+        floor: floorMatch[1] ? `${floorMatch[1]}层` : '',
+        room: floorMatch[2] || '',
       }
-
-      // 解析后的位置信息（解析失败时整串作为建筑名，避免数据污染）
-      payload.location = location || {
-        building: reportForm.location,
-        floor: '',
-        room: '',
-      }
-
-      if (reportForm.deviceId) {
-        payload.deviceId = reportForm.deviceId
-      }
-
-      await api.alarms.report(payload)
-      ElMessage.success(t('messages.createSuccess'))
-      reportDialog.visible = false
-      await refreshAll()
-    } catch (e) {
-      // 错误已在拦截器统一提示（2026-09-26 审计：此处再补泛化 toast 会双提示，
-      // 且泛化文案会覆盖拦截器给出的具体错误语义）
-    } finally {
-      reportDialog.submitting = false
     }
-  })
+    const location = parseLocation(reportForm.location)
+
+    const payload = {
+      alarmType: reportForm.alarmType,
+      level: 'warning', // 默认级别为警告
+      description: reportForm.description,
+      occurredAt: new Date(), // 报警发生时间
+    }
+
+    // 解析后的位置信息（解析失败时整串作为建筑名，避免数据污染）
+    payload.location = location || {
+      building: reportForm.location,
+      floor: '',
+      room: '',
+    }
+
+    if (reportForm.deviceId) {
+      payload.deviceId = reportForm.deviceId
+    }
+
+    await api.alarms.report(payload)
+    ElMessage.success(t('messages.createSuccess'))
+    reportDialog.visible = false
+    await refreshAll()
+  } catch (_) {
+    // 错误已在拦截器统一提示（2026-09-26 审计：此处再补泛化 toast 会双提示，
+    // 且泛化文案会覆盖拦截器给出的具体错误语义）
+  } finally {
+    reportDialog.submitting = false
+  }
 }
 
 // 处理报警（pending→派单给当前操作人；processing→登记到达现场）

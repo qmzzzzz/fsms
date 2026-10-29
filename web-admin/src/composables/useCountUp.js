@@ -17,26 +17,38 @@ const SKIP_ANIMATION = import.meta.env.MODE === 'test' || REDUCED
 export function useCountUp(statsRef, { duration = 600 } = {}) {
   const display = ref(statsRef.value.map((item) => item.value))
   const rafs = []
+  const cancelRaf = (index) => {
+    const id = rafs[index]
+    if (id !== undefined && id !== null) cancelAnimationFrame(id)
+    rafs[index] = null
+  }
 
   watch(
     statsRef,
     (next) => {
+      // A shorter refresh must cancel animations for removed cards and trim
+      // their stale display slots; otherwise RAF callbacks keep mutating
+      // detached values until the old animation completes.
+      for (let i = next.length; i < rafs.length; i += 1) cancelRaf(i)
+      rafs.length = next.length
+      if (display.value.length > next.length) display.value.length = next.length
       next.forEach((item, i) => {
         const target = item.value
         if (typeof target !== 'number' || !Number.isFinite(target) || SKIP_ANIMATION) {
-          cancelAnimationFrame(rafs[i])
+          cancelRaf(i)
           display.value[i] = target
           return
         }
         const from = typeof display.value[i] === 'number' ? display.value[i] : 0
         if (from === target) return
-        cancelAnimationFrame(rafs[i])
+        cancelRaf(i)
         const start = performance.now()
         const tick = (now) => {
           const p = Math.min(1, (now - start) / duration)
           const eased = 1 - Math.pow(1 - p, 3) // easeOutCubic：与苹果弹簧的"先快后稳"同向
           display.value[i] = Math.round(from + (target - from) * eased)
           if (p < 1) rafs[i] = requestAnimationFrame(tick)
+          else rafs[i] = null
         }
         rafs[i] = requestAnimationFrame(tick)
       })
@@ -44,7 +56,7 @@ export function useCountUp(statsRef, { duration = 600 } = {}) {
     { deep: true }
   )
 
-  onUnmounted(() => rafs.forEach((id) => cancelAnimationFrame(id)))
+  onUnmounted(() => rafs.forEach((_, index) => cancelRaf(index)))
 
   return display
 }

@@ -484,54 +484,58 @@ const handleSubmit = async () => {
   submitting.value = true
 
   try {
-    await formRef.value.validate(async (valid) => {
-      if (!valid) return
-      loading.value = true
-      try {
-        // 构建提交数据（时间串转 ISO：value-format 的本地时间串不含时区，
-        // 直接提交会被后端按 UTC 解析产生时区偏移）
-        const submitData = {
-          title: form.title,
-          inspectionType: form.inspectionType,
-          devices: form.devices,
-          locations: [],
-          checkItems: form.checkItems,
-          assignedTo: form.assignedTo,
-          planStartTime: form.planStartTime
-            ? parseLocalDateTime(form.planStartTime).toISOString()
-            : '',
-          planEndTime: form.planEndTime ? parseLocalDateTime(form.planEndTime).toISOString() : '',
-          remark: form.remark,
-        }
-
-        // 添加位置信息
-        if (form.building || form.floor || form.area) {
-          submitData.locations = [
-            {
-              building: form.building,
-              floor: form.floor,
-              area: form.area,
-            },
-          ]
-        }
-
-        if (isEdit.value) {
-          await api.inspections.update(props.editData._id, submitData)
-          ElMessage.success(t('inspection.planUpdateSuccessMsg'))
-        } else {
-          await api.inspections.create(submitData)
-          ElMessage.success(t('inspection.planCreateSuccessMsg'))
-        }
-
-        visible.value = false
-        emit('success')
-      } catch (error) {
-        // 具体原因（字段校验/权限/冲突）已由响应拦截器提示，不再叠加泛化文案
-        if (!isHandledApiError(error)) ElMessage.error(t('common.submitFailedRetry'))
-      } finally {
-        loading.value = false
+    let valid = false
+    try {
+      valid = await formRef.value.validate()
+    } catch (_) {
+      return
+    }
+    if (!valid) return
+    loading.value = true
+    try {
+      // 构建提交数据（时间串转 ISO：value-format 的本地时间串不含时区，
+      // 直接提交会被后端按 UTC 解析产生时区偏移）
+      const submitData = {
+        title: form.title,
+        inspectionType: form.inspectionType,
+        devices: form.devices,
+        locations: [],
+        checkItems: form.checkItems,
+        assignedTo: form.assignedTo,
+        planStartTime: form.planStartTime
+          ? parseLocalDateTime(form.planStartTime).toISOString()
+          : '',
+        planEndTime: form.planEndTime ? parseLocalDateTime(form.planEndTime).toISOString() : '',
+        remark: form.remark,
       }
-    })
+
+      // 添加位置信息
+      if (form.building || form.floor || form.area) {
+        submitData.locations = [
+          {
+            building: form.building,
+            floor: form.floor,
+            area: form.area,
+          },
+        ]
+      }
+
+      if (isEdit.value) {
+        await api.inspections.update(props.editData._id, submitData)
+        ElMessage.success(t('inspection.planUpdateSuccessMsg'))
+      } else {
+        await api.inspections.create(submitData)
+        ElMessage.success(t('inspection.planCreateSuccessMsg'))
+      }
+
+      visible.value = false
+      emit('success')
+    } catch (error) {
+      // 具体原因（字段校验/权限/冲突）已由响应拦截器提示，不再叠加泛化文案
+      if (!isHandledApiError(error)) ElMessage.error(t('common.submitFailedRetry'))
+    } finally {
+      loading.value = false
+    }
   } finally {
     // 校验不通过 / 请求失败 / 成功，都要解锁：否则按钮永久卡死或被后续点击绕过
     submitting.value = false

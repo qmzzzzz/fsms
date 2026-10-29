@@ -73,7 +73,7 @@
  *  - 编辑（传入 role）：预填并 PUT /roles/:id，成功后 emit('updated', updatedRole)
  * 列表刷新、选中态维护归父组件。
  */
-import { computed, ref, reactive, watch } from 'vue'
+import { computed, ref, reactive, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api } from '@/utils/api'
@@ -148,6 +148,9 @@ const resetForm = () => {
   form.code = ''
   form.description = ''
   formRef.value?.clearValidate()
+  // validate() may still be settling when the dialog closes; clear once more
+  // on the following tick so its async result cannot leave stale red states.
+  nextTick(() => formRef.value?.clearValidate())
 }
 
 // 打开时按模式初始化：编辑模式用 role 回填，新增模式清空。
@@ -178,39 +181,43 @@ const submit = async () => {
   if (submitting.value) return
   submitting.value = true
   try {
-    await formRef.value.validate(async (valid) => {
-      if (!valid) return
-      try {
-        if (isEdit.value) {
-          const target = props.role
-          // 内置角色禁发 name：后端对「内置角色 + name!==undefined」直接 400
-          // （BUILTIN_ROLE_NAME_LEVEL_LOCKED），只把 description 送出去；
-          // level/status 不在本表单职责内，一律不发。
-          const payload = target.isBuiltIn
-            ? { description: form.description }
-            : { name: form.name, description: form.description }
-          const res = await api.roles.update(target._id, payload)
-          ElMessage.success(t('messages.updateSuccess'))
-          emit('update:visible', false)
-          resetForm()
-          const updatedRole = res?.data?.data
-          if (updatedRole) emit('updated', updatedRole)
-        } else {
-          const res = await api.roles.create({
-            name: form.name,
-            code: form.code,
-            description: form.description,
-          })
-          ElMessage.success(t('messages.createSuccess'))
-          emit('update:visible', false)
-          resetForm()
-          const newRole = res?.data?.data
-          if (newRole) emit('created', newRole)
-        }
-      } catch (_) {
-        // 错误已在拦截器处理
+    let valid = false
+    try {
+      valid = await formRef.value.validate()
+    } catch (_) {
+      return
+    }
+    if (!valid) return
+    try {
+      if (isEdit.value) {
+        const target = props.role
+        // 内置角色禁发 name：后端对「内置角色 + name!==undefined」直接 400
+        // （BUILTIN_ROLE_NAME_LEVEL_LOCKED），只把 description 送出去；
+        // level/status 不在本表单职责内，一律不发。
+        const payload = target.isBuiltIn
+          ? { description: form.description }
+          : { name: form.name, description: form.description }
+        const res = await api.roles.update(target._id, payload)
+        ElMessage.success(t('messages.updateSuccess'))
+        emit('update:visible', false)
+        resetForm()
+        const updatedRole = res?.data?.data
+        if (updatedRole) emit('updated', updatedRole)
+      } else {
+        const res = await api.roles.create({
+          name: form.name,
+          code: form.code,
+          description: form.description,
+        })
+        ElMessage.success(t('messages.createSuccess'))
+        emit('update:visible', false)
+        resetForm()
+        const newRole = res?.data?.data
+        if (newRole) emit('created', newRole)
       }
-    })
+    } catch (_) {
+      // 错误已在拦截器处理
+    }
   } finally {
     // 覆盖校验未通过（callback 未被调用）与校验链抛错两条路径，确保解锁
     submitting.value = false

@@ -288,24 +288,28 @@ const submit = async () => {
   if (submitting.value) return
   submitting.value = true
   try {
-    await formRef.value.validate(async (valid) => {
-      if (!valid) return
-      try {
-        const payload = {
-          targetType: form.targetType,
-          reason: form.reason.trim(),
-        }
-        if (form.targetType !== 'system') payload.targetId = form.targetId
-        const description = form.description.trim()
-        if (description) payload.description = description
-        await api.security.report(payload)
-        ElMessage.success(t('security.reportSuccess'))
-        emit('update:visible', false)
-        resetForm()
-      } catch (_) {
-        // 错误已在拦截器处理（含目标不存在/越权等码化文案）
+    let valid = false
+    try {
+      valid = await formRef.value.validate()
+    } catch (_) {
+      return
+    }
+    if (!valid) return
+    try {
+      const payload = {
+        targetType: form.targetType,
+        reason: form.reason.trim(),
       }
-    })
+      if (form.targetType !== 'system') payload.targetId = form.targetId
+      const description = form.description.trim()
+      if (description) payload.description = description
+      await api.security.report(payload)
+      ElMessage.success(t('security.reportSuccess'))
+      emit('update:visible', false)
+      resetForm()
+    } catch (_) {
+      // 错误已在拦截器处理（含目标不存在/越权等码化文案）
+    }
   } finally {
     // 覆盖校验未通过与校验链抛错两条路径，确保解锁
     submitting.value = false

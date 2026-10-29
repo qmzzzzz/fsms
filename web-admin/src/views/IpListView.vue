@@ -129,7 +129,7 @@
             type="button"
             class="glass-btn glass-btn--primary"
             :class="{ 'glass-btn--danger': listType === 'black' }"
-            :disabled="adding"
+            :disabled="adding || switchingId !== null"
             @click="handleAdd"
           >
             {{
@@ -232,12 +232,24 @@
         </el-table-column>
         <!-- 权限门控与路由 meta / 后端 DELETE 同一权限码：会话期内权限被热回收时，
              按钮随之消失，而不是留着让用户点一次 403（上方「加入名单」同此门控） -->
-        <el-table-column :label="$t('common.operation')" width="100" fixed="right">
+        <el-table-column :label="$t('common.operation')" width="210" fixed="right">
           <template #default="{ row }">
             <button
               v-if="hasPerm('security:config')"
               type="button"
+              class="glass-btn glass-btn--primary switch-btn"
+              :disabled="switchingId !== null"
+              @click="handleSwitchList(row)"
+            >
+              {{
+                row.type === 'black' ? $t('security.addToWhitelist') : $t('security.addToBlacklist')
+              }}
+            </button>
+            <button
+              v-if="hasPerm('security:config')"
+              type="button"
               class="glass-btn glass-btn--danger glass-btn--link"
+              :disabled="switchingId !== null"
               @click="handleRemove(row)"
             >
               {{ $t('common.remove') }}
@@ -496,6 +508,8 @@ const handleSizeChange = () => {
 // 新增重入锁：同 handleQuery，adding 要等 DOM 重渲染才对按钮生效
 // （实测同一 tick 三次连点发出 3 个 POST，名单会被重复写入三次）
 const addSubmitting = ref(false)
+// 名单切换重入锁：跨名单操作包含多个写请求，整个流程期间禁用所有行操作。
+const switchingId = ref(null)
 
 const handleAdd = async () => {
   if (addSubmitting.value) return
@@ -557,6 +571,93 @@ const handleRemove = async (row) => {
       // 具体原因已由响应拦截器提示，组件不再叠加一条泛化「删除失败」
       if (!isHandledApiError(e)) ElMessage.error(t('messages.deleteFailed'))
     }
+  }
+}
+
+// 计算切换时沿用原条目的剩余时长，避免“加入另一名单”意外从临时规则变成永久规则。
+const remainingDurationHours = (row) => {
+  if (!row?.expiresAt) return 0
+  const remainingMs = new Date(row.expiresAt).getTime() - Date.now()
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) return 1
+  return Math.min(8760, Math.max(1, Math.ceil(remainingMs / (60 * 60 * 1000))))
+}
+
+const switchReason = (row, type) => {
+  const fallback = type === 'white' ? 'trusted_source' : 'manual_configuration'
+  return String(row?.reason || fallback).slice(0, 200)
+}
+
+// 将当前条目切换到另一侧名单。黑转白可直接复用 POST（后端会先写白再解除同 IP 黑名单）；
+// 白转黑先移除白名单再新增黑名单，新增失败时恢复原白名单，避免请求中断造成放行窗口。
+const handleSwitchList = async (row) => {
+  if (!row?._id || switchingId.value !== null) return
+  const targetType = row.type === 'black' ? 'white' : 'black'
+  const targetLabel = targetType === 'black' ? t('security.blacklist') : t('security.whitelist')
+  try {
+    await ElMessageBox.confirm(
+      t('security.switchListConfirm', { ip: row.ip, target: targetLabel }),
+      t('messages.confirmTitle'),
+      { type: 'warning' }
+    )
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close' && !isHandledApiError(e)) {
+      ElMessage.error(t('security.switchFailed'))
+    }
+    return
+  }
+
+  switchingId.value = row._id
+  const payload = {
+    ip: row.ip,
+    type: targetType,
+    reason: switchReason(row, targetType),
+    durationHours: remainingDurationHours(row),
+  }
+  const restoreOriginalWhitelist = async () => {
+    try {
+      await apiClient.post('/security/ip-list', {
+        ...payload,
+        type: 'white',
+        reason: switchReason(row, 'white'),
+      })
+      return true
+    } catch (restoreError) {
+      ElMessage.error(t('security.switchRestoreFailed'))
+      return false
+    }
+  }
+
+  try {
+    if (targetType === 'white') {
+      await apiClient.post('/security/ip-list', payload)
+    } else {
+      try {
+        await apiClient.delete(`/security/ip-list/${row._id}`)
+      } catch (e) {
+        // 网络错误或 5xx 时删除结果可能未知：先恢复白名单再结束，避免出现放行窗口。
+        if (!e?.response || e.response.status >= 500) await restoreOriginalWhitelist()
+        throw e
+      }
+      try {
+        await apiClient.post('/security/ip-list', payload)
+      } catch (e) {
+        // 原白名单恢复失败必须显式告警，便于管理员立即复核该 IP 的实际判定。
+        await restoreOriginalWhitelist()
+        throw e
+      }
+    }
+
+    ElMessage.success(t('security.switchSuccess', { ip: row.ip, target: targetLabel }))
+    // 查询模式保持当前查询；普通模式刷新当前名单，确保已切换条目立即消失。
+    if (queryMode.value) {
+      await handleQuery()
+    } else {
+      await loadData()
+    }
+  } catch (e) {
+    if (!isHandledApiError(e)) ElMessage.error(t('security.switchFailed'))
+  } finally {
+    switchingId.value = null
   }
 }
 

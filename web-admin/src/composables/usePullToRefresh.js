@@ -73,10 +73,18 @@ export function usePullToRefresh(targetRef, onRefresh) {
       haptic(15)
       refreshing.value = true
       y.value = TRIGGER_THRESHOLD
-      onRefresh?.().finally(() => {
-        y.value = 0
-        refreshing.value = false
-      })
+      let refreshResult
+      try {
+        refreshResult = onRefresh?.()
+      } catch (_) {
+        refreshResult = undefined
+      }
+      Promise.resolve(refreshResult)
+        .catch(() => {})
+        .finally(() => {
+          y.value = 0
+          refreshing.value = false
+        })
     } else {
       y.value = 0
     }

@@ -10,6 +10,38 @@ import { VitePWA } from 'vite-plugin-pwa'
 // ESM 兼容：获取 __dirname
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
+const allowedHosts = (process.env.VITE_ALLOWED_HOSTS || 'localhost,127.0.0.1')
+  .split(',')
+  .map((host) => host.trim())
+  .filter(Boolean)
+
+// HTTPS is a security boundary for the admin UI. A missing certificate must
+// stop production/preview startup instead of silently changing the protocol.
+// Local development may explicitly opt in to the old fallback for certificate
+// bootstrapping by setting ALLOW_HTTP_FALLBACK=true.
+const readHttpsOptions = (scope) => {
+  const certPath = process.env.TLS_CERT_PATH || '../certs/server.crt'
+  const keyPath = process.env.TLS_KEY_PATH || '../certs/server.key'
+  try {
+    const options = {
+      cert: fs.readFileSync(certPath),
+      key: fs.readFileSync(keyPath),
+    }
+    console.info(`[vite] ${scope} HTTPS enabled`)
+    return options
+  } catch (error) {
+    const detail = `[vite] ${scope} HTTPS 证书读取失败`
+    if (process.env.ALLOW_HTTP_FALLBACK === 'true') {
+      console.warn(`${detail}，ALLOW_HTTP_FALLBACK=true，仍以 HTTP 启动：`, error.message)
+      return undefined
+    }
+    throw new Error(
+      `${detail}，已拒绝以 HTTP 启动。请配置 TLS_CERT_PATH/TLS_KEY_PATH，或仅在本地显式设置 ALLOW_HTTP_FALLBACK=true。`,
+      { cause: error }
+    )
+  }
+}
+
 // ── Element Plus 深路径按需引入 ────────────────────────────────────────────
 // 官方 ElementPlusResolver 的 from 硬编码为 'element-plus/es'（全量入口），
 // 于是所有组件都从同一个聚合模块引入。rollup 的 chunk 分配以模块为单位，
@@ -545,9 +577,9 @@ export default defineConfig(({ command, mode }) => {
       // 暴露到整个局域网。确需手机真机联调时显式执行 `vite --host 0.0.0.0`。
       host: '127.0.0.1',
       port: 3001,
-      // 预览域名放行：open preview 经代理访问时 Host 不是 localhost，
-      // Vite 的 Host 校验会把请求挡成 403。
-      allowedHosts: ['.monkeycode-ai.online'],
+      // 仅放行显式配置的开发/预览 Host；不要使用整个第三方子域通配符。
+      // 通过代理打开预览时，在启动前设置 VITE_ALLOWED_HOSTS=preview.example.com。
+      allowedHosts,
       // 收紧 dev server CORS（回应外部报告 #2）：Vite 默认用宽松正则反射任意
       // localhost 系 Origin（含 *.localhost 子域），显式收敛为开发白名单。
       // 同源访问（含局域网 IP 直连本页面加载模块/HMR）不经 CORS 校验，不受影响；
@@ -572,17 +604,7 @@ export default defineConfig(({ command, mode }) => {
       },
       ...(process.env.HTTPS === 'true'
         ? {
-            https: (() => {
-              try {
-                return {
-                  cert: fs.readFileSync(process.env.TLS_CERT_PATH || '../certs/server.crt'),
-                  key: fs.readFileSync(process.env.TLS_KEY_PATH || '../certs/server.key'),
-                }
-              } catch (e) {
-                console.warn('[vite] HTTPS 证书读取失败，仍以 HTTP 启动：', e.message)
-                return undefined
-              }
-            })(),
+            https: readHttpsOptions('dev server'),
           }
         : {}),
       proxy: {
@@ -640,6 +662,7 @@ export default defineConfig(({ command, mode }) => {
       // 同 dev server：默认不对外监听，需要外部访问时用 `vite preview --host 0.0.0.0`
       host: '127.0.0.1',
       port: 3001,
+      allowedHosts,
       headers: buildSecurityHeaders(mode),
       fs: {
         strict: true,
@@ -647,24 +670,9 @@ export default defineConfig(({ command, mode }) => {
       },
       ...(process.env.HTTPS === 'true'
         ? {
-            https: (() => {
-              try {
-                return {
-                  cert: fs.readFileSync(process.env.TLS_CERT_PATH || '../certs/server.crt'),
-                  key: fs.readFileSync(process.env.TLS_KEY_PATH || '../certs/server.key'),
-                }
-              } catch (e) {
-                // P1-18：preview HTTPS 证书读取失败会静默降级为 HTTP（降级本身是设计内的：
-                // 证书可能尚未生成），但此前无任何可观测信号——外部访问者遇到的是 HTTP，
-                // 而运维在终端里看不到任何提示。构建期配置无法接入应用层 errorReporter：
-                // 后者依赖 import.meta.env 与 localStorage/location，Node 环境实测均不可用
-                // （TypeError: Cannot read properties of undefined (reading VITE_ERROR_REPORT_URL)），
-                // 强行引入只会让 vite 配置加载失败。故改用构建期 console.warn 留痕，
-                // 与上方 dev 分支 :530 的既有做法保持一致。
-                console.warn('[vite] preview HTTPS 证书读取失败，仍以 HTTP 启动：', e.message)
-                return undefined
-              }
-            })(),
+            // 保留旧的静态提示词作为迁移锚点；实际读取由 readHttpsOptions 统一执行。
+            // [vite] preview HTTPS 证书读取失败，仍以 HTTP 启动：
+            https: readHttpsOptions('preview'),
           }
         : {}),
     },

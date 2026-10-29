@@ -162,6 +162,8 @@ const addIpBtn = (c) =>
     (b) => b.textContent.includes('加入黑名单') || b.textContent.includes('加入白名单')
   )
 
+const switchIpBtn = (c) => c.find('.switch-btn')
+
 /** 在新增表单填入 IP（并可选填原因） */
 const fillAdd = async (c, ip, reason) => {
   const inputs = c.find('.add-form').querySelectorAll('input')
@@ -942,6 +944,91 @@ describe('IpListView 移除名单条目', () => {
     await waitFor(() => queryCalls().length === beforeQuery + 1, { message: '重新查询' })
     expect(queryCalls()[queryCalls().length - 1][1]).toEqual({ params: { ip: '10.0.0.5' } })
     expect(listCalls()).toHaveLength(beforeList)
+  })
+})
+
+describe('IpListView 黑白名单切换按钮', () => {
+  test('黑名单行点击「加入白名单」：保留原因与剩余时长并复用加白接口', async () => {
+    const expiresAt = new Date(Date.now() + 2.5 * 60 * 60 * 1000).toISOString()
+    get.mockImplementation(() =>
+      Promise.resolve(listBody([ipRow({ reason: '攻击源', expiresAt })]))
+    )
+    confirm.mockResolvedValue('confirm')
+    post.mockResolvedValue({ data: {} })
+    const c = await boot(1)
+
+    expect(switchIpBtn(c).textContent.trim()).toBe('加入白名单')
+    click(switchIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 1, { message: '加白请求' })
+    expect(confirm.mock.calls[0][0]).toContain('10.0.0.1')
+    expect(post.mock.calls[0][0]).toBe('/security/ip-list')
+    expect(post.mock.calls[0][1]).toMatchObject({
+      ip: '10.0.0.1',
+      type: 'white',
+      reason: '攻击源',
+    })
+    expect(post.mock.calls[0][1].durationHours).toBeGreaterThanOrEqual(2)
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '切换成功提示' })
+    expect(ElMessage.success.mock.calls[0][0]).toContain('加入白名单')
+    expect(c.errors).toEqual([])
+  })
+
+  test('白名单行点击「加入黑名单」：先移除白名单再加黑，失败时恢复白名单', async () => {
+    const row = ipRow({ _id: 'white-1', type: 'white', reason: '可信出口' })
+    get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
+    confirm.mockResolvedValue('confirm')
+    del.mockResolvedValue({ data: {} })
+    post.mockResolvedValue({ data: {} })
+    const c = await boot(1)
+
+    expect(switchIpBtn(c).textContent.trim()).toBe('加入黑名单')
+    click(switchIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 1, { message: '加黑请求' })
+    expect(del).toHaveBeenCalledWith('/security/ip-list/white-1')
+    expect(post.mock.calls[0][1]).toMatchObject({
+      ip: '10.0.0.1',
+      type: 'black',
+      reason: '可信出口',
+      durationHours: 0,
+    })
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '切换成功提示' })
+
+    // 加黑失败时，原白名单必须通过同一条受审计接口恢复。
+    post.mockReset()
+    ElMessage.success.mockReset()
+    get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
+    post.mockRejectedValueOnce(new Error('black add down')).mockResolvedValueOnce({ data: {} })
+    click(switchIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 2, { message: '失败后的白名单恢复请求' })
+    expect(post.mock.calls[0][1].type).toBe('black')
+    expect(post.mock.calls[1][1]).toMatchObject({ ip: '10.0.0.1', type: 'white' })
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('用户取消切换：不发写请求', async () => {
+    get.mockImplementation(() => Promise.resolve(listBody([ipRow()])))
+    confirm.mockRejectedValue('cancel')
+    const c = await boot(1)
+    click(switchIpBtn(c))
+    await flush(10)
+    expect(post).not.toHaveBeenCalled()
+    expect(del).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('移除白名单结果未知时：先恢复原白名单，避免切换造成放行窗口', async () => {
+    const row = ipRow({ _id: 'white-network', type: 'white', reason: '可信出口' })
+    get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
+    confirm.mockResolvedValue('confirm')
+    del.mockRejectedValue(new Error('network timeout'))
+    post.mockResolvedValue({ data: {} })
+    const c = await boot(1)
+
+    click(switchIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 1, { message: '未知删除结果后的恢复请求' })
+    expect(post.mock.calls[0][1]).toMatchObject({ ip: '10.0.0.1', type: 'white' })
+    expect(c.errors).toEqual([])
   })
 })
 

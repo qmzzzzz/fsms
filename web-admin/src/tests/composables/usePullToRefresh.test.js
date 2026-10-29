@@ -104,6 +104,28 @@ describe('usePullToRefresh 下拉刷新', () => {
     expect(api().refreshing.value).toBe(false)
   })
 
+  test('同步或缺失的刷新回调也会安全复位状态', async () => {
+    const { el, api } = await mountPull(() => undefined)
+    el.dispatchEvent(touch('touchstart', 100))
+    el.dispatchEvent(touch('touchmove', 300))
+    el.dispatchEvent(touch('touchend', 300))
+    expect(api().refreshing.value).toBe(true)
+    await flush(2)
+    expect(api().refreshing.value).toBe(false)
+    expect(api().y.value).toBe(0)
+
+    active.handle.unmount()
+    active = null
+    const throwing = await mountPull(() => {
+      throw new Error('refresh failed')
+    })
+    throwing.el.dispatchEvent(touch('touchstart', 100))
+    throwing.el.dispatchEvent(touch('touchmove', 300))
+    throwing.el.dispatchEvent(touch('touchend', 300))
+    await flush(2)
+    expect(throwing.api().refreshing.value).toBe(false)
+  })
+
   test('不在顶部不启动：el.scrollTop 与 window.scrollY 任一越界都忽略', async () => {
     const { fn } = deferredRefresh()
     const { el, api } = await mountPull(fn)
