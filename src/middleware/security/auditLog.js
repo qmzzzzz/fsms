@@ -77,6 +77,13 @@ const auditLog = (options = {}) => {
       '/api/security/my-info',
       '/api/security/bindings',
       '/api/security/my-logs',
+      // c) 无业务数据的版本元数据（2026-10-30，随热升级引入）
+      // 响应只有 version/buildId/buildTime，不含业务数据，也不代表任何身份；
+      // 前端每个标签页打开查一次、之后每 5 分钟一次。按 b 类登记会失真（数据主体
+      // 不是请求者），故单列 c 类：无主体、无业务数据、频率由客户端驱动。
+      // 不豁免的失效形态很具体：审计链被「谁在何时查了版本号」灌满，
+      // 真实操作痕迹被稀释到无法筛选。
+      '/api/version',
     ],
   } = options;
 

@@ -74,6 +74,7 @@ const {
   securityRoutes,
   inspectionRoutes,
   reportRoutes,
+  versionRoutes,
   wellKnownRoutes,
 } = require('./routes');
 
@@ -527,6 +528,13 @@ function installRoutes(app) {
   app.use('/', wellKnownRoutes);
 
   // 挂载路由
+  // 版本元数据（匿名）：蓝绿升级后用于确认流量落在哪个构建；前端轮询它判断
+  // 「服务端已换版、本标签页仍是旧壳子」。响应只有 version/buildId/buildTime，
+  // 不含依赖、运行时版本、镜像 digest 等指纹原料（见 config/buildInfo.js 头注）。
+  // 挂在这里而非根路径：根路径的 /version 会被前端静态资源兜底吞掉（try_files
+  // 回 index.html），新增根路径还必须同步改所有既有部署的 nginx；挂在 /api 下
+  // 天然落在既有的 proxy_pass 与限流/来源校验之内，零部署改动。
+  app.use('/api/version', versionRoutes);
   app.use('/api/auth', authRoutes);
   app.use('/api/users', userRoutes);
   app.use('/api/roles', roleRoutes);

@@ -11,6 +11,7 @@ const alarmRoutes = require('./alarmRoutes');
 const inspectionRoutes = require('./inspectionRoutes');
 const reportRoutes = require('./reportRoutes');
 const securityRoutes = require('./securityRoutes');
+const versionRoutes = require('./versionRoutes');
 const wellKnownRoutes = require('./wellKnownRoutes');
 
 module.exports = {
@@ -23,5 +24,6 @@ module.exports = {
   inspectionRoutes,
   reportRoutes,
   securityRoutes,
+  versionRoutes,
   wellKnownRoutes,
 };
