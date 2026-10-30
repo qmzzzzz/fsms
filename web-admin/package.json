@@ -28,7 +28,7 @@
     "@sentry/vue": "^11.8.0",
     "axios": "^1.18.1",
     "echarts": "^6.1.0",
-    "element-plus": "^2.14.5",
+    "element-plus": "^2.14.7",
     "pinia": "^4.0.2",
     "qrcode": "^1.5.4",
     "socket.io-client": "^4.8.3",
