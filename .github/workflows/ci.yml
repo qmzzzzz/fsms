@@ -41,7 +41,7 @@ jobs:
           persist-credentials: false
 
       - name: Use Node.js 22.x
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # 不使用 npm cache：本作业刻意不安装依赖，cache 只会制造无关的写操作。
           node-version: 22.x
@@ -106,7 +106,7 @@ jobs:
           persist-credentials: false
 
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node-version }}
           # 缓存两份 lockfile（后端与 web-admin）：下方两次 npm ci 都受益
@@ -272,7 +272,7 @@ jobs:
           persist-credentials: false
 
       - name: Use Node.js 22.x
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.x
 
@@ -411,7 +411,7 @@ jobs:
       # 直接调用 worker_threads.markAsUncloneable（Node 22.10+ 才有），
       # Node 20 下 jsdom 加载即崩、全部 worker 起不来（2026-09-05 CI 实证）
       - name: Use Node.js 24.x
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.x
           cache: npm
@@ -482,7 +482,7 @@ jobs:
           persist-credentials: false
 
       - name: Use Node.js 22.x
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.x
 
@@ -534,7 +534,7 @@ jobs:
           persist-credentials: false
 
       - name: Use Node.js 22.x
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.x
 
