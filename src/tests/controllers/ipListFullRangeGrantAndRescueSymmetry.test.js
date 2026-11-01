@@ -38,7 +38,8 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
       .send(body);
 
   /** “已授权”痕迹条数（riskFactors 含 grant 的那一类） */
-  const grantTraces = () => AuditLog.countDocuments({ riskFactors: 'full_range_cidr_super_admin_grant' });
+  const grantTraces = () =>
+    AuditLog.countDocuments({ riskFactors: 'full_range_cidr_super_admin_grant' });
 
   /** 重播救援白：beforeEach 会清库，不重播则每条用例都退化成“无救援路径”，② 的对照会失真 */
   const seedRescue = () =>
@@ -78,7 +79,14 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
     }
     const configPerm = await Permission.findOneAndUpdate(
       { code: 'security:config' },
-      { $setOnInsert: { name: '安全配置', code: 'security:config', type: 'api', module: 'security' } },
+      {
+        $setOnInsert: {
+          name: '安全配置',
+          code: 'security:config',
+          type: 'api',
+          module: 'security',
+        },
+      },
       { upsert: true, new: true }
     );
     const secRole = await Role.create({
@@ -183,7 +191,9 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
       .set('Authorization', 'Bearer ' + secToken);
     expect(del.status).toBe(403);
     expect(await IPBlacklist.countDocuments({ _id: rescueDoc._id })).toBe(1);
-    const trace = await AuditLog.findOne({ riskFactors: 'full_range_cidr_rescue_removal_attempt' }).lean();
+    const trace = await AuditLog.findOne({
+      riskFactors: 'full_range_cidr_rescue_removal_attempt',
+    }).lean();
     expect(trace).toBeTruthy();
     expect(trace.riskLevel).toBe('critical');
   });

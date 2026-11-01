@@ -662,7 +662,9 @@ describe('层 1 · 死区间（零登记、无豁免）', () => {
     // 反向对照 1：第二个数字改到"只剩闭合标点"的行 ⇒ 必须红（旧判据只核 109，这里看不见）
     const wrongPunct = citationsInLine('  // 见 middleware/errorHandler.js:109/104\n', siteAbs);
     expect(wrongPunct.map((c) => c.from)).toEqual([109, 104]);
-    expect(classify(wrongPunct).blank.map((c) => `${c.from}:${c.kind}`)).toEqual(['104:punct-only']);
+    expect(classify(wrongPunct).blank.map((c) => `${c.from}:${c.kind}`)).toEqual([
+      '104:punct-only',
+    ]);
     // 反向对照 2：第二个数字越界 ⇒ 必须进死区间
     const wrongDead = citationsInLine('  // 见 middleware/errorHandler.js:109/999999\n', siteAbs);
     expect(classify(wrongDead).deadRange.map((c) => c.from)).toEqual([999999]);

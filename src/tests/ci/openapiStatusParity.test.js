@@ -64,7 +64,10 @@ const UNDOCUMENTED = [
   { key: 'GET /.well-known/security.txt', why: 'RFC 9116 发现文件（wellKnownRoutes.js）' },
   { key: 'GET /security.txt', why: '同上，根路径兼容位置' },
   { key: 'POST /csp-report', why: '浏览器 CSP 违规上报（wellKnownRoutes.js:96），恒回 204' },
-  { key: 'POST /client-errors', why: '前端异常/Web Vitals 上报（wellKnownRoutes.js:151），恒回 204' },
+  {
+    key: 'POST /client-errors',
+    why: '前端异常/Web Vitals 上报（wellKnownRoutes.js:151），恒回 204',
+  },
   // 注：GET /api/version 曾在这里（"待补文档"）。lead 已把它补进 generate.js（产物 104 paths / 125 ops），
   // 于是它从"实现有、文档无"里消失 —— 台账必须同步删，否则 #3 变成永远红的噪声。
 ];
@@ -139,7 +142,9 @@ describe('文档成功码与实现返回的双向对账', () => {
 
   test('#4b 变异自证：台账漏登记一个端点 ⇒ #3 红（且只多出那一条）', () => {
     const actual = undocumentedEndpoints(SPEC, ROUTE_OPS);
-    const dropped = UNDOCUMENTED.map((x) => x.key).sort().slice(1);
+    const dropped = UNDOCUMENTED.map((x) => x.key)
+      .sort()
+      .slice(1);
     // 模拟"新人删掉一行台账"：实际集合与台账不再相等
     expect(actual).not.toEqual(dropped);
     expect(actual.length - dropped.length).toBe(1);

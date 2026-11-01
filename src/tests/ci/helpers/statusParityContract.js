@@ -120,7 +120,9 @@ const resolveModuleFile = (baseDir, spec) => {
 };
 
 const isDefined = (view, name) =>
-  new RegExp(`(?:const|let|var)\\s+${name}\\s*[=:]|(?:async\\s+)?function\\s+${name}\\s*\\(`).test(view);
+  new RegExp(`(?:const|let|var)\\s+${name}\\s*[=:]|(?:async\\s+)?function\\s+${name}\\s*\\(`).test(
+    view
+  );
 
 /**
  * 一个模块里的 require 索引：
@@ -134,7 +136,10 @@ const moduleIndex = (view) => {
   for (const m of view.matchAll(/const\s+(\w+)\s*=\s*require\('([^']+)'\)/g)) named.set(m[1], m[2]);
   for (const m of view.matchAll(/const\s*\{([^}]+)\}\s*=\s*require\('([^']+)'\)/g)) {
     for (const part of m[1].split(',')) {
-      const pieces = part.trim().split(':').map((s) => s.trim());
+      const pieces = part
+        .trim()
+        .split(':')
+        .map((s) => s.trim());
       const alias = pieces[0];
       const inner = (pieces[1] || pieces[0] || '').trim();
       if (alias && inner) destructured.set(alias, { spec: m[2], inner });
@@ -326,7 +331,8 @@ const parseRouteFileOps = (file, prefix) => {
   const view = jsCodeOnlyKeepingLines(fs.readFileSync(path.join(ROUTES_DIR, file), 'utf8'));
   const required = new Map();
   const destructured = new Map();
-  for (const m of view.matchAll(/const\s+(\w+)\s*=\s*require\('([^']+)'\)/g)) required.set(m[1], m[2]);
+  for (const m of view.matchAll(/const\s+(\w+)\s*=\s*require\('([^']+)'\)/g))
+    required.set(m[1], m[2]);
   for (const m of view.matchAll(/const\s*\{([^}]+)\}\s*=\s*require\('([^']+)'\)/g)) {
     for (const part of m[1].split(',')) {
       const name = part.trim().split(':').pop().trim();
@@ -341,9 +347,10 @@ const parseRouteFileOps = (file, prefix) => {
     const parts = splitArgs(got.args);
     const routePath = unquote(parts[0] || '');
     const handler = parts[parts.length - 1] || '';
-    const full = ((prefix.replace(/\/+$/, '') || '') + '/' + routePath.replace(/^\/+/, ''))
-      .replace(/\/+/g, '/')
-      .replace(/\/$/, '') || '/';
+    const full =
+      ((prefix.replace(/\/+$/, '') || '') + '/' + routePath.replace(/^\/+/, ''))
+        .replace(/\/+/g, '/')
+        .replace(/\/$/, '') || '/';
     let moduleSpec = null;
     let fn = null;
     const dotted = /^(\w+)\.(\w+)$/.exec(handler);
@@ -354,7 +361,14 @@ const parseRouteFileOps = (file, prefix) => {
       moduleSpec = destructured.get(handler);
       fn = handler;
     }
-    ops.push({ source: `src/routes/${file}`, method: m[1].toUpperCase(), path: full, moduleSpec, fn, handler });
+    ops.push({
+      source: `src/routes/${file}`,
+      method: m[1].toUpperCase(),
+      path: full,
+      moduleSpec,
+      fn,
+      handler,
+    });
   }
   return ops;
 };
@@ -363,7 +377,8 @@ const parseRouteFileOps = (file, prefix) => {
 const parseAppOps = () => {
   const view = jsCodeOnlyKeepingLines(fs.readFileSync(APP_FILE, 'utf8'));
   const required = new Map();
-  for (const m of view.matchAll(/const\s+(\w+)\s*=\s*require\('([^']+)'\)/g)) required.set(m[1], m[2]);
+  for (const m of view.matchAll(/const\s+(\w+)\s*=\s*require\('([^']+)'\)/g))
+    required.set(m[1], m[2]);
   // 解构 require：`const { metricsEndpoint } = require('./middleware/metrics')`，
   // 不收的话 /metrics 会被记成"处理函数定位不到"，与"真的没有成功码"混同。
   for (const m of view.matchAll(/const\s*\{([^}]+)\}\s*=\s*require\('([^']+)'\)/g)) {
@@ -542,12 +557,22 @@ const statusViolations = (spec, routeOps) => {
     // 抽成空集合**不能**默认成 200：那是"抽取器退化了"而不是"实现只回 200"。
     // 默认成 200 会让判据在退化时静默全绿——本仓反复踩过的假绿形状。
     if (impl.codes.length === 0) {
-      violations.push({ key, declared, impl: [], why: '实现里抽不到任何成功码（抽取器退化，需人复核）' });
+      violations.push({
+        key,
+        declared,
+        impl: [],
+        why: '实现里抽不到任何成功码（抽取器退化，需人复核）',
+      });
       continue;
     }
     const implCodes = impl.codes;
     if (JSON.stringify(declared) !== JSON.stringify(implCodes)) {
-      violations.push({ key, declared, impl: implCodes, why: `文档 ${declared.join('/')} vs 实现 ${implCodes.join('/')}` });
+      violations.push({
+        key,
+        declared,
+        impl: implCodes,
+        why: `文档 ${declared.join('/')} vs 实现 ${implCodes.join('/')}`,
+      });
     }
   }
   return violations;
@@ -581,7 +606,10 @@ const coverageViolations = (routeOps) => {
       continue;
     }
     if (!fs.existsSync(path.join(ROOT, impl.file))) {
-      problems.push({ kind: 'impl-file-missing', detail: `${o.method} ${normalizePath(o.path)} → ${impl.file}` });
+      problems.push({
+        kind: 'impl-file-missing',
+        detail: `${o.method} ${normalizePath(o.path)} → ${impl.file}`,
+      });
       continue;
     }
     // 落到路由文件本身**不一定是错**：wellKnownRoutes 的 serveSecurityTxt 就定义在路由文件里。

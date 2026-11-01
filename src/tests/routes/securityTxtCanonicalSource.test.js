@@ -157,8 +157,7 @@ describe('security.txt 字段值注入（Canonical / Contact / Policy 同一把�
   });
 
   const fakeReq = () => ({ protocol: 'http', get: () => 'evil.example' });
-  const fieldLines = (text, name) =>
-    text.split(/\r?\n/).filter((l) => l.startsWith(name + ': '));
+  const fieldLines = (text, name) => text.split(/\r?\n/).filter((l) => l.startsWith(name + ': '));
 
   test('Canonical：值里含换行 ⇒ 只下发首个逻辑行，伪造的 Contact 不许出现', () => {
     process.env.SECURITY_TXT_CANONICAL =
@@ -172,11 +171,9 @@ describe('security.txt 字段值注入（Canonical / Contact / Policy 同一把�
   });
 
   test('Canonical：CR 单独成行、U+2028 也是行界（不只是 LF）', () => {
-    process.env.SECURITY_TXT_CANONICAL =
-      'https://a.example/c\rPolicy: https://evil.example/p';
+    process.env.SECURITY_TXT_CANONICAL = 'https://a.example/c\rPolicy: https://evil.example/p';
     expect(buildSecurityTxt(fakeReq())).not.toMatch(/evil\.example/);
-    process.env.SECURITY_TXT_CANONICAL =
-      'https://b.example/c\u2028Policy: https://evil.example/p';
+    process.env.SECURITY_TXT_CANONICAL = 'https://b.example/c\u2028Policy: https://evil.example/p';
     const text = buildSecurityTxt(fakeReq());
     expect(text).not.toMatch(/evil\.example/);
     expect(fieldLines(text, 'Canonical')).toEqual(['Canonical: https://b.example/c']);
@@ -192,8 +189,7 @@ describe('security.txt 字段值注入（Canonical / Contact / Policy 同一把�
   });
 
   test('Contact：值里含换行 ⇒ 伪造字段不许出现，且每个字段行都只有一条', async () => {
-    process.env.SECURITY_CONTACT_EMAIL =
-      'sec@fire.example\nExpires: 1970-01-01T00:00:00.000Z';
+    process.env.SECURITY_CONTACT_EMAIL = 'sec@fire.example\nExpires: 1970-01-01T00:00:00.000Z';
     const { res } = await canonicalLine();
     expect(res.text).not.toMatch(/1970-01-01T00:00:00\.000Z/);
     expect(fieldLines(res.text, 'Contact')).toEqual(['Contact: mailto:sec@fire.example']);

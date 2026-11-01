@@ -351,7 +351,9 @@ const main = async () => {
     console.error('                请先修复（npm run lint 应保持 0 error）。');
     // 短路本身是刻意的（error 必须最先修），但"棘轮清单本轮没打印"必须说出来：
     // 否则读者会把"没有棘轮输出"读成"没有棘轮回退"（第 23 轮实测的误读场景）。
-    console.error('                本轮**棘轮比对已跳过**：下面的回退清单没有计算，修完 error 后请重跑本命令。');
+    console.error(
+      '                本轮**棘轮比对已跳过**：下面的回退清单没有计算，修完 error 后请重跑本命令。'
+    );
     process.exit(1);
   }
 

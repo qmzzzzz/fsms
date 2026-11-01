@@ -155,9 +155,17 @@ const codeIndentPeaksOf = (src) => {
     if (!isCode[i]) continue;
     const indent = /^(\s*)/.exec(raw[i])[1].length;
     let up = -1;
-    for (let j = i - 1; j >= 0; j -= 1) if (isCode[j]) { up = j; break; }
+    for (let j = i - 1; j >= 0; j -= 1)
+      if (isCode[j]) {
+        up = j;
+        break;
+      }
     let down = -1;
-    for (let j = i + 1; j < raw.length; j += 1) if (isCode[j]) { down = j; break; }
+    for (let j = i + 1; j < raw.length; j += 1)
+      if (isCode[j]) {
+        down = j;
+        break;
+      }
     if (up < 0 || down < 0) continue;
     const upIndent = /^(\s*)/.exec(raw[up])[1].length;
     const downIndent = /^(\s*)/.exec(raw[down])[1].length;
@@ -290,9 +298,7 @@ describe('注释块完整性（删注释不得留下断裂残骸）', () => {
     // 反向：基线里的文件若一条都不剩，说明有人真的修好了 —— 那必须同批把基线改小，
     // 否则这张表会慢慢退化成一张永远绿的废纸。
     expect(shrunk).toEqual([]);
-    expect(totalOf('dangling')).toBe(
-      Object.values(DANGLING_BASELINE).reduce((a, b) => a + b, 0)
-    );
+    expect(totalOf('dangling')).toBe(Object.values(DANGLING_BASELINE).reduce((a, b) => a + b, 0));
   });
 
   test('判据 3（孤儿续行）只许降不许升', () => {
@@ -399,7 +405,6 @@ describe('自证：这条闸必须能抓到 2026-11-02 那 6 处修复前形态'
     expect(violationsOf(clean).indentBreak).toEqual([]);
   });
 
-
   test('真文件变异自证：把一处真实注释行多缩进 4 格 ⇒ 判据 2 必须当场红', () => {
     // 上面 5 条样张是「事故的逐字形态」，这一条补的是「判据对真文件也生效」：
     // 样张走的是同一套 violationsOf，但只有真文件能证明扫描面真的扫到了这些行。
@@ -420,7 +425,6 @@ describe('自证：这条闸必须能抓到 2026-11-02 那 6 处修复前形态'
     expect(violationsOf(rows.join('\n')).indentBreak.length).toBeGreaterThan(0);
   });
 
-
   test('判据 4（代码行孤峰缩进）无例外：任何一处立红（eslint 不管这一格）', () => {
     // 全仓实测 0。2026-11-02 我把 account.js:194 的代码行缩进从 10 改成 18，
     // `npx eslint <该文件>` 退出码是 0 —— 这条判据补的就是这个缺口。
@@ -433,7 +437,7 @@ describe('自证：这条闸必须能抓到 2026-11-02 那 6 处修复前形态'
     const damaged = [
       '  const bindings = {',
       '    email: {',
-      '      value: user.email || \'\',',
+      "      value: user.email || '',",
       '      verified: !!user.email,',
       '                  verified: !!user.department,',
       '      required: false,',
@@ -442,7 +446,7 @@ describe('自证：这条闸必须能抓到 2026-11-02 那 6 处修复前形态'
     ].join('\n');
     expect(codeIndentPeaksOf(damaged)).toEqual([5]);
     // 修复后的形态必须判绿
-    const fixed = damaged.replace(/\n {18}/, "\n      ");
+    const fixed = damaged.replace(/\n {18}/, '\n      ');
     expect(codeIndentPeaksOf(fixed)).toEqual([]);
   });
 
@@ -458,18 +462,13 @@ describe('自证：这条闸必须能抓到 2026-11-02 那 6 处修复前形态'
       '  }));',
       'const label =',
       '  cond',
-      '    ? \'a\'',
-      '    : \'b\';',
+      "    ? 'a'",
+      "    : 'b';",
     ].join('\n');
     expect(codeIndentPeaksOf(legit)).toEqual([]);
   });
   test('前提自证：混排块（块开 + 星号续 + 块闭）不因列不齐而误报', () => {
-    const mixed = [
-      '  /**',
-      '   * 缩进 2 的块。',
-      '   */',
-      '  const y = 2;',
-    ].join('\n');
+    const mixed = ['  /**', '   * 缩进 2 的块。', '   */', '  const y = 2;'].join('\n');
     expect(violationsOf(mixed).indentBreak).toEqual([]);
   });
 });

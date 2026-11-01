@@ -68,7 +68,10 @@ describe('注释密度脚本的强制状态声明', () => {
       [path.join(ROOT, 'scripts', 'commentDensity.js'), '--check'],
       { cwd: ROOT, encoding: 'utf8' }
     );
-    expect({ ok: verdict.ok, exit: r.status }).toEqual({ ok: verdict.ok, exit: verdict.ok ? 0 : 1 });
+    expect({ ok: verdict.ok, exit: r.status }).toEqual({
+      ok: verdict.ok,
+      exit: verdict.ok ? 0 : 1,
+    });
     expect(r.status === 0 ? r.stdout : r.stderr).toMatch(/注释密度检查/);
   });
 

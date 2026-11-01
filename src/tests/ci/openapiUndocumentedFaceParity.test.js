@@ -91,8 +91,7 @@ const UNDOCUMENTED_FACE = [
   },
 ];
 
-const opOf = (key) =>
-  ROUTE_OPS.find((o) => `${o.method} ${normalizePath(o.path)}` === key) || null;
+const opOf = (key) => ROUTE_OPS.find((o) => `${o.method} ${normalizePath(o.path)}` === key) || null;
 
 describe('未文档面的状态码与理由', () => {
   test('D0 成员集合与业务面闸的未文档集合一致（不设第二份成员台账）', () => {
@@ -112,9 +111,14 @@ describe('未文档面的状态码与理由', () => {
       }
       if (entry.codes === null) continue; // 显式放弃核对，由下面的规模锚点兜底
       verified += 1;
-      const actual = impl.codes.filter((c) => c >= 200 && c < 400).slice().sort();
+      const actual = impl.codes
+        .filter((c) => c >= 200 && c < 400)
+        .slice()
+        .sort();
       if (JSON.stringify(actual) !== JSON.stringify(entry.codes.slice().sort())) {
-        violations.push(`${entry.key}：声明 ${entry.codes.join('/')}，实现实际 ${actual.join('/')}`);
+        violations.push(
+          `${entry.key}：声明 ${entry.codes.join('/')}，实现实际 ${actual.join('/')}`
+        );
       }
     }
     expect(violations).toEqual([]);

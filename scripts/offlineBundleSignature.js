@@ -49,7 +49,9 @@ function assertEd25519(key, what) {
 /** 公钥解析 + 类型校验；PEM 坏、类型不符都抛可读错误（调用方决定是中止还是按未验签放行） */
 function parsePublicKey(publicKeyPem) {
   if (typeof publicKeyPem !== 'string' || publicKeyPem.trim() === '') {
-    throw new Error('验签公钥为空：OFFLINE_BUNDLE_VERIFY_PUBKEY / --pubkey-file 指向的文件读不出 PEM');
+    throw new Error(
+      '验签公钥为空：OFFLINE_BUNDLE_VERIFY_PUBKEY / --pubkey-file 指向的文件读不出 PEM'
+    );
   }
   let key;
   try {

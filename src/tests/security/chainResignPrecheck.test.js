@@ -37,7 +37,11 @@ const KEY = 'aa'.repeat(32);
 const ACTIONS = ['zzq_a1', 'zzq_a2', 'zzq_a3'];
 const TS = new Date('2026-03-04T05:06:07.000Z');
 
-const { canonicalPayload, computeHash, CURRENT_PAYLOAD_VERSION } = require('../../utils/auditChain');
+const {
+  canonicalPayload,
+  computeHash,
+  CURRENT_PAYLOAD_VERSION,
+} = require('../../utils/auditChain');
 const hmacOf = (secret, hash) =>
   crypto.createHmac('sha256', secret).update(hash, 'utf8').digest('hex');
 

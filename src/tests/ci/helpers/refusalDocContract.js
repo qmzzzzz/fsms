@@ -55,7 +55,10 @@ const collectEmitFiles = () =>
 const endpoints = () =>
   Object.values(ENDPOINT_OF_FILE)
     .flat()
-    .map((ep) => ({ ...ep, file: Object.keys(ENDPOINT_OF_FILE).find((f) => ENDPOINT_OF_FILE[f].includes(ep)) }))
+    .map((ep) => ({
+      ...ep,
+      file: Object.keys(ENDPOINT_OF_FILE).find((f) => ENDPOINT_OF_FILE[f].includes(ep)),
+    }))
     .sort((a, b) => a.path.localeCompare(b.path));
 
 /** 该端点「自己的描述」= 操作描述 + 它自己所有 4xx 描述（不含整份文档的其它端点） */
@@ -66,7 +69,9 @@ const endpointText = (spec, { method, path: p }) => {
   return {
     op,
     fourXx,
-    text: [op.description || '', ...fourXx.map(([, res]) => (res && res.description) || '')].join('\n'),
+    text: [op.description || '', ...fourXx.map(([, res]) => (res && res.description) || '')].join(
+      '\n'
+    ),
   };
 };
 
@@ -87,7 +92,8 @@ const endpointDocViolations = (spec) => {
       violations.push({ ...ep, why: '没有任何 4xx 描述（拒绝路径未文档化）' });
       continue;
     }
-    if (!/errors\.reason/.test(found.text)) violations.push({ ...ep, why: '自身描述里没有 errors.reason' });
+    if (!/errors\.reason/.test(found.text))
+      violations.push({ ...ep, why: '自身描述里没有 errors.reason' });
   }
   return violations;
 };

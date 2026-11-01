@@ -102,7 +102,14 @@ describe('全网段写入：超管打字确认 + 放行留痕', () => {
 
     const configPerm = await Permission.findOneAndUpdate(
       { code: 'security:config' },
-      { $setOnInsert: { name: '安全配置', code: 'security:config', type: 'api', module: 'security' } },
+      {
+        $setOnInsert: {
+          name: '安全配置',
+          code: 'security:config',
+          type: 'api',
+          module: 'security',
+        },
+      },
       { upsert: true, new: true }
     );
     const secRole = await Role.create({

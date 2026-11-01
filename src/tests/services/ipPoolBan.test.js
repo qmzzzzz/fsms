@@ -90,8 +90,16 @@ describe('护栏：这些情况一律拒绝封禁', () => {
 describe('拒绝计数：每个拒绝原因恰好记一次（同一事件两处自增 = 看板翻倍；漏记 = 看板少计）', () => {
   // 判据是**增量**：新增判据时不必回头改其它用例，也就少一次忘改的机会
   const cases = [
-    ['unparsable_cidr', () => {}, () => ban.requestBan({ cidr: 'not-a-cidr', reason: 't', operatorIp })],
-    ['full_range_cidr', () => {}, () => ban.requestBan({ cidr: '0.0.0.0/0', reason: 't', operatorIp })],
+    [
+      'unparsable_cidr',
+      () => {},
+      () => ban.requestBan({ cidr: 'not-a-cidr', reason: 't', operatorIp }),
+    ],
+    [
+      'full_range_cidr',
+      () => {},
+      () => ban.requestBan({ cidr: '0.0.0.0/0', reason: 't', operatorIp }),
+    ],
     ['reason_required', () => {}, () => ban.requestBan({ cidr: '203.0.113.0/24', operatorIp })],
     [
       'whitelist_covers',
@@ -103,7 +111,11 @@ describe('拒绝计数：每个拒绝原因恰好记一次（同一事件两处�
       () => ipListService.listActiveEntryIps.mockResolvedValue(['128.0.0.0/1']),
       () => ban.requestBan({ cidr: '0.0.0.0/1', reason: 't', operatorIp }),
     ],
-    ['operator_inside', () => {}, () => ban.requestBan({ cidr: '10.0.0.0/24', reason: 't', operatorIp })],
+    [
+      'operator_inside',
+      () => {},
+      () => ban.requestBan({ cidr: '10.0.0.0/24', reason: 't', operatorIp }),
+    ],
     [
       'live_traffic_inside',
       () => liveTraffic.segmentHasLiveTraffic.mockResolvedValue({ live: true, scanned: 3 }),
@@ -118,7 +130,9 @@ describe('拒绝计数：每个拒绝原因恰好记一次（同一事件两处�
       // restoreAllMocks 会撤掉 beforeEach 的三条 spy，这里按需重装（每条用例自己声明依赖，不靠外部顺序）
       jest.spyOn(ipListService, 'listActiveEntryIps').mockResolvedValue([]);
       jest.spyOn(ipListService, 'findCoveringEntries').mockResolvedValue([]);
-      jest.spyOn(liveTraffic, 'segmentHasLiveTraffic').mockResolvedValue({ live: false, scanned: 0 });
+      jest
+        .spyOn(liveTraffic, 'segmentHasLiveTraffic')
+        .mockResolvedValue({ live: false, scanned: 0 });
       setup();
       const before = ban.getPoolBanStats().refused;
       const r = await call();
@@ -138,9 +152,15 @@ describe('拒绝计数：每个拒绝原因恰好记一次（同一事件两处�
       [
         'token_expired',
         async () =>
-          ban.applyBan({ token: await ticketFor('203.0.113.0/24'), now: new Date(Date.now() + 11 * 60 * 1000) }),
+          ban.applyBan({
+            token: await ticketFor('203.0.113.0/24'),
+            now: new Date(Date.now() + 11 * 60 * 1000),
+          }),
       ],
-      ['typed_confirmation_required', async () => ban.applyBan({ token: await ticketFor('203.0.113.0/24') })],
+      [
+        'typed_confirmation_required',
+        async () => ban.applyBan({ token: await ticketFor('203.0.113.0/24') }),
+      ],
     ];
     for (const [name, call] of calls) {
       ban.resetPoolBanState();

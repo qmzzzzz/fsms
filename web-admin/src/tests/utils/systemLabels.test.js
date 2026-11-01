@@ -115,9 +115,7 @@ describe('upgradeReason 升级就绪原因', () => {
   test('英文侧 AGENT_NOT_READY：嵌套原因逐段翻译（全角分号分隔）', () => {
     setEnglish(true)
     const { upgradeReason } = useSystemLabels()
-    expect(
-      upgradeReason('升级代理未就绪：缺少 HMAC 密钥；自检尚未完成', 'AGENT_NOT_READY')
-    ).toBe(
+    expect(upgradeReason('升级代理未就绪：缺少 HMAC 密钥；自检尚未完成', 'AGENT_NOT_READY')).toBe(
       'Upgrade agent not ready: HMAC secret is missing (HMAC_SECRET / HMAC_SECRET_FILE); Self-check has not completed yet'
     )
   })
@@ -125,9 +123,7 @@ describe('upgradeReason 升级就绪原因', () => {
   test('英文侧 AGENT_NOT_READY：无前缀原文回默认文案', () => {
     setEnglish(true)
     const { upgradeReason } = useSystemLabels()
-    expect(upgradeReason('完全未知的中文原文', 'AGENT_NOT_READY')).toBe(
-      'Upgrade agent not ready'
-    )
+    expect(upgradeReason('完全未知的中文原文', 'AGENT_NOT_READY')).toBe('Upgrade agent not ready')
   })
 
   test('英文侧无 code：已知代理原文按正则映射，未知原样保留', () => {

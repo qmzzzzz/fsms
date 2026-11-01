@@ -321,7 +321,11 @@ describe('helper 导出可达性（守「判据被静默摘掉」）', () => {
       '// 这里提一句 coverageViolations 也不算：注释已在代码视图里被剔掉',
     ];
     const droppedView = jsCodeOnlyKeepingLines(dropped.join('\n'));
-    const usage = usageOf(droppedView, 'src/tests/ci/x.test.js', 'src/tests/ci/helpers/statusParityContract.js');
+    const usage = usageOf(
+      droppedView,
+      'src/tests/ci/x.test.js',
+      'src/tests/ci/helpers/statusParityContract.js'
+    );
     expect(usage.destructured.has('coverageViolations')).toBe(true);
     // 解构语句已被 stripRequireStatements 剔掉、注释也不在代码视图 ⇒ 取用语句之外零出现
     expect(stripRequireStatements(droppedView)).not.toMatch(/\bcoverageViolations\b/);
@@ -340,7 +344,9 @@ describe('helper 导出可达性（守「判据被静默摘掉」）', () => {
 
     // 别名解构要认得：{ accessToken: accessTokenOf } 算取了 accessToken
     const alias = usageOf(
-      jsCodeOnlyKeepingLines("const { accessToken: accessTokenOf } = require('../helpers/authResponse');\naccessTokenOf(res);"),
+      jsCodeOnlyKeepingLines(
+        "const { accessToken: accessTokenOf } = require('../helpers/authResponse');\naccessTokenOf(res);"
+      ),
       'src/tests/controllers/y.test.js',
       'src/tests/helpers/authResponse.js'
     );
@@ -379,7 +385,9 @@ describe('helper 导出可达性（守「判据被静默摘掉」）', () => {
     expect(baselineKeys().length).toBeGreaterThanOrEqual(10);
     for (const key of baselineKeys()) {
       const [file, name] = key.split('::');
-      expect(usageOf(selfView, SELF, file).whole || new RegExp('\\b' + name + '\\b').test(selfView)).toBe(true);
+      expect(
+        usageOf(selfView, SELF, file).whole || new RegExp('\\b' + name + '\\b').test(selfView)
+      ).toBe(true);
     }
     // 若把本文件放回消费者集合，棘轮必须真的被清空 —— 那才说明这个排除不是「刚好没影响」
     expect(result.zeroRefs.length).toBeGreaterThanOrEqual(10);

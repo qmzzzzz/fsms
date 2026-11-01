@@ -354,9 +354,7 @@ describe('前提自证：判据在真树上真的取到了样本', () => {
       scanned: SCAN.length > 700,
       controlled: controlled.length >= 10,
       asserted: asserted.length >= 20,
-      httpDrivenAndAsserted: SCAN.some(
-        (s) => s.result.httpDriven && s.result.assertedQueries > 0
-      ),
+      httpDrivenAndAsserted: SCAN.some((s) => s.result.httpDriven && s.result.assertedQueries > 0),
     }).toEqual({
       scanned: true,
       controlled: true,
@@ -408,7 +406,10 @@ describe('判据可失败（红先证据）与反向对照', () => {
       '});',
     ].join('\n');
     const r = scan.analyzeFile(other);
-    expect({ aliases: scan.auditModelAliases(scan.stripComments(other)), q: r.assertedQueries }).toEqual({
+    expect({
+      aliases: scan.auditModelAliases(scan.stripComments(other)),
+      q: r.assertedQueries,
+    }).toEqual({
       aliases: [],
       q: 0,
     });
@@ -472,10 +473,7 @@ describe('②其余审计断言必须显式声明', () => {
       [
         ...missing.map((f) => '新增未声明：' + f + ' ⇒ ' + REMEDY),
         ...stale.map(
-          (f) =>
-            '台账陈旧：' +
-            f +
-            ' 已不再是 suspect ⇒ 从台账删掉（多余的声明等于放宽判据）'
+          (f) => '台账陈旧：' + f + ' 已不再是 suspect ⇒ 从台账删掉（多余的声明等于放宽判据）'
         ),
         ...dup.map((f) => '台账重复条目：' + f),
       ].join('\n')
@@ -499,10 +497,18 @@ describe('②其余审计断言必须显式声明', () => {
     };
     expect(verifyLedgerEntry(forgedNoPath).join(' | ')).toMatch(/点名直写的生产代码文件/);
     // 反向对照③：理由过短
-    const forgedShort = { file: UNCONTROLLED_LEDGER[0].file, kind: 'direct-fixture-scope', reason: '短' };
+    const forgedShort = {
+      file: UNCONTROLLED_LEDGER[0].file,
+      kind: 'direct-fixture-scope',
+      reason: '短',
+    };
     expect(verifyLedgerEntry(forgedShort).join(' | ')).toMatch(/理由过短/);
     // 反向对照④：幽灵文件
-    const ghost = { file: 'src/tests/ci/__nonexistent__.test.js', kind: 'direct-fixture-scope', reason: 'x'.repeat(80) };
+    const ghost = {
+      file: 'src/tests/ci/__nonexistent__.test.js',
+      kind: 'direct-fixture-scope',
+      reason: 'x'.repeat(80),
+    };
     expect(verifyLedgerEntry(ghost).join(' | ')).toMatch(/文件不存在/);
   });
 });
@@ -511,7 +517,8 @@ describe('③前提锚点：本闸的存在前提是"缓冲默认不启动"', ()
   test('全局测试装配（setupFiles / globalSetup）不得自行启动缓冲', () => {
     const cfg = fs.readFileSync(path.join(ROOT, 'jest.config.js'), 'utf8');
     for (const rel of ['src/tests/setup.js', 'src/tests/globalSetup.js']) {
-      const wired = cfg.includes(rel) || cfg.includes(rel.replace('src/tests/', '<rootDir>/src/tests/'));
+      const wired =
+        cfg.includes(rel) || cfg.includes(rel.replace('src/tests/', '<rootDir>/src/tests/'));
       expect({ rel, wired }).toEqual({ rel, wired: true });
       const code = scan.stripComments(fs.readFileSync(path.join(ROOT, rel), 'utf8'));
       expect({ rel, controls: scan.CONTROL_RE.test(code) }).toEqual({ rel, controls: false });

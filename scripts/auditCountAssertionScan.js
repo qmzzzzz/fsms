@@ -133,7 +133,7 @@ function stripComments(text) {
       i += 1;
       continue;
     }
-    if (ch === '\'' || ch === '"' || ch === '`') {
+    if (ch === "'" || ch === '"' || ch === '`') {
       st.quote = ch;
       out.push(ch);
       continue;
@@ -144,11 +144,15 @@ function stripComments(text) {
 }
 
 /** 引号字符（避免在本文件里同时出现两种引号的字面量，正则才读得清） */
-const QS = '\'' + '"';
+const QS = "'" + '"';
 
 /** 该文件是否驱动 HTTP ⇒ 全局审计中间件真的会被执行到 */
 const HTTP_RE = new RegExp(
-  'require\\s*\\(\\s*[' + QS + ']supertest[' + QS + ']\\s*\\)' +
+  'require\\s*\\(\\s*[' +
+    QS +
+    ']supertest[' +
+    QS +
+    ']\\s*\\)' +
     '|createApp\\s*\\(' +
     '|\\brequest\\s*\\(\\s*(?:app|server|expressApp)\\b'
 );
@@ -236,7 +240,8 @@ function auditModelAliases(source) {
  * 读成"这个查询的空洞断言"。链式写法（expect(x)\n .toHaveLength(0)）仍被覆盖，因为切点是分号。 */
 function chainFrom(source, idx) {
   const semi = source.indexOf(';', idx);
-  const stop = semi === -1 ? idx + ASSERT_CHAIN_CHARS : Math.min(semi + 1, idx + ASSERT_CHAIN_CHARS);
+  const stop =
+    semi === -1 ? idx + ASSERT_CHAIN_CHARS : Math.min(semi + 1, idx + ASSERT_CHAIN_CHARS);
   return source.slice(idx, stop);
 }
 
@@ -325,7 +330,9 @@ function auditQuerySites(source) {
     return { used, zero };
   };
   const re = new RegExp(
-    '(?:' + aliases.map((a) => a.replace(/[$]/g, '\\$')).join('|') + ')\\s*\\.\\s*(' +
+    '(?:' +
+      aliases.map((a) => a.replace(/[$]/g, '\\$')).join('|') +
+      ')\\s*\\.\\s*(' +
       QUERY_METHODS.join('|') +
       ')\\b',
     'g'

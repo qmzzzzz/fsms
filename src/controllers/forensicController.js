@@ -11,7 +11,11 @@ const forensicExport = require('../services/forensicExport');
 const forensicCapture = require('../services/forensicCapture');
 const forensicManifest = require('../services/forensicManifest');
 const ipListService = require('../services/ipListService');
-const { clientIpForSecurityDecision, normalizeIP, auditClientAddress } = require('../utils/ipUtils');
+const {
+  clientIpForSecurityDecision,
+  normalizeIP,
+  auditClientAddress,
+} = require('../utils/ipUtils');
 const { auditPath } = require('../utils/auditMeta');
 const { CODES: REFUSAL } = require('../constants/banRefusalReason');
 
@@ -123,7 +127,11 @@ const tracePoolBanUnionRollback = async (req, result) => {
     body: { cidr: result.cidr, rolledBack, rolledBackIds: result.rolledBackIds || [] },
     success: false,
     riskLevel: 'critical',
-    riskFactors: [rolledBack ? 'full_range_cidr_pool_ban_union_rollback' : 'full_range_cidr_pool_ban_union_prewrite'],
+    riskFactors: [
+      rolledBack
+        ? 'full_range_cidr_pool_ban_union_rollback'
+        : 'full_range_cidr_pool_ban_union_prewrite',
+    ],
     reason: `确认 ${result.cidr} 时黑名单并集覆盖地址族（${rolledBack ? '已回滚本次写入' : '写入前拦下'}）`,
   });
 };

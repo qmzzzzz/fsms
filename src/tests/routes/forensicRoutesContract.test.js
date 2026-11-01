@@ -248,7 +248,11 @@ describe('取证溯源接口契约（T5/T6）', () => {
     // 不复核的后果：取票→确认之间换个网（或把票交给同事）就能把自己/对方挡在门外，且不需要 /0、不需要并集铺满。
     const IPBlacklist = require('../../models/IPBlacklist');
     const HALF = '128.0.0.0/1';
-    const issued = await postFrom('/pool-ban/request', { cidr: HALF, reason: `位置复核 ${stamp}` }, '10.0.0.5');
+    const issued = await postFrom(
+      '/pool-ban/request',
+      { cidr: HALF, reason: `位置复核 ${stamp}` },
+      '10.0.0.5'
+    );
     expect(issued.status).toBe(200);
 
     // 确认时换到 192.0.2.7：它落在 128.0.0.0/1 里（该段覆盖 128.0.0.0–255.255.255.255）
@@ -266,7 +270,11 @@ describe('取证溯源接口契约（T5/T6）', () => {
 
     // 反向对照：两侧都在段外的段照常落库（判据不是恒拒）
     const CIDR = '203.0.113.0/24';
-    const ok = await postFrom('/pool-ban/request', { cidr: CIDR, reason: `对照 ${stamp}` }, '192.0.2.7');
+    const ok = await postFrom(
+      '/pool-ban/request',
+      { cidr: CIDR, reason: `对照 ${stamp}` },
+      '192.0.2.7'
+    );
     const okConfirm = await postFrom(
       '/pool-ban/confirm',
       { token: ok.body.data.token, durationHours: 1, typedConfirm: CIDR },
@@ -281,15 +289,35 @@ describe('取证溯源接口契约（T5/T6）', () => {
     const IPBlacklist = require('../../models/IPBlacklist');
     const AuditLog = require('../../models/AuditLog');
     const V6 = ['::/1', '8000::/1'];
-    const a = await postFrom('/pool-ban/request', { cidr: V6[0], reason: `痕迹甲 ${stamp}` }, '192.0.2.7');
-    const b = await postFrom('/pool-ban/request', { cidr: V6[1], reason: `痕迹乙 ${stamp}` }, '192.0.2.7');
+    const a = await postFrom(
+      '/pool-ban/request',
+      { cidr: V6[0], reason: `痕迹甲 ${stamp}` },
+      '192.0.2.7'
+    );
+    const b = await postFrom(
+      '/pool-ban/request',
+      { cidr: V6[1], reason: `痕迹乙 ${stamp}` },
+      '192.0.2.7'
+    );
     expect([a.status, b.status]).toEqual([200, 200]);
     // 两种时刻共用一个可对账的事件：写入前拦下（prewrite）与写完才发现并发补齐（rollback）
-    const filter = { riskFactors: { $in: ['full_range_cidr_pool_ban_union_prewrite', 'full_range_cidr_pool_ban_union_rollback'] } };
-    const first = await postFrom('/pool-ban/confirm', { token: a.body.data.token, durationHours: 1, typedConfirm: V6[0] }, '192.0.2.7');
+    const filter = {
+      riskFactors: {
+        $in: ['full_range_cidr_pool_ban_union_prewrite', 'full_range_cidr_pool_ban_union_rollback'],
+      },
+    };
+    const first = await postFrom(
+      '/pool-ban/confirm',
+      { token: a.body.data.token, durationHours: 1, typedConfirm: V6[0] },
+      '192.0.2.7'
+    );
     expect(first.status).toBe(200);
     const before = await AuditLog.countDocuments(filter); // 正常落库不留痕：这条同时是"不是恒记"的对照
-    const rolled = await postFrom('/pool-ban/confirm', { token: b.body.data.token, durationHours: 1, typedConfirm: V6[1] }, '192.0.2.7');
+    const rolled = await postFrom(
+      '/pool-ban/confirm',
+      { token: b.body.data.token, durationHours: 1, typedConfirm: V6[1] },
+      '192.0.2.7'
+    );
     const after = await AuditLog.countDocuments(filter);
     const doc = await AuditLog.findOne(filter).sort({ _id: -1 }).lean();
     // 判据是**增量**而不是"函数被调用过"：写失败被静默吞掉时增量会是 0，这条就会红

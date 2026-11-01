@@ -462,7 +462,8 @@ describe('第 5 族 · 回指式裸行锚', () => {
     // 收口到 captchaSwitch；2026-11-02 拆成目录后迁到 session.js 的验证码闸 :52 与密文解密
     // :82——路径要写全：`authService/session.js` 这种半路径因 basename 与
     // src/controllers/authController/session.js 撞名而解析不到，会被当成"未解析"）。
-    const attributed = '  // 见 src/services/authService/session.js:52 与 src/services/authService/session.js:82\n';
+    const attributed =
+      '  // 见 src/services/authService/session.js:52 与 src/services/authService/session.js:82\n';
     expect(attributed.match(BARE_PAREN_RE)).toBeNull();
     // 数值形态连冒号都没有，CITE_RE 永远看不见它
     expect('与上方 210/233 行同口径'.match(BARE_NUMERIC_RE)).toEqual(['上方 210/233 行']);

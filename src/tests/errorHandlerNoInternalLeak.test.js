@@ -38,6 +38,14 @@ function makeRes({ headersSent = false, writableEnded = false } = {}) {
     statusCode: 200,
     locals: {},
     body: null,
+    // errorHandler 的裸出口（唯一的 res.status().json() 分支）会直接调 Node 层的
+    // setHeader 落 no-store（7aa0b84「错误响应禁缓存」）；mock 必须跟上进行为，
+    // 顺带把「落头」本身钉进契约——错误响应必须可被中间层判定为不可缓存。
+    headers: {},
+    setHeader(name, value) {
+      res.headers[String(name).toLowerCase()] = value;
+      return res;
+    },
     status(code) {
       res.statusCode = code;
       return res;

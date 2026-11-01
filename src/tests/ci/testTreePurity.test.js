@@ -40,7 +40,10 @@ const ROOT = path.resolve(__dirname, '../../..');
 
 /** 两个会被 testMatch / vitest include 扫到的测试树 */
 const TEST_TREES = [
-  { label: '后端 jest（testMatch: <rootDir>/src/tests/**/*.test.js）', dir: path.join(ROOT, 'src/tests') },
+  {
+    label: '后端 jest（testMatch: <rootDir>/src/tests/**/*.test.js）',
+    dir: path.join(ROOT, 'src/tests'),
+  },
   {
     label: '前端 vitest（include: src/tests/**/*.test.js）',
     dir: path.join(ROOT, 'web-admin', 'src', 'tests'),

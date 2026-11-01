@@ -6,8 +6,8 @@
  */
 
 const mongoose = require('mongoose');
-// 取值清单的单一来源（见 constants/ipList.js 头注释：schema enum / 路由 isIn /
-// 控制器守卫 / OpenAPI 生成器四处曾各抄一份）
+// 取值清单的单一来源（constants/ipList.js 头注释：schema enum / 路由 isIn / 控制器 / OpenAPI 曾各抄一份）
+const logger = require('../utils/logger');
 const { IP_LIST_TYPES } = require('../constants/ipList');
 const {
   ipMatchesEntry,
@@ -142,8 +142,7 @@ const getSnapshot = async function (type) {
  * - 等价文本形式/CIDR 无法用单一索引查询表达，故取回名单快照后在内存匹配
  * - IPv6 等价文本形式与 IPv4 映射地址（::ffff:1.2.3.4 ≡ 1.2.3.4）均视为同一地址
  * - 过期记录惰性清理（含 CIDR 记录；deleteMany 异步执行不阻塞请求，另有 TTL 索引兜底）
- * - 排序：覆盖面最宽优先（/16 宽于 /24、/24 宽于 /32 单地址），同宽时永久记录优先、
- *   再按到期时间晚者优先——供 IP 查询等展示场景取「最宽泛命中」
+ * - 排序：覆盖面最宽优先（/16 宽于 /24），同宽时永久优先、再按到期晚者优先——供展示取「最宽泛命中」
  * @param {string} clientIp 客户端 IP
  * @param {string} type 名单类型：black / white
  * @returns {Promise<object[]>} 命中的有效记录（已排序）
@@ -246,7 +245,6 @@ ipBlacklistSchema.statics.findCoveringEntries = async function (entryIp, type) {
 
 // 静态方法：添加 IP 到名单（黑/白通用，upsert 语义）
 // upsert 键含 type：同一 IP 的黑/白记录相互独立，避免加入一侧时静默覆盖另一侧
-// createdAt 用 $setOnInsert：重复封禁同一 IP 时保留首次加入时间，便于追溯「首封时间」
 ipBlacklistSchema.statics.blockIP = async function (rawIp, options = {}) {
   const {
     reason = 'security_policy',
@@ -257,33 +255,66 @@ ipBlacklistSchema.statics.blockIP = async function (rawIp, options = {}) {
   } = options;
   // findOneAndUpdate 默认不跑 schema 校验，pre('validate') 覆盖不到这里
   const ip = normalizeEntryIp(rawIp);
-
-  const expiresAt = durationMs > 0 ? new Date(Date.now() + durationMs) : null;
+  const asked = durationMs > 0 ? durationMs : 0; // 非正/NaN 一律按永久（旧 expiresAt 口径）
+  const now = new Date();
 
   const filter = { ip, type };
-  const update = {
-    $set: {
-      ip,
-      reason,
-      durationMs,
-      source,
-      targetUsername,
-      type,
-      expiresAt,
+  // 命中既有条目时取更严的一侧（F-25-7）：永久不被临时覆盖、时长只增不减、原 reason/source 保留
+  // 管道 $set 里裸字符串会被当成字段路径（reason:'$ip' 取到 IP 值）⇒ 调用方字符串一律 $literal
+  const merge = [
+    {
+      $set: {
+        ip: { $literal: ip },
+        type: { $literal: type },
+        durationMs: {
+          $cond: [
+            { $or: [{ $eq: [{ $ifNull: ['$durationMs', -1] }, 0] }, { $eq: [asked, 0] }] },
+            0,
+            { $max: [{ $ifNull: ['$durationMs', -1] }, asked] },
+          ],
+        },
+        reason: { $ifNull: ['$reason', { $literal: reason }] },
+        source: { $ifNull: ['$source', { $literal: source }] },
+        createdAt: { $ifNull: ['$createdAt', now] }, // 首次加入时间：命中即保留
+        ...(targetUsername === undefined ? {} : { targetUsername: { $literal: targetUsername } }),
+      },
     },
-    $setOnInsert: { createdAt: new Date() },
-  };
+    // 到期时间由合并后的时长决定：永久 ⇒ null（TTL 只删非空 expiresAt），否则取「原到期」与「现在+时长」较晚者
+    {
+      $set: {
+        expiresAt: {
+          $cond: [
+            { $eq: ['$durationMs', 0] },
+            null,
+            { $max: [{ $ifNull: ['$expiresAt', new Date(0)] }, { $add: [now, '$durationMs'] }] },
+          ],
+        },
+      },
+    },
+  ];
 
-  let entry;
+  // 命中还是新建：驱动元数据 updatedExisting=false ⇒ 本次插入（先读再比看不见并发插入窗口）
+  const opts = { upsert: true, returnDocument: 'after', includeResultMetadata: true };
+  let res;
   try {
-    entry = await this.findOneAndUpdate(filter, update, { upsert: true, new: true });
+    res = await this.findOneAndUpdate(filter, merge, opts);
   } catch (err) {
     // 并发 upsert 撞复合唯一索引（E11000）：另一请求已插入同 (ip, type) 记录，
     // 重试一次同样的 findOneAndUpdate 即转为普通更新命中对方文档；仍失败再向上抛出
     if (err.code !== 11000) throw err;
-    entry = await this.findOneAndUpdate(filter, update, { upsert: true, new: true });
+    res = await this.findOneAndUpdate(filter, merge, opts);
   }
 
+  const meta = (res && res.lastErrorObject) || {};
+  const entry = (res && res.value) || null;
+  const created = meta.updatedExisting === false;
+  if (entry && !created && (entry.durationMs !== asked || entry.reason !== reason)) {
+    logger.warn(
+      `名单条目已存在，按更严一侧合并（本次 ${asked}ms/${reason}，保留 ${entry.durationMs}ms/${entry.reason}）: ${ip}/${type}`
+    );
+  }
+  // created 只挂 $locals（非持久化载体，不进 JSON/toObject/落库）：调用方据此区分「本次新建」与「命中他人既有」
+  if (entry) entry.$locals.created = created;
   invalidateSnapshot(type);
   return entry;
 };
@@ -317,8 +348,7 @@ ipBlacklistSchema.statics.invalidateSnapshot = function (type) {
 // 条目归一化判据（导出给测试与需要预检的调用方；模型内部三个写路径已经用它）
 ipBlacklistSchema.statics.normalizeEntryIp = normalizeEntryIp;
 
-// 兜底失效：任何绕过上述静态方法的直接写操作（如测试中的 deleteMany({})、
-// 其他模块直接调用 create/updateOne）同样清空快照，避免读到陈旧名单。
+// 兜底失效：绕过上述静态方法的直接写（如测试里的 deleteMany、直接 create/updateOne）同样清空快照
 [
   'save',
   'deleteOne',
