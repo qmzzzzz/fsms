@@ -431,4 +431,124 @@ describe('upgradeService（应用侧队列）', () => {
       []
     );
   });
+
+  describe('离线升级（mode 与 bundles 透传）', () => {
+    const writeHeartbeatWithBundles = (bundles) =>
+      fs.writeFileSync(
+        upgradeConfig.heartbeatFile,
+        JSON.stringify({
+          lastSeenAt: new Date().toISOString(),
+          version: 'test',
+          ready: true,
+          bundles,
+        }),
+        { mode: 0o644 }
+      );
+
+    test("mode:'offline' 入队：落盘显式带 mode，签名按 offline 分型（5 段）且剥掉 mode 必红", () => {
+      writeHeartbeat();
+      const { job } = upgradeService.createUpgradeRequest({
+        image: IMAGE,
+        mode: 'offline',
+        user: { userId: 'u8', username: 'a8' },
+      });
+      const file = path.join(upgradeConfig.requestsDir, `${job.id}.json`);
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      expect(raw.mode).toBe('offline');
+      const verifyPayload = {
+        id: raw.id,
+        image: raw.image,
+        requestedAt: raw.requestedAt,
+        userId: raw.requestedBy.userId,
+      };
+      // 带 mode 验（5 段）通过；剥掉 mode 冒充 registry（4 段）必红——两条旁路都不存在
+      expect(
+        signature.verifyUpgradeRequest(
+          process.env.HMAC_SECRET,
+          { ...verifyPayload, mode: 'offline' },
+          raw.signature
+        )
+      ).toBe(true);
+      expect(
+        signature.verifyUpgradeRequest(process.env.HMAC_SECRET, verifyPayload, raw.signature)
+      ).toBe(false);
+      // 任务视图带 mode（前端进度弹窗显示「来源」）
+      expect(upgradeService.readJob(job.id).mode).toBe('offline');
+    });
+
+    test('mode 缺省入队：落盘 mode=registry，签名维持 4 段历史格式（滚动期旧代理也能验）', () => {
+      writeHeartbeat();
+      const { job } = upgradeService.createUpgradeRequest({
+        image: IMAGE,
+        user: { userId: 'u9', username: 'a9' },
+      });
+      const raw = JSON.parse(
+        fs.readFileSync(path.join(upgradeConfig.requestsDir, `${job.id}.json`), 'utf8')
+      );
+      expect(raw.mode).toBe('registry');
+      // 与历史格式逐字节相同的 4 段验签必须通过（旧版宿主脚本兼容性）
+      expect(
+        signature.verifyUpgradeRequest(
+          process.env.HMAC_SECRET,
+          {
+            id: raw.id,
+            image: raw.image,
+            requestedAt: raw.requestedAt,
+            userId: raw.requestedBy.userId,
+          },
+          raw.signature
+        )
+      ).toBe(true);
+    });
+
+    test('service 层 mode 兜底归一：非法值按 registry 处理（路由层 isIn 已先行 400）', () => {
+      writeHeartbeat();
+      const { job } = upgradeService.createUpgradeRequest({
+        image: IMAGE,
+        mode: 'evil',
+        user: { userId: 'u10', username: 'a10' },
+      });
+      const raw = JSON.parse(
+        fs.readFileSync(path.join(upgradeConfig.requestsDir, `${job.id}.json`), 'utf8')
+      );
+      expect(raw.mode).toBe('registry');
+      expect(job.mode).toBe('registry');
+    });
+
+    test('心跳 bundles 原样透传；心跳坏 bundles / 无 bundles 折成空结构（不让坏心跳炸概览）', () => {
+      writeHeartbeatWithBundles({
+        available: [
+          {
+            dirName: 'v1.2.3',
+            ref: IMAGE,
+            digest: DIGEST,
+            repository: 'ghcr.io/fsms-test/app',
+            version: '1.2.3',
+            buildId: 'ci-42',
+            createdAt: '2026-11-01T00:00:00Z',
+          },
+        ],
+        invalid: [{ dirName: 'broken', error: 'manifest 缺 sha256' }],
+      });
+      const overview = upgradeService.getOverview({ buildInfo: { version: '1.0.0' } });
+      expect(overview.upgrade.bundles.available).toHaveLength(1);
+      expect(overview.upgrade.bundles.available[0]).toMatchObject({
+        dirName: 'v1.2.3',
+        ref: IMAGE,
+      });
+      expect(overview.upgrade.bundles.invalid).toHaveLength(1);
+
+      writeHeartbeatWithBundles({ available: 'not-an-array', invalid: 42 });
+      const degraded = upgradeService.getOverview({ buildInfo: { version: '1.0.0' } });
+      expect(degraded.upgrade.bundles).toEqual({ available: [], invalid: [] });
+
+      writeHeartbeat();
+      const plain = upgradeService.getOverview({ buildInfo: { version: '1.0.0' } });
+      expect(plain.upgrade.bundles).toEqual({ available: [], invalid: [] });
+      // 从未上报心跳（null）时同样给空结构，而不是 undefined
+      fs.rmSync(upgradeConfig.heartbeatFile, { force: true });
+      const noBeat = upgradeService.getOverview({ buildInfo: { version: '1.0.0' } });
+      expect(noBeat.upgrade.bundles).toEqual({ available: [], invalid: [] });
+    });
+  });
 });

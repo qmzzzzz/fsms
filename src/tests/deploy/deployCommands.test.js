@@ -168,6 +168,60 @@ describe('升级命令（蓝绿）', () => {
   test('缺 nginxConf 时拒绝构造（不猜默认生产路径）', () => {
     expect(() => buildHotUpgradeInvocation({})).toThrow(/nginxConf/);
   });
+
+  test('offline: true 追加 --offline（离线请求专用；registry 请求不受影响）', () => {
+    const online = buildHotUpgradeInvocation({ nginxConf: '/etc/nginx/nginx.conf' });
+    expect(online.args).not.toContain('--offline');
+    const offline = buildHotUpgradeInvocation({
+      nginxConf: '/etc/nginx/nginx.conf',
+      offline: true,
+    });
+    expect(offline.args).toContain('--offline');
+    expect(offline.args[offline.args.indexOf('--offline') + 1]).toBe('--apply');
+  });
+});
+
+describe('离线包导入命令（离线请求的第一段）', () => {
+  const {
+    buildImportBundleInvocation,
+    DEFAULT_IMPORT_BUNDLE_SCRIPT,
+  } = require('../../../scripts/deployCommands');
+
+  test('固定脚本 + --bundle/--bundle-root/--allowlist/--apply，全部参数化（无 shell 拼接）', () => {
+    const inv = buildImportBundleInvocation({
+      bundleDir: '/var/lib/fsms/upgrade/bundles/v1.2.3',
+      bundleRoot: '/var/lib/fsms/upgrade/bundles',
+      allowlist: ['ghcr.io/acme/', 'ghcr.io/acme-mir/'],
+    });
+    expect(inv.file).toBe(process.execPath);
+    expect(inv.args).toEqual([
+      DEFAULT_IMPORT_BUNDLE_SCRIPT,
+      '--bundle',
+      '/var/lib/fsms/upgrade/bundles/v1.2.3',
+      '--bundle-root',
+      '/var/lib/fsms/upgrade/bundles',
+      '--allowlist',
+      'ghcr.io/acme/,ghcr.io/acme-mir/',
+      '--apply',
+    ]);
+  });
+
+  test('缺 bundleDir / bundleRoot 拒绝构造（不猜包位置；bundle-root 把包钉在受管目录内）', () => {
+    expect(() =>
+      buildImportBundleInvocation({ bundleRoot: '/var/lib/fsms/upgrade/bundles' })
+    ).toThrow(/bundleDir/);
+    expect(() => buildImportBundleInvocation({ bundleDir: '/tmp/x' })).toThrow(/bundleRoot/);
+  });
+
+  test('白名单为空时不传 --allowlist：导入器按「空白名单 = 全拒」自己拒绝（与在线同口径）', () => {
+    const inv = buildImportBundleInvocation({
+      bundleDir: '/b/v1',
+      bundleRoot: '/b',
+      allowlist: [],
+    });
+    expect(inv.args).not.toContain('--allowlist');
+    expect(inv.args).toContain('--apply');
+  });
 });
 
 describe('命令计划：顺序与实发同源', () => {

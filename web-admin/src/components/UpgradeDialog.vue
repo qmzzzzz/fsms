@@ -44,6 +44,9 @@
         <el-descriptions-item :label="t('about.upgrade.imageLabel')" :span="2">
           <span class="upgrade-mono upgrade-wrap">{{ job.image || '-' }}</span>
         </el-descriptions-item>
+        <el-descriptions-item :label="t('about.upgrade.modeLabel')">
+          {{ modeLabel(job.mode) }}
+        </el-descriptions-item>
         <el-descriptions-item :label="t('about.upgrade.currentColor')">
           {{ colorLabel(job.activeColor || currentColor) }}
         </el-descriptions-item>
@@ -100,8 +103,54 @@
         </span>
       </div>
       <el-form label-position="top" @submit.prevent>
-        <el-form-item :label="t('about.upgrade.imageLabel')">
+        <el-form-item :label="t('about.upgrade.sourceLabel')">
+          <el-radio-group
+            v-model="source"
+            class="upgrade-source"
+            data-testid="upgrade-source"
+            :disabled="submitting"
+          >
+            <el-radio value="registry">{{ t('about.upgrade.sourceRegistry') }}</el-radio>
+            <el-radio value="offline" :disabled="offlineBundles.length === 0">
+              {{ t('about.upgrade.sourceOffline') }}
+            </el-radio>
+          </el-radio-group>
+          <!-- 禁用态也要能看见处置动作：提示放在来源行内，不依赖先切到离线 -->
+          <div v-if="offlineBundles.length === 0" class="upgrade-field-hint">
+            {{ t('about.upgrade.offlineNone') }}
+          </div>
+        </el-form-item>
+        <el-form-item
+          :label="
+            source === 'offline'
+              ? t('about.upgrade.offlineBundleLabel')
+              : t('about.upgrade.imageLabel')
+          "
+        >
+          <!-- 离线来源：候选来自代理心跳公布的包摘要（应用只「点名」，导入与校验都在宿主） -->
+          <el-select
+            v-if="source === 'offline'"
+            v-model="selectedBundle"
+            class="upgrade-bundle-select"
+            data-testid="upgrade-bundle-select"
+            filterable
+            :placeholder="t('about.upgrade.offlineBundlePlaceholder')"
+            :no-data-text="t('about.upgrade.offlineBundleEmpty')"
+            :aria-invalid="imageError ? 'true' : 'false'"
+            aria-describedby="upgrade-image-hint upgrade-image-error"
+          >
+            <el-option
+              v-for="bundle in offlineBundles"
+              :key="bundle.ref"
+              :value="bundle.ref"
+              :label="bundleOptionLabel(bundle)"
+            >
+              <span class="upgrade-bundle-version">{{ bundle.version || bundle.dirName }}</span>
+              <span class="upgrade-bundle-ref">{{ bundle.ref }}</span>
+            </el-option>
+          </el-select>
           <el-input
+            v-else
             v-model="image"
             class="upgrade-image-input"
             maxlength="512"
@@ -112,7 +161,9 @@
             @keydown.enter.prevent="submit"
           />
           <div id="upgrade-image-hint" class="upgrade-field-hint">
-            {{ t('about.upgrade.imageHint') }}
+            {{
+              source === 'offline' ? t('about.upgrade.offlineHint') : t('about.upgrade.imageHint')
+            }}
           </div>
           <div v-if="imageError" id="upgrade-image-error" class="upgrade-field-error" role="alert">
             {{ imageError }}
@@ -231,6 +282,10 @@ const visible = computed({
 
 const job = ref(null)
 const image = ref('')
+// 镜像来源：registry = 手输 digest（在线仓库）；offline = 从代理心跳公布的包里选。
+// 切换来源不改对方已填的值——两边都可能填了一半，互相覆盖只会制造「我以为填了 A」。
+const source = ref('registry')
+const selectedBundle = ref('')
 const imageError = ref('')
 const credentialMode = ref('password')
 const password = ref('')
@@ -277,10 +332,24 @@ const reasons = computed(() => {
   }))
 })
 
+// 代理心跳公布的离线包候选：只是「自称通过校验的候选」，导入与摘要比对都在宿主执行时做
+const offlineBundles = computed(() => {
+  const list = props.overview?.upgrade?.bundles?.available
+  if (!Array.isArray(list)) return []
+  return list.filter((bundle) => bundle && typeof bundle.ref === 'string')
+})
+
+const bundleOptionLabel = (bundle) =>
+  (bundle && (bundle.version || bundle.dirName)) || bundle?.ref || ''
+const modeLabel = (mode) =>
+  mode === 'offline' ? t('about.upgrade.sourceOffline') : t('about.upgrade.sourceRegistry')
+
 const canSubmit = computed(() => {
   // 就绪条件未满足时不提交：后端必然拒绝，让用户先按提示联系运维修配置
   if (!ready.value) return false
-  if (!image.value.trim()) return false
+  // 离线来源看选中的包，在线来源看手输的引用——两边互不代替
+  const target = source.value === 'offline' ? selectedBundle.value.trim() : image.value.trim()
+  if (!target) return false
   return credentialMode.value === 'mfa' ? /^\d{6}$/.test(mfaCode.value.trim()) : !!password.value
 })
 
@@ -329,6 +398,7 @@ const adoptJob = (raw) => {
     id,
     state: STATE_TAG_TYPES[raw.state] ? raw.state : 'unknown',
     image: typeof raw.image === 'string' ? raw.image : '',
+    mode: raw.mode === 'offline' ? 'offline' : 'registry',
     message: typeof raw.message === 'string' ? raw.message : '',
     outcome: typeof raw.outcome === 'string' ? raw.outcome : '',
     activeColor: typeof raw.activeColor === 'string' ? raw.activeColor : '',
@@ -488,9 +558,11 @@ const toggleMode = () => {
 const submit = async () => {
   if (submitting.value || !canSubmit.value) return
   imageError.value = ''
-  const value = image.value.trim()
+  const mode = source.value === 'offline' ? 'offline' : 'registry'
+  const value = (mode === 'offline' ? selectedBundle.value : image.value).trim()
   if (!IMAGE_RE.test(value)) {
-    imageError.value = t('about.upgrade.imageInvalid')
+    imageError.value =
+      mode === 'offline' ? t('about.upgrade.offlineBundleInvalid') : t('about.upgrade.imageInvalid')
     return
   }
 
@@ -526,7 +598,11 @@ const submit = async () => {
     // 提交（POST）刻意不带 signal：写请求一旦被取消，前端以为「没发生」而
     // 服务端可能已入队，这种错位比多一次点击危险得多（同 api.js P3-42 口径）。
     // 关窗失代后由 stillCurrent() 丢弃响应即可。
-    const { data: resp } = await api.security.triggerUpgrade({ image: value, ...credential })
+    const { data: resp } = await api.security.triggerUpgrade({
+      image: value,
+      mode,
+      ...credential,
+    })
     if (!stillCurrent()) return
     if (resp?.success && resp.data?.job) {
       if (adoptJob(resp.data.job)) {
@@ -589,6 +665,8 @@ const reset = () => {
   pollError.value = ''
   job.value = null
   image.value = ''
+  source.value = 'registry'
+  selectedBundle.value = ''
   imageError.value = ''
   credentialMode.value = 'password'
   password.value = ''
@@ -780,5 +858,25 @@ onUnmounted(() => {
 
 .upgrade-mode-toggle {
   margin-top: 4px;
+}
+
+.upgrade-source {
+  flex-wrap: wrap;
+}
+
+.upgrade-bundle-select {
+  width: 100%;
+}
+
+.upgrade-bundle-version {
+  font-weight: 600;
+  margin-right: 10px;
+}
+
+.upgrade-bundle-ref {
+  font-family: var(--xf-font-mono);
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-text-secondary);
+  word-break: break-all;
 }
 </style>

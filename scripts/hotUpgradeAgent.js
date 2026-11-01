@@ -9,9 +9,12 @@
  * 每轮动作：
  *   1. 写心跳（应用据此判断代理是否在线；升级期间每 10s 续一次）
  *   2. 自检（白名单 / HMAC / nginx 配置）——任一不满足就只写心跳，不消费请求
- *   3. 认领最早的一条请求（requests → processing），由 hotUpgradeJob 重新做全部判据
- *   4. 用固定脚本、固定参数执行（镜像经 HOT_UPGRADE_IMAGE 传入，不进 argv）
- *   5. 把终态写回 status/<uuid>.json，应用侧轮询展示
+ *   3. 扫描离线包目录（OFFLINE_BUNDLE_DIR，只读 manifest + 白名单，不算 payload 哈希），
+ *      把可用包摘要并入心跳 bundles——应用侧「一键离线升级」的下拉候选来自这里，
+ *      全量校验仍只在执行时由 importOfflineBundle.js 做
+ *   4. 认领最早的一条请求（requests → processing），由 hotUpgradeJob 重新做全部判据
+ *   5. 用固定脚本、固定参数执行（镜像经 HOT_UPGRADE_IMAGE 传入，不进 argv）
+ *   6. 把终态写回 status/<uuid>.json，应用侧轮询展示
  *
  * 安全边界：签名只防「能写队列目录的本机用户伪造升级指令」，不防应用被攻陷
  * （应用与代理共用同一把 HMAC）。真正的边界在这里——无论签名是否通过，都重新
@@ -28,7 +31,8 @@ const fs = require('fs');
 const path = require('path');
 
 const queue = require('./hotUpgradeQueue');
-const { processRequest, runUpgrade } = require('./hotUpgradeJob');
+const { processRequest, runUpgradeByMode } = require('./hotUpgradeJob');
+const { scanBundles } = require('./offlineBundleScan');
 
 const { JOB_ID_RE, readJsonFile, listJsonFiles, writeStatus, statusOf, isTerminal } = queue;
 const { pidAlive, LOCK_STALE_MS } = queue;
@@ -92,7 +96,7 @@ function recoverStale(cfg, { isAlive = pidAlive, now = Date.now() } = {}) {
   return { busy: false };
 }
 
-async function runOnce({ env = process.env, executor = runUpgrade, now = Date.now } = {}) {
+async function runOnce({ env = process.env, executor = runUpgradeByMode, now = Date.now } = {}) {
   const cfg = queue.loadConfig(env);
   queue.ensureDirs(cfg);
 
@@ -118,7 +122,16 @@ async function runOnce({ env = process.env, executor = runUpgrade, now = Date.no
 
   try {
     const readiness = assessReadiness(cfg);
-    beat = { ready: readiness.ready, reasons: readiness.reasons };
+    // 离线包扫描只影响心跳内容，不影响 ready：离线通道坏了（目录不可读、全是坏包）
+    // 不许把在线升级一起拖红。目录不可读的原因折进 reasons 让应用侧如实展示。
+    const bundles = scanBundles({ bundlesDir: cfg.bundlesDir, allowlist: cfg.allowlist });
+    const reasons = [...readiness.reasons];
+    if (bundles.error) reasons.push(bundles.error);
+    beat = {
+      ready: readiness.ready,
+      reasons,
+      bundles: { available: bundles.available, invalid: bundles.invalid },
+    };
     queue.writeHeartbeat(cfg, beat);
     if (!readiness.ready) {
       log(`代理未就绪：${readiness.reasons.join('；')}`);

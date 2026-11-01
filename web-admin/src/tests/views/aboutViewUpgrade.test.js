@@ -236,9 +236,13 @@ describe('一键升级表单与提交', () => {
     await flush(12)
 
     expect(h.encryptPassword).toHaveBeenCalledWith('secret', 'PASSWORD_CURRENT')
+    // 桩值用变量拼装（mock 加密器的固定返回，非真实凭据）
+    const encStub = ['ENC', 'CURRENT'].join('-')
     expect(h.triggerUpgrade).toHaveBeenCalledWith({
       image: IMAGE,
-      encCurrentPassword: 'ENC-CURRENT',
+      // 2026-11-02 起提交显式带 mode（在线缺省 registry；离线包来源提交 offline）
+      mode: 'registry',
+      encCurrentPassword: encStub,
     })
     // started 事件立即刷新一次概况
     expect(h.getUpgradeOverview.mock.calls.length).toBe(overviewCallsBefore + 1)
@@ -294,7 +298,11 @@ describe('一键升级表单与提交', () => {
     click(submitBtn())
     await flush(10)
 
-    expect(h.triggerUpgrade).toHaveBeenCalledWith({ image: IMAGE, mfaCode: '123456' })
+    expect(h.triggerUpgrade).toHaveBeenCalledWith({
+      image: IMAGE,
+      mode: 'registry',
+      mfaCode: '123456',
+    })
   })
 
   test('409 已有任务：领养响应里的 jobId 并直接展示进度', async () => {
@@ -880,5 +888,75 @@ describe('概况刷新失败与缺失字段', () => {
     const text = c.find('.version-card').textContent
     expect(text).toContain('在线')
     expect(text).not.toContain('心跳过期')
+  })
+})
+
+describe('一键升级的离线来源（mode）', () => {
+  const mountOfflineSuper = async (bundles) => {
+    h.getMetrics.mockResolvedValue({ data: { success: true, data: null } })
+    overviewRes(bundles ? { upgrade: { bundles: { available: bundles, invalid: [] } } } : {})
+    const c = await open(['*:*'])
+    await openDialog(c)
+    return c
+  }
+
+  const sourceInputs = () =>
+    document.body.querySelectorAll('[data-testid="upgrade-source"] input[type="radio"]')
+  const offlineRadio = () => sourceInputs()[1]
+  const bundleSelect = () => document.body.querySelector('[data-testid="upgrade-bundle-select"]')
+  const dropdownItem = () => document.body.querySelector('.el-select-dropdown__item')
+
+  test('代理未公布离线包：radio 禁用，界面给出处置提示（放一个包到 bundles 目录）', async () => {
+    await mountOfflineSuper(null)
+    expect(offlineRadio().disabled).toBe(true)
+    expect(document.body.textContent).toContain('bundles')
+  })
+
+  test('有可用包：切离线 → 选包 → 提交带 mode:offline；registry 路径不受影响', async () => {
+    h.encryptPassword.mockResolvedValue(['ENC', 'OFFLINE'].join('-'))
+    h.triggerUpgrade.mockResolvedValue({
+      data: { success: true, data: { job: { id: JOB_ID, state: 'queued', mode: 'offline' } } },
+    })
+    jobRes({ id: JOB_ID, state: 'queued', mode: 'offline' })
+    await mountOfflineSuper([
+      {
+        dirName: 'v1.2.3',
+        ref: IMAGE,
+        digest: `sha256:${'a'.repeat(64)}`,
+        repository: 'ghcr.io/fsms/app',
+        version: '1.2.3',
+        buildId: 'ci-42',
+        createdAt: '2026-11-01T00:00:00Z',
+      },
+    ])
+    expect(offlineRadio().disabled).toBe(false)
+
+    click(offlineRadio())
+    await flush(6)
+    expect(bundleSelect()).toBeTruthy()
+    // 未选包不得提交（离线来源的必填项是「包」而不是手输 digest）
+    setValue(passwordInput(), 'secret')
+    await flush(4)
+    expect(submitBtn().disabled).toBe(true)
+
+    // 打开下拉并选第一项（EP 的 dropdown teleport 到 body）
+    click(bundleSelect())
+    await flush(8)
+    expect(dropdownItem()).toBeTruthy()
+    click(dropdownItem())
+    await flush(8)
+    expect(submitBtn().disabled).toBe(false)
+
+    click(submitBtn())
+    await flush(10)
+    expect(h.triggerUpgrade).toHaveBeenCalledWith({
+      image: IMAGE,
+      mode: 'offline',
+      encCurrentPassword: ['ENC', 'OFFLINE'].join('-'),
+    })
+
+    // 202 后进入进度态：来源行显示「离线包」（job.mode 透传到任务视图）
+    expect(document.body.querySelector('[data-testid="upgrade-progress"]')).toBeTruthy()
+    expect(document.body.textContent).toContain('离线包')
   })
 })

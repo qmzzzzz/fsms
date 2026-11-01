@@ -40,7 +40,7 @@ const getUpgradeJob = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, { job }, '获取成功');
 });
 
-/** POST /api/security/upgrade/requests   body: { image: 'registry/name@sha256:<64hex>' }
+/** POST /api/security/upgrade/requests   body: { image: 'registry/name@sha256:<64hex>', mode?: 'registry'|'offline' }
  *  权限：security:config（路由层）+ 唯一超管 *:*（发布版本只由最高权限账户发起）。 */
 const triggerUpgrade = asyncHandler(async (req, res) => {
   const permissions = Array.isArray(req.userPermissions) ? req.userPermissions : [];
@@ -49,10 +49,12 @@ const triggerUpgrade = asyncHandler(async (req, res) => {
   }
 
   const image = typeof req.body.image === 'string' ? req.body.image.trim() : '';
+  const mode = typeof req.body.mode === 'string' ? req.body.mode.trim() : '';
   let job;
   try {
     ({ job } = upgradeService.createUpgradeRequest({
       image,
+      mode,
       user: req.user,
       sourceIp: clientIpForSecurityDecision(req) || '',
     }));
@@ -63,6 +65,7 @@ const triggerUpgrade = asyncHandler(async (req, res) => {
       code: err.code || 'UPGRADE_UNKNOWN',
       operator: req.user.username,
       image,
+      mode: mode || 'registry',
       message: err.message,
     });
     return rejectUpgrade(res, err);
@@ -79,7 +82,7 @@ const triggerUpgrade = asyncHandler(async (req, res) => {
       userAgent: req.get('user-agent'),
       success: true,
       riskLevel: 'high',
-      body: { image: job.image, jobId: job.id, targetColor: job.targetColor },
+      body: { image: job.image, jobId: job.id, targetColor: job.targetColor, mode: job.mode },
     },
     { auditAction: 'security_config_change', req }
   );

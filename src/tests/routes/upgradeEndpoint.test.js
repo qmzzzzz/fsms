@@ -268,4 +268,38 @@ describe('升级端点', () => {
     expect(second.body.errors.jobId).toBe(first.body.data.job.id);
     expect(fs.readdirSync(upgradeConfig.requestsDir)).toHaveLength(1);
   });
+
+  test("mode='offline' 入队：任务带 mode、审计 body 记 mode（离线来源可追溯）", async () => {
+    const res = await request(app)
+      .post('/api/security/upgrade/requests')
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ image: IMAGE, mode: 'offline', currentPassword: PASSWORD });
+    expect(res.status).toBe(202);
+    expect(res.body.data.job.mode).toBe('offline');
+
+    const audit = await AuditLog.findOne({
+      action: 'upgrade_triggered',
+      'body.jobId': res.body.data.job.id,
+    });
+    expect(audit).toBeTruthy();
+    expect(audit.body.mode).toBe('offline');
+  });
+
+  test('mode 非法值 400（isIn 白名单）；mode=registry 与缺省行为一致', async () => {
+    const bad = await request(app)
+      .post('/api/security/upgrade/requests')
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ image: IMAGE, mode: 'evil', currentPassword: PASSWORD });
+    expect(bad.status).toBe(400);
+    expect(fs.readdirSync(upgradeConfig.requestsDir).filter((n) => n.endsWith('.json'))).toEqual(
+      []
+    );
+
+    const ok = await request(app)
+      .post('/api/security/upgrade/requests')
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ image: IMAGE, mode: 'registry', currentPassword: PASSWORD });
+    expect(ok.status).toBe(202);
+    expect(ok.body.data.job.mode).toBe('registry');
+  });
 });

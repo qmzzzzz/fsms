@@ -81,6 +81,19 @@ const acceptedByScript = new Map(
   [...secretOptionsByScript].map(([rel, flags]) => [rel, flags.filter((f) => FILE_FORM.test(f))])
 );
 
+/**
+ * 经 policy 层从 argv 取值的脚本：取值发生在被 require 的判据模块里（takeValue 抽象，
+ * VALUE_OPT_RE 的 argv[++i] 形态在调用方脚本源码里不存在），静态判据看不见这层间接。
+ * 因此这里的每一项都是**显式登记**而非派生——登记漂移由下方「反向自证」用例钉住：
+ * 脚本必须真的 require 那个 policy 模块，policy 的 FLAGS 闭合清单必须真的含该选项。
+ */
+const POLICY_DELEGATED = new Map([['scripts/importOfflineBundle.js', ['--pubkey-file']]]);
+for (const [rel, flags] of POLICY_DELEGATED) {
+  const merged = new Set(acceptedByScript.get(rel) || []);
+  for (const f of flags) merged.add(f);
+  acceptedByScript.set(rel, [...merged]);
+}
+
 function acceptedFor(citedScript) {
   const rel = [...acceptedByScript.keys()].find(
     (k) => k === `scripts/${citedScript}` || k.endsWith(`/${citedScript}`)
@@ -152,12 +165,17 @@ describe('密钥类 argv 选项的静态判据', () => {
   test('前提自证：判据集非空，且全部已是 -file 形态（否则本套件在自证空气）', () => {
     expect(secretOptionsByScript.size).toBeGreaterThanOrEqual(2);
     expect([...acceptedByScript.keys()].sort()).toEqual(
-      ['scripts/migrate-mfa-secret.js', 'scripts/resign-audit-hmac.js'].sort()
+      [
+        'scripts/importOfflineBundle.js', // POLICY_DELEGATED 登记（经 policy 层取值，见上方注释）
+        'scripts/migrate-mfa-secret.js',
+        'scripts/resign-audit-hmac.js',
+      ].sort()
     );
     expect([...acceptedByScript.values()].flat().sort()).toEqual([
       '--new-key-file',
       '--new-key-file',
       '--old-key-file',
+      '--pubkey-file', // POLICY_DELEGATED 登记
     ]);
     // 文档侧同样要有料：真存在带密钥选项的手册命令，否则第 3 条用例是空集恒真
     expect(docCommands.length).toBeGreaterThanOrEqual(4);
@@ -209,6 +227,21 @@ describe('密钥类 argv 选项的静态判据', () => {
     expect(
       badDocFlags({ origin: 'x', script: 'verify-audit-chain.js', flags: ['--hmac-key'] })
     ).toEqual(['--hmac-key']);
+  });
+
+  test('POLICY_DELEGATED 登记的反向自证：脚本真的 require 那个 policy，且 policy 闭合清单真的含该选项', () => {
+    for (const [rel, flags] of POLICY_DELEGATED) {
+      // 1) 脚本必须真的经 policy.parseArgs 取值（换了取值实现而忘改登记 ⇒ 登记变空头支票）
+      const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+      expect(src).toMatch(/require\([^)]*offlineBundlePolicy["']\)/);
+      // 2) policy 的 FLAGS 闭合清单必须真的含每个登记选项（offlineBundlePolicy.test.js
+      //    的同名用例钉住 FLAGS 本身；这里钉的是「登记 ↔ 清单」两侧不许单方面漂移）
+      const policyFlags = require('../../../scripts/offlineBundlePolicy').FLAGS;
+      for (const f of flags) {
+        expect(policyFlags).toContain(f.slice(2));
+        expect(FILE_FORM.test(f)).toBe(true);
+      }
+    }
   });
 });
 

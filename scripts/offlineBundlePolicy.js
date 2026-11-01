@@ -26,6 +26,7 @@
 'use strict';
 
 const hotUpgradePolicy = require('./hotUpgradePolicy');
+const cliFlagPolicy = require('./cliFlagPolicy');
 
 /** 包格式版本。判据只认这一个值：老导入器读新包必须硬失败而不是「尽力而为」 */
 const BUNDLE_FORMAT_VERSION = 1;
@@ -48,7 +49,16 @@ const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 /** payload 只接受包内相对路径，且必须是 .tar（docker save 的产物） */
 const PAYLOAD_FILE_RE = /\.tar$/;
 
-const FLAGS = ['bundle', 'bundle-root', 'allowlist', 'max-payload-bytes', 'apply', 'dry-run', 'help'];
+const FLAGS = [
+  'bundle',
+  'bundle-root',
+  'pubkey-file',
+  'allowlist',
+  'max-payload-bytes',
+  'apply',
+  'dry-run',
+  'help',
+];
 
 /**
  * 包内相对路径的约束。
@@ -165,7 +175,15 @@ function parseBundleManifest(raw) {
       );
     }
 
-    return { role: entry.role, ref: ref.ref, repository: ref.repository, digest: ref.digest, file, bytes, sha256 };
+    return {
+      role: entry.role,
+      ref: ref.ref,
+      repository: ref.repository,
+      digest: ref.digest,
+      file,
+      bytes,
+      sha256,
+    };
   });
 
   return {
@@ -253,6 +271,7 @@ function parseArgs(argv = []) {
     help: false,
     bundle: '',
     bundleRoot: '',
+    pubkeyFile: '',
     allowlist: '',
     maxPayloadBytes: DEFAULT_MAX_PAYLOAD_BYTES,
   };
@@ -261,7 +280,17 @@ function parseArgs(argv = []) {
     if (!raw.startsWith('--')) throw new Error(`无法识别的参数：${raw}`);
     const [name, inlineValue] = raw.slice(2).split('=');
     if (!FLAGS.includes(name)) {
-      throw new Error(`未知参数：--${name}（可用：${FLAGS.map((f) => `--${f}`).join(', ')}）`);
+      // 复用 cliFlagPolicy.suggestFlag：本仓的破坏性脚本统一按「未知参数即拒绝 + 给出可照抄的
+      // 写法」处理（口径见 scripts/cliFlagPolicy.js 头部）。手误（\`--bundle-rootz\`）被静默忽略时，
+      // 脚本会转去默认目录找包，而操作者以为已经指定了别处——这正是那份白名单解析当初被抽出来的原因。
+      const hint = cliFlagPolicy.suggestFlag(
+        `--${name}`,
+        FLAGS.map((f) => `--${f}`)
+      );
+      throw new Error(
+        `未知参数：--${name}（可用：${FLAGS.map((f) => `--${f}`).join(', ')}）` +
+          (hint ? `；是否想写 ${hint}？` : '')
+      );
     }
     const takeValue = () => {
       if (inlineValue !== undefined) return inlineValue;
@@ -277,11 +306,15 @@ function parseArgs(argv = []) {
     else if (name === 'help') opts.help = hotUpgradePolicy.parseBooleanFlag(name, inlineValue);
     else if (name === 'bundle') opts.bundle = takeValue();
     else if (name === 'bundle-root') opts.bundleRoot = takeValue();
+    else if (name === 'pubkey-file') opts.pubkeyFile = takeValue();
     else if (name === 'allowlist') opts.allowlist = takeValue();
     else if (name === 'max-payload-bytes') {
-      const n = Number(takeValue());
+      // 回显必须用「取到的那个 token」，不能用 inlineValue：空格写法（--max-payload-bytes abc）
+      // 下 inlineValue 恒为 undefined，报错会让运维看不到自己到底敲了什么，只能靠猜。
+      const written = takeValue();
+      const n = Number(written);
       if (!Number.isInteger(n) || n <= 0) {
-        throw new Error(`--max-payload-bytes 需要正整数，收到：${inlineValue}`);
+        throw new Error(`--max-payload-bytes 需要正整数，收到：${written}`);
       }
       opts.maxPayloadBytes = n;
     }

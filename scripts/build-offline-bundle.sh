@@ -9,11 +9,13 @@
 #
 # 用法：
 #   bash scripts/build-offline-bundle.sh --image <repo[:tag]|repo@sha256:<64hex>> \\
-#        --version <版本号> --out <输出目录> [--build-id <CI 构建号>]
+#        --version <版本号> --out <输出目录> [--build-id <CI 构建号>] [--sign-key <Ed25519 私钥.pem>]
 #
 # 产出（<outDir> 下，就是导入器要的形态）：
 #   manifest.json          包清单（format=1、images[0].role=app）
-#   SHA256SUMS             payload 的 sha256 清单（sha256sum -c 兼容；不含 manifest.json 自身）
+#   manifest.sig           对 manifest.json 原始字节的 Ed25519 签名（给了 --sign-key 时才有）
+#   SHA256SUMS             sha256 清单（sha256sum -c 兼容；覆盖 payload 与 manifest.sig，
+#                          不含 manifest.json 自身——清单不能自我覆盖）
 #   payload/fsms-app.tar   docker save 产物
 #
 # 当前只导出一个应用镜像：判据层 IMAGE_ROLES 目前只认 role=app（scripts/offlineBundlePolicy.js:34），
@@ -23,20 +25,25 @@
 #   · 没有"演练"开关：本脚本只产出文件，真正的破坏性动作在导入侧（importOfflineBundle.js
 #     默认演练）。这里的对应措施是"拒绝覆盖既有产物"＋"失败即清掉本次产物"——半截的包
 #     在目标机上看起来和完整的包一模一样。
-#   · 只依赖 bash + docker + sha256sum：升级路径不该再拉进 node/jq 之类的新前提。
+#   · 只依赖 bash + docker + sha256sum（+ 可选 openssl）：升级路径不该再拉进 node/jq 之类的新前提。
+#     --sign-key 需要 OpenSSL ≥ 3.0（pkeyutl 的 Ed25519 -rawin 支持）；签名在构建机完成，
+#     目标机只持公钥（scripts/offlineBundleSignature.js 验签），私钥永不进包。
+#   · 未签名也能构建（向后兼容既有搬运流程），但目标机配了验签公钥时未签名包会被拒绝；
+#     FSMS_BUNDLE_REQUIRE_SIGNATURE=1 可把"忘了带 --sign-key"从事故变成构建期报错。
 #   · 用户给的引用与版本号一律当**数据**：只经 argv 传给 docker，绝不进 shell 求值；
 #     写进 manifest 的值先收成"不需要转义"的字符集，因此这里没有第二套 JSON 转义实现。
 #   · --out 不要指向仓库工作树内的路径：包动辄上 GB，一次 git add 会把整包带进版本库。
 
 set -euo pipefail
 
-USAGE='用法: bash scripts/build-offline-bundle.sh --image <repo[:tag]|repo@sha256:<64hex>> --version <版本号> --out <输出目录> [--build-id <CI 构建号>]'
-FLAGS_TEXT='--image / --out / --version / --build-id / --help'
-KNOWN_FLAGS=(--image --out --version --build-id --help)
+USAGE='用法: bash scripts/build-offline-bundle.sh --image <repo[:tag]|repo@sha256:<64hex>> --version <版本号> --out <输出目录> [--build-id <CI 构建号>] [--sign-key <Ed25519 私钥.pem>]'
+FLAGS_TEXT='--image / --out / --version / --build-id / --sign-key / --help'
+KNOWN_FLAGS=(--image --out --version --build-id --sign-key --help)
 
 ROLE='app'
 PAYLOAD_REL='payload/fsms-app.tar'
 MANIFEST_REL='manifest.json'
+SIG_REL='manifest.sig'
 SUMS_REL='SHA256SUMS'
 
 # ================= 参数解析（未知参数报错、退出码 2、用法错误时 stdout 不留一个字节） =================
@@ -95,6 +102,7 @@ IMAGE_REF=''
 OUT_DIR=''
 VERSION=''
 BUILD_ID=''
+SIGN_KEY=''
 HELP=0
 ERRORS=()
 
@@ -107,7 +115,8 @@ while [ "$#" -gt 0 ]; do
     --out=*) OUT_DIR=${arg#--out=} ;;
     --version=*) VERSION=${arg#--version=} ;;
     --build-id=*) BUILD_ID=${arg#--build-id=} ;;
-    --image | --out | --version | --build-id)
+    --sign-key=*) SIGN_KEY=${arg#--sign-key=} ;;
+    --image | --out | --version | --build-id | --sign-key)
       # 值槽被开关形态的 token 占掉后，后面的边界已不可信，不再继续解析（同 generate-secrets.js）
       if [ "$#" -lt 1 ] || [ "${1#--}" != "$1" ]; then
         ERRORS+=("「${arg}」需要一个值（后面跟着另一个开关，或已到末尾）")
@@ -120,6 +129,7 @@ while [ "$#" -gt 0 ]; do
         --out) OUT_DIR=$value ;;
         --version) VERSION=$value ;;
         --build-id) BUILD_ID=$value ;;
+        --sign-key) SIGN_KEY=$value ;;
       esac
       ;;
     *)
@@ -174,6 +184,24 @@ command -v sha256sum >/dev/null 2>&1 || {
   exit 1
 }
 
+# 签名前置：这些都排在任何副作用（mkdir/pull/save）之前——带了 --sign-key 却半路发现
+# 私钥读不了，不该以"已经 save 出一个 8GB tar"为代价才发现。
+if [ -n "$SIGN_KEY" ]; then
+  if [ ! -r "$SIGN_KEY" ]; then
+    printf '错误：--sign-key 指向的私钥不可读：%s\n' "$SIGN_KEY" >&2
+    exit 1
+  fi
+  command -v openssl >/dev/null 2>&1 || {
+    printf '错误：未找到 openssl 命令（--sign-key 的 Ed25519 签名依赖它，需 OpenSSL ≥ 3.0）。\n' >&2
+    exit 1
+  }
+elif [ "${FSMS_BUNDLE_REQUIRE_SIGNATURE:-0}" = "1" ]; then
+  # 部署把"未签名包"定为事故口径时，让构建在起点就失败，而不是产出一个
+  # 到目标机才被（正确地）拒收的包。
+  printf '错误：FSMS_BUNDLE_REQUIRE_SIGNATURE=1 但未给 --sign-key：本次构建要求产出已签名包。\n' >&2
+  exit 1
+fi
+
 # ================= 产物落点：形状、拒绝覆盖、清理钩子 =================
 
 if [ -e "$OUT_DIR" ] && [ ! -d "$OUT_DIR" ]; then
@@ -182,7 +210,7 @@ if [ -e "$OUT_DIR" ] && [ ! -d "$OUT_DIR" ]; then
 fi
 # 拒绝覆盖既有产物：包被覆盖后上一份再也找不回来，而"上一次的 payload + 这一次的 manifest"
 # 这种混合现场没有任何判据能识别出来。
-for _rel in "$MANIFEST_REL" "$SUMS_REL" "$PAYLOAD_REL"; do
+for _rel in "$MANIFEST_REL" "$SUMS_REL" "$PAYLOAD_REL" "$SIG_REL"; do
   if [ -e "$OUT_DIR/$_rel" ]; then
     printf '错误：--out 目录里已经有本脚本的产物，拒绝覆盖：%s\n' "$OUT_DIR/$_rel" >&2
     printf '       请换一个空目录（或人工确认后删掉旧包）后重跑。\n' >&2
@@ -201,6 +229,7 @@ fi
 
 TAR_PATH="$OUT_DIR/$PAYLOAD_REL"
 MANIFEST_PATH="$OUT_DIR/$MANIFEST_REL"
+SIG_PATH="$OUT_DIR/$SIG_REL"
 SUMS_PATH="$OUT_DIR/$SUMS_REL"
 
 FINALIZED=0          # 1 = 产物齐备且自校验通过，清理钩子从此不碰任何文件
@@ -211,7 +240,7 @@ ARTIFACTS_STARTED=0  # 1 = 已经开始往 outDir 写东西
 cleanup() {
   if [ "$FINALIZED" -eq 1 ] || [ "$ARTIFACTS_STARTED" -ne 1 ]; then return 0; fi
   ARTIFACTS_STARTED=0
-  rm -f -- "$TAR_PATH" "$MANIFEST_PATH" "$SUMS_PATH" 2>/dev/null || true
+  rm -f -- "$TAR_PATH" "$MANIFEST_PATH" "$SUMS_PATH" "$SIG_PATH" 2>/dev/null || true
   printf '已清理本次未完成的产物：%s\n' "$OUT_DIR" >&2
   return 0
 }
@@ -399,13 +428,40 @@ printf '{
 }
 ' "$VERSION" "$BUILD_ID" "$CREATED_AT" "$ROLE" "$PINNED" "$PAYLOAD_REL" "$TAR_BYTES" "$TAR_SHA" > "$MANIFEST_PATH"
 
-# SHA256SUMS 只覆盖 payload：manifest.json 是清单本身，让它包含"自己的摘要"不可能自洽。
-# 清单的完整性由搬运前后人工比对（下面会打印它的 sha256）与导入侧的逐字段判据保证。
+# ================= 签名（可选，但目标机配了公钥时就是必需） =================
+
+# 签名覆盖 manifest.json 的**原始字节**：目标机的验签（scripts/offlineBundleSignature.js）按
+# 字节比对，这里的任何后处理（重排键、改行尾）都会让包在自己构建机以外的地方验不过。
+# -rawin 是 Ed25519 的要求（One-shot 签名，不做摘要预热）；签完立即用同一把钥匙回验一次，
+# 把"openssl 版本不支持 -rawin 也退出码 0"这类假成功挡在构建机上。
+if [ -n "$SIGN_KEY" ]; then
+  printf '==> openssl pkeyutl -sign（Ed25519）→ %s\n' "$SIG_REL"
+  if ! openssl pkeyutl -sign -rawin -inkey "$SIGN_KEY" -in "$MANIFEST_PATH" -out "$SIG_PATH"; then
+    printf '错误：manifest 签名失败（需 OpenSSL ≥ 3.0 支持 Ed25519 的 pkeyutl -rawin）。\n' >&2
+    exit 1
+  fi
+  if ! openssl pkeyutl -verify -rawin -inkey "$SIGN_KEY" -in "$MANIFEST_PATH" -sigfile "$SIG_PATH" >/dev/null; then
+    printf '错误：签名回验失败——私钥与刚产出的 %s 对不上，拒绝发出一个连自己都验不了的包。\n' "$SIG_REL" >&2
+    exit 1
+  fi
+  SIGNED=1
+else
+  SIGNED=0
+  printf '==> 未签名（未给 --sign-key）：目标机配置验签公钥后，这个包会被拒绝导入。\n' >&2
+fi
+
+# SHA256SUMS 覆盖 payload 与 manifest.sig：manifest.json 是清单本身，让它包含"自己的摘要"
+# 不可能自洽；manifest 的完整性由 manifest.sig（签名，机器校验）与搬运前后人工比对兜底。
 # 写法与 sha256sum 的产出一致（相对路径），目标机 cd <包目录> && sha256sum -c SHA256SUMS 直接可用。
+# （追加写而不是 { A; [ cond ] && B; } 组合：set -e 下未签名分支的 [ ] 会以非零退出，
+#  把整条管线变成假失败。）
 ( cd -- "$OUT_DIR" && sha256sum -- "$PAYLOAD_REL" ) > "$SUMS_PATH"
+if [ "$SIGNED" -eq 1 ]; then
+  ( cd -- "$OUT_DIR" && sha256sum -- "$SIG_REL" ) >> "$SUMS_PATH"
+fi
 # 写完立刻按清单自校验一次：避免"清单写成功，但它与产物不是同一时刻的读数"。
 if ! ( cd -- "$OUT_DIR" && sha256sum -c -- "$SUMS_REL" ) >/dev/null; then
-  printf '错误：SHA256SUMS 自校验失败（清单与 payload 对不上），本次产物按失败处理。\n' >&2
+  printf '错误：SHA256SUMS 自校验失败（清单与产物对不上），本次产物按失败处理。\n' >&2
   exit 1
 fi
 
@@ -424,6 +480,11 @@ printf '  版本：%s%s\n' "$VERSION" "$BUILD_LABEL"
 printf '  镜像：%s → %s\n' "$ROLE" "$PINNED"
 printf '  %s：%s 字节，sha256 %s\n' "$PAYLOAD_REL" "$TAR_BYTES" "$TAR_SHA"
 printf '  %s sha256：%s（不在 SHA256SUMS 内：清单不能自我覆盖，搬运前后请核对这一行）\n' "$MANIFEST_REL" "$MANIFEST_SHA"
+if [ "$SIGNED" -eq 1 ]; then
+  printf '  签名：已用 %s 对 manifest 签名（%s）；目标机以 OFFLINE_BUNDLE_VERIFY_PUBKEY 钉对应公钥\n' "$SIGN_KEY" "$SIG_REL"
+else
+  printf '  签名：无——目标机配置了验签公钥（OFFLINE_BUNDLE_VERIFY_PUBKEY）时此包将被拒绝\n'
+fi
 printf '\n目标机（air-gap）下一步：把整个目录原样搬到目标机，然后\n'
 printf '  演练： node scripts/importOfflineBundle.js --bundle <包目录> --allowlist %s\n' "$ALLOWLIST_HINT"
 printf '  执行： node scripts/importOfflineBundle.js --bundle <包目录> --allowlist %s --apply\n' "$ALLOWLIST_HINT"

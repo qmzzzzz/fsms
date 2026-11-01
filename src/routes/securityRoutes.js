@@ -588,6 +588,10 @@ router.post(
     .withMessage('请提供镜像地址')
     .isLength({ max: 512 })
     .withMessage('镜像地址不能超过 512 个字符'),
+  body('mode')
+    .optional()
+    .isIn(['registry', 'offline'])
+    .withMessage('mode 只能是 registry 或 offline'),
   ...reauthCredentialValidation,
   consumeValidation(),
   requireReAuthentication(),

@@ -5,8 +5,14 @@
  * 这里才是执行前的最终判定：文件名 id、TTL、HMAC 签名、digest 钉扎、白名单，
  * 任何一条不满足都写 failed/rejected 并把原文件移入 rejected/ 留证。
  *
- * 执行只调用固定脚本、固定参数（buildHotUpgradeInvocation），镜像经环境变量传入，
- * 不经过 shell —— 请求内容永远不会被拼进命令行。
+ * 执行只调用固定脚本、固定参数（buildHotUpgradeInvocation / buildImportBundleInvocation），
+ * 镜像经环境变量传入，不经过 shell —— 请求内容永远不会被拼进命令行。
+ *
+ * mode=offline（离线包通道，ADR-019）时执行分两段，顺序不可调换：
+ *   1. 导入：scripts/importOfflineBundle.js --apply——包目录由代理在受管 bundles 目录
+ *      内按 digest 定位（请求只点名镜像，永远指定不了包外的路径），全量校验 + docker load；
+ *   2. 换装：scripts/hotUpgrade.js --offline——本地已有该 digest 才继续，复用蓝绿七步。
+ * 定位不到包、或导入退出码非 0，都停在第一段（aborted_import_failed）：未切流、未动数据。
  */
 
 'use strict';
@@ -17,8 +23,13 @@ const { spawn } = require('child_process');
 
 const policy = require('./hotUpgradePolicy');
 const queue = require('./hotUpgradeQueue');
-const { verifyUpgradeRequest } = require('../src/services/upgradeRequestSignature');
-const { buildHotUpgradeInvocation } = require('./deployCommands');
+const { scanBundles } = require('./offlineBundleScan');
+const {
+  verifyUpgradeRequest,
+  normalizeMode,
+  UPGRADE_MODES,
+} = require('../src/services/upgradeRequestSignature');
+const { buildHotUpgradeInvocation, buildImportBundleInvocation } = require('./deployCommands');
 
 const ROOT = path.resolve(__dirname, '..');
 const { JOB_ID_RE, MAX_JSON_BYTES, readJsonFile, writeJsonAtomic, writeStatus, statusOf } = queue;
@@ -29,6 +40,17 @@ function validateRequest(request, cfg, now) {
   if (!JOB_ID_RE.test(request.id)) return { ok: false, reason: 'id 格式非法' };
   if (typeof request.image !== 'string' || !request.image.trim()) {
     return { ok: false, reason: '缺少镜像引用' };
+  }
+  // mode：缺省按 registry（旧应用只发 registry 请求，签名也是 4 段格式）；
+  // 显式给了就必须是合法值——「带非法 mode 却能过验签」的中间形态不存在
+  //（mode 在签名 canonical 里，改它必红），这里拦的是签名之前就能拒掉的脏输入。
+  const mode = normalizeMode(request.mode);
+  if (
+    request.mode !== undefined &&
+    request.mode !== null &&
+    !UPGRADE_MODES.includes(request.mode)
+  ) {
+    return { ok: false, reason: 'mode 非法（只接受 registry / offline）' };
   }
   const requestedAt = Date.parse(request.requestedAt);
   if (!Number.isFinite(requestedAt)) return { ok: false, reason: 'requestedAt 非法' };
@@ -47,6 +69,7 @@ function validateRequest(request, cfg, now) {
     {
       id: request.id,
       image: request.image,
+      mode,
       requestedAt: request.requestedAt,
       userId,
     },
@@ -61,7 +84,7 @@ function validateRequest(request, cfg, now) {
   } catch (err) {
     return { ok: false, reason: err.message };
   }
-  return { ok: true };
+  return { ok: true, mode };
 }
 
 /** 子进程回收的宽限期：SIGTERM 之后等这么久还没退出就升级为 SIGKILL */
@@ -112,23 +135,19 @@ function killChildAndWait(child, graceMs = CHILD_KILL_GRACE_MS) {
  * 才是这条链上真正不可绕过的约束。
  */
 
-function runUpgrade({ cfg, request, statusFile, claimedFile }) {
-  const invocation = buildHotUpgradeInvocation({ nginxConf: cfg.nginxConf, statusFile });
+/**
+ * 共用执行壳：spawn 固定 invocation + pid 先记账。
+ * 「先记 pid 再等结果」的约束对两段执行同样成立：导入阶段的进程也必须被跟踪，
+ * 否则它被杀后 processRequest 会按 spawn_failed 收尾、删请求、放锁，而 docker load
+ * 可能仍在进行——下一轮升级会与它并发改本地镜像状态。
+ */
+function runInvocation({ invocation, env = {}, cfg, claimedFile }) {
   return new Promise((resolve) => {
     const child = spawn(invocation.file, invocation.args, {
       cwd: ROOT,
       stdio: 'inherit',
-      env: {
-        ...process.env,
-        HOT_UPGRADE_IMAGE: request.image,
-        HOT_UPGRADE_REGISTRY_ALLOWLIST: cfg.allowlist.join(','),
-        HOT_UPGRADE_NGINX_CONF: cfg.nginxConf,
-        ...(cfg.composeFile ? { HOT_UPGRADE_COMPOSE_FILE: cfg.composeFile } : {}),
-      },
+      env: { ...process.env, ...env },
     });
-    // 先记 pid 再等结果：记不下去（磁盘满、processing/ 不可写、原子写复核失败）时
-    // 必须把子进程收回来——否则 processRequest 会按 spawn_failed 收尾、删掉请求文件、
-    // 释放锁，而升级本身仍在跑并可能已经切流：宿主上留着一个没人跟踪的升级进程。
     try {
       updateProcessing(cfg, claimedFile, { childPid: child.pid });
     } catch (err) {
@@ -144,6 +163,104 @@ function runUpgrade({ cfg, request, statusFile, claimedFile }) {
     child.on('error', (err) => resolve({ code: -1, error: err.message }));
     child.on('close', (code) => resolve({ code }));
   });
+}
+
+/** 给 status 追加一个步骤（writeStatus 是浅合并：steps 必须整组回写） */
+function appendStep(cfg, id, name, detail = '') {
+  const current = queue.statusOf(cfg, id) || {};
+  const steps = Array.isArray(current.steps) ? current.steps : [];
+  queue.writeStatus(cfg, id, {
+    steps: [...steps, { name, detail, at: new Date().toISOString() }],
+  });
+}
+
+/** registry 请求：镜像经 HOT_UPGRADE_IMAGE 传入（不进 argv），直接走蓝绿七步 */
+function runUpgrade({ cfg, request, statusFile, claimedFile }) {
+  const invocation = buildHotUpgradeInvocation({ nginxConf: cfg.nginxConf, statusFile });
+  return runInvocation({
+    invocation,
+    cfg,
+    claimedFile,
+    env: {
+      HOT_UPGRADE_IMAGE: request.image,
+      HOT_UPGRADE_REGISTRY_ALLOWLIST: cfg.allowlist.join(','),
+      HOT_UPGRADE_NGINX_CONF: cfg.nginxConf,
+      ...(cfg.composeFile ? { HOT_UPGRADE_COMPOSE_FILE: cfg.composeFile } : {}),
+    },
+  });
+}
+
+/**
+ * offline 请求：先导入（第一段），成功后才换装（第二段，--offline）。
+ *
+ * 包目录由代理在受管 bundles 目录内按 digest 定位——请求只点名目标镜像，
+ * 永远指定不了目录；定位不到（未放置、未解压，或扫描判据/白名单未过）与导入退出码
+ * 非 0 都停在第一段：未切流、未动数据，且失败描述都指向可执行的处置动作。
+ */
+async function runOfflineUpgrade({ cfg, request, statusFile, claimedFile }) {
+  const scan = scanBundles({ bundlesDir: cfg.bundlesDir, allowlist: cfg.allowlist });
+  const bundle = scan.available.find((entry) => entry.ref === request.image);
+  if (!bundle) {
+    queue.writeStatus(cfg, request.id, {
+      state: 'failed',
+      outcome: 'aborted_import_failed',
+      message:
+        '离线升级被拒绝：宿主离线包目录（OFFLINE_BUNDLE_DIR）中没有声明该 digest 的可用包' +
+        (scan.error
+          ? `——${scan.error}`
+          : '（未放置、未解压成目录，或 manifest/白名单校验未通过）') +
+        '。请先用 scripts/build-offline-bundle.sh 构建并把整个包目录放到 bundles 下，待代理心跳公布后再发起。',
+      finishedAt: new Date().toISOString(),
+    });
+    return { code: -1 };
+  }
+
+  appendStep(cfg, request.id, 'import-bundle', bundle.dirName);
+  const imported = await runInvocation({
+    invocation: buildImportBundleInvocation({
+      bundleDir: path.join(cfg.bundlesDir, bundle.dirName),
+      bundleRoot: cfg.bundlesDir,
+      allowlist: cfg.allowlist,
+    }),
+    cfg,
+    claimedFile,
+  });
+  if (imported.error || imported.code !== 0) {
+    queue.writeStatus(cfg, request.id, {
+      state: 'failed',
+      outcome: 'aborted_import_failed',
+      message: imported.error
+        ? `无法启动离线包导入：${imported.error}`
+        : `离线包导入失败（退出码 ${imported.code}）：未切流，旧色继续服务；详细原因见宿主 logs/offline-import-*.json 与 journal`,
+      finishedAt: new Date().toISOString(),
+    });
+    return { code: imported.code, error: imported.error || '' };
+  }
+
+  appendStep(cfg, request.id, 'start-upgrade-offline', request.image);
+  const invocation = buildHotUpgradeInvocation({
+    nginxConf: cfg.nginxConf,
+    statusFile,
+    offline: true,
+  });
+  return runInvocation({
+    invocation,
+    cfg,
+    claimedFile,
+    env: {
+      HOT_UPGRADE_IMAGE: request.image,
+      HOT_UPGRADE_REGISTRY_ALLOWLIST: cfg.allowlist.join(','),
+      HOT_UPGRADE_NGINX_CONF: cfg.nginxConf,
+      ...(cfg.composeFile ? { HOT_UPGRADE_COMPOSE_FILE: cfg.composeFile } : {}),
+    },
+  });
+}
+
+/** 按 mode 分派的执行器入口（测试可整体注入替换） */
+function runUpgradeByMode(options) {
+  return normalizeMode(options.request.mode) === 'offline'
+    ? runOfflineUpgrade(options)
+    : runUpgrade(options);
 }
 
 function prepareRequest(cfg, file, now) {
@@ -199,7 +316,7 @@ function prepareRequest(cfg, file, now) {
   return { ok: true, id, request };
 }
 
-async function processRequest(cfg, file, { executor = runUpgrade, now = Date.now() } = {}) {
+async function processRequest(cfg, file, { executor = runUpgradeByMode, now = Date.now() } = {}) {
   const prepared = prepareRequest(cfg, file, now);
   if (!prepared.ok) return { status: 'skipped', reason: prepared.reason };
 
@@ -225,6 +342,7 @@ async function processRequest(cfg, file, { executor = runUpgrade, now = Date.now
   writeStatus(cfg, id, {
     state: 'running',
     image: request.image,
+    mode: normalizeMode(request.mode),
     requestedAt: request.requestedAt,
     requestedBy: request.requestedBy,
     sourceIp: request.sourceIp,
@@ -277,6 +395,9 @@ async function processRequest(cfg, file, { executor = runUpgrade, now = Date.now
 module.exports = {
   validateRequest,
   runUpgrade,
+  runOfflineUpgrade,
+  runUpgradeByMode,
+  runInvocation,
   prepareRequest,
   processRequest,
 };

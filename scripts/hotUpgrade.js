@@ -289,6 +289,33 @@ function stopQuietly(color, why) {
     log(`${why}：停容器失败（${err.message}），请人工确认 ${SERVICE_BY_COLOR[color]}`);
   }
 }
+/**
+ * 离线模式专用：确认本地 docker 已有这个 digest 的镜像。
+ *
+ * 为什么不靠 compose 的默认拉取策略：\`up\` 的默认行为是「本地缺了才 pull」——
+ * 本地没有时它**不会失败**，而是去联网。在内网机上表现为长时间卡住后超时，
+ * 在断网机上表现为拉取报错，两种现场都不是「这个包还没导入」这句话。
+ * 提前断言把这条最贵的失败点挪到备份之前，并把原因直接写在报错里。
+ *
+ * 只查 RepoDigests 不查 tag：与 scripts/importOfflineBundle.js 同一口径——
+ * tag 说明不了装的是哪一版，digest 才能。
+ */
+function assertLocalImage(ref) {
+  try {
+    execFileSync('docker', ['image', 'inspect', '--format', '{{json .RepoDigests}}', ref], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (_) {
+    fail(
+      `离线模式：本地 docker 里没有镜像 ${ref}，未做任何变更。\n` +
+        '  请先在目标机上导入离线包：node scripts/importOfflineBundle.js --bundle <目录> --apply\n' +
+        '  离线模式不接受「本地没有就去 registry 拉」——那正是这个模式要避免的事。'
+    );
+  }
+}
+
 function printHelp() {
   process.stdout.write(
     [
@@ -300,6 +327,7 @@ function printHelp() {
       '  --status-file <path>     进度回写文件（应用侧轮询用；由宿主代理传入）',
       '  --readyz-timeout <sec>   等备色就绪的超时，默认 180',
       '  --observe-seconds <sec>  切流后观察窗口，默认 300；--apply 下不得低于 60',
+      '  --offline                离线升级：镜像必须已由 scripts/importOfflineBundle.js 导入，执行期间不联网拉取',
       '  --apply                  真正执行（缺省为演练）',
       '  --help                   本帮助',
       '',
@@ -339,6 +367,7 @@ function buildPlan(opts) {
     targetPort,
     image: parsed.ref,
     digest: parsed.digest,
+    mode: opts.offline ? 'offline' : 'registry',
     nginxConf: confPath,
     observeSec: opts.observeSec,
   };
@@ -374,6 +403,14 @@ async function executePlan({ confPath, active, target, targetPort, parsed, plan,
     if (statusSink) statusSink.step(entry);
     log(`▶ ${name}${detail ? `：${detail}` : ''}`);
   };
+
+  // 0. 离线模式前置：包必须已经在本机 docker 里。
+  //    排在最前不是抠顺序——这是整条链上唯一「不碰数据、只读本地状态」的判据，
+  //    该在付出一次全量备份的代价之前就把「包没导入」这件事拒绝掉。
+  if (opts.offline) {
+    step('assert-local-image', parsed.ref);
+    assertLocalImage(parsed.ref);
+  }
 
   // 1. 备份先行。失败即中止——此时尚未改动任何东西，是最便宜的失败点
   step('backup');

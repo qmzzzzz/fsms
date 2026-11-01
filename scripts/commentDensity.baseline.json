@@ -1646,16 +1646,16 @@
       "ratio": 0.3609022556390977
     },
     "src/services/upgradeRequestSignature.js": {
-      "comment": 6,
-      "code": 22,
-      "total": 28,
-      "ratio": 0.21428571428571427
+      "comment": 15,
+      "code": 38,
+      "total": 53,
+      "ratio": 0.2830188679245283
     },
     "src/services/upgradeService.js": {
-      "comment": 11,
-      "code": 452,
-      "total": 463,
-      "ratio": 0.023758099352051837
+      "comment": 17,
+      "code": 487,
+      "total": 504,
+      "ratio": 0.03373015873015873
     },
     "src/services/userAnonymizationBatch.js": {
       "comment": 13,
@@ -2103,8 +2103,8 @@
     }
   },
   "total": {
-    "comment": 22290,
-    "code": 46385,
-    "ratio": 0.3246
+    "comment": 22305,
+    "code": 46436,
+    "ratio": 0.3245
   }
 }

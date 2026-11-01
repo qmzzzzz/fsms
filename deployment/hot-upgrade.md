@@ -119,6 +119,103 @@ node scripts/hotUpgrade.js \
 每一步都写进 `logs/hot-upgrade-<时间戳>.json`（审计链之外的第二份证据）；
 一键升级时还会同步写入 `status/<uuid>.json` 供界面轮询。
 
+### 3.3 离线（air-gap）升级：从离线包一键换装
+
+前面两条入口都要求目标机能**从 registry 拉取**目标 digest。内网/断网机器上这条前提不成立，
+因此另有一条离线通道：在联机侧把镜像导出成「离线包」搬到目标机，放进宿主受管的 bundles
+目录后，管理员在**应用内**选包一键升级；导入与换装仍走**同一套**判据与蓝绿七步
+（与 §3.1/§3.2 的差别只在镜像从哪来，切流与观察逻辑逐行相同）。
+
+**离线包形态**（是目录，不是单个 tar——导入器刻意不自己解包，理由见 §9）：
+
+```
+<bundle>/
+  manifest.json          # 包的自述：镜像 ref、字节数、sha256
+  manifest.sig           # 对 manifest.json 原始字节的 Ed25519 签名（--sign-key 构建时产出）
+  SHA256SUMS             # 传输完整性：覆盖 payload 与 manifest.sig；manifest 自身不能自我覆盖
+  payload/fsms-app.tar   # docker save 的产物
+```
+
+manifest.json 的形状（判据在 `scripts/offlineBundlePolicy.js`）：
+
+| 字段              | 约束                                                   | 为什么不能省                               |
+| ----------------- | ------------------------------------------------------ | ------------------------------------------ |
+| `format`          | 只认 `1`                                               | 老导入器读新包必须硬失败，不能「尽力而为」 |
+| `images[].ref`    | `repo@sha256:<64hex>`，**tag 一律拒绝**                | 离线包不是 digest 钉扎的逃生通道           |
+| `images[].file`   | 包内相对路径，`/` 分隔；`..`、绝对路径、反斜杠一律拒绝 | 上跳段能把文件写到包外                     |
+| `images[].bytes`  | 正整数                                                 | 拷贝截断的包会被当成完整包装上             |
+| `images[].sha256` | 64 位小写十六进制                                      | 摘要缺失 = 不校验                          |
+
+**签名与信任链（ADR-019）**：`manifest.sig` 是构建机 Ed25519 私钥对 manifest.json **原始字节**
+的签名（不做 JSON canonical——键序、空白、行尾任何字节动了就该验签失败）。目标机只钉一把
+公钥（`OFFLINE_BUNDLE_VERIFY_PUBKEY`）：配置后**未签名或验签失败的包一律拒绝**（fail-closed）；
+不配置则跳过验签，留痕明示 `signature: 'unchecked'`。payload 的完整性由 manifest 内的 sha256
+逐字节比对承接，于是 `信任根(公钥) → manifest 字节 → payload 摘要` 传递覆盖整包——
+「manifest 与 payload 被整体重写」从此是可检测的（此前只靠搬运通道可信）。
+
+**第 1 步·构建（联机侧）**：
+
+```bash
+scripts/build-offline-bundle.sh --image ghcr.io/<org>/<repo>@sha256:<64hex> \
+  --version <版本号> --out /tmp/fsms-offline-v1.2.3 \
+  --sign-key /path/to/offline_bundle_sign.pem
+```
+
+（`FSMS_BUNDLE_REQUIRE_SIGNATURE=1` 可把「忘了带 --sign-key」变成构建期报错；
+openssl 需 ≥ 3.0。私钥只在构建机，目标机永远只拿公钥。）
+
+**第 2 步·搬运与落位（运维）**：把**整个目录**原样搬到目标机 `/var/lib/fsms/upgrade/bundles/`
+下（scp / USB 均可），保持 0700 root。刻意不走应用内上传：应用容器只读、无 multipart 栈，
+而 bundles 目录必须保持 root-only——**能写这个目录的账号 = 能决定线上跑什么代码**，
+这个边界不因离线通道存在而松动。
+
+**第 3 步·一键换装（应用内，推荐）**：代理每轮扫描 bundles 目录（只读 manifest + 白名单，
+**不算 payload 哈希**——全量校验在执行时做），可用包摘要经心跳 `bundles` 字段公布；
+「关于」页的升级弹窗会出现「离线包」来源，管理员从下拉选择包 → 二次验证 → 确认。
+后续动作与在线一键升级完全一致：签名请求（mode=offline）→ 宿主代理重验全部判据 →
+`importOfflineBundle.js --apply`（验签 → 逐字节比对 → `docker load` → RepoDigests 复核）→
+`hotUpgrade.js --offline`（蓝绿七步，本地没有该 digest 就拒绝启动）。
+
+**CLI 兜底（第 3 步的人工等价物）**：
+
+```bash
+# 演练（默认）：只校验不 load
+node scripts/importOfflineBundle.js --bundle /var/lib/fsms/upgrade/bundles/v1.2.3 \
+  --bundle-root /var/lib/fsms/upgrade/bundles --allowlist ghcr.io/<org>/ \
+  --pubkey-file /etc/fsms/secrets/offline_bundle.pub
+# 真正 docker load
+node scripts/importOfflineBundle.js ... --apply
+# 换装（离线模式：本地必须有该 digest，不联网拉取）
+node scripts/hotUpgrade.js --image <同一个 ref> --offline --nginx-conf /etc/nginx/nginx.conf --apply
+```
+
+导入器按固定顺序做五件事，**任何一步不过都在碰 docker 之前中止**——顺序不能换：
+先校验后 load，是因为一个损坏的包若先被 load，会在被拒绝之前就把半个镜像写进本地
+docker（占盘，并与上一版抢同一个 repo 名），失败现场的清理成本远高于先校验。
+
+1. 验签（配置了公钥时）：`manifest.sig` ↔ manifest.json 原始字节；未签名 = 拒绝；
+2. `manifest.json` 结构与白名单（空白名单 = 全拒，与在线路径是**同一条**判据）；
+3. 每个 payload 的实际字节数、sha256 ↔ manifest 声明；
+4. `docker load`；
+5. `docker image inspect` 的 `RepoDigests` 必须含 manifest 声明的那个 digest。
+   load 的退出码**不是**答案：它只说明 tar 结构被接受了，装进来的完全可以是另一版。
+
+`--offline` 只加一条前置判据：**本地 docker 必须已经有这个 digest 的镜像**，且它排在
+备份之前（整条链上唯一不碰数据、只读本地状态的判据）。失败时报的是「本地没有这个镜像，
+请先导入」——而不是让 `compose up` 去联网，把「包没导入」表现成一次漫长的拉取超时
+（在断网机上是拉取报错，在内网机上则可能长时间卡住）。
+
+| 变量（宿主代理侧）             | 用途                                                            |
+| ------------------------------ | --------------------------------------------------------------- |
+| `OFFLINE_BUNDLE_DIR`           | 离线包目录，默认 `/var/lib/fsms/upgrade/bundles`                |
+| `OFFLINE_BUNDLE_VERIFY_PUBKEY` | Ed25519 验签公钥路径；**配置后未签名包一律拒绝**（fail-closed） |
+
+默认值落在 `UPGRADE_QUEUE_DIR` 之内，因此已被单元现有的
+`ReadWritePaths=-/var/lib/fsms/upgrade` 覆盖；**改到别处时必须同步改那一行**，
+否则代理会在读包处 EACCES，而现场表现是「包读不了」，看起来像包坏了。
+该目录属主只给 root（0700）：能把包放进这个目录的账号，等于能决定线上跑什么代码。
+离线请求的终态码是 `aborted_import_failed`（定位不到包 / 导入失败都停在这一步：
+未切流、未动数据），进度弹窗的步骤里会出现「导入离线包」与「启动离线换装」。
 ---
 
 ## 4. 宿主代理（一键升级的执行侧）
@@ -128,15 +225,15 @@ node scripts/hotUpgrade.js \
 宿主目录 `/var/lib/fsms/upgrade`（compose 的 `UPGRADE_QUEUE_HOST_DIR`）bind mount
 到应用容器的 `/var/lib/fsms/upgrade`：
 
-| 路径                     | 写入方 | 权限             | 用途                                                         |
-| ------------------------ | ------ | ---------------- | ------------------------------------------------------------ |
-| 路径                     | 写入方 | 权限与属主       | 用途                                                         |
-| ------------------------ | ------ | ---------------  | --------------------------------------------------------     |
-| `requests/<uuid>.json`   | 应用   | 0600 nodejs      | 签名后的升级请求；代理消费时移走                             |
-| `processing/<uuid>.json` | 代理   | 0640 root:nodejs | 已认领；同时记录子进程 pid，用于崩溃恢复                     |
-| `status/<uuid>.json`     | 代理   | 0640 root:nodejs | 步骤与终态；应用只读（含镜像 digest 与发起人，故不给 other） |
-| `rejected/<uuid>.json`   | 代理   | 0600 root        | 验签/校验失败的请求留证（不执行、不静默删）                  |
-| `heartbeat.json`         | 代理   | 0644 root        | 每次轮询覆盖写；应用据此判断在线/就绪                        |
+| 路径                     | 写入方 | 权限             | 用途                                                                                                                                                          |
+| ------------------------ | ------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 路径                     | 写入方 | 权限与属主       | 用途                                                                                                                                                          |
+| ------------------------ | ------ | ---------------  | --------------------------------------------------------                                                                                                      |
+| `requests/<uuid>.json`   | 应用   | 0600 nodejs      | 签名后的升级请求；代理消费时移走                                                                                                                              |
+| `processing/<uuid>.json` | 代理   | 0640 root:nodejs | 已认领；同时记录子进程 pid，用于崩溃恢复                                                                                                                      |
+| `status/<uuid>.json`     | 代理   | 0640 root:nodejs | 步骤与终态；应用只读（含镜像 digest 与发起人，故不给 other）                                                                                                  |
+| `rejected/<uuid>.json`   | 代理   | 0600 root        | 验签/校验失败的请求留证（不执行、不静默删）                                                                                                                   |
+| `heartbeat.json`         | 代理   | 0644 root        | 每次轮询覆盖写；应用据此判断在线/就绪。`bundles` 字段公布离线包候选（只读 manifest + 白名单的**自称**摘要，全量校验在执行时做；available/invalid 各限 10 条） |
 
 目录本身：`/var/lib/fsms/upgrade` 与 `status/`、`processing/` 为 `0750 root:nodejs`，
 `requests/` 为 `0700 nodejs`，`rejected/` 为 `0700 root`。
@@ -235,6 +332,11 @@ docker compose start app
 
 **数据不回滚**。回滚只回代码，所以迁移必须遵守下一节的约束。
 
+离线路径（§3.3）的回滚与在线路径完全一致，且**不需要再搬一次包**：上一版镜像既然仍在
+本地 docker 里，切回旧色就仍然只是「改 upstream 那一行注释 + `nginx -s reload` +
+`docker compose start app`」。这也是把包留在 `OFFLINE_BUNDLE_DIR`（而不是导入完即删）
+的理由——内网机重新搬一次包的成本，远高于留几 GB 磁盘。
+
 ---
 
 ## 6. 迁移硬约束：expand / contract
@@ -260,6 +362,10 @@ docker compose start app
 
 同时要求 **N-1 兼容**：新增字段一律可选，响应只增不减。
 切换窗口内两版同时在服务，任何「新版本才有的必填字段」都会让旧版本的请求 500。
+
+**离线路径（§3.3）受同一组约束，且不因「包在本地」而放松**：离线升级同样是「两版同时在
+服务、回滚只回代码」，所以 expand/contract 与 N-1 兼容一条都不能少。反过来说，离线包里
+**不包含数据库快照**——它换的是程序，不是数据。
 
 ---
 
@@ -323,6 +429,17 @@ GET /api/version   （匿名，no-store）
   执行命令。应用能做的只有写一份签名请求；执行侧固定脚本、固定参数，并重跑全部
   判据。这比给应用一个「能指定跑什么代码」的 HTTP 入口窄得多。
 - **不做灰度分流**（L3）：两色跑不同版本时按比例分流，需要先有稳定的错误率基线。
+- **不自己做离线包的解包**（§3.3）：导入器只接受**已解压的目录**，在升级链路上再实现一次
+  安全解包，等于再开一条路径穿越面，而这一步没有任何不可替代性。
+  **签名已随 ADR-019 引入**（2026-11-02）：早期版本连签名也不做，可信度完全压在
+  「搬运通道 + 逐字节比对」上——那挡不住「manifest 与 payload 被整体重写」（自带的
+  sha256 只证明两者同源，证明不了出自构建机）。现在的信任链是
+  `构建机私钥签 manifest 字节 → 目标机钉公钥验签 → manifest 内 sha256 覆盖 payload`，
+  且目标机**配置公钥后未签名包一律拒绝**（fail-closed）；是否启用由部署显式选择，
+  未配置公钥时留痕明示 `signature: 'unchecked'`。同理，**离线包不是绕开白名单的通道**：
+  包内镜像引用仍要过与在线路径同一条前缀判据，空白名单依然全拒；
+  **离线也不是绕开二次验证的通道**：应用内发起离线升级与在线升级走同一道
+  security:config + 唯一超管 + 步进验证门。
 - **不解决宿主机故障**：蓝绿只覆盖「应用版本切换」，宿主机宕机属高可用范畴。
 
 ---
@@ -339,6 +456,14 @@ GET /api/version   （匿名，no-store）
   **未在本项目实测**。
 - 真实代理 systemd timer 的 15s 节奏、长任务期间 10s 心跳续期、以及 root 环境下
   的 `docker compose` 调用，均只在测试替身里验证过。
+- **离线一键链路未在 air-gap 真机走通**（2026-11-02）：离线请求的两段执行
+  （定位包 → `importOfflineBundle --apply` → `hotUpgrade --offline`）、心跳 bundles
+  的真实扫描，目前由判据层测试与进程内档板
+  （`src/tests/deploy/hotUpgradeOfflineDispatch.test.js`）覆盖。签名侧已实测两半：
+  node 签 → node 验（`offlineBundleSignature.test.js` 回环）与 **openssl 签 → node 验**
+  （`openssl pkeyutl -sign -rawin` 产出、node:crypto 验签通过，2026-11-02 手工实测）；
+  `--offline` 换装在真实 docker/双色环境的行为仍未实测，首次离线升级前按 §3.3
+  的三步在一套可丢弃环境里先演练一遍。
 
 首次真实升级前，在一套可丢弃的环境里按下面清单走一遍：
 

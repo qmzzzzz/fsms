@@ -57,7 +57,13 @@ function makeEnv() {
 
 function writeRequest(
   queueDir,
-  { id = JOB_ID, image = IMAGE, requestedAt = new Date().toISOString(), secret = SECRET } = {}
+  {
+    id = JOB_ID,
+    image = IMAGE,
+    requestedAt = new Date().toISOString(),
+    secret = SECRET,
+    mode = '',
+  } = {}
 ) {
   const requestedBy = { userId: 'u-1', username: 'admin' };
   const signature = signUpgradeRequest(secret, {
@@ -65,8 +71,17 @@ function writeRequest(
     image,
     requestedAt,
     userId: requestedBy.userId,
+    ...(mode ? { mode } : {}),
   });
-  const payload = { id, image, requestedAt, requestedBy, sourceIp: '127.0.0.1', signature };
+  const payload = {
+    id,
+    image,
+    ...(mode ? { mode } : {}),
+    requestedAt,
+    requestedBy,
+    sourceIp: '127.0.0.1',
+    signature,
+  };
   fs.writeFileSync(
     path.join(queueDir, 'requests', `${id}.json`),
     JSON.stringify(payload, null, 2),
@@ -120,6 +135,8 @@ describe('请求判据', () => {
     const image = overrides.image || IMAGE;
     const requestedAt = overrides.requestedAt || new Date().toISOString();
     const requestedBy = { userId: 'u-1', username: 'admin' };
+    // 签名必须与 overrides.mode 一致（canonical 分型）：贴错型签名正是本组用例要证伪的形态
+    const mode = overrides.mode;
     return {
       id,
       image,
@@ -130,6 +147,7 @@ describe('请求判据', () => {
         image,
         requestedAt,
         userId: requestedBy.userId,
+        ...(mode ? { mode } : {}),
       }),
       ...overrides,
     };
@@ -168,6 +186,32 @@ describe('请求判据', () => {
     const future = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     expect(job.validateRequest(requestOf({ requestedAt: future }), cfg, Date.now()).reason).toMatch(
       /未来/
+    );
+  });
+
+  test('mode 判据：缺省按 registry；显式 registry/offline 都过；非法值先于签名被拒', () => {
+    const { cfg } = base();
+    expect(job.validateRequest(requestOf(), cfg, Date.now()).ok).toBe(true);
+    expect(job.validateRequest(requestOf({ mode: 'registry' }), cfg, Date.now()).ok).toBe(true);
+    expect(job.validateRequest(requestOf({ mode: 'offline' }), cfg, Date.now()).ok).toBe(true);
+    expect(job.validateRequest(requestOf({ mode: 'evil' }), cfg, Date.now())).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/mode 非法/),
+    });
+  });
+
+  test('签名分型：offline 请求只接受 5 段签名，registry 请求只接受 4 段（两条旁路都不存在）', () => {
+    const { cfg } = base();
+    // 在线请求贴 5 段（offline）签名 ⇒ 验签必红
+    expect(job.validateRequest(requestOf({ mode: 'registry' }), cfg, Date.now()).ok).toBe(true); // requestOf 按 mode 签名，registry=4 段，应过
+    const offline = requestOf({ mode: 'offline' });
+    // 把 offline 签名剥掉 mode 冒充 registry：4 段验证对 5 段签名必红
+    const stripped = { ...offline };
+    delete stripped.mode;
+    expect(job.validateRequest(stripped, cfg, Date.now()).ok).toBe(false);
+    // 给 registry 请求硬贴 mode:'offline'（签名是 4 段）⇒ 验签必红
+    expect(job.validateRequest({ ...requestOf(), mode: 'offline' }, cfg, Date.now()).ok).toBe(
+      false
     );
   });
 });
@@ -267,6 +311,88 @@ describe('一轮队列处理（不跑 docker）', () => {
     expect(status.state).toBe('failed');
     expect(status.outcome).toBe('exit_nonzero');
     expect(status.message).toContain('7');
+  });
+});
+
+describe('心跳公布离线包（应用侧下拉的数据源）', () => {
+  const DIGEST = `sha256:${'b'.repeat(64)}`;
+  const REF = `ghcr.io/acme/fsms@${DIGEST}`;
+
+  const manifestOf = () => ({
+    format: 1,
+    version: '1.2.3',
+    buildId: 'ci-42',
+    createdAt: '2026-11-01T00:00:00Z',
+    images: [
+      { role: 'app', ref: REF, file: 'payload/fsms-app.tar', bytes: 1, sha256: 'a'.repeat(64) },
+    ],
+  });
+
+  const writeBundle = (bundlesDir, name, manifest) => {
+    // 与 offlineBundleScan.test.js 同一条测试自防线：目录名必须落在 bundles 根之内
+    //（本 describe 全部用字面量目录名，这条守的是测试自身的笔误）。
+    const base = path.resolve(bundlesDir);
+    const dir = path.resolve(base, name);
+    if (dir !== base && !dir.startsWith(base + path.sep)) {
+      throw new Error(`测试用例错误：目录名「${name}」逃逸出 bundles 根（allowed base: ${base}）`);
+    }
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+    return dir;
+  };
+
+  test('bundles 目录有好包 ⇒ 心跳 bundles.available 携带摘要；无请求时不消费任何请求', async () => {
+    const { queueDir, env } = makeEnv();
+    const bundlesDir = path.join(queueDir, 'bundles');
+    writeBundle(bundlesDir, 'v1.2.3', manifestOf());
+    const code = await agent.runOnce({
+      env: { ...env, OFFLINE_BUNDLE_DIR: bundlesDir },
+      executor: async () => {
+        throw new Error('没有请求，不应执行');
+      },
+    });
+    expect(code).toBe(0);
+    const beat = readBeat(queueDir);
+    expect(beat.ready).toBe(true);
+    expect(beat.bundles.available).toHaveLength(1);
+    expect(beat.bundles.available[0]).toMatchObject({ dirName: 'v1.2.3', ref: REF });
+    expect(beat.bundles.invalid).toEqual([]);
+  });
+
+  test('坏包进 invalid；目录不可读只追加 reason，ready 不变红（离线坏了不拖垮在线）', async () => {
+    const { queueDir, env } = makeEnv();
+    const bundlesDir = path.join(queueDir, 'bundles');
+    const notADir = path.join(queueDir, 'not-a-dir.txt');
+    fs.writeFileSync(notADir, 'x', 'utf8');
+    const code = await agent.runOnce({
+      env: { ...env, OFFLINE_BUNDLE_DIR: notADir },
+      executor: async () => {
+        throw new Error('不应执行');
+      },
+    });
+    expect(code).toBe(0);
+    const beat = readBeat(queueDir);
+    expect(beat.ready).toBe(true); // 在线升级不受影响
+    expect(beat.reasons.join('')).toMatch(/不可读/);
+    expect(beat.bundles.available).toEqual([]);
+
+    // 正常目录 + 坏包：invalid 携带可读错误
+    writeBundle(bundlesDir, 'broken', { format: 2 });
+    await agent.runOnce({
+      env: { ...env, OFFLINE_BUNDLE_DIR: bundlesDir },
+      executor: async () => [],
+    });
+    const beat2 = readBeat(queueDir);
+    expect(beat2.bundles.available).toEqual([]);
+    expect(beat2.bundles.invalid[0].dirName).toBe('broken');
+    expect(beat2.bundles.invalid[0].error).toMatch(/format|版本/);
+  });
+
+  test('未配置 OFFLINE_BUNDLE_DIR ⇒ 心跳仍带空 bundles 字段（应用侧按空下拉渲染）', async () => {
+    const { queueDir, env } = makeEnv();
+    await agent.runOnce({ env, executor: async () => [] });
+    const beat = readBeat(queueDir);
+    expect(beat.bundles).toEqual({ available: [], invalid: [] });
   });
 });
 

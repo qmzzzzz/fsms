@@ -25,6 +25,7 @@ const DEFAULT_COMPOSE_FILE = path.resolve(__dirname, '..', 'docker-compose.yml')
 const DEFAULT_BACKUP_SCRIPT = path.resolve(__dirname, 'backup-mongo.sh');
 const DEFAULT_BACKUP_DIR = path.resolve(__dirname, '..', 'backups');
 const DEFAULT_HOT_UPGRADE_SCRIPT = path.resolve(__dirname, 'hotUpgrade.js');
+const DEFAULT_IMPORT_BUNDLE_SCRIPT = path.resolve(__dirname, 'importOfflineBundle.js');
 
 /** compose 公共前缀：显式指定文件，避免命令受 cwd 影响（cwd 决定项目名）。 */
 function composeArgs(composeFile = DEFAULT_COMPOSE_FILE) {
@@ -94,17 +95,45 @@ function buildBackupInvocation({
  * 镜像引用走 `HOT_UPGRADE_IMAGE` 环境变量而不是 `--image`：与本模块的
  * 既有约束一致（镜像/密钥不进 argv，/proc/<pid>/cmdline 同机可读）。
  * `--status-file` 让应用的进度弹窗能看到每一步；缺省时不传。
+ * `offline: true` 追加 `--offline`：换装前断言本地 docker 已有该 digest（离线包已导入），
+ * 且脚本执行期间不接受联网拉取——只由离线请求（request.mode=offline）触发。
  */
 function buildHotUpgradeInvocation({
   nginxConf,
   statusFile = '',
   dryRun = false,
+  offline = false,
   scriptFile = DEFAULT_HOT_UPGRADE_SCRIPT,
 } = {}) {
   if (!nginxConf) throw new Error('升级必须显式给出 nginxConf');
   const args = [scriptFile, '--nginx-conf', nginxConf];
   if (statusFile) args.push('--status-file', statusFile);
+  if (offline) args.push('--offline');
   args.push(dryRun ? '--dry-run' : '--apply');
+  return { file: process.execPath, args };
+}
+
+/**
+ * 离线包导入（离线请求的第一段，先于换装执行）：
+ * 固定脚本 + 固定参数，包目录与白名单都来自代理配置/扫描结果，绝不来自请求内容——
+ * 请求只声明目标 digest，导入哪个目录由代理在 bundles 根目录内定位。
+ * `--bundle-root` 把包钉在代理管理的 bundles 目录之内：请求被伪造时，最坏也只是
+ * 「导入一个 root 放进来的合法包」，指向包外的路径在导入器就被拒绝。
+ * allowlist 为空时不传该参数：导入器按「空白名单 = 全拒」自己拒绝，与在线路径同口径。
+ */
+function buildImportBundleInvocation({
+  bundleDir,
+  bundleRoot,
+  allowlist = [],
+  scriptFile = DEFAULT_IMPORT_BUNDLE_SCRIPT,
+} = {}) {
+  if (!bundleDir) throw new Error('离线包导入必须显式给出 bundleDir');
+  if (!bundleRoot) throw new Error('离线包导入必须显式给出 bundleRoot（把包钉在受管目录之内）');
+  const args = [scriptFile, '--bundle', bundleDir, '--bundle-root', bundleRoot];
+  if (Array.isArray(allowlist) && allowlist.length > 0) {
+    args.push('--allowlist', allowlist.join(','));
+  }
+  args.push('--apply');
   return { file: process.execPath, args };
 }
 
@@ -134,6 +163,7 @@ module.exports = {
   DEFAULT_BACKUP_SCRIPT,
   DEFAULT_BACKUP_DIR,
   DEFAULT_HOT_UPGRADE_SCRIPT,
+  DEFAULT_IMPORT_BUNDLE_SCRIPT,
   composeArgs,
   buildPullInvocation,
   buildMigrateInvocation,
@@ -141,6 +171,7 @@ module.exports = {
   buildProbeInvocation,
   buildBackupInvocation,
   buildHotUpgradeInvocation,
+  buildImportBundleInvocation,
   buildCommandPlan,
   formatInvocation,
 };

@@ -8,6 +8,61 @@
 
 ## [未发布]
 
+### 新增：离线升级包一键化 + Ed25519 包签名（ADR-019）（2026-11-02）
+
+> 目标：把 air-gap / 内网机器的升级从「两条人工 SSH 命令（导入 + 换装）」变成与在线
+> 同门槛的应用内一键流程，同时堵上离线包「manifest 与 payload 可被整体重写」这个
+> 只能靠搬运通道可信兜底的缺口。宿主侧骨架（打包脚本 / 判据层 / 导入 CLI / `--offline`
+> 换装）于 2026-11-01 落地（25d05a1），本轮补齐触发链路与信任锚。
+
+- **触发链路（同一队列、同一端点、同一套安全门）**：`POST /api/security/upgrade/requests`
+  的 body 增加 `mode: 'registry' | 'offline'`（缺省 registry，路由层 `isIn` 白名单）。
+  security:config + 唯一超管 + 步进验证 + strictLimiter 原样复用——**离线不是绕开二次
+  验证的通道**。宿主代理按 mode 分派：先 `importOfflineBundle.js --apply`（包目录由代理
+  在受管 bundles 目录内按 digest 定位，`--bundle-root` 钉死；请求只点名镜像，指定不了
+  目录），成功后才 `hotUpgrade.js --offline` 走蓝绿七步；定位不到包 / 导入退出码非 0
+  都停在第一段（终态 `aborted_import_failed`：未切流、未动数据）。
+- **签名 canonical 按 mode 分型**（`src/services/upgradeRequestSignature.js`）：registry
+  维持历史 4 段格式逐字节不变（应用与宿主脚本滚动期互不丢请求），offline 追加第 5 段；
+  走哪型由请求里的 mode 唯一决定——在线签名贴到离线请求、离线签名剥掉 mode 冒充在线，
+  两条旁路都验签必红（测试钉住）。
+- **Ed25519 包签名（信任链收口）**：构建机 `build-offline-bundle.sh --sign-key <pem>`
+  对 manifest.json 的**原始字节**签名（`openssl pkeyutl -sign -rawin`，需 OpenSSL ≥ 3.0，
+  签完即回验；刻意不做 JSON canonical——canonical 化会把「字节被改过」洗白成「语义相同」），
+  产出 `manifest.sig` 并计入 SHA256SUMS；目标机 `importOfflineBundle.js --pubkey-file` /
+  代理 env `OFFLINE_BUNDLE_VERIFY_PUBKEY` 验签（node:crypto 内置 Ed25519，零新依赖）。
+  **配置公钥 = fail-closed**：未签名/验签失败的包一律拒绝；未配置 = 放行但留痕明示
+  `signature: 'unchecked'`。信任链 `公钥 → manifest 字节 → manifest 内 payload sha256`
+  传递覆盖整包——「包被整体重写」从不可检测变为可检测。
+- **可用性公布（心跳 bundles）**：代理每轮扫描 `OFFLINE_BUNDLE_DIR`（只读 manifest +
+  纯判据 + 白名单，**不算 payload 哈希**——GB 级×N 每 15s 一轮不可承受），
+  available/invalid 各限 10 条、逐字段截断写入心跳；应用 `readHeartbeat → getOverview`
+  透传，前端「关于」页升级弹窗出现「离线包」来源下拉。三条 fail-soft 纪律：目录不存在
+  = 未启用离线通道；目录不可读/坏包只折进 reasons 与 invalid，**ready 不变红**（离线坏了
+  不拖垮在线）；心跳里的包是「自称通过校验的候选」，不是完整性背书。
+- **前端（web-admin）**：`UpgradeDialog` 加「镜像来源」切换——在线手输 digest / 离线从
+  心跳公布的包中选择（空列表时 radio 禁用并给出处置提示）；提交显式带 mode；进度弹窗
+  加「来源」行与两个新步骤名（导入离线包 / 启动离线换装）；`AboutView.normalizeUpgrade`
+  补 `bundles`/`mode` 白名单归一（旧代码逐字段重建快照会把新字段静默丢弃——实测踩中，
+  见 ADR-019「踩过的坑」）；中英文案齐备。
+- **GB 级包刻意不走应用内上传**：容器只读、无 multipart 栈、body 上限 1MB，且 bundles
+  必须保持 root-only（0700）——**能写这个目录的账号 = 能决定线上跑什么代码**，落位
+  一律由运维 scp/USB 完成（`deployment/hot-upgrade.md` §3.3 三步 Runbook：构建 `--sign-key`
+  → 搬运落位 → 应用内选包一键 / CLI 兜底）。
+- **登记面**：`deployment/systemd/hot-upgrade.env.example` 增 `OFFLINE_BUNDLE_VERIFY_PUBKEY`
+  （含 openssl 密钥生成与落位命令）；`deployment/hot-upgrade.md` §3.3 重写为完整 Runbook、
+  §4 心跳 bundles 字段、§9「不做签名」改写为「签名已引入（ADR-019）、仍不自做解包」、
+  §10 增补「离线一键链路未在 air-gap 真机实测（含 openssl 签 / node 验的跨工具互操作）」；
+  OpenAPI 的 triggerUpgrade body 同步 mode 字段。
+- **门禁（新增/更新测试）**：`offlineBundleSignature.test.js`（签验回环、单字节篡改必红、
+  CRLF 算篡改、密钥类型收紧）、`offlineBundleScan.test.js`（字段映射、坏包隔离、fail-soft、
+  封顶）、`hotUpgradeOfflineDispatch.test.js`（两段顺序不可反、导入失败停第一段、定位不到
+  零执行、registry 不被带偏——进程内 spawn 档板）、`offlineBundlePolicy.test.js`（`--pubkey-file`
+  进闭合清单）、`hotUpgradeAgent.test.js`（mode 判据、签名分型、心跳 bundles）、
+  `deployCommands.test.js`（`--offline` / `buildImportBundleInvocation`）、
+  `upgradeService.test.js`（mode 入队与签名分型、bundles 透传）、`upgradeEndpoint.test.js`
+  （mode isIn 400、审计 body 记 mode）、`aboutViewUpgrade.test.js`（离线来源切换/选包/提交）。
+
 ### 收口：前置人机层拦下的登录尝试落库留痕（审计二-3，裁决取「落库留痕」）（2026-11-01）
 
 原缺口：ADR-015 的闸门（静态验证码开关 ∪ 失败触发的挑战）拦在口令比对之前，被拦下的尝试

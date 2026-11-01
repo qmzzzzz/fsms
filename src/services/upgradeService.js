@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const config = require('../config');
 const upgradeConfig = require('../config/upgrade');
 const policy = require('../../scripts/hotUpgradePolicy');
-const { signUpgradeRequest } = require('./upgradeRequestSignature');
+const { signUpgradeRequest, normalizeMode } = require('./upgradeRequestSignature');
 const { toEpochMs } = require('../utils/helpers');
 
 const MAX_JSON_BYTES = 64 * 1024;
@@ -124,6 +124,41 @@ function listJsonFiles(dir) {
     .map((name) => path.join(dir, name));
 }
 
+/** 心跳 bundles 的归一化：代理写入时已封顶（每类 10 条、逐字段截断），这里再防一道
+ *  「心跳文件被手写坏」的形态——字段非字符串、条目非对象都折成缺省，不让一个坏心跳炸掉概览。 */
+const BUNDLE_LIST_LIMIT = 10;
+
+function normalizeBundleEntry(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const dirName = asString(raw.dirName).slice(0, 128);
+  if (!dirName) return null; // 没有目录名的条目无法在界面上呈现，按不存在处理
+  return {
+    dirName,
+    ref: asString(raw.ref).slice(0, 512),
+    digest: asString(raw.digest).slice(0, 71),
+    repository: asString(raw.repository).slice(0, 256),
+    version: asString(raw.version).slice(0, 64),
+    buildId: asString(raw.buildId).slice(0, 128),
+    createdAt: asString(raw.createdAt).slice(0, 32),
+  };
+}
+
+function normalizeHeartbeatBundles(raw) {
+  const empty = { available: [], invalid: [] };
+  if (!raw || typeof raw !== 'object') return empty;
+  const take = (list, map) =>
+    Array.isArray(list) ? list.map(map).filter(Boolean).slice(0, BUNDLE_LIST_LIMIT) : [];
+  return {
+    available: take(raw.available, normalizeBundleEntry),
+    invalid: take(raw.invalid, (item) => {
+      if (!item || typeof item !== 'object') return null;
+      const dirName = asString(item.dirName).slice(0, 128);
+      if (!dirName) return null;
+      return { dirName, error: asString(item.error).slice(0, 200) };
+    }),
+  };
+}
+
 function readHeartbeat() {
   const beat = readJsonFile(upgradeConfig.heartbeatFile);
   if (!beat) return null; // 不存在 = 代理从未上报；字段读得出却不可用（下行 throw）算异常——两类不许同码
@@ -142,6 +177,7 @@ function readHeartbeat() {
     ready: typeof beat.ready === 'boolean' ? beat.ready : false,
     clockSkew: ageMs < 0, // 与「单纯过期」区分开：英文界面按 code 呈现不同措辞；真正的处置是校时而非查代理
     reasons: ageMs < 0 ? [...reasons, '心跳时间晚于当前时间（宿主与应用时钟不同步）'] : reasons,
+    bundles: normalizeHeartbeatBundles(beat.bundles),
   };
 }
 
@@ -286,6 +322,7 @@ function normalizeJob(raw, fallback = {}) {
     id,
     state,
     image: asString(raw.image),
+    mode: raw.mode === 'offline' ? 'offline' : 'registry', // 旧状态文件没有 mode 字段：按 registry 呈现
     requestedBy: normalizeRequester(raw.requestedBy),
     requestedAt: asNullableString(raw.requestedAt),
     startedAt: asNullableString(raw.startedAt),
@@ -385,7 +422,7 @@ function withEnqueueLock(fn) {
   }
 }
 
-function createUpgradeRequest({ image, user, sourceIp = '', now = Date.now() }) {
+function createUpgradeRequest({ image, mode, user, sourceIp = '', now = Date.now() }) {
   const readiness = getReadiness();
   if (!upgradeConfig.enabled) {
     throw Object.assign(new Error('热升级未启用'), { code: 'UPGRADE_DISABLED' });
@@ -408,9 +445,13 @@ function createUpgradeRequest({ image, user, sourceIp = '', now = Date.now() }) 
   const id = crypto.randomUUID();
   const requestedAt = new Date(now).toISOString();
   const activeColor = currentColor();
+  // mode 只在签名 canonical 里分型（offline 多一段）：离线请求最终能否执行由宿主代理
+  // 判定（本地是否有声明该 digest 的包 + 全量校验），应用侧不预判——预判会引用一份
+  // 可能已被搬走的包，而代理每轮扫描的心跳只是候选。
   const payload = {
     id,
     image: validation.parsed.ref,
+    mode: normalizeMode(mode),
     requestedAt,
     requestedBy: {
       userId: String(user?.userId || ''),
@@ -423,6 +464,7 @@ function createUpgradeRequest({ image, user, sourceIp = '', now = Date.now() }) 
   const signature = signUpgradeRequest(config.hmacSecret, {
     id,
     image: payload.image,
+    mode: payload.mode,
     requestedAt,
     userId: payload.requestedBy.userId,
   });
@@ -483,6 +525,8 @@ function getOverview({ buildInfo, now = Date.now() }) {
       reasonCodes: codeList,
       allowlist: readiness.allowlist,
       heartbeat: readiness.heartbeat,
+      // 离线包候选（代理心跳携带）：仅用于展示与下拉，不是完整性背书——全量校验在代理执行时做
+      bundles: readiness.heartbeat ? readiness.heartbeat.bundles : { available: [], invalid: [] },
       activeJob: active,
       latestJob: jobs[0] || active,
       history: jobs,

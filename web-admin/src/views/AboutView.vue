@@ -465,6 +465,7 @@ const normalizeJob = (raw) => {
     id: raw.id,
     state: typeof raw.state === 'string' ? raw.state : 'unknown',
     image: typeof raw.image === 'string' ? raw.image : '',
+    mode: raw.mode === 'offline' ? 'offline' : 'registry',
     message: typeof raw.message === 'string' ? raw.message : '',
     outcome: typeof raw.outcome === 'string' ? raw.outcome : '',
     activeColor: typeof raw.activeColor === 'string' ? raw.activeColor : '',
@@ -488,6 +489,32 @@ const normalizeJob = (raw) => {
             at: step.at || null,
           }))
       : [],
+  }
+}
+
+/** 离线包候选（代理心跳携带）的白名单式归一：坏形状折成空结构，不让坏心跳炸整卡 */
+const normalizeBundles = (raw) => {
+  const empty = { available: [], invalid: [] }
+  if (!raw || typeof raw !== 'object') return empty
+  const take = (list, map) =>
+    Array.isArray(list) ? list.map(map).filter(Boolean).slice(0, 10) : []
+  return {
+    available: take(raw.available, (b) => {
+      if (!b || typeof b !== 'object' || typeof b.ref !== 'string' || !b.ref) return null
+      return {
+        dirName: typeof b.dirName === 'string' ? b.dirName : '',
+        ref: b.ref,
+        digest: typeof b.digest === 'string' ? b.digest : '',
+        repository: typeof b.repository === 'string' ? b.repository : '',
+        version: typeof b.version === 'string' ? b.version : '',
+        buildId: typeof b.buildId === 'string' ? b.buildId : '',
+        createdAt: typeof b.createdAt === 'string' ? b.createdAt : '',
+      }
+    }),
+    invalid: take(raw.invalid, (b) => {
+      if (!b || typeof b !== 'object' || typeof b.dirName !== 'string' || !b.dirName) return null
+      return { dirName: b.dirName, error: typeof b.error === 'string' ? b.error : '' }
+    }),
   }
 }
 
@@ -523,6 +550,8 @@ const normalizeUpgrade = (d) => {
         : [],
       heartbeat:
         upgrade.heartbeat && typeof upgrade.heartbeat === 'object' ? upgrade.heartbeat : null,
+      // 离线包候选：仅用于展示与下拉，不是完整性背书（全量校验在代理执行时做）
+      bundles: normalizeBundles(upgrade.bundles),
       activeJob: normalizeJob(upgrade.activeJob),
       latestJob: normalizeJob(upgrade.latestJob),
     },

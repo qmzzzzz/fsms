@@ -524,9 +524,12 @@ describe('命令行：未知参数必报错，默认演练', () => {
   });
 
   test('开关集合是闭合清单：新增开关必须在这里显式确认（清单写死在这里是故意的）', () => {
+    // 2026-11-02 确认新增 --pubkey-file：Ed25519 验签公钥（ADR-019）。配置后未签名/验签
+    // 失败的包一律拒绝（fail-closed）；不配则跳过验签并在留痕里明示 signature=unchecked。
     expect(policy.FLAGS).toEqual([
       'bundle',
       'bundle-root',
+      'pubkey-file',
       'allowlist',
       'max-payload-bytes',
       'apply',

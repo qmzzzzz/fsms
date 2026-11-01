@@ -53,6 +53,7 @@ export default {
     reqPath: 'Path',
     riskFactors: 'Risk Factors',
     errorInfo: 'Error Message',
+    refusalReason: 'Refusal Reason Code',
     reqBody: 'Request Params',
     duration: 'Duration',
     complianceTitle: 'Compliance & Integrity',
@@ -693,6 +694,8 @@ export default {
       'Refused: the whitelist already covers this segment, so adding it to the blacklist has no effect',
     typedConfirmLabel: 'Type the segment to confirm',
     typedConfirmPlaceholder: 'Copy the segment exactly',
+    typedConfirmPrompt: 'This range is high-impact: type {ip} verbatim to confirm',
+    typedConfirmMismatch: 'Does not match the range',
   },
   // Forensic tracing (T5/T6): criteria / timeline / triggers / segments / "their IP pool" / two-step subnet ban / signed export.
   // Key names must stay exactly symmetric with zh-CN (src/tests/i18n/localeKeyParity.test.js is a CI gate).
@@ -795,6 +798,8 @@ export default {
     banTypedLabel: 'Type the segment to confirm (this blocks ≥ 256 addresses)',
     banTypedPlaceholder: 'Type exactly: {cidr}',
     banRefusedTypedConfirm: 'This segment is too high-impact; type the segment itself to confirm',
+    banRefusedNoRescuePath:
+      'Writing this would lock you out too, and there is no usable rescue path right now (add your source IP to a permanent whitelist first)',
     banRefusedLiveTraffic:
       'This segment still has live traffic (possibly a whole building); ban refused',
     banRefusedUnionCovers:
@@ -1234,6 +1239,7 @@ export default {
       'security_forensic_pool-ban_request': 'Request subnet ban ticket',
       'security_forensic_pool-ban_confirm': 'Confirm subnet ban',
       security_forensic_export: 'Signed forensic export',
+      'security_stuffing-profile': 'Query credential-stuffing profile',
     },
     detail: {
       time: 'Time',

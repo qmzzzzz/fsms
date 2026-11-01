@@ -185,6 +185,9 @@ function loadConfig(env = process.env) {
     statusDir: path.join(queueDir, 'status'),
     processingDir: path.join(queueDir, 'processing'),
     rejectedDir: path.join(queueDir, 'rejected'),
+    // 离线包目录：默认落在队列目录之内，因此 systemd 单元现有的 ReadWritePaths 已覆盖；
+    // 改到别处必须同步改单元那一行，否则代理会在读包处 EACCES（表现像「包坏了」）。
+    bundlesDir: String(env.OFFLINE_BUNDLE_DIR || '').trim() || path.join(queueDir, 'bundles'),
     heartbeatFile: path.join(queueDir, 'heartbeat.json'),
     allowlist: String(env.HOT_UPGRADE_REGISTRY_ALLOWLIST || '')
       .split(',')

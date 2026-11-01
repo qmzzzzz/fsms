@@ -41,11 +41,15 @@ Restart=no
 # ProtectSystem=full 把 /usr /boot /etc 变只读——nginx 配置要写，故显式放开；
 # 改了 HOT_UPGRADE_NGINX_CONF 的目录时，这里同步改，否则升级会在 reload 前的写盘处失败。
 #
-# 三个目录必须显式建出来并放开写权限，否则该单元根本起不来（或 gpg/私有 registry 失败）：
+# 四个目录必须显式建出来并放开写权限，否则该单元根本起不来（或 gpg/私有 registry/离线包 失败）：
 #   gnupg  —— ProtectHome=yes 会把 /root 藏掉，默认 GNUPGHOME 直接不可用；
 #             gpg 备份的密钥环改放这里（gpg --homedir /var/lib/fsms/gnupg --import）。
 #   docker —— 私有仓库凭据同理（/root/.docker 被藏），DOCKER_CONFIG 指到这里。
 #   upgrade queue —— 路径前加 '-'：目录还不存在（首次安装/自定义路径）时不因此起不来。
+#   offline bundles —— 离线包目录，默认在 upgrade queue 之内（故已被下一行的
+#             ReadWritePaths 覆盖）。把 OFFLINE_BUNDLE_DIR 改到别处时，
+#             必须同步往 ReadWritePaths 增加该路径，否则代理会在读包处 EACCES，
+#             而现场表现是「包读不了」，看起来像包坏了。
 NoNewPrivileges=yes
 Umask=0077
 PrivateTmp=yes
@@ -53,7 +57,7 @@ ProtectHome=yes
 ProtectSystem=full
 Environment=GNUPGHOME=/var/lib/fsms/gnupg
 Environment=DOCKER_CONFIG=/var/lib/fsms/docker
-ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/fsms/gnupg /var/lib/fsms/docker
+ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/fsms/gnupg /var/lib/fsms/docker /var/lib/fsms/upgrade/bundles
 ReadWritePaths=-/etc/nginx -/var/lib/fsms/upgrade -/var/lib/fsms/gnupg -/var/lib/fsms/docker
 
 [Install]

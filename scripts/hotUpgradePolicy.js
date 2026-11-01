@@ -290,8 +290,19 @@ const FLAGS = [
   'observe-seconds',
   'apply',
   'dry-run',
+  'offline',
   'help',
 ];
+
+/**
+ * 布尔旗标 → opts 字段名。
+ *
+ * 单独成表不是风格偏好：parseArgs 的圈复杂度已经贴着 eslint 上限（15），再为
+ * 「离线」加一条 else-if 就会把本文件顶成新告警，而本仓的棘轮只允许告警数下降
+ * （scripts/lint-ratchet.js 对齐 eslint.ratchet.json）。表驱动把「新增一个布尔旗标」
+ * 变成改两处常量，而不是再加一条分支——这条约束对下一个改动的人同样成立。
+ */
+const BOOLEAN_OPTS = { 'dry-run': 'dryRun', apply: 'apply', offline: 'offline', help: 'help' };
 
 /**
  * 解析命令行。
@@ -306,6 +317,7 @@ function parseArgs(argv = []) {
     apply: false,
     dryRun: false,
     help: false,
+    offline: false,
     image: '',
     nginxConf: '',
     statusFile: '',
@@ -329,9 +341,7 @@ function parseArgs(argv = []) {
     // 布尔旗标也接受 =true/=false：模板与 CI 里写成 "--apply=${{ inputs.apply }}"
     // 是常态，而旧的 `opts.apply = true` 会把字符串 "false" 也当成执行——
     // 参数里明确写着 false、线上却真的开始切流，是这条链上最贵的一次误解。
-    if (name === 'dry-run') opts.dryRun = parseBooleanFlag(name, inlineValue);
-    else if (name === 'apply') opts.apply = parseBooleanFlag(name, inlineValue);
-    else if (name === 'help') opts.help = parseBooleanFlag(name, inlineValue);
+    if (BOOLEAN_OPTS[name]) opts[BOOLEAN_OPTS[name]] = parseBooleanFlag(name, inlineValue);
     else if (name === 'image') opts.image = takeValue();
     else if (name === 'nginx-conf') opts.nginxConf = takeValue();
     else if (name === 'status-file') opts.statusFile = takeValue();

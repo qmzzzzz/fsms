@@ -15,14 +15,19 @@
  *
  * 刻意不做的事：
  *   · 不接受 .tar，只接受**已解压的目录**——自己实现安全解包，等于在升级链路上
- *     再开一条路径穿越面，而这一步没有任何不可替代性；
+ *     再开一条路径穿越面，而这一步没有任何不可替代性（ADR-019 引入签名时保留了这条）；
  *   · 不切流：本脚本只负责「把镜像装进本地 docker 并证明它是哪一版」，
  *     换不换、什么时候换，仍由 scripts/hotUpgrade.js 的蓝绿七步决定；
  *   · 不接受 tag：离线包不是 tag 的逃生通道（判据在 scripts/offlineBundlePolicy.js）。
  *
+ * 签名（ADR-019）：manifest.json 的原始字节由构建机 Ed25519 私钥签名（manifest.sig）。
+ * 本脚本 fail-closed：配置了验签公钥（--pubkey-file / OFFLINE_BUNDLE_VERIFY_PUBKEY）时，
+ * 未签名或验签失败的包一律拒绝；未配置公钥时放行，但 stdout 与留痕都会明示
+ * signature: 'unchecked'——是否把「未验签」定为拒绝，是部署的显式选择。
+ *
  * 用法：
  *   node scripts/importOfflineBundle.js --bundle /var/lib/fsms/upgrade/bundles/v1.2.3
- *   node scripts/importOfflineBundle.js --bundle <dir> --apply
+ *   node scripts/importOfflineBundle.js --bundle <dir> --pubkey-file /etc/fsms/secrets/offline_bundle.pub --apply
  */
 
 'use strict';
@@ -32,6 +37,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const policy = require('./offlineBundlePolicy');
+const { SIG_FILE, verifyManifestBytes } = require('./offlineBundleSignature');
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -164,6 +170,9 @@ function printHelp() {
       '',
       '  --bundle <dir>              已解压的离线包目录（含 manifest.json 与 payload/）',
       '  --bundle-root <dir>         只允许包目录位于该根目录之下（代理调用时用）',
+      '  --pubkey-file <file>             Ed25519 验签公钥（PEM）；也可用 OFFLINE_BUNDLE_VERIFY_PUBKEY。',
+      '                              配置后未签名/验签失败的包一律拒绝（fail-closed）；不配则跳过',
+      '                              验签并在留痕里明示 signature=unchecked',
       '  --allowlist <prefixes>      逗号分隔的仓库前缀；也可用 OFFLINE_BUNDLE_ALLOWLIST',
       '                              或 HOT_UPGRADE_REGISTRY_ALLOWLIST。空白名单 = 全拒',
       '  --max-payload-bytes <n>     单个 payload 大小上限，默认 8 GiB',
@@ -212,15 +221,62 @@ function resolveBundleDir(input, bundleRoot) {
   return dir;
 }
 
-function readManifest(bundleDir) {
+function readManifestBytes(bundleDir) {
   const manifestPath = path.join(bundleDir, 'manifest.json');
+  try {
+    // 按 Buffer 读：签名是对原始字节做的，过一遍 utf8 字符串再编码回来可能不是同一批字节
+    return fs.readFileSync(manifestPath);
+  } catch (err) {
+    fail(`manifest.json 不可读：${err.message}`);
+  }
+}
+
+function parseManifestBytes(bytes) {
   let raw;
   try {
-    raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    raw = JSON.parse(bytes.toString('utf8'));
   } catch (err) {
     fail(`manifest.json 不是合法 JSON：${err.message}`);
   }
   return policy.parseBundleManifest(raw);
+}
+
+/**
+ * 验签（fail-closed：公钥已配置时，未签名 = 拒绝）。
+ *
+ * 排在 manifest 结构解析**之前**：签名是对字节做的，与 JSON 语义无关——一个被改过
+ * 字节但碰巧还能解析的 manifest，没有理由先享受判据层的服务再被拦下。
+ * 三个失败面分开说清：公钥读不了（本机配置问题）、sig 不存在（包未签名）、
+ * 字节不符（包被篡改或公钥配错）——运维的处置动作完全不同。
+ */
+function verifyBundleSignature(bundleDir, manifestBytes, pubkeyFile) {
+  let pem;
+  try {
+    pem = fs.readFileSync(pubkeyFile, 'utf8');
+  } catch (err) {
+    fail(
+      `验签公钥不可读（--pubkey-file / OFFLINE_BUNDLE_VERIFY_PUBKEY 指向的文件）：${err.code || err.message}`
+    );
+  }
+  const sigPath = path.join(bundleDir, SIG_FILE);
+  let sigBytes;
+  try {
+    sigBytes = fs.readFileSync(sigPath);
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      fail(
+        '本机已配置验签公钥，但包里没有 manifest.sig（未签名包）：按 fail-closed 拒绝。\n' +
+          '  请用 scripts/build-offline-bundle.sh --sign-key <私钥.pem> 重新构建并搬运；\n' +
+          '  或经人工确认本机确实要接受未签名包后，再移除公钥配置。'
+      );
+    }
+    fail(`manifest.sig 不可读：${err.message}`);
+  }
+  const result = verifyManifestBytes(manifestBytes, sigBytes, pem);
+  if (!result.ok) {
+    fail(`离线包签名验证失败：${result.reason}`);
+  }
+  log(`签名验证通过（${SIG_FILE} ↔ manifest.json 原始字节）`);
 }
 
 /** 留痕：与 scripts/hotUpgrade.js 同口径，写 logs/ 下 0600 的本地记录 */
@@ -270,7 +326,21 @@ function main() {
       process.env.HOT_UPGRADE_REGISTRY_ALLOWLIST
   );
   const bundleDir = resolveBundleDir(opts.bundle, opts.bundleRoot);
-  const manifest = readManifest(bundleDir);
+  const pubkeyFile = String(
+    opts.pubkeyFile || process.env.OFFLINE_BUNDLE_VERIFY_PUBKEY || ''
+  ).trim();
+  const manifestBytes = readManifestBytes(bundleDir);
+  let signatureState = 'unchecked';
+  if (pubkeyFile) {
+    verifyBundleSignature(bundleDir, manifestBytes, pubkeyFile);
+    signatureState = 'verified';
+  } else {
+    log(
+      '未配置验签公钥（--pubkey-file / OFFLINE_BUNDLE_VERIFY_PUBKEY）：本次导入不校验签名，' +
+        '包完整性仅由「搬运通道 + 逐字节比对 + load 后 RepoDigests 复核」保证'
+    );
+  }
+  const manifest = parseManifestBytes(manifestBytes);
 
   // 白名单判据在**读盘之前**跑：这个包该不该被接受，与它有多大、装在哪无关
   for (const img of manifest.images) policy.assertBundleImageAllowed(img, allowlist);
@@ -288,6 +358,7 @@ function main() {
     bundle: bundleDir,
     version: manifest.version,
     buildId: manifest.buildId,
+    signature: signatureState,
     startedAt: new Date().toISOString(),
     images: manifest.images.map((i) => ({ role: i.role, ref: i.ref })),
     steps: [],
