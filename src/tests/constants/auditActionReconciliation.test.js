@@ -280,13 +280,43 @@ describe('审计 action 白名单对账', () => {
     // 各字面量出处：status 'resolved' :14/:58；processLog 'dispatched' :25/:46、
     // 'alarm_received' :87、'marked_false_alarm' :111；巡检侧 'started' :182/:228、
     // 'completed' :185/:231、'review_approved' :189。
-    ['src/constants/honeypotDecoyEvents.js', 'alarm_received', 'decoy', ':87 诱饵告警 processLog 展示数据'],
-    ['src/constants/honeypotDecoyEvents.js', 'completed', 'decoy', ':185/:231 诱饵巡检 processLog 展示数据'],
-    ['src/constants/honeypotDecoyEvents.js', 'dispatched', 'decoy', ':25/:46 诱饵告警 processLog 展示数据'],
-    ['src/constants/honeypotDecoyEvents.js', 'marked_false_alarm', 'decoy', ':111 诱饵告警 processLog 展示数据'],
+    [
+      'src/constants/honeypotDecoyEvents.js',
+      'alarm_received',
+      'decoy',
+      ':87 诱饵告警 processLog 展示数据',
+    ],
+    [
+      'src/constants/honeypotDecoyEvents.js',
+      'completed',
+      'decoy',
+      ':185/:231 诱饵巡检 processLog 展示数据',
+    ],
+    [
+      'src/constants/honeypotDecoyEvents.js',
+      'dispatched',
+      'decoy',
+      ':25/:46 诱饵告警 processLog 展示数据',
+    ],
+    [
+      'src/constants/honeypotDecoyEvents.js',
+      'marked_false_alarm',
+      'decoy',
+      ':111 诱饵告警 processLog 展示数据',
+    ],
     ['src/constants/honeypotDecoyEvents.js', 'resolved', 'decoy', ':14/:58 诱饵告警 status 字段值'],
-    ['src/constants/honeypotDecoyEvents.js', 'review_approved', 'decoy', ':189 诱饵巡检 processLog 展示数据'],
-    ['src/constants/honeypotDecoyEvents.js', 'started', 'decoy', ':182/:228 诱饵巡检 processLog 展示数据'],
+    [
+      'src/constants/honeypotDecoyEvents.js',
+      'review_approved',
+      'decoy',
+      ':189 诱饵巡检 processLog 展示数据',
+    ],
+    [
+      'src/constants/honeypotDecoyEvents.js',
+      'started',
+      'decoy',
+      ':182/:228 诱饵巡检 processLog 展示数据',
+    ],
     ['src/controllers/roleController.js', 'created', 'ws', ':173 WebSocket 权限同步广播载荷'],
     ['src/controllers/roleController.js', 'deleted', 'ws', ':291 同上'],
     [

@@ -2,6 +2,9 @@
   "scripts/audit-chain-checkpoint.js": {
     "complexity": 1
   },
+  "scripts/auditCountAssertionScan.js": {
+    "max-lines": 1
+  },
   "scripts/deployPolicy.js": {
     "max-lines": 1
   },
@@ -42,6 +45,10 @@
   "src/middleware/rateLimit.js": {
     "max-lines": 1
   },
+  "src/models/IPBlacklist.js": {
+    "max-lines": 1,
+    "complexity": 1
+  },
   "src/models/User.js": {
     "max-lines": 1
   },
@@ -76,6 +83,7 @@
     "complexity": 1
   },
   "__lineCounts": {
+    "scripts/auditCountAssertionScan.js": 442,
     "scripts/deployPolicy.js": 352,
     "scripts/hotUpgradeJob.js": 319,
     "scripts/hotUpgrade.js": 334,

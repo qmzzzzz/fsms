@@ -135,7 +135,13 @@ async function applyBan({
       if (!banned) state.failedEntries += 1;
       // created 来自 blockIP 的驱动元数据（$locals，非持久化）：未知/缺省一律按「非本次新建」，回滚侧才敢保守不删
       const created = Boolean(r && r.$locals && r.$locals.created === true);
-      return { cidr: one, banned, created, reason: (r && r.reason) || null, _id: (r && r._id) || null };
+      return {
+        cidr: one,
+        banned,
+        created,
+        reason: (r && r.reason) || null,
+        _id: (r && r._id) || null,
+      };
     })
   );
   const bannedCount = results.filter((r) => r.banned).length;
@@ -219,7 +225,10 @@ async function rollbackIfUnionCoversFamily(results, bannedCount) {
   const skippedIds = [];
   for (const r of results) {
     if (!r._id) continue;
-    if (!r.created) { skippedIds.push(String(r._id)); continue; }
+    if (!r.created) {
+      skippedIds.push(String(r._id));
+      continue;
+    }
     const removed = await ipListService.removeEntry(r._id, 'black').catch(() => null);
     if (removed && removed.deletedCount === 1) rolledBackIds.push(String(r._id));
   }
