@@ -380,6 +380,7 @@ function validateConfig() {
   errors.push(...trustedProxies.parseTrustedProxyCidrs(rawTrustedProxyCidrs).errors);
   collectTlsErrors(errors);
   collectTimezoneErrors(errors);
+  collectJwtDurationErrors(errors);
 
   if (errors.length > 0) reportConfigErrors(errors);
 
@@ -579,6 +580,35 @@ function collectTimezoneErrors(errors) {
         '非法值不会在启动期暴露，而会在首次业务调用（仪表盘今日边界、审计按天聚合）' +
         "抛 RangeError: Invalid time zone specified。请使用如 'Asia/Shanghai' 的 IANA 名称"
     );
+  }
+}
+
+/**
+ * JWT_EXPIRE / JWT_REFRESH_EXPIRE 的可解析性启动闸（审计 2026-11-02 P2-3）
+ *
+ * 同一配置值有两个解释器：令牌 exp 由 jsonwebtoken→ms 解析，cookie maxAge 与
+ * 会话行 expiresAt 由 utils/cookie.js 的 durationToMs 解析（不可解析时静默回落
+ * 24h/7d 兜底）。坏表达（如复合形式 '2h30m'）此前启动期零报错，故障形态是
+ * 「首次登录/刷新时 jwt.sign 抛错 → 登录接口 500 + 三个消费点各自口径」——
+ * 与 TZ_BUSINESS 的「构造即校验」同型缺口。
+ *
+ * 判定用 durationToMs（fallback 取 NaN：不可解析即 NaN → 报错），与 cookie 侧
+ * 同一实现；ms 侧语法与它几乎同集（durationToMsParity.test.js 现场反推钉住），
+ * durationToMs 拒绝的复合形式 ms 同样拒绝。未配置时不报错（config/index.js
+ * 有合法默认）。仅生产环境执行（validateConfig 已提前 return 非生产环境）。
+ */
+function collectJwtDurationErrors(errors) {
+  const { durationToMs } = require('../utils/cookie');
+  for (const name of ['JWT_EXPIRE', 'JWT_REFRESH_EXPIRE']) {
+    const raw = (process.env[name] || '').trim();
+    if (!raw) continue;
+    if (!Number.isFinite(durationToMs(raw, NaN)) || durationToMs(raw, NaN) <= 0) {
+      errors.push(
+        `${name} 不是可解析的正时长（当前值：${raw}）。` +
+          '非法值在启动期不会暴露，而会在首次登录/刷新时令 jwt.sign 抛错（登录 500），' +
+          "且 cookie 与会话行各自回落到不同的兜底口径。请使用如 '2h' / '14d' 的表达"
+      );
+    }
   }
 }
 

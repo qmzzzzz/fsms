@@ -27,8 +27,10 @@ const alarmTypeMap = {
 const deviceStatusMap = {
   normal: '正常',
   offline: '离线',
+  warning: '警告',
   fault: '故障',
   maintenance: '维护中',
+  scrapped: '已报废',
 };
 
 // 审计 action 展示名（导出用；与审计页 labelMaps 相互独立，口径同义）
@@ -76,8 +78,10 @@ const LABELS_EN = {
   deviceStatusMap: {
     normal: 'Normal',
     offline: 'Offline',
+    warning: 'Warning',
     fault: 'Fault',
     maintenance: 'Maintenance',
+    scrapped: 'Scrapped',
   },
   EXPORT_ACTION_LABELS: {
     login_success: 'Login succeeded',

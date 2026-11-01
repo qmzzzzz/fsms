@@ -108,6 +108,26 @@ describe('piiCrypto 纯判据', () => {
     expect(piiSearchKey(null)).toBe('');
   });
 
+  test('伪造 enc.v2. 前缀的用户输入必须被加密而不是透传（审计 2026-11-02 P2-1）', () => {
+    // 攻击形态：email 是合法 email（isEmail 通过），值恰好以 enc.v2. 开头——
+    // 旧幂等判据只认前缀，该值被当"已加密"原样落库：明文绕过加密 + 读侧按
+    // 密文解析（IV 段非法）稳定抛错，毒化一切投影该列的列表端点。
+    // 修复后：前缀命中且严格形态成立才透传；伪造前缀照常加密，读侧解出的
+    // 就是提交的字面值。
+    const hostile = 'enc.v2.aaa@x.com';
+    const enc = encryptPii(hostile, { subjectId: 'a'.repeat(24), field: 'email' });
+    expect(enc).not.toBe(hostile); // 必须真的被加密
+    expect(enc.startsWith('enc.v2.')).toBe(true);
+    expect(decryptPii(enc, { subjectId: 'a'.repeat(24), field: 'email' })).toBe(hostile);
+
+    // 真实密文的钩子重入场景不受影响：形态成立的密文照旧透传
+    const real = encryptPii(PLAIN_PHONE, { subjectId: 'b'.repeat(24), field: 'phone' });
+    expect(encryptPii(real, { subjectId: 'b'.repeat(24), field: 'phone' })).toBe(real);
+
+    // 形态闸本体：IV 段必须是 16 个无填充 base64 字符（12 字节）
+    expect(enc.split('.')).toHaveLength(4);
+  });
+
   test('篡改密文 ⇒ 解密抛错而不是返回乱码（GCM 认证标签的用途所在）', () => {
     const enc = encryptPii(PLAIN_PHONE);
     const parts = enc.slice(VERSION_PREFIX.length).split('.');

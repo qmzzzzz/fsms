@@ -42,6 +42,23 @@ const VERSION_PREFIX = 'enc.v1.';
 const VERSION_PREFIX_V2 = 'enc.v2.';
 
 /**
+ * 严格密文形态：`enc.v1/v2.<12 字节 IV 的 base64>.<数据段 base64>`。
+ * 12 字节 IV 的 base64 恰为 16 个无填充字符；数据段允许 base64 字母表 + 最多
+ * 两个 '='（真实约束——数据段下限与 GCM 认证——由 decryptPii 把守，这里只做
+ * 「长得像密文」的形态闸）。
+ *
+ * 用途（审计 2026-11-02 P2-1）：encryptPii 的幂等判据原先只认**前缀**——用户
+ * 可控输入（email 合法即可通过 isEmail 校验）若恰好以 `enc.v2.` 开头，会被当
+ * 成"已加密值"**原样落库**：既绕过加密（明文入库），读侧 getter 又按密文解析
+ * （IV 段非 12 字节）稳定抛错，毒化管理面一切投影该列的列表端点。收紧后：
+ * 前缀命中且形态成立才透传（钩子重入场景的真实密文不受影响），伪造前缀照常
+ * 走加密——读侧解出的就是用户提交的那个字面值，无害。
+ */
+const PII_CIPHERTEXT_SHAPE_RE = /^enc\.v[12]\.[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]+={0,2}$/;
+const isWellFormedPiiCiphertext = (value) =>
+  typeof value === 'string' && PII_CIPHERTEXT_SHAPE_RE.test(value);
+
+/**
  * 主密钥取值判据（fail-closed，加密侧与检索键侧共用这唯一一个口子）。
  *
  * 为什么要拦 `'undefined'` / `'null'` 这类**字面量**，而不只是拦空值： `process.env.X = undefined` 被 Node 强转成字符串 `"undefined"`（实测，v18/v22/v24 同），
@@ -98,7 +115,7 @@ const buildAad = (aadContext) => {
 const encryptPii = (value, aadContext = null) => {
   if (value === undefined || value === null) return value;
   if (typeof value !== 'string') return value;
-  if (value === '' || value.startsWith(VERSION_PREFIX) || value.startsWith(VERSION_PREFIX_V2)) {
+  if (value === '' || isWellFormedPiiCiphertext(value)) {
     return value;
   }
   const isV2 = aadContext !== null;

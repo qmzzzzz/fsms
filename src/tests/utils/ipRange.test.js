@@ -67,6 +67,18 @@ describe('ipRange（用户 IP 访问范围规则）', () => {
       expect(validateRules('192.168.300.1').valid).toBe(false);
     });
 
+    test('模式分支的前导零一律非法（审计 2026-11-02 P2-2：与单地址/CIDR 同一歧义判据）', () => {
+      // 同一份规则文本写成单地址/CIDR 会被歧义判据 400 纠偏，模式写法此前
+      // 却按十进制静默生效（'010'→10）——管理员按八进制语义录入的排除规则
+      // 会落在错误网段。修复后模式分支与 CANONICAL_OCTET 同尺。
+      expect(validateRules('192.168.010.0-255').valid).toBe(false);
+      expect(validateRules('!192.168.010.0-255').valid).toBe(false);
+      expect(validateRules('192.168.1.010').valid).toBe(false);
+      expect(validateRules('192.168.010-020.*').valid).toBe(false);
+      // 等价的规范形态仍合法
+      expect(validateRules('192.168.10.0-255').valid).toBe(true);
+    });
+
     test('仅有 ! 前缀而无内容为非法', () => {
       expect(validateRules('!').valid).toBe(false);
     });

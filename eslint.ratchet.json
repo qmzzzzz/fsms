@@ -26,6 +26,9 @@
   "src/docs/generate.js": {
     "max-lines": 1
   },
+  "src/middleware/idempotency.js": {
+    "max-lines": 1
+  },
   "src/middleware/metricsAuth.js": {
     "complexity": 1
   },
@@ -41,8 +44,14 @@
   "src/services/auditBuffer.js": {
     "max-lines": 1
   },
+  "src/services/authService/session.js": {
+    "complexity": 1
+  },
   "src/services/authService/token.js": {
     "complexity": 1
+  },
+  "src/services/sessionService.js": {
+    "max-lines": 1
   },
   "src/services/upgradeService.js": {
     "max-lines": 1
@@ -55,5 +64,22 @@
   },
   "src/utils/reauthTicket.js": {
     "complexity": 1
+  },
+  "__lineCounts": {
+    "scripts/deployPolicy.js": 352,
+    "scripts/hotUpgrade.js": 334,
+    "scripts/hotUpgradeQueue.js": 318,
+    "scripts/migrate-pii-encryption.js": 308,
+    "src/config/validate.js": 351,
+    "src/controllers/roleController.js": 304,
+    "src/docs/generate.js": 1419,
+    "src/middleware/idempotency.js": 313,
+    "src/middleware/rateLimit.js": 389,
+    "src/routes/securityRoutes.js": 372,
+    "src/services/auditBuffer.js": 308,
+    "src/services/sessionService.js": 316,
+    "src/services/upgradeService.js": 452,
+    "src/utils/errorCodes.js": 912,
+    "src/utils/metrics.js": 307
   }
 }

@@ -100,7 +100,10 @@ const grantsPayload = ({ query, now }) => {
   const mine = (row) => !query.status || row.status === query.status;
   const owner = (row) => !query.userId || String(row.userId) === String(query.userId);
   const rows = aggData.DECOY_TEMP_GRANTS.filter((row) => mine(row) && owner(row));
-  rows.sort((a, b) => a.createdAtOffsetMin - b.createdAtOffsetMin); // 真实链 sort{createdAt:-1}，此处按时间正序取页
+  // 与真实链同向（audit 2026-11-02 P2-4）：privilegeGrantService.listGrants 是
+  // sort{createdAt:-1}（新→旧）。此前按时间正序取页且未登记进 NON_DERIVABLE
+  // 台账——「列表最旧在前」是一个非常规特征，陷阱会话持有者凭它即可识别合成面。
+  rows.sort((a, b) => b.createdAtOffsetMin - a.createdAtOffsetMin);
   return {
     data: rows.slice((page - 1) * limit, page * limit).map((row) => grantRowOf(row, now)),
     pagination: {

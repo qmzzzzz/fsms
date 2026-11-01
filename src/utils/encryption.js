@@ -362,8 +362,10 @@ class DataMasking {
     if (!email) return '';
     const str = String(email);
     const at = str.indexOf('@');
-    // 无 @ 或本地部分为空：非邮箱形态，原样返回（避免产出 "undefined*@d" 这类脏数据）
-    if (at <= 0) return str;
+    // 无 @ 或本地部分为空：非邮箱形态。兜底全掩码（审计 2026-11-02 P3-4）——
+    // 与 maskPhone/maskIdCard 的「认不出即全掩码」失败方向一致；原样返回会把
+    // 未来误用点（传入非邮箱串）变成静默明文出口。
+    if (at <= 0) return '****';
     const local = str.slice(0, at);
     const domain = str.slice(at + 1);
 

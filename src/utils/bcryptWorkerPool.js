@@ -128,9 +128,14 @@ const ensurePool = () => {
   }
 };
 
+/** 排队上限（审计 2026-11-02 P3-2）：池吞吐 ≈ workers×(1/250ms)，全站 bcrypt 路径
+ * 虽各有独立限流，但容量闸不该依赖"上游都守规矩"的自觉。超限直接走 runInline——
+ * 与线程池初始化失败的兜底同一出口（主线程阻塞退化为主线程算，语义一致）。 */
+const QUEUE_MAX = 256;
+
 const run = (op, args) => {
   const p = ensurePool();
-  if (!p) return runInline(op, args);
+  if (!p || p.queue.length >= QUEUE_MAX) return runInline(op, args);
   return new Promise((resolve, reject) => {
     p.queue.push({ op, args, resolve, reject });
     p.pump();

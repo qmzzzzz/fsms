@@ -617,7 +617,7 @@ describe('.env.example 必须覆盖配置层读取的全部变量', () => {
     expect(secretsCode).toMatch(/FILE_BACKED_SECRETS/); // 前提自证：它确实还是动态那一族
   });
 
-  test('点名的四个关键变量确实在模板中（防误删）', () => {
+  test('点名的四个关键变量名确实在模板中（防误删）', () => {
     const env = fs.readFileSync(path.join(ROOT, '.env.example'), 'utf8');
     for (const name of [
       'TZ_BUSINESS',
@@ -627,5 +627,88 @@ describe('.env.example 必须覆盖配置层读取的全部变量', () => {
     ]) {
       expect(env).toContain(name);
     }
+  });
+});
+
+describe('JWT_EXPIRE / JWT_REFRESH_EXPIRE 可解析性启动闸（审计 2026-11-02 P2-3）', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  afterAll(() => {
+    process.env = ORIGINAL_ENV;
+  });
+
+  /** 生产环境下除 JWT 时长外全部合法（与上方 TZ 夹具同型） */
+  const setValidProdEnv = () => {
+    process.env.NODE_ENV = 'production';
+    process.env.JWT_SECRET = 'strong-random-jwt-secret-that-is-long-enough';
+    process.env.JWT_REFRESH_SECRET = 'strong-random-refresh-secret-long-enough';
+    process.env.AES_SECRET_KEY = 'test-aes-key-with-32-chars-minimum!!';
+    process.env.HMAC_SECRET = 'strong-random-hmac-secret-that-is-long-enough';
+    process.env.MONGODB_URI = 'mongodb://prod-server:27017/db?tls=true';
+    process.env.CORS_ORIGIN = 'https://example.com';
+    process.env.ENABLE_HTTPS = 'true';
+    process.env.ALLOWED_HOSTS = 'api.example.com';
+    process.env.REDIS_URL = 'rediss://redis.example.com:6379';
+    process.env.REDIS_PASSWORD = 'strong-random-redis-' + 'secret-that-is-long-enough';
+    process.env.TRUST_PROXY_HOPS = '1';
+    process.env.TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
+  };
+
+  /** 跑一次生产校验，返回 { exited, messages }（与上方 TZ 夹具同型） */
+  const runProd = () => {
+    const { validateConfig } = require('../../config/validate');
+    const logger = require('../../utils/logger');
+    const messages = [];
+    const mockError = jest
+      .spyOn(logger, 'error')
+      .mockImplementation((m) => messages.push(String(m)));
+    jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    let exited = false;
+    try {
+      validateConfig();
+    } catch (e) {
+      exited = e.message === 'process.exit called';
+    }
+    mockError.mockRestore();
+    mockExit.mockRestore();
+    return { exited, messages: messages.join('\n') };
+  };
+
+  test('未配置 → 通过（config/index.js 有合法默认）', () => {
+    setValidProdEnv();
+    delete process.env.JWT_EXPIRE;
+    delete process.env.JWT_REFRESH_EXPIRE;
+    expect(runProd().exited).toBe(false);
+  });
+
+  test.each([
+    ['小时', '2h'],
+    ['天', '14d'],
+    ['分钟', '30m'],
+    ['毫秒数字串', '7200000'],
+  ])('合法表达（%s）→ 通过', (_label, value) => {
+    setValidProdEnv();
+    process.env.JWT_EXPIRE = value;
+    process.env.JWT_REFRESH_EXPIRE = value;
+    expect(runProd().exited).toBe(false);
+  });
+
+  test.each([
+    ['复合形式（双解释器都无法解析）', '2h30m'],
+    ['纯文字', 'forever'],
+    ['非正数', '0h'],
+    ['负值', '-1d'],
+  ])('%s → 启动致命错误且文案点名变量', (_label, value) => {
+    setValidProdEnv();
+    process.env.JWT_EXPIRE = value;
+    const { exited, messages } = runProd();
+    expect(exited).toBe(true);
+    expect(messages).toContain('JWT_EXPIRE');
   });
 });

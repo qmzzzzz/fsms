@@ -655,6 +655,7 @@ module.exports = {
   resolvePunishableIp,
   ipAttributionRiskFactors,
   resolvePunishTarget,
+  CANONICAL_OCTET,
   IP_ATTRIBUTION_KINDS: IP_ATTRIBUTION_KINDS,
   parseIP,
   normalizeIP,

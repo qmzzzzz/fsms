@@ -43,7 +43,7 @@
 const ipaddr = require('ipaddr.js');
 // 严格形态判据已收进 ipUtils（normalizeIP 自带歧义拒绝），
 // 原先的过渡模块 utils/ipCanonical 已并入并删除——两侧共用一把尺子，不存在第二套规则。
-const { normalizeIP, parseCIDR } = require('./ipUtils');
+const { normalizeIP, parseCIDR, CANONICAL_OCTET } = require('./ipUtils');
 
 // 规则分隔符：逗号、分号、中文逗号/分号、空白（含换行、制表）
 const RULE_SEPARATOR = /[,;，；\s]+/;
@@ -73,14 +73,22 @@ const splitRules = (text) => {
 /**
  * 解析 IPv4 单段的取值集合定义
  * 支持：具体数字（1）、区间（1-10）、通配（*）
+ * 前导零一律非法（审计 2026-11-02 P2-2）：与 ipUtils.CANONICAL_OCTET 同一判据——
+ * 同一份规则文本写成单地址/CIDR 会在写入期被歧义判据 400 纠偏，模式写法
+ * （192.168.010.0-255）此前却按十进制静默生效（'010'→10），同一入口两种语义
+ * 且方向相对配置意图 fail-open。八进制语义从来不是本仓的解释口径。
  * @param {string} segment 段文本
  * @returns {{min: number, max: number}|null} 该段允许的取值区间；非法返回 null
  */
 const parseIPv4Segment = (segment) => {
   if (segment === '*') return { min: 0, max: 255 };
 
-  const rangeMatch = /^(\d{1,3})-(\d{1,3})$/.exec(segment);
+  const rangeMatch = segment.match(/^(\d{1,3})-(\d{1,3})$/);
   if (rangeMatch) {
+    // 区间两端各自过同一把八段尺（'010-020' 整条非法，不是"两端取十进制"）
+    if (!CANONICAL_OCTET.test(rangeMatch[1]) || !CANONICAL_OCTET.test(rangeMatch[2])) {
+      return null;
+    }
     const min = Number(rangeMatch[1]);
     const max = Number(rangeMatch[2]);
     if (min > 255 || max > 255 || min > max) return null;
@@ -88,6 +96,7 @@ const parseIPv4Segment = (segment) => {
   }
 
   if (/^\d{1,3}$/.test(segment)) {
+    if (!CANONICAL_OCTET.test(segment)) return null;
     const value = Number(segment);
     if (value > 255) return null;
     return { min: value, max: value };

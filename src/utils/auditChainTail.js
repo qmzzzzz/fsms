@@ -54,4 +54,6 @@ async function getLatestHash(model) {
   return unclaimed[0];
 }
 
-module.exports = { TAIL_WINDOW, getLatestHash, latestHashByMaxId };
+// TAIL_WINDOW 与 latestHashByMaxId 均为本文件内部消费（审计 2026-11-02 P3-3：
+// 导出名册里零外部消费者、也无测试引用——导出会制造「有测试在钉它」的错觉）。
+module.exports = { getLatestHash };
