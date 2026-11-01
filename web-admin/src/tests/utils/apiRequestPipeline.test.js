@@ -85,6 +85,17 @@ const httpError = (config, status, data) =>
 const networkError = (config) =>
   new AxiosError('Network Error', AxiosError.ERR_NETWORK, config, { __fakeRequest: true })
 
+/**
+ * 刷新端点「明确拒绝」的形态（401 + 错误码）。
+ *
+ * 2026-10-30 起口径变更：只有这种明确拒绝才允许登出；`new Error('refresh down')`
+ * 属于网络层失败（没有 response），按新口径**不得**登出——本文件里凡断言
+ * 「刷新失败 → 登出」的用例都必须用本 helper 构造拒绝，网络/5xx 的不登出语义
+ * 由 apiRefreshRaceRecovery.test.js 专门覆盖。
+ */
+const refreshRejected = (status = 401, errorCode = 'REFRESH_TOKEN_INVALID') =>
+  httpError({ url: '/api/auth/refresh' }, status, { success: false, errors: { errorCode } })
+
 const sleep = (ms = 0) => new Promise((r) => setTimeout(r, ms))
 
 /** 轮转真实定时器等待条件成立（waitFor 只推 nextTick，推不动这条微任务链） */
@@ -229,7 +240,8 @@ describe('401 刷新链（含并发合流）', () => {
   test('并发 401 且刷新失败：登出提示与跳转只发生一次，两个调用方都收到 401', async () => {
     // 防退化：去掉 _isHandling401 合流 → 每个失败请求各弹一次「会话已失效」并各跳一次
     const { apiClient, router, axios, i18n } = await loadAll()
-    vi.spyOn(axios, 'post').mockRejectedValue(new Error('refresh down'))
+    // 刷新被明确拒绝（401）才登出：并发只登出一次仍然成立
+    vi.spyOn(axios, 'post').mockRejectedValue(refreshRejected())
     const pushSpy = vi.spyOn(router, 'push').mockResolvedValue()
     apiClient.defaults.adapter = (config) => Promise.reject(httpError(config, 401, {}))
     const [e1, e2] = await Promise.all([
@@ -249,7 +261,7 @@ describe('401 刷新链（含并发合流）', () => {
     // 防退化：isRefreshing/_isHandling401 只在 finally 复位；若漏掉复位，
     // 第二波 401 既不再刷新也不再登出，会话彻底失去兜底
     const { apiClient, router, axios } = await loadAll()
-    const postSpy = vi.spyOn(axios, 'post').mockRejectedValue(new Error('down'))
+    const postSpy = vi.spyOn(axios, 'post').mockRejectedValue(refreshRejected())
     const pushSpy = vi.spyOn(router, 'push').mockResolvedValue()
     apiClient.defaults.adapter = (config) => Promise.reject(httpError(config, 401, {}))
     await apiClient.get('/a').catch((e) => e)
@@ -264,7 +276,7 @@ describe('401 刷新链（含并发合流）', () => {
   test('登出提示文案优先级：码化翻译 > 后端 message > sessionExpired 兜底', async () => {
     // 防退化：优先回显后端原文（英文界面串中文）；丢掉兜底（无 message 时静默登出）
     const { apiClient, router, axios, i18n } = await loadAll()
-    vi.spyOn(axios, 'post').mockRejectedValue(new Error('refresh down'))
+    vi.spyOn(axios, 'post').mockRejectedValue(refreshRejected())
     vi.spyOn(router, 'push').mockResolvedValue()
     const run = async (data) => {
       apiClient.defaults.adapter = (config) => Promise.reject(httpError(config, 401, data))
@@ -389,7 +401,9 @@ describe('401 刷新链（含并发合流）', () => {
 
   test('刷新响应 success 非布尔真值不算成功（严格 === true）', async () => {
     // 防退化：把 === true 放宽为真值判断 → 畸形刷新响应被当作成功，
-    // 重试注定失败且因 _retried 静默，用户既无提示也未被登出
+    // 重试注定失败且因 _retried 静默，用户既无提示也未被登出。
+    // 2026-10-30：畸形 200 既不是成功、也无法证明会话失效，按「无法判定」处理——
+    // 不重放（n 仍为 1）、不登出（否则后端一次响应体变形就把人踢下线）。
     const { apiClient, router, axios } = await loadAll()
     vi.spyOn(axios, 'post').mockResolvedValue({ data: { success: 'yes' } })
     const pushSpy = vi.spyOn(router, 'push').mockResolvedValue()
@@ -401,8 +415,8 @@ describe('401 刷新链（含并发合流）', () => {
     await apiClient.get('/devices').catch((e) => e)
     await flush()
     expect(n).toBe(1)
-    expect(pushSpy).toHaveBeenCalledTimes(1)
-    expect(msg.error).toHaveBeenCalledTimes(1)
+    expect(pushSpy).not.toHaveBeenCalled()
+    expect(msg.error).not.toHaveBeenCalled()
   })
 
   test('刷新失败清认证：clearAuth 先于 router.push("/login")', async () => {
@@ -413,7 +427,7 @@ describe('401 刷新链（含并发合流）', () => {
     const authStore = storeMod.useAuthStore()
     authStore.setAuth({ userId: 'u1', username: 'alice' }, ['device:read'])
     const clearSpy = vi.spyOn(authStore, 'clearAuth')
-    vi.spyOn(axios, 'post').mockRejectedValue(new Error('down'))
+    vi.spyOn(axios, 'post').mockRejectedValue(refreshRejected())
     const pushSpy = vi.spyOn(router, 'push').mockResolvedValue()
     apiClient.defaults.adapter = (config) => Promise.reject(httpError(config, 401, {}))
     await apiClient.get('/devices').catch((e) => e)
@@ -993,6 +1007,32 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
     ['permissions.update', 'put', '/permissions/p1', ['p1', { u: 1 }], { data: { u: 1 } }],
     ['permissions.delete', 'delete', '/permissions/p1', ['p1'], {}],
     ['permissions.batchCreate', 'post', '/permissions/batch', [{ u: 1 }], { data: { u: 1 } }],
+    // 临时权限授予（C-08）：路径必须留在 /permissions 命名空间下——
+    // 换到 /api/privileges 会让审计分类从 permission 漂成未映射分类，记录被静默丢弃
+    [
+      'permissions.getGrants',
+      'get',
+      '/permissions/grants',
+      [{ status: 'pending' }],
+      { params: { status: 'pending' } },
+    ],
+    ['permissions.getGrantReview', 'get', '/permissions/grants/review', [], {}],
+    ['permissions.createGrant', 'post', '/permissions/grants', [{ u: 1 }], { data: { u: 1 } }],
+    ['permissions.approveGrant', 'post', '/permissions/grants/g1/approve', ['g1'], {}],
+    [
+      'permissions.rejectGrant',
+      'post',
+      '/permissions/grants/g1/reject',
+      ['g1', { u: 1 }],
+      { data: { u: 1 } },
+    ],
+    [
+      'permissions.revokeGrant',
+      'post',
+      '/permissions/grants/g1/revoke',
+      ['g1', { u: 1 }],
+      { data: { u: 1 } },
+    ],
 
     ['devices.getList', 'get', '/devices', [{ page: 1 }], { params: { page: 1 } }],
     ['devices.getById', 'get', '/devices/d1', ['d1'], {}],
@@ -1187,6 +1227,7 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
       ['roles.getById', [special], `/roles/${enc}`],
       ['roles.assignPermissions', [special, {}], `/roles/${enc}/permissions`],
       ['permissions.update', [special, {}], `/permissions/${enc}`],
+      ['permissions.approveGrant', [special], `/permissions/grants/${enc}/approve`],
       ['devices.updateStatus', [special, {}], `/devices/${enc}/status`],
       ['devices.addMaintenance', [special, {}], `/devices/${enc}/maintenance`],
       ['alarms.dispatch', [special, {}], `/alarms/${enc}/dispatch`],

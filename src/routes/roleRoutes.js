@@ -10,6 +10,7 @@ const { authenticate, checkPermission } = require('../middleware');
 const { body, param, query } = require('express-validator');
 const { mustBeString } = require('../utils/validationRules');
 const { consumeValidation } = require('../middleware/validateQuery');
+const { idempotency } = require('../middleware/idempotency');
 // 与 Permission/Role schema 的 status enum 同源（见 constants/permission.js）
 const { RESOURCE_STATUSES } = require('../constants/permission');
 
@@ -147,6 +148,7 @@ router.post(
   '/',
   authenticate,
   checkPermission('role:create'),
+  idempotency({ scope: 'role:create' }), // 请求级幂等（一-1）：重复提交回放首次结果，而非撞 E11000
   createRoleValidation,
   roleController.createRole
 );

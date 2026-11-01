@@ -38,6 +38,7 @@
  * `src/tests/controllers/skipGlobalAuditWriteFailure.test.js` 的登记表。
  */
 
+const mongoose = require('mongoose');
 const logger = require('../utils/logger');
 const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
 const wal = require('./auditBufferWal');
@@ -72,6 +73,11 @@ async function spool(entry) {
   // 序号要在序列化前分配，WAL 行才带 __walSeq；push(doc, true) 复用该序号、
   // 跳过重复追加，只负责把文档放进内存缓冲。
   wal.assignSeq(doc);
+  if (typeof auditBuffer.assignDocId === 'function') {
+    auditBuffer.assignDocId(doc); // 行里带 _id，重放才撞唯一索引（跨重启幂等）
+  } else if (doc && !doc._id) {
+    doc._id = new mongoose.Types.ObjectId(); // 替身（mock 掉 auditBuffer）下的等价回落
+  }
   // `__walDurable`：这一行背后是对调用方的**持久化承诺**（本函数 resolve 后，敏感操作
   // 就回了成功）。WAL 超限裁剪必须据此区分——普通 `push` 写出的行是"尽力而为"，
   // 丢了只损失取证；这一行丢了则是"已回成功却永久不入库"。

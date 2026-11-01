@@ -24,9 +24,23 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const { execFileSync } = require('child_process');
 
 const isWindows = process.platform === 'win32';
+
+/** 当前用户：环境变量优先，其次 os.userInfo()（服务/CI 无 USERNAME 时权限收紧仍可执行）。 */
+function currentUsername() {
+  const fromEnv = process.env.USERNAME || process.env.USER;
+  if (fromEnv) return fromEnv;
+  try {
+    const name = os.userInfo().username;
+    if (name) return name;
+  } catch (err) {
+    // 受限沙箱 / 无 passwd 条目时 userInfo 会抛错：落到 fail-closed 分支
+  }
+  return '';
+}
 
 /**
  * 收紧单个路径的权限
@@ -54,19 +68,19 @@ function hardenPath(target, opts = {}) {
   }
 
   // Windows：icacls 切断继承并只留当前用户
-  const user = process.env.USERNAME || process.env.USER;
+  const user = currentUsername();
   if (!user) {
     log(`⚠️  无法确定当前用户名，跳过 ACL 收紧：${target}`);
-    return { ok: false, method: 'icacls', detail: 'USERNAME 未定义' };
+    return {
+      ok: false,
+      method: 'icacls',
+      detail: '无法确定当前用户名（USERNAME/USER 与 os.userInfo 均不可用）',
+    };
   }
 
-  // 两步命令的参数各只写一处：实际执行与失败提示**共用同一份 argv**（见 catch 里的 hint）。
-  // 之前"执行"和"印给用户的手工命令"各写一遍，于是提示漏掉了 /reset —— 照提示手敲会得到
-  // "显式 ACE 存活"的半套收紧（F-189）。共用 argv 后二者不可能再分叉。
-  // 提示用解析后的真实用户名而不是 `%USERNAME%`：后者只在 cmd.exe 里展开，
-  // 粘进 PowerShell（如今 Windows 开发机的默认 shell）会原样传给 icacls 并失败。
-  // recursive=false：目录只收紧自身，不 reset 子项——用于目录与其它文件共享
-  // （如 logs/ 下的 WAL）的场景；需要清除子文件显式 ACE 时由调用方逐个收紧。
+  // 两步命令共用同一份 argv（F-189：执行与提示分叉会让提示漏掉 /reset，得到半套收紧）。
+  // 提示用解析后的真实用户名而非 %USERNAME%：后者只在 cmd.exe 展开，粘进 PowerShell 会原样传给 icacls。
+  // recursive=false：目录只收紧自身，不 reset 子项（如 logs/ 下与 WAL 共享的目录）。
   const recursive = opts.recursive !== false;
   const resetFlags = isDir && recursive ? ['/T', '/C', '/Q'] : [];
   const ace = isDir ? '(OI)(CI)F' : 'F';
@@ -174,4 +188,4 @@ function verifyHardened(target) {
   return { tightened: principals.length > 0 && suspicious.length === 0, evidence };
 }
 
-module.exports = { hardenPath, verifyHardened, isWindows };
+module.exports = { hardenPath, verifyHardened, isWindows, currentUsername };

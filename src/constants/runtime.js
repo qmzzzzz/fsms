@@ -1,54 +1,24 @@
 /**
  * 运行时拓扑假设的集中声明
  *
- * 背景：仓库里十余处实现隐含「本服务只有一个 Node 进程」这一前提，
- * 却分散在各文件的注释里，没有任何集中声明与启动期校验。一旦有人
- * 加上 `pm2 -i 4` 或把副本数调到 2，下列机制会**静默**失效：
+ * 仓库里十余处实现隐含「本服务只有一个 Node 进程」这一前提。一旦加上 `pm2 -i 4` 或把副本数
+ * 调到 2，这些机制会**静默**失效：审计哈希链分叉（append-only 防篡改整体失效，最严重且只有
+ * 校验脚本能发现）、审计 WAL 行交错/丢行、限流配额放大 N 倍、用户权限缓存失效广播只在本进程、
+ * 验证码/统计/告警频控/WS 客户端表等进程内 Map 跨进程不可见、安全与数据面缓存各自为政一个 TTL。
  *
- *   1. 审计哈希链（utils/auditChain.js）
- *      进程内互斥锁 + 内存链尾指针。多进程各自维护链尾 → 必然分叉，
- *      append-only 防篡改整体失效（最严重，且校验脚本才能发现）。
- *   2. 审计缓冲（services/auditBuffer.js）
- *      内存队列 + 本地 WAL 文件。多进程写同一 WAL 路径 → 行交错、
- *      前缀裁剪按各自条数进行 → 账目错乱、可能丢行。
- *   3. 限流（middleware/rateLimit.js，express-rate-limit 默认 MemoryStore）
- *      每进程独立计数 → 实际配额被放大 N 倍，暴力破解防护按比例削弱。
- *   4. 用户/权限缓存（middleware/userAuthCache.js invalidateUserCache，auth 中间件使用）
- *      失效只作用于当前进程 → 禁用用户/改权限后其余进程最长 60s 仍放行。
- *   5. 验证码存储（services/captchaService.js）、统计缓存（services/statsCache.js）、
- *      告警频控（services/securityAlert.js 的 alertRateLimit Map）、
- *      WebSocket 客户端表（services/websocketService/index.js）
- *      均为进程内 Map → 跨进程不可见，一次性消费/风暴抑制不成立。
- *   6. 安全与数据面的进程内缓存（无失效广播者，多实例下各自为政到一个 TTL）：
- *      IP 封禁缓存（middleware/security/ipBlacklist.js）、部门成员缓存（services/auditScopeFilter.js）、
- *      配置读取缓存（models/SystemConfig.js，TTL 30s）、名单快照（models/IPBlacklist.js，TTL 10s）、
- *      告警去重表（services/auditMonitor.js，多实例会重复告警）。
- *      前两项直接影响**鉴权与数据范围判定**，不是"数字抖动"那么轻。
- *
- * 刻意**不在**本清单：MFA 重放计数。它一度被写进本注释，属名实不符——
- * 现由 `User.mfaLastCounter` + `mfaService.claimTotpWindow` 的 Mongo 原子认领实现
- * （状态在库、跨进程天然一致），不是进程内 Map。把它列进来会让运维在
- * 多实例部署时误以为"重放防护会失效"，从而漏掉真正失效的那几项。
- *
- * 本清单的唯一事实来源是下方 SINGLE_PROCESS_DEPENDENCIES 数组（本注释只是导读）。
- * 完整性由 src/tests/constants/singleProcessInventoryCompleteness.test.js 钉住：
- * 新增进程内状态而忘记登记，会在该用例变红。
- *
- * 本模块把这些假设写成可执行的断言：启动期检测多进程迹象并给出
- * 明确的失效清单，而不是让运维在数据不一致时才发现。
- *
- * 要真正支持多实例，需把上述状态外置（Redis/Mongo），逐项迁移；
- * 在完成之前，部署拓扑必须保持单进程。
+ * **唯一事实来源是下方 SINGLE_PROCESS_DEPENDENCIES 数组**，本注释只是导读。完整性与
+ * "某项是否该登记"由 src/tests/constants/singleProcessInventoryCompleteness.test.js 钉住
+ * （含刻意不在清单里的项，如已改为 Mongo 原子认领的 MFA 重放计数——误列会让运维漏掉真失效项）。
+ * 本模块把假设写成启动期断言：检测到多进程迹象即给出明确失效清单，而不是等数据不一致才发现。
+ * 要支持多实例需把这些状态外置（Redis/Mongo）并逐项迁移；在此之前部署拓扑必须单进程。
  */
 
 const logger = require('../utils/logger');
 
 /** 依赖单进程假设的机制清单（供日志与文档引用，避免再次散落）
  *
- * `redisExternalized: true` 表示该机制在配置 REDIS_URL（共享缓存就绪）后
- * 已外置为跨实例一致：审计链锁与链尾（A-1）、限流计数（R-3 rate-limit-redis）、
- * 用户/权限缓存失效广播（L-4）、验证码存储。启动校验据此把它们与「仍单进程」
- * 的机制区分开，避免 Redis 已就绪时仍误报这些项会失效。
+ * `redisExternalized: true` 表示该机制在配置 REDIS_URL（共享缓存就绪）后已外置为跨实例一致：审计链锁与链尾（A-1）、限流计数（R-3 rate-limit-redis）、
+ * 用户/权限缓存失效广播（L-4）、验证码存储。启动校验据此把它们与「仍单进程」的机制区分开，避免 Redis 已就绪时仍误报这些项会失效。
  */
 const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
   {
@@ -167,8 +137,7 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
   {
     module: 'services/reportDashboardService.js',
     mechanism: '仪表盘缓存（dashboardCache Map，刻意不接失效广播）',
-    impact:
-      '各进程独立，写侧改完最长滞后一个 30s TTL；不接共享通道是取舍而非漏接，见 services/reportDashboardService.js:18-22',
+    impact: '各进程独立，滞后一个 30s TTL；取舍见 services/reportDashboardService.js:19-24',
     // 这里**没有** redisExternalized：配上 REDIS_URL 也不会让这块缓存跨实例一致
     // （原条目误写 redisExternalized: true ⇒ Redis 就绪后启动体检把它从"仍按单进程假设运行"
     // 的清单里滤掉，运维据此以为多实例安全）。
@@ -184,6 +153,21 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     impact: '各进程各自去重、各自对账；同一哨兵命中按实例数重复告警',
   },
   {
+    module: 'services/honeypotWatch.js',
+    mechanism: '诱饵账户当日告警去重表（notifiedDayByHoneypot Map）与物化状态快照',
+    impact: '各进程各自去重、各自物化；同一诱饵名命中按实例数重复告警',
+  },
+  {
+    module: 'services/ipPoolBan.js',
+    mechanism: '待确认封禁票据表（pending Map，票与 CIDR 绑死、10 分钟失效、一次性）',
+    impact: '各进程只认自己签发的票，多实例下确认需重走申请；不落库是为保住一次性语义',
+  },
+  {
+    module: 'services/forensicTrigger.js',
+    mechanism: '取证触发标记表（marksByIp Map + LRU 序号与计数器）',
+    impact: '各进程各自标记各自淘汰；同一 IP 只在实际命中它的实例上被取证，抽查面随实例数缩小',
+  },
+  {
     module: 'services/websocketService/index.js',
     mechanism: '客户端连接表',
     impact: '跨进程无法向指定用户推送（需 socket.io adapter）',
@@ -194,10 +178,8 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
 /**
  * 解析 Pod 序号（K8s StatefulSet 的 hostname 约定：<name>-<ordinal>）
  *
- * 为什么需要这条判据：Deployment 的 `replicas > 1` 由 ReplicaSet 命名 Pod
- * （形如 `<deployment>-<rs-hash>-<5位随机>`），**不注入任何环境变量**，
- * 因此上方 6 条判据（PM2 / cluster / WEB_CONCURRENCY / INSTANCE_COUNT /
- * REPLICAS / NODE_APP_INSTANCE）在纯 K8s 单容器多副本场景下**全部落空**，
+ * 为什么需要这条判据：Deployment 的 `replicas > 1` 由 ReplicaSet 命名 Pod （形如 `<deployment>-<rs-hash>-<5位随机>`），**不注入任何环境变量**，
+ * 因此上方 6 条判据（PM2 / cluster / WEB_CONCURRENCY / INSTANCE_COUNT / REPLICAS / NODE_APP_INSTANCE）在纯 K8s 单容器多副本场景下**全部落空**，
  * 检测静默失效——而这正是审计哈希链分叉、限流配额放大最可能的生产形态。
  *
  * 判据分两档，避免把普通单副本 Pod 误判：
@@ -207,9 +189,7 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
  *     时也成立，故本身不能证明多副本，只能说明「像是由编排器管理的 Pod」。
  *     调用方按需决定是否上报（见 detectMultiProcess 的 k8sPodLike 字段）。
  *
- * 为何读 `os.hostname()` 而不是 `process.env.HOSTNAME`：容器内两者通常相同，
- * 但 hostname 在本地/裸机也能拿到真实值，且不依赖编排器是否导出该变量——
- * 本判据必须在「编排器什么都没导出」时仍能工作。
+ * 为何读 `os.hostname()` 而不是 `process.env.HOSTNAME`：容器内两者通常相同，但 hostname 在本地/裸机也能拿到真实值，且不依赖编排器是否导出该变量——本判据必须在「编排器什么都没导出」时仍能工作。
  *
  * @param {string} [hostname] 待解析的 hostname，默认取 os.hostname()
  * @returns {{podLike: boolean, ordinal: number|null, strong: boolean}}
@@ -267,13 +247,10 @@ function isInCluster() {
 /**
  * 部署渲染期声明的副本数（F-12，2026-10-17）
  *
- * 为什么必须**新开**一个变量而不是复用 INSTANCE_COUNT：`.env.example` 里
- * `INSTANCE_COUNT=1` 是**默认值**（不带引号、随模板复制进 ConfigMap），
- * 拿它当"已声明单副本"的证明，等于让所有按模板部署的集群自动闭嘴。
+ * 为什么必须**新开**一个变量而不是复用 INSTANCE_COUNT：`.env.example` 里 `INSTANCE_COUNT=1` 是**默认值**（不带引号、随模板复制进 ConfigMap），拿它当"已声明单副本"的证明，等于让所有按模板部署的集群自动闭嘴。
  * 本变量的语义严格限定为「部署阶段按真实 replicas 写入」，未设置就是未声明。
  *
- * K8s 的 Downward API **给不出** replicas（它只能暴露 Pod 自身字段），
- * 所以只能由渲染阶段（helm/kustomize 模板替换）或 initContainer 调 API 写入；
+ * K8s 的 Downward API **给不出** replicas（它只能暴露 Pod 自身字段），所以只能由渲染阶段（helm/kustomize 模板替换）或 initContainer 调 API 写入；
  * 见 docs/multi-instance-consistency.md §4。
  *
  * @returns {number|null} 有效副本数；未设置或非法值返回 null（不得静默当作 1）
@@ -297,9 +274,7 @@ function readDeclaredInstanceCount() {
  *   - K8s StatefulSet Pod 序号 > 0（见 parsePodOrdinal；Deployment 形态
  *     属弱信号，仅置 k8sPodLike 提示，不计入 suspected）
  *
- * 另有第三档 `unproven`：**在集群内、但没有强信号、也没声明副本数**。
- * 这不是"检测到多副本"，而是"无法自证单副本"——Deployment 的 replicas>1
- * 既不注入环境变量、Pod 名也不带序号，此时上面的判据**全部落空**，
+ * 另有第三档 `unproven`：**在集群内、但没有强信号、也没声明副本数**。这不是"检测到多副本"，而是"无法自证单副本"——Deployment 的 replicas>1 既不注入环境变量、Pod 名也不带序号，此时上面的判据**全部落空**，
  * 旧实现只置 k8sPodLike 就结束了，等于静默放行（F-12 的缺陷本体）。
  *
  * @param {{hostname?: string}} [opts] 仅测试使用：注入 hostname 以验证判据
@@ -331,8 +306,7 @@ function detectMultiProcess(opts = {}) {
 /**
  * 副本数类判据：部署声明的真实副本数 + 编排器/进程管理器的实例数
  *
- * 抽成独立函数只为压 complexity（原 detectMultiProcess 触到 15 的上限，
- * 而"再抽一层"正是本项目对复杂度的既定处理方式，不是为拆而拆）。
+ * 抽成独立函数只为压 complexity（原 detectMultiProcess 触到 15 的上限，而"再抽一层"正是本项目对复杂度的既定处理方式，不是为拆而拆）。
  *
  * @param {string[]} reasons 追加式收集器
  */
@@ -382,8 +356,7 @@ function collectProcessManagerReasons(reasons) {
 /**
  * 判定「无法自证单副本」这一档（F-12）
  *
- * 与 suspected **互斥**：已经有确凿多副本证据时，"无法自证单副本"是废话，
- * 两者同时为真只会让调用方再判一次优先级。
+ * 与 suspected **互斥**：已经有确凿多副本证据时，"无法自证单副本"是废话，两者同时为真只会让调用方再判一次优先级。
  *
  * @param {string[]} reasons 已收集到的强信号
  * @param {{strong: boolean}} pod parsePodOrdinal 的结论
@@ -408,12 +381,10 @@ function resolveUnprovenReason(reasons, pod) {
 /**
  * 共享缓存（Redis）是否就绪
  *
- * 惰性 require 是**必须**的，不得提到文件顶部：sharedCache/index.js 的
- * degradedMechanismHint() 会在函数内反向 require 本模块取 SINGLE_PROCESS_DEPENDENCIES
+ * 惰性 require 是**必须**的，不得提到文件顶部：sharedCache/index.js 的 degradedMechanismHint() 会在函数内反向 require 本模块取 SINGLE_PROCESS_DEPENDENCIES
  * （它那边也有同一条注释），顶层化会把这条互相依赖变成加载期环。
  *
- * 抽成函数而不是两处各写一遍：`assertSingleProcessAssumptions` 与
- * `multiInstanceReadinessBlocker` 判的是同一件事（审计链分布式锁是否真的可用），
+ * 抽成函数而不是两处各写一遍：`assertSingleProcessAssumptions` 与`multiInstanceReadinessBlocker` 判的是同一件事（审计链分布式锁是否真的可用），
  * 两处各写一份的话，将来任何一侧改了"什么算就绪"，另一侧会静默沿用旧口径。
  *
  * @returns {boolean}
@@ -429,18 +400,12 @@ function sharedCacheReady() {
 /**
  * 启动期校验单进程假设
  *
- * 不阻断启动：多实例部署下服务本身可用，只是上述机制降级；
- * 强行退出反而可能让运维在不知情时失去服务。因此以 error 级日志
- * 列出确切的失效清单，让问题在启动日志里就无法被忽略。
+ * 不阻断启动：多实例部署下服务本身可用，只是上述机制降级；强行退出反而可能让运维在不知情时失去服务。因此以 error 级日志列出确切的失效清单，让问题在启动日志里就无法被忽略。
  *
- * 若共享缓存（Redis）已就绪，标记为 redisExternalized 的机制已外置为
- * 跨实例一致，不再列入失效清单，只单列说明；仍单进程的机制照常告警。
+ * 若共享缓存（Redis）已就绪，标记为 redisExternalized 的机制已外置为跨实例一致，不再列入失效清单，只单列说明；仍单进程的机制照常告警。
  *
- * F-12（2026-10-17）起多出**第三档**：`suspected=false && unproven=true`
- * （在集群内但无法自证单副本）走 **warn** 而不是 debug 静默放行。
- * 刻意不用 error：这一档可能是真的单副本 Deployment，打成 error 会让
- * 「多副本导致审计链分叉」这条真信号被每天一次的假警报稀释——本文件
- * 开头与 parsePodOrdinal 的注释里都写着这条教训。
+ * F-12（2026-10-17）起多出**第三档**：`suspected=false && unproven=true` （在集群内但无法自证单副本）走 **warn** 而不是 debug 静默放行。
+ * 刻意不用 error：这一档可能是真的单副本 Deployment，打成 error 会让「多副本导致审计链分叉」这条真信号被每天一次的假警报稀释——本文件开头与 parsePodOrdinal 的注释里都写着这条教训。
  *
  * @returns {{suspected: boolean, reasons: string[], unproven: boolean}}
  */
@@ -500,13 +465,10 @@ function assertSingleProcessAssumptions() {
 /**
  * A-2：多实例部署的就绪闸
  *
- * 审计哈希链的写序只在单写者下成立。检测到多实例迹象时，若共享缓存（Redis）
- * 未就绪 ⇒ 审计链分布式锁（utils/auditChain 的 acquireLockBlocking）根本不启用，
- * 多个实例会各自推进链尾并分叉。此时不能再"打条日志照常接流量"：
+ * 审计哈希链的写序只在单写者下成立。检测到多实例迹象时，若共享缓存（Redis）未就绪 ⇒ 审计链分布式锁（utils/auditChain 的 acquireLockBlocking）根本不启用，多个实例会各自推进链尾并分叉。此时不能再"打条日志照常接流量"：
  * /readyz 必须不就绪，让编排器/LB 把实例摘掉。
  *
- * 只在 suspected 档拦截；unproven 档（K8s Deployment 无法自证单副本）仍按
- * assertSingleProcessAssumptions 的口径 warn，否则会把正常单副本 Deployment
+ * 只在 suspected 档拦截；unproven 档（K8s Deployment 无法自证单副本）仍按 assertSingleProcessAssumptions 的口径 warn，否则会把正常单副本 Deployment
  * 误摘流量。Redis 就绪即视为分布式审计锁可用（auditChain 的判据同源）。
  *
  * @returns {{reason: string, detail: string}|null} null 表示可正常就绪

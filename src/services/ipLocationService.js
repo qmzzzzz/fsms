@@ -65,9 +65,9 @@ const locate = (ipText) => {
     // normalizeIP 复用名单/审计同一套入站判据：::ffff:1.2.3.4 收敛为纯 IPv4，
     // 歧义写法（0177.0.0.1 等）与非法文本直接 null——归属地不做"猜意图"的宽松解释
     const normalized = normalizeIP(ipText.trim());
-    // 缓存键用**归一化文本**：223.5.5.5 / ::ffff:223.5.5.5 / 带空白形态是同一个
-    // 地址，各占一个槽会让 2048 上限被等价形态摊薄。归一化失败的垃圾输入按
-    // 原文各自成键（互相不污染），由 FIFO 上限兜底
+    // 缓存键必须用**归一化文本**：223.5.5.5 / ::ffff:223.5.5.5 / 带空白形态是同一个地址，
+    // 各占一个槽会让 2048 上限被等价形态摊薄。归一化失败的垃圾输入按原文各自成键
+    // （互相不污染），由 FIFO 上限兜底
     const cacheKey = normalized || ipText.trim();
     if (resultCache.has(cacheKey)) return resultCache.get(cacheKey);
 

@@ -40,17 +40,25 @@ class ApiResponse {
    * @param {string} message - 成功消息
    */
   static paginated(res, data, pagination, message = '获取成功') {
+    // 分页元数据**整体缺失**时兜底成 1/0（不把"少传字段"升级成 500）；但**字段显式为 null ≠ 缺失**：
+    // 游标模式的契约就是 total/totalPages=null（不做全量 count），兜成 0 会与"真的 0 条"在响应上不可分。
+    const meta = pagination && typeof pagination === 'object' ? pagination : {};
+    const numOr = (v, dflt) => (v === null ? null : Number.isFinite(v) ? v : dflt);
+    const page = numOr(meta.page, 1);
+    const limit = numOr(meta.limit, 0);
+    const total = numOr(meta.total, 0);
+    const totalPages = numOr(meta.totalPages, 0);
     return res.status(200).json({
       success: true,
       message,
       data,
       pagination: {
-        page: pagination.page,
-        limit: pagination.limit,
-        total: pagination.total,
-        totalPages: pagination.totalPages,
-        ...(pagination.hasMore !== undefined ? { hasMore: pagination.hasMore } : {}),
-        ...(pagination.nextCursor !== undefined ? { nextCursor: pagination.nextCursor } : {}),
+        page,
+        limit,
+        total,
+        totalPages,
+        ...(meta.hasMore !== undefined ? { hasMore: meta.hasMore } : {}),
+        ...(meta.nextCursor !== undefined ? { nextCursor: meta.nextCursor } : {}),
       },
     });
   }
@@ -121,10 +129,7 @@ class ApiResponse {
     return this.error(res, message, 403, errors);
   }
 
-  /**
-   * 资源不存在响应
-   * @param {Object|null} errors - 附加错误信息（透传给 error，如 { errorCode }）
-   */
+  /** 资源不存在响应（errors 透传给 error，如 { errorCode }） */
   static notFound(res, message = '资源不存在', errors = null) {
     return this.error(res, message, 404, errors);
   }

@@ -22,22 +22,30 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { resolveShell } = require('./helpers/posixShell');
+const { execThroughStubPath } = require('./helpers/stubPath');
 
 const ROOT = path.resolve(__dirname, '../..');
 const SCRIPT = path.join(ROOT, 'scripts', 'backup-mongo.sh');
 
-function findBash() {
-  for (const c of ['/bin/bash', 'bash', 'C:/Program Files/Git/bin/bash.exe']) {
-    const r = spawnSync(c, ['--version'], { encoding: 'utf8' });
-    if (!r.error && r.status === 0) return c;
-  }
-  return null;
-}
-const BASH = findBash();
+// 复用测试基础设施的 shell 解析（行为验证、来源可自证），不再在本文件里另写一套候选顺序：
+// 两处的候选表一旦漂移，"本机能跑"与"CI 能跑"就会给出不同答案。
+const BASH = (resolveShell() || { cmd: null }).cmd;
 if (!BASH)
   console.warn('[跳过] 未找到 bash：backup-mongo.sh 的行为用例在本平台无法执行（CI ubuntu 会跑）');
 
 const group = BASH ? describe : describe.skip;
+
+if (!BASH && process.env.CI) {
+  // describe.skip 在 CI 上等于「整组零断言的绿」，而 ubuntu runner 一定有 bash ——
+  // 探不到就是探测本身坏了（PATH、权限、或有人改了 posixShell 的候选表）。
+  // 这种前提失效必须红，不能靠人眼去数 skipped 条数（口径同 imageDigestGate.test.js:80-89）。
+  describe('backup-mongo.sh 平台前提（CI 上缺 bash）', () => {
+    test('CI 上 resolveShell 必须解析到 bash，否则本文件全部覆盖都是假的', () => {
+      expect(BASH).toBeTruthy();
+    });
+  });
+}
 
 const STUB = `#!/bin/bash
 echo "$@" >> "$STUB_LOG"
@@ -58,8 +66,8 @@ afterAll(() => {
   for (const d of tracked) fs.rmSync(d, { recursive: true, force: true });
 });
 
-/** 一次隔离演练：stub PATH + 命令日志 + 临时备份目录 */
-function stage(mode) {
+/** 一次隔离演练：stub PATH + 命令日志 + 临时备份目录。extraStubs 用来按需遮住某个工具（wc/tr/…）。 */
+function stage(mode, extraStubs = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bakscript-'));
   tracked.push(dir);
   const bin = path.join(dir, 'bin');
@@ -70,6 +78,15 @@ function stage(mode) {
     fs.chmodSync(stubPath, 0o755);
   } catch (_) {
     /* Windows 上是空操作，MSYS 由 mode 参数处理 */
+  }
+  for (const [name, body] of Object.entries(extraStubs)) {
+    const extra = path.join(bin, name);
+    fs.writeFileSync(extra, body, { mode: 0o755 });
+    try {
+      fs.chmodSync(extra, 0o755);
+    } catch (_) {
+      /* 同上 */
+    }
   }
   const backups = path.join(dir, 'backups');
   return {
@@ -103,7 +120,10 @@ function run(st, { retention, uri = 'mongodb://user:sup3rs3cr3t@db:27017/fire_sa
   else delete env.MONGODB_URI; // 必须显式删：jest 引导链会给进程注入 MONGODB_URI，
   // 只"不设置"等于继承真值，用例测的就不是"缺失"这一支了（实测踩过）
   if (retention !== undefined) env.BACKUP_RETENTION_DAYS = retention;
-  const r = spawnSync(BASH, [SCRIPT, st.backups], { env, encoding: 'utf8' });
+  // PATH 桩必须在**孩子 shell 内部**收口：MSYS 启动时会把 /usr/bin 前置，stub `date` 会被
+  // /usr/bin/date 顶掉（同名归档那条例用的确定性时间戳就失效了）。见 helpers/stubPath.js。
+  const argv = execThroughStubPath(SCRIPT, [st.backups], path.join(st.dir, 'bin'), BASH);
+  const r = spawnSync(argv.file, argv.args, { env, encoding: 'utf8' });
   const argvLog = fs.existsSync(st.log) ? fs.readFileSync(st.log, 'utf8') : '';
   return {
     code: r.status,
@@ -194,6 +214,24 @@ group('backup-mongo.sh 真跑行为', () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain('0 字节');
     expect(r.out).not.toContain('Backup size:');
+  });
+
+  /**
+   * 第四轮审计（2026-10-30）：`[ "" -le 0 ]` 抛整数表达式错误、条件取**假**，于是空串被当成
+   * 「非 0 字节」放行 —— 一次看起来成功的备份。判据是「数量」，就先得证明这个数量存在。
+   */
+  test('wc 静默空输出（退出 0）⇒ 判失败（空串不是 0 字节：它连比较都没发生）', () => {
+    // 桩只在「输入是普通文件」时沉默（归档那一次用 `< file`），管道仍走真 wc ——
+    // 否则连前置的 mongo_validate_uri 都会先拒，用例就测不到归档这道闸了。
+    const st = stage('ok', {
+      wc: ['#!/bin/sh', 'if [ -f /dev/stdin ]; then exit 0; fi', 'exec /usr/bin/wc "$@"', ''].join(
+        '\n'
+      ),
+    });
+    const r = run(st);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('归档字节数判据不可用');
+    expect(r.out).not.toContain('Backup completed successfully');
   });
 
   test('目标归档已存在 ⇒ 拒绝覆盖（时间戳同名时不得静默吃掉上一份）', () => {

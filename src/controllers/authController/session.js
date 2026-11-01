@@ -18,6 +18,7 @@ const { asyncHandler } = require('../../middleware/errorHandler');
 const { extractAccessToken } = require('../../middleware/auth');
 const { clearAuthCookies, getCookies, REFRESH_COOKIE_NAME } = require('../../utils/cookie');
 const sessionService = require('../../services/sessionService');
+const { revokeReauthGrant } = require('../../services/reauthGrantStore');
 const authService = require('../../services/authService');
 const { recordSensitiveActionDurably } = require('../../services/auditOutbox');
 const { isAccessTokenValid, isRefreshTokenValid } = require('../../services/tokenService');
@@ -30,7 +31,6 @@ const { getUserPermissions, getMenuTree } = require('../../utils/permissionHelpe
 const getMe = asyncHandler(async (req, res) => {
   const userId = req.user.userId;
 
-  // 使用权限辅助工具获取完整的用户权限信息
   const permInfo = await getUserPermissions(userId);
 
   if (!permInfo) {
@@ -47,7 +47,9 @@ const getMe = asyncHandler(async (req, res) => {
   return ApiResponse.success(
     res,
     {
-      user: permInfo.user,
+      // P1-2：/auth/me 是前端刷新后的身份来源，必须带上强制改密标记
+      // （permissionHelper 的 user 投影不含该字段，从认证上下文补）
+      user: { ...permInfo.user, mustChangePassword: req.user.mustChangePassword === true },
       permissions: permInfo.permissions,
       menuPermissions: permInfo.menuPermissions,
       buttonPermissions: permInfo.buttonPermissions,
@@ -149,6 +151,8 @@ const logout = asyncHandler(async (req, res) => {
       userId: req.user.userId,
       reason: 'logout',
     });
+    // 二次验证窗口（审计一-3）随会话一起清：不留给「看起来仍然有效」的残留记录（失败只告警，到期由 TTL 兜底）。
+    await revokeReauthGrant(req.user.sid);
   }
 
   logger.info('用户登出', { username });
@@ -219,7 +223,6 @@ const listSessions = asyncHandler(async (req, res) => {
 /**
  * 吊销指定会话（踢除单台设备）
  * DELETE /api/auth/sessions/:sid
- *
  * 越权防护由 sessionService.revokeSession 的 userId 查询条件承担：
  * sid 是 UUID 不可枚举，但「不可猜」不是授权机制，必须在查询层限定归属。
  */
@@ -269,7 +272,6 @@ const revokeSession = asyncHandler(async (req, res) => {
 /**
  * 吊销除当前会话外的全部会话（退出其他所有设备）
  * DELETE /api/auth/sessions/others
- *
  * 与改密的差别：不递增 tokenVersion，因此当前设备不受影响，用户无需重新登录。
  * 这正是设备级吊销存在的意义——此前想清掉其他设备只能改密码把自己也踢掉。
  */

@@ -9,12 +9,14 @@
 
 # CI/CD：工作流定义、动作钉版、依赖机器人
 /.github/workflows/ @qmzzzzz
+/.github/semgrep/ @qmzzzzz
 /.github/CODEOWNERS @qmzzzzz
 /.github/dependabot.yml @qmzzzzz
 
 # 供应链信任锚：任何改动都等于重新定义「什么算已审」
 /deployment/audit-allowlist.json @qmzzzzz
 /deployment/lockfile-anchor.json @qmzzzzz
+/deployment/dependency-sla.json @qmzzzzz
 /deployment/mongod-artifacts.json @qmzzzzz
 /deployment/ip2region-checksum.json @qmzzzzz
 /eslint.ratchet.json @qmzzzzz

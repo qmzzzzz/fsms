@@ -20,6 +20,7 @@
 import { describe, test, expect, vi, afterEach } from 'vitest'
 import { mountComponent, flush, click, waitFor } from '../helpers/componentHarness'
 import { useAuthStore } from '@/store'
+import i18n from '@/i18n'
 
 const usersGetList = vi.fn()
 const usersCreate = vi.fn()
@@ -35,6 +36,8 @@ const secSetReg = vi.fn()
 const secSetLogin = vi.fn()
 const secSetRegister = vi.fn()
 const resetMfa = vi.fn()
+const resetPwd = vi.fn()
+const alertBox = vi.fn()
 const lockUserApi = vi.fn()
 const viewSensitive = vi.fn()
 const isCanceledError = vi.fn(() => false)
@@ -57,6 +60,7 @@ vi.mock('@/utils/api', () => ({
       setLoginCaptchaConfig: (...a) => secSetLogin(...a),
       setRegisterCaptchaConfig: (...a) => secSetRegister(...a),
       resetUserMfa: (...a) => resetMfa(...a),
+      resetUserPassword: (...a) => resetPwd(...a),
       lockUser: (...a) => lockUserApi(...a),
       viewSensitive: (...a) => viewSensitive(...a),
     },
@@ -74,7 +78,11 @@ vi.mock('element-plus/es/components/message/index.mjs', () => ({
 const confirmBox = vi.fn()
 const promptBox = vi.fn()
 vi.mock('element-plus/es/components/message-box/index.mjs', () => ({
-  ElMessageBox: { confirm: (...a) => confirmBox(...a), prompt: (...a) => promptBox(...a) },
+  ElMessageBox: {
+    confirm: (...a) => confirmBox(...a),
+    prompt: (...a) => promptBox(...a),
+    alert: (...a) => alertBox(...a),
+  },
 }))
 
 import UserView from '@/views/UserView.vue'
@@ -250,6 +258,8 @@ afterEach(() => {
     secSetLogin,
     secSetRegister,
     resetMfa,
+    resetPwd,
+    alertBox,
     lockUserApi,
     viewSensitive,
     isCanceledError,
@@ -283,7 +293,7 @@ describe('UserView 写入口权限门控（同组件不同权限集对照）', (
     const c = await mountUser(P_ALL)
     expect(toolbarLabels(c)).toEqual(['新增用户', '批量删除', '刷新'])
     expect(c.findAll('.glass-switch')).toHaveLength(3)
-    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置MFA', '删除'])
+    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置密码', '重置MFA', '删除'])
     expect(secGetReg).toHaveBeenCalledTimes(1)
     expect(secGetLogin).toHaveBeenCalledTimes(1)
     expect(secGetRegister).toHaveBeenCalledTimes(1)
@@ -293,17 +303,17 @@ describe('UserView 写入口权限门控（同组件不同权限集对照）', (
   test('缺 user:create：新增按钮消失，但刷新与其余写入口仍在（差异只来自该权限）', async () => {
     const c = await mountUser(P_ALL.filter((p) => p !== 'user:create'))
     expect(toolbarLabels(c)).toEqual(['批量删除', '刷新'])
-    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置MFA', '删除'])
+    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置密码', '重置MFA', '删除'])
   })
 
   test('缺 user:update：编辑入口消失，分配角色/重置MFA/删除仍在', async () => {
     const c = await mountUser(P_ALL.filter((p) => p !== 'user:update'))
-    expect(rowLabels(c, 0)).toEqual(['分配角色', '重置MFA', '删除'])
+    expect(rowLabels(c, 0)).toEqual(['分配角色', '重置密码', '重置MFA', '删除'])
   })
 
   test('缺 role:assign：分配角色入口消失，编辑/重置MFA/删除仍在', async () => {
     const c = await mountUser(P_ALL.filter((p) => p !== 'role:assign'))
-    expect(rowLabels(c, 0)).toEqual(['编辑', '重置MFA', '删除'])
+    expect(rowLabels(c, 0)).toEqual(['编辑', '重置密码', '重置MFA', '删除'])
   })
 
   test('缺 user:reset_password：重置 MFA 入口消失，删除仍在（两个权限不可互相顶替）', async () => {
@@ -313,7 +323,7 @@ describe('UserView 写入口权限门控（同组件不同权限集对照）', (
 
   test('缺 user:delete：删除入口消失，重置MFA 不受影响', async () => {
     const c = await mountUser(P_ALL.filter((p) => p !== 'user:delete'))
-    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置MFA'])
+    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置密码', '重置MFA'])
     // 批量删除按钮与选择列同受 user:delete 门控
     expect(toolbarLabels(c)).toEqual(['新增用户', '刷新'])
   })
@@ -340,7 +350,7 @@ describe('UserView 自伤防护（不得对自己重置 MFA / 删除）', () => 
   test('自己那行不渲染重置MFA与删除；他人行都渲染', async () => {
     const c = await mountUser(P_ALL, [ROW_SELF, ROW_OTHER])
     expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色'])
-    expect(rowLabels(c, 1)).toEqual(['编辑', '分配角色', '重置MFA', '删除'])
+    expect(rowLabels(c, 1)).toEqual(['编辑', '分配角色', '重置密码', '重置MFA', '删除'])
   })
 
   test('只给自己一行且权限齐全时，仍不出现重置MFA/删除（不是「他人行恰好没有」）', async () => {
@@ -354,9 +364,88 @@ describe('UserView 自伤防护（不得对自己重置 MFA / 删除）', () => 
 
   test('MFA 未开启的他人行不显示重置MFA（避免对无 MFA 账户发无意义请求）', async () => {
     const c = await mountUser(P_ALL, [ROW_NO_MFA])
-    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '删除'])
+    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置密码', '删除'])
   })
 })
+describe('UserView 列表加载失败：不得把「读失败」画成「没有用户」（P1③/P1④）', () => {
+  /** 失败夹具：getList 直接 reject（模拟 500/网络失败，拦截器已提示过） */
+  const mountFailing = async (perms = P_ALL) => {
+    usersGetList.mockRejectedValue(new Error('boom'))
+    secGetReg.mockResolvedValue({ data: { data: { allowPublicRegistration: true } } })
+    secGetLogin.mockResolvedValue({ data: { data: { loginCaptchaEnabled: false } } })
+    secGetRegister.mockResolvedValue({ data: { data: { registerCaptchaEnabled: true } } })
+    rolesGetAll.mockResolvedValue({ data: { data: [] } })
+    const c = mountComponent(UserView, {
+      setupStore: (pinia) => {
+        const s = useAuthStore(pinia)
+        s.setAuth({ userId: 'me', username: 'admin' }, perms)
+      },
+    })
+    await flush(12)
+    return c
+  }
+
+  test('首屏加载失败：必须出现显式错误块，且不得显示「暂无数据」空态', async () => {
+    const c = await mountFailing()
+    expect(c.find('.load-error')).not.toBeNull()
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.listLoadFailed'))
+    // 关键判据：失败 ≠ 空。修复前这里会渲染 el-table 的「暂无数据」
+    expect(c.text()).not.toContain(i18n.global.t('common.noData'))
+    // 分页器不得显示「共 0 条」（那等于宣称「确实没有用户」）
+    expect(c.find('.el-pagination')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('首屏加载失败：错误块里给出重试按钮，点击后重新发请求', async () => {
+    const c = await mountFailing()
+    const before = usersGetList.mock.calls.length
+    usersGetList.mockResolvedValue({ data: { data: [ROW_OTHER], pagination: { total: 1 } } })
+    click(c.find('.load-error button'))
+    await flush(12)
+    expect(usersGetList.mock.calls.length).toBeGreaterThan(before)
+    await waitFor(() => c.findAll('.el-table__body-wrapper .el-table__row').length === 1, {
+      message: '重试成功后渲染行',
+    })
+    expect(c.find('.load-error')).toBeNull()
+  })
+
+  test('先成功后失败：保留旧数据但标注为上次数据（stale，不是静默旧数据）', async () => {
+    const c = await mountUser(P_ALL)
+    expect(c.findAll('.el-table__body-wrapper .el-table__row')).toHaveLength(1)
+    usersGetList.mockRejectedValue(new Error('boom'))
+    // 点刷新触发第二次加载
+    const refresh = c
+      .findAll('.table-toolbar .glass-btn')
+      .find((b) => b.textContent.trim() === '刷新')
+    click(refresh)
+    await flush(12)
+    expect(c.findAll('.el-table__body-wrapper .el-table__row')).toHaveLength(1) // 旧数据仍在
+    expect(c.find('.load-error')).not.toBeNull()
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.staleData'))
+  })
+
+  test('pagination.total 缺失：分页器不得回退成「共 1 条」（P1④）', async () => {
+    // 后端契约漂移：pagination 字段缺失
+    usersGetList.mockResolvedValue({ data: { data: [ROW_OTHER] } })
+    secGetReg.mockResolvedValue({ data: { data: { allowPublicRegistration: true } } })
+    secGetLogin.mockResolvedValue({ data: { data: { loginCaptchaEnabled: false } } })
+    secGetRegister.mockResolvedValue({ data: { data: { registerCaptchaEnabled: true } } })
+    rolesGetAll.mockResolvedValue({ data: { data: [] } })
+    const c = mountComponent(UserView, {
+      setupStore: (pinia) => {
+        const s = useAuthStore(pinia)
+        s.setAuth({ userId: 'me', username: 'admin' }, P_ALL)
+      },
+    })
+    await flush(12)
+    const pag = c.find('.el-pagination')
+    // 修复前：page.total = list.length = 1 → 「共 1 条」，第 2 页永远不出现
+    if (pag) expect(pag.textContent).not.toContain('共 1 条')
+    expect(c.find('.total-unknown')).not.toBeNull()
+    expect(c.errors).toEqual([])
+  })
+})
+
 describe('UserView 列表与筛选', () => {
   test('首屏请求参数：页码 1、每页 10、空关键字', async () => {
     const c = await mountUser(P_BASE)
@@ -502,16 +591,20 @@ describe('UserView 列表与筛选', () => {
     expect(active.errors).toEqual([])
   })
 
-  test('加载失败：清空列表且组件不弹 toast（提示归拦截器，P2-3）；abort 的取消错误静默', async () => {
+  test('加载失败：组件不弹 toast（提示归拦截器，P2-3）；旧数据保留并标注；abort 静默', async () => {
     const c = await mountUser(P_BASE, [ROW_OTHER])
     expect(c.findAll('.el-table__body-wrapper .el-table__row')).toHaveLength(1)
     usersGetList.mockRejectedValue(new Error('boom'))
     click(c.find('.table-toolbar .glass-btn--default'))
     // 契约对齐 alarmView：加载失败由 api.js 响应拦截器统一提示，组件只清态。
     // 原断言把组件那条 error 钉成契约（`calls.length === 1`），于是双提示被锁死。
-    await waitFor(() => c.findAll('.el-table__body-wrapper .el-table__row').length === 0, {
-      message: '失败后列表清空',
-    })
+    //
+    // 2026-10-31 口径纠正（P1③）：原断言还钉住了「失败后列表清空」——那正是缺陷本身
+    // （把「读失败」画成「没有数据」）。失败时若有旧数据必须保留并标注为上次数据，
+    // 只有首屏就失败（没有旧数据）才让位于错误块。
+    await waitFor(() => c.find('.load-error') !== null, { message: '失败标记出现' })
+    expect(c.findAll('.el-table__body-wrapper .el-table__row')).toHaveLength(1)
+    expect(c.text()).toContain(i18n.global.t('common.staleData'))
     expect(ElMessage.error).not.toHaveBeenCalled()
     // 再走一次 abort 分支：同样不得弹错（组件侧本来就不弹）
     isCanceledError.mockReturnValue(true)
@@ -541,16 +634,23 @@ describe('UserView 新增用户对话框', () => {
     await setField(dlg, '真实姓名', '新人')
     click(footerBtn(dlg, '新增'))
     await waitFor(() => usersCreate.mock.calls.length === 1, { message: '创建请求发出' })
-    expect(usersCreate).toHaveBeenCalledWith({
-      username: 'newbie01',
-      email: 'n@x.com',
-      realName: '新人',
-      department: '',
-      phone: '',
-      status: 'active',
-      allowedIPs: '',
-      encPassword: 'ENC:Str0ng-Pass_2026',
-    })
+    // 第二个实参是提交配置：建号必须带 Idempotency-Key（审计一-1）。
+    // 键值随机，用 objectContaining 断言形状而不是钉死字面量。
+    expect(usersCreate).toHaveBeenCalledWith(
+      {
+        username: 'newbie01',
+        email: 'n@x.com',
+        realName: '新人',
+        department: '',
+        phone: '',
+        status: 'active',
+        allowedIPs: '',
+        encPassword: 'ENC:Str0ng-Pass_2026',
+      },
+      {
+        headers: { 'Idempotency-Key': expect.stringMatching(/^[0-9a-zA-Z-]{8,64}$/) },
+      }
+    )
     // 明文口令绝不能出现在载荷里（降级轨才允许 password 字段）
     expect(usersCreate.mock.calls[0][0]).not.toHaveProperty('password')
     await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '成功提示' })
@@ -1384,7 +1484,7 @@ describe('UserView 删除与重置 MFA', () => {
     expect(confirmBox.mock.calls[0][1]).toBe('提示')
     expect(usersDelete).toHaveBeenCalledWith('u2')
     await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '删除成功提示' })
-    expect(ElMessage.success).toHaveBeenCalledWith('删除成功')
+    expect(ElMessage.success).toHaveBeenCalledWith('用户已注销并匿名化')
     await waitFor(() => usersGetList.mock.calls.length === 1, { message: '删除后刷新列表' })
   })
 
@@ -1412,6 +1512,24 @@ describe('UserView 删除与重置 MFA', () => {
     expect(resetMfa).toHaveBeenCalledWith('u2', { encCurrentPassword: 'ENC:secret' })
     await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '重置成功提示' })
     expect(ElMessage.success).toHaveBeenCalledWith('两步验证已重置')
+  })
+
+  test('重置密码：二次验证后返回一次性临时口令，提示安全转交并刷新列表', async () => {
+    resetPwd.mockResolvedValue({ data: { data: { temporaryPassword: 'Tmp#1234567890' } } })
+    confirmBox.mockResolvedValue('confirm')
+    alertBox.mockResolvedValue('confirm')
+    const c = await mountUser(['user:read', 'user:reset_password'])
+    usersGetList.mockClear()
+    click(rowBtn(c, '重置密码'))
+    await waitFor(() => confirmBox.mock.calls.length === 1, { message: '确认框已弹出' })
+    expect(confirmBox.mock.calls[0][0]).toContain('bob')
+    await completeStepUp()
+    await waitFor(() => resetPwd.mock.calls.length === 1, { message: '重置请求' })
+    expect(resetPwd).toHaveBeenCalledWith('u2', { encCurrentPassword: 'ENC:secret' })
+    await waitFor(() => alertBox.mock.calls.length === 1, { message: '临时口令提示框' })
+    expect(alertBox.mock.calls[0][0]).toContain('Tmp#1234567890')
+    expect(ElMessage.success).toHaveBeenCalledWith('口令已重置')
+    await waitFor(() => usersGetList.mock.calls.length === 1, { message: '重置后刷新列表' })
   })
 
   test('重置 MFA 取消：不发请求、不弹任何提示（静默）', async () => {
@@ -1442,9 +1560,9 @@ describe('UserView 锁定与解锁', () => {
       { ...ACTIVE_OTHER, _id: 'a3', status: 'inactive' },
       ROW_SELF,
     ])
-    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置MFA', '锁定用户', '删除'])
-    expect(rowLabels(c, 1)).toEqual(['编辑', '分配角色', '重置MFA', '解锁用户', '删除'])
-    expect(rowLabels(c, 2)).toEqual(['编辑', '分配角色', '重置MFA', '删除'])
+    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置密码', '重置MFA', '锁定用户', '删除'])
+    expect(rowLabels(c, 1)).toEqual(['编辑', '分配角色', '重置密码', '重置MFA', '解锁用户', '删除'])
+    expect(rowLabels(c, 2)).toEqual(['编辑', '分配角色', '重置密码', '重置MFA', '删除'])
     expect(rowLabels(c, 3)).toEqual(['编辑', '分配角色'])
     expect(c.errors).toEqual([])
   })
@@ -1454,7 +1572,7 @@ describe('UserView 锁定与解锁', () => {
       P_ALL.filter((p) => p !== 'user:lock'),
       [ACTIVE_OTHER]
     )
-    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置MFA', '删除'])
+    expect(rowLabels(c, 0)).toEqual(['编辑', '分配角色', '重置密码', '重置MFA', '删除'])
   })
 
   test('锁定：prompt 确认后 PUT {locked:true, reason}，原因修剪两端空白，成功后提示并刷新', async () => {
@@ -1606,7 +1724,7 @@ describe('UserView 批量删除', () => {
     await waitFor(() => usersBatchDelete.mock.calls.length === 1, { message: '批量删除请求' })
     expect(usersBatchDelete).toHaveBeenCalledWith(['u2'])
     await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '成功提示' })
-    expect(ElMessage.success).toHaveBeenCalledWith('已删除 1 个用户')
+    expect(ElMessage.success).toHaveBeenCalledWith('批量注销完成（已匿名化 1 个用户）')
     await waitFor(() => usersGetList.mock.calls.length === 1, { message: '删除后刷新列表' })
     // 勾选清空：按钮回到禁用，防对刚删的 id 二次提交
     await waitFor(() => toolbarBtn(c, '批量删除').disabled === true, { message: '勾选已清空' })

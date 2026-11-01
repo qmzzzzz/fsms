@@ -50,36 +50,64 @@
         </button>
       </div>
       <!-- 首屏骨架占位；数据到达后直接替换（带数据刷新时走表格内 loading） -->
+      <!-- P1③：报警列表加载失败必须有持久痕迹。此前失败只清表，界面与「真的没有报警」
+           完全一致——值班员会判断为「一切正常」，这比其它页面同型缺陷更危险。 -->
+      <el-alert
+        v-if="listState.failed.value"
+        :title="listState.stale.value ? $t('common.staleData') : $t('common.listLoadFailed')"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="load-error"
+      >
+        <template #default>
+          <button
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            :disabled="loading"
+            @click="loadData"
+          >
+            {{ $t('common.retry') }}
+          </button>
+        </template>
+      </el-alert>
       <GlassSkeleton
         v-if="loading && tableData.length === 0"
         variant="table"
         :rows="6"
         :cols="['6%', '18%', '16%', '12%', '11%', '11%', '16%']"
       />
-      <el-table v-else v-loading="loading" :data="tableData" border stripe style="width: 100%">
+      <el-table
+        v-else-if="listState.showTable.value"
+        v-loading="loading"
+        :data="tableData"
+        border
+        stripe
+        style="width: 100%"
+      >
         <el-table-column type="index" label="#" width="60" />
         <el-table-column prop="_time" :label="$t('alarm.occurredAt')" width="170" />
         <el-table-column :label="$t('alarm.location')" min-width="160">
           <template #default="{ row }">
-            {{ row._location || formatLocation(row.location) }}
+            {{ formatLocation(row.location) }}
           </template>
         </el-table-column>
         <el-table-column :label="$t('alarm.alarmType')" width="120">
           <template #default="{ row }">
             <el-tag :type="row._tagType || row.tagType" size="small">
-              {{ row._type || row.type }}
+              {{ alarmTypeText(row) }}
             </el-tag>
           </template>
         </el-table-column>
         <el-table-column :label="$t('alarm.handler')" width="110">
           <template #default="{ row }">
-            {{ row._handler || formatHandler(row.handler) }}
+            {{ formatHandler(row.handler) }}
           </template>
         </el-table-column>
         <el-table-column :label="$t('common.status')" width="110">
           <template #default="{ row }">
             <el-tag :type="row._statusType || statusType(row.status)" effect="light">
-              {{ row._status || statusText(row.status) }}
+              {{ statusText(row.status) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -151,13 +179,21 @@
         入口。用户看到列表底部就以为「只有这些报警」，历史报警实际无从访问。
         （报告称「不分页全量拉取」，实测恰好相反：是被静默截断到 10 条。）
       -->
-      <div class="pagination">
+      <div v-if="listState.showTable.value" class="pagination">
+        <!-- P1④：total 未知时不得用当前页长度顶替（会显示「共 N 条 / 1 页」，第 2 页永不出现） -->
+        <span v-if="!listState.totalKnown.value" class="total-unknown">
+          {{ $t('common.totalUnknown') }}
+        </span>
         <el-pagination
           v-model:current-page="page.current"
           v-model:page-size="page.size"
-          :total="page.total"
+          :total="listState.total.value ?? 0"
           :page-sizes="[10, 20, 50]"
-          layout="total, sizes, prev, pager, next, jumper"
+          :layout="
+            listState.totalKnown.value
+              ? 'total, sizes, prev, pager, next, jumper'
+              : 'sizes, prev, pager, next, jumper'
+          "
           background
           @current-change="loadData"
           @size-change="handlePageSizeChange"
@@ -243,7 +279,9 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 
 import { ElRadioGroup, ElRadio } from 'element-plus/es/components/radio/index.mjs'
-import { api } from '@/utils/api'
+import { api, isCanceledError } from '@/utils/api'
+import { useListLoadState } from '@/composables/useListLoadState'
+import { createSubmissionKey } from '@/utils/idempotency'
 import { makeAlarmTypeLabels } from '@/utils/labelMaps'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
@@ -308,6 +346,9 @@ const statCards = computed(() => [
 const reportDialog = reactive({
   visible: false,
   submitting: false,
+  // 本次上报的幂等键（审计一-1）：报火警是现场最容易被连点的动作，
+  // 重复上报会在台账里变成两条互不相干的警情。
+  submission: createSubmissionKey(),
 })
 
 // 新建报警表单
@@ -340,6 +381,10 @@ const statusType = (s) =>
     false_alarm: 'info',
     cancelled: 'warning',
   })[s] || 'info'
+// 报警类型文案：词表未覆盖的新类型回落后端 type 字段，再回落 '-'。
+// 列表与详情弹窗共用，避免两处口径漂移。
+const alarmTypeText = (row) => alarmTypeMap.value[row.alarmType] || row.type || '-'
+
 const statusText = (s) =>
   ({
     pending: t('alarm.pending'),
@@ -355,12 +400,18 @@ const statusText = (s) =>
 // 另：没有 building 的对象（{} / {building:null}）不可直出，会渲染成 "{}"
 // 或 "{ \"building\": null }"，对值班员是噪音，统一回落到「暂无数据」。
 const formatLocation = (location) => {
-  if (location && typeof location === 'object' && location.building) {
-    return `${location.building}${location.floor || ''}${location.room ? ' ' + location.room : ''}`
+  if (location && typeof location === 'object') {
+    if (location.building) {
+      return `${location.building}${location.floor || ''}${location.room ? ' ' + location.room : ''}`
+    }
+    // 后端 FireAlarm.location.detail（maxlength 200）是「只填详细位置、不填楼栋」的
+    // 合法形态（路由对 building 声明 optional）。DeviceView / DeviceReminderDialog 都有
+    // 这条回落，报警页此前没有：这类报警一律显示「暂无数据」，值班员丢掉唯一定位信息。
+    if (location.detail) return String(location.detail)
+    // 对象但没有可读的 building（{} / {building:null}）：直出会渲染成 "{}" 或
+    // "{ \"building\": null }"，对值班员是噪音，统一回落到「暂无数据」
+    return t('common.noData')
   }
-  // 对象但没有可读的 building（{} / {building:null}）：直出会渲染成 "{}" 或
-  // "{ \"building\": null }"，对值班员是噪音，统一回落到「暂无数据」
-  if (location && typeof location === 'object') return t('common.noData')
   return location || t('common.noData')
 }
 
@@ -419,6 +470,8 @@ const loadStats = async () => {
 
 // 竞态守卫：快速筛选时丢弃过期的旧响应，防止旧数据覆盖新结果
 const listGuard = useLatestRequest()
+// P1③/P1④ 共用三态契约（与 UserView/DeviceView 同一判据）
+const listState = useListLoadState()
 
 /** 切换每页条数时回到第一页（停在旧页码上可能超出结果集，显示空列表） */
 const handlePageSizeChange = () => {
@@ -435,6 +488,7 @@ const handleFilterChange = () => {
 const loadData = async () => {
   const isCurrent = listGuard()
   loading.value = true
+  listState.begin()
   try {
     const res = await api.alarms.getList({
       page: page.current,
@@ -445,13 +499,11 @@ const loadData = async () => {
     const payload = res?.data?.data
     const list = Array.isArray(payload) ? payload : payload?.list || payload?.items || []
 
-    // 转换数据格式，确保 handler 字段正确显示
+    // 只物化「与语言无关」的派生列（标签色 / 时间串）。类型、状态、位置、处理人
+    // 一律留给模板渲染期取词：此处若存 t(...) 的字符串，页内切语言后表头变英文、
+    // 行内仍是中文（同一张表两种语言，实测复现）。
     tableData.value = list.map((item) => ({
       ...item,
-      _handler: formatHandler(item.handler),
-      _location: formatLocation(item.location),
-      _type: alarmTypeMap.value[item.alarmType] || item.type || '-',
-      _status: statusText(item.status),
       _statusType: statusType(item.status),
       _tagType: tagTypeMap[item.alarmType] || 'info',
       // 时间列统一走 utils/datetime.formatTime（O-3 单一事实来源）：本地时区 +
@@ -460,11 +512,22 @@ const loadData = async () => {
       _time: formatTime(item.occurredAt),
     }))
     // 后端 ApiResponse.paginated 把总数放在 pagination.total
-    page.total = res?.data?.pagination?.total ?? tableData.value.length
+    // P1④：缺失时传 undefined（= 未知），不再用 tableData.length 顶替
+    listState.commit({ total: res?.data?.pagination?.total, count: tableData.value.length })
+    const clamped = listState.clampPage(page.current, page.size)
+    if (clamped !== page.current) {
+      page.current = clamped
+      return loadData()
+    }
   } catch (e) {
+    // FE-L1：路由切换 abort 的在途请求不算失败（原实现缺这条守卫：
+    // 离开页面时被打断的请求会被记成「加载失败」，回退到本页就带一条假错误）。
+    if (isCanceledError(e)) return listState.abort()
     if (!isCurrent()) return
-    tableData.value = []
-    page.total = 0
+    // P1③：失败不得画成「没有报警」——值班员会以为一切正常。
+    // 交给三态契约：无旧数据进 failed（表格让位给错误块），有旧数据进 stale（保留 + 标注）。
+    listState.fail()
+    if (!listState.showTable.value) tableData.value = []
   } finally {
     if (isCurrent()) loading.value = false
   }
@@ -477,6 +540,8 @@ const refreshAll = async () => {
 
 // 显示新建报警对话框
 const showReportDialog = () => {
+  // 每打开一次上报框算一次新的提交意图（上一次的键可能已用它生成过警情）
+  reportDialog.submission.renew()
   reportDialog.visible = true
 }
 
@@ -524,7 +589,7 @@ const submitReport = async () => {
       }
       return {
         building,
-        floor: floorMatch[1] ? `${floorMatch[1]}层` : '',
+        floor: floorMatch[1] ? `${floorMatch[1]}${t('alarm.floorSuffix')}` : '',
         room: floorMatch[2] || '',
       }
     }
@@ -548,7 +613,7 @@ const submitReport = async () => {
       payload.deviceId = reportForm.deviceId
     }
 
-    await api.alarms.report(payload)
+    await api.alarms.report(payload, { headers: reportDialog.submission.header() })
     ElMessage.success(t('messages.createSuccess'))
     reportDialog.visible = false
     await refreshAll()
@@ -617,8 +682,12 @@ const resolve = async (row) => {
 
       const { value } = await ElMessageBox.prompt(t('alarm.handleResult'), t('alarm.resolve'), {
         inputType: 'textarea',
-        inputPattern: /.+/,
-        inputErrorMessage: t('alarm.handleResult'),
+        // 不设 inputPattern：与 inputValidator 并存时先报 pattern 那条，而它只能填
+        // 一句静态文案（此前填的是字段名「处理结果/Result」，用户看到提示框里只有
+        // 两个字，不知道错在哪）。校验全交给 validator，按「必填/超长」分别说明。
+        // validator 返回字符串时 Element Plus 直接显示该串；返回 false 才用这条兜底，
+        // 所以兜底也必须是「说明」而不是字段名（字段名当错误提示＝用户看不懂错在哪）。
+        inputErrorMessage: t('alarm.handleResultRequired'),
         inputValidator: (value) =>
           (value && value.trim().length > 0 && value.length <= 1000) ||
           t('alarm.handleResultRequired'),
@@ -721,17 +790,20 @@ const markAsFalseAlarm = async (row) => {
 }
 
 const detail = (row) => {
+  // 冒号随语言：中文全角「：」、英文「: 」；与 ProfileView / SessionManager 同一词条，
+  // 不再手写半角冒号（否则中文弹窗会出现「报警类型: 」的中英混排标点）。
+  const colon = t('common.labelColon')
   const details = [
-    `${t('alarm.alarmType')}: ${alarmTypeMap.value[row.alarmType] || row.type || '-'}`,
-    `${t('alarm.location')}: ${formatLocation(row.location)}`,
-    `${t('alarm.handler')}: ${formatHandler(row.handler)}`,
-    `${t('common.status')}: ${statusText(row.status)}`,
-    `${t('alarm.occurredAt')}: ${row._time || '-'}`,
+    `${t('alarm.alarmType')}${colon}${alarmTypeText(row)}`,
+    `${t('alarm.location')}${colon}${formatLocation(row.location)}`,
+    `${t('alarm.handler')}${colon}${formatHandler(row.handler)}`,
+    `${t('common.status')}${colon}${statusText(row.status)}`,
+    `${t('alarm.occurredAt')}${colon}${row._time || '-'}`,
   ]
 
-  ElMessageBox.alert(details.join('\n'), t('alarm.title'), {
+  ElMessageBox.alert(details.join('\n'), t('alarm.detailTitle'), {
     confirmButtonText: t('common.confirm'),
-    customClass: 'alarm-detail-dialog',
+    customClass: 'mb-multiline',
   })
 }
 
@@ -742,6 +814,16 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.load-error {
+  margin-bottom: var(--xf-spacing-md);
+}
+/* P1④：total 未知时的显式标注（不拿当前页长度冒充总数） */
+.total-unknown {
+  margin-right: var(--xf-spacing-sm);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-text-secondary);
+}
+
 .page {
   display: flex;
   flex-direction: column;
@@ -817,17 +899,6 @@ onMounted(() => {
   justify-content: flex-end;
   margin-top: var(--xf-spacing-lg);
   font-family: var(--xf-font-body);
-}
-
-/* 报警详情对话框样式 */
-:deep(.alarm-detail-dialog .el-message-box__content) {
-  white-space: pre-line;
-  line-height: 1.8;
-  font-size: var(--xf-font-size-base);
-}
-
-:deep(.alarm-detail-dialog .el-message-box__content p) {
-  margin: 8px 0;
 }
 
 /* ===== Apple 风格增量（交互手感层：只叠反馈与过渡，不改布局） ===== */

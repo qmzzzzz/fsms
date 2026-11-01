@@ -183,11 +183,11 @@ const inspectionSchema = new mongoose.Schema(
 );
 
 // 索引优化
-inspectionSchema.index({ status: 1, planStartTime: -1 });
+inspectionSchema.index({ status: 1, planStartTime: -1, _id: -1 });
 // 巡检列表游标分页排序 `{ planStartTime: -1, _id: -1 }`（排序键可重复 ⇒ 必须有同向
 // 复合索引，否则退化成全表扫描 + 阻塞排序）。原单字段索引被最左前缀整体取代 ⇒ 替换而非新增。
-// 带 status 等值筛选的那条走 `{status:1,planStartTime:-1}` 后再做一次子集内排序：
-// 正确性优先——旧口径下等值块跨页会漏记录，"快但丢数据"不是可接受的取舍。
+// 带 status 等值筛选的那条同样必须带 `_id:-1`：缺它时 mongod 在等值块内做阻塞排序
+// （大集合撞内存排序上限而 500）。跨页漏/重只在排序**不带** `_id` 时发生，现行调用点都带。
 inspectionSchema.index({ planStartTime: -1, _id: -1 });
 // 列表的数据范围/筛选是「assignedTo（或 createdBy）等值 + planStartTime,_id 倒序」：
 // 单字段索引只能定位等值块，块内仍要阻塞排序；self 档是两字段 $or，两臂各需一条复合索引。
@@ -216,4 +216,13 @@ if (inspectionTtl.days !== null) {
   );
 }
 
-module.exports = mongoose.model('Inspection', inspectionSchema);
+const Inspection = mongoose.model('Inspection', inspectionSchema);
+const logger = require('../utils/logger');
+Inspection.on('index', (err) => {
+  if (err) {
+    logger.error(
+      `Inspection 索引创建失败：物理索引与声明不一致时 mongoose 只报错不改选项（改档由 services/initData/indexes.js 的启动对账落地），此前无 on('index') 监听时这个错误被完全吞掉：${err.message}`
+    );
+  }
+});
+module.exports = Inspection;

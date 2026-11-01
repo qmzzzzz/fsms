@@ -174,8 +174,13 @@ describe('userController 列表与批量删除边界', () => {
 
     const deleted = await authed('delete', '/api/users/batch').send({ ids: targetIds });
     expect(deleted.status).toBe(200);
-    expect(deleted.body.data.deleted).toBe(2);
-    const remaining = await User.countDocuments({ _id: { $in: targetIds } });
-    expect(remaining).toBe(0);
+    // P1-3 起批量删除=匿名化：返回匿名化计数，记录**不消失**（只抹除身份字段）
+    const remaining = await User.find({ _id: { $in: targetIds } }).lean();
+    expect(remaining).toHaveLength(2);
+    for (const u of remaining) {
+      expect(u.status).toBe('inactive');
+      expect(u.phone).toBe('');
+      expect(u.realName).toBe('已注销用户');
+    }
   });
 });

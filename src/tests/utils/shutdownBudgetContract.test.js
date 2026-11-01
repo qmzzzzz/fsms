@@ -141,7 +141,9 @@ describe('关停链总预算与部署窗口的契约（F-103）', () => {
     // 计数 3→4：这条闸只会在**步骤被删**时红，所以扩列是随实做随报，不是放水。
     // F-202 再 4→6：关 Redis 与关 Mongo 这两步此前既不领额度也没有硬闸，
     // 对端不可达时 `await` 永不返回 ⇒ 链尾的排空与 exit 全跑不到（见 runStep 的 capMs）。
-    expect(region.match(/stepAllowMs\(/g) || []).toHaveLength(6);
+    // 2026-10-31 取证捕获排空（P2，forensicCapture.flushAndStop）接进链尾：6→7——
+    // 它同样在向 stepAllowMs 要额度，同样是"删掉步骤才会红"的那一侧。
+    expect(region.match(/stepAllowMs\(/g) || []).toHaveLength(7);
   });
 
   test('③ stepAllowMs：未 begin 不限制、预算内给足、用尽归零且永不为负', () => {
@@ -244,6 +246,9 @@ describe('关停链总预算与部署窗口的契约（F-103）', () => {
     // 同为"只读扫描 + 告警"的后台定时任务，其 stop() 只 clearInterval、无 await 网络/IO
     // （见该函数体与 src/index.js 关停链的注释），故属同步步骤。
     '停止审计链核验',
+    // 2026-10-31 追加：蜜罐事件链巡检（services/honeypotChainWatch.js）同为「只读聚合 + 告警」的
+    // 后台定时任务，其 stop() 只 clearInterval、无 await 网络/IO，故属同步步骤。
+    '停止蜜罐事件链巡检',
     '停止权限缓存清理定时器',
     '停止统计缓存清理定时器',
     '停止验证码清理定时器',

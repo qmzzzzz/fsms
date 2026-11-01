@@ -32,9 +32,9 @@ const {
 const { disableWithSecondFactor } = require('../services/mfaDisable');
 const metrics = require('../utils/metrics');
 // F-03（2026-10-17）：MFA 状态变更（登记/开启/关闭/恢复码重生成）是**业务状态已改变**
-// 的安全操作，审计必须先持久化（DB 或审计 WAL）才允许回成功。原写法
-// `AuditLog.record(...).catch(() => {})` 里 record 自身已吞错返回 null，
-// 外层 catch 永不触发 ⇒ 落库失败只剩一条 error 日志，客户端照收"已开启"。
+// 的安全操作，审计必须先持久化（DB 或审计 WAL）才允许回成功。写成
+// `AuditLog.record(...).catch(() => {})` 不算数：record 自身已吞错返回 null，外层 catch
+// 永不触发 ⇒ 落库失败只剩一条 error 日志，客户端照收"已开启"。
 // 失败/拒绝路径（success:false 的 mfa_verify_failed 等）仍用 record：业务状态未改变，
 // best-effort 是正确语义。
 const { recordDurably } = require('../services/auditOutbox');
@@ -267,9 +267,9 @@ const mfaEnable = asyncHandler(async (req, res) => {
   }
 
   // 口令有效 ≠ 口令可用：必须原子认领该时间窗，与 disable / regenerate / 登录同口径。
-  // 原先的 `$max` 只保证不把水位拉回，从不拒绝请求——并发两次 enable 携带同一个码
-  // 会都通过；账号关闭 MFA 后重开时，水位仍保留上一次生命周期的消费记录，但
-  // `$max` 同样不拒绝。认领让"同一时间窗只能用一次"成为 DB 层不变量。
+  // 只比水位的 `$max` 从不拒绝请求 ⇒ 并发两次 enable 携带同一个码会都通过，账号关闭 MFA
+  // 后重开时水位仍保留上一次生命周期的消费记录、`$max` 同样不拒绝。认领让"同一时间窗只能
+  // 用一次"成为 DB 层不变量。
   const claimed = await claimTotpWindow(user._id, totpResult.counter);
   if (!claimed) {
     await recordMfaFailure(user);
@@ -284,11 +284,10 @@ const mfaEnable = asyncHandler(async (req, res) => {
   // 生成备用恢复码：仅此刻返回明文，服务端只存摘要；旧恢复码全部作废
   const recoveryCodes = generateRecoveryCodes(10);
 
-  // 时间窗已由 claimTotpWindow 原子推进，此处不再写 mfaLastCounter：
-  // 再写一次只会制造"验证与写库之间"的第二段窗口（原实现 $max 的问题源头）。
-  // 条件更新（mfaEnabled:false + 同一密钥）：并发 enable 携带相邻窗口的不同码时，
-  // 两次认领都能成功，若无此闸后到者会把先到者刚下发的 10 张恢复码整组顶掉——
-  // 用户手里那组全部作废，而响应里又各自宣称"已开启"。
+  // 时间窗已由 claimTotpWindow 原子推进，此处**不得**再写 mfaLastCounter：再写一次只会
+  // 制造"验证与写库之间"的第二段窗口。条件更新（mfaEnabled:false + 同一密钥）同样不可省：
+  // 并发 enable 携带相邻窗口的不同码时两次认领都能成功，无此闸则后到者会把先到者刚下发的
+  // 10 张恢复码整组顶掉——用户手里那组全部作废，而响应里又各自宣称"已开启"。
   const enabled = await User.findOneAndUpdate(
     { _id: user._id, mfaEnabled: false, mfaSecret: user.mfaSecret },
     {

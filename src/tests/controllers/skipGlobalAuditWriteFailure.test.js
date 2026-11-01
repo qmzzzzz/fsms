@@ -330,10 +330,16 @@ const EXPECTED_DURABLE_REGISTRY = {
   'controllers/mfaController.js#mfaEnroll': { recordDurably: 1 },
   'controllers/mfaController.js#regenerateRecoveryCodes': { recordDurably: 1 },
   'controllers/securityController/account.js#changePasswordSecure': { recordDurably: 1 },
-  'controllers/securityController/admin.js#recordAdminMfaReset': { recordDurably: 1 },
   'controllers/securityController/config.js#setLoginCaptchaConfig': { recordDurably: 1 },
   'controllers/securityController/config.js#setRegisterCaptchaConfig': { recordDurably: 1 },
   'controllers/securityController/config.js#setRegistrationConfig': { recordDurably: 1 },
+  'controllers/securityController/upgrade.js#triggerUpgrade': { recordDurably: 1 },
+  // P1-3：单删/批量删除改匿名化，审计必须落库后才回成功
+  'controllers/userController/delete.js#deleteUser': { recordDurably: 1 },
+  'controllers/userController/delete.js#batchDeleteUsers': { recordDurably: 1 },
+  // P1-2：账户救济审计从 admin.js 抽出（admin.js 贴 max-lines 上限）
+  'services/adminAccountAudit.js#recordAdminMfaReset': { recordDurably: 1 },
+  'services/adminAccountAudit.js#recordAdminPasswordReset': { recordDurably: 1 },
   'services/mfaService.js#recordMfaDisableSuccess': { recordDurably: 1 },
 };
 

@@ -1,14 +1,9 @@
 /**
  * 限流升级 · 处置侧（写审计 / 通知 / 封禁）
  *
- * 与计数侧（rateLimitEscalation.js）拆开是体积债的收口，不是架构偏好：
- * 前者已经触及 eslint max-lines 上限，本仓的既定出路是按职责拆文件
- * （lint:ratchet 只许降不许升，不允许放宽基线——同 roleGuards.js /
- * inspectionGuards.js 的先例）。计数侧不 require 本模块，只在升级那一刻
- * 惰性 require，所以这里可以反向依赖 middleware/security 而不构成环。
+ * 与计数侧（rateLimitEscalation.js）拆开是体积债的收口，不是架构偏好：前者已经触及 eslint max-lines 上限，本仓的既定出路是按职责拆文件（lint:ratchet 只许降不许升，不允许放宽基线——同 roleGuards.js / inspectionGuards.js 的先例）。计数侧不 require 本模块，只在升级那一刻惰性 require，所以这里可以反向依赖 middleware/security 而不构成环。
  *
- * ============================ 最重要的一条：处置与通知解耦 ============================
- * 原实现是：
+ * ============================ 最重要的一条：处置与通知解耦 ============================ 原实现是：
  *
  *     if (!shouldSendAlert(`rate_limit_abuse_${ip}`)) return;   // ← 通知频控
  *     await AuditLog.create({...});                              // 审计
@@ -21,12 +16,9 @@
  *     跳过审计 ⇒ 阶梯永远停在第一档 ⇒ 反复触发的 IP 每次都只被封 1 小时，
  *     而日志与通知仍在照打"第 N 档"。
  *
- * 现在：**审计与封禁无条件执行**，只有 `dispatchNotification` 受频控约束。
- * 通知是给人看的，处置是对系统做的，两者不该共用一个开关。
+ * 现在：**审计与封禁无条件执行**，只有 `dispatchNotification` 受频控约束。通知是给人看的，处置是对系统做的，两者不该共用一个开关。
  *
- * ============================ 阶梯统计必须在本次落库之前读 ============================
- * 同 checkBruteForce 的口径：每次升级写一条 rate_limit_abuse 审计，
- * "30 天窗口内该 IP 的历史条数"就是本次落在第几档。先读后写。
+ * ============================ 阶梯统计必须在本次落库之前读 ============================ 同 checkBruteForce 的口径：每次升级写一条 rate_limit_abuse 审计， "30 天窗口内该 IP 的历史条数"就是本次落在第几档。先读后写。
  */
 const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
@@ -41,8 +33,7 @@ const {
 } = require('./securityAlert');
 
 /**
- * 写审计。append-only 兼作阶梯事件源，因此**不设频控**——
- * 漏写一行会让阶梯停滞，而阶梯停滞的后果是"反复触发的 IP 永远只封 1 小时"。
+ * 写审计。append-only 兼作阶梯事件源，因此**不设频控**—— 漏写一行会让阶梯停滞，而阶梯停滞的后果是"反复触发的 IP 永远只封 1 小时"。
  */
 const recordEscalation = async (normalizedIp, detail) => {
   try {

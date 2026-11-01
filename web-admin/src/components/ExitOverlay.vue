@@ -143,19 +143,15 @@ html.dark .exit-overlay__spinner {
   border-top-color: var(--xf-primary, #c1121f);
 }
 
-/* 无障碍降级 */
+/* 无障碍降级：只降装饰性动效，不降阻塞退出期间的「必要反馈」。
+   ① 进度环：遮罩显示期间下层已 inert、没有其它可操作性，环停转会与「卡死」无法区分
+      （它是唯一的活动信号）——按必要反馈保留旋转，不随 reduced-motion 停转；
+   ② 进出场：本就是纯 opacity 过渡（无位移/缩放），与全局降级口径
+      （apple-polish 把过渡统一降为 opacity 过渡）一致，保留；
+   ③ 呼吸光：纯装饰、不承载信息，按 reduced-motion 关闭。 */
 @media (prefers-reduced-motion: reduce) {
   .exit-overlay__icon {
     animation: none;
-  }
-  .exit-overlay__spinner {
-    animation: none;
-    border-top-color: var(--xf-primary);
-    border-right-color: var(--xf-primary);
-  }
-  .exit-fade-enter-active,
-  .exit-fade-leave-active {
-    transition: none;
   }
 }
 </style>

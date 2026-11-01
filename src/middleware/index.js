@@ -20,6 +20,7 @@ const {
   ipLimiter,
   userLimiter,
   staticSurfaceLimiter,
+  preflightLimiter,
 } = require('./rateLimit');
 const errorHandler = require('./errorHandler');
 const requestId = require('./requestId');
@@ -36,6 +37,8 @@ const { applyObjectIdParams } = require('./validateObjectId');
 const { consumeValidation } = require('./validateQuery');
 const { mountStaticFrontend } = require('./staticFrontend');
 const { metricsAuth } = require('./metricsAuth');
+const { idempotency } = require('./idempotency');
+const { forensicCapture } = require('./security/forensicCapture'); // 取证捕获（P2）：与 auditLog 同段挂载
 const {
   applySecurity,
   applyResponseHardening,
@@ -76,6 +79,7 @@ module.exports = {
   ipLimiter,
   userLimiter,
   staticSurfaceLimiter,
+  preflightLimiter,
 
   // 错误处理
   errorHandler,
@@ -114,4 +118,6 @@ module.exports = {
   consumeValidation,
   mountStaticFrontend,
   metricsAuth,
+  idempotency, // 请求级幂等（Idempotency-Key 请求头，审计一-1；ADR-014）
+  forensicCapture,
 };

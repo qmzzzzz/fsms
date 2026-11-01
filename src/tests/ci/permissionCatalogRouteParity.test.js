@@ -175,7 +175,12 @@ const FE_PROTECTED = {
   inspections: 'inspection:read',
   reports: 'report:read',
   'audit-logs': 'security:audit',
+  // 取证溯源页：读溯源与审计日志同一个权限码（同一条 /api/security/forensic 链也只认
+  // security:audit，见 routes/forensicRoutes.js 的 checkPermission）。页内"封段"按钮
+  // 另按 security:config 门控，属于页内二次门控，不体现在路由 meta 上。
+  'forensic-trace': 'security:audit',
   'ip-list': 'security:config',
+  'privilege-grants': 'privilege:read',
 };
 // 有 meta 但不设权限闸的页面：登录/注册是 requiresAuth:false，其余三页只要登录态
 const FE_NO_GATE_WITH_META = ['/login', '/register', 'dashboard', 'profile', 'about'];

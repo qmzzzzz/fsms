@@ -1,6 +1,5 @@
 /**
- * 安全管理控制器 · 自助面（my-info / 改密 / 账户绑定 / 我的操作日志）
- * （2026-10-19 批 3c-3 自 controllers/securityController.js 原样迁出，纯搬家不改语义）
+ * 安全管理控制器 · 自助面（my-info / 改密 / 账户绑定 / 我的操作日志）。
  */
 
 const { User, AuditLog } = require('./shared');
@@ -12,8 +11,8 @@ const logger = require('../../utils/logger');
 const { asyncHandler } = require('../../middleware/errorHandler');
 const authService = require('../../services/authService');
 const { auditClientAddress } = require('../../utils/ipUtils');
-// 安全建议码表（i18n）：后端只出稳定码，文案归前端词表——原先这里直接拼中文句子，
-// 英文界面下无从翻译。见 constants/securitySuggestions.js 文件头。
+// 安全建议码表（i18n）：后端只出稳定码，文案归前端词表（拼中文句子在英文界面下无从翻译）。
+// 见 constants/securitySuggestions.js 文件头。
 const { SECURITY_SUGGESTION_CODES } = require('../../constants/securitySuggestions');
 const { AUDIT_CATEGORIES } = require('../../constants/audit');
 // F-03（2026-10-17）：业务状态已改变的成功路径改走可靠 outbox（落库失败 ⇒ 转审计 WAL
@@ -21,10 +20,7 @@ const { AUDIT_CATEGORIES } = require('../../constants/audit');
 // （PII 查看、安全举报）是刻意的 fail-closed：它们必须"记账后重抛"，不许把结果交出去。
 const { recordDurably } = require('../../services/auditOutbox');
 
-/**
- * 获取当前用户的安全信息
- * GET /api/security/my-info
- */
+/** GET /api/security/my-info：本人安全信息（评分/建议/最近登录）。 */
 const getMySecurityInfo = asyncHandler(async (req, res) => {
   const userId = req.user.userId;
 
@@ -134,23 +130,20 @@ const changePasswordSecure = asyncHandler(async (req, res) => {
     case 'OK':
       break;
     default:
-      // fail-closed：未知 outcome 绝不落到成功分支。
-      // 原为 `default: break;` —— 业务层一旦新增 outcome 而此处忘了映射，会**静默按成功处理**
-      // 并写入 password_changed 审计，把「映射表漏项」变成一条假的成功留痕。
-      // 实证：zzqA_changePasswordOutcomeMap 的「未知 outcome」用例此前只是被一次
-      // 无关的 ValidationError 顶成绿，源码里并没有守这条不变量。
+      // fail-closed：未知 outcome 绝不落到成功分支——`default: break;` 时业务层新增
+      // outcome 而此处忘了映射，会**静默按成功处理**并写一条假的 password_changed 留痕。
       logger.error('改密返回未知 outcome，已按失败处理', { outcome: result.outcome });
       return ApiResponse.codeError(res, 'INTERNAL_ERROR');
   }
 
   logger.info('用户成功修改密码', { username: result.username });
 
-  // 记录审计日志
-  res.locals.skipGlobalAudit = true;
+  // P1-2：强制改密与普通改密分开记账，审计页才分得清"用户主动"与"临时口令救济"
+  const auditAction = result.forced ? 'password_force_changed' : 'password_changed';
   // F-03：密码已改成功 ⇒ 审计先持久化（DB 或 WAL）才允许回成功
   await recordDurably(
     {
-      action: 'password_changed',
+      action: auditAction,
       category: 'auth',
       userId: req.user.userId,
       username: result.username,
@@ -158,8 +151,10 @@ const changePasswordSecure = asyncHandler(async (req, res) => {
       userAgent: req.get('user-agent'),
       success: true,
     },
-    { auditAction: 'password_changed', req }
+    { auditAction, req }
   );
+  // 置位必须晚于审计：审计重抛时这次 500 由全局审计接手记录（先置位 ⇒ 状态已变、审计为零）
+  res.locals.skipGlobalAudit = true;
 
   return ApiResponse.success(res, null, '密码修改成功，请重新登录');
 });

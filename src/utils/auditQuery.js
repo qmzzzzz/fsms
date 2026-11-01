@@ -160,6 +160,7 @@ const assertFiltersValid = ({
   level,
   userId,
   ip,
+  username,
 }) => {
   // 判据单源 helpers.isValidDateParam：裸 isNaN(new Date(x)) 对 '123' / '2026' 一律放行，
   // 经 parseDateBoundary 静默翻译成"公元 0122 年"的窗口 ⇒ 200 + 一个看不见却看似正常的结果集
@@ -191,6 +192,20 @@ const assertFiltersValid = ({
   if (ip && !normalizeIP(ip)) {
     throw new Error('参数 ip 必须是合法的 IPv4/IPv6 地址');
   }
+
+  // username 是唯一没有枚举白名单的文本项：qs 把重复键解析成数组、把 `[$ne]` 解析成对象，
+  // 原样拼进前缀区间后直到 mongoose cast 才炸 CastError ⇒ 参数写错被记成服务端 500。
+  // 收尾追加：前面几条的既有文案与顺序不动（同时写坏两个参数时抛的仍是原来那条）。
+  if (
+    username !== undefined &&
+    username !== null &&
+    username !== '' &&
+    typeof username !== 'string'
+  ) {
+    const err = new Error('参数 username 必须是字符串');
+    err.status = 400; // 与 validateEnum 同口径：这是参数错误，不是服务故障
+    throw err;
+  }
 };
 
 /**
@@ -205,12 +220,6 @@ const applyTimestampFilter = (query, startDate, endDate) => {
   if (endDate) query.timestamp.$lte = parseDateBoundary(endDate, 'end');
 };
 
-/**
- * IP 条件：变体集合从**地址**推导（规范形态 + 原始写法 + IPv4 的 `::ffff:` 映射形态），
- * 见 ipUtils.ipQueryVariants。单值时不加 `$in` 包装，让查询形状与索引保持一致。
- * 原实现只取 [归一化值, 原始 trim 值]，于是"搜规范写法"覆盖不到以映射形态
- * 入库的行（实测同一地址 3553 行漏 63%），且与导出侧各写一份造成口径漂移。
- */
 /**
  * IP 条件：变体推导与条件形状统一由 `ipUtils.ipQueryCondition` 决定
  * （查询侧与导出侧共用同一把尺子，各自抄一份就是口径漂移源）。

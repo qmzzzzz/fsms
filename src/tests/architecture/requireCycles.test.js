@@ -148,7 +148,11 @@ const stronglyConnected = (graph) => {
 };
 
 /**
- * 已登记的惰性环分量：1 个分量 / 22 个模块（2026-10-26 实测）
+ * 已登记的惰性环分量：1 个分量 / 23 个模块（2026-10-30 实测）
+ *
+ * 2026-10-30 新增成员 `config/jwtRotation.js`（P2-3 密钥轮换）：validate.js 需要按
+ * 轮换配置判错，jwtRotation 又要复用 validate 的弱密钥判据，两边都用函数体 require
+ * 打断顶层环——于是它并入本分量。方向不变（判据词表 → 配置校验），不是新的依赖倒置。
  *
  * 这一个分量是**有意的双向依赖**，不是遗漏：
  *   · 配置校验要用 metrics 记账，metrics 的告警又经审计缓冲落库，审计缓冲回读配置；
@@ -162,6 +166,7 @@ const LAZY_SCC = [
     'config/deploymentCredentialGuards.js',
     'config/immutableConfigGuard.js',
     'config/index.js',
+    'config/jwtRotation.js',
     'config/legacyCbcGuard.js',
     'config/loginEncryptGuard.js',
     'config/validate.js',
@@ -183,6 +188,30 @@ const LAZY_SCC = [
     'utils/passwordHistory.js',
   ],
 ];
+
+/**
+ * 取出某个分量内部的「只以惰性形式存在」的边（全深度图有、顶层图没有）。
+ *
+ * 这才是登记 SCC 真正要守的东西：分量是用全深度图算的，把一条惰性边提到顶层时
+ * 全深度图不变、分量不变，上一条用例照样绿，而半初始化风险已经落地。把「惰性边清单」
+ * 钉住，任何一条被提回顶层就会从清单里消失 ⇒ 本用例转红。
+ * @param {string[]} component 分量成员（仓库相对路径）
+ * @param {Map<string, Set<string>>} allEdges 全深度 require 图
+ * @param {Map<string, Set<string>>} topEdges 顶层 require 图
+ * @returns {string[]} 形如 "from -> to"，已排序
+ */
+const lazyIntraComponentEdges = (component, allEdges, topEdges) => {
+  const members = new Set(component);
+  const out = [];
+  for (const from of component) {
+    for (const to of allEdges.get(from) || []) {
+      if (!members.has(to)) continue;
+      if ((topEdges.get(from) || new Set()).has(to)) continue;
+      out.push(`${from} -> ${to}`);
+    }
+  }
+  return out.sort();
+};
 
 describe('依赖图无环断言', () => {
   const files = collectSourceFiles(SRC_DIR);
@@ -314,6 +343,79 @@ describe('依赖图无环断言', () => {
         ])
       )
     ).toEqual([]);
+  });
+
+  /**
+   * 惰性边清单（分量内部、只以函数体 require 存在的边）。
+   *
+   * 23 条 / 1 个分量（2026-10-30 实测）。这张表是**登记表**，不是白名单：
+   * 新增一条惰性 require、或把某条提到顶层（清单里少一条），都必须先解释清楚再改这里。
+   * 与 LAZY_SCC 的分工：那张表守「哪些模块卷进了环」，这张表守「环是靠哪几条边撑住的」。
+   */
+  const LAZY_EDGES = [
+    'config/deploymentCredentialGuards.js -> config/validate.js',
+    'config/immutableConfigGuard.js -> utils/metrics.js',
+    'config/immutableConfigGuard.js -> utils/passwordHistory.js',
+    'config/index.js -> config/validate.js',
+    'config/jwtRotation.js -> config/validate.js',
+    'config/legacyCbcGuard.js -> config/immutableConfigGuard.js',
+    'config/legacyCbcGuard.js -> utils/metrics.js',
+    'config/loginEncryptGuard.js -> utils/metrics.js',
+    'config/validate.js -> config/jwtRotation.js',
+    'constants/runtime.js -> services/sharedCache/index.js',
+    'models/auditLogHooks.js -> utils/auditChain.js',
+    'models/auditLogWriteStatics.js -> utils/metrics.js',
+    'services/auditBuffer.js -> utils/auditChain.js',
+    'services/auditBuffer.js -> utils/metrics.js',
+    'services/auditBufferDocs.js -> utils/metrics.js',
+    'services/auditWalCap.js -> utils/metricsAuditDrops.js',
+    'services/auditWalPermissions.js -> utils/metrics.js',
+    'services/sharedCache/index.js -> constants/runtime.js',
+    'utils/auditChain.js -> config/index.js',
+    'utils/auditWriteFailure.js -> utils/metrics.js',
+    'utils/metricsAuditDrops.js -> services/auditBuffer.js',
+    'utils/metricsAuditDrops.js -> services/auditWalCap.js',
+    'utils/passwordHistory.js -> config/index.js',
+  ];
+
+  describe('惰性边清单', () => {
+    const files = collectSourceFiles(SRC_DIR);
+    const known = new Set(files.map((f) => path.normalize(f)));
+    const build = (extract) => {
+      const graph = new Map();
+      for (const f of files) {
+        const deps = extract(fs.readFileSync(f, 'utf8'))
+          .map((rel) => resolveDep(f, rel))
+          .filter((d) => d && known.has(d))
+          .map((d) => relOf(d));
+        graph.set(relOf(f), new Set(deps));
+      }
+      return graph;
+    };
+
+    test('分量内部的惰性边与登记表一致（提回顶层会从清单里消失 ⇒ 必红）', () => {
+      const allEdges = build(extractRelativeRequires);
+      const topEdges = build(extractTopLevelRequires);
+      const actual = LAZY_SCC.flatMap((comp) => lazyIntraComponentEdges(comp, allEdges, topEdges));
+      // 两侧都排序：SCC 的遍历序不是语义，只有集合相等才是判据（2026-10-30）
+      expect([...actual].sort()).toEqual([...LAZY_EDGES].sort());
+
+      // 自证：同一条边若也出现在顶层图里，它就不再是「惰性边」，判据必须让它消失——
+      // 真实图里现在一条都没有，不喂合成反例就证不了这条判据会不会响。
+      const comp = ['a', 'b'];
+      const all = new Map([
+        ['a', new Set(['b'])],
+        ['b', new Set(['a'])],
+      ]);
+      expect(lazyIntraComponentEdges(comp, all, new Map())).toEqual(['a -> b', 'b -> a']);
+      expect(lazyIntraComponentEdges(comp, all, new Map([['a', new Set(['b'])]]))).toEqual([
+        'b -> a',
+      ]);
+      // 反向：指向分量外的边不算（否则清单会把普通依赖也算进来）
+      expect(lazyIntraComponentEdges(comp, new Map([['a', new Set(['c'])]]), new Map())).toEqual(
+        []
+      );
+    });
   });
 
   test('涉及循环依赖的模块可被正常加载（加载顺序不炸）', () => {

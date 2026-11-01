@@ -6,6 +6,10 @@
 const mongoose = require('mongoose');
 const logger = require('../../utils/logger');
 const { RETENTION_SECONDS, RETENTION_DAYS } = require('../../constants/retention');
+const {
+  BUSINESS_RETENTION_POLICY,
+  resolveTtlIndexPlan,
+} = require('../../constants/businessRetention');
 
 /**
  * 清理 tokenblacklists 集合的遗留唯一索引
@@ -53,20 +57,32 @@ const reconcileTokenBlacklistIndexes = async () => {
 /**
  * 对账 users 集合的 username 索引
  *
- * schema 从「字段级 unique」改为「显式 collation 唯一索引 username_ci」后，
- * MongoDB 里既有的 `username_1`（默认 collation，大小写敏感）不会自动消失。
- * 两个索引并存时 username_1 仍然放行 Admin/admin 共存，修复等于没生效。
+ * schema 从「字段级 unique」改为「显式 collation 唯一索引 username_ci」后，MongoDB 里既有的
+ * `username_1`（默认 collation，大小写敏感）不会自动消失，两者并存时 Admin/admin 仍可共存。
  *
- * 关键顺序问题：不能先删旧索引再建新索引——若库中已存在大小写冲突的账号，
- * 新的唯一索引会创建失败，而旧索引已被删掉，结果是**两个约束都没有**。
- * 因此流程为：① 先检测冲突组；② 有冲突则保留旧索引并告警，等人工处置；
- * ③ 无冲突才删除 username_1（新索引由 mongoose autoIndex 建立）。
+ * 顺序不可颠倒：存在大小写冲突账号时新索引建不起来，若已先删旧索引则**两个约束都没有**。
+ * 故 ① 检测冲突组 → ② 有冲突保留旧索引并告警 → ③ 确认 username_ci 真的可用才删。
+ * ③ 与 email 半边同款：只看名字不够——同名但非唯一/无 collation 都不构成约束。
  *
  * @returns {Promise<void>}
  */
 const dropLegacyUsernameIndex = async (coll, indexes) => {
   const legacy = indexes.find((idx) => idx.name === 'username_1');
-  if (!legacy) return;
+  const fresh = indexes.find((idx) => idx.name === 'username_ci');
+  const freshUsable = Boolean(fresh && fresh.unique === true && fresh.collation);
+
+  // 两道都不在场 = 用户名字段零唯一约束，必须留痕（fail-closed：绝不动任何索引）
+  if (!legacy) {
+    if (!freshUsable) {
+      logger.error(
+        'users 集合既没有 username_1 也没有可用的 username_ci（唯一 + collation）：' +
+          '用户名当前**没有任何唯一约束**，Admin/admin 可并存。' +
+          'username_ci 由 schema 声明 + mongoose autoIndex 建立，' +
+          '请按启动日志里的索引创建失败原因（重复键/权限/超时）处置后重启服务收敛'
+      );
+    }
+    return;
+  }
 
   // 大小写归一化后分组，找出视觉等同却并存的账号
   const conflicts = await coll
@@ -88,6 +104,16 @@ const dropLegacyUsernameIndex = async (coll, indexes) => {
       '检测到大小写冲突的用户名，无法启用大小写不敏感唯一索引：' +
         `${detail}。旧索引 username_1 已保留（约束不会中断），` +
         '请人工合并或重命名冲突账号后重启服务完成索引升级'
+    );
+    return;
+  }
+
+  // ③ 新索引不在场就不删：先删旧的会让用户名唯一性出现真空期
+  if (!freshUsable) {
+    logger.error(
+      'username_ci 唯一索引尚未建立或不可用（autoIndex 未完成/创建失败，或同名索引不唯一、' +
+        '缺 collation）：本次不删除旧索引 username_1——先删旧的会让用户名唯一性出现真空期' +
+        '（Admin/admin 可并存）。请确认启动日志无索引创建失败后重启服务完成切换。'
     );
     return;
   }
@@ -242,4 +268,84 @@ const reconcileAuditTtlIndex = async () => {
   }
 };
 
-module.exports = { reconcileUserIndexes, reconcileTokenBlacklistIndexes, reconcileAuditTtlIndex };
+const businessTtlIndexName = (field) => `ttl_${field}`;
+
+const reconcileBusinessTtlIndexes = async () => {
+  const summary = { aligned: [], created: [], orphaned: [], skipped: [] };
+  for (const policy of BUSINESS_RETENTION_POLICY) {
+    if (policy.disposition !== 'ttl' || !policy.ttlField) continue;
+    const name = businessTtlIndexName(policy.ttlField);
+    let coll;
+    try {
+      coll = mongoose.connection.collection(
+        mongoose.model(policy.modelName).collection.collectionName
+      );
+    } catch (e) {
+      summary.skipped.push({ model: policy.modelName, reason: e.message });
+      continue;
+    }
+    const plan = resolveTtlIndexPlan(policy.modelName); // 每次调用现读 env：改档/关开关本轮即生效
+    let indexes = [];
+    try {
+      indexes = await coll.indexes();
+    } catch (e) {
+      if (!(e.codeName === 'NamespaceNotFound' || e.code === 26)) {
+        logger.warn(`业务保留期对账跳过 ${policy.modelName}：${e.message}`);
+        summary.skipped.push({ model: policy.modelName, reason: e.message });
+        continue;
+      }
+    }
+    const physical = indexes.find((i) => i.name === name);
+    if (plan.days === null) {
+      if (physical && physical.expireAfterSeconds !== undefined) {
+        summary.orphaned.push({
+          model: policy.modelName,
+          index: name,
+          expireAfterSeconds: physical.expireAfterSeconds,
+        });
+        logger.error(
+          `业务保留期开关已关闭，但物理 TTL 仍在删除数据：${coll.collectionName}.${name} ` +
+            `expireAfterSeconds=${physical.expireAfterSeconds}s。对外声明是「无 TTL，数据永久保留」，` +
+            '与数据面相反；autoIndex 从不回收 TTL，请手工执行 ' +
+            `db.${coll.collectionName}.dropIndex("${name}")` +
+            ` 后重启（不自动删：删索引不可逆）。开关未生效原因：${plan.reason || '未配置'}`
+        );
+      }
+      continue;
+    }
+    const want = plan.days * 24 * 60 * 60;
+    if (!physical) {
+      await coll.createIndex({ [policy.ttlField]: 1 }, { name, expireAfterSeconds: want });
+      summary.created.push({ model: policy.modelName, index: name, expireAfterSeconds: want });
+      logger.warn(
+        `已按声明为 ${policy.modelName} 创建 TTL 索引 ${name}（${plan.days} 天）：` +
+          '物理索引此前缺失，过期数据不会被清理'
+      );
+      continue;
+    }
+    if (physical.expireAfterSeconds === want) continue;
+    await mongoose.connection.db.command({
+      collMod: coll.collectionName,
+      index: { keyPattern: { [policy.ttlField]: 1 }, expireAfterSeconds: want },
+    });
+    summary.aligned.push({
+      model: policy.modelName,
+      index: name,
+      from: physical.expireAfterSeconds,
+      to: want,
+    });
+    logger.warn(
+      `${policy.modelName} 的 TTL 索引 ${name} 由 ${physical.expireAfterSeconds ?? '（未设置）'}s ` +
+        `对齐为声明值 ${want}s（${plan.days} 天）：mongoose 遇同名不同选项只抛 ` +
+        'IndexOptionsConflict 且不回收，改档只能在这里落地'
+    );
+  }
+  return summary;
+};
+
+module.exports = {
+  reconcileUserIndexes,
+  reconcileTokenBlacklistIndexes,
+  reconcileAuditTtlIndex,
+  reconcileBusinessTtlIndexes,
+};

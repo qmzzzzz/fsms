@@ -41,6 +41,11 @@ const SCAN_ROOTS = [
  */
 const ALLOWLIST = new Map([
   [
+    'src/tests/services/forensicManifestLock.test.js',
+    '互斥锁并发证明：10ms 延迟用来把 8 个任务压进临界区（不重叠则 maxActive 恒为 1，判据本身失效）；' +
+      '延迟不是等待测试完成，也无法换成栅栏——正确实现下栅栏必然死锁',
+  ],
+  [
     'src/tests/auditBufferZombieDuplicate.test.js',
     '慢库测试替身：sleep(delayMs) 模拟慢速写入，制造读-写竞态窗口，不是等待测试完成',
   ],

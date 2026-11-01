@@ -382,15 +382,163 @@ describe('C. auditChainMonitor：周期核验与噪声治理', () => {
     await auditChainMonitor.runVerification();
     expect(auditChainMonitor.getHealth().consecutiveFailures).toBe(0);
   });
+
+  test('核验每轮抛错 ⇒ 连续失败走告警通道（删掉失败告警本用例必红）', async () => {
+    // 修复前的形态：「每轮都在抛」与「链本来就干净」在所有对外面上不可分——
+    // catch 只写 health + 一行日志，而 getHealth 当时没有任何生产读取方。
+    jest.spyOn(AuditLogModel, 'find').mockImplementation(() => {
+      throw new Error('db down');
+    });
+    const sendSpy = jest.spyOn(securityAlert, 'sendNotification').mockResolvedValue();
+
+    // 第 1 轮：单轮可能是抖动（maxTimeMS 掐断 / 网络半开），只记账不占告警通道
+    await auditChainMonitor.runVerification();
+    expect(sendSpy).not.toHaveBeenCalled();
+
+    // 第 2 轮连续失败：进入告警通道，且通道与「断裂告警」同源
+    await auditChainMonitor.runVerification();
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const [type, level, message, data] = sendSpy.mock.calls[0];
+    expect(type).toBe(securityAlert.ALERT_TYPES.AUDIT_CHAIN_VERIFY_FAILED);
+    expect(level).toBe(securityAlert.ALERT_LEVELS.HIGH);
+    expect(message).toContain('连续 2 轮执行失败');
+    expect(message).toContain('db down');
+    expect(data.consecutiveFailures).toBe(2);
+    // 失败不得冒充结论：lastVerdictCode 仍是「本轮没有结论」
+    expect(auditChainMonitor.getHealth().lastVerdictCode).toBeNull();
+
+    // 第 3 轮：同一业务日内被频控挡下（失败告警不许变成每轮一次的噪声）
+    await auditChainMonitor.runVerification();
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+  });
+  test('投递每轮都断时连续失败照样累计（旧归零点把它永远压在 1）', async () => {
+    // 归零点原在"判定之后、投递之前"：投递每轮都断的那一轮，先把连续计数抹成 0 再加 1 ⇒
+    // 永远够不到 FAILURE_ALERT_THRESHOLD(2) ⇒「连续两轮失败才占告警通道」这条判据静默失效。
+    jest.spyOn(AuditLogModel, 'find').mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        limit: jest.fn().mockReturnValue({
+          lean: jest.fn().mockImplementation(async () => brokenChainFixture()),
+        }),
+      }),
+    });
+    const sendSpy = jest
+      .spyOn(securityAlert, 'sendNotification')
+      .mockRejectedValue(new Error('webhook down'));
+
+    await auditChainMonitor.runVerification();
+    expect(auditChainMonitor.getHealth().consecutiveFailures).toBe(1);
+
+    // 第 2 轮：同一断裂走「待重投位」（不被频控挡），投递再次失败 ⇒ 连续失败必须到 2
+    await auditChainMonitor.runVerification();
+    const health = auditChainMonitor.getHealth();
+    expect(health.consecutiveFailures).toBe(2);
+    expect(health.failures).toBe(2);
+    expect(health.lastSuccessAt).toBeNull(); // 两轮都没跑到底，不得冒充成功
+    expect(sendSpy).toHaveBeenCalled();
+  });
+
+  test('成功读数配对：lastSuccessAt 只在整轮（含投递）跑完时落，投递抛错不刷新它', async () => {
+    jest.spyOn(AuditLogModel, 'find').mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        limit: jest.fn().mockReturnValue({
+          lean: jest.fn().mockImplementation(async () => healthyChainFixture()),
+        }),
+      }),
+    });
+    await auditChainMonitor.runVerification();
+    const ok = auditChainMonitor.getHealth().lastSuccessAt;
+    expect(ok).toBeTruthy();
+
+    // getHealth() 返回的是**快照副本**（{...health}），下面比对的是上一轮读到的值本身，
+    // 与被测时刻是否跨毫秒无关：不需要靠固定睡眠把两次 Date.now() 拉开。
+    // 真正防"没刷新"假通过的是下面那条做得到的对照——投递抛错的轮次里 lastSuccessAt 必须仍等于 ok。
+    jest.spyOn(AuditLogModel, 'find').mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        limit: jest.fn().mockReturnValue({
+          lean: jest.fn().mockImplementation(async () => brokenChainFixture()),
+        }),
+      }),
+    });
+    jest.spyOn(securityAlert, 'sendNotification').mockRejectedValueOnce(new Error('webhook down'));
+
+    await auditChainMonitor.runVerification();
+    const bad = auditChainMonitor.getHealth();
+    expect(bad.failures).toBe(1);
+    expect(bad.lastSuccessAt).toBe(ok);
+    // 反向：成功轮必须刷新——否则"没被刷新"在上一条会因 lastSuccessAt 恒为旧值而假通过
+    jest.spyOn(securityAlert, 'sendNotification').mockResolvedValueOnce({ ok: true });
+    await auditChainMonitor.runVerification();
+    expect(auditChainMonitor.getHealth().lastSuccessAt).not.toBe(ok);
+  });
+
+  test('复位钩子覆盖 health 的每一个键（新增读数不会漏复位）', async () => {
+    const fresh = auditChainMonitor.getHealth();
+    jest.spyOn(AuditLogModel, 'find').mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        limit: jest.fn().mockReturnValue({
+          lean: jest.fn().mockImplementation(async () => healthyChainFixture()),
+        }),
+      }),
+    });
+    await auditChainMonitor.runVerification();
+    auditChainMonitor.__resetForTest();
+    // 逐键相等：复位漏掉任何一个键（含日后新增的）这里必红
+    expect(auditChainMonitor.getHealth()).toEqual(fresh);
+  });
+
+  test('D3 投递失败不得把断裂记成已处理：下一轮必须重投同一条断裂', async () => {
+    // 第十一轮 D3（work/audit-round11-auditchain.md）：指纹原先写在 dispatchChainAlert 之前，
+    // 于是"投递抛错"也被记成"已处理"——下一轮在指纹处直接 return，该断裂在告警面上永久静默。
+    // 修法：指纹只在送达成功后落成水位线；失败保留「待重投位」，下一轮必须重投（且不被频控挡住）。
+    // 每轮返回**新造**的夹具数组：verifyAuditChain 的 window.reverse() 是原地反转，
+    // 同一个数组复用会让第二轮看到不同的次序（指纹漂移成 chain_break，用例自己制造假红）。
+    jest.spyOn(AuditLogModel, 'find').mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        limit: jest.fn().mockReturnValue({
+          lean: jest.fn().mockImplementation(async () => brokenChainFixture()),
+        }),
+      }),
+    });
+    const sendSpy = jest
+      .spyOn(securityAlert, 'sendNotification')
+      .mockRejectedValueOnce(new Error('webhook down'))
+      .mockResolvedValue();
+
+    await auditChainMonitor.runVerification(); // 轮 1：投递失败
+    await auditChainMonitor.runVerification(); // 轮 2：必须重投同一条断裂
+
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+    expect(sendSpy.mock.calls[0][0]).toBe(securityAlert.ALERT_TYPES.AUDIT_CHAIN_BREAK_DETECTED);
+    expect(sendSpy.mock.calls[1][0]).toBe(securityAlert.ALERT_TYPES.AUDIT_CHAIN_BREAK_DETECTED);
+    // 同一断裂（同一指纹 ⇒ 同一文案）
+    expect(sendSpy.mock.calls[1][2]).toBe(sendSpy.mock.calls[0][2]);
+  });
+
+  test('D4 非 Error 拒绝（Promise.reject(undefined)）不得把 catch 体炸掉：两轮后必须送达失败告警', async () => {
+    // 第十一轮 D4：catch 体裸读 err.message ⇒ TypeError 从 catch 逃到定时器 .catch（只写日志），
+    // 于是"每轮都失败"在告警面完全不存在。判据：不逃逸 + 连续第 2 轮送达 AUDIT_CHAIN_VERIFY_FAILED。
+    jest.spyOn(AuditLogModel, 'find').mockImplementation(() => {
+      throw undefined; // 等价于 Promise.reject()（undefined）
+    });
+    const sendSpy = jest.spyOn(securityAlert, 'sendNotification').mockResolvedValue();
+
+    await expect(auditChainMonitor.runVerification()).resolves.toBeUndefined();
+    await expect(auditChainMonitor.runVerification()).resolves.toBeUndefined();
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(sendSpy.mock.calls[0][0]).toBe(securityAlert.ALERT_TYPES.AUDIT_CHAIN_VERIFY_FAILED);
+    expect(sendSpy.mock.calls[0][1]).toBe(securityAlert.ALERT_LEVELS.HIGH);
+  });
 });
 
 describe('D. 告警类型登记（防新类型被静默丢弃）', () => {
   const { ALERT_TYPES } = require('../../services/securityAlert');
 
-  test('审计链三个类型已登记且取值稳定', () => {
+  test('审计链告警类型已登记且取值稳定', () => {
     expect(ALERT_TYPES.AUDIT_HASH_COMPUTE_FAILED).toBe('audit_hash_compute_failed');
     expect(ALERT_TYPES.AUDIT_CHAIN_BREAK_DETECTED).toBe('audit_chain_break_detected');
     expect(ALERT_TYPES.LEGACY_CBC_DECRYPT_ENABLED).toBe('legacy_cbc_decrypt_enabled');
+    expect(ALERT_TYPES.AUDIT_CHAIN_VERIFY_FAILED).toBe('audit_chain_verify_failed');
   });
 });
 

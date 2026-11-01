@@ -17,7 +17,7 @@
  *   node scripts/ops-e2e.js --list
  *   node scripts/ops-e2e.js --keep          # 保留临时目录供排查
  *
- * 退出码：0 全部通过 / 1 有旅程失败 / 2 参数不合法
+ * 退出码：0 全部通过 / 1 有旅程失败 / 2 参数不合法（含「选择器命中 0 条」：空选集不是通过）
  */
 
 'use strict';
@@ -49,6 +49,14 @@ const JOURNEYS = [
 ];
 const JOURNEY_IDS = JOURNEYS.map((j) => j.id);
 
+/**
+ * 空选集的统一话术。`--only ","` 这类写法 split/filter 之后得到**空数组**，而空数组在 JS 里
+ * 是真值 ⇒ `args.only ? filter : JOURNEYS` 的 false 分支永不成立 ⇒ 四条旅程全被排除，
+ * 汇总打印 "0/0 通过" 并退 0。写歪一个参数就能拿到"四条关键路径全过"的绿。
+ * 同仓对照：scripts/verify-image-digests.js:227-233 对同一形状显式拒绝（退 2）。
+ */
+const EMPTY_SELECTION_MESSAGE = '选择器命中 0 条，拒绝把空跑报成通过';
+
 function parseArgs(argv) {
   const args = { only: null, keep: false, list: false, errors: [] };
   for (let i = 0; i < argv.length; i += 1) {
@@ -72,7 +80,11 @@ function parseArgs(argv) {
         .map((s) => s.trim())
         .filter(Boolean);
       const unknown = ids.filter((id) => !JOURNEY_IDS.includes(id));
-      if (unknown.length > 0) {
+      if (ids.length === 0) {
+        args.errors.push(
+          `--only 的取值 ${JSON.stringify(value)} 解析后为空：${EMPTY_SELECTION_MESSAGE}`
+        );
+      } else if (unknown.length > 0) {
         args.errors.push(`未知旅程：${unknown.join(', ')}（可选：${JOURNEY_IDS.join(', ')}）`);
       } else {
         args.only = ids;
@@ -128,6 +140,11 @@ function main() {
   }
 
   const selected = args.only ? JOURNEYS.filter((j) => args.only.includes(j.id)) : JOURNEYS;
+  // 兜底：即便 parseArgs 之外的调用方传进空选集，也不许把空跑报成通过。
+  if (selected.length === 0) {
+    console.error(`[ops-e2e] ${EMPTY_SELECTION_MESSAGE}（选中的旅程数为 0）`);
+    process.exit(2);
+  }
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-ops-e2e-'));
   const configPath = path.join(tmpDir, 'config.json');
   fs.writeFileSync(
@@ -174,4 +191,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { JOURNEYS, parseArgs };
+module.exports = { JOURNEYS, JOURNEY_IDS, parseArgs, EMPTY_SELECTION_MESSAGE };

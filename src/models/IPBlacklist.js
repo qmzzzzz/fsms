@@ -318,16 +318,19 @@ ipBlacklistSchema.statics.invalidateSnapshot = function (type) {
 ipBlacklistSchema.statics.normalizeEntryIp = normalizeEntryIp;
 
 // 兜底失效：任何绕过上述静态方法的直接写操作（如测试中的 deleteMany({})、
-// 其他模块直接调用 create/updateOne）同样清空快照，避免读到陈旧名单
+// 其他模块直接调用 create/updateOne）同样清空快照，避免读到陈旧名单。
 [
   'save',
   'deleteOne',
   'deleteMany',
   'findOneAndDelete',
   'findOneAndUpdate',
+  'findOneAndReplace',
   'updateOne',
   'updateMany',
+  'replaceOne',
   'insertMany',
+  'bulkWrite',
 ].forEach((op) => {
   ipBlacklistSchema.post(op, function () {
     invalidateSnapshot();

@@ -1,11 +1,10 @@
 /**
- * 审计缓冲的 WAL 文件层（自 services/auditBuffer.js 拆出，O-3 体积棘轮）
+ * 审计缓冲的 WAL 文件层
  *
  * 职责边界：本模块负责 WAL 文件的一切——路径派生、按行追加、前缀裁剪、大小上限、
  * 毒批序号与归档，以及把上述操作串行化的 walChain；内存缓冲、批量落库（flush）
- * 与进程生命周期仍在 services/auditBuffer.js。拆出原因：auditBuffer.js 在
- * 修复后超过 eslint max-lines 上限（300 行，已计 skipBlankLines/skipComments），
- * 而 eslint.ratchet.json 对其无基线（只许 0 条 warn），故按职责拆分而非放宽基线。
+ * 与进程生命周期仍在 services/auditBuffer.js（两者合一会超过 eslint max-lines 上限 300 行，
+ * 而 eslint.ratchet.json 对其无基线、只许 0 条 warn，故按职责拆分而非放宽基线）。
  * 对外行为不变：auditBuffer 的公开 API 保持固定。
  *
  * 【WAL 兜底（G4 不丢失）】push 时同步追加一行到本地 WAL 文件，flush 落库成功后
@@ -80,8 +79,8 @@ function getWalPath() {
 }
 
 /**
- * 读取 WAL 并切分为记录行数组（抽出：enforceWalLimit / removeWalLinesBySeqs /
- * readWalLines 等处共用，此前各自重复一遍「split + 尾换行判定」）。
+ * 读取 WAL 并切分为记录行数组（enforceWalLimit / removeWalLinesBySeqs / readWalLines
+ * 等处共用，避免各自重复一遍「split + 尾换行判定」）。
  * 与 readWalLines 的差别：尾部无换行的残缺行**保留**为最后一条记录，
  * 按行重写时才不会把它丢掉。
  *

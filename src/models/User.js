@@ -175,6 +175,7 @@ const userSchema = new mongoose.Schema(
       enum: Object.values(USER_STATUS),
       default: 'active',
     },
+    isHoneypot: { type: Boolean, default: false }, // 蜜罐账户标志（唯一写入方是安全侧：services/honeypotWatch.js 物化或运维手工打标）；面向用户的投影一律排除它——它是「哪个账号是陷阱」的答案
     lastLoginAt: {
       type: Date,
     },
@@ -186,12 +187,26 @@ const userSchema = new mongoose.Schema(
     },
 
     /**
+     * 强制改密标记（P1-2，2026-10-30）：管理员重置口令 / 管理员建号设置初始口令后置 true。
+     * authenticate 在每次请求上校验它：为 true 时除改密/查看本人/登出外一律 403
+     * PASSWORD_CHANGE_REQUIRED，且该标记只能由本人成功改密清除（services/authService/password.js）。
+     * 放 schema 默认可读：每请求认证都要判，不能 select:false。
+     */
+    mustChangePassword: {
+      type: Boolean,
+      default: false,
+    },
+    // 最近一次设置口令的时间（建号/管理员重置/本人改密），供运维审计"临时口令活了多久"
+    passwordSetAt: {
+      type: Date,
+    },
+
+    /**
      * 口令复用历史：最近 N 条**已退役**口令的 HMAC 摘要（最新在前）。
      *
      * select:false —— 与 password 同级的凭证材料：它是对口令明文的单向摘要，
      * 读到它等于拿到"判定某个口令是否曾被使用"的预言机，对外一律不返回。
      * 校验时需显式 .select('+password') .select('+passwordHistory')。
-     *
      * 深度上限由 utils/passwordHistory 的 HISTORY_DEPTH 负责（写入侧截断 +
      * 读取侧再截一次）。schema 层**刻意不加长度 validator**：上限被调小后，
      * validator 会让库里既有的超长文档在**任何一次 save** 时校验失败——
@@ -202,6 +217,8 @@ const userSchema = new mongoose.Schema(
       select: false,
       default: [],
     },
+
+    passwordRetiredHash: { type: String, select: false }, // 审计二-2：管理员重置时被替换掉的**用户自选**那一代口令的 bcrypt 摘要（只留最近一条；未被消费的临时口令不覆盖它）；重置路径拿不到旧口令明文、算不出 HMAC 摘要，只能留可校验摘要，由改密路径比对一次（见 ADR-016）
 
     // 允许登录/访问的 IP 范围规则文本（空 = 不限制）
     // 语法见 utils/ipRange：支持单地址、末段区间、CIDR、通配符、段区间，
@@ -277,6 +294,23 @@ const userSchema = new mongoose.Schema(
       default: '',
       maxlength: [500, '备注最多 500 个字符'],
     },
+
+    /**
+     * 注销/匿名化留痕（P1-3，2026-10-30）：用户删除改为匿名化后，记录必须说明
+     * "什么时候被谁因何注销"。deletionRequestedAt 记录发起时刻（与 anonymizedAt
+     * 分开，为将来"先申请后执行"的冷静期留位），anonymizationReason 是操作原因原文。
+     */
+    deletionRequestedAt: {
+      type: Date,
+    },
+    anonymizedAt: {
+      type: Date,
+    },
+    anonymizationReason: {
+      type: String,
+      default: '',
+      maxlength: [200, '匿名化原因最多 200 个字符'],
+    },
   },
   {
     timestamps: true, // 自动添加 createdAt 和 updatedAt
@@ -316,7 +350,6 @@ userSchema.index({ createdAt: -1 });
 userSchema.index({ phoneKey: 1 }, { background: true, name: 'phoneKey_1' });
 
 // A3 检索键索引：email 加密后，查重/占用判定全部走 emailKey。
-//
 // ⚠️ **唯一索引的创建顺序有硬约束**：MongoDB 的唯一索引把「字段缺失」视作 null，
 // 而存量行**根本没有 emailKey 字段**，多条缺失即
 // `E11000 dup key: { emailKey: null }`，索引直接建不起来（本机 mongod 实测）。
@@ -331,23 +364,19 @@ userSchema.index({ emailGrams: 1 }, { background: true, name: 'emailGrams_1' });
 
 /**
  * 对外响应的字段排除投影（G5：响应过度暴露）
- *
  * select:false 只覆盖了「凭证级」字段（password/passwordHistory/mfaSecret/
  * mfaRecoveryCodes/mfaFailCount/mfaLockUntil/mfaLastCounter）；下列字段是
  * 「内部安全状态」，
  * schema 层必须默认可读（authenticate 每请求校验 tokenVersion/lockUntil，
  * 登录流程读写 failedLoginCount），因此不能设 select:false，
  * 只能在响应投影层显式排除。
- *
  * 排除理由：
  * - tokenVersion / lockUntil / failedLoginCount：会话吊销与锁定状态，
  *   暴露等于告知攻击者「该账号还剩几次尝试、是否已被锁定」
  * - passwordChangedAt / lastLoginIp：改密时间与上次登录 IP，属账户活动画像
  * - __v：Mongoose 内部版本号，无业务含义
- *
  * 保留 allowedIPs：用户管理界面编辑表单需回填该字段（UserView.handleEdit），
  * 且仅 user:read 权限者可见，属功能必需而非泄露。
- *
  * 清单是一张字段表而不是拼好的字符串：RESPONSE_EXCLUDE_PII_VISIBLE 要从同一张表
  * 派生（下面解释为什么要这个变体）。写成字符串手术（`base.replace(' -phone','')`）
  * 的话，将来清单里多一个空格、多个 `-phone` 别名，都会静默失效——而"静默失效"
@@ -358,11 +387,13 @@ const USER_RESPONSE_EXCLUDE_FIELDS = [
   // 凭证级材料的第二道：schema 已是 select:false，这里再排一次与 password 同规格。
   // 只排不减：少排一次的后果是历史摘要进到某个响应体里，而它是对明文的单向预言机。
   '-passwordHistory',
+  '-passwordRetiredHash', // 审计二-2：同规格第二道——退役口令的 bcrypt 摘要不得进响应体（只排不减）
   '-tokenVersion',
   '-lockUntil',
   '-failedLoginCount',
   '-passwordChangedAt',
   '-lastLoginIp',
+  '-isHoneypot', // 默认不许外泄：一次 GET 就能问出「这个账号是不是蜜罐」，等于把攻击者的「别碰这里」名单交出去
   // PII（2026-10-02）：phone 落库是密文，但本文件 phone 声明处的 getter **透明解密**，
   // 于是不写投影的用户读路径会把完整手机号放进响应体——持 user:read 的部门管理员
   // 一次 GET 就拿到整个部门的手机号，无二次验证、不写 view_sensitive_data 审计，
@@ -394,7 +425,6 @@ const USER_RESPONSE_EXCLUDE = USER_RESPONSE_EXCLUDE_FIELDS.join(' ');
 /**
  * 唯一允许把**明文 PII**（phone / email）读进进程的对外投影：同一张字段表、
  * 只少 `-phone` / `-email` 两项。
- *
  * 存在的理由是展示需求而非读取需求：用户管理表格要显示脱敏号码与邮箱
  * （`138****5678` / `a****z@example.com`），而脱敏必须在拿到明文的那一侧算——
  * 密文列随机 IV、逐行不同，对密文打码什么也读不出。
@@ -415,7 +445,6 @@ userSchema.statics.USERNAME_COLLATION = USERNAME_COLLATION;
 
 /**
  * 读-改-save 的载入端必须带的排除投影（对象形态）。
- *
  * 它挡的是 HIGH 级"改头像顺手毁凭证"：`User.findById(id)` 不写任何投影时，mongod
  * 按 `_optionsForExec()`（schema 的 select:false 已并入其中）不返回下面这些路径，
  * 但文档构造拿到的却是 `_fieldsForExec()`——只含**调用方自己写的**投影，无用户投影时
@@ -424,7 +453,6 @@ userSchema.statics.USERNAME_COLLATION = USERNAME_COLLATION;
  * mfaSecret/mfaRecoveryCodes/mfaLastCounter/mfaFailCount/phoneKey/passwordHistory）。
  * 后果：一次 PUT /api/auth/profile 就关掉用户的 MFA（口令因子被写成 ""）、抹掉
  * TOTP 重放防护与恢复码、把爆破计数清零、让手机号精确检索键失联、清空口令历史。
- *
  * 三个已排除的替代修法，写下来是为了别让后人再走一遍：
  *  - 字符串形态 `.select('-mfaSecret')`：`_fields` 里保留 `-` 前缀，applyDefaults 的
  *    `curPath in fields` 判不出 ⇒ 与不写投影同样漏（实测仍清空）。
@@ -432,12 +460,10 @@ userSchema.statics.USERNAME_COLLATION = USERNAME_COLLATION;
  *    口令 bcrypt 正挂在那两个钩子上。
  *  - 载入时 `select('+全部凭证')` 再 save：把口令摘要与 MFA 密钥读进内存，
  *    与本文件"凭证级材料默认不出进程"的口径相反。
- *
  * 派生自 schema 而不是手写清单：日后新增 select:false 路径自动纳入。
  * 排除的是**读**，不是写：钩子或业务显式赋值这些路径时（改手机号 ⇒ pre('validate')
  * 写 phoneKey；解绑 ⇒ 写 mfaSecret）照常落库，由
  * tests/services/userSaveCredentialWipe.test.js 盯住这一条。
- *
  * @returns {Record<string, 0>} 可直接交给 Query#select 的对象形态排除投影
  */
 userSchema.statics.unselectedCredentialProjection = function unselectedCredentialProjection() {
@@ -452,7 +478,6 @@ userSchema.statics.unselectedCredentialProjection = function unselectedCredentia
 
 /**
  * 按用户名查找（大小写不敏感，与唯一索引同一 collation）
- *
  * 必须走这个入口而非裸 findOne({ username })：后者用默认 collation 比较，
  * 既命中不了 username_ci 索引（退化为全表扫描），也会让 `Admin` 查不到
  * 已存在的 `admin`——判重放过、随后写入触发 E11000，表现为 500。

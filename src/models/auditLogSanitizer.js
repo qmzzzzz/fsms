@@ -41,8 +41,8 @@ const walk = (node, isSensitive, depth) => {
   // 对所有时间戳失效（取证时只看到一个空对象，且没有任何痕迹说明它曾经是时间）。
   // 同理 Buffer/Map/Set 也会摊成 {}，但它们不出现在 JSON 请求体里，Date 会
   // （服务端自己组装审计载荷时最容易顺手带上时间戳）。
-  // 注：这里刻意不写具体的写入调用样式——audit action 对账用例按源码文本扫描，
-  // 注释里出现那种写法会被它当成一个解析不了的写入点而硬失败（本轮实测踩过）。
+  // 注：这里刻意不写具体的写入调用样式——audit action 对账用例按源码文本扫描，注释里出现那种
+  // 写法会被当成解析不了的写入点而硬失败。
   if (node instanceof Date) {
     return Number.isNaN(node.getTime()) ? '[无效时间]' : node.toISOString();
   }

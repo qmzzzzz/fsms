@@ -236,7 +236,12 @@
           </el-tooltip>
           <el-dropdown @command="handleCommand">
             <span class="user-dropdown">
-              <el-avatar :size="32" class="user-avatar">{{ avatarText }}</el-avatar>
+              <UserAvatar
+                :src="currentUser?.avatar"
+                :name="currentUser?.username"
+                :size="32"
+                class="user-avatar"
+              />
               <span class="user-name tech-hide-mobile">{{
                 currentUser?.username || t('common.notLoggedIn')
               }}</span>
@@ -313,6 +318,7 @@ import {
   ArrowDown,
   UserFilled,
   Lock,
+  Stamp,
   SwitchButton,
   Document,
   Sunny,
@@ -333,6 +339,7 @@ import { disconnectWebSocket } from '@/utils/websocket'
 import ExitOverlay from '@/components/ExitOverlay.vue'
 import SearchPalette from '@/components/SearchPalette.vue'
 import ReportDialog from '@/components/ReportDialog.vue'
+import UserAvatar from '@/components/UserAvatar.vue'
 
 const { t, locale } = useI18n()
 const route = useRoute()
@@ -469,11 +476,6 @@ const currentTitle = computed(() =>
   route.meta.titleKey ? t(route.meta.titleKey) : route.meta.title || ''
 )
 
-const avatarText = computed(() => {
-  const name = currentUser.value?.username || ''
-  return name.slice(0, 1).toUpperCase()
-})
-
 const hasPerm = (perm) => matchPermission(permissions.value, perm)
 
 const baseMenu = [
@@ -490,6 +492,19 @@ const baseMenu = [
       { path: '/roles', i18nKey: 'nav.roles', icon: Key, perm: 'role:read' },
       { path: '/audit-logs', i18nKey: 'nav.auditLogs', icon: Document, perm: 'security:audit' },
       { path: '/ip-list', i18nKey: 'nav.ipList', icon: Lock, perm: 'security:config' },
+      {
+        // 取证溯源：只读溯源需要 security:audit，与路由 meta.permission 同一权限码
+        path: '/forensic-trace',
+        i18nKey: 'nav.forensic',
+        icon: Search,
+        perm: 'security:audit',
+      },
+      {
+        path: '/privilege-grants',
+        i18nKey: 'nav.privilegeGrants',
+        icon: Stamp,
+        perm: 'privilege:read',
+      },
     ],
   },
   { path: '/reports', i18nKey: 'nav.reports', icon: DataAnalysis, perm: 'report:read' },

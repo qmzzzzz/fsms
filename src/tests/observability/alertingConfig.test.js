@@ -134,11 +134,33 @@ describe('告警链路配置一致性（G-2）', () => {
 
   describe('docker-compose 编排', () => {
     test('alertmanager 服务使用钉版镜像且配置只读挂载', () => {
-      const serviceBlock = composeYml.slice(composeYml.indexOf('alertmanager:'));
+      const serviceBlock = composeYml.slice(composeYml.indexOf('\n  alertmanager:'));
       expect(serviceBlock).toMatch(/image:\s*prom\/alertmanager:v[\d.]+/); // 钉版，禁 latest
-      // S-5：挂载源与启动闸共用 ALERTMANAGER_CONFIG_PATH，避免「校验 A、运行 B」
-      expect(serviceBlock).toContain(
-        '${ALERTMANAGER_CONFIG_PATH:-./deployment/observability/alertmanager.yml}:/etc/alertmanager/alertmanager.yml:ro'
+      // F-15：运行侧改为只读消费命名卷 alertmanager-config（宿主配置先由
+      // alertmanager-config-init 复制进卷并 chown 65534，避免 0600 私有文件
+      // 让容器内 nobody 读不到而启动失败）。挂载源与启动闸仍共用
+      // ALERTMANAGER_CONFIG_PATH，避免「校验 A、运行 B」——那一半在下一条用例里钉。
+      expect(serviceBlock).toContain('alertmanager-config:/etc/alertmanager:ro');
+      expect(serviceBlock).toMatch(
+        /alertmanager-config-init:\s*\n\s*condition:\s*service_completed_successfully/
+      );
+    });
+
+    test('配置字节的唯一来源：校验容器与初始化容器共用 ALERTMANAGER_CONFIG_PATH', () => {
+      // 校验源（check）与运行源（init 复制进卷的那份）必须是同一个宿主文件，
+      // 否则闸校验的是 A、实际跑的是 B。
+      const checkStart = composeYml.indexOf('\n  alertmanager-config-check:');
+      const initStart = composeYml.indexOf('\n  alertmanager-config-init:');
+      const runtimeStart = composeYml.indexOf('\n  alertmanager:');
+      expect(checkStart).toBeGreaterThan(-1);
+      expect(initStart).toBeGreaterThan(checkStart);
+      expect(runtimeStart).toBeGreaterThan(initStart);
+      const source = '${ALERTMANAGER_CONFIG_PATH:-./deployment/observability/alertmanager.yml}';
+      expect(composeYml.slice(checkStart, initStart)).toContain(
+        `${source}:/etc/alertmanager/alertmanager.yml:ro`
+      );
+      expect(composeYml.slice(initStart, runtimeStart)).toContain(
+        `${source}:/source/alertmanager.yml:ro`
       );
     });
 
@@ -198,7 +220,12 @@ describe('告警标签可归因与抑制规则口径', () => {
 
   test('不出现 bare sum(...)：聚合必须写 by (...)，否则 instance 被整体丢弃', () => {
     // `sum by (x) (...)` 中 sum 后面跟的是 by，所以 /\bsum\s*\(/ 只命中 bare sum。
-    const offenders = ruleBlocks.filter((r) => /\bsum\s*\(/.test(r.code)).map((r) => r.name);
+    // BackendDown 是唯一例外：判据刻意是"两色都抓不到"（sum(up)==0），
+    // 按 instance 聚合会在蓝绿未同时运行时永久红着——一条永远在响的告警等于没有告警。
+    const LABEL_DROP_OK = new Set(['BackendDown']);
+    const offenders = ruleBlocks
+      .filter((r) => /\bsum\s*\(/.test(r.code) && !LABEL_DROP_OK.has(r.name))
+      .map((r) => r.name);
     expect(offenders).toEqual([]);
   });
 

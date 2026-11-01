@@ -259,10 +259,11 @@ describe('审计缓冲的关停排空（F-101）', () => {
 
     // 记录确实在库里
     expect(await AuditLog.countDocuments({ username: 'shutdown_late' })).toBe(1);
-    // 那么它的 WAL 行就必须消失：留着 = 下次 start() 重放进缓冲，而重放文档的 _id
-    // 是下一轮 flush 新分配的（WAL 行写于 push，那时还没有 _id）⇒ 幂等性跨重启不成立，
-    // 这个已经存在的批次会被再插一份。原先的 `wal.isEnabled()` 闸门在这里为假
-    // （stop() 已 disable）⇒ 裁剪被跳过，实测本行红。
+    // 那么它的 WAL 行就必须消失：留着 = 下次 start() 重放进缓冲，白跑一轮。
+    // （改前这一条还不止是白跑——重放文档的 _id 由下一轮 flush 现分配 ⇒ 已落库的批次
+    // 会被再插一份；F-143 修复后 WAL 行自带 _id，重放撞唯一索引不再插入。
+    // 但"行必须回收"的要求不变：不回收就一直占着 WAL 配额、每次启动都重放一遍。）
+    // 原先的 `wal.isEnabled()` 闸门在这里为假（stop() 已 disable）⇒ 裁剪被跳过，实测本行红。
     expect(await walUsernames()).not.toContain('shutdown_late');
   });
 

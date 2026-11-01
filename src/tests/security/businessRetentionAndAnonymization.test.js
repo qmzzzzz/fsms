@@ -38,6 +38,7 @@ describe('业务数据保留期声明（A2）', () => {
     expect(BUSINESS_RETENTION_POLICY.map((p) => p.modelName).sort()).toEqual([
       'FireAlarm',
       'FireDevice',
+      'ForensicCapture',
       'Inspection',
       'User',
     ]);
@@ -67,13 +68,21 @@ describe('业务数据保留期声明（A2）', () => {
     expect(() => assertBusinessRetentionEnforceable('FireAlarm')).toThrow(/两者都在场/);
   });
 
-  test('F-07 口径落地：四个集合都声明了 180 天（业务方给定，等保六个月同口径）', () => {
+  test('F-07 口径落地：业务集合声明 180 天（业务方给定），取证捕获声明 30 天（用户 2026-10-31 书面确认）', () => {
+    // 取证捕获（P2）声明 30 天：用户书面确认的口径。它的下限**独立于审计链**——
+    // 审计链仍是 90 天（见下方不变量），两件事合规依据不同，不能用一个常量绑在一起。
     for (const p of BUSINESS_RETENTION_POLICY) {
       expect({ m: p.modelName, declared: p.declaredDays }).toEqual({
         m: p.modelName,
-        declared: 180,
+        declared: p.modelName === 'ForensicCapture' ? 30 : 180,
       });
     }
+    // 关键不变量：取证下限独立于审计链，全局 MIN 仍必须是 90——
+    // 若有人为了"支持 30 天"把全局 MIN 下调，AuditLog 的留存合规下限会一起降。
+    const { FORENSIC_RETENTION_MIN_DAYS } = require('../../constants/businessRetention');
+    expect(FORENSIC_RETENTION_MIN_DAYS).toBe(30);
+    expect(getBusinessRetentionPolicy('ForensicCapture').minDays).toBe(30);
+    expect(getBusinessRetentionPolicy('FireAlarm').minDays).toBe(MIN_RETENTION_DAYS);
     // User 的处置方式是匿名化而不是 TTL：删账号会让审计链上的操作者悬空
     expect(getBusinessRetentionPolicy('User').disposition).toBe('anonymize');
     expect(getBusinessRetentionPolicy('User').ttlField).toBeNull();
@@ -216,7 +225,12 @@ describe('用户匿名化：删除权流程的落点（A2）', () => {
     //   · 随后"抹除"再跑 ⇒ tokenVersion 已被幂等路径锁住不再自增 ⇒
     //     `expect(after.tokenVersion).toBe(oldTokenVersion + 1)` 拿到 1 而非 2。
     // 快照取在匿名化**之前**，故"抹除"用例的 before/after 对比不再受顺序影响。
-    preAnonymize = await User.findById(userId).select('+password');
+    // 审计二-2：给这条用例挂一份「退役口令摘要」（管理员重置时被替换掉的那代口令的
+    // bcrypt 副本），好让下面「抹除」那条能判它有没有跟着匿名化一起被抹掉
+    await mongoose.connection
+      .collection('users')
+      .updateOne({ _id: userId }, { $set: { passwordRetiredHash: user.password } });
+    preAnonymize = await User.findById(userId).select('+password +passwordRetiredHash');
     await userService.anonymizeById(userId, { reason: 'unit_test' });
   });
 
@@ -252,6 +266,10 @@ describe('用户匿名化：删除权流程的落点（A2）', () => {
     // phoneKey 必须同步清空（写侧钩子的职责，走 save 才会触发）
     const raw = await mongoose.connection.collection('users').findOne({ _id: userId });
     expect(raw.phoneKey).toBe('');
+    // 审计二-2：退役口令的 bcrypt 摘要也是 L4 凭证材料，删除权要求一并抹掉——
+    // 注销后若留着它，这个账号仍能被离线爆破出「重置前那代口令」
+    expect(preAnonymize.passwordRetiredHash).toBe(oldHash);
+    expect(raw.passwordRetiredHash).toBeNull();
   });
 
   test('幂等：重复匿名化不改写任何东西（tokenVersion 不自增）', async () => {

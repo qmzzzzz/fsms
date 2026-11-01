@@ -3,7 +3,7 @@
  *
  * ## 为什么需要它
  * 本仓有一条成文纪律在三个文件里被重复声明（`middleware/security/ipBlacklist.js:205`、
- * `middleware/rateLimitStore.js:53-56`、`services/websocketService/handshake.js:480-482`）：
+ * `middleware/rateLimitStore.js:53-56`、`services/websocketService/handshake.js:481-483`）：
  * **fail-open 必须有显式可观测信号**。但纪律只在注释里——没有任何东西把
  * 「站点集合」与「每个站点的信号」钉在一起，于是第四处漏了：
  * `services/captchaService.js` 的上限判定被跳过时，唯一痕迹是 `sharedCache/index.js:330`
@@ -242,6 +242,59 @@ describe('fail-open 台账完整性：信号站点必须被登记、登记必须
       listed: FAIL_OPEN_ALERT_TYPES,
       unknown: [],
     });
+  });
+
+  test('②b 取证降级信号必须有专条覆盖：新类型不许「只登记、没人看」，专条不许点名台账外的 type', () => {
+    /**
+     * 与 ② 的分工：② 管 FAIL_OPEN_SITES（降级即护栏失效）；本条管 OTHER_ALERT_SIGNALS 里
+     * 新接入的"能力降级"型信号——它们在语义上不进 SecurityFailOpenSustained，
+     * 但同样不许"登记了信号却没有告警"。风险实例：2026-10-31 取证捕获（P2）接入时，
+     * 两条 type 只写进了台账，规则文件里没有任何一条会看它们。
+     */
+    const rules = parseAlertRules(ruleText);
+    const dedicated = rules.find((r) => r.name === 'ForensicCaptureDegraded');
+    expect(dedicated).toBeTruthy();
+    const FORENSIC_TYPES = [
+      'forensic_capture_write_failed',
+      'forensic_capture_trigger_unavailable',
+    ];
+    // 正向：台账真的登记着这两个类型（否则是给一个不存在的信号发告警），且专条点到了它们
+    for (const t of FORENSIC_TYPES) {
+      expect(OTHER_ALERT_SIGNALS.some((s) => s.type === t)).toBe(true);
+      expect(dedicated.expr).toContain(t);
+    }
+    // 反向：专条不得点名台账之外的 type（防"多写一个既没登记也没发出的名字"）
+    const listed = [...dedicated.expr.matchAll(/type=~"([^"]+)"/g)].flatMap((m) => m[1].split('|'));
+    expect(listed.sort()).toEqual([...FORENSIC_TYPES].sort());
+    // 前提自证：是"持续型"（丢了 for 就退化成抖动也报的瞬时告警），且窗口/级别与台账级别相称
+    expect(dedicated.forText).toBe('10m');
+    expect(dedicated.expr).toContain('increase(');
+    expect(dedicated.severity).toBe('warning');
+  });
+
+  test('②c 幂等在途接管信号必须有专条覆盖：接管意味着「同一请求可能已执行两次」', () => {
+    /**
+     * 与 ②b 同型、不同域：接管不是「依赖不可用」（不该并进 SecurityFailOpenSustained，
+     * 那条的处置文案是「恢复依赖后再把护栏当防线」，而这里依赖全都正常、缺的是
+     * 「上一次受理的结局」），也不是批量事件（单次接管只 +1，速率型规则永远不达标）。
+     * 它描述的是**一次可能重复的业务写入**，必须有人看见——所以必须有专条。
+     *
+     * 判据与 ②b 对称：台账真的登记了该 type ⇄ 专条点名了它，双向对账，多一个少一个都红。
+     */
+    const rules = parseAlertRules(ruleText);
+    const dedicated = rules.find((r) => r.name === 'IdempotencyLeaseTakeOver');
+    expect(dedicated).toBeTruthy();
+    expect(OTHER_ALERT_SIGNALS.some((s) => s.type === 'idempotency_lease_takeover')).toBe(true);
+    expect(dedicated.expr).toContain('idempotency_lease_takeover');
+    // 反向：专条不得点名台账之外的 type（'=' 与 '=~' 两种写法都收）
+    const listed = [...dedicated.expr.matchAll(/type=~?"([^"]+)"/g)].flatMap((m) =>
+      m[1].split('|')
+    );
+    expect(listed.sort()).toEqual(['idempotency_lease_takeover']);
+    // 前提自证：接管是既成事实（重复写入可能已发生），等 10 分钟只会让归因更难
+    expect(dedicated.forText).toBe('0m');
+    expect(dedicated.expr).toContain('increase(');
+    expect(dedicated.severity).toBe('warning');
   });
 
   test('动态转发点必须登记在案（无法枚举 type，但必须说明它是转发点）', () => {

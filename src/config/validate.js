@@ -212,7 +212,7 @@ function collectProductionWarnings() {
  *
  * swagger.basicAuth 已改为 fail-closed（无凭据则 503），故缺凭据不会造成
  * 匿名可读；但那是运行期兜底，配置错误应当在启动期就被拦下——否则文档
- * 实际不可用却无人知晓，属"静默失效"。口令下限 16 字符与其余密钥口径一致。
+ * 实际不可用却无人知晓，属"静默失效"。口令下限 32 字符，与其余密钥（HMAC / AES / JWT 均 ≥32）同口径；此处是唯一口径，以本函数下方的 `docsPass.length < 32` 为准。
  *
  * 抽为独立函数：validateConfig 已接近 max-lines-per-function 上限
  *（见 eslint.ratchet.json），新增校验须放在独立函数内。
@@ -246,11 +246,9 @@ function isDocsEnabled() {
   if (raw !== undefined) {
     return TRUTHY_FLAG_VALUES.has(String(raw).trim().toLowerCase());
   }
-  // 未显式设置时按环境决定。原实现是 (NODE_ENV || 'development') !== 'production'，
-  // 于是 NODE_ENV=prod 的部署会把 API 文档**默认打开**——与 validateConfig 的
-  // 生产硬闸恰好相反：闸因拼写被跳过，文档却因同一拼写暴露出来。
-  // 用同一个 fail-closed 判据：未识别的环境值也按"关"处理。
-  return !requiresProductionSemantics();
+  // 未显式设置时跟随硬闸判据（staging 默认同生产，只有显式宽松才默认开）：原实现用
+  // 字面量比较，NODE_ENV=prod 的部署里"闸被跳过、文档却打开"——同一条判据才不会再分叉。
+  return !requiresProductionHardening();
 }
 
 function validateDocsCredentials(errors) {
@@ -315,19 +313,19 @@ function resolveTrustProxyHops(raw, nodeEnv) {
 const {
   normalizeNodeEnv,
   isProductionLikeEnv,
+  isStagingLikeEnv,
+  stagingLeniencyAcknowledged,
   requiresProductionSemantics,
+  requiresProductionHardening,
 } = require('./envSemantics');
 
 // 生产环境配置校验（与 config/index.js 的 validateProductionConfig 保持一致）
 //
-// 按校验域拆为 4 个「收集器」（各自只负责把错误推进 errors 数组）与 2 个「上报器」，
-// validateConfig 本体只做顺序编排。errors 数组的内容与顺序由测试直接断言锁定，
-// 因此收集器的 push 顺序与文案属于对外契约，不能随意调整；
-// 新增校验项时，插在正确的位置并同步更新期望数组。
+// 按校验域拆为「收集器」+「上报器」，validateConfig 本体只做顺序编排。errors 的内容与
+// 顺序由测试直接断言锁定：收集器的 push 顺序与文案属于对外契约，新增项须同步更新期望。
 function validateConfig() {
-  // NODE_ENV 是生产硬闸的选择开关。缺失时不能把裸跑入口当成开发环境，
-  // 否则弱密钥、Host、Redis 和 TLS 校验会全部被跳过；开发脚本必须显式设置
-  // NODE_ENV=development，生产入口必须显式设置 production/prod/live。
+  // NODE_ENV 是环境声明，不是"跳过校验"的开关：staging 默认与生产同判，只有显式
+  // FSMS_ALLOW_STAGING_LENIENT=true 才放宽（后果由 reportStagingLeniency 逐条打印）。
   if (process.env.NODE_ENV === undefined) {
     reportConfigErrors([
       'NODE_ENV 必须显式设置（development/dev/local/test/ci/staging 或 production/prod/live），' +
@@ -335,28 +333,35 @@ function validateConfig() {
     ]);
     return;
   }
-  if (!requiresProductionSemantics()) {
-    // 2026-10-24 审计：声明了生产语义却落在开发家族 ⇒ 拒绝启动（判据在 guards 模块）
+  if (!requiresProductionHardening()) {
+    // 2026-10-24 审计：声明了生产语义却落在开发家族 ⇒ 拒绝启动（判据在 guards 模块）。
+    // requiresProductionSemantics 只管诊断口径（日志格式/采样率/前端托管），不再决定本闸。
     const envMismatch = deploymentGuards.productionSemanticsMismatch();
     if (envMismatch) {
       reportConfigErrors([envMismatch]);
       return;
     }
+    reportStagingLeniency();
     return;
   }
 
   const errors = [];
 
-  if (!isProductionLikeEnv()) {
+  if (!isProductionLikeEnv() && !isStagingLikeEnv()) {
     // 放在最前：运维先看到"你的 NODE_ENV 我看不懂"，再看到下面一串因此被要求的生产项，
-    // 否则会被误读成"生产环境怎么突然多了这么多要求"。
+    // 否则会被误读成"生产环境怎么突然多了这么多要求"。staging 是已知环境（默认走硬闸），
+    // 不在这条"未识别"文案里。
     errors.push(
-      `NODE_ENV 取值 "${process.env.NODE_ENV}" 未被识别：仅 development/dev/local/test/ci 与 ` +
-        'staging 可跳过生产校验；生产部署请用 production 或 prod'
+      `NODE_ENV 取值 "${process.env.NODE_ENV}" 未被识别：仅 development/dev/local/test/ci 可跳过` +
+        '生产校验；staging/stage 默认与 production 同判（放宽须显式 FSMS_ALLOW_STAGING_LENIENT=true）；' +
+        '生产部署请用 production 或 prod'
     );
   }
 
   collectSecretErrors(errors);
+  // P2-3 判据在 config/jwtRotation.js（validate.js 体积棘轮贴着上限）；
+  // 启动期只调一次，惰性 require 与 config/index.js 的委托写法同型
+  require('./jwtRotation').collectJwtRotationErrors(errors);
   // 运维凭据强度（Redis / metrics / 告警 webhook / 日志外发）与 webhook 配置完整性：
   // 原先只有"有没有"的判据，弱口令与占位符在启动期不可区分。
   deploymentGuards.collectRuntimeCredentialGuards(errors);
@@ -393,12 +398,16 @@ function validateConfig() {
  * 此行原称「含空值、黑名单、长度三重判定」——**失实**：既漏了实际存在的判据，
  * 又让人以为已有字符集层面的检查（这正是 .env.example 占位符能通过校验的认知根源）。
  */
+// 配了密钥集后，legacy 单密钥不再是必填项：留空 = 「拒绝一切无 kid 令牌」，这正是轮换收尾
+// （删掉旧钥）唯一能真正关掉旧钥的开关。反过来强制必填，旧钥泄露后永远无法吊销。
+const hasKidSet = (name) => (process.env[name] || '').trim().length > 0;
+
 function collectSecretErrors(errors) {
-  if (isWeakSecret(process.env.JWT_SECRET)) {
+  if (!hasKidSet('JWT_SECRETS') && isWeakSecret(process.env.JWT_SECRET)) {
     errors.push('JWT_SECRET 必须设置为至少 32 字符的强随机值，不能使用默认弱密钥');
   }
 
-  if (isWeakSecret(process.env.JWT_REFRESH_SECRET)) {
+  if (!hasKidSet('JWT_REFRESH_SECRETS') && isWeakSecret(process.env.JWT_REFRESH_SECRET)) {
     errors.push('JWT_REFRESH_SECRET 必须设置为至少 32 字符的强随机值');
   }
 
@@ -502,7 +511,7 @@ function collectTrustProxyErrors(errors) {
 
   // 一旦生产启用了 trust proxy，必须同时声明真实代理网段；仅按私网/回环
   // 判断对端身份会允许同一容器网络内的其他服务伪造 X-Forwarded-For。
-  if (requiresProductionSemantics() && validHops) {
+  if (requiresProductionHardening() && validHops) {
     const trusted = trustedProxies.parseTrustedProxyCidrs(process.env[trustedProxies.ENV_KEY]);
     if (!trusted.configured) {
       errors.push(
@@ -516,13 +525,10 @@ function collectTrustProxyErrors(errors) {
 /**
  * TLS 终结校验（自 validateConfig 拆出；M3，2026-09-11 放宽版）
  *
- * TLS 必须在某一层终结，但「哪一层」由部署形态决定。原实现只认
- * ENABLE_HTTPS=true，与 README / .env.example / docker-compose 的目标形态直接
- * 冲突——那里明确写着「TLS 由前置 Nginx 终结，应用进程本身不建议暴露 443」，
- * 且该形态下 ENABLE_HTTPS 必须保持关闭：置 true 会让进程转而加载 ./certs 证书
- * 自起 HTTPS（见 src/index.js 的 HTTPS 分支），证书缺失时直接拒绝启动。
- * 结果是：文档推荐的生产拓扑无法通过生产校验（演练与 CI e2e 一并变红）。
- *
+ * TLS 必须在某一层终结，但「哪一层」由部署形态决定。原实现只认 ENABLE_HTTPS=true，与
+ * README / .env.example / docker-compose 的「TLS 由前置 Nginx 终结」直接冲突：该形态下
+ * ENABLE_HTTPS 必须保持关闭（置 true 会加载 ./certs 自起 HTTPS，证书缺失即拒启动），
+ * 于是文档推荐的生产拓扑反而过不了生产校验（演练与 CI e2e 一并变红）。
  * 放宽后的判定（2026-10-24 收紧为显式声明）：以下二者之一成立即可——
  *   a) 进程自启 HTTPS：ENABLE_HTTPS === 'true'（需自备证书）；
  *   b) 部署方显式声明：TLS_TERMINATED_UPSTREAM === 'true'。
@@ -610,7 +616,6 @@ function reportConfigErrors(errors) {
 
 /**
  * 加固项缺失告警上报（自 validateConfig 拆出；G6）
- *
  * 致命项全部通过后才执行；logger 不可用时降级到 console，确保信息不丢失。
  */
 function reportProductionWarnings() {
@@ -638,7 +643,10 @@ module.exports = {
   // 安全属性一律用 requiresProductionSemantics（未识别值按生产办）；
   // isProductionLikeEnv 只回答"是否显式声明为生产"。
   isProductionLikeEnv,
+  isStagingLikeEnv,
+  stagingLeniencyAcknowledged,
   requiresProductionSemantics,
+  requiresProductionHardening,
   normalizeNodeEnv,
   // trust proxy 取值规则的单一来源：app.js（HTTP）与 websocketService/handshake.js（WS 握手）
   // 必须共用同一份判据与同一个上限，否则同一条请求在两侧得出不同的客户端 IP。
@@ -646,14 +654,48 @@ module.exports = {
   resolveTrustProxyHops,
 };
 
+// 预发宽松（显式声明）时跳过的硬闸清单：只用于启动日志，判据以 validateConfig 的调用顺序为准
+const STAGING_SKIPPED_GATES = [
+  '弱密钥 / JWT 轮换',
+  '运维凭据与 webhook',
+  'CORS 来源',
+  'Mongo/Redis 传输与认证',
+  'ALLOWED_HOSTS',
+  '文档凭据',
+  'TRUST_PROXY_HOPS 与 TRUSTED_PROXY_CIDRS',
+  'TLS 终结',
+  'TZ_BUSINESS',
+];
+
+/**
+ * 预发宽松启动的显式登记：放宽不能是静默的——跳过了哪些硬闸、同时生效了哪些放宽项，
+ * 必须在启动日志里逐条可见，否则与"一个变量把整张生产校验表关掉"没有区别。
+ * 只对 staging + 显式 ack 发声；开发家族本地跑不打印（那是设计内的默认口径）。
+ */
+function reportStagingLeniency() {
+  if (!isStagingLikeEnv() || !stagingLeniencyAcknowledged()) return;
+  const lines = [
+    '预发宽松启动已显式声明（FSMS_ALLOW_STAGING_LENIENT=true），以下生产硬闸本次全部跳过：',
+    `  ${STAGING_SKIPPED_GATES.join(' / ')}`,
+    `同时生效的放宽项：/api-docs 默认${isDocsEnabled() ? '开启' : '关闭'}（ENABLE_API_DOCS 未显式设置时为开）；`,
+    '会话 cookie 无 Secure 位（COOKIE_SECURE 未显式 true）；限流参数越界不拒绝启动。',
+    '生产部署请勿设置该开关：staging 默认与 production 同判据（硬闸全部执行）。',
+  ];
+  try {
+    const logger = require('../utils/logger');
+    lines.forEach((line) => logger.warn(line));
+  } catch (e) {
+    lines.forEach((line) => console.warn(line));
+  }
+}
+
 // 支持直接执行：node src/config/validate.js（= `npm run validate`）
 //
 // 这一支是**独立进程入口**，不经过 src/config/index.js:11，于是没人替它把 <NAME>_FILE
 // 回填进 process.env——而容器里密钥**只**以文件挂载（见 ./secrets.js）。
 // 不回填时 collectSecretErrors 读到 undefined，报出四条「JWT/REFRESH/AES/HMAC 必须设置
-// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:302
+// 为至少 32 字符的强随机值」的**假错**（实测退出码 1），而 deployment/secret-rotation.md:384
 // 正是拿这一步的退出码当"轮换后配置自洽"的证据——*_FILE 部署下那条轮换流程做不到收尾。
-//
 // 为什么不在文件顶部 hydrate（本轮真的先写成顶部方案，被自己的测试打回来了）：
 // 本文件同时是**库**（app.js / index.js / staticFrontend.js / websocketService/handshake.js 都 require 它）
 // 和**入口**，而这两种身份对 require 期的副作用要求相反。顶部写法在 require 期就覆写

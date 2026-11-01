@@ -1,0 +1,142 @@
+# 本仓自持的 Semgrep 规则包（私有仓 SAST 的判据来源）
+#
+# 【为什么规则放在仓库里】`--config auto` / `p/ci` 这类远端配置会把私有源码交给 SaaS，
+# 规则内容也随上游漂移。门禁的判据必须能在仓库里被读到、被测试逐条钉住
+# （`src/tests/ci/sastWorkflowInvariants.test.js` 对 id / 必备字段 / 排除面 / 零命中逐条判）。
+#
+# 【每条规则的入场券是"当前树零命中"】第一次跑就红的门禁会被 `continue-on-error` 消化掉。
+# 零命中的可复算口径（扫哪些根、哪些后缀、怎么排除）写在同一份测试里；改规则必须同时改那份用例，
+# 否则规则自己就是漏检。每条规则下面 metadata.for 记的是"发这条规则时的现场事实"。
+#
+# 【YAML 引号】正则用单引号标量书写：单引号要**成对写**（`''`）才表示一个字面单引号，
+# 例如 `[''"]` 是正则里的 `['"]`。用双引号会让反斜杠再吃一层转义——改完先在本地
+# `new RegExp(...)` 跑一遍再提交。
+
+rules:
+  - id: fsms-jwt-verify-without-algorithms
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      jwt.verify 只传两个参数 ⇒ 没有算法白名单，攻击者可把 alg 换成 none/对称算法伪造令牌。
+      改成 jwt.verify(token, secret, { algorithms: [...] })。
+    metadata:
+      category: security
+      confidence: HIGH
+      for: 本仓 12 处 jwt.verify 全部带 { algorithms }（credentialDoorCheckLedger 逐点对账）
+    pattern-regex: '\bjwt\.verify\(\s*[A-Za-z_$][A-Za-z0-9_$.]*\s*,\s*[A-Za-z_$][A-Za-z0-9_$.]*\s*\)'
+    paths:
+      exclude:
+        - '.github/semgrep/**'
+        - 'src/tests/**'
+        - 'web-admin/src/tests/**'
+        - 'e2e/**'
+
+  - id: fsms-tls-verification-disabled
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      关掉 TLS 校验（rejectUnauthorized: false / NODE_TLS_REJECT_UNAUTHORIZED=0）等于把传输
+      交给中间人。自签证书场景把 CA 装进信任库（NODE_EXTRA_CA_CERTS），别关校验。
+    metadata:
+      category: security
+      confidence: HIGH
+      for: 本仓 0 处；mongod 自签证书走 NODE_EXTRA_CA_CERTS（compose 与 deployment/ 里可见）
+    pattern-regex: 'rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*.{0,1}0'
+    paths:
+      exclude:
+        - '.github/semgrep/**'
+        - 'src/tests/**'
+        - 'web-admin/src/tests/**'
+        - 'e2e/**'
+
+  - id: fsms-md5-hash
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      createHash('md5') 会被碰撞构造打穿：密钥派生、签名、指纹都不该用它。非安全用途改 sha256
+      并写明用途。
+    metadata:
+      category: security
+      confidence: HIGH
+      for: >-
+        本仓 createHash('md5') 0 处；两处 createHash('sha1') 是缓存/ETag 指纹（非安全用途），
+        故本规则只拦 md5——这条豁免写在规则里，不是漏检。
+    pattern-regex: 'createHash\(\s*[''"]md5[''"]'
+    paths:
+      exclude:
+        - '.github/semgrep/**'
+        - 'src/tests/**'
+        - 'web-admin/src/tests/**'
+        - 'e2e/**'
+
+  - id: fsms-dynamic-code-execution
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      eval / new Function 把字符串当代码执行：任何能影响该字符串的输入都成了代码注入面。
+      （redis 的 client.eval 是 Lua 脚本调用，不是本规则的目标——成员调用已被排除。）
+    metadata:
+      category: security
+      confidence: HIGH
+      for: 本仓 0 处 JS eval / new Function；client.eval 那类成员调用由 [^.\w$] 排除
+    pattern-regex: '(^|[^.\w$])eval\s*\(|\bnew\s+Function\s*\('
+    paths:
+      exclude:
+        - '.github/semgrep/**'
+        - 'src/tests/**'
+        - 'web-admin/src/tests/**'
+        - 'e2e/**'
+
+  - id: fsms-child-process-shell
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      child_process 用 shell: true（或 exec）会把参数拼进命令行：任何进入参数的输入都可能
+      变成第二个命令。用 execFile/spawn + 数组参数，别让 shell 参与。
+    metadata:
+      category: security
+      confidence: HIGH
+      for: 本仓 0 处；唯一两处 child_process 用法是 execFileSync（config/buildInfo.js、utils/filePermission.js）
+    pattern-regex: 'shell\s*:\s*true'
+    paths:
+      exclude:
+        - '.github/semgrep/**'
+        - 'src/tests/**'
+        - 'web-admin/src/tests/**'
+        - 'e2e/**'
+
+  - id: fsms-mongo-where-operator
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Mongo 的 $where 会在服务端执行 JS：值里一旦有用户输入就是脚本注入，且绕开索引。
+      改用普通查询算子。
+    metadata:
+      category: security
+      confidence: HIGH
+      for: 本仓 0 处
+    pattern-regex: '\$where\b'
+    paths:
+      exclude:
+        - '.github/semgrep/**'
+        - 'src/tests/**'
+        - 'web-admin/src/tests/**'
+        - 'e2e/**'
+
+  - id: fsms-open-redirect
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      res.redirect(req.*) 把跳转目标交给了请求，可被拿去钓登录凭据。取值后必须只允许同源
+      或白名单内的相对路径。
+    metadata:
+      category: security
+      confidence: HIGH
+      for: 本仓 0 处
+    pattern-regex: 'res\.redirect\(\s*req\.'
+    paths:
+      exclude:
+        - '.github/semgrep/**'
+        - 'src/tests/**'
+        - 'web-admin/src/tests/**'
+        - 'e2e/**'

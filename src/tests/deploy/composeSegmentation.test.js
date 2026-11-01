@@ -136,7 +136,7 @@ describe('compose 端口暴露面闸门', () => {
   /**
    * 取某服务 ports: 下的条目（支持块状与内联 `ports: [...]` 两种写法）
    *
-   * 必须容忍 `ports: !override`：热升级的备色服务（app-green）用它把继承来的
+   * 必须容忍 `ports: !override`：升级的备色服务（app-green）用它把继承来的
    * 端口**替换**掉（extends 对 sequences 是合并，不加 !override 会同时 publish
    * 3000 与 3001）。不认这个形态时，解析结果会是「没有端口」——闸门于是
    * 对着一个 publish 了端口的服务报「干净」，正是它本该拦住的那类假绿。
@@ -188,7 +188,7 @@ describe('compose 端口暴露面闸门', () => {
 
   test('任何 publish 到宿主机的端口都必须绑 127.0.0.1（裸端口等于 0.0.0.0）', () => {
     const offenders = [];
-    // app-green 必须在内：它是热升级窗口内唯一新增的暴露面，
+    // app-green 必须在内：它是升级窗口内唯一新增的暴露面，
     // 写成 `3001:3001` 就等于给备色开了 0.0.0.0 入口，而它只在升级时才存在，
     // 平时没人会注意到
     for (const s of ['app', 'app-green', 'prometheus', 'alertmanager', 'grafana']) {
@@ -213,5 +213,179 @@ describe('compose 端口暴露面闸门', () => {
     for (const pattern of [/27017:27017/, /6379:6379/, /0\.0\.0\.0:27017/, /0\.0\.0\.0:6379/]) {
       expect(exec).not.toMatch(pattern);
     }
+  });
+
+  // ── 宿主端口互斥：热升级备色 vs 监控栈（第四轮审计 D6） ────────────────────
+  //
+  // 缺陷本体：app-green 固定 publish 127.0.0.1:3001（scripts/hotUpgradePolicy.js 的
+  // PORT_BY_COLOR.green 与 deployment/nginx.conf.example 的备色 upstream 都钉这一条），
+  // 而 grafana 也 publish 同一个宿主 3001 且在默认栈里 ⇒ 升级第 2 步
+  // 「docker compose --profile green up -d --no-deps app-green」直接报
+  // "Bind for 127.0.0.1:3001 failed: port is already allocated"：旧色继续服务
+  // （fail-closed），但升级窗口从一开始就走不完。
+  //
+  // 判据：同一宿主端口不得被「可能同时在线」的两个服务声明——
+  //   任一方是默认服务（无 profiles），或两方 profiles 相交 ⇒ 冲突；
+  //   两方都带 profile 且集合不相交 ⇒ 只有人显式同时启用才会撞，视为互斥成立。
+  // 修法选定 grafana 进 observability profile：改动最小，且端口数字不变，
+  // docs/architecture.md 的宿主端口表仍然成立；runbook 与 nginx 示例同步说明。
+  describe('宿主端口互斥闸门', () => {
+    /** 服务块里 profiles: 的取值（默认服务 = 空数组；支持内联与块状两种写法） */
+    const profilesOf = (block) => {
+      const lines = stripComments(block).split(/\r?\n/);
+      const out = [];
+      for (let i = 0; i < lines.length; i += 1) {
+        const inline = /^\s*profiles:\s*\[(.+)\]\s*$/.exec(lines[i]);
+        if (inline) {
+          out.push(
+            ...inline[1]
+              .split(',')
+              .map((one) => one.trim().replace(/^['"]|['"]$/g, ''))
+              .filter(Boolean)
+          );
+          continue;
+        }
+        if (!/^\s*profiles:\s*$/.test(lines[i])) continue;
+        const indent = lines[i].match(/^\s*/)[0].length;
+        for (let j = i + 1; j < lines.length; j += 1) {
+          const line = lines[j];
+          if (!line.trim()) continue;
+          if (line.match(/^\s*/)[0].length <= indent) break;
+          out.push(
+            line
+              .trim()
+              .replace(/^-\s*/, '')
+              .replace(/^['"]|['"]$/g, '')
+          );
+        }
+      }
+      return out;
+    };
+
+    /** '127.0.0.1:3001:3000' 或 '3001:3000' → 宿主端口号；其它形态返回 null */
+    const hostPortOf = (entry) => {
+      const m = /^(?:127\.0\.0\.1:)?(\d+):(\d+)$/.exec(entry.trim());
+      return m ? Number(m[1]) : null;
+    };
+
+    /** 解析任意 compose 文本 → [{ name, profiles, hostPorts }] */
+    const servicePortMap = (text) => {
+      const lines = text.split(/\r?\n/);
+      const start = lines.findIndex((line) => /^services:\s*$/.test(line));
+      if (start < 0) return [];
+      const blocks = [];
+      let cur = null;
+      for (let i = start + 1; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (/^[A-Za-z]/.test(line)) break; // 下一个顶层段
+        const m = /^ {2}([A-Za-z0-9][A-Za-z0-9_-]*):\s*$/.exec(line);
+        if (m) {
+          cur = { name: m[1], lines: [] };
+          blocks.push(cur);
+          continue;
+        }
+        if (cur) cur.lines.push(line);
+      }
+      return blocks.map(({ name, lines: body }) => {
+        const blockText = body.join('\n');
+        return {
+          name,
+          profiles: profilesOf(blockText),
+          hostPorts: publishedPorts(blockText)
+            .map(hostPortOf)
+            .filter((port) => port !== null),
+        };
+      });
+    };
+
+    /** 「可能同时在线」判定：任一方默认、或 profiles 相交 ⇒ 冲突 */
+    const portConflicts = (services) => {
+      const conflicts = [];
+      for (let i = 0; i < services.length; i += 1) {
+        for (let j = i + 1; j < services.length; j += 1) {
+          const a = services[i];
+          const b = services[j];
+          const shared = a.hostPorts.filter((port) => b.hostPorts.includes(port));
+          if (shared.length === 0) continue;
+          const hasDefault = a.profiles.length === 0 || b.profiles.length === 0;
+          const overlap = a.profiles.some((profile) => b.profiles.includes(profile));
+          if (hasDefault || overlap) {
+            conflicts.push(...shared.map((port) => port + ': ' + a.name + ' ↔ ' + b.name));
+          }
+        }
+      }
+      return conflicts;
+    };
+
+    test('前提自证：五个对外服务都解析出宿主端口（解析器退化时下面全是空集假绿）', () => {
+      const map = servicePortMap(YML);
+      const byName = Object.fromEntries(map.map((svc) => [svc.name, svc.hostPorts]));
+      expect(byName.app).toEqual([3000]);
+      expect(byName['app-green']).toEqual([3001]);
+      expect(byName.grafana).toEqual([3001]);
+      expect(byName.prometheus).toEqual([9090]);
+      expect(byName.alertmanager).toEqual([9093]);
+      const profiles = Object.fromEntries(map.map((svc) => [svc.name, svc.profiles]));
+      expect(profiles.app).toEqual([]);
+      expect(profiles['app-green']).toEqual(['green']);
+    });
+
+    test('当前 compose 不存在「可能同时在线」的宿主端口冲突（默认栈与升级窗口各自成立）', () => {
+      expect(portConflicts(servicePortMap(YML))).toEqual([]);
+    });
+
+    test('grafana 必须留在 observability profile：否则它与备色同抢 3001', () => {
+      const map = servicePortMap(YML);
+      const grafana = map.find((svc) => svc.name === 'grafana');
+      expect(grafana.hostPorts).toEqual([3001]);
+      expect(grafana.profiles).toEqual(['observability']);
+      // 与备色的 profile 必须不相交：落在同一个 profile 里时，--profile 一开就撞
+      const green = map.find((svc) => svc.name === 'app-green');
+      expect(green.profiles).toEqual(['green']);
+      for (const profile of grafana.profiles) {
+        expect(green.profiles).not.toContain(profile);
+      }
+    });
+
+    test('可证伪：删掉 grafana 的 profile、或让 profile 与备色重叠，判据都必须报冲突', () => {
+      const fixture = (grafanaBody) =>
+        [
+          'services:',
+          '  app:',
+          '    ports:',
+          "      - '127.0.0.1:3000:3000'",
+          '  app-green:',
+          "    profiles: ['green']",
+          '    ports:',
+          "      - '127.0.0.1:3001:3000'",
+          '  grafana:',
+          ...grafanaBody.map((line) => '    ' + line),
+          'networks:',
+          '  fire-safety-net:',
+          '    driver: bridge',
+          '',
+        ].join('\n');
+      const grafanaPorts = ['ports:', "  - '127.0.0.1:3001:3000'"];
+      // ① 现状形态（profile 不同）→ 无冲突
+      expect(
+        portConflicts(servicePortMap(fixture(["profiles: ['observability']", ...grafanaPorts])))
+      ).toEqual([]);
+      // ② 删掉 profile（正是 D6 的旧形态）→ 必须报 3001 冲突
+      expect(portConflicts(servicePortMap(fixture(grafanaPorts)))).toEqual([
+        '3001: app-green ↔ grafana',
+      ]);
+      // ③ profile 与备色重叠 → 同时启用两个 profile 时仍会撞
+      expect(
+        portConflicts(servicePortMap(fixture(["profiles: ['green']", ...grafanaPorts])))
+      ).toEqual(['3001: app-green ↔ grafana']);
+      // ④ 挪到 3002：另一条合法修法也必须判为无冲突（判据不绑定具体端口号）
+      expect(
+        portConflicts(
+          servicePortMap(
+            fixture(["profiles: ['observability']", 'ports:', "  - '127.0.0.1:3002:3000'"])
+          )
+        )
+      ).toEqual([]);
+    });
   });
 });

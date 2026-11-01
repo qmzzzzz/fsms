@@ -1,6 +1,5 @@
 /**
  * 系统初始化数据服务 · 系统配置播种（allowPublicRegistration / loginCaptchaEnabled）
- * 2026-10-19 批 3c：自 src/services/initData.js 拆出（纯搬家，语义不变）。
  */
 
 const logger = require('../../utils/logger');

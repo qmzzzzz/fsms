@@ -229,6 +229,41 @@ const systemPermissions = [
     method: 'PUT',
     parent: null,
   },
+
+  {
+    name: '临时权限授予菜单',
+    code: 'privilege:*',
+    type: 'menu',
+    module: 'system',
+    path: '/system/privilege-grants',
+  },
+  {
+    name: '查看临时授权',
+    code: 'privilege:read',
+    type: 'api',
+    module: 'system',
+    path: '/api/permissions/grants',
+    method: 'GET',
+    parent: null,
+  },
+  {
+    name: '申请临时授权',
+    code: 'privilege:grant',
+    type: 'api',
+    module: 'system',
+    path: '/api/permissions/grants',
+    method: 'POST',
+    parent: null,
+  },
+  {
+    name: '审批临时授权',
+    code: 'privilege:approve',
+    type: 'api',
+    module: 'system',
+    path: '/api/permissions/grants/{id}/approve',
+    method: 'POST',
+    parent: null,
+  },
 ];
 
 module.exports = { systemPermissions };

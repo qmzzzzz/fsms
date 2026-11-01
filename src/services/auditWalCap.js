@@ -1,17 +1,12 @@
 /**
- * 审计 WAL 的「硬上限」子系统：抽查节流相位 + 超限裁剪 + 裁剪侧计数
- * （报告 R-6 / B-I1 / F-74 / F-217 / F-218）
+ * 审计 WAL 的「硬上限」子系统：抽查节流相位 + 超限裁剪 + 裁剪侧计数。
  *
- * 从 `auditBufferWal.js` 按**既有边界**拆出：宿主管 WAL 文件的 I/O 与串行链，本模块只
- * 回答两个问题——「这次要不要抽查大小」「抽查发现越限之后怎么办」。逐条搬运，行为不变。
- * 拆的直接动因是 `max-lines` 棘轮：宿主文件已到 329 > 300 有效行，而本仓规矩是棘轮只许降
- * 不许升（同族先例：handoff §16.3 把判据搬进 `bundleBudgetPolicy.js`；台账 §8822 的
- * `securityAlert.js [max-lines] 0 -> 1` 也是"不动基线、搬代码"）。
+ * 宿主管 WAL 文件的 I/O 与串行链，本模块只回答两个问题——「这次要不要抽查大小」
+ * 「抽查发现越限之后怎么办」。
  *
  * 文件 I/O 由宿主注入（`readWalRecords` / `atomicReplaceWal` / 当次的 `walPath`）：
- * `enforceWalLimit` 运行在宿主的串行 `walChain` 上，自己不得再排一次队。
- * `stat` 走 `fs.promises.stat` 的属性查找（不解构成局部变量），这样测试对
- * `fs.promises.stat` 的 spy 仍然拦得住这条路径——它原先就靠这个 spy 驱动。
+ * `enforceWalLimit` 运行在宿主的串行 `walChain` 上，自己不得再排一次队。`stat` 走
+ * `fs.promises.stat` 的属性查找（不解构成局部变量），测试的 spy 才拦得住这条路径。
  */
 const fs = require('fs');
 const logger = require('../utils/logger');
@@ -25,19 +20,17 @@ const { readPositiveNumberEnv } = require('../utils/envNumber');
 // 丢弃对象按持久化承诺分级：普通行优先，`__walDurable` 行默认不丢（详见 enforceWalLimit）。
 // 被丢弃的普通行，其文档若仍在缓冲中会照常落库，WAL 行由该批成功落库时的按序号裁剪回收；
 // 对应文档已被 BUFFER_HARD_LIMIT 丢弃的行，本就是纯取证残留。
+// 普通行被裁也进丢弃指标（wal_trim_ordinary）：`.discarded` 永不回灌 ⇒ 缓冲副本已不在的那些同样永久丢失。
 // 运行期读 env 便于测试注入小阈值；默认 50MB。
 const DEFAULT_WAL_MAX_BYTES = 50 * 1024 * 1024;
 // 同一个坏值只告警一次（本函数每次 stat 抽查都会调用，逐次告警会刷日志）
 let walMaxBytesWarnedFor = null;
 
 /**
- * 解析 AUDIT_WAL_MAX_BYTES。
+ * 解析 AUDIT_WAL_MAX_BYTES：只有"有限正数"被采纳，其余一律按未配置处理并显式告警。
  *
- * 原先是 `Number(env) || 50MB`，于是**负数**是个被静默接受的合法真值——
- * `stat.size <= 负数` 恒假 ⇒ 每次抽查都判定"超限"并弃掉一半行，
- * WAL 被持续销毁式裁剪，而这是崩溃后唯一的取证残留。0/NaN 会被 `||` 兜住，
- * 负数不会。判据统一交给 utils/envNumber（与审计链锁超时同一口径）：
- * 非"有限正数"一律按未配置处理并显式告警。
+ * 负数若被当作真值，`stat.size <= 负数` 恒假 ⇒ 每次抽查都判定"超限"并弃掉一半行，
+ * 而 WAL 是崩溃后唯一的取证残留。判据统一交给 utils/envNumber（与审计链锁超时同口径），
  * 测试注入的小阈值（如 1、200 字节）仍是正数，语义不变。
  */
 function getWalMaxBytes() {
@@ -53,16 +46,10 @@ function getWalMaxBytes() {
   });
 }
 
-// B-I1：每条 append 都 stat 是串行 walChain 的吞吐瓶颈——改为每 N 次追加
-// 抽查一次大小（默认 32；N×单行 ≈ 数 KB 的滞后窗口，对 50MB 上限可忽略）。
-// F-217：这一档原先写成 `Math.max(1, Number(env) || 32)`，而它上面那句注释
-// "0/负值按 1 处理"只在负值上成立。实测（node -e，本机）：
-//   "0"→32  "-5"→1  "abc"→32  "2.5"→2.5  ""→32
-// 即 `0 || 32` 被 || 吞成 32 ⇒ 注释承诺的"最保守那一档"恰好给出最松那一档，
-// 且零反馈；2.5 原样生效后 `count % 2.5 === 0` 实际等价"每 5 次"，也不是注释说的值。
-// 现在走仓内统一判据（utils/envNumber）：只有正整数被采纳，其余（含 0）回落默认
-// 并留一条 warn。要"逐条检查"就注入 1 —— 那是既有测试的实际做法，不该为同一个意图
-// 保留第二种写法（同时接受 0 和 1 两种拼法，正是刚才那句假注释的来路）。
+// 每条 append 都 stat 是串行 walChain 的吞吐瓶颈——改为每 N 次追加抽查一次大小
+// （默认 32；N×单行 ≈ 数 KB 的滞后窗口，对 50MB 上限可忽略）。
+// 判据走 utils/envNumber：只有正整数被采纳，其余（含 0）回落默认并留一条 warn；要"逐条
+// 检查"就注入 1（既有测试的实际做法）。
 const WAL_STAT_INTERVAL_DEFAULT = 32;
 const getWalStatInterval = () =>
   readPositiveNumberEnv('AUDIT_WAL_STAT_INTERVAL', WAL_STAT_INTERVAL_DEFAULT, {
@@ -77,14 +64,10 @@ let walAppendCount = 0;
 
 // 累计因 WAL 超限被丢弃的行数（可观测，静默丢取证数据在合规上不可接受）
 let walDroppedLines = 0;
-// F-217：WAL **裁剪侧**的失败计数。追加侧有 walAppendFailures，而"越过上限之后这一轮
-// 到底省没省出空间"以前一个计数都没有（`enforceWalLimit` 的三个失败点全部只 warn 或不 warn）。
-// 于是存在一条面板完全同形的路径：appendFile 一直成功、裁剪一直失败 ⇒
-// walEnabled:true / walAppendFailures:0 / walDroppedLines:0 / walRewriteFailures:0，
-// 与"上限从未被触碰"一字不差，而此时 R-6 这个硬上限已经是空操作（WAL 无界增长 + 写放大）。
-// "追加成功而裁剪失败"不是想象：appendFile 只要**目标文件**可写，裁剪要 writeFile(.tmp)+rename，
-// 需要**目录**可写 —— 目录权限、目录配额、上一次以别的 uid 留下的 .tmp 不属主，三种都够。
-// （本机未实测：Windows 上 fs.chmodSync 是空操作，POSIX 权限分裂复现不出来，属不变式论证。）
+// WAL **裁剪侧**的失败计数：追加侧有 walAppendFailures，而"越过上限之后这一轮到底省没省出
+// 空间"必须单独可见——否则 appendFile 一直成功、裁剪一直失败时，面板与"上限从未被触碰"
+// 一字不差，硬上限已是空操作（WAL 无界增长 + 写放大）。追加只需目标文件可写，裁剪要
+// writeFile(.tmp)+rename ⇒ 需要目录可写（目录权限/配额/残留 .tmp 三种都够）。
 let walTrimFailures = 0;
 // 已按显式开关丢弃的「已 fsync 敏感行」条数。与 walDroppedLines 分开：
 // 前者是"取证缺失"，后者里混着"承诺缺失"，合规口径上不是一回事。
@@ -122,19 +105,16 @@ const noteTrimFailure = (msg) => {
 };
 
 /**
- * WAL 大小硬上限保护（R-6）：超过 getWalMaxBytes() 丢弃最旧一半行并告警。
+ * WAL 大小硬上限保护：超过 getWalMaxBytes() 丢弃最旧一半行并告警。
  * 串行化在宿主的 walChain 上（与追加/裁剪互斥）。
  *
- * **丢弃对象按持久化承诺分级**（2026-10-21 修正）：
- *  - 普通行（`auditBuffer.push` 写出，尽力而为）优先丢，最旧优先；
- *  - `__walDurable` 行（`auditOutbox` 写出，背后是"敏感操作已回成功"）默认**不丢**。
- *    普通行不足以完成本轮目标时，记 `walDurableTrimRefusals` 并停手，
- *    只有显式 `AUDIT_WAL_ALLOW_DURABLE_TRIM=true` 才允许裁，且计入 `walDurableDropped`。
+ * **丢弃对象按持久化承诺分级**：普通行（`auditBuffer.push` 写出，尽力而为）优先丢，最旧
+ * 优先；`__walDurable` 行（`auditOutbox` 写出，背后是"敏感操作已回成功"）默认**不丢**，
+ * 普通行不足以完成本轮目标时记 `walDurableTrimRefusals` 并停手，只有显式
+ * `AUDIT_WAL_ALLOW_DURABLE_TRIM=true` 才允许裁且计入 `walDurableDropped`。
  *
- * 旧实现按**位置**丢最旧一半，理由是"较新行对应的文档大概率仍在缓冲中"。
- * 那个理由对普通行成立，对 durable 行不成立：它们的承诺是"已 fsync 即已持久化"，
- * 而 `.discarded` 永不回灌 ⇒ 按位置裁剪等于把承诺改成"落盘但永久不入库"。
- * 「大概率」不能作为合规链路的正确性前提，故改为按标记分级。
+ * durable 行不能按位置丢：它们的承诺是"已 fsync 即已持久化"，而 `.discarded` 永不回灌，
+ * 按位置裁剪等于把承诺改成"落盘但永久不入库"。「大概率」不能作为合规链路的正确性前提。
  */
 async function enforceWalLimit({ walPath, readWalRecords, atomicReplaceWal }) {
   let stat;
@@ -236,13 +216,18 @@ async function enforceWalLimit({ walPath, readWalRecords, atomicReplaceWal }) {
   }
 
   walDroppedLines += droppedLines.length;
+  const ordinaryDropped = droppedLines.length - durableDropped;
+  if (ordinaryDropped > 0) {
+    // 普通行同样是**永久丢失**（`.discarded` 永不回灌）：缓冲里已没有的那些（崩溃 / 已被
+    // BUFFER_HARD_LIMIT 丢弃）再无第二次机会，此前只累加 JSON 计数。标签与 durable 分开：
+    // wal_trim_ordinary 是“取证缺失”，wal_durable_lost 是“承诺缺失”。
+    require('../utils/metricsAuditDrops').incAuditDrop('wal_trim_ordinary', ordinaryDropped);
+  }
   if (durableDropped > 0) {
     // 与上面那条拒绝日志同一件事的两面：拒绝是"没丢"，这里是"按显式开关丢了"。
     // 单独计数，面板上才能把"取证缺失"与"承诺缺失"分开。
     walDurableDropped += durableDropped;
-    // 同时打进 Prometheus：这条路径的严重度高于其余三个 drop reason
-    // （丢的是已 fsync 且已回成功的敏感审计），必须能触发 AuditRecordsDropped，
-    // 而不是只等有人打开合规面板才发现。
+    // 同时打进 Prometheus：丢的是已 fsync 且已回成功的敏感审计，必须能触发 AuditRecordsDropped。
     require('../utils/metricsAuditDrops').incAuditDrop('wal_durable_lost', durableDropped);
     logger.error(
       `审计 WAL 超限裁剪已按 AUDIT_WAL_ALLOW_DURABLE_TRIM 丢弃 ${durableDropped} 条` +
@@ -280,11 +265,9 @@ function getStats() {
 /**
  * 归零。`walAppendCount` 虽不出现在 getStats 里，也必须一起清：它是抽查判据
  * `walAppendCount % interval === 0` 的左操作数，即"下一次抽查落在第几次追加"的相位。
- * 不清时它是模块级累加值、跨用例泄漏，于是"默认间隔 32 ⇒ 这 10 次追加里根本不会抽查"
- * 这类前提成立与否取决于此前跑过多少条审计记录——实测同一文件换 seed 后变红的臂会换位
- * （zzqA_walStatIntervalEnvContract 的 2.5 臂 ⇄ 0 臂），正是本仓三 seed 随机顺序门禁要禁的形。
- * 既有两处"注入 interval=1 来消除顺序依赖"的绕行（auditBufferFlushAndWalGuards 的
- * walcap / stat_err 两条）在本改动后依然成立：任何整数 % 1 === 0，与相位无关。
+ * 不清时它是模块级累加值、跨用例泄漏，"默认间隔 32 ⇒ 这 10 次追加里根本不会抽查"这类
+ * 前提就会取决于此前跑过多少条审计记录（三 seed 随机顺序门禁要禁的形）。注入 interval=1
+ * 可消除该顺序依赖：任何整数 % 1 === 0，与相位无关。
  */
 function resetCounters() {
   walAppendCount = 0;

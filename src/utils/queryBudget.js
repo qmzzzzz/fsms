@@ -1,5 +1,5 @@
 /**
- * 列表链查询预算（2026-10-01 审计 finding：服务端时间预算此前只覆盖审计侧）
+ * 列表链查询预算
  *
  * 缺口：审计侧早已把「不锚定 $regex ⇒ COLLSCAN」写进注释并用上 maxTimeMS
  * （models/auditLogQueryStatics.js / services/auditChainVerify.js），而业务列表链

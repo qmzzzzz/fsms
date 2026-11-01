@@ -27,6 +27,18 @@ jest.mock('../services/securityAlert', () => ({
   checkUnusualTime: jest.fn().mockResolvedValue(false),
 }));
 
+// 失败触发的人机挑战是**前置层**：本文件量的是凭据/拒绝路径的口令比较次数，而挑战闸门
+// 会在同一用户名的连续失败达到阈值后把这些路径整体换成 CAPTCHA_INVALID（那正是它的行为，
+// 判据与"账户是否存在"无关，由 services/loginChallenge 自己的用例钉住）。整模块替换后，
+// 本文件只考察它要考察的那条链；不替换则探针用的同一个用户名会被自己反噬成假红。
+jest.mock('../services/loginChallenge', () => ({
+  isChallengeRequired: jest.fn().mockResolvedValue(false),
+  // 审计二-3 后登录前置层还会在验证码拒绝分支调它：桩必须与真实导出同形，
+  // 否则走到该分支的用例会拿到 TypeError 而不是被测 outcome
+  recordCaptchaRejected: jest.fn().mockResolvedValue(undefined),
+  CAPTCHA_TRIGGERS: { SWITCH: 'captcha_switch', CHALLENGE: 'challenge_required' },
+}));
+
 const { checkBruteForce } = require('../services/securityAlert');
 const { randomPassword } = require('./helpers/buildLoginEnvelope');
 

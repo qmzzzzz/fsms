@@ -19,6 +19,9 @@ const {
 // 「审计记录被 ValidationError 静默丢弃」的成因。
 const { AUDIT_CATEGORIES: CATEGORY_ENUM } = require('../../constants/audit');
 
+const OID_T = '6aab4cb4ee7f2bc07fcd7a8d'; // 24 位十六进制 ObjectId
+const UUID_T = '550e8400-e29b-41d4-a716-446655440000'; // randomUUID 形态
+
 const OID = '6a587774afeb797dd4de03e3';
 
 describe('auditMeta（审计元数据派生）', () => {
@@ -75,6 +78,36 @@ describe('auditMeta（审计元数据派生）', () => {
   });
 
   describe('deriveAction', () => {
+    test('被丢弃的段后面还有保留段 ⇒ 不得前移拼成别的端点（否则可伪造真实 action）', () => {
+      // 第 18 轮 controllers lane 实测：POST /api/security/forensic/pool-ban/<65 个 Z>/request
+      // 里那段被丢弃后，后续段前移，恰好拼出 security_forensic_pool-ban_request ——
+      // 一个在白名单里、会真的落库的 action，而匿名/404 请求也能走到这条派生。
+      const forged = deriveAction(
+        'POST',
+        '/api/security/forensic/pool-ban/' + 'Z'.repeat(65) + '/request',
+        'security'
+      );
+      expect(forged).not.toBe('security_forensic_pool-ban_request');
+      expect(forged).toBe('security_create'); // 退到方法兜底：语义不可还原时不猜
+
+      const exportForged = deriveAction(
+        'GET',
+        '/api/security/audit-logs/' + 'Z'.repeat(65) + '/export',
+        'security'
+      );
+      expect(exportForged).not.toBe('security_audit-logs_export');
+      expect(exportForged).toBe('security_view');
+    });
+
+    test('对照：常规尾部动态段照旧派生（/:id 类形态不受影响）', () => {
+      expect(deriveAction('DELETE', `/api/auth/sessions/${UUID_T}`, 'auth')).toBe('auth_sessions');
+      expect(deriveAction('POST', `/api/devices/${OID_T}/dispatch`, 'device')).toBe(
+        'device_dispatch'
+      );
+      // 路由声明位（:id）与动态标识同类：/:id/status 必须照旧派生出 device_status
+      expect(deriveAction('PATCH', '/api/devices/:id/status', 'device')).toBe('device_status');
+    });
+
     test('无子路径时按方法映射 create / update / delete', () => {
       expect(deriveAction('POST', '/api/users', 'user')).toBe('user_create');
       expect(deriveAction('PUT', `/api/users/${OID}`, 'user')).toBe('user_update');
@@ -215,6 +248,11 @@ describe('auditMeta（审计元数据派生）', () => {
       // 因此不在"审计筛选白名单"的口径内。实测它派生 4 个 action，全部落在白名单外，
       // 这正是把它豁免掉而不是补 4 条白名单的理由——补了反而给公开端点编造审计动作。
       'wellKnownRoutes.js': '公开无鉴权端点，不写审计行，不在筛选白名单口径内',
+      // 匿名版本元数据（2026-10-30）：该 GET 已在 auditLog 的 auditGetExcludePaths
+      // 里显式豁免（c 类：无主体、无业务数据、频率由客户端驱动），因此整条链不写审计行，
+      // 派生出的 version_view 也就不该进筛选白名单——补进去等于给一个"从不落库的 action"
+      // 开筛选入口，用户按它筛永远得到空集。
+      'versionRoutes.js': '匿名版本元数据，已列入 auditGetExcludePaths，不写审计行',
     };
     const routeFilesInDir = () =>
       fs
@@ -222,6 +260,16 @@ describe('auditMeta（审计元数据派生）', () => {
         .filter((f) => f.endsWith('.js'))
         .sort();
     const collectRouteFiles = () => routeFilesInDir().filter((f) => !ROUTE_EXEMPT[f]);
+
+    /**
+     * 挂载前缀改由 helpers/routeMounts 解析（第 17 轮 F-06）。
+     * 原写法是 \`api/${file.replace('Routes.js', '')}\`——靠"文件名恰好等于挂载段"的巧合工作，
+     * routes/forensicRoutes.js 挂到 /api/security/forensic 后巧合破裂：本闸会凭空造出
+     * forensic_trace 这类**不存在**的 action（真实值是 security_forensic_trace），于是
+     * 一条"多余"的红指向一个不存在的缺陷，而真正的漏登记被这条噪声盖住。
+     */
+    const { readMounts, readNestedMounts, makePrefixOf } = require('../helpers/routeMounts');
+    const prefixOf = makePrefixOf(readMounts(), readNestedMounts());
 
     const collectActions = () => {
       const actions = new Set();
@@ -234,23 +282,23 @@ describe('auditMeta（审计元数据派生）', () => {
         while ((m = routeRe.exec(src)) !== null) {
           const [, method, routePath] = m;
           if (!methods.includes(method)) continue;
-          // 挂载前缀（与 app.js 一致）
-          const prefix = `api/${file.replace('Routes.js', '').replace('security', 'security')}`;
-          const full = `/${prefix}${routePath === '/' ? '' : routePath}`;
+          // 挂载前缀（解析自 app.js 与嵌套 router.use，不再靠文件名巧合）
+          const prefix = prefixOf(file.replace(/\.js$/, ''));
+          const full = `${prefix}${routePath === '/' ? '' : routePath}`.replace(/\/+/g, '/');
           // 复刻 deriveAction 清洗：剔除运行期取值为动态标识的段
           // （:id / :userId 为 ObjectId，:sid 为会话 UUID）。
           // :key 之类「参数名即语义」的段不剔除——它们的取值是有限枚举，
-          // 会正常进入 action（如 security_config_loginCaptchaEnabled）
-          const segments = full.split('/').filter(Boolean);
-          const cleaned = segments.filter((s) => !/^\d+$/.test(s) && !/^:(id|userId|sid)$/.test(s));
-          const subAction = cleaned.slice(2).join('_');
-          const category = cleaned[1] || 'system';
-          if (subAction) {
-            actions.add(`${category}_${subAction}`);
-          } else if (method === 'get') actions.add(`${category}_view`);
-          else if (method === 'post') actions.add(`${category}_create`);
-          else if (method === 'delete') actions.add(`${category}_delete`);
-          else actions.add(`${category}_update`);
+          // 会正常进入 action（如 security_config_loginCaptchaEnabled）。
+          // :jobId（升级任务，randomUUID）与 :sid 同族：运行期取值是动态标识，
+          // 派生时由 deriveAction 的 isDynamicSegment 剔除，故此处同步剔除。
+          // 直接调用**真实的** deriveAction/deriveCategory（不再在本闸里复刻一遍清洗规则）。
+          // 复刻版的实测偏差：它把资源段原样当 category（得到 alarms_view / alarms_stats），
+          // 而生产用 ROUTE_CATEGORY_MAP 归一到单数（alarm_view / alarm_stats）。于是本闸
+          // 报出 60 条"白名单里没有"的假阳性——真正的漏登记被这一屏噪声盖住。
+          // 这正是第 26 轮 F-201 的同一形状：判据与生产各写一份，"事实"就有两份。
+          const { deriveAction, deriveCategory } = require('../../utils/auditMeta');
+          const category = deriveCategory(full);
+          actions.add(deriveAction(method.toUpperCase(), full, category));
         }
       }
       return actions;
@@ -260,8 +308,10 @@ describe('auditMeta（审计元数据派生）', () => {
       // 这条用例自己承担三件事，缺任何一条，上面那条"缺口为空"都可能是恒真的：
       //  ① 目录普查：新增路由文件必须显式表态（进扫描集或进 ROUTE_EXEMPT）；
       //  ② 豁免不留幽灵：ROUTE_EXEMPT 里的文件名必须真的还在目录里（改名/删除要同步）；
-      //  ③ 抽取基线：派生 action 的条数钉死（实测 91）。抽取正则一旦因为写法变化
-      //     返回空集或半集，①②与缺口判据会一起变成空转，只有这一条会响。
+      //  ③ 抽取基线：派生 action 的条数钉死（实测 94；2026-10-30 升级新增
+      //     security_upgrade / security_upgrade_jobs / security_upgrade_requests 三条）。
+      //     抽取正则一旦因为写法变化返回空集或半集，①②与缺口判据会一起变成空转，
+      //     只有这一条会响。
       const dir = routeFilesInDir();
       expect(dir).toEqual([...collectRouteFiles(), ...Object.keys(ROUTE_EXEMPT)].sort());
       expect(dir).toContain('userRoutes.js'); // 目录读到了东西（路径写错时上面也会绿）
@@ -269,7 +319,14 @@ describe('auditMeta（审计元数据派生）', () => {
       for (const reason of Object.values(ROUTE_EXEMPT)) {
         expect(reason.trim().length).toBeGreaterThan(4); // 豁免必须带理由，不许空占位
       }
-      expect(collectActions().size).toBe(91);
+      // 94 → 95：P1-2 新增 PUT /api/security/users/:userId/password/reset
+      // 97：头像写操作 auth_avatar + 读路由派生的 avatar_view（94→95 是 P1-2 密码重置路由）
+      // 102：临时权限授予 5 条（C-08/C-09，挂在 /api/permissions/grants 下）
+      // 106：取证溯源 5 条（T5/T6，嵌套挂在 /api/security/forensic 下）新纳入 = +5，
+      //      同时改调真实 deriveAction 后少了 1 条：复刻版把 /api/alarms/:id/... 之类
+      //      资源段原样当 category（alarms_*），真实实现按 ROUTE_CATEGORY_MAP 归一到
+      //      alarm_*，复刻版凭空多出来的那条随之消失——不是"放宽判据"，是两份事实合一。
+      expect(collectActions().size).toBe(106);
     });
 
     test('全部路由派生型 action 均在 AUDIT_LOG_ACTIONS 白名单内', () => {

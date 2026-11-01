@@ -705,6 +705,66 @@ describe('IpListView 新增名单条目', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('被拒的高危网段：第一次点只亮出确认框，敲对网段后第二次点才带上 typedConfirm', async () => {
+    // 后端四道封段护栏里，打字确认是唯一"再点一次就能满足"的那条。前端若不给通道，
+    // 这个入口就永远是红的（护栏只实现了一侧）——所以这里锁两阶段：
+    // 第一次提交不带 typedConfirm（后端据此判"没确认"），敲对了第二次才带。
+    get.mockImplementation(() => Promise.resolve(listBody([], { total: 0, black: 0, white: 0 })))
+    const refused = {
+      response: {
+        data: {
+          errors: { errorCode: 'IP_SEGMENT_WRITE_REFUSED', reason: 'typed_confirmation_required' },
+        },
+      },
+    }
+    post.mockRejectedValueOnce(refused).mockResolvedValue({ data: {} })
+    const c = await boot(0)
+    expect(c.find('.ip-typed-confirm')).toBeNull() // 低危条目不该预先多一个必填项
+    await fillAdd(c, '203.0.113.0/24')
+    click(addIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 1, { message: '第一次提交' })
+    expect(post.mock.calls[0][1]).not.toHaveProperty('typedConfirm')
+    await waitFor(() => c.find('.ip-typed-confirm') !== null, { message: '确认框渲染' })
+    expect(ElMessage.warning).toHaveBeenCalledWith(
+      '高危网段：请逐字敲出网段本身再提交（防止手滑把整栋楼封进来）'
+    )
+
+    const box = c.find('.ip-typed-confirm').querySelector('input')
+    box.value = '203.0.113.0/24'
+    box.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(4)
+    click(addIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 2, { message: '第二次提交' })
+    expect(post.mock.calls[1][1]).toMatchObject({
+      ip: '203.0.113.0/24',
+      typedConfirm: '203.0.113.0/24',
+    })
+    expect(c.errors).toEqual([])
+  })
+
+  test('自伤网段（罩住调用者）被拒：只说清原因，不亮确认框（打字满足不了这条）', async () => {
+    // operator_inside 与 typed_confirmation_required 的差别必须在界面上看得出来：
+    // 前者再敲一遍也没用（得换更小的网段），给个确认框等于把人骗进死循环。
+    get.mockImplementation(() => Promise.resolve(listBody([], { total: 0, black: 0, white: 0 })))
+    post.mockRejectedValueOnce({
+      response: {
+        data: {
+          errors: { errorCode: 'IP_SEGMENT_WRITE_REFUSED', reason: 'operator_inside' },
+        },
+      },
+    })
+    const c = await boot(0)
+    await fillAdd(c, '127.0.0.0/24')
+    click(addIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 1, { message: '提交' })
+    await waitFor(() => ElMessage.warning.mock.calls.length === 1, { message: '拒绝提示' })
+    expect(ElMessage.warning).toHaveBeenCalledWith(
+      '拒绝：这个网段罩住了你自己，封下去会把你也挡在门外'
+    )
+    expect(c.find('.ip-typed-confirm')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
   test('格式校验边界：合法 CIDR/IPv6 放行，前缀越界/含空格/越界 IPv4 段拒绝', async () => {
     get.mockImplementation(() => Promise.resolve(listBody([], { total: 0 })))
     post.mockResolvedValue({ data: {} })
@@ -1003,6 +1063,32 @@ describe('IpListView 黑白名单切换按钮', () => {
     expect(post.mock.calls[0][1].type).toBe('black')
     expect(post.mock.calls[1][1]).toMatchObject({ ip: '10.0.0.1', type: 'white' })
     expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('白转黑落到**网段**上：必须带上 typedConfirm，否则这条路径 100% 被封段护栏拒', async () => {
+    // 白转黑复用 POST /security/ip-list，而后端对该入口的加黑网段要求打字确认（≥256 主机）。
+    // 切换路径此前只带 ip/type/reason/durationHours ⇒ /24 网段切换必然 400，而
+    // restoreOriginalWhitelist 还会被触发一次多余写（实测两处 false）。判据是"请求体里有没有
+    // 与网段逐字相同的确认串"，不是"有没有弹过确认框"——弹框满足不了护栏。
+    const row = ipRow({ _id: 'white-net', type: 'white', ip: '203.0.113.0/24', reason: '可信出口' })
+    get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
+    confirm.mockResolvedValue('confirm')
+    del.mockResolvedValue({ data: {} })
+    post.mockResolvedValue({ data: {} })
+    const c = await boot(1)
+
+    click(switchIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 1, { message: '加黑请求' })
+    expect(post.mock.calls[0][1]).toMatchObject({
+      ip: '203.0.113.0/24',
+      type: 'black',
+      typedConfirm: '203.0.113.0/24',
+    })
+    // 确认串只对网段有意义：单地址切换不许凭空多出这个字段（后端对该字段只做长度校验，
+    // 但多带一个"看起来确认过"的字段会掩盖真正的语义错误）。
+    expect(post.mock.calls[0][1].typedConfirm).toBe('203.0.113.0/24')
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '切换成功' })
     expect(c.errors).toEqual([])
   })
 

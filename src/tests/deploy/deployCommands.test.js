@@ -24,8 +24,10 @@ const {
   buildUpInvocation,
   buildProbeInvocation,
   buildBackupInvocation,
+  buildHotUpgradeInvocation,
   buildCommandPlan,
   formatInvocation,
+  DEFAULT_HOT_UPGRADE_SCRIPT,
 } = require('../../../scripts/deployCommands');
 
 const ROOT = path.resolve(__dirname, '../../..');
@@ -131,6 +133,40 @@ describe('备份命令与密钥边界', () => {
     const { args } = buildBackupInvocation({ backupDir: hostile });
     expect(args).toEqual([path.resolve(ROOT, 'scripts', 'backup-mongo.sh'), hostile]);
     expect(args.at(-1)).toBe(hostile);
+  });
+});
+
+describe('升级命令（蓝绿）', () => {
+  test('固定脚本 + --apply；nginx 配置与状态文件各占一个 argv 元素', () => {
+    const inv = buildHotUpgradeInvocation({
+      nginxConf: '/etc/nginx/nginx.conf',
+      statusFile: '/var/lib/fsms/upgrade/status/abc.json',
+    });
+    expect(inv.file).toBe(process.execPath);
+    expect(inv.args).toEqual([
+      DEFAULT_HOT_UPGRADE_SCRIPT,
+      '--nginx-conf',
+      '/etc/nginx/nginx.conf',
+      '--status-file',
+      '/var/lib/fsms/upgrade/status/abc.json',
+      '--apply',
+    ]);
+  });
+
+  test('镜像引用不进 argv（走 HOT_UPGRADE_IMAGE 环境变量）', () => {
+    const inv = buildHotUpgradeInvocation({ nginxConf: '/etc/nginx/nginx.conf' });
+    expect(JSON.stringify(inv)).not.toMatch(/sha256:|ghcr\.io/);
+    expect(inv.args).not.toContain('--image');
+  });
+
+  test('演练显式传 --dry-run（不加 --apply），不会真的改生产', () => {
+    const inv = buildHotUpgradeInvocation({ nginxConf: '/n.conf', dryRun: true });
+    expect(inv.args).toContain('--dry-run');
+    expect(inv.args).not.toContain('--apply');
+  });
+
+  test('缺 nginxConf 时拒绝构造（不猜默认生产路径）', () => {
+    expect(() => buildHotUpgradeInvocation({})).toThrow(/nginxConf/);
   });
 });
 

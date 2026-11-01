@@ -107,6 +107,28 @@
           </template>
         </el-input>
       </div>
+      <!-- P1③：加载失败必须有持久痕迹。此前 catch 里直接 tableData=[] + total=0，
+           界面与「确实没有任何用户」完全一致，管理员会误以为账号被清空。
+           无旧数据时用错误块**顶替**表格（而不是空表），有旧数据时表格保留并加警示条。 -->
+      <el-alert
+        v-if="list.failed.value"
+        :title="list.stale.value ? $t('common.staleData') : $t('common.listLoadFailed')"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="load-error"
+      >
+        <template #default>
+          <button
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            :disabled="loading"
+            @click="loadData"
+          >
+            {{ $t('common.retry') }}
+          </button>
+        </template>
+      </el-alert>
       <!-- 首屏骨架占位；数据到达后直接替换（带数据刷新时走表格内 loading） -->
       <GlassSkeleton
         v-if="loading && tableData.length === 0"
@@ -115,7 +137,7 @@
         :cols="['6%', '18%', '11%', '13%', '13%', '14%', '9%', '16%']"
       />
       <el-table
-        v-else
+        v-else-if="list.showTable.value"
         v-loading="loading"
         :data="tableData"
         border
@@ -136,9 +158,13 @@
         <el-table-column :label="$t('user.userColumn')" min-width="160">
           <template #default="{ row }">
             <div class="user-cell">
-              <el-avatar :size="32" class="user-avatar">
-                {{ (row.username || 'U').slice(0, 1).toUpperCase() }}
-              </el-avatar>
+              <UserAvatar
+                :src="row.avatar"
+                :name="row.username"
+                fallback="U"
+                :size="32"
+                class="user-avatar"
+              />
               <div class="user-meta">
                 <div class="uname">
                   {{ row.username }}
@@ -170,7 +196,7 @@
               size="small"
               style="margin-right: 4px"
             >
-              {{ r.name || r.code || r }}
+              {{ roleName(r) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -211,6 +237,14 @@
               {{ $t('user.assignRoles') }}
             </button>
             <button
+              v-if="hasPerm('user:reset_password') && !authStore.isSelf(row._id)"
+              type="button"
+              class="glass-btn glass-btn--warning glass-btn--link"
+              @click="handleResetPassword(row)"
+            >
+              {{ $t('user.resetPassword') }}
+            </button>
+            <button
               v-if="hasPerm('user:reset_password') && row.mfaEnabled && !authStore.isSelf(row._id)"
               type="button"
               class="glass-btn glass-btn--warning glass-btn--link"
@@ -242,13 +276,22 @@
           </template>
         </el-table-column>
       </el-table>
-      <div class="pagination">
+      <div v-if="list.showTable.value" class="pagination">
+        <!-- P1④：total 未知时不能拿当前页长度顶替（会显示「共 N 条 / 1 页」，第 2 页
+             永远不出现）。此处显式标注未知，并让 el-pagination 走 total=0 的隐藏数字分支。 -->
+        <span v-if="!list.totalKnown.value" class="total-unknown">
+          {{ $t('common.totalUnknown') }}
+        </span>
         <el-pagination
           v-model:current-page="page.current"
           v-model:page-size="page.size"
-          :total="page.total"
+          :total="list.total.value ?? 0"
           :page-sizes="[10, 20, 50]"
-          layout="total, sizes, prev, pager, next, jumper"
+          :layout="
+            list.totalKnown.value
+              ? 'total, sizes, prev, pager, next, jumper'
+              : 'sizes, prev, pager, next, jumper'
+          "
           background
           @current-change="loadData"
           @size-change="handleSearch"
@@ -402,7 +445,7 @@
             <el-option
               v-for="role in availableRoles"
               :key="role._id || role.id"
-              :label="role.name"
+              :label="roleName(role)"
               :value="role._id || role.id"
             />
           </el-select>
@@ -507,20 +550,25 @@
 <script setup>
 import { computed, ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useSystemLabels } from '@/i18n/systemLabels'
 import { Search, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api, isCanceledError, isHandledApiError } from '@/utils/api'
+import { useListLoadState } from '@/composables/useListLoadState'
 import { encryptPassword } from '@/utils/loginCipher'
 import { passwordStrengthRule } from '@/utils/password'
 import { enterSubmit } from '@/utils/enterSubmit'
 import ReauthDialog from '@/components/ReauthDialog.vue'
+import UserAvatar from '@/components/UserAvatar.vue'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useAuthStore } from '@/store'
+import { createSubmissionKey } from '@/utils/idempotency'
 
 const { hasPerm } = usePermission()
 const { t } = useI18n()
+const { roleName } = useSystemLabels()
 const authStore = useAuthStore()
 
 /**
@@ -598,6 +646,11 @@ const dialog = reactive({
   visible: false,
   isEdit: false,
   submitting: false,
+  // 本次提交的幂等键（审计一-1）。生命周期=一次提交（含其重试）：
+  // 打开对话框时生成，重试复用同一个键，用户关掉重开/改了内容再提交则换新的。
+  // 服务端据此把"双击的第二次"识别为同一次提交并原样回放第一次结果，
+  // 而不是再建一个同名账号。
+  submission: createSubmissionKey(),
   form: {
     _id: null,
     username: '',
@@ -677,10 +730,13 @@ const debouncedSearch = () => {
 
 // 竞态守卫：快速搜索/翻页时丢弃过期的旧响应，防止旧数据覆盖新结果
 const listGuard = useLatestRequest()
+// P1③/P1④ 共用三态契约：失败、空、未知总数三件事必须分开，不各自为政
+const list = useListLoadState()
 
 const loadData = async () => {
   const isCurrent = listGuard()
   loading.value = true
+  list.begin()
   try {
     const res = await api.users.getList({
       page: page.current,
@@ -689,18 +745,29 @@ const loadData = async () => {
     })
     if (!isCurrent()) return
     const payload = res?.data?.data
-    const list = Array.isArray(payload) ? payload : []
-    tableData.value = list
-    page.total = res?.data?.pagination?.total || list.length
+    const rows = Array.isArray(payload) ? payload : []
+    // P1④：total 缺失时传 undefined（= 未知），**不再**用 rows.length 顶替。
+    // 顶替的后果是分页器显示「共 N 条 / 1 页」，第 2 页起永远不出现且毫无提示。
+    list.commit({ total: res?.data?.pagination?.total, count: rows.length })
+    tableData.value = rows
+    // 末页 clamp：删完最后一页后 current 可能已越界（P1④）
+    const clamped = list.clampPage(page.current, page.size)
+    if (clamped !== page.current) {
+      page.current = clamped
+      return loadData()
+    }
   } catch (e) {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
-    if (isCanceledError(e)) return
+    if (isCanceledError(e)) return list.abort()
     if (!isCurrent()) return
     // P2-3：加载失败只清态，**提示由 api.js 响应拦截器统一负责**（与 alarmView 同契约）。
     // 报告 P2-3 的清单只列了 Device/Inspection/AuditLog/ipList 四处，本文件是**同型漏列**：
     // 组件这里再弹一条，同一次失败会弹两条（拦截器具体文案 + 组件泛化文案）。
-    tableData.value = []
-    page.total = 0
+    //
+    // 但「只清态」不等于「把失败画成空」：交给三态契约判——无旧数据进 failed（表格让位），
+    // 有旧数据进 stale（保留 + 标注）。tableData 只在 failed 时清，stale 必须留旧数据。
+    list.fail()
+    if (!list.showTable.value) tableData.value = []
   } finally {
     if (isCurrent()) loading.value = false
   }
@@ -895,6 +962,7 @@ const handleAdd = () => {
   dialog.phoneBaseline = null
   dialog.form.status = 'active'
   dialog.form.allowedIPs = ''
+  dialog.submission.renew()
   dialog.visible = true
 }
 
@@ -1081,8 +1149,8 @@ const handleBatchDelete = async () => {
   }
   try {
     const res = await api.users.batchDelete(ids)
-    const deleted = res?.data?.data?.deleted
-    ElMessage.success(t('messages.batchDeleteSuccess', { count: deleted ?? ids.length }))
+    const anonymized = res?.data?.data?.anonymized
+    ElMessage.success(t('messages.userBatchDeactivateSuccess', { count: anonymized ?? ids.length }))
     selectedUsers.value = []
     loadData()
   } catch (_) {
@@ -1093,12 +1161,12 @@ const handleBatchDelete = async () => {
 const handleDelete = async (row) => {
   try {
     await ElMessageBox.confirm(
-      `${t('messages.deleteConfirm')}「${row.username}」?`,
+      t('messages.userDeactivateConfirm', { username: row.username }),
       t('messages.confirmTitle'),
       { type: 'warning' }
     )
     await api.users.delete(row._id || row.id)
-    ElMessage.success(t('messages.deleteSuccess'))
+    ElMessage.success(t('messages.userDeactivateSuccess'))
     loadData()
   } catch (e) {
     // Element Plus 的取消与右上角关闭都以字符串 reject（'cancel' / 'close'），
@@ -1107,6 +1175,32 @@ const handleDelete = async (row) => {
       if (!isHandledApiError(e)) ElMessage.error(t('messages.deleteFailed'))
     }
   }
+}
+
+/** 管理员重置用户口令（P1-2：返回一次性临时口令，首次登录强制改密） */
+const handleResetPassword = async (row) => {
+  try {
+    await ElMessageBox.confirm(
+      t('user.resetPasswordConfirm', { username: row.username }),
+      t('messages.confirmTitle'),
+      { type: 'warning' }
+    )
+  } catch (_) {
+    return // 用户取消确认
+  }
+  requestStepUp({
+    run: async (credential) => {
+      const res = await api.security.resetUserPassword(row._id || row.id, credential)
+      const temporaryPassword = res?.data?.data?.temporaryPassword || '—'
+      await ElMessageBox.alert(
+        t('user.resetPasswordResult', { username: row.username, password: temporaryPassword }),
+        t('messages.confirmTitle'),
+        { type: 'warning' }
+      )
+      ElMessage.success(t('user.resetPasswordSuccess'))
+      loadData()
+    },
+  })
 }
 
 /** 管理员重置用户两步验证（丢失认证器时的救济操作，成功后该用户被强制下线） */
@@ -1239,7 +1333,7 @@ const submitForm = async () => {
       if (enc === 'BLOCKED') return
       if (enc) payload.encPassword = enc
       else payload.password = dialog.form.password
-      await api.users.create(payload)
+      await api.users.create(payload, { headers: dialog.submission.header() })
       ElMessage.success(t('messages.createSuccess'))
     } else {
       await api.users.update(dialog.form._id, payload)
@@ -1320,6 +1414,16 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.load-error {
+  margin-bottom: var(--xf-spacing-md);
+}
+/* P1④：total 未知时的显式标注（不拿当前页长度冒充总数） */
+.total-unknown {
+  margin-right: var(--xf-spacing-sm);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-text-secondary);
+}
+
 .page {
   display: flex;
   flex-direction: column;

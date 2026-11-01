@@ -132,7 +132,7 @@ const initCharts = (alarmTrendData, deviceTypeData, failed = {}) => {
       trigger: 'axis',
       formatter: (params) => {
         const data = params[0]
-        return `${escapeHtml(data.name)}<br/>${t('dashboard.alarmCount')}: ${escapeHtml(data.value)}`
+        return `${escapeHtml(data.name)}<br/>${t('dashboard.alarmCount')}${t('common.labelColon')}${escapeHtml(data.value)}`
       },
     },
     grid: {

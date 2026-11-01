@@ -11,10 +11,10 @@
  * 而 trim/discard 表达的是**这条记录已经在库里、它的取证行该不该回收**。
  * 拿前者门控后者，在唯一"关闭但仍会落库"的窗口——`flushAndStop()` 排空预算用尽后
  * `stop()`（disable），而那一轮在途 insertMany 随后成功——就会关掉回收：
- *   · 已落库批次的行永久留在 WAL ⇒ 下次 `start()` 重放进缓冲，而重放文档的 `_id`
- *     是下一轮 flush 新分配的（WAL 行写于 push，那时还没有 `_id`）⇒
- *     **每重启一次就把这个已存在的批次再插一份**（本仓 `index.js` 的关停注释对
- *     同类时序的定性一模一样：B-L2）；
+ *   · 已落库批次的行永久留在 WAL ⇒ 下次 `start()` 重放进缓冲、白占配额，每次启动
+ *     都重放一遍。改前还会**每重启一次就把这个已存在的批次再插一份**（那时的 _id
+ *     由 flush 现分配）；F-143 的跨重启幂等修复后行自带 _id、重放撞唯一索引不再插入，
+ *     但"行必须回收"的要求不变（本仓 `index.js` 的关停注释对同类时序的定性：B-L2）；
  *   · 毒批的内存副本按 `droppedCount` 计损、行却没归档 ⇒ 紧跟着的 error 日志
  *     （`doomedBatchMessage` 按 `discardSeqs.size > 0` 分支）照说"已归档…并从主 WAL
  *     移除"，而 `.discarded` 是"审计永久缺失了多少"的唯一凭据。
@@ -100,8 +100,12 @@ describe('审计 WAL 回收与追加开关解耦（F-143 门禁）', () => {
     // 用计数而不是 toContain：同一个名字出现两次时，toContain 看不见"其中一处被改回去"。
     // discard 从 1 涨到 2（2026-09-26 预铸造闸）：schema 预检被拒的文档走毒批同一口径记账，
     // 多一条回收调用点，而它落在 auditBufferDocs.js——单文件闸门当时看不见它。
+    // trim 从 2 涨到 3（2026-10-31 取证捕获）：services/forensicCapture.js 落库成功后回收自己的
+    // WAL 行。它是**另一个 WAL 模块**（forensicCaptureWal），与本闸门的 auditBufferWal 不是同一份文件，
+    // 只是方法同名而被本闸门的名字判据一并计到——这是有意的：名字判据扫的是目录而不是单文件，
+    // 「拆到哪个文件都还在闸内」正是本闸门存在的理由。这第三条同样必须不在 isEnabled 之后（第 3 条断言覆盖）。
     expect({ trim: sum('trimCalls'), discard: sum('discardCalls') }).toEqual({
-      trim: 2,
+      trim: 3,
       discard: 2,
     });
   });

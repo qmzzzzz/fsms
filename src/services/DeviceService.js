@@ -174,11 +174,9 @@ class DeviceService {
   /**
    * 更新设备信息
    *
-   * status 从可更新白名单中移除。原实现允许通过通用更新接口直写
-   * status='scrapped'，绕过模型层的 transitionTo 迁移表——结果是
-   * status 已报废、而 lifecycleStage/scrapDate/scrapReason 全为空，
-   * 产生「业务上已报废、生命周期上仍在用」的自相矛盾状态，
-   * 且 pre-save 的报废守卫（不再生成检查计划）也不会命中。
+   * status 必须留在可更新白名单之外：走通用更新接口直写 status='scrapped' 会绕过模型层
+   * 的 transitionTo 迁移表，产生 status 已报废而 lifecycleStage/scrapDate/scrapReason 全为空的
+   * 「业务上已报废、生命周期上仍在用」自相矛盾状态，且 pre-save 的报废守卫也不会命中。
    * 状态变更统一走 updateDeviceStatus / scrapDevice。
    */
   async updateDevice(device, updates) {
@@ -305,9 +303,9 @@ class DeviceService {
   /**
    * 添加维护记录
    *
-   * 报废守卫此前只写在模型实例方法 addMaintenanceRecord 里，
-   * 而该方法从未被调用（Service 直接 push 数组），守卫形同虚设——
-   * 已报废设备可继续添加维护记录，还会被算出一个「未来的下次检查日期」。
+   * 报废守卫只写在模型实例方法 addMaintenanceRecord 里是不够的——若 Service 直接 push
+   * 数组而不调该方法，守卫就形同虚设：已报废设备可继续添加维护记录，还会被算出一个
+   * 「未来的下次检查日期」。
    * 此处改为委托模型方法，让守卫与检查周期推进规则成为唯一实现。
    */
   async addMaintenanceRecord(device, content, operatorId, type = 'routine') {

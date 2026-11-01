@@ -20,6 +20,18 @@ const ROOT = path.resolve(__dirname, '../../..');
 const WF = path.join(ROOT, '.github/workflows/release.yml');
 const src = fs.readFileSync(WF, 'utf8');
 
+// 第八轮审计 R-8：脚本体必须来自 release.yml **原文**（抽取器见 helpers/releaseNotesScript.js），
+// shell 必须由 helpers/posixShell.js 行为验证后解析——Windows 上 PATH 里的 bash.exe 多为 WSL 桩，
+// 直接 spawnSync('bash') 的结果是「退出码非 0 且什么都没执行」。
+const { resolveShell } = require('../helpers/posixShell');
+const { extractStepRuns } = require('./helpers/releaseNotesScript');
+
+const EXTRACT_STEP = 'Extract release notes from CHANGELOG';
+const RUN_BODIES = extractStepRuns(src, EXTRACT_STEP);
+/** 探不到可用 POSIX shell 时用 test.skip（报告里是 skipped，不是 passed） */
+const SHELL_CMD = (resolveShell() || { cmd: null }).cmd;
+const itWithShell = SHELL_CMD ? test : test.skip;
+
 /**
  * 与工作流中的提取语义一致的参考实现：
  * 从 `## [version]` 的下一行起，到下一个 `## ` 前一行为止。
@@ -98,56 +110,118 @@ describe('D-1 发布工作流：抽取逻辑与结构不变量', () => {
     expect(exitCount).toBeGreaterThanOrEqual(2);
   });
 
-  test('若环境有 bash + awk，就用**真命令**验一遍工作流里的那条管线（而不是只验 JS 参考实现）', () => {
-    // 上一条测试的局限必须说清楚：它把 awk 逻辑**在 JS 里重写了一遍**，
-    // 因此只能证明“一个符合该规格的实现会得出正确结果”，**不能证明工作流里那条 awk 本身对**。
-    // 这一条用真 bash/awk 跑同一条管线，把那个缺口补上。
-    // 环境无 bash/awk 时明确跳过（不静默假绿）：用 test.skip 而非 if 包裹断言。
-    const { spawnSync } = require('child_process');
-    const probe = spawnSync('bash', ['-c', 'command -v awk'], { encoding: 'utf8' });
-    if (probe.status !== 0) {
-      // 显式标记为跳过，不伪造绿色
-      console.warn('本机无 bash/awk，跳过真命令校验（CI 上会执行）');
-      return;
+  // ── 前提自证：抽取器抽不到就不能"全通过" ────────────────────────────────
+  test('前提自证：从 release.yml 原文抽到了抽取步骤的 run 体（抽不到时下面全是空集假绿）', () => {
+    expect(RUN_BODIES.length).toBeGreaterThanOrEqual(1);
+    for (const body of RUN_BODIES) {
+      expect(body).toContain('CHANGELOG.md');
+      expect(body).toContain('grep -n');
+      expect(body).toContain('tail -n');
+      expect(body).toContain('awk');
+      expect(body).toContain('exit 1');
     }
-    const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'relnotes-'));
+  });
+
+  /**
+   * 在隔离目录里跑一段 run 体：CHANGELOG.md 就位，RELEASE_TAG/GITHUB_OUTPUT 与 Actions 同形。
+   * 返回 release-notes.md 的内容（不存在时为空串）与退出码。
+   */
+  function runExtractBody(body, tag, changelogText) {
+    const os = require('os');
+    const { spawnSync } = require('child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relnotes-'));
     try {
-      const sample = [
-        '# 日志',
-        '',
-        '## [未发布]',
-        '',
-        '- 未来',
-        '',
-        '## [2.0.0] - 2026-12-01',
-        '',
-        '- 第二版的新功能',
-        '',
-        '## [1.0.0] - 2026-08-29',
-        '',
-        '- 第一版',
-        '',
-      ].join('\n');
-      const changelog = path.join(dir, 'CHANGELOG.md');
-      fs.writeFileSync(changelog, sample, 'utf8');
-      const out = path.join(dir, 'notes.md');
-      // 直接拄工作流里的那两段命令（变量换成本地路径）
-      const script = [
-        'set -euo pipefail',
-        'version=2.0.0',
-        `start="$(grep -n -m1 -E "^## \\\\[\${version}\\\\]" '${changelog}' | cut -d: -f1 || true)"`,
-        'if [[ -z "$start" ]]; then echo NOTFOUND; exit 1; fi',
-        `tail -n "+$((start + 1))" '${changelog}' | awk 'NR > 1 && /^## / { exit } NR > 1 { print }' > '${out}'`,
-      ].join('\n');
-      const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
-      expect({ status: r.status, stderr: r.stderr }).toMatchObject({ status: 0 });
-      const notes = fs.readFileSync(out, 'utf8');
-      // 关键：只有第二版的内容，不含第一版与未发布
-      expect(notes).toContain('第二版的新功能');
-      expect(notes).not.toContain('第一版');
-      expect(notes).not.toContain('未来');
+      fs.writeFileSync(path.join(dir, 'CHANGELOG.md'), changelogText, 'utf8');
+      const outFile = path.join(dir, 'github_output');
+      fs.writeFileSync(outFile, '', 'utf8');
+      const r = spawnSync(SHELL_CMD, ['-c', body], {
+        cwd: dir,
+        encoding: 'utf8',
+        timeout: 30000,
+        env: { ...process.env, RELEASE_TAG: tag, GITHUB_OUTPUT: outFile },
+      });
+      let notes = '';
+      try {
+        notes = fs.readFileSync(path.join(dir, 'release-notes.md'), 'utf8');
+      } catch (err) {
+        notes = '';
+      }
+      return { status: r.status, notes, output: String(r.stdout || '') + String(r.stderr || '') };
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * 判定"抽出来的正文合法"：目标内容在、相邻章节一个字都不许进来、且不含任何 `## ` 标题。
+   * 抽成函数是为了让下面的可证伪用例能直接复用它（断言同一份判据会红）。
+   */
+  function expectNoLeak(notes) {
+    expect(notes).toContain('第二版的新功能');
+    expect(notes).not.toContain('第一版');
+    expect(notes).not.toContain('未来');
+    expect(notes.split(/\r?\n/).some((line) => line.startsWith('## '))).toBe(false);
+  }
+
+  // 【R-8】原实现是 fail-open：`if (probe.status !== 0) { console.warn(...); return; }`
+  // —— jest 把空函数体判 passed（本机实测 12 passed + 一行 warn），注释却写"用 test.skip"。
+  // 现在：① 无 shell 时由 itWithShell → test.skip（报告里是 skipped）；
+  //       ② 跑的是从 release.yml **抽出来的原文**，不是手抄副本；
+  //       ③ 下方"可证伪"用例证明这条断言真的会红。
+  itWithShell('真命令：跑工作流原文的抽取步骤，只取目标章节（无泄漏）', () => {
+    const sample = [
+      '# 日志',
+      '',
+      '## [未发布]',
+      '',
+      '- 未来',
+      '',
+      '## [2.0.0] - 2026-12-01',
+      '',
+      '- 第二版的新功能',
+      '',
+      '## [1.0.0] - 2026-08-29',
+      '',
+      '- 第一版',
+      '',
+    ].join('\n');
+    for (const body of RUN_BODIES) {
+      const r = runExtractBody(body, 'v2.0.0', sample);
+      expect({
+        status: r.status,
+        output: r.output.trim() === '' ? '' : r.output.trim(),
+      }).toMatchObject({ status: 0 });
+      // 关键：只有第二版的内容，不含第一版与未发布（判据与可证伪用例共用同一个函数）
+      expectNoLeak(r.notes);
+    }
+  });
+
+  /**
+   * 可证伪：把工作流原文里的 awk 改成 `{ print; exit }`（多吞下一个标题），
+   * 同一段夹具下 note 里必须出现 `## [1.0.0]` —— 即上一条的 not.toContain 会失败。
+   * 变异作用在**抽出来的那份体**上，不引入第二份真源。
+   */
+  itWithShell('可证伪：awk 改成 { print; exit } 后本文件的断言必须变红', () => {
+    const sample = [
+      '## [2.0.0] - 2026-12-01',
+      '',
+      '- 第二版的新功能',
+      '',
+      '## [1.0.0] - 2026-08-29',
+      '',
+      '- 第一版',
+      '',
+    ].join('\n');
+    const AWK_CORRECT = "awk 'NR > 1 && /^## / { exit } NR > 1 { print }'";
+    for (const body of RUN_BODIES) {
+      const mutated = body.replace(
+        AWK_CORRECT,
+        "awk 'NR > 1 && /^## / { print; exit } NR > 1 { print }'"
+      );
+      expect(mutated).not.toBe(body);
+      const r = runExtractBody(mutated, 'v2.0.0', sample);
+      // 判据本身必须抛：M1 形态会把 `## [1.0.0] - …` 标题写进正文，被上面的标题断言抓到
+      expect(() => expectNoLeak(r.notes)).toThrow();
     }
   });
 

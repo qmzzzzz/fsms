@@ -446,11 +446,16 @@ const onLogin = async () => {
         }
         return
       }
-      ElMessage.success(t('login.success'))
+      // P1-2：临时口令账户不走首页，直接进个人资料改密；提示语说明原因
+      if (user.mustChangePassword) {
+        ElMessage.warning(t('login.mustChangePassword'))
+      } else {
+        ElMessage.success(t('login.success'))
+      }
       // 跳转前清理敏感字段，避免密码/动态口令残留在内存中
       loginForm.password = ''
       loginForm.mfaCode = ''
-      router.push('/dashboard')
+      router.push(user.mustChangePassword ? '/profile' : '/dashboard')
     } else {
       ElMessage.error(resp.message || t('login.failed'))
       // 验证码一次性消费：任何失败尝试后都必须换新的
@@ -462,6 +467,14 @@ const onLogin = async () => {
   } catch (error) {
     // 错误已在 axios 拦截器中统一提示
     // 密文被拒的公钥缓存失效已统一收敛到 api.js 拦截器（FE-M1），此处不再重复
+    // 失败触发的人机挑战（后端在连续失败后要求验证码，与静态开关无关）：验证码区
+    // 只在开关开启时渲染，这类响应会显示"验证码错误或已过期"却无处可填——收到该错误码
+    // 即补渲染验证码区并拉一张新图（一次性消费），用户才有出口。
+    if (error?.code === 'CAPTCHA_INVALID' && !captchaEnabled.value) {
+      captchaEnabled.value = true
+      captchaStatus.value = 'ready'
+      ElMessage.warning(t('login.captchaChallengeRequired'))
+    }
     // MFA 码错误时保留二期状态供用户直接重输；验证码一次性消费，失败后换新
     if (captchaEnabled.value) {
       loginForm.captchaText = ''

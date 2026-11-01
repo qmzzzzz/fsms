@@ -11,7 +11,10 @@
  *   MONGODB_URI             必填，MongoDB 连接串（勿用命令行参数传，会泄露到 ps）
  *   HMAC_SECRET             必填（或 HMAC_SECRET_FILE）：检查点签名与审计链 hmac 共用
  *   AUDIT_ANCHOR_SINK       锚点存储：`file:<路径>` 或 `http(s)://<基址>`；未配置则 ship 报错
- *   AUDIT_ANCHOR_ALLOWLIST  http sink 的主机白名单（逗号分隔）；配了就校验，没配只警告
+ *   AUDIT_ANCHOR_ALLOWLIST  http sink 的主机白名单（逗号分隔）；**必填**——未配置即拒绝
+ *                           解析（fail-closed），不再"放行 + 一条 warning"（2026-10-31，审计一-4）
+ *   AUDIT_ANCHOR_ALLOW_PRIVATE_HOSTS  可选，显式放行内网/回环锚点（主机名或 IP/网段）；
+ *                           默认一律拒绝私网目标（云元数据端点是经典 SSRF 目标）
  *
  * 与 verify-audit-chain.js 的分工：后者校验链内自洽性，天然看不见「在已知锚点后
  * 插枝」与「尾部截断」；本脚本把某一时刻的链尾与记录数签成检查点，核验时比对

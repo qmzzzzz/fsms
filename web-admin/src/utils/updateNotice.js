@@ -45,21 +45,52 @@ export function resetUpdateNotice() {
 }
 
 /**
+ * 兜底 reload 的延迟（ms）。
+ *
+ * applier 正常返回**不等于**页面已经更新：vite-plugin-pwa 的 updateSW(true) 在
+ * 没有 waiting SW 时只发一条 SKIP_WAITING 就 resolve（不 reload），于是用户点了
+ * 「立即刷新」什么都不发生，而页面正处于新旧混合状态。给它一个很短的时间窗让
+ * SW 路径真的接管并刷新；窗口过后若还留在页面上，就强制 reload。
+ */
+export const UPDATE_RELOAD_FALLBACK_MS = 1500
+
+const reloadPage = () => {
+  if (typeof location !== 'undefined' && typeof location.reload === 'function') {
+    location.reload()
+  }
+}
+
+/**
+ * 安排一次兜底刷新。
+ *
+ * 若 applier 走的是 SW 路径且确实触发了整页刷新，页面已经离开，
+ * 这个定时器随页面一起销毁（不会产生第二次刷新）。
+ */
+const scheduleReloadFallback = () => {
+  if (typeof setTimeout !== 'function') {
+    reloadPage()
+    return
+  }
+  setTimeout(reloadPage, UPDATE_RELOAD_FALLBACK_MS)
+}
+
+/**
  * 应用更新：优先走 SW 的激活路径，没有可用 applier 时退回普通 reload。
  *
- * applier 抛错必须仍能刷新——否则用户点了按钮、界面毫无反应，
+ * applier 抛错必须**立即**刷新——否则用户点了按钮、界面毫无反应，
  * 而这时页面其实已经处于「新旧混合」状态，比刷一下更危险。
+ * applier 正常返回时走 scheduleReloadFallback：resolve 只代表"消息已发出"，
+ * 不代表页面已刷新（无 waiting SW 时 updateSW(true) 就是这种形态）。
  */
 export async function applyUpdate() {
   if (applier) {
     try {
       await applier()
+      scheduleReloadFallback()
       return
     } catch (_) {
       // 落到下面的兜底 reload
     }
   }
-  if (typeof location !== 'undefined' && typeof location.reload === 'function') {
-    location.reload()
-  }
+  reloadPage()
 }

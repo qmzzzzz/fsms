@@ -1,6 +1,5 @@
 /**
- * 设备/巡检报表统计服务：将数据范围、日期口径与聚合逻辑留在 service 层，
- * 控制器只保留请求校验和统一响应。
+ * 设备/巡检报表统计服务：将数据范围、日期口径与聚合逻辑留在 service 层，控制器只保留请求校验和统一响应。
  */
 
 const FireDevice = require('../models/FireDevice');
@@ -16,17 +15,14 @@ const { withListBudget, listCountOptions, listAggregateOptions } = require('../u
 const MS_PER_MINUTE = 1000 * 60;
 const TREND_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
-// 到期窗口不再自己用定长毫秒算：`30*86400*1000` 与其余实现的 `setDate(+30)`
-// 在 31 天月份/夏令时下差最多 1 天，同一台设备在一处算"即将到期"、另一处不算。
+// 到期窗口不再自己用定长毫秒算：`30*86400*1000` 与其余实现的 `setDate(+30)` 在 31 天月份/夏令时下差最多 1 天，同一台设备在一处算"即将到期"、另一处不算。
 // 口径唯一来源：constants/deviceAlerts（含 scrapped 排除）。
 
 /**
  * 报表内嵌"即将到期"清单的单次上限（资源护栏）。
  *
- * 刻意**不**与 `EXPIRING_LIST_LIMIT`(50) 合并：那是提醒出口的上限，这里是报表出口，
- * 两者要各自调参（是否统一属待拍板项，见 AGENT 工作总账 §104.7）。
- * 但「截断必须可数」这条约定（`constants/deviceAlerts.js:38-48`、F-174）对本出口同样成立，
- * 所以响应体如实带 `expiringSoonTotal` / `expiringSoonTruncated`：
+ * 刻意**不**与 `EXPIRING_LIST_LIMIT`(50) 合并：那是提醒出口的上限，这里是报表出口，两者要各自调参（是否统一属待拍板项，见 AGENT 工作总账 §104.7）。
+ * 但「截断必须可数」这条约定（`constants/deviceAlerts.js:38-48`、F-174）对本出口同样成立，所以响应体如实带 `expiringSoonTotal` / `expiringSoonTruncated`：
  * 修复前 20 行的清单与库里 5000 台的清单**同形**，安全员据此排巡检/备耗材。
  */
 const EXPIRING_REPORT_LIMIT = 20;
@@ -40,8 +36,7 @@ const getDeviceReportData = async (query) => {
   const baseMatch = { ...scopeFilter };
   if (Object.keys(dateFilter).length > 0) baseMatch.installDate = dateFilter;
 
-  // 清单与计数必须共用同一次过滤器构造：分两份写就会各算各的（口径漂移 →
-  // "被数进去却没列出来"或反过来，那比没有总数更糟）。
+  // 清单与计数必须共用同一次过滤器构造：分两份写就会各算各的（口径漂移 →"被数进去却没列出来"或反过来，那比没有总数更糟）。
   const expiringFilter = {
     ...scopeFilter,
     // 原先完全没有状态排除：已报废设备会作为"即将到期"连同位置出现在报表里
@@ -63,9 +58,22 @@ const getDeviceReportData = async (query) => {
               { $group: { _id: '$location.building', count: { $sum: 1 } } },
               { $sort: { count: -1 } },
             ],
+            // 不用 $unwind 展开数组：数组只留最新 RECORD_TAIL_CAP(200) 条（models/FireDevice.js:256），展开计数会在第 201 条起永久少报，而"截断必须可数"正是 maintenanceRecordCount 存在的理由。
+            // 取两者较大值兼容存量文档（无计数字段时按数组长度算），并顺带去掉随总条数线性增长的 $unwind 代价。
             maintenanceTotal: [
-              { $unwind: '$maintenanceRecord' },
-              { $group: { _id: null, count: { $sum: 1 } } },
+              {
+                $group: {
+                  _id: null,
+                  count: {
+                    $sum: {
+                      $max: [
+                        { $size: { $ifNull: ['$maintenanceRecord', []] } },
+                        { $ifNull: ['$maintenanceRecordCount', 0] },
+                      ],
+                    },
+                  },
+                },
+              },
             ],
           },
         },
@@ -112,8 +120,7 @@ const getInspectionReportData = async (query) => {
 
   const matchFilter = { $match: withDateFilter(scopeFilter, dateFilter) };
 
-  // L-2：原先 7 次串行往返，同一份匹配条件下用 $facet 收敛为 1 次，
-  // 仪表盘冷启动时显著降低 p95；返回结构与旧实现对齐，前端无需变更。
+  // L-2：原先 7 次串行往返，同一份匹配条件下用 $facet 收敛为 1 次，仪表盘冷启动时显著降低 p95；返回结构与旧实现对齐，前端无需变更。
   const [facetResult] = await Inspection.aggregate(
     [
       matchFilter,
@@ -155,7 +162,11 @@ const getInspectionReportData = async (query) => {
  * @param {{scopeFilter: object, matchStage: object}} args
  */
 const getAlarmReportData = async ({ scopeFilter, matchStage }) => {
-  const thirtyDaysAgo = new Date(Date.now() - TREND_WINDOW_MS);
+  const now = new Date();
+  const thirtyDaysAgo = new Date(now.getTime() - TREND_WINDOW_MS);
+  const byDayWindow = matchStage.occurredAt
+    ? { $lte: now, ...matchStage.occurredAt }
+    : { $gte: thirtyDaysAgo, $lte: now };
 
   // 使用 $facet 将 6 次聚合合并为 1 次查询；顶层 $match 先应用数据范围，各分支再叠加自身过滤
   const [facetResult] = await FireAlarm.aggregate(
@@ -174,9 +185,14 @@ const getAlarmReportData = async ({ scopeFilter, matchStage }) => {
             { $match: { ...matchStage, cause: { $ne: null } } },
             { $group: { _id: '$cause', count: { $sum: 1 } } },
           ],
-          // 按天统计（近30天）：时区取业务时区单一声明，与仪表盘「今日」同口径
+          // 按天统计：给了日期区间就按请求（缺的一侧由 byDayWindow 用 now 封顶），没给才回落近 30 天；上界必须有，否则未来记录会进趋势图
           byDay: [
-            { $match: { occurredAt: { $gte: thirtyDaysAgo } } },
+            {
+              $match: {
+                ...matchStage,
+                occurredAt: byDayWindow,
+              },
+            },
             {
               $group: {
                 _id: {
@@ -191,8 +207,7 @@ const getAlarmReportData = async ({ scopeFilter, matchStage }) => {
             },
             { $sort: { _id: 1 } },
           ],
-          // 平均响应时间（分钟）（叠加日期过滤；receivedAt 同样加 $ne:null 守卫，
-          // 防止缺失字段的文档参与 $subtract 得到 NaN/报错拉低均值）
+          // 平均响应时间（分钟）（叠加日期过滤；receivedAt 同样加 $ne:null 守卫，防止缺失字段的文档参与 $subtract 得到 NaN/报错拉低均值）
           avgResponseTime: [
             { $match: { ...matchStage, dispatchedAt: { $ne: null }, receivedAt: { $ne: null } } },
             {

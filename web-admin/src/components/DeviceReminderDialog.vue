@@ -39,7 +39,7 @@
         <template v-else>
           <section v-for="bucket in activeBuckets" :key="bucket.key" class="reminder-bucket">
             <h4 class="reminder-bucket-title" :class="bucket.cls">
-              {{ bucket.label }}（{{ bucket.list(data).length }}）
+              {{ bucket.label }}{{ $t('common.countParens', { count: bucket.list(data).length }) }}
             </h4>
             <ul class="reminder-list">
               <li v-for="(item, i) in bucket.list(data)" :key="item._id || i" class="reminder-item">

@@ -53,6 +53,13 @@ const auditLogSchema = new mongoose.Schema(
     },
 
     // 被操作对象（如管理员锁定某用户时记录目标用户）
+    // 索引保留登记（F3，2026-10-31 实测）：本字段与 sessionId/fingerprint 三条 index:true
+    // 「当前无生产查询点」的口径：扫遍全仓 AuditLog.<静态方法>( 调用点、collection('auditlogs')
+    // 直连点与动态构造（auditQuery.js / auditQueryService.js / auditExportService.js /
+    // auditChainCheckpoint.js / securityAlert.js / account.js / behaviorBaseline.js），生产码无一按
+    // 这三字段过滤；只有测试树按 targetUserId 过滤。写侧实测 +308KB（摊 +5B/条；逐条 216/132/4KB，
+    // 20000 文档）。取舍：常数级写放大 vs 将来按此字段取证检索时在最大集合上重建索引（运维窗口 +
+    // 写抖动）。触发条件：一旦出现按该字段的过滤查询，这条索引即被使用。
     targetUserId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -62,17 +69,10 @@ const auditLogSchema = new mongoose.Schema(
       type: String,
     },
 
-    // 举报目标与敏感数据类型的显式声明。此前 schema 为 strict:true 且未声明
-    // 这四个字段，securityController 写入的 targetType/targetId/dataType/description
-    // 被静默丢弃——举报记录无法定位被举报对象、敏感查看记录无法回答「看了哪个字段」。
-    // 类型与写入方对齐：
-    //  - targetType: securityRoutes 校验为 user|device|alarm|system 之一，长度受限
-    //  - targetId:   securityRoutes 校验后只可能是 ObjectId（记录型）或缺席（system 型），
-    //                且记录型已在控制器过存在性 + 数据范围核验；maxlength:100 是
-    //                防御性上限（本字段唯一的写入口收窄后走不到它，留着是为了让
-    //                未来任何新写入方都不至于写出无界字符串）
-    //  - dataType:   securityRoutes 校验为 phone|email 之一
-    //  - description: securityRoutes 限制 <=500 字符
+    // 举报目标与敏感数据类型：此前 strict:true 未声明这四字段，securityController 的写入被静默
+    // 丢弃（举报无法定位对象、敏感查看无法回答「看了哪个字段」）。类型与写入方对齐：
+    // targetType/dataType ∈ securityRoutes 枚举，targetId 校验后只可能是 ObjectId 或缺席；
+    // 四个 maxlength 均为防御性上限（收窄后的写入口走不到，留给未来写入方）。
     targetType: {
       type: String,
       maxlength: [20, '举报目标类型最长 20 个字符'],
@@ -195,7 +195,7 @@ const auditLogSchema = new mongoose.Schema(
       },
     ],
 
-    // 会话信息
+    // 会话信息（索引保留登记见上方 targetUserId 段：零生产查询点，保留取舍与写侧数字同处）
     sessionId: {
       type: String,
       index: true,
@@ -203,7 +203,7 @@ const auditLogSchema = new mongoose.Schema(
     },
 
     // 会话指纹：UA + Accept-Language + Accept-Encoding + IP 网段的 SHA-256 摘要（前 32 位）
-    // 用途：同一 sessionId 下指纹突变可判定为令牌被窃用；跨会话相同指纹可关联同源攻击者
+    // 用途：同一 sessionId 下指纹突变可判定令牌被窃用；索引保留登记同 targetUserId 段（零查询点）。
     fingerprint: {
       type: String,
       index: true,
@@ -233,7 +233,7 @@ const auditLogSchema = new mongoose.Schema(
       type: String,
       default: null,
       index: true,
-      sparse: true, // 同 prevHash：与 sessionId/fingerprint 不同，那两处无 default，稀疏才真省空间
+      sparse: true, // 同 prevHash：稀疏不省空间——写入点恒写 null（auditLogWriteStatics.js:48/54/129-130），实测 4000 行 null 32768B vs 缺键 8192B
     },
     hmac: {
       type: String,
@@ -280,19 +280,19 @@ const auditLogSchema = new mongoose.Schema(
 
 // ================= 索引设计 =================
 // 原则：审计是写密集型集合，每个索引都会带来插入时的 B-tree 维护开销，
-// 因此只保留「筛选字段 + timestamp:-1」形态的复合索引——审计页所有查询都按时间倒序，
-// 复合索引的最左前缀同时覆盖了单字段等值查询，无需再建单字段索引。
+// 因此只保留「筛选字段 + timestamp:-1 + _id:-1」形态的复合索引——审计页所有查询都按
+// {timestamp:-1,_id:-1} 倒序，最左前缀同时覆盖单字段等值查询，无需再建单字段索引。
 //
-// 已移除的冗余索引（由下列复合索引前缀覆盖）：
-//   {action:1} {category:1} {userId:1} {statusCode:1} {success:1} {ip:1} {riskLevel:1}
-// 历史遗留的 {timestamp:1} 由 scripts/sync-audit-indexes.js 清理；
-// schema 不再声明该冗余索引。
-auditLogSchema.index({ userId: 1, timestamp: -1 });
-auditLogSchema.index({ category: 1, timestamp: -1 });
-auditLogSchema.index({ action: 1, timestamp: -1 });
-auditLogSchema.index({ riskLevel: 1, timestamp: -1 });
-auditLogSchema.index({ success: 1, timestamp: -1 });
-auditLogSchema.index({ ip: 1, timestamp: -1 });
+// 尾部 _id:-1 不可省：二键形态只供 filter 段，时间与 _id 仍阻塞排序 ⇒ 优化器不用它
+// （N=2000 实测 category：keys 2000→667、SORT 消失、写侧 +45~49B/条；见迁移
+// 20261201000000 与 tests/models/auditListTiebreakExplain.test.js）；冗余单键索引与历史
+// {timestamp:1}、旧二键筛选形态，均由 sync-audit-indexes.js / 迁移回收。
+auditLogSchema.index({ userId: 1, timestamp: -1, _id: -1 });
+auditLogSchema.index({ category: 1, timestamp: -1, _id: -1 });
+auditLogSchema.index({ action: 1, timestamp: -1, _id: -1 });
+auditLogSchema.index({ riskLevel: 1, timestamp: -1, _id: -1 });
+auditLogSchema.index({ success: 1, timestamp: -1, _id: -1 });
+auditLogSchema.index({ ip: 1, timestamp: -1, _id: -1 });
 
 /**
  * username 前缀过滤的 collation 口径。
@@ -319,7 +319,7 @@ auditLogSchema.index(
 );
 
 // 分类 + 操作类型联合筛选（审计页常用组合）
-auditLogSchema.index({ category: 1, action: 1, timestamp: -1 });
+auditLogSchema.index({ category: 1, action: 1, timestamp: -1, _id: -1 });
 // 审计列表游标分页的排序是 `{ timestamp: -1, _id: -1 }`：续翻子句用
 // `{timestamp:v,_id:{$lt:id}}` 做平局裁决，排序必须同带 `_id`，否则同一毫秒内的
 // 记录整块跨页漂移（实测：5000 条 / 每页 20 ⇒ 漏 3950 条且提前"到底"）。
@@ -329,11 +329,11 @@ auditLogSchema.index({ category: 1, action: 1, timestamp: -1 });
 // 只能各占一条索引。
 auditLogSchema.index({ timestamp: -1, _id: -1 });
 
-// 自动过期（可配，默认 180 天）—— 降序索引同时满足查询排序与 TTL 过期
+// 自动过期（可配，默认 180 天）——降序索引同时满足查询排序与 TTL 过期
 // 留存期解析下沉到 constants/retention.js 单一声明。
 // 此前本文件、logger.js、securityController.js、compliance-check.js 各自解析，
 // 三种口径并存：模型钳制到 [90,3650]，其余两处用 `|| 180`——
-// AUDIT_RETENTION_DAYS=1 时 TTL 是 90 天，而日志文件只留 1 天、合规仪表盘对外报 1 天
+// AUDIT_RETENTION_DAYS=1 时 TTL 是 90 天，而日志文件只留 1 天、合规仪表盘对外报 1 天。
 const { RETENTION_SECONDS } = require('../constants/retention');
 auditLogSchema.index({ timestamp: -1 }, { expireAfterSeconds: RETENTION_SECONDS });
 

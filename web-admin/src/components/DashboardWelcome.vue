@@ -17,9 +17,13 @@
             {{ currentTime }}
           </div>
         </div>
-        <el-avatar :size="64" class="welcome-avatar">
-          {{ (currentUser?.username || 'A').slice(0, 1).toUpperCase() }}
-        </el-avatar>
+        <UserAvatar
+          :src="currentUser?.avatar"
+          :name="currentUser?.username"
+          fallback="A"
+          :size="64"
+          class="welcome-avatar"
+        />
       </div>
     </div>
   </el-card>
@@ -28,6 +32,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import UserAvatar from '@/components/UserAvatar.vue'
 
 defineProps({
   currentUser: { type: Object, default: null },

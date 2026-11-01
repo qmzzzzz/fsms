@@ -36,6 +36,7 @@ const {
 const {
   SINK_ENV,
   ALLOWLIST_ENV,
+  ALLOW_PRIVATE_ENV,
   resolveSink,
   readAnchorStore,
   shipCheckpoints,
@@ -68,6 +69,12 @@ function fakeModel(docs) {
       const hashed = state.filter((doc) => doc.hash != null);
       return hashed.length ? { ...hashed[hashed.length - 1] } : null;
     }
+    // 按 hash 值直查：链尾初始化（utils/auditChainTail）先取尾 hash，再据此取头部文档。
+    // 少了这一支，链尾会被判成 null ⇒ 检查点退化成「空链锚点」（实测算出 headHash:null 的假现场）。
+    if (typeof query.hash === 'string') {
+      const hit = state.find((doc) => doc.hash === query.hash);
+      return hit ? { ...hit } : null;
+    }
     if (query._id !== undefined) {
       const hit = state.find((doc) => String(doc._id) === String(query._id));
       return hit ? { ...hit } : null;
@@ -85,6 +92,11 @@ function fakeModel(docs) {
       if (query && query._id && query._id.$lte !== undefined) {
         return state.filter((doc) => String(doc._id) <= String(query._id.$lte)).length;
       }
+      // 生产口径：recordCount 只数「带哈希」的记录（hash:{$ne:null}），不是集合总数。
+      // 假模型若按总数回答，一旦现场混入无哈希行，计数判据就会在测试里假绿。
+      if (query && query.hash && query.hash.$ne === null) {
+        return state.filter((doc) => doc.hash != null).length;
+      }
       return state.length;
     }),
   };
@@ -93,12 +105,15 @@ function fakeModel(docs) {
 describe('auditAnchorSink.resolveSink', () => {
   const savedSink = process.env[SINK_ENV];
   const savedAllow = process.env[ALLOWLIST_ENV];
+  const savedAllowPrivate = process.env[ALLOW_PRIVATE_ENV];
 
   afterEach(() => {
     if (savedSink === undefined) delete process.env[SINK_ENV];
     else process.env[SINK_ENV] = savedSink;
     if (savedAllow === undefined) delete process.env[ALLOWLIST_ENV];
     else process.env[ALLOWLIST_ENV] = savedAllow;
+    if (savedAllowPrivate === undefined) delete process.env[ALLOW_PRIVATE_ENV];
+    else process.env[ALLOW_PRIVATE_ENV] = savedAllowPrivate;
   });
 
   test('file: 前缀解析为绝对路径，且不带告警', () => {
@@ -128,12 +143,63 @@ describe('auditAnchorSink.resolveSink', () => {
     expect(ok.warnings).toEqual([]);
   });
 
-  test('白名单未配置 → 放行但带一条告警（与 securityAlertDelivery 同口径，不阻断）', () => {
+  test('白名单未配置 → 拒绝（fail-closed），不再"放行 + 一条警告"', () => {
+    // 口径变更（2026-10-31，审计一-4）：原实现放行 + 一条 warning，理由是
+    // "AUDIT_ANCHOR_SINK 与 MONGODB_URI 同级信任"。这条理由挡不住真实失效：
+    // 改错的域名会把**签名有效的检查点**（链头 hash + 计数 + 签名）持续发给陌生人，
+    // 而 cron 的 warning 没人看。现在未配白名单即拒绝。
     delete process.env[ALLOWLIST_ENV];
-    const sink = resolveSink('https://anchor.internal/anchors');
-    expect(sink.kind).toBe('http');
-    expect(sink.warnings).toHaveLength(1);
-    expect(sink.warnings[0]).toMatch(/AUDIT_ANCHOR_ALLOWLIST/);
+    expect(resolveSink('https://anchor.internal/anchors')).toMatchObject({
+      kind: null,
+      reason: 'allowlist_not_configured',
+      host: 'anchor.internal',
+    });
+  });
+
+  test('私网/回环/链路本地与歧义 IPv4 默认拒绝（即使已在白名单里也一样）', () => {
+    // 白名单是"允许发给谁"，私网闸是"这类地址本身不接受"：两道判据独立成立，
+    // 白名单里写上私网地址不等于放行（要放行走 AUDIT_ANCHOR_ALLOW_PRIVATE_HOSTS）。
+    process.env[ALLOWLIST_ENV] = '127.0.0.1,169.254.169.254,10.0.0.7,::1,anchor.internal';
+    for (const raw of [
+      'http://127.0.0.1:9000/anchors',
+      'https://169.254.169.254/latest/meta-data',
+      'http://10.0.0.7/anchors',
+      'http://[::1]/anchors',
+      // 歧义形态：OS 当 127.0.0.1 连，但严格解析判不出私网 ⇒ 一并拒绝
+      'http://127.1/anchors',
+      'http://2130706433/anchors',
+    ]) {
+      expect(resolveSink(raw)).toMatchObject({
+        kind: null,
+        reason: 'host_private_not_allowed',
+      });
+    }
+    // 反面对照：同一份白名单里的公网主机照常放行（判据不是"一律拒绝"）
+    expect(resolveSink('https://anchor.internal/anchors')).toMatchObject({
+      kind: 'http',
+      host: 'anchor.internal',
+    });
+  });
+
+  test('AUDIT_ANCHOR_ALLOW_PRIVATE_HOSTS 可显式放行内网目标（主机名 / IP / 网段）', () => {
+    process.env[ALLOWLIST_ENV] = 'siem.internal,192.168.5.9';
+    expect(resolveSink('http://192.168.5.9/anchors')).toMatchObject({
+      kind: null,
+      reason: 'host_private_not_allowed',
+    });
+    process.env[ALLOW_PRIVATE_ENV] = '192.168.5.9';
+    expect(resolveSink('http://192.168.5.9/anchors')).toMatchObject({ kind: 'http' });
+    // 网段形态走 ipMatchesEntry（与 IP 名单同一把尺）
+    process.env[ALLOW_PRIVATE_ENV] = '192.168.5.0/24';
+    expect(resolveSink('http://192.168.5.9/anchors')).toMatchObject({ kind: 'http' });
+    // 主机名形态：精确匹配
+    process.env[ALLOW_PRIVATE_ENV] = 'siem.internal';
+    expect(resolveSink('http://siem.internal/logs')).toMatchObject({ kind: 'http' });
+    // 放行只针对声明的那个目标，别的私网地址仍然拒绝
+    expect(resolveSink('http://10.1.2.3/anchors')).toMatchObject({
+      kind: null,
+      reason: 'host_private_not_allowed',
+    });
   });
 
   test('未配置（参数与环境变量都没有）→ not_configured', () => {
@@ -250,6 +316,66 @@ describe('compareAnchors（双向比对）', () => {
   });
 });
 
+describe('compareAnchors · D8：外部回滚与「还没发」必须分开（2026-10-31）', () => {
+  test('① 正常落后：外锚停在更早的水位 ⇒ 仍记 pending，不得判红', () => {
+    const local = [mkRecord(1), mkRecord(2), mkRecord(3)];
+    const result = compareAnchors({
+      localEntries: local.map((r, i) => entryOf(r, i + 1)),
+      externalAnchors: [mkRecord(1), mkRecord(2)],
+      secret: SECRET,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.pending).toEqual([expect.objectContaining({ line: 3, headId: local[2].headId })]);
+  });
+
+  test('② 外锚里已有更晚的锚点、本地更早的那条在外锚里缺失 ⇒ anchor_rollback（不得混进 pending）', () => {
+    // 现场：本地 c1→c2→c3；外锚只剩 c1 与 c3。ship 是「按文件序把本地缺的一次性全推」，
+    // c3 能进外锚就说明 c2 当时也在本地、也该一起进去 ⇒ c2 现在不在外锚只可能是被回退掉了。
+    const c1 = mkRecord(1);
+    const c2 = mkRecord(2);
+    const c3 = mkRecord(3);
+    const result = compareAnchors({
+      localEntries: [c1, c2, c3].map((r, i) => entryOf(r, i + 1)),
+      externalAnchors: [c1, c3],
+      secret: SECRET,
+    });
+    expect(result.errors.map((e) => e.type)).toEqual(['anchor_rollback']);
+    expect(result.errors[0]).toMatchObject({ line: 2 });
+    expect(result.errors[0].message).toContain(c2.headId);
+    expect(result.errors[0].message).toContain(c3.headId);
+    expect(result.pending).toEqual([]);
+  });
+
+  test('③ 外锚整份被清空（present 但零条）⇒ 判错 no_external_anchors，不是 pending：空存储证明不了任何事', () => {
+    // 判定理由：外锚这一路的全部价值是「外部有独立副本」。零条时既不能证明失配、也不能
+    // 证明无失配；把它读成 pending 等于让「把外部副本清空」变成一种无成本的掩盖手段。
+    const result = compareAnchors({
+      localEntries: [entryOf(mkRecord(1), 1)],
+      externalAnchors: [],
+      secret: SECRET,
+    });
+    expect(result.errors.map((e) => e.type)).toEqual(['no_external_anchors']);
+    expect(result.pending).toEqual([]);
+  });
+  test('②b 本地记录的 createdAt 是坏串 ⇒ 不判回滚、不抛：水位证不出「发过又被撤」', () => {
+    // 同一现场（本地 c1→c2→c3，外锚只有 c1 与 c3），只把 c2 的 createdAt 换成不可解析的值。
+    // 判据必须退到 pending 而不是猜成回滚：回滚的前提是「c2 早于外锚水位」，而坏串算不出先后。
+    // 顺带钉住不抛：new Date(坏串).getTime() 得 NaN，NaN 参与比较恒 false，成本不能变成异常。
+    const c1 = mkRecord(1);
+    const c2 = { ...mkRecord(2), createdAt: 'not-a-date' };
+    const c3 = mkRecord(3);
+    // 坏串会破坏签名（签名覆盖 createdAt），改用「签名有效但时间不可解析」的构造：
+    // 直接重签一次，保证本用例测的是水位判据，而不是签名闸先把它拦掉。
+    c2.signature = signCheckpoint(c2, SECRET);
+    const result = compareAnchors({
+      localEntries: [c1, c2, c3].map((r, i) => entryOf(r, i + 1)),
+      externalAnchors: [c1, c3],
+      secret: SECRET,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.pending).toEqual([expect.objectContaining({ line: 2, headId: c2.headId })]);
+  });
+});
 describe('verifyCheckpoints 与 externalAnchors 的组合', () => {
   let dir;
   beforeEach(() => {
@@ -506,6 +632,28 @@ describe('shipCheckpoints（file sink）', () => {
     expect(result).toMatchObject({ ok: false, error: 'anchor_store_malformed' });
   });
 
+  test('file sink 存在但零条 ⇒ present:true + emptied:true（与「从未创建」分开）；ship 颜色不变但必须说出来', async () => {
+    fs.mkdirSync(path.dirname(storeFile), { recursive: true });
+    fs.writeFileSync(storeFile, '', 'utf8');
+    const store = await readAnchorStore(resolveSink(`file:${storeFile}`));
+    expect(store).toMatchObject({ ok: true, present: true, emptied: true, anchors: [] });
+
+    // 对照：文件根本不存在时没有 emptied 概念（= 尚未创建，不是被清空）
+    const missing = await readAnchorStore(resolveSink(`file:${path.join(dir, 'nope.jsonl')}`));
+    expect(missing).toMatchObject({ ok: true, present: false, anchors: [] });
+    expect(missing.emptied).toBeUndefined();
+
+    writeLocal([mkRecord(1)]);
+    const shipped = await shipCheckpoints({
+      filePath: localFile,
+      sink: resolveSink(`file:${storeFile}`),
+      secret: SECRET,
+    });
+    // 判据颜色不变：清空不是外发失败，ship 仍会把本地全部锚点重新推入（append-only 可恢复）
+    expect(shipped).toMatchObject({ ok: true, shipped: 1 });
+    // 但它必须被大声说出来——否则「外部被清空」在 ship 侧也是静默的
+    expect(shipped.warnings.join('\n')).toMatch(/被清空|存在但为空/);
+  });
   test('本地没有任何检查点 ⇒ 成功但零条（不是错误，也不算外发成功过）', async () => {
     const result = await shipCheckpoints({
       filePath: localFile,
@@ -525,15 +673,29 @@ describe('shipCheckpoints / readAnchorStore（http sink）', () => {
   let postStatus;
   let getBody;
 
+  // 本组用**真实**本地 server 当对端（http://127.0.0.1:<port>）。2026-10-31 起
+  // http sink 是两道硬闸（白名单必配 + 私网默认拒），故这里按运维的真实做法
+  // 显式声明：白名单写上 127.0.0.1，并用 ALLOW_PRIVATE_HOSTS 放行回环地址。
+  // 不这样声明的话，本组测的就不再是传输语义，而是被闸门挡在 resolveSink 之前
+  // ——那正是下面「未配置白名单 ⇒ 拒绝」那条用例单独钉住的形态。
+  const savedAllow = process.env[ALLOWLIST_ENV];
+  const savedAllowPrivate = process.env[ALLOW_PRIVATE_ENV];
+
   beforeEach(() => {
     store = [];
     posts = [];
     getStatus = 200;
     postStatus = 200;
     getBody = null;
+    process.env[ALLOWLIST_ENV] = '127.0.0.1';
+    process.env[ALLOW_PRIVATE_ENV] = '127.0.0.1';
   });
 
   afterEach(async () => {
+    if (savedAllow === undefined) delete process.env[ALLOWLIST_ENV];
+    else process.env[ALLOWLIST_ENV] = savedAllow;
+    if (savedAllowPrivate === undefined) delete process.env[ALLOW_PRIVATE_ENV];
+    else process.env[ALLOW_PRIVATE_ENV] = savedAllowPrivate;
     if (server) {
       await new Promise((resolve) => server.close(resolve));
       server = null;

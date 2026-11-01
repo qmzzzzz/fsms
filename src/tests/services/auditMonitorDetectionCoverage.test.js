@@ -318,6 +318,38 @@ describe('auditMonitor 检测窗口占空比 / 重入 / 失败可见（F-125）'
       expect(auditMonitor.getHealth().failures).toBe(0);
       expect(auditMonitor.getHealth().skippedOverlaps).toBe(0);
     });
+
+    test('成功读数配对：lastSuccessAt 只在整轮（含告警侧）跑完时落，推送侧抛错不刷新它', async () => {
+      await auditMonitor.runDetection();
+      const ok = auditMonitor.getHealth().lastSuccessAt;
+      expect(ok).toBeTruthy();
+
+      // getHealth() 返回快照副本，比对对象是上一轮的读数本身，不需要固定睡眠拉开毫秒）；
+      // "没被刷新"的真对照在末尾：成功轮必须把 lastSuccessAt 换成新值。
+      // 换一个维度命中：当日"已推送"表是**按维度**消费的，复用同一个维度会在推送前
+      // 就 return（本轮根本没走到推送侧，"推送抛错"这条路径就测不到了）
+      AuditLog.detectAnomalies.mockResolvedValueOnce({
+        failedOperations: [],
+        failedOperationsByIp: [{ _id: '1.2.3.4', count: 42 }],
+        unusualTimeOperations: [],
+      });
+      securityAlert.sendNotification.mockRejectedValueOnce(new Error('webhook refused'));
+      await auditMonitor.runDetection();
+
+      const bad = auditMonitor.getHealth();
+      expect(bad.lastFailureMessage).toBe('webhook refused');
+      expect(bad.lastSuccessAt).toBe(ok); // 闭环断在推送侧的那一轮不是成功轮
+      expect(bad.consecutiveFailures).toBe(1); // 上一轮成功已归零，连败从 1 起算
+    });
+
+    test('复位钩子覆盖 health 的每一个键（新增读数不会漏复位）', async () => {
+      const fresh = auditMonitor.getHealth();
+      securityAlert.sendNotification.mockRejectedValueOnce(new Error('blip'));
+      await auditMonitor.runDetection();
+      auditMonitor.__resetForTest();
+      // 逐键相等：复位漏掉任何一个键（含日后新增的）这里必红
+      expect(auditMonitor.getHealth()).toEqual(fresh);
+    });
   });
 });
 

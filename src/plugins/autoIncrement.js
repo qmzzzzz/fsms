@@ -1,6 +1,5 @@
 /**
- * Mongoose 自动编号插件
- * 基于 counters 集合的原子计数器，为文档生成唯一编号（如设备编号、报警编号）
+ * Mongoose 自动编号插件基于 counters 集合的原子计数器，为文档生成唯一编号（如设备编号、报警编号）
  *
  * 用法：
  *   schema.plugin(autoIncrement, {
@@ -18,11 +17,7 @@ const { escapeRegExp } = require('../utils/helpers');
 /**
  * 从 findOneAndUpdate 的返回值里取出文档本身。
  *
- * driver 7 默认 `includeResultMetadata:false`（返回文档或 null），但旧版/显式传
- * `includeResultMetadata:true` 时返回的是 `{ value, ok, lastErrorObject }`。
- * 仓库里原先写的是 `r.value || r`，它在"ModifyResult 且没匹配到文档"这一格会退化成
- * 把整个结果壳当成文档（`.seq` 为 undefined）——两处调用点都靠这种形状猜。
- * 按载荷本身判别：自带 seq 就是文档，否则取 .value（可能是 null）。
+ * driver 7 默认 `includeResultMetadata:false`（返回文档或 null），但旧版/显式传 `includeResultMetadata:true` 时返回的是 `{ value, ok, lastErrorObject }`。仓库里原先写的是 `r.value || r`，它在"ModifyResult 且没匹配到文档"这一格会退化成把整个结果壳当成文档（`.seq` 为 undefined）——两处调用点都靠这种形状猜。按载荷本身判别：自带 seq 就是文档，否则取 .value（可能是 null）。
  */
 const docOfResult = (r) => {
   if (!r) return null;

@@ -116,6 +116,34 @@ describe('接线不变量（语义对了但没接线，是这类修复最常见�
     expect(fn).toMatch(/user\.passwordHistory\s*=\s*withPrevious\(/);
   });
 
+  test('管理员重置口令必须把被替换掉的那一代口令写成退役摘要（审计二-2）', () => {
+    // 漏了 +password ⇒ user.password 恒 undefined ⇒ retiredHashForReset 算出 null
+    // ⇒「重置后又把口令改回重置前那条」静默放行，而本文件所有语义用例仍然全绿
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '../../controllers/securityController/admin.js'),
+      'utf8'
+    );
+    const fn = src.slice(src.indexOf('const resetUserPassword = asyncHandler'));
+    expect(fn).toMatch(/\.select\('\+password[^']*'\)/);
+    expect(fn).toMatch(/passwordRetiredHash:\s*retiredHashForReset\(user\)/);
+    // 取值函数本体必须落「本次载入的旧摘要」，而不是常量或新签发的临时口令
+    const helper = src.slice(src.indexOf('function retiredHashForReset'));
+    expect(helper).toMatch(
+      /return hasUnconsumedTemp \? user\.passwordRetiredHash : user\.password \|\| null;/
+    );
+  });
+
+  test('改密路径必须读出退役摘要并真的比对（只写不读同样是缺陷）', () => {
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '../../services/authService/password.js'),
+      'utf8'
+    );
+    const fn = src.slice(src.indexOf('async function changeUserPassword'));
+    expect(fn).toMatch(/\.select\(\s*'\+password[^']*passwordRetiredHash/);
+    expect(src).toMatch(/matchesRetiredPassword\(user\.passwordRetiredHash, newPassword\)/);
+    expect(src).toMatch(/bcryptWorker\.compare\(candidatePassword, retiredHash\)/);
+  });
+
   test('passwordHistory 是 select:false 凭证级字段，且被响应投影显式排除', () => {
     // 它是对口令明文的单向摘要：读到它等于拿到"这个口令用过没有"的预言机
     expect(User.schema.path('passwordHistory').options.select).toBe(false);

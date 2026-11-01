@@ -6,9 +6,9 @@
  *    （migrate-mongo 上下文不 require 模型），模型改 `collection:` 就没人报警；
  * ② 迁移建的复合索引 key 必须与 schema 声明逐字段一致 —— 只声明不迁迁移，
  *    存量库永远缺索引（autoIndex 只在新库生效）；只迁不声明，
- *    `scripts/sync-audit-indexes.js --apply` 会把它当"模型未声明的冗余索引"删掉；
+ *    存量库对齐走本迁移（`scripts/sync-audit-indexes.js` 只对账 auditlogs，不会碰这两个集合）；
  * ③ 索引名必须与 mongod 自动生成的名字一致 —— 迁移按名字判存在，名字算错会
- *    走到 createIndex，同 key 不同名直接 IndexKeySpecsConflict，部署停在半途；
+ *    走到 createIndex，同 key 不同名抛 85 IndexOptionsConflict（86 IndexKeySpecsConflict 是同名不同 key）；
  * ④ auditlogs 的 `{timestamp:-1}` 单字段索引不能删：它挂着 TTL，而 mongod 6.0.14
  *    实测拒绝在复合索引上挂 expireAfterSeconds（TTL indexes are single-field indexes）。
  *
@@ -147,7 +147,7 @@ describe('游标平局裁决复合索引：迁移与声明对账', () => {
     test('⑤ 从漂移形态（只有旧单字段索引）出发，up() 收敛到声明且幂等', async () => {
       const db = isolated.db;
       await seedDriftAndUp(db);
-      // 幂等：跑第二遍不得因为"名字算错 ⇒ 再建一次同名 key"而抛 IndexKeySpecsConflict
+      // 幂等：跑第二遍不得因为"名字算错 ⇒ 再建一次同 key 异名"而抛 85 IndexOptionsConflict
       await expect(migration.up(db)).resolves.toBeUndefined();
 
       for (const { model, field, replaceSingle } of TARGETS) {
@@ -190,5 +190,114 @@ describe('游标平局裁决复合索引：迁移与声明对账', () => {
         RETENTION_SECONDS
       );
     });
+
+    test('⑦ 同名但 key 漂移（反序）⇒ up() 必须纠正到声明的 key', async () => {
+      const db = isolated.db;
+      for (const { model, field } of TARGETS) {
+        const coll = db.collection(model.collection.name);
+        await coll.dropIndexes().catch(() => {});
+        // 名字是 mongod 生成态（迁移只按这个名字判存在），但 key 反序——
+        // 「名字在就跳过」会把它当已对齐放过，查询侧排序随之退化（20k 实测 docs 20000/keys 0 同源）
+        await coll.createIndex({ _id: -1, [field]: -1 }, { name: `${field}_-1__id_-1` });
+      }
+      await expect(migration.up(db)).resolves.toBeUndefined();
+      for (const { model, field } of TARGETS) {
+        const list = await indexesOf(model.collection.name);
+        const named = list.find((i) => i.name === `${field}_-1__id_-1`);
+        expect(named).toBeTruthy();
+        expect(keySig(named.key)).toBe(`${field}:-1|_id:-1`);
+      }
+    });
+
+    test('⑧ 同 key 不同名（85 形态）⇒ up() 不抛且收敛到声明名一条', async () => {
+      const db = isolated.db;
+      for (const { model, field } of TARGETS) {
+        const coll = db.collection(model.collection.name);
+        await coll.dropIndexes().catch(() => {});
+        // 声明的 key 已被别的名字占着：迁移再 createIndex（自动命名）必撞
+        // 85 IndexOptionsConflict（mongod 8.0.34 实测：'Index already exists with a different name'）
+        await coll.createIndex({ [field]: -1, _id: -1 }, { name: `legacy_${field}_tie` });
+      }
+      await expect(migration.up(db)).resolves.toBeUndefined();
+      for (const { model, field } of TARGETS) {
+        const list = await indexesOf(model.collection.name);
+        const declared = list.filter((i) => keySig(i.key) === `${field}:-1|_id:-1`);
+        expect(declared).toHaveLength(1);
+        expect(declared[0].name).toBe(`${field}_-1__id_-1`);
+        expect(list.find((i) => i.name === `legacy_${field}_tie`)).toBeFalsy();
+      }
+    });
+    test('⑨ 同名且 key 对，但整 spec 漂移（unique:true）⇒ up() 必须重建', async () => {
+      const db = isolated.db;
+      for (const { model, field } of TARGETS) {
+        const coll = db.collection(model.collection.name);
+        await coll.dropIndexes().catch(() => {});
+        // 名字对、key 也对，只有 unique 漂移：只比 key 的判据会 skip，于是凭空多出一条唯一约束
+        await coll.createIndex(
+          { [field]: -1, _id: -1 },
+          { name: `${field}_-1__id_-1`, unique: true }
+        );
+      }
+      await expect(migration.up(db)).resolves.toBeUndefined();
+      for (const { model, field } of TARGETS) {
+        const named = (await indexesOf(model.collection.name)).find(
+          (i) => i.name === `${field}_-1__id_-1`
+        );
+        expect(named).toBeTruthy();
+        expect(keySig(named.key)).toBe(`${field}:-1|_id:-1`);
+        expect(named.unique).toBeFalsy();
+      }
+    });
+
+    test('⑩ 同名且 key 对，但 collation 漂移（caseLevel）⇒ up() 必须重建', async () => {
+      const db = isolated.db;
+      for (const { model, field } of TARGETS) {
+        const coll = db.collection(model.collection.name);
+        await coll.dropIndexes().catch(() => {});
+        // 声明里根本没有 collation：带 caseLevel 的那条与声明不是同一条索引（查询也命不中它）
+        await coll.createIndex(
+          { [field]: -1, _id: -1 },
+          { name: `${field}_-1__id_-1`, collation: { locale: 'en', strength: 2, caseLevel: true } }
+        );
+      }
+      await expect(migration.up(db)).resolves.toBeUndefined();
+      for (const { model, field } of TARGETS) {
+        const named = (await indexesOf(model.collection.name)).find(
+          (i) => i.name === `${field}_-1__id_-1`
+        );
+        expect(named).toBeTruthy();
+        expect(named.collation).toBeUndefined();
+      }
+    });
+
+    test('⑪ 异名 twin 带语义差异（unique:true）⇒ up() 不得删它', async () => {
+      const db = isolated.db;
+      for (const { model, field } of TARGETS) {
+        const coll = db.collection(model.collection.name);
+        await coll.dropIndexes().catch(() => {});
+        // 同 key、异名、多一个 unique：与目标**并存合法**（实测），删它就是静默丢掉唯一约束
+        await coll.createIndex(
+          { [field]: -1, _id: -1 },
+          { name: `legacy_${field}_uniq`, unique: true }
+        );
+      }
+      await expect(migration.up(db)).resolves.toBeUndefined();
+      for (const { model, field } of TARGETS) {
+        const list = await indexesOf(model.collection.name);
+        const twin = list.find((i) => i.name === `legacy_${field}_uniq`);
+        expect(twin).toBeTruthy();
+        expect(twin.unique).toBe(true);
+        expect(list.find((i) => i.name === `${field}_-1__id_-1`)).toBeTruthy();
+      }
+    });
+
+    // 判据覆盖但不可构造（写成注释而不是会红的用例，避免造出 mongod 直接拒的形态）：
+    //   · 复合 key + expireAfterSeconds ⇒ 8.0.34 实测 code 67 CannotCreateIndex
+    //     （TTL indexes are single-field indexes, compound indexes do not support TTL）；
+    //   · collation.caseFirst:'upper' 在本批迁移的声明形态下建不出来：8.0.34 实测
+    //     {locale:'en',strength:2,caseFirst:'upper'} 抛 code 2 BadValue（'caseFirst' is invalid
+    //     unless 'caseLevel' is on or 'strength' is greater than 2）⇒ 不可构造（与本轮报告的
+    //     8.3.4 读数一致）。判据仍覆盖它：把 strength 提到 3 即可构造，实测建成后会被 specSig
+    //     判为漂移并重建（probe12c 的 S7 一格）。
   });
 });

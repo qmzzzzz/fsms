@@ -36,10 +36,9 @@ function base32Encode(buf) {
 /**
  * Base32 字符串 → Buffer
  *
- * 非法字符不再静默跳过。原实现 `if (idx === -1) continue` 会把
- * `JBSWY3DPEHPK3PXP!!!!` 与 `JBSWY3DPEHPK3PXP` 解成同一个密钥，
- * 也会把用户误粘贴的整段 URL 解出一个"看起来能用"的密钥——
- * 于是 enroll 阶段的输入错误要到验证阶段才暴露，且无从定位。
+ * 非法字符**不得**静默跳过（`if (idx === -1) continue` 会把 `JBSWY3DPEHPK3PXP!!!!` 与
+ * `JBSWY3DPEHPK3PXP` 解成同一个密钥，也会把误粘贴的整段 URL 解出一个"看起来能用"的密钥）
+ * ——否则 enroll 阶段的输入错误要到验证阶段才暴露，且无从定位。
  * 空白与 `=` 填充仍然容忍（认证器展示的密钥常带分组空格）。
  *
  * @param {string} str Base32 字符串

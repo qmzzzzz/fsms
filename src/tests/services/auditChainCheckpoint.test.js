@@ -28,15 +28,29 @@ const ID2 = '000000000000000000000020';
 const ID3 = '000000000000000000000030';
 
 /**
- * 假 AuditLog：docs 按 _id 升序存放，findOne 支持两种查询——
- * 取最新哈希记录（createCheckpoint）与按 _id 取头（verifyCheckpoints）。
+ * 假 AuditLog：docs 按 _id 存放，findOne 支持取最新哈希记录 / 按 _id / 按 hash 取头，
+ * find 支持 getLatestHash 需要的「候选窗口 + prevHash 反查」。
  */
 function fakeModel(docs) {
   const state = docs.map((doc) => ({ ...doc }));
-  const resultOf = (query) => {
+  const match = (doc, query = {}) =>
+    Object.entries(query).every(([key, cond]) => {
+      if (cond && typeof cond === 'object' && '$ne' in cond) {
+        return cond.$ne === null ? doc[key] != null : doc[key] !== cond.$ne;
+      }
+      if (cond && typeof cond === 'object' && '$in' in cond) return cond.$in.includes(doc[key]);
+      return String(doc[key]) === String(cond);
+    });
+  const resultOf = (query = {}) => {
+    if (typeof query.hash === 'string') {
+      const hit = state.find((doc) => doc.hash === query.hash);
+      return hit ? { ...hit } : null;
+    }
     if (query.hash && query.hash.$ne === null) {
       const hashed = state.filter((doc) => doc.hash != null);
-      return hashed.length ? { ...hashed[hashed.length - 1] } : null;
+      if (!hashed.length) return null;
+      const byIdDesc = hashed.slice().sort((x, y) => String(y._id).localeCompare(String(x._id)));
+      return { ...byIdDesc[0] };
     }
     if (query._id !== undefined) {
       const hit = state.find((doc) => String(doc._id) === String(query._id));
@@ -51,7 +65,27 @@ function fakeModel(docs) {
       const chain = { sort: () => chain, lean: async () => result };
       return chain;
     }),
+    find: jest.fn((query) => {
+      let rows = state.filter((doc) => match(doc, query));
+      const api = {
+        sort: (spec) => {
+          if (spec && spec._id === -1) {
+            rows = rows.slice().sort((x, y) => String(y._id).localeCompare(String(x._id)));
+          }
+          return api;
+        },
+        limit: (n) => {
+          rows = rows.slice(0, n);
+          return api;
+        },
+        lean: async () => rows.map((doc) => ({ ...doc })),
+      };
+      return api;
+    }),
     countDocuments: jest.fn(async (query) => {
+      if (query && query.hash && query.hash.$ne === null) {
+        return state.filter((doc) => doc.hash != null).length;
+      }
       if (query && query._id && query._id.$lte !== undefined) {
         return state.filter((doc) => String(doc._id) <= String(query._id.$lte)).length;
       }
@@ -62,8 +96,8 @@ function fakeModel(docs) {
 }
 
 const hashedDocs = () => [
-  { _id: ID1, hash: 'hash-1', hmac: 'hmac-1' },
-  { _id: ID2, hash: 'hash-2', hmac: 'hmac-2' },
+  { _id: ID1, hash: 'hash-1', hmac: 'hmac-1', prevHash: null },
+  { _id: ID2, hash: 'hash-2', hmac: 'hmac-2', prevHash: 'hash-1' },
 ];
 
 describe('auditChainCheckpoint', () => {
@@ -118,7 +152,7 @@ describe('auditChainCheckpoint', () => {
   test('锚点之后追加正常记录不算篡改（链尾晚于检查点）', async () => {
     const model = fakeModel(hashedDocs());
     await createCheckpoint({ model, filePath: filePath(), secret: SECRET });
-    model.state.push({ _id: ID3, hash: 'hash-3', hmac: 'hmac-3' });
+    model.state.push({ _id: ID3, hash: 'hash-3', hmac: 'hmac-3', prevHash: 'hash-2' });
 
     const result = await verifyCheckpoints({ model, filePath: filePath(), secret: SECRET });
     expect(result).toEqual({ ok: true, checked: 1, errors: [] });
@@ -148,16 +182,20 @@ describe('auditChainCheckpoint', () => {
     ]);
   });
 
-  test('锚点之前插入分支记录 ⇒ count_mismatch', async () => {
+  test('锚点之前插入分支记录：计数判据已降级为估算，不再误报 count_mismatch（分叉归 auditChainVerify）', async () => {
     const model = fakeModel(hashedDocs());
     await createCheckpoint({ model, filePath: filePath(), secret: SECRET });
 
-    // prevHash 指向链内已有 hash 的分支记录：链内校验会放过，计数不会
-    model.state.splice(1, 0, { _id: ID_BRANCH, hash: 'branch', hmac: 'branch' });
+    // prevHash 指向链内已有 hash 的分支记录：本模块不再用 _id 计数去判它（那会在诚实乱序库上误报）
+    model.state.splice(1, 0, {
+      _id: ID_BRANCH,
+      hash: 'branch',
+      hmac: 'branch',
+      prevHash: 'hash-1',
+    });
 
     const result = await verifyCheckpoints({ model, filePath: filePath(), secret: SECRET });
-    expect(result.ok).toBe(false);
-    expect(result.errors).toEqual([expect.objectContaining({ type: 'count_mismatch' })]);
+    expect(result.ok).toBe(true);
   });
 
   test('检查点头部被替换 ⇒ head_hash_mismatch / head_hmac_mismatch', async () => {
@@ -173,7 +211,7 @@ describe('auditChainCheckpoint', () => {
     );
   });
 
-  test('把链截断到锚点之前 ⇒ head_missing + count_mismatch + tail_rolled_back', async () => {
+  test('把链截断到锚点之前 ⇒ head_missing + tail_rolled_back（计数判据不再参与）', async () => {
     const model = fakeModel(hashedDocs());
     await createCheckpoint({ model, filePath: filePath(), secret: SECRET });
 
@@ -182,7 +220,7 @@ describe('auditChainCheckpoint', () => {
     const result = await verifyCheckpoints({ model, filePath: filePath(), secret: SECRET });
     expect(result.ok).toBe(false);
     expect(result.errors.map((e) => e.type)).toEqual(
-      expect.arrayContaining(['head_missing', 'count_mismatch', 'tail_rolled_back'])
+      expect.arrayContaining(['head_missing', 'tail_rolled_back'])
     );
   });
 
@@ -202,7 +240,7 @@ describe('auditChainCheckpoint', () => {
     );
   });
 
-  test('检查点时间/头部 _id 倒退 ⇒ order_violation', async () => {
+  test('检查点时间倒退 ⇒ order_violation（不再用 _id 序判检查点先后）', async () => {
     const model = fakeModel(hashedDocs());
     const file = filePath();
     await createCheckpoint({
@@ -224,7 +262,7 @@ describe('auditChainCheckpoint', () => {
 
     const result = await verifyCheckpoints({ model, filePath: file, secret: SECRET });
     expect(result.ok).toBe(false);
-    expect(result.errors.filter((e) => e.type === 'order_violation')).toHaveLength(2);
+    expect(result.errors.filter((e) => e.type === 'order_violation')).toHaveLength(1);
   });
 
   test('无 HMAC_SECRET 时拒绝创建检查点', async () => {
@@ -309,6 +347,79 @@ describe('auditChainCheckpoint', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.errors).toEqual([expect.objectContaining({ type: 'version_unsupported' })]);
+  });
+
+  test('_id 乱序的诚实库：检查点必须钉在真链尾（无子记录者），而不是最大 _id', async () => {
+    // 模拟 push 预分配 _id：久候批次的 _id 比其间直写的记录小，但链序上它们排在后面。
+    const model = fakeModel([
+      { _id: '000000000000000000000005', hash: 'h-direct-1', hmac: 'm1', prevHash: null },
+      { _id: '000000000000000000000006', hash: 'h-direct-2', hmac: 'm2', prevHash: 'h-direct-1' },
+      { _id: '000000000000000000000001', hash: 'h-batch-1', hmac: 'm3', prevHash: 'h-direct-2' },
+      { _id: '000000000000000000000002', hash: 'h-batch-2', hmac: 'm4', prevHash: 'h-batch-1' },
+    ]);
+    const { record } = await createCheckpoint({ model, filePath: filePath(), secret: SECRET });
+    expect(record.headHash).toBe('h-batch-2');
+    expect(record.headId).toBe('000000000000000000000002');
+
+    const result = await verifyCheckpoints({ model, filePath: filePath(), secret: SECRET });
+    expect(result.ok).toBe(true);
+  });
+
+  test('真的删掉链尾记录 ⇒ tail_rolled_back（反向：判据不能只会误报）', async () => {
+    const model = fakeModel(hashedDocs());
+    await createCheckpoint({ model, filePath: filePath(), secret: SECRET });
+    model.state.pop(); // 删掉链尾 ID2
+    const result = await verifyCheckpoints({ model, filePath: filePath(), secret: SECRET });
+    expect(result.ok).toBe(false);
+    expect(result.errors.map((e) => e.type)).toEqual(
+      expect.arrayContaining(['head_missing', 'tail_rolled_back'])
+    );
+  });
+
+  test('v1 旧格式检查点：仍验证签名/头部，但结果标记 degraded（计数判据已退役）', async () => {
+    const model = fakeModel(hashedDocs());
+    const file = filePath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const v1 = {
+      version: 1,
+      createdAt: new Date('2026-10-20T00:00:00.000Z').toISOString(),
+      headId: ID2,
+      headHash: 'hash-2',
+      headHmac: 'hmac-2',
+      recordCount: 2,
+    };
+    v1.signature = signCheckpoint(v1, SECRET);
+    fs.writeFileSync(file, `${JSON.stringify(v1)}\n`);
+    const result = await verifyCheckpoints({ model, filePath: file, secret: SECRET });
+    expect(result.ok).toBe(true);
+    expect(result.degraded).toEqual([expect.objectContaining({ type: 'legacy_version' })]);
+  });
+
+  test('v1 存量：本地与外锚同一条 v1（签名合法）⇒ 不误报 anchor_missing_local', async () => {
+    // 升级窗口的真实形态：文件里全是 v1，外锚副本也是同一批 v1。三处版本口径
+    // （本地自筛 / 外锚侧 / 主循环）必须一致，否则存量会全量误红。
+    const model = fakeModel(hashedDocs());
+    const file = filePath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const v1 = {
+      version: 1,
+      createdAt: new Date('2026-10-20T00:00:00.000Z').toISOString(),
+      headId: ID2,
+      headHash: 'hash-2',
+      headHmac: 'hmac-2',
+      recordCount: 2,
+    };
+    v1.signature = signCheckpoint(v1, SECRET);
+    fs.writeFileSync(file, `${JSON.stringify(v1)}\n`);
+
+    const result = await verifyCheckpoints({
+      model,
+      filePath: file,
+      secret: SECRET,
+      externalAnchors: [{ ...v1 }],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
   });
 });
 

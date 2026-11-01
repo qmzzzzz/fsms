@@ -6,25 +6,25 @@
  * 链接检查都会放过（见 auditChainVerify.js「已知检出上限」）。另外，**尾部截断**
  * （删掉最新若干条）在纯链内校验里同样不可见——链仍自洽。
  *
- * 本模块把「某个时刻的链尾」固化成**带 HMAC 签名的检查点**，并同时记录该尾之前
- * 的记录总数。核验时逐条重算签名、比对头部 hash/hmac、比对计数：
- *   · 插入分支记录 ⇒ 计数变大 ⇒ count_mismatch；
+ * 本模块把「某个时刻的链尾」固化成**带 HMAC 签名的检查点**。链尾定义是「库里没有
+ * 任何记录把它当作 prevHash」，**不是「_id 最大」**：`auditBuffer.push` 在 push 时
+ * 预分配 `_id`（F-143），久候批次的 `_id` 小于其后直写的记录 ⇒ `_id` 序 ≠ 追加序。
+ * 核验时重算签名、比对头部 hash/hmac，再从当前链尾沿 prevHash 回溯找 headId：
  *   · 替换/改写头部 ⇒ hash 或 hmac 失配；
- *   · 把链截断到检查点之前（含把头部本身删掉）⇒ 当前链尾早于最后检查点 ⇒ tail_rolled_back；
+ *   · 截断到检查点之前（含删掉头部本身）⇒ 回溯到链头仍见不到 ⇒ tail_rolled_back；
+ *   · 回溯 TAIL_WALK_LIMIT 步仍未见到 ⇒ tail_unverifiable（不静默绿，也不假红）；
  *   · 改检查点文件本身 ⇒ 没密钥签不出来 ⇒ signature_invalid。
+ * `recordCount` 只是**创建时的估算**（哈希记录数），不参与任何判红：TTL 裁剪与迟到
+ * 批写都会让它与库对不上，当判据在诚实库上必误报。v1 存量仍按 v1 口径验，标 degraded。
  *
- * 能力边界（如实记录，不得读成「完整防篡改」）：
- *   · 检查点文件默认落在本机 logs/；**能同时改 Mongo 与该文件的人**可以重写两者。
- *     真正的外部锚定需要把文件（或每行 signature/tailDigest）周期性复制到
- *     WORM/对象存储/时间戳服务；本模块只负责产出可验证的锚点，不做传输。
- *     ⇒ 传输由 `auditAnchorSink` 负责，核验侧的「双向比对」由本模块的
- *     `compareAnchors` 负责（2026-10-24 补）。两者缺一，上面的攻击路径（改链 →
- *     删检查点文件 → 重新 create）就仍然成立且**不需要 HMAC_SECRET**。
- *   · 检查点之间的窗口内插入分支，只有落在下一次检查点计数差内的部分能被发现；
- *     检查点越频繁，可检出窗口越小。
- *   · 检查点**之后**新增又删掉的记录无法被这一条锚点发现（链尾仍等于锚点）。
- *     这是纯锚点方案的固有边界：需要更晚的检查点，或把每次检查点的计数差
- *     与外部日志留存比对，才能收窄。
+ * 能力边界（如实记录，不得读成「完整防篡改」）：检查点文件默认落在本机 logs/，
+ * **能同时改 Mongo 与该文件的人**可以重写两者；真正的外部锚定要把文件周期性复制到
+ * WORM/对象存储/时间戳服务（传输由 `auditAnchorSink`，双向比对由本模块 `compareAnchors`，
+ * 2026-10-24 补）——缺任一半，「改链 → 删文件 → 重新 create」仍成立且不需要密钥。
+ *   · 两检查点之间插入的分支靠 auditChainVerify 的一父两子与外锚比对判定（旧计数判据
+ *     在诚实库上误报）；检查点越频繁，可检出窗口越小。
+ *   · 检查点**之后**新增又删掉的记录无法被这一条锚点发现（链尾仍等于锚点）——纯锚点
+ *     固有边界，需要更晚的检查点或把计数差与外部留存比对才能收窄。
  *   · 未配置 HMAC_SECRET 时**拒绝创建**（无密钥的检查点等于一张可随意重写的便条）。
  */
 
@@ -33,13 +33,17 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { getLatestHash } = require('../utils/auditChainTail');
 
 const DEFAULT_CHECKPOINT_FILE = path.join(
   path.resolve(__dirname, '..', '..'),
   'logs',
   'audit-chain-checkpoints.jsonl'
 );
-const CHECKPOINT_VERSION = 1;
+const CHECKPOINT_VERSION = 2;
+const TAIL_WALK_LIMIT = 1024;
+const pushErr = (list, type, message, line = null) => list.push({ line, type, message });
+const isSupportedVersion = (v) => v === 1 || v === CHECKPOINT_VERSION;
 
 function hmacSecretOf(secret) {
   if (typeof secret === 'string' && secret.length > 0) return secret;
@@ -87,11 +91,12 @@ async function createCheckpoint({ model, filePath, secret, now = new Date() } = 
   const AuditLog = model || require('../models/AuditLog');
   const out = filePath || DEFAULT_CHECKPOINT_FILE;
 
-  const latest = await AuditLog.findOne({ hash: { $ne: null } }, { hash: 1, hmac: 1, _id: 1 })
-    .sort({ _id: -1 })
-    .lean();
+  const tailHash = await getLatestHash(AuditLog);
+  const latest = tailHash
+    ? await AuditLog.findOne({ hash: tailHash }, { hash: 1, hmac: 1, _id: 1 }).lean()
+    : null;
   const headId = latest ? String(latest._id) : null;
-  const recordCount = headId ? await AuditLog.countDocuments({ _id: { $lte: headId } }) : 0;
+  const recordCount = headId ? await AuditLog.countDocuments({ hash: { $ne: null } }) : 0;
 
   const record = {
     version: CHECKPOINT_VERSION,
@@ -133,19 +138,11 @@ const sameId = (a, b) => String(a) === String(b);
 /** 签名与版本：任一不过则该条不再参与后续比对（`continue` 的语义）。 */
 function checkSignature(record, hmacSecret, line, errors) {
   if (record.signature !== signCheckpoint(record, hmacSecret)) {
-    errors.push({
-      line,
-      type: 'signature_invalid',
-      message: '检查点签名不匹配（文件被改写或密钥已轮换）',
-    });
+    pushErr(errors, 'signature_invalid', '检查点签名不匹配（文件被改写或密钥已轮换）', line);
     return false;
   }
-  if (record.version !== CHECKPOINT_VERSION) {
-    errors.push({
-      line,
-      type: 'version_unsupported',
-      message: `不支持的检查点版本：${record.version}`,
-    });
+  if (!isSupportedVersion(record.version)) {
+    pushErr(errors, 'version_unsupported', `不支持的检查点版本：${record.version}`, line);
     return false;
   }
   return true;
@@ -154,17 +151,9 @@ function checkSignature(record, hmacSecret, line, errors) {
 /** 相邻检查点的时间/头部 _id 必须单调不回退。 */
 function checkOrder(previous, record, line, errors) {
   if (!previous) return;
-  if (new Date(record.createdAt).getTime() < new Date(previous.record.createdAt).getTime()) {
-    errors.push({ line, type: 'order_violation', message: '检查点时间倒退' });
-  }
-  if (record.headId && previous.record.headId) {
-    if (String(record.headId) < String(previous.record.headId)) {
-      errors.push({
-        line,
-        type: 'order_violation',
-        message: '检查点头部 _id 倒退（检查点被重排）',
-      });
-    }
+  const at = (x) => new Date(x).getTime();
+  if (at(record.createdAt) < at(previous.record.createdAt)) {
+    pushErr(errors, 'order_violation', '检查点时间倒退', line);
   }
 }
 
@@ -172,48 +161,60 @@ function checkOrder(previous, record, line, errors) {
 async function checkHead(AuditLog, record, line, errors) {
   if (!record.headId) return;
   const head = await AuditLog.findOne({ _id: record.headId }).lean();
-  if (!head) {
-    errors.push({ line, type: 'head_missing', message: `检查点头部记录不存在：${record.headId}` });
-  } else {
-    if (head.hash !== record.headHash) {
-      errors.push({ line, type: 'head_hash_mismatch', message: '检查点头部 hash 与库中不一致' });
-    }
-    if ((head.hmac || null) !== record.headHmac) {
-      errors.push({ line, type: 'head_hmac_mismatch', message: '检查点头部 hmac 与库中不一致' });
-    }
-  }
-  const count = await AuditLog.countDocuments({ _id: { $lte: record.headId } });
-  if (count !== record.recordCount) {
-    errors.push({
-      line,
-      type: 'count_mismatch',
-      message: `检查点计数 ${record.recordCount} 与库中 ${count} 不一致（检查点之前有插入或删除）`,
-    });
-  }
+  if (!head) return pushErr(errors, 'head_missing', `检查点头部记录不存在：${record.headId}`, line);
+  if (head.hash !== record.headHash)
+    pushErr(errors, 'head_hash_mismatch', '头部 hash 与库中不一致', line);
+  if ((head.hmac || null) !== record.headHmac)
+    pushErr(errors, 'head_hmac_mismatch', '头部 hmac 与库中不一致', line);
 }
 
 /** 尾部截断：删掉最后一次检查点之后的记录，链本身仍自洽，只有与锚点比较才看得见。 */
-async function checkTail(AuditLog, last, errors) {
+async function checkTail(AuditLog, last, errors, degraded) {
   if (!last || !last.headId) return;
-  const tail = await AuditLog.findOne({ hash: { $ne: null } }, { _id: 1 })
-    .sort({ _id: -1 })
-    .lean();
-  // 尾部一条不剩与「尾部倒退」是同一件事的两种现场：都不能因为 tail 为空就跳过。
-  if (!tail) {
-    errors.push({
-      line: null,
-      type: 'tail_rolled_back',
-      message: `库中已无任何哈希记录，最后检查点 ${last.headId} 之后的内容被整体删除`,
-    });
-  } else if (sameId(tail._id, last.headId) === false && String(tail._id) < String(last.headId)) {
-    errors.push({
-      line: null,
-      type: 'tail_rolled_back',
-      message: `当前链尾 ${tail._id} 早于最后检查点 ${last.headId}（尾部记录可能被删除）`,
-    });
+  const tailHash = await getLatestHash(AuditLog);
+  if (!tailHash) {
+    pushErr(
+      errors,
+      'tail_rolled_back',
+      `库中已无任何哈希记录，最后检查点 ${last.headId} 之后的内容被整体删除`
+    );
+    return;
   }
+  let cur = await AuditLog.findOne({ hash: tailHash }, { _id: 1, hash: 1, prevHash: 1 }).lean();
+  let steps = 0;
+  while (cur && steps < TAIL_WALK_LIMIT) {
+    if (sameId(cur._id, last.headId)) return;
+    cur = cur.prevHash
+      ? await AuditLog.findOne({ hash: cur.prevHash }, { _id: 1, hash: 1, prevHash: 1 }).lean()
+      : null;
+    steps += 1;
+  }
+  if (cur) {
+    pushErr(
+      degraded,
+      'tail_unverifiable',
+      `从当前链尾沿 prevHash 走了 ${TAIL_WALK_LIMIT} 步仍未见到最后检查点 ${last.headId}（窗口耗尽，不判回滚）`
+    );
+    return;
+  }
+  pushErr(
+    errors,
+    'tail_rolled_back',
+    `从当前链尾沿 prevHash 回到链头仍未见到最后检查点 ${last.headId}（尾部记录被删除）`
+  );
 }
 
+/** 本地缺失的两种成因：外锚水位已越过它 ⇒ 回滚（报错）；水位之前才是「还没发」（null）。日期用 `new Date(x).getTime()` 构造式（dateParamGateSingleSource 只许 helpers 一处裸解析）。 */
+const anchorRollbackError = (line, record, watermark) => {
+  const at = new Date(record.createdAt).getTime();
+  if (!Number.isFinite(at) || !(at < watermark.at)) return null;
+  const when = new Date(watermark.at).toISOString();
+  return {
+    line,
+    type: 'anchor_rollback',
+    message: `本地锚点 ${record.headId || '(空链)'}（${record.createdAt}）在外锚中缺失，但外锚已有更晚的锚点 ${watermark.headId || '(空链)'}（${when}）—— 只可能是外部副本被回退，不是「还没外发」`,
+  };
+};
 /**
  * 本地检查点集合与**外部锚点副本**的双向比对（2026-10-24，P1 外锚）。
  *
@@ -227,13 +228,11 @@ async function checkTail(AuditLog, last, errors) {
  *   · 外部有、本地无 ⇒ anchor_missing_local：文件被删除 / 截断 / 整体重写。
  *   · 外部签名验不过 ⇒ anchor_signature_invalid：外部副本本身被动过，不能当锚点，
  *     也不能因为「验不过所以跳过」就静默放过（跳过等于给篡改留静默位）。
- *   · 本地有、外部无 ⇒ 只记 `pending`，**不判错**：正常情况就是「刚 create、还没
- *     ship」。判红会让每个尚未配置 ship 的部署常红，从而把这条告警训练成噪音。
- *   · 外部为空 ⇒ no_external_anchors：空存储证明不了任何事，不能读成「无失配」。
+ *   · 本地有、外部无 ⇒ 外锚水位（最晚 createdAt）已越过它 ⇒ anchor_rollback（发过又被回退，
+ *     判红，不混进 pending）；否则才是 pending。整份为空 ⇒ no_external_anchors。
  *
- * 比对用 `signature` 作为锚点身份（它覆盖 version/createdAt/headId/headHash/
- * headHmac/recordCount 全部字段），因此不依赖外部存储的行序或索引——外部存储被
- * 重排、被并行 ship 追加出重复行，都不影响判定。
+ * 比对用 `signature` 作锚点身份（覆盖 version/createdAt/headId/headHash/headHmac/recordCount），
+ * 不依赖外部行序。回滚只在水位留下**缺口**时可判：整段截到更早水位的副本与「还没发」同形。
  *
  * @param {{localEntries: Array<{line:number, record:object}>, externalAnchors: object[], secret?: string}} input
  * @returns {{errors: Array<{line:number|null, type:string, message:string}>, pending: object[], externalValid: object[]}}
@@ -266,7 +265,7 @@ function compareAnchors({ localEntries = [], externalAnchors = [], secret } = {}
     if (
       record &&
       record.signature === signCheckpoint(record, hmacSecret) &&
-      record.version === CHECKPOINT_VERSION
+      isSupportedVersion(record.version)
     ) {
       localSignatures.add(record.signature);
     } else {
@@ -274,51 +273,49 @@ function compareAnchors({ localEntries = [], externalAnchors = [], secret } = {}
     }
   }
 
+  const mkErr = (type, message, line = null) => ({ line, type, message });
   const externalSignatures = new Set();
+  // wm = 外锚水位（最晚的合法 createdAt）：回退与「还没发」的分界，缺失/非法时间不参与
+  const wm = { at: -Infinity, headId: null };
   externalAnchors.forEach((record, idx) => {
-    const position = idx + 1;
+    const n = idx + 1;
     if (!record || typeof record !== 'object' || typeof record.signature !== 'string') {
-      errors.push({
-        line: null,
-        type: 'anchor_signature_invalid',
-        message: `外部锚点第 ${position} 条不是可识别的检查点记录`,
-      });
+      errors.push(mkErr('anchor_signature_invalid', `外部锚点第 ${n} 条不是可识别的检查点记录`));
       return;
     }
     if (record.signature !== signCheckpoint(record, hmacSecret)) {
-      errors.push({
-        line: null,
-        type: 'anchor_signature_invalid',
-        message: `外部锚点第 ${position} 条签名不匹配（外部副本被改写，或 HMAC_SECRET 已轮换）`,
-      });
+      errors.push(
+        mkErr('anchor_signature_invalid', `外部锚点第 ${n} 条签名不匹配（副本被改写/密钥轮换）`)
+      );
       return;
     }
-    if (record.version !== CHECKPOINT_VERSION) {
-      errors.push({
-        line: null,
-        type: 'anchor_version_unsupported',
-        message: `外部锚点第 ${position} 条版本不支持：${record.version}`,
-      });
+    if (!isSupportedVersion(record.version)) {
+      errors.push(
+        mkErr('anchor_version_unsupported', `锚点第 ${n} 条版本不支持：${record.version}`)
+      );
       return;
     }
     externalValid.push(record);
     externalSignatures.add(record.signature);
+    const ts = new Date(record.createdAt).getTime();
+    if (Number.isFinite(ts) && ts > wm.at) Object.assign(wm, { at: ts, headId: record.headId });
     if (!localSignatures.has(record.signature)) {
-      errors.push({
-        line: null,
-        type: 'anchor_missing_local',
-        message:
-          `外部锚点 ${record.headId || '(空链)'}（${record.createdAt}，计数 ${record.recordCount}）` +
-          '在本地检查点文件中缺失 —— 本地检查点被删除、截断或重写（重新锚定）',
-      });
+      const head = record.headId || '(空链)';
+      errors.push(
+        mkErr('anchor_missing_local', `外部锚点 ${head}（计数 ${record.recordCount}）缺失`)
+      );
     }
   });
 
   for (const { line, record } of localEntries) {
     if (localBadLines.has(line)) continue;
-    if (!externalSignatures.has(record.signature)) {
-      pending.push({ line, headId: record.headId, createdAt: record.createdAt });
+    if (externalSignatures.has(record.signature)) continue;
+    const rollback = anchorRollbackError(line, record, wm);
+    if (rollback) {
+      errors.push(rollback);
+      continue;
     }
+    pending.push({ line, headId: record.headId, createdAt: record.createdAt });
   }
 
   return { errors, pending, externalValid };
@@ -337,6 +334,7 @@ async function verifyCheckpoints({ model, filePath, secret, externalAnchors } = 
   const hmacSecret = hmacSecretOf(secret);
   const AuditLog = model || require('../models/AuditLog');
   const errors = [];
+  const degraded = [];
   const anchorsCompared = Array.isArray(externalAnchors);
   let anchorResult = null;
 
@@ -373,16 +371,24 @@ async function verifyCheckpoints({ model, filePath, secret, externalAnchors } = 
   let previous = null;
   for (const { line, record } of entries) {
     if (!checkSignature(record, hmacSecret, line, errors)) continue;
+    if (record.version === 1)
+      degraded.push({
+        line,
+        type: 'legacy_version',
+        message:
+          'v1 检查点：计数判据已退役（旧判据在 TTL 裁剪/迟到批写下会误报），本条只验签名/头部/链尾',
+      });
     checkOrder(previous, record, line, errors);
     await checkHead(AuditLog, record, line, errors);
     previous = { line, record };
   }
-  await checkTail(AuditLog, previous && previous.record, errors);
+  await checkTail(AuditLog, previous && previous.record, errors, degraded);
 
   return assemble(errors, entries.length);
 
   function assemble(collected, checked) {
     const out = { ok: collected.length === 0, checked, errors: collected };
+    if (degraded.length) out.degraded = degraded;
     // 只在真的比对过时才带 anchors 键：旧调用方与旧断言按「无此键」比较，
     // 无条件加一个 null 会破坏 `toEqual({ok, checked, errors})` 的既有契约。
     if (anchorResult) {

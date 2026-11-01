@@ -1,5 +1,5 @@
 /**
- * 热升级判据（scripts/hotUpgrade.js 的纯逻辑层）
+ * 升级判据（scripts/hotUpgrade.js 的纯逻辑层）
  *
  * 分层理由与 deployPolicy.js 相同：这里的每一条判据都要能在毫秒级被直接断言
  * （该不该拒绝这个镜像、当前哪一色在接流量、readyz 算不算过），而「执行」
@@ -273,9 +273,19 @@ const DEFAULT_OPTIONS = {
   readyzIntervalSec: 3,
 };
 
+/**
+ * `--apply` 下观察窗口的下限（秒）。
+ *
+ * 观察窗口是「切流后发现问题并切回」的唯一窗口。它被参数压到 0/5 时，脚本会在切流后
+ * 立刻宣告成功，把「刚切过去就 502」留给用户去发现。因此真正执行时夹一个下限；
+ * 演练（--dry-run / 不加 --apply）不受限——那里本来就没有流量被挪动。
+ */
+const MIN_OBSERVE_SEC = 60;
+
 const FLAGS = [
   'image',
   'nginx-conf',
+  'status-file',
   'readyz-timeout',
   'observe-seconds',
   'apply',
@@ -298,6 +308,7 @@ function parseArgs(argv = []) {
     help: false,
     image: '',
     nginxConf: '',
+    statusFile: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const raw = argv[i];
@@ -315,16 +326,36 @@ function parseArgs(argv = []) {
       i += 1;
       return next;
     };
-    if (name === 'dry-run') opts.dryRun = true;
-    else if (name === 'apply') opts.apply = true;
-    else if (name === 'help') opts.help = true;
+    // 布尔旗标也接受 =true/=false：模板与 CI 里写成 "--apply=${{ inputs.apply }}"
+    // 是常态，而旧的 `opts.apply = true` 会把字符串 "false" 也当成执行——
+    // 参数里明确写着 false、线上却真的开始切流，是这条链上最贵的一次误解。
+    if (name === 'dry-run') opts.dryRun = parseBooleanFlag(name, inlineValue);
+    else if (name === 'apply') opts.apply = parseBooleanFlag(name, inlineValue);
+    else if (name === 'help') opts.help = parseBooleanFlag(name, inlineValue);
     else if (name === 'image') opts.image = takeValue();
     else if (name === 'nginx-conf') opts.nginxConf = takeValue();
+    else if (name === 'status-file') opts.statusFile = takeValue();
     else if (name === 'readyz-timeout') opts.readyzTimeoutSec = parsePositiveInt(takeValue(), name);
     else if (name === 'observe-seconds')
       opts.observeSec = parsePositiveInt(takeValue(), name, true);
   }
+  // --apply 下夹到下限；调用方必须把这个**实际生效值**打印出来（否则参数被静默改写）
+  if (opts.apply && opts.observeSec < MIN_OBSERVE_SEC) opts.observeSec = MIN_OBSERVE_SEC;
   return opts;
+}
+
+/**
+ * 布尔旗标：缺省 true；带 = 时只接受 true/false（含 1/0、yes/no）。
+ *
+ * 为什么不是「非空即真」："--apply=no" 被当成执行、"--dry-run=off" 被当成演练，
+ * 两种误读都直接作用在生产流量上，且日志里看不出发生过误解。
+ */
+function parseBooleanFlag(name, inlineValue) {
+  if (inlineValue === undefined) return true;
+  const v = String(inlineValue).trim().toLowerCase();
+  if (['true', '1', 'yes'].includes(v)) return true;
+  if (['false', '0', 'no'].includes(v)) return false;
+  throw new Error(`--${name} 只接受布尔值（true/false），收到：${inlineValue}`);
 }
 
 /** 正整数解析；allowZero 用于 --observe-seconds 0（跳过观察期，仅限演练） */
@@ -341,6 +372,7 @@ module.exports = {
   COLOR_BY_PORT,
   PORT_BY_COLOR,
   DEFAULT_OPTIONS,
+  MIN_OBSERVE_SEC,
   parseImageRef,
   assertImageAllowed,
   parseActiveUpstream,
@@ -348,4 +380,5 @@ module.exports = {
   evaluateReadyz,
   parseArgs,
   detectEol,
+  parseBooleanFlag,
 };

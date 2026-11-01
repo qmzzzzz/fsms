@@ -23,7 +23,7 @@
         @keydown.space.self.prevent="$emit('select', role)"
       >
         <div class="glass-role-item__info">
-          <span class="glass-role-item__name">{{ role.name }}</span>
+          <span class="glass-role-item__name">{{ roleName(role) }}</span>
           <span class="glass-role-item__code">{{ role.code }}</span>
         </div>
         <div class="glass-role-item__meta">
@@ -63,6 +63,7 @@
 
 <script setup>
 import GlassSkeleton from '@/components/GlassSkeleton.vue'
+import { useSystemLabels } from '@/i18n/systemLabels'
 
 defineProps({
   roles: { type: Array, default: () => [] },
@@ -76,6 +77,9 @@ defineProps({
 })
 
 defineEmits(['select', 'delete', 'edit'])
+
+// 内置角色按 code 映射英文名；自定义角色保留作者原文（中文侧同样不覆盖）
+const { roleName } = useSystemLabels()
 </script>
 
 <style scoped>

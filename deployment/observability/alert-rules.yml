@@ -8,15 +8,18 @@
 groups:
   - name: xf-availability
     rules:
-      # 抓取目标消失 = 后端进程挂了或容器网络断
+      # 抓取目标消失 = 后端进程挂了或容器网络断。
+      # 判据是"两色都抓不到"而不是"任一 instance 为 0"：蓝绿部署里 app-green 平时
+      # 根本没起（profile: green），逐实例判会让 BackendDown 永久红着——
+      # 一条永远在响的告警等于没有告警。sum==0 只在两色同时失联时成立。
       - alert: BackendDown
-        expr: up{job="xf-app"} == 0
+        expr: sum(up{job="xf-app"}) == 0
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: '后端 /metrics 抓取失败（{{ $labels.instance }}）'
-          description: 'Prometheus 连续 1 分钟无法抓取后端指标，服务可能已不可用。'
+          summary: '后端 /metrics 两色均抓取失败'
+          description: 'Prometheus 连续 1 分钟无法抓取任一颜色的后端指标，服务可能已不可用。'
 
       # 5xx 错误率：5 分钟窗口内超过 5%
       # 必须 `sum by (instance)`：bare `sum(...)` 会把**全部**标签丢掉（含 instance），
@@ -88,7 +91,7 @@ groups:
       # （黑名单 fail-closed = 库挂时全量请求无法验证 = 全站拒绝；验证码 fail-closed
       # = 没人能登录）。是否收紧是产品决策，不是告警规则能代做的。
       - alert: SecurityFailOpenSustained
-        expr: increase(security_alerts_total{type=~"ip_blacklist_failopen|ratelimit_store_degraded|captcha_active_bound_lost|captcha_switch_db_fallback|audit_wal_permission_not_tightened"}[5m]) > 0
+        expr: increase(security_alerts_total{type=~"ip_blacklist_failopen|ratelimit_store_degraded|captcha_active_bound_lost|captcha_switch_db_fallback|audit_wal_permission_not_tightened|reauth_grant_store_degraded|idempotency_degraded"}[5m]) > 0
         for: 10m
         labels:
           severity: critical
@@ -123,6 +126,58 @@ groups:
             处置：确认反代所在网段并显式声明（通常只有 Nginx 一段，如 172.28.0.0/16）；
             判据本体与兼容档的取舍见 src/utils/ipUtils.js 的 isPeerTrustedProxy 与
             src/config/trustedProxies.js，部署侧口径见 docs/adr/ADR-009。
+
+      # ── 取证能力降级型信号（2026-10-31，P2）────────────────────────────────
+      # 与上面几条的区别：它不是「准入护栏放行」，也不是「批量安全事件」，而是
+      # **取证证据的留存降级**——捕获失败时按设计不阻塞业务响应（记数 + 限频 warn），
+      # 代价是被标记 IP 的证据出现缺口，缺口不会自动补齐（落库失败尚有 WAL 行可重放；
+      # 触发判据模块不可用时是整个捕获跳过）。
+      # 为什么不并进 SecurityFailOpenSustained：那条的处置文案是「恢复依赖后再把
+      # 护栏当防线」，而这里没有"护栏"这一侧，处置是查落库/WAL 与触发判据模块——
+      # 错误的处置指引比没有指引更糟（与 TrustedProxyBoundaryUnset 同一取舍）。
+      # 为什么不并进 SecurityAlertBurst：降级是"低速而持续"的形态（每次捕获失败才 +1），
+      # 速率型规则可能永远不达标，而证据缺口一直存在。
+      # 为什么 for 不是 0m：单次落库抖动属常态（重试与 WAL 重放是设计的一部分），
+      # 持续 10 分钟仍在降级才说明持久化或模块加载真的坏了。
+      - alert: ForensicCaptureDegraded
+        expr: increase(security_alerts_total{type=~"forensic_capture_write_failed|forensic_capture_trigger_unavailable"}[15m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: '取证捕获持续降级（{{ $labels.type }}）'
+          description: >-
+            近 15 分钟被标记 IP 的取证捕获在持续失败（落库/WAL 写入失败，或触发判据
+            模块不可用）。不阻塞业务是刻意取舍，代价是证据缺口，缺口不会自动补齐。
+            处置：确认 MongoDB 与 logs/forensic-capture*.wal 的落盘/召回，核对
+            /api/metrics 的 security_alerts_total 明细与捕获统计的 dropped/lastError；
+            各类型的失效语义见 src/constants/failOpenSites.js 的 OTHER_ALERT_SIGNALS。
+            类型集合与台账严格双向对账（src/tests/ci/failOpenLedgerGate.test.js ②b）。
+
+      # ── 幂等在途接管型信号（2026-11-01，审计一-1 补齐）──────────────────────
+      # 与上面几条的区别：它不是「依赖挂了」，也不是「配置没给」，而是**一次业务写入
+      # 可能被执行了两次**——同一枚 Idempotency-Key 的在途记录超过租约（5 分钟）仍没有
+      # 结论，说明上一次受理被中断（进程被杀 / OOM / 滚动重启 / 事件循环永久挂起 /
+      # 响应头发出前断开），于是这一次按首次提交重新执行了一遍
+      # （docs/adr/ADR-014 决策 7）。仓库选择「可观测的偶发重复」而不是「调用方一天内
+      # 不可自愈的 409 死锁」，代价必须有人看见，所以必须有专条。
+      # 为什么 for 不是 10m：接管是既成事实（重复写入可能已经发生），等 10 分钟只会
+      # 让「哪一次部署弄死了请求」更难对齐；而它本身很低频，不会形成噪声。
+      # 为什么不并进 SecurityAlertBurst：单次接管只 +1，速率型规则不达标 ⇒ 等于没告警。
+      - alert: IdempotencyLeaseTakeOver
+        expr: increase(security_alerts_total{type="idempotency_lease_takeover"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '幂等键的在途记录被接管：同一请求可能已执行两次'
+          description: >-
+            近 15 分钟出现超过租约（5 分钟）仍无结论的幂等记录，已被同键重试接管并按首次
+            提交执行一次。若上一次其实已落库，则这次是重复写入，且调用方看到的是正常成功。
+            处置：核对该时间窗内是否有 Pod/进程重启、OOMKilled 或滚动发布（kubectl get
+            events、systemd restart 计数）；按 type 在业务表里核对是否有同内容双记录并人工
+            回收；确认 /api/metrics 的 security_alerts_total 明细与 ADR-014 的租约取值是否
+            仍远大于该端点 p100。类型集合与台账对账见 failOpenLedgerGate ②c。
 
   # 自监控：可观测性链路自身的失效。这类规则不反映业务异常，反映的是
   # 「我们看到的业务数据不完整」——所以它的严重度是 warning 而非 info：

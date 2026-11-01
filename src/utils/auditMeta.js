@@ -17,6 +17,9 @@ const ROUTE_CATEGORY_MAP = {
   '/api/alarms': 'alarm',
   '/api/inspections': 'inspection',
   '/api/users': 'user',
+  // 头像读取虽然是展示型资源（默认被 auditGetExcludePaths 豁免），仍给出正确分类：
+  // 豁免清单一旦调整，落库记录至少不会退化成 category=system。
+  '/api/avatars': 'user',
   '/api/roles': 'role',
   '/api/permissions': 'permission',
   '/api/security': 'security',
@@ -121,12 +124,16 @@ const foldRegisteredAction = (action) =>
  */
 const deriveAction = (method, path, category) => {
   const segments = path.split('/').filter(Boolean);
-  // 剔除动态标识段（ObjectId/数字/UUID），并丢弃非「短可打印标识」段——否则
-  // GET /api/devices/<5000 个 a> 会把整段拼进 action，撑爆 {action:1} 索引键
-  // （>1024B 插入失败 → 审计记录被抑制 + 索引基数膨胀）。
-  const cleanSegments = segments.filter((s) => !isDynamicSegment(s) && ACTION_SEGMENT_RE.test(s));
+  // 剔除动态标识段（ObjectId/数字/UUID）与非「短可打印标识」段——否则超长段会把整段拼进
+  // action 撑爆 {action:1} 索引键；形状非法段还会让后续段前移拼出真实端点（可伪造已登记
+  // action），此时退到方法兜底（ADR-018）。
+  const dynamicAt = segments.map((s) => s.startsWith(':') || isDynamicSegment(s));
+  const kept = segments.map((s, i) => !dynamicAt[i] && ACTION_SEGMENT_RE.test(s));
+  const shapeFailAt = segments.map((s, i) => !dynamicAt[i] && !ACTION_SEGMENT_RE.test(s));
+  const cleanSegments = segments.filter((_, i) => kept[i]);
+  const forgedByShift = shapeFailAt.some((bad, i) => bad && kept.slice(i + 1).some(Boolean));
   // cleanSegments[0] = 'api'，[1] = 资源段（users/alarms/...），其后为子动作
-  const subAction = cleanSegments.slice(2).join('_').slice(0, 64);
+  const subAction = forgedByShift ? '' : cleanSegments.slice(2).join('_').slice(0, 64);
 
   if (subAction) return foldRegisteredAction(`${category}_${subAction}`.slice(0, 96));
   // HEAD 与 GET 同一语义：Express 把 HEAD 归一成 GET（Route.dispatch），所以 HEAD
@@ -145,9 +152,7 @@ const deriveAction = (method, path, category) => {
 };
 
 /**
- * 一次性派生审计元数据
- * @param {object} req Express 请求对象
- * @returns {{path: string, category: string, action: string}}
+ * 一次性派生审计元数据：@param req Express 请求对象；@returns {path, category, action}
  */
 const deriveAuditMeta = (req) => {
   const path = auditPath(req);

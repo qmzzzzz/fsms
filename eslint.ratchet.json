@@ -5,7 +5,19 @@
   "scripts/deployPolicy.js": {
     "max-lines": 1
   },
+  "scripts/hotUpgrade.js": {
+    "max-lines": 1
+  },
+  "scripts/hotUpgradeAgent.js": {
+    "complexity": 1
+  },
+  "scripts/hotUpgradeQueue.js": {
+    "max-lines": 1
+  },
   "scripts/migrate-pii-encryption.js": {
+    "max-lines": 1
+  },
+  "src/config/validate.js": {
     "max-lines": 1
   },
   "src/controllers/roleController.js": {
@@ -31,6 +43,9 @@
   },
   "src/services/authService/token.js": {
     "complexity": 1
+  },
+  "src/services/upgradeService.js": {
+    "max-lines": 1
   },
   "src/utils/errorCodes.js": {
     "max-lines": 1

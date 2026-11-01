@@ -2,8 +2,8 @@ const ExcelJS = require('exceljs');
 const {
   EXPORT_LIMIT,
   EXPORT_MODEL_CONFIG,
-  EXPORT_SHEET_NAMES,
-  EXPORT_COLUMN_DEFS,
+  getExportSheetName,
+  getExportColumnDefs,
   EXPORT_ROW_TRANSFORMS,
   createSafeTransform,
 } = require('./reportExportService');
@@ -11,6 +11,7 @@ const {
 // xlsx 这条链此前从未挂过——username 条件改成前缀形态后，不挂就会**漏**记录
 // （默认二进制 collation 下 ADMIN 不落在 [adm, adn) 内），见 auditQuery.js:190-201。
 const { withCollation } = require('../utils/auditQuery');
+const { TRACE_HEADER } = require('./piiExportWatermark');
 // 业务日口径只有一份（constants/timezone）：仪表盘「今日」、报表日期边界、告警的
 // 非工作时间判定都读它，导出文件名没有理由例外。
 const { businessDateParts } = require('../constants/timezone');
@@ -82,14 +83,9 @@ const streamExportRows = async (worksheet, config, query, safeTransform, collati
 };
 
 /**
- * 不完整必须**说出来**：xlsx 此前静默封顶 5000 行，导出一份"看起来完整"的合规材料
- * 其实少了后面全部记录——与"筛选参数被静默翻译"同一类缺陷（HTTP 200 + 窄得多的结果集）。
- * 双通道：响应头给程序化读取（与 CSV 的 X-Audit-Truncated 同形），表内脚注给
- * 拿到文件的人（Excel 打开时表头与数据之间不会错位，因为它追加在最后一行）。
+ * 不完整必须**说出来**：xlsx 此前静默封顶 5000 行，导出一份"看起来完整"的合规材料其实少了后面全部记录——与"筛选参数被静默翻译"同一类缺陷（HTTP 200 + 窄得多的结果集）。双通道：响应头给程序化读取（与 CSV 的 X-Audit-Truncated 同形），表内脚注给拿到文件的人（Excel 打开时表头与数据之间不会错位，因为它追加在最后一行）。
  *
- * 头只回答"这个文件完整吗"，脚注才回答"缺的是哪一种"：撞上限与被抽走是两回事，
- * 混写成一句"仅包含前 N 行"会把后者说成前者——读者会以为后面还有记录，
- * 而实际是那些行已经不存在了（追查方向完全不同）。
+ * 头只回答"这个文件完整吗"，脚注才回答"缺的是哪一种"：撞上限与被抽走是两回事，混写成一句"仅包含前 N 行"会把后者说成前者——读者会以为后面还有记录，而实际是那些行已经不存在了（追查方向完全不同）。
  */
 const TRUNCATION_HEADER = 'X-Export-Truncated';
 
@@ -102,15 +98,43 @@ const TRUNCATION_HEADER = 'X-Export-Truncated';
  *     "计数时 total 条、实际写出 written 条"对账对出来 —— 差额先减去 rowsLost
  *     已点名的部分，避免同一批行被两套措辞各报一次（populate 分支两式同时成立）。
  */
-const buildTruncationFooter = ({ total, written, truncated, rowsLost, countDrift }) => {
+const buildTruncationFooterEn = ({ total, written, truncated, rowsLost, countDrift }) => {
   const reasons = [];
   if (truncated) {
-    // `truncated` 是**取数腿**亲眼看到的证据：它读到了第 EXPORT_LIMIT+1 条。
-    // 而 total 来自更早的计数腿，两腿之间新增的行它一个都没数到。
-    // 原措辞无条件写"命中总数 ${total}"，于是 total ≤ 上限时脚注自相矛盾——
-    // 文件明明被截断，文案却说命中数正好等于文件里那份切片的行数，
-    // 被截掉的那批在材料里不存在（计数腿 5000 条 + 计数后新增 1 条即触发）。
-    // 计数腿缺位（total 非有限数）时退回下界表述，与原行为一致。
+    const phrase = !Number.isFinite(total)
+      ? `matches ≥ ${EXPORT_LIMIT + 1}`
+      : total > EXPORT_LIMIT
+        ? `total matches ${total}`
+        : `fetch hit ≥ ${EXPORT_LIMIT + 1} (count leg only found ${total}; rows arrived between the two legs)`;
+    reasons.push(`This file contains only the first ${EXPORT_LIMIT} rows (${phrase})`);
+  }
+  if (rowsLost > 0) {
+    reasons.push(
+      `${rowsLost} rows were deleted or no longer match the filter during export (${written} rows written)`
+    );
+  }
+  if (countDrift > 0) {
+    reasons.push(
+      `${countDrift} rows were deleted or no longer match the filter after counting (${written} rows written, ${total} at count time)`
+    );
+  }
+  const title = truncated ? 'Data truncated' : 'Data incomplete';
+  return `⚠ ${title}: ${reasons.join('; ')}. Narrow the time range or add filters and export again.`;
+};
+
+/**
+ * 中文脚注（改造前的逐字实现，每一处措辞的来历都留在注释里，不得随手改写）。
+ *
+ * `truncated` 是**取数腿**亲眼看到的证据：它读到了第 EXPORT_LIMIT+1 条。
+ * 而 total 来自更早的计数腿，两腿之间新增的行它一个都没数到。
+ * 原措辞无条件写"命中总数 ${total}"，于是 total ≤ 上限时脚注自相矛盾——
+ * 文件明明被截断，文案却说命中数正好等于文件里那份切片的行数，
+ * 被截掉的那批在材料里不存在（计数腿 5000 条 + 计数后新增 1 条即触发）。
+ * 计数腿缺位（total 非有限数）时退回下界表述，与原行为一致。
+ */
+const buildTruncationFooterZh = ({ total, written, truncated, rowsLost, countDrift }) => {
+  const reasons = [];
+  if (truncated) {
     const phrase = !Number.isFinite(total)
       ? `命中数 ≥ ${EXPORT_LIMIT + 1}`
       : total > EXPORT_LIMIT
@@ -131,6 +155,13 @@ const buildTruncationFooter = ({ total, written, truncated, rowsLost, countDrift
     `⚠ ${truncated ? '数据已截断' : '数据不完整'}：${reasons.join('；')}，` +
     '请缩小时间范围或增加筛选条件后重新导出。'
   );
+};
+
+/** 按 lang 选中文/英文脚注；缺省中文，与改造前逐字一致。 */
+const buildTruncationFooter = (context) => {
+  const lang = context.lang || 'zh';
+  const isEn = String(lang).toLowerCase().startsWith('en');
+  return isEn ? buildTruncationFooterEn(context) : buildTruncationFooterZh(context);
 };
 
 /**
@@ -197,16 +228,17 @@ const writeWorkbookToResponse = async (res, workbook) => {
 
 const writeExportWorkbook = async (
   res,
-  { type, query, total = null, collation = null, maskPii = false }
+  { type, query, total = null, collation = null, maskPii = false, lang = 'zh', watermark = null }
 ) => {
   const config = EXPORT_MODEL_CONFIG[type];
-  const sheetName = EXPORT_SHEET_NAMES[type] || '数据导出';
+  const sheetName = getExportSheetName(type, lang);
   // 文件名里的日期必须是**业务日**：原先用 `new Date().toISOString().slice(0,10)`，那是第三个
   // 口径（裸 UTC）——既不是这次查询用的 `?tz=`（前端传浏览器时区，见 reportController
   // resolveQueryTimezone），也不是全仓声明的业务时区。后果：东八区 10-01 00:30 点导出的文件
-  // 名字写着 09-30，而同一份文件的日期过滤边界与仪表盘的「今日」都算 10-01。
-  // 导出的 xlsx 是会被归档的取证件，名字里的日子说错一天就够人怀疑整份件。
-  const filename = `${sheetName}_${businessDateParts().dateStr}.xlsx`;
+  // 名字写着 09-30，而同一份文件的日期过滤边界与仪表盘的「今日」都算 10-01；xlsx 是归档取证件，名字里说错一天就够人怀疑整份件。
+  const filename = watermark
+    ? `${sheetName}_${businessDateParts().dateStr}_${watermark.traceId}.xlsx`
+    : `${sheetName}_${businessDateParts().dateStr}.xlsx`;
   res.setHeader(
     'Content-Type',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -216,10 +248,10 @@ const writeExportWorkbook = async (
   const workbook = new ExcelJS.Workbook();
   const worksheet = workbook.addWorksheet(sheetName);
   worksheet.properties.defaultColWidth = 15;
-  worksheet.columns = EXPORT_COLUMN_DEFS[type];
+  worksheet.columns = getExportColumnDefs(type, lang);
 
   // A4（2026-10-16）：脱敏判据随请求透传（默认掩码，持 system:read 者才拿全文）
-  const safeTransform = createSafeTransform(EXPORT_ROW_TRANSFORMS[type], { maskPii });
+  const safeTransform = createSafeTransform(EXPORT_ROW_TRANSFORMS[type], { maskPii, lang });
   const { written, truncated, rowsLost } = await streamExportRows(
     worksheet,
     config,
@@ -234,7 +266,19 @@ const writeExportWorkbook = async (
     !truncated && Number.isFinite(total) ? Math.max(total - written - rowsLost, 0) : 0;
   if (truncated || rowsLost > 0 || countDrift > 0) {
     res.setHeader(TRUNCATION_HEADER, 'true');
-    worksheet.addRow([buildTruncationFooter({ total, written, truncated, rowsLost, countDrift })]);
+    worksheet.addRow([
+      buildTruncationFooter({ total, written, truncated, rowsLost, countDrift, lang }),
+    ]);
+  }
+
+  if (watermark) {
+    // 表尾可见行 / 响应头；工作簿属性是第三、四处——表尾行能被删，属性不能
+    worksheet.addRow([watermark.text]).font = { italic: true, color: { argb: 'FF808080' } };
+    workbook.creator = watermark.operator;
+    workbook.lastModifiedBy = watermark.operator + ' (' + watermark.traceId + ')';
+    workbook.description = watermark.text;
+    workbook.keywords = 'FSMS ' + watermark.traceId;
+    res.setHeader(TRACE_HEADER, watermark.traceId);
   }
 
   worksheet.getRow(1).eachCell((cell) => {
@@ -247,4 +291,4 @@ const writeExportWorkbook = async (
   await writeWorkbookToResponse(res, workbook);
 };
 
-module.exports = { streamExportRows, writeExportWorkbook };
+module.exports = { streamExportRows, writeExportWorkbook, buildTruncationFooter };

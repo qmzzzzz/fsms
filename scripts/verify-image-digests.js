@@ -118,6 +118,15 @@ const EXPECTED = [
     sources: 'docker.m.daocloud.io + docker.1ms.run（同上，index 3 个条目）',
     sites: 'docker-compose.yml 的 grafana',
   },
+  {
+    ref: 'semgrep/semgrep:1.183.0',
+    repo: 'semgrep/semgrep',
+    digest: '2e45517a85e13a9cca14a2a00df6bb48affd66b8ebfae1b0991cd57578362fb0',
+    captured: '2026-10-31',
+    // 第三方命名空间：ECR Public 只托管 official 库，map() 归 null ⇒ 不声称、也不失败。
+    sources: 'docker.m.daocloud.io + docker.1ms.run（两源逐字节一致）',
+    sites: '.github/workflows/sast.yml 的 container 镜像（全仓第一个 container: 键）',
+  },
 ];
 
 function parseArgs(argv) {

@@ -238,6 +238,13 @@ const collectBruteForceSignals = async ({ reportedIp, normalizedIp, windowStart,
 const applyBruteForceIpBan = async ({ normalizedIp, priorBans, fallbackIp }) => {
   try {
     const tier = IPBanEvents.tierFor(priorBans);
+    try {
+      require('./forensicTrigger').markForensicTarget(normalizedIp, {
+        reason: 'brute_force_auto_ban',
+        source: 'securityAlertIpBans',
+        evidence: { tier: tier + 1, durationMs: ESCALATION_TIERS[tier] },
+      }); // 取证标记（P1 钩子c）：这里是实际执行封禁的起点、先于 addToBlacklist——取证不依赖封禁是否落地（白名单/写库失败/抛错都算已确认攻击源）
+    } catch (_) {} // 失败怎么办：mark 内部吞异常并计数（fail-visible）、壳兜 require 期异常——标记失败绝不影响封禁与告警流程
     const result = await addToBlacklist(
       normalizedIp,
       ESCALATION_TIERS[tier],

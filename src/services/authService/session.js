@@ -26,6 +26,8 @@ const sessionService = require('../sessionService');
 const { generateToken, generateRefreshToken } = require('../tokenService');
 const statsCache = require('../statsCache');
 const initialPasswordFile = require('../initialPasswordFile');
+const { presentedClaims } = require('../../constants/honeypotDecoy');
+const consentService = require('../consentService');
 
 /**
  * 用户注册（业务层）
@@ -33,7 +35,7 @@ const initialPasswordFile = require('../initialPasswordFile');
  * @param {object} [ctx] `{ req }`：注册成功即建立会话，UserSession 的 ip / UA / 设备指纹
  *   都只能从真实请求对象取（见 sessionService.createSession），没有 req 时按既有降级口径
  *   签发不可吊销的令牌
- * @returns {Promise<{outcome:'CAPTCHA_INVALID'|'ENC_INVALID'|'WEAK'|'DUPLICATE'|'OK'}>}
+ * @returns {Promise<{outcome:'CAPTCHA_INVALID'|'CONSENT_REQUIRED'|'CONSENT_RECORD_FAILED'|'ENC_INVALID'|'WEAK'|'DUPLICATE'|'OK'}>}
  *   OK 时附 { userId, username, email, token, refreshToken }
  */
 async function registerUser(body, ctx = {}) {
@@ -48,6 +50,12 @@ async function registerUser(body, ctx = {}) {
   const registerCaptchaEnabled = await SysConfig.captchaSwitch('register');
   if (registerCaptchaEnabled && !(await captchaService.verify(captchaId, captchaText))) {
     return { outcome: 'CAPTCHA_INVALID' };
+  }
+
+  // 一-7：同意必须在服务层**再判一次**（fail-closed）。校验层只挡 HTTP 入口，
+  // 直接调用本函数的路径（脚本/其它控制器）不应因为绕过路由就免掉这条前提。
+  if (body.privacyConsent !== true) {
+    return { outcome: 'CONSENT_REQUIRED' };
   }
 
   // department 刻意不解构：它是数据范围的唯一来源（middleware/rbac.js 以
@@ -115,6 +123,21 @@ async function registerUser(body, ctx = {}) {
     roles: roleIds,
   });
 
+  // 一-7：同意记录必须在**签发任何令牌之前**落库。落库失败则回滚刚建的账号并失败退出：
+  // 留下「有账号、无同意证据」的用户，等于让这条合规链路在无人察觉时失效。
+  try {
+    await consentService.recordConsent({
+      userId: user._id,
+      username: user.username,
+      req: ctx.req,
+      source: 'self-register',
+    });
+  } catch (err) {
+    logger.error(`同意记录落库失败，回滚注册：${err.message}`, { username });
+    await User.deleteOne({ _id: user._id }).catch(() => {});
+    return { outcome: 'CONSENT_RECORD_FAILED' };
+  }
+
   // 公开注册同样改变总数/部门分布：所有管理员的统计缓存都必须失效（A-1），
   // 否则新账号在面板上最长一个 TTL 不可见。
   statsCache.invalidateAll('user-register');
@@ -148,21 +171,16 @@ async function registerUser(body, ctx = {}) {
 /**
  * 签发「与一条 UserSession 记录绑定」的令牌对（登录与注册共用同一段实现）
  *
- * 为什么必须共用：`sid` 的语义是"跨 refresh 轮换保持不变 ⇒ 踢掉某台设备后那台设备
- * 刷新令牌也无法复活"，而"落库失败就退回不带 sid 的令牌"是这条语义的唯一兜底。
- * 两处 mint 各抄一份时，注册路径正是漏抄的那一份（F-175）：它既不建 UserSession，
- * 签出的 refresh 令牌却能一路自续下去——`refreshSession` 里的 `if (rotateSid)`
- * 对无 sid 的令牌整段跳过，于是每次轮换再签一对新的无 sid 7 天令牌。结果是这条
- * 血统不出现在「登录会话」界面、点不掉，也只有改密码（tokenVersion）才能终止，
- * 而 auth.js 对无 sid 令牌的承诺是"最长在 refresh 有效期后自然消亡"——被无限轮换
- * 续下去的令牌不消亡。共用之后，新增的登录态一律可吊销；降级只保留给真正的
- * 落库失败（那一条仍属无上限血统，见交接的待拍板项）。
+ * 为什么必须共用：`sid` 的语义是"跨 refresh 轮换保持不变 ⇒ 踢掉某台设备后那台设备刷新令牌
+ * 也无法复活"，而"落库失败就退回不带 sid 的令牌"是这条语义的唯一兜底。两处 mint 各抄一份时，
+ * 注册路径正是漏抄的那一份（F-175）：它既不建 UserSession，签出的 refresh 令牌却能一路自续
+ * ——`refreshSession` 里的 `if (rotateSid)` 对无 sid 的令牌整段跳过，于是每次轮换再签一对新的
+ * 无 sid 7 天令牌，这条血统不出现在「登录会话」界面、点不掉，只有改密码（tokenVersion）能终止。
+ * 共用之后新增的登录态一律可吊销；降级只保留给真正的落库失败（那条仍属无上限血统，见待拍板项）。
  *
- * 降级方向是"少给一份可吊销性"而不是"拒绝这次登录/注册"，理由见
- * issueLoginSession 的 JSDoc；`sid` 返回 null 让调用方能看得见降级发生了。
- * 会话注册失败时**不签发 refresh**（refreshToken 为 null）：无 sid 的刷新令牌
- * 无法被设备级吊销终止，还会每次轮换自我续期。只发 access 时这次登录最长
- * 活过一个 access TTL，之后自然要求重新登录。
+ * 降级方向是"少给一份可吊销性"而不是"拒绝这次登录/注册"（理由见 issueLoginSession 的 JSDoc），
+ * `sid` 返回 null 让调用方看得见降级；会话注册失败时**不签发 refresh**（refreshToken 为 null），
+ * 只发 access 时这次登录最长活过一个 access TTL。
  *
  * @returns {Promise<{token:string, refreshToken:string|null, sessionId:string, sid:string|null, sessionRegistered:boolean}>}
  */
@@ -181,12 +199,13 @@ async function issueRevocableTokenPair({ user, roles, req }) {
     });
   }
   const sid = sessionRegistered ? sessionId : null;
+  const claims = presentedClaims(user, roles); // 载荷能被客户端解码：诱饵会话的 email/roles 在签发起就换成呈现层那份
   return {
     token: generateToken(
       user._id,
       user.username,
-      user.email,
-      roles,
+      claims.email,
+      claims.roles,
       user.realName,
       tokenVersion,
       sessionId,
@@ -202,7 +221,6 @@ async function issueRevocableTokenPair({ user, roles, req }) {
 /**
  * 登录成功后的收尾（自 loginUser 拆出）：非常规时间审计、登录信息更新、
  * 角色权限读取、令牌签发、设备会话注册与成功审计。
- *
  * 会话注册表落库失败不阻断登录，但要降级为「令牌不含可吊销会话」：若此处失败
  * 仍下发带 sid 的令牌，authenticate 会因查不到会话而拒绝该令牌，用户登录成功
  * 却立刻无法访问任何接口——比「本次登录不支持设备级吊销」严重得多。
@@ -282,6 +300,8 @@ async function issueLoginSession(user, ctx, username) {
       realName: user.realName,
       roles,
       permissions,
+      // P1-2：前端据此把用户直接引导到改密页，而不是先放行再吃 403
+      mustChangePassword: user.mustChangePassword === true,
     },
   };
 }

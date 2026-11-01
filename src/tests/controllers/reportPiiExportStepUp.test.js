@@ -69,6 +69,27 @@ describe('未脱敏 PII 导出：pii:export + 二次验证（L-17）', () => {
     return out;
   };
 
+  /** 最后一行的第一格文本（A-8 的水印行；掩码档没有这一行） */
+  /** 工作簿属性（A-8 水印的另两路：creator/lastModifiedBy/description/keywords） */
+  const workbookPropsOf = async (body) => {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(body);
+    return {
+      creator: wb.creator,
+      lastModifiedBy: wb.lastModifiedBy,
+      description: wb.description,
+      keywords: wb.keywords,
+    };
+  };
+
+  const lastRowFirstCell = async (body) => {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(body);
+    return String(wb.worksheets[0].lastRow.getCell(1).value ?? '');
+  };
+
   const binaryParser = (res, cb) => {
     const chunks = [];
     res.on('data', (chunk) => chunks.push(chunk));
@@ -199,13 +220,31 @@ describe('未脱敏 PII 导出：pii:export + 二次验证（L-17）', () => {
     expect(columns['描述']).toContain(alarmDescription);
     expect(columns['处理人']).toEqual([MASKED_NAME]);
     expect(columns['处理人']).not.toContain(REAL_NAME);
+    // 反向对照（A-8）：掩码档既没有追溯号响应头，也没有表尾水印行
+    expect(res.headers['x-export-trace-id']).toBeUndefined();
+    expect(await lastRowFirstCell(res.buffer)).not.toContain('未脱敏导出');
   });
 
   test('② 未脱敏只经 POST：口令正确且持 pii:export 时输出「张伟明」并留痕', async () => {
     const res = await exportPost(piiToken, { currentPassword: PASSWORD });
     expect(res.status).toBe(200);
     const columns = await columnsFromWorkbook(res.buffer);
-    expect(columns['处理人']).toEqual([REAL_NAME]);
+    // A-8：表尾多一行可见水印，故「处理人」列有两条——数据行 + 空（水印那行）
+    expect(columns['处理人']).toEqual([REAL_NAME, '']);
+
+    // A-8：水印多路同号（响应头 / 表尾行 / 文件名 / 审计），外流件能反查到导出人
+    const traceId = res.headers['x-export-trace-id'];
+    expect(traceId).toMatch(/^[0-9a-f]{16}$/);
+    const lastCell = await lastRowFirstCell(res.buffer);
+    expect(lastCell).toContain('未脱敏导出');
+    expect(lastCell).toContain(piiUser.username);
+    expect(lastCell).toContain(traceId);
+    expect(decodeURIComponent(res.headers['content-disposition'])).toContain(traceId);
+    const props = await workbookPropsOf(res.buffer);
+    expect(props.creator).toBe(piiUser.username);
+    expect(props.description).toBe(lastCell);
+    expect(props.keywords).toContain(traceId);
+    expect(props.lastModifiedBy).toContain(traceId);
 
     // 提权路径必须可回答"谁在什么时候导出了全文"。
     // 审计经 auditBuffer 异步落库：响应先回，行在并行 worker 下可能尚未可见，
@@ -223,7 +262,7 @@ describe('未脱敏 PII 导出：pii:export + 二次验证（L-17）', () => {
       { label: 'view_sensitive_data 审计落库' }
     );
     expect(audit).toBeTruthy();
-    expect(audit.body).toMatchObject({ type: 'alarms', masked: false });
+    expect(audit.body).toMatchObject({ type: 'alarms', masked: false, traceId });
     expect(audit.dataType).toBe('export_realname');
   });
 
@@ -264,5 +303,26 @@ describe('未脱敏 PII 导出：pii:export + 二次验证（L-17）', () => {
 
     const fresh = await User.findById(piiUser._id).select('mfaFailCount').lean();
     expect(fresh.mfaFailCount ?? 0).toBe(0);
+  });
+
+  test('A-8：配额用尽（滚动 24h）时在二次验证之前拒绝，并给出 Retry-After', async () => {
+    const now = new Date();
+    await AuditLog.insertMany(
+      Array.from({ length: 5 }, () => ({
+        action: 'view_sensitive_data',
+        category: 'report',
+        userId: piiUser._id,
+        username: piiUser.username,
+        dataType: 'export_realname',
+        success: true,
+        riskLevel: 'medium',
+        timestamp: now,
+      }))
+    );
+    const res = await exportPost(piiToken, { currentPassword: PASSWORD });
+    expect(res.status).toBe(429);
+    expect(jsonOf(res)?.errors?.errorCode).toBe('PII_EXPORT_QUOTA_EXCEEDED');
+    expect(Number(res.headers['retry-after'])).toBeGreaterThan(0);
+    expect(res.headers['content-type']).not.toContain('spreadsheetml');
   });
 });

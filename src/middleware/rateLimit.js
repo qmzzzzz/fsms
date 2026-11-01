@@ -2,6 +2,7 @@
  * 限流中间件
  * 防止 API 滥用和暴力攻击
  */
+// 限流中间件：防止 API 滥用和暴力攻击
 
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = rateLimit;
@@ -89,8 +90,8 @@ const skipIfWhitelisted = (req) => req.ipWhitelisted === true;
 // 计入配额会让门禁对完全健康的新版本恒红并自动回滚。清单与 protocolCompliance.skipPaths
 // 同源（constants/probePaths），不在这里再造第二份——两份清单迟早有一份先忘。
 // 判据是 `isProbeRequest`（精确路径 + GET/HEAD）而不是路径前缀：前缀语义曾把整个
-// `/health/...` 子树连同任意方法一起免配额免闸门，实测 40 发 ~200KB 的
-// `POST /health/zzflood` 一条 429 都没有——body 解析放大正是这两个限流器要挡的东西。
+// `/health/...` 子树连同任意方法一起免配额，实测 40 发 ~200KB 的 `POST /health/zzflood`
+// 一条 429 都没有——body 解析放大正是这两个限流器要挡的东西。清单与 constants/probePaths 同源。
 const skipProbeRequests = (req) => isProbeRequest(req.method, req.path);
 const skipProbesAndWhitelisted = (req) => skipIfWhitelisted(req) || skipProbeRequests(req);
 
@@ -119,12 +120,24 @@ const skipProbesAndWhitelisted = (req) => skipIfWhitelisted(req) || skipProbeReq
 //
 // 注意用 `=== '/api' || startsWith('/api/')` 而不是 `startsWith('/api')`：
 // 后者会把 `/api-docs` 一并算进 API 面（它有自己的 docsLimiter，口径不同）。
-const skipResourceLimiter = (req) => skipProbesAndWhitelisted(req) || isStaticSurfaceRequest(req);
+const AVATAR_READ_PREFIX = '/api/avatars';
+/** 头像读取判据（GET/HEAD + /api/avatars 前缀）：用 req.originalUrl 而非 req.path——路由内的桶看到的
+ * 是剥掉挂载前缀的 path。A2（2026-10-30）后本判据只负责"全局桶让位"：不变量是「命中本判据 ⇒ 必进
+ * avatarRoutes 的 router.use(avatarReadIpLimiter)」，改任一侧须同时核对另一侧（守卫 avatarUnmatchedSurfaceGuard）。
+ */
+const isAvatarReadRequest = (req) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  const path = String(req.originalUrl || '')
+    .split('?')[0]
+    .toLowerCase();
+  return path === AVATAR_READ_PREFIX || path.startsWith(AVATAR_READ_PREFIX + '/');
+};
+
+const skipResourceLimiter = (req) =>
+  skipProbesAndWhitelisted(req) || isStaticSurfaceRequest(req) || isAvatarReadRequest(req);
 
 /**
- * 通用限流器
- * 适用于大多数 API 接口
- * 生产环境：300 次/15 分钟（约 20 次/分钟）
+ * 通用限流器（适用于大多数 API 接口）：生产环境 300 次/15 分钟（约 20 次/分钟）。
  *
  * 挂载范围是**全站**（app.js 不带 `/api/` 前缀）：`/`、`/csp-report`、`/api-docs` 这些
  * 表面上同样会为每一次协议违规写一条走哈希链的审计记录，只挂 `/api/` 时它们一条 429 都不吃。
@@ -152,40 +165,30 @@ const generalLimiter = rateLimit({
 });
 
 /**
- * 静态前端面限流器（2026-09-30 新增）
+ * 静态前端面限流器（2026-09-30 新增）：存在的理由是**修一个度量缺陷**，不是加一道闸——
+ * 此前静态面被 generalLimiter / ipLimiter
+ * 整体豁免，豁免的代价是「零预算」——单个 IP 可以无限拉 `/assets/*`。而它之所以需要豁免，
+ * 恰恰是因为通用配额（300 次/15 分钟）在度量**错误的东西**：一次页面加载 = 34 个静态请求
+ * + 1 个 API 请求（Playwright trace 实测），静态请求的成本（一次 express.static 取文件）
+ * 与 API 请求的成本（认证 + 授权 + DB 往返）差着两三个数量级，共享一个计数器时无论把阈值
+ * 调多高都会在某一侧出错——调高则 API 侧失去保护，调低则 SPA 白屏。正确形态是**按成本分桶**：
+ * 静态面自己一个宽松但非零的桶，API 面保留严桶，于是"豁免"变成"换桶"，不再是"无上限"。
  *
- * 存在的理由是**修一个度量缺陷**，不是加一道闸：
- * 此前静态面被 generalLimiter / ipLimiter 整体豁免，豁免的代价是「零预算」——
- * 单个 IP 可以无限拉 `/assets/*`。而它之所以需要豁免，恰恰是因为通用配额
- * （300 次/15 分钟）在度量**错误的东西**：一次页面加载 = 34 个静态请求 + 1 个 API
- * 请求（Playwright trace 实测），静态请求的成本（一次 express.static 取文件）
- * 与 API 请求的成本（认证 + 授权 + DB 往返）差着两三个数量级，共享一个计数器时
- * 无论把阈值调多高都会在某一侧出错——调高则 API 侧失去保护，调低则 SPA 白屏。
- *
- * 正确形态是**按成本分桶**：静态面自己一个宽松但非零的桶，API 面保留严桶。
- * 于是"豁免"变成"换桶"，不再是"无上限"。
- *
- * 阈值推导（全部来自实测，不是拍的）：
- *   34 静态请求/页面 × 30 人（NAT 出口的常见规模）× 10 次页面加载/15 分钟 = 10200
- *   取 12000，留约 18% 余量。
- * 按 IP 而非 IP+UA 键：NAT 出口后同版本同浏览器的 UA 完全一致，
+ * 阈值推导（实测）：34 静态请求/页面 × 30 人（NAT 常见规模）× 10 次页面加载/15 分钟 = 10200，
+ * 取 12000 留约 18% 余量。按 IP 而非 IP+UA 键：NAT 出口后同版本同浏览器的 UA 完全一致，
  * 加 UA 进键只是把一个桶拆成几个值相同的桶，收益为零而键空间凭空变大。
  *
- * 这个桶的定位要说清：它挡的是**意外洪水**（脚本误循环、爬虫无节制重取），
- * 不是决心明确的攻击者——10000 req/min 的攻击者打穿 12000/15min 毫不费力，
- * 那种流量本来就该由前置反代挡（Nginx 示例配置里对 /metrics 也有同层限流）。
- * 把应用层桶当反代来用，只会在"正常用户被误伤"和"真攻击打不穿"之间两头不讨好。
+ * 定位要说清：它挡的是**意外洪水**（脚本误循环、爬虫无节制重取），不是决心明确的攻击者——
+ * 10000 req/min 的攻击者打穿 12000/15min 毫不费力，那种流量本来就该由前置反代挡（Nginx
+ * 示例配置里对 /metrics 也有同层限流）。把应用层桶当反代用，只会在"正常用户被误伤"和
+ * "真攻击打不穿"之间两头不讨好。
  *
- * 429 文案与 generalLimiter **刻意不同**：静态面被限流时页面已加载一半，
- * 返回通用文案会让用户以为是接口故障。命中几乎总是"某个 IP 出口后面的人全被限了"，
- * 直接说明现象即可。
+ * 429 文案与 generalLimiter **刻意不同**：静态面被限流时页面已加载一半，返回通用文案会让
+ * 用户以为是接口故障；命中几乎总是"某个 IP 出口后面的人全被限了"，直接说明现象即可。
  */
 const STATIC_SURFACE_MAX_REQUESTS = 12000;
-/**
- * 本桶的计数范围判定。单独导出（仅供测试驱动语义）——express-rate-limit 的实例上
- * 不暴露 skip，测试拿不到它；这与 normalizeLoginRateKey / normalizeRateLimitIp
- * 「导出以供测试」是同一条既有做法，而不是为测试新增的后门。
- */
+/** 本桶的计数范围判定。单独导出（仅供测试驱动语义）：express-rate-limit 实例不暴露 skip，
+ * 这与 normalizeLoginRateKey / normalizeRateLimitIp「导出以供测试」是同一条既有做法，不是后门。 */
 const staticSurfaceSkip = (req) => !isStaticSurfaceRequest(req) || skipProbesAndWhitelisted(req);
 
 const staticSurfaceLimiter = rateLimit({
@@ -202,9 +205,8 @@ const staticSurfaceLimiter = rateLimit({
     message: '静态资源请求过于频繁，请稍后再试',
   },
   handler: (req, res, _next) => {
-    // 刻意**不**接 noteRateLimitHit：CC 升级服务的阶梯是按"IP 触顶即封"设计的，
-    // 而静态面被限流绝大多数是 NAT 出口聚合的结果（一个人多刷几个标签页就可能撞上），
-    // 接到封禁阶梯上就是把误封风险从"一个 IP"放大到"一整个办公室"。
+    // 刻意**不**接 noteRateLimitHit：CC 升级阶梯按"IP 触顶即封"设计，而静态面被限流绝大多数是
+    // NAT 出口聚合（一个人多刷几个标签页就可能撞上），接上去等于把误封风险从「一个 IP」放大到「一整个办公室」。
     logger.warn(`静态面限流触发：${clientIpForSecurityDecision(req)} - ${req.method} ${req.path}`);
     res.status(429).json({
       success: false,
@@ -213,10 +215,66 @@ const staticSurfaceLimiter = rateLimit({
   },
 });
 
+const PREFLIGHT_MAX_REQUESTS = 12000;
+/** 预检桶：cors 对 OPTIONS 直接 204，挂在其后的 ip/general/static 三桶一发都计不到。故在 cors 之前单独按 IP
+ * 计一个更宽的桶（12000/15min ≈13 次/秒）：塞进 300/15min 的通用配额会按"请求数×2"误伤正常 SPA，本档只挡洪水。
+ * 审计侧不写链（无主体、无业务数据，一发一条就是放大面），显式登记为「不审计但必须计数」——计数点即本桶。 */
+const preflightLimiter = rateLimit({
+  windowMs: config.rateLimit.windowMs,
+  max: PREFLIGHT_MAX_REQUESTS,
+  store: makeSharedStore('preflight'),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req))),
+  skip: (req) => req.method !== 'OPTIONS' || skipProbesAndWhitelisted(req),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res, _next) => {
+    logger.warn(`预检请求限流触发：${clientIpForSecurityDecision(req)}`);
+    res.status(429).json({ success: false, message: '预检请求过于频繁，请稍后再试' });
+  },
+});
+
+const AVATAR_READ_IP_MAX = 600;
 /**
- * 严格限流器
- * 适用于注册、修改密码、数据导出等敏感/重资源操作
- * 生产环境：30 次/15 分钟
+ * 头像读取桶（认证前，按 IP）：头像是"一页 N 张"的资源型请求，塞进通用配额会在正常翻页时误伤。
+ * 但不能沿用通用桶的宽松度：本桶挂在 authenticate 之前，未认证探测也计入，3000/15 分钟
+ * （12000/小时）比它要替代的 ipLimiter（1000/小时）宽 12 倍——方向是反的。阈值：20 张/页 ×
+ * 30 人 NAT × 1 次首屏 = 600/15 分钟，认证后的重复浏览由用户桶承担。
+ */
+const avatarReadIpLimiter = rateLimit({
+  windowMs: config.rateLimit.windowMs,
+  max: AVATAR_READ_IP_MAX,
+  store: makeSharedStore('avatar-read-ip'),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req))),
+  skip: skipProbesAndWhitelisted,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    // 不接 noteRateLimitHit：头像桶的 429 更可能是 NAT 聚合或列表首屏，不应升级成 IP 封禁
+    logger.warn(`头像读取限流触发（IP）：${clientIpForSecurityDecision(req)}`);
+    res.status(429).json({ success: false, message: '头像加载过于频繁，请稍后再试' });
+  },
+});
+
+const AVATAR_READ_USER_MAX = 1200;
+/**
+ * 头像读取桶（认证后，按用户）：1200/15 分钟 = 一页 20 张 × 60 次页面加载，给单账号批量抓取设上限，不影响正常使用。
+ */
+const avatarReadUserLimiter = rateLimit({
+  windowMs: config.rateLimit.windowMs,
+  max: AVATAR_READ_USER_MAX,
+  store: makeSharedStore('avatar-read-user'),
+  keyGenerator: (req) => `avatar-user:${req.user?.userId}`,
+  skip: (req) => !req.user?.userId || skipIfWhitelisted(req),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn('头像读取限流触发（用户）', { userId: req.user?.userId || '-' });
+    res.status(429).json({ success: false, message: '头像加载过于频繁，请稍后再试' });
+  },
+});
+
+/**
+ * 严格限流器：适用于注册、修改密码、数据导出等敏感/重资源操作，生产环境 30 次/15 分钟。
  */
 const strictLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
@@ -241,22 +299,19 @@ const strictLimiter = rateLimit({
 });
 
 /**
- * 登录限流器（IP 维度）
- * 防止暴力破解密码
- * 生产环境：10 次/15 分钟，跳过成功请求
+ * 登录限流器（IP 维度）：防止暴力破解密码，生产环境 10 次/15 分钟，跳过成功请求。
  *
- * 这是登录入口**唯一**的 IP 维度桶，不要再在这里并联"同键空间、阈值更宽"的第二个桶：
- * 此前 `authRoutes.js` 还挂过一个 `loginIpLimiter`（30 次/15 分钟，键 `login-ip:${ip}`），
- * 与本桶键空间（只由来源 IP 决定）、窗口、`skipSuccessfulRequests` 全同，只有阈值更宽
- * ⇒ 它既不可能多挡一次，也不可能多放行一次，只把第 31 次之后的 429 文案换成另一句
- * （实测见 `src/tests/security/loginIpBucketDominator.test.js`：串联时本桶第 11 次触顶，
- * 宽桶单独挂载第 31 次触顶）。注释里"外层兜底、封住轮换用户名撞库"描述的是一个
- * 不存在的能力——那条路径由本桶（更严）与 `loginUserLimiter`（账号维度）共同覆盖。
+ * 这是登录入口**唯一**的 IP 维度桶，不要再并联"同键空间、阈值更宽"的第二个桶：此前
+ * `authRoutes.js` 还挂过 `loginIpLimiter`（30 次/15 分钟，键 `login-ip:${ip}`），与本桶键空间、
+ * 窗口、`skipSuccessfulRequests` 全同，只有阈值更宽 ⇒ 它既不可能多挡一次，也不可能多放行一次，
+ * 只把第 31 次之后的 429 文案换成另一句（实测见 `src/tests/security/loginIpBucketDominator.test.js`：
+ * 串联时本桶第 11 次触顶，宽桶单独挂载第 31 次触顶）。注释里"外层兜底、封住轮换用户名撞库"描述的是
+ * 一个不存在的能力——那条路径由本桶（更严）与 `loginUserLimiter`（账号维度）共同覆盖。
  *
- * 分层事实（不随本条改动）：非白名单 IP 通常在第 6 次失败登录时就被
- * `securityAlert` 的暴力破解阈值（5 次/5 分钟）自动封禁，`checkIPBlacklist` 早于限流，
- * 于是第 6 次起拿到的是 403。本桶真正管住的是白名单 IP（凭据型限流刻意**不**豁免白名单）
- * 与"慢速滴灌"（5 分钟窗口内不足 5 次、15 分钟窗口内累计超 10 次）两条路径。
+ * 分层事实（不随本条改动）：非白名单 IP 通常在第 6 次失败登录时就被 `securityAlert` 的暴力破解
+ * 阈值（5 次/5 分钟）自动封禁，`checkIPBlacklist` 早于限流，于是第 6 次起拿到的是 403。本桶真正管住
+ * 的是白名单 IP（凭据型限流刻意**不**豁免白名单）与"慢速滴灌"（5 分钟窗口内不足 5 次、15 分钟
+ * 窗口内累计超 10 次）两条路径。
  */
 const loginLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
@@ -264,8 +319,7 @@ const loginLimiter = rateLimit({
   store: makeSharedStore('login'),
   skipSuccessfulRequests: true, // 成功登录不计入限流
   keyGenerator: (req) => {
-    // 仅按来源 IP 限流：username 是客户端可控字段，参与组键会让攻击者通过
-    // 任意轮换用户名不断获得新配额，使暴力破解防护形同虚设
+    // 仅按来源 IP 限流：username 是客户端可控字段，参与组键会让攻击者任意轮换用户名获得新配额，防护形同虚设
     return `login:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`;
   },
   standardHeaders: true,
@@ -288,23 +342,32 @@ const loginLimiter = rateLimit({
 });
 
 /**
- * 登录限流器的账号维度键归一化。
+ * 登录限流器的账号维度键归一化 + 有界化。
  *
- * 必须与 `loginValidation` 的 `body('username').trim()` 同形：限流器挂在验证之前，
- * 控制器拿到的是 trim 后的名字，而"admin␣␣"与"admin"若算两个键，
- * 每多一个空格就多一个 20 次/15 分钟 的桶（128 字符上限给了数百个），
- * 本限流器唯一的存在理由——多 IP 各自少量尝试同一账号——就此失效。
+ * 归一化必须与 `loginValidation` 的 `body('username').trim()` 同形：限流器挂在验证之前，
+ * "admin␣␣"与"admin"若算两个键，每多一个空格就多一个 20 次/15 分钟 的桶（128 上限给了数百个），
+ * 本限流器唯一的存在理由——多 IP 各自少量尝试同一账号——就此失效。有界化同样必要：键直接来自
+ * 未校验的 req.body（1mb 上限），不设上限时单个请求就能压入近 1MB 的 Redis/内存键。
  * @param {unknown} username
  * @returns {string}
  */
-const normalizeLoginRateKey = (username) => String(username).trim().toLowerCase();
+const LOGIN_RATE_KEY_MAX_CHARS = 64;
+const LOGIN_RATE_KEY_OVERSIZED = '~oversized';
+const normalizeLoginRateKey = (username) => {
+  const normalized = (typeof username === 'string' ? username : String(username ?? ''))
+    .trim()
+    .toLowerCase();
+  if (normalized.length <= LOGIN_RATE_KEY_MAX_CHARS) return normalized;
+  // 超长不截断也不摘要：前两者都让"前 64 字符相同"的任意长串各占一个新桶（截断则互相挤占，
+  // 摘要则键空间仍由请求方决定）。超出上限的 username 注定被 loginValidation 拒（上限 128）
+  // 或根本不存在（模型上限 30），故并到一个登记在案的共享桶：键长恒为 10，且换不出新配额。
+  return LOGIN_RATE_KEY_OVERSIZED;
+};
 
 /**
- * 登录限流器（账号维度）
- * 与上方 IP 维度限流器互补：IP 维度防「单 IP 撞库/轮换用户名」，
- * 账号维度防「分布式撞单账号」（多个 IP 各自少量尝试同一用户名，IP 维度无法察觉）。
- * 单账号 20 次/15 分钟，跳过成功请求（成功登录不应占用配额）。
- * username 缺失时回退 IP 键，避免无 username 字段时键为 undefined。
+ * 登录限流器（账号维度）：与上方 IP 维度限流器互补——IP 维度防「单 IP 撞库/轮换用户名」，账号维度防
+ * 「分布式撞单账号」（多个 IP 各自少量尝试同一用户名，IP 维度无法察觉）。单账号 20 次/15 分钟，跳过
+ * 成功请求（成功登录不应占用配额）。username 缺失时回退 IP 键，避免无 username 字段时键为 undefined。
  */
 const loginUserLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
@@ -321,7 +384,7 @@ const loginUserLimiter = rateLimit({
   legacyHeaders: false,
   handler: (req, res) => {
     logger.warn(
-      `登录账号维度限流触发：username=${req.body?.username || '-'}, ip=${clientIpForSecurityDecision(req)}（可能存在分布式撞单账号攻击）`
+      `登录账号维度限流触发：username=${normalizeLoginRateKey(req.body?.username) || '-'}, ip=${clientIpForSecurityDecision(req)}（可能存在分布式撞单账号攻击）`
     );
     res.status(429).json({
       success: false,
@@ -369,7 +432,7 @@ const ipLimiter = rateLimit({
 const userLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
   store: makeSharedStore('user'),
-  skip: skipIfWhitelisted,
+  skip: (req) => skipIfWhitelisted(req) || isAvatarReadRequest(req),
   max: (req) => {
     // 注意：不信任 token payload 中的 roles，仅按 userId 限流
     // 角色配额如需实时生效，应由上层 authenticate 中间件加载后挂到 req.user.roleCodes
@@ -626,11 +689,20 @@ module.exports = {
   userLimiter,
   registerIpLimiter,
   staticSurfaceLimiter,
-  // 仅供测试：账号维度键的归一化规则（空格填充分裂计数桶的回归由它盯着）
+  preflightLimiter,
+  avatarReadIpLimiter,
+  avatarReadUserLimiter,
+  // 仅供测试：账号维度键的归一化与有界化规则（空格填充分裂桶、超长 username 撑爆键都由它盯着）
   normalizeLoginRateKey,
+  LOGIN_RATE_KEY_MAX_CHARS,
+  LOGIN_RATE_KEY_OVERSIZED,
   // 仅供测试与 wellKnownRoutes 复用：限流键 IP 部分的归一化（::ffff: 双桶回归由它盯着）
   normalizeRateLimitIp,
   // 静态面限流器的计数范围判定（仅供测试驱动语义，见 staticSurfaceSkip 的注释）
   staticSurfaceSkip,
   STATIC_SURFACE_MAX_REQUESTS,
+  PREFLIGHT_MAX_REQUESTS,
+  isAvatarReadRequest,
+  AVATAR_READ_IP_MAX,
+  AVATAR_READ_USER_MAX,
 };

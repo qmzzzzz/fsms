@@ -21,11 +21,16 @@ import i18n from '@/i18n'
 
 const getMe = vi.fn()
 const updateProfile = vi.fn()
+const uploadAvatar = vi.fn()
+const deleteAvatar = vi.fn()
+const compressAvatarFile = vi.fn()
 vi.mock('@/utils/api', () => ({
   api: {
     auth: {
       getMe: (...a) => getMe(...a),
       updateProfile: (...a) => updateProfile(...a),
+      uploadAvatar: (...a) => uploadAvatar(...a),
+      deleteAvatar: (...a) => deleteAvatar(...a),
     },
     // ProfileView 右栏还挂了 B 组自助卡（我的安全信息/账户绑定/我的操作日志），
     // 挂载时各发一次请求。给桩以免它们因 api.security 缺失而落进错误态——
@@ -37,7 +42,14 @@ vi.mock('@/utils/api', () => ({
     },
   },
   isCanceledError: () => false,
+  // 头像失败提示的仓内口径：拦截器已弹过的 axios 错误由组件侧抑制
+  isHandledApiError: (e) => e?.isAxiosError === true,
 }))
+// 压缩依赖 canvas/Image/URL.createObjectURL（jsdom 不全），这里桩掉，只测组件接线
+vi.mock('@/utils/avatarImage', () => ({
+  compressAvatarFile: (...a) => compressAvatarFile(...a),
+}))
+
 vi.mock('element-plus/es/components/message/index.mjs', () => ({
   ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }))
@@ -120,6 +132,9 @@ afterEach(() => {
   i18n.global.locale.value = 'zh-CN'
   getMe.mockReset()
   updateProfile.mockReset()
+  uploadAvatar.mockReset()
+  deleteAvatar.mockReset()
+  compressAvatarFile.mockReset()
   ElMessage.success.mockReset()
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
@@ -340,7 +355,9 @@ describe('ProfileView 时间格式（O-3 单一事实来源）', () => {
 
   test('语言漂移守卫：同一实例切到 en-US 后时间文本完全不变（标签变英文证明切换真的生效）', async () => {
     const c = await open({ ...ME, lastLoginAt: ISO_LOGIN })
-    expect(lastLoginRow(c).textContent.trim()).toBe(`最近登录：${localStamp(ISO_LOGIN)}`)
+    expect(lastLoginRow(c).textContent.trim()).toBe(
+      `最近登录${i18n.global.t('common.labelColon')}${localStamp(ISO_LOGIN)}`
+    )
 
     i18n.global.locale.value = 'en-US'
     await flush(8)
@@ -348,7 +365,9 @@ describe('ProfileView 时间格式（O-3 单一事实来源）', () => {
     const row = lastLoginRow(c)
     expect(row).toBeTruthy()
     // 正：标签确实切成了英文（证明 locale 已切换，本用例不是恒真）
-    expect(row.textContent.trim()).toBe(`Last Login：${localStamp(ISO_LOGIN)}`)
+    expect(row.textContent.trim()).toBe(
+      `Last Login${i18n.global.t('common.labelColon')}${localStamp(ISO_LOGIN)}`
+    )
     // 反：时间串必须仍是同一个本地定长串，不得出现 en-US 的 toLocaleString 形态
     expect(row.textContent).not.toContain('10/1/2026')
     // 同实例的其它文案也切了英文
@@ -377,6 +396,138 @@ describe('ProfileView 角色文案随语言切换（第 34 轮 M6）', () => {
     i18n.global.locale.value = 'zh-CN'
     await flush(8)
     expect(c.text()).toContain(zhText)
+    expect(c.errors).toEqual([])
+  })
+})
+
+describe('ProfileView 头像上传/移除（A5 回归）', () => {
+  /** 头像移除按钮（上传按钮之后的第二个 small 按钮） */
+  const avatarRemoveBtn = (c) => c.findAll('.profile-avatar-actions button')[1]
+
+  /** 选文件：直接给 input 塞一个假 File 并派发 change（accept 属性由浏览器把关，这里只测接线） */
+  const chooseFile = async (c, file) => {
+    const input = c.find('.profile-avatar-input')
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+    input.dispatchEvent(new window.Event('change', { bubbles: true }))
+    await flush(4)
+  }
+
+  const FILE_A = { type: 'image/jpeg', size: 1024, name: 'a.jpg' }
+  const FILE_B = { type: 'image/png', size: 2048, name: 'b.png' }
+
+  test('上传成功：走专用端点、回填 avatar、成功提示一次', async () => {
+    compressAvatarFile.mockResolvedValue({
+      dataUrl: 'data:image/jpeg;base64,AAAA',
+      width: 512,
+      height: 512,
+    })
+    uploadAvatar.mockResolvedValue({
+      data: { success: true, data: { avatar: '/api/avatars/new1?v=abc' } },
+    })
+    const c = await open()
+    await chooseFile(c, FILE_A)
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '上传成功提示' })
+    expect(compressAvatarFile).toHaveBeenCalledTimes(1)
+    expect(uploadAvatar).toHaveBeenCalledTimes(1)
+    // 只送 image 字段：资料保存接口不发 avatar（后端 PUT /auth/avatar 的契约）
+    expect(Object.keys(uploadAvatar.mock.calls[0][0])).toEqual(['image'])
+    expect(useAuthStore(c.pinia).currentUser.avatar).toBe('/api/avatars/new1?v=abc')
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  /**
+   * 失败提示去重（A5 根因 1）：axios 错误已由响应拦截器弹过一条具体文案，
+   * 组件再弹一条泛化「头像处理失败」就是两条，且泛化文案后到、盖住真正有用的那条。
+   * 判据：拦截器已提示过的错误 ⇒ 组件侧 0 条；本地压缩失败（非 axios）⇒ 1 条。
+   */
+  test('上传失败：拦截器已提示过的 axios 错误不再重复弹（isHandledApiError 去重）', async () => {
+    compressAvatarFile.mockResolvedValue({ dataUrl: 'data:image/jpeg;base64,AAAA' })
+    const axiosErr = Object.assign(new Error('Request failed with status code 413'), {
+      isAxiosError: true,
+    })
+    uploadAvatar.mockRejectedValue(axiosErr)
+    const c = await open()
+    await chooseFile(c, FILE_A)
+    await flush(20)
+    expect(uploadAvatar).toHaveBeenCalledTimes(1)
+    // 拦截器负责那一条；组件不得补第二条
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('上传失败：本地压缩失败（非 axios 错误）仍必须由组件提示', async () => {
+    compressAvatarFile.mockRejectedValue(new Error('tooLarge'))
+    const c = await open()
+    await chooseFile(c, FILE_A)
+    await flush(20)
+    expect(uploadAvatar).not.toHaveBeenCalled()
+    expect(ElMessage.error).toHaveBeenCalledTimes(1)
+    expect(ElMessage.error.mock.calls[0][0]).toBe(i18n.global.t('profile.avatar.tooLarge'))
+  })
+
+  test('移除头像：接口失败时组件不重复弹提示，成功时清空并提示一次', async () => {
+    deleteAvatar.mockResolvedValue({ data: { success: true } })
+    const c = await open({ ...ME, avatar: '/api/avatars/old?v=1' })
+    await waitFor(() => c.findAll('.profile-avatar-actions button').length >= 2, {
+      message: '头像移除按钮出现',
+    })
+    click(avatarRemoveBtn(c))
+    await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '移除成功提示' })
+    expect(deleteAvatar).toHaveBeenCalledTimes(1)
+    expect(useAuthStore(c.pinia).currentUser.avatar).toBe('')
+    expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+
+  test('移除头像失败：拦截器已提示过的错误不再重复弹', async () => {
+    deleteAvatar.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 500'), { isAxiosError: true })
+    )
+    const c = await open({ ...ME, avatar: '/api/avatars/old?v=1' })
+    await waitFor(() => c.findAll('.profile-avatar-actions button').length >= 2, {
+      message: '头像移除按钮出现',
+    })
+    click(avatarRemoveBtn(c))
+    await flush(20)
+    expect(deleteAvatar).toHaveBeenCalledTimes(1)
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  /**
+   * 并发上传（A5 根因 2）：连选两张图时两次请求都在飞，响应可能乱序到达。
+   * 判据（后发者赢）：先发的旧响应**晚到**也不得回写头像；界面/store 必须是新图，
+   * 且成功提示只有一条（旧请求不该报「已更新」）。
+   */
+  test('并发上传：旧响应晚到不得覆盖新头像（后发者赢）', async () => {
+    let resolveFirst
+    let resolveSecond
+    compressAvatarFile.mockImplementation(async (file) => ({
+      dataUrl: `data:image/jpeg;base64,${file.name}`,
+      width: 512,
+      height: 512,
+    }))
+    uploadAvatar.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          if (!resolveFirst) resolveFirst = resolve
+          else resolveSecond = resolve
+        })
+    )
+    const c = await open()
+    await chooseFile(c, FILE_A)
+    await chooseFile(c, FILE_B)
+    await waitFor(() => uploadAvatar.mock.calls.length === 2, { message: '两次上传都已发出' })
+    // 乱序：新图先回，旧图后回
+    resolveSecond({ data: { success: true, data: { avatar: '/api/avatars/new?v=2' } } })
+    await flush(6)
+    resolveFirst({ data: { success: true, data: { avatar: '/api/avatars/old?v=1' } } })
+    await flush(10)
+    // 后发者赢：旧响应不得回写
+    expect(useAuthStore(c.pinia).currentUser.avatar).toBe('/api/avatars/new?v=2')
+    // 只允许一条「头像已更新」（旧请求既已作废，不得再报成功）
+    expect(ElMessage.success).toHaveBeenCalledTimes(1)
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
   })
 })

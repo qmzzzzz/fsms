@@ -95,6 +95,26 @@ npm run test:e2e              # HTTP 冒烟（完整启动序列走查）
   且要容忍格式化换行；界面断言优先补 `data-testid`。
 - E2E 增量见 `e2e/README.md`（Playwright 旅程）。
 
+### 6.1 跨平台 shell 门禁（POSIX shell 解析）
+
+`src/tests/deploy/**` 等套件用真实进程跑 `scripts/*.sh`，因此必须先有一个可用的 POSIX shell：
+
+- **解析与接入**：`src/tests/helpers/posixShell.js` 负责**行为验证**候选 shell（跑得起来、
+  `-c` 语义成立、探针标记能原样带回——文件存在不算数），`src/tests/globalSetup.js` 在 jest
+  启动时把它接到 PATH 最前面并打印来源（`git-bash` / `posix` / `override`）。
+  为什么在全局 setup：测试进程里改 `process.env.PATH` **不影响**子进程的可执行文件查找，
+  只有主进程的环境变量才会随 worker 派生继承。
+- **Windows 上的坑**：PATH 里的 `bash` 常是没装发行版的 WSL 启动桩（存在、退出非 0、
+  什么也不执行）。自动探测会改用 Git for Windows 的 bash；都找不到时整族用例仍会红，
+  并在启动日志里点名根因与修法（不静默跳过，也不给没有诊断的红）。
+- **显式指定**：`FSMS_TEST_SHELL=<bash 绝对路径> npm test`。指错会**当场报错**，
+  不会静默换成另一个 shell 顶上。
+- **桩工具**：mongodump / gpg / date 一类桩必须经 `src/tests/helpers/stubPath.js` 在
+  **子 shell 内**收口 PATH——MSYS 启动时会把 `/usr/bin` 前置，只在 env 里前置的桩目录
+  会被同名系统工具顶掉（真二进制被执行，用例看起来像被测脚本有缺陷）。
+- **口径**：Windows 上跑出来的绿是 **MSYS 语义的绿**，Linux 权威结论仍以 CI（ubuntu-latest）
+  为准。
+
 ## 7. 文档同步
 
 行为变更必须同步文档，否则视为未完成：

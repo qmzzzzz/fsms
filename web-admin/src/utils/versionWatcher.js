@@ -17,6 +17,8 @@
  *   3. 页面隐藏时不发请求；重新可见时补查一次。轮询只在用户真的在看页面时消耗配额。
  */
 
+import { API_BASE_URL } from '@/utils/api'
+
 export const DEFAULT_INTERVAL_MS = 5 * 60 * 1000
 
 /** 本页的构建标识（vite define 注入；测试/开发态可能不存在） */
@@ -34,19 +36,30 @@ export function isComparableBuildId(id) {
   return value !== '' && value !== 'unknown' && value !== 'dev'
 }
 
-/** 子路径部署（BASE_URL='/admin/'）下必须带上部署基路径，否则请求打到站点根 */
+/**
+ * 版本接口地址：复用统一 API base（与 utils/api.js 同源，P2-8）。
+ *
+ * 原实现用 BASE_URL 拼 `${BASE_URL}/api/version`，完全忽略 VITE_API_BASE_URL：
+ * 独立 API 域或 VITE_API_BASE_URL='/sub/api' 的部署下探测会静默 404 ——
+ * 头注第 2 条纪律要求探测失败静默，于是没有任何信号能暴露这个配置错。
+ */
 function versionUrl() {
-  const base = String((import.meta.env && import.meta.env.BASE_URL) || '/').replace(/\/+$/, '')
-  return `${base}/api/version`
+  const base = String(API_BASE_URL || '/api').replace(/\/+$/, '')
+  return `${base}/version`
 }
 
-/** 默认取数：显式 no-store，避免代理/浏览器缓存让比对恒等 */
-async function defaultFetchVersion() {
+/** 探测超时（P2-7）：悬挂的请求会让 inFlight 永久为真，此后所有轮询都被它挡掉 */
+export const DEFAULT_TIMEOUT_MS = 10 * 1000
+
+/** 默认取数：显式 no-store，避免代理/浏览器缓存让比对恒等；signal 由调用方注入（P2-7） */
+async function defaultFetchVersion(options = {}) {
+  const { signal } = options
   const res = await fetch(versionUrl(), {
     method: 'GET',
     credentials: 'same-origin',
     cache: 'no-store',
     headers: { Accept: 'application/json' },
+    signal,
   })
   if (!res.ok) throw new Error(`version probe failed: ${res.status}`)
   const body = await res.json()
@@ -54,15 +67,31 @@ async function defaultFetchVersion() {
   return (body && body.data) || body
 }
 
-function defaultIsHidden() {
-  return typeof document !== 'undefined' && document.visibilityState === 'hidden'
+/**
+ * 页面是否不可见（全仓统一判据，P2-6）。
+ *
+ * 原判据只认 `visibilityState === 'hidden'`：本仓 jsdom 的默认可见性是 'prerender'
+ * （document.hidden 恒为 true），AboutView 另用了一套 `=== 'visible'` —— 同一仓三套
+ * 判据，谁都没覆盖 'prerender'。这里统一为「不可见 = visibilityState 不是 'visible'」，
+ * 拿不到 visibilityState 时退回 document.hidden。
+ *
+ * doc 可注入：测试无需改动全局 document。
+ */
+export function isPageHidden(doc = typeof document !== 'undefined' ? document : null) {
+  if (!doc) return false
+  const state = doc.visibilityState
+  if (typeof state === 'string' && state !== '') return state !== 'visible'
+  return doc.hidden === true
 }
+
+const defaultIsHidden = () => isPageHidden()
 
 /**
  * @param {object} [options]
  * @param {string} [options.localBuildId] 本页构建标识（测试注入用）
- * @param {() => Promise<object>} [options.fetchVersion] 取数实现
+ * @param {(options: {signal?: AbortSignal}) => Promise<object>} [options.fetchVersion] 取数实现
  * @param {number} [options.intervalMs] 轮询间隔
+ * @param {number} [options.timeoutMs] 单次探测超时（超时即 abort 并释放 inFlight）
  * @param {(info: {localBuildId: string, remoteBuildId: string}) => void} [options.onUpdateAvailable]
  * @param {() => boolean} [options.isHidden] 页面是否不可见
  */
@@ -71,6 +100,7 @@ export function createVersionWatcher(options = {}) {
     localBuildId = LOCAL_BUILD_ID,
     fetchVersion = defaultFetchVersion,
     intervalMs = DEFAULT_INTERVAL_MS,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
     onUpdateAvailable = () => {},
     isHidden = defaultIsHidden,
   } = options
@@ -79,8 +109,27 @@ export function createVersionWatcher(options = {}) {
   let inFlight = false
   let started = false
   let notified = false
+  /**
+   * 代号（P2-7）：stop / start 各 +1。停止之后才回来的响应据此丢弃——
+   * 原实现只看 inFlight/started，停止后回来的响应照样 onUpdateAvailable。
+   */
+  let generation = 0
+  let controller = null
 
   const local = typeof localBuildId === 'string' ? localBuildId.trim() : ''
+
+  /** 中止在途探测并复位 inFlight：请求悬挂时唯一能让轮询继续下去的手段 */
+  const abortInFlight = () => {
+    if (controller) {
+      try {
+        controller.abort()
+      } catch (_) {
+        // abort 自身失败不应影响停止流程
+      }
+      controller = null
+    }
+    inFlight = false
+  }
 
   const check = async () => {
     if (!started) return
@@ -90,9 +139,35 @@ export function createVersionWatcher(options = {}) {
     if (!isComparableBuildId(local)) return
     if (isHidden()) return
 
+    const gen = generation
     inFlight = true
+    controller = typeof AbortController === 'function' ? new AbortController() : null
+
+    // 超时兜底：即使取数实现忽略 signal，也要让 inFlight 有机会复位
+    let timerId = null
+    const timeoutPromise = new Promise((_, reject) => {
+      if (!(typeof timeoutMs === 'number' && timeoutMs > 0)) return
+      timerId = setTimeout(() => {
+        if (controller) {
+          try {
+            controller.abort()
+          } catch (_) {
+            // 同上：超时路径不得因 abort 失败而中断
+          }
+        }
+        reject(new Error('version probe timeout'))
+      }, timeoutMs)
+    })
+    // 竞速已定后 timeout 仍会 reject：不接住就是一条 unhandledrejection
+    timeoutPromise.catch(() => {})
+
     try {
-      const payload = await fetchVersion()
+      const payload = await Promise.race([
+        fetchVersion(controller ? { signal: controller.signal } : undefined),
+        timeoutPromise,
+      ])
+      // 停止 / 重启之后回来的响应一律丢弃
+      if (!started || gen !== generation) return
       const remote = payload && typeof payload.buildId === 'string' ? payload.buildId.trim() : ''
       if (!isComparableBuildId(remote)) return
       if (remote === local) return
@@ -100,9 +175,13 @@ export function createVersionWatcher(options = {}) {
       notified = true
       onUpdateAvailable({ localBuildId: local, remoteBuildId: remote })
     } catch (_) {
-      // 见头注第 2 条纪律：静默
+      // 见头注第 2 条纪律：静默（含超时与被 abort 的探测）
     } finally {
-      inFlight = false
+      if (timerId !== null) clearTimeout(timerId)
+      if (gen === generation) {
+        inFlight = false
+        controller = null
+      }
     }
   }
 
@@ -114,6 +193,10 @@ export function createVersionWatcher(options = {}) {
   const start = () => {
     if (started) return
     started = true
+    // 复位：stop 之后再 start 必须能重新探测、重新提示（原实现把两者都留成旧值）
+    generation += 1
+    inFlight = false
+    notified = false
     if (typeof document !== 'undefined' && document.addEventListener) {
       document.addEventListener('visibilitychange', onVisibilityChange)
     }
@@ -125,6 +208,9 @@ export function createVersionWatcher(options = {}) {
 
   const stop = () => {
     started = false
+    generation += 1
+    // 停止 = 连在途请求一起中止：否则停止后回来的响应仍会 onUpdateAvailable
+    abortInFlight()
     if (timer !== null) {
       clearInterval(timer)
       timer = null

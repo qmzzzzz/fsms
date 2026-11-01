@@ -11,7 +11,7 @@
  *   [已自陈] 用例内已记录并给出保留理由。复核证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.9 测试资产。
  *   - [仍有效·已实测] `:363-367`（现形 `:127-135`）用 grep 源码断"变量名存在" ⇒ 机制坏了用例仍绿（源码文本正则断言的失效形态，deliverables/七维代码健康度深度审计-2026-09-18.md）
  *     变异实测确认（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）：断言 `expect(fn).toMatch(/wasAdjusted/)`
- *       只查 `checkRetention` 函数**文本里出现该标识符**。把 scripts/compliance-check.js:56 的
+ *       只查 `checkRetention` 函数**文本里出现该标识符**。把 scripts/compliance-check.js:167 的
  *       `const passed = meetsMinimum && !wasAdjusted;` 改成 `const passed = meetsMinimum;`
  *       （机制破坏、文本保留）→ **33/33 全绿**；**文本级正对照**（全函数把 wasAdjusted 改名
  *       wasClamped）→ 1 例红。⚠️ 文本孤岛断言结构上无法用 throw 做正对照，只能用文本级正对照。

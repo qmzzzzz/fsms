@@ -64,6 +64,27 @@
           </el-radio-button>
         </el-radio-group>
       </div>
+      <!-- P1③：加载失败必须有持久痕迹。此前失败只清表，界面与「真的没有巡检计划」
+           完全一致——值班安排会按「今天没有活」来做。 -->
+      <el-alert
+        v-if="listState.failed.value"
+        :title="listState.stale.value ? $t('common.staleData') : $t('common.listLoadFailed')"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="load-error"
+      >
+        <template #default>
+          <button
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            :disabled="loading"
+            @click="loadData"
+          >
+            {{ $t('common.retry') }}
+          </button>
+        </template>
+      </el-alert>
       <!-- 首屏骨架占位；数据到达后直接替换（带数据刷新时走表格内 loading） -->
       <GlassSkeleton
         v-if="loading && tableData.length === 0"
@@ -71,7 +92,14 @@
         :rows="6"
         :cols="['6%', '16%', '10%', '12%', '16%', '10%', '10%', '20%']"
       />
-      <el-table v-else v-loading="loading" :data="tableData" border stripe style="width: 100%">
+      <el-table
+        v-else-if="listState.showTable.value"
+        v-loading="loading"
+        :data="tableData"
+        border
+        stripe
+        style="width: 100%"
+      >
         <el-table-column type="index" label="#" width="60" />
         <el-table-column prop="title" :label="$t('inspection.inspectionTitle')" min-width="160" />
         <el-table-column prop="inspectionType" :label="$t('common.type')" width="100">
@@ -170,12 +198,20 @@
           </template>
         </el-table-column>
       </el-table>
-      <div class="pagination">
+      <div v-if="listState.showTable.value" class="pagination">
+        <!-- P1④：total 未知时不得用当前页长度顶替（会显示「共 N 条 / 1 页」，第 2 页永不出现） -->
+        <span v-if="!listState.totalKnown.value" class="total-unknown">
+          {{ $t('common.totalUnknown') }}
+        </span>
         <el-pagination
           v-model:current-page="page.current"
           v-model:page-size="page.size"
-          :total="page.total"
-          layout="total, sizes, prev, pager, next, jumper"
+          :total="listState.total.value ?? 0"
+          :layout="
+            listState.totalKnown.value
+              ? 'total, sizes, prev, pager, next, jumper'
+              : 'sizes, prev, pager, next, jumper'
+          "
           background
           @current-change="loadData"
           @size-change="
@@ -222,6 +258,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api, isCanceledError } from '@/utils/api'
+import { useListLoadState } from '@/composables/useListLoadState'
 import { formatTime } from '@/utils/datetime'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
@@ -297,6 +334,9 @@ const statsLoadedOnce = ref(false)
 
 // 竞态守卫：快速筛选/翻页时丢弃过期的旧响应，防止旧数据覆盖新结果
 const listGuard = useLatestRequest()
+// P1③/P1④ 共用三态契约（与 UserView/DeviceView/AlarmView 同一判据）。
+// 实例名用 listState：本文件 loadData 内有局部 const list，同名会遮蔽（AlarmView 已踩过）。
+const listState = useListLoadState()
 
 // 换筛选条件必须回到第 1 页：筛选后的结果集一般比「全部」小，
 // 停在第 N 页发出去的是 page=N + 新条件 ⇒ 表格空白而 total 仍显示有数据。
@@ -309,6 +349,7 @@ const handleFilterChange = () => {
 const loadData = async () => {
   const isCurrent = listGuard()
   loading.value = true
+  listState.begin()
   try {
     const res = await api.inspections.getList({
       page: page.current,
@@ -321,7 +362,13 @@ const loadData = async () => {
     const list = Array.isArray(payload) ? payload : payload?.list || payload?.items || []
     tableData.value = list
     // 使用后端返回的分页总数，而非当前页数据长度
-    page.total = res?.data?.pagination?.total || list.length
+    // P1④：total 缺失传 undefined（= 未知），不再用 list.length 顶替
+    listState.commit({ total: res?.data?.pagination?.total, count: list.length })
+    const clamped = listState.clampPage(page.current, page.size)
+    if (clamped !== page.current) {
+      page.current = clamped
+      return loadData()
+    }
 
     // 统计
     try {
@@ -375,9 +422,10 @@ const loadData = async () => {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
     if (isCanceledError(e)) return
     if (!isCurrent()) return
-    // API 失败时展示空列表而非假数据，防止误导用户
-    tableData.value = []
-    page.total = 0
+    // P1③：失败不得画成「没有巡检」。交给三态契约：无旧数据进 failed（表格让位给
+    // 错误块），有旧数据进 stale（保留 + 标注「上次数据」）。
+    listState.fail()
+    if (!listState.showTable.value) tableData.value = []
     // P2-3：加载失败只清态，**提示由 api.js 响应拦截器统一负责**（与 alarmView 同契约）。
     // 此前组件这里再弹一条 messages.loadFailed（且是 warning 级，与其余三处 error 级
     // 还不一致），同一次失败会弹两条：拦截器的具体文案 + 组件的泛化文案。
@@ -496,6 +544,15 @@ onMounted(loadData)
 </script>
 
 <style scoped>
+.load-error {
+  margin-bottom: var(--xf-spacing-md);
+}
+.total-unknown {
+  margin-right: var(--xf-spacing-sm);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-text-secondary);
+}
+
 .page {
   display: flex;
   flex-direction: column;

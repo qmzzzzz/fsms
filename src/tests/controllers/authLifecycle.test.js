@@ -131,7 +131,7 @@ describe('认证生命周期（批次 B）', () => {
    *
    * 为什么注册用例必须带它：注册接口的图形验证码**默认开启**
    * （src/config/index.js:77 顶层 registerCaptchaEnabled，全仓无任何地方设
-   * REGISTER_CAPTCHA_ENABLED=false；models/SystemConfig.js:215 的 fallback 同读顶层），
+   * REGISTER_CAPTCHA_ENABLED=false；models/SystemConfig.js:208 的 fallback 同读顶层），
    * 所以任何期望走到业务层的 register 请求都必须带验证码，否则一律 400 CAPTCHA_INVALID。
    */
   const freshCaptcha = async () => {
@@ -169,6 +169,7 @@ describe('认证生命周期（批次 B）', () => {
         username: `lbu${stamp}x`,
         email: `lbu${stamp}x@example.com`,
         password: PASSWORD,
+        privacyConsent: true,
       });
     expect(noCaptcha.status).toBe(400);
     expect(noCaptcha.body.errors?.errorCode).toBe('CAPTCHA_INVALID');
@@ -179,6 +180,7 @@ describe('认证生命周期（批次 B）', () => {
         username: `lbu${stamp}x`,
         email: `lbu${stamp}x@example.com`,
         password: PASSWORD,
+        privacyConsent: true,
         ...(await freshCaptcha()),
       });
     expect(ok.status).toBe(201);
@@ -189,6 +191,7 @@ describe('认证生命周期（批次 B）', () => {
         username: `lbu${stamp}x`,
         email: `lbu${stamp}y@example.com`,
         password: PASSWORD,
+        privacyConsent: true,
         ...(await freshCaptcha()),
       });
     expect(dup.status).toBe(400);
@@ -201,6 +204,7 @@ describe('认证生命周期（批次 B）', () => {
         username: `lbu${stamp}y`,
         email: `lbu${stamp}y@example.com`,
         password: '123',
+        privacyConsent: true,
         ...(await freshCaptcha()),
       });
     expect(weak.status).toBe(400);

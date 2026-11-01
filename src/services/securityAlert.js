@@ -117,9 +117,8 @@ const checkBruteForce = async (username, ip, attribution = null) => {
         fallbackIp: ip,
       });
 
-    // 审计写入挂独立 try/catch。此前裸 await 位于 try 块之外，
-    // AuditLog.create 抛错（DB 瞬断/校验失败）会把异常上抛给调用方，
-    // 下方自动封禁 try 块根本执行不到——告警审计写失败反而放过了封禁。
+    // 审计写入必须挂独立 try/catch：裸 await AuditLog.create 抛错（DB 瞬断/校验失败）会把
+    // 异常上抛给调用方，下方自动封禁 try 块根本执行不到——告警审计写失败反而放过了封禁。
     // 审计失败不阻断封禁与通知，但按项目风格记录 error（不静默吞错）。
     try {
       await AuditLog.create({
@@ -167,15 +166,14 @@ const checkBruteForce = async (username, ip, attribution = null) => {
       });
     }
 
-    // ============ 处置与通知解耦（2026-09-30，与 rateLimitEscalationBan 同一修法）============
-    // 修复前：两行 `shouldSendAlert` 挡在 priorBans 统计 / 审计 / 封禁**之前**，
-    // 任一命中即 `return`，把三件事一起关在门外。后果不是少一条通知：
+    // ============ 处置与通知解耦（与 rateLimitEscalationBan 同一纪律）============
+    // 统计 / 审计 / 封禁**必须无条件执行**，频控只约束 dispatchNotification——不能把
+    // `shouldSendAlert` 挡在它们**之前**并 `return`，那会把三件事一起关在门外：
     //   - 封禁**失败**（命中白名单 / 黑名单写库故障）时，5 分钟内的重试被这行吞掉——
     //     而"封禁没生效"恰恰是最需要重试的场合；
-    //   - 审计行是**阶梯的事件源**（IPBanEvents.countPrior 数的就是它，
-    //     见上方 :66-86 的注释），跳过审计 ⇒ 阶梯永远停在第一档 ⇒ 反复触发的 IP
-    //     每次都只被封 1 小时，而 :279 照打「第 N 次」——运维以为阶梯在工作。
-    // 现在：统计 / 审计 / 封禁**无条件执行**，频控只约束 dispatchNotification。
+    //   - 审计行是**阶梯的事件源**（IPBanEvents.countPrior 数的就是它，见上方 :66-86），
+    //     跳过审计 ⇒ 阶梯永远停在第一档 ⇒ 反复触发的 IP 每次都只被封 1 小时，
+    //     而 :279 照打「第 N 次」——运维以为阶梯在工作。
     // 通知是给人看的，处置是对系统做的，两者不该共用一个开关。
     //
     // 键**内联**而非中间变量：键里同时含 username 与归一化 IP，两处各内联一次
@@ -201,21 +199,20 @@ const checkBruteForce = async (username, ip, attribution = null) => {
  */
 const checkBulkExport = async (userId, username, count, operation) => {
   // 「达到阈值即告警」在三个检测器里必须是同一种比较：另两处用 `>=`
-  // （bruteForceAttempts、permissionFailures），这里原先是 `count <= 阈值` 才返回，
-  // 等价于"必须严格大于 100"——每次恰好导出 100 条的内部人员完全静默，
-  // 且可以无限重复。阈值本身是"含"的语义，改成 `<` 才与同伴一致。
+  // （bruteForceAttempts、permissionFailures）。判据必须是 `count < 阈值` 即告警：
+  // 写成 `count <= 阈值` 才返回等价于"必须严格大于 100"——每次恰好导出 100 条的内部人员
+  // 完全静默，且可以无限重复。阈值本身是"含"的语义。
   if (count < THRESHOLDS.bulkExportThreshold) return;
 
   const alertKey = `bulk_export_${userId}`;
 
   // 同口径：告警审计落库失败**不得**冒泡到调用方。checkBulkExport 被
-  // reportController/auditController 的导出路径 `await`，此前裸 await AuditLog.create
-  // 在 DB 瞬断/校验失败时会把一次本已成功的导出顶成 500——告警是旁路增强，
-  // 绝不该拖垮主流程。捕获后仍继续投递通知（告警本身重要），仅记 error 不静默。
+  // reportController/auditController 的导出路径 `await`：裸 await AuditLog.create 在 DB
+  // 瞬断/校验失败时会把一次本已成功的导出顶成 500——告警是旁路增强，绝不该拖垮主流程。
+  // 捕获后仍继续投递通知（告警本身重要），仅记 error 不静默。
   //
-  // 处置与通知解耦（2026-10-01，与上面 checkBruteForce 里 :302-311 那一条修法同源）：
-  // 修复前这里写的是 `if (!shouldSendAlert(alertKey)) return;`，一行把**审计落库**
-  // 一起挡在了门外。后果不是少一条通知，而是少一条证据：
+  // 处置与通知解耦（与上面 checkBruteForce 里 :302-311 同源）：`if (!shouldSendAlert
+  // (alertKey)) return;` 会把**审计落库**一起挡在门外。后果不是少一条通知，而是少一条证据：
   //   - 抑制窗（同一 userId 的 5 分钟）内的第二次、第三次批量导出**完全没有留痕**，
   //     而"短时间内反复大批量导出"恰恰是最需要被审计看见的内部威胁形态；
   //   - 审计行是 riskLevel=HIGH 的正式记录，与管理页的审计查询/导出脱敏/取证都相关，
@@ -284,14 +281,14 @@ const checkPermissionAbuse = async (userId, attribution) => {
 
   if (recentFailures >= THRESHOLDS.permissionFailures) {
     // username 为 AuditLog 必填字段：缺失会让告警写入 ValidationError 静默失败
-    //（批次 E 测试暴露的潜伏缺陷——该函数此前无调用方，缺陷从未触发）
+    //（无调用方的潜伏缺陷，一旦接入路径即触发）
     const User = require('../models/User');
     const abuser = await User.findById(userId).select('username').lean();
     if (!abuser) return;
 
     // 处置侧整块（审计 / 遏制封禁 / 通知）抽到 securityAlertPermissionAbuse.js：
     // 本文件 max-lines 已贴棘轮上限，且"遏制"是本次新增的一整条职责。
-    // 该模块的头注释记着为什么这里必须封 IP（此前只告警不封任何东西 ⇒ 有效凭据
+    // 该模块的头注释记着为什么这里必须封 IP（只告警不封任何东西时，有效凭据
     // 持有者把探测压到 <20 次/5 分钟即可永久试探权限边界）。
     await require('./securityAlertPermissionAbuse').recordAndContain({
       userId,

@@ -41,7 +41,7 @@ describe('迁移：auditlogs TTL 对齐留存声明值', () => {
       // 集合压根不存在时驱动是抛错而不是返回 []。`resetIndex('absent')` 只 dropIndexes、
       // 从不建集合，所以本文件的"缺索引"用例是否成立，取决于**前面有没有别的用例先建过集合**
       // ——默认顺序恰好建过，`--randomize` 一打散就红（实测单文件 + seed 31337 即复现）。
-      // 与迁移侧同一口径：只认 NamespaceNotFound，其它错误原样抛（宽 catch 会把
+      // 与迁移侧同一口径：只认 NamespaceNotFound(26) 与 code 48，其它错误原样抛（宽 catch 会把
       // 真实的连接/权限故障读成"没有索引"，那条用例就成了假绿）。
       if (err?.codeName === 'NamespaceNotFound' || err?.code === 26 || err?.code === 48)
         return null;

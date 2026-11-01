@@ -27,14 +27,12 @@
  *    整条链重算；hmac = HMAC-SHA256(HMAC_SECRET, hash) 是唯一真正的防线。
  *    缺失或失配均计入断裂。未配置 HMAC_SECRET 时降级并显式声明。
  *
- * 3. 链接性校验（删除检测）—— 每条记录的 prevHash 必须命中「近期已见
- *    hash 的滑动窗口」。用窗口而非「严格等于上一条的 hash」，是因为 _id 顺序
- *    与实际串链顺序存在小幅错位：AuditLog.create 在构造文档时就分配了 _id，
- *    而 auditBuffer 走 insertMany 的批次要等 2s 定时器才拿到 _id——两者在
- *    链锁上的先后可能与 _id 大小相反。这种错位不是完整性问题（哈希链本身连续），
- *    严格逐对比较会产出大量假阳性断链，反而掩盖真实篡改。
- *    窗口足够小（LINK_WINDOW_SIZE），**删除**记录会立即暴露。注意别把它读成
- *    "插入也覆盖"——插入伪造在本层不可检出，成因与修法见下方「已知检出上限」段。
+ * 3. 链接性校验（删除检测）—— 每条记录的 prevHash 必须命中「窗口哈希集合」：已扫过的
+ *    最近 256 条哈希（滑动窗口），或**未扫到**的 ≤ LINK_WINDOW_SIZE 个位次内的前瞻窗口
+ *    （`auditBuffer.push` 在 push 时就分配 `_id`、串链要等链锁 ⇒ 子可能先于父被扫到，
+ *    p6-d 实测形态）。判据**不依赖「谁先被扫到」**；中间隔着无哈希记录（分隔段边界）
+ *    一律 chain_break，窗口外同样回落 chain_break（不静默、不假红）。窗口足够小
+ *    ⇒ **删除**记录会立即暴露；插入伪造在本层不可检出，成因与修法见「已知检出上限」段。
  *
  * 无哈希记录不再一律算 legacy（P2 级修正）：哈希链自启用起就是**连续**的，
  * 因此「无 hash」出现在带 hash 记录之前 = 存量 legacy（不计断裂），出现在之后 =
@@ -98,7 +96,7 @@ const {
   isHmacConfigured,
 } = require('../utils/auditChain');
 
-// 链接性校验的滑动窗口大小：容纳 _id 与串链顺序的正常错位，
+// 链接性窗口：父可在**已扫侧最近 256 条哈希**里，或**未扫侧 ≤ 该值个位次**的前瞻里；
 // 远小于任何有意义的删除批量 ⇒ 删除可检出；插入伪造不可检，见文件头「已知检出上限」
 const LINK_WINDOW_SIZE = 256;
 
@@ -278,18 +276,26 @@ const checkContentHash = (state, doc, index) => {
   }
 };
 
+/** 前瞻窗口（见文件头第 3 条）：父哈希在**尚未扫到**的 ≤ LINK_WINDOW_SIZE 个位次内吗？
+ *  量的是位次而不是 _id；遇无哈希记录（分隔段边界）即否定——抹掉哈希正是为了让前后失联。 */
+const parentAhead = (docs, index, prevHash) => {
+  const ahead = docs.slice(index, index + LINK_WINDOW_SIZE);
+  const stop = ahead.findIndex((d) => !d.hash || d.hash === prevHash);
+  return stop >= 0 && ahead[stop].hash === prevHash;
+};
+
 /**
  * 链接性层：prevHash=null 是链首（合法）；父不在窗口内 = chain_break（删除检测）；
  * 父已被别的孩子认领 = chain_fork（分叉检测）。
  *
- * 用窗口而非「严格等于上一条的 hash」，是因为 _id 顺序与实际串链顺序存在小幅错位：
- * AuditLog.create 在构造文档时就分配了 _id，而 auditBuffer 走 insertMany 的批次要等
- * 2s 定时器才拿到 _id——两者在链锁上的先后可能与 _id 大小相反。这种错位不是完整性问题
- * （哈希链本身连续），严格逐对比较会产出大量假阳性断链，反而掩盖真实篡改。
+ * 父在不在由两个窗口共同回答：已扫侧是最近 256 条哈希的滑动窗口，未扫侧是位次 ≤
+ * LINK_WINDOW_SIZE 的前瞻（见 parentAhead），**不再**是"扫描顺序里出现过没有"：
+ * `AuditLog.create` 在构造文档时分配 `_id`、auditBuffer 批次要等链锁 ⇒ 子先于父被扫到
+ * 是诚实形态，按出现先后判会产出假阳性断链（p6 实测），反而掩盖真实篡改。
  */
-const checkLinkage = (state, doc, index) => {
+const checkLinkage = (state, doc, index, docs) => {
   if (state.isFirst || !doc.prevHash) return;
-  if (!state.seen.has(doc.prevHash)) {
+  if (!state.seen.has(doc.prevHash) && !parentAhead(docs, index, doc.prevHash)) {
     pushBreak(state, sampleOf(doc, index, 'chain_break', { actualPrevHash: doc.prevHash }));
     return;
   }
@@ -386,7 +392,7 @@ const verifyAuditChain = async (AuditLog, options = {}) => {
       // 与「启用后被抹掉」，置晚了第一条无哈希记录会被误判成 legacy
       state.seenHashed = true;
       checkContentHash(state, doc, total);
-      checkLinkage(state, doc, total);
+      checkLinkage(state, doc, total, docs);
       rememberHash(state, doc.hash);
       state.isFirst = false;
     } else {
@@ -489,17 +495,9 @@ const chainVetoReasons = (v) => {
  * 该字段的"未知"没有保守侧可言——把每次正常核验都判 INCOMPLETE 会让判据失去区分力，
  * 而那比漏报更糟（运维会开始忽略 code 2）。
  *
- * 这里曾写过"唯一漏传路径是旧调用方，而旧调用方根本不可能产生带 hashFailure 标记的记录"——
- * **该前提是失实的**，2026-10-03 实测推翻：两个运维脚本（verify-audit-chain.js、
- * resign-audit-chain-v3.js）都是在用调用方，而它们的报告恒带 hashComputeFailed
- * （verifyAuditChain 无条件回填），漏传纯粹是出口处少写一行。漏传的实际后果也已实测：
- * 链尾一条 hashFailure 记录 ⇒ 报告 hashComputeFailed=1、breaks=0 ⇒ 旧 CLI 打
- * 「PASS（全量、无断裂、hmac 已校验）」并退 0。
- *
- * 修的是调用方而不是把缺省翻成 fail-closed：翻转会让判据对**任何**不带该字段的调用
- * 报 INCOMPLETE，而真值表用例与在线侧构造的部分字段调用都属正常用法；本仓对"未来调用方
- * 漏传"的既有机制是逐调用点门禁（见 src/tests/verifyChainExitCode.test.js 的回传用例，
- * 它同时钉 scanned 与 hashComputeFailed），不是把判据调瞎。
+ * 漏传的实际后果（实测）：链尾一条 hashFailure 记录 ⇒ hashComputeFailed=1、breaks=0 ⇒
+ * 旧 CLI 打「PASS」并退 0。修的是**调用方**，不是把缺省翻成 fail-closed——翻转会让判据对
+ * 任何不带该字段的调用报 INCOMPLETE。逐调用点门禁见 src/tests/verifyChainExitCode.test.js。
  */
 const hasUnattestableGapOf = (hashComputeFailed) =>
   Number.isFinite(hashComputeFailed) ? hashComputeFailed > 0 : false;
@@ -507,59 +505,22 @@ const hasUnattestableGapOf = (hashComputeFailed) =>
 /**
  * 「能不能宣称审计链完整」的唯一判据（CLI 与在线接口共用）
  *
- * 为什么要在服务层而不是脚本里：这个判据此前有两份实现——
- * `scripts/verify-audit-chain.js` 纳入了 truncated/empty/hmac 三类"不完整"，
- * 而在线的 `GET /api/security/audit-logs/verify` 只看 `intact && hmacChecked`，
- * 于是同一个事实在两处给出不同结论：脚本退 2 说"不得当作链完整"，
- * 接口却回答「审计链完整」并把核验审计记成 riskLevel=low。
- * 在线侧是 UI 与运维实际读的那一个，错得更贵。
+ * 此前脚本与在线接口各一份实现（同一事实两处结论不同，在线侧错得更贵），故收敛到服务层。
  *
- * 不完整理由彼此独立，且**豁免不得越界**：allowNoHmac 只豁免 hmac，
- * allowEmpty 只豁免"集合本来就是空的"（首次部署）；"扫到 0 条"和截断、子集校验
- * 一样没有任何豁免口子——前者是估算与扫描互相矛盾的异常现场，不是一句"我知道是空的"
- * 能盖过去的；后者根本不该由判据的调用方自行声明（见下面 scanned 一段）。
+ * 四条否决臂，**豁免不得越界**：① nothingVerified（扫到 0 条，与估算互相矛盾）——
+ * 无豁免口子；② truncated（`total !== collectionTotal`，不用 `<`：估算滞后偏低会把
+ * 截断否决撤销）；③ scoped（缺 `scanned` 一律按局部校验，漏传只得到偏保守的
+ * INCOMPLETE，不会得到假 PASS）；④ nothingHashed（`legacy` 缺省按未知、视同整窗无
+ * 哈希）——否则「只抹链尾 ⇒ 断裂；整表全抹 ⇒ 完整」形成反向激励。
+ * allowNoHmac 只豁免 hmac、allowEmpty 只豁免首次部署的空集合、allowAllLegacy 只豁免
+ * nothingHashed，三者彼此独立、不得互相顶替。取舍的实测成因见
+ * `src/tests/services/auditChainVerdict.test.js`（每条否决臂都有反向用例）。
  *
- * 为什么"扫过的条数"要单独否决一遍（total === 0 与 collectionTotal === 0 不是一回事）：
- * collectionTotal 来自 `estimatedDocumentCount()`，是**元数据估算**；total 是游标真的读回来
- * 并逐条重算过哈希的条数。两者不同源，就可以各说各话：
- * - 在线侧 scan 与估算之间隔着一个 await，清空集合与并发写入交错 ⇒ total=0 而估算>0；
- * - 脚本侧估算在 scan **之前**取（verify-audit-chain.js），扫描期间被清空 ⇒ 同一现场。
- * 旧判据只看 `collectionTotal === 0`，于是"0 条被验过 + 估算非 0"直接得 code 0，
- * 接口答「审计链完整」、脚本打 `PASS（全量、无断裂、hmac 已校验）`——
- * 为一条都没核验过的链签了合格证明，正是 auditController 里
- * 「等于为灭迹签发合格证明」那段注释声称要防的事。
- *
- * 为什么窗口打满时估算**低于**扫描数也要否决（`total !== collectionTotal` 而非 `<`）：
- * 旧式 `total < collectionTotal` 把估算当作"库里还有更多"的唯一证据，估算滞后偏低时
- * 条件为假 ⇒ 截断否决被一个不可信的数撤销。反过来（估算偏高）本来就判截断，
- * 不受影响。残留上限：估算恰好等于窗口大小时无从分辨"真就这么多条"与"估算滞后"，
- * 要分辨只能实打实 countDocuments({})（千万级集合上是全索引扫，代价不该由核验请求付）；
- * 判据在此选择保守一侧的方向是"宁可 INCOMPLETE，也不给局部结论盖章"。
- *
- * 为什么"整窗无哈希"要单独否决（`nothingHashed`）：`legacy` 是"无 hash 的记录数"，
- * 它同时容纳两种成因——链启用前的存量集合，与"整表 `$unset` 掉 hash/prevHash/hmac"
- * 的彻底灭迹。旧判据只把 legacy 当计数回显，**没有任何否决基于它**，于是实测出现
- * 这个反向激励：只抹链尾 ⇒ code=1（断裂）；整表全抹 ⇒ code=0（**"链完整"**、
- * 核验审计记 riskLevel=low）。抹得越彻底、结论反而越好，防御对更强的攻击失效。
- * `legacy` 缺省（调用方漏传）按"未知"处理、视同整窗无哈希，方向与缺 `scanned` 一致：
- * 偏保守，不产生假 PASS。确要在"链从未启用"的存量库上放行，显式传
- * `allowAllLegacy: true`（脚本侧对应 `--allow-all-legacy`）——与另两个豁免彼此独立，
- * 不得互相顶替。
- *
- * @param {Object} [params.scanned] 报告自带的扫描口径 verifyAuditChain 的 scanned 字段。
- *   判据据此识别"这只是一次子集校验"：带 filter 的扫描即使没撞上限也不是全量，
- *   旧判据对此毫无察觉（total=5 / maxRecords=20000 / collectionTotal=5000 ⇒ code 0「完整」），
- *   而服务层的 JSDoc 只是"建议"消费方自己看 filter 回显。**缺 scanned 一律按局部校验处理**：
- *   调用方漏传只会得到偏保守的 INCOMPLETE（响亮），不会得到一个假的 PASS（静默）。
- * @param {number} [params.legacy] 报告自带的"无 hash 记录数"（verifyAuditChain 的 legacy 字段）。
- *   缺省按"未知"处理并视同整窗无哈希（偏保守），见上面 `nothingHashed` 一段。
- * @param {number} [params.hashComputeFailed] 报告自带的"哈希计算失败的无哈希记录数"
- *   （verifyAuditChain 的 hashComputeFailed 字段）。> 0 时判据否决 code 0——
- *   这些记录的内容未被哈希保护，链在该处不可追认。缺省按 0 处理（与 legacy 方向相反，
- *   理由见实现内注释）。**不计入 breaks**：那是硬篡改信号，良性缺口不该淹没它。
- * @param {boolean} [params.allowAllLegacy=false] 唯一豁免 `nothingHashed` 的开关，
- *   仅供"链从未启用"的存量库在知情前提下放行；与 allowNoHmac / allowEmpty 彼此独立。
- *
+ * @param {Object} [params.scanned] 报告自带的扫描口径；缺省按局部校验处理。
+ * @param {number} [params.legacy] 无 hash 记录数；缺省按未知（偏保守）。
+ * @param {number} [params.hashComputeFailed] 哈希计算失败的无哈希记录数；> 0 否决 code 0。
+ *   **不计入 breaks**：那是硬篡改信号，良性缺口不该淹没它。
+ * @param {boolean} [params.allowAllLegacy=false] 唯一豁免 nothingHashed 的开关。
  * @returns {{code:number, canAttestIntact:boolean, reasons:string[], truncated:boolean, hmacSkipped:boolean, empty:boolean, nothingVerified:boolean, nothingHashed:boolean, hasUnattestableGap:boolean, scoped:boolean}}
  *          code：0=全量且无断裂且各层都真跑过；1=发现断裂；2=不完整（不得宣称完整）
  */

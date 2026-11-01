@@ -10,6 +10,10 @@
  * 同一次复核也确认了 `valueType` 这个"声明了但没人读"的字段，这里只把事实写进 schema 注释，
  * 不虚构保护：`valueType` 由写入侧派生、读取侧不依赖。`modifiable` 已按 Q-4 直接删除——
  * 预留位没有消费方，留着只会被误认为已生效的保护。
+ *
+ * set() 的并发 upsert（F7，第十一轮）：两个请求同时看到 key 不存在、各自插入，后到者必然撞 {key:1}
+ * 唯一索引（E11000）抛错给调用方。修复在 model 内部重试一次（转为普通更新命中对方文档），仍失败再向上抛
+ * ——与 IPBlacklist.blockIP / TokenBlacklist.blacklistToken 的既有形态一致。判据见下方「③ set() 的并发 upsert」。
  */
 const mongoose = require('mongoose');
 
@@ -119,6 +123,50 @@ describe('SystemConfig 布尔口径', () => {
       expect(await SystemConfig.isRegistrationAllowed()).toBe(false);
       await SystemConfig.set('allowPublicRegistration', true);
       expect(await SystemConfig.isRegistrationAllowed()).toBe(true);
+    });
+  });
+  describe('③ set() 的并发 upsert（F7）', () => {
+    test('撞唯一索引（E11000）时重试一次，调用方不看到异常', async () => {
+      const key = 'zzProbeUpsertRetry';
+      await SystemConfig.collection.deleteOne({ key });
+
+      // 确定性复现并发 upsert 的失败形态：两个请求同时看到「key 不存在」，各自插入，
+      // 后到者撞 {key:1} 唯一索引抛 E11000。这里把第一次 findOneAndUpdate 钉成抛 11000，
+      // 第二次交回真实实现——重试逻辑缺席时 set() 直接 reject（红），有重试时成功（绿）。
+      const real = SystemConfig.findOneAndUpdate.bind(SystemConfig);
+      const spy = jest
+        .spyOn(SystemConfig, 'findOneAndUpdate')
+        .mockImplementationOnce(() => {
+          const err = new Error('E11000 duplicate key error collection: test.systemconfigs');
+          err.code = 11000;
+          return Promise.reject(err);
+        })
+        .mockImplementation((...args) => real(...args));
+
+      try {
+        await expect(SystemConfig.set(key, 'retried')).resolves.toBeTruthy();
+        expect(spy).toHaveBeenCalledTimes(2);
+      } finally {
+        spy.mockRestore();
+        await SystemConfig.collection.deleteOne({ key });
+      }
+    });
+
+    test('20 个并发 set 同一 key：都不抛错，且只留一行', async () => {
+      const key = 'zzProbeConcurrentSet';
+      await SystemConfig.collection.deleteOne({ key });
+
+      const results = await Promise.allSettled(
+        Array.from({ length: 20 }, (_, i) => SystemConfig.set(key, 'v' + i))
+      );
+      const rejected = results.filter((r) => r.status === 'rejected');
+      expect(rejected.map((r) => String(r.reason && r.reason.message))).toEqual([]);
+
+      const docs = await SystemConfig.collection.find({ key }).toArray();
+      expect(docs).toHaveLength(1);
+      expect(docs[0].value).toMatch(/^v\d+$/);
+
+      await SystemConfig.collection.deleteOne({ key });
     });
   });
 });

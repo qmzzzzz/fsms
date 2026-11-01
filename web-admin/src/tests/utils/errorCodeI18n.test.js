@@ -102,4 +102,53 @@ describe('resolveErrorMessage', () => {
     })
     expect(msg).toContain('0.0.0.0/0')
   })
+
+  // W4（2026-10-31）：动态状态是「码 + 参数」通道的第二个真实用例（第一个是 FULL_RANGE_FORBIDDEN
+  // 的 {ip}）。下面两条断言的是**实测字符串**——用真实 i18n 模块跑出来的现值，
+  // 不是拼出来的模板，值来自 web-admin/src/i18n/locales/{zh-CN,en-US}.js 的
+  // errors.privilegeGrantNotActive（与 apiStatusCodes.test.js 的 expired 用例同源、不同参数）。
+  test('params 透传：PRIVILEGE_GRANT_NOT_ACTIVE 的 {currentStatus} 被真正填充（中英各一次）', () => {
+    const expected = {
+      'zh-CN': '该授权当前不在生效期（当前：revoked）',
+      'en-US': 'This grant is not currently within its effective period (current: revoked)',
+    }
+    for (const locale of LOCALES) {
+      i18n.global.locale.value = locale
+      const msg = resolveErrorMessage({
+        errors: { errorCode: 'PRIVILEGE_GRANT_NOT_ACTIVE', currentStatus: 'revoked' },
+      })
+      expect(msg, locale).toBe(expected[locale])
+      // 占位被真正替换：留着花括号就是把模板喷给用户
+      expect(msg, locale).not.toContain('{')
+      expect(msg, locale).toContain('revoked')
+    }
+  })
+
+  /**
+   * 负向断言：缺参时**保留字面占位符**，而不是替换成空串。
+   *
+   * 这不是「随便钉个现状」，而是本仓 web-admin/src/i18n/index.js 的自定义 messageCompiler
+   * 的**有意行为**：它的回退链是「values 命中 → ctx.list 位置参数 → 原样返回 match」。
+   * 之所以不用 vue-i18n 默认编译器：默认实现走 new Function（JIT），CSP 无
+   * "unsafe-eval" 时登录页渲染直接 EvalError（见该文件头注释）。
+   *
+   * 这条断言的用意：
+   *  1. 谁把编译器改回默认实现 ⇒ 缺参行为变化（空串/其它）⇒ 立即红；
+   *  2. 谁把词表里的 {currentStatus} 占位删掉（"反正缺参看不出来"）⇒ 期望串里仍带占位 ⇒ 也红。
+   * 缺参的真实场景：后端 409 的 errors 未携带 currentStatus（老版本/半升级）——
+   * 用户至少看到「当前：{currentStatus}」这种明显异常，而不是「当前：」的空洞。
+   */
+  test('缺参保留字面占位符（自定义 messageCompiler 的有意行为，非替换成空串）', () => {
+    const expected = {
+      'zh-CN': '该授权当前不在生效期（当前：{currentStatus}）',
+      'en-US': 'This grant is not currently within its effective period (current: {currentStatus})',
+    }
+    for (const locale of LOCALES) {
+      i18n.global.locale.value = locale
+      // errors 存在但缺 currentStatus：模拟后端 409 未携带动态状态字段
+      const msg = resolveErrorMessage({ errors: { errorCode: 'PRIVILEGE_GRANT_NOT_ACTIVE' } })
+      expect(msg, locale).toBe(expected[locale])
+      expect(msg, locale).toContain('{currentStatus}')
+    }
+  })
 })

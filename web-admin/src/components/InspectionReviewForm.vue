@@ -10,14 +10,21 @@
         <template #title>
           {{ $t('inspectionReview.infoLabel') }}
         </template>
-        <div>{{ $t('inspection.inspectionTitle') }}：{{ inspectionData.title }}</div>
-        <div>{{ $t('inspection.ownerLabel') }}：{{ inspectionAssignedNames }}</div>
         <div>
-          {{ $t('inspection.actualStartTime') }}：{{ formatTime(inspectionData.actualStartTime) }}
-          至
+          {{ $t('inspection.inspectionTitle') }}{{ $t('common.labelColon')
+          }}{{ inspectionData.title }}
+        </div>
+        <div>
+          {{ $t('inspection.ownerLabel') }}{{ $t('common.labelColon')
+          }}{{ inspectionAssignedNames }}
+        </div>
+        <div>
+          {{ $t('inspection.actualStartTime') }}{{ $t('common.labelColon')
+          }}{{ formatTime(inspectionData.actualStartTime) }}
+          {{ $t('common.rangeSeparator') }}
           {{ formatTime(inspectionData.actualEndTime) }}
         </div>
-        <div>{{ $t('inspection.result') }}：{{ resultLabel }}</div>
+        <div>{{ $t('inspection.result') }}{{ $t('common.labelColon') }}{{ resultLabel }}</div>
       </el-alert>
 
       <el-alert v-if="hasFindings" type="warning" :closable="false" class="mb-4">

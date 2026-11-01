@@ -17,7 +17,9 @@
 **铁律：发布前必须先备份。** 没有备份的发布不具备回滚资格。
 
 ```bash
-# 发布前（每次）
+# 发布前（每次）：先证明宿主时钟可信（P1-5；容器继承宿主时钟，不在容器内跑）
+node scripts/check-clock-sync.js
+# 再备份
 MONGODB_URI_FILE=./secrets/mongodb_uri ./scripts/backup-mongo.sh ./backups
 # 默认产出加密归档 .gz.gpg + .sha256（P1-①）；明文出口/异地副本/私钥托管见 backup-encryption.md
 # 本手册所有命令都在**宿主机**执行：运行镜像里只有 scripts/destructiveGuard.js
@@ -140,11 +142,11 @@ curl -fsS http://127.0.0.1:3000/health
 
 ### 5.1 技术事实：备份频率（已定，非目标值）
 
-| 项       | 值                                                 | 来源                                                      |
-| -------- | -------------------------------------------------- | --------------------------------------------------------- |
-| 定时全量 | 每日 02:00（`0 2 * * *`），cron 跑在**宿主机**上   | `deployment/backup-encryption.md:39-43`                   |
-| 发布前   | 每次发布前额外一次（`scripts/deploy.js` 自动触发） | `deployment/rollback-drill.md:17`（「发布前必须先备份」） |
-| 异地副本 | 由 `BACKUP_OFFSITE_CMD` 决定，未配置时只警告不失败 | `deployment/backup-encryption.md:15`                      |
+| 项       | 值                                                                                            | 来源                                                      |
+| -------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| 定时全量 | 每日 02:00（`0 2 * * *`），cron 跑在**宿主机**上                                              | `deployment/backup-encryption.md:39-43`                   |
+| 发布前   | 每次发布前额外一次（`scripts/deploy.js` 自动触发）                                            | `deployment/rollback-drill.md:17`（「发布前必须先备份」） |
+| 异地副本 | `BACKUP_OFFSITE_CMD` 或 `BACKUP_OFFSITE_DIR`，生产置 `BACKUP_REQUIRE_OFFSITE=true` 缺失即失败 | `deployment/backup-encryption.md:15`                      |
 
 ⇒ **最坏情况必丢 24 小时内的写入**（02:00 备份完成、02:01 故障）。
 这是备份频率**决定**的上限，不是任何人拍的目标。

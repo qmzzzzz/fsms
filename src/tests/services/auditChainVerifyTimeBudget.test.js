@@ -234,6 +234,7 @@ describe('auditChainMonitor 的单轮预算与闸门释放', () => {
     ALERT_TYPES: {
       AUDIT_CHAIN_BREAK_DETECTED: 'audit_chain_break_detected',
       AUDIT_HASH_COMPUTE_FAILED: 'audit_hash_compute_failed',
+      AUDIT_CHAIN_VERIFY_FAILED: 'audit_chain_verify_failed',
     },
     ALERT_LEVELS: { CRITICAL: 'critical', HIGH: 'high' },
     THRESHOLDS: { alertRateLimitMs: 300000 },
@@ -300,6 +301,17 @@ describe('auditChainMonitor 的单轮预算与闸门释放', () => {
     expect(defaultish.maxTimeMS).toBe(Math.max(floor, 10 * MINUTE));
     expect(slow.maxTimeMS).toBe(30 * MINUTE);
     expect(slow.maxTimeMS).toBeGreaterThan(shortest.maxTimeMS);
+  });
+
+  test('间隔上界：超过 24h 被压到上限，预算跟着钳制后的间隔走（同一缺口类）', async () => {
+    const logger = require('../../utils/logger');
+    logger.warn.mockClear();
+    const opts = await runRoundWithInterval(3000000000); // > 2^31-1ms：Node 会把它静默改成 1ms
+
+    expect(auditChainMonitor.getHealth().intervalMs).toBe(24 * 60 * 60 * 1000);
+    // 预算读的是**生效间隔**：不钳制的话这里会是配置值（34 天），而定时器实际每毫秒一轮
+    expect(opts.maxTimeMS).toBe(24 * 60 * 60 * 1000);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('高于最大间隔'));
   });
 
   test('小数间隔不产生小数预算（真库会 FailedToParse）', async () => {

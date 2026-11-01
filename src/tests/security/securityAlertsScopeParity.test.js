@@ -9,7 +9,7 @@
  * 并把 username/ip/path/body 原样返回。
  * 而 initData 的口径是"level 决定数据范围：≥9 全部 / ≥7 本部门"，SECURITY_ADMIN 是 **level 8**
  * ⇒ 部门档。于是：把审计日志按部门收口的努力，被同一权限下的另一个出口整体绕过
- * ——与 reportController.js:213「越权出口封堵」当年处理的是同一类问题（report:export 曾可
+ * ——与 reportController.js:267「越权出口封堵」当年处理的是同一类问题（report:export 曾可
  * 绕过 security:audit 全量导出审计）。
  *
  * 判据分工（缺一条就留有假绿空间）：

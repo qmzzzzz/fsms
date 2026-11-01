@@ -7,7 +7,7 @@
  * ② 迁移建的索引 key 必须与 schema 声明逐字段一致 —— 只声明不迁迁移，
  *    存量库永远缺索引（autoIndex 只在新库生效）；
  * ③ 索引名必须与 schema 声明一致 —— 迁移按名字判存在，名字算错会走到 createIndex，
- *    同 key 不同名直接 IndexKeySpecsConflict，部署停在半途；
+ *    同 key 不同名抛 85 IndexOptionsConflict（86 IndexKeySpecsConflict 是同名不同 key）；
  * ④ **collation 必须一致** —— 这是本迁移与其它索引迁移最大的不同：带 collation 的索引
  *    **只能**被带同一 collation 的查询命中。迁移若漏了 collation（或 strength 不同），
  *    查询侧带着 collation 来反而命中不了它，表现为"索引明明在、却仍走 COLLSCAN"；
@@ -150,6 +150,168 @@ describe('迁移 20260928000000 与模型声明的对账', () => {
       await expect(migration.down(isolated.db)).resolves.toBeUndefined();
     });
 
+    // ── M-3：key 漂移（第八轮审计补的判据）─────────────────────────────────
+    //
+    // 现状（登记项 M-1）：迁移 sameCollation 只比 locale/strength，up() **从不比较 KEY**，
+    // 于是"同名 + collation 一致 + key 漂移"会被判成"已存在，跳过"。下面三条用例断言的是
+    // **正确行为**（漂移必须被纠正），因此对着当前迁移**必然是红的**——红即证据：
+    // 说明这套判据真的在设防，而不是"跑绿了所以没事"。
+    // 实测危害（真实 mongod 8.0.34，见 work/audit-round8-compose-migrations.md §3.3）：
+    //   · 反序 key 漂移 ⇒ 查询计划从 IXSCAN 退化为 COLLSCAN（20k 条 4000→20000 docs）；
+    //   · 缺 timestamp ⇒ 排序只能走内存（200k 条 304ms 阻塞排序）；
+    //   · caseLevel 类细项漂移 ⇒ 同上退化为 COLLSCAN。
+
+    /** 清掉本集合上除 _id_ 外的所有索引（含"同 key 不同名"的残留），让每条用例从干净态起跑 */
+    const clearAuditIndexes = async () => {
+      const coll = isolated.db.collection(migration.COLLECTION);
+      const existing = await indexesOf(isolated.db, migration.COLLECTION).catch(() => []);
+      for (const idx of existing) {
+        if (idx.name === '_id_') continue;
+        await coll.dropIndex(idx.name).catch(() => {});
+      }
+    };
+
+    /**
+     * 用例包装：跑前跑后都清索引。必须在用例内 finally 清 —— 本 describe 里的
+     * 其它用例只认"名字为 INDEX_NAME 的那条在不在"，同名/同 key 的残留会让它们的
+     * up() 抛 85（--randomize 打乱顺序时尤其致命），所以不能只靠 afterAll。
+     */
+    const withCleanIndexes = (fn) => async () => {
+      await clearAuditIndexes();
+      try {
+        await fn();
+      } finally {
+        await clearAuditIndexes();
+      }
+    };
+
+    test(
+      '[M-3/S2] key 漂移（同名同 collation、key 少 timestamp）必须被 up() 纠正',
+      withCleanIndexes(async () => {
+        const coll = isolated.db.collection(migration.COLLECTION);
+        // 自证前置：同名、同 collation、key 只有 username —— 正是实测里被"静默跳过"的形态
+        await coll.createIndex(
+          { username: 1 },
+          { name: migration.INDEX_NAME, collation: migration.COLLATION }
+        );
+        const pre = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
+        expect(pre).not.toBeNull();
+        expect(keySig(pre.key)).toBe('username:1');
+        expect(pre.collation).toMatchObject({ locale: 'en', strength: 2 });
+
+        await migration.up(isolated.db);
+
+        const post = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
+        expect(post).not.toBeNull();
+        expect(post.key).toEqual({ username: 1, timestamp: -1 });
+        expect(post.collation).toMatchObject({ locale: 'en', strength: 2 });
+      })
+    );
+
+    test(
+      '[M-3/S3] key 漂移（同名同 collation、key 顺序反了）必须被 up() 纠正',
+      withCleanIndexes(async () => {
+        const coll = isolated.db.collection(migration.COLLECTION);
+        await coll.createIndex(
+          { timestamp: -1, username: 1 },
+          { name: migration.INDEX_NAME, collation: migration.COLLATION }
+        );
+        const pre = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
+        expect(pre).not.toBeNull();
+        // 顺序是 key 的一部分：反序对本查询（username 等值 + timestamp 排序）不可用
+        expect(keySig(pre.key)).toBe('timestamp:-1|username:1');
+
+        await migration.up(isolated.db);
+
+        const post = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
+        expect(post).not.toBeNull();
+        expect(keySig(post.key)).toBe('username:1|timestamp:-1');
+        expect(post.collation).toMatchObject({ locale: 'en', strength: 2 });
+      })
+    );
+
+    test(
+      '[M-3/S10] 同 key 同 collation 但名字不同（username_1_timestamp_-1）⇒ up() 不得抛 85，且收敛到一条',
+      withCleanIndexes(async () => {
+        const coll = isolated.db.collection(migration.COLLECTION);
+        // 自证前置：正是会触发 85 IndexOptionsConflict 的形态（实测原文：
+        // "Index already exists with a different name: username_1_timestamp_-1"）
+        await coll.createIndex({ username: 1, timestamp: -1 }, { collation: migration.COLLATION });
+        const pre = await findIndex(isolated.db, migration.COLLECTION, 'username_1_timestamp_-1');
+        expect(pre).not.toBeNull();
+        expect(keySig(pre.key)).toBe('username:1|timestamp:-1');
+        expect(await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME)).toBeNull();
+
+        // 现状会抛 85 ⇒ 迁移中断；正确行为是收敛（复用同名或收敛到声明名），且不抛
+        await expect(migration.up(isolated.db)).resolves.toBeUndefined();
+
+        const named = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
+        expect(named).not.toBeNull();
+        expect(named.key).toEqual({ username: 1, timestamp: -1 });
+        // 收敛后同 key 的索引只应剩一条：重复索引是纯粹的写放大
+        const sameKey = (await indexesOf(isolated.db, migration.COLLECTION)).filter(
+          (i) => i.key.username === 1 && i.key.timestamp === -1
+        );
+        expect(sameKey).toHaveLength(1);
+      })
+    );
+
+    test(
+      '[W3-1] 同名同 key 但整 spec 漂移（unique:true）⇒ up() 必须重建（唯一约束消失）',
+      withCleanIndexes(async () => {
+        const coll = isolated.db.collection(migration.COLLECTION);
+        await coll.createIndex(
+          { username: 1, timestamp: -1 },
+          { name: migration.INDEX_NAME, collation: migration.COLLATION, unique: true }
+        );
+        const pre = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
+        // 自证前置：漂移真的造出了'凭空多出的唯一约束'
+        expect(pre.unique).toBe(true);
+        await migration.up(isolated.db);
+        const post = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
+        expect(post).not.toBeNull();
+        expect(post.unique).toBeFalsy();
+        expect(post.collation.strength).toBe(2);
+      })
+    );
+
+    test(
+      '[W3-2] 同名同 key 同 locale/strength 但 collation.caseLevel 漂移 ⇒ up() 必须重建',
+      withCleanIndexes(async () => {
+        const coll = isolated.db.collection(migration.COLLECTION);
+        await coll.createIndex(
+          { username: 1, timestamp: -1 },
+          {
+            name: migration.INDEX_NAME,
+            collation: { locale: 'en', strength: 2, caseLevel: true },
+          }
+        );
+        const pre = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
+        // 自证前置：只比 locale/strength 的判据会把它当'已对齐'放过
+        expect(pre.collation.caseLevel).toBe(true);
+        await migration.up(isolated.db);
+        const post = await findIndex(isolated.db, migration.COLLECTION, migration.INDEX_NAME);
+        expect(post.collation.caseLevel).toBe(false);
+      })
+    );
+
+    test(
+      '[W4] 异名 twin 带语义差异（unique:true）⇒ up() 不得删它（删了就是静默丢唯一约束）',
+      withCleanIndexes(async () => {
+        const coll = isolated.db.collection(migration.COLLECTION);
+        await coll.createIndex(
+          { username: 1, timestamp: -1 },
+          { name: 'legacy_username_uniq', collation: migration.COLLATION, unique: true }
+        );
+        await expect(migration.up(isolated.db)).resolves.toBeUndefined();
+        const list = await indexesOf(isolated.db, migration.COLLECTION);
+        const twin = list.find((i) => i.name === 'legacy_username_uniq');
+        expect(twin).toBeTruthy();
+        expect(twin.unique).toBe(true);
+        // 声明的那条也建出来了（两者并存合法）
+        expect(list.find((i) => i.name === migration.INDEX_NAME)).toBeTruthy();
+      })
+    );
     test('up() 在空库（集合不存在）上也能建（首次 migrate 路径）', async () => {
       await isolated.db
         .collection(migration.COLLECTION)

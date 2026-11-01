@@ -1,5 +1,5 @@
 /**
- * 审计异常检测的 MTTD 指标（Plan B，2026-10-19）
+ * 审计异常检测的 MTTD 指标
  *
  * 与 metricsAuditDrops / metricsRuntime 单独成文件的理由相同：
  * `utils/metrics.js` 的 max-lines 贴着 300 行棘轮红线。

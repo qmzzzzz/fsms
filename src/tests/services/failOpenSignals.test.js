@@ -7,7 +7,7 @@
  *     否则『DB 挂了 + 全站裸奔』只有一条 error 日志可循」
  *   · `middleware/rateLimitStore.js:53-56`：「降级态只写日志等于没有可告警信号——
  *     `grep 日志` 不是运维动作」
- *   · `services/websocketService/handshake.js:480-482`：「fail-open 必须留 `ip_blacklist_failopen` 计数」
+ *   · `services/websocketService/handshake.js:481-483`：「fail-open 必须留 `ip_blacklist_failopen` 计数」
  *
  * 但实测有两处降级**完全没有信号**，且都属于「已修的同类漏了一处」：
  *   1. `services/captchaService.js`：Redis 就绪但计数命令报错时，上限判定被跳过。
@@ -179,7 +179,7 @@ describe('SystemConfig.captchaSwitch：DB 故障降级为静态默认时必须�
   });
 
   test('配置未落库（doc 为 null，非 DB 故障）→ 用静态默认但**不发**降级信号', async () => {
-    // 这是「全新部署」的正常路径（config/index.js:73 注释自陈"全新部署必然走这条 fallback"），
+    // 这是「全新部署」的正常路径（config/index.js:86 注释自陈"全新部署必然走这条 fallback"），
     // 与 DB 故障是两件事。把它也算成降级会让告警在每次全新部署时响。
     jest.spyOn(SystemConfig, 'findOne').mockReturnValue({ lean: () => Promise.resolve(null) });
     const value = await SystemConfig.captchaSwitch('register');

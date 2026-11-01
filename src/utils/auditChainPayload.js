@@ -45,17 +45,12 @@ const PAYLOAD_FIELDS_V2 = [
 ];
 
 /**
- * v3 = v2 的字段集（当时只是补了「算哈希前统一填默认值」的口径，字段没变）。
- * 必须是**独立快照**而不是 `= PAYLOAD_FIELDS_V2`：同一引用的话，将来给 v2
- * 追加任何字段都会静默改写 v3 的语义，历史记录的哈希就再也算不回来了。
+ * v3 = v2 的字段集（当时只是补了「算哈希前统一填默认值」的口径，字段没变）。必须是**独立快照**而不是 `= PAYLOAD_FIELDS_V2`：同一引用的话，将来给 v2 追加任何字段都会静默改写 v3 的语义，历史记录的哈希就再也算不回来了。
  */
 const PAYLOAD_FIELDS_V3 = [...PAYLOAD_FIELDS_V2];
 
 /**
- * v4：补进加到 schema 却从未进哈希的四个字段
- * （targetType / targetId / dataType / description）。
- * 这四字段承载「谁举报了谁 / 看了哪类敏感数据 / 操作描述」，正是取证要看的值；
- * 不在 payload 里就意味着落库后可被任意改写而三层校验一层都不会红。
+ * v4：补进加到 schema 却从未进哈希的四个字段（targetType / targetId / dataType / description）。这四字段承载「谁举报了谁 / 看了哪类敏感数据 / 操作描述」，正是取证要看的值；不在 payload 里就意味着落库后可被任意改写而三层校验一层都不会红。
  */
 const PAYLOAD_FIELDS_V4 = [
   ...PAYLOAD_FIELDS_V3,
@@ -70,11 +65,7 @@ const CURRENT_PAYLOAD_VERSION = 4;
 /**
  * 四份历史清单一律冻结。
  *
- * 理由不是洁癖：本文件第 48-51 行记着的事故（v3 曾写成 `= PAYLOAD_FIELDS_V2`
- * 同一个引用）就是"清单被别处改动 ⇒ 历史哈希再也算不回来"这一类，
- * 而它的后果是**大面积假篡改告警**——防篡改链最坏的失败形态
- * （把完好的链路报成被篡改，运维只能整库重签）。
- * 靠注释与 code review 防不住第三次，冻结能防住：数组内容从此不可能被 push/splice 改掉。
+ * 理由不是洁癖：本文件第 48-51 行记着的事故（v3 曾写成 `= PAYLOAD_FIELDS_V2` 同一个引用）就是"清单被别处改动 ⇒ 历史哈希再也算不回来"这一类，而它的后果是**大面积假篡改告警**——防篡改链最坏的失败形态（把完好的链路报成被篡改，运维只能整库重签）。靠注释与 code review 防不住第三次，冻结能防住：数组内容从此不可能被 push/splice 改掉。
  */
 Object.freeze(PAYLOAD_FIELDS_V1);
 Object.freeze(PAYLOAD_FIELDS_V2);
@@ -145,9 +136,7 @@ const canonicalPayloadV2LegacyBatch = (doc) => {
 };
 
 /**
- * 按记录自带的 hashVersion 选择口径。v2/v3 共用 25 字段集（v3 只是补齐默认值
- * 的写入口径，字段集未变），v4 起加入 targetType/targetId/dataType/description。
- * 每新增一版都必须保留旧分支——历史记录的哈希只有按当年口径才复算得出来。
+ * 按记录自带的 hashVersion 选择口径。v2/v3 共用 25 字段集（v3 只是补齐默认值的写入口径，字段集未变），v4 起加入 targetType/targetId/dataType/description。每新增一版都必须保留旧分支——历史记录的哈希只有按当年口径才复算得出来。
  */
 const canonicalPayload = (doc, version = CURRENT_PAYLOAD_VERSION) => {
   if (version >= 4) return canonicalPayloadV2(doc, PAYLOAD_FIELDS_V4);

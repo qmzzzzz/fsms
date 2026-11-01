@@ -1,10 +1,8 @@
 /**
- * 「早于 auditLog 中间件的拒绝」审计写入（自 ipBlacklist.js 抽出）
- *
- * 抽出的直接原因：originCheck 只为了这一个函数就经 security/index 门面取用，
- * 而门面把 IP 黑名单、审计中间件、协议合规整条链拉进来，形成
- * `originCheck → security/index → … → originCheck` 的惰性环。本模块只依赖
- * AuditLog 与若干纯工具函数，是叶子节点。
+ * 「早于 auditLog 中间件的拒绝」审计写入。独立成叶子模块：originCheck 只为这一个函数就经
+ * security/index 门面取用会把 IP 黑名单、审计中间件、协议合规整条链拉进来，形成
+ * `originCheck → security/index → … → originCheck` 的惰性环。本模块只依赖 AuditLog 与
+ * 若干纯工具函数。
  */
 
 const logger = require('../../utils/logger');

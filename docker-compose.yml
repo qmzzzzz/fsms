@@ -90,6 +90,10 @@ services:
       - BUSINESS_RETENTION_DAYS_FIRE_DEVICE=${BUSINESS_RETENTION_DAYS_FIRE_DEVICE:-180}
       # User 不建 TTL（匿名化口径），此变量仅用于合规检查的声明一致性核对
       - BUSINESS_RETENTION_DAYS_USER=${BUSINESS_RETENTION_DAYS_USER:-180}
+      # 取证捕获（P2）：声明 30 天（用户 2026-10-31 书面确认），区间 [30,3650]。下限**独立于审计链**：
+      # 审计留存仍 90 天，取证捕获是"事件取证窗口"，两件事合规依据不同。TTL 到期不可逆删除，
+      # 这里的默认值必须与 declaredDays 逐字一致，否则启动对账会判 orphaned 交人工。
+      - BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE=${BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE:-90}
       # 恢复目标（F-08）：声明值 24h / 4h，见 src/constants/backupObjectives.js。
       # 默认值与声明一致；发布脚本要求显式给值（不依赖这里的默认）。
       - BACKUP_RPO_HOURS=${BACKUP_RPO_HOURS:-24}
@@ -127,6 +131,21 @@ services:
       # 运维在 .env 里配了也进不了容器 ⇒ 任何同网容器都能读取负载与安全告警计数。
       # 经 secrets 注入（不走 environment，理由同上方 P3-48）。
       - METRICS_TOKEN_FILE=/run/secrets/metrics_token
+      # ===== 应用内一键升级（2026-10-30）=====
+      # 应用只写「签名请求文件」，不执行 docker/nginx；执行侧是宿主机的
+      # scripts/hotUpgradeAgent.js（systemd timer）。队列目录由下面的 volumes
+      # 以 bind mount 与宿主共享，容器内路径固定，宿主路径由 UPGRADE_QUEUE_HOST_DIR 决定。
+      # 默认关闭：没配白名单/代理时，按钮只会看到「未启用」而不是一个点了没反应的入口。
+      - UPGRADE_ENABLED=${UPGRADE_ENABLED:-false}
+      - UPGRADE_QUEUE_DIR=/var/lib/fsms/upgrade
+      # 空白名单 = 全拒（fail-closed），与 scripts/hotUpgradePolicy.js 同口径。
+      # 例：ghcr.io/qmzzzzz/
+      - HOT_UPGRADE_REGISTRY_ALLOWLIST=${HOT_UPGRADE_REGISTRY_ALLOWLIST:-}
+      # 代理心跳超过该秒数即视为离线（代理每 10s 续写，默认 120s 容忍）
+      - UPGRADE_AGENT_STALE_SECONDS=${UPGRADE_AGENT_STALE_SECONDS:-120}
+      # 请求在队列里停留超过该秒数后代理拒绝执行（默认 30 分钟）
+      - UPGRADE_REQUEST_TTL_SECONDS=${UPGRADE_REQUEST_TTL_SECONDS:-1800}
+      - UPGRADE_HISTORY_LIMIT=${UPGRADE_HISTORY_LIMIT:-10}
     secrets:
       - jwt_secret
       - jwt_refresh_secret
@@ -222,7 +241,9 @@ services:
     #   DAC_OVERRIDE —— 读宿主 0600 的 secret 源文件；
     #   CHOWN        —— 把副本改属 nodejs；
     #   SETUID/SETGID—— su-exec 降权到 nodejs。
-    # 不补 FOWNER：脚本先 chmod（此时 root 仍是属主）再 chown，不需要它。
+    # 不补 FOWNER：入口脚本的顺序是「chown root → chmod → 交出属主」——
+    # chmod 时 root 一定是属主。反过来说，只要少了那步「收回 root」，
+    # 对已属 nodejs 的目录 chmod 就会 EPERM（第二次启动、app-green、compose run 都会踩）。
     # NET_RAW/SYS_ADMIN 等逃逸常用能力仍全部剥夺。
     cap_drop:
       - ALL
@@ -243,6 +264,10 @@ services:
       - /run/app-secrets
     volumes:
       - app-logs:/app/logs
+      # 升级请求/状态队列（应用写请求，宿主代理消费并执行）。
+      # 容器内路径固定；宿主侧默认 /var/lib/fsms/upgrade。目录属主/权限由
+      # docker/app-entrypoint.sh 的 root 阶段适配（应用以 nodejs 写入）。
+      - ${UPGRADE_QUEUE_HOST_DIR:-/var/lib/fsms/upgrade}:/var/lib/fsms/upgrade
     networks:
       # 双网络接入：fire-safety-net 承载监控抓取（prometheus→app:3000）与宿主发布的
       # 3000 端口，且 app 的出网能力（securityAlertDelivery 的 webhook）走这张网；
@@ -252,7 +277,7 @@ services:
       - fire-safety-net
       - data-net
 
-  # ── 热升级备色（2026-10-30）──────────────────────────────────────────────
+  # ── 升级备色（2026-10-30）──────────────────────────────────────────────
   # 升级时同时在线的是「当前色 app（3000）」+「备色 app-green（3001）」，
   # nginx 的 upstream 指向哪一色，流量就去哪一色。切流即改 upstream + reload，
   # 回滚就是把 upstream 改回来——旧容器在观察期内不销毁，这是回滚的前提。
@@ -278,6 +303,16 @@ services:
     # 故退到一个人为构造、绝不可能存在的 tag：真有人绕过脚本手动起备色，
     # 会立刻卡在 pull 阶段（响亮失败），而不是安静地跑起一个错版本。
     image: ${APP_IMAGE_NEXT:-fire-safety-app:green-unset-by-script}
+    environment:
+      # 备色身份。不能靠 PORT 判断：两色在容器内都监听 3000（宿主分别映射
+      # 3000/3001），只看 PORT 会把 green 也报成 blue，概览页的切流提示就错了。
+      # extends 对 environment 列表做追加，app 段没有同名变量，不会冲突。
+      - DEPLOY_COLOR=green
+      # 审计 WAL 必须按颜色分开：两色共用 app-logs 卷，而 WAL 文件名按库名派生
+      # ⇒ 同一个 audit-buffer.<db>.wal 会被两个进程同时追加。WAL 的全部价值是
+      # 崩溃后重放，两个写者会让「谁写的、该不该重放」不可判定：切断瞬间两色都在跑，
+      # 后启动的一方会把对方未落库的行也重放落库（重复插入 → 哈希链分叉）。
+      - AUDIT_WAL_PATH=/app/logs/audit-buffer.green.wal
     ports: !override
       # 仅回环，与 app 同口径；宿主 nginx 通过 upstream 访问。
       # `!override` 不是装饰：compose 的 extends 对 sequences 做的是**合并**而不是
@@ -368,7 +403,11 @@ services:
     # 库级权限缺失）」这种形态会被判健康，rs-init 照常去建账号再失败，
     # 表象是 app 反复重启而健康状态一直绿——探针在说谎，排查方向被引到别处。
     #
-    # 现在用 root 凭据从 secret 文件读入（不进 environment / argv），并显式断言 ping 的 ok。
+    # 现在用 root 凭据从 secret 文件读入（**不进 environment**），并显式断言 ping 的 ok。
+    # 残留暴露（登记，别当它不存在）：`$(cat …)` 会把值展开进 mongosh 的 **argv**，
+    # 容器内 `ps` 的可见性取决于该容器里还有谁能起进程——本镜像只有 mongod/健康检查。
+    # 想连 argv 一起摘掉，得让 mongosh 从 env 读（`--eval` + `process.env`），那是一次
+    # 需要在真环境验一遍的健康检查改造，未在本轮做（见 work/lead/iter-report.md）。
     # 凭据错误 ⇒ 恒 unhealthy ⇒ rs-init 不启动 ⇒ app 不启动（fail-loud，不静默降级）。
     # 首次初始化的窗口由 start_period 覆盖：MONGO_INITDB_ROOT_* 会先建好 root 用户，
     # 之后带凭据的 ping 才能通过。
@@ -686,8 +725,17 @@ services:
     # R-5 同口径：digest 取自 scripts/verify-image-digests.js（对 manifest 字节自算 sha256、≥2 个独立运营来源一致、须为 manifest list）
     # 期望表在同脚本；scripts/capture-image-digests.sh 只认 node 与 mongo，第三方命名空间（prom/…、grafana/…）不走那条路。
     image: grafana/grafana:11.1.0@sha256:079600c9517b678c10cda6006b4487d3174512fd4c6cface37df7822756ed7a5
+    # 不能进默认栈：宿主 3001 是热升级备色的固定端口（scripts/hotUpgradePolicy.js 的
+    # PORT_BY_COLOR.green = 3001，deployment/nginx.conf.example 的备色 upstream 也钉这一条）。
+    # Grafana 随默认栈常驻时，升级第 2 步 `docker compose --profile green up -d --no-deps
+    # app-green` 会报 "Bind for 127.0.0.1:3001 failed: port is already allocated"——
+    # 旧色仍在服务（fail-closed），但升级窗口从一开始就走不完（第四轮审计 D6）。
+    # 看板按需启用：docker compose --profile observability up -d grafana。升级窗口内不要
+    # 启用该 profile：同一宿主端口仍然互斥。判据在 src/tests/deploy/composeSegmentation.test.js
+    # 的「宿主端口互斥闸门」，删掉下面这行 profiles 就会红。
+    profiles: ['observability']
     ports:
-      # 宿主 3000 已被 app 占用，Grafana 用 3001
+      # 宿主 3000 已被 app 占用；3001 与备色互斥，靠上面的 profile 保证两者不同时在线
       - '127.0.0.1:3001:3000'
     environment:
       # 初始管理员口令走宿主环境变量（同 CORS_ORIGIN 的强制显式约定）；
@@ -736,6 +784,10 @@ services:
   # 可读。Grafana 本身保持默认非 root 用户运行。
   grafana-secret-init:
     image: node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5
+    # D3（2026-10-31 第八轮审计）：与 grafana 同 profile——默认栈不需要它；留在默认栈会让
+    # `docker compose up -d` 对 ./secrets/grafana_admin_password 产生硬依赖（缺文件即创建阶段失败），
+    # 而 Grafana 本身已在 observability profile（见上方 grafana 段的说明）。
+    profiles: ['observability']
     entrypoint: ['sh', '-c']
     command:
       - >-

@@ -67,6 +67,8 @@ const localStamp = (iso) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
+const t2colon = (label) => label + i18n.global.t('common.labelColon')
+
 const mkRow = (id, over = {}) => ({
   _id: id,
   status: 'pending',
@@ -106,6 +108,63 @@ const open = async (rows, opts = {}) => {
   await flush(4)
   return active
 }
+
+describe('AlarmView 列表加载失败：不得把「读失败」画成「没有报警」（P1③/P1④）', () => {
+  /** 失败夹具：getList reject，统计正常 */
+  const openFailing = async () => {
+    getList.mockRejectedValue(new Error('boom'))
+    getStats.mockResolvedValue({ data: { data: { byStatus: [], total: 0 } } })
+    const c = mountComponent(AlarmView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(ALL_PERMS),
+    })
+    await waitFor(() => getList.mock.calls.length >= 1, { message: '列表请求已发出' })
+    await flush(12)
+    return c
+  }
+
+  test('首屏加载失败：显式错误块顶替表格，不得显示「暂无数据」', async () => {
+    const c = await openFailing()
+    expect(c.find('.load-error')).not.toBeNull()
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.listLoadFailed'))
+    // 关键判据：报警页把失败画成「没有报警」＝值班员以为一切正常
+    expect(c.text()).not.toContain(i18n.global.t('common.noData'))
+    expect(c.find('.el-pagination')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('首屏加载失败：错误块提供重试，点击后重新请求并恢复表格', async () => {
+    const c = await openFailing()
+    const before = getList.mock.calls.length
+    const rows = [mkRow('a1')]
+    getList.mockResolvedValue({ data: { data: rows, pagination: { total: rows.length } } })
+    click(c.find('.load-error button'))
+    await flush(14)
+    expect(getList.mock.calls.length).toBeGreaterThan(before)
+    await waitFor(() => cells(c).length === 1, { message: '重试成功后渲染行' })
+    expect(c.find('.load-error')).toBeNull()
+  })
+
+  test('先成功后失败：旧数据保留并标注为上次数据（stale）', async () => {
+    const c = await open([mkRow('a1')])
+    expect(cells(c)).toHaveLength(1)
+    getList.mockRejectedValue(new Error('boom'))
+    click(
+      c.findAll('.glass-btn').find((b) => b.textContent.includes(i18n.global.t('common.refresh')))
+    )
+    await flush(14)
+    expect(cells(c)).toHaveLength(1)
+    expect(c.find('.load-error')).not.toBeNull()
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.staleData'))
+  })
+
+  test('pagination.total 缺失：不得回退成「共 N 条」（P1④）', async () => {
+    const c = await open([mkRow('a1')], { pagination: null })
+    expect(c.find('.total-unknown')).not.toBeNull()
+    const pag = c.find('.el-pagination')
+    if (pag) expect(pag.textContent).not.toContain('共 1 条')
+    expect(c.errors).toEqual([])
+  })
+})
 
 const dialogSubmit = () =>
   Array.from(document.querySelectorAll('.el-dialog button')).find(
@@ -197,14 +256,51 @@ describe('AlarmView 列表渲染口径', () => {
     await flush(30)
     expect(cells(c)[0][1]).toBe(before)
     // 反证：同一次切换里确实有别的文案变了（否则上面的恒定断言可能是恒真）。
-    // 用表头做反证：它走 $t 模板插值、随 locale 响应式更新；行内状态文案是
-    // loadData 时物化的（本视图不 watch locale 重取），不适用于本次反证。
     const headers = () => c.findAll('.el-table__header th').map((th) => th.textContent.trim())
     expect(headers()).toContain('Occurred At')
     expect(headers()).toContain('Handler')
     expect(headers()).not.toContain('发生时间')
     i18n.global.locale.value = 'zh-CN'
     await flush(30)
+  })
+
+  test('页内切语言（不刷新、不重新请求）时行内类型/状态/处理人同步变英文', async () => {
+    // 退化保护：行映射曾把 t(...) 的结果物化成 _type/_status/_handler 字符串，
+    // 语言切换后表头变英文、行内仍是中文（同一张表两种语言，实测复现）。
+    // 这里不重新 loadData，只切 locale —— 断言必须靠渲染期取词才能通过。
+    const c = await open([
+      mkRow('l1', { status: 'resolved', alarmType: 'smoke', handler: null }),
+      mkRow('l2', { status: 'false_alarm', alarmType: 'other', handler: { name: '李四' } }),
+    ])
+    expect(cells(c).map((r) => r[3])).toEqual(['烟雾报警', '其他'])
+    expect(cells(c).map((r) => r[5])).toEqual(['已处理', '误报'])
+    expect(cells(c).map((r) => r[4])).toEqual([i18n.global.t('common.noData'), '李四'])
+
+    getList.mockClear()
+    i18n.global.locale.value = 'en-US'
+    await flush(30)
+
+    expect(cells(c).map((r) => r[3])).toEqual(['Smoke Alarm', 'Other'])
+    expect(cells(c).map((r) => r[5])).toEqual(['Resolved', 'False Alarm'])
+    // 「暂无数据」占位同样随语言（它是词表文案，不是数据）
+    expect(cells(c)[0][4]).toBe('No Data')
+    // 切语言不得触发重新拉取（纯展示层变更）
+    expect(getList).not.toHaveBeenCalled()
+    i18n.global.locale.value = 'zh-CN'
+    await flush(30)
+  })
+
+  test('后端回吐未知状态/类型时不渲染裸码：状态回落后端值、类型回落到 type 字段', async () => {
+    // 状态机将来新增态（后端先行上线）时，前端不得把 'archived' 当成未知而消失；
+    // 类型词表缺键时同样要回落后端 type，再回落 '-'。
+    const c = await open([
+      mkRow('u1', { status: 'archived', alarmType: 'brand_new', type: '新型报警' }),
+      mkRow('u2', { status: 'archived', alarmType: 'brand_new', type: undefined }),
+    ])
+    expect(cells(c).map((r) => r[5])).toEqual(['archived', 'archived'])
+    expect(cells(c)[0][3]).toBe('新型报警')
+    expect(cells(c)[1][3]).toBe('-')
+    expect(c.errors).toEqual([])
   })
   test('时间缺失渲染为 -（不是 Invalid Date / undefined）', async () => {
     const c = await open([mkRow('a1', { occurredAt: null })])
@@ -304,6 +400,23 @@ describe('AlarmView 位置与类型显示口径', () => {
     ])
     expect(cells(c).map((r) => r[2])).toEqual([i18n.global.t('common.noData'), 'B栋1层'])
     expect(cells(c)).toHaveLength(2)
+    expect(c.errors).toEqual([])
+  })
+
+  test('只填 location.detail（无 building）时显示 detail，不回落到「暂无数据」', async () => {
+    // 后端 location.building 是 optional，报警只登记「详细位置」是合法形态。
+    // DeviceView / DeviceReminderDialog 都有 detail 回落，报警页此前漏了这条。
+    const c = await open([
+      mkRow('d1', { location: { detail: '地下车库 B2 通道' } }),
+      mkRow('d2', { location: { building: 'A栋', floor: '3层', detail: '东侧楼梯间' } }),
+      mkRow('d3', { location: { detail: '' } }),
+    ])
+    // building 优先：detail 不覆盖已有楼栋拼装
+    expect(cells(c).map((r) => r[2])).toEqual([
+      '地下车库 B2 通道',
+      'A栋3层',
+      i18n.global.t('common.noData'),
+    ])
     expect(c.errors).toEqual([])
   })
 
@@ -429,15 +542,21 @@ describe('AlarmView 请求参数口径（分页 / 筛选）', () => {
     expect(c.findAll('.el-pagination').length).toBe(1)
   })
 
-  test('分页信息缺失时 total 回退为当前页行数（防「表里有行但分页显示 Total 0」）', async () => {
+  test('分页信息缺失时不得把 total 回退成当前页行数，而是显式标注未知（P1④）', async () => {
+    // 2026-10-31 口径纠正（P1④）：原断言要求 total 回退成 rows.length，理由是
+    // 「防表里有行但分页显示 Total 0」。但回退的代价更重：契约漂移时显示
+    // 「共 2 条 / 1 页」，第 2 页起永远不出现，且用户看不出任何异常（静默降级）。
+    // 新口径：total 未知就标未知（.total-unknown + 隐藏 total 数字），行照常渲染。
     getList.mockResolvedValue({ data: { data: [mkRow('a1'), mkRow('a2')] } })
     getStats.mockResolvedValue({ data: { data: { byStatus: [], total: 0 } } })
     active = mountComponent(AlarmView, {
       setupStore: (pinia) => useAuthStore(pinia).setPermissions(ALL_PERMS),
     })
     await waitFor(() => cells(active).length === 2, { message: '列表行渲染完成' })
-    expect(active.find('.el-pagination__total').textContent).toBe('Total 2')
     expect(cells(active)).toHaveLength(2)
+    expect(active.find('.total-unknown')).not.toBeNull()
+    // 不再宣称一个假的「总 2 条」
+    expect(active.find('.el-pagination__total')).toBeNull()
   })
 
   test('翻页按钮透传目标页码（点第 2 页 → page=2，limit/status 不变）', async () => {
@@ -633,7 +752,10 @@ describe('AlarmView 统计卡与分段计数（loadStats 口径）', () => {
   })
 })
 describe('AlarmView 加载失败与竞态', () => {
-  test('首屏加载失败：骨架退场，空表 + total 归零（不留半截状态）', async () => {
+  test('首屏加载失败：骨架退场，错误块顶替表格（不再渲染空表 + Total 0）', async () => {
+    // 2026-10-31 口径纠正（P1③）：原断言钉的是「失败 ⇒ 空表 + Total 0」——
+    // 那正是缺陷本身（报警页把失败画成「没有报警」＝值班员以为一切正常）。
+    // 新口径：失败且无旧数据时表格让位于错误块，分页器整块不渲染。
     getList.mockRejectedValue(new Error('boom'))
     getStats.mockResolvedValue({ data: { data: { byStatus: [], total: 0 } } })
     active = mountComponent(AlarmView, {
@@ -641,21 +763,25 @@ describe('AlarmView 加载失败与竞态', () => {
     })
     await flush(24)
     expect(active.findAll('.glass-skeleton')).toEqual([])
-    expect(active.findAll('.el-table')).toHaveLength(1)
-    expect(cells(active)).toEqual([])
-    expect(active.find('.el-pagination__total').textContent).toBe('Total 0')
+    expect(active.find('.load-error')).not.toBeNull()
+    expect(active.text()).not.toContain(i18n.global.t('common.noData'))
+    expect(active.findAll('.el-table')).toHaveLength(0)
+    expect(active.find('.el-pagination__total')).toBeNull()
     expect(active.errors).toEqual([])
   })
 
-  test('刷新失败：清空旧数据并把 total 归零（残留旧行会让用户误以为已是最新）', async () => {
+  test('刷新失败：旧数据保留但标注为上次数据（不静默、也不假装归零）', async () => {
+    // 2026-10-31 口径纠正（P1③）：原断言要求失败后清空旧行 + Total 归零，
+    // 顾虑是「残留旧行会让用户误以为已是最新」。但清空的代价是把「刷新失败」
+    // 画成「一条报警都没有」——对值班场景是更危险的谎报。
+    // 新口径：保留旧数据 + 显式警示条标注「以下为上次加载的数据」，两者都不骗人。
     const c = await open([mkRow('a1')])
     expect(cells(c)).toHaveLength(1)
     getList.mockRejectedValue(new Error('boom'))
     click(c.findAll('.glass-btn--default').find((b) => b.textContent.includes('刷新')))
-    await waitFor(() => c.find('.el-pagination__total').textContent === 'Total 0', {
-      message: '失败后 total 归零',
-    })
-    expect(cells(c)).toEqual([])
+    await waitFor(() => c.find('.load-error') !== null, { message: '失败标记出现' })
+    expect(cells(c)).toHaveLength(1)
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.staleData'))
     expect(c.errors).toEqual([])
   })
 
@@ -947,6 +1073,10 @@ describe('AlarmView 行级动作：处理完成（双确认 + 原因单选）', 
     expect(promptOpts.inputValidator('x'.repeat(1001))).toBe(
       i18n.global.t('alarm.handleResultRequired')
     )
+    // 不得同时挂 inputPattern：Element Plus 会先报 pattern 那条静态文案，
+    // 覆盖掉 validator 的「必填/超长」说明（此前那条填的是字段名，用户看不懂错在哪）
+    expect(promptOpts.inputPattern).toBeUndefined()
+    expect(promptOpts.inputErrorMessage).toBe(i18n.global.t('alarm.handleResultRequired'))
     expect(ElMessage.success).toHaveBeenCalledWith(i18n.global.t('alarm.resolved'))
     // 完成后必须回表刷新：否则行仍显示「处理中」，用户以为没生效
     await waitFor(() => getList.mock.calls.length > before, { message: '完成后刷新列表' })
@@ -1141,17 +1271,81 @@ describe('AlarmView 详情弹窗', () => {
     alert.mockResolvedValue('confirm')
     click(rowBtn(c, 0, '详情'))
     await waitFor(() => alert.mock.calls.length === 1, { message: '详情弹窗弹出' })
+    // 冒号随语言：zh 全角「：」（中文弹窗不得出现半角冒号的中英混排）
+    const colon = i18n.global.t('common.labelColon')
     expect(alert.mock.calls[0][0]).toBe(
       [
-        '报警类型: 烟雾报警',
-        '报警位置: A栋3层 配电室',
-        '处理人: 张三',
-        '状态: 已处理',
-        '发生时间: ' + localStamp(iso),
+        `报警类型${colon}烟雾报警`,
+        `报警位置${colon}A栋3层 配电室`,
+        `处理人${colon}张三`,
+        `状态${colon}已处理`,
+        `发生时间${colon}` + localStamp(iso),
       ].join('\n')
     )
-    expect(alert.mock.calls[0][1]).toBe(i18n.global.t('alarm.title'))
-    expect(alert.mock.calls[0][2]).toMatchObject({ customClass: 'alarm-detail-dialog' })
+    expect(alert.mock.calls[0][1]).toBe(i18n.global.t('alarm.detailTitle'))
+    expect(alert.mock.calls[0][2]).toMatchObject({ customClass: 'mb-multiline' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('英文界面：五要素全英文 + 半角冒号，标题是 Alarm Details', async () => {
+    const iso = '2026-10-01T01:00:00.000Z'
+    const c = await open(
+      [
+        mkRow('v3', {
+          status: 'resolved',
+          alarmType: 'smoke',
+          occurredAt: iso,
+          location: { building: 'A栋', floor: '3层', room: '配电室' },
+          handler: { realName: '张三' },
+        }),
+      ],
+      { locale: 'en-US' }
+    )
+    alert.mockResolvedValue('confirm')
+    click(rowBtn(c, 0, 'Details'))
+    await waitFor(() => alert.mock.calls.length === 1, { message: '详情弹窗弹出' })
+    const lines = alert.mock.calls[0][0].split('\n')
+    expect(lines).toEqual([
+      'Alarm Type: Smoke Alarm',
+      'Location: A栋3层 配电室',
+      'Handler: 张三',
+      'Status: Resolved',
+      'Occurred At: ' + localStamp(iso),
+    ])
+    expect(alert.mock.calls[0][1]).toBe('Alarm Details')
+    // 反：英文弹窗里不得出现中文标签/全角冒号（楼栋与姓名是数据，允许中文）
+    expect(alert.mock.calls[0][0]).not.toMatch(/报警|处理人|状态|发生时间|：/)
+    expect(c.errors).toEqual([])
+  })
+
+  test('超长 / 未知码也不得撑爆或露出 undefined：位置 100 字、状态未知、类型未知', async () => {
+    // 位置上限 100 字（后端 locationLen），全是中文无空格——弹窗若不允许断行会横向溢出；
+    // 状态/类型走后端枚举，前端词表未覆盖时回落后端值，绝不能渲染成 undefined。
+    const long = '东'.repeat(100)
+    const c = await open([
+      mkRow('x1', {
+        status: 'archived',
+        alarmType: 'brand_new',
+        type: undefined,
+        occurredAt: '2026-10-01T01:00:00.000Z',
+        location: { building: long },
+        handler: { realname: '张三' },
+      }),
+    ])
+    alert.mockResolvedValue('confirm')
+    click(rowBtn(c, 0, '详情'))
+    await waitFor(() => alert.mock.calls.length === 1, { message: '详情弹窗弹出' })
+    const text = alert.mock.calls[0][0]
+    expect(text).not.toContain('undefined')
+    expect(text).not.toContain('null')
+    // 未知状态原样回落后端值（不吞掉、不臆造翻译）
+    expect(text).toContain('archived')
+    // 类型无词条、type 也缺失 → '-'
+    expect(text).toContain(t2colon('报警类型') + '-')
+    // 处理人只认 realName/name/username：realname 大小写不符 → 暂无数据
+    expect(text).toContain(t2colon('处理人') + i18n.global.t('common.noData'))
+    // 100 字位置原样保留（不截断）
+    expect(text).toContain(long)
     expect(c.errors).toEqual([])
   })
 
@@ -1165,8 +1359,9 @@ describe('AlarmView 详情弹窗', () => {
     const text = alert.mock.calls[0][0]
     expect(text).not.toContain('undefined')
     expect(text).not.toContain('Invalid')
-    expect(text).toContain('发生时间: -')
-    expect(text).toContain('报警类型: -')
+    const colon = i18n.global.t('common.labelColon')
+    expect(text).toContain(`发生时间${colon}-`)
+    expect(text).toContain(`报警类型${colon}-`)
   })
 })
 

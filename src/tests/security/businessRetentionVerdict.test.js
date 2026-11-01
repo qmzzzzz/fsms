@@ -18,12 +18,19 @@
 
 const { businessRetentionVerdict } = require('../../../scripts/complianceVerdicts');
 
-const MODELS = ['FireAlarm', 'Inspection', 'FireDevice', 'User'];
+const MODELS = ['FireAlarm', 'Inspection', 'FireDevice', 'User', 'ForensicCapture'];
 const ENV_KEYS = MODELS.map(
   (m) => `BUSINESS_RETENTION_DAYS_${m.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}`
 );
 
 const clearAll = () => ENV_KEYS.forEach((k) => delete process.env[k]);
+
+// 「全部按声明值启用」：业务集合声明 180 天，取证捕获（ForensicCapture，P2）声明 30 天
+// —— 用 180 去配它会被判「生效值超过业务声明」，那是声明与配置真矛盾，不是本用例要验的东西。
+const enableAll = () =>
+  ENV_KEYS.forEach((k) => {
+    process.env[k] = k.includes('FORENSIC_CAPTURE') ? '30' : '180';
+  });
 
 afterEach(clearAll);
 
@@ -41,9 +48,7 @@ describe('F-07 合规判据：未启用必须显形为"未就绪"，配置矛盾
   });
 
   test('按 180 天全部启用 ⇒ passed=true 且 notReady=false', () => {
-    ENV_KEYS.forEach((k) => {
-      process.env[k] = '180';
-    });
+    enableAll();
     const v = businessRetentionVerdict();
     expect(v.passed).toBe(true);
     expect(v.notReady).toBe(false);
@@ -59,9 +64,7 @@ describe('F-07 合规判据：未启用必须显形为"未就绪"，配置矛盾
   });
 
   test('生效值超过声明天数 ⇒ passed=false（"只留 180 天"在数据面上不成立）', () => {
-    ENV_KEYS.forEach((k) => {
-      process.env[k] = '180';
-    });
+    enableAll();
     process.env.BUSINESS_RETENTION_DAYS_FIRE_ALARM = '365';
     const v = businessRetentionVerdict();
     expect(v.passed).toBe(false);
@@ -69,9 +72,7 @@ describe('F-07 合规判据：未启用必须显形为"未就绪"，配置矛盾
   });
 
   test('越界值被钳制 ⇒ passed=false（配置意图与生效值不一致）', () => {
-    ENV_KEYS.forEach((k) => {
-      process.env[k] = '180';
-    });
+    enableAll();
     process.env.BUSINESS_RETENTION_DAYS_FIRE_ALARM = '99999';
     const v = businessRetentionVerdict();
     expect(v.passed).toBe(false);

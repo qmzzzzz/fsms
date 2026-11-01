@@ -60,6 +60,11 @@ COPY migrate-mongo-config.js ./
 # 观测命令序列，看不到容器内的文件集合。src/tests/deploy/imageRequireClosure.test.js
 # 把"COPY 集合必须闭合满足相对 require"钉成门禁。
 COPY scripts/destructiveGuard.js ./scripts/
+# 升级判据（hotUpgradePolicy）与 destructiveGuard 同属「运行期会被加载的 scripts 文件」：
+# src/services/upgradeService.js 在模块顶层 require 它，而 upgradeService 又经
+# securityRoutes → securityController → ./upgrade 在启动链上被加载——缺这个文件，
+# 整个进程会以 MODULE_NOT_FOUND 起不来。仍按单文件白名单复制，不整目录搬 scripts/。
+COPY scripts/hotUpgradePolicy.js ./scripts/
 COPY package*.json ./
 
 # 前端构建阶段（L-1）：产出 web-admin/dist，供后端 express 静态托管
@@ -85,7 +90,7 @@ COPY web-admin/ ./
 # 未传时为空（本地开发），生产/CI 从 login_ecdh_private_key 计算后传入。
 ARG VITE_LOGIN_PUBLIC_KEY_SHA256=
 ENV VITE_LOGIN_PUBLIC_KEY_SHA256=$VITE_LOGIN_PUBLIC_KEY_SHA256
-# 热升级：前端构建标识必须与运行时 GET /api/version 的 buildId **同源**，
+# 升级：前端构建标识必须与运行时 GET /api/version 的 buildId **同源**，
 # 否则前端会一直认为「服务端是另一个版本」而反复提示刷新（或反过来永远不提示）。
 # 同源的做法就是两边都取 CI 传进来的同一个 GIT_SHA：
 #   · 这里把它作为 APP_BUILD_ID 传给 vite，编译期常量 __APP_BUILD_ID__；
@@ -113,7 +118,7 @@ FROM node:26.12.0-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb
 ARG GIT_SHA=unknown
 ARG BUILD_DATE=unknown
 ARG APP_VERSION=unknown
-# 热升级：把构建标识落到**运行期环境**，供 src/config/buildInfo.js 读取，
+# 升级：把构建标识落到**运行期环境**，供 src/config/buildInfo.js 读取，
 # 由 GET /api/version 返回。必须与 web-builder 阶段的 APP_BUILD_ID 同源
 # （同一个 GIT_SHA），否则前端比对会恒为「不一致」而反复提示刷新。
 # 默认 unknown 会被 isComparableBuildId 判为不可比对 —— 本地 `docker build .`
@@ -197,6 +202,8 @@ COPY --from=builder --chown=nodejs:nodejs /app/migrate-mongo-config.js ./
 # 只复制这一个文件，不把整个 scripts/ 塞进镜像：里面的 --apply 破坏性运维脚本
 # 一旦被容器里任何一条命令路径引用到，就等于把"改库开关"分发到生产实例上。
 COPY --from=builder --chown=nodejs:nodejs /app/scripts/destructiveGuard.js ./scripts/
+# 与上一行同因：upgradeService 顶层 require('../../scripts/hotUpgradePolicy')。
+COPY --from=builder --chown=nodejs:nodejs /app/scripts/hotUpgradePolicy.js ./scripts/
 
 # ===== D-3 / F-02：迁移执行器 =====
 # migrate-mongo 是**部署期**要用的工具（scripts/deploy.js 的 migrate status/up 步骤），

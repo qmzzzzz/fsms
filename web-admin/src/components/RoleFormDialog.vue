@@ -75,6 +75,7 @@
  */
 import { computed, ref, reactive, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useSystemLabels } from '@/i18n/systemLabels'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api } from '@/utils/api'
 import { usePermission } from '@/composables/usePermission'
@@ -88,6 +89,7 @@ const props = defineProps({
 const emit = defineEmits(['update:visible', 'created', 'updated'])
 
 const { t } = useI18n()
+const { roleName, roleDescription } = useSystemLabels()
 const { hasPerm } = usePermission()
 const formRef = ref(null)
 const submitting = ref(false)
@@ -97,6 +99,7 @@ const isEdit = computed(() => !!props.role)
 // 内置角色按 code 寻址（播种/迁移/授权链），改名等于换了一个它
 const builtinLock = computed(() => isEdit.value && !!props.role?.isBuiltIn)
 
+const initialDescription = ref('')
 const form = reactive({
   name: '',
   code: '',
@@ -161,9 +164,12 @@ watch(
   (v) => {
     if (!v) return
     if (props.role) {
-      form.name = props.role.name || ''
+      form.name = roleName(props.role)
       form.code = props.role.code || ''
-      form.description = props.role.description || ''
+      // 英文界面下内置角色的描述按 code 展示英文；必须记住「打开时的展示值」——
+      // 用户没改就原样回传后端中文描述，避免只是切了语言就把内置角色描述写成了英文。
+      form.description = roleDescription(props.role)
+      initialDescription.value = form.description
       formRef.value?.clearValidate()
     } else {
       resetForm()
@@ -194,8 +200,14 @@ const submit = async () => {
         // 内置角色禁发 name：后端对「内置角色 + name!==undefined」直接 400
         // （BUILTIN_ROLE_NAME_LEVEL_LOCKED），只把 description 送出去；
         // level/status 不在本表单职责内，一律不发。
+        // 内置角色：描述未改则回传原文（英文界面打开时展示的是本地化文案，
+        // 不能把「没改」误当成「改成英文」写库）。
+        const description =
+          target.isBuiltIn && form.description === initialDescription.value
+            ? target.description || ''
+            : form.description
         const payload = target.isBuiltIn
-          ? { description: form.description }
+          ? { description }
           : { name: form.name, description: form.description }
         const res = await api.roles.update(target._id, payload)
         ElMessage.success(t('messages.updateSuccess'))

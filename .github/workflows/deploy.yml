@@ -42,6 +42,14 @@ on:
         options:
           - staging
           - production
+      strategy:
+        description: '发布策略：rolling=单色滚动（秒级中断）；hot=蓝绿升级（零停机，要求 nginx upstream 与宿主代理）'
+        required: true
+        type: choice
+        options:
+          - rolling
+          - hot
+        default: rolling
       dry_run:
         description: '干跑：只打印部署计划与判据，不做任何变更'
         required: false
@@ -156,6 +164,20 @@ jobs:
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
           echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
 
+      # ===== 合规就绪度（严格档）为什么**不在**这里 =====
+      # 严格档要在它声称要拦的位置兑现，但那个位置不是 preflight：
+      #   ① 本 job 没有 actions/checkout：runner 上不存在 scripts/，任何 node scripts/…
+      #      都必然 ENOENT ⇒ 这道 step 一加就恒红（第 19 轮 r19-f lane 在空工作区复刻实测
+      #      `Cannot find module …\scripts\compliance-check.js`，RC=1）。
+      #   ② 就算补上 checkout 也过不了：严格档读 logs/alert-probe.json（complianceVerdicts
+      #      :222 的硬编码路径），该文件由 alert-delivery-probe.js 在**能连 alertmanager 的
+      #      那台机器**上写出，且 logs/ 被 .gitignore 整体忽略 ⇒ hosted runner 的干净 checkout
+      #      上必然 missing ⇒ 恒 notReady（实测：给足所有 secret 仍 RC=1，
+      #      notReady=["告警投递探针 (alertmanager)"]）。
+      # 结论：严格档必须在**部署主机侧**执行（仓库副本在、探针记录可能在），见下面两个
+      # job 里的 "Compliance readiness (strict)"。判据由 src/tests/deploy/deployWorkflow.test.js
+      # 钉住：preflight 出现 COMPLIANCE_STRICT 即红。
+
       - name: Detect deploy credentials
         id: mode
         env:
@@ -200,6 +222,30 @@ jobs:
           persist-credentials: false
           clean: true
 
+      # ===== 合规就绪度（严格档）=====
+      # scripts/compliance-check.js 的严格档本来就只为部署门禁设计（见该文件 :490-497 与
+      # complianceVerdicts.js:80/172），但它的证据**只可能存在于部署主机**：保留期/RPO/
+      # SIEM 要走 secrets，告警探针记录 logs/alert-probe.json 又由 alert-delivery-probe.js
+      # 在这台机器上写出（logs/ 被 .gitignore 忽略，hosted runner 上必然 missing）。
+      # 所以这道闸放在主机侧、checkout 之后、任何环境交互之前——与 check-clock-sync.js 同层。
+      # 不配置即 notReady ⇒ 拦；"治理没开就上线"正是要拦的那件事。
+      - name: Compliance readiness (strict — blocks deploy when governance is off)
+        env:
+          COMPLIANCE_STRICT: '1'
+          # 生产闸：占位 webhook 在本档即红（compliance-alerting.js:88 的口径）
+          ALERT_WEBHOOK_CHECK: production
+          BUSINESS_RETENTION_DAYS_FIRE_ALARM: ${{ secrets.BUSINESS_RETENTION_DAYS_FIRE_ALARM }}
+          BUSINESS_RETENTION_DAYS_INSPECTION: ${{ secrets.BUSINESS_RETENTION_DAYS_INSPECTION }}
+          BUSINESS_RETENTION_DAYS_FIRE_DEVICE: ${{ secrets.BUSINESS_RETENTION_DAYS_FIRE_DEVICE }}
+          BUSINESS_RETENTION_DAYS_USER: ${{ secrets.BUSINESS_RETENTION_DAYS_USER }}
+          BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE: ${{ secrets.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE }}
+          BACKUP_RPO_HOURS: ${{ secrets.BACKUP_RPO_HOURS }}
+          BACKUP_RTO_HOURS: ${{ secrets.BACKUP_RTO_HOURS }}
+          LOG_SHIPPING_URL: ${{ secrets.LOG_SHIPPING_URL }}
+          # 探针记录不在仓库里时的落点（宿主机绝对路径）；不配则用仓库相对默认值
+          ALERT_PROBE_RECORD_PATH: ${{ secrets.ALERT_PROBE_RECORD_PATH }}
+        run: node scripts/compliance-check.js
+
       # 直接调脚本：备份 / 迁移 / 切换 / 健康门禁 / 失败回滚全在脚本内，
       # 工作流不重复实现一遍判据（否则两处逻辑会漂移）。
       - name: Run deploy.js
@@ -222,6 +268,11 @@ jobs:
           # validatePreflight 阶段以退出码 2 拒绝（此前工作流从未下发，按文档执行必失败）。
           BACKUP_RPO_HOURS: ${{ secrets.BACKUP_RPO_HOURS }}
           BACKUP_RTO_HOURS: ${{ secrets.BACKUP_RTO_HOURS }}
+          # P1-4：生产发布强制异地备份；CMD 与 DIR 任选其一（CMD 优先）
+          DEPLOY_ENFORCE_OFFSITE: 'true'
+          BACKUP_REQUIRE_OFFSITE: 'true'
+          BACKUP_OFFSITE_CMD: ${{ secrets.BACKUP_OFFSITE_CMD }}
+          BACKUP_OFFSITE_DIR: ${{ secrets.BACKUP_OFFSITE_DIR }}
           # 告警接收端真实配置（私有副本路径）。不配则 deployPolicy 读仓库内占位模板
           # 并 fail-closed；演练环境可显式允许占位（S-5）。
           ALERTMANAGER_CONFIG_PATH: ${{ secrets.ALERTMANAGER_CONFIG_PATH }}
@@ -229,12 +280,42 @@ jobs:
           # 两个开关同样走 env：本文件的规定是 run 脚本里零 `${{ }}` 文本插值
           DRY_RUN: ${{ inputs.dry_run }}
           SKIP_BACKUP: ${{ inputs.skip_backup }}
+          # 发布策略与升级参数：同样只经 env 进入脚本
+          DEPLOY_STRATEGY: ${{ inputs.strategy }}
+          HOT_UPGRADE_NGINX_CONF: ${{ secrets.HOT_UPGRADE_NGINX_CONF }}
+          HOT_UPGRADE_REGISTRY_ALLOWLIST: ${{ secrets.HOT_UPGRADE_REGISTRY_ALLOWLIST }}
         run: |
           set -euo pipefail
+          # P1-5：正式发布前证明宿主时钟已同步（dry-run 不执行只出计划）
+          if [[ "$DRY_RUN" != "true" ]]; then
+            node scripts/check-clock-sync.js
+          fi
           args=()
           [[ "$DRY_RUN" == "true" ]] && args+=(--dry-run)
           [[ "$SKIP_BACKUP" == "true" ]] && args+=(--skip-backup)
-          node scripts/deploy.js "${args[@]}"
+          if [[ "$DEPLOY_STRATEGY" == "hot" ]]; then
+            # 升级自带备份，且失败要靠旧色回滚；跳备份等于放弃回滚抓手
+            if [[ "$SKIP_BACKUP" == "true" ]]; then
+              echo "::error::hot 策略不支持 skip_backup（回滚依赖升级前备份）"
+              exit 1
+            fi
+            if [[ -z "${HOT_UPGRADE_NGINX_CONF:-}" ]]; then
+              echo "::error::hot 策略必须配置 secret HOT_UPGRADE_NGINX_CONF（含 upstream fsms_app 的 nginx 主配置）"
+              exit 1
+            fi
+            if [[ -z "${HOT_UPGRADE_REGISTRY_ALLOWLIST:-}" ]]; then
+              echo "::error::hot 策略必须配置 secret HOT_UPGRADE_REGISTRY_ALLOWLIST（空白名单按全拒处理）"
+              exit 1
+            fi
+            hot_args=(--nginx-conf "$HOT_UPGRADE_NGINX_CONF")
+            [[ "$DRY_RUN" == "true" ]] && hot_args+=(--dry-run)
+            # 缺 --apply 时 hotUpgrade.js 走演练分支并以 2 退出：CI 会「成功打印了计划」，
+            # 而线上什么都没变。这个分支是发布路径，非法演练必须显式 --dry-run。
+            [[ "$DRY_RUN" == "true" ]] || hot_args+=(--apply)
+            HOT_UPGRADE_IMAGE="$APP_IMAGE" node scripts/hotUpgrade.js "${hot_args[@]}"
+          else
+            node scripts/deploy.js "${args[@]}"
+          fi
 
   # 模式 B：SSH（部署机上有仓库副本，通过 DEPLOY_PATH 指定）
   deploy-ssh:
@@ -304,8 +385,22 @@ jobs:
           # O-1：与 self-hosted 同口径，RPO/RTO 缺一即在前置校验被拒
           BACKUP_RPO_HOURS: ${{ secrets.BACKUP_RPO_HOURS }}
           BACKUP_RTO_HOURS: ${{ secrets.BACKUP_RTO_HOURS }}
+          # P1-4：与 self-hosted 同口径；下面经 printf %q 写入远程脚本
+          DEPLOY_ENFORCE_OFFSITE: 'true'
+          BACKUP_REQUIRE_OFFSITE: 'true'
+          BACKUP_OFFSITE_CMD: ${{ secrets.BACKUP_OFFSITE_CMD }}
+          BACKUP_OFFSITE_DIR: ${{ secrets.BACKUP_OFFSITE_DIR }}
           ALERTMANAGER_CONFIG_PATH: ${{ secrets.ALERTMANAGER_CONFIG_PATH }}
           ALLOW_PLACEHOLDER_ALERT_WEBHOOK: ${{ secrets.ALLOW_PLACEHOLDER_ALERT_WEBHOOK }}
+          # 合规严格档（在目标机上跑）所需的声明口径与探针记录落点：
+          # 与 self-hosted 路径同源，缺任一项在本地 printf 的 ${:?} 处就失败。
+          BUSINESS_RETENTION_DAYS_FIRE_ALARM: ${{ secrets.BUSINESS_RETENTION_DAYS_FIRE_ALARM }}
+          BUSINESS_RETENTION_DAYS_INSPECTION: ${{ secrets.BUSINESS_RETENTION_DAYS_INSPECTION }}
+          BUSINESS_RETENTION_DAYS_FIRE_DEVICE: ${{ secrets.BUSINESS_RETENTION_DAYS_FIRE_DEVICE }}
+          BUSINESS_RETENTION_DAYS_USER: ${{ secrets.BUSINESS_RETENTION_DAYS_USER }}
+          BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE: ${{ secrets.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE }}
+          LOG_SHIPPING_URL: ${{ secrets.LOG_SHIPPING_URL }}
+          ALERT_PROBE_RECORD_PATH: ${{ secrets.ALERT_PROBE_RECORD_PATH }}
           IMAGE_TAG: ${{ needs.preflight.outputs.image_ref }}
           # 与 self-hosted 同口径：deploy.js 侧拒绝非 digest 引用。
           # 注意这份 env 只到本 runner 为止，目标机上的 deploy.js 看不见它——
@@ -314,11 +409,30 @@ jobs:
           DEPLOY_REQUIRE_DIGEST_PIN: 'true'
           DRY_RUN: ${{ inputs.dry_run }}
           SKIP_BACKUP: ${{ inputs.skip_backup }}
+          DEPLOY_STRATEGY: ${{ inputs.strategy }}
+          HOT_UPGRADE_NGINX_CONF: ${{ secrets.HOT_UPGRADE_NGINX_CONF }}
+          HOT_UPGRADE_REGISTRY_ALLOWLIST: ${{ secrets.HOT_UPGRADE_REGISTRY_ALLOWLIST }}
         run: |
           set -euo pipefail
           extra=""
           [[ "$DRY_RUN" == "true" ]] && extra="$extra --dry-run"
           [[ "$SKIP_BACKUP" == "true" ]] && extra="$extra --skip-backup"
+          hot_extra=""
+           if [[ "$DRY_RUN" == "true" ]]; then hot_extra=" --dry-run"; else hot_extra=" --apply"; fi
+          if [[ "$DEPLOY_STRATEGY" == "hot" ]]; then
+            if [[ "$SKIP_BACKUP" == "true" ]]; then
+              echo "::error::hot 策略不支持 skip_backup（回滚依赖升级前备份）"
+              exit 1
+            fi
+            if [[ -z "${HOT_UPGRADE_NGINX_CONF:-}" ]]; then
+              echo "::error::hot 策略必须配置 secret HOT_UPGRADE_NGINX_CONF"
+              exit 1
+            fi
+            if [[ -z "${HOT_UPGRADE_REGISTRY_ALLOWLIST:-}" ]]; then
+              echo "::error::hot 策略必须配置 secret HOT_UPGRADE_REGISTRY_ALLOWLIST"
+              exit 1
+            fi
+          fi
           # O-1：远程环境改经 **stdin 脚本**交付，不再依赖 `ssh -o SendEnv` 通道——
           # SendEnv 只在目标机 sshd 显式 AcceptEnv 该变量名时才生效（默认只放行
           # LANG/LC_*），此前 CORS_ORIGIN/ALLOWED_HOSTS 实际从未到达目标机，
@@ -344,12 +458,49 @@ jobs:
             printf 'export TRUSTED_PROXY_CIDRS=%q\n' "${TRUSTED_PROXY_CIDRS:?deploy-ssh 未下发 TRUSTED_PROXY_CIDRS}"
             printf 'export BACKUP_RPO_HOURS=%q\n' "${BACKUP_RPO_HOURS:?deploy-ssh 未下发 BACKUP_RPO_HOURS}"
             printf 'export BACKUP_RTO_HOURS=%q\n' "${BACKUP_RTO_HOURS:?deploy-ssh 未下发 BACKUP_RTO_HOURS}"
+            printf 'export DEPLOY_ENFORCE_OFFSITE=%q\n' "${DEPLOY_ENFORCE_OFFSITE:?deploy-ssh 未下发 DEPLOY_ENFORCE_OFFSITE}"
+            printf 'export BACKUP_REQUIRE_OFFSITE=%q\n' "${BACKUP_REQUIRE_OFFSITE:?deploy-ssh 未下发 BACKUP_REQUIRE_OFFSITE}"
+            if [[ -n "${BACKUP_OFFSITE_CMD:-}" ]]; then
+              printf 'export BACKUP_OFFSITE_CMD=%q\n' "$BACKUP_OFFSITE_CMD"
+            fi
+            if [[ -n "${BACKUP_OFFSITE_DIR:-}" ]]; then
+              printf 'export BACKUP_OFFSITE_DIR=%q\n' "$BACKUP_OFFSITE_DIR"
+            fi
+            printf 'export DEPLOY_STRATEGY=%q\n' "${DEPLOY_STRATEGY:?deploy-ssh 未下发 DEPLOY_STRATEGY}"
+            if [[ "$DEPLOY_STRATEGY" == "hot" ]]; then
+              printf 'export HOT_UPGRADE_NGINX_CONF=%q\n' "${HOT_UPGRADE_NGINX_CONF:?hot 策略未下发 HOT_UPGRADE_NGINX_CONF}"
+              printf 'export HOT_UPGRADE_REGISTRY_ALLOWLIST=%q\n' "${HOT_UPGRADE_REGISTRY_ALLOWLIST:?hot 策略未下发 HOT_UPGRADE_REGISTRY_ALLOWLIST}"
+            fi
             if [[ -n "${ALERTMANAGER_CONFIG_PATH:-}" ]]; then
               printf 'export ALERTMANAGER_CONFIG_PATH=%q\n' "$ALERTMANAGER_CONFIG_PATH"
             fi
+            # 合规严格档：与 self-hosted 路径同口径，在**目标机**上执行（探针记录只可能在
+            # 跑容器那台机器上；hosted runner 的干净 checkout 里必然 missing）。
+            printf 'export COMPLIANCE_STRICT=%q\n' '1'
+            printf 'export ALERT_WEBHOOK_CHECK=%q\n' 'production'
+            printf 'export BUSINESS_RETENTION_DAYS_FIRE_ALARM=%q\n' "${BUSINESS_RETENTION_DAYS_FIRE_ALARM:?deploy-ssh 未下发 BUSINESS_RETENTION_DAYS_FIRE_ALARM}"
+            printf 'export BUSINESS_RETENTION_DAYS_INSPECTION=%q\n' "${BUSINESS_RETENTION_DAYS_INSPECTION:?deploy-ssh 未下发 BUSINESS_RETENTION_DAYS_INSPECTION}"
+            printf 'export BUSINESS_RETENTION_DAYS_FIRE_DEVICE=%q\n' "${BUSINESS_RETENTION_DAYS_FIRE_DEVICE:?deploy-ssh 未下发 BUSINESS_RETENTION_DAYS_FIRE_DEVICE}"
+            printf 'export BUSINESS_RETENTION_DAYS_USER=%q\n' "${BUSINESS_RETENTION_DAYS_USER:?deploy-ssh 未下发 BUSINESS_RETENTION_DAYS_USER}"
+            printf 'export BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE=%q\n' "${BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE:?deploy-ssh 未下发 BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE}"
+            if [[ -n "${LOG_SHIPPING_URL:-}" ]]; then
+              printf 'export LOG_SHIPPING_URL=%q\n' "$LOG_SHIPPING_URL"
+            fi
+            if [[ -n "${ALERT_PROBE_RECORD_PATH:-}" ]]; then
+              printf 'export ALERT_PROBE_RECORD_PATH=%q\n' "$ALERT_PROBE_RECORD_PATH"
+            fi
+            printf 'node scripts/compliance-check.js\n'
             if [[ -n "${ALLOW_PLACEHOLDER_ALERT_WEBHOOK:-}" ]]; then
               printf 'export ALLOW_PLACEHOLDER_ALERT_WEBHOOK=%q\n' "$ALLOW_PLACEHOLDER_ALERT_WEBHOOK"
             fi
-            printf 'node scripts/deploy.js %s\n' "$extra"
+            # P1-5：在目标机（真正跑容器的那台）检查宿主时钟，dry-run 跳过
+            printf 'if [[ "%s" != "true" ]]; then node scripts/check-clock-sync.js; fi\n' "$DRY_RUN"
+            # 策略分支留在目标机上执行：两条命令的固定 argv 由 deployCommands.js
+            # 的单元测试把守，这里不重复实现部署判据。
+            printf 'if [[ "$DEPLOY_STRATEGY" == "hot" ]]; then\n'
+            printf '  HOT_UPGRADE_IMAGE="$APP_IMAGE" node scripts/hotUpgrade.js --nginx-conf "$HOT_UPGRADE_NGINX_CONF"%s\n' "$hot_extra"
+            printf 'else\n'
+            printf '  node scripts/deploy.js %s\n' "$extra"
+            printf 'fi\n'
           } | ssh "${ssh_opts[@]}" -i ~/.ssh/id_deploy -o BatchMode=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s'

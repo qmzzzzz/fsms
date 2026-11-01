@@ -30,6 +30,10 @@ const {
   decideRollback,
   parseArgs,
 } = require('../../../scripts/deployPolicy');
+// compose 的「代码视图」：剥注释后提取 `${VAR:?}`。注释里也会出现同一写法
+// （app-green 段解释了"为什么这里不用 APP_IMAGE_NEXT:?"），逐字扫描会把
+// 那句说明读成硬必填项——理由见 helpers/composeSource.js 头注。
+const { hardRequiredEnv } = require('./helpers/composeSource');
 
 /** 构造一个「全部合法」的环境，供各用例按需覆盖单项 */
 const validEnv = () => ({
@@ -236,7 +240,7 @@ describe('D-1 部署前置校验：fail-closed', () => {
       path.join(__dirname, '..', '..', '..', 'docker-compose.yml'),
       'utf8'
     );
-    const hard = [...yml.matchAll(/\$\{([A-Z0-9_]+):\?/g)].map((m) => m[1]);
+    const hard = hardRequiredEnv(yml);
     // 前提自证：正则真的抓到了硬声明项（抓空会让本用例恒绿）
     expect(hard.length).toBeGreaterThanOrEqual(2);
     expect([...hard].sort()).toEqual(REQUIRED_COMPOSE_ENV.map(([n]) => n).sort());
@@ -710,7 +714,7 @@ describe('Top-2 部署前置：告警接收端未注入即拒绝（fail-closed�
 
   test('读不到配置 ⇒ 判不过（2026-10-01 修正：只写 warning 等于门禁判绿）', () => {
     // 旧行为：errors 为空 + 一条 warning。而本函数的裁决位是 `ok = errors.length === 0`
-    // （deployPolicy.js:109）⇒ alertmanager.yml 被删/未挂载/无读权限时，告警链必然不可用，
+    // （deployPolicy.js:185）⇒ alertmanager.yml 被删/未挂载/无读权限时，告警链必然不可用，
     // 发布却照样通过。2026-09-26 那次修复的标题就是「fail-closed」，这一支恰好没关上。
     const r = checkAlertingEndpoint({}, fakeFs(fullSecrets()));
     expect(r.errors.length).toBe(1);

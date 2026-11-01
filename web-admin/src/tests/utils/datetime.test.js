@@ -7,6 +7,10 @@
  * 关键不变量：口径为**本地时区**且 hour12=false。用 toISOString()（UTC）
  * 会在东八区凌晨 0-8 点把日期算成前一天——这正是本模块存在的理由，
  * 所以必须用「构造本地时间再断言本地字段」的方式钉住，不能拿 UTC 串比对。
+ *
+ * 2026-10-31 口径纠正：0 是合法时间戳，占位只对 null/undefined/空串生效，对齐后端 toDisplayDate。
+ * （此前 formatTime(0) 断言 '-'、toLocalWallClock(0) 断言 ''，是把「合法的 0」与「缺失」
+ *   混为一谈的同一族缺陷。断言是**纠正**不是放宽——不要改回去。）
  */
 import { describe, test, expect, vi, afterEach } from 'vitest'
 import { localDateStr, formatTime, toLocalWallClock } from '@/utils/datetime'
@@ -26,6 +30,14 @@ describe('localDateStr 本地日期串', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(2026, 5, 15, 10, 30, 0))
     expect(localDateStr()).toBe('2026-06-15')
+  })
+
+  test('非法/缺失输入返回空串占位，绝不输出 NaN-NaN-NaN（P1⑤）', () => {
+    for (const v of [new Date('abc'), new Date(NaN), 'not-a-date', {}, null, '']) {
+      const out = localDateStr(v)
+      expect(out).not.toContain('NaN')
+      expect(out).toBe('')
+    }
   })
 
   test('跨年边界：12-31 与 01-01 各自归年（不得错位一天）', () => {
@@ -51,10 +63,20 @@ describe('localDateStr 本地日期串', () => {
 })
 
 describe('formatTime 时间串', () => {
-  test('空值一律返回占位符 -（null/undefined/空串/0 都要覆盖）', () => {
-    for (const v of [null, undefined, '', 0, false]) {
+  test('空值（null/undefined/空串/布尔）返回占位符 -', () => {
+    for (const v of [null, undefined, '', false]) {
       expect(formatTime(v)).toBe('-')
     }
+  })
+
+  test('0 是合法的纪元时间戳，不得被 if (!v) 吞成占位符（P1⑤）', () => {
+    const expected = localDateStr(new Date(0)) + ' 0' + '0:00:00'
+    const text = formatTime(0)
+    expect(text).not.toBe('-')
+    expect(text).not.toContain('NaN')
+    expect(text).toBe(formatTime(new Date(0)))
+    expect(text.startsWith(localDateStr(new Date(0)))).toBe(true)
+    expect(expected.length).toBeGreaterThan(0)
   })
 
   test('非法日期串返回占位符 -，不抛错也不输出 Invalid Date', () => {
@@ -118,9 +140,16 @@ describe('toLocalWallClock 本地墙钟串（date-picker 回填口径）', () =>
   })
 
   test('空值/非法值返回空串（picker 显示为空，交给必填校验拦截，不得伪造当前时间）', () => {
-    for (const v of [null, undefined, 0, false, '', 'not-a-date']) {
+    for (const v of [null, undefined, false, '', 'not-a-date']) {
       expect(toLocalWallClock(v)).toBe('')
     }
+  })
+
+  test('0 是合法时间戳：回填纪元时刻而不是空串（P1⑤，与 formatTime 同口径）', () => {
+    const text = toLocalWallClock(0)
+    expect(text).not.toBe('')
+    expect(text).not.toContain('NaN')
+    expect(text).toBe(formatTime(0))
   })
 
   test('与 formatTime 同一口径：同一输入两者输出一致（单一事实来源）', () => {

@@ -219,7 +219,11 @@ function alertProbeVerdict({ recordPath } = {}) {
   const fs = require('fs');
   const path = require('path');
   const { evaluateProbeRecord, PROBE_WINDOW_HOURS } = require('./alertProbeRecord');
-  const file = recordPath || path.join(__dirname, '..', 'logs', 'alert-probe.json');
+  // 落点可由部署侧显式指定（ALERT_PROBE_RECORD_PATH）：默认值假定"在仓库根跑探针"，
+  // 而部署主机上的探针记录常常不在仓库副本里（checkout 可被清理、logs/ 又被 gitignore），
+  // 没有这个覆盖口时部署门禁只会给出一个永远修不好的 notReady。
+  const file =
+    recordPath || process.env.ALERT_PROBE_RECORD_PATH || path.join(__dirname, '..', 'logs', 'alert-probe.json');
   let record = null;
   try {
     record = JSON.parse(fs.readFileSync(file, 'utf8'));

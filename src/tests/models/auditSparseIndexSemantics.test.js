@@ -200,3 +200,56 @@ describe('AuditLog 稀疏索引：服务端语义实测（自建探针集合，�
     expect(byIndex.map((d) => d._id)).toEqual([1]);
   });
 });
+
+describe('D4：sessionId/fingerprint 的 sparse 与写入点事实（注释必须与库里的值一致）', () => {
+  beforeAll(async () => {
+    if (mongoose.connection.readyState !== 1) await mongoose.connect(process.env.MONGODB_URI);
+  }, 30000);
+  afterAll(async () => {
+    await mongoose.connection
+      .collection('zzb_probe_sparse_size')
+      .drop()
+      .catch(() => {});
+    await mongoose.disconnect();
+  });
+  const fs = require('fs');
+  const path = require('path');
+  const statics = fs.readFileSync(
+    path.join(__dirname, '../../models/auditLogWriteStatics.js'),
+    'utf8'
+  );
+  const modelSrc = fs.readFileSync(path.join(__dirname, '../../models/AuditLog.js'), 'utf8');
+
+  test('写入点恒写 null：sessionId/fingerprint 落库值不是「缺键」，sparse 对经 schema 的记录一条都省不掉', () => {
+    expect(statics).toMatch(/sessionId:\s*extra\.sessionId \|\| null/);
+    expect(statics).toMatch(/fingerprint:\s*extra\.fingerprint \|\| null/);
+    expect(statics).toMatch(/sessionId:\s*req\.user\?\.sessionId \|\| null/);
+    expect(statics).toMatch(/fingerprint:\s*computeFingerprint\(req\)/);
+  });
+
+  test('注释不得再声称「那两处无 default、稀疏才真省空间」（与实测反向的结论）', () => {
+    expect(modelSrc).not.toContain('那两处无 default，稀疏才真省空间');
+    expect(modelSrc).toMatch(/稀疏不省空间/);
+    expect(modelSrc).toMatch(/32768/);
+  });
+
+  test('服务端实测：4000 行键为 null 的索引体积必须大于缺键（稀疏省的是缺键，不是 null）', async () => {
+    const coll = mongoose.connection.collection('zzb_probe_sparse_size');
+    const sizeOf = async () => {
+      const r = await coll.aggregate([{ $collStats: { storageStats: {} } }]).toArray();
+      const stats = r[0].storageStats || r[0];
+      return stats.indexSizes;
+    };
+    await coll.drop().catch(() => {});
+    await coll.insertMany(Array.from({ length: 4000 }, (_, i) => ({ _id: i, n: i, sid: null })));
+    await coll.createIndex({ sid: 1 }, { sparse: true });
+    const withNull = (await sizeOf()).sid_1;
+    await coll.dropIndex('sid_1');
+    await coll.deleteMany({});
+    await coll.insertMany(Array.from({ length: 4000 }, (_, i) => ({ _id: i, n: i })));
+    await coll.createIndex({ sid: 1 }, { sparse: true });
+    const withoutKey = (await sizeOf()).sid_1;
+    await coll.drop().catch(() => {});
+    expect(withNull).toBeGreaterThan(withoutKey);
+  });
+});

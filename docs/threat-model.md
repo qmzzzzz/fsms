@@ -23,7 +23,10 @@
 ### S 冒充（Spoofing）
 
 - 口令登录：bcrypt + 登录限流 + 失败锁定（`account_temp_locked`）+ MFA 全链路
-  （enroll/challenge/recovery-code，`services/mfaService.js`）；
+  （enroll/challenge/recovery-code，`services/mfaService.js`）；连续失败 3 次触发的
+  人机挑战闸门（`services/loginChallenge.js`）拦在口令比对之前，使「知道用户名就能把账户
+  锁 10 分钟」的可用性 DoS 不再成立；闸门拦下的尝试写 `login_captcha_rejected`
+  （只留痕、不进任何失败计数，见 `docs/adr/ADR-015` 决策 7）；
 - 会话：access 2h（`JWT_EXPIRE` 默认值）/ refresh 7d 双密钥（`validate.js` 强制两钥不同），
   tokenVersion 全局吊销、设备级会话吊销（sid）；
 - 冒充管理员：超管角色唯一性由 `utils/superAdmin.js` 强制（克隆角色被拒）。
@@ -54,7 +57,13 @@
 - 传输：生产强制 `tls=true`/`rediss:`（豁免须显式旗标）；
 - 响应投影：凭证级字段 `select:false` + `RESPONSE_EXCLUDE` 双道；
 - 权限：RBAC + 数据范围（`applyDataScopeToQuery`），GET 接口鉴权契约门禁（F-196）。
-- 残余：PII 在**响应体与导出文件**中仍是明文（at-rest 口径；导出审计全覆盖兜底）。
+- 未脱敏导出（真实姓名）另有三重收口（A-8）：`pii:export` + 当场二次验证之外，① 每日配额按**滚动
+  24h** 计（`services/piiExportQuota.js`，读失败 fail-closed 拒发；用尽回 429 + `Retry-After`）；
+  ② 水印四路同号（文件名后缀 / 工作簿属性 / 表尾可见行 / 响应头 `X-Export-Trace-Id`，
+  `services/piiExportWatermark.js`）；③ 追溯号与用途随 `view_sensitive_data` 审计落库。
+- 残余：PII 在**响应体与导出文件**中仍是明文（at-rest 口径）。未脱敏导出**未做双人审批**
+  （无审批工作流基础设施、前端未接入该字段），补偿即上一条的配额/水印/审计，叠加
+  `pii:export` 并入高风险模块后的授予面收窄。
 
 ### D 拒绝服务（Denial of Service）
 
@@ -100,3 +109,19 @@
    生产面不受影响（dev/preview 不参与部署，生产为 `dist/` 静态托管 + 反代），
    但**禁止把 3001 端口发布到公网**；对外演示须用生产构建而非 `npm run preview`。
    暴露内容对照表与自查清单见 `README.md` 的「开发/预览服务器的暴露边界」。
+6. **同意链路的边界（一-7）**：隐私同意只在**自助注册**强制，存量账号在告知改版后不会被要求
+   重新同意；不存在撤回同意的自助入口（只能联系管理员注销）。告知正文写明「撤回同意将导致
+   无法继续使用自助注册的账号」，但界面侧没有一键撤回——测评时按此口径答。管理员建号
+   属组织法定基础（《个人信息保护法》第十三条），不写同意记录。
+7. **分类分级抓不到"登记了错误等级"**：`tests/ci/dataClassificationInventory.test.js` 强制的是
+   「声明与 schema 实况一致」（模型闭合、路径真实、个人信息不降级、`select:false` 全登记、
+   加密与 getter 互证），新字段被登记成错误等级只能靠评审发现。日志正文与审计 `details`
+   里的自由文本不在台账逐字段覆盖内，按整模型等级继承。
+8. **重置口令的复用收口只覆盖一代（审计二-2）**：`User.passwordRetiredHash` 留的是「最近一次重置替换掉的
+   **用户自选**那一代口令」的 bcrypt 摘要，上限 1 条（见 `docs/adr/ADR-016`）——连续重置不会用临时口令
+   顶掉它，但把口令改回**更早**的退役口令（跨两次以上「重置→改密」）仍不被拦。它同时是一份可离线爆破的
+   L4 凭证材料；上限取 1 条是为把改密端点的额外成本钉死在一次 bcrypt 比对（~250–300ms）。重置前的口令明文
+   不可知，这在该场景下是唯一可行的形态（不要求用户提供旧口令，否则救济通道就废了）。覆盖窗口的边界由
+   `adminResetPasswordGates.test.js` 里那条「已声明残留」用例钉死（改密后再重置会顶掉上一代摘要）。用户注销（删除权）
+   时这份摘要随匿名化一并抹掉，故不构成「注销后仍留凭证材料」；命中退役摘要时前端文案仍说「最近 N 条」
+   （实际可能更早），属已声明的下界表述。

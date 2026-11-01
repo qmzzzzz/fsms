@@ -157,7 +157,9 @@ const buildComplianceSection = async () => {
   try {
     const { getLatestHash } = require('../../utils/auditChain');
     const auditMonitor = require('../../services/auditMonitor');
+    const auditChainMonitor = require('../../services/auditChainMonitor');
     const auditBuffer = require('../../services/auditBuffer');
+    const honeypotChainWatch = require('../../services/honeypotChainWatch');
     // 同一文件的模型入口已由 shared 提供；此处复用，不再二次 require（A-4）
     const AuditLogModel = AuditLog;
     const chainTailHash = await getLatestHash(AuditLogModel);
@@ -183,6 +185,10 @@ const buildComplianceSection = async () => {
       // 兜底走 null 而不是让它抛：这里抛 TypeError 会把整段 compliance
       // （留存天数/链尾哈希/丢失计数）一起降级成 `{error}`，代价远大于一个字段。
       monitorHealth: typeof auditMonitor.getHealth === 'function' ? auditMonitor.getHealth() : null,
+      chainMonitorHealth:
+        typeof auditChainMonitor.getHealth === 'function' ? auditChainMonitor.getHealth() : null, // 链核验 lastVerdictCode 出口（§1.2：此后有真实读取方，文件头那句从承诺变成事实）
+      honeypotChainHealth:
+        typeof honeypotChainWatch.getHealth === 'function' ? honeypotChainWatch.getHealth() : null, // 蜜罐事件链巡检（services/honeypotChainWatch.js）的"每轮真在跑吗"读数：同 monitorHealth 口径的只读快照
       walEnabled:
         typeof auditBuffer.isWalEnabled === 'function' ? auditBuffer.isWalEnabled() : false,
       // 审计导出没有运行期开关（路由恒挂载），所以这个键不携带信息量；

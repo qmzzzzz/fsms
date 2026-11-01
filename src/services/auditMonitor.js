@@ -30,6 +30,7 @@ const { recordDetectionLag } = require('./auditMonitorDetection');
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 /** 定时检测的最小间隔：低于此值的一律抬到该值（见下方 start() 的钳制说明） */
 const MIN_INTERVAL_MS = 30 * 1000;
+const MAX_INTERVAL_MS = 24 * 60 * 60 * 1000; // 上限远低于 2^31-1：超界的 setInterval 被 Node 静默压成 1ms，面板却照报配置值（理由见 ADR-013「间隔上界」）
 /**
  * 检测窗口相对生效间隔的重叠余量 = 2×最小间隔。
  * setInterval 的实际触发时刻会因事件循环滞后整体后移，窗口严格等于间隔会在两轮
@@ -68,6 +69,7 @@ const health = {
   consecutiveFailures: 0, // 连续失败次数，成功一轮即归零（判健用这个）
   skippedOverlaps: 0, // 因上一轮未结束而跳过的轮次
   lastRunAt: null,
+  lastSuccessAt: null, // 整轮（含告警侧）无异常才算成功：与 lastRunAt 配对判「跑完了还是一半就断了」
   lastFailureAt: null,
   lastFailureMessage: null,
 };
@@ -142,14 +144,12 @@ async function runDetection() {
   detectionRunning = true;
   health.runs += 1;
   health.lastRunAt = new Date().toISOString();
+  let roundFailed = false; // 成功判据是「整轮没抛」：告警侧的 reject 同样落进 catch，闭环断在推送侧的那一轮不是成功轮
   try {
     const result = await AuditLog.detectAnomalies({
       windowMinutes: windowMinutesFor(effectiveIntervalMs),
       maxTimeMS: roundBudgetMs(),
     });
-    // 走到这里说明"看数据"这一步成功了；之后的告警侧异常另计（下面 sendNotification
-    // 的 reject 同样落进 catch，闭环断在推送侧也要可见）
-    health.consecutiveFailures = 0;
 
     // detectedAt 必须在 await 之后立刻取：它包含本轮聚合耗时，是真实的检测完成时刻。
     // 所有命中维度都记账（不受下面"当日只推送一次"频控影响）——频控是通知策略，
@@ -217,12 +217,17 @@ async function runDetection() {
       });
     }
   } catch (err) {
+    roundFailed = true;
     health.failures += 1;
     health.consecutiveFailures += 1;
     health.lastFailureAt = new Date().toISOString();
     health.lastFailureMessage = failureText(err);
     logger.error(`审计异常监控执行失败：${failureText(err)}`);
   } finally {
+    if (!roundFailed) {
+      health.consecutiveFailures = 0; // 整轮跑完才归零：旧位置在"看数据"之后，推送侧每轮都断时连续计数永远只有 1（"连续两轮才告警"的判据随之失效）
+      health.lastSuccessAt = new Date().toISOString();
+    }
     detectionRunning = false;
   }
 }
@@ -253,6 +258,13 @@ function start() {
         `已抬升到最小值（防止高频自触发把审计库打满）`
     );
     intervalMs = MIN_INTERVAL_MS;
+  }
+  if (intervalMs > MAX_INTERVAL_MS) {
+    logger.warn(
+      `AUDIT_MONITOR_INTERVAL_MS=${intervalMs} 高于最大间隔 ${MAX_INTERVAL_MS}ms，` +
+        `已压到最大值（超过 2^31-1ms 的 setInterval 会被静默改成 1ms，等于忙轮询）`
+    );
+    intervalMs = MAX_INTERVAL_MS; // 上限钳制与下限同一个缺口类：抬升/下压都必须留痕
   }
 
   // 钳制之后的值才是"生效间隔"，检测窗口按它推导（见 effectiveIntervalMs 说明）。
@@ -320,6 +332,7 @@ function __resetForTest() {
   health.consecutiveFailures = 0;
   health.skippedOverlaps = 0;
   health.lastRunAt = null;
+  health.lastSuccessAt = null;
   health.lastFailureAt = null;
   health.lastFailureMessage = null;
 }

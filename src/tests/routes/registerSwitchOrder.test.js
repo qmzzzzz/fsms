@@ -42,6 +42,7 @@ describe('POST /api/auth/register：注册开关先于字段校验', () => {
       email: `sworder${stamp}@example.com`,
       realName: '顺序契约',
       password: randomPassword(),
+      privacyConsent: true,
     };
   };
 

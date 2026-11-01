@@ -1,6 +1,5 @@
 /**
  * 系统初始化数据服务 · 业务模块权限目录（设备/报警/巡检/报表/超级权限）
- * 2026-10-19 批 3c：自 src/services/initData.js 拆出（纯搬家，语义不变）。
  */
 
 const businessPermissions = [

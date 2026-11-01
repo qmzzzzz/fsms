@@ -242,18 +242,18 @@ fireAlarmSchema.set('toObject', { getters: true });
 // 报警列表的游标分页按 `{ occurredAt: -1, _id: -1 }` 排序，排序键取值可重复
 // （同一毫秒多条上报是常态），续翻子句用 `{occurredAt:v,_id:{$lt:id}}` 做平局裁决 ⇒
 // 索引必须是**同向复合**形态，否则该排序退化成 COLLSCAN + 阻塞排序（实测 5000 条：
-// examined 从 20 涨到 5000，大集合还会撞 32MB 内存排序上限而 500）。
+// examined 从 20 涨到 5000，大集合还会撞 100 MiB 内存排序上限而 500）。
 // 原单字段 `{occurredAt:-1}` 被它整体取代：最左前缀仍覆盖"只按时间倒序"的查询与排序，
 // 所以这里是**替换**而非新增——写放大只来自每条索引键多 8 字节。
 fireAlarmSchema.index({ occurredAt: -1, _id: -1 });
-fireAlarmSchema.index({ status: 1, occurredAt: -1 });
-fireAlarmSchema.index({ handler: 1, occurredAt: -1 });
-fireAlarmSchema.index({ 'reporter.userId': 1, occurredAt: -1 });
-fireAlarmSchema.index({ 'location.building': 1, occurredAt: -1 });
-// 等级筛选 + 时间倒序：单字段 {level:1} 只能定位等值块，块内排序仍要阻塞排序。
-// 列表统一按 {occurredAt:-1,_id:-1} 排序，故复合索引带同向次序键，由最左前缀取代单字段。
+fireAlarmSchema.index({ status: 1, occurredAt: -1, _id: -1 });
+fireAlarmSchema.index({ handler: 1, occurredAt: -1, _id: -1 });
+fireAlarmSchema.index({ 'reporter.userId': 1, occurredAt: -1, _id: -1 });
+fireAlarmSchema.index({ 'location.building': 1, occurredAt: -1, _id: -1 });
+// 六条等值筛选（等级/状态/类型 + 数据范围的属主臂 reporter.userId、handler、部门臂 location.building）
+// 都与时间倒序同用：双字段索引只能定位等值块、块内仍阻塞排序 ⇒ 一律补同向次序键 _id:-1（level 是原范式）。
 fireAlarmSchema.index({ level: 1, occurredAt: -1, _id: -1 });
-fireAlarmSchema.index({ alarmType: 1, occurredAt: -1 });
+fireAlarmSchema.index({ alarmType: 1, occurredAt: -1, _id: -1 });
 // L-22：设备删除级联（DeviceService.deleteDevice）按 deviceId 反查并 $unset 引用。
 // 此前无索引覆盖 → COLLSCAN。12 万告警规模实测：扫 12 万文档 / 204.54ms，
 // 补此索引后扫 30 文档 / 1.07ms（191.2x，2026-09-16 实测）。
@@ -273,4 +273,13 @@ if (fireAlarmTtl.days !== null) {
   );
 }
 
-module.exports = mongoose.model('FireAlarm', fireAlarmSchema);
+const FireAlarm = mongoose.model('FireAlarm', fireAlarmSchema);
+const logger = require('../utils/logger');
+FireAlarm.on('index', (err) => {
+  if (err) {
+    logger.error(
+      `FireAlarm 索引创建失败：物理索引与声明不一致时 mongoose 只报错不改选项（改档由 services/initData/indexes.js 的启动对账落地），此前无 on('index') 监听时这个错误被完全吞掉：${err.message}`
+    );
+  }
+});
+module.exports = FireAlarm;

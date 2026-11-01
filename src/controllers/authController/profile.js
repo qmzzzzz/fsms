@@ -94,7 +94,7 @@ const changePassword = asyncHandler(async (req, res) => {
     category: 'auth',
     req,
     res,
-    auditAction: 'password_changed',
+    auditAction: result.forced ? 'password_force_changed' : 'password_changed',
   });
 
   return ApiResponse.success(res, null, '密码修改成功');

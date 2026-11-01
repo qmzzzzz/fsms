@@ -184,7 +184,7 @@ for (const r of parsedRefs) {
  * 双向对账的纯逻辑：`refs` 是文件里扫出来的 `{nameTag, digest}`，`table` 是期望表
  * `Map<ref, digest>`；返回三类缺陷（表里没有的 / digest 不符的 / 表里的陈行）。
  *
- * 【为什么抽成函数】真实仓库里六条引用与表**完全一致**，所以"digest 不符"这条判据在真实数据
+ * 【为什么抽成函数】真实仓库里七条引用与表**完全一致**，所以"digest 不符"这条判据在真实数据
  * 上永远是空数组——把它写成 `table.get(x) !== y` 之后改成 `长度不同才不符`，实测变异存活（M6）：
  * 没有夹具就没有判据。抽出纯函数后同一份逻辑既能对真实数据跑，也能被构造出来的"同长度、
  * 末位不同"的假 digest 打红。
@@ -213,25 +213,32 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
       // 但扫描面必须显式登记——否则将来往它里面加镜像时，面账会静默漏掉这个文件。
       '.github/workflows/dr-readiness.yml',
       '.github/workflows/release.yml',
+      // 私有仓 SAST（审计一-5）的容器镜像写在 image: 位置 ⇒ 它同样落在本面账里。
+      '.github/workflows/sast.yml',
       '.github/workflows/scorecard.yml',
     ]);
-    // 13 = Dockerfile 3 处 FROM + compose 8 条 image（S-5 告警配置校验器、P2 备份副本）
-    // + ci.yml 2 条 image；其余 workflow 0 条。
+    // 18 = Dockerfile 3 处 FROM + compose 12 条 image（S-5 告警配置校验器、P2 备份副本、
+    // 2026-10-30 升级的 app-green 与 F-14 的 redis-secret-init 初始化容器）
+    // + ci.yml 2 条 image + sast.yml 1 条（Semgrep 容器，2026-10-31）；其余 workflow 0 条。
     // 新增一个带镜像的 workflow 会同时改这里与下面的 byFile ⇒ 逼着改动的人把新引用登记进表。
-    expect(all).toHaveLength(13);
+    expect(all).toHaveLength(18);
     const byFile = {};
     for (const r of all) byFile[r.file] = (byFile[r.file] || 0) + 1;
     expect(byFile).toEqual({
       Dockerfile: 3,
-      'docker-compose.yml': 8,
+      'docker-compose.yml': 12,
       '.github/workflows/ci.yml': 2,
+      '.github/workflows/sast.yml': 1,
     });
     // 例外清单的条数同样是判据：新增一条"带变量的引用"必须显式改这里。
+    // 2026-10-30 起第三条：app-green 的 `${APP_IMAGE_NEXT:-…}`——备色镜像是脚本在升级时
+    // 现算的，不可能预先钉 digest；它退化的形态（回落 APP_IMAGE）由 hotUpgradePolicy 判据挡。
     expect(dynamicRefs.map((r) => r.value)).toEqual([
       '${APP_IMAGE:-fire-safety-app:local}',
+      '${APP_IMAGE_NEXT:-fire-safety-app:green-unset-by-script}',
       '${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}',
     ]);
-    expect(registryRefs).toHaveLength(11);
+    expect(registryRefs).toHaveLength(15);
     // 引用面本身（哪个文件钉的是哪个 name:tag）：digest 由期望表那侧对账，这里只管"谁在哪"。
     expect(parsedRefs.map((r) => r.nameTag).sort()).toEqual([
       'grafana/grafana:11.1.0',
@@ -242,9 +249,13 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
       'node:26.12.0-alpine',
       'node:26.12.0-alpine',
       'node:26.12.0-alpine',
+      'node:26.12.0-alpine',
+      'node:26.12.0-alpine',
       'prom/alertmanager:v0.27.0',
       'prom/prometheus:v2.53.0',
       'redis:7-alpine',
+      'redis:7-alpine',
+      'semgrep/semgrep:1.183.0',
     ]);
     // 自证的反面（注释语料确实没被算进来）由下面那条独立用例判：这里不再写
     // `all.some(r => /<64 位 hex>|<捕获值>|/.test(r.value)) === false` 那种永真断言——
@@ -434,19 +445,22 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
     expect(
       multi.map(([nameTag, digests]) => `${nameTag} → ${[...digests.keys()].join(' / ')}`)
     ).toEqual([]);
-    // 名号一致这条判据本身也要有覆盖：mongo（compose + CI）与 node（Dockerfile 三处）
-    // 都必须是"同一 digest 出现多次"，否则上面那条断言是在空转。
+    // 名号一致这条判据本身也要有覆盖：mongo（compose + CI）与 node（Dockerfile 三处
+    // + compose 三处）都必须是"同一 digest 出现多次"，否则上面那条断言是在空转。
+    // redis 自 2026-10-30 起也是多引用点（主服务 + F-14 的 secret 初始化容器），
+    // 两个容器必须是同一批字节——初始化容器换了版本，secret 的落位/权限语义就未必一致。
     const repeats = [...groups.entries()].filter(
       ([, digests]) => [...digests.values()].flat().length > 1
     );
     expect(repeats.map(([nameTag]) => nameTag).sort()).toEqual([
       'mongo:8.0.34',
       'node:26.12.0-alpine',
+      'redis:7-alpine',
     ]);
   });
 
   test('期望表自身站得住：ref/repo/tag 互洽，digest 与取证字段形状合规', () => {
-    expect(EXPECTED.length).toBe(6);
+    expect(EXPECTED.length).toBe(7);
     for (const e of EXPECTED) {
       expect(e.digest).toMatch(/^[0-9a-f]{64}$/);
       expect(e.captured).toMatch(/^\d{4}-\d{2}-\d{2}$/);
@@ -499,13 +513,14 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
         if (!files.includes(f)) expect(e.sites.includes(f)).toBe(false);
       }
     }
-    // ⑤ 表与扫描面的引用点总数也要对上：11 个引用点 = node 四处（Dockerfile 三处 FROM
-    //    + compose 的告警配置校验器）+ mongo 三处（compose 主实例、compose 备份副本
-    //    与 CI service）+ 其余四条各一处。
+    // ⑤ 表与扫描面的引用点总数也要对上：15 个引用点 = node 六处（Dockerfile 三处 FROM
+    //    + compose 的告警配置校验器、密钥权限初始化容器与 F-14 的 redis 初始化前的
+    //    两个 node 容器）+ mongo 三处（compose 主实例、compose 备份副本与 CI service）
+    //    + redis 两处（主服务与 F-14 的 secret 初始化容器）+ 其余四条各一处（含 sast.yml 的 Semgrep）。
     const occurrences = EXPECTED.map(
       (e) => parsedRefs.filter((r) => r.nameTag === e.ref).length
     ).sort();
-    expect(occurrences).toEqual([1, 1, 1, 1, 3, 4]);
+    expect(occurrences).toEqual([1, 1, 1, 1, 2, 3, 6]);
   });
 
   test('capture-image-digests.sh 的常量与期望表同源（脚本改得了的每一条都在表里）', () => {
@@ -517,7 +532,7 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
     for (const c of consts) {
       expect(EXPECTED.some((e) => e.ref === c)).toBe(true);
     }
-    // 脚本只认这两个镜像 ⇒ 表里其余四条必须由**本闸或 verify 脚本**盯着，
+    // 脚本只认这两个镜像 ⇒ 表里其余五条必须由**本闸或 verify 脚本**盯着，
     // 否则"全仓钉版"这句话就还是假象。这里把"谁负责哪几条"写成断言而不是散文。
     const scripted = new Set(consts);
     const outside = EXPECTED.map((e) => e.ref).filter((r) => !scripted.has(r));
@@ -526,6 +541,7 @@ describe('镜像引用面账（真实文件 ↔ 期望表 ↔ 脚本常量三方
       'prom/alertmanager:v0.27.0',
       'prom/prometheus:v2.53.0',
       'redis:7-alpine',
+      'semgrep/semgrep:1.183.0',
     ]);
   });
 

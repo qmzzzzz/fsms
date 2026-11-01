@@ -27,6 +27,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync, execFileSync } = require('child_process');
+const { execThroughStubPath } = require('../helpers/stubPath');
 
 const ROOT = path.resolve(__dirname, '../../..');
 const BACKUP = path.join(ROOT, 'scripts/backup-mongo.sh');
@@ -128,7 +129,11 @@ function mkwork() {
 }
 
 function runBackup(work, script, env) {
-  const r = spawnSync('bash', [sh(script || BACKUP), sh(work.backupDir)], {
+  // PATH 桩必须在**孩子 shell 内部**收口：MSYS 启动时会把 /usr/bin 前置，桩 gpg 会被
+  // Git 自带的 gpg 顶掉，那时用例报的是真 gpg 的错、看起来像被测脚本的缺陷（见
+  // src/tests/helpers/stubPath.js）。env.PATH 那一行仍然保留：Linux 上它才是生效路径。
+  const argv = execThroughStubPath(sh(script || BACKUP), [sh(work.backupDir)], work.bin);
+  const r = spawnSync(argv.file, argv.args, {
     cwd: ROOT,
     encoding: 'utf8',
     timeout: 60000,

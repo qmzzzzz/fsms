@@ -42,6 +42,10 @@ describe('门禁层存在性（删掉门禁不会让任何东西变红 → 由�
     '.github/workflows/ci.yml',
     '.github/workflows/deploy.yml',
     '.github/workflows/codeql.yml',
+    // 2026-10-31 补：这两条此前不在清单里，于是删掉它们不会有任何东西变红。
+    // sast.yml 是私有仓唯一的 SAST（codeql.yml 在私有仓被条件关掉），dr-readiness.yml 是恢复演练时效的定时工作流。
+    '.github/workflows/sast.yml',
+    '.github/workflows/dr-readiness.yml',
     '.github/workflows/dependency-review.yml',
     '.github/workflows/release.yml',
     '.github/workflows/scorecard.yml',

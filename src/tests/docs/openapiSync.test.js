@@ -29,6 +29,13 @@ const MOUNTS = [
   { name: 'inspectionRoutes', prefix: '/api/inspections' },
   { name: 'reportRoutes', prefix: '/api/reports' },
   { name: 'securityRoutes', prefix: '/api/security' },
+  // 取证溯源（T5/T6）：**传递挂载**——app.js 仍只挂 securityRoutes，由它 router.use('/forensic')
+  // 并入。此处登记的是最终生效前缀；不直接改 app.js 的挂载行，是为了不让 app.js 行数位移
+  // （sentry.js / appTrustProxyAndReadyzGuards.test.js 有 10 条锚点登记在 app.js 的行号上）。
+  { name: 'forensicRoutes', prefix: '/api/security/forensic' },
+  // 头像读取（2026-10-30）：app.js:530 挂的就是这个前缀。它是真实业务端点
+  // （本人直通 / 他人需 user:read + 数据范围），故按挂载链纳入对账，而不是豁免。
+  { name: 'avatarRoutes', prefix: '/api/avatars' },
 ];
 
 describe('OpenAPI 文档同步守卫', () => {

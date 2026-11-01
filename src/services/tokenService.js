@@ -8,6 +8,7 @@
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
+const jwtKeys = require('../utils/jwtKeys');
 const User = require('../models/User');
 const { isTokenBlacklisted } = require('../middleware/tokenBlacklist');
 
@@ -33,7 +34,6 @@ const generateToken = (
     //   sid —— 整个登录会话期间恒定，指向 UserSession 一条记录。
     // 设备级吊销只能绑定 sid：若绑 jti，下一次轮换就换了新 jti，
     // 「已踢除的设备」会自动复活。
-    //
     // type 声明用途（与 refresh 侧对称）。历史上 access 载荷没有这个字段，
     // 因此读取侧只在"字段存在且不等于 access"时拒绝——新签发的令牌一律带 type，
     // 已签发的旧令牌继续可用到自然过期，不因这次加固而集体失效。
@@ -48,8 +48,9 @@ const generateToken = (
       type: 'access',
       ...(sid ? { sid } : {}),
     },
-    config.jwt.secret,
-    { expiresIn: config.jwt.expire }
+    // P2-3：签钥与 kid 头由 jwtKeys 统一决定（未配置密钥集时与单密钥行为一致）
+    jwtKeys.signKey('access'),
+    jwtKeys.signOptions('access', config.jwt.expire)
   );
 };
 
@@ -63,8 +64,8 @@ const generateRefreshToken = (userId, tokenVersion = 0, sid = null) => {
     // jti 保证同秒内多次签发也产生不同令牌，使 refresh 轮换真正生效（杜绝令牌重用）；
     // 否则同秒相同 payload+exp 会签出相同 refresh token，"轮换"形同未轮换
     { userId, type: 'refresh', tokenVersion, jti: crypto.randomUUID(), ...(sid ? { sid } : {}) },
-    config.jwt.refreshSecret,
-    { expiresIn: config.jwt.refreshExpire }
+    jwtKeys.signKey('refresh'),
+    jwtKeys.signOptions('refresh', config.jwt.refreshExpire)
   );
 };
 
@@ -90,7 +91,9 @@ const isSessionUsable = async (sid) => {
 const isAccessTokenValid = async (token) => {
   const { violatesAccessTokenPurpose } = require('../utils/tokenPurpose');
   try {
-    const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
+    const decoded = jwt.verify(token, jwtKeys.verifyKeyFor(token, 'access'), {
+      algorithms: ['HS256'],
+    });
     // 两把密钥被配成同值时，refresh 令牌也能在此验签通过 ⇒ 探测会把它当成有效 access。
     // 判据与 authenticate 中间件同一份（见 utils/tokenPurpose）。
     if (violatesAccessTokenPurpose(decoded)) return false;
@@ -112,7 +115,9 @@ const isAccessTokenValid = async (token) => {
  */
 const isRefreshTokenValid = async (token) => {
   try {
-    const decoded = jwt.verify(token, config.jwt.refreshSecret, { algorithms: ['HS256'] });
+    const decoded = jwt.verify(token, jwtKeys.verifyKeyFor(token, 'refresh'), {
+      algorithms: ['HS256'],
+    });
     if (decoded.type !== 'refresh') return false;
     // 无 sid 的 refresh 不可再续期（见 authService/token.js 的 refreshSession）
     if (!decoded.sid) return false;

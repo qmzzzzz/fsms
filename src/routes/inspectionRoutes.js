@@ -10,6 +10,7 @@ const { authenticate, checkPermission } = require('../middleware');
 const { body, param, query } = require('express-validator');
 const { mustBeString } = require('../utils/validationRules');
 const { consumeValidation } = require('../middleware/validateQuery');
+const { idempotency } = require('../middleware/idempotency');
 // findings.*.severity 的取值全集与 models/Inspection.js 的 enum 同一份（F-149）：
 // 校验层与写入层各写一遍字面量时，单侧增删就会让两边对同一个值给出相反结论
 const {
@@ -289,6 +290,7 @@ router.post(
   '/',
   authenticate,
   checkPermission('inspection:create'),
+  idempotency({ scope: 'inspection:create' }), // 请求级幂等（一-1）：重复计划会派两次工
   createValidation,
   // SCOPE-EXEMPT: 创建动作无「他人资源」可越权——归属字段 assignedTo 由路由校验器
   // 限定为 ObjectId 数组白名单（inspectionRoutes.js:69-70），服务层不接受其他归属来源。

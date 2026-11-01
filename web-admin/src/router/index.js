@@ -81,6 +81,23 @@ const routes = [
         meta: { titleKey: 'nav.ipList', icon: 'Lock', permission: 'security:config' },
       },
       {
+        // 取证溯源（T5/T6）：读溯源 security:audit；页内封段按钮另按 security:config 门控
+        path: 'forensic-trace',
+        name: 'forensic-trace',
+        component: () => import('@/views/ForensicTraceView.vue'),
+        meta: { titleKey: 'nav.forensic', icon: 'Search', permission: 'security:audit' },
+      },
+      {
+        path: 'privilege-grants',
+        name: 'privilege-grants',
+        component: () => import('@/views/PrivilegeGrantView.vue'),
+        meta: {
+          titleKey: 'nav.privilegeGrants',
+          icon: 'Stamp',
+          permission: 'privilege:read',
+        },
+      },
+      {
         path: 'profile',
         name: 'profile',
         component: () => import('@/views/ProfileView.vue'),
@@ -183,9 +200,19 @@ router.beforeEach(async (to, from, next) => {
     authenticated = await authStore.restoreSession()
   }
 
-  // 已登录用户访问登录页 -> 跳首页
+  // P1-2：临时口令账户在完成改密前只允许停留在个人资料页。
+  // 服务端 authenticate 对所有业务接口返回 403 PASSWORD_CHANGE_REQUIRED，
+  // 前端守卫提前收敛，避免用户点一圈菜单全是 403。
+  const mustChangePassword = authStore.currentUser?.mustChangePassword === true
+
+  // 已登录用户访问登录页 -> 跳首页（强制改密账户先去改密）
   if (to.name === 'login' && authenticated) {
-    next('/dashboard')
+    next(mustChangePassword ? '/profile' : '/dashboard')
+    return
+  }
+
+  if (authenticated && mustChangePassword && to.name !== 'profile') {
+    next('/profile')
     return
   }
 

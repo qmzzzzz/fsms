@@ -679,15 +679,21 @@ describe('SessionManager 时间格式（O-3 单一事实来源）', () => {
 
   test('语言漂移守卫：同一实例切到 en-US 后时间文本完全不变（标签变英文证明切换真的生效）', async () => {
     const c = await renderSessions([sessionRow()])
-    expect(metaSpans(c)).toContain(`最近活动：${localStamp(ISO_SEEN)}`)
+    expect(metaSpans(c)).toContain(
+      `最近活动${i18n.global.t('common.labelColon')}${localStamp(ISO_SEEN)}`
+    )
 
     i18n.global.locale.value = 'en-US'
     await flush(8)
 
     const spans = metaSpans(c)
     // 正：标签确实切成了英文（证明 locale 已切换，本用例不是恒真）
-    expect(spans).toContain(`Last active：${localStamp(ISO_SEEN)}`)
-    expect(spans).toContain(`Signed in：${localStamp(ISO_CREATED)}`)
+    expect(spans).toContain(
+      `Last active${i18n.global.t('common.labelColon')}${localStamp(ISO_SEEN)}`
+    )
+    expect(spans).toContain(
+      `Signed in${i18n.global.t('common.labelColon')}${localStamp(ISO_CREATED)}`
+    )
     // 反：时间串必须仍是同一个本地定长串，不得出现 en-US 的 toLocaleString 形态
     expect(spans.join('|')).not.toContain('10/1/2026')
     expect(c.text()).not.toContain('最近活动')

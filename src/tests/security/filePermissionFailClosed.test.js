@@ -40,6 +40,17 @@ const cp = require('child_process');
 
 const MODULE = '../../utils/filePermission';
 
+/** 与被测模块同一口径解析“当前用户”（环境变量优先，其次 os.userInfo） */
+function curUser() {
+  const fromEnv = process.env.USERNAME || process.env.USER;
+  if (fromEnv) return fromEnv;
+  try {
+    return os.userInfo().username;
+  } catch (err) {
+    return '';
+  }
+}
+
 /** 在指定平台上重新加载模块（spoof 仅在 require 期间生效） */
 function loadOn(platform) {
   const desc = Object.getOwnPropertyDescriptor(process, 'platform');
@@ -115,7 +126,7 @@ describe('补漏：filePermission 失败路径', () => {
       // 反向钉住：目录专属标志不得出现在文件提示里（出现即说明 isDir 分支串了）
       expect(out).not.toContain('/T');
       expect(out).not.toContain('(OI)(CI)');
-      expect(out).toContain(`${process.env.USERNAME || process.env.USER}:F`);
+      expect(out).toContain(`${curUser()}:F`);
     });
   });
 
@@ -124,6 +135,10 @@ describe('补漏：filePermission 失败路径', () => {
       const savedUser = process.env.USERNAME;
       const savedUser2 = process.env.USER;
       const spy = jest.spyOn(cp, 'execFileSync');
+      // 环境变量与 os.userInfo 两条来源都必须取不到，才是真实的“无法确定”
+      const spyOs = jest.spyOn(os, 'userInfo').mockImplementation(() => {
+        throw new Error('no passwd entry');
+      });
       const mod = loadOn('win32');
       const logs = [];
       let r;
@@ -136,13 +151,45 @@ describe('补漏：filePermission 失败路径', () => {
         else process.env.USERNAME = savedUser;
         if (savedUser2 === undefined) delete process.env.USER;
         else process.env.USER = savedUser2;
+        spyOs.mockRestore();
         spy.mockRestore();
       }
       expect(r.ok).toBe(false);
-      expect(r.detail).toBe('USERNAME 未定义');
+      expect(r.detail).toBe('无法确定当前用户名（USERNAME/USER 与 os.userInfo 均不可用）');
       expect(logs.join('\n')).toContain('跳过 ACL 收紧');
       // 关键：未确定用户名时**不得**执行 icacls（否则可能把 ACL 授予错误账户）
       expect(spy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('USERNAME/USER 缺失但 os.userInfo 可用 → 仍收紧（回退来源不得失效）', () => {
+    withTempDir((dir) => {
+      const savedUser = process.env.USERNAME;
+      const savedUser2 = process.env.USER;
+      const spy = jest.spyOn(cp, 'execFileSync').mockReturnValue('');
+      const mod = loadOn('win32');
+      let r;
+      let calls = [];
+      try {
+        delete process.env.USERNAME;
+        delete process.env.USER;
+        r = mod.hardenPath(dir, { isDir: true });
+        // 调用记录必须在 mockRestore() 之前取：restore 会清空 mock.calls
+        calls = spy.mock.calls.map((c) => c[1]);
+      } finally {
+        if (savedUser === undefined) delete process.env.USERNAME;
+        else process.env.USERNAME = savedUser;
+        if (savedUser2 === undefined) delete process.env.USER;
+        else process.env.USER = savedUser2;
+        spy.mockRestore();
+      }
+      const expected = curUser();
+      expect(expected).toBeTruthy();
+      expect(r.ok).toBe(true);
+      expect(calls).toEqual([
+        [dir, '/reset', '/T', '/C', '/Q'],
+        [dir, '/inheritance:r', '/grant:r', `${expected}:(OI)(CI)F`],
+      ]);
     });
   });
 
@@ -270,7 +317,7 @@ describe('补漏：filePermission 失败路径', () => {
       // 提示里的主体是**解析后的真实用户名**而不是 `%USERNAME%`：后者只在 cmd.exe 展开，
       // 粘进 PowerShell 会原样传给 icacls ⇒ 手工兜底命令在默认 shell 里跑不通。
       // 只断言"开关序列 + ACE 串"：路径/用户名是否加引号取决于其中有没有空格，不做过度假设。
-      const user = process.env.USERNAME || process.env.USER;
+      const user = curUser();
       expect(logs.join('\n')).toContain('/inheritance:r /grant:r ');
       expect(logs.join('\n')).toContain(`${user}:F`);
       expect(logs.join('\n')).not.toContain('(OI)(CI)F');
@@ -294,7 +341,7 @@ describe('补漏：filePermission 失败路径', () => {
    * 相等即白名单——任何后来被拼进命令行的东西（文件内容、密钥、多余参数）都必然让它不相等。
    */
   it('成功路径：两步 icacls 必须真被执行，且 argv 逐元素等于白名单形态', () => {
-    const user = process.env.USERNAME || process.env.USER;
+    const user = curUser();
     // 前提自证：用户名取不到时 hardenPath 会提前返回（那不是本用例要走的路径）
     expect(user).toBeTruthy();
 

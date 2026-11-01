@@ -64,13 +64,24 @@ describe('auditScopeFilter 部门成员缓存的上界', () => {
   });
 
   test('反向对照：TTL 内重复读同一部门不再打库（否则下一条的"重新打库"没有信息量）', async () => {
+    // 自足前提：本用例自己把键读热——不借用别条用例刚写过的 cap-a-0，
+    // --randomize 下那条可能还没跑，两次读都会实打库。
     distinct.mockClear();
-    await queryFor('cap-a-0');
-    await queryFor('cap-a-0');
+    await queryFor('cap-rep-0');
+    expect(distinct).toHaveBeenCalledTimes(1);
+    distinct.mockClear();
+    await queryFor('cap-rep-0');
+    await queryFor('cap-rep-0');
     expect(distinct).not.toHaveBeenCalled();
   });
 
   test('上界本身：写满 CACHE_MAX 个部门后，最早的部门已被淘汰并重新打库', async () => {
+    // 自足前提：本用例自己写下"最早键"再填满上限——不借用别条用例的 cap-a-0，
+    // 否则"最早的已被淘汰"会退化成"它本来就没进过缓存"。
+    distinct.mockClear();
+    await queryFor('cap-evt-0');
+    expect(distinct).toHaveBeenCalledTimes(1);
+
     distinct.mockClear();
     for (let i = 0; i < CACHE_MAX; i += 1) await queryFor(`cap-b-${i}`);
     // 全部为新键 ⇒ 每次都 miss（这条同时钉住"填充满上限"这个前提真的发生了）
@@ -81,14 +92,14 @@ describe('auditScopeFilter 部门成员缓存的上界', () => {
     await queryFor(`cap-b-${CACHE_MAX - 1}`);
     expect(distinct).not.toHaveBeenCalled();
 
-    // 最早写入的键（cap-a-0）此刻必须已被淘汰 ⇒ 重新打库
+    // 最早写入的键（cap-evt-0）此刻必须已被淘汰 ⇒ 重新打库
     distinct.mockClear();
-    await queryFor('cap-a-0');
+    await queryFor('cap-evt-0');
     expect(distinct).toHaveBeenCalledTimes(1);
   });
 
   test('淘汰后仍能正常出结果（上界不是靠拒绝写入实现的）', async () => {
-    const { query, dataScope } = await queryFor('cap-a-0');
+    const { query, dataScope } = await queryFor('cap-out-0');
     expect(dataScope.type).toBe('department');
     expect(query.userId).toEqual({ $in: [oneId] });
   });

@@ -19,7 +19,7 @@
  * 专门跑计数（deviceStatsService.js:67 的 `$facet.total`）——"到期设备到底有多少台"一直是系统要
  * 回答的问题，只有清单这条路把它丢了。本仓另有多处已把同一约定写进注释：
  * `auditExportService.js:71`（多取一条当探针，"truncated 判定精确"）、
- * `reportWorkbookService.js:20`（恰好等于上限不得误报截断）、
+ * `reportWorkbookService.js:21`（恰好等于上限不得误报截断）、
  * `models/FireDevice.js:235`（"截断必须可数，不能拿数组长度假装这就是全部历史"）。
  *
  * 【修法】`paginated` 只新增 `pagination` 兄弟键，`data` **仍是数组**——三条既有消费路径

@@ -2,10 +2,9 @@
  * 数据范围判定（自 rbac.js 抽出）
  *
  * 抽出的直接原因：`services/auditScopeFilter` 只需要「算范围 + 判范围不可用」三件套，
- * 却因 rbac.js 顶部还引用了告警服务而把整条告警链拉进依赖图，形成
- * `securityAlert → auditScopeFilter → rbac → securityAlert` 的惰性环。
- * 本模块只依赖 User 模型与错误码，是叶子节点；rbac.js 原样再导出这三个名字，
- * 既有调用方与测试口径不变。
+ * 若留在 rbac.js（其顶部还引用告警服务）就会形成
+ * `securityAlert → auditScopeFilter → rbac → securityAlert` 的惰性环。本模块只依赖 User
+ * 模型与错误码，是叶子节点；rbac.js 原样再导出这三个名字，既有调用方与测试口径不变。
  */
 
 const User = require('../models/User');

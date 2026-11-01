@@ -49,6 +49,8 @@ const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_ALLOWLIST = path.resolve(ROOT, 'deployment', 'audit-allowlist.json');
 
 const SEVERITY_RANK = { info: 0, low: 1, moderate: 2, high: 3, critical: 4 };
+/** metadata.vulnerabilities 里参与计数的五档（total 是它们的和，见 reconcileReportCounts） */
+const SEVERITY_COUNTS = ['info', 'low', 'moderate', 'high', 'critical'];
 
 /** `https://github.com/advisories/GHSA-xxxx-...` → `GHSA-xxxx-...`（取不到则回退数字 id） */
 function advisoryId(via) {
@@ -140,8 +142,38 @@ function loadAllowlist(file) {
   return raw;
 }
 
-/** 读 audit 报告（`-` 表示 stdin）。端点报错/树陈旧的报告要判为 infra 错误而非策略违规 */
-function readReport(file) {
+/**
+ * 「汇总计数」与「明细」的自洽判据（纯函数）。
+ *
+ * 为什么必须有这一条：`metadata.vulnerabilities` 是 npm 自己写的**汇总**，而门禁真正
+ * 读的是 `vulnerabilities` 里的 `via` 明细。两者可以互相矛盾——报告自称 `high: 3`，
+ * 明细却整个缺席（或被裁剪成空对象）。此时 `collectRootAdvisories` 得到 0 条根因，
+ * 三条判据（未登记/已过期/已陈旧）全部无从触发 ⇒ 打印「根因公告 0 条」后**判绿**。
+ * 这就是 2026-10-31 实测的假绿：报告明明说 3 条 high，门禁却说"通过"。
+ *
+ * 判据取 npm v7+ 的恒等式：`vulnerabilities` 一个键 = 一个受影响**包**，
+ * 而 `metadata.vulnerabilities` 按严重度统计的正是这些包 ⇒ 各档之和必须等于键数。
+ * 恒等式在真实报告上成立（本轮实测：total 5/details 5、total 4/details 4、total 0/details 0），
+ * 故不匹配即"报告本身不自洽"，而不是"环境差异"。
+ *
+ * @param {object} report npm audit --json 的解析结果
+ * @returns {{totalCount:number, severitySum:number, detailCount:number,
+ *            consistent:boolean, detail:string}}
+ */
+function reconcileReportCounts(report) {
+  const meta = (report && report.metadata && report.metadata.vulnerabilities) || {};
+  const counted = SEVERITY_COUNTS.reduce((n, k) => n + Number(meta[k] || 0), 0);
+  const totalCount = Number(meta.total || 0);
+  const detailCount = Object.keys((report && report.vulnerabilities) || {}).length;
+  const consistent = totalCount === counted && detailCount === counted;
+  const detail =
+    `汇总 total=${totalCount} / 各档之和=${counted} / 明细条目=${detailCount}` +
+    `（不一致时说明报告被裁剪或来自不认识的 audit 版本）`;
+  return { totalCount, severitySum: counted, detailCount, consistent, detail };
+}
+
+/** 读 audit 报告（`-` 表示 stdin）。端点报错/树陈旧/自相矛盾的报告都判为 infra 错误 */
+function readReport(file, { allowMissingDetails = false } = {}) {
   const text = file === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(file, 'utf8');
   const report = JSON.parse(text);
   if (!report || !report.metadata || !report.metadata.vulnerabilities) {
@@ -151,6 +183,17 @@ function readReport(file) {
         '属基础设施问题而非策略违规'
     );
   }
+  const r = reconcileReportCounts(report);
+  if (!r.consistent) {
+    const msg =
+      `audit 报告的汇总计数与明细对不上（${r.detail}）：计数说存在漏洞，明细却拿不到` +
+      '可判定的根因公告。放绿等于门禁替报告编一个"零公告"的结论。';
+    if (!allowMissingDetails) {
+      throw new Error(msg + '（如确认只需汇总、明细确不可得，显式加 --allow-missing-details）');
+    }
+    // 降级：不改写报告内容，只打标记，让 run() 打印 WARN 并把退出码钉在非 0。
+    report.detailsAcknowledgedMissing = r;
+  }
   return report;
 }
 
@@ -158,8 +201,34 @@ function describe(a) {
   return `${a.severity.padEnd(8)} ${a.id} ${a.pkg}（影响 ${a.packages.length} 个包，区间 ${a.range}）`;
 }
 
+/**
+ * 打印「清单自身需要维护」的两类问题。抽出来的理由：run() 已顶着 complexity 棘轮
+ * （本仓 eslint.ratchet.json 对该文件的基线是 0，多一个分支就红），而这段纯打印
+ * 不含判定，放回 run() 只会让判据更难读。
+ */
+function reportMaintenance(r) {
+  if (r.expired.length) {
+    console.error('\n允许清单自身需要维护（fail-closed）：');
+    for (const e of r.expired)
+      console.error(`  已过期 reviewBy=${e.reviewBy}：${e.id}（${e.package}）—— 重新评估或删除`);
+  }
+  if (r.stale.length) {
+    for (const e of r.stale)
+      console.error(`  已陈旧（本次报告里已无对应公告）：${e.id}（${e.package}）—— 必须删掉该行`);
+  }
+}
+
+/** 打印未登记公告与处置指引（同上：纯打印，不含判定） */
+function reportOffenders(r) {
+  if (!r.offenders.length) return;
+  console.error('\n未登记的依赖 advisory（fail-closed，阻断合并）：');
+  for (const a of r.offenders) console.error(`  ${describe(a)}`);
+  console.error('\n若确认可带洞上线：把 GHSA id 加入 deployment/audit-allowlist.json 的 entries，');
+  console.error('写明理由、可达性判断与复核期限，随提交评审。');
+}
+
 /** @returns {number} 退出码（0=通过 / 1=策略违规 / 2=用法或 IO 错误） */
-function run({ reportFile, allowlistFile, today }) {
+function run({ reportFile, allowlistFile, today, allowMissingDetails = false }) {
   let allowlist;
   let report;
   try {
@@ -171,7 +240,7 @@ function run({ reportFile, allowlistFile, today }) {
     return 2;
   }
   try {
-    report = readReport(reportFile);
+    report = readReport(reportFile, { allowMissingDetails });
   } catch (e) {
     console.error(
       `Error: 无法读取/解析 audit 报告 ${reportFile}：${String(e.message).slice(0, 300)}`
@@ -180,33 +249,30 @@ function run({ reportFile, allowlistFile, today }) {
   }
 
   const r = evaluate({ report, allowlist, today });
-  const total = report.metadata.vulnerabilities;
+  const counts = reconcileReportCounts(report);
 
-  console.log(`[含 dev 依赖审计] 包维度：${JSON.stringify(total)}`);
+  console.log(`[含 dev 依赖审计] 包维度：${JSON.stringify(report.metadata.vulnerabilities)}`);
+  console.log(`[含 dev 依赖审计] 计数自洽：${counts.consistent ? '是' : '否'} —— ${counts.detail}`);
   console.log(
     `阈值 ${r.threshold}；根因公告 ${r.advisories.length} 条，其中达阈值 ${r.gate.length} 条：`
   );
   for (const a of r.gate)
     console.log(`  ${registered(r, a) ? '✅ 已登记' : '❌ 未登记'} ${describe(a)}`);
-  const below = r.advisories.filter((a) => a.rank < SEVERITY_RANK[r.threshold]);
-  for (const a of below) console.log(`  ➖ 低于阈值 ${describe(a)}`);
+  for (const a of r.advisories.filter((x) => x.rank < SEVERITY_RANK[r.threshold]))
+    console.log(`  ➖ 低于阈值 ${describe(a)}`);
 
-  if (r.expired.length || r.stale.length) {
-    console.error('\n允许清单自身需要维护（fail-closed）：');
-    for (const e of r.expired)
-      console.error(`  已过期 reviewBy=${e.reviewBy}：${e.id}（${e.package}）—— 重新评估或删除`);
-    for (const e of r.stale)
-      console.error(`  已陈旧（本次报告里已无对应公告）：${e.id}（${e.package}）—— 必须删掉该行`);
-  }
-  if (r.offenders.length) {
-    console.error('\n未登记的依赖 advisory（fail-closed，阻断合并）：');
-    for (const a of r.offenders) console.error(`  ${describe(a)}`);
-    console.error(
-      '\n若确认可带洞上线：把 GHSA id 加入 deployment/audit-allowlist.json 的 entries，'
-    );
-    console.error('写明理由、可达性判断与复核期限，随提交评审。');
-  }
+  reportMaintenance(r);
+  reportOffenders(r);
   if (r.offenders.length || r.expired.length || r.stale.length) return 1;
+
+  if (report.detailsAcknowledgedMissing) {
+    console.error(
+      '\nWARN: --allow-missing-details 已降级，但报告汇总计数与明细仍对不上' +
+        `（${report.detailsAcknowledgedMissing.detail}）。`
+    );
+    console.error('      降级不等于通过：本条步骤仍以非 0 退出，须人工核对后再放行。');
+    return 1;
+  }
 
   console.log(`\n✅ 含 dev 依赖审计通过（未登记 0，清单 ${allowlist.entries.length} 条全部有效）`);
   return 0;
@@ -223,10 +289,20 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const [flag, inline] = argv[i].split('=');
     const value = inline !== undefined ? inline : argv[++i];
+    // 报错时要点名**用户写的那个开关**：`++i` 之后 argv[i] 已是下一个参数（或 undefined），
+    // 用它拼消息会打出「未知参数：undefined」——一条读了也不知道该改哪里的错误。
+    const written = inline !== undefined ? flag : argv[i - 1];
     if (flag === '--report') opts.reportFile = value;
     else if (flag === '--allowlist') opts.allowlistFile = value;
     else if (flag === '--today') opts.today = value;
-    else return { error: `未知参数：${argv[i]}（支持 --report / --allowlist / --today）` };
+    else if (flag === '--allow-missing-details') {
+      // 布尔开关：不带值，故把多读的那一位还回去
+      if (inline === undefined) i -= 1;
+      opts.allowMissingDetails = true;
+    } else
+      return {
+        error: `未知参数：${written}（支持 --report / --allowlist / --today / --allow-missing-details）`,
+      };
   }
   return opts;
 }
@@ -245,6 +321,8 @@ if (require.main === module) main();
 
 module.exports = {
   SEVERITY_RANK,
+  SEVERITY_COUNTS,
+  reconcileReportCounts,
   advisoryId,
   collectRootAdvisories,
   evaluate,

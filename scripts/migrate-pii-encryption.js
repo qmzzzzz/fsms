@@ -1,5 +1,6 @@
 /**
- * PII 加密迁移 / 密钥轮换（2026-09-30；2026-10-16 扩到报警上报人电话与用户邮箱）
+ * PII 加密迁移 / 密钥轮换（2026-09-30；2026-10-16 扩到报警上报人电话与用户邮箱；
+ * 2026-10-30 纳入 UserAvatar.data）
  *
  * 用法（与 resign-audit-hmac.js 同族的门禁口径：--apply 需 ALLOWED_SOURCE_DB + --yes）：
  *   node scripts/migrate-pii-encryption.js                        # 演练：只读扫描并出报告
@@ -27,7 +28,8 @@
  * 默认（不加档）仍是"两者都做"，与 A1 时代的既有用法逐字兼容。
  *
  * 背景：`User.phone` 自 2026-09-30 起 at-rest 加密，`FireAlarm.reporter.phone`
- * 与 `User.email` 自 2026-10-16 起同轨加密（均走 utils/piiCrypto.js，AES-256-GCM 随机 IV）。
+ * 与 `User.email` 自 2026-10-16 起同轨加密，`UserAvatar.data` 自 2026-10-30 起同轨
+ * （均走 utils/piiCrypto.js，AES-256-GCM 随机 IV）。
  * 密文格式两代：`enc.v1.<iv>.<data>`（无行绑定，2026-10-01 审计发现同一派生钥下
  * 可跨行搬运）→ `enc.v2.<iv>.<data>`（AAD 绑定 pii:v2:<_id>:<field>，
  * 跨行复制在解密侧认证失败）。模型层对存量明文**透读取**、修改时才加密
@@ -130,6 +132,13 @@ const PII_TARGETS = [
     fields: [{ path: 'reporter.phone', keyField: null, gramField: null }],
     legacyPlaintextSelfHeal: [],
   },
+  {
+    collection: 'useravatars',
+    // 头像 data 是图片 Base64 密文；AAD field 必须与 avatarService 写侧的 'data' 一致，
+    // 否则轮换脚本重加密出来的行业务读侧解不开。无检索键，故不建 HMAC 列。
+    fields: [{ path: 'data', keyField: null, gramField: null }],
+    legacyPlaintextSelfHeal: [],
+  },
 ];
 
 /** 按点分路径取值（驱动返回的是普通对象，`doc['reporter.phone']` 取不到嵌套值） */
@@ -159,7 +168,7 @@ function assertMasterKeyUsable() {
   if (require('../src/config/validate').isWeakSecret(key)) {
     console.error(
       'Error: AES_SECRET_KEY 未通过强度校验（长度 <32 / 命中弱密钥黑名单或占位符形态 / 低熵）。' +
-        '本脚本会把 users / firealarms 的 PII 列改写在该密钥之下，弱密钥一旦落库不可逆。' +
+        '本脚本会把 users / firealarms / useravatars 的 PII 列改写在该密钥之下，弱密钥一旦落库不可逆。' +
         '请用 `openssl rand -hex 32` 生成后经环境变量提供。'
     );
     process.exit(2);
@@ -253,7 +262,7 @@ async function main() {
   }
   if (args.apply && !args.confirmYes) {
     console.error(
-      '错误：--apply 将批量改写 users / firealarms 的 PII 列（明文 → 密文 / 跨密钥重加密），需再传 --yes 确认。'
+      '错误：--apply 将批量改写 users / firealarms / useravatars 的 PII 列（明文 → 密文 / 跨密钥重加密），需再传 --yes 确认。'
     );
     process.exit(2);
   }

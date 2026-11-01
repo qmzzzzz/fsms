@@ -32,6 +32,16 @@ const URI_EXPLICIT = `mongodb://fsms:ExplicitPw@127.0.0.1:27017/${DB}?authSource
 
 const sh = (p) => String(p).replace(/\\/g, '/');
 
+/**
+ * PATH 条目必须转成 `/d/…`：实测（2026-10-30）MSYS 把 `D:/…` 当成**不可解析的字面路径**，
+ * 于是「把桩目录放进 PATH」会静默失效——命令照样落在 /usr/bin 的真工具上，
+ * 用例便在「以为桩已生效」的假前提下变绿。`sh()` 只换反斜杠，故这里单列一个转换器。
+ */
+const posix = (p) =>
+  String(p)
+    .replace(/\\/g, '/')
+    .replace(/^([A-Za-z]):\//, (_m, d) => `/${d.toLowerCase()}/`);
+
 function mkwork(prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const bin = path.join(dir, 'bin');
@@ -325,6 +335,57 @@ describe('backup/restore 的 MONGODB_URI_FILE 接线（每日 cron 的默认形�
     expect(r.out).toMatch(/NUL/);
   });
 
+  test('调用方 IFS 污染（source 场景）+ 两向共谋 tr ⇒ od 逐字节目视仍拒 NUL（fail-closed）', () => {
+    // audit-round6-odparser.md ②-2：mongoUri.sh 被 source 进调用方 shell，`for … in $var` 的
+    // 切分随调用方 IFS 走。若 IFS=' '，od 输出的换行不再作分隔符、行尾 token 连换行粘成
+    // `00\n`，`case 00)` 漏计；再配「数 NUL 的调用输出空、数非 NUL 的调用透传」的两向共谋
+    // tr 桩，互补和式闭合 ⇒ 修复前 rc=0、含 NUL 文件被静默接受。修复：od 循环外局部固定
+    // IFS（`_ifs_saved` 成对保存/恢复，restore-mongo 的 `IFS= read` 同款局部化纪律）。
+    // 两向共谋 tr：`tr -dc '\000'`（数 NUL 的那条管道）输出空 ⇒ _file_nul=0；
+    // `tr -cd '\001-\377'`（数非 NUL 的那条）原样透传 ⇒ _file_nonnull=总字节 ⇒ 和式闭合。
+    // mkwork 已把 work/bin 放在 PATH 首位，桩在这里遮蔽真 tr；桩把每次调用记进 $STUB_LOG，
+    // 用例末尾断言两条管道**都被桩接过** —— 否则真 tr 会让这条用例变成空转（假绿）。
+    const trStub = path.join(work.bin, 'tr');
+    fs.writeFileSync(
+      trStub,
+      [
+        '#!/usr/bin/env bash',
+        'echo "TR $*" >> "$STUB_LOG"',
+        'case "$*" in',
+        '  *001-377*) exec /usr/bin/cat ;;',
+        '  *000*) exec /usr/bin/true ;;',
+        '  *) exec /usr/bin/cat ;;',
+        'esac',
+        '',
+      ].join('\n')
+    );
+    // chmod 与 mkwork 同款：Windows 上 writeFileSync 的 mode 不足以让 MSYS 认它是可执行体，
+    // 缺这一句桩会被跳过、用例退化成对着真 tr 空转。
+    fs.chmodSync(trStub, 0o755);
+    const file = secretFile(
+      work,
+      Buffer.from('mongodb://a:1/h\u0000x', 'utf8') // 17 B：NUL 是 od 第一行的行尾 token（第 16 字节）
+    );
+    // PATH 必须在命令串里前置（MSYS 会把 /usr/bin:/mingw64/bin 重新前置，光靠 env 块的 PATH
+    // 遮蔽不到 tr），且整条赋值要用双引号 —— PATH 里有含空格的目录，裸 $PATH 会在空格处断句。
+    // 目录形态必须是 `/d/…`：`D:/…` 这种混合形态 MSYS 整段跳过，桩形同不存在（假绿）。
+    const r = runBashC(
+      [
+        `PATH="${posix(work.bin)}:$PATH"; export PATH; IFS=' '; . "${posix(
+          path.join(ROOT, 'scripts', 'mongoUri.sh')
+        )}"`,
+        `MONGODB_URI=''; MONGODB_URI_FILE='${posix(file)}'; mongo_hydrate_uri`,
+      ].join('\n'),
+      work,
+      {}
+    );
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/NUL/);
+    // 前提自证：桩确实遮蔽了真 tr，且 NUL 管道与非 NUL 管道都经过了它
+    expect(r.calls).toMatch(/TR -dc \\000/);
+    expect(r.calls).toMatch(/TR -cd \\001-\\377/);
+  });
+
   test('反向自证：同一串去掉 NUL ⇒ 照常放行（判据没有退化成"拒绝一切"）', () => {
     const file = secretFile(
       work,
@@ -340,24 +401,37 @@ describe('backup/restore 的 MONGODB_URI_FILE 接线（每日 cron 的默认形�
     // 机械删块 + 找不到就抛：上一轮踩过"变异没落地、用例对着未改动的文件保持绿"，
     // 所以这里不用 sed 行号，改成"按特征定位并显式断言定位成功"。
     const lines = fs.readFileSync(path.join(ROOT, 'scripts', 'mongoUri.sh'), 'utf8').split('\n');
-    const from = lines.findIndex((l) => /tr -dc '\\000'/.test(l));
-    if (from < 0) {
-      throw new Error('夹具前提失效：mongoUri.sh 里找不到 NUL 闸的判据行，请同步本用例');
-    }
-    let to = from;
-    while (to < lines.length && lines[to].trim() !== 'fi') to += 1;
-    if (to >= lines.length) {
-      throw new Error('夹具前提失效：NUL 闸的 if 没有配对的 fi 收尾');
-    }
+    // 判据几经演进（NUL 计数 → 非 NUL 计数 → 互补计数和式 + NUL 直接计数 + od 逐字节目视），
+    // NUL 的拒绝语义现在由**两条冗余臂**承载：直接计数臂与 od 逐字节目视臂（互为备份）。
+    // 所以这里把两臂一起摘（探针证实：只摘一条时另一条仍拦住 UTF-16 夹具；两条都摘 ⇒
+    // 「NUL 计数被吞 ⇒ 相等 ⇒ 放行」的原始缺陷链重新成立，rc=0 且值被静默改写）：
+    // 锚点必须是 **if 行**而不是赋值行：赋值行后面先经过一串 case/其他 if（第四轮新增的
+    // stat/-s/互补计数腿），用「第一个 fi」会删掉半截、留下悬空的 _file_nonnull 引用 ——
+    // 那种静默错删正是这条用例自己要防的形态。锚点字面量必须与判据行**逐字节同形**，
+    // 找不到就抛（判据变了 ⇒ 同步本用例），不许静默跳过。
+    const armOf = (needle) => {
+      const at = lines.findIndex((l) => l.includes(needle));
+      if (at < 0) {
+        throw new Error(`夹具前提失效：mongoUri.sh 里找不到判据行 ${needle}，请同步本用例`);
+      }
+      let end = at;
+      while (end < lines.length && lines[end].trim() !== 'fi') end += 1;
+      if (end >= lines.length) {
+        throw new Error('夹具前提失效：判据 if 没有配对的 fi 收尾');
+      }
+      return [at, end];
+    };
+    const armA = armOf('if [ "$_file_nul" != 0 ]; then');
+    const armB = armOf('if [ "$_od_nul" != 0 ]; then');
+    const keep = lines.filter(
+      (_, i) => !(i >= armA[0] && i <= armA[1]) && !(i >= armB[0] && i <= armB[1])
+    );
     const legacy = path.join(work.dir, 'legacy-nul');
     fs.mkdirSync(legacy);
     for (const f of ['backup-mongo.sh', 'backupCrypto.sh']) {
       fs.copyFileSync(path.join(ROOT, 'scripts', f), path.join(legacy, f));
     }
-    fs.writeFileSync(
-      path.join(legacy, 'mongoUri.sh'),
-      [...lines.slice(0, from), ...lines.slice(to + 1)].join('\n')
-    );
+    fs.writeFileSync(path.join(legacy, 'mongoUri.sh'), keep.join('\n'));
 
     const file = secretFile(work, Buffer.from(`${URI_FILE}\n`, 'utf16le'));
     const r = runScript(path.join(legacy, 'backup-mongo.sh'), [work.backupDir], work, {
@@ -533,5 +607,327 @@ describe('显式 MONGODB_URI 的内容校验与脱敏回显', () => {
     // 同形（fire-safety-backup-*.gz）——留着它，retention 清单与回滚演练就会把
     // 一次中断的运行当成"最近有一次备份"。cleanup 按定稿标志（FINALIZED）删除未定稿产物。
     expect(r.archives).toEqual([]);
+  });
+
+  /**
+   * 工具缺失 ⇒ 必须失败关（A6，2026-10-30）。
+   *
+   * `mongo_validate_uri` 的「单行纯可打印 ASCII」判据由 `tr` 执行，而它的失败**是静默的**：
+   * 命令替换得到空串，与「干净的值」不可分。修复前实测（本机，PATH 里没有 tr）：
+   * 带真换行的连接串照样 rc=0 —— 换行会被写成 mongodump/mongorestore 配置文件的第二行，
+   * 而配置里唯一由调用方决定的那一段正是它（见 scripts/mongoUri.sh 顶部 2026-10-03 的取证）。
+   * 所以这里锁两件事：没有 tr 时**必须拒绝**，且拒绝理由要点名 tr（红不能由别的判据凑出来）。
+   */
+  describe('tr 不可用时 mongo_validate_uri 必须失败关（不是静默放行）', () => {
+    const VALIDATE_LIB = path.join(ROOT, 'scripts/mongoUri.sh');
+    const CLEAN = 'mongodb://fsms:pw@127.0.0.1:27017/fire_safety';
+
+    /**
+     * 起一个真 sh：先 source mongoUri.sh，再按需把 PATH 换成「只有桩工具」的目录。
+     *
+     * PATH 必须在 **shell 内部**设死：Git Bash / MSYS 启动时会把 /usr/bin:/mingw64/bin
+     * 塞回 PATH（实测），从 Node 侧传一个不含 tr 的 env.PATH 删不掉 tr ——
+     * 那样的用例会在「以为已移除」的假前提下变绿，等于没测。
+     * 换行值同样在 shell 内部用 printf 生成：真换行经 Windows 命令行转交 bash 不可靠。
+     */
+    const callValidate = ({
+      newline = false,
+      stripPath = false,
+      trStub = '',
+      wcStub = '',
+    } = {}) => {
+      const payload = newline
+        ? "printf 'mongodb://fsms:pw@127.0.0.1:27017/fire_safety\\ndrop:true'"
+        : `printf '%s' '${CLEAN}'`;
+      // stripPath：PATH 里只剩桩目录（工具真缺）；trStub/wcStub：桩目录 + 真工具（只遮一个）。
+      // 两者都必须走 posix()：`D:/…` 形态的 PATH 条目 MSYS 解析不到（实测），
+      // 那会让「桩已生效」这个前提静默失效 —— 判据照样落在 /usr/bin 的真工具上。
+      const writeStub = (name, body) => {
+        fs.writeFileSync(path.join(work.bin, name), body, { mode: 0o755 });
+        try {
+          fs.chmodSync(path.join(work.bin, name), 0o755);
+        } catch (_) {
+          /* Windows 上 mode 参数已足够 */
+        }
+      };
+      if (trStub) {
+        // 桩只遮 tr，其余工具（wc/grep/…）照常可用：这正是审计实测的形态 ——
+        // 「工具在不在」通过，「判据这一次能不能执行」不通过。
+        writeStub('tr', trStub);
+      }
+      // wcStub 走「路径里必需有桩目录」那一支：桩目录 + 真工具，与 trStub 同款。
+      const useStubDir = Boolean(trStub || wcStub);
+      const pathLine2 = stripPath
+        ? `PATH='${posix(work.bin)}'; export PATH; `
+        : useStubDir
+          ? `PATH='${posix(work.bin)}:/usr/bin:/bin'; export PATH; `
+          : '';
+      if (wcStub) writeStub('wc', wcStub);
+      // 末尾带上 tr/wc 的实际解析结果：桩是否真的生效必须被观测，否则「桩没进 PATH」会伪装成绿。
+      const cmd = `_v=$(${payload}); . "$1"; ${pathLine2}mongo_validate_uri "$_v" MONGODB_URI; printf 'rc=%s' "$?"; printf 'tr=%s' "$(command -v tr 2>/dev/null)"; printf 'wc=%s' "$(command -v wc 2>/dev/null)"`;
+      const r = spawnSync('bash', ['-c', cmd, '_', sh(VALIDATE_LIB)], {
+        cwd: ROOT,
+        encoding: 'utf8',
+        timeout: 30000,
+      });
+      return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
+    };
+
+    test('前提自证：tr 在位时判据是活的（干净值放行、换行值拒绝）', () => {
+      expect(callValidate().out).toContain('rc=0');
+      const nlValue = callValidate({ newline: true });
+      expect(nlValue.out).toContain('rc=1');
+      // 拒绝理由必须是「值里有越界字节」，不是别的判据顺手拒绝的
+      expect(nlValue.out).toMatch(/换行或不可打印字符/);
+    });
+
+    test('没有 tr：带换行的值必须拒绝，且理由点名 tr（修复前实测 rc=0）', () => {
+      const r = callValidate({ newline: true, stripPath: true });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/字节计数不可用/);
+    });
+
+    test('没有 tr：干净值同样拒绝（无法校验即拒绝，宁静不能以放行为代价）', () => {
+      const r = callValidate({ stripPath: true });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/字节计数不可用/);
+    });
+
+    /**
+     * 2026-10-30 第三轮审计的形态：探针证明的是「工具在不在」，判据要的是「这一次调用能不能执行」。
+     * 只装一个「无 tr」的桩是不够的 —— 曾经的探针跑 `tr -d 'a'` 通过、判据跑 `tr -d '\\041-\\176'` 失败，
+     * 于是 `$(…; printf '~')` 恰好等于 '~'，换行注入的连接串照样 rc=0。
+     * 所以这里让桩**只在八进制区间集合这一形态上**失败（其余形态委托真 tr）：
+     * 判据必须仍然拒绝，且理由必须指向「判不出来」，而不是变成放行。
+     */
+    test('tr 只在判据的那种形态上失败（八进制区间集合）⇒ 仍然拒绝（修复前实测 rc=0）', () => {
+      const stub = [
+        '#!/bin/sh',
+        'case "$*" in *"041-"*) echo "tr: illegal set" >&2; exit 1 ;; esac',
+        'exec /usr/bin/tr "$@"',
+        '',
+      ].join('\n');
+      const r = callValidate({ newline: true, trStub: stub });
+      expect(r.out).toMatch(/tr=\S*backup-uri-hard[^\s]*\/bin\/tr/); // 前提自证：桩确实被解析到了
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/字节计数不可用|换行或不可打印字符/);
+    });
+
+    /**
+     * 第四轮审计（2026-10-30）把 fail-open 从 tr 这条腿搬到了 wc 这条腿：wc 退出 0、打印 0 时
+     * 两个计数都是 0 ⇒ 相等 ⇒ 放行（实测：换行注入照样 rc=0）。两种新形态各配一条腿：
+     *   · wc 静默 0 —— 由「`${#_uri}`（shell 内建）与字节数交叉」拦住；0 是合法数字，形状校验挡不住它。
+     *   · tr 退化成 cat（能跑、退出 0、一个字节都不删）—— 由「同一形态的自检常量」拦住。
+     * 每条都配前提自证（桩确实生效），否则「桩没进 PATH」会伪装成绿。
+     */
+    test('wc 从第二次调用起只打印 0 ⇒ 判据必须拒绝（形状校验挡不住 0，靠内建字符数交叉）', () => {
+      const counter = path.join(work.bin, 'wc.count');
+      fs.writeFileSync(counter, '0');
+      const stub = [
+        '#!/bin/sh',
+        `c=$(cat '${posix(counter)}' 2>/dev/null || printf 0)`,
+        'c=$((c + 1))',
+        `printf '%s\\n' "$c" > '${posix(counter)}'`,
+        '[ "$c" -gt 1 ] && { printf "0\\n"; exit 0; }',
+        'exec /usr/bin/wc "$@"',
+        '',
+      ].join('\n');
+      // 干净值：绝对值是 46，桩把它变成 0 —— 只有与 `\${#_uri}` 交叉才能发现。
+      const r = callValidate({ wcStub: stub });
+      expect(r.out).toMatch(/wc=\S*backup-uri-hard[^\s]*\/bin\/wc/); // 前提自证：桩确实被解析到了
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/字节数与字符数不符|字节计数不可用/);
+    });
+
+    test('tr 退化成 cat（退出 0、不删任何字节）⇒ 判据必须拒绝（互补计数之和 ≠ 总字节数）', () => {
+      // 桩不过滤：允许集与禁止集两条管道都得到整串 ⇒ 两边之和 = 2×总数 ≠ 总数 ⇒ 判「检测不可用」。
+      // 这条判据跑在**真实载荷**上，所以没有固定串可以被绕（固定串自检那一版正是栽在这里）。
+      const r = callValidate({ trStub: '#!/bin/sh\nexec cat\n' });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/tr 没有按判据过滤字节/);
+    });
+
+    test('tr 吃掉一切（退出 0、无输出）⇒ 判据必须拒绝（互补计数之和 = 0 ≠ 总字节数）', () => {
+      // 这一条是「和式」那条腿存在的理由：吃掉一切时两个违禁/允许计数都是 0，
+      // 「违禁字节数 == 0」会放行一个**已被工具毁掉**的值。
+      // 桩只在判据形态（-cd）上吃掉一切，规范化管道（tr -d ' \t'）仍走真 tr ——
+      // 否则连「把 wc 输出去掉空白」这一步都会被打断，用例测到的就不是这条腿了。
+      const eat = [
+        '#!/bin/sh',
+        'case "$*" in *-cd*) /usr/bin/cat > /dev/null; exit 0 ;; esac',
+        'exec /usr/bin/tr "$@"',
+        '',
+      ].join('\n');
+      const r = callValidate({ trStub: eat });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/tr 没有按判据过滤字节/);
+    });
+
+    test('内容相关退化的 tr（短输入正常、真实载荷透传）+ 换行载荷 ⇒ 必须拒绝（第四轮复攻的原始形态）', () => {
+      // 审计实测：固定串自检只能证明「短输入」这一形态，工具对真实载荷退化为透传时旧版 rc=0。
+      const scratch = posix(path.join(work.bin, 'tr.in'));
+      const stub = [
+        '#!/bin/sh',
+        `_d='${scratch}'`,
+        '/usr/bin/cat > "$_d"',
+        'if [ "$(/usr/bin/wc -c < "$_d" | /usr/bin/tr -d " ")" -le 12 ]; then',
+        '  exec /usr/bin/tr "$@" < "$_d"',
+        'fi',
+        'exec /usr/bin/cat < "$_d"',
+        '',
+      ].join('\n');
+      const r = callValidate({ newline: true, trStub: stub });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/tr 没有按判据过滤字节|换行或不可打印字符/);
+    });
+    test('前提自证：同一个桩下干净值也必须拒绝（判据不再是「碰巧有 tr」就算数）', () => {
+      const stub = [
+        '#!/bin/sh',
+        'case "$*" in *"041-"*) echo "tr: illegal set" >&2; exit 1 ;; esac',
+        'exec /usr/bin/tr "$@"',
+        '',
+      ].join('\n');
+      const r = callValidate({ trStub: stub });
+      expect(r.out).toMatch(/tr=\S*backup-uri-hard[^\s]*\/bin\/tr/); // 前提自证：桩确实被解析到了
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/字节计数不可用|换行或不可打印字符/);
+    });
+  });
+
+  /**
+   * 同族的第二条：NUL 判据的**正常值就是 0**，与「工具死了输出 0」不可分 ——
+   * 这正是审计里那条「tr 只在 -dc '\000' 形态上失败 ⇒ UTF-16LE 密钥文件 rc=0」的成因。
+   * 判据改成「非 NUL 字节数 == 总字节数」之后，形态失败会让左边变成 0，与右边不等 ⇒ 拒绝。
+   */
+  describe('tr 只在 NUL 判据的形态上失败 ⇒ mongo_hydrate_uri 仍必须拒绝 UTF-16 文件', () => {
+    // 第四轮起新增 stubs：{ tr, wc, stat, grep } 逐名覆盖；**先清掉上一轮留下的同名桩**，
+    // 否则「上一条用例的桩还挂着」会让下一条在错误前提下变绿。
+    const callHydrate = ({ trStub = '', stubs = {}, clean = false } = {}) => {
+      const file = path.join(work.dir, clean ? 'secret-clean.txt' : 'secret-utf16.txt');
+      // clean：干净的 UTF-8 单行文件（行数判据那类用例要用它，否则会在 NUL 闸就红、测不到目标腿）。
+      fs.writeFileSync(file, clean ? `${URI_FILE}\n` : Buffer.from(`${URI_FILE}\n`, 'utf16le'));
+      if (trStub) stubs = { ...stubs, tr: trStub };
+      for (const name of ['tr', 'wc', 'stat', 'grep']) {
+        const stubPath = path.join(work.bin, name);
+        if (fs.existsSync(stubPath)) fs.rmSync(stubPath, { force: true });
+      }
+      for (const [name, body] of Object.entries(stubs)) {
+        fs.writeFileSync(path.join(work.bin, name), body, { mode: 0o755 });
+        try {
+          fs.chmodSync(path.join(work.bin, name), 0o755);
+        } catch (_) {
+          /* Windows 上 mode 参数已足够 */
+        }
+      }
+      const cmd = `PATH='${posix(work.bin)}:/usr/bin:/bin'; export PATH; . "$1"; MONGODB_URI='' MONGODB_URI_FILE="$2"; mongo_hydrate_uri; printf 'rc=%s' "$?"`;
+      const r = spawnSync(
+        'bash',
+        ['-c', cmd, '_', sh(path.join(ROOT, 'scripts/mongoUri.sh')), sh(file)],
+        {
+          cwd: ROOT,
+          encoding: 'utf8',
+          timeout: 30000,
+        }
+      );
+      return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
+    };
+
+    test('反向对照：真 tr 下同一份 UTF-16 夹具必须拒绝（红不能来自夹具本身）', () => {
+      const r = callHydrate();
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/含 NUL 字节/);
+    });
+
+    test('桩只在「非 NUL 计数」那一形态上失败 ⇒ 仍然拒绝（修复前实测 rc=0、值被静默改写）', () => {
+      const stub = [
+        '#!/bin/sh',
+        'case "$*" in *"001-"*) echo "tr: illegal set" >&2; exit 1 ;; esac',
+        'exec /usr/bin/tr "$@"',
+        '',
+      ].join('\n');
+
+      const r = callHydrate({ trStub: stub });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/含 NUL 字节|字节检查未能完成/);
+    });
+
+    /**
+     * 第四轮审计（2026-10-30）在 hydrate 侧也踩到了同一族的三条腿：
+     *   · wc 静默 0 ⇒ 两个计数都是 0 ⇒ 相等 ⇒ UTF-16 文件被吃成值；由 stat 交叉拦住；
+     *   · stat 本身不可用 ⇒ 「能不能检测」这件事必须先答，答不出来就拒；
+     *   · tr 退化成 cat ⇒ 自检常量对不上；
+     *   · wc 与 stat 同时说 0 而文件非空 ⇒ 由 shell 内建 `[ -s ]` 的自相矛盾拦住；
+     *   · grep -c 静默空输出 ⇒ 行数判据取假分支被跳过（两行密钥文件只取第一行）⇒ 形状校验拦住。
+     */
+    test('wc 一律打印 0（stat 是真的）⇒ 必须拒绝：绝不按「检测不到」继续', () => {
+      // 桩让每一次 wc 都说 0（这正是第四轮审计造的形态）：0 是合法数字，形状校验拦不住，
+      // 靠 stat 的独立长度交叉拦下（它排在互补计数之前，所以理由必须是「两者不一致」）。
+      const r = callHydrate({ stubs: { wc: '#!/bin/sh\nprintf "0\\n"\n' } });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/两者不一致/);
+    });
+
+    test('stat 不可用 ⇒ 必须拒绝（不能拿「工具在不在」当「这一次判得出来」）', () => {
+      const r = callHydrate({ stubs: { stat: '#!/bin/sh\nexit 1\n' } });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/stat 不可用/);
+    });
+
+    test('tr 退化成 cat ⇒ 必须拒绝（互补计数之和 ≠ 总字节数）', () => {
+      const r = callHydrate({ stubs: { tr: '#!/bin/sh\nexec cat\n' } });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/tr 没有按判据过滤字节/);
+    });
+
+    test('tr 吃掉一切（退出 0、无输出）⇒ 必须拒绝（不是「没有 NUL」）', () => {
+      // 判据是「NUL 字节数 == 0」，工具吃掉一切时它同样是 0 —— 只有互补计数之和那条腿看得见。
+      const eat = [
+        '#!/bin/sh',
+        'case "$*" in *-cd*) /usr/bin/cat > /dev/null; exit 0 ;; esac',
+        'exec /usr/bin/tr "$@"',
+        '',
+      ].join('\n');
+      const r = callHydrate({ stubs: { tr: eat }, clean: true });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/tr 没有按判据过滤字节/);
+    });
+
+    test('内容相关退化的 tr（短输入正常、真实文件透传）+ UTF-16 文件 ⇒ 必须拒绝（第四轮复攻的原始形态）', () => {
+      // 审计实测：那一版能把 UTF-16 密钥文件吃成「字形相同」的连接串并 rc=0。
+      const scratch = posix(path.join(work.bin, 'tr.in'));
+      const stub = [
+        '#!/bin/sh',
+        `_d='${scratch}'`,
+        '/usr/bin/cat > "$_d"',
+        'if [ "$(/usr/bin/wc -c < "$_d" | /usr/bin/tr -d " ")" -le 12 ]; then',
+        '  exec /usr/bin/tr "$@" < "$_d"',
+        'fi',
+        'exec /usr/bin/cat < "$_d"',
+        '',
+      ].join('\n');
+      const r = callHydrate({ stubs: { tr: stub } });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/tr 没有按判据过滤字节|含 NUL 字节/);
+    });
+
+    test('wc 与 stat 同时说 0、而文件非空 ⇒ 由内建 `[ -s ]` 的自相矛盾拦住', () => {
+      const r = callHydrate({
+        stubs: { wc: '#!/bin/sh\nprintf "0\\n"\n', stat: '#!/bin/sh\nprintf "0\\n"\n' },
+      });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/计数为 0 但文件非空/);
+    });
+
+    test('grep -c 静默空输出（退出 0）⇒ 行数判据必须判「不可用」而不是被跳过', () => {
+      const grepStub = [
+        '#!/bin/sh',
+        'case "$*" in *"-c"*) exit 0 ;; esac',
+        'exec /usr/bin/grep "$@"',
+        '',
+      ].join('\n');
+      const r = callHydrate({ stubs: { grep: grepStub }, clean: true });
+      expect(r.out).toContain('rc=1');
+      expect(r.out).toMatch(/行数判据不可用/);
+    });
   });
 });

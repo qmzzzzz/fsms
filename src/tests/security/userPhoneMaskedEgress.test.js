@@ -249,6 +249,11 @@ describe('用户管理读路径的手机号口径', () => {
   test('边界自证：省略 phone/email 不等于清空，提交脱敏电话一定被拒且不落库', async () => {
     // 前端"脏字段才提交"的全部理由压在这两条判据上：
     // 省略键 = 保持原值；把列表里的展示值当可写值提交 = 被路由正则拒掉。
+    // 自足前提：本用例断言「省略字段 = 保持原值」，原值必须由本用例自己写下。默认顺序靠
+    // 「改号」用例先跑；--randomize 打乱后 mutant 仍是初始号，断言会撞上 TARGET_PHONE。
+    const prime = await authed('put', `/api/users/${mutant._id}`).send({ phone: NEW_PHONE });
+    expect(prime.status).toBe(200);
+
     const untouched = await authed('put', `/api/users/${mutant._id}`).send({
       realName: '被管对象乙',
     });

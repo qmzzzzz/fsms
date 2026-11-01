@@ -183,4 +183,44 @@ describe('审计 WAL 超限裁剪按持久化承诺分级', () => {
     expect(seen[0].__walSeq).toBe('zzq-r1');
     expect(seen[0].__walDurable).toBeUndefined();
   });
+  test('普通行被裁必须进 Prometheus：wal_trim_ordinary，与 durable 的 wal_durable_lost 分开', async () => {
+    // 第十一轮 D5：普通行被裁只累加 walDroppedLines（JSON/面板），不进指标；
+    // 而 .discarded 永不回灌 ⇒ 它们同样是永久丢失。这条按"降到零"的方式钉住上报。
+    const drops = require('../../utils/metricsAuditDrops');
+    const incSpy = jest.spyOn(drops, 'incAuditDrop').mockImplementation(() => {});
+    writeLines([0, 1, 2, 3, 4, 5, 6].map((s) => walLine(s, false)));
+    try {
+      await enforce();
+      expect(cap.getStats().walDroppedLines).toBe(3);
+      expect(incSpy.mock.calls).toEqual([['wal_trim_ordinary', 3]]);
+    } finally {
+      incSpy.mockRestore();
+    }
+  });
+
+  test('两种丢弃的标签可区分：混合裁剪时普通行与 durable 行各报各的', async () => {
+    process.env.AUDIT_WAL_ALLOW_DURABLE_TRIM = 'true';
+    const drops = require('../../utils/metricsAuditDrops');
+    const incSpy = jest.spyOn(drops, 'incAuditDrop').mockImplementation(() => {});
+    // 7 行 ⇒ dropTarget = 3：普通 2 条（seq 0/2）+ 最旧 durable 1 条（seq 1）
+    writeLines([
+      walLine(0, false),
+      walLine(1, true),
+      walLine(2, false),
+      walLine(3, true),
+      walLine(4, true),
+      walLine(5, true),
+      walLine(6, true),
+    ]);
+    try {
+      await enforce();
+      expect(cap.getStats().walDroppedLines).toBe(3);
+      expect(incSpy.mock.calls).toEqual([
+        ['wal_trim_ordinary', 2],
+        ['wal_durable_lost', 1],
+      ]);
+    } finally {
+      incSpy.mockRestore();
+    }
+  });
 });

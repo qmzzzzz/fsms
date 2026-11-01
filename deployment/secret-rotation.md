@@ -78,6 +78,7 @@ tmpfs 删掉，三者是这条链的组成部分（契约见
 | MONGODB_URI / 口令     | 需同步改 Mongo 账户，属数据库运维动作                                        | 不适用                     |
 | MONGO_KEYFILE          | 副本集内部认证凭据；单节点重启即生效，**多成员必须同批替换**（见下）         | 否                         |
 | METRICS_TOKEN          | `/metrics` 的 Bearer 令牌；旧令牌立即失效（Prometheus 需同步换读同一份文件） | 否                         |
+| 备份 GPG 密钥          | 新归档用新公钥加密；旧私钥必须保留到所有旧归档过保留期，否则旧备份不可恢复   | 否（保留旧私钥）           |
 
 `MONGO_KEYFILE` 一行的机制补笔：该文件由 compose 的 `mongo_keyfile` secret 挂载，
 mongod 启动前由 entrypoint 复制到 `/tmp/mongo.key` 并收紧到 0400
@@ -100,6 +101,16 @@ mongod 启动前由 entrypoint 复制到 `/tmp/mongo.key` 并收紧到 0400
 `bearer_token_file`，须指向同一份文件并重启 prometheus（shipped 配置以容器私网
 来源放行，不依赖令牌；令牌用于反代/跨网段抓取）。
 
+### 备份 GPG 密钥轮换（P1-4）
+
+备份归档的收件人由 `BACKUP_GPG_RECIPIENT` 指定。轮换步骤：
+
+1. 在离线/受控机器生成新密钥对（步骤见 `deployment/backup-encryption.md`），导出公钥；
+2. 把新公钥导入备份宿主机，更新部署环境/cron 的 `BACKUP_GPG_RECIPIENT` 为新指纹；
+3. **旧私钥不得立即销毁**：旧归档仍在 `RETENTION_DAYS` 保留期内，删掉旧私钥等于把这段窗口的备份变成不可恢复的密文。旧私钥至少保留到"最后一份旧归档被清理"之后，并在密钥台账登记 key id、启用/停用日期；
+4. 轮换后各做一次恢复演练：一份旧归档用旧私钥、一份新归档用新私钥，均需通过 sha256 校验并完成 `mongorestore --dryRun`；
+5. 旧公钥可从备份宿主机移除，但旧私钥的托管记录与销毁审批必须留档。
+
 `LOGIN_ECDH_PRIVATE_KEY` 一行的机制补笔：该私钥由 compose 的
 `login_ecdh_private_key` secret 经 `LOGIN_ECDH_PRIVATE_KEY_FILE` 注入
 （`src/config/secrets.js` 的 `FILE_BACKED_SECRETS` 在列，`docker-compose.yml`
@@ -114,19 +125,21 @@ mongod 启动前由 entrypoint 复制到 `/tmp/mongo.key` 并收紧到 0400
 服务端日志的 `publicKeySha256` 字段。另注意静态私钥无前向保密：一旦泄露须按
 口令泄露处置（强制改密），预案见 `SECURITY.md`「登录口令加密的密钥管理」。
 
-### ⚠️ HMAC_SECRET 的五重影响：请按这张表读，不要按小节读
+### ⚠️ HMAC_SECRET 的六重影响：请按这张表读，不要按小节读
 
-上表 HMAC_SECRET 一行只写了审计链。**`HMAC_SECRET` 在本仓有五个消费点**，
-其中只有第 1 个有迁移工具——另外四个换钥后都没有迁移手段（第 2~4 个**静默失效**，
-第 5 个会让检查点核验**全量报 signature_invalid**）：
+上表 HMAC_SECRET 一行只写了审计链。**`HMAC_SECRET` 在本仓有六个消费点**，
+其中只有第 1 个有迁移工具——另外五个换钥后都没有迁移手段（第 2~4 个**静默失效**，
+第 5 个会让检查点核验**全量报 signature_invalid**，第 6 个只会让在途的升级请求
+被代理拒绝执行——**可自愈**，但错误的换钥时机仍会卡住一次发布）：
 
-| #   | 消费点（路径按仓库根写全，行号会漂移、判据是文件） | 用途                      | 轮换后                 | 迁移手段                                       |
-| --- | -------------------------------------------------- | ------------------------- | ---------------------- | ---------------------------------------------- |
-| 1   | `src/utils/auditChain.js:64`                       | 审计记录 `hmac` 字段      | 存量记录 hmac 全部失配 | ✅ `scripts/resign-audit-hmac.js`（重签）      |
-| 2   | `src/utils/passwordHistory.js:64`                  | 口令复用历史摘要的 pepper | 历史长度归零           | ❌ 无（没有明文就无法重算）                    |
-| 3   | `src/services/mfaService.js:29`                    | **备用恢复码**的 pepper   | **全部恢复码失效**     | ❌ 无                                          |
-| 4   | `src/utils/encryption.js:189`                      | `HMACSigner` 数据签名密钥 | 存量签名全部失配       | ❌ 无                                          |
-| 5   | `src/services/auditChainCheckpoint.js:44`          | 审计链检查点签名          | 存量检查点全部验签失败 | ❌ 无（轮换前留档、轮换后另起文件，见第 5 点） |
+| #   | 消费点（路径按仓库根写全，行号会漂移、判据是文件） | 用途                                   | 轮换后                             | 迁移手段                                               |
+| --- | -------------------------------------------------- | -------------------------------------- | ---------------------------------- | ------------------------------------------------------ |
+| 1   | `src/utils/auditChain.js:64`                       | 审计记录 `hmac` 字段                   | 存量记录 hmac 全部失配             | ✅ `scripts/resign-audit-hmac.js`（重签）              |
+| 2   | `src/utils/passwordHistory.js:64`                  | 口令复用历史摘要的 pepper              | 历史长度归零                       | ❌ 无（没有明文就无法重算）                            |
+| 3   | `src/services/mfaService.js:29`                    | **备用恢复码**的 pepper                | **全部恢复码失效**                 | ❌ 无                                                  |
+| 4   | `src/utils/encryption.js:189`                      | `HMACSigner` 数据签名密钥              | 存量签名全部失配                   | ❌ 无                                                  |
+| 5   | `src/services/auditChainCheckpoint.js:44`          | 审计链检查点签名                       | 存量检查点全部验签失败             | ❌ 无（轮换前留档、轮换后另起文件，见第 5 点）         |
+| 6   | `src/services/upgradeService.js`                   | 升级请求签名（应用签发、宿主代理验签） | 在途请求验签失败、被移入 rejected/ | ❌ 无需迁移（请求 30 分钟内过期，重发即可；见第 6 点） |
 
 > **这张表是单一来源**：`src/tests/config/hmacSecretConsumersSingleSource.test.js`
 > 会扫描 `src/`（排除测试与配置装载面）下所有 `HMAC_SECRET` / `hmacSecret` 的消费点，
@@ -208,6 +221,20 @@ ALLOWED_SOURCE_DB=<库名> MONGODB_URI_FILE=./secrets/mongodb_uri \
 旧文件若留在默认路径，此后每次 `verify` 都会全红——一个永远红的校验会很快
 被当成噪声忽略，等于把锚点废掉。
 
+#### 第 6 点：升级请求签名（唯一「可自愈」的消费点）
+
+`services/upgradeService.js` 用 `HMAC_SECRET` 给**应用侧签发的升级请求**签名
+（域分隔前缀见 `services/upgradeRequestSignature.js`），宿主机上的
+`scripts/hotUpgradeAgent.js` 在执行前用同一把钥验签，并重新校验摘要与白名单。
+
+**换钥后**：队列里尚未被代理领取的请求验签失败，被移入 `rejected/`——
+它们本来也不会被执行（代理会再校验一次白名单），所以**没有数据面损失**。
+
+**轮换时的操作**：无需迁移。只要应用与代理**同批换钥**（同一份
+`HMAC_SECRET`），最多让一次在途升级请求被拒；请求 30 分钟内过期，重发即可。
+劫持队列目录也换不来执行权：代理只认 digest + 白名单，还要过签名——这正是把
+签名放在请求文件里的原因。
+
 ## AES_SECRET_KEY 轮换（必须先迁数据）
 
 ```bash
@@ -226,7 +253,7 @@ MONGODB_URI_FILE=./secrets/mongodb_uri AES_SECRET_KEY_FILE=./secrets/aes_secret_
   ALLOWED_SOURCE_DB=<库名> node scripts/migrate-mfa-secret.js --new-key-file ./secrets/aes_secret_key.new --apply
 
 # 2b. 同一把 AES_SECRET_KEY 还派生 PII 子密钥（User.phone / User.email /
-#     FireAlarm.reporter.phone，见 src/utils/piiCrypto.js）——必须一起重加密。
+#     FireAlarm.reporter.phone / UserAvatar.data，见 src/utils/piiCrypto.js）——必须一起重加密。
 #     AES_SECRET_KEY_FILE 指向**新**钥（写入侧），旧钥只经 PII_ROTATION_OLD_AES_KEY
 #     传给脚本（该变量没有 *_FILE 形态，用命令替换避免进 argv）。
 #     漏掉这一步：换钥后手机号/邮箱无法解密，且 migrate-mfa-secret 的"成功"报告
@@ -290,9 +317,64 @@ echo "退出码 $?"
 
 ## JWT 双密钥轮换
 
-直接替换 `secrets/jwt_secret` 与 `secrets/jwt_refresh_secret` 并重启即可：
+有两种方式，按"能否接受全员重新登录"选择：
+
+### 方式一：直接替换（会踢下线）
+
+直接替换 `secrets/jwt_secret` 与 `secrets/jwt_refresh_secret` 并重启：
 所有存量令牌失效、用户重新登录，无数据迁移。建议选低峰期执行；
 `tokenVersion`/黑名单机制不受影响（黑名单存的是 tokenHash，令牌失效后自然过期）。
+
+### 方式二：kid 重叠轮换（P2-3，不踢下线）
+
+签发钥写进 JWT header 的 `kid`，验签按 kid 选钥；新旧密钥在集合里并存，
+旧令牌自然过期后再删旧钥。环境变量（均为可选，四项成组使用）：
+
+| 变量                                              | 含义                                             |
+| ------------------------------------------------- | ------------------------------------------------ |
+| `JWT_SECRETS`                                     | JSON 对象，access 令牌的 `kid → secret` 集合     |
+| `JWT_CURRENT_KID`                                 | 当前签发 access 令牌使用的 kid，必须存在于集合中 |
+| `JWT_REFRESH_SECRETS` / `JWT_REFRESH_CURRENT_KID` | refresh 侧同构                                   |
+
+执行顺序（access 与 refresh 同步做，两套 TTL 不同则各自按自己的节奏）：
+
+1. **加新钥**：把新密钥加入 `JWT_SECRETS`（旧钥保留），`JWT_CURRENT_KID`
+   指向新钥，重启。此后新签发的令牌带 `kid=<新 kid>`；旧令牌（带旧 kid 的）
+   与轮换前无 kid 的历史令牌都仍能验签——**无 kid 令牌固定回退
+   `JWT_SECRET` / `JWT_REFRESH_SECRET`，所以这两项在旧令牌全部过期前不要改动**。
+2. **等过期**：至少等待一个 `JWT_REFRESH_EXPIRE`（默认 7d）。
+   access 令牌较短，但 refresh 仍可能被旧钥签出新的 access，必须按最长的算。
+3. **删旧钥**：从 `JWT_SECRETS` 移除旧 kid 并重启。此后带旧 kid 的令牌
+   一律按「未知 kid」拒绝（**不会**回退当前钥——否则删钥只是注释）。
+   确认方式：用一枚轮换前保存的旧 refresh 令牌请求 `/api/auth/refresh`，应得 401。
+
+4. **关掉无 kid 的历史令牌**（可选，但「旧钥泄露」时必做）：带 `kid` 的令牌由集合裁决，
+   无 `kid` 的令牌固定回退 `JWT_SECRET` / `JWT_REFRESH_SECRET`——只要那两项还在，
+   泄露的旧钥就能一直签出无 kid 令牌。把对应项清空即可：`keyForHeader` 返回 null、
+   验签抛 `UNKNOWN_KID`、请求得 401 `AUTH_TOKEN_INVALID`。单密钥轮换（方式一）关不掉
+   这条路，它只能靠全员重新登录——这也是方式二相对方式一的实质收益之一。
+   注意：**配了 `JWT_SECRETS` 之后 `JWT_SECRET` 才算可选**（`collectSecretErrors` 不再
+   强制其强度），未配集合时仍然必填，否则等于不带密钥启动。
+
+启动校验（生产，`src/config/validate.js` 的 `collectJwtRotationErrors`）会拒绝：
+JSON 无法解析、集合为空或含空 kid/secret、任一密钥弱于 32 字符、
+`*_CURRENT_KID` 未设置或不在集合中、access 与 refresh 两侧出现同值密钥。
+配置错误不会静默退回单密钥——那种"降级"会让新钥从没被用上、旧钥永远删不掉。
+
+留痕：生产启动时会比较当前生效的签发 kid（access/refresh 两域）与上次启动登记的
+基线（`SystemConfig` 的 `jwtSigningKeyIds`，只存 kid、不存密钥），发生变化即写一条
+`jwt_key_rotated` 审计，reason 形如 `access k1 → k2，refresh r1 → r2`。
+首次启动只登记基线不落审计；连续重启不会重复记账；多副本并发启动只有一个副本记录。
+因此方式二第 1 步重启后审计页应出现一条 `jwt_key_rotated`（reason 含前后 kid）；
+第 3 步删旧钥不改变当前签发位，**不会**产生该事件（删除动作以变更流程留痕）。
+方式一直换 `JWT_SECRET` 不经过 kid，同样不产生该事件。
+
+> 部署注意：`JWT_SECRETS` 是 JSON 字符串，目前只能经环境变量注入，尚未纳入
+> `<NAME>_FILE` 的 compose secrets 管道（`FILE_BACKED_SECRETS`）。
+> 这与本手册"密钥不进 environment"的原则存在偏差，属已知缺口：
+> 启用方式二前应确认宿主机的 compose 环境注入面（`docker inspect` /
+> `docker compose config`）不会把密钥带进日志或镜像层；不需要零停机轮换时，
+> 优先用方式一。
 
 ## 收尾检查清单
 

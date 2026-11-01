@@ -288,6 +288,21 @@
                 </div>
               </el-form-item>
 
+              <!-- 一-7：隐私告知同意是本步的**必填**项（后端 privacyConsent 必须布尔 true），
+                   不是装饰性的勾选框；勾选前可点开完整告知，文案与 CONSENT_SCOPES 的 notice 项一致 -->
+              <el-form-item prop="privacyConsent" class="register-card__consent">
+                <el-checkbox id="privacyConsent" v-model="registerForm.privacyConsent">
+                  {{ $t('register.privacyConsentLabel') }}
+                </el-checkbox>
+                <button
+                  type="button"
+                  class="register-card__consent-open"
+                  @click="privacyNoticeVisible = true"
+                >
+                  {{ $t('register.privacyConsentOpen') }}
+                </button>
+              </el-form-item>
+
               <!-- 信息核对（D-2 拆为 RegisterSummary 组件，列表项由父级传入） -->
               <RegisterSummary :items="summaryItems" />
             </div>
@@ -325,6 +340,34 @@
         </div>
       </div>
     </div>
+    <!-- 隐私告知全文：告知内容必须**可读**才谈得上明示同意，故与勾选框同屏可达。
+         版本号由后端同意记录同一常量决定（services/consentService.PRIVACY_NOTICE_VERSION），
+         界面不另抄一份日期，避免"告知已改版而界面还显示旧版" -->
+    <el-dialog
+      v-model="privacyNoticeVisible"
+      :title="$t('register.privacyNoticeTitle', { version: PRIVACY_NOTICE_VERSION })"
+      width="560px"
+      align-center
+    >
+      <p class="privacy-notice__intro">{{ $t('register.privacyNoticeIntro') }}</p>
+      <h4 class="privacy-notice__heading">{{ $t('register.privacyNoticeScopeTitle') }}</h4>
+      <ul class="privacy-notice__list">
+        <li v-for="key in privacyNoticeScopes" :key="key">
+          {{ $t(`register.privacyNoticeScopes.${key}`) }}
+        </li>
+      </ul>
+      <p class="privacy-notice__para">{{ $t('register.privacyNoticeRetention') }}</p>
+      <p class="privacy-notice__para">{{ $t('register.privacyNoticeRights') }}</p>
+      <template #footer>
+        <button
+          type="button"
+          class="glass-btn glass-btn--primary glass-btn--sm"
+          @click="acceptPrivacyNotice"
+        >
+          {{ $t('register.privacyNoticeClose') }}
+        </button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -345,6 +388,7 @@ import { usePointerGradient } from '@/composables/usePointerGradient'
 // D-2：强度条与信息核对拆为子组件，步骤切换动效拆为组合式函数
 import PasswordStrengthMeter from '@/components/PasswordStrengthMeter.vue'
 import RegisterSummary from '@/components/RegisterSummary.vue'
+import { PRIVACY_NOTICE_VERSION, PRIVACY_NOTICE_SCOPES } from '@/utils/privacyNotice'
 import { useStepTransition } from '@/composables/useStepTransition'
 import {
   User,
@@ -364,6 +408,7 @@ const router = useRouter()
 const registerRootRef = ref(null)
 usePointerGradient(registerRootRef)
 
+const privacyNoticeVisible = ref(false)
 const loading = ref(false)
 // 提交重入锁：与 loading 分开，**同步**置位。loading 要等整表异步校验通过才置位，
 // 连点时后面的点击早已越过 loading 判断（实测同一 tick 三次点击发出 3 个注册请求，
@@ -385,6 +430,7 @@ const registerForm = reactive({
   phone: '',
   department: '',
   captchaText: '',
+  privacyConsent: false,
 })
 
 const steps = computed(() => [
@@ -393,15 +439,23 @@ const steps = computed(() => [
   { key: 'confirm', title: t('register.stepConfirm'), desc: t('register.stepConfirmDesc') },
 ])
 
-// 各步骤所辖字段：nextStep 只校验当前步，避免「第 1 步就报第 3 步验证码没填」
+// 各步骤所辖字段：nextStep 只校验当前步，避免「第 1 步就报第 3 步验证码没填」；一-7 的同意勾选恒校验
 const STEP_FIELDS = [
   ['username', 'email', 'password', 'confirmPassword'],
   ['realName', 'phone', 'department'],
-  ['captchaText'],
+  ['privacyConsent', 'captchaText'],
 ]
 
 // 口令逐条规则与强度分档已随强度条迁入 PasswordStrengthMeter 组件（D-2），
 // 该组件与提交校验共用 evaluatePasswordRules 判据，保持同源
+
+/** 告知范围清单来自 utils/privacyNotice（与后端 CONSENT_SCOPES 的 notice 项对拍），不在此手抄 */
+const privacyNoticeScopes = PRIVACY_NOTICE_SCOPES
+
+/** 告知弹窗的「我已阅读」只关闭弹窗，**不代勾**：同意必须由用户自己在勾选框上作出 */
+const acceptPrivacyNotice = () => {
+  privacyNoticeVisible.value = false
+}
 
 const summaryItems = computed(() => [
   { label: t('auth.username'), value: registerForm.username },
@@ -441,6 +495,16 @@ const rules = computed(() => ({
   // realName / phone / department 后端均为 optional，此处不设 required，
   // 只保留格式约束（手机号）——写 required:false + message 只会让界面看起来像必填
   phone: [{ pattern: /^1[3-9]\d{9}$/, message: t('validation.phonePattern'), trigger: 'blur' }],
+  // 一-7：必须是布尔 true（后端 .custom(v => v === true) 同口径）。用 validator 而非
+  // required:true —— el-checkbox 的 false 会被 required 判成「有值」，勾选框形同虚设。
+  privacyConsent: [
+    {
+      validator: (rule, value, callback) => {
+        value === true ? callback() : callback(new Error(t('register.privacyConsentRequired')))
+      },
+      trigger: 'change',
+    },
+  ],
   captchaText: [
     { required: true, message: t('validation.captchaRequired'), trigger: 'blur' },
     { len: 4, message: t('validation.captchaLen'), trigger: 'blur' },
@@ -517,6 +581,7 @@ onMounted(() => {
 
 /** 只校验当前步骤字段；未开启验证码时第 3 步无待校验字段，直接放行 */
 const validateStep = async (index) => {
+  // captchaText 仅开启验证码时校验；privacyConsent 恒校验（同意是注册前提，不随开关变化）
   const fields = STEP_FIELDS[index].filter((f) => f !== 'captchaText' || captchaEnabled.value)
   if (fields.length === 0) return true
   try {
@@ -644,6 +709,8 @@ const onRegister = async () => {
       realName: registerForm.realName,
       phone: registerForm.phone,
       department: registerForm.department,
+      // 一-7：明示同意，后端校验 v === true；缺省或非布尔会被 400 拒绝
+      privacyConsent: registerForm.privacyConsent,
     }
     let enc
     try {
@@ -1212,6 +1279,48 @@ html.dark .register-steps__item.is-done .register-steps__index {
 
 .register-card__reset:active {
   opacity: 0.6;
+}
+
+/* ===== 隐私告知（一-7）===== */
+.register-card__consent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+}
+
+.register-card__consent-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--xf-primary);
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.register-card__consent-open:focus-visible {
+  outline: 2px solid var(--xf-primary);
+  outline-offset: 2px;
+}
+
+.privacy-notice__intro,
+.privacy-notice__para {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.privacy-notice__heading {
+  margin: 16px 0 8px;
+  font-size: 14px;
+}
+
+.privacy-notice__list {
+  margin: 0 0 12px;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.8;
 }
 
 /* ===== 验证码 ===== */

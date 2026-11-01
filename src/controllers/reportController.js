@@ -15,7 +15,7 @@ const { getDataScope } = require('../middleware/rbac');
 const { hasPermission } = require('../utils/permissionHelper');
 // 审计数据范围判据的唯一来源（列表与 CSV 导出用的就是它）
 const { applyAuditDataScope } = require('../services/auditScopeFilter');
-const { isValidDateParam, buildDateRangeFilter } = require('../utils/helpers');
+const { isValidDateParam, isDateRangeReversed, buildDateRangeFilter } = require('../utils/helpers');
 const { BUSINESS_TIMEZONE } = require('../constants/timezone');
 
 /**
@@ -48,11 +48,11 @@ const resolveQueryTimezone = (req, res) => {
  * @returns {boolean} true = 已写出 400 响应，调用方短路
  */
 const rejectInvalidReportDates = (res, startDate, endDate) => {
-  if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
-    ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
-    return true;
-  }
-  return false;
+  const badFormat = !isValidDateParam(startDate) || !isValidDateParam(endDate);
+  const badRange = !badFormat && isDateRangeReversed(startDate, endDate);
+  if (!badFormat && !badRange) return false;
+  ApiResponse.codeError(res, badRange ? 'DATE_RANGE_INVALID' : 'DATE_PARAM_INVALID');
+  return true;
 };
 const {
   scopeFilterFor,
@@ -68,6 +68,8 @@ const {
 // 请求方自己写的 X-Forwarded-For，读 PII 的人可以顺手挑一个写进取证记录。
 const { clientIpForSecurityDecision } = require('../utils/ipUtils');
 const { streamExportRows, writeExportWorkbook } = require('../services/reportWorkbookService');
+// A-8：未脱敏导出的水印与追溯号（与审计同号）
+const { piiExportWatermarkFor } = require('../services/piiExportWatermark');
 // P-2：导出并发闸。上限 2 + 有界排队，超限回 429（EXPORT_BUSY + Retry-After）。
 // 闸本身的状态机与指标见该模块头部注释——它必须能被独立证伪，所以不塞进本文件。
 const { acquireExportSlot, ExportBusyError } = require('../services/exportConcurrency');
@@ -163,15 +165,12 @@ const resolveExportMasking = async (req, type) => {
 };
 
 /**
- * A4：全文（未掩码）导出是**提权路径**，单独留痕。
- *
- * 掩码档是默认行为、已由全局审计中间件的 `report_export` 覆盖，再写一条只会淹没
- * 真正的提权事件；全文导出才是需要能回答"谁在什么时候导出了含 PII 的报表"的那次。
- * 留痕放在**写出成功之后**：中断的下载不算"导出了"（writeExportWorkbook 对中断抛错，
- * 走不到这里）。失败吞错不重抛，见 auditUnmaskedPiiExport 的注释。
+ * A4：全文（未掩码）导出是**提权路径**，单独留痕。掩码档已由全局中间件的 report_export
+ * 覆盖，再写一条只会淹没真正的提权事件；留痕在**写出成功之后**（中断的下载不算"导出了"，
+ * 见 auditUnmaskedPiiExport）。判据取 watermark：非空 ⇔ 本次确为未脱敏的姓名报表。
  */
-const auditFullPiiExportIfAny = async (req, type, total, maskPii) => {
-  if (maskPii || !PII_NAME_EXPORT_TYPES.includes(type)) return;
+const auditFullPiiExportIfAny = async (req, type, total, watermark) => {
+  if (!watermark) return;
   await auditUnmaskedPiiExport({
     userId: req.user.userId,
     username: req.user.username,
@@ -179,6 +178,8 @@ const auditFullPiiExportIfAny = async (req, type, total, maskPii) => {
     total,
     ip: clientIpForSecurityDecision(req),
     userAgent: req.get('user-agent'),
+    traceId: watermark.traceId,
+    purpose: watermark.purpose,
   });
 };
 
@@ -351,14 +352,25 @@ const exportReport = asyncHandler(async (req, res) => {
     // A4/L-17：携带真实姓名的报表默认脱敏；GET 恒为掩码档，全文导出只经
     // POST /export/pii 且需 pii:export + 二次验证（全文导出单独留痕）
     const maskPii = await resolveExportMasking(req, type);
+    // 导出语言跟随界面：?lang=en 时工作表名/列头/枚举标签/截断脚注都用英文，
+    // 缺省或未知值保持中文（既有行为不变）。
+    const lang = String(req.query.lang || '')
+      .toLowerCase()
+      .startsWith('en')
+      ? 'en'
+      : 'zh';
+    // A-8：未脱敏导出的水印（掩码档为 null，四路同号见 piiExportWatermark 模块头）
+    const watermark = piiExportWatermarkFor(req, { type, maskPii, lang });
     await writeExportWorkbook(res, {
       type,
       query,
       total: exportTotal,
       ...collationOptions,
       maskPii,
+      lang,
+      watermark,
     });
-    await auditFullPiiExportIfAny(req, type, exportTotal, maskPii);
+    await auditFullPiiExportIfAny(req, type, exportTotal, watermark);
   });
 });
 
@@ -371,9 +383,7 @@ module.exports = {
   // 时区参数解析（测试钩子）：非法 tz 的 400 分支经 HTTP 需要 Mongo 之外的
   // 完整路由栈，直接单测该纯函数更便宜且可证伪
   resolveQueryTimezone,
-  // 测试钩子（与 auditBuffer.__resetForTest 同惯例）：O-1 容量上限分支
-  // 无法经 HTTP 在合理开销内填满 500 键，测试直接驱动缓存与保护函数；
-  // streamExportRows 重导出自 service（B-4 两阶段排序的单测入口）
+  // 测试钩子（与 auditBuffer.__resetForTest 同惯例）：O-1 容量上限分支无法经 HTTP 在合理开销内填满 500 键，测试直接驱动缓存与保护函数；streamExportRows 重导出自 service（B-4 两阶段排序的单测入口）
   __test: {
     ...dashboardService.__test,
     streamExportRows,

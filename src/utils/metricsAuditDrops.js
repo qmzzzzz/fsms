@@ -24,11 +24,13 @@
 // 缓冲记录（WAL 里通常还有行可重放），这里丢的是**已经向调用方回成功、
 // 且已 fsync 过**的敏感操作审计：`.discarded` 永不回灌 ⇒ 永久不入库。
 // 因此它必须能触发 AuditRecordsDropped（critical），而不是只出现在合规面板 JSON 里。
+// `wal_trim_ordinary`（第十一轮 D5 补）：WAL 超限裁剪的**普通行**此前只累加 walDroppedLines（JSON/面板），Prometheus 侧无声；`.discarded` 永不回灌 ⇒ 缓冲里已没有的那些同样永久丢失。与 `wal_durable_lost` 分开：前者“取证缺失”、后者“承诺缺失”。
 const AUDIT_DROP_REASONS = [
   'buffer_overflow',
   'poison_doc',
   'precast',
   'wal_durable_lost',
+  'wal_trim_ordinary',
   'other',
 ];
 const auditDrops = new Map(); // reason -> 累计丢弃条数
@@ -36,7 +38,7 @@ const auditDrops = new Map(); // reason -> 累计丢弃条数
 /**
  * 审计记录丢弃计数（auditBuffer 调用）
  *
- * @param {'buffer_overflow'|'poison_doc'|'precast'} reason 闭合集合外的取值一律并入 other
+ * @param {'buffer_overflow'|'poison_doc'|'precast'|'wal_durable_lost'|'wal_trim_ordinary'} reason 闭合集合外的取值一律并入 other
  * @param {number} [n=1] 本次丢弃条数；非正数不记账（"丢了 0 条"不该出现，
  *   出现即调用方算错，静默接受会让计数变成无法解释的漂移）
  */
@@ -53,10 +55,8 @@ function incAuditDrop(reason, n = 1) {
 /**
  * 审计缓冲积压量（gauge）：**拉取时取值**，不由 auditBuffer 在每条变更点上上报。
  *
- * 为什么不做成 push：gauge 是时点量，而缓冲长度会在 push / flush / 回退 /
- * 裁剪 / 重放等**多处**变化，靠调用方逐个同步点上报，漏掉任何一条路径就得到
- * 一个悄悄偏小的数——那比没有这个指标更糟（面板会替"丢数据"作证清白）。
- * 拉取时读一次从构造上消灭了这一类漏报。
+ * 为什么不做成 push：gauge 是时点量，而缓冲长度会在 push / flush / 回退 / 裁剪 / 重放等**多处**变化，
+ * 靠调用方逐个同步点上报，漏掉任何一条路径就得到一个悄悄偏小的数（面板会替"丢数据"作证清白）；拉取时读一次从构造上消灭这一类漏报。
  *
  * 惰性 require 断开 util→service 的加载环（auditBuffer 反向 require metrics），
  * 且取不到时回 0 而不是抛错：抓取指标绝不能影响业务。

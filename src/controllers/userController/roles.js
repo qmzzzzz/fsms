@@ -179,9 +179,8 @@ const assignRoles = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'USER_SCOPE_FORBIDDEN');
   }
 
-  // 此前仅校验"被分配角色"的层级，未校验"目标用户"的层级，
-  // 导致低层级管理员可剥离同级/更高级用户（含内置超管）的角色
-  // 修复：目标用户层级保护（口径对齐 updateUser/deleteUser/toggleUserLock）
+  // 目标用户层级必须一并校验：否则低层级管理员可剥离同级/更高级用户（含内置超管）的角色，
+  // 口径对齐 updateUser/deleteUser/toggleUserLock。
   const targetUserRoles = await userService.findRolesByIds(user.roles, 'level code isBuiltIn');
   const targetUserMaxLevel = maxRoleLevel(targetUserRoles);
 

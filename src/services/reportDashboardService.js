@@ -103,7 +103,10 @@ const collectDashboardFacets = async (filters, now, startOfDay, endOfDay) => {
           $facet: {
             total: [{ $count: 'n' }],
             pending: [{ $match: { status: 'pending' } }, { $count: 'n' }],
-            today: [{ $match: { occurredAt: { $gte: startOfDay } } }, { $count: 'n' }],
+            today: [
+              { $match: { occurredAt: { $gte: startOfDay, $lte: endOfDay } } },
+              { $count: 'n' },
+            ],
             byLevel: [{ $group: { _id: '$level', count: { $sum: 1 } } }],
             avgResponse: [
               { $match: { dispatchedAt: { $ne: null }, receivedAt: { $ne: null } } },
@@ -149,7 +152,7 @@ const collectDashboardFacets = async (filters, now, startOfDay, endOfDay) => {
               {
                 $match: {
                   $or: [
-                    { actualStartTime: { $gte: startOfDay } },
+                    { actualStartTime: { $gte: startOfDay, $lte: endOfDay } },
                     { planStartTime: { $gte: startOfDay, $lte: endOfDay } },
                   ],
                 },

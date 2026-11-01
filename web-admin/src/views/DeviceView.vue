@@ -106,13 +106,41 @@
         </div>
       </div>
       <!-- 首屏骨架占位；数据到达后直接替换（带数据刷新时走表格内 loading） -->
+      <!-- P1③：加载失败必须有持久痕迹。此前 catch 里 tableData=[] + total=0，
+           界面与「台账里确实没有设备」完全一致，资产判断会被引向错误结论。 -->
+      <el-alert
+        v-if="list.failed.value"
+        :title="list.stale.value ? $t('common.staleData') : $t('common.listLoadFailed')"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="load-error"
+      >
+        <template #default>
+          <button
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            :disabled="loading"
+            @click="loadData"
+          >
+            {{ $t('common.retry') }}
+          </button>
+        </template>
+      </el-alert>
       <GlassSkeleton
         v-if="loading && tableData.length === 0"
         variant="table"
         :rows="6"
         :cols="['6%', '20%', '14%', '20%', '14%', '10%', '16%']"
       />
-      <el-table v-else v-loading="loading" :data="tableData" border stripe style="width: 100%">
+      <el-table
+        v-else-if="list.showTable.value"
+        v-loading="loading"
+        :data="tableData"
+        border
+        stripe
+        style="width: 100%"
+      >
         <el-table-column type="index" label="#" width="60" />
         <el-table-column prop="deviceName" :label="$t('device.deviceName')" min-width="140" />
         <el-table-column prop="deviceCode" :label="$t('device.deviceCode')" width="130" />
@@ -181,13 +209,21 @@
           </template>
         </el-table-column>
       </el-table>
-      <div class="pagination">
+      <div v-if="list.showTable.value" class="pagination">
+        <!-- P1④：total 未知时不得用当前页长度顶替（会显示「共 N 条 / 1 页」，第 2 页永不出现） -->
+        <span v-if="!list.totalKnown.value" class="total-unknown">
+          {{ $t('common.totalUnknown') }}
+        </span>
         <el-pagination
           v-model:current-page="page.current"
           v-model:page-size="page.size"
-          :total="page.total"
+          :total="list.total.value ?? 0"
           :page-sizes="[10, 20, 50]"
-          layout="total, sizes, prev, pager, next, jumper"
+          :layout="
+            list.totalKnown.value
+              ? 'total, sizes, prev, pager, next, jumper'
+              : 'sizes, prev, pager, next, jumper'
+          "
           background
           @current-change="loadData"
           @size-change="handleSearch"
@@ -368,6 +404,8 @@ import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { Box, Calendar, Timer, Tools, WarningFilled } from '@element-plus/icons-vue'
 import { ElRadioGroup, ElRadio } from 'element-plus/es/components/radio/index.mjs'
 import { api, isCanceledError } from '@/utils/api'
+import { useListLoadState } from '@/composables/useListLoadState'
+import { createSubmissionKey } from '@/utils/idempotency'
 import { localDateStr as sharedLocalDateStr } from '@/utils/datetime'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
@@ -419,11 +457,25 @@ const statusText = (s) =>
 // 本地时区日期串（YYYY-MM-DD）：toISOString 按 UTC 取日期会导致跨日偏移。
 // 评价报告 #20：删除本文件的重复实现，统一走 utils/datetime 单一事实来源
 const localDateStr = sharedLocalDateStr
-// 编辑回填：已是 YYYY-MM-DD 字符串则原样使用，Date/时间戳按本地时区取日期部分
+// 严格的 YYYY-MM-DD 判定：正则只挡格式，还要回验日历（2026-13-45 这类串能过正则却不是日期）
+const isDateOnly = (v) => {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false
+  const [y, m, d] = v.split('-').map(Number)
+  const dt = new Date(y, m - 1, d)
+  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d
+}
+// 编辑回填：已是 YYYY-MM-DD 字符串则原样使用，Date/时间戳按本地时区取日期部分；
+// 解析不出来一律回空串（= 没有值），交给必填校验拦下。绝不把 NaN-NaN-NaN 塞进表单（P1⑤）。
 const toDateOnly = (value) => {
   if (!value) return ''
   if (value instanceof Date) return localDateStr(value)
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : localDateStr(new Date(value))
+  // 形状像日期的串必须走严格日历校验：new Date('2026-02-30') 会**静默滚到** 2026-03-02，
+  // 那等于替用户改了一个日期（比报错更糟）。只有非日期形状的串（ISO 时间戳）才交给 Date 解析。
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return isDateOnly(value) ? value : ''
+  }
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? '' : localDateStr(d)
 }
 const formatLocation = (loc) => {
   if (!loc) return ''
@@ -440,6 +492,9 @@ const dialog = reactive({
   visible: false,
   isEdit: false,
   submitting: false,
+  // 本次提交的幂等键（审计一-1）：设备 code 有唯一约束，双击的第二次会撞 E11000；
+  // 带上键后服务端把第二次识别为同一次提交并原样回放第一次结果。
+  submission: createSubmissionKey(),
   form: {
     _id: null,
     deviceCode: '',
@@ -459,7 +514,19 @@ const dialog = reactive({
 const dialogRules = computed(() => ({
   deviceName: [{ required: true, message: t('device.deviceName'), trigger: 'blur' }],
   deviceType: [{ required: true, message: t('messages.selectRequired'), trigger: 'change' }],
-  installDate: [{ required: true, message: t('device.installDate'), trigger: 'change' }],
+  installDate: [
+    { required: true, message: t('device.installDate'), trigger: 'change' },
+    {
+      // 必填只管"空没空"：这里补一条"是不是合法日期"，否则脏串（回填/手工编辑遗留）
+      // 仍能提交，后端 isISO8601 才 400，用户看到的是一次莫名其妙的保存失败。
+      validator: (_rule, value, callback) => {
+        if (value === '' || value === null || value === undefined) return callback()
+        const ok = value instanceof Date ? !Number.isNaN(value.getTime()) : isDateOnly(value)
+        return ok ? callback() : callback(new Error(t('device.installDateInvalid')))
+      },
+      trigger: 'change',
+    },
+  ],
 }))
 
 // 查询条件变更时回到第一页，避免停留在超出结果集的页码上看到空列表
@@ -470,10 +537,13 @@ const handleSearch = () => {
 
 // 竞态守卫：快速搜索/翻页时丢弃过期的旧响应，防止旧数据覆盖新结果
 const listGuard = useLatestRequest()
+// P1③/P1④ 共用三态契约（与 UserView 同一判据，禁止各视图重写一套）
+const list = useListLoadState()
 
 const loadData = async () => {
   const isCurrent = listGuard()
   loading.value = true
+  list.begin()
   try {
     const res = await api.devices.getList({
       page: page.current,
@@ -483,17 +553,27 @@ const loadData = async () => {
     })
     if (!isCurrent()) return
     const payload = res?.data?.data
-    tableData.value = Array.isArray(payload) ? payload : []
-    page.total = res?.data?.pagination?.total || tableData.value.length
+    const rows = Array.isArray(payload) ? payload : []
+    // P1④：total 缺失传 undefined（= 未知），不再用 rows.length 顶替
+    list.commit({ total: res?.data?.pagination?.total, count: rows.length })
+    tableData.value = rows
+    const clamped = list.clampPage(page.current, page.size)
+    if (clamped !== page.current) {
+      page.current = clamped
+      return loadData()
+    }
   } catch (e) {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
-    if (isCanceledError(e)) return
+    if (isCanceledError(e)) return list.abort()
     if (!isCurrent()) return
     // P2-3：加载失败只清态，**提示由 api.js 响应拦截器统一负责**（与 alarmView 同契约）。
     // 此前组件这里再弹一条 messages.loadFailed，同一次失败会弹两条：
     // 拦截器的具体文案（400/403/404/429/5xx/网络错误）+ 组件的泛化文案。
-    tableData.value = []
-    page.total = 0
+    //
+    // 但「只清态」不等于「把失败画成空台账」：交给三态契约判——无旧数据进 failed（表格让位），
+    // 有旧数据进 stale（保留 + 标注「上次数据」）。设备台账被当成空，用户会以为资产没了。
+    list.fail()
+    if (!list.showTable.value) tableData.value = []
   } finally {
     if (isCurrent()) loading.value = false
   }
@@ -519,6 +599,7 @@ const handleAdd = () => {
   dialog.form.installDate = localDateStr()
   dialog.form.checkCycle = 30
   dialog.form.remark = ''
+  dialog.submission.renew()
   dialog.visible = true
 }
 
@@ -596,7 +677,7 @@ const submitForm = async () => {
       await api.devices.update(dialog.form._id, payload)
       ElMessage.success(t('messages.updateSuccess'))
     } else {
-      await api.devices.create(payload)
+      await api.devices.create(payload, { headers: dialog.submission.header() })
       ElMessage.success(t('messages.createSuccess'))
     }
     dialog.visible = false
@@ -832,6 +913,16 @@ onMounted(refreshAll)
 </script>
 
 <style scoped>
+.load-error {
+  margin-bottom: var(--xf-spacing-md);
+}
+/* P1④：total 未知时的显式标注（不拿当前页长度冒充总数） */
+.total-unknown {
+  margin-right: var(--xf-spacing-sm);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-text-secondary);
+}
+
 .page {
   display: flex;
   flex-direction: column;

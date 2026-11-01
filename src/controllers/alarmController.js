@@ -14,7 +14,7 @@ const {
   isDepartmentValueAllowed,
 } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
-const { normalizePagination, isValidDateParam } = require('../utils/helpers');
+const { normalizePagination, isValidDateParam, isDateRangeReversed } = require('../utils/helpers');
 const logger = require('../utils/logger');
 const alarmService = require('../services/AlarmService');
 
@@ -94,6 +94,9 @@ const getAlarms = asyncHandler(async (req, res) => {
   // 日期格式校验：判据单源 helpers.isValidDateParam（裸 isNaN(new Date(x)) 会把 '123' 翻成公元 0122 年）
   if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
     return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
+  }
+  if (isDateRangeReversed(startDate, endDate)) {
+    return ApiResponse.codeError(res, 'DATE_RANGE_INVALID');
   }
 
   const dataScope = await getDataScope(req.user.userId);
@@ -424,6 +427,9 @@ const getAlarmStats = asyncHandler(async (req, res) => {
   const { startDate, endDate } = req.query;
   if (!isValidDateParam(startDate) || !isValidDateParam(endDate)) {
     return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
+  }
+  if (isDateRangeReversed(startDate, endDate)) {
+    return ApiResponse.codeError(res, 'DATE_RANGE_INVALID');
   }
   const dataScope = await getDataScope(req.user.userId);
   const stats = await alarmService.getAlarmStats(startDate, endDate, dataScope);

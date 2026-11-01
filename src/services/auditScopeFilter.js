@@ -8,6 +8,8 @@
 
 const mongoose = require('mongoose');
 const User = require('../models/User');
+const { withHoneypotExcluded } = require('../constants/honeypotAccounts'); // 部门成员集同样排除蜜罐：否则它会成为一个「永远不属于任何部门」的幽灵成员
+
 // 数据范围三件套直接取叶子模块（rbac.js 只是再导出）：经 rbac 取用会把本模块
 // 拉进 `securityAlert → auditScopeFilter → rbac → securityAlert` 的惰性环。
 const { getDataScope, isDataScopeDenied, deniedDataScope } = require('../middleware/dataScope');
@@ -53,7 +55,7 @@ const enforceDeptMembersLimit = () => {
 const getDepartmentMemberIds = async (department) => {
   const hit = deptMembersCache.get(department);
   if (hit && hit.expiresAt > Date.now()) return hit.ids;
-  const ids = await User.distinct('_id', { department });
+  const ids = await User.distinct('_id', withHoneypotExcluded({ department }));
   enforceDeptMembersLimit();
   deptMembersCache.set(department, { ids, expiresAt: Date.now() + DEPT_MEMBERS_CACHE_TTL_MS });
   return ids;

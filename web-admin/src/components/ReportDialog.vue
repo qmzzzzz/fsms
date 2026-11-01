@@ -152,10 +152,12 @@ const alarmTypeLabels = computed(() => makeAlarmTypeLabels(t))
 /** 候选 → 一行可读标签（id 只作为 option 的 value，不出现在界面上） */
 const labelOf = (item) => {
   if (item.kind === 'user') {
-    return item.name ? `${item.name}（${item.code}）` : item.code
+    return item.name ? t('common.entityWithCode', { name: item.name, code: item.code }) : item.code
   }
   if (item.kind === 'device') {
-    const base = item.name ? `${item.name}（${item.code}）` : item.code
+    const base = item.name
+      ? t('common.entityWithCode', { name: item.name, code: item.code })
+      : item.code
     return item.detail ? `${base} · ${item.detail}` : base
   }
   // 报警：编号 · 类型 · 位置（类型是后端稳定码，中文映射在前端 labelMaps）

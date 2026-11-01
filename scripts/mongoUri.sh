@@ -373,9 +373,108 @@ mongo_validate_uri() {
   # 门禁被值里的一条换行绕过，现场证据还声明相反。
   # 先补一个哨兵字符再比较：残串只可能是越界字节（可打印 ASCII 已被 tr 删掉），
   # 因此 "残串+哨兵" 等于哨兵 当且仅当 残串为空，判据无歧义。
-  if [ "$(printf '%s' "$_uri" | tr -d '\041-\176'; printf '~')" != '~' ]; then
-    printf 'Error: %s 含空白、换行或不可打印字符（应为单行纯 ASCII，特殊字符需 %%XX 转义）\n' \
+  # 判据的形态必须是**自己会失败**的那种，而不是靠一个「工具在不在」的探针兜着：
+  # 2026-10-30 第二轮审计实测过反例 —— 探针跑 `tr -d 'a'`（单字符集合、管道输入）通过，
+  # 判据跑 `tr -d '\041-\176'`（八进制区间集合）失败，于是 `$(…; printf '~')` 恰好等于 '~'，
+  # 换行注入的连接串照样 rc=0。「自证证明工具在」和「判据这一次能执行」不是同一件事。
+  # 现在改成**两个字节计数相比**（可打印字节数 vs 总字节数）：
+  #   · 干净值 ⇒ 两者相等；
+  #   · 值里有换行/空格/不可打印字节 ⇒ 可打印数 < 总数 ⇒ 拒绝；
+  #   · tr 任何形态失败 ⇒ 可打印数变成 0（wc 读空 stdin），而总数仍 > 0 ⇒ 一样拒绝。
+  # 即：工具的失败方向与判据的拒绝方向一致，不依赖任何前置探针；空值两者都是 0，由 scheme 判据兜底。
+  # 两个计数还要先做**形状校验**（非空 + 纯数字）：`[ "" -ne 0 ]` 在 bash 报 integer expected、
+  # 在 dash 报 Illegal number，条件取假 ⇒ 静默放行，那正是「拿数量当判据」的经典失效形态。
+  # 第四轮复攻（2026-10-30，第二轮）：上一版把 fail-open 从 tr 搬到了 wc（wc 打印 0 ⇒ 两个计数都是 0
+  # ⇒「相等」⇒ 放行）；补了固定串自检之后，**固定串本身又成了新的漏洞**：工具只要「对短输入正常、
+  # 对真实载荷退化」（实测：换行载荷 rc=0），自检与相等判据会一起被骗过。
+  # 所以判据不再依赖任何固定串，也不再是「两个数相等就放行」，而是对**真实载荷**做三条互补的绝对计数：
+  #   · 允许字节数 + 禁止字节数 == 总字节数（两条互补管道之和必须闭合；tr 不过滤 ⇒ 两边都等于总数 ⇒ 拒）；
+  #   · 禁止字节数 == 0（**直接数禁止字节**，内容相关退化在这条上藏不住）；
+  #   · `${#_uri}`（shell 内建）== 总字节数（非 ASCII 字节、以及字节计数说谎 ⇒ 拒）。
+  # 三条任一条不成立都拒；每条都只在"判不了/判到违禁"时触发，没有"猜着放行"的分支。
+  _uri_bytes=$(printf '%s' "$_uri" | wc -c | tr -d ' \t') || _uri_bytes=''
+  _uri_printable=$(printf '%s' "$_uri" | tr -cd '\041-\176' | wc -c | tr -d ' \t') || _uri_printable=''
+  _uri_other=$(printf '%s' "$_uri" | tr -cd '\000-\040\177-\377' | wc -c | tr -d ' \t') || _uri_other=''
+  case "$_uri_bytes" in
+    '' | *[!0-9]*)
+      printf 'Error: %s 校验未能完成：字节计数不可用（本机没有 wc/tr），拒绝放行\n' "$_src" >&2
+      return 1
+      ;;
+  esac
+  case "$_uri_printable" in
+    '' | *[!0-9]*)
+      printf 'Error: %s 校验未能完成：可打印字节计数不可用（本机没有 tr/wc），拒绝放行\n' "$_src" >&2
+      return 1
+      ;;
+  esac
+  case "$_uri_other" in
+    '' | *[!0-9]*)
+      printf 'Error: %s 校验未能完成：字节计数不可用（本机没有 tr/wc），拒绝放行\n' "$_src" >&2
+      return 1
+      ;;
+  esac
+  # `${#_uri}` 是 shell 内建：它与字节数不等 ⇔ 值里有非 ASCII 字节（多字节字符）⇒ 拒。
+  # 位置放在形状校验之后：字节数已经是"非空纯数字"，这条比较才有确定语义。
+  if [ "${#_uri}" != "$_uri_bytes" ]; then
+    printf 'Error: %s 含非 ASCII 字节（字节数与字符数不符），或字节计数不可用；两种情况都拒绝放行\n' \
       "$_src" >&2
+    return 1
+  fi
+  # 两条互补管道之和必须闭合到总字节数：tr 不过滤（退化成 cat、或只对短输入正常）时两边都等于总数，
+  # 和是 2 倍 ⇒ 这里立刻判「检测不可用」。这条用的是**真实载荷**，没有固定串可被绕。
+  if [ "$((_uri_printable + _uri_other))" -ne "$_uri_bytes" ]; then
+    printf 'Error: %s 校验未能完成：字节计数不可用（允许+禁止字节数之和 %s 与总字节数 %s 不符，tr 没有按判据过滤字节），拒绝放行\n' \
+      "$_src" "$((_uri_printable + _uri_other))" "$_uri_bytes" >&2
+    return 1
+  fi
+  if [ "$_uri_other" != 0 ]; then
+    printf 'Error: %s 含空白、换行或不可打印字符（应为单行纯 ASCII，特殊字符需 %%XX 转义），拒绝放行\n' \
+      "$_src" >&2
+    return 1
+  fi
+
+  # 第五道（第四轮复攻的第二形态）：不经过滤工具的**独立信息通道** —— `od` 的十六进制转储
+  # 在纯 shell 里逐 token 解析。tr 可以「对短输入正常、对真实载荷透传」（固定串自检就是栽在
+  # 这里），而 od 给的是原始字节、shell 的逐 token 判定不看长度也不看内容形态：
+  #   · token 数必须等于总字节数（od 说谎/空输出 ⇒ 立刻判「检测不可用」）；
+  #   · 每个 token 必须落在可打印 ASCII 区间（0x21-0x7E），一个越界就拒 —— 换行在这里无处可藏。
+  # 定位（摘腿探针已逐臂证实）：对「换行载荷」它是**冗余腿**——只摘它时 other≠0 臂仍拦住；
+  # 但当两条 tr 管道同时说谎且 wc 也说谎时，它是唯一不依赖 tr/wc 的信息通道（`od` 在列，
+  # 且 od 自身的 token 数与 wc/stat 再交叉一次）。保留它不是「多一道装饰」，是三通道互证。
+  # od 的输出是「每行前导空格 + 十六进制 token + 换行」：用 `for … in $var` 按默认 IFS
+  # （空格/制表/换行）逐 word 展开 —— 比手写 while/split 短，也不会把行尾换行当成 token。
+  _od_hex=$(printf '%s' "$_uri" | LC_ALL=C od -An -v -tx1 2>/dev/null) || _od_hex=''
+  _od_toks=0; _od_bad=0
+  _ifs_saved=$IFS
+  # 固定 IFS 只接受一种形态：**单引号字面量跨行**写出「换行 / 制表 / 空格」三字节。
+  #   · 不用 ANSI-C 引号 `$'...'`：不属 POSIX，busybox 与部分老 dash 不解释它，该行会退化
+  #     成 6 字节字面量（无换行）⇒ od 腿失明、fail-open（第七轮实测：hydrate rc=0 放行、
+  #     validate 对合法值全体误拒）；
+  #   · 也不用 `IFS=$(printf ...)`：命令替换吃掉行尾换行（要哨兵再剥），更要命的是给
+  #     `printf` 加了**可执行依赖**——`BASH_ENV` 里定义同名函数优先于内建（第八轮实测：
+  #     printf() 返回空格后 hydrate rc=0，含 NUL 文件被静默放行）。
+  # 字面量没有命令替换、不调用任何命令，注入无处下手，字节本身也看得见。
+  IFS='
+	 '
+  # 局部固定 IFS：word splitting 的分隔符集合不能随调用方环境漂移（本库被 source 进调用方 shell；
+  # 若调用方 IFS 不含换行，行尾 token 连换行一起切走、`case` 漏判 —— 2026-10-31 第六轮复攻实测：
+  # 同 shell IFS=' ' + 共谋 tr ⇒ 含 NUL 文件被静默接受）。循环完恢复调用方原值。
+  for _od_tok in $_od_hex; do
+    _od_toks=$((_od_toks + 1))
+    case "$_od_tok" in
+      2[1-9a-f] | 3[0-9a-f] | 4[0-9a-f] | 5[0-9a-f] | 6[0-9a-f] | 7[0-9a-e]) : ;;
+      *) _od_bad=$((_od_bad + 1)) ;;
+    esac
+  done
+  IFS=$_ifs_saved
+  if [ "$_od_toks" != "$_uri_bytes" ]; then
+    printf 'Error: %s 校验未能完成：字节计数不可用（od 给出 %s 个字节、字节计数为 %s，两者不一致），拒绝放行\n' \
+      "$_src" "$_od_toks" "${_uri_bytes:-空}" >&2
+    return 1
+  fi
+  if [ "$_od_bad" != 0 ]; then
+    printf 'Error: %s 含 %s 个越界字节：空白、换行或不可打印字符（应为单行纯 ASCII，特殊字符需 %%XX 转义），拒绝放行\n' \
+      "$_src" "$_od_bad" >&2
     return 1
   fi
   case "$_uri" in
@@ -429,10 +528,105 @@ mongo_hydrate_uri() {
   # 实测形态：文件里写 `mongodb://u:p@h:27017/fs<NUL>ms` ⇒ hydrate 成功、
   # MONGODB_URI 变成 `…/fsms`——**目标库名被改坏了，而且是 rc=0**。
   # 现实来源不是手工编辑：UTF-16/UTF-16LE 另存的密钥文件里每个 ASCII 字符都跟着一个 NUL。
-  # 判据写成"剩下的字节个数 != 0"而不是"grep 到就算"：tr/grep 自身失败（文件读不了、
-  # 平台没有 tr）时残串是空串，`"" != "0"` 照样点亮 ⇒ fail-closed，不会退化成放行。
+  # 判据不能只写「剩下的字节个数 != 0」：tr 失败时管道下游的 wc 照旧打印 0，
+  # 于是 `"0" != "0"` 为假 ⇒ 放行。2026-10-30 第二轮审计实测过：UTF-16LE 密钥文件
+  # 在「tr 只在 -dc '\000' 这一形态上失败」时 rc=0（实测的形态就是 UTF-16LE 密钥文件），
+  # 只有「管道首尾同时死」才偶然拒绝——那不是设计，是巧合。
+  # 判据改成**两个字节计数相比**（文件总字节 vs 非 NUL 字节），并先做纯数字形状校验：
+  #   · 文件里没有 NUL ⇒ 两者相等 ⇒ 放行（继续后面的单行/scheme 判据）；
+  #   · 有 NUL         ⇒ 非 NUL 计数 < 总数 ⇒ 拒绝；
+  #   · tr 任何形态失败 ⇒ 非 NUL 计数为 0 或空 ⇒ 与总数不等（或形状非法）⇒ 拒绝。
+  # 用「非 NUL 计数」而不是「NUL 计数」是关键：后者的正常值就是 0，与「工具死了输出 0」
+  # 不可分 —— 这正是 2026-10-30 审计实测到的放行形态。前者的正常值等于文件长度，失败即露馅。
+  # 空文件两者都是 0 ⇒ 这里放行，由下面「空文件」那条判据给出准确原因。
   # 消息只点名文件路径，不回显任何字节（这是凭据文件）。
-  if [ "$(tr -dc '\000' < "$_file" 2>/dev/null | wc -c | tr -d ' \t')" != "0" ]; then
+  # 第四轮复攻（2026-10-30，第二轮）：上一版补的**固定串自检**本身就是新漏洞 —— 工具只要「对短输入
+  # 正常、对真实载荷退化」（实测：UTF-16 密钥文件 rc=0 且值被静默改写），自检与相等判据一起被骗过。
+  # 现在改用对**真实文件**的三条互补绝对计数：
+  #   · `stat -c %s` 独立取长度，与 wc 的计数必须一致（任一方不工作 ⇒ 先被形状校验拒）；
+  #   · `[ -s ]` 是 shell 内建：计数为 0 却说"文件非空" ⇒ 自相矛盾 ⇒ 拒；
+  #   · 非 NUL 字节数 + NUL 字节数 == 总字节数（两条互补管道之和必须闭合；tr 不过滤 ⇒ 两边都等于
+  #     总数 ⇒ 判「检测不可用」）；且 **NUL 字节数必须为 0**（直接数 NUL，内容相关退化藏不住）。
+  _file_stat=$(stat -c %s -- "$_file" 2>/dev/null | tr -d ' \t') || _file_stat=''
+  case "$_file_stat" in
+    '' | *[!0-9]*)
+      printf 'Error: MONGODB_URI_FILE 的字节检查未能完成（stat 不可用）：%s\n' "$_file" >&2
+      return 1
+      ;;
+  esac
+  _file_bytes=$(wc -c < "$_file" 2>/dev/null | tr -d ' \t') || _file_bytes=''
+  _file_nonnull=$(tr -cd '\001-\377' < "$_file" 2>/dev/null | wc -c | tr -d ' \t') || _file_nonnull=''
+  _file_nul=$(tr -dc '\000' < "$_file" 2>/dev/null | wc -c | tr -d ' \t') || _file_nul=''
+  case "$_file_bytes" in
+    '' | *[!0-9]*)
+      printf 'Error: MONGODB_URI_FILE 的字节检查未能完成（本机没有 wc/tr）：%s\n' "$_file" >&2
+      return 1
+      ;;
+  esac
+  case "$_file_nonnull" in
+    '' | *[!0-9]*)
+      printf 'Error: MONGODB_URI_FILE 的字节检查未能完成（本机没有 wc/tr）：%s\n' "$_file" >&2
+      return 1
+      ;;
+  esac
+  if [ "$_file_bytes" != "$_file_stat" ]; then
+    printf 'Error: MONGODB_URI_FILE 的字节检查未能完成（wc 说 %s、stat 说 %s，两者不一致）：%s\n' \
+      "$_file_bytes" "$_file_stat" "$_file" >&2
+    return 1
+  fi
+  if [ "$_file_bytes" = 0 ] && [ -s "$_file" ]; then
+    printf 'Error: MONGODB_URI_FILE 的字节检查未能完成（计数为 0 但文件非空）：%s\n' "$_file" >&2
+    return 1
+  fi
+  case "$_file_nul" in
+    '' | *[!0-9]*)
+      printf 'Error: MONGODB_URI_FILE 的字节检查未能完成（本机没有 wc/tr）：%s\n' "$_file" >&2
+      return 1
+      ;;
+  esac
+  # 互补计数必须闭合（真实文件，不是固定串）：tr 不过滤时两边都等于总字节数 ⇒ 判「检测不可用」。
+  if [ "$((_file_nonnull + _file_nul))" -ne "$_file_bytes" ]; then
+    printf 'Error: MONGODB_URI_FILE 的字节检查未能完成（非 NUL %s + NUL %s ≠ 总字节 %s，tr 没有按判据过滤字节）：%s\n' \
+      "$_file_nonnull" "$_file_nul" "$_file_bytes" "$_file" >&2
+    return 1
+  fi
+  if [ "$_file_nul" != 0 ]; then
+    printf 'Error: MONGODB_URI_FILE 含 NUL 字节，或字节检查未能完成：%s\n' "$_file" >&2
+    printf '       多为 UTF-16/二进制"另存为"产物；请用 UTF-8（无 BOM）重写该文件。\n' >&2
+    return 1
+  fi
+
+  # 第五道：`od` 的十六进制转储在纯 shell 里逐 token 解析（tr 可以被「对短输入正常、对真实载荷
+  # 透传」的工具骗过；od 给的是原始字节，逐 token 判定与长度/内容形态无关）：
+  #   · token 数必须等于总字节数（od 说谎/空输出 ⇒ 判「检测不可用」）；
+  #   · NUL 的 token（`00`）一个都不许有（UTF-16/二进制「另存为」的产物在这里无处可藏）。
+  _od_hex=$(LC_ALL=C od -An -v -tx1 < "$_file" 2>/dev/null) || _od_hex=''
+  _od_toks=0; _od_nul=0
+  _ifs_saved=$IFS
+  # 固定 IFS 只接受一种形态：**单引号字面量跨行**写出「换行 / 制表 / 空格」三字节。
+  #   · 不用 ANSI-C 引号 `$'...'`：不属 POSIX，busybox 与部分老 dash 不解释它，该行会退化
+  #     成 6 字节字面量（无换行）⇒ od 腿失明、fail-open（第七轮实测：hydrate rc=0 放行、
+  #     validate 对合法值全体误拒）；
+  #   · 也不用 `IFS=$(printf ...)`：命令替换吃掉行尾换行（要哨兵再剥），更要命的是给
+  #     `printf` 加了**可执行依赖**——`BASH_ENV` 里定义同名函数优先于内建（第八轮实测：
+  #     printf() 返回空格后 hydrate rc=0，含 NUL 文件被静默放行）。
+  # 字面量没有命令替换、不调用任何命令，注入无处下手，字节本身也看得见。
+  IFS='
+	 '
+  # 局部固定 IFS：word splitting 的分隔符集合不能随调用方环境漂移（本库被 source 进调用方 shell；
+  # 若调用方 IFS 不含换行，行尾 token 连换行一起切走、`case` 漏判 —— 2026-10-31 第六轮复攻实测：
+  # 同 shell IFS=' ' + 共谋 tr ⇒ 含 NUL 文件被静默接受）。循环完恢复调用方原值。
+  for _od_tok in $_od_hex; do
+    _od_toks=$((_od_toks + 1))
+    case "$_od_tok" in 00) _od_nul=$((_od_nul + 1)) ;; esac
+  done
+  IFS=$_ifs_saved
+  if [ "$_od_toks" != "$_file_bytes" ]; then
+    printf 'Error: MONGODB_URI_FILE 的字节检查未能完成（od 给出 %s 个字节、字节计数为 %s，两者不一致）：%s\n' \
+      "$_od_toks" "${_file_bytes:-空}" "$_file" >&2
+    return 1
+  fi
+  if [ "$_od_nul" != 0 ]; then
     printf 'Error: MONGODB_URI_FILE 含 NUL 字节，或字节检查未能完成：%s\n' "$_file" >&2
     printf '       多为 UTF-16/二进制"另存为"产物；请用 UTF-8（无 BOM）重写该文件。\n' >&2
     return 1
@@ -449,7 +643,21 @@ mongo_hydrate_uri() {
 
   # grep -c 无命中时打印 0 并以 1 退出；`|| _n=0` 同时兜住"输出被上层吞掉变成空串"，
   # 否则 `[ "" -eq 0 ]` 会抛 shell 的 integer 表达式错误，退出码与原因都不对。
-  _n=$(printf '%s\n' "$_body" | grep -c '[^[:space:]]') || _n=0
+  # `LC_ALL=C` 不是装饰：U+00A0(NBSP) 这类字符的"算不算空白"随 locale 变——同一个只含
+  # NBSP 的文件，C 下计 1 行、en_US.UTF-8 下计 0 行（被当空白 ⇒ 报"空文件"）。两种口径
+  # 最终都拒，但**裁决理由与后续路径不同**，而"同一输入同一裁决"是本库的硬要求；上游
+  # grep/sed 一律钉了 C，这里漏一条就留下 locale 依赖（2026-10-31 第八轮审计实测：
+  # `LC_ALL=C grep -c` 对 `c2 a0 0a` 得 1；en_US.UTF-8 与 C.UTF-8 得 0）。
+  _n=$(printf '%s\n' "$_body" | LC_ALL=C grep -c '[^[:space:]]') || _n=0
+  # 形状校验（第四轮审计）：grep 退出 0 却什么都不打印时 _n 是空串，`[ "" -eq 0 ]` 与
+  # `[ "" -gt 1 ]` 都取假分支 ⇒ 两条行数判据被一起跳过，两行的密钥文件会被静默接受（只取第一行）。
+  # 「拿数量当判据」的地方一律先过"非空 + 纯数字"，与同文件其它计数同款。
+  case "$_n" in
+    '' | *[!0-9]*)
+      printf 'Error: MONGODB_URI_FILE 的行数判据不可用（本机 grep 未给出计数）：%s\n' "$_file" >&2
+      return 1
+      ;;
+  esac
   if [ "$_n" -eq 0 ]; then
     printf 'Error: MONGODB_URI_FILE 是空文件（没有任何非空行）：%s\n' "$_file" >&2
     return 1
@@ -464,8 +672,8 @@ mongo_hydrate_uri() {
   #     （Windows 记事本 / `Set-Content -Encoding UTF8` 写出的密钥文件）。
   #     连接串本身全是 ASCII，绝不会以这类字节开头，所以这一步不会误伤。
   #   · `s/[[:space:]]*$//` 去掉行尾空白与 CR（CRLF 文件、编辑器残留）。
-  MONGODB_URI=$(printf '%s\n' "$_body" | grep -m 1 '[^[:space:]]' |
-    sed -e 's/^[^ -~]*//' -e 's/[[:space:]]*$//')
+  MONGODB_URI=$(printf '%s\n' "$_body" | LC_ALL=C grep -m 1 '[^[:space:]]' |
+    LC_ALL=C sed -e 's/^[^ -~]*//' -e 's/[[:space:]]*$//')
 
   # 连接串必须是**单行纯可打印 ASCII**（凭据里的特殊字符按 RFC 3986 写成 %XX）。
   # 空白/控制字符留在中间时，mongodump 只会报一个和"密钥文件写坏了"毫无关系的解析错，

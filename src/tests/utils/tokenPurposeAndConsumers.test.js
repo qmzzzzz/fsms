@@ -108,17 +108,31 @@ describe('行为：refresh 载荷不得建立推送通道 / 不得被探测当�
     const bl = path.join(__dirname, '../../middleware/tokenBlacklist');
     mockActiveUser(path.join(__dirname, '../../models/User'));
     jest.doMock(bl, () => ({ isTokenBlacklisted: async () => false }));
+    // 握手期的 IP 封禁闸在认证之前跑：它查的是 models/IPBlacklist，本文件没有真实 DB，
+    // 不桩就会以「网络黑名单校验暂不可用」fail-closed 先拒掉连接，令牌类型判据
+    // 永远走不到。这里返回"未命中白名单、未被封禁"，即把这一闸放行的正常态，
+    // 使断言落在本文件真正要测的那条判据上（该闸本身由 websocketHandshakeIpBan 覆盖）。
+    jest.doMock(path.join(__dirname, '../../models/IPBlacklist'), () => ({
+      isWhitelisted: async () => false,
+      isBlocked: async () => false,
+    }));
   });
 
   afterEach(() => {
     jest.dontMock(path.join(__dirname, '../../models/User'));
     jest.dontMock(path.join(__dirname, '../../middleware/tokenBlacklist'));
+    jest.dontMock(path.join(__dirname, '../../models/IPBlacklist'));
     jest.resetModules();
   });
 
   const makeSocket = () => {
     const socket = {
       id: 'sock-purpose',
+      // 握手必须带对端地址：websocketService 在认证之前先过 IP 封禁闸
+      // （_assertHandshakeIpNotBanned），该闸 2026-10-30 起「取不到地址 ⇒ fail-closed」，
+      // 于是没有 handshake 的替身会被「无法验证网络来源」先拒掉，
+      // 本文件要测的令牌类型判据根本走不到。真实 socket.handshake 恒有 address。
+      handshake: { address: '127.0.0.1', headers: {} },
       authenticated: false,
       emitted: [],
       connected: true,

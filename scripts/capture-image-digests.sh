@@ -421,7 +421,9 @@ stage_ref() {
   # 分隔符用 `%` 而不是 `|`：**`|` 是 ERE 的选择运算符**，`([[:space:]]|$)` 里的 `|`
   # 会把 s 表达式提前截断（实测报 `unknown option to 's'`）。registry 引用文法不含 `%`。
   tag_re=$(to_re "$tag")
-  sed -E \
+  # LC_ALL=C：`[[:space:]]` 的字符集合随 locale 漂移（实测 NBSP 在 C 下不匹配、在 en_US 下匹配），
+  # 替换的边界判据必须是字节语义，否则同一份 Dockerfile 在不同机器上命中不同的位置。
+  LC_ALL=C sed -E \
     -e "s%^([[:space:]]*${kw}[[:space:]]+)${tag_re}([[:space:]]|$)%\1${want}\2%" \
     -e "s%(^|[^A-Za-z0-9._/:@-])${tag_re}@sha256:[0-9a-f]{64}([^0-9a-f]|$)%\1${want}\2%g" \
     "$src" > "$tmp"
@@ -483,11 +485,111 @@ probe_target() {
   # 检测必须走**字节**通道：本机上 `grep -q "$CR"` 与 `awk '/\r/'` 都看不见 CR——
   # MSYS 的文本模式在读取时就把 CRLF 换成了 LF（2026-10-04 实测：文件里 od 明明有 \r，
   # 两者都报 0 处）。tr 不做行切分也不转文本模式，所以按字节数 CR。
-  if [ "$(tr -dc '\r' < "$file" | wc -c)" -ne 0 ]; then
-    printf '错误：%s 里有 CR（CRLF 行尾），本脚本拒绝在两种平台结果不一致的前提下落笔。\n' "$label" >&2
-    printf '       请先把该文件的行尾改成 LF（.gitattributes / 编辑器设置），再重跑。\n' >&2
+  # tr 是这条判据的执行者，而它失败时是**静默的**：`tr … | wc -c` 里 wc 照旧输出 0，
+  # 而"文件里没有 CR"也输出 0 —— 两者不可分，于是检测被整体跳过、脚本会在"以为已是 LF"
+  # 的前提下落笔（MSYS 的 sed/gawk 顺手吃掉 CR，正是这条判据要挡的静默改写）。
+  # 2026-10-30 第二轮审计又踩深一层：探针跑的是**管道输入**、判据跑的是**文件重定向输入**，
+  # 只证明前者可用时，后者失败仍会被读成「没有 CR」——实测 CRLF 的 Dockerfile 被重写并 exit 0。
+  # 所以判据改成**两个字节计数相比**（文件总字节 vs 非 CR 字节），并先做纯数字形状校验：
+  #   · tr 任何形态失败 ⇒ 非 CR 计数为 0 或空 ⇒ 与总数不等（或形状非法）⇒ 拒绝；
+  #   · 文件里没有 CR     ⇒ 两者相等 ⇒ 放行；
+  #   · 有 CR             ⇒ 非 CR 计数 < 总数 ⇒ 拒绝。
+  # 工具的失败方向与判据的拒绝方向一致，不依赖任何前置探针。空文件两者都是 0，放行（没有 CR）。
+  # 第四轮复攻（2026-10-30，第二轮）：上一版的**固定串自检**本身就是漏洞 —— 工具只要「对短输入正常、
+  # 对真实载荷退化」，自检与相等判据会一起被骗过。现在改用对**真实文件**的三条互补绝对计数：
+  #   · `stat -c %s` 独立取长度，与 wc 的计数必须一致；
+  #   · `[ -s ]` 是 shell 内建：计数为 0 却说"文件非空" ⇒ 自相矛盾 ⇒ 拒；
+  #   · 非 CR 字节数 + CR 字节数 == 总字节数（互补管道之和必须闭合；tr 不过滤 ⇒ 两边都等于总数 ⇒
+  #     判「检测不可用」）；且 **CR 字节数必须为 0**（直接数 CR，内容相关退化藏不住）。
+  _file_stat=$(stat -c %s -- "$file" 2>/dev/null | tr -d ' \t') || _file_stat=''
+  case "$_file_stat" in
+    '' | *[!0-9]*)
+      printf '错误：%s 的字节级检测不可用（stat 不可用），拒绝在未检测的前提下落笔。\n' "$label" >&2
+      exit 1
+      ;;
+  esac
+  _file_bytes=$(wc -c < "$file" 2>/dev/null | tr -d ' \t') || _file_bytes=''
+  _file_noncr=$(tr -dc '\000-\014\016-\377' < "$file" 2>/dev/null | wc -c | tr -d ' \t') || _file_noncr=''
+  _cr_bytes=$(tr -dc '\015' < "$file" 2>/dev/null | wc -c | tr -d ' \t') || _cr_bytes=''
+  case "$_file_bytes" in
+    '' | *[!0-9]*)
+      printf '错误：%s 的字节级检测不可用（缺少 tr / wc），拒绝在未检测的前提下落笔。\n' "$label" >&2
+      exit 1
+      ;;
+  esac
+  case "$_file_noncr" in
+    '' | *[!0-9]*)
+      printf '错误：%s 的字节级检测不可用（缺少 tr / wc），拒绝在未检测的前提下落笔。\n' "$label" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$_file_bytes" != "$_file_stat" ]; then
+    printf '错误：%s 的字节级检测不可用（wc 说 %s、stat 说 %s，两者不一致）。\n' \
+      "$label" "$_file_bytes" "$_file_stat" >&2
     exit 1
   fi
+  if [ "$_file_bytes" = 0 ] && [ -s "$file" ]; then
+    printf '错误：%s 的字节级检测不可用（计数为 0 但文件非空）。\n' "$label" >&2
+    exit 1
+  fi
+  case "$_cr_bytes" in
+    '' | *[!0-9]*)
+      printf '错误：%s 的字节级检测不可用（数不出 CR 字节数），拒绝在未检测的前提下落笔。\n' "$label" >&2
+      exit 1
+      ;;
+  esac
+  # 第五道：`od` 的十六进制转储在纯 shell 里逐 token 解析（tr 可以被「对短输入正常、对真实载荷
+  # 透传」的工具骗过；od 给的是原始字节，逐 token 判定与长度/内容形态无关）：
+  #   · token 数必须等于总字节数（od 说谎/空输出 ⇒ 判「检测不可用」）；
+  #   · `0d`（CR）一个都不许有 —— 换行风格在这里无处可藏（od 的 CR 计数与 tr 的 CR 计数是两条独立读数，各有一条能红的拒绝腿；差值腿经推演不构成独立判据，见修复报告）。
+  # 解析用 `for … in $var` 按默认 IFS 展开（空格/制表/换行都是分隔符）：od 每行是「前导空格 +
+  # token + 换行」，手写 while 按空格切分会把行尾 token 连换行一起切走、`case 0d` 漏计
+  # （2026-10-31 第五轮复攻实测：CR 全落在 16 字节边界时 od_cr=0，共谋 tr 下 CRLF 文件被静默改写）。
+  # 固定 IFS 的理由与 `mongoUri.sh` 同源，只是注入通道不同：本脚本虽是新进程，但 `bash script.sh`
+  # 会 source `$BASH_ENV`，那里面可以设置 IFS（2026-10-31 第七轮复攻用 bash + BASH_ENV + 共谋 tr
+  # 实测复现静默改写：rc=0、177→314 B、CR=0）。此处的固定腿就是把这条通道堵掉。
+  _od_hex=$(LC_ALL=C od -An -v -tx1 < "$file" 2>/dev/null) || _od_hex=''
+  _od_toks=0; _od_cr=0
+  _ifs_saved=$IFS
+  # 固定 IFS 只接受一种形态：**单引号字面量跨行**写出「换行 / 制表 / 空格」三字节。
+  #   · 不用 ANSI-C 引号 `$'...'`：那不是 POSIX，busybox 与部分老 dash 不解释它，
+  #     该行会退化成字面量（不含换行）⇒ od 腿失明、fail-open（第七轮实测该退化形态）；
+  #   · 也不用 `IFS=$(printf ...)`：命令替换会吃掉行尾换行（要哨兵再剥），更要命的是
+  #     它给 `printf` 加了一条**可执行依赖**——`BASH_ENV` 里定义同名函数就优先于内建
+  #     （第八轮实测：printf() 返回空格后本脚本 rc=0、177→314 B、CR 归零，静默改写）。
+  # 字面量没有命令替换、不调用任何命令，注入无处下手，字节本身也看得见。
+  IFS='
+	 '
+  for _od_tok in $_od_hex; do
+    _od_toks=$((_od_toks + 1))
+    case "$_od_tok" in 0d) _od_cr=$((_od_cr + 1)) ;; esac
+  done
+  IFS=$_ifs_saved
+  if [ "$_od_toks" != "$_file_bytes" ]; then
+    printf '错误：%s 的字节级目视不可用（od 给出 %s 个字节、字节计数为 %s），拒绝落笔。\n' \
+      "$label" "$_od_toks" "${_file_bytes:-空}" >&2
+    exit 1
+  fi
+  if [ "$_od_cr" != 0 ]; then
+    printf '错误：%s 里有 %s 个 CR（CRLF 行尾），拒绝落笔。\n' "$label" "$_od_cr" >&2
+    printf '       若确认行尾已是 LF，请检查本机 tr / wc 是否可用；否则先把行尾改成 LF（.gitattributes / 编辑器设置），再重跑。\n' >&2
+    exit 1
+  fi
+  # 互补计数必须闭合到总字节数（真实文件，不是固定串）：tr 不过滤时两边都等于总数 ⇒ 判「检测不可用」。
+  if [ "$((_file_noncr + _cr_bytes))" -ne "$_file_bytes" ]; then
+    printf '错误：%s 的字节级检测不可用（非 CR %s + CR %s ≠ 总字节 %s，tr 没有按判据过滤字节）。\n' \
+      "$label" "$_file_noncr" "$_cr_bytes" "$_file_bytes" >&2
+    exit 1
+  fi
+  # 决定性的一条：**直接数 CR 字节**，必须为 0。它与上面「互补计数闭合」是两条不同的判据 ——
+  # 一条管「工具这一次到底有没有按判据过滤」，一条管「过滤之后还有没有 CR」；
+  # 少了任何一条，都能构造出让 CRLF 文件被顺手改写、exit 0 的退化工具（第四轮复攻实测过）。
+  if [ "$_cr_bytes" != 0 ]; then
+    printf '错误：%s 里有 %s 个 CR（CRLF 行尾），拒绝落笔。\n' "$label" "$_cr_bytes" >&2
+    printf '       若确认行尾已是 LF，请检查本机 tr / wc 是否可用；否则先把行尾改成 LF（.gitattributes / 编辑器设置），再重跑。\n' >&2
+    exit 1
+  fi
+
   # 残留的临时文件必须**先看见再说**：它可能是上一次运行中断留下的，也可能是别人放的。
   # 本脚本既不覆盖它也不在退出时删它（下面的 trap 只删自己创建过的那些）。
   if [ -e "$tmp" ]; then

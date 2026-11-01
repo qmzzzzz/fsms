@@ -115,7 +115,11 @@ describe('app 入口脚本：复制 → 收紧 → 改属主 → 降权', () => 
   });
 
   test('HOME/USER/LOGNAME 按 nodejs 重设（root 启动时 Docker 会把 HOME 设为 /root）', () => {
-    expect(entrypoint).toMatch(/grep '\^nodejs:' \/etc\/passwd \| cut -d: -f6/);
+    // 2026-10-31：解析方式从 `grep … | cut …` 改成纯 shell 的 `IFS=: read`（外部命令缺失时
+    // 命令替换只剩空串而 set -e 不触发，见 tests/deploy/appEntrypointHomePasswd.test.js）。
+    // 这里只钉"仍然按 passwd 取值 + 仍然 export 成 nodejs"这条形状，实现细节交给那份行为级用例。
+    expect(entrypoint).toMatch(/IFS=: read -r name _pw _uid _gid _gecos home _shell/);
+    expect(entrypoint).toMatch(/done < \/etc\/passwd/);
     expect(entrypoint).toMatch(/export HOME="\$nodejs_home"/);
     expect(entrypoint).toMatch(/export USER=nodejs/);
     expect(entrypoint).toMatch(/export LOGNAME=nodejs/);

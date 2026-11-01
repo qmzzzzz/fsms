@@ -89,6 +89,43 @@ const same = (label, actual, expected) =>
  * 判据的牙由文件末的「豁免集精确性」用例钉住：任何其它告警文案（含闸自己那几条）
  * 都必须**不**被匹配——把正则放宽成 `/^审计/` 之类，那条用例立刻红。
  */
+/**
+ * 与预铸造闸无关的启动期噪声：ACL 权限收紧（services/auditWalPermissions）。
+ *
+ * 本机（Windows 且进程环境里没有 USERNAME）收紧必然失败，于是 start() 期间会有
+ * 一条 warn + 一条 error；CI（Linux）上收紧成功、根本不产生这两条。它们出现在
+ * errSpy/warnSpy 里时，「恰好 1 条」「一条都没有」这两条判据会被环境决定，
+ * 而测的又不是本闸。该子系统的行为由 src/tests/services/auditWalPermissionHardening
+ * 与 auditWalPathIsolation 单独钉住，这里按文案逐字筛掉，判据只对着本闸自己的文案。
+ */
+const ENV_ACL_NOISE = /^审计 WAL (?:目录|文件)权限未能收紧（|^无法确定当前用户名，跳过 ACL 收紧：/;
+
+/** 取某个 spy 收到的、不属于环境噪声的文案 */
+const scopedMessages = (spy) =>
+  spy.mock.calls.map((c) => String(c[0])).filter((m) => !ENV_ACL_NOISE.test(m));
+
+test('ENV_ACL_NOISE 只命中启动期 ACL 两条文案（放宽容不得）', () => {
+  // 豁免集自身也要有反证：把它写宽成 /审计 WAL|无法确定当前用户名/ 时，本闸自己的
+  // 警告会被一起吞掉，而所有断言仍是绿的。正样本取自 auditWalPermissions 的两条实测文案，
+  // 负样本取自本文件的 MUST_STAY_RED_* 与「权限已收紧」的正常路径。
+  const positives = [
+    '审计 WAL 目录权限未能收紧（/opt/fsms/logs）：ACE 主体 1 条，可疑 0 条',
+    '审计 WAL 文件权限未能收紧（/opt/fsms/logs/audit-buffer.wal）：chmod 失败',
+    '无法确定当前用户名，跳过 ACL 收紧：/opt/fsms/logs',
+  ];
+  for (const m of positives) expect({ m, hit: ENV_ACL_NOISE.test(m) }).toEqual({ m, hit: true });
+  const negatives = [
+    '审计缓冲超过硬上限，已丢弃最早的一条',
+    '审计 WAL 追加失败，本条审计未落盘',
+    '审计 WAL 权限已收紧（/opt/fsms/logs）',
+    '审计 WAL 启动重放失败：读取失败',
+  ];
+  for (const m of negatives) expect({ m, hit: ENV_ACL_NOISE.test(m) }).toEqual({ m, hit: false });
+  // 自指断言：scopedMessages 真的接在这个正则上（否则上面的精确性只是对着一个死常量）。
+  const spy = { mock: { calls: [[positives[0]], [negatives[0]]] } };
+  expect(scopedMessages(spy)).toEqual([negatives[0]]);
+});
+
 const OS_WAL_EPERM = /^审计 WAL [^：]*：EPERM\b/;
 
 /** 闸/落库链上必须恒红的告警文案（逐字取自 src/services/auditBuffer.js，用例里回查） */
@@ -171,8 +208,9 @@ describe('批量审计写路径：串链前的预铸造闸', () => {
 
     // 静默丢弃在合规上等同篡改：必须计入累计丢失并 error 级告警
     expect(auditBuffer.getStats().droppedCount).toBe(1);
-    expect(errSpy).toHaveBeenCalledTimes(1);
-    expect(String(errSpy.mock.calls[0][0])).toMatch(/bogus-cat|category/);
+    const precastErrors = scopedMessages(errSpy);
+    expect(precastErrors).toHaveLength(1);
+    expect(precastErrors[0]).toMatch(/bogus-cat|category/);
     // 取证顺序：被拒那条的 WAL 行既不在主文件（不会被崩溃重放再插一遍），也已在归档里
     expect(readFile(auditBuffer.getWalPath())).not.toContain('a_bad_');
     expect(readFile(`${auditBuffer.getWalPath()}.discarded`)).toContain('a_bad_');
@@ -236,11 +274,9 @@ describe('批量审计写路径：串链前的预铸造闸', () => {
     await wal.drain();
     expect(await AuditLog.countDocuments({ action })).toBe(4);
     expect(auditBuffer.getStats().droppedCount).toBe(0);
-    expect(errSpy).not.toHaveBeenCalled();
+    expect(scopedMessages(errSpy)).toEqual([]);
     // 逐条按形状筛，不按"这条用例不该有告警"下结论：见文件头 OS_WAL_EPERM 的实测豁免理由
-    const unexpectedWarns = warnSpy.mock.calls
-      .map((c) => String(c[0]))
-      .filter((m) => !OS_WAL_EPERM.test(m));
+    const unexpectedWarns = scopedMessages(warnSpy).filter((m) => !OS_WAL_EPERM.test(m));
     expect(unexpectedWarns).toEqual([]);
     expect(readFile(`${auditBuffer.getWalPath()}.discarded`)).toBe('');
   });
@@ -339,5 +375,31 @@ describe('批量审计写路径：串链前的预铸造闸', () => {
     const needle = ['!OS_WAL_EPERM', '.test(m)'].join('');
     const self = fs.readFileSync(path.join(__dirname, path.basename(__filename)), 'utf8');
     expect(self.split(needle).length - 1).toBe(1);
+  });
+  test('预检拒收文案不得先于归档事实：discard 只是移交队列，不写「已归档/已移除」', () => {
+    // 第十一轮 D7：wal.discardBySeqs 是 fire-and-forget（返回 undefined，归档排在 wal 链上）。
+    // 文案原先写「已归档到 … 并从主文件移除」——完成时措辞先于事实：调用返回时归档
+    // 可能还没发生、也可能随后失败。这条用例把"此刻只是移交队列"钉在案发时刻。
+    const discardSpy = jest.spyOn(wal, 'discardBySeqs').mockReturnValue(undefined);
+    errSpy.mockClear();
+    try {
+      const bad = {
+        ...doc(ACTION('claim'), { category: 'bogus-cat' }),
+        _id: new mongoose.Types.ObjectId(),
+        __walSeq: `zzq-claim-${STAMP}`,
+      };
+      const sink = { addDropped: () => 1, retract: () => {}, clearStrike: () => {} };
+      expect(auditDocs.precastBatch([bad], sink)).toEqual([]);
+      expect(discardSpy).toHaveBeenCalledTimes(1);
+      const msg = scopedMessages(errSpy).find((m) => m.includes('预铸造中被拒'));
+      expect(msg).toBeTruthy();
+      // 归档尚未落定 ⇒ 完成时措辞一律不允许
+      expect(msg).not.toMatch(/已归档/);
+      expect(msg).not.toMatch(/并从主文件移除/);
+      // 只允许「移交队列」这一档
+      expect(msg).toMatch(/移交归档队列/);
+    } finally {
+      discardSpy.mockRestore();
+    }
   });
 });

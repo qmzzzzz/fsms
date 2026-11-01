@@ -1,10 +1,7 @@
 /**
  * 登录/MFA 失败计数口径 + 二段校验（MFA TOTP 与恢复码）
  *
- * 自 authService.js 拆出。失败阈值、锁定时长与「计数读不到即按已达阈值处理」
- * 的 fail-closed 解析规则是**一处口径**：口令主路径（login.js）与 MFA/恢复码
- * 累计路径（本文件）共用同一份常量与同一个解析函数，两边各写一遍必然漂移——
- * 漂移的后果是其中一条路径的防线阈值被悄悄抬高。
+ * 失败阈值、锁定时长与「计数读不到即按已达阈值处理」的 fail-closed 解析规则是**一处口径**：口令主路径（login.js）与 MFA/恢复码累计路径（本文件）共用同一份常量与同一个解析函数，两边各写一遍必然漂移——漂移的后果是其中一条路径的防线阈值被悄悄抬高。
  * 本文件因此对内不引用 login.js，避免与登录主流程形成循环依赖。
  */
 
@@ -28,23 +25,18 @@ const LOCK_DURATION_MS = 10 * 60 * 1000;
 /**
  * 失败计数的解析规则（口令错误主路径与 MFA/恢复码累计路径共用同一判据）
  *
- * 计数写不进库时按「已达阈值」处理（fail-closed），与 mfaService.recordMfaFailure 同口径。
- * 旧实现的两处兜底方向都反了：一处 `?? 1`（读不到计数 = 第一次失败），
- * 一处「用请求早先读到的陈旧快照 +1」（写路径持续失败时那个快照永不变，等效卡在 1）。
- * 后果同形：Mongo 可读不可写（主从切换 / 写关注失败）的窗口里，攻击者对已知用户名
- * 连续试错，计数永远落不了库 ⇒ 阈值永远到不了 ⇒ 账户临时锁定与自动封禁两道防线
- * 同时静默消失，只剩 IP 限流。观测不到防线时要收紧，不能假定防线还在。
+ * 计数写不进库时按「已达阈值」处理（fail-closed），与 mfaService.recordMfaFailure 同口径。两处兜底方向都必须朝「已达阈值」：`?? 1`（读不到计数 = 第一次失败）与「用请求早先
+ * 读到的陈旧快照 +1」（写路径持续失败时那个快照永不变，等效卡在 1）都是反的。否则 Mongo 可读不可写（主从切换 / 写关注失败）的窗口里，攻击者对已知用户名连续试错，计数永远落不了库 ⇒ 阈值永远到不了 ⇒ 账户临时锁定与自动封禁两道防线同时静默消失，
+ * 只剩 IP 限流。观测不到防线时要收紧，不能假定防线还在。
  *
  * 代价如实写明：DB 写故障期间的正当用户会被锁 10 分钟。这与 MFA 侧已作出的取舍一致。
  */
 const resolveFailedLoginCount = (updated) =>
   typeof updated?.failedLoginCount === 'number' ? updated.failedLoginCount : MAX_FAILED_LOGINS;
 /**
- * MFA 二期验证（自 loginUser 拆出）：TOTP 动态口令或备用恢复码二选一。
+ * MFA 二期验证（与 loginUser 分开，控制圈复杂度）：TOTP 动态口令或备用恢复码二选一。
  *
- * 独立防爆破：6 位码空间小，除 failedLoginCount 外另有 MFA 专用阈值（见
- * mfaService），锁定期间直接拒绝，攻击者持正确密码也无法对 6 位码无限尝试。
- * 支持 6 位 TOTP 或备用恢复码（XXXX-XXXX）二选一：手机丢失/换机时的恢复途径。
+ * 独立防爆破：6 位码空间小，除 failedLoginCount 外另有 MFA 专用阈值（见 mfaService），锁定期间直接拒绝，攻击者持正确密码也无法对 6 位码无限尝试。支持 6 位 TOTP 或备用恢复码（XXXX-XXXX）二选一：手机丢失/换机时的恢复途径。
  *
  * @returns {Promise<{outcome:'MFA_REQUIRED'|'MFA_ATTEMPTS_EXCEEDED'|'MFA_CODE_INVALID'|'OK'}>}
  */
@@ -107,11 +99,8 @@ async function verifyMfaChallenge(user, { mfaCodeRaw, username, ctx }) {
 /**
  * TOTP 动态口令校验（二级拆分，控制圈复杂度）
  *
- * 重放防护必须原子。原实现「读 mfaLastCounter → 比较 → 事后无条件覆写」
- * 三步分离，两个携带同一有效验证码的并发请求都会读到旧 counter、都判定通过，
- * 造成 TOTP 双花（同一 6 位码换取两个会话）。现改为条件更新：以
- * `mfaLastCounter < counter` 为过滤条件推进，只有第一个请求能命中（DB 保证），
- * 其余落入重放分支；与恢复码的原子消费（$pull 条件过滤）口径一致。
+ * 重放防护必须原子。写成「读 mfaLastCounter → 比较 → 事后无条件覆写」三步分离时，两个携带同一有效验证码的并发请求都会读到旧 counter、都判定通过，造成 TOTP 双花
+ * （同一 6 位码换取两个会话）。故用条件更新：以 `mfaLastCounter < counter` 为过滤条件推进，只有第一个请求能命中（DB 保证），其余落入重放分支；与恢复码的原子消费（$pull 条件过滤）口径一致。
  */
 async function verifyTotpChallenge(user, { mfaCode, mfaUser, username, ctx }) {
   const { ip, userAgent, fingerprint } = ctx;
@@ -167,13 +156,10 @@ async function verifyTotpChallenge(user, { mfaCode, mfaUser, username, ctx }) {
 /**
  * 备用恢复码校验（二级拆分，控制圈复杂度）：格式 XXXX-XXXX，命中即消费。
  *
- * 原子消费：以「数组中仍含该摘要」为过滤条件执行 $pull 并要求命中——消除
- * check 与 pull 分离导致的并发双花窗口；未命中即视为无效。
+ * 原子消费：以「数组中仍含该摘要」为过滤条件执行 $pull 并要求命中——消除 check 与 pull 分离导致的并发双花窗口；未命中即视为无效。
  *
- * 必须用 findOneAndUpdate 而非 findByIdAndUpdate（Critical 修复）：
- * findByIdAndUpdate 只从第一参取 _id，其余键被**静默丢弃**——实测传
- * { _id, mfaRecoveryCodes: '不存在的摘要' } 依然返回文档，于是任意「格式合法」的
- * 恢复码都能通过校验并签发会话，等同于对所有已开启 MFA 的账户完全绕过两步验证。
+ * 必须用 findOneAndUpdate 而非 findByIdAndUpdate（Critical 修复）： findByIdAndUpdate 只从第一参取 _id，其余键被**静默丢弃**——实测传
+ * { _id, mfaRecoveryCodes: '不存在的摘要' } 依然返回文档，于是任意「格式合法」的恢复码都能通过校验并签发会话，等同于对所有已开启 MFA 的账户完全绕过两步验证。
  */
 async function verifyRecoveryCodeChallenge(user, { mfaCode, username, ctx }) {
   const { ip, userAgent, fingerprint } = ctx;
@@ -232,8 +218,7 @@ async function verifyRecoveryCodeChallenge(user, { mfaCode, username, ctx }) {
 /**
  * 恢复码失败统一记录（自 loginUser 内的局部闭包提到模块级）
  *
- * 与 TOTP 错误路径同口径：增量 failedLoginCount + MFA 独立计数 + 审计。
- * riskFactors/reason 由调用方区分「格式无效」与「不匹配」两种情况。
+ * 与 TOTP 错误路径同口径：增量 failedLoginCount + MFA 独立计数 + 审计。 riskFactors/reason 由调用方区分「格式无效」与「不匹配」两种情况。
  */
 async function recordRecoveryFailure(
   user,
@@ -259,19 +244,12 @@ async function recordRecoveryFailure(
 }
 
 /**
- * 登录失败计数原子递增 + 阈值锁定（抽出，MFA 两条失败路径共用）
+ * 登录失败计数原子递增 + 阈值锁定（MFA 两条失败路径共用）
  *
- * $inc 由 DB 保证无丢失更新：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，
- * 丢失更新导致锁定阈值被推迟，利于爆破。阈值判定可能并发重复触发，但
- * lockUntil 覆写幂等，审计重复仅产生冗余日志，可接受。
+ * $inc 由 DB 保证无丢失更新：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，丢失更新导致锁定阈值被推迟，利于爆破。阈值判定可能并发重复触发，但 lockUntil 覆写幂等，审计重复仅产生冗余日志，可接受。
  *
- * 补 lockExpired 重置，与口令路径
- * （verifyPasswordOrTrackFailure 内 :403-410）对齐。MFA 两条失败路径
- * 此前只做纯 $inc：此前 10 分钟锁定刚过期时，旧计数会继续累计——
- * 解锁后仅剩 1 次试错即再次锁定，对正常用户表现为「输错一次就锁」。
- * 已过期的 lockUntil 视为新一轮：重置计数从 1 起算并清空过期时间戳。
- * 走到本函数时 lockUntil 必为空或已过期（loginUser ③ 已在锁定期间提前返回），
- * 故该判断不会误伤「锁定仍生效」的场景。
+ * 必须补 lockExpired 重置，与口令路径（verifyPasswordOrTrackFailure 内 :403-410）对齐：纯 $inc 时 10 分钟锁定刚过期、旧计数会继续累计——解锁后仅剩 1 次试错即再次锁定，对正常用户表现为「输错一次就锁」。
+ * 已过期的 lockUntil 视为新一轮：重置计数从 1 起算并清空过期时间戳。走到本函数时 lockUntil 必为空或已过期（loginUser ③ 已在锁定期间提前返回），故该判断不会误伤「锁定仍生效」的场景。
  *
  * @returns {Promise<number>} 递增后的失败计数
  */
@@ -299,7 +277,7 @@ async function incrementFailedLoginCount(user, { username, lockReason }) {
   }
   const newCount = resolveFailedLoginCount(updated);
   if (newCount >= MAX_FAILED_LOGINS) {
-    // 与上面 checkBruteForce 里的同一条修法（本函数是它的第二条登录失败路径）：
+    // 与 checkBruteForce 同一条纪律（本函数是第二条登录失败路径）：
     // 锁定写不进库时不得照常写下「账户临时锁定」——读日志的人会以为防线还在。
     let lockApplied = true;
     await User.findByIdAndUpdate(user._id, {

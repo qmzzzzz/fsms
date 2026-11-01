@@ -503,6 +503,7 @@ describe('auditBuffer 分支补齐', () => {
 
       // 不应抛异常
       expect(() => auditBuffer.start()).not.toThrow();
+
       await waitFor(() => auditBuffer.getStats().bufferLength >= 1, {
         label: '损坏行被跳过、有效行进入缓冲',
       });
@@ -857,8 +858,9 @@ describe('auditBuffer 分支补齐', () => {
       // 分支已随 F-97 删除：按条数裁剪才会出现"行数不足"，而按序号裁剪根本不会越界。
       // 场景本身仍然是**唯一真实的空洞夹具**（3 条文档 / 1 行 WAL），所以保留并改钉新契约：
       //   ① 手工写入的旧行没有 `__walSeq` ⇒ 重放时必须补号并回写文件
-      //      （不补号它就永远裁不掉，而重放文档的 _id 是 flush 时才分配的，
-      //       等于每重启一次就重复插入一份审计、哈希链跟着分叉）；
+      //      （不补号它就永远裁不掉 ⇒ 每次重启都重放一遍、白占配额。改前还会
+      //       再插一份，因为那时的 _id 由 flush 现分配；F-143 之后行自带 _id，
+      //       重放撞唯一索引不再插入，但"行必须回收"的要求不变）；
       //   ② 补号之后本批 3 条照常落库，那 1 行被精确裁掉，文件收敛为空；
       //   ③ 另外 2 条是 WAL 关闭期间入缓冲的（有文档、无行）——旧实现正是被这种
       //      "文档数 > 行数"的空洞坑到的：它会越界吃掉排在本批之后的、别的未落库行。
@@ -942,10 +944,23 @@ describe('auditBuffer 分支补齐', () => {
       }
       fs.writeFileSync(walPath, lines.join('\n') + '\n', 'utf8');
 
-      // 让重放链上的第一次 logger.error 抛错：serialize 的 catch 处理器必须接住它
+      // 让重放链上的第一次 logger.error 抛错：serialize 的 catch 处理器必须接住它。
+      //
+      // 只认「重放链上」的那一条：启动路径还会经过 ACL 权限收紧（auditWalPermissions），
+      // 它在收紧失败时同样走 logger.error——本机（无 icacls 权限）必现、Linux 上不出现。
+      // 用 mockImplementationOnce 时抛错会落在该旁路上，重放链的 catch 一次都没被触发，
+      // 用例在 CI 上绿、在本机红，其实验的是机器而不是这条链路。
       const logger = require('../../utils/logger');
-      const errSpy = jest.spyOn(logger, 'error').mockImplementationOnce(() => {
-        throw new Error('logger.error exploded');
+      let exploded = false;
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      const errSpy = jest.spyOn(logger, 'error').mockImplementation((...args) => {
+        const text = String(args[0] || '');
+        if (/审计 WAL .*权限未能收紧|无法确定当前用户名/.test(text)) return undefined;
+        if (!exploded) {
+          exploded = true;
+          throw new Error('logger.error exploded');
+        }
+        return undefined;
       });
 
       mockTimer();
@@ -954,6 +969,15 @@ describe('auditBuffer 分支补齐', () => {
       // 重放完成：250 行读回后被硬上限裁剪到 200（drain 等链排空，比轮询确定）
       await wal.drain();
       expect(auditBuffer.getStats().bufferLength).toBeGreaterThanOrEqual(200);
+
+      // 钉住「catch 真的被走到」——否则本用例是空转：start() 只把重放排进 walChain，
+      // 异步抛错既不会从 start() 冒出来，也会被 wal.drain() 的 .catch(()=>{}) 吞掉，
+      // 于是删掉 serialize 的 onError、或 logger.error 压根没被触发，用例照样绿。
+      // 证据链两条：抛错确实发生（exploded）+ 兜底回调确实执行（warn 文案）。
+      expect(exploded).toBe(true);
+      expect(
+        warnSpy.mock.calls.map((c) => String(c[0])).some((m) => m.includes('审计 WAL 启动重放失败'))
+      ).toBe(true);
 
       // 链上异常被吞：后续 push 仍能正常入缓冲。
       // 注意不能断言「缓冲 = before+1」——200 行已满 BUFFER_LIMIT，push 会立即
@@ -968,6 +992,7 @@ describe('auditBuffer 分支补齐', () => {
       expect(walAfter.length).toBeGreaterThan(walBefore.length);
 
       errSpy.mockRestore();
+      warnSpy.mockRestore();
     });
   });
 

@@ -319,6 +319,33 @@ describe('useAuthStore（I-01 httpOnly cookie 方案）', () => {
       expect(store.restoreFailed).toBe(false)
     })
 
+    test('429 限流被打回不得判「明确未登录」：不写负缓存、保留身份、下次路由再试', async () => {
+      // 防退化：store/auth.js 曾把「4xx」整体当成服务端明确答复 → 全站限流器
+      // （app.js 的 generalLimiter）打回一次 429，本标签页在整个页面生命周期内
+      // 都不再探测会话，用户只能靠整页刷新恢复；而 cookie 其实一直有效。
+      localStorage.setItem('currentUser', JSON.stringify({ userId: 'u-1', username: 'admin' }))
+      getSessionStatusMock.mockRejectedValue({ response: { status: 429 } })
+
+      const store = useAuthStore()
+      await expect(store.restoreSession()).resolves.toBe(true)
+      expect(store.restoreFailed).toBe(false)
+      expect(store.isAuthenticated).toBe(true)
+      expect(JSON.parse(localStorage.getItem('currentUser')).userId).toBe('u-1')
+      // 没核实过：下一次路由守卫仍会重试
+      expect(store.sessionVerified).toBe(false)
+    })
+
+    test('404（后端比前端旧/网关改写路径）同样不写负缓存：下一次仍会探测', async () => {
+      // 防退化：404 曾被算作「明确答复」→ 版本错配一次的代价是永久放弃探测
+      getSessionStatusMock.mockRejectedValue({ response: { status: 404 } })
+
+      const store = useAuthStore()
+      await expect(store.restoreSession()).resolves.toBe(false)
+      expect(store.restoreFailed).toBe(false)
+      await expect(store.restoreSession()).resolves.toBe(false)
+      expect(getSessionStatusMock).toHaveBeenCalledTimes(2)
+    })
+
     test('并发调用只探测一次（守卫与在途请求同时触发）', async () => {
       mockSessionAuthenticated()
       getMeMock.mockResolvedValue({

@@ -190,6 +190,56 @@ checkout，而 `.gitattributes` 对 `package-lock.json` 无规则。实测
   （`.github/workflows/ci.yml` 的 `Generate SBOM` + `Upload SBOM artifact`），
   请勿把「有了完整性锚」误当成「有了 SBOM」。
 
+## 私有仓 SAST 与修复时限（SLA）
+
+### 私有仓的静态分析缺口（2026-10-31 收口）
+
+`.github/workflows/codeql.yml` 的第一层判据是 `github.event.repository.private == false`：本仓是私有仓，
+于是 CodeQL **从未运行过**——上面"供应链完整性锚"那段里点名的"CodeQL"这一环，在私有仓上其实是空的，
+人工评审是当时唯一的发现路径。
+
+补法是一个不依赖 GHAS 的作业：`.github/workflows/sast.yml`（Semgrep OSS + 仓库自持规则包
+`.github/semgrep/rules.yml`）。
+
+- **不需要 GHAS / code scanning**：私有仓的 SARIF 交 `upload-sarif` 会被拒，故结果落成制品
+  `semgrep-sarif`，复核时下载，不进 Security 面板；
+- **私有源码不出 runner**：规则取自仓库内的规则包（不用 `--config auto`、不向 registry 拉规则），
+  并带 `--metrics=off`；容器镜像按 digest 钉死，同时登记在本仓的镜像面账
+  （`scripts/verify-image-digests.js` 的期望表）里逐字节对账；
+- **命中即阻断**：扫描步骤带 `--error`，任一条 ERROR 级 finding 让作业非零退出；规则包先过
+  `--validate`——规则写坏时的"扫 0 条规则后报绿"是这类门禁最坏的绿；
+- **规则本身也是被管对象**：规则条数 / 必备字段 / 排除面 / **当前树零命中**由
+  `src/tests/ci/sastWorkflowInvariants.test.js` 逐条钉住。零命中是入场券：第一次跑就红的规则会被
+  `continue-on-error` 或注释消化掉；每条规则还必须在自己的违反样例上命中，防止它退化成空转。
+- **能力边界（如实声明）**：这是规则级静态分析，不是数据流污点跟踪；它挡的是"这类写法再次出现"，
+  不替代人工评审，也不声称等价于 GHAS 的查询集。
+
+### 修复时限表（SLA）
+
+数字的数据源是 `deployment/dependency-sla.json`，与本表由 `src/tests/deploy/dependencyFixSla.test.js`
+逐格对账；同一份用例里写着硬上限 ⇒ **数字只许收紧**（放宽要改用例，等于一次显式评审）。
+
+| 严重度   | 修复/缓解时限 | 口径                                                                   |
+| -------- | ------------- | ---------------------------------------------------------------------- |
+| critical | 7 天          | 可利用且影响面大（认证 / 权限 / 审计链）：立刻评估，7 天内修复或降级。 |
+| high     | 30 天         | 30 天内出修复版本；确实无补丁时走允许清单登记（见下）。                |
+| moderate | 90 天         | 90 天；随依赖升级批次一起处理。                                        |
+| low      | 180 天        | 180 天；不单独排期。                                                   |
+| info     | 365 天        | 不阻断，随下一次依赖梳理处理。                                         |
+
+### 这些时限靠什么执行
+
+1. **未登记 = 立刻红**：`scripts/check-audit-allowlist.js` + `deployment/audit-allowlist.json` 对含 dev 的
+   完整树判定，未登记的 advisory 立刻阻断合并——比本表任何一档都严；
+2. **已登记 = 有期限**：无补丁项逐条登记理由 / 可达性 / `reviewBy`，到期即红（登记不是永久豁免）；
+   上游出补丁后该项在报告里消失即判"陈旧"，必须删行；
+3. **SAST findings = 阻断**：`.github/workflows/sast.yml` 的 `--error`；
+4. **逾期升级**：第 2 条时间到了仍无补丁时，按 `deployment/audit-allowlist.json` 的 `exitPlan` 换依赖或
+   换工具链，并在 PR 描述里同步例外摘要（`deliverables/` 不进版本库，见下"通用约定"）。
+
+SLA 的意义是把"要不要现在修"从口头讨论变成一条写下来、且与门禁同源的期限；它不改变
+"未登记一律阻断"这条更严的规则。
+
 ## 通用约定
 
 - 任何依赖更换必须附：变更前后 `npm audit` 对比、全量测试结果、

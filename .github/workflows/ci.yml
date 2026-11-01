@@ -128,7 +128,14 @@ jobs:
       - name: Provision SHA-256 pinned mongod
         # 只输出二进制路径；下载/校验日志走 stderr。MONGOMS_SYSTEM_BINARY 会让
         # mongodb-memory-server 跳过一切下载与 postinstall。
-        run: echo "MONGOMS_SYSTEM_BINARY=$(node scripts/provision-mongod.js)" >> "$GITHUB_ENV"
+        run: |
+          # 失败必须传播：`echo "…$(node …)"` 的退出码取 echo 自己的，provision 报错时
+          # 步骤照样绿、写进 $GITHUB_ENV 的是空串；而 MongoBinary 把空串当"未设置"⇒ 回落到
+          # 自己下载**未经仓库 SHA-256 锚**的 mongod（globalSetup 还关掉了 checkMD5）。
+          # 默认 shell 是 bash -e，赋值 `VAR="$(cmd)"` 会把 cmd 的退出码带上来，失败即中止。
+          MONGOD="$(node scripts/provision-mongod.js)"
+          test -n "$MONGOD"
+          echo "MONGOMS_SYSTEM_BINARY=$MONGOD" >> "$GITHUB_ENV"
 
       # 体积预算的端到端断言（src/tests/deploy/bundleBudget.test.js 的「真实产物」部分）
       # 需要真实的 web-admin/dist；而 dist 是构建产物、已被 .gitignore 排除，CI 上不存在。
@@ -175,12 +182,20 @@ jobs:
         # 这里给的是**声明口径**（180 天 / RPO 24h / RTO 4h），与
         # src/constants/businessRetention.js 的 declaredDays、backupObjectives.js 的
         # declaredHours 一致——任一处漂移都会让本条红（生效值不得宽于声明值）。
+        # **不设 COMPLIANCE_STRICT**：严格档是"部署门禁"口径（见 scripts/compliance-check.js:490-497
+        # 与 complianceVerdicts.js:80/172 的设计说明），它要求保留期/SIEM/告警探针全部就绪。
+        # 仓库态（干净 checkout、无生产库、无 alertmanager）里探针记录必然 missing ⇒ 严格档
+        # 恒 notReady ⇒ 本步永远红 ⇒ 下游 build 永不放行（第 18 轮 ops lane 逐字复刻实测 RC=1，
+        # 补 FORENSIC 仍 1，只有造出 logs/alert-probe.json 才 0）。一道恒红的门禁必然被绕过。
+        # 严格档在 deploy.yml 的 preflight 兑现——那才是它声称要拦的地方。
         env:
-          COMPLIANCE_STRICT: '1'
           BUSINESS_RETENTION_DAYS_FIRE_ALARM: '180'
           BUSINESS_RETENTION_DAYS_INSPECTION: '180'
           BUSINESS_RETENTION_DAYS_FIRE_DEVICE: '180'
           BUSINESS_RETENTION_DAYS_USER: '180'
+          # 取证捕获：声明 30 天（constants/businessRetention.js 的 FORENSIC_RETENTION_MIN_DAYS=30）。
+          # 漏给这一项时该集合"未启用"，与声明口径对不上，本步会红。
+          BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE: '30'
           BACKUP_RPO_HOURS: '24'
           BACKUP_RTO_HOURS: '4'
         run: node scripts/compliance-check.js
@@ -492,7 +507,14 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Provision SHA-256 pinned mongod
-        run: echo "MONGOMS_SYSTEM_BINARY=$(node scripts/provision-mongod.js)" >> "$GITHUB_ENV"
+        run: |
+          # 失败必须传播：`echo "…$(node …)"` 的退出码取 echo 自己的，provision 报错时
+          # 步骤照样绿、写进 $GITHUB_ENV 的是空串；而 MongoBinary 把空串当"未设置"⇒ 回落到
+          # 自己下载**未经仓库 SHA-256 锚**的 mongod（globalSetup 还关掉了 checkMD5）。
+          # 默认 shell 是 bash -e，赋值 `VAR="$(cmd)"` 会把 cmd 的退出码带上来，失败即中止。
+          MONGOD="$(node scripts/provision-mongod.js)"
+          test -n "$MONGOD"
+          echo "MONGOMS_SYSTEM_BINARY=$MONGOD" >> "$GITHUB_ENV"
 
       - name: Run E2E smoke（完整启动序列 14 步）
         run: npm run test:e2e
@@ -802,19 +824,23 @@ jobs:
         run: echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       # S-2：前端包在构建期钉扎登录公钥指纹，运行期再与同一把私钥比对。
-      # 未配置 secret 时输出空（不钉扎，仍可部署）；配置了但解析失败则本步红。
-      - name: Compute login key pin
+      #
+      # 2026-10-31（审计一-6）：本步改为**强制**（--require）。本 job 只在 main 与
+      # v* 标签上运行（见上方 job 级 if），产出的正是可部署镜像。原实现缺 secret 时
+      # 只打一条 ::warning:: 然后照常构建推送：镜像里 LOGIN_PUBLIC_KEY_SHA256_PIN
+      # 为空 ⇒ 运行期 verifyBuildPin 直接跳过，前端包与运行私钥的绑定在这条路径上
+      # 完全不存在，而 CI 全绿、镜像可拉可跑——失效是无声的。「生产构建必须钉扎」
+      # 此前只写在注释里，没有任何一处会红。现在缺 secret ⇒ 本步非零退出 ⇒
+      # build job 红 ⇒ 不产出未钉扎镜像。
+      # （PR 构建走上面的 container-build job：不推送、无 secret，故不强制。）
+      - name: Compute login key pin (required for release images)
         id: loginpin
         env:
           LOGIN_ECDH_PRIVATE_KEY: ${{ secrets.LOGIN_ECDH_PRIVATE_KEY }}
         run: |
-          PIN="$(node scripts/login-key-pin.js)"
+          PIN="$(node scripts/login-key-pin.js --require)"
           echo "pin=${PIN}" >> "$GITHUB_OUTPUT"
-          if [ -z "$PIN" ]; then
-            echo "::warning::LOGIN_ECDH_PRIVATE_KEY 未配置——镜像不做登录公钥钉扎"
-          else
-            echo "登录公钥钉扎指纹：${PIN}"
-          fi
+          echo "登录公钥钉扎指纹：${PIN}"
 
       - name: Build and push Docker image
         id: push
@@ -830,6 +856,9 @@ jobs:
             BUILD_DATE=${{ steps.builddate.outputs.date }}
             APP_VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
             VITE_LOGIN_PUBLIC_KEY_SHA256=${{ steps.loginpin.outputs.pin }}
+            # 发布镜像再兜一次（Dockerfile 在 web-builder 阶段指纹为空即构建失败），
+            # 使「绕开 CI、手工 docker build 当发布镜像」也拿不到未钉扎包。
+            REQUIRE_LOGIN_KEY_PIN=1
           # P2-⑩：SLSA provenance 证明（构建来源与参数随镜像一同入 GHCR）
           provenance: true
           cache-from: type=gha

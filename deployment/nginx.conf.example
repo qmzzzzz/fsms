@@ -29,6 +29,18 @@
 #     body parser 显式对齐）与 443 default_server 兜底块
 #     （ssl_reject_handshake + return 444）。契约由
 #     src/tests/deploy/nginxProxyContract.test.js 把守。
+#
+# 审计整改说明（2026-10-31）：
+#   - 取证加固（取证任务书 §1.6）：http 级限速拆为 login/strict/general 三档（当前只把
+#     general 挂在 /api 两条入口，login/strict 给出启用模板与前置条件）；全部 7 个反代块
+#     补两条 TLS 取证头（X-Tls-Protocol/X-Tls-Cipher）；新增取证日志格式 fsms_forensic
+#     （默认不挂线，见「访问日志」段的启用说明）；补 XFF 信任边界口径（与应用层
+#     utils/ipUtils.clientIpForSecurityDecision 对齐）。
+#   - 边缘/应用分工、DDoS 时应用日志降级机理、按 IP 统计速查见 deployment/edge-protection.md；
+#     应用侧两级捕获管道（常态头级 / 触发式全量）由 P2 交付；P1 已落地的标记表见
+#     src/services/forensicTrigger.js（「要不要升级为全量捕获」的唯一事实来源）。
+#   - 以上指令的契约仍由 src/tests/deploy/nginxProxyContract.test.js 与
+#     deployment/config-drift-baseline.json 把守。
 
 # ===== 边缘资源闸（finding #10；本文件按 conf.d include 进 http{}，此处为 http 级指令）=====
 # 慢速攻击（slowloris / slow-read / slow-post）防线：威胁模型把这类防线显式交给
@@ -46,15 +58,40 @@ keepalive_timeout 30s;       # 默认 75s 偏长：缩短半开连接占用窗�
 # 全仓无文件上传路由（无 multer/multipart），不存在被误伤的合法大请求体。
 client_max_body_size 1m;
 
-# /api 入口限流的令牌桶（按客户端 IP）。应用侧 generalLimiter = 300 次/15 分钟/IP
-# ≈ 0.33 r/s（src/config/index.js rateLimit 默认 + src/middleware/rateLimit.js），取值依据：
-#   - rate=10r/s：约为应用侧持续配额的 30 倍——正常流量永远不该先于应用限流被本闸拦下
-#     （应用限流带白名单/探针豁免、审计与 JSON 429 语义，必须让它当主闸）；本闸只截
-#     扫描器/爆破量级的洪峰，在 Node 事件循环与 JSON.parse 之前把它们丢弃。
-#   - burst=20 nodelay：吸收 SPA 交互的天然前载突发；nodelay 立即放行突发额度而非
-#     延迟整形——给交互式 API 加延迟没有安全收益，只有体验损失。
-#   - 10m 共享内存 ≈ 16 万个 IPv4 客户端状态（每状态约 64B），裸 IP 粒度足够公网面。
-limit_req_zone $binary_remote_addr zone=api_perip:10m rate=10r/s;
+# ── 边缘限速三档（login / strict / general，2026-10-31 取证加固）──────────────────
+# 全部按 $binary_remote_addr（裸 IP）分桶，令牌桶状态在 10m 共享内存里。默认值刻意
+# 保守：一律比应用侧同端点配额宽 1~2 个数量级（倍数按默认配置算），只截扫描器/
+# 爆破量级的洪峰——应用限流带白名单/探针豁免、审计与 JSON 429 语义，必须让它当
+# 主闸；边缘闸只是在 Node 事件循环与 JSON.parse 之前丢洪峰的那道。三档如下：
+#   - login（登录/认证端点，暴力破解主战场）：rate=2r/s ≈ 应用侧 loginLimiter（10 次/
+#     15 分钟/IP ≈ 0.011 r/s，仅按 IP、成功不计）的 180 倍；burst=5。单账号高频撞库
+#     归应用侧账号维度限流，本档只按 IP 兜底洪峰，两者独立计数、互不顶替。
+#   - strict（写类/敏感端点：批量写入、导出、权限变更等）：rate=5r/s ≈ 应用侧
+#     strictLimiter（30 次/15 分钟/IP ≈ 0.033 r/s）的 150 倍；burst=10。
+#   - general（/api 常规流量）：rate=10r/s ≈ 应用侧 generalLimiter（300 次/15 分钟/IP
+#     ≈ 0.33 r/s，src/config/index.js rateLimit 默认 + src/middleware/rateLimit.js）的
+#     30 倍；burst=20 nodelay。nodelay 立即放行突发额度而非延迟整形——给交互式 API
+#     加延迟没有安全收益，只有体验损失。本档是当前**唯一激活**的档，挂 /api 两条入口。
+# 内存账：三档各 10m（≈16 万个 IPv4 客户端状态/档，每状态约 64B）；按最坏 30MB
+# 预算，用不到的档整行删除即可。调参指引：改 rate 前先算「应用侧同端点持续配额 ×
+# 1~2 位余量」；改**落点**前先读 src/tests/deploy/nginxProxyContract.test.js 的
+# 「limit_req 只落在 /api 两条入口」断言——限速落点是需评审的变更，新增落点须
+# 同步该测试的期望表（模板与注意事项见下）。
+limit_req_zone $binary_remote_addr zone=login:10m rate=2r/s;
+limit_req_zone $binary_remote_addr zone=strict:10m rate=5r/s;
+limit_req_zone $binary_remote_addr zone=general:10m rate=10r/s;
+
+# 启用模板（默认注释；把哪条指令挂到哪个 location 是部署决策，本文件只给保守形态）：
+#   - 登录端点（示例路径，以实际路由为准）：在比 /api/ 更精确的 location 里单挂
+#       limit_req zone=login burst=5 nodelay;
+#       limit_req_status 429;
+#   - 写类/敏感端点：同上换 zone=strict burst=10。
+#   注意事项（缺一条都会失效或偏航）：
+#     1) 新 location 必须**完整重声明** proxy 头与超时（见下方「反向代理头」段——
+#        嵌套块整体替换语义，漏一条等于该块没有）；
+#     2) 正则 location 的优先级高于 /api/ 前缀块，路径按实际路由写，别用会误伤的宽正则；
+#     3) 启用前同步 src/tests/deploy/nginxProxyContract.test.js 的限速落点期望表，
+#        否则契约测试会按「意外携带 limit_req」报红——这是有意的评审闸，不是障碍。
 
 # ===== 访问日志：只记路径，不记查询串（2026-10-24 审计 finding）=====
 # nginx 默认的 combined 格式含 `$request`，即「方法 + 完整 URI + 协议」——查询串
@@ -67,8 +104,27 @@ log_format fsms_no_query '$remote_addr - $remote_user [$time_local] '
                          '"$request_method $uri $server_protocol" '
                          '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
 access_log /var/log/nginx/access.log fsms_no_query;
+#
+# ── 取证日志格式（2026-10-31；默认不挂线）──────────────────────────────────────
+# 定位：DDoS/爆破窗口的**离线取证**，与 P2 捕获管道互为备份——后者按 P1 标记表
+# （src/services/forensicTrigger.js）决定是否升级为全量捕获。字段与应用侧捕获对齐：远端地址 /
+# XFF 原链 / 方法 / 原始 URI / 状态 / TLS 参数 / UA / sec-ch-ua / 请求耗时 / 上游耗时；
+# 应用侧采样或降级时 nginx 侧仍完整。
+# 与 fsms_no_query 的取舍（先读懂再启用）：本格式**含 $request_uri（带查询串）**，
+# 查询串里可能有一次性凭据（重置令牌等），所以默认**不挂线**；只在攻击窗口按需启用，
+# 窗口结束立即改回注释并轮转/删除 forensic.log（启用/关闭步骤与观察口径见
+# deployment/edge-protection.md 的「取证窗口」一节）。
+# 字段说明：$http_x_forwarded_for 保留**原链文本**（不解析、不截断，应用侧同口径）；
+# $ssl_protocol/$ssl_cipher 与两条 X-Tls-* 头同源（同一次 TLS 会话）；上游未到/超时
+# 时 $upstream_response_time 记 -，别把它当 0 用。
+log_format fsms_forensic '$remote_addr $http_x_forwarded_for [$time_local] '
+                         '"$request_method $request_uri $server_protocol" $status '
+                         'tls=$ssl_protocol/$ssl_cipher ua="$http_user_agent" '
+                         'ch="$http_sec_ch_ua" rt=$request_time urt=$upstream_response_time';
+# 启用（默认注释；窗口结束改回）：取消下一行注释即开始写 forensic.log
+# access_log /var/log/nginx/forensic.log fsms_forensic;
 
-# ── 热升级：蓝绿 upstream（2026-10-30）───────────────────────────────────────
+# ── 升级：蓝绿 upstream（2026-10-30）───────────────────────────────────────
 # 切流 = 改「哪一行被注释」+ `nginx -t && nginx -s reload`。
 # reload 只影响新连接（worker 平滑换代），既有 keepalive 连接被优雅关闭，
 # 实测中断 < 100ms。回滚就是把注释改回来再 reload——旧色容器在观察期内
@@ -89,6 +145,9 @@ access_log /var/log/nginx/access.log fsms_no_query;
 upstream fsms_app {
     server 127.0.0.1:3000;    # 当前色 blue：compose 服务 app
     # server 127.0.0.1:3001;  # 备色 green：compose 服务 app-green（仅升级窗口内存在）
+    # 注意：3001 也是 Grafana 声明的宿主端口，故 Grafana 已移入 observability profile
+    # （默认栈不含它）。升级窗口内不要 `--profile observability` 起 Grafana，否则第 2 步
+    # 起备色会撞端口：Bind for 127.0.0.1:3001 failed: port is already allocated。
 }
 
 # HTTP -> HTTPS 强制跳转
@@ -259,7 +318,7 @@ server {
         add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
     }
 
-    # ===== 反向代理头：每个 proxy 块必须**完整重声明**四条 =====
+    # ===== 反向代理头：每个 proxy 块必须**完整重声明**基础四条 + TLS 取证两条 =====
     #
     # 两条 nginx 语义决定了不能只在 server 级写一遍：
     #   1. proxy_set_header 在嵌套块中是**整体替换**而非继承/追加——只要本块出现
@@ -276,11 +335,35 @@ server {
     # 这些端点不经过 nginx 就测不到（supertest 直连 app），CI 完全抓不住。
     #
     # X-Real-IP / X-Forwarded-For 同理不可省：TRUST_PROXY_HOPS 默认 1
-    # （docker-compose.yml），应用侧的限流、IP 黑名单与审计来源都取 req.ip。
+    # （docker-compose.yml），应用侧的限流、IP 黑名单与审计来源都取 req.ip（可信边界判据见下段）。
     # 少传时该通道上所有客户端在应用侧塌缩成同一个 IP（F-10 的反代版本），
     # 限流与封禁对其失效，审计里的来源 IP 也是假的。
     #
     # 一致性由 src/tests/deploy/nginxProxyContract.test.js 把守（新增 proxy 块漏头即红）。
+    #
+    # 【2026-10-31 取证加固：TLS 取证两条】基础四条之外，每个反代块再声明：
+    #   proxy_set_header X-Tls-Protocol $ssl_protocol;
+    #   proxy_set_header X-Tls-Cipher $ssl_cipher;
+    # 用途：应用侧取证捕获（P2，按 P1 标记表 src/services/forensicTrigger.js 升级）从 x-tls-protocol /
+    # x-tls-cipher 读客户端 TLS 会话参数；缺失时应用侧记 null（不推断）。TLS 在本层终结，
+    # 这两条头是应用唯一可见的来源，故与基础四条同规格：嵌套块整体替换语义下，必须
+    # 逐块重声明（漏一块＝那条通道的捕获缺 TLS 字段）。
+    #
+    # 【2026-10-31 XFF 信任边界口径（与应用层 clientIpForSecurityDecision 的 N 跳对齐）】
+    # 本层用**追加式** $proxy_add_x_forwarded_for（保留请求方自带的左段 + 追加本层看到的
+    # $remote_addr），并用 X-Real-IP $remote_addr 单独给出 TCP 对端。应用侧 TRUST_PROXY_HOPS
+    # 默认 1（docker-compose.yml）：Express/proxy-addr 取 XFF **最右一跳**作为 req.ip，
+    # 正常路径下即本层追加的真实客户端。但最终口径在 utils/ipUtils.clientIpForSecurityDecision：
+    # trust proxy 开启且带 XFF 时，先要求 socket 对端 ∈ TRUSTED_PROXY_CIDRS（对端须是代理
+    # 才信 XFF），否则退回**不可伪造的 socket 对端**。由此两条部署不变量：
+    #   1) TRUST_PROXY_HOPS 必须等于实际代理层数（本拓扑恒为 1）。调大＝允许请求方自带的
+    #      XFF 左段参与判定，伪造即成功——该风险已在 src/middleware/rateLimit.js 与
+    #      src/middleware/security/ipBlacklist.js 的注释里登记，改前先读；
+    #   2) 应用端口只对本层（或等价网关）可达，且 TRUSTED_PROXY_CIDRS 覆盖本层对端网段
+    #      （compose 已把 app 端口钉在 127.0.0.1 且该变量强制必填）。绕过本层直连 app:3000
+    #      的请求在应用侧退回 socket 对端——限流/封禁/审计口径才不会被 XFF 伪造带走。
+    # 结论：改本文件任何 XFF 相关行之前，先对齐 utils/ipUtils 的判据本体与
+    # docs/threat-model.md 的 F-01 残余风险；两边的「N 跳」口径必须一起改。
     #
     # 反代超时（finding #10）：每个反代块都显式声明 connect/send 超时，不依赖
     # nginx 默认值——上游 nginx.conf 的静默变更不应改变本文件的边缘语义。
@@ -311,6 +394,8 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Tls-Protocol $ssl_protocol;
+        proxy_set_header X-Tls-Cipher $ssl_cipher;
     }
 
     # ===== 无认证上报端点（根路径，静态托管不能吞掉）=====
@@ -325,6 +410,8 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Tls-Protocol $ssl_protocol;
+        proxy_set_header X-Tls-Cipher $ssl_cipher;
     }
 
     # ===== 安全联络策略（RFC 9116）=====
@@ -344,14 +431,16 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Tls-Protocol $ssl_protocol;
+        proxy_set_header X-Tls-Cipher $ssl_cipher;
     }
 
     # ===== 后端 API 反向代理（TLS 在此终结，后端可走明文内网） =====
     location /api/ {
-        # 边缘限流（finding #10）：zone 取值依据见文件顶部 limit_req_zone 处注释。
+        # 边缘限流（finding #10 / 2026-10-31 三档）：zone 取值依据与 login/strict 档启用模板见文件顶部 limit_req_zone 段。
         # 只落在 /api 的两条入口——/socket.io/ 长连接语义不同（见其块内注释）刻意豁免；
         # 上报端点由后端独立限流、/metrics 有 ACL、/health 是探针，都不在本闸范围。
-        limit_req zone=api_perip burst=20 nodelay;
+        limit_req zone=general burst=20 nodelay;
         # 与后端 express-rate-limit 的 429 语义对齐（nginx 默认 503 会误导客户端退避
         # 逻辑与监控告警口径）。
         limit_req_status 429;
@@ -366,10 +455,12 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Tls-Protocol $ssl_protocol;
+        proxy_set_header X-Tls-Cipher $ssl_cipher;
     }
 
     # 前缀块 `location /api/` 匹配不到**不带斜杠**的 `/api`，而它是一条真实路由
-    # （app.js:313 返回 `{"success":true,"message":"消防管理系统 API"}`）：
+    # （app.js:518 返回 `{"success":true,"message":"消防管理系统 API"}`）：
     # 少了本块，`https://域名/api` 会落到 location / 的 try_files，
     # 用 200 的 SPA HTML 回答一个 API 路径请求——客户端解析 JSON 直接炸，
     # 且炸在业务层而不是网关层，排查成本极高。
@@ -377,12 +468,12 @@ server {
     # `/apixyz.html` 这类未来的静态资源，把不该转发的请求也代理走。
     # 已知取舍：app.js 的 ipLimiter/generalLimiter/auditLog 挂在 `app.use('/api/')` 下，
     # 该精确路径不经过它们（全站级的 checkIPBlacklist 与 protocolCompliance 仍在）。
-    # 应用侧的限流缺口由网关侧补齐：本块与 /api/ 共用同一条 limit_req（finding #10，
+    # 应用侧的限流缺口由网关侧补齐：本块与 /api/ 共用同一条 limit_req（finding #10 / general 档，
     # 取值依据见文件顶部）——响应虽是常量 JSON，边缘闸的本意也是让扫描器的侦察请求
     # 付出速率代价。若将来它变成有状态的端点，
     # 必须改挂到 /api/ 前缀之下而不是继续扩大本块。
     location = /api {
-        limit_req zone=api_perip burst=20 nodelay;
+        limit_req zone=general burst=20 nodelay;
         limit_req_status 429;
         proxy_connect_timeout 5s;
         proxy_send_timeout 30s;
@@ -393,6 +484,8 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Tls-Protocol $ssl_protocol;
+        proxy_set_header X-Tls-Cipher $ssl_cipher;
     }
 
     # /health 本身在 protocolCompliance 的 skipPaths 内（Host 校验豁免），
@@ -407,6 +500,8 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Tls-Protocol $ssl_protocol;
+        proxy_set_header X-Tls-Cipher $ssl_cipher;
     }
 
     # ===== 就绪探针：显式 404，不得落到 SPA 兜底（2026-10-24）=====
@@ -443,6 +538,8 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Tls-Protocol $ssl_protocol;
+        proxy_set_header X-Tls-Cipher $ssl_cipher;
         # connect/send 口径见上方「反向代理头」段落（finding #10）：send 取 60s
         # 是心跳余量（非短请求块的 30s）；read 300s 回收闸保持不动。
         proxy_connect_timeout 5s;

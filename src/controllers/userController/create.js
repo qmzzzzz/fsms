@@ -149,10 +149,7 @@ const resolveAdminSetPassword = async (req, res, username) => {
   return { password, rejected: false };
 };
 
-/**
- * 创建用户
- * POST /api/users
- */
+/** 创建用户：POST /api/users（建号路径的前置校验见上方各 guard）。 */
 const createUser = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -215,6 +212,10 @@ const createUser = asyncHandler(async (req, res) => {
     createdBy: req.user.userId,
     roles: validatedRoles,
     allowedIPs: allowedIPs || '',
+    // P1-2（2026-10-30）：管理员代设的初始口令一律视为临时口令，首次登录先改密。
+    // 否则初始口令可以长期有效（管理员知道它，且没有"首次登录强制改密"这道闸）。
+    mustChangePassword: true,
+    passwordSetAt: new Date(),
   });
 
   // L-03：建号落库后复验角色仍存在且生效。角色删除采用「先停用再统计持有者」，

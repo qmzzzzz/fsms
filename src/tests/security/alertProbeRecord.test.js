@@ -239,4 +239,33 @@ describe('F-09 探针记录落盘（判据读的是文件，不是内存）', ()
     expect(v.passed).toBe(true);
     expect(v.notReady).toBe(false);
   });
+
+  test('ALERT_PROBE_RECORD_PATH 覆盖默认落点（部署主机上的记录不在仓库副本里）', () => {
+    const { alertProbeVerdict } = require('../../../scripts/complianceVerdicts');
+    const file = path.join(dir, 'host.json');
+    fs.writeFileSync(file, JSON.stringify(okRecord({ probedAt: new Date().toISOString() })));
+    const saved = process.env.ALERT_PROBE_RECORD_PATH;
+    try {
+      process.env.ALERT_PROBE_RECORD_PATH = file;
+      const v = alertProbeVerdict();
+      expect(v.notReady).toBe(false);
+      // 覆盖确实被用了：detail 里报的是这个文件，不是仓库相对的默认值
+      expect(v.detail).toContain('host.json');
+      expect(v.detail).not.toContain(path.join('logs', 'alert-probe.json'));
+    } finally {
+      if (saved === undefined) delete process.env.ALERT_PROBE_RECORD_PATH;
+      else process.env.ALERT_PROBE_RECORD_PATH = saved;
+    }
+  });
+
+  test('对照：不设覆盖口时默认落点仍是仓库根的 logs/alert-probe.json', () => {
+    const { alertProbeVerdict } = require('../../../scripts/complianceVerdicts');
+    const saved = process.env.ALERT_PROBE_RECORD_PATH;
+    try {
+      delete process.env.ALERT_PROBE_RECORD_PATH;
+      expect(alertProbeVerdict().detail).toContain(path.join('logs', 'alert-probe.json'));
+    } finally {
+      if (saved !== undefined) process.env.ALERT_PROBE_RECORD_PATH = saved;
+    }
+  });
 });

@@ -1,8 +1,8 @@
 /**
  * 审计异常检测的 MTTD 记账（Plan B，2026-10-19）
  *
- * 从 auditMonitor.runDetection 抽出的纯记账层：把 detectAnomalies 的三路结果
- * 换算成每个维度的检测延迟，写入指标并生成告警载荷里的 `detection` 字段。
+ * 纯记账层（与 auditMonitor.runDetection 分开，便于单独断言）：把 detectAnomalies 的
+ * 三路结果换算成每个维度的检测延迟，写入指标并生成告警载荷里的 `detection` 字段。
  *
  * 口径（见 constants/detectionObjectives.js）：
  *   - 统一 1× 生效检测间隔；

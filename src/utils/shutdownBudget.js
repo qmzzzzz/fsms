@@ -1,13 +1,11 @@
 'use strict';
 
 /**
- * 优雅关闭的总预算（F-103）
+ * 优雅关闭的总预算
  *
- * 缺陷的三个实测输入（本轮独立复测，与台账 §14.21.5 / §16 一致）：
- *  · HTTP 步骤自带 10 s 强制超时（`src/index.js` 的 `forceTimeout`）；
- *  · `stopReminderScheduler` 最长等 30 s（`deviceReminder.js` 的 `waitCount < 30`）；
- *  · `docker-compose.yml` 的 app 服务此前**没有** `stop_grace_period`
- *    ⇒ Docker 按默认 10 s 发 SIGKILL。
+ * 缺陷的三个输入：HTTP 步骤自带 10 s 强制超时（`src/index.js` 的 `forceTimeout`）；
+ * `stopReminderScheduler` 最长等 30 s（`deviceReminder.js` 的 `waitCount < 30`）；
+ * `docker-compose.yml` 的 app 服务若没有 `stop_grace_period`，Docker 会按默认 10 s 发 SIGKILL。
  * 链上各步预算之和远超部署窗口，而**有持久化后果**的两步（审计缓冲排空、Mongo 连接关闭）
  * 恰好排在链尾 ⇒ 最坏情形下它们一次都不会执行，且 SIGKILL 不留任何日志线索
  * （比"指标说谎"更糟：连谎话都没有）。
@@ -64,13 +62,13 @@ function __setDeadlineForTest(value) {
 }
 
 /**
- * 给"可能永远不 settle 的 await"套上硬闸（F-202）。
+ * 给"可能永远不 settle 的 await"套上硬闸。
  *
  * 为什么需要：关停链上 `await runStep(...)` 的语义是"等这一步做完"，但 Redis socket
  * 卡在半开、Mongo 驱动处在重连队列里时，那个 promise 再也不会落地 —— 于是后面的
  * 审计排空、SIEM 排空、`process.exit` 全部跑不到，进程只在部署侧 stop_grace_period 之后
- * 吃一发 SIGKILL，日志里连"卡在哪一步"都没有。F-103 给的是"每步该等多久"的额度，
- * 但额度只有被**读取**才生效；本函数是那条额度的执行端。
+ * 吃一发 SIGKILL，日志里连"卡在哪一步"都没有。每步的额度只有被**读取**才生效；本函数
+ * 是那条额度的执行端。
  *
  * 契约（调用方只看返回值，本函数**永不 reject**）：
  *   `{ timedOut: false, error: null }`   正常做完

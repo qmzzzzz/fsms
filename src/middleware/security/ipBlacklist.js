@@ -152,6 +152,12 @@ const checkIPBlacklist = async (req, res, next) => {
       // 写入进程内缓存（5 分钟 TTL），供 DB 故障时降级使用
       ipBlockCache.set(ipCacheKey(clientIP), Date.now() + IP_BLOCK_CACHE_TTL_MS);
       logger.warn(`黑名单 IP 访问被拦截：${clientIP}`);
+      try {
+        require('../../services/forensicTrigger').markForensicTarget(clientIP, {
+          reason: 'blacklist_hit',
+          source: 'ipBlacklist',
+        }); // 取证触发（P1 钩子a）：黑名单命中＝已知攻击源；为什么在这：与 403 拦截同点、早于审计与通知，标记不依赖它们成败
+      } catch (_) {} // 失败怎么办：mark 内部吞异常并计数（fail-visible）、壳只兜 require 期异常——绝不影响 403 拦截主流程
       recordEarlyRejection(req, {
         action: 'ip_blacklist_blocked',
         reason: '请求 IP 命中黑名单，已拒绝访问',
@@ -191,6 +197,13 @@ const checkIPBlacklist = async (req, res, next) => {
     const cachedExpiry = ipBlockCache.get(ipCacheKey(clientIP));
     if (cachedExpiry && cachedExpiry > Date.now()) {
       logger.warn(`黑名单 IP 访问被拦截（降级缓存）：${clientIP}`);
+      try {
+        require('../../services/forensicTrigger').markForensicTarget(clientIP, {
+          reason: 'blacklist_hit',
+          source: 'ipBlacklist',
+          evidence: { degraded: true },
+        }); // 降级分支同点标记（P1 钩子a 下半段）：DB 故障期命中缓存同样是已确认攻击源；降级拦截行为不依赖标记
+      } catch (_) {} // 失败怎么办：同主分支——mark 内部 fail-visible 计数，绝不改变降级拦截与 fail-open 判据
       recordEarlyRejection(req, {
         action: 'ip_blacklist_blocked',
         reason: '请求 IP 命中黑名单降级缓存（数据库查询失败），已拒绝访问',

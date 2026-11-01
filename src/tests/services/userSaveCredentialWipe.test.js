@@ -25,6 +25,7 @@
  */
 
 const mongoose = require('mongoose');
+const { buildAvatarUrl } = require('../../utils/avatarUrl');
 
 // ===== mock 声明区（必须在 require 被测模块之前）=====
 
@@ -96,6 +97,9 @@ jest.spyOn(sessionService, 'revokeAllSessionsSafe').mockResolvedValue(undefined)
 const CREDENTIAL_PATHS = [
   'password',
   'passwordHistory',
+  // 审计二-2：管理员重置时被替换掉的那一代口令的 bcrypt 摘要（select:false，且是逐条登记的
+  // 独立字面量：新增路径必须自己进来，否则投影退化成少排一项时断言集合也跟着变小）
+  'passwordRetiredHash',
   'phoneKey',
   'emailKey',
   'emailGrams',
@@ -237,7 +241,7 @@ describe('第 0 组 · 仪器自证：采样点确实能看见清空', () => {
 });
 
 describe('第 1 组 · helper 的派生形状', () => {
-  test('键集合等于独立字面量的 10 条凭证/检索键路径，值全为 0，无 - 前缀', () => {
+  test('键集合等于独立字面量的 11 条凭证/检索键路径，值全为 0，无 - 前缀', () => {
     const projection = RealUser.unselectedCredentialProjection();
     expect(Object.keys(projection).sort()).toEqual([...CREDENTIAL_PATHS].sort());
     expect(Object.values(projection).every((v) => v === 0)).toBe(true);
@@ -258,7 +262,7 @@ describe('第 1 组 · helper 的派生形状', () => {
     } finally {
       delete RealUser.schema.paths[path];
       delete RealUser.schema.tree[path];
-      // 复原后必须立刻回到 10 条：金丝雀留在 schema 里就等于给真模型加了个字段
+      // 复原后必须立刻回到 11 条：金丝雀留在 schema 里就等于给真模型加了个字段
       expect(Object.keys(RealUser.unselectedCredentialProjection())).toHaveLength(
         CREDENTIAL_PATHS.length
       );
@@ -288,7 +292,9 @@ describe('第 2 组 · 显式写凭证列仍然落库（排除的是读，不是
 
 describe('第 3 组 · 三个真实站点的端到端 delta', () => {
   test('updateUserProfile 只改头像：$set 里没有凭证列，且头像确实写出去了', async () => {
-    const result = await authService.updateUserProfile(ID, { avatar: '/upload/avatar/new.png' });
+    const result = await authService.updateUserProfile(ID, {
+      avatar: buildAvatarUrl(ID, 'c'.repeat(64)),
+    });
     expect(result.outcome).toBe('OK');
     expect(saveLog).toHaveLength(1);
     expect(saveLog[0].hit).toEqual([]);

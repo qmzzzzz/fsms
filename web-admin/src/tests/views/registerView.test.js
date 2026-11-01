@@ -400,6 +400,13 @@ describe('RegisterView 分步导航与提交的同步锁（H1 / H7）', () => {
 
   const nextButton = (c) => c.findAll('button').find((b) => b.textContent.includes('下一步'))
 
+  /** 勾选隐私告知同意（一-7）：末步必填，后端 privacyConsent 必须布尔 true */
+  const acceptConsent = (c) => {
+    const box = c.find('#privacyConsent')
+    if (!box) throw new Error('缺少隐私告知勾选框 #privacyConsent')
+    click(box)
+  }
+
   test('正对照：单击「下一步」前进一步（证明校验链路在 jsdom 里真的通，不是真空断言）', async () => {
     const c = await openRegister()
     fillStepOne(c)
@@ -448,6 +455,7 @@ describe('RegisterView 分步导航与提交的同步锁（H1 / H7）', () => {
     await flush(30)
     expect(visibleStep(c)).toBe(2)
     typeInto(c, 'captcha', 'a1b2')
+    acceptConsent(c)
     await flush(4)
     const before = getCaptcha.mock.calls.length
     expect(before).toBeGreaterThan(0)

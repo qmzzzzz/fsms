@@ -288,7 +288,7 @@ function checkAppendOnlyHooks() {
 
 // ================= 3. 审计导出接口存在 =================
 // L-25 同族修复（2026-09-16）：原实现查的是 securityController 上的同名函数，
-// 但该函数实际位于 controllers/auditController.js（securityRoutes.js:388 引用它）。
+// 但该函数实际位于 controllers/auditController.js（securityRoutes.js:449 引用它）。
 // 于是本项**长期误报「未定义」**——门禁亮红却无人能修，因为代码本身是对的。
 // 门禁的价值在于「失败时指向真问题」；指向错位置的红灯会训练出「红灯可忽略」的
 // 习惯，比没有门禁更危险。现改为按路由实际挂载的处理器校验（单一事实来源），

@@ -246,7 +246,7 @@ describe('A. tooltip 的 HTML 转义（L7：类目名用户可控）', () => {
     expect(thtml).not.toContain('<script>')
     expect(thtml).toContain('&lt;script&gt;x&lt;/script&gt;')
     // 正常数字仍原样显示（escapeHtml 走 String()，不把 3 变成别的）
-    expect(trend([{ name: 'ok', value: 3 }])).toContain(': 3')
+    expect(trend([{ name: 'ok', value: 3 }])).toContain(i18n.global.t('common.labelColon') + '3')
   })
 })
 

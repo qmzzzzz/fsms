@@ -31,7 +31,14 @@ const ALLOWLIST = path.join(ROOT, 'deployment', 'audit-allowlist.json');
 const SCRIPT = path.join(ROOT, 'scripts', 'check-audit-allowlist.js');
 
 /** 被测对象的真判据（不许在本文件里另写一份） */
-const { evaluate, collectRootAdvisories, loadAllowlist, advisoryId } = require(SCRIPT);
+const {
+  evaluate,
+  collectRootAdvisories,
+  loadAllowlist,
+  advisoryId,
+  reconcileReportCounts,
+} = require(SCRIPT);
+const { spawnSync } = require('child_process');
 
 const allowlist = loadAllowlist(ALLOWLIST);
 
@@ -211,6 +218,114 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
       expect(() => loadAllowlist(tmp)).toThrow(/YYYY-MM-DD/);
       write({ threshold: 'nope', entries: [] });
       expect(() => loadAllowlist(tmp)).toThrow(/threshold/);
+    } finally {
+      fs.unlinkSync(tmp);
+    }
+  });
+
+  // —— 判据④「汇总计数与明细自洽」（2026-10-31 补：报告自称有洞、明细却缺席）——
+  // 变异实测：删掉 readReport 里的 `if (!r.consistent)` 整段（或让 reconcileReportCounts
+  // 恒返 consistent:true），下面 CLI 两条断言转红（打印「✅ 通过」并退 0）。
+  test('自洽判据：汇总计数 > 0 而明细缺席 ⇒ 不一致（本轮实测的假绿形状）', () => {
+    const fake = {
+      metadata: {
+        vulnerabilities: { info: 0, low: 0, moderate: 0, high: 3, critical: 0, total: 3 },
+      },
+    };
+    const r = reconcileReportCounts(fake);
+    expect(r.totalCount).toBe(3);
+    expect(r.severitySum).toBe(3);
+    expect(r.detailCount).toBe(0);
+    expect(r.consistent).toBe(false);
+    expect(r.detail).toContain('明细条目=0');
+  });
+
+  test('自洽判据：真实报告形状必须判为一致（防"一收紧就把正常报告也判红"）', () => {
+    expect(
+      reconcileReportCounts({ metadata: { vulnerabilities: { total: 0 } }, vulnerabilities: {} })
+    ).toMatchObject({ totalCount: 0, severitySum: 0, detailCount: 0, consistent: true });
+    const five = {
+      metadata: {
+        vulnerabilities: { info: 0, low: 5, moderate: 0, high: 0, critical: 0, total: 5 },
+      },
+      vulnerabilities: { a: {}, b: {}, c: {}, d: {}, e: {} },
+    };
+    expect(reconcileReportCounts(five)).toMatchObject({
+      totalCount: 5,
+      severitySum: 5,
+      detailCount: 5,
+      consistent: true,
+    });
+    // 明细比计数多/少两个方向都要判不一致，不是只拦缺席
+    expect(reconcileReportCounts({ ...five, vulnerabilities: { a: {}, b: {} } }).consistent).toBe(
+      false
+    );
+    expect(
+      reconcileReportCounts({
+        metadata: { vulnerabilities: { low: 1, total: 1 } },
+        vulnerabilities: { a: {}, b: {} },
+      }).consistent
+    ).toBe(false);
+  });
+
+  test('夹具自觉：REAL_SHAPE 是策略样本而非"合法报告"（metadata 计数为空 ⇒ 判不一致）', () => {
+    // 这条把判据④的边界写清楚：夹具的 metadata.vulnerabilities 是 {}，明细有 7 个包，
+    // 于是它本身就不自洽。故 CLI 段必须自己造一份自洽报告，不能拿夹具直接喂 CLI。
+    const r = reconcileReportCounts(REAL_SHAPE);
+    expect(r.detailCount).toBe(7);
+    expect(r.totalCount).toBe(0);
+    expect(r.consistent).toBe(false);
+  });
+
+  // 变异实测：把 readReport 的 `if (!allowMissingDetails) throw` 改成无条件 return，
+  // 或删掉 run() 里的 `report.detailsAcknowledgedMissing` 分支 ⇒ 下面两条同时红。
+  test('CLI：缺明细的报告必须非 0（红先绿后的"红"就是这条）', () => {
+    const tmp = path.join(ROOT, '.audit-zzq-missing.json');
+    fs.writeFileSync(tmp, JSON.stringify({ metadata: { vulnerabilities: { high: 3, total: 3 } } }));
+    try {
+      const r = spawnSync(process.execPath, [SCRIPT, '--report', tmp], {
+        cwd: ROOT,
+        encoding: 'utf8',
+      });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain('汇总计数与明细对不上');
+      // 修复前的形态是这一行；它是反向判据，必须消失
+      expect(r.stdout).not.toContain('✅ 含 dev 依赖审计通过');
+    } finally {
+      fs.unlinkSync(tmp);
+    }
+  });
+
+  test('CLI：--allow-missing-details 降级也要非 0 并打印 WARN（降级≠通过）', () => {
+    const tmp = path.join(ROOT, '.audit-zzq-missing2.json');
+    fs.writeFileSync(tmp, JSON.stringify({ metadata: { vulnerabilities: { high: 3, total: 3 } } }));
+    try {
+      const r = spawnSync(process.execPath, [SCRIPT, '--report', tmp, '--allow-missing-details'], {
+        cwd: ROOT,
+        encoding: 'utf8',
+      });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain('WARN: --allow-missing-details');
+      expect(r.stdout).toContain('计数自洽：否');
+    } finally {
+      fs.unlinkSync(tmp);
+    }
+  });
+
+  test('CLI：自洽且无洞的真实形状仍判绿（防"堵假绿把真绿也堵了"）', () => {
+    const tmp = path.join(ROOT, '.audit-zzq-clean.json');
+    fs.writeFileSync(
+      tmp,
+      JSON.stringify({ metadata: { vulnerabilities: { total: 0 } }, vulnerabilities: {} })
+    );
+    try {
+      const r = spawnSync(process.execPath, [SCRIPT, '--report', tmp], {
+        cwd: ROOT,
+        encoding: 'utf8',
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('✅ 含 dev 依赖审计通过');
+      expect(r.stdout).toContain('计数自洽：是');
     } finally {
       fs.unlinkSync(tmp);
     }

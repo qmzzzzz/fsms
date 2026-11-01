@@ -46,7 +46,7 @@
  * 反过来，**没有同向复合索引时不要单独加次级排序键**（本机实测 5000 条 + {ts:-1} 索引）：
  *   .sort({ts:-1})            → LIMIT/FETCH/IXSCAN，扫 limit 量级
  *   .sort({ts:-1,_id:±1})     → PROJECTION/SORT/**COLLSCAN**，totalDocsExamined=5000
- * 即加次级排序键会把索引有序扫描打成全表扫描 + 阻塞排序（大集合还会撞 32MB 内存排序
+ * 即加次级排序键会把索引有序扫描打成全表扫描 + 阻塞排序（大集合还会撞 100 MiB 内存排序
  * 上限，表现为列表接口 500）。索引声明见三个模型，存量库对齐走
  * `migrations/20260926000000-cursor-tiebreak-compound-indexes.js`；
  * 取舍与实测口径见 `docs/adr/ADR-006-高量级列表游标分页选型.md`，

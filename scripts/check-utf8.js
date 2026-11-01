@@ -132,11 +132,87 @@ const binaryExts = new Set([
   '.wav',
 ]);
 
+/** 路径「此刻真的不在」的两类 errno：并发删除/改名都会制造它们（见 walk 的注释） */
+const isVanished = (err) => Boolean(err) && (err.code === 'ENOENT' || err.code === 'ENOTDIR');
+
+/** 悬空条目（名字仍在、目标不可达）的失败类别：持续缺失必须报红，不得静默跳过 */
+function danglingEntryError(p) {
+  const err = new Error(
+    `DANGLING_ENTRIES：${p} 仍然存在（悬空链接/目录联接）但目标不可达——持续缺失必须报红，不得静默跳过`
+  );
+  err.code = 'DANGLING_ENTRIES';
+  return err;
+}
+
+/**
+ * 复核「路径真的不在」：stat/readdir 报了 ENOENT 之后再 lstat 一次。
+ *   · lstat 成功 ⇒ 名字还在（悬空链接/目录联接，目标已被删）⇒ 抛 DANGLING_ENTRIES；
+ *   · lstat 也 ENOENT ⇒ 确实被删（并发竞态）⇒ 返回，允许调用方跳过；
+ *   · lstat 抛其它 errno（EACCES、ENOTDIR…）⇒ 照旧上抛：复核不可用不许降级成「跳过」。
+ */
+function confirmVanished(p) {
+  try {
+    fs.lstatSync(p);
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return;
+    throw err;
+  }
+  throw danglingEntryError(p);
+}
+
+/**
+ * 目录遍历：**并发下消失的条目按「没看见」处理**，其余错误一律上抛。
+ *
+ * 为什么需要这一条（2026-10-31 全量并行实测）：`src/tests/security/gateSelfTest.test.js`
+ * 用 `fs.mkdtempSync(path.join(ROOT, '.lint-ratchet-selftest-'))` 在**仓库根**下造夹具，
+ * 用完即 `rmSync`。另一个套件（`src/tests/docs/deliverablesReferenceIndex.test.js`）
+ * 同时在本函数里走全仓：readdir 拿到名字、stat 之前那个目录已被删 ⇒
+ * `ENOENT: no such file or directory, stat '…/.lint-ratchet-selftest-D0Y6cO'`，
+ * 整个套件报「Test suite failed to run」。这是**假红**：编码内容一个字节都没变，
+ * 红的只是「遍历期间有人删掉了自己的临时目录」。
+ *
+ * 但「消失」有两种，第十一轮起必须分开：
+ *   · 瞬时消失（竞态：并发删/改名）——跳过，上面那条假红要挡的就是它；
+ *   · 持续缺失（悬空链接/目录联接：名字还在、目标已删）——**必须报红**。
+ * 2026-10-31 实测反例：把仓库里一个**已被扫描的文件**换成悬空链接，只跳过竞态的
+ * 那版实现静默 exit 0，扫描面 1429→1428 且一个提示都没有（HEAD 版则是未捕获
+ * ENOENT 直接崩溃——崩也不是红）。一个长期挂着的坏链接不是竞态，把它当「没看见」
+ * 等于扫描面在静默缩水。区分手段：stat/readdir 报 ENOENT 后再 `lstat` 一次
+ * （不跟随链接）——lstat 成功说明名字还在 ⇒ 抛 DANGLING_ENTRIES；lstat 也 ENOENT
+ * 才是确实被删 ⇒ 跳过。
+ *
+ * 边界写死在这里：只有 ENOENT / ENOTDIR（「这个路径此刻不在」）被跳过；其余错误
+ * （EACCES、EIO、ELOOP…）照旧上抛；lstat 复核自己抛错时同样上抛（含 ENOTDIR）——
+ * 复核不可用不等于「没问题」。把整段包进 try/catch 吞掉，等于把「看不见」
+ * 当成「没问题」——那正是本仓库反复点名的那类假绿。扫描面缩水另有闸：
+ * `collectScanSet` 的「根缺位 / 根为空 / 空扫描集」三条判据会红。
+ */
 function walk(dir, out) {
-  for (const name of fs.readdirSync(dir)) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch (err) {
+    if (isVanished(err)) {
+      // ENOENT 还要复核一次：名字还在（悬空目录联接）就不是竞态，必须报红。
+      if (err.code === 'ENOENT') confirmVanished(dir);
+      return; // ENOTDIR（组件被换走）或 lstat 复核确认真被删：目录按空
+    }
+    throw err;
+  }
+  for (const name of names) {
     if (isSkippedDirName(name)) continue;
     const full = path.join(dir, name);
-    const st = fs.statSync(full);
+    let st;
+    try {
+      st = fs.statSync(full);
+    } catch (err) {
+      if (isVanished(err)) {
+        // 同上：ENOENT 先 lstat 复核，悬空链接/目录联接要报红，真被删才跳过。
+        if (err.code === 'ENOENT') confirmVanished(full);
+        continue; // ENOTDIR 或复核确认真被删：跳过这一条
+      }
+      throw err;
+    }
     if (st.isDirectory()) walk(full, out);
     else out.push(full);
   }
@@ -233,7 +309,18 @@ function findEncodingProblems(files) {
 
 function main() {
   // 扫描集本身不可信时不进逐文件检查：那时"没发现问题"只意味着"没看"
-  const files = collectScanSet();
+  let files;
+  try {
+    files = collectScanSet();
+  } catch (err) {
+    // 持续性缺失（悬空链接/目录联接）是判据内的失败类别：按可控方式报红，
+    // 而不是把 Node 的原始堆栈当成唯一线索（HEAD 版那次的症状正是"崩"而不是"红"）。
+    if (err && err.code === 'DANGLING_ENTRIES') {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
   if (!files) process.exit(1);
 
   const { bad, garbled } = findEncodingProblems(files);

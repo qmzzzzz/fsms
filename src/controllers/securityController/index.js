@@ -10,6 +10,7 @@ const overview = require('./overview');
 const admin = require('./admin');
 const config = require('./config');
 const reauth = require('./reauth');
+const upgrade = require('./upgrade');
 
 module.exports = {
   getMySecurityInfo: account.getMySecurityInfo,
@@ -22,6 +23,7 @@ module.exports = {
   getMyLogs: account.getMyLogs,
   toggleUserLock: admin.toggleUserLock,
   resetUserMfa: admin.resetUserMfa,
+  resetUserPassword: admin.resetUserPassword,
   getSecurityOverview: overview.getSecurityOverview,
   getRecentAlerts: overview.getRecentAlerts,
   getRegistrationConfig: config.getRegistrationConfig,
@@ -32,4 +34,7 @@ module.exports = {
   setRegisterCaptchaConfig: config.setRegisterCaptchaConfig,
   // 审计读取的短时票据：步进验证通过后签发，供 GET 类审计端点在 TTL 内复用
   issueReauthTicket: reauth.issueReauthTicket,
+  getUpgradeOverview: upgrade.getUpgradeOverview,
+  getUpgradeJob: upgrade.getUpgradeJob,
+  triggerUpgrade: upgrade.triggerUpgrade,
 };

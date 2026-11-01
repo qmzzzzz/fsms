@@ -152,6 +152,53 @@ const DECLARED_DYNAMIC = [
       'VALIDATION_FAILED',
     ],
   },
+  // 蜜罐文件类端点的拒绝出口（P1c）：码槽是"判定"返回的描述符，值全是码表里的字面量。
+  // 本调用点没有字面 message 实参是**有意的**——真实控制器那几句拒绝体就是码表默认文案 +
+  // ApiResponse 同一个口（REPORT_TYPE_UNSUPPORTED 的自定义文案由 options 提供，与真实链逐字相同）。
+  // 带 ${format} 占位符的 EXPORT_FORMAT_UNSUPPORTED 不在这里：它在 sendFileResponse 里是一条
+  // 内联 message 的独立调用点（占位符码绝不允许从"不传 message"的出口发出去）。
+  {
+    site: 'src/services/honeypotDecoyFiles.js|response.code',
+    trace: { file: 'src/services/honeypotDecoyFiles.js', props: ['code'] },
+    codes: [
+      'AUDIT_EXPORT_REQUIRES_AUDIT_PERM',
+      'AVATAR_NOT_FOUND',
+      'DATE_PARAM_INVALID',
+      'DATE_RANGE_INVALID',
+      'PERMISSION_DENIED',
+      'REPORT_TYPE_UNSUPPORTED',
+    ],
+  },
+  // 诱饵本人自助面（P2）的统一出口：描述符里的 errorCode 由各 handler 自己给，
+  // 目前只有 VALIDATION_FAILED 一条（my-logs 的 category、report-targets 的 type），
+  // 两处都是码表里的字面量，且各自在 options.fieldErrors 里带了逐字复用的真实文案。
+  // 登记它是因为出口不传 message：日后若有人在这里扩出占位符码，本闸会先红。
+  {
+    site: 'src/services/honeypotDecoySelf.js|response.errorCode',
+    trace: { file: 'src/services/honeypotDecoySelf.js', props: ['errorCode'] },
+    codes: ['VALIDATION_FAILED'],
+  },
+  // 蜜罐判定层的两个拒绝出口共用一个码槽（P2-2 路由表 + 批次 D 列表查询面）：
+  //   · 明细未命中：码取自「逐集合点名的 404 描述符表」（USER_NOT_FOUND 额外带 statusCode:404）；
+  //   · 列表非法查询：码取自与真实路由**逐字相同**的拒绝描述符——VALIDATION_FAILED（体里带
+  //     options.fieldErrors 四键明细）、DATE_PARAM_INVALID / DATE_RANGE_INVALID（参数形态/区间反向）。
+  // 值全是码表里的字面量，且出口不传 message 是**有意的**：真实链这几句用的就是码表默认文案 +
+  // 同一个 ApiResponse.codeError；这里多写一句 message 反而会造出可指纹的差异。
+  {
+    site: 'src/services/honeypotDecoy.js|payload.code',
+    trace: { file: 'src/constants/honeypotDecoy.js', props: ['code'] },
+    codes: [
+      'ALARM_NOT_FOUND',
+      'DATE_PARAM_INVALID',
+      'DATE_RANGE_INVALID',
+      'DEVICE_NOT_FOUND',
+      'INSPECTION_NOT_FOUND',
+      'PERMISSION_NOT_FOUND',
+      'ROLE_NOT_FOUND',
+      'USER_NOT_FOUND',
+      'VALIDATION_FAILED',
+    ],
+  },
   {
     // 密码轨与 MFA 轨合并后的统一失败出口（两处同文本 errorCode 槽会撞站点键）
     site: 'src/middleware/security/index.js|failed.errorCode',

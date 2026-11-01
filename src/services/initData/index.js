@@ -11,10 +11,12 @@ const {
   reconcileUserIndexes,
   reconcileTokenBlacklistIndexes,
   reconcileAuditTtlIndex,
+  reconcileBusinessTtlIndexes,
 } = require('./indexes');
 const { initSystemConfig } = require('./systemConfig');
 const { defaultPermissions } = require('./permissions');
 const { defaultRoles } = require('./roles');
+const honeypotWatch = require('../honeypotWatch');
 
 const initializeSystem = async () => {
   try {
@@ -31,10 +33,12 @@ const initializeSystem = async () => {
     await createDefaultAdmin();
     // 超管对账须在 createDefaultAdmin 之后：首次启动时 admin 账户此刻才存在
     await reconcileSuperAdmin();
+    await honeypotWatch.init(); // 蜜罐物化：与超管对账同层的启动期数据任务（HONEYPOT_ENABLED 未置真值时零副作用）
     // 索引对账：清掉旧 schema 残留的唯一索引，否则 refresh 轮换会被误判为重放
     await reconcileTokenBlacklistIndexes();
     // 留存 TTL 常驻对账：改档后迁移不会重放，这里是唯一能把声明落到物理索引的地方
     await reconcileAuditTtlIndex();
+    await reconcileBusinessTtlIndexes(); // 业务三集合（FireAlarm/Inspection/FireDevice）TTL 对账：改档后唯一能落到物理索引的地方
     await initSystemConfig();
     logger.info('=== 系统初始化完成 ===');
   } catch (error) {
@@ -52,6 +56,7 @@ module.exports = {
   reconcileUserIndexes,
   reconcileTokenBlacklistIndexes,
   reconcileAuditTtlIndex,
+  reconcileBusinessTtlIndexes,
   initSystemConfig,
   defaultPermissions,
   defaultRoles,

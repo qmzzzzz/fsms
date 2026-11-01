@@ -1,6 +1,4 @@
-/**
- * userController 删除路径：单个删除与批量删除。
- */
+/** userController 删除路径：单个删除与批量删除（匿名化，见 P1-3）。 */
 const { validationResult } = require('express-validator');
 const { safeFieldErrors } = require('../../utils/validationRules');
 const ApiResponse = require('../../utils/apiResponse');
@@ -14,6 +12,10 @@ const statsCache = require('../../services/statsCache');
 const { invalidateUserCache } = require('../../middleware/auth');
 const userService = require('../../services/userService');
 const { USER_OWNER_FIELD, USER_DEPT_FIELD, operatorTag } = require('./shared');
+// P1-3：删除改为匿名化后，审计动作从路由派生的 user_delete 收敛为专用 user_anonymized
+const { recordDurably } = require('../../services/auditOutbox');
+const { auditClientAddress } = require('../../utils/ipUtils');
+const { auditPath } = require('../../utils/auditMeta');
 
 /**
  * 写后置判定所依据的状态快照（M-01）：范围判据用 createdBy/department，
@@ -27,10 +29,7 @@ const stateSnapshot = (user) => {
   return snapshot;
 };
 
-/**
- * 删除用户
- * DELETE /api/users/:id
- */
+/** 删除单个用户（P1-3 起为匿名化）：DELETE /api/users/:id */
 const deleteUser = asyncHandler(async (req, res) => {
   const user = await userService.findUserForUpdate(req.params.id);
   if (!user) {
@@ -73,43 +72,75 @@ const deleteUser = asyncHandler(async (req, res) => {
   }
 
   const userId = user._id;
-  const deleted = await userService.deleteById(req.params.id, stateSnapshot(user));
-  if (!deleted) {
+  // P1-3（2026-10-30）：默认行为改为匿名化——硬删除会把审计里的 userId 留成悬空指向，
+  // 而删除权要求的是"不再能识别到这个人"，不是"抹掉他做过的事"。
+  // deleteById 仅保留给建号失败回滚等确实需要撤销半成品记录的路径。
+  const anonymized = await userService.anonymizeById(req.params.id, {
+    reason: 'admin_delete',
+    expected: stateSnapshot(user),
+  });
+  if (!anonymized) {
     return ApiResponse.codeError(res, 'USER_STATE_CONFLICT');
   }
 
   // 失效缓存
 
   invalidateUserCache(userId);
-  // 统计缓存：删除改变所有查看者的聚合口径，必须全量失效（A-1）
+  // 统计缓存：注销改变所有查看者的聚合口径，必须全量失效（A-1）
   statsCache.invalidateAll('user-delete');
 
-  logger.info('用户已删除', { username: user.username });
+  // P1-3：业务状态已改变（实名/PII 已抹除、会话已吊销）⇒ 审计先持久化再回成功。
+  // skipGlobalAudit 后由本条专用动作承担唯一留痕，避免同一操作出现两条语义不同的记录。
+  await recordDurably(
+    {
+      action: 'user_anonymized',
+      category: 'user',
+      userId: req.user.userId,
+      username: req.user.username,
+      targetUserId: user._id,
+      targetUsername: user.username,
+      method: req.method,
+      path: auditPath(req),
+      ...auditClientAddress(req),
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'high',
+      riskFactors: ['user_anonymized'],
+      reason: '管理员注销用户并匿名化其个人身份信息',
+    },
+    { auditAction: 'user_anonymized', req }
+  );
+  res.locals.skipGlobalAudit = true; // 置位晚于审计：审计重抛时由全局审计接手记这次 500
 
-  return ApiResponse.success(res, null, '用户删除成功');
+  logger.info('用户已匿名化', { username: user.username, operator: req.user.username });
+
+  return ApiResponse.success(
+    res,
+    { userId: String(userId), anonymized: true },
+    '用户已注销并匿名化'
+  );
 });
 
 /**
- * M-01：按判定时的状态快照做条件删除。
+ * M-01：按判定时的状态快照做条件匿名化。
  * 快照缺失（两次读之间用户消失）与条件不匹配（判定后被改角色/部门/归属）
- * 一律返回 null，由调用方映射为 409——绝不能让 undefined 快照退化成无条件删除。
+ * 一律返回 null，由调用方映射为 409——绝不能让 undefined 快照退化成无条件匿名化。
  */
-const deleteBatchWithSnapshots = async (requestedIds, snapshots) => {
+const anonymizeBatchWithSnapshots = async (requestedIds, snapshots) => {
   const snapshotById = new Map(snapshots.map((s) => [String(s._id), stateSnapshot(s)]));
   const expectedByTarget = new Map(requestedIds.map((id) => [id, snapshotById.get(id)]));
   if (requestedIds.some((id) => !expectedByTarget.get(id))) return null;
   try {
-    return await userService.deleteMany({ _id: { $in: requestedIds } }, expectedByTarget);
+    return await userService.anonymizeMany({ _id: { $in: requestedIds } }, expectedByTarget, {
+      reason: 'admin_batch_delete',
+    });
   } catch (err) {
     if (err.code === 'USER_STATE_CONFLICT') return null;
     throw err;
   }
 };
 
-/**
- * 批量删除用户
- * DELETE /api/users/batch
- */
+/** 批量删除用户（同为匿名化）：DELETE /api/users/batch */
 const batchDeleteUsers = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -187,8 +218,7 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
     });
   }
 
-  // 超管账户不可删除（与单个删除口径一致）：任一目标是超管则整批拒绝，
-  // 避免"批量接口成为单个接口保护的绕过路径"
+  // 超管账户不可删除（与单个删除口径一致）：任一目标是超管则整批拒绝，杜绝绕过路径
   const superTarget = targets.find((t) => (t.roles || []).some(isSuperAdminRole));
   if (superTarget) {
     logger.warn('批量删除含超管账户被拒', {
@@ -200,20 +230,45 @@ const batchDeleteUsers = asyncHandler(async (req, res) => {
     });
   }
 
-  // M-01：逐个目标带快照条件删除；任一目标在判定后被改角色/改部门/改归属，
+  // M-01：逐个目标带快照条件匿名化；任一目标在判定后被改角色/改部门/改归属，
   // 整批以 409 中止（副本集下事务回滚），不让批量接口把单对象的保护绕过去
-  const result = await deleteBatchWithSnapshots(requestedIds, snapshots);
+  const result = await anonymizeBatchWithSnapshots(requestedIds, snapshots);
   if (!result) return ApiResponse.codeError(res, 'USER_STATE_CONFLICT');
 
   // 批量失效缓存
 
   requestedIds.forEach(invalidateUserCache);
-  // 统计缓存：批量删除同样影响所有查看者，一次全量失效即可（A-1）
+  // 统计缓存：批量注销同样影响所有查看者，一次全量失效即可（A-1）
   statsCache.invalidateAll('user-bulk-delete');
 
-  logger.info(`批量删除用户：${result.deletedCount} 个`);
+  // P1-3：批量一条审计覆盖整批（targetIds 可逐条查）——逐目标写 N 条会让一次批量操作看起来像 N 次
+  await recordDurably(
+    {
+      action: 'user_anonymized',
+      category: 'user',
+      userId: req.user.userId,
+      username: req.user.username,
+      method: req.method,
+      path: auditPath(req),
+      body: { targetIds: requestedIds, count: requestedIds.length, batch: true },
+      ...auditClientAddress(req),
+      userAgent: req.get('user-agent'),
+      success: true,
+      riskLevel: 'high',
+      riskFactors: ['user_anonymized', 'batch'],
+      reason: `管理员批量注销 ${requestedIds.length} 个用户并匿名化`,
+    },
+    { auditAction: 'user_anonymized', req }
+  );
+  res.locals.skipGlobalAudit = true; // 置位晚于审计：审计重抛时由全局审计接手记这次 500
 
-  return ApiResponse.success(res, { deleted: result.deletedCount }, '批量删除成功');
+  logger.info(`批量注销用户：${result.anonymizedCount} 个`);
+
+  return ApiResponse.success(
+    res,
+    { anonymized: result.anonymizedCount },
+    '批量注销完成（已匿名化）'
+  );
 });
 
 module.exports = { deleteUser, batchDeleteUsers };

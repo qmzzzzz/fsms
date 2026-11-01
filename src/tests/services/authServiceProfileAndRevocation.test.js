@@ -30,6 +30,7 @@ const path = require('path');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { buildAvatarUrl } = require('../../utils/avatarUrl');
 
 describe('authService gap A', () => {
   let User;
@@ -107,15 +108,16 @@ describe('authService gap A', () => {
 
     test('OK - 正常更新全部可自助字段并返回 profile', async () => {
       const user = await makeUser('prof5');
+      const avatar = buildAvatarUrl(user._id, 'a'.repeat(64));
       const result = await authService.updateUserProfile(user._id, {
         realName: '张三',
         phone: '13800138000',
-        avatar: 'https://example.com/avatar.png',
+        avatar,
       });
       expect(result.outcome).toBe('OK');
       expect(result.profile.realName).toBe('张三');
       expect(result.profile.phone).toBe('13800138000');
-      expect(result.profile.avatar).toBe('https://example.com/avatar.png');
+      expect(result.profile.avatar).toBe(avatar);
     });
 
     // ==================== H-01 回归：department 不可自助修改 ====================
@@ -155,12 +157,23 @@ describe('authService gap A', () => {
       expect(result.outcome).toBe('OK');
     });
 
-    test('OK - 合法相对路径头像与 data URI', async () => {
+    test('D3 收口：外部 URL / 相对路径 / data URI 一律 INVALID_AVATAR', async () => {
       const user = await makeUser('prof7');
-      const r1 = await authService.updateUserProfile(user._id, {
-        avatar: '/uploads/photo.jpg',
-      });
-      expect(r1.outcome).toBe('OK');
+      for (const avatar of [
+        'https://example.com/avatar.png',
+        '/uploads/photo.jpg',
+        'data:image/png;base64,iVBORw0KGgo=',
+      ]) {
+        const result = await authService.updateUserProfile(user._id, { avatar });
+        expect(result.outcome).toBe('INVALID_AVATAR');
+      }
+    });
+
+    test('OK - 服务端为该用户生成的 URL 通过校验', async () => {
+      const user = await makeUser('prof7ok');
+      const avatar = buildAvatarUrl(user._id, 'b'.repeat(64));
+      const result = await authService.updateUserProfile(user._id, { avatar });
+      expect(result.outcome).toBe('OK');
     });
 
     test('OK - 空字符串头像通过校验', async () => {

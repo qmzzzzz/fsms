@@ -182,7 +182,57 @@ function validatePreflight(env, fsImpl) {
   const objectives = checkBackupObjectives(env);
   errors.push(...objectives.errors);
 
+  // ⑥ 异地备份（P1-4）：备份只在同机同盘等于没有灾备。
+  //    默认只在生产/显式开启时强制，本地演练不被误伤；但生产缺配置必须拒绝发布，
+  //    不能像旧版备份脚本那样只打一行 Warning 就继续。
+  const offsite = checkBackupOffsite(env);
+  errors.push(...offsite.errors);
+  warnings.push(...offsite.warnings);
+
   return { ok: errors.length === 0, errors, warnings };
+}
+
+/**
+ * 异地备份配置检查（P1-4）
+ *
+ * @param {Record<string,string|undefined>} env
+ * @returns {{errors: string[], warnings: string[]}}
+ */
+function checkBackupOffsite(env) {
+  const errors = [];
+  const warnings = [];
+  const rawCmd = env.BACKUP_OFFSITE_CMD || '';
+  const cmd = rawCmd.trim();
+  const dir = (env.BACKUP_OFFSITE_DIR || '').trim();
+  // 生产（NODE_ENV=production）自动强制；工作流另显式下发 DEPLOY_ENFORCE_OFFSITE=true，
+  // 让非 production 标记的预发也能按生产口径演练。
+  const enforced =
+    (env.DEPLOY_ENFORCE_OFFSITE || '').trim() === 'true' ||
+    (env.NODE_ENV || '').trim() === 'production';
+
+  if (rawCmd !== '' && !cmd) {
+    const msg =
+      'BACKUP_OFFSITE_CMD 已设置但只含空白：备份脚本会按失败处理，请删除该变量或填入真实命令。';
+    if (enforced) errors.push(msg);
+    return { errors, warnings };
+  }
+
+  if (!cmd && !dir) {
+    const msg =
+      '未配置异地备份（BACKUP_OFFSITE_CMD 或 BACKUP_OFFSITE_DIR）：备份只留在本机，' +
+      '不满足等保 2.0 与 P1-4 的异地副本要求。';
+    if (enforced) errors.push(msg + '生产发布已拒绝；请配置其一后重试。');
+    // 未强制时保持静默：本地/单测的 validatePreflight 调用不应因"没配异地"改变
+    // 既有 warnings 契约（生产由工作流显式置 DEPLOY_ENFORCE_OFFSITE=true）。
+    return { errors, warnings };
+  }
+
+  if (cmd && dir) {
+    warnings.push(
+      'BACKUP_OFFSITE_CMD 与 BACKUP_OFFSITE_DIR 同时设置：备份脚本优先执行 CMD，DIR 不会生效，请只保留一个。'
+    );
+  }
+  return { errors, warnings };
 }
 
 /**
@@ -531,6 +581,7 @@ module.exports = {
   validatePreflight,
   checkAlertingEndpoint,
   checkBackupObjectives,
+  checkBackupOffsite,
   buildPlan,
   isSameImageRef,
   parseAppliedMigrations,

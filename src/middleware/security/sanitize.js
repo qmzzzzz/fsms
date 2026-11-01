@@ -1,9 +1,8 @@
 /**
- * MongoDB 注入防护与 req.query 物化（自 `middleware/security.js` 拆出，2026-10-18）
+ * MongoDB 注入防护与 req.query 物化。
  *
  * 内容：sanitizeMongo（NoSQL 操作符/原型污染键清理）与 materializeQuery
  * （query 只读物化——写 req.query 在 Express 5 会抛错，此处逐层拷贝成普通对象）。
- * 对外导出面由 security/index.js 原样再导出。
  */
 
 const logger = require('../../utils/logger');
@@ -13,21 +12,17 @@ const ApiResponse = require('../../utils/apiResponse');
  * 2. 数据清理 - MongoDB 注入防护
  * 清理请求中的 MongoDB 操作符，防止 NoSQL 注入
  *
- * ⚠ Express 5 前提（修正，2026-09-17；2026-09-30 收口）：req.query 是 getter
- * （node_modules/express/lib/request.js 的 defineGetter(req, 'query', ...)），
- * 每次访问都重新解析 URL 查询串。因此本中间件对 req.query 的**原地赋值无效**，
- * 且实测比"下次访问才丢"更彻底——同一 handler 同一 tick 内回读就已经是全新对象。
- *
- * 2026-09-30 起 query 侧改由 materializeQuery 收口：读一次 → 清洗 → 物化成自有
- * 数据属性 → **回读自证身份**。本中间件不再遍历 req.query（写了也是空操作，
- * 留着只会让人误以为 query 有两道防线）。
+ * ⚠ Express 5 前提：req.query 是 getter（express/lib/request.js 的 `defineGetter`），
+ * 每次访问都重新解析 URL 查询串 ⇒ 本中间件对 req.query 的**原地赋值无效**，且同一 handler
+ * 同一 tick 内回读就已经是全新对象。query 侧因此改由 materializeQuery 收口：读一次 →
+ * 清洗 → 物化成自有数据属性 → **回读自证身份**。本中间件不再遍历 req.query（写了也是
+ * 空操作，留着只会让人误以为 query 有两道防线）。
  *
  * req.body 与 req.params 是普通自有属性，原地清洗对它们确实生效。
  *
- * 注意：本中间件的单测用**手搓的 req 桩对象**，而桩上的 query 是普通属性——
- * 所以那组单测**结构上不可能**发现上面这条 Express 5 前提。
- * 「物化真的生效」由 src/tests/app/queryDefenseSingleSource.test.js 在**真实
- * express 实例**上钉住（真实 getter + 真实 supertest），不接受桩。
+ * 注意：本中间件的单测用**手搓的 req 桩对象**，桩上的 query 是普通属性——那组单测结构上
+ * 不可能发现上面这条前提。「物化真的生效」由 src/tests/app/queryDefenseSingleSource.test.js
+ * 在**真实 express 实例**上钉住（真实 getter + 真实 supertest），不接受桩。
  */
 // 递归深度上限：1mb 请求体可构造数千层嵌套，无上限的同步递归会被极端载荷
 // 打爆调用栈（RangeError→500 资源骚扰）；超限分支直接整体丢弃该子树
@@ -85,14 +80,12 @@ const sanitizeMongo = (req, res, next) => {
   // `delete req.query.search` 之后**同一 handler 同一 tick** 内 `Object.keys(req.query)`
   // 仍然读得到 `search`。
   //
-  // 此处此前把 req.query 一起遍历（写作"对 body/params/query 都生效"），读代码的人
-  // 会以为 query 有两道防线，实际其中一道从未存在过。已移交给 materializeQuery：
-  // 它把解析结果物化成**自有数据属性**，清洗与"物化真的生效"由运行时自证。
+  // query 侧不在此遍历：移交给 materializeQuery（物化成**自有数据属性**，清洗与"物化
+  // 真的生效"由运行时自证）。把它写在这里只会让人误以为 query 有两道防线。
   //
-  // 必须显式包一层箭头函数：forEach 的实参是 (元素, 下标, 数组)，
-  // 直接传函数引用会把**下标**当成 deepSanitizeKeys 的 depth 入参——
-  // body 从 0 起算（正确），params 从 1 起算，于是 params 的可用嵌套预算凭空少 1 层：
-  // 第 9 层子树就被整体清空，而注释承诺的是「SANITIZE_MAX_DEPTH 层内不误伤」。
+  // 必须显式包一层箭头函数：forEach 的实参是 (元素, 下标, 数组)，直接传函数引用会把
+  // **下标**当成 deepSanitizeKeys 的 depth 入参——body 从 0 起算，params 从 1 起算，
+  // params 的可用嵌套预算凭空少 1 层：第 9 层子树被整体清空，而承诺是「层内不误伤」。
   // 方向上仍偏保守（超限是删除而非放行），所以不是注入缺口，是数据损失 + 契约不符。
   [req.body, req.params].forEach((part) => deepSanitizeKeys(part));
   next();
@@ -111,12 +104,11 @@ const sanitizeMongo = (req, res, next) => {
  * 同一份实现，不另造第二套规则）→ 用 defineProperty 把这个对象**物化**成 req 的自有
  * 数据属性，遮蔽原型 getter。此后所有消费者读到的是同一份、已清洗的快照。
  *
- * 为什么必须自证（这是本中间件与「注释里说它有效」的根本区别）：
- * 物化成不生效只有两种可能——defineProperty 抛错（req 被冻结），或将来 Express 改了
- * 实现让自有属性不再遮蔽原型 getter。两者都不会有任何报错，只会让防线**静默归零**，
- * 而这正是本仓吃过一次亏的形态（防线失效是被 e2e 白屏偶然发现，不是被发现）。
- * 所以每次物化后立即回读比对身份，不等即**拒绝本次请求**并 error 级留痕——
- * 「服务不可用」远好过「带着未清洗的 query 把请求处理下去」。
+ * 为什么必须自证（这是本中间件与「注释里说它有效」的根本区别）：物化成不生效只有两种
+ * 可能——defineProperty 抛错（req 被冻结），或将来 Express 改了实现让自有属性不再遮蔽
+ * 原型 getter。两者都不会有任何报错，只会让防线**静默归零**。所以每次物化后立即回读比对
+ * 身份，不等即**拒绝本次请求**并 error 级留痕——「服务不可用」远好过「带着未清洗的 query
+ * 把请求处理下去」。
  *
  * 附带收益：解析次数从「每个消费者一次」（sanitizeMongo / hpp / queryScalarGuard /
  * queryLengthLimit / 各控制器各一次）降到全请求一次，query 键多时省掉的是实打实的

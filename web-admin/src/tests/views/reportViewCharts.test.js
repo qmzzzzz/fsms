@@ -366,8 +366,10 @@ describe('ReportView 图表数据渲染', () => {
     ])
     // 轴标签与 series 必须同序同长，否则柱与标签错位
     expect(lastBar().xAxis.data).toEqual(['正常', '警告', '故障', '离线', '维护中', '已报废'])
-    // 柱状图 tooltip 带单位「台」；饼图 tooltip 带占比，两者语义不同不可互换
-    expect(lastBar().tooltip).toEqual({ trigger: 'axis', formatter: '{b}: {c}台' })
+    // 柱状图 tooltip 带本地化单位（中文「台」/英文 units）；饼图 tooltip 带占比，两者语义不同不可互换
+    expect(lastBar().tooltip.trigger).toBe('axis')
+    expect(typeof lastBar().tooltip.formatter).toBe('function')
+    expect(lastBar().tooltip.formatter([{ name: '正常', value: 7 }])).toBe('正常: 7台')
     expect(lastPie().tooltip).toEqual({ trigger: 'item', formatter: '{b}: {c} ({d}%)' })
   })
 

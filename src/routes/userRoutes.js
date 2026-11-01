@@ -11,6 +11,7 @@ const { mustBeString } = require('../utils/validationRules');
 const { validatePasswordStrength } = require('../utils/helpers');
 const { MAX_TEXT_LENGTH } = require('../utils/ipRange');
 const { consumeValidation } = require('../middleware/validateQuery');
+const { idempotency } = require('../middleware/idempotency');
 const { USER_STATUS } = require('../utils/constants');
 
 // 列表 query 校验。status 此前零校验直入 Mongo 过滤，
@@ -185,6 +186,7 @@ router.post(
   '/',
   authenticate,
   checkPermission('user:create'),
+  idempotency({ scope: 'user:create' }), // 请求级幂等（一-1；键可选，前端默认带上）
   createUserValidation,
   userController.createUser
 );

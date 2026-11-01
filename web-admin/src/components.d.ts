@@ -23,6 +23,7 @@ declare module 'vue' {
     ElBadge: typeof import('element-plus/es/components/badge/index.mjs')['ElBadge']
     ElBreadcrumb: typeof import('element-plus/es/components/breadcrumb/index.mjs')['ElBreadcrumb']
     ElBreadcrumbItem: typeof import('element-plus/es/components/breadcrumb/index.mjs')['ElBreadcrumbItem']
+    ElButton: typeof import('element-plus/es/components/button/index.mjs')['ElButton']
     ElCard: typeof import('element-plus/es/components/card/index.mjs')['ElCard']
     ElCheckbox: typeof import('element-plus/es/components/checkbox/index.mjs')['ElCheckbox']
     ElCol: typeof import('element-plus/es/components/col/index.mjs')['ElCol']
@@ -32,6 +33,7 @@ declare module 'vue' {
     ElDescriptionsItem: typeof import('element-plus/es/components/descriptions/index.mjs')['ElDescriptionsItem']
     ElDialog: typeof import('element-plus/es/components/dialog/index.mjs')['ElDialog']
     ElDivider: typeof import('element-plus/es/components/divider/index.mjs')['ElDivider']
+    ElDrawer: typeof import('element-plus/es/components/drawer/index.mjs')['ElDrawer']
     ElDropdown: typeof import('element-plus/es/components/dropdown/index.mjs')['ElDropdown']
     ElDropdownItem: typeof import('element-plus/es/components/dropdown/index.mjs')['ElDropdownItem']
     ElDropdownMenu: typeof import('element-plus/es/components/dropdown/index.mjs')['ElDropdownMenu']
@@ -82,6 +84,8 @@ declare module 'vue' {
     SecurityStatsCard: typeof import('./components/SecurityStatsCard.vue')['default']
     SessionManager: typeof import('./components/SessionManager.vue')['default']
     UpdateNoticeBar: typeof import('./components/UpdateNoticeBar.vue')['default']
+    UpgradeDialog: typeof import('./components/UpgradeDialog.vue')['default']
+    UserAvatar: typeof import('./components/UserAvatar.vue')['default']
   }
   export interface GlobalDirectives {
     vLoading: typeof import('element-plus/es/components/loading/index.mjs')['ElLoadingDirective']

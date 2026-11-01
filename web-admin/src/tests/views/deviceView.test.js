@@ -11,6 +11,7 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mountComponent, click, flush, waitFor } from '../helpers/componentHarness'
 import { useAuthStore } from '@/store'
+import i18n from '@/i18n'
 
 const getList = vi.fn()
 const create = vi.fn()
@@ -265,7 +266,7 @@ describe('DeviceView 列表加载与筛选', () => {
     expect(params.page).toBe(1)
   })
 
-  test('加载失败：清空列表、不留旧数据，且组件不弹 toast（提示归拦截器，P2-3）', async () => {
+  test('加载失败：旧数据保留并标注为上次数据，且组件不弹 toast（提示归拦截器，P2-3）', async () => {
     const c = await open()
     expect(cells(c)).toHaveLength(1)
     getList.mockRejectedValue(new Error('boom'))
@@ -274,10 +275,15 @@ describe('DeviceView 列表加载与筛选', () => {
     // 组件这里再弹一条的话，生产上同一次失败会弹两条（拦截器具体文案 + 组件泛化文案）。
     // 前提自证：本套件把 @/utils/api 整体替身掉，拦截器不参与 ⇒ 这里必须恰好 0 次；
     // 「用户仍能看到错误」的那一半由 apiRequestPipeline.test.js 走真实拦截器兜住。
-    await waitFor(() => cells(c).length === 0, { message: '失败后列表清空' })
+    //
+    // 2026-10-31 口径纠正（P1③）：原断言钉的是「失败后列表清空」——那正是缺陷本身
+    // （把「读失败」画成「台账为空」）。失败时已有旧数据必须保留并标注为上次数据；
+    // 「首屏就失败 ⇒ 表格让位于错误块」由本文件 P1③ 那组用例覆盖。
+    await waitFor(() => c.find('.load-error') !== null, { message: '失败标记出现' })
+    expect(cells(c)).toHaveLength(1)
+    expect(c.text()).toContain(i18n.global.t('common.staleData'))
     expect(ElMessage.error).not.toHaveBeenCalled()
     expect(ElMessage.warning).not.toHaveBeenCalled()
-    expect(cells(c)).toEqual([])
     expect(c.errors).toEqual([])
   })
 
@@ -291,6 +297,65 @@ describe('DeviceView 列表加载与筛选', () => {
     expect(ElMessage.error).not.toHaveBeenCalled()
     // 旧数据保留：abort 表示用户已离开，不是数据作废
     expect(cells(c)).toHaveLength(1)
+  })
+})
+
+describe('DeviceView 列表加载失败：不得把「读失败」画成「没有设备」（P1③/P1④）', () => {
+  /** 失败夹具：getList reject，其余辅助请求正常 */
+  const openFailing = async (perms = FULL) => {
+    getList.mockRejectedValue(new Error('boom'))
+    const c = mountComponent(DeviceView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(perms),
+    })
+    await waitFor(() => getList.mock.calls.length >= 1, { message: '列表请求已发出' })
+    await flush(12)
+    return c
+  }
+
+  test('首屏加载失败：显式错误块顶替表格，不得显示「暂无数据」', async () => {
+    const c = await openFailing()
+    expect(c.find('.load-error')).not.toBeNull()
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.listLoadFailed'))
+    // 关键判据：失败 ≠ 空。修复前这里渲染的是 el-table 的「暂无数据」
+    expect(c.text()).not.toContain(i18n.global.t('common.noData'))
+    expect(c.find('.el-pagination')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('首屏加载失败：错误块提供重试，点击后重新请求并恢复表格', async () => {
+    const c = await openFailing()
+    const before = getList.mock.calls.length
+    getList.mockResolvedValue({ data: { data: ROWS, pagination: { total: ROWS.length } } })
+    click(c.find('.load-error button'))
+    await flush(12)
+    expect(getList.mock.calls.length).toBeGreaterThan(before)
+    await waitFor(
+      () => c.findAll('.el-table__body-wrapper .el-table__row').length === ROWS.length,
+      { message: '重试成功后渲染行' }
+    )
+    expect(c.find('.load-error')).toBeNull()
+  })
+
+  test('先成功后失败：旧数据保留并标注为上次数据（stale）', async () => {
+    const c = await open(FULL, ROWS)
+    expect(c.findAll('.el-table__body-wrapper .el-table__row')).toHaveLength(ROWS.length)
+    getList.mockRejectedValue(new Error('boom'))
+    click(btn(c, '刷新'))
+    await flush(12)
+    expect(c.findAll('.el-table__body-wrapper .el-table__row')).toHaveLength(ROWS.length)
+    expect(c.find('.load-error')).not.toBeNull()
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.staleData'))
+  })
+
+  test('pagination.total 缺失：不得回退成「共 N 条」（P1④）', async () => {
+    getList.mockResolvedValue({ data: { data: ROWS } })
+    const c = mountComponent(DeviceView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(FULL),
+    })
+    await waitFor(() => getList.mock.calls.length >= 1, { message: '列表请求已发出' })
+    await flush(12)
+    expect(c.find('.total-unknown')).not.toBeNull()
+    expect(c.errors).toEqual([])
   })
 })
 
@@ -363,6 +428,42 @@ describe('DeviceView 编辑', () => {
     const dateInput = d.querySelector('.el-date-editor input')
     expect(dateInput).toBeTruthy()
     expect(dateInput.value).toBe('2026-01-05')
+    expect(c.errors).toEqual([])
+  })
+
+  test('回填脏日期（非日期串）：输入框显示占位而不是 NaN-NaN-NaN，且提交被表单校验拦下', async () => {
+    // 后端/历史数据里的 installDate 可能是脏串（迁移遗留、外部导入）。
+    // 修复前：toDateOnly 把任意非 YYYY-MM-DD 值丢给 localDateStr(new Date(value))，
+    // 得到 'NaN-NaN-NaN' 直接进了可提交表单，点保存就把这个串发给了后端。
+    update.mockResolvedValue({ data: { success: true } })
+    const row = { ...ROW, installDate: 'not-a-date' }
+    const c = await open(FULL, [row])
+    const d = await openDialog(c, '编辑')
+    const dateInput = d.querySelector('.el-date-editor input')
+    expect(dateInput).toBeTruthy()
+    expect(dateInput.value).not.toContain('NaN')
+    expect(dateInput.value).toBe('')
+    // 占位符可见（用户能看出「这里没值」，而不是看着一个伪日期）
+    expect(dateInput.getAttribute('placeholder')).toBe('安装日期')
+    const submit = dlgFootBtn('保存')
+    click(submit)
+    await flush(12)
+    expect(update).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('回填伪日期（2026-02-30 过正则但不是日历日）：同样清空并拦下提交', async () => {
+    // 正则 ^\d{4}-\d{2}-\d{2}$ 放行 2026-02-30；只有回验日历才能发现它不是真实日期。
+    update.mockResolvedValue({ data: { success: true } })
+    const row = { ...ROW, installDate: '2026-02-30' }
+    const c = await open(FULL, [row])
+    const d = await openDialog(c, '编辑')
+    const dateInput = d.querySelector('.el-date-editor input')
+    expect(dateInput.value).toBe('')
+    click(dlgFootBtn('保存'))
+    await flush(12)
+    expect(update).not.toHaveBeenCalled()
     expect(c.errors).toEqual([])
   })
 

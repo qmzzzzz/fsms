@@ -15,6 +15,9 @@
 
 const fs = require('fs');
 const path = require('path');
+// 同 deployScript.test.js：compose 的硬必填变量只看代码、不看注释
+// （app-green 段的注释里写着"不用 ${APP_IMAGE_NEXT:?}"，逐字扫描会把它当成真声明）。
+const { hardRequiredEnv } = require('./helpers/composeSource');
 
 const ROOT = path.resolve(__dirname, '../../..');
 const WF = path.join(ROOT, '.github/workflows/deploy.yml');
@@ -300,7 +303,7 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
     // 备份做完、迁移做完，才在 `docker compose up -d` 的插值阶段被拒——
     // 数据库已改写而版本没切。清单从 compose 反向推导，新增 `:?` 变量必须同步到这里。
     const yml = fs.readFileSync(path.join(ROOT, 'docker-compose.yml'), 'utf8');
-    const hard = [...yml.matchAll(/\$\{([A-Z0-9_]+):\?/g)].map((m) => m[1]);
+    const hard = hardRequiredEnv(yml);
     // 前提自证：正则真的抓到硬声明项（抓空会让本用例恒绿）
     expect(hard.length).toBeGreaterThanOrEqual(2);
 
@@ -491,5 +494,73 @@ describe('D-1 部署工作流：结构与关键不变量', () => {
     expect(block).toMatch(/^concurrency:$/m);
     expect(block).toMatch(/group:\s*deploy-\$\{\{ inputs\.environment \}\}/);
     expect(block).toMatch(/cancel-in-progress:\s*false/);
+  });
+});
+
+/**
+ * 门禁的**执行位置**自检（2026-11-01 补，来源：第 19 轮 r19-f lane 实测）。
+ *
+ * 反例是真实发生过的：合规严格档一度被放进 preflight，而那个 job 既没有
+ * actions/checkout（runner 上不存在 scripts/ ⇒ node scripts/… 必然 ENOENT），
+ * 也没有主机上的 logs/alert-probe.json（strict 档要求它，见 complianceVerdicts:222）
+ * ⇒ 该 step 在两种意义上都不可能通过：一道恒红的门禁只会被人用 || true 绕过。
+ *
+ * 本组判据要求"门禁的落点必须与它的证据/依赖同层"，并且是可证伪的：
+ * 把严格档挪回 preflight、或删掉某条部署路径上的严格档，都会红。
+ */
+describe('门禁执行位置：脚本与证据必须在同层', () => {
+  test('preflight 不得出现 COMPLIANCE_STRICT（严格档的证据不在 hosted runner 上）', () => {
+    // 只看**可执行行**：注释里点名 COMPLIANCE_STRICT 是说明，不是接线
+    const code = jobBlock('preflight')
+      .split(/\r?\n/)
+      .filter((l) => !/^\s*#/.test(l))
+      .join('\n');
+    expect(code).not.toMatch(/COMPLIANCE_STRICT/);
+    // 也不能偷偷跑合规脚本（它需要仓库文件 + 主机侧探针记录）
+    expect(code).not.toMatch(/node scripts\/compliance-check\.js/);
+  });
+
+  test('两条部署路径都在主机侧兑现严格档（缺一条即红）', () => {
+    const selfHosted = jobBlock('deploy-self-hosted');
+    expect(selfHosted).toMatch(/COMPLIANCE_STRICT:\s*'1'/);
+    expect(selfHosted).toMatch(/run: node scripts\/compliance-check\.js/);
+    // 主机侧：必须在 checkout 之后（否则脚本仍不存在）
+    expect(selfHosted.indexOf('actions/checkout')).toBeLessThan(
+      selfHosted.indexOf('node scripts/compliance-check.js')
+    );
+
+    // SSH 路径的严格档必须落在**远程脚本**里（cd "$DEPLOY_PATH" 之后、目标机上执行），
+    // 而不是在 hosted runner 上跑（那里既没有仓库也没有探针记录）
+    const ssh = jobBlock('deploy-ssh');
+    expect(ssh).toMatch(/printf 'export COMPLIANCE_STRICT=%q\\n' '1'/);
+    expect(ssh).toMatch(/printf 'node scripts\/compliance-check\.js\\n'/);
+  });
+
+  test('任何直接执行 node scripts/… 的 job 都必须先 actions/checkout', () => {
+    // 这一条拦的是"门禁脚本本身不存在"这类死闸：printf 生成的是**远程**命令，
+    // 不在本 job 执行，故排除——两条部署路径的差异正在这里。
+    const offenders = [];
+    for (const name of ['preflight', 'deploy-self-hosted', 'deploy-ssh']) {
+      const block = jobBlock(name);
+      // 三类行都不算"本 job 执行"：注释（说明文字，仓库里到处引脚本名）、
+      // printf 生成串（那是**远程**命令），以及纯 echo 文案。
+      const executesLocally = block
+        .split(/\r?\n/)
+        .filter((l) => !/^\s*#/.test(l) && !/printf/.test(l) && !/echo\s/.test(l))
+        .some((l) => /(^|\s)node\s+(?:\.\.?\/)?(scripts\/[\w.-]+\.js)/.test(l));
+      if (executesLocally && !/uses:\s*actions\/checkout/.test(block)) offenders.push(name);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test('前提自证：上面那条判据不是恒真（造一个无 checkout 的 job 必须被挑出来）', () => {
+    const localRuns = (block) =>
+      block
+        .split(/\r?\n/)
+        .filter((l) => !/^\s*#/.test(l) && !/printf/.test(l) && !/echo\s/.test(l))
+        .some((l) => /(^|\s)node\s+(?:\.\.?\/)?(scripts\/[\w.-]+\.js)/.test(l));
+    expect(localRuns('    steps:\n      - run: node scripts/zzz.js')).toBe(true);
+    expect(localRuns("      - run: printf 'node scripts/zzz.js\\n'")).toBe(false);
+    expect(localRuns('    # 见 node scripts/zzz.js')).toBe(false);
   });
 });

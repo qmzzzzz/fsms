@@ -1,11 +1,9 @@
 /**
- * 遗留 CBC 解密开关的启动期告警（2026-09-30）
+ * 遗留 CBC 解密开关的启动期告警
  *
- * 单独成模块的两个理由（与 utils/metricsAuditDrops.js、metricsRuntime.js 同惯例）：
- *   ① config/validate.js 的行数已贴着 max-lines 棘轮上限——该文件自己的注释就写着
- *      「新增校验须放在独立函数内」；
- *   ② 这条判据有一处**反直觉的取舍**（下详），值得有名字与独立文档，而不是
- *      夹在三条并行告警里。
+ * 单独成模块的两个理由：① config/validate.js 的行数已贴着 max-lines 棘轮上限（该文件
+ * 自己的注释就写着「新增校验须放在独立函数内」）；② 这条判据有一处**反直觉的取舍**
+ * （下详），值得有名字与独立文档，而不是夹在三条并行告警里。
  *
  * 【为什么是"告警 + 提醒"而不是"拒绝启动"】
  * `ALLOW_LEGACY_CBC_DECRYPT=true` 重新打开的是**无认证 AES-CBC 的填充预言机攻击面**，
@@ -16,10 +14,9 @@
  * 这与 ALLOWED_HOSTS 那类"未配置就不可用"的致命项有本质区别——后者阻断是安全的，
  * 因为修复它不需要服务先跑起来。
  *
- * 【为什么必须同时计入 incSecurityAlert】
- * 升级前它只值 collectProductionWarnings 里一行文本。生产环境该开关若长期挂着，
- * 那条 warn 会被日常日志淹没，而告警面（security_alerts_total / 概览高危计数）
- * 完全看不见它——"可检测 ≠ 已告警"。
+ * 【为什么必须同时计入 incSecurityAlert】只值 collectProductionWarnings 里一行文本时，
+ * 生产环境该开关若长期挂着，那条 warn 会被日常日志淹没，而告警面（security_alerts_total /
+ * 概览高危计数）完全看不见它——"可检测 ≠ 已告警"。
  */
 
 const CBC_FLAG_NAME = 'ALLOW_LEGACY_CBC_DECRYPT';
@@ -54,10 +51,10 @@ const reportLegacyCbcDecryptIfEnabled = () => {
 /**
  * 遗留 CBC + immutable 档位（改配置需配套数据迁移）告警的合并出口。
  *
- * 为什么合并成一个函数而不是两个：collectProductionWarnings 是**唯一**的告警汇总
- * 出口，而 validate.js 的净代码行已贴着 max-lines 棘轮上限（实测 301/300、
- * 棘轮会判 max-lines 回退）。合并后 validate.js 只需**把原来那条 `if` 换成
- * 一个 `for...of`**——净增 0 行，两条判据都还在，且各自的取舍文档仍在各自模块里。
+ * 必须合并成一个函数：collectProductionWarnings 是**唯一**的告警汇总出口，而 validate.js
+ * 的净代码行已贴着 max-lines 棘轮上限（棘轮会判 max-lines 回退）。合并后 validate.js 只需
+ * 把原来那条 `if` 换成一个 `for...of`——净增 0 行，两条判据都还在，各自的取舍文档仍在
+ * 各自模块里。
  *
  * 顺序与合并前一致：先 CBC（高危，重开填充预言机面），后 immutable。
  * 副作用（incSecurityAlert）由各自模块负责，本函数只做编排。

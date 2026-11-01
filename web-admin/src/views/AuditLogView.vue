@@ -144,7 +144,9 @@
         <el-card shadow="hover" class="stat-card">
           <div class="stat-content">
             <div class="stat-value info">
-              {{ total }}
+              <!-- P1④：total 未知时显示「—」而不是 0——0 是「一条都没有」这个
+                   事实断言，契约漂移时我们并不知道总数 -->
+              {{ listState.totalKnown.value ? listState.total.value : '—' }}
             </div>
             <div class="stat-label">
               {{ $t('auditLog.totalRecords') }}
@@ -206,6 +208,59 @@
         >
           {{ $t('auditLog.chainTailLabel') }} {{ compliance.chainTailHash.slice(0, 12) }}…
         </span>
+      </div>
+      <!-- 监控读数：三个定时任务 getHealth() 的只读快照（compliance.monitorHealth /
+           chainMonitorHealth / honeypotChainHealth）。monitorRunning 只说「定时器挂着没有」，
+           而最常见的静默失效形态是「面板说活着、每轮都失败」——判据落在这一块：
+           连续失败 > 0、最近成功为 null 都必须是可见的告警，而不是留白。
+           某个读数整体缺失（后端降级为 null）时只把**那一行**降级，卡片其余字段照常。 -->
+      <div class="compliance-monitors">
+        <span class="compliance-monitors__title">{{ $t('auditLog.monitorReadingsTitle') }}</span>
+        <div
+          v-for="row in monitorHealthRows"
+          :key="row.source"
+          class="monitor-row"
+          :data-monitor="row.source"
+        >
+          <span class="monitor-row__name">{{ $t(row.labelKey) }}</span>
+          <span v-if="row.degraded" class="compliance-chip is-bad monitor-row__degraded">
+            {{ $t('auditLog.monitorDegraded') }}
+          </span>
+          <template v-else>
+            <span
+              class="compliance-chip monitor-row__running"
+              :class="row.running ? 'is-ok' : 'is-bad'"
+            >
+              {{ $t('auditLog.monitorRunningLabel') }}·{{
+                row.running ? $t('common.enabled') : $t('common.disabled')
+              }}
+            </span>
+            <!-- lastSuccessAt === null 是「定时器在、却一次都没跑成」的凭据，
+                 必须显式成文（不能留白、也不能渲染 null 字面量） -->
+            <span
+              class="compliance-chip monitor-row__success"
+              :class="row.lastSuccessAt ? 'is-ok' : 'is-bad'"
+            >
+              {{ $t('auditLog.monitorLastSuccessLabel') }}·{{
+                row.lastSuccessAt
+                  ? formatTime(row.lastSuccessAt)
+                  : $t('auditLog.monitorNeverSucceeded')
+              }}
+            </span>
+            <span
+              class="compliance-chip monitor-row__failures"
+              :class="row.consecutiveFailures > 0 ? 'is-bad' : 'is-ok'"
+              :title="row.failureDetail"
+            >
+              {{ $t('auditLog.monitorConsecutiveFailuresLabel') }} {{ row.consecutiveFailures }}
+            </span>
+            <span class="compliance-chip monitor-row__lastrun">
+              {{ $t('auditLog.monitorLastRunLabel') }}·{{
+                row.lastRunAt ? formatTime(row.lastRunAt) : $t('auditLog.monitorNeverRun')
+              }}
+            </span>
+          </template>
+        </div>
       </div>
     </div>
 
@@ -285,6 +340,28 @@
         </div>
       </div>
 
+      <!-- P1③（裁决②：保持旧数据）：审计日志是定责依据。失败时**不得抹掉**
+           最后已知的一屏——有旧数据就继续显示并标注已过期（stale），
+           没有旧数据才让位给错误块。两种情形都不显示「暂无数据」。 -->
+      <el-alert
+        v-if="listState.failed.value"
+        :title="listState.stale.value ? $t('common.staleData') : $t('common.listLoadFailed')"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="load-error"
+      >
+        <template #default>
+          <button
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            :disabled="loading"
+            @click="loadData"
+          >
+            {{ $t('common.retry') }}
+          </button>
+        </template>
+      </el-alert>
       <!-- 首屏骨架：日志未到达时占位 -->
       <GlassSkeleton
         v-if="loading && logs.length === 0"
@@ -293,7 +370,7 @@
         :cols="['12%', '12%', '16%', '14%', '12%', '9%', '9%', '8%', '8%']"
       />
       <el-table
-        v-else
+        v-else-if="listState.showTable.value"
         v-loading="loading"
         :data="logs"
         stripe
@@ -383,14 +460,22 @@
         </el-table-column>
       </el-table>
 
-      <!-- 分页 -->
-      <div class="pagination">
+      <!-- 分页：失败且无旧数据时整块不渲染（无表可分页） -->
+      <div v-if="listState.showTable.value" class="pagination">
+        <!-- P1④：meta.total 未知时不得用当前页长度顶替（会显示「共 N 条 / 1 页」） -->
+        <span v-if="!listState.totalKnown.value" class="total-unknown">
+          {{ $t('common.totalUnknown') }}
+        </span>
         <el-pagination
           v-model:current-page="page"
           v-model:page-size="limit"
-          :total="total"
+          :total="listState.total.value ?? 0"
           :page-sizes="[10, 20, 50, 100]"
-          layout="total, sizes, prev, pager, next, jumper"
+          :layout="
+            listState.totalKnown.value
+              ? 'total, sizes, prev, pager, next, jumper'
+              : 'sizes, prev, pager, next, jumper'
+          "
           @size-change="handleSizeChange"
           @current-change="loadData"
         />
@@ -435,7 +520,7 @@
           {{ detailDialog.data.targetUsername }}
         </el-descriptions-item>
         <el-descriptions-item v-if="detailDialog.data.reason" :label="$t('auditLog.opReason')">
-          {{ detailDialog.data.reason }}
+          {{ auditReasonText(detailDialog.data.reason) }}
         </el-descriptions-item>
         <el-descriptions-item :label="$t('auditLog.reqMethod')">
           {{ detailDialog.data.method || '-' }}
@@ -518,7 +603,8 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api, apiClient, isCanceledError, resolveErrorMessage } from '@/utils/api'
-import { getReauthTicket, storeReauthTicket } from '@/utils/reauthTicket'
+import { useListLoadState } from '@/composables/useListLoadState'
+import { markReauthVerified } from '@/utils/reauthTicket'
 import ReauthDialog from '@/components/ReauthDialog.vue'
 import { formatTime, localDateStr } from '@/utils/datetime'
 import { useLatestRequest } from '@/composables/useLatestRequest'
@@ -528,8 +614,10 @@ import { usePermission } from '@/composables/usePermission'
 import { actionLabel as toActionLabel, categoryLabel as toCategoryLabel } from '@/utils/auditLabels'
 // IP 归属地：后端只出稳定码，中文「内网」/ 英文 "Internal network" 的本地化在这一个模块
 import { ipLocationLabel as toIpLocationLabel } from '@/utils/ipLocationLabels'
+// 审计 reason 的展示期翻译（落库原文不动，模板映射见 i18n/auditReasons.js）
+import { translateAuditReason } from '@/i18n/auditReasons'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const { hasPerm, hasAllPerms } = usePermission()
 
 /**
@@ -553,7 +641,8 @@ const canAudit = computed(() => hasPerm('security:audit'))
 const loading = ref(false)
 const page = ref(1)
 const limit = ref(20)
-const total = ref(0)
+// 原 total ref 已并入 listState.total（契约统一保管 total 三态），
+// 避免「分页器读一个 total、卡片读另一个」的双份事实。
 const logs = ref([])
 const stats = ref({ criticalAlerts: 0, highAlerts: 0, failedLogins: 0 })
 const statsLoaded = ref(false)
@@ -588,6 +677,79 @@ const auditLossDetail = computed(() => {
   if (s.walDurableTrimRefusals) parts.push(`durableTrimRefused ${s.walDurableTrimRefusals}`)
   return parts.join(' / ')
 })
+
+/**
+ * 三个监控模块的健康读数出口（compliance.monitorHealth / chainMonitorHealth /
+ * honeypotChainHealth）。字段名以服务端 getHealth() 的返回为准：
+ *   - auditMonitor / auditChainMonitor：runs/failures/consecutiveFailures/skippedOverlaps/
+ *     lastRunAt/lastSuccessAt/lastFailureAt/lastFailureMessage/intervalMs/running
+ *     （auditChainMonitor 另有 lastVerdictCode）
+ *   - honeypotChainWatch：同一组基础计数之外还有 escalated/escalationFailures/
+ *     unparsableSources/droppedCandidates 等，本区块只取三家共有的那几项。
+ * 三者都可能为 null（后端 getHealth 缺失或整块降级），此时**只降级那一行**。
+ */
+const MONITOR_HEALTH_SOURCES = [
+  { source: 'auditMonitor', field: 'monitorHealth', labelKey: 'auditLog.monitorAuditDetectLabel' },
+  {
+    source: 'auditChainMonitor',
+    field: 'chainMonitorHealth',
+    labelKey: 'auditLog.monitorChainVerifyLabel',
+  },
+  {
+    source: 'honeypotChainWatch',
+    field: 'honeypotChainHealth',
+    labelKey: 'auditLog.monitorHoneypotChainLabel',
+  },
+]
+
+/** 计数只认有限数字：结构漂移时按 0 计（不要 NaN 进到 chip 里） */
+const healthCount = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+
+/**
+ * 连续失败的 tooltip：把「连着失败几轮 / 累计失败 / 跳过几轮 / 最后一次失败」
+ * 收在一处——区块本身只留四个判据字段，长文本进 title 不挤占行高。
+ */
+const healthFailureDetail = (h) => {
+  const parts = []
+  if (h.consecutiveFailures) parts.push(`consecutiveFailures ${h.consecutiveFailures}`)
+  if (h.failures) parts.push(`failures ${h.failures}`)
+  if (h.skippedOverlaps) parts.push(`skippedOverlaps ${h.skippedOverlaps}`)
+  if (h.lastFailureAt) parts.push(`lastFailureAt ${formatTime(h.lastFailureAt)}`)
+  if (h.lastFailureMessage) parts.push(String(h.lastFailureMessage).slice(0, 200))
+  // 链核验的裁决码：'broken' 之类与「跑成功了但链断了」是两件事，混进计数会误读
+  if (h.lastVerdictCode) parts.push(`lastVerdictCode ${h.lastVerdictCode}`)
+  return parts.join(' / ')
+}
+
+const monitorHealthRows = computed(() =>
+  MONITOR_HEALTH_SOURCES.map(({ source, field, labelKey }) => {
+    const h = compliance.value?.[field]
+    // 读数整体不可用：只降级本行（卡片其余字段与另外两行不受影响）
+    if (!h || typeof h !== 'object') {
+      return {
+        source,
+        labelKey,
+        degraded: true,
+        running: false,
+        lastSuccessAt: null,
+        consecutiveFailures: 0,
+        lastRunAt: null,
+        failureDetail: '',
+      }
+    }
+    return {
+      source,
+      labelKey,
+      degraded: false,
+      // running 与 compliance.monitorRunning 是两处口径：这里是各模块自己的定时器状态
+      running: h.running === true,
+      lastSuccessAt: h.lastSuccessAt || null,
+      consecutiveFailures: healthCount(h.consecutiveFailures),
+      lastRunAt: h.lastRunAt || null,
+      failureDetail: healthFailureDetail(h),
+    }
+  })
+)
 
 const filters = reactive({
   dateRange: null,
@@ -624,6 +786,11 @@ const buildFilterParams = () => {
 // 竞态守卫：快速筛选/翻页时丢弃过期的旧响应，防止旧数据覆盖新结果
 const listGuard = useLatestRequest()
 
+// P1③/P1④ 三态契约。本视图口径由 lead 裁决②定为「保持旧数据」：
+// 审计日志是定责依据，「失败时把最后已知的一屏抹掉」比
+// 「显示可能过期的一屏 + 明示已过期」更危险。契约的 stale 态正是为此存在。
+const listState = useListLoadState()
+
 // ===== 审计读取二次验证票据（P3-2）=====
 // 后端对 audit-logs / alerts / audit-logs/export 要求短期票据（5 分钟）。
 // 页面统一在此收口：无票据 → 先弹框，验过后重放被拦下的动作。
@@ -656,9 +823,11 @@ const handleReauthSubmit = async (credential) => {
   reauthSubmitting.value = true
   try {
     const res = await api.security.createReauthTicket(credential)
-    const issued = res?.data?.data
-    if (!issued?.ticket) return
-    storeReauthTicket(issued.ticket, issued.expiresIn)
+    // 服务端只回 { ticket, expiresIn }：窗口已按会话落库，ticket 是给无会话客户端用的。
+    // 前端**不保存** ticket（审计一-3：客户端不再持有可重放凭据），只记一个
+    // "刚验证过"的本地时间戳，避免重放首屏时又被弹一次框。
+    if (!res?.data?.data) return
+    markReauthVerified()
     const tags = [...pendingReauthTags]
     pendingReauthTags.clear()
     reauthVisible.value = false
@@ -680,12 +849,13 @@ watch(reauthVisible, (visible) => {
 })
 
 const loadData = async () => {
-  if (!getReauthTicket()) {
-    requireReauth('logs')
-    return
-  }
+  // 授权判据在服务端（会话窗口），客户端手里没有任何凭据可查——所以这里**不做**
+  // 前置判断，直接发请求，由 401 REAUTH_TICKET_* 驱动弹框（见下方 catch）。
+  // 前置判断只会变成第二份（且更弱的）判据：原来"本地票据还在"就放行，
+  // 服务端不认时照样白跑一趟，而本地票据过期时又会拦下本可直接通过的请求。
   const isCurrent = listGuard()
   loading.value = true
+  listState.begin()
   try {
     const params = {
       page: page.value,
@@ -696,8 +866,15 @@ const loadData = async () => {
     const res = await api.security.queryAuditLogs(params)
     if (!isCurrent()) return
     // 后端返回结构：{ success: true, message, data: [logs], meta: {...} }
-    logs.value = res.data?.data || []
-    total.value = res.data?.meta?.total || 0
+    const rows = res.data?.data || []
+    logs.value = rows
+    // P1④：meta.total 缺失传 undefined（= 未知），不再用 0 冒充已知
+    listState.commit({ total: res.data?.meta?.total, count: rows.length })
+    const clamped = listState.clampPage(page.value, limit.value)
+    if (clamped !== page.value) {
+      page.value = clamped
+      return loadData()
+    }
   } catch (e) {
     // FE-L1：路由切换 abort 的在途请求不提示（用户已到达新页面）
     if (isCanceledError(e)) return
@@ -710,6 +887,10 @@ const loadData = async () => {
     // P2-3：加载失败只清态，**提示由 api.js 响应拦截器统一负责**（与 alarmView 同契约）。
     // 此前组件这里再弹一条 messages.loadFailed，同一次失败会弹两条：
     // 拦截器的具体文案（400/403/404/429/5xx/网络错误）+ 组件的泛化文案。
+    //
+    // P1③（裁决②）：失败不得抹掉最后已知的一屏。有旧数据 ⇒ stale（保留 + 标注过期）；
+    // 无旧数据 ⇒ failed（错误块顶替空表）。两者都不显示「暂无数据」。
+    listState.fail()
   } finally {
     if (isCurrent()) loading.value = false
   }
@@ -764,10 +945,6 @@ const visibleAlerts = computed(() =>
 )
 
 const loadAlerts = async () => {
-  if (!getReauthTicket()) {
-    requireReauth('alerts')
-    return
-  }
   try {
     const res = await api.security.getAlerts()
     // 结构性兜底：非预期包络一律视为失败（面板不出现），不做部分渲染
@@ -803,6 +980,8 @@ const verifyChain = async () => {
     ElMessageBox.alert(lines.join('\n'), title, {
       type,
       confirmButtonText: t('common.confirm'),
+      // 两行信息（断链条数 + 扫描范围）要分开显示：默认样式会把换行折掉
+      customClass: 'mb-multiline',
     })
   } catch (e) {
     // 错误提示由 api 响应拦截器统一输出（含 strictLimiter 的 429）
@@ -919,10 +1098,6 @@ const exportLogs = async () => {
 const forensicExporting = ref(false)
 
 const exportForensic = async () => {
-  if (!getReauthTicket()) {
-    requireReauth('forensic')
-    return
-  }
   forensicExporting.value = true
   try {
     const response = await api.security.exportAuditLogs(buildFilterParams())
@@ -989,6 +1164,9 @@ const actionLabel = (action) => toActionLabel(t, action)
 const categoryLabel = (category) => toCategoryLabel(t, category)
 // 归属地是后端可选增强字段：稳定码走本地化，数据文本（公网归属）原样透传
 const ipLocationText = (location) => toIpLocationLabel(t, location)
+// 英文界面把已知的系统生成 reason 模板译出；未命中/中文界面一律原样返回
+const auditReasonText = (reason) =>
+  String(locale.value || '').startsWith('en') ? translateAuditReason(reason) : reason
 
 // 风险等级样式
 const riskType = (level) => {
@@ -1046,6 +1224,15 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.load-error {
+  margin-bottom: var(--xf-spacing-md);
+}
+.total-unknown {
+  margin-right: var(--xf-spacing-sm);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-text-secondary);
+}
+
 .page {
   display: flex;
   flex-direction: column;
@@ -1104,6 +1291,37 @@ onMounted(() => {
   color: var(--xf-danger-strong);
   border-color: var(--xf-danger-alpha-45);
   background: var(--xf-danger-alpha-8);
+}
+/* 监控读数：三个定时任务各一行，沿用 chips 的排版习惯（细分割线 + 紧凑行高） */
+.compliance-monitors {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--xf-border-color);
+}
+.compliance-monitors__title {
+  display: block;
+  margin-bottom: 6px;
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-xs);
+  letter-spacing: var(--xf-tracking-wide);
+  color: var(--xf-gray-500);
+}
+.monitor-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+.monitor-row__name {
+  flex: none;
+  min-width: 96px;
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-700);
+  white-space: nowrap;
+}
+.monitor-row .compliance-chip {
+  font-variant-numeric: tabular-nums;
 }
 /* 最近安全告警：紧凑单行列表（风险标签 / 动作 / 用户+IP / 时间 / 详情） */
 .alerts-card {

@@ -1,0 +1,12 @@
+# /etc/chrony/chrony.conf（示例，复制前替换 NTP 源）
+# P1-5：生产宿主至少两个上游源；不要只配本地时钟。
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+rtcsync
+
+server ntp1.example.net iburst
+server ntp2.example.net iburst
+
+# 只允许本机/容器网段查询（按实际网段调整）
+allow 127.0.0.1
+allow 172.16.0.0/12

@@ -308,14 +308,9 @@ async function flush() {
   // 这批文档此刻**既不在缓冲也未落库**：关停排空必须把它们计入 residual，
   // 否则 `buffer.length === 0` 会被误读成"已排空"（F-101）。
   inFlightCount = batch.length;
-  // 幂等重放的身份键：预分配 _id（原先由 Mongoose 在 insertMany 内分配，时机一致）。
-  // 回退重试的文档是**同一批对象引用**（unshiftChunked(retryDocs)），_id 因此存活，
-  // 下一轮再插必撞 11000 → 被 collectDurableIds 识别为已落库，不再重复插入。
-  //
-  // 为什么不在 push() 里分配：链尾重同步用 `sort({_id:-1})` 近似「最新链尾」
-  // （utils/auditChain.js getLatestHash）。缓冲里久候的批次若在入队时拿到 _id，
-  // 其 _id 会**早于**其间直写的 AuditLog.create 记录，而链顺序上它更晚——
-  // _id 顺序与链顺序反转会让重同步挑错链尾，凭空造出 chain_break 篡改告警。
+  // 兜底补号，只覆盖两类（补号语义与旧实现逐字相同）：旧格式 WAL 行（升级前的行
+  // 没有 _id ⇒ 按旧语义现分配，重复插入窗口在那一档仍在）与同进程回退重试（本就是
+  // 同一批对象引用，_id 已存活 ⇒ 空操作）。正常路径的 _id 由 push 定下并随行落盘。
   for (const d of batch) if (!d._id) d._id = new mongoose.Types.ObjectId();
   // docs = 预铸造后的**可进链子集**（闸在 services/auditBufferDocs.js，被拒的那些已在该调用内
   // 完成丢弃记账）。初值取整批：万一预铸造自身抛错，外层 catch 回退的是整批，一条都不丢。
@@ -364,9 +359,8 @@ async function flush() {
         // F-143：这里原先写着 `if (wal.isEnabled()) wal.trimBySeqs(...)`——用"能不能追加"
         // 的状态去门控"要不要回收"。关停链的 flushAndStop 在排空预算用尽时会 break 并
         // `stop()`（disable），而那一轮在途 insertMany 可能**随后仍然成功**：记录确认在库里，
-        // 行却被永久留下。重放文档的 `_id` 是下一轮 flush 新分配的（WAL 行写于 push，
-        // 那时还没有 `_id`），幂等性只覆盖同进程的引用存活，跨重启不成立 ⇒
-        // **每重启一次就把这个已落库的批次再插一份**。裁剪本身与 enable 无关：
+        // 行却被永久留下。留下的行重放时**不再**重复插入：WAL 行现在带 _id（assignDocId），
+        // 重放撞唯一索引走 11000 对账（F-143 当初只修掉 enable 门控这一半）。裁剪本身与 enable 无关：
         // walTrimBySeqs 空集直接 return，removeWalLinesBySeqs 从不读 walEnabled。
         wal.trimBySeqs(auditDocs.walSeqsOf(docs));
         // 本批已确认在库：其内容级失败计次随对象一起作废
@@ -432,12 +426,20 @@ async function flush() {
   }
 }
 
+/** 定下 WAL 行里的**身份键**（_id），已有则复用——重放据此撞唯一索引实现跨重启幂等。 */
+function assignDocId(doc) {
+  if (doc && !doc._id) doc._id = new mongoose.Types.ObjectId();
+  return doc;
+}
+
 /**
  * 压入一条审计记录；缓冲满额立即触发异步落库
  * @param {object} doc AuditLog 文档
  * @param {boolean} walAppended 调用方已完成**可等待**的 WAL 追加（outbox 持久化路径）
  */
 function push(doc, walAppended = false) {
+  // 身份键先于序号与行：WAL 行带上 _id，重放才能复用同一主键（见 assignDocId）。
+  assignDocId(doc);
   // 分配 WAL 序号（已有则复用——重放/回退重试的文档必须保留原序号，
   // 否则「毒批丢弃后按序号移除对应 WAL 行」匹配不上）。序号分配逻辑在 wal 模块。
   wal.assignSeq(doc);
@@ -638,6 +640,7 @@ function __resetForTest() {
 const __waitForFlushIdle = (budgetMs = 5000) => waitForFlushIdle(budgetMs);
 
 module.exports = {
+  assignDocId,
   push,
   flush,
   flushAndStop,

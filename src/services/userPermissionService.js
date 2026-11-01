@@ -8,7 +8,7 @@
  * ================= 权限结果缓存（性能优化 P-01） =================
  * 背景：每个受保护请求原本都要执行「查用户 → populate roles → populate
  * permissions」三层关联查询，100 QPS 下即产生 300+ 次/秒的数据库聚合负载。
- * 策略：进程内 TTL 缓存（30 秒）+ 显式失效：
+ * 策略：进程内 TTL 缓存（30 秒；该用户有临时授予时按最近一条授予的到期时刻进一步收敛）+ 显式失效：
  *  - 用户级失效：assignRoles 等变更某用户角色时，仅删除该用户条目
  *  - 全局失效：角色权限被修改（assignPermissions）时清空整个缓存（permCache.clear()）
  *
@@ -53,6 +53,10 @@ function getUserModel() {
 
 // 共享缓存门面（失效广播）。sharedCache 仅依赖 logger，无循环依赖，可顶层引入。
 // 未配置 REDIS_URL 时 publishInvalidate/onInvalidate 均为无操作。
+const privilegeGrantService = require('./privilegeGrantService');
+
+privilegeGrantService.setPermissionCacheInvalidator(invalidatePermissionCache);
+privilegeGrantService.setPermissionChecker((userId, code) => hasPermission(userId, code));
 const sharedCache = require('./sharedCache');
 
 /**
@@ -105,6 +109,11 @@ function effectiveCacheTtlMs(ttlMs) {
 function isEntryFresh(entry, now) {
   if (!entry || entry.expireAt <= now) return false;
   return now - entry.cachedAt < effectiveCacheTtlMs(entry.ttlMs);
+}
+
+function grantBoundTtlMs(grantExpiresAt, now) {
+  if (!grantExpiresAt) return PERM_CACHE_TTL_MS;
+  return Math.max(0, Math.min(PERM_CACHE_TTL_MS, grantExpiresAt.getTime() - now)); // A3：TTL 收敛到「最近一条临时授予的到期时刻 − now」，到期后 0ms 就该不可见，不得被 30 秒 TTL 吃掉
 }
 
 /** 统一写入口：TTL 在写入当拍按降级态定死 */
@@ -205,6 +214,9 @@ async function getPermissions(userId) {
   }
 
   const perms = collectPermissionCodes(user);
+  const granted = (await privilegeGrantService.activeGrantsForUsers([key], new Date(now))).get(key);
+  const grantedCodes = granted ? granted.codes : [];
+  const merged = grantedCodes.length > 0 ? [...new Set([...perms, ...grantedCodes])] : perms;
 
   // 容量保护：超过上限直接清空（重建成本远低于逐条淘汰的复杂度）
   if (permCache.size >= PERM_CACHE_MAX_SIZE) permCache.clear();
@@ -212,10 +224,10 @@ async function getPermissions(userId) {
   // 缓存它等于把刚 delete 掉的条目重新种回去（收回的权限继续放行到 TTL 到期）。
   // 宁可这次不缓存、让下一个请求再查一趟库。
   if (permCacheGeneration === genAtRead) {
-    setCacheEntry(key, perms, now, PERM_CACHE_TTL_MS);
+    setCacheEntry(key, merged, now, grantBoundTtlMs(granted && granted.expiresAt, now));
   }
 
-  return perms;
+  return merged;
 }
 
 /** 命中缓存的直接写入 result；未命中的去重后返回。 */
@@ -239,14 +251,17 @@ function splitCachedAndMissing(userIds, now, result) {
 }
 
 /** 批量写回缓存与结果；查库期间发生过失效则整批不写回。 */
-function writeBackBatch(missing, byId, now, genAtRead, result) {
+function writeBackBatch(missing, byId, now, genAtRead, result, grantedByUser) {
   // 容量保护只需判一次：整批写回是原子的，不会出现批内反复清空
   if (permCache.size + missing.length >= PERM_CACHE_MAX_SIZE) permCache.clear();
 
   for (const key of missing) {
     const user = byId.get(key);
-    const perms = user ? collectPermissionCodes(user) : [];
-    const ttl = user ? PERM_CACHE_TTL_MS : PERM_CACHE_MISS_TTL_MS;
+    const base = user ? collectPermissionCodes(user) : [];
+    const granted = (grantedByUser && grantedByUser.get(key)) || null;
+    const grantedCodes = granted ? granted.codes : [];
+    const perms = grantedCodes.length > 0 ? [...new Set([...base, ...grantedCodes])] : base;
+    const ttl = user ? grantBoundTtlMs(granted && granted.expiresAt, now) : PERM_CACHE_MISS_TTL_MS;
     if (permCacheGeneration === genAtRead) {
       setCacheEntry(key, perms, now, ttl);
     }
@@ -280,7 +295,8 @@ async function getPermissionsForUsers(userIds) {
   const genAtRead = permCacheGeneration;
   const users = await User.find({ _id: { $in: missing } }).populate(PERMISSION_POPULATE);
   const byId = new Map((users || []).map((user) => [String(user._id), user]));
-  writeBackBatch(missing, byId, now, genAtRead, result);
+  const grantedByUser = await privilegeGrantService.activeGrantsForUsers(missing, new Date(now));
+  writeBackBatch(missing, byId, now, genAtRead, result, grantedByUser);
 
   return result;
 }

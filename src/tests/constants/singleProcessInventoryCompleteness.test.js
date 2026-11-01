@@ -50,6 +50,9 @@ const REQUIRED_MODULES = [
   'services/reportDashboardService.js',
   'services/auditMonitor.js',
   'services/canaryWatch.js',
+  'services/honeypotWatch.js',
+  'services/forensicTrigger.js',
+  'services/ipPoolBan.js',
   'services/websocketService/index.js',
 ];
 
@@ -74,6 +77,10 @@ const EXEMPT_MODULES = {
   // 同一份理由 ⇒ 豁免随迁，而不是新增一条豁免。
   'config/envSemantics.js':
     '静态字面量 Set（环境别名 / 真值词表，自 config/validate.js 迁出），只读',
+  // PERMISSION_REFS_BY_CODE：由静态权限目录字面量建成的索引 Map，建好后只 .get()，逐进程恒同。
+  // 与 constants/detectionObjectives.js 同族——是「判据索引」而非进程内状态。
+  'constants/honeypotDecoyRbac.js':
+    'PERMISSION_REFS_BY_CODE，静态字面量 Map（权限码→行的索引），只读',
   // SECURITY_RELEVANT，静态字面量 Set（哪些 immutable 档位项该计入安全告警面），只读。
   // 与同族的 config/validate.js、legacyCbcGuard.js 完全同构：是「判据词表」而非进程内状态。
   'config/immutableConfigGuard.js': 'SECURITY_RELEVANT，静态字面量 Set，只读',
@@ -82,10 +89,18 @@ const EXEMPT_MODULES = {
   // 逐进程恒同，只 .has()，不存在跨进程不一致。
   'constants/detectionObjectives.js': '检测维度闭合集合，静态字面量 Set，只读',
 
+  // PASSWORD_CHANGE_ALLOWED_PATHS：强制改密闸（P1-2）放行的路径词表，静态字面量 Set，
+  // 只 .has()。与 middleware/protocolCompliance.js 的 HOST_GATE_EXEMPT_PATHS 同族：
+  // 是判据词表而非进程内状态，逐进程恒同。
+  'middleware/auth.js': 'PASSWORD_CHANGE_ALLOWED_PATHS，静态字面量 Set（放行路径词表），只读',
   'middleware/protocolCompliance.js': 'HOST_GATE_EXEMPT_PATHS，静态字面量 Set',
   // FORBIDDEN_KEYS：原型链入口词表（__proto__/constructor/prototype），静态字面量 Set、
   // 建好后只 .has()。2026-10-18 自 middleware/security.js 拆出时随 sanitize 模块迁至本文件，
   // 与 constants/breachedPasswords.js 同为判据词表，不是进程内状态。
+  // NARROWED_GET_EXEMPT_PREFIXES：审计 GET 豁免的「前缀 → 唯一可豁免形态」收窄表，内容全由源码
+  // 字面量决定、逐进程恒同、建好后只 .get()。与同文件的正则常量同族，是判据词表而非进程内状态。
+  'middleware/security/auditLog.js':
+    'NARROWED_GET_EXEMPT_PREFIXES，静态字面量 Map（收窄豁免判据），只读',
   'middleware/security/sanitize.js': 'FORBIDDEN_KEYS，静态字面量 Set（原型链入口词表），只读',
   'middleware/validateObjectId.js':
     '进程内幂等守卫（WeakSet 记录已注册的 Router；Router 是 require 缓存的进程内单例），无跨进程语义',
@@ -101,6 +116,10 @@ const EXEMPT_MODULES = {
     '共享缓存基础设施自身（memStore 是 Redis 未就绪时的回退实现，2026-10-19 拆分随迁）',
   'services/sharedCache/invalidation.js':
     '共享缓存基础设施自身（invalidationHandlers 是失效广播回调表，2026-10-19 拆分随迁）',
+  'services/upgradeService.js':
+    'TERMINAL_STATES / ACTIVE_STATES，静态字面量 Set（任务状态词表），只读、无跨进程语义',
+  'utils/avatarImage.js':
+    'JPEG_SOF_MARKERS / JPEG_METADATA_MARKERS，静态字面量 Set（图片段标记词表），只读、无跨进程语义',
   'utils/auditMeta.js': 'REGISTERED_ACTIONS，由 AUDIT_LOG_ACTIONS 派生的只读集合',
   // AUDIT_FILTER_DIMENSION_FIELDS：「审计恒空参数组合判据要枚举哪几个维度」的定义域，
   // 内容全由源码字面量决定、逐进程恒同，且没有任何写入路径（只 .has()）。
@@ -125,8 +144,24 @@ const EXEMPT_MODULES = {
   // 随迁至 authController/credentials.js）。值全是函数字面量、建好后只 .get()，
   // 逐进程内容恒同 ⇒ 多实例部署不存在不一致。与 middleware/protocolCompliance.js 的
   // HOST_GATE_EXEMPT_PATHS 同族：判据词表，不是进程内状态。
+  // IP_LIST_WRITE_FIELDS：IP 名单写路径的「允许字段」白名单（2026-10-30 自
+  // ipListController.js 抽出，避免该文件撞 max-lines 棘轮）。内容全由源码字面量决定、
+  // 逐进程恒同、建好后只 .has()，没有任何写入路径 ⇒ 多实例部署不存在不一致。
+  // 与 routes/wellKnownRoutes.js 的 CLIENT_ERROR_KINDS、middleware/security/sanitize.js
+  // 的 FORBIDDEN_KEYS 同族：判据词表，不是进程内状态。
+  'controllers/ipListWriteGuards.js':
+    'IP_LIST_WRITE_FIELDS，静态字面量 Set（写路径字段白名单），只读、无跨进程语义',
   'controllers/authController/credentials.js':
     'REFRESH_OUTCOME_RESPONSES，outcome → 响应函数的静态查表（只读、无跨进程语义）',
+  'services/forensicCapturePayload.js':
+    'MASKED_HEADERS，静态字面量 Set（请求头脱敏词表），只读、无跨进程语义',
+  // MASKED_HEADERS / CREDENTIAL_URL_HEADERS：请求头脱敏与「哪些头的 query 要打码」两张判据词表，
+  // 2026-10-31 自 forensicCapturePayload.js 拆出（max-lines 300）随迁。内容全由源码字面量决定、
+  // 逐进程恒同、建好后只 .has()，与 utils/logPiiMask.js、middleware/security/sanitize.js 同族：
+  // 判据词表而非进程内状态。登记进 SINGLE_PROCESS_DEPENDENCIES 会让启动期对运维说
+  // 「多实例时请求头脱敏会失效」——假警报。
+  'services/forensicCaptureCodec.js':
+    'MASKED_HEADERS / CREDENTIAL_URL_HEADERS，静态字面量 Set（头脱敏判据词表），只读、无跨进程语义',
   'services/websocketService/inboundThrottle.js':
     'buckets: Map<Socket, {count, windowStart}>，状态绑定单条 Socket 连接、只存在于单进程，无跨实例语义',
 };
@@ -205,7 +240,15 @@ describe('单进程依赖清单完整性（constants/runtime.js）', () => {
 
   test('④ 模块级 Map/Set 全覆盖：要么登记，要么在豁免表里写明理由', () => {
     const modules = inventoryModules();
-    const unaccounted = scanModuleLevelContainers()
+    const hits = scanModuleLevelContainers();
+    // 下限先行（第 18 轮 r2-infra S1/S2 实测的假绿）：本用例的判据是「未登记且未豁免的集合为空」，
+    // 而扫描器塌缩（collectSourceFiles 返回 []）或容器正则失配（matches 恒假）时该集合**恒空**，
+    // 于是"扫完全仓没发现任何容器"与"全仓都登记了"长得一模一样。先钉住"确实扫到了东西"。
+    expect({ scannedAtLeast: hits.length >= 8 }).toEqual({ scannedAtLeast: true });
+    expect({ knownContainer: hits.map((h) => h.module) }).toEqual({
+      knownContainer: expect.arrayContaining(['services/ipPoolBan.js', 'middleware/auth.js']),
+    });
+    const unaccounted = hits
       .map((h) => h.module)
       .filter((m) => !modules.includes(m) && !(m in EXEMPT_MODULES));
     expect({ unaccounted }).toEqual({ unaccounted: [] });

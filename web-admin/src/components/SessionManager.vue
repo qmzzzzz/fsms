@@ -90,11 +90,17 @@
           <div class="session-meta">
             <!-- 归属地是后端可选增强（旧数据/检索不可用时缺字段），必须 v-if 省略而非渲染空串 -->
             <span>
-              {{ t('session.ip') }}：{{ item.lastIp || item.ip || '—'
+              {{ t('session.ip') }}{{ $t('common.labelColon') }}{{ item.lastIp || item.ip || '—'
               }}<template v-if="item.location"> · {{ ipLocationLabel(t, item.location) }}</template>
             </span>
-            <span>{{ t('session.lastSeen') }}：{{ formatSessionTime(item.lastSeenAt) }}</span>
-            <span>{{ t('session.loginAt') }}：{{ formatSessionTime(item.createdAt) }}</span>
+            <span
+              >{{ t('session.lastSeen') }}{{ $t('common.labelColon')
+              }}{{ formatSessionTime(item.lastSeenAt) }}</span
+            >
+            <span
+              >{{ t('session.loginAt') }}{{ $t('common.labelColon')
+              }}{{ formatSessionTime(item.createdAt) }}</span
+            >
           </div>
 
           <!--

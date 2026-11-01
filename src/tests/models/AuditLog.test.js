@@ -226,20 +226,20 @@ describe('AuditLog 模型静态方法', () => {
       }
     });
 
-    test('关键查询维度均有 timestamp 降序复合索引', () => {
+    test('关键查询维度均有 timestamp 降序 + _id 平局键复合索引', () => {
       const signatures = AuditLog.schema.indexes().map(([key]) =>
         Object.entries(key)
           .map(([k, v]) => `${k}:${v}`)
           .join('|')
       );
       for (const expected of [
-        'userId:1|timestamp:-1',
-        'category:1|timestamp:-1',
-        'action:1|timestamp:-1',
-        'riskLevel:1|timestamp:-1',
-        'success:1|timestamp:-1',
-        'ip:1|timestamp:-1',
-        'category:1|action:1|timestamp:-1',
+        'userId:1|timestamp:-1|_id:-1',
+        'category:1|timestamp:-1|_id:-1',
+        'action:1|timestamp:-1|_id:-1',
+        'riskLevel:1|timestamp:-1|_id:-1',
+        'success:1|timestamp:-1|_id:-1',
+        'ip:1|timestamp:-1|_id:-1',
+        'category:1|action:1|timestamp:-1|_id:-1',
       ]) {
         expect(signatures).toContain(expected);
       }

@@ -4,12 +4,13 @@
  */
 
 const jwt = require('jsonwebtoken');
-const config = require('../config');
+const jwtKeys = require('../utils/jwtKeys');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
 const AuditLog = require('../models/AuditLog');
 const { isTokenBlacklisted } = require('./tokenBlacklist');
 const sessionService = require('../services/sessionService');
+const honeypotDecoy = require('../services/honeypotDecoy'); // 蜜罐会话的影子数据面（接管点在 authenticate 身份就绪处）
 const { isIPAllowed } = require('../utils/ipRange');
 const { clientIpForSecurityDecision, isClientIpIdentityTrustworthy } = require('../utils/ipUtils');
 const { userLimiter } = require('./rateLimit');
@@ -72,7 +73,7 @@ const loadValidUser = async (userId) => {
   // 必须 select allowedIPs 用于每请求的 IP 访问范围校验
   const user = await User.findById(userId)
     .select(
-      'username email realName status roles passwordChangedAt lastLoginAt tokenVersion allowedIPs failedLoginCount lockUntil'
+      'username email realName status roles passwordChangedAt lastLoginAt tokenVersion allowedIPs failedLoginCount lockUntil mustChangePassword isHoneypot'
     )
     // 仅生效角色参与授权判定（与 userPermissionService / permissionHelper 同口径）：
     // 停用角色后，该角色码不得继续进入 req.user.roleCodes，
@@ -123,7 +124,10 @@ const authenticate = async (req, res, next) => {
     }
 
     // 2. 验证 Token 签名与有效期（限制算法防止 alg:none 攻击）
-    const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
+    // P2-3：密钥按 header.kid 选（无 kid 的历史令牌回退轮换前的单密钥）
+    const decoded = jwt.verify(token, jwtKeys.verifyKeyFor(token, 'access'), {
+      algorithms: ['HS256'],
+    });
 
     // 2.1 用途：refresh 令牌不得当 access 用（两把密钥被配成同值时的唯一拦截点）
     const purposeError = assertTokenPurpose(decoded, res);
@@ -150,10 +154,18 @@ const authenticate = async (req, res, next) => {
 
     req.user = buildAuthContext(decoded, freshUser);
 
+    if (await honeypotDecoy.steer(req, res)) return; // 蜜罐会话在身份就绪处改道：诱饵数据面 / 放行白名单 / 其余 403——真实控制器与 RBAC 一律不参与，泄漏面由这一个接线点保证
+
     // userId 自动注入日志上下文（报告 5.6）：认证成功即写入 ALS store，
     // 本请求后续所有日志（morgan finish、审计、限流/业务告警）经 logger format
     // 自动携带 userId——此前靠各控制器显式传 meta，遗漏即断链
     extendLogContext({ userId: decoded.userId });
+
+    // P1-2：管理员重置/建号初始口令的账户，在本人改密前只放行改密、查看本人与登出。
+    // 位置：所有身份校验之后（否则被禁用/锁定账户会先看到 403 改密提示），extendLogContext
+    // 之后（否则闸吐出的 403 不带 userId，事后无法归因是谁在闸状态下扫接口）。
+    const passwordGate = assertPasswordChangeCompleted(req, res);
+    if (passwordGate) return passwordGate;
 
     logger.debug('用户认证成功', { username: req.user.username });
     // 用户维度限流：必须在 req.user 就绪后执行，才能按 userId 建键、按角色定配额
@@ -165,17 +177,12 @@ const authenticate = async (req, res, next) => {
 };
 
 /**
- * 账户可用性校验（自 authenticate 拆出）：存在性、禁用、锁定、临时锁定。
- * 返回错误响应或 null；四处拒绝的先后顺序固定，不得调整。
- */
-/**
  * 令牌用途校验：refresh 令牌不得作为 access 令牌使用。
  *
  * access 与 refresh 由两把不同的密钥签名，正常配置下 refresh 在本处验签即失败；
  * 但 config 只分别校验两把密钥的强度，运维把 JWT_SECRET 与 JWT_REFRESH_SECRET
  * 配成同一个值时，二者就完全等价了 —— refresh 有效期 7 天且带 sid/tokenVersion，
  * 拿来当 Bearer 直连全部 API，"access 短有效期 + 频繁换发"这条收缩访问窗口的机制整体失效。
- *
  * 只在 `type` 存在且不等于 'access' 时拒绝：历史 access 令牌没有该字段，
  * 不因这次加固而集体失效；新签发的 access 已带 type: 'access'（见 tokenService）。
  * 同名的正向判据在 config/validate.js（两把密钥不得相同），两道各自成立。
@@ -189,6 +196,10 @@ const assertTokenPurpose = (decoded, res) => {
   return null;
 };
 
+/**
+ * 账户可用性校验（自 authenticate 拆出）：存在性、禁用、锁定、临时锁定。
+ * 返回错误响应或 null；四处拒绝的先后顺序固定，不得调整。
+ */
 const assertAccountUsable = (freshUser, res) => {
   if (!freshUser) {
     return ApiResponse.codeError(res, 'USER_NOT_FOUND_OR_DELETED');
@@ -211,7 +222,6 @@ const assertAccountUsable = (freshUser, res) => {
 
 /**
  * 凭据新鲜度校验（自 authenticate 拆出）：改密时间 + tokenVersion。
- *
  * tokenVersion 强制要求字段存在——省略该字段的令牌一律拒绝，防止伪造令牌
  * 通过省略字段绕过会话吊销（改密/禁用/refresh 重放检测后的全量吊销）；
  * 历史文档缺字段时按 schema 默认值 0 参与比对。
@@ -241,10 +251,8 @@ const assertCredentialFresh = (freshUser, decoded, res) => {
 
 /**
  * 用户 IP 访问范围校验（自 authenticate 拆出）
- *
  * token 有效期内换到未授权 IP 同样被拒绝，避免「登录时校验通过后换网络仍可
  * 长期使用」的绕过路径。规则为空时不限制，不影响未配置该功能的用户。
- *
  * 客户端身份取 `clientIpForSecurityDecision` 而**不是** `req.ip`：开着 trust proxy 时
  * req.ip 来自 X-Forwarded-For，能直连应用端口的主体（容器网络、误配入口、SSRF 跳板）
  * 伪造一跳即可把它换成白名单里的地址——限流被这样买到三重豁免已是既有结论（判据同源），
@@ -290,14 +298,11 @@ const assertIpAllowed = (freshUser, req, res) => {
 
 /**
  * 设备级会话校验（自 authenticate 拆出）
- *
  * 令牌里的 sid 指向 UserSession 一条记录，用户在「登录会话」界面踢除某台设备后，
  * 该记录置为 revoked，此处即拒绝——其余设备不受影响（tokenVersion 只能全局吊销）。
- *
  * 兼容不含 sid 的令牌：本功能上线前签发的令牌、以及登录时会话注册失败降级签发
  * 的令牌都没有 sid。对它们跳过会话校验而非拒绝，否则功能上线瞬间会把所有在线
  * 用户全部踢下线。这些令牌最长在 refresh 有效期后自然消亡。
- *
  * 不在此处 try/catch：validateSession 的 fail-closed 异常
  * （code=SESSION_SERVICE_UNAVAILABLE）交由调用方统一 catch 转成 503，
  * 与黑名单服务故障同一口径。在这里捕获再原样抛出没有任何作用，
@@ -319,8 +324,39 @@ const assertSessionUsable = async (decoded, req, res) => {
 };
 
 /**
+ * 强制改密闸（P1-2，2026-10-30）：临时口令只能用于改密、看本人与登出。
+ * 判据用 req.baseUrl + req.path 规范化（小写、去尾斜杠）：Express 5 的路由默认大小写不敏感
+ * 且 strict:false，按 originalUrl 精确串比对会把 /api/auth/password/ 一起 403，等于把唯一
+ * 的逃生通道自己锁死；相对路径比对同时杜绝 /api/auth/password-extra 这类前缀绕过。
+ * 会话管理也在放行表内：账户被盗后应当先能踢掉攻击者的设备，再谈改密。
+ */
+const PASSWORD_CHANGE_ALLOWED_PATHS = new Set([
+  '/api/auth/password',
+  '/api/security/change-password',
+  '/api/auth/me',
+  '/api/auth/logout',
+  '/api/security/my-info',
+  '/api/auth/sessions',
+  '/api/auth/sessions/others',
+]);
+
+const PASSWORD_CHANGE_ALLOWED_PATTERNS = [/^\/api\/auth\/sessions\/[^/]+$/]; // A1：恰好一段，非通配
+
+const passwordChangePathOf = (req) => {
+  const joined = String(req.baseUrl || '') + String(req.path || '');
+  return (joined.replace(/\/+$/, '') || '/').toLowerCase();
+};
+
+const assertPasswordChangeCompleted = (req, res) => {
+  if (req.user?.mustChangePassword !== true) return null;
+  const path = passwordChangePathOf(req);
+  if (PASSWORD_CHANGE_ALLOWED_PATHS.has(path)) return null;
+  if (PASSWORD_CHANGE_ALLOWED_PATTERNS.some((re) => re.test(path))) return null;
+  return ApiResponse.codeError(res, 'PASSWORD_CHANGE_REQUIRED');
+};
+
+/**
  * 构造 req.user（自 authenticate 拆出）
- *
  * 角色信息一律以实时加载的 freshUser 为准，不信任 token payload 中的 roles——
  * 用户角色被全部撤销后，旧 token 在有效期内不得继续携带签发时的角色快照。
  * 身份展示字段（username/email/realName）同样取自 freshUser：载荷里的副本
@@ -349,6 +385,9 @@ const buildAuthContext = (decoded, freshUser) => {
     roles: freshRoles,
     roleCodes: freshRoleCodes, // 供 userLimiter 等中间件使用，实时角色
     realName: freshUser.realName, // 用于报警上报时记录真实姓名
+    // P1-2：强制改密标记随身份上下文下发，authenticate 在业务路由前统一设闸
+    mustChangePassword: freshUser.mustChangePassword === true,
+    isHoneypot: freshUser.isHoneypot === true, // 蜜罐账户标志：只做「是否改道」的判据，不参与任何授权判定、也不进任何响应
     sessionId: decoded.jti || null,
     // 设备会话标识：会话管理接口据此标记「本设备」并禁止误踢自己
     sid: decoded.sid || null,
@@ -359,7 +398,6 @@ const buildAuthContext = (decoded, freshUser) => {
 
 /**
  * 认证异常 → 错误响应（自 authenticate 拆出）
- *
  * 黑名单/会话服务故障（fail-closed 上抛）明确返回 503 而非笼统 500，
  * 与 tokenBlacklist.isTokenBlacklisted 的注释契约一致——查不到结论时放行
  * 等于取消对应防线。
@@ -370,6 +408,11 @@ const mapAuthFailure = (error, res) => {
   }
   if (error.name === 'TokenExpiredError') {
     return ApiResponse.codeError(res, 'AUTH_TOKEN_EXPIRED');
+  }
+  // 未知 kid（旧钥已删、或伪造的 header）：按令牌无效回 401，绝不能落到下面的 500——
+  // 前端只在 401 触发刷新/登出，500 会让客户端卡在"认证过程出错"且可被用来刷 5xx 告警。
+  if (error.code === 'JWT_UNKNOWN_KID') {
+    return ApiResponse.codeError(res, 'AUTH_TOKEN_INVALID');
   }
   // 黑名单服务故障（fail-closed 上抛）：明确返回 503 而非笼统 500，
   // 与 tokenBlacklist.isTokenBlacklisted 的注释契约一致
@@ -388,15 +431,8 @@ const mapAuthFailure = (error, res) => {
 };
 
 /**
- * 可选认证（已移除）
- *
- * 原实现存在两个问题且全项目无任何路由挂载：
- * 1. fail-open：黑名单/用户加载故障时外层 catch 一律 next() 静默降级为匿名，
- *    使 isTokenBlacklisted 的 fail-closed 语义失效；
- * 2. 死代码：无消费者，维护成本大于价值。
- *
- * 如未来需要"公开但可个性化"的接口，请基于 authenticate 提取
- * 共享校验函数实现，并对服务故障返回 503 而非静默降级。
+ * 可选认证（已移除）：原实现 fail-open（黑名单/加载故障时静默降级为匿名）且全仓零挂载。
+ * 若将来需要"公开但可个性化"的接口，请基于 authenticate 提取共享校验函数，并对服务故障回 503。
  */
 
 module.exports = {

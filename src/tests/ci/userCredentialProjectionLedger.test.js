@@ -241,6 +241,10 @@ function escapingHelpers() {
     lines.forEach((line, i) => {
       if (isCommentLine(line) || !ESCAPE_RE.test(line)) return;
       const text = statementOf(lines, i);
+      // `.lean()` 的返回值是普通对象、没有 save 方法：本族闸的机理是「文档被交出去、
+      // 由调用方 save」，lean 结果不成立（avatarService.loadScopeTarget 是
+      // `.select('createdBy department').lean()`，2026-10-30 头像功能引入）。
+      if (/\.lean\s*\(/.test(text)) return;
       let name = null;
       for (let k = i - 1; k >= 0; k -= 1) {
         if (isCommentLine(lines[k])) continue;
@@ -313,11 +317,13 @@ describe('第 3 组 · 文档外逃的跨文件闭合（行窗口看不见的那
         `${h.name}@${h.rel}:${h.wired ? 'wired' : 'bare'}=>${consumersOf(h.name, h.rel, h.line).length}`
     );
     // findUserForUpdate 同名两份定义互相计入调用方（保守：按形状剔除定义行，不按名字剔），
-    // 于是它的调用点 = rolePermissionController 1 + userController 3 = 4；findOneUser = 2
+    // 于是它的调用点 = rolePermissionController 1 + userController 3 + userService.anonymizeMany 2 = 6；
+    // findOneUser = 2。anonymizeMany 的两处是 P1-3 批量匿名化：带快照/无快照各一条路径，
+    // 复用同一带投影载入器，避免新增"裸载入 + save"站点。
     expect(per.sort()).toEqual(
       [
-        'findUserForUpdate@src/services/roleService.js:wired=>4',
-        'findUserForUpdate@src/services/userService.js:wired=>4',
+        'findUserForUpdate@src/services/roleService.js:wired=>6',
+        'findUserForUpdate@src/services/userService.js:wired=>6',
         'findOneUser@src/services/userService.js:bare=>2',
       ].sort()
     );
@@ -340,7 +346,7 @@ describe('第 3 组 · 文档外逃的跨文件闭合（行窗口看不见的那
 });
 
 describe('第 4 组 · 缺陷面的边界：select:false 路径逐一登记', () => {
-  test('全模型精确普查：User 是唯一携带凭据投影的模型（10 条），Role 仅两条删除恢复标记', () => {
+  test('全模型精确普查：User 是唯一携带凭据投影的模型（11 条），Role 两条恢复标记，UserAvatar 仅图片密文', () => {
     const modelDir = path.join(SRC, 'models');
     const offenders = [];
     for (const name of fs.readdirSync(modelDir)) {
@@ -358,14 +364,17 @@ describe('第 4 组 · 缺陷面的边界：select:false 路径逐一登记', ()
         .map(([k]) => k);
       if (bad.length) offenders.push({ model: name, n: bad.length, paths: bad.sort() });
     }
-    // 两个模型允许出现 select:false，但语义不同：User 的是凭据面（本文件的主题），
-    // Role 的是删除流程的中断恢复标记（不参与用户投影契约，见下一条断言）。
-    expect(offenders).toHaveLength(2);
+    // 三个模型允许出现 select:false，但语义不同：User 的是凭据面（本文件的主题），
+    // Role 的是删除流程的中断恢复标记，UserAvatar 的是图片密文（读 304 路径只取
+    // mime/hash，绝不为条件请求把近 1 MB 密文拉进内存）。
+    expect(offenders).toHaveLength(3);
     const byModel = Object.fromEntries(offenders.map((o) => [o.model, o]));
     expect(byModel['User.js']).toBeDefined();
 
     // A3：8 → 10（新增 emailKey 检索键 + emailGrams 子串盲索引，两者都是 select:false）
-    expect(byModel['User.js'].n).toBe(10);
+    // 审计二-2：10 → 11（新增 passwordRetiredHash：管理员重置时被替换掉的那一代口令的
+    // bcrypt 摘要 —— 与 passwordHistory 同属凭证材料，读过等于拿到旧口令的可校验副本）
+    expect(byModel['User.js'].n).toBe(11);
     expect(byModel['User.js'].paths).toEqual(
       [
         'emailGrams',
@@ -377,6 +386,7 @@ describe('第 4 组 · 缺陷面的边界：select:false 路径逐一登记', ()
         'mfaSecret',
         'password',
         'passwordHistory',
+        'passwordRetiredHash',
         'phoneKey',
       ].sort()
     );
@@ -386,6 +396,9 @@ describe('第 4 组 · 缺陷面的边界：select:false 路径逐一登记', ()
     expect(byModel['Role.js'].paths).toEqual(
       ['deletionPreviousStatus', 'deletionStartedAt'].sort()
     );
+
+    // 头像：只有密文字段一个 select:false。逐字钉住，防止把别的字段偷偷设成隐藏。
+    expect(byModel['UserAvatar.js'].paths).toEqual(['data']);
   });
 
   test('派生投影与普查结果同源：helper 的键集合必须等于 schema 里 select:false 的路径集合', () => {

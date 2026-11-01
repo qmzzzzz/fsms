@@ -39,6 +39,7 @@ const { startReminderScheduler, stopReminderScheduler } = require('./services/de
 const { startAlertCleanup, stopAlertCleanup } = require('./services/securityAlert');
 const { startCaptchaCleanup, stopCaptchaCleanup } = require('./services/captchaService');
 const auditBuffer = require('./services/auditBuffer');
+const forensicCapture = require('./services/forensicCapture'); // P2 取证捕获：与审计缓冲同款生命周期（见 :203 排空 / :417 启动）
 const auditMonitor = require('./services/auditMonitor');
 // 审计链周期自检（2026-09-30）：补上"链完整性由定时任务守护"这一方，
 // 与 auditMonitor（异常行为检测）分工，见该模块文件头
@@ -191,16 +192,24 @@ const gracefulShutdown = async (signal) => {
   await runStep('停止验证码清理定时器', () => stopCaptchaCleanup());
   await runStep('停止统计缓存清理定时器', () => statsCache.stopCleanup());
   await runStep('停止权限缓存清理定时器', () => userPermissionService.stopCleanup());
-
-  // 3.5 审计日志缓冲清空落库 + 异常监控停止（必须在数据库连接关闭前完成）。
-  // 顺序关键：flush（walEnabled 仍为 true，落库后按本批文档的 __walSeq 精确裁剪 WAL，
-  // F-97 之前这里是"按条数裁剪"——WAL 有行缺序号或已被回收时会误删未落库行）→ 等待
-  // walChain 排空（裁剪的原子 rename 落盘）→ stop。此前「await flush(); stop()」
-  // 不等裁剪，500ms 强制退出截断 rename → 重启重放把已落库批次重复插入（B-L2）
+  // 3.5 审计日志缓冲清空落库 + 异常监控停止（必须在数据库连接关闭前完成）。顺序关键：
+  // flush（按 __walSeq 精确裁剪 WAL）→ 等 walChain 排空（rename 落盘）→ stop；不等裁剪就退出会截断 rename 并重放。
   await runStep('停止审计监控', () => auditMonitor.stop());
   // 审计链核验与 auditMonitor 同为"只读扫描 + 告警"的后台任务，关停口径一致：
   // 只清定时器（停掉新一轮），在途那一轮由 runStep 的超时预算兜底，不阻塞关停
   await runStep('停止审计链核验', () => auditChainMonitor.stop());
+  await runStep('停止蜜罐事件链巡检', () => require('./services/honeypotChainWatch').stop());
+  await runStep('排空取证捕获缓冲', async () => {
+    const { drained, residual } = await forensicCapture.flushAndStop(
+      shutdownBudget.stepAllowMs(1500)
+    );
+    if (drained) logger.info('取证捕获缓冲已排空');
+    else
+      logger.error(
+        `取证捕获缓冲未排空：仍有 ${residual} 条待落库（预算用尽）。WAL 行仍在盘上，重启后由 start() 重放——不要说成已排空`
+      );
+  });
+
   await runStep('清空审计缓冲', async () => {
     // F-101：这一句以前无条件打「已清空」。flush 在有在途批次时会直接 return，
     // 于是"定时 flush 正跑到一半时关停"这种常见时序下，日志说清空了、缓冲里其实还压着记录，
@@ -308,6 +317,14 @@ const startServer = async () => {
       } catch (auditErr) {
         logger.warn(`密钥强度审计留痕写入失败：${auditErr.message}`);
       }
+
+      // P2-3：JWT 签发密钥轮换留痕。基线态只登记不落审计（首次配置不是轮换），
+      // currentKid 变化时写一条 jwt_key_rotated。失败只告警不阻断启动
+      try {
+        await require('./services/jwtKeyRotationAudit').recordJwtKeyRotation();
+      } catch (rotationErr) {
+        logger.warn(`JWT 密钥轮换审计留痕失败：${rotationErr.message}`);
+      }
     }
 
     const app = createApp();
@@ -367,10 +384,8 @@ const startServer = async () => {
     // 造成**真实分叉**——那比幻影链尾（仅假阳性）严重得多。跨 pre/post 两个
     // 钩子持锁则会引入"钩子未触发即锁泄漏、审计整体停摆"的新失效模式。
     // 故保持原推进位置，改在启动期做一次自愈：从 DB 重建真实链尾。
-    //
     // 位置：必须在 listen 回调**之外**（该回调非 async），且早于任何审计写入。
     await resyncChainTail();
-
     httpServer = server.listen(PORT, () => {
       // 初始化 WebSocket（挂载到同一 HTTP server）
       wsServiceInstance = new WebSocketService(httpServer);
@@ -398,12 +413,14 @@ const startServer = async () => {
       userPermissionService.startCleanup();
       // 启动审计日志缓冲定时落库（配合 gracefulShutdown 中的 stop + flush）
       auditBuffer.start();
+      forensicCapture.start(); // WAL 重放 + 定时 flush（定时器 unref，不阻止退出）
       // 启动审计异常检测定时监控（配合 gracefulShutdown 中的 stop）
       auditMonitor.start();
       // 启动审计链周期自检（2026-09-30）：此前链核验只在被手动调用时发生，
       // "篡改会留痕"成立而"痕迹会被发现"不成立；本定时器把发现从人工动作
       // 变成自动循环。窗口取最近 N 条（默认 2000），发现新断裂/缺口即告警。
       auditChainMonitor.start();
+      require('./services/honeypotChainWatch').start(); // 蜜罐事件链巡检（与 auditMonitor 同款：只读聚合 + 告警，定时器 unref）
       // 启动期哨兵用户名遮蔽对账（init 永不 reject；失败按"未检查"处理，
       // 不影响名单匹配与登录路径，见 canaryWatch 文件头）
       canaryWatch.init().catch(() => {});
@@ -440,7 +457,6 @@ const startServer = async () => {
 };
 
 // 未捕获异常
-//
 // F-186b：崩溃路径同样要排空 SIEM 转发缓冲——gracefulShutdown 里的那一步管不到这里，
 // 而按取证价值排序恰好是反的：进程崩掉那一刻的日志最需要进 SIEM，它们此时全压在
 // logShipper 的内存缓冲里（默认 100 行/批、串行发送）。
@@ -468,6 +484,7 @@ process.on('uncaughtException', (error) => {
   // flush 失败不阻断退出：进程已处于不可信状态，尽力而为
   Promise.resolve()
     .then(() => auditBuffer.flush())
+    .then(() => forensicCapture.flush())
     .catch((e) => logger.error(`退出前审计缓冲落库失败：${e && e.message ? e.message : e}`))
     .then(() => bestEffortDrain({ allowMs: CRASH_DRAIN_BUDGET_MS, tag: 'uncaughtException' }))
     .finally(() => setTimeout(() => process.exit(1), 1000));
@@ -488,6 +505,7 @@ process.on('unhandledRejection', (reason, promise) => {
   }
   Promise.resolve()
     .then(() => auditBuffer.flush())
+    .then(() => forensicCapture.flush())
     .catch((e) => logger.error(`退出前审计缓冲落库失败：${e && e.message ? e.message : e}`))
     .then(() => bestEffortDrain({ allowMs: CRASH_DRAIN_BUDGET_MS, tag: 'unhandledRejection' }))
     .finally(() => setTimeout(() => process.exit(1), 1000));

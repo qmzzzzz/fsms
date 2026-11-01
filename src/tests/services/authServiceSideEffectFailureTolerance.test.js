@@ -54,6 +54,15 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
  * ——即该分支此前**不确定被执行**，那条用例的绿与被测代码无关。
  */
 let mockUnusualMode = false;
+// 挑战闸门（前置层）整模块替换：本文件注入的故障点之一是 AuditLog.countDocuments，
+// 而挑战判据也读同一个方法——留真的会让"注入 checkBruteForce 的故障"被前置层先吃掉，
+// 用例想证明的那条链（旁路失败仍 401）根本没被执行到。
+jest.mock('../../services/loginChallenge', () => ({
+  isChallengeRequired: jest.fn().mockResolvedValue(false),
+  // 同上：审计二-3 的留痕调用也在前置层，桩缺了它就会以 TypeError 形式假红
+  recordCaptchaRejected: jest.fn().mockResolvedValue(undefined),
+  CAPTCHA_TRIGGERS: { SWITCH: 'captcha_switch', CHALLENGE: 'challenge_required' },
+}));
 jest.mock('../../services/securityAlert', () => {
   const actual = jest.requireActual('../../services/securityAlert');
   return {
@@ -480,6 +489,7 @@ describe('authService gap C - catch handler coverage', () => {
         password: PASSWORD,
         captchaId: 'any',
         captchaText: 'any',
+        privacyConsent: true,
       });
       expect(result.outcome).toBe('OK');
       spy.mockRestore();

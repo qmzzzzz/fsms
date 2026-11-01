@@ -21,6 +21,7 @@ const { isIPAllowed } = require('../../utils/ipRange');
 const { isPeerTrustedProxy } = require('../../utils/ipUtils');
 const trustedProxies = require('../../config/trustedProxies');
 const { isTemporarilyLocked, userRoom } = require('./shared');
+const honeypotWatch = require('../honeypotWatch'); // 蜜罐会话的 WS 侧判据与留痕（不建立推送通道，与账户禁用同形的拒绝）
 
 /**
  * 解析握手来源 IP（修复，2026-09-17）
@@ -191,19 +192,25 @@ const methods = {
       if (await this._assertHandshakeIpNotBanned(socket)) return false;
 
       const jwt = require('jsonwebtoken');
+      const jwtKeys = require('../../utils/jwtKeys');
       // 限制算法防止 alg:none 攻击，使用统一配置而非直接读环境变量
-      const decoded = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
+      // P2-3：密钥按 header.kid 选（无 kid 的历史令牌回退轮换前的单密钥）
+      const decoded = jwt.verify(token, jwtKeys.verifyKeyFor(token, 'access'), {
+        algorithms: ['HS256'],
+      });
 
       if (this._assertHandshakeTokenPurpose(socket, decoded)) return false;
       if (await this._assertHandshakeTokenNotRevoked(socket, token)) return false;
 
-      // 校验用户当前状态、tokenVersion、allowedIPs 与临时锁定：被禁用/锁定/改密后旧连接应失效。
-      // 字段集与 auth.js 的等价 select（含 lockUntil）对齐——少取一个字段就等于少一条判据。
+      // 校验用户当前状态、tokenVersion、allowedIPs、临时锁定与强制改密：字段集与 auth.js 的
+      // 等价 select 对齐——少取一个字段就等于少一条判据。
       const User = require('../../models/User');
       const freshUser = await User.findById(decoded.userId)
-        .select('username status tokenVersion passwordChangedAt allowedIPs lockUntil')
+        .select(
+          'username status tokenVersion passwordChangedAt allowedIPs lockUntil mustChangePassword isHoneypot'
+        )
         .populate({ path: 'roles', select: 'code', match: { status: 'active' } });
-      if (this._assertHandshakeUserExists(socket, freshUser)) return false;
+      if (this._assertHandshakeUserUsable(socket, freshUser)) return false;
       if (freshUser.status !== 'active') {
         logger.warn('WebSocket 认证失败（用户状态异常）', {
           status: freshUser.status,
@@ -213,12 +220,11 @@ const methods = {
         socket.disconnect(true);
         return false;
       }
-      // 临时锁定：HTTP 侧对此返回 ACCOUNT_TEMP_LOCKED，WS 侧同判据拒绝
-      // （写法与 _assertHandshakeIpAllowed / _assertHandshakeSessionUsable 一致，
-      //  不再往 authenticateSocket 里叠第 N 个分支——该方法复杂度已在棘轮基线上）
+      // 临时锁定：同判据拒绝（写法定式同 _assertHandshakeIpAllowed，不往本方法里叠分支）
       if (this._assertHandshakeAccountLocked(socket, freshUser)) return false;
       if (this._assertHandshakeTokenVersion(socket, freshUser, decoded)) return false;
       if (this._assertHandshakePasswordFresh(socket, freshUser, decoded)) return false;
+      if (this._assertHandshakePasswordChangeCompleted(socket, freshUser)) return false;
 
       // ============ 修复：补齐 HTTP 侧已有、WS 侧缺失的两道失效信号 ============
       // 审计实证：同一个 JWT 在 HTTP 侧因 allowedIPs 不匹配被 403 AUTH_IP_RANGE_DENIED、
@@ -235,9 +241,8 @@ const methods = {
       // ——周期清扫只遍历 this.clients.keys()，永不回收它。代价不是内存量级而是"以为还在"：
       // getStats().totalUsers 长期虚高、emitPermissionSync 给已死 socket.id 逐个查库+投递、
       // MAX_CONNECTIONS_PER_PROCESS 数的是 io.sockets.sockets.size ⇒ 幽灵不占配额，计数与真实在线分叉。
-      // 位置约束：必须紧贴最后一个 await、且在任何状态写入之前——中间再插 await 就重新开窗。
-      // 不抽成 _assert* 方法：websocketAuthGhostConnection 的接线闸按**文本位置**钉这两件事
-      // （复检在最后一个 await 之后、this.userConnections 之前），抽走就只剩一句注释承诺。
+      // 位置约束：必须紧贴最后一个 await、且在任何状态写入之前；不抽成 _assert* 方法——
+      // websocketAuthGhostConnection 的接线闸按**文本位置**钉这处复检，抽走就只剩注释承诺。
       if (!socket.connected) {
         logger.warn(`WebSocket 认证在途断开，作废本次认证: ${socket.id}`);
         return false;
@@ -245,8 +250,7 @@ const methods = {
 
       this._bindHandshakeIdentity(socket, decoded, freshUser);
       clearTimeout(authTimer);
-      // 认证成功即归还按 IP 的未认证名额（#9）：该配额限制的是"同时挂着一堆
-      // 尚未认证的连接"，不限制正常用户的累计登录次数；断开路径会再调一次，幂等。
+      // 认证成功即归还按 IP 的未认证名额（#9）：限制的是"挂着未认证连接"，不是登录次数；断开路径幂等。
       this._releaseUnauthenticatedSlot(socket);
 
       // 加入用户定向房间：挂载 Redis adapter 后，权限同步可经房间投递
@@ -360,14 +364,15 @@ const methods = {
   },
 
   /**
-   * 用户存在闸。
+   * 用户存在闸 + 蜜罐标志：存在也未必可用（蜜罐会话与禁用通道同类处理，不建推送通道）。
    *
    * @param {import('socket.io').Socket} socket
    * @param {object|null} freshUser 按 decoded.userId 查回的用户文档
    * @returns {boolean} true 表示已拒绝并断开连接
    */
-  _assertHandshakeUserExists(socket, freshUser) {
-    if (freshUser) return false;
+  _assertHandshakeUserUsable(socket, freshUser) {
+    // 存在性 + 蜜罐标志（同类：不绑身份、不建通道、拒绝形状同形）：存在也未必可用，蜜罐会话在此被同步拦下
+    if (freshUser) return honeypotWatch.isHoneypotSocket(freshUser, socket);
     logger.warn(`WebSocket 认证失败（用户不存在）: ${socket.id}`);
     socket.emit('auth-error', { message: '用户不存在' });
     socket.disconnect(true);
@@ -411,6 +416,20 @@ const methods = {
     if (decoded.iat >= changedAtTs) return false;
     logger.warn(`WebSocket 认证失败（密码已修改）: ${socket.id}`);
     socket.emit('auth-error', { message: '密码已修改，请重新登录' });
+    socket.disconnect(true);
+    return true;
+  },
+
+  // 握手期强制改密闸（同 middleware/auth.js 的 assertPasswordChangeCompleted）：HTTP 侧改了闸而
+  // WS 侧不改，等于给临时口令留一条数据面——join-room 的 alarm / device-alert / notification
+  // 三个房间不校验角色，认证通过即入房并持续收实时事件。返回 true = 已拒绝并断开。
+  _assertHandshakePasswordChangeCompleted(socket, freshUser) {
+    if (freshUser.mustChangePassword !== true) return false;
+    logger.warn(`WebSocket 认证失败（必须先完成改密）: ${socket.id}`);
+    socket.emit('auth-error', {
+      code: 'PASSWORD_CHANGE_REQUIRED',
+      message: '请先修改初始口令后再使用实时推送',
+    });
     socket.disconnect(true);
     return true;
   },
@@ -552,14 +571,13 @@ const methods = {
   /**
    * 握手设备会话状态校验（修复，2026-09-17）
    *
-   * 与 middleware/auth.js 的 assertSessionUsable（auth.js:341-354）同源：
+   * 与 middleware/auth.js 的 assertSessionUsable（auth.js:344-357）同源：
    * 令牌携带 sid 时校验对应 UserSession 仍可用；未携带 sid 时跳过——功能
    * 上线前的旧令牌、以及登录时会话注册失败而降级签发的令牌都没有 sid，
    * 拒绝它们等于把全部在线用户踢下线（HTTP 侧出于同一理由放行）。
    *
-   * fail-closed 不吞错：validateSession 在 DB 故障时抛
-   * SESSION_SERVICE_UNAVAILABLE，此处让它抛到 authenticateSocket 的 catch，
-   * 按「认证失败」断开连接——拒绝语义与 HTTP 侧返回 503 一致，不会放行。
+   * fail-closed 不吞错：validateSession 在 DB 故障时抛 SESSION_SERVICE_UNAVAILABLE，此处让它抛到
+   * authenticateSocket 的 catch 按「认证失败」断开连接——拒绝语义与 HTTP 侧 503 一致，不会放行。
    *
    * @param {import('socket.io').Socket} socket
    * @param {object} decoded 已验证的 JWT payload

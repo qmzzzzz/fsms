@@ -209,6 +209,7 @@ describe('日期边界与 ?tz 接线', () => {
     ).toEqual([
       'controllers/reportController.js:3',
       'controllers/reportController.js:3',
+      'services/honeypotDecoyFiles.js:3',
       'services/reportStatsService.js:3',
       'services/reportStatsService.js:3',
     ]);

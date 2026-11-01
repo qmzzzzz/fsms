@@ -1,11 +1,10 @@
 /**
  * IP 归属地展示码的单一来源
  *
- * 背景（i18n 缺口）：`location` 原先是后端直接拼好的**展示文本**，私网/环回
- * 地址收敛成中文两字「内网」（src/services/ipLocationService.js）。这类字段
- * 一旦是成句文案，英文界面就没有任何办法正确显示——前端拿到的是已经定型的
- * 中文串，vue-i18n 无从下手。表现是：管理员把界面切到 en-US，会话管理 /
- * 审计日志 / IP 名单里内网 IP 旁边仍挂着「内网」两字。
+ * 背景（i18n 缺口）：`location` 若由后端拼成**展示文本**（私网/环回收敛成中文两字
+ * 「内网」，见 src/services/ipLocationService.js），英文界面就无法正确显示——vue-i18n
+ * 拿到的是已经定型的字符串。表现：管理员切到 en-US，会话管理 / 审计日志 / IP 名单里
+ * 内网 IP 旁边仍挂着「内网」两字。
  *
  * 修法与仓内既有口径一致（constants/securitySuggestions.js、utils/auditLabels.js
  * 的 audit.action.*、utils/labelMaps.js 的 DEVICE_TYPE）：**后端只出稳定码，

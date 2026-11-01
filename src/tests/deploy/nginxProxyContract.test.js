@@ -238,7 +238,11 @@ describe('deployment/nginx.conf.example 反代契约', () => {
     // /proxy_pass\s/ 对整块文本做**非锚定**匹配，所以"删掉指令、留着同名注释"
     // 在旧实现下仍然全绿——即 security.txt/metrics 这类块真的丢了反代、退化成
     // SPA 200 HTML，门禁看不见。这里同时钉住"旧口径是假绿"和"新口径报缺"。
-    const mutated = text.replace(/^([ \t]*)(proxy_pass\shttp:\/\/127\.0\.0\.1:3000;)/m, '$1# $2');
+    // 2026-10-30 升级改造后反代目标不再是字面地址，而是 upstream 名 fsms_app
+    // （蓝绿切流靠改 upstream 块里的 server 行）。变异对象必须跟着改：
+    // 仍按 `127.0.0.1:3000` 去匹配会一个字都替换不到，`mutated !== text` 先红，
+    // 于是"假绿曾被证实"这条记录反而失效。
+    const mutated = text.replace(/^([ \t]*)(proxy_pass\shttp:\/\/fsms_app;)/m, '$1# $2');
     expect(mutated).not.toBe(text); // 替身没替换成功 = 空跑
     // 旧口径（直接解析原视图）：看不见这条缺口——这条断言就是"假绿曾被证实"的记录
     expect(proxyOwnershipGaps(parseLocations(mutated))).toEqual([]);

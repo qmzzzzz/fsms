@@ -120,9 +120,16 @@ describe('会话不可恢复的 401 必须给用户反馈', () => {
     expect(pushSpy).not.toHaveBeenCalled()
   })
 
-  test('刷新失败的路径提示不变（本次改动没有把两条路径变成两处弹一次）', async () => {
+  test('刷新被明确拒绝的路径提示不变（本次改动没有把两条路径变成两处弹一次）', async () => {
     const { apiClient, axios, router } = await loadAll()
-    const postSpy = vi.spyOn(axios, 'post').mockRejectedValue(new Error('network'))
+    // 2026-10-30：刷新失败分两类。这里必须用「明确拒绝」（401 + 错误码）——
+    // 只有它才登出；裸 Error 是网络层失败，按新口径不得登出（见
+    // apiRefreshRaceRecovery.test.js 的 503/网络错误用例）。
+    const postSpy = vi.spyOn(axios, 'post').mockRejectedValue(
+      httpError({ url: '/api/auth/refresh' }, 401, {
+        errors: { errorCode: 'REFRESH_TOKEN_INVALID' },
+      })
+    )
     const pushSpy = vi.spyOn(router, 'push').mockResolvedValue()
     let n = 0
     apiClient.defaults.adapter = (config) => {

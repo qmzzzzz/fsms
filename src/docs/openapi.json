@@ -33,6 +33,10 @@
       "description": "权限管理接口"
     },
     {
+      "name": "Privileges",
+      "description": "临时权限授予接口"
+    },
+    {
       "name": "Devices",
       "description": "消防设备管理接口"
     },
@@ -78,7 +82,7 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["username", "email", "password"],
+                "required": ["username", "email", "password", "privacyConsent"],
                 "properties": {
                   "username": {
                     "type": "string",
@@ -105,6 +109,10 @@
                   "encPassword": {
                     "type": "string",
                     "description": "口令密文（与 password 二选一）"
+                  },
+                  "privacyConsent": {
+                    "type": "boolean",
+                    "description": "必须为 true：明示同意现行隐私告知（审计一-7）"
                   }
                 }
               }
@@ -316,7 +324,8 @@
                     "type": "string"
                   },
                   "avatar": {
-                    "type": "string"
+                    "type": "string",
+                    "pattern": "^/api/avatars/[0-9a-f]{24}\\?v=[0-9a-f]{16}$"
                   }
                 }
               }
@@ -326,6 +335,111 @@
         "responses": {
           "200": {
             "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/auth/avatar": {
+      "put": {
+        "tags": ["Auth"],
+        "summary": "上传/替换头像（本人）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["image"],
+                "properties": {
+                  "image": {
+                    "type": "string",
+                    "description": "data:image/jpeg|png;base64,...（原始二进制上限 256 KB；客户端压到 512×512 JPEG q0.85）"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "头像已更新，返回 { avatar, width, height, size }"
+          },
+          "400": {
+            "400": {
+              "description": "参数错误"
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Auth"],
+        "summary": "移除头像（本人，幂等）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/avatars/{userId}": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "读取用户头像（本人直通，他人需 user:read + 数据范围）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "图片二进制（ETag / Cache-Control: private, no-cache）",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "未修改（If-None-Match 命中）"
+          },
+          "403": {
+            "403": {
+              "description": "无权限"
+            }
+          },
+          "404": {
+            "404": {
+              "description": "资源不存在"
+            }
           }
         }
       }
@@ -656,6 +770,19 @@
             "bearerAuth": []
           }
         ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 64
+            },
+            "description": "可选的提交标识（8-64 位可见 ASCII，建议 UUID）。同键同载荷的重试不会产生第二次副作用，而是原样回放第一次的响应（响应头带 Idempotency-Replayed: true）；同键但载荷不同返回 409 IDEMPOTENCY_KEY_REUSED；上一次仍在处理中返回 409 IDEMPOTENCY_IN_PROGRESS。业务失败（非 2xx）会释放该键，修正后可用同一个键重试。"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -717,6 +844,261 @@
         "responses": {
           "200": {
             "description": "返回总数、活跃/禁用数、按部门/角色统计"
+          }
+        }
+      }
+    },
+    "/api/permissions/grants": {
+      "get": {
+        "tags": ["Privileges"],
+        "summary": "获取临时授权列表（分页）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["pending", "active", "rejected", "revoked", "expired"]
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Privileges"],
+        "summary": "申请临时权限授予",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 64
+            },
+            "description": "可选的提交标识（8-64 位可见 ASCII，建议 UUID）。同键同载荷的重试不会产生第二次副作用，而是原样回放第一次的响应（响应头带 Idempotency-Replayed: true）；同键但载荷不同返回 409 IDEMPOTENCY_KEY_REUSED；上一次仍在处理中返回 409 IDEMPOTENCY_IN_PROGRESS。业务失败（非 2xx）会释放该键，修正后可用同一个键重试。"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["targetUserId", "permissionCodes", "reason", "durationHours"],
+                "properties": {
+                  "targetUserId": {
+                    "type": "string"
+                  },
+                  "permissionCodes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "description": "拟授予的权限码（须在权限目录内且为启用态）"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "durationHours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 168
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "申请已提交，待审批"
+          }
+        }
+      }
+    },
+    "/api/permissions/grants/review": {
+      "get": {
+        "tags": ["Privileges"],
+        "summary": "获取临时授权复核汇总与超期清单",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/api/permissions/grants/{id}/approve": {
+      "post": {
+        "tags": ["Privileges"],
+        "summary": "签批临时授权（高敏授予需两名不同审批人）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "已签批"
+          },
+          "400": {
+            "description": "参数错误"
+          },
+          "403": {
+            "description": "无权限"
+          }
+        }
+      }
+    },
+    "/api/permissions/grants/{id}/reject": {
+      "post": {
+        "tags": ["Privileges"],
+        "summary": "驳回临时授权申请",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已驳回"
+          },
+          "400": {
+            "description": "参数错误"
+          },
+          "403": {
+            "description": "无权限"
+          }
+        }
+      }
+    },
+    "/api/permissions/grants/{id}/revoke": {
+      "post": {
+        "tags": ["Privileges"],
+        "summary": "撤销临时授权",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已撤销"
+          },
+          "400": {
+            "description": "参数错误"
+          },
+          "403": {
+            "description": "无权限"
           }
         }
       }
@@ -907,6 +1289,19 @@
         "security": [
           {
             "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 64
+            },
+            "description": "可选的提交标识（8-64 位可见 ASCII，建议 UUID）。同键同载荷的重试不会产生第二次副作用，而是原样回放第一次的响应（响应头带 Idempotency-Replayed: true）；同键但载荷不同返回 409 IDEMPOTENCY_KEY_REUSED；上一次仍在处理中返回 409 IDEMPOTENCY_IN_PROGRESS。业务失败（非 2xx）会释放该键，修正后可用同一个键重试。"
           }
         ],
         "requestBody": {
@@ -1132,6 +1527,19 @@
             "bearerAuth": []
           }
         ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 64
+            },
+            "description": "可选的提交标识（8-64 位可见 ASCII，建议 UUID）。同键同载荷的重试不会产生第二次副作用，而是原样回放第一次的响应（响应头带 Idempotency-Replayed: true）；同键但载荷不同返回 409 IDEMPOTENCY_KEY_REUSED；上一次仍在处理中返回 409 IDEMPOTENCY_IN_PROGRESS。业务失败（非 2xx）会释放该键，修正后可用同一个键重试。"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1183,6 +1591,19 @@
         "security": [
           {
             "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 64
+            },
+            "description": "可选的提交标识（8-64 位可见 ASCII，建议 UUID）。同键同载荷的重试不会产生第二次副作用，而是原样回放第一次的响应（响应头带 Idempotency-Replayed: true）；同键但载荷不同返回 409 IDEMPOTENCY_KEY_REUSED；上一次仍在处理中返回 409 IDEMPOTENCY_IN_PROGRESS。业务失败（非 2xx）会释放该键，修正后可用同一个键重试。"
           }
         ],
         "requestBody": {
@@ -1375,6 +1796,19 @@
         "security": [
           {
             "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 64
+            },
+            "description": "可选的提交标识（8-64 位可见 ASCII，建议 UUID）。同键同载荷的重试不会产生第二次副作用，而是原样回放第一次的响应（响应头带 Idempotency-Replayed: true）；同键但载荷不同返回 409 IDEMPOTENCY_KEY_REUSED；上一次仍在处理中返回 409 IDEMPOTENCY_IN_PROGRESS。业务失败（非 2xx）会释放该键，修正后可用同一个键重试。"
           }
         ],
         "requestBody": {
@@ -1873,6 +2307,19 @@
             "bearerAuth": []
           }
         ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 64
+            },
+            "description": "可选的提交标识（8-64 位可见 ASCII，建议 UUID）。同键同载荷的重试不会产生第二次副作用，而是原样回放第一次的响应（响应头带 Idempotency-Replayed: true）；同键但载荷不同返回 409 IDEMPOTENCY_KEY_REUSED；上一次仍在处理中返回 409 IDEMPOTENCY_IN_PROGRESS。业务失败（非 2xx）会释放该键，修正后可用同一个键重试。"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2217,6 +2664,19 @@
         "security": [
           {
             "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 64
+            },
+            "description": "可选的提交标识（8-64 位可见 ASCII，建议 UUID）。同键同载荷的重试不会产生第二次副作用，而是原样回放第一次的响应（响应头带 Idempotency-Replayed: true）；同键但载荷不同返回 409 IDEMPOTENCY_KEY_REUSED；上一次仍在处理中返回 409 IDEMPOTENCY_IN_PROGRESS。业务失败（非 2xx）会释放该键，修正后可用同一个键重试。"
           }
         ],
         "requestBody": {
@@ -2876,8 +3336,8 @@
     "/api/security/reauth": {
       "post": {
         "tags": ["Security"],
-        "summary": "完成二次验证并换取审计读取票据",
-        "description": "审计读取端点（/alerts、/audit-logs、/audit-logs/export）需携带 X-Reauth-Ticket。本端点校验当前密码或 MFA 动态口令，成功后返回 5 分钟有效、绑定账号与会话的票据。",
+        "summary": "完成二次验证（开启会话窗口并签发票据）",
+        "description": "审计读取端点（/alerts、/audit-logs、/audit-logs/export）要求近期完成过二次验证。本端点校验当前密码或 MFA 动态口令，成功后：① 为该会话开 5 分钟窗口（绑定 access token 的会话标识，窗口内凭有效令牌即可读取，客户端不持有凭据）；② 同时返回一张 5 分钟有效、绑定账号与会话、**一次性**的票据（供无会话上下文的 API 客户端使用）。",
         "security": [
           {
             "bearerAuth": []
@@ -3173,11 +3633,11 @@
           {
             "name": "X-Reauth-Ticket",
             "in": "header",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             },
-            "description": "POST /api/security/reauth 换取的短时票据（5 分钟，绑定账号与会话）"
+            "description": "可选的短时票据（5 分钟，绑定账号与会话，**一次性**）。默认不需要：POST /api/security/reauth 成功后服务端会为该会话开 5 分钟窗口，窗口内凭有效访问令牌即可读取。票据路径供无会话上下文的 API 客户端使用，同一张票第二次使用会被拒（REAUTH_TICKET_INVALID）。"
           }
         ],
         "responses": {
@@ -3203,11 +3663,11 @@
           {
             "name": "X-Reauth-Ticket",
             "in": "header",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             },
-            "description": "POST /api/security/reauth 换取的短时票据（5 分钟，绑定账号与会话）"
+            "description": "可选的短时票据（5 分钟，绑定账号与会话，**一次性**）。默认不需要：POST /api/security/reauth 成功后服务端会为该会话开 5 分钟窗口，窗口内凭有效访问令牌即可读取。票据路径供无会话上下文的 API 客户端使用，同一张票第二次使用会被拒（REAUTH_TICKET_INVALID）。"
           },
           {
             "name": "page",
@@ -3613,6 +4073,75 @@
         }
       }
     },
+    "/api/security/users/{userId}/password/reset": {
+      "put": {
+        "tags": ["Security"],
+        "summary": "管理员重置用户口令（返回一次性临时口令，首次登录强制改密）",
+        "description": "生成一次性临时口令并强制目标用户全部会话下线；临时口令只在本次响应返回，审计与日志均不记录。目标用户下次登录只能先修改口令。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "currentPassword": {
+                    "type": "string",
+                    "description": "当前密码（与 encCurrentPassword、mfaCode 三选一）"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "ECDH 信封加密后的当前密码"
+                  },
+                  "mfaCode": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "description": "6 位 TOTP 动态口令（已开启 MFA 时必用）"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "重置原因（可选，仅进审计）"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "口令已重置，返回 { userId, username, temporaryPassword, mustChangePassword: true }"
+          },
+          "400": {
+            "description": "目标为自身 / 参数校验失败"
+          },
+          "403": {
+            "description": "同级或更高层级 / 内置超管 / 二次验证未通过"
+          },
+          "404": {
+            "description": "用户不存在"
+          },
+          "409": {
+            "description": "目标状态已变更（角色快照不一致）"
+          }
+        }
+      }
+    },
     "/api/security/audit-logs/verify": {
       "get": {
         "tags": ["Security"],
@@ -3651,11 +4180,11 @@
           {
             "name": "X-Reauth-Ticket",
             "in": "header",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
             },
-            "description": "POST /api/security/reauth 换取的短时票据（5 分钟，绑定账号与会话）"
+            "description": "可选的短时票据（5 分钟，绑定账号与会话，**一次性**）。默认不需要：POST /api/security/reauth 成功后服务端会为该会话开 5 分钟窗口，窗口内凭有效访问令牌即可读取。票据路径供无会话上下文的 API 客户端使用，同一张票第二次使用会被拒（REAUTH_TICKET_INVALID）。"
           },
           {
             "name": "limit",
@@ -3738,6 +4267,132 @@
         }
       }
     },
+    "/api/security/upgrade": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "升级概览（服务端构建信息、代理就绪判据、最近任务）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 { server, upgrade, checkedAt }；upgrade.reasons 逐条解释升级按钮为何不可用"
+          },
+          "403": {
+            "403": {
+              "description": "无权限"
+            }
+          }
+        }
+      }
+    },
+    "/api/security/upgrade/jobs/{jobId}": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "升级任务详情（状态目录优先，其次 processing/requests）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 { job }；非 UUID 或状态文件不存在时按 404 处理"
+          },
+          "404": {
+            "404": {
+              "description": "资源不存在"
+            }
+          }
+        }
+      }
+    },
+    "/api/security/upgrade/requests": {
+      "post": {
+        "tags": ["Security"],
+        "summary": "入队一次升级请求（不立即改变线上流量）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Reauth-Ticket",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选的短时票据（5 分钟，绑定账号与会话，**一次性**）。默认不需要：POST /api/security/reauth 成功后服务端会为该会话开 5 分钟窗口，窗口内凭有效访问令牌即可读取。票据路径供无会话上下文的 API 客户端使用，同一张票第二次使用会被拒（REAUTH_TICKET_INVALID）。"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["image"],
+                "properties": {
+                  "image": {
+                    "type": "string",
+                    "description": "必须是 registry/repo@sha256:<64 位小写十六进制>；tag 一律拒绝"
+                  },
+                  "currentPassword": {
+                    "type": "string",
+                    "description": "当前密码（与 encCurrentPassword、mfaCode 三选一）"
+                  },
+                  "encCurrentPassword": {
+                    "type": "string",
+                    "description": "ECDH 信封加密后的当前密码"
+                  },
+                  "mfaCode": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "description": "6 位 TOTP 动态口令（已开启 MFA 时必用）"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "请求已入队，返回 { job }"
+          },
+          "400": {
+            "400": {
+              "description": "参数错误"
+            }
+          },
+          "403": {
+            "403": {
+              "description": "无权限"
+            }
+          },
+          "409": {
+            "description": "已有任务进行中或排队（errorCode=UPGRADE_ALREADY_RUNNING）"
+          },
+          "503": {
+            "description": "升级未启用或队列不可用（UPGRADE_DISABLED / UPGRADE_QUEUE_UNAVAILABLE）"
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": ["System"],
@@ -3756,6 +4411,264 @@
         "responses": {
           "200": {
             "description": "固定返回 { success: true, message }，不含端点清单"
+          }
+        }
+      }
+    },
+    "/api/security/forensic/trace": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "取证溯源查询（按 IP / 设备指纹 / 网段）",
+        "description": "至少提供一个查询维度，否则 400 FORENSIC_NO_CRITERIA；地址无法解析同样按判据不可用拒绝，不返回空结果。传 fingerprint 时会额外返回 pools —— 该指纹落到过的网段，即「他的 ip 池」。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "ip",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fingerprint",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ipSegment",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回时间线、触发原因分布、网段分布与候选池"
+          },
+          "400": {
+            "description": "缺少查询维度或地址不可解析"
+          }
+        }
+      }
+    },
+    "/api/security/forensic/clusters": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "IP 池聚类候选",
+        "description": "按网段聚合取证记录。verdict=rotate_pool（同段 IP 多而指纹极少）才建议封段；verdict=shared_egress（IP 多且指纹也多，典型是办公 NAT）只报不建议，recommendBan 为 false。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "windowHours",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 720
+            }
+          },
+          {
+            "name": "minHits",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "minIps",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回聚类结果与 recommended 子集"
+          }
+        }
+      }
+    },
+    "/api/security/forensic/pool-ban/request": {
+      "post": {
+        "tags": ["Security"],
+        "summary": "申请网段封禁的确认票据",
+        "description": "本步不落库。被护栏拒绝时返回 400，errors.errorCode=FORENSIC_POOL_BAN_REFUSED，errors.reason ∈ unparsable_cidr（网段格式无法解析） · full_range_cidr（这是全网段（/0）） · whitelist_covers（白名单已覆盖该网段，封了不会生效） · union_covers_family（与已有黑名单并集后覆盖整个地址族） · operator_inside（操作者自己在该网段内） · live_traffic_inside（该网段最近仍有真实业务请求） · reason_required（未填写封禁理由） · typed_confirmation_required（该网段影响面大，必须逐字输入网段本身） · unknown_token（确认票据不存在或已失效） · token_expired（确认票据已过期（有效期 10 分钟））。票据 10 分钟失效且只能用一次。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["cidr", "reason"],
+                "properties": {
+                  "cidr": {
+                    "type": "string",
+                    "description": "CIDR 网段，如 203.0.113.0/24"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回 token 与 expiresAt"
+          },
+          "400": {
+            "description": "护栏拒绝，原因见 errors.reason"
+          }
+        }
+      }
+    },
+    "/api/security/forensic/pool-ban/confirm": {
+      "post": {
+        "tags": ["Security"],
+        "summary": "持票落库（确认网段封禁）",
+        "description": "bannedCount 只统计**实际写入**的条目数：addToBlacklist 从不抛错，所以「没报错」不等于「封上了」。调用方必须按 bannedCount 上报结果。票据失效/不存在同样返回 400 + errors.reason。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["token"],
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  },
+                  "durationHours": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 8760,
+                    "description": "0=永久"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "返回 bannedCount 与逐条结果"
+          },
+          "400": {
+            "description": "票据无效或已过期"
+          }
+        }
+      }
+    },
+    "/api/security/forensic/export": {
+      "post": {
+        "tags": ["Security"],
+        "summary": "签名导出取证记录",
+        "description": "签名材料包含当天清单 chainHash，篡改记录或替换清单锚点都会校验失败。未配置 FORENSIC_EXPORT_SECRET / AUDIT_HMAC_SECRET 时返回 400 FORENSIC_EXPORT_NO_SECRET，不产出未签名包。能力边界：签名只证明「导出方确实导出过这份」，不证明「库当时是诚实的」——后者只能靠审计链锚点。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ip": {
+                    "type": "string"
+                  },
+                  "fingerprint": {
+                    "type": "string"
+                  },
+                  "ipSegment": {
+                    "type": "string"
+                  },
+                  "since": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "until": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5000
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回签名包 pkg"
+          },
+          "400": {
+            "description": "未配置导出密钥或缺少查询维度"
           }
         }
       }

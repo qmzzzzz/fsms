@@ -10,7 +10,7 @@
 ```mermaid
 flowchart TB
   subgraph Client["前端 web-admin（Vue3 + Pinia + Element Plus）"]
-    Views["视图层：仪表盘/设备/告警/巡检/用户/角色/报表/审计/Profile 等 13 个 View"]
+    Views["视图层：仪表盘/设备/告警/巡检/用户/角色/报表/审计/Profile/权限授予/登录/注册/取证溯源 等 15 个 View"]
     Store["Pinia store（auth/app）"]
     Api["utils/api.js（axios 封装）"]
     Ws["utils/websocket.js（socket.io-client，引用计数 + 房间）"]
@@ -19,11 +19,11 @@ flowchart TB
 
   subgraph Backend["后端（Express，src/）"]
     MW["中间件链：requestId → metrics → Sentry → IP黑名单 → CORS →\n安全头/限流/查询防护 → morgan → auditLog"]
-    Routes["路由（11）：auth / user / role / permission / device /\nalarm / inspection / report / security / wellKnown / index"]
-    Ctrl["控制器（9）：auth / user / role / permission / device /\nalarm / inspection / report / security"]
-    Svc["服务层（15）：sessionService / userPermissionService /\ncaptchaService / websocketService / auditBuffer / auditMonitor /\nstatsCache / securityAlert / Device·Alarm·Inspection Service 等"]
+    Routes["路由（13）：auth / user / role / permission / device /\nalarm / inspection / report / security / avatar / version / wellKnown /\nforensic"]
+    Ctrl["控制器（16）：auth / user / security / role / permission /\ndevice / alarm / inspection / report / audit / avatar / mfa /\nipList / privilege / rolePermission / forensic"]
+    Svc["服务层（97）：sessionService / userPermissionService /\ncaptchaService / auditBuffer / auditMonitor / statsCache / securityAlert /\nDevice·Alarm·Inspection Service 等（另有 authService / websocketService /\ninitData / sharedCache 子目录）"]
     Utils["工具：loginCipher / auditChain / encryption /\nlogger(winston) / response 封装"]
-    Models["Mongoose 模型（12）"]
+    Models["Mongoose 模型（18）"]
   end
 
   Mongo[("MongoDB 8.0")]
@@ -81,6 +81,7 @@ sequenceDiagram
 ```mermaid
 erDiagram
   USER ||--o{ USER_SESSION : "登录会话"
+  USER ||--|| USER_AVATAR : "头像（_id = userId，1:1）"
   USER }o--o{ ROLE : "roles[]"
   ROLE }o--o{ PERMISSION : "permissions[]"
   PERMISSION ||--o{ PERMISSION : "parent 自引用树"
@@ -154,9 +155,18 @@ erDiagram
     string key UK
     string updatedBy
   }
+  USER_AVATAR {
+    ObjectId _id UK "= userId，1:1"
+    string mime "image/jpeg | image/png"
+    string data "enc.v2 密文（Base64 图片），select:false"
+    string hash "SHA-256，ETag/缓存分桶"
+    int size
+    int width
+    int height
+  }
 ```
 
-模型清单：`User / Role / Permission / FireDevice / FireAlarm / Inspection / AuditLog / UserSession / TokenBlacklist / IPBlacklist / SystemConfig`（`src/models/`）。
+模型清单：`User / Role / Permission / PrivilegeGrant / FireDevice / FireAlarm / Inspection / AuditLog / UserSession / TokenBlacklist / IPBlacklist / SystemConfig / UserAvatar / IdempotencyRecord / ReauthGrant / ReauthTicketUse / ForensicCapture / ConsentRecord`（`src/models/`）。
 
 ## 4. 部署拓扑
 
@@ -172,12 +182,12 @@ compose 里增删服务/网络而文档没跟上，那条门禁会红。
 flowchart TB
   Internet["互联网"] -->|443 TLS| NGX["宿主 Nginx\nTLS 终结 / 安全头 / gzip\n静态托管 web-admin/dist\n/metrics 限源访问"]
   NGX -->|"/api、/socket.io 反代\n127.0.0.1:3000"| APP
-  OPS["运维 / 值班（本机回环）"] -.->|"127.0.0.1:3000 app\n127.0.0.1:3001 grafana\n127.0.0.1:9090 prometheus · 127.0.0.1:9093 alertmanager"| EDGE
+  OPS["运维 / 值班（本机回环）"] -.->|"127.0.0.1:3000 app\n127.0.0.1:3001 grafana（observability profile 才起）\n127.0.0.1:9090 prometheus · 127.0.0.1:9093 alertmanager"| EDGE
 
   subgraph EDGE["fire-safety-net（bridge，可出网）"]
     PROM["prometheus\n15s 抓取 + 告警规则求值"]
     AM["alertmanager:v0.27.0\n接收器默认占位\n生产以私有副本挂载注入"]
-    GRAF["grafana:11.1.0\n看板 / 告警视图"]
+    GRAF["grafana:11.1.0\n看板 / 告警视图\n（observability profile 才启动，默认栈不带）"]
   end
 
   subgraph DATA["data-net（bridge，internal: true）\n不接宿主 NAT、不出外网"]
@@ -201,6 +211,9 @@ flowchart TB
 
 1. `fire-safety-net` 是**边缘/监控面**：app、prometheus、alertmanager、grafana 在此网。
    app 的出网能力（`securityAlertDelivery` 的 webhook）与 Prometheus 的抓取都走这张网。
+   提醒：**grafana 不在默认栈**——它在 compose 里带 `profiles: ['observability']`（理由见 `docker-compose.yml:724-732`），
+   要 `docker compose --profile observability up -d grafana` 才启动；宿主 3001 与热升级备色互斥，
+   同栈常驻会让升级第 2 步报「Bind for 127.0.0.1:3001 failed」（第四轮审计 D6）。
 2. `data-net` 是**数据面**且 `internal: true`：mongo、redis 只在此网，**没有宿主端口、不能出外网**。
    监控栈与宿主发布面都摸不到数据面——这条分段直接封掉的反向路径是
    "Grafana 数据源 URL 可配任意地址 ⇒ 可达无密码 redis（删黑名单键 = 撤销封禁、
@@ -211,19 +224,19 @@ flowchart TB
 
 **宿主端口（全部绑 127.0.0.1，不对公网）**：
 
-| 服务         | 宿主端口 | 说明                                    |
-| ------------ | -------- | --------------------------------------- |
-| app          | 3000     | 由宿主 Nginx 反代；直接访问仅限本机排障 |
-| grafana      | 3001     | 容器内 3000，宿主 3000 已被 app 占用    |
-| prometheus   | 9090     | 查询 / 状态页                           |
-| alertmanager | 9093     | Web UI；Prometheus 经容器网络推送到此   |
-| mongo        | 无       | 仅 `data-net`，容器内 27017             |
-| redis        | 无       | 仅 `data-net`，容器内 6379              |
+| 服务         | 宿主端口 | 说明                                                                                           |
+| ------------ | -------- | ---------------------------------------------------------------------------------------------- |
+| app          | 3000     | 由宿主 Nginx 反代；直接访问仅限本机排障                                                        |
+| grafana      | 3001     | 容器内 3000；**需 `--profile observability` 才启动，默认栈不带**（宿主 3001 与热升级备色互斥） |
+| prometheus   | 9090     | 查询 / 状态页                                                                                  |
+| alertmanager | 9093     | Web UI；Prometheus 经容器网络推送到此                                                          |
+| mongo        | 无       | 仅 `data-net`，容器内 27017                                                                    |
+| redis        | 无       | 仅 `data-net`，容器内 6379                                                                     |
 
 要点：
 
 - **密钥注入**：全部经 Docker secrets 文件（`*_FILE`），`environment` 只留非敏感项（见 ADR-003）
-- **镜像钉版本**：仓库内所有第三方镜像引用都已钉到 registry digest（`name:tag@sha256:<64hex>`，保留可读 tag）——Dockerfile 的 3 处 `node:26.12.0-alpine`、compose 的 mongo / redis / prometheus / alertmanager / grafana、`.github/workflows/ci.yml` 的 mongo service 容器。digest 的取值与核验口径见 `scripts/verify-image-digests.js`（对返回字节自算 sha256，且要求 ≥2 个运营主体不同的来源一致），对账闸是 `src/tests/security/imageReferenceInventory.test.js`（优化清单 R-5）
+- **镜像钉版本**：仓库内所有第三方镜像引用都已钉到 registry digest（`name:tag@sha256:<64hex>`，保留可读 tag）——Dockerfile 的 3 处 `node:26.12.0-alpine`、compose 的 mongo / redis / prometheus / alertmanager / grafana、`.github/workflows/ci.yml` 的 mongo service 容器、`.github/workflows/sast.yml` 的 Semgrep 容器。digest 的取值与核验口径见 `scripts/verify-image-digests.js`（对返回字节自算 sha256，且要求 ≥2 个运营主体不同的来源一致），对账闸是 `src/tests/security/imageReferenceInventory.test.js`（优化清单 R-5）
 - **Redis** 已在 compose 中实际运行（非注释态）：`redis:7-alpine` 钉了 digest，app 以 depends_on 等其健康后启动；承接限流/缓存/分布式锁（R-3/A-1）
 - **前端静态托管已落地**（L-1，P0）：由 `src/middleware/staticFrontend.js` 托管 `web-admin/dist`；通过 `SERVE_FRONTEND` 启用、`FRONTEND_DIST` 指定产物目录。内置 `/assets` 一年强缓存 immutable、`index.html` 与 `sw.js` no-cache、SPA history 回退、`.map`/`.ts` 显式拦截，并配套专项测试覆盖。
 

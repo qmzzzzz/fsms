@@ -2,9 +2,9 @@
  * 告警频控与投递入口（自 securityAlert.js 抽出）
  *
  * 抽出的直接原因：`securityAlertPermissionAbuse` 需要 `shouldSendAlert` /
- * `dispatchNotification`，而它们原先定义在 `securityAlert` 里，形成
+ * `dispatchNotification`，若定义在 `securityAlert` 里会形成
  * `securityAlert ↔ permissionAbuse` 的双向依赖。频控表与投递壳不依赖任何检测逻辑，
- * 独立成叶子模块后两个文件都只单向引用它。
+ * 独立成叶子模块后两个文件都只单向引用它（新增检测器必须保持这个方向）。
  *
  * 投递仍是 fire-and-forget：webhook 不可达时（2 次重试 × 5s 超时 + 退避 ≈ 11s）
  * 会把延迟放大到认证/导出响应上，构成 DoS 放大器，所以检测器只"投递"、不等待。

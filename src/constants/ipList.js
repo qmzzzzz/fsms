@@ -1,11 +1,10 @@
 /**
  * IP 名单类型清单（单一事实来源）
  *
- * 为什么需要：`['black', 'white']` 此前有 6 处**字面量副本**——
- * `models/IPBlacklist.js` 的 `enum`、`routes/securityRoutes.js` 的两处 `isIn(...)`
- * （查询与请求体各一）、`controllers/ipListController.js` 的入参守卫、
- * `docs/generate.js` 的两处文档 `enum`。副本今天内容完全相同 ⇒ 全仓测试全绿，
- * 失效方式是"加一档（比如灰名单）的那一天错"，三种分叉三种症状：
+ * 为什么需要：`['black', 'white']` 有 6 处消费方（`models/IPBlacklist.js` 的 `enum`、
+ * `routes/securityRoutes.js` 的两处 `isIn(...)`、`controllers/ipListController.js` 的
+ * 入参守卫、`docs/generate.js` 的两处文档 `enum`），一律引用本文件、不留字面量副本。
+ * 副本的失效方式是"加一档（比如灰名单）的那一天错"，三种分叉三种症状：
  *   - 只改 constants：路由 `isIn` 先 400 掉新值，schema 永远收不到，新档实际不可用；
  *   - 只改 schema：校验放行但 `save()` 抛 `ValidationError`
  *     （`insertMany({ordered:false})` 下表现为静默丢行）；

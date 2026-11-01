@@ -4,6 +4,8 @@
  */
 
 const User = require('../models/User');
+const { HONEYPOT_EXCLUDED_FILTER } = require('../constants/honeypotAccounts'); // 枚举面排除判据（单一声明，见 constants/honeypotAccounts.js）
+const UserAvatar = require('../models/UserAvatar');
 const Role = require('../models/Role');
 // 删除用户时要级联清理"进行中的指派"（见 deleteById 的注释），
 // 这两个模型与 User 之间没有相互 require，不会成环。
@@ -12,6 +14,7 @@ const Inspection = require('../models/Inspection');
 const { withListBudget, listCountOptions } = require('../utils/queryBudget');
 const { withTransaction } = require('../utils/transaction');
 const userPermissionService = require('./userPermissionService');
+const { anonymizeMany } = require('./userAnonymizationBatch');
 const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const { uniqueIdStrings } = require('../utils/helpers');
@@ -30,13 +33,13 @@ const logger = require('../utils/logger');
 
 /**
  * 匿名化的取值口径（A2，2026-10-16）——**单一声明**，判据只在这里。
- *
  * 占位姓名刻意不用「已删除」：记录还在、只是不再指向某个具体的人，
  * 写成「已删除」会让读报表的人以为这条数据本身被删了。
  *
  * email 占位必须唯一（User.email 有唯一索引，且 A3 尚未实施加密）：
  * 置空会让第二个注销用户撞 E11000，故把 _id 编进占位里 —— 天然唯一、可回溯到原账号，
  * 且 `.invalid` 是 RFC 2606 保留域，永不会被投递。
+ *
  */
 const ANONYMIZED_REAL_NAME = '已注销用户';
 const ANONYMIZED_EMAIL_PREFIX = 'deleted+';
@@ -58,29 +61,16 @@ const DETAIL_ROLE_POPULATE = {
 };
 
 /**
- * 管理员读用户响应的 PII 口径：明文只在这里存在过一瞬，出去的是
- * `phoneMasked` / `emailMasked`。
+ * 管理员读用户响应的 PII 口径：明文只在这里存在过一瞬，出去的是 `phoneMasked` / `emailMasked`。
  *
- * 为什么不沿用仓里已有的形状（`controllers/securityController/account.js:68` 的 my-info 就是
- * `phone: maskPhone(...)`）：my-info 是只读面板，而用户列表的值会**回填编辑表单**
- * （`web-admin/src/views/UserView.vue` 的 handleEdit）。让展示值占住 `phone` 这个
- * 可写字段的槽位，前端只剩两条必坏的路：
- *   1) 原样提交回填值 → `138****5678` 撞上 `userRoutes.js:110` 的 /^1[3-9]\d{9}$/ ⇒ 400；
- *   2) 那条校验是 `.optional({ values:'falsy' })`，空串照样过，而
- *      `controllers/userController/update.js:165` 写的是 `if (phone !== undefined) user.phone = phone`
- *      ⇒ 一次"我没动手机号"的保存把号码清空。
- * 改名成 `phoneMasked` 是把"误把展示值当可写字段"变成结构上不可能，而不是靠约定。
+ * 不复用 my-info 的 `phone: maskPhone(...)` 形状：用户列表的值会**回填编辑表单**
+ * （UserView.vue 的 handleEdit），展示值占住可写字段的槽位后，原样提交会撞
+ * `userRoutes.js:110` 的手机号正则 ⇒ 400；空串又能过 `.optional({values:'falsy'})`，
+ * 继而被 `userController/update.js:165` 写成「把号码清空」。改名成 phoneMasked 是把这种
+ * 误用变成结构上不可能，而不是靠约定；email 同规格（回填会撞 `.isEmail()`）。
  *
- * email 同规格：更新接口对它是 `if (email !== undefined)`，键缺失才是不修改；
- * 把脱敏值回填进去会直接撞上 `userRoutes.js:99` 的 `.isEmail()`。
- *
- * 另一个不能两头各打一次的理由：`DataMasking.maskPhone` **不幂等**——
- * `138****5678` 再打一次得到 `****`（两条锚定正则都不命中，落到兜底分支）。
- * 所以打码点只有这里一个，前端只渲染。
- *
- * 返回 POJO 而非文档对象是刻意的：`toJSON()` 的输出与改造前的响应体逐字段同形
- * （getters 已开），差别只在 phone → phoneMasked、email → emailMasked；
- * 调用方（userController）只读属性与序列化，不碰文档方法。
+ * 打码点只有这里一个：`DataMasking.maskPhone` 不幂等（`138****5678` 再打一次得到 `****`）。
+ * 返回 POJO 而非文档对象，是为了让响应体与改造前逐字段同形（差别只在两个 *Masked 键）。
  */
 function toMaskedAdminUser(doc) {
   if (!doc) return doc;
@@ -99,7 +89,7 @@ function toMaskedAdminUser(doc) {
 
 class UserService {
   async buildListQuery(filters, dataScope) {
-    const query = {};
+    const query = { ...HONEYPOT_EXCLUDED_FILTER }; // 列表与计数同源：蜜罐账户不得出现在任何面向人的用户清单/计数里
 
     const searchTerm = normalizeSearchTerm(filters.search);
     if (searchTerm) {
@@ -197,8 +187,11 @@ class UserService {
    * mfaSecret/mfaRecoveryCodes/mfaFailCount/phoneKey/passwordHistory 写成 schema 默认值
    * （机理与"为什么必须是对象形态"见 models/User.js 的 unselectedCredentialProjection）。
    */
-  findUserForUpdate(id) {
-    return User.findById(id).select(User.unselectedCredentialProjection());
+  findUserForUpdate(id, expected, opts = {}) {
+    // expected 为控制器判定时的状态快照（P1-3 匿名化复用）：带条件载入，
+    // 避免"判定后目标被提权/改部门"仍按旧结论执行。不传时保持原语义。
+    const filter = expected ? { _id: id, ...expected } : { _id: id };
+    return User.findOne(filter, null, opts).select(User.unselectedCredentialProjection());
   }
 
   findDuplicateUsername(username) {
@@ -213,8 +206,8 @@ class UserService {
     return User.create(fields);
   }
 
-  saveUser(user) {
-    return user.save();
+  saveUser(user, opts = {}) {
+    return user.save(opts);
   }
 
   /**
@@ -342,10 +335,8 @@ class UserService {
     const opts = session ? { session } : {};
     const now = new Date();
     const remark = options.remark || '处理人账户已删除，工单退回待指派池';
-    // 报警：处理中的退回待指派池并留痕。只认 processing ——
-    // 全仓唯一的 handler 写入点是 AlarmService.dispatchAlarm，它把 handler 与
-    // status:'processing' 写在同一条原子更新里，于是"pending 却挂着 handler"
-    // 这种状态根本不存在，为它多写一条 updateMany 只会多一条永远为假的分支。
+    // 报警：处理中的退回待指派池并留痕。只认 processing：handler 与 status:'processing' 在
+    // AlarmService.dispatchAlarm 里由同一条原子更新写完，"pending 却挂着 handler" 不存在。
     await FireAlarm.updateMany(
       { handler: { $in: userIds }, status: 'processing' },
       {
@@ -361,8 +352,7 @@ class UserService {
       },
       opts
     );
-    // 巡检：未开工/进行中的计划里摘掉该成员（全部摘掉后 assignedTo.0 不存在，
-    // 同范围的合格执行人即可接手，这正是"无人认领"的既有语义）
+    // 巡检：未开工/进行中的计划里摘掉该成员（全摘后 assignedTo.0 不存在，同范围合格执行人即可接手，正是"无人认领"的既有语义）
     await Inspection.updateMany(
       { assignedTo: { $in: userIds }, status: { $in: INSPECTION_OPEN_STATUSES } },
       { $pull: { assignedTo: { $in: userIds } } },
@@ -386,6 +376,8 @@ class UserService {
         ? await User.findOneAndDelete(filter, opts)
         : await User.findByIdAndDelete(id, opts);
       if (!deleted) return;
+      // 头像记录与用户同生命周期：删用户不删图 = 留下可被 /api/avatars/:id 拉到的残留
+      await UserAvatar.deleteOne({ _id: deleted._id }, opts);
       await this.releaseOpenAssignments([deleted._id], session);
     });
     return deleted;
@@ -424,6 +416,7 @@ class UserService {
           ids.push(deleted._id);
         }
         result = { deletedCount: ids.length, acknowledged: true };
+        await UserAvatar.deleteMany({ _id: { $in: ids } }, opts);
         await this.releaseOpenAssignments(ids, session);
         return;
       }
@@ -431,6 +424,8 @@ class UserService {
       const affected = await User.find(filter, '_id').lean();
       const ids = affected.map((doc) => doc._id);
       result = await User.deleteMany(filter, opts);
+      // 空数组不发写请求（Mongo 不报错，但会产生无意义写）
+      if (ids.length > 0) await UserAvatar.deleteMany({ _id: { $in: ids } }, opts);
       await this.releaseOpenAssignments(ids, session);
     });
     return result;
@@ -439,40 +434,29 @@ class UserService {
   /**
    * 匿名化一个用户（A2「删除权/注销」的落点，2026-10-16）
    *
-   * 为什么不是硬删除：审计链（AuditLog 的 username 快照、FireAlarm.reporter.userId、
-   * processLog[].operator、reviewedBy、executionLog[].userId、createdBy）里到处都是
-   * 指向用户的引用。硬删之后这些引用变成**悬空指向**——审计上问不出"当时是谁做的"，
-   * 而"删除权"的本意是**不再能识别到这个人**，不是"抹掉他做过的事"。
-   * 匿名化同时满足两侧：保留 userId 与统计口径（`countDocuments({userId})` 照常成立），
-   * 抹除可识别信息（realName / phone / email / avatar）。
+   * 为什么不是硬删除：审计链（AuditLog.username 快照、FireAlarm.reporter.userId、
+   * processLog[].operator、reviewedBy、executionLog[].userId、createdBy）到处指向用户；
+   * 硬删后这些引用变成悬空指向（问不出「当时是谁做的」），而删除权的本意是「不再能识别到
+   * 这个人」，不是抹掉他做过的事。匿名化兼顾两侧：保留 userId 与统计口径，抹除可识别信息。
    *
-   * 抹除清单与**保留清单**（都是刻意的）：
-   *   抹除：realName → 固定占位；phone → ''（写侧钩子同步清空 phoneKey）；
-   *         email → `deleted+<id>@anonymized.invalid`（email 有唯一索引，不能置空，
-   *         否则第二个注销用户就撞 E11000；占位里带 _id 因此天然唯一）；
-   *         avatar → ''（可能含人像）。
-   *   保留：username（它是账号标识、审计快照与登录名，抹掉它审计链就断在"匿名用户"上）、
-   *         department（部门级统计口径要它）、roles（角色引用）、createdAt。
-   *   `_id` 保留 ⇒ 统计口径与审计引用全部照旧成立。
+   * 抹除：realName → 固定占位；phone → ''（写侧钩子同步清 phoneKey）；email →
+   * `deleted+<id>@anonymized.invalid`（唯一索引不能置空，占位带 _id 才天然唯一）；avatar → ''。
+   * 保留：username（账号标识/审计快照/登录名）、department、roles、createdAt。
    *
-   * 会话与工单：
-   *   - `tokenVersion++`：立即吊销已签发的访问/刷新令牌（authenticate 每请求校验它）。
-   *   - `status → inactive`：账户不可再登录。
-   *   - 密码改写为随机值：即使有人拿着旧密码也进不来（随机值不落任何日志）。
-   *   - 释放进行中的指派（复用 releaseOpenAssignments）：与删号同一口径，
-   *     否则"处理中"的工单会卡在一个已停用账户上，任何出口都关不掉。
+   * 会话与工单：tokenVersion++ 吊销已签发令牌、status → inactive 禁登录、密码改写为随机值
+   * （不落任何日志）、释放进行中的指派（复用 releaseOpenAssignments，与删号同口径）。
    *
-   * 幂等：以 email 的占位前缀为标记，重复调用直接返回，不会二次改写
-   * （二次改写会让 `tokenVersion` 无谓自增、审计上出现"没有变更的变更"）。
+   * 幂等：以 email 占位前缀为标记，重复调用直接返回（二次改写会让 tokenVersion 无谓自增）。
    *
    * @param {string|import('mongoose').Types.ObjectId} id 用户 id
    * @param {{reason?: string}} [options] 注销原因（仅用于日志与调用方留痕）
    * @returns {Promise<object|null>} 匿名化后的用户文档；用户不存在时为 null
    */
-  async anonymizeById(id, { reason = 'deletion_request' } = {}) {
+  async anonymizeById(id, { reason = 'deletion_request', expected } = {}) {
     let result = null;
     await withTransaction(async (session) => {
       const opts = session ? { session } : {};
+      const filter = expected ? { _id: id, ...expected } : { _id: id };
       // 排除投影不可省：这里后面是 user.save()，不写投影时 Mongoose 会把**本次没有
       // 从服务器取回**的 select:false 路径按 schema 默认值填上并写进 $set
       // （机理见 models/User.js 的 unselectedCredentialProjection）。
@@ -481,35 +465,68 @@ class UserService {
       // 本函数的契约里**没有**这几项（契约只写了 realName/phone/email/avatar），
       // 那些改写是"默认值回填"这个副作用的产物，不是有意设计。
       // 该站点由 src/tests/ci/userCredentialProjectionLedger.test.js 第 2 组捕获。
-      const user = await User.findById(id, null, opts).select(
+      //
+      // 条件载入（expected）：控制器做范围/层级/超管判定时读到的状态快照必须就是
+      // 被匿名化的那份状态；目标在判定之后被提权/改部门时返回 null，由控制器回 409。
+      const user = await User.findOne(filter, null, opts).select(
         User.unselectedCredentialProjection()
       );
       if (!user) return;
-      if (isAnonymizedEmail(user.email)) {
-        result = user; // 已匿名化：幂等返回
-        return;
-      }
-
-      user.realName = ANONYMIZED_REAL_NAME;
-      user.phone = ''; // 写侧钩子会同步把 phoneKey 落成 ''
-      user.email = buildAnonymizedEmail(user._id);
-      user.avatar = '';
-      user.status = USER_STATUS.INACTIVE;
-      user.password = crypto.randomBytes(32).toString('hex'); // pre('save') 钩子负责哈希
-      user.tokenVersion = (user.tokenVersion || 0) + 1;
-      await user.save(opts);
-
+      result = await this.anonymizeUserDocument(user, reason, opts);
       // 与删号同一口径：把"进行中的指派"退回池子（见 releaseOpenAssignments 的注释）
       await this.releaseOpenAssignments([user._id], session);
-
-      logger.warn(`用户已匿名化（删除权流程）：id=${String(user._id)} reason=${reason}`);
-      result = user;
     });
     return result;
   }
 
+  /**
+   * 单文档匿名化（内部实现）：anonymizeById / anonymizeMany 共用，
+   * 保证两条入口的抹除清单、幂等标记与审计字段完全同源。
+   * @param {object} user 已加载的用户文档（须带 unselectedCredentialProjection）
+   * @param {string} reason 注销原因
+   * @param {object} opts mongoose 选项（含 session）
+   * @returns {Promise<object>} 匿名化后的用户文档
+   */
+  async anonymizeUserDocument(user, reason, opts = {}) {
+    if (isAnonymizedEmail(user.email)) return user; // 幂等：已匿名化不二次改写
+
+    const now = new Date();
+    user.realName = ANONYMIZED_REAL_NAME;
+    user.phone = ''; // 写侧钩子会同步把 phoneKey 落成 ''
+    user.email = buildAnonymizedEmail(user._id);
+    user.avatar = '';
+    // 匿名化只清指针不删图 = 图片仍可通过 /api/avatars/:id 拉到（读端查 UserAvatar）
+    await UserAvatar.deleteOne({ _id: user._id }, opts);
+    user.status = USER_STATUS.INACTIVE;
+    user.password = crypto.randomBytes(32).toString('hex'); // pre('save') 钩子负责哈希
+    user.passwordRetiredHash = null; // 审计二-2：注销后不得留「重置前那代口令」的 bcrypt 摘要——它是可离线爆破的 L4 凭证，删除权要求一并抹掉
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    user.mustChangePassword = false; // 匿名账户没有"改密后恢复"的语义
+    user.deletionRequestedAt = user.deletionRequestedAt || now;
+    user.anonymizedAt = now;
+    user.anonymizationReason = String(reason || 'deletion_request').slice(0, 200);
+    await user.save(opts);
+
+    logger.warn(
+      `用户已匿名化（删除权流程）：id=${String(user._id)} reason=${user.anonymizationReason}`
+    );
+    return user;
+  }
+
+  /**
+   * 批量匿名化（P1-3）：任一目标状态已变即抛 USER_STATE_CONFLICT 中止事务
+   * （副本集下整批回滚），与 deleteMany 的批量口径一致。
+   * @param {object} filter 无快照时的过滤条件
+   * @param {Map<string, object>} [expectedByTarget] Map<id, {roles,department,createdBy}>
+   * @param {{reason?: string}} [options]
+   * @returns {Promise<{anonymizedCount: number, acknowledged?: boolean}>}
+   */
+  async anonymizeMany(filter, expectedByTarget, options = {}) {
+    return anonymizeMany(this, filter, expectedByTarget, options);
+  }
+
   aggregateStats(pipeline) {
-    return User.aggregate(pipeline);
+    return User.aggregate([{ $match: HONEYPOT_EXCLUDED_FILTER }, ...pipeline]); // 统计面同口径：蜜罐账户既不进总用户数，也不进部门/角色分布
   }
 }
 

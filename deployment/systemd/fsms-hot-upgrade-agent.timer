@@ -1,0 +1,20 @@
+# 热升级宿主代理的定时器
+#
+# OnUnitInactiveSec 从「服务结束」开始计时（不是从启动开始）：
+# 一次升级跑 10 分钟，不会在这 10 分钟里反复触发失败；结束后 15s 再跑下一轮。
+# 应用点完按钮到开始执行的最大等待因此是 15s。
+# 心跳写入间隔为 10s，应用侧默认 120s 判过期，留了足够余量。
+
+[Unit]
+Description=Run FSMS hot upgrade agent every 15s
+Documentation=file:/opt/fsms/deployment/hot-upgrade.md
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+# 不设 Persistent：错过一轮没有意义，15s 后就会再来；何况升级不是补作业。
+Unit=fsms-hot-upgrade-agent.service
+
+[Install]
+WantedBy=timers.target

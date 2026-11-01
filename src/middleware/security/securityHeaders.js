@@ -1,6 +1,5 @@
 /**
- * HTTP 安全头与 CSP：CSP（每请求 nonce / Swagger 豁免 / 上报端点）、helmet 全量响应头、
- * HSTS 明文兜底、Permissions-Policy、Reporting-Endpoints、Trusted Types 灰度。
+ * HTTP 安全头与 CSP：CSP（每请求 nonce / Swagger 豁免 / 上报端点）、helmet 全量响应头、 HSTS 明文兜底、Permissions-Policy、Reporting-Endpoints、Trusted Types 灰度。
  * 纯写响应头——不读 body、不碰数据库；挂载顺序见 security/index.js 的 applyResponseHardening。
  */
 
@@ -9,20 +8,16 @@ const helmet = require('helmet');
 const { matchesAnyPathPrefix } = require('../../utils/helpers');
 
 /**
- * CSP 违规上报端点（G9）：由 CSP_REPORT_ENABLED 开启后下发 report-uri / report-to。
- * 默认关闭——没有上报消费方时下发端点只会给每个客户端凭空增加一条失败请求。
+ * CSP 违规上报端点（G9）：由 CSP_REPORT_ENABLED 开启后下发 report-uri / report-to。默认关闭——没有上报消费方时下发端点只会给每个客户端凭空增加一条失败请求。
  */
 const CSP_REPORT_PATH = '/csp-report';
 const cspReportEnabled = process.env.CSP_REPORT_ENABLED === 'true';
 
 /**
- * Trusted Types 强制开关（A7）。默认 false = 保持灰度（见 trustedTypesReportOnly）。
- * 置 true 时：① require-trusted-types-for 挪进主 CSP（浏览器阻断违规的 DOM 写入）；
+ * Trusted Types 强制开关（A7）。默认 false = 保持灰度（见 trustedTypesReportOnly）。置 true 时：① require-trusted-types-for 挪进主 CSP（浏览器阻断违规的 DOM 写入）；
  * ② 不再下发 report-only 头（同一策略下发两遍会让违规计数翻倍）。
  *
- * ⚠ 前置条件是灰度数据：先跑 CSP_REPORT_ENABLED=true ≥2 周，确认违规清零或每一条
- * 都有正当豁免。没跑够就升强制会直接打断前端（页面局部功能静默失效，最难排查）。
- * 用环境变量而非常量：升级依赖部署决策，代码里没有判据能替运维做；
+ * ⚠ 前置条件是灰度数据：先跑 CSP_REPORT_ENABLED=true ≥2 周，确认违规清零或每一条都有正当豁免。没跑够就升强制会直接打断前端（页面局部功能静默失效，最难排查）。用环境变量而非常量：升级依赖部署决策，代码里没有判据能替运维做；
  * 开关让升强制与回退都只是改一个环境变量重启，不必重新构建镜像。
  */
 const trustedTypesEnforced = process.env.TRUSTED_TYPES_ENFORCE === 'true';
@@ -30,8 +25,7 @@ const trustedTypesEnforced = process.env.TRUSTED_TYPES_ENFORCE === 'true';
 /**
  * 1. HTTP 安全头配置（helmet）
  *
- * style-src（L-5）：全站禁用 'unsafe-inline'，改为每请求随机 nonce；
- * 仅 /api-docs（Swagger UI 自注入内联 <style>，无法携带 nonce）放行，把放宽面收敛到文档路径。
+ * style-src（L-5）：全站禁用 'unsafe-inline'，改为每请求随机 nonce；仅 /api-docs（Swagger UI 自注入内联 <style>，无法携带 nonce）放行，把放宽面收敛到文档路径。
  */
 const SWAGGER_PATH_PREFIX = '/api-docs';
 
@@ -70,9 +64,7 @@ if (trustedTypesEnforced) {
 }
 
 /**
- * 生成每请求 CSP nonce（L-5）
- * 必须在 securityHeaders 之前挂载：helmet 的 style-src 函数指令在写响应头时
- * 读取 res.locals.cspNonce。API 以 JSON 为主，生成开销可忽略。
+ * 生成每请求 CSP nonce（L-5）必须在 securityHeaders 之前挂载：helmet 的 style-src 函数指令在写响应头时读取 res.locals.cspNonce。API 以 JSON 为主，生成开销可忽略。
  */
 const attachCspNonce = (req, res, next) => {
   res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
@@ -134,8 +126,7 @@ const securityHeaders = helmet({
 
 /**
  * 1.2 Permissions-Policy 显式下发
- * helmet 7.x 已移除该功能（旧配置会被静默忽略），必须手工下发。
- * 覆盖常见敏感特性：禁用定位/麦克风/摄像头/支付/USB/传感器等。
+ * helmet 7.x 已移除该功能（旧配置会被静默忽略），必须手工下发。覆盖常见敏感特性：禁用定位/麦克风/摄像头/支付/USB/传感器等。
  */
 const PERMISSIONS_POLICY_VALUE = [
   'camera=()',
@@ -156,8 +147,7 @@ const permissionsPolicy = (req, res, next) => {
 
 /**
  * 1.3 Reporting-Endpoints 下发（G9）
- * report-to 指令依赖该响应头解析具名端点；仅在上报开启时下发，
- * 否则浏览器会为一个不存在的端点保留上报队列。
+ * report-to 指令依赖该响应头解析具名端点；仅在上报开启时下发，否则浏览器会为一个不存在的端点保留上报队列。
  */
 const reportingEndpoints = (req, res, next) => {
   if (cspReportEnabled) {
@@ -167,17 +157,12 @@ const reportingEndpoints = (req, res, next) => {
 };
 
 /**
- * Trusted Types 灰度（report-only）。
- * 不阻断任何现有行为，只上报会被 require-trusted-types-for 命中的 DOM 写入点
- * （为是否升强制取证）。头名与主 CSP 不同（Report-Only vs 强制），两者互不干扰。
+ * Trusted Types 灰度（report-only）。不阻断任何现有行为，只上报会被 require-trusted-types-for 命中的 DOM 写入点（为是否升强制取证）。头名与主 CSP 不同（Report-Only vs 强制），两者互不干扰。
  *
- * ⚠ helmet 7.2.0 构造期硬约束（index.cjs:90-92）：CSP 必须声明 default-src，
- * report-only 也不例外；只写 require-trusted-types-for 会在模块加载期直接抛错。
- * 本策略只要这一条，故用 dangerouslyDisableDefaultSrc 摘掉 default-src，
- * 避免把 helmet 全套默认指令拖进来制造上报噪音。
+ * ⚠ helmet 7.2.0 构造期硬约束（index.cjs:90-92）：CSP 必须声明 default-src， report-only 也不例外；只写 require-trusted-types-for 会在模块加载期直接抛错。
+ * 本策略只要这一条，故用 dangerouslyDisableDefaultSrc 摘掉 default-src，避免把 helmet 全套默认指令拖进来制造上报噪音。
  *
- * 上报出口仅当 CSP_REPORT_ENABLED=true 时附带（端点复用 CSP_REPORT_PATH）。
- * 强制态下本中间件退化为 no-op，同一条指令改由 securityHeaders 下发。
+ * 上报出口仅当 CSP_REPORT_ENABLED=true 时附带（端点复用 CSP_REPORT_PATH）。强制态下本中间件退化为 no-op，同一条指令改由 securityHeaders 下发。
  */
 const TRUSTED_TYPES_REPORT_ONLY_DIRECTIVES = {
   'default-src': helmet.contentSecurityPolicy.dangerouslyDisableDefaultSrc,
@@ -190,9 +175,7 @@ if (cspReportEnabled) {
 }
 
 /**
- * 强制态下的占位中间件（A7）。
- * 用 no-op 透传而不是条件 app.use：挂载点保持无条件一条语句（max-lines/圈复杂度棘轮），
- * 也让"策略下发在哪条头里"只有 trustedTypesEnforced 一处判断——两处判据分叉
+ * 强制态下的占位中间件（A7）。用 no-op 透传而不是条件 app.use：挂载点保持无条件一条语句（max-lines/圈复杂度棘轮），也让"策略下发在哪条头里"只有 trustedTypesEnforced 一处判断——两处判据分叉
  * 就是静默失效（例如强制态仍下发 report-only，同一策略下发两遍）。
  */
 const noTrustedTypesReportOnly = (req, res, next) => next();
@@ -207,8 +190,7 @@ const trustedTypesReportOnly = trustedTypesEnforced
 
 /**
  * 1.1 HSTS 兜底下发
- * helmet 默认仅在安全连接（HTTPS）下设置 Strict-Transport-Security。
- * 为保证反向代理/扫描器在任意入口都能看到该头，此处对未携带 HSTS 的响应统一下发；
+ * helmet 默认仅在安全连接（HTTPS）下设置 Strict-Transport-Security。为保证反向代理/扫描器在任意入口都能看到该头，此处对未携带 HSTS 的响应统一下发；
  * 浏览器按 RFC 6797 只会采纳经 HTTPS 送达的 HSTS，明文下的头不构成安全风险。
  */
 const ensureHsts = (req, res, next) => {

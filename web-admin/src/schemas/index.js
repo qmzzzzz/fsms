@@ -59,6 +59,8 @@ export const UserSchema = z
     realName: z.string().nullish(),
     phone: z.string().nullish(),
     department: z.string().nullish(),
+    // 头像 URL 由服务端生成；旧数据可能为空串或外部 URL，统一按可空字符串收
+    avatar: z.string().nullish(),
     // roles 既可能是 code 字符串数组（login），也可能是 {name,code} 对象数组（/auth/me）
     roles: z
       .array(z.union([z.string(), z.looseObject({ code: z.string().optional() })]))

@@ -955,8 +955,15 @@ describe('initData 启动播种与安全对账', () => {
       await User.syncIndexes();
     });
 
-    test('E3 无冲突时删除 legacy 索引（大小写仿冒面收敛）', async () => {
+    test('E3 无冲突且 username_ci 已在场时删除 legacy 索引（大小写仿冒面收敛）', async () => {
       const coll = await seedLegacyIndex();
+      // 前提：新索引已在场。seedLegacyIndex 会显式删掉 username_ci（那是「升级前」的形态），
+      // 这里按「autoIndex 已跑完」的形态建回来——否则 ③ 道闸会拦下删除，
+      // 本用例测的就不是「收敛」而是「真空防护」（那两条见 E3b / E3c）。
+      await coll.createIndex(
+        { username: 1 },
+        { unique: true, name: 'username_ci', collation: User.USERNAME_COLLATION }
+      );
       await coll.insertOne({ username: 'solo', email: 'e3@example.com', password: 'x' });
 
       await reconcileUserIndexes();
@@ -982,6 +989,55 @@ describe('initData 启动播种与安全对账', () => {
      * 后者会把「实现是否用了 aggregate」这类细节钉死，换个等价写法就假红。
      */
     const errText = () => logger.error.mock.calls.map((c) => String(c[0])).join('\n');
+
+    /**
+     * D1（第四轮审计）：③ 道闸对称化 + 零约束留痕。
+     * 原实现删 username_1 前不校验 username_ci 是否在场，而 email 半边有这道闸；
+     * 探针实测删完后用户名字段一条唯一索引都不剩，Admin/admin 两行都能插进去。
+     */
+    test('E3b username_ci 不在场时保留 username_1（否则用户名字段零约束）', async () => {
+      const coll = await seedLegacyIndex();
+      await coll.insertOne({ username: 'solo_b', email: 'e3b@example.com', password: 'x' });
+
+      await reconcileUserIndexes();
+
+      const names = (await coll.indexes()).map((i) => i.name);
+      expect(names).toContain('username_1');
+      expect(errText()).toContain('username_ci 唯一索引尚未建立');
+
+      // 行为闭环：约束真的还在（username_1 是二进制比较 ⇒ 同名才拦得住）
+      let blockedCode = null;
+      try {
+        await coll.insertOne({ username: 'solo_b', email: 'e3b2@example.com', password: 'x' });
+      } catch (e) {
+        blockedCode = e.code;
+      }
+      expect(blockedCode).toBe(11000);
+
+      await coll.deleteMany({});
+      await User.syncIndexes();
+    });
+
+    test('E3c 两道都不在场（零唯一约束）必须 error 留痕，且不下发任何删除', async () => {
+      await mongoose.connection.dropCollection('users').catch(() => {});
+      const coll = mongoose.connection.collection('users');
+      await coll.insertOne({ username: 'no_constraint', email: 'e3c@example.com', password: 'x' });
+
+      const dropSpy = jest.spyOn(coll, 'dropIndex');
+      let dropCalls;
+      try {
+        await reconcileUserIndexes();
+        dropCalls = dropSpy.mock.calls.length;
+      } finally {
+        dropSpy.mockRestore();
+      }
+
+      expect(dropCalls).toBe(0);
+      expect(errText()).toContain('没有任何唯一约束');
+
+      await coll.deleteMany({});
+      await User.syncIndexes();
+    });
 
     test('E7 ① emailKey 未回填（缺失 + 空串两种形态）时保留 email_1 并点名数量', async () => {
       const coll = await seedLegacyIndex();

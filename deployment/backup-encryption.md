@@ -8,11 +8,11 @@
 
 `scripts/backup-mongo.sh` 每次产出**三件套**：
 
-| 产物     | 形态                                 | 说明                                                                       |
-| -------- | ------------------------------------ | -------------------------------------------------------------------------- |
-| 加密归档 | `fire-safety-backup-<时间戳>.gz.gpg` | gpg 非对称加密（`--trust-model always`），明文归档在加密成功后**立即删除** |
-| 校验和   | `…​.gz.gpg.sha256`                   | sha256，异地副本与恢复演练都必须先验它                                     |
-| 异地副本 | 由 `BACKUP_OFFSITE_CMD` 决定         | 未配置时脚本打警告但不失败；配置了却失败则**整体失败**                     |
+| 产物     | 形态                                         | 说明                                                                                 |
+| -------- | -------------------------------------------- | ------------------------------------------------------------------------------------ |
+| 加密归档 | `fire-safety-backup-<时间戳>.gz.gpg`         | gpg 非对称加密（`--trust-model always`），明文归档在加密成功后**立即删除**           |
+| 校验和   | `…​.gz.gpg.sha256`                           | sha256，异地副本与恢复演练都必须先验它                                               |
+| 异地副本 | `BACKUP_OFFSITE_CMD` 或 `BACKUP_OFFSITE_DIR` | 生产置 `BACKUP_REQUIRE_OFFSITE=true`：未配置即**整体失败**；配置了却失败同样整体失败 |
 
 明文出口只有一个：`BACKUP_ENCRYPTION=plaintext-acknowledged`——取值本身就是一句
 确认词，脚本仍会打 error 级警告。任何"忘了配加密"的部署在备份这一步硬失败，
@@ -97,6 +97,17 @@ gpg --armor --export "ops@example.net" > fsms-backup.pub
   已到手的本地副本仍是回滚抓手。行为闸见
   `src/tests/deploy/backupFailureArtifactHygiene.test.js`（真跑 bash + 桩 mongodump/gpg）。
 
+## 异地副本的强制口径（P1-4，2026-10-30）
+
+生产部署在 `deployPolicy.validatePreflight` 阶段额外检查 `BACKUP_OFFSITE_CMD` /
+`BACKUP_OFFSITE_DIR`：`DEPLOY_ENFORCE_OFFSITE=true` 或 `NODE_ENV=production` 时（生产工作流已显式下发），
+两者都没有就**拒绝发布**。备份脚本侧对应 `BACKUP_REQUIRE_OFFSITE=true`（工作流已下发），
+缺配置时不再只打 Warning，而是退出 1。两条路径的判据同源，避免"部署门禁过了、
+备份却没做异地"的假阳性。
+
+`BACKUP_OFFSITE_DIR` 是已挂载的异地存储/NAS 路径；`BACKUP_OFFSITE_CMD` 见下方 argv
+语义。两者都配时 CMD 优先，部署前置检查会给出告警。
+
 ## 恢复演练（每季度至少一次，与 rollback-drill.md 联动）
 
 ```bash
@@ -119,6 +130,17 @@ MONGODB_URI='<目标连接串>' ./scripts/restore-mongo.sh backups/fire-safety-b
 
 演练要证明的正是这三条链各自独立成立：**异地副本取回得了、私钥解得开、
 恢复进库后系统跑得动**。任何一环只存在于文档里没被演练过，就当它不存在。
+
+### 逻辑恢复演练记录（P1-4 必填）
+
+每次演练至少在 `deployment/rollback-drill-record.md` 登记：
+
+1. 取回的**异地副本**文件名、sha256 校验结果、解密命令（不记录私钥口令）；
+2. `mongorestore --dryRun` 或恢复到隔离库后的集合/文档数对比（用户、告警、审计三类至少各一项）；
+3. 恢复后 `GET /api/security/audit-logs/verify` 的返回码与结论；
+4. 数据级恢复实测耗时（分钟），与 RTO 240 分钟对照。
+
+只做"备份文件存在"检查不算逻辑恢复演练；必须证明**备份能被读回、解密、导入并驱动系统**。
 
 ## 完整性巡检（自动化，A8 2026-10-16）
 

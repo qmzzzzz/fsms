@@ -1,0 +1,60 @@
+# 热升级宿主代理（systemd oneshot service）
+#
+# 由 fsms-hot-upgrade-agent.timer 每 15s 拉起一次；一次只处理队列里的一条请求。
+# 应用容器没有 docker socket：它只写签名请求，docker/nginx 动作全部在本服务里执行，
+# 且执行前会重新校验 digest 钉扎与镜像白名单（见 scripts/hotUpgradeAgent.js）。
+#
+# 安装：
+#   sudo install -d -m 0755 /etc/fsms
+#   sudo install -m 0640 -o root -g root hot-upgrade.env /etc/fsms/hot-upgrade.env
+#   sudo install -m 0644 fsms-hot-upgrade-agent.service /etc/systemd/system/
+#   sudo install -m 0644 fsms-hot-upgrade-agent.timer   /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fsms-hot-upgrade-agent.timer
+#   journalctl -u fsms-hot-upgrade-agent -f
+#
+# 注意：本服务以 root 运行（要调 docker 与改 nginx 配置）。不要改成普通用户，
+# 除非把该用户加入 docker 组——那等价于 root，只是看起来不像。
+
+[Unit]
+Description=FSMS hot upgrade agent (queue consumer)
+Documentation=file:/opt/fsms/deployment/hot-upgrade.md
+# docker.service 不存在时仍允许启动（代理会写心跳并报未就绪，而不是静默消失）
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 改成实际部署目录；hotUpgrade.js 的备份/日志会写在该目录下
+WorkingDirectory=/opt/fsms
+EnvironmentFile=/etc/fsms/hot-upgrade.env
+ExecStart=/usr/bin/node /opt/fsms/scripts/hotUpgradeAgent.js --once
+# 升级最坏耗时 = 备份 + readyz 180s + 迁移 + 观察 300s，给足 2 小时；
+# oneshot 默认不限时，这里显式写出来是为了让「超时被杀」变成一个可解释的状态。
+TimeoutStartSec=2h
+# 升级期间少被打断：Nice 只影响 CPU 调度，不是 OOM 保护——真正管用的是 OOMScoreAdjust。
+Nice=5
+OOMScoreAdjust=-500
+# 不在失败时无限重启：下一轮 timer 会自然重试；重启风暴只会刷屏 journal
+Restart=no
+# 最小权限：代理以 root 跑（要调 docker、改 nginx 配置），但仍能收掉的都收掉。
+# ProtectSystem=full 把 /usr /boot /etc 变只读——nginx 配置要写，故显式放开；
+# 改了 HOT_UPGRADE_NGINX_CONF 的目录时，这里同步改，否则升级会在 reload 前的写盘处失败。
+#
+# 三个目录必须显式建出来并放开写权限，否则该单元根本起不来（或 gpg/私有 registry 失败）：
+#   gnupg  —— ProtectHome=yes 会把 /root 藏掉，默认 GNUPGHOME 直接不可用；
+#             gpg 备份的密钥环改放这里（gpg --homedir /var/lib/fsms/gnupg --import）。
+#   docker —— 私有仓库凭据同理（/root/.docker 被藏），DOCKER_CONFIG 指到这里。
+#   upgrade queue —— 路径前加 '-'：目录还不存在（首次安装/自定义路径）时不因此起不来。
+NoNewPrivileges=yes
+Umask=0077
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+Environment=GNUPGHOME=/var/lib/fsms/gnupg
+Environment=DOCKER_CONFIG=/var/lib/fsms/docker
+ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/fsms/gnupg /var/lib/fsms/docker
+ReadWritePaths=-/etc/nginx -/var/lib/fsms/upgrade -/var/lib/fsms/gnupg -/var/lib/fsms/docker
+
+[Install]
+WantedBy=multi-user.target

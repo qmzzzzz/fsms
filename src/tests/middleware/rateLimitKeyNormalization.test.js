@@ -15,8 +15,16 @@
 const fs = require('fs');
 const path = require('path');
 
+const express = require('express');
+const request = require('supertest');
 const { ipKeyGenerator } = require('express-rate-limit');
-const { normalizeRateLimitIp } = require('../../middleware/rateLimit');
+const {
+  normalizeRateLimitIp,
+  normalizeLoginRateKey,
+  LOGIN_RATE_KEY_MAX_CHARS,
+  LOGIN_RATE_KEY_OVERSIZED,
+  loginUserLimiter,
+} = require('../../middleware/rateLimit');
 
 /** 读源码并剥掉注释：门禁只约束代码形状，不约束注释里的历史示例文字 */
 const readCode = (rel) =>
@@ -120,5 +128,68 @@ describe('限流器接线门禁（源码形状）', () => {
     // 三个 keyGenerator 全部走安全裁决地址 + 归一化 + IPv6 /56 聚合
     expect(src.match(/normalizeRateLimitIp\(clientIpForSecurityDecision\(req\)\)/g).length).toBe(3);
     expect(src.match(/ipKeyGenerator\(/g).length).toBe(3);
+  });
+});
+
+/**
+ * 登录账号桶（login-user:<username>）的键必须有界——第三轮 D3
+ *
+ * 缺陷本体：`normalizeLoginRateKey` 只 trim + toLowerCase，而限流器挂在 `loginValidation` **之前**
+ * （authRoutes 的 loginLimiter → loginUserLimiter → loginValidation），body 上限 1mb ⇒ 单个请求就能
+ * 让 Redis/MemoryStore 里出现一个接近 1MB 的键，且 15 分钟窗口内不释放。
+ *
+ * 判据分两层，缺一层就能被绕过：
+ *   1. 单元层：超长 username 归一后长度有界；
+ *   2. 行为层：**换不出新配额**——今天每个不同的长串都是新桶，于是"轮换长 username"等于"无限配额"。
+ *      修法不是截断（前 64 字符相同的任意长串会互相挤占同一个桶）也不是摘要（键空间仍由请求方决定），
+ *      而是把超出上限的一律并到一个登记在案的共享桶。
+ */
+describe('登录账号桶键必须有界（未校验输入不得原样成为存储键）', () => {
+  test('超长 username 的键长有界（今天会原样进键，长度 200000）', () => {
+    const long = 'a'.repeat(200000);
+    expect(normalizeLoginRateKey(long).length).toBeLessThanOrEqual(LOGIN_RATE_KEY_MAX_CHARS);
+    expect(normalizeLoginRateKey(long)).toBe(LOGIN_RATE_KEY_OVERSIZED);
+  });
+
+  test('超长不截断：互不相同（但前 64 字符相同）的长串必须同桶，换不出新配额', () => {
+    const prefix = 'a'.repeat(LOGIN_RATE_KEY_MAX_CHARS);
+    const keys = Array.from({ length: 50 }, (_, i) =>
+      normalizeLoginRateKey(prefix + 'x'.repeat(2000) + i)
+    );
+    expect(new Set(keys).size).toBe(1);
+    expect(keys[0]).toBe(LOGIN_RATE_KEY_OVERSIZED);
+  });
+
+  test('非字符串输入不得压成任意键长（对象/数组/undefined 一并收敛）', () => {
+    expect(normalizeLoginRateKey({ toString: () => 'z'.repeat(5000) }).length).toBeLessThanOrEqual(
+      LOGIN_RATE_KEY_MAX_CHARS
+    );
+    expect(typeof normalizeLoginRateKey(undefined)).toBe('string');
+    expect(normalizeLoginRateKey(undefined).length).toBeLessThanOrEqual(LOGIN_RATE_KEY_MAX_CHARS);
+  });
+
+  test('对照：界内的短 username 仍逐值分桶（有界不等于全并一桶）', () => {
+    expect(normalizeLoginRateKey('alice')).not.toBe(normalizeLoginRateKey('bob'));
+    expect(normalizeLoginRateKey(' alice ')).toBe(normalizeLoginRateKey('ALICE'));
+  });
+
+  test('行为层：21 个互不相同的 200KB username 落在同一个桶里，第 21 发 429', async () => {
+    const app = express();
+    app.set('trust proxy', 1);
+    app.use(express.json({ limit: '1mb' }));
+    app.use(loginUserLimiter);
+    app.post('/login', (req, res) => res.status(400).json({ success: false }));
+
+    const ip = '198.51.100.77';
+    let res;
+    for (let i = 0; i < 21; i += 1) {
+      const username = 'a'.repeat(200000 - 4) + String(i).padStart(4, '0');
+      res = await request(app)
+        .post('/login')
+        .set('X-Forwarded-For', ip)
+        .send({ username, password: 'x' });
+    }
+    // 修前：21 个长串 = 21 个独立桶 ⇒ 永不触顶（本断言红）；修后：同一个 ~oversized 桶 ⇒ 第 21 发 429
+    expect(res.status).toBe(429);
   });
 });

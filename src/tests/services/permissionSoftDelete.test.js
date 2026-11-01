@@ -12,6 +12,12 @@
  *   ③ 冲突补偿：有子权限/被角色引用时拒绝，且父文档必须恢复为可见（standalone 无事务）；
  *   ④ 最后兜底：补偿写失败也不得丢数据，完整文档必须落日志；
  *   ⑤ 启动自愈：目录内的内置权限被软删除后，initPermissions 会恢复它。
+ *   ⑥ 写路径覆盖（F4/F8，第十一轮）：过滤判据只有 softDeleteExempt 一处，读路径与写钩子共用——
+ *      `pre(/^find/)` 在 mongoose 8.24.1 下**也覆盖 findOneAndUpdate/findOneAndReplace**（实测），
+ *      原先它只认 filter 不认 update 文档，于是用 findOneAndUpdate 做恢复恒返回 null、DB 里
+ *      deletedAt 不变，且不报错；故那两个 op 不再单独注册钩子（重复注册只会让读者以为它们没走）。
+ *      `estimatedDocumentCount` 则恰好相反：该命令**没有 filter 形参**，钩子改不到它，注册只会让读
+ *      代码的人以为墓碑已被排除（实测 est=2 而 countDocuments=1）——要排除墓碑只能用 countDocuments。
  */
 
 const mongoose = require('mongoose');
@@ -193,4 +199,131 @@ describe('权限软删除（#7 先删后复核窗口根治）', () => {
     const raw = await Permission.collection.findOne({ _id: target._id });
     expect(raw.deletedAt).toBeNull();
   }, 60000);
+
+  /*
+   * D5（2026-10-30 审计）：软删除过滤原先只覆盖 /^find/ 与 countDocuments，
+   * updateOne/updateMany/aggregate 等路径会**就地改掉已删除的行**——而本文件开头那条
+   * 「文档永不离开集合、保留期后可复核」的承诺，靠的正是「已删除 = 只读墓碑」。
+   * 下面三条把「写路径看不见 / 显式状态变更放行 / 读路径不泄露」钉成行为判据。
+   */
+  test('写路径同样看不见软删除文档：updateOne / updateMany 不得命中', async () => {
+    const perm = await makePerm('wexcl');
+    await service.deletePermission(perm._id);
+
+    // 反例对照：同一条 update 打在**活跃**行上必须命中 —— 否则下面的 0 可能只是「判据没接线」
+    const active = await makePerm('wact');
+    const hit = await Permission.updateOne({ _id: active._id }, { $set: { sort: 9 } });
+    expect(hit.modifiedCount).toBe(1);
+
+    const one = await Permission.updateOne({ _id: perm._id }, { $set: { name: '被改掉的名字' } });
+    expect(one.modifiedCount).toBe(0);
+
+    const many = await Permission.updateMany(
+      { module: perm.module },
+      { $set: { description: '批量改' } }
+    );
+    expect(many.modifiedCount).toBe(0);
+
+    // 物理上确实没被改动（不是「看着没改」）
+    expect((await rawDoc(perm._id)).name).toBe(perm.name);
+  });
+
+  test('显式状态变更必须放行：$set.deletedAt 与 includeDeleted 两条口子不被追加条件吃掉', async () => {
+    const perm = await makePerm('rest');
+    await service.deletePermission(perm._id);
+    expect(await Permission.findById(perm._id)).toBeNull();
+
+    // 与 permissionService 的补偿路径同形：过滤条件只给 _id，靠「更新文档在动 deletedAt」放行
+    const r = await Permission.updateOne({ _id: perm._id }, { $set: { deletedAt: null } });
+    expect(r.matchedCount).toBe(1);
+    expect(await Permission.findById(perm._id)).not.toBeNull();
+
+    // includeDeleted: true 是显式后门：能改已删除的行（播种/运维修复用）
+    await service.deletePermission(perm._id);
+    const viaOption = await Permission.updateOne(
+      { _id: perm._id },
+      { $set: { sort: 7 } },
+      { includeDeleted: true }
+    );
+    expect(viaOption.modifiedCount).toBe(1);
+  });
+
+  test('读路径不泄露软删除的 code：distinct / aggregate 与 find 同口径', async () => {
+    const perm = await makePerm('readpath');
+    await service.deletePermission(perm._id);
+
+    expect(await Permission.distinct('code', { module: perm.module })).toEqual([]);
+    expect(await Permission.aggregate([{ $match: { module: perm.module } }])).toEqual([]);
+
+    // 反例对照：活跃行的同两条查询必须命中，否则「上面是空」可能只是查询写错了
+    const live = await makePerm('readlive');
+    expect(await Permission.distinct('code', { module: live.module })).toEqual([live.code]);
+    const aggLive = await Permission.aggregate([{ $match: { module: live.module } }]);
+    expect(aggLive.map((d) => d.code)).toEqual([live.code]);
+  });
+  /*
+   * F4（第十一轮审计）：pre(/^find/) 对 findOneAndUpdate 同样生效并追加 deletedAt:null，
+   * 而「更新文档在动 deletedAt」这条放行口子原先只挂在 updateOne/updateMany/replaceOne 上
+   * ⇒ 用 findOneAndUpdate 做恢复恒返回 null、DB 里 deletedAt 不变，且不报错。
+   * 下面三条把「恢复真的生效」与「普通更新仍看不见墓碑」同时钉住。
+   */
+  test('findOneAndUpdate 恢复必须真的生效（不得静默返回 null）', async () => {
+    const perm = await makePerm('fau');
+    await service.deletePermission(perm._id);
+
+    const restored = await Permission.findOneAndUpdate(
+      { _id: perm._id },
+      { $set: { deletedAt: null } },
+      { new: true }
+    );
+    expect(restored).not.toBeNull();
+    expect((await rawDoc(perm._id)).deletedAt).toBeNull();
+  });
+
+  test('findOneAndUpdate 普通更新仍看不见墓碑（放行口子只认 deletedAt 本身）', async () => {
+    const perm = await makePerm('fag');
+    await service.deletePermission(perm._id);
+
+    const hit = await Permission.findOneAndUpdate(
+      { _id: perm._id },
+      { $set: { sort: 3 } },
+      { new: true }
+    );
+    expect(hit).toBeNull();
+    expect((await rawDoc(perm._id)).sort).not.toBe(3);
+  });
+
+  test('findOneAndReplace 恢复同样生效（replace 形态没有 $set）', async () => {
+    const perm = await makePerm('far');
+    await service.deletePermission(perm._id);
+    const raw = await rawDoc(perm._id);
+
+    const restored = await Permission.findOneAndReplace(
+      { _id: perm._id },
+      { ...raw, deletedAt: null },
+      { new: true }
+    );
+    expect(restored).not.toBeNull();
+    expect((await rawDoc(perm._id)).deletedAt).toBeNull();
+  });
+
+  /*
+   * F8：estimatedDocumentCount 的命令**不吃 filter**（第十一轮实测 est=2 而 countDocuments=1），
+   * 原先注册的 pre('estimatedDocumentCount') 只会让读代码的人以为墓碑已被排除。判据改成
+   * 「按实测钉住命令语义 + 模型不得再注册这个钩子」。
+   */
+  test('estimatedDocumentCount 不吃 filter：墓碑计入估算，排除墓碑只能用 countDocuments', async () => {
+    const perm = await makePerm('fest');
+    const before = await Permission.estimatedDocumentCount();
+    await service.deletePermission(perm._id);
+    expect(await Permission.estimatedDocumentCount()).toBe(before);
+    expect(await Permission.countDocuments({ code: perm.code })).toBe(0);
+  });
+
+  test('模型不得再注册 estimatedDocumentCount 过滤器（该命令没有 filter 形参）', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../../models/Permission.js'), 'utf8');
+    expect(src).not.toMatch(/pre\('estimatedDocumentCount'/);
+  });
 });

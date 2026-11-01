@@ -1,0 +1,18 @@
+# 临时权限授予复核/收敛的定时器
+#
+# 每小时一次：复核节奏是「天」级别的管理动作，不需要分钟级精度；
+# 到期权限本身由读取路径强制，本定时器只刷新状态与清单（见 ADR-012）。
+# 不设 Persistent：错过一轮会在下一小时补上，收敛没有补作业的语义。
+
+[Unit]
+Description=Run FSMS privilege grant review every hour
+Documentation=file:/opt/fsms/docs/adr/ADR-012-临时权限授予与定期复核.md
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=1h
+AccuracySec=1min
+Unit=fsms-access-review.service
+
+[Install]
+WantedBy=timers.target

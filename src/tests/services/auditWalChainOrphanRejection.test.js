@@ -13,7 +13,7 @@
  * 本模块 12 处 catch/链尾 handler 全是裸读 `e.message` / `e.code`。被拒值为非 Error 时
  * （undefined / null / 字符串 / 无 message 的对象）这些语句自己抛 TypeError。后果分三档，
  * 本文件按档给判据：
- *   · 最重：`serialize()` 的默认兜底臂（:493）—— 抛出的 TypeError 让 walChain 变成孤儿
+ *   · 最重：`serialize()` 的默认兜底臂（:492）—— 抛出的 TypeError 让 walChain 变成孤儿
  *     ⇒ 全进程下线；
  *   · 次重：链中断（append 失败后 `.then(() => cap.afterAppend)` 被跳过 ⇒ 这一轮的大小
  *     抽查与裁剪没做）；

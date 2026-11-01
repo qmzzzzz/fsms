@@ -357,6 +357,47 @@ describe('安全管理深覆盖（批次 C）', () => {
     expect(resetSuper2.status).toBe(403);
   });
 
+  test('P1-2 管理员重置口令：临时口令一次性返回、强制改密标记、审计不含口令', async () => {
+    const auditBefore = await AuditLog.countDocuments({
+      action: 'admin_reset_password',
+      targetUserId: lowUserId,
+    });
+    const before = await User.findById(lowUserId).select('+password');
+    const oldTokenVersion = before.tokenVersion;
+
+    const ok = await authed()
+      .put(`/api/security/users/${lowUserId}/password/reset`)
+      .send({ currentPassword: PASSWORD, reason: '员工忘记口令（单测）' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.data.username).toBe(before.username);
+    expect(typeof ok.body.data.temporaryPassword).toBe('string');
+    expect(ok.body.data.mustChangePassword).toBe(true);
+
+    const after = await User.findById(lowUserId).select('+password');
+    expect(after.mustChangePassword).toBe(true);
+    expect(after.tokenVersion).toBe(oldTokenVersion + 1);
+    expect(await after.comparePassword(ok.body.data.temporaryPassword)).toBe(true);
+    expect(await after.comparePassword(PASSWORD)).toBe(false);
+
+    expect(
+      await AuditLog.countDocuments({
+        action: 'admin_reset_password',
+        targetUserId: lowUserId,
+      })
+    ).toBe(auditBefore + 1);
+    const audit = await AuditLog.findOne({
+      action: 'admin_reset_password',
+      targetUserId: lowUserId,
+    }).sort({ createdAt: -1 });
+    expect(JSON.stringify(audit.body || {})).not.toContain(ok.body.data.temporaryPassword);
+
+    const self = await authed()
+      .put(`/api/security/users/${superUserId}/password/reset`)
+      .send({ currentPassword: PASSWORD });
+    expect(self.status).toBe(400);
+    expect(self.body.errors.errorCode).toBe('CANNOT_RESET_OWN_PASSWORD_VIA_ADMIN');
+  });
+
   test('IP 黑白名单：新增/查询命中/列表/删除；全网段仅内置超管', async () => {
     // 行为级断言基线：ip_*_added / ip_*_removed 是该操作的唯一留痕（控制器已设
     // skipGlobalAudit）。此前两处写入换成 Promise.resolve 后 70 套 / 746 例全绿。

@@ -1,21 +1,10 @@
 /**
  * 错误码注册表（后端唯一事实来源）
- *
- * 目的：给前端提供机器可读的稳定错误标识（errors.errorCode），
- * 取代「中文字符串精确匹配」的脆弱翻译方案（后端文案一改前端映射即失效）。
- *
- * 响应契约（与前端 utils/api.js 的 resolveErrorMessage 对齐）：
- *   { success: false, message: <人读文案>, errors: { errorCode: 'MFA_CODE_INVALID', ...params } }
- *
+ * 目的：给前端机器可读的稳定错误标识（errors.errorCode），取代「中文字符串精确匹配」的脆弱翻译方案。
+ * 响应契约（与前端 utils/api.js 的 resolveErrorMessage 对齐）：{ success: false, message: <人读文案>, errors: { errorCode: 'MFA_CODE_INVALID', ...params } }
  * 命名规范：DOMAIN_REASON，全大写下划线分隔。
- *
- * 安全约束（防枚举）：账户禁用/锁定/临时锁定等状态类失败
- * 不得注册区分性错误码——外部响应必须与「用户名或密码错误」完全一致，
- * 否则攻击者可借差异化响应枚举有效用户名。真实原因只进日志与审计。
- *
- * 迁移策略：本表只收录高频认证/安全路径（登录、验证码、MFA、IP 名单校验），
- * 即前端 EN 映射已覆盖的那部分消息；其余 ~270 处调用点保持 message-only
- * 行为不变，按模块渐进迁移（见迭代 backlog）。
+ * 安全约束（防枚举）：账户禁用/锁定/临时锁定等状态类失败不得注册区分性错误码——外部响应必须与「用户名或密码错误」完全一致，否则攻击者可借差异化响应枚举有效用户名。真实原因只进日志与审计。
+ * 迁移策略：本表只收录高频认证/安全路径（登录、验证码、MFA、IP 名单校验）即前端 EN 映射已覆盖的那部分消息；其余 ~270 处调用点保持 message-only 行为不变，按模块渐进迁移（见迭代 backlog）。
  */
 
 const ERROR_CODES = {
@@ -80,7 +69,6 @@ const ERROR_CODES = {
   // 前者是"这个部门今天确实没有报警"，后者是"你这个人不在这个部门可见范围里"——
   // 两者的后续动作完全相反（一个继续等数据，一个去找管理员开权限），而响应一模一样。
   // 与"宁声明勿假装完整"同族：导出截断要喊（X-Export-Truncated），范围不可用也要喊。
-  //
   // 落点是 middleware/rbac.js 的 applyDataScopeToQuery（列表/统计共用的唯一收口）、
   // services/auditScopeFilter.js 与 services/reportExportService.js 的 scopeFilterFor
   // ——三处原先都回空集。
@@ -156,6 +144,24 @@ const ERROR_CODES = {
     message: '不能重置超级管理员的两步验证',
   },
 
+  // P1-2（2026-10-30）：管理员重置口令的边界
+  CANNOT_RESET_OWN_PASSWORD_VIA_ADMIN: {
+    status: 400,
+    message: '不能通过管理员重置接口修改自己的口令，请使用个人资料中的修改密码',
+  },
+  CANNOT_RESET_PASSWORD_SUPER_ADMIN: {
+    status: 403,
+    message: '不能重置超级管理员的口令：系统必须保留唯一的最高权限账户',
+  },
+  PASSWORD_RESET_PEER_OR_HIGHER_FORBIDDEN: {
+    status: 403,
+    message: '不能重置同级或更高级别账户的口令',
+  },
+  PASSWORD_RESET_FAILED: {
+    status: 500,
+    message: '口令重置失败，请重试或联系运维',
+  },
+
   // ================= IP 名单校验 =================
   IP_REQUIRED: { status: 400, message: '请提供有效的 IP 地址' },
   IP_SINGLE_REQUIRED: {
@@ -185,6 +191,10 @@ const ERROR_CODES = {
   DATE_PARAM_INVALID: {
     status: 400,
     message: '日期参数格式错误',
+  },
+  DATE_RANGE_INVALID: {
+    status: 400,
+    message: '结束日期不能早于开始日期',
   },
   VALIDATION_FAILED: {
     status: 400,
@@ -258,6 +268,11 @@ const ERROR_CODES = {
     status: 401,
     message: '密码已修改，请重新登录',
   },
+  // P1-2：首次登录/管理员重置后未完成改密，业务接口一律拒绝
+  PASSWORD_CHANGE_REQUIRED: {
+    status: 403,
+    message: '当前账户需要先修改密码（首次登录或管理员已重置口令）',
+  },
   SESSION_EXPIRED: {
     status: 401,
     message: '会话已失效，请重新登录',
@@ -319,7 +334,11 @@ const ERROR_CODES = {
   },
   AVATAR_INVALID: {
     status: 400,
-    message: '头像必须是有效的图片 URL 或图片数据',
+    message: '头像图片不合法（仅支持 JPEG/PNG，上限 256 KB）',
+  },
+  AVATAR_NOT_FOUND: {
+    status: 404,
+    message: '该用户尚未设置头像',
   },
   CANNOT_REVOKE_CURRENT_SESSION: {
     status: 400,
@@ -357,6 +376,29 @@ const ERROR_CODES = {
     status: 403,
     message: '无权操作该巡检记录',
   },
+  // ================= 取证溯源（T5/T6） =================
+  // 溯源至少要给一个维度（IP / 指纹 / 网段）。地址解析不出也走这个码——退化成"匹配不到"的空结果
+  // 会让运维以为该 IP 干净，而真相是地址打错了；明确报判据不可用才是诚实的。
+  FORENSIC_NO_CRITERIA: {
+    status: 400,
+    message: '请至少提供一个查询维度（IP、设备指纹或网段），且地址格式必须可解析',
+  },
+  // 网段封禁被护栏拒绝。原因码在 errors.reason，取值见 constants/banRefusalReason（单一事实来源）；
+  // 前端按 reason 给专属文案，笼统的"操作失败"会让运维不知道自己被哪一条挡住。
+  FORENSIC_POOL_BAN_REFUSED: {
+    status: 400,
+    message: '网段封禁被拒绝，请查看具体原因',
+  },
+  // 未配置 FORENSIC_EXPORT_SECRET / AUDIT_HMAC_SECRET：宁可不导出，也不产出"看起来签过"的包
+  FORENSIC_EXPORT_NO_SECRET: {
+    status: 400,
+    message: '服务端未配置取证导出密钥，请联系管理员',
+  },
+  // 溯源/聚类/导出自身失败（区别于"判据不可用"）
+  FORENSIC_QUERY_FAILED: {
+    status: 500,
+    message: '取证数据查询失败，请稍后重试',
+  },
   IP_LIST_TYPE_INVALID: {
     status: 400,
     message: '名单类型必须为 black（黑名单）或 white（白名单）',
@@ -374,6 +416,10 @@ const ERROR_CODES = {
     status: 400,
     message:
       '该 IP 已被白名单条目（${coveredBy}）覆盖，白名单优先级高于黑名单；如需封禁请先将其移出白名单',
+  },
+  IP_SEGMENT_WRITE_REFUSED: {
+    status: 400,
+    message: '该网段写入被拒绝，请查看拒绝原因',
   },
   IP_LIST_ENTRY_NOT_FOUND: {
     status: 404,
@@ -412,12 +458,16 @@ const ERROR_CODES = {
     status: 400,
     message: '不支持的导出格式: ${format}',
   },
-  // P-2：导出并发闸拒绝。429 而不是 503——503 的语义是"本实例不可用"，
-  // 会让客户端/网关把它当成服务故障并触发更激进的重试；导出忙是**容量**问题，
-  // 配合 Retry-After 让调用方按节奏退避才是对的。
+  // P-2：导出并发闸拒绝。429 而非 503——503 是"本实例不可用"，网关会当成故障并更激进地重试；
+  // 导出忙是**容量**问题，配合 Retry-After 按节奏退避才对。
   EXPORT_BUSY: {
     status: 429,
     message: '导出任务繁忙，请稍后重试',
+  },
+  // A-8：配额用尽。429 而非 403——不是"没有权限"，是"今天不行、稍后可以"。
+  PII_EXPORT_QUOTA_EXCEEDED: {
+    status: 429,
+    message: '今日未脱敏导出已达配额，请稍后再试或联系管理员',
   },
   REPORT_TYPE_UNSUPPORTED: {
     status: 400,
@@ -849,6 +899,22 @@ const ERROR_CODES = {
     status: 401,
     message: '二次验证票据无效或已过期，请重新验证',
   },
+  IDEMPOTENCY_KEY_REQUIRED: {
+    status: 400,
+    message: '该操作要求携带 Idempotency-Key 请求头；同一次提交重试请复用同一个键',
+  },
+  IDEMPOTENCY_KEY_INVALID: {
+    status: 400,
+    message: 'Idempotency-Key 格式无效：应为 8-64 位可见 ASCII 字符（建议使用 UUID）',
+  },
+  IDEMPOTENCY_IN_PROGRESS: {
+    status: 409,
+    message: '同一提交正在处理中，请勿重复提交',
+  },
+  IDEMPOTENCY_KEY_REUSED: {
+    status: 409,
+    message: '该 Idempotency-Key 已用于另一次内容不同的提交，请更换键后重试',
+  },
   IP_BLOCKED: {
     status: 403,
     message: '您的 IP 已被禁止访问',
@@ -877,6 +943,12 @@ const ERROR_CODES = {
     status: 503,
     message: '注册服务暂不可用，请稍后重试',
   },
+  // 一-7：未勾选隐私告知同意。400 而非 403——这不是"没有权限"，是本次请求缺少必备的
+  // 明示同意（前端必须渲染可点击的告知入口，而不是把同意藏进"注册即表示同意"）。
+  PRIVACY_CONSENT_REQUIRED: {
+    status: 400,
+    message: '请阅读并同意隐私告知后再注册',
+  },
   AUDIT_QUERY_FAILED: {
     status: 500,
     message: '审计日志查询失败',
@@ -885,11 +957,48 @@ const ERROR_CODES = {
     status: 403,
     message: '全网段名单仅超级管理员可配置或移除',
   },
+
+  SUPER_ADMIN_REQUIRED: {
+    status: 403,
+    message: '该操作仅超级管理员可执行',
+  },
+  UPGRADE_DISABLED: {
+    status: 503,
+    message: '升级未启用，请联系运维开启服务端开关',
+  },
+  UPGRADE_IMAGE_INVALID: {
+    status: 400,
+    message: '镜像地址无效：请使用 name@sha256:<64 位十六进制摘要> 形式',
+  },
+  UPGRADE_IMAGE_NOT_ALLOWED: {
+    status: 403,
+    message: '镜像仓库不在升级白名单内',
+  },
+  UPGRADE_ALREADY_RUNNING: {
+    status: 409,
+    message: '已有升级任务进行中或排队，请等待其结束后再试',
+  },
+  UPGRADE_QUEUE_UNAVAILABLE: {
+    status: 503,
+    message: '升级队列不可用（目录不可写或宿主代理离线），请检查部署',
+  },
+  UPGRADE_JOB_NOT_FOUND: {
+    status: 404,
+    message: '升级任务不存在',
+  },
+
+  PRIVILEGE_DURATION_INVALID: { status: 400, message: '临时授权的有效期应为 1-168 小时' },
+  PRIVILEGE_GRANT_INVALID: { status: 400, message: '临时授权申请参数无效' },
+  PRIVILEGE_CODE_INVALID: { status: 400, message: '权限码不存在或已停用' },
+  PRIVILEGE_GRANT_NOT_FOUND: { status: 404, message: '临时授权记录不存在' },
+  PRIVILEGE_GRANT_NOT_PENDING: { status: 409, message: '该授权申请已处理，不能重复审批' },
+  PRIVILEGE_GRANT_NOT_ACTIVE: { status: 409, message: '该授权当前不在生效期' },
+  PRIVILEGE_SELF_APPROVAL_FORBIDDEN: { status: 403, message: '申请人不得审批自己提交的授权申请' },
+  PRIVILEGE_APPROVAL_FORBIDDEN: { status: 403, message: '审批人须自行持有拟授予的权限' },
 };
 
 /**
  * 校验注册表完整性（供单测使用）：每个码必须有 status 与 message(非空 string)。
- *
  * status 判据为「400..599 的有限整数」而非仅 typeof number：
  * NaN 与 400.5 都能通过 typeof/区间比较（NaN 的任何比较均为 false），
  * 但两者在 res.status() 处行为不同——NaN 被 codeError 的 `||` 兜底成 400，

@@ -78,6 +78,86 @@ set_nodejs_home() {
   export USER=nodejs
   export LOGNAME=nodejs
 }
+# 升级队列目录：宿主代理与应用通过 bind mount 共享（应用只**写 requests**、
+# 只**读 status/processing**）。属主矩阵按「谁真的需要写」分配，不是一律 chown nodejs：
+#   requests    nodejs:nodejs  0700   应用写、代理读
+#   status      root:nodejs    0750   代理写、应用只读（含镜像 digest 与发起人）
+#   processing  root:nodejs    0750   同上（已认领请求同样含镜像与发起人）
+#   rejected    root:root      0700   只有代理看；给应用写权限等于让它删验签失败留证
+# 一律 chown nodejs 的后果：应用被攻陷后可删 .agent.lock（升级永久 busy）、
+# 写 status/<id>{"state":"succeeded"}（界面假成功、请求被丢弃）、清空 rejected（取证消失）。
+# 目录不存在时（本地 docker run 未挂载）静默跳过：升级不可用，但服务照常启动。
+QUEUE_DIR=${UPGRADE_QUEUE_DIR:-/var/lib/fsms/upgrade}
+prepare_upgrade_queue() {
+  [ -d "$QUEUE_DIR" ] || return 0
+  # 下面会对目录树做 chown。误配成 /、/var/lib、/etc 之类时，容器 root 会把宿主
+  # 大量文件的属主改成 UID 1001——宿主权限体系被破坏，且事后很难解释。
+  # 只接受绝对路径，且不得是系统目录本身。
+  case "$QUEUE_DIR" in
+    /*) : ;;
+    *)
+      echo "app-entrypoint: 警告：UPGRADE_QUEUE_DIR 必须是绝对路径，已跳过权限适配：$QUEUE_DIR" >&2
+      return 0
+      ;;
+  esac
+  case "$QUEUE_DIR" in
+    / | /var | /var/lib | /var/log | /etc | /etc/* | /usr | /usr/* | /home | /home/* | /root | /root/* | /tmp | /run)
+      echo "app-entrypoint: 警告：UPGRADE_QUEUE_DIR 指向系统目录，已跳过权限适配：$QUEUE_DIR" >&2
+      return 0
+      ;;
+  esac
+  if ! mkdir -p \
+    "$QUEUE_DIR/requests" \
+    "$QUEUE_DIR/status" \
+    "$QUEUE_DIR/processing" \
+    "$QUEUE_DIR/rejected"; then
+    echo "app-entrypoint: 警告：升级队列目录不可写，应用内升级将不可用：$QUEUE_DIR" >&2
+    return 0
+  fi
+
+  # 顺序必须是「先收回 root，再 chmod，最后按矩阵交出属主」：本容器 cap_drop: ALL
+  # 且刻意不补 FOWNER，对**已属 nodejs** 的目录再 chmod 必然 EPERM；脚本是 set -eu，
+  # 一次 EPERM 就终止入口——第二次启动、app-green 启动、compose run 的一次性迁移
+  # 容器都会踩到（升级窗口里恰好是最不能起不来的时刻）。
+  chown root:root \
+    "$QUEUE_DIR" \
+    "$QUEUE_DIR/requests" \
+    "$QUEUE_DIR/status" \
+    "$QUEUE_DIR/processing" \
+    "$QUEUE_DIR/rejected" 2>/dev/null || true
+  # 只读 bind / root-squash 会让下面任意一条 chmod/chgrp 失败，而入口是 set -eu：
+  # 单条失败就终止容器——升级窗口里最不能起不来的恰恰是这个容器。整块做失败容忍：
+  # 改不动就告警放行，升级不可用但服务照常启动（compose run 的一次性迁移容器同理）。
+  # 命令之间必须是 && 而不是逐行并列：`{ a; b; c; }` 的退出码只取**最后一条**，
+  # 而 if 的条件列表又不受 set -e 约束——中间任何一条 EPERM 都会被静默吞掉，剩下的
+  # 命令继续执行，于是"改不动就告警放行"对中间几条根本不成立。&& 一断即失败。
+  if ! {
+    chmod 0750 "$QUEUE_DIR" &&
+      chmod 0700 "$QUEUE_DIR/requests" &&
+      chmod 0700 "$QUEUE_DIR/rejected" &&
+      chmod 0750 "$QUEUE_DIR/status" &&
+      chmod 0750 "$QUEUE_DIR/processing" &&
+      chown nodejs:nodejs "$QUEUE_DIR/requests" &&
+      chgrp nodejs "$QUEUE_DIR" "$QUEUE_DIR/status" "$QUEUE_DIR/processing" &&
+      chown root:root "$QUEUE_DIR/rejected"
+  } 2>/dev/null; then
+    # 2026-10-30 审计修正：此处原先写成「成功走 else、失败走 :」，与上面那句注释正好相反——
+    # 于是成功时打出一条**假告警**并 return 0（下面的 find 归一化整段被跳过，队列文件归属
+    # 永远不修正），失败时反而静默继续。现在按注释的本意：整块改不动就告警放行。
+    echo "app-entrypoint: 警告：升级队列权限适配失败（只读挂载或 root-squash？），应用内升级将不可用：$QUEUE_DIR" >&2
+    return 0
+  fi
+
+  # 只处理这四棵树，-xdev 不跨文件系统、不跟随符号链接：应用对 requests 可写，
+  # 被攻陷后可放一个指向宿主文件的链接，`chown -R` 会改到宿主关键文件。
+  find "$QUEUE_DIR/requests" -xdev -type d -exec chown nodejs:nodejs {} + 2>/dev/null || true
+  find "$QUEUE_DIR/requests" -xdev -type f -exec chown nodejs:nodejs {} + 2>/dev/null || true
+  # status/processing 由 root 代理写、应用只读：属主 root、属组 nodejs、0640。
+  find "$QUEUE_DIR/status" "$QUEUE_DIR/processing" -xdev -type f \
+    -exec chown root:nodejs {} + -exec chmod 0640 {} + 2>/dev/null || true
+  find "$QUEUE_DIR/rejected" -xdev -type f \
+    -exec chown root:root {} + -exec chmod 0600 {} + 2>/dev/null || true
+}
 
 if [ "$(id -u)" = "0" ]; then
   if [ -d "$SECRET_SRC" ]; then
@@ -99,6 +179,7 @@ if [ "$(id -u)" = "0" ]; then
     chown nodejs:nodejs "$SECRET_DST"
     rewrite_file_pointers
   fi
+  prepare_upgrade_queue
   # 即使 /run/secrets 不存在（例如本地没挂 secret），只要 compose 仍给了
   # *_FILE 指针，就在这里以 nodejs 身份把「读不到」说清楚。
   verify_file_pointers nodejs_can_read

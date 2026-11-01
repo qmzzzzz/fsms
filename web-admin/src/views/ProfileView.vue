@@ -15,9 +15,22 @@
           <GlassSkeleton v-if="profileLoading" variant="detail" :avatar-size="100" :rows="5" />
           <template v-else>
             <div class="profile-avatar">
-              <el-avatar :size="100">
-                {{ avatarText }}
-              </el-avatar>
+              <UserAvatar :src="user.avatar" :name="avatarText" :size="100" />
+            </div>
+            <div v-if="!forcedChange" class="profile-avatar-actions">
+              <el-button size="small" :loading="avatarUploading" @click="pickAvatar">
+                {{ $t('profile.avatar.upload') }}
+              </el-button>
+              <el-button v-if="user.avatar" size="small" text @click="removeAvatar">
+                {{ $t('profile.avatar.remove') }}
+              </el-button>
+              <input
+                ref="avatarInputRef"
+                type="file"
+                accept="image/jpeg,image/png"
+                class="profile-avatar-input"
+                @change="onAvatarSelected"
+              />
             </div>
             <h3 class="profile-name">
               {{ user.realName || user.username }}
@@ -28,23 +41,28 @@
             <el-divider />
             <ul class="profile-meta">
               <li>
-                <el-icon><User /></el-icon><span>{{ $t('profile.username') }}：</span
+                <el-icon><User /></el-icon
+                ><span>{{ $t('profile.username') }}{{ $t('common.labelColon') }}</span
                 >{{ user.username }}
               </li>
               <li>
-                <el-icon><Message /></el-icon><span>{{ $t('profile.email') }}：</span
+                <el-icon><Message /></el-icon
+                ><span>{{ $t('profile.email') }}{{ $t('common.labelColon') }}</span
                 >{{ user.email }}
               </li>
               <li>
-                <el-icon><Phone /></el-icon><span>{{ $t('profile.phone') }}：</span
+                <el-icon><Phone /></el-icon
+                ><span>{{ $t('profile.phone') }}{{ $t('common.labelColon') }}</span
                 >{{ user.phone || $t('profile.notSet') }}
               </li>
               <li>
-                <el-icon><OfficeBuilding /></el-icon><span>{{ $t('profile.department') }}：</span
+                <el-icon><OfficeBuilding /></el-icon
+                ><span>{{ $t('profile.department') }}{{ $t('common.labelColon') }}</span
                 >{{ user.department || $t('profile.notSet') }}
               </li>
               <li v-if="user.lastLoginAt">
-                <el-icon><Clock /></el-icon><span>{{ $t('profile.lastLogin') }}：</span
+                <el-icon><Clock /></el-icon
+                ><span>{{ $t('profile.lastLogin') }}{{ $t('common.labelColon') }}</span
                 >{{ formatProfileTime(user.lastLoginAt) }}
               </li>
             </ul>
@@ -56,7 +74,7 @@
           两者数据同源（同一个 user 对象），拆到两栏会让用户改完右栏
           还要回头去左栏确认结果。
         -->
-        <el-card shadow="never" class="profile-block">
+        <el-card v-if="!forcedChange" shadow="never" class="profile-block">
           <template #header>
             <span class="card-header">{{ $t('profile.editProfile') }}</span>
           </template>
@@ -125,16 +143,26 @@
         </h2>
 
         <!-- 我的安全信息（B 组自助面接线）：安全评分 / 建议 / 最近登录 -->
-        <SecurityInfoCard class="profile-block" />
+        <SecurityInfoCard v-if="!forcedChange" class="profile-block" />
 
         <!-- 修改口令（D-2 拆为 ChangePasswordCard 组件） -->
+        <!-- 强制改密期间只留这张卡：其余卡片的 onMounted 请求都不在放行清单里，
+             一起弹四条 403 会让用户以为整个页面坏了，而真正该做的那一步被淹没。 -->
+        <el-alert
+          v-if="forcedChange"
+          class="profile-block"
+          type="warning"
+          :closable="false"
+          show-icon
+          :title="$t('errors.passwordChangeRequired')"
+        />
         <ChangePasswordCard />
 
         <!-- 账户绑定（B 组自助面接线）：邮箱/手机号/部门的绑定与校验状态 -->
-        <AccountBindingsCard class="profile-block" />
+        <AccountBindingsCard v-if="!forcedChange" class="profile-block" />
 
         <!-- 设备级登录会话：查看并管理正在使用本账号的设备 -->
-        <el-card shadow="never" class="profile-block">
+        <el-card v-if="!forcedChange" shadow="never" class="profile-block">
           <template #header>
             <span class="card-header">{{ $t('session.title') }}</span>
           </template>
@@ -145,10 +173,10 @@
         </el-card>
 
         <!-- MFA 两步验证（I-06，D-2 拆为 MfaSettingsCard 组件） -->
-        <MfaSettingsCard />
+        <MfaSettingsCard v-if="!forcedChange" />
 
         <!-- 我的操作日志（B 组自助面接线）：仅本人记录，按时间范围收窄 -->
-        <MyLogsCard class="profile-block" />
+        <MyLogsCard v-if="!forcedChange" class="profile-block" />
       </el-col>
     </el-row>
   </div>
@@ -157,10 +185,11 @@
 <script setup>
 import { computed, ref, reactive, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useSystemLabels } from '@/i18n/systemLabels'
 import { User, Message, Phone, OfficeBuilding, Clock } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { useAuthStore } from '@/store'
-import { api } from '@/utils/api'
+import { api, isHandledApiError } from '@/utils/api'
 import { enterSubmit } from '@/utils/enterSubmit'
 import { formatTime } from '@/utils/datetime'
 import SessionManager from '@/components/SessionManager.vue'
@@ -171,9 +200,15 @@ import MfaSettingsCard from '@/components/MfaSettingsCard.vue'
 import SecurityInfoCard from '@/components/SecurityInfoCard.vue'
 import AccountBindingsCard from '@/components/AccountBindingsCard.vue'
 import MyLogsCard from '@/components/MyLogsCard.vue'
+import UserAvatar from '@/components/UserAvatar.vue'
+import { compressAvatarFile } from '@/utils/avatarImage'
 
 const { t, locale } = useI18n()
+const { roleName } = useSystemLabels()
 const authStore = useAuthStore()
+// 强制改密（P1-2）：服务端只放行改密/me/logout，本页其余卡片一发请求就是 403。
+// 用 store 的标记驱动渲染，而不是自己发一次探测请求——标记已由登录响应与 /auth/me 写入。
+const forcedChange = computed(() => authStore.currentUser?.mustChangePassword === true)
 const user = ref(authStore.currentUser || {})
 const profileFormRef = ref(null)
 // 手机号格式规则与后端 authRoutes 一致；非必填，留空不校验
@@ -181,6 +216,8 @@ const profileFormRef = ref(null)
 const profileLoading = ref(!authStore.currentUser)
 
 const avatarText = ref((user.value.username || 'U').slice(0, 1).toUpperCase())
+const avatarInputRef = ref(null)
+const avatarUploading = ref(false)
 const roleText = ref('')
 
 const updateRoleText = (roles) => {
@@ -188,11 +225,10 @@ const updateRoleText = (roles) => {
     roleText.value = t('profile.normalUser')
     return
   }
-  if (typeof roles[0] === 'string') {
-    roleText.value = roles.join(', ')
-    return
-  }
-  roleText.value = roles.map((r) => r.name || r.code || t('profile.unknownRole')).join(', ')
+  // 登录响应 user.roles 是 code 字符串、/auth/me 是 {name, code} 对象，
+  // 两种形状都交给 roleName 统一处理：英文按内置角色 code 映射，
+  // 自定义角色与未知 code 保留后端原文。
+  roleText.value = roles.map((r) => roleName(r) || t('profile.unknownRole')).join(', ')
 }
 updateRoleText(user.value.roles)
 
@@ -308,6 +344,65 @@ const formatProfileTime = (value) => {
 }
 
 /** 回车提交守卫已抽至 utils/enterSubmit.js，三处表单共用同一判据（D-2） */
+
+/** 头像上传：先本地裁切压缩，再走专用端点（资料保存不发 avatar） */
+const applyAvatar = (avatar) => {
+  user.value = { ...user.value, avatar }
+  authStore.setCurrentUser({ ...authStore.currentUser, avatar })
+}
+
+const pickAvatar = () => {
+  avatarInputRef.value?.click()
+}
+
+/** 头像上传代号：每次选择文件/删除都同步 +1；代号变了的旧响应不得回写（后发者赢） */
+let avatarUploadEpoch = 0
+
+const onAvatarSelected = async (event) => {
+  const file = event.target.files?.[0]
+  // 允许再次选择同一文件：不清空的话 change 不会触发
+  event.target.value = ''
+  if (!file) return
+  // 同步重入判据（首行、第一个 await 之前）：本次选择立即作废上一次在途上传的回写。
+  // 没有它，用户连选两张图时会按"响应到达顺序"回写：先发的旧图可能盖住后发的新图。
+  const epoch = (avatarUploadEpoch += 1)
+  avatarUploading.value = true
+  try {
+    const { dataUrl } = await compressAvatarFile(file)
+    const res = await api.auth.uploadAvatar({ image: dataUrl })
+    if (epoch !== avatarUploadEpoch) return
+    applyAvatar(res?.data?.data?.avatar || '')
+    ElMessage.success(t('profile.avatar.success'))
+  } catch (error) {
+    if (epoch !== avatarUploadEpoch) return
+    // 本地压缩失败是纯 Error（非 axios），组件自己给文案；
+    // 接口失败已由响应拦截器按状态码弹过一次，组件不得重复弹（仓内统一口径）。
+    if (!isHandledApiError(error)) {
+      const key = error?.message === 'tooLarge' ? 'tooLarge' : 'failed'
+      ElMessage.error(t(`profile.avatar.${key}`))
+    }
+  } finally {
+    // 只有"最后一次选择"有权解除忙态，否则旧请求会提前放开按钮
+    if (epoch === avatarUploadEpoch) avatarUploading.value = false
+  }
+}
+
+const removeAvatar = async () => {
+  // 删除同样作废在途上传：否则上传响应可能把刚删掉的头像又写回来
+  const epoch = (avatarUploadEpoch += 1)
+  avatarUploading.value = true
+  try {
+    await api.auth.deleteAvatar()
+    if (epoch !== avatarUploadEpoch) return
+    applyAvatar('')
+    ElMessage.success(t('profile.avatar.removeSuccess'))
+  } catch (error) {
+    if (epoch !== avatarUploadEpoch) return
+    if (!isHandledApiError(error)) ElMessage.error(t('profile.avatar.failed'))
+  } finally {
+    if (epoch === avatarUploadEpoch) avatarUploading.value = false
+  }
+}
 
 const save = async () => {
   try {
@@ -461,6 +556,18 @@ onMounted(async () => {
   display: flex;
   justify-content: center;
   margin: 10px 0;
+}
+
+.profile-avatar-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+/* 文件选择器不占布局：由"更换头像"按钮代触发 */
+.profile-avatar-input {
+  display: none;
 }
 
 .profile-avatar :deep(.el-avatar) {

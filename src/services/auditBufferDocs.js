@@ -52,7 +52,7 @@ function precastOne(doc) {
   return null;
 }
 
-/** 预检拒绝的告警文案（含累计丢失量与 WAL 归档去向） */
+/** 预检拒绝的告警文案（含累计丢失量与 WAL 归档去向）。文案不得先于事实（第十一轮 D7）：`wal.discardBySeqs` 是 fire-and-forget（返回 undefined，归档排在 wal 链上），调用返回时归档可能尚未发生、也可能随后失败，故只写“已移交归档队列”，完成时措辞留给真正完成的那一刻。 */
 function rejectMessage(rejected, seqs, droppedTotal) {
   const listed = rejected
     .slice(0, 5)
@@ -60,7 +60,7 @@ function rejectMessage(rejected, seqs, droppedTotal) {
     .join(', ');
   const walPart =
     seqs.size > 0
-      ? `其 ${seqs.size} 行 WAL 取证行已归档到 ${wal.getWalPath()}.discarded 并从主文件移除`
+      ? `其 ${seqs.size} 行 WAL 取证行已移交归档队列（异步追加到 ${wal.getWalPath()}.discarded，落定后才从主文件移除）`
       : '本批无 WAL 行可归档（WAL 未启用窗口入队的文档）';
   return (
     `审计批次内 ${rejected.length} 条文档在串链前的 schema 预铸造中被拒` +
@@ -115,8 +115,8 @@ function precastBatch(docs, sink) {
   for (const d of rejectedDocs) sink.clearStrike(d);
   const seqs = walSeqsOf(rejectedDocs);
   const droppedTotal = sink.addDropped(rejectedDocs.length);
-  // 取证顺序在这里同样成立：先归档再改主文件，否则每次重启都重放同一批、
-  // 再走一遍预检、再丢一次，而 .discarded 里始终没有它们。
+  // 取证顺序在这里同样成立：先归档再改主文件（顺序由 wal 链保证），否则每次重启都重放同一批、
+  // 再走一遍预检、再丢一次，而 .discarded 里始终没有它们。它是 fire-and-forget：返回时归档**尚未**完成。
   if (seqs.size > 0) wal.discardBySeqs(seqs);
   logger.error(rejectMessage(rejected, seqs, droppedTotal));
   return accepted;

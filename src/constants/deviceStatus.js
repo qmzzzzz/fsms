@@ -6,13 +6,10 @@
  *     query 校验、update 校验、DeviceService.VALID_STATUSES、文档生成器四处各写一遍；
  *   - DEVICE_STATUS_WRITABLE：PUT /api/devices/{id}/status 的可写子集。
  *
- * 第二样才是本文件存在的理由。它此前是**两份手抄的 5 值清单**（deviceRoutes.js 的
- * updateDeviceStatusValidation、docs/generate.js 的 requestBody enum），抄的是
- * 「全集减去 scrapped」这条规则的**结果**而不是规则本身。后果与 constants/alarm.js
- * 记录的那一族完全同形：给 DEVICE_STATUS 追加第 7 档，模型存得进去，通用状态接口却
- * 400 拒掉新档，而对外文档仍在推荐旧的五档——两份副本还会各自漂，因为它们之间
- * 没有任何东西要求它们相等（文档不是运行时，没人对账就永不红）。
- * 现在加一档只改 DEVICE_STATUS，两个出口跟着动；要再多排除一档，改这一行 filter。
+ * 第二样才是本文件存在的理由：抄一份「全集减去 scrapped」的**结果**而不是规则本身，
+ * 副本就会各自漂——给 DEVICE_STATUS 追加第 7 档，模型存得进去，通用状态接口却 400
+ * 拒掉新档，而对外文档仍在推荐旧的五档（文档不是运行时，没人对账就永不红）。
+ * 加一档只改 DEVICE_STATUS，两个出口跟着动；要再多排除一档，改这一行 filter。
  *
  * scrapped 被排除是设计而非遗漏：报废需要 scrapReason 并推进 lifecycleStage，
  * 只能走 POST /api/devices/{id}/scrap；放行到通用状态接口会绕过 transitionTo 状态机，

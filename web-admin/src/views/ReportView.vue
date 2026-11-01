@@ -461,7 +461,13 @@ const loadChartData = async () => {
 
     if (dChart) {
       dChart.setOption({
-        tooltip: { trigger: 'axis', formatter: '{b}: {c}台' },
+        tooltip: {
+          trigger: 'axis',
+          formatter: (params) => {
+            const item = Array.isArray(params) ? params[0] : params
+            return `${item?.name ?? ''}: ${item?.value ?? 0}${t('report.deviceUnit')}`
+          },
+        },
         xAxis: {
           type: 'category',
           // 由 deviceStatusData 单一来源派生，轴标签与 series 永远同序同长，
@@ -643,6 +649,8 @@ const handleExport = async () => {
   try {
     const params = {
       type: exportDialog.type,
+      // 导出的工作表名/列头/枚举标签跟随当前界面语言（后端缺省中文）
+      lang: String(locale.value || '').startsWith('en') ? 'en' : 'zh',
     }
 
     if (exportDialog.dateRange && exportDialog.dateRange.length === 2) {

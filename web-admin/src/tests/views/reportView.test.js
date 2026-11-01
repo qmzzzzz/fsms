@@ -460,7 +460,7 @@ describe('ReportView 未脱敏导出（L-17 权限 + 二次验证）', () => {
 
     click(confirmBtn())
     await waitFor(() => exportPii.mock.calls.length === 1, { message: '未脱敏导出请求发出' })
-    expect(exportPii.mock.calls[0][0]).toEqual({ type: 'alarms' })
+    expect(exportPii.mock.calls[0][0]).toEqual({ type: 'alarms', lang: 'zh' })
     expect(exportPii.mock.calls[0][1]).toEqual({ mfaCode: '123456' })
     // 掩码档的 GET 不得被顺带调用：两条路径的权限与留痕口径不同
     expect(exportReport).not.toHaveBeenCalled()

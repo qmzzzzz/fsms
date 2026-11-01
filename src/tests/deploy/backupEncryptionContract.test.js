@@ -23,6 +23,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
+const { stubPathPreamble } = require('../helpers/stubPath');
 
 const ROOT = path.resolve(__dirname, '../../..');
 const CRYPTO = path.join(ROOT, 'scripts/backupCrypto.sh');
@@ -110,7 +111,9 @@ describe('备份加密契约', () => {
     let stubDir;
 
     const runCrypto = (script, env = {}) => {
-      const stdout = execFileSync('bash', ['-c', script], {
+      // stubDir 必须在孩子 shell 内部前置（MSYS 会把 /usr/bin 放最前，桩 gpg 会被 Git 自带的
+      // gpg 顶掉）：见 src/tests/helpers/stubPath.js。
+      const stdout = execFileSync('bash', ['-c', stubPathPreamble(stubDir) + script], {
         encoding: 'utf8',
         cwd: ROOT,
         env: { ...process.env, ...env },

@@ -219,7 +219,7 @@ const premiseHolds = (src, premise) =>
 
 /**
  * 第三种导出形态的"零容忍"清单：写了 `module.exports` 但两个扫描器都认不出的文件。
- * 实测这 36 个全部是**单值导出**（`module.exports = router` / `mongoose.model(...)` /
+ * 实测这 38 个全部是**单值导出**（`module.exports = router` / `mongoose.model(...)` /
  * 一个 class 或 service 实例），本身不具名 ⇒ 没有钩子面。清单的意义不是"文件数恰好如此"，
  * 而是：有人往这些文件加**任何一种具名导出**时，该文件立刻从清单里掉出去、门禁变红，
  * 逼一次评审；`Object.assign(module.exports, {__x})`、循环动态挂键等真正的新形态同理无处藏。
@@ -235,19 +235,39 @@ const EXPORT_FORM_UNRECOGNISED = [
   'docs/generate.js',
   // 模型：`module.exports = mongoose.model(...)`
   'models/AuditLog.js',
+  // 取证捕获模型（2026-10-31，P2）：单值 `module.exports = mongoose.model(...)`，无钩子面
   'models/FireAlarm.js',
+  'models/ForensicCapture.js',
   'models/FireDevice.js',
   'models/IPBlacklist.js',
   'models/Inspection.js',
   'models/Permission.js',
+  // 临时权限授予模型（2026-10-30）：`module.exports = mongoose.model(...)`，单值不具名 ⇒ 无钩子面
+  'models/PrivilegeGrant.js',
+  // 二次验证两个新模型（2026-10-31）：与其余模型同形（`module.exports = mongoose.model(...)`），
+  // 单值、不具名 ⇒ 没有钩子面；加任何具名导出会立刻掉出本清单并让门禁变红。
+  'models/ReauthGrant.js',
+  'models/ReauthTicketUse.js',
+  // 幂等键落库模型（2026-10-31）：`module.exports = mongoose.model(...)`，单值不具名 ⇒ 无钩子面
+  'models/IdempotencyRecord.js',
   'models/Role.js',
   'models/SystemConfig.js',
   'models/TokenBlacklist.js',
   'models/User.js',
+  // 头像模型（2026-10-30）：与其余模型同形（`module.exports = mongoose.model(...)`）——
+  // 单值、不具名 ⇒ 没有钩子面；加任何具名导出会立刻掉出本清单并让门禁变红。
+  // 隐私同意记录模型（2026-11-01，一-7）：与其余模型同形（`module.exports = mongoose.model(...)`），单值不具名 ⇒ 无钩子面
+  'models/ConsentRecord.js',
+  'models/UserAvatar.js',
   'models/UserSession.js',
   // 路由：`module.exports = router`
   'routes/alarmRoutes.js',
   'routes/authRoutes.js',
+  // 头像读取路由（2026-10-30）：与上面同形，`module.exports = router`；挂在 /api/avatars，
+  // 只有一条 GET /:userId ⇒ 仍是单值不具名导出，没有钩子面。
+  'routes/avatarRoutes.js',
+  // 取证溯源路由（2026-11-01）：与上面同形，`module.exports = router`，单值不具名 ⇒ 没有钩子面。
+  'routes/forensicRoutes.js',
   'routes/deviceRoutes.js',
   'routes/inspectionRoutes.js',
   'routes/permissionRoutes.js',
@@ -255,6 +275,9 @@ const EXPORT_FORM_UNRECOGNISED = [
   'routes/roleRoutes.js',
   'routes/securityRoutes.js',
   'routes/userRoutes.js',
+  // 匿名版本元数据路由（2026-10-30）：与上面同形，`module.exports = router`，
+  // 不具名 ⇒ 没有钩子面。加任何具名导出都会立刻掉出本清单并让门禁变红。
+  'routes/versionRoutes.js',
   // 服务：导出单例实例
   'services/AlarmService.js',
   'services/DeviceService.js',
@@ -361,8 +384,27 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
     expect(propertyExportKeys('const v = module.exports["_read"];')).toEqual([]);
   });
 
-  it('钩子总数钉死：只许减不许增（当前 36 个），且成员可点名', () => {
-    expect(hooks.length).toBe(36);
+  it('模型目录完整性：src/models 下每个文件都必须在统一导出面里（孤儿声明 = 死代码）', () => {
+    // 只认「真正声明了 mongoose 模型」的文件：models/ 下还有 auditLogHooks 那类被
+    // AuditLog.js require 的纯 mixin，它们不该出现在 barrel 里。
+    const modelFiles = [...prodSrc.entries()]
+      .filter(
+        ([rel, src]) =>
+          /^models\/[^/]+\.js$/.test(rel) &&
+          rel !== 'models/index.js' &&
+          /mongoose\.model\(/.test(src)
+      )
+      .map(([rel]) => rel)
+      .sort();
+    const barreled = topLevelExportKeys(prodSrc.get('models/index.js')).sort();
+
+    // 两个方向都要判：文件在、导出面没有 ⇒ 从不被 require，schema 里的 unique/TTL 永不落地；
+    // 导出面有、文件不在 ⇒ require 直接抛 MODULE_NOT_FOUND（删模型时漏改 barrel）。
+    expect(modelFiles).toEqual(barreled.map((name) => `models/${name}.js`));
+  });
+
+  it('钩子总数钉死：只许减不许增（当前 38 个），且成员可点名', () => {
+    expect(hooks.length).toBe(38);
     const keys = hooks.map(keyOf);
     for (const must of [
       // worker 线程池是模块级单例：强制 worker 模式的用例必须能 terminate 并复位池，
@@ -387,6 +429,13 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
       // P-2：导出并发闸的槽位/队列是模块级单例，套件之间必须能复位，
       // 否则前一个用例占住的槽位会让后一个用例随机排队超时（随机顺序门禁下必现）。
       'services/exportConcurrency.js::__resetForTest',
+      // 蜜罐账户与哨兵同源：模块级 initPromise + 「当日告警只发一次」的去重表都是单例，
+      // 用例必须能复位，否则「重复 init 幂等」「开关关闭不放行」只能靠进程隔离才测得准。
+      'services/honeypotWatch.js::__resetForTest',
+      // 事件链巡检的计数全是模块级累加器（含「最后一轮」读数）：不复位则同一文件里
+      // 第二条用例只能写相对差值断言，绝对值断言会被前序用例污染（随机顺序门禁下假红/假绿）。
+      // 定时器不归钩子管——关停只有一个入口 stop()。
+      'services/honeypotChainWatch.js::__resetForTest',
     ])
       expect(keys).toContain(must);
   });

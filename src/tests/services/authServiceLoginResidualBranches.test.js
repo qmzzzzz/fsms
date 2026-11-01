@@ -27,6 +27,16 @@ jest.mock('../../models', () => ({
   SystemConfig: { captchaSwitch: jest.fn() },
 }));
 jest.mock('../../services/securityAlert', () => ({ checkBruteForce: jest.fn() }));
+// 挑战闸门的判据读 AuditLog（本文件把该模型整体替身成只有 recordLogin/record），
+// 且它属"前置层"而非本文件的被测对象（残余分支与 .catch 兜底）——整模块替换，避免
+// 判据在本文件里永远读不到而 fail-closed，把所有拒绝路径改写成 CAPTCHA_INVALID。
+jest.mock('../../services/loginChallenge', () => ({
+  isChallengeRequired: jest.fn().mockResolvedValue(false),
+  // 验证码拒绝分支现在会写一条 login_captcha_rejected（审计二-3）——本文件量的是
+  // 「拒绝口径不受旁路失败影响」，故留痕按桩记调用，不在这里断言落库
+  recordCaptchaRejected: jest.fn().mockResolvedValue(undefined),
+  CAPTCHA_TRIGGERS: { SWITCH: 'captcha_switch', CHALLENGE: 'challenge_required' },
+}));
 jest.mock('../../services/canaryWatch', () => ({ recordGhostAttempt: jest.fn() }));
 jest.mock('../../services/captchaService', () => ({ verify: jest.fn() }));
 jest.mock('../../utils/loginCipher', () => ({ decryptLoginCredential: jest.fn() }));
@@ -50,6 +60,7 @@ const { decryptLoginCredential } = require('../../utils/loginCipher');
 const failureAndMfa = require('../../services/authService/failureAndMfa');
 const session = require('../../services/authService/session');
 const { loginUser } = require('../../services/authService/login');
+const loginChallenge = require('../../services/loginChallenge');
 
 const CTX = {
   ip: '127.0.0.1',
@@ -96,6 +107,12 @@ describe('登录前置：验证码与口令解析', () => {
     expect(result).toEqual({ outcome: 'CAPTCHA_INVALID' });
     expect(User.findByUsername).not.toHaveBeenCalled();
     expect(AuditLog.recordLogin).not.toHaveBeenCalled();
+    // 审计二-3：留痕写的**不是**失败行（recordLogin 未被调用），而是独立动作
+    expect(loginChallenge.recordCaptchaRejected).toHaveBeenCalledTimes(1);
+    expect(loginChallenge.recordCaptchaRejected.mock.calls[0][0]).toMatchObject({
+      username: 'alice',
+      trigger: 'captcha_switch',
+    });
   });
 
   test('用户不存在 + 非字符串/空口令：哑 compare 兜底不抛，仍返回统一 401', async () => {

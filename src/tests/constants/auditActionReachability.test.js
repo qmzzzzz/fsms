@@ -35,21 +35,19 @@ const path = require('path');
 
 // 与正向对账闸（auditActionReconciliation）同一份取数实现，见 scanWrittenActions 注释。
 const { scanWriteSites } = require('../helpers/auditWriteSites');
-
-const SRC_DIR = path.resolve(__dirname, '../..');
-const ROUTES_DIR = path.join(SRC_DIR, 'routes');
+// 挂载前缀与 auditMeta 闸共用一份实现（第 18 轮 r2-infra 3.2）：两份等价实现只要有人只改
+// 一处，两个闸门就会对同一份代码给出互相矛盾的结论——抽出来的理由正是这一条。
+const {
+  SRC_DIR,
+  ROUTES_DIR,
+  readMounts,
+  readNestedMounts,
+  makePrefixOf,
+} = require('../helpers/routeMounts');
 
 /** 与生产同源：动态段按真实请求形态替换，再交给真实 deriveAction */
 const OID = '6aab4cb4ee7f2bc07fcd7a8d';
 const UUID = '550e8400-e29b-41d4-a716-446655440000';
-
-/** app.js 的挂载前缀（从源码读，不手抄） */
-function readMounts() {
-  const appSrc = fs.readFileSync(path.join(SRC_DIR, 'app.js'), 'utf8');
-  const mounts = {};
-  for (const m of appSrc.matchAll(/app\.use\(\s*'([^']+)',\s*(\w+)/g)) mounts[m[2]] = m[1];
-  return mounts;
-}
 
 /** security/auditLog.js 的 auditGetExcludePaths（从源码读，不手抄——手抄必然漂移） */
 function readAuditGetExcludePaths() {
@@ -83,7 +81,7 @@ function readAuditGetExcludePaths() {
 const concretize = (routePath) =>
   routePath.replace(/\/:([^/]+)/g, (_m, name) => {
     const n = name.toLowerCase();
-    if (n === 'sid' || n.includes('uuid') || n === 'token') return `/${UUID}`;
+    if (n === 'sid' || n === 'jobid' || n.includes('uuid') || n === 'token') return `/${UUID}`;
     if (n.includes('username') || n === 'code' || n.includes('name')) return '/abc';
     return `/${OID}`;
   });
@@ -92,16 +90,29 @@ const concretize = (routePath) =>
 function scanRoutes() {
   const { deriveAction, deriveCategory } = require('../../utils/auditMeta');
   const mounts = readMounts();
+  const nestedMounts = readNestedMounts();
+  const prefixOrThrow = makePrefixOf(mounts, nestedMounts);
   const auditGetExcludePaths = readAuditGetExcludePaths();
   // 与生产 isGetAudit 同尺：GET/HEAD 默认审计，命中豁免清单才跳过
   const isExcluded = (full) =>
     auditGetExcludePaths.some((p) => full === p || full.startsWith(`${p}/`));
 
   const rows = [];
+  const unmounted = [];
+  // 未挂载（既不在 app.js 也不在嵌套挂载里）= 该文件本就不对外暴露，跳过；
+  // 但"该文件有挂载、只是解析失败"必须抛——两种情形不能长得一样（helper 的抛错纪律）。
+  const prefixOf = (name) => {
+    if (mounts[name] || nestedMounts[name]) return prefixOrThrow(name);
+    return undefined;
+  };
   for (const f of fs.readdirSync(ROUTES_DIR)) {
     if (!f.endsWith('.js')) continue;
-    const prefix = mounts[f.replace('.js', '')];
-    if (!prefix) continue;
+    const name = f.replace('.js', '');
+    const prefix = prefixOf(name);
+    if (!prefix) {
+      unmounted.push(name);
+      continue;
+    }
     const src = fs.readFileSync(path.join(ROUTES_DIR, f), 'utf8');
     for (const m of src.matchAll(/router\.(get|post|put|patch|delete)\(\s*'([^']*)'/g)) {
       const method = m[1].toUpperCase();
@@ -133,8 +144,21 @@ function scanRoutes() {
       audited: method === 'GET' ? !isExcluded(route) : true,
     });
   }
-  return rows;
+  return { rows, unmounted };
 }
+
+/**
+ * 未被挂载的路由文件清单（未挂载 ≠ 解析失败）。
+ *
+ * index.js 只是汇总入口（内部 options/mfa/avatar 等子路由由它 require 后再各自 use，
+ * 自己不做 app.use 的第二个实参）——它确实没有独立前缀。但「跳过」必须是**可数**的：
+ * 第 18 轮 r2-infra 实测指出，原先的 `if (!prefix) continue` 让「少扫一个文件」和
+ * 「该文件没有路由」长得一模一样（helper 对同情形是抛）。这里把集合钉住：
+ * 新增一个未挂载的路由文件会立刻红，而不是悄悄少扫。
+ * （wellKnownRoutes/versionRoutes 一度被我写进本清单，实测它们由 app.js 直接挂载、
+ *  本就在取数结果里——本清单是"确实取不到前缀"的集合，不是"我不知道前缀"的集合。）
+ */
+const UNMOUNTED_ROUTE_FILES = ['index'];
 
 /**
  * 源码写入集合 —— 与正向对账闸**共用同一个扫描器**（helpers/auditWriteSites）。
@@ -157,7 +181,7 @@ function scanWrittenActions() {
 }
 
 /**
- * 「永不产生」的实测集合（2026-09-17 度量，共 39 条）
+ * 「永不产生」的实测集合（2026-09-17 度量 39 条；2026-10-30 升级新增 2 条、头像读 1 条后共 42 条）
  *
  * 判定口径（与下方用例完全一致，不是手抄清单）：
  *   在白名单内 ∧ 没有任何「会被审计的」路由能派生出它 ∧ 没有任何源码写入点。
@@ -167,7 +191,7 @@ function scanWrittenActions() {
  *
  * 分两类，处置口径不同：
  *
- * ── A 类（9 条）：路由可派生，但该 GET 路由命中 auditGetExcludePaths 豁免清单
+ * ── A 类（12 条）：路由可派生，但该 GET 路由命中 auditGetExcludePaths 豁免清单
  *    全局审计中间件对 GET 默认审计、命中豁免清单才跳过（见 security.js 的 isGetAudit），
  *    因此这批 action 虽能由 deriveAction 推导出来，实际永远不会落库。这 9 条都在
  *    豁免清单的两种口径内（预认证/登录流程面、纯自读面，依据见 security.js 的
@@ -197,7 +221,8 @@ function scanWrittenActions() {
  *    （有人把 GET 路由移出了豁免清单，或加了写入点），测试立即失败，强制同步更新技术文档。
  */
 const NEVER_PRODUCED = [
-  // ── A 类：GET 路由命中 auditGetExcludePaths 豁免清单（2026-09-30 反转后 9 条；
+  // ── A 类：GET 路由命中 auditGetExcludePaths 豁免清单（2026-09-30 反转后 9 条，
+  //    2026-10-30 升级轮询新增 2 条；
   //    反转前 25 条里的 device/alarm/inspection view+stats、report_*、
   //    security_stats/overview/alerts/ip-list_query 共 16 条已随反转真实落库，
   //    从本技术文档移除）──
@@ -210,6 +235,14 @@ const NEVER_PRODUCED = [
   'security_my-info',
   'security_bindings',
   'security_my-logs',
+  // 头像读取：本人/他人头像都是展示型资源，命中豁免前缀 /api/avatars（高频 img src），
+  // 实际不落库；保留白名单条目是为豁免清单调整后 action 校验仍然合法。
+  'avatar_view',
+  // 升级状态轮询（2026-10-30，d 类：无业务数据、弹窗打开期间 3 秒一次）。
+  // 两条 GET 命中豁免前缀 /api/security/upgrade；POST /upgrade/requests 不在豁免内，
+  // 其派生 action security_upgrade_requests 由失败尝试真实落库，故不登记在此。
+  'security_upgrade',
+  'security_upgrade_jobs',
 
   // ── B 类 b1：语义已被替代/改名 ──
   'security_report-suspicious',
@@ -232,10 +265,26 @@ const NEVER_PRODUCED = [
   'alarm_false_alarm',
 ];
 
+describe('挂载前缀取数（与 auditMeta 闸共用 helpers/routeMounts）', () => {
+  test('未挂载的路由文件集合必须与登记一致：少扫一个文件不能和「该文件没有路由」长得一样', () => {
+    const { unmounted } = scanRoutes();
+    expect({ unmounted }).toEqual({ unmounted: UNMOUNTED_ROUTE_FILES });
+  });
+
+  test('解析失败必须抛：父前缀缺失时不能被降级成「未挂载」', () => {
+    const { makePrefixOf } = require('../helpers/routeMounts');
+    const prefixOf = makePrefixOf(
+      {},
+      { forensicRoutes: [{ parent: 'securityRoutes', sub: '/forensic' }] }
+    );
+    expect(() => prefixOf('forensicRoutes')).toThrow(/父路由 securityRoutes/);
+  });
+});
+
 describe('审计 action 白名单可达性技术文档', () => {
   test('白名单 ⊆（路由派生可达 ∪ 源码写入可达 ∪ 技术文档登记）', () => {
     const { AUDIT_LOG_ACTIONS } = require('../../constants/audit');
-    const routes = scanRoutes();
+    const { rows: routes } = scanRoutes();
     const written = scanWrittenActions();
 
     const derived = new Set(routes.map((r) => r.action));
@@ -254,7 +303,7 @@ describe('审计 action 白名单可达性技术文档', () => {
 
   test('技术文档无冗余：登记的每一条都确实不可达（防止技术文档变成「免责名单」）', () => {
     const { AUDIT_LOG_ACTIONS } = require('../../constants/audit');
-    const routes = scanRoutes();
+    const { rows: routes } = scanRoutes();
     const written = scanWrittenActions();
     const auditedDerived = new Set(routes.filter((r) => r.audited).map((r) => r.action));
     const whitelist = new Set(AUDIT_LOG_ACTIONS);

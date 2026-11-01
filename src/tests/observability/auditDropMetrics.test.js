@@ -81,13 +81,14 @@ describe('Top-6 ② 渲染口径：恒定行（含 0），面板不必区分"没
     metrics._auditDrops.clear();
   });
 
-  test('五个 reason 各一行（即使全为 0）+ 积压/拒绝裁剪 gauge 各一行', () => {
+  test('六个 reason 各一行（即使全为 0）+ 积压/拒绝裁剪 gauge 各一行', () => {
     const out = metrics.formatPrometheus();
     for (const reason of [
       'buffer_overflow',
       'poison_doc',
       'precast',
       'wal_durable_lost',
+      'wal_trim_ordinary',
       'other',
     ]) {
       expect(out).toContain(`audit_records_dropped_total{reason="${reason}"} 0`);

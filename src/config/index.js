@@ -9,21 +9,41 @@ require('dotenv').config();
 // 下方所有字段在模块加载时求值，若晚于此处 hydrate，拿到的会是空串。
 const { hydrateSecretsFromFiles } = require('./secrets');
 const secretHydration = hydrateSecretsFromFiles();
-const { requiresProductionSemantics } = require('./envSemantics');
+const { requiresProductionHardening } = require('./envSemantics');
 
 // 限流参数是安全边界，不应因为误配成极端值而静默关闭保护或占满内存。
-// 开发/测试环境保留原有可调范围，方便高配额集成测试；生产语义下越界直接拒绝启动。
+// 开发/测试环境保留原有可调范围，方便高配额集成测试；生产硬闸判据下越界直接拒绝启动。
 const parseRateLimitParam = (name, fallback, min, max) => {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
   const value = Number(raw);
   const valid = Number.isInteger(value) && value >= min && value <= max;
-  if (!valid && requiresProductionSemantics()) {
+  if (!valid && requiresProductionHardening()) {
     throw new Error(`${name} 必须是 ${min} 到 ${max} 之间的整数`);
   }
   if (Number.isInteger(value) && value > 0) return value;
   return fallback;
 };
+
+/**
+ * P2-3：JWT 密钥集解析。形状错误不在这里抛（配置模块在 logger 加载链最前端），
+ * 由 config/validate.js 的生产校验统一拒绝；开发态解析失败按未配置处理。
+ */
+function parseJwtSecrets(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([kid, secret]) => typeof kid === 'string' && kid && typeof secret === 'string' && secret
+      )
+    );
+  } catch (_) {
+    return {};
+  }
+}
 
 module.exports = {
   // 密钥注入结果（供 index.js 启动期输出日志，此处不能 require logger——
@@ -31,11 +51,9 @@ module.exports = {
   secretHydration,
   // 服务器配置
   port: process.env.PORT || 3000,
-  // 环境名必须与 validate.js 的归一判据**同源**，否则同一进程里"是否生产"有两个答案：
-  // 体检按生产办（`NODE_ENV=` 空串 ⇒ requiresProductionSemantics()=true），
-  // 而行为按开发走（`|| 'development'` 把空串当 falsy）⇒ morgan 落到 dev 分支、
-  // 查询串里的 refreshToken 原文落盘，originCheck 也回退到 localhost 白名单。
-  // 顶层 require 无环：validate.js 不 require 本文件（见 §112.2）。
+  // 环境名必须与 validate.js 的归一判据**同源**：否则同一进程里"是否生产"有两个答案
+  // （体检按生产办、行为按开发走 ⇒ morgan 落 dev 分支、查询串里的 refreshToken 原文落盘，
+  // originCheck 也回退 localhost 白名单）。顶层 require 无环：validate.js 不 require 本文件。
   nodeEnv: require('./validate').normalizeNodeEnv(),
 
   // MongoDB 配置
@@ -50,6 +68,13 @@ module.exports = {
     expire: process.env.JWT_EXPIRE || '2h',
     refreshSecret: process.env.JWT_REFRESH_SECRET || '',
     refreshExpire: process.env.JWT_REFRESH_EXPIRE || '7d',
+    // P2-3：多密钥轮换。密钥集为 JSON 对象（kid → secret），签发带 kid，
+    // 验签按 kid 选钥；未配置时保持单密钥语义。解析失败留给启动校验报错，
+    // 这里只做形状归一，避免配置模块抛错把 logger 的加载链打断。
+    secrets: parseJwtSecrets(process.env.JWT_SECRETS),
+    currentKid: (process.env.JWT_CURRENT_KID || '').trim(),
+    refreshSecrets: parseJwtSecrets(process.env.JWT_REFRESH_SECRETS),
+    refreshCurrentKid: (process.env.JWT_REFRESH_CURRENT_KID || '').trim(),
   },
 
   // 生产环境配置校验（委托给 config/validate.js 统一实现，避免两套规则不一致）
@@ -63,11 +88,9 @@ module.exports = {
   hmacSecret: process.env.HMAC_SECRET || '',
 
   // CORS 允许的来源（逗号分隔）
-  // 此处曾声称「未配置时反射请求来源」——与实现不符。
-  // app.js 与 middleware/originCheck.js 在本值为空时都回退到**固定**的本地
-  // 开发白名单（localhost/127.0.0.1 的 3001 与 5173），从不回显 Origin。
-  // 回显来源在 credentials:true 下等于允许任意站点带凭据跨域，
-  // 保留这句错误注释会让人误判现有行为不安全，或据此写出真的回显实现。
+  // 曾声称「未配置时反射请求来源」——与实现不符：本值为空时 app.js 与 originCheck.js 都回退
+  // 到**固定**的本地开发白名单（localhost/127.0.0.1 的 3001 与 5173），从不回显 Origin——
+  // 回显在 credentials:true 下等于允许任意站点带凭据跨域。
   corsOrigin: process.env.CORS_ORIGIN || '',
 
   // 是否开放公开注册（生产环境可关闭，仅由管理员创建用户）
@@ -80,13 +103,13 @@ module.exports = {
   //
   // 【位置即契约】这个键必须留在**顶层**。它此前被写在下方 `rateLimit: {}` 子对象里，
   // 而三处读取方读的都是顶层：
-  //   · models/SystemConfig.js:215（isRegisterCaptchaEnabled 的 fallback）
-  //   · models/SystemConfig.js:283-284（captchaSwitch 的静态兜底，DB 读取失败时用它）
+  //   · models/SystemConfig.js:208（isRegisterCaptchaEnabled 的 fallback）
+  //   · models/SystemConfig.js:277（captchaSwitch 的静态兜底，DB 读取失败时用它）
   //   · controllers/authController/credentials.js:114-115（/auth/captcha-status 兜底网的降级值）
   // ⇒ 恒为 undefined ⇒ toConfigBoolean(undefined, false) === false
   // ⇒ 注册接口的图形验证码被**静默关闭**。而 initData 从不播种该键
   // （只播种 allowPublicRegistration / loginCaptchaEnabled），所以**全新部署必然走这条 fallback**，
-  // 与 config/index.js / SystemConfig.js:194,:214 / .env.example:244 四处"默认开启/默认强校验"
+  // 与 config/index.js:77 / SystemConfig.js:193 / SystemConfig.js:207 / .env.example:244 四处"默认开启/默认强校验"
   // 的声明全部相反。与紧邻的 loginCaptchaEnabled 同层是唯一正确写法。
   // 回归判据见 src/tests/security/systemConfigBooleanContract.test.js 的「默认值契约」用例。
   registerCaptchaEnabled: process.env.REGISTER_CAPTCHA_ENABLED !== 'false',
@@ -101,11 +124,9 @@ module.exports = {
     // 默认 12 轮：现代 GPU 下的推荐下限（10 轮已不足以抵抗离线爆破），
     // 仅影响新哈希，存量哈希仍可校验；如需迁移可在用户下次改密时自然升级。
     //
-    // 加范围校验 10–14。原先只判 `rounds > 0`，两个方向都危险：
-    //   - 过小（如 BCRYPT_ROUNDS=4）→ 口令哈希秒破，而系统照常启动、无任何提示；
-    //   - 过大（如 999）→ bcrypt 单次哈希耗时指数上升，登录接口直接变成自我 DoS
-    //     （bcrypt 是同步 CPU 密集操作，会占满事件循环）。
-    // 越界值回落默认 12 并在启动日志告警，避免「静默按危险参数运行」。
+    // 加范围校验 10–14：原先只判 `rounds > 0`，过小（如 4）口令秒破且启动无提示，
+    // 过大（如 999）则 bcrypt 单次哈希耗时指数上升、占满事件循环（自我 DoS）。
+    // 越界值回落默认 12 并在启动日志告警，避免静默按危险参数运行。
     const BCRYPT_MIN_ROUNDS = 10;
     const BCRYPT_MAX_ROUNDS = 14;
     if (Number.isFinite(rounds) && (rounds < BCRYPT_MIN_ROUNDS || rounds > BCRYPT_MAX_ROUNDS)) {
@@ -137,10 +158,7 @@ module.exports = {
     ipMaxRequests: (() => {
       return parseRateLimitParam('RATE_LIMIT_IP_MAX_REQUESTS', 1000, 1, 100000);
     })(),
-    // 注：`registerCaptchaEnabled` **不在**本子对象内——它属于顶层，见上方注释。
-    // 曾经写在这里，导致三处顶层读取恒为 undefined、注册验证码被静默关闭。
-    // 本子对象只放**限流**参数（下面两项），不放开关。
-    // 注册 IP 限流阈值（默认 10 次/5 分钟/IP）
+    // 注：`registerCaptchaEnabled` 不在本子对象内（它属顶层）；这里只放限流参数。
     registerWindowMs: (() => {
       return parseRateLimitParam('REGISTER_IP_WINDOW_MS', 5 * 60 * 1000, 1000, 24 * 60 * 60 * 1000);
     })(),

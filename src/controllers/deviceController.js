@@ -252,8 +252,8 @@ const updateDeviceStatus = asyncHandler(async (req, res) => {
  */
 const addMaintenanceRecord = asyncHandler(async (req, res) => {
   // 路由链已挂 maintenanceValidation（deviceRoutes.js:169-180：content 1-500、type 枚举），
-  // 但本控制器此前从不消费 validationResult → 校验器是死代码：非法 type 直冲模型 enum
-  // 抛 ValidationError→500（应 400），content 无 schema 上限→存储无界。补齐与其它写入口一致的守卫。
+  // 必须消费 validationResult：否则校验器是死代码——非法 type 直冲模型 enum 抛 500（应 400），
+  // content 无 schema 上限→存储无界。补齐与其它写入口一致的守卫。
   const errors = validationResult(req);
   if (!errors.isEmpty())
     return ApiResponse.codeError(res, 'VALIDATION_FAILED', {

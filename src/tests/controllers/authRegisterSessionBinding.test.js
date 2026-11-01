@@ -79,7 +79,7 @@ describe('注册即登录的令牌必须绑定一条可吊销会话（F-175）',
     passwords[local] = password;
     const res = await request(app)
       .post('/api/auth/register')
-      .send({ username, email: `${username}@reg.example.com`, password });
+      .send({ username, email: `${username}@reg.example.com`, password, privacyConsent: true });
     expect(res.status).toBe(201);
     const access = cookieValue(res, 'access_token');
     const refreshToken = cookieValue(res, 'refresh_token');
@@ -241,6 +241,7 @@ describe('注册即登录的令牌必须绑定一条可吊销会话（F-175）',
           username: `${stamp}deg`,
           email: `${stamp}deg@reg.example.com`,
           password: randomPassword(),
+          privacyConsent: true,
         },
         { req: { ip: '127.0.0.1', get: () => 'jest-degraded' } }
       );

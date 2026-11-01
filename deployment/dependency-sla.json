@@ -1,0 +1,11 @@
+{
+  "note": "依赖/SAST 修复时限（SLA）的数据源。表里的数字与 docs/security-dependency-watch.md 的同名表格必须逐格相同，由 src/tests/deploy/dependencyFixSla.test.js 对账；同一用例里另写着硬上限，数字只许收紧——放宽数字必须改用例，等于一次显式评审。",
+  "unit": "days",
+  "windows": {
+    "critical": 7,
+    "high": 30,
+    "moderate": 90,
+    "low": 180,
+    "info": 365
+  }
+}

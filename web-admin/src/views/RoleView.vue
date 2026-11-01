@@ -16,6 +16,28 @@
               <span>{{ $t('common.add') }}</span>
             </button>
           </div>
+          <!-- P1③：角色列表加载失败必须显式可见。此前 catch 只 roles=[]，
+               左栏渲染成「没有角色」，与「系统里确实一个角色都没有」完全一致。
+               这是**列表面**的错误块，与右侧权限集面的 .perm-load-failed 相互独立。 -->
+          <el-alert
+            v-if="roleListFailed"
+            :title="$t('common.listLoadFailed')"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="load-error role-list-failed"
+          >
+            <template #default>
+              <button
+                type="button"
+                class="glass-btn glass-btn--default glass-btn--sm"
+                :disabled="loadingRoleList"
+                @click="retryLoadRoles"
+              >
+                {{ $t('common.retry') }}
+              </button>
+            </template>
+          </el-alert>
           <!-- 角色列表（D-2 拆为 RoleListPanel 组件） -->
           <RoleListPanel
             :roles="roles"
@@ -37,7 +59,7 @@
             <div class="panel-title-group">
               <span class="panel-title">{{ $t('role.permissions') }}</span>
               <span v-if="currentRole" class="panel-subtitle">
-                <span class="role-tag">{{ currentRole.name }}</span>
+                <span class="role-tag">{{ roleName(currentRole) }}</span>
                 <span v-if="currentRole.isBuiltIn" class="role-tag role-tag--builtin">{{
                   $t('role.builtIn')
                 }}</span>
@@ -58,7 +80,7 @@
                 v-if="canAssign"
                 type="button"
                 class="glass-btn glass-btn--primary glass-btn--sm"
-                :disabled="savingPermissions || treeForbidden"
+                :disabled="savingPermissions || treeForbidden || permLoadFailed"
                 @click="savePermissions"
               >
                 {{ savingPermissions ? $t('common.adding') : $t('role.assignPermissions') }}
@@ -66,18 +88,32 @@
             </div>
           </div>
 
-          <!-- 空状态 -->
-          <div v-if="!currentRole" class="empty-state">
+          <!-- 空状态：列表失败时**不得**走这一支（失败 ≠ 没有角色，裁决③） -->
+          <div v-if="!currentRole && !roleListFailed" class="empty-state">
             <div class="empty-state__icon">🔐</div>
             <p>{{ $t('role.selectRole') }}</p>
           </div>
 
-          <template v-else>
+          <template v-else-if="currentRole">
             <!-- 无 permission:read / permission:tree：目录接口会 403，
                  只展示角色元数据，不再渲染空树误导用户 -->
             <div v-if="treeForbidden" class="perm-unavailable">
               <div class="perm-unavailable__icon">🔒</div>
               <p>{{ $t('role.permTreeForbidden') }}</p>
+            </div>
+
+            <!-- 权限集没读到：显式错误态。不渲染权限网格，避免把「未知」画成「全部未勾选」 -->
+            <div v-else-if="permLoadFailed" class="perm-unavailable perm-load-failed">
+              <div class="perm-unavailable__icon">⚠️</div>
+              <p>{{ $t('role.permLoadFailed') }}</p>
+              <button
+                type="button"
+                class="glass-btn glass-btn--default glass-btn--sm"
+                :disabled="savingPermissions"
+                @click="retryLoadRolePermissions"
+              >
+                {{ $t('common.retry') }}
+              </button>
             </div>
 
             <template v-else>
@@ -158,6 +194,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { useSystemLabels } from '@/i18n/systemLabels'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { ElNotification } from 'element-plus/es/components/notification/index.mjs'
@@ -174,6 +211,8 @@ import PermissionModuleCard from '@/components/PermissionModuleCard.vue'
 
 const { t } = useI18n()
 const { hasPerm } = usePermission()
+// 内置角色名称本地化：列表/标签/删除确认共用同一口径
+const { roleName } = useSystemLabels()
 
 // 写权限与「目录读权限」是两件事：路由只要求 role:read，而权限树接口要求
 // permission:read | permission:tree。仅持 role:read 的自定义角色能进本页，
@@ -188,6 +227,13 @@ const currentRole = ref(null)
 const savingPermissions = ref(false)
 const loadingTree = ref(false)
 const treeForbidden = ref(false)
+// 权限集加载失败：与「该角色没有任何权限」是两件事。前者必须进入显式错误态并禁用保存，
+// 否则空勾选会被当成用户的编辑意图，一次保存就把整集权限静默替换成空集。
+const permLoadFailed = ref(false)
+// 角色列表加载失败：与 permLoadFailed 是**两个独立事实**（裁决③）。
+// 不共用一个布尔——共用会导致「列表没读到」被权限集的错误块顶掉，
+// 或反过来「权限集没读到」被列表的错误块掩盖，两个面的红互相遮。
+const roleListFailed = ref(false)
 const loadingRoleList = ref(false)
 const dialogVisible = ref(false)
 // 编辑模式的预填来源：null = 新增模式。打开编辑时指向被点的行对象
@@ -234,6 +280,7 @@ const loadRoles = async (forceSelect = false) => {
     const res = await api.roles.getList({ limit: 100 })
     const payload = res?.data?.data
     roles.value = Array.isArray(payload) ? payload : []
+    roleListFailed.value = false
     if (forceSelect && roles.value.length > 0) {
       currentRole.value = roles.value[0]
       await loadRolePermissions(currentRole.value._id)
@@ -249,7 +296,9 @@ const loadRoles = async (forceSelect = false) => {
       clearChecked()
     }
   } catch (e) {
-    // 失败原因已在拦截器统一提示
+    // 失败原因已在拦截器统一提示；但**页面上必须留持久痕迹**：
+    // 只清空 roles 会让左栏渲染成「没有角色」，与「系统里确实一个角色都没有」无法区分。
+    roleListFailed.value = true
     roles.value = []
   } finally {
     loadingRoleList.value = false
@@ -298,10 +347,23 @@ const loadRolePermissions = async (roleId) => {
     const roleData = res?.data?.data
     const permissions = roleData?.permissions || []
     setChecked(permissions.map((p) => p._id || p.id).filter(Boolean))
+    permLoadFailed.value = false
   } catch (e) {
     if (!isCurrent()) return
+    // 失败时清空勾选只是为了让面板不残留上一个角色的选中态；「未知」这个事实
+    // 由 permLoadFailed 单独承载，并被保存按钮的 disabled 与 savePermissions 的
+    // 入口守卫共同拦住——清空本身绝不能被读成「该角色权限为空」。
     setChecked([])
+    permLoadFailed.value = true
   }
+}
+
+// 错误态下的重试：只重拉当前角色的权限集（权限树已在上面按需补拉过）
+const retryLoadRoles = () => loadRoles()
+
+const retryLoadRolePermissions = () => {
+  if (!currentRole.value) return Promise.resolve()
+  return loadRolePermissions(currentRole.value._id)
 }
 
 // 切换角色
@@ -327,7 +389,7 @@ const handleCurrentChange = async (row) => {
 const handleDelete = async (row) => {
   try {
     await ElMessageBox.confirm(
-      `${t('messages.deleteConfirm')}「${row.name}」?`,
+      `${t('messages.deleteConfirm')}「${roleName(row)}」?`,
       t('messages.confirmTitle'),
       { type: 'warning' }
     )
@@ -369,6 +431,13 @@ const onRoleUpdated = async (updatedRole) => {
 const savePermissions = async () => {
   if (!currentRole.value) {
     ElMessage.warning(t('role.selectRole'))
+    return
+  }
+  // 入口守卫（不只依赖按钮 disabled）：权限集没读到时勾选集合不代表该角色的现状，
+  // 任何提交都等于用当前勾选整集替换线上权限。先强制重载，重载成功后再由用户确认保存。
+  if (permLoadFailed.value) {
+    ElMessage.warning(t('role.permLoadFailed'))
+    await retryLoadRolePermissions()
     return
   }
   savingPermissions.value = true
@@ -522,6 +591,10 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.load-error {
+  margin-bottom: var(--xf-spacing-md);
+}
+
 /* ==========================================================================
    说明：按钮样式完全复用全局 .glass-btn 体系（global.css 设计令牌驱动），
    本组件不再定义任何与全局冲突的按钮样式，仅保留布局与组件特有视觉。

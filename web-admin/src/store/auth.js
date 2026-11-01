@@ -52,7 +52,15 @@ export const normalizeUser = (user) => {
  * （`sessionVerified` 不持久化，恒为 false），受保护视图挂载时内存里已是
  * /auth/me 的完整对象。localStorage 里的这份只是「上次见到的身份」提示。
  */
-const PERSISTED_USER_FIELDS = ['userId', 'id', '_id', 'username', 'roles']
+const PERSISTED_USER_FIELDS = [
+  'userId',
+  'id',
+  '_id',
+  'username',
+  'roles',
+  // P1-2：仅用于刷新后先把用户引到改密页；服务端 authenticate 仍会独立兜底
+  'mustChangePassword',
+]
 
 /**
  * @param {object|null} user 归一化后的用户对象
@@ -333,18 +341,24 @@ export const useAuthStore = defineStore('auth', {
           // 网络恢复后用户仍被当作未登录，必须手动刷新页面才能回到已登录态，
           // 而 cookie 其实一直有效。
           //
-          // 只有 4xx（服务端明确表态）才写负缓存；网络错误/超时/5xx 不写，
-          // 留给下一次触发（路由切换、下一个请求）重试。
+          // 2026-10-30 收窄：只有 401/403 才是「服务端明确答复未登录」。
+          // 原先按「4xx 一律算明确答复」处理，把这些同样不掌握会话状态的状态码
+          // 也写进了负缓存，代价同样是整个页面生命周期不再探测：
+          //   - 429：全站限流器（app.js 的 generalLimiter）打回，与登录态无关；
+          //   - 404：后端版本比前端旧（/auth/session 尚未上线）或网关改写了路径；
+          //   - 400：请求本身被拒（查询参数闸等），不代表会话失效；
+          //   - 5xx / 网络错误 / 超时：无法核实。
+          // 它们一律不写 restoreFailed，留给下一次触发（路由切换、下一个请求）重试。
           const status = err?.response?.status
-          const isDefiniteAnswer = typeof status === 'number' && status >= 400 && status < 500
+          const isDefiniteAnswer = status === 401 || status === 403
           if (isDefiniteAnswer) {
             this.restoreFailed = true
             // 401/403 明确表示会话不可用：连同本地缓存身份一起清除
-            if (hadCachedIdentity && (status === 401 || status === 403)) {
-              dropStaleIdentity()
-            }
-          } else if (hadCachedIdentity) {
-            // 网络/5xx：无法核实，但后端仍是最终鉴权方（所有请求带 cookie）。
+            if (hadCachedIdentity) dropStaleIdentity()
+            return false
+          }
+          if (hadCachedIdentity) {
+            // 打不通：无法核实，但后端仍是最终鉴权方（所有请求带 cookie）。
             // 保留已有身份与页面，下一次路由切换会继续尝试核实（sessionVerified 仍为 false）。
             return true
           }

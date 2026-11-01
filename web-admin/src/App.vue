@@ -1,6 +1,6 @@
 <template>
   <el-config-provider :locale="epLocale">
-    <!-- 热升级提示条：服务端换版或前端资源有新版本时出现在底部，由用户决定何时刷新 -->
+    <!-- 升级提示条：服务端换版或前端资源有新版本时出现在底部，由用户决定何时刷新 -->
     <UpdateNoticeBar />
     <router-view />
   </el-config-provider>

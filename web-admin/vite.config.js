@@ -432,7 +432,7 @@ export default defineConfig(({ command, mode }) => {
     fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')
   ).version
 
-  // 构建标识（热升级的比对键）：必须与后端 GET /api/version 返回的 buildId 同源，
+  // 构建标识（升级的比对键）：必须与后端 GET /api/version 返回的 buildId 同源，
   // 否则前端会一直认为「服务端是另一个版本」而反复提示刷新。
   //
   // 来源只有一处：构建期的 APP_BUILD_ID（Dockerfile 把 CI 的 GIT_SHA 同时传给
@@ -551,7 +551,7 @@ export default defineConfig(({ command, mode }) => {
         //
         // 原为 'autoUpdate'：SW 自行 skipWaiting + clientsClaim，并在 controllerchange
         // 时**自动整页 reload**。用户正在填巡检表/报警单时会被直接刷掉，数据丢失且
-        // 毫无提示。升级频率低时这个坑不容易被撞见；一旦启用蓝绿热升级（一天可能数次），
+        // 毫无提示。升级频率低时这个坑不容易被撞见；一旦启用蓝绿升级（一天可能数次），
         // 它会变成常态事故。故改为「新版本就绪 → 提示 → 用户点了才生效」。
         //
         // 代价：新版本不再自动生效，依赖用户点「立即刷新」。为此 main.js 另外挂了

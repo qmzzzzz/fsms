@@ -16,7 +16,7 @@
           </span>
           <!-- 查询模式：表格直接展示该名单类型的命中条目，便于对封禁 IP 直接操作（移除等） -->
           <span v-else class="query-mode-label">
-            {{ $t('security.queryMode') }}：{{ queryResult?.ip || '' }}
+            {{ $t('security.queryMode') }}{{ $t('common.labelColon') }}{{ queryResult?.ip || '' }}
           </span>
         </div>
         <button
@@ -119,6 +119,16 @@
             clearable
             maxlength="200"
             show-word-limit
+          />
+        </el-form-item>
+        <el-form-item v-if="typedConfirmTarget" :label="$t('ipList.typedConfirmLabel')">
+          <el-input
+            v-model="typedConfirmText"
+            class="ip-typed-confirm"
+            :placeholder="$t('ipList.typedConfirmPlaceholder')"
+            style="width: 220px"
+            maxlength="200"
+            @keyup.enter="handleAdd"
           />
         </el-form-item>
         <el-form-item>
@@ -508,8 +518,22 @@ const handleSizeChange = () => {
 // 新增重入锁：同 handleQuery，adding 要等 DOM 重渲染才对按钮生效
 // （实测同一 tick 三次连点发出 3 个 POST，名单会被重复写入三次）
 const addSubmitting = ref(false)
+/**
+ * 打字确认的**两阶段**：第一次提交被拒（typed_confirmation_required）后，
+ * 后端把"这个网段需要逐字敲一遍"说出来，本视图据此亮出输入框；第二次提交带上 typedConfirm。
+ * 不做成"永远显示输入框"：低危条目（单地址）不需要，多一个必填项只会让人乱填。
+ */
+const typedConfirmTarget = ref('')
+const typedConfirmText = ref('')
 // 名单切换重入锁：跨名单操作包含多个写请求，整个流程期间禁用所有行操作。
 const switchingId = ref(null)
+
+/** 读网段护栏的原因码：只在被拒时存在，命中不了就当"没有这回事"（不吞成笼统文案） */
+const refusalReasonOf = (e) => {
+  const err = e?.response?.data?.errors
+  if (!err || err.errorCode !== 'IP_SEGMENT_WRITE_REFUSED') return ''
+  return typeof err.reason === 'string' ? err.reason : ''
+}
 
 const handleAdd = async () => {
   if (addSubmitting.value) return
@@ -526,24 +550,43 @@ const handleAdd = async () => {
   addSubmitting.value = true
   adding.value = true
   try {
-    await apiClient.post('/security/ip-list', {
+    const body = {
       ip,
       type: listType.value,
       reason:
         addForm.reason.trim() ||
         (listType.value === 'black' ? 'manual_configuration' : 'trusted_source'),
       durationHours: Number(addForm.durationHours) || 0,
-    })
+    }
+    // 同一网段的第二次提交才带确认串：第一次被拒本身就说明了"这段是高危段"
+    if (typedConfirmTarget.value === ip && typedConfirmText.value.trim()) {
+      body.typedConfirm = typedConfirmText.value.trim()
+    }
+    await apiClient.post('/security/ip-list', body)
     ElMessage.success(
       `${t('security.added')} ${ip} ${listType.value === 'black' ? t('security.blacklist') : t('security.whitelist')}`
     )
     addForm.ip = ''
     addForm.reason = ''
+    // 确认串只对"那一次、那个网段"有效：不清掉下次换网段会被判成敲错
+    typedConfirmTarget.value = ''
+    typedConfirmText.value = ''
     // 新增条目按时间倒序排在第一页，回到首页以便立即看到
     page.current = 1
     loadData()
   } catch (e) {
-    // 错误已在拦截器统一提示
+    // 网段护栏的拒绝要给**可执行的下一步**，不是一个笼统的"操作失败"：
+    // typed_confirmation_required 能靠再点一次满足（亮出输入框），另两条只能换更小的网段。
+    const refusal = refusalReasonOf(e)
+    if (refusal === 'typed_confirmation_required') {
+      typedConfirmTarget.value = ip
+      ElMessage.warning(t('ipList.refusedTypedConfirm'))
+    } else if (refusal === 'operator_inside') {
+      ElMessage.warning(t('ipList.refusedOperatorInside'))
+    } else if (refusal === 'live_traffic_inside') {
+      ElMessage.warning(t('ipList.refusedLiveTraffic'))
+    }
+    // 其余错误已在拦截器统一提示
   } finally {
     adding.value = false
     addSubmitting.value = false
@@ -613,6 +656,10 @@ const handleSwitchList = async (row) => {
     reason: switchReason(row, targetType),
     durationHours: remainingDurationHours(row),
   }
+  // 白转黑落到网段上时，后端要求逐字确认（≥256 主机）。切换本身已经是"确认框 + 再点一次"
+  // 的两次交互，故用网段本身当确认串——不给这个字段，该路径上的 /24 切换 100% 被拒，
+  // 还会连带触发一次多余的白名单恢复写。单地址不带（没有"封段"语义，多带反而掩盖错误）。
+  if (targetType === 'black' && row.ip.includes('/')) payload.typedConfirm = row.ip
   const restoreOriginalWhitelist = async () => {
     try {
       await apiClient.post('/security/ip-list', {

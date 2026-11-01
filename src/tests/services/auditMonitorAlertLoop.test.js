@@ -10,6 +10,9 @@
  * 缺陷二：AUDIT_MONITOR_INTERVAL_MS 直传 setInterval，
  * parseInt('-5') 非 NaN ⇒ `-5 || DEFAULT` 取 -5 ⇒ Node 把间隔抬成 1ms，
  * 每 1ms 跑三条审计聚合（自我 DoS）。
+ *
+ * 缺陷二的**上界**（同一缺口类，2026-11-01）：> 2^31-1ms 的值同样被 Node 静默改成 1ms 并只打
+ * 一条 TimeoutOverflowWarning ⇒ 面板报"34 天"、实际每毫秒一轮。故 start() 另有 24h 上限钳制。
  */
 
 jest.mock('../../models/AuditLog', () => ({ detectAnomalies: jest.fn() }));
@@ -169,5 +172,17 @@ describe('auditMonitor.start 的间隔下限', () => {
     logger.warn.mockClear();
     auditMonitor.start();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('最小间隔'));
+  });
+
+  test('间隔上界：超过 24h 被压到上限，且实际 setInterval 用的就是钳制后的值', () => {
+    process.env.AUDIT_MONITOR_INTERVAL_MS = '3000000000';
+    const logger = require('../../utils/logger');
+    logger.warn.mockClear();
+    auditMonitor.start();
+    // 判据读的是 start 真正交给 setInterval 的实参（不是配置值，也不是面板读数）：
+    // 溢出被压成 1ms 时这里就是 1，面板却照报 3000000000
+    expect(startedInterval()).toBe(24 * 60 * 60 * 1000);
+    expect(auditMonitor.getHealth().intervalMs).toBe(24 * 60 * 60 * 1000);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('高于最大间隔'));
   });
 });

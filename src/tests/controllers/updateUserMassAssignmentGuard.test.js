@@ -345,6 +345,7 @@ describe('updateUser/createUser 特权字段批量赋值防护', () => {
       const PRIVILEGED_FIELDS = [
         'password',
         'passwordHistory',
+        'passwordRetiredHash',
         'roles',
         'level',
         'tokenVersion',

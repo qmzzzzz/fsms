@@ -9,6 +9,7 @@ const { authenticate, checkPermission } = require('../middleware');
 const { body, param, query } = require('express-validator');
 const { mustBeString, coordinatesRules } = require('../utils/validationRules');
 const { consumeValidation } = require('../middleware/validateQuery');
+const { idempotency } = require('../middleware/idempotency');
 // 整改：设备类型枚举此前在 createDeviceValidation / updateDeviceValidation
 // 两处内联展开，与 constants 的 DEVICE_TYPE、模型 enum、文档生成器共 4 份副本。
 // 现统一从 constants 取值——新增设备类型只需改这一处。
@@ -289,6 +290,7 @@ router.post(
   '/',
   authenticate,
   checkPermission('device:create'),
+  idempotency({ scope: 'device:create' }), // 请求级幂等（一-1）：同上，重复提交回放首次结果
   createDeviceValidation,
   deviceController.createDevice
 );

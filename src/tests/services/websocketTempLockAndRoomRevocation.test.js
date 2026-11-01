@@ -19,7 +19,7 @@
  *
  * F-144（投影不复制第二份）：本文件原先在"取数字段集含 lockUntil"那条用例里
  * **逐字抄了一遍**生产的 select 字符串。抄的这份不会随生产漂移——实测把
- * `websocketService/handshake.js:204` 投影里的 `lockUntil` 删掉，那条用例照旧绿（`-t` 单独跑
+ * `websocketService/handshake.js:205` 投影里的 `lockUntil` 删掉，那条用例照旧绿（`-t` 单独跑
  * `Tests: 17 skipped, 1 passed`），名字承诺的防线并不存在。现在投影改为**从生产源码
  * 解析**，并补一条结构门禁：握手判定读到的每个 `freshUser.<字段>` 必须在
  * select 投影或 populate 填充集里——那正是本文件头说的根因（"少取一个字段就等于
@@ -189,6 +189,51 @@ describe('WebSocket 临时锁定与降级出房', () => {
       await Role.deleteOne({ _id: plainRoleId }).catch(() => {});
       await mongoose.connection.close();
     }
+  });
+
+  describe('握手期强制改密闸（与 HTTP 侧 PASSWORD_CHANGE_REQUIRED 同判据）', () => {
+    test('mustChangePassword=true：认证拒绝、断开、且不绑定身份', async () => {
+      const user = await makeUser('pcg', { mustChangePassword: true });
+      const svc = makeService();
+      const socket = makeSocket(user);
+
+      const ok = await svc.authenticateSocket(socket, socket.handshake.auth.token, null);
+
+      expect(ok).toBe(false);
+      expect(socket.authenticated).toBe(false);
+      expect(socket.connected).toBe(false);
+      expect(authErrorOf(socket).data.code).toBe('PASSWORD_CHANGE_REQUIRED');
+      expect(svc.userConnections.size).toBe(0);
+      expect(svc.clients.size).toBe(0);
+      expect(socket.joined).toEqual([]);
+    });
+
+    test('mustChangePassword=false / 未设置：认证通过（对照组，排除"有字段就拒"）', async () => {
+      for (const flag of [false, undefined]) {
+        const user = await makeUser(
+          `pcg${flag}`,
+          flag === undefined ? {} : { mustChangePassword: flag }
+        );
+        const svc = makeService();
+        const socket = makeSocket(user);
+        expect(await svc.authenticateSocket(socket, socket.handshake.auth.token, null)).toBe(true);
+      }
+    });
+
+    test('投影含 mustChangePassword：select 少一个字段即判据失效（反向锁定）', async () => {
+      expect(handshakeProjection().split(/\s+/)).toContain('mustChangePassword');
+
+      const user = await makeUser('pcgsel', { mustChangePassword: true });
+      const doc = await User.findById(user._id)
+        .select(handshakeProjection())
+        .populate({ path: 'roles', select: 'code', match: { status: 'active' } });
+      const svc = makeService();
+      expect(svc._assertHandshakePasswordChangeCompleted(makeSocket(user), doc)).toBe(true);
+      // 字段被投影掉 ⇒ 判定必须放行，证明本条测的是"字段有没有取到"，不是恒定拒绝
+      expect(
+        svc._assertHandshakePasswordChangeCompleted(makeSocket(user), { username: doc.username })
+      ).toBe(false);
+    });
   });
 
   describe('握手期临时锁定（与 HTTP 侧 ACCOUNT_TEMP_LOCKED 同判据）', () => {

@@ -10,7 +10,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const User = require('../../models/User');
 const AuditLog = require('../../models/AuditLog');
-const config = require('../../config');
+const jwtKeys = require('../../utils/jwtKeys');
 const logger = require('../../utils/logger');
 const { isIPAllowed } = require('../../utils/ipRange');
 const {
@@ -21,6 +21,7 @@ const {
 const sessionService = require('../sessionService');
 const { generateToken, generateRefreshToken } = require('../tokenService');
 const { awaitAuditWrite } = require('../../utils/auditWriteFailure');
+const { presentedClaims } = require('../../constants/honeypotDecoy');
 
 /**
  * 并发轮换宽限窗口：消费时间落在该窗口内的 `rotate` 重放视为并发竞争，
@@ -244,7 +245,9 @@ async function refreshSession(refreshTokenRaw, ctx) {
   // 会变成"不验签的门"，那条双向登记会红（且红得对——它守的正是"这扇门自己验不验"）。
   let decoded;
   try {
-    decoded = jwt.verify(refreshTokenRaw, config.jwt.refreshSecret, { algorithms: ['HS256'] });
+    decoded = jwt.verify(refreshTokenRaw, jwtKeys.verifyKeyFor(refreshTokenRaw, 'refresh'), {
+      algorithms: ['HS256'],
+    });
   } catch (error) {
     if (error.name === 'TokenExpiredError') {
       return { outcome: 'EXPIRED' };
@@ -306,11 +309,12 @@ async function refreshSession(refreshTokenRaw, ctx) {
   }
 
   // 签发新的 access token + refresh token（携带当前 tokenVersion 与原 sid）
+  const claims = presentedClaims(user, subject.roles); // 与登录链同一份呈现声明：否则诱饵会话一续期就把 honeypot.invalid 与零角色写回载荷
   const token = generateToken(
     user._id,
     user.username,
-    user.email,
-    subject.roles,
+    claims.email,
+    claims.roles,
     user.realName,
     user.tokenVersion,
     crypto.randomUUID(),
@@ -340,7 +344,7 @@ async function refreshSession(refreshTokenRaw, ctx) {
 function isForeignRefreshToken(token, ownerUserId) {
   let payload = null;
   try {
-    payload = jwt.verify(token, config.jwt.refreshSecret, { algorithms: ['HS256'] });
+    payload = jwt.verify(token, jwtKeys.verifyKeyFor(token, 'refresh'), { algorithms: ['HS256'] });
   } catch (e) {
     return false;
   }
@@ -352,7 +356,7 @@ function isForeignRefreshToken(token, ownerUserId) {
 async function revokeOneRefreshToken(token) {
   let payload = null;
   try {
-    payload = jwt.verify(token, config.jwt.refreshSecret, { algorithms: ['HS256'] });
+    payload = jwt.verify(token, jwtKeys.verifyKeyFor(token, 'refresh'), { algorithms: ['HS256'] });
   } catch (e) {
     // refresh token 校验失败说明它本就无效，不影响登出结论
     logger.warn(`登出时 refresh token 校验失败: ${e.message}`);
@@ -406,7 +410,9 @@ async function revokeTokensOnLogout({
     // 使用 verify 校验签名，防止伪造 token 污染黑名单
     let payload = null;
     try {
-      payload = jwt.verify(accessToken, config.jwt.secret, { algorithms: ['HS256'] });
+      payload = jwt.verify(accessToken, jwtKeys.verifyKeyFor(accessToken, 'access'), {
+        algorithms: ['HS256'],
+      });
     } catch (e) {
       // 签名无效/已过期的令牌本就不可用，无需吊销，不算失败
       logger.warn(`登出时 access token 校验失败: ${e.message}`);

@@ -129,6 +129,15 @@ const EXCEPTIONS = {
     expr: 'safeErrors',
     reason: 'Mongoose 形状 {field,message}，且 isDev 为假时置 undefined（生产不出站）',
   },
+  // IP 名单写路径的未知字段拒绝（2026-10-30 自 ipListController 抽出）。
+  // 值来源是**字段名**（Object.keys(body)），不是字段值——报文里回显的是
+  // 「你多传了哪个键」，而键名本身不是用户输入的秘密；四键形状（type/location/path/msg）
+  // 与 safeFieldErrors 的产物逐字相同，没有 value 键可夹带。
+  // 之所以不写成 `fieldErrors: [...]` 字面量：条目由 unknown.map 生成，不是静态数组。
+  'controllers/ipListWriteGuards.js': {
+    expr: "unknown.map((key) => ({ type: 'field', location: 'body', path: key, msg: `不支持的字段：${key}（生效时长请用 durationHours，0 表示永久）`, }))",
+    reason: '值来源是未知字段名而非字段值；四键形状与 safeFieldErrors 产物一致，无 value 键',
+  },
 };
 
 describe('校验错误出站面：value 一律不出站', () => {
@@ -226,7 +235,10 @@ describe('校验错误出站面：value 一律不出站', () => {
 
     it('前提自证：扫描器扫到了真实站点（格式漂移时它会静默返回空）', () => {
       // 包装出站是本仓主流写法，数量级掉了就说明 fieldErrors 的书写形态变了，扫描器需同步
-      expect(egressSites.filter((s) => isWrapped(s.expr))).toHaveLength(48);
+      // 48 → 49：P1-2 管理员重置口令（securityController/admin.js）新增一处 safeFieldErrors
+      // 49 → 50：头像上传/读取（avatarController.js）新增一处 safeFieldErrors
+      // 50 → 51：临时权限授予（privilegeController.js）新增一处
+      expect(egressSites.filter((s) => isWrapped(s.expr))).toHaveLength(51);
       expect(arraySites.length + egressSites.length).toBeGreaterThan(50);
     });
 
@@ -244,12 +256,24 @@ describe('校验错误出站面：value 一律不出站', () => {
       const unregistered = egressSites.filter(
         (s) => !isWrapped(s.expr) && !isHandBuilt(s.expr) && !isPassThrough(s.expr)
       );
-      expect(unregistered.map((s) => `${s.rel} => ${s.expr}`)).toEqual(
-        Object.entries(EXCEPTIONS).map(([rel, e]) => `${rel} => ${e.expr}`)
+      // 两侧排序后比较：扫描顺序是"按文件名遍历"，登记表的顺序是人工维护的，
+      // 两者不一致时不该报"内容不同"——本闸要判的是**集合相等**（每条裸出站都被
+      // 登记过、且登记表里没有幽灵条目），不是书写顺序。
+      expect(unregistered.map((s) => `${s.rel} => ${s.expr}`).sort()).toEqual(
+        Object.entries(EXCEPTIONS)
+          .map(([rel, e]) => `${rel} => ${e.expr}`)
+          .sort()
       );
       // 每条例外的理由必须是当前事实，不是历史备忘
+      //
+      // 比对口径按「空白折叠」而不是逐字：expr 本身是扫描器 collapse 过的形态
+      // （`\s+` → 空格），源码里则可能跨行书写（prettier 在 100 列处必然折行）。
+      // 逐字 toContain 会把「同一段代码换个折行位置」判成登记失效，
+      // 逼着登记人为了过闸把表达式压成一行——那是让门禁去改代码风格，
+      // 而不是在核对其内容。折叠后比较：内容必须真在源码里，折行位置不计。
       for (const [rel, e] of Object.entries(EXCEPTIONS)) {
-        expect(stripComments(read(rel))).toContain(`fieldErrors: ${e.expr}`);
+        const collapsed = stripComments(read(rel)).replace(/\s+/g, ' ');
+        expect(collapsed).toContain(`fieldErrors: ${e.expr}`);
       }
     });
 
@@ -266,7 +290,11 @@ describe('校验错误出站面：value 一律不出站', () => {
 
     it('例外之所以是例外：errorHandler 的 fieldErrors 仍被 isDev 闸住且是 Mongoose 形状', () => {
       const src = read('middleware/errorHandler.js');
-      expect(src).toMatch(/const isDev =[^;]*development/);
+      // 2026-10-30：dev 判据统一走 config/envSemantics 的 isDevelopmentLikeEnv()，
+      // 不再在本文件内联 `NODE_ENV === 'development'`（那正是"各写一份字面量比较"
+      // 的老形态，别名 prod/dev 会各判一次）。判据本身不变：仍必须是**环境判定**
+      // 出来的布尔量，而不是常量或配置开关。
+      expect(src).toMatch(/const isDev = isDevelopmentLikeEnv\(\);/);
       expect(src).toMatch(/const safeErrors = isDev \? errors : undefined;/);
       // 值来源里只有 field/message 两键，没有用户原始输入
       expect(src).toMatch(/field: e\.path/);

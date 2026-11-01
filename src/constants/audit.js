@@ -194,12 +194,10 @@ const AUDIT_USERNAME_MAX_LENGTH = 128;
  * （同族另两条触发面已实测记录在 tests/utils/auditChainSurrogateArtifact.test.js）。
  * 控制字符（NUL/CR/Bidi）实测逐字符原样往返、不产生哈希伪影，但会随审计列表与导出进入
  * 终端渲染——与 ip 的第 2 条理由同形。
- *
  * 负结果一并记下（已转成断言，不再只是散文）：2000 字符的 username 用原生 driver 直插
  * 能成功、collated 索引 `{username:1, timestamp:-1}` 不因超键长拒写 ⇒ 这一维在本闸之前
  * 没有「静默丢行」风险，上界的价值是单点防御与渲染口径，不是修一个正在发生的丢数据故障。
  * 见 tests/services/auditUsernameCastGate.test.js 的「超长原始行仍能读回」用例。
- *
  * 两条**实测到的副作用**（本闸的代价，不假装没有）：
  *  - 等值查询也吃 `set`：`countDocuments({username:'a\\u0000b'})` 实际下发的是
  *    `{username:'a b'}`（实测命中清洗后那条、命不中原生 driver 塞进去的裸 'a\\u0000b'）。
@@ -241,6 +239,7 @@ const AUDIT_LOG_ACTIONS = [
   'auth_refresh',
   'auth_password',
   'auth_profile',
+  'auth_avatar',
   'auth_logout',
   // 认证类其余路由派生 action（GET 类多为敏感读取，POST 为状态变更）
   'auth_captcha',
@@ -267,6 +266,11 @@ const AUDIT_LOG_ACTIONS = [
   'permission_update',
   'permission_delete',
   'permission_batch',
+  'permission_grants', // C-08/C-09：子路由挂在 /api/permissions/grants，与目录同 category
+  'permission_grants_review',
+  'permission_grants_approve',
+  'permission_grants_reject',
+  'permission_grants_revoke',
   // 角色列表兜底路由
   'role_all',
   // 业务类
@@ -303,6 +307,9 @@ const AUDIT_LOG_ACTIONS = [
   'security_config_registerCaptchaEnabled',
   // WB-1：生产启动期密钥强度审计留痕（validate 已拦截弱密钥，此处记录「已通过」事实）
   'security_key_strength_audit',
+  // P2-3：启动期检测到 JWT 签发 key id（access/refresh）相对上次启动发生变化。
+  // 首次登记基线不落审计；连续重启不重复记账（见 services/jwtKeyRotationAudit.js）
+  'jwt_key_rotated',
   // 以下派生 action 此前缺失于白名单——审计页按它们筛选会被
   // validateEnum 打 400（记录在库里却筛不出来）。与各路由文件逐一核对：
   'security_view', // GET /api/security（无子路径兜底）
@@ -315,11 +322,15 @@ const AUDIT_LOG_ACTIONS = [
   'security_users_mfa_reset', // PUT /api/security/users/:userId/mfa/reset
   'security_audit-logs_verify', // GET /api/security/audit-logs/verify
   'security_ip-list_query', // GET /api/security/ip-list/query
+  'security_upgrade',
+  'security_upgrade_jobs',
+  'security_upgrade_requests',
   // app.js 直接注册的 /api 级只读端点（/api、/api/metrics）：不在 ROUTE_CATEGORY_MAP
   // 内，派生为 category=system、action=system_view。不登记则按该 action 筛选 400
   'system_view',
   'user_stats', // GET /api/users/stats
   'user_view', // GET /api/users/:id（敏感读取审计）
+  'avatar_view', // GET /api/avatars/:userId（默认豁免，登记保持派生闭合）
   'role_view', // GET /api/roles/:id
   'role_permissions_tree', // GET /api/roles/permissions/tree
   'permission_view', // GET /api/permissions/:id
@@ -340,6 +351,7 @@ const AUDIT_LOG_ACTIONS = [
   'security_report', // POST /api/security/report
   'security_report-targets', // GET /api/security/report-targets（举报对象候选集）
   'security_reauth', // POST /api/security/reauth（步进验证换短时票据）
+  'security_users_password_reset', // PUT /api/security/users/:userId/password/reset（管理员重置口令）
   'security_my-logs', // GET /api/security/my-logs
   'security_audit-logs', // GET /api/security/audit-logs（GET 默认审计）
   'security_audit-logs_export', // GET /api/security/audit-logs/export
@@ -352,11 +364,13 @@ const AUDIT_LOG_ACTIONS = [
   'login_success',
   'login_failed',
   'login_unusual_time',
+  'login_captcha_rejected', // 前置人机层（静态开关或失败触发的挑战）拦下的登录尝试；留痕但不进任何失败计数（services/loginChallenge.recordCaptchaRejected，审计二-3）
   // 刷新的成功与拒绝（含重放/全量吊销）：/api/auth/refresh 被全局审计显式排除，
   // 这些事件由 services/authService/token.js 的 recordRefreshAudit 写入
   'auth_refresh_failed',
   'logout',
   'password_changed',
+  'password_force_changed', // 首次登录/管理员重置后的强制改密完成
   'change_password',
   // MFA 两步验证事件（登录 MFA 步骤/开关/恢复码/管理员重置全链路）
   'mfa_challenge',
@@ -368,11 +382,13 @@ const AUDIT_LOG_ACTIONS = [
   'login_recovery_code',
   'recovery_codes_regenerate',
   'admin_reset_mfa',
+  'admin_reset_password', // P1-2 管理员重置口令（临时口令只进响应、不入审计）
   // 设备级会话事件（用户从「登录会话」界面踢除设备）
   'session_revoked',
   'session_revoked_others',
   // 用户状态事件
   'user_locked',
+  'user_anonymized', // P1-3 删除改为匿名化后的专用动作
   // 登录失败计数达阈值触发的 10 分钟临时锁定（authService 写入）。
   // 此前缺失于白名单：记录在库却无法按该 action 筛选（validateEnum 打 400）
   'account_temp_locked',
@@ -381,6 +397,9 @@ const AUDIT_LOG_ACTIONS = [
   'brute_force_login',
   // 哨兵用户名（canary）探测：幽灵名凭证失败（services/canaryWatch.js 写入）
   'canary_username_attempt',
+  'honeypot_login', // 与 ALERT_TYPES.HONEYPOT_LOGIN 同值：审计 action 与告警类型同源（services/honeypotAlertTypes.js）
+  'honeypot_probe', // 与 ALERT_TYPES.HONEYPOT_PROBE 同值：陷阱会话内的后续探测（写尝试与只读探测分开记风险等级）
+  'honeypot_chain_escalated', // 与 ALERT_TYPES.HONEYPOT_CHAIN_ESCALATED 同值：同一来源 IP 在一个业务日内跨过多个蜜罐阶段（services/honeypotChainWatch.js）
   // 限流持续触顶的升级封禁事件（rateLimitEscalation 写入，CC 防护闭环）
   'rate_limit_abuse',
   'bulk_data_export',
@@ -392,8 +411,14 @@ const AUDIT_LOG_ACTIONS = [
   'ip_range_denied',
   'audit_log_query',
   'audit_chain_verify',
-  // 早于 auditLog 中间件的 403 拒绝（黑名单命中 / CSRF 来源校验失败）
-  // 与协议合规拒绝。此前这三类拒绝只进 logger，审计页无从筛选
+  'forensic_capture_manifest', // P2b 每日锚点：没有它"纯删尾"在清单内部自洽（链不会察觉少几行），只有审计链上这个外部期望值才让尾部截断可判
+  // T5/T6 取证溯源（forensicRoutes.js 挂在 /api/security/forensic 下）的真值带 security_ 前缀（category 由 /api/security 命中）；漏登记则审计页筛不出（tests/utils/auditMeta 兜）。
+  'security_forensic_trace',
+  'security_forensic_clusters',
+  'security_forensic_pool-ban_request',
+  'security_forensic_pool-ban_confirm',
+  'security_forensic_export',
+  // 早于 auditLog 中间件的 403 拒绝（黑名单命中 / CSRF 来源校验失败）与协议合规拒绝。此前这三类拒绝只进 logger，审计页无从筛选
   'ip_blacklist_blocked',
   'csrf_origin_denied',
   'malformed_request_blocked',
@@ -413,6 +438,7 @@ const AUDIT_LOG_ACTIONS = [
   'login_captcha_disabled',
   'register_captcha_enabled',
   'register_captcha_disabled',
+  'upgrade_triggered',
   'ip_blacklist_added',
   'ip_blacklist_removed',
   'ip_whitelist_added',

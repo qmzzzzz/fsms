@@ -75,6 +75,10 @@ describe('WebSocket 全流程（批次 D2）', () => {
     const socketRegistry = new Map();
     svc.clients = new Map();
     svc.userConnections = new Map();
+    // #9：来源 IP -> 未认证连接数的准入表，真实构造器在 index.js:66 初始化。
+    // 假 socket 一旦带上 handshake.address，_acquireUnauthenticatedSlot 就不再走
+    // 「没有 IP 直接放行」的早退分支，缺这个 Map 会以 TypeError 崩在 push.js:131。
+    svc.unauthConnectionsByIp = new Map();
     svc._sweepRunning = false;
     svc.io = {
       on: (ev, cb) => {
@@ -89,11 +93,20 @@ describe('WebSocket 全流程（批次 D2）', () => {
     return { svc, state, socketRegistry };
   };
 
-  /** 假 socket：握手携带令牌，事件监听可捕获 */
+  /**
+   * 假 socket：握手携带令牌，事件监听可捕获
+   *
+   * `handshake.address` 不能省：真实的 socket.handshake 一定带对端地址，而握手期的
+   * IP 封禁闸（websocketService/handshake.js 的 _assertHandshakeIpNotBanned，
+   * 2026-10-30 起「取不到地址 ⇒ fail-closed」）会在认证之前先拒掉没有地址的握手——
+   * 表现为 auth-error「无法验证网络来源」+ 断开，认证成功路径一条都跑不到，
+   * 三个成功类用例集体超时。缺 address 的假 socket 不是"更干净的替身"，
+   * 而是构造了一个真实环境里不存在的输入。
+   */
   const makeSocket = (token, id) => {
     const socket = {
       id: id || `ws-${++counter}`,
-      handshake: { auth: token ? { token } : {}, headers: {} },
+      handshake: { auth: token ? { token } : {}, headers: {}, address: '127.0.0.1' },
       authenticated: false,
       authing: false,
       connected: true,

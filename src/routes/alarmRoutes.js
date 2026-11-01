@@ -9,6 +9,7 @@ const { authenticate, checkPermission } = require('../middleware');
 const { body, param, query } = require('express-validator');
 const { mustBeString, coordinatesRules } = require('../utils/validationRules');
 const { consumeValidation } = require('../middleware/validateQuery');
+const { idempotency } = require('../middleware/idempotency');
 const { ALARM_LEVELS, ALARM_TYPES, ALARM_STATUSES, ALARM_CAUSES } = require('../constants/alarm');
 
 // 列表 query 枚举校验。原先 status/level/alarmType 零校验直入
@@ -152,6 +153,7 @@ router.post(
   '/report',
   authenticate,
   checkPermission('alarm:create'),
+  idempotency({ scope: 'alarm:report' }), // 请求级幂等（一-1）：连点会产出两条互不相干的警情
   reportAlarmValidation,
   alarmController.reportAlarm
 );

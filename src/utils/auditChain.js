@@ -77,21 +77,9 @@ function computeHmac(hash) {
 /** 是否配置了 HMAC 密钥（校验脚本据此决定是否执行 hmac 校验） */
 const isHmacConfigured = () => !!getHmacSecret();
 
-/**
- * 取最新链尾（仅用于首次初始化链尾，见 getChainTail）。
- *
- * 按 `_id` 降序近似写入顺序——ObjectId 内嵌毫秒时间戳，单实例下与追加顺序一致。
- * 多实例场景下本函数**只**在共享链尾未初始化时被调用一次（且在分布式锁内），
- * 链尾推进由 A-1 分布式锁保证串行，不存在「各实例各自读旧尾」的分叉问题，
- * 故不为此引入额外写放大。
- */
-async function getLatestHash(model) {
-  const latest = await model
-    .findOne({ hash: { $ne: null } }, { hash: 1, _id: 1 })
-    .sort({ _id: -1 })
-    .lean();
-  return latest && latest.hash ? latest.hash : null;
-}
+// 链尾初始化口径（谁是尾、窗口反查、兜底）抽到 utils/auditChainTail.js：
+// 本文件顶 max-lines 棘轮阈值，而那块是纯读侧判据，与链尾指针/分布式锁无关。
+const { getLatestHash } = require('./auditChainTail');
 
 // ================= 哈希链并发防护 =================
 // pre-save（逐条 create）与 auditBuffer.flush（批量 insertMany）原先各自

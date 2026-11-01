@@ -7,6 +7,7 @@
  */
 import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useSystemLabels } from '@/i18n/systemLabels'
 
 // 模块图标映射
 const MODULE_ICONS = {
@@ -43,6 +44,8 @@ const flattenPermissionNodes = (nodes, acc = [], seen = new Set()) => {
 
 export function useRolePermissions() {
   const { t } = useI18n()
+  // 权限名在英文界面按稳定 code 映射；中文与未知 code 用后端 name
+  const { permissionName } = useSystemLabels()
 
   // 权限树原始数据
   const permissionTree = ref([])
@@ -196,7 +199,9 @@ export function useRolePermissions() {
     const visiblePerms = kw
       ? module.permissions.filter(
           (p) =>
-            (p.name || '').toLowerCase().includes(kw) || (p.code || '').toLowerCase().includes(kw)
+            permissionName(p).toLowerCase().includes(kw) ||
+            (p.name || '').toLowerCase().includes(kw) ||
+            (p.code || '').toLowerCase().includes(kw)
         )
       : module.permissions
     // 过滤结果为空（理论上不会出现：过滤后模块不可见）时保守不动集合
@@ -252,7 +257,9 @@ export function useRolePermissions() {
         // 范围判定为 allOn、点击实际执行**清空**：文案与行为相反（实测复现）。
         const visible = m.permissions.filter(
           (p) =>
-            (p.name || '').toLowerCase().includes(kw) || (p.code || '').toLowerCase().includes(kw)
+            permissionName(p).toLowerCase().includes(kw) ||
+            (p.name || '').toLowerCase().includes(kw) ||
+            (p.code || '').toLowerCase().includes(kw)
         )
         return {
           ...m,
@@ -297,6 +304,7 @@ export function useRolePermissions() {
     clearChecked,
     // 判定与操作
     typeLabel,
+    permissionName,
     isPermChecked,
     isPermAdded,
     isPermRemoved,

@@ -126,7 +126,7 @@ describe('认证边界（第三批审计）', () => {
 
     // 模拟 mfaEnable/mfaDisable 路径：更新库 + 失效缓存（与 controller 一致）。
     // 【可观测性边界，实测】authenticate 的 loadValidUser 投影里没有 mfaEnabled
-    // （middleware/auth.js:73 的 select 列表），authenticate 全文也不读该字段；
+    // （middleware/auth.js:74 的 select 列表），authenticate 全文也不读该字段；
     // 因此「MFA 开关」本身对 /protected 的响应不可观测——本段写库+失效是为对齐
     // 生产路径形态，真正被断言的是紧随其后的 tokenVersion 通道（同一份缓存）。
     // 变异验证：把本段两行整体删除，本用例仍绿（不可证伪，故不声称它被验证）。

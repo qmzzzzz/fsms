@@ -26,15 +26,18 @@
  * action 派生（utils/auditMeta.deriveAction）必须与 GET 同尺：否则 HEAD 落到末尾兜底
  * 得到 `user_head`——一个不在 AUDIT_LOG_ACTIONS 里的值，审计页筛不到也统计不到。
  *
- * 【三】OPTIONS 只做现状登记，不修：`cors` 挂在两个限流器之前，对**任何** OPTIONS
- * 直接 `res.writeHead(204); res.end()`。我此前据此推断"Express 会回显 `Allow`，
- * 构成未认证的路由/方法存在性 oracle"——实测**证伪**（见第三个用例的四种形态）：
- * 2.8.6 连 `Origin` 都不要求，存在与不存在的路径返回逐字段同构的 204，既无 `Allow`
- * 也无 `Access-Control-Allow-Origin`。真正剩下的只有" OPTIONS 不吃配额"，而其一发的
- * 代价是一次表头写出（无 body 解析、无业务、无审计写入），与【一】修掉的
- * 「零配额 × 1MB JSON 解析 × 四条闸门」不是同一量级；把限流器前移到 `cors` 之前会让
- * 浏览器的预检开始消耗真实请求配额，代价大于收益。故本用例钉住的是**不变量**
- * （不反射 Origin、不作为 oracle、不写审计），任一被破坏都会红。
+ * 【三】OPTIONS 的现状与定论（第三轮 D2 后重写）：`cors` 对**任何** OPTIONS 直接
+ * `res.writeHead(204); res.end()`，于是挂在它之后的 ip/general/static 三桶一发都计不到——
+ * 预检曾是全站唯一零配额的表面（实测：12 发 OPTIONS 后三桶计数全 0，随后一次 GET 才是 1/1/1）。
+ * 但"把两个全局限流器整体前移到 cors 之前"是错的解法：预检是浏览器对每个非简单请求的
+ * **强制前置**，按"请求数×2"占用 300/15min 会误伤正常 SPA。现在的形态是**换桶**：专用
+ * preflightLimiter（12000/15min，与静态面同档）挂在 cors 之前只认 OPTIONS，其余请求零影响。
+ * 审计侧仍**不写入**（预检无主体、无业务数据，一发预检写一条链就是把放大面搬进审计链），
+ * 登记为「不审计但必须计数」——计数点即该桶。
+ * 我此前据此推断"Express 会回显 `Allow`，构成未认证的路由/方法存在性 oracle"——实测
+ * **证伪**：2.8.6 连 `Origin` 都不要求，存在与不存在的路径返回逐字段同构的 204，既无
+ * `Allow` 也无 `Access-Control-Allow-Origin`。故本用例钉三条不变量：**计数在推进**、
+ * 不反射 Origin、不作为 oracle（外加"不写审计"这一条显式取舍）。
  */
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
@@ -285,7 +288,7 @@ describe('探针豁免的边界与 HEAD 审计留痕', () => {
     expect([row.method, row.action]).toEqual(['HEAD', 'device_view']);
   });
 
-  test('OPTIONS 现状：cors 早于限流短路，但既不反射 Origin 也不是路由 oracle', async () => {
+  test('OPTIONS 计入预检桶（不再零配额），但仍不写审计、不反射 Origin、不是路由 oracle', async () => {
     const shapes = [
       {
         label: '预检（Origin + ACRM）',
@@ -315,11 +318,11 @@ describe('探针豁免的边界与 HEAD 审计留痕', () => {
       },
     ];
     for (const { label, res } of shapes) {
-      // 204 + 零 RateLimit 头 = cors 在两个 limiter 与协议闸门之前就 res.end() 了
-      expect({ label, status: res.status, rate: rateHeaders(res) }).toEqual({
+      // 204（cors 在 OPTIONS 上收尾）+ 有 RateLimit-* 头 = 预检已由 preflightLimiter 计数
+      expect({ label, status: res.status, counted: rateHeaders(res).length > 0 }).toEqual({
         label,
         status: 204,
-        rate: [],
+        counted: true,
       });
       // 不反射 Origin（`origin` 是白名单数组，非白名单/缺 Origin 都拿不到 ACAO），
       // 也不回显 Allow ⇒ 四种形态逐字段同构，无法据此判断路径是否存在
@@ -343,7 +346,16 @@ describe('探针豁免的边界与 HEAD 审计留痕', () => {
     expect([real.status, real.headers['access-control-allow-origin']]).toEqual([200, undefined]);
     expect(rateHeaders(real).length).toBeGreaterThan(0);
 
-    // 零成本的另一半证据：OPTIONS 连审计都不落（否则未认证一发就能写一条链）
+    // 计数在**推进**，不是只写了一个固定的头：同一 IP 连发两次，remaining 必须递减
+    const sameIp = freshIp(9);
+    const first = await request(app).options('/api/users').set('X-Forwarded-For', sameIp);
+    const second = await request(app).options('/api/users').set('X-Forwarded-For', sameIp);
+    const remainingOf = (r) => Number(r.headers['ratelimit-remaining']);
+    expect(Number.isFinite(remainingOf(first))).toBe(true);
+    expect(remainingOf(second)).toBe(remainingOf(first) - 1);
+
+    // 另一半：OPTIONS 仍不落审计（预检无主体、无业务数据，一发写一条链就是把放大面搬进审计链）。
+    // 两条合起来才是本用例钉住的口径：「不审计，但必须计数」。
     const before = await settleAudit();
     for (let i = 0; i < 5; i += 1) {
       await request(app).options('/api/users').set('X-Forwarded-For', freshIp(9));

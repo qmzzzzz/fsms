@@ -8,24 +8,14 @@
  *   上行：encPassword = base64(JSON{v:1, x, y, salt, iv, c})，
  *         x/y 为临时公钥坐标（base64url），c 为 AES 密文||16 字节 GCM tag。
  *
- * 为什么用 ECDH 而不是 RSA-OAEP：P-256 即达 128-bit 安全强度且密钥/密文
- * 体积小一个数量级（临时公钥 65 字节 vs RSA-3072 密文 384 字节），
- * 浏览器 WebCrypto 与 Node 原生支持，无第三方依赖。
+ * 为什么用 ECDH 而不是 RSA-OAEP：P-256 即达 128-bit 安全强度且密钥/密文体积小一个数量级（临时公钥 65 字节 vs RSA-3072 密文 384 字节），浏览器 WebCrypto 与 Node 原生支持，无第三方依赖。
  *
- * 防重放：ts 限 ±5 分钟窗口；nonce 经 sharedCache 一次性消费——
- * 配置 REDIS_URL 时跨实例共享（任一实例消费后全集群拒绝重放），
- * 未配置时回退进程内去重（单实例语义，与其余共享层口径一致）。
- * 截获密文的攻击者无法重放原密文（nonce 已消费，载荷被 GCM 认证不可篡改），
- * 也无法恢复口令——但后者以「服务端私钥不泄露」为前提：信封自带临时公钥
- * 坐标，持有静态私钥（LOGIN_ECDH_PRIVATE_KEY_FILE 注入）即可对任一历史
- * 密文重新协商出共享密钥，即无前向保密。临时密钥对模式（见下）相反：
- * 私钥不出进程故历史密文攻不破，但重启即换钥，重启前的密文永久不可解密。
+ * 防重放：ts 限 ±5 分钟窗口；nonce 经 sharedCache 一次性消费—— 配置 REDIS_URL 时跨实例共享（任一实例消费后全集群拒绝重放），未配置时回退进程内去重（单实例语义，与其余共享层口径一致）。
+ * 截获密文的攻击者无法重放原密文（nonce 已消费，载荷被 GCM 认证不可篡改），也无法恢复口令——但后者以「服务端私钥不泄露」为前提：信封自带临时公钥坐标，持有静态私钥（LOGIN_ECDH_PRIVATE_KEY_FILE 注入）即可对任一历史
+ * 密文重新协商出共享密钥，即无前向保密。临时密钥对模式（见下）相反：私钥不出进程故历史密文攻不破，但重启即换钥，重启前的密文永久不可解密。
  *
- * 密钥管理：私钥经 LOGIN_ECDH_PRIVATE_KEY(_FILE) 注入（约定），
- * 曲线支持 P-256 / P-384，非法曲线或非 EC 密钥直接拒绝。
- * 未配置时惰性生成临时密钥对并告警——私钥不出进程、前端按会话取公钥，
- * 重启换钥无安全损失（仅损失 keyId 诊断连续性）；但重启前产生的密文
- * 在重启后永久无法解密——流量取证须在重启前完成，或持久注入静态私钥。
+ * 密钥管理：私钥经 LOGIN_ECDH_PRIVATE_KEY(_FILE) 注入（约定），曲线支持 P-256 / P-384，非法曲线或非 EC 密钥直接拒绝。未配置时惰性生成临时密钥对并告警——私钥不出进程、前端按会话取公钥，
+ * 重启换钥无安全损失（仅损失 keyId 诊断连续性）；但重启前产生的密文在重启后永久无法解密——流量取证须在重启前完成，或持久注入静态私钥。
  */
 
 const crypto = require('crypto');
@@ -70,8 +60,7 @@ const NONCE_TTL_MS = REPLAY_WINDOW_MS * 2;
 const NONCE_KEY_PREFIX = 'login-nonce:';
 
 /**
- * 解密失败统一抛出。code 仅写服务端日志用于排障，
- * 不回传客户端做区分——差异化错误可被用于探测服务端校验逻辑。
+ * 解密失败统一抛出。code 仅写服务端日志用于排障，不回传客户端做区分——差异化错误可被用于探测服务端校验逻辑。
  */
 class CredentialError extends Error {
   constructor(code) {
@@ -115,12 +104,9 @@ function initFromPrivatePem(privateKeyPem) {
 }
 
 /**
- * 构建期钉扎一致性（S-2）：镜像构建时把前端包使用的公钥指纹同时写入运行环境
- * （LOGIN_PUBLIC_KEY_SHA256_PIN，由 Dockerfile 从同一 build-arg 注入）。
+ * 构建期钉扎一致性（S-2）：镜像构建时把前端包使用的公钥指纹同时写入运行环境（LOGIN_PUBLIC_KEY_SHA256_PIN，由 Dockerfile 从同一 build-arg 注入）。
  *
- * 未设置时不干预（本地开发/未钉扎部署）；设置后必须完整 64 位且与当前公钥逐字相等——
- * 任何不一致都意味着「前端只认某一把公钥，而后端在用另一把」：登录信封会全部解不开，
- * 或（更糟）钉扎根本没进前端包而无人发现。启动即失败优于上线后才暴露。
+ * 未设置时不干预（本地开发/未钉扎部署）；设置后必须完整 64 位且与当前公钥逐字相等—— 任何不一致都意味着「前端只认某一把公钥，而后端在用另一把」：登录信封会全部解不开，或（更糟）钉扎根本没进前端包而无人发现。启动即失败优于上线后才暴露。
  */
 function assertBuildPin(kp) {
   const pin = (process.env.LOGIN_PUBLIC_KEY_SHA256_PIN || '').trim().toLowerCase();
@@ -180,9 +166,7 @@ function ensureKeyPair() {
 }
 
 /**
- * 启动期钉扎校验：仅在镜像携带 LOGIN_PUBLIC_KEY_SHA256_PIN 时强制初始化密钥并比对。
- * 由 createApp 调用——放在这里而不是首次请求公钥时，才能让「构建/运行密钥不一致」
- * 在启动阶段就失败，而不是等用户第一次登录才发现。
+ * 启动期钉扎校验：仅在镜像携带 LOGIN_PUBLIC_KEY_SHA256_PIN 时强制初始化密钥并比对。由 createApp 调用——放在这里而不是首次请求公钥时，才能让「构建/运行密钥不一致」在启动阶段就失败，而不是等用户第一次登录才发现。
  */
 function verifyBuildPin() {
   const pin = (process.env.LOGIN_PUBLIC_KEY_SHA256_PIN || '').trim();
@@ -204,9 +188,7 @@ function getPublicKeyInfo() {
 /**
  * 阶段 1 —— 信封解析与形状校验（纯结构，不接触任何密钥材料）
  *
- * 长度上限先于解码：信封是外部可控输入，先把量钉住再解析。
- * 临时公钥坐标的长度必须与当前服务端曲线匹配，好让"错配曲线"
- * （重启换钥后前端仍用缓存的旧公钥加密）在 ECDH 之前就被挡下。
+ * 长度上限先于解码：信封是外部可控输入，先把量钉住再解析。临时公钥坐标的长度必须与当前服务端曲线匹配，好让"错配曲线" （重启换钥后前端仍用缓存的旧公钥加密）在 ECDH 之前就被挡下。
  */
 function parseCredentialEnvelope(kp, envelopeB64) {
   let envelope;
@@ -258,9 +240,7 @@ function parseCredentialEnvelope(kp, envelopeB64) {
 /**
  * 阶段 2 —— ECDH 协商 + HKDF-SHA256 派生 + AES-256-GCM 解载荷（与前端 WebCrypto 同参）
  *
- * 无效曲线点 / 公钥错配 / 认证标签不符 / AAD 用途不符 等原因**一律吞并**成
- * DECRYPT：不区分失败原因，免得给探测者"差一点了"的信号。AAD 不符（信封是
- * 为别的端点加密的）与"密钥错了"在对外表现上不可区分，正是这条吞并的延伸。
+ * 无效曲线点 / 公钥错配 / 认证标签不符 / AAD 用途不符等原因**一律吞并**成 DECRYPT：不区分失败原因，免得给探测者"差一点了"的信号。AAD 不符（信封是为别的端点加密的）与"密钥错了"在对外表现上不可区分，正是这条吞并的延伸。
  */
 function decryptCredentialPayload(kp, { x, y, saltBuf, ivBuf, ctBuf }, aad) {
   try {
@@ -273,7 +253,7 @@ function decryptCredentialPayload(kp, { x, y, saltBuf, ivBuf, ctBuf }, aad) {
       crypto.hkdfSync('sha256', shared, saltBuf, HKDF_INFO, HKDF_KEY_BYTES)
     );
 
-    // WebCrypto 的输出是 密文||tag，尾部 16 字节即认证标签
+    // WebCrypto 的输出是密文||tag，尾部 16 字节即认证标签
     const tag = ctBuf.subarray(ctBuf.length - GCM_TAG_BYTES);
     const body = ctBuf.subarray(0, ctBuf.length - GCM_TAG_BYTES);
     const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, ivBuf);
@@ -288,8 +268,7 @@ function decryptCredentialPayload(kp, { x, y, saltBuf, ivBuf, ctBuf }, aad) {
 }
 
 /**
- * 阶段 3 —— 明文载荷结构与时间窗 / nonce 形态校验
- * （一次性消费要落库，留在编排函数里，那里才有 await）
+ * 阶段 3 —— 明文载荷结构与时间窗 / nonce 形态校验（一次性消费要落库，留在编排函数里，那里才有 await）
  */
 function parseCredentialPayload(plain) {
   let payload;
@@ -312,8 +291,7 @@ function parseCredentialPayload(plain) {
 }
 
 /**
- * 解密并校验口令密文，成功返回明文口令
- * 任何失败一律抛 CredentialError
+ * 解密并校验口令密文，成功返回明文口令任何失败一律抛 CredentialError
  *
  * @param {string} envelopeB64 上行信封
  * @param {string} purpose 用途键（CREDENTIAL_AAD 的键，如 'LOGIN'）：决定
@@ -321,8 +299,7 @@ function parseCredentialPayload(plain) {
  *   未知键抛普通 Error（编程错误，不应发生）；两种抛出都落在调用方的
  *   ENC_INVALID 分支，fail-closed 不放行。
  *
- * 异步：nonce 一次性消费经 sharedCache 原子占位（配置 REDIS_URL 时跨实例
- * 共享，重放无论命中哪个实例都被拒绝；未配置时回退进程内去重）
+ * 异步：nonce 一次性消费经 sharedCache 原子占位（配置 REDIS_URL 时跨实例共享，重放无论命中哪个实例都被拒绝；未配置时回退进程内去重）
  */
 async function decryptLoginCredential(envelopeB64, purpose) {
   const aad = CREDENTIAL_AAD[purpose];

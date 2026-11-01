@@ -252,7 +252,15 @@ if [ ! -f "$ARCHIVE_PATH" ]; then
   echo "Error: mongodump 退出码为 0 但归档不存在：$ARCHIVE_PATH" >&2
   exit 1
 fi
-ARCHIVE_BYTES=$(wc -c < "$ARCHIVE_PATH")
+ARCHIVE_BYTES=$(wc -c < "$ARCHIVE_PATH") || ARCHIVE_BYTES=''
+# 形状校验（第四轮审计）：wc 退出 0 却不打印时 ARCHIVE_BYTES 是空串，`[ "" -le 0 ]` 抛整数
+# 表达式错误并取**假**分支 ⇒ 闸静默通过（"一次看起来成功的备份比没有备份更糟"最坏的方向）。
+case "$ARCHIVE_BYTES" in
+  '' | *[!0-9]*)
+    echo "Error: 归档字节数判据不可用（本机 wc 未给出计数）：$ARCHIVE_PATH" >&2
+    exit 1
+    ;;
+esac
 if [ "$ARCHIVE_BYTES" -le 0 ]; then
   echo "Error: 归档为 0 字节，不是一次有效备份：$ARCHIVE_PATH" >&2
   exit 1
@@ -358,8 +366,24 @@ elif [ -n "${BACKUP_OFFSITE_CMD:-}" ]; then
   # （那档本来就是 exit 1），免得一次拼错的副本看起来像一次成功的备份。
   echo "Error: BACKUP_OFFSITE_CMD 已设置但只含空白，异地副本一步都没有执行；本次备份按失败处理" >&2
   exit 1
+elif [ -n "${BACKUP_OFFSITE_DIR:-}" ]; then
+  # 目录形态：BACKUP_OFFSITE_DIR 通常是已挂载的异地存储/NAS。失败必须阻断，
+  # 不能把"本机有备份"当成"异地有备份"。
+  if ! mkdir -p "$BACKUP_OFFSITE_DIR"; then
+    echo "Error: 无法创建异地备份目录（BACKUP_OFFSITE_DIR=$BACKUP_OFFSITE_DIR），本次备份按失败处理" >&2
+    exit 1
+  fi
+  if ! cp -p "$BACKUP_FILE_FINAL" "$BACKUP_FILE_FINAL.sha256" "$BACKUP_OFFSITE_DIR"/; then
+    echo "Error: 异地备份目录复制失败（BACKUP_OFFSITE_DIR=$BACKUP_OFFSITE_DIR），本次备份按失败处理" >&2
+    exit 1
+  fi
+  echo "Offsite copy completed: $BACKUP_OFFSITE_DIR"
+elif [ "${BACKUP_REQUIRE_OFFSITE:-false}" = "true" ]; then
+  # P1-4：生产部署显式要求异地副本时，缺配置必须是失败而不是警告。
+  echo "Error: BACKUP_REQUIRE_OFFSITE=true 但未配置 BACKUP_OFFSITE_CMD / BACKUP_OFFSITE_DIR——异地副本未产生，本次备份按失败处理" >&2
+  exit 1
 else
-  echo "Warning: 未配置 BACKUP_OFFSITE_CMD——备份只存在于本机。等保 2.0 与 P1-① 都要求异地副本。" >&2
+  echo "Warning: 未配置 BACKUP_OFFSITE_CMD/BACKUP_OFFSITE_DIR——备份只存在于本机。等保 2.0 与 P1-4 都要求异地副本。" >&2
 fi
 
 # 清理过期备份。

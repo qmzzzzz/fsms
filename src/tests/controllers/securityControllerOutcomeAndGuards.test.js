@@ -236,6 +236,46 @@ jest.mock('../../services/auditMonitor', () => ({
     running: true,
   })),
 }));
+// 链核验监控（compliance.chainMonitorHealth）：与 auditMonitor 同款「有指标、无出口」。
+// 桩必须带 getHealth，否则该字段恒走 null 兜底——面板看着绿、跑的却是降级分支。
+jest.mock('../../services/auditChainMonitor', () => ({
+  getHealth: jest.fn(() => ({
+    runs: 7,
+    failures: 2,
+    consecutiveFailures: 2,
+    skippedOverlaps: 1,
+    lastRunAt: '2026-09-25T02:00:00.000Z',
+    lastFailureAt: '2026-09-25T02:00:00.000Z',
+    lastFailureMessage: 'db down',
+    lastVerdictCode: 2,
+  })),
+}));
+
+// 事件链巡检（compliance.honeypotChainHealth）：与上面两条同款「有指标、无出口」。
+// 桩必须带 getHealth，否则该字段恒走 null 兜底——面板看着绿、跑的却是降级分支。
+jest.mock('../../services/honeypotChainWatch', () => ({
+  getHealth: jest.fn(() => ({
+    runs: 4,
+    failures: 1,
+    consecutiveFailures: 0,
+    skippedOverlaps: 3,
+    escalated: 2,
+    escalationFailures: 0,
+    unparsableSources: 1,
+    droppedCandidates: 2,
+    lastCandidates: 9,
+    lastPendingCandidates: 6,
+    lastRunAt: '2026-10-31T15:05:00.000Z',
+    lastSuccessAt: '2026-10-31T15:05:00.000Z',
+    lastEscalatedIp: '198.51.100.7',
+    lastFailureAt: '2026-10-31T14:00:00.000Z',
+    lastFailureMessage: 'mongo timeout',
+    intervalMs: 300000,
+    minStages: 2,
+    escalationLimit: 50,
+    running: true,
+  })),
+}));
 jest.mock('../../services/auditBuffer', () => ({
   isWalEnabled: jest.fn(() => true),
   // F-03：审计落库失败时 outbox 把文档推进这里（WAL 追加 + 内存缓冲）
@@ -618,7 +658,7 @@ describe('changePasswordSecure 分支补齐（委托 authService 后的映射）
     );
   });
 
-  test('审计写入失败且 WAL 不可用 ⇒ 500（没有可靠介质就不许声称已记账，F-03）', async () => {
+  test('审计写入失败且 WAL 不可用 ⇒ 500，且这次状态变更不得零留痕（F-03 顺序闸）', async () => {
     mockChangeUserPassword.mockResolvedValue({ outcome: 'OK', username: 'admin' });
     const auditBuffer = require('../../services/auditBuffer');
     auditBuffer.isWalEnabled.mockReturnValue(false);
@@ -627,6 +667,10 @@ describe('changePasswordSecure 分支补齐（委托 authService 后的映射）
     // asyncHandler 在本文件被 mock 成恒等函数 ⇒ 异常直接外抛（生产里由它转给 next ⇒ 500）
     await expect(invoke(changePasswordSecure, req, res, next)).rejects.toThrow('audit down');
     expect(auditBuffer.push).not.toHaveBeenCalled();
+    // 顺序闸：改密已提交（服务层返回 OK）⇒ 重抛时标志必须尚未置位；
+    // 先置位（旧顺序）会把这次 500 的全局兜底留痕关掉 ⇒ 状态已变、审计为零。
+    expect(mockChangeUserPassword).toHaveBeenCalled();
+    expect(res.locals.skipGlobalAudit).toBeUndefined();
   });
 });
 
@@ -978,6 +1022,38 @@ describe('resetUserMfa 分支补齐', () => {
     );
     expect(res.payload.success).toBe(true);
   });
+
+  test('审计重抛（落库失败且 WAL 不可用）⇒ 交给上层转 500，且不得先置 skipGlobalAudit', async () => {
+    // 红线形态：MFA 已被清除（业务不可回滚），若此时 skipGlobalAudit 已置位，
+    // errorHandler 把 500 写回时 doLog 会直接跳过 ⇒ 状态已变、审计为零。
+    mockUserFindById.mockResolvedValue({
+      _id: 'mfa-audit-fail-id',
+      username: 'mfaAuditFail',
+      mfaEnabled: true,
+      roles: ['role-user'],
+    });
+    mockRoleFind.mockReturnValue({
+      select: jest.fn().mockResolvedValue([{ level: 1, code: 'USER', isBuiltIn: false }]),
+    });
+    mockGetOperatorMaxLevel.mockResolvedValue(10);
+    mockUserFindOneAndUpdate.mockResolvedValue({ _id: 'mfa-audit-fail-id' });
+    // recordDurably 的两个重抛条件同时成立：落库失败 + WAL 不可用
+    // 一次性 reject：旧写法 mockReturnValue(Promise.reject(...)) 会持久覆盖默认实现，
+    // 随机顺序下任何跑在其后的用例只要走审计落库路径就会接到同一个拒绝（跨用例假红）。
+    mockAuditLogCreate.mockRejectedValueOnce(new Error('audit down'));
+    require('../../services/auditBuffer').isWalEnabled.mockReturnValueOnce(false);
+
+    const { req, res, next } = makeCtx({
+      params: { userId: 'mfa-audit-fail-id' },
+      user: { userId: 'operator-id', username: 'operator' },
+    });
+    await expect(invoke(resetUserMfa, req, res, next)).rejects.toThrow('audit down');
+
+    // 业务已提交（条件写命中）⇒ 兜底只剩全局审计，故标志必须仍未置位
+    expect(mockUserFindOneAndUpdate).toHaveBeenCalled();
+    expect(res.locals.skipGlobalAudit).toBeUndefined();
+    expect(res.payload).toBeNull();
+  });
 });
 
 // ============================================================
@@ -1126,6 +1202,7 @@ describe('getSecurityOverview 分支补齐', () => {
       consecutiveFailures: 4,
       skippedOverlaps: 2,
       lastRunAt: '2026-09-25T01:00:00.000Z',
+      lastSuccessAt: '2026-09-25T01:00:00.000Z',
       lastFailureAt: '2026-09-25T01:00:00.000Z',
       lastFailureMessage: 'mongo timeout',
       intervalMs: 30000,
@@ -1148,6 +1225,7 @@ describe('getSecurityOverview 分支补齐', () => {
       consecutiveFailures: 4,
       skippedOverlaps: 2,
       lastRunAt: '2026-09-25T01:00:00.000Z',
+      lastSuccessAt: '2026-09-25T01:00:00.000Z',
       lastFailureAt: '2026-09-25T01:00:00.000Z',
       lastFailureMessage: 'mongo timeout',
       intervalMs: 30000,
@@ -1155,6 +1233,69 @@ describe('getSecurityOverview 分支补齐', () => {
     });
     // 与新字段必须成对外发：只给一个就退回到"面板说活着"的旧口径
     expect(compliance.monitorRunning).toBe(true);
+  });
+
+  test('compliance.chainMonitorHealth 原样透出：链核验的结论码此后有真实读取方', async () => {
+    // 文件头承诺「lastVerdictCode 暴露给合规面板」，此前没有任何生产读取方（审计 §1.2）。
+    const auditChainMonitor = require('../../services/auditChainMonitor');
+    auditChainMonitor.getHealth.mockReturnValueOnce({
+      runs: 9,
+      failures: 5,
+      consecutiveFailures: 3,
+      skippedOverlaps: 0,
+      lastRunAt: '2026-09-25T03:00:00.000Z',
+      lastSuccessAt: '2026-09-25T02:00:00.000Z',
+      lastFailureAt: '2026-09-25T02:58:00.000Z',
+      lastFailureMessage: 'db down',
+      lastVerdictCode: 0,
+    });
+    mockGetSecurityOverview.mockResolvedValue({
+      criticalAlerts: 0,
+      highAlerts: 0,
+      failedLogins: 0,
+      unusualAccess: 0,
+      riskScore: 0,
+    });
+    const { req, res, next } = makeCtx();
+    await invoke(getSecurityOverview, req, res, next);
+    const compliance = res.payload.data.compliance;
+    expect(compliance.error).toBeUndefined();
+    // 逐字段相等：失败次数与结论码都必须原样出站（少一个键等于把「每轮都在抛」重新变成不可见）
+    expect(compliance.chainMonitorHealth).toEqual({
+      runs: 9,
+      failures: 5,
+      consecutiveFailures: 3,
+      skippedOverlaps: 0,
+      lastRunAt: '2026-09-25T03:00:00.000Z',
+      lastSuccessAt: '2026-09-25T02:00:00.000Z',
+      lastFailureAt: '2026-09-25T02:58:00.000Z',
+      lastFailureMessage: 'db down',
+      lastVerdictCode: 0,
+    });
+  });
+
+  test('反向：链核验桩缺 getHealth 只降级该字段，不得抹掉整段 compliance', async () => {
+    const auditChainMonitor = require('../../services/auditChainMonitor');
+    const realGetHealth = auditChainMonitor.getHealth;
+    auditChainMonitor.getHealth = undefined;
+    try {
+      mockGetSecurityOverview.mockResolvedValue({
+        criticalAlerts: 0,
+        highAlerts: 0,
+        failedLogins: 0,
+        unusualAccess: 0,
+        riskScore: 0,
+      });
+      const { req, res, next } = makeCtx();
+      await invoke(getSecurityOverview, req, res, next);
+      const compliance = res.payload.data.compliance;
+      expect(compliance.chainMonitorHealth).toBeNull();
+      expect(compliance.error).toBeUndefined();
+      expect(compliance.auditLoss).toBeDefined();
+      expect(compliance.chainTailHash).toBeDefined();
+    } finally {
+      auditChainMonitor.getHealth = realGetHealth;
+    }
   });
 
   test('反向：桩缺 getHealth 时只降级这一个字段，不得抹掉整段 compliance', async () => {
@@ -1184,6 +1325,65 @@ describe('getSecurityOverview 分支补齐', () => {
     }
   });
 
+  test('compliance.honeypotChainHealth 原样透出：事件链巡检的「每轮真在跑吗」计数此后有真实读取方', async () => {
+    // 与 monitorHealth / chainMonitorHealth 同一缺陷类：定时任务的静默失效形态是
+    // 「isRunning() 说挂着、实际每轮都失败」。本用例只钉控制器这一半：调用了、原样外发、不丢字段。
+    // 夹具键集合从真模块**现取**（同本文件 auditLoss 用例）：手抄键清单在巡检新增计数时
+    // 只会跟着变绿、不会跟着变红，面板就此静默少一项。
+    const honeypotChainWatch = require('../../services/honeypotChainWatch');
+    const realKeys = Object.keys(
+      jest.requireActual('../../services/honeypotChainWatch').getHealth()
+    );
+    const fixture = {};
+    // 每键一个互不相同的值：控制器若把 droppedCandidates 读进 lastCandidates，逐项比对必红。
+    realKeys.forEach((k, i) => {
+      fixture[k] = k === 'running' ? true : i + 1;
+    });
+    honeypotChainWatch.getHealth.mockReturnValueOnce(fixture);
+    mockGetSecurityOverview.mockResolvedValue({
+      criticalAlerts: 0,
+      highAlerts: 0,
+      failedLogins: 0,
+      unusualAccess: 0,
+      riskScore: 0,
+    });
+    const { req, res, next } = makeCtx();
+    await invoke(getSecurityOverview, req, res, next);
+    const compliance = res.payload.data.compliance;
+    expect(compliance.error).toBeUndefined();
+    // ① 不发明键、不丢键：面板上的键集合必须与巡检真有的键集合逐一相等
+    expect(Object.keys(compliance.honeypotChainHealth).sort()).toEqual([...realKeys].sort());
+    // ② 值原样透传（不串位、不改写）
+    expect(compliance.honeypotChainHealth).toEqual(fixture);
+    // escalationFailures 与 escalated 必须分开报：前者>0 说的是「升级没落库、本轮也没投递」，
+    // 后者说的是「真的升级了几条链」——合并成一个数就把「静默没告警」藏起来了。
+    expect(realKeys).toContain('escalationFailures');
+    expect(realKeys).toContain('escalated');
+  });
+
+  test('反向：事件链巡检桩缺 getHealth 只降级该字段，不得抹掉整段 compliance', async () => {
+    const honeypotChainWatch = require('../../services/honeypotChainWatch');
+    const realGetHealth = honeypotChainWatch.getHealth;
+    honeypotChainWatch.getHealth = undefined;
+    try {
+      mockGetSecurityOverview.mockResolvedValue({
+        criticalAlerts: 0,
+        highAlerts: 0,
+        failedLogins: 0,
+        unusualAccess: 0,
+        riskScore: 0,
+      });
+      const { req, res, next } = makeCtx();
+      await invoke(getSecurityOverview, req, res, next);
+      const compliance = res.payload.data.compliance;
+      expect(compliance.honeypotChainHealth).toBeNull();
+      expect(compliance.error).toBeUndefined();
+      expect(compliance.chainTailHash).toBeDefined();
+      expect(compliance.auditLoss).toBeDefined();
+    } finally {
+      honeypotChainWatch.getHealth = realGetHealth;
+    }
+  });
   test('securityAlert 返回 degraded 时返回 503 + 明确标记，绝不渲染零风险（A-2）', async () => {
     mockGetSecurityOverview.mockResolvedValue({ degraded: true, period: '7天' });
     const { req, res, next } = makeCtx();

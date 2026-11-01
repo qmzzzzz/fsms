@@ -28,6 +28,14 @@ jest.mock('../../models/AuditLog', () => {
 jest.mock('../../services/auditBuffer', () => ({
   push: jest.fn(),
   isWalEnabled: jest.fn(() => true),
+  // 替身：真实 auditBuffer.assignDocId 是纯函数（没有 _id 就补一个新的），这里按同语义
+  // 内联实现，而不是 `jest.fn(() => doc)`——后者会让「WAL 行带 _id」这条断言假绿。
+  // 不 requireActual 真实模块：它会把真实 wal 依赖也拖进来（本文件把 wal 也 mock 了）。
+  assignDocId: (doc) => {
+    const { Types } = jest.requireActual('mongoose');
+    if (doc && !doc._id) doc._id = new Types.ObjectId();
+    return doc;
+  },
 }));
 
 jest.mock('../../services/auditBufferWal', () => ({
@@ -83,6 +91,8 @@ describe('F-03 审计可靠 outbox', () => {
     expect(wal.appendLineDurable).toHaveBeenCalledTimes(1);
     const line = wal.appendLineDurable.mock.calls[0][0];
     expect(JSON.parse(line)).toMatchObject({ action: 'password_changed', category: 'auth' });
+    // 身份键必须进 WAL 行：跨重启重放靠它撞唯一索引实现幂等（见 auditBuffer.assignDocId）
+    expect(JSON.parse(line)._id).toMatch(/^[0-9a-f]{24}$/);
     // 已等待 WAL 落盘，进缓冲时不得再 fire-and-forget 追加一次（否则 WAL 行重复）
     expect(auditBuffer.push).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'password_changed', category: 'auth' }),

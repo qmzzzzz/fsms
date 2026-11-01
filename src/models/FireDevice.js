@@ -336,4 +336,13 @@ fireDeviceSchema.methods.transitionTo = async function (stage, overrides = {}) {
   return this.save();
 };
 
-module.exports = mongoose.model('FireDevice', fireDeviceSchema);
+const FireDevice = mongoose.model('FireDevice', fireDeviceSchema);
+const logger = require('../utils/logger');
+FireDevice.on('index', (err) => {
+  if (err) {
+    logger.error(
+      `FireDevice 索引创建失败：物理索引与声明不一致时 mongoose 只报错不改选项（改档由 services/initData/indexes.js 的启动对账落地），此前无 on('index') 监听时这个错误被完全吞掉：${err.message}`
+    );
+  }
+});
+module.exports = FireDevice;

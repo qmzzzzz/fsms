@@ -47,6 +47,7 @@ const EXPECTED_CONSUMERS = [
   'src/services/mfaService.js', // 备用恢复码的 pepper
   'src/utils/encryption.js', // HMACSigner 数据签名密钥
   'src/services/auditChainCheckpoint.js', // 审计链签名检查点（S-8）
+  'src/services/upgradeService.js', // 升级请求签名（应用签发、宿主代理验签）
 ];
 
 /**
@@ -54,7 +55,7 @@ const EXPECTED_CONSUMERS = [
  * 只认「从配置/环境**读出**密钥」这一形态：`hmacSecretOf(...)` 把已取出的密钥当参数
  * 传递给下游（auditAnchorSink、auditChainVerify）不是新消费点——密钥来源仍是
  * auditChainCheckpoint / auditChain。按裸标识符 `hmacSecret` 匹配会把这类下游
- * 全部卷进清单，轮换手册就得为同一把钥写多行，反而稀释"真正需要轮换预案"的那五个。
+ * 全部卷进清单，轮换手册就得为同一把钥写多行，反而稀释"真正需要轮换预案"的那六个。
  */
 const KEY_ACCESS_PATTERN =
   /require\(['"]\.\.\/config['"]\)\.hmacSecret|config\.hmacSecret|process\.env\.HMAC_SECRET/;
@@ -107,8 +108,8 @@ describe('HMAC_SECRET 消费点清单的单一来源', () => {
       expect(doc).toMatch(/恢复码/);
     });
 
-    test('手册必须写明消费点总数为五个（防止表格被悄悄删行）', () => {
-      expect(doc).toMatch(/五个消费点/);
+    test('手册必须写明消费点总数为六个（防止表格被悄悄删行）', () => {
+      expect(doc).toMatch(/六个消费点/);
     });
 
     test('手册必须说明"只有第 1 个有迁移工具"这一非对称事实', () => {

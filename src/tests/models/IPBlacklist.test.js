@@ -1,6 +1,10 @@
 /**
  * IPBlacklist 模型测试
  * 覆盖：单地址精确匹配（存量行为回归）、等价地址归一化、CIDR 网段包含、过期惰性清理、脏数据容错
+ *
+ * 快照失效清单（F5，第十一轮）：post 钩子必须与 auditLogHooks 的 APPEND_ONLY_HOOKS 同宽（9 项写入口）。
+ * 漏 replaceOne / findOneAndReplace / bulkWrite 时，改过的 ip 在 TTL 内表现为「旧地址仍拦、新地址不拦」，
+ * 且没有任何信号——不是延迟生效，是判据反了。清单宽度的判据在下方「快照失效覆盖全部写入口」用例。
  */
 
 const mongoose = require('mongoose');
@@ -145,6 +149,54 @@ describe('IPBlacklist Model', () => {
       expect(await IPBlacklist.isBlocked('1.2.3.4')).toBe(false);
       // 脏数据字符串级精确相等仍命中自身（与旧行为一致）
       expect(await IPBlacklist.isBlocked('::::')).toBe(true);
+    });
+  });
+  /*
+   * F5（第十一轮审计）：名单快照的失效钩子只列了 8 个写操作，漏掉
+   * findOneAndReplace / replaceOne / bulkWrite —— 与 APPEND_ONLY_HOOKS 的 9 项清单不一致。
+   * 漏一个的后果不是"晚 10 秒生效"这么轻：改过 ip 之后**旧地址继续被拦、新地址不被拦**，
+   * 而快照 TTL 内没有任何信号提示这件事（TTL 到期后才自愈，且期间判据是反的）。
+   * 下面三条按"改完立刻读"钉住：每个写入口都必须让快照失效。
+   */
+  describe('快照失效覆盖全部写入口（F5）', () => {
+    /** 预热快照：先 blockIP（会失效快照）再 isBlocked（把当前名单读进缓存） */
+    const warm = async (ip) => {
+      await IPBlacklist.blockIP(ip, { durationMs: 0 });
+      expect(await IPBlacklist.isBlocked(ip)).toBe(true);
+    };
+
+    test('findOneAndReplace 改 ip 后快照必须失效', async () => {
+      await warm('203.0.113.10');
+      await IPBlacklist.findOneAndReplace(
+        { ip: '203.0.113.10' },
+        { ip: '203.0.113.11', type: 'black', durationMs: 0, expiresAt: null }
+      );
+      expect(await IPBlacklist.isBlocked('203.0.113.11')).toBe(true);
+      expect(await IPBlacklist.isBlocked('203.0.113.10')).toBe(false);
+    });
+
+    test('replaceOne 改 ip 后快照必须失效', async () => {
+      await warm('203.0.113.20');
+      await IPBlacklist.replaceOne(
+        { ip: '203.0.113.20' },
+        { ip: '203.0.113.21', type: 'black', durationMs: 0, expiresAt: null }
+      );
+      expect(await IPBlacklist.isBlocked('203.0.113.21')).toBe(true);
+      expect(await IPBlacklist.isBlocked('203.0.113.20')).toBe(false);
+    });
+
+    test('bulkWrite 改 ip 后快照必须失效', async () => {
+      await warm('203.0.113.30');
+      await IPBlacklist.bulkWrite([
+        {
+          updateOne: {
+            filter: { ip: '203.0.113.30' },
+            update: { $set: { ip: '203.0.113.31' } },
+          },
+        },
+      ]);
+      expect(await IPBlacklist.isBlocked('203.0.113.31')).toBe(true);
+      expect(await IPBlacklist.isBlocked('203.0.113.30')).toBe(false);
     });
   });
 });

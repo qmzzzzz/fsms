@@ -20,13 +20,23 @@
  *  - 且能精确断言"旧代码会拿 http 模块打到哪个 host:port"，
  *    而不是只能观察"没有命中"。
  * logShipper 在调用点才取 `lib.request`，故对同一模块对象的 spy 生效。
+ *
+ * 2026-10-31（审计一-4 后续加固项）起，**域名**目标在建立连接前会先解析一次并把
+ * 结果钉进 http 客户端的 lookup（DNS 重绑定防护，见 utils/logShippingTarget.js）。
+ * 本文件用的是 siem.internal / siem.example.com 这类测试域名，真实解析必然失败
+ * ⇒ 用例要断言的就不再是 scheme 白名单，而是"解析失败"。故此处替掉
+ * `dns.promises.lookup`（单测不出网，给一个公网结果），IP 字面量的目标不受影响。
+ * 钉扎判据本身（含"解析到内网地址即拒绝"）由
+ * src/tests/observability/logShipperDnsPinning.test.js 单独钉住。
  */
 
+const dns = require('dns');
 const http = require('http');
 const https = require('https');
 
 let httpSpy;
 let httpsSpy;
+let lookupSpy;
 let consoleSpies;
 
 // 传输层的告警走 console（挂载期 logger 正在加载），本用例静音并留副本备查
@@ -50,6 +60,11 @@ beforeEach(() => {
   httpsSpy = jest.spyOn(https, 'request').mockImplementation(() => {
     throw new Error('SENTINEL_REQUEST_ATTEMPTED');
   });
+  // 测试域名解析到公网地址（判据的"公网侧"），使本文件测的仍是 scheme/门禁，
+  // 而不是"测试环境没有 DNS"
+  lookupSpy = jest
+    .spyOn(dns.promises, 'lookup')
+    .mockResolvedValue([{ address: '203.0.113.9', family: 4 }]);
 });
 
 // 必须每条用例后摘掉：jest.spyOn 对"已被 spy 的方法"再 spy 一次时，
@@ -58,6 +73,7 @@ beforeEach(() => {
 afterEach(() => {
   httpSpy.mockRestore();
   httpsSpy.mockRestore();
+  lookupSpy.mockRestore();
 });
 
 const { HttpShipperTransport } = require('../utils/logShipper');

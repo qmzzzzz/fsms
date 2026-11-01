@@ -54,7 +54,9 @@
           {{ ui.isPermRemoved(perm._id) ? '↺' : ui.isPermChecked(perm._id) ? '✓' : '' }}
         </span>
         <span class="glass-perm-btn__text">
-          <span class="glass-perm-btn__name">{{ perm.name }}</span>
+          <span class="glass-perm-btn__name">{{
+            ui.permissionName ? ui.permissionName(perm) : perm.name
+          }}</span>
           <span class="glass-perm-btn__code">{{ perm.code }}</span>
         </span>
         <span v-if="ui.isPermAdded(perm._id)" class="glass-perm-btn__badge is-added">{{

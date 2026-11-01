@@ -10,12 +10,13 @@ const { authenticate, checkPermission, requireReAuthentication } = require('../m
 const { strictLimiter, reauthLimiter, reauthUserLimiter } = require('../middleware/rateLimit');
 const ApiResponse = require('../utils/apiResponse');
 const { PII_NAME_EXPORT_TYPES } = require('../services/reportExportService');
+const logger = require('../utils/logger');
+const { checkPiiExportQuota } = require('../services/piiExportQuota');
 
 /**
  * GET 导出只有掩码档（L-17）
  *
- * 未脱敏导出改为 POST /export/pii + 二次验证；若 GET 仍按 pii:export 放行全文，
- * 拿到口令的会话就能绕过步进验证直接批量拉真实姓名，两条路径的强度会不一致。
+ * 未脱敏导出改为 POST /export/pii + 二次验证；GET 若仍按 pii:export 放行全文，持会话者就能绕过步进验证批量拉真实姓名。
  * 置位后由 reportController.resolveExportMasking 统一消费，非 PII 类型不受影响。
  */
 const forceMaskPii = (req, res, next) => {
@@ -39,6 +40,25 @@ const requirePiiExportType = (req, res, next) => {
     });
   }
   next();
+};
+
+/** A-8 配额闸：滚动 24h 配额；置于二次验证之前（注定被拒的请求不烧凭据尝试） */
+const requirePiiExportQuota = async (req, res, next) => {
+  try {
+    const verdict = await checkPiiExportQuota({ userId: req.user.userId });
+    if (verdict.allowed) return next();
+    res.setHeader('Retry-After', String(verdict.retryAfterSeconds));
+    logger.warn(
+      `未脱敏导出配额已满：user=${req.user.username || req.user.userId} ` +
+        `used=${verdict.used}/${verdict.limit}`
+    );
+    return ApiResponse.codeError(res, 'PII_EXPORT_QUOTA_EXCEEDED', {
+      message: `今日未脱敏导出已达配额（${verdict.used}/${verdict.limit} 次），请稍后再试或联系管理员`,
+      params: { used: verdict.used, limit: verdict.limit },
+    });
+  } catch (err) {
+    return next(err);
+  }
 };
 
 /**
@@ -126,6 +146,7 @@ router.post(
   reauthUserLimiter,
   checkPermission('report:export'),
   checkPermission('pii:export'),
+  requirePiiExportQuota,
   requireReAuthentication(),
   reportController.exportReport
 );

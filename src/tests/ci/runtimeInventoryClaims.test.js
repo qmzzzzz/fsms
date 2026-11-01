@@ -3,7 +3,7 @@
  *
  * 为什么要有这个门禁：这份清单是运维据以决定"能不能多实例部署"的唯一入口，
  * 而它此前只是散文——清单里给 services/reportDashboardService.js 写着"配失效广播"
- * 并 `redisExternalized: true`，那个模块自己的头注释（src/services/reportDashboardService.js:18-22）
+ * 并 `redisExternalized: true`，那个模块自己的头注释（src/services/reportDashboardService.js:19-24）
  * 写的却是**刻意不做跨实例失效广播**。后果不是文档不准：`assertSingleProcessAssumptions`
  * 在 REDIS_URL 就绪时会把 `redisExternalized` 的条目从"仍按单进程假设运行"的清单里滤掉，
  * 于是多实例部署看不到这块缓存的不一致，只看得到它想让你看到的。
@@ -175,7 +175,7 @@ describe('单进程依赖清单：声称必须落到代码上', () => {
     expect(missingBroadcastPairIn('a.onInvalidate(h);')).toMatch(/缺发布端/);
     expect(missingBroadcastPairIn('const x = 1;')).toMatch(/两端都没有/);
     // 反向自证 4：注释里把两条腿都写出来，也不能算"接了广播"。
-    // （services/reportDashboardService.js:18-23 的改法说明本来就该写全：只接发布端等于没接。）
+    // （services/reportDashboardService.js:19-24 的改法说明本来就该写全：只接发布端等于没接。）
     // 这一条钉的是"判据跑在代码视图上"这件事本身：全文匹配会判它两端齐全 ⇒ 下面第一行为真、
     // 第二行必须仍然报"两端都没有"。
     const dashAbs = absOf('services/reportDashboardService.js');

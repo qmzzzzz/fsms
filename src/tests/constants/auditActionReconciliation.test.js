@@ -234,6 +234,22 @@ describe('审计 action 白名单对账', () => {
     ).toBeNull();
     // 没有任何定义的标识符仍然 null ⇒ 调用方走 unresolved 硬失败，而不是静默跳过
     expect(resolveActionExpr('NEVER_DEFINED_HERE', ctx, "const ACTION = 'x';")).toBeNull();
+    // 三元常量：两个分支都得被认领（account.js 的强制改密分账）
+    expect(
+      resolveActionExpr(
+        'ACTION',
+        ctx,
+        "const ACTION = result.forced ? 'password_force_changed' : 'password_changed';\npush({ action: ACTION });"
+      )
+    ).toEqual(['password_force_changed', 'password_changed']);
+    // 三元被函数包着 ⇒ 实际值不受这两个字面量约束，不得凭空认定
+    expect(
+      resolveActionExpr(
+        'ACTION',
+        ctx,
+        "const ACTION = pick(flag ? 'x_on' : 'x_off');\npush({ action: ACTION });"
+      )
+    ).toBeNull();
   });
 
   test('回归：account_temp_locked 在库可查（validateEnum 白名单命中）', () => {

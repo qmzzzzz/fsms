@@ -229,3 +229,121 @@ describe('auditlogs TTL 的启动期对账', () => {
     expect(await nsExists()).toBe(false);
   });
 });
+
+describe('业务集合 TTL 的启动期对账（D2：改档不生效 / 关开关不回收）', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const FireDevice = require('../../models/FireDevice');
+  const { reconcileBusinessTtlIndexes } = require('../../services/initData');
+  const TTL_NAME = 'ttl_createdAt';
+  const ENV_KEY = 'BUSINESS_RETENTION_DAYS_FIRE_DEVICE';
+  const DECLARED = 180 * 86400;
+  const coll = () => mongoose.connection.collection(FireDevice.collection.collectionName);
+  const ttlNow = async () => {
+    const list = await coll()
+      .indexes()
+      .catch(() => []);
+    const idx = list.find((i) => i.name === TTL_NAME);
+    return idx ? idx.expireAfterSeconds : undefined;
+  };
+
+  beforeAll(async () => {
+    // 前一个 describe 的 afterAll 会关连接；本块自己保证连接在，且同样是独立库
+    if (mongoose.connection.readyState !== 1) {
+      const base = process.env.MONGODB_URI;
+      const [head, query] = base.split('?');
+      const uri = `${head.replace(/\/[^/]*$/, `/${DB_NAME}`)}${query ? `?${query}` : ''}`;
+      await mongoose.connect(uri);
+    }
+    expect(mongoose.connection.name).toBe(DB_NAME);
+    await FireDevice.init(); // 先把 schema 声明的索引落完，避免与用例自造的物理形态抢跑
+  });
+
+  beforeEach(() => {
+    delete process.env[ENV_KEY];
+  });
+
+  afterAll(async () => {
+    delete process.env[ENV_KEY];
+    await coll()
+      .drop()
+      .catch(() => {});
+  });
+
+  test('改档漂移（库里 90 天 / 声明 180 天）⇒ 启动对账把它纠回声明值', async () => {
+    await coll()
+      .dropIndexes()
+      .catch(() => {});
+    await coll().createIndex({ createdAt: 1 }, { name: TTL_NAME, expireAfterSeconds: 90 * 86400 });
+    expect(await ttlNow()).toBe(90 * 86400); // 前提：物理索引此刻停在旧档位（IndexOptionsConflict 形态）
+    process.env[ENV_KEY] = '180';
+
+    await reconcileBusinessTtlIndexes();
+
+    expect(await ttlNow()).toBe(DECLARED);
+  });
+
+  test('开关开但物理索引缺失 ⇒ 按声明值创建（否则过期数据永不清理，且开关形同没开）', async () => {
+    await coll()
+      .dropIndexes()
+      .catch(() => {});
+    expect(await ttlNow()).toBeUndefined(); // 前提：物理 TTL 不存在
+    process.env[ENV_KEY] = '180';
+
+    await reconcileBusinessTtlIndexes();
+
+    expect(await ttlNow()).toBe(DECLARED);
+  });
+
+  test('关开关但物理 TTL 仍在 ⇒ error 点名集合/索引/当前值并给 dropIndex 指引，且不自动删索引', async () => {
+    await coll()
+      .createIndex({ createdAt: 1 }, { name: TTL_NAME, expireAfterSeconds: DECLARED })
+      .catch(() => {});
+    delete process.env[ENV_KEY]; // 对外承诺的是「无 TTL，数据永久保留」，物理 TTL 必须不存在
+    const error = jest.spyOn(logger, 'error').mockImplementation(() => {});
+
+    const summary = await reconcileBusinessTtlIndexes();
+
+    const text = error.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(text).toContain(FireDevice.collection.collectionName);
+    expect(text).toContain(TTL_NAME);
+    expect(text).toContain('dropIndex');
+    expect(text).toContain('永久保留');
+    expect(summary.orphaned.map((o) => o.index)).toEqual([TTL_NAME]);
+    // 不自动删：删索引不可逆，但物理 TTL 必须仍在原处（错误已经响亮，不靠静默改写数据面）
+    expect(await ttlNow()).toBe(DECLARED);
+  });
+
+  test('反向对照：已等于声明值 ⇒ 一条写命令都不发（幂等，不每次启动都 collMod）', async () => {
+    await coll()
+      .createIndex({ createdAt: 1 }, { name: TTL_NAME, expireAfterSeconds: DECLARED })
+      .catch(() => {});
+    process.env[ENV_KEY] = '180';
+    const passThrough = mongoose.connection.db.command.bind(mongoose.connection.db);
+    const issued = [];
+    const cmd = jest
+      .spyOn(mongoose.connection.db, 'command')
+      .mockImplementation(async (command, ...rest) => {
+        if (command && command.collMod) issued.push(command.collMod);
+        return passThrough(command, ...rest);
+      });
+
+    const summary = await reconcileBusinessTtlIndexes();
+
+    expect(issued).toEqual([]);
+    expect({
+      aligned: summary.aligned,
+      created: summary.created,
+      orphaned: summary.orphaned,
+    }).toEqual({ aligned: [], created: [], orphaned: [] });
+    cmd.mockRestore();
+  });
+
+  test("静态守卫：三个业务模型必须把 on('index') 的错误接到日志（否则改档冲突被完全吞掉）", () => {
+    for (const model of ['FireAlarm', 'Inspection', 'FireDevice']) {
+      const src = fs.readFileSync(path.join(__dirname, '../../models', `${model}.js`), 'utf8');
+      expect(src).toMatch(/\.on\('index',\s*\(err\)/);
+      expect(src).toMatch(/if \(err\) \{[\s\S]{0,200}logger\.error\(/);
+    }
+  });
+});

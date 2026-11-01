@@ -1,8 +1,7 @@
 /**
  * 关闭 MFA 的领域判定与条件写（自 mfaService 拆出，控制单文件体积）
  *
- * 依赖方向单向：本模块 → mfaService（摘要、失败计数、TOTP 验签），
- * mfaService 不反向依赖，避免循环引用。
+ * 依赖方向单向：本模块 → mfaService（摘要、失败计数、TOTP 验签）， mfaService 不反向依赖，避免循环引用。
  */
 
 const User = require('../models/User');
@@ -12,11 +11,7 @@ const { hashRecoveryCode, recordMfaFailure, verifyTotpFactor } = require('./mfaS
 /**
  * 原子消费一个备用恢复码（关闭 MFA 的第二因子之一）。
  *
- * 过滤条件同时包含 `_id` 与摘要，`$pull` 未命中即视为无效——与登录侧
- * verifyRecoveryCodeChallenge 同一形状，消除"先查后删"的并发双花窗口。
- * 必须用 findOneAndUpdate 而非 findByIdAndUpdate：后者只取第一参的 _id，
- * 其余过滤键会被静默丢弃（登录侧曾因此让任意格式合法恢复码通过）。
- * 写库异常按无效处理（fail-closed），并留痕。
+ * 过滤条件同时包含 `_id` 与摘要，`$pull` 未命中即视为无效——与登录侧 verifyRecoveryCodeChallenge 同一形状，消除"先查后删"的并发双花窗口。必须用 findOneAndUpdate 而非 findByIdAndUpdate：后者只取第一参的 _id，其余过滤键会被静默丢弃（登录侧曾因此让任意格式合法恢复码通过）。写库异常按无效处理（fail-closed），并留痕。
  */
 const consumeRecoveryCodeForDisable = async (userId, normalizedCode) => {
   const codeHash = hashRecoveryCode(normalizedCode);
@@ -35,11 +30,7 @@ const consumeRecoveryCodeForDisable = async (userId, normalizedCode) => {
 /**
  * 用恢复码关闭 MFA：消费恢复码与清空 MFA 状态必须是**同一条文档写**。
  *
- * 原实现先 `$pull` 恢复码、再发一条独立的 `findOneAndUpdate` 清 MFA。第二步
- * 失败（并发重新登记导致条件 miss、或写库异常）时恢复码已经没了、MFA 仍在——
- * 用户手里少一张码，却什么都没关掉；只剩最后一张码时直接锁死在登录第二步。
- * 两者作用在同一个 User 文档上，没有理由拆成两步：过滤条件同时要求
- * 「码在组里」和「密钥仍是本次验证的那份」，一次 `$set` 同时完成消费与关闭。
+ * 原实现先 `$pull` 恢复码、再发一条独立的 `findOneAndUpdate` 清 MFA。第二步失败（并发重新登记导致条件 miss、或写库异常）时恢复码已经没了、MFA 仍在—— 用户手里少一张码，却什么都没关掉；只剩最后一张码时直接锁死在登录第二步。两者作用在同一个 User 文档上，没有理由拆成两步：过滤条件同时要求「码在组里」和「密钥仍是本次验证的那份」，一次 `$set` 同时完成消费与关闭。
  *
  * @returns {Promise<{outcome:'OK'|'VERIFY_FAILED'|'STATE_CONFLICT'|'NOT_ENABLED', user?: object}>}
  */
@@ -87,9 +78,7 @@ const disableWithRecoveryCode = async (user, normalizedCode) => {
 /**
  * 关闭 MFA 的第二因子验证：TOTP 优先，其次恢复码（"二选一"，不是叠加）。
  *
- * 两条路径统一受防爆破约束：不能借恢复码路径绕过 TOTP 的尝试限额。
- * 放在 service 而不是 controller——"什么算验证通过"是领域判定，
- * controller 只该决定"通过后写什么、失败时回什么码"。
+ * 两条路径统一受防爆破约束：不能借恢复码路径绕过 TOTP 的尝试限额。放在 service 而不是 controller——"什么算验证通过"是领域判定， controller 只该决定"通过后写什么、失败时回什么码"。
  * @returns {Promise<{verified: boolean, method: string}>}
  */
 const verifyDisableFactor = async (user, { mfaCode, normalizedCode, codePath }) => {
@@ -102,10 +91,7 @@ const verifyDisableFactor = async (user, { mfaCode, normalizedCode, codePath }) 
 /**
  * 关闭 MFA 的统一入口：先验第二因子，再用**条件写**清理状态。
  *
- * 两条路径的共同约束：验证是对载入时的 `user.mfaSecret` 做的，落库必须继续
- * 锁定那份密钥。否则并发 enroll/enable 换掉密钥后，本次从未证明过控制权的
- * 新登记会被一并清掉（审计还记成"用户关闭 MFA"）。
- * 恢复码路径额外要求"消费码 + 清状态"同一条写，见 disableWithRecoveryCode。
+ * 两条路径的共同约束：验证是对载入时的 `user.mfaSecret` 做的，落库必须继续锁定那份密钥。否则并发 enroll/enable 换掉密钥后，本次从未证明过控制权的新登记会被一并清掉（审计还记成"用户关闭 MFA"）。恢复码路径额外要求"消费码 + 清状态"同一条写，见 disableWithRecoveryCode。
  *
  * @returns {Promise<{outcome:'OK'|'VERIFY_FAILED'|'STATE_CONFLICT'|'NOT_ENABLED', verifyMethod?: string}>}
  */

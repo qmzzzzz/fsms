@@ -537,7 +537,10 @@ describe('RoleView 角色列表与选中态', () => {
     expect(active.errors).toEqual([])
   })
 
-  test('列表加载失败：列表清空为空态，不抛 Vue 错误', async () => {
+  test('列表加载失败：出现列表错误块而不是「请选择角色」空态，且不抛 Vue 错误', async () => {
+    // 2026-10-31 口径纠正（P1③）：原断言要求失败后渲染 .empty-state——
+    // 那是「列表读到了、但没选中」的文案，用在「列表根本没读到」时等于谎报表空。
+    // 新口径：列表错误块显式可见，空态不得出现（两面判据独立，见 P1③ 那组用例）。
     rolesGetList.mockRejectedValue(new Error('boom'))
     rolesGetTree.mockResolvedValue({ data: { data: TREE } })
     rolesGetById.mockResolvedValue({ data: { data: { permissions: [] } } })
@@ -547,8 +550,8 @@ describe('RoleView 角色列表与选中态', () => {
     await waitFor(() => rolesGetList.mock.calls.length === 1, { message: '列表请求' })
     await flush(10)
     expect(active.findAll('.glass-role-item')).toEqual([])
-    // 空态：未选中任何角色
-    expect(active.find('.empty-state')).toBeTruthy()
+    expect(active.find('.role-list-failed')).not.toBeNull()
+    expect(active.find('.empty-state')).toBeNull()
     expect(rolesGetById).not.toHaveBeenCalled()
     expect(active.errors).toEqual([])
   })
@@ -1209,5 +1212,130 @@ describe('RoleView 权限面板渲染细节', () => {
     expect(roleTags(active)).toEqual(['巡检员'])
     expect(active.find('.perm-empty-search')).toBeTruthy()
     expect(active.errors).toEqual([])
+  })
+})
+
+describe('RoleView 角色列表加载失败：与权限集失败是两个独立面（P1③/P1④）', () => {
+  // 裁决③：这两个面必须是两个独立判据、两个独立错误块。
+  // 本组用例刻意在**权限集正常**的前提下让列表失败（以及反向组合），
+  // 确保任一面的红都不会被另一个面的绿掩盖。
+  const mountListFailing = async (perms = ['role:read', 'role:assign', 'permission:read']) => {
+    // 不调用 mountRole：它内部会 mockResolvedValue 列表，把这里的 reject 覆盖掉
+    rolesGetTree.mockResolvedValue({ data: { data: TREE } })
+    rolesGetList.mockRejectedValue(new Error('boom'))
+    const c = mountComponent(RoleView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(perms),
+    })
+    await waitForDom(() => rolesGetList.mock.calls.length >= 1, '列表请求已发出')
+    await flush(12)
+    return c
+  }
+
+  test('列表失败且无选中角色：出现列表错误块，且不渲染「请选择角色」冒充空态', async () => {
+    const c = await mountListFailing()
+    expect(c.find('.role-list-failed')).not.toBeNull()
+    expect(c.find('.role-list-failed').textContent).toContain(
+      i18n.global.t('common.listLoadFailed')
+    )
+    // 关键判据：失败 ≠ 空。「请选择角色」是「列表读到了但没选中」的文案，
+    // 在「列表根本没读到」时显示它会让用户以为系统里一个角色都没有。
+    expect(c.find('.empty-state')).toBeNull()
+    // 权限集错误块此时不应出现（这一面没失败）——两面不共用布尔
+    expect(c.find('.perm-load-failed')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('列表失败：错误块提供重试，点击后重新拉取并渲染角色', async () => {
+    const c = await mountListFailing()
+    const before = rolesGetList.mock.calls.length
+    rolesGetList.mockResolvedValue({ data: { data: [ROLE_PLAIN] } })
+    rolesGetById.mockResolvedValue({ data: { data: { permissions: P_READ } } })
+    click(c.find('.role-list-failed button'))
+    await flush(14)
+    expect(rolesGetList.mock.calls.length).toBeGreaterThan(before)
+    await waitFor(() => c.findAll('.glass-role-item').length === 1, { message: '重试后渲染角色' })
+    expect(c.find('.role-list-failed')).toBeNull()
+  })
+
+  test('两面判据互不串台：列表失败时权限集错误块不出现，反之亦然', async () => {
+    // 反向组合 A：列表成功、权限集失败 ⇒ 只应有权限集错误块
+    const a = await mountRole(['role:read', 'role:assign', 'permission:read'], [ROLE_PLAIN], {})
+    // mountRole 内部已把列表 mock 成成功；这里单独把权限集那一面改成失败
+    rolesGetById.mockRejectedValue(new Error('perm down'))
+    click(a.findAll('.glass-role-item')[0])
+    await flush(14)
+    expect(a.find('.perm-load-failed')).not.toBeNull()
+    expect(a.find('.role-list-failed')).toBeNull()
+    expect(a.errors).toEqual([])
+  })
+
+  test('pagination 缺失不适用于本视图，但角色数超上限时不静默截断（列表长度即全部）', async () => {
+    // RoleView 无分页器（limit:100 一次取完），P1④ 在它身上表现为「不得假装有分页」：
+    // 不该出现 .total-unknown，也不该出现分页器——否则会给用户「还有下一页」的错觉。
+    const c = await mountRole(['role:read'], [ROLE_PLAIN], {})
+    expect(c.find('.total-unknown')).toBeNull()
+    expect(c.find('.el-pagination')).toBeNull()
+  })
+})
+
+describe('RoleView 权限集加载失败：显式错误态（P1①，禁止把「没读到」当「没有」）', () => {
+  test('getById 失败：保存被拦下（按钮禁用 + 处理函数拒绝），绝不发整集替换请求', async () => {
+    rolesGetList.mockResolvedValue({ data: { data: [ROLE_PLAIN] } })
+    rolesGetTree.mockResolvedValue({ data: { data: TREE } })
+    rolesGetById.mockRejectedValue(new Error('perm down'))
+    active = mountComponent(RoleView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(P_ALL),
+    })
+    await waitFor(() => active.find('.perm-load-failed'), { message: '权限加载失败错误态' })
+    expect(active.find('.perm-load-failed').textContent).toContain(
+      i18n.global.t('role.permLoadFailed')
+    )
+    // 错误态下不得把「没读到」渲染成「全部未勾选」的权限网格
+    expect(active.findAll('.glass-perm-btn')).toEqual([])
+    const save = active.findAll('.header-actions .glass-btn--primary')[0]
+    expect(save.disabled).toBe(true)
+    // disabled 只挡 UI：程序化触发也必须被处理函数拒绝（双击/键盘/自动化都不例外）
+    save.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
+    await flush(12)
+    expect(rolesAssignPerm).not.toHaveBeenCalled()
+    expect(confirmBox).not.toHaveBeenCalled()
+    expect(ElMessage.warning).toHaveBeenCalledWith(i18n.global.t('role.permLoadFailed'))
+    expect(active.errors).toEqual([])
+  })
+
+  test('错误态点击重试：重新拉取成功后勾选态恢复、保存解锁且发出的是真实权限集', async () => {
+    let byIdCalls = 0
+    rolesGetList.mockResolvedValue({ data: { data: [ROLE_PLAIN] } })
+    rolesGetTree.mockResolvedValue({ data: { data: TREE } })
+    rolesGetById.mockImplementation(() => {
+      byIdCalls += 1
+      if (byIdCalls === 1) return Promise.reject(new Error('perm down'))
+      return Promise.resolve({
+        data: {
+          data: {
+            _id: 'r2',
+            name: '巡检员',
+            permissions: [{ _id: 'aaaaaaaaaaaaaaaaaaaaaaaa' }],
+          },
+        },
+      })
+    })
+    active = mountComponent(RoleView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(P_ALL),
+    })
+    await waitFor(() => active.find('.perm-load-failed'), { message: '错误态出现' })
+    click(active.find('.perm-load-failed button'))
+    await waitFor(() => active.findAll('.glass-perm-btn').length === 2, {
+      message: '重试成功后权限网格恢复',
+    })
+    expect(active.find('.perm-load-failed')).toBeNull()
+    expect(permOn(active)).toEqual([true, false])
+    const save = active.findAll('.header-actions .glass-btn--primary')[0]
+    expect(save.disabled).toBe(false)
+    click(save)
+    await waitFor(() => rolesAssignPerm.mock.calls.length === 1, { message: '恢复后保存' })
+    expect(rolesAssignPerm).toHaveBeenCalledWith('r2', {
+      permissions: ['aaaaaaaaaaaaaaaaaaaaaaaa'],
+    })
   })
 })

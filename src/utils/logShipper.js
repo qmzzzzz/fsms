@@ -34,7 +34,14 @@ const TransportStream = require('winston-transport');
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-const { isPrivateOrLoopback, ipMatchesEntry } = require('./ipUtils');
+const net = require('net');
+// 判据与"发送前钉扎"（DNS 重绑定防护）在 utils/logShippingTarget.js：本文件顶
+// max-lines 棘轮阈值，而那块判据与 winston 传输层零耦合。
+const {
+  assertPublicShippingTarget,
+  pinShippingTarget,
+  pinnedLookup,
+} = require('./logShippingTarget');
 const { URL } = require('url');
 // 运行时信号（转发失败 / 缓冲丢行）。本文件**不**反向被 metricsRuntime 引用，
 // 因此不存在 util ↔ util 的加载环（metricsAuditDrops 那边的拉取式 require 才需要惰性）。
@@ -134,49 +141,8 @@ function resolveShippingTarget(rawUrl) {
   throw new Error(`LOG_SHIPPING_URL 仅支持 http/https，收到 ${parsed.protocol}`);
 }
 
-/**
- * 出站目标门禁：scheme 只回答"加不加密"，不回答"发到哪"。
- * `http://169.254.169.254/latest/meta-data` 是**合法** http:，却是云元数据端点
- * （经典 SSRF 目标）；私网/回环目标同理——日志批 + Bearer 令牌发给内网某台机器
- * 的误配置不该零告警地成立。判据与 metricsAuth 的来源判定同一把尺
- * （utils/ipUtils.isPrivateOrLoopback，含 IPv4-mapped/uniqueLocal/linkLocal）。
- *
- * 已知边界（如实记录）：主机名（非 IP 字面量）在解析期不查 DNS——它可能在
- * 发送期被重新解析（DNS rebinding 窗口）。LOG_SHIPPING_URL 是运维配置项，
- * 本门禁是纵深防御而非沙箱；真要收窄到"发送时逐次验证已解析地址"，需要把
- * 校验嵌进发送路径并对每次连接的地址做判定，属后续加固项。
- *
- * 内网 SIEM 的合法部署用 LOG_SHIPPING_ALLOW_PRIVATE_HOSTS 显式放行：
- * 逗号分隔，条目可以是主机名（精确匹配）或 IP/网段（经 ipMatchesEntry，
- * 与 IP 名单同一把尺）。
- */
-function assertPublicShippingTarget(parsed) {
-  // URL.hostname 对 IPv6 字面量保留方括号（'[::1]'），先剥掉再进判据
-  const host = (parsed.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (!host) return;
-
-  const allowEntries = (process.env.LOG_SHIPPING_ALLOW_PRIVATE_HOSTS || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const allowed = allowEntries.some(
-    (entry) => entry.toLowerCase() === host || ipMatchesEntry(host, entry) === true
-  );
-
-  // 歧义 IPv4 形态（127.1 / 2130706433 / 0x7f.0.0.1）：ipUtils 的严格解析判 null
-  // ⇒ isPrivateOrLoopback 返回 false，但 OS 层仍会把它们当 127.0.0.1 连——
-  // 这类串**永不可能是合法域名**（纯数字点分不完整 / 0x 前导），按歧义拒绝，
-  // 不给"换一种写法绕过网段判据"留门。allowlist 同样可以放行（显式决策优先）。
-  const looksLikeAmbiguousIpv4 =
-    /^\d+(\.\d+){0,2}$/.test(host) || /^0[xX][0-9a-fA-F.]+$/.test(host);
-
-  if (!allowed && (isPrivateOrLoopback(host) || looksLikeAmbiguousIpv4)) {
-    throw new Error(
-      `LOG_SHIPPING_URL 指向内网/回环/链路本地地址（${host}）：日志与 Bearer 令牌不得发往私网目标。` +
-        '确属内网 SIEM 时，把该主机或网段加入 LOG_SHIPPING_ALLOW_PRIVATE_HOSTS'
-    );
-  }
-}
+// 出站目标判据与发送前钉扎已抽到 utils/logShippingTarget.js（2026-10-31）；原「DNS rebinding 属后续加固项」的已知边界
+// 已由 pinShippingTarget 收口（解析只做一次，结果交给 http 客户端 lookup，连接期不再查询）。完整论证见 work/fix-round12-commentdensity-logshipper.md。
 
 class HttpShipperTransport extends TransportStream {
   constructor(opts = {}) {
@@ -299,14 +265,38 @@ class HttpShipperTransport extends TransportStream {
     }
   }
 
+  /**
+   * 判据 → 钉扎 → 连接。
+   *
+   * 顺序不可换：判据与钉扎都必须在**建立连接之前**完成，域名只解析这一次，
+   * 结果交给 lookup，连接期不再查询 —— 关闭"判据通过 → 真正连接"之间的 DNS
+   * 重绑定窗口（见 pinShippingTarget）。解析失败或解析到禁止地址时本次投递
+   * 直接放弃，由 _flush 把整批放回缓冲重试，而不是"先连上再说"。
+   *
+   * IP 字面量的两条路径（判据 / 钉扎）都是同步的，因此这条分支**不进微任务**：
+   * 原实现的 http.request 就在 _post 的同步调用栈里发生，改成 async 会让
+   * 调用方的时序假设（如"同步调用了 request"）静默失效。
+   */
   _post(batch) {
+    let target;
+    try {
+      target = resolveShippingTarget(this.url);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    const host = (target.parsed.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+    const literalFamily = net.isIP(host);
+    if (literalFamily) {
+      return this._sendPinned(batch, target, { address: host, family: literalFamily });
+    }
+    return pinShippingTarget(target.parsed).then((pinned) =>
+      this._sendPinned(batch, target, pinned)
+    );
+  }
+
+  /** 用**已经钉住**的目标地址发出这一批（连接期不再解析，见 _post 的注释） */
+  _sendPinned(batch, target, pinned) {
     return new Promise((resolve, reject) => {
-      let target;
-      try {
-        target = resolveShippingTarget(this.url);
-      } catch (e) {
-        return reject(e);
-      }
       const { parsed, lib } = target;
       const body = JSON.stringify(batch);
       const headers = {
@@ -335,6 +325,8 @@ class HttpShipperTransport extends TransportStream {
           path: `${parsed.pathname || '/'}${parsed.search || ''}`,
           headers,
           timeout: this.timeoutMs,
+          // 连接期不再做 DNS：只返回上面校验过的那个地址
+          lookup: pinnedLookup(pinned),
         },
         (res) => {
           // 【修复】必须先接管响应流错误：对端在响应体传输中途断连时
@@ -419,4 +411,10 @@ class HttpShipperTransport extends TransportStream {
 }
 
 // F-215：挂载期也要用（logger.js 在 logger.add 之前先解析一次），故导出。
-module.exports = { HttpShipperTransport, BUFFER_CAP, resolveShippingTarget };
+module.exports = {
+  HttpShipperTransport,
+  BUFFER_CAP,
+  resolveShippingTarget,
+  // 判据与钉扎已抽到 utils/logShippingTarget.js（本文件顶 max-lines 棘轮阈值）：
+  // 单测直接 require 那个模块，这里不再转出一个副本，避免两处导出漂移。
+};

@@ -1,0 +1,41 @@
+# 临时权限授予的定期复核与到期收敛（systemd oneshot service）
+#
+# 由 fsms-access-review.timer 每小时拉起一次，做两件事：
+#   1) --expire：把 {status:'active', expiresAt <= now} 的授予置为 expired（记录保留，不删）；
+#   2) 打印 reviewSummary / 超期未复核清单，落到 journal 供测评取证。
+#
+# 为什么要有这个服务：权限是否生效由**读取路径**判定（见 ADR-012），
+# 所以本服务停摆不会让过期权限复活；它的失效形态只是「状态与清单不刷新」。
+# 这一条必须写清楚，否则运维会误以为本服务是控制措施本身。
+#
+# 安装：
+#   sudo install -m 0644 fsms-access-review.service /etc/systemd/system/
+#   sudo install -m 0644 fsms-access-review.timer   /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fsms-access-review.timer
+#   journalctl -u fsms-access-review -n 50
+
+[Unit]
+Description=FSMS privilege grant review and expiry sweep
+Documentation=file:/opt/fsms/docs/adr/ADR-012-临时权限授予与定期复核.md
+After=network-online.target mongod.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/fsms
+# 复用应用自身的 .env（MONGODB_URI 等）；生产由部署流程注入，缺文件时本服务起不来是期望行为
+EnvironmentFile=/opt/fsms/.env
+ExecStart=/usr/bin/node /opt/fsms/scripts/access-review.js --expire
+# 读全表扫超期，分钟级足够；给 10 分钟上限让「卡住」变成可解释状态
+TimeoutStartSec=10min
+# 只读业务库的授权集合，不需要任何特权
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+# 不重启：下一轮 timer 自然重试，重启风暴只会刷屏 journal
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

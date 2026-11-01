@@ -12,7 +12,7 @@
 | 安全   | helmet（CSP / Trusted Types）、三层限流 + CC 封禁阶梯、bcryptjs、字段级加密与登录信封加密、TOTP 两步验证、令牌黑名单、IP 黑 / 白名单、审计日志哈希链 |
 | 测试   | 后端 Jest + mongodb-memory-server（内存 MongoDB）；前端 Vitest；E2E Playwright                                                                       |
 | 部署   | Docker 多阶段构建、Docker Compose、GitHub Actions CI（Node 22/24/26 矩阵测试，前端构建 24，镜像 node:26.12.0）                                       |
-| 监控   | Prometheus + Grafana + Alertmanager（docker-compose 随栈启动）、Sentry（可选）                                                                       |
+| 监控   | Prometheus + Alertmanager（随栈启动）、Grafana（默认栈不含，需 `docker compose --profile observability up -d` 才起）、Sentry（可选）                 |
 
 ## 功能特性
 
@@ -62,7 +62,8 @@ fsms/
 ├── scripts/                    # 运维与门禁脚本：部署（deploy.js）/ 备份恢复 / 合规检查 / 审计链校验与重签 / PII 加密迁移 / 密钥生成 / 锁文件与包体积门禁 / 压测
 ├── e2e/                        # Playwright 端到端用例（登录 / 巡检-报警 / 权限审计 / MFA / 移动端 / 故障注入）
 ├── .github/workflows/ci.yml    # CI：多版本测试 + 覆盖率 + 顺序无关 + Docker 镜像构建
-├── docker-compose.yml          # 应用 + MongoDB + Redis + 监控栈（Prometheus/Alertmanager/Grafana）一键编排
+├── .github/workflows/sast.yml  # 私有仓 SAST（Semgrep + 自持规则包 .github/semgrep/rules.yml，命中即阻断）
+├── docker-compose.yml          # 应用 + MongoDB + Redis + 监控栈（Prometheus/Alertmanager 随栈；Grafana 需 --profile observability）一键编排
 ├── Dockerfile                  # 后端多阶段构建（非 root 运行 + 健康检查）
 ├── docs/                       # 项目文档：架构 / 威胁模型 / 等保对照 / 应急响应 / 多实例一致性 / 依赖观察 + ADR
 ├── deployment/                 # 部署配套：Nginx 示例 / 密钥轮换 / 回滚演练 / 备份加密 / 可观测性
@@ -75,7 +76,7 @@ fsms/
 │   ├── lockfile-anchor.json    # 锁文件完整性锚点
 │   └── observability/          # 监控栈（prometheus.yml 在本子目录，非 deployment/ 根）
 │       ├── prometheus.yml      # Prometheus 抓取配置（直连后端 app:3000 的 /metrics）
-│       ├── alert-rules.yml     # 告警规则（16 条：宕机 / 5xx 错误率 / P95 延迟 / 安全告警突增等）
+│       ├── alert-rules.yml     # 告警规则（18 条：宕机 / 5xx 错误率 / P95 延迟 / 安全告警突增等）
 │       ├── alertmanager.yml    # Alertmanager 路由（按 severity 分发；通知渠道为占位，按头注释注入）
 │       └── grafana/            # Grafana 数据源与仪表盘（datasources/、dashboards/ 容器启动自动装载）
 ├── start.bat                   # Windows 一键启动脚本
@@ -88,16 +89,16 @@ fsms/
 
 ## 项目文档
 
-| 文档                                                                       | 内容                                                                                                                                                                                                                             |
-| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [docs/architecture.md](./docs/architecture.md)                             | 系统架构图、登录时序图、ER 图、部署拓扑图（Mermaid）                                                                                                                                                                             |
-| [docs/threat-model.md](./docs/threat-model.md)                             | STRIDE 威胁模型：资产与信任边界、每项缓解的落地位置与残余风险                                                                                                                                                                    |
-| [docs/mlps2-controls.md](./docs/mlps2-controls.md)                         | 等保 2.0（GB/T 22239-2019）控制项对照表，逐条给出可出示的证据（文件 / 测试 / 端点）                                                                                                                                              |
-| [docs/incident-response.md](./docs/incident-response.md)                   | 应急响应预案：角色与升级链，每个动作绑定实际存在的端点 / 脚本 / 日志位置                                                                                                                                                         |
-| [docs/multi-instance-consistency.md](./docs/multi-instance-consistency.md) | 多实例一致性清单：进程内状态、Redis 外置路径与多实例下的残余差异                                                                                                                                                                 |
-| [docs/security-dependency-watch.md](./docs/security-dependency-watch.md)   | 依赖安全观察清单：需盯住的依赖、监控动作与触发条件                                                                                                                                                                               |
-| [docs/adr/](./docs/adr/README.md)                                          | 架构决策记录（11 篇，ADR-001～ADR-011）：登录 ECDH 选型、审计链哈希、密钥管理、单进程锁假设、多实例 Redis 回退、高量级游标分页、Express 5 迁移评估、数据范围强制方式、网络分段与数据面隔离、不引入分布式追踪的适用边界、注释治理 |
-| [CHANGELOG.md](./CHANGELOG.md)                                             | 版本变更日志                                                                                                                                                                                                                     |
+| 文档                                                                       | 内容                                                                                                                                                                                                                                                                                                                                                                                                               |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [docs/architecture.md](./docs/architecture.md)                             | 系统架构图、登录时序图、ER 图、部署拓扑图（Mermaid）                                                                                                                                                                                                                                                                                                                                                               |
+| [docs/threat-model.md](./docs/threat-model.md)                             | STRIDE 威胁模型：资产与信任边界、每项缓解的落地位置与残余风险                                                                                                                                                                                                                                                                                                                                                      |
+| [docs/mlps2-controls.md](./docs/mlps2-controls.md)                         | 等保 2.0（GB/T 22239-2019）控制项对照表，逐条给出可出示的证据（文件 / 测试 / 端点）                                                                                                                                                                                                                                                                                                                                |
+| [docs/incident-response.md](./docs/incident-response.md)                   | 应急响应预案：角色与升级链，每个动作绑定实际存在的端点 / 脚本 / 日志位置                                                                                                                                                                                                                                                                                                                                           |
+| [docs/multi-instance-consistency.md](./docs/multi-instance-consistency.md) | 多实例一致性清单：进程内状态、Redis 外置路径与多实例下的残余差异                                                                                                                                                                                                                                                                                                                                                   |
+| [docs/security-dependency-watch.md](./docs/security-dependency-watch.md)   | 依赖安全观察清单：需盯住的依赖、监控动作与触发条件                                                                                                                                                                                                                                                                                                                                                                 |
+| [docs/adr/](./docs/adr/README.md)                                          | 架构决策记录（18 篇，ADR-001～ADR-018）：登录 ECDH 选型、审计链哈希、密钥管理、单进程锁假设、多实例 Redis 回退、高量级游标分页、Express 5 迁移评估、数据范围强制方式、网络分段与数据面隔离、不引入分布式追踪的适用边界、注释治理、临时权限授予与定期复核、蜜罐账户与诱饵登录、请求级幂等与响应回放、登录失败触发的人机挑战与锁定收口、管理员重置口令后的口令复用收口、无 body 请求的 body 归一、封段护栏的四条判据 |
+| [CHANGELOG.md](./CHANGELOG.md)                                             | 版本变更日志                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 ## 快速开始
 
@@ -174,9 +175,9 @@ npm run dev             # 默认监听 127.0.0.1:3001，/api 自动代理到后�
 - 文档页面：`http://localhost:3000/api-docs`
 - 原始规范：`http://localhost:3000/api-docs.json`（OpenAPI 3.0）
 
-涵盖 10 个模块共 105 个接口（86 个 path / 105 个 operation），支持在线调试（需先通过 `/api/auth/login` 获取 token 并在页面右上角 Authorize 中填入）。
+涵盖 11 个模块共 118 个接口（97 个 path / 118 个 operation）——模块数 = `src/docs/openapi.json` 的 `spec.tags` 声明条数（现算对齐，由 `src/tests/docs/openapiTagDeclaration.test.js` 钉住），支持在线调试（需先通过 `/api/auth/login` 获取 token 并在页面右上角 Authorize 中填入）。
 
-**安全说明**：生产环境默认关闭 API 文档，需显式设置 `ENABLE_API_DOCS=true` 才会暴露。开启后建议同时设置 `DOCS_USERNAME` 和 `DOCS_PASSWORD` 启用 Basic Auth 保护，并在网络层限制仅内网/ VPN 访问。
+**安全说明**：生产环境默认关闭 API 文档，需显式设置 `ENABLE_API_DOCS=true` 才会暴露。开启后**必须**设置 `DOCS_USERNAME` 和 `DOCS_PASSWORD`（缺任一项启动校验即失败，不是运行期可选），并在网络层限制仅内网 / VPN 访问。
 
 ### 方式三：Docker Compose（本地/预发布验证）
 
@@ -230,8 +231,8 @@ docker compose up -d --no-build
 | `LOG_DIR`                                          | 日志目录（容器常需指向挂载卷；测试用它在临时目录里取证）                                                                                                                                                                                                                                                         | 仓库 `logs/`                               |
 | `SENTRY_DSN`                                       | Sentry 错误监控（可选）                                                                                                                                                                                                                                                                                          | -                                          |
 | `ENABLE_API_DOCS`                                  | 是否暴露 Swagger API 文档（生产默认 false）                                                                                                                                                                                                                                                                      | 开发=true / 生产=false                     |
-| `DOCS_USERNAME`                                    | API 文档 Basic Auth 用户名（可选）                                                                                                                                                                                                                                                                               | -                                          |
-| `DOCS_PASSWORD`                                    | API 文档 Basic Auth 密码（可选）                                                                                                                                                                                                                                                                                 | -                                          |
+| `DOCS_USERNAME`                                    | API 文档 Basic Auth 用户名；`ENABLE_API_DOCS=true` 时**必填**（缺失或空即启动失败，不是可选项）                                                                                                                                                                                                                  | -                                          |
+| `DOCS_PASSWORD`                                    | API 文档 Basic Auth 密码；`ENABLE_API_DOCS=true` 时**必填**，且 ≥32 字符、非弱口令（`validateDocsCredentials` 启动校验）                                                                                                                                                                                         | -                                          |
 | `LOGIN_ENCRYPT_STRICT`                             | 拒绝明文口令上行（仅 HTTPS / localhost 部署可开）                                                                                                                                                                                                                                                                | `false`                                    |
 | `TRUSTED_TYPES_ENFORCE`                            | Trusted Types 由 Report-Only 升为强制（移入主 CSP）                                                                                                                                                                                                                                                              | `false`                                    |
 
@@ -580,9 +581,12 @@ curl -fsS http://127.0.0.1:3000/readyz
 - [ ] `TRUST_PROXY_HOPS` 已按反向代理层数设置（1..5 的正整数，非法值会导致生产启动失败（fail-closed））
 - [ ] `TRUSTED_PROXY_CIDRS` 已按反向代理实际所在网段设置——compose 已把该项设为强制（缺失即 `up` 失败）；未设置时 XFF 的可信判据只看「对端是否在私网」，同一容器网络内任意服务可伪造（见审计 F-01）
 - [ ] 自托管/SSH 部署已设置 `FSMS_SECRETS_DIR`，并让它指向 checkout 目录之外、权限收紧的密钥目录；部署工作流会清理 checkout，不能再依赖仓库内残留的 `./secrets`
+- [ ] **异地备份已配置**：`BACKUP_OFFSITE_CMD` 或 `BACKUP_OFFSITE_DIR` 至少一个，且 `BACKUP_REQUIRE_OFFSITE=true`；生产发布前置校验会拒绝"只有本机备份"的部署，`backup-integrity-patrol` 完整模式应全绿（见 `deployment/backup-encryption.md`）
+- [ ] **宿主时钟已同步**：部署前执行 `node scripts/check-clock-sync.js`，输出 `ok:true` 且偏移 ≤1000ms；判不了（退出码 2）按不通过处理（见 `deployment/clock-sync.md`）
+- [ ] 管理员建号/重置口令后，用户首次登录会被强制改密（`mustChangePassword`）；临时口令只通过安全通道一次性转交
 - [ ] `ALLOW_PUBLIC_REGISTRATION` 保持 `false`
 - [ ] 已修改默认管理员初始密码
-- [ ] 若 `ENABLE_API_DOCS=true`：`DOCS_USERNAME` / `DOCS_PASSWORD` 已设置，且口令 ≥16 字符（文档暴露全部接口契约与权限编码）
+- [ ] 若 `ENABLE_API_DOCS=true`：`DOCS_USERNAME` / `DOCS_PASSWORD` 已设置，且口令 ≥32 字符、非弱口令（文档暴露全部接口契约与权限编码；启动校验会拒绝 <32 字符）
 - [ ] `deployment/observability/alertmanager.yml` 的通知渠道已注入真实入口——`docker-compose.yml` 直接挂载仓库内这份文件，而仓库版本是**占位 URL**，照抄上线等于 critical 告警全部发往 `hooks.example.com`（告警静默丢失，监控页面却一切正常）。`scripts/deploy.js` 的前置校验会以生产口径校验它：占位即拒绝发布，并给出注入方式；确为无告警的演练环境时用 `ALLOW_PLACEHOLDER_ALERT_WEBHOOK=true` 显式豁免（那等于书面承认本次发布后无人会被叫醒）
 - [ ] **告警链路已实证**：`node scripts/alert-delivery-probe.js` 投递成功，且已按 correlationId 在接收端核对后 `--ack` 补记。配置里有 URL 不等于通道能通——一个失效的 access_token 在所有静态判据里与健康通道长得一模一样
 - [ ] **SIEM 转发已接入**（或书面豁免）：`LOG_SHIPPING_URL` 未配置时审计日志只有本地副本，进程崩溃/磁盘写满即失去外部证据。无 SIEM 的部署用 `ALLOW_UNCONFIGURED_LOG_SHIPPING=true` 显式豁免，并在合规报告里留痕
@@ -607,10 +611,10 @@ CSP 由 `src/middleware/security/` 目录（`securityHeaders.js`，经 `index.js
 
 ## 可观测性（Prometheus / Grafana / 告警）
 
-监控配置集中在 `deployment/observability/`（注意不是 `deployment/` 根目录），`docker-compose.yml` 已挂载并随编排栈一并启动：
+监控配置集中在 `deployment/observability/`（注意不是 `deployment/` 根目录）；`docker-compose.yml` 里 Prometheus 与 Alertmanager 随编排栈一并启动，**Grafana 不在默认栈内**，要看监控需另行 `docker compose --profile observability up -d`（升级窗口内不要启用：见 `deployment/hot-upgrade.md` §2 第 7 条与 `deployment/nginx.conf.example` 第 92-94 行）：
 
 - `deployment/observability/prometheus.yml`：Prometheus 抓取配置，直连后端 `app:3000` 的 `/metrics`（该端点在 Nginx 层按 allow 列表限流，不对公网暴露）。
-- `deployment/observability/alert-rules.yml`：16 条内置告警，分 5 组——可用性（`BackendDown` 抓取失败、`HighErrorRate` 5xx >5%）、延迟（`HighP95Latency` P95 >1s）、安全（`SecurityAlertBurst` 安全告警突增、`SecurityFailOpenSustained` fail-open 降级持续 10 分钟未恢复、`TrustedProxyBoundaryUnset` 代理信任边界未配置）、自监控（`MetricsSeriesTruncated` 指标序列触顶丢弃、`AuditRecordsDropped` 审计记录落库前丢弃、`AuditWalTrimRefused` WAL 裁剪被拒绝（WAL 无界增长风险）、`AuditDetectionLagOutsideObjective` 审计异常检测延迟未达标）、运行时（`MongoUnavailable`、`ReadinessProbeMissing`、`DiskSpaceLow`、`DiskProbeFailing`、`LogShipperDeliveryFailing`、`LogShipperDroppingLines`）。阈值为保守初值，待压测基线落地后收紧；每条规则的失效语义与处置见规则文件内的注释。
+- `deployment/observability/alert-rules.yml`：18 条内置告警，分 5 组——可用性（`BackendDown` 抓取失败、`HighErrorRate` 5xx >5%）、延迟（`HighP95Latency` P95 >1s）、安全（`SecurityAlertBurst` 安全告警突增、`SecurityFailOpenSustained` fail-open 降级持续 10 分钟未恢复、`TrustedProxyBoundaryUnset` 代理信任边界未配置、`ForensicCaptureDegraded` 取证捕获持续降级、`IdempotencyLeaseTakeOver` 幂等在途记录被接管）、自监控（`MetricsSeriesTruncated` 指标序列触顶丢弃、`AuditRecordsDropped` 审计记录落库前丢弃、`AuditWalTrimRefused` WAL 裁剪被拒绝（WAL 无界增长风险）、`AuditDetectionLagOutsideObjective` 审计异常检测延迟未达标）、运行时（`MongoUnavailable`、`ReadinessProbeMissing`、`DiskSpaceLow`、`DiskProbeFailing`、`LogShipperDeliveryFailing`、`LogShipperDroppingLines`）。阈值为保守初值，待压测基线落地后收紧；每条规则的失效语义与处置见规则文件内的注释。
 - `deployment/observability/alertmanager.yml`：告警触达链路的路由中枢，按 `severity` 分发（critical 即时通道 30 分钟重复提醒，warning 低优先级通道 4 小时），并按实例维度抑制同源重复告警。仓库内为**占位配置**，通知渠道（webhook/SMTP）按文件头注释以私有副本或模板渲染注入，敏感值不入库。两道闸门盯住"忘了注入"：部署路径由 `scripts/deploy.js` 的前置校验（占位即拒绝发布，可用 `ALERTMANAGER_CONFIG_PATH` 指向独立挂载的真实配置）；合规检查路径由 `ALERT_WEBHOOK_CHECK=production node scripts/compliance-check.js` 人工/上线前触发（CI 默认不设该变量，因为仓库模板本身必须是占位）。
 - **告警投递探针（F-09）**：上面两道闸门只判"配置里还有没有占位串"，判不出"URL 写对了但 access_token 已失效"。探针补这一环：
 

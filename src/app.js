@@ -26,8 +26,10 @@ const {
   materializeQuery,
   generalLimiter,
   ipLimiter,
+  preflightLimiter,
   staticSurfaceLimiter,
   auditLog,
+  forensicCapture,
   queryLengthLimit,
   queryScalarGuard,
   createOriginCheck,
@@ -76,21 +78,15 @@ const {
   reportRoutes,
   versionRoutes,
   wellKnownRoutes,
+  avatarRoutes,
 } = require('./routes');
 
 const sentryInitialized = initSentry();
 
 /**
- * CORS 白名单求值（从 createApp 里抽出来的唯一原因：这条判据原先零行为覆盖）
- *
- * 抽出前实测（2026-10-02 R13 变异台 M8）：把 `? [...DEV_CORS_ORIGINS]` 改成
- * `? [...DEV_CORS_ORIGINS.filter(() => false)]`——即开发兜底静默变空——全仓 503 个套件
- * 仍然全绿。原因是 src/tests/setup.js 固定注入 `CORS_ORIGIN=DEFAULT_CORS_ORIGIN`，
- * 所以既有那些断言 `access-control-allow-origin` 的用例走的是「显式配置」分支，
- * 而 `nodeEnv === 'development'` 兜底分支从来没被执行过。
- * 分支不跑 = 判据不成立：开发兜底清单是不是真的接进了 CORS，只能靠调用它来证明。
- *
- * 抽出后本函数被 createApp 调用（不是死码），且可脱离 DB/中间件链单独跑。
+ * CORS 白名单求值。抽成独立函数是为了让开发兜底的 `[...DEV_CORS_ORIGINS]` 分支可被直接
+ * 调用验证：src/tests/setup.js 固定注入 `CORS_ORIGIN=DEFAULT_CORS_ORIGIN`，既有断言走的
+ * 都是显式配置分支，而兜底分支不跑 = 判据不成立。
  *
  * @param {{corsOrigin?: string, nodeEnv?: string}} cfg 环境配置（默认读真实 config）
  * @returns {string[]} 允许的来源列表；空数组表示不回应任何 Origin
@@ -269,7 +265,7 @@ function installEdgeMiddleware(app) {
 }
 
 /**
- * 安全中间件主链：CORS → 限流 → body 解析 → body/query 闸门 → 审计
+ * 安全中间件主链：预检计数 → CORS → 限流 → body 解析 → body/query 闸门 → 审计
  *
  * 抽出原因同 configureTrustProxy：本函数体曾把整条闸门链压在 createApp 里，
  * 越过 `max-lines-per-function` 的 100 行阈值。顺序本身即安全语义，逐段理由随代码同行。
@@ -280,19 +276,20 @@ function installEdgeMiddleware(app) {
 function installSecurityMiddlewareChain(app, corsOrigin) {
   // ================= 中间件配置 =================
 
-  // CORS 白名单配置
-  // credentials:true 时 origin 必须是明确白名单；求值口径（含开发兜底与"配了但全为空项"
-  // 的回落方向）集中在 resolveCorsOrigins，那里的注释即本行的事实来源。
+  // 预检计数必须在 cors 之前：cors 见到 OPTIONS 就 204 收尾，挂在其后的限流器一发都计不到
+  // （口径与取舍见 rateLimit.js 的 preflightLimiter；审计侧登记为「不审计但必须计数」）。
+  app.use(preflightLimiter);
+  // CORS 白名单配置：credentials:true 时 origin 必须是明确白名单；求值口径（含开发兜底与
+  // "配了但全为空项"的回落方向）集中在 resolveCorsOrigins，那里即本行的事实来源。
   app.use(
     cors({
       origin: corsOrigin,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-      // G7：曾声明 X-Request-Signature / X-Request-Timestamp，但全仓无任何验签
-      // 中间件落地（security.js 未导出 verifyRequestSignature，也无路由引用）。
-      // 保留纯占位头会误导审计与客户端接入方，让人以为高权操作已受重放保护，
-      // 故按「不实现就不声明」原则移除；后续真正落地验签时再一并恢复。
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
-      exposedHeaders: ['X-Request-Id', 'Content-Disposition'],
+      // G7：曾声明 X-Request-Signature / X-Request-Timestamp，但全仓无任何验签中间件落地
+      // （security.js 未导出 verifyRequestSignature，也无路由引用）。保留纯占位头会误导审计与
+      // 客户端接入方，让人以为高权操作已受重放保护，故按「不实现就不声明」移除。
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'Idempotency-Key'], // Idempotency-Key 必须进白名单，否则预检拦下（ADR-014）
+      exposedHeaders: ['X-Request-Id', 'Content-Disposition', 'Idempotency-Replayed'],
       credentials: true,
       maxAge: 600,
     })
@@ -318,9 +315,8 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
   // constants/probePaths：漏了这道 skip，门禁会以 127.0.0.1 的高频探测先把健康版本打成红。
   app.use(ipLimiter);
   app.use(generalLimiter);
-  // 静态前端面专用桶：静态面被上面两个「整体豁免」，而豁免的代价原本是零预算。
-  // 这是把「豁免」改成「换桶」——同一份豁免判据（staticFrontend.isStaticSurfaceRequest），
-  // 但静态请求落在自己的宽松配额上而不是无限上。阈值推导见 rateLimit.js 的注释。
+  // 静态前端面专用桶：静态面被上面两个「整体豁免」，而豁免的代价原本是零预算。这是把
+  // 「豁免」改成「换桶」——同一份判据（staticFrontend.isStaticSurfaceRequest），阈值推导见 rateLimit.js。
   app.use(staticSurfaceLimiter);
 
   // ================= 安全中间件（body 解析之前）=================
@@ -362,9 +358,8 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
     ':remote-addr - :remote-user [:date[clf]] ' +
     '":method :safe-url HTTP/:http-version" :status :res[content-length] ' +
     '":safe-referrer" ":user-agent"';
-  // Tests/CI remain on the structured stream so redaction and request-context
-  // assertions observe the same logger path as staging/production. Only the
-  // interactive development aliases use morgan's human-readable stdout mode.
+  // 只有交互式开发别名用 morgan 的可读输出；test/ci 保持结构化流，
+  // 使脱敏与请求上下文的断言和生产走同一条 logger 路径。
   const envName = String(config.nodeEnv || '')
     .trim()
     .toLowerCase();
@@ -401,6 +396,8 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
   // /api/security/audit-logs 批量数据出口的 GET 审计——均已在默认值中定义，
   // 此处重复传参会形成两处配置源，日后易漂移不一致）
   app.use('/api/', auditLog());
+
+  app.use('/api/', forensicCapture()); // 取证捕获（P2）：只采标记 IP 的全量请求/响应，挂载理由同 auditLog，细节见 middleware/security/forensicCapture.js
 }
 
 /**
@@ -528,15 +525,12 @@ function installRoutes(app) {
   app.use('/', wellKnownRoutes);
 
   // 挂载路由
-  // 版本元数据（匿名）：蓝绿升级后用于确认流量落在哪个构建；前端轮询它判断
-  // 「服务端已换版、本标签页仍是旧壳子」。响应只有 version/buildId/buildTime，
-  // 不含依赖、运行时版本、镜像 digest 等指纹原料（见 config/buildInfo.js 头注）。
-  // 挂在这里而非根路径：根路径的 /version 会被前端静态资源兜底吞掉（try_files
-  // 回 index.html），新增根路径还必须同步改所有既有部署的 nginx；挂在 /api 下
-  // 天然落在既有的 proxy_pass 与限流/来源校验之内，零部署改动。
+  // 版本元数据（匿名，供蓝绿换版识别与前端提示刷新）。挂 /api 下而非根路径：
+  // 根路径 /version 会被前端静态兜底吞成 index.html，且新增根路径要同步改所有部署的 nginx。
   app.use('/api/version', versionRoutes);
   app.use('/api/auth', authRoutes);
   app.use('/api/users', userRoutes);
+  app.use('/api/avatars', avatarRoutes);
   app.use('/api/roles', roleRoutes);
   app.use('/api/permissions', permissionRoutes);
   app.use('/api/devices', deviceRoutes);

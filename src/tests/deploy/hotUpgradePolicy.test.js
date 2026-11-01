@@ -1,5 +1,5 @@
 /**
- * 热升级判据
+ * 升级判据
  *
  * 这些用例守的不是「函数能跑」，而是四种「升级看起来成功、实际没成」的形态：
  *   · 镜像用浮动 tag ⇒ 审计里记的版本与线上跑的不是一回事；
@@ -181,6 +181,12 @@ describe('命令行解析', () => {
     expect(opts.image).toBe(`ghcr.io/x/y@${DIGEST}`);
   });
 
+  test('--status-file 供宿主代理回写进度；缺省为空串', () => {
+    const opts = policy.parseArgs(['--status-file', '/var/lib/fsms/upgrade/status/a.json']);
+    expect(opts.statusFile).toBe('/var/lib/fsms/upgrade/status/a.json');
+    expect(policy.parseArgs([]).statusFile).toBe('');
+  });
+
   test('未知参数必须报错：`--dryrun` 被静默忽略就等于真的去改生产', () => {
     expect(() => policy.parseArgs(['--dryrun'])).toThrow(/未知参数/);
   });
@@ -194,8 +200,24 @@ describe('命令行解析', () => {
     expect(() => policy.parseArgs(['--observe-seconds', 'abc'])).toThrow(/整数/);
     expect(() => policy.parseArgs(['--readyz-timeout', '-1'])).toThrow(/整数/);
   });
-});
 
+  test('--apply=false / --dry-run=false 必须被读成 false（不是「出现过就为真」）', () => {
+    // 反例场景真实存在：workflow/模板里写 --apply=${{ inputs.apply }}，值为 false 时
+    // 旧实现照样执行切流。这条钉住的是「参数写 false 时绝不改生产」。
+    expect(policy.parseArgs(['--apply=false']).apply).toBe(false);
+    expect(policy.parseArgs(['--apply=false']).dryRun).toBe(false);
+    expect(policy.parseArgs(['--dry-run=false']).dryRun).toBe(false);
+    expect(policy.parseArgs(['--apply=true']).apply).toBe(true);
+    expect(policy.parseArgs(['--apply=1']).apply).toBe(true);
+    expect(policy.parseArgs(['--apply=0']).apply).toBe(false);
+    expect(policy.parseArgs(['--apply']).apply).toBe(true);
+  });
+
+  test('布尔旗标给了无法解释的值时报错，而不是猜一个', () => {
+    expect(() => policy.parseArgs(['--apply=maybe'])).toThrow(/布尔值/);
+    expect(() => policy.parseArgs(['--dry-run=off'])).toThrow(/布尔值/);
+  });
+});
 describe('部署配置与脚本的契约（静态闸门）', () => {
   test('nginx 模板必须定义 upstream fsms_app，且不得再出现直连 3000 的 proxy_pass', () => {
     const src = fs.readFileSync(NGINX_EXAMPLE, 'utf8');

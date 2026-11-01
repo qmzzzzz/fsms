@@ -1,17 +1,19 @@
 const fs = require('fs');
 const path = require('path');
-// 整改：设备类型枚举此前在 deviceListParams（query）内联展开一份，与
-// utils/constants.js、models/FireDevice.js、routes/deviceRoutes.js 合计 4 份副本。
-// 现统一引用 constants 的单一事实来源（本文件的 deviceType 请求体只声明 string 类型，
-// 枚举约束由模型层负责，故无需改）。
+// 整改：设备类型枚举此前在 deviceListParams（query）内联展开一份，与 utils/constants.js、models/FireDevice.js、routes/deviceRoutes.js 合计 4 份副本。
+// 现统一引用 constants 的单一事实来源（本文件的 deviceType 请求体只声明 string 类型，枚举约束由模型层负责，故无需改）。
 const { DEVICE_TYPE } = require('../utils/constants');
+const { PRIVILEGE_GRANT_STATUSES } = require('../constants/privilegeGrant');
 const DEVICE_TYPE_VALUES = Object.values(DEVICE_TYPE);
-// 同一口径（续集）：审计页两维枚举此前在本文件与产物里各抄一份，
-// 与 constants/audit.js 没有任何连线——常量加一档时文档会继续宣称旧的四档，
+// 同一口径（续集）：审计页两维枚举此前在本文件与产物里各抄一份，与 constants/audit.js 没有任何连线——常量加一档时文档会继续宣称旧的四档，
 // 调用方按文档传值换来一个 400。现在接上同一根线（openapiSync 有对账）。
 const { AUDIT_RISK_LEVELS, AUDIT_DISPLAY_LEVELS } = require('../constants/audit');
 const { PERMISSION_TYPES, PERMISSION_METHODS } = require('../constants/permission');
 const { IP_LIST_TYPES } = require('../constants/ipList');
+const { REFUSAL_TEXT } = require('../constants/banRefusalReason');
+const REFUSAL_DOC = Object.entries(REFUSAL_TEXT)
+  .map(([code, text]) => code + '（' + text + '）')
+  .join(' · ');
 const { ALARM_LEVELS, ALARM_TYPES, ALARM_STATUSES, ALARM_CAUSES } = require('../constants/alarm');
 const {
   INSPECTION_TYPES,
@@ -20,8 +22,7 @@ const {
   INSPECTION_REVIEW_RESULTS,
 } = require('../constants/inspection');
 const { USER_STATUS } = require('../utils/constants');
-// 设备状态：全集与「通用状态接口可写子集」都取自 constants/deviceStatus（它自身只是
-// utils/constants 的 DEVICE_STATUS 的派生视图）。原先这两处各写一份字面量，与路由
+// 设备状态：全集与「通用状态接口可写子集」都取自 constants/deviceStatus（它自身只是 utils/constants 的 DEVICE_STATUS 的派生视图）。原先这两处各写一份字面量，与路由
 // 校验器之间没有连线——加一档会让文档继续推荐旧五档，症状同 audit/alarm 那一族。
 const { DEVICE_STATUS_VALUES, DEVICE_STATUS_WRITABLE } = require('../constants/deviceStatus');
 
@@ -42,6 +43,7 @@ const spec = {
     { name: 'Users', description: '用户管理接口' },
     { name: 'Roles', description: '角色管理接口' },
     { name: 'Permissions', description: '权限管理接口' },
+    { name: 'Privileges', description: '临时权限授予接口' },
     { name: 'Devices', description: '消防设备管理接口' },
     { name: 'Alarms', description: '火警报警管理接口' },
     { name: 'Inspections', description: '巡检计划与执行接口' },
@@ -94,9 +96,20 @@ const reauthCredentialProperties = {
 const reauthTicketHeader = {
   name: 'X-Reauth-Ticket',
   in: 'header',
-  required: true,
+  required: false,
   schema: { type: 'string' },
-  description: 'POST /api/security/reauth 换取的短时票据（5 分钟，绑定账号与会话）',
+  description:
+    '可选的短时票据（5 分钟，绑定账号与会话，**一次性**）。默认不需要：POST /api/security/reauth 成功后服务端会为该会话开 5 分钟窗口，窗口内凭有效访问令牌即可读取。票据路径供无会话上下文的 API 客户端使用，同一张票第二次使用会被拒（REAUTH_TICKET_INVALID）。',
+};
+
+// 请求级幂等（ADR-014）：8 个核心写端点接受可选 Idempotency-Key；缺失不报错，格式错/复用冲突才拒。
+const idempotencyKeyHeader = {
+  name: 'Idempotency-Key',
+  in: 'header',
+  required: false,
+  schema: { type: 'string', minLength: 8, maxLength: 64 },
+  description:
+    '可选的提交标识（8-64 位可见 ASCII，建议 UUID）。同键同载荷的重试不会产生第二次副作用，而是原样回放第一次的响应（响应头带 Idempotency-Replayed: true）；同键但载荷不同返回 409 IDEMPOTENCY_KEY_REUSED；上一次仍在处理中返回 409 IDEMPOTENCY_IN_PROGRESS。业务失败（非 2xx）会释放该键，修正后可用同一个键重试。',
 };
 
 // ==================== Auth ====================
@@ -106,7 +119,7 @@ spec.paths['/api/auth/register'] = {
     description: '公开注册，受系统注册开关控制',
     requestBody: body({
       type: 'object',
-      required: ['username', 'email', 'password'],
+      required: ['username', 'email', 'password', 'privacyConsent'],
       properties: {
         username: { type: 'string', minLength: 3, maxLength: 30 },
         email: { type: 'string', format: 'email' },
@@ -115,6 +128,10 @@ spec.paths['/api/auth/register'] = {
         phone: { type: 'string' },
         department: { type: 'string' },
         encPassword: { type: 'string', description: '口令密文（与 password 二选一）' },
+        privacyConsent: {
+          type: 'boolean',
+          description: '必须为 true：明示同意现行隐私告知（审计一-7）',
+        },
       },
     }),
     responses: {
@@ -208,11 +225,54 @@ spec.paths['/api/auth/profile'] = {
           email: { type: 'string' },
           phone: { type: 'string' },
           department: { type: 'string' },
-          avatar: { type: 'string' },
+          // D3 收口后只接受服务端为**目标用户**生成的 /api/avatars/<id>?v=<hash16>；外部 URL / data URI 一律 400（data URI 会绕过上传校验与加密）
+          avatar: { type: 'string', pattern: '^/api/avatars/[0-9a-f]{24}\\?v=[0-9a-f]{16}$' },
         },
       },
       false
     ),
+  }),
+};
+
+spec.paths['/api/auth/avatar'] = {
+  put: p('put', ['Auth'], '上传/替换头像（本人）', {
+    requestBody: body(
+      {
+        type: 'object',
+        required: ['image'],
+        properties: {
+          image: {
+            type: 'string',
+            description:
+              'data:image/jpeg|png;base64,...（原始二进制上限 256 KB；客户端压到 512×512 JPEG q0.85）',
+          },
+        },
+      },
+      true
+    ),
+    responses: {
+      200: { description: '头像已更新，返回 { avatar, width, height, size }' },
+      400: badRequest,
+    },
+  }),
+  delete: p('delete', ['Auth'], '移除头像（本人，幂等）'),
+};
+
+spec.paths['/api/avatars/{userId}'] = {
+  get: p('get', ['Auth'], '读取用户头像（本人直通，他人需 user:read + 数据范围）', {
+    parameters: [{ name: 'userId', in: 'path', required: true, schema: { type: 'string' } }],
+    responses: {
+      200: {
+        description: '图片二进制（ETag / Cache-Control: private, no-cache）',
+        content: {
+          'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+          'image/png': { schema: { type: 'string', format: 'binary' } },
+        },
+      },
+      304: { description: '未修改（If-None-Match 命中）' },
+      403: forbidden,
+      404: notFound,
+    },
   }),
 };
 
@@ -222,8 +282,7 @@ spec.paths['/api/auth/logout'] = {
   }),
 };
 
-// L-24：以下 14 个端点此前只存在于产物、生成器中缺失——重跑生成器会
-// 把它们整体抹掉（实测 path 数 83 → 69），而产物却是线上 Swagger 的实际来源。
+// L-24：以下 14 个端点此前只存在于产物、生成器中缺失——重跑生成器会把它们整体抹掉（实测 path 数 83 → 69），而产物却是线上 Swagger 的实际来源。
 // 本块把它们补回生成器，使两者重新等价；openapiSync 测试新增对账守卫。
 spec.paths['/api/auth/login-public-key'] = {
   get: p('get', ['Auth'], '获取登录口令加密公钥（ECDH P-256，供前端加密口令上行）', {
@@ -298,8 +357,7 @@ spec.paths['/api/auth/mfa/disable'] = {
           currentPassword: { type: 'string' },
         },
       },
-      // required=true：控制器在「既无动态码也无登录密码」时一律拒绝，
-      // 空请求体必然失败，故此处按必填描述（字段级仍全部可选——两条路径二选一）。
+      // required=true：控制器在「既无动态码也无登录密码」时一律拒绝，空请求体必然失败，故此处按必填描述（字段级仍全部可选——两条路径二选一）。
       true
     ),
     responses: { ...ok('返回 { enabled: false }'), 403: { description: '验证失败' } },
@@ -333,6 +391,7 @@ const userListParams = [
 spec.paths['/api/users'] = {
   get: p('get', ['Users'], '获取用户列表（分页）', { parameters: userListParams }),
   post: p('post', ['Users'], '创建用户', {
+    parameters: [idempotencyKeyHeader],
     requestBody: body({
       type: 'object',
       required: ['username', 'email', 'password'],
@@ -345,8 +404,7 @@ spec.paths['/api/users'] = {
         },
         password: { type: 'string' },
         realName: { type: 'string' },
-        // 写入收明文、读出只给脱敏值：这个不对称是刻意的，理由见
-        // services/userService.js 的 toMaskedAdminUser 注释。
+        // 写入收明文、读出只给脱敏值：这个不对称是刻意的，理由见 services/userService.js 的 toMaskedAdminUser 注释。
         phone: {
           type: 'string',
           description:
@@ -367,6 +425,78 @@ spec.paths['/api/users/stats'] = {
 };
 
 const idParam = [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }];
+
+const privilegeCodesSchema = {
+  type: 'array',
+  items: { type: 'string' },
+  minItems: 1,
+  maxItems: 20,
+  description: '拟授予的权限码（须在权限目录内且为启用态）',
+};
+
+spec.paths['/api/permissions/grants'] = {
+  get: p('get', ['Privileges'], '获取临时授权列表（分页）', {
+    parameters: [
+      { name: 'status', in: 'query', schema: { type: 'string', enum: PRIVILEGE_GRANT_STATUSES } },
+      { name: 'userId', in: 'query', schema: { type: 'string' } },
+      { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1 } },
+      { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100 } },
+    ],
+  }),
+  post: p('post', ['Privileges'], '申请临时权限授予', {
+    parameters: [idempotencyKeyHeader],
+    requestBody: body({
+      type: 'object',
+      required: ['targetUserId', 'permissionCodes', 'reason', 'durationHours'],
+      properties: {
+        targetUserId: { type: 'string' },
+        permissionCodes: privilegeCodesSchema,
+        reason: { type: 'string', maxLength: 200 },
+        durationHours: { type: 'integer', minimum: 1, maximum: 168 },
+      },
+    }),
+    responses: { ...created('申请已提交，待审批') },
+  }),
+};
+
+spec.paths['/api/permissions/grants/review'] = {
+  get: p('get', ['Privileges'], '获取临时授权复核汇总与超期清单'),
+};
+
+spec.paths['/api/permissions/grants/{id}/approve'] = {
+  post: p('post', ['Privileges'], '签批临时授权（高敏授予需两名不同审批人）', {
+    parameters: idParam,
+    responses: { ...ok('已签批'), ...badRequest, ...forbidden },
+  }),
+};
+
+spec.paths['/api/permissions/grants/{id}/reject'] = {
+  post: p('post', ['Privileges'], '驳回临时授权申请', {
+    parameters: idParam,
+    requestBody: body(
+      {
+        type: 'object',
+        properties: { reason: { type: 'string', maxLength: 200 } },
+      },
+      false
+    ),
+    responses: { ...ok('已驳回'), ...badRequest, ...forbidden },
+  }),
+};
+
+spec.paths['/api/permissions/grants/{id}/revoke'] = {
+  post: p('post', ['Privileges'], '撤销临时授权', {
+    parameters: idParam,
+    requestBody: body(
+      {
+        type: 'object',
+        properties: { reason: { type: 'string', maxLength: 200 } },
+      },
+      false
+    ),
+    responses: { ...ok('已撤销'), ...badRequest, ...forbidden },
+  }),
+};
 
 spec.paths['/api/users/{id}'] = {
   get: p('get', ['Users'], '获取用户详情', {
@@ -408,6 +538,7 @@ spec.paths['/api/users/batch'] = {
 spec.paths['/api/roles'] = {
   get: p('get', ['Roles'], '获取角色列表（分页）'),
   post: p('post', ['Roles'], '创建角色', {
+    parameters: [idempotencyKeyHeader],
     requestBody: body({
       type: 'object',
       required: ['name', 'code'],
@@ -456,6 +587,7 @@ spec.paths['/api/roles/{id}/permissions'] = {
 spec.paths['/api/permissions'] = {
   get: p('get', ['Permissions'], '获取权限列表'),
   post: p('post', ['Permissions'], '创建权限', {
+    parameters: [idempotencyKeyHeader],
     requestBody: body({
       type: 'object',
       required: ['name', 'code', 'type', 'module'],
@@ -475,6 +607,7 @@ spec.paths['/api/permissions'] = {
 
 spec.paths['/api/permissions/batch'] = {
   post: p('post', ['Permissions'], '批量创建权限（系统初始化）', {
+    parameters: [idempotencyKeyHeader],
     requestBody: body({
       type: 'object',
       required: ['permissions'],
@@ -520,6 +653,7 @@ spec.paths['/api/devices'] = {
   get: p('get', ['Devices'], '获取设备列表（分页）', { parameters: deviceListParams }),
   post: p('post', ['Devices'], '创建设备', {
     description: '设备编号自动生成，格式为 类型前缀-年份-序号（如 FA-2026-0001）',
+    parameters: [idempotencyKeyHeader],
     requestBody: body({
       type: 'object',
       required: ['deviceName', 'deviceType'],
@@ -611,8 +745,7 @@ spec.paths['/api/devices/{id}/scrap'] = {
     requestBody: body(
       {
         type: 'object',
-        // 字段名须与 deviceRoutes.scrapDeviceValidation / deviceController 的 scrapReason 一致；
-        // 旧文档写成 reason，集成方按文档提交的报废原因会被静默丢弃（FireDevice.scrapReason 落默认值）。
+        // 字段名须与 deviceRoutes.scrapDeviceValidation / deviceController 的 scrapReason 一致；旧文档写成 reason，集成方按文档提交的报废原因会被静默丢弃（FireDevice.scrapReason 落默认值）。
         properties: {
           scrapReason: { type: 'string', maxLength: 200 },
           scrapDate: { type: 'string', format: 'date' },
@@ -664,6 +797,7 @@ spec.paths['/api/alarms/{id}'] = {
 spec.paths['/api/alarms/report'] = {
   post: p('post', ['Alarms'], '上报火警（手动报警）', {
     description: '上报人身份强制使用当前登录用户，不可伪造',
+    parameters: [idempotencyKeyHeader],
     requestBody: body({
       type: 'object',
       required: ['alarmType', 'description'],
@@ -680,8 +814,7 @@ spec.paths['/api/alarms/report'] = {
           type: 'object',
           properties: {
             name: { type: 'string' },
-            // 接受写入但任何读接口都不回传（投影见 services/AlarmService.js 的
-            // ALARM_READ_SELECT）：明文手机号原样外发给全体 alarm:read 持有者会绕过
+            // 接受写入但任何读接口都不回传（投影见 services/AlarmService.js 的 ALARM_READ_SELECT）：明文手机号原样外发给全体 alarm:read 持有者会绕过
             // 仓里为手机号建立的 step-up 通道。
             phone: {
               type: 'string',
@@ -766,6 +899,7 @@ const inspectionListParams = [
 spec.paths['/api/inspections'] = {
   get: p('get', ['Inspections'], '获取巡检列表（分页）', { parameters: inspectionListParams }),
   post: p('post', ['Inspections'], '创建巡检计划', {
+    parameters: [idempotencyKeyHeader],
     requestBody: body({
       type: 'object',
       required: ['title', 'inspectionType', 'planStartTime', 'planEndTime', 'checkItems'],
@@ -897,8 +1031,7 @@ spec.paths['/api/reports/export'] = {
   }),
 };
 
-// L-17：未脱敏导出只走 POST —— 凭据不能进 URL（日志/Referer 泄漏），
-// 且必须与 GET 的掩码档分开，避免持会话者绕过步进验证批量拉真实姓名。
+// L-17：未脱敏导出只走 POST —— 凭据不能进 URL（日志/Referer 泄漏），且必须与 GET 的掩码档分开，避免持会话者绕过步进验证批量拉真实姓名。
 spec.paths['/api/reports/export/pii'] = {
   post: p('post', ['Reports'], '导出未脱敏报表（真实姓名，需二次验证）', {
     description:
@@ -956,10 +1089,9 @@ spec.paths['/api/security/bindings'] = {
 };
 
 spec.paths['/api/security/reauth'] = {
-  post: p('post', ['Security'], '完成二次验证并换取审计读取票据', {
+  post: p('post', ['Security'], '完成二次验证（开启会话窗口并签发票据）', {
     description:
-      '审计读取端点（/alerts、/audit-logs、/audit-logs/export）需携带 X-Reauth-Ticket。' +
-      '本端点校验当前密码或 MFA 动态口令，成功后返回 5 分钟有效、绑定账号与会话的票据。',
+      '审计读取端点（/alerts、/audit-logs、/audit-logs/export）要求近期完成过二次验证。本端点校验当前密码或 MFA 动态口令，成功后：① 为该会话开 5 分钟窗口（绑定 access token 的会话标识，窗口内凭有效令牌即可读取，客户端不持有凭据）；② 同时返回一张 5 分钟有效、绑定账号与会话、**一次性**的票据（供无会话上下文的 API 客户端使用）。',
     requestBody: body(
       {
         type: 'object',
@@ -993,8 +1125,7 @@ spec.paths['/api/security/stats'] = {
 };
 
 // 举报对话框的对象选择器取数：免权限码（举报对全员开放），但候选集已被
-// **举报人数据范围**过滤，判据与 POST /report 的目标核验同源（buildRecordScopeFilter
-// ↔ isRecordInScope）。system 不指向具体对象，不在 type 枚举内。
+// **举报人数据范围**过滤，判据与 POST /report 的目标核验同源（buildRecordScopeFilter↔ isRecordInScope）。system 不指向具体对象，不在 type 枚举内。
 spec.paths['/api/security/report-targets'] = {
   get: p('get', ['Security'], '列出当前用户数据范围内可举报的对象', {
     parameters: [
@@ -1017,8 +1148,7 @@ spec.paths['/api/security/report'] = {
       required: ['targetType', 'reason'],
       properties: {
         targetType: { type: 'string', enum: ['user', 'device', 'alarm', 'system'] },
-        // 记录型（user/device/alarm）必填，且必须指向一条存在并在举报人数据范围内的记录；
-        // system 型不得携带 targetId（服务端会拒绝）。核验位置见 securityRoutes.reportValidation
+        // 记录型（user/device/alarm）必填，且必须指向一条存在并在举报人数据范围内的记录； system 型不得携带 targetId（服务端会拒绝）。核验位置见 securityRoutes.reportValidation
         // 与 securityController 的 resolveReportTargetViolation。
         targetId: { type: 'string', pattern: '^[a-f0-9]{24}$' },
         reason: { type: 'string', maxLength: 200 },
@@ -1177,6 +1307,32 @@ spec.paths['/api/security/users/{userId}/mfa/reset'] = {
   }),
 };
 
+// P1-2：管理员代重置口令（内部系统无邮件通道，账号救济的管理员轨）
+spec.paths['/api/security/users/{userId}/password/reset'] = {
+  put: p('put', ['Security'], '管理员重置用户口令（返回一次性临时口令，首次登录强制改密）', {
+    description:
+      '生成一次性临时口令并强制目标用户全部会话下线；临时口令只在本次响应返回，审计与日志均不记录。目标用户下次登录只能先修改口令。',
+    parameters: [{ name: 'userId', in: 'path', required: true, schema: { type: 'string' } }],
+    requestBody: body(
+      {
+        type: 'object',
+        properties: {
+          ...reauthCredentialProperties,
+          reason: { type: 'string', maxLength: 200, description: '重置原因（可选，仅进审计）' },
+        },
+      },
+      false
+    ),
+    responses: {
+      ...ok('口令已重置，返回 { userId, username, temporaryPassword, mustChangePassword: true }'),
+      400: { description: '目标为自身 / 参数校验失败' },
+      403: { description: '同级或更高层级 / 内置超管 / 二次验证未通过' },
+      404: { description: '用户不存在' },
+      409: { description: '目标状态已变更（角色快照不一致）' },
+    },
+  }),
+};
+
 spec.paths['/api/security/audit-logs/verify'] = {
   get: p('get', ['Security'], '校验审计日志哈希链完整性（hash 重算 + hmac + 链接性三层校验）', {
     parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer' } }],
@@ -1209,12 +1365,61 @@ spec.paths['/api/security/config/registerCaptchaEnabled'] = {
   }),
 };
 
+spec.paths['/api/security/upgrade'] = {
+  get: p('get', ['Security'], '升级概览（服务端构建信息、代理就绪判据、最近任务）', {
+    responses: {
+      200: {
+        description:
+          '返回 { server, upgrade, checkedAt }；upgrade.reasons 逐条解释升级按钮为何不可用',
+      },
+      403: forbidden,
+    },
+  }),
+};
+
+spec.paths['/api/security/upgrade/jobs/{jobId}'] = {
+  get: p('get', ['Security'], '升级任务详情（状态目录优先，其次 processing/requests）', {
+    parameters: [
+      { name: 'jobId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+    ],
+    responses: {
+      200: { description: '返回 { job }；非 UUID 或状态文件不存在时按 404 处理' },
+      404: notFound,
+    },
+  }),
+};
+
+spec.paths['/api/security/upgrade/requests'] = {
+  post: p('post', ['Security'], '入队一次升级请求（不立即改变线上流量）', {
+    parameters: [reauthTicketHeader],
+    requestBody: body({
+      type: 'object',
+      required: ['image'],
+      properties: {
+        image: {
+          type: 'string',
+          description: '必须是 registry/repo@sha256:<64 位小写十六进制>；tag 一律拒绝',
+        },
+        ...reauthCredentialProperties,
+      },
+    }),
+    responses: {
+      202: { description: '请求已入队，返回 { job }' },
+      400: badRequest,
+      403: forbidden,
+      409: { description: '已有任务进行中或排队（errorCode=UPGRADE_ALREADY_RUNNING）' },
+      503: {
+        description: '升级未启用或队列不可用（UPGRADE_DISABLED / UPGRADE_QUEUE_UNAVAILABLE）',
+      },
+    },
+  }),
+};
+
 // ==================== System ====================
 spec.paths['/health'] = {
   get: p('get', ['System'], '健康检查', {
     security: false,
-    // 原描述称「包含数据库连接状态」，与实现不符——app.js 的 /health
-    // 只回 { status: 'ok' }（刻意最小化，不暴露版本/DB 状态等内部信息）；
+    // 原描述称「包含数据库连接状态」，与实现不符——app.js 的 /health 只回 { status: 'ok' }（刻意最小化，不暴露版本/DB 状态等内部信息）；
     // 带 DB 连通性的是 /readyz（另有固定枚举约束）。
     responses: ok("进程存活信号，固定返回 { status: 'ok' }"),
   }),
@@ -1222,32 +1427,126 @@ spec.paths['/health'] = {
 spec.paths['/api'] = {
   get: p('get', ['System'], 'API 根路径', {
     security: false,
-    // 原描述称「返回 API 版本和可用端点列表」，与实现不符——
-    // app.js 的 /api 只回 { success: true, message: '消防管理系统 API' }；
+    // 原描述称「返回 API 版本和可用端点列表」，与实现不符——app.js 的 /api 只回 { success: true, message: '消防管理系统 API' }；
     // 返回端点清单是刻意的安全取舍（避免未认证的信息暴露），不会再恢复。
     responses: ok('固定返回 { success: true, message }，不含端点清单'),
   }),
 };
 
-// L-24：本文件此前只有「生成」一种用法——require 它就必然重写产物。
-// 于是它无法被测试比对，产物与生成器之间的漂移长期无人发现
-// （实测重跑会把 83 个 path 覆盖成 69 个，精确丢失 14 个端点）。
-//
-// 现在拆成两种用法：
-//   - 直接执行（node src/docs/generate.js）→ 写盘，保持原有行为；
-//   - 被 require → 只导出 spec，不产生任何副作用。
-// 后者让 openapiSync 测试能对「生成器输出」与「已提交产物」做双向对账。
+// L-24：本文件此前只有「生成」一种用法——require 就必然重写产物，无法被测试比对，产物与生成器之间的漂移长期无人发现（实测重跑把 83 个 path 覆盖成 69 个，丢失 14 个端点）。
+// 现拆两种用法：直接执行（node src/docs/generate.js）→ 写盘，保持原有行为；被 require → 只导出 spec、不产生副作用，让 openapiSync 能对「生成器输出」与「产物」双向对账。
+// ===== 取证溯源（T5/T6，2026-11-01）=====
+// T6 的封禁是两步人工确认：request 出票（不落库）、confirm 持票落库。
+// 两侧都会在护栏命中时回 400 + errors.reason，故 reason 逐项列进 description —— 契约只在文档里说清楚，
+// 前端才可能给出「你自己就在这个网段里」这种可执行的提示，而不是笼统的「操作失败」。
+const forensicTraceParams = [
+  { name: 'ip', in: 'query', schema: { type: 'string' } },
+  { name: 'fingerprint', in: 'query', schema: { type: 'string' } },
+  { name: 'ipSegment', in: 'query', schema: { type: 'string' } },
+  { name: 'since', in: 'query', schema: { type: 'string', format: 'date-time' } },
+  { name: 'until', in: 'query', schema: { type: 'string', format: 'date-time' } },
+  { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 1000 } },
+];
+
+spec.paths['/api/security/forensic/trace'] = {
+  get: p('get', ['Security'], '取证溯源查询（按 IP / 设备指纹 / 网段）', {
+    description:
+      '至少提供一个查询维度，否则 400 FORENSIC_NO_CRITERIA；地址无法解析同样按判据不可用拒绝，不返回空结果。' +
+      '传 fingerprint 时会额外返回 pools —— 该指纹落到过的网段，即「他的 ip 池」。',
+    parameters: forensicTraceParams,
+    responses: {
+      ...ok('返回时间线、触发原因分布、网段分布与候选池'),
+      400: { description: '缺少查询维度或地址不可解析' },
+    },
+  }),
+};
+
+spec.paths['/api/security/forensic/clusters'] = {
+  get: p('get', ['Security'], 'IP 池聚类候选', {
+    description:
+      '按网段聚合取证记录。verdict=rotate_pool（同段 IP 多而指纹极少）才建议封段；' +
+      'verdict=shared_egress（IP 多且指纹也多，典型是办公 NAT）只报不建议，recommendBan 为 false。',
+    parameters: [
+      { name: 'windowHours', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 720 } },
+      { name: 'minHits', in: 'query', schema: { type: 'integer', minimum: 1 } },
+      { name: 'minIps', in: 'query', schema: { type: 'integer', minimum: 1 } },
+      { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200 } },
+    ],
+    responses: ok('返回聚类结果与 recommended 子集'),
+  }),
+};
+
+spec.paths['/api/security/forensic/pool-ban/request'] = {
+  post: p('post', ['Security'], '申请网段封禁的确认票据', {
+    description:
+      '本步不落库。被护栏拒绝时返回 400，errors.errorCode=FORENSIC_POOL_BAN_REFUSED，' +
+      'errors.reason ∈ ' +
+      REFUSAL_DOC +
+      '。票据 10 分钟失效且只能用一次。',
+    requestBody: body({
+      type: 'object',
+      required: ['cidr', 'reason'],
+      properties: {
+        cidr: { type: 'string', description: 'CIDR 网段，如 203.0.113.0/24' },
+        reason: { type: 'string', maxLength: 200 },
+      },
+    }),
+    responses: {
+      ...ok('返回 token 与 expiresAt'),
+      400: { description: '护栏拒绝，原因见 errors.reason' },
+    },
+  }),
+};
+
+spec.paths['/api/security/forensic/pool-ban/confirm'] = {
+  post: p('post', ['Security'], '持票落库（确认网段封禁）', {
+    description:
+      'bannedCount 只统计**实际写入**的条目数：addToBlacklist 从不抛错，所以「没报错」不等于「封上了」。' +
+      '调用方必须按 bannedCount 上报结果。票据失效/不存在同样返回 400 + errors.reason。',
+    requestBody: body({
+      type: 'object',
+      required: ['token'],
+      properties: {
+        token: { type: 'string' },
+        durationHours: { type: 'number', minimum: 0, maximum: 8760, description: '0=永久' },
+      },
+    }),
+    responses: {
+      ...created('返回 bannedCount 与逐条结果'),
+      400: { description: '票据无效或已过期' },
+    },
+  }),
+};
+
+spec.paths['/api/security/forensic/export'] = {
+  post: p('post', ['Security'], '签名导出取证记录', {
+    description:
+      '签名材料包含当天清单 chainHash，篡改记录或替换清单锚点都会校验失败。' +
+      '未配置 FORENSIC_EXPORT_SECRET / AUDIT_HMAC_SECRET 时返回 400 FORENSIC_EXPORT_NO_SECRET，不产出未签名包。' +
+      '能力边界：签名只证明「导出方确实导出过这份」，不证明「库当时是诚实的」——后者只能靠审计链锚点。',
+    requestBody: body({
+      type: 'object',
+      properties: {
+        ip: { type: 'string' },
+        fingerprint: { type: 'string' },
+        ipSegment: { type: 'string' },
+        since: { type: 'string', format: 'date-time' },
+        until: { type: 'string', format: 'date-time' },
+        limit: { type: 'integer', minimum: 1, maximum: 5000 },
+      },
+    }),
+    responses: { ...ok('返回签名包 pkg'), 400: { description: '未配置导出密钥或缺少查询维度' } },
+  }),
+};
+
 module.exports = spec;
 
 if (require.main === module) {
   const outPath = path.join(__dirname, 'openapi.json');
   // 产物按仓库自己的 prettier 配置落盘。原先这里直接写 JSON.stringify 的结果：
-  // 短数组会逐行展开，而已提交产物是 prettier 版（短数组并成一行）——
-  // 于是「改完生成器重跑一次」必然把 500 多行格式噪声灌进 diff，
-  // 并且让 CI 的 `npm run format:check` 红（openapiSync 的逐端点深比对按内容比，
-  // 抓不到格式漂移；实测这次整改就是这么撞上的）。
-  // prettier 只在 CLI 分支 require：被 app/tests require 时不走这里，
-  // 生产安装（--omit=dev）因此不需要它。失败不做静默降级——
+  // 短数组会逐行展开，而已提交产物是 prettier 版（短数组并成一行）——于是「改完生成器重跑一次」必然把 500 多行格式噪声灌进 diff，
+  // 并且让 CI 的 `npm run format:check` 红（openapiSync 的逐端点深比对按内容比，抓不到格式漂移；实测这次整改就是这么撞上的）。
+  // prettier 只在 CLI 分支 require：被 app/tests require 时不走这里，生产安装（--omit=dev）因此不需要它。失败不做静默降级——
   // 退回未格式化写法等于把这个坑重新埋回去。
   (async () => {
     const prettier = require('prettier');

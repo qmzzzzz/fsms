@@ -1,6 +1,5 @@
 /**
- * 安全管理控制器 · 配置开关（注册 / 登录验证码 / 注册验证码）
- * （2026-10-19 批 3c-3 自 controllers/securityController.js 原样迁出，纯搬家不改语义）
+ * 安全管理控制器 · 配置开关（注册 / 登录验证码 / 注册验证码）（2026-10-19 批 3c-3 自 controllers/securityController.js 原样迁出，纯搬家不改语义）
  */
 
 const { SystemConfig } = require('./shared');
@@ -14,8 +13,7 @@ const { auditClientAddress } = require('../../utils/ipUtils');
 const { recordDurably } = require('../../services/auditOutbox');
 
 /**
- * 获取注册开关状态
- * GET /api/security/config/allowPublicRegistration
+ * 获取注册开关状态 GET /api/security/config/allowPublicRegistration
  */
 const getRegistrationConfig = asyncHandler(async (req, res) => {
   const allowed = await SystemConfig.isRegistrationAllowed();
@@ -30,9 +28,7 @@ const getRegistrationConfig = asyncHandler(async (req, res) => {
 });
 
 /**
- * 设置注册开关
- * PUT /api/security/config/allowPublicRegistration
- * body: { allowPublicRegistration: boolean }
+ * 设置注册开关 PUT /api/security/config/allowPublicRegistration body: { allowPublicRegistration: boolean }
  */
 const setRegistrationConfig = asyncHandler(async (req, res) => {
   const { allowPublicRegistration } = req.body;
@@ -44,8 +40,6 @@ const setRegistrationConfig = asyncHandler(async (req, res) => {
   await SystemConfig.set('allowPublicRegistration', allowPublicRegistration, req.user.userId);
   SystemConfig.invalidateRegistrationCache();
 
-  // 审计日志
-  res.locals.skipGlobalAudit = true;
   // F-03：注册开关已落库并失效缓存 ⇒ 审计先持久化再回成功
   await recordDurably(
     {
@@ -61,6 +55,8 @@ const setRegistrationConfig = asyncHandler(async (req, res) => {
     },
     { auditAction: 'security_config_change', req }
   );
+  // 置位必须晚于审计：审计重抛时这次 500 由全局审计接手记录（先置位 ⇒ 状态已变、审计为零）
+  res.locals.skipGlobalAudit = true;
 
   logger.info('注册开关已变更', { allowPublicRegistration, operator: req.user.username });
 
@@ -74,8 +70,7 @@ const setRegistrationConfig = asyncHandler(async (req, res) => {
 });
 
 /**
- * 获取登录验证码开关状态
- * GET /api/security/config/loginCaptchaEnabled
+ * 获取登录验证码开关状态 GET /api/security/config/loginCaptchaEnabled
  */
 const getLoginCaptchaConfig = asyncHandler(async (req, res) => {
   const enabled = await SystemConfig.isLoginCaptchaEnabled();
@@ -90,9 +85,7 @@ const getLoginCaptchaConfig = asyncHandler(async (req, res) => {
 });
 
 /**
- * 设置登录验证码开关
- * PUT /api/security/config/loginCaptchaEnabled
- * body: { loginCaptchaEnabled: boolean }
+ * 设置登录验证码开关 PUT /api/security/config/loginCaptchaEnabled body: { loginCaptchaEnabled: boolean }
  */
 const setLoginCaptchaConfig = asyncHandler(async (req, res) => {
   const { loginCaptchaEnabled } = req.body;
@@ -104,8 +97,6 @@ const setLoginCaptchaConfig = asyncHandler(async (req, res) => {
   await SystemConfig.set('loginCaptchaEnabled', loginCaptchaEnabled, req.user.userId);
   SystemConfig.invalidateLoginCaptchaCache();
 
-  // 审计日志
-  res.locals.skipGlobalAudit = true;
   // F-03：登录验证码开关已落库并失效缓存 ⇒ 审计先持久化再回成功
   await recordDurably(
     {
@@ -121,6 +112,8 @@ const setLoginCaptchaConfig = asyncHandler(async (req, res) => {
     },
     { auditAction: 'security_config_change', req }
   );
+  // 置位必须晚于审计：审计重抛时这次 500 由全局审计接手记录（先置位 ⇒ 状态已变、审计为零）
+  res.locals.skipGlobalAudit = true;
 
   logger.info('登录验证码开关已变更', { loginCaptchaEnabled, operator: req.user.username });
 
@@ -134,8 +127,7 @@ const setLoginCaptchaConfig = asyncHandler(async (req, res) => {
 });
 
 /**
- * 获取注册验证码开关状态
- * GET /api/security/config/registerCaptchaEnabled
+ * 获取注册验证码开关状态 GET /api/security/config/registerCaptchaEnabled
  */
 const getRegisterCaptchaConfig = asyncHandler(async (req, res) => {
   const enabled = await SystemConfig.isRegisterCaptchaEnabled();
@@ -150,9 +142,7 @@ const getRegisterCaptchaConfig = asyncHandler(async (req, res) => {
 });
 
 /**
- * 设置注册验证码开关
- * PUT /api/security/config/registerCaptchaEnabled
- * body: { registerCaptchaEnabled: boolean }
+ * 设置注册验证码开关 PUT /api/security/config/registerCaptchaEnabled body: { registerCaptchaEnabled: boolean }
  */
 const setRegisterCaptchaConfig = asyncHandler(async (req, res) => {
   const { registerCaptchaEnabled } = req.body;
@@ -164,8 +154,6 @@ const setRegisterCaptchaConfig = asyncHandler(async (req, res) => {
   await SystemConfig.set('registerCaptchaEnabled', registerCaptchaEnabled, req.user.userId);
   SystemConfig.invalidateRegisterCaptchaCache();
 
-  // 审计日志
-  res.locals.skipGlobalAudit = true;
   // F-03：注册验证码开关已落库并失效缓存 ⇒ 审计先持久化再回成功
   await recordDurably(
     {
@@ -181,6 +169,8 @@ const setRegisterCaptchaConfig = asyncHandler(async (req, res) => {
     },
     { auditAction: 'security_config_change', req }
   );
+  // 置位必须晚于审计：审计重抛时这次 500 由全局审计接手记录（先置位 ⇒ 状态已变、审计为零）
+  res.locals.skipGlobalAudit = true;
 
   logger.info('注册验证码开关已变更', { registerCaptchaEnabled, operator: req.user.username });
 

@@ -52,6 +52,23 @@ describe('拦截器状态码覆盖（P1-15）', () => {
     expect(lastCall(ElMessage.warning)).toBe(i18n.global.t('errors.alarmAlreadyHandled'))
   })
 
+  test('409 携带 currentStatus：动态状态并入码化文案（中英都带），不回显后端原文', async () => {
+    for (const locale of ['zh-CN', 'en-US']) {
+      vi.clearAllMocks()
+      i18n.global.locale.value = locale
+      await respondWith(409, {
+        errors: { errorCode: 'PRIVILEGE_GRANT_NOT_ACTIVE', currentStatus: 'expired' },
+        message: '该授权当前状态不可撤销（当前：expired）',
+      })
+      const text = lastCall(ElMessage.warning)
+      expect(text, locale).toContain('expired')
+      expect(text, locale).not.toContain('该授权当前状态不可撤销')
+      expect(text, locale).toBe(
+        i18n.global.t('errors.privilegeGrantNotActive', { currentStatus: 'expired' })
+      )
+    }
+  })
+
   test('405/413/415/431：各自命中映射文案，不回显后端原文', async () => {
     const cases = [
       [405, 'HTTP_METHOD_UNSUPPORTED', 'errors.httpMethodUnsupported'],

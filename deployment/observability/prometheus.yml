@@ -35,7 +35,10 @@ scrape_configs:
     #   bearer_token_file: /run/secrets/metrics_token
     # 令牌只从文件读——不要写进本文件（本文件随仓库分发）。
     static_configs:
-      # compose 服务名即主机名；3000 为容器内端口
-      - targets: ['app:3000']
+      # compose 服务名即主机名；3000 为容器内端口。
+      # 两色都要抓：切流后旧色被停、新色接管，只列 app 会让升级完成的那一刻
+      # 指标全部消失（up=0），而告警已改成「两色都抓不到」才红（见 alert-rules.yml）。
+      # 平时 app-green 不在运行，它那条 up=0 是预期状态，不是故障。
+      - targets: ['app:3000', 'app-green:3000']
         labels:
           service: fire-safety-backend

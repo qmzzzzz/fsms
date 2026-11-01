@@ -49,6 +49,15 @@ import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 let active = null
 const PERMS = ['inspection:read', 'inspection:review', 'inspection:execute', 'inspection:delete']
 
+/** 最小可用行夹具（列表渲染只需 _id/title/status/planStartTime） */
+const mkRow = (id, over = {}) => ({
+  _id: id,
+  title: '巡检' + id,
+  status: 'pending',
+  planStartTime: null,
+  ...over,
+})
+
 /** 独立计算本地时区渲染结果（与实现无关的口径） */
 const expectLocal = (iso) => {
   const d = new Date(iso)
@@ -70,8 +79,13 @@ const expectLocal = (iso) => {
 
 /** mount 成功后等待列表数据落地 */
 const open = async (rows, opts = {}) => {
+  // 用 'pagination' in opts 区分「未传」（给正常 total）与「显式传 null」（模拟契约漂移）：
+  // 原来写 opts.pagination || {total}，null 会被 || 吞成默认值，P1④ 用例永远测不到。
   getList.mockResolvedValue({
-    data: { data: rows, pagination: opts.pagination || { total: rows.length } },
+    data: {
+      data: rows,
+      pagination: 'pagination' in opts ? opts.pagination : { total: rows.length },
+    },
   })
   // opts.statsReject：让统计请求本身失败（首屏失败块的入口条件）；
   // 不给时保持原默认——成功但 data 为空，四张卡 0。
@@ -92,6 +106,64 @@ const open = async (rows, opts = {}) => {
   await flush(2)
   return active
 }
+
+describe('InspectionView 列表加载失败：不得把「读失败」画成「没有巡检」（P1③/P1④）', () => {
+  /** 失败夹具：getList reject，统计正常 */
+  const openFailing = async () => {
+    getList.mockRejectedValue(new Error('boom'))
+    getStats.mockResolvedValue({ data: { success: true, data: {} } })
+    getById.mockResolvedValue({ data: { data: { title: 'r', findings: [] } } })
+    const c = mountComponent(InspectionView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(PERMS),
+    })
+    await waitFor(() => getList.mock.calls.length >= 1, { message: '列表请求已发出' })
+    await flush(12)
+    return c
+  }
+
+  test('首屏加载失败：显式错误块顶替表格，不得显示「暂无数据」', async () => {
+    const c = await openFailing()
+    expect(c.find('.load-error')).not.toBeNull()
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.listLoadFailed'))
+    // 关键判据：失败 ≠ 空。消防巡检计划被读成「没有巡检」会直接影响值班安排
+    expect(c.text()).not.toContain(i18n.global.t('common.noData'))
+    expect(c.find('.el-pagination')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('首屏加载失败：错误块提供重试，点击后重新请求并恢复表格', async () => {
+    const c = await openFailing()
+    const before = getList.mock.calls.length
+    const rows = [mkRow('i1')]
+    getList.mockResolvedValue({ data: { data: rows, pagination: { total: 1 } } })
+    click(c.find('.load-error button'))
+    await flush(14)
+    expect(getList.mock.calls.length).toBeGreaterThan(before)
+    await waitFor(() => cells(c).length === 1, { message: '重试成功后渲染行' })
+    expect(c.find('.load-error')).toBeNull()
+  })
+
+  test('先成功后失败：旧数据保留并标注为上次数据（stale）', async () => {
+    const c = await open([mkRow('i1')])
+    expect(cells(c)).toHaveLength(1)
+    getList.mockRejectedValue(new Error('boom'))
+    click(
+      c.findAll('.glass-btn').find((b) => b.textContent.includes(i18n.global.t('common.refresh')))
+    )
+    await flush(14)
+    expect(cells(c)).toHaveLength(1)
+    expect(c.find('.load-error')).not.toBeNull()
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.staleData'))
+  })
+
+  test('pagination.total 缺失：不得回退成「共 N 条」（P1④）', async () => {
+    const c = await open([mkRow('i1')], { pagination: null })
+    expect(c.find('.total-unknown')).not.toBeNull()
+    const pag = c.find('.el-pagination')
+    if (pag) expect(pag.textContent).not.toContain('共 1 条')
+    expect(c.errors).toEqual([])
+  })
+})
 
 /** 数据行单元格文本矩阵 */
 const cells = (c) =>
@@ -159,7 +231,7 @@ describe('InspectionView 计划时间列（本地时区口径）', () => {
 })
 
 describe('InspectionView 加载路径', () => {
-  test('加载失败：清空列表（不留旧数据）且组件不弹 toast（提示归拦截器，P2-3）', async () => {
+  test('加载失败：旧数据保留并标注为上次数据，且组件不弹 toast（提示归拦截器，P2-3）', async () => {
     const rows = [{ _id: 'i1', title: 'A', status: 'pending', planStartTime: null }]
     const c = await open(rows)
     expect(cells(c)).toHaveLength(1)
@@ -169,10 +241,15 @@ describe('InspectionView 加载路径', () => {
     // 原断言把组件那条 warning 钉成契约（`ElMessage.warning.mock.calls.length === 1`），
     // 于是「同一次失败弹两条」被钉成了正确行为，且与其余三处视图的 error 级还不一致。
     // 前提自证：本套件把 @/utils/api 整体替身掉，拦截器不参与 ⇒ 这里必须恰好 0 次。
-    await waitFor(() => cells(c).length === 0, { message: '失败后列表清空' })
+    //
+    // 2026-10-31 口径纠正（P1③）：原断言还钉住「失败 ⇒ 清空列表」，那正是缺陷本身
+    // （把「读失败」画成「没有巡检计划」）。新口径：有旧数据必须保留 + 标注上次数据；
+    // 「首屏就失败 ⇒ 表格让位于错误块」由本文件 P1③ 那组用例覆盖。
+    await waitFor(() => c.find('.load-error') !== null, { message: '失败标记出现' })
+    expect(cells(c)).toHaveLength(1)
+    expect(c.text()).toContain(i18n.global.t('common.staleData'))
     expect(ElMessage.warning).not.toHaveBeenCalled()
     expect(ElMessage.error).not.toHaveBeenCalled()
-    expect(cells(c)).toEqual([])
     expect(c.errors).toEqual([])
   })
 

@@ -66,10 +66,13 @@ function readScrapeContract() {
     .split(',')
     .map((t) => t.trim().replace(/^['"]|['"]$/g, ''))
     .filter(Boolean);
-  if (targets.length !== 1) {
-    throw new Error(`xf-app 目标数应为 1，实测 ${targets.length}：${targets.join('|')}`);
+  // 蓝绿部署下 xf-app 同时抓 app 与 app-green（前者是常驻目标），
+  // 本测试只关心"抓取方发出的 Host"这一件事，取第一个 target 即可；
+  // 目标数塌缩为 0 才是解析锚点失效。
+  if (targets.length === 0) {
+    throw new Error('xf-app 目标数为 0（解析锚点已失效）');
   }
-  return { metricsPath: pathMatch[1], host: targets[0] };
+  return { metricsPath: pathMatch[1], host: targets[0], targets };
 }
 
 const SCRAPE = readScrapeContract();

@@ -6,6 +6,8 @@
 const Role = require('../models/Role');
 const Permission = require('../models/Permission');
 const User = require('../models/User');
+const { withHoneypotExcluded } = require('../constants/honeypotAccounts'); // 角色维度的用户计数/清单同样不得把蜜罐账户算进去
+
 const userPermissionService = require('./userPermissionService');
 const logger = require('../utils/logger');
 const { withListBudget, listCountOptions } = require('../utils/queryBudget');
@@ -41,9 +43,9 @@ class RoleService {
     // 收益来自 $unwind 展开行数减少，而非查询计划差异。
     // 以上为 2026-09-16 实测值。
     const userCounts = await User.aggregate([
-      { $match: { roles: { $in: roleIds } } },
+      { $match: withHoneypotExcluded({ roles: { $in: roleIds } }) },
       { $unwind: '$roles' },
-      { $match: { roles: { $in: roleIds } } },
+      { $match: withHoneypotExcluded({ roles: { $in: roleIds } }) },
       { $group: { _id: '$roles', count: { $sum: 1 } } },
     ]);
 
@@ -67,7 +69,7 @@ class RoleService {
     const role = await Role.findById(id).populate(ROLE_DETAIL_POPULATE);
     if (!role) return null;
     const [userCount, validPermissions] = await Promise.all([
-      User.countDocuments({ roles: role._id }),
+      User.countDocuments(withHoneypotExcluded({ roles: role._id })),
       role.permissions.filter((perm) => perm._id && /^[0-9a-fA-F]{24}$/.test(perm._id.toString())),
     ]);
     return { ...role.toObject(), permissions: validPermissions, userCount };
@@ -134,11 +136,13 @@ class RoleService {
   }
 
   listUsersWithRole(roleId) {
-    return User.find({ roles: roleId }).select('_id').lean();
+    return User.find(withHoneypotExcluded({ roles: roleId }))
+      .select('_id')
+      .lean();
   }
 
   countUsersWithRole(roleId) {
-    return User.countDocuments({ roles: roleId });
+    return User.countDocuments(withHoneypotExcluded({ roles: roleId }));
   }
 
   /**

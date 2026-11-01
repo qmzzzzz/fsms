@@ -3,14 +3,25 @@
  * 口径：本地时区、hour12=false；避免 toISOString 的 UTC 日期在东八区 0-8 点错位一天
  */
 export const localDateStr = (d = new Date()) => {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
+  // 非法/缺失输入返回空串占位：绝不把 NaN 拼成 `NaN-NaN-NaN` 这种看着像日期的串。
+  // 空串在下游是"没有值"（date-picker 显示占位、必填校验拦下），而 NaN-NaN-NaN 会
+  // 一路进到可提交表单并被存进库（前端复审 P1⑤ 实测复现）。
+  if (d === null || d === '') return ''
+  const date = d instanceof Date ? d : new Date(d)
+  if (Number.isNaN(date.getTime())) return ''
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
 }
 
+/** 空值判定：只有 null/undefined/空串/布尔算"没填"。
+ *  0 是合法纪元时间戳（1970-01-01T00:00:00Z），用 `if (!v)` 判空会把它吞成占位符，
+ *  与后端 utils/dateFormat.js 的 toDisplayDate 口径必须一致（P1⑤）。 */
+const isBlankTime = (v) => v === null || v === undefined || v === '' || typeof v === 'boolean'
+
 export const formatTime = (v) => {
-  if (!v) return '-'
+  if (isBlankTime(v)) return '-'
   const d = new Date(v)
   if (Number.isNaN(d.getTime())) return '-'
   const hh = String(d.getHours()).padStart(2, '0')
@@ -32,7 +43,8 @@ export const formatTime = (v) => {
  * @returns {string} 无法解析时返回空串（picker 显示为空，交由必填校验拦截）
  */
 export const toLocalWallClock = (v) => {
-  if (!v) return ''
+  // 与 formatTime 同口径：0 是合法时间戳，只有真正的空值才回空串（P1⑤）
+  if (isBlankTime(v)) return ''
   const d = v instanceof Date ? v : new Date(v)
   if (Number.isNaN(d.getTime())) return ''
   const p = (n) => String(n).padStart(2, '0')

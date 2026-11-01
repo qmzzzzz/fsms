@@ -1,5 +1,5 @@
 /**
- * 登录口令加密 strict 模式的启动期告警（2026-10-10）
+ * 登录口令加密 strict 模式的启动期告警
  *
  * 单独成模块的两个理由（与 config/legacyCbcGuard.js 同惯例）：
  *   ① config/validate.js 的行数已贴着 max-lines 棘轮上限——该文件自己的注释

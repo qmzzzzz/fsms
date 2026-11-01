@@ -33,6 +33,33 @@ module.exports = async function globalSetup() {
   delete process.env.HMAC_SECRET_FILE;
   process.env.CORS_ORIGIN = process.env.CORS_ORIGIN || DEFAULT_CORS_ORIGIN;
 
+  /**
+   * POSIX shell 解析（Windows 上 PATH 里那个 bash 常是"没装发行版的 WSL 桩"；详见
+   * src/tests/helpers/posixShell.js 的模块注释）。
+   *
+   * 为什么必须在 globalSetup 这一层做：测试进程里改 process.env.PATH **不影响**子进程的
+   * 可执行文件查找——Windows 上 libuv 是按真实进程环境块解析 bash 的，而 jest 的沙箱
+   * process.env 与真实环境块不是同一个东西（实测：同一个进程里改沙箱 PATH 后
+   * spawnSync('bash') 依旧命中 WSL 桩）。globalSetup 跑在 jest 主进程、其环境变量随
+   * worker 派生一起继承，只有在这里改，用例里那句 spawnSync('bash') 才会真的命中可用 shell。
+   */
+  const { ensureShellOnPath } = require('./helpers/posixShell');
+  const resolvedShell = ensureShellOnPath();
+  if (resolvedShell) {
+    if (resolvedShell.source !== 'posix') {
+      console.log(
+        `[test-env] shell 门禁使用 ${resolvedShell.cmd}（来源 ${resolvedShell.source}）：` +
+          'Windows/MSYS 语义下的绿不等价于 Linux 权威结论，CI 仍是最终口径。'
+      );
+    }
+  } else {
+    console.warn(
+      '[test-env] 未找到可用的 POSIX shell（PATH 上的 bash 跑不通；Windows 上多为未装发行版的 WSL 桩）。' +
+        '依赖 shell 的门禁（src/tests/deploy/** 等）本轮会红，属环境缺失而非代码缺陷；' +
+        '修法：装 Git Bash 或 WSL 发行版，或用 FSMS_TEST_SHELL 显式指定可用的 bash。'
+    );
+  }
+
   // 启动内存 MongoDB（镜像源不提供 .md5 校验文件，关闭 MD5 校验，完整性由解压过程保证）
   mongoServer = await MongoMemoryServer.create({
     binary: {

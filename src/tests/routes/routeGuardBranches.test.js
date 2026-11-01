@@ -144,6 +144,7 @@ describe('路由校验分支（T-3）', () => {
       username: `${stamp}r${Math.random().toString(36).slice(2, 8)}`,
       email: `${stamp}r${Math.random().toString(36).slice(2, 8)}@example.com`,
       realName: '分支测试',
+      privacyConsent: true,
       ...extra,
     });
 

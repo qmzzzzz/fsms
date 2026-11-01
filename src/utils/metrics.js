@@ -95,9 +95,8 @@ function warnSeriesLimitOnce(store) {
 /**
  * 还能不能登记一条新 series。返回 false 时调用方丢弃新 series（既有 series 照常累计）。
  *
- * 截断必须是**消费方可见**的：此前只有一条 warn-once 日志，抓取的 Prometheus/面板
- * 看不出"这个 store 其实被砍掉了一批 series"——route 列表少了几条、错误率少了分母，
- * 看起来都像"本来就没有"。沉默的兜底机制比没有兜底更危险。
+ * 截断必须是**消费方可见**的：单靠一条 warn-once 日志，抓取的 Prometheus/面板看不出
+ * "这个 store 被砍掉了一批 series"——沉默的兜底机制比没有兜底更危险。
  */
 function canAddSeries(store, currentSize) {
   if (currentSize < MAX_SERIES) return true;
@@ -114,8 +113,6 @@ function canAddSeries(store, currentSize) {
  * `labels[k] || 'unknown'`（→ "unknown"），于是同一条 series 在两个视图里
  * 顶着两个不同的标签值——而这两个视图恰是告警规则（吃 /metrics 文本）与
  * 管理面板（吃 JSON 快照）各自的取数口径，改一处口径就对不上另一处。
- * 实测旧行为：文本 `security_alerts_total{...,level="undefined"}`，
- * 快照 `{...,level:"unknown"}`。
  */
 function normLabel(value) {
   if (value === undefined || value === null) return 'unknown';
@@ -472,9 +469,8 @@ module.exports = {
   _alertCounters: alertCounters,
   _loginCounters: loginCounters,
   _mfaCounters: mfaCounters,
-  // alertLabels 此前**没有**导出，而 writeSurface 测试的 afterEach 里写着
-  // `metrics._alertLabels?.clear?.()` ——可选链把"清不掉的标签表"伪装成"清好了"。
-  // 导出后那行才真正生效（漏导出一次，标签表就在同一文件的用例间悄悄累积）。
+  // alertLabels 必须导出：writeSurface 的 afterEach 靠 `metrics._alertLabels?.clear?.()` 清理，
+  // 漏导出会让标签表在同一文件的用例间悄悄累积。
   _alertLabels: alertLabels,
   _droppedSeries: droppedSeries,
   _auditDrops: auditDropMetrics._auditDrops,

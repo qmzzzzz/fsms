@@ -134,3 +134,141 @@ describe('F-06 宿主端口表与 compose 一致', () => {
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D5（2026-10-30 第四轮审计）：架构文档的「面」计数必须与目录实况一致
+//
+// 缺陷：文档写着 13 View / 11 路由 / 9 控制器 / 15 服务，而目录实况是 14 / 12 / 15 / 66；
+// 模型清单还漏了 PrivilegeGrant（特权授予，安全敏感模块）——新人拿这份「全局地图」
+// 会低估半个后端，而这类漂移此前没有任何门禁。
+//
+// 计数口径（全部用 fs 读目录，不解析 mermaid，也不数「文档里出现过哪个数字」）：
+//   View   = web-admin/src/views 下直接的 *.vue 文件（顶层，不含子目录）
+//   路由   = src/routes 下 *Routes.js 文件（index.js 只是聚合器，不计）
+//   控制器 = src/controllers 下一层的 *Controller.js 文件 + *Controller/ 目录（各含 index.js）
+//   服务层 = src/services 下直接的 *.js 文件（顶层；authService / initData / sharedCache /
+//            websocketService 是子目录，不计入顶层数）
+//   模型   = src/models 下真的调用了 mongoose.model( 的 .js 文件（不是「目录里有几个文件」）
+//
+// 判据是「文档数字 == 当场数出来的数字」：两边各自算一次再比。目录增删而文档没跟上 ⇒ 红；
+// 文档数字被人手滑改错 ⇒ 红。模型清单则逐名比对（漏一个或编一个都红）。
+function entriesIn(rel) {
+  return fs.readdirSync(path.join(ROOT, rel), { withFileTypes: true });
+}
+
+const VIEW_COUNT = entriesIn('web-admin/src/views').filter(
+  (e) => e.isFile() && e.name.endsWith('.vue')
+).length;
+const ROUTE_COUNT = entriesIn('src/routes').filter(
+  (e) => e.isFile() && /Routes\.js$/.test(e.name)
+).length;
+const CONTROLLER_COUNT = entriesIn('src/controllers').filter(
+  (e) =>
+    (e.isFile() && /Controller\.js$/.test(e.name)) ||
+    (e.isDirectory() && /Controller$/.test(e.name))
+).length;
+const SERVICE_COUNT = entriesIn('src/services').filter(
+  (e) => e.isFile() && e.name.endsWith('.js')
+).length;
+const MODEL_NAMES = entriesIn('src/models')
+  .filter((e) => e.isFile() && e.name.endsWith('.js'))
+  .map((e) => e.name)
+  .filter((n) =>
+    /mongoose\.model\(/.test(fs.readFileSync(path.join(ROOT, 'src', 'models', n), 'utf8'))
+  )
+  .map((n) => n.replace(/\.js$/, ''))
+  .sort();
+
+/** 从文档固定句式里抠计数：句式被改坏（数字不见了）也算红，不静默通过 */
+function documentedCount(label, re) {
+  const m = re.exec(DOC);
+  if (!m) throw new Error('docs/architecture.md 里找不到「' + label + '」的计数句式');
+  return Number(m[1]);
+}
+
+describe('D5 架构文档的计数与目录实况一致', () => {
+  test('口径自证：每一类都数到了，且谓词真的在筛', () => {
+    expect(VIEW_COUNT).toBeGreaterThan(8);
+    expect(ROUTE_COUNT).toBeGreaterThan(5);
+    expect(CONTROLLER_COUNT).toBeGreaterThan(5);
+    expect(SERVICE_COUNT).toBeGreaterThan(20);
+    expect(MODEL_NAMES.length).toBeGreaterThan(8);
+    // 反证：把后缀换掉必须归零——否则上面的「> 8」可能只是把目录里所有条目都数了进去
+    expect(entriesIn('web-admin/src/views').filter((e) => e.name.endsWith('.zzz')).length).toBe(0);
+    expect(entriesIn('src/routes').filter((e) => e.name.endsWith('.zzz')).length).toBe(0);
+  });
+
+  test('View 数 = web-admin/src/views 顶层 *.vue', () => {
+    expect(documentedCount('View', /视图层：.*?(\d+) 个 View/)).toBe(VIEW_COUNT);
+  });
+
+  test('路由数 = src/routes/*Routes.js（不含聚合器 index.js）', () => {
+    expect(documentedCount('路由', /路由（(\d+)）/)).toBe(ROUTE_COUNT);
+  });
+
+  test('控制器数 = *Controller.js 文件 + *Controller/ 目录', () => {
+    expect(documentedCount('控制器', /控制器（(\d+)）/)).toBe(CONTROLLER_COUNT);
+  });
+
+  test('服务层数 = src/services 顶层 *.js', () => {
+    expect(documentedCount('服务层', /服务层（(\d+)/)).toBe(SERVICE_COUNT);
+  });
+
+  test('模型数 = src/models 里调用 mongoose.model( 的文件', () => {
+    expect(documentedCount('模型', /Mongoose 模型（(\d+)）/)).toBe(MODEL_NAMES.length);
+  });
+
+  test('模型清单逐名与 src/models 实况一致（漏一个或编一个都红）', () => {
+    const m = /模型清单：`([^`]+)`/.exec(DOC);
+    expect(m).not.toBeNull();
+    const listed = m[1]
+      .split(' / ')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .sort();
+    expect(listed).toEqual(MODEL_NAMES);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D4（2026-10-30 第四轮审计）：README / CONTRIBUTING 与代码、编排的硬冲突
+//
+// 三处「照文档做就会错」：DOCS_PASSWORD 写 16 而校验是 32；DOCS_* 标「可选」而缺项即报错；
+// MongoDB 写 6.x 而 compose/CI 钉 8.0.34。再加一处指向不存在文件（errorCodeI18n.js）。
+// 判据一律「两边各算一次再比」，不是「文档里出现某个字符串」就算过。
+const README = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+const CONTRIBUTING = fs.readFileSync(path.join(ROOT, 'CONTRIBUTING.md'), 'utf8');
+const VALIDATE_SRC = fs.readFileSync(path.join(ROOT, 'src', 'config', 'validate.js'), 'utf8');
+
+describe('D4 文档与代码/编排一致（照文档做不会错）', () => {
+  test('README 的 DOCS_PASSWORD 下限 = 启动校验的实际下限（注释口径也算）', () => {
+    const codeMin = Number(/docsPass\.length < (\d+)/.exec(VALIDATE_SRC)[1]);
+    const docMins = [...README.matchAll(/DOCS_PASSWORD[^\n]*?≥\s*(\d+)\s*字符/g)].map((m) =>
+      Number(m[1])
+    );
+    expect(docMins.length).toBeGreaterThanOrEqual(1);
+    expect(docMins).toEqual(docMins.map(() => codeMin));
+    // 注释里的旧口径（16 字符）也会被下一个人当成依据，必须同口径
+    expect(new RegExp('口令下限\\s*' + codeMin + '\\s*字符').test(VALIDATE_SRC)).toBe(true);
+    expect(/口令下限\s*16\s*字符/.test(VALIDATE_SRC)).toBe(false);
+  });
+
+  test('README 不得把 DOCS_USERNAME / DOCS_PASSWORD 写成「可选」', () => {
+    expect(README).not.toMatch(/DOCS_(?:USERNAME|PASSWORD)[^\n]*（可选）/);
+  });
+
+  test('CONTRIBUTING 的 MongoDB 主版本 = compose 钉版主版本', () => {
+    const docMajor = Number(/MongoDB[^\n]*?(\d+)\.\d/.exec(CONTRIBUTING)[1]);
+    const imageMajor = Number(/image:\s*mongo:(\d+)\./.exec(COMPOSE)[1]);
+    expect(docMajor).toBe(imageMajor);
+  });
+
+  test('CONTRIBUTING 引用的前端错误码映射落在真实文件上（api.js 的 ERROR_CODE_I18N_MAP）', () => {
+    expect(CONTRIBUTING).not.toContain('web-admin/src/utils/errorCodeI18n.js');
+    const api = fs.readFileSync(path.join(ROOT, 'web-admin', 'src', 'utils', 'api.js'), 'utf8');
+    expect(/const ERROR_CODE_I18N_MAP = \{/.test(api)).toBe(true);
+    expect(
+      fs.existsSync(path.join(ROOT, 'web-admin', 'src', 'tests', 'utils', 'errorCodeI18n.test.js'))
+    ).toBe(true);
+  });
+});

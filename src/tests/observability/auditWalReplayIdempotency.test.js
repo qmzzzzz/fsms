@@ -22,6 +22,13 @@
  *  3. **WAL 追加是 best-effort（异步 fire-and-forget、无 fsync）**（用例 3）
  *     正常路径可用，但不承诺"崩溃零丢失"——auditBufferWal.js:17 已如实声明。
  *
+ * 【2026-10-31 更新：用例 2 的边界在**新格式行**上已闭合】F-143 的跨重启幂等修复把
+ * `_id` 的分配从 flush 提前到 push，并随 WAL 行落盘 ⇒ 重放复用同一 `_id` ⇒ 撞 `_id`
+ * 唯一索引 ⇒ 走 collectDurableIds 的 11000 对账（不再插入）。所以：
+ *   · **新格式行**（用例 5/6 写出的行，带 `_id`）＝恰好一次；
+ *   · **旧格式行**（升级前写下的行，没有 `_id`）＝仍按旧语义重放，重复插入窗口仍在（用例 2）。
+ * 这不是「两个真相」：行里有没有身份键是磁盘上可读的事实，用例 2/5/6 分别钉住两档。
+ *
  * 模拟"进程重启"的手法：同进程内 `__resetForTest()` 清空内存缓冲 + 重新
  * `start()`。这与真实重启的差别只在"不重建模块对象"，对本测试要断言的
  * 「磁盘 WAL 状态 → 落库条数」映射无影响。
@@ -52,6 +59,7 @@ const auditBuffer = require('../../services/auditBuffer');
 const wal = require('../../services/auditBufferWal');
 const AuditLog = require('../../models/AuditLog');
 const { waitFor, waitForStable, flushEventLoop } = require('../helpers/waitFor');
+const chain = require('../../utils/auditChain');
 
 /** 等 WAL 异步写入链真正排空（追加/裁剪/rename 全部落盘）。
  *
@@ -191,7 +199,7 @@ describe('§13 V-8 WAL 重放幂等性边界', () => {
     });
   });
 
-  test('用例 2：落库成功但 WAL 未裁剪即「崩溃」→ 重放整批再插一份（已知边界，非回归）', async () => {
+  test('用例 2：**旧格式**行（无 _id）落库成功但未裁剪即「崩溃」→ 重放再插一份（兼容档，非回归）', async () => {
     const tag = `idem2_${Date.now()}`;
     siSpy = jest.spyOn(global, 'setInterval');
     siSpy.mockImplementation(() => ({ unref() {} }));
@@ -212,6 +220,10 @@ describe('§13 V-8 WAL 重放幂等性边界', () => {
     // 「硬崩前一刻」：把 WAL 恢复成裁剪前的状态——模拟 insert 确认后、rename
     // 完成前进程被 SIGKILL（WAL 行原样留在磁盘）。不依赖真实 SIGKILL，等价地
     // 重建「DB 已有记录 + WAL 仍有对应行」这个磁盘状态。
+    //
+    // 注意这里**手工构造的是旧格式行**（makeDoc 没有 _id）：升级前写下的行就该按旧
+    // 语义重放（现分配 _id），所以本用例仍然期待 2 条 —— 它钉的是兼容档。
+    // 新格式行的同一形态见用例 6（那里由 push 写行、行里带 _id，期待 1 条）。
     const crashLine = JSON.stringify(makeDoc(tag, 0)) + '\n';
     await waitForWalQuiet();
     fs.writeFileSync(walPath(), crashLine);
@@ -296,5 +308,126 @@ describe('§13 V-8 WAL 重放幂等性边界', () => {
       await wal.drain();
       appendSpy.mockRestore();
     }
+  });
+
+  test('用例 5：行的 _id 随行落盘 → 重放落库的 _id 与行内一致，且只有一条', async () => {
+    const tag = 'idem5_' + Date.now();
+    siSpy = jest.spyOn(global, 'setInterval');
+    siSpy.mockImplementation(() => ({ unref() {} }));
+    auditBuffer.start();
+    auditBuffer.push(makeDoc(tag, 0));
+    await waitForWalQuiet();
+
+    const linesBefore = fs.readFileSync(walPath(), 'utf8').trim().split('\n').filter(Boolean);
+    expect(linesBefore).toHaveLength(1);
+    const lineDoc = JSON.parse(linesBefore[0]);
+    // 身份键必须在行里：这是跨重启幂等的唯一依据（改前此处为 undefined）
+    expect(typeof lineDoc._id).toBe('string');
+    expect(lineDoc._id).toMatch(/^[0-9a-f]{24}$/);
+
+    // 模拟进程死：内存状态全丢，磁盘 WAL 原样留下
+    const tick = reboot();
+    await waitFor(async () => auditBuffer.getStats().bufferLength === 1);
+    tick();
+
+    const ok = await waitFor(
+      async () => (await AuditLog.countDocuments({ username: tag + '_0' })) === 1,
+      {
+        label: '重放后恰好一条',
+      }
+    );
+    expect(ok).toBe(true);
+    const stored = await AuditLog.findOne({ username: tag + '_0' }).lean();
+    // 落库的 _id 必须是行里那一个（改前：重放现分配 ⇒ 两者不同）
+    expect(String(stored._id)).toBe(String(lineDoc._id));
+  });
+
+  test('用例 6：崩在「落库成功、WAL 未裁」之间 → 重放不再插第二份（F-143 跨重启幂等）', async () => {
+    const tag = 'idem6_' + Date.now();
+    siSpy = jest.spyOn(global, 'setInterval');
+    siSpy.mockImplementation(() => ({ unref() {} }));
+    auditBuffer.start();
+    const tick1 = siSpy.mock.calls[0][0];
+    auditBuffer.push(makeDoc(tag, 0));
+    auditBuffer.push(makeDoc(tag, 1));
+    await waitForWalQuiet();
+    const preTrim = fs.readFileSync(walPath(), 'utf8');
+    expect(preTrim.trim().split('\n').filter(Boolean)).toHaveLength(2);
+
+    tick1();
+    const inserted = await waitFor(
+      async () => (await AuditLog.countDocuments({ username: new RegExp('^' + tag + '_') })) === 2,
+      { label: '第一轮两条落库' }
+    );
+    expect(inserted).toBe(true);
+    await waitForWalQuiet(); // 等裁剪真正落盘，再回写裁剪前的字节
+    const tailAfterFirst = await chain.getChainTail(AuditLog);
+
+    // 「硬崩」：把 WAL 恢复成裁剪前的字节（模拟 insert 确认后 rename 未完成）
+    fs.writeFileSync(walPath(), preTrim);
+    expect(await AuditLog.countDocuments({ username: new RegExp('^' + tag + '_') })).toBe(2);
+
+    const tick2 = reboot();
+    await waitFor(async () => auditBuffer.getStats().bufferLength === 2);
+    tick2();
+    await waitForWalQuiet();
+    await flushEventLoop(5);
+
+    // 改前：重放的 _id 是新分配的 ⇒ 库里 4 条；改后：撞 _id 唯一索引 ⇒ 仍 2 条
+    expect(await AuditLog.countDocuments({ username: new RegExp('^' + tag + '_') })).toBe(2);
+    // 链尾不多推：重放没有产生新记录，也就没有新链尾
+    expect(await chain.getChainTail(AuditLog)).toBe(tailAfterFirst);
+    // 已被识别为「已在库中」⇒ 两行随后被正常裁掉，不会每次重启都重放
+    const emptied = await waitFor(() => fs.readFileSync(walPath(), 'utf8').trim() === '', {
+      label: '重放的行被裁空',
+    });
+    expect(emptied).toBe(true);
+  });
+
+  test('用例 7：C 实测 —— 久候批次的 _id 序与串链序反转，链尾初始化是否还选得对', async () => {
+    const tag = 'idem7_' + Date.now();
+    siSpy = jest.spyOn(global, 'setInterval');
+    siSpy.mockImplementation(() => ({ unref() {} }));
+    auditBuffer.start();
+    const tick = siSpy.mock.calls[0][0];
+
+    // (a) 批次先入队：此刻就已分配 _id（较早）
+    auditBuffer.push(makeDoc(tag, 'b'));
+    await waitForWalQuiet();
+    // (b) 其间一条**直写**记录先落库并推链尾（_id 更晚）
+    await AuditLog.create(makeDoc(tag, 'd'));
+    // (c) 批次随后落库：链上更晚，但 _id 更早
+    tick();
+    const both = await waitFor(
+      async () =>
+        (await AuditLog.countDocuments({ username: { $in: [tag + '_b', tag + '_d'] } })) === 2,
+      { label: '批次与直写各一条' }
+    );
+    expect(both).toBe(true);
+
+    const batch = await AuditLog.findOne({ username: tag + '_b' }).lean();
+    const direct = await AuditLog.findOne({ username: tag + '_d' }).lean();
+    // 实测 1：id 序与串链序**相反**（改前 _id 在 flush 时分配 ⇒ 两者一致）
+    expect(String(batch._id) < String(direct._id)).toBe(true);
+    expect(batch.prevHash).toBe(direct.hash);
+    // 实测 2：谁被谁认领 —— 直写已有子记录，批次没有（批次就是链尾）
+    const parents = new Set(
+      (
+        await AuditLog.find(
+          { prevHash: { $in: [batch.hash, direct.hash] } },
+          { prevHash: 1 }
+        ).lean()
+      )
+        .map((r) => r.prevHash)
+        .filter(Boolean)
+    );
+    expect(parents.has(direct.hash)).toBe(true);
+    expect(parents.has(batch.hash)).toBe(false);
+    // 实测 3：链尾初始化必须选「无子记录」的那条，而不是「最大 _id」的那条
+    await chain.resyncChainTail();
+    const tail = await chain.getChainTail(AuditLog);
+    expect(tail).not.toBe(direct.hash);
+    // 顺序跑（--runInBand）时真尾就是本批次的尾；并行跑其它套件时可能已有更晚的记录接在后面，
+    // 故这里只断言充要性质（旧实现恰好返回被认领的那条）。
   });
 });

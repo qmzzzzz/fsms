@@ -1,11 +1,9 @@
 /**
  * 安全建议码表的单一来源
  *
- * 背景（i18n 缺口）：`suggestions` 原先是**后端直接拼好的中文句子**
- * （securityController.js 的 my-info 与 stats 两处共 5 条）。这类字段一旦是
- * 成句文案，就没有任何办法在英文界面里正确显示——前端拿到的是已经定型的
- * 中文串，vue-i18n 无从下手。表现是：管理员把界面切到 en-US，「我的安全信息」
- * 的建议列表与安全概览的建议仍是中文。
+ * 背景（i18n 缺口）：`suggestions` 若由**后端直接拼好中文句子**（my-info 与 stats 两处
+ * 共 5 条），英文界面就没有任何办法正确显示——前端拿到的是已经定型的字符串，vue-i18n
+ * 无从下手。表现是：管理员把界面切到 en-US，「我的安全信息」与安全概览的建议仍是中文。
  *
  * 修法与仓内既有口径一致（utils/labelMaps.js 的 DEVICE_TYPE、constants/alarm.js
  * 的 ALARM_TYPES、utils/auditLabels.js 的 audit.action.*）：**后端只出稳定码，

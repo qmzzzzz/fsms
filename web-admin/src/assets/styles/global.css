@@ -1962,3 +1962,22 @@ a:hover {
     font-size: 12px;
   }
 }
+
+/* ===== 多行消息弹窗 =====
+ * ElMessageBox / ElNotification 都挂在 body 下（teleport），组件里的 scoped
+ * 样式（含 :deep）编译后带 [data-v-xxx] 前缀，祖先不在组件子树时整条失效——
+ * 于是传给 alert 的 \n 会被当成普通空白折掉，多条信息挤成一行。
+ * 这里用**全局**类名开口：调用方只需 customClass: 'mb-multiline'。
+ */
+.mb-multiline .el-message-box__content {
+  /* 长值必须能断行：位置/处理结果可能是上百字不含空格的中文串或无分隔符标识符，
+   * 默认 normal 会把弹窗撑出横向滚动条。 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-line;
+  line-height: 1.8;
+}
+
+.mb-multiline .el-message-box__content p {
+  margin: 8px 0;
+}

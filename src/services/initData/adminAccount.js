@@ -247,7 +247,8 @@ const createDefaultAdmin = async () => {
   const desiredEmail = (process.env.ADMIN_INITIAL_EMAIL || '').trim() || 'admin@example.com';
   const username = getSuperAdminUsername();
 
-  /** 用指定邮箱创建管理员 */
+  // bootstrap 超管同样置 mustChangePassword：它是全新部署里唯一持有最高权限的账户，
+  // 初始口令（可能来自 ADMIN_INITIAL_PASSWORD 或落盘文件）在本人改密前只可用于改密。
   const createWith = (email) =>
     User.create({
       username,
@@ -255,6 +256,7 @@ const createDefaultAdmin = async () => {
       password: adminPassword,
       realName: '系统管理员',
       status: 'active',
+      mustChangePassword: true,
       roles: [adminRole._id],
     });
 
@@ -282,7 +284,6 @@ const createDefaultAdmin = async () => {
  * 变更超管归属（见 utils/superAdmin.js 的设计说明）。因此这里是唯一的
  * 修复入口：无论归属如何丢失（误操作、直连数据库改动、迁移遗漏），
  * 重启一次即自愈。
- *
  * 三类情形：
  * 1. 指定账户缺少超管角色 → 补回（覆盖「0 持有者」的不可恢复状态）
  * 2. 其他账户多持有超管角色 → 剥离并记 error 日志（唯一性收敛）

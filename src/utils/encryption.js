@@ -222,10 +222,9 @@ class HMACSigner {
    * @returns {boolean} - 签名是否有效（任何输入不合形状都是 false，不抛异常）
    */
   verify(data, signature) {
-    // 先守卫、后计算：原先 this.sign(data) 排在守卫之前，非字符串 data 会让
-    // ERR_INVALID_ARG_TYPE 从这个标着 @returns {boolean} 的判定方法里抛给调用方。
-    // 形状必须是"等于产出集"而不是"hex 解得开"：Buffer.from(x,'hex') 大小写不敏感、
-    // 且截断到第一个坏字符，所以改前 sig.toUpperCase() 与 sig+'zz' 都判等成立。
+    // 先守卫、后计算：非字符串 data 走到 this.sign(data) 会抛 ERR_INVALID_ARG_TYPE，从这个标着
+    // @returns {boolean} 的判定方法漏给调用方。形状必须是"等于产出集"而不是"hex 解得开"：
+    // Buffer.from(x,'hex') 大小写不敏感、且截断到第一个坏字符，所以 toUpperCase 与 +'zz' 都判等成立。
     if (typeof signature !== 'string' || !this.signatureShape.test(signature)) {
       return false;
     }

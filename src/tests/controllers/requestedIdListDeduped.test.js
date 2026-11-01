@@ -217,6 +217,16 @@ jest.mock('../../services/userService', () => {
         createdBy: u.createdBy,
       }))
     ),
+    // P1-3 起批量删除走 anonymizeMany({...}, Map<id, snapshot>)：键天然去重，
+    // 不存在/状态已变的目标不计入。替身复现这两条，本闸的量尺才还落在真实语义上。
+    anonymizeMany: jest.fn(async (filter, expectedByTarget) => {
+      if (!expectedByTarget) throw new Error('替身只支持带快照的匿名化路径');
+      const done = [...expectedByTarget.keys()].filter((id) => mockStore.users[castId(id)]);
+      done.forEach((id) => {
+        delete mockStore.users[castId(id)];
+      });
+      return { anonymizedCount: done.length, acknowledged: true };
+    }),
     deleteMany: jest.fn(async (filter) => {
       const requested = ((filter && filter._id && filter._id.$in) || []).map(castId);
       const existing = [...new Set(requested)].filter((id) => mockStore.users[id]);
@@ -250,6 +260,17 @@ jest.mock('../../middleware/rbac', () => ({
 /** 角色变更后的权限推送要连 socket 与 DB：只钉「被调用」这件事 */
 jest.mock('../../utils/permissionSync', () => ({
   syncPermissionsToUsers: jest.fn(async () => {}),
+}));
+
+/**
+ * 删除路径（P1-3）先持久化审计再回成功：recordDurably 会真写库。
+ * 本闸的射程是"交出去的 id 列表是哪一份"，审计持久化有专门套件
+ * （skipGlobalAuditWriteFailure / auditOutbox 三态）；这里只要"写成功"这一件事，
+ * 桩成 resolve 即可——桩成 reject 会让每条成功腿变成 500，与本闸无关。
+ */
+jest.mock('../../services/auditOutbox', () => ({
+  recordDurably: jest.fn(async () => ({ ok: true })),
+  recordAudit: jest.fn(async () => ({ ok: true })),
 }));
 
 /** auth 的用户缓存失效：真实模块会拉起口令黑名单与会话链路 */
@@ -364,6 +385,7 @@ const mockServiceNames = [
   'findDuplicateUsername',
   'findOneUser',
   'findBatchUsers',
+  'anonymizeMany',
   'deleteMany',
 ];
 
@@ -372,6 +394,9 @@ const mockRes = () => {
   const res = {
     statusCode: null,
     body: null,
+    // 删除路径用 res.locals.skipGlobalAudit 声明"本条已专用留痕"（P1-3）；
+    // 真实 Express 的 res.locals 恒存在，替身少了这一格会把成功路径变成 TypeError。
+    locals: {},
     status(code) {
       res.statusCode = code;
       return res;
@@ -457,9 +482,10 @@ const createdPayload = () => {
   return calls.length === 0 ? null : calls[calls.length - 1][0];
 };
 
-const deletedIn = () => {
-  const calls = userService.deleteMany.mock.calls;
-  return calls.length === 0 ? null : calls[calls.length - 1][0]._id.$in;
+/** 控制器交给匿名化的目标集合（Map 的键＝归一后的 id 列表，保序） */
+const anonymizedIn = () => {
+  const calls = userService.anonymizeMany.mock.calls;
+  return calls.length === 0 ? null : [...calls[calls.length - 1][1].keys()];
 };
 
 beforeEach(() => {
@@ -592,24 +618,24 @@ describe('第 4 组 · DELETE /api/users/batch 的重复 id', () => {
   test('重复 id 必须放行，而不是整批 USER_ID_NOT_FOUND_IN_LIST', async () => {
     const res = await batch([mockIds.peerA, mockIds.peerA, mockIds.peerB]);
     expect(res.body && res.body.success).toBe(true);
-    expect(res.body.data.deleted).toBe(2);
+    expect(res.body.data.anonymized).toBe(2);
   });
 
-  test('传给 deleteMany 的 $in 是去重后的列表', async () => {
+  test('传给匿名化的目标集合是去重后的列表', async () => {
     await batch([mockIds.peerA, mockIds.peerB, mockIds.peerA]);
-    expect(deletedIn()).toEqual([mockIds.peerA, mockIds.peerB]);
+    expect(anonymizedIn()).toEqual([mockIds.peerA, mockIds.peerB]);
   });
 
   test('重复 + 不存在仍然整批拒绝', async () => {
     const res = await batch([mockIds.peerA, mockIds.peerA, mockIds.missing]);
     expect(errorCodeOf(res)).toBe('USER_ID_NOT_FOUND_IN_LIST');
-    expect(deletedIn()).toBeNull();
+    expect(anonymizedIn()).toBeNull();
   });
 
   test('归一发生在「不得删自己」之前：重复提交自己的 id 仍回 CANNOT_DELETE_SELF', async () => {
     const res = await batch([mockIds.operator, mockIds.operator]);
     expect(errorCodeOf(res)).toBe('CANNOT_DELETE_SELF');
-    expect(deletedIn()).toBeNull();
+    expect(anonymizedIn()).toBeNull();
   });
 
   test('缓存失效按去重后的 id 逐个执行（不随重复项放大）', async () => {
@@ -636,7 +662,34 @@ describe('第 4 组 · DELETE /api/users/batch 的重复 id', () => {
 
     const res = await batch([mockIds.peerA, mockIds.peerB]);
     expect(errorCodeOf(res)).toBe('USER_STATE_CONFLICT');
-    expect(userService.deleteMany.mock.calls.length).toBe(0);
+    expect(userService.anonymizeMany.mock.calls.length).toBe(0);
+  });
+
+  test('审计重抛（落库失败且 WAL 不可用）⇒ 交给上层转 500，且不得先置 skipGlobalAudit', async () => {
+    // 红线形态：批量匿名化已提交（用户从 mockStore 中消失）。若此时 skipGlobalAudit 已置位，
+    // 生产里 errorHandler 把 500 写回时全局审计会直接跳过 ⇒ 状态已变、审计为零。
+    const { recordDurably } = require('../../services/auditOutbox');
+    recordDurably.mockRejectedValueOnce(new Error('audit down'));
+    const res = mockRes();
+    const next = jest.fn();
+    await userController.batchDeleteUsers(
+      mockReq({
+        body: { ids: [mockIds.peerA, mockIds.peerB] },
+        user: { userId: mockIds.operator, username: 'ops_admin', roleCodes: ['OPS_ADMIN'] },
+      }),
+      res,
+      next
+    );
+
+    // 生产语义：asyncHandler 把重抛交给 errorHandler ⇒ 500（不是静默吞掉）
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next.mock.calls[0][0].message).toBe('audit down');
+    // 业务已提交 ⇒ 兜底只剩全局审计，故标志必须仍未置位
+    expect(anonymizedIn()).not.toBeNull();
+    expect(res.locals.skipGlobalAudit).toBeUndefined();
+    // 前提对照：那两条目标确实已被匿名化（状态已变是这条用例的前提）
+    expect(mockStore.users[mockIds.peerA]).toBeUndefined();
+    expect(mockStore.users[mockIds.peerB]).toBeUndefined();
   });
 });
 
@@ -695,7 +748,7 @@ describe('第 5 组 · 同一 id 的大小写两种写法', () => {
   test('把自己的 id 写成大写也必须被「不得删自己」拦住（安全闸不吃大小写）', async () => {
     const res = await batch([mockIds.operator.toUpperCase(), mockIds.peerA]);
     expect(errorCodeOf(res)).toBe('CANNOT_DELETE_SELF');
-    expect(deletedIn()).toBeNull();
+    expect(anonymizedIn()).toBeNull();
   });
 });
 
@@ -1048,7 +1101,7 @@ describe('第 8 组 · 大写 :id 走单个入口', () => {
  *  2. roleController.js:115 的权限 id 归一由 src/tests/controllers/
  *     roleCreatePermissionExistence.test.js 钉住"去重"，**没有大小写腿**——把 uniqueIdStrings
  *     换回 `new Set(map(String))` 那一套腿照样绿。该文件是并行 agent 的已提交用例，改动前需协调。
- *  3. 三处 service 侧 `findScopeFieldsByIds`（userService.js:278、DeviceService.js:137、
+ *  3. 三处 service 侧 `findScopeFieldsByIds`（userService.js:293、DeviceService.js:137、
  *     AlarmService.js:181）的归一没有腿，且在当前接线下**造不出**能红的腿：调用方（守卫）
  *     已经先归一过一次，服务层这一句是幂等冗余 ⇒ 删掉它是等价变异。留着是纵深防御
  *     （新调用方不必重新想一遍口径），但要写清"这里没有腿，别把它当已覆盖"。

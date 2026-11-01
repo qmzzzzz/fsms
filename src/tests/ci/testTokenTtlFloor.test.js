@@ -38,6 +38,7 @@ const DELIBERATE_SHORT_TTL = {
   '0s': '钉「过期即 401 AUTH_TOKEN_EXPIRED」：必须真的过期，长 TTL 会让这条用例恒走有效分支',
   '-1s': '钉「已过期的 access/refresh 不得再通过校验」：负值即已过期，是语义用例不是夹具',
   '-10s': '登出入口专用：access 已过期仍须能登掉自己的会话（吊销入口不得随 access 一起失效）',
+  '5m': 'JWT 双密钥轮换交叉验签夹具：5 分钟窗口只用于让旧 kid 令牌在测试内自然过期',
 };
 
 const UNIT_SECONDS = { ms: 0.001, s: 1, m: 60, h: 3600, d: 86400 };

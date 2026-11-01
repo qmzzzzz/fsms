@@ -8,8 +8,16 @@
  * 连带 isDocsEnabled 用同一种字面量比较，prod 下 API 文档还会**默认打开**。
  *
  * 判据设计成 fail-closed 而非"猜一个默认"：
- *   开发/预发家族可跳过；生产家族执行硬闸；**不认识的值也执行硬闸并额外报一条**——
+ *   开发家族（development/dev/local/test/ci）可跳过；生产家族执行硬闸；**不认识的值也
+ *   执行硬闸并额外报一条**；**未设置同样拒绝启动**（2026-10-30 收紧：缺失时无法区分
+ *   "开发机裸跑"与"生产容器漏配"，按开发语义放行等于四类生产校验一起静默跳过）。
  *   猜错方向的代价必须是"启动不起来"，不是"生产以零校验启动"。
+ *
+ * 第三轮（2026-10-30，D1）：**staging/stage 从"可跳过"表里移出**，默认与 production 同判。
+ * 原边界（ADR-005）只在"预发是隔离环境"这个前提成立时才对，而全仓只有 docker-compose
+ * 强制它；同一条 NODE_ENV 取值曾同时关掉 9 类启动硬闸、把 /api-docs 默认打开、让会话
+ * cookie 丢掉 Secure。放宽改为显式声明 FSMS_ALLOW_STAGING_LENIENT=true，且放宽的后果
+ * 由启动日志逐条打印（否则与"一个变量关掉整张生产校验表"没有区别）。
  */
 
 const WEAK_ONLY_ENV = {
@@ -83,11 +91,51 @@ describe('NODE_ENV 归一：生产硬闸不再押在字面量拼写上', () => {
     ['dev', 'dev'],
     ['local', 'local'],
     ['test', 'test'],
-    ['staging（ADR-005 的既有边界，不得改动）', 'staging'],
-    ['stage', 'stage'],
-    ['未设置', undefined],
-  ])('%s 仍允许跳过生产校验', (_label, value) => {
+    ['ci', 'ci'],
+  ])('%s 仍允许跳过生产校验（本地开发口径，判据未改）', (_label, value) => {
     expect(stopsBoot(value)).toBe(false);
+  });
+
+  test.each([
+    ['staging（第三轮起：预发默认同生产）', 'staging'],
+    ['stage', 'stage'],
+  ])('%s 必须与 production 同判据被拦下', (_label, value) => {
+    expect(stopsBoot(value)).toBe(true);
+  });
+
+  test('预发放宽必须显式声明，且跳过了什么、放宽了什么都要写进启动日志', () => {
+    const { mod, exitSpy, consoleSpy } = loadAndRun('staging', {
+      FSMS_ALLOW_STAGING_LENIENT: 'true',
+    });
+    const logger = require('../utils/logger');
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      mod.validateConfig();
+      expect(exitSpy).not.toHaveBeenCalled();
+      const text = warnSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(text).toContain('FSMS_ALLOW_STAGING_LENIENT'); // 声明本身
+      expect(text).toContain('ALLOWED_HOSTS'); // 跳过了哪些硬闸
+      expect(text).toContain('/api-docs'); // 同时生效的放宽项之一
+      expect(text).toContain('Secure'); // 之二（cookie）
+    } finally {
+      warnSpy.mockRestore();
+      exitSpy.mockRestore();
+      consoleSpy.mockRestore();
+    }
+  });
+
+  test('反向对照：宽松开关只在预发生效，production 下照旧拒绝启动', () => {
+    expect(stopsBoot('production', { FSMS_ALLOW_STAGING_LENIENT: 'true' })).toBe(true);
+  });
+
+  // 「未设置」自 2026-10-30 起从上面那张表里移出（原断言 false，随实现收紧而失效）：
+  // validate.js 现在把「NODE_ENV 缺失」直接判为拒绝启动，理由写在实现处——
+  // 缺失时无法区分"开发机裸跑"与"生产容器漏配"，按开发语义放行等于弱密钥 /
+  // Host / Redis / TLS 四类校验全部静默跳过。故裸跑入口必须显式写 development
+  // （README 部署清单与 .env.example 均已同口径）。这条与下面 F-216 的「空串」
+  // 一格互补：空串是"配了但没值"，未设置是"根本没配"，两者都 fail-closed。
+  test('未设置（不是空串，而是键根本不存在）同样拒绝启动，不按开发语义放行', () => {
+    expect(stopsBoot(undefined)).toBe(true);
   });
 
   test('无法识别的取值按生产处理，且错误文案点名 NODE_ENV（fail-closed 而非静默跳过）', () => {
@@ -126,13 +174,28 @@ describe('NODE_ENV 归一：生产硬闸不再押在字面量拼写上', () => {
       expect(stopsBoot(value)).toBe(true);
     });
 
-    test('反向对照：真正未设置仍归一为 development（不得把本地开发也闸停）', () => {
-      expect(stopsBoot(undefined)).toBe(false);
+    test('反向对照：未设置时归一值仍是 development，但启动闸不因此放行', () => {
+      // 两件事必须分开钉：
+      //   ① 归一函数（normalizeNodeEnv）对 undefined 仍返回 'development' —— 它只回答
+      //      "这个值看起来像什么环境"，其他模块（logger/errorHandler/trust proxy）
+      //      依赖这个结果，改成抛错或返回哨兵会波及一圈无关判据；
+      //   ② 但 validateConfig 在归一**之前**就拦下"键不存在"这一格，不进入
+      //      "开发家族 ⇒ 跳过生产校验"的分支。
+      // 原用例（2026-10-30 前）断言 stopsBoot(undefined) === false，正是被 ② 推翻的那半。
+      expect(stopsBoot(undefined)).toBe(true);
       const { mod, exitSpy, consoleSpy } = loadAndRun(undefined);
+      const logger = require('../utils/logger');
+      const logSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
       try {
         expect(mod.normalizeNodeEnv()).toBe('development');
         expect(mod.requiresProductionSemantics()).toBe(false);
+        // 文案必须点名 NODE_ENV 与"未设置"，否则运维只会看到一条无头错误
+        expect(() => mod.validateConfig()).toThrow('process.exit called');
+        const text = logSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+        expect(text).toContain('NODE_ENV');
+        expect(text).toContain('必须显式设置');
       } finally {
+        logSpy.mockRestore();
         exitSpy.mockRestore();
         consoleSpy.mockRestore();
       }
@@ -180,19 +243,31 @@ describe('NODE_ENV 归一：生产硬闸不再押在字面量拼写上', () => {
       }
     };
 
-    test.each(['production', 'prod', 'Production', 'live', 'prodution'])(
+    test.each(['production', 'prod', 'Production', 'live', 'prodution', 'staging', 'stage'])(
       '%s → 文档默认关闭',
       (value) => {
         expect(docsFor(value)).toBe(false);
       }
     );
 
-    test.each(['development', 'dev', 'local', 'test', 'staging', undefined])(
-      '%s → 文档默认开启（保持既有语义）',
+    test.each(['development', 'dev', 'local', 'test', undefined])(
+      '%s → 文档默认开启（本地开发口径，保持既有语义）',
       (value) => {
         expect(docsFor(value)).toBe(true);
       }
     );
+
+    test('预发显式宽松时才默认开启（文档位与硬闸共用同一判据，不再各按一把尺）', () => {
+      const { mod, exitSpy, consoleSpy } = loadAndRun('staging', {
+        FSMS_ALLOW_STAGING_LENIENT: 'true',
+      });
+      try {
+        expect(mod.isDocsEnabled()).toBe(true);
+      } finally {
+        exitSpy.mockRestore();
+        consoleSpy.mockRestore();
+      }
+    });
 
     test('显式 ENABLE_API_DOCS 仍优先于环境判据', () => {
       const { mod, exitSpy, consoleSpy } = loadAndRun('production');
@@ -228,12 +303,12 @@ describe('NODE_ENV 归一：生产硬闸不再押在字面量拼写上', () => {
   describe('同一拼写不得让会话 cookie 的 Secure 位静默关闭（真实后果面）', () => {
     // 走 setAuthCookies 这个真出口，读它交给 res.cookie 的属性——
     // 比"检查源码里有没有 'production' 字样"的文本断言强：删掉调用点文本断言照样绿。
-    const optionsFor = (nodeEnv) => {
+    const optionsFor = (nodeEnv, extra = {}) => {
       jest.resetModules();
-      process.env = { ...WEAK_ONLY_ENV };
+      process.env = { ...WEAK_ONLY_ENV, ...extra };
       if (nodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = nodeEnv;
-      delete process.env.COOKIE_SECURE;
+      if (extra.COOKIE_SECURE === undefined) delete process.env.COOKIE_SECURE;
       const cookie = require('../utils/cookie');
       const captured = {};
       const res = {
@@ -246,12 +321,19 @@ describe('NODE_ENV 归一：生产硬闸不再押在字面量拼写上', () => {
       return captured[cookie.ACCESS_COOKIE_NAME];
     };
 
-    test.each(['production', 'prod', 'Production', 'live', 'prodution'])(
+    test.each(['production', 'prod', 'Production', 'live', 'prodution', 'staging', 'stage'])(
       '%s → Secure 必须为 true',
       (value) => {
         expect(optionsFor(value).secure).toBe(true);
       }
     );
+
+    test('预发显式宽松时 Secure 才由 COOKIE_SECURE 决定（不再因 NODE_ENV 静默关闭）', () => {
+      expect(optionsFor('staging', { FSMS_ALLOW_STAGING_LENIENT: 'true' }).secure).toBe(false);
+      expect(
+        optionsFor('staging', { FSMS_ALLOW_STAGING_LENIENT: 'true', COOKIE_SECURE: 'true' }).secure
+      ).toBe(true);
+    });
 
     test.each(['development', 'test', 'local'])(
       '%s → Secure 为 false（本地 HTTP 可用）',

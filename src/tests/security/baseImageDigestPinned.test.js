@@ -99,10 +99,19 @@ describe('基础镜像 digest 钉版门禁（真实 Dockerfile / docker-compose.
   test('docker-compose.yml 的 redis image 指令行带 @sha256（注释行不算数）', () => {
     // 行锚定：compose 注释里也有一份 `docker pull redis:7-alpine@sha256:...`
     // 示例文本，不带 `image:` 锚的断言会被注释假通过。
+    //
+    // 条数自 2026-10-30 起是 2：F-14 新增 `redis-secret-init`（一次性 root 容器，
+    // 把 secret 复制进命名卷并降权），它与主 `redis` 服务**必须是同一个 digest**——
+    // 初始化容器跑的是另一个镜像版本时，redis.conf/secret 的落位与权限语义就未必一致。
+    // 故断言从"恰好一条"改成"恰好两条且逐字相同"，比原来更严而不是更松：
+    // 新增第三个 redis 容器会红（要么同 digest 一并登记，要么说明为什么不）。
     const imageLines = COMPOSE.split(/\r?\n/).filter((line) =>
       /^\s*image:\s*redis:\S*@sha256:[0-9a-f]{64}\s*$/.test(line)
     );
-    expect(imageLines).toHaveLength(1);
-    expect(imageLines[0].trim()).toMatch(/^image:\s+redis:7-alpine@sha256:[0-9a-f]{64}$/);
+    expect(imageLines).toHaveLength(2);
+    for (const line of imageLines) {
+      expect(line.trim()).toMatch(/^image:\s+redis:7-alpine@sha256:[0-9a-f]{64}$/);
+    }
+    expect(new Set(imageLines.map((l) => l.trim())).size).toBe(1);
   });
 });

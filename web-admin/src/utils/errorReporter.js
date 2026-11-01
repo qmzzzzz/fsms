@@ -77,6 +77,10 @@ const SAFE_REASON_KEYS = new Set([
 // 落到浏览器本地存储与第三方服务，且**不会被清理**（缓冲按条数滚动，
 // 不按时间过期）。当前路由确实没有这类参数，但这属于「今天安全、
 // 明天加一个回调链接就泄露」的典型脆弱点，防护应在上报侧而非路由侧。
+// 仅在**字符串形态**做键值打码时补的复合键：对象键路径已由 normalizeObjectKey 折叠成
+// mfa_code / api_key 这样的形态命中上面的清单，字符串里却是照原文写的，故两种写法都要收。
+const COMPOUND_SENSITIVE_KEYS = ['mfa_code', 'captcha_id', 'session_id', 'secret_key', 'api_key']
+
 const SENSITIVE_QUERY_KEYS = [
   'password',
   'passwd',
@@ -98,6 +102,8 @@ const SENSITIVE_QUERY_KEYS = [
   'id_token',
   'jwt',
   'bearer',
+  // 会话标识：能直接定位一次登录态，属于凭据而非普通业务参数
+  'sid',
 ]
 
 // 与后端一致的下划线边界感知：短键（code/sign）若用 includes 子串匹配，
@@ -119,12 +125,37 @@ const isSensitiveKey = (key) => {
 }
 
 /**
+ * query/hash 的键名判据：先按对象键那套强归一化（补驼峰边界、非字母数字折叠成 _）
+ * 再走同一份敏感清单，最后额外去掉 [] 这类数组/嵌套下标形态。
+ * 与后端 utils/helpers.js 的 redactUrlQuery 同口径（键名保留、值替换为 ***）。
+ */
+const isSensitivePairKey = (rawKey) => {
+  let decoded = rawKey
+  try {
+    decoded = decodeURIComponent(rawKey)
+  } catch (_) {
+    // 非法百分号编码保持原样判定：宁可多打码，不要把"解不开"当成"不敏感"
+  }
+  const normalized = normalizeObjectKey(decoded.replace(/\[[^\]]*\]/g, ''))
+  return normalized === 'code' || isSensitiveKey(decoded) || isSensitiveKey(normalized)
+}
+
+/**
  * 对 URL 的 query 与 hash 做敏感值打码，保留路径与键名便于排障
  * @param {string} rawUrl 原始 URL（location.href 或相对路径）
  * @returns {string} 敏感值替换为 *** 后的 URL；入参非法时原样返回
  */
-function redactUrl(rawUrl) {
+function redactUrl(rawUrl, depth = 0) {
   if (typeof rawUrl !== 'string' || rawUrl.length === 0) return rawUrl
+  // 值里嵌 URL 时最多下沉 3 层：OAuth 回调把 next/redirect_uri 层层套起来是常见写法，
+  // 但没有边界的递归会被构造成"值里再套值"的自相似串打爆（r17-web F2）。
+  // 到顶后必须**失败关闭**：这里已至少被编码 3 次（说明是套起来的嵌套串），
+  // 而深层那份凭据正是 detector 再也追不到的——返回原文等于给"套 4 层"留了后门
+  // （本轮用例实测：500 层嵌套下 token 明文存活）。所以整体抹成 ***，键名与结构仍在，排障信息只损值。
+  // 判据必须是无条件的：早先写成"只在仍是百分号编码时才抹"（想保留可读的 4 层明文），
+  // 第 18 轮 audit-web 实测把那个推断推翻了——4 层纯明文照样把 token 原文留在上报里
+  // （分界在 3/4 层，与编码形态无关）。到顶即抹，代价是丢失一个 4 层嵌套的排障串。
+  if (depth > 3) return '***'
 
   const [beforeHash, ...hashParts] = rawUrl.split('#')
   const hash = hashParts.join('#')
@@ -133,6 +164,23 @@ function redactUrl(rawUrl) {
   const path = qIndex === -1 ? beforeHash : beforeHash.slice(0, qIndex)
   const query = qIndex === -1 ? '' : beforeHash.slice(qIndex + 1)
 
+  // 值**也要看**：next=/redirect_uri= 里嵌的 URL 常带自己的 token（r17-web F2 实测
+  // /cb?next=https://x/cb?token=SECRET 明文外发）。只看 key 等于把"凭据可以藏进值里"当成了
+  // 不存在的写法；而 record 每次都会写 url:redactUrl(location.href)，不依赖 message 是否被调用。
+  const redactNestedValue = (rawValue) => {
+    let decoded = rawValue
+    try {
+      decoded = decodeURIComponent(rawValue)
+    } catch (_) {
+      return rawValue // 非法百分号编码：不动它，宁可少码也不要产出半截编码
+    }
+    if (!/[?&#]/.test(decoded)) return rawValue
+    const inner = redactUrl(decoded, depth + 1)
+    if (inner === decoded) return rawValue
+    // 入参已是编码形态就回写到同样的编码形态，否则原样回写（不改写调用方看到的形状）
+    return /%[0-9A-Fa-f]{2}/.test(rawValue) ? encodeURIComponent(inner) : inner
+  }
+
   const redactPairs = (text) =>
     text
       .split('&')
@@ -140,7 +188,16 @@ function redactUrl(rawUrl) {
         const eq = pair.indexOf('=')
         if (eq === -1) return pair
         const key = pair.slice(0, eq)
-        return isSensitiveKey(key) ? `${key}=***` : pair
+        if (!isSensitivePairKey(key)) {
+          const value = pair.slice(eq + 1)
+          const inner = redactNestedValue(value)
+          return inner === value ? pair : `${key}=${inner}`
+        }
+        // 键名先做与对象键同一套强归一化再去判定：axios 会把数组参数序列化成
+        // token[]=、嵌套参数序列化成 password[x]=，而 access.token / x-auth-token
+        // 这类变体也不是驼峰形态。只拆驼峰（isSensitiveKey 的旧口径）对这三种形态
+        // 全部失配 ⇒ 明文凭据留在上报负载里。归一化后仍然保留原始键名输出。
+        return `${key}=***`
       })
       .join('&')
 
@@ -346,12 +403,43 @@ const isSensitiveObjectKey = (key) => {
 // last-resort scrub in addition to object-key filtering and URL redaction.
 function redactSensitiveText(value) {
   const text = typeof value === 'string' ? value : String(value ?? '')
-  return text
-    .replace(
-      /["']?(password|passwd|pwd|access[_-]?token|refresh[_-]?token|token|secret|api[_-]?key|authorization|cookie|enc[_-]?password)["']?\s*([:=])\s*(?:"[^"]*"|'[^']*'|[^\s,;}&]+)/gi,
-      '$1$2***'
-    )
-    .replace(/\bBearer\s+[A-Za-z0-9._~+\-/]+=*/gi, 'Bearer ***')
+  // 顺序有意义：Authorization 的值本身就是 "Bearer <JWT>"，若先跑通用键值规则，
+  // 它会把 "Bearer" 当成值吃掉（Authorization:*** eyJ...），后面的凭据形态规则
+  // 再也看不到原文，JWT 就明文留在日志里。凭据形态规则必须先跑。
+  return (
+    text
+      // Digest **必须单独一条**：它的凭据在参数列表里（response="…"），而下面那条通用方案规则
+      // 只吃"方案 + 一个 token"，于是 Digest 的 response 会明文存活（r17-web F4）。
+      // 参数列表按 RFC 7616 的形态整体吃掉：逗号分隔的 name="value" / name=value。
+      .replace(
+        /\bDigest\s+[A-Za-z]+\s*=\s*(?:"[^"]*"|[^\s,]+)(?:\s*,\s*[A-Za-z]+\s*=\s*(?:"[^"]*"|[^\s,]+))*/gi,
+        'Digest ***'
+      )
+      // 认证方案 + 凭据（Bearer JWT / Basic base64 / Negotiate ...）：整段吃掉方案与凭据
+      .replace(/\b(Bearer|Basic|Negotiate)\s+[A-Za-z0-9._~+\/=:-]+/gi, '$1 ***')
+      // 键值形态：Authorization: Bearer <JWT> / token=Bearer abc 等（方案已在上一条处理，
+      // 这里兜住 "x-auth-token"、"access.token" 这类变体键名）
+      .replace(
+        new RegExp(
+          // 键清单从 SENSITIVE_QUERY_KEYS 派生（而不是手抄一份更窄的）：两套清单各写一份时，
+          // 同一凭据换个书写位置就从"已防护"变成"明文外发"——本轮实测 signature=/otp=/
+          // mfaCode=/captchaId=/sessionId=/sid=/jwt=/bearer=/secret_key= 在字符串形态全部幸存。
+          // 长键优先，避免 code 先把 mfaCode 的后半段吃掉，留下 "mfa" + "***" 的残形。
+          '["\']?(' +
+            // `code` 必须剔除：它是**安全的错误码**（对象键路径里 isSensitiveObjectKey 也显式放行，
+            // 见 :344 的 `if (normalized === 'code') return false`）。不剔的话
+            // JSON.stringify({code:42}) 会被打成 "{code:***"，把排障要用的错误码一并毁掉——
+            // 这是本轮修复自身的回归，由 E16 用例当场抓住。
+            [...SENSITIVE_QUERY_KEYS.filter((k) => k !== 'code'), ...COMPOUND_SENSITIVE_KEYS]
+              .sort((a, b) => b.length - a.length)
+              .map((k) => k.replace(/[_]/g, '[._-]?'))
+              .join('|') +
+            ')["\']?\\s*([:=])\\s*(?:"[^"]*"|\'[^\']*\'|[^\\s,;}&]+)',
+          'gi'
+        ),
+        '$1$2***'
+      )
+  )
 }
 
 function safePathname(value) {
@@ -490,9 +578,14 @@ function record(kind, message, stack = '', extra = {}) {
   const lastSeen = recentKeys.get(key)
   if (lastSeen && now - lastSeen < DEDUPE_WINDOW_MS) {
     const duplicate = stored.find((item) => entryKey(item) === key)
-    if (duplicate) duplicate.count += 1
-    persist()
-    return
+    if (duplicate) {
+      duplicate.count += 1
+      persist()
+      return
+    }
+    // 原条目已被裁剪（本轮审计 F4）：去重窗口仍开着，但"要累加的那条"已经不在了。
+    // 旧实现在这里直接 return，于是这次错误一条都不留——缓冲里 0 条，
+    // 而排障者看到的正是"刚出错"的现场。窗口命中但无宿主 ⇒ 继续往下走，按新条目落库。
   }
   recentKeys.set(key, now)
   if (recentKeys.size > 200) recentKeys.clear()

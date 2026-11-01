@@ -114,6 +114,53 @@ describe('审计中间件：大小写变体的敏感读取必须同等留痕', (
     });
   });
 
+  test('豁免清单的前缀大小写/混合大小写不改变「形态收窄」：非读取形态仍必须留痕', async () => {
+    // 旧写法：matchesPathPrefix 大小写不敏感（前缀命中），NARROWED_GET_EXEMPT_PREFIXES 却用原始字符串做键
+    // （'/api/Avatars' 取不到 narrowed）⇒ 退化成整段前缀豁免：/api/avatars/<id>/extra 零留痕。
+    const id = '8f1c2b3a4d5e6f7a8b9c0d1e';
+    const results = [];
+    for (const prefix of ['/api/avatars', '/API/Avatars', '/Api/aVaTaRs']) {
+      const app = express();
+      app.use(express.json());
+      app.use('/api/', auditLog({ auditGetExcludePaths: [prefix] }));
+      app.get('/api/avatars/:userId', (_req, res) => res.json({ ok: true }));
+      app.get('/api/avatars/:userId/extra', (_req, res) => res.status(404).json({ ok: false }));
+
+      spyPush.mockClear();
+      const read = await request(app).get(`/api/avatars/${id}`);
+      await tick();
+      const readLogged = spyPush.mock.calls.length;
+
+      spyPush.mockClear();
+      const extra = await request(app).get(`/api/avatars/${id}/extra`);
+      await tick();
+      const extraLogged = spyPush.mock.calls.length;
+      results.push({ prefix, read: read.status, extra: extra.status, readLogged, extraLogged });
+    }
+
+    // 生产默认清单必须引用同一张收窄表：清单漏登记 ⇒ 合法读取被多记（read≠0）；表漏收窄 ⇒ 非读取形态零留痕（extra≠1）
+    const defaultsApp = express();
+    defaultsApp.use(express.json());
+    defaultsApp.use('/api/', auditLog());
+    defaultsApp.get('/api/avatars/:userId', (_req, res) => res.json({ ok: true }));
+    spyPush.mockClear();
+    await request(defaultsApp).get(`/api/avatars/${id}`);
+    await tick();
+    const defaultRead = spyPush.mock.calls.length;
+    spyPush.mockClear();
+    await request(defaultsApp).get(`/api/avatars/${id}/extra`);
+    await tick();
+    const defaultExtra = spyPush.mock.calls.length;
+
+    // 读取形态免审计（0 条）与「同前缀下的其它形态必须留痕（1 条）」三档必须完全一致
+    expect(results).toEqual([
+      { prefix: '/api/avatars', read: 200, extra: 404, readLogged: 0, extraLogged: 1 },
+      { prefix: '/API/Avatars', read: 200, extra: 404, readLogged: 0, extraLogged: 1 },
+      { prefix: '/Api/aVaTaRs', read: 200, extra: 404, readLogged: 0, extraLogged: 1 },
+    ]);
+    expect({ defaultRead, defaultExtra }).toEqual({ defaultRead: 0, defaultExtra: 1 });
+  });
+
   test('POST 变体路径不得将 category 退化为 system（按 category 过滤的查询会漏检）', async () => {
     const app = express();
     app.use(express.json());

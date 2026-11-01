@@ -46,8 +46,113 @@ vi.mock('element-plus/es/components/message-box/index.mjs', () => ({
 import AuditLogView from '@/views/AuditLogView.vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { useAuthStore } from '@/store'
-import { storeReauthTicket, clearReauthTicket, getReauthTicket } from '@/utils/reauthTicket'
+import { clearReauthTicket } from '@/utils/reauthTicket'
 import i18n from '@/i18n'
+
+describe('AuditLogView 列表加载失败：定责依据不得被抹掉（P1③/P1④）', () => {
+  // 裁决②：审计日志的口径是**保持旧数据**。审计日志是定责依据，
+  // 「失败时把最后已知的一屏抹掉」比「显示可能过期的一屏 + 明示已过期」更危险。
+  // 故：有旧数据 ⇒ showTable=true + stale=true（旧数据继续显示 + 过期标注）；
+  //     无旧数据 ⇒ showErrorBlock=true + .load-error，绝不显示空表也不显示 0。
+  const mountFailing = async () => {
+    get.mockImplementation((url) => {
+      if (url === '/security/audit-logs') return Promise.reject(new Error('boom'))
+      if (url === '/security/overview') {
+        return Promise.resolve({
+          data: { data: { criticalAlerts: 2, highAlerts: 3, failedLogins: 4 } },
+        })
+      }
+      if (url === '/security/alerts') {
+        return Promise.resolve({
+          data: { data: [], meta: { total: 0, limit: 50, hasMore: false } },
+        })
+      }
+      return Promise.resolve({ data: { data: [] } })
+    })
+    const c = mountComponent(AuditLogView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(PERMS),
+    })
+    await waitFor(() => get.mock.calls.some((a) => a[0] === '/security/audit-logs'), {
+      message: '审计日志请求已发出',
+    })
+    await flush(14)
+    return c
+  }
+
+  test('首屏加载失败：显式错误块，不得显示「暂无数据」空表', async () => {
+    const c = await mountFailing()
+    expect(c.find('.load-error')).not.toBeNull()
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.listLoadFailed'))
+    // 关键判据：审计页把失败画成「没有记录」＝定责时以为当天无迹可查
+    expect(c.text()).not.toContain(i18n.global.t('common.noData'))
+    expect(c.find('.el-pagination')).toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('首屏加载失败：错误块提供重试，点击后重新请求并恢复列表', async () => {
+    const c = await mountFailing()
+    const before = get.mock.calls.filter((a) => a[0] === '/security/audit-logs').length
+    get.mockImplementation((url) => {
+      if (url === '/security/audit-logs') {
+        return Promise.resolve({ data: { data: [logRow()], meta: { total: 1 } } })
+      }
+      if (url === '/security/overview') {
+        return Promise.resolve({
+          data: { data: { criticalAlerts: 2, highAlerts: 3, failedLogins: 4 } },
+        })
+      }
+      if (url === '/security/alerts') {
+        return Promise.resolve({
+          data: { data: [], meta: { total: 0, limit: 50, hasMore: false } },
+        })
+      }
+      return Promise.resolve({ data: { data: [] } })
+    })
+    click(c.find('.load-error button'))
+    await flush(16)
+    const after = get.mock.calls.filter((a) => a[0] === '/security/audit-logs').length
+    expect(after).toBeGreaterThan(before)
+    await waitFor(() => c.findAll('.el-table__body-wrapper .el-table__row').length === 1, {
+      message: '重试后渲染日志行',
+    })
+    expect(c.find('.load-error')).toBeNull()
+  })
+
+  test('先成功后失败：旧数据保留 + 明确标注已过期（裁决②：绝不抹掉最后已知的一屏）', async () => {
+    const c = await openList([logRow({ _id: 'l1' })], { total: 1 })
+    expect(c.findAll('.el-table__body-wrapper .el-table__row')).toHaveLength(1)
+    get.mockImplementation((url) => {
+      if (url === '/security/audit-logs') return Promise.reject(new Error('boom'))
+      if (url === '/security/overview') {
+        return Promise.resolve({
+          data: { data: { criticalAlerts: 2, highAlerts: 3, failedLogins: 4 } },
+        })
+      }
+      if (url === '/security/alerts') {
+        return Promise.resolve({
+          data: { data: [], meta: { total: 0, limit: 50, hasMore: false } },
+        })
+      }
+      return Promise.resolve({ data: { data: [] } })
+    })
+    click(
+      c.findAll('.glass-btn').find((b) => b.textContent.includes(i18n.global.t('common.search')))
+    )
+    await flush(16)
+    // 旧数据必须还在（这是与「清空」口径的分界点）
+    expect(c.findAll('.el-table__body-wrapper .el-table__row')).toHaveLength(1)
+    expect(c.find('.load-error')).not.toBeNull()
+    expect(c.find('.load-error').textContent).toContain(i18n.global.t('common.staleData'))
+  })
+
+  test('meta.total 缺失：不得回退成「共 N 条」（P1④）', async () => {
+    const c = await openList([logRow({ _id: 'l1' })], {})
+    expect(c.find('.total-unknown')).not.toBeNull()
+    const pag = c.find('.el-pagination')
+    if (pag) expect(pag.textContent).not.toContain('共 1 条')
+    expect(c.errors).toEqual([])
+  })
+})
 
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 const PERMS = ['report:export', 'security:audit']
@@ -66,8 +171,8 @@ const logRow = (over = {}) => ({
 })
 
 const mountView = (perms = PERMS) => {
-  // P3-2：审计读取需短期票据，既有用例验证的是「拿到票据之后」的行为
-  storeReauthTicket('test-ticket', 300)
+  // 审计读取的二次验证窗口由服务端按会话维护，客户端不持有任何凭据（审计一-3），
+  // 故这里不需要预置"票据"；既有用例验证的是「窗口已开」时的正常行为。
   active = mountComponent(AuditLogView, {
     setupStore: (pinia) => useAuthStore(pinia).setPermissions(perms),
   })
@@ -1096,7 +1201,7 @@ describe('AuditLogView 最近安全告警面板', () => {
   })
 })
 
-describe('AuditLogView 审计读取票据（P3-2）', () => {
+describe('AuditLogView 审计读取二次验证（会话窗口，审计一-3）', () => {
   /** 二次验证弹层（append-to-body）：按标题定位 */
   const stepUpDlg = () =>
     Array.from(document.body.querySelectorAll('.el-dialog')).find(
@@ -1130,31 +1235,39 @@ describe('AuditLogView 审计读取票据（P3-2）', () => {
     })
   }
 
-  test('无票据：不发审计请求，先弹二次验证；通过后换票并重放列表与告警', async () => {
+  test('无窗口：首屏读取照常发出（客户端无凭据可预判），401 后弹框；通过后重放列表与告警', async () => {
     clearReauthTicket()
     createTicket.mockResolvedValue({ data: { data: { ticket: 't1', expiresIn: 300 } } })
-    mockReads(() => Promise.resolve({ data: { data: [logRow()], meta: { total: 1 } } }))
+    let attempts = 0
+    mockReads(() => {
+      attempts += 1
+      // 第一次没有会话窗口 ⇒ 服务端回 REQUIRED（客户端手里没有票据，也就无从预判）
+      if (attempts === 1) {
+        return Promise.reject({
+          response: { data: { errors: { errorCode: 'REAUTH_TICKET_REQUIRED' } } },
+        })
+      }
+      return Promise.resolve({ data: { data: [logRow()], meta: { total: 1 } } })
+    })
     const c = mountComponent(AuditLogView, {
       setupStore: (pinia) => useAuthStore(pinia).setPermissions(PERMS),
     })
     active = c
-    await flush(6)
-    expect(logCalls()).toHaveLength(0)
+    // 关键：请求**先发出去**（不再有"本地没票就直接弹框、连请求都不发"的前置判断，
+    // 那等于把授权判据复制成一份更弱的客户端版本）
+    await waitFor(() => logCalls().length === 1, { message: '首屏列表请求已发出并被拒' })
     await fillAndConfirm()
-    await waitFor(() => logCalls().length === 1, { message: '换票后重放列表请求' })
+    await waitFor(() => logCalls().length === 2, { message: '换到窗口后重放列表请求' })
     await waitFor(() => get.mock.calls.some((x) => x[0] === '/security/alerts'), {
-      message: '换票后重放告警请求',
+      message: '重放告警请求',
     })
     expect(createTicket).toHaveBeenCalledWith({ encCurrentPassword: 'ENC:secret' })
-    expect(getReauthTicket()).toBe('t1')
     expect(trs(c)).toHaveLength(1)
     expect(c.errors).toEqual([])
   })
 
-  test('票据被服务端拒绝：重新弹框换票并重放，不当作加载失败提示', async () => {
+  test('窗口已失效：服务端 401 INVALID 同样弹框重新验证并重放，不当作加载失败提示', async () => {
     let attempts = 0
-    // 本地票据仍在有效期内，但服务端已不认（例如重启换了签名密钥）
-    storeReauthTicket('stale-ticket', 300)
     createTicket.mockResolvedValue({ data: { data: { ticket: 't2', expiresIn: 300 } } })
     mockReads(() => {
       attempts += 1
@@ -1171,9 +1284,214 @@ describe('AuditLogView 审计读取票据（P3-2）', () => {
     active = c
     await waitFor(() => logCalls().length === 1, { message: '首次列表请求被拒' })
     await fillAndConfirm()
-    await waitFor(() => logCalls().length === 2, { message: '换票后重放列表请求' })
-    expect(getReauthTicket()).toBe('t2')
+    await waitFor(() => logCalls().length === 2, { message: '重新验证后重放列表请求' })
     expect(trs(c)).toHaveLength(1)
     expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+})
+
+describe('AuditLogView 合规卡片的监控读数（定时任务静默失效的唯一凭据）', () => {
+  /**
+   * 三个监控读数都以 getHealth() 的真实键集合构造（键名取自后端实模块，不手编）：
+   * auditMonitor / auditChainMonitor 一家、honeypotChainWatch 多几个专有计数。
+   * 时间字段是 ISO 串或 null，读数整体也可能为 null（后端降级）。
+   */
+  const monitorHealth = (over = {}) => ({
+    runs: 120,
+    failures: 3,
+    consecutiveFailures: 0,
+    skippedOverlaps: 0,
+    lastRunAt: '2026-10-05T02:00:00.000Z',
+    lastSuccessAt: '2026-10-05T02:00:00.000Z',
+    lastFailureAt: null,
+    lastFailureMessage: null,
+    intervalMs: 300000,
+    running: true,
+    ...over,
+  })
+  const chainMonitorHealth = (over = {}) => monitorHealth({ lastVerdictCode: 'intact', ...over })
+  const honeypotChainHealth = (over = {}) =>
+    monitorHealth({
+      escalated: 4,
+      escalationFailures: 0,
+      unparsableSources: 0,
+      droppedCandidates: 2,
+      lastCandidates: 7,
+      lastPendingCandidates: 1,
+      lastEscalatedIp: '10.0.0.9',
+      ...over,
+    })
+
+  /** 完整 compliance 包（含三个读数）；over 用于逐字段替换/降级 */
+  const complianceOf = (over = {}) => ({
+    retentionDays: 90,
+    retentionConfigAdjusted: false,
+    appendOnlyEnforced: true,
+    monitorRunning: true,
+    monitorHealth: monitorHealth(),
+    chainMonitorHealth: chainMonitorHealth(),
+    honeypotChainHealth: honeypotChainHealth(),
+    walEnabled: true,
+    shippingEnabled: false,
+    chainTailHash: 'abcdef0123456789',
+    auditLoss: { droppedCount: 0, walDroppedLines: 0, walDiscardedLines: 0, walDurableDropped: 0 },
+    ...over,
+  })
+
+  /** 挂载并等合规卡片（含监控读数区块）渲染完成 */
+  const openCompliance = async (compliance) => {
+    get.mockImplementation((url) => {
+      if (url === '/security/audit-logs') {
+        return Promise.resolve({ data: { data: [], meta: { total: 0 } } })
+      }
+      if (url === '/security/overview') {
+        return Promise.resolve({
+          data: {
+            data: { criticalAlerts: 0, highAlerts: 0, failedLogins: 0, compliance },
+          },
+        })
+      }
+      if (url === '/security/alerts') {
+        return Promise.resolve({ data: { data: [], meta: { total: 0, limit: 50 } } })
+      }
+      return Promise.reject(new Error('unexpected url: ' + url))
+    })
+    const c = mountView()
+    await waitFor(() => c.find('.compliance-monitors'), { message: '监控读数区块渲染' })
+    await flush(4)
+    return c
+  }
+
+  /** 按 data-monitor 取样某一行；不存在返回 null（行被整块抹掉时必须能被断言到） */
+  const rowOf = (c, source) => c.find(`[data-monitor="${source}"]`)
+  const chipText = (row, selector) => {
+    const el = row.querySelector(selector)
+    return el ? el.textContent.replace(/\s+/g, ' ').trim() : null
+  }
+
+  test('三个读数齐全：每行渲染真实数值（运行状态 / 最近成功 / 连续失败 / 最近一轮）', async () => {
+    const iso = '2026-10-05T02:00:00.000Z'
+    const c = await openCompliance(complianceOf())
+
+    // 三行都在，顺序与来源一致
+    expect(c.findAll('.monitor-row').map((r) => r.dataset.monitor)).toEqual([
+      'auditMonitor',
+      'auditChainMonitor',
+      'honeypotChainWatch',
+    ])
+    for (const source of ['auditMonitor', 'auditChainMonitor', 'honeypotChainWatch']) {
+      const row = rowOf(c, source)
+      expect(row).not.toBeNull()
+      expect(chipText(row, '.monitor-row__running')).toBe('运行状态·启用')
+      // 最近成功渲染的是本地定长串（不是 ISO 原串，也不是字面 null）
+      expect(chipText(row, '.monitor-row__success')).toBe(`最近成功·${localStamp(iso)}`)
+      expect(chipText(row, '.monitor-row__failures')).toBe('连续失败 0')
+      expect(chipText(row, '.monitor-row__lastrun')).toBe(`最近一轮·${localStamp(iso)}`)
+      // 0 次连续失败必须落在「好」档，不得与告警同色
+      expect(row.querySelector('.monitor-row__failures').classList.contains('is-ok')).toBe(true)
+      expect(row.querySelector('.monitor-row__failures').classList.contains('is-bad')).toBe(false)
+    }
+    // 前提自证：期望值不是原样 ISO（否则下面的 toBe 可能在实现退化成直出时仍成立）
+    expect(localStamp(iso)).not.toBe(iso)
+    expect(c.errors).toEqual([])
+  })
+
+  test('连续失败 > 0：该行失败凭据落 is-bad 档并带失败明细（与既有 is-bad 同款告警样式）', async () => {
+    const c = await openCompliance(
+      complianceOf({
+        monitorHealth: monitorHealth({
+          consecutiveFailures: 4,
+          failures: 9,
+          lastFailureAt: '2026-10-05T03:00:00.000Z',
+          lastFailureMessage: 'aggregation timeout',
+        }),
+      })
+    )
+    const row = rowOf(c, 'auditMonitor')
+    const failures = row.querySelector('.monitor-row__failures')
+    expect(chipText(row, '.monitor-row__failures')).toBe('连续失败 4')
+    expect(failures.classList.contains('is-bad')).toBe(true)
+    expect(failures.classList.contains('is-ok')).toBe(false)
+    // 明细进 title：连续 4 轮之外还要能看出累计轮次与最后一次的错因
+    const title = failures.getAttribute('title')
+    expect(title).toContain('consecutiveFailures 4')
+    expect(title).toContain('failures 9')
+    expect(title).toContain('aggregation timeout')
+    // 另外两行未被牵连
+    expect(chipText(rowOf(c, 'auditChainMonitor'), '.monitor-row__failures')).toBe('连续失败 0')
+  })
+
+  test('monitorHealth = null：只降级该行，卡片其余字段与另外两行照常渲染', async () => {
+    const c = await openCompliance(complianceOf({ monitorHealth: null }))
+
+    const degradedRow = rowOf(c, 'auditMonitor')
+    expect(degradedRow).not.toBeNull()
+    expect(chipText(degradedRow, '.monitor-row__degraded')).toBe('读数不可用')
+    // 降级行不得再渲染读数 chip（否则读起来像「真的 0 次失败」）
+    expect(degradedRow.querySelector('.monitor-row__failures')).toBeNull()
+    expect(degradedRow.querySelector('.monitor-row__success')).toBeNull()
+
+    // 本来没有这一行才是真正的缺陷：另外两行必须完好
+    for (const source of ['auditChainMonitor', 'honeypotChainWatch']) {
+      const row = rowOf(c, source)
+      expect(row).not.toBeNull()
+      expect(chipText(row, '.monitor-row__running')).toBe('运行状态·启用')
+      expect(chipText(row, '.monitor-row__success')).toBe(
+        `最近成功·${localStamp('2026-10-05T02:00:00.000Z')}`
+      )
+    }
+
+    // 卡片本身不能被抹掉：既有 chips 与核验按钮都还在
+    expect(c.find('.compliance-card')).not.toBeNull()
+    const chips = c
+      .findAll('.compliance-card__chips .compliance-chip')
+      .map((e) => e.textContent.replace(/\s+/g, ' ').trim())
+    expect(chips).toContain('留存 90 天')
+    expect(chips).toContain('只追加护栏·启用')
+    expect(chips).toContain('监控任务·启用')
+    expect(chips).toContain('WAL·启用')
+    expect(chips).toContain('审计丢失 0')
+    expect(c.find('.compliance-card .glass-btn')).not.toBeNull()
+    expect(c.errors).toEqual([])
+  })
+
+  test('有牙对照：只改 lastSuccessAt（有值 ↔ null）渲染结果必须随之改变', async () => {
+    const iso = '2026-10-05T02:00:00.000Z'
+    const withSuccess = await openCompliance(
+      complianceOf({ monitorHealth: monitorHealth({ lastSuccessAt: iso }) })
+    )
+    const okText = chipText(rowOf(withSuccess, 'auditMonitor'), '.monitor-row__success')
+    const okBad = rowOf(withSuccess, 'auditMonitor')
+      .querySelector('.monitor-row__success')
+      .classList.contains('is-bad')
+
+    active?.handle.unmount()
+    active = null
+    document.body.innerHTML = ''
+
+    // 同一份包，只把 lastSuccessAt 换成 null；consecutiveFailures 仍为 0
+    // （= 「定时器挂着、最近一轮也跑了，但从未成功过」这一 silent-failure 形态）
+    const noSuccess = await openCompliance(
+      complianceOf({ monitorHealth: monitorHealth({ lastSuccessAt: null }) })
+    )
+    const missingRow = rowOf(noSuccess, 'auditMonitor')
+    const nullText = chipText(missingRow, '.monitor-row__success')
+    const nullBad = missingRow.querySelector('.monitor-row__success').classList.contains('is-bad')
+
+    // 核心判据：渲染值随输入变化（这段渲染真的读了 lastSuccessAt，不是恒真文本）
+    expect(okText).not.toBe(nullText)
+    expect(okText).toBe(`最近成功·${localStamp(iso)}`)
+    // null 必须成文，既不是空白也不是字面 'null'
+    expect(nullText).toBe('最近成功·尚无成功轮')
+    expect(nullText).not.toContain('null')
+    expect(nullText).not.toBe('最近成功·')
+    // 配色同样随输入变化：从未成功 = 告警档
+    expect(okBad).toBe(false)
+    expect(nullBad).toBe(true)
+    // 降级与「从未成功」是两回事：这一行不应被当成读数不可用
+    expect(missingRow.querySelector('.monitor-row__degraded')).toBeNull()
+
+    active?.handle.unmount()
+    active = null
   })
 })

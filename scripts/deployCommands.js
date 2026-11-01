@@ -24,6 +24,7 @@ const path = require('path');
 const DEFAULT_COMPOSE_FILE = path.resolve(__dirname, '..', 'docker-compose.yml');
 const DEFAULT_BACKUP_SCRIPT = path.resolve(__dirname, 'backup-mongo.sh');
 const DEFAULT_BACKUP_DIR = path.resolve(__dirname, '..', 'backups');
+const DEFAULT_HOT_UPGRADE_SCRIPT = path.resolve(__dirname, 'hotUpgrade.js');
 
 /** compose 公共前缀：显式指定文件，避免命令受 cwd 影响（cwd 决定项目名）。 */
 function composeArgs(composeFile = DEFAULT_COMPOSE_FILE) {
@@ -88,6 +89,26 @@ function buildBackupInvocation({
 }
 
 /**
+ * 升级（蓝绿）：宿主代理与人工发布共用同一条命令。
+ *
+ * 镜像引用走 `HOT_UPGRADE_IMAGE` 环境变量而不是 `--image`：与本模块的
+ * 既有约束一致（镜像/密钥不进 argv，/proc/<pid>/cmdline 同机可读）。
+ * `--status-file` 让应用的进度弹窗能看到每一步；缺省时不传。
+ */
+function buildHotUpgradeInvocation({
+  nginxConf,
+  statusFile = '',
+  dryRun = false,
+  scriptFile = DEFAULT_HOT_UPGRADE_SCRIPT,
+} = {}) {
+  if (!nginxConf) throw new Error('升级必须显式给出 nginxConf');
+  const args = [scriptFile, '--nginx-conf', nginxConf];
+  if (statusFile) args.push('--status-file', statusFile);
+  args.push(dryRun ? '--dry-run' : '--apply');
+  return { file: process.execPath, args };
+}
+
+/**
  * 本次发布的**完整外部命令序列**（顺序即执行顺序；条件分支见 deploy.js）：
  * 备份 → 拉取 → 查看迁移 → 应用迁移 → 切换 → 健康探针。
  * 回滚命令与被跳过的步骤不在此列（它们由运行时条件决定）。
@@ -112,12 +133,14 @@ module.exports = {
   DEFAULT_COMPOSE_FILE,
   DEFAULT_BACKUP_SCRIPT,
   DEFAULT_BACKUP_DIR,
+  DEFAULT_HOT_UPGRADE_SCRIPT,
   composeArgs,
   buildPullInvocation,
   buildMigrateInvocation,
   buildUpInvocation,
   buildProbeInvocation,
   buildBackupInvocation,
+  buildHotUpgradeInvocation,
   buildCommandPlan,
   formatInvocation,
 };

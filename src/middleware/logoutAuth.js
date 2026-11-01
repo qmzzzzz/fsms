@@ -27,7 +27,7 @@
  */
 
 const jwt = require('jsonwebtoken');
-const config = require('../config');
+const jwtKeys = require('../utils/jwtKeys');
 const ApiResponse = require('../utils/apiResponse');
 const { getCookies, REFRESH_COOKIE_NAME } = require('../utils/cookie');
 const { isTokenBlacklisted } = require('./tokenBlacklist');
@@ -48,7 +48,9 @@ const authorizeByRefreshToken = async (req, res, accessTokenExpired) => {
 
   let decoded;
   try {
-    decoded = jwt.verify(refreshToken, config.jwt.refreshSecret, { algorithms: ['HS256'] });
+    decoded = jwt.verify(refreshToken, jwtKeys.verifyKeyFor(refreshToken, 'refresh'), {
+      algorithms: ['HS256'],
+    });
   } catch (_) {
     // 验不过签/已过期都只说明"证明不了会话归属"。不细分错误码：
     // 在这里区分 refresh 与 access 的失效原因会给探测者多一条免费信息
@@ -89,7 +91,9 @@ const authenticateForLogout = async (req, res, next) => {
   const accessToken = extractAccessToken(req);
   if (accessToken) {
     try {
-      jwt.verify(accessToken, config.jwt.secret, { algorithms: ['HS256'] });
+      jwt.verify(accessToken, jwtKeys.verifyKeyFor(accessToken, 'access'), {
+        algorithms: ['HS256'],
+      });
     } catch (err) {
       if (err && err.name === 'TokenExpiredError') {
         if (await authorizeByRefreshToken(req, res, true)) return next();

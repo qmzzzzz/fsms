@@ -16,18 +16,13 @@
  * 的哈希链写入放大相比不是同一量级的风险面。
  *
  * 【豁免面必须精确到「探针路径 + 探针方法」，不是路径前缀】
- * 两个消费方原先都用 `helpers.matchesAnyPathPrefix`（`f === p || f.startsWith(p + '/')`）
- * 判定，于是 `/health` 一名豁免了整个 `/health/...` 子树；又因为判定里不看方法，
- * 任意方法（含带体的 POST）一起免检。实测（supertest 打真实 createApp()）：
- *   POST /health/zznope   → 404，响应里**没有** RateLimit-* 头（两个限流器都 skip 掉了）
- *   POST /health/zznope   → Content-Type: text/plain 照样放行（协议合规闸整体没碰它）
- *   POST /api/zznope      → 415 CONTENT_TYPE_UNSUPPORTED，且带全套 RateLimit-* 头（对照）
- *   40 × POST /health/zzflood（每发 ~200KB JSON）→ 全部 404，一条 429 都没有
+ * 用 `helpers.matchesAnyPathPrefix`（`f === p || f.startsWith(p + '/')`）判定时，`/health`
+ * 一名豁免了整个 `/health/...` 子树；判定里不看方法则任意方法（含带体的 POST）一起免检。
  * 后果正是 `app.js` 里"限流必须早于 body 解析"那段论证要挡的东西：未认证者可以用
- * `/health/<任意后缀>` 让服务端**不计配额地**反复解析 1MB 级 JSON，同时绕开
- * Content-Length/Content-Type/头部数量/方法白名单四道闸。前缀语义在这里没有价值——
- * 真实的探针只有 `curl GET /health`、`curl GET /readyz`（compose/ci/deploy.js 三处实测，
- * 见 deployment/rollback-drill.md 与 .github/workflows/ci.yml），没有一个消费子树或换方法。
+ * `/health/<任意后缀>` 让服务端**不计配额地**反复解析 1MB 级 JSON（实测 40 × POST
+ * /health/zzflood 全部 404、一条 429 都没有），同时绕开 Content-Length / Content-Type /
+ * 头部数量 / 方法白名单四道闸。前缀语义在这里没有价值——真实的探针只有 `curl GET /health`、
+ * `curl GET /readyz`（compose/ci/deploy.js 三处实测），没有一个消费子树或换方法。
  *
  * 方法维度也收口（不只收子树）：`POST /health` 与 `POST /health/x` 的代价同源，
  * 只改前缀等于把同一个放大面留在最短的那条 URL 上。于是非探针方法打到探针路径时

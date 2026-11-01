@@ -56,16 +56,18 @@ curl -fsS http://127.0.0.1:3000/health
 
 ## 回滚语义一览（**`migrate:down` ≠ 数据一定回到迁移前**）
 
-| 迁移                                                 | `down()` 语义  | 回滚后果                                                                                                                                                                                                                      |
-| ---------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `20260830000000-backfill-token-version.js`           | **有意空操作** | **不撤销**补齐的 `tokenVersion`。原实现按 `{ tokenVersion: 0 }` 撤字段，而 User schema 有 `default: 0` ⇒ 射程远超本迁移的写入范围 `{ $exists: false }`，会把存量字段一并抹掉。精确回退须用执行前的备份，按 `_id` 白名单撤字段 |
-| `20260831000000-reconcile-audit-index-options.js`    | 真实回滚       | `timestamp_-1` 重建为无 TTL 索引（**留存策略会停止自动清理**）、`sessionId_1` / `hash_1` 回普通索引 —— 非必要不回滚本迁移                                                                                                     |
-| `20260919000000-reconcile-audit-ttl-to-retention.js` | **明确不回滚** | 脚本只打印理由：把留存期改回旧值可能更短，且**已被 TTL 删除的审计记录无法恢复**                                                                                                                                               |
-| `20260926000000-cursor-tiebreak-compound-indexes.js` | 真实回滚       | 删除本次建立的复合 tiebreak 索引（并按 `replaceSingle` 还原被替换的单列索引）                                                                                                                                                 |
-| `20260928000000-audit-username-ci-index.js`          | 真实回滚       | 删除 `username_ci_timestamp` 索引（不存在则跳过）                                                                                                                                                                             |
-| `20261021000000-query-performance-indexes.js`        | 真实回滚       | 删除本次新增的复合索引，并按旧形态建回 `nextCheckDate_1` / `assignedTo_1` / `level_1` / `status_1`                                                                                                                            |
+| 迁移                                                 | `down()` 语义  | 回滚后果                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `20260830000000-backfill-token-version.js`           | **有意空操作** | **不撤销**补齐的 `tokenVersion`。原实现按 `{ tokenVersion: 0 }` 撤字段，而 User schema 有 `default: 0` ⇒ 射程远超本迁移的写入范围 `{ $exists: false }`，会把存量字段一并抹掉。精确回退须用执行前的备份，按 `_id` 白名单撤字段                               |
+| `20260831000000-reconcile-audit-index-options.js`    | 真实回滚       | `timestamp_-1` 重建为无 TTL 索引（**留存策略会停止自动清理**）、`sessionId_1` / `hash_1` 回普通索引 —— 非必要不回滚本迁移                                                                                                                                   |
+| `20260919000000-reconcile-audit-ttl-to-retention.js` | **明确不回滚** | 脚本只打印理由：把留存期改回旧值可能更短，且**已被 TTL 删除的审计记录无法恢复**                                                                                                                                                                             |
+| `20260926000000-cursor-tiebreak-compound-indexes.js` | 真实回滚       | 删除本次建立的复合 tiebreak 索引（并按 `replaceSingle` 还原被替换的单列索引）                                                                                                                                                                               |
+| `20260928000000-audit-username-ci-index.js`          | 真实回滚       | 删除 `username_ci_timestamp` 索引（不存在则跳过）                                                                                                                                                                                                           |
+| `20261021000000-query-performance-indexes.js`        | 真实回滚       | 删除本次新增的复合索引，并按旧形态建回 `nextCheckDate_1` / `assignedTo_1` / `level_1` / `usersessions.status_1`                                                                                                                                             |
+| `20261030000000-backfill-password-set-at.js`         | 真实回滚       | 只撤「有 `passwordSetAt` 且无 `mustChangePassword`」的存量文档该字段（射程与本迁移写入范围一致）；新生用户不受影响                                                                                                                                          |
+| `20261101000000-filter-tiebreak-compound-indexes.js` | 真实回滚       | 删除六条三键索引，并按旧形态建回 `status_1_occurredAt_-1` / `handler_1_occurredAt_-1` / `reporter.userId_1_occurredAt_-1` / `location.building_1_occurredAt_-1` / `alarmType_1_occurredAt_-1` / `status_1_planStartTime_-1`；**列表排序随之退化为阻塞排序** |
 
-⇒ 6 个迁移里 **2 个不撤销变更**。规划回退前请先读对应迁移文件的 `down()` 与文件头注释，**不要只看本表**（本表是导读，迁移文件才是事实来源）。
+⇒ 目录里现有 **8 个迁移**（2026-10-31 实测：`ls migrations/*.js | wc -l` = `8`），其中 **2 个不撤销变更**（`20260830000000` 有意空操作、`20260919000000` 明确不回滚）。规划回退前请先读对应迁移文件的 `down()` 与文件头注释，**不要只看本表**（本表是**手工维护**的导读，没有门禁兜底——新增迁移必须自己补一行；迁移文件才是事实来源）。
 
 注意事项：
 

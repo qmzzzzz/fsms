@@ -138,6 +138,17 @@ describe('调用点错误码必须已注册', () => {
     expect(dead.sort()).toEqual([
       'IP_FULL_RANGE_REMOVE_SUPER_ADMIN_ONLY',
       'IP_FULL_RANGE_SUPER_ADMIN_ONLY',
+      // 2026-10-30 临时权限授予：这些码由 services/privilegeGrantService.js 的 grantError(message, status, code)
+      // 统一构造后交给 errorHandler，码以**变量**传递，本文件的五条字面量通道都看不见。
+      // 不是死码（有 13 处调用点、两个套件按码断言），但要让扫描器认可"有人发"就得改发出方式；
+      // 这里按封闭清单登记，代价是新人看到名字时知道去 grantError 的调用点核对。
+      'PRIVILEGE_APPROVAL_FORBIDDEN',
+      'PRIVILEGE_CODE_INVALID',
+      'PRIVILEGE_DURATION_INVALID',
+      'PRIVILEGE_GRANT_INVALID',
+      'PRIVILEGE_GRANT_NOT_FOUND',
+      'PRIVILEGE_GRANT_NOT_PENDING',
+      'PRIVILEGE_SELF_APPROVAL_FORBIDDEN',
     ]);
   });
 });

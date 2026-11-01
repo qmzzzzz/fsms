@@ -86,6 +86,11 @@ const PUBLIC_GET_ALLOWLIST = {
     '只回 { authenticated }，由调用者自己的 cookie 推导，不接受任何身份入参（controllers/authController/session.js:164-176）',
   'wellKnownRoutes.js /.well-known/security.txt': 'RFC 9116 公共安全联系信息',
   'wellKnownRoutes.js /security.txt': '同上的历史别名',
+  // 匿名版本元数据（2026-10-30）：只回 version / buildId / buildTime / startedAt /
+  // uptimeSec，无业务数据、无身份信息。要求认证会让"登录页停留期间恰逢升级"的会话
+  // 永远拿不到刷新提示（那正是它存在的场景），故刻意公开。
+  'versionRoutes.js /':
+    '匿名版本元数据：只回构建标识，无业务数据；响应已关缓存（no-store），见 versionRoutes.js 头注',
 };
 
 /**
@@ -102,6 +107,19 @@ const SELF_ONLY_ALLOWLIST = {
   'securityRoutes.js /my-logs': '本人操作日志（getMyLogs 只接 days/limit/category）',
   'securityRoutes.js /report-targets':
     '举报对象候选集：无目标用户入参，候选集由 buildRecordScopeFilter 按举报人数据范围收敛，且为最小投影（列表端点本就不按权限码收口，见路由块内 PERMISSION-EXEMPT）',
+};
+
+/**
+ * 已鉴权、路由上没有 permission 中间件、但**授权在控制器内按目标资源完成**的 GET。
+ *
+ * 与 SELF_ONLY_ALLOWLIST 是两回事：那份清单的不变式是"操作对象恒为调用者本人、
+ * 不接受 ?userId 之类目标入参"（见其头注释）。把"可以读别人"的路由塞进去会让
+ * 这条不变式失真——以后读白名单的人会以为目标恒为本人。
+ * 归入本清单的前提是控制器里能同时看到权限码与数据范围两道判据（见 ④ 的断言）。
+ */
+const CONTROLLER_SCOPE_ALLOWLIST = {
+  'avatarRoutes.js /:userId':
+    '头像读取：本人直通；他人需 user:read 且通过 assertRecordInScope（数据范围与 GET /api/users/:id 同一把尺），见 controllers/avatarController.js',
 };
 
 /**
@@ -183,7 +201,12 @@ const scan = (sources) => {
             guardMissing.push(`${key} 声称由 ${entry.guard} 保护，但声明里没有它`);
           }
         }
-      } else if (!c.permission && !c.exempt && !SELF_ONLY_ALLOWLIST[key]) {
+      } else if (
+        !c.permission &&
+        !c.exempt &&
+        !SELF_ONLY_ALLOWLIST[key] &&
+        !CONTROLLER_SCOPE_ALLOWLIST[key]
+      ) {
         unscoped.push(key);
       }
     }
@@ -243,13 +266,18 @@ describe('GET 接口鉴权契约（F-196：写侧有闸，读侧不能没有）'
     expect(scan(REAL).anonymous).toEqual([]);
   });
 
-  test('② 已鉴权但未收口到"本人资源"的 GET，必须落在 SELF_ONLY_ALLOWLIST', () => {
+  test('② 已鉴权但未收口到"本人资源"的 GET，必须落在本人或控制器收口清单', () => {
     expect(scan(REAL).unscoped).toEqual([]);
   });
 
   test('③ 三张白名单都不许留失效条目（路由改名/下线必须同轮瘦身）', () => {
     const found = new Set(scan(REAL).found);
-    for (const list of [PUBLIC_GET_ALLOWLIST, SELF_ONLY_ALLOWLIST, APP_GET_GUARDS]) {
+    for (const list of [
+      PUBLIC_GET_ALLOWLIST,
+      SELF_ONLY_ALLOWLIST,
+      CONTROLLER_SCOPE_ALLOWLIST,
+      APP_GET_GUARDS,
+    ]) {
       expect(Object.keys(list).filter((k) => !found.has(k))).toEqual([]);
     }
   });
@@ -259,6 +287,7 @@ describe('GET 接口鉴权契约（F-196：写侧有闸，读侧不能没有）'
     for (const [key, reason] of Object.entries({
       ...PUBLIC_GET_ALLOWLIST,
       ...SELF_ONLY_ALLOWLIST,
+      ...CONTROLLER_SCOPE_ALLOWLIST,
     })) {
       if (reason.trim().length <= 4) thin.push(key);
     }
@@ -268,7 +297,16 @@ describe('GET 接口鉴权契约（F-196：写侧有闸，读侧不能没有）'
     expect(thin).toEqual([]);
   });
 
-  test('④ app.js 侧白名单声称的守卫必须真的出现在声明里（否则白名单替变异背书）', () => {
+  test('④ 控制器内收口的条目必须在控制器源码里看到权限码 + 数据范围两道判据', () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, '../../controllers/avatarController.js'),
+      'utf8'
+    );
+    expect(source).toContain("matchesPermissionCodes(permissions, 'user:read')");
+    expect(source).toContain('assertRecordInScope');
+  });
+
+  test('⑤ app.js 侧白名单声称的守卫必须真的出现在声明里（否则白名单替变异背书）', () => {
     expect(scan(REAL).guardMissing).toEqual([]);
   });
 

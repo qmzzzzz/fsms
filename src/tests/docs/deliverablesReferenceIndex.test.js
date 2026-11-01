@@ -55,13 +55,17 @@ const TEXT_EXT = new Set([
  * 这条区分不是给自己开后门，而是本用例的命题边界：它要证明的是「仓库里写下的引用
  * 在克隆后指得到东西」。一份本地快照目录内部的互相引用（`backups/deliverables-*` 里
  * 旧报告引用旧台账）既不在 checkout 里，也不承担被外部跟读的义务——把它们也登记进台账，
- * 只会让 33 条里有 20 条是「快照对快照」，真正的活引用被淹没。
+ * 只会让 42 条里有 19 条是「快照对快照」，真正的活引用（23 条）被淹没。
  * 代价如实写明：**若哪天有人把 `backups/` 纳入版本管理，这条豁免就失去依据**，
  * 本文件的注释与 skip 列表必须同时改。
  *
  * 后两类是自指（台账自己、本用例自己），理由见 `REF_RE` 上方的拼接写法。
  */
-const LOCAL_ONLY_PREFIXES = ['backups/', 'logs/', 'coverage/'];
+// 2026-10-30 增补 .mimosa/：判据与前三类完全同源（.gitignore:101 已忽略 ⇒ clean checkout
+// 里没有它），但它是**代理/钩子会话态**，会把 agent 的 grep 输出整段落盘——实测一条
+// "probe-captcha-flood" 的检索结果就足以让本用例报出 21 条「未登记引用」，而这些
+// 路径在克隆后根本不存在，无法也不应被外部跟读。
+const LOCAL_ONLY_PREFIXES = ['backups/', 'logs/', 'coverage/', '.mimosa/'];
 
 function isSkippedPath(rel) {
   const p = rel.replace(/\\/g, '/');

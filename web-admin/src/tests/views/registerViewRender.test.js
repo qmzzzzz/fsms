@@ -82,6 +82,13 @@ const fillStep1AndNext = async (c) => {
   await flush(40)
 }
 
+/** 勾选隐私告知同意（一-7）：末步必填项，未勾选时整表校验会拦下提交 */
+const acceptConsent = (c) => {
+  const box = c.find('#privacyConsent')
+  if (!box) throw new Error('缺少隐私告知勾选框 #privacyConsent')
+  click(box)
+}
+
 afterEach(() => {
   active?.handle.unmount()
   active = null
@@ -235,6 +242,8 @@ describe('RegisterView 提交载荷与失败处理', () => {
     await fillStep1AndNext(c)
     click(btnByText(c, '下一步'))
     await flush(40)
+    acceptConsent(c)
+    await flush(4)
     click(btnByText(c, '提交注册'))
     await waitFor(() => register.mock.calls.length === 1, { message: '注册请求发出' })
     expect(ElNotification).toHaveBeenCalledTimes(1)
@@ -253,6 +262,8 @@ describe('RegisterView 提交载荷与失败处理', () => {
     await flush(4)
     click(btnByText(c, '下一步'))
     await flush(40)
+    acceptConsent(c)
+    await flush(4)
     click(btnByText(c, '提交注册'))
     await waitFor(() => register.mock.calls.length === 1, { message: '注册请求发出' })
     const payload = register.mock.calls[0][0]
@@ -274,6 +285,8 @@ describe('RegisterView 提交载荷与失败处理', () => {
     await fillStep1AndNext(c)
     click(btnByText(c, '下一步'))
     await flush(40)
+    acceptConsent(c)
+    await flush(4)
     click(btnByText(c, '提交注册'))
     await waitFor(() => register.mock.calls.length === 1, { message: '注册请求发出' })
     const payload = register.mock.calls[0][0]
@@ -287,6 +300,8 @@ describe('RegisterView 提交载荷与失败处理', () => {
     await fillStep1AndNext(c)
     click(btnByText(c, '下一步'))
     await flush(40)
+    acceptConsent(c)
+    await flush(4)
     click(btnByText(c, '提交注册'))
     await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '加密失败提示' })
     await flush(20)
@@ -302,6 +317,8 @@ describe('RegisterView 提交载荷与失败处理', () => {
     await fillStep1AndNext(c)
     click(btnByText(c, '下一步'))
     await flush(40)
+    acceptConsent(c)
+    await flush(4)
     const submit = btnByText(c, '提交注册')
     click(submit)
     click(submit)
@@ -337,6 +354,8 @@ describe('RegisterView 提交载荷与失败处理', () => {
     await fillStep1AndNext(c)
     click(btnByText(c, '下一步'))
     await flush(40)
+    acceptConsent(c)
+    await flush(4)
     click(btnByText(c, '提交注册'))
     await waitFor(() => register.mock.calls.length === 1, { message: '注册请求发出' })
     await flush(20)
@@ -353,6 +372,8 @@ describe('RegisterView 提交载荷与失败处理', () => {
     await fillStep1AndNext(c)
     click(btnByText(c, '下一步'))
     await flush(40)
+    acceptConsent(c)
+    await flush(4)
     click(btnByText(c, '提交注册'))
     await waitFor(() => register.mock.calls.length === 1, { message: '注册请求发出' })
     await flush(20)
@@ -385,6 +406,8 @@ describe('RegisterView 验证码分支', () => {
     await fillStep1AndNext(c)
     click(btnByText(c, '下一步'))
     await flush(40)
+    acceptConsent(c)
+    await flush(4)
     click(btnByText(c, '提交注册'))
     await flush(60)
     expect(register).not.toHaveBeenCalled()
@@ -404,6 +427,8 @@ describe('RegisterView 验证码分支', () => {
     typeInto(c, 'captcha', 'ab12')
     await flush(6)
     const captchaCallsBefore = getCaptcha.mock.calls.length
+    acceptConsent(c)
+    await flush(4)
     click(btnByText(c, '提交注册'))
     await waitFor(() => register.mock.calls.length === 1, { message: '注册请求发出' })
     const payload = register.mock.calls[0][0]
@@ -440,10 +465,40 @@ describe('RegisterView 键盘行为', () => {
     await fillStep1AndNext(c)
     click(btnByText(c, '下一步'))
     await flush(40)
+    acceptConsent(c)
+    await flush(4)
     c.find('form').dispatchEvent(
       new window.KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true })
     )
     await waitFor(() => register.mock.calls.length === 1, { message: '回车触发注册请求' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('未勾选隐私告知：末步整表校验拦下，不发出注册请求（一-7）', async () => {
+    register.mockResolvedValue({ data: { success: true } })
+    const c = await open()
+    await fillStep1AndNext(c)
+    click(btnByText(c, '下一步'))
+    await flush(40)
+    // 故意不勾选：提交必须被拦下——勾选框若只是装饰，注册会照常发出
+    click(btnByText(c, '提交注册'))
+    await flush(60)
+    expect(register).not.toHaveBeenCalled()
+    expect(errCount(c)).toBe(1)
+    expect(c.errors).toEqual([])
+  })
+
+  test('勾选隐私告知后同意才落到载荷里（privacyConsent: true）', async () => {
+    register.mockResolvedValue({ data: { success: true } })
+    const c = await open()
+    await fillStep1AndNext(c)
+    click(btnByText(c, '下一步'))
+    await flush(40)
+    acceptConsent(c)
+    await flush(4)
+    click(btnByText(c, '提交注册'))
+    await waitFor(() => register.mock.calls.length === 1, { message: '注册请求发出' })
+    expect(register.mock.calls[0][0].privacyConsent).toBe(true)
     expect(c.errors).toEqual([])
   })
 })

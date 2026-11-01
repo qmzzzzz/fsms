@@ -49,8 +49,7 @@ const { auditLog } = auditLogModule;
  */
 const hpp = require('hpp');
 const preventHPP = hpp({
-  // 不保留数组白名单：所有接口都消费标量 query；重复 key 由 hpp 收敛，
-  // 对象/嵌套形态仍由 queryScalarGuard 拒绝，避免两道防线口径冲突。
+  // 不保留数组白名单：所有接口都消费标量 query；重复 key 由 hpp 收敛，对象/嵌套形态仍由 queryScalarGuard 拒绝，避免两道防线口径冲突。
   whitelist: [],
 });
 
@@ -284,22 +283,18 @@ const requireReAuthentication = () => {
  * 未来引入文件上传功能时，必须在上传路由强制启用本中间件（配合 MIME 白名单、
  * 扩展名校验与大小限制），不可直接裸奔上传接口。
  *
- * 【2026-10-01：扩展名闸由 fail-open 改为构造期 fail-closed】
- * 原实现是 `allowedExts = allowedTypes.map(t => mimeToExt[t]).filter(Boolean)`，
- * 再用 `if (allowedExts.length > 0 && ...)` 短路。于是当 `allowedTypes` 里**一个
- * 都不在** mimeToExt 表里时（表里只有 5 项：jpeg/png/gif/pdf/zip），`filter(Boolean)`
- * 把整组映射结果清空 ⇒ `allowedExts.length === 0` ⇒ **扩展名校验整条消失**，
- * 只剩客户端自报的 `file.mimetype`（`allowedTypes.includes(file.mimetype)` 也一并失效，
- * 因为那条判据同样依赖调用方传的 MIME 与真实类型一致）。即"配置了白名单却等于没配"，
- * 且没有任何信号——这正是本仓纪律里"配了却不生效=最危险"的形态。
- * 今天无 multer 挂载故不可利用，但这类缺口一旦随首个上传路由上线就会同时生效。
+ * 【扩展名闸必须在构造期 fail-closed，不能靠运行期 filter(Boolean)】
+ * 写成 `allowedExts = allowedTypes.map(t => mimeToExt[t]).filter(Boolean)` 再 `if (allowedExts.length > 0 && ...)`
+ * 短路的形态是 fail-open：当 `allowedTypes` 里**一个都不在** mimeToExt 表里时（表里只有 5 项：
+ * jpeg/png/gif/pdf/zip），`filter(Boolean)` 把整组映射结果清空 ⇒ `allowedExts.length === 0`
+ * ⇒ **扩展名校验整条消失**，只剩客户端自报的 `file.mimetype`（`allowedTypes.includes(...)`
+ * 也一并失效，因为那条判据同样依赖调用方传的 MIME 与真实类型一致）。即"配置了白名单却
+ * 等于没配"，且没有任何信号——"配了却不生效=最危险"。
  *
- * 收口方式：把映射与校验提到**构造期**（= 路由装配期，即启动期）——
- * 只要 `allowedTypes` 里存在**任何一个**没有扩展名映射的 MIME，直接抛错。
- * 于是运行期不可能再出现"白名单非空但扩展名闸为空"的组合，
- * 短路判据也随之简化为 `allowedTypes.length > 0`（语义变得与直觉一致）。
- * 之所以对"部分未映射"也抛：未映射的那一项在运行期就是一条静默放行，
- * 只抛"全部未映射"会把部分漏洞留在原地。
+ * 收口方式：把映射与校验提到**构造期**（= 路由装配期，即启动期）——只要 `allowedTypes`
+ * 里存在**任何一个**没有扩展名映射的 MIME，直接抛错。于是运行期不可能再出现"白名单非空
+ * 但扩展名闸为空"的组合，短路判据也随之简化为 `allowedTypes.length > 0`。之所以对"部分
+ * 未映射"也抛：未映射的那一项在运行期就是一条静默放行，只抛"全部未映射"会把部分漏洞留下。
  */
 const MIME_TO_EXT = {
   'image/jpeg': 'jpg',
@@ -456,7 +451,14 @@ const applyResponseHardening = (app) => {
  * @param {import('express').Application} app
  * @returns {void}
  */
+/** Express 5 下无 body 时 `req.body` 是 undefined（4.x 恒为 {}），而依赖它的 .if 谓词抛错会被 express-validator 当作"整条链跳过"⇒ 校验失效、控制器解构 undefined ⇒ 500；归一成 {}，反例见 tests/middleware/bodyNormalization.test.js，决策与实测见 docs/adr/ADR-017-无body请求的body归一.md。 */
+const normalizeBody = (req, _res, next) => {
+  if (!req.body) req.body = {};
+  next();
+};
+
 const applyPostBodySecurity = (app) => {
+  app.use(normalizeBody);
   app.use(sanitizeMongo);
   // JSON API 不做全局输入转义，转义责任在输出层（前端渲染/报表导出）
   app.use(preventHPP);
@@ -474,6 +476,7 @@ const applySecurity = (app) => {
 };
 
 module.exports = {
+  normalizeBody,
   securityHeaders,
   attachCspNonce,
   ensureHsts,

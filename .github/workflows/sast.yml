@@ -1,0 +1,54 @@
+name: SAST（Semgrep，私有仓）
+
+# 【补的是哪个缺口】`codeql.yml` 的第一层判据是 `github.event.repository.private == false`：
+# 本仓是私有仓，于是 CodeQL 从未运行过，仓库里此前**没有任何静态分析器在跑**，findings 只能靠
+# 人工评审撞见（docs/security-dependency-watch.md 的"只回答一个问题"那段旁边如实登记了这条）。
+#
+# 【为什么不是 codeql.yml / 远端 Semgrep】私有仓的 code scanning 需要 GHAS：SARIF 交给
+# `upload-sarif` 会被拒，所以结果落成制品而不是"上传到 Security 面板"。规则包不放 SaaS 端
+# （`--config auto`/registry 拉规则会把私有源码交给第三方，且规则随上游漂移），改用仓库自持的
+# `.github/semgrep/rules.yml`，并在 `--metrics=off` 下运行 ⇒ **私有源码不出 runner**。
+#
+# 【这一层能被证伪吗】三条：
+#   ① 规则包先 `--validate`：规则写坏=扫描 0 条规则后报绿，是最坏的绿；
+#   ② 扫描带 `--error`：任何 ERROR 级 finding 让 job 非零退出（不是"报告一下"）；
+#   ③ 规则条数/必备字段/排除面/零命中由 `src/tests/ci/sastWorkflowInvariants.test.js` 逐条钉住。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 每周一次：代码在动，历史代码也要按当前规则复查（PR 只覆盖增量）
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: 本地规则包扫描
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # 容器镜像写在 image: 位置（能被镜像面账看见），digest 与 scripts/verify-image-digests.js
+    # 的期望表同源；镜像里没有 node，故本作业只跑 semgrep，不跑任何 npm/node 步骤。
+    container:
+      image: semgrep/semgrep:1.183.0@sha256:2e45517a85e13a9cca14a2a00df6bb48affd66b8ebfae1b0991cd57578362fb0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 校验规则包（写坏规则 = 门禁静默空跑）
+        run: semgrep scan --validate --config .github/semgrep/rules.yml
+
+      - name: 扫描（命中即非零退出）
+        run: semgrep scan --config .github/semgrep/rules.yml --error --metrics=off --disable-version-check --sarif --output sast.sarif src scripts migrations e2e web-admin/src
+
+      - name: 上传 SARIF（私有仓不能交给 code scanning，落制品供复核）
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: semgrep-sarif
+          path: sast.sarif
+          if-no-files-found: error

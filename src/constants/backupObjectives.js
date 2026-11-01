@@ -1,19 +1,14 @@
 /**
  * 备份 / 恢复目标（RPO / RTO）声明（A8，2026-10-16）
  *
- * 缺口：备份与恢复这条链上
- * 「多久备份一次」是写死的（cron），但「**允许丢多久数据**（RPO）」和
- * 「**多久必须恢复**（RTO）」在仓库里没有任何一处声明。于是：
+ * 缺口：备份与恢复这条链上「多久备份一次」是写死的（cron），但「**允许丢多久数据**（RPO）」和「**多久必须恢复**（RTO）」在仓库里没有任何一处声明。于是：
  *   - 没人能从代码回答"我们的 RPO 是多少"；
  *   - 备份频率一旦被人改（比如从每日改成每周），没有任何东西会因此变红——
  *     而 RPO 承诺已经悄悄从 24h 退化成 168h；
  *   - 恢复演练记录里只有"耗时"这一个数字，没有可对照的目标值，于是"快不快"全凭感觉。
  *
- * ⚠ 本模块的 `declaredHours` 于 2026-10-17 由业务方拍板填值（RPO 24h / RTO 4h），
- * 与 constants/businessRetention.js 的 180 天同批决策。此前 `declaredHours` 全为
- * `null`，理由是「允许丢多久数据、多久必须恢复」属业务与合规口径，技术单方面写一个
- * 数字并对外当承诺，等于把一个没人评估过的 SLA 印进测评材料。该理由仍然成立，
- * 所以这里保留「声明（业务口径）」与「生效（部署侧环境变量）」两条通道：
+ * ⚠ 本模块的 `declaredHours` 于 2026-10-17 由业务方拍板填值（RPO 24h / RTO 4h），与 constants/businessRetention.js 的 180 天同批决策。此前 `declaredHours` 全为
+ * `null`，理由是「允许丢多久数据、多久必须恢复」属业务与合规口径，技术单方面写一个数字并对外当承诺，等于把一个没人评估过的 SLA 印进测评材料。该理由仍然成立，所以这里保留「声明（业务口径）」与「生效（部署侧环境变量）」两条通道：
  * 声明变了要改代码评审，部署变了只动环境变量，可分别回退。
  *
  * 【依据必须写清楚，别把内部决策说成标准条文】
@@ -26,15 +21,11 @@
  *     不是标准条文。它的可执行形态是**演练实测耗时 ≤ 4h**（见 rollback-drill 记录）。
  *   测评/合同里引用这两个数字时，应写「本单位自定目标」而非「等保要求」。
  *
- * 但**技术事实**必须先钉住，而且必须钉住——否则"对齐"这句话没有落点：
- * 备份频率是每日全量（`deployment/backup-encryption.md:40` 的 `0 2 * * *`，
- * 外加每次发布前由 `scripts/deploy.js` 触发一次），所以
+ * 但**技术事实**必须先钉住，而且必须钉住——否则"对齐"这句话没有落点：备份频率是每日全量（`deployment/backup-encryption.md:40` 的 `0 2 * * *`，外加每次发布前由 `scripts/deploy.js` 触发一次），所以
  * **RPO 的技术下限就是 24 小时**：02:00 备份完成后立刻故障，最坏丢失一整天写入。
- * 声明一个**优于** 24h 的 RPO（例如 1 小时）在现有备份频率下是不可能兑现的承诺——
- * `evaluateRpoAlignment` 就是用来当场拦住这种"口头 SLA"的。
+ * 声明一个**优于** 24h 的 RPO（例如 1 小时）在现有备份频率下是不可能兑现的承诺—— `evaluateRpoAlignment` 就是用来当场拦住这种"口头 SLA"的。
  *
- * 纪律与 constants/retention.js 同源：解析用 `Number` 而非 `parseInt`、
- * 空串归入"未配置"、生效值与原始值不等时 `wasAdjusted` 为 true（由 compliance-check 告警）。
+ * 纪律与 constants/retention.js 同源：解析用 `Number` 而非 `parseInt`、空串归入"未配置"、生效值与原始值不等时 `wasAdjusted` 为 true（由 compliance-check 告警）。
  */
 
 /** 目标值的合法区间（小时）。下限 1h：比 1 小时还短的恢复目标不是靠备份实现的。 */
@@ -49,8 +40,7 @@ const MAX_OBJECTIVE_HOURS = 720;
  *   - `deployment/backup-encryption.md:39-43`：`deploy.js` 每次发布前自动备份；
  *     `0 2 * * *` cron 每日全量。
  *   - `deployment/rollback-drill.md:17`：「发布前必须先备份」是铁律。
- * 改这条 cron 的人必须同时改这里——`evaluateRpoAlignment` 与巡检脚本都读它，
- * 于是"备份频率与 RPO 承诺是否还对齐"变成一次可执行的判定，而不是一句口号。
+ * 改这条 cron 的人必须同时改这里——`evaluateRpoAlignment` 与巡检脚本都读它，于是"备份频率与 RPO 承诺是否还对齐"变成一次可执行的判定，而不是一句口号。
  */
 const BACKUP_SCHEDULE = Object.freeze({
   cron: '0 2 * * *',
@@ -64,9 +54,7 @@ const BACKUP_SCHEDULE = Object.freeze({
 /**
  * 受管的恢复目标声明（**单一声明**）。
  *
- * `declaredHours` = 业务方拍板的目标值（2026-10-17）；`basis` 记录"这个目标为什么
- * 由业务定、依据是什么"，供业务方评审与测评时对照（不是技术判断）。
- * 声明值是**上界**：生效值不得宽于它（更宽 = 对外承诺与内部能力不符）。
+ * `declaredHours` = 业务方拍板的目标值（2026-10-17）；`basis` 记录"这个目标为什么由业务定、依据是什么"，供业务方评审与测评时对照（不是技术判断）。声明值是**上界**：生效值不得宽于它（更宽 = 对外承诺与内部能力不符）。
  */
 const BACKUP_OBJECTIVES = Object.freeze(
   [
@@ -110,8 +98,7 @@ const getBackupObjective = (key) => {
 /**
  * 把原始字符串解析成生效值（**纯函数**，不读 process.env）。
  *
- * 单独抽出来的理由：`scripts/deployPolicy.js` 的发布前置校验按纪律只接收注入的
- * `env` 对象、不读进程环境，若解析逻辑留在 `resolveBackupObjective` 里，那边就得
+ * 单独抽出来的理由：`scripts/deployPolicy.js` 的发布前置校验按纪律只接收注入的 `env` 对象、不读进程环境，若解析逻辑留在 `resolveBackupObjective` 里，那边就得
  * 复制一份解析规则——两份规则漂移时，会出现"发布时判绿、启动后判红"这种最难查的分歧。
  *
  * 与 constants/retention.js 逐条同口径：
@@ -169,9 +156,7 @@ const resolveBackupObjective = (key) => {
 /**
  * RPO 与备份频率的对齐判定（A8 动作 2 的核心）。
  *
- * 判据只有一条：**声明的 RPO 不得优于备份频率允许的下限**。
- * 备份每 24h 一次 ⇒ 最坏情况必丢 24h ⇒ 声明 RPO < 24h 是一个不可能兑现的承诺。
- * 这不是"配置错误"，而是"对外承诺与内部能力不符"——比配置错误更严重，
+ * 判据只有一条：**声明的 RPO 不得优于备份频率允许的下限**。备份每 24h 一次 ⇒ 最坏情况必丢 24h ⇒ 声明 RPO < 24h 是一个不可能兑现的承诺。这不是"配置错误"，而是"对外承诺与内部能力不符"——比配置错误更严重，
  * 因为它在事故复盘时才会暴露，且暴露时已经有人按那个数字做过决策。
  *
  * @param {{declaredRpoHours: number|null, intervalHours?: number}} input
@@ -252,8 +237,7 @@ const evaluateDeclaredBound = (key) => {
 };
 
 /**
- * 对外的可读说明（供启动日志 / 合规检查 / 巡检报告）。
- * 三种"没设值"必须分开说：没配（或配了空值）/ 配了但解析不出数字 / 配了但被钳制。
+ * 对外的可读说明（供启动日志 / 合规检查 / 巡检报告）。三种"没设值"必须分开说：没配（或配了空值）/ 配了但解析不出数字 / 配了但被钳制。
  */
 const describeBackupObjective = (key) => {
   const o = resolveBackupObjective(key);

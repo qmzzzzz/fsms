@@ -2,7 +2,7 @@
  * 可信代理网段（TRUSTED_PROXY_CIDRS）——把「代理身份」从「网络位置」里拆出来
  *
  * 由来（F-01，2026-10-16 独立审计，P1）：`utils/ipUtils.isClientIpIdentityTrustworthy`
- * 原本的第 3 种可信形态是「socket 对端属内网/回环 ⇒ 它写的 X-Forwarded-For 可信」。
+ * 的第三种可信形态不能是「socket 对端属内网/回环 ⇒ 它写的 X-Forwarded-For 可信」。
  * RFC1918 描述的是**位置**，不是**身份**：docker-compose 里 app 同时挂在
  * fire-safety-net 与 data-net 上，同网任意容器直连 `app:3000` 并自带一条 XFF，
  * 其 socket 对端同样是 RFC1918，与真实 nginx 反代**在应用视角完全同形**。

@@ -12,6 +12,8 @@
  *     对读屏隐藏（aria-hidden）；
  *  4. 文案走 i18n（common.appTitle + auth.signingOut），切语言实时跟随；
  *  5. visible 翻回 false：遮罩离场移除，不留常驻节点。
+ *  6. 动效降级口径（reduce）：只降装饰性呼吸光——进度环旋转（阻塞遮罩的必要反馈）与
+ *     进出场 opacity 过渡必须保留；静态不变量（读源码断言）见文件末尾。
  *
  * 34 轮 M5「ExitOverlay 无 inert」的处置口径：遮罩自身**不能**加 inert（那会连
  * 它自己的 aria-live 播报一起禁掉）；下层不可交互由布局层的 inert 负责。第 2 条
@@ -23,6 +25,8 @@
  *    断言用墙钟轮询，不用固定 sleep 也不假设帧数。
  */
 import { describe, test, expect, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { defineComponent, h, reactive } from 'vue'
 import { mountComponent, flush } from '../helpers/componentHarness'
 import i18n from '@/i18n'
@@ -106,5 +110,35 @@ describe('ExitOverlay 退出遮罩', () => {
     await flush(2)
     await waitGone()
     expect(overlay()).toBeNull()
+  })
+})
+
+/**
+ * reduce 降级静态不变量（jsdom 不注入 SFC 样式，只能读源码）
+ *
+ * 防的退化：把「减少动态效果」当成「一律不动」——进度环 animation:none 后，
+ * 阻塞遮罩里唯一能区分「仍在退出」与「卡死」的活动信号消失；进出场 transition:none
+ * 让遮罩瞬间硬切。两者都是用户侧实际观察到的「不会动」。
+ * 口径：reduce 下只降装饰性呼吸光；进度环（必要反馈）与进出场（本就是纯 opacity
+ * 过渡，与全局降级口径一致）必须保留。
+ */
+describe('ExitOverlay · reduce 降级静态不变量（jsdom 不注入 SFC 样式，只能读源码）', () => {
+  const source = readFileSync(resolve(__dirname, '../../components/ExitOverlay.vue'), 'utf8')
+  // reduce 段是样式表最后一块：从媒体查询起点切到文件尾，断言「该段不得覆盖 X」即可
+  const reduceBlock = source.slice(source.indexOf('@media (prefers-reduced-motion: reduce)'))
+
+  test('进度环旋转不随 reduce 停转（降级段不得触碰 spinner）', () => {
+    expect(source).toContain('animation: exit-spin 0.8s linear infinite')
+    expect(reduceBlock).not.toContain('.exit-overlay__spinner')
+  })
+
+  test('进出场不随 reduce 硬切（保留 opacity 过渡）', () => {
+    expect(source).toContain('transition: opacity 0.4s')
+    expect(source).toContain('transition: opacity 0.3s')
+    expect(reduceBlock).not.toMatch(/transition:\s*none/)
+  })
+
+  test('装饰性呼吸光仍按 reduce 关闭（降级不是「全部解除」）', () => {
+    expect(reduceBlock).toMatch(/\.exit-overlay__icon\s*\{[^}]*animation:\s*none/)
   })
 })

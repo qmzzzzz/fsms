@@ -247,7 +247,9 @@ describe('ipListController 分支补齐', () => {
     expect(res.body.errors.errorCode).toBe('FULL_RANGE_FORBIDDEN');
     // 标题里的"critical 越权审计"是本用例的主要判据：这条记录是安全概览
     // criticalAlerts 与风险评分的高危来源之一，删掉写入或降级都不会影响 403。
-    const audit = await findEscalationAudit('POST');
+    // 按 body.ip 精确认领：本文件另有「分片铺满」（128.0.0.0/1）的 POST 403 审核，只按
+    // method 轮询在随机顺序下可能先命中它而误判本用例；与调用方注释同一口径。
+    const audit = await findEscalationAudit('POST', { 'body.ip': '0.0.0.0/0' });
     expect(audit).not.toBeNull();
     expect({
       userId: String(audit.userId),
@@ -308,6 +310,67 @@ describe('ipListController 分支补齐', () => {
           .set('Authorization', `Bearer ${superToken}`);
       }
     }
+  });
+
+  test('B11 同一权限位的 ip-list 入口必须与 pool-ban 共享护栏：不许把自己封在外面', async () => {
+    // 取证页的 pool-ban 有四道判据（并集/自伤/活跃流量/打字确认），而 ip-list 只有并集一条。
+    // 同一个 security:config 权限位上的两个入口，判据必须一致——否则"封段会切断消防上报"
+    // 这条结论在另一条路径上等于不存在（第 18 轮 controllers lane 实测 /16 直接 200）。
+    // 判据针对**网段**：把调用者自己所在的 /24 加黑 = 把自己（和同事）封在门外。
+    // 用回环网段是因为 supertest 里的客户端地址就是回环——这条用例要的是"网段罩住调用者"，
+    // 用 203.0.113.0/24 那种"别人的网段"测不出自伤闸（实测：那样会 200）。
+    const res = await secPost('/api/security/ip-list', {
+      ip: '127.0.0.0/24',
+      type: 'black',
+      reason: '把自己封了',
+      typedConfirm: '127.0.0.0/24',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.errors.reason).toBe('operator_inside');
+  });
+
+  test('B11 并集铺满的**真实网段**不许绕过自伤判据（只有 /0 本身才是例外）', async () => {
+    // 旧实现把 coveredFamilies.length > 0 当成"属于全网段口径"，于是**自身并非 /0** 的真实
+    // 网段被整类排除在段护栏外：0.0.0.0/1 罩住一半 IPv4、含着调用者自己，却一路 200。
+    // 判据应该是"这一条本身是不是 /0"，不是"并集是否铺满"——后者是并集判据的输入，不是豁免理由。
+    const ids = [];
+    try {
+      const first = await request(app)
+        .post('/api/security/ip-list')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({
+          ip: '128.0.0.0/1',
+          type: 'black',
+          reason: '并集前置',
+          typedConfirm: '128.0.0.0/1',
+        });
+      expect(first.status).toBe(200);
+      ids.push(first.body?.data?._id);
+
+      const res = await request(app)
+        .post('/api/security/ip-list')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ ip: '0.0.0.0/1', type: 'black', reason: '并集绕过', typedConfirm: '0.0.0.0/1' });
+      expect(res.status).toBe(400);
+      // 0.0.0.0/1 覆盖 127.0.0.1（supertest 的来源地址）⇒ 自伤判据必须命中
+      expect(res.body.errors.reason).toBe('operator_inside');
+    } finally {
+      for (const id of ids.filter(Boolean)) {
+        await request(app)
+          .delete(`/api/security/ip-list/${id}`)
+          .set('Authorization', `Bearer ${superToken}`);
+      }
+    }
+  });
+
+  test('B11 大段必须显式确认（≥256 个地址不许一句话封掉）', async () => {
+    const res = await secPost('/api/security/ip-list', {
+      ip: '198.51.100.0/24',
+      type: 'black',
+      reason: '大段',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.errors.reason).toBe('typed_confirmation_required');
   });
 
   test('POST 加黑被白名单覆盖 → 400 冲突，信任标记不可被封禁覆盖', async () => {
@@ -483,5 +546,92 @@ describe('ipListController 分支补齐', () => {
     expect(res.body.errors?.errorCode).toBe('VALIDATION_FAILED');
     expect(res.body.errors.fieldErrors.map((e) => e.path)).toContain('duration');
     expect(await IPBlacklist.countDocuments({ ip: typoIP })).toBe(0);
+  });
+
+  test('POST 审计持久化失败 ⇒ 500，且这次名单变更必须有全局审计留痕（不得状态已变、审计为零）', async () => {
+    // 夹具只构造 recordDurably 的两个重抛条件：AuditLog.create 失败 + WAL 未启用。
+    // 条目已落库（不可回滚）⇒ 兜底只能是全局审计按路由补记这次 500 —— 恰好 1 条。
+    const AuditLog = require('../../models/AuditLog');
+    const auditBuffer = require('../../services/auditBuffer');
+    const spyCreate = jest.spyOn(AuditLog, 'create').mockRejectedValue(new Error('audit down'));
+    const spyWal = jest.spyOn(auditBuffer, 'isWalEnabled').mockReturnValue(false);
+    const spyPush = jest.spyOn(auditBuffer, 'push');
+    const ip = '203.0.113.79';
+    try {
+      const res = await secPost('/api/security/ip-list', {
+        ip,
+        type: 'black',
+        reason: '分支补齐-审计重抛夹具',
+      });
+      expect(res.status).toBe(500);
+      expect(res.body.errors.errorCode).toBe('INTERNAL_ERROR');
+
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      const entry = await IPBlacklist.findOne({ ip, type: 'black' });
+      const stateChanged = !!entry;
+      const pushed = spyPush.mock.calls
+        .map(([doc]) => doc)
+        .filter((doc) => doc && doc.path === '/api/security/ip-list');
+      expect(stateChanged || pushed.length > 0).toBe(true);
+      expect(pushed).toHaveLength(1);
+      expect(pushed[0]).toMatchObject({
+        action: 'security_ip-list',
+        category: 'security',
+        statusCode: 500,
+        success: false,
+      });
+    } finally {
+      spyCreate.mockRestore();
+      spyWal.mockRestore();
+      spyPush.mockRestore();
+    }
+  });
+
+  test('DELETE 审计持久化失败 ⇒ 500，且这次解除封禁必须有全局审计留痕（不得状态已变、审计为零）', async () => {
+    // 先正常建一条条目（该步审计照常成功），再用夹具删除它：条目已删（不可回滚）⇒
+    // 唯一可接受的兜底是全局审计补记这次 500，恰好 1 条。
+    const created = await secPost('/api/security/ip-list', {
+      ip: '203.0.113.80',
+      type: 'black',
+      reason: '分支补齐-删除夹具前置',
+    });
+    expect(created.status).toBe(200);
+    const id = created.body.data._id;
+    createdIds.push(id);
+
+    const AuditLog = require('../../models/AuditLog');
+    const auditBuffer = require('../../services/auditBuffer');
+    const spyCreate = jest.spyOn(AuditLog, 'create').mockRejectedValue(new Error('audit down'));
+    const spyWal = jest.spyOn(auditBuffer, 'isWalEnabled').mockReturnValue(false);
+    const spyPush = jest.spyOn(auditBuffer, 'push');
+    try {
+      const path = `/api/security/ip-list/${id}`;
+      const res = await secDel(path);
+      expect(res.status).toBe(500);
+      expect(res.body.errors.errorCode).toBe('INTERNAL_ERROR');
+
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      const still = await IPBlacklist.findById(id).lean();
+      const stateChanged = !still;
+      const pushed = spyPush.mock.calls
+        .map(([doc]) => doc)
+        .filter((doc) => doc && doc.path === path);
+      expect(stateChanged || pushed.length > 0).toBe(true);
+      expect(pushed).toHaveLength(1);
+      expect(pushed[0]).toMatchObject({
+        action: 'security_ip-list',
+        category: 'security',
+        statusCode: 500,
+        success: false,
+      });
+    } finally {
+      spyCreate.mockRestore();
+      spyWal.mockRestore();
+      spyPush.mockRestore();
+    }
   });
 });

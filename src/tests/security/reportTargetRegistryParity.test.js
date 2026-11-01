@@ -3,7 +3,7 @@
  * （2026-10-03 审计线，针对并行 Agent 的 `27f4243`）
  *
  * 缺陷形状是**清单漂移**，不是当前行为错误：
- *   · 路由 `src/routes/securityRoutes.js:103` 自己写了一份
+ *   · 路由 `src/routes/securityRoutes.js:81` 自己写了一份
  *     `REPORT_TARGET_TYPES = ['user','device','alarm','system']`；
  *   · 控制器 `src/controllers/securityController.js` 另写了一份
  *     `REPORT_TARGET_KINDS = { user, device, alarm }`（system 刻意缺席）；

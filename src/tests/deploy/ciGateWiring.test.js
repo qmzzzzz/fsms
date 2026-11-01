@@ -69,6 +69,9 @@ const CI_ENFORCED_GATE_SCRIPTS = [
   // S-2：登录公钥指纹在 build job 里由该脚本从私钥算出，作为构建参数钉进前端包。
   // 删掉 ci.yml 的 `Compute login key pin` 步骤不会惊动任何别的测试——而失效的
   // 结果是钉扎悄悄变成空值（只留一条 warning），前端包不再与运行期私钥绑定。
+  // P1-5（2026-10-30）：部署前宿主时钟检查。工作流里删掉该调用不会惊动别的测试，
+  // 而它挡的是「JWT nbf/exp、TOTP 30 秒窗口锚在未同步时钟上」的整类问题。
+  'scripts/check-clock-sync.js',
   'scripts/login-key-pin.js',
 ];
 
@@ -105,7 +108,49 @@ const escapeForRegex = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
  */
 const findWiring = (script, ciText, npmScripts) => {
   const bare = path.basename(script);
-  if (ciText.includes(script) || ciText.includes(bare)) return 'workflow 直接调用';
+  // 命中必须落在**真的会执行它**的 `run:` 行上，而不是注释/echo 文案里。
+  // 纯子串判据（第 18 轮 ops lane 变异实测）会被两种改动骗过：
+  //   ① 把 `run: node scripts/x.js` 换成 `echo "见 scripts/x.js"` ⇒ 文本仍在，门禁已消失；
+  //   ② 给命令追加 `|| true` ⇒ 文本仍在，判据恒绿。
+  // 因此先切出 run 行，再要求"该行以可执行形态提到这个脚本"，且**不带 || true 兜底**。
+  // 抽「run 块」：`run: |` 的续行缩进比 run 行更深，直到缩进回落才结束。
+  // 只看单行会把 `run: |` + 多行脚本漏掉，也把注释当代码。
+  const runBlocks = [];
+  {
+    const lines = ciText.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i += 1) {
+      // CI 的 YAML 是 CRLF：按换行切后行尾留着回车，行尾锚点会把回车吃进 body，
+      // 于是「这一行以 node 开头」的判断永远差一个字符。先把行尾统一掉。
+      const raw = lines[i].replace(/\r$/, '');
+      const m = raw.match(/^(\s*)(?:-\s*)?run:\s*(.*)$/);
+      if (!m) continue;
+      const indent = m[1].length;
+      const body = [m[2]];
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const cur = lines[j].replace(/\r$/, '');
+        if (!cur.trim()) {
+          body.push('');
+          continue;
+        }
+        const curIndent = cur.match(/^\s*/)[0].length;
+        if (curIndent <= indent) break;
+        body.push(cur);
+      }
+      runBlocks.push(body.join('\n'));
+    }
+  }
+  const runLines = runBlocks;
+  // `|| true` 只在**它跟着门禁自己那一行**时才算兜底：同块里 `npm audit … || true`
+  // 是合法的（要保留 JSON 报告，判定交给下一步），不能因为它否掉整块。
+  const executableHit = runLines.some((block) => {
+    const lines = block.split('\n');
+    return lines.some((line) => {
+      if (!line.includes(script) && !line.includes(bare)) return false;
+      if (!/\bnode\b|\bnpm\b|\bbash\b|\bsh\b/.test(line)) return false;
+      return !/\|\|\s*true\b/.test(line);
+    });
+  });
+  if (executableHit) return 'workflow 直接调用';
   for (const { name, cmd } of npmScripts) {
     if (!cmd.includes(bare)) continue;
     // script 名必须**整词**命中：`\\b` 在 `test:e2e` 与 `:browser` 之间也成立（e→: 是词边界），
@@ -169,6 +214,9 @@ describe('CI 门禁接线自检', () => {
     // 部署脚本：被 deploy.yml 调用，职责是"把已通过门禁的产物推上去"。
     // 它自己不产生"通过/不通过"的判定，删掉它 CI 不会放行任何坏代码。
     ['scripts/deploy.js', '部署执行脚本，非判定类门禁'],
+    // 蓝绿升级执行脚本：deploy.yml 的 hot 策略会调用它；同样只执行、不判定，
+    // 失败会让部署步骤变红而不是让坏代码变绿。
+    ['scripts/hotUpgrade.js', '蓝绿升级执行脚本，非判定类门禁'],
   ]);
 
   test('防清单瘦身：工作流里被调用的脚本必须已登记或已豁免（删清单行必红）', () => {

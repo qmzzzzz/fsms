@@ -102,6 +102,8 @@ const MENU_KEYS = [
   'nav.roles',
   'nav.auditLogs',
   'nav.ipList',
+  'nav.forensic',
+  'nav.privilegeGrants',
   'nav.reports',
   'nav.profile',
   'nav.about',
@@ -232,6 +234,8 @@ const ROUTES = [
   page('roles', { titleKey: 'nav.roles' }),
   page('audit-logs', { titleKey: 'nav.auditLogs' }),
   page('ip-list', { titleKey: 'nav.ipList' }),
+  page('forensic-trace', { titleKey: 'nav.forensic' }),
+  page('privilege-grants', { titleKey: 'nav.privilegeGrants' }),
   page('reports', { titleKey: 'nav.reports' }),
   page('profile', { titleKey: 'nav.profile' }),
   page('about', { titleKey: 'nav.about' }),
@@ -323,7 +327,7 @@ afterEach(() => {
 
 // ── 用例 ────────────────────────────────────────────────────────────────────
 describe('布局 · 菜单渲染与权限过滤', () => {
-  test('超级通配 *:*：渲染全部菜单项，顺序与声明一致，系统管理含 4 个子项', async () => {
+  test('超级通配 *:*：渲染全部菜单项，顺序与声明一致，系统管理含 5 个子项', async () => {
     const c = mountLayout({ perms: ['*:*'] })
     await settleRouter(c.router)
     await flush(10)
@@ -372,7 +376,14 @@ describe('布局 · 菜单渲染与权限过滤', () => {
     await settleRouter(c.router)
     await flush(10)
     expect(menuLabels(c)).toEqual(
-      ['nav.dashboard', 'nav.users', 'nav.auditLogs', 'nav.profile', 'nav.about'].map(label)
+      [
+        'nav.dashboard',
+        'nav.users',
+        'nav.auditLogs',
+        'nav.forensic',
+        'nav.profile',
+        'nav.about',
+      ].map(label)
     )
     expect(submenuTitles(c)).toEqual([label('nav.system')])
   })
@@ -957,6 +968,8 @@ describe('布局 · 语言切换', () => {
       'Roles',
       'Audit Logs',
       'IP List',
+      'Forensics',
+      'Temporary Grants',
       'Reports',
       'Profile',
       'About',

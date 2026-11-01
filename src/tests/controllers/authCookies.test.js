@@ -116,7 +116,7 @@ describe('httpOnly Cookie 认证集成', () => {
     await SystemConfig.create({ key: 'allowPublicRegistration', value: true });
     SystemConfig.invalidateRegistrationCache();
 
-    // 注册图形验证码**默认开启**（src/config/index.js:77 / models/SystemConfig.js:215 都读顶层）。
+    // 注册图形验证码**默认开启**（src/config/index.js:77 / models/SystemConfig.js:208 都读顶层）。
     // 本用例测的是「注册成功同样下发两个令牌 cookie」，与验证码前置层无关；
     // 验证码若开着，:288 的 `expect(res.status).toBe(201)` 会被 400 CAPTCHA_INVALID 拦掉。
     // 故显式落库关闭（本文件无 svg-captcha mock，拿不到可用的 captchaText）。
@@ -297,6 +297,7 @@ describe('httpOnly Cookie 认证集成', () => {
       username: 'cookie_reg_user',
       email: 'cookie_reg@example.com',
       password: PASSWORD,
+      privacyConsent: true,
     });
     expect(res.status).toBe(201);
 

@@ -21,7 +21,10 @@
  * 这两条就是这两处豁免的**根据**。哪天改动让根据不再成立（比如有人在吊销路径上开始
  * 用 payload 构造 req.user），本闸的清单不变、但那条行为用例会先红——这是刻意的顺序。
  *
- * 判据口径：只看 `jwt.verify(<第一参>, config.jwt.secret …)` 且第二参**不是** refreshSecret 的调用。
+ * 判据口径：只看 `jwt.verify(<第一参>, <access 密钥来源> …)` 且密钥来源**不是** refreshSecret
+ * 的调用。access 密钥来源有两种等价形态（见 isAccessVerifyCall）：字面量
+ * `config.jwt.secret` / `process.env.JWT_SECRET`，以及 P2-3 的按 kid 选钥
+ * `jwtKeys.verifyKeyFor(<token>, 'access')`。
  * refresh 侧验签不需要这条闸（它的用途判据是 `decoded.type !== 'refresh'`，已各自存在）。
  * 注释先剥掉再扫，所以注释里引用 `jwt.verify` 不会被算成入口。
  */
@@ -48,9 +51,19 @@ const listJs = (dir) => {
 
 const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
-/** 一次 `jwt.verify(...)` 调用是否用 access 密钥验签（refresh 密钥签名的不算） */
+/**
+ * 一次 `jwt.verify(...)` 调用是否用 access 密钥验签（refresh 密钥签名的不算）
+ *
+ * P2-3 起 key 参数可能是 `jwtKeys.verifyKeyFor(token, 'access')`（按 kid 选钥），
+ * 不再出现 `config.jwt.secret` 字面量。两条形态必须同时识别，否则扫描会塌缩成空集——
+ * 而空集会让下面「枚举不是空集」「规模钉住」两条用例变红，这是刻意的：
+ * 换了选钥方式就必须来改这把尺子，而不是让闸静默失明。
+ * 上面的 `match` 以 `[^)]*` 截断嵌套调用，匹配到的原文可能是
+ * `jwt.verify(token, jwtKeys.verifyKeyFor(token, 'access'`——因此判据不要求收尾括号。
+ */
 const isAccessVerifyCall = (call) =>
-  /config\.jwt\.secret|process\.env\.JWT_SECRET/.test(call) && !/refreshSecret/.test(call);
+  (/config\.jwt\.secret|process\.env\.JWT_SECRET/.test(call) && !/refreshSecret/.test(call)) ||
+  /verifyKeyFor\([^)]*'access'/.test(call);
 
 /** 判据本体：从源码里取出所有"用 access 密钥验签"的调用 */
 const findAccessVerifyCalls = (code) => {
@@ -136,6 +149,13 @@ describe('入口清单：用 access 密钥验签的地方必须引用用途判�
     expect(findAccessVerifyCalls(clean)).toHaveLength(1);
     expect(referencesPurposeGuard(clean)).toBe(true);
     expect(findAccessVerifyCalls(commentedOut)).toEqual([]);
+    // P2-3 形态：按 kid 选钥的验签入口同样要被枚举到（access 侧算、refresh 侧不算）
+    const viaKeyring =
+      "const handle = (t) => jwt.verify(t, jwtKeys.verifyKeyFor(t, 'access'), { algorithms: ['HS256'] });";
+    const viaKeyringRefresh =
+      "const handle = (t) => jwt.verify(t, jwtKeys.verifyKeyFor(t, 'refresh'), { algorithms: ['HS256'] });";
+    expect(findAccessVerifyCalls(viaKeyring)).toHaveLength(1);
+    expect(findAccessVerifyCalls(viaKeyringRefresh)).toEqual([]);
   });
 
   test('豁免表里不许躺着用不到的条目（豁免本身也不许静止）', () => {

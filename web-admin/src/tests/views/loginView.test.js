@@ -12,6 +12,8 @@
  *  3. 验证码一次性消费：任何失败尝试后都换新（captchaId 变化 + 输入清空）。
  *  4. 成功路径：setAuth + 跳 /dashboard + 清空内存中的 password/mfaCode。
  *  5. 重入：连点只发一次请求。
+ *  6. 失败触发的人机挑战：后端以 CAPTCHA_INVALID 要求验证码时（静态开关其实是关的），
+ *     验证码区必须被补渲染，且下一次提交真的带上 captchaId/captchaText。
  */
 import { describe, test, expect, vi, afterEach } from 'vitest'
 import { mountComponent, click, flush, waitFor } from '../helpers/componentHarness'
@@ -349,6 +351,35 @@ describe('LoginView 验证码一次性消费', () => {
     await flush(20)
     expect(c.findAll('img.login-card__captcha-img')).toHaveLength(0)
     expect(c.findAll('.login-card__captcha-placeholder')).toHaveLength(1)
+  })
+
+  test('失败触发的人机挑战：CAPTCHA_INVALID ⇒ 补渲染验证码区，且下次提交真的带上验证码', async () => {
+    // 场景：静态开关是关的（getCaptchaStatus 返回 false），后端因连续失败要求人机验证。
+    // 若不补渲染，用户看到"验证码错误或已过期"却没有任何输入框 —— 无出口。
+    encryptPassword.mockResolvedValue('ENC')
+    const challenge = Object.assign(new Error('captcha required'), { code: 'CAPTCHA_INVALID' })
+    login
+      .mockRejectedValueOnce(challenge)
+      .mockResolvedValueOnce({ data: { success: false, message: 'x' } })
+    const c = await open({ captchaEnabled: false })
+    await fill(c, 'alice', 'Str0ng-Pass')
+    click(submitBtn(c))
+    await waitFor(() => login.mock.calls.length === 1, { message: '首次提交' })
+    await flush(30)
+
+    expect(ElMessage.warning).toHaveBeenCalledWith(i18n.global.t('login.captchaChallengeRequired'))
+    // 三个输入框 = 用户名 / 口令 / 验证码（验证码区由失败响应补上）
+    const inputs = c.findAll('input.el-input__inner')
+    expect(inputs).toHaveLength(3)
+    expect(login.mock.calls[0][0]).not.toHaveProperty('captchaId')
+
+    inputs[2].value = 'AB12'
+    inputs[2].dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(6)
+    click(submitBtn(c))
+    await waitFor(() => login.mock.calls.length === 2, { message: '二次提交' })
+    expect(login.mock.calls[1][0].captchaId).toBeTruthy()
+    expect(login.mock.calls[1][0].captchaText).toBe('AB12')
   })
 })
 

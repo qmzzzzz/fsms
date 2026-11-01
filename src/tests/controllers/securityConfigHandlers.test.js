@@ -248,15 +248,23 @@ describe('注册验证码开关配置', () => {
     expect(mockIncSecurityAlert).toHaveBeenCalledWith('audit_write_failed', 'high');
   });
 
-  test('审计落库失败且 WAL 不可用 ⇒ 500（不许假装记账成功，F-03）', async () => {
+  test('审计落库失败且 WAL 不可用 ⇒ 500，且这次状态变更不得零留痕（F-03 顺序闸）', async () => {
     // 这条是上一条的反面：没有可靠介质时，"已留痕"就是假话。
     // 开关本身已经落库（业务不可回滚），所以这里断言的是**响应诚实**而非业务未生效。
     mockAuditBuffer.isWalEnabled.mockReturnValue(false);
     mockAuditLog.create.mockReturnValue(Promise.reject(new Error('audit down')));
     const { req, res, next } = makeCtx({ registerCaptchaEnabled: true });
     await invoke(setRegisterCaptchaConfig, req, res, next);
-    expect(next).toHaveBeenCalled();
+    // 响应诚实：错误交给 errorHandler ⇒ 500（不许假装记账成功）
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next.mock.calls[0][0].message).toBe('audit down');
+    // 手写审计一条都没写成（落库失败 + WAL 不可用 ⇒ recordDurably 重抛）
     expect(mockAuditBuffer.push).not.toHaveBeenCalled();
+    // 顺序不变量：要么状态没变、要么审计存在。此处状态已变（set 已调用），
+    // 唯一可接受的形态是「全局审计按路由补记这次 500」——判据就是响应时刻的标志值。
+    // 先把标志置位（旧顺序）会让 doLog 直接 return ⇒ 状态已变、审计为零。
+    expect(mockSystemConfig.set).toHaveBeenCalled();
+    expect(res.locals.skipGlobalAudit).toBeUndefined();
   });
 });
 

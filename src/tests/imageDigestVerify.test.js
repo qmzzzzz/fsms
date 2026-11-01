@@ -472,7 +472,7 @@ describe('verify-image-digests.js 的判据行为', () => {
     }
   });
 
-  test('tagOf：registry 端口不是 tag 分隔符（真实六行各只有一个冒号，判据只能靠夹具）', () => {
+  test('tagOf：registry 端口不是 tag 分隔符（真实各只有一个冒号，判据只能靠夹具）', () => {
     // `lastIndexOf` 改成 `indexOf`（实测存活 M3）在 `mongo:6.0.20` 这类引用上毫无差别，
     // 所以这条判据的唯一来源就是带端口的夹具。
     expect(tagOf('reg.example.com:5000/team/app:1.2.3')).toBe('1.2.3');
@@ -482,7 +482,7 @@ describe('verify-image-digests.js 的判据行为', () => {
     // `/v2/<repo>/manifests/<tag>` 直接指到别的路径上去）。
     for (const e of EXPECTED) {
       const tag = tagOf(e.ref);
-      // 真实六行都只有一个冒号，所以"最后一个"与"唯一的"两种切法必须给同一个结果——
+      // 真实各行都只有一个冒号，所以"最后一个"与"唯一的"两种切法必须给同一个结果——
       // 这条交叉判据的作用是让下次有人加**内网 registry（带端口）**的引用时先看一眼这里。
       expect(e.ref.split(':')).toHaveLength(2);
       expect(tag).toBe(e.ref.split(':')[1]);

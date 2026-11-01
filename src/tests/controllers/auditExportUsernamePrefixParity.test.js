@@ -357,12 +357,15 @@ describe('审计 xlsx 导出的 username 前缀 + collation 口径', () => {
       expect(ctrl).toContain('countDocuments(query,collationOptions)');
       // A4（2026-10-16）：同一份 options 之外多了 maskPii（脱敏档位），但
       // 「计数腿与取数腿共用同一个 collationOptions 对象」这条判据不变。
+      // 2026-10-30 追加 lang：导出标签语言与脱敏档位同为每请求判据，一并透传。
       expect(ctrl).toContain(
-        'writeExportWorkbook(res,{type,query,total:exportTotal,...collationOptions,maskPii,})'
+        'writeExportWorkbook(res,{type,query,total:exportTotal,...collationOptions,maskPii,lang,watermark,})'
       );
       const wb = squash('../../services/reportWorkbookService.js');
       expect(wb).toContain('streamExportRows(worksheet,config,query,safeTransform,collation)');
-      expect(wb).toContain('{type,query,total=null,collation=null,maskPii=false}');
+      expect(wb).toContain(
+        "{type,query,total=null,collation=null,maskPii=false,lang='zh',watermark=null}"
+      );
     });
   });
 });

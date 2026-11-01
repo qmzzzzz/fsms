@@ -1,10 +1,8 @@
 /**
- * IP 黑名单写入原语（自 ipBlacklist.js 抽出）
- *
- * 抽出的原因：自动封禁的三条臂（暴力破解 / 权限滥用 / 限流升级）只需要
- * `addToBlacklist`，此前却经 `middleware/security` 门面取用；门面反向拉入
- * ipBlacklist → securityAlert → 三条臂，构成惰性环。本模块只碰 IPBlacklist 模型，
- * 不引用任何告警/中间件门面，是叶子节点。
+ * IP 黑名单写入原语。自动封禁的三条臂（暴力破解 / 权限滥用 / 限流升级）只需要
+ * `addToBlacklist`，若经 `middleware/security` 门面取用，门面反向拉入 ipBlacklist →
+ * securityAlert → 三条臂，构成惰性环。本模块只碰 IPBlacklist 模型，不引用任何告警/
+ * 中间件门面，是叶子节点。
  */
 
 const logger = require('../../utils/logger');

@@ -8,7 +8,9 @@
 const User = require('../../models/User');
 const Role = require('../../models/Role');
 const logger = require('../../utils/logger');
-const { isValidAvatar } = require('../../utils/helpers');
+const { isAvatarUrlForUser } = require('../../utils/avatarUrl');
+const { withTransaction } = require('../../utils/transaction');
+const avatarService = require('../avatarService');
 const AuditLog = require('../../models/AuditLog');
 // 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
 const { onAuditWriteFailure } = require('../../utils/auditWriteFailure');
@@ -49,13 +51,18 @@ const PROFILE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  *
  * @returns {string|null} 拒绝时的 outcome，通过时 null
  */
-function validateProfileInput({ email, phone, avatar }) {
+function validateProfileInput({ email, phone, avatar }, userId) {
   // 验证手机号格式（如果提供）
   if (phone && !PROFILE_PHONE_RE.test(phone)) return 'INVALID_PHONE';
   // 验证邮箱格式（如果提供）
   if (email && !PROFILE_EMAIL_RE.test(email)) return 'INVALID_EMAIL';
   // 头像白名单校验：仅允许 http(s) URL、相对图片路径或 data:image 数据 URI（不含 svg，防存储型脚本注入）
-  if (avatar !== undefined && avatar !== '' && !isValidAvatar(avatar)) return 'INVALID_AVATAR';
+  // D3 收口：非空头像只允许**该用户自己的**服务端 URL。外部 URL / data URI 一律拒绝——
+  // 否则 data URI 可以绕过上传校验、加密与尺寸限制，把任意载荷塞进 User.avatar。
+  // 绑定对象是目标用户（管理员改他人时 userId 是对方的 id），不是调用者。
+  if (avatar !== undefined && avatar !== '' && !isAvatarUrlForUser(avatar, userId)) {
+    return 'INVALID_AVATAR';
+  }
   return null;
 }
 
@@ -102,7 +109,7 @@ async function updateUserProfile(userId, body) {
     return { outcome: 'NOT_FOUND' };
   }
 
-  const invalid = validateProfileInput({ email, phone, avatar });
+  const invalid = validateProfileInput({ email, phone, avatar }, userId);
   if (invalid) {
     return { outcome: invalid };
   }
@@ -114,7 +121,16 @@ async function updateUserProfile(userId, body) {
 
   assignProfileFields(user, { realName, email, phone, avatar }, normalizedEmail);
 
-  await user.save();
+  // 头像清除（avatar === ''）必须与指针写入同一事务：只清指针不删记录的话，
+  // 图片仍能通过 GET /api/avatars/:id 拉到（读端查的是 UserAvatar，不是 User.avatar）。
+  if (avatar === '') {
+    await withTransaction(async (session) => {
+      await avatarService.deleteAvatar(userId, session);
+      await user.save(session ? { session } : {});
+    });
+  } else {
+    await user.save();
+  }
 
   logger.info('用户更新了个人资料', { username: user.username });
 
@@ -146,11 +162,8 @@ async function updateUserProfile(userId, body) {
  * @param {object} ctx { operatorId, operatorUsername, ip, userAgent }
  * @returns {Promise<{outcome:'NOT_FOUND'|'FORBIDDEN_SAME_LEVEL'|'CANNOT_LOCK_SUPER_ADMIN'|'INACTIVE_UNLOCK'|'INACTIVE_LOCK'|'NOT_LOCKED'|'REVOKE_UNAVAILABLE'|'OK', ...}>}
  */
-/**
- * 锁定/解锁的三类拒绝判据（层级 → 内置超管 → inactive 双向状态机），顺序即原实现顺序。
- *
- * @returns {string|null} 拒绝时的 outcome，通过时 null
- */
+/** 锁定/解锁的三类拒绝判据（层级 → 内置超管 → inactive 双向状态机），顺序即原实现顺序。
+ * @returns {string|null} 拒绝时的 outcome，通过时 null */
 function checkLockTransitionAllowed(
   user,
   { locked, targetUserRoles, targetMaxLevel, operatorMaxLevel, operatorId }
@@ -165,12 +178,10 @@ function checkLockTransitionAllowed(
     return 'CANNOT_LOCK_SUPER_ADMIN';
   }
 
-  // 仅当账户当前确实处于锁定态时才允许解锁并恢复为 active；
-  // 管理员禁用（inactive）的账户不允许借“解锁”复活，需先由管理员通过用户更新接口恢复启用
+  // 仅当账户当前确实处于锁定态时才允许解锁并恢复为 active；管理员禁用（inactive）的账户不允许借“解锁”复活，需先由管理员通过用户更新接口恢复启用
   if (!locked && user.status === 'inactive') return 'INACTIVE_UNLOCK';
   if (!locked && user.status !== 'locked') return 'NOT_LOCKED';
-  // 锁定方向同样拒绝已禁用账户：若允许 inactive → locked，
-  // 后续“锁定→解锁”链路会把禁用账户洗回 active，变相复活被禁用账户
+  // 锁定方向同样拒绝已禁用账户：若允许 inactive → locked，后续“锁定→解锁”链路会把禁用账户洗回 active，变相复活被禁用账户
   if (locked && user.status === 'inactive') return 'INACTIVE_LOCK';
   return null;
 }
@@ -179,7 +190,7 @@ function checkLockTransitionAllowed(
  * 状态与 lockUntil 的**写入计划**（纯函数，可单测）。
  *
  * 解锁必须连**临时锁定**一起清掉。两套锁定是分开的：管理员锁定改 status，
- * 暴力破解阈值只写 lockUntil。而 authenticate（middleware/auth.js:297，经
+ * 暴力破解阈值只写 lockUntil。而 authenticate（middleware/auth.js:217，经
  * assertAccountUsable）与 loginUser（:350）都只看 lockUntil 就拒绝登录。
  * 因此"先被爆破锁定、再被管理员锁定"的账户，此前解锁只改回 status ⇒
  * 接口 200「用户已解锁」+ 审计 success:true，用户依然登不进来（且活令牌全部 403），

@@ -93,20 +93,45 @@ const permissionSchema = new mongoose.Schema(
 );
 
 /**
- * 默认隐藏软删除文档；需要看到已删除记录时显式传 `includeDeleted: true`
- * （播种恢复与编码占用检查用）。覆盖 /^find/ 与 countDocuments：
- * 漏掉任何一条读路径，软删除的数据都会从"已删除"变成"时隐时现"。
- *
- * 过滤条件已显式写 deletedAt 时不再追加，避免覆盖调用方的查询意图。
+ * 默认隐藏软删除文档：显式 includeDeleted，或过滤条件/更新文档本身写了 deletedAt 时放行；
+ * 判据只在 softDeleteExempt 一处（读路径与写钩子共用，/^find/ 已含 findOneAndUpdate/
+ * findOneAndReplace）；estimatedDocumentCount 无 filter 形参、钩子改不到，不注册。详见测试头。
  */
+const touchesDeletedAt = (update) => {
+  if (!update || typeof update !== 'object') return false;
+  return (
+    (update.$set && update.$set.deletedAt !== undefined) ||
+    (update.$unset && update.$unset.deletedAt !== undefined) ||
+    update.deletedAt !== undefined
+  );
+};
+
+/** 本次查询是否豁免软删除过滤（读路径与写路径共用这一个判据） */
+const softDeleteExempt = (query) => {
+  if (query.getOptions().includeDeleted) return true;
+  const filter = query.getFilter();
+  if (filter && filter.deletedAt !== undefined) return true;
+  return touchesDeletedAt(query.getUpdate());
+};
+
 const excludeSoftDeleted = function () {
-  if (this.getOptions().includeDeleted) return;
-  const filter = this.getFilter();
-  if (filter && filter.deletedAt !== undefined) return;
+  if (softDeleteExempt(this)) return;
   this.where({ deletedAt: null });
 };
+
+// 写钩子只登记不被 /^find/ 覆盖的三个 op；findOneAndUpdate/findOneAndReplace 走 /^find/
+for (const op of ['updateOne', 'updateMany', 'replaceOne']) {
+  permissionSchema.pre(op, excludeSoftDeleted);
+}
 permissionSchema.pre(/^find/, excludeSoftDeleted);
 permissionSchema.pre('countDocuments', excludeSoftDeleted);
+permissionSchema.pre('distinct', excludeSoftDeleted);
+permissionSchema.pre('aggregate', function () {
+  if (this.options && this.options.includeDeleted) return;
+  const first = this.pipeline()[0];
+  if (first && first.$match && first.$match.deletedAt !== undefined) return;
+  this.pipeline().unshift({ $match: { deletedAt: null } });
+});
 
 // 索引优化查询
 permissionSchema.index({ module: 1, type: 1 });

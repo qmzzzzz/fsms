@@ -199,4 +199,19 @@ describe('镜像 COPY 集合对相对 require 的闭合性', () => {
     expect(specs).toContain('./src/config/secrets');
     expect(specs).toHaveLength(2);
   });
+
+  test('应用入口 src/index.js 的整条 require 链都必须随镜像分发（补 D-3 的盲区）', () => {
+    // 为什么必须单独加这条：上面三条只覆盖"被单独 COPY 的文件"这一批入口
+    // （migrate-mongo-config.js 等）。src/ 是**整目录**复制进镜像的，它内部任何一处
+    // 指向 scripts/ 的相对 require 都不在那批入口的闭包半径内——2026-10-30 实测：
+    // src/services/upgradeService.js:9 require('../../scripts/hotUpgradePolicy')，
+    // 而 Dockerfile 只复制 scripts/destructiveGuard.js，于是 282 个文件 / 1311 条
+    // 相对 require 边里唯一一条缺失边正好落在盲区，容器启动即 MODULE_NOT_FOUND。
+    const { missing, checked, visited } = findUnclosedRequires(['src/index.js']);
+    // 规模下界：整棵生产树必须真被遍历（当前 280+ 文件 / 1300+ 边），
+    // 否则"入口写错导致一条都没扫"会伪装成 missing=[]。
+    expect(visited).toBeGreaterThanOrEqual(250);
+    expect(checked).toBeGreaterThanOrEqual(1000);
+    expect(missing).toEqual([]);
+  });
 });

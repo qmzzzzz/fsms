@@ -9,6 +9,7 @@
 const { BAN_EVENT_ACTIONS } = require('./securityAlertIpBans');
 const { AUDIT_CHAIN_ALERT_TYPES } = require('./auditChainAlertTypes');
 const { CANARY_ALERT_TYPES } = require('./canaryAlertTypes');
+const { HONEYPOT_ALERT_TYPES } = require('./honeypotAlertTypes');
 
 // 告警级别
 const ALERT_LEVELS = { LOW: 'low', MEDIUM: 'medium', HIGH: 'high', CRITICAL: 'critical' };
@@ -26,6 +27,7 @@ const ALERT_TYPES = {
   ...AUDIT_CHAIN_ALERT_TYPES,
   // 哨兵用户名探测（2026-10-19）：定义见 canaryAlertTypes.js，判据见 canaryWatch.js
   ...CANARY_ALERT_TYPES,
+  ...HONEYPOT_ALERT_TYPES,
 };
 
 module.exports = { ALERT_LEVELS, ALERT_TYPES };

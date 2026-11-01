@@ -569,6 +569,112 @@ describe('permission/user 控制器零散分支补齐', () => {
       }
     });
 
+    test('deleteUser：审计持久化失败 ⇒ 500，且这次匿名化必须有全局审计留痕（不得状态已变、审计为零）', async () => {
+      // 夹具只构造 recordDurably 的两个重抛条件：AuditLog.create 失败 + WAL 未启用。
+      // 目标已被匿名化（不可回滚）⇒ 兜底只能是全局审计按路由补记这次 500，恰好 1 条。
+      const User = require('../../models/User');
+      const AuditLog = require('../../models/AuditLog');
+      const auditBuffer = require('../../services/auditBuffer');
+      const target = await User.create({
+        username: `upbtarget${stamp}d`,
+        department: 'SECDEPT',
+        createdBy: secUserId,
+        email: `upbtarget${stamp}d@example.com`,
+        password: PASSWORD,
+      });
+      const targetId = String(target._id);
+      const before = await User.findById(targetId).lean();
+      const spyCreate = jest.spyOn(AuditLog, 'create').mockRejectedValue(new Error('audit down'));
+      const spyWal = jest.spyOn(auditBuffer, 'isWalEnabled').mockReturnValue(false);
+      const spyPush = jest.spyOn(auditBuffer, 'push');
+      try {
+        const path = `/api/users/${targetId}`;
+        const res = await sec.delete(path);
+        expect(res.status).toBe(500);
+        expect(res.body.errors.errorCode).toBe('INTERNAL_ERROR');
+
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+
+        const after = await User.findById(targetId).lean();
+        const stateChanged = after && String(after.email) !== String(before.email);
+        const pushed = spyPush.mock.calls
+          .map(([doc]) => doc)
+          .filter((doc) => doc && doc.path === path);
+        expect(stateChanged || pushed.length > 0).toBe(true);
+        expect(pushed).toHaveLength(1);
+        expect(pushed[0]).toMatchObject({
+          action: 'user_delete',
+          category: 'user',
+          statusCode: 500,
+          success: false,
+        });
+      } finally {
+        spyCreate.mockRestore();
+        spyWal.mockRestore();
+        spyPush.mockRestore();
+        await User.deleteMany({ _id: targetId }).catch(() => {});
+      }
+    });
+
+    test('deleteUser：成功路径恰好 1 条删户审计 + 全局侧不双写（成功≠零留痕，也≠两条）', async () => {
+      // 与上一条红线用例互为反面：正常成功一侧必须留痕，且只留一条。
+      // 判据三件：用户不可见（匿名化占位 + status=inactive + tokenVersion 自增 ⇒ 旧会话失效）、
+      // 专用留痕恰好 1 条（作者是操作者、目标指向被删者）、全局派生侧 0 条（去重生效且不双写）。
+      const User = require('../../models/User');
+      const AuditLog = require('../../models/AuditLog');
+      const auditBuffer = require('../../services/auditBuffer');
+      const target = await User.create({
+        username: `upbtarget${stamp}ok`,
+        department: 'SECDEPT',
+        createdBy: secUserId,
+        email: `upbtarget${stamp}ok@example.com`,
+        password: PASSWORD,
+      });
+      const targetId = String(target._id);
+      // 不取 .lean()：email/realName 是字段级加密列，getter 才解出占位值
+      const before = await User.findById(targetId);
+      const spyPush = jest.spyOn(auditBuffer, 'push');
+      try {
+        const path = `/api/users/${targetId}`;
+        const res = await sec.delete(path);
+        expect(res.status).toBe(200);
+
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+
+        // ① 用户不可见：PII 已抹除成占位、账户置为失效、旧令牌全部作废
+        const after = await User.findById(targetId);
+        expect(String(after.email)).not.toBe(String(before.email));
+        expect(String(after.email)).toContain('anonymized.invalid');
+        expect(after.realName).toBe('已注销用户');
+        expect(after.status).toBe('inactive');
+        expect(after.anonymizedAt).toBeTruthy();
+        expect(after.anonymizationReason).toBe('admin_delete');
+        expect(after.tokenVersion).toBe((before.tokenVersion || 0) + 1);
+
+        // ② 恰好 1 条删户审计：0 条=零留痕、2 条=把一次删除记成两次，两者都要红
+        const docs = await AuditLog.find({
+          action: 'user_anonymized',
+          targetUserId: target._id,
+        }).lean();
+        expect(docs).toHaveLength(1);
+        expect(docs[0].success).toBe(true);
+        expect(docs[0].category).toBe('user');
+        // 作者是操作者、被删者是 target：一条记录里两个主体字段不得指向同一个人（L-06 同口径）
+        expect(docs[0].username).toBe(`upbsec${stamp}`);
+        expect(String(docs[0].userId)).toBe(secUserId);
+
+        // ③ 全局去重不双写：本条已有专用留痕 ⇒ 这条路径不得再落全局派生记录
+        const pushed = spyPush.mock.calls
+          .map(([doc]) => doc)
+          .filter((doc) => doc && doc.path === path);
+        expect(pushed).toHaveLength(0);
+      } finally {
+        spyPush.mockRestore();
+        await User.deleteMany({ _id: targetId }).catch(() => {});
+      }
+    });
     test('batchDeleteUsers：空列表 / 超上限 / 非法 ID / 含自己 → 逐层拒绝', async () => {
       const empty = await sec.delete('/api/users/batch', { ids: [] });
       expect(empty.status).toBe(400);

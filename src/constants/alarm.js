@@ -1,11 +1,8 @@
 /**
  * 报警域取值清单的单一来源（F-142）
  *
- * 整改前三组值各有 3~5 份手写副本，分属四个文件：
- *   - level（4 档）：models/FireAlarm.js 的 schema enum、routes/alarmRoutes.js 的
- *     query 校验器与 body 校验器、docs/generate.js 的 query 参数与 requestBody 属性；
- *   - alarmType（6 档）：model、alarmRoutes 的两处 isIn、generate.js；
- *   - status（5 档）：model、alarmRoutes 的 query 校验器、generate.js。
+ * 三组清单（level 4 档 / alarmType 6 档 / status 5 档）只此一份：model 的 schema enum、
+ * 路由的 query 与 body 校验器、docs/generate.js 的文档 enum 全部引用本文件。
  * 副本不会同步，只会各写各的——最坏症状不是「校验不严」而是**清单窄于 schema**：
  * 给 FireAlarm.level 加第 5 档后，模型存得进去、路由却以「无效的报警级别」400 拒掉，
  * 且只有走到那条路由的测试会红（清单本身无人对账）。
@@ -37,9 +34,8 @@ const ALARM_TYPES = [
 const ALARM_STATUSES = ['pending', 'processing', 'resolved', 'false_alarm', 'cancelled'];
 
 // 报警原因（PUT /api/alarms/:id/resolve 的 cause 字段）。
-// F-142 收敛三组清单时漏扫了这一组：它当时只写在 models/FireAlarm.js 的 schema enum 里，
-// 路由校验器与文档生成器各抄一份字面量——给 schema 追加一档，路由会先 400 拒掉它，
-// 而对外文档仍在推荐那一档，属同一族「清单漂移」。
+// 同样只此一份（schema enum / 路由校验器 / 文档生成器一律引用）——给 schema 追加一档，
+// 路由会先 400 拒掉它，而对外文档仍在推荐那一档，属同一族「清单漂移」。
 const ALARM_CAUSES = ['fire', 'false_alarm', 'equipment_fault', 'test', 'unknown'];
 
 module.exports = { ALARM_LEVELS, ALARM_TYPES, ALARM_STATUSES, ALARM_CAUSES };

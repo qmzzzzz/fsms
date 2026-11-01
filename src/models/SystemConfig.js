@@ -107,6 +107,15 @@ systemConfigSchema.statics.get = async function (key, defaultValue = null) {
   return doc.value;
 };
 
+const findOneAndUpdateWithRetry = async (model, filter, update) => {
+  try {
+    return await model.findOneAndUpdate(filter, update, { upsert: true, new: true });
+  } catch (err) {
+    if (err.code !== 11000) throw err;
+    return model.findOneAndUpdate(filter, update, { upsert: true, new: true });
+  }
+};
+
 // 静态方法：设置配置值
 systemConfigSchema.statics.set = async function (key, value, userId = null) {
   const valueType =
@@ -123,11 +132,7 @@ systemConfigSchema.statics.set = async function (key, value, userId = null) {
   // 显式传 undefined 会把已有的 updatedBy 覆写成 null，导致修改人信息丢失
   if (userId) update.updatedBy = userId;
 
-  const result = await this.findOneAndUpdate(
-    { key },
-    { $set: update },
-    { upsert: true, new: true }
-  );
+  const result = await findOneAndUpdateWithRetry(this, { key }, { $set: update });
 
   // 写入成功后失效对应缓存；注册开关/登录验证码开关有各自的派生布尔缓存，一并失效
   getCache.delete(key);
@@ -187,14 +192,8 @@ systemConfigSchema.statics.invalidateLoginCaptchaCache = function () {
 // 静态方法：获取注册验证码开关状态（带内存缓存）
 // 默认值取静态配置 config.registerCaptchaEnabled（env REGISTER_CAPTCHA_ENABLED，默认 true），
 // 管理员在后台设置后以数据库值为准；**配置未落库**（doc 为 null）时用静态默认。
-//
-// 【2026-10-09 就地更正】本行原写作「DB 故障时降级到静态配置（fail-open 以静态默认）」——
-// **与实现不符**：`isRegisterCaptchaEnabled` / `isLoginCaptchaEnabled` 都没有 try/catch，
-// `findOne` 在 DB 故障时直接 reject，降级不在本文件发生，而在各调用点。
-// 该表述之所以危险：它让人以为「DB 故障 → 一定有静态默认」，于是没人去问
-// 「降级动作的信号在哪」——实测答案是 3 个调用点各复刻一份 try/catch、全都没有信号。
-// 现已收口到 `captchaSwitch(kind)`（见下），信号为
-// security_alerts_total{type=captcha_switch_db_fallback}。
+// 降级不在这两个函数里发生（它们没有 try/catch，`findOne` 在 DB 故障时直接 reject），
+// 而是收口在下方 `captchaSwitch(kind)`，信号为 security_alerts_total{type=captcha_switch_db_fallback}。
 let _registerCaptchaCache = null;
 let _registerCaptchaCacheExpiresAt = 0;
 

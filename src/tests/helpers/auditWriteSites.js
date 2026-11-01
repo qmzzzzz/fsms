@@ -208,10 +208,20 @@ function resolveActionExpr(expr, ctx, src) {
   // 同文件的字符串常量间接层：`const ACTION = 'x'; ... push({ action: ACTION })`。
   // 不认这一形态，写入点会从对账里**整个消失**（errorHandler 的截断更正事件就是这么溜过的：
   // 正向对账看不见它，反向可达性也看不见它，于是不登记的 action 双向都判"没问题"）。
+  // 三元常量同型（securityController/account.js：强制改密/普通改密分账）：
+  // `const ACTION = cond ? 'a' : 'b'`。要求三元是**整个右值**——被函数包着
+  // （`pick(cond ? 'a' : 'b')`）不算，否则实际运行值可以是任意东西，而本闸会
+  // 凭空认定两个字面量已认领。两个分支任一不是字面量同样返回 null 走硬失败。
   const ident = /^([A-Za-z_$][\w$]*)$/.exec(expr);
   if (ident && src) {
-    const def = new RegExp(`const\\s+${ident[1]}\\s*=\\s*'([^']+)'`).exec(src);
-    if (def) return [def[1]];
+    const def = new RegExp(`const\\s+${ident[1]}\\s*=\\s*([^;\\n]+);`).exec(src);
+    if (def) {
+      const rhs = def[1].trim();
+      const plain = /^'([^']+)'$/.exec(rhs) || /^"([^"]+)"$/.exec(rhs);
+      if (plain) return [plain[1]];
+      const ternary = /^[\s\S]+?\?\s*'([^']+)'\s*:\s*'([^']+)'$/.exec(rhs);
+      if (ternary) return [ternary[1], ternary[2]];
+    }
   }
   return null;
 }

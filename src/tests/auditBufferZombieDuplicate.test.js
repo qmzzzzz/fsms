@@ -17,8 +17,9 @@
  * `verifyAuditChain` 看不出任何断裂——**篡改检测完好，但"每条请求只记一次"这个
  * 审计基本性质被破坏了**，而且 droppedCount/告警都不会响。
  *
- * 修复判据：flush 取走批次后预分配 `_id`（与原先 Mongoose 的分配时机一致），
- * 回退重试是同一批对象引用 ⇒ `_id` 存活 ⇒ 再插必撞 11000 ⇒ 识别为「已落库」；
+ * 修复判据：`_id` 在 **push 时**预分配并写进 WAL 行（F-143 跨重启幂等修复，2026-10-31
+ * 把分配点从 flush 提前到了 push；同进程回退重试是同一批对象引用 ⇒ `_id` 存活）
+ * ⇒ 再插必撞 11000 ⇒ 识别为「已落库」；
  * 并且**知道真相的那一刻**（僵尸 fn 内）把缓冲里被超时回退重新排入的那几条撤掉，
  * 否则批次会在"每轮都超时"里永不收敛，最后被毒文档逻辑丢弃并虚增 droppedCount。
  * `_id` 不参与哈希 payload（utils/auditChainPayload.js 字段白名单实测无 _id），
@@ -440,12 +441,13 @@ describe('链锁超时与僵尸写入的重复落库', () => {
     expect(await countTag('half')).toBe(2);
   });
 
-  test('链尾重同步按 _id 近似最新记录：_id 必须在 flush 里分配而不是 push 里', async () => {
-    // 这条钉住"_id 预分配位置"的理由，而不是只写在注释里。
-    // 时序：A 先入缓冲（不 flush）→ 直写记录 B 落库 → flush 把 A 接在 B 之后。
-    // 链顺序是 B→A；若 A 在 push 时就拿到 _id，则 A._id < B._id，
-    // getChainTail 的 `sort({_id:-1})` 会挑到 B（已被接走的旧尾）→ 下一批分叉，
-    // 凭空造出 chain_break。flush 内分配则 A._id > B._id，重同步挑到真尾。
+  test('链尾重同步不依赖 _id 序：push 预分配的 _id 与串链序反转时，重同步仍要挑到真尾', async () => {
+    // 这条钉住"链尾初始化选谁"的判据，而不是只写在注释里。
+    // 时序：A 先入缓冲（push 时即拿到 _id）→ 直写记录 B 落库 → flush 把 A 接在 B 之后。
+    // 链顺序是 B→A，而 _id 顺序反过来（A._id < B._id）——这正是 push 预分配带来的形态。
+    // 若 getChainTail 仍按 `sort({_id:-1})` 取"最大 _id"，它会挑到 B（已被 A 接走的旧尾）
+    // → 下一批分叉、凭空造出 chain_break。现在的判据是"最近窗口里没有任何记录把它当作父"，
+    // 与 _id 先后无关，所以反转形态下也必须挑到真尾 A。
     const { resyncChainTail } = require('../utils/auditChain');
 
     const [docA] = makeDocs('order', 1);
@@ -472,8 +474,9 @@ describe('链锁超时与僵尸写入的重复落库', () => {
     const rowC = await AuditLog.findOne({ username: 'zzombie_order_1' }).lean();
     expect(rowC.prevHash).toBe(rowA.hash);
 
-    // 前提复核：本用例的判据成立依赖 A._id 晚于 B._id（push 期分配会反过来）
-    expect(String(rowA._id) > String(B._id)).toBe(true);
+    // 前提复核：本用例的判据成立**依赖** _id 序与串链序反转（A._id 早于 B._id）。
+    // 这是 push 预分配的直接后果（改前 flush 内分配 ⇒ A._id > B._id，断言会红）。
+    expect(String(rowA._id) < String(B._id)).toBe(true);
   });
 
   function walLines(tag) {

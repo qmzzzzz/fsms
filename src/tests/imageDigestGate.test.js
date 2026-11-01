@@ -281,6 +281,41 @@ function run(fx, args, mode = 'good') {
  * pull（取到的是 pull 之前的 RepoDigests）。这两个都在序列里，不在条数里。
  * inspect 的 `--format={{index .RepoDigests 0}}` 本身带空格，所以只取首尾两格。
  */
+/**
+ * 让 fixture/bin **在 shell 内部**顶到 PATH 最前再起脚本。
+ *
+ * 从 Node 侧改 env.PATH 是没用的：MSYS / Git Bash 启动时会把自带的 /usr/bin:/mingw64/bin
+ * 塞到 PATH 最前（本仓实测过多次），/usr/bin 里的 tr 因此永远盖过 fixture/bin 里的桩 ——
+ * 「工具不可用」这条前提会在假前提下变绿（等于没测）。在 shell 内部先设 PATH 才作数。
+ */
+function runWithPathShadowing(fx, args) {
+  // MSYS 路径：反斜杠转 /，盘符还要写成 `/d/…`。实测：`D:/…` 这种混合形态 MSYS **不认**
+  // （该目录被整个跳过，`command -v docker` 于是找到宿主机的真 docker，用例会在假前提下变绿）。
+  // CI 上（ubuntu）路径本就是 `/tmp/…`，转换函数对它是空操作。
+  const posix = (x) => {
+    const s = String(x).replace(/\\/g, '/');
+    const m = /^([A-Za-z]):\//.exec(s);
+    return m ? `/${m[1].toLowerCase()}${s.slice(2)}` : s;
+  };
+  const withRoot = ['--root=<ROOT>', ...args].map((a) => a.replace('<ROOT>', fx.dir));
+  const quoted = withRoot.map((a) => `"${posix(a)}"`).join(' ');
+  const cmd = `PATH="${posix(path.join(fx.dir, 'bin'))}:$PATH"; export PATH; exec "${posix(SH)}" "${posix(SCRIPT)}" ${quoted}`;
+  const r = spawnSync(SH, ['-c', cmd], {
+    env: { ...process.env, STUB_LOG: fx.log, DOCKER_STUB_MODE: 'good' },
+    encoding: 'utf8',
+  });
+  return {
+    code: r.status,
+    out: (r.stdout || '') + (r.stderr || ''),
+    dockerfile: readOr(path.join(fx.dir, 'Dockerfile')),
+    compose: readOr(path.join(fx.dir, 'docker-compose.yml')),
+    tmps: fs
+      .readdirSync(fx.dir)
+      .filter((f) => f.endsWith('.pin.tmp'))
+      .sort(),
+  };
+}
+
 const callSeq = (r) =>
   r.calls.map((line) => {
     const t = line
@@ -631,6 +666,319 @@ function checkFailure(label, mutate, mode, args, wantCode, wantReason) {
 }
 
 group('capture-image-digests.sh 真跑行为', () => {
+  /**
+   * 工具缺失 ⇒ 必须失败关（A6，2026-10-30）。
+   *
+   * CR 检测（`tr -dc '\r' | wc -c`）**执行者失败时是静默的**：wc 照旧输出 0，
+   * 与「文件里没有 CR」不可分 ⇒ 检测被整体跳过，脚本会在「以为已是 LF」的前提下落笔，
+   * 而 MSYS 的 sed/gawk 顺手吃掉 CR —— 正是这条判据存在的理由（见脚本 :483-490）。
+   * 判据不能建立在「工具碰巧在」之上（同脚本 :47 的 docker 存在性检查同一口径）。
+   */
+  test('tr 不可用 ⇒ 拒绝落笔（不是「检测不到 CR 就当没有 CR」）', () => {
+    // 反向前提：同一夹具在真 tr 下必须成功 —— 否则下面的红可能来自夹具而不是这条判据
+    const okFixture = fixture();
+    expect(run(okFixture, ['--apply']).code).toBe(0);
+
+    const fx = fixture();
+    // 用一个恒失败的空壳 tr 遮住真 tr（fixture/bin 在 PATH 最前）。脚本只在 CR 这条
+    // 判据上用 tr，所以这就是「工具不可用」的最小复现，不需要动仓库里的任何脚本。
+    const trStub = path.join(fx.dir, 'bin', 'tr');
+    fs.writeFileSync(trStub, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    try {
+      fs.chmodSync(trStub, 0o755);
+    } catch (_) {
+      /* Windows 上 mode 参数已足够 */
+    }
+
+    const before = { d: fx.dockerfile, c: fx.compose };
+    const r = runWithPathShadowing(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/字节级检测不可用/);
+    // 拒绝必须**早于动作**：两个文件一字未改，也不留临时文件
+    expect({ d: r.dockerfile, c: r.compose }).toEqual(before);
+    expect(r.tmps).toEqual([]);
+  });
+  /**
+   * 同族的第二种形态（2026-10-30 第三轮审计的端到端复现）：
+   * 探针跑的是**管道输入**（`printf 'a\rb' | tr …`），判据跑的是**文件重定向输入**
+   * （`tr -dc … < "$file"`）。只证明前者可用时，后者失败会被 wc 读成 0 ⇒「没有 CR」⇒
+   * 落笔。实测反例：CRLF 的 Dockerfile 被 sed 顺手改成 LF 并钉上 digest，exit 0。
+   * 判据改成「非 CR 字节数 == 总字节数」后，形态失败让左边变 0、与右边不等 ⇒ 拒绝。
+   */
+  test('tr 只在「文件重定向输入」这一形态上失败 ⇒ CRLF 夹具必须被拒（修复前实测：exit 0 且被重写）', () => {
+    // 反向前提：同一份 CRLF 夹具在真 tr 下也必须被拒（红不是夹具凑出来的）
+    const okFixture = fixture();
+    crlfBoth(okFixture);
+    expect(runWithPathShadowing(okFixture, ['--apply']).code).not.toBe(0);
+
+    const fx = fixture();
+    // 夹具必须让每个 CR 都落在 od 某一行的**行尾**（16 字节一行的最后一个 token）：
+    // 只有这样，IFS 里少了换行才会把行尾 token 粘成 `0d\n`、`case 0d` 漏计。
+    // 直接复用「同源共谋 + 16 字节边界」那条的补丁布局（CR 位于 16/32/48/64/112/160/176）。
+    writeDockerfile(
+      fx,
+      [
+        '#'.repeat(15),
+        '#'.repeat(14),
+        '#'.repeat(14),
+        '#'.repeat(14),
+        `FROM node:26.12.0-alpine AS builder${' '.repeat(11)}`,
+        `FROM node:26.12.0-alpine AS runner${' '.repeat(12)}`,
+        `USER nodejs${' '.repeat(3)}`,
+        '',
+      ].join('\r\n')
+    );
+    // 桩：读管道正常（探针会通过），读**文件重定向**就失败 —— 正是判据本身用的形态。
+    const trStub = path.join(fx.dir, 'bin', 'tr');
+    fs.writeFileSync(
+      trStub,
+      [
+        '#!/bin/sh',
+        'if [ -f /dev/stdin ]; then echo "tr: read error" >&2; exit 1; fi',
+        'exec /usr/bin/tr "$@"',
+        '',
+      ].join('\n'),
+      { mode: 0o755 }
+    );
+    try {
+      fs.chmodSync(trStub, 0o755);
+    } catch (_) {
+      /* Windows 上 mode 参数已足够 */
+    }
+
+    // 基准取**盘上当前字节**（crlfBoth 刚把行尾换成 CRLF），不是 fx 里的原始字符串。
+    const before = {
+      d: readOr(path.join(fx.dir, 'Dockerfile')),
+      c: readOr(path.join(fx.dir, 'docker-compose.yml')),
+    };
+    const r = runWithPathShadowing(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/CR（CRLF 行尾）|字节级检测不可用/);
+    // 拒绝必须**早于动作**：CRLF 一词未改，也不留临时文件
+    expect({ d: r.dockerfile, c: r.compose }).toEqual(before);
+    expect(r.tmps).toEqual([]);
+  });
+
+  /**
+   * 第四轮审计（2026-10-30）把 fail-open 从 tr 这条腿搬到了 wc：wc 退出 0、打印 0 ⇒ 两个计数
+   * 都是 0 ⇒ 相等 ⇒ 落笔。另外「tr 退化成 cat」（能跑、退出 0、一个字节都不删）也会让两个计数
+   * 相等。这里各钉一条腿：stat 交叉（拦 wc 静默 0）与「grep 直接问有没有 CR」（拦 tr 退化）。
+   * 两条都配前提自证：桩必须真的生效，否则「桩没进 PATH」会伪装成绿。
+   */
+  test('wc 一律打印 0（stat 是真的）⇒ 拒：检测不可用时不许落笔', () => {
+    const fx = fixture(); // 默认 LF：没有 CR 可抓，红只可能来自「检测不可用」
+    // 桩让每一次 wc 都说 0：0 是合法数字，形状校验拦不住；靠 stat 的独立长度交叉拦下。
+    const wcStub = path.join(fx.dir, 'bin', 'wc');
+    fs.writeFileSync(wcStub, ['#!/bin/sh', 'printf "0\\n"', ''].join('\n'), { mode: 0o755 });
+    try {
+      fs.chmodSync(wcStub, 0o755);
+    } catch (_) {
+      /* Windows 上 mode 参数已足够 */
+    }
+    const before = {
+      d: readOr(path.join(fx.dir, 'Dockerfile')),
+      c: readOr(path.join(fx.dir, 'docker-compose.yml')),
+    };
+    const r = runWithPathShadowing(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/两者不一致|计数为 0 但文件非空/);
+    expect({ d: r.dockerfile, c: r.compose }).toEqual(before);
+    expect(r.tmps).toEqual([]);
+  });
+
+  test('tr 退化成 cat（能跑、退出 0、不过滤）⇒ 拒：互补计数之和 ≠ 总字节数', () => {
+    const fx = fixture();
+    const trStub = path.join(fx.dir, 'bin', 'tr');
+    fs.writeFileSync(trStub, ['#!/bin/sh', 'exec /usr/bin/cat', ''].join('\n'), { mode: 0o755 });
+    try {
+      fs.chmodSync(trStub, 0o755);
+    } catch (_) {
+      /* Windows 上 mode 参数已足够 */
+    }
+    const before = {
+      d: readOr(path.join(fx.dir, 'Dockerfile')),
+      c: readOr(path.join(fx.dir, 'docker-compose.yml')),
+    };
+    const r = runWithPathShadowing(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/tr 没有按判据过滤字节/);
+    expect({ d: r.dockerfile, c: r.compose }).toEqual(before);
+    expect(r.tmps).toEqual([]);
+  });
+
+  test('tr 只删 NUL、不删 CR（计数闭合但没按判据过滤）⇒ od 那道腿必须拒', () => {
+    const fx = fixture();
+    crlfBoth(fx);
+    // 桩让「非 CR + CR == 总字节数」成立（它动了 NUL 字节），却没碰 CR ——
+    // 判据必须靠**直接数 CR 字节**那条腿拦住，而不是靠和式。
+    const trStub = path.join(fx.dir, 'bin', 'tr');
+    fs.writeFileSync(trStub, ['#!/bin/sh', 'exec /usr/bin/tr -d "\\000"', ''].join('\n'), {
+      mode: 0o755,
+    });
+    try {
+      fs.chmodSync(trStub, 0o755);
+    } catch (_) {
+      /* Windows 上 mode 参数已足够 */
+    }
+    const before = {
+      d: readOr(path.join(fx.dir, 'Dockerfile')),
+      c: readOr(path.join(fx.dir, 'docker-compose.yml')),
+    };
+    const r = runWithPathShadowing(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/有 \d+ 个 CR/);
+    expect({ d: r.dockerfile, c: r.compose }).toEqual(before);
+    expect(r.tmps).toEqual([]);
+  });
+  test('同源共谋（非 CR 通道拍平、CR 通道吞掉）+ CR 全部落在 16 字节边界 ⇒ od 腿必须拒', () => {
+    const fx = fixture();
+    // 第五轮复攻复现：旧版手写 while 解析器按空格切分，od 每行的**行尾 token** 会连换行
+    // 一起被切走（形如 `0d\n`，`case 0d` 不匹配）⇒ 落在 16 字节边界上的 CR 全部漏计。
+    // 这里让每个 CRLF 的 CR 都恰好是 od 某一行的最后一个字节（CR 位于 16/32/48/64/112/160/176）。
+    writeDockerfile(
+      fx,
+      [
+        '#'.repeat(15),
+        '#'.repeat(14),
+        '#'.repeat(14),
+        '#'.repeat(14),
+        `FROM node:26.12.0-alpine AS builder${' '.repeat(11)}`,
+        `FROM node:26.12.0-alpine AS runner${' '.repeat(12)}`,
+        `USER nodejs${' '.repeat(3)}`,
+        '',
+      ].join('\r\n')
+    );
+    // 共谋桩：非 CR 通道 = cat（整份文件都算「非 CR」）、CR 通道 = 空输出（报 0 个 CR）——
+    // 互补和因此闭合、直接 CR 计数也是 0；唯一还能看见 CR 的只剩 od 的那条腿。
+    const trStub = path.join(fx.dir, 'bin', 'tr');
+    fs.writeFileSync(
+      trStub,
+      [
+        '#!/bin/sh',
+        'case "$*" in',
+        '  *015) exit 0 ;;',
+        '  *) exec /usr/bin/cat ;;',
+        'esac',
+        '',
+      ].join('\n'),
+      { mode: 0o755 }
+    );
+    try {
+      fs.chmodSync(trStub, 0o755);
+    } catch (_) {
+      /* Windows 上 mode 参数已足够 */
+    }
+    const before = {
+      d: readOr(path.join(fx.dir, 'Dockerfile')),
+      c: readOr(path.join(fx.dir, 'docker-compose.yml')),
+    };
+    const r = runWithPathShadowing(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/有 \d+ 个 CR/);
+    expect({ d: r.dockerfile, c: r.compose }).toEqual(before);
+    expect(r.tmps).toEqual([]);
+  });
+
+  /**
+   * 两条注入通道都在这一条腿上，判据必须有**肉眼可核的字节口径**：
+   *
+   * ① 第七轮：`bash script.sh` 会先 source `$BASH_ENV`，那里面可以设置 IFS（实测在 IFS=' ' 下
+   *    od 腿只丢一部分 CR：177 B 夹具 7 个 CR 里仍数到 4 个 ⇒ 脚本照样拒绝）。行为用例区分
+   *    不出「有固定腿」与「没有固定腿」——那样的断言在变异下会保持绿，等于假绿。所以此处用
+   *    文本契约钉形态；同一固定腿的**行为级**证据在 `src/tests/deploy/backupUriFile.test.js`
+   *    （被 source 的 mongoUri 同款代码，调用方 IFS=' ' + 两向共谋 tr 实测红）。
+   * ② 第八轮：旧形态 `IFS=$(printf …)` 还挂着一条**可执行依赖**——BASH_ENV 里定义 `printf()`
+   *    同名函数就优先于内建（实测 printf 返回空格 ⇒ IFS 退化成单空格 ⇒ CR=0、rc=0、静默改写）。
+   *    现形态是**单引号字面量跨行**写「换行/制表/空格」：没有命令替换、不调用任何命令。
+   *
+   * 判据不是「源码里出现过某几个字」——第八轮实测两条假绿都出在这类断言上：只删 `_` 哨兵
+   * （`IFS=$(printf ' \t\n')`，缺换行）与「把四行注释掉但注释文字留着」都能骗过 toMatch。
+   * 所以：**先剥注释行**，再断整行形态、右值字节集合、无命令替换、保存/恢复的成对与顺序。
+   */
+  test('od 解析循环必须自带 IFS 固定腿（BASH_ENV 注入 IFS / 劫持 printf 都挡在这条腿上）', () => {
+    // 剥注释行：注释里的示例文字不许替代真代码满足断言（第八轮变异 M5 的教训）
+    const code = fs
+      .readFileSync(SCRIPT, 'utf8')
+      .split(/\r?\n/)
+      .map((l) => l.replace(/\r$/, ''))
+      .filter((l) => !l.trim().startsWith('#'));
+    // **每一处** od 解析循环都要自带固定腿，不是只看第一处。
+    // 第九轮复攻的 M10 就是钻这个空子：在真腿前面插一段「合规的诱饵块」（同样带
+    // `_ifs_saved=$IFS` + 字面量 + 恢复行，只是不接循环），真腿退化成 `IFS=' '` ⇒
+    // findIndex 只看第一处 ⇒ 用例照绿，行为 rc=0、177→314 B、CR=0 静默改写。
+    // 本脚本今天有 1 处（`_od_cr` 腿），mongoUri.sh 有 2 处（validate / hydrate）——
+    // 逐处检查在两侧都成立，且脚本将来加一处解析器时会自动被要求同款固定。
+    const loops = code.reduce(
+      (acc, l, i) => (l === '  for _od_tok in $_od_hex; do' ? [...acc, i] : acc),
+      []
+    );
+    expect(loops.length).toBeGreaterThanOrEqual(1);
+    for (const loop of loops) {
+      const windowBefore = code.slice(Math.max(0, loop - 12), loop);
+      expect(windowBefore).toContain('  _ifs_saved=$IFS');
+      // 赋值形态：必须是相邻两行的字面量，右值恰为「换行/制表/空格」三字节（排列不限）
+      const literal = `${code[loop - 2]}\n${code[loop - 1]}`.match(/^ {2}IFS='([\s\S]*)'$/);
+      expect(literal).not.toBeNull();
+      const bytes = [...Buffer.from(literal[1], 'utf8')];
+      expect(bytes).toHaveLength(3);
+      expect([...bytes].sort((a, b) => a - b)).toEqual([0x09, 0x0a, 0x20]);
+      // 窗口内不许出现命令替换式 IFS（`$(printf …)` 是第八轮复攻的静默改写通道）
+      expect(windowBefore.join('\n')).not.toMatch(/IFS=\$\(/);
+      // 保存 → 字面量 → 循环 的顺序（保存行必须在字面量之前）
+      const saved = code.lastIndexOf('  _ifs_saved=$IFS', loop - 2);
+      expect(saved).toBeGreaterThanOrEqual(0);
+      expect(saved).toBeLessThan(loop - 2);
+      // 成对恢复：循环之后 <=12 行内必须恢复调用方原 IFS
+      expect(code.slice(loop + 1, loop + 12)).toContain('  IFS=$_ifs_saved');
+    }
+  });
+  test('od 桩只吐三个 token（独立通道被破坏）⇒ 判「目视不可用」拒绝（fail-closed）', () => {
+    const fx = fixture();
+    const odStub = path.join(fx.dir, 'bin', 'od');
+    fs.writeFileSync(odStub, ['#!/bin/sh', "printf '6d 6f 0a\\n'", ''].join('\n'), { mode: 0o755 });
+    try {
+      fs.chmodSync(odStub, 0o755);
+    } catch (_) {
+      /* Windows 上 mode 参数已足够 */
+    }
+    const before = {
+      d: readOr(path.join(fx.dir, 'Dockerfile')),
+      c: readOr(path.join(fx.dir, 'docker-compose.yml')),
+    };
+    const r = runWithPathShadowing(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/字节级目视不可用（od 给出 3 个字节/);
+    expect({ d: r.dockerfile, c: r.compose }).toEqual(before);
+    expect(r.tmps).toEqual([]);
+  });
+
+  test('od 对内容说谎（CR token 被改写成别的 token）⇒ tr 与直接计数两条兜底腿仍必须拒', () => {
+    const fx = fixture();
+    crlfBoth(fx);
+    // od 桩把每个 `0d` token 改写成 `00`：token 数照旧（长度腿过）、od 的 CR 计数却为 0。
+    // 单个通道说谎不构成放行理由：tr 照实数出 4 个 CR，直接计数那条腿必须把它拦下。
+    const odStub = path.join(fx.dir, 'bin', 'od');
+    fs.writeFileSync(
+      odStub,
+      ['#!/bin/sh', 'exec /usr/bin/od "$@" | /usr/bin/sed "s/0d/00/g"', ''].join('\n'),
+      { mode: 0o755 }
+    );
+    try {
+      fs.chmodSync(odStub, 0o755);
+    } catch (_) {
+      /* Windows 上 mode 参数已足够 */
+    }
+    const before = {
+      d: readOr(path.join(fx.dir, 'Dockerfile')),
+      c: readOr(path.join(fx.dir, 'docker-compose.yml')),
+    };
+    const r = runWithPathShadowing(fx, ['--apply']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toMatch(/有 \d+ 个 CR/);
+    expect({ d: r.dockerfile, c: r.compose }).toEqual(before);
+    expect(r.tmps).toEqual([]);
+  });
+
   test('不加 --apply：只打印两个可粘贴的钉版引用，且一个文件都不改', () => {
     const fx = fixture();
     const before = { d: fx.dockerfile, c: fx.compose };

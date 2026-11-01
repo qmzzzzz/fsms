@@ -104,7 +104,7 @@ describe('S-5 Compose 接线：校验容器必须真正挡在 alertmanager 前�
     );
   });
 
-  test('校验源与运行源是同一个文件（ALERTMANAGER_CONFIG_PATH 同时进入两处挂载）', () => {
+  test('校验源与运行源是同一个文件（ALERTMANAGER_CONFIG_PATH 同时进入校验挂载与初始化挂载）', () => {
     const i = COMPOSE.indexOf('\n  alertmanager-config-check:');
     const j = COMPOSE.indexOf('\n  alertmanager:', i);
     expect(i).toBeGreaterThan(-1);
@@ -112,7 +112,28 @@ describe('S-5 Compose 接线：校验容器必须真正挡在 alertmanager 前�
     const mount =
       /\$\{ALERTMANAGER_CONFIG_PATH:-\.\/deployment\/observability\/alertmanager\.yml\}/;
     expect(checkBlock).toMatch(mount);
-    expect(alertmanagerBlock()).toMatch(mount);
+
+    // F-15 起运行源不再直接 bind mount 进 alertmanager：宿主文件权限不能假定与
+    // 容器 nobody 一致（0600 的私有配置会让真实服务起不来）。改由一次性初始化容器
+    // 从**同一个** ALERTMANAGER_CONFIG_PATH 复制进命名卷并显式 chown/chmod，
+    // alertmanager 只读消费该副本。判据不变——校验的字节与运行的字节仍是同一份，
+    // 只是中间多了一跳；这里逐段钉住这条链，任何一段被改回 bind mount 都会红。
+    const k = COMPOSE.indexOf('\n  alertmanager-config-init:');
+    expect(k).toBeGreaterThan(-1);
+    const initBlock = COMPOSE.slice(k, j);
+    expect(initBlock).toMatch(mount);
+    expect(initBlock).toContain(':/source/alertmanager.yml:ro');
+    expect(initBlock).toContain('alertmanager-config:/etc/alertmanager');
+    expect(initBlock).toMatch(
+      /alertmanager-config-check:\s*\n\s*condition:\s*service_completed_successfully/
+    );
+
+    // 运行侧：只消费命名卷，且必须等初始化容器成功（否则拿到的是空卷/旧副本）
+    const runtimeBlock = alertmanagerBlock();
+    expect(runtimeBlock).toContain('alertmanager-config:/etc/alertmanager:ro');
+    expect(runtimeBlock).toMatch(
+      /alertmanager-config-init:\s*\n\s*condition:\s*service_completed_successfully/
+    );
   });
 
   test('校验容器挂载的脚本存在且镜像为 digest 钉死引用', () => {

@@ -1,5 +1,5 @@
 /**
- * PII 迁移脚本覆盖 firealarms.reporter.phone（P1，2026-10-16）
+ * PII 迁移脚本覆盖 firealarms.reporter.phone 与 useravatars.data（P1，2026-10-16 / 2026-10-30）
  *
  * 为什么必须有这条**真跑库**的用例，而不是只测模型接线：
  * 迁移脚本与模型是**两条独立的写侧**，它们对同一列写出的密文必须能互相解开——
@@ -11,24 +11,29 @@
  *
  * 可证伪对：同时放一行**明文**用户手机号，证明本用例跑的是脚本的真实扫描路径
  * （不是"firealarms 恰好没数据所以什么也没发生"），也顺带守住 users 腿没被
- * 2026-10-16 的泛化改造改坏。
+ * 2026-10-16 的泛化改造改坏；头像同理放一行明文 useravatars.data，钉住 2026-10-30
+ * 的收口——漏掉这一列时，轮换 AES_SECRET_KEY 后头像密文永久解不开。
  */
 
 const path = require('path');
 const mongoose = require('mongoose');
 const { execFileSync } = require('child_process');
 
+const { decryptPii } = require('../../utils/piiCrypto');
+
 const ROOT = path.resolve(__dirname, '../../..');
 const SCRIPT = path.join('scripts', 'migrate-pii-encryption.js');
 
 const LEGACY_ALARM_PHONE = '13500135000';
 const LEGACY_USER_PHONE = '13600136001';
+const LEGACY_AVATAR_PLAINTEXT = 'avatar-legacy-bytes';
 
-describe('migrate-pii-encryption：报警上报人电话列纳入迁移', () => {
+describe('migrate-pii-encryption：报警电话 / 用户邮箱 / 头像列纳入迁移', () => {
   let FireAlarm;
   const stamp = `pmmig${String(Date.now()).slice(-8)}`;
   let legacyAlarmId;
   let legacyUserId;
+  let legacyAvatarId;
 
   const childUri = () =>
     `mongodb://${mongoose.connection.host}:${mongoose.connection.port}/${mongoose.connection.name}`;
@@ -95,6 +100,19 @@ describe('migrate-pii-encryption：报警上报人电话列纳入迁移', () => 
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+
+    legacyAvatarId = new mongoose.Types.ObjectId();
+    await mongoose.connection.collection('useravatars').insertOne({
+      _id: legacyAvatarId,
+      mime: 'image/png',
+      data: LEGACY_AVATAR_PLAINTEXT,
+      hash: 'a'.repeat(64),
+      size: Buffer.byteLength(LEGACY_AVATAR_PLAINTEXT),
+      width: 32,
+      height: 32,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
   });
 
   afterAll(async () => {
@@ -107,14 +125,19 @@ describe('migrate-pii-encryption：报警上报人电话列纳入迁移', () => 
         .collection('users')
         .deleteMany({ username: new RegExp(`^legacy_${stamp}$`) })
         .catch(() => {});
+      await mongoose.connection
+        .collection('useravatars')
+        .deleteMany({ _id: legacyAvatarId })
+        .catch(() => {});
       await mongoose.connection.close();
     }
   });
 
-  test('--apply 后两列都变成 enc.v2.，且**模型能解开脚本写出的密文**（AAD field 逐字一致）', async () => {
+  test('--apply 后三列都变成 enc.v2.，且读侧能解开脚本写出的密文（AAD field 逐字一致）', async () => {
     const r = runMigrate();
     expect(r.code).toBe(0);
     expect(r.output).toContain('"firealarms"');
+    expect(r.output).toContain('"useravatars"');
     expect(r.output).toContain('"corruptTotal": 0');
 
     const rawAlarm = await mongoose.connection
@@ -131,13 +154,24 @@ describe('migrate-pii-encryption：报警上报人电话列纳入迁移', () => 
     const rawUser = await mongoose.connection.collection('users').findOne({ _id: legacyUserId });
     expect(rawUser.phone).toMatch(/^enc\.v2\./);
     expect(rawUser.phoneKey).toMatch(/^[0-9a-f]{64}$/);
+
+    // useravatars 腿：脚本的 AAD field 必须与 avatarService 写侧的 'data' 一致
+    const rawAvatar = await mongoose.connection
+      .collection('useravatars')
+      .findOne({ _id: legacyAvatarId });
+    expect(rawAvatar.data).toMatch(/^enc\.v2\./);
+    expect(rawAvatar.data).not.toContain(LEGACY_AVATAR_PLAINTEXT);
+    expect(decryptPii(rawAvatar.data, { subjectId: String(legacyAvatarId), field: 'data' })).toBe(
+      LEGACY_AVATAR_PLAINTEXT
+    );
   });
 
   test('幂等：再跑一次是演练形态的"无待迁移行"（v2 行被跳过，不会被重加密）', async () => {
     const r = runMigrate();
     expect(r.code).toBe(0);
-    // 第二次跑时 firealarms 段应为 encryptedRows ≥ 1 而 plaintextRows = 0
+    // 第二次跑时 firealarms / useravatars 段应为 encryptedRows ≥ 1 而 plaintextRows = 0
     expect(r.output).toMatch(/"firealarms":\s*\{[^}]*"plaintextRows": 0/);
+    expect(r.output).toMatch(/"useravatars":\s*\{[^}]*"plaintextRows": 0/);
 
     const rawAlarm = await mongoose.connection
       .collection('firealarms')

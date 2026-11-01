@@ -21,7 +21,7 @@ import router from '@/router'
 import i18n from '@/i18n'
 // FE-M1：密文被拒时统一失效公钥缓存（loginCipher 仅依赖 axios，无循环）
 import { invalidatePublicKeyCache } from '@/utils/loginCipher'
-import { getReauthTicket, clearReauthTicket } from '@/utils/reauthTicket'
+import { clearReauthTicket } from '@/utils/reauthTicket'
 import {
   ApiEnvelopeSchema,
   AuthMeResponseSchema,
@@ -84,6 +84,7 @@ const ERROR_CODE_I18N_MAP = {
   QUERY_PARAM_MUST_BE_SCALAR: 'errors.queryParamMustBeScalar',
   // ================= i18n 全量改造 =================
   DATE_PARAM_INVALID: 'errors.dateParamInvalid',
+  DATE_RANGE_INVALID: 'errors.dateRangeInvalid',
   VALIDATION_FAILED: 'errors.validationFailed',
   ALARM_NOT_FOUND: 'errors.alarmNotFound',
   ALARM_VIEW_FORBIDDEN: 'errors.alarmViewForbidden',
@@ -117,6 +118,7 @@ const ERROR_CODE_I18N_MAP = {
   EMAIL_INVALID: 'errors.emailInvalid',
   EMAIL_TAKEN: 'errors.emailTaken',
   AVATAR_INVALID: 'errors.avatarInvalid',
+  AVATAR_NOT_FOUND: 'errors.avatarNotFound',
   CANNOT_REVOKE_CURRENT_SESSION: 'errors.cannotRevokeCurrentSession',
   SESSION_NOT_FOUND: 'errors.sessionNotFound',
   DEVICE_NOT_FOUND: 'errors.deviceNotFound',
@@ -130,6 +132,7 @@ const ERROR_CODE_I18N_MAP = {
   IP_LIST_DURATION_OUT_OF_RANGE: 'errors.ipListDurationOutOfRange',
   IP_FULL_RANGE_SUPER_ADMIN_ONLY: 'errors.ipFullRangeSuperAdminOnly',
   IP_COVERED_BY_WHITELIST: 'errors.ipCoveredByWhitelist',
+  IP_SEGMENT_WRITE_REFUSED: 'errors.ipSegmentWriteRefused',
   IP_LIST_ENTRY_NOT_FOUND: 'errors.ipListEntryNotFound',
   IP_FULL_RANGE_REMOVE_SUPER_ADMIN_ONLY: 'errors.ipFullRangeRemoveSuperAdminOnly',
   PERMISSION_NOT_FOUND: 'errors.permissionNotFound',
@@ -140,6 +143,8 @@ const ERROR_CODE_I18N_MAP = {
   PERMISSION_LIST_INVALID: 'errors.permissionListInvalid',
   EXPORT_FORMAT_UNSUPPORTED: 'errors.exportFormatUnsupported',
   EXPORT_BUSY: 'errors.exportBusy',
+  PII_EXPORT_QUOTA_EXCEEDED: 'errors.piiExportQuotaExceeded',
+  PRIVACY_CONSENT_REQUIRED: 'errors.privacyConsentRequired',
   REPORT_TYPE_UNSUPPORTED: 'errors.reportTypeUnsupported',
   ROLE_NOT_FOUND: 'errors.roleNotFound',
   ROLE_VIEW_FORBIDDEN: 'errors.roleViewForbidden',
@@ -181,8 +186,21 @@ const ERROR_CODE_I18N_MAP = {
   LOCK_INACTIVE_ACCOUNT: 'errors.lockInactiveAccount',
   ACCOUNT_NOT_LOCKED: 'errors.accountNotLocked',
   CANNOT_RESET_OWN_MFA_VIA_ADMIN: 'errors.cannotResetOwnMfaViaAdmin',
+  PASSWORD_CHANGE_REQUIRED: 'errors.passwordChangeRequired',
+  CANNOT_RESET_OWN_PASSWORD_VIA_ADMIN: 'errors.cannotResetOwnPasswordViaAdmin',
+  CANNOT_RESET_PASSWORD_SUPER_ADMIN: 'errors.cannotResetPasswordSuperAdmin',
+  PASSWORD_RESET_PEER_OR_HIGHER_FORBIDDEN: 'errors.passwordResetPeerOrHigherForbidden',
+  PASSWORD_RESET_FAILED: 'errors.passwordResetFailed',
   TARGET_MFA_NOT_ENABLED: 'errors.targetMfaNotEnabled',
   MFA_RESET_PEER_OR_HIGHER_FORBIDDEN: 'errors.mfaResetPeerOrHigherForbidden',
+  PRIVILEGE_DURATION_INVALID: 'errors.privilegeDurationInvalid',
+  PRIVILEGE_GRANT_INVALID: 'errors.privilegeGrantInvalid',
+  PRIVILEGE_CODE_INVALID: 'errors.privilegeCodeInvalid',
+  PRIVILEGE_GRANT_NOT_FOUND: 'errors.privilegeGrantNotFound',
+  PRIVILEGE_GRANT_NOT_PENDING: 'errors.privilegeGrantNotPending',
+  PRIVILEGE_GRANT_NOT_ACTIVE: 'errors.privilegeGrantNotActive',
+  PRIVILEGE_SELF_APPROVAL_FORBIDDEN: 'errors.privilegeSelfApprovalForbidden',
+  PRIVILEGE_APPROVAL_FORBIDDEN: 'errors.privilegeApprovalForbidden',
   SESSION_REVOKE_SERVICE_UNAVAILABLE: 'errors.sessionRevokeServiceUnavailable',
   FORCE_LOGOUT_MFA_CLEAR_FAILED: 'errors.forceLogoutMfaClearFailed',
   SECURITY_OVERVIEW_FORMAT_INVALID: 'errors.securityOverviewFormatInvalid',
@@ -247,6 +265,11 @@ const ERROR_CODE_I18N_MAP = {
   REAUTH_PROCESS_FAILED: 'errors.reauthProcessFailed',
   REAUTH_TICKET_REQUIRED: 'errors.reauthTicketRequired',
   REAUTH_TICKET_INVALID: 'errors.reauthTicketInvalid',
+  // 请求级幂等（审计一-1）：同键重放不报错（原样回放上一次结果），这三个码是"用错了"
+  IDEMPOTENCY_KEY_REQUIRED: 'errors.idempotencyKeyRequired',
+  IDEMPOTENCY_KEY_INVALID: 'errors.idempotencyKeyInvalid',
+  IDEMPOTENCY_IN_PROGRESS: 'errors.idempotencyInProgress',
+  IDEMPOTENCY_KEY_REUSED: 'errors.idempotencyKeyReused',
   MFA_SECOND_FACTOR_REQUIRED: 'errors.mfaSecondFactorRequired',
   IP_BLOCKED: 'errors.ipBlocked',
   UPLOAD_FILE_TOO_LARGE: 'errors.uploadFileTooLarge',
@@ -256,6 +279,22 @@ const ERROR_CODE_I18N_MAP = {
   PUBLIC_REGISTRATION_DISABLED: 'errors.publicRegistrationDisabled',
   REGISTER_SERVICE_UNAVAILABLE: 'errors.registerServiceUnavailable',
   AUDIT_QUERY_FAILED: 'errors.auditQueryFailed',
+  // 取证溯源（T5/T6）。FORENSIC_POOL_BAN_REFUSED 的**具体原因**在 errors.reason
+  // （full_range_cidr / whitelist_covers / operator_inside / reason_required /
+  // unparsable_cidr / unknown_token / token_expired），视图按 reason 选专属文案；
+  // 这里的码级文案只是「兜底」——reason 未知时才会看到它。
+  FORENSIC_NO_CRITERIA: 'errors.forensicNoCriteria',
+  FORENSIC_POOL_BAN_REFUSED: 'errors.forensicPoolBanRefused',
+  FORENSIC_EXPORT_NO_SECRET: 'errors.forensicExportNoSecret',
+  FORENSIC_QUERY_FAILED: 'errors.forensicQueryFailed',
+  // 升级：触发入口仅超管，但错误文案仍由码化通道翻译（英文界面不得回显后端中文）
+  SUPER_ADMIN_REQUIRED: 'errors.superAdminRequired',
+  UPGRADE_DISABLED: 'errors.upgradeDisabled',
+  UPGRADE_IMAGE_INVALID: 'errors.upgradeImageInvalid',
+  UPGRADE_IMAGE_NOT_ALLOWED: 'errors.upgradeImageNotAllowed',
+  UPGRADE_ALREADY_RUNNING: 'errors.upgradeAlreadyRunning',
+  UPGRADE_QUEUE_UNAVAILABLE: 'errors.upgradeQueueUnavailable',
+  UPGRADE_JOB_NOT_FOUND: 'errors.upgradeJobNotFound',
 }
 
 /**
@@ -282,9 +321,18 @@ export { ERROR_CODE_I18N_MAP, resolveErrorMessage }
 // 拦截器 fallback 走 i18n（按当前 locale 解析，替代硬编码中文兜底）
 const t = (key) => i18n.global.t(key)
 
+/**
+ * API base（单一事实来源）。
+ *
+ * 导出是为了让不走 axios 的调用方复用同一口径：versionWatcher 的 /api/version
+ * 探测原先自己用 BASE_URL 拼路径、忽略 VITE_API_BASE_URL ⇒ 分域或
+ * VITE_API_BASE_URL='/sub/api' 的部署下静默 404（探测失败按纪律静默，无人发现）。
+ */
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
+
 // 创建 axios 实例
 const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
+  baseURL: API_BASE_URL,
   timeout: 15000,
   withCredentials: true,
   headers: {
@@ -292,13 +340,11 @@ const apiClient = axios.create({
   },
 })
 
-// 审计读取票据：由 POST /security/reauth 换取，仅存内存。
-// 无票据时返回空头，让请求按契约拿 401 REAUTH_TICKET_REQUIRED，
-// 由页面统一弹二次验证框（而不是在拦截器里静默重放写请求）。
-const reauthTicketHeaders = () => {
-  const ticket = getReauthTicket()
-  return ticket ? { 'X-Reauth-Ticket': ticket } : {}
-}
+// 审计读取的二次验证（2026-10-31，审计一-3）：**不再有票据请求头**。
+// step-up 结果由服务端按会话记 5 分钟窗口（models/ReauthGrant），窗口内读取端点
+// 直接放行；客户端手里没有任何可重放的凭据，也就没有头可带。
+// 无窗口时请求按契约拿 401 REAUTH_TICKET_REQUIRED，由页面弹二次验证框
+// （而不是在拦截器里静默重放写请求）。
 
 // 「需要二次验证」的两个 401 与「登录态失效」是不同语义：前者绝不能触发
 // 令牌刷新链或强制登出，否则一次票据过期就会把用户踢回登录页。
@@ -338,20 +384,57 @@ let refreshPromise = null
  */
 const AUTH_NO_REFRESH_PATHS = ['/auth/login', '/auth/register', '/auth/refresh']
 
-const doRefreshToken = async () => {
+/**
+ * 并发刷新败者的静默恢复等待窗口（毫秒）
+ *
+ * 后端对「同一枚 refresh 令牌在宽限期内被二次使用」返回 503
+ * SECURITY_SERVICE_UNAVAILABLE（services/authService/token.js 的 CONCURRENT 结局）。
+ * 兄弟标签页的 Set-Cookie 需要一次网络往返才会写进浏览器，因此这里等一小段再重试
+ * 刷新：过早重试会再撞一次宽限窗口，过晚则用户白等。400ms 覆盖同城 RTT。
+ */
+export const REFRESH_RACE_RECOVERY_DELAY_MS = 400
+
+/**
+ * 刷新令牌：把结局归一化成对象，不再用异常表达失败
+ *
+ * 调用方必须能区分两种「刷新失败」：
+ *  - 服务端**明确拒绝**（401/403/400 REFRESH_TOKEN_MISSING）：会话确实不可用，可以登出；
+ *  - **打不通**（网络错误/超时/其它 5xx）：无法证明会话失效，登出就是把有效会话误杀。
+ * 旧实现用 try/catch 一律吞成「失败」，两种结局在调用点无法区分——这正是
+ * 「一次网络抖动 / 一次多标签页竞态就把用户登出」的根因。
+ *
+ * @param {{ raceRecovery?: boolean }} [options] raceRecovery=true 时先等
+ *   REFRESH_RACE_RECOVERY_DELAY_MS 再发请求（只在并发竞态恢复路径使用）
+ * @returns {Promise<{ ok: boolean, status?: number, errorCode?: string }>}
+ */
+const doRefreshToken = async ({ raceRecovery = false } = {}) => {
   if (isRefreshing) return refreshPromise
   isRefreshing = true
   refreshPromise = (async () => {
     try {
+      if (raceRecovery) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, REFRESH_RACE_RECOVERY_DELAY_MS)
+        })
+      }
       // 刷新令牌在 httpOnly cookie(path=/api/auth)中，浏览器按路径自动携带，无需 body；
       // 直接用 axios 调用，避免经过拦截器导致循环；补超时防止刷新请求悬挂阻塞重试链
       const resp = await axios.post(
-        (import.meta.env.VITE_API_BASE_URL || '/api') + '/auth/refresh',
+        API_BASE_URL + '/auth/refresh',
         {},
         { timeout: 10000, withCredentials: true }
       )
       // 新令牌由响应 Set-Cookie 写回浏览器，前端无需（也无法）读取
-      return resp.data?.success === true
+      if (resp.data?.success === true) return { ok: true }
+      // 200 但响应体不符合契约（success 不是字面量 true）：既不能当成功重放，
+      // 也不能据此断言会话失效——归入「无法判定」，由调用方放弃本次请求。
+      return { ok: false, status: resp.status }
+    } catch (err) {
+      return {
+        ok: false,
+        status: err?.response?.status,
+        errorCode: err?.response?.data?.errors?.errorCode,
+      }
     } finally {
       isRefreshing = false
       refreshPromise = null
@@ -359,6 +442,23 @@ const doRefreshToken = async () => {
   })()
   return refreshPromise
 }
+
+/**
+ * 刷新失败能否断言「会话确实不可用」
+ *
+ * 唯一证据是服务端**明确拒绝**这次刷新：
+ *  - 401/403：刷新令牌无效/过期/被撤销、设备会话被踢、账户被锁、口令已变更等
+ *    （controllers/authController/credentials.js 的 REFRESH_OUTCOME_RESPONSES
+ *    把这些结局全部映射到这两个状态码）；
+ *  - 400 REFRESH_TOKEN_MISSING：浏览器里根本没有刷新令牌，无法续期，等同未登录。
+ * 其余结局都不能证明会话失效：网络错误/超时/429/其它 5xx/畸形 200。
+ * 尤其是 503 SECURITY_SERVICE_UNAVAILABLE —— 它包含多标签页并发刷新的 CONCURRENT
+ * 结局，此刻浏览器 cookie 已被胜者换成新令牌，会话是**有效**的。
+ */
+const isRefreshSessionDead = (outcome) =>
+  outcome?.status === 401 ||
+  outcome?.status === 403 ||
+  outcome?.errorCode === 'REFRESH_TOKEN_MISSING'
 
 // ========== 请求取消机制 ==========
 // 每个请求关联一个 AbortController，路由切换时可批量取消在途请求
@@ -429,6 +529,20 @@ apiClient.interceptors.request.use(
   (config) => {
     // 关联 AbortController，支持请求取消（路由切换时批量取消）
     const controller = new AbortController()
+    // 调用方自带的 signal 必须**转发**而不是覆盖：升级进度轮询会带自己的
+    // AbortController（弹窗关闭 / 切换任务即中断在途请求）。原实现无条件覆盖
+    // config.signal：调用方 abort 之后请求仍在飞、响应照样回填——旧任务的
+    // 进度会盖住新任务。
+    const callerSignal = config.signal
+    if (callerSignal && typeof callerSignal.addEventListener === 'function') {
+      if (callerSignal.aborted) {
+        controller.abort(callerSignal.reason)
+      } else {
+        callerSignal.addEventListener('abort', () => controller.abort(callerSignal.reason), {
+          once: true,
+        })
+      }
+    }
     config.signal = controller.signal
     const method = String(config.method || 'get').toLowerCase()
     const reqKey = `${method}::${config.url}::${Date.now()}::${Math.random().toString(36).slice(2, 8)}`
@@ -565,6 +679,18 @@ apiClient.interceptors.response.use(
       return Promise.reject(error)
     }
 
+    /**
+     * 调用方声明「本次失败不打扰用户」（config.silentErrors）。
+     *
+     * 升级进度轮询是 3s 一次的自动请求：切流瞬间的 502 / 网络抖动极常见，
+     * 逐次弹红框会在用户面前刷屏，还会把真正需要人介入的失败淹没在噪音里。
+     * 只吞掉**提示**：schema 校验、401 刷新与登出链一律照旧。
+     * 因此 401/403 两个分支必须照常进入（见下方 notifyStatus）：401 分支里除了
+     * 提示还住着「刷新成功后重发仍 401」的 forceSessionReset（登出链），403 分支
+     * 承载鉴权结论；分支**内部的提示**才由 silentErrors 决定要不要弹。
+     */
+    const silentErrors = error.config?.silentErrors === true
+
     if (error.response) {
       const { status, data, config } = error.response
 
@@ -611,7 +737,8 @@ apiClient.interceptors.response.use(
         String(config?.url || '').includes(p)
       )
       // 会话确认不可用：提示 + 清本地态 + 跳登录。两条路径共用（Qoder 轮7）：
-      //   ① 刷新失败（refresh cookie 过期/被撤销/网络错误）；
+      //   ① 刷新被服务端**明确拒绝**（401/403/REFRESH_TOKEN_MISSING；网络错误与 5xx
+      //      不算——见下方 isRefreshSessionDead 的口径）；
       //   ② 刷新**成功**但重发的那一发仍然 401 —— 典型形态是设备被踢或强制下线：
       //      cookie 有效、新令牌照发，但令牌里的 sid 已失效，于是每次请求都落在
       //      "刷新成功 → 重发 → 又 401"。此前 ② 因 `_retried` 短路了整段登出逻辑，
@@ -641,110 +768,191 @@ apiClient.interceptors.response.use(
         })
       }
 
-      if (status === 401 && !config?._retried && !isAuthEntryPoint) {
-        try {
-          const refreshed = await doRefreshToken()
-          if (refreshed && config) {
-            config._retried = true
-            // 新 access_token 已由刷新响应 Set-Cookie 写入浏览器，直接重发即可
-            delete config.headers.Authorization
-            return apiClient.request(config)
+      /**
+       * 强制改密：写本地标记 + 引导到 /profile。
+       *
+       * 为什么不只弹提示：该闸生效期间**所有**业务请求都会失败，一次提示等于把用户留在原地
+       * 反复点。这里先把 mustChangePassword 写进 store（路由守卫据此收敛），再跳 /profile；
+       * 已在 /profile 时只更新标记——那一页的几个卡片会同时收到 403，逐个弹提示就是刷屏。
+       * 去重锁与 forceSessionReset 同一思路：并发请求只处理第一次。
+       */
+      const handlePasswordChangeRequired = (payload, { silent } = {}) => {
+        if (apiClient._isHandlingPasswordChange) return
+        apiClient._isHandlingPasswordChange = true
+        ;(async () => {
+          let onProfile = false
+          try {
+            const { useAuthStore } = await import('@/store')
+            const store = useAuthStore()
+            const current = store.currentUser
+            if (current && current.mustChangePassword !== true) {
+              store.setCurrentUser({ ...current, mustChangePassword: true })
+            }
+          } catch (_) {}
+          try {
+            onProfile = router.currentRoute?.value?.path === '/profile'
+          } catch (_) {}
+          if (!onProfile) {
+            if (!silent) {
+              ElMessage.warning(
+                resolveErrorMessage(payload) || payload?.message || t('messages.accessDenied')
+              )
+            }
+            router.replace('/profile').catch(() => {})
           }
-        } catch (_) {
-          // 刷新失败，走正常登出流程
+        })().finally(() => {
+          apiClient._isHandlingPasswordChange = false
+        })
+      }
+
+      // 强制改密闸（P1-2）：服务端对所有非放行路径一律回 PASSWORD_CHANGE_REQUIRED。
+      // 不在这里统一处理的话，页面只会得到一条「权限不足」，然后继续发下一条同样失败的
+      // 请求——用户被留在看起来坏掉的界面上，而「去改密」这个唯一的下一步没有任何入口。
+      if (incomingErrorCode === 'PASSWORD_CHANGE_REQUIRED') {
+        handlePasswordChangeRequired(data, { silent: silentErrors })
+        return Promise.reject(error)
+      }
+
+      if (status === 401 && !config?._retried && !isAuthEntryPoint) {
+        const outcome = await doRefreshToken()
+        if (outcome?.ok && config) {
+          config._retried = true
+          // 新 access_token 已由刷新响应 Set-Cookie 写入浏览器，直接重发即可
+          delete config.headers.Authorization
+          return apiClient.request(config)
         }
 
         // silent401：调用方声明「401 属预期结果」（会话恢复探测 /auth/me）。
         // 刷新仍要尝试——access 过期而 refresh 有效时会话应当被救回；
         // 但刷新也失败时不提示、不跳转，把结果交还调用方判定。
         // 否则未登录用户首次访问任意页面都会先弹一次「登录已过期」。
-        if (config?.silent401) {
+        const rejectAsSessionDead = () => {
+          if (config?.silent401) return Promise.reject(error)
+          forceSessionReset(data)
           return Promise.reject(error)
         }
 
-        forceSessionReset(data)
-        return Promise.reject(error)
+        // 503（含 CONCURRENT）：静默恢复一次。
+        // 后端对「同一浏览器的两个标签页几乎同时刷新」有宽限：败者拿到 503
+        // SECURITY_SERVICE_UNAVAILABLE，但胜者的 Set-Cookie 已经把浏览器里的
+        // access/refresh 都换成了新令牌——本次 401 只是**抢跑**，不是会话失效。
+        // 等一小段让 Set-Cookie 落地后重试刷新一次：成功即重放原请求（写请求也安全，
+        // 原请求在鉴权层就被拒、处理器从未执行）；仍失败则放弃本次请求，不打扰用户。
+        if (outcome?.status === 503 && config && !config._raceRecovered) {
+          config._raceRecovered = true
+          const recovered = await doRefreshToken({ raceRecovery: true })
+          if (recovered?.ok && config) {
+            config._retried = true
+            delete config.headers.Authorization
+            return apiClient.request(config)
+          }
+          // 恢复这一发若被明确拒绝，才轮到登出；否则只放弃本次请求
+          if (isRefreshSessionDead(recovered)) return rejectAsSessionDead()
+          return Promise.reject(error)
+        }
+
+        // 网络错误/超时/429/其它 5xx：无法证明会话失效。
+        // 不弹「会话已失效」、不清本地身份、不跳登录页——只把 401 交还调用方；
+        // 网络/后端故障的真实原因会由界面上后续请求各自的失败提示承担。
+        if (!isRefreshSessionDead(outcome)) return Promise.reject(error)
+
+        return rejectAsSessionDead()
       }
 
-      switch (status) {
-        case 400:
-          ElMessage.warning(
-            resolveErrorMessage(data) || data?.message || t('messages.requestParamError')
-          )
-          break
-        case 401:
-          // 令牌过期路径已在上方处理（重试或登出），不重复提示。
-          // P3-41：认证入口的 401（凭据错误）跳过了上方分支，必须在此提示，
-          // 否则输错密码将完全没有反馈——比原来的「等 10s 才提示」更糟。
-          if (isAuthEntryPoint) {
-            ElMessage.error(resolveErrorMessage(data) || data?.message || t('login.failed'))
-          } else if (!config?.silent401) {
-            // 落到这里的只剩一种形态：**刷新成功后重发仍然 401**（`_retried` 已置真，
-            // 上方分支不再进入）。此前它两头都不管——上方因 `_retried` 短路、
-            // 这里只服务认证入口——于是用户既没提示也没登出。
-            forceSessionReset(data)
-          }
-          break
-        case 403:
-          ElMessage.error(resolveErrorMessage(data) || data?.message || t('messages.accessDenied'))
-          break
-        case 404:
-          ElMessage.error(
-            resolveErrorMessage(data) || data?.message || t('messages.resourceNotFound')
-          )
-          break
-        case 405:
-          // HTTP_METHOD_UNSUPPORTED：协议层拒绝（如 TRACE/TRACK），非用户可纠正的操作错误
-          ElMessage.error(
-            resolveErrorMessage(data) || data?.message || t('messages.methodNotAllowed')
-          )
-          break
-        case 409:
-          // 状态冲突类（ALARM_ALREADY_HANDLED / ALARM_STATUS_NOT_ALLOWED*）：
-          // 多为「记录已被他人处理」这类可解释的并发结果，用 warning 而非 error
-          ElMessage.warning(resolveErrorMessage(data) || data?.message || t('messages.conflict'))
-          break
-        case 413:
-          // PAYLOAD_EXCEEDS_LIMIT / PAYLOAD_TOO_LARGE：请求体超过服务端上限
-          ElMessage.error(
-            resolveErrorMessage(data) || data?.message || t('messages.payloadTooLarge')
-          )
-          break
-        case 415:
-          // CONTENT_TYPE_UNSUPPORTED：媒体类型不在白名单内
-          ElMessage.error(
-            resolveErrorMessage(data) || data?.message || t('messages.unsupportedMediaType')
-          )
-          break
-        case 429:
-          // 优先透传后端消息（如 MFA 防爆破锁定的"10 分钟后再试"），映射缺失时按 locale 兜底
-          ElMessage.warning(
-            resolveErrorMessage(data) || data?.message || t('messages.tooManyRequests')
-          )
-          break
-        case 431:
-          // HEADER_COUNT_EXCESSIVE / HEADER_VALUE_TOO_LONG：请求头数量或长度超限
-          ElMessage.error(
-            resolveErrorMessage(data) || data?.message || t('messages.requestHeaderTooLarge')
-          )
-          break
-        case 500:
-          // 500 与 503 同口径：先走码化翻译（如 INTERNAL_ERROR / AUDIT_EXPORT_FAILED），
-          // 否则英文界面下会直接回显后端中文文案
-          ElMessage.error(resolveErrorMessage(data) || data?.message || t('messages.serverError'))
-          break
-        case 503:
-          // 服务不可用类（如 LOGOUT_REVOKE_FAILED / CAPTCHA_SERVICE_UNAVAILABLE）：
-          // 走码化翻译通道，否则会退到 default 分支直接回显后端中文，英文界面下不一致
-          ElMessage.error(resolveErrorMessage(data) || data?.message || t('messages.serverError'))
-          break
-        default:
-          ElMessage.error(data?.message || t('messages.requestFailed'))
-      }
+      // 静音只覆盖「提示」本身；401/403 属控制流/安全语义，分支必须照常进入：
+      // 401 分支里除了提示还住着「刷新成功后重发仍 401」的 forceSessionReset（登出链），
+      // 403 分支承载鉴权结论。二者若整段被跳过，会话已死的页面会静默僵住——
+      // 升级轮询正是唯一的 silentErrors 调用方（3s 一次），这条路径真实可达。
+      // 分支**内部**的提示仍按 silentErrors 决定是否弹（403 静音不丢任何语义，
+      // 因为该分支只有一条提示；429 等仍整体静音，避免轮询把红框刷屏）。
+      const notifyStatus = !silentErrors || status === 401 || status === 403
+      if (notifyStatus)
+        switch (status) {
+          case 400:
+            ElMessage.warning(
+              resolveErrorMessage(data) || data?.message || t('messages.requestParamError')
+            )
+            break
+          case 401:
+            // 令牌过期路径已在上方处理（重试或登出），不重复提示。
+            // P3-41：认证入口的 401（凭据错误）跳过了上方分支，必须在此提示，
+            // 否则输错密码将完全没有反馈——比原来的「等 10s 才提示」更糟。
+            if (isAuthEntryPoint) {
+              // 认证入口的凭据错误提示：静音态下由调用方自行处理文案
+              if (!silentErrors)
+                ElMessage.error(resolveErrorMessage(data) || data?.message || t('login.failed'))
+            } else if (!config?.silent401) {
+              // 落到这里的只剩一种形态：**刷新成功后重发仍然 401**（`_retried` 已置真，
+              // 上方分支不再进入）。此前它两头都不管——上方因 `_retried` 短路、
+              // 这里只服务认证入口——于是用户既没提示也没登出。
+              forceSessionReset(data)
+            }
+            break
+          case 403:
+            // 静音态（轮询）下不弹：权限不足的结论已由 reject 交还调用方，
+            // 3s 一次重复弹「权限不足」只会把真正需要人介入的失败淹没
+            if (!silentErrors)
+              ElMessage.error(
+                resolveErrorMessage(data) || data?.message || t('messages.accessDenied')
+              )
+            break
+          case 404:
+            ElMessage.error(
+              resolveErrorMessage(data) || data?.message || t('messages.resourceNotFound')
+            )
+            break
+          case 405:
+            // HTTP_METHOD_UNSUPPORTED：协议层拒绝（如 TRACE/TRACK），非用户可纠正的操作错误
+            ElMessage.error(
+              resolveErrorMessage(data) || data?.message || t('messages.methodNotAllowed')
+            )
+            break
+          case 409:
+            // 状态冲突类（ALARM_ALREADY_HANDLED / ALARM_STATUS_NOT_ALLOWED*）：
+            // 多为「记录已被他人处理」这类可解释的并发结果，用 warning 而非 error
+            ElMessage.warning(resolveErrorMessage(data) || data?.message || t('messages.conflict'))
+            break
+          case 413:
+            // PAYLOAD_EXCEEDS_LIMIT / PAYLOAD_TOO_LARGE：请求体超过服务端上限
+            ElMessage.error(
+              resolveErrorMessage(data) || data?.message || t('messages.payloadTooLarge')
+            )
+            break
+          case 415:
+            // CONTENT_TYPE_UNSUPPORTED：媒体类型不在白名单内
+            ElMessage.error(
+              resolveErrorMessage(data) || data?.message || t('messages.unsupportedMediaType')
+            )
+            break
+          case 429:
+            // 优先透传后端消息（如 MFA 防爆破锁定的"10 分钟后再试"），映射缺失时按 locale 兜底
+            ElMessage.warning(
+              resolveErrorMessage(data) || data?.message || t('messages.tooManyRequests')
+            )
+            break
+          case 431:
+            // HEADER_COUNT_EXCESSIVE / HEADER_VALUE_TOO_LONG：请求头数量或长度超限
+            ElMessage.error(
+              resolveErrorMessage(data) || data?.message || t('messages.requestHeaderTooLarge')
+            )
+            break
+          case 500:
+            // 500 与 503 同口径：先走码化翻译（如 INTERNAL_ERROR / AUDIT_EXPORT_FAILED），
+            // 否则英文界面下会直接回显后端中文文案
+            ElMessage.error(resolveErrorMessage(data) || data?.message || t('messages.serverError'))
+            break
+          case 503:
+            // 服务不可用类（如 LOGOUT_REVOKE_FAILED / CAPTCHA_SERVICE_UNAVAILABLE）：
+            // 走码化翻译通道，否则会退到 default 分支直接回显后端中文，英文界面下不一致
+            ElMessage.error(resolveErrorMessage(data) || data?.message || t('messages.serverError'))
+            break
+          default:
+            ElMessage.error(data?.message || t('messages.requestFailed'))
+        }
     } else if (error.request) {
-      ElMessage.error(t('messages.networkError'))
+      if (!silentErrors) ElMessage.error(t('messages.networkError'))
     } else {
-      ElMessage.error(error.message || t('messages.requestConfigError'))
+      if (!silentErrors) ElMessage.error(error.message || t('messages.requestConfigError'))
     }
 
     return Promise.reject(error)
@@ -771,6 +979,8 @@ export const api = {
     getSessionStatus: (config) => apiClient.get('/auth/session', config),
     changePassword: (data) => apiClient.put('/auth/password', data),
     updateProfile: (data) => apiClient.put('/auth/profile', data),
+    uploadAvatar: (data) => apiClient.put('/auth/avatar', data),
+    deleteAvatar: () => apiClient.delete('/auth/avatar'),
     refreshToken: (data) => apiClient.post('/auth/refresh', data),
     // MFA 两步验证（I-06）
     getMfaStatus: () => apiClient.get('/auth/mfa/status'),
@@ -790,10 +1000,11 @@ export const api = {
 
   // 用户管理
   users: {
-    getList: (params) => apiClient.get('/users', { params }),
+    getList: (params, config) => apiClient.get('/users', { params, ...config }),
     getById: (id) => apiClient.get(`/users/${encodePathSegment(id)}`),
     getStats: () => apiClient.get('/users/stats'),
-    create: (data) => apiClient.post('/users', data),
+    // config 透传：建号是「点一次多一条」的端点，视图会带 Idempotency-Key 提交标识
+    create: (data, config) => apiClient.post('/users', data, config),
     update: (id, data) => apiClient.put(`/users/${encodePathSegment(id)}`, data),
     delete: (id) => apiClient.delete(`/users/${encodePathSegment(id)}`),
     // 批量删除：固定字面量 /users/batch（后端把该路由注册在 /:id 之前），ids 为 1-100 个 ID。
@@ -807,29 +1018,38 @@ export const api = {
     getList: (params) => apiClient.get('/roles', { params }),
     getAll: () => apiClient.get('/roles/all'),
     getById: (id) => apiClient.get(`/roles/${encodePathSegment(id)}`),
-    create: (data) => apiClient.post('/roles', data),
+    create: (data, config) => apiClient.post('/roles', data, config),
     update: (id, data) => apiClient.put(`/roles/${encodePathSegment(id)}`, data),
     delete: (id) => apiClient.delete(`/roles/${encodePathSegment(id)}`),
     assignPermissions: (id, data) =>
       apiClient.put(`/roles/${encodePathSegment(id)}/permissions`, data),
-    getPermissionTree: () => apiClient.get('/roles/permissions/tree'),
+    getPermissionTree: (config) => apiClient.get('/roles/permissions/tree', config),
   },
 
   // 权限管理
   permissions: {
     getList: (params) => apiClient.get('/permissions', { params }),
     getById: (id) => apiClient.get(`/permissions/${encodePathSegment(id)}`),
-    create: (data) => apiClient.post('/permissions', data),
+    create: (data, config) => apiClient.post('/permissions', data, config),
     update: (id, data) => apiClient.put(`/permissions/${encodePathSegment(id)}`, data),
     delete: (id) => apiClient.delete(`/permissions/${encodePathSegment(id)}`),
-    batchCreate: (data) => apiClient.post('/permissions/batch', data),
+    batchCreate: (data, config) => apiClient.post('/permissions/batch', data, config),
+    // 临时权限授予（C-08）：路由挂在 /api/permissions/grants 下，与权限目录同一命名空间
+    getGrants: (params) => apiClient.get('/permissions/grants', { params }),
+    getGrantReview: () => apiClient.get('/permissions/grants/review'),
+    createGrant: (data, config) => apiClient.post('/permissions/grants', data, config),
+    approveGrant: (id) => apiClient.post(`/permissions/grants/${encodePathSegment(id)}/approve`),
+    rejectGrant: (id, data) =>
+      apiClient.post(`/permissions/grants/${encodePathSegment(id)}/reject`, data),
+    revokeGrant: (id, data) =>
+      apiClient.post(`/permissions/grants/${encodePathSegment(id)}/revoke`, data),
   },
 
   // 设备管理
   devices: {
     getList: (params) => apiClient.get('/devices', { params }),
     getById: (id) => apiClient.get(`/devices/${encodePathSegment(id)}`),
-    create: (data) => apiClient.post('/devices', data),
+    create: (data, config) => apiClient.post('/devices', data, config),
     update: (id, data) => apiClient.put(`/devices/${encodePathSegment(id)}`, data),
     delete: (id) => apiClient.delete(`/devices/${encodePathSegment(id)}`),
     updateStatus: (id, data) => apiClient.put(`/devices/${encodePathSegment(id)}/status`, data),
@@ -844,7 +1064,7 @@ export const api = {
   alarms: {
     getList: (params) => apiClient.get('/alarms', { params }),
     getById: (id) => apiClient.get(`/alarms/${encodePathSegment(id)}`),
-    report: (data) => apiClient.post('/alarms/report', data),
+    report: (data, config) => apiClient.post('/alarms/report', data, config),
     dispatch: (id, data) => apiClient.put(`/alarms/${encodePathSegment(id)}/dispatch`, data),
     arrive: (id) => apiClient.put(`/alarms/${encodePathSegment(id)}/arrive`),
     resolve: (id, data) => apiClient.put(`/alarms/${encodePathSegment(id)}/resolve`, data),
@@ -856,7 +1076,7 @@ export const api = {
   inspections: {
     getList: (params) => apiClient.get('/inspections', { params }),
     getById: (id) => apiClient.get(`/inspections/${encodePathSegment(id)}`),
-    create: (data) => apiClient.post('/inspections', data),
+    create: (data, config) => apiClient.post('/inspections', data, config),
     update: (id, data) => apiClient.put(`/inspections/${encodePathSegment(id)}`, data),
     start: (id) => apiClient.put(`/inspections/${encodePathSegment(id)}/start`),
     complete: (id, data) => apiClient.put(`/inspections/${encodePathSegment(id)}/complete`, data),
@@ -890,11 +1110,21 @@ export const api = {
   // 安全管理
   security: {
     getOverview: () => apiClient.get('/security/overview'),
-    getAlerts: () => apiClient.get('/security/alerts', { headers: reauthTicketHeaders() }),
-    queryAuditLogs: (params) =>
-      apiClient.get('/security/audit-logs', { params, headers: reauthTicketHeaders() }),
-    // 二次验证换取审计读取票据（5 分钟）。body 同写操作：{ currentPassword |
-    // encCurrentPassword | mfaCode }。票据只进内存，登出即丢弃。
+    // 版本概况（security:config）：服务端构建、当前承接色、升级代理心跳与任务历史。
+    // 快照数据，页面按需刷新；升级弹窗打开期间另按任务 ID 轮询 /upgrade/jobs/:jobId。
+    // config 透传：{ signal } 让调用方可在弹窗关闭 / 切换任务时中断在途请求
+    getUpgradeOverview: (config) => apiClient.get('/security/upgrade', config),
+    // config 透传 { signal, silentErrors }：轮询是 3s 一次的自动请求，失败不弹提示
+    // （由调用方按退避策略重试），关闭弹窗 / 切换任务时中断在途请求。
+    getUpgradeJob: (jobId, config) =>
+      apiClient.get(`/security/upgrade/jobs/${encodePathSegment(jobId)}`, config),
+    // 一键升级（仅超管 + 二次验证）：body { image, currentPassword | encCurrentPassword | mfaCode }。
+    // image 必须是 name@sha256:<64hex>；服务端只把请求写入队列，由宿主代理执行并重新校验。
+    triggerUpgrade: (data) => apiClient.post('/security/upgrade/requests', data),
+    getAlerts: () => apiClient.get('/security/alerts'),
+    queryAuditLogs: (params) => apiClient.get('/security/audit-logs', { params }),
+    // 二次验证（5 分钟会话窗口 + 一次性票据）。body 同写操作：{ currentPassword |
+    // encCurrentPassword | mfaCode }。窗口存在服务端，客户端不保管任何凭据。
     createReauthTicket: (credential) => apiClient.post('/security/reauth', credential),
     getRegistrationConfig: () => apiClient.get('/security/config/allowPublicRegistration'),
     setRegistrationConfig: (data) =>
@@ -910,6 +1140,10 @@ export const api = {
     // 需操作者本人二次验证：data 为 { currentPassword | encCurrentPassword | mfaCode }。
     resetUserMfa: (userId, data) =>
       apiClient.put(`/security/users/${encodePathSegment(userId)}/mfa/reset`, data),
+    // P1-2 管理员重置口令（账户救济）：返回的一次性临时口令只用于本次展示，
+    // 服务端不落明文、审计不含口令；用户首次登录必须改密。
+    resetUserPassword: (userId, data) =>
+      apiClient.put(`/security/users/${encodePathSegment(userId)}/password/reset`, data),
     // 锁定/解锁用户（user:lock）：locked 必须是真布尔——路由 toBoolean 收口前，
     // 字符串 'false' 会被服务层按 truthy 判成锁定。reason 可选 ≤500，锁定方向
     // 写入 user.remark 与 user_locked 审计（服务层连带清 lockUntil 并失效权限缓存）
@@ -940,17 +1174,48 @@ export const api = {
     // 取证级导出：CSV + 签名 manifest（尾部注释行 + X-Audit-Manifest-* 响应头），
     // 截断时带 X-Audit-Truncated: true。与 /reports/export?type=audit 的 xlsx 报表定位不同。
     exportAuditLogs: (params) =>
-      apiClient.get('/security/audit-logs/export', {
-        params,
-        responseType: 'blob',
-        headers: reauthTicketHeaders(),
-      }),
+      apiClient.get('/security/audit-logs/export', { params, responseType: 'blob' }),
     // 系统安全统计（管理员，需 security:stats）
     getSecurityStats: () => apiClient.get('/security/stats'),
     // 个人安全信息 / 账号绑定 / 个人操作日志（本人数据，无权限码门控）
     getMySecurityInfo: () => apiClient.get('/security/my-info'),
     getAccountBindings: () => apiClient.get('/security/bindings'),
     getMyLogs: (params) => apiClient.get('/security/my-logs', { params }),
+
+    // ================= 取证溯源（T5/T6）=================
+    // 后端挂载前缀 /api/security/forensic（src/routes/securityRoutes.js 的
+    // router.use('/forensic', forensicRoutes)），故这里写 /security/forensic/*。
+    //
+    // 信封口径（utils/apiResponse）：成功 { success, message, data }，失败
+    // { success: false, message, errors: { errorCode, ...params } }。axios 的
+    // res.data 就是这层信封，**业务负载在 res.data.data** —— 视图一律读内层 data，
+    // 不要读 res.data（那拿到的是信封本身）。
+    //
+    // 溯源查询：ip / fingerprint / ipSegment 至少给一个，否则后端 400
+    // FORENSIC_NO_CRITERIA（地址解析不出也走同一个码，不是空结果）。
+    // 传 fingerprint 时响应才带 pools —— 那就是「他的 ip 池」。
+    getForensicTrace: (params, config) =>
+      apiClient.get('/security/forensic/trace', { params, ...config }),
+    // IP 池聚类：windowHours(1..720，默认 24) minHits(默认 20) minIps(默认 4) limit(默认 50)。
+    // 返回 segments 与 recommended（后者是 recommendBan=true 的子集）。
+    getForensicClusters: (params, config) =>
+      apiClient.get('/security/forensic/clusters', { params, ...config }),
+    // 封段两步走：先申请确认票据（不落库），再持票落库。
+    // 被护栏拒绝时 HTTP 400 + FORENSIC_POOL_BAN_REFUSED，**具体原因在 errors.reason**，
+    // 视图必须按 reason 给专属文案，不能笼统报「操作失败」。
+    // config 透传 { silentErrors }：本视图要把拒绝原因渲染在页面上，不希望同一次失败
+    // 再弹一条笼统的拦截器提示（重复且更模糊）。
+    requestPoolBan: (data, config) =>
+      apiClient.post('/security/forensic/pool-ban/request', data, config),
+    // 持票落库。token 一次性、10 分钟失效，原样提交。响应 bannedCount 只数**真的**
+    // 写进去的条数（addToBlacklist 从不抛错，「没报错」≠「封上了」），
+    // 故成功提示必须用 bannedCount 报实数。
+    confirmPoolBan: (data, config) =>
+      apiClient.post('/security/forensic/pool-ban/confirm', data, config),
+    // 签名导出：参数与 trace 同形，响应 data.pkg 是签名包（v/alg/keyId/exportedAt/
+    // count/digest/signature/records/manifestRef）。未配密钥 ⇒ 400
+    // FORENSIC_EXPORT_NO_SECRET，绝不能当成功。
+    exportForensic: (data, config) => apiClient.post('/security/forensic/export', data, config),
   },
 }
 

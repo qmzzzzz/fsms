@@ -1,7 +1,7 @@
 /**
  * 白名单豁免标记（req.ipWhitelisted）的可信边界（2026-09-26 审计 Top-3）
  *
- * 缺陷原文：白名单双豁免（限流 + CSRF），`originCheck.js:98` / `rateLimit.js:25`，
+ * 缺陷原文：白名单双豁免（限流 + CSRF），`originCheck.js:98` / `rateLimit.js:87`，
  * 修复面「改用 socket 地址（照抄 metricsAuth）」。
  *
  * 修复已落地（security.js 的 `isWhitelistExemptionTrustworthy`，把"发放豁免标记"

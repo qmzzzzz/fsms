@@ -37,6 +37,7 @@ describe('端到端：skipGlobalAudit 命中路径不再双写', () => {
   let Role;
   let Permission;
   let AuditLog;
+  let SystemConfig;
   let admin;
   let adminToken;
   let adminPassword;
@@ -51,7 +52,7 @@ describe('端到端：skipGlobalAudit 命中路径不再双写', () => {
     Permission = require('../../models/Permission');
     AuditLog = require('../../models/AuditLog');
     require('../../models/TokenBlacklist');
-    require('../../models/SystemConfig');
+    SystemConfig = require('../../models/SystemConfig');
 
     const pConfig = await Permission.findOneAndUpdate(
       { code: 'security:config' },
@@ -78,12 +79,25 @@ describe('端到端：skipGlobalAudit 命中路径不再双写', () => {
       },
       { upsert: true, new: true }
     );
+    // 账户救济写路径：审计重抛夹具要打在真实路由上
+    const pReset = await Permission.findOneAndUpdate(
+      { code: 'user:reset_password' },
+      {
+        $setOnInsert: {
+          name: '重置口令',
+          code: 'user:reset_password',
+          type: 'api',
+          module: 'user',
+        },
+      },
+      { upsert: true, new: true }
+    );
     const adminRole = await Role.create({
       name: `P05E2E 配置管理员_${stamp}`,
       code: `P05E2E_${stamp}`,
       level: 9,
       status: 'active',
-      permissions: [pConfig._id, pUpdate._id],
+      permissions: [pConfig._id, pUpdate._id, pReset._id],
     });
     adminPassword = randomPassword();
     admin = await User.create({
@@ -202,5 +216,86 @@ describe('端到端：skipGlobalAudit 命中路径不再双写', () => {
     expect(pushed).toHaveLength(1);
     expect(pushed[0].action).toBe('user_update');
     expect(pushed[0].category).toBe('user');
+  });
+
+  test('配置开关：审计持久化失败 ⇒ 500，且这次 500 必须有全局审计留痕（不得状态已变、审计为零）', async () => {
+    // 夹具只构造 recordDurably 的两个重抛条件：AuditLog.create 失败 + WAL 未启用。
+    // 不变量是「要么状态没变、要么审计存在」；这条路径状态已提交（不可回滚），
+    // 所以唯一可接受的形态是全局审计按路由补记这次 500 —— 恰好 1 条（0=红线，2=双写）。
+    const spyCreate = jest.spyOn(AuditLog, 'create').mockRejectedValue(new Error('audit down'));
+    const spyWal = jest.spyOn(auditBuffer, 'isWalEnabled').mockReturnValue(false);
+    try {
+      const res = await request(app)
+        .put('/api/security/config/loginCaptchaEnabled')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ loginCaptchaEnabled: false, currentPassword: adminPassword });
+
+      expect(res.status).toBe(500);
+      expect(res.body.errors.errorCode).toBe('INTERNAL_ERROR');
+
+      await tick();
+      await tick();
+
+      const cfg = await SystemConfig.findOne({ key: 'loginCaptchaEnabled' }).lean();
+      const stateChanged = cfg.value === false;
+      const pushed = pushedForPath('/api/security/config/loginCaptchaEnabled');
+      expect(stateChanged || pushed.length > 0).toBe(true);
+      expect(pushed).toHaveLength(1);
+      expect(pushed[0]).toMatchObject({
+        action: 'security_config_loginCaptchaEnabled',
+        category: 'security',
+        statusCode: 500,
+        success: false,
+      });
+    } finally {
+      spyCreate.mockRestore();
+      spyWal.mockRestore();
+    }
+  });
+
+  test('重置口令：审计持久化失败 ⇒ 500，且不得状态已变而审计为零', async () => {
+    // admin.js 的同一形状（先置位、后写审计）。这里让 recordDurably 重抛：
+    // 口令与 tokenVersion 已原子提交 ⇒ 兜底只能是全局审计记下这次 500。
+    const target = await User.create({
+      username: `p05reset${stamp}`,
+      email: `p05reset${stamp}@example.com`,
+      password: randomPassword(),
+      status: 'active',
+      department: '总部',
+      roles: [],
+      tokenVersion: 0,
+    });
+    const before = await User.findById(target._id).select('+password tokenVersion');
+    const spyCreate = jest.spyOn(AuditLog, 'create').mockRejectedValue(new Error('audit down'));
+    const spyWal = jest.spyOn(auditBuffer, 'isWalEnabled').mockReturnValue(false);
+    try {
+      const res = await request(app)
+        .put(`/api/security/users/${target._id}/password/reset`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ currentPassword: adminPassword, reason: '审计重抛夹具' });
+
+      expect(res.status).toBe(500);
+      expect(res.body.errors.errorCode).toBe('INTERNAL_ERROR');
+
+      await tick();
+      await tick();
+
+      const after = await User.findById(target._id).select('+password tokenVersion');
+      const stateChanged =
+        String(after.password) !== String(before.password) &&
+        after.tokenVersion === before.tokenVersion + 1;
+      const pushed = pushedForPath(`/api/security/users/${target._id}/password/reset`);
+      expect(stateChanged || pushed.length > 0).toBe(true);
+      expect(pushed).toHaveLength(1);
+      expect(pushed[0]).toMatchObject({
+        action: 'security_users_password_reset',
+        category: 'security',
+        statusCode: 500,
+        success: false,
+      });
+    } finally {
+      spyCreate.mockRestore();
+      spyWal.mockRestore();
+    }
   });
 });

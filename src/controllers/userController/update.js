@@ -8,9 +8,10 @@ const { getOperatorMaxLevel, maxRoleLevel } = require('../../utils/permissionHel
 const logger = require('../../utils/logger');
 const { asyncHandler } = require('../../middleware/errorHandler');
 const { getDataScope, assertRecordInScope } = require('../../middleware/rbac');
-const { isValidAvatar } = require('../../utils/helpers');
+const { isAvatarUrlForUser } = require('../../utils/avatarUrl');
+const { withTransaction } = require('../../utils/transaction');
+const avatarService = require('../../services/avatarService');
 const { normalizeEmailKey } = require('../../utils/emailKey');
-// A3：email 已 at-rest 加密 ⇒ 查重改走 HMAC 检索键（明文列随机 IV，相等性不成立）
 const { piiSearchKey } = require('../../utils/piiCrypto');
 const { isSuperAdminRole } = require('../../utils/superAdmin');
 const statsCache = require('../../services/statsCache');
@@ -60,8 +61,10 @@ const rejectForbiddenStatusChange = async (req, res, { user, status, isSelf, tar
  * IP 范围规则语法（非法片段必须回报，否则入库后规则静默失效）。
  * @returns {boolean} true 表示已写出拒绝响应
  */
-const rejectInvalidFieldFormats = (res, { avatar, allowedIPs }) => {
-  if (avatar !== undefined && avatar !== '' && !isValidAvatar(avatar)) {
+const rejectInvalidFieldFormats = (res, { avatar, allowedIPs }, userId) => {
+  // D3 收口：非空头像只允许服务端为**目标用户**生成的 URL（不是调用者自己的）。
+  // 管理员改他人时此前用 isValidAvatar 会把新 URL 判成非法，反之放行外部 URL/data URI。
+  if (avatar !== undefined && avatar !== '' && !isAvatarUrlForUser(avatar, userId)) {
     ApiResponse.codeError(res, 'AVATAR_INVALID');
     return true;
   }
@@ -197,8 +200,29 @@ const releaseAssignmentsWhenDisabled = async (status, user) => {
 };
 
 /**
+ * 保存用户，并在"清空头像"时把 UserAvatar 记录的删除纳入同一事务
+ *
+ * 只清 User.avatar 指针不删 UserAvatar，图片仍能通过 GET /api/avatars/:id 拉到
+ * （读端查 UserAvatar，不看 User.avatar）；反过来先删后写失败，则用户失去头像。
+ * 非清空路径保持原有 save 语义（不额外开事务，避免无谓的副本集开销）。
+ */
+const saveUserWithAvatarCleanup = async (user, avatar) => {
+  if (avatar !== '') {
+    await userService.saveUser(user);
+    return;
+  }
+  await withTransaction(async (session) => {
+    await avatarService.deleteAvatar(user._id, session);
+    await userService.saveUser(user, session ? { session } : {});
+  });
+};
+
+/**
  * 更新用户信息
  * PUT /api/users/:id
+ *
+ * 恢复可登录状态（非 active → active）先吊销旧令牌再落库，fail-closed：吊销失败则中止恢复并回 503，账户保持原状可安全重试（否则锁定期间被窃取的令牌会重新生效）。
+ * 写入后按变更维度失效缓存：状态/部门变更 → 统计缓存全量失效（A-1）+ 用户缓存；IP 规则变更同样立即失效（否则新规则最长延迟 30 秒，存在越权窗口）。
  */
 const updateUser = asyncHandler(async (req, res) => {
   const errors = validationResult(req);
@@ -228,7 +252,6 @@ const updateUser = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'USER_SCOPE_FORBIDDEN');
   }
 
-  // 以下逐步调用与原实现同序；每步自己决定是否要查库，调用方只管"被拒即 return"
   const targetRoles = await userService.findRolesByIds(user.roles, 'level code isBuiltIn');
   const isSelf = String(user._id) === String(req.user.userId);
 
@@ -236,7 +259,7 @@ const updateUser = asyncHandler(async (req, res) => {
 
   if (await rejectForbiddenStatusChange(req, res, { user, status, isSelf, targetRoles })) return;
 
-  if (rejectInvalidFieldFormats(res, { avatar, allowedIPs })) return;
+  if (rejectInvalidFieldFormats(res, { avatar, allowedIPs }, user._id)) return;
 
   if (await rejectOutOfScopeFieldChange(req, res, { user, department, allowedIPs })) return;
 
@@ -244,9 +267,6 @@ const updateUser = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'EMAIL_TAKEN_SHORT');
   }
 
-  // 恢复可登录状态与专用解锁接口同口径：先吊销旧令牌再落库，否则禁用/锁定
-  // 期间被窃取的令牌会在账户恢复瞬间重新生效。fail-closed：吊销失败则不恢复，
-  // 状态保持原样（仍不可登录），管理员可安全重试。
   const restoringAccess = status === 'active' && user.status !== 'active';
   if (restoringAccess) {
     const { invalidateUserTokens } = require('../../middleware/tokenBlacklist');
@@ -263,27 +283,20 @@ const updateUser = asyncHandler(async (req, res) => {
 
   applyProfileFields(user, { realName, email, phone, department, avatar, status, allowedIPs });
 
-  await userService.saveUser(user);
+  await saveUserWithAvatarCleanup(user, avatar);
 
   await releaseAssignmentsWhenDisabled(status, user);
 
-  // 会话表与 tokenVersion 同步收敛（fail-soft：防线已由 tokenVersion 保证）
   if (restoringAccess) {
     const sessionService = require('../../services/sessionService');
     await sessionService.revokeAllSessionsSafe(user._id, 'access_restored');
   }
 
-  // 统计缓存：状态/部门变更都会改变所有查看者的聚合口径（A-1 全量失效）
   statsCache.invalidateAll('user-update');
-  // 用户状态变更时失效缓存（解锁同样必须失效——
-  // 原实现只对「变为非 active」失效，锁定/禁用解除后 authenticate 的
-  // 60s 缓存仍持有旧的 status，合法用户最长 1 分钟仍被拒）
   if (status !== undefined) {
     invalidateUserCache(user._id);
   }
 
-  // IP 范围规则变更需立即生效：authenticate 的用户缓存持有旧 allowedIPs，
-  // 不失效会让新规则最长延迟 30 秒（存在越权访问窗口）
   if (allowedIPs !== undefined) {
     invalidateUserCache(user._id);
   }

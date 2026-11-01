@@ -1,10 +1,12 @@
 /**
  * 认证相关路由
  */
+// 认证相关路由
 
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const avatarController = require('../controllers/avatarController');
 // D-1：MFA 生命周期端点自 authController 拆出
 const mfaController = require('../controllers/mfaController');
 const { authenticate } = require('../middleware/auth');
@@ -21,6 +23,7 @@ const {
 } = require('../middleware/rateLimit');
 const { body, param } = require('express-validator');
 const { mustBeString } = require('../utils/validationRules');
+const { MAX_DATA_URI_CHARS } = require('../utils/avatarImage');
 const { validatePasswordStrength } = require('../utils/helpers');
 const config = require('../config');
 const ApiResponse = require('../utils/apiResponse');
@@ -36,10 +39,9 @@ const rejectPlaintextInStrict = () => {
   return true;
 };
 
-// S-L1：strict 模式下 enc 与明文字段并存视为协议违规——明文校验器挂在
-// `.if(!enc)` 条件内，并存时会被整体跳过（enc 优先、明文被静默忽略，
-// 不构成降级，但掩盖未完成加密改造的客户端）。此处补一条无条件的
-// 「enc 存在时明文必须缺席」断言；非 strict 双轨灰度期维持原兼容行为
+// S-L1：strict 模式下 enc 与明文字段并存视为协议违规——明文校验器挂在 `.if(!enc)`
+// 条件内，并存时会被整体跳过（enc 优先、明文被静默忽略，不构成降级）。此处补一条
+// 无条件的「enc 存在时明文必须缺席」断言；非 strict 双轨灰度期维持原兼容行为
 const rejectEncPlaintextCoexistence = (encField, plainField) =>
   body(plainField).custom((value, { req }) => {
     if (config.loginEncryptStrict && req.body[encField] && value !== undefined && value !== '') {
@@ -99,6 +101,11 @@ const registerValidation = [
     .trim()
     .isLength({ max: 100 })
     .withMessage('部门不能超过 100 个字符'),
+  // 一-7：隐私告知同意必须**明示**（布尔 true，不接受 'true'/'1'/缺省）——
+  // 缺省为真的写法等于「注册即表示同意」，那正是本轮要关闭的形态。
+  body('privacyConsent')
+    .custom((v) => v === true)
+    .withMessage('请阅读并同意隐私告知后再注册'),
 ];
 
 const loginValidation = [
@@ -239,21 +246,13 @@ const updateProfileValidation = [
     .withMessage('头像地址不能超过 500 个字符'),
 ];
 
-// 路由定义
-// 注册开关：支持运行时动态切换（数据库持久化 + 30 秒缓存）
-// 启动时先使用静态配置，运行时通过 SystemConfig 动态覆盖
-//
+// 注册开关：运行时动态切换（数据库持久化 + 30 秒缓存），启动时先用静态配置。
 // 【顺序契约】strictLimiter → registerIpLimiter → requireRegistrationEnabled
 //            → registerValidation → 控制器（控制器内消费 validationResult）
-//
-// 为什么开关必须排在 `registerValidation` **之前**：开关关闭时唯一还会被执行的
-// 逻辑就是校验链本身（passwordStrengthCheck / normalizeEmail / 各条自定义守卫），
-// 它们的结果随后被 403 丢弃——纯属白跑。这不构成"响应层泄露校验规则"（403 分支
-// 不返回 fieldErrors），但会让"注册已关闭"的实例持续为每个请求做无意义校验，
-// 且让读代码的人误以为关闭态连校验器都不会进（旧测试注释正是这么写的，已更正）。
-//
-// 为什么开关**不能**排到限流器之前：本守卫要读数据库（30s 缓存），
-// 放到限流器前面等于给未认证入口开一个无节流的 DB 探针。
+// 开关必须排在 registerValidation **之前**：关闭态下唯一还会执行的逻辑就是校验链
+// （passwordStrengthCheck / normalizeEmail / 各条自定义守卫），结果随后被 403 丢弃
+// ——纯属白跑；这不构成"响应层泄露校验规则"（403 分支不返回 fieldErrors）。
+// 开关**不能**排到限流器之前：本守卫要读数据库（30s 缓存），放到限流器前面等于给未认证入口开一个无节流的 DB 探针。
 const requireRegistrationEnabled = async (req, res, next) => {
   try {
     const { SystemConfig } = require('../models');
@@ -263,9 +262,7 @@ const requireRegistrationEnabled = async (req, res, next) => {
     }
     return next();
   } catch (err) {
-    // 数据库故障时无法确认注册开关，fail-closed 直接拒绝：
-    // 原「降级到静态配置放行」并不成立——register 本身依赖数据库，
-    // 放行只会把失败推迟为 500，不如在此明确返回 503
+    // 数据库故障时无法确认开关 ⇒ fail-closed 503：register 本身依赖数据库，放行只会把失败推迟成 500
     return ApiResponse.codeError(res, 'REGISTER_SERVICE_UNAVAILABLE');
   }
 };
@@ -314,10 +311,8 @@ router.get('/login-public-key', captchaLimiter, authController.getLoginPublicKey
  * @access  Public
  *
  * 限流分层（顺序即优先级，勿再并联"同键空间、阈值更宽"的第三个桶）：
- *   1. `checkIPBlacklist`（app.js 级）：5 次失败/5 分钟的自动封禁在此生效 ⇒ 多数
- *      非白名单攻击源第 6 次就拿到 403，下面两桶轮不到；
- *   2. `loginLimiter`：单 IP 10 次/15 分钟，管住白名单 IP（凭据型限流刻意不豁免白名单）
- *      与"慢速滴灌"（每 5 分钟不足 5 次）；
+ *   1. `checkIPBlacklist`（app.js 级）：5 次失败/5 分钟的自动封禁在此生效 ⇒ 多数非白名单攻击源第 6 次就拿到 403；
+ *   2. `loginLimiter`：单 IP 10 次/15 分钟，管住白名单 IP（凭据型限流刻意不豁免白名单）与"慢速滴灌"；
  *   3. `loginUserLimiter`：单账号 20 次/15 分钟，管住"多 IP 各试几下同一账号"。
  * 不变量由 `src/tests/security/loginIpBucketDominator.test.js` 盯住（含"被挡住后不得复活"）。
  */
@@ -364,12 +359,10 @@ router.get('/me', authenticate, authController.getMe);
 router.put(
   '/password',
   authenticate,
-  // 凭据型限流（5 次/15 分钟，userId+IP 组合键，白名单不豁免）：
-  // 改密是账户接管的关键动作，此前误挂资源型 strictLimiter（30 次且豁免白名单）
+  // 凭据型限流（5 次/15 分钟，userId+IP 组合键，白名单不豁免）：改密是账户接管的关键动作，不能用资源型 strictLimiter（30 次且豁免白名单）
   passwordChangeLimiter,
-  // 并列的账号维度桶：组合键含 req.ip，而 TRUST_PROXY_HOPS>0 时 req.ip 取自
-  // X-Forwarded-For ⇒ 攻击者每换一个假 IP 就多一个 5 次配额。本桶只用 userId 作键，
-  // 让"同一账号"的配额不随 IP 分裂（缺失 userId 时跳过，不影响匿名请求）。
+  // 并列的账号维度桶：组合键含 req.ip，而 TRUST_PROXY_HOPS>0 时 req.ip 取自 X-Forwarded-For ⇒ 攻击者每换一个
+  // 假 IP 就多一个 5 次配额。本桶只用 userId 作键，让"同一账号"的配额不随 IP 分裂（缺失 userId 时跳过，不影响匿名请求）。
   passwordChangeUserLimiter,
   changePasswordValidation,
   authController.changePassword
@@ -385,15 +378,38 @@ router.put('/profile', authenticate, updateProfileValidation, authController.upd
 // PERMISSION-EXEMPT: 本人资源：authenticate 已确定身份，资料对象恒为本人
 
 /**
+ * 头像上传/移除（本人资源）：只接受 data URI 的 JSON 载荷，不走 multipart（容器只读、无 multer、无新依赖）。
+ * 校验链：mustBeString 挡对象/数组/布尔（express-validator 会 String() 后再 isLength），上限先用 data URI
+ * 字符数粗筛，解码后的真实字节上限在 utils/avatarImage.js。
+ */
+const avatarUploadValidation = [
+  mustBeString('image', '头像数据'),
+  body('image')
+    .isLength({ min: 1, max: MAX_DATA_URI_CHARS })
+    .withMessage('头像数据不能为空且不能超过 400000 个字符'),
+];
+
+router.put(
+  '/avatar',
+  authenticate,
+  strictLimiter,
+  avatarUploadValidation,
+  avatarController.uploadAvatar
+);
+// PERMISSION-EXEMPT: 本人资源：上传对象恒为 req.user.userId
+
+router.delete('/avatar', authenticate, strictLimiter, avatarController.removeAvatar);
+// PERMISSION-EXEMPT: 本人资源：删除对象恒为 req.user.userId
+
+/**
  * @route   POST /api/auth/logout
  * @desc    用户登出
  * @access  Private
  *
- * 用 authenticateForLogout 而不是 authenticate：登出是 refresh 令牌与设备会话的
- * **唯一**吊销入口，而 access 令牌先于 refresh 过期是常态。挂在 authenticate 之后时，
- * "access 已过期"的客户端拿 401 再也进不到处理体 —— 手里那个 7 天有效的 refresh 令牌
- * 与服务端 active 会话就此无人可关（泄露场景下最需要收尾动作时恰恰收不了尾）。
- * 判据细节见 middleware/logoutAuth.js 的 authenticateForLogout。
+ * 用 authenticateForLogout 而不是 authenticate：登出是 refresh 令牌与设备会话的**唯一**吊销入口，而
+ * access 令牌先于 refresh 过期是常态——挂在 authenticate 之后时，"access 已过期"的客户端拿 401 再也进不到
+ * 处理体，手里那个 7 天有效的 refresh 令牌与服务端 active 会话就此无人可关。判据细节见
+ * middleware/logoutAuth.js 的 authenticateForLogout。
  */
 router.post('/logout', authenticateForLogout, refreshTokenBodyValidation, authController.logout);
 // PERMISSION-EXEMPT: 会话生命周期：吊销当前调用者自己的会话
@@ -412,14 +428,11 @@ router.get('/mfa/status', authenticate, mfaController.getMfaStatus);
  * @desc    生成 MFA 密钥（开启第一步，返回 secret 与 otpauth URI）
  * @access  Private
  *
- * G3 复核结论：控制器本身不读取任何请求体/查询/路径参数（仅用 req.user.userId）。
- * 请求体中的 currentPassword / encCurrentPassword 由 requireReAuthentication 消费：
- * 密文轨解密失败一律 AUTH_ENCRYPTED_CREDENTIAL_INVALID（fail-closed），strict 模式
- * 下拒绝明文轨与密文/明文并存——该策略收敛在中间件，enroll/enable 无需重复声明校验器。
+ * 控制器不读任何请求体/查询/路径参数（仅 req.user.userId）。请求体中的 currentPassword /
+ * encCurrentPassword 由 requireReAuthentication 消费：密文轨解密失败一律
+ * AUTH_ENCRYPTED_CREDENTIAL_INVALID（fail-closed），strict 模式拒绝明文轨与并存
+ * ——策略收敛在中间件，enroll/enable 无需重复声明校验器。
  */
-// 二次验证（当前密码）不是可选项：会话被劫持后，攻击者若能直接 enroll，
-// 就把自己的认证器绑进受害者账户，再 enable 即形成持久化接管。
-// 此步 MFA 尚未开启，requireReAuthentication 只接受密码——正是本端点的正确因子。
 router.post(
   '/mfa/enroll',
   authenticate,
@@ -442,15 +455,13 @@ router.post(
 router.post(
   '/mfa/enable',
   authenticate,
-  // 与 enroll/disable/recovery-codes 对齐挂 strictLimiter：本步是 TOTP 6 位码的
-  // 在线校验入口，30 次/15 分钟的严格限额对正常用户零感知（输错一次即知），
-  // 却能把「已登录会话 + 自动化枚举动态码」的尝试速度压到与其余 MFA 端点同一档。
-  // 危害面确有界（爆破成功也只是给攻击者自己的账号开 MFA），但限流器挂载的
-  // 一致性本身就是可核查的安全属性——漏挂的那一个端点永远是最先被扫到的。
+  // 与其余 MFA 端点对齐挂 strictLimiter：本步是 TOTP 6 位码的在线校验入口，
+  // 30 次/15 分钟对正常用户零感知，却能把「已登录会话 + 自动化枚举动态码」的
+  // 尝试速度压到同一档。限流器挂载的一致性本身就是可核查的安全属性——漏挂的
+  // 那一个端点永远是最先被扫到的。
   strictLimiter,
   // 确认开启是**真正改变安全状态**的一步：会话劫持者若只凭 mfaCode 就能启用，
-  // 等于用受害者刚扫过的密钥把自己的认证器锁进账户（受害者此后无法登录）。
-  // 此处追加当前密码复检；MFA 尚未开启，密码是唯一可用的独立因子。
+  // 等于用受害者刚扫过的密钥把自己的认证器锁进账户。此处追加当前密码复检。
   requireReAuthentication(),
   body('mfaCode')
     .trim()
@@ -494,8 +505,8 @@ router.post(
 // ================= 设备级会话管理（登录会话） =================
 
 // sid 形状校验：sessionService.newSid 用 crypto.randomUUID()，因此必须是 UUID。
-// 为什么要卡形状而不是直接丢给查询：sid 会进 Mongo 查询条件与审计记录，
-// 提前收敛可以挡掉超长/畸形串（$ 开头的对象注入尝试在这里就被拒）。
+// sid 会进 Mongo 查询条件与审计记录，提前收敛形状可挡掉超长/畸形串
+// （$ 开头的对象注入尝试在这里就被拒）。
 const sessionSidValidation = [
   param('sid')
     .isString()
@@ -509,9 +520,8 @@ const sessionSidValidation = [
  * @desc    列出本人当前的活跃登录会话（设备列表）
  * @access  Private
  *
- * 不加 strictLimiter：会话界面进入即拉取、踢除后还要刷新，
- * 把只读列表纳入严格限流会让正常操作触发 429。用户级限流已在
- * authenticate 内生效，足以约束滥用。
+ * 不加 strictLimiter：会话界面进入即拉取、踢除后还要刷新，把只读列表纳入严格限流
+ * 会让正常操作触发 429。用户级限流已在 authenticate 内生效，足以约束滥用。
  */
 router.get('/sessions', authenticate, authController.listSessions);
 

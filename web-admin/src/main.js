@@ -80,7 +80,7 @@ app.use(i18n)
 // 挂载应用
 app.mount('#app')
 
-// —— 热升级（2026-10-30）——
+// —— 升级（2026-10-30）——
 // 两条来源汇到同一处 updateNotice，界面由 UpdateNoticeBar 消费：
 //   1. SW 报 onNeedRefresh：前端资源本身有新版本；
 //   2. /api/version 的 buildId 与本页不一致：服务端已换版（蓝绿切流）。

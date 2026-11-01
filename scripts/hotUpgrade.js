@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 蓝绿热升级（单机 docker-compose 拓扑，零停机）
+ * 蓝绿升级（单机 docker-compose 拓扑，零停机）
  *
  * 一次升级的完整动作，顺序不可调换：
  *   1. 备份（失败即中止，此时还没动任何东西）
@@ -24,6 +24,9 @@
  * 用法：
  *   node scripts/hotUpgrade.js --image ghcr.io/org/fsms@sha256:<64hex> --nginx-conf /etc/nginx/nginx.conf
  *   node scripts/hotUpgrade.js --image ... --apply
+ *
+ * 供宿主机代理调用时，镜像引用可走 `HOT_UPGRADE_IMAGE`（不进 argv），
+ * 并用 `--status-file` 把进度回写给应用侧轮询（见 scripts/hotUpgradeAgent.js）。
  */
 
 'use strict';
@@ -32,6 +35,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const policy = require('./hotUpgradePolicy');
+const { createStatusSink } = require('./hotUpgradeStatusSink');
 
 const ROOT = path.resolve(__dirname, '..');
 const COMPOSE_FILE = process.env.HOT_UPGRADE_COMPOSE_FILE || path.join(ROOT, 'docker-compose.yml');
@@ -39,12 +43,26 @@ const NGINX_BIN = process.env.HOT_UPGRADE_NGINX_BIN || 'nginx';
 /** 实际部署里 nginx 主配置的位置；容器化 nginx 或自编译路径不同时用 --nginx-conf 覆盖 */
 const DEFAULT_NGINX_CONF = process.env.HOT_UPGRADE_NGINX_CONF || '/etc/nginx/nginx.conf';
 
+/**
+ * 单次 /readyz 探测的超时。
+ *
+ * 没有超时的 fetch 会让「容器已接受连接但不回包」变成永久挂起：没有超时就没有失败，
+ * 没有失败就没有回滚——最坏形态是流量已经切走、脚本永远停在观察窗口里不返回，
+ * systemd 只能等 TimeoutStartSec(2h) 才把它杀掉。
+ */
+const PROBE_TIMEOUT_MS = 5000;
+
 /** 颜色 ↔ compose 服务名 / 镜像变量。与 policy 的 PORT_BY_COLOR 必须一致 */
 const SERVICE_BY_COLOR = { blue: 'app', green: 'app-green' };
 const IMAGE_ENV_BY_COLOR = { blue: 'APP_IMAGE', green: 'APP_IMAGE_NEXT' };
 
 const log = (msg) => process.stdout.write(`[hot-upgrade] ${msg}\n`);
-const fail = (msg) => {
+
+/** 状态回写（供应用侧轮询）。宿主代理预置 id 等字段，见 hotUpgradeStatusSink.js */
+let statusSink = null;
+
+const fail = (msg, outcome = 'failed') => {
+  if (statusSink) statusSink.finish('failed', { outcome, message: msg });
   process.stderr.write(`[hot-upgrade] 中止：${msg}\n`);
   process.exit(1);
 };
@@ -58,8 +76,14 @@ function run(file, args, extraEnv = {}) {
   });
 }
 
-/** compose 前缀：显式 -f，避免命令受 cwd 影响（cwd 决定项目名，项目名决定卷） */
-const compose = (...args) => ['compose', '-f', COMPOSE_FILE, ...args];
+/**
+ * compose 前缀：显式 -f，避免命令受 cwd 影响（cwd 决定项目名，项目名决定卷）。
+ *
+ * `--profile green` 必须常驻：app-green 在 compose 里挂在 profile 下，不加它时
+ * `run/stop app-green` 会报 no such service（`up` 那一处原先单独加过，于是迁移与停容器
+ * 两个动作仍然会踩空——升级到了迁移步才失败，看上去像「镜像有问题」）。
+ */
+const compose = (...args) => ['compose', '-f', COMPOSE_FILE, '--profile', 'green', ...args];
 
 /**
  * 原子写配置：先写临时文件再 rename。
@@ -67,24 +91,42 @@ const compose = (...args) => ['compose', '-f', COMPOSE_FILE, ...args];
  * 直接 writeFileSync 覆盖时，进程若在写到一半被杀，nginx 配置会变成半截文本——
  * 下一次 reload 直接失败，且现场看起来像「脚本把配置写坏了」。rename 在同分区是原子的。
  */
-function writeConfAtomically(file, text) {
+function writeConfAtomically(file, text, mode = 0o644) {
   const tmp = `${file}.hot-upgrade.tmp`;
-  fs.writeFileSync(tmp, text, 'utf8');
+  const fd = fs.openSync(tmp, 'w', mode);
+  try {
+    fs.writeFileSync(fd, text, 'utf8');
+    // 先 fsync 再 rename：rename 只是换名字，不保证内容已经落盘
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, file);
 }
 
-/** 探一次 readyz；返回 { ok, reason }。网络错误也算不 ok，不吞 */
+/** 探一次 readyz；返回 { ok, reason }。网络错误/超时都算不 ok，不吞、不抛 */
 async function probeReadyz(port) {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/readyz`, {
       headers: { Accept: 'application/json' },
+      // 必须带超时：挂住的容器（连接建立但永不回包）会让升级永久卡在这一步。
+      // 超时一律按「未就绪」返回，绝不向上抛出未捕获异常。
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
     const body = await res.json().catch(() => null);
     return policy.evaluateReadyz(res.status, body);
   } catch (err) {
-    return { ok: false, reason: `连接失败：${err.message}` };
+    const reason = isTimeoutError(err)
+      ? `探测超时（${PROBE_TIMEOUT_MS}ms 内无响应）：按未就绪处理`
+      : `连接失败：${err.message}`;
+    return { ok: false, reason };
   }
 }
+
+/** AbortSignal.timeout 的中止在各 Node 版本里表现为不同错误名/码，这里统一识别 */
+const TIMEOUT_ERRORS = new Set(['TimeoutError', 'AbortError', 'ABORT_ERR', 'UND_ERR_ABORTED']);
+const isTimeoutError = (err) =>
+  Boolean(err) && (TIMEOUT_ERRORS.has(err.name) || TIMEOUT_ERRORS.has(err.code));
 
 /** 轮询到超时；返回最后一次结果（调用方决定要不要因此中止） */
 async function waitReadyz(port, timeoutSec, intervalSec) {
@@ -110,23 +152,68 @@ async function observe(port, observeSec, intervalSec) {
   return { ok: true, reason: '观察期内持续就绪' };
 }
 
-/** 把 upstream 切到指定色并 reload；nginx -t 不通过则原样回滚文件 */
+/**
+ * 把 upstream 切到指定色并 reload——**事务式**：任一步失败都写回原配置并重新自检。
+ *
+ * 顺序固定：备份原文件 → 写候选 → nginx -t → reload。
+ * 只在 nginx -t 失败时回滚是不够的：reload 也会失败（证书/端口/权限/其它 include 出错时
+ * -t 通过而 reload 失败），那时文件里留着候选配置，宿主 nginx 的下一次 reload/重启
+ * 就会带着一份「脚本以为已经回滚了」的坏配置起来。
+ */
 function switchTraffic(confPath, targetColor) {
   const original = fs.readFileSync(confPath, 'utf8');
   const next = policy.renderUpstream(original, targetColor);
+  const originalMode = fs.statSync(confPath).mode & 0o777;
+
   if (next === original) {
     log(`upstream 已在 ${targetColor}，无需改配置`);
-  } else {
-    writeConfAtomically(confPath, next);
+    run(NGINX_BIN, ['-t']);
+    run(NGINX_BIN, ['-s', 'reload']);
+    return original;
   }
+
+  // 1. 备份原文件。后缀刻意不带 .conf：避免被 `include /etc/nginx/*.conf` 之类的
+  //    通配当成一份配置加载进去（那会得到一个「备份文件把 nginx 弄坏」的怪现场）。
+  const backupFile = `${confPath}.hot-upgrade-orig.bak`;
+  try {
+    writeConfAtomically(backupFile, original, originalMode);
+  } catch (err) {
+    // 此刻还没动任何配置，报错就说清这一点：不需要回滚
+    throw new Error(`备份原配置失败（配置未被改动）：${err.message}`);
+  }
+
+  // 2. 写候选
+  writeConfAtomically(confPath, next, originalMode);
+
+  /** 写回原配置并重新自检；返回一句话说清「回滚了没有、校验过没有」 */
+  const rollback = (stage) => {
+    try {
+      writeConfAtomically(confPath, original, originalMode);
+      run(NGINX_BIN, ['-t']);
+      return `已回滚原配置（${stage}；回滚后 nginx -t 通过）`;
+    } catch (_) {
+      // 最坏情况：写回失败或写回后仍自检不过。绝不能含糊地说「已回滚」——
+      // 运维要据此决定是手工恢复备份文件还是先停流量。
+      return (
+        `回滚未完成（${stage}）：原配置未能写回，或写回后 nginx -t 仍不通过（原因见宿主 journal）。` +
+        `原配置备份在同一目录下的 ${path.basename(backupFile)}，请立即人工处理`
+      );
+    }
+  };
+
+  // 3. 校验候选
   try {
     run(NGINX_BIN, ['-t']);
   } catch (_) {
-    // 配置自检失败：把文件恢复成原样，避免留下一个「nginx 起不来」的现场
-    writeConfAtomically(confPath, original);
-    throw new Error('nginx -t 未通过，已恢复原配置');
+    throw new Error(`nginx -t 未通过（原因见宿主 journal）；${rollback('候选配置自检失败')}`);
   }
-  run(NGINX_BIN, ['-s', 'reload']);
+
+  // 4. 切流
+  try {
+    run(NGINX_BIN, ['-s', 'reload']);
+  } catch (_) {
+    throw new Error(`nginx -s reload 失败（原因见宿主 journal）；${rollback('reload 失败')}`);
+  }
   return original;
 }
 
@@ -135,11 +222,10 @@ function recordState(state) {
   const dir = path.join(ROOT, 'logs');
   try {
     fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(
-      dir,
-      `hot-upgrade-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
-    );
-    fs.writeFileSync(file, JSON.stringify(state, null, 2), 'utf8');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const file = path.join(dir, `hot-upgrade-${stamp}.json`);
+    // 显式 0600：这份记录含镜像 digest 与宿主 nginx 路径，不该被同机其它用户读到
+    fs.writeFileSync(file, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
     log(`状态记录：${file}`);
   } catch (err) {
     // 记录失败不阻断升级本身，但要说出来——否则「有留痕」是假的
@@ -160,7 +246,7 @@ async function switchAndVerify({ confPath, active, target, targetPort, opts, sta
     switchTraffic(confPath, target);
   } catch (err) {
     recordState({ ...state, outcome: 'aborted_switch_failed', reason: err.message });
-    fail(`切流失败：${err.message}`);
+    fail(`切流失败：${err.message}`, 'aborted_switch_failed');
   }
 
   step('observe', `${opts.observeSec}s`);
@@ -174,43 +260,70 @@ async function switchAndVerify({ confPath, active, target, targetPort, opts, sta
     // 最坏情况：流量可能还在新色，旧色也还在跑。必须把现场原样说清楚，
     // 而不是含糊地报「回滚失败」——运维要据此决定是手工切回还是直接停新色。
     recordState({ ...state, outcome: 'rollback_failed', reason: err.message });
-    fail(
+    const msg =
       `回滚切流失败（${err.message}）。当前流量可能仍在新色，` +
-        `旧色容器 ${SERVICE_BY_COLOR[active.color]} 仍在运行。请立即人工确认。`
-    );
+      `旧色容器 ${SERVICE_BY_COLOR[active.color]} 仍在运行。请立即人工确认。`;
+    fail(msg, 'rollback_failed');
   }
   recordState({ ...state, outcome: 'rolled_back', reason: observed.reason });
-  fail(`观察期未通过（${observed.reason}），已切回 ${active.color}。`);
+  // 回滚成功才停新色：此刻流量已确认在旧色。不停的话，一个有问题的版本会继续占着
+  // 3001 端口跑到下一次升级，谁也不知道它还在（也可能自己重启、连同一个库）。
+  // 只有回滚**失败**的分支不能停——那时流量可能还在新色，停了就是全站 502。
+  try {
+    run('docker', compose('stop', SERVICE_BY_COLOR[target]));
+  } catch (err) {
+    log(`回滚已生效，但停新色容器失败：${err.message}（请人工确认 ${SERVICE_BY_COLOR[target]}）`);
+  }
+  fail(`观察期未通过（${observed.reason}），已切回 ${active.color}。`, 'rolled_back');
 }
 
-async function main() {
-  const opts = policy.parseArgs(process.argv.slice(2));
-  if (opts.help) {
-    process.stdout.write(
-      [
-        '蓝绿热升级。默认只演练，加 --apply 才真正执行。',
-        '',
-        '  --image <ref>            新版本镜像，必须是 registry/repo@sha256:<64hex>',
-        '  --nginx-conf <path>      nginx 配置路径（含 upstream fsms_app）',
-        '  --readyz-timeout <sec>   等备色就绪的超时，默认 180',
-        '  --observe-seconds <sec>  切流后观察窗口，默认 300',
-        '  --apply                  真正执行（缺省为演练）',
-        '  --help                   本帮助',
-        '',
-      ].join('\n')
-    );
-    return 0;
+/**
+ * 尽力停掉某个颜色的容器；失败只记一行日志（收尾路径不许把主结论覆盖成异常）。
+ * @param {'blue'|'green'} color
+ * @param {string} why 失败时说明这是哪一步的清理
+ */
+function stopQuietly(color, why) {
+  try {
+    run('docker', compose('stop', SERVICE_BY_COLOR[color]));
+  } catch (err) {
+    log(`${why}：停容器失败（${err.message}），请人工确认 ${SERVICE_BY_COLOR[color]}`);
+  }
+}
+function printHelp() {
+  process.stdout.write(
+    [
+      '蓝绿升级。默认只演练，加 --apply 才真正执行。',
+      '',
+      '  --image <ref>            新版本镜像，必须是 registry/repo@sha256:<64hex>',
+      '                           也可用 HOT_UPGRADE_IMAGE 环境变量（不进 argv）',
+      '  --nginx-conf <path>      nginx 配置路径（含 upstream fsms_app）',
+      '  --status-file <path>     进度回写文件（应用侧轮询用；由宿主代理传入）',
+      '  --readyz-timeout <sec>   等备色就绪的超时，默认 180',
+      '  --observe-seconds <sec>  切流后观察窗口，默认 300；--apply 下不得低于 60',
+      '  --apply                  真正执行（缺省为演练）',
+      '  --help                   本帮助',
+      '',
+    ].join('\n')
+  );
+}
+
+function buildPlan(opts) {
+  const confPath = opts.nginxConf || DEFAULT_NGINX_CONF;
+  if (!fs.existsSync(confPath)) {
+    // 真实路径只写宿主 journal（运维看得到）；回写应用的文案用逻辑名，不泄漏宿主绝对路径
+    log(`nginx 主配置不存在：${confPath}`);
+    fail('nginx 主配置不存在（--nginx-conf 或 HOT_UPGRADE_NGINX_CONF 指定的文件），未做任何变更');
   }
 
-  const confPath = opts.nginxConf || DEFAULT_NGINX_CONF;
-  if (!fs.existsSync(confPath)) fail(`nginx 配置不存在：${confPath}（用 --nginx-conf 指定）`);
-
-  const conf = fs.readFileSync(confPath, 'utf8');
-  const active = policy.parseActiveUpstream(conf);
+  const active = policy.parseActiveUpstream(fs.readFileSync(confPath, 'utf8'));
   const target = active.color === 'blue' ? 'green' : 'blue';
   const targetPort = policy.PORT_BY_COLOR[target];
 
-  const parsed = policy.parseImageRef(opts.image);
+  // 镜像引用允许走环境变量：宿主代理调本脚本时，digest 不必出现在
+  // /proc/<pid>/cmdline 里（虽然 digest 不是机密，但固定 argv 面更小）。
+  const imageRef = (opts.image || process.env.HOT_UPGRADE_IMAGE || '').trim();
+  if (!imageRef) fail('缺少镜像引用（--image 或 HOT_UPGRADE_IMAGE）', 'missing_image');
+  const parsed = policy.parseImageRef(imageRef);
   policy.assertImageAllowed(
     parsed,
     String(process.env.HOT_UPGRADE_REGISTRY_ALLOWLIST || '')
@@ -230,18 +343,35 @@ async function main() {
     observeSec: opts.observeSec,
   };
 
-  log('升级计划：');
-  for (const [k, v] of Object.entries(plan)) log(`  ${k} = ${v}`);
-
-  if (!opts.apply || opts.dryRun) {
-    log('演练模式：未做任何改动。确认无误后加 --apply 执行。');
-    return opts.dryRun ? 0 : 2;
+  if (statusSink) {
+    statusSink.detail({ image: parsed.ref, activeColor: active.color, targetColor: target });
   }
 
-  const startedAt = new Date().toISOString();
-  const state = { ...plan, startedAt, steps: [] };
+  log('升级计划：');
+  for (const [k, v] of Object.entries(plan)) log(`  ${k} = ${v}`);
+  return { confPath, active, target, targetPort, parsed, plan };
+}
+
+function reportDryRun(opts) {
+  if (statusSink) {
+    statusSink.finish('failed', {
+      outcome: 'dry_run',
+      message: '演练模式：未做任何变更（代理只执行 --apply）',
+    });
+  }
+  log('演练模式：未做任何改动。确认无误后加 --apply 执行。');
+  return opts.dryRun ? 0 : 2;
+}
+
+/** 真正执行七步。任何一步 fail 都会抛错，不会继续往下走 */
+async function executePlan({ confPath, active, target, targetPort, parsed, plan, opts }) {
+  const state = { ...plan, startedAt: new Date().toISOString(), steps: [] };
+  // 打印**实际生效值**：--apply 下 policy.parseArgs 会把下限抬到 MIN_OBSERVE_SEC
+  log(`观察窗口实际生效值：${opts.observeSec}s（--apply 下限 ${policy.MIN_OBSERVE_SEC}s）`);
   const step = (name, detail = '') => {
-    state.steps.push({ name, detail, at: new Date().toISOString() });
+    const entry = { name, detail, at: new Date().toISOString() };
+    state.steps.push(entry);
+    if (statusSink) statusSink.step(entry);
     log(`▶ ${name}${detail ? `：${detail}` : ''}`);
   };
 
@@ -251,7 +381,10 @@ async function main() {
 
   // 2. 起备色。--no-deps：绝不让 compose 顺带重建 mongo/redis（那才是真停机）
   step('start-target', `${SERVICE_BY_COLOR[target]} @ ${parsed.digest}`);
-  run('docker', compose('--profile', 'green', 'up', '-d', '--no-deps', SERVICE_BY_COLOR[target]), {
+  // --no-build 不是优化：compose 文件里 app 段带 build:，少了它 `up` 会在部署机上
+  // 重新构建一遍本仓库当前源码，并把标签指过去——线上跑的就不再是请求里那个 digest，
+  // 而审计记录、镜像白名单校验全是对着 digest 做的（“升了，但升的不是那个版本”）。
+  run('docker', compose('up', '-d', '--no-build', '--no-deps', SERVICE_BY_COLOR[target]), {
     [IMAGE_ENV_BY_COLOR[target]]: parsed.ref,
   });
 
@@ -260,7 +393,11 @@ async function main() {
   const ready = await waitReadyz(targetPort, opts.readyzTimeoutSec, 3);
   if (!ready.ok) {
     recordState({ ...state, outcome: 'aborted_not_ready', reason: ready.reason });
-    fail(`备色未就绪（${ready.reason}）。旧色仍在服务，未切流。`);
+    // 未切流的分支要顺手停掉备色：它占着 3001、连着同一个库，还会被 Prometheus 抓成
+    // 一个永远不健康的目标（BackendDown / MongoUnavailable 从此长鸣）。
+    // 用 stop 而不是 rm：容器日志还在，排查按 docker logs 看。
+    stopQuietly(target, '备色未就绪');
+    fail(`备色未就绪（${ready.reason}）。旧色仍在服务，未切流。`, 'aborted_not_ready');
   }
 
   // 4. 迁移：用新版本的代码跑（备色容器里就是新镜像）
@@ -281,23 +418,53 @@ async function main() {
     );
   } catch (_) {
     recordState({ ...state, outcome: 'aborted_migrate_failed' });
-    fail('迁移失败。未切流，旧色继续服务；备色容器保留以便排查。');
+    fail('迁移失败。未切流，旧色继续服务；备色容器保留以便排查。', 'aborted_migrate_failed');
   }
 
   // 5-6. 切流 + 观察 + 失败回滚
   await switchAndVerify({ confPath, active, target, targetPort, opts, state, step });
 
-  // 7. 停旧色：stop 而非 rm，保留回滚能力
+  // 7. 停旧色：stop 而非 rm，保留回滚能力。
+  //
+  // 这一步失败**不得**把整次升级判成失败：此刻流量已经在新色、观察期已通过，
+  // 线上事实是「升级成功、旧色容器还在跑」。报 failed 会让运维按失败处置
+  //（甚至发起回滚），把一次成功的升级变成事故。只记 warning。
+  let stopWarning = '';
   step('stop-previous', SERVICE_BY_COLOR[active.color]);
-  run('docker', compose('stop', SERVICE_BY_COLOR[active.color]));
+  try {
+    run('docker', compose('stop', SERVICE_BY_COLOR[active.color]));
+  } catch (err) {
+    const detail = Number.isInteger(err && err.status)
+      ? `退出码 ${err.status}`
+      : '原因见宿主 journal';
+    stopWarning =
+      `旧色容器 ${SERVICE_BY_COLOR[active.color]} 停止失败（${detail}）；` +
+      '本次升级已成功（流量在新色），请人工确认旧色是否仍在运行';
+    process.stderr.write(`[hot-upgrade] 警告：${stopWarning}\n`);
+  }
 
   state.outcome = 'success';
   state.finishedAt = new Date().toISOString();
+  if (stopWarning) state.warnings = [stopWarning];
   recordState(state);
+  if (statusSink) statusSink.finish('succeeded', { outcome: 'success', message: stopWarning });
   log(`升级完成：${active.color} -> ${target}（${parsed.digest}）`);
   log(
     `回滚方式：把 upstream 改回 ${active.port} 并 reload，然后 start ${SERVICE_BY_COLOR[active.color]}`
   );
+}
+
+async function main() {
+  const opts = policy.parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    printHelp();
+    return 0;
+  }
+
+  statusSink = createStatusSink(opts.statusFile);
+  const ctx = buildPlan(opts);
+  if (!opts.apply || opts.dryRun) return reportDryRun(opts);
+  await executePlan({ ...ctx, opts });
   return 0;
 }
 

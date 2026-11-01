@@ -86,12 +86,14 @@ describe('User Model', () => {
      * 分叉。所以下面按"选项值"断言，而不是按"字段存在"断言。
      */
     test('凭证级字段一律 select:false（删掉任意一个即 API 开始回吐哈希/密钥）', () => {
-      // 清单来源：src/models/User.js 里 10 处 select: false。这不是"再抄一份常量"，
+      // 清单来源：src/models/User.js 里 11 处 select: false（审计二-2 加了 passwordRetiredHash）。
+      // 这不是"再抄一份常量"，
       // 而是**故意把清单钉在测试里**——新增凭证字段却忘了 select:false 时，
       // 本用例不会自动覆盖它，但下方"总数"断言会提示清单需要同步（见第二条）。
       const credentialFields = [
         'password',
         'passwordHistory',
+        'passwordRetiredHash',
         'emailKey',
         'emailGrams',
         'phoneKey',
@@ -122,6 +124,7 @@ describe('User Model', () => {
           'mfaSecret',
           'password',
           'passwordHistory',
+          'passwordRetiredHash',
           'phoneKey',
         ].sort()
       );

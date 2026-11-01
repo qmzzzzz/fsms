@@ -145,7 +145,7 @@ describe('关停链排空 SIEM 转发缓冲（F-186）', () => {
       drainShippingBuffer({ logger: { transports: [slow] }, allowMs: 30 })
     ).resolves.toBe('over-budget');
     // 判据用"送达"而不是"缓冲长度"：_flush 先 splice 出本批再 await _post
-    // （logShipper.js:212-214），所以在途那批此刻已经不在缓冲里了。
+    // （logShipper.js:246），所以在途那批此刻已经不在缓冲里了。
     expect(sent).toHaveLength(0);
 
     // 收尾：放行那次被放弃的排空，证明放弃不留半成品状态（也避免跨用例悬挂）。

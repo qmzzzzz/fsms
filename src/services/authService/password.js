@@ -1,8 +1,7 @@
 /**
  * 口令变更
  *
- * 自 authService.js 拆出。改密的三段判据（密文解密、口令策略与历史、口令轮换后
- * 的会话吊销）此前与登录流程同处一个文件，实测互相之间零引用。
+ * 自 authService.js 拆出。改密的三段判据（密文解密、口令策略与历史、口令轮换后的会话吊销）此前与登录流程同处一个文件，实测互相之间零引用。
  */
 
 const User = require('../../models/User');
@@ -10,6 +9,7 @@ const logger = require('../../utils/logger');
 const { validatePasswordStrength } = require('../../utils/helpers');
 const { matchesHistory, withPrevious, HISTORY_DEPTH } = require('../../utils/passwordHistory');
 const { invalidateUserTokens } = require('../../middleware/tokenBlacklist');
+const bcryptWorker = require('../../utils/bcryptWorkerPool');
 const { decryptLoginCredential } = require('../../utils/loginCipher');
 const sessionService = require('../sessionService');
 const initialPasswordFile = require('../initialPasswordFile');
@@ -17,9 +17,7 @@ const initialPasswordFile = require('../initialPasswordFile');
 /**
  * 解出一段口令：密文轨优先，回落到明文轨。
  *
- * 双轨并存期（LOGIN_ENCRYPT_STRICT=true 后明文轨由校验层关闭）两条轨解出的值同权，
- * 后续的非空/强度/复用校验对二者一视同仁——所以这里只负责"拿到明文"，
- * 不在这里判空（`MISSING` 要等两段都解完再判，否则"密文轨失败"会被误报成"没填"）。
+ * 双轨并存期（LOGIN_ENCRYPT_STRICT=true 后明文轨由校验层关闭）两条轨解出的值同权，后续的非空/强度/复用校验对二者一视同仁——所以这里只负责"拿到明文"，不在这里判空（`MISSING` 要等两段都解完再判，否则"密文轨失败"会被误报成"没填"）。
  *
  * @param {unknown} encValue 密文轨字段值
  * @param {unknown} plainValue 明文轨字段值
@@ -43,9 +41,7 @@ async function resolveCredentialTrack(encValue, plainValue, purpose, label, ctx)
 /**
  * 入参层校验：非空 → 确认一致性 → 强度策略。
  *
- * 顺序即优先级，且"确认密码"必须在**解密之后**才判：密文轨下明文只有解完才知道
- * （评价报告 #15 收敛点：原 securityController 内联比对，密文轨下永远比的是密文）。
- * 客户端未携带 confirmPassword 时不强制——/api/auth/password 一直如此。
+ * 顺序即优先级，且"确认密码"必须在**解密之后**才判：密文轨下明文只有解完才知道（评价报告 #15 收敛点：原 securityController 内联比对，密文轨下永远比的是密文）。客户端未携带 confirmPassword 时不强制——/api/auth/password 一直如此。
  *
  * @param {object} body 原始请求体
  * @param {unknown} currentPassword 已解出的当前口令
@@ -72,12 +68,7 @@ function validatePasswordChangeInput(body, currentPassword, newPassword) {
 }
 
 /**
- * 账户层校验：存在 → 当前口令正确 → 与当前不同 → 不命中复用历史。
- *
- * 「与当前相同」（SAME_PASSWORD）与「与更早的相同」（PASSWORD_REUSED）是两件事，
- * 错误码必须分开：合并成一个码会让用户以为自己只是没改够。A→B→A 这种两步复用
- * 上面那条 SAME_PASSWORD 挡不住（当前口令是 B），只能靠查历史。
- *
+ * 账户层校验：存在 → 当前口令正确 → 与当前不同 → 不命中复用历史（HMAC 摘要集）→ 不是上一次管理员重置换掉的那一代口令。「与当前相同」（SAME_PASSWORD）与「与更早的相同」（PASSWORD_REUSED）是两件事，错误码必须分开：合并成一个码会让用户以为自己只是没改够。A→B→A 这种两步复用上面那条 SAME_PASSWORD 挡不住（当前口令是 B），只能靠查历史。
  * @param {object|null} user 已 select +password +passwordHistory 的文档
  * @param {unknown} currentPassword
  * @param {unknown} newPassword
@@ -102,16 +93,38 @@ async function assertPasswordRotatable(user, currentPassword, newPassword, ctx) 
     });
     return { outcome: 'PASSWORD_REUSED', historyDepth: HISTORY_DEPTH };
   }
+  if (await matchesRetiredPassword(user.passwordRetiredHash, newPassword)) {
+    // 与 PASSWORD_REUSED 合并成一个 outcome：用户要做的动作完全相同（换一条没被重置掉的口令），
+    // 拆码只会多一份前端文案；服务端日志里两个来源区分得开（ADR-016 记了这条取舍）。
+    logger.warn('改密拒绝 - 新口令是管理员重置前的那一代口令（退役摘要命中）', {
+      username: ctx.username,
+    });
+    return { outcome: 'PASSWORD_REUSED', historyDepth: HISTORY_DEPTH };
+  }
   return null;
 }
 
 /**
- * 改密后的会话收口：吊销全部会话（tokenVersion 递增 + 缓存失效）→ 收敛会话表 → 审计。
- *
- * fail-closed：密码已落库，吊销失败绝不能静默吞掉——旧会话是否仍有效处于未知态，
- * 返回 REVOKE_FAILED 让控制器如实告知「已改但未吊销」，而不是用 500 掩盖部分成功。
- * 而会话表收敛用 Safe 版本：收敛失败只是「显示不准」，不能让改密请求整体失败。
- *
+ * 退役摘要比对（审计二-2）：管理员重置时被替换掉的那一代口令的 bcrypt 摘要留在
+ * passwordRetiredHash，改密时对候选口令比对一次，命中即拒。必须用 bcrypt 而非复用历史的
+ * HMAC：重置路径没有旧口令**明文**（口令一落库就是 bcrypt 摘要），算不出 HMAC。只留最近
+ * 一条 ⇒ 成本上限一次比对（~250ms），且只出现在「曾被管理员重置过口令」的账户上。
+ * 判不了（形态不对 / 比对抛错）按**放行**处理并留 error 日志：它是加强层，主防线是
+ * 当前口令 + HMAC 历史，不能让一次数据形态异常把改密端点变成 DoS 面。
+ */
+async function matchesRetiredPassword(retiredHash, candidatePassword) {
+  if (typeof retiredHash !== 'string' || !/^\$2[aby]\$/.test(retiredHash)) return false;
+  if (typeof candidatePassword !== 'string' || !candidatePassword) return false;
+  try {
+    return await bcryptWorker.compare(candidatePassword, retiredHash);
+  } catch (err) {
+    logger.error(`退役摘要比对失败，本条按放行处理：${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * 改密后的会话收口：吊销全部会话（tokenVersion 递增 + 缓存失效）→ 收敛会话表 → 审计。 fail-closed：密码已落库，吊销失败绝不能静默吞掉——旧会话是否仍有效处于未知态，返回 REVOKE_FAILED 让控制器如实告知「已改但未吊销」，而不是用 500 掩盖部分成功。而会话表收敛用 Safe 版本：收敛失败只是「显示不准」，不能让改密请求整体失败。
  * @param {object} user 已落库的文档
  * @returns {Promise<{outcome: string, username: string}>}
  */
@@ -136,7 +149,8 @@ async function revokeSessionsAfterPasswordChange(user) {
  * @param {object} body 原始请求体（含明文轨与密文轨字段）
  * @param {object} ctx { username } 供审计/日志使用
  * @returns {Promise<{outcome:'ENC_INVALID'|'MISSING'|'CONFIRM_MISMATCH'|'WEAK'|'USER_NOT_FOUND'|'CURRENT_WRONG'|'SAME_PASSWORD'|'PASSWORD_REUSED'|'REVOKE_FAILED'|'OK'}>}
- *   OK / REVOKE_FAILED 时附 { username }（REVOKE_FAILED 表示密码已改但会话吊销失败）
+ *   OK / REVOKE_FAILED 时附 { username, forced }（forced=true 表示本次是强制改密完成；
+ *   REVOKE_FAILED 表示密码已改但会话吊销失败）
  *   PASSWORD_REUSED 时附 { historyDepth }（供控制器回显可用范围）
  */
 async function changeUserPassword(userId, body, ctx) {
@@ -169,7 +183,9 @@ async function changeUserPassword(userId, body, ctx) {
     return inputRejection;
   }
 
-  const user = await User.findById(userId).select('+password +passwordHistory');
+  const user = await User.findById(userId).select(
+    '+password +passwordHistory +passwordRetiredHash'
+  );
   const subjectRejection = await assertPasswordRotatable(user, current.value, next.value, ctx);
   if (subjectRejection) {
     return subjectRejection;
@@ -178,8 +194,15 @@ async function changeUserPassword(userId, body, ctx) {
   // 落库留在本函数体内，**不抽成 applyPasswordChange**：passwordHistory.test.js 的接线不变量
   // 直接按「changeUserPassword 起点之后的文本」找 `user.passwordHistory = withPrevious(`，
   // 抽走之后那条判据会红——而它守的正是「历史真的被写进去了」，不是一次代码整理可以豁免的。
+  // P1-2：本次改密是否是"首次登录/管理员重置后的强制改密"决定审计动作
+  // （password_force_changed 与普通 password_changed 分开，审计页才分得清
+  // "用户自己定期换"和"临时口令完成首改"）。
+  const wasForced = user.mustChangePassword === true;
+
   user.password = next.value;
   user.passwordChangedAt = new Date();
+  user.passwordSetAt = new Date();
+  user.mustChangePassword = false;
   // 记的是**刚被替换掉的旧口令**：本次比较发生在写入之前，检查对象是
   // 「候选新口令 vs 既往口令」。当前口令由上面的 SAME_PASSWORD 单独判。
   user.passwordHistory = withPrevious(user.passwordHistory, current.value);
@@ -188,7 +211,8 @@ async function changeUserPassword(userId, body, ctx) {
   // 口令已变 ⇒ 初始口令作废；即使随后的会话吊销失败也必须销毁该文件
   initialPasswordFile.consume(user.username, '修改密码');
 
-  return revokeSessionsAfterPasswordChange(user);
+  const revoked = await revokeSessionsAfterPasswordChange(user);
+  return { ...revoked, forced: wasForced && revoked.outcome === 'OK' };
 }
 
 module.exports = {

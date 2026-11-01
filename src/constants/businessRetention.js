@@ -1,26 +1,18 @@
 /**
  * 业务数据保留期声明（A2，2026-10-16）
  *
- * 缺口：需求「数据保护 → 全生命周期」
- * 六段里，**销毁段完全空白**——
+ * 缺口：需求「数据保护 → 全生命周期」六段里，**销毁段完全空白**——
  *   - 有保留期的：AuditLog / IPBlacklist / TokenBlacklist / UserSession（TTL 索引）；
  *   - 没有保留期的：User / FireDevice / FireAlarm / Inspection（`expireAfterSeconds` 零命中）。
  * 于是「业务数据留多久」这件事在代码里根本没有一处可查的声明。
  *
- * ⚠ 本模块把「业务口径」与「是否启用」拆成两条通道：
- * 「报警/巡检记录留 N 年、设备台账随资产寿命」是**业务与合规口径**，不是技术参数，
- * 因此口径必须写进 `declaredDays` 并经业务方书面确认；技术侧不得擅自改数字。
- * 2026-10-17（F-07）业务方已给出统一口径 **180 天**，故四个集合的 `declaredDays`
- * 均为 180。是否真正建 TTL 仍由 `BUSINESS_RETENTION_DAYS_*` 开关决定；标准
- * docker-compose 部署为这些变量提供了 `:-180` 默认值 ⇒ 默认启用 180 天 TTL，
- * 到期删除不可逆且无提示。要停用必须显式修改部署文件去掉默认值（见 compose 注释）。
+ * ⚠ 本模块把「业务口径」与「是否启用」拆成两条通道：「报警/巡检记录留 N 年、设备台账随资产寿命」是**业务与合规口径**，不是技术参数，因此口径必须写进 `declaredDays` 并经业务方书面确认；技术侧不得擅自改数字。
+ * 2026-10-17（F-07）业务方已给出统一口径 **180 天**，故四个集合的 `declaredDays` 均为 180。是否真正建 TTL 仍由 `BUSINESS_RETENTION_DAYS_*` 开关决定；标准
+ * docker-compose 部署为这些变量提供了 `:-180` 默认值 ⇒ 默认启用 180 天 TTL，到期删除不可逆且无提示。要停用必须显式修改部署文件去掉默认值（见 compose 注释）。
  *
- * 纪律与 constants/retention.js 同源（该文件头记录过一次「对外声明 N 天、实际只留更少」
- * 的事故）：解析必须严格（`Number` 而不是 `parseInt`）、空串归入「未配置」、
- * 生效值与原始值不等时 `wasAdjusted` 为 true 并由 compliance-check 告警。
- * 两套声明共用同一对合规区间常量（MIN/MAX 自 constants/retention.js 引入），
- * 不另抄一份——审计与业务数据的合规下限没有理由不同，且分叉会让"哪个区间才是真的"
- * 变成一道需要读两处才能回答的题。
+ * 纪律与 constants/retention.js 同源（该文件头记录过一次「对外声明 N 天、实际只留更少」的事故）：解析必须严格（`Number` 而不是 `parseInt`）、空串归入「未配置」、
+ * 生效值与原始值不等时 `wasAdjusted` 为 true 并由 compliance-check 告警。两套声明共用同一对合规区间常量（MIN/MAX 自 constants/retention.js 引入），
+ * 不另抄一份——审计与业务数据的合规下限没有理由不同，且分叉会让"哪个区间才是真的" 变成一道需要读两处才能回答的题。
  *
  * 启用流程（三步，缺一不可）：
  *   ① 业务方给出书面保留期口径（按集合）；
@@ -32,21 +24,20 @@
 
 const { MIN_RETENTION_DAYS, MAX_RETENTION_DAYS } = require('./retention');
 
+/** 取证捕获下限独立于审计链（用户 2026-10-31 确认 30 天）：MIN_RETENTION_DAYS 同时是 AuditLog 审计链的下限，全局下调等于拿审计证据换便利 */
+const FORENSIC_RETENTION_MIN_DAYS = 30;
+
 /** camelCase → SCREAMING_SNAKE（`FireAlarm` → `FIRE_ALARM`），用于拼环境变量名 */
 const toScreamingSnake = (name) => name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase();
 
 /**
  * 受管业务集合的保留期声明（**单一声明**）。
  *
- * `declaredDays: null` = 业务口径未定 ⇒ 不得启用 TTL。
- * `basis` 记录的是"为什么这个集合需要保留期"，供业务方评审时对照（不是技术判断）。
+ * `declaredDays: null` = 业务口径未定 ⇒ 不得启用 TTL。 `basis` 记录的是"为什么这个集合需要保留期"，供业务方评审时对照（不是技术判断）。
  *
- * 【2026-10-17 口径落地（F-07）】业务方给定：**全部 180 天**。
- * 180 天的依据是等保 2.0 三级对审计/日志留存「不少于六个月」的要求（《网络安全法》
- * 第 21 条同口径），本仓按同一口径统一业务台账的保留期，不再按集合分档。
+ * 【2026-10-17 口径落地（F-07）】业务方给定：**全部 180 天**。 180 天的依据是等保 2.0 三级对审计/日志留存「不少于六个月」的要求（《网络安全法》 第 21 条同口径），本仓按同一口径统一业务台账的保留期，不再按集合分档。
  *
- * 两处必须说清楚的偏离（不是遗漏，是刻意）：
- *  ① **User 不建 TTL**。删账号与删台账不是同一件事：AuditLog.userId 指向被删用户后，
+ * 两处必须说清楚的偏离（不是遗漏，是刻意）： ① **User 不建 TTL**。删账号与删台账不是同一件事：AuditLog.userId 指向被删用户后，
  *     审计链上的操作者会变成悬空引用（合规回溯断链），而且删账号不可逆。它的 180 天
  *     口径体现为**匿名化**（services/userService.anonymizeById），disposition='anonymize'。
  *  ② **TTL 字段取"事件时间"而非 createdAt**：报警按 occurredAt、巡检按 planStartTime。
@@ -76,6 +67,13 @@ const BUSINESS_RETENTION_POLICY = Object.freeze(
         '按统一的 180 天口径处置；需要更长留存时由归档流程接管，而不是把 TTL 调长。',
     ],
     [
+      'ForensicCapture',
+      'createdAt',
+      'ttl',
+      '取证捕获记录（P2）：只存 forensicTrigger 标记 IP 的取证级请求/响应全量，用于溯源与 IP 池封禁。' +
+        '保留期 30 天（用户 2026-10-31 书面确认）；下限独立于审计链，用 FORENSIC_RETENTION_MIN_DAYS 而非下调全局 MIN。',
+    ],
+    [
       'User',
       null,
       'anonymize',
@@ -87,8 +85,9 @@ const BUSINESS_RETENTION_POLICY = Object.freeze(
     Object.freeze({
       modelName,
       envKey: `BUSINESS_RETENTION_DAYS_${toScreamingSnake(modelName)}`,
-      // 业务方 2026-10-17 给定的统一口径
-      declaredDays: 180,
+      // 业务方 2026-10-17 给 180；取证捕获按用户 2026-10-31 确认的 30 天。minDays 是该集合自己的合规下限
+      declaredDays: modelName === 'ForensicCapture' ? FORENSIC_RETENTION_MIN_DAYS : 180,
+      minDays: modelName === 'ForensicCapture' ? FORENSIC_RETENTION_MIN_DAYS : MIN_RETENTION_DAYS,
       /** TTL 索引字段；null = 该集合不建 TTL（见 disposition） */
       ttlField,
       /** 'ttl' = Mongo TTL 索引；'anonymize' = 由运维/定时任务执行匿名化 */
@@ -128,20 +127,21 @@ const resolveBusinessRetention = (modelName) => {
   const rawEnv = process.env[policy.envKey];
   const rawDays = typeof rawEnv === 'string' && rawEnv.trim() === '' ? NaN : Number(rawEnv);
   const isConfigured = Number.isFinite(rawDays);
+  // 钳制用**该集合自己的**下限（policy.minDays），不是全局 MIN：取证捕获 30 天、审计链类 90 天。
   const effectiveDays = isConfigured
-    ? Math.min(Math.max(rawDays, MIN_RETENTION_DAYS), MAX_RETENTION_DAYS)
+    ? Math.min(Math.max(rawDays, policy.minDays), MAX_RETENTION_DAYS)
     : null;
   return {
     modelName,
     envKey: policy.envKey,
     declaredDays: policy.declaredDays,
+    minDays: policy.minDays,
     ttlField: policy.ttlField,
     disposition: policy.disposition,
     rawDays,
     isConfigured,
     effectiveDays,
-    // enabled 的判据是"有生效值"，而不是"声明了"——声明只是评审留痕，
-    // 真正的开关是环境变量，这样"改口径"与"改部署"各走各的通道，可分别回退。
+    // enabled 判据是"有生效值"而非"声明了"：声明只是评审留痕，真正的开关是环境变量
     enabled: effectiveDays !== null,
     wasAdjusted: isConfigured ? rawDays !== effectiveDays : rawEnv !== undefined,
   };
@@ -150,13 +150,10 @@ const resolveBusinessRetention = (modelName) => {
 /**
  * 建 TTL 索引前的 fail-closed 判据。
  *
- * 为什么要有它：将来某人给 FireAlarm 加 TTL 索引时，最容易发生的不是"算错天数"，
- * 而是**跳过业务口径直接写一个数字**。此函数把"口径没定"从"没人记得"变成"当场抛错"。
+ * 为什么要有它：将来某人给 FireAlarm 加 TTL 索引时，最容易发生的不是"算错天数"，而是**跳过业务口径直接写一个数字**。此函数把"口径没定"从"没人记得"变成"当场抛错"。
  *
- * 【F-07 修正（2026-10-17）】原判据只看 `enabled`（= 环境变量配了就算通过），
- * 于是 `declaredDays: null`（业务口径根本没定）时只要有人设了一个环境变量，
- * `assertBusinessRetentionEnforceable()` 就返回该天数、TTL 索引照建——「口径未定
- * 不许建」这条纪律实际没落地。现在四道闸全过才放行：
+ * 【F-07 修正（2026-10-17）】原判据只看 `enabled`（= 环境变量配了就算通过），于是 `declaredDays: null`（业务口径根本没定）时只要有人设了一个环境变量，
+ * `assertBusinessRetentionEnforceable()` 就返回该天数、TTL 索引照建——「口径未定不许建」这条纪律实际没落地。现在四道闸全过才放行：
  *   ① 业务口径已声明（declaredDays 非 null）；
  *   ② 环境变量已配置且能解析出数值；
  *   ③ 生效值落在 [MIN, MAX] 合规区间内（被钳制 ⇒ 意图与生效不一致，拒绝）；
@@ -187,7 +184,7 @@ const assertBusinessRetentionEnforceable = (modelName) => {
   if (r.wasAdjusted) {
     throw new Error(
       `拒绝为 ${modelName} 建保留期（TTL）索引：${r.envKey}=${r.rawDays} 超出允许区间 ` +
-        `[${MIN_RETENTION_DAYS}, ${MAX_RETENTION_DAYS}]，实际会生效 ${r.effectiveDays} 天。` +
+        `[${r.minDays}, ${MAX_RETENTION_DAYS}]，实际会生效 ${r.effectiveDays} 天。` +
         '配置意图与生效值不一致时不允许静默按钳制值建索引。'
     );
   }
@@ -206,9 +203,7 @@ const assertBusinessRetentionEnforceable = (modelName) => {
 /**
  * 建 TTL 索引的**决策**（不抛错版本，供模型层使用）。
  *
- * 模型在**加载期**就要决定建不建 TTL 索引，而那时如果直接调
- * `assertBusinessRetentionEnforceable` 抛错，一次配置写错（如 99999）会让整个进程
- * 起不来——错误信息还不指向环境变量。所以模型层要的是"不建 + 有原因"，
+ * 模型在**加载期**就要决定建不建 TTL 索引，而那时如果直接调 `assertBusinessRetentionEnforceable` 抛错，一次配置写错（如 99999）会让整个进程起不来——错误信息还不指向环境变量。所以模型层要的是"不建 + 有原因"，
  * 由合规检查把原因变成红灯，而不是让服务起不来。
  *
  * @param {string} modelName
@@ -227,9 +222,8 @@ const describeBusinessRetention = (modelName) => {
   const r = resolveBusinessRetention(modelName);
   const declared = r.declaredDays === null ? '未声明（待业务口径）' : `${r.declaredDays} 天`;
   if (!r.enabled) {
-    // 三种"没启用"必须分开说：环境变量没配（或配了空值）/ 配了但解析不出数字。
-    // 混成一句"未配置"会让运维把"我明明写了 90x"读成"我没写过"——
-    // 而 `90x` 恰恰是 parseInt 会静默吃掉尾部、只有严格 Number 才拦得住的形态。
+    // 三种"没启用"必须分开说：没配（或空值）/ 配了但解析不出数字。混成一句会让运维把"我明明写了 90x"
+    // 读成"我没写过"——而 90x 恰恰是 parseInt 会静默吃掉尾部、只有严格 Number 才拦得住的形态。
     const rawEnv = process.env[r.envKey];
     const reason =
       rawEnv === undefined || rawEnv.trim() === ''
@@ -240,7 +234,7 @@ const describeBusinessRetention = (modelName) => {
   if (r.wasAdjusted) {
     return (
       `${modelName}：${r.envKey}=${r.rawDays} 超出允许区间 ` +
-      `[${MIN_RETENTION_DAYS}, ${MAX_RETENTION_DAYS}]，实际生效 ${r.effectiveDays} 天`
+      `[${r.minDays}, ${MAX_RETENTION_DAYS}]，实际生效 ${r.effectiveDays} 天`
     );
   }
   return `${modelName}：${r.envKey}=${r.effectiveDays} 天（在允许区间内，原样生效）`;
@@ -251,6 +245,7 @@ const describeAllBusinessRetention = () =>
   BUSINESS_RETENTION_POLICY.map((p) => describeBusinessRetention(p.modelName));
 
 module.exports = {
+  FORENSIC_RETENTION_MIN_DAYS,
   BUSINESS_RETENTION_POLICY,
   getBusinessRetentionPolicy,
   resolveBusinessRetention,

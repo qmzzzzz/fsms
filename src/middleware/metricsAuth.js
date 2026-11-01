@@ -1,10 +1,9 @@
 /**
  * /metrics 应用层鉴权纵深（可观测性审计改进项）
  *
- * 背景：/metrics 只暴露 QPS/延迟/错误率/安全告警计数等运行情报，
- * 此前仅靠 Nginx 网络层限源（nginx.conf.example 的 allow/deny），应用层
- * 无任何防线——Nginx 配置漂移、或有人从容器网络直连 app:3000 时即暴露。
- * 本中间件作为第二道防线，与 Nginx 限源纵深互补。
+ * 背景：/metrics 只暴露 QPS/延迟/错误率/安全告警计数等运行情报。只靠 Nginx 网络层
+ * 限源（nginx.conf.example 的 allow/deny）时应用层无任何防线——Nginx 配置漂移、或
+ * 有人从容器网络直连 app:3000 即暴露。本中间件作为第二道防线，与 Nginx 限源纵深互补。
  *
  * 鉴权策略（fail-safe：不确定来源一律拒绝）：
  *  1. 配置了 METRICS_TOKEN 且请求携带正确 Bearer 令牌 → 放行

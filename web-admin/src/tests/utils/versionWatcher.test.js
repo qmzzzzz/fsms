@@ -1,5 +1,5 @@
 /**
- * 版本探测（热升级的感知层）
+ * 版本探测（升级的感知层）
  *
  * 这个模块一旦判错，两种后果都很糟：
  *   · 误报 ⇒ 每次打开页面都弹「有新版本」，用户学会无视它，真升级时也没人点；
@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import {
   createVersionWatcher,
   isComparableBuildId,
+  isPageHidden,
   DEFAULT_INTERVAL_MS,
 } from '@/utils/versionWatcher'
 
@@ -33,6 +34,25 @@ describe('isComparableBuildId', () => {
     for (const v of ['', '   ', 'unknown', 'dev', null, undefined, 123]) {
       expect(isComparableBuildId(v)).toBe(false)
     }
+  })
+})
+
+describe('isPageHidden（全仓统一可见性判据）', () => {
+  test('不可见 = visibilityState 不是 visible：hidden 与 prerender 都算', () => {
+    // 原判据只认 === 'hidden'，于是 prerender（本仓 jsdom 默认、也是浏览器
+    // 预渲染态）被当成「可见」，探测会在不该发的时候发出去
+    expect(isPageHidden({ visibilityState: 'prerender', hidden: true })).toBe(true)
+    expect(isPageHidden({ visibilityState: 'hidden', hidden: true })).toBe(true)
+    expect(isPageHidden({ visibilityState: 'visible', hidden: false })).toBe(false)
+  })
+
+  test('拿不到 visibilityState 时退回 document.hidden', () => {
+    expect(isPageHidden({ visibilityState: '', hidden: true })).toBe(true)
+    expect(isPageHidden({ visibilityState: undefined, hidden: false })).toBe(false)
+  })
+
+  test('没有 document（SSR / 测试注入空）时按可见处理，不因判据缺失而停摆', () => {
+    expect(isPageHidden(null)).toBe(false)
   })
 })
 
@@ -123,6 +143,22 @@ describe('createVersionWatcher', () => {
     watcher.stop()
   })
 
+  test('页面处于 prerender 时同样不发请求（原判据漏掉这个状态）', async () => {
+    setVisibility('prerender')
+    const fetchVersion = vi.fn(async () => ({ buildId: 'build-bbb' }))
+    const watcher = createVersionWatcher({
+      localBuildId: 'build-aaa',
+      fetchVersion,
+      intervalMs: 1000,
+    })
+
+    watcher.start()
+    await watcher.checkNow()
+
+    expect(fetchVersion).not.toHaveBeenCalled()
+    watcher.stop()
+  })
+
   test('页面隐藏时不发请求（后台标签页不烧配额）', async () => {
     setVisibility('hidden')
     const fetchVersion = vi.fn(async () => ({ buildId: 'build-bbb' }))
@@ -182,6 +218,124 @@ describe('createVersionWatcher', () => {
     watcher.stop()
     await vi.advanceTimersByTimeAsync(DEFAULT_INTERVAL_MS * 3)
     expect(fetchVersion).toHaveBeenCalledTimes(2)
+  })
+
+  test('探测超时：悬挂的请求到期即中止并释放 inFlight（否则轮询被永久挡掉）', async () => {
+    vi.useFakeTimers()
+    let aborted = false
+    const fetchVersion = vi.fn(
+      ({ signal } = {}) =>
+        new Promise((_, reject) => {
+          signal?.addEventListener('abort', () => {
+            aborted = true
+            reject(new Error('aborted'))
+          })
+        })
+    )
+    const watcher = createVersionWatcher({
+      localBuildId: 'build-aaa',
+      fetchVersion,
+      intervalMs: 1000,
+      timeoutMs: 5000,
+    })
+
+    watcher.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchVersion).toHaveBeenCalledTimes(1)
+
+    // 未超时前不叠加请求（慢网络下叠加只会烧穿配额）
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(fetchVersion).toHaveBeenCalledTimes(1)
+
+    // 到点即 abort：请求真的被中止，而不是只是我们自己不再等它
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(aborted).toBe(true)
+
+    // inFlight 已释放 ⇒ 下一个周期恢复探测（原实现会永久卡死在这里）
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetchVersion).toHaveBeenCalledTimes(2)
+    watcher.stop()
+  })
+
+  test('stop 中止在途探测：停止后回来的响应不得再回调', async () => {
+    let resolveFetch
+    let capturedSignal
+    const onUpdateAvailable = vi.fn()
+    const fetchVersion = vi.fn(({ signal } = {}) => {
+      capturedSignal = signal
+      return new Promise((resolve) => {
+        resolveFetch = () => resolve({ buildId: 'build-bbb' })
+      })
+    })
+    const watcher = createVersionWatcher({
+      localBuildId: 'build-aaa',
+      fetchVersion,
+      intervalMs: 1000,
+      timeoutMs: 0,
+      onUpdateAvailable,
+    })
+
+    watcher.start()
+    expect(fetchVersion).toHaveBeenCalledTimes(1)
+    expect(capturedSignal).toBeTruthy()
+
+    watcher.stop()
+    expect(capturedSignal.aborted).toBe(true)
+
+    resolveFetch()
+    await watcher.checkNow()
+    expect(onUpdateAvailable).not.toHaveBeenCalled()
+  })
+
+  test('stop 后再 start：允许重新探测并重新提示（原实现把 inFlight/notified 留成旧值）', async () => {
+    const onUpdateAvailable = vi.fn()
+    const fetchVersion = vi.fn(async () => ({ buildId: 'build-bbb' }))
+    const watcher = createVersionWatcher({
+      localBuildId: 'build-aaa',
+      fetchVersion,
+      intervalMs: 1000,
+      onUpdateAvailable,
+    })
+
+    watcher.start()
+    await vi.waitFor(() => expect(onUpdateAvailable).toHaveBeenCalledTimes(1))
+
+    watcher.stop()
+    watcher.start()
+    await vi.waitFor(() => expect(onUpdateAvailable).toHaveBeenCalledTimes(2))
+    watcher.stop()
+  })
+
+  test('默认取数复用统一 API base：VITE_API_BASE_URL 覆盖时探测路径跟随（P2-8）', async () => {
+    const originalFetch = globalThis.fetch
+    const urls = []
+    const stubFetch = vi.fn(async (url) => {
+      urls.push(url)
+      return { ok: true, json: async () => ({ success: true, data: { buildId: 'build-aaa' } }) }
+    })
+
+    try {
+      globalThis.fetch = stubFetch
+      for (const [env, expected] of [
+        ['/sub/api', '/sub/api/version'],
+        ['https://api.example.com/api', 'https://api.example.com/api/version'],
+        [undefined, '/api/version'],
+      ]) {
+        vi.resetModules()
+        if (env === undefined) vi.stubEnv('VITE_API_BASE_URL', '')
+        else vi.stubEnv('VITE_API_BASE_URL', env)
+        const mod = await import('@/utils/versionWatcher')
+        const watcher = mod.createVersionWatcher({ localBuildId: 'build-aaa', intervalMs: 1000 })
+        watcher.start()
+        await watcher.checkNow()
+        watcher.stop()
+        expect(urls.at(-1), String(env)).toBe(expected)
+      }
+    } finally {
+      globalThis.fetch = originalFetch
+      vi.unstubAllEnvs()
+      vi.resetModules()
+    }
   })
 
   test('标签页重新可见时补查一次（切回页面能立刻发现换版）', async () => {

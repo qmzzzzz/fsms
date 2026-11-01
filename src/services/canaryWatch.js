@@ -36,6 +36,7 @@ const { guardDetection, errText } = require('../utils/auditWriteFailure');
 const { normalizeIP, ipAttributionRiskFactors, resolvePunishTarget } = require('../utils/ipUtils');
 const { businessDateParts } = require('../constants/timezone');
 const { parseCanaryUsernames, findCanaryMatch } = require('../constants/canaryAccounts');
+const { withHoneypotExcluded } = require('../constants/honeypotAccounts'); // 蜜罐账户占用哨兵名不是「遮蔽」而是有意接管：对账时把它排除在遮蔽集外
 
 const { ALERT_TYPES } = securityAlert;
 
@@ -80,6 +81,7 @@ async function recordGhostAttempt({
   method,
   path,
   attribution,
+  credentialShape,
 } = {}) {
   const canary = matchCanaryName(username);
   if (canary === null) return; // 热路径绝大多数：不是名单名，立即返回
@@ -108,7 +110,7 @@ async function recordGhostAttempt({
         ...ipAttributionRiskFactors(attribution && attribution.kind),
       ],
       reason: 'canary_username_probe',
-      body: { canary },
+      body: credentialShape ? { canary, credentialShape } : { canary },
     });
   } catch (err) {
     logger.error(`哨兵用户名审计写入失败（不影响登录响应）：${errText(err)}`, { canary });
@@ -140,7 +142,7 @@ function init() {
       const { names, fromEnv, errors } = parseCanaryUsernames(process.env.CANARY_USERNAMES);
       for (const message of errors) logger.error(`哨兵用户名配置问题：${message}`);
       try {
-        const occupied = await User.find({ username: { $in: names } })
+        const occupied = await User.find(withHoneypotExcluded({ username: { $in: names } }))
           .collation(User.USERNAME_COLLATION)
           .select('username')
           .lean();

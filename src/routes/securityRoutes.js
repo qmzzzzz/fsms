@@ -8,6 +8,8 @@ const securityController = require('../controllers/securityController');
 // D-1：审计日志与 IP 名单端点自 securityController 拆出
 const auditController = require('../controllers/auditController');
 const ipListController = require('../controllers/ipListController');
+// 取证溯源（T5/T6）：本文件有效行已超 300（棘轮 max-lines），故路由独立成文件，在此按 /forensic 子路径并入，避免继续堆大本文件。
+const forensicRoutes = require('./forensicRoutes');
 // 名单类型取值与 models/IPBlacklist 的 enum、ipListController 的守卫同源
 const { IP_LIST_TYPES } = require('../constants/ipList');
 const {
@@ -19,9 +21,7 @@ const {
 } = require('../middleware');
 const { body, param, query } = require('express-validator');
 const { mustBeString } = require('../utils/validationRules');
-// 改密专用限流器 + 严格限流器（导出等重资源操作）
-// 注意：change-password 此前误用 loginLimiter——其组键读取 body.username 且
-// skipSuccessfulRequests 语义面向登录成功，均不适用于改密场景，现替换为专用限流器
+// 改密专用限流器 + 严格限流器（导出等重资源操作）注意：change-password 此前误用 loginLimiter——其组键读取 body.username 且 skipSuccessfulRequests 语义面向登录成功，均不适用于改密场景，现替换为专用限流器
 const {
   passwordChangeLimiter,
   passwordChangeUserLimiter,
@@ -32,60 +32,14 @@ const {
 } = require('../middleware/rateLimit');
 const { consumeValidation } = require('../middleware/validateQuery');
 const { validatePasswordStrength } = require('../utils/helpers');
-const config = require('../config');
+const {
+  rejectPlaintextInStrict,
+  encPasswordField,
+  rejectEncPlaintextCoexistence,
+  reauthCredentialValidation, // /reauth 与管理员写操作（含升级）共用的凭据契约
+} = require('../middleware/security/reauthCredentialRules');
 
-// ===== 登录口令加密传输（密文轨/明文轨双轨，与 authRoutes 同口径）=====
-// 明文轨守卫：LOGIN_ENCRYPT_STRICT=true 后所有明文口令字段直接拒绝
-const rejectPlaintextInStrict = () => {
-  if (config.loginEncryptStrict) {
-    throw new Error('服务端已启用口令加密传输，请刷新页面后重试');
-  }
-  return true;
-};
-
-// 口令密文字段的统一格式约束（ECDH 信封 base64，上限与 loginCipher 一致）
-const encPasswordField = (field) =>
-  body(field)
-    .optional({ values: 'falsy' })
-    .isString()
-    .withMessage('口令密文格式无效')
-    .isLength({ max: 1024 })
-    .withMessage('口令密文长度异常');
-
-// strict 模式下 enc 与明文字段并存视为协议违规（与 authRoutes 同口径）
-const rejectEncPlaintextCoexistence = (encField, plainField) =>
-  body(plainField).custom((value, { req }) => {
-    if (config.loginEncryptStrict && req.body[encField] && value !== undefined && value !== '') {
-      throw new Error(`已提供口令密文（${encField}），禁止同时携带明文字段（${plainField}）`);
-    }
-    return true;
-  });
-
-// 二次验证凭据的共享校验链：签发审计票据的 POST /reauth、管理员写操作
-// （重置 MFA / 三个安全开关）共用一套字段契约。requireReAuthentication
-// 自身在缺凭据时返回 REAUTH_REQUIRED，这里只拦"格式无效"的凭据，避免
-// 坏格式请求把口令比对/失败计数/验证码烧毁逻辑走一遍。
-const reauthCredentialValidation = [
-  encPasswordField('encCurrentPassword'),
-  rejectEncPlaintextCoexistence('encCurrentPassword', 'currentPassword'),
-  body('currentPassword')
-    .if((value, { req }) => !req.body.encCurrentPassword)
-    .optional({ values: 'falsy' })
-    .isString()
-    .withMessage('密码格式无效')
-    .isLength({ max: 128 })
-    .withMessage('密码长度异常')
-    .custom(rejectPlaintextInStrict),
-  body('mfaCode')
-    .optional({ values: 'falsy' })
-    .isString()
-    .withMessage('验证码格式无效')
-    .matches(/^\d{6}$/)
-    .withMessage('验证码应为 6 位数字'),
-];
-
-// 验证规则
-// isString() 前置：express-validator 会把对象/数组先强转字符串再跑后续校验，
+// 验证规则 isString() 前置：express-validator 会把对象/数组先强转字符串再跑后续校验，
 // `{}` → `[object Object]` 可通过 notEmpty/matches，原值随后进入
 // bcrypt.compare 触发 TypeError → 500（与 authRoutes 同口径修复）
 const changePasswordValidation = [
@@ -179,11 +133,10 @@ const reportValidation = [
 ];
 
 // 路由定义
-/**
- * @route   GET /api/security/my-info
- * @desc    获取当前用户的安全信息
- * @access  Private
- */
+/** GET /api/security/my-info：本人安全信息（Private，本人资源）。 */
+// 挂在所有具体路由之前：/forensic/* 是独立前缀，先注册避免被后续同前缀规则抢占
+router.use('/forensic', forensicRoutes);
+
 router.get('/my-info', authenticate, securityController.getMySecurityInfo);
 
 /**
@@ -202,11 +155,7 @@ router.put(
   // PERMISSION-EXEMPT: 本人资源：authenticate 已确定身份（#15 收敛后业务在 authService）
 );
 
-/**
- * @route   GET /api/security/bindings
- * @desc    获取账户绑定信息
- * @access  Private
- */
+/** GET /api/security/bindings：本人账户绑定状态（Private，本人资源）。 */
 router.get('/bindings', authenticate, securityController.getAccountBindings);
 
 /**
@@ -416,6 +365,33 @@ router.put(
 );
 
 /**
+ * @route   PUT /api/security/users/:userId/password/reset
+ * @desc    管理员重置用户口令（生成一次性临时口令并强制首次登录改密）
+ *          场景：内部系统无自助找回渠道，员工忘记口令时由管理员救济
+ * @access  Private [user:reset_password]（与重置 MFA 同级敏感的账户救济操作）
+ */
+router.put(
+  '/users/:userId/password/reset',
+  authenticate,
+  checkPermission('user:reset_password'),
+  strictLimiter,
+  // 与 MFA 重置同口径：账户接管级操作，权限码之外再要求操作者当场验证一次
+  // 口令/MFA，避免会话被借用时直接改掉受害者口令。
+  param('userId').isMongoId().withMessage('用户 ID 格式无效'),
+  body('reason')
+    .optional({ values: 'falsy' })
+    .isString()
+    .withMessage('reason 必须为字符串')
+    .trim()
+    .isLength({ max: 200 })
+    .withMessage('重置原因最多 200 个字符'),
+  ...reauthCredentialValidation,
+  consumeValidation(),
+  requireReAuthentication(),
+  securityController.resetUserPassword
+);
+
+/**
  * @route   GET /api/security/overview
  * @desc    获取安全概览（管理员）
  * @access  Private [security:audit]
@@ -579,6 +555,45 @@ router.put(
   securityController.setRegisterCaptchaConfig
 );
 
+/** GET /api/security/upgrade：概览 [security:config]。GET 不挂 requireReAuthentication
+ * （只读构建信息与就绪原因）；两条 GET 在 auditGetExcludePaths 豁免（3 秒轮询会灌满审计链）。 */
+router.get(
+  '/upgrade',
+  authenticate,
+  checkPermission('security:config'),
+  securityController.getUpgradeOverview
+);
+
+/** GET /api/security/upgrade/jobs/:jobId：任务状态 [security:config]。参数名用 :jobId 而非
+ * :id——applyObjectIdParams 会对 :id 做 ObjectId 校验，而任务 ID 是 randomUUID，用 :id 会 400。 */
+router.get(
+  '/upgrade/jobs/:jobId',
+  authenticate,
+  checkPermission('security:config'),
+  securityController.getUpgradeJob
+);
+
+/** POST /api/security/upgrade/requests：入队 [security:config + 唯一超管 + 步进验证]。
+ * 用 strictLimiter 而非 reauth 桶：后者与 /view-sensitive 共用 5 次/15 分钟，正常查看
+ * 联系方式后不该连带失去发布能力；步进验证的暴力防护由共享 MFA 失败锁承担。 */
+router.post(
+  '/upgrade/requests',
+  authenticate,
+  checkPermission('security:config'),
+  strictLimiter,
+  body('image')
+    .isString()
+    .trim()
+    .notEmpty()
+    .withMessage('请提供镜像地址')
+    .isLength({ max: 512 })
+    .withMessage('镜像地址不能超过 512 个字符'),
+  ...reauthCredentialValidation,
+  consumeValidation(),
+  requireReAuthentication(),
+  securityController.triggerUpgrade
+);
+
 /**
  * @route   GET /api/security/ip-list
  * @desc    获取 IP 黑白名单列表（?type=black|white）
@@ -641,6 +656,12 @@ router.post(
     .optional()
     .isFloat({ min: 0, max: 8760 })
     .withMessage('生效时长应在 0-8760 小时'),
+  body('typedConfirm')
+    .optional()
+    .isString()
+    .trim()
+    .isLength({ max: 200 })
+    .withMessage('确认串不能超过 200 个字符'),
   ipListController.addIPEntry
 );
 

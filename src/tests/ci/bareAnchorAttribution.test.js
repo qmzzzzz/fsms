@@ -129,27 +129,27 @@ const LEDGER = [
 
   {
     site: 'src/services/authService/login.js',
-    siteLine: 291,
-    raw: '上方 219/235 行',
+    siteLine: 333,
+    raw: '上方 214/258 行',
     status: 'LIVE',
     referent: 'src/services/authService/login.js',
-    from: 219,
-    to: 235,
+    from: 214,
+    to: 258,
     mustRead: 'checkBruteForce(',
-    note: '锚曾长期写着「上方 210/233 行」：210 是 @returns JSDoc 行、233 是"查找用户"注释（他人 M，不代改）。2026-10-18 lint 批 3a 把 authService 拆成子模块后，两处真站点随模块头迁到 login.js 的 :212 与 :228，而 210/233 这对旧坐标恰好把这两行夹在中间——台账的「锚仍错着」判据（区间读不出真符号）从此再也证伪不了它。继续原样留着，等于把一对看起来对、其实差 2 行与 5 行的坐标固化进源码，故按本闸自身规则（改对了本闸红、要求晋升）把锚改对并晋升为 LIVE，原始错号留在本条 note 里。2026-10-19 哨兵用户名（canary）批在「用户不存在」分支插入幽灵名探测调用（模块头 :16 与 :104 后共 +15 行），锚随整体下移并同步改对：站点 284→299、两处真站点 212/228→227/243。2026-10-20 删除重复 JSDoc（-8 行）：站点 299→291、两处真站点 227/243→219/235。',
+    note: '锚曾长期写着「上方 210/233 行」：210 是 @returns JSDoc 行、233 是"查找用户"注释（他人 M，不代改）。2026-10-18 lint 批 3a 把 authService 拆成子模块后，两处真站点随模块头迁到 login.js 的 :212 与 :228，而 210/233 这对旧坐标恰好把这两行夹在中间——台账的「锚仍错着」判据（区间读不出真符号）从此再也证伪不了它。继续原样留着，等于把一对看起来对、其实差 2 行与 5 行的坐标固化进源码，故按本闸自身规则（改对了本闸红、要求晋升）把锚改对并晋升为 LIVE，原始错号留在本条 note 里。2026-10-19 哨兵用户名（canary）批在「用户不存在」分支插入幽灵名探测调用（模块头 :16 与 :104 后共 +15 行），锚随整体下移并同步改对：站点 284→299、两处真站点 212/228→227/243。2026-10-20 删除重复 JSDoc（-8 行）：站点 299→291、两处真站点 227/243→219/235。2026-10-31 蜜罐批在 loginUser 的 ③（账户可用性）与 ④（口令校验）之间插入诱饵放行分支（模块头 +1 行 require、分支 +16 行 ⇒ 该行以下的代码整体 +17 行）：站点 291→308、两处真站点 219/235→235/251。2026-10-31 登录挑战批在前置层加失败触发的人机挑战（模块头 +3 行、resolveLoginPassword 内 +2 行、assertAccountUsable 的临时锁定分支新增 captchaVerified 放行臂 +3 行 ⇒ 该行以下的代码整体 +5 行），随后又按注释密度棘轮把本文件 7 处两行注释并回一行（目标站点以上 −8 行）：站点 308→313、两处真站点 235/251→238/253。2026-11-01 审计二-3 在 resolveLoginPassword 的验证码拒绝分支加留痕（+18 行，在真站点之前 ⇒ 两处真站点 238/253→214/258 之外还把站点 313→333），同时把「与上方 238/253 行」这对坐标连同其上的两行注释并成一行（−1 行）。',
   },
   {
     site: 'src/services/authService/profile.js',
-    siteLine: 183,
+    siteLine: 194,
     raw: '（:350）',
     status: 'DEBT',
     wrongFrom: 350,
     wrongTo: 350,
     referent: 'src/services/authService/login.js',
-    from: 73,
-    to: 73,
+    from: 72,
+    to: 72,
     mustRead: 'async function loginUser',
-    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动；2026-10-18 lint 批 1 把 setUserLockStatus 的判据/写入计划抽成具名函数（本注释所在块 +5 行）⇒ 1288→1293；2026-10-18 lint 批 2 把 refreshSession / changeUserPassword 拆成具名步骤函数（两函数合计 +123 行，均在站点之上）⇒ 1293→1417，指代目标 :230 在它们之上、不受影响；2026-10-18 lint 批 3a 把 authService 拆成子模块后，锚随 setUserLockStatus 落到 profile.js（1417→182），指代目标 loginUser 落到 login.js（:230→:80）——两者不再同文件，这正是本台账坚持用「文件限定坐标」而不是裸行号的原因。2026-10-19 哨兵用户名（canary）批在 login.js 模块头 :16 后 +1 行（require），指代目标 80→81；错号 :350 在 profile.js、不受影响。2026-10-20 删除重复 JSDoc（-8 行）：指代目标 81→73；错号 :350 仍在 profile.js、不受影响。2026-10-21 解锁吊销会话批在模块头 +1 行（sessionService require）：站点 182→183；错号与指代目标均不受影响。',
+    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动；2026-10-18 lint 批 1 把 setUserLockStatus 的判据/写入计划抽成具名函数（本注释所在块 +5 行）⇒ 1288→1293；2026-10-18 lint 批 2 把 refreshSession / changeUserPassword 拆成具名步骤函数（两函数合计 +123 行，均在站点之上）⇒ 1293→1417，指代目标 :230 在它们之上、不受影响；2026-10-18 lint 批 3a 把 authService 拆成子模块后，锚随 setUserLockStatus 落到 profile.js（1417→182），指代目标 loginUser 落到 login.js（:230→:80）——两者不再同文件，这正是本台账坚持用「文件限定坐标」而不是裸行号的原因。2026-10-19 哨兵用户名（canary）批在 login.js 模块头 :16 后 +1 行（require），指代目标 80→81；错号 :350 在 profile.js、不受影响。2026-10-20 删除重复 JSDoc（-8 行）：指代目标 81→73；错号 :350 仍在 profile.js、不受影响。2026-10-21 解锁吊销会话批在模块头 +1 行（sessionService require）：站点 182→183；错号与指代目标均不受影响。2026-10-30 头像上传在 profile.js 增加清空事务分支（+16 行），站点 183→199。2026-10-30 当日二次改动（清空事务分支收敛 + 注释压缩，-5 行）⇒ 站点 199→194，错号 :350 与指代目标 :73 均不受影响。2026-10-31 蜜罐批在 login.js 模块头 +1 行（honeypotWatch require）：指代目标 73→74；错号 :350 在 profile.js、不受影响。2026-10-31 登录挑战批在 login.js 前置层与临时锁定分支加人机挑战（真站点以下 +5 行，均在 loginUser 之上），同日的注释密度棘轮收口又把 7 处两行注释并回一行（模块头与 loginUser 以上 −8 行）：指代目标 74→71；错号 :350 仍在 profile.js、不受影响。2026-11-01 蜜罐批在 login.js 模块头 +1 行（honeypotWatch 的 require 及其尾注），审计二-3 又把文件头两行注释并成一行（−1 行）：指代目标 71→72（净 +1）；错号 :350 仍在 profile.js、不受影响。',
   },
   {
     site: 'src/services/permissionService.js',
@@ -187,14 +187,14 @@ const LEDGER = [
 
   {
     site: 'src/services/initData/indexes.js',
-    siteLine: 211,
+    siteLine: 237,
     raw: '（:89）',
     status: 'LIVE',
     referent: 'migrations/20260831000000-reconcile-audit-index-options.js',
     from: 89,
     to: 89,
     mustRead: 'createIndex({ timestamp: -1 }',
-    note: '指迁移脚本 down() 重建的无 TTL 索引——该文件在 migrations/，不在 commentAnchorFreshness 的 SCAN_ROOTS 内。站点行号 2026-10-16 因 A3（emailKey 唯一索引四步对账 + dropLegacyUsernameIndex/switchEmailIndexToKey 拆函数）在 initData.js 上方插入共 +124 行 ⇒ 1132→1256；2026-10-19 批 3c 把 initData.js 拆为目录后站点迁至 indexes.js（:1256 → :211）；指代目标在 migrations/ 未动',
+    note: '指迁移脚本 down() 重建的无 TTL 索引——该文件在 migrations/，不在 commentAnchorFreshness 的 SCAN_ROOTS 内。站点行号 2026-10-16 因 A3（emailKey 唯一索引四步对账 + dropLegacyUsernameIndex/switchEmailIndexToKey 拆函数）在 initData.js 上方插入共 +124 行 ⇒ 1132→1256；2026-10-19 批 3c 把 initData.js 拆为目录后站点迁至 indexes.js（:1256 → :211）；2026-10-30 又因 dropLegacyUsernameIndex 补 fail-closed（username_ci 未就绪不删旧索引、零唯一约束告警）2026-10-30 同日该文件的续改（username 索引对账继续加行）把站点推至 :237——本条行号随该文件收敛而浮动，改动者需同步此值；指代目标在 migrations/ 未动',
   },
   {
     site: 'src/services/reportDashboardService.js',
@@ -220,14 +220,14 @@ const LEDGER = [
   },
   {
     site: 'src/tests/config/startupGuards.test.js',
-    siteLine: 470,
+    siteLine: 474,
     raw: '（:39-43）',
     status: 'LIVE',
     referent: 'src/config/database.js',
     from: 39,
     to: 43,
     mustRead: 'envInt(',
-    note: '那五个开关确实由 envInt 读出。站点 435→470：F-04（2026-10-17）新增「环境语义归一」用例把本文件撑长 35 行；505 那个值是另一份 F-01 实现给本文件加的净 35 行算出来的（+36/−1），2026-10-18 收敛到远端实现后那 35 行不再存在 ⇒ 回到 470',
+    note: '那五个开关确实由 envInt 读出（站点现为 474）',
   },
   {
     site: 'src/tests/inspectionInputBoundary.test.js',
@@ -243,13 +243,13 @@ const LEDGER = [
   {
     site: 'src/tests/services/auditWalChainOrphanRejection.test.js',
     siteLine: 16,
-    raw: '（:493）',
+    raw: '（:492）',
     status: 'LIVE',
     referent: 'src/services/auditBufferWal.js',
-    from: 493,
-    to: 493,
+    from: 492,
+    to: 492,
     mustRead: 'onError ||',
-    note: 'serialize() 的默认兜底臂；文件已从 utils/auditBuffer.js 迁到 services/auditBufferWal.js（第 4 族），2026-10-21 拆分 WAL 路径/目录模块后迁到 :487；2026-10-25 审计整改在文件上方 +6 行 ⇒ :493',
+    note: 'serialize() 的默认兜底臂；文件已从 utils/auditBuffer.js 迁到 services/auditBufferWal.js（第 4 族），2026-10-21 拆分 WAL 路径/目录模块后迁到 :487；2026-10-25 审计整改在文件上方 +6 行 ⇒ :493；2026-10-31 上方注释治理净删 1 行 ⇒ :492',
   },
 
   {
@@ -443,8 +443,8 @@ describe('第 5 族 · 回指式裸行锚', () => {
     // 自动解析给出的指代（同块最近 token = src/index.js）里没有那个符号 ⇒ 会判成死锚
     expect(hasSymbol('src/index.js', wal.from, wal.to, 'onError ||')).toBe(false);
     // 真实指代在另一个文件里、行号完全正确 ⇒ 只有作者登记才给得出来
-    expect(contentFreeKind('src/services/auditBufferWal.js', 493, 493)).toBeNull();
-    expect(hasSymbol('src/services/auditBufferWal.js', 493, 493, 'onError ||')).toBe(true);
+    expect(contentFreeKind('src/services/auditBufferWal.js', 492, 492)).toBeNull();
+    expect(hasSymbol('src/services/auditBufferWal.js', 492, 492, 'onError ||')).toBe(true);
     for (const e of byStatus('LIVE').concat(byStatus('DEBT'))) {
       expect(typeof e.referent).toBe('string');
       expect(e.from).toBeGreaterThan(0);

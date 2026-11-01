@@ -15,6 +15,9 @@ logs/
 *.log
 npm-debug.log*
 
+# 升级本地队列（生产在 /var/lib/fsms/upgrade，仅本地开发可能指向仓库内）
+.upgrade-queue/
+
 # 测试
 coverage/
 .nyc_output/
@@ -155,3 +158,9 @@ deliverables/
 
 # jest 本地运行临时目录（haste map / 日志）
 .jesttmp/
+
+# work/lead 下的全量跑日志是临时诊断输出（体积 MB 级），结论转写进 iter-report，不入库
+work/lead/*.log
+
+# 审计/修复过程的临时工作台（脚本自述「不进仓库」），只留报告
+work/_harness/

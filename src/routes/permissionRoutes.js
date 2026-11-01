@@ -9,6 +9,8 @@ const { authenticate, checkPermission } = require('../middleware');
 const { body, param, query } = require('express-validator');
 const { mustBeString } = require('../utils/validationRules');
 const { consumeValidation } = require('../middleware/validateQuery');
+const { idempotency } = require('../middleware/idempotency');
+const privilegeController = require('../controllers/privilegeController');
 // 取值清单只有一份（constants/permission.js）：这些 isIn 与 Permission/Role schema 的 enum
 // 必须同源，否则"校验放行、落库被 ValidationError 拒"。
 const {
@@ -16,6 +18,12 @@ const {
   PERMISSION_METHODS,
   RESOURCE_STATUSES,
 } = require('../constants/permission');
+const {
+  PRIVILEGE_GRANT_STATUSES,
+  MAX_GRANT_CODES,
+  MIN_GRANT_HOURS,
+  MAX_GRANT_HOURS,
+} = require('../constants/privilegeGrant');
 
 // 列表 query 校验。module/type/status 此前零校验直入 Mongo 过滤
 // values:'falsy'：前端未选筛选项时带空串（type=&status=），空串语义为「不筛选」
@@ -167,6 +175,90 @@ router.get(
   permissionController.getPermissions
 );
 
+const grantsListValidation = [
+  query('status')
+    .optional({ values: 'falsy' })
+    .isIn(PRIVILEGE_GRANT_STATUSES)
+    .withMessage('无效的状态值'),
+  query('userId').optional({ values: 'falsy' }).isMongoId().withMessage('用户 ID 格式无效'),
+  query('page').optional().isInt({ min: 1 }).withMessage('页码无效'),
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('每页数量应在 1-100'),
+];
+
+const createGrantValidation = [
+  body('targetUserId').isMongoId().withMessage('被授权用户 ID 格式无效'),
+  body('permissionCodes')
+    .isArray({ min: 1, max: MAX_GRANT_CODES })
+    .withMessage('权限码列表应为 1-' + MAX_GRANT_CODES + ' 项'),
+  body('permissionCodes.*').isString().withMessage('权限码格式无效'),
+  body('durationHours')
+    .isInt({ min: MIN_GRANT_HOURS, max: MAX_GRANT_HOURS })
+    .withMessage('有效期应为 ' + MIN_GRANT_HOURS + '-' + MAX_GRANT_HOURS + ' 小时'),
+  mustBeString('reason', '申请理由'),
+  body('reason').trim().isLength({ min: 1, max: 200 }).withMessage('申请理由长度应为 1-200 个字符'),
+];
+
+const grantIdValidation = [param('id').isMongoId().withMessage('授权记录 ID 格式无效')];
+const grantReasonValidation = [
+  mustBeString('reason', '理由'),
+  body('reason').optional().trim().isLength({ max: 200 }).withMessage('理由不能超过 200 个字符'),
+];
+
+router.get(
+  '/grants',
+  authenticate,
+  checkPermission('privilege:read'),
+  grantsListValidation,
+  consumeValidation(),
+  privilegeController.listGrants
+);
+
+router.get(
+  '/grants/review',
+  authenticate,
+  checkPermission('privilege:read'),
+  privilegeController.getReviewSummary
+);
+
+router.post(
+  '/grants',
+  authenticate,
+  checkPermission('privilege:grant'),
+  idempotency({ scope: 'privilege:grant' }), // 请求级幂等（一-1）：重复提交产出两条待审记录
+  createGrantValidation,
+  consumeValidation(),
+  privilegeController.createGrant // SCOPE-EXEMPT: 授予对象由 targetUserId 显式指定，全局管理面
+);
+
+router.post(
+  '/grants/:id/approve',
+  authenticate,
+  checkPermission('privilege:approve'),
+  grantIdValidation,
+  consumeValidation(),
+  privilegeController.approveGrant // SCOPE-EXEMPT: 审批对象是授权记录本身，无数据范围维度
+);
+
+router.post(
+  '/grants/:id/reject',
+  authenticate,
+  checkPermission('privilege:approve'),
+  grantIdValidation,
+  grantReasonValidation,
+  consumeValidation(),
+  privilegeController.rejectGrant // SCOPE-EXEMPT: 同 approve
+);
+
+router.post(
+  '/grants/:id/revoke',
+  authenticate,
+  checkPermission('privilege:grant'),
+  grantIdValidation,
+  grantReasonValidation,
+  consumeValidation(),
+  privilegeController.revokeGrant // SCOPE-EXEMPT: 同 approve
+);
+
 /**
  * @route   GET /api/permissions/:id
  * @desc    获取权限详情
@@ -192,6 +284,7 @@ router.post(
   '/',
   authenticate,
   checkPermission('permission:create'),
+  idempotency({ scope: 'permission:create' }), // 请求级幂等（一-1）：回放首次结果
   createPermissionValidation,
   // SCOPE-EXEMPT: 权限定义属全局管理面（无部门/属主维度），由 checkPermission('permission:create') 把关
   permissionController.createPermission
@@ -206,6 +299,7 @@ router.post(
   '/batch',
   authenticate,
   checkPermission('permission:create'),
+  idempotency({ scope: 'permission:batchCreate' }), // 请求级幂等（一-1）：脚本重跑会重复几十条
   batchCreateValidation,
   // SCOPE-EXEMPT: 同 POST /api/permissions：全局管理面，无数据范围维度
   permissionController.batchCreatePermissions

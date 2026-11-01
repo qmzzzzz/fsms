@@ -3,7 +3,7 @@
  *
  * 起因：`?level=warning&success=false` 会组装出 `{success:false} ∩ {success:true, riskLevel:'medium'}`
  * = 空集，对外却是 200 + 空列表 + 零提示——审计人员以为"这段时间没有 warning"，
- * 实际是他自己的两个筛选条件互相抵消。本文件对同一形状早有裁定（utils/auditQuery.js:30-35：
+ * 实际是他自己的两个筛选条件互相抵消。本文件对同一形状早有裁定（utils/auditQuery.js:36：
  * 误导性空结果 ⇒ 收口为抛错，调用方给 400），这里把那条裁定补到 level 这条腿上。
  *
  * 门禁为什么长这样：

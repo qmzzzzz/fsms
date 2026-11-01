@@ -18,11 +18,9 @@
  *   避免大批键同一时刻过期引发的缓存雪崩；
  * - EMPTY_SENTINEL：空结果哨兵值，调用方可缓存「查无结果」防穿透。
  *
- * 拆分说明（2026-10-19，max-lines）：原文件 409 代码行。按职责切三块——
- * state.js（Redis 连接态与判据）、memoryStore.js（内存回退存储/容量收口/
- * 降级留痕）、invalidation.js（L-4 失效广播）；本文件保留门面与核心读写
- * （set/get/del/getDel/incrWithTtl/setIfAbsent）及锁装配。对外导出面逐字同序，
- * `require('./sharedCache')` 的调用方无需改动。
+ * 分块：state.js（Redis 连接态与判据）、memoryStore.js（内存回退存储/容量收口/降级留痕）、
+ * invalidation.js（L-4 失效广播）；本文件保留门面与核心读写（set/get/del/getDel/
+ * incrWithTtl/setIfAbsent）及锁装配。对外导出面逐字同序，调用方无需改动。
  */
 
 const logger = require('../../utils/logger');
@@ -157,14 +155,13 @@ async function initSharedCache() {
 async function set(key, value, ttlMs) {
   const payload = JSON.stringify(value);
   const redisOn = isRedisEnabled();
-  // F-207：`部署上有没有共享层`必须在**发起写入的那一拍**定死，不能在 await 之后再读一次 env。
-  // 原实现 `return !isRedisConfigured()` 位于两次 await 之后，于是判据读的是"回话时刻"的环境：
-  //  - 连接仍在、SET 抛错、而此刻 REDIS_URL 被撤 ⇒ 返回 true = "已落到共享层"，
-  //    而 Redis 根本没收到；调用方（utils/auditChain.js 的 writeSharedTail）据此**解除不可信
-  //    并抹掉本地唯一副本** ⇒ 权威状态只剩一个谁都不认识的本地值。
-  //  - 反向：内存态部署（本来内存就是全部真相）在 await 期间被补上 REDIS_URL ⇒ 返回 false，
-  //    把一次完整成功的写入谎报成"没落地"。
-  // 生产不改 env，但本仓有 20 个测试文件会改 REDIS_URL ⇒ 这一行同时是判据方向错误与偶发红的燃料。
+  // `部署上有没有共享层`必须在**发起写入的那一拍**定死，不能在 await 之后再读一次 env：
+  //  - 连接仍在、SET 抛错、而此刻 REDIS_URL 被撤 ⇒ 判成"已落到共享层"，而 Redis 根本没收到；
+  //    调用方（utils/auditChain.js 的 writeSharedTail）据此**解除不可信并抹掉本地唯一副本**
+  //    ⇒ 权威状态只剩一个谁都不认识的本地值。
+  //  - 反向：内存态部署（内存就是全部真相）在 await 期间被补上 REDIS_URL ⇒ 把一次完整成功
+  //    的写入谎报成"没落地"。
+  // 本仓有 20 个测试文件会改 REDIS_URL ⇒ 这一行同时是判据方向错误与偶发红的燃料。
   const configured = isRedisConfigured();
   if (redisOn) {
     try {
@@ -285,20 +282,15 @@ async function getDel(key) {
 /**
  * 原子自增 + 首设过期（限流计数类用途）。
  *
- * L-07 修复：原实现是 `INCR` + `PEXPIRE` 两条独立命令，与「原子」注释不符。
- * 两个后果：① `INCR` 成功而 `PEXPIRE` 失败（或进程在两条命令之间退出）→
- * Redis 键永不带 TTL，限流/验证码计数器永久滞留，且计数再也不重置；
- * ② 两条命令之间若抛错落入内存分支，同一逻辑操作会被重复计一次。
+ * 必须是**单条 Lua 脚本**，不能是 `INCR` + `PEXPIRE` 两条独立命令：① `INCR` 成功而
+ * `PEXPIRE` 失败（或进程在两条命令之间退出）⇒ Redis 键永不带 TTL，限流/验证码计数器
+ * 永久滞留且计数再也不重置；② 两条命令之间若抛错落入内存分支，同一逻辑操作会被重复计一次。
+ * 脚本整体成功或整体失败，消除 ① 的中间态；并额外处理**无 TTL 键**（PTTL < 0）——
+ * 某键若已是永久键，下一次自增时补上过期时间，无需人工清理。
  *
- * 现改为单条 Lua 脚本，两条命令在 Redis 端原子执行：
- *  - 脚本整体成功或整体失败，消除 ① 的中间态；
- *  - 额外处理历史遗留的「无 TTL 键」（PTTL < 0）——即使某键此前因旧实现
- *    落成了永久键，下一次自增时也会补上过期时间，无需人工清理。
- *
- * 残留风险（如实记录）：`eval` 若在服务端已执行、回包时连接中断，调用方
- * 无法区分「没执行」与「执行了但没收到回执」，此时**不计这一笔**（见下），
- * 最坏后果是这一次自增在共享层生效而本地未统计——即阈值判定偏松一次，
- * 而不是原实现的「再计一次」。
+ * 残留风险（如实记录）：`eval` 若在服务端已执行、回包时连接中断，调用方无法区分
+ * 「没执行」与「执行了但没收到回执」，此时**不计这一笔**（见下），最坏后果是这一次自增
+ * 在共享层生效而本地未统计——即阈值判定偏松一次，而不是「再计一次」。
  *
  * F-205：Redis 已启用而命令抛错时返回 **null**，绝不回退进程内计数后照常给数字。
  * 调用方拿这个返回值是去和**全局**上限比较的（`captchaService` 的 MAX_ACTIVE_ENTRIES
@@ -331,12 +323,10 @@ async function incrWithTtl(key, ttlMs) {
       return null;
     }
   }
-  // F-211：F-205 只堵了「已就绪但命令抛错」这一个入口（上面的 catch），**未就绪**这一入口
-  // 当时直落内存计数器。实测（配 REDIS_URL、端口不可达）连拿 1、2、3，而调用方
-  // captchaService 把这个本进程数字当"集群活跃验证码数"去和 MAX_ACTIVE_ENTRIES 比 ⇒
-  // 洪水期护栏被骗过（偏小）、恢复期合法请求被降级史卡住（偏大）——两个方向都是假的。
-  // 同文件的 setIfAbsent 早就两个入口一起堵（:451 那段 `if (isRedisConfigured())`），
-  // 本行只是把 incr 补齐到同一口径：配了共享层就绝不拿本地凑一个全局值。
+  // 「已就绪但命令抛错」（上面的 catch）与**未就绪**（此处）两个入口都必须返回 null：
+  // 调用方 captchaService 把这个本进程数字当"集群活跃验证码数"去和 MAX_ACTIVE_ENTRIES 比 ⇒
+  // 洪水期护栏被骗过（偏小）、恢复期合法请求被本地降级值卡住（偏大）——两个方向都是假的。
+  // 与同文件 setIfAbsent 同口径：配了共享层就绝不拿本地凑一个全局值。
   if (isRedisConfigured()) {
     warnIncrDegraded(key);
     return null;
@@ -404,15 +394,14 @@ const { acquireLock, acquireLockBlocking, casSet } = lockOperations;
  * 拒绝本次请求）而非落内存放行——「可能放行一条重放」比「抖动期拒绝一次合法
  * 登录」危害大，且合法请求重试时会携带新的随机 nonce 自然恢复。
  *
- * 但这条 fail-closed 原先只在**命令抛错**时兑现。真正更常见的故障形态是
- * "连接整体不可用"（未就绪 / 断线 / init 失败），此时 isRedisEnabled() 为 false，
- * 原实现直接落到内存分支——而内存里"从没见过这个 nonce"恰恰**不等于**"全局第一次见"：
- * 多实例部署（配 REDIS_URL 的唯一理由）下，被另一实例消费过的 nonce 在这里会被
- * 判为首次 ⇒ 登录防重放在 Redis 故障期间整体失效（captured 登录信封可反复重放）。
- * 现在：配了 REDIS_URL 就绝不退回内存占位，一律按重复处理。
- * 未配 REDIS_URL 的单实例部署语义不变（内存就是它的全部真相）。
- * 内存分支还有第三种拒绝：容量饱和且表里只剩关键键时，新 nonce 同样按重复处理
- * （拒收）——宁可拒绝也不把已有的防重放记录挤出去。
+ * fail-closed 必须覆盖**两种**故障形态，而不只是命令抛错：更常见的是"连接整体不可用"
+ * （未就绪 / 断线 / init 失败），此时 isRedisEnabled() 为 false，若落到内存分支则内存里
+ * "从没见过这个 nonce"恰恰**不等于**"全局第一次见"——多实例部署（配 REDIS_URL 的唯一
+ * 理由）下，被另一实例消费过的 nonce 在这里会被判为首次 ⇒ 登录防重放在 Redis 故障期间
+ * 整体失效（captured 登录信封可反复重放）。故：配了 REDIS_URL 就绝不退回内存占位，
+ * 一律按重复处理；未配 REDIS_URL 的单实例部署语义不变（内存就是它的全部真相）。
+ * 内存分支还有第三种拒绝：容量饱和且表里只剩关键键时，新 nonce 同样按重复处理（拒收）
+ * ——宁可拒绝也不把已有的防重放记录挤出去。
  *
  * @returns {Promise<boolean>}
  */
@@ -434,7 +423,7 @@ async function setIfAbsent(key, value, ttlMs) {
     return false;
   }
   ensureMemCleanup();
-  // 先判重再挤空间：原实现反了次序，连"重放尝试"本身都会挤掉一条表项
+  // 次序必须是先判重再挤空间：反过来连"重放尝试"本身都会挤掉一条表项
   const existing = memStore.get(key);
   if (existing && existing.expireAt > Date.now()) return false;
   if (!existing && !enforceMemCap()) return false;
