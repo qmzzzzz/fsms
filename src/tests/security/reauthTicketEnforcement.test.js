@@ -259,11 +259,13 @@ describe('reauth ticket HTTP 强制', () => {
   const getAs = (token, path, headers = {}) =>
     request(app).get(path).set('Authorization', `Bearer ${token}`).set(headers);
 
-  test('三个审计读取端点：无票据 → 401 REAUTH_TICKET_REQUIRED', async () => {
+  test('审计读取端点（含 verify）：无票据 → 401 REAUTH_TICKET_REQUIRED', async () => {
     for (const path of [
       '/api/security/alerts',
       '/api/security/audit-logs?limit=1',
       '/api/security/audit-logs/export?limit=1',
+      // verify 原是唯一不要求票据的审计读取面（审计 2026-11-02 C-F1），现与其余同尺
+      '/api/security/audit-logs/verify?limit=1',
     ]) {
       const res = await getAs(readerToken, path);
       expect({ path, status: res.status, code: res.body.errors?.errorCode }).toEqual({

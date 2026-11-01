@@ -431,10 +431,12 @@ describe('安全管理深覆盖（批次 C）', () => {
     expect((await authed().get('/api/security/ip-list?page=1&limit=20')).status).toBe(200);
 
     // 全网段：内置超管可加可删
+    // 加白 /0 与加黑同判据：超管也要逐字确认（覆盖全族即高危，不分黑白）
     const fullRange = await authed().post('/api/security/ip-list').send({
       ip: '0.0.0.0/0',
       type: 'white',
       reason: '全段放行_测试',
+      typedConfirm: '0.0.0.0/0',
     });
     // 实测 200（同上前置）
     expect(fullRange.status).toBe(200);
@@ -475,7 +477,14 @@ describe('安全管理深覆盖（批次 C）', () => {
       (await authed().get('/api/security/audit-logs?category=bogus').set(reauthHeaders(superToken)))
         .status
     ).toBe(400);
-    expect((await authed().get('/api/security/audit-logs/verify?limit=50')).status).toBe(200);
+    // verify 已并入步进票据面（2026-11-02 C-F1）：与其余审计读取同尺
+    expect(
+      (
+        await authed()
+          .get('/api/security/audit-logs/verify?limit=50')
+          .set(reauthHeaders(superToken))
+      ).status
+    ).toBe(200);
 
     const csv = await authed()
       .get('/api/security/audit-logs/export?limit=50')

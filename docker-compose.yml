@@ -510,16 +510,22 @@ services:
           // initiate 返回不代表可写：成员还要走 STARTUP -> STARTUP2 -> PRIMARY。
           // 不在这里等，app 会在选主窗口内连上却拿不到 primary，白跑一轮
           // serverSelectionTimeoutMS（5s）+ 重试。等就绪再退出，让 depends_on 有意义。
+          // 就绪判定用循环外旗标，不能用循环内哨兵值（i=999）：`for (let i)` 的
+          // 作用域止于 ForStatement，循环后读 `i` 是对未声明标识符的引用，成功与
+          // 超时两条路都会抛 ReferenceError —— mongosh 非零退出 ⇒
+          // service_completed_successfully 永不满足 ⇒ app 永远不启动（审计
+          // 2026-11-02 D-F1；编译性由 src/tests/deploy/composeEvalScripts.test.js 钉住）。
+          let primaryReady = false;
           for (let i = 0; i < 60; i++) {
             const st = rs.status();
             if (st.members && st.members.some((m) => m.stateStr === "PRIMARY")) {
               print("primary 就绪");
-              i = 999;
+              primaryReady = true;
               break;
             }
             sleep(500);
           }
-          if (i !== 999) { print("等待 primary 超时（30s）"); quit(1); }
+          if (!primaryReady) { print("等待 primary 超时（30s）"); quit(1); }
 
           // 应用专用账号（2026-10-24 审计，P2）：只授 fire_safety_db 的 readWrite。
           // 幂等：已存在则同步口令与角色（轮换 secret 后重跑本容器即可生效）。

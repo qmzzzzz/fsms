@@ -80,8 +80,59 @@ const bodyBytes = (kind, body) => {
   return 0;
 };
 
+/**
+ * 2xx 存储判据与写入形态收口：!ok 删记录（释放键）；超限/无体留 completed +
+ * replayOmitted（容量上限与"有没有体"只影响回放能力，不影响去重）；否则存可回放体。
+ * @param {object} p
+ * @param {string} p.contentTypeOf - 文本类响应的 Content-Type 取值函数（读 res 头）
+ */
+const buildOutcomeUpdate = ({
+  keyHash,
+  statusCode,
+  ok,
+  kind,
+  storedBody,
+  size,
+  location,
+  contentTypeOf,
+}) => {
+  const replayable =
+    ok && kind !== 'none' && !Buffer.isBuffer(storedBody) && size <= MAX_REPLAY_BYTES;
+  if (!ok) {
+    return IdempotencyRecord.deleteOne({ keyHash });
+  }
+  if (!replayable) {
+    return IdempotencyRecord.updateOne(
+      { keyHash },
+      {
+        $set: {
+          state: 'completed',
+          statusCode,
+          responseBody: null,
+          contentType: null,
+          responseLocation: location,
+          replayOmitted: true,
+        },
+      }
+    );
+  }
+  return IdempotencyRecord.updateOne(
+    { keyHash },
+    {
+      $set: {
+        state: 'completed',
+        statusCode,
+        responseBody: storedBody ?? null,
+        contentType: kind === 'text' ? String(contentTypeOf() || 'text/html; charset=utf-8') : null,
+        responseLocation: location,
+        replayOmitted: false,
+      },
+    }
+  );
+};
+
 /** 响应回填：任何出口都要收尾——2xx 落 completed（可回放的存体、无体的标降级），非 2xx 删记录（释放键）。 */
-function captureOutcome(res, keyHash) {
+function captureOutcome(res, keyHash, replayBodyFilter = null) {
   let settled = false;
   let streamed = false;
   const settle = (kind, body) => {
@@ -90,46 +141,27 @@ function captureOutcome(res, keyHash) {
     const statusCode = res.statusCode;
     const ok = statusCode >= 200 && statusCode < 300;
     if (streamed) kind = 'none'; // 已流过 res.write：响应体不可知，绝不能把从未发出的字节存成可回放
-    const size = ok ? bodyBytes(kind, body) : 0;
     const location =
       typeof res.getHeader('location') === 'string' ? res.getHeader('location') : null;
-    // 容量上限与"有没有体"只影响回放能力，不影响去重：超限/无体一律留 completed + replayOmitted
-    const replayable = ok && kind !== 'none' && !Buffer.isBuffer(body) && size <= MAX_REPLAY_BYTES;
-    let update;
-    if (!ok) {
-      update = IdempotencyRecord.deleteOne({ keyHash });
-    } else if (!replayable) {
-      update = IdempotencyRecord.updateOne(
-        { keyHash },
-        {
-          $set: {
-            state: 'completed',
-            statusCode,
-            responseBody: null,
-            contentType: null,
-            responseLocation: location,
-            replayOmitted: true,
-          },
-        }
-      );
-    } else {
-      update = IdempotencyRecord.updateOne(
-        { keyHash },
-        {
-          $set: {
-            state: 'completed',
-            statusCode,
-            responseBody: body ?? null,
-            contentType:
-              kind === 'text'
-                ? String(res.getHeader('content-type') || 'text/html; charset=utf-8')
-                : null,
-            responseLocation: location,
-            replayOmitted: false,
-          },
-        }
-      );
-    }
+    // replayBodyFilter（审计 2026-11-02 C-F4）：挂载点声明的回放体裁剪。响应回放
+    // 副本是响应 PII 加密体系外的明文旁路（留存 24h）——回含 PII 的 scope 必须在
+    // 挂载点声明裁剪，只留重试方所需的结论字段（首次响应已交付，字段缺失对
+    // 重试方无损）。裁剪先行，容量判据按裁剪后的体计算。
+    const storedBody =
+      ok && kind === 'json' && replayBodyFilter && body !== null && body !== undefined
+        ? replayBodyFilter(body)
+        : body;
+    const size = ok ? bodyBytes(kind, storedBody) : 0;
+    const update = buildOutcomeUpdate({
+      keyHash,
+      statusCode,
+      ok,
+      kind,
+      storedBody,
+      size,
+      location,
+      contentTypeOf: () => res.getHeader('content-type'),
+    });
     // 回填失败只告警：最坏结果是"下次同键请求按首次处理"（重复一次），比在响应路径上抛错（用户看到 500 但数据已写）好。
     update.exec().catch((err) => {
       degradeOpen('幂等记录回填失败（该键下次可能按首次提交处理）', err);
@@ -282,7 +314,7 @@ const ensureKeyIndex = () => {
 
 /** 中间件工厂：scope 写进哈希（不同端点的同名键不相撞）；required=true 时缺键即拒（默认放行，见文件头）。 */
 const idempotency = (options = {}) => {
-  const { scope, required = false } = options;
+  const { scope, required = false, replayBodyFilter = null } = options;
   const resolvedScope = String(scope || '');
   if (!resolvedScope) throw new Error('idempotency: 必须显式给出 scope（否则跨端点的键会相撞）');
 
@@ -330,7 +362,7 @@ const idempotency = (options = {}) => {
       if ((await resolveConflict(res, { keyHash, requestHash, expiresAt })) === 'done') return;
     }
 
-    captureOutcome(res, keyHash);
+    captureOutcome(res, keyHash, replayBodyFilter);
     return next();
   };
 };

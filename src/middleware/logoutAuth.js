@@ -95,11 +95,19 @@ const authenticateForLogout = async (req, res, next) => {
         algorithms: ['HS256'],
       });
     } catch (err) {
-      if (err && err.name === 'TokenExpiredError') {
+      // 过期与验签失败都先走 refresh 回退（审计 2026-11-02 C-F2）：本文件头
+      // 声明的设计目标是「登出是 refresh 令牌与设备会话的唯一吊销入口」，但
+      // 旧实现只在 TokenExpiredError 时兑现——JsonWebTokenError（JWT_SECRET
+      // 轮换出旧钥保留窗、cookie 被代理截断、多实例密钥短暂不一致）直接 401，
+      // 持有效 refresh 的用户在最坏情况要等 access 剩余 TTL 到期才能登出，
+      // 期间服务端会话与设备记录无人可关、浏览器又清不掉 httpOnly cookie。
+      // refresh 路径自带完整验签/黑名单/会话校验，放宽不构成降级；两条路都
+      // 不成立才交回主链的统一错误映射（对外错误码不变）。
+      if (err && (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError')) {
         if (await authorizeByRefreshToken(req, res, true)) return next();
         return undefined;
       }
-      // 非过期类错误一律交回主链，由它按统一口径判 401
+      // 其余（NotBeforeError 等）交回主链，由它按统一口径判 401
     }
     return authenticate(req, res, next);
   }

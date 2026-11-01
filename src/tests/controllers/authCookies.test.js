@@ -9,6 +9,7 @@
  */
 
 const request = require('supertest');
+const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
 const {
@@ -293,6 +294,31 @@ describe('httpOnly Cookie 认证集成', () => {
 
     const refreshDenied = await request(app).post('/api/auth/refresh').send({ refreshToken });
     expect(refreshDenied.status).toBe(401);
+  });
+
+  test('access 验签失败（非过期类）时持有效 refresh 仍可登出（2026-11-02 C-F2）', async () => {
+    // 场景：JWT_SECRET 轮换出旧钥保留窗 / 多实例密钥短暂不一致 / cookie 被代理
+    // 截断——客户端手里的 access 变成"格式合法但验不过签"的串。旧实现只在
+    // TokenExpiredError 时走 refresh 回退，本形态直接 401：登出是 refresh 令牌
+    // 与设备会话的唯一吊销入口，挡死它意味着会话要等 access 剩余 TTL 自然到期
+    // 才能关闭，而浏览器 JS 清不掉 httpOnly cookie。
+    const loginRes = await login();
+    const refreshToken = parseSetCookies(loginRes).refresh_token.value;
+
+    const bogusAccess = jwt.sign(
+      { userId: 'x', username: 'x', tokenVersion: 0, type: 'access' },
+      'wrong-secret-not-the-real-jwt-secret',
+      { expiresIn: '1h' }
+    );
+    const out = await request(app)
+      .post('/api/auth/logout')
+      .set('Authorization', `Bearer ${bogusAccess}`)
+      .set('Cookie', [`refresh_token=${refreshToken}`]);
+    expect(out.status).toBe(200);
+
+    // 会话真的关了：该 refresh 已随登出吊销，刷新必须失败
+    const after = await request(app).post('/api/auth/refresh').send({ refreshToken });
+    expect(after.status).toBe(401);
   });
 
   test('注册成功同样下发两个令牌 cookie', async () => {

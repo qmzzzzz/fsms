@@ -425,11 +425,17 @@ router.get(
  * @access  Private [security:audit]
  * 注意：必须在 /audit-logs 之前注册，避免被 /audit-logs 吞掉。
  * 挂 strictLimiter：全量重算是重 CPU 操作（每条记录一次 SHA-256 + 一次 HMAC）。
+ * 挂 requireReauthTicket（审计 2026-11-02 C-F1）：同权限码下的审计读取面
+ * （/audit-logs、/export、/alerts、stuffing-profile）都要求步进票据，verify
+ * 是唯一例外且无注释说明豁免理由——按「豁免必须写明理由」的纪律补齐对齐，
+ * 防被盗会话无步进验证地反复探测「篡改是否被发现/检测器是否在线」的元结论，
+ * 也防其向审计链注入 verify 噪声记录。
  */
 router.get(
   '/audit-logs/verify',
   authenticate,
   checkPermission('security:audit'),
+  requireReauthTicket(),
   strictLimiter,
   auditController.verifyAuditChainIntegrity
 );

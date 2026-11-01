@@ -117,6 +117,14 @@ describe('幂等中间件（真实 HTTP + Mongo）', () => {
       status: 'active',
       permissions: [pCreate._id],
     });
+    // user:create 回放体裁剪用例（C-F4）需要经 /api/users 建号：补授该权限码
+    // （已存在则复用；afterAll 不清理这个共享码）
+    const uCreate = await Permission.findOneAndUpdate(
+      { code: 'user:create' },
+      { $setOnInsert: { name: '创建用户', code: 'user:create', type: 'api', module: 'user' } },
+      { upsert: true, new: true }
+    );
+    await Role.findByIdAndUpdate(role._id, { $addToSet: { permissions: uCreate._id } });
     const user = await User.create({
       username: `idem${stamp}`,
       email: `idem${stamp}@example.com`,
@@ -148,7 +156,9 @@ describe('幂等中间件（真实 HTTP + Mongo）', () => {
       await Permission.deleteMany({ code: rx }).catch(() => {});
       await Role.deleteMany({ code: rx }).catch(() => {});
       await User.deleteMany({ username: rx }).catch(() => {});
-      await IdempotencyRecord.deleteMany({ scope: /permission:create/ }).catch(() => {});
+      await IdempotencyRecord.deleteMany({ scope: /permission:create|user:create/ }).catch(
+        () => {}
+      );
       await mongoose.connection.close();
     }
   });
@@ -168,6 +178,44 @@ describe('幂等中间件（真实 HTTP + Mongo）', () => {
     expect(second.body).toEqual(first.body);
     // 副作用只有一次
     expect(await Permission.countDocuments({ code: body.code })).toBe(1);
+  });
+
+  test('user:create 回放副本经 PII 裁剪（2026-11-02 C-F4）：只留 id/username', async () => {
+    // user:create 的首次响应经特权查看可含真实 email/realName/phone，而
+    // IdempotencyRecord 是这些列加密体系外的明文旁路（留存 24h）。挂载点的
+    // replayBodyFilter 把回放副本裁到重试方所需的最小集。
+    const username = `idemu${stamp}`;
+    const body = {
+      username,
+      email: `${username}@example.com`,
+      password: randomPassword(),
+      realName: '张三丰',
+      phone: '13800138000',
+    };
+    const key = `ucut-${stamp}`;
+    const req = (k) =>
+      request(app)
+        .post('/api/users')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', k);
+    const first = await req(key).send(body);
+    expect(first.status).toBe(201);
+
+    // 落库副本：除信封字段外，data 只剩 id/username 两个结论字段
+    const record = await IdempotencyRecord.findOne({ scope: 'user:create' }).lean();
+    expect(record).toBeTruthy();
+    expect(record.responseBody.data).toEqual({ id: expect.anything(), username });
+    expect(JSON.stringify(record.responseBody)).not.toContain('张三丰');
+    expect(JSON.stringify(record.responseBody)).not.toContain(body.email);
+    expect(JSON.stringify(record.responseBody)).not.toContain('13800138000');
+
+    // 重试回放可用：拿到 id/username 完成重试语义，PII 字段缺席
+    const second = await req(key).send(body);
+    expect(second.status).toBe(201);
+    expect(second.headers['idempotency-replayed']).toBe('true');
+    expect(second.body.data.username).toBe(username);
+    expect(second.body.data.email).toBeUndefined();
+    expect(second.body.data.realName).toBeUndefined();
   });
 
   test('同键不同载荷 → 409：不能借用上一次的成功响应，也不能"以最后一次为准"', async () => {
@@ -281,7 +329,14 @@ describe('接线层：业务创建端点必须挂着幂等中间件', () => {
     const root = path.resolve(__dirname, '../../..');
     for (const { file, scope } of ROUTES_WITH_IDEMPOTENCY) {
       const src = fs.readFileSync(path.join(root, file), 'utf8');
-      expect({ file, scope, wired: src.includes(`idempotency({ scope: '${scope}' })`) }).toEqual({
+      // scope 字面量必须出现在 idempotency({ ... }) 的挂载对象里；user:create
+      // 因回放体 PII 裁剪（2026-11-02 C-F4）为多行 options，故匹配放宽为
+      // 「scope 字面量在场 + idempotency({ 挂载形态在场」两条并立。
+      const singleLine = src.includes(`idempotency({ scope: '${scope}' })`);
+      const multiLine =
+        src.includes(`scope: '${scope}'`) &&
+        new RegExp(`idempotency\\(\\{[\\s\\S]{0,240}scope: '${scope}'`).test(src);
+      expect({ file, scope, wired: singleLine || multiLine }).toEqual({
         file,
         scope,
         wired: true,
@@ -297,9 +352,9 @@ describe('接线层：业务创建端点必须挂着幂等中间件', () => {
   test('反证：把某条路由的中间件摘掉，上面的接线判据必须变红', () => {
     const root = path.resolve(__dirname, '../../..');
     const src = fs.readFileSync(path.join(root, 'src/routes/userRoutes.js'), 'utf8');
-    const mutated = src.replace("idempotency({ scope: 'user:create' })", '');
-    expect(mutated.includes("idempotency({ scope: 'user:create' })")).toBe(false);
-    expect(src.includes("idempotency({ scope: 'user:create' })")).toBe(true);
+    const mutated = src.replace("scope: 'user:create'", '');
+    expect(mutated.includes("scope: 'user:create'")).toBe(false);
+    expect(src.includes("scope: 'user:create'")).toBe(true);
   });
 });
 

@@ -403,7 +403,15 @@ const mainContentRef = ref(null)
 const { y: pullY, refreshing: pullRefreshing } = usePullToRefresh(mainContentRef, async () => {
   // 下拉刷新等价于点击刷新按钮：整页重载，各视图自行重新拉取
   window.location.reload()
-  // reload 完成后页面已重建，无需手动复位 refreshing
+  // reload 完成后页面已重建，无需手动复位 refreshing。
+  // 兜底（审计 2026-11-02 D-F5）：reload 可能被宿主环境阻止（部分内嵌 WebView
+  // 的策略）——返回永不 resolve 的 Promise 加上 onTouchCancel 在 refreshing 态
+  // 的短路，会让指示器永久转圈且无恢复路径。3 秒后仍未离开页面就本地复位；
+  // reload 正常发生时定时器随页面销毁，无副作用。
+  setTimeout(() => {
+    pullRefreshing.value = false
+    pullY.value = 0
+  }, 3000)
   return new Promise(() => {})
 })
 

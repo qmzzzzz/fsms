@@ -418,7 +418,7 @@ jobs:
           [[ "$DRY_RUN" == "true" ]] && extra="$extra --dry-run"
           [[ "$SKIP_BACKUP" == "true" ]] && extra="$extra --skip-backup"
           hot_extra=""
-           if [[ "$DRY_RUN" == "true" ]]; then hot_extra=" --dry-run"; else hot_extra=" --apply"; fi
+          if [[ "$DRY_RUN" == "true" ]]; then hot_extra=" --dry-run"; else hot_extra=" --apply"; fi
           if [[ "$DEPLOY_STRATEGY" == "hot" ]]; then
             if [[ "$SKIP_BACKUP" == "true" ]]; then
               echo "::error::hot 策略不支持 skip_backup（回滚依赖升级前备份）"
@@ -494,7 +494,10 @@ jobs:
               printf 'export ALLOW_PLACEHOLDER_ALERT_WEBHOOK=%q\n' "$ALLOW_PLACEHOLDER_ALERT_WEBHOOK"
             fi
             # P1-5：在目标机（真正跑容器的那台）检查宿主时钟，dry-run 跳过
-            printf 'if [[ "%s" != "true" ]]; then node scripts/check-clock-sync.js; fi\n' "$DRY_RUN"
+            # DRY_RUN 也走 %q（审计 2026-11-02 D-F2）：与同段其余变量同一纪律——
+            # 当前它是 boolean 输入无注入面，但改成 string 输入/透传上游变量时
+            # 这里就是与镜像名同型的注入点，口径先收齐。
+            printf 'if [[ %q != "true" ]]; then node scripts/check-clock-sync.js; fi\n' "$DRY_RUN"
             # 策略分支留在目标机上执行：两条命令的固定 argv 由 deployCommands.js
             # 的单元测试把守，这里不重复实现部署判据。
             printf 'if [[ "$DEPLOY_STRATEGY" == "hot" ]]; then\n'

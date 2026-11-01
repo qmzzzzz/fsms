@@ -6,6 +6,7 @@ const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/userController');
 const { authenticate, checkPermission } = require('../middleware');
+const { strictLimiter } = require('../middleware/rateLimit');
 const { body, param, query } = require('express-validator');
 const { mustBeString } = require('../utils/validationRules');
 const { validatePasswordStrength } = require('../utils/helpers');
@@ -186,7 +187,21 @@ router.post(
   '/',
   authenticate,
   checkPermission('user:create'),
-  idempotency({ scope: 'user:create' }), // 请求级幂等（一-1；键可选，前端默认带上）
+  idempotency({
+    scope: 'user:create', // 请求级幂等（一-1；键可选，前端默认带上）
+    // 回放体 PII 裁剪（审计 2026-11-02 C-F4）：创建响应经特权查看可含真实
+    // email/realName/phone，IdempotencyRecord 是这些列加密体系外的明文旁路
+    // 副本（留存 24h）。重试方只需要"建好了 + id/username"，其余字段在回放
+    // 时省略（首次响应已交付，字段缺失无损）；容量判据按裁剪后体计算。
+    replayBodyFilter: (body) => {
+      if (!body || typeof body !== 'object') return body;
+      const user = body.data && typeof body.data === 'object' ? body.data : null;
+      return {
+        ...body,
+        data: user ? { id: user.id ?? user._id, username: user.username } : null,
+      };
+    },
+  }),
   createUserValidation,
   userController.createUser
 );
@@ -228,6 +243,10 @@ router.delete(
   '/batch',
   authenticate,
   checkPermission('user:delete'),
+  // 资源型限流（审计 2026-11-02 C-F3）：批量注销一次最多匿名化 100 个不可逆账户，
+  // 与审计导出/报表导出同级的「批量 + 不可逆」操作面，破坏速率不应只受
+  // userLimiter 的普通配额约束（被劫持会话 15 分钟理论可扫 2 万账户）
+  strictLimiter,
   // G3：ids 数组结构与元素格式前置校验（控制器内已有等价检查并保留作为兜底，
   // 此处统一为 express-validator 口径，与其余端点一致）
   body('ids').isArray({ min: 1, max: 100 }).withMessage('请提供 1-100 个用户 ID'),
