@@ -283,3 +283,5 @@ FireAlarm.on('index', (err) => {
   }
 });
 module.exports = FireAlarm;
+// 明文期校验 spec 导出：供门禁测试遍历（同 User.PII_ENCRYPTED_FIELDS，复审 F1-1）
+module.exports.REPORTER_PII_FIELDS = REPORTER_PII_FIELDS;

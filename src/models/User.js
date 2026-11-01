@@ -599,3 +599,4 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 };
 
 module.exports = mongoose.model('User', userSchema);
+module.exports.PII_ENCRYPTED_FIELDS = PII_ENCRYPTED_FIELDS; // 明文期校验 spec 导出：供门禁遍历「合法样本 ∩ 密文形态 = ∅」（复审 F1-1）

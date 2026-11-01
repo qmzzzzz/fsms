@@ -939,6 +939,7 @@ describe('在途租约：崩溃/被杀/永久挂起不再把键钉满 24h（真�
     RETENTION_MS,
   } = require('../../middleware/idempotency');
   const metrics = require('../../utils/metrics');
+  const { waitFor } = require('../helpers/waitFor');
 
   /**
    * 「响应头发出前断开」与「进程被杀」在库里是同一个形状：一条没人再收尾的 in_progress。
@@ -990,6 +991,24 @@ describe('在途租约：崩溃/被杀/永久挂起不再把键钉满 24h（真�
     route('plain', (req, res) => {
       res.status(201).json({ success: true, data: { n: bump('plain') } });
     });
+    // filter 抛错的挂载点（复审 F1-3）：中间件契约要求 filter 失败降级为
+    // 「不可回放」而不是卡死 in_progress
+    app.post(
+      '/badfilter',
+      (req, res, next) => {
+        req.user = { userId };
+        next();
+      },
+      idempotency({
+        scope: 'lease:badfilter',
+        replayBodyFilter: () => {
+          throw new Error('filter exploded');
+        },
+      }),
+      (req, res) => {
+        res.status(201).json({ success: true, data: { n: bump('badfilter') } });
+      }
+    );
   });
 
   afterAll(async () => {
@@ -1121,6 +1140,36 @@ describe('在途租约：崩溃/被杀/永久挂起不再把键钉满 24h（真�
   test('(n) 租约常数自身成立：0 < 租约 < 保留窗口（写反会让键要么立刻可夺、要么永远不租约）', () => {
     expect(IN_PROGRESS_LEASE_MS).toBeGreaterThan(0);
     expect(IN_PROGRESS_LEASE_MS).toBeLessThan(RETENTION_MS);
+  });
+
+  test('(o) 回放体 filter 抛错 → 降级为 completed + replayOmitted，绝不卡死 in_progress（复审 F1-3）', async () => {
+    // 缺陷形态（修复前）：settled 已置位后 filter 在响应路径上抛错 ⇒ 业务写入
+    // 已提交但记录停在 in_progress ⇒ 租约过期后同键重试二次执行已成功的写入。
+    const key = stamp16();
+    const first = await post('badfilter', {}, key);
+    expect(first.status).toBe(201);
+    expect(first.headers['idempotency-replay-omitted']).toBeUndefined(); // 首次响应原样交付
+
+    // 注意 scope 前缀：这个挂载点走的是 lease: 前缀（route 助手），不是
+    // keyHashOf 的 test: 前缀——按实际 scope 算哈希。waitFor 只回真值性，
+    // 文档经闭包捕获；回填是 fire-and-forget 的 exec()，轮询到终态而不是赌时机。
+    let stored = null;
+    await waitFor(async () => {
+      stored = await IdempotencyRecord.findOne({
+        keyHash: hashIdempotencyKey({ scope: 'lease:badfilter', userId, key }),
+      }).lean();
+      return Boolean(stored && stored.state !== 'in_progress');
+    });
+    expect({ state: stored.state, replayOmitted: stored.replayOmitted }).toEqual({
+      state: 'completed',
+      replayOmitted: true, // filter 失败 = 不可回放，不是不可完成
+    });
+
+    // 同键重试：不重复执行业务（副作用仍是 1 次），回放"已完成、体略"结论
+    const second = await post('badfilter', {}, key);
+    expect(second.status).toBe(201);
+    expect(second.headers['idempotency-replay-omitted']).toBe('true');
+    expect(countOf('badfilter')).toBe(1);
   });
 });
 

@@ -64,15 +64,30 @@ describe('compose 内嵌脚本片段的 no-undef 闸（D-F1）', () => {
     expect(messages[0].message).toContain("'i' is not defined");
   });
 
-  test('docker-compose.yml 全部内嵌脚本片段无未声明引用', () => {
+  test('docker-compose.yml 全部内嵌脚本片段无未声明引用，且无解析失败（复审 F1-5）', () => {
     const scripts = extractScripts(compose);
-    // 前提自证：确实解析到了脚本（mongo-rs-init 两段 + 其它服务的探针），防空集假绿
+    // 前提自证（覆盖计数，复审 F1-5 ②）：文件里每个 mongosh 脚本 flag 都必须
+    // 被提取器吃进——「少提取一个」比「全丢」更隐蔽，只断言下限抓不住它。
+    // 计数排除 # 注释行（说明文字里的 flag 字样不是脚本）。
+    const flagCount = compose
+      .split(/\r?\n/)
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n')
+      .match(/--[e]val\b/g).length;
+    expect(scripts.length).toBe(flagCount);
     expect(scripts.length).toBeGreaterThanOrEqual(3);
     const offenders = [];
     for (const code of scripts) {
       for (const message of noUndefMessages(code)) {
-        if (message.ruleId === 'no-undef') {
-          offenders.push(message.message + ' @ line ' + message.line);
+        // fatal（解析失败）的 message.ruleId 为 null：只挑 no-undef 会把
+        // 「截断的非 JS 片段解析报错」静默放过——这一层闸就假绿了（F1-5 ①）。
+        // 解析失败与未声明引用同为红，不区分。
+        if (message.fatal || message.ruleId === 'no-undef') {
+          offenders.push(
+            (message.fatal ? '解析失败: ' + message.message : message.message) +
+              ' @ line ' +
+              message.line
+          );
         }
       }
     }

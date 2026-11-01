@@ -2,7 +2,7 @@
 
 - **状态**：已接受（2026-09-28 / 2026-10-10 两轮复核与加固：实现已演进，见「后果与局限」）
 - **日期**：2026-08-29（追溯建档）
-- **涉及**：`src/utils/loginCipher.js`、`src/controllers/authController.js`、`web-admin/src/utils/loginCipher.js`
+- **涉及**：`src/utils/loginCipher.js`、`src/controllers/authController.js`（2026-10 起拆分为同名目录，登录入口在 `authController/credentials.js`）、`web-admin/src/utils/loginCipher.js`
 
 ## 背景
 

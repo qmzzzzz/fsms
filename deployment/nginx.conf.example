@@ -574,6 +574,11 @@ server {
     error_page 502 504 /_gateway_error.html;
     location = /_gateway_error.html {
         internal;
+        # 头级 noindex（复审 2026-11-02 F1-6）：错误页的 noindex 此前只有页面内
+        # meta 层；本 location 一旦未来被直链外探（internal 只挡本层路由，挡不住
+        # 其它入口 alias 到同文件），头层是最后防线。刻意**不加 CSP**——该页的
+        # 刷新按钮用内联事件，加 CSP 会静默拦掉（见 gateway-error.html 头注释）。
+        add_header X-Robots-Tag "noindex, nofollow" always;
         # 部署时与 deployment/gateway-pages/ 保持同步（路径按宿主布局调整）
         alias /var/www/fire-safety/gateway-pages/gateway-error.html;
     }

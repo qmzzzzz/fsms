@@ -97,11 +97,12 @@ describe('脱敏函数绝不回显原文', () => {
     expect(DataMasking._maskMiddle('1234567890', 2, 2)).toBe('12******90');
   });
 
-  test('唯一保留的"原样返回"例外是 maskEmail 的非邮箱形态（既有契约，明确记档）', () => {
-    // 这一条不是缺陷放行，而是把"我们讨论过并决定不改"的那个决定钉住：
-    // 邮箱列里的非邮箱值没有可脱敏的结构，先前实现选择原样返回并写了测试。
-    // 若哪天要改成统一打码，必须连带改 src/tests/utils/pureModules.test.js 的对应断言。
-    expect(DataMasking.maskEmail('not-an-email')).toBe('not-an-email');
+  test('maskEmail 的非邮箱形态统一全掩码（2026-11-02 P3-4 契约更新：与 maskPhone/maskIdCard 失败方向一致）', () => {
+    // 旧契约是「非邮箱形态原样返回」（讨论过并钉住）；审计 P3-4 指出该方向
+    // 会把未来误用点（给 maskEmail 传非邮箱串）变成静默明文出口，且与同文件
+    // 另两个 mask 函数的「认不出即全掩码」不一致。契约反转为统一打码；
+    // 现行调用点传入的都是 schema 保证的合法 email，行为无实际变化。
+    expect(DataMasking.maskEmail('not-an-email')).toBe('****');
     expect(DataMasking.maskEmail('abcdef@example.com')).toMatch(/^a\*{4}f@example\.com$/);
   });
 });

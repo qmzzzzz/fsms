@@ -147,16 +147,34 @@ function captureOutcome(res, keyHash, replayBodyFilter = null) {
     // 副本是响应 PII 加密体系外的明文旁路（留存 24h）——回含 PII 的 scope 必须在
     // 挂载点声明裁剪，只留重试方所需的结论字段（首次响应已交付，字段缺失对
     // 重试方无损）。裁剪先行，容量判据按裁剪后的体计算。
-    const storedBody =
-      ok && kind === 'json' && replayBodyFilter && body !== null && body !== undefined
-        ? replayBodyFilter(body)
-        : body;
-    const size = ok ? bodyBytes(kind, storedBody) : 0;
+    //
+    // filter 抛错必须吞掉并降级为「不可回放」（审计 2026-11-02 复审 F1-3）：
+    // settled 已在入口置位，这里抛出会让 buildOutcomeUpdate 永不执行 ⇒ 记录
+    // 卡死 in_progress ⇒ 5 分钟租约后同键重试**二次执行已成功的写入**（违反
+    // 「回填失败只告警，不在响应路径上抛错」的本函数纪律）。filter 失败 =
+    // 不可回放（replayOmitted），不是不可完成。
+    let filterFailed = false;
+    let storedBody = body;
+    if (ok && kind === 'json' && replayBodyFilter && body !== null && body !== undefined) {
+      try {
+        storedBody = replayBodyFilter(body);
+      } catch (e) {
+        logger.warn('幂等回放体裁剪失败，降级为不可回放（首次响应已交付）', {
+          err: String((e && e.message) || e),
+        });
+        filterFailed = true;
+        storedBody = null;
+      }
+    }
+    // filter 失败复用「无体」出口：completed + replayOmitted，释放回放语义；
+    // 单一执行路径——降级分支绝不能绕过下方唯一的 update.exec()。
+    const effectiveKind = filterFailed ? 'none' : kind;
+    const size = ok ? bodyBytes(effectiveKind, storedBody) : 0;
     const update = buildOutcomeUpdate({
       keyHash,
       statusCode,
       ok,
-      kind,
+      kind: effectiveKind,
       storedBody,
       size,
       location,

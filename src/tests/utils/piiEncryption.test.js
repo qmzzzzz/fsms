@@ -128,6 +128,41 @@ describe('piiCrypto 纯判据', () => {
     expect(enc.split('.')).toHaveLength(4);
   });
 
+  test('契约门禁：密文形态串不可能通过任何加密字段的明文校验（复审 F1-1 建议）', () => {
+    // encryptPii 的透传判据是内容嗅探（形态成立即透传），其安全性依赖一个
+    // 隐式前提：每个加密字段的合法样本空间与密文形态**不相交**（email 的模式
+    // 必含 @、phone 的模式纯数字、reporter.phone 长度上限 20 < 形态最短 48）。
+    // 该前提此前不可见——未来任何放宽契约的新加密字段会同时复活"明文绕过
+    // 加密"与"读侧投毒"。本门禁遍历两份 spec，把前提变成红绿可见：新字段
+    // 落进任一份清单而放行形态串时，这里红。
+    const shape = 'enc.v2.' + 'A'.repeat(16) + '.' + 'A'.repeat(24); // 48 字符，形态成立
+    expect(shape).toMatch(/^enc\.v[12]\.[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]+={0,2}$/);
+
+    const specs = [
+      ...require('../../models/User').PII_ENCRYPTED_FIELDS.map((s) => ({
+        field: `User.${s.plain}`,
+        max: s.max ? s.max[0] : Infinity,
+        pattern: s.pattern ? s.pattern[0] : null,
+      })),
+      ...require('../../models/FireAlarm').REPORTER_PII_FIELDS.map((s) => ({
+        field: `FireAlarm.${s.path}`,
+        max: s.max ? s.max[0] : Infinity,
+        pattern: null,
+      })),
+    ];
+    // 前提自证：确实遍历到了已知的三处加密字段（防 spec 结构变化导致空转假绿）
+    expect(specs.map((s) => s.field).sort()).toEqual([
+      'FireAlarm.reporter.phone',
+      'User.email',
+      'User.phone',
+    ]);
+    for (const { field, max, pattern } of specs) {
+      const overMax = shape.length > max;
+      const patternRejects = pattern ? !pattern.test(shape) : true;
+      expect({ field, blocked: overMax || patternRejects }).toEqual({ field, blocked: true });
+    }
+  });
+
   test('篡改密文 ⇒ 解密抛错而不是返回乱码（GCM 认证标签的用途所在）', () => {
     const enc = encryptPii(PLAIN_PHONE);
     const parts = enc.slice(VERSION_PREFIX.length).split('.');

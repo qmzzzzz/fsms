@@ -48,12 +48,14 @@
 
 - 全量操作审计：写方法 + **全部未豁免 GET/HEAD**（2026-09-30 判据反转，
   `middleware/security.js` auditGetExcludePaths）；HEAD 归一 GET 同尺留痕；
-- 敏感读取 403 也留痕（静默探测面清零，`probeExemptionBoundaryAndHeadAudit`）；
+- 敏感读取 403 也留痕（静默探测面清零：早期拒绝面 `middleware/security/earlyRejection.js`，
+  GET/HEAD 豁免清单与审计挂载 `middleware/security/auditLog.js`）；
 - 审计留存 ≥90 天（`constants/retention.js`），导出链路全覆盖（P0-6 write/end 包装）。
 
 ### I 信息泄露（Information Disclosure）
 
-- PII at-rest 加密（phone，GCM；realName 暂明文见残余风险）+ 备份加密 + 异地副本（P1-①/②）；
+- PII at-rest 加密（phone / email / FireAlarm.reporter.phone，AES-256-GCM v2 行绑定；
+  realName 暂明文见残余风险）+ 备份加密 + 异地副本（P1-①/②）；
 - 传输：生产强制 `tls=true`/`rediss:`（豁免须显式旗标）；
 - 响应投影：凭证级字段 `select:false` + `RESPONSE_EXCLUDE` 双道；
 - 权限：RBAC + 数据范围（`applyDataScopeToQuery`），GET 接口鉴权契约门禁（F-196）。

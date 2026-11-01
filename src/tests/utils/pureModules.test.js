@@ -24,10 +24,12 @@ describe('encryption.js 缺口覆盖：DataMasking / HMACSigner / HashUtils / AE
       expect(DataMasking.maskPhone(null)).toBe('');
     });
 
-    test('maskEmail：本地部分按长度打码；无 @ 原样返回', () => {
+    test('maskEmail：本地部分按长度打码；非邮箱形态全掩码（2026-11-02 P3-4 契约更新）', () => {
       expect(DataMasking.maskEmail('ab@example.com')).toBe('a****@example.com');
       expect(DataMasking.maskEmail('abcdef@example.com')).toMatch(/^a\*{4}f@example\.com$/);
-      expect(DataMasking.maskEmail('not-an-email')).toBe('not-an-email');
+      // 旧契约「无 @ 原样返回」反转为统一打码：与 maskPhone/maskIdCard 失败方向
+      // 一致，杜绝未来误用点变成静默明文出口（encryptionRandomAndMasking 同步更新）
+      expect(DataMasking.maskEmail('not-an-email')).toBe('****');
       expect(DataMasking.maskEmail('')).toBe('');
       expect(DataMasking.maskEmail(null)).toBe('');
     });
