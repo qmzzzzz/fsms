@@ -90,6 +90,16 @@ COPY web-admin/ ./
 # 未传时为空（本地开发），生产/CI 从 login_ecdh_private_key 计算后传入。
 ARG VITE_LOGIN_PUBLIC_KEY_SHA256=
 ENV VITE_LOGIN_PUBLIC_KEY_SHA256=$VITE_LOGIN_PUBLIC_KEY_SHA256
+# S-2 强制档（2026-10-31，审计一-6）：CI 的发布构建传 REQUIRE_LOGIN_KEY_PIN=1，
+# 此时指纹为空即**构建失败**。CI 侧已由 login-key-pin.js --require 先拦一道，
+# 这里是第二道：镜像构建参数是 final artifact 的唯一入口，绕开 CI 手工
+# `docker build --build-arg APP_VERSION=v1 …` 也应拿不到未钉扎包。
+# 默认空 = 不强制（本地 docker build / PR 构建），与既有行为一致。
+ARG REQUIRE_LOGIN_KEY_PIN=
+RUN if [ "$REQUIRE_LOGIN_KEY_PIN" = "1" ] && [ -z "$VITE_LOGIN_PUBLIC_KEY_SHA256" ]; then \
+      echo "错误：REQUIRE_LOGIN_KEY_PIN=1 但 VITE_LOGIN_PUBLIC_KEY_SHA256 为空 —— 拒绝产出未钉扎的前端包（前端公钥钉扎会静默失效）" >&2; \
+      exit 1; \
+    fi
 # 升级：前端构建标识必须与运行时 GET /api/version 的 buildId **同源**，
 # 否则前端会一直认为「服务端是另一个版本」而反复提示刷新（或反过来永远不提示）。
 # 同源的做法就是两边都取 CI 传进来的同一个 GIT_SHA：

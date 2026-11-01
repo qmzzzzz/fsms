@@ -113,7 +113,6 @@ const recordViolation = (req, violation, detail) => {
         fingerprint: computeFingerprint(req),
         // method 原样交下去即可：取值全集与"越枚举怎么办"由 AuditLog schema
         // （constants/audit.js 的 AUDIT_HTTP_METHODS + setter）单点决定。
-        // 原先这里私抄一份 5 动词白名单，与另两处写入点各自漂移。
         method: req.method,
         path: auditPath(req),
         ...auditClientAddress(req),

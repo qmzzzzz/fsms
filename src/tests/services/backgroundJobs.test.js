@@ -28,6 +28,10 @@ const makeRes = () => {
       this.headers[k] = v;
       return this;
     },
+    setHeader(k, v) {
+      this.headers[k] = v;
+      return this;
+    },
     end() {
       return this;
     },

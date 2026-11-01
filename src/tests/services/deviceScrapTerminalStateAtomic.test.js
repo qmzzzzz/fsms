@@ -164,10 +164,15 @@ describe('设备报废终态：旧快照不得覆盖终态', () => {
   // 用真实冲突产生的错误对象而不是手搓一个：VersionError 的 message 含文档 _id、
   // 加载时 __v 与 modifiedPaths，"不回显内部信息"只有拿它来喂才有内容可泄。
 
-  /** 最小响应桩：errorHandler 只需要 headersSent / writableEnded / status / json */
+  /** 最小响应桩：errorHandler 需要 headersSent / writableEnded / status / json / setHeader（真实 res 必有） */
   const makeRes = () => {
     const res = {
       headersSent: false,
+      headers: {},
+      setHeader(k, v) {
+        this.headers[k] = v;
+        return this;
+      },
       writableEnded: false,
       statusCode: undefined,
       body: undefined,

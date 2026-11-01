@@ -17,7 +17,6 @@ const { auditClientAddress } = require('../utils/ipUtils');
 const MFA_MAX_FAILS = 5;
 const MFA_LOCK_MS = 10 * 60 * 1000;
 // 日志与审计里那句"锁了多久"必须与真正写进 mfaLockUntil 的那个值同源：
-// 原先 warn 载荷写 lockMinutes: 10、审计 reason 写死"10 分钟"，三处各抄一遍。
 // 改 MFA_LOCK_MS 时这三处不会一起动，于是防线时长变了而留痕还在宣称旧值——
 // 读日志的人据此判断"爆破窗口还有 10 分钟"，实际窗口已经不同。
 const MFA_LOCK_MINUTES = Math.round(MFA_LOCK_MS / 60000);

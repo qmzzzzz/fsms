@@ -132,7 +132,6 @@ router.get(
   authenticate,
   checkPermission('role:read'),
   roleIdValidation,
-  // 2026-09-26 审计 Top5：param 链此前挂而不消费（消费点本就不存在的死校验链）。
   // applyObjectIdParams 的 router.param 兜底会先对非法 id 400，本消费层正常时
   // 收不到错误——挂上是为了让「校验 → 消费 → 控制器」在同处成立，兜底移除后不裸奔
   consumeValidation(),

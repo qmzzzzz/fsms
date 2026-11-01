@@ -165,6 +165,75 @@ describe('门禁负向自检：该红时必须红', () => {
       }
     });
 
+    it('max-lines 的真实行数必须单独记账：915 行的文件与 301 行的文件都只报 1 条 warn', () => {
+      // 缺陷形态（基数盲）：ESLint 对单个文件的单条规则**只发 1 条诊断**，所以
+      // {"max-lines": 1} 这个基线值只能表达「超了」，表达不了「超了多少」——
+      // 一个 301 行的文件与一个 1400 行的文件在基线上长得一模一样，再涨 500 行也不红。
+      // 判据：走一遍 --update-baseline 后，基线必须同时含 __lineCounts 且数值 = 真实代码行数；
+      // 然后再涨几行、用检查模式跑，必须 exit 1 并点名行数（这才是"基数"被记上了）。
+      const tmp = fs.mkdtempSync(path.join(ROOT, '.lint-ratchet-selftest-'));
+      const baselinePath = path.join(tmp, 'eslint.ratchet.json');
+      try {
+        fs.mkdirSync(path.join(tmp, 'scripts'), { recursive: true });
+        fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+        fs.mkdirSync(path.join(tmp, 'e2e'), { recursive: true });
+        fs.mkdirSync(path.join(tmp, 'migrations'), { recursive: true });
+        fs.writeFileSync(
+          path.join(tmp, 'migrate-mongo-config.js'),
+          'module.exports = {};\n',
+          'utf8'
+        );
+        fs.writeFileSync(path.join(tmp, 'migrations/dummy.js'), 'var m = 1;\n', 'utf8');
+        fs.copyFileSync(
+          path.join(ROOT, 'scripts/lint-ratchet.js'),
+          path.join(tmp, 'scripts/lint-ratchet.js')
+        );
+        fs.writeFileSync(
+          path.join(tmp, 'eslint.config.js'),
+          'module.exports = [{ rules: { "max-lines": ["warn", { max: 300, skipBlankLines: true, skipComments: true }] } }];\n',
+          'utf8'
+        );
+        const emit = (n) =>
+          `${Array.from({ length: n }, (_, i) => `var v${i} = ${i};`).join('\n')}\n`;
+        fs.writeFileSync(path.join(tmp, 'src/big.js'), emit(305), 'utf8');
+        fs.writeFileSync(path.join(tmp, 'e2e/dummy.js'), 'var ok = 1;\n', 'utf8');
+
+        // 首次建账：应写入 __lineCounts.src/big.js = 305
+        const first = spawnSync(
+          NODE,
+          [path.join(tmp, 'scripts/lint-ratchet.js'), '--update-baseline'],
+          {
+            cwd: tmp,
+            encoding: 'utf8',
+          }
+        );
+        expect(first.status).toBe(0);
+        const written = JSON.parse(fs.readFileSync(baselinePath, 'utf8'));
+        expect(written['src/big.js']).toEqual({ 'max-lines': 1 });
+        expect(written.__lineCounts['src/big.js']).toBe(305);
+
+        // 加到 320 行：warn 计数仍是 1（基数盲），但真实行数涨了 ⇒ 检查模式必须红
+        fs.writeFileSync(path.join(tmp, 'src/big.js'), emit(320), 'utf8');
+        const second = spawnSync(NODE, [path.join(tmp, 'scripts/lint-ratchet.js')], {
+          cwd: tmp,
+          encoding: 'utf8',
+        });
+        expect(second.status).toBe(1);
+        expect(second.stderr).toContain('max-lines 行数');
+        expect(second.stderr).toContain('305 -> 320');
+
+        // 对照：不改行数时检查模式必须放行（否则上面那条对"永远报错"的写法也成立）
+        fs.writeFileSync(path.join(tmp, 'src/big.js'), emit(305), 'utf8');
+        const third = spawnSync(NODE, [path.join(tmp, 'scripts/lint-ratchet.js')], {
+          cwd: tmp,
+          encoding: 'utf8',
+        });
+        expect(third.status).toBe(0);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
     it('对照：纯改善时 --update-baseline 必须放行并落盘（守卫不得退化成"一律拒绝"）', () => {
       // 去掉这条对照，"任何情况都 exit 1"的写法也能让上面那条端到端保持绿色，
       // 而棘轮就此失去唯一合法的收紧通路。
@@ -313,6 +382,103 @@ describe('门禁负向自检：该红时必须红', () => {
         expect(ok.status).toBe(0);
       } finally {
         fs.rmSync(f.tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('行数地板：基线认账却没记行数 ⇒ 回退；文件本就不在基线里 ⇒ 不算这条（两种缺失语义相反）', () => {
+      // 高-1：原实现 findLineCountRegressions 走 Object.entries(was || {})，把两种
+      // **语义相反**的缺失当成同一件事跳过：
+      //   ① 基线里记着该文件的 max-lines 债、却没有行数地板（键被删 / 整块被删）
+      //      ⇒ 该文件的行数从此不与任何数字比对，行数维度对它**永久关闭**；
+      //   ② 文件本来就不在基线里（新债）⇒ 由 diffBaseline 的「基线无此项 -> 1」负责，
+      //      此刻还没有任何地板可比，绝不能在这里重复报成"地板丢失"。
+      const { findLineCountRegressions } = require(path.join(ROOT, 'scripts/lint-ratchet'));
+      const baseline = { 'src/big.js': { 'max-lines': 1 }, 'src/other.js': { complexity: 3 } };
+      // ① 整块 __lineCounts 被删（was === undefined）⇒ 必须报回退
+      expect(findLineCountRegressions(undefined, { 'src/big.js': 320 }, baseline)).toEqual([
+        expect.stringMatching(/src\/big\.js \[max-lines 行数\].*地板缺失/),
+      ]);
+      // ①′ 只删该文件的键（was 存在但缺这一项）⇒ 同样必须报回退
+      expect(findLineCountRegressions({}, { 'src/big.js': 320 }, baseline)).toEqual([
+        expect.stringMatching(/src\/big\.js \[max-lines 行数\]/),
+      ]);
+      // ② 新文件（基线里根本没有）⇒ 这条判据不得报；新债由 diffBaseline 抓
+      expect(findLineCountRegressions({}, { 'src/new.js': 320 }, baseline)).toEqual([]);
+      // ③ 基线里只有 complexity、没有 max-lines 债 ⇒ 同样不是"地板缺失"
+      expect(findLineCountRegressions({}, { 'src/other.js': 320 }, baseline)).toEqual([]);
+      // ④ 地板在、行数没涨 ⇒ 放行（守卫不得退化成"一律报"）
+      expect(
+        findLineCountRegressions({ 'src/big.js': 320 }, { 'src/big.js': 320 }, baseline)
+      ).toEqual([]);
+      // ⑤ 地板在、行数涨了 ⇒ 仍是原有的回退形态（这条不能被新分支挤掉）
+      expect(
+        findLineCountRegressions({ 'src/big.js': 320 }, { 'src/big.js': 325 }, baseline)
+      ).toEqual(['src/big.js [max-lines 行数] 320 -> 325']);
+    });
+
+    it('端到端：真实基线里删掉 __lineCounts 的任意一个键 ⇒ 检查模式必须 exit 1', () => {
+      // 高-1 的实测形态：真实 eslint.ratchet.json 里 13 个 max-lines 债文件各有一条
+      // 行数地板，把其中任意一条删掉（或把整块 __lineCounts 删掉），旧实现照旧 exit 0
+      // 并打印「通过：21 个含 warn 文件均未超过基线」。这里不编造行数，直接取**真实
+      // 基线里的数值**造夹具，删键的形态才是真的。
+      const realBaseline = JSON.parse(
+        fs.readFileSync(path.join(ROOT, 'eslint.ratchet.json'), 'utf8')
+      );
+      const floors = realBaseline.__lineCounts || {};
+      const debtFiles = Object.entries(realBaseline)
+        .filter(([, rules]) => rules['max-lines'])
+        .map(([file]) => file);
+      // 前提自证：真实基线里确实存在"有 max-lines 债 + 有行数地板"的文件，
+      // 否则下面的夹具会退化成空转，"删键必红"就成了对空集合的断言。
+      expect(debtFiles.length).toBeGreaterThan(0);
+      expect(debtFiles.filter((f) => floors[f] !== undefined).length).toBeGreaterThan(0);
+      // 真实基线的不变式：每个 max-lines 债文件都必须有行数地板。
+      // 直接删掉真实文件里任意一个 __lineCounts 键，这一条立刻红。
+      expect(debtFiles.filter((f) => floors[f] === undefined)).toEqual([]);
+      const target = debtFiles.find((f) => floors[f] !== undefined);
+      const floor = floors[target];
+      expect(floor).toBeGreaterThan(300); // 夹具要真的触发 max-lines warn
+      const cases = [
+        [
+          '对照：地板在',
+          JSON.stringify(
+            { [target]: { 'max-lines': 1 }, __lineCounts: { [target]: floor } },
+            null,
+            2
+          ),
+        ],
+        ['单键被删', JSON.stringify({ [target]: { 'max-lines': 1 }, __lineCounts: {} }, null, 2)],
+        ['整块被删', JSON.stringify({ [target]: { 'max-lines': 1 } }, null, 2)],
+      ];
+      for (const [label, baseline] of cases) {
+        // lines: 5 —— 让 makeFix 的 src/big.js 保持干净。若沿用默认的 320 行，它会
+        // 自己带一条 max-lines warn，而它不在基线里 ⇒ 被 diffBaseline 判成新债、exit 1，
+        // 「对照：地板在」就成了假红（夹具噪声），这条用例测的就不是行数地板了。
+        const f = makeFix({ baseline: baseline + '\n', lines: 5 });
+        // 目标文件按**真实地板行数**生成，确保 max-lines warn 真的触发
+        const targetPath = path.join(f.tmp, target);
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        fs.writeFileSync(
+          targetPath,
+          `${Array.from({ length: floor }, (_, i) => `var v${i} = ${i};`).join('\n')}\n`,
+          'utf8'
+        );
+        try {
+          const r = spawnSync(NODE, [f.script], { cwd: f.tmp, encoding: 'utf8' });
+          expect({ label, failed: r.stderr.includes('执行失败') }).toEqual({
+            label,
+            failed: false,
+          });
+          if (label === '对照：地板在') {
+            expect({ label, status: r.status }).toEqual({ label, status: 0 });
+          } else {
+            expect({ label, status: r.status }).toEqual({ label, status: 1 });
+            expect(r.stderr).toContain('max-lines 行数');
+            expect(r.stderr).toContain(target);
+          }
+        } finally {
+          fs.rmSync(f.tmp, { recursive: true, force: true });
+        }
       }
     });
   });
@@ -537,10 +703,17 @@ describe('门禁负向自检：该红时必须红', () => {
       // 三个用例体内必须各有真实断言，且不得退化为「长度 >= 0」这类恒真式。
       // 原写法 `if (!/…/.test(head)) continue;` 在标题被改写或文件被清空时
       // 匹配不到任何用例、循环零执行、本元测试恒绿——而它正是「守卫用例体非空」
-      // 的那道门禁。现先钉死命中数量（恰为 3），再逐个断言用例体非空。
+      // 的那道门禁。现按**精确标题**取三个用例体（上面 toContain 已钉住标题存在），
+      // 并断言取到的恰为 3 —— 不能用 /双向/ 之类模糊词过滤：新增用例标题里带该词
+      // 就会把计数顶成 4，届时只有两个选择：改这个数字（元测试没在测东西）或改别人的标题。
+      const GUARDED_TITLES = [
+        '已注册端点全部入文档（无漏文档）',
+        '文档中不存在幽灵端点（无对应路由）',
+        'path 集合与产物完全一致（双向）',
+      ];
       const bodies = src.split(/test\('/).slice(1);
-      const guarded = bodies.filter((b) => /无漏文档|幽灵端点|双向/.test(b.slice(0, 40)));
-      expect(guarded).toHaveLength(3);
+      const guarded = GUARDED_TITLES.map((title) => bodies.find((b) => b.startsWith(title)));
+      expect(guarded.filter(Boolean)).toHaveLength(GUARDED_TITLES.length);
       for (const body of guarded) {
         const head = body.slice(0, 40);
         expect(head).not.toMatch(/\)\s*=>\s*\{\s*\}\s*\)/);

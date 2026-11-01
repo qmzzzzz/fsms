@@ -9,13 +9,7 @@ const CREDENTIAL_SHAPE_FIELDS = Object.freeze([
 ]);
 
 const LENGTH_BOUNDARIES = Object.freeze([8, 12, 16, 20]); // 档位下界：与口令强度校验的 PASSWORD_MIN_LENGTH 同源起点，档宽 4
-const LENGTH_BUCKETS = Object.freeze([
-  'lt8',
-  '8-11',
-  '12-15',
-  '16-19',
-  '20plus',
-]);
+const LENGTH_BUCKETS = Object.freeze(['lt8', '8-11', '12-15', '16-19', '20plus']);
 
 const CHARSET_FLAGS = Object.freeze([
   Object.freeze(['l', (code) => code >= 97 && code <= 122]),

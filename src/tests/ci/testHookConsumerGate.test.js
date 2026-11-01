@@ -219,10 +219,17 @@ const premiseHolds = (src, premise) =>
 
 /**
  * 第三种导出形态的"零容忍"清单：写了 `module.exports` 但两个扫描器都认不出的文件。
- * 实测这 38 个全部是**单值导出**（`module.exports = router` / `mongoose.model(...)` /
+ * 实测这 43 条全部是**单值导出**（计数随清单一同维护：旧注释写 38 是未同步的旧数）（`module.exports = router` / `mongoose.model(...)` /
  * 一个 class 或 service 实例），本身不具名 ⇒ 没有钩子面。清单的意义不是"文件数恰好如此"，
  * 而是：有人往这些文件加**任何一种具名导出**时，该文件立刻从清单里掉出去、门禁变红，
  * 逼一次评审；`Object.assign(module.exports, {__x})`、循环动态挂键等真正的新形态同理无处藏。
+ *
+ * 2026-11-02（r24）：`models/FireAlarm.js`、`models/User.js` 已按这条设计**掉出本清单**——
+ * 两者各新增一行属性式具名导出（`module.exports.REPORTER_PII_FIELDS` / `.PII_ENCRYPTED_FIELDS`），
+ * 被第二种扫描器认下，于是不再是「两种口径都认不出」。掉出即触发一次评审（本轮）。
+ * 「是不是扫描器不再看 models/」由变异实验排除：把这两行属性式导出删掉，两个文件立刻回到
+ * `unaccountedExportFiles()` 集合、与本清单重新逐字相等（13 passed 原文 work/r24-mut1.txt）
+ * ⇒ 形状真的变了，不是识别器退化。反向（删条目后再变异）会红，证据见 work/r24-mut2.txt。
  */
 const EXPORT_FORM_UNRECOGNISED = [
   // 中间件/工具：导出单个函数或类
@@ -235,8 +242,6 @@ const EXPORT_FORM_UNRECOGNISED = [
   'docs/generate.js',
   // 模型：`module.exports = mongoose.model(...)`
   'models/AuditLog.js',
-  // 取证捕获模型（2026-10-31，P2）：单值 `module.exports = mongoose.model(...)`，无钩子面
-  'models/FireAlarm.js',
   'models/ForensicCapture.js',
   'models/FireDevice.js',
   'models/IPBlacklist.js',
@@ -253,7 +258,6 @@ const EXPORT_FORM_UNRECOGNISED = [
   'models/Role.js',
   'models/SystemConfig.js',
   'models/TokenBlacklist.js',
-  'models/User.js',
   // 头像模型（2026-10-30）：与其余模型同形（`module.exports = mongoose.model(...)`）——
   // 单值、不具名 ⇒ 没有钩子面；加任何具名导出会立刻掉出本清单并让门禁变红。
   // 隐私同意记录模型（2026-11-01，一-7）：与其余模型同形（`module.exports = mongoose.model(...)`），单值不具名 ⇒ 无钩子面
@@ -274,6 +278,8 @@ const EXPORT_FORM_UNRECOGNISED = [
   'routes/reportRoutes.js',
   'routes/roleRoutes.js',
   'routes/securityRoutes.js',
+  // 撞库画像读口（2026-11-01）：`module.exports = router` 单值导出，与其余路由文件同形
+  'routes/stuffingProfileRoutes.js',
   'routes/userRoutes.js',
   // 匿名版本元数据路由（2026-10-30）：与上面同形，`module.exports = router`，
   // 不具名 ⇒ 没有钩子面。加任何具名导出都会立刻掉出本清单并让门禁变红。

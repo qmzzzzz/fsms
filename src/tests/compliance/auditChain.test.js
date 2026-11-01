@@ -231,7 +231,7 @@ describe('审计日志合规化', () => {
       // 防漂移守卫。原实现只遍历 PAYLOAD_FIELDS_V3——也就是**被它监管的那份清单本身**，
       // 于是给 schema 加了 targetType/targetId/dataType/description 却忘了
       // 加进 payload 时，守卫全绿：方向错了，等于没有守卫。
-      const { PAYLOAD_SCHEMA_DEFAULTS, PAYLOAD_FIELDS_V4 } = require('../../utils/auditChain');
+      const { PAYLOAD_SCHEMA_DEFAULTS, PAYLOAD_FIELDS_V5 } = require('../../utils/auditChain');
       const paths = AuditLog.schema.paths;
 
       const hasImplicitDefault = (path) =>
@@ -239,7 +239,7 @@ describe('审计日志合规化', () => {
 
       // 方向①：payload 里带 default 的字段必须登记默认值表，否则 chainBatch 算 hash
       // 时是 undefined、落库后被 Mongoose 填成默认值 → 整批断链（AUX-02 的根因）
-      const notRegistered = PAYLOAD_FIELDS_V4.filter((field) => {
+      const notRegistered = PAYLOAD_FIELDS_V5.filter((field) => {
         const path = paths[field];
         return (
           path && hasImplicitDefault(path) && !Object.keys(PAYLOAD_SCHEMA_DEFAULTS).includes(field)
@@ -267,12 +267,12 @@ describe('审计日志合规化', () => {
       const uncovered = Object.keys(paths)
         .filter((p) => !p.startsWith('$'))
         .filter((p) => !CHAIN_METADATA.has(p.split('.')[0]))
-        .filter((p) => !PAYLOAD_FIELDS_V4.includes(p.split('.')[0]));
+        .filter((p) => !PAYLOAD_FIELDS_V5.includes(p.split('.')[0]));
       expect(uncovered).toEqual([]);
 
       // 方向②的自检：把守卫的判据反过来必须能抓到真实缺口，
       // 否则「空数组等于全覆盖」这类断言可能是空转
-      const tampered = PAYLOAD_FIELDS_V4.filter((f) => f !== 'description');
+      const tampered = PAYLOAD_FIELDS_V5.filter((f) => f !== 'description');
       expect(
         Object.keys(paths)
           .filter((p) => !CHAIN_METADATA.has(p.split('.')[0]))
@@ -288,8 +288,9 @@ describe('审计日志合规化', () => {
         PAYLOAD_FIELDS_V2,
         PAYLOAD_FIELDS_V3,
         PAYLOAD_FIELDS_V4,
+        PAYLOAD_FIELDS_V5,
       } = require('../../utils/auditChain');
-      expect(CURRENT_PAYLOAD_VERSION).toBe(4);
+      expect(CURRENT_PAYLOAD_VERSION).toBe(5);
 
       // 版本清单必须是**互不相同的快照**：v3 曾写成 `= PAYLOAD_FIELDS_V2`（同一引用），
       // 将来任何人给 v2 追加字段都会静默改写 v3 的语义，存量 v3 记录集体算不回哈希
@@ -303,6 +304,10 @@ describe('审计日志合规化', () => {
       for (const field of ['targetType', 'targetId', 'dataType', 'description']) {
         expect(PAYLOAD_FIELDS_V3).not.toContain(field);
       }
+      // v5 的增量同样封闭：只多一个 refusalReason，且 v4 一字未动
+      expect(PAYLOAD_FIELDS_V5).not.toBe(PAYLOAD_FIELDS_V4);
+      expect([...PAYLOAD_FIELDS_V5].sort()).toEqual([...PAYLOAD_FIELDS_V4, 'refusalReason'].sort());
+      expect(PAYLOAD_FIELDS_V4).not.toContain('refusalReason');
 
       const doc = {
         timestamp: new Date('2026-08-25T00:00:00.000Z'),
@@ -428,6 +433,60 @@ describe('审计日志合规化', () => {
       // samples 有 MAX_SAMPLES=20 的上限：这一条断的是"本条在被报出的样本里"，
       // 若共享集合攒出 20 处以上断裂它可能因截断而假红——那是一次响亮的红，不是假绿，可接受。
       expect(report.samples.map((s) => String(s._id))).toContain(String(doc._id));
+    });
+
+    // H4：v5 只**增量**纳入 refusalReason。这条用例必须能区分「发了 v5」与「什么都没做」，
+    // 所以两半都要：v4 存量记录（含该字段）照旧验得过（否则发版即假篡改），
+    // 而同一内容在 v5 口径下哈希不同、且驱动层改该字段会被抓到（否则等于没进哈希）。
+    test('v4 存量记录（含 refusalReason）仍验得过，v5 同内容哈希不同且篡改可检出', async () => {
+      const { verifyAuditChain } = require('../../services/auditChainVerify');
+      const username = `chain_h4_${Date.now().toString(36)}`;
+      const now = new Date();
+      const base = {
+        timestamp: now,
+        action: 'ip_blacklist_refused',
+        category: 'security',
+        username,
+        ip: '127.0.0.1',
+        path: '/api/security/ip-list',
+        method: 'POST',
+        statusCode: 400,
+        success: false,
+        errorMessage: 'Bad Request',
+        refusalReason: 'operator_inside',
+      };
+
+      // ① 存量 v4 行：直接插驱动层，哈希按当年 V4 口径铸（该口径不含 refusalReason）
+      const v4doc = {
+        ...base,
+        _id: new mongoose.Types.ObjectId(),
+        prevHash: null,
+        hashVersion: 4,
+      };
+      v4doc.hash = computeHash(null, canonicalPayload(v4doc, 4));
+      if (isHmacConfigured()) v4doc.hmac = computeHmac(v4doc.hash);
+      await AuditLog.collection.insertOne(v4doc);
+
+      const v4report = await verifyAuditChain(AuditLog, { filter: { _id: v4doc._id } });
+      expect(v4report.total).toBe(1);
+      expect(v4report.intact).toBe(true);
+
+      // ② 同一内容换成 v5 口径：哈希必须不同（v5 真的把它算进去了，不是形同虚设）
+      expect(computeHash(null, canonicalPayload(base, 5))).not.toBe(v4doc.hash);
+
+      // ③ v5 记录：驱动层改 refusalReason 必须被抓（v4 行改同一字段则抓不到——这就是 v5 的增量）
+      const v5doc = await AuditLog.create(base);
+      expect(v5doc.hashVersion).toBe(CURRENT_PAYLOAD_VERSION);
+      expect(v5doc.hash).toBe(computeHash(v5doc.prevHash, canonicalPayload(v5doc.toObject(), 5)));
+      const tampered = await verifyAuditChain(AuditLog, { filter: { _id: v5doc._id } });
+      expect(tampered.intact).toBe(true);
+      await AuditLog.collection.updateOne(
+        { _id: v5doc._id },
+        { $set: { refusalReason: 'typed_confirmation_required' } }
+      );
+      const after = await verifyAuditChain(AuditLog, { filter: { _id: v5doc._id } });
+      expect(after.intact).toBe(false);
+      expect(after.byType.hash_mismatch).toBe(1);
     });
   });
 

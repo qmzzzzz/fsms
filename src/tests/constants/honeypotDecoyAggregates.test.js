@@ -402,7 +402,9 @@ describe('载荷形状与独立复算', () => {
     for (const row of decoy.DECOY_INSPECTIONS) {
       const arrays = [row.devices, row.checkItems, row.findings, row.executionLog]; // M13：四个数组键恒有
       expect(arrays.every(Array.isArray)).toBe(true);
-      expect(row.executionLogCount).toBe(0);
+      // executionLogCount 是全历史 push 数、executionLog 是封顶后的尾部 ⇒ 恒 count ≥ length；
+      // 诱饵行没有截断故事，钉成相等：「异常完成」配 count 0（或反过来的空数组配正计数）都会在这里红
+      expect(row.executionLogCount).toBe(row.executionLog.length);
       expect(typeof row.createdBy).toBe('string');
     }
   });

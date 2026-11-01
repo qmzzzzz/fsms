@@ -23,6 +23,7 @@ const { stripControlChars, redactUrlQuery } = require('../utils/helpers');
 // 共享口径不一致。接入同一个 makeSharedStore（无 Redis 时行为不变）。
 const { makeSharedStore } = require('../middleware/rateLimitStore');
 const { normalizeRateLimitIp } = require('../middleware/rateLimit');
+const { setNoStore } = require('../middleware/noStore');
 const { clientIpForSecurityDecision } = require('../utils/ipUtils');
 const { captureException, isSentryInitialized } = require('../middleware/sentry');
 
@@ -39,7 +40,7 @@ const cspReportLimiter = rateLimit({
     `csp-report:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
   standardHeaders: false,
   legacyHeaders: false,
-  handler: (req, res) => res.status(429).end(),
+  handler: (req, res) => setNoStore(res).status(429).end(),
 });
 
 /**
@@ -132,7 +133,7 @@ const clientErrorLimiter = rateLimit({
     `client-errors:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
   standardHeaders: false,
   legacyHeaders: false,
-  handler: (req, res) => res.status(429).end(),
+  handler: (req, res) => setNoStore(res).status(429).end(),
 });
 
 /** 上报条目类型白名单（与前端 errorReporter/webVitals 的 kind 对齐） */
@@ -208,10 +209,18 @@ router.post('/client-errors', clientErrorLimiter, (req, res) => {
  * 且会被中间缓存固化 24 小时。宁可缺这一行（RFC 9116 里 Canonical 是可选字段），
  * 也不输出一个来自请求的、未经声明的值。
  */
+// security.txt 字段值的**唯一**净化尺（Canonical/Contact/Policy 共用）：值里的换行即新字段
+// （RFC 9116 一行一字段），三个值全部来自环境变量 ⇒ 各写一份 split 必然漏一处。
+const securityTxtFieldValue = (raw) =>
+  stripControlChars(
+    String(raw == null ? '' : raw).split(/\r\n|[\n\r\u2028\u2029]/)[0],
+    Infinity // 不截断：字段值无长度约束，运维配的精确串必须原样下发（见 securityTxtCanonicalSource 的「原样输出」用例）
+  ).trim();
+
 const securityTxtCanonical = (req) => {
-  const explicit = (process.env.SECURITY_TXT_CANONICAL || '').trim();
+  const explicit = securityTxtFieldValue(process.env.SECURITY_TXT_CANONICAL);
   if (explicit) return explicit;
-  const firstAllowed = (process.env.ALLOWED_HOSTS || '').split(',')[0].trim();
+  const firstAllowed = securityTxtFieldValue((process.env.ALLOWED_HOSTS || '').split(',')[0]);
   if (!firstAllowed) return '';
   // 协议仍取 req.protocol：TLS 在哪一层终结由 TRUST_PROXY_HOPS 决定，与主机名无关
   return `${req.protocol}://${firstAllowed}/.well-known/security.txt`;
@@ -224,7 +233,8 @@ const securityTxtCanonical = (req) => {
  * 超过一年——静态文件必然过期，过期的 security.txt 按规范应被视为无效。
  */
 const buildSecurityTxt = (req) => {
-  const contact = process.env.SECURITY_CONTACT_EMAIL || 'security@example.com';
+  const contact =
+    securityTxtFieldValue(process.env.SECURITY_CONTACT_EMAIL) || 'security@example.com';
   const expires = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString();
   const canonical = securityTxtCanonical(req);
 
@@ -234,11 +244,9 @@ const buildSecurityTxt = (req) => {
     'Preferred-Languages: zh-Hans, en',
   ];
   if (canonical) lines.push(`Canonical: ${canonical}`);
-  // Policy（RFC 9116 可选字段）：指向对外披露的安全响应政策。由部署方显式配置
-  // 才下发——仓库内 SECURITY.md 未必有对外可达的 URL，硬编码会产出 404 字段。
-  // 值经简单行内清洗：security.txt 的字段值不得包含换行（换行即新字段，可被
-  // 环境变量注入伪造字段），换行截断即可。
-  const policyUrl = (process.env.SECURITY_POLICY_URL || '').trim().split(/\r?\n/)[0];
+  // Policy（RFC 9116 可选字段）由部署方显式配置才下发：仓库内 SECURITY.md 未必有对外可达
+  // 的 URL，硬编码会产出 404 字段。值与另外两处共用同一把尺（见 securityTxtFieldValue）。
+  const policyUrl = securityTxtFieldValue(process.env.SECURITY_POLICY_URL);
   if (policyUrl) lines.push(`Policy: ${policyUrl}`);
   lines.push(
     '',
@@ -258,7 +266,7 @@ const securityTxtLimiter = rateLimit({
     `security-txt:${ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req)))}`,
   standardHeaders: false,
   legacyHeaders: false,
-  handler: (req, res) => res.status(429).end(),
+  handler: (req, res) => setNoStore(res).status(429).end(),
 });
 
 const serveSecurityTxt = (req, res) => {

@@ -29,6 +29,9 @@ const MOUNTS = [
   { name: 'inspectionRoutes', prefix: '/api/inspections' },
   { name: 'reportRoutes', prefix: '/api/reports' },
   { name: 'securityRoutes', prefix: '/api/security' },
+  // 撞库画像读口（2026-11-01，ADR-013「P2 情报」）：与 securityRoutes **同前缀**、独立文件挂载；
+  // 拆文件是为避开 securityRoutes 的 max-lines 行数地板，此处登记的是最终生效前缀。
+  { name: 'stuffingProfileRoutes', prefix: '/api/security' },
   // 取证溯源（T5/T6）：**传递挂载**——app.js 仍只挂 securityRoutes，由它 router.use('/forensic')
   // 并入。此处登记的是最终生效前缀；不直接改 app.js 的挂载行，是为了不让 app.js 行数位移
   // （sentry.js / appTrustProxyAndReadyzGuards.test.js 有 10 条锚点登记在 app.js 的行号上）。
@@ -36,6 +39,10 @@ const MOUNTS = [
   // 头像读取（2026-10-30）：app.js:530 挂的就是这个前缀。它是真实业务端点
   // （本人直通 / 他人需 user:read + 数据范围），故按挂载链纳入对账，而不是豁免。
   { name: 'avatarRoutes', prefix: '/api/avatars' },
+  // 版本元数据（app.js:530）：匿名只读，登录页据此提示「有新版本」。此前**漏登记**，
+  // 于是它既不进「漏文档」清单（注册集里没有它），也不进文档——双向对账两边都看不见它。
+  // 下面那条完整性守卫就是为了堵住这个盲区：漏登记不许再无声发生。
+  { name: 'versionRoutes', prefix: '/api/version' },
 ];
 
 describe('OpenAPI 文档同步守卫', () => {
@@ -99,6 +106,26 @@ describe('OpenAPI 文档同步守卫', () => {
       return !registered.has(d) && !DOC_EXEMPT.has(path);
     });
     expect(ghosts).toEqual([]);
+  });
+
+  // 上面两条对账都依赖 MOUNTS，而 MOUNTS 是**手抄** app.js 的镜像。手抄就会漏，
+  // 而漏掉的注册集缺项会让「漏文档」与「幽灵文档」**同时**失明（/api/version 即此）。
+  // 故把 MOUNTS 自身也纳入对账：app.js 里每个 `app.use('<前缀>', <router名>)` 的路由器，
+  // 要么在此登记，要么落进有理由的豁免集。新增挂载点忘了同步 = 本用例当场红。
+  test('MOUNTS 覆盖 app.js 的每个挂载点（防手抄漏项让双向对账同时失明）', () => {
+    // 豁免仅两项，各带理由：'/' 前缀的 well-known（探针/报告类，已在反向漂移台账登记）、
+    // 以及非业务路由的中间件组。二者都不属于业务 API 文档面。
+    const EXEMPT_ROUTERS = new Set(['wellKnownRoutes']);
+    const appSrc = fs.readFileSync(path.join(__dirname, '../../app.js'), 'utf8');
+    const mounted = new Set();
+    for (const m of appSrc.matchAll(/app\.use\(\s*'[^']*'\s*,\s*([A-Za-z_$][\w$]*)\s*[,)]/g)) {
+      mounted.add(m[1]);
+    }
+    // 防正则退化成空集：空集会让本用例永远绿，等于没写
+    expect(mounted.size).toBeGreaterThan(5);
+    const registered = new Set(MOUNTS.map((x) => x.name));
+    const missing = [...mounted].filter((n) => !registered.has(n) && !EXEMPT_ROUTERS.has(n));
+    expect(missing).toEqual([]);
   });
 
   // L-24：生成器与产物的一致性守卫。

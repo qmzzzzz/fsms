@@ -149,6 +149,7 @@ const ROUTE_TABLE = Object.freeze([
   need('GET', '/api/security/audit-logs/verify', 'security:audit', 'decoy-summary'),
   need('GET', '/api/security/audit-logs/export', 'security:audit', 'decoy-file'),
   need('GET', '/api/security/audit-logs', 'security:audit', 'decoy-summary'),
+  need('GET', '/api/security/stuffing-profile', 'security:audit', 'deny403'), // 撞库画像读口（ADR-013 P2 情报）：聚合面不向陷阱会话开口，与真实 403 逐字相同
   need('GET', '/api/security/config/allowPublicRegistration', 'security:config', 'decoy-summary'),
   need('PUT', '/api/security/config/allowPublicRegistration', 'security:config', 'deny403'),
   need('GET', '/api/security/config/loginCaptchaEnabled', 'security:config', 'decoy-summary'),

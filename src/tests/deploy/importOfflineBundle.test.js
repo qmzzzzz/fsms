@@ -188,7 +188,14 @@ describe('包形态与位置', () => {
 
   test('--bundle-root 之外的包：拒绝（代理调用时把包目录钉在允许的根之下）', () => {
     const dir = makeBundle();
-    const r = run(['--bundle', dir, '--allowlist', ALLOWLIST, '--bundle-root', path.join(dir, 'sub')]);
+    const r = run([
+      '--bundle',
+      dir,
+      '--allowlist',
+      ALLOWLIST,
+      '--bundle-root',
+      path.join(dir, 'sub'),
+    ]);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('不在允许的根目录之下');
   });

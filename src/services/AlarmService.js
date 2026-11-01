@@ -155,7 +155,7 @@ class AlarmService {
         .populate({ path: 'deviceId', select: 'deviceCode deviceName deviceType' })
         // 与上面两条列表分支同口径：handler 只取 username/realName。
         // 此处原多带一个 `phone`，而 User.phone 的 getter 会把密文解成明文
-        // （models/User.js:99），于是 GET /api/alarms/:id 把处置人的完整手机号
+        // （models/User.js:138），于是 GET /api/alarms/:id 把处置人的完整手机号
         // 直接回给任何持 `alarm:read` 且在该条范围内的账号——没有二次验证、没有
         // `system:read`、也没有 view_sensitive_data 审计。那条合规通道
         // （POST /api/security/view-sensitive）专门挂了 reauthLimiter +

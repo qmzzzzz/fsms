@@ -44,14 +44,10 @@ const PAYLOAD_FIELDS_V2 = [
   'duration',
 ];
 
-/**
- * v3 = v2 的字段集（当时只是补了「算哈希前统一填默认值」的口径，字段没变）。必须是**独立快照**而不是 `= PAYLOAD_FIELDS_V2`：同一引用的话，将来给 v2 追加任何字段都会静默改写 v3 的语义，历史记录的哈希就再也算不回来了。
- */
+// v3 = v2 字段集（只补了「算哈希前统一填默认值」的口径）。必须独立快照：同一引用时给 v2 加字段会静默改写 v3 语义，历史哈希再也算不回来。
 const PAYLOAD_FIELDS_V3 = [...PAYLOAD_FIELDS_V2];
 
-/**
- * v4：补进加到 schema 却从未进哈希的四个字段（targetType / targetId / dataType / description）。这四字段承载「谁举报了谁 / 看了哪类敏感数据 / 操作描述」，正是取证要看的值；不在 payload 里就意味着落库后可被任意改写而三层校验一层都不会红。
- */
+// v4：补进四字段（谁举报了谁 / 哪类敏感数据 / 操作描述）——取证要看的值，不进 payload 就能落库后被静默改写而三层校验全绿。
 const PAYLOAD_FIELDS_V4 = [
   ...PAYLOAD_FIELDS_V3,
   'targetType',
@@ -60,17 +56,17 @@ const PAYLOAD_FIELDS_V4 = [
   'description',
 ];
 
-const CURRENT_PAYLOAD_VERSION = 4;
+// v5：补进 refusalReason（4xx 拒绝原因码）——归因证据，与 riskLevel 同族。**只能在 V5 加**：往 V4 追加会让存量 v4 记录按新口径复算 ⇒ 集体 hash_mismatch（假篡改告警）。
+const PAYLOAD_FIELDS_V5 = [...PAYLOAD_FIELDS_V4, 'refusalReason'];
 
-/**
- * 四份历史清单一律冻结。
- *
- * 理由不是洁癖：本文件第 48-51 行记着的事故（v3 曾写成 `= PAYLOAD_FIELDS_V2` 同一个引用）就是"清单被别处改动 ⇒ 历史哈希再也算不回来"这一类，而它的后果是**大面积假篡改告警**——防篡改链最坏的失败形态（把完好的链路报成被篡改，运维只能整库重签）。靠注释与 code review 防不住第三次，冻结能防住：数组内容从此不可能被 push/splice 改掉。
- */
+const CURRENT_PAYLOAD_VERSION = 5;
+
+// 历史清单一律冻结：清单被改动 ⇒ 历史哈希算不回来 ⇒ 大面积假篡改告警（本文件 v3 那行记的事故）。冻结是可执行判据，注释与 review 防不住第三次。
 Object.freeze(PAYLOAD_FIELDS_V1);
 Object.freeze(PAYLOAD_FIELDS_V2);
 Object.freeze(PAYLOAD_FIELDS_V3);
 Object.freeze(PAYLOAD_FIELDS_V4);
+Object.freeze(PAYLOAD_FIELDS_V5);
 
 const stableStringify = (value) => {
   if (value === null || value === undefined) return 'null';
@@ -135,10 +131,9 @@ const canonicalPayloadV2LegacyBatch = (doc) => {
   return canonicalPayloadV2(probe);
 };
 
-/**
- * 按记录自带的 hashVersion 选择口径。v2/v3 共用 25 字段集（v3 只是补齐默认值的写入口径，字段集未变），v4 起加入 targetType/targetId/dataType/description。每新增一版都必须保留旧分支——历史记录的哈希只有按当年口径才复算得出来。
- */
+// 按记录自带 hashVersion 选口径；每新增一版都必须保留旧分支——历史哈希只有按当年口径才复算得出来。
 const canonicalPayload = (doc, version = CURRENT_PAYLOAD_VERSION) => {
+  if (version >= 5) return canonicalPayloadV2(doc, PAYLOAD_FIELDS_V5);
   if (version >= 4) return canonicalPayloadV2(doc, PAYLOAD_FIELDS_V4);
   // v3 必须读 V3 那份快照。此前这一行读的是 PAYLOAD_FIELDS_V2，于是上面"必须是独立快照"
   // 的承诺实际未生效：给 V2 追加字段会连同 v3 的口径一起改掉，全部 v3 历史记录
@@ -163,6 +158,7 @@ module.exports = {
   PAYLOAD_FIELDS_V2,
   PAYLOAD_FIELDS_V3,
   PAYLOAD_FIELDS_V4,
+  PAYLOAD_FIELDS_V5,
   CURRENT_PAYLOAD_VERSION,
   canonicalPayload,
   canonicalPayloadV2,

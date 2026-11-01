@@ -86,6 +86,11 @@ const permissionHelper = require('../../utils/permissionHelper');
 const AuditLog = require('../../models/AuditLog');
 const { SystemConfig } = require('../../models');
 const logger = require('../../utils/logger');
+const {
+  ACCESS_COOKIE_NAME,
+  ACCESS_COOKIE_NAME_SECURED,
+  REFRESH_COOKIE_NAME,
+} = require('../../utils/cookie');
 
 const controller = require('../../controllers/authController');
 
@@ -435,11 +440,16 @@ describe('logout fail-closed 与会话收敛', () => {
     expect(res.clearCookie).not.toHaveBeenCalled();
   });
 
-  test('成功：清两个 cookie + 按 sid 收敛会话', async () => {
+  test('成功：清掉全部三个令牌 cookie 名（access 新旧名 + refresh）+ 按 sid 收敛会话', async () => {
     authService.revokeTokensOnLogout.mockResolvedValue({ revokeFailed: false });
     const res = makeRes();
     await invoke(controller.logout, makeReq(), res);
-    expect(res.clearCookie).toHaveBeenCalledTimes(2);
+    // 三个而不是两个：access 侧**新旧名都要清**（__Host- 前缀是后加的，迁移窗口内浏览器可能同时持有
+    // 旧普通名与新前缀名），只清一枚会留下「看起来登出了、旧串仍在浏览器里」。故断言逐个 cookie 名，
+    // 而不是断言次数——次数是实现的副产物，名字才是登出必须达成的事实。
+    expect(res.clearCookie).toHaveBeenCalledTimes(3);
+    const cleared = res.clearCookie.mock.calls.map((c) => c[0]);
+    expect(cleared).toEqual([ACCESS_COOKIE_NAME_SECURED, ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME]);
     expect(sessionService.revokeSessionSafe).toHaveBeenCalledWith(
       expect.objectContaining({ sid: 'sid-cur', userId: 'u-1', reason: 'logout' })
     );

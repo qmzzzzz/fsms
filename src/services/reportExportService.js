@@ -353,8 +353,8 @@ const buildAuditExportQuery = ({
   // 于是同一个 URL 参数在两条链上有两种语义：列表＝大小写不敏感的前缀，导出＝子串。
   // 后果不是"搜索结果略有差别"而是**证据材料比可见集宽**——筛 `adm` 的 xlsx 里会出现
   // `damin`、`superadmin` 的 IP/路径/操作，而操作员以为文件只有那一个人的记录；
-  // 本文件的 docstring 与 utils/auditQuery.js:199-200 都把"导出即所见"写成硬约束。
-  // 注：`i` 正则还有一层已实测的代价——keysExamined 2000（全索引扫），见 auditQuery.js:176-178。
+  // 本文件的 docstring 与 utils/auditQuery.js:304-305 都把"导出即所见"写成硬约束。
+  // 注：`i` 正则还有一层已实测的代价——keysExamined 2000（全索引扫），见 auditQuery.js:282。
   if (username) auditQuery.username = usernamePrefixCondition(username);
   // action/category 为枚举值,精确匹配,与审计日志查询接口语义一致
   if (action) auditQuery.action = action;

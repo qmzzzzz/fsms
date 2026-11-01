@@ -33,6 +33,7 @@ const { redactUrlQuery, stripControlChars } = require('../utils/helpers');
 // 早期 403 留痕：直连实现模块，不再经 security/index 门面。
 // 门面会拉入 IP 黑名单与告警链，而这里只需要一条影子审计写入。
 const { recordEarlyRejection } = require('./security/earlyRejection');
+const { setNoStore } = require('./noStore');
 const { WRITE_METHODS } = require('./httpMethods');
 
 /**
@@ -94,7 +95,6 @@ const createOriginCheck = (allowedOrigins) => {
       return next();
     }
 
-    // 非写方法与预检请求不校验
     if (req.method === 'OPTIONS' || !WRITE_METHODS.includes(req.method)) {
       return next();
     }
@@ -107,8 +107,6 @@ const createOriginCheck = (allowedOrigins) => {
       return next();
     }
 
-    // Origin 头存在但为空串：异常来源，视为校验失败拒绝，
-    // 防止利用空串的 falsy 特性绕过白名单
     if (origin === '') {
       logger.warn(
         `来源校验失败（空 Origin）：method=${req.method} path=${redactUrlQuery(req.originalUrl)} ip=${req.ip}`
@@ -120,7 +118,7 @@ const createOriginCheck = (allowedOrigins) => {
         reason: '写操作 Origin 头为空串（异常来源）',
         riskFactors: ['csrf_origin_violation', 'empty_origin'],
       });
-      return res.status(403).json({ success: false, message: '来源校验失败' });
+      return setNoStore(res).status(403).json({ success: false, message: '来源校验失败' });
     }
 
     if (whitelist.includes(origin)) {
@@ -135,7 +133,7 @@ const createOriginCheck = (allowedOrigins) => {
       reason: `写操作来源 ${origin} 不在白名单内`,
       riskFactors: ['csrf_origin_violation'],
     });
-    return res.status(403).json({ success: false, message: '来源校验失败' });
+    return setNoStore(res).status(403).json({ success: false, message: '来源校验失败' });
   };
 };
 

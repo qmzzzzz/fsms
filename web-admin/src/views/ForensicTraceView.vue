@@ -750,6 +750,7 @@ const BAN_REFUSAL_KEYS = {
   live_traffic_inside: 'forensic.banRefusedLiveTraffic',
   reason_required: 'forensic.banRefusedReasonRequired',
   typed_confirmation_required: 'forensic.banRefusedTypedConfirm',
+  no_rescue_path: 'forensic.banRefusedNoRescuePath',
   unknown_token: 'forensic.banRefusedUnknownToken',
   token_expired: 'forensic.banRefusedTokenExpired',
 }

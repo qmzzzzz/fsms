@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-// 整改：设备类型枚举此前在 deviceListParams（query）内联展开一份，与 utils/constants.js、models/FireDevice.js、routes/deviceRoutes.js 合计 4 份副本。
 // 现统一引用 constants 的单一事实来源（本文件的 deviceType 请求体只声明 string 类型，枚举约束由模型层负责，故无需改）。
 const { DEVICE_TYPE } = require('../utils/constants');
 const { PRIVILEGE_GRANT_STATUSES } = require('../constants/privilegeGrant');
@@ -52,9 +51,7 @@ const spec = {
     { name: 'System', description: '系统接口' },
   ],
   components: {
-    securitySchemes: {
-      bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
-    },
+    securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' } },
   },
   paths: {},
 };
@@ -282,7 +279,6 @@ spec.paths['/api/auth/logout'] = {
   }),
 };
 
-// L-24：以下 14 个端点此前只存在于产物、生成器中缺失——重跑生成器会把它们整体抹掉（实测 path 数 83 → 69），而产物却是线上 Swagger 的实际来源。
 // 本块把它们补回生成器，使两者重新等价；openapiSync 测试新增对账守卫。
 spec.paths['/api/auth/login-public-key'] = {
   get: p('get', ['Auth'], '获取登录口令加密公钥（ECDH P-256，供前端加密口令上行）', {
@@ -474,10 +470,7 @@ spec.paths['/api/permissions/grants/{id}/reject'] = {
   post: p('post', ['Privileges'], '驳回临时授权申请', {
     parameters: idParam,
     requestBody: body(
-      {
-        type: 'object',
-        properties: { reason: { type: 'string', maxLength: 200 } },
-      },
+      { type: 'object', properties: { reason: { type: 'string', maxLength: 200 } } },
       false
     ),
     responses: { ...ok('已驳回'), ...badRequest, ...forbidden },
@@ -613,7 +606,7 @@ spec.paths['/api/permissions/batch'] = {
       required: ['permissions'],
       properties: { permissions: { type: 'array', items: { type: 'object' }, minItems: 1 } },
     }),
-    responses: { ...created('创建成功') },
+    responses: { ...ok('创建成功') },
   }),
 };
 
@@ -639,10 +632,7 @@ const deviceListParams = [
   {
     name: 'status',
     in: 'query',
-    schema: {
-      type: 'string',
-      enum: DEVICE_STATUS_VALUES,
-    },
+    schema: { type: 'string', enum: DEVICE_STATUS_VALUES },
   },
   { name: 'building', in: 'query', schema: { type: 'string' } },
   { name: 'floor', in: 'query', schema: { type: 'string' } },
@@ -1156,7 +1146,7 @@ spec.paths['/api/security/report'] = {
       },
     }),
     responses: {
-      ...created('举报已提交'),
+      ...ok('举报已提交'),
       403: { description: '被举报对象超出举报人的数据范围' },
       404: { description: '被举报对象不存在' },
     },
@@ -1226,6 +1216,20 @@ spec.paths['/api/security/audit-logs'] = {
   }),
 };
 
+spec.paths['/api/security/stuffing-profile'] = {
+  get: p('get', ['Security'], '撞库画像（来源段 × 字典特征 × 成功率；businessDay 缺省=今天）', {
+    parameters: [
+      reauthTicketHeader,
+      { name: 'businessDay', in: 'query', schema: { type: 'string' } },
+    ],
+    responses: {
+      ...ok('返回业务日窗口内按强度排序的来源段画像；行数低于 minSamples 时不返回条目'),
+      400: { description: 'businessDay 形状非法（DATE_PARAM_INVALID）' },
+      401: { description: '缺少或无效的二次验证票据' },
+    },
+  }),
+};
+
 spec.paths['/api/security/config/allowPublicRegistration'] = {
   get: p('get', ['Security'], '获取注册开关状态', {
     responses: ok('返回 allowPublicRegistration'),
@@ -1257,7 +1261,7 @@ spec.paths['/api/security/ip-list'] = {
     parameters: [{ name: 'type', in: 'query', schema: { type: 'string', enum: IP_LIST_TYPES } }],
   }),
   post: p('post', ['Security'], '添加 IP 到黑/白名单', {
-    description: '白名单优先级高于黑名单；加入黑名单时若已在白名单则拒绝',
+    description: '白名单优先；覆盖整族须超管+typedConfirm+永久白救援路径，被拒回带归一化 expected',
     requestBody: body({
       type: 'object',
       required: ['ip'],
@@ -1266,12 +1270,18 @@ spec.paths['/api/security/ip-list'] = {
         type: { type: 'string', enum: IP_LIST_TYPES, default: 'black' },
         reason: { type: 'string', maxLength: 200 },
         durationHours: { type: 'number', minimum: 0, maximum: 8760, description: '0=永久' },
+        typedConfirm: { type: 'string', description: '逐字复述网段；覆盖整族时必须' },
       },
     }),
-    responses: { ...created('添加成功'), 400: { description: 'IP 已在白名单中' } },
+    responses: {
+      ...ok('添加成功'),
+      400: {
+        description: '已在白名单；或段护栏拒绝（errors.reason 为原因码，expected 是归一化网段）',
+      },
+      403: { description: '覆盖整族且非内置超管；或删除会拆掉唯一救援路径' },
+    },
   }),
 };
-
 const ipIdParam = [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }];
 spec.paths['/api/security/ip-list/{id}'] = {
   delete: p('delete', ['Security'], '从名单中移除 IP 记录', { parameters: ipIdParam }),
@@ -1293,7 +1303,6 @@ spec.paths['/api/security/ip-list/query'] = {
   }),
 };
 
-// L-24：以下 4 个端点此前只存在于产物、生成器中缺失（同上方 Auth 块）。
 spec.paths['/api/security/users/{userId}/mfa/reset'] = {
   put: p('put', ['Security'], '管理员重置用户两步验证（清除密钥/恢复码并强制下线）', {
     description: '清除他人第二因子属账户接管级操作，要求操作者本人通过一次二次验证。',
@@ -1416,25 +1425,21 @@ spec.paths['/api/security/upgrade/requests'] = {
 };
 
 // ==================== System ====================
-spec.paths['/health'] = {
-  get: p('get', ['System'], '健康检查', {
-    security: false,
-    // 原描述称「包含数据库连接状态」，与实现不符——app.js 的 /health 只回 { status: 'ok' }（刻意最小化，不暴露版本/DB 状态等内部信息）；
-    // 带 DB 连通性的是 /readyz（另有固定枚举约束）。
-    responses: ok("进程存活信号，固定返回 { status: 'ok' }"),
-  }),
+// 三个匿名只读端点形状相同（无鉴权、固定 200）：登记式写法，同一形状只写一份。
+const anonGet = (path, summary, resp) => {
+  spec.paths[path] = {
+    get: p('get', ['System'], summary, { security: false, responses: ok(resp) }),
+  };
 };
-spec.paths['/api'] = {
-  get: p('get', ['System'], 'API 根路径', {
-    security: false,
-    // 原描述称「返回 API 版本和可用端点列表」，与实现不符——app.js 的 /api 只回 { success: true, message: '消防管理系统 API' }；
-    // 返回端点清单是刻意的安全取舍（避免未认证的信息暴露），不会再恢复。
-    responses: ok('固定返回 { success: true, message }，不含端点清单'),
-  }),
-};
+// /health 只回 { status: 'ok' }（刻意最小化，不暴露版本/DB 状态）；带 DB 连通性的是 /readyz。
+anonGet('/health', '健康检查', "进程存活信号，固定返回 { status: 'ok' }");
+// /api 返回端点清单是刻意的安全取舍（避免未认证的信息暴露），不会再恢复。
+anonGet('/api', 'API 根路径', '固定返回 { success: true, message }，不含端点清单');
+// /api/version：匿名 + no-store 是功能需要（登录页停留期恰逢升级要能提示刷新；中间层缓存会让
+// 「有更新」永远检测不到），高频轮询故不进审计（auditLog.js 的 auditGetExcludePaths）。
+anonGet('/api/version', '版本元数据（匿名，响应带 no-store）', '构建信息（版本/构建时间/commit）');
 
-// L-24：本文件此前只有「生成」一种用法——require 就必然重写产物，无法被测试比对，产物与生成器之间的漂移长期无人发现（实测重跑把 83 个 path 覆盖成 69 个，丢失 14 个端点）。
-// 现拆两种用法：直接执行（node src/docs/generate.js）→ 写盘，保持原有行为；被 require → 只导出 spec、不产生副作用，让 openapiSync 能对「生成器输出」与「产物」双向对账。
+// L-24：直接执行（node src/docs/generate.js）→ 写盘；被 require → 只导出 spec、不产生副作用，从而让 openapiSync 能对「生成器输出」与「产物」双向对账（此前 require 即重写产物，无法比对）。
 // ===== 取证溯源（T5/T6，2026-11-01）=====
 // T6 的封禁是两步人工确认：request 出票（不落库）、confirm 持票落库。
 // 两侧都会在护栏命中时回 400 + errors.reason，故 reason 逐项列进 description —— 契约只在文档里说清楚，
@@ -1512,8 +1517,8 @@ spec.paths['/api/security/forensic/pool-ban/confirm'] = {
       },
     }),
     responses: {
-      ...created('返回 bannedCount 与逐条结果'),
-      400: { description: '票据无效或已过期' },
+      ...ok('返回 bannedCount 与逐条结果'),
+      400: { description: '票据无效/已过期/已用过，或逐字确认不符（errors.reason 为原因码）' },
     },
   }),
 };

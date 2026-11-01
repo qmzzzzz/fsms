@@ -471,10 +471,6 @@ const revokeSession = async ({ sid, userId, reason = 'user_revoked' }) => {
 /**
  * 批量吊销后的**精准**缓存失效（审计 2026-11-02 B-F-4）
  *
- * 此前 revokeOtherSessions / revokeAllSessions 在 updateMany 后一律 clearSessionCache()
- * + 广播 sesscache:*：单用户的踢除/改密操作会清空**所有**在线用户的会话缓存，
- * 全员 cache miss 在多副本下被广播放大成一次 DB 尖峰。
- *
  * 改为按「批次标记」回查后逐条失效：updateMany 用同一枚 revokedAt+reason 落标记，
  * 回查在**其后**执行——凡被本批吊销的会话必然带这枚标记（「标记后新建」的会话
  * 要么已被吊销、要么不在本次范围，不产生漏杀，补上了旧「预取 sid 快照」方案的
@@ -557,10 +553,6 @@ const revokeAllSessions = async (userId, reason = 'password_changed') => {
     { userId, status: 'active' },
     { $set: { status: 'revoked', revokedAt, revokeReason: reason } }
   );
-  // 精准失效（审计 2026-11-02 B-F-4，与 revokeOtherSessions 同判据）：批次标记回查
-  // 在 updateMany 之后执行，凡被本次吊销的会话必然带这枚标记——「快照之后新建」
-  // 的会话要么已被吊销（有标记，会被失效）、要么不在本次范围（仍是活会话，本就
-  // 不该失效）。不再全清缓存：该用户被踢不该让所有在线用户跟着 cache miss。
   const count = result.modifiedCount || 0;
   if (count > 0) {
     await invalidateRevokedBatch({ userId, revokedAt, reason });

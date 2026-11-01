@@ -107,27 +107,42 @@ function resolveTarget(citedRaw, siteAbs) {
   return hits.length === 1 ? hits[0] : null;
 }
 
+// 第 24 轮 C1 裁定：`errorHandler.js:109/116` 这类**斜杠成对坐标**是同一个坐标串里的两个
+// 坐标。旧判据只认第一个（后面直接 (?!\d)，/116 落进"看不见"的部分），等于承认第二个
+// 数字可以随便写。第四个捕获组把第二个坐标收进来，采集时拆成两条独立引用（见
+// collectCitations）——两个数字各自判死活，第二个写错（空行/闭合标点/越界）照样红。
 const CITE_RE =
-  /((?:[\w.@-]+\/)*[\w.@-]+\.(?:js|jsx|ts|tsx|vue|md|sh|json|ya?ml)):(\d+)(?:\s*[-–~]\s*(\d+))?(?!\d)/g;
+  /((?:[\w.@-]+\/)*[\w.@-]+\.(?:js|jsx|ts|tsx|vue|md|sh|json|ya?ml)):(\d+)(?:\s*[-–~]\s*(\d+))?(?:\s*\/\s*(\d+))?(?!\d)/g;
 
 /** 普查全部锚点引用（注释与字符串都算——这里要判的正是"写下来的引用"） */
+function citationsInLine(line, siteAbs) {
+  const out = [];
+  let m;
+  CITE_RE.lastIndex = 0;
+  while ((m = CITE_RE.exec(line)) !== null) {
+    // 第 24 轮 C1：斜杠成对写法是"一个坐标串、两个坐标"。旧判据只核第一个，第二个数字写错
+    // 也不会红 ⇒ 拆成两条独立引用，死活各自判（m[4] 存在时 m[3] 不参与：那不是区间）。
+    const points = m[4] ? [Number(m[2]), Number(m[4])] : [Number(m[2])];
+    for (const n of points) {
+      out.push({
+        site: slash(siteAbs),
+        siteLine: 0,
+        cited: m[1],
+        from: n,
+        to: m[4] ? n : m[3] ? Number(m[3]) : n,
+        abs: resolveTarget(m[1], siteAbs),
+      });
+    }
+  }
+  return out;
+}
+
 function collectCitations(files) {
   const found = [];
   for (const f of files) {
     const lines = read(f).split('\n');
     for (let i = 0; i < lines.length; i++) {
-      let m;
-      CITE_RE.lastIndex = 0;
-      while ((m = CITE_RE.exec(lines[i])) !== null) {
-        found.push({
-          site: slash(f),
-          siteLine: i + 1,
-          cited: m[1],
-          from: Number(m[2]),
-          to: m[3] ? Number(m[3]) : Number(m[2]),
-          abs: resolveTarget(m[1], f),
-        });
-      }
+      for (const c of citationsInLine(lines[i], f)) found.push({ ...c, siteLine: i + 1 });
     }
   }
   return found;
@@ -289,15 +304,15 @@ const LIVE = [
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:581',
+    at: 'app.js:586',
     must: /sentryErrorHandler/,
-    why: 'Sentry 错误处理器挂载点',
+    why: 'Sentry 错误处理器挂载点（2026-11-01 撞库画像挂载点 +2、静态面 no-store +3 后由 :581 移至 :586）',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:585',
+    at: 'app.js:590',
     must: /app\.use\(errorHandler/,
-    why: '通用 errorHandler 位置（口径是"在它之前"）',
+    why: '通用 errorHandler 位置（口径是"在它之前"；2026-11-01 由 :585 移至 :590）',
   },
   {
     in: 'src/controllers/reportController.js',
@@ -474,9 +489,9 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:581',
+    at: 'app.js:586',
     must: /sentryErrorHandler/,
-    why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见）',
+    why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见；2026-11-01 由 :581 移至 :586）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
@@ -635,6 +650,26 @@ describe('层 1 · 死区间（零登记、无豁免）', () => {
     // 混合段（`}` 之外还有代码）必须放行：判据只挑"整段都可有可无"的锚点
     expect(classify([mk(6, cleanAt, cleanAt + 1)]).blank).toEqual([]);
   });
+
+  test('斜杠成对坐标是两个坐标：第二个数字也必须落在有内容的行上（旧判据看不见它）', () => {
+    const siteAbs = path.join(ROOT, 'src/tests/ci/commentAnchorFreshness.test.js');
+    // 正证：真实存在的成对写法要采成**两条**引用，各自解析到有内容的行
+    const pair = citationsInLine('  // 见 middleware/errorHandler.js:109/116\n', siteAbs);
+    expect(pair.map((c) => c.from)).toEqual([109, 116]);
+    expect(pair.every((c) => c.abs)).toBe(true);
+    expect(classify(pair).deadRange).toEqual([]);
+    expect(classify(pair).blank).toEqual([]);
+    // 反向对照 1：第二个数字改到"只剩闭合标点"的行 ⇒ 必须红（旧判据只核 109，这里看不见）
+    const wrongPunct = citationsInLine('  // 见 middleware/errorHandler.js:109/104\n', siteAbs);
+    expect(wrongPunct.map((c) => c.from)).toEqual([109, 104]);
+    expect(classify(wrongPunct).blank.map((c) => `${c.from}:${c.kind}`)).toEqual(['104:punct-only']);
+    // 反向对照 2：第二个数字越界 ⇒ 必须进死区间
+    const wrongDead = citationsInLine('  // 见 middleware/errorHandler.js:109/999999\n', siteAbs);
+    expect(classify(wrongDead).deadRange.map((c) => c.from)).toEqual([999999]);
+    // 反向对照 3：区间写法（`-`/`–`/`~`）不走这条拆分，仍是单条区间引用（口径没被顺手改掉）
+    const range = citationsInLine('  // 见 middleware/errorHandler.js:109-116\n', siteAbs);
+    expect(range.map((c) => [c.from, c.to])).toEqual([[109, 116]]);
+  });
 });
 
 describe('层 2 · 无内容锚点（空行 / 只剩注释标记；豁免 = STALE 台账，逐条绑死）', () => {
@@ -754,7 +789,7 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
   });
 
   test('谓词有牙（正向命中 + 反向不命中），不许跟着行号走', () => {
-    const hit = citedRange('src/middleware/sentry.js', 'app.js:581');
+    const hit = citedRange('src/middleware/sentry.js', 'app.js:586');
     expect(/sentryErrorHandler/.test(hit.text)).toBe(true);
     expect(/绝不可能出现在这一行的符号ZZZ/.test(hit.text)).toBe(false);
     // 本轮之前的真实写法：auditController.js:38 是空行，同一条判据必须判它不含符号

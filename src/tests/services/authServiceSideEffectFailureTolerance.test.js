@@ -12,10 +12,10 @@
  *   - [仍有效] 文件头自陈目的是「提升 functions 指标」；12 条断言与 `GapB` 同场景用例**逐字相同**，唯一增量是让 Istanbul 计数器 +1（deliverables/七维代码健康度深度审计-2026-09-18.md）
  *   - [部分有效] `:303-322`（现形 `:327`）标题写「REPLAYED + invalidateUserTokens 成功 + revokeAllSessionsSafe 执行」而函数体只断 `outcome==="REPLAYED"`（deliverables/七维代码健康度深度审计-2026-09-18.md）
  *     变异实测更正（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）：作用域 = authService.js 的 73 套 / 872 例。
- *       `authService.js:909` invalidateUserTokens 变 no-op → 2 例红（杀器 security/revokeFailurePropagation.test.js）
- *       ⇒ **第一个动作有人守**；`:916` revokeAllSessionsSafe 变 no-op → **872/872 全绿**
- *       ⇒ **第二个动作全仓无断言**（`:914-915` 注释自陈其后果是「登录会话」界面留下僵尸记录）。
- *       正对照（`:916` 点位 throw）杀掉 2 例，**含本用例本身** ⇒ 本用例确实执行到 `:916`，只是没断言。
+ *       `src/services/authService/token.js:172` invalidateUserTokens 变 no-op → 2 例红（杀器 security/revokeFailurePropagation.test.js）
+ *       ⇒ **第一个动作有人守**；`src/services/authService/token.js:181` revokeAllSessionsSafe 变 no-op → **872/872 全绿**
+ *       ⇒ **第二个动作全仓无断言**（`src/services/authService/token.js:179-180` 注释自陈其后果是「登录会话」界面留下僵尸记录）。
+ *       正对照（`src/services/authService/token.js:181` 点位 throw）杀掉 2 例，**含本用例本身** ⇒ 本用例确实执行到 `:916`，只是没断言。
  *   - [已修复] `:284-295,343-349` 时间依赖 + 双可能断言（原出处 2026-09-16 全面代码审计报告；**该报告已删除**，问题编号保留原样）
  *     复核：`:353-356` 已注释「该用例恒返回 OK，却用 expect([OK,REVOKE_FAILED]) 双可能断言兜住…现改为…断言 REVOKE_FAILED + 密码确已落库 + tokenVersion 未递增」。
  *
@@ -46,7 +46,7 @@ const crypto = require('crypto');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
 
 /**
- * 非常规时间登录（authService.js:25 解构 → :732 调用 checkUnusualTime）是**解构导入**，
+ * 非常规时间登录（src/services/authService/session.js:15 解构 → :243 调用 checkUnusualTime）是**解构导入**，
  * 事后 `jest.spyOn` 改不到已绑定的引用；只有**模块级替换**才能在 authService 加载时被捕获。
  *
  * 默认 false ⇒ 与未 mock 的行为逐字一致；只有需要**确定性**触发该分支的用例才置 true。

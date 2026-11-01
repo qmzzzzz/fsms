@@ -168,7 +168,7 @@ function redactUrl(rawUrl, depth = 0) {
   // /cb?next=https://x/cb?token=SECRET 明文外发）。只看 key 等于把"凭据可以藏进值里"当成了
   // 不存在的写法；而 record 每次都会写 url:redactUrl(location.href)，不依赖 message 是否被调用。
   const redactNestedValue = (rawValue) => {
-    let decoded = rawValue
+    let decoded
     try {
       decoded = decodeURIComponent(rawValue)
     } catch (_) {
@@ -416,7 +416,7 @@ function redactSensitiveText(value) {
         'Digest ***'
       )
       // 认证方案 + 凭据（Bearer JWT / Basic base64 / Negotiate ...）：整段吃掉方案与凭据
-      .replace(/\b(Bearer|Basic|Negotiate)\s+[A-Za-z0-9._~+\/=:-]+/gi, '$1 ***')
+      .replace(/\b(Bearer|Basic|Negotiate)\s+[A-Za-z0-9._~+/=:-]+/gi, '$1 ***')
       // 键值形态：Authorization: Bearer <JWT> / token=Bearer abc 等（方案已在上一条处理，
       // 这里兜住 "x-auth-token"、"access.token" 这类变体键名）
       .replace(

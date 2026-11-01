@@ -15,6 +15,10 @@ const REFUSAL_REASONS = Object.freeze({
   live_traffic_inside: { text: '该网段最近仍有真实业务请求', ticket: false },
   reason_required: { text: '未填写封禁理由', ticket: false },
   typed_confirmation_required: { text: '该网段影响面大，必须逐字输入网段本身', ticket: false },
+  no_rescue_path: {
+    text: '写下去会把你自己也封在门外，且当前没有可用的救援路径（先把你的来源 IP 加入永久白名单）',
+    ticket: false,
+  },
   unknown_token: { text: '确认票据不存在或已失效', ticket: true },
   token_expired: { text: '确认票据已过期（有效期 10 分钟）', ticket: true },
 });

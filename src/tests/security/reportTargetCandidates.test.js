@@ -271,6 +271,51 @@ describe('GET /api/security/report-targets：候选集与提交核验同值', ()
       expect((await get(tokens.self, { type: 'inspection' })).status).toBe(400);
     });
 
+    test('原型链成员不得冒充合法 type（constructor/toString/valueOf/__proto__/hasOwnProperty ⇒ 400）', async () => {
+      // 缺陷形态（2026-11-02，r21-c）：`REPORT_TARGET_CANDIDATE_KINDS` 是**普通对象字面量**，
+      // 裸下标 `KINDS[req.query.type]` 会顺着原型链取到 Object.prototype 的成员——
+      // `constructor`/`toString`/`valueOf`/`hasOwnProperty` 全是函数、`__proto__` 是对象，
+      // 全部 truthy ⇒ :322 的 `!kind` 兜底**不放行** ⇒ :331 `kind.fields.ownerField`
+      // 撞 undefined ⇒ TypeError ⇒ 500。
+      //
+      // 这不是「类型校验不严」，而是 **fail-closed 兜底被原型链击穿**：兜底还在、还在跑，
+      // 但它比对的不是「这张表有没有这个键」，而是「顺着原型链能不能取到东西」。
+      // 所以修复不能靠在路由层再列一份 type 白名单（那会变成第二份清单 = 两把尺子），
+      // 而是把兜底本身改成自有的键判定（Object.hasOwn）。
+      const prototypeKeys = ['constructor', 'toString', 'valueOf', '__proto__', 'hasOwnProperty'];
+      const observed = [];
+      for (const type of prototypeKeys) {
+        const res = await get(tokens.self, { type });
+        observed.push(`${type}=${res.status}`);
+        // 逐条断言 400，不用「整组一个 toEqual」掩盖是哪一条漏了
+        expect({ type, status: res.status }).toEqual({ type, status: 400 });
+        expect(res.body.errors.errorCode).toBe('VALIDATION_FAILED');
+        expect(res.body.errors.fieldErrors).toEqual([{ field: 'type', message: '无效的目标类型' }]);
+      }
+      expect(observed).toEqual(prototypeKeys.map((t) => `${t}=400`));
+    });
+
+    test('同型普查对照：POST /report 的 targetType 由路由 isIn 拦，原型链成员同样 400', async () => {
+      // 本文件第二张表 REPORT_TARGET_KINDS[targetType]（sensitive.js:211）是**同一个裸下标形状**，
+      // 只是它的前置校验在路由 :89 `body('targetType').isIn(REPORT_TARGET_TYPES)`。
+      // 这条用例把「那道 isIn 确实挡得住原型链成员」变成可复核的事实：validator.isIn 走数组
+      // indexOf（不是对象下标），所以 constructor/__proto__ 都不在集合里 ⇒ 400。
+      // 若哪天有人把 isIn 从链上摘掉，这里会立刻从 400 变 500。
+      for (const targetType of ['constructor', '__proto__', 'hasOwnProperty']) {
+        const res = await post(tokens.self, { targetType, reason: `原型链_${targetType}` });
+        expect({ targetType, status: res.status }).toEqual({ targetType, status: 400 });
+      }
+    });
+
+    test('反向对照：白名单内的三类仍 200、inspection 仍 400（上一条不是恒 400 造的绿）', async () => {
+      for (const type of ['user', 'device', 'alarm']) {
+        const res = await get(tokens.all, { type });
+        expect({ type, status: res.status }).toEqual({ type, status: 200 });
+        expect(Array.isArray(res.body.data.items)).toBe(true);
+      }
+      expect((await get(tokens.all, { type: 'inspection' })).status).toBe(400);
+    });
+
     test('keyword 超过全局入参上限（200）⇒ 400（app.js 的 queryLengthLimit）', async () => {
       const res = await get(tokens.self, { type: 'device', keyword: 'x'.repeat(201) });
       expect(res.status).toBe(400);

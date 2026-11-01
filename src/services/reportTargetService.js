@@ -77,7 +77,7 @@ const KINDS = {
  * @returns {Promise<Array>} lean 投影文档
  */
 const search = ({ type, filter, keyword, limit }) => {
-  const kind = KINDS[type];
+  const kind = Object.hasOwn(KINDS, type) ? KINDS[type] : null; // 裸下标会取到原型链上的 constructor ⇒ 违反本函数「未知类型返回空集，不抛错」的契约（G-1，2026-11-02；语义见 tests/services/reportTargetServiceKindLookup.test.js）
   if (!kind) return Promise.resolve([]);
 
   const query = { ...filter };

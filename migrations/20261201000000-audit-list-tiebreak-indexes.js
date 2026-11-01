@@ -10,16 +10,21 @@
  *     审计页「分类 + 操作类型」联合筛选（同文件 assembleQuery 的 category+action 组合）。
  *
  * 为什么必须补：旧二键形态的键序（filter,timestamp）与排序键序（timestamp,_id）**不同向**，
- * 索引只能供 filter 这一段，时间与 _id 两段仍要阻塞排序 ⇒ 优化器不用它。N=2000 实测
- * （work/_harness/_r11-probe-explain2.js）：
- *   category 筛选: FETCH filter > IXSCAN(timestamp_-1__id_-1)          n=667 keys=2000 docs=2000
- *   补 _id 后:     FETCH        > IXSCAN(category_1_timestamp_-1__id_-1) n=667 keys=667 docs=667
- *   category+action / riskLevel / success / ip / action 同形状（后两条旧形态还带 SORT 阶段）。
- *   反证：把排序里的 _id 去掉 ⇒ 二键索引立刻被选中（keys=667），症结是排序键序而非缺索引。
+ * 索引只能供 filter 这一段，时间与 _id 两段仍要阻塞排序 ⇒ 优化器干脆不用它。
+ * N=2000 实测（work/_harness/_r12-probe-f2final.js，同一集合同一数据，只换索引族）：
+ *   无 limit（等值块整块读，最能看清代价） category 筛选：
+ *     二键: FETCH filter > IXSCAN(timestamp_-1__id_-1)             keys=2000 n=667
+ *     三键: FETCH        > IXSCAN(category_1_timestamp_-1__id_-1)  keys=667  n=667
+ *   有 limit 20（生产列表形态）：二键下 category/riskLevel/success 走 timestamp_-1__id_-1（按时间
+ *     扫、边扫边过滤，命中密度低时白扫），category+action/action/ip/userId 走各自二键索引但带
+ *     阻塞 SORT 阶段；三键下七条全部命中各自的 __id_-1 索引，SORT 全部消失。
+ *   反证：把排序里的 _id 去掉 ⇒ 二键索引立刻被选中（同一数据、同一 filter），说明症结是
+ *     排序键序而不是「索引不存在」。
  *
- * 写侧成本（同批 20000 条 × 3 轮，work/_harness/_r12-probe-f2e.js）：索引总体积
- * 3056KB → 5264KB（+2208KB / +72%，摊到每条文档约 +38B）；插入耗时中位数 509→524ms（±3% 内，
- * 属计时噪声量级）。取舍：筛选查询的代价随留存期线性增长，写放大是每条文档的常数。
+ * 写侧成本（同批 20000 条 × 3 轮，四轮重复，work/_harness/_r12-probe-f2e.js）：索引总体积
+ * 二键 2844~3144KB → 三键 5684~5880KB（+2640~2892KB / +87%~+102%，摊到每条文档 +45~49B）；
+ * 插入耗时抖动大（中位数 +2%~+31%，同机同数据重复四轮），不作为结论，只把体积当确定成本。
+ * 取舍：筛选查询的代价随留存期线性增长，写放大是每条文档的常数。
  *
  * 为什么必须**替换**旧形态：模型侧改成三键后，旧二键索引（`category_1_timestamp_-1` 等）
  * 就不再被 schema 声明，而 autoIndex 只创建、从不删除 ⇒ 它会永久留在库里变成纯写放大。
@@ -54,7 +59,8 @@ const REPLACE = [
   { field: 'category+action' },
 ].map((entry) => {
   const coll = 'auditlogs';
-  const keys = entry.field === 'category+action' ? { category: 1, action: 1 } : { [entry.field]: 1 };
+  const keys =
+    entry.field === 'category+action' ? { category: 1, action: 1 } : { [entry.field]: 1 };
   const tail = { timestamp: -1, _id: -1 };
   const oldTail = { timestamp: -1 };
   const key = { ...keys, ...tail };
@@ -80,7 +86,8 @@ const listIndexes = async (db, coll) => {
   try {
     return await db.collection(coll).indexes();
   } catch (err) {
-    if (err && (err.codeName === 'NamespaceNotFound' || err.code === 26 || err.code === 48)) return [];
+    if (err && (err.codeName === 'NamespaceNotFound' || err.code === 26 || err.code === 48))
+      return [];
     throw err;
   }
 };
@@ -94,7 +101,8 @@ const keySig = (key) =>
     .map((k) => k + ':' + key[k])
     .join('|');
 
-const sameKey = (actualKey, expectedKey) => !!actualKey && keySig(actualKey) === keySig(expectedKey);
+const sameKey = (actualKey, expectedKey) =>
+  !!actualKey && keySig(actualKey) === keySig(expectedKey);
 
 /**
  * collation 的**缺省值**。mongod 8.0.34 实测：声明过的 collation 在 indexes() 里被展开成全字段，
@@ -207,13 +215,20 @@ module.exports = {
           if (isEquivalentTwin(twin, DECLARED) && ttlSig(twin) === ttlSig(DECLARED)) {
             await collection.dropIndex(twin.name);
             console.log(
-              coll + '.' + twin.name + ' 与声明在 85 判据上等价（key/unique/sparse/partial/collation 全同，' +
+              coll +
+                '.' +
+                twin.name +
+                ' 与声明在 85 判据上等价（key/unique/sparse/partial/collation 全同，' +
                 'hidden 不参与），已删除待按声明名重建：' +
                 specSig(twin)
             );
           } else {
             console.log(
-              coll + '.' + twin.name + ' 与目标同 key 但 spec 有差异，未删除，需人工确认：' + specSig(twin)
+              coll +
+                '.' +
+                twin.name +
+                ' 与目标同 key 但 spec 有差异，未删除，需人工确认：' +
+                specSig(twin)
             );
           }
         }

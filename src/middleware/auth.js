@@ -431,11 +431,6 @@ const mapAuthFailure = (error, res) => {
   return ApiResponse.codeError(res, 'AUTH_PROCESS_FAILED');
 };
 
-/**
- * 可选认证（已移除）：原实现 fail-open（黑名单/加载故障时静默降级为匿名）且全仓零挂载。
- * 若将来需要"公开但可个性化"的接口，请基于 authenticate 提取共享校验函数，并对服务故障回 503。
- */
-
 module.exports = {
   authenticate,
   invalidateUserCache,

@@ -120,7 +120,7 @@ describe('httpOnly Cookie 认证集成', () => {
     await SystemConfig.create({ key: 'allowPublicRegistration', value: true });
     SystemConfig.invalidateRegistrationCache();
 
-    // 注册图形验证码**默认开启**（src/config/index.js:77 / models/SystemConfig.js:208 都读顶层）。
+    // 注册图形验证码**默认开启**（src/config/index.js:115 / models/SystemConfig.js:208 都读顶层）。
     // 本用例测的是「注册成功同样下发两个令牌 cookie」，与验证码前置层无关；
     // 验证码若开着，:288 的 `expect(res.status).toBe(201)` 会被 400 CAPTCHA_INVALID 拦掉。
     // 故显式落库关闭（本文件无 svg-captcha mock，拿不到可用的 captchaText）。
@@ -305,10 +305,12 @@ describe('httpOnly Cookie 认证集成', () => {
     const loginRes = await login();
     const refreshToken = parseSetCookies(loginRes).refresh_token.value;
 
+    // TTL 必须 ≥ 地板（6h，testTokenTtlFloor）：本用例要的是「格式合法但验不过签」，
+    // 1h 在拥挤排队下会先自然过期，于是走成 TokenExpiredError 分支、红的是无关断言。
     const bogusAccess = jwt.sign(
       { userId: 'x', username: 'x', tokenVersion: 0, type: 'access' },
       'wrong-secret-not-the-real-jwt-secret',
-      { expiresIn: '1h' }
+      { expiresIn: '12h' }
     );
     const out = await request(app)
       .post('/api/auth/logout')

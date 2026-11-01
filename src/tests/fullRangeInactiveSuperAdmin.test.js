@@ -111,7 +111,9 @@ describe('全网段名单守卫：停用超管不再等于超管', () => {
     request(app)
       .post('/api/security/ip-list')
       .set('Authorization', `Bearer ${token}`)
-      .send({ ip: FULL_RANGE, type, reason: 'guard-probe' });
+      // 超管放行也要逐字确认（本轮新增）：缺了它 200 会变成 400，
+      // 后面的「停用后 403」就测不出「生效与否」这件事了
+      .send({ ip: FULL_RANGE, type, reason: 'guard-probe', typedConfirm: FULL_RANGE });
 
   test('前置自证：操作者确实持有内置超管，且请求确实能过权限层（防假绿）', async () => {
     expect(superRole.isBuiltIn).toBe(true);

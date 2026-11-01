@@ -125,3 +125,108 @@ describe('风险前提（改动任一环都必须显式暴露）', () => {
       });
   });
 });
+
+/**
+ * 字段值注入：Canonical / Contact / Policy 必须是**同一把尺**（wellKnownRoutes 的
+ * securityTxtFieldValue）。RFC 9116 的字段值是「一行一字段」——值里出现换行就等于凭空
+ * 多出一个字段，而这三个值全部来自环境变量，dotenv 又会保留 .env 引号内的真实换行。
+ *
+ * 这里同时钉两件相反的事，缺一条这把尺就会走偏：
+ *   1) 含换行 ⇒ 伪造字段一个都不许出现（含 CR 单独成行与 U+2028 这两种行界）；
+ *   2) 不含换行的正常值 ⇒ **逐字原样**下发（净化不许顺手改写运维配的精确串）。
+ * 第 2 条正是上一组「原样输出」用例守的东西，所以那条用例一个字没改——错的从来不是它，
+ * 而是实现只在 Policy 一处洗了换行。
+ */
+describe('security.txt 字段值注入（Canonical / Contact / Policy 同一把尺）', () => {
+  const VARS = [
+    'SECURITY_TXT_CANONICAL',
+    'ALLOWED_HOSTS',
+    'SECURITY_CONTACT_EMAIL',
+    'SECURITY_POLICY_URL',
+  ];
+  let snapshot;
+  beforeEach(() => {
+    snapshot = VARS.map((k) => [k, process.env[k]]);
+    for (const k of VARS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const [k, v] of snapshot) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  const fakeReq = () => ({ protocol: 'http', get: () => 'evil.example' });
+  const fieldLines = (text, name) =>
+    text.split(/\r?\n/).filter((l) => l.startsWith(name + ': '));
+
+  test('Canonical：值里含换行 ⇒ 只下发首个逻辑行，伪造的 Contact 不许出现', () => {
+    process.env.SECURITY_TXT_CANONICAL =
+      'https://psirt.example.com/.well-known/security.txt\nContact: mailto:attacker@evil.example';
+    const text = buildSecurityTxt(fakeReq());
+    expect(text).not.toMatch(/attacker\.evil\.example/);
+    expect(fieldLines(text, 'Contact')).toEqual(['Contact: mailto:security@example.com']);
+    expect(fieldLines(text, 'Canonical')).toEqual([
+      'Canonical: https://psirt.example.com/.well-known/security.txt',
+    ]);
+  });
+
+  test('Canonical：CR 单独成行、U+2028 也是行界（不只是 LF）', () => {
+    process.env.SECURITY_TXT_CANONICAL =
+      'https://a.example/c\rPolicy: https://evil.example/p';
+    expect(buildSecurityTxt(fakeReq())).not.toMatch(/evil\.example/);
+    process.env.SECURITY_TXT_CANONICAL =
+      'https://b.example/c\u2028Policy: https://evil.example/p';
+    const text = buildSecurityTxt(fakeReq());
+    expect(text).not.toMatch(/evil\.example/);
+    expect(fieldLines(text, 'Canonical')).toEqual(['Canonical: https://b.example/c']);
+  });
+
+  test('ALLOWED_HOSTS 首项含换行 ⇒ 与 Canonical 走同一把尺（列表形态不是豁免理由）', () => {
+    process.env.ALLOWED_HOSTS = 'api.example.com\nPolicy: https://evil.example/p';
+    const text = buildSecurityTxt(fakeReq());
+    expect(text).not.toMatch(/evil\.example/);
+    expect(fieldLines(text, 'Canonical')).toEqual([
+      'Canonical: http://api.example.com/.well-known/security.txt',
+    ]);
+  });
+
+  test('Contact：值里含换行 ⇒ 伪造字段不许出现，且每个字段行都只有一条', async () => {
+    process.env.SECURITY_CONTACT_EMAIL =
+      'sec@fire.example\nExpires: 1970-01-01T00:00:00.000Z';
+    const { res } = await canonicalLine();
+    expect(res.text).not.toMatch(/1970-01-01T00:00:00\.000Z/);
+    expect(fieldLines(res.text, 'Contact')).toEqual(['Contact: mailto:sec@fire.example']);
+    expect(fieldLines(res.text, 'Expires')).toHaveLength(1);
+  });
+
+  test('Policy：与另外两处同一把尺（曾经只有它洗了换行，这条把三处拉平）', () => {
+    process.env.SECURITY_POLICY_URL =
+      'https://policy.example/a\nContact: mailto:attacker@evil.example';
+    const text = buildSecurityTxt(fakeReq());
+    expect(text).not.toMatch(/attacker\.evil\.example/);
+    expect(fieldLines(text, 'Policy')).toEqual(['Policy: https://policy.example/a']);
+    expect(fieldLines(text, 'Contact')).toEqual(['Contact: mailto:security@example.com']);
+  });
+
+  test('反向对照：不含换行的正常值逐字原样下发（净化没把正常值吃掉）', () => {
+    process.env.SECURITY_TXT_CANONICAL = 'https://psirt.example.com/.well-known/security.txt';
+    process.env.SECURITY_CONTACT_EMAIL = 'sec@fire.example';
+    process.env.SECURITY_POLICY_URL = 'https://policy.example/security-response?lang=zh-Hans';
+    const text = buildSecurityTxt(fakeReq());
+    expect(text).toContain('Contact: mailto:sec@fire.example');
+    expect(text).toContain('Canonical: https://psirt.example.com/.well-known/security.txt');
+    expect(text).toContain('Policy: https://policy.example/security-response?lang=zh-Hans');
+  });
+
+  test('纯空白视为未配置：可选字段整行不输出，必需字段回落默认而不是空值', () => {
+    process.env.SECURITY_TXT_CANONICAL = '   ';
+    process.env.SECURITY_POLICY_URL = ' \t ';
+    process.env.SECURITY_CONTACT_EMAIL = '   ';
+    const text = buildSecurityTxt(fakeReq());
+    expect(fieldLines(text, 'Canonical')).toEqual([]);
+    expect(fieldLines(text, 'Policy')).toEqual([]);
+    expect(fieldLines(text, 'Contact')).toEqual(['Contact: mailto:security@example.com']);
+    expect(text).not.toMatch(/^Contact: *$/m);
+  });
+});

@@ -22,6 +22,7 @@ const get = vi.fn()
 const post = vi.fn()
 const del = vi.fn()
 const confirm = vi.fn()
+const prompt = vi.fn()
 vi.mock('@/utils/api', () => ({
   apiClient: {
     get: (...a) => get(...a),
@@ -36,7 +37,7 @@ vi.mock('element-plus/es/components/message/index.mjs', () => ({
   ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }))
 vi.mock('element-plus/es/components/message-box/index.mjs', () => ({
-  ElMessageBox: { confirm: (...a) => confirm(...a) },
+  ElMessageBox: { confirm: (...a) => confirm(...a), prompt: (...a) => prompt(...a) },
 }))
 
 import IpListView from '@/views/IpListView.vue'
@@ -187,6 +188,7 @@ afterEach(() => {
   post.mockReset()
   del.mockReset()
   confirm.mockReset()
+  prompt.mockReset()
   ElMessage.success.mockReset()
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
@@ -1066,29 +1068,173 @@ describe('IpListView 黑白名单切换按钮', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('白转黑落到**网段**上：必须带上 typedConfirm，否则这条路径 100% 被封段护栏拒', async () => {
-    // 白转黑复用 POST /security/ip-list，而后端对该入口的加黑网段要求打字确认（≥256 主机）。
-    // 切换路径此前只带 ip/type/reason/durationHours ⇒ /24 网段切换必然 400，而
-    // restoreOriginalWhitelist 还会被触发一次多余写（实测两处 false）。判据是"请求体里有没有
-    // 与网段逐字相同的确认串"，不是"有没有弹过确认框"——弹框满足不了护栏。
+  test('白转黑落到**网段**上：先不带 typedConfirm，只有后端明确要确认才重发（两阶段）', async () => {
+    // 白转黑复用 POST /security/ip-list，后端对加黑网段可能要求逐字确认（≥256 主机）。
+    // 判据是**两阶段语义**，不是"最终请求里有没有这个字段"——后者对
+    // 「前端自己 includes('/') 就预先带上」的写法同样成立，而那正是要禁掉的：
+    // 前端自算门槛 = 把后端的 hostCount/normalizeCIDR 口径复制一遍，两份事实，
+    // 当下等价只是巧合（门槛改 /25、或非规范写法导致归一化漂移，就会一边错）。
+    // 故这里锁死：第一次**不带**；后端答 typed_confirmation_required 后第二次才带。
     const row = ipRow({ _id: 'white-net', type: 'white', ip: '203.0.113.0/24', reason: '可信出口' })
     get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
     confirm.mockResolvedValue('confirm')
     del.mockResolvedValue({ data: {} })
-    post.mockResolvedValue({ data: {} })
+    post
+      .mockRejectedValueOnce({
+        response: {
+          data: {
+            errors: {
+              errorCode: 'IP_SEGMENT_WRITE_REFUSED',
+              reason: 'typed_confirmation_required',
+            },
+          },
+        },
+      })
+      .mockResolvedValue({ data: {} })
+    // 确认串必须由**用户**敲：替用户回填 row.ip 只证明字符串可复制，不证明人看过影响面
+    prompt.mockResolvedValue({ value: '  203.0.113.0/24  ' })
     const c = await boot(1)
 
     click(switchIpBtn(c))
-    await waitFor(() => post.mock.calls.length === 1, { message: '加黑请求' })
-    expect(post.mock.calls[0][1]).toMatchObject({
+    await waitFor(() => post.mock.calls.length === 2, { message: '被拒后的第二次提交' })
+    // 第一次：与用户此前是否确认过无关，请求体里不该出现"我确认了"的字段
+    expect(post.mock.calls[0][1]).toMatchObject({ ip: '203.0.113.0/24', type: 'black' })
+    expect(post.mock.calls[0][1]).not.toHaveProperty('typedConfirm')
+    // 弹出输入框让用户敲，而不是静默重发
+    expect(prompt).toHaveBeenCalledTimes(1)
+    // 第二次：带上用户敲的串（首尾空白由前端 trim，与后端 trim 口径一致）
+    expect(post.mock.calls[1][1]).toMatchObject({
       ip: '203.0.113.0/24',
       type: 'black',
       typedConfirm: '203.0.113.0/24',
     })
-    // 确认串只对网段有意义：单地址切换不许凭空多出这个字段（后端对该字段只做长度校验，
-    // 但多带一个"看起来确认过"的字段会掩盖真正的语义错误）。
-    expect(post.mock.calls[0][1].typedConfirm).toBe('203.0.113.0/24')
     await waitFor(() => ElMessage.success.mock.calls.length === 1, { message: '切换成功' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('切换需要确认时用户点了取消：不重发、白名单照旧补回、不谎报成功', async () => {
+    // 「取不到确认串」与「确认串不对」是两种结局：前者必须当作放弃（走恢复），
+    // 不能退化成"没敲也照样提交"——那等于把逐字确认这一整条判据删掉。
+    const row = ipRow({
+      _id: 'white-net3',
+      type: 'white',
+      ip: '203.0.113.0/24',
+      reason: '可信出口',
+    })
+    get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
+    confirm.mockResolvedValue('confirm')
+    del.mockResolvedValue({ data: {} })
+    prompt.mockRejectedValue('cancel')
+    post.mockImplementation((url, body) =>
+      body?.type === 'black'
+        ? Promise.reject({
+            response: {
+              data: {
+                errors: {
+                  errorCode: 'IP_SEGMENT_WRITE_REFUSED',
+                  reason: 'typed_confirmation_required',
+                },
+              },
+            },
+          })
+        : Promise.resolve({ data: {} })
+    )
+    const c = await boot(1)
+
+    click(switchIpBtn(c))
+    await waitFor(() => post.mock.calls.filter((x) => x[1].type === 'white').length === 1, {
+      message: '取消确认后的白名单恢复',
+    })
+    // 加黑只发了那一次（被拒），取消后不得带任何确认串重发
+    expect(post.mock.calls.filter((x) => x[1].type === 'black')).toHaveLength(1)
+    expect(post.mock.calls.some((x) => 'typedConfirm' in (x[1] || {}))).toBe(false)
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
+  })
+
+  test('切换需要确认时用户敲错：前端拦住不提交，后端不会收到没确认过的写', async () => {
+    // 输入框的 validator 是前端唯一该做的事（取文本），"该不该要确认"仍只由后端说。
+    // 这里钉住：敲错 ⇒ 一次带 typedConfirm 的 POST 都不许发出。
+    const row = ipRow({
+      _id: 'white-net4',
+      type: 'white',
+      ip: '203.0.113.0/24',
+      reason: '可信出口',
+    })
+    get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
+    confirm.mockResolvedValue('confirm')
+    del.mockResolvedValue({ data: {} })
+    // validator 让输入框判为不合法 ⇒ ElMessageBox.prompt 以 reject 结束（用户被拦住）
+    prompt.mockImplementation((message, title, opts) => {
+      const bad = '203.0.113.0/25'
+      const ok = opts.inputValidator(bad)
+      expect(ok).toBe('与网段不一致')
+      expect(opts.inputValidator('203.0.113.0/24')).toBe(true)
+      return Promise.reject('cancel')
+    })
+    post.mockImplementation((url, body) =>
+      body?.type === 'black'
+        ? Promise.reject({
+            response: {
+              data: {
+                errors: {
+                  errorCode: 'IP_SEGMENT_WRITE_REFUSED',
+                  reason: 'typed_confirmation_required',
+                },
+              },
+            },
+          })
+        : Promise.resolve({ data: {} })
+    )
+    const c = await boot(1)
+
+    click(switchIpBtn(c))
+    await waitFor(() => post.mock.calls.filter((x) => x[1].type === 'white').length === 1, {
+      message: '敲错后的白名单恢复',
+    })
+    expect(post.mock.calls.filter((x) => x[1].type === 'black')).toHaveLength(1)
+    expect(post.mock.calls.some((x) => 'typedConfirm' in (x[1] || {}))).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('白转黑被指判据类原因拒（operator_inside）：分档说清原因，且白名单条目必须被补回', async () => {
+    // 切换路径的失败态必须分档：operator_inside（你自己在里面）与 live_traffic_inside
+    // （这栋楼还在用）的下一步动作完全不同，笼统一句「切换失败」等于让运维猜，
+    // 而猜错的方向是把自己锁在门外。
+    const row = ipRow({ _id: 'white-net2', type: 'white', ip: '127.0.0.0/8', reason: '可信出口' })
+    get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
+    confirm.mockResolvedValue('confirm')
+    del.mockResolvedValue({ data: {} })
+    // 只让**加黑**那条被拒：恢复白名单的 POST 必须成功，否则测的是"恢复也失败"那条分支
+    post.mockImplementation((url, body) =>
+      body?.type === 'black'
+        ? Promise.reject({
+            response: {
+              data: {
+                errors: { errorCode: 'IP_SEGMENT_WRITE_REFUSED', reason: 'operator_inside' },
+              },
+            },
+          })
+        : Promise.resolve({ data: {} })
+    )
+    const c = await boot(1)
+
+    click(switchIpBtn(c))
+    await waitFor(() => ElMessage.warning.mock.calls.length === 1, { message: '分档提示' })
+    expect(ElMessage.warning).toHaveBeenCalledWith(
+      '拒绝：这个网段罩住了你自己，封下去会把你也挡在门外'
+    )
+    // 判据类原因不会因"再带个确认串"而通过 ⇒ 不该重发第二次加黑。
+    expect(post.mock.calls.filter((c) => c[1].type === 'black').length).toBe(1)
+    // **白名单必须恢复**：进入加黑之前已经 DELETE 掉了白名单条目（del 调用见下），
+    // 所以此刻该 IP 两边名单都不在。按拒绝原因跳过恢复 = 静默丢条目：用户看到
+    // 「拒绝：这个网段罩住了你自己」以为什么都没变，实际放行规则已经没了。
+    expect(del).toHaveBeenCalledTimes(1)
+    expect(post.mock.calls.filter((c) => c[1].type === 'white').length).toBe(1)
+    expect(post.mock.calls.at(-1)[1]).toMatchObject({ ip: '127.0.0.0/8', type: 'white' })
+    // 拒绝原因分档到位，且**不叠加**笼统一句「切换失败」
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled() // 不叠加笼统「切换失败」
     expect(c.errors).toEqual([])
   })
 
@@ -1151,5 +1297,225 @@ describe('IpListView 权限门控（第 34 轮 L13）', () => {
     })
     expect(addIpBtn(c)).toBeUndefined()
     expect(c.findAll('.el-table__body-wrapper .glass-btn--link')).toEqual([])
+  })
+
+  test('确认被拒时把后端的归一化形态（errors.expected）当作输入框提示，而不是让用户反复试', async () => {
+    // 用户敲 "2001:DB8::/64" 会被拒；再照原样敲一遍还是被拒——因为他不知道要敲 "2001:db8::/64"。
+    // 判据：拒绝响应里的 errors.expected 必须落到 placeholder 上（不得自动回填 input 值）。
+    const ip = '2001:DB8::/64'
+    const c = await openList([], { total: 0, perms: ['security:config'] })
+    post
+      .mockRejectedValueOnce({
+        response: {
+          status: 400,
+          data: {
+            errors: {
+              errorCode: 'IP_SEGMENT_WRITE_REFUSED',
+              reason: 'typed_confirmation_required',
+              expected: '2001:db8::/64',
+            },
+          },
+        },
+      })
+      .mockResolvedValueOnce({ data: { success: true } })
+
+    await fillAdd(c, ip)
+    click(addIpBtn(c))
+    await waitFor(() => c.findAll('.ip-typed-confirm').length === 1, { message: '确认输入框出现' })
+
+    const box = c.find('.ip-typed-confirm').querySelector('input')
+    expect(box.getAttribute('placeholder')).toBe('2001:db8::/64')
+    // 关键：提示不是回填。输入框的值必须仍为空，否则等于替用户签字
+    expect(box.value).toBe('')
+  })
+})
+
+describe('第22轮：逐字确认的 expected 回带 / no_rescue_path / 删除侧救援路径', () => {
+  const MISMATCH = () => i18n.global.t('ipList.typedConfirmMismatch')
+  const confirmInput = (c) => c.find('.ip-typed-confirm input')
+  const hasConfirmBox = (c) => Boolean(c.find('.ip-typed-confirm'))
+  const segRefusal = (reason, extra = {}) => ({
+    response: { data: { errors: { errorCode: 'IP_SEGMENT_WRITE_REFUSED', reason, ...extra } } },
+  })
+  const warnTexts = () => ElMessage.warning.mock.calls.map((x) => x[0])
+  const errTexts = () => ElMessage.error.mock.calls.map((x) => x[0])
+
+  test('(a1) 回带 expected：占位符=归一化形态；再次被拒后输入框清空（不静默重发旧错串）', async () => {
+    const c = await openList([])
+    await fillAdd(c, '2001:DB8::/64', '测试')
+    post.mockRejectedValueOnce(
+      segRefusal('typed_confirmation_required', { expected: '2001:db8::/64' })
+    )
+    click(addIpBtn(c))
+    await waitFor(() => hasConfirmBox(c), { message: '被拒后亮出确认输入框' })
+    expect(confirmInput(c).getAttribute('placeholder')).toBe('2001:db8::/64')
+    expect(confirmInput(c).value).toBe('')
+
+    // 用户敲了错串再提交：第二次仍被拒 => 旧错串必须被清掉，否则下一次点提交会把它静默重发
+    confirmInput(c).value = '2001:db8::/48'
+    confirmInput(c).dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(4)
+    post.mockRejectedValueOnce(
+      segRefusal('typed_confirmation_required', { expected: '2001:db8::/64' })
+    )
+    click(addIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 2, { message: '第二次提交' })
+    await flush(6)
+    expect(post.mock.calls[1][1].typedConfirm).toBe('2001:db8::/48')
+    expect(confirmInput(c).value).toBe('')
+    expect(warnTexts()).toContain(i18n.global.t('ipList.refusedTypedConfirm'))
+    expect(c.errors).toEqual([])
+  })
+
+  test('(a2) 未回带 expected：占位符回退 i18n 文案，绝不渲染 undefined', async () => {
+    const c = await openList([])
+    await fillAdd(c, '10.0.0.0/24', '测试')
+    post.mockRejectedValueOnce(segRefusal('typed_confirmation_required'))
+    click(addIpBtn(c))
+    await waitFor(() => hasConfirmBox(c), { message: '确认输入框' })
+    const ph = confirmInput(c).getAttribute('placeholder')
+    expect(ph).toBe(i18n.global.t('ipList.typedConfirmPlaceholder'))
+    expect(ph).not.toContain('undefined')
+    expect(ph.length).toBeGreaterThan(0)
+    expect(c.errors).toEqual([])
+  })
+
+  test('(a3) 换成另一个网段：上一个网段的确认态与 expected 提示不得跟着走', async () => {
+    const c = await openList([])
+    await fillAdd(c, '10.0.0.0/24', '测试')
+    post.mockRejectedValueOnce(
+      segRefusal('typed_confirmation_required', { expected: '10.0.0.0/24' })
+    )
+    click(addIpBtn(c))
+    await waitFor(() => hasConfirmBox(c), { message: '确认输入框' })
+    expect(confirmInput(c).getAttribute('placeholder')).toBe('10.0.0.0/24')
+
+    // 用户改主意，填另一个网段并从零提交：旧确认态必须失效
+    await fillAdd(c, '203.0.113.0/24', '测试')
+    post.mockResolvedValueOnce({ data: {} })
+    click(addIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 2, { message: '第二次提交' })
+    expect(post.mock.calls[1][1]).toMatchObject({ ip: '203.0.113.0/24' })
+    expect(post.mock.calls[1][1]).not.toHaveProperty('typedConfirm')
+    expect(hasConfirmBox(c)).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('(b) 非规范写法 2001:DB8::/64：确认框按 expected 提示并可校验通过，第二次带归一化串', async () => {
+    // 后端比对的是 normalizeCIDR 之后的值。若确认框仍按原始 row.ip 提示/校验，
+    // validator 会强制用户敲原始形态、后端又只认归一化形态 —— 这条路径永远敲不对。
+    const row = ipRow({ _id: 'w-v6', type: 'white', ip: '2001:DB8::/64', reason: '可信出口' })
+    get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
+    confirm.mockResolvedValue('confirm')
+    del.mockResolvedValue({ data: {} })
+    let captured = null
+    post
+      .mockRejectedValueOnce(
+        segRefusal('typed_confirmation_required', { expected: '2001:db8::/64' })
+      )
+      .mockResolvedValue({ data: {} })
+    prompt.mockImplementation((message, title, opts) => {
+      captured = { message, title, opts }
+      return Promise.resolve({ value: '2001:db8::/64' })
+    })
+    const c = await boot(1)
+
+    click(switchIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 2, { message: '带确认串的第二次提交' })
+    expect(captured).toBeTruthy()
+    expect(captured.opts.inputPlaceholder).toBe('2001:db8::/64')
+    expect(captured.message).toContain('2001:db8::/64')
+    expect(captured.message).not.toContain('2001:DB8::/64')
+    // validator 认的必须是后端要比对的那个值
+    expect(captured.opts.inputValidator('2001:DB8::/64')).toBe(MISMATCH())
+    expect(captured.opts.inputValidator('2001:db8::/64')).toBe(true)
+    expect(post.mock.calls[1][1].typedConfirm).toBe('2001:db8::/64')
+    expect(c.errors).toEqual([])
+  })
+
+  test('(b2) 切换路径未回带 expected：确认框回退 row.ip 原文（与新增路径同一判据来源）', async () => {
+    const row = ipRow({ _id: 'w-fb', type: 'white', ip: '203.0.113.0/24', reason: '可信出口' })
+    get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
+    confirm.mockResolvedValue('confirm')
+    del.mockResolvedValue({ data: {} })
+    let captured = null
+    post
+      .mockRejectedValueOnce(segRefusal('typed_confirmation_required'))
+      .mockResolvedValue({ data: {} })
+    prompt.mockImplementation((message, title, opts) => {
+      captured = { message, title, opts }
+      return Promise.resolve({ value: '203.0.113.0/24' })
+    })
+    const c = await boot(1)
+
+    click(switchIpBtn(c))
+    await waitFor(() => post.mock.calls.length === 2, { message: '第二次提交' })
+    expect(captured.opts.inputPlaceholder).toBe('203.0.113.0/24')
+    expect(captured.opts.inputPlaceholder).not.toContain('undefined')
+    expect(captured.opts.inputValidator('203.0.113.0/24')).toBe(true)
+    expect(captured.opts.inputValidator('203.0.113.0/25')).toBe(MISMATCH())
+    expect(c.errors).toEqual([])
+  })
+
+  test('(c1) 切换遇 no_rescue_path：不弹确认框，文案指向"先给自己加永久白名单"，与缺确认串可区分', async () => {
+    const row = ipRow({ _id: 'w-zero', type: 'white', ip: '0.0.0.0/0', reason: '全网放行' })
+    get.mockImplementation(() => Promise.resolve(listBody([row], { black: 0, white: 1 })))
+    confirm.mockResolvedValue('confirm')
+    del.mockResolvedValue({ data: {} })
+    post.mockImplementation((url, body) =>
+      body?.type === 'black'
+        ? Promise.reject(segRefusal('no_rescue_path', { expected: '0.0.0.0/0' }))
+        : Promise.resolve({ data: {} })
+    )
+    prompt.mockResolvedValue({ value: '0.0.0.0/0' })
+    const c = await boot(1)
+
+    click(switchIpBtn(c))
+    await waitFor(() => post.mock.calls.filter((x) => x[1].type === 'white').length === 1, {
+      message: '白名单恢复',
+    })
+    await flush(6)
+    // 敲多少遍都没用：不许再弹「逐字确认」框
+    expect(prompt).not.toHaveBeenCalled()
+    const noRescue = i18n.global.t('ipList.refusedNoRescuePath')
+    expect(warnTexts()).toContain(noRescue)
+    expect(warnTexts()).not.toContain(i18n.global.t('ipList.refusedTypedConfirm'))
+    expect(warnTexts()).not.toContain(i18n.global.t('security.switchFailed'))
+    expect(noRescue).toContain('白名单')
+    expect(c.errors).toEqual([])
+  })
+
+  test('(c2) 新增遇 no_rescue_path：只亮专属文案，不亮确认输入框（敲一遍不解决问题）', async () => {
+    const c = await openList([])
+    await fillAdd(c, '0.0.0.0/0', '测试')
+    post.mockRejectedValueOnce(segRefusal('no_rescue_path', { expected: '0.0.0.0/0' }))
+    click(addIpBtn(c))
+    await waitFor(() => warnTexts().length >= 1, { message: '拒绝提示' })
+    await flush(6)
+    expect(hasConfirmBox(c)).toBe(false)
+    expect(warnTexts()).toContain(i18n.global.t('ipList.refusedNoRescuePath'))
+    expect(warnTexts()).not.toContain(i18n.global.t('ipList.refusedTypedConfirm'))
+    expect(c.errors).toEqual([])
+  })
+
+  test('(d) 删除侧 403 FULL_RANGE_FORBIDDEN：说清"这是唯一救援路径"，不是泛化删除失败', async () => {
+    const row = ipRow({ _id: 'b-zero', type: 'black', ip: '0.0.0.0/0', reason: '全网封禁' })
+    const c = await openList([row], { black: 1 })
+    confirm.mockResolvedValue('confirm')
+    del.mockRejectedValue({
+      response: {
+        status: 403,
+        data: { errors: { errorCode: 'FULL_RANGE_FORBIDDEN', ip: '0.0.0.0/0' } },
+      },
+    })
+    click(
+      Array.from(trs(c)[0].querySelectorAll('button')).find((b) => b.textContent.includes('移除'))
+    )
+    await waitFor(() => errTexts().length >= 1, { message: '删除失败提示' })
+    await flush(6)
+    expect(errTexts()).toContain(i18n.global.t('ipList.deleteRescueForbidden'))
+    expect(errTexts()).not.toContain(i18n.global.t('messages.deleteFailed'))
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
   })
 })

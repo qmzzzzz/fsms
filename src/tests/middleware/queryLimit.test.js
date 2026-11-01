@@ -53,7 +53,7 @@ describe('queryLengthLimit 中间件', () => {
   });
 
   // 两处拒绝日志的 `url` 字段必须过 redactUrlQuery（同 app.js:352 morgan 的 safe-url、
-  // errorHandler.js:104/111）。本中间件只在"参数可疑"时打日志，而未打码的
+  // errorHandler.js:109/116）。本中间件只在"参数可疑"时打日志，而未打码的
   // req.originalUrl 里正是攻击者可控、且常含凭据的那一段。
   describe('拒绝日志不得落明文凭据', () => {
     const SECRET = 'REAL_TOKEN_9f3a';
@@ -72,7 +72,7 @@ describe('queryLengthLimit 中间件', () => {
     const buildScalarApp = () => {
       const { queryScalarGuard } = require('../../middleware/queryLimit');
       const app = express();
-      // 必须与生产同形：app.js:608 显式把 query parser 设回 'extended'（Express 5 默认
+      // 必须与生产同形：app.js:613 显式把 query parser 设回 'extended'（Express 5 默认
       // 收窄为 simple，会让 `status[$ne]=1` 停在字符串上）。不设这行时本用例是**假绿**
       // ——中间件根本看不到对象形态，实测返回 200。
       app.set('query parser', 'extended');

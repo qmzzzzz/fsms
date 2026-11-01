@@ -641,6 +641,8 @@ export default {
     duration30d: '30 天',
     fullRangeWarning:
       '全网段（{ip}）会命中所有 IP，仅超级管理员可配置；如需限制特定范围请使用更精确的网段',
+    fullRangeDeleteForbidden:
+      '不能删除全网段黑名单（{ip}）：这是唯一的救援路径，删掉之后无人能自行解除封锁',
     blacklist: '黑名单',
     whitelist: '白名单',
     blacklistDesc: '黑名单 IP 将被系统直接拦截，所有请求返回 403',
@@ -687,6 +689,10 @@ export default {
     refusedLiveTraffic: '拒绝：网段内最近还有正常业务流量（消防系统报不上来不可逆）',
     refusedUnionCovers: '拒绝：这条网段与已有黑名单并集后覆盖整个地址族，封下去等于全 IPv4 拒服',
     refusedWhitelistCovers: '拒绝：白名单已覆盖该网段，加到黑名单也不会生效',
+    refusedNoRescuePath:
+      '拒绝：写下去会把你自己也封在门外，且当前没有可用的救援路径——请先把自己的来源 IP 加入**永久**白名单，再回来配置全网段',
+    deleteRescueForbidden:
+      '不能删除：该条是全网段黑名单的唯一救援路径，删掉之后无人能自行解除封锁。请先为自己保留一条永久的白名单放行规则',
     typedConfirmLabel: '输入网段以确认',
     typedConfirmPlaceholder: '逐字照抄上面的网段',
   },
@@ -785,7 +791,8 @@ export default {
     banTypedLabel: '逐字确认网段（该段影响 ≥ 256 个地址）',
     banTypedPlaceholder: '请原样输入：{cidr}',
     banRefusedTypedConfirm: '该网段影响面大，必须逐字输入网段本身才能封禁',
-    banRefusedNoRescuePath: '写下去会把你自己也封在门外，且当前没有可用的救援路径（先把你的来源 IP 加入永久白名单）',
+    banRefusedNoRescuePath:
+      '写下去会把你自己也封在门外，且当前没有可用的救援路径（先把你的来源 IP 加入永久白名单）',
     banRefusedLiveTraffic: '该网段最近还有人正常使用系统（可能是整栋楼的设备），拒绝封段',
     banRefusedUnionCovers: '该段与已有黑名单并集后覆盖整个地址族（等价于全网段），拒绝封禁',
     banDuration24h: '24 小时',

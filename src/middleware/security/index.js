@@ -322,8 +322,7 @@ const fileUploadSecurity = (options = {}) => {
         '请改用受支持的 MIME，或先在 MIME_TO_EXT 里补齐映射。'
     );
   }
-  // 映射后必与 allowedTypes 等长（上面已保证无未映射项），故此处不再 filter(Boolean)：
-  // 那个 filter 正是原先 fail-open 的来源。
+  // 映射后必与 allowedTypes 等长（上面已保证无未映射项），故此处不再 filter(Boolean)。
   const allowedExts = allowedTypes.map((t) => MIME_TO_EXT[t]);
 
   return async (req, res, next) => {

@@ -6,6 +6,7 @@ const { ipKeyGenerator } = rateLimit;
 const { normalizeIP, clientIpForSecurityDecision } = require('../utils/ipUtils');
 const { makeSharedStore } = require('../middleware/rateLimitStore');
 const { redactUrlQuery } = require('../utils/helpers');
+const { setNoStore } = require('../middleware/noStore');
 const openapiSpec = require('../docs/openapi.json');
 
 const swaggerOptions = {
@@ -76,7 +77,7 @@ const docsLimiter = rateLimit({
     } catch (_) {
       /* logger 不可用时静默 */
     }
-    res.status(429).json({
+    setNoStore(res).status(429).json({
       success: false,
       message: '访问过于频繁，请稍后再试',
     });

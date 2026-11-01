@@ -135,6 +135,11 @@ const auditLogSchema = new mongoose.Schema(
     errorMessage: {
       type: String,
     },
+    // 4xx 拒绝原因码（H4）：errorMessage 只有 HTTP 措辞，同一 errorCode 下的细分原因事后不可分辨。
+    // 值取 errors.reason || errors.errorCode，成功响应恒缺席；v5 起参与哈希。
+    refusalReason: {
+      type: String,
+    },
 
     // 网络信息
     ip: {
@@ -295,22 +300,14 @@ auditLogSchema.index({ success: 1, timestamp: -1, _id: -1 });
 auditLogSchema.index({ ip: 1, timestamp: -1, _id: -1 });
 
 /**
- * username 前缀过滤的 collation 口径。
- *
- * 与 `User.USERNAME_COLLATION`（`username_ci` 唯一索引）**同口径**：
- * locale `en` / strength 2 = 忽略大小写与重音。用户名在业务上是大小写不敏感的标识，
- * 审计页搜 `admin` 必须能搜到存量里的 `ADMIN`（本机实测存量确有 1 条 `ADMIN`）。
- * 两处常量由 `src/tests/models/auditUsernameIndex.test.js` 断言深度相等，防漂移。
- *
- * 为何索引必须带 collation：带 collation 的索引**只能**被带同一 collation 的查询命中，
- * 反之亦然。这是明确的代价（查询侧见 `utils/auditQuery.js` 与 `services/auditQueryService.js`），
- * 换来的是前缀过滤从 COLLSCAN 变成索引范围扫描——本机实测（2000 条）keysExamined 2000 → 1144；
- * 而在加这条索引之前（6939 条真实数据），子串 / 前缀 / 带 `i` / 不带 `i` 四种形态
- * **连等值查询都是 COLLSCAN**。
- *
- * 写放大取舍：本文件上方特别在意"审计是写密集集合、避免写放大"，本索引是**明知有写放大
- * 而新增**的一条——审计页的用户名过滤此前是纯 COLLSCAN，代价随留存期线性增长，
- * 而一条两字段索引的写放大是常数。两者不是同一量级，故此处接受。
+ * username 前缀过滤的 collation 口径：与 `User.USERNAME_COLLATION`（`username_ci`）**同口径**——
+ * locale `en` / strength 2 忽略大小写与重音，审计页搜 `admin` 必须搜得到存量 `ADMIN`（本机实测确有 1 条）；
+ * 两处常量由 `src/tests/models/auditUsernameIndex.test.js` 断言深度相等。
+ * 带 collation 的索引**只能**被带同一 collation 的查询命中（反之亦然，查询侧见 `utils/auditQuery.js`、
+ * `services/auditQueryService.js`）：换来前缀过滤从 COLLSCAN 变索引范围扫描，本机实测（2000 条）
+ * keysExamined 2000 → 1144，而加索引前（6939 条真实数据）子串/前缀/带 `i`/不带 `i` 四种形态**连等值都是 COLLSCAN**。
+ * 写放大取舍：本文件上方在意"审计写密集、避免写放大"，本索引是**明知有写放大而新增**的一条——
+ * 用户名过滤此前纯 COLLSCAN、代价随留存期线性增长，两字段索引的写放大是常数，不同量级故接受。
  */
 const AUDIT_USERNAME_COLLATION = Object.freeze({ locale: 'en', strength: 2 });
 auditLogSchema.index(

@@ -569,6 +569,15 @@
         >
           {{ detailDialog.data.errorMessage }}
         </el-descriptions-item>
+        <!-- 4xx 拒绝原因码：errorMessage 只有 HTTP 措辞，同一 errorCode 下的细分原因只在这里 -->
+        <el-descriptions-item
+          v-if="detailDialog.data.refusalReason"
+          :label="$t('auditLog.refusalReason')"
+        >
+          <el-tag size="small" type="danger" effect="plain">
+            {{ detailDialog.data.refusalReason }}
+          </el-tag>
+        </el-descriptions-item>
         <el-descriptions-item :label="$t('auditLog.reqBody')">
           <pre class="json-preview">{{
             formatJson(detailDialog.data.body ?? detailDialog.data.params)

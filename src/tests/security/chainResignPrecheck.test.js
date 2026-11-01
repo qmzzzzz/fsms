@@ -15,7 +15,7 @@
  * 1. 纯函数真值表：四种「能不能宣称完整 × 是否 apply × 是否越权」的组合；
  * 2. 行为判据：篡改链（攻击者已把 hash/prevHash 重算自洽）必须被拒，
  *    且**所有文档一字未动**——只看退出码会被"先写后拒"骗过去；
- * 3. 反向对照：干净链的 --apply 必须真的改写成功（hashVersion 2→4），
+ * 3. 反向对照：干净链的 --apply 必须真的改写成功（hashVersion 2→当前版本），
  *    否则"永远拒绝"也能让第 2 条全绿，而运维脚本也就此废掉。
  *
  * 环境陷阱与同族 hmac 预检用例一致：.env 里有 HMAC_SECRET/MONGODB_URI，
@@ -23,6 +23,7 @@
  * （文件优先于环境变量）。
  */
 
+const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
@@ -36,7 +37,7 @@ const KEY = 'aa'.repeat(32);
 const ACTIONS = ['zzq_a1', 'zzq_a2', 'zzq_a3'];
 const TS = new Date('2026-03-04T05:06:07.000Z');
 
-const { canonicalPayload, computeHash } = require('../../utils/auditChain');
+const { canonicalPayload, computeHash, CURRENT_PAYLOAD_VERSION } = require('../../utils/auditChain');
 const hmacOf = (secret, hash) =>
   crypto.createHmac('sha256', secret).update(hash, 'utf8').digest('hex');
 
@@ -50,7 +51,7 @@ const mine = () => ({ action: { $in: ACTIONS } });
 
 /**
  * 造一条 v2 口径的链（hashVersion=2 是"待升级到当前版本"的真实形态，
- * 也让"有没有被改写"有一个可观测的标记：重签后应为 4）。
+ * 也让"有没有被改写"有一个可观测的标记：重签后应为 CURRENT_PAYLOAD_VERSION）。
  * tamper='selfconsistent' 模拟攻击者：改 action 后把 hash/prevHash 全部重算自洽，
  * 但 hmac 保持原值——他没有密钥。
  */
@@ -210,9 +211,31 @@ describe('resign-audit-chain-v3 的改写前预检', () => {
     expect(r.out).not.toContain('拒绝执行');
     expect(r.code).toBe(0);
     const after = await snapshot();
-    expect(after.every((d) => d.hashVersion === 4)).toBe(true);
-    // 链尾被重建（v4 口径下 hash 必然不同于 v2）
+    // 钉住**当前**版本，不写死数字：升版忘了同步用例会红在这里，而不是红在一个看似对的旧数字上
+    expect(after.every((d) => d.hashVersion === CURRENT_PAYLOAD_VERSION)).toBe(true);
+    // 链尾被重建（当前口径下 hash 必然不同于 v2）
     expect(after[2].hash).not.toBe(before[2].hash);
+  });
+
+  // 判据 4（版本号有人守）：脚本产出的 hashVersion 必须是 CURRENT_PAYLOAD_VERSION，
+  // 且脚本**自己不许写死版本数字**——写死就说明它没跟上常量，升版时不会有任何东西红。
+  // 这条与上面两条的分工：上面测"跑出来的结果对不对"，这里测"脚本有没有把版本号变成常量"。
+  test('resign 脚本按 CURRENT_PAYLOAD_VERSION 走，不写死版本数字', () => {
+    const src = fs.readFileSync(SCRIPT, 'utf8');
+    // 反向对照：写死一个与当前版本不同的数字必须被判红（把下面这条判据改成恒真，本用例仍绿但失去意义）
+    const hardcoded = /(hashVersion\s*=\s*)(\d+)/g;
+    const offenders = [];
+    let m = hardcoded.exec(src);
+    while (m) {
+      offenders.push(Number(m[2]));
+      m = hardcoded.exec(src);
+    }
+    expect(offenders).toEqual([]);
+    // 正向：脚本必须从 auditChain 取常量，且真的用它算 hash 与落版本
+    expect(src).toContain('CURRENT_PAYLOAD_VERSION');
+    expect(src).toMatch(/canonicalPayload\(payload,\s*CURRENT_PAYLOAD_VERSION\)/);
+    // 版本号本身仍由常量定义（不是本用例写死的 4/5），所以升版只需改 auditChainPayload.js
+    expect(typeof CURRENT_PAYLOAD_VERSION).toBe('number');
   });
 
   test('反向对照：越权标志确实放行改写（否则"拒绝"可以是恒真的）', async () => {
@@ -222,7 +245,7 @@ describe('resign-audit-chain-v3 的改写前预检', () => {
     expect(r.out).toContain('越权放行');
     expect(r.code).toBe(0);
     const after = await snapshot();
-    expect(after.every((d) => d.hashVersion === 4)).toBe(true);
+    expect(after.every((d) => d.hashVersion === CURRENT_PAYLOAD_VERSION)).toBe(true);
     expect(after[1].hash).not.toBe(before[1].hash);
   });
 

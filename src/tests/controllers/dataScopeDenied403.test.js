@@ -81,6 +81,7 @@ const DENIED_ENDPOINTS = [
   '/api/security/audit-logs',
   '/api/security/audit-logs/export',
   '/api/security/alerts',
+  '/api/security/stuffing-profile',
   '/api/security/stats',
 ];
 

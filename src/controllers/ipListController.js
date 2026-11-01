@@ -30,6 +30,9 @@ const {
   coveredFamiliesOf,
   guardFullRangeCIDR,
   guardSegmentWrite,
+  guardRescueRemoval,
+  enforceConcurrentUnionGuard,
+  recordFullRangeGrantIfGranted,
 } = require('./ipListSegmentGuards');
 // IP 黑白名单变更属于**安全配置**且业务状态已落库 ⇒ 审计必须先持久化（DB 或审计 WAL）才允许回成功；落库失败时转 WAL 待重放，不允许"回成功但可能零留痕"。
 const { recordDurably } = require('../services/auditOutbox');
@@ -226,6 +229,10 @@ const addIPEntry = asyncHandler(async (req, res) => {
     durationMs,
     source: 'manual',
   });
+  // 写入前那次并集判据在并发下会双双放行（两条互补 /1 = 整族覆盖），落库后按数据库状态复检并回滚；违规时抛 403
+  await enforceConcurrentUnionGuard(req, { normalizedIP, type, entry });
+  // 到这里条目已确实落库且未触发回滚 ⇒ 全网段的允许侧痕迹在此刻才写（写在护栏里会留下未写入的假痕迹）
+  recordFullRangeGrantIfGranted(req);
 
   // L-14：先落白名单、再解除黑名单。反序（先解黑再写白）在写白失败时会留下一个「已解除封禁」的 IP——失败方向是放行（fail-open）。
   // 本序在解除失败时白名单已经生效，运行期白名单优先，重试也是幂等的。
@@ -289,6 +296,15 @@ const removeIPEntry = asyncHandler(async (req, res) => {
   //
   // 判据必须是**并集**而不是单条 bits===0：两条互补的 /1 合起来等价于 /0，逐个删除时每一条都只是半张网，单条判据全都放行。这里只拦「删掉之后
   // 覆盖率下降」的那一步——全覆盖名单里一条冗余 /24 被删掉不会触发，避免误伤。覆盖判定与添加侧共用 cidrCoverage，读的也是同一份生效名单快照。
+  // 删除侧的第二道判据：这条永久白是不是全网段黑名单的唯一救援路径（拆掉它 = 谁都解不开）
+  if (
+    await guardRescueRemoval(req, res, {
+      entry,
+      activeBlackIps: await ipListService.listActiveEntryIps('black'),
+    })
+  )
+    return;
+
   const activeIps = await ipListService.listActiveEntryIps(entry.type);
   const broken = cidrRemovalBreaksFullCoverage(activeIps, entry.ip);
   const coveredFamilies = [broken.ipv4 && 'IPv4', broken.ipv6 && 'IPv6'].filter(Boolean);

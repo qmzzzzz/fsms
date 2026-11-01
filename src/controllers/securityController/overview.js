@@ -202,7 +202,6 @@ const buildComplianceSection = async () => {
       shippingEnabled:
         typeof logger.isShippingEnabled === 'function' ? logger.isShippingEnabled() : false,
       chainTailHash: chainTailHash || null,
-      // 「有没有永久缺失的审计」此前只有测试能读（getStats 无生产读取方）。
       // 合规面板是这些指标唯一该有的地方：任何一项 >0 都意味着有一份需要取证的
       // 完整性缺口（各键的确切含义见下方逐项注释——有的是"已丢"，有的是"会重复"）。
       auditLoss: (() => {

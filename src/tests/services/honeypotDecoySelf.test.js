@@ -57,12 +57,17 @@ const call = (path, options = {}) =>
   });
 
 const mockRes = () => ({
+  headers: {},
   status(code) {
     this.statusCode = code;
     return this;
   },
   json(payload) {
     this.body = payload;
+    return this;
+  },
+  setHeader(k, v) {
+    this.headers[k] = v;
     return this;
   },
 });

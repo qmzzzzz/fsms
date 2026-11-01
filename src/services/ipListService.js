@@ -3,7 +3,6 @@
  *
  * 控制器保留 HTTP 校验、冲突策略与响应编排；名单查询、匹配、写入与
  * 操作者超管判定集中在这里，避免 controllers/ 继续 expansion 模型引用。
- * 名单快照失效仍由模型静态方法内部完成（removeById / blockIP），语义不变。
  */
 'use strict';
 
@@ -49,9 +48,8 @@ const removeEntry = (id, type) => IPBlacklist.removeById(id, type);
  * 取某类型名单当前**仍生效**的条目文本，供「并集是否铺满地址族」判定用。
  *
  * 走模型快照（10s TTL）而不是直查：覆盖判定与管理面运行期匹配必须读同一份口径，
- * 且该判定处在添加路径的请求热路径上。过期条目在快照里可能尚未被惰性清理，
- * 故这里显式按 expiresAt 过滤——已过期的条目早已不参与匹配，不能拿来凑满覆盖。
- * 顺序无关（调用方会做区间排序），返回值只带 ip 字符串，不暴露其余字段。
+ * 且该判定处在添加路径的请求热路径上。过期条目在快照里可能尚未被惰性清理，故显式按
+ * expiresAt 过滤，不拿不参与匹配的条目凑满覆盖。顺序无关（调用方会做区间排序）。
  * @param {'black'|'white'} type
  * @returns {Promise<string[]>}
  */
@@ -61,6 +59,13 @@ async function listActiveEntryIps(type) {
   return entries
     .filter((entry) => entry.ip && (!entry.expiresAt || new Date(entry.expiresAt).getTime() > now))
     .map((entry) => entry.ip);
+}
+
+/** 取**永不过期**（expiresAt 为空）的条目文本：临时的也算生效，但只有永久条目能当救援路径
+ * （临时白 + 永久 /0 = 一小时后就没人能解），与 listActiveEntryIps 各留一份取值。 */
+async function listPermanentEntryIps(type) {
+  const entries = await IPBlacklist.getSnapshot(type);
+  return entries.filter((entry) => entry.ip && !entry.expiresAt).map((entry) => entry.ip);
 }
 
 /**
@@ -94,6 +99,7 @@ module.exports = {
   findEntryById,
   removeEntry,
   listActiveEntryIps,
+  listPermanentEntryIps,
   operatorIsSuperAdmin,
   recordPrivilegeEscalation,
 };

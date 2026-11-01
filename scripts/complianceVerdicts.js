@@ -223,7 +223,9 @@ function alertProbeVerdict({ recordPath } = {}) {
   // 而部署主机上的探针记录常常不在仓库副本里（checkout 可被清理、logs/ 又被 gitignore），
   // 没有这个覆盖口时部署门禁只会给出一个永远修不好的 notReady。
   const file =
-    recordPath || process.env.ALERT_PROBE_RECORD_PATH || path.join(__dirname, '..', 'logs', 'alert-probe.json');
+    recordPath ||
+    process.env.ALERT_PROBE_RECORD_PATH ||
+    path.join(__dirname, '..', 'logs', 'alert-probe.json');
   let record = null;
   try {
     record = JSON.parse(fs.readFileSync(file, 'utf8'));

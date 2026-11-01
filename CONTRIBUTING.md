@@ -4,11 +4,11 @@
 
 ## 1. 环境要求
 
-| 依赖    | 版本                                   | 说明                                                                         |
-| ------- | -------------------------------------- | ---------------------------------------------------------------------------- |
-| Node.js | ≥22.12.0（建议 22，CI 另测 24）        | `package.json` / `web-admin/package.json` 的 `engines` 与 Dockerfile 同口径 |
-| MongoDB | 6.x                                    | 本地需先启动（`net start MongoDB`）                                          |
-| npm     | 随 Node                                | 后端在根目录、前端在 `web-admin/`                                            |
+| 依赖    | 版本                             | 说明                                                                        |
+| ------- | -------------------------------- | --------------------------------------------------------------------------- |
+| Node.js | ≥22.12.0（建议 22，CI 另测 24）  | `package.json` / `web-admin/package.json` 的 `engines` 与 Dockerfile 同口径 |
+| MongoDB | 8.0（镜像钉 8.0.34；6.0 已 EOL） | 本地需先启动（`net start MongoDB`）；升级须逐级 6.0 → 7.0 → 8.0             |
+| npm     | 随 Node                          | 后端在根目录、前端在 `web-admin/`                                           |
 
 ## 2. 本地启动
 
@@ -61,7 +61,7 @@ npm run test:e2e              # HTTP 冒烟（完整启动序列走查）
 - **日志**：结构化字段进 winston meta（`logger.warn('消息', { userId })`），
   不把用户标识拼进消息字符串。
 - **错误处理**：控制器用 `asyncHandler` + `ApiError`；错误码新增须同时补
-  前端 i18n 映射（`web-admin/src/utils/errorCodeI18n.js` 有对账测试）。
+  前端映射（`web-admin/src/utils/api.js` 的 `ERROR_CODE_I18N_MAP`；对账测试 `web-admin/src/tests/utils/errorCodeI18n.test.js`）。
 - **前端**：组件文案走 i18n（禁止中文裸键）；色值走 `--xf-*` 变量；
   会话身份状态只经 `@/store` 的 auth 域，令牌永不进 JS 可读存储。
 - **审计**：新增写路由必须在 `AUDIT_LOG_ACTIONS` 白名单登记动作，
@@ -86,6 +86,51 @@ npm run test:e2e              # HTTP 冒烟（完整启动序列走查）
 - PR 描述包含：**动机 → 方案要点 → 自测清单**（跑过的门禁命令与结果、
   手工验证路径）。涉及界面变化的附截图或录屏。
 - 纯重构必须「行为不变 + 全量测试绿」，不与功能变更混在一个提交。
+
+### 5.1 回滚与备份 ref（硬性规定）
+
+**`refs/backup/*` 只保提交，不保工作区；而工作区才是这里最贵的东西。**
+
+依据（2026-10-30 实测）：当时 `main` 上有 257 个暂存文件 + 113 个未暂存文件 + 9 个未跟踪项，
+全部不在任何提交里；同一时间有并行会话在写同一份仓库（`docker/app-entrypoint.sh`、
+`jest.config.js`、`CHANGELOG.md` 等在数分钟内被改）。这些内容没有任何 git 对象承载——
+一次 `git reset --hard` 就没了，且**不可恢复**（不在 reflog、不在 stash、不在任何 ref）。
+
+硬性规定：
+
+1. **禁止**在本仓库执行 `git reset --hard`、`git checkout -- .`、`git restore .`、
+   `git clean -fdx`。任何形式的「回滚」都不得以丢弃工作区为代价。
+2. 回滚**已提交**内容用 `git revert <range>`（追加反向提交），不靠移动分支指针。
+3. 只想「看/验一下旧状态」：`git switch --detach <ref>` 或
+   `git worktree add ../fsms-old <ref>`，不移动 `main`。
+4. 确需移动分支指针（如历史整理），先做齐三件事，缺一不可：
+   - **两端钉 ref**：`git update-ref refs/backup/<用途>-<yyyymmdd> <sha>`（回滚前后各一个）；
+   - **工作区快照**，且不得碰真索引：
+     ```bash
+     GIT_INDEX_FILE=/tmp/idx-snap git read-tree HEAD
+     GIT_INDEX_FILE=/tmp/idx-snap git add -A          # 含未跟踪新文件
+     TREE=$(GIT_INDEX_FILE=/tmp/idx-snap git write-tree)
+     SNAP=$(git commit-tree "$TREE" -p HEAD -m "snapshot: <说明>")
+     git update-ref refs/backup/worktree-<yyyymmdd> "$SNAP"
+     ```
+     为什么不用 stash：`git stash` 会清空工作区（直接违反第 1 条）；`git stash create`
+     在索引 stat 过期时会直接失败（实测 `Entry … not uptodate. Cannot merge`）。
+     临时索引两条都不碰。
+   - **留指纹自证**：操作前后各取一次 `git diff --cached --binary | sha256sum` 与
+     `git ls-files -s | sha256sum`，两者不变才说明没动到别人的暂存内容。
+5. **reflog 不是备份**：默认 90 天，一次 `git gc --prune=now` 即清空。凡是「回滚之后可能
+   还要回来」的节点，必须有 `refs/backup/*` 兜底。
+6. 并行会话纪律：只 `git add <显式路径>`；**禁止** `git add -A` / `git commit -a`；提交前用
+   `git diff --cached --name-only` 逐条核，确认没把别的会话的暂存项卷进本次提交。
+7. 恢复姿势：
+   ```bash
+   git restore --source=refs/backup/worktree-<yyyymmdd> -- <path>   # 取回单个文件
+   git switch --detach refs/backup/main-post-merge-<yyyymmdd>       # 整棵树回到回滚前
+   ```
+
+现存兜底 ref 用 `git for-each-ref refs/backup` 查看。本仓库按上述规则补了三类：
+`main-pre-merge-<日期>`（回滚前）、`main-post-merge-<日期>`（回滚后）、
+`worktree-<日期>`（工作区快照，含未跟踪文件）。
 
 ## 6. 测试要求
 

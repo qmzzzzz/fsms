@@ -28,6 +28,26 @@ const LINE_COMMENT = /^\s*(\/\/|\/\*|\*)/;
 /** 新文件允许的注释密度上限：低于全仓现状，新代码不得免费入场 */
 const NEW_FILE_MAX = 0.3;
 
+/**
+ * 强制状态声明（第 23 轮）。本脚本**当前不强制**：没有任何 npm script 或 workflow 引用它，
+ * 无参跑只打印总量并恒 exit 0 —— 那条 exit 0 不是"检查通过"，是"没在检查"。
+ *
+ * 这份声明由 src/tests/ci/commentDensityEnforcementStatus.test.js 与事实对账：
+ * 未接线 ⇔ enforced:false；谁把 --check 接进 CI，就必须同批把这个开关翻掉（否则闸判红）。
+ *
+ * 不直接接线的原因：仓库现状 evaluate().regressions / newFilesOverCap 都非空，
+ * 立刻强制会在 CI 里多一个**长期全红**的步骤，红会退化成噪音。
+ */
+const ENFORCEMENT = {
+  enforced: false,
+  rationale:
+    '仓库现状 evaluate().regressions 与 newFilesOverCap 均非空（基线 22290 行 < 实测注释行），' +
+    '现在强制会让该步骤长期全红；先治理回退再接线。',
+  enable:
+    'node scripts/commentDensity.js --check（verdict.ok=false 时 exit 1）接进 .github/workflows，' +
+    '同批把 ENFORCEMENT.enforced 置 true',
+};
+
 /** 收集指定根目录下的 .js 文件（跳过 node_modules / 生成物） */
 function collect(dir, acc = []) {
   let entries;
@@ -157,6 +177,31 @@ function main() {
   const total = totalsOf(files);
   const grand = total.comment + total.code;
 
+  if (process.argv.includes('--check')) {
+    const baseline = readBaseline();
+    if (!baseline) {
+      process.stderr.write('注释密度检查失败：基线文件缺失，无法判定回退（fail-closed）\n');
+      process.exit(1);
+    }
+    const verdict = evaluate(baseline, files);
+    if (!verdict.ok) {
+      const details = [
+        ...verdict.regressions.map((r) => `回归 ${r.file}: ${r.base} → ${r.now}`),
+        ...verdict.newFilesOverCap.map(
+          (r) => `新文件超密度上限 ${r.file}: ${(r.ratio * 100).toFixed(1)}%`
+        ),
+        ...verdict.stale.map((f) => `清单残留 ${f}（文件已删除/改名，需同批更新基线）`),
+        ...(verdict.totalRegressed ? [`总量回归：上限 ${baseline.total.comment} 行`] : []),
+      ];
+      process.stderr.write(`注释密度检查失败：\n  ${details.join('\n  ')}\n`);
+      process.exit(1);
+    }
+    process.stdout.write(
+      `注释密度检查通过：comment=${total.comment} 基线=${baseline.total.comment}\n`
+    );
+    return;
+  }
+
   if (process.argv.includes('--update-baseline')) {
     const current = snapshot(files);
     const baseline = readBaseline();
@@ -208,4 +253,5 @@ module.exports = {
   LINE_COMMENT,
   NEW_FILE_MAX,
   BASELINE_PATH,
+  ENFORCEMENT,
 };

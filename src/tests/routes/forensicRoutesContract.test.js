@@ -56,6 +56,9 @@ describe('取证溯源接口契约（T5/T6）', () => {
       { expiresIn: '24h' }
     );
 
+    // 客户端身份判据只在开着 trust proxy 时才认 XFF（test 环境默认 hops=0 ⇒ req.ip 恒为 socket 对端）。
+    // 8d/8e 要造"取票与确认来自两个不同来源 IP"，必须先把代理拓扑声明成生产形态（反代 1 跳）。
+    process.env.TRUST_PROXY_HOPS = '1';
     const { createApp } = require('../../app');
     app = createApp();
   });
@@ -79,6 +82,11 @@ describe('取证溯源接口契约（T5/T6）', () => {
     request(app)
       .post(BASE + p)
       .set('Authorization', `Bearer ${token}`)
+      .send(b);
+  const postFrom = (p, b, ip) =>
+    request(app)
+      .post(BASE + p)
+      .set({ Authorization: `Bearer ${token}`, 'x-forwarded-for': ip })
       .send(b);
 
   test('1 未鉴权一律 401，且 401 早于参数校验（不泄露端点与字段名）', async () => {
@@ -233,6 +241,80 @@ describe('取证溯源接口契约（T5/T6）', () => {
     expect(hours).toBeLessThan(25);
     // 清理：不给其它用例留下真实黑名单记录
     await IPBlacklist.deleteMany({ ip: '198.51.100.8/30' });
+  });
+
+  test('8d 落库时刻必须复核操作者位置：取票时在段外、确认时在段内 ⇒ operator_inside 且零落库', async () => {
+    // 判据位在**写入时刻**（ip-list 侧一直在写入时刻现取 operatorIp，pool-ban 先前只在取票时刻判一次）。
+    // 不复核的后果：取票→确认之间换个网（或把票交给同事）就能把自己/对方挡在门外，且不需要 /0、不需要并集铺满。
+    const IPBlacklist = require('../../models/IPBlacklist');
+    const HALF = '128.0.0.0/1';
+    const issued = await postFrom('/pool-ban/request', { cidr: HALF, reason: `位置复核 ${stamp}` }, '10.0.0.5');
+    expect(issued.status).toBe(200);
+
+    // 确认时换到 192.0.2.7：它落在 128.0.0.0/1 里（该段覆盖 128.0.0.0–255.255.255.255）
+    const confirmed = await postFrom(
+      '/pool-ban/confirm',
+      { token: issued.body.data.token, durationHours: 1, typedConfirm: HALF },
+      '192.0.2.7'
+    );
+    const rows = await IPBlacklist.find({ ip: HALF }).lean();
+    expect({
+      status: confirmed.status,
+      reason: confirmed.body.errors && confirmed.body.errors.reason,
+      rows: rows.length,
+    }).toEqual({ status: 400, reason: 'operator_inside', rows: 0 });
+
+    // 反向对照：两侧都在段外的段照常落库（判据不是恒拒）
+    const CIDR = '203.0.113.0/24';
+    const ok = await postFrom('/pool-ban/request', { cidr: CIDR, reason: `对照 ${stamp}` }, '192.0.2.7');
+    const okConfirm = await postFrom(
+      '/pool-ban/confirm',
+      { token: ok.body.data.token, durationHours: 1, typedConfirm: CIDR },
+      '192.0.2.7'
+    );
+    const okRows = await IPBlacklist.find({ ip: CIDR }).lean();
+    expect({ status: okConfirm.status, rows: okRows.length }).toEqual({ status: 200, rows: 1 });
+    await IPBlacklist.deleteMany({ ip: { $in: [HALF, CIDR] } });
+  });
+
+  test('8e 并集复核拒绝必须留 critical 痕迹：AuditLog 增量 = 1（不是"函数被调用过"）', async () => {
+    const IPBlacklist = require('../../models/IPBlacklist');
+    const AuditLog = require('../../models/AuditLog');
+    const V6 = ['::/1', '8000::/1'];
+    const a = await postFrom('/pool-ban/request', { cidr: V6[0], reason: `痕迹甲 ${stamp}` }, '192.0.2.7');
+    const b = await postFrom('/pool-ban/request', { cidr: V6[1], reason: `痕迹乙 ${stamp}` }, '192.0.2.7');
+    expect([a.status, b.status]).toEqual([200, 200]);
+    // 两种时刻共用一个可对账的事件：写入前拦下（prewrite）与写完才发现并发补齐（rollback）
+    const filter = { riskFactors: { $in: ['full_range_cidr_pool_ban_union_prewrite', 'full_range_cidr_pool_ban_union_rollback'] } };
+    const first = await postFrom('/pool-ban/confirm', { token: a.body.data.token, durationHours: 1, typedConfirm: V6[0] }, '192.0.2.7');
+    expect(first.status).toBe(200);
+    const before = await AuditLog.countDocuments(filter); // 正常落库不留痕：这条同时是"不是恒记"的对照
+    const rolled = await postFrom('/pool-ban/confirm', { token: b.body.data.token, durationHours: 1, typedConfirm: V6[1] }, '192.0.2.7');
+    const after = await AuditLog.countDocuments(filter);
+    const doc = await AuditLog.findOne(filter).sort({ _id: -1 }).lean();
+    // 判据是**增量**而不是"函数被调用过"：写失败被静默吞掉时增量会是 0，这条就会红
+    expect({
+      status: rolled.status,
+      reason: rolled.body.errors && rolled.body.errors.reason,
+      before,
+      delta: after - before,
+      riskLevel: doc && doc.riskLevel,
+      action: doc && doc.action,
+      success: doc && doc.success,
+      factor: doc && doc.riskFactors && doc.riskFactors[0],
+      rolledBack: doc && doc.body && doc.body.rolledBack,
+    }).toEqual({
+      status: 400,
+      reason: 'union_covers_family',
+      before: 0,
+      delta: 1,
+      riskLevel: 'critical',
+      action: 'privilege_escalation',
+      success: false,
+      factor: 'full_range_cidr_pool_ban_union_prewrite',
+      rolledBack: 0,
+    });
+    await IPBlacklist.deleteMany({ ip: { $in: V6 } });
   });
 
   test('9 无导出密钥时拒绝，不产出未签名包', async () => {

@@ -396,7 +396,6 @@ async function revokeTokensOnLogout({
 } = {}) {
   // 属主预检（F-100 的另一半）：任何一枚被出示的 refresh 串若不是当前操作者的，
   // 整次登出失败，且**不做任何吊销**——见 errorCodes.LOGOUT_REFRESH_FOREIGN 的注释。
-  // 旧实现不判属主：拿到他人 refresh 串即可代为吊销（会话 DoS），接口还回 200。
   // 预检必须走在任何 blacklistToken 之前：部分成功会让"登出"处于说不清的状态。
   const refreshCandidates = [...new Set([refreshToken, ...extraRefreshTokens].filter(Boolean))];
   if (refreshCandidates.some((t) => isForeignRefreshToken(t, userId))) {

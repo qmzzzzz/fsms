@@ -44,9 +44,7 @@ const stripComments = (src) => {
 describe('画像派生字段的写入面：两个蜜罐入口都带、且落进既有 body', () => {
   test('静态：login.js 的两处蜜罐/哨兵调用都传了 credentialShape（注释不算）', () => {
     const code = stripComments(readSrc('src/services/authService/login.js'));
-    const passes = code
-      .split(/\r?\n/)
-      .filter((line) => /credentialShape:/.test(line));
+    const passes = code.split(/\r?\n/).filter((line) => /credentialShape:/.test(line));
     expect(passes).toHaveLength(2); // 两个入口各一次：少一处 = 那类行永远缺派生字段
     for (const line of passes) {
       expect(line).toMatch(/credentialShape:\s*credentialShapeOf\(password\)/); // 传的是派生函数的结果，不是随手一个对象
@@ -57,7 +55,9 @@ describe('画像派生字段的写入面：两个蜜罐入口都带、且落进�
     const canary = stripComments(readSrc('src/services/canaryWatch.js'));
     const honeypot = stripComments(readSrc('src/services/honeypotWatch.js'));
     expect(canary).toMatch(/body: credentialShape \? \{ canary, credentialShape \} : \{ canary \}/);
-    expect(honeypot).toMatch(/body: credentialShape \? \{ honeypot, credentialShape \} : \{ honeypot \}/);
+    expect(honeypot).toMatch(
+      /body: credentialShape \? \{ honeypot, credentialShape \} : \{ honeypot \}/
+    );
     // 写入面不新增：两个文件里 create 的**条数**是本轮改动前后不变的常量，加一处就红。
     // canaryWatch 只有幽灵名一处；honeypotWatch 三处（诱饵登录 / HTTP 陷阱探测 / WS 探测），
     // 后者是既有面，本轮一个字都没动。

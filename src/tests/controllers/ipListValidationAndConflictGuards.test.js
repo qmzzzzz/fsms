@@ -148,10 +148,13 @@ describe('ipListController 分支补齐', () => {
     // 白名单优先级更高，挂 ipWhitelisted 后 API 才能继续触达控制器分支。
     // 直接经模型层落库（同步名单快照），不依赖 app 实例，且必须先于
     // 任何全网段黑名单条目存在。
+    // durationMs=0（永久）不可省：救援路径判据要求覆盖操作者的白名单**永不过期**，
+    // 缺省 1 小时的临时白不算救援路径（否则一小时后二次自锁）——本用例的 /0 前置会因此被拒。
     const loopbackWhite = await IPBlacklist.blockIP('127.0.0.0/8', {
       type: 'white',
       reason: '分支补齐-回环豁免前置',
       source: 'manual',
+      durationMs: 0,
     });
     if (loopbackWhite?._id) createdIds.push(loopbackWhite._id);
 
@@ -399,7 +402,13 @@ describe('ipListController 分支补齐', () => {
     const full = await request(app)
       .post('/api/security/ip-list')
       .set('Authorization', `Bearer ${superToken}`)
-      .send({ ip: '0.0.0.0/0', type: 'black', reason: '分支补齐-全网段前置' });
+      // 超管也要逐字确认（guardFullRangeCIDR）：这条断言是新增前置，不是放宽
+      .send({
+        ip: '0.0.0.0/0',
+        type: 'black',
+        reason: '分支补齐-全网段前置',
+        typedConfirm: '0.0.0.0/0',
+      });
     // 实测 200（同上前置）
     expect(full.status).toBe(200);
     const fullId = full.body?.data?._id || full.body?.data?.id;
@@ -446,7 +455,8 @@ describe('ipListController 分支补齐', () => {
       const res = await request(app)
         .post('/api/security/ip-list')
         .set('Authorization', `Bearer ${superToken}`)
-        .send({ ip, type: 'white', reason: '分支补齐-分片删除前置' });
+        // 铺满的那一条（第二条）会被要求逐字确认；不铺满时后端不看这个字段，故统一带上
+        .send({ ip, type: 'white', reason: '分支补齐-分片删除前置', typedConfirm: ip });
       expect(res.status).toBe(200);
       ids.push(res.body?.data?._id);
     }
@@ -504,6 +514,8 @@ describe('ipListController 分支补齐', () => {
     // /0 已铺满，再挂一条 /1 只是冗余。删除 /1 不会降低覆盖率 ⇒ 非超管应放行。
     const ids = [];
     try {
+      // 两条都要确认串：/0 之后这条 /1 是冗余的，但判据是「并集铺满」——
+      // 冗余与否由 DB 里的存量决定，前端与控制器都不该自己算（那会成为第二份事实）
       for (const [ip, reason] of [
         ['0.0.0.0/0', '分支补齐-全覆盖前置'],
         ['0.0.0.0/1', '分支补齐-冗余前置'],
@@ -511,7 +523,7 @@ describe('ipListController 分支补齐', () => {
         const res = await request(app)
           .post('/api/security/ip-list')
           .set('Authorization', `Bearer ${superToken}`)
-          .send({ ip, type: 'white', reason });
+          .send({ ip, type: 'white', reason, typedConfirm: ip });
         expect(res.status).toBe(200);
         ids.push(res.body?.data?._id);
       }

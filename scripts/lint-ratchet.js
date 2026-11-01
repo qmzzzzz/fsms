@@ -82,7 +82,18 @@ const readBaseline = (strict = true) => {
   // 基线文件允许人工编辑，不能因一个字节卡死整条门禁
   if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // __lineCounts 是旁路记账键，不是"含 warn 的文件"：留在账本里会让 diffBaseline 与
+    // 零命中守卫把它当成一个文件。行数地板原样挂在结果上，供 main() 单独比对。
+    if (parsed && typeof parsed.__lineCounts === 'object') {
+      Object.defineProperty(parsed, '__lineCounts', {
+        value: parsed.__lineCounts,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      });
+    }
+    return parsed;
   } catch (err) {
     // 收紧模式遇损坏基线直接重写修复；检查模式必须 fail-loud
     if (!strict) return null;
@@ -91,12 +102,19 @@ const readBaseline = (strict = true) => {
   }
 };
 
-const writeBaseline = (baseline) => {
+const writeBaseline = (baseline, lineCounts) => {
   // 键排序保证 diff 稳定（git 评审友好）
   const sorted = {};
   for (const file of Object.keys(baseline).sort()) {
     sorted[file] = Object.fromEntries(
       Object.entries(baseline[file]).sort(([a], [b]) => a.localeCompare(b))
+    );
+  }
+  // __lineCounts：max-lines 的真实行数地板。ESLint 单文件单规则只发 1 条诊断，
+  // 基线里的 "max-lines": 1 无法表达"已经 912 行"，行数在这里单独记账。
+  if (lineCounts && Object.keys(lineCounts).length > 0) {
+    sorted.__lineCounts = Object.fromEntries(
+      Object.entries(lineCounts).sort(([a], [b]) => a.localeCompare(b))
     );
   }
   fs.writeFileSync(BASELINE_PATH, `${JSON.stringify(sorted, null, 2)}\n`, 'utf8');
@@ -130,6 +148,67 @@ const aggregateWarnCounts = (results) => {
     }
   }
   return { current, errorTotal };
+};
+
+/**
+ * 实测每个文件的**真实代码行数**（跳过空行与纯注释行，与 max-lines 的 skip 选项同口径）
+ *
+ * 为什么需要这一层：ESLint 对单个文件的单条规则最多只发 1 条诊断，所以
+ * `{"max-lines": 1}` 这种基线值只能表达"超了"，无法表达"超了多少"。实测
+ * `src/utils/errorCodes.js` 912 行、`src/docs/generate.js` 1406 行，两者都早已
+ * 越过 300 行上限却仍显示为 1——再涨 500 行也不会红（基数盲）。
+ * 故对 `max-lines` 这一维额外记录真实行数：基线存 lineCounts，实测超基线即回退。
+ * @param {string[]} files 仓库相对路径
+ * @returns {Object<string, number>} 文件 -> 代码行数
+ */
+const measureCodeLines = (files) => {
+  const counts = {};
+  for (const rel of files) {
+    const abs = path.join(repoRoot, rel);
+    if (!fs.existsSync(abs)) continue;
+    counts[rel] = fs
+      .readFileSync(abs, 'utf8')
+      .split(/\r?\n/)
+      .filter((line) => line.trim() && !/^\s*(\/\/|\/\*|\*)/.test(line)).length;
+  }
+  return counts;
+};
+
+/**
+ * 真实代码行数的回退检查（max-lines 维度的基数盲补丁）。
+ *
+ * 单列成函数是为了让 main() 的圈复杂度不因这条旁路判据越过 eslint 上限——
+ * 与 computeChainVerdict 拆出 hashFailure 判据同一个理由。
+ * 该文件已不再超 300 行时 now 为 undefined（不再有 max-lines warn），属改善，
+ * 交由 stale/improvements 流程处理，不在此报回退。
+ *
+ * 两种「缺失」语义**相反**，必须分开处理（原实现把它们一起跳过了）：
+ *   ① 文件不在基线里（新债）：由 diffBaseline 的「基线无此项 -> 1」负责，
+ *      此刻还没有任何地板可比，**不是**这里的回退；
+ *   ② 基线里记着该文件的 max-lines 债、却没有对应行数地板（单键被删 / 整块
+ *      __lineCounts 被删）：该文件的行数从此不与任何数字比对 ⇒ 行数维度对它
+ *      永久关闭，等于账本被掏空，必须判回退。
+ * @param {Object<string, number>|undefined} was 基线行数地板
+ * @param {Object<string, number>} now 实测行数
+ * @param {Object} baseline 基线 warn 计数（文件 -> 规则 -> 计数），用于识别 ②
+ * @returns {string[]} 回退描述
+ */
+const findLineCountRegressions = (was, now, baseline) => {
+  const out = [];
+  const floors = was || {};
+  for (const [file, before] of Object.entries(floors)) {
+    const after = now[file];
+    if (after === undefined) continue; // 债已消化，交给 stale/improvements
+    if (after > before) out.push(`${file} [max-lines 行数] ${before} -> ${after}`);
+  }
+  // ② 地板缺失：基线认账（有 max-lines 债）却没留下数字。删键与删整块都落到这里，
+  //   因为 floors 为空/缺项时上面的循环一次也不会命中该文件。
+  for (const [file, measured] of Object.entries(now)) {
+    if (floors[file] !== undefined) continue; // 有地板，上面已判过
+    if (!baseline || !baseline[file] || !baseline[file]['max-lines']) continue; // ① 新债/无此债
+    out.push(`${file} [max-lines 行数] 地板缺失（基线记 max-lines 债却无行数，实测 ${measured}）`);
+  }
+  return out;
 };
 
 /**
@@ -209,7 +288,7 @@ function findBaselineIncreases(before, current) {
  *
  * @param {Object} current 当前实测（文件 -> 规则 -> warn 计数）
  */
-function updateBaseline(current) {
+function updateBaseline(current, lineCounts) {
   const before = readBaseline(false);
   if (!before) {
     // 「文件不存在」与「文件存在但解析不了」必须分开处理。
@@ -228,7 +307,7 @@ function updateBaseline(current) {
       );
       process.exit(1);
     }
-    writeBaseline(current);
+    writeBaseline(current, lineCounts);
     console.log(
       `[lint-ratchet] 基线文件不存在，已按当前实测建立：${Object.keys(current).length} 个含 warn 文件。`
     );
@@ -244,7 +323,7 @@ function updateBaseline(current) {
     console.error('              eslint.ratchet.json 并让评审在 diff 里看到它。');
     process.exit(1);
   }
-  writeBaseline(current);
+  writeBaseline(current, lineCounts);
   const beforeFiles = Object.keys(before).length;
   const afterFiles = Object.keys(current).length;
   console.log(`[lint-ratchet] 基线已更新：${beforeFiles} -> ${afterFiles} 个含 warn 文件。`);
@@ -258,15 +337,27 @@ const main = async () => {
   // ── 1. 跑 lint，聚合每个文件按规则维度的 warn 计数与 error 总数 ──
   const { current, errorTotal } = aggregateWarnCounts(await runLint());
 
+  // max-lines 的计数天然是 0/1（ESLint 单文件单规则只发 1 条），故对含该规则的文件
+  // 另测**真实代码行数**并写进基线：否则 912 行的文件与 300 行的文件在基线上长得一样，
+  // 再涨 500 行也不红。行数只在"该文件本来就有 max-lines 债"时记录，避免把行数
+  // 变成第二个需要维护的全量清单。
+  const maxLinesFiles = Object.entries(current)
+    .filter(([, rules]) => rules['max-lines'])
+    .map(([file]) => file);
+  const lineCounts = measureCodeLines(maxLinesFiles);
+
   if (errorTotal > 0) {
     console.error(`[lint-ratchet] 检测到 ${errorTotal} 个 error 级违例——error 不属棘轮范畴，`);
     console.error('                请先修复（npm run lint 应保持 0 error）。');
+    // 短路本身是刻意的（error 必须最先修），但"棘轮清单本轮没打印"必须说出来：
+    // 否则读者会把"没有棘轮输出"读成"没有棘轮回退"（第 23 轮实测的误读场景）。
+    console.error('                本轮**棘轮比对已跳过**：下面的回退清单没有计算，修完 error 后请重跑本命令。');
     process.exit(1);
   }
 
   // ── 2. 与基线比对 ──
   if (UPDATE_MODE) {
-    updateBaseline(current);
+    updateBaseline(current, lineCounts);
     return;
   }
 
@@ -278,6 +369,8 @@ const main = async () => {
   }
 
   const { regressions, improvements, stale } = diffBaseline(baseline, current);
+
+  regressions.push(...findLineCountRegressions(baseline.__lineCounts, lineCounts, baseline));
 
   // ── 3. 输出与退出码 ──
   if (improvements.length > 0) {
@@ -332,6 +425,7 @@ module.exports = {
   aggregateWarnCounts,
   diffBaseline,
   findBaselineIncreases,
+  findLineCountRegressions,
   toRepoRelative,
   // 导出供门禁自检比对 `npm run lint` 的目标集（漏一个目录就是一条旁路）
   LINT_TARGETS,

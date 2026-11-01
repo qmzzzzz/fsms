@@ -10,7 +10,10 @@ const ipPoolBan = require('../services/ipPoolBan');
 const forensicExport = require('../services/forensicExport');
 const forensicCapture = require('../services/forensicCapture');
 const forensicManifest = require('../services/forensicManifest');
-const { clientIpForSecurityDecision, normalizeIP } = require('../utils/ipUtils');
+const ipListService = require('../services/ipListService');
+const { clientIpForSecurityDecision, normalizeIP, auditClientAddress } = require('../utils/ipUtils');
+const { auditPath } = require('../utils/auditMeta');
+const { CODES: REFUSAL } = require('../constants/banRefusalReason');
 
 const MAX_WINDOW_HOURS = 720;
 
@@ -103,6 +106,28 @@ const requestPoolBan = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, result, '待确认');
 });
 
+// 并集复核有两个时刻：写入前先判（rolledBack=0）与"写完才发现并发补齐"（rolledBack>0）。
+// 两者都要留痕、不能只留 logger.warn；函数与档位跟同型护栏 enforceConcurrentUnionGuard 一致。
+const tracePoolBanUnionRollback = async (req, result) => {
+  if (result.reason !== REFUSAL.union_covers_family) return;
+  const rolledBack = result.rolledBack || 0;
+  await ipListService.recordPrivilegeEscalation({
+    action: 'privilege_escalation',
+    category: 'security',
+    userId: req.user.userId,
+    username: req.user.username,
+    method: req.method,
+    path: auditPath(req),
+    ...auditClientAddress(req),
+    userAgent: req.get('user-agent'),
+    body: { cidr: result.cidr, rolledBack, rolledBackIds: result.rolledBackIds || [] },
+    success: false,
+    riskLevel: 'critical',
+    riskFactors: [rolledBack ? 'full_range_cidr_pool_ban_union_rollback' : 'full_range_cidr_pool_ban_union_prewrite'],
+    reason: `确认 ${result.cidr} 时黑名单并集覆盖地址族（${rolledBack ? '已回滚本次写入' : '写入前拦下'}）`,
+  });
+};
+
 /** 第二步：持票落库。票据一次性，重放同一张票不生效 */
 const confirmPoolBan = asyncHandler(async (req, res) => {
   const raw = req.body.durationHours;
@@ -120,8 +145,11 @@ const confirmPoolBan = asyncHandler(async (req, res) => {
     typedConfirm: req.body.typedConfirm,
     durationMs,
     permanent,
+    // 落库时刻的操作者位置：由与拦截中间件同一把尺取（不读 req.ip —— 开着 trust proxy 时它由请求头决定）
+    operatorIp: normalizeIP(clientIpForSecurityDecision(req)),
   });
   if (!result.ok) {
+    await tracePoolBanUnionRollback(req, result);
     return ApiResponse.codeError(res, 'FORENSIC_POOL_BAN_REFUSED', {
       params: { reason: result.reason },
     });

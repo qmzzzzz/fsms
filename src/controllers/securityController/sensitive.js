@@ -318,9 +318,12 @@ const listReportTargets = asyncHandler(async (req, res) => {
     });
   }
 
-  const kind = REPORT_TARGET_CANDIDATE_KINDS[req.query.type];
+  const requestedType = req.query.type;
+  // Object.hasOwn 而非裸下标：普通对象字面量 + 裸下标会取到原型链成员（constructor 等全 truthy）⇒ !kind 兜底失效
+  const kind = Object.hasOwn(REPORT_TARGET_CANDIDATE_KINDS, requestedType)
+    ? REPORT_TARGET_CANDIDATE_KINDS[requestedType]
+    : null;
   if (!kind) {
-    // 路由层 isIn 已拦；这里是"新增类型只改了一侧"时的 fail-closed 兜底
     return ApiResponse.codeError(res, 'VALIDATION_FAILED', {
       fieldErrors: [{ field: 'type', message: '无效的目标类型' }],
     });
@@ -334,7 +337,7 @@ const listReportTargets = asyncHandler(async (req, res) => {
   });
 
   const docs = await reportTargetService.search({
-    type: req.query.type,
+    type: requestedType,
     filter,
     keyword: req.query.keyword,
     limit: REPORT_TARGET_CANDIDATE_LIMIT,

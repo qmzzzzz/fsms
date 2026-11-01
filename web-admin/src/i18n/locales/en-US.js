@@ -642,6 +642,8 @@ export default {
     duration30d: '30 days',
     fullRangeWarning:
       'Full range ({ip}) matches all IPs and can only be configured by super admins; use a more specific CIDR to restrict scope',
+    fullRangeDeleteForbidden:
+      'Cannot delete the full-range blacklist entry ({ip}): it is the only rescue path, and without it nobody can lift the block',
     blacklist: 'Blacklist',
     whitelist: 'Whitelist',
     blacklistDesc: 'Blacklisted IPs are blocked directly, all requests return 403',
@@ -692,6 +694,10 @@ export default {
       'Refused: this segment combined with the existing blacklist covers a whole address family, blocking all IPv4 service',
     refusedWhitelistCovers:
       'Refused: the whitelist already covers this segment, so adding it to the blacklist has no effect',
+    refusedNoRescuePath:
+      'Refused: this would lock you out too, and there is currently no rescue path — add your own source IP to a **permanent** whitelist first',
+    deleteRescueForbidden:
+      'Cannot delete: this entry is the only rescue path for the full-range blacklist; once removed nobody can lift the block. Keep a permanent whitelist rule for yourself first',
     typedConfirmLabel: 'Type the segment to confirm',
     typedConfirmPlaceholder: 'Copy the segment exactly',
     typedConfirmPrompt: 'This range is high-impact: type {ip} verbatim to confirm',

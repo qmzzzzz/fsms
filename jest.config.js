@@ -7,8 +7,11 @@ module.exports = {
   // Node 环境（与 jsdom 区别）
   testEnvironment: 'node',
 
-  // 测试匹配规则
-  testMatch: ['**/src/tests/**/*.test.js'],
+  // 测试匹配规则。锚定到 <rootDir> 而不是用 ** 前缀：** 会把**任意层级**下的
+  // src/tests/ 都收进来，于是 work/ 下的夹具副本（含 src/tests/ 路径的变异实验目录）
+  // 与 .temp/ 的测试树快照都会进全量收集面 —— 实测 --listTests 因此多收 1 个仓外副本，
+  // 且判据在仓内看它是「未跟踪的 *.test.js」，会误判成测试树不纯。
+  testMatch: ['<rootDir>/src/tests/**/*.test.js'],
 
   // 全局 setup：使用 mongodb-memory-server 启动内存 MongoDB
   globalSetup: '<rootDir>/src/tests/globalSetup.js',
@@ -283,6 +286,23 @@ module.exports = {
     './src/services/rateLimitEscalation.js': { branches: 81, functions: 72 },
     './src/services/rateLimitEscalationBan.js': { branches: 86, functions: 97 },
     './src/services/webhookTargetResolver.js': { branches: 67, functions: 97 },
+    // ===== 2026-10-30：C-08 临时权限授予（含定期复核）新增模块的独立门槛 =====
+    // 新模块不并入 global 的理由同上方 sessionService 段：这四个模块承担的是
+    // 「谁能临时拿到高敏权限」，退化形态是**安全结论错误**而不是报错，不能被均值稀释。
+    // 数值按本文件唯一规则取「2026-10-30 全量实测 - 5pt(分支) / -3pt(函数)，向下取整」，
+    // 实测分别为：privilegeGrantService br 71.95 / fn 100、accessReviewService br 70 / fn 100、
+    // privilegeController br 83.33 / fn 100、constants/privilegeGrant br 75 / fn 100、
+    // privilegeGrantHooks br 100 / fn 100、privilegeGrantValidation br 88.23 / fn 100。
+    // 后两个是 2026-10-30 同日拆出的子模块（max-lines 棘轮）：钩子模块的分支全在
+    // 「钩子未注册即抛」两条腿，验证模块的分支是有效期上下限与保留码/停用码判定。
+    // 分支余量刻意留满 5pt：到期/并发/钩子缺失这几条腿依赖 mongodb-memory-server 的时序，
+    // 压缩余量只会换来 flaky（同 auditMonitor / deviceReminder 的既有取舍）。
+    './src/services/privilegeGrantService.js': { branches: 69, functions: 97 },
+    './src/services/accessReviewService.js': { branches: 65, functions: 97 },
+    './src/controllers/privilegeController.js': { branches: 78, functions: 97 },
+    './src/constants/privilegeGrant.js': { branches: 70, functions: 97 },
+    './src/services/privilegeGrantHooks.js': { branches: 95, functions: 97 },
+    './src/services/privilegeGrantValidation.js': { branches: 83, functions: 97 },
   },
 
   // 测试文件命名约定

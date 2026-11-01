@@ -176,6 +176,7 @@ const DECLARED_OFFENDERS = [
   'src/tests/ci/credentialDoorCheckLedger.test.js|2',
   'src/tests/ci/fieldErrorsEgressGate.test.js|1',
   'src/tests/ci/permissionCatalogRouteParity.test.js|1',
+  'src/tests/ci/stuffingProfileWriteSites.test.js|2',
   'src/tests/ci/userCredentialProjectionLedger.test.js|1',
   'src/tests/config/gateLayerExistence.test.js|1',
   'src/tests/config/migrateConfigHostQualifiedAllowlist.test.js|1',

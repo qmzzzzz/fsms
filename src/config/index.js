@@ -109,7 +109,7 @@ module.exports = {
   // ⇒ 恒为 undefined ⇒ toConfigBoolean(undefined, false) === false
   // ⇒ 注册接口的图形验证码被**静默关闭**。而 initData 从不播种该键
   // （只播种 allowPublicRegistration / loginCaptchaEnabled），所以**全新部署必然走这条 fallback**，
-  // 与 config/index.js:77 / SystemConfig.js:193 / SystemConfig.js:207 / .env.example:244 四处"默认开启/默认强校验"
+  // 与 config/index.js:115 / SystemConfig.js:193 / SystemConfig.js:207 / .env.example:422 四处"默认开启/默认强校验"
   // 的声明全部相反。与紧邻的 loginCaptchaEnabled 同层是唯一正确写法。
   // 回归判据见 src/tests/security/systemConfigBooleanContract.test.js 的「默认值契约」用例。
   registerCaptchaEnabled: process.env.REGISTER_CAPTCHA_ENABLED !== 'false',

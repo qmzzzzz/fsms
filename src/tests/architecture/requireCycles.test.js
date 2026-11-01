@@ -160,6 +160,20 @@ const stronglyConnected = (graph) => {
  *   · auditBuffer ↔ auditBufferDocs / auditWal* 是「写入与文档化/容量控制」的双向编排。
  * 消除它需要把审计写入收敛成独立 writer 并迁移 metrics 的初始化边界，属独立一轮重构。
  * 登记在此：新增或消失都会红，逼改动者重新审视依赖方向（整改过程见 CHANGELOG 2026-10-26）。
+ *
+ * `utils/cookie.js` 为何在分量里（2026-11-02 补登记，不是顺手加一条例外）：
+ *   1. 它必须有一条**惰性**边 `utils/cookie.js -> config/validate.js`：cookie 的 Secure 位
+ *      要按生产硬闸判据（requiresProductionHardening）定，而 validate.js 在**顶层**已经
+ *      require 了 cookie 的 durationToMs（collectJwtDurationErrors，同一实现两处消费）。
+ *      若 cookie 顶层再 require validate，加载期即闭环，两侧都拿到半初始化对象。
+ *   2. 谁**不能**把这条边提到顶层：任何人（包括本文件的登记者）。提了之后 `require('../utils/cookie')`
+ *      在 validate 的加载途中会拿到 { durationToMs: undefined, ... } 而**不报错**，
+ *      症状是启动期 collectJwtDurationErrors 静默跳过（校验看起来通过、实际没跑）。
+ *      本分量的「惰性边清单」用例守的正是这一点：那条边被提回顶层就会从清单里消失 ⇒ 必红。
+ *   3. 分量成员集合的意义：cookie 之所以卷进**这一个**分量（而不是自成一个小环），是因为它同时被
+ *      `config/index.js` 顶层引用（config/index.js -> utils/cookie.js 是真实边），而 config/index.js
+ *      本身已在分量内（config/index.js -> config/validate.js 惰性）。即：cookie 的入口有两处——
+ *      config/index.js（顶层）与 config/validate.js（惰性），前者把它拖进分量，后者提供闭环的那条边。
  */
 const LAZY_SCC = [
   [
@@ -183,6 +197,7 @@ const LAZY_SCC = [
     'services/sharedCacheLocks.js',
     'utils/auditChain.js',
     'utils/auditWriteFailure.js',
+    'utils/cookie.js',
     'utils/metrics.js',
     'utils/metricsAuditDrops.js',
     'utils/passwordHistory.js',
@@ -373,6 +388,8 @@ describe('依赖图无环断言', () => {
     'services/sharedCache/index.js -> constants/runtime.js',
     'utils/auditChain.js -> config/index.js',
     'utils/auditWriteFailure.js -> utils/metrics.js',
+    'config/validate.js -> utils/cookie.js',
+    'utils/cookie.js -> config/validate.js',
     'utils/metricsAuditDrops.js -> services/auditBuffer.js',
     'utils/metricsAuditDrops.js -> services/auditWalCap.js',
     'utils/passwordHistory.js -> config/index.js',

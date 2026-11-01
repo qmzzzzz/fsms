@@ -152,3 +152,94 @@ describe('resolveErrorMessage', () => {
     }
   })
 })
+
+/**
+ * 方法分档（第 22 轮）：同一个 errorCode 在不同 HTTP 方法下的**下一步动作**不同。
+ * 删除侧的 FULL_RANGE_FORBIDDEN 说的是「这一条是全网段黑名单的唯一救援路径，删了就没人能
+ * 自行解除封锁」；写入侧说的是「换更精确的网段、仅超管可配」。用写入侧文案解释一次删除，
+ * 用户会以为"只是权限不够、什么都没发生"——而条目其实已经没了。
+ */
+describe('resolveErrorMessage 方法分档', () => {
+  const IP = '0.0.0.0/0'
+  const expected = {
+    'zh-CN': '不能删除全网段黑名单（0.0.0.0/0）：这是唯一的救援路径，删掉之后无人能自行解除封锁',
+    'en-US':
+      'Cannot delete the full-range blacklist entry (0.0.0.0/0): it is the only rescue path, and without it nobody can lift the block',
+  }
+
+  test('DELETE 上的 FULL_RANGE_FORBIDDEN 给出「唯一救援路径」专属文案（中英各一次，占位真被填）', () => {
+    for (const locale of LOCALES) {
+      i18n.global.locale.value = locale
+      const msg = resolveErrorMessage(
+        { errors: { errorCode: 'FULL_RANGE_FORBIDDEN', ip: IP } },
+        'delete'
+      )
+      expect(msg, locale).toBe(expected[locale])
+      expect(msg, locale).toContain(IP)
+      expect(msg, locale).not.toContain('{')
+      // 与写入侧通用文案必须不同，否则"分档"名存实亡
+      expect(msg, locale).not.toBe(i18n.global.t('security.fullRangeWarning', { ip: IP }))
+    }
+  })
+
+  test('向后兼容：不传 method 或传其它方法，行为与改动前完全一致', () => {
+    for (const locale of LOCALES) {
+      i18n.global.locale.value = locale
+      const noMethod = resolveErrorMessage({
+        errors: { errorCode: 'FULL_RANGE_FORBIDDEN', ip: IP },
+      })
+      const asPost = resolveErrorMessage(
+        { errors: { errorCode: 'FULL_RANGE_FORBIDDEN', ip: IP } },
+        'post'
+      )
+      expect(asPost, locale).toBe(noMethod)
+      expect(noMethod, locale).toBe(i18n.global.t('security.fullRangeWarning', { ip: IP }))
+    }
+  })
+
+  test('未分档的码在 DELETE 上仍走通用表（新增分档表不得把其它码变成 null）', () => {
+    i18n.global.locale.value = 'zh-CN'
+    expect(resolveErrorMessage({ errors: { errorCode: 'MFA_ATTEMPTS_EXCEEDED' } }, 'delete')).toBe(
+      i18n.global.t('errors.mfaAttemptsExceeded')
+    )
+    expect(resolveErrorMessage({ errors: { errorCode: 'FUTURE_CODE' } }, 'delete')).toBeNull()
+    expect(resolveErrorMessage({ message: '无码' }, 'delete')).toBeNull()
+  })
+})
+
+/**
+ * 回归钉子：方法分档表用小写键，而 axios **进入拦截器前已把 method 归一化为小写**。
+ * 这两件事必须同时成立，分档才不会静默失效（失效形态是"不报错、不 500，只是文案错位"，
+ * 任何现有断言都发现不了）。
+ *
+ * 判据来自 axios 源码本身（axios 1.20.0，dist/node/axios.cjs:6385）：
+ *   config.method = (utils.getSafeProp(config,'method') || ... || 'get').toLowerCase()
+ * 这里用**真实 axios 实例 + 真实拦截器链**复核该行为，而不是引用结论：
+ * 若哪天 axios 去掉 toLowerCase，本用例会红，提示"分档表要改用大写键"。
+ */
+test('axios 把 method 归一化为小写（分档表用小写键的前提）', async () => {
+  const axios = (await import('axios')).default
+  const seen = []
+  const inst = axios.create({ baseURL: 'http://127.0.0.1:1', timeout: 3000 })
+  inst.interceptors.response.use(
+    (r) => r,
+    (err) => {
+      seen.push(err.config?.method)
+      return Promise.reject(err)
+    }
+  )
+  const probe = async (cfg) => {
+    try {
+      await inst.request(cfg)
+    } catch {
+      /* 预期失败：真实适配器拒绝连接，但 config 已归一化 */
+    }
+    return seen[seen.length - 1]
+  }
+
+  expect(await probe({ url: '/security/ip-list/x', method: 'delete' })).toBe('delete')
+  expect(await probe({ url: '/security/ip-list/x', method: 'DELETE' })).toBe('delete')
+  expect(await probe({ url: '/security/ip-list/x', method: 'Delete' })).toBe('delete')
+  // 对照：POST 侧没有分档，仍应落在通用表（见上一条用例）
+  expect(await probe({ url: '/security/ip-list', method: 'POST' })).toBe('post')
+})

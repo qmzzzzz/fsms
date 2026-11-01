@@ -140,7 +140,7 @@ const LEDGER = [
   },
   {
     site: 'src/services/authService/profile.js',
-    siteLine: 194,
+    siteLine: 219,
     raw: '（:350）',
     status: 'DEBT',
     wrongFrom: 350,
@@ -149,7 +149,7 @@ const LEDGER = [
     from: 72,
     to: 72,
     mustRead: 'async function loginUser',
-    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动；2026-10-18 lint 批 1 把 setUserLockStatus 的判据/写入计划抽成具名函数（本注释所在块 +5 行）⇒ 1288→1293；2026-10-18 lint 批 2 把 refreshSession / changeUserPassword 拆成具名步骤函数（两函数合计 +123 行，均在站点之上）⇒ 1293→1417，指代目标 :230 在它们之上、不受影响；2026-10-18 lint 批 3a 把 authService 拆成子模块后，锚随 setUserLockStatus 落到 profile.js（1417→182），指代目标 loginUser 落到 login.js（:230→:80）——两者不再同文件，这正是本台账坚持用「文件限定坐标」而不是裸行号的原因。2026-10-19 哨兵用户名（canary）批在 login.js 模块头 :16 后 +1 行（require），指代目标 80→81；错号 :350 在 profile.js、不受影响。2026-10-20 删除重复 JSDoc（-8 行）：指代目标 81→73；错号 :350 仍在 profile.js、不受影响。2026-10-21 解锁吊销会话批在模块头 +1 行（sessionService require）：站点 182→183；错号与指代目标均不受影响。2026-10-30 头像上传在 profile.js 增加清空事务分支（+16 行），站点 183→199。2026-10-30 当日二次改动（清空事务分支收敛 + 注释压缩，-5 行）⇒ 站点 199→194，错号 :350 与指代目标 :73 均不受影响。2026-10-31 蜜罐批在 login.js 模块头 +1 行（honeypotWatch require）：指代目标 73→74；错号 :350 在 profile.js、不受影响。2026-10-31 登录挑战批在 login.js 前置层与临时锁定分支加人机挑战（真站点以下 +5 行，均在 loginUser 之上），同日的注释密度棘轮收口又把 7 处两行注释并回一行（模块头与 loginUser 以上 −8 行）：指代目标 74→71；错号 :350 仍在 profile.js、不受影响。2026-11-01 蜜罐批在 login.js 模块头 +1 行（honeypotWatch 的 require 及其尾注），审计二-3 又把文件头两行注释并成一行（−1 行）：指代目标 71→72（净 +1）；错号 :350 仍在 profile.js、不受影响。',
+    note: 'loginUser 实在 :230；:350 落在 assertAccountUsable 里（该函数本轮由 :330 迁到 :339）。同一个错号还被 src/tests/security/userLockBooleanBoundary.test.js 抄过一次（本轮已改对那一处），这里是"错锚自我复制"的第二个现场。站点行号 1278→1282→1275：先因 updateUserProfile/setUserLockStatus 两处载入端各加 2 行排除投影注释下移，2026-10-09 又因本文件删掉两份手写 captcha try/catch（-7 行）上移；2026-10-16 A3 再因 email 查重改走 emailKey（+13 行）⇒ 1275→1288，指代目标 :221→:230 同步随迁，锚上写的错号 :350 是原文，不动；2026-10-18 lint 批 1 把 setUserLockStatus 的判据/写入计划抽成具名函数（本注释所在块 +5 行）⇒ 1288→1293；2026-10-18 lint 批 2 把 refreshSession / changeUserPassword 拆成具名步骤函数（两函数合计 +123 行，均在站点之上）⇒ 1293→1417，指代目标 :230 在它们之上、不受影响；2026-10-18 lint 批 3a 把 authService 拆成子模块后，锚随 setUserLockStatus 落到 profile.js（1417→182），指代目标 loginUser 落到 login.js（:230→:80）——两者不再同文件，这正是本台账坚持用「文件限定坐标」而不是裸行号的原因。2026-10-19 哨兵用户名（canary）批在 login.js 模块头 :16 后 +1 行（require），指代目标 80→81；错号 :350 在 profile.js、不受影响。2026-10-20 删除重复 JSDoc（-8 行）：指代目标 81→73；错号 :350 仍在 profile.js、不受影响。2026-10-21 解锁吊销会话批在模块头 +1 行（sessionService require）：站点 182→183；错号与指代目标均不受影响。2026-10-30 头像上传在 profile.js 增加清空事务分支（+16 行），站点 183→199。2026-10-30 当日二次改动（清空事务分支收敛 + 注释压缩，-5 行）⇒ 站点 199→194，错号 :350 与指代目标 :73 均不受影响。2026-10-31 蜜罐批在 login.js 模块头 +1 行（honeypotWatch require）：指代目标 73→74；错号 :350 在 profile.js、不受影响。2026-10-31 登录挑战批在 login.js 前置层与临时锁定分支加人机挑战（真站点以下 +5 行，均在 loginUser 之上），同日的注释密度棘轮收口又把 7 处两行注释并回一行（模块头与 loginUser 以上 −8 行）：指代目标 74→71；错号 :350 仍在 profile.js、不受影响。2026-11-01 蜜罐批在 login.js 模块头 +1 行（honeypotWatch 的 require 及其尾注），审计二-3 又把文件头两行注释并成一行（−1 行）：指代目标 71→72（净 +1）；错号 :350 仍在 profile.js、不受影响。2026-11-02 站点 194→219：f4ccbdb 在本注释块上方净增 25 行（模块头 require +1、updateUserProfile 段 +24），`（:350）` 原文、错号 :350 与指代目标 login.js:72 均未变；本条只把站点行号改回实况。',
   },
   {
     site: 'src/services/permissionService.js',
@@ -288,9 +288,11 @@ const byStatus = (st) => LEDGER.filter((e) => e.status === st);
  * 边界判据只有一份：本闸管"裸锚"，对方闸管"署名锚"。这里不复制对方那份尺子的**逻辑**，
  * 而是把它字面量原文钉成字符串，再由这个字符串编译出 used-by-both 的采集器；对方一改，
  * 第 6 条用例立刻红，两边不可能悄悄漂移成两套口径。
+ * 第 24 轮 C1：对方给 `file:109/116` 这类**斜杠成对坐标**加了第 4 组（两个坐标都要核），
+ * 这里同步跟上——镜像漏跟就是两套口径。
  */
 const PEER_CITE_RE_SRC =
-  '((?:[\\w.@-]+\\/)*[\\w.@-]+\\.(?:js|jsx|ts|tsx|vue|md|sh|json|ya?ml)):(\\d+)(?:\\s*[-–~]\\s*(\\d+))?(?!\\d)';
+  '((?:[\\w.@-]+\\/)*[\\w.@-]+\\.(?:js|jsx|ts|tsx|vue|md|sh|json|ya?ml)):(\\d+)(?:\\s*[-–~]\\s*(\\d+))?(?:\\s*\\/\\s*(\\d+))?(?!\\d)';
 const ATTRIBUTED_RE = new RegExp(PEER_CITE_RE_SRC, 'g');
 const PEER_GATE = 'src/tests/ci/commentAnchorFreshness.test.js';
 
@@ -457,8 +459,10 @@ describe('第 5 族 · 回指式裸行锚', () => {
     // 合成「署名锚」样例。注意本闸（commentAnchorFreshness）会扫全仓文本，
     // 这里出现的 `文件:行号` 也被它当真实锚点校验 ⇒ 数字必须真的落在有内容的行上，
     // 目标行被改动时要跟着迁移（2026-10-09：authService.js 的 registerUser 验证码闸
-    // 收口到 captchaSwitch，原 :120/:128 已随行数变化迁到 :124/:126）。
-    const attributed = '  // 见 src/services/authService.js:128 与 authService.js:130\n';
+    // 收口到 captchaSwitch；2026-11-02 拆成目录后迁到 session.js 的验证码闸 :52 与密文解密
+    // :82——路径要写全：`authService/session.js` 这种半路径因 basename 与
+    // src/controllers/authController/session.js 撞名而解析不到，会被当成"未解析"）。
+    const attributed = '  // 见 src/services/authService/session.js:52 与 src/services/authService/session.js:82\n';
     expect(attributed.match(BARE_PAREN_RE)).toBeNull();
     // 数值形态连冒号都没有，CITE_RE 永远看不见它
     expect('与上方 210/233 行同口径'.match(BARE_NUMERIC_RE)).toEqual(['上方 210/233 行']);

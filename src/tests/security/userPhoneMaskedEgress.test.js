@@ -79,7 +79,7 @@ describe('用户管理读路径的手机号口径', () => {
       permissions: [wildcard._id],
     });
     // 分配角色那条出口需要一个"可比自己低"的角色：路由要求 roles 至少 1 项
-    // （userRoutes.js:131 的 isArray({min:1})），空数组会先撞 400 而走不到回显。
+    // （userRoutes.js:133 的 isArray({min:1})），空数组会先撞 400 而走不到回显。
     const lowRole = await Role.create({
       name: '只读观察员',
       code: `UPM_LOW_${stamp}`,

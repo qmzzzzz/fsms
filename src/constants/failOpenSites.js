@@ -3,16 +3,16 @@
  *
  * ## 这份台账要解决什么
  * 本仓有一条成文纪律，在三个地方被重复声明：
- *   · `middleware/security/ipBlacklist.js:205`：「fail-open 放行（缓存未命中）**必须有显式可观测信号**——
+ *   · `middleware/security/ipBlacklist.js:215-216`：「fail-open 放行（缓存未命中）**必须有显式可观测信号**——
  *     否则『DB 挂了 + 全站裸奔』只有一条 error 日志可循」
  *   · `middleware/rateLimitStore.js:53-56`：「降级态只写日志等于没有可告警信号——
  *     `grep 日志` 不是运维动作」
- *   · `services/websocketService/handshake.js:481-483`：「fail-open 必须留 `ip_blacklist_failopen` 计数」
+ *   · `services/websocketService/handshake.js:519`：「fail-open 必须留 `ip_blacklist_failopen` 计数」
  *
  * 但纪律只在**注释里**，没有任何东西把「站点集合」与「每个站点的信号」钉在一起。
  * 后果实测（2026-10-09）：`services/captchaService.js` 的活跃数上限判定被跳过时，
- * 唯一痕迹是 `sharedCache/index.js:330` 的 `logger.debug`，而生产默认 `LOG_LEVEL=info`
- * （`utils/logger.js:85`）⇒ **debug 不落盘**：没有日志、没有指标、没有告警。
+ * 唯一痕迹是 `services/sharedCache/index.js:322` 的 `logger.debug`，而生产默认 `LOG_LEVEL=info`
+ * （`utils/logger.js:95`）⇒ **debug 不落盘**：没有日志、没有指标、没有告警。
  * 这正是「已修的同类漏了一处」——三处注释在讲同一条纪律，第四处漏了。
  *
  * ## 台账的结构（三段，各有各的判据）
@@ -62,7 +62,7 @@ const FAIL_OPEN_SITES = Object.freeze([
     direction: 'fail-open',
     trigger: '握手期名单查询抛错',
     effect: '该地址放行，WS 侧名单失效（HTTP 侧可能仍拦着，两侧口径出现窗口差）',
-    why: '与 HTTP 侧同口径（「宁可不拦，也不因一次 DB 抖动把全部实时推送踢下线」）。**复用同一个 type 而非新造**：同一根因、同一条时间序列，新造一个恒真信号只会稀释告警（见 handshake.js:481-483 的说明）。',
+    why: '与 HTTP 侧同口径（「宁可不拦，也不因一次 DB 抖动把全部实时推送踢下线」）。**复用同一个 type 而非新造**：同一根因、同一条时间序列，新造一个恒真信号只会稀释告警（见 handshake.js:519 的说明）。',
     tightening: '同 HTTP 侧；另需注意两侧是不同进程路径，快照方案要保证同一份来源。',
   },
   {
@@ -136,7 +136,7 @@ const FAIL_OPEN_SITES = Object.freeze([
     trigger: '记录或查询 5 分钟二次验证窗口时数据库读写失败',
     effect:
       '窗口既写不进也读不出，该会话只能继续走一次性票据：安全性不降级（票据更严），但全体用户会被反复要求 step-up',
-    why: '刻意不 fail-open：认不出窗口就放行等于把"另一次验证"整个取消。但"降级只写日志等于没有可告警信号"（middleware/rateLimitStore.js:53）——一次库抖动会让全站 step-up 率飙升，运维必须能从计数看见，而不是靠翻日志。',
+    why: '刻意不 fail-open：认不出窗口就放行等于把"另一次验证"整个取消。但"降级只写日志等于没有可告警信号"（middleware/rateLimitStore.js:54）——一次库抖动会让全站 step-up 率飙升，运维必须能从计数看见，而不是靠翻日志。',
     tightening:
       '可收紧方向：读失败时改用短 TTL 的内存新鲜缓存（只对本进程此前确认过的 sid 放行），把可用性损失限制在"库抖动开始后新发生的 step-up"。未做——需要先确认多副本下的缓存一致口径。',
   },
@@ -149,7 +149,7 @@ const FAIL_OPEN_SITES = Object.freeze([
     trigger: '幂等判据的 keyHash 唯一索引建立失败，或键登记/读取/回填/提前应答收尾时数据库读写失败',
     effect:
       '本次去重整个不生效：同一个 Idempotency-Key 的请求会被**重复执行**（资金/写操作语义上是真实副作用），而客户端只看到一次正常响应',
-    why: '刻意 fail-open：中间件在业务之前，把它做成 fail-closed 等于库抖一下就全站 5xx。但"降级只写日志等于没有可告警信号"（middleware/rateLimitStore.js:53）——重复执行是**静默的**，客户端无感、业务侧幂等也可能兜不住，必须能从计数看见。本条此前登记在 OTHER_ALERT_SIGNALS（定义为"安全事件上报，不是降级"），而它自己的 why 写着"是降级"——台账自相矛盾且无任何告警规则覆盖，本闸当时全绿。',
+    why: '刻意 fail-open：中间件在业务之前，把它做成 fail-closed 等于库抖一下就全站 5xx。但"降级只写日志等于没有可告警信号"（middleware/rateLimitStore.js:54）——重复执行是**静默的**，客户端无感、业务侧幂等也可能兜不住，必须能从计数看见。本条此前登记在 OTHER_ALERT_SIGNALS（定义为"安全事件上报，不是降级"），而它自己的 why 写着"是降级"——台账自相矛盾且无任何告警规则覆盖，本闸当时全绿。',
     tightening:
       '可收紧方向：登记失败时不直接放行，而要求下游写操作携带一次性的 requestHash（读-改-写时比对），把去重从"中间件尽力而为"移到"数据层强制"。未做——需要先确认所有写接口都有可比的 requestHash。',
   },

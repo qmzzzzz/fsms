@@ -19,7 +19,7 @@ flowchart TB
 
   subgraph Backend["后端（Express，src/）"]
     MW["中间件链：requestId → metrics → Sentry → IP黑名单 → CORS →\n安全头/限流/查询防护 → morgan → auditLog"]
-    Routes["路由（13）：auth / user / role / permission / device /\nalarm / inspection / report / security / avatar / version / wellKnown /\nforensic"]
+    Routes["路由（14）：auth / user / role / permission / device /\nalarm / inspection / report / security / avatar / version / wellKnown /\nforensic / stuffingProfile"]
     Ctrl["控制器（16）：auth / user / security / role / permission /\ndevice / alarm / inspection / report / audit / avatar / mfa /\nipList / privilege / rolePermission / forensic"]
     Svc["服务层（97）：sessionService / userPermissionService /\ncaptchaService / auditBuffer / auditMonitor / statsCache / securityAlert /\nDevice·Alarm·Inspection Service 等（另有 authService / websocketService /\ninitData / sharedCache 子目录）"]
     Utils["工具：loginCipher / auditChain / encryption /\nlogger(winston) / response 封装"]

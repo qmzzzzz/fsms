@@ -93,7 +93,7 @@ services:
       # 取证捕获（P2）：声明 30 天（用户 2026-10-31 书面确认），区间 [30,3650]。下限**独立于审计链**：
       # 审计留存仍 90 天，取证捕获是"事件取证窗口"，两件事合规依据不同。TTL 到期不可逆删除，
       # 这里的默认值必须与 declaredDays 逐字一致，否则启动对账会判 orphaned 交人工。
-      - BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE=${BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE:-90}
+      - BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE=${BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE:-30}
       # 恢复目标（F-08）：声明值 24h / 4h，见 src/constants/backupObjectives.js。
       # 默认值与声明一致；发布脚本要求显式给值（不依赖这里的默认）。
       - BACKUP_RPO_HOURS=${BACKUP_RPO_HOURS:-24}

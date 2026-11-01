@@ -342,9 +342,6 @@ router.put(
 // review 此前零 body 校验——reviewComment 超长以英文 ValidationError
 // 回显（Mongoose maxlength 消息），result 枚举错误值直写库
 //
-// L-05 修复：原校验写的是 body('result')，而控制器消费的是 req.body.reviewResult
-//（见 inspectionController 的 review 处理）→ 该校验对真实字段**完全不生效**，
-// 注释声称的"已修复"实际未落地。字段名已更正为 reviewResult。
 const reviewValidation = [
   body('reviewResult').optional().isIn(INSPECTION_REVIEW_RESULTS).withMessage('无效的审核结果'),
   mustBeString('reviewComment', '审核意见'),

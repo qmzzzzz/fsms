@@ -8,7 +8,6 @@
  *
  * 已登记类型各对应一条**此前只有 logger（或完全无出口）**的失效路径：
  *   - AUDIT_HASH_COMPUTE_FAILED：auditBuffer 算 hash 失败 ⇒ 批次无哈希落库。
- *     原实现只有 logger.warn，而这是"链出现缺口"的唯一直接信号。
  *   - AUDIT_CHAIN_BREAK_DETECTED：周期核验发现真实断裂。原实现里核验只在
  *     有人手动调 GET /api/security/audit-logs/verify 或跑离线脚本时才发生——
  *     "篡改会留痕"成立，但"痕迹会被发现"不成立。

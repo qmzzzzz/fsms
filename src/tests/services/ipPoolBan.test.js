@@ -87,6 +87,74 @@ describe('护栏：这些情况一律拒绝封禁', () => {
   });
 });
 
+describe('拒绝计数：每个拒绝原因恰好记一次（同一事件两处自增 = 看板翻倍；漏记 = 看板少计）', () => {
+  // 判据是**增量**：新增判据时不必回头改其它用例，也就少一次忘改的机会
+  const cases = [
+    ['unparsable_cidr', () => {}, () => ban.requestBan({ cidr: 'not-a-cidr', reason: 't', operatorIp })],
+    ['full_range_cidr', () => {}, () => ban.requestBan({ cidr: '0.0.0.0/0', reason: 't', operatorIp })],
+    ['reason_required', () => {}, () => ban.requestBan({ cidr: '203.0.113.0/24', operatorIp })],
+    [
+      'whitelist_covers',
+      () => ipListService.findCoveringEntries.mockResolvedValue([{ ip: '203.0.113.0/24' }]),
+      () => ban.requestBan({ cidr: '203.0.113.0/24', reason: 't', operatorIp }),
+    ],
+    [
+      'union_covers_family',
+      () => ipListService.listActiveEntryIps.mockResolvedValue(['128.0.0.0/1']),
+      () => ban.requestBan({ cidr: '0.0.0.0/1', reason: 't', operatorIp }),
+    ],
+    ['operator_inside', () => {}, () => ban.requestBan({ cidr: '10.0.0.0/24', reason: 't', operatorIp })],
+    [
+      'live_traffic_inside',
+      () => liveTraffic.segmentHasLiveTraffic.mockResolvedValue({ live: true, scanned: 3 }),
+      () => ban.requestBan({ cidr: '203.0.113.0/24', reason: 't', operatorIp }),
+    ],
+  ];
+
+  test('申请侧七条判据逐条：拒绝即 +1', async () => {
+    for (const [name, setup, call] of cases) {
+      ban.resetPoolBanState();
+      jest.restoreAllMocks();
+      // restoreAllMocks 会撤掉 beforeEach 的三条 spy，这里按需重装（每条用例自己声明依赖，不靠外部顺序）
+      jest.spyOn(ipListService, 'listActiveEntryIps').mockResolvedValue([]);
+      jest.spyOn(ipListService, 'findCoveringEntries').mockResolvedValue([]);
+      jest.spyOn(liveTraffic, 'segmentHasLiveTraffic').mockResolvedValue({ live: false, scanned: 0 });
+      setup();
+      const before = ban.getPoolBanStats().refused;
+      const r = await call();
+      expect({
+        name,
+        reason: r.reason,
+        delta: ban.getPoolBanStats().refused - before,
+      }).toEqual({ name, reason: name, delta: 1 });
+    }
+  });
+
+  test('确认侧三条判据逐条：拒绝即 +1（unknown_token 曾经整条漏记）', async () => {
+    const ticketFor = async (cidr) =>
+      (await ban.requestBan({ cidr, reason: 't', operator: 'a', operatorIp })).token;
+    const calls = [
+      ['unknown_token', async () => ban.applyBan({ token: 'deadbeef' })],
+      [
+        'token_expired',
+        async () =>
+          ban.applyBan({ token: await ticketFor('203.0.113.0/24'), now: new Date(Date.now() + 11 * 60 * 1000) }),
+      ],
+      ['typed_confirmation_required', async () => ban.applyBan({ token: await ticketFor('203.0.113.0/24') })],
+    ];
+    for (const [name, call] of calls) {
+      ban.resetPoolBanState();
+      const before = ban.getPoolBanStats().refused;
+      const r = await call();
+      expect({
+        name,
+        reason: r.reason,
+        delta: ban.getPoolBanStats().refused - before,
+      }).toEqual({ name, reason: name, delta: 1 });
+    }
+  });
+});
+
 describe('票据表的内存边界（TTL 只约束可用性，不约束占用）', () => {
   test('过期票据在下次出票时被清掉：pending 不随"申请了不确认"无限增长', async () => {
     const t0 = new Date('2026-01-01T00:00:00Z');
@@ -401,9 +469,11 @@ describe('自动封禁：不存在自动分支，只出票不自批', () => {
     expect(ban.getPoolBanStats().requests).toBe(1); // 共享出口连"待确认"都不该生成
   });
 
-  test('没有候选 ⇒ 如实报 no_candidates（不是空成功）', async () => {
+  test('没有候选 ⇒ 报「无候选」而不是空成功，且不借用拒绝原因码', async () => {
     const r = await ban.banRecommended({ clusters: [], operator: 'system', reason: 'x' });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe('no_candidates');
+    expect(r.empty).toBe(true);
+    // reason 是**拒绝原因**字段，只认常量表里的码；「没有候选」不是拒绝，不许自造表外码
+    expect(r.reason).toBeNull();
   });
 });

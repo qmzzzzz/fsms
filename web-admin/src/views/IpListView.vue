@@ -125,7 +125,7 @@
           <el-input
             v-model="typedConfirmText"
             class="ip-typed-confirm"
-            :placeholder="$t('ipList.typedConfirmPlaceholder')"
+            :placeholder="typedConfirmExpected || $t('ipList.typedConfirmPlaceholder')"
             style="width: 220px"
             maxlength="200"
             @keyup.enter="handleAdd"
@@ -525,6 +525,8 @@ const addSubmitting = ref(false)
  */
 const typedConfirmTarget = ref('')
 const typedConfirmText = ref('')
+// 后端回带的归一化形态，仅用于提示（不自动回填——回填等于替用户签字）
+const typedConfirmExpected = ref('')
 // 名单切换重入锁：跨名单操作包含多个写请求，整个流程期间禁用所有行操作。
 const switchingId = ref(null)
 
@@ -534,6 +536,26 @@ const refusalReasonOf = (e) => {
   if (!err || err.errorCode !== 'IP_SEGMENT_WRITE_REFUSED') return ''
   return typeof err.reason === 'string' ? err.reason : ''
 }
+
+/** 后端回带的**归一化形态**（errors.expected）：确认串比对的就是它，取不到返回空串 */
+const expectedOf = (e) => {
+  const err = e?.response?.data?.errors
+  return typeof err?.expected === 'string' && err.expected ? err.expected : ''
+}
+
+/**
+ * 逐字确认的**期望值唯一来源**：后端 errors.expected（归一化形态）优先，缺失才回退给定原文。
+ *
+ * 新增路径与切换路径**都必须**经这里取期望值。两条路径各写一套（一条用 expected、一条用
+ * 原始 row.ip）就是判据分叉：非规范写法（2001:DB8::/64、::ffff:10.0.0.0/104）下，用原文的
+ * 那条会把用户钉在后端永不接受的字符串上——他敲对了也 400，且提示还在让他"再敲一遍"。
+ * 回退层（fallback）由调用方按「这个界面有没有别处显示该值」决定，不由判据决定：
+ * 切换路径行内无输入框 ⇒ 传 row.ip；新增路径上方已显示输入框内容 ⇒ 传空串落回 i18n 通用提示。
+ * **优先级本身（expected 优先）只有这一处**，不随界面变。
+ * @param {object} e 后端拒绝响应
+ * @param {string} fallback 老后端未回带 expected 时的原文兜底
+ */
+const typedConfirmExpectationOf = (e, fallback) => expectedOf(e) || String(fallback || '')
 
 const handleAdd = async () => {
   if (addSubmitting.value) return
@@ -547,9 +569,19 @@ const handleAdd = async () => {
     return
   }
 
+  // 换了网段：上一个网段的确认态（含 expected 提示）不能跟着走——否则输入框会继续
+  // 拿旧网段的归一化形态当占位符，指向一个与本表单无关的值
+  if (typedConfirmTarget.value && typedConfirmTarget.value !== ip) {
+    typedConfirmTarget.value = ''
+    typedConfirmText.value = ''
+    typedConfirmExpected.value = ''
+  }
+
   addSubmitting.value = true
   adding.value = true
   try {
+    // 后端可能回带归一化形态（见 expectedOf）：敲错的根因往往是用户不知道规范写法，
+    // 故记下来给输入框当占位/提示，而不是让他反复试
     const body = {
       ip,
       type: listType.value,
@@ -571,6 +603,7 @@ const handleAdd = async () => {
     // 确认串只对"那一次、那个网段"有效：不清掉下次换网段会被判成敲错
     typedConfirmTarget.value = ''
     typedConfirmText.value = ''
+    typedConfirmExpected.value = ''
     // 新增条目按时间倒序排在第一页，回到首页以便立即看到
     page.current = 1
     loadData()
@@ -580,7 +613,19 @@ const handleAdd = async () => {
     const refusal = refusalReasonOf(e)
     if (refusal === 'typed_confirmation_required') {
       typedConfirmTarget.value = ip
+      // 回退参数给空串：新增表单上方已经显示着用户输入的 ip，占位符再抄一遍没有增量信息；
+      // 留空则落到 i18n 的通用提示（「逐字照抄上面的网段」）。切换路径相反——行内没有输入框，
+      // 提示里必须出现那个值，故那里回退 row.ip。**期望值的优先级两边同一个函数**，
+      // 差的只是「没有 expected 时显示什么」这一层展示回退。
+      typedConfirmExpected.value = typedConfirmExpectationOf(e, '')
+      // 上次敲错的串必须清掉：留着它下一次点提交会原样重发，用户以为自己在重试，
+      // 实际发出去的还是那个已经被判定敲错的字符串
+      typedConfirmText.value = ''
       ElMessage.warning(t('ipList.refusedTypedConfirm'))
+    } else if (refusal === 'no_rescue_path') {
+      // 敲多少遍都没用：这条要用户先去给自己加**永久**白名单，与「缺确认串」的下一步
+      // 动作完全不同，故单列一档；不亮确认输入框（亮了等于把人往无解的重试里推）
+      ElMessage.warning(t('ipList.refusedNoRescuePath'))
     } else if (refusal === 'operator_inside') {
       ElMessage.warning(t('ipList.refusedOperatorInside'))
     } else if (refusal === 'live_traffic_inside') {
@@ -612,7 +657,16 @@ const handleRemove = async (row) => {
     if (e !== 'cancel' && e !== 'close') {
       // O-6: 点右上角 X(close) 亦属用户主动放弃，不误报删除失败
       // 具体原因已由响应拦截器提示，组件不再叠加一条泛化「删除失败」
-      if (!isHandledApiError(e)) ElMessage.error(t('messages.deleteFailed'))
+      // 删除侧 403 多了一种触发（删掉全网段黑名单的唯一救援路径）：它与「权限不足」的
+      // 下一步动作完全不同（删了就再也没人能自行解除封锁），不能与泛化删除失败同档
+      const code = e?.response?.data?.errors?.errorCode
+      if (!isHandledApiError(e)) {
+        ElMessage.error(
+          code === 'FULL_RANGE_FORBIDDEN'
+            ? t('ipList.deleteRescueForbidden')
+            : t('messages.deleteFailed')
+        )
+      }
     }
   }
 }
@@ -632,6 +686,43 @@ const switchReason = (row, type) => {
 
 // 将当前条目切换到另一侧名单。黑转白可直接复用 POST（后端会先写白再解除同 IP 黑名单）；
 // 白转黑先移除白名单再新增黑名单，新增失败时恢复原白名单，避免请求中断造成放行窗口。
+/**
+ * 行内切换的逐字确认：让用户自己敲网段，**不**替他回填。
+ * 返回 null 表示用户取消（调用方按原拒绝结束流程，并走白名单恢复）。
+ * 不在前端判「该不该要确认」：是否要，只由后端在拒绝时说出来（ADR-018 ③）。
+ */
+const promptTypedConfirm = async (expected) => {
+  try {
+    const { value } = await ElMessageBox.prompt(
+      t('ipList.typedConfirmPrompt', { ip: expected }),
+      t('messages.confirmTitle'),
+      {
+        inputPlaceholder: expected,
+        inputValidator: (v) => (v || '').trim() === expected || t('ipList.typedConfirmMismatch'),
+        type: 'warning',
+      }
+    )
+    return String(value || '').trim()
+  } catch (e) {
+    return null
+  }
+}
+
+/** 切换被护栏拒绝时按原因分档提示；返回 true 表示这条错误已被本函数处理 */
+const showSwitchRefusal = (e) => {
+  const refusal = refusalReasonOf(e)
+  if (!refusal) return false
+  if (refusal === 'operator_inside') ElMessage.warning(t('ipList.refusedOperatorInside'))
+  else if (refusal === 'live_traffic_inside') ElMessage.warning(t('ipList.refusedLiveTraffic'))
+  else if (refusal === 'union_covers_family') ElMessage.warning(t('ipList.refusedUnionCovers'))
+  else if (refusal === 'whitelist_covers') ElMessage.warning(t('ipList.refusedWhitelistCovers'))
+  else if (refusal === 'typed_confirmation_required')
+    ElMessage.warning(t('ipList.refusedTypedConfirm'))
+  else if (refusal === 'no_rescue_path') ElMessage.warning(t('ipList.refusedNoRescuePath'))
+  else ElMessage.warning(t('security.switchFailed'))
+  return true
+}
+
 const handleSwitchList = async (row) => {
   if (!row?._id || switchingId.value !== null) return
   const targetType = row.type === 'black' ? 'white' : 'black'
@@ -656,14 +747,13 @@ const handleSwitchList = async (row) => {
     reason: switchReason(row, targetType),
     durationHours: remainingDurationHours(row),
   }
-  // 白转黑落到网段上时，后端要求逐字确认（≥256 主机）。切换本身已经是"确认框 + 再点一次"
-  // 的两次交互，故用网段本身当确认串——不给这个字段，该路径上的 /24 切换 100% 被拒，
-  // 还会连带触发一次多余的白名单恢复写。单地址不带（没有"封段"语义，多带反而掩盖错误）。
-  if (targetType === 'black' && row.ip.includes('/')) payload.typedConfirm = row.ip
   const restoreOriginalWhitelist = async () => {
     try {
+      // 恢复白名单只写白名单：typedConfirm 是"封段"语义的字段，沿 ...payload 传过去既是
+      // 语义错位（靠后端 type!=='black' 短路才没出事），也会让"确认过"这件事看起来发生过。
+      const { typedConfirm: _ignored, ...whiteOnly } = payload
       await apiClient.post('/security/ip-list', {
-        ...payload,
+        ...whiteOnly,
         type: 'white',
         reason: switchReason(row, 'white'),
       })
@@ -671,6 +761,35 @@ const handleSwitchList = async (row) => {
     } catch (restoreError) {
       ElMessage.error(t('security.switchRestoreFailed'))
       return false
+    }
+  }
+
+  /**
+   * 加黑提交：**不带** typedConfirm 先发一次，只有后端明确答 typed_confirmation_required
+   * 才带确认串重发。
+   *
+   * 为什么不在这里判 row.ip.includes('/')：那等于把后端的门槛（hostCount>=256、
+   * 且比对的是 normalizeCIDR 之后的值）在前端重算一遍——两份事实，等价只是当下巧合。
+   * 一旦某天门槛改成 /25 或后端归一化口径变化，前端就会"该带不带"（必被拒）或
+   * "不该带却带"（把没确认过的写操作伪装成确认过）。ADR-018 ③ 已写明这条归后端算。
+   * 第二次用 row.ip 原文当确认串仍是需要的：后端比对的是归一化后的 cidr，回填原始文本
+   * 在非规范写法下会漂移；故这里用**后端已经接受过的那个值**（即拒绝时读回的信息）——
+   * 至少有据可依，且失败会如实抛给调用方走恢复流程。
+   */
+  const submitBlackWithTypedConfirm = async () => {
+    try {
+      await apiClient.post('/security/ip-list', payload)
+    } catch (e) {
+      if (refusalReasonOf(e) !== 'typed_confirmation_required') throw e
+      // **不许**自动回填 row.ip 当确认串：那等于替用户签字。逐字确认的全部意义在于
+      // 「人看过这段影响面并复述一遍」，机器复述一遍只证明字符串可复制。行内没有输入框，
+      // 故这里亮出与新增同款的确认框，让用户自己敲；敲的内容与原网段不符就不提交。
+      // 提示与校验都用后端回带的**归一化**形态：确认串比对的就是它。拿 row.ip 原文
+      // 当提示会把用户钉在一个后端永不接受的字符串上（2001:DB8::/64 敲对了也 400）。
+      // 老后端不回带 expected 时退回 row.ip 原文。
+      const typed = await promptTypedConfirm(typedConfirmExpectationOf(e, row.ip))
+      if (typed === null) throw e
+      await apiClient.post('/security/ip-list', { ...payload, typedConfirm: typed })
     }
   }
 
@@ -686,9 +805,13 @@ const handleSwitchList = async (row) => {
         throw e
       }
       try {
-        await apiClient.post('/security/ip-list', payload)
+        await submitBlackWithTypedConfirm()
       } catch (e) {
-        // 原白名单恢复失败必须显式告警，便于管理员立即复核该 IP 的实际判定。
+        // **无条件恢复**：上一段 DELETE 已经真的删掉了白名单条目（后端 ip_whitelist_removed
+        // 有审计），所以此刻该 IP 两边名单都不在。按拒绝原因决定要不要补偿是错的——
+        // 判据类拒绝（罩住自己/还有活跃流量）只是"黑名单写不进去"，不代表白名单还在。
+        // 跳过恢复 = 静默丢条目：用户看到「拒绝：这个网段罩住了你自己」，以为什么都没变，
+        // 而实际上放行规则已经没了。恢复失败也要显式告警，便于管理员立即复核判定。
         await restoreOriginalWhitelist()
         throw e
       }
@@ -702,7 +825,12 @@ const handleSwitchList = async (row) => {
       await loadData()
     }
   } catch (e) {
-    if (!isHandledApiError(e)) ElMessage.error(t('security.switchFailed'))
+    // 判据类拒绝必须说清"为什么"：operator_inside（你自己就在里面）与
+    // live_traffic_inside（这栋楼还在用）的下一步动作完全不同，笼统一句"切换失败"
+    // 等于让运维去猜，而猜错的方向是把自己锁在门外。
+    if (!showSwitchRefusal(e) && !isHandledApiError(e)) {
+      ElMessage.error(t('security.switchFailed'))
+    }
   } finally {
     switchingId.value = null
   }

@@ -43,6 +43,27 @@ describe('文档与代码对账（D-1～D-4）', () => {
     expect(readme).toContain(`ADR-${String(maxAdr).padStart(3, '0')}`);
   });
 
+  test('D-1b：docs/adr/README.md 的索引表必须逐篇覆盖 docs/adr 下的每一篇 ADR', () => {
+    // 上一轮审计报过：新增 ADR-018 后索引表停在 017，而 D-1 只看根 README 的**计数**与
+    // 「最新编号被点名」——两者都不读这张表，于是索引少一整篇仍然全绿。
+    // 索引是给人找文档用的：漏一篇 = 那篇在目录页上不存在，与"没写"等价。
+    const files = fs
+      .readdirSync(path.join(ROOT, 'docs/adr'))
+      .filter((f) => /^ADR-[0-9]+.*[.]md$/.test(f))
+      .map((f) => f.match(/^(ADR-\d+)/)[1])
+      .sort();
+    const index = read('docs/adr/README.md');
+    const listed = [...index.matchAll(/\[ADR-(\d+)\]/g)].map((m) => 'ADR-' + m[1]).sort();
+    // 双向比对：漏篇（新加未登记）与幽灵行（登记了但文件已改名）都要红
+    expect(listed).toEqual(files);
+    // 链接目标必须真的存在：只写编号不写对文件名时，点进去是 404
+    for (const f of fs
+      .readdirSync(path.join(ROOT, 'docs/adr'))
+      .filter((x) => /^ADR-\d+.*\.md$/.test(x))) {
+      expect({ file: f, linked: index.includes('./' + f) }).toEqual({ file: f, linked: true });
+    }
+  });
+
   test('D-1：README 的告警条数 = alert-rules.yml 实际条数', () => {
     const rules = read('deployment/observability/alert-rules.yml');
     const actual = (rules.match(/^\s*- alert:/gm) || []).length;

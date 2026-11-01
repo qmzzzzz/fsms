@@ -17,7 +17,7 @@ const DECOY_USERS = frozenRows([
     roles: [DECOY_ROLE_ENTRIES[0]], // users.roles 的 populate 三键形态 {_id,name,code} 在此声明一次，DECOY_ROLES 同源派生
     department: '中控室',
     status: 'active',
-    phone: '138****1001',
+    phoneMasked: '138****1001',
     avatar: '',
     mustChangePassword: false,
     allowedIPs: '',
@@ -34,7 +34,7 @@ const DECOY_USERS = frozenRows([
     roles: [DECOY_ROLE_ENTRIES[1]],
     department: '维保部',
     status: 'active',
-    phone: '138****1002',
+    phoneMasked: '138****1002',
     avatar: '',
     mustChangePassword: false,
     allowedIPs: '',
@@ -51,7 +51,7 @@ const DECOY_USERS = frozenRows([
     roles: [DECOY_ROLE_ENTRIES[2]],
     department: '中控室',
     status: 'active',
-    phone: '138****1003',
+    phoneMasked: '138****1003',
     avatar: '',
     mustChangePassword: false,
     allowedIPs: '',
@@ -68,7 +68,7 @@ const DECOY_USERS = frozenRows([
     roles: [DECOY_ROLE_ENTRIES[2]],
     department: 'A 区值班室',
     status: 'active',
-    phone: '138****1004',
+    phoneMasked: '138****1004',
     avatar: '',
     mustChangePassword: false,
     allowedIPs: '',
@@ -85,7 +85,7 @@ const DECOY_USERS = frozenRows([
     roles: [DECOY_ROLE_ENTRIES[3]],
     department: '维保部',
     status: 'active',
-    phone: '138****1005',
+    phoneMasked: '138****1005',
     avatar: '',
     mustChangePassword: false,
     allowedIPs: '',
@@ -102,7 +102,7 @@ const DECOY_USERS = frozenRows([
     roles: [DECOY_ROLE_ENTRIES[3]],
     department: 'B 区值班室',
     status: 'inactive',
-    phone: '138****1006',
+    phoneMasked: '138****1006',
     avatar: '',
     mustChangePassword: false,
     allowedIPs: '',
@@ -113,6 +113,7 @@ const DECOY_USERS = frozenRows([
     updatedAtOffsetMin: 60 * 24 * 40,
   },
 ]);
-const DECOY_SELF = DECOY_USERS[0];
+const { phoneMasked: selfPhone, ...selfBase } = DECOY_USERS[0]; // 列表面出 phoneMasked；本人面契约键是 phone（honeypotDecoySelf.js:120），在此派生
+const DECOY_SELF = Object.freeze({ ...selfBase, phone: selfPhone });
 
 module.exports = { DECOY_ROLE_ENTRIES, DECOY_SELF, DECOY_USERS };

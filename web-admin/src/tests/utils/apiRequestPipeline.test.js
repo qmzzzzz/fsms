@@ -1179,6 +1179,24 @@ describe('api 方法表契约（动词/路径/参数透传）', () => {
     ['security.removeIPEntry', 'delete', '/security/ip-list/e1', ['e1'], {}],
   ]
 
+  test('security.addIPEntry 是未接线的死通道：任何视图直接用它写网段都会被封段护栏拒', async () => {
+    // 它只发 { ip, type, reason, durationHours }，永远不带 typedConfirm。而后端对
+    // 加黑网段要求逐字确认（≥256 主机）⇒ 直接启用必然 400 typed_confirmation_required。
+    // 判据两段：① 生产视图里真没人调它（否则这就是个现网缺陷，不是死代码）；
+    // ② 它的调用签名里没有 typedConfirm 通道（所以"顺手启用"必然踩坑，而不是碰巧能用）。
+    const glob = await import('node:fs')
+    const pathMod = await import('node:path')
+    const viewsDir = pathMod.resolve(__dirname, '../../views')
+    const hit = []
+    for (const f of glob.readdirSync(viewsDir)) {
+      if (!f.endsWith('.vue')) continue
+      if (glob.readFileSync(pathMod.join(viewsDir, f), 'utf8').includes('addIPEntry')) hit.push(f)
+    }
+    expect(hit).toEqual([])
+    const src = glob.readFileSync(pathMod.resolve(__dirname, '../../utils/api.js'), 'utf8')
+    expect(src).toMatch(/addIPEntry: \(data\) => apiClient\.post\('\/security\/ip-list', data\)/)
+  })
+
   test('全部端点的动词与路径符合后端契约，参数/响应类型原样透传', async () => {
     // 防退化：动词或路径被改错（如 update 误用 post、:sid 分支误用 others 字面量、
     // 导出丢掉 responseType: blob）→ 生产环境才暴露的 404/405/损坏下载

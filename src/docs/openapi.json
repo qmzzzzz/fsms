@@ -1627,7 +1627,7 @@
           }
         },
         "responses": {
-          "201": {
+          "200": {
             "description": "创建成功"
           }
         }
@@ -3503,7 +3503,7 @@
           }
         },
         "responses": {
-          "201": {
+          "200": {
             "description": "举报已提交"
           },
           "403": {
@@ -3767,6 +3767,46 @@
         }
       }
     },
+    "/api/security/stuffing-profile": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "撞库画像（来源段 × 字典特征 × 成功率；businessDay 缺省=今天）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Reauth-Ticket",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选的短时票据（5 分钟，绑定账号与会话，**一次性**）。默认不需要：POST /api/security/reauth 成功后服务端会为该会话开 5 分钟窗口，窗口内凭有效访问令牌即可读取。票据路径供无会话上下文的 API 客户端使用，同一张票第二次使用会被拒（REAUTH_TICKET_INVALID）。"
+          },
+          {
+            "name": "businessDay",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回业务日窗口内按强度排序的来源段画像；行数低于 minSamples 时不返回条目"
+          },
+          "400": {
+            "description": "businessDay 形状非法（DATE_PARAM_INVALID）"
+          },
+          "401": {
+            "description": "缺少或无效的二次验证票据"
+          }
+        }
+      }
+    },
     "/api/security/config/allowPublicRegistration": {
       "get": {
         "tags": ["Security"],
@@ -3913,7 +3953,7 @@
       "post": {
         "tags": ["Security"],
         "summary": "添加 IP 到黑/白名单",
-        "description": "白名单优先级高于黑名单；加入黑名单时若已在白名单则拒绝",
+        "description": "白名单优先；覆盖整族须超管+typedConfirm+永久白救援路径，被拒回带归一化 expected",
         "security": [
           {
             "bearerAuth": []
@@ -3945,6 +3985,10 @@
                     "minimum": 0,
                     "maximum": 8760,
                     "description": "0=永久"
+                  },
+                  "typedConfirm": {
+                    "type": "string",
+                    "description": "逐字复述网段；覆盖整族时必须"
                   }
                 }
               }
@@ -3952,11 +3996,14 @@
           }
         },
         "responses": {
-          "201": {
+          "200": {
             "description": "添加成功"
           },
           "400": {
-            "description": "IP 已在白名单中"
+            "description": "已在白名单；或段护栏拒绝（errors.reason 为原因码，expected 是归一化网段）"
+          },
+          "403": {
+            "description": "覆盖整族且非内置超管；或删除会拆掉唯一救援路径"
           }
         }
       }
@@ -4415,6 +4462,17 @@
         }
       }
     },
+    "/api/version": {
+      "get": {
+        "tags": ["System"],
+        "summary": "版本元数据（匿名，响应带 no-store）",
+        "responses": {
+          "200": {
+            "description": "构建信息（版本/构建时间/commit）"
+          }
+        }
+      }
+    },
     "/api/security/forensic/trace": {
       "get": {
         "tags": ["Security"],
@@ -4540,7 +4598,7 @@
       "post": {
         "tags": ["Security"],
         "summary": "申请网段封禁的确认票据",
-        "description": "本步不落库。被护栏拒绝时返回 400，errors.errorCode=FORENSIC_POOL_BAN_REFUSED，errors.reason ∈ unparsable_cidr（网段格式无法解析） · full_range_cidr（这是全网段（/0）） · whitelist_covers（白名单已覆盖该网段，封了不会生效） · union_covers_family（与已有黑名单并集后覆盖整个地址族） · operator_inside（操作者自己在该网段内） · live_traffic_inside（该网段最近仍有真实业务请求） · reason_required（未填写封禁理由） · typed_confirmation_required（该网段影响面大，必须逐字输入网段本身） · unknown_token（确认票据不存在或已失效） · token_expired（确认票据已过期（有效期 10 分钟））。票据 10 分钟失效且只能用一次。",
+        "description": "本步不落库。被护栏拒绝时返回 400，errors.errorCode=FORENSIC_POOL_BAN_REFUSED，errors.reason ∈ unparsable_cidr（网段格式无法解析） · full_range_cidr（这是全网段（/0）） · whitelist_covers（白名单已覆盖该网段，封了不会生效） · union_covers_family（与已有黑名单并集后覆盖整个地址族） · operator_inside（操作者自己在该网段内） · live_traffic_inside（该网段最近仍有真实业务请求） · reason_required（未填写封禁理由） · typed_confirmation_required（该网段影响面大，必须逐字输入网段本身） · no_rescue_path（写下去会把你自己也封在门外，且当前没有可用的救援路径（先把你的来源 IP 加入永久白名单）） · unknown_token（确认票据不存在或已失效） · token_expired（确认票据已过期（有效期 10 分钟））。票据 10 分钟失效且只能用一次。",
         "security": [
           {
             "bearerAuth": []
@@ -4610,11 +4668,11 @@
           }
         },
         "responses": {
-          "201": {
+          "200": {
             "description": "返回 bannedCount 与逐条结果"
           },
           "400": {
-            "description": "票据无效或已过期"
+            "description": "票据无效/已过期/已用过，或逐字确认不符（errors.reason 为原因码）"
           }
         }
       }

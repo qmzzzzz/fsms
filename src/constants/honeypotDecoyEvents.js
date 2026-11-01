@@ -123,7 +123,12 @@ const DECOY_INSPECTIONS = frozenRows([
     description: '罐区每日防火巡查：消防通道、灭火器压力、可燃物堆放',
     priority: 'normal',
     devices: [
-      { _id: 'hp-d3', deviceCode: 'HD-B2-006', deviceName: '点型感温探测器', deviceType: 'heat_detector' },
+      {
+        _id: 'hp-d3',
+        deviceCode: 'HD-B2-006',
+        deviceName: '点型感温探测器',
+        deviceType: 'heat_detector',
+      },
       { _id: 'hp-d4', deviceCode: 'MB-B2-011', deviceName: '手动报警按钮', deviceType: 'other' },
     ],
     locations: [{ building: 'B2 罐区', floor: '1 层', area: '南侧' }],
@@ -151,7 +156,12 @@ const DECOY_INSPECTIONS = frozenRows([
     description: '月度综合检查：探测器、手报、疏散指示、防火门',
     priority: 'high',
     devices: [
-      { _id: 'hp-d1', deviceCode: 'SD-A1-014', deviceName: '点型感烟探测器', deviceType: 'smoke_detector' },
+      {
+        _id: 'hp-d1',
+        deviceCode: 'SD-A1-014',
+        deviceName: '点型感烟探测器',
+        deviceType: 'smoke_detector',
+      },
     ],
     locations: [{ building: 'A1 厂房', floor: '2 层', area: '东侧' }],
     checkItems: [
@@ -168,8 +178,17 @@ const DECOY_INSPECTIONS = frozenRows([
     result: 'normal',
     remark: '全部检查项合格',
     findings: [],
-    executionLog: [],
-    executionLogCount: 0,
+    executionLog: [
+      { userId: 'hp-u4', action: 'started', timestampOffsetMin: 60 * 20.5 },
+      {
+        userId: 'hp-u4',
+        action: 'completed',
+        timestampOffsetMin: 60 * 19.2,
+        location: { text: 'A1 厂房 2 层东侧' },
+      },
+      { userId: 'hp-u2', action: 'review_approved', timestampOffsetMin: 60 * 18 },
+    ],
+    executionLogCount: 3,
     reviewedBy: { _id: 'hp-u2', username: 'liqiang', realName: '李强' },
     reviewedAtOffsetMin: 60 * 18,
     reviewComment: '记录完整，同意归档',
@@ -195,13 +214,29 @@ const DECOY_INSPECTIONS = frozenRows([
     actualStartTimeOffsetMin: 60 * 43.5,
     actualEndTimeOffsetMin: 60 * 42.2,
     status: 'completed',
-    result: 'normal',
-    remark: '喷淋泵压力正常',
-    findings: [],
-    executionLog: [],
-    executionLogCount: 0,
+    result: 'abnormal',
+    remark: '喷淋泵出口压力偏低，已挂牌报修',
+    findings: [
+      {
+        deviceId: 'hp-d5',
+        issue: '喷淋泵出口压力表读数低于额定下限，停泵复启一次后仍偏低',
+        severity: 'medium',
+        suggestion: '已挂维修牌并报维保班复核，下期周检跟踪复测',
+      },
+    ],
+    executionLog: [
+      { userId: 'hp-u6', action: 'started', timestampOffsetMin: 60 * 43.5 },
+      {
+        userId: 'hp-u6',
+        action: 'completed',
+        timestampOffsetMin: 60 * 42.2,
+        location: { text: 'B1 泵房设备间' },
+        remark: '异常项已录入 findings',
+      },
+    ],
+    executionLogCount: 2,
     createdAtOffsetMin: 60 * 24 * 3,
-    updatedAtOffsetMin: 60 * 42,
+    updatedAtOffsetMin: 60 * 42.2,
   },
   {
     _id: 'hp-i4',

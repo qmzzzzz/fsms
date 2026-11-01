@@ -538,6 +538,8 @@ function installRoutes(app) {
   app.use('/api/inspections', inspectionRoutes);
   app.use('/api/reports', reportRoutes);
   app.use('/api/security', securityRoutes);
+  const stuffingProfileRoutes = require('./routes/stuffingProfileRoutes'); // 同前缀，见 index.js
+  app.use('/api/security', stuffingProfileRoutes); // 走就近 require：顶部加行会漂移已登记的行号锚点
 
   // API 文档（Swagger UI）— 生产环境默认关闭，可通过 ENABLE_API_DOCS=true 开启
   // 开启后可通过 DOCS_USERNAME / DOCS_PASSWORD 设置 Basic Auth 保护
@@ -615,8 +617,7 @@ function createApp() {
 
   // 顺序即语义，不可调换：边缘闸门 → 安全主链 → 路由 → 静态与错误处理
   installEdgeMiddleware(app);
-  const corsOrigin = resolveCorsOrigins();
-  installSecurityMiddlewareChain(app, corsOrigin);
+  installSecurityMiddlewareChain(app, resolveCorsOrigins()); // 单次使用，就地求值
   installRoutes(app);
   installStaticAndErrorHandling(app);
 

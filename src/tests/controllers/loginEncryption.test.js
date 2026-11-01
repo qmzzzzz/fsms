@@ -47,7 +47,7 @@ describe('登录口令加密传输（密文轨）', () => {
     );
     SystemConfig.invalidateRegistrationCache();
 
-    // 注册图形验证码**默认开启**（src/config/index.js:77 顶层 registerCaptchaEnabled，
+    // 注册图形验证码**默认开启**（src/config/index.js:115 顶层 registerCaptchaEnabled，
     // models/SystemConfig.js:208 的 fallback 也读顶层；全仓无任何地方设 REGISTER_CAPTCHA_ENABLED=false）。
     // 本文件的 register 用例测的是「密文轨 + 解密后补做的强度校验」，与验证码前置层无关：
     // 验证码若开着，弱口令与合规口令会**同样**被 400 拦在验证码层 ——

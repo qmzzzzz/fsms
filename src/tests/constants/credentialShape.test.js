@@ -23,11 +23,7 @@ const { isBreachedPassword } = require('../../utils/helpers');
 
 describe('口令字典特征派生：三字段的形状与红线', () => {
   test('字段集合是冻结的三元组：增删字段必须回来改判据（反向也钉住）', () => {
-    expect(CREDENTIAL_SHAPE_FIELDS).toEqual([
-      'credentialStemHits',
-      'lengthBucket',
-      'charsetClass',
-    ]);
+    expect(CREDENTIAL_SHAPE_FIELDS).toEqual(['credentialStemHits', 'lengthBucket', 'charsetClass']);
     expect(Object.isFrozen(CREDENTIAL_SHAPE_FIELDS)).toBe(true);
     const shape = credentialShapeOf('Passw0rd!x');
     expect(Object.keys(shape).sort()).toEqual([...CREDENTIAL_SHAPE_FIELDS].sort());

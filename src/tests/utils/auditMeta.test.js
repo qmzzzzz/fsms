@@ -326,7 +326,9 @@ describe('auditMeta（审计元数据派生）', () => {
       //      同时改调真实 deriveAction 后少了 1 条：复刻版把 /api/alarms/:id/... 之类
       //      资源段原样当 category（alarms_*），真实实现按 ROUTE_CATEGORY_MAP 归一到
       //      alarm_*，复刻版凭空多出来的那条随之消失——不是"放宽判据"，是两份事实合一。
-      expect(collectActions().size).toBe(106);
+      // 107：撞库画像读口 GET /api/security/stuffing-profile（ADR-013 P2 情报）——路由独立成
+      //      stuffingProfileRoutes.js，是为避开 securityRoutes.js 的 max-lines 行数地板。
+      expect(collectActions().size).toBe(107);
     });
 
     test('全部路由派生型 action 均在 AUDIT_LOG_ACTIONS 白名单内', () => {

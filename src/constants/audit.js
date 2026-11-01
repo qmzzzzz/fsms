@@ -318,6 +318,7 @@ const AUDIT_LOG_ACTIONS = [
   'security_stats', // GET /api/security/stats
   'security_overview', // GET /api/security/overview（2026-09-30 GET 默认审计反转后已真实落库）
   'security_alerts', // GET /api/security/alerts
+  'security_stuffing-profile', // GET /api/security/stuffing-profile（撞库画像，ADR-013 P2 情报）
   'security_users_view', // GET 类用户子路径兜底
   'security_users_mfa_reset', // PUT /api/security/users/:userId/mfa/reset
   'security_audit-logs_verify', // GET /api/security/audit-logs/verify
@@ -390,7 +391,6 @@ const AUDIT_LOG_ACTIONS = [
   'user_locked',
   'user_anonymized', // P1-3 删除改为匿名化后的专用动作
   // 登录失败计数达阈值触发的 10 分钟临时锁定（authService 写入）。
-  // 此前缺失于白名单：记录在库却无法按该 action 筛选（validateEnum 打 400）
   'account_temp_locked',
   'user_unlocked',
   // 安全告警事件
@@ -423,7 +423,6 @@ const AUDIT_LOG_ACTIONS = [
   'csrf_origin_denied',
   'malformed_request_blocked',
   // queryLimit 的两类拒绝（参数超长 / 收到对象数组形态的取值）。
-  // 与上面三类同族：都发生在 auditLog 之前，此前只进 logger。
   // 不复用 malformed_request_blocked：那一条由协议合规层发出（Content-Type/头部/方法畸形），
   // 这一条是 NoSQL 操作符与资源耗尽探测的指纹，混在一起就分不出"谁在探查询参数"。
   'query_param_rejected',

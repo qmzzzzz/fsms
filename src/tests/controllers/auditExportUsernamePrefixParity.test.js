@@ -4,7 +4,7 @@
  *
  * 被测对象：GET /api/reports/export?type=audit&username=…（xlsx 链）
  * 守护的不变式：本仓写成硬约束的「导出即所见」（reportExportService 文件头、
- *   utils/auditQuery.js:199-200）——同一个 URL 参数在三条链上必须是同一个结果集。
+ *   utils/auditQuery.js:304-305）——同一个 URL 参数在三条链上必须是同一个结果集。
  *
  * 缺陷形状（修复前）：xlsx 侧留着列表改造前的旧写法
  *   `{ $regex: escapeRegExp(username), $options: 'i' }`，且全程不挂 collation。

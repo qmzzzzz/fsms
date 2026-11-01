@@ -205,12 +205,16 @@ describe('Top-3 ③ 消费侧：标记缺席时两处豁免都必须恢复生效
     });
 
     // 无标记：跨站来源被拒
+    // setHeader 必须补：403 出口经 setNoStore 下发 Cache-Control（错误响应禁止缓存）。
+    // 这里断言的是**403 语义**（下面 denied.statusCode），不是"调用过 setHeader"——
+    // 后者会把实现细节钉成期望，换个下发方式就假红。
     const denied = {
       statusCode: 200,
       status(c) {
         this.statusCode = c;
         return this;
       },
+      setHeader: jest.fn(),
       json: jest.fn(),
     };
     middleware(mk(false), denied, jest.fn());
@@ -223,6 +227,7 @@ describe('Top-3 ③ 消费侧：标记缺席时两处豁免都必须恢复生效
         this.statusCode = c;
         return this;
       },
+      setHeader: jest.fn(),
       json: jest.fn(),
     };
     const next = jest.fn();

@@ -10,11 +10,11 @@
  *   标记：[仍有效] 复核后问题依旧 / [已修复] 已被后续修复解决 / [部分有效] 仅部分成立 /
  *   [已自陈] 用例内已记录并给出保留理由。复核证据见 `deliverables/AGENT工作总账与待办-2026-09-21.md` §2.9 测试资产。
  *   - [仍有效·已实测] `:230-242`（现形 `:251`）标题写「降级为无 sid 令牌」而未验证 sid 缺失（deliverables/七维代码健康度深度审计-2026-09-18.md）
- *     变异实测确认 + 措辞更正（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）：让 services/authService.js:791-799
- *       的**降级分支仍传 `sid`**（正是 :777-779 注释自己警告的形态：下发查不到会话的带 sid 令牌
+ *     变异实测确认 + 措辞更正（2026-09-20，`deliverables/AGENT工作总账与待办-2026-09-21.md` §6 方法）：让 src/services/authService/session.js:212
+ *       的**降级分支仍传 `sid`**（正是 src/services/authService/session.js:235-237 注释自己警告的形态：下发查不到会话的带 sid 令牌
  *       ⇒ `authenticate` 拒绝该令牌，用户登录成功却立刻无法访问任何接口）
  *       → 本文件 **26/26 全绿**；同点位 throw 正对照杀 **2 例**（含该标题用例本身）。
- *     **措辞更正**：`loginUser` 返回体**没有 `sid` 字段**（:811-823 仅 outcome/token/refreshToken/user），
+ *     **措辞更正**：`loginUser` 返回体**没有 `sid` 字段**（src/services/authService/session.js:303-317 仅 outcome/token/refreshToken/user），
  *       可观测物应是**解码 JWT 后的 `sid` claim**，不是 `result.sid`。
  *
  * 命名沿革：2026-09-20 由 `authServiceGapB.test.js` 更名。旧名里的
@@ -120,11 +120,11 @@ describe('authService gap B', () => {
     });
 
     test('ENC_INVALID - 注册时 encPassword 解密失败', async () => {
-      // 注册验证码默认开启（src/config/index.js:77 顶层 registerCaptchaEnabled；
+      // 注册验证码默认开启（src/config/index.js:115 顶层 registerCaptchaEnabled；
       // models/SystemConfig.js:208 的 fallback 同读顶层；全仓无任何地方设
       // REGISTER_CAPTCHA_ENABLED=false），而 authService.registerUser 的验证码闸
-      // （src/services/authService.js:129）排在密文解密
-      // （src/services/authService.js:139）**之前** ⇒ 不打桩就会被 CAPTCHA_INVALID 拦下，
+      // （src/services/authService/session.js:52）排在密文解密
+      // （src/services/authService/session.js:82）**之前** ⇒ 不打桩就会被 CAPTCHA_INVALID 拦下，
       // 永远到不了本用例要测的解密失败分支。被测对象是解密分支，故显式关掉验证码闸
       // （与上方 CAPTCHA_INVALID 用例同一手法，只是方向相反）。
       const SysConfig = require('../../models').SystemConfig;
@@ -303,7 +303,7 @@ describe('authService gap B', () => {
     });
 
     // NOTE: 非常规时间分支依赖「当前时刻」且 checkUnusualTime 是加载时解构
-    // （authService.js:25 解构 → :732 调用），事后 spyOn 确实改不到。
+    // （src/services/authService/session.js:15 解构 → :243 调用），事后 spyOn 确实改不到。
     // 但**模块级 jest.mock 可以**，且已在 authServiceSideEffectFailureTolerance.test.js
     // 做过确定性触发 + 行为级断言（该文件的 mockUnusualMode）。
     // 本文件不重复造同一场景，避免同一条不变量两处实现漂移。

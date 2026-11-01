@@ -18,12 +18,19 @@ const PROFILE_FIELDS = Object.freeze([
   'windowEnd',
 ]);
 
-const SAMPLED_ACTIONS = Object.freeze(['canary_username_attempt', 'honeypot_login', 'honeypot_probe']); // 只有蜜罐阶段的行才计 attempts
+const SAMPLED_ACTIONS = Object.freeze([
+  'canary_username_attempt',
+  'honeypot_login',
+  'honeypot_probe',
+]); // 只有蜜罐阶段的行才计 attempts
 const SUCCESS_ACTION = 'login_success'; // successes 只由真实登录成功贡献：诱饵放行的成功单独计，否则成功率被诱饵自身抬到 100%
 
 const sortedKeys = (counts, order) =>
-  [...counts.keys()].sort((a, b) =>
-    counts.get(b) - counts.get(a) || (order.indexOf(a) - order.indexOf(b) || String(a).localeCompare(String(b)))
+  [...counts.keys()].sort(
+    (a, b) =>
+      counts.get(b) - counts.get(a) ||
+      order.indexOf(a) - order.indexOf(b) ||
+      String(a).localeCompare(String(b))
   ); // 平票按档位表序再按字典序——绝不按 Map 插入序：同一份行集必须每次得到同一份画像
 
 const dominantOf = (counts, order) => sortedKeys(counts, order)[0] || null;
@@ -40,8 +47,7 @@ const emptyGroup = (sourceKey) => ({
   accounts: new Set(),
 });
 
-const accountOf = (username) =>
-  typeof username === 'string' ? username.trim().toLowerCase() : ''; // 大小写不敏感口径与 username_ci 唯一索引同源
+const accountOf = (username) => (typeof username === 'string' ? username.trim().toLowerCase() : ''); // 大小写不敏感口径与 username_ci 唯一索引同源
 
 const accumulateShape = (group, shape) => {
   if (!shape || typeof shape !== 'object') return;

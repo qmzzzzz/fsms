@@ -573,23 +573,18 @@ describe('H/I/J 投影键集、值域桥与反向对照', () => {
   };
   /** 第三刀把下列键改名：本表就是「改名待办」，改名落地后条目必须删，否则 stale 判红。 */
   const PENDING_RENAME = {
-    users: { phone: 'phoneMasked' },
+    users: {},
     roles: {},
     permissions: {},
     devices: {},
     alarms: {},
-    inspections: {
-      code: 'title',
-      area: 'locations',
-      inspector: 'assignedTo',
-      finished: 'actualEndTime',
-    },
+    inspections: {},
   };
   /**
    * 改名已落地的集合：待办表必须为空，且**不许再往回填**（回填即判红）。
    * 表一旦删空，H 里那句 `extra === 待办键` 就自动翻转成"旧名必须消失"——这半句才是棘轮。
    */
-  const RENAME_LANDED = ['alarms', 'devices'];
+  const RENAME_LANDED = ['alarms', 'devices', 'inspections', 'users'];
   const MUST_EMIT = ['_id', 'status'];
   /** 条件物化：数据面没有该偏移量时整键不出现（第三刀可评估是否统一补齐）。 */
   const VARYING_KEYS = {
@@ -598,7 +593,15 @@ describe('H/I/J 投影键集、值域桥与反向对照', () => {
     permissions: [],
     devices: ['expiryDate', 'nextCheckDate', 'remark', 'scrapDate', 'scrapReason'],
     alarms: ['arrivedAt', 'cause', 'dispatchedAt', 'handleResult', 'handler', 'resolvedAt'],
-    inspections: ['finished', 'planEndTime', 'result'],
+    inspections: [
+      'actualEndTime',
+      'actualStartTime',
+      'result',
+      'reviewComment',
+      'reviewResult',
+      'reviewedAt',
+      'reviewedBy',
+    ],
   };
 
   /** 凭证/内部字段：模型 schema 的 select:false 全路径 + 用户模型源码声明的排除清单。 */
@@ -613,9 +616,8 @@ describe('H/I/J 投影键集、值域桥与反向对照', () => {
     return out;
   };
 
-  const projectionVerdict = (key, emitted) => {
+  const projectionVerdict = (key, emitted, pending = PENDING_RENAME[key] || {}) => {
     const expected = expectedKeysOf(key);
-    const pending = PENDING_RENAME[key] || {};
     const extra = emitted
       .filter((k) => !expected.has(k))
       .slice()
@@ -758,13 +760,16 @@ describe('H/I/J 投影键集、值域桥与反向对照', () => {
     const relapsed = projectionVerdict('alarms', emitted.concat(['code', 'time']).slice().sort());
     expect(relapsed.undeclared).toEqual(['code', 'time']);
     expect(relapsed.stale).toEqual([]);
-    // 少下发一个键：拿还有改名待办的集合做，待办键缺席即 stale（跟着字段走）
-    const pendingEmitted = Object.keys(payloadOf('inspections').data[0]).slice().sort();
+    // 少下发一个键：待改名键缺席即 stale（跟着字段走）。四张改名待办现已全部清空，没有现成靶子，
+    // 这里显式给一份合成待办走**同一条**判定路径——stale 通道常年在测，不随棘轮收口而空转。
+    const inspectionsEmitted = Object.keys(payloadOf('inspections').data[0]).slice().sort();
     const missingVerdict = projectionVerdict(
       'inspections',
-      pendingEmitted.filter((k) => k !== 'code')
+      inspectionsEmitted.filter((k) => k !== 'title'),
+      { title: 'code' }
     );
-    expect(missingVerdict.stale).toEqual(['code']);
+    expect(missingVerdict.stale).toEqual(['title']);
+    expect(missingVerdict.undeclared).toEqual([]); // 'title' 本身是合法键：少下发 ≠ 多下发
     const droppedCore = projectionVerdict(
       'alarms',
       emitted.filter((k) => k !== 'status')

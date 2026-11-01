@@ -54,13 +54,17 @@ describe('蜜罐影子数据面（P1）：改道判定、合成数据与留痕',
     else process.env[key] = value;
   };
   const makeRes = () => {
-    const res = {};
+    const res = { headers: {} };
     res.status = (code) => {
       res.statusCode = code;
       return res;
     };
     res.json = (payload) => {
       res.body = payload;
+      return res;
+    };
+    res.setHeader = (k, v) => {
+      res.headers[k] = v;
       return res;
     };
     return res;

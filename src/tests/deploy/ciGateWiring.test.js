@@ -210,6 +210,16 @@ describe('CI 门禁接线自检', () => {
   // 也被调用，但它们**不是**"做错了会让 CI 变绿"的那种闸，被删不会造成静默放行。
   // 用显式豁免（附理由）而不是放宽匹配规则，是为了让"为什么它不算门禁"这个判断
   // 本身可审计、可复核，而不是藏在一个宽泛的正则里。
+  //
+  // 2026-11-02（第 25 轮供应链面审计 H2）：匹配面原为 `\.js`，于是 `scripts/` 下 7 个
+  // `.sh`（backup-mongo / restore-mongo / mongoUri / backupCrypto / generate-dev-cert /
+  // build-offline-bundle / capture-image-digests，合计 2802 行）**结构性地不在本判据的
+  // 匹配集内**——不是"漏登记一个文件"，而是"登记面没有 .sh 这个入口"。
+  // 扩面为 `\.js|\.sh` 时实测（第 25 轮夹具）：现有 8 份工作流对 `.sh` 的调用点为 **0**
+  // ⇒ **新增红 0 条**，`CI_ENFORCED_GATE_SCRIPTS` 与豁免清单都无需改动。
+  // 同时验证过扩面不是空转：在夹具里注入一行 `run: bash scripts/backup-mongo.sh` 后
+  // 本用例立刻报 `unaccounted = ['scripts/backup-mongo.sh']`。
+  // 注意放宽的只是**文件扩展名**，不是"门禁 vs 非门禁"的区分——后者仍然只许走上面的显式豁免。
   const NON_GATE_SCRIPT_EXEMPT = new Map([
     // 部署脚本：被 deploy.yml 调用，职责是"把已通过门禁的产物推上去"。
     // 它自己不产生"通过/不通过"的判定，删掉它 CI 不会放行任何坏代码。
@@ -221,7 +231,9 @@ describe('CI 门禁接线自检', () => {
 
   test('防清单瘦身：工作流里被调用的脚本必须已登记或已豁免（删清单行必红）', () => {
     const called = new Set();
-    for (const m of ciText.matchAll(/scripts\/[\w.-]+\.js/g)) called.add(m[0]);
+    // .js 与 .sh 都在登记面内：只匹配 .js 时，7 个 shell 门禁/运维脚本（2802 行）
+    // 即便被工作流调用也不受"必须登记"约束（第 25 轮审计 H2 的根因）。
+    for (const m of ciText.matchAll(/scripts\/[\w.-]+\.(?:js|sh)/g)) called.add(m[0]);
     const unaccounted = [...called].filter(
       (s) => !CI_ENFORCED_GATE_SCRIPTS.includes(s) && !NON_GATE_SCRIPT_EXEMPT.has(s)
     );

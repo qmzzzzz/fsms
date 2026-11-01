@@ -18,6 +18,14 @@ npm-debug.log*
 # 升级本地队列（生产在 /var/lib/fsms/upgrade，仅本地开发可能指向仓库内）
 .upgrade-queue/
 
+# 会话临时归档（.temp/lead-reflow-freeze/*）：某会话冻结的测试树快照，属诊断产物，
+# 不是本仓库内容；仓库根跑 git add -A 会把它整个收进仓库。
+.temp/
+
+# 外部编码工具的计划目录（.zcode/plans/*.md）：不属于本仓库产物，
+# 曾以单个 12KB 计划文件出现在仓库根，`git add -A` 会一并收进仓库。
+.zcode/
+
 # 测试
 coverage/
 .nyc_output/
@@ -164,3 +172,30 @@ work/lead/*.log
 
 # 审计/修复过程的临时工作台（脚本自述「不进仓库」），只留报告
 work/_harness/
+
+# work/lead 下还有一批「一次性探针/夹具/截图/前版本文件」：备份副本（*.bak*.js / *.bak*.sh / *.fixed / *.v2 / *.v3）、
+# 变异与探针脚本（mut/）、UI 截图（*.png）、进程日志（*.err）与前后版对照（*.before.*）。
+# 它们的结论都已转写进 iter-report 与各报告；留着只会让 `git status` 里长期挂着几十个未跟踪条目，
+# 真正的新增文件反而被淹没。判据是「可否从报告里的命令重放」——能重放的不必留副本。
+work/lead/*.bak*.js
+work/lead/*.bak*.sh
+work/lead/*.fixed
+work/lead/*.v2
+work/lead/*.v3
+work/lead/*.png
+work/lead/*.err
+work/lead/*.before.*
+work/lead/write-test.txt
+work/lead/mut/
+
+# ===== 审计/修复工作台整体不入库（2026-11-01）=====
+# work/ 是多 lane 并行审计的本地工作台：探针、变异台、.bak/.fixed/.v2 副本与各轮报告。
+# 与 deliverables/ 同一理由——报告里含带 file:line 坐标的可利用漏洞细节，而本仓库是公开仓库；
+# 一次性脚本按「可否从报告里的命令重放」判据不留副本。结论转写进 docs/ 后，work/ 只留在本地。
+# 个别确需入库的文件用 git add -f 显式添加。此前被整目录误暂存的 533 个文件已 git reset -- work/ 剔除。
+work/
+
+# 仓库根下的一次性调试输出（schema 内省 dump / 套件运行输出），同理不入库
+/tmp/
+/tmp-*.json
+/tmp-*.out

@@ -151,7 +151,7 @@ const LIST_ENDPOINTS = Object.freeze([
     filters: Object.freeze(['status', 'inspectionType', 'assignedTo']),
     dates: DATES,
     sort: sortOf(['planStartTime', -1], ['_id', -1]),
-    search: searchOf(['code', 'substring'], ['area', 'substring']),
+    search: searchOf(['title', 'substring'], ['locations.building', 'substring']),
     rules: Object.freeze([
       enumRule('status', INSPECTION_STATUSES, '无效的巡检状态'),
       enumRule('inspectionType', INSPECTION_TYPES, '无效的巡检类型'),

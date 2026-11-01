@@ -11,6 +11,7 @@ const admin = require('./admin');
 const config = require('./config');
 const reauth = require('./reauth');
 const upgrade = require('./upgrade');
+const profile = require('./profile');
 
 module.exports = {
   getMySecurityInfo: account.getMySecurityInfo,
@@ -37,4 +38,5 @@ module.exports = {
   getUpgradeOverview: upgrade.getUpgradeOverview,
   getUpgradeJob: upgrade.getUpgradeJob,
   triggerUpgrade: upgrade.triggerUpgrade,
+  getStuffingProfile: profile.getStuffingProfile,
 };

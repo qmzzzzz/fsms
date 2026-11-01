@@ -279,10 +279,9 @@ const ERROR_CODE_I18N_MAP = {
   PUBLIC_REGISTRATION_DISABLED: 'errors.publicRegistrationDisabled',
   REGISTER_SERVICE_UNAVAILABLE: 'errors.registerServiceUnavailable',
   AUDIT_QUERY_FAILED: 'errors.auditQueryFailed',
-  // 取证溯源（T5/T6）。FORENSIC_POOL_BAN_REFUSED 的**具体原因**在 errors.reason
-  // （full_range_cidr / whitelist_covers / operator_inside / reason_required /
-  // unparsable_cidr / unknown_token / token_expired），视图按 reason 选专属文案；
-  // 这里的码级文案只是「兜底」——reason 未知时才会看到它。
+  // 取证溯源（T5/T6）。FORENSIC_POOL_BAN_REFUSED 的**具体原因**在 errors.reason，取值见后端
+  // src/constants/banRefusalReason.js（单一事实来源；此处不抄枚举——抄一份漂一份）；
+  // 视图按 reason 选专属文案，这里的码级文案只是「兜底」——reason 未知时才会看到它。
   FORENSIC_NO_CRITERIA: 'errors.forensicNoCriteria',
   FORENSIC_POOL_BAN_REFUSED: 'errors.forensicPoolBanRefused',
   FORENSIC_EXPORT_NO_SECRET: 'errors.forensicExportNoSecret',
@@ -298,19 +297,45 @@ const ERROR_CODE_I18N_MAP = {
 }
 
 /**
+ * 同一错误码在不同 HTTP 方法下的**下一步动作**可能完全不同，故按方法分档。
+ *
+ * 目前只有一档：FULL_RANGE_FORBIDDEN 落在 DELETE 上。写入侧说的下一步是
+ * 「换更精确的网段，且只有超管能配」；删除侧说的下一步是「这一条是全网段黑名单的
+ * **唯一救援路径**，删了之后谁也无法自行解除封锁」。拿写入侧文案去解释一次删除，
+ * 用户会以为"只是权限不够、什么都没发生"——而条目其实已经没了。
+ *
+ * 判据是「方法 + 码」，不是「码」：通用表保持按码查，只有明确分档的才走本表，
+ * 未分档一律回落通用表（新码/新方法不需要改这里）。
+ */
+const METHOD_SCOPED_ERROR_I18N = {
+  delete: { FULL_RANGE_FORBIDDEN: 'security.fullRangeDeleteForbidden' },
+}
+
+/**
  * 按 errors.errorCode 解析本地化错误消息
  * 未命中（后端未码化的接口）返回 null，调用方回退到后端 message
+ * @param {object} data - 响应体
+ * @param {string} [method] - HTTP 方法（axios config.method，小写）。缺省时行为与单参调用完全一致
  */
-function resolveErrorMessage(data) {
+function resolveErrorMessage(data, method) {
   const errorCode = data?.errors?.errorCode
+  if (!errorCode) return null
+  const params = data?.errors || {}
+  // 方法分档优先于通用表；两边都用自有属性查表，理由同上（原型链键）
+  const scoped =
+    typeof method === 'string' &&
+    Object.prototype.hasOwnProperty.call(METHOD_SCOPED_ERROR_I18N, method)
+      ? METHOD_SCOPED_ERROR_I18N[method]
+      : null
+  if (scoped && Object.prototype.hasOwnProperty.call(scoped, errorCode)) {
+    return i18n.global.t(scoped[errorCode], params)
+  }
   // errorCode 来自响应体（外部输入），必须限定为自有属性：裸查表会让 'toString'/
   // 'constructor' 等原型链键取到 Object.prototype 上的函数（truthy），返回函数而非
-  // 约定的 null，调用方 `resolveErrorMessage(...) || data?.message || t(...)` 兜底链
+  // 约定的 null，调用方 `resolveErrorMessage(...) ||数据?.message || t(...)` 兜底链
   // 被短路，界面渲染出「function toString() { [native code] }」
-  if (errorCode && Object.prototype.hasOwnProperty.call(ERROR_CODE_I18N_MAP, errorCode)) {
-    const i18nKey = ERROR_CODE_I18N_MAP[errorCode]
-    const params = data?.errors || {}
-    return i18n.global.t(i18nKey, params)
+  if (Object.prototype.hasOwnProperty.call(ERROR_CODE_I18N_MAP, errorCode)) {
+    return i18n.global.t(ERROR_CODE_I18N_MAP[errorCode], params)
   }
   return null
 }
@@ -891,9 +916,13 @@ apiClient.interceptors.response.use(
           case 403:
             // 静音态（轮询）下不弹：权限不足的结论已由 reject 交还调用方，
             // 3s 一次重复弹「权限不足」只会把真正需要人介入的失败淹没
+            // 顺序＝方法分档文案 → 后端专属 message → 通用兜底：删除侧 403 的
+            // 后端 message 是专属的（「唯一救援路径」），不能被通用表吞掉
             if (!silentErrors)
               ElMessage.error(
-                resolveErrorMessage(data) || data?.message || t('messages.accessDenied')
+                resolveErrorMessage(data, config?.method) ||
+                  data?.message ||
+                  t('messages.accessDenied')
               )
             break
           case 404:
@@ -1153,6 +1182,9 @@ export const api = {
     // → data { type, masked, full }。用户列表/详情只下发脱敏值，明文只能走这一条通道
     // （服务端在此写 view_sensitive_data 审计，审计写失败即不返回明文）。
     viewSensitive: (data) => apiClient.post('/security/view-sensitive', data),
+    // 本通道**不**补 typedConfirm：要不要确认由后端按 hostCount/normalizeCIDR 判（ADR-018 ③），
+    // 前端复算即第二份事实。当前无视图调用它；启用时照 IpListView 走两阶段（先不带 → 读回
+    // 后端的打字确认原因码 → 再带），否则加黑网段必然被拒。
     addIPEntry: (data) => apiClient.post('/security/ip-list', data),
     removeIPEntry: (id) => apiClient.delete(`/security/ip-list/${encodePathSegment(id)}`),
     // 举报对象候选（GET /security/report-targets?type=&keyword=）→ data { items }

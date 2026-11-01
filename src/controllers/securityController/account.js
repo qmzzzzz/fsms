@@ -191,7 +191,6 @@ const getAccountBindings = asyncHandler(async (req, res) => {
           // 占位符交前端词表渲染——AccountBindingsCard 对空值显示 '—'。
           value: user.department || '',
           // 与上面 email/phone 两项同口径：verified = 「该项有值」。
-          // 原先这里写死 true，于是没有部门的用户会显示成「已绑定 + 未设置」这一自相矛盾的状态。
           verified: !!user.department,
           required: false,
         },

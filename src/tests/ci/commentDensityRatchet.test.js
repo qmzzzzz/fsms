@@ -12,7 +12,10 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const {
+  measure,
   production,
   evaluate,
   totalsOf,
@@ -90,5 +93,58 @@ describe('注释密度棘轮（生产代码，只降不升）', () => {
       comment: Object.values(current).reduce((n, m) => n + m.comment, 0),
       code: Object.values(current).reduce((n, m) => n + m.code, 0),
     });
+  });
+
+  test('ruler 语义：块注释必须计入注释行（把 LINE_COMMENT 收窄成只认 // 时本用例必红）', () => {
+    // 上面几条都是「账本自洽」断言（total == Σfiles、ratio 可重算），把判据本体
+    // LINE_COMMENT 从 /^\s*(\/\/|\/\*|\*)/ 收窄成只认 `//` 后它们照样全绿：
+    // 注释整行数从 22,497 掉到 7,061，密度门禁由红转绿，而没有任何一条断言过
+    // 「块注释算不算注释」。这里直接钉判据本体。
+    expect(measure('/**\n * 文档注释\n */\n')).toEqual({
+      comment: 3,
+      code: 0,
+      total: 3,
+      ratio: 1,
+    });
+    expect(measure('/* 单行块注释 */\n').comment).toBe(1);
+    expect(measure('  * 续行\n').comment).toBe(1);
+    expect(measure('// 行注释\n').comment).toBe(1);
+    // 对照：行尾注释依附代码行，不得算成整行注释（判据不得放宽到"含 // 就算"）
+    expect(measure('var a = 1; // 行尾\n')).toEqual({
+      comment: 0,
+      code: 1,
+      total: 1,
+      ratio: 0,
+    });
+    // 空行不进分母
+    expect(measure('\n \n').total).toBe(0);
+
+    // 只用块注释的**临时文件**走完整 measure：文件面上也必须数出注释行
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-ruler-'));
+    try {
+      const blockOnly = path.join(tmp, 'blockonly.js');
+      fs.writeFileSync(blockOnly, '/**\n * 只有块注释\n */\n', 'utf8');
+      const m = measure(fs.readFileSync(blockOnly, 'utf8'));
+      expect({ comment: m.comment, code: m.code }).toEqual({ comment: 3, code: 0 });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+
+    // 全仓层面：用**独立写法的**块注释正则（故意不复用 LINE_COMMENT）数一遍原始文本，
+    // 每个含块注释的文件都必须已被判据算进 comment。收窄判据后这 338 个文件全部转红。
+    const ROOT_DIR = path.resolve(path.dirname(BASELINE_PATH), '..');
+    const blockRe = /^\s*(\/\*|\*)/;
+    const short = [];
+    let blockLines = 0;
+    for (const rel of Object.keys(current)) {
+      const text = fs.readFileSync(path.join(ROOT_DIR, rel), 'utf8');
+      const n = text.split(/\r?\n/).filter((l) => l.trim() !== '' && blockRe.test(l)).length;
+      blockLines += n;
+      if (n > 0 && current[rel].comment < n)
+        short.push({ rel, blockLines: n, comment: current[rel].comment });
+    }
+    // 前提自证：真实统计面里确实有块注释；否则下面那条对空集合恒真
+    expect(blockLines).toBeGreaterThan(10000);
+    expect(short).toEqual([]);
   });
 });

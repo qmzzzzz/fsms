@@ -215,7 +215,7 @@ function checkLockTransitionAllowed(
  * 状态与 lockUntil 的**写入计划**（纯函数，可单测）。
  *
  * 解锁必须连**临时锁定**一起清掉。两套锁定是分开的：管理员锁定改 status，
- * 暴力破解阈值只写 lockUntil。而 authenticate（middleware/auth.js:217，经
+ * 暴力破解阈值只写 lockUntil。而 authenticate（middleware/auth.js:218，经
  * assertAccountUsable）与 loginUser（:350）都只看 lockUntil 就拒绝登录。
  * 因此"先被爆破锁定、再被管理员锁定"的账户，此前解锁只改回 status ⇒
  * 接口 200「用户已解锁」+ 审计 success:true，用户依然登不进来（且活令牌全部 403），

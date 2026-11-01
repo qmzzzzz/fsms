@@ -70,11 +70,33 @@ nodejs_can_read() {
 # 容器以 root 启动时 Docker 会把 HOME 设为 /root；su-exec 只改 uid/gid，
 # 不会重设 HOME。降权后若 HOME 仍指向 /root，任何尝试在 HOME 下写缓存的
 # 工具都会 EACCES（根文件系统还是只读的）。按 passwd 里的 nodejs home 重设。
+#
+# 读 /etc/passwd 只用 shell 内建，**不调用任何外部命令**（2026-10-31 审计）。
+# 原实现是 nodejs_home=$(grep '^nodejs:' /etc/passwd | cut -d: -f6)：管道里两个
+# 外部命令，任一缺失或被 PATH 上的同名桩顶替时——命令替换只留空串，而 `set -e`
+# **不会**触发（管道退出码取最后一个命令，对空输入一样成功）。于是 HOME 保持
+# /root，EACCES 推迟到某个要写缓存的工具上，日志里一个字都没有：「工具不在」被
+# 读成了「没有这个用户」。而且 grep 失败与「真的没有 nodejs 用户」在返回值上
+# 不可区分。`IFS=: read` 是命令级前缀赋值，不污染调用方的全局 IFS。
+#
+# fail-closed：找不到该行、或 home 为空就明确报错退出。理由——镜像里没有 nodejs
+# 用户时后面的 su-exec 本来就起不来，留着空 HOME 只会在别处炸成看不懂的样子；
+# 「重设 HOME」这件事必须要么做到、要么喊出来。
 set_nodejs_home() {
-  nodejs_home=$(grep '^nodejs:' /etc/passwd | cut -d: -f6)
-  if [ -n "$nodejs_home" ]; then
-    export HOME="$nodejs_home"
+  nodejs_home=
+  while IFS=: read -r name _pw _uid _gid _gecos home _shell; do
+    if [ "$name" = nodejs ]; then
+      nodejs_home=$home
+      break
+    fi
+  done < /etc/passwd
+  if [ -z "$nodejs_home" ]; then
+    echo "app-entrypoint: 无法从 /etc/passwd 解析 nodejs 用户的 home（行缺失或第 6 字段为空）。" >&2
+    echo "app-entrypoint: 降权前必须把 HOME 从 /root 换到可写目录，否则写缓存的工具会 EACCES，" >&2
+    echo "app-entrypoint: 而日志里只会看到一句与被测功能无关的报错。请检查镜像 /etc/passwd。" >&2
+    exit 1
   fi
+  export HOME="$nodejs_home"
   export USER=nodejs
   export LOGNAME=nodejs
 }

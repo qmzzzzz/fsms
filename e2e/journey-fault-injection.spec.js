@@ -18,19 +18,10 @@
  */
 
 const { test, expect } = require('@playwright/test');
-const { loginViaUI, expectLoggedIn } = require('./helpers/auth');
+const { loginViaUI, expectLoggedIn, ensureAppAvailable } = require('./helpers/auth');
 
 const NETWORK_ERROR_TEXT = '网络错误，请检查网络连接';
 const SERVER_ERROR_TEXT = '服务器内部错误';
-
-/** 前端服务不可达时跳过（故障注入的前提是页面本身能加载） */
-async function skipIfAppUnavailable(page) {
-  try {
-    await page.goto('/', { timeout: 10_000 });
-  } catch (_) {
-    test.skip(true, '前端服务未启动，跳过故障注入旅程');
-  }
-}
 
 /** 填入任意凭据并点击登录（请求已被注入故障，凭据内容无关紧要） */
 async function submitLogin(page) {
@@ -41,7 +32,7 @@ async function submitLogin(page) {
 
 test.describe('依赖不可达：登录路径的界面韧性', () => {
   test('连接被拒：明确报错、按钮恢复、不白屏', async ({ page }) => {
-    await skipIfAppUnavailable(page);
+    await ensureAppAvailable(page);
     // 掐断全部 API（登录、验证码开关探测等），静态资源不受影响
     await page.route('**/api/**', (route) => route.abort('connectionrefused'));
 
@@ -55,7 +46,7 @@ test.describe('依赖不可达：登录路径的界面韧性', () => {
   });
 
   test('服务响应超时（客户端 15s 超时）：同样走网络错误兜底', async ({ page }) => {
-    await skipIfAppUnavailable(page);
+    await ensureAppAvailable(page);
     // 挂起登录请求 16s，让 axios 的 15s timeout 先触发；
     // 其余 /api 一并掐断，避免旁路请求干扰
     await page.route('**/api/**', async (route) => {
@@ -75,7 +66,7 @@ test.describe('依赖不可达：登录路径的界面韧性', () => {
   });
 
   test('依赖返回 500：提示服务异常且不卡死', async ({ page }) => {
-    await skipIfAppUnavailable(page);
+    await ensureAppAvailable(page);
     await page.route('**/api/**', (route) =>
       route.fulfill({
         status: 500,

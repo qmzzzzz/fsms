@@ -65,7 +65,10 @@ const TEXT_EXT = new Set([
 // 里没有它），但它是**代理/钩子会话态**，会把 agent 的 grep 输出整段落盘——实测一条
 // "probe-captcha-flood" 的检索结果就足以让本用例报出 21 条「未登记引用」，而这些
 // 路径在克隆后根本不存在，无法也不应被外部跟读。
-const LOCAL_ONLY_PREFIXES = ['backups/', 'logs/', 'coverage/', '.mimosa/'];
+// work/ 同属这一类：它被 .gitignore:196 忽略，是各泳道的审计报告/探针/夹具暂存地，
+// clean checkout 里不存在 ⇒ 其中的路径外部读者无法跟读。实测后果：一份 work/ 报告里
+// 提到 deliverables 归档快照，本用例当场报「未登记引用」，而该路径在克隆后根本不在。
+const LOCAL_ONLY_PREFIXES = ['backups/', 'logs/', 'coverage/', '.mimosa/', 'work/'];
 
 function isSkippedPath(rel) {
   const p = rel.replace(/\\/g, '/');

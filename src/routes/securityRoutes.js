@@ -267,7 +267,7 @@ router.get(
  * 候选集与提交核验**同判据**（控制器用 buildRecordScopeFilter，与
  * resolveReportTargetViolation 的 isRecordInScope 逐臂同值），因此不存在
  * "选得到却提交 403"或"能通过却选不到"。type 白名单不在这里重复声明：
- * 控制器对未知 type 已 fail-closed 返回 400（listReportTargets 的 !kind 分支），
+ * 控制器自己判（listReportTargets 用 Object.hasOwn；2026-11-02 前裸下标命中原型链 ⇒ 500，原句不成立），
  * 而记录型清单的单一来源是本文件的 REPORT_RECORD_TYPES（reportTargetRegistryParity 盯着）。
  * 限流由 authenticate 内的账号级 userLimiter 承担（200/15min），与举报提交的
  * 独立 20 次写配额分开——搜索不会吃掉提交配额。

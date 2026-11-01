@@ -244,7 +244,6 @@ const initRoles = async () => {
     }
   }
 
-  // 对账更新一次性提交（原实现逐个 existing.save()）
   if (reconcileOps.length > 0) {
     await Role.bulkWrite(reconcileOps);
   }

@@ -39,12 +39,9 @@ const { WRITE_METHODS } = require('../httpMethods');
 /**
  * 受控豁免（收窄规则）：这些前缀**不再整段豁免**，只有形态确实命中某条读取路由时才豁免。
  *
- * A2 修复（2026-10-30）：豁免清单原本一律按前缀判定（helpers.matchesPathPrefix），于是 `/api/avatars` 免掉了整棵子树——包括**未匹配任何路由**的 404 空转（`/api/avatars`、
- * `/api/avatars/<id>/<extra>`）。同一个前缀在限流侧也被豁免（rateLimit.js 的 isAvatarReadRequest），两侧叠加后那个面既无限流也无留痕（"谁在扫接口"这件事整个消失）。
- * 收窄后：只有 GET/HEAD + `/api/avatars/<24 位十六进制 ObjectId>`（avatarRoutes 唯一路由的形态，见其 param('userId').isMongoId()）豁免；其余 `/api/avatars/**` 回到"默认审计"。
- * 豁免原意（一页 N 张 img src 的高频展示型资源不灌满审计链）由这一形态承担，故仍成立。
- *
- * 用例守卫：src/tests/middleware/avatarUnmatchedSurfaceGuard.test.js（含"修复前形态"对照）。口径与路由同尺：Express 路由大小写不敏感，故此处用 `i` 标志。
+ * A2 修复（2026-10-30）：豁免清单原按前缀判定（helpers.matchesPathPrefix），于是 `/api/avatars` 免掉了整棵子树——包括**未匹配任何路由**的 404 空转。同一前缀在限流侧也被豁免（rateLimit.js 的 isAvatarReadRequest），两侧叠加后那个面既无限流也无留痕（"谁在扫接口"整个消失）。
+ * 收窄后：只有 GET/HEAD + `/api/avatars/<24 位十六进制 ObjectId>`（avatarRoutes 唯一路由形态，见其 param('userId').isMongoId()）豁免，其余 `/api/avatars/**` 回到"默认审计"——豁免原意（一页 N 张 img src 不灌满审计链）由这一形态承担。口径与路由同尺：Express 路由大小写不敏感，故用 `i` 标志；
+ * 用例守卫 src/tests/middleware/avatarUnmatchedSurfaceGuard.test.js（含"修复前形态"对照）。
  */
 const NARROWED_GET_EXEMPT_PREFIXES = {
   '/api/avatars': /^\/api\/avatars\/[0-9a-f]{24}$/i,
@@ -74,6 +71,19 @@ const isGetExempt = (auditGetExcludePaths, fullPath) => {
     if (narrowed.test(String(fullPath || ''))) return true;
   }
   return false;
+};
+
+// 拒绝原因码（H4）：errors.reason 是同一 errorCode 下的细分原因（IP_SEGMENT_WRITE_REFUSED 的三类），
+// 没有细分才退回 errorCode。只认 4xx（2xx 带值即"恒填"噪声列）；上界与控制字符中和同其余外部文本。
+const MAX_REFUSAL_REASON = 120;
+const extractRefusalReason = (statusCode, body) => {
+  if (!(statusCode >= 400 && statusCode < 500)) return undefined;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const errors = body.errors;
+  if (!errors || typeof errors !== 'object' || Array.isArray(errors)) return undefined;
+  const raw = errors.reason || errors.errorCode;
+  if (typeof raw !== 'string' || raw === '') return undefined;
+  return stripControlChars(raw, MAX_REFUSAL_REASON) || undefined;
 };
 
 const auditLog = (options = {}) => {
@@ -148,8 +158,8 @@ const auditLog = (options = {}) => {
     const originalEnd = typeof res.end === 'function' ? res.end.bind(res) : null;
     let logged = false;
 
-    // 统一的审计日志记录逻辑
-    const doLog = () => {
+    // 统一的审计日志记录逻辑（body 仅在 json/send 出口可得；write/end 流式路径恒为 undefined）
+    const doLog = (responseBody) => {
       // logged 先置位再判定：res.send 内部会调 res.end，第二次进入必须在 skip 判定之前就被守卫吃掉，避免重复判定与重复记录
       if (logged) return; // 防止重复记录
       logged = true;
@@ -171,21 +181,34 @@ const auditLog = (options = {}) => {
       // 之后再改内存对象只会让 WAL 与库不一致。所以事后失败只能追加一条更正事件，不能就地翻转——这正是 append-only 审计的正确形态。
       if (res.locals) res.locals.auditRecordWritten = true;
 
+      // 在**响应时刻**取，不在 setImmediate 里回读：那时 res.json/send 的参数已出栈，无源可读。
+      const refusalReason = extractRefusalReason(res.statusCode, responseBody);
+
       // 异步记录（不阻塞响应）；回调体见模块级 persistAuditRecord（体积棘轮拆分）
       setImmediate(() =>
-        persistAuditRecord({ req, res, action, category, success, duration, fullPath, isGetAudit })
+        persistAuditRecord({
+          req,
+          res,
+          action,
+          category,
+          success,
+          duration,
+          fullPath,
+          isGetAudit,
+          refusalReason,
+        })
       );
     };
 
-    // 拦截 json 响应
+    // 拦截 json 响应（响应体交给 doLog：4xx 的拒绝原因码只在这里可见）
     res.json = (body) => {
-      doLog();
+      doLog(body);
       return originalJson(body);
     };
 
     // 同时拦截 send 响应（如导出文件等场景）
     res.send = (body) => {
-      doLog();
+      doLog(body);
       return originalSend(body);
     };
 
@@ -218,8 +241,7 @@ const auditLog = (options = {}) => {
 /**
  * 构造并投递一条请求型审计记录（doLog 的 setImmediate 回调体抽出）
  *
- * 抽出原因：该回调体内联在 auditLog 工厂函数里，会使函数体与 doLog 超出体积阈值，故按仓库既有约定拆为模块级函数。eslint.ratchet.json 只许降不许升，
- * 本函数只承载该回调体，读取时机与行为不变。
+ * 抽出原因：该回调体内联在工厂函数里会使函数体与 doLog 超出体积阈值；本函数只承载该回调体，读取时机与行为不变。
  *
  * 读取时机（抽出前后完全一致，勿提前快照）：
  *   - action/category/success/duration/fullPath/isGetAudit 由调用方在**响应时刻**固化后传入；
@@ -232,7 +254,8 @@ const auditLog = (options = {}) => {
  * @returns {void}
  */
 const persistAuditRecord = (ctx) => {
-  const { req, res, action, category, success, duration, fullPath, isGetAudit } = ctx;
+  const { req, res, action, category, success, duration, fullPath, isGetAudit, refusalReason } =
+    ctx;
   // 控制字符清洗：userAgent / params / query 为外部可控输入，含 \n \r \u0000 时会污染下游日志渲染与 SIEM 解析，入库前统一剥离
   const safeUserAgent = stripControlChars(req.get('user-agent'), 512);
   // 键脱敏（此前缺）：body 走 SENSITIVE_KEYS 名单，而 params/query **完全不脱敏**，于是 `POST /api/auth/refresh?refreshToken=<真 JWT>` 这类经 query 传令牌的请求，
@@ -320,6 +343,8 @@ const persistAuditRecord = (ctx) => {
         })(),
     statusCode: res.statusCode,
     success,
+    // 缺席时保持 undefined（不写 null/空串）：该列只描述"被拒的原因"，成功行带值即噪声
+    refusalReason,
     errorMessage: success ? undefined : stripControlChars(res.statusMessage, 512),
     // ip 只取可信边界内的判定地址；上报值/对端留在 clientInfo 供取证
     ...auditClientAddress(req),

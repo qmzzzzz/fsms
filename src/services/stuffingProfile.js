@@ -36,7 +36,9 @@ const TRACKED_ACTIONS = Object.freeze([...SAMPLED_ACTIONS, SUCCESS_ACTION]);
  */
 const resolveWindow = ({ businessDay, now = Date.now() } = {}) => {
   const day =
-    typeof businessDay === 'string' && businessDay !== '' ? businessDay : businessDateParts().dateStr;
+    typeof businessDay === 'string' && businessDay !== ''
+      ? businessDay
+      : businessDateParts().dateStr;
   const bounds = businessDayBounds(day);
   const retentionFloor = now - RETENTION_SECONDS * 1000;
   const startMs = Math.max(bounds.start.getTime(), retentionFloor);
@@ -69,7 +71,8 @@ const aggregateRows = (rows, window, options = {}) => {
       droppedUnparsable += 1;
       continue;
     }
-    const group = groups.get(sourceKey) || groups.set(sourceKey, emptyGroup(sourceKey)).get(sourceKey);
+    const group =
+      groups.get(sourceKey) || groups.set(sourceKey, emptyGroup(sourceKey)).get(sourceKey);
     const account = accountOf(row && row.username);
     if (account !== '') group.accounts.add(account);
     if (row.action === SUCCESS_ACTION) {
@@ -101,9 +104,13 @@ const aggregateRows = (rows, window, options = {}) => {
   });
 };
 
-const buildProfile = async ({ businessDay, now = Date.now() } = {}) => {
+// 范围先展开：它放宽不了本函数写死的 action / timestamp 两个条件，只会再叠一层收窄。
+// 但蜜罐审计行不带 userId，而 self / department 档的范围谓词正是按 userId 过滤 —— 那两档取到的
+// 行集恒为空。这是有意接受的同源收口副作用（出口用 dataScopeType 说明），不是查询写错。
+const buildProfile = async ({ businessDay, now = Date.now(), scopeFilter } = {}) => {
   const window = resolveWindow({ businessDay, now });
   const rows = await AuditLog.find({
+    ...(scopeFilter || {}),
     action: { $in: TRACKED_ACTIONS },
     timestamp: { $gte: window.start, $lte: window.end },
   })

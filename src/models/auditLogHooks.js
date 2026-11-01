@@ -127,7 +127,6 @@ const applyHooks = (schema, logger) => {
   schema.pre(APPEND_ONLY_HOOKS, function (next) {
     if (!appendOnlyEnforced) return next();
     const options = (this.getOptions && this.getOptions()) || {};
-    // bypassAppendOnly 原先接受任意真值即放行（运行时关闭护栏的后门）。
     // 现收紧为「仅测试环境 + 显式传入布尔 true」才放行：
     //   - 未传 / 传 false / 非布尔（如 'true'、1）一律拦截；
     //   - 生产环境（NODE_ENV !== 'test'）无论传什么都不放行。

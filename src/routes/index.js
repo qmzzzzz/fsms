@@ -12,6 +12,7 @@ const inspectionRoutes = require('./inspectionRoutes');
 const reportRoutes = require('./reportRoutes');
 const securityRoutes = require('./securityRoutes');
 const forensicRoutes = require('./forensicRoutes'); // 取证溯源（T5/T6）：单独成文件，避免继续堆大 securityRoutes（其有效行已超棘轮阈值）
+const stuffingProfileRoutes = require('./stuffingProfileRoutes'); // 撞库画像（P2 情报）：securityRoutes 有效行已顶到棘轮地板，同 forensicRoutes 拆出
 const versionRoutes = require('./versionRoutes');
 const wellKnownRoutes = require('./wellKnownRoutes');
 const avatarRoutes = require('./avatarRoutes');
@@ -26,6 +27,7 @@ module.exports = {
   inspectionRoutes,
   reportRoutes,
   securityRoutes,
+  stuffingProfileRoutes,
   forensicRoutes,
   versionRoutes,
   wellKnownRoutes,

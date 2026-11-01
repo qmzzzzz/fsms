@@ -33,7 +33,7 @@
  *       checkMongoReady 本身，未验证 HTTP 响应体真的不含驱动错误消息——本文件
  *       补上 app 级闭环。
  *
- *  B. Sentry 三件套（app.js:248-249、app.js:581）——**不补测，理由如实记录**：
+ *  B. Sentry 三件套（app.js:248-249、app.js:586）——**不补测，理由如实记录**：
  *     `sentryInitialized` 是模块级常量，要覆盖需 SENTRY_DSN + 模块重置 + 对
  *     @sentry/node 打桩三件套齐备；而它覆盖的是「SDK 自己的中间件被 app.use」，
  *     属第三方库接线，行为已验证于 middleware/sentry 的单测

@@ -228,8 +228,7 @@ const withExportSlot = async (req, res, work) => {
 };
 
 const exportReport = asyncHandler(async (req, res) => {
-  // audit 分支补 ip/userId 筛选参数（与 /security/audit-logs 查询接口同参），
-  // 此前导出接口不支持这两个维度——列表筛出 20 条、导出却是全量，「导出即所见」破缺
+  // audit 分支补 ip/userId 筛选参数（与 /security/audit-logs 查询接口同参）。
   const {
     type = 'alarms',
     format = 'xlsx',
