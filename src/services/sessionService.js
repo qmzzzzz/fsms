@@ -468,6 +468,48 @@ const revokeSession = async ({ sid, userId, reason = 'user_revoked' }) => {
  * @param {string} [params.reason]
  * @returns {Promise<number>} 被吊销的会话数
  */
+/**
+ * 批量吊销后的**精准**缓存失效（审计 2026-11-02 B-F-4）
+ *
+ * 此前 revokeOtherSessions / revokeAllSessions 在 updateMany 后一律 clearSessionCache()
+ * + 广播 sesscache:*：单用户的踢除/改密操作会清空**所有**在线用户的会话缓存，
+ * 全员 cache miss 在多副本下被广播放大成一次 DB 尖峰。
+ *
+ * 改为按「批次标记」回查后逐条失效：updateMany 用同一枚 revokedAt+reason 落标记，
+ * 回查在**其后**执行——凡被本批吊销的会话必然带这枚标记（「标记后新建」的会话
+ * 要么已被吊销、要么不在本次范围，不产生漏杀，补上了旧「预取 sid 快照」方案的
+ * 快照窗口）。逐条失效同样带代际保护（每次本地失效 sessionCacheGeneration +1，
+ * in-flight 写回照旧作废），竞态下限与全清等价。
+ *
+ * 回查失败时退化为全量清空（旧行为）：宁可全员多查一次库，不可留下最长
+ * SESSION_CACHE_TTL 的僵尸放行——「被吊销的 sid 缓存必失效」这条下限不回退。
+ *
+ * @param {object} params
+ * @param {string} params.userId
+ * @param {Date} params.revokedAt - 本批吊销的标记时间戳（与 updateMany 同一枚）
+ * @param {string} params.reason
+ * @returns {Promise<string[]|null>} 被吊销的 sid 列表；null 表示已退化为全量清空
+ */
+const invalidateRevokedBatch = async ({ userId, revokedAt, reason }) => {
+  try {
+    const revoked = await UserSession.find(
+      { userId, status: 'revoked', revokedAt, revokeReason: reason },
+      'sid'
+    ).lean();
+    const sids = revoked.map((t) => String(t.sid));
+    for (const sid of sids) invalidateSessionCache(sid);
+    return sids;
+  } catch (e) {
+    logger.warn('批次标记回查失败，退化为全量清空会话缓存', {
+      userId: String(userId),
+      reason,
+      err: String((e && e.message) || e),
+    });
+    clearSessionCache();
+    return null;
+  }
+};
+
 const revokeOtherSessions = async ({ userId, exceptSid = null, reason = 'user_revoked' }) => {
   if (!userId) return 0;
   const filter = { userId, status: 'active' };
@@ -480,22 +522,18 @@ const revokeOtherSessions = async ({ userId, exceptSid = null, reason = 'user_re
   const result = await UserSession.updateMany(filter, {
     $set: { status: 'revoked', revokedAt, revokeReason: reason },
   });
-  // 清空带代际保护（sessionCacheGeneration），in-flight 写回会被作废，
-  // 不会把旧结论重新种回来。
-  clearSessionCache();
 
   const count = result.modifiedCount || 0;
   if (count > 0) {
-    const revoked = await UserSession.find(
-      { userId, status: 'revoked', revokedAt, revokeReason: reason },
-      'sid'
-    ).lean();
-    notifySessionRevoked({
-      sids: revoked.map((t) => String(t.sid)),
-      userId: String(userId),
-      all: false,
-      reason,
-    });
+    const revokedSids = await invalidateRevokedBatch({ userId, revokedAt, reason });
+    if (revokedSids) {
+      notifySessionRevoked({
+        sids: revokedSids,
+        userId: String(userId),
+        all: false,
+        reason,
+      });
+    }
   }
   logger.info('批量吊销会话', { userId, count, reason });
   return count;
@@ -514,15 +552,18 @@ const revokeOtherSessions = async ({ userId, exceptSid = null, reason = 'user_re
  */
 const revokeAllSessions = async (userId, reason = 'password_changed') => {
   if (!userId) return 0;
+  const revokedAt = new Date();
   const result = await UserSession.updateMany(
     { userId, status: 'active' },
-    { $set: { status: 'revoked', revokedAt: new Date(), revokeReason: reason } }
+    { $set: { status: 'revoked', revokedAt, revokeReason: reason } }
   );
-  // 清除全部缓存而不是只清预先取出的 sid 快照：快照之后新建、
-  // 已被 updateMany 吊销的会话同样不能再命中旧缓存。
-  clearSessionCache();
+  // 精准失效（审计 2026-11-02 B-F-4，与 revokeOtherSessions 同判据）：批次标记回查
+  // 在 updateMany 之后执行，凡被本次吊销的会话必然带这枚标记——「快照之后新建」
+  // 的会话要么已被吊销（有标记，会被失效）、要么不在本次范围（仍是活会话，本就
+  // 不该失效）。不再全清缓存：该用户被踢不该让所有在线用户跟着 cache miss。
   const count = result.modifiedCount || 0;
   if (count > 0) {
+    await invalidateRevokedBatch({ userId, revokedAt, reason });
     // all=true：连同没有 sid 的旧令牌连接一起按 userId 断开——全局吊销的语义
     // 本来就覆盖它们（tokenVersion 已被推进），没必要等周期清扫。
     notifySessionRevoked({ sids: [], userId: String(userId), all: true, reason });

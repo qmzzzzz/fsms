@@ -137,6 +137,9 @@ function mountStaticFrontend(app, { logger } = {}) {
   // GET 与 HEAD 都要拦——HEAD 无响应体但回 200+Content-Length，足以探测产物存在性。
   app.use((req, res, next) => {
     if ((req.method === 'GET' || req.method === 'HEAD') && isDeniedStaticPath(req.path)) {
+      // 404 属启发式可缓存状态码（RFC 9111）：「该文件不存在」的结论若被中间层
+      // 缓存，部署产物后同 URL 仍命中缓存的 404（审计 2026-11-02 F-3）。
+      res.setHeader('Cache-Control', 'no-store');
       return res.status(404).json({ success: false, message: '资源不存在' });
     }
     return next();

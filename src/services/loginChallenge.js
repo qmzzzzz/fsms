@@ -4,6 +4,7 @@
 const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
 const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
+const { cleanAuditUsername } = require('../constants/audit');
 
 /** 触发挑战的连续失败次数（先于 MAX_FAILED_LOGINS 生效）；判据窗口 15 分钟，与凭据型限流（loginUserLimiter）对齐 */
 const CHALLENGE_AFTER_FAILURES = 3;
@@ -21,9 +22,15 @@ const isChallengeRequired = async (username) => {
   if (typeof username !== 'string' || !username.trim()) return false;
   const windowStart = new Date(Date.now() - CHALLENGE_WINDOW_MS);
   try {
+    // 查询键与写入侧同一把尺（审计 2026-11-02 B-F-2）：审计行的 username 经
+    // model set 钩子清洗，filter 不应用 setter——请求方在用户名前后附加空白/
+    // 控制字符时原文键恒查 0 行，挑战判据永远不触发（挑战闸恰好是最该对
+    // 撞库变体生效的一层）。cleanAuditUsername 与 constants/audit.js 的写入
+    // 钩子同源，对同一输入产出与落库行相同的键。
+    const usernameKey = cleanAuditUsername(username);
     const collation = AuditLog.AUDIT_USERNAME_COLLATION;
     const lastSuccess = await AuditLog.findOne({
-      username,
+      username: usernameKey,
       action: 'login_success',
       timestamp: { $gte: windowStart },
     })
@@ -35,7 +42,7 @@ const isChallengeRequired = async (username) => {
     const since =
       lastSuccess && lastSuccess.timestamp > windowStart ? lastSuccess.timestamp : windowStart;
     const failures = await AuditLog.countDocuments({
-      username,
+      username: usernameKey,
       action: { $in: FAILURE_ACTIONS },
       timestamp: { $gt: since },
     }).collation(collation);

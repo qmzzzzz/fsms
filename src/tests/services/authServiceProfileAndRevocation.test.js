@@ -98,6 +98,25 @@ describe('authService gap A', () => {
       expect(result.outcome).toBe('EMAIL_TAKEN');
     });
 
+    test('E11000 竞态窗口：判重通过但 save 撞唯一索引 → EMAIL_TAKEN 而非 500（B-F-3）', async () => {
+      // isEmailTakenByAnother 与 user.save() 之间存在并发窗口：双开两个改同一邮箱的
+      // 请求，后到者判重通过、save 撞 emailKey_1。原始 MongoError 冒泡 500 与防枚举
+      // 统一口径矛盾——用一次性 save rejection 复现该窗口，断言归一出口。
+      const user = await makeUser('prof3c');
+      const conflictErr = Object.assign(new Error('E11000 duplicate key'), { code: 11000 });
+      const saveSpy = jest
+        .spyOn(mongoose.Model.prototype, 'save')
+        .mockRejectedValueOnce(conflictErr);
+      try {
+        const result = await authService.updateUserProfile(user._id, {
+          email: `${stamp}prof3c-fresh@example.com`,
+        });
+        expect(result.outcome).toBe('EMAIL_TAKEN');
+      } finally {
+        saveSpy.mockRestore();
+      }
+    });
+
     test('INVALID_AVATAR - 非法头像 URL', async () => {
       const user = await makeUser('prof4');
       const result = await authService.updateUserProfile(user._id, {
@@ -181,9 +200,58 @@ describe('authService gap A', () => {
       const r = await authService.updateUserProfile(user._id, { avatar: '' });
       expect(r.outcome).toBe('OK');
     });
+
+    test('E11000 竞态窗口：avatar 清除分支下 save 撞唯一索引 → 中止事务并归一 EMAIL_TAKEN', async () => {
+      // 头像清除 + 资料保存是同一事务：若 11000 被吞成返回值，withTransaction 会
+      // 正常提交，落成「头像已删、邮箱未换」。标记错误抛出保证回滚。
+      const user = await makeUser('prof3d');
+      const conflictErr = Object.assign(new Error('E11000 duplicate key'), { code: 11000 });
+      const saveSpy = jest
+        .spyOn(mongoose.Model.prototype, 'save')
+        .mockRejectedValueOnce(conflictErr);
+      try {
+        const result = await authService.updateUserProfile(user._id, {
+          email: `${stamp}prof3d-fresh@example.com`,
+          avatar: '',
+        });
+        expect(result.outcome).toBe('EMAIL_TAKEN');
+        // 头像删除不得已在事务中止后仍生效（该用户本就没有头像，删 0 条是正常结果；
+        // 关键断言是上面的 outcome 与 save 被调用）
+        expect(saveSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        saveSpy.mockRestore();
+      }
+    });
   });
 
   // ==================== changeUserPassword ====================
+
+  describe('registerUser 的 E11000 竞态窗口归一（2026-11-02 B-F-3）', () => {
+    test('判重通过但 User.create 撞唯一索引 → DUPLICATE（而非 500 冒泡）', async () => {
+      // 注册接口前置 captchaService.verify（开关默认开）：桩成放行以隔离开关状态
+      const captchaService = require('../../services/captchaService');
+      const verifySpy = jest.spyOn(captchaService, 'verify').mockResolvedValue(true);
+      const conflictErr = Object.assign(new Error('E11000 duplicate key'), {
+        code: 11000,
+        keyPattern: { username_ci: 1 },
+      });
+      const createSpy = jest.spyOn(User, 'create').mockRejectedValueOnce(conflictErr);
+      try {
+        const result = await authService.registerUser({
+          username: `${stamp}rege11000`,
+          email: `${stamp}rege11000@example.com`,
+          password: PASSWORD,
+          privacyConsent: true,
+        });
+        expect(result.outcome).toBe('DUPLICATE');
+        expect(createSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        verifySpy.mockRestore();
+        createSpy.mockRestore();
+      }
+    });
+  });
+
   describe('changeUserPassword', () => {
     test('MISSING - currentPassword 或 newPassword 缺失', async () => {
       const user = await makeUser('cp1');

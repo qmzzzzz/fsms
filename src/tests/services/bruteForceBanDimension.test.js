@@ -44,7 +44,19 @@ const USER_F = `${USER}_f`;
 const USER_G = `${USER}_g`;
 const CASE_USER = `zzcase_${stamp}`;
 const CASE_VARIANTS = [CASE_USER, CASE_USER.toLowerCase(), CASE_USER.toUpperCase()];
-const SEEDED_USERS = [USER, USER_B, USER_C, USER_D, USER_E, USER_F, USER_G, ...CASE_VARIANTS];
+// B-F-2 变体测试的专属账户（变体清洗后都落在本名上，afterAll 按本名清理）
+const BLAST_USER = `zzblast_${stamp}`;
+const SEEDED_USERS = [
+  USER,
+  USER_B,
+  USER_C,
+  USER_D,
+  USER_E,
+  USER_F,
+  USER_G,
+  BLAST_USER,
+  ...CASE_VARIANTS,
+];
 
 const originalAdd = ipBlacklistStore.addToBlacklist;
 let banCalls;
@@ -214,6 +226,28 @@ describe('checkBruteForce 账户维度计数口径（#22）', () => {
     await seedFailure(CASE_USER.toLowerCase(), CASE_IP);
 
     await checkBruteForce(CASE_USER.toUpperCase(), CASE_IP);
+
+    const alert = await AuditLog.findOne({
+      action: ALERT_TYPES.BRUTE_FORCE,
+      ip: CASE_IP,
+    }).lean();
+    expect(alert).toBeTruthy();
+    expect(alert.body.userAttempts).toBe(THRESHOLDS.bruteForceAttempts);
+  });
+
+  test('带空白/控制字符的变体用户名不绕过账户维度计数（2026-11-02 B-F-2）', async () => {
+    // 写入侧 set 钩子把变体清洗成本名落库（stripControlChars→空格 + trim），
+    // 而 Mongoose 对 filter 不应用 setter：修复前查询用**原文键**恒查 0 行，
+    // 每个变体各占一个空桶，账户维度阈值永远攒不满（与轮换大小写同型的绕过）。
+    // 修复后查询键走同一把 cleanAuditUsername，与落库行同键。
+    await seedFailure(` ${BLAST_USER}\u0001`, CASE_IP);
+    await seedFailure(`${BLAST_USER} `, CASE_IP);
+    await seedFailure(`\t${BLAST_USER}\n`, CASE_IP);
+    await seedFailure(` ${BLAST_USER} `, CASE_IP);
+    await seedFailure(BLAST_USER, CASE_IP);
+
+    // 用最脏的变体发问：必须能数到全部 5 条（含它自己变体清洗后的那份）
+    await checkBruteForce(` ${BLAST_USER}\u0001`, CASE_IP);
 
     const alert = await AuditLog.findOne({
       action: ALERT_TYPES.BRUTE_FORCE,

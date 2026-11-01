@@ -18,10 +18,15 @@ const requestPathOf = (req) => String((req && (req.originalUrl || req.url)) || '
 const isHoneypotSession = (req) => !!(req && req.user && req.user.isHoneypot === true); // 判据只看身份上下文（authenticate 从库里读的 isHoneypot），token 载荷与请求头都不可信
 
 const sendRouteNotFound = (req, res) =>
-  res.status(404).json({
-    success: false,
-    message: `接口不存在：${req.method} ${redactUrlQuery(req.originalUrl || req.url)}`, // 形状同 app.js 的兜底 404：同一句 message、同样**没有** errors 键——多给一个 errors 就等于自报家门
-  });
+  // 404 启发式可缓存（RFC 9111）：蜜罐 404 与真实 404 同形，被中间层缓存会污染
+  // 同 URL 的正常响应面（审计 2026-11-02 F-3；no-store 与 app.js 兜底 404 同口径）
+  res
+    .setHeader('Cache-Control', 'no-store')
+    .status(404)
+    .json({
+      success: false,
+      message: `接口不存在：${req.method} ${redactUrlQuery(req.originalUrl || req.url)}`, // 形状同 app.js 的兜底 404：同一句 message、同样**没有** errors 键——多给一个 errors 就等于自报家门
+    });
 
 const sendAggregate = (res, payload) => {
   if (payload.kind === 'codeError') return respondDecoy(res, payload); // 参数非法走通用出口的 codeError 分支：拒绝路径只留一个 ApiResponse.codeError 调用点（多一处就多一次口径分叉），且绝不回落成 404「资源不存在」——那是一次请求就能拿到的自证

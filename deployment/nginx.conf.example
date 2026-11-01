@@ -270,6 +270,10 @@ server {
         add_header X-XSS-Protection "0" always;
         add_header Cross-Origin-Opener-Policy "same-origin" always;
         add_header Cross-Origin-Resource-Policy "same-origin" always;
+        # 全局 noindex 的 nginx 直出面补位（审计 2026-11-02 F-4）：SPA 登录页是
+        # 最可收录的组织指纹面，而它不经 Node（securityHeaders 的 X-Robots-Tag
+        # 够不到这里）。L-09 整体替换语义 ⇒ 本块必须与其它头并列重声明。
+        add_header X-Robots-Tag "noindex, nofollow" always;
         add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()" always;
         # 静态 CSP（finding #6）取值证据：
         #   - script-src 'self'：构建产物 dist/index.html 全部为外链 script（vite 默认
@@ -312,6 +316,8 @@ server {
         add_header X-XSS-Protection "0" always;
         add_header Cross-Origin-Opener-Policy "same-origin" always;
         add_header Cross-Origin-Resource-Policy "same-origin" always;
+        # 与 location / 同款 noindex 补位（L-09 ⇒ 两块都要显式重声明，见其块内注释）
+        add_header X-Robots-Tag "noindex, nofollow" always;
         add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()" always;
         # 静态 CSP（finding #6）：与 location / 为**同一份**策略（取值证据见其块内
         # 注释），由契约测试断言两条副本逐字节一致——只改一条 = 另一条静默漂移。

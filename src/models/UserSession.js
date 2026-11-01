@@ -226,7 +226,9 @@ const userSessionSchema = new mongoose.Schema({
    * 吊销原因，用于事后追溯「这台设备为什么掉线」
    * logout=本设备主动登出；user_revoked=用户从会话列表踢除；
    * admin_revoked=管理员强制下线；password_changed=改密全局吊销；
-   * token_reuse=refresh 重放检测；superseded=同设备重新登录顶掉旧会话
+   * token_reuse=refresh 重放检测；superseded=同设备重新登录顶掉旧会话；
+   * session_cap=超出单用户会话数上限被挤掉（sessionCap）；access_restored=
+   * 账号封禁解除/权限恢复时的全量重置（authService/profile 与 userController/update）
    */
   revokeReason: {
     type: String,

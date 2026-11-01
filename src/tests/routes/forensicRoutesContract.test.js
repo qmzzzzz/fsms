@@ -204,6 +204,37 @@ describe('取证溯源接口契约（T5/T6）', () => {
     expect(right.status).toBe(200);
   });
 
+  test('8c 空字符串时长不得折成永久封禁（审计 2026-11-02 F-2：漏填即 24h 兜底）', async () => {
+    // 攻击场景：路由校验 optional({values:'falsy'}) 对 ''/null/false 整体放行，旧折算
+    // 「解析不出正数且字段传了 ⇒ 永久」会把前端某次重构序列化出的空输入落成
+    // expiresAt=null 的永久封段。判据直接查库：expiresAt 必须非 null（≈24h 兜底）。
+    const IPBlacklist = require('../../models/IPBlacklist');
+    const issued = await post('/pool-ban/request', {
+      cidr: '198.51.100.8/30', // 4 主机 < HIGH_IMPACT_HOSTS(256)，无需打字确认
+      reason: `空时长兜底 ${stamp}`,
+    });
+    expect(issued.status).toBe(200);
+    expect(issued.body.data.needTypedConfirm).toBe(false);
+
+    const res = await post('/pool-ban/confirm', {
+      token: issued.body.data.token,
+      durationHours: '',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.bannedCount).toBeGreaterThan(0);
+
+    // blockIP 的入参就是票据里的 CIDR 串，名单条目按原样存（不展开成单 IP）
+    const doc = await IPBlacklist.findOne({ ip: '198.51.100.8/30' }).lean();
+    expect(doc).toBeTruthy();
+    expect(doc.expiresAt).not.toBeNull();
+    // 24h 兜底：落在 23h~25h 窗口内（容忍测试执行耗时）
+    const hours = (new Date(doc.expiresAt).getTime() - Date.now()) / 3600000;
+    expect(hours).toBeGreaterThan(23);
+    expect(hours).toBeLessThan(25);
+    // 清理：不给其它用例留下真实黑名单记录
+    await IPBlacklist.deleteMany({ ip: '198.51.100.8/30' });
+  });
+
   test('9 无导出密钥时拒绝，不产出未签名包', async () => {
     const savedExport = process.env.FORENSIC_EXPORT_SECRET;
     const savedHmac = process.env.AUDIT_HMAC_SECRET;

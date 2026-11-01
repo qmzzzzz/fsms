@@ -10,6 +10,7 @@ const Role = require('../../models/Role');
 const logger = require('../../utils/logger');
 const { isAvatarUrlForUser } = require('../../utils/avatarUrl');
 const { withTransaction } = require('../../utils/transaction');
+const { isDuplicateKeyError } = require('../../utils/mongoDuplicateKey');
 const avatarService = require('../avatarService');
 const AuditLog = require('../../models/AuditLog');
 // 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
@@ -123,13 +124,37 @@ async function updateUserProfile(userId, body) {
 
   // 头像清除（avatar === ''）必须与指针写入同一事务：只清指针不删记录的话，
   // 图片仍能通过 GET /api/avatars/:id 拉到（读端查的是 UserAvatar，不是 User.avatar）。
+  // isEmailTakenByAnother 判重与 save 之间存在窗口（并发改到同一邮箱）：后到者撞
+  // emailKey_1 唯一索引。原始 MongoError 冒泡成 500 与防枚举统一口径矛盾，归一到
+  // 与判重相同的 EMAIL_TAKEN 出口（审计 2026-11-02 B-F-3，判定谓词见
+  // utils/mongoDuplicateKey）。
   if (avatar === '') {
-    await withTransaction(async (session) => {
-      await avatarService.deleteAvatar(userId, session);
-      await user.save(session ? { session } : {});
-    });
+    // 冲突必须**中止事务**（头像清除 + 资料保存原子）：吞成返回值会让 withTransaction
+    // 正常提交，落成「头像已删、邮箱未换」。故 save 的 11000 在事务内转标记错误抛出，
+    // 由事务外的 catch 归一为 EMAIL_TAKEN。
+    try {
+      await withTransaction(async (session) => {
+        await avatarService.deleteAvatar(userId, session);
+        try {
+          await user.save({ session });
+        } catch (e) {
+          if (!isDuplicateKeyError(e)) throw e;
+          const conflict = new Error('EMAIL_UNIQUE_CONFLICT');
+          conflict.isEmailUniqueConflict = true;
+          throw conflict;
+        }
+      });
+    } catch (e) {
+      if (e && e.isEmailUniqueConflict) return { outcome: 'EMAIL_TAKEN' };
+      throw e;
+    }
   } else {
-    await user.save();
+    try {
+      await user.save();
+    } catch (e) {
+      if (isDuplicateKeyError(e)) return { outcome: 'EMAIL_TAKEN' };
+      throw e;
+    }
   }
 
   logger.info('用户更新了个人资料', { username: user.username });

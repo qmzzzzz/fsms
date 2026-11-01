@@ -8,7 +8,7 @@ const logger = require('../utils/logger');
 const { normalizeIP, ipAttributionRiskFactors, resolvePunishTarget } = require('../utils/ipUtils');
 const { businessHour, isOffHours } = require('../constants/timezone');
 // 高危档不在此复述：与审计页 level=error、概览高危次数同一派生集合（F-149）
-const { AUDIT_ERROR_RISK_LEVELS } = require('../constants/audit');
+const { AUDIT_ERROR_RISK_LEVELS, cleanAuditUsername } = require('../constants/audit');
 const { sendNotification } = require('./securityAlertDelivery');
 const { applyAuditDataScope } = require('./auditScopeFilter');
 const { guardDetection } = require('../utils/auditWriteFailure');
@@ -67,9 +67,15 @@ const checkBruteForce = async (username, ip, attribution = null) => {
   // 账户维度必须与 User.findByUsername 同口径（大小写不敏感 collation）：
   // 否则 `Admin` / `admin` / `ADMIN` 各占一个计数桶，攻击者只要轮换大小写，
   // 同一账户的失败次数就永远到不了阈值，而账户锁定仍按同一个账户生效。
+  // 查询键还要与**写入侧同一把尺**（审计 2026-11-02 B-F-2）：审计行的 username
+  // 经 model set 钩子清洗，而 Mongoose 对 filter 不应用 setter——请求方在用户名
+  // 前后附加空白/控制字符（如 " admin\u0001"，逐次变化）时原文键恒查 0 行，
+  // 账户维度计数失焦。cleanAuditUsername 对同一输入产出与落库行相同的键；
+  // 真实账户不受影响（变体名查无此人走「用户不存在」分支，根本不会试密码）。
+  const usernameKey = cleanAuditUsername(username);
   const [userFailures, ipFailures] = await Promise.all([
     AuditLog.countDocuments({
-      username,
+      username: usernameKey,
       action: { $in: ['login_failed', 'auth_failed'] },
       timestamp: { $gte: windowStart },
     }).collation(AuditLog.AUDIT_USERNAME_COLLATION),

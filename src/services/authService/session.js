@@ -11,6 +11,7 @@ const User = require('../../models/User');
 const Role = require('../../models/Role');
 const logger = require('../../utils/logger');
 const { validatePasswordStrength } = require('../../utils/helpers');
+const { isDuplicateKeyError } = require('../../utils/mongoDuplicateKey');
 const { checkUnusualTime } = require('../securityAlert');
 const canaryWatch = require('../canaryWatch');
 const AuditLog = require('../../models/AuditLog');
@@ -114,14 +115,24 @@ async function registerUser(body, ctx = {}) {
   const roleIds = defaultRole ? [defaultRole._id] : [];
 
   // 创建用户（一次性写入角色，避免 create 后 save 失败导致无角色用户）
-  const user = await User.create({
-    username,
-    email,
-    password,
-    realName,
-    phone,
-    roles: roleIds,
-  });
+  let user;
+  try {
+    user = await User.create({
+      username,
+      email,
+      password,
+      realName,
+      phone,
+      roles: roleIds,
+    });
+  } catch (e) {
+    // 判重与写入之间存在窗口（双击提交 / 前端重试 / 并发脚本）：先到者 201，
+    // 后到者撞 username_ci / emailKey_1 唯一索引。原始 MongoError 冒泡成 500 会给
+    // 「该用户名刚刚被注册」的弱时间信号（500 vs 模糊拒绝可分），与防枚举统一
+    // 口径矛盾——归一到与上方判重相同的 DUPLICATE 出口（审计 2026-11-02 B-F-3）。
+    if (isDuplicateKeyError(e)) return { outcome: 'DUPLICATE' };
+    throw e;
+  }
 
   // 一-7：同意记录必须在**签发任何令牌之前**落库。落库失败则回滚刚建的账号并失败退出：
   // 留下「有账号、无同意证据」的用户，等于让这条合规链路在无人察觉时失效。

@@ -105,11 +105,16 @@ const requestPoolBan = asyncHandler(async (req, res) => {
 
 /** 第二步：持票落库。票据一次性，重放同一张票不生效 */
 const confirmPoolBan = asyncHandler(async (req, res) => {
-  const hours = Number.parseFloat(req.body.durationHours);
+  const raw = req.body.durationHours;
+  const hours = Number.parseFloat(raw);
   const durationMs = Number.isFinite(hours) && hours > 0 ? Math.round(hours * 3600000) : 0;
-  // "永久"必须由调用方**显式**要求（durationHours===0 且字段确实传了）：把"没填"与"选了永久"
-  // 折成同一个 0，会让漏填的请求落成永久封禁——库里 expiresAt=null，DEFAULT_BAN_MS 永不生效。
-  const permanent = durationMs === 0 && req.body.durationHours !== undefined;
+  // "永久"只认 **0 / '0' 两种显式字面**（审计 2026-11-02 F-2）。路由校验对 falsy 值整体
+  // 放行（optional({ values: 'falsy' })），''、null、false 都会原样到达这里——旧折算
+  // 「解析不出正数且字段传了 ⇒ 永久」会把空输入折成永久封段（expiresAt=null 且
+  // DEFAULT_BAN_MS 永不生效），恰好复活 ADR-018 ④ 否定过的「漏填即最重」形态。
+  // 非显式永久的一切取值（含漏填、拼错类型）都落 durationMs=0 + permanent=false，
+  // 由 ipPoolBan.applyBan 兜底 DEFAULT_BAN_MS（24h）——退化方向永远是"更短"而非"更重"。
+  const permanent = raw === 0 || raw === '0';
   const result = await ipPoolBan.applyBan({
     token: req.body.token,
     typedConfirm: req.body.typedConfirm,

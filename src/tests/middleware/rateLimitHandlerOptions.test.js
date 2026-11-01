@@ -36,6 +36,7 @@ const logger = require('../../utils/logger');
 
 const mockRes = () => {
   const res = {};
+  res.setHeader = jest.fn(() => res); // respond429 会置 Cache-Control: no-store（2026-11-02 F-3）
   res.status = jest.fn(() => res);
   res.json = jest.fn((body) => {
     res.body = body;

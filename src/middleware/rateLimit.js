@@ -95,6 +95,12 @@ const skipIfWhitelisted = (req) => req.ipWhitelisted === true;
 const skipProbeRequests = (req) => isProbeRequest(req.method, req.path);
 const skipProbesAndWhitelisted = (req) => skipIfWhitelisted(req) || skipProbeRequests(req);
 
+// 429 统一出口：置 no-store（限流结论不进缓存，与 ApiResponse.error 同口径；审计 F-3）
+const respond429 = (res, payload) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(429).json(payload);
+};
+
 // 静态前端面豁免资源型限流（generalLimiter / ipLimiter 这两个全站挂载的）
 //
 // 判据来自 middleware/staticFrontend 的 `isStaticSurfaceRequest`——**唯一事实来源**。
@@ -157,7 +163,7 @@ const generalLimiter = rateLimit({
   handler: (req, res, _next) => {
     noteRateLimitHit(req, 'general');
     logger.warn(`限流触发：${clientIpForSecurityDecision(req)} - ${req.method} ${req.path}`);
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: '请求过于频繁，请稍后再试',
     });
@@ -208,7 +214,7 @@ const staticSurfaceLimiter = rateLimit({
     // 刻意**不**接 noteRateLimitHit：CC 升级阶梯按"IP 触顶即封"设计，而静态面被限流绝大多数是
     // NAT 出口聚合（一个人多刷几个标签页就可能撞上），接上去等于把误封风险从「一个 IP」放大到「一整个办公室」。
     logger.warn(`静态面限流触发：${clientIpForSecurityDecision(req)} - ${req.method} ${req.path}`);
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: '静态资源请求过于频繁，请稍后再试',
     });
@@ -229,7 +235,7 @@ const preflightLimiter = rateLimit({
   legacyHeaders: false,
   handler: (req, res, _next) => {
     logger.warn(`预检请求限流触发：${clientIpForSecurityDecision(req)}`);
-    res.status(429).json({ success: false, message: '预检请求过于频繁，请稍后再试' });
+    respond429(res, { success: false, message: '预检请求过于频繁，请稍后再试' });
   },
 });
 
@@ -251,7 +257,7 @@ const avatarReadIpLimiter = rateLimit({
   handler: (req, res) => {
     // 不接 noteRateLimitHit：头像桶的 429 更可能是 NAT 聚合或列表首屏，不应升级成 IP 封禁
     logger.warn(`头像读取限流触发（IP）：${clientIpForSecurityDecision(req)}`);
-    res.status(429).json({ success: false, message: '头像加载过于频繁，请稍后再试' });
+    respond429(res, { success: false, message: '头像加载过于频繁，请稍后再试' });
   },
 });
 
@@ -269,7 +275,7 @@ const avatarReadUserLimiter = rateLimit({
   legacyHeaders: false,
   handler: (req, res) => {
     logger.warn('头像读取限流触发（用户）', { userId: req.user?.userId || '-' });
-    res.status(429).json({ success: false, message: '头像加载过于频繁，请稍后再试' });
+    respond429(res, { success: false, message: '头像加载过于频繁，请稍后再试' });
   },
 });
 
@@ -291,7 +297,7 @@ const strictLimiter = rateLimit({
   handler: (req, res, _next) => {
     noteRateLimitHit(req, 'strict');
     logger.warn(`严格限流触发：${clientIpForSecurityDecision(req)} - ${req.method} ${req.path}`);
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: '操作过于频繁，请稍后再试',
     });
@@ -334,7 +340,7 @@ const loginLimiter = rateLimit({
       ip: clientIpForSecurityDecision(req),
       username: req.body?.username,
     });
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: '登录尝试次数过多，请稍后再试',
     });
@@ -386,7 +392,7 @@ const loginUserLimiter = rateLimit({
     logger.warn(
       `登录账号维度限流触发：username=${normalizeLoginRateKey(req.body?.username) || '-'}, ip=${clientIpForSecurityDecision(req)}（可能存在分布式撞单账号攻击）`
     );
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: '该账户登录尝试次数过多，请稍后再试或联系管理员',
     });
@@ -415,7 +421,7 @@ const ipLimiter = rateLimit({
   // 最先持续触顶的那一层，没有 handler 就没有升级信号
   handler: (req, res, _next) => {
     noteRateLimitHit(req, 'ip');
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: 'IP 请求频率超限',
     });
@@ -456,7 +462,7 @@ const userLimiter = rateLimit({
       userId: req.user?.userId || '-',
       ip: clientIpForSecurityDecision(req),
     });
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: '操作过于频繁，请稍后再试',
     });
@@ -480,7 +486,7 @@ const captchaLimiter = rateLimit({
   handler: (req, res) => {
     noteRateLimitHit(req, 'captcha');
     logger.warn(`验证码限流触发：${clientIpForSecurityDecision(req)}`);
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: '验证码获取过于频繁，请稍后再试',
     });
@@ -513,7 +519,7 @@ const passwordChangeLimiter = rateLimit({
       userId: req.user?.userId || '-',
       ip: clientIpForSecurityDecision(req),
     });
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: '密码修改操作过于频繁，请稍后再试',
     });
@@ -560,7 +566,7 @@ function makeUserBucketLimiter(prefix, message, max = 5) {
         userId: req.user?.userId || '-',
         ip: clientIpForSecurityDecision(req),
       });
-      res.status(429).json({ success: false, message });
+      respond429(res, { success: false, message });
     },
   });
 }
@@ -630,7 +636,7 @@ const registerIpLimiter = rateLimit({
   handler: (req, res) => {
     noteRateLimitHit(req, 'register');
     logger.warn(`注册 IP 限流触发：${clientIpForSecurityDecision(req)}（可能存在批量注册滥用）`);
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: '注册过于频繁，请稍后再试',
     });
@@ -667,7 +673,7 @@ const reauthLimiter = rateLimit({
       userId: req.user?.userId || '-',
       ip: clientIpForSecurityDecision(req),
     });
-    res.status(429).json({
+    respond429(res, {
       success: false,
       message: '二次验证尝试过于频繁，请稍后再试',
     });

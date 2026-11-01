@@ -148,7 +148,8 @@ function checkSignature(record, hmacSecret, line, errors) {
   return true;
 }
 
-/** 相邻检查点的时间/头部 _id 必须单调不回退。 */
+/** 相邻检查点的 createdAt 必须单调不回退。仅校验时间单调：_id 序 ≠ 追加序
+ *（见文件头说明），不作为序判据——本注释此前宣称连 _id 也校验，与实现不符。 */
 function checkOrder(previous, record, line, errors) {
   if (!previous) return;
   const at = (x) => new Date(x).getTime();
