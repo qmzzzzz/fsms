@@ -94,6 +94,7 @@
     "src/docs/generate.js": 1419,
     "src/middleware/idempotency.js": 322,
     "src/middleware/rateLimit.js": 389,
+    "src/models/IPBlacklist.js": 369,
     "src/models/User.js": 602,
     "src/routes/securityRoutes.js": 372,
     "src/services/auditBuffer.js": 308,
