@@ -17,6 +17,7 @@ const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { randomPassword } = require('../helpers/buildLoginEnvelope');
+const { waitFor, waitForStable } = require('../helpers/waitFor');
 
 describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', () => {
   let app;
@@ -158,7 +159,10 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
     });
     expect(black.status).toBe(400);
     expect(await IPBlacklist.countDocuments({ ip: FULL_RANGE, type: 'black' })).toBe(0);
-    // 没有落库，就不得新增“已授权”痕迹
+    // 没有落库，就不得新增“已授权”痕迹。痕迹写入是 fire-and-forget（AuditLog.record
+    // 只 create().catch()，不随响应返回），读数前先等计数稳定——等稳后仍无增量才是
+    // 「真的没写」；若拒绝路径晚写了，等稳反而会红，判据更严不是更松。
+    await waitForStable(() => grantTraces());
     expect(await grantTraces()).toBe(before);
   });
 
@@ -172,6 +176,10 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
     });
     expect(ok.status).toBe(200);
     expect(await IPBlacklist.countDocuments({ ip: FULL_RANGE, type: 'black' })).toBe(1);
+    // 同 fire-and-forget：痕迹晚于 200 响应，轮询到真实落库而不是赌时延
+    await waitFor(async () => (await grantTraces()) === before + 1, {
+      label: 'granted 痕迹落库',
+    });
     expect(await grantTraces()).toBe(before + 1);
   });
 
@@ -191,9 +199,18 @@ describe('全网段写入：痕迹晚于落库 + 删除侧守护救援路径', (
       .set('Authorization', 'Bearer ' + secToken);
     expect(del.status).toBe(403);
     expect(await IPBlacklist.countDocuments({ _id: rescueDoc._id })).toBe(1);
-    const trace = await AuditLog.findOne({
-      riskFactors: 'full_range_cidr_rescue_removal_attempt',
-    }).lean();
+    // record() 是 fire-and-forget（create().catch()，不随 403 返回），全量并发下
+    // 单次 findOne 会输给落库时延——按仓规轮询真实完成条件，不赌时延
+    let trace = null;
+    await waitFor(
+      async () => {
+        trace = await AuditLog.findOne({
+          riskFactors: 'full_range_cidr_rescue_removal_attempt',
+        }).lean();
+        return Boolean(trace);
+      },
+      { label: '救援删除拒绝的 critical 痕迹落库' }
+    );
     expect(trace).toBeTruthy();
     expect(trace.riskLevel).toBe('critical');
   });

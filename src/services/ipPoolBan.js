@@ -133,7 +133,9 @@ async function applyBan({
       // 生效会让 bannedCount 恒 0、审计恒 success:false，而条目其实已落库（ADR-018 踩坑）。
       const banned = Boolean(r && (r.ip || r._id));
       if (!banned) state.failedEntries += 1;
-      return { cidr: one, banned, reason: (r && r.reason) || null, _id: (r && r._id) || null };
+      // created 来自 blockIP 的驱动元数据（$locals，非持久化）：未知/缺省一律按「非本次新建」，回滚侧才敢保守不删
+      const created = Boolean(r && r.$locals && r.$locals.created === true);
+      return { cidr: one, banned, created, reason: (r && r.reason) || null, _id: (r && r._id) || null };
     })
   );
   const bannedCount = results.filter((r) => r.banned).length;
@@ -178,6 +180,7 @@ async function ticketJudgementRefusal({ ticket, typedConfirm, targets, operatorI
       cidr: ticket.cidr,
       rolledBack: 0,
       rolledBackIds: [],
+      skippedExisting: 0,
     });
   }
   if (operatorIp && targets.some((one) => entryCovers(one, operatorIp))) {
@@ -205,21 +208,22 @@ async function banRecommended({ clusters, operator, operatorIp, reason, now = ne
 }
 
 /** 落库后按数据库现状复检并集：申请与确认是两个时刻，名单在两者之间会变（可能正是另一张票造成的）。
- *  回滚按本次写入返回的 _id 删；已知未修缺陷：upsert 命中他人在写前已有的同值条目时，删掉的是他人那条，且本次被拒的操作会静默移除一个既有封禁（实测 19/20 可复现，见 report r25 F-25-8） */
+ *  只回滚**本次新建**的条目：命中他人在写前已有的同值条目时那条不是我们写的，删掉等于被拒的操作静默移除一个既有封禁（F-25-8） */
 async function rollbackIfUnionCoversFamily(results, bannedCount) {
   if (!bannedCount) return null;
   const coverage = cidrUnionCoversAll(await ipListService.listActiveEntryIps('black'));
   if (!coverage.ipv4 && !coverage.ipv6) return null;
   logger.warn('确认时并集铺满地址族，回滚本次写入', { cidrs: results.map((r) => r.cidr) });
-  // 计数必须是**实际删掉的**而不是「打算删的」（bannedCount）：删除可能命中 0 条、抛错或无 _id，
-  // 而这条以 critical 进不可否认链，记「打算删 N 条」等于把一次没发生的回滚记成发生过。
+  // 计数必须是**实际删掉的**而不是「打算删的」（bannedCount）：删除可能命中 0 条、抛错或无 _id，记「打算删 N 条」等于把一次没发生的回滚记成发生过。
   const rolledBackIds = [];
+  const skippedIds = [];
   for (const r of results) {
     if (!r._id) continue;
+    if (!r.created) { skippedIds.push(String(r._id)); continue; }
     const removed = await ipListService.removeEntry(r._id, 'black').catch(() => null);
     if (removed && removed.deletedCount === 1) rolledBackIds.push(String(r._id));
   }
-  return { rolledBack: rolledBackIds.length, rolledBackIds };
+  return { rolledBack: rolledBackIds.length, rolledBackIds, skippedExisting: skippedIds.length };
 }
 
 const getPoolBanStats = () => ({ ...state, pending: pending.size });

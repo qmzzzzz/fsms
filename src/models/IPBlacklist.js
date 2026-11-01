@@ -266,6 +266,7 @@ ipBlacklistSchema.statics.blockIP = async function (rawIp, options = {}) {
       $set: {
         ip: { $literal: ip },
         type: { $literal: type },
+        createdAt: { $ifNull: ['$createdAt', now] }, // 旧 $setOnInsert:createdAt 的等价物：命中即保留首封时间
         durationMs: {
           $cond: [
             { $or: [{ $eq: [{ $ifNull: ['$durationMs', -1] }, 0] }, { $eq: [asked, 0] }] },
@@ -275,7 +276,6 @@ ipBlacklistSchema.statics.blockIP = async function (rawIp, options = {}) {
         },
         reason: { $ifNull: ['$reason', { $literal: reason }] },
         source: { $ifNull: ['$source', { $literal: source }] },
-        createdAt: { $ifNull: ['$createdAt', now] }, // 首次加入时间：命中即保留
         ...(targetUsername === undefined ? {} : { targetUsername: { $literal: targetUsername } }),
       },
     },
@@ -286,15 +286,14 @@ ipBlacklistSchema.statics.blockIP = async function (rawIp, options = {}) {
           $cond: [
             { $eq: ['$durationMs', 0] },
             null,
-            { $max: [{ $ifNull: ['$expiresAt', new Date(0)] }, { $add: [now, '$durationMs'] }] },
+            { $max: [{ $ifNull: ['$expiresAt', new Date(0)] }, { $add: [now, asked] }] }, // 用 asked 而非合并后的时长：缩短请求不推迟既有到期
           ],
         },
       },
     },
   ];
 
-  // 命中还是新建：驱动元数据 updatedExisting=false ⇒ 本次插入（先读再比看不见并发插入窗口）
-  const opts = { upsert: true, returnDocument: 'after', includeResultMetadata: true };
+  const opts = { upsert: true, returnDocument: 'after', includeResultMetadata: true }; // updatedExisting=false ⇒ 本次插入（先读再比看不见并发插入窗口）
   let res;
   try {
     res = await this.findOneAndUpdate(filter, merge, opts);
