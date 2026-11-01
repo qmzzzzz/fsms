@@ -23,6 +23,46 @@ const ACCESS_COOKIE_PATH = '/';
 const REFRESH_COOKIE_PATH = '/api/auth';
 
 /**
+ * 生产环境（isSecureCookie() 为真）下 access cookie 的 `__Host-` 前缀形态
+ * （参考研读 2026-11-01 §二 P1-1）。
+ *
+ * `__Host-` 是浏览器强制校验的保留前缀：携带它的 cookie 必须同时满足
+ * Secure、Path=/、**不带 Domain 属性**，且只会在 HTTPS 连接上被浏览器接受与回传。
+ * 三项条件本实现全部满足（baseCookieOptions 的 secure 位 + ACCESS_COOKIE_PATH=/
+ * + 本仓从不传 Domain）。收益：兄弟子域（或被攻陷的子域）无法用 Set-Cookie
+ * 覆写主域的令牌 cookie——普通名 cookie 默认按「域匹配」被任意同注册域子域投毒。
+ *
+ * 两个刻意的边界：
+ * 1. **refresh cookie 不加前缀**：`__Host-` 强制 Path=/，而 refresh cookie 的
+ *    path=/api/auth（缩小暴露面，见 I-01 注释）不满足前缀要求，硬上会被浏览器
+ *    直接拒收 ⇒ 刷新整体失效。refresh 的跨站防护由 SameSite=strict 承担。
+ * 2. **仅 isSecureCookie() 时启用**：前缀 cookie 在非 HTTPS（含本地 http 开发）
+ *    下会被浏览器静默丢弃，门禁复用 Secure 位同一判据，两侧永远同真同假。
+ */
+const ACCESS_COOKIE_NAME_SECURED = '__Host-access_token';
+
+/**
+ * 读取 access cookie 时应尝试的名字序列（按优先级）。
+ *
+ * 安全模式 = [带前缀名, 旧普通名]：升级部署后，老会话浏览器里还持有旧普通名
+ * cookie（直到 maxAge 自然过期），读侧双名兼容让存量会话零感知平滑迁移；
+ * 写侧（setAuthCookies）从启用起只写带前缀名，旧名只减不增，双名窗口有限。
+ * 非安全模式 = [普通名]：与升级前完全一致。
+ */
+const activeAccessCookieNames = () =>
+  isSecureCookie() ? [ACCESS_COOKIE_NAME_SECURED, ACCESS_COOKIE_NAME] : [ACCESS_COOKIE_NAME];
+
+/** 按「名字优先级」从已解析的 cookie 对象中取第一个非空值；全缺返回 null */
+const pickCookieValue = (cookies, names) => {
+  if (!cookies || typeof cookies !== 'object') return null;
+  for (const name of names) {
+    const value = cookies[name];
+    if (typeof value === 'string' && value) return value;
+  }
+  return null;
+};
+
+/**
  * 解析 Cookie 请求头为键值对象兼容多值、URL 编码值与空/非法输入（解析失败返回空对象，不抛错）
  * @param {string|undefined} cookieHeader - req.headers.cookie
  * @returns {Object<string,string>}
@@ -161,8 +201,11 @@ const baseCookieOptions = () => ({
  */
 const setAuthCookies = (res, accessToken, refreshToken) => {
   if (!res || typeof res.cookie !== 'function') return;
+  // 名字由 Secure 位判据决定（__Host- 前缀见其定义处注释）：secure 关闭时写普通名，
+  // 否则浏览器会因非 HTTPS 直接丢弃带前缀 cookie。
+  const secureMode = isSecureCookie();
   if (accessToken) {
-    res.cookie(ACCESS_COOKIE_NAME, accessToken, {
+    res.cookie(secureMode ? ACCESS_COOKIE_NAME_SECURED : ACCESS_COOKIE_NAME, accessToken, {
       ...baseCookieOptions(),
       path: ACCESS_COOKIE_PATH,
       maxAge: durationToMs(config.jwt.expire, 24 * 60 * 60 * 1000),
@@ -181,19 +224,28 @@ const setAuthCookies = (res, accessToken, refreshToken) => {
 
 /**
  * 登出时按各自 path 清除两个令牌 cookie （maxAge=0 + 相同 path 才能让浏览器真正删除对应 cookie）
- * @param {import('express').Response} res
+ *
+ * access 侧**新旧名都清**：迁移窗口内浏览器可能同时持有旧普通名（升级前签发）
+ * 与新前缀名两枚 cookie，只清一枚会留下「看起来登出了、旧串仍在浏览器里」的
+ * 残留（旧串虽然已被服务端吊销，但残留本身是卫生问题，也可能在换个后端实例
+ * 时被回读）。清旧名必须不带前缀判据——无论当前 secure 与否都把两个名字都发一遍
+ * Set-Cookie 过期指令，浏览器各删各的。
  */
 const clearAuthCookies = (res) => {
   if (!res || typeof res.clearCookie !== 'function') return;
+  res.clearCookie(ACCESS_COOKIE_NAME_SECURED, { ...baseCookieOptions(), path: ACCESS_COOKIE_PATH });
   res.clearCookie(ACCESS_COOKIE_NAME, { ...baseCookieOptions(), path: ACCESS_COOKIE_PATH });
   res.clearCookie(REFRESH_COOKIE_NAME, { ...baseCookieOptions(), path: REFRESH_COOKIE_PATH });
 };
 
 module.exports = {
   ACCESS_COOKIE_NAME,
+  ACCESS_COOKIE_NAME_SECURED,
   REFRESH_COOKIE_NAME,
   ACCESS_COOKIE_PATH,
   REFRESH_COOKIE_PATH,
+  activeAccessCookieNames,
+  pickCookieValue,
   parseCookies,
   getCookies,
   durationToMs,

@@ -25,6 +25,7 @@ const {
   attachCspNonce,
   ensureHsts,
   permissionsPolicy,
+  xRobotsTag,
   reportingEndpoints,
   trustedTypesReportOnly,
   CSP_REPORT_PATH,
@@ -435,6 +436,9 @@ const applyResponseHardening = (app) => {
   app.use(securityHeaders);
   app.use(ensureHsts);
   app.use(permissionsPolicy);
+  // 内部管理系统全局 noindex（robots.txt 只覆盖静态面且仅约束守规矩的爬虫，
+  // 响应头对所有抓取器硬生效——含被收录的 API 错误页与未来新增的任何出口）。
+  app.use(xRobotsTag);
   app.use(reportingEndpoints);
   // Trusted Types 灰度：独立 CSP 中间件，只写 Content-Security-Policy-Report-Only，
   // 与上面的 securityHeaders 写出的 Content-Security-Policy 头名不同、互不覆盖。

@@ -318,7 +318,9 @@ describe('NODE_ENV 归一：生产硬闸不再押在字面量拼写上', () => {
         },
       };
       cookie.setAuthCookies(res, 'zz-access', 'zz-refresh');
-      return captured[cookie.ACCESS_COOKIE_NAME];
+      // 2026-11-01 __Host- 前缀迁移：安全模式下写侧改用带前缀名（见 cookie.js
+      // ACCESS_COOKIE_NAME_SECURED），非安全模式仍是普通名。取「实际写入的那枚」。
+      return captured[cookie.ACCESS_COOKIE_NAME_SECURED] || captured[cookie.ACCESS_COOKIE_NAME];
     };
 
     test.each(['production', 'prod', 'Production', 'live', 'prodution', 'staging', 'stage'])(
@@ -354,10 +356,110 @@ describe('NODE_ENV 归一：生产硬闸不再押在字面量拼写上', () => {
         },
       };
       cookie.setAuthCookies(res, 'zz-access', 'zz-refresh');
-      const opts = captured[cookie.ACCESS_COOKIE_NAME];
+      const opts =
+        captured[cookie.ACCESS_COOKIE_NAME_SECURED] || captured[cookie.ACCESS_COOKIE_NAME];
       expect(opts.secure).toBe(true);
       expect(opts.httpOnly).toBe(true);
       expect(opts.sameSite).toBe('strict');
+    });
+  });
+
+  describe('__Host- 前缀名切换（2026-11-01 参考研读 P1-1）', () => {
+    // 与 Secure 位同一判据（isSecureCookie）驱动写侧 cookie 名：
+    // 安全模式写 '__Host-access_token'（浏览器强制 Secure+Path=/+无 Domain，
+    // 兄弟子域无法投毒主域令牌 cookie），开发模式保持普通名（非 HTTPS 下
+    // 带前缀 cookie 会被浏览器静默丢弃）。读侧双名兼容由 activeAccessCookieNames
+    // 提供，本组只钉写侧与读取序列。
+    const captureAccessNames = (nodeEnv, extra = {}) => {
+      jest.resetModules();
+      process.env = { ...WEAK_ONLY_ENV, ...extra };
+      process.env.NODE_ENV = nodeEnv;
+      if (extra.COOKIE_SECURE === undefined) delete process.env.COOKIE_SECURE;
+      const cookie = require('../utils/cookie');
+      const captured = {};
+      const res = {
+        cookie(name, _value, opts) {
+          captured[name] = opts;
+          return this;
+        },
+        clearCookie(name, _opts) {
+          captured[name] = null;
+          return this;
+        },
+      };
+      cookie.setAuthCookies(res, 'zz-access', 'zz-refresh');
+      return { cookie, captured };
+    };
+
+    test.each(['production', 'prod', 'staging'])(
+      '%s → access cookie 必须用 __Host- 前缀名',
+      (value) => {
+        const { cookie, captured } = captureAccessNames(value);
+        expect(captured[cookie.ACCESS_COOKIE_NAME_SECURED]).toBeDefined();
+        expect(captured[cookie.ACCESS_COOKIE_NAME]).toBeUndefined();
+        expect(cookie.ACCESS_COOKIE_NAME_SECURED).toBe('__Host-access_token');
+        // __Host- 前缀的三个浏览器硬条件，本实现必须全满足：
+        expect(captured[cookie.ACCESS_COOKIE_NAME_SECURED].secure).toBe(true);
+        expect(captured[cookie.ACCESS_COOKIE_NAME_SECURED].path).toBe('/');
+        // 不传 domain 属性（express 不默认加），res.cookie 的 options 上不应出现 domain
+        expect(captured[cookie.ACCESS_COOKIE_NAME_SECURED].domain).toBeUndefined();
+      }
+    );
+
+    test.each(['development', 'test'])(
+      '%s → 保持普通名（前缀 cookie 在 http 下会被浏览器丢弃）',
+      (value) => {
+        const { cookie, captured } = captureAccessNames(value);
+        expect(captured[cookie.ACCESS_COOKIE_NAME]).toBeDefined();
+        expect(captured[cookie.ACCESS_COOKIE_NAME_SECURED]).toBeUndefined();
+      }
+    );
+
+    test('refresh cookie 永不加前缀（__Host- 强制 Path=/，与其 /api/auth 收窄路径冲突）', () => {
+      const { cookie, captured } = captureAccessNames('production');
+      expect(cookie.REFRESH_COOKIE_NAME).toBe('refresh_token');
+      expect(captured[cookie.REFRESH_COOKIE_NAME]).toBeDefined();
+      expect(captured[cookie.REFRESH_COOKIE_NAME].path).toBe('/api/auth');
+    });
+
+    test('读取序列：安全模式双名兼容（存量旧名会话零感知），非安全模式只认普通名', () => {
+      jest.resetModules();
+      process.env = { ...WEAK_ONLY_ENV, NODE_ENV: 'production' };
+      let cookie = require('../utils/cookie');
+      expect(cookie.activeAccessCookieNames()).toEqual([
+        cookie.ACCESS_COOKIE_NAME_SECURED,
+        cookie.ACCESS_COOKIE_NAME,
+      ]);
+
+      jest.resetModules();
+      process.env = { ...WEAK_ONLY_ENV, NODE_ENV: 'development' };
+      cookie = require('../utils/cookie');
+      expect(cookie.activeAccessCookieNames()).toEqual([cookie.ACCESS_COOKIE_NAME]);
+
+      // pickCookieValue：按优先级取第一个非空值，全缺返回 null（供 auth/WS 握手共用）
+      expect(cookie.pickCookieValue({ foo: '1' }, ['bar', 'foo'])).toBe('1');
+      expect(cookie.pickCookieValue({ bar: '', baz: '2' }, ['bar', 'baz'])).toBe('2');
+      expect(cookie.pickCookieValue(undefined, ['bar'])).toBeNull();
+      expect(cookie.pickCookieValue({}, ['bar'])).toBeNull();
+    });
+
+    test('登出清除：新旧两枚 access 名 + refresh 三者都发过期指令（迁移窗口无残留）', () => {
+      jest.resetModules();
+      process.env = { ...WEAK_ONLY_ENV, NODE_ENV: 'production' };
+      const cookie = require('../utils/cookie');
+      const cleared = [];
+      const res = {
+        clearCookie(name) {
+          cleared.push(name);
+          return this;
+        },
+      };
+      cookie.clearAuthCookies(res);
+      expect(cleared).toEqual([
+        cookie.ACCESS_COOKIE_NAME_SECURED,
+        cookie.ACCESS_COOKIE_NAME,
+        cookie.REFRESH_COOKIE_NAME,
+      ]);
     });
   });
 });

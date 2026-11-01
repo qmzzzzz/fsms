@@ -234,6 +234,12 @@ const buildSecurityTxt = (req) => {
     'Preferred-Languages: zh-Hans, en',
   ];
   if (canonical) lines.push(`Canonical: ${canonical}`);
+  // Policy（RFC 9116 可选字段）：指向对外披露的安全响应政策。由部署方显式配置
+  // 才下发——仓库内 SECURITY.md 未必有对外可达的 URL，硬编码会产出 404 字段。
+  // 值经简单行内清洗：security.txt 的字段值不得包含换行（换行即新字段，可被
+  // 环境变量注入伪造字段），换行截断即可。
+  const policyUrl = (process.env.SECURITY_POLICY_URL || '').trim().split(/\r?\n/)[0];
+  if (policyUrl) lines.push(`Policy: ${policyUrl}`);
   lines.push(
     '',
     '# 请勿对生产环境执行拒绝服务、暴力破解或社会工程测试。',

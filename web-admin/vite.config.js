@@ -464,6 +464,24 @@ export default defineConfig(({ command, mode }) => {
       __APP_VERSION__: JSON.stringify(pkgVersion),
       __APP_BUILD_ID__: JSON.stringify(appBuildId),
     },
+    // 生产构建去噪（参考研读 2026-11-01 §二 P0-6）：debugger 语句与低级别
+    // console 调用（log/info/debug）不出现在产物中，减少运行时噪音与潜在的
+    // 调试信息泄露。两个刻意保留的例外：
+    //   1. console.error/warn 不在 pure 清单里——api.js 的 [schema-drift] 与
+    //      errorReporter 的 [errorHandler] 输出是**需要开发介入的契约**（api.js
+    //      内注释明确「console.error 而非 warn」），静默删除等于关掉生产侧诊断；
+    //   2. 仅 command === 'build' 生效：dev/vitest（serve 命令）保持原样，
+    //      开发期 console 照常输出。
+    // pure 语义：esbuild 把这些调用标记为无副作用，压缩阶段整体移除（含参数求值）；
+    // drop 与 pure 都是 esbuild 选项，无需引入 terser 依赖。
+    ...(command === 'build'
+      ? {
+          esbuild: {
+            drop: ['debugger'],
+            pure: ['console.log', 'console.info', 'console.debug'],
+          },
+        }
+      : {}),
     // vitest 配置（I-02 前端测试基线）：jsdom 提供 localStorage/document，
     // alias 与构建共用；PWA/安全头等插件仅服务 dev/build，测试不加载
     test: {

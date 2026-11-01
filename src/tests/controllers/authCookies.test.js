@@ -79,7 +79,10 @@ describe('cookie 工具函数', () => {
     const calls = [];
     const fakeRes = { clearCookie: (name, opts) => calls.push({ name, opts }) };
     clearAuthCookies(fakeRes);
-    expect(calls).toHaveLength(2);
+    // 2026-11-01 __Host- 前缀迁移：access 新旧两枚名字都要发过期指令，
+    // 迁移窗口内浏览器可能同时持有旧普通名与新前缀名（见 cookie.js 注释）
+    expect(calls).toHaveLength(3);
+    expect(calls.find((c) => c.name === '__Host-access_token').opts.path).toBe('/');
     expect(calls.find((c) => c.name === 'access_token').opts.path).toBe('/');
     expect(calls.find((c) => c.name === 'refresh_token').opts.path).toBe('/api/auth');
   });

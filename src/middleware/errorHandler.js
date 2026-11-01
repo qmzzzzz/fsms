@@ -91,6 +91,11 @@ const respondApiError = (err, req, res) => {
   // 拿不到码就只能回退到后端中文 message——英文界面显示中文。今天带 code 的抛点
   // 只有 rbac.deniedDataScope（DATA_SCOPE_DENIED），但"丢码"与抛点个数无关。
   const errors = err.code ? { ...(err.errors || {}), errorCode: err.code } : err.errors;
+  // 与 ApiResponse.error 同一口径：错误响应禁止缓存（防浏览器/反向代理缓存
+  // 鉴权与频控的失败结论，参考研读 2026-11-01 §二 P0-1）。
+  // 本文件其余出口都经 ApiResponse.error/codeError（其内部已置 no-store），
+  // 这里是唯一的裸 res.status().json() 错误出口。
+  res.setHeader('Cache-Control', 'no-store');
   return res.status(err.statusCode || 400).json({
     success: false,
     message: err.message,

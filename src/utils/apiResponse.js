@@ -76,6 +76,12 @@ class ApiResponse {
       logger.error(`ApiResponse.error called with null res: ${message}`);
       return;
     }
+    // 错误响应一律 no-store：401/403/429 这类鉴权与频控结论若被浏览器/反向代理
+    // 缓存，下一个同 URL 的合法请求会命中缓存的失败结论（参考研读 2026-11-01
+    // §二 P0-1）。成功路径不受影响——本方法只被错误出口调用。
+    // 可选链与上方 null-res 降级同一容忍口径：真实 express res 必有 setHeader，
+    // 只有测试替身/降级环境的非标准 res 才会缺——那时跳过头但不改变响应语义。
+    res.setHeader?.('Cache-Control', 'no-store');
     return res.status(statusCode).json({
       success: false,
       message,

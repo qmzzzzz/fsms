@@ -4,6 +4,7 @@ export default {
     expandSidebar: 'Expand sidebar',
     collapseSidebar: 'Collapse sidebar',
     closeSidebar: 'Close sidebar',
+    skipToContent: 'Skip to main content',
   },
   auditLog: {
     catAuthLogin: 'Authentication',
@@ -686,6 +687,10 @@ export default {
       'Refused: this segment covers your own address, so blocking it would lock you out too',
     refusedLiveTraffic:
       'Refused: the segment still has live business traffic (a fire alarm that cannot be reported is irreversible)',
+    refusedUnionCovers:
+      'Refused: this segment combined with the existing blacklist covers a whole address family, blocking all IPv4 service',
+    refusedWhitelistCovers:
+      'Refused: the whitelist already covers this segment, so adding it to the blacklist has no effect',
     typedConfirmLabel: 'Type the segment to confirm',
     typedConfirmPlaceholder: 'Copy the segment exactly',
   },
@@ -1499,6 +1504,19 @@ export default {
       imageHint:
         'Only name@sha256:<64 lowercase hex chars> is accepted; latest and floating tags are rejected',
       imageInvalid: 'Invalid image reference: it must end with @sha256: and 64 lowercase hex chars',
+      sourceLabel: 'Image Source',
+      sourceRegistry: 'Registry',
+      sourceOffline: 'Offline bundle',
+      modeLabel: 'Source',
+      offlineBundleLabel: 'Offline bundle (published by agent)',
+      offlineBundlePlaceholder: 'Select the offline bundle to install',
+      offlineBundleEmpty:
+        'The agent has not published any offline bundle (bundles directory empty or validation failed)',
+      offlineBundleInvalid: 'Select an offline bundle first',
+      offlineHint:
+        'Offline bundles are placed into the host bundles directory by operators; the agent only publishes self-declared candidates — full verification happens on the host at execution time',
+      offlineNone:
+        'No offline bundle is selectable right now: ask the operator to place a bundle in the host bundles directory and wait for the agent scan',
       currentColor: 'Currently Serving',
       targetColor: 'Switch To',
       credential: 'Identity Verification',
@@ -1532,6 +1550,7 @@ export default {
         missing_image: 'Missing image reference',
         aborted_not_ready: 'Standby color never became ready; traffic not switched',
         aborted_migrate_failed: 'Migration failed; traffic not switched',
+        aborted_import_failed: 'Offline bundle import failed; traffic not switched',
         aborted_switch_failed: 'Traffic switch failed',
         rolled_back: 'Observation window failed; rolled back',
         rollback_failed: 'Rollback failed; manual confirmation required',
@@ -1547,6 +1566,8 @@ export default {
         'start-target': 'Start standby instance',
         'wait-readyz': 'Wait for standby readiness',
         readyz: 'Health check',
+        'import-bundle': 'Import offline bundle',
+        'start-upgrade-offline': 'Start offline upgrade',
         'migrate-up': 'Run database migrations',
         switch: 'Switch traffic',
         'switch-traffic': 'Switch traffic',

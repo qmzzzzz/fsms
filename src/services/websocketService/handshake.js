@@ -16,7 +16,7 @@ const {
   MAX_TRUST_PROXY_HOPS,
   resolveTrustProxyHops: resolveTrustProxyHopsFromConfig,
 } = require('../../config/validate');
-const { parseCookies, ACCESS_COOKIE_NAME } = require('../../utils/cookie');
+const { parseCookies, activeAccessCookieNames, pickCookieValue } = require('../../utils/cookie');
 const { isIPAllowed } = require('../../utils/ipRange');
 const { isPeerTrustedProxy } = require('../../utils/ipUtils');
 const trustedProxies = require('../../config/trustedProxies');
@@ -171,7 +171,10 @@ const methods = {
     const cookieHeader = socket.handshake?.headers?.cookie;
     if (cookieHeader) {
       const cookies = parseCookies(cookieHeader);
-      if (cookies[ACCESS_COOKIE_NAME]) return cookies[ACCESS_COOKIE_NAME];
+      // 双名兼容读（__Host- 前缀迁移，见 cookie.js）：HTTP 侧与 WS 侧必须同源，
+      // 否则升级窗口内「HTTP 已登录、WS 握手却匿名」。
+      const cookieToken = pickCookieValue(cookies, activeAccessCookieNames());
+      if (cookieToken) return cookieToken;
     }
     return null;
   },

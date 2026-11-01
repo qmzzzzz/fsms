@@ -1,0 +1,5 @@
+# fsms 是登录后使用的内部管理系统：任何路径都不该被收录。
+# 这只约束"愿意遵守的爬虫"；对所有抓取器硬生效的是
+# X-Robots-Tag: noindex, nofollow 响应头（src/middleware/security/securityHeaders.js）。
+User-agent: *
+Disallow: /

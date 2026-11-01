@@ -45,14 +45,16 @@ describe('security/index.js 挂载入口与启动期断言', () => {
     mockRouteCategoryMap['/api/mock'] = AuditLog.schema.path('category').enumValues[0];
   });
 
-  test('applySecurity 按「响应头 → 解析前 → 解析后」挂载全部 10 个中间件', () => {
+  test('applySecurity 按「响应头 → 解析前 → 解析后」挂载全部 11 个中间件', () => {
     const app = { use: jest.fn() };
     applySecurity(app);
-    // 响应头 6 + protocolCompliance 1 + sanitizeMongo/preventHPP 2 + normalizeBody 1
+    // 响应头 7（xRobotsTag 是 2026-11-01 参考研读 P0-4 加的第 7 个：内部系统全局
+    // noindex——robots.txt 只约束守规矩的爬虫，响应头对所有抓取器硬生效）
+    // + protocolCompliance 1 + sanitizeMongo/preventHPP 2 + normalizeBody 1
     // （normalizeBody 是第 18 轮加的：Express 5 下无 body 请求的 req.body 是 undefined，
     //  而 .if((v,{req}) => req.body.x) 这类谓词抛错会被 express-validator 当成"整条链跳过"，
     //  校验失效后控制器 req.body.username 直接 500。见 middleware/bodyNormalization.test.js）
-    expect(app.use).toHaveBeenCalledTimes(10);
+    expect(app.use).toHaveBeenCalledTimes(11);
   });
 
   test('审计 category 映射含非法值时 applyPreBodySecurity 直接抛错（阻止带病启动）', () => {

@@ -57,6 +57,28 @@ describe('wellKnownRoutes 公共发现端点', () => {
       else process.env.SECURITY_CONTACT_EMAIL = original;
     });
 
+    test('Policy 取 SECURITY_POLICY_URL；未配置整行缺省；换行截断防字段注入（2026-11-01 P0-5）', async () => {
+      const original = process.env.SECURITY_POLICY_URL;
+      try {
+        process.env.SECURITY_POLICY_URL = 'https://policy.example/security-response';
+        const withPolicy = await request(buildApp()).get('/.well-known/security.txt');
+        expect(withPolicy.text).toMatch(/^Policy: https:\/\/policy\.example\/security-response$/m);
+
+        // 字段值中的换行即「新字段」：截断到首行，防止环境变量注入伪造字段
+        process.env.SECURITY_POLICY_URL = 'https://policy.example/a\nEvil: injected';
+        const injected = await request(buildApp()).get('/.well-known/security.txt');
+        expect(injected.text).not.toContain('Evil: injected');
+        expect(injected.text).toMatch(/^Policy: https:\/\/policy\.example\/a$/m);
+
+        delete process.env.SECURITY_POLICY_URL;
+        const without = await request(buildApp()).get('/.well-known/security.txt');
+        expect(without.text).not.toMatch(/^Policy: /m);
+      } finally {
+        if (original === undefined) delete process.env.SECURITY_POLICY_URL;
+        else process.env.SECURITY_POLICY_URL = original;
+      }
+    });
+
     test('根路径 /security.txt 同样可访问（规范过渡位置）', async () => {
       const res = await request(buildApp()).get('/security.txt');
       expect(res.status).toBe(200);

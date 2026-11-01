@@ -14,7 +14,7 @@ const honeypotDecoy = require('../services/honeypotDecoy'); // 蜜罐会话的�
 const { isIPAllowed } = require('../utils/ipRange');
 const { clientIpForSecurityDecision, isClientIpIdentityTrustworthy } = require('../utils/ipUtils');
 const { userLimiter } = require('./rateLimit');
-const { getCookies, ACCESS_COOKIE_NAME } = require('../utils/cookie');
+const { getCookies, activeAccessCookieNames, pickCookieValue } = require('../utils/cookie');
 const { violatesAccessTokenPurpose } = require('../utils/tokenPurpose');
 const { USER_STATUS } = require('../utils/constants');
 const { extendLogContext } = require('../utils/logContext');
@@ -42,7 +42,8 @@ const extractAccessToken = (req) => {
     if (token) return token;
   }
   const cookies = getCookies(req);
-  return cookies[ACCESS_COOKIE_NAME] || null;
+  // 双名兼容读（__Host- 前缀迁移，见 cookie.js）：存量旧名 cookie 在升级窗口内仍有效
+  return pickCookieValue(cookies, activeAccessCookieNames());
 };
 
 /**

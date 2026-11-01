@@ -13,6 +13,11 @@
     :inert="showExit ? '' : null"
     @keydown.esc="mobileSidebarOpen = false"
   >
+    <!-- 键盘跳转链接（a11y）：Tab 键的第一个停靠点，回车后焦点直达主内容区，
+         免去逐个 Tab 穿过整条侧边栏菜单。平时视觉隐藏，获得焦点时浮现
+         （纯 CSS 实现，参考研读 2026-11-01 §二 P1-2）。 -->
+    <a class="skip-link" href="#main-content">{{ t('layout.skipToContent') }}</a>
+
     <!-- 移动端遮罩：用原生 button 承载点击/键盘关闭，避免只有一个不可聚焦的 div -->
     <button
       v-if="isMobile && mobileSidebarOpen"
@@ -274,7 +279,9 @@
         }}</span>
       </div>
 
-      <main ref="mainContentRef" class="main-content">
+      <!-- tabindex="-1"：skip-link 的 href 定位目标必须可编程聚焦，
+           否则部分浏览器点击跳转链接后焦点仍停在原地（URL hash 变了但 Tab 序不变） -->
+      <main id="main-content" ref="mainContentRef" class="main-content" tabindex="-1">
         <router-view v-slot="{ Component }">
           <transition name="fade" mode="out-in">
             <component :is="Component" :key="route.fullPath" />
@@ -1057,6 +1064,30 @@ const handleCommand = (command) => {
   font-size: var(--xf-font-size-base);
   color: var(--xf-gray-700);
   font-weight: 600;
+}
+
+/* ===== 键盘跳转链接（a11y） ===== */
+/* 平时移出屏幕隐藏；获得键盘焦点时浮现在左上角。纯 CSS、无 JS。
+   z-index 需压过遮罩与侧边栏；outline 用系统焦点环，不自定义颜色。 */
+.skip-link {
+  position: fixed;
+  top: -48px;
+  left: 16px;
+  z-index: 3000;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: var(--xf-gray-900, #0f172a);
+  color: #fff;
+  font-size: var(--xf-font-size-base);
+  text-decoration: none;
+  transition: top 0.15s var(--xf-ease-glass, ease);
+}
+.skip-link:focus-visible {
+  top: 12px;
+}
+/* focus 兜底（不支持 :focus-visible 的旧浏览器同样要能看见） */
+.skip-link:focus {
+  top: 12px;
 }
 
 /* ===== 主内容区 ===== */

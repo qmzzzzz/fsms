@@ -349,6 +349,13 @@ server {
     # 这两条头是应用唯一可见的来源，故与基础四条同规格：嵌套块整体替换语义下，必须
     # 逐块重声明（漏一块＝那条通道的捕获缺 TLS 字段）。
     #
+    # 【2026-11-01 上游指纹抹除：proxy_hide_header】每个反代块再声明一行：
+    #   proxy_hide_header X-Powered-By;
+    # server_tokens off 只抹 nginx 自己的 Server 头；上游响应里的框架指纹由本行在
+    # 本层抹除。应用侧已有 app.disable('x-powered-by')，本行是纵深——防「未来链路
+    # 新增上游组件/新色后端重新带出该头」这类静默回归。它同样是逐块生效的指令
+    # （不属于 add_header 的整体替换语义，但新增 proxy 块时须一并带上）。
+    #
     # 【2026-10-31 XFF 信任边界口径（与应用层 clientIpForSecurityDecision 的 N 跳对齐）】
     # 本层用**追加式** $proxy_add_x_forwarded_for（保留请求方自带的左段 + 追加本层看到的
     # $remote_addr），并用 X-Real-IP $remote_addr 单独给出 TCP 对端。应用侧 TRUST_PROXY_HOPS
@@ -396,6 +403,8 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
         proxy_set_header X-Tls-Cipher $ssl_cipher;
+        # 上游指纹抹除（说明见上方「反向代理头」段）
+        proxy_hide_header X-Powered-By;
     }
 
     # ===== 无认证上报端点（根路径，静态托管不能吞掉）=====
@@ -412,6 +421,8 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
         proxy_set_header X-Tls-Cipher $ssl_cipher;
+        # 上游指纹抹除（说明见上方「反向代理头」段）
+        proxy_hide_header X-Powered-By;
     }
 
     # ===== 安全联络策略（RFC 9116）=====
@@ -433,6 +444,8 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
         proxy_set_header X-Tls-Cipher $ssl_cipher;
+        # 上游指纹抹除（说明见上方「反向代理头」段）
+        proxy_hide_header X-Powered-By;
     }
 
     # ===== 后端 API 反向代理（TLS 在此终结，后端可走明文内网） =====
@@ -457,6 +470,8 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
         proxy_set_header X-Tls-Cipher $ssl_cipher;
+        # 上游指纹抹除（说明见上方「反向代理头」段）
+        proxy_hide_header X-Powered-By;
     }
 
     # 前缀块 `location /api/` 匹配不到**不带斜杠**的 `/api`，而它是一条真实路由
@@ -486,6 +501,8 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
         proxy_set_header X-Tls-Cipher $ssl_cipher;
+        # 上游指纹抹除（说明见上方「反向代理头」段）
+        proxy_hide_header X-Powered-By;
     }
 
     # /health 本身在 protocolCompliance 的 skipPaths 内（Host 校验豁免），
@@ -502,6 +519,8 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
         proxy_set_header X-Tls-Cipher $ssl_cipher;
+        # 上游指纹抹除（说明见上方「反向代理头」段）
+        proxy_hide_header X-Powered-By;
     }
 
     # ===== 就绪探针：显式 404，不得落到 SPA 兜底（2026-10-24）=====
@@ -524,6 +543,32 @@ server {
         return 404;
     }
 
+    # ===== 网关错误页接管（参考研读 2026-11-01 §二 P0-2） =====
+    # 502/504 是用户唯一绕过应用层、直接撞上 nginx 默认白页的路径——白页无指引、
+    # 无品牌、被截图即成"系统挂了"的证据。三步接管（SafeLine 同款骨架，见其
+    # IF_backend_1 的 error_page 体系）：
+    #   1) 497（明文请求打到 HTTPS 端口）→ 302 到字面域名的 https 地址，把最扫兴的
+    #      协议错误变成无感跳转。跳转目标与 :80 的 301 同一纪律：写**字面域名**，
+    #      不用 $host（Host 头可伪造，见 :80 块注释）；$request_uri 只含路径/查询，
+    #      不含主机，可安全回带。
+    #   2) 502/504 → internal 重定向到自包含错误页（零外部请求、noindex，见
+    #      deployment/gateway-pages/gateway-error.html）。部署时把该目录同步到宿主、
+    #      保持下方 alias 路径一致；文件缺失时本层对内部重定向返回 404——
+    #      上线清单必须包含「错误页文件已就位」一项（deployment 文档同步登记）。
+    #   3) 错误页 location 无 add_header（继承 server 级安全头）、无 CSP（CSP 只落
+    #      两条静态直出块，见 finding #6 契约）、无 proxy_pass（不构成第二个入口）。
+    # 429 不在此接管：应用层限流的 429 有结构化 JSON 语义与前端话术；边缘
+    # limit_req 的 429 也由前端按状态码处理。「排队/降级页」是独立演进项
+    # （deliverables/参考项目研读与优化报告-2026-11-01.md P2-5），不与本段混做。
+    error_page 497 =302 https://your-domain.example$request_uri;
+
+    error_page 502 504 /_gateway_error.html;
+    location = /_gateway_error.html {
+        internal;
+        # 部署时与 deployment/gateway-pages/ 保持同步（路径按宿主布局调整）
+        alias /var/www/fire-safety/gateway-pages/gateway-error.html;
+    }
+
     # ===== WebSocket（wss，同源） =====
     # 刻意**不加** limit_req（finding #10 范围说明）：WebSocket/长轮询是长连接语义，
     # 握手后消息复用同一逻辑连接，按请求数计的令牌桶表达不了「连接数」，还会误伤
@@ -540,6 +585,8 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
         proxy_set_header X-Tls-Cipher $ssl_cipher;
+        # 上游指纹抹除（说明见上方「反向代理头」段）
+        proxy_hide_header X-Powered-By;
         # connect/send 口径见上方「反向代理头」段落（finding #10）：send 取 60s
         # 是心跳余量（非短请求块的 30s）；read 300s 回收闸保持不动。
         proxy_connect_timeout 5s;

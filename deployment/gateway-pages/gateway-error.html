@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 网关错误页：502/504 由 nginx error_page 内部重定向到本文件（见
+         deployment/nginx.conf.example）。此页必须零外部网络请求（无 CDN 字体/
+         无 JS 文件/无 API 调用）——它出现的时刻恰恰是后端/静态产物不可达的
+         时刻，任何外链资源都可能再次失败或放大故障。刷新按钮用内联事件即可，
+         不得改为外部脚本。noindex：错误页不进入搜索引擎。 -->
+    <meta name="robots" content="noindex, nofollow" />
+    <title>服务暂时不可用</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family:
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          'Microsoft YaHei',
+          sans-serif;
+        background: #0a0f1a;
+        color: #e2e8f0;
+        text-align: center;
+        padding: 24px;
+      }
+      main {
+        max-width: 480px;
+      }
+      .code {
+        font-size: 56px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: #c1121f;
+        margin: 0 0 8px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 12px;
+      }
+      p {
+        font-size: 14px;
+        line-height: 1.7;
+        color: #94a3b8;
+        margin: 0 0 6px;
+      }
+      button {
+        margin-top: 20px;
+        padding: 10px 28px;
+        font-size: 14px;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        background: transparent;
+        color: #e2e8f0;
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: #c1121f;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="code">502 / 504</p>
+      <h1>服务暂时不可用</h1>
+      <p>系统正在维护或负载过高，您的请求未能送达应用服务。</p>
+      <p>请稍后重试；若持续出现，请联系系统管理员。</p>
+      <button type="button" onclick="location.reload()">刷新重试</button>
+    </main>
+  </body>
+</html>

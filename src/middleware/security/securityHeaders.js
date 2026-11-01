@@ -146,6 +146,18 @@ const permissionsPolicy = (req, res, next) => {
 };
 
 /**
+ * 1.4 X-Robots-Tag: noindex 全局下发
+ * fsms 是登录后使用的内部管理系统，任何 URL 被搜索引擎收录都构成信息泄露面
+ * （登录页 → 组织指纹；带 token 的分享链接 → 收录即泄露）。robots.txt 只对
+ * 「愿意遵守的爬虫」有效且只覆盖静态面，响应头是对所有抓取器生效的硬声明，
+ * 两层叠加（robots.txt 见 web-admin/public/）。参考研读 2026-11-01 §二 P0-4。
+ */
+const xRobotsTag = (req, res, next) => {
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  next();
+};
+
+/**
  * 1.3 Reporting-Endpoints 下发（G9）
  * report-to 指令依赖该响应头解析具名端点；仅在上报开启时下发，否则浏览器会为一个不存在的端点保留上报队列。
  */
@@ -204,6 +216,7 @@ module.exports = {
   attachCspNonce,
   ensureHsts,
   permissionsPolicy,
+  xRobotsTag,
   reportingEndpoints,
   trustedTypesReportOnly,
   CSP_REPORT_PATH,

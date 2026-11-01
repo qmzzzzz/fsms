@@ -590,6 +590,36 @@ describe('布局 · 顶栏与遮罩键盘可达', () => {
   })
 })
 
+describe('布局 · 键盘跳转链接（skip-link，2026-11-01 参考研读 P1-2）', () => {
+  test('跳转链接是 app-wrapper 的首个可聚焦元素，指向主内容区；主内容区可编程聚焦', async () => {
+    // 防退化：skip-link 必须在 DOM 顺序上先于侧边栏/顶栏（Tab 的第一个停靠点），
+    // 且目标 main 必须带 tabindex="-1"——否则部分浏览器点击后焦点仍停在原地。
+    const c = mountLayout()
+    await settleRouter(c.router)
+    await flush(10)
+
+    const link = c.find('.skip-link')
+    expect(link).toBeTruthy()
+    expect(link.tagName).toBe('A')
+    expect(link.getAttribute('href')).toBe('#main-content')
+
+    // DOM 顺序：skip-link 之前的兄弟元素不得含可聚焦节点
+    const wrapper = c.find('.app-wrapper')
+    const children = Array.from(wrapper.children)
+    const linkIndex = children.indexOf(link)
+    expect(linkIndex).toBeGreaterThanOrEqual(0)
+    for (const earlier of children.slice(0, linkIndex)) {
+      expect(earlier.querySelector('a, button, input, select, textarea, [tabindex]')).toBeNull()
+    }
+
+    const main = c.find('#main-content')
+    expect(main).toBeTruthy()
+    expect(main.tagName).toBe('MAIN')
+    expect(main.getAttribute('tabindex')).toBe('-1')
+    expect(c.errors).toEqual([])
+  })
+})
+
 describe('布局 · 主题切换', () => {
   test('主题图标随 themeMode 三态切换（system → Monitor / light → Sunny / dark → Moon）', async () => {
     for (const [mode, icon] of [

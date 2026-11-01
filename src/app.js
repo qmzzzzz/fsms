@@ -567,6 +567,9 @@ function installStaticAndErrorHandling(app) {
 
   // 404
   app.use((req, res) => {
+    // 错误响应禁止缓存（与 ApiResponse.error 同一口径，参考研读 2026-11-01 §二 P0-1）：
+    // 静态面 404 兜底先于此命中，若被中间层缓存会把"文件还没部署"的结论钉死在缓存里。
+    res.setHeader('Cache-Control', 'no-store');
     res.status(404).json({
       success: false,
       // L-03：原样回显 originalUrl 会把查询串一并带出（含 ?token= 之类），
