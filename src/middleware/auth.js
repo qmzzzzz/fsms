@@ -78,7 +78,7 @@ const loadValidUser = async (userId) => {
     )
     // 仅生效角色参与授权判定（与 userPermissionService / permissionHelper 同口径）：
     // 停用角色后，该角色码不得继续进入 req.user.roleCodes，
-    // 否则 checkRole 与 userLimiter 会按已作废的角色放行/限流。
+    // 否则 checkPermission 与 userLimiter 会按已作废的角色放行/限流。
     .populate({ path: 'roles', select: 'code', match: { status: 'active' } });
   if (!user) {
     deleteCacheEntry(userId);

@@ -53,7 +53,6 @@ jest.mock('../../models', () => ({
 jest.mock('../../middleware/rbac', () => ({
   getDataScope: jest.fn(async () => ({ type: 'all' })),
   checkPermission: jest.fn(() => (req, res, next) => next()),
-  checkRole: jest.fn(() => (req, res, next) => next()),
 }));
 
 const fs = require('fs');

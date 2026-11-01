@@ -4,7 +4,7 @@
  * 缺陷形态：`userPermissionService.getPermissions` 与 `permissionHelper`
  * 早已对 populate 的 roles 加 `match:{status:'active'}`，注释写明"管理员停用角色后必须立即失效"。
  * 但同一份语义在别处被重新实现时漏掉了这个 match：
- *   middleware/auth.js                  → req.user.roleCodes（checkRole / userLimiter 的输入）
+ *   middleware/auth.js                  → req.user.roleCodes（checkPermission / userLimiter 的输入）
  *   services/websocketService（3 处）    → 受限房间 membership 与周期复查
  *   services/authService（2 处）         → 登录响应 / 会话刷新的客户端权限快照
  *   controllers/securityController      → 查看他人 PII 时的"目标层级"

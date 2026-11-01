@@ -255,8 +255,6 @@ const ERROR_CODE_I18N_MAP = {
   CONTENT_TYPE_UNSUPPORTED: 'errors.contentTypeUnsupported',
   PERMISSION_DENIED: 'errors.permissionDenied',
   PERMISSION_CHECK_FAILED: 'errors.permissionCheckFailed',
-  ROLE_NOT_ALLOWED: 'errors.roleNotAllowed',
-  ROLE_CHECK_FAILED: 'errors.roleCheckFailed',
   REAUTH_REQUIRED: 'errors.reauthRequired',
   REAUTH_PASSWORD_INCORRECT: 'errors.reauthPasswordIncorrect',
   REAUTH_MFA_NOT_ENABLED: 'errors.reauthMfaNotEnabled',

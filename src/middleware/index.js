@@ -6,7 +6,6 @@ const { authenticate, invalidateUserCache } = require('./auth');
 const {
   checkPermission,
   checkViewSensitivePermission,
-  checkRole,
   getDataScope,
   buildDataScopeFilter,
 } = require('./rbac');
@@ -65,7 +64,6 @@ module.exports = {
   // 授权中间件
   checkPermission,
   checkViewSensitivePermission,
-  checkRole,
   getDataScope,
   buildDataScopeFilter,
 

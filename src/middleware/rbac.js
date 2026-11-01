@@ -4,7 +4,6 @@
  * 支持菜单权限、按钮权限、API 权限、数据范围权限的多层级控制
  */
 
-const User = require('../models/User');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
 const { resolvePunishableIp } = require('../utils/ipUtils');
@@ -116,50 +115,6 @@ const checkViewSensitivePermission = async (req, res, next) => {
     logger.error('查看敏感信息权限检查出错', { error: error.message });
     return next(error);
   }
-};
-
-/**
- * 角色检查中间件
- * @param {string|string[]} requiredRoles - 需要的角色编码
- */
-const checkRole = (requiredRoles) => {
-  return async (req, res, next) => {
-    try {
-      const roles = Array.isArray(requiredRoles) ? requiredRoles : [requiredRoles];
-
-      // 优化：优先使用 authenticate 中间件已加载的实时角色（req.user.roleCodes），
-      // 避免重复查库；仅在未提供时回退到带请求级缓存的数据库查询
-      let userRoles;
-      if (req.user && req.user.roleCodes && req.user.roleCodes.length > 0) {
-        userRoles = req.user.roleCodes;
-      } else {
-        // 同一请求内复用角色查询结果，避免 N+1
-        if (!req.userRoles) {
-          // 与 auth.js buildAuthContext / getDataScope 同口径：只认生效角色，
-          // 否则停用角色的 code 会在此回退路径复活、绕过 checkRole（filter(Boolean) 为防御可能的 null 洞，实测 8.24.1 不留）。
-          const user = await User.findById(req.user.userId)
-            .populate({ path: 'roles', select: 'code', match: { status: 'active' } })
-            .lean();
-          req.userRoles = (user?.roles || []).filter(Boolean).map((r) => r.code);
-        }
-        userRoles = req.userRoles;
-      }
-
-      logger.debug(`检查用户角色是否包含：${roles.join(', ')}`, { userRoles });
-
-      const hasRole = roles.some((role) => userRoles.includes(role));
-
-      if (hasRole) {
-        next();
-      } else {
-        logger.warn(`用户角色不匹配，需要：${roles.join(', ')}`);
-        return ApiResponse.codeError(res, 'ROLE_NOT_ALLOWED');
-      }
-    } catch (error) {
-      logger.error(`角色检查失败：${error.message}`);
-      return ApiResponse.codeError(res, 'ROLE_CHECK_FAILED');
-    }
-  };
 };
 
 /**
@@ -461,7 +416,6 @@ const isDepartmentValueAllowed = (dataScope, value) => {
 module.exports = {
   checkPermission,
   checkViewSensitivePermission,
-  checkRole,
   getDataScope,
   buildDataScopeFilter,
   applyDataScopeToQuery,

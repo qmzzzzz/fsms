@@ -5,13 +5,13 @@
  *  1. userPermissionService 的「用户 -> 权限码」解析缓存（TTL 30s）
  *     —— 已失效，permissionCacheInvalidation.test.js 已覆盖。
  *  2. middleware/auth 的用户缓存（TTL 60s），它填充了 req.user.roles /
- *     req.user.roleCodes —— rbac.js 的 checkRole 优先读 roleCodes，
- *     rateLimit.js 的角色配额（SUPER_ADMIN 500 / SECURITY_ADMIN 400）也读它，
+ *     req.user.roleCodes —— checkPermission 与 rateLimit.js 的角色配额
+ *     （SUPER_ADMIN 500 / SECURITY_ADMIN 400）都读它，
  *     userController/roles.js 的「同级角色归属」闸门以它为事实来源。
  *
  * 修复前 updateRole 只做第 1 件事，于是与 auth.js 自己的注释直接矛盾：
  *   「停用角色后，该角色码不得继续进入 req.user.roleCodes，
- *     否则 checkRole 与 userLimiter 会按已作废的角色放行/限流」
+ *     否则 checkPermission 与 userLimiter 会按已作废的角色放行/限流」
  * 经本接口停用的角色，其 code 最长仍留存 60 秒。
  *
  * 口径对齐 rolePermissionController.js 的权限变更路径（同样按持有者逐个失效）。

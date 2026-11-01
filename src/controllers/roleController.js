@@ -253,7 +253,7 @@ const updateRole = asyncHandler(async (req, res) => {
   invalidatePermissionCache();
 
   // 权限解析缓存失效之外，还须失效 auth.js 的用户缓存：req.user.roleCodes
-  // 由它提供（TTL 60s），rbac.js 的 checkRole 与 rateLimit.js 的角色配额都读它。
+  // 由它提供（TTL 60s），checkPermission 与 rateLimit.js 的角色配额都读它。
   // 漏掉这一步则出现自相矛盾的窗口——auth.js 缓存注释承诺「停用角色的 code
   // 不得继续进入 req.user.roleCodes」，但经本接口停用时该 code 最长留存 60 秒。
   // 口径对齐 rolePermissionController.js 的权限变更路径（同样按持有者逐个失效）。

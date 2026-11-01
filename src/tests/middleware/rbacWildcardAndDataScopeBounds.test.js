@@ -23,7 +23,7 @@
  *
  * 覆盖分支：
  *  - checkPermission：模块通配符 `module:*` 正向命中、AND 逻辑、无权限 403
- *  - checkRole：数组/单字符串入参、roleCodes 缺失回退查库、无匹配角色 403
+ *    （checkRole 的分支已随该死代码删除一并摘除，2026-11-02 C-F5）
  *  - getDataScope：用户不存在、角色为空、level 阈值边界（9/8/7/4/1）
  *    与 maxLevel 多角色取最大
  *  - buildDataScopeFilter / isRecordInScope：纯函数的空入参、department 空、
@@ -36,7 +36,6 @@
 const mongoose = require('mongoose');
 const {
   checkPermission,
-  checkRole,
   getDataScope,
   buildDataScopeFilter,
   applyDataScopeToQuery,
@@ -145,74 +144,8 @@ describe('rbac.js 分支补齐', () => {
     });
   });
 
-  describe('checkRole（mock User.findById 回退路径）', () => {
-    afterEach(() => {
-      jest.restoreAllMocks();
-    });
-
-    const makeReq = () => ({
-      user: { userId: new mongoose.Types.ObjectId().toString() },
-    });
-
-    test('roleCodes 缺失时回退查库并命中', async () => {
-      jest.spyOn(User, 'findById').mockReturnValue({
-        populate: jest.fn().mockReturnThis(),
-        lean: jest.fn().mockResolvedValue({ roles: [{ code: 'OPERATOR' }] }),
-      });
-      const req = makeReq(); // 无 roleCodes 字段
-      const res = makeRes();
-      const next = jest.fn();
-      await checkRole('OPERATOR')(req, res, next);
-      expect(next).toHaveBeenCalled();
-      // 请求级缓存生效：第二次不再查库
-      const next2 = jest.fn();
-      await checkRole('OPERATOR')(req, res, next2);
-      expect(User.findById).toHaveBeenCalledTimes(1);
-      expect(next2).toHaveBeenCalled();
-    });
-
-    test('回退查库后仍无匹配角色 → 403', async () => {
-      jest.spyOn(User, 'findById').mockReturnValue({
-        populate: jest.fn().mockReturnThis(),
-        lean: jest.fn().mockResolvedValue({ roles: [{ code: 'GUEST' }] }),
-      });
-      const req = makeReq();
-      const res = makeRes();
-      const next = jest.fn();
-      await checkRole(['ADMIN', 'SUPER_ADMIN'])(req, res, next);
-      expect(next).not.toHaveBeenCalled();
-      expect(res.status).toHaveBeenCalledWith(403);
-    });
-
-    test('roleCodes 存在时优先使用，不查库', async () => {
-      const findById = jest.spyOn(User, 'findById');
-      const req = { user: { userId: 'x', roleCodes: ['ADMIN'] } };
-      const res = makeRes();
-      const next = jest.fn();
-      await checkRole('ADMIN')(req, res, next);
-      expect(next).toHaveBeenCalled();
-      expect(findById).not.toHaveBeenCalled();
-    });
-
-    test('回退查库抛错 → 500 ROLE_CHECK_FAILED，不把异常抛给上层', async () => {
-      jest.spyOn(User, 'findById').mockReturnValue({
-        populate: jest.fn().mockReturnThis(),
-        lean: jest.fn().mockRejectedValue(new Error('db down')),
-      });
-      const req = makeReq();
-      const res = makeRes();
-      const next = jest.fn();
-      await checkRole('OPERATOR')(req, res, next);
-      expect(next).not.toHaveBeenCalled();
-      expect(res.status).toHaveBeenCalledWith(500);
-      expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({
-          success: false,
-          errors: expect.objectContaining({ errorCode: 'ROLE_CHECK_FAILED' }),
-        })
-      );
-    });
-  });
+  // checkRole 已随死代码删除一并摘除（审计 2026-11-02 C-F5：全仓零路由消费，
+  // 角色口径唯一实现是 authenticate 的 roleCodes + checkPermission）
 
   describe('getDataScope（真实 DB：level 阈值边界）', () => {
     const ids = {};

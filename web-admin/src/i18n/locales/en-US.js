@@ -2090,10 +2090,8 @@ export default {
     contentTypeUnsupported: 'Unsupported Content-Type: {mediaType}',
     permissionDenied: 'You do not have permission to perform this action',
     permissionCheckFailed: 'An error occurred while verifying permissions',
-    roleNotAllowed: 'Your role is not allowed to perform this action',
     roleCodeReserved:
       'This role code is reserved by the system and cannot be used for custom roles',
-    roleCheckFailed: 'An error occurred while verifying roles',
     reauthRequired:
       'This sensitive operation requires re-authentication; please provide your current password or MFA code',
     reauthPasswordIncorrect: 'Current password is incorrect; verification failed',
