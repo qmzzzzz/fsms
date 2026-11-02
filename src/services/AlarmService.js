@@ -23,6 +23,7 @@ const { applyDataScopeToQuery } = require('../middleware/rbac');
 const { DATA_SCOPE_FIELDS } = require('../constants/dataScopeFields');
 const { castScopeObjectIds, applySearchCondition } = require('../utils/scopeCast');
 const ApiError = require('../utils/ApiError');
+const realtimeNotifier = require('./realtimeNotifier');
 
 /**
  * 报警**读出**投影（列表两条分支 + 详情共用同一个常量，防止只修一条）。
@@ -224,6 +225,8 @@ class AlarmService {
     });
 
     logger.warn(`新火警报警：${alarm.alarmCode} - ${alarm.description}`);
+    // 推送在落库之后：订阅方收到即说明数据已可读，刷新不会拿到旧列表
+    realtimeNotifier.notifyAlarm('alarm_created', alarm);
     return alarm;
   }
 
@@ -309,6 +312,8 @@ class AlarmService {
     );
     if (updated)
       logger.info('报警已指派', { alarmCode: updated.alarmCode, handler: handlerDoc.username });
+    // notifyAlarm 对 null 空转：条件写未命中时这里不会产生推送
+    realtimeNotifier.notifyAlarm('alarm_dispatched', updated);
     return updated;
   }
 
@@ -329,6 +334,8 @@ class AlarmService {
       { new: true, projection: ALARM_READ_SELECT }
     );
     if (updated) logger.info(`到达现场登记：${updated.alarmCode}`);
+    // notifyAlarm 对 null 空转：条件写未命中时这里不会产生推送
+    realtimeNotifier.notifyAlarm('alarm_arrived', updated);
     return updated;
   }
 
@@ -354,6 +361,8 @@ class AlarmService {
       { new: true, projection: ALARM_READ_SELECT }
     );
     if (updated) logger.info(`报警处理完成：${updated.alarmCode}`);
+    // notifyAlarm 对 null 空转：条件写未命中时这里不会产生推送
+    realtimeNotifier.notifyAlarm('alarm_resolved', updated);
     return updated;
   }
 
@@ -391,6 +400,8 @@ class AlarmService {
       { new: true, runValidators: true, projection: ALARM_READ_SELECT }
     );
     if (updated) logger.info(`报警标记为误报：${updated.alarmCode}`);
+    // notifyAlarm 对 null 空转：条件写未命中时这里不会产生推送
+    realtimeNotifier.notifyAlarm('alarm_false_alarm', updated);
     return updated;
   }
 
@@ -426,6 +437,8 @@ class AlarmService {
       { new: true, projection: ALARM_READ_SELECT }
     );
     if (updated) logger.info(`报警已取消：${updated.alarmCode}`);
+    // notifyAlarm 对 null 空转：条件写未命中时这里不会产生推送
+    realtimeNotifier.notifyAlarm('alarm_cancelled', updated);
     return updated;
   }
 

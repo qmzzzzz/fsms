@@ -27,6 +27,17 @@
             @clear="handleSearch"
           />
         </el-form-item>
+        <el-form-item :label="$t('auditLog.ipFilter')">
+          <el-input
+            v-model="filters.ip"
+            :placeholder="$t('auditLog.ipFilterHint')"
+            clearable
+            maxlength="64"
+            style="width: 160px"
+            @keyup.enter="handleSearch"
+            @clear="handleSearch"
+          />
+        </el-form-item>
         <el-form-item :label="$t('auditLog.categoryLabel')">
           <!-- 下面四个 el-select 只绑 @change 不绑 @clear：点清除图标时
                deleteSelected 会先 emit update:modelValue 再 emit change
@@ -160,14 +171,40 @@
     <div v-if="compliance && !compliance.error" class="glass compliance-card">
       <div class="compliance-card__header">
         <span class="compliance-card__title">{{ $t('auditLog.complianceTitle') }}</span>
-        <button
-          type="button"
-          class="glass-btn glass-btn--default glass-btn--sm"
-          :disabled="verifying"
-          @click="verifyChain"
-        >
-          {{ verifying ? $t('auditLog.verifying') : $t('auditLog.verifyChain') }}
-        </button>
+        <div class="compliance-card__actions">
+          <!-- 核验窗口：后端上限 20000 条；默认「自最新向前」只证明最近一段，
+               选「自最早向后」才能从头核验（能否宣称完整仍由 canAttestIntact 裁决） -->
+          <el-select
+            v-model="verifyFrom"
+            size="small"
+            style="width: 132px"
+            :aria-label="$t('auditLog.verifyFromLabel')"
+          >
+            <el-option :label="$t('auditLog.verifyFromLatest')" value="latest" />
+            <el-option :label="$t('auditLog.verifyFromEarliest')" value="earliest" />
+          </el-select>
+          <el-select
+            v-model="verifyLimit"
+            size="small"
+            style="width: 120px"
+            :aria-label="$t('auditLog.verifyLimitLabel')"
+          >
+            <el-option
+              v-for="n in VERIFY_LIMIT_OPTIONS"
+              :key="n"
+              :label="$t('auditLog.verifyLimitOption', { n })"
+              :value="n"
+            />
+          </el-select>
+          <button
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            :disabled="verifying"
+            @click="verifyChain"
+          >
+            {{ verifying ? $t('auditLog.verifying') : $t('auditLog.verifyChain') }}
+          </button>
+        </div>
       </div>
       <div class="compliance-card__chips">
         <span class="compliance-chip">
@@ -490,109 +527,235 @@
     />
 
     <!-- 详情对话框 -->
-    <!-- append-to-body：传送至 body，避免任何祖先 transform/filter 改变 fixed 遮罩的定位基准 -->
+    <!-- 列表投影（RESPONSE_EXCLUDE）刻意不含 body/params/query 与请求/响应头，
+         完整记录只能经 GET /security/audit-logs/:id 单条读取。打开时先用行数据占位，
+         详情到达后逐键覆盖；加载失败保留行数据并就地提示，不弹全局错误。
+         append-to-body：传送至 body，避免任何祖先 transform/filter 改变 fixed 遮罩的定位基准 -->
     <el-dialog
       v-model="detailDialog.visible"
-      :title="$t('security.auditLogs')"
-      width="700px"
+      :title="$t('auditLog.detailTitle')"
+      width="min(920px, 94vw)"
       append-to-body
     >
-      <el-descriptions v-if="detailDialog.data" :column="1" border>
-        <el-descriptions-item :label="$t('auditLog.opTime')">
-          {{ formatTime(detailDialog.data.timestamp) }}
-        </el-descriptions-item>
-        <el-descriptions-item :label="$t('auditLog.opUser')">
-          {{ detailDialog.data.username }}
-        </el-descriptions-item>
-        <el-descriptions-item :label="$t('auditLog.userIdLabel')">
-          {{ detailDialog.data.userId || '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item :label="$t('auditLog.opType')">
-          {{ actionLabel(detailDialog.data.action) }}
-        </el-descriptions-item>
-        <el-descriptions-item :label="$t('auditLog.categoryLabel')">
-          {{ categoryLabel(detailDialog.data.category) }}
-        </el-descriptions-item>
-        <el-descriptions-item
-          v-if="detailDialog.data.targetUsername"
-          :label="$t('auditLog.targetUser')"
-        >
-          {{ detailDialog.data.targetUsername }}
-        </el-descriptions-item>
-        <el-descriptions-item v-if="detailDialog.data.reason" :label="$t('auditLog.opReason')">
-          {{ auditReasonText(detailDialog.data.reason) }}
-        </el-descriptions-item>
-        <el-descriptions-item :label="$t('auditLog.reqMethod')">
-          {{ detailDialog.data.method || '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item :label="$t('auditLog.reqPath')">
-          {{ detailDialog.data.path || '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item :label="$t('auditLog.ipAddress')">
-          {{ detailDialog.data.ip || '—'
-          }}<span v-if="detailDialog.data.location" class="ip-loc">
-            · {{ ipLocationText(detailDialog.data.location) }}</span
-          >
-        </el-descriptions-item>
-        <el-descriptions-item :label="$t('auditLog.riskLevel')">
-          <el-tag :type="riskType(detailDialog.data.riskLevel)">
-            {{ riskText(detailDialog.data.riskLevel) }}
-          </el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item
-          v-if="detailDialog.data.riskFactors && detailDialog.data.riskFactors.length"
-          :label="$t('auditLog.riskFactors')"
-        >
-          <el-tag
-            v-for="factor in detailDialog.data.riskFactors"
-            :key="factor"
-            size="small"
-            type="warning"
-            effect="plain"
-            class="risk-factor-tag"
-          >
-            {{ factor }}
-          </el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item :label="$t('auditLog.resultLabel')">
-          <el-tag :type="detailDialog.data.success ? 'success' : 'danger'">
-            {{
-              detailDialog.data.success
-                ? $t('auditLog.resultSuccess')
-                : $t('auditLog.resultFailure')
-            }}
-          </el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item
-          v-if="detailDialog.data.errorMessage"
-          :label="$t('auditLog.errorInfo')"
-        >
-          {{ detailDialog.data.errorMessage }}
-        </el-descriptions-item>
-        <!-- 4xx 拒绝原因码：errorMessage 只有 HTTP 措辞，同一 errorCode 下的细分原因只在这里 -->
-        <el-descriptions-item
-          v-if="detailDialog.data.refusalReason"
-          :label="$t('auditLog.refusalReason')"
-        >
-          <el-tag size="small" type="danger" effect="plain">
-            {{ detailDialog.data.refusalReason }}
-          </el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item :label="$t('auditLog.reqBody')">
-          <pre class="json-preview">{{
-            formatJson(detailDialog.data.body ?? detailDialog.data.params)
-          }}</pre>
-        </el-descriptions-item>
-        <el-descriptions-item label="User-Agent">
-          <span class="ua-text">{{ detailDialog.data.userAgent || '-' }}</span>
-        </el-descriptions-item>
-        <el-descriptions-item
-          v-if="detailDialog.data.duration != null"
-          :label="$t('auditLog.duration')"
-        >
-          {{ detailDialog.data.duration }}ms
-        </el-descriptions-item>
-      </el-descriptions>
+      <div class="detail-scroll">
+        <el-alert
+          v-if="detailDialog.error"
+          :title="$t('auditLog.detailLoadFailed')"
+          type="warning"
+          :closable="false"
+          show-icon
+          class="detail-alert"
+        />
+        <div v-if="detailDialog.loading" class="detail-loading">
+          {{ $t('auditLog.detailLoading') }}
+        </div>
+        <template v-if="detailDialog.data">
+          <h4 class="detail-section-title">{{ $t('auditLog.sectionOverview') }}</h4>
+          <el-descriptions :column="1" border>
+            <el-descriptions-item :label="$t('auditLog.opTime')">
+              {{ formatTime(detailDialog.data.timestamp) }}
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.opUser')">
+              {{ detailDialog.data.username || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.userIdLabel')">
+              {{ userRefText(detailDialog.data.userId) }}
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.opType')">
+              {{ actionLabel(detailDialog.data.action) }}
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.categoryLabel')">
+              {{ categoryLabel(detailDialog.data.category) }}
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detailDialog.data.targetUsername"
+              :label="$t('auditLog.targetUser')"
+            >
+              {{ detailDialog.data.targetUsername }}
+            </el-descriptions-item>
+            <el-descriptions-item v-if="detailDialog.data.reason" :label="$t('auditLog.opReason')">
+              {{ auditReasonText(detailDialog.data.reason) }}
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.ipAddress')">
+              {{ detailDialog.data.ip || '—'
+              }}<span v-if="detailDialog.data.location" class="ip-loc">
+                · {{ ipLocationText(detailDialog.data.location) }}</span
+              >
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.riskLevel')">
+              <el-tag :type="riskType(detailDialog.data.riskLevel)">
+                {{ riskText(detailDialog.data.riskLevel) }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detailDialog.data.riskFactors && detailDialog.data.riskFactors.length"
+              :label="$t('auditLog.riskFactors')"
+            >
+              <el-tag
+                v-for="factor in detailDialog.data.riskFactors"
+                :key="factor"
+                size="small"
+                type="warning"
+                effect="plain"
+                class="risk-factor-tag"
+              >
+                {{ factor }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.resultLabel')">
+              <el-tag :type="detailDialog.data.success ? 'success' : 'danger'">
+                {{
+                  detailDialog.data.success
+                    ? $t('auditLog.resultSuccess')
+                    : $t('auditLog.resultFailure')
+                }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detailDialog.data.errorMessage"
+              :label="$t('auditLog.errorInfo')"
+            >
+              {{ detailDialog.data.errorMessage }}
+            </el-descriptions-item>
+            <!-- 4xx 拒绝原因码：errorMessage 只有 HTTP 措辞，同一 errorCode 下的细分原因只在这里 -->
+            <el-descriptions-item
+              v-if="detailDialog.data.refusalReason"
+              :label="$t('auditLog.refusalReason')"
+            >
+              <el-tag size="small" type="danger" effect="plain">
+                {{ detailDialog.data.refusalReason }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detailDialog.data.duration != null"
+              :label="$t('auditLog.duration')"
+            >
+              {{ detailDialog.data.duration }}ms
+            </el-descriptions-item>
+          </el-descriptions>
+
+          <h4 class="detail-section-title">{{ $t('auditLog.sectionRequest') }}</h4>
+          <el-descriptions :column="1" border>
+            <el-descriptions-item :label="$t('auditLog.reqMethod')">
+              {{ detailDialog.data.method || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.reqPath')">
+              <span class="trace-text">{{ detailDialog.data.path || '-' }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.reqQuery')">
+              <pre class="json-preview">{{ formatTraceValue(detailDialog.data.query) }}</pre>
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.reqParams')">
+              <pre class="json-preview">{{ formatTraceValue(detailDialog.data.params) }}</pre>
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.reqHeaders')">
+              <pre class="json-preview">{{
+                formatTraceValue(detailDialog.data.requestHeaders)
+              }}</pre>
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.reqBody')">
+              <pre class="json-preview">{{ formatTraceValue(detailDialog.data.body) }}</pre>
+            </el-descriptions-item>
+          </el-descriptions>
+
+          <h4 class="detail-section-title">{{ $t('auditLog.sectionResponse') }}</h4>
+          <el-descriptions :column="1" border>
+            <el-descriptions-item :label="$t('auditLog.respStatus')">
+              <el-tag
+                v-if="detailDialog.data.statusCode != null"
+                :type="detailDialog.data.success ? 'success' : 'danger'"
+                size="small"
+              >
+                {{ detailDialog.data.statusCode }}
+              </el-tag>
+              <span v-else>-</span>
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.respHeaders')">
+              <pre class="json-preview">{{
+                formatTraceValue(detailDialog.data.responseHeaders)
+              }}</pre>
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.respBody')">
+              <el-alert
+                v-if="detailDialog.data.responseBodyTruncated"
+                :title="$t('auditLog.respBodyTruncated')"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="detail-inline-alert"
+              />
+              <div v-if="detailDialog.data.responseBodySkipped" class="detail-hint">
+                {{ responseBodySkipText(detailDialog.data.responseBodySkipped) }}
+              </div>
+              <pre v-else class="json-preview">{{
+                formatTraceValue(detailDialog.data.responseBody)
+              }}</pre>
+            </el-descriptions-item>
+          </el-descriptions>
+
+          <h4 class="detail-section-title">{{ $t('auditLog.sectionClient') }}</h4>
+          <el-descriptions :column="1" border>
+            <el-descriptions-item :label="$t('auditLog.reportedIp')">
+              {{ detailDialog.data.clientInfo?.reportedIp || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.socketPeer')">
+              {{ detailDialog.data.clientInfo?.socketPeer || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="User-Agent">
+              <span class="ua-text">{{ detailDialog.data.userAgent || '-' }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detailDialog.data.clientInfo?.browser"
+              :label="$t('auditLog.clientBrowser')"
+            >
+              {{ detailDialog.data.clientInfo.browser }}
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detailDialog.data.clientInfo?.os"
+              :label="$t('auditLog.clientOs')"
+            >
+              {{ detailDialog.data.clientInfo.os }}
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detailDialog.data.clientInfo?.device"
+              :label="$t('auditLog.clientDevice')"
+            >
+              {{ detailDialog.data.clientInfo.device }}
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detailDialog.data.fingerprint"
+              :label="$t('auditLog.fingerprint')"
+            >
+              <span class="trace-hash">{{ detailDialog.data.fingerprint }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detailDialog.data.sessionId"
+              :label="$t('auditLog.sessionIdLabel')"
+            >
+              <span class="trace-hash">{{ detailDialog.data.sessionId }}</span>
+            </el-descriptions-item>
+          </el-descriptions>
+
+          <h4 class="detail-section-title">{{ $t('auditLog.sectionIntegrity') }}</h4>
+          <el-descriptions :column="1" border>
+            <el-descriptions-item :label="$t('auditLog.hashVersionLabel')">
+              {{ detailDialog.data.hashVersion ?? '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.prevHash')">
+              <span class="trace-hash">{{ detailDialog.data.prevHash || '—' }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('auditLog.recordHash')">
+              <span class="trace-hash">{{ detailDialog.data.hash || '—' }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detailDialog.data.hashFailure"
+              :label="$t('auditLog.hashFailureLabel')"
+            >
+              {{ detailDialog.data.hashFailure }}
+            </el-descriptions-item>
+          </el-descriptions>
+        </template>
+      </div>
       <template #footer>
         <button
           type="button"
@@ -607,7 +770,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
@@ -627,6 +791,7 @@ import { ipLocationLabel as toIpLocationLabel } from '@/utils/ipLocationLabels'
 import { translateAuditReason } from '@/i18n/auditReasons'
 
 const { t, locale } = useI18n()
+const route = useRoute()
 const { hasPerm, hasAllPerms } = usePermission()
 
 /**
@@ -659,6 +824,10 @@ const statsLoaded = ref(false)
 // 合规面板（overview.compliance 数据已随统计接口下发，之前只取了 3 个计数就丢了）
 const compliance = ref(null)
 const verifying = ref(false)
+// 核验窗口（与后端 HTTP 面上限 DEFAULT_MAX_RECORDS=20000 同口径）
+const VERIFY_LIMIT_OPTIONS = [20000, 10000, 5000, 1000]
+const verifyFrom = ref('latest')
+const verifyLimit = ref(20000)
 
 const auditLossTotal = computed(() => {
   const s = compliance.value?.auditLoss
@@ -763,6 +932,7 @@ const monitorHealthRows = computed(() =>
 const filters = reactive({
   dateRange: null,
   username: '',
+  ip: '',
   category: '',
   level: '',
   riskLevel: '',
@@ -771,13 +941,49 @@ const filters = reactive({
 
 const detailDialog = reactive({
   visible: false,
+  id: null,
   data: null,
+  loading: false,
+  error: false,
 })
+
+// 详情请求竞态守卫：快速连点不同行时，先发出的慢响应不得覆盖后点开的那条。
+const detailGuard = useLatestRequest()
+
+const loadDetail = async (id) => {
+  const isCurrent = detailGuard()
+  detailDialog.loading = true
+  detailDialog.error = false
+  try {
+    const res = await api.security.getAuditLogDetail(id)
+    if (!isCurrent()) return
+    const doc = res?.data?.data
+    if (!doc) {
+      detailDialog.error = true
+      return
+    }
+    // 行数据先到、详情后到：保留行字段，逐键以详情为准覆盖
+    detailDialog.data = { ...detailDialog.data, ...doc }
+  } catch (e) {
+    if (isCanceledError(e)) return
+    if (!isCurrent()) return
+    // 票据过期：重新验证后重放详情读取，不当作业务失败提示
+    if (REAUTH_TICKET_ERROR_CODES.includes(await readReauthErrorCode(e))) {
+      requireReauth('detail')
+      return
+    }
+    // 失败提示就地显示（保留行字段），不弹全局错误
+    detailDialog.error = true
+  } finally {
+    if (isCurrent()) detailDialog.loading = false
+  }
+}
 
 // 构建当前筛选条件对应的查询参数（列表与导出共用，保证"导出即所见"）
 const buildFilterParams = () => {
   const params = {}
   if (filters.username) params.username = filters.username
+  if (String(filters.ip || '').trim()) params.ip = String(filters.ip).trim()
   if (filters.category) params.category = filters.category
   if (filters.level) params.level = filters.level
   if (filters.riskLevel) params.riskLevel = filters.riskLevel
@@ -844,6 +1050,8 @@ const handleReauthSubmit = async (credential) => {
       if (tag === 'logs') loadData()
       else if (tag === 'alerts') loadAlerts()
       else if (tag === 'forensic') exportForensic()
+      // 详情弹层可能已被关闭：此时 id 已清空，重放一个看不见的请求没有意义
+      else if (tag === 'detail' && detailDialog.id) loadDetail(detailDialog.id)
     }
   } catch (_) {
     // 凭据错误等提示由 api 响应拦截器统一输出；弹层保持打开便于重试
@@ -976,7 +1184,10 @@ const loadAlerts = async () => {
 const verifyChain = async () => {
   verifying.value = true
   try {
-    const res = await api.security.verifyAuditChain()
+    const res = await api.security.verifyAuditChain({
+      from: verifyFrom.value,
+      limit: verifyLimit.value,
+    })
     const d = res.data?.data
     if (!d) return
     const title = d.canAttestIntact
@@ -986,6 +1197,16 @@ const verifyChain = async () => {
         : t('auditLog.verifyPartialTitle')
     const type = d.canAttestIntact ? 'success' : d.breaks > 0 ? 'error' : 'warning'
     const lines = []
+    // 结论必须自述窗口：同样的 scanned 数字，latest 与 earliest 证明的是链的两端
+    lines.push(
+      t('auditLog.verifyScopeLine', {
+        from:
+          verifyFrom.value === 'earliest'
+            ? t('auditLog.verifyFromEarliest')
+            : t('auditLog.verifyFromLatest'),
+        limit: verifyLimit.value,
+      })
+    )
     if (d.breaks > 0) lines.push(t('auditLog.verifyBreaksLine', { n: d.breaks }))
     lines.push(t('auditLog.verifyDetail', { scanned: d.total, total: d.collectionTotal }))
     ElMessageBox.alert(lines.join('\n'), title, {
@@ -1006,6 +1227,7 @@ const verifyChain = async () => {
 const resetFilters = () => {
   filters.dateRange = null
   filters.username = ''
+  filters.ip = ''
   filters.category = ''
   filters.level = ''
   filters.riskLevel = ''
@@ -1013,12 +1235,28 @@ const resetFilters = () => {
   handleSearch()
 }
 
-// 查看详情
+// 查看详情：先行数据占位，再单条拉取完整记录（列表投影不含请求/响应正文与头袋）
 const viewDetail = (row) => {
-  // 直接使用当前行的数据作为详情（因为列表已经包含完整信息）
-  detailDialog.data = row
+  detailDialog.id = row?._id || null
+  detailDialog.data = row ? { ...row } : null
+  detailDialog.loading = false
+  detailDialog.error = false
   detailDialog.visible = true
+  if (detailDialog.id) loadDetail(detailDialog.id)
 }
+
+// 关闭即作废本轮在途详情请求，避免下次打开时被旧响应覆盖
+watch(
+  () => detailDialog.visible,
+  (visible) => {
+    if (visible) return
+    detailGuard()
+    detailDialog.id = null
+    detailDialog.data = null
+    detailDialog.loading = false
+    detailDialog.error = false
+  }
+)
 
 // 导出日志
 const exporting = ref(false)
@@ -1160,11 +1398,42 @@ const exportForensic = async () => {
 // ① 切换界面语言会让同一列的时间格式突变（月/日顺序与分隔符都变）；
 // ② 非法时间戳渲染成 "Invalid Date"。两者都已由 formatTime 兜住。
 
-// 格式化 JSON（列表接口出于安全不返回 body/params 时显示占位符）
-const formatJson = (value) => {
-  if (value === null || value === undefined) return '-'
-  if (typeof value !== 'object' || Object.keys(value).length === 0) return '-'
-  return JSON.stringify(value, null, 2)
+// 详情值的统一渲染：字符串原样、对象格式化 JSON、空值占位。
+// 响应正文允许是字符串（非 JSON 响应），不能只按对象走 JSON.stringify。
+const formatTraceValue = (value) => {
+  if (value === null || value === undefined || value === '') return '-'
+  if (typeof value === 'string') return value
+  if (typeof value === 'object') {
+    if (Object.keys(value).length === 0) return '-'
+    try {
+      return JSON.stringify(value, null, 2)
+    } catch (_) {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
+// 响应正文未采集的原因码 → 文案。未知码不得误标成「无法序列化」（原因码可能新增）。
+const RESPONSE_SKIP_KEYS = {
+  stream: 'auditLog.respBodySkippedStream',
+  empty: 'auditLog.respBodySkippedEmpty',
+  binary: 'auditLog.respBodySkippedBinary',
+  unserializable: 'auditLog.respBodySkippedUnserializable',
+}
+const responseBodySkipText = (code) => {
+  const key = RESPONSE_SKIP_KEYS[code]
+  return key ? t(key) : t('auditLog.respBodySkippedUnknown', { code })
+}
+
+// userId 在列表/详情里是 populate 后的对象，直接渲染会得到 [object Object]
+const userRefText = (user) => {
+  if (!user) return '-'
+  if (typeof user !== 'object') return String(user)
+  const username = user.username || ''
+  const realName = user.realName || ''
+  if (username && realName && realName !== username) return `${realName} (${username})`
+  return username || realName || String(user._id || '-')
 }
 
 // 操作类型 / 分类标签：映射本体已抽至 utils/auditLabels.js（与 MyLogsCard 共用）。
@@ -1227,11 +1496,48 @@ const riskRowClass = ({ row }) => {
   return ''
 }
 
-onMounted(() => {
-  loadData()
-  loadStats()
-  loadAlerts()
-})
+/**
+ * 从画像页深链进入时预填查询：
+ *   ?ip=&startDate=&endDate=  打开该 IP 在画像统计日期内的原始记录
+ *   ?logId=                   直接打开指定记录的完整取证（逐行「查看完整取证」）
+ * 布局层以 route.fullPath 作为 router-view 的 key，query 变化会重新挂载本页，
+ * 因此挂载时读取一次即可覆盖「从画像页跳入」与「本页再次带参跳入」两种情形。
+ */
+const queryString = (value) => (Array.isArray(value) ? value[0] : value)
+
+const applyRouteQuery = () => {
+  const read = (key) => String(queryString(route.query[key]) ?? '').trim()
+  const ip = read('ip')
+  if (ip) filters.ip = ip
+  const startDate = read('startDate')
+  const endDate = read('endDate')
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/
+  if (dateOnly.test(startDate) && dateOnly.test(endDate)) {
+    filters.dateRange = [startDate, endDate]
+  }
+  return read('logId')
+}
+
+let routeQueryApplied = false
+watch(
+  () => route.query,
+  () => {
+    const logId = applyRouteQuery()
+    if (logId) viewDetail({ _id: logId })
+    if (!routeQueryApplied) {
+      routeQueryApplied = true
+      loadData()
+      loadStats()
+      loadAlerts()
+      return
+    }
+    // 路由解析晚于组件挂载（memory history / 首屏导航）：参数到齐后补一次带参查询。
+    // 真实布局以 route.fullPath 作为 router-view 的 key，带参跳转会重挂载本页，
+    // 不会走到这条分支——它只为「挂载时 query 尚未就绪」兜底。
+    if (Object.keys(buildFilterParams()).length > 0) handleSearch()
+  },
+  { immediate: true }
+)
 </script>
 
 <style scoped>
@@ -1276,6 +1582,12 @@ onMounted(() => {
   font-family: var(--xf-font-display);
   font-weight: 600;
   letter-spacing: var(--xf-tracking-wide);
+}
+.compliance-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .compliance-card__chips {
   display: flex;
@@ -1512,6 +1824,49 @@ onMounted(() => {
 }
 
 /* ===== 详情对话框 ===== */
+/* 详情是长表：滚动收在本容器内，页脚按钮始终可见 */
+.detail-scroll {
+  max-height: 68vh;
+  overflow-y: auto;
+  padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+.detail-section-title {
+  margin: 18px 0 8px;
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-gray-900);
+  letter-spacing: var(--xf-tracking-wide);
+}
+.detail-section-title:first-of-type {
+  margin-top: 0;
+}
+.detail-alert {
+  margin-bottom: 12px;
+}
+.detail-inline-alert {
+  margin-bottom: 8px;
+}
+.detail-loading,
+.detail-hint {
+  padding: 4px 0;
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-text-secondary);
+}
+.trace-text,
+.trace-hash {
+  font-family: var(--xf-font-mono);
+  font-size: var(--xf-font-size-xs);
+  word-break: break-all;
+}
+.trace-text {
+  color: var(--xf-gray-600);
+}
+.trace-hash {
+  color: var(--xf-gray-600);
+}
 .risk-factor-tag {
   margin: 2px 6px 2px 0;
 }

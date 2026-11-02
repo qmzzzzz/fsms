@@ -102,7 +102,7 @@ const MENU_KEYS = [
   'nav.roles',
   'nav.auditLogs',
   'nav.ipList',
-  'nav.forensic',
+  'nav.securityAnalysis',
   'nav.privilegeGrants',
   'nav.reports',
   'nav.profile',
@@ -234,7 +234,7 @@ const ROUTES = [
   page('roles', { titleKey: 'nav.roles' }),
   page('audit-logs', { titleKey: 'nav.auditLogs' }),
   page('ip-list', { titleKey: 'nav.ipList' }),
-  page('forensic-trace', { titleKey: 'nav.forensic' }),
+  page('security-analysis', { titleKey: 'nav.securityAnalysis', keepOnQuery: true }),
   page('privilege-grants', { titleKey: 'nav.privilegeGrants' }),
   page('reports', { titleKey: 'nav.reports' }),
   page('profile', { titleKey: 'nav.profile' }),
@@ -380,7 +380,7 @@ describe('布局 · 菜单渲染与权限过滤', () => {
         'nav.dashboard',
         'nav.users',
         'nav.auditLogs',
-        'nav.forensic',
+        'nav.securityAnalysis',
         'nav.profile',
         'nav.about',
       ].map(label)
@@ -964,6 +964,20 @@ describe('布局 · 路由联动与面包屑', () => {
     // 顺序：旧实例先卸载，新实例再 setup/mount（in-out 过渡不重叠）
     expect(pageEvents.map((e) => e.split(':')[0])).toEqual(['unmount', 'setup', 'mount'])
   })
+
+  test('meta.keepOnQuery 的页面：仅 query 变化不重挂载（工作台 tab 保活）', async () => {
+    const c = mountLayout({ initialRoute: '/security-analysis' })
+    await settleRouter(c.router)
+    await settleTransition(c, () => !!c.find('.page-security-analysis'))
+    const firstInstance = c.find('.page-security-analysis').dataset.instance
+    pageEvents.length = 0
+
+    await c.router.push('/security-analysis?tab=forensic')
+    await flush(10)
+    // 工作台三个工具的状态挂在页面实例上；切 tab 若重挂载就全部丢失
+    expect(c.find('.page-security-analysis').dataset.instance).toBe(firstInstance)
+    expect(pageEvents).toEqual([])
+  })
 })
 
 describe('布局 · 语言切换', () => {
@@ -998,7 +1012,7 @@ describe('布局 · 语言切换', () => {
       'Roles',
       'Audit Logs',
       'IP List',
-      'Forensics',
+      'Security Analysis',
       'Temporary Grants',
       'Reports',
       'Profile',

@@ -127,6 +127,8 @@ const ROW_OTHER = {
   roles: [{ _id: 'r1', name: '管理员', code: 'ADMIN' }],
   status: 'inactive',
   mfaEnabled: true,
+  lastLoginAt: '2026-10-01T01:02:03.000Z',
+  remark: '年度复训未完成',
 }
 const ROW_NO_MFA = { ...ROW_OTHER, _id: 'u3', username: 'carol', mfaEnabled: false }
 
@@ -451,6 +453,18 @@ describe('UserView 列表与筛选', () => {
     const c = await mountUser(P_BASE)
     expect(usersGetList).toHaveBeenCalledWith({ page: 1, limit: 10, search: '' })
     expect(c.errors).toEqual([])
+  })
+
+  test('列表展示最后登录时间（本地时区定长串）与备注', async () => {
+    const c = await mountUser(P_BASE)
+    const row = c.findAll('.el-table__body-wrapper .el-table__row')[0]
+    const d = new Date(ROW_OTHER.lastLoginAt)
+    const p = (n) => String(n).padStart(2, '0')
+    const expected = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(
+      d.getHours()
+    )}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+    expect(row.textContent).toContain(expected)
+    expect(row.textContent).toContain('年度复训未完成')
   })
 
   test('末页 clamp：越界页回退到 1 并重取，且 loading 收敛为 false（WF-05 实证）', async () => {

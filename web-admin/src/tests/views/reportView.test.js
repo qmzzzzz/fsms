@@ -32,8 +32,7 @@ vi.mock('@/utils/api', () => ({
   // WF-09（2026-11-02）：ReportView 的 blob 错误解包改为优先走码化翻译，
   // mock 必须提供该导出；替身按「有 errorCode 就有翻译」的最简口径，
   // 翻译表本身由 errorCodeI18n.test.js 单独钉住
-  resolveErrorMessage: (data) =>
-    data?.errors?.errorCode ? `i18n:${data.errors.errorCode}` : null,
+  resolveErrorMessage: (data) => (data?.errors?.errorCode ? `i18n:${data.errors.errorCode}` : null),
 }))
 // 口令信封需要 WebCrypto 与公钥；本套件只关心"加密后提交、明文不上行"
 const encryptPassword = vi.fn(async (password, purpose) => `envelope:${purpose}:${password}`)
@@ -238,7 +237,12 @@ describe('ReportView 导出错误处理', () => {
     // 有 errorCode 的错误体优先走 resolveErrorMessage（错误码 → i18n），
     // 英文界面下不再直出后端中文——此前只取 message 字段（与 AuditLogView 分叉）
     const jsonBlob = new Blob(
-      [JSON.stringify({ message: '导出范围过大', errors: { errorCode: 'PII_EXPORT_QUOTA_EXCEEDED' } })],
+      [
+        JSON.stringify({
+          message: '导出范围过大',
+          errors: { errorCode: 'PII_EXPORT_QUOTA_EXCEEDED' },
+        }),
+      ],
       { type: 'application/json' }
     )
     exportReport.mockResolvedValue({ data: jsonBlob })

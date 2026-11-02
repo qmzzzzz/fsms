@@ -81,11 +81,30 @@ const routes = [
         meta: { titleKey: 'nav.ipList', icon: 'Lock', permission: 'security:config' },
       },
       {
-        // 取证溯源（T5/T6）：读溯源 security:audit；页内封段按钮另按 security:config 门控
+        // 安全分析工作台：IP 画像 / 撞库画像 / 取证溯源三个 tab。读面统一 security:audit；
+        // 页内封段按钮仍由 security:config 单独门控。tab 存 query，keepOnQuery 决定不重挂载。
+        path: 'security-analysis',
+        name: 'security-analysis',
+        component: () => import('@/views/SecurityAnalysisView.vue'),
+        meta: {
+          titleKey: 'nav.securityAnalysis',
+          icon: 'Aim',
+          permission: 'security:audit',
+          keepOnQuery: true,
+        },
+      },
+      // 旧入口保留为深链：判据原样带给工作台对应 tab，书签/告警链接不失效
+      {
         path: 'forensic-trace',
-        name: 'forensic-trace',
-        component: () => import('@/views/ForensicTraceView.vue'),
-        meta: { titleKey: 'nav.forensic', icon: 'Search', permission: 'security:audit' },
+        redirect: (to) => ({ path: '/security-analysis', query: { ...to.query, tab: 'forensic' } }),
+      },
+      {
+        path: 'attack-profile',
+        redirect: (to) => ({ path: '/security-analysis', query: { ...to.query, tab: 'attack' } }),
+      },
+      {
+        path: 'stuffing-profile',
+        redirect: (to) => ({ path: '/security-analysis', query: { ...to.query, tab: 'stuffing' } }),
       },
       {
         path: 'privilege-grants',

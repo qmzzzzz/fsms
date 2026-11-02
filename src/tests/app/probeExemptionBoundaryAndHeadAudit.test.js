@@ -97,7 +97,7 @@ describe('探针豁免的边界与 HEAD 审计留痕', () => {
 
   /**
    * 本用例刚落库的那一行。排序口径直接沿用审计列表游标的权威形状 `{ timestamp:-1, _id:-1 }`
-   * （models/AuditLog.js:244 注释：同一毫秒要靠 `_id` 打散），
+   * （models/AuditLog.js:344 注释：同一毫秒要靠 `_id` 打散），
    * 这样"取最新"不会因为两行时间戳并列而回到未定义顺序。
    */
   const newestRow = async () =>

@@ -124,15 +124,20 @@ const tracePoolBanUnionRollback = async (req, result) => {
     path: auditPath(req),
     ...auditClientAddress(req),
     userAgent: req.get('user-agent'),
-    body: { cidr: result.cidr, rolledBack, rolledBackIds: result.rolledBackIds || [] },
+    body: {
+      cidr: result.cidr,
+      rolledBack,
+      rolledBackIds: result.rolledBackIds || [],
+      skippedExisting: result.skippedExisting || 0,
+    },
     success: false,
     riskLevel: 'critical',
     riskFactors: [
-      rolledBack
+      rolledBack || result.skippedExisting
         ? 'full_range_cidr_pool_ban_union_rollback'
         : 'full_range_cidr_pool_ban_union_prewrite',
     ],
-    reason: `确认 ${result.cidr} 时黑名单并集覆盖地址族（${rolledBack ? '已回滚本次写入' : '写入前拦下'}）`,
+    reason: `确认 ${result.cidr} 时黑名单并集覆盖地址族（${rolledBack ? '已回滚本次写入' : result.skippedExisting ? '未删他人既有条目' : '写入前拦下'}）`,
   });
 };
 

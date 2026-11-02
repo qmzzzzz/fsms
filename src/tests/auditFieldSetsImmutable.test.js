@@ -13,7 +13,7 @@
  * 注释和 review 防不住第三次，`Object.freeze` 防得住：
  * 清单内容从此在物理上无法被 push/splice 改动。
  * 本用例同时钉住三件事，缺一就会退化成"看着严证实则空转"：
- *   ① 四份清单都处于 frozen 状态；
+ *   ① 全部版本清单都处于 frozen 状态；
  *   ② 在严格模式调用方里改动它们必须抛 TypeError，且抛完之后内容一字未变；
  *   ③ **反向前提**：同一份未冻结的副本 push 必须成功——
  *      否则 ② 可能只是因为"push 永远不抛"而假绿。
@@ -24,6 +24,8 @@ const {
   PAYLOAD_FIELDS_V2,
   PAYLOAD_FIELDS_V3,
   PAYLOAD_FIELDS_V4,
+  PAYLOAD_FIELDS_V5,
+  PAYLOAD_FIELDS_V6,
   canonicalPayload,
   CURRENT_PAYLOAD_VERSION,
 } = require('../utils/auditChainPayload');
@@ -33,10 +35,12 @@ const ALL_SETS = {
   V2: PAYLOAD_FIELDS_V2,
   V3: PAYLOAD_FIELDS_V3,
   V4: PAYLOAD_FIELDS_V4,
+  V5: PAYLOAD_FIELDS_V5,
+  V6: PAYLOAD_FIELDS_V6,
 };
 
 describe('审计链字段清单不可变', () => {
-  test('四份清单全部 frozen', () => {
+  test('六份清单全部 frozen', () => {
     for (const [name, list] of Object.entries(ALL_SETS)) {
       expect({ name, frozen: Object.isFrozen(list) }).toEqual({ name, frozen: true });
     }
@@ -62,8 +66,12 @@ describe('审计链字段清单不可变', () => {
   test('版本清单必须是互不相同的快照（v3 事故的直接回归）', () => {
     expect(PAYLOAD_FIELDS_V3).not.toBe(PAYLOAD_FIELDS_V2);
     expect(PAYLOAD_FIELDS_V4).not.toBe(PAYLOAD_FIELDS_V3);
+    expect(PAYLOAD_FIELDS_V5).not.toBe(PAYLOAD_FIELDS_V4);
+    expect(PAYLOAD_FIELDS_V6).not.toBe(PAYLOAD_FIELDS_V5);
     expect(PAYLOAD_FIELDS_V3).toEqual(PAYLOAD_FIELDS_V2);
     expect(PAYLOAD_FIELDS_V4.slice(0, PAYLOAD_FIELDS_V3.length)).toEqual(PAYLOAD_FIELDS_V3);
+    expect(PAYLOAD_FIELDS_V5.slice(0, PAYLOAD_FIELDS_V4.length)).toEqual(PAYLOAD_FIELDS_V4);
+    expect(PAYLOAD_FIELDS_V6.slice(0, PAYLOAD_FIELDS_V5.length)).toEqual(PAYLOAD_FIELDS_V5);
   });
 
   test('v4 新增的四字段只属于 v4（否则历史口径又被悄悄改写）', () => {
@@ -75,7 +83,7 @@ describe('审计链字段清单不可变', () => {
     }
   });
 
-  test('分派表逐版稳定：同一文档按 1/2/3/4 复算得到四个不同结果', () => {
+  test('分派表逐版稳定：同一文档按 1~6 复算，各版边界断言', () => {
     const doc = {
       timestamp: new Date('2026-09-19T00:00:00.000Z'),
       action: 'user_login',
@@ -88,8 +96,9 @@ describe('审计链字段清单不可变', () => {
       riskLevel: 'low',
       riskFactors: ['x'],
       description: '取证要看的值',
+      refusalReason: 'typed_confirmation_required',
     };
-    const digests = [1, 2, 3, CURRENT_PAYLOAD_VERSION].map((v) => canonicalPayload(doc, v));
+    const digests = [1, 2, 3, 4, 5, CURRENT_PAYLOAD_VERSION].map((v) => canonicalPayload(doc, v));
     // v2 与 v3 字段集相同 ⇒ 这两版必然同串（这是设计，不是缺陷）；
     // v1 与 v4 都必须与它们不同 ⇒ 任何一版被悄悄改写都会在这里现形。
     expect(digests[1]).toEqual(digests[2]);
@@ -98,6 +107,13 @@ describe('审计链字段清单不可变', () => {
     // v4 的串必须真的带上那四个新字段（防止"清单加了、payload 没进"的假收紧）
     expect(digests[3]).toContain('description');
     expect(digests[1]).not.toContain('description');
+    // v5 只多 refusalReason；v6 只多五个溯源字段（本 doc 未提供 ⇒ 值以 null 入串）
+    expect(digests[4]).toContain('refusalReason');
+    expect(digests[3]).not.toContain('refusalReason');
+    expect(CURRENT_PAYLOAD_VERSION).toBe(6);
+    expect(digests[5]).toContain('requestHeaders');
+    expect(digests[5]).toContain('responseBody');
+    expect(digests[4]).not.toContain('requestHeaders');
   });
 
   test('缺省版本就是当前写入版本（写入端与校验端不许各自理解缺省）', () => {

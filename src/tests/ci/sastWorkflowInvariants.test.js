@@ -20,6 +20,18 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '../../..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n?/g, '\n');
 
+/**
+ * 剥掉整行注释与行尾注释，只留真正会生效的内容（与 ciWorkflowInvariants.test.js 同款）。
+ * 凡「数某个键出现几次」「某属性必须在」这类判据都必须跑在这个视图上：注释行在 YAML 里
+ * 不生效，按原始文本计数时 `# persist-credentials: false` 会把一处失效属性数成一处有效属性。
+ */
+const stripComments = (text) =>
+  text
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .map((line) => line.replace(/\s+#(?![^'"]*').*$/, ''))
+    .join('\n');
+
 const wf = read('.github/workflows/sast.yml');
 const rules = read('.github/semgrep/rules.yml');
 const doc = read('docs/security-dependency-watch.md');
@@ -144,9 +156,13 @@ describe('私有仓 SAST（Semgrep）工作流的不变量', () => {
       });
       expect(l).toMatch(/#\s*v\d+/);
     }
-    const checkouts = wf.split('\n').filter((l) => /uses: actions\/checkout@/.test(l)).length;
+    // 数「生效了几处」必须剥注释：按原始文本计数时，把唯一那处前置 `#` 之后
+    // 正则仍能数到 1，与 checkouts 相等 ⇒ 假绿。属性实际已退回默认值 true，
+    // 而这是本工作流唯一一道「GITHUB_TOKEN 不留在 .git/config」的判据。
+    const eff = stripComments(wf);
+    const checkouts = eff.split('\n').filter((l) => /uses: actions\/checkout@/.test(l)).length;
     expect(checkouts).toBe(1);
-    expect((wf.match(/persist-credentials: false/g) || []).length).toBe(checkouts);
+    expect((eff.match(/persist-credentials: false/g) || []).length).toBe(checkouts);
   });
 
   test('4 容器镜像：写在 image: 位置（可被镜像面账看见）且与期望表同一个 digest', () => {

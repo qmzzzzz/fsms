@@ -1,4 +1,4 @@
-const ExcelJS = require('exceljs');
+const { createWorkbook } = require('../utils/xlsxWriter');
 const {
   EXPORT_LIMIT,
   EXPORT_MODEL_CONFIG,
@@ -167,12 +167,10 @@ const buildTruncationFooter = (context) => {
 /**
  * 把 workbook 写进响应流，并且**只对真正送完的导出报成功**。
  *
- * 为什么 `await workbook.xlsx.write(res)` 之后还不能算成功（两处实测）：
- *   ① 它等的是 **zip 自己**收工（exceljs/lib/xlsx/xlsx.js 里 `zip.pipe(stream)` 之后
- *      由 zip 的收尾事件 resolve），不是目的端收工；
- *   ② 探针实测：write() resolve 的那一刻，目的端**一个事件都还没发**——
- *      正常收尾时 `finish`/`close` 都在其后才到（此时 `destroyed=false`），
- *      而中途被 destroy 的那次同样是先 resolve、事件后到。
+ * 为什么 `workbook.write(res)` 之后还不能算成功：
+ *   ① 它只做两件事——把整包字节交给 `res.end()`，然后立刻返回。它等的是**自己**
+ *      把 buffer 交出去，不是目的端把字节交给内核；
+ *   ② 交付那一刻目的端**一个终局事件都还没发**：`finish`/`close` 都在其后才到。
  * 所以"写完读一下 destroyed/writableFinished 状态"这种写法抓不到任何一次中断
  * （状态位在那一刻还没来得及翻），CSV 侧的判据是"全程挂监听器 + 写完再等一步"
  * （auditExportService.js:85-101、150-152），这里按同一形状补齐 xlsx 这半边：
@@ -192,6 +190,16 @@ const RESPONSE_ABORTED = '导出响应中途断开（客户端中断或连接被
 const writeWorkbookToResponse = async (res, workbook) => {
   let aborted = null;
   let finished = false;
+  // 状态位必须在 write **之前**取：判据要回答的是"客户端是不是在 write 之前就已断开"
+  // （半截下载被取消、反代超时）——那种情况下 finish/close 早已发完，监听器只收挂上之后
+  // 的事件，settled 永不 settle，handler 就永久挂在 await 上（既不报成功也不报中断，
+  // response_aborted_after_headers 那条审计走不到，游标随 async 栈常驻）。
+  // 顺序不能反：正常收尾后 Node 也会 destroy socket，先认 writableFinished 才不会把
+  // "成功写完"读成"中途断开"。**也不能改回 write 之后再读**——write 自己会调 `res.end()`，
+  // 之后 `writableEnded` 恒为 true，读它等于把每一次正常导出判成中断。
+  const finishedBefore = res.writableFinished === true;
+  const abortedBefore = res.destroyed === true || res.writableEnded === true;
+
   const settled = new Promise((resolve) => {
     res.once('finish', () => {
       finished = true;
@@ -206,23 +214,18 @@ const writeWorkbookToResponse = async (res, workbook) => {
     res.once('error', onAbort);
   });
 
-  await workbook.xlsx.write(res);
-  // write() 只代表 zip 把字节交给了 StreamBuf：目的端还没表态就等它表态。
-  //
-  // 但"等它表态"有一个前置条件：终局事件必须还没发过。上面那对监听器只能收到
-  // **挂上之后**才发生的事件——客户端在 write() 之前就已断开（半截下载被取消、
-  // 反代超时）时 finish/close 早已发完，settled 永不 settle，这个 handler 就永久
-  // 挂在 await 上：既不报成功也不报中断，response_aborted_after_headers 那条审计
-  // 走不到，workbook 与 mongoose 游标随挂起的 async 栈常驻。
-  // CSV 侧的同一判据是"先查 res.destroyed 再等"（auditExportService.js 的 writeLine
-  // 预检），这里按同一形状补 xlsx 这半边——用状态位收口，而不是假设事件还在后面。
-  // 顺序不能反：正常收尾后 Node 也会 destroy socket，先认 writableFinished 才把
-  // "成功写完"读成"中途断开"这种反向误判不会发生。
-  if (!finished && !aborted) {
-    if (res.writableFinished) finished = true;
-    else if (res.destroyed || res.writableEnded) aborted = new Error(RESPONSE_ABORTED);
-    else await settled;
+  if (finishedBefore) {
+    // 已经写完：再写一次会拿到 ERR_STREAM_ALREADY_FINISHED，没有意义
+    return;
   }
+  if (abortedBefore) {
+    // 目的端已死：不往死流里写（会同步抛 ERR_STREAM_DESTROYED，盖掉真正的错因）
+    throw new Error(RESPONSE_ABORTED);
+  }
+
+  await workbook.write(res);
+  // write() 只代表字节交给了目的流：目的端还没表态就等它表态。
+  if (!finished && !aborted) await settled;
   if (aborted) throw aborted;
 };
 
@@ -245,10 +248,23 @@ const writeExportWorkbook = async (
   );
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
 
-  const workbook = new ExcelJS.Workbook();
-  const worksheet = workbook.addWorksheet(sheetName);
-  worksheet.properties.defaultColWidth = 15;
-  worksheet.columns = getExportColumnDefs(type, lang);
+  // 表头样式由写入器按 columns 自动施加：表头不再是"第 1 行的一个特例"，而是列定义的一部分。
+  const workbook = createWorkbook({
+    sheetName,
+    columns: getExportColumnDefs(type, lang),
+    defaultColWidth: 15,
+    // 工作簿属性是水印的第三、四处（表尾行能被删，属性不能），必须在建包时给定：
+    // docProps/core.xml 是包里的一份静态部件，不是可以事后改的字段。
+    props: watermark
+      ? {
+          creator: watermark.operator,
+          lastModifiedBy: watermark.operator + ' (' + watermark.traceId + ')',
+          description: watermark.text,
+          keywords: 'FSMS ' + watermark.traceId,
+        }
+      : {},
+  });
+  const worksheet = workbook.sheet;
 
   // A4（2026-10-16）：脱敏判据随请求透传（默认掩码，持 system:read 者才拿全文）
   const safeTransform = createSafeTransform(EXPORT_ROW_TRANSFORMS[type], { maskPii, lang });
@@ -272,21 +288,10 @@ const writeExportWorkbook = async (
   }
 
   if (watermark) {
-    // 表尾可见行 / 响应头；工作簿属性是第三、四处——表尾行能被删，属性不能
-    worksheet.addRow([watermark.text]).font = { italic: true, color: { argb: 'FF808080' } };
-    workbook.creator = watermark.operator;
-    workbook.lastModifiedBy = watermark.operator + ' (' + watermark.traceId + ')';
-    workbook.description = watermark.text;
-    workbook.keywords = 'FSMS ' + watermark.traceId;
+    // 表尾可见行 / 响应头 / 工作簿属性（后两者见上面的 props）
+    worksheet.addRow([watermark.text], { font: { italic: true } });
     res.setHeader(TRACE_HEADER, watermark.traceId);
   }
-
-  worksheet.getRow(1).eachCell((cell) => {
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4472C4' } };
-    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    cell.alignment = { vertical: 'middle', horizontal: 'center' };
-    cell.border = { thin: true };
-  });
 
   await writeWorkbookToResponse(res, workbook);
 };

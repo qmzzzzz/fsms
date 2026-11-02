@@ -1,23 +1,23 @@
 {
-  "measuredAt": "2026-10-31",
+  "measuredAt": "2026-11-02",
   "measured": {
-    "entryJsGzip": 199424,
-    "entryCssGzip": 30515,
-    "totalRaw": 2666489,
-    "totalGzip": 834498,
+    "entryJsGzip": 209756,
+    "entryCssGzip": 32602,
+    "totalRaw": 2803711,
+    "totalGzip": 877666,
     "maxChunkGzip": 191076,
-    "jsChunks": 74,
-    "cssChunks": 42
+    "jsChunks": 82,
+    "cssChunks": 45
   },
   "budgets": {
-    "entryJsGzip": 210000,
-    "entryCssGzip": 33000,
-    "totalRaw": 2800000,
-    "totalGzip": 877000,
+    "entryJsGzip": 221000,
+    "entryCssGzip": 35000,
+    "totalRaw": 2944000,
+    "totalGzip": 922000,
     "maxChunkGzip": 201000
   },
   "floors": {
-    "jsChunks": 44,
-    "cssChunks": 25
+    "jsChunks": 49,
+    "cssChunks": 27
   }
 }

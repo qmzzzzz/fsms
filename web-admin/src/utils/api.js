@@ -277,6 +277,7 @@ const ERROR_CODE_I18N_MAP = {
   PUBLIC_REGISTRATION_DISABLED: 'errors.publicRegistrationDisabled',
   REGISTER_SERVICE_UNAVAILABLE: 'errors.registerServiceUnavailable',
   AUDIT_QUERY_FAILED: 'errors.auditQueryFailed',
+  AUDIT_LOG_NOT_FOUND: 'errors.auditLogNotFound',
   // 取证溯源（T5/T6）。FORENSIC_POOL_BAN_REFUSED 的**具体原因**在 errors.reason，取值见后端
   // src/constants/banRefusalReason.js（单一事实来源；此处不抄枚举——抄一份漂一份）；
   // 视图按 reason 选专属文案，这里的码级文案只是「兜底」——reason 未知时才会看到它。
@@ -1080,6 +1081,9 @@ export const api = {
     update: (id, data) => apiClient.put(`/devices/${encodePathSegment(id)}`, data),
     delete: (id) => apiClient.delete(`/devices/${encodePathSegment(id)}`),
     updateStatus: (id, data) => apiClient.put(`/devices/${encodePathSegment(id)}/status`, data),
+    // 报废独立于 updateStatus：它由 device:scrap 权限码把关（不是 device:update），
+    // 且走服务端状态机 transitionTo，不能与普通状态变更共用入口
+    scrap: (id, data) => apiClient.put(`/devices/${encodePathSegment(id)}/scrap`, data),
     addMaintenance: (id, data) =>
       apiClient.post(`/devices/${encodePathSegment(id)}/maintenance`, data),
     getStats: () => apiClient.get('/devices/stats'),
@@ -1096,6 +1100,7 @@ export const api = {
     arrive: (id) => apiClient.put(`/alarms/${encodePathSegment(id)}/arrive`),
     resolve: (id, data) => apiClient.put(`/alarms/${encodePathSegment(id)}/resolve`, data),
     markAsFalse: (id, data) => apiClient.put(`/alarms/${encodePathSegment(id)}/false-alarm`, data),
+    cancel: (id, data) => apiClient.put(`/alarms/${encodePathSegment(id)}/cancel`, data),
     getStats: (params) => apiClient.get('/alarms/stats', { params }),
   },
 
@@ -1150,6 +1155,9 @@ export const api = {
     triggerUpgrade: (data) => apiClient.post('/security/upgrade/requests', data),
     getAlerts: () => apiClient.get('/security/alerts'),
     queryAuditLogs: (params) => apiClient.get('/security/audit-logs', { params }),
+    // 单条审计详情：列表接口刻意不带 body/params/query 与头袋/响应正文（见后端
+    // RESPONSE_EXCLUDE），详情页必须再取一次；同样受 security:audit + 步进票据约束。
+    getAuditLogDetail: (id) => apiClient.get(`/security/audit-logs/${encodePathSegment(id)}`),
     // 二次验证（5 分钟会话窗口 + 一次性票据）。body 同写操作：{ currentPassword |
     // encCurrentPassword | mfaCode }。窗口存在服务端，客户端不保管任何凭据。
     createReauthTicket: (credential) => apiClient.post('/security/reauth', credential),
@@ -1226,6 +1234,17 @@ export const api = {
     // 传 fingerprint 时响应才带 pools —— 那就是「他的 ip 池」。
     getForensicTrace: (params, config) =>
       apiClient.get('/security/forensic/trace', { params, ...config }),
+    // 单 IP 攻击行为画像：只需 ip（缺省最近 7 天，hours 1..720）。
+    // 与审计列表同权限（security:audit）且同受 step-up 窗口约束；响应只含
+    // 判定所需的元数据，不含请求正文/头袋（敏感载荷仍走单条详情接口）。
+    // 非法/缺失 IP 返回 400 IP_SINGLE_REQUIRED，由拦截器映射为字段文案。
+    getAttackProfile: (params, config) =>
+      apiClient.get('/security/attack-profile', { params, ...config }),
+    // 撞库画像（按来源段聚合）：businessDay 可选（YYYY-MM-DD，缺省=今天）。
+    // entries 与 meta 分两层：meta 自述窗口、样本门槛、丢弃计数与本账号的数据范围——
+    // 空数组不许被读成「没有攻击」。同样受 security:audit + 步进票据约束。
+    getStuffingProfile: (params, config) =>
+      apiClient.get('/security/stuffing-profile', { params, ...config }),
     // IP 池聚类：windowHours(1..720，默认 24) minHits(默认 20) minIps(默认 4) limit(默认 50)。
     // 返回 segments 与 recommended（后者是 recommendBan=true 的子集）。
     getForensicClusters: (params, config) =>

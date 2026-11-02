@@ -134,7 +134,7 @@ mongod 启动前由 entrypoint 复制到 `/tmp/mongo.key` 并收紧到 0400
 
 | #   | 消费点（路径按仓库根写全，行号会漂移、判据是文件） | 用途                                   | 轮换后                             | 迁移手段                                               |
 | --- | -------------------------------------------------- | -------------------------------------- | ---------------------------------- | ------------------------------------------------------ |
-| 1   | `src/utils/auditChain.js:64`                       | 审计记录 `hmac` 字段                   | 存量记录 hmac 全部失配             | ✅ `scripts/resign-audit-hmac.js`（重签）              |
+| 1   | `src/utils/auditChain.js:65`                       | 审计记录 `hmac` 字段                   | 存量记录 hmac 全部失配             | ✅ `scripts/resign-audit-hmac.js`（重签）              |
 | 2   | `src/utils/passwordHistory.js:64`                  | 口令复用历史摘要的 pepper              | 历史长度归零                       | ❌ 无（没有明文就无法重算）                            |
 | 3   | `src/services/mfaService.js:29`                    | **备用恢复码**的 pepper                | **全部恢复码失效**                 | ❌ 无                                                  |
 | 4   | `src/utils/encryption.js:189`                      | `HMACSigner` 数据签名密钥              | 存量签名全部失配                   | ❌ 无                                                  |

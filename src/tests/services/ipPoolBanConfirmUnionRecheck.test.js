@@ -155,6 +155,61 @@ describe('pool-ban 确认时的并集复检（取齐票不得拼满整族）', (
     expect((await unionOfV6()).ipv6).toBe(false);
   });
 
+  /**
+   * F-25-8（第 25 轮审计实测，19/20 可复现）：并集在窗口内被铺满时要回滚，而回滚删的是
+   * 「本次写入返回的 _id」——upsert 命中他人写前已有的同值条目时，那个 _id 是**别人的**。
+   * 于是被拒的这次操作静默删掉一个既有封禁：拒绝理由说「为了保护名单」，实际把名单删薄了。
+   *
+   * 判据：blockIP 的驱动元数据（updatedExisting=false ⇒ 本次新建）是唯一能看见并发插入窗口的
+   * 依据；先读后比看不见。未知/缺省一律按「非本次新建」⇒ 保守不删。
+   */
+  test('命中他人既有条目时回滚不得删它（库侧事实：条目与 _id 原样还在）', async () => {
+    const existing = await IPBlacklist.blockIP('8000::/1', {
+      reason: '他人预置-同值',
+      durationMs: 0,
+      source: 'manual',
+    });
+    const before = await IPBlacklist.findOne({ ip: '8000::/1' }).lean();
+    expect(String(before._id)).toBe(String(existing._id));
+
+    const ticket = await ban.requestBan({
+      cidr: '8000::/1',
+      reason: '回滚-命中既有',
+      operator: 'probe-op',
+      operatorIp: '198.51.100.9',
+    });
+    expect(ticket.ok).toBe(true);
+
+    const realList = ipListService.listActiveEntryIps.bind(ipListService);
+    let calls = 0;
+    const spy = jest.spyOn(ipListService, 'listActiveEntryIps').mockImplementation(async (type) => {
+      calls += 1;
+      const base = await realList(type);
+      return calls === 1 ? base : [...base, '::/1'];
+    });
+
+    let applied;
+    try {
+      applied = await ban.applyBan({ token: ticket.token, typedConfirm: '8000::/1' });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(applied.ok).toBe(false);
+    expect(applied.reason).toBe('union_covers_family');
+    // 一条都没删（本次没新建任何条目），且如实报出「跳过了几条既有条目」
+    expect(applied.rolledBack).toBe(0);
+    expect(applied.rolledBackIds).toEqual([]);
+    expect(applied.skippedExisting).toBe(1);
+
+    // 库侧事实：他人那条既在库里、_id 与内容都没变
+    const after = await IPBlacklist.findOne({ ip: '8000::/1' }).lean();
+    expect(after).not.toBeNull();
+    expect(String(after._id)).toBe(String(before._id));
+    expect(after.reason).toBe('他人预置-同值');
+    expect(after.durationMs).toBe(0);
+  });
+
   test('回滚只删本次写入返回的 _id，不连带删同族其它条目（按 ip 删就会误删）', async () => {
     // 同族其它条目：他人写前已存在，与本次写入不同值 ⇒ 回滚若按 ip/网段删就会误伤
     const other = await IPBlacklist.blockIP('fd00::/8', {

@@ -73,11 +73,25 @@ afterEach(() => {
   }
 })
 
-const mountView = (perms = PERMS) => {
+const mountView = (perms = PERMS, initialRoute = '/') => {
   active = mountComponent(ForensicTraceView, {
+    initialRoute,
     setupStore: (pinia) => useAuthStore(pinia).setPermissions(perms),
   })
   return active
+}
+
+/** 本地日期串（与视图 value-format=YYYY-MM-DD 同口径） */
+const wallDate = (d) => {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** 「最近 N 小时」对应的日期范围（本地日期，独立按 Date 计算，不 import 被测源码） */
+const rangeOfHours = (hours) => {
+  const until = new Date()
+  const since = new Date(until.getTime() - hours * 60 * 60 * 1000)
+  return [wallDate(since), wallDate(until)]
 }
 
 /** 本地时区「YYYY-MM-DD HH:mm:ss」定长串（口径由 utils/datetime.formatTime 统一） */
@@ -453,6 +467,17 @@ describe('ForensicTraceView · 200 但不是成功信封', () => {
     await doTrace(c, { ip: '1.2.3.4' })
     expect(c.text()).toContain(i18n.global.t('forensic.emptyResult'))
     expect(c.text()).not.toContain(i18n.global.t('forensic.loadError'))
+  })
+
+  test('聚类路径：200 且内层 data 为空 ⇒ 报「聚类查询失败」，不渲染成「没有网段」', async () => {
+    clusters.mockImplementation(() =>
+      Promise.resolve({ data: { success: true, message: 'ok', data: null } })
+    )
+    const c = mountView()
+    await waitFor(() => c.text().includes(i18n.global.t('forensic.clustersError')), {
+      message: '聚类契约漂移必须显式报错',
+    })
+    expect(c.text()).not.toContain(i18n.global.t('forensic.clustersEmpty'))
   })
 })
 
@@ -921,6 +946,260 @@ describe('ForensicTraceView · 签名导出', () => {
       expect(ElMessage.success).not.toHaveBeenCalled()
     } finally {
       window.URL.createObjectURL = realCreateURL
+    }
+  })
+})
+
+describe('ForensicTraceView · 时间快捷范围', () => {
+  test('点「近 30 天」再查询：since/until 按本地日期覆盖最近 30 天', async () => {
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    const c = mountView()
+    await flush(8)
+    const preset = c
+      .findAll('.preset-btn')
+      .find((b) => b.textContent.trim() === i18n.global.t('forensic.range30d'))
+    click(preset)
+    await flush(4)
+    setInput(c.findAll('.criteria-form .el-input__inner')[0], '1.2.3.4')
+    await flush(4)
+    const btn = c
+      .findAll('.glass-btn')
+      .find((b) => b.textContent.trim() === i18n.global.t('forensic.search'))
+    click(btn)
+    await flush(10)
+
+    const params = trace.mock.calls[0][0]
+    const [since, until] = rangeOfHours(30 * 24)
+    expect(params.since).toBe(new Date(`${since}T00:00:00`).toISOString())
+    expect(params.until).toBe(new Date(`${until}T23:59:59.999`).toISOString())
+  })
+
+  test('预设只改时间范围，不会自己发查询（无判据时点预设也不该有请求）', async () => {
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    const c = mountView()
+    await flush(8)
+    const preset = c
+      .findAll('.preset-btn')
+      .find((b) => b.textContent.trim() === i18n.global.t('forensic.rangeToday'))
+    click(preset)
+    await flush(8)
+    expect(trace).not.toHaveBeenCalled()
+  })
+})
+
+describe('ForensicTraceView · 一键钻取', () => {
+  test('时间线点 IP：以该 IP 重新溯源，并清掉原来的指纹判据', async () => {
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    const c = mountView()
+    await flush(8)
+    await doTrace(c, { ip: '', fingerprint: 'ab12cd' })
+    await waitFor(() => rowsOf(c, 'forensic-timeline').length === 1, { message: '时间线渲染' })
+
+    const pivot = rowsOf(c, 'forensic-timeline')[0].querySelector('.pivot-link')
+    expect(pivot.textContent.trim()).toBe('1.2.3.4')
+    click(pivot)
+    await waitFor(() => trace.mock.calls.length === 2, { message: '钻取请求发出' })
+
+    const params = trace.mock.calls[1][0]
+    expect(params.ip).toBe('1.2.3.4')
+    expect(params.fingerprint).toBeUndefined()
+    expect(params.ipSegment).toBeUndefined()
+    expect(c.findAll('.criteria-form .el-input__inner')[0].value).toBe('1.2.3.4')
+  })
+
+  test('网段分布点网段：以 ipSegment 重新溯源', async () => {
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    const c = mountView()
+    await flush(8)
+    await doTrace(c)
+    await waitFor(() => c.find('.forensic-segment .pivot-link') !== null, { message: '网段行渲染' })
+
+    click(c.find('.forensic-segment .pivot-link'))
+    await waitFor(() => trace.mock.calls.length === 2, { message: '网段钻取请求发出' })
+    const params = trace.mock.calls[1][0]
+    expect(params.ipSegment).toBe('1.2.3')
+    expect(params.ip).toBeUndefined()
+    expect(params.fingerprint).toBeUndefined()
+  })
+
+  test('「他的 ip 池」点网段：同样可钻取', async () => {
+    trace.mockImplementation(() =>
+      Promise.resolve(
+        traceBody({
+          pools: [
+            {
+              segment: '1.2.3',
+              hits: 12,
+              distinctIps: 5,
+              firstSeen: '2026-10-01T00:00:00.000Z',
+              lastSeen: '2026-10-01T01:00:00.000Z',
+            },
+          ],
+        })
+      )
+    )
+    const c = mountView()
+    await flush(8)
+    await doTrace(c, { ip: '', fingerprint: 'ab12cd' })
+    await waitFor(() => c.find('.forensic-pool .pivot-link') !== null, { message: 'IP 池行渲染' })
+
+    click(c.find('.forensic-pool .pivot-link'))
+    await waitFor(() => trace.mock.calls.length === 2, { message: 'IP 池钻取请求发出' })
+    expect(trace.mock.calls[1][0].ipSegment).toBe('1.2.3')
+  })
+})
+
+describe('ForensicTraceView · 聚类先核实再封禁', () => {
+  test('聚类行「查看记录」：按该网段溯源，并沿用聚类的实际时间窗', async () => {
+    clusters.mockImplementation(() => Promise.resolve(clustersBody([clusterRow()])))
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    const c = mountView()
+    await waitFor(() => rowsOf(c, 'forensic-clusters').length === 1, { message: '聚类渲染' })
+
+    const btn = c
+      .findAll('.glass-btn')
+      .find((b) => b.textContent.trim() === i18n.global.t('forensic.viewRecords'))
+    click(btn)
+    await waitFor(() => trace.mock.calls.length === 1, { message: '聚类钻取请求发出' })
+
+    const params = trace.mock.calls[0][0]
+    expect(params.ipSegment).toBe('1.2.3')
+    expect(params.ip).toBeUndefined()
+    expect(params.fingerprint).toBeUndefined()
+    const since = wallDate(new Date('2026-10-01T00:00:00.000Z'))
+    const until = wallDate(new Date('2026-10-02T00:00:00.000Z'))
+    expect(params.since).toBe(new Date(`${since}T00:00:00`).toISOString())
+    expect(params.until).toBe(new Date(`${until}T23:59:59.999`).toISOString())
+  })
+
+  test('封禁确认框「先查看该段记录」：不拿票不落库，只按该段溯源', async () => {
+    clusters.mockImplementation(() => Promise.resolve(clustersBody([clusterRow()])))
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    const c = mountView()
+    await waitFor(() => rowsOf(c, 'forensic-clusters').length === 1, { message: '聚类渲染' })
+    await openBan(c)
+
+    const review = c
+      .findAll('.glass-btn')
+      .find((b) => b.textContent.trim() === i18n.global.t('forensic.banReviewFirst'))
+    click(review)
+    await waitFor(() => trace.mock.calls.length === 1, { message: '核验请求发出' })
+
+    expect(trace.mock.calls[0][0].ipSegment).toBe('1.2.3')
+    expect(requestBan).not.toHaveBeenCalled()
+    expect(confirmBan).not.toHaveBeenCalled()
+  })
+
+  test('查询在途时「查看记录 / 重置」不可点：不会出现「表单已换、结果还是上一份」', async () => {
+    clusters.mockImplementation(() => Promise.resolve(clustersBody([clusterRow()])))
+    let resolveTrace
+    trace.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTrace = resolve
+        })
+    )
+    const c = mountView()
+    await waitFor(() => rowsOf(c, 'forensic-clusters').length === 1, { message: '聚类渲染' })
+    await doTrace(c)
+    expect(trace).toHaveBeenCalledTimes(1)
+
+    const byText = (text) =>
+      c.findAll('.glass-btn').find((b) => b.textContent.trim() === i18n.global.t(text))
+    expect(byText('forensic.viewRecords').disabled).toBe(true)
+    expect(byText('forensic.reset').disabled).toBe(true)
+
+    resolveTrace(traceBody())
+    await flush(10)
+  })
+})
+
+describe('ForensicTraceView · 深链与判据回显', () => {
+  test('带 ?ip=&since=&until= 进入：预填判据并自动查询', async () => {
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    const c = mountView(PERMS, '/forensic-trace?ip=203.0.113.10&since=2026-10-01&until=2026-10-02')
+    await waitFor(() => trace.mock.calls.length === 1, { message: '深链自动查询' })
+
+    const params = trace.mock.calls[0][0]
+    expect(params.ip).toBe('203.0.113.10')
+    expect(params.since).toBe(new Date('2026-10-01T00:00:00').toISOString())
+    expect(params.until).toBe(new Date('2026-10-02T23:59:59.999').toISOString())
+    expect(c.findAll('.criteria-form .el-input__inner')[0].value).toBe('203.0.113.10')
+  })
+
+  test('深链只有时间没有判据：不自动发查询（避免把全表当溯源）', async () => {
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    mountView(PERMS, '/forensic-trace?since=2026-10-01&until=2026-10-02')
+    await flush(10)
+    expect(trace).not.toHaveBeenCalled()
+  })
+
+  test('深链 limit 是整串十进制整数才生效（对照：50 生效）', async () => {
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    mountView(PERMS, '/forensic-trace?ip=203.0.113.10&limit=50')
+    await waitFor(() => trace.mock.calls.length === 1, { message: '深链自动查询' })
+    expect(trace.mock.calls[0][0].limit).toBe(50)
+  })
+
+  test('深链 limit 带尾随字符（999abc）：不静默当 999，回退默认 200', async () => {
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    mountView(PERMS, '/forensic-trace?ip=203.0.113.10&limit=999abc')
+    await waitFor(() => trace.mock.calls.length === 1, { message: '深链自动查询' })
+    expect(trace.mock.calls[0][0].limit).toBe(200)
+  })
+
+  test('工作台内切 tab（URL 已无判据）：不拿表单里的旧判据重查', async () => {
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    const c = mountView(PERMS, '/forensic-trace?ip=203.0.113.10')
+    await waitFor(() => trace.mock.calls.length === 1, { message: '深链自动查询' })
+
+    await c.router.push('/forensic-trace?tab=attack')
+    await flush(10)
+    // 判据仍在表单里，但 URL 没有——自动查询只认 URL，切 tab 不应打第二次
+    expect(trace).toHaveBeenCalledTimes(1)
+  })
+
+  test('判据回显用发起查询时的快照：改表单未重查时，结果与判据不会对不上', async () => {
+    trace.mockImplementation(() => Promise.resolve(traceBody()))
+    const c = mountView()
+    await flush(8)
+    await doTrace(c, { ip: '1.2.3.4', fingerprint: '' })
+    await waitFor(() => c.find('.criteria-echo') !== null, { message: '判据回显渲染' })
+    expect(c.find('.criteria-echo').textContent).toContain('1.2.3.4')
+
+    setInput(c.findAll('.criteria-form .el-input__inner')[0], '9.9.9.9')
+    await flush(4)
+    expect(c.find('.criteria-echo').textContent).toContain('1.2.3.4')
+    expect(c.find('.criteria-echo').textContent).not.toContain('9.9.9.9')
+  })
+
+  test('复制查询链接：地址里带当前判据与时间范围', async () => {
+    const writeText = vi.fn(() => Promise.resolve())
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    try {
+      const c = mountView()
+      await flush(8)
+      setInput(c.findAll('.criteria-form .el-input__inner')[0], '1.2.3.4')
+      await flush(4)
+      const btn = c
+        .findAll('.glass-btn')
+        .find((b) => b.textContent.trim() === i18n.global.t('forensic.copyLink'))
+      click(btn)
+      await waitFor(() => writeText.mock.calls.length === 1, { message: '链接写入剪贴板' })
+
+      const url = new URL(writeText.mock.calls[0][0])
+      expect(url.origin).toBe(window.location.origin)
+      expect(url.pathname).toContain('security-analysis')
+      expect(url.searchParams.get('tab')).toBe('forensic')
+      expect(url.searchParams.get('ip')).toBe('1.2.3.4')
+      const [since, until] = rangeOfHours(7 * 24)
+      expect(url.searchParams.get('since')).toBe(since)
+      expect(url.searchParams.get('until')).toBe(until)
+    } finally {
+      delete navigator.clipboard
     }
   })
 })

@@ -93,6 +93,23 @@ async function login(base, username, password) {
   return cookie;
 }
 
+/**
+ * 「首次登录必须改密」形态的登录：管理员建号（POST /api/users）与 bootstrap 超管
+ * 都带 mustChangePassword，改密前除本人改密外的业务路径一律 403。
+ * 改密会递增 tokenVersion ⇒ 旧 cookie 立刻失效，必须重登换新——直接复用旧 cookie
+ * 会在下一步拿到 401，看起来像"账号没建好"，实际是令牌已被本次改密作废。
+ */
+async function loginAfterRotating(base, username, password) {
+  const initial = await login(base, username, password);
+  const rotatedPassword = password + 'Rotated9';
+  const changed = await request(base, 'PUT', '/api/auth/password', {
+    cookie: initial,
+    body: { currentPassword: password, newPassword: rotatedPassword },
+  });
+  assert.equal(changed.status, 200, `${username} 改密失败：status=${changed.status}`);
+  return login(base, username, rotatedPassword);
+}
+
 async function listDevices(base, cookie) {
   const result = await request(base, 'GET', '/api/devices?limit=100', { cookie });
   assert.equal(
@@ -209,6 +226,17 @@ async function main(config) {
       '管理员创建两个部门账号与两台设备（正对照：管理员可见两台设备）',
       async () => {
         ctx.adminCookie = await login(base, 'admin', password);
+        // bootstrap 超管恒带 mustChangePassword（initData/adminAccount.js 的 createWith），
+        // 改密前除「本人改密」外的业务路径一律 403 PASSWORD_CHANGE_REQUIRED——这里第一步
+        // 就是查角色列表，不先改密会整条旅程连锁失败。改密递增 tokenVersion ⇒ 旧 cookie
+        // 立刻失效，必须重登换新；两个部门账号用各自创建时的初始 password，不受影响。
+        const rotatedPassword = password + 'Rotated9';
+        const rotated = await request(base, 'PUT', '/api/auth/password', {
+          cookie: ctx.adminCookie,
+          body: { currentPassword: password, newPassword: rotatedPassword },
+        });
+        assert.equal(rotated.status, 200, `管理员改密失败：status=${rotated.status}`);
+        ctx.adminCookie = await login(base, 'admin', rotatedPassword);
         const roles = await request(base, 'GET', '/api/roles?limit=100', {
           cookie: ctx.adminCookie,
         });
@@ -227,8 +255,8 @@ async function main(config) {
     );
 
     await journey.step('部门账号列表只含本部门设备', async () => {
-      const cookieA = await login(base, `ops_a_${process.pid}`, password);
-      const cookieB = await login(base, `ops_b_${process.pid}`, password);
+      const cookieA = await loginAfterRotating(base, `ops_a_${process.pid}`, password);
+      const cookieB = await loginAfterRotating(base, `ops_b_${process.pid}`, password);
       await assertDepartmentIsolation(
         base,
         cookieA,

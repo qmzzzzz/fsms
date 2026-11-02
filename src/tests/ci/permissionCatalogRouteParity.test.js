@@ -12,15 +12,16 @@
  *     管理面按目录勾选），只有 `*:*` 的超管能用；一旦是拼写错误，表现为"功能对所有人 403"，
  *     而错误信息是通用的 PERMISSION_DENIED，排查时看不出是码不存在。这个方向今天为零，
  *     所以按**严格相等**钉死（新增一个未入库的码必须响）。
- *   - **目录里有、没有任何路由强制** ⇒ 授予了却不接线：角色权限列表里显示"有设备报废权限"，
- *     实际那条接口要的是 `device:update`。这是**治理面失真**（审计/交接时读角色权限清单会得出
+ *   - **目录里有、没有任何路由强制** ⇒ 授予了却不接线：角色权限列表里显示"有设备统计权限"，
+ *     实际那条接口要的是 `device:read`。这是**治理面失真**（审计/交接时读角色权限清单会得出
  *     错误结论），不是即时漏洞。修法要么改路由收口、要么从目录删除，两者都会动既有种子数据
  *     与依赖它的夹具，属产品决策，不由这条用例单方面拍板 ⇒ 与
  *     `models/builtInRoleCodeSource.test.js` 的 `KNOWN_LEGACY_MINT_CODES` 同一档：
  *     **钉"不许再多一个"，而不是"应当为 0"**。
  *
  * 每条 reason 都是实测（对应接口的真实 checkPermission 实参），不是推测：
- *   - `device:scrap`   → `PUT /api/devices/:id/scrap` 实为 `device:update`（routes/deviceRoutes.js:362）
+ *   - `device:scrap`   → 已收口（P1）：`PUT /api/devices/:id/scrap` 现按 `device:scrap` 强制，
+ *     不再借道 `device:update`；报废由此不再需要"顺带授予编辑权限"
  *   - `device:stats`   → `GET /api/devices/stats` 实为 `device:read`（routes/deviceRoutes.js:240）
  *   - `alarm:stats`    → `GET /api/alarms/stats` 实为 `alarm:read`（routes/alarmRoutes.js:131）
  *   - `user:assign_role` → `PUT /api/users/:id/roles` 实为 `role:assign`（routes/userRoutes.js:214）
@@ -90,7 +91,7 @@ const concreteCatalog = catalogCodes.filter((c) => !isWildcard(c));
 const wildcardCatalog = catalogCodes.filter((c) => isWildcard(c));
 
 // 登记表见文件头：钉"不许再多一个"，不是"应当为 0"。
-const KNOWN_UNENFORDED = ['alarm:stats', 'device:scrap', 'device:stats', 'user:assign_role'];
+const KNOWN_UNENFORDED = ['alarm:stats', 'device:stats', 'user:assign_role'];
 
 describe('权限目录与路由强制点的差集（授予即生效）', () => {
   // 反向闸的自证：扫描器本身不能是"扫不到就当通过"的形状
@@ -118,13 +119,15 @@ describe('权限目录与路由强制点的差集（授予即生效）', () => {
     expect(dead).toEqual([...KNOWN_UNENFORDED].sort());
   });
 
-  test('方向二的后果属实：这四条码对应的能力各由另一条码把关', () => {
+  test('方向二的后果属实：三条登记码对应的能力各由另一条码把关，报废已收口', () => {
     // 若哪天有人把路由改成用这些码，本条与上一条会同时要求更新登记表——
     // 这正是我们希望的"改一处必须看见另一处"。
     const read = (rel) =>
       stripComments(fs.readFileSync(path.join(SRC_DIR, rel), 'utf8')).replace(/\s+/g, ' ');
+    // P1：报废接口必须按目录里的 device:scrap 强制。若有人改回 device:update，
+    // 上面"方向二"会把 device:scrap 重新算成未强制 ⇒ 登记表不符 ⇒ 红。
     expect(read('routes/deviceRoutes.js')).toContain(
-      "'/:id/scrap', authenticate, checkPermission('device:update')"
+      "'/:id/scrap', authenticate, checkPermission('device:scrap')"
     );
     expect(read('routes/deviceRoutes.js')).toContain(
       "'/stats', authenticate, checkPermission('device:read')"
@@ -162,7 +165,7 @@ describe('权限目录与路由强制点的差集（授予即生效）', () => {
  * 一道不存在的门，实际接口由另一条码把关）。
  *
  * 登记表按「路径 → 码」整表钉死，不是只钉非空：换档、置空、新增页面忘声明权限都会红。
- * 与上面几条同一档纪律——两侧各写一份而无人对齐，就是 layout/index.vue:273-291
+ * 与上面几条同一档纪律——两侧各写一份而无人对齐，就是 layout/index.vue 的 baseMenu
  * 那份自建 hasPerm 名单能悄悄漂移的原因。
  */
 const FE_ROUTER = path.resolve(SRC_DIR, '../web-admin/src/router/index.js');
@@ -175,17 +178,25 @@ const FE_PROTECTED = {
   inspections: 'inspection:read',
   reports: 'report:read',
   'audit-logs': 'security:audit',
-  // 取证溯源页：读溯源与审计日志同一个权限码（同一条 /api/security/forensic 链也只认
-  // security:audit，见 routes/forensicRoutes.js 的 checkPermission）。页内"封段"按钮
-  // 另按 security:config 门控，属于页内二次门控，不体现在路由 meta 上。
-  'forensic-trace': 'security:audit',
+  // 安全分析工作台：IP 画像 / 撞库画像 / 取证溯源三 tab 共用 security:audit；
+  // 数据范围由服务端 applyAuditDataScope 收窄，页内"封段"按钮另按 security:config
+  // 单独门控（页内二次门控，不体现在路由 meta 上）。
+  'security-analysis': 'security:audit',
   'ip-list': 'security:config',
   'privilege-grants': 'privilege:read',
 };
 // 有 meta 但不设权限闸的页面：登录/注册是 requiresAuth:false，其余三页只要登录态
 const FE_NO_GATE_WITH_META = ['/login', '/register', 'dashboard', 'profile', 'about'];
-// 整条没有 meta 的路由（根布局与 404 兜底），解析器要能区分"没有 meta"与"meta 里没有权限"
-const FE_NO_META = ['/', '/:pathMatch(.*)*'];
+// 整条没有 meta 的路由：根布局、404 兜底，以及三个旧深链 redirect（/forensic-trace、
+// /attack-profile、/stuffing-profile 保留为跳安全分析工作台对应 tab 的书签兼容，
+// redirect 路由不声明 meta——能进到它们说明用户已在系统内，落点页自己设闸）。
+const FE_NO_META = [
+  '/',
+  '/:pathMatch(.*)*',
+  'forensic-trace',
+  'attack-profile',
+  'stuffing-profile',
+];
 
 describe('前端路由声明的权限码与后端目录/强制点对齐', () => {
   /**
@@ -195,8 +206,18 @@ describe('前端路由声明的权限码与后端目录/强制点对齐', () => 
    * 于是"漏声明权限"这类错误恰好会被解析器吞掉。
    */
   function parseFeRoutes(src) {
-    const paths = [...src.matchAll(/path:\s*'([^']+)'/g)].map((m) => ({ path: m[1], at: m.index }));
-    const metas = [...src.matchAll(/meta:\s*\{([^}]*)\}/g)].map((m) => ({
+    // redirect 箭头函数的对象字面量里也写着 `path: '...'`（跳转目标），不剥掉会被
+    // 当成独立路由多计（实测：深链 redirect 三条 ⇒ 23 vs 真实 20）。redirect 目前
+    // 都是单行形态；将来改成多行时这里要跟着收口。
+    const clean = src
+      .split('\n')
+      .filter((line) => !/^\s*redirect:/.test(line))
+      .join('\n');
+    const paths = [...clean.matchAll(/path:\s*'([^']+)'/g)].map((m) => ({
+      path: m[1],
+      at: m.index,
+    }));
+    const metas = [...clean.matchAll(/meta:\s*\{([^}]*)\}/g)].map((m) => ({
       meta: m[1],
       at: m.index,
     }));

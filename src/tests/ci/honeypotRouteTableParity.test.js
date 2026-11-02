@@ -15,8 +15,10 @@
  *
  * 第三条轴是**授权轴**：读侧回答必须能由「呈现身份持有的权限（精确 / `*:*` / `module:*`，
  * 规则取真实链那一份实现）+ 真实链有没有第二道闸（requireReauthTicket）」解释。判据第一版只做
- * 精确匹配，把 5 条 security:audit 端点误记成越权开口；口径同源之后真正的分歧只剩 6 条，
- * 逐条登记方向与理由（见 READ_DIVERGENCE_BACKLOG）。
+ * 精确匹配，把 5 条 security:audit 端点误记成越权开口；口径同源之后剩下的分歧全部落在「陷阱少一道
+ * 票据闸」上，已于批次 B 收口：闸写进路由表（TRAP_HANDLING.REAUTH）、马甲的两个面都回真实链逐字相同的
+ * 401，本数组随之清空。「这条路由有没有第二道闸」因此也升级成 diffFacts 的一条轴（声明 ⇄ 源码现算），
+ * 不再只作归因材料。
  */
 
 'use strict';
@@ -45,6 +47,10 @@ const {
   resolveAggregatePayload,
 } = require('../../constants/honeypotDecoyAggregates');
 const { resolveMetricsPayload } = require('../../constants/honeypotDecoyMetrics');
+// 缺票闸的码从生产叶子取（不是抄一份期望值）：本文件只负责「声明 ⇄ 现算」对拍，
+// 「这个字面量等不等于真实中间件那一句」由 honeypotTicketGateParity 用例对源码现采。
+const { isReauthGated, reauthPayload } = require('../../constants/honeypotTicketGate');
+const REAUTH_CODE = reauthPayload().code;
 
 const ROOT = path.resolve(__dirname, '../../..');
 const read = (rel) => jsCodeOnly(fs.readFileSync(path.join(ROOT, rel), 'utf8'));
@@ -144,9 +150,10 @@ const factsOf = (args) => {
 };
 
 /**
- * 二次验证闸（requireReauthTicket）的现算。它**不进路由表**：表声明的是「有哪些路由」，
- * 而票据面对陷阱的回答没有影响（陷阱从不发票据）。判据需要它，只是为了把读侧回答的分歧
- * 归因清楚——有闸 ⇒ 真实链缺票时回 REAUTH_TICKET_REQUIRED，没闸 ⇒ 真实链直接进控制器。
+ * 二次验证闸（requireReauthTicket）的现算。批次 B 起闸**进路由表**（TRAP_HANDLING.REAUTH）：
+ * 「这条路由有没有第二道闸」是可被现算校验的声明，而不只是归因材料——有闸 ⇒ 真实链缺票时回
+ * REAUTH_TICKET_REQUIRED，陷阱必须回同一句（陷阱不发票据也不持窗口，缺票是唯一可能）；没闸 ⇒
+ * 真实链直接进控制器。两端同源：声明侧 isReauthGated(row)，源码侧本函数。
  */
 const reauthOf = (args) => /requireReauthTicket\s*\(/.test(args.join(','));
 
@@ -227,6 +234,9 @@ const diffFacts = (actual, table) => {
     if (Boolean(row.viewSensitive) !== Boolean(real.viewSensitive)) {
       bad.push(keyOf(row) + ' 敏感标记 ' + row.viewSensitive + ' ≠ ' + real.viewSensitive);
     }
+    if (isReauthGated(row) !== Boolean(real.reauth)) {
+      bad.push(keyOf(row) + ' 二次验证闸 ' + isReauthGated(row) + ' ≠ ' + Boolean(real.reauth));
+    }
   }
   return bad;
 };
@@ -255,13 +265,15 @@ const liveHandlingOf = (row) => {
   if (verdict === HONEYPOT_VERDICT.PASSTHROUGH) return TRAP_HANDLING.PASSTHROUGH;
   if (verdict === HONEYPOT_VERDICT.NOT_FOUND) return 'route-not-found';
   if (verdict === HONEYPOT_VERDICT.DENY) return TRAP_HANDLING.DENY;
-  if (resolveFileResponse({ method, path: target, query: {} })) return TRAP_HANDLING.FILE;
+  const file = resolveFileResponse({ method, path: target, query: {} }); // 文件面在通用载荷面之前接线，两个面都要认缺票闸：把它算成 FILE 会把「401 缺票」误当「403 拒绝」
+  if (file) return file.code === REAUTH_CODE ? TRAP_HANDLING.REAUTH : TRAP_HANDLING.FILE;
   const session = { userId: 'hp-u1', username: 'sample' };
   if (resolveSelfResponse({ method, path: target, query: {}, session })) return TRAP_HANDLING.SELF;
   if (resolveAggregatePayload({ method, path: target, query: {} })) return TRAP_HANDLING.AGGREGATE; // 聚合读面：与列表同前缀、不同语义（接线在 steer 的通用载荷之前）
   if (resolveMetricsPayload({ method, path: target })) return TRAP_HANDLING.METRICS; // 运行时指标快照面：单端点，同样接在 steer 的通用载荷之前
   const payload = resolveDecoyPayload({ method, path: target, user: session });
   if (!payload) return 'decoy-none';
+  if (payload.code === REAUTH_CODE) return TRAP_HANDLING.REAUTH; // 同一个码出现在码槽上即缺票闸（list/detail/summary 三种形状都没有 code，不会误判）
   if (payload.kind === 'list') return TRAP_HANDLING.LIST;
   if (payload.kind === 'summary') return TRAP_HANDLING.SUMMARY;
   if (payload.kind === 'detail') return TRAP_HANDLING.DETAIL;
@@ -279,6 +291,7 @@ const trapReadAnswerOf = (row) => {
   if (handling === TRAP_HANDLING.DENY) return 'permission-denied';
   if (handling === TRAP_HANDLING.PASSTHROUGH) return 'passthrough';
   if (handling === 'route-not-found' || handling === 'decoy-not-found') return 'not-found';
+  if (handling === TRAP_HANDLING.REAUTH) return 'reauth-ticket-required'; // 与 realReadAnswerOf 的应然回答同名：两个面同答，分歧才归零
   if (handling !== TRAP_HANDLING.FILE) return handling === 'decoy-none' ? 'decoy-none' : 'data';
   const file = resolveFileResponse({ method: row.method, path: samplePathOf(row), query: {} });
   if (file && file.kind === 'workbook') return 'data';
@@ -341,6 +354,7 @@ const LIVE_OF_DECLARED = Object.freeze({
   [TRAP_HANDLING.SELF]: [TRAP_HANDLING.SELF],
   [TRAP_HANDLING.FILE]: [TRAP_HANDLING.FILE],
   [TRAP_HANDLING.METRICS]: [TRAP_HANDLING.METRICS],
+  [TRAP_HANDLING.REAUTH]: [TRAP_HANDLING.REAUTH],
   [TRAP_HANDLING.DENY]: [TRAP_HANDLING.DENY],
 });
 
@@ -374,57 +388,29 @@ const UNHELD_BUT_OK_BACKLOG = [];
 const READ_NOT_FOUND_ROWS = ['GET /api/avatars/:userId'];
 
 /**
- * 登记项三：读侧回答与真实链**应然**回答的分歧，逐条给出方向（real/trap）与理由。
- * 只判授权轴；404（内容判定：无头像/查无此 id）与放行白名单各有判据，不在这里混算。
+ * 登记项三：读侧回答与真实链**应然**回答的分歧。**已清空**——这里空着不是「判据放水」，而是欠账
+ * 被吃掉：现算集 === 本数组（双向），多一条少一条都红。
  *
- * 三类归因，都能只凭现有事实复算：
+ * 收口前登记过 5 条，全部落在同一道闸上，归因两类（都只凭当时的既有事实可复算）：
  * - real=reauth-ticket-required / trap=data：真实链在权限码过闸后还要 requireReauthTicket()
  *   （票据由 POST /api/security/reauth 换取），陷阱没有票据面 ⇒ **少一道闸**，回的是合成数据。
  * - real=reauth-ticket-required / trap=permission-denied：状态同、**理由不同**——对方拿着
  *   /api/auth/me 的权限表能算出「我该过权限闸」，却收到权限不足。
- * 第三类（real=data / trap=permission-denied：GET /api/metrics 没有第二道闸，而呈现身份经
- * security:* 持有 security:audit ⇒ 真实链是 200）是**唯一一条纯自相矛盾**——不需要知道票据闸的
- * 存在，只比对两次响应即可发现。它已在 2026-11-02 收口：路由表把该行改成 decoy-metrics，
- * 判定层回同键集的合成快照（见 constants/honeypotDecoyMetrics.js 与其形态闸），本数组随之少一条。
- * 剩下 5 条全是票据面（同一道闸的两种表现），收口方向写在下面。
+ * 更早还收过一条**纯自相矛盾**（real=data / trap=permission-denied，GET /api/metrics：没有第二道
+ * 闸，而呈现身份经 security:* 持有 security:audit ⇒ 真实链是 200）：它已在 2026-11-02 改成
+ * decoy-metrics + 同键集合成快照收口。
  *
- * 收口方向（留给下一次增量，不在这里顺手改行为）：票据面要么整体不建模（保持合成面，但登记项
- * 只许变少），要么把 requireReauthTicket 声明进路由表、给缺票会话回逐字相同的
- * REAUTH_TICKET_REQUIRED。**不能**改成把 security:* 从呈现目录里摘掉：那时越权开口会立刻变成
- * 5 条（见下一个用例的反向自证），比现状更差。
+ * 批次 B 的收口方式就是上面写的那条：把 requireReauthTicket 声明进路由表（TRAP_HANDLING.REAUTH），
+ * 给缺票会话回**逐字相同**的 401 REAUTH_TICKET_REQUIRED；陷阱不发票据（POST /api/security/reauth
+ * 是 deny403）、也不持窗口，所以「缺票」在这些路由上是唯一可能的真实答案，合成面反而成了指纹。
+ * 被否决的另一条路（把 security:* 从呈现目录里摘掉）代价不变差还是更差：越权开口会立刻变成 5 条
+ * （见下一个用例的反向自证），而分歧只从 5 条换成另外 5 条。
+ *
+ * 残余（如实记下，不假装归零）：**带票**请求仍会分叉——真持票据/窗口的会话在这 5 条上拿到的是控制器
+ * 输出，而陷阱会话永远拿不到票（它只能拿到这个 401）。要收口它得让陷阱伪造票据或窗口，那等于让马甲
+ * 自报「我能过二次验证」，比多一个指纹更糟，故不做。REAUTH_TICKET_INVALID（票据无效/重放）同样未建模。
  */
-const READ_DIVERGENCE_BACKLOG = [
-  {
-    key: 'GET /api/security/alerts',
-    real: 'reauth-ticket-required',
-    trap: 'data',
-    why: '真实链过权限闸后还要求步进票据；陷阱没有票据面，回的是合成告警列表',
-  },
-  {
-    key: 'GET /api/security/audit-logs/verify',
-    real: 'reauth-ticket-required',
-    trap: 'data',
-    why: '同上：真实链缺票时连「检测器是否在线」都问不到，陷阱回合成校验结果',
-  },
-  {
-    key: 'GET /api/security/audit-logs/export',
-    real: 'reauth-ticket-required',
-    trap: 'permission-denied',
-    why: '状态同、理由不同：真实链缺票回 REAUTH_TICKET_REQUIRED，陷阱回 PERMISSION_DENIED',
-  },
-  {
-    key: 'GET /api/security/audit-logs',
-    real: 'reauth-ticket-required',
-    trap: 'data',
-    why: '同上：真实链要票据，陷阱回合成审计列表',
-  },
-  {
-    key: 'GET /api/security/stuffing-profile',
-    real: 'reauth-ticket-required',
-    trap: 'permission-denied',
-    why: '同上：本行原有的「零权限会话该看到的 403」在呈现身份持有 security:audit 之后不再成立',
-  },
-];
+const READ_DIVERGENCE_BACKLOG = [];
 
 describe('路由声明表（P2-2）：与真实路由、真实判定链双向对拍', () => {
   test('前提自证：解析器吃得下多行实参、OR 数组、串联权限与敏感标记（正反样本）', () => {
@@ -489,6 +475,17 @@ describe('路由声明表（P2-2）：与真实路由、真实判定链双向对
         )
       )
     ).toEqual([keyOf(vsensRow) + ' 敏感标记 false ≠ true']);
+    // 第四条轴（批次 B）：闸声明在那一行上，摘掉任一行的声明必须被点名，而且只点名那一行
+    const gatedRow = ROUTE_TABLE.find((row) => isReauthGated(row));
+    expect(gatedRow).toBeTruthy();
+    expect(
+      diffFacts(
+        actual,
+        ROUTE_TABLE.map((row) =>
+          row === gatedRow ? Object.assign({}, row, { handling: TRAP_HANDLING.DENY }) : row
+        )
+      )
+    ).toEqual([keyOf(gatedRow) + ' 二次验证闸 false ≠ true']);
   });
 
   test('回答类别现算 === 声明：登记项以外的每一行都必须现算出声明的那一类（双向）', () => {
@@ -574,25 +571,20 @@ describe('路由声明表（P2-2）：与真实路由、真实判定链双向对
     expect(heldByPresented('pii:export')).toBe(false);
   });
 
-  test('读侧「未持有却开口」双向：现算 === 登记（空）；摘掉 security:* 后 5 条 200 面立刻落网', () => {
+  test('读侧「未持有却开口」双向：现算 === 登记（空）；摘掉 security:* 后 2 条 200 面立刻落网', () => {
     expect(unheldButOpenOf(ROUTE_TABLE, PRESENTED_PERMISSIONS).sort()).toEqual([
       ...UNHELD_BUT_OK_BACKLOG,
     ]);
     // 反向自证（判据有牙）：通配符那行一摘，合法 200 立刻变成越权开口——现算集随输入变，
-    // 说明现在的空集不是「判据没牙」，而是这 5 条（4 条 security 面 + /api/metrics 合成快照面）
-    // 在真实链口径下确实合法
+    // 说明现在的空集不是「判据没牙」，而是这两条（/api/metrics 合成快照面 + /api/security/overview
+    // 合成汇总面）在真实链口径下确实合法。批次 B 之前这里是 5 条：另外 3 条（alerts / audit-logs /
+    // audit-logs/verify）如今回的是缺票 401 而不是 200，已不在本判据的范围里
     expect(
       unheldButOpenOf(
         ROUTE_TABLE,
         PRESENTED_PERMISSIONS.filter((code) => code !== 'security:*')
       ).sort()
-    ).toEqual([
-      'GET /api/metrics',
-      'GET /api/security/alerts',
-      'GET /api/security/audit-logs',
-      'GET /api/security/audit-logs/verify',
-      'GET /api/security/overview',
-    ]);
+    ).toEqual(['GET /api/metrics', 'GET /api/security/overview']);
   });
 
   test('读侧回答 vs 真实链应然回答：分歧逐条登记（键 + 方向一起比，不许只比条数）', () => {
@@ -610,8 +602,12 @@ describe('路由声明表（P2-2）：与真实路由、真实判定链双向对
       .map(keyOf)
       .sort();
     expect(notFound).toEqual([...READ_NOT_FOUND_ROWS].sort());
-    // 反向自证（两个方向一起翻）：摘掉 security:* 之后，5 条票据分歧全部消失（真实链也变成
-    // 权限拒绝，与陷阱的拒绝同形），但代价是冒出 5 条越权开口——所以「摘通配符」不是收口方向
+    // 反向自证（两个方向一起翻）：摘掉 security:* 之后，这 7 条票据分歧不再由「缺票」产生（真实链
+    // 先撞权限闸，与陷阱的拒绝同形），但代价是冒出 7 条越权开口——「摘通配符」这一路仍然不是收口方向，
+    // 空集靠的是声明闸而不是把呈现目录削薄。注意这 7 条里含 /api/security/stuffing-profile 与
+    // /api/security/attack-profile：它们在批次 B / 本批次之前是 real=data/trap=permission-denied
+    // （纯矛盾那类），现在是 real=permission-denied/trap=reauth-ticket-required——**只是换了个方向**，
+    // 所以本集合的成员没变
     const reduced = readDivergenceOf(
       ROUTE_TABLE,
       PRESENTED_PERMISSIONS.filter((code) => code !== 'security:*'),
@@ -620,16 +616,41 @@ describe('路由声明表（P2-2）：与真实路由、真实判定链双向对
     expect(reduced.map((item) => item.key).sort()).toEqual([
       'GET /api/metrics',
       'GET /api/security/alerts',
+      'GET /api/security/attack-profile',
       'GET /api/security/audit-logs',
+      'GET /api/security/audit-logs/:id',
+      'GET /api/security/audit-logs/export',
       'GET /api/security/audit-logs/verify',
       'GET /api/security/overview',
+      'GET /api/security/stuffing-profile',
     ]);
-    expect(reduced.every((item) => item.real === 'permission-denied' && item.trap === 'data')).toBe(
-      true
-    );
+    expect(reduced.every((item) => item.real === 'permission-denied')).toBe(true);
+    // 陷阱侧不再一律「照给数据」：只有真没有第二道闸的两条还会回数据，另外 7 条即使摘掉通配符
+    // 也照回缺票 401（闸声明在路由表里，与呈现身份持有什么权限无关）——其中 audit-logs/export
+    // 走文件面，同一个闸同样盖住它
+    expect(
+      reduced
+        .filter((item) => item.trap !== 'reauth-ticket-required')
+        .map((item) => item.key)
+        .sort()
+    ).toEqual(['GET /api/metrics', 'GET /api/security/overview']);
+    expect(
+      reduced
+        .filter((item) => item.trap === 'reauth-ticket-required')
+        .map((item) => item.key)
+        .sort()
+    ).toEqual([
+      'GET /api/security/alerts',
+      'GET /api/security/attack-profile',
+      'GET /api/security/audit-logs',
+      'GET /api/security/audit-logs/:id',
+      'GET /api/security/audit-logs/export',
+      'GET /api/security/audit-logs/verify',
+      'GET /api/security/stuffing-profile',
+    ]);
   });
 
-  test('前提：二次验证闸从源码现算，恰好这 5 条（正反样本都吃得下）', () => {
+  test('前提：二次验证闸的声明 ⇄ 源码双向，恰好这 7 条（正反样本都吃得下）', () => {
     expect(
       reauthOf(['authenticate', "checkPermission('security:audit')", 'requireReauthTicket()'])
     ).toBe(true);
@@ -638,11 +659,26 @@ describe('路由声明表（P2-2）：与真实路由、真实判定链双向对
     );
     expect([...gatedKeys()].sort()).toEqual([
       'GET /api/security/alerts',
+      'GET /api/security/attack-profile',
       'GET /api/security/audit-logs',
+      'GET /api/security/audit-logs/:id',
       'GET /api/security/audit-logs/export',
       'GET /api/security/audit-logs/verify',
       'GET /api/security/stuffing-profile',
     ]);
+    // 同一条集合的**声明侧**：表里说「有闸」的行必须正好是源码里那些（多一条少一条都红）
+    expect(
+      ROUTE_TABLE.filter((row) => row.handling === TRAP_HANDLING.REAUTH)
+        .map(keyOf)
+        .sort()
+    ).toEqual([...gatedKeys()].sort());
+    // 闸必须能挡住陷阱自己发的路由：换票端点本身是拒绝面（否则马甲能自发票据过闸）
+    const reauthEndpoint = actualRoutes().find((row) => row.path === '/api/security/reauth');
+    expect(reauthEndpoint).toBeTruthy();
+    expect(reauthEndpoint.reauth).toBe(false);
+    expect(ROUTE_TABLE.find((row) => keyOf(row) === keyOf(reauthEndpoint)).handling).toBe(
+      TRAP_HANDLING.DENY
+    );
   });
 
   test('前提：authenticate 只逐路由挂，绝不 router.use / app.use 整段挂（否则未声明路径真会进改道点）', () => {

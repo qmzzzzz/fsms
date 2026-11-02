@@ -7,7 +7,7 @@
  *
  * 本轮实测（2026-10-03）：这类站点 20 处——8 处当场可证失实（DEBT）、6 处正确但未署名（LIVE）、
  * 4 处尚未复核（UNVERIFIED）、2 处指向依赖内部行号（EXTERNAL）。
- * CENSUS total=16 DEBT=3 LIVE=7 UNVERIFIED=4 EXTERNAL=2
+ * CENSUS total=17 DEBT=3 LIVE=8 UNVERIFIED=4 EXTERNAL=2
  * 上面这行不是排版：最后一条用例把它读回来和台账逐项对撞。写散文的计数会被改台账的人漏掉
  * （第 15 轮就出现过"闸对、文档写着 4 处、闸里断言 5 处"），机器可读的一行才能被闸管住。
  *
@@ -210,13 +210,24 @@ const LEDGER = [
   {
     site: 'src/tests/ci/commentAnchorFreshness.test.js',
     siteLine: 25,
-    raw: '（:110）',
+    raw: '（:111）',
     status: 'LIVE',
     referent: 'src/services/DeviceService.js',
-    from: 110,
-    to: 110,
+    from: 111,
+    to: 111,
     mustRead: 'countDocuments(',
-    note: '上一行点名 DeviceService.js:444，这里回指同符号的另一处 :110（用于度量谓词的局部唯一性）。2026-10-26 把 getDeviceStats 抽到 deviceStatsService 后，两处计数坐标从 :108/:502 前移到 :110/:444（顶部新增两行 require，尾部移除 59 行）',
+    note: '上一行点名 DeviceService.js:448，这里回指同符号的另一处 :111（用于度量谓词的局部唯一性）。2026-10-26 把 getDeviceStats 抽到 deviceStatsService 后，两处计数坐标从 :108/:502 前移到 :110/:444（顶部新增两行 require，尾部移除 59 行）。2026-11-02 设备状态实时推送批在模块头新增 realtimeNotifier require（+1 行，在两处之上）并在状态迁移/报废分支插入 previousStatus 留痕（+5 行，均在第二处之上）：第一处 110→111、第二处 444→448，距离 334→337。',
+  },
+  {
+    site: 'web-admin/src/tests/i18n/enumLabelCoverage.test.js',
+    siteLine: 171,
+    raw: '(:153)',
+    status: 'LIVE',
+    referent: 'web-admin/src/tests/i18n/enumLabelCoverage.test.js',
+    from: 153,
+    to: 153,
+    mustRead: '解析器自证：真源码能抠出键',
+    note: '同文件内的回指：注释说「本文件『解析器自证』」指的是 :153 的 test 标题，而不是上方 :136 的「前提自证」。2026-11-02 登记时原文写的是半角 (:136)——偏移 17 行且指向了错的 test；本闸的「必须有人登记」正是在这一步拦住它。',
   },
   {
     site: 'src/tests/config/startupGuards.test.js',

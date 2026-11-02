@@ -32,7 +32,13 @@ jest.mock('../../utils/metrics', () => ({
   incSecurityAlert: (...args) => mockIncSecurityAlert(...args),
 }));
 
-const { onAuditWriteFailure, guardDetection } = require('../../utils/auditWriteFailure');
+const {
+  onAuditWriteFailure,
+  guardDetection,
+  awaitAuditWrite,
+} = require('../../utils/auditWriteFailure');
+
+const { flushEventLoop, waitFor } = require('../helpers/waitFor');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -142,5 +148,95 @@ describe('guardDetection：契约"永不 reject"与非 Error 的 reject', () => 
     const detect = jest.fn().mockResolvedValue(undefined);
     await guardDetection('暴力破解检测', detect)('alice', '1.2.3.4', { extra: 1 });
     expect(detect).toHaveBeenCalledWith('alice', '1.2.3.4', { extra: 1 });
+  });
+});
+
+describe('awaitAuditWrite：超时后迟到失败的单独记账（F-01）', () => {
+  const deferred = () => {
+    let settle;
+    let fail;
+    const promise = new Promise((resolve, reject) => {
+      settle = resolve;
+      fail = reject;
+    });
+    return { promise, settle, fail };
+  };
+
+  test('超时后才失败 ⇒ 除超时那条外，迟到失败必须再单独记一次（修前此处只记超时）', async () => {
+    const gate = deferred();
+    await awaitAuditWrite(gate.promise, 'late_write_fail', { user: { username: 'dave' } }, 10);
+    expect(mockLogger.error).toHaveBeenCalledTimes(1); // 返回时只有超时那条
+    gate.fail(new Error('迟到写库失败'));
+    await waitFor(() => mockLogger.error.mock.calls.length === 2, { label: '迟到记账出现' });
+    const [message, meta] = mockLogger.error.mock.calls[1];
+    expect(message).toContain('迟到写库失败');
+    expect(message).toContain('迟到记账');
+    expect(meta).toEqual({ auditAction: 'late_write_fail', operator: 'dave' });
+    expect(mockIncSecurityAlert).toHaveBeenCalledTimes(2);
+  });
+
+  test('超时时限生效：返回时只记了超时那一条（写入仍在途，没有被等）', async () => {
+    const gate = deferred();
+    await awaitAuditWrite(gate.promise, 'bounded_wait', undefined, 20);
+    expect(mockLogger.error).toHaveBeenCalledTimes(1); // 真正的证据：闸到点即返回，写入尚未落地
+    gate.fail(new Error('晚到'));
+    await waitFor(() => mockLogger.error.mock.calls.length === 2, {
+      label: '迟到记账出现（时限用例）',
+    });
+  });
+
+  test('迟到失败不得变成 unhandledRejection（接住它的那条链自己也不得抛）', async () => {
+    const escapes = [];
+    const onEscape = (reason) => escapes.push(reason);
+    process.on('unhandledRejection', onEscape);
+    try {
+      const gate = deferred();
+      await awaitAuditWrite(gate.promise, 'late_rejection_escape', undefined, 10);
+      gate.fail(new Error('不得逃逸'));
+      await waitFor(() => mockLogger.error.mock.calls.length === 2, {
+        label: '迟到记账出现（逃逸面）',
+      });
+      expect(escapes).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onEscape);
+    }
+  });
+
+  test('超时后写入最终成功：只记超时，不得凭空多记一条失败', async () => {
+    const gate = deferred();
+    await awaitAuditWrite(gate.promise, 'late_write_ok', undefined, 10);
+    gate.settle('ok');
+    await flushEventLoop(2); // 反向断言没有可等待的条件：只让出事件循环，不承诺时长
+    expect(mockLogger.error).toHaveBeenCalledTimes(1);
+    expect(mockIncSecurityAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('未超时就失败：仍只记一次，且不得出现“迟到记账”字样（防重复记账）', async () => {
+    await awaitAuditWrite(Promise.reject(new Error('早到失败')), 'early_write_fail', undefined, 50);
+    await flushEventLoop(2);
+    expect(mockLogger.error).toHaveBeenCalledTimes(1);
+    expect(mockLogger.error.mock.calls[0][0]).toContain('早到失败');
+    expect(mockLogger.error.mock.calls[0][0]).not.toContain('迟到记账');
+  });
+
+  test('迟到值不可读（取 .then 抛错）时也不得留下 unhandledRejection', async () => {
+    const escapes = [];
+    const onEscape = (reason) => escapes.push(reason);
+    process.on('unhandledRejection', onEscape);
+    try {
+      const gate = deferred();
+      await awaitAuditWrite(gate.promise, 'late_unreadable', undefined, 10);
+      // 被 catch 的值不保证可读：settled 的 onRejected 原样返回它，解析过程会再取一次 .then
+      gate.fail({
+        get then() {
+          throw new Error('不可读的迟到值');
+        },
+      });
+      // 反向断言没有可等待的条件；Node 在「本 tick 微任务清空后」才判定未处理拒绝，故跨过该时点再断言
+      await flushEventLoop(3);
+      expect(escapes).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onEscape);
+    }
   });
 });

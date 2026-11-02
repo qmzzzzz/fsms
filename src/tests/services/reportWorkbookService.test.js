@@ -1,12 +1,12 @@
-const { streamExportRows, writeExportWorkbook } = require('../../services/reportWorkbookService');
+jest.mock('../../utils/xlsxWriter');
 
-jest.mock('exceljs');
-const { Workbook } = require('exceljs');
+const { streamExportRows, writeExportWorkbook } = require('../../services/reportWorkbookService');
+const { createWorkbook } = require('../../utils/xlsxWriter');
 const FireDevice = require('../../models/FireDevice');
 
 /**
  * 成功导出现在要等目的端表态（writeExportWorkbook → writeWorkbookToResponse），
- * 而这里打桩的 workbook.xlsx.write 不产生真实流事件。桩按"正常收尾"办事：
+ * 而这里打桩的 workbook.write 不产生真实流事件。桩按"正常收尾"办事：
  * 注册 finish 时立刻回调，close/error 留空（正常收尾时它们只在 finish 之后才到，
  * 而函数在 finish 那一刻就已经返回）。
  */
@@ -95,17 +95,9 @@ describe('report workbook service', () => {
       }),
     }));
     const findSpy = jest.spyOn(FireDevice, 'find').mockImplementation(find);
-    const worksheet = {
-      properties: {},
-      columns: undefined,
-      addRow: jest.fn(),
-      getRow: jest.fn(() => ({ eachCell: (callback) => callback({}) })),
-    };
-    const workbook = {
-      addWorksheet: jest.fn(() => worksheet),
-      xlsx: { write: jest.fn().mockResolvedValue() },
-    };
-    Workbook.mockImplementationOnce(() => workbook);
+    const worksheet = { addRow: jest.fn() };
+    const workbook = { sheet: worksheet, write: jest.fn().mockResolvedValue() };
+    createWorkbook.mockImplementationOnce(() => workbook);
     const res = completedRes({
       write: jest.fn(),
       end: jest.fn(),
@@ -124,11 +116,11 @@ describe('report workbook service', () => {
       'Content-Disposition',
       expect.stringContaining('attachment; filename=')
     );
-    expect(workbook.addWorksheet).toHaveBeenCalledWith('设备列表');
-    expect(worksheet.columns).toEqual(
+    expect(createWorkbook).toHaveBeenCalledWith(expect.objectContaining({ sheetName: '设备列表' }));
+    expect(createWorkbook.mock.calls.at(-1)[0].columns).toEqual(
       expect.arrayContaining([expect.objectContaining({ key: 'deviceCode' })])
     );
-    expect(workbook.xlsx.write).toHaveBeenCalledWith(res);
+    expect(workbook.write).toHaveBeenCalledWith(res);
     // 空值占位符必须原样是 `-`：sanitizeSpreadsheetCell 会给一切以 `-` 开头的文本
     // 加前导单引号，而 xlsx 的单元格是带类型的文本（实测 exceljs 把 `'=1+1'` 存成
     // type=3 String、formula=undefined，Excel 打开时不会求值），那个引号只会显示出来。
@@ -279,17 +271,9 @@ describe('xlsx export truncation must be declared', () => {
       };
       return chain;
     });
-    const worksheet = {
-      properties: {},
-      columns: undefined,
-      addRow: jest.fn(),
-      getRow: jest.fn(() => ({ eachCell: (callback) => callback({}) })),
-    };
-    const workbook = {
-      addWorksheet: jest.fn(() => worksheet),
-      xlsx: { write: jest.fn().mockResolvedValue() },
-    };
-    Workbook.mockImplementationOnce(() => workbook);
+    const worksheet = { addRow: jest.fn() };
+    const workbook = { sheet: worksheet, write: jest.fn().mockResolvedValue() };
+    createWorkbook.mockImplementationOnce(() => workbook);
     const res = completedRes();
 
     await writeExportWorkbook(res, { type: 'devices', query: {}, total: LIMIT + 37 });
@@ -309,17 +293,9 @@ describe('xlsx export truncation must be declared', () => {
     const findSpy = jest
       .spyOn(FireDevice, 'find')
       .mockImplementation(cursorModel([{ deviceCode: 'DEV-0' }]).find);
-    const worksheet = {
-      properties: {},
-      columns: undefined,
-      addRow: jest.fn(),
-      getRow: jest.fn(() => ({ eachCell: (callback) => callback({}) })),
-    };
-    const workbook = {
-      addWorksheet: jest.fn(() => worksheet),
-      xlsx: { write: jest.fn().mockResolvedValue() },
-    };
-    Workbook.mockImplementationOnce(() => workbook);
+    const worksheet = { addRow: jest.fn() };
+    const workbook = { sheet: worksheet, write: jest.fn().mockResolvedValue() };
+    createWorkbook.mockImplementationOnce(() => workbook);
     const res = completedRes();
 
     await writeExportWorkbook(res, { type: 'devices', query: {} });

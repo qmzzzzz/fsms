@@ -124,8 +124,7 @@ function listJsonFiles(dir) {
     .map((name) => path.join(dir, name));
 }
 
-/** 心跳 bundles 的归一化：代理写入时已封顶（每类 10 条、逐字段截断），这里再防一道
- *  「心跳文件被手写坏」的形态——字段非字符串、条目非对象都折成缺省，不让一个坏心跳炸掉概览。 */
+/** 心跳 bundles 归一化：代理写入时已封顶（每类 10 条、逐字段截断），这里再防「心跳文件被手写坏」的形态——字段非字符串、条目非对象都折成缺省，不让一个坏心跳炸掉概览。 */
 const BUNDLE_LIST_LIMIT = 10;
 
 function normalizeBundleEntry(raw) {
@@ -159,14 +158,7 @@ function normalizeHeartbeatBundles(raw) {
   };
 }
 
-/**
- * 心跳 intake 的归一化（代理落位通道：inbox → bundles）。
- *
- * pending = 已传完但还没落位的归档名（静默期未到 / 本轮排队）；
- * rejected = 落位失败的归档与原因；landed = 本轮刚落位的目录名（空串表示本轮没落位）。
- * 与 bundles 同纪律：逐字段截断、数量封顶——心跳是 0644 全局可读文件，
- * 一个塞满畸形条目的 inbox 不能把它撑成 DoS 载体。
- */
+/** 心跳 intake 归一化（inbox → bundles）：pending=待落位、rejected=落位失败及原因、landed=本轮落位目录；与 bundles 同纪律（逐字段截断、数量封顶）——心跳 0644 全局可读，不能被畸形 inbox 撑成 DoS。 */
 function normalizeHeartbeatIntake(raw) {
   const empty = { pending: [], rejected: [], landed: '' };
   if (!raw || typeof raw !== 'object') return empty;
@@ -479,9 +471,7 @@ function createUpgradeRequest({ image, mode, user, sourceIp = '', now = Date.now
   const id = crypto.randomUUID();
   const requestedAt = new Date(now).toISOString();
   const activeColor = currentColor();
-  // mode 只在签名 canonical 里分型（offline 多一段）：离线请求最终能否执行由宿主代理
-  // 判定（本地是否有声明该 digest 的包 + 全量校验），应用侧不预判——预判会引用一份
-  // 可能已被搬走的包，而代理每轮扫描的心跳只是候选。
+  // mode 只在签名 canonical 里分型（offline 多一段）：离线请求能否执行由宿主代理判定（本地是否有声明该 digest 的包 + 全量校验），应用侧不预判——预判会引用一份可能已被搬走的包，而代理每轮扫描的心跳只是候选。
   const payload = {
     id,
     image: validation.parsed.ref,

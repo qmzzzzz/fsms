@@ -4,7 +4,7 @@
  * 有意不模拟：并发闸、数据范围、日期窗以外的筛选维度——边界表与理由见 docs/adr/ADR-013；日期窗已模拟（buildDateRangeFilter，窗口外为空 ⇒ 只留表头）。台账：src/tests/ci/honeypotDecoyLedger.test.js 的「文件/导出类端点」用例。
  */
 
-const ExcelJS = require('exceljs');
+const { createWorkbook } = require('../utils/xlsxWriter');
 const ApiResponse = require('../utils/apiResponse');
 const {
   buildDateRangeFilter,
@@ -24,6 +24,7 @@ const {
   materializeRow,
   rowClockNow,
 } = require('../constants/honeypotDecoy');
+const { reauthPayload } = require('../constants/honeypotTicketGate');
 const {
   EXPORT_MODEL_CONFIG,
   EXPORT_ROW_TRANSFORMS,
@@ -120,7 +121,7 @@ const resolveFileResponse = ({ method = '', path = '', query = {} } = {}) => {
   if (endpoint.id === 'reports-export') response = resolveReportExport(query);
   else if (endpoint.id === 'reports-export-pii') response = resolvePiiExport(query);
   else if (endpoint.id === 'audit-logs-export')
-    response = { kind: 'codeError', code: 'PERMISSION_DENIED' }; // 审计导出收口在 checkPermission('security:audit')，这就是它的 403
+    response = reauthPayload(); // 审计导出真实链是「权限闸 → 二次验证闸」：呈现身份经 security:* 已过第一道，所以缺票的 401 才是它在这里看到的下一句（旧口径的 403 是归因错误，见 ADR-013 P2-2）。拒绝体与判定层共用同一份冻结对象，逐字相同
   else response = { kind: 'codeError', code: 'AVATAR_NOT_FOUND', options: { statusCode: 404 } }; // 头像一律"尚未设置"：真链在没有头像时回的就是这句 404
   return {
     ...response,
@@ -140,10 +141,12 @@ const sendDecoyWorkbook = async (res, { type, lang, head, startDate, endDate, tz
   );
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
   if (head) return res.end(); // HEAD 与真实一致：只回头（Node 本就不为 HEAD 带体）
-  const workbook = new ExcelJS.Workbook();
-  const worksheet = workbook.addWorksheet(sheetName);
-  worksheet.properties.defaultColWidth = 15;
-  worksheet.columns = getExportColumnDefs(type, lang);
+  const workbook = createWorkbook({
+    sheetName,
+    columns: getExportColumnDefs(type, lang),
+    defaultColWidth: 15, // 与真实链同一个写入器 + 同一份列定义 ⇒ 表头/列宽/样式由构造保证相同
+  });
+  const worksheet = workbook.sheet;
   const transform = createSafeTransform(EXPORT_ROW_TRANSFORMS[type], { maskPii: true, lang }); // maskPii 恒真：真实 GET 导出由 forceMaskPii 强制同档
   // 日期参数真的作用在合成行上，与真实查询同一个 buildDateRangeFilter（date-only 按 tz 展开整天）：
   // 窗口外为空就只留表头——这正是真实腿"筛完没命中"时给出的文件，比"任何时候都给同一批行"更难识破
@@ -160,13 +163,9 @@ const sendDecoyWorkbook = async (res, { type, lang, head, startDate, endDate, tz
       );
     })
     .forEach((row) => worksheet.addRow(transform(row)));
-  worksheet.getRow(1).eachCell((cell) => {
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4472C4' } };
-    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    cell.alignment = { vertical: 'middle', horizontal: 'center' };
-    cell.border = { thin: true };
-  });
-  await workbook.xlsx.write(res).catch(() => {
+  try {
+    workbook.write(res);
+  } catch {
     // 头已发出（客户端中途断流）⇒ 与真实链同结局：断流；头还没发 ⇒ 只能是生成期异常，
     // 补一句 500 把连接收掉——不然客户端会一直挂在这条请求上，比 500 更像异常
     if (!res.headersSent) {
@@ -174,7 +173,7 @@ const sendDecoyWorkbook = async (res, { type, lang, head, startDate, endDate, tz
       res.removeHeader('Content-Disposition');
       res.status(500).end();
     } else res.destroy();
-  });
+  }
 };
 
 /** 发应答：拒绝走 ApiResponse 的两个口（与真实链同一个口），文件走合成 xlsx */

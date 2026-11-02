@@ -57,7 +57,7 @@ const conditionOf = ({ ip, fingerprint, ipSegment, since, until }) => {
   return cond;
 };
 
-/** 时间线：按时间正序，只出摘要字段 */
+/** 时间线：按时间正序返回，只出摘要字段。limit 截断时取**最近** N 条（界面与导出都承诺「最近」而不是「最早」），再翻回正序供按时间线阅读 */
 async function traceTimeline({
   model,
   limit,
@@ -73,9 +73,10 @@ async function traceTimeline({
   const records = await model
     .find(cond)
     .select(SUMMARY_FIELDS.join(' '))
-    .sort({ createdAt: 1 })
+    .sort({ createdAt: -1 })
     .limit(clampLimit(limit))
     .lean();
+  records.reverse();
   return { ok: true, since, until, count: records.length, records };
 }
 

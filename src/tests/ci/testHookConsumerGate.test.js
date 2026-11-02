@@ -280,6 +280,8 @@ const EXPORT_FORM_UNRECOGNISED = [
   'routes/securityRoutes.js',
   // 撞库画像读口（2026-11-01）：`module.exports = router` 单值导出，与其余路由文件同形
   'routes/stuffingProfileRoutes.js',
+  // 单 IP 攻击行为画像读口（2026-11-02）：同上，单值导出
+  'routes/attackProfileRoutes.js',
   'routes/userRoutes.js',
   // 匿名版本元数据路由（2026-10-30）：与上面同形，`module.exports = router`，
   // 不具名 ⇒ 没有钩子面。加任何具名导出都会立刻掉出本清单并让门禁变红。
@@ -409,8 +411,8 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
     expect(modelFiles).toEqual(barreled.map((name) => `models/${name}.js`));
   });
 
-  it('钩子总数钉死：只许减不许增（当前 38 个），且成员可点名', () => {
-    expect(hooks.length).toBe(38);
+  it('钩子总数钉死：只许减不许增（当前 39 个），且成员可点名', () => {
+    expect(hooks.length).toBe(39);
     const keys = hooks.map(keyOf);
     for (const must of [
       // worker 线程池是模块级单例：强制 worker 模式的用例必须能 terminate 并复位池，
@@ -442,6 +444,9 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
       // 第二条用例只能写相对差值断言，绝对值断言会被前序用例污染（随机顺序门禁下假红/假绿）。
       // 定时器不归钩子管——关停只有一个入口 stop()。
       'services/honeypotChainWatch.js::__resetForTest',
+      // 蜜罐告警「同一来源每小时一条」的频控表是模块级 Map：三个蜜罐套件都要断言
+      // "重复触发不再发第二条"，不复位则先跑的用例会把后跑的告警吞掉。
+      'services/alertDispatch.js::__resetAlertRateLimitForTest',
     ])
       expect(keys).toContain(must);
   });

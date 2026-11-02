@@ -13,9 +13,11 @@ const ApiResponse = require('../../utils/apiResponse');
 const logger = require('../../utils/logger');
 const { asyncHandler } = require('../../middleware/errorHandler');
 const { isValidDateParam } = require('../../utils/helpers');
+const { normalizeIP } = require('../../utils/ipUtils');
 const { applyAuditDataScope } = require('../../services/auditScopeFilter');
 const { MIN_SAMPLES } = require('../../constants/stuffingProfile');
 const { buildProfile } = require('../../services/stuffingProfile');
+const { buildAttackProfile } = require('../../services/attackProfile');
 
 const BUSINESS_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -36,8 +38,7 @@ const readBusinessDay = (value) => {
 
 /**
  * GET /api/security/stuffing-profile —— 撞库画像（按来源段聚合）
- */
-const getStuffingProfile = asyncHandler(async (req, res) => {
+ */ const getStuffingProfile = asyncHandler(async (req, res) => {
   try {
     const day = readBusinessDay(req.query.businessDay);
     if (!day.ok) return ApiResponse.codeError(res, 'DATE_PARAM_INVALID');
@@ -66,4 +67,31 @@ const getStuffingProfile = asyncHandler(async (req, res) => {
   }
 });
 
-module.exports = { getStuffingProfile };
+/**
+ * GET /api/security/attack-profile —— 单 IP 攻击行为画像
+ *
+ * 入参只有 ip 与可选 hours：普通用户只需要输入 IP 点「分析」。分类码、评分与建议
+ * 全部由后端派生；前端只负责按当前界面语言渲染。PROFILE_FIELDS 不含正文/头袋，
+ * 原始载荷仍走 GET /audit-logs/:id 单条详情。
+ */
+const getAttackProfile = asyncHandler(async (req, res) => {
+  try {
+    const ip = normalizeIP(req.query.ip);
+    if (!ip) return ApiResponse.codeError(res, 'IP_SINGLE_REQUIRED');
+    const { query: scopeFilter, dataScope } = await applyAuditDataScope({}, req.user.userId);
+    const profile = await buildAttackProfile({
+      ip,
+      hours: req.query.hours,
+      scopeFilter,
+      scopeLimited: dataScope.type !== 'all',
+    });
+    if (!profile.ok) return ApiResponse.codeError(res, 'IP_SINGLE_REQUIRED');
+    return ApiResponse.success(res, profile, '获取成功');
+  } catch (error) {
+    if (error.isApiError) throw error;
+    logger.error(`攻击画像查询失败: ${error.message}`);
+    return ApiResponse.codeError(res, 'AUDIT_QUERY_FAILED');
+  }
+});
+
+module.exports = { getStuffingProfile, getAttackProfile };

@@ -24,6 +24,7 @@
  * 退出码:
  *   0 = 全部就绪
  *   1 = 存在缺失项（含"某条检查器没交出结论"这一类，见 runRegisteredChecks 的注释）
+ *   2 = 用法错误（未知参数，如把 --strict 误打成 --strcit）——不与"有债"混码，但同样非零
  *
  * 输出: JSON 格式的合规就绪度清单 + 控制台摘要
  */
@@ -529,6 +530,12 @@ function runAllChecks() {
 // 作为脚本运行 ⇒ 立即出结论并退出；被 require（测试要复用判定函数）⇒ 不执行、只导出。
 // 不这样分叉的话，require 会连带跑完门禁并 process.exit，测试既拿不到函数也活不下来。
 if (require.main === module) {
+  // 未知参数 ⇒ 打印后退出 2，**在跑任何检查之前**：手误 `--strcit` 原先不含 `--strict` 子串，
+  // strict 保持 false ⇒ 未就绪项被降级成信息、总体报「就绪」、退出码 0——而 package.json 的
+  // security:audit 正是用 `--strict` 调它。一个字母的手误让安全审计由红转绿，且没有任何信号。
+  // 校验放在这里而不是模块顶层：本文件被 complianceGate.test.js require，而顶层 exit 会连带
+  // 杀掉 jest 进程（同 lint-ratchet.js:43-46 / commentDensity.js 的处境）。
+  require('./cliFlagPolicy').assertKnownArgs(process.argv.slice(2), ['--strict']);
   runAllChecks();
 } else {
   module.exports = {

@@ -12,6 +12,8 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AccountBindingsCard: typeof import('./components/AccountBindingsCard.vue')['default']
+    AttackEvidenceTable: typeof import('./components/AttackEvidenceTable.vue')['default']
+    AttackProfileResult: typeof import('./components/AttackProfileResult.vue')['default']
     AuthPrefs: typeof import('./components/AuthPrefs.vue')['default']
     ChangePasswordCard: typeof import('./components/ChangePasswordCard.vue')['default']
     DashboardCharts: typeof import('./components/DashboardCharts.vue')['default']
@@ -57,6 +59,8 @@ declare module 'vue' {
     ElSwitch: typeof import('element-plus/es/components/switch/index.mjs')['ElSwitch']
     ElTable: typeof import('element-plus/es/components/table/index.mjs')['ElTable']
     ElTableColumn: typeof import('element-plus/es/components/table/index.mjs')['ElTableColumn']
+    ElTabPane: typeof import('element-plus/es/components/tabs/index.mjs')['ElTabPane']
+    ElTabs: typeof import('element-plus/es/components/tabs/index.mjs')['ElTabs']
     ElTag: typeof import('element-plus/es/components/tag/index.mjs')['ElTag']
     ElTooltip: typeof import('element-plus/es/components/tooltip/index.mjs')['ElTooltip']
     ExitOverlay: typeof import('./components/ExitOverlay.vue')['default']

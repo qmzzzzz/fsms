@@ -13,7 +13,12 @@ const {
 } = require('../../utils/helpers');
 const { auditPath, deriveAuditMeta } = require('../../utils/auditMeta');
 const { auditClientAddress } = require('../../utils/ipUtils');
-const { isBodySensitiveKey, sanitizeAuditQuery } = require('../../models/auditLogSanitizer');
+const {
+  isBodySensitiveKey,
+  sanitizeAuditQuery,
+  sanitizeAuditHeaders,
+  sanitizeAuditResponseBody,
+} = require('../../models/auditLogSanitizer');
 // 写操作口径的单一事实来源（本处再写一遍方法名会与 originCheck 的 CSRF 闸各自漂移：一处加了方法，另一处就出现"拦了但没审计"/"审计了但没拦"）。
 const { WRITE_METHODS } = require('../httpMethods');
 
@@ -159,7 +164,7 @@ const auditLog = (options = {}) => {
     let logged = false;
 
     // 统一的审计日志记录逻辑（body 仅在 json/send 出口可得；write/end 流式路径恒为 undefined）
-    const doLog = (responseBody) => {
+    const doLog = (responseBody, responseSkipped) => {
       // logged 先置位再判定：res.send 内部会调 res.end，第二次进入必须在 skip 判定之前就被守卫吃掉，避免重复判定与重复记录
       if (logged) return; // 防止重复记录
       logged = true;
@@ -196,6 +201,11 @@ const auditLog = (options = {}) => {
           fullPath,
           isGetAudit,
           refusalReason,
+          // 响应体只存引用，脱敏/截断放到 setImmediate（persistAuditRecord）：
+          // doLog 在 res.json/res.send **发送前**同步执行，在这里序列化 8KB+ 正文
+          // 会直接加进响应时延，且一旦抛错会把成功响应变成 500。
+          responseBodyRef: responseBody,
+          responseSkipped,
         })
       );
     };
@@ -214,8 +224,8 @@ const auditLog = (options = {}) => {
 
     // 修复：导出接口绕过 json/send——
     //   - services/auditExportService.js 直接 res.write(...) / res.end()
-    //   - services/reportWorkbookService.js 走 workbook.xlsx.write(res)
-    //     （ExcelJS 内部同样是 res.write/res.end）
+    //   - services/reportWorkbookService.js 走 workbook.write(res)
+    //     （写入器 utils/xlsxWriter 内部同样是 res.end(整包 buffer)）
     // 实测 GET /api/reports/export 与 GET /api/security/audit-logs/export 真实下载成功但 auditBuffer 计数为 0。此处一并包装 write/end：
     //   - 用 rest 参数原样透传（含 write(chunk, encoding, callback) 的三参形态），
     //     返回值原样返回，不改变背压/流控语义；
@@ -223,13 +233,18 @@ const auditLog = (options = {}) => {
     //   - 响应替身缺这两个方法时（typeof 守卫）跳过包装，不改变其行为。
     if (originalWrite) {
       res.write = (...args) => {
-        doLog();
+        // write 出现即说明正文是分块产生的（CSV/Excel/文件流）：此时还没有"完整响应体"
+        // 这个概念，只能记录字节数以证明"响应确实产生过内容"。
+        doLog(undefined, 'stream');
         return originalWrite(...args);
       };
     }
     if (originalEnd) {
       res.end = (...args) => {
-        doLog();
+        const chunk = args[0];
+        // 无参 end 是空响应（204/304 或已由 send 内部结束）；有 chunk 而未经 send
+        // 才是真正的流式收尾。两者必须分开，否则详情页会把"本来没有正文"显示成"流式未采集"。
+        doLog(undefined, chunk === undefined || chunk === null ? undefined : 'stream');
         return originalEnd(...args);
       };
     }
@@ -254,8 +269,19 @@ const auditLog = (options = {}) => {
  * @returns {void}
  */
 const persistAuditRecord = (ctx) => {
-  const { req, res, action, category, success, duration, fullPath, isGetAudit, refusalReason } =
-    ctx;
+  const {
+    req,
+    res,
+    action,
+    category,
+    success,
+    duration,
+    fullPath,
+    isGetAudit,
+    refusalReason,
+    responseBodyRef,
+    responseSkipped,
+  } = ctx;
   // 控制字符清洗：userAgent / params / query 为外部可控输入，含 \n \r \u0000 时会污染下游日志渲染与 SIEM 解析，入库前统一剥离
   const safeUserAgent = stripControlChars(req.get('user-agent'), 512);
   // 键脱敏（此前缺）：body 走 SENSITIVE_KEYS 名单，而 params/query **完全不脱敏**，于是 `POST /api/auth/refresh?refreshToken=<真 JWT>` 这类经 query 传令牌的请求，
@@ -266,6 +292,13 @@ const persistAuditRecord = (ctx) => {
   const safeParams = sanitizeAuditQuery(stripControlCharsDeep(req.params || {}));
   const safeQuery = sanitizeAuditQuery(stripControlCharsDeep(req.query || {}));
   const { computeFingerprint } = require('../../utils/fingerprint');
+  // 头袋在 setImmediate 时刻读取：res.json 包装器执行时 Express 尚未写入
+  // Content-Type/Content-Length，此刻 res.getHeaders() 才是最终形态。
+  const responseCapture = sanitizeAuditResponseBody(responseBodyRef, responseSkipped);
+  const safeRequestHeaders = sanitizeAuditHeaders(req.headers);
+  const safeResponseHeaders = sanitizeAuditHeaders(
+    typeof res.getHeaders === 'function' ? res.getHeaders() : undefined
+  );
 
   /**
    * 头像 data URI 的审计打码（窄规则，不并进 SENSITIVE_KEY_SUBSTRINGS）
@@ -341,6 +374,13 @@ const persistAuditRecord = (ctx) => {
           };
           return stripControlCharsDeep(sanitizeValue(req.body || {}));
         })(),
+    requestHeaders: safeRequestHeaders,
+    responseHeaders: safeResponseHeaders,
+    // 三个响应体字段同进同出：truncated 只在 true 时落库（false 是噪声），
+    // skipped 说明"为什么没有正文"——详情页据此区分空响应与未采集。
+    responseBody: responseCapture.value,
+    responseBodyTruncated: responseCapture.truncated ? true : undefined,
+    responseBodySkipped: responseCapture.skipped,
     statusCode: res.statusCode,
     success,
     // 缺席时保持 undefined（不写 null/空串）：该列只描述"被拒的原因"，成功行带值即噪声

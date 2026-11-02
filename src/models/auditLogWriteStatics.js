@@ -6,7 +6,11 @@ const logger = require('../utils/logger');
 const { auditPath } = require('../utils/auditMeta');
 const { auditClientAddress } = require('../utils/ipUtils');
 const { computeFingerprint } = require('../utils/fingerprint');
-const { sanitizeAuditBody, sanitizeAuditQuery } = require('./auditLogSanitizer');
+const {
+  sanitizeAuditBody,
+  sanitizeAuditQuery,
+  sanitizeAuditHeaders,
+} = require('./auditLogSanitizer');
 const { stripControlChars, stripControlCharsDeep } = require('../utils/helpers');
 
 /**
@@ -122,6 +126,9 @@ const applyWriteStatics = (schema) => {
       params: sanitizeAuditDeep(req.params),
       query: sanitizeAuditDeep(req.query),
       body: sanitizeAuditBody(req.body),
+      // 控制器手写审计（敏感数据查看/改密等）在**响应发送之前**构造，拿不到
+      // 响应头/正文；请求头仍可如实留痕，且这是这些高危操作唯一能采集到的一侧。
+      requestHeaders: sanitizeAuditHeaders(req.headers),
       statusCode: res.statusCode,
       success: res.statusCode < 400,
       ...auditClientAddress(req),

@@ -31,9 +31,9 @@ import zhCN from '@/i18n/locales/zh-CN'
 import enUS from '@/i18n/locales/en-US'
 
 const require = createRequire(import.meta.url)
-// 后端那份派生清单里，本文件只取全集：界面上没有"状态变更"与"报废"控件
-// （`api.devices.updateStatus` 零调用方、`scrap` 连封装都没有），所以可写子集这一维
-// 在前端没有任何消费方，硬断言它只会把"将来要加的控件"提前钉死——那属于待拍板项。
+// 后端那份派生清单里，本文件只取全集。可写子集（WRITABLE）这一维不在这里对账：
+// 它由 DeviceView 行为测试按「变更状态单选组」「报废入口」逐项断言（P1 已补齐
+// `api.devices.scrap` 封装与报废按钮），两组覆盖面相同，这里不再钉第二份清单。
 const { DEVICE_STATUS_VALUES } = require('../../../../src/constants/deviceStatus.js')
 /**
  * 仓库根的取法：从后端模块的**真实磁盘路径**往上退两级。

@@ -31,8 +31,9 @@ const {
   WRITE_METHODS,
   resolveDecoyVerdict,
 } = require('../../constants/honeypotDecoy');
-const { FILE_ENDPOINTS } = require('../../constants/honeypotDecoyFiles');
+const { DECOY_EXPORT_ITEMS, FILE_ENDPOINTS } = require('../../constants/honeypotDecoyFiles');
 const { matchRoute } = require('../../constants/honeypotRouteTable');
+const { REAUTH_TICKET_REQUIRED_CODE } = require('../../constants/honeypotTicketGate');
 const { resolveFileResponse } = require('../../services/honeypotDecoyFiles');
 
 const MOUNT_RE = /app\.use\('(\/api\/[a-z-]+)'/g;
@@ -161,6 +162,15 @@ describe('文件/导出类端点台账（P1c）：注册表、形态与"写方�
     }
   });
 
+  test('导出面与数据面同一世界（A6 棘轮）：导出行与数据面行逐对象同一、行数相等——回退成手抄第二份立刻红', () => {
+    for (const key of ['alarms', 'devices', 'inspections']) {
+      const source = DECOY_TABLES[key];
+      const rows = DECOY_EXPORT_ITEMS[key];
+      expect(rows.length).toBe(source.length);
+      for (const row of rows) expect(source.includes(row)).toBe(true); // 同一对象引用，不是同值拷贝
+    }
+  });
+
   test('注册表路径必须落在已挂载前缀内（拼错前缀的症状是"诱饵永不可达"，静默无感）', () => {
     const uncovered = FILE_ENDPOINTS.filter(
       (e) => !MOUNTED_PREFIXES.some((p) => e.path === p || e.path.startsWith(p + '/'))
@@ -168,7 +178,7 @@ describe('文件/导出类端点台账（P1c）：注册表、形态与"写方�
     expect(uncovered).toEqual([]);
   });
 
-  test('只读形态：报表导出给合成文件，审计导出/头像逐字拒绝，且没有一个落进放行白名单', () => {
+  test('只读形态：报表导出给合成文件，审计导出给缺票闸，头像回未设置，且没有一个落进放行白名单', () => {
     expect(
       resolveFileResponse({ method: 'GET', path: '/api/reports/export', query: {} })
     ).toMatchObject({
@@ -182,7 +192,7 @@ describe('文件/导出类端点台账（P1c）：注册表、形态与"写方�
     ).toMatchObject({ kind: 'workbook', head: true });
     expect(
       resolveFileResponse({ method: 'GET', path: '/api/security/audit-logs/export', query: {} })
-    ).toMatchObject({ kind: 'codeError', code: 'PERMISSION_DENIED', write: false });
+    ).toMatchObject({ kind: 'codeError', code: REAUTH_TICKET_REQUIRED_CODE, write: false });
     expect(
       resolveFileResponse({ method: 'GET', path: '/api/avatars/hp-u1', query: {} })
     ).toMatchObject({

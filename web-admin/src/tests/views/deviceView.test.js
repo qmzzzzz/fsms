@@ -22,7 +22,19 @@ const getReminders = vi.fn()
 const getExpiring = vi.fn()
 const updateStatus = vi.fn()
 const addMaintenance = vi.fn()
+const scrap = vi.fn()
 const isCanceledError = vi.fn(() => false)
+// 实时推送：视图挂载时 acquire 连接并加入 'device-alert' 房间，收到 notification 后刷新
+const wsJoinRoom = vi.fn()
+const wsLeaveRoom = vi.fn()
+const wsOn = vi.fn()
+const wsOff = vi.fn()
+const acquireWs = vi.fn()
+const releaseWs = vi.fn()
+vi.mock('@/utils/websocket', () => ({
+  acquireWebSocket: (...a) => acquireWs(...a),
+  releaseWebSocket: (...a) => releaseWs(...a),
+}))
 vi.mock('@/utils/api', () => ({
   api: {
     devices: {
@@ -35,6 +47,7 @@ vi.mock('@/utils/api', () => ({
       getExpiring: (...a) => getExpiring(...a),
       updateStatus: (...a) => updateStatus(...a),
       addMaintenance: (...a) => addMaintenance(...a),
+      scrap: (...a) => scrap(...a),
     },
   },
   isCanceledError: (...a) => isCanceledError(...a),
@@ -103,6 +116,13 @@ const REMINDERS = {
   skipped: false,
 }
 
+const wsStub = {
+  joinRoom: (...a) => wsJoinRoom(...a),
+  leaveRoom: (...a) => wsLeaveRoom(...a),
+  on: (...a) => wsOn(...a),
+  off: (...a) => wsOff(...a),
+}
+
 // 概览/提醒/清单三块都参与首屏加载：默认给成功值，失败分支由用例自行覆盖
 beforeEach(() => {
   getStats.mockResolvedValue({ data: { data: STATS } })
@@ -110,6 +130,7 @@ beforeEach(() => {
   getExpiring.mockResolvedValue({
     data: { data: [], pagination: { total: 0, hasMore: false, limit: 20 } },
   })
+  acquireWs.mockReturnValue(wsStub)
 })
 
 const open = async (perms = FULL, rows = ROWS, total = rows.length) => {
@@ -183,9 +204,16 @@ afterEach(() => {
   getExpiring.mockReset()
   updateStatus.mockReset()
   addMaintenance.mockReset()
+  scrap.mockReset()
   confirm.mockReset()
   isCanceledError.mockReset()
   isCanceledError.mockReturnValue(false)
+  wsJoinRoom.mockClear()
+  wsLeaveRoom.mockClear()
+  wsOn.mockClear()
+  wsOff.mockClear()
+  acquireWs.mockClear()
+  releaseWs.mockClear()
   ElMessage.success.mockReset()
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
@@ -206,6 +234,7 @@ describe('DeviceView 写入口权限门控', () => {
     expect(btn(c, '删除')).toBeUndefined()
     expect(btn(c, '变更状态')).toBeUndefined()
     expect(btn(c, '维护')).toBeUndefined()
+    expect(btn(c, '报废')).toBeUndefined()
     expect(cells(c)).toHaveLength(1)
     expect(cells(c)[0].join(' ')).toContain('SMK-001')
     expect(c.errors).toEqual([])
@@ -216,6 +245,17 @@ describe('DeviceView 写入口权限门控', () => {
     expect(btn(c, '编辑')).toBeTruthy()
     expect(btn(c, '新增设备')).toBeUndefined()
     expect(btn(c, '删除')).toBeUndefined()
+    expect(btn(c, '报废')).toBeUndefined()
+  })
+
+  test('只给 device:scrap（消防主管场景）：报废入口可见，编辑/变更状态不出现', async () => {
+    // P1：报废接口原先要 device:update，而种子角色 FIRE_SUPERVISOR 只有 device:scrap，
+    // 结果「有报废权限的人没有入口、有编辑权限的人反而能报废」。前后端现在按同一码门控。
+    const c = await open(['device:read', 'device:scrap'])
+    expect(rowBtn(c, 0, '报废')).toBeTruthy()
+    expect(btn(c, '编辑')).toBeUndefined()
+    expect(btn(c, '变更状态')).toBeUndefined()
+    expect(c.errors).toEqual([])
   })
 })
 
@@ -847,10 +887,11 @@ describe('DeviceView 变更状态', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('报废行：变更状态与维护入口不渲染（后端必拒的入口不出现）', async () => {
-    const c = await open(FULL, [{ ...ROW, status: 'scrapped' }])
+  test('报废行：变更状态/维护/报废入口不渲染（后端必拒的入口不出现）', async () => {
+    const c = await open([...FULL, 'device:scrap'], [{ ...ROW, status: 'scrapped' }])
     expect(rowBtn(c, 0, '变更状态')).toBeUndefined()
     expect(rowBtn(c, 0, '维护')).toBeUndefined()
+    expect(rowBtn(c, 0, '报废')).toBeUndefined()
     // 编辑/删除不受影响（报废行仍可改资料/删除）
     expect(rowBtn(c, 0, '编辑')).toBeTruthy()
     expect(rowBtn(c, 0, '删除')).toBeTruthy()
@@ -885,6 +926,98 @@ describe('DeviceView 变更状态', () => {
     const c = await open()
     confirm.mockImplementation(() => new Promise(() => {}))
     const b = rowBtn(c, 0, '变更状态')
+    click(b)
+    click(b)
+    await flush(4)
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(c.errors).toEqual([])
+  })
+})
+
+describe('DeviceView 报废', () => {
+  const SCRAP_PERMS = [...FULL, 'device:scrap']
+
+  test('有 device:scrap：确认框收集原因与日期，确认后按两项载荷提交并回表刷新', async () => {
+    const c = await open(SCRAP_PERMS)
+    scrap.mockResolvedValue({ data: { success: true } })
+    const seen = {}
+    confirm.mockImplementation((msg, title, opts) => {
+      expect(typeof msg).toBe('function')
+      const children = msg().children
+      // [说明段落, 原因标签, 原因输入, 日期标签, 日期选择器]
+      seen.reason = children[2]
+      seen.date = children[4]
+      seen.title = title
+      seen.type = opts?.type
+      seen.reason.props['onUpdate:modelValue']('  老化失效  ')
+      seen.date.props['onUpdate:modelValue']('2026-10-01')
+      return Promise.resolve('confirm')
+    })
+    click(rowBtn(c, 0, '报废'))
+    await waitFor(() => scrap.mock.calls.length === 1, { message: '报废请求发出' })
+    expect(seen.title).toBe('报废')
+    expect(seen.type).toBe('warning')
+    expect(seen.reason.props.type).toBe('textarea')
+    expect(seen.date.props.valueFormat).toBe('YYYY-MM-DD')
+    expect(scrap.mock.calls[0][0]).toBe('d1')
+    // 原因去首尾空白后上线；日期走 value-format 的日期串
+    expect(scrap.mock.calls[0][1]).toEqual({
+      scrapReason: '老化失效',
+      scrapDate: '2026-10-01',
+    })
+    expect(ElMessage.success).toHaveBeenCalledTimes(1)
+    await waitFor(() => getList.mock.calls.length === 2, { message: '列表刷新' })
+    await waitFor(() => getStats.mock.calls.length === 2, { message: '概览刷新' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('原因/日期留空：两个键都不发，由服务端落默认值（而不是写一条「未填原因」）', async () => {
+    const c = await open(SCRAP_PERMS)
+    scrap.mockResolvedValue({ data: { success: true } })
+    confirm.mockImplementation((msg) => {
+      const children = msg().children
+      seenReason(children[2])
+      return Promise.resolve('confirm')
+    })
+    function seenReason(input) {
+      input.props['onUpdate:modelValue']('   ')
+      expect(input.props.modelValue).toBe('')
+    }
+    click(rowBtn(c, 0, '报废'))
+    await waitFor(() => scrap.mock.calls.length === 1, { message: '报废请求发出' })
+    expect(scrap.mock.calls[0][1]).toEqual({})
+    expect(c.errors).toEqual([])
+  })
+
+  test('取消确认：不发 scrap、不弹成功、行锁释放', async () => {
+    const c = await open(SCRAP_PERMS)
+    confirm.mockRejectedValue('cancel')
+    click(rowBtn(c, 0, '报废'))
+    await waitFor(() => confirm.mock.calls.length === 1, { message: '确认框弹出' })
+    await flush(10)
+    expect(scrap).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(rowBtn(c, 0, '报废').disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('scrap 失败：不弹成功、行锁释放（错误提示归拦截器）', async () => {
+    const c = await open(SCRAP_PERMS)
+    confirm.mockResolvedValue('confirm')
+    scrap.mockRejectedValue(new Error('boom'))
+    click(rowBtn(c, 0, '报废'))
+    await waitFor(() => scrap.mock.calls.length === 1, { message: '请求发出' })
+    await flush(10)
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(rowBtn(c, 0, '报废').disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('重入：同一 tick 双击只弹一次确认框', async () => {
+    const c = await open(SCRAP_PERMS)
+    confirm.mockImplementation(() => new Promise(() => {}))
+    const b = rowBtn(c, 0, '报废')
     click(b)
     click(b)
     await flush(4)
@@ -966,5 +1099,45 @@ describe('DeviceView 维护登记', () => {
     const submit = dlgFootBtn('确定')
     expect(submit.disabled).toBe(false)
     expect(c.errors).toEqual([])
+  })
+})
+
+describe('DeviceView 实时推送（device-alert 房间）', () => {
+  /** 取本页注册的 notification 处理器（on 的参数第二项） */
+  const notificationHandler = () => {
+    const call = wsOn.mock.calls.find(([event]) => event === 'notification')
+    return call?.[1]
+  }
+
+  test('挂载即加入 device-alert 房间并订阅 notification（他人改状态才能到达本页）', async () => {
+    const c = await open()
+    expect(acquireWs).toHaveBeenCalledTimes(1)
+    expect(wsJoinRoom.mock.calls.map(([room]) => room)).toEqual(['device-alert'])
+    expect(typeof notificationHandler()).toBe('function')
+    expect(c.errors).toEqual([])
+  })
+
+  test('收到 notification 后刷新列表、概览与到期提醒（三块必须一起刷新）', async () => {
+    await open()
+    const handler = notificationHandler()
+    const beforeList = getList.mock.calls.length
+    const beforeStats = getStats.mock.calls.length
+    const beforeReminders = getReminders.mock.calls.length
+    handler({ type: 'notification', notificationType: 'device_status_changed' })
+    await waitFor(() => getList.mock.calls.length > beforeList, { message: '列表被推送刷新' })
+    await waitFor(() => getStats.mock.calls.length > beforeStats, { message: '概览被推送刷新' })
+    await waitFor(() => getReminders.mock.calls.length > beforeReminders, {
+      message: '提醒被推送刷新',
+    })
+  })
+
+  test('卸载时按注册的同一处理器退订、退出房间并释放引用', async () => {
+    const c = await open()
+    const handler = notificationHandler()
+    c.handle.unmount()
+    active = null
+    expect(wsOff.mock.calls).toEqual([['notification', handler]])
+    expect(wsLeaveRoom.mock.calls).toEqual([['device-alert']])
+    expect(releaseWs).toHaveBeenCalledTimes(1)
   })
 })

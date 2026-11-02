@@ -8,8 +8,10 @@
 const { parentPort } = require('worker_threads');
 const bcrypt = require('bcryptjs');
 
+const SUPPORTED_OPS = new Set(['hash', 'compare', 'genSalt']); // 白名单而不是「bcrypt[op] 是函数」：裸下标会放行原型链上的 constructor/toString/hasOwnProperty 等
+
 parentPort.on('message', ({ id, op, args }) => {
-  const fn = bcrypt[op];
+  const fn = SUPPORTED_OPS.has(op) ? bcrypt[op] : null;
   if (typeof fn !== 'function') {
     parentPort.postMessage({ id, ok: false, error: `bcryptjs 不支持的操作：${op}` });
     return;

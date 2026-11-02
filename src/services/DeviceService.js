@@ -33,6 +33,7 @@ const { DEVICE_STATUS } = require('../utils/constants');
 const { withTransaction } = require('../utils/transaction');
 const statsCache = require('./statsCache');
 const deviceStatsService = require('./deviceStatsService');
+const realtimeNotifier = require('./realtimeNotifier');
 
 const VALID_STATUSES = Object.values(DEVICE_STATUS);
 
@@ -263,6 +264,7 @@ class DeviceService {
       throw ApiError.badRequest('报废操作请使用设备报废接口（需提供报废原因）');
     }
 
+    const previousStatus = device.status;
     device.status = status;
 
     // 与生命周期对齐：进入/退出维护态时同步迁移 lifecycleStage。
@@ -281,6 +283,7 @@ class DeviceService {
         logger.info(
           `设备状态已更新：${device.deviceCode} -> ${status}（生命周期 -> ${targetStage}）`
         );
+        realtimeNotifier.notifyDeviceStatusChanged(device, previousStatus);
         return device;
       } catch (err) {
         // 只吞"迁移表不允许"这一种（如 installed → maintenance）：业务上的故障标记
@@ -297,6 +300,7 @@ class DeviceService {
     await device.save();
     statsCache.invalidateDeviceStats('device-status');
     logger.info(`设备状态已更新：${device.deviceCode} -> ${status}`);
+    realtimeNotifier.notifyDeviceStatusChanged(device, previousStatus);
     return device;
   }
 
@@ -373,6 +377,7 @@ class DeviceService {
       }
     }
 
+    const previousStatus = device.status;
     device.status = 'scrapped';
     // 只把"未提交"当成默认值：路由的 scrapReason 校验是
     // mustBeString + optional().trim().isLength({max:200})，**没有 notEmpty**，
@@ -394,6 +399,7 @@ class DeviceService {
 
     logger.info(`设备已报废：${device.deviceCode}`);
     statsCache.invalidateDeviceStats('device-scrap');
+    realtimeNotifier.notifyDeviceStatusChanged(device, previousStatus);
     return device;
   }
 

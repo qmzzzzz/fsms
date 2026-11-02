@@ -19,6 +19,7 @@ const handshake = require('./handshake');
 const lifecycle = require('./lifecycle');
 const sessionRevocation = require('./sessionRevocation');
 const push = require('./push');
+const realtimeNotifier = require('../realtimeNotifier');
 
 class WebSocketService {
   constructor(server) {
@@ -77,6 +78,11 @@ class WebSocketService {
     );
     this.setupEventHandlers();
     this.setupConnectionCleanup();
+
+    // 业务层（AlarmService/DeviceService）经 realtimeNotifier 向本实例推送。
+    // 绑定由实例自身持有：构造即生效、dispose 即解绑，启动/关闭流程都不必再记得调用，
+    // 也不存在「服务已销毁但入口仍指向它」的窗口。
+    realtimeNotifier.setWebSocketService(this);
 
     logger.info('WebSocket 服务已初始化');
   }

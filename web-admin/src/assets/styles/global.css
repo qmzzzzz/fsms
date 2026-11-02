@@ -1448,6 +1448,13 @@ a:hover {
   animation: page-enter 0.4s var(--xf-ease-glass) backwards;
 }
 
+/* 列表页卡片入场统一降级：各视图不再单独声明，由全局承担 */
+@media (prefers-reduced-motion: reduce) {
+  .glass-card {
+    animation: none !important;
+  }
+}
+
 @keyframes page-enter {
   from {
     opacity: 0;
@@ -1642,7 +1649,7 @@ a:hover {
 :root {
   --xf-skeleton-bg: var(--xf-gray-200);
   --xf-skeleton-bg-strong: var(--xf-gray-300);
-  --xf-skeleton-shine: rgba(255, 255, 255, 0.85);
+  --xf-skeleton-shine: rgba(255, 255, 255, 0.55);
   --xf-skeleton-duration: 1.5s;
 }
 
@@ -1673,7 +1680,7 @@ a:hover {
     var(--xf-skeleton-shine) 50%,
     transparent 100%
   );
-  animation: sk-sweep var(--xf-skeleton-duration) var(--xf-ease-standard) infinite;
+  animation: sk-sweep var(--xf-skeleton-duration) linear infinite;
   pointer-events: none;
   will-change: transform;
 }

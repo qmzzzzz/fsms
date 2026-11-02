@@ -496,16 +496,16 @@ onUnmounted(() => {
   animation: page-enter 0.4s var(--xf-ease-glass) both;
 }
 
-.stat-card:nth-child(1) {
+.stat-row > .el-col:nth-child(1) .stat-card {
   animation-delay: 0.05s;
 }
-.stat-card:nth-child(2) {
+.stat-row > .el-col:nth-child(2) .stat-card {
   animation-delay: 0.1s;
 }
-.stat-card:nth-child(3) {
+.stat-row > .el-col:nth-child(3) .stat-card {
   animation-delay: 0.15s;
 }
-.stat-card:nth-child(4) {
+.stat-row > .el-col:nth-child(4) .stat-card {
   animation-delay: 0.2s;
 }
 
@@ -630,14 +630,6 @@ onUnmounted(() => {
 .el-button:active {
   transform: scale(0.97);
   transition: transform 100ms ease-out;
-}
-
-/* 卡片 hover 轻浮起（可中断阴影过渡，无弹跳，克制） */
-.el-card {
-  transition: box-shadow 280ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-.el-card:hover {
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
 }
 
 /* 表格行背景平滑渐变，避免斑马纹/状态色跳变 */

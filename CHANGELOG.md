@@ -8,6 +8,60 @@
 
 ## [未发布]
 
+### 易用性：安全分析工作台——画像 / 撞库 / 取证三合一（2026-11-02）
+
+> 三个安全工具的数据源与粒度不同（画像按单 IP 看窗口聚合、撞库按网段看业务日、
+> 取证看单条请求），后端保持独立；重复的是入口与导航成本，本次只合并读面。
+
+- **新增 `/security-analysis` 工作台**：IP 行为画像、撞库画像、取证溯源以 tab 呈现，
+  共用 `security:audit` 读权限；封段按钮仍由 `security:config` 单独门控，合并入口
+  不放大任何人的写权限。菜单中的三项收敛为「安全分析」一项。
+- **旧深链不失效**：`/forensic-trace`、`/attack-profile`、`/stuffing-profile` 保留为
+  重定向，原有 query 判据原样带进对应 tab（含 `?ip=&fingerprint=&limit=` 等），
+  书签与告警里的链接继续可用；取证页「复制链接」改为生成工作台 URL。
+- **按需加载 + 保活**：未访问过的 tab 不加载对应 chunk；访问过的用 `v-show` 保留
+  查询现场，来回切换不丢结果。tab 写进 URL `?tab=`，刷新/前进后退落回同一工具。
+- **判据不串台**：切 tab 时只保留 `tab` 参数，上一个工具的深链判据不带给下一个工具；
+  取证页的自动查询改为只认 URL 中的判据（而非表单里的旧值），因此纯 tab 变化不会
+  触发一次多余查询。
+- **布局豁免**：`router-view` 默认以 `fullPath` 为 key（同路径不同 query 重挂载），
+  工作台通过 `meta.keepOnQuery` 改为按 `path` 作 key，tab 切换不再重挂整个页面。
+
+用例：`src/tests/views/securityAnalysisView.test.js` 5 条（按需挂载、保活、判据清理、
+非法 tab 回落、路由驱动切换）；`layout.test.js` 新增 `keepOnQuery` 不重挂载用例；
+`forensicTraceView.test.js` 补「换 tab 不触发二次查询」。eslint / vitest 全绿。
+
+### 易用性：取证溯源从「照抄判据」到「点一下就走」（2026-11-02）
+
+> 目标：把这一页最常见的动作（照着结果里的 IP/指纹再敲一遍、每次手填时间、封网段前
+> 看不到明细）从「手输」变成「点选」，同时让「这次结果对应哪组判据」永远可见。
+
+- **一键钻取**：结果区的时间线行、网段分布与聚类表的网段都做成按钮——点 IP/指纹/网段
+  即以**该单一判据**重新溯源（同时清空另外两项，避免旧网段/指纹把结果收窄成空），
+  并滚动到结果卡片顶部（减少动效偏好下不做平滑滚动）。此前这些值只能肉眼抄进表单。
+- **时间快捷范围**：今日 / 近 7 天 / 近 30 天三个预设，选中态随日期区间自动回显；
+  自定义区间时不误亮任何预设。默认仍是近 7 天。
+- **聚类先核实再封禁**：聚类表新增「查看记录」，封禁确认弹层的「先核实再封禁」会用
+  该聚类的统计窗口跳到时间线明细；封禁仍是原有的二次确认，不跳过确认直接封。
+- **深链与判据回显**：`/forensic-trace?ip=…&fingerprint=…&ipSegment=…&since=…&until=…&limit=…`
+  进页自动查询（长度上限、时间范围在查询前统一校验、limit 必须是 1–1000 的整串整数，
+  非法项忽略）；「复制链接」把当前判据生成可分享 URL。结果卡顶部回显**发起本次查询时的
+  判据快照**，而不是表单里正在编辑的值——改到一半时不会误读成「结果就是现在这组条件查的」。
+- **时间线默认最新在前**，可一键切换正序；不再需要滚到底部看最新记录。
+- **边界收口**：查询在途时禁用「重置 / 查看记录 / 先核实」，避免表单已改而结果仍是上一份；
+  聚类 200 空信封判为失败（不再画成「没有网段」）；滚动定位遵循 `prefers-reduced-motion`，
+  结果卡预留固定头高度。
+
+**截断语义修正**（`src/services/forensicTrace.js`）：面板与导出一直承诺「最近 N 条」，
+但 `traceTimeline` 原先是 `sort(createdAt: 1).limit(N)`——limit 时返回的是**最旧 N 条**。
+现改为按时间倒序取数、返回前再翻回正序（时间线仍按时间轴展示）；新增用例钉住
+`sort({ createdAt: -1 })` 与输出正序两侧，防止语义再次反转。
+
+用例：`web-admin/src/tests/views/forensicTraceView.test.js` 50 条（新增 15 条，覆盖预设、
+钻取、聚类核实、深链、回显、复制链接与在途禁用）；`src/tests/services/forensicTraceExport.test.js`
+34 条（新增 1 条）。eslint / prettier / `npm run build:budget` 全绿（entryJsGzip 210248 B，
+余量 10752 B）。
+
 ### 移除：零消费死代码 `rbac.checkRole` 及其两个孤立错误码（审计 C-F5）（2026-11-02）
 
 > 提交 `2ed3067`。这段叙事原先以 3 行"墓碑注释"的形式留在 `src/utils/errorCodes.js` 的
@@ -52,7 +106,7 @@ errorCodeI18n + localeKeyParity 19 用例全绿（zh/en 键奇偶不受影响）
 - **外层签名（信任链第三层）**：签的是**归档 sha256 的 hex 文本**（64 字节），不是归档
   本身——Ed25519 是 one-shot 签名，GB 级归档整包签必 OOM，而 OOM 在现场表现为
   「构建进程被杀」。三层链：`归档 .sig → 归档 sha256 → manifest.sig → manifest 字节
-  → payload sha256`，覆盖了 ADR-019 覆盖不到的部分（解包前的归档本身）。
+→ payload sha256`，覆盖了 ADR-019 覆盖不到的部分（解包前的归档本身）。
 - **落位（inbox → bundles，全自动）**：新增
   `offlineBundleIntakePolicy.js`（纯判据，44 例测试）、`offlineBundleIntake.js`
   （编排）、`offlineBundleIntakeExec.js`（子进程收口）。代理每轮最多落位**一个**包，

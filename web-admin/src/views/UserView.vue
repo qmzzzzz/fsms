@@ -214,10 +214,21 @@
             </el-tag>
           </template>
         </el-table-column>
-        <!-- 列宽预算：主内容区 1440-220(侧栏)-48(边距)=1172px，
-             全列合计须 ≤1172，否则固定列被推出视口（实测曾溢出 115px）。
-             新增「锁定/解锁」入口后为容纳第五个行内按钮，操作列 230→300，
-             其余列相应收窄以维持总预算不变 -->
+        <!-- 最后登录：接口已返回并在排序白名单内，此前列表未展示，管理员无从判断僵尸账号 -->
+        <el-table-column :label="$t('user.lastLoginAt')" width="160">
+          <template #default="{ row }">
+            {{ row.lastLoginAt ? formatTime(row.lastLoginAt) : '-' }}
+          </template>
+        </el-table-column>
+        <!-- 备注：锁定/解锁等操作原因写在这里，列表可见才不必逐行点开编辑 -->
+        <el-table-column :label="$t('user.remark')" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.remark || '-' }}
+          </template>
+        </el-table-column>
+        <!-- 列宽预算：主内容区 1440-220(侧栏)-48(边距)=1172px。
+             新增「最后登录 / 备注」两列后合计超出该预算，1440 视口下表格横向滚动；
+             操作列 fixed="right" 仍常驻，宽屏下由 user/remark 弹性列吸收余量。 -->
         <el-table-column :label="$t('common.operation')" width="300" fixed="right">
           <template #default="{ row }">
             <button
@@ -555,6 +566,7 @@ import { Search, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api, isCanceledError, isHandledApiError } from '@/utils/api'
+import { formatTime } from '@/utils/datetime'
 import { useListLoadState } from '@/composables/useListLoadState'
 import { encryptPassword } from '@/utils/loginCipher'
 import { passwordStrengthRule } from '@/utils/password'
@@ -1304,6 +1316,12 @@ const submitForm = async () => {
     }
     // 邮箱与手机号同口径：编辑框不回填展示值，留空=不修改（服务端以键缺失判定）；
     // 创建时必填校验保证这里非空。
+    //
+    // 为何 email 用「非空即发」而没有 phone 那样的 baseline（WF-03 复核，2026-11-02）：
+    // email 无「揭示明文」能力，状态空间只有两态——空（不改）/有值（改为它），
+    // 「非空即发」恰好等价于这个空间；phone 多一档「揭示后删空=真的清空」，
+    // 才需要 baseline 区分「没动」与「删空」（见下方注释）。两者差异是能力
+    // 差异的映射，不是两套判据的不一致。
     if (!dialog.isEdit || dialog.form.email) {
       payload.email = dialog.form.email
     }

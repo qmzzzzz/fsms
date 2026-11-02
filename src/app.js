@@ -65,7 +65,7 @@ const { getTransactionTopology, transactionReadinessBlocker } = require('./utils
 const swagger = require('./config/swagger');
 const { verifyBuildPin: verifyLoginKeyPin } = require('./utils/loginCipher');
 
-// 导入路由
+// 导入路由（routeMounts 按变量解构识别挂载前缀）
 const {
   authRoutes,
   userRoutes,
@@ -79,6 +79,8 @@ const {
   versionRoutes,
   wellKnownRoutes,
   avatarRoutes,
+  stuffingProfileRoutes,
+  attackProfileRoutes,
 } = require('./routes');
 
 const sentryInitialized = initSentry();
@@ -538,8 +540,10 @@ function installRoutes(app) {
   app.use('/api/inspections', inspectionRoutes);
   app.use('/api/reports', reportRoutes);
   app.use('/api/security', securityRoutes);
-  const stuffingProfileRoutes = require('./routes/stuffingProfileRoutes'); // 同前缀，见 index.js
-  app.use('/api/security', stuffingProfileRoutes); // 走就近 require：顶部加行会漂移已登记的行号锚点
+
+  app.use('/api/security', stuffingProfileRoutes); // 撞库画像：与审计列表同权限面
+  // 攻击行为画像：鉴权链先写入 req.user，取数层再按数据范围收窄
+  app.use('/api/security', attackProfileRoutes);
 
   // API 文档（Swagger UI）— 生产环境默认关闭，可通过 ENABLE_API_DOCS=true 开启
   // 开启后可通过 DOCS_USERNAME / DOCS_PASSWORD 设置 Basic Auth 保护
@@ -582,9 +586,7 @@ function installStaticAndErrorHandling(app) {
   });
 
   // Sentry 错误处理器（在通用 errorHandler 之前）
-  if (sentryInitialized) {
-    app.use(sentryErrorHandler());
-  }
+  if (sentryInitialized) app.use(sentryErrorHandler());
 
   // 全局错误处理
   app.use(errorHandler);
@@ -600,9 +602,8 @@ function installStaticAndErrorHandling(app) {
  * @returns {express.Application}
  */
 function createApp() {
-  // S-2：镜像带构建期公钥指纹时，启动即校验运行密钥是否与之匹配。
-  // 未钉扎（本地开发）时为空操作；不匹配直接抛错，避免「前端只认另一把公钥」
-  // 的镜像上线后所有登录才集体失败。
+  // S-2：镜像带构建期公钥指纹时，启动即校验运行密钥是否与之匹配。未钉扎（本地开发）时
+  // 为空操作；不匹配直接抛错，避免「前端只认另一把公钥」的镜像上线后所有登录才集体失败。
   verifyLoginKeyPin();
 
   const app = express();

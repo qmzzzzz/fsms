@@ -164,6 +164,11 @@ const EXEMPT_MODULES = {
     'MASKED_HEADERS / CREDENTIAL_URL_HEADERS，静态字面量 Set（头脱敏判据词表），只读、无跨进程语义',
   'services/websocketService/inboundThrottle.js':
     'buckets: Map<Socket, {count, windowStart}>，状态绑定单条 Socket 连接、只存在于单进程，无跨实例语义',
+  'models/auditLogSanitizer.js':
+    'CREDENTIAL_HEADER_NAMES / URL_HEADER_NAMES，静态字面量 Set（头脱敏判据词表），只读',
+  'services/attackProfileSummary.js':
+    'ACCOUNT_FAILURE_ACTIONS，静态字面量 Set（登录失败动作词表），只读',
+  'utils/bcryptWorkerThread.js': 'SUPPORTED_OPS，静态字面量 Set（worker 操作白名单），只读',
 };
 
 /** 递归收集 src 下全部非测试 .js 文件 */

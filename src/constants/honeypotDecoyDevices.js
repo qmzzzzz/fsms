@@ -44,9 +44,16 @@ const DECOY_DEVICES = frozenRows([
     lastCheckDateOffsetMin: 60 * 74,
     nextCheckDateOffsetMin: 60 * 2,
     expiryDateOffsetMin: 60 * 24 * 3,
-    maintenanceRecord: [],
+    maintenanceRecord: [
+      {
+        dateOffsetMin: 60 * 70,
+        type: 'repair',
+        content: '探测腔积尘清洗，更换防虫网',
+        operator: 'hp-u5',
+      },
+    ],
     inspectionRecord: [],
-    maintenanceRecordCount: 0,
+    maintenanceRecordCount: 1,
     qrCode: 'QR:SD-A1-027',
     images: [],
     remark: '探测腔积尘，已报修待更换',

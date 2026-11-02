@@ -96,9 +96,9 @@ const getExportSheetName = (type, lang) =>
 // 模型 + 排序 + populate + 字段裁剪配置（选择投影在查询阶段生效）
 //
 // 排序必须是**全序**，且与对应列表接口同序——这是仓库既有不变式，不是新约定：
-// FireAlarm.js:242 / Inspection.js:187 / AuditLog.js:324-331 三处都写明"排序键取值可重复
+// FireAlarm.js:242 / Inspection.js:187 / AuditLog.js:343-350 三处都写明"排序键取值可重复
 // ⇒ 必须有同向 `_id` 次级键"，并为此建了 `{key:-1,_id:-1}` 索引；列表侧
-// AlarmService.js:120、InspectionService.js:146、auditQueryService.js:154 用的就是它。
+// AlarmService.js:121、InspectionService.js:146、auditQueryService.js:154 用的就是它。
 // 导出原先只写 `{occurredAt:-1}` / `{planStartTime:-1}` / `{timestamp:-1}`，于是：
 //   1. 同一毫秒内的并列行由查询计划决定先后 ⇒ 撞上限时"前 5000 行"取到哪一批
 //      不确定，同一条筛选重跑两次可以给出两份不同的合规材料；
@@ -318,11 +318,11 @@ const createSafeTransform =
     const row = transform(item, options);
     for (const key of Object.keys(row)) {
       // 空值占位符是唯一被放行的 `-` 开头文本：它不是外部输入，没有注入面。
-      // 放行的理由实测过——exceljs 把 `'=1+1'` 这类字符串存成 type=3（String）、
-      // formula=undefined，即 xlsx 的单元格是**带类型的文本**，Excel 打开时不会求值，
+      // 放行的理由实测过——写入器（utils/xlsxWriter）把**每个**单元格都写成共享字符串
+      // （`t="s"`），即单元格是**带类型的文本**、没有 `<f>` 公式节点，Excel 打开时不会求值，
       // 那个前导单引号只会原样显示出来。于是一条没有 success/duration 字段的审计记录
-      // （suspicious_report、非常规时间登录等直写点）在合规文件里显示成 `'-`，
-      // 而 CSV 侧同一条记录显示成空 —— 两份材料不一致，占位符还被污染成看起来像 bug 的串。
+      // （suspicious_report、非常规时间登录等直写点）在合规文件里显示成 `'-`，而 CSV 侧
+      // 同一条记录显示成空 —— 两份材料不一致，占位符还被污染成看起来像 bug 的串。
       // 真实数据一律照旧加固：单引号断的是"xlsx 另存为 CSV 再导入"那一跳
       // （CSV 无类型，`-2+3` 会被 Excel 当公式求值）。
       if (row[key] !== EXPORT_NO_VALUE) row[key] = sanitizeSpreadsheetCell(row[key]);

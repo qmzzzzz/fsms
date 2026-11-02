@@ -27,7 +27,7 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '../../..');
-const { intakeOne } = require('../../../scripts/offlineBundleIntake');
+const { intakeOne, listInboxCandidates } = require('../../../scripts/offlineBundleIntake');
 const { signManifestBytes } = require('../../../scripts/offlineBundleSignature');
 const { sha256File } = require('../../../scripts/importOfflineBundle');
 const intakePolicy = require('../../../scripts/offlineBundleIntakePolicy');
@@ -176,11 +176,54 @@ describe('落位：成功路径', () => {
     expect(fs.existsSync(path.join(landed, 'EXTRA-SHOULD-NOT-LAND'))).toBe(false);
     // staging 不残留
     expect(fs.readdirSync(ctx.bundles).filter((n) => n.startsWith('.staging-'))).toEqual([]);
+    // 落位成功后归档（及外层签名）必须移出 inbox，否则下一轮仍选中它（inbox 不前进）
+    expect(fs.existsSync(ctx.archive)).toBe(false);
+    expect(fs.existsSync(`${ctx.archive}.sig`)).toBe(false);
+    expect(fs.readdirSync(path.join(ctx.inbox, '.processed')).sort()).toEqual([
+      'v1.2.3.tar.gz',
+      'v1.2.3.tar.gz.sig',
+    ]);
   });
+
+  maybe(
+    'inbox 前进：落位第一个包后，后续包在下一轮轮到自己（不被 aborted_target_exists 卡死）',
+    () => {
+      const ctx = makeArchive();
+      // 第二个同名风格的包（内容相同、版本名不同即可）
+      const secondArchive = path.join(ctx.inbox, 'v1.2.4.tar.gz');
+      fs.copyFileSync(ctx.archive, secondArchive);
+      fs.copyFileSync(`${ctx.archive}.sig`, `${secondArchive}.sig`);
+      const old = new Date(Date.now() - 300000);
+      fs.utimesSync(secondArchive, old, old);
+
+      expect(listInboxCandidates(ctx.inbox)).toEqual([
+        path.join(ctx.inbox, 'v1.2.3.tar.gz'),
+        path.join(ctx.inbox, 'v1.2.4.tar.gz'),
+      ]);
+      expect(
+        intakeOne({ ...baseArgs(ctx), archivePath: listInboxCandidates(ctx.inbox)[0] }).ok
+      ).toBe(true);
+      expect(listInboxCandidates(ctx.inbox)).toEqual([path.join(ctx.inbox, 'v1.2.4.tar.gz')]);
+      const second = intakeOne({
+        ...baseArgs(ctx),
+        archivePath: listInboxCandidates(ctx.inbox)[0],
+      });
+      expect(second).toMatchObject({ ok: true, dirName: 'v1.2.4' });
+      expect(fs.existsSync(path.join(ctx.bundles, 'v1.2.3'))).toBe(true);
+      expect(fs.existsSync(path.join(ctx.bundles, 'v1.2.4'))).toBe(true);
+    }
+  );
 
   maybe('不覆盖：同名目标已存在即拒绝（与 build 脚本的拒绝覆盖同纪律）', () => {
     const ctx = makeArchive();
     expect(intakeOne(baseArgs(ctx)).ok).toBe(true);
+    // 归档已被消费移走；放回复现「同名目标目录已存在」的重试场景
+    const processed = path.join(ctx.inbox, '.processed');
+    for (const name of ['v1.2.3.tar.gz', 'v1.2.3.tar.gz.sig']) {
+      fs.copyFileSync(path.join(processed, name), path.join(ctx.inbox, name));
+    }
+    const old = new Date(Date.now() - 300000);
+    fs.utimesSync(ctx.archive, old, old);
     const second = intakeOne(baseArgs(ctx));
     expect(second).toMatchObject({ ok: false, outcome: 'aborted_target_exists' });
     expect(second.reason).toMatch(/拒绝覆盖/);

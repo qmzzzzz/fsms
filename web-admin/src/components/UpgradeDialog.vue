@@ -120,7 +120,11 @@
             {{ t('about.upgrade.offlineNone') }}
           </div>
           <!-- 有归档已传完但还没落位（代理每轮最多落一个）：解释「为什么传了却没出现」 -->
-          <div v-if="intakePending.length" class="upgrade-field-hint" data-testid="upgrade-intake-pending">
+          <div
+            v-if="intakePending.length"
+            class="upgrade-field-hint"
+            data-testid="upgrade-intake-pending"
+          >
             {{ t('about.upgrade.intakePending', { count: intakePending.length }) }}
           </div>
           <!-- 落位失败：把原因摆出来（否则运维只知道「传了但没出现」） -->

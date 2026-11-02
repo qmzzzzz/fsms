@@ -245,9 +245,9 @@ const guardSegmentWrite = async (req, res, { normalizedIP, type, typedConfirm })
  * 于是两条都通过 guardFullRangeCIDR 并都落库，事后并集铺满整个 IPv6 —— 与 /0 等价（全站拒服 +
  * 管理员自锁），而非内置超管本不该有这个能力。顺序提交时第二条会被正确拒绝，所以串行测试看不见它。
  *
- * 这里在**写入之后**再算一次并集：若此刻覆盖整族且操作者不是内置超管，就删掉本次刚写入的那一条
- * （只按自己的 _id 回滚，不碰别人的条目）并回 403。两方同时发现时各回滚各的，最终为空 —— 过度回滚
- * 的方向是安全侧：宁可两条都不留，也不能让整族被铺满。
+ * 这里在**写入之后**再算一次并集：若此刻覆盖整族且操作者不是内置超管，就把**本次写入**回滚掉并回 403。
+ * 「本次写入」按 blockIP 的 created 判据（`$locals.created === true`，与 pool-ban 侧 F-25-8 同一口径）：命中
+ * 他人既有条目的重复写不是本次写入，删它＝被拒的操作静默解除既有封禁 ⇒ 只留痕 403、不动他人条目。
  *
  * 残留窗口（如实记录）：从本次 blockIP 落库到 removeEntry 落库之间（毫秒级，且要求两个请求恰好落在
  * 同一窗口），期间该族对新请求表现为全覆盖；进程若在两步之间崩溃，条目会残留（需靠人工/对账收敛）。
@@ -259,13 +259,17 @@ const enforceConcurrentUnionGuard = async (req, { normalizedIP, type, entry }) =
   if (coveredFamilies.length === 0) return;
   if (await ipListService.operatorIsSuperAdmin(req.user.userId)) return;
 
-  if (entry && entry._id) await ipListService.removeEntry(entry._id, type);
+  const created = Boolean(entry && entry.$locals && entry.$locals.created === true); // 只有本次新建的条目才归本次回滚（blockIP 的 $locals.created，口径同 pool-ban 侧 F-25-8）
+  const skippedExisting = entry && entry._id && !created ? 1 : 0; // 命中他人既有条目时不动它：删它=被拒的操作静默解除既有封禁
+  if (created) await ipListService.removeEntry(entry._id, type);
+  const outcome = created ? '已回滚本次写入' : '本次未新建条目，未回滚（既有条目原样保留）';
   const scope = coveredFamilies.join('/');
-  logger.warn('并发写入铺满地址族，已回滚本次写入', {
+  logger.warn(`并发写入铺满地址族，${outcome}`, {
     ip: normalizedIP,
     type,
     coveredFamilies,
     operator: req.user.username,
+    skippedExisting,
   });
   ipListService.recordPrivilegeEscalation({
     action: 'privilege_escalation',
@@ -276,18 +280,18 @@ const enforceConcurrentUnionGuard = async (req, { normalizedIP, type, entry }) =
     path: auditPath(req),
     ...auditClientAddress(req),
     userAgent: req.get('user-agent'),
-    body: { ip: normalizedIP, type },
+    body: { ip: normalizedIP, type, skippedExisting },
     success: false,
     riskLevel: 'critical',
     riskFactors: ['full_range_cidr_concurrent_bypass'],
-    reason: `并发写入 ${normalizedIP} 后${type === 'black' ? '黑' : '白'}名单并集覆盖全部 ${scope} 地址，已回滚本次写入；仅超级管理员可配置全网段`,
+    reason: `并发写入 ${normalizedIP} 后${type === 'black' ? '黑' : '白'}名单并集覆盖全部 ${scope} 地址，${outcome}；仅超级管理员可配置全网段`,
   });
   // 抛错而不是自己写响应：控制器里就能是「一条 await」，不给 addIPEntry 增加分支
   // （该函数复杂度已贴 eslint complexity=15 棘轮）。err.code ⇒ errors.errorCode 由 errorHandler 统一映射。
   throw new ApiError(
-    `并发写入后，名单中的网段组合将覆盖全部 ${scope} 地址，本次写入已回滚；仅超级管理员可配置全网段`,
+    `并发写入后，名单中的网段组合将覆盖全部 ${scope} 地址，${outcome}；仅超级管理员可配置全网段`,
     403,
-    { ip: normalizedIP },
+    { ip: normalizedIP, skippedExisting },
     'FULL_RANGE_FORBIDDEN'
   );
 };

@@ -10,6 +10,7 @@ const { validatePasswordStrength } = require('../../utils/helpers');
 const { matchesHistory, withPrevious, HISTORY_DEPTH } = require('../../utils/passwordHistory');
 const { invalidateUserTokens } = require('../../middleware/tokenBlacklist');
 const bcryptWorker = require('../../utils/bcryptWorkerPool');
+const config = require('../../config');
 const { decryptLoginCredential } = require('../../utils/loginCipher');
 const sessionService = require('../sessionService');
 const initialPasswordFile = require('../initialPasswordFile');
@@ -199,14 +200,36 @@ async function changeUserPassword(userId, body, ctx) {
   // "用户自己定期换"和"临时口令完成首改"）。
   const wasForced = user.mustChangePassword === true;
 
-  user.password = next.value;
-  user.passwordChangedAt = new Date();
-  user.passwordSetAt = new Date();
-  user.mustChangePassword = false;
+  // 先算新摘要，再用「旧摘要仍一致」作为条件做原子更新。
+  // 无条件 save() 会在并发时造成 lost update：管理员重置写入临时口令后，
+  // 用户侧这条 save 把管理员的处置覆盖回自己已知的新口令（重置被静默抵消）；
+  // 同一旧口令的双击重试也会后写覆盖先写，而两次都记成功审计。
+  // 条件里带旧摘要：期间的任何一方改过口令，本次更新就落空，由下方统一判冲突。
+  const newPasswordHash = await bcryptWorker.hash(next.value, config.bcryptRounds);
   // 记的是**刚被替换掉的旧口令**：本次比较发生在写入之前，检查对象是
   // 「候选新口令 vs 既往口令」。当前口令由上面的 SAME_PASSWORD 单独判。
   user.passwordHistory = withPrevious(user.passwordHistory, current.value);
-  await user.save();
+  const now = new Date();
+  const updated = await User.findOneAndUpdate(
+    { _id: user._id, password: user.password },
+    {
+      $set: {
+        password: newPasswordHash,
+        passwordChangedAt: now,
+        passwordSetAt: now,
+        mustChangePassword: false,
+        passwordHistory: user.passwordHistory,
+      },
+    },
+    { new: true }
+  );
+  if (!updated) {
+    // 条件落空 = 读取之后有人改过口令（管理员重置 / 并发改密）。
+    // 不回 OK：本次提交的新口令并未生效；也不能回 500，这是可预期的并发结果。
+    const fresh = await User.findById(userId).select('_id').lean();
+    logger.warn('改密中止 - 口令在读取后被并发变更', { username: ctx.username });
+    return { outcome: fresh ? 'CURRENT_WRONG' : 'USER_NOT_FOUND' };
+  }
 
   // 口令已变 ⇒ 初始口令作废；即使随后的会话吊销失败也必须销毁该文件
   initialPasswordFile.consume(user.username, '修改密码');

@@ -355,12 +355,12 @@ router.delete(
 /**
  * @route   PUT /api/devices/:id/scrap
  * @desc    设备报废
- * @access  Private [device:update]
+ * @access  Private [device:scrap]
  */
 router.put(
   '/:id/scrap',
   authenticate,
-  checkPermission('device:update'),
+  checkPermission('device:scrap'),
   mongoIdParamValidation,
   scrapDeviceValidation,
   deviceController.scrapDevice

@@ -49,13 +49,15 @@
     "max-lines": 1
   },
   "src/models/IPBlacklist.js": {
-    "max-lines": 1,
     "complexity": 1
   },
   "src/models/User.js": {
     "max-lines": 1
   },
   "src/routes/securityRoutes.js": {
+    "max-lines": 1
+  },
+  "src/services/AlarmService.js": {
     "max-lines": 1
   },
   "src/services/auditAnchorSink.js": {
@@ -86,25 +88,25 @@
     "complexity": 1
   },
   "__lineCounts": {
-    "scripts/auditCountAssertionScan.js": 442,
+    "scripts/auditCountAssertionScan.js": 307,
     "scripts/deployPolicy.js": 352,
-    "scripts/hotUpgradeJob.js": 319,
     "scripts/hotUpgrade.js": 407,
+    "scripts/hotUpgradeJob.js": 319,
     "scripts/hotUpgradeQueue.js": 322,
     "scripts/migrate-pii-encryption.js": 308,
     "scripts/offlineBundleIntake.js": 496,
     "src/config/validate.js": 351,
     "src/controllers/roleController.js": 304,
-    "src/docs/generate.js": 1419,
+    "src/docs/generate.js": 1463,
     "src/middleware/idempotency.js": 322,
     "src/middleware/rateLimit.js": 389,
-    "src/models/IPBlacklist.js": 369,
-    "src/models/User.js": 602,
-    "src/routes/securityRoutes.js": 372,
+    "src/models/User.js": 301,
+    "src/routes/securityRoutes.js": 382,
+    "src/services/AlarmService.js": 306,
     "src/services/auditBuffer.js": 308,
     "src/services/sessionService.js": 316,
     "src/services/upgradeService.js": 514,
-    "src/utils/errorCodes.js": 912,
+    "src/utils/errorCodes.js": 908,
     "src/utils/metrics.js": 307
   }
 }

@@ -859,9 +859,6 @@ const ERROR_CODES = {
     status: 500,
     message: '权限验证过程出错',
   },
-  // ROLE_NOT_ALLOWED / ROLE_CHECK_FAILED 已随 rbac.checkRole 死代码删除一并摘除
-  // （审计 2026-11-02 C-F5：全仓零路由消费，角色口径的唯一实现是 authenticate 的
-  // roleCodes + checkPermission；前端 i18n 映射与两个语言键同步摘除）
   REAUTH_REQUIRED: {
     status: 403,
     message: '敏感操作需要重新验证身份，请提供当前密码或 MFA 验证码',
@@ -947,6 +944,10 @@ const ERROR_CODES = {
   AUDIT_QUERY_FAILED: {
     status: 500,
     message: '审计日志查询失败',
+  },
+  AUDIT_LOG_NOT_FOUND: {
+    status: 404,
+    message: '审计日志不存在',
   },
   FULL_RANGE_FORBIDDEN: {
     status: 403,

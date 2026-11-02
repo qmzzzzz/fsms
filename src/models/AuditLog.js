@@ -124,6 +124,29 @@ const auditLogSchema = new mongoose.Schema(
       type: Object,
       default: {},
     },
+    // 请求/响应头的脱敏副本（含响应正文）：审计详情页的溯源材料。
+    // 刻意不设 default——缺省即"未采集"，与空对象可区分；哈希载荷对 undefined 归一为 null，
+    // 与落库后缺失该键的形态一致（见 utils/auditChainPayload 的 normalizeValue）。
+    // 体积上限与脱敏规则在 models/auditLogSanitizer（sanitizeAuditHeaders /
+    // sanitizeAuditResponseBody），此处只声明类型；列表/导出投影见 RESPONSE_EXCLUDE。
+    requestHeaders: {
+      type: Object,
+    },
+    responseHeaders: {
+      type: Object,
+    },
+    responseBody: {
+      type: mongoose.Schema.Types.Mixed,
+    },
+    responseBodyTruncated: {
+      type: Boolean,
+    },
+    // 未采集到正文的原因（stream/empty/binary/unserializable）；不设 enum——
+    // 将来新增形态若被 enum 拒绝，整条审计会在 insertMany({ordered:false}) 里静默消失。
+    responseBodySkipped: {
+      type: String,
+      maxlength: 32,
+    },
 
     // 响应信息
     statusCode: {
@@ -334,7 +357,19 @@ auditLogSchema.index({ timestamp: -1, _id: -1 });
 const { RETENTION_SECONDS } = require('../constants/retention');
 auditLogSchema.index({ timestamp: -1 }, { expireAfterSeconds: RETENTION_SECONDS });
 
-const RESPONSE_EXCLUDE = ['-body', '-params', '-query', '-hmac'].join(' ');
+const RESPONSE_EXCLUDE = [
+  '-body',
+  '-params',
+  '-query',
+  '-hmac',
+  // 详情字段（头袋/响应正文）只由 GET /audit-logs/:id 单条读取：
+  // 列表一页 20 条各带 8KB 正文会让审计页响应膨胀、也让日常筛选付出无谓的传输成本。
+  '-requestHeaders',
+  '-responseHeaders',
+  '-responseBody',
+  '-responseBodyTruncated',
+  '-responseBodySkipped',
+].join(' ');
 applyWriteStatics(auditLogSchema);
 applyQueryStatics(auditLogSchema, RESPONSE_EXCLUDE);
 auditLogSchema.statics.RESPONSE_EXCLUDE = RESPONSE_EXCLUDE;

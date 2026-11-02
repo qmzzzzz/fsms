@@ -213,8 +213,30 @@ const verifyAuditChainIntegrity = asyncHandler(async (req, res) => {
   );
 });
 
+/**
+ * 单条审计详情（GET /api/security/audit-logs/:id）
+ *
+ * 列表接口的 RESPONSE_EXCLUDE 刻意排除 body/params/query 与头袋/响应正文，
+ * 详情页原先只能复用列表行 ⇒ 请求体永远显示 "-"。本端点按 _id 单条读取完整文档，
+ * 是审计详情页唯一的数据来源。数据范围与列表同一口径（applyAuditDataScope）：
+ * 越权点查与不存在同样返回 404，不泄露"这条记录存在但你看不到"。
+ */
+const getAuditLogDetail = asyncHandler(async (req, res) => {
+  let query = { _id: req.params.id };
+  ({ query } = await applyAuditDataScope(query, req.user.userId));
+  const doc = await AuditLog.findOne(query)
+    .populate('userId', 'username realName')
+    // hmac 是服务端完整性签名的副产物，对前端溯源没有价值；hash/prevHash 保留供详情页展示。
+    .select('-hmac -__v')
+    .lean();
+  if (!doc) return ApiResponse.codeError(res, 'AUDIT_LOG_NOT_FOUND');
+  doc.location = require('../services/ipLocationService').locate(doc.ip);
+  return ApiResponse.success(res, doc, '获取成功');
+});
+
 module.exports = {
   queryAuditLogs,
   exportAuditLogs,
   verifyAuditChainIntegrity,
+  getAuditLogDetail,
 };

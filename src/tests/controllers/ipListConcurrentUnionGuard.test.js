@@ -205,6 +205,79 @@ describe('ipListController 并发并集绕过', () => {
     expect(await activeEntryIps()).toEqual(['203.0.113.0/24']);
   });
 
+  test('F-25-8 镜像面：非超管重复写既有条目 + 互补半族并发落库 ⇒ 不得删他人条目', async () => {
+    const ipListService = require('../../services/ipListService');
+    const third = await IPBlacklist.blockIP('::/1', {
+      reason: '第三方-既有封禁',
+      source: 'manual',
+      durationMs: 0,
+    });
+    const thirdId = String(third._id);
+    const removeSpy = jest.spyOn(ipListService, 'removeEntry');
+    const realList = ipListService.listActiveEntryIps.bind(ipListService);
+    let reads = 0;
+    // 只对齐时序、不伪造列表：第 2 次读（后置复检）之前让「超管的互补半族」真实落库
+    const spy = jest.spyOn(ipListService, 'listActiveEntryIps').mockImplementation(async (type) => {
+      reads += 1;
+      if (reads === 2) {
+        await IPBlacklist.blockIP('8000::/1', {
+          reason: 'S-超管补另一半',
+          source: 'manual',
+          durationMs: 0,
+        });
+      }
+      return realList(type);
+    });
+
+    const res = await secPost({
+      ip: '::/1',
+      type: 'black',
+      reason: 'A-重复',
+      typedConfirm: '::/1',
+    });
+    const removedCalls = removeSpy.mock.calls.map((c) => [String(c[0]), c[1]]); // 必须在 mockRestore 之前取走：restore 会清空 mock.calls
+    spy.mockRestore();
+    removeSpy.mockRestore();
+
+    const after = await IPBlacklist.find({ type: 'black' }).lean();
+    // _id 对照：本次请求不得调用任何回滚；修前这里会收到 [[thirdId, 'black']]（删的正是第三方的行）
+    expect(removedCalls).toEqual([]);
+    expect(res.status).toBe(403);
+    expect(res.body.errors.errorCode).toBe('FULL_RANGE_FORBIDDEN');
+    // 他人既有条目必须原样在库（修前：被 entry._id 这次回滚删掉 ⇒ 本行红）
+    expect(after.some((e) => String(e._id) === thirdId)).toBe(true);
+    expect(after.map((e) => e.ip).sort()).toEqual(['8000::/1', '::/1']);
+  });
+
+  test('反向对照：本次新建的条目仍必须被回滚（跳过口径不得变成「永不回滚」）', async () => {
+    const ipListService = require('../../services/ipListService');
+    const realList = ipListService.listActiveEntryIps.bind(ipListService);
+    let reads = 0;
+    const spy = jest.spyOn(ipListService, 'listActiveEntryIps').mockImplementation(async (type) => {
+      reads += 1;
+      if (reads === 2) {
+        await IPBlacklist.blockIP('8000::/1', {
+          reason: 'S-补另一半',
+          source: 'manual',
+          durationMs: 0,
+        });
+      }
+      return realList(type);
+    });
+
+    const res = await secPost({
+      ip: '::/1',
+      type: 'black',
+      reason: 'A-新建',
+      typedConfirm: '::/1',
+    });
+    spy.mockRestore();
+
+    expect(res.status).toBe(403);
+    // 只剩他人的那条：本次新建的 ::/1 已按 created=true 回滚
+    expect((await activeEntryIps()).sort()).toEqual(['8000::/1']);
+  });
+
   afterAll(async () => {
     // 本套件自建连接自己关：mongodb-memory-server 是全仓共享的同一个 mongod，漏关会留下
     // hasRef 的 Socket，jest-worker 到点强杀该 worker 并连带吞掉本套件输出（见

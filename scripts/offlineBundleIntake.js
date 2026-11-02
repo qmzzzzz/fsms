@@ -52,6 +52,7 @@ const bundlePolicy = require('./offlineBundlePolicy');
 const { verifyManifestBytes } = require('./offlineBundleSignature');
 const { sha256File } = require('./importOfflineBundle');
 const intakeExec = require('./offlineBundleIntakeExec');
+const intakeArchive = require('./offlineBundleIntakeArchive');
 const { buildImportBundleInvocation } = require('./deployCommands');
 
 /**
@@ -128,7 +129,7 @@ function verifyArchiveSignature(archivePath, pubkeyFile) {
       reason: `验签公钥不可读（--pubkey-file / OFFLINE_BUNDLE_VERIFY_PUBKEY）：${err.code || err.message}`,
     };
   }
-  const sigPath = signaturePathOf(archivePath);
+  const sigPath = intakeArchive.signaturePathOf(archivePath);
   let sigBytes;
   try {
     sigBytes = fs.readFileSync(sigPath);
@@ -267,8 +268,7 @@ function readStability(file, settleSec) {
   return { ...verdict, size: statB.size };
 }
 
-/** 外层签名的路径：归档名 + .sig（`pkg.tar.gz` → `pkg.tar.gz.sig`） */
-const signaturePathOf = (archivePath) => `${archivePath}${'.sig'}`;
+/** 外层签名的路径与消费后的归档去向见 offlineBundleIntakeArchive.js（单一来源） */
 
 /**
  * 从环境读静默期（与 hotUpgradeQueue.loadConfig 的同一变量、同一区间）。
@@ -575,6 +575,9 @@ function intakeOne({
     return finish('aborted_promote_failed', `落位 rename 失败：${err.message}`);
   }
   state.finalDir = dirName;
+
+  // 7. 消费归档：不移走的话下一轮仍选它，目标已存在 ⇒ 后续包永远轮不到（见 offlineBundleIntakeArchive.js）
+  intakeArchive.consumeAfterPromote({ archive, state, step, warn, dirMode: DIR_MODE });
   return finish('success');
 }
 
@@ -683,7 +686,6 @@ module.exports = {
   extractNamedMembers,
   hardenTree,
   verifyArchiveSignature,
-  signaturePathOf,
   STAGING_PREFIX,
   DIR_MODE,
   FILE_MODE,

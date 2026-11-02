@@ -54,6 +54,70 @@ const findStep = (re) => steps.find((s) => re.test(s.name)) || null;
 /** 剥掉 YAML 行尾注释再判：`continue-on-error: true # keep CI green` 曾在 r17 假绿 93/93 */
 const stripComment = (line) => line.replace(/(^|\s)#.*$/, '').trim();
 
+/**
+ * 取一步的**生效** run 命令行（整行注释跳过，行尾注释剥掉）。
+ * 判「这一步到底跑的是什么」必须读这个，而不是只读步骤名——`run:` 被换成
+ * `echo ...` 时步骤名一字不变，只判「步骤存在」会得到一个空壳全绿。
+ * @param {object|null} step stepsOf() 切出来的步骤对象
+ * @returns {string[]} 生效 run 命令（行内 `run: <cmd>` 的 cmd 部分）
+ */
+const effectiveRunLinesOf = (step) => {
+  if (!step) return [];
+  const out = [];
+  step.lines.forEach((line, k) => {
+    const eff = stripComment(line);
+    if (eff === '') return;
+    // 块式（`run: |` / `run: >`，可带 `-`/`+` 裁切指示）：取块体，run: 行本身不是命令。
+    // 先判块式再判行内：`run: |` 也满足 `run:<空格>...` 的行内形状，顺序反了会把 `|` 当成命令。
+    const block = /^(?:-\s+)?run:\s*([|>][-+]?)\s*$/.exec(eff);
+    if (block) {
+      const runIndent = line.match(/^\s*/)[0].length;
+      for (let j = k + 1; j < step.lines.length; j += 1) {
+        const body = stripComment(step.lines[j]);
+        if (body === '') continue;
+        if (step.lines[j].match(/^\s*/)[0].length <= runIndent) break;
+        out.push(body);
+      }
+      return;
+    }
+    const inline = /^(?:-\s+)?run:\s+(.+)$/.exec(eff);
+    if (inline) out.push(inline[1].trim());
+  });
+  return out;
+};
+/**
+ * 覆盖率命令的形态：跑测试并开覆盖率（`npm run test:coverage` 这类脚本名、
+ * 或 jest/vitest 带 `--coverage`）。只认「真的在算覆盖率」的命令，
+ * 不要求逐字相同——加 `--maxWorkers=2` 之类仍是覆盖率命令，判红就变成风格要求了。
+ */
+const COVERAGE_COMMAND_RE =
+  /\b(?:npm\s+run\s+test:coverage|npm\s+run\s+coverage|npm\s+test\b[^\n]*--coverage|npx\s+(?:jest|vitest)\b[^\n]*--coverage|(?:jest|vitest)\b[^\n]*--coverage)/;
+
+/**
+ * 该步骤里「真的在跑覆盖率」的那条生效命令；没有则返回空串。
+ * 返回命令本身而不是布尔值：判红时失败信息要能指出「实际跑的是 echo」。
+ * @param {object|null} step
+ * @returns {string}
+ */
+const coverageCommandOf = (step) =>
+  effectiveRunLinesOf(step).find((cmd) => COVERAGE_COMMAND_RE.test(cmd)) || '';
+
+/**
+ * 就地吞掉退出状态的形态。这跟「命令被换成 echo」是同一族：命令还在、也确实会跑，
+ * 但「覆盖率没过阈值」不再让 job 非零退出 ⇒ 硬门变味成日志。
+ * @param {object|null} step
+ * @returns {string[]} 命中的命令行（空数组 = 干净）
+ */
+const swallowsExitCode = (step) => {
+  const bad = [];
+  for (const cmd of effectiveRunLinesOf(step)) {
+    if (/\|\|\s*(?:true|:|exit\s+0)\s*$/.test(cmd)) bad.push(cmd);
+    else if (/;\s*(?:true|exit\s+0)\s*$/.test(cmd)) bad.push(cmd);
+    else if (/\|\s*(?:cat|tee)\b/.test(cmd)) bad.push(cmd);
+  }
+  return bad;
+};
+
 /** 步骤是否真的会执行：`if:` 不得是常量假值，`continue-on-error` 不得为真 */
 const isExecutable = (step) => {
   if (!step) return { ok: false, why: '步骤不存在' };
@@ -189,13 +253,64 @@ describe('CI 测试步骤接线闸（删掉测试步骤不得让仓库全绿）'
       ok: true,
       why: '',
     });
+    // 存在 + 可执行仍不够：`run:` 被换成 echo 时前两条一字不变。
+    // 前端硬门禁的真正载体是这一行命令（vitest coverage.thresholds 低于基线才非零退出）。
+    expect(coverageCommandOf(step)).not.toBe('');
+    expect(swallowsExitCode(step)).toEqual([]);
   });
 
-  test('前端/后端覆盖率步骤都必须存在（判据按步骤，不按整文件匹配）', () => {
+  test('前端/后端覆盖率步骤都必须存在，且 run 真的是覆盖率命令（判据按步骤，不按整文件匹配）', () => {
     // 实证：gateLayerExistence 用整文件正则，删掉前端覆盖率步骤仍 98 passed。
+    // 另一实证（本轮）：只判「步骤存在」时把 run 换成 `echo probe-skip-coverage` 仍 10/10 全绿，
+    // 覆盖率阈值于是再也不执行——步骤在、命令空，是「删步骤」的同构复发。
     const backend = findStep(/^Run tests with coverage$/);
     const frontend = findStep(/frontend tests with coverage/i);
     expect(Boolean(backend)).toBe(true);
     expect(Boolean(frontend)).toBe(true);
+    expect(coverageCommandOf(backend)).not.toBe('');
+    expect(coverageCommandOf(frontend)).not.toBe('');
+    // 命令在、退出状态被就地吞掉（`|| true` / `; true`）同样是硬门失效，属同一族
+    expect(swallowsExitCode(backend)).toEqual([]);
+    expect(swallowsExitCode(frontend)).toEqual([]);
+  });
+
+  test('判据可失败：覆盖率步骤的 run 被掏成 echo 必须被同一条判据抓到', () => {
+    // 反向对照。不做的话上面那条可能只是「文本里恰好有 npm run test:coverage」的文本匹配。
+    const synthetic = stepsOf(
+      [
+        '      - name: Run tests with coverage',
+        '        run: echo probe-skip-coverage',
+        '      - name: Run frontend tests with coverage',
+        '        working-directory: web-admin',
+        '        # run: npm run test:coverage',
+        '        run: |',
+        '          echo probe-skip-frontend',
+      ].join('\n')
+    );
+    const backend = synthetic.find((s) => /^Run tests with coverage$/.test(s.name));
+    const frontend = synthetic.find((s) => /frontend tests with coverage/i.test(s.name));
+    // 提取器本身：块式 run 取块体、`|` 不是命令、注释行不算命令
+    expect(effectiveRunLinesOf(backend)).toEqual(['echo probe-skip-coverage']);
+    expect(effectiveRunLinesOf(frontend)).toEqual(['echo probe-skip-frontend']);
+    // 判据口径：掏空的步骤拿不到覆盖率命令 ⇒ 上面那条判据会红
+    expect(coverageCommandOf(backend)).toBe('');
+    expect(coverageCommandOf(frontend)).toBe('');
+    // 反向对照的第二半：注释掉的 run 不得被当成「还有这条命令」
+    expect(effectiveRunLinesOf(frontend)).not.toContain('npm run test:coverage');
+    // 正向对照：真命令必须被认出，否则上面两条空串断言是「提取器恒返回空」的假绿
+    const real = stepsOf(
+      [
+        '      - name: Run tests with coverage',
+        '        run: npm run test:coverage -- --forceExit',
+        '      - name: Run frontend tests with coverage',
+        '        run: npm run test:coverage',
+      ].join('\n')
+    );
+    expect(coverageCommandOf(real.find((s) => /^Run tests with coverage$/.test(s.name)))).toBe(
+      'npm run test:coverage -- --forceExit'
+    );
+    expect(coverageCommandOf(real.find((s) => /frontend tests with coverage/i.test(s.name)))).toBe(
+      'npm run test:coverage'
+    );
   });
 });

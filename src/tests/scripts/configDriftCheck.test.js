@@ -161,4 +161,92 @@ describe('部署面配置漂移检测（M-05）', () => {
     expect(parsed.drift).toEqual([]);
     expect(parsed.baselineItems).toBeGreaterThanOrEqual(50);
   });
+
+  /**
+   * 同一条指令在模板里出现多份是常态：443 的 server、80/跳转的 server、以及另一处
+   * vhost 各下一份安全头。原实现逐行 `items[key] = digest(本行)` 是**覆盖赋值**，
+   * 账面上只剩最后一份 ⇒ 前面几份被人改掉/摘掉时闸照样绿。
+   * 下面这组用例连同旁边的公平性对照一起成立才叫「有牙齿」：
+   *   · 改第 1 / 2 / 3 份 ⇒ 各自都要报 changed；
+   *   · 整行注释掉中间那份 ⇒ 要报（配置面少了一处下发点）；
+   *   · **什么都不改 ⇒ 必须报无漂移**（否则「处处报漂移」也能让上面几条全绿）；
+   *   · 改动与账面无关的指令 ⇒ 必须报无漂移（防「一切皆漂移」的假牙齿）。
+   */
+  test('覆盖赋值回归：同一指令的每一份副本都必须在同一份摘要里', () => {
+    const multi = [
+      'server {',
+      '  listen 443 ssl;',
+      '  server_tokens off;',
+      '  add_header Strict-Transport-Security "max-age=63072000" always;',
+      '  add_header X-Frame-Options SAMEORIGIN;',
+      '}',
+      'server {',
+      '  listen 80;',
+      '  server_tokens off;',
+      '  add_header Strict-Transport-Security "max-age=63072000" always;',
+      '  add_header X-Frame-Options SAMEORIGIN;',
+      '}',
+      'server {',
+      '  listen 8443 ssl;',
+      '  server_tokens off;',
+      '  add_header Strict-Transport-Security "max-age=63072000" always;',
+      '  add_header X-Frame-Options SAMEORIGIN;',
+      '  client_max_body_size 2m;',
+      '}',
+    ].join('\n');
+
+    const dirs = [];
+    const itemsOf = (nginx) => {
+      const d = writeFixture(fs.mkdtempSync(path.join(os.tmpdir(), 'fsms-config-copies-')), {
+        nginx,
+      });
+      dirs.push(d);
+      return collectItems(d);
+    };
+    const hsts = 'add_header Strict-Transport-Security';
+    const lines = multi.split('\n');
+    const hstsAt = lines.reduce(
+      (acc, l, i) => (l.trim().startsWith(hsts) ? acc.concat(i) : acc),
+      []
+    );
+    expect(hstsAt.length).toBe(3);
+    const before = itemsOf(multi);
+
+    const driftOf = (nginx) => diffItems(before, itemsOf(nginx));
+    const mutate = (index, fn) => {
+      const ls = lines.slice();
+      ls[index] = fn(ls[index]);
+      return ls.join('\n');
+    };
+
+    // 公平性对照①：一个字都不改时必须是空漂移
+    expect(driftOf(multi)).toEqual([]);
+
+    // 公平性对照②：改与账面无关的指令不得产生漂移（防「一切皆漂移」）
+    expect(driftOf(multi.replace('client_max_body_size 2m;', 'client_max_body_size 8m;'))).toEqual(
+      []
+    );
+
+    // 三份副本逐个被改（降级到不带 always）：每一份都必须被看见
+    for (const index of hstsAt) {
+      const degraded = mutate(index, (line) => line.replace(/always;\s*$/, ';'));
+      expect({ line: index + 1, drift: driftOf(degraded) }).toEqual({
+        line: index + 1,
+        drift: [{ item: 'nginx:' + hsts, status: 'changed' }],
+      });
+    }
+
+    // 整行注释掉中间那份：配置面少了一处下发点，同样必须报
+    const commented = mutate(hstsAt[1], (line) => '# ' + line);
+    expect(driftOf(commented)).toEqual([{ item: 'nginx:' + hsts, status: 'changed' }]);
+
+    // 新增第 4 份副本：多出一处下发点是有意的信号，不是误报
+    const extra = multi + '\nadd_header Strict-Transport-Security "max-age=63072000" always;\n';
+    expect(driftOf(extra)).toEqual([{ item: 'nginx:' + hsts, status: 'changed' }]);
+
+    // 摘要口径的形状：同一指令多份时，键仍然只有一个（不是「第 n 份」拆键）
+    expect(Object.keys(before).filter((k) => k.startsWith('nginx:' + hsts)).length).toBe(1);
+
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+  });
 });

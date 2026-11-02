@@ -326,6 +326,39 @@ describe('authService gap A', () => {
       expect(result.username).toBe(user.username);
     });
 
+    test('并发管理员重置：条件更新落空，不覆盖临时口令、不返回 OK（lost update 修复）', async () => {
+      const user = await makeUser('cp_lost');
+      const bcryptWorker = require('../../utils/bcryptWorkerPool');
+      const adminTemp = randomPassword();
+      const adminHash = await bcryptWorker.hash(adminTemp, 4);
+      const original = User.findOneAndUpdate.bind(User);
+      // 模拟管理员重置恰好在「读取用户」与「条件写回」之间完成
+      const spy = jest
+        .spyOn(User, 'findOneAndUpdate')
+        .mockImplementationOnce(async (filter, update, options) => {
+          await original(
+            { _id: filter._id },
+            { $set: { password: adminHash, mustChangePassword: true } },
+            { new: true }
+          );
+          return original(filter, update, options);
+        });
+      try {
+        const result = await authService.changeUserPassword(
+          user._id,
+          { currentPassword: PASSWORD, newPassword: randomPassword() },
+          { username: user.username }
+        );
+        expect(result.outcome).toBe('CURRENT_WRONG');
+      } finally {
+        spy.mockRestore();
+      }
+
+      const after = await User.findById(user._id).select('+password');
+      expect(await after.comparePassword(adminTemp)).toBe(true);
+      expect(after.mustChangePassword).toBe(true);
+    });
+
     test('OK - 默认管理员改密后删除初始口令文件（旧口令已作废）', async () => {
       const user = await makeUser('cpinitpwd');
       const oldName = process.env.SUPER_ADMIN_USERNAME;

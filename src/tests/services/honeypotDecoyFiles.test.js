@@ -28,6 +28,7 @@ const { getExportColumnDefs, getExportSheetName } = require('../../services/repo
 const { DataMasking } = require('../../utils/encryption');
 const { DECOY_EXPORT_ITEMS, FILE_ENDPOINTS } = require('../../constants/honeypotDecoyFiles');
 const { HONEYPOT_VERDICT } = require('../../constants/honeypotDecoy');
+const { __resetAlertRateLimitForTest } = require('../../services/alertDispatch');
 
 describe('蜜罐文件/导出类端点（P1c）：合成 xlsx、逐字拒绝与留痕', () => {
   const honeypotName = 'filetrap';
@@ -107,6 +108,11 @@ describe('蜜罐文件/导出类端点（P1c）：合成 xlsx、逐字拒绝与�
   });
 
   beforeEach(() => {
+    // 两处节流都在**进程级**存活：honeypotWatch 的「类别+账户+业务日」表与 alertDispatch 的
+    // 5 分钟频控表。不重置则本用例的投递能否被观测取决于执行顺序（曾靠「排在最前」维持，
+    // --randomize 一打乱即红）。每用例自建初始状态，顺序无关。
+    honeypotWatch.__resetForTest();
+    __resetAlertRateLimitForTest();
     dispatchSpy = jest.spyOn(securityAlert, 'dispatchNotification').mockImplementation(() => {});
   });
 
@@ -135,8 +141,8 @@ describe('蜜罐文件/导出类端点（P1c）：合成 xlsx、逐字拒绝与�
     ).toBeNull();
   });
 
-  // 本用例**必须**排在本文件最前**：告警按「类别 + 账户 + 业务日」节流，同一进程里
-  // 只有第一批探测能观测到投递；排在别的探测用例之后就只剩审计行可比了。
+  // 本用例要求「本进程里这条蜜罐账户还没有探测记录」：节流表清空已由 beforeEach 负责，
+  // 因此不再依赖文件内顺序（原注释「必须排在最前」是在没有重置钩子时的权宜）。
   test('留痕分级：只读探测 high、未脱敏导出 POST critical，路径与判定入 honeypot_probe', async () => {
     const baseline = await AuditLog.countDocuments({
       action: 'honeypot_probe',
@@ -194,7 +200,8 @@ describe('蜜罐文件/导出类端点（P1c）：合成 xlsx、逐字拒绝与�
       jest.spyOn(Inspection, 'find'),
     ];
     const expected = {
-      alarms: { sheet: '报警记录', first: 'AL-2026-0731', handler: DataMasking.maskName('李强') },
+      // 首行 = 最新行：AL-2026-0732 是唯一 pending（尚无处理人 ⇒ 处理人列是「-」占位）
+      alarms: { sheet: '报警记录', first: 'AL-2026-0732', handler: '-' },
       devices: { sheet: '设备列表', first: 'HD-B2-006', handler: null },
       inspections: {
         sheet: '巡检记录',
@@ -355,11 +362,12 @@ describe('蜜罐文件/导出类端点（P1c）：合成 xlsx、逐字拒绝与�
         name: '审计日志 CSV 导出',
         request: makeReq('GET', '/api/security/audit-logs/export'),
         expect: {
-          statusCode: 403,
+          // 真实链是「权限闸 → 二次验证闸」：呈现在场的陷阱身份已过第一道，缺票的 401 才是下一句
+          statusCode: 401,
           body: {
             success: false,
-            message: '您没有执行此操作的权限',
-            errors: { errorCode: 'PERMISSION_DENIED' },
+            message: '查看审计数据需要先完成二次验证',
+            errors: { errorCode: 'REAUTH_TICKET_REQUIRED' },
           },
         },
       },
@@ -414,7 +422,7 @@ describe('蜜罐文件/导出类端点（P1c）：合成 xlsx、逐字拒绝与�
       write: true,
     });
     expect(at('GET', '/api/security/audit-logs/export/')).toMatchObject({
-      code: 'PERMISSION_DENIED',
+      code: 'REAUTH_TICKET_REQUIRED',
     });
     for (const path of ['/api/avatars', '/api/avatars/', '/api/avatars/hp-u1/']) {
       expect(at('GET', path)).toMatchObject({
@@ -460,9 +468,9 @@ describe('蜜罐文件/导出类端点（P1c）：合成 xlsx、逐字拒绝与�
     const empty = await exportSheet({ endDate: '2000-01-02' });
     expect(empty.sheet.rowCount).toBe(1);
     expect(empty.res.headers['X-Export-Truncated']).toBeUndefined();
-    // 只包含最新一条（4 小时窗）
+    // 只包含最新一条（110 分钟窗：卡在 0732@95m 与 0731@118m 之间，隔离最新一行）
     expect(
-      (await exportSheet({ startDate: new Date(Date.now() - 240 * 60000).toISOString() })).sheet
+      (await exportSheet({ startDate: new Date(Date.now() - 110 * 60000).toISOString() })).sheet
         .rowCount
     ).toBe(2);
     // date-only 按 tz 展开整天：锚点日取**最新那条合成行自己的业务日**，不用 wall-clock 的"今天"。

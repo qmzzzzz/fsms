@@ -27,7 +27,8 @@ const {
   DECOY_ROLES,
 } = require('./honeypotDecoyRbac');
 const { DECOY_DEVICES } = require('./honeypotDecoyDevices');
-const { DECOY_ALARMS, DECOY_INSPECTIONS } = require('./honeypotDecoyEvents');
+const { DECOY_ALARMS } = require('./honeypotDecoyAlarms');
+const { DECOY_INSPECTIONS } = require('./honeypotDecoyInspections');
 
 module.exports = {
   DECOY_ALARMS,

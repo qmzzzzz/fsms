@@ -288,4 +288,76 @@ describe('合规门禁 · 登记项必须真跑过（F-164）', () => {
     // 报告里不得出现 A/B 那两类补记行——它们一旦出现就是"有检查器没交结论"
     expect(report.checks.map((c) => c.name).join('\n')).not.toMatch(/自身抛出|未产出结论/);
   });
+  // ===== 未知参数（2026-11-02，task-32）：门禁自己也要拒绝手误 =====
+  // 修前实跑（work/r26-cli-flags-before.log）：--strict ⇒ RC 1「存在缺失」，
+  // 而把同一个开关打成 --strcit ⇒ RC 0「就绪」——判据是 argv.includes('--strict')，
+  // 一个字母的手误让 strict 恒为 false、四条未就绪项被降级成信息行。
+  // package.json 的 security:audit 正是用 --strict 调本脚本：手误即把安全审计由红翻绿，
+  // 且没有任何信号。这是「会误报的尺子」的反面——一把不会报错的尺子。
+  // 口径与 scripts/cliFlagPolicy.js 的 assertKnownArgs 统一：未知参数 ⇒ stderr 点名 + 退出 2
+  // （2 = 用法错误，与 1 = 有缺失分开；两者都非零，CI 一律拦）。
+  describe('合规门禁 · 未知参数不得静默降级（task-32）', () => {
+    const { spawnSync } = require('child_process');
+    const SCRIPT = path.join(ROOT, 'scripts/compliance-check.js');
+    // 显式钉住环境，避免本用例依赖本机 .env：ALERT_WEBHOOK_CHECK='' 使「告警投递探针」
+    // 必然未就绪 ⇒ --strict 必然判红；反之不带 --strict 必然报「就绪」。对照面才有意义。
+    const run = (args) =>
+      spawnSync(process.execPath, [SCRIPT].concat(args), {
+        cwd: ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          ALERT_WEBHOOK_CHECK: '',
+          COMPLIANCE_STRICT: '',
+          ALERTMANAGER_CONFIG_PATH: '',
+        },
+      });
+
+    it('修前红：--strcit 必须以退出码 2 拒绝，且点名手误并给出候选', () => {
+      const r = run(['--strcit']);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('未知参数');
+      expect(r.stderr).toContain('--strcit');
+      // 给出候选，别让使用者自己去猜白名单
+      expect(r.stderr).toContain('--strict');
+      // 拒绝必须发生在跑检查之前：不能既报错又照旧打印一份「就绪」报告
+      expect(r.stdout).toBe('');
+      expect(r.stdout).not.toContain('合规就绪度摘要');
+    });
+
+    it('对照面一：不带参数仍然 RC 0「就绪」（守卫不得把正常用法一起拒掉）', () => {
+      const r = run([]);
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('合规就绪度摘要');
+      expect(r.stdout).toContain('"strict": false');
+      expect(r.stdout).toContain('总体: 就绪');
+    });
+
+    it('对照面二：--strict 仍然 RC 1「存在缺失」（合法开关的语义没被改动）', () => {
+      const r = run(['--strict']);
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain('"strict": true');
+      expect(r.stdout).toContain('总体: 存在缺失');
+    });
+
+    it('凭空参数同样 RC 2（不是只针对 --strcit 的特判，且不给无谓候选）', () => {
+      const r = run(['xs']);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('未知参数');
+      expect(r.stderr).toContain('xs');
+      expect(r.stderr).not.toContain('是否想写');
+      expect(r.stdout).toBe('');
+    });
+
+    it('守卫挂在「作为脚本执行」分支内：挪到模块顶层会让本文件自己 require 时被杀', () => {
+      // 本文件 :36 就 require 了该脚本，顶层校验进程 argv 会直接 exit 2 杀掉 jest 进程，
+      // 所以位置也是被钉住的一部分，不只是「存在这行代码」。
+      const gateSrc = read('scripts/compliance-check.js');
+      const head = gateSrc.slice(0, gateSrc.indexOf('if (require.main === module)'));
+      expect(head).not.toMatch(/assertKnownArgs\(/);
+      expect(gateSrc).toMatch(
+        /if \(require\.main === module\) \{[\s\S]*?assertKnownArgs\(process\.argv/
+      );
+    });
+  });
 });

@@ -19,9 +19,9 @@
  *   3) 同一批行不得被 `rowsLost` 与对账各报一次（populate 分支会同时满足两式），
  *      撞上限那一档也不得再算成"丢行"（那是 truncated 的活）。
  */
-jest.mock('exceljs');
+jest.mock('../../utils/xlsxWriter');
 
-const { Workbook } = require('exceljs');
+const { createWorkbook } = require('../../utils/xlsxWriter');
 const { writeExportWorkbook } = require('../../services/reportWorkbookService');
 const { EXPORT_LIMIT } = require('../../services/reportExportService');
 const FireDevice = require('../../models/FireDevice');
@@ -29,12 +29,7 @@ const FireAlarm = require('../../models/FireAlarm');
 
 const LIMIT = EXPORT_LIMIT;
 
-const makeWorksheet = () => ({
-  properties: {},
-  columns: undefined,
-  addRow: jest.fn(),
-  getRow: jest.fn(() => ({ eachCell: (callback) => callback({}) })),
-});
+const makeWorksheet = () => ({ addRow: jest.fn() });
 
 const makeRes = () => {
   const handlers = {};
@@ -58,14 +53,12 @@ const makeRes = () => {
 const injectWorkbook = () => {
   const worksheet = makeWorksheet();
   const workbook = {
-    addWorksheet: jest.fn(() => worksheet),
-    xlsx: {
-      write: jest.fn(async (res) => {
-        res.fire('finish');
-      }),
-    },
+    sheet: worksheet,
+    write: jest.fn(async (res) => {
+      res.fire('finish');
+    }),
   };
-  Workbook.mockImplementationOnce(() => workbook);
+  createWorkbook.mockImplementationOnce(() => workbook);
   return { workbook, worksheet };
 };
 

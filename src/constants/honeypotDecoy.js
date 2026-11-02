@@ -28,6 +28,7 @@ const {
 const { WRITE_METHODS } = require('../middleware/httpMethods');
 const { DECOY_SELF_EMAIL_DOMAIN } = require('./honeypotDecoySelf');
 const { matchRoute, segmentsOf, TRAP_HANDLING } = require('./honeypotRouteTable'); // 判定层必须知道这条路径是不是 app.js 里真有的路由：零 require 叶子，与体积/判据门禁共用同一份声明
+const { isReauthGated, reauthPayload } = require('./honeypotTicketGate'); // 缺票闸的声明与拒绝体单一来源：本文件被 errorCodePlaceholderDefault 的码槽现采点名（parts:['code']），字面量放这里会破闭，改由该叶给出调用（马甲的两个面共用同一份冻结体）
 const { ALARM_OPEN_STATUSES } = require('./honeypotDecoyListShape'); // 列表端点形状单一来源：S1 的「未终结档」从这里派生，别处不再抄一份枚举
 const { listPageOf, listQueryRejection } = require('./honeypotDecoyListQuery'); // 列表查询面（校验/过滤/分页）：非法查询必须回真实路由同一个 400 体，合法查询必须回真实控制器的分页信封
 
@@ -41,7 +42,7 @@ const DECOY_SUMMARY = Object.freeze({
   devices: DECOY_DEVICES.length,
   faultDevices: countByStatus(DECOY_DEVICES, 'fault'),
   alarms: DECOY_ALARMS.length,
-  openAlarms: DECOY_ALARMS.filter((row) => ALARM_OPEN_STATUSES.includes(row.status)).length, // 口径是「状态属于未终结档」（AlarmService.js:372 的 pending/processing 集合），不是「总数 − 某一档」：终态不止一种，减法会把误报/已取消也算成未处理
+  openAlarms: DECOY_ALARMS.filter((row) => ALARM_OPEN_STATUSES.includes(row.status)).length, // 口径是「状态属于未终结档」（AlarmService.js:381 的 pending/processing 集合），不是「总数 − 某一档」：终态不止一种，减法会把误报/已取消也算成未处理
   inspections: DECOY_INSPECTIONS.length,
 });
 
@@ -183,6 +184,7 @@ const resolveDecoyPayload = ({ method = 'GET', path, user, query } = {}) => {
   const target = String(path || '');
   const route = matchRoute({ method, path: target }); // 取路径段走 segmentsOf：大小写、一个尾斜杠、查询串的口径与 Express 和路由表完全同源
   if (!route) return null;
+  if (isReauthGated(route)) return reauthPayload(); // 缺票闸不是「这条集合没有该资源」，必须在集合面之前返回：判它的是真实链的第二道闸，与合成表无关
   const collection = collectionFor(route.path);
   if (!collection) return null;
   const base = rowClockNow(); // 一次应答只取一个基准：同一份响应里所有行共享它，行时间不会跨秒开裂

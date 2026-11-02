@@ -158,6 +158,61 @@ describe('IPBlacklist Model', () => {
    * 而快照 TTL 内没有任何信号提示这件事（TTL 到期后才自愈，且期间判据是反的）。
    * 下面三条按"改完立刻读"钉住：每个写入口都必须让快照失效。
    */
+  /*
+   * F-25-7（第 25 轮审计实测）：重复封禁同一 IP 时，upsert 的 $set 把**既有条目的字段整体覆写**，
+   * 于是「第三方写下的永久封禁」被一次 24h 的重复封禁降级成临时封禁，且对方的 reason 也被换掉。
+   * 后果不是「少拦一会儿」：到期后 TTL 直接删档，而重复封禁这条路是运维最常走的
+   * （自动阶梯、池封禁、手工补封都会打到同一条 upsert 上）⇒ 永久封禁会自己消失，没有任何信号。
+   * 修法取「更严的一侧」：永久优先、时长取大、原 reason/source 保留。下面断言全部读**库侧**行。
+   */
+  describe('重复封禁取更严的一侧（F-25-7）', () => {
+    const rowOf = (ip) => IPBlacklist.findOne({ ip }).lean();
+
+    test('永久封禁不得被后续临时封禁降级（到期时间仍是 null）', async () => {
+      await IPBlacklist.blockIP('203.0.113.40', {
+        reason: '第三方-长期封禁',
+        durationMs: 0,
+        source: 'auto',
+      });
+      await IPBlacklist.blockIP('203.0.113.40', { reason: '我方-24h', durationMs: 24 * 3600000 });
+      const row = await rowOf('203.0.113.40');
+      expect({ durationMs: row.durationMs, expiresAt: row.expiresAt }).toEqual({
+        durationMs: 0,
+        expiresAt: null,
+      });
+      // 判据反了的样子：expiresAt 变成某个时刻，TTL 到期就把这条永久封禁删掉
+      expect(row.reason).toBe('第三方-长期封禁');
+      expect(row.source).toBe('auto');
+    });
+
+    test('时长只增不减：7 天封禁不被 1 小时的重复封禁缩短', async () => {
+      await IPBlacklist.blockIP('203.0.113.41', { reason: '七天', durationMs: 7 * 24 * 3600000 });
+      const before = await rowOf('203.0.113.41');
+      await IPBlacklist.blockIP('203.0.113.41', { reason: '缩短到1h', durationMs: 3600000 });
+      const after = await rowOf('203.0.113.41');
+      expect(after.durationMs).toBe(7 * 24 * 3600000);
+      expect(+after.expiresAt).toBe(+before.expiresAt); // 缩短请求也不得推迟既有到期
+    });
+
+    test('重复封禁保留首封时间 createdAt', async () => {
+      await IPBlacklist.blockIP('203.0.113.42', { reason: '首封', durationMs: 3600000 });
+      const first = await rowOf('203.0.113.42');
+      await IPBlacklist.blockIP('203.0.113.42', { reason: '再封', durationMs: 3600000 });
+      const second = await rowOf('203.0.113.42');
+      expect(+second.createdAt).toBe(+first.createdAt);
+    });
+
+    test('省略 targetUsername 不得把既有值清空', async () => {
+      await IPBlacklist.blockIP('203.0.113.43', {
+        reason: '带用户',
+        durationMs: 3600000,
+        targetUsername: 'alice',
+      });
+      await IPBlacklist.blockIP('203.0.113.43', { reason: '不带用户', durationMs: 3600000 });
+      expect((await rowOf('203.0.113.43')).targetUsername).toBe('alice');
+    });
+  });
+
   describe('快照失效覆盖全部写入口（F5）', () => {
     /** 预热快照：先 blockIP（会失效快照）再 isBlocked（把当前名单读进缓存） */
     const warm = async (ip) => {

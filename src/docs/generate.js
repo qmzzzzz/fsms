@@ -1230,6 +1230,37 @@ spec.paths['/api/security/stuffing-profile'] = {
   }),
 };
 
+spec.paths['/api/security/attack-profile'] = {
+  get: p('get', ['Security'], '单 IP 攻击行为画像（输入 IP 即返回分类/评分/证据/处置建议）', {
+    parameters: [
+      reauthTicketHeader,
+      {
+        name: 'ip',
+        in: 'query',
+        required: true,
+        schema: { type: 'string' },
+        description: '单个 IPv4/IPv6 地址（不含 CIDR 网段）',
+      },
+      {
+        name: 'hours',
+        in: 'query',
+        required: false,
+        schema: { type: 'integer', minimum: 1, maximum: 720, default: 168 },
+        description: '回溯小时数；越界按 7 天处理（最大 30 天）',
+      },
+    ],
+    responses: {
+      ...ok(
+        '返回 { ip, window, total, analyzed, truncated, firstSeen, lastSeen, score, verdict, riskLevel, scopeLimited, isPrivate, stats, categories, uncategorized, topPaths, topActions, topTargetAccounts, topUserAgents, timeline, containment, suggestions }；每条证据带 logId（审计记录定位键），可据此调用 GET /api/security/audit-logs/{id} 读取完整取证；分类之外的行在 uncategorized.evidence 中列出。不包含请求/响应正文。'
+      ),
+      400: { description: 'ip 缺失或不是单个合法地址（IP_SINGLE_REQUIRED）' },
+      401: { description: '缺少或无效的二次验证票据' },
+      403: { description: '无 security:audit 权限或数据范围不可用（DATA_SCOPE_DENIED）' },
+      500: { description: '画像查询失败（AUDIT_QUERY_FAILED）' },
+    },
+  }),
+};
+
 spec.paths['/api/security/config/allowPublicRegistration'] = {
   get: p('get', ['Security'], '获取注册开关状态', {
     responses: ok('返回 allowPublicRegistration'),
@@ -1357,6 +1388,26 @@ spec.paths['/api/security/audit-logs/export'] = {
       { name: 'from', in: 'query', schema: { type: 'string' } },
     ],
     responses: ok('text/csv 流式响应'),
+  }),
+};
+
+spec.paths['/api/security/audit-logs/{id}'] = {
+  get: p('get', ['Security'], '单条审计详情（含请求/响应头、响应正文等溯源字段）', {
+    parameters: [
+      reauthTicketHeader,
+      {
+        name: 'id',
+        in: 'path',
+        required: true,
+        schema: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' },
+      },
+    ],
+    responses: {
+      ...ok('返回完整审计记录（含 requestHeaders/responseHeaders/responseBody）'),
+      400: { description: '审计日志 ID 格式无效' },
+      401: { description: '缺少或无效的二次验证票据' },
+      404: { description: '审计日志不存在或不在数据范围内' },
+    },
   }),
 };
 

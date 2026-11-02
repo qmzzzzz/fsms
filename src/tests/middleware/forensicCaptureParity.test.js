@@ -51,6 +51,8 @@ const runOnce = async () => {
   const res = await request(app)
     .post('/api/probe')
     .set('user-agent', 'parity-agent/1')
+    // 每次 request(app) 都会起新监听端口，host 头随附端口必然不同；钉死才能做逐字对拍。
+    .set('host', 'parity.example')
     .set('x-forwarded-for', '203.0.113.7')
     .send({ x: 7, password: 'S3NTINEL-PW-7f3a9c' });
   await tick();

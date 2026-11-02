@@ -644,6 +644,12 @@ jobs:
                     { _id: u._id },
                     { \$set: { mfaEnabled: true, mfaSecret: enc, mfaLastCounter: 0, status: 'active' } }
                   );
+                  // 浏览器旅程用 admin 跑业务路径（E2E_USER=admin），而 bootstrap 超管恒带
+                  // mustChangePassword：前端路由守卫会把它钉在 /profile（web-admin/src/router/
+                  // index.js:210），而 helpers/auth.js 的 expectLoggedIn 等的是 /dashboard
+                  // ⇒ 32 条旅程会集体超时。测试账户由本步骤自己创建，直接清标记；
+                  // 口令保持不变，journey 里的 step-up 二次验证仍用同一份 E2E_PASS。
+                  await User.updateOne({ username: 'admin' }, { \$set: { mustChangePassword: false } });
                   console.log('mfa_e2e seeded');
                   await mongoose.disconnect();
                 })().catch((e) => { console.error(e); process.exit(1); });

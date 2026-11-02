@@ -207,6 +207,28 @@ async function runAuthSteps(ctx) {
           !!accessCookie
       );
     ctx.token = accessCookie.slice('access_token='.length).split(';')[0];
+
+    // bootstrap 超管恒带 mustChangePassword（initData/adminAccount.js 的 createWith），
+    // 改密前除「本人改密」外的业务路径一律 403 PASSWORD_CHANGE_REQUIRED。真实运维第一步
+    // 就是改密，冒烟按同一流程走；改密会递增 tokenVersion ⇒ 旧令牌立刻失效，必须重登
+    // 换新令牌，否则后面每一步都会 401。
+    const rotated = PASSWORD + 'Rotated9';
+    const ch = await req('PUT', '/api/auth/password', {
+      token: ctx.token,
+      body: { currentPassword: PASSWORD, newPassword: rotated },
+    });
+    if (ch.status !== 200)
+      throw new Error('改密失败 status=' + ch.status + ' ' + JSON.stringify(ch.body).slice(0, 120));
+
+    const relogin = await req('POST', '/api/auth/login', {
+      body: { username: 'admin', password: rotated },
+    });
+    const rotatedCookie = (relogin.headers['set-cookie'] || []).find((line) =>
+      line.startsWith('access_token=')
+    );
+    if (relogin.status !== 200 || !rotatedCookie)
+      throw new Error('改密后重登失败 status=' + relogin.status + ' cookie=' + !!rotatedCookie);
+    ctx.token = rotatedCookie.slice('access_token='.length).split(';')[0];
   });
 
   await step('GET /api/auth/me 会话有效', async () => {

@@ -7,8 +7,8 @@ const { INSPECTION_STATUSES, INSPECTION_TYPES } = require('./inspection');
 const { PERMISSION_TYPES, RESOURCE_STATUSES } = require('./permission');
 
 /*
- * "未终结档"集合：口径出处是 AlarmService.js:372 的 `status: { $in: ['pending', 'processing'] }`
- * （列表侧唯一在用的未终结集合）。第三刀起数据面直接用真实英文枚举（honeypotDecoyEvents.js），
+ * "未终结档"集合：口径出处是 AlarmService.js:381 的 `status: { $in: ['pending', 'processing'] }`
+ * （列表侧唯一在用的未终结集合）。第三刀起数据面直接用真实英文枚举（honeypotDecoyAlarms.js），
  * 这张表只剩"把源码里的集合写成常量"一件事，同源性由 honeypotListShapeParity.test.js 从该
  * 源码文本抽取比对——不是"再抄一份"就算数。
  */

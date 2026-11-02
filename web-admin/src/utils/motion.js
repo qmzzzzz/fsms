@@ -26,5 +26,4 @@ export const safeMatchMedia = (query) => {
 }
 
 /** 用户是否偏好减弱动效；供所有自定义动画（scramble/计数动画/视图过渡）统一判定 */
-export const prefersReducedMotion = () =>
-  safeMatchMedia('(prefers-reduced-motion: reduce)').matches
+export const prefersReducedMotion = () => safeMatchMedia('(prefers-reduced-motion: reduce)').matches

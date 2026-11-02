@@ -8,7 +8,7 @@
  * ============================ 阶梯事件源为什么是审计 ============================
  * 事件源必须是 append-only 的审计日志，而不是 ipblacklist 集合：
  * 该集合上 (ip,type) 唯一（models/IPBlacklist.js:95），blockIP 走 findOneAndUpdate +
- * $setOnInsert:createdAt（models/IPBlacklist.js:269），且 TTL 索引（models/IPBlacklist.js:92）到期即删档 ⇒ 同一 IP 任何时刻
+ * upsert（管道 $ifNull 保留首封 createdAt，models/IPBlacklist.js:269），且 TTL 索引（models/IPBlacklist.js:92）到期即删档 ⇒ 同一 IP 任何时刻
  * 最多只剩一条 ⇒ 在它上面 countDocuments 恒 ≤1，第三/四档（24 小时、7 天）永不可达，
  * 而日志照打"第 N 次"——运维以为阶梯在工作。
  *
@@ -195,7 +195,7 @@ const collectBruteForceSignals = async ({ reportedIp, normalizedIp, windowStart,
   // 渐进式封禁的"第几次"必须在**本次告警落库之前**统计：
   // 每次真正封禁 = 一条 brute_force_login 审计（ipBanApplied=true），频控只挡通知。
   // 为什么不数 ipblacklist 集合：该集合上 (ip,type) 唯一（models/IPBlacklist.js:95），
-  // blockIP 用 findOneAndUpdate + $setOnInsert:createdAt（models/IPBlacklist.js:269），且 TTL 索引（models/IPBlacklist.js:92）
+  // blockIP 走 upsert（管道 $ifNull 保留首封 createdAt，models/IPBlacklist.js:269），且 TTL 索引（models/IPBlacklist.js:92）
   // 到期即删档 ⇒ 同一 IP 任何时刻最多只剩一条 ⇒ countDocuments 恒 ≤1，
   // 第三/四档（24 小时、7 天）永不可达，而日志照打"第 N 次"——运维以为阶梯在工作。
   // 审计是 append-only 的，是唯一能承载"事件次数"的现存存储。

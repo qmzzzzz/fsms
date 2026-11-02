@@ -21,8 +21,8 @@
  *     只有这一层抓得住"行号仍在范围内但指错了地方"。新增登记的正确姿势与
  *     stubReturnTypeParity 同一条：**先说出这一行凭什么算证据（符号名），再来登记**。
  *     3b 谓词必须**局部唯一**：登记的符号在被引区间外的最近出现必须 ≥ 6 行。
- *     否则"漂 3 行"照样绿——本轮实测到 `DeviceService.js:444` 的 `/countDocuments(/`
- *     全文件命中 2 处、最近距离 334 行（:110），`/npm run validate/` 最近距离 1 行。
+ *     否则"漂 3 行"照样绿——本轮实测到 `DeviceService.js:448` 的 `/countDocuments(/`
+ *     全文件命中 2 处、最近距离 337 行（:111），`/npm run validate/` 最近距离 1 行。
  *     （行号随 #11 查询预算折行漂移，锚与台账随迁。）
  *     这样的登记只是装饰，必须写成能区分邻行的形态。
  *
@@ -298,21 +298,21 @@ function unexplainedExemptions(exemptedKeys, ledgerKeys) {
 const LIVE = [
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:248',
+    at: 'app.js:250',
     must: /sentryRequestHandler/,
     why: 'Sentry 请求处理器挂载点（2026-10-30 预检桶插入 cors 之前：其后全体 +2 行）',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:586',
+    at: 'app.js:589',
     must: /sentryErrorHandler/,
-    why: 'Sentry 错误处理器挂载点（2026-11-01 撞库画像挂载点 +2、静态面 no-store +3 后由 :581 移至 :586）',
+    why: 'Sentry 错误处理器挂载点（2026-11-02 攻击画像挂载点 +2 后由 :586 移至 :589）',
   },
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:590',
+    at: 'app.js:592',
     must: /app\.use\(errorHandler/,
-    why: '通用 errorHandler 位置（口径是"在它之前"；2026-11-01 由 :585 移至 :590）',
+    why: '通用 errorHandler 位置（口径是"在它之前"；2026-11-02 由 :590 移至 :592）',
   },
   {
     in: 'src/controllers/reportController.js',
@@ -340,17 +340,17 @@ const LIVE = [
   },
   {
     in: 'src/services/reportExportService.js',
-    at: 'AuditLog.js:324-331',
-    // 谓词收紧到整句调用：区间外 1 行处（:322 category+action 索引）也含 'timestamp: -1, _id: -1'，
+    at: 'AuditLog.js:343-350',
+    // 谓词收紧到整句调用：区间外 1 行处（:342 category+action 索引）也含 'timestamp: -1, _id: -1'，
     // 用宽谓词时锚点漂 1 行不会红（3b 判据实测抓到），故绑定到唯一的 `{timestamp:-1,_id:-1}` 声明。
     must: /auditLogSchema\.index\(\{ timestamp: -1, _id: -1 \}\)/,
     why: '不变式出处三',
   },
   {
     in: 'src/services/reportExportService.js',
-    at: 'AlarmService.js:120',
+    at: 'AlarmService.js:121',
     must: /\.sort\(\{ occurredAt: -1, _id: -1 \}\)/,
-    why: '列表侧实际用的全序（报警，2026-10-25 审计整改后在 :120）',
+    why: '列表侧实际用的全序（报警，2026-10-25 审计整改后在 :121）',
   },
   {
     in: 'src/services/reportExportService.js',
@@ -445,19 +445,19 @@ const LIVE = [
   // —— 以下 13 条是第 17 轮 G/H 两线实测出的错锚：站点已改对，登记钉住不再漂 ——
   {
     in: 'src/utils/loggerFlush.js',
-    at: 'index.js:123',
+    at: 'index.js:124',
     must: /logger\.warn\(`收到重复/,
-    why: '二次信号 handler 的 logger.warn（原写 :70，落在 docblock 的空续行上；2026-10-31 取证接线把 gracefulShutdown 的幂等守卫下移一行 ⇒ :122→:123）',
+    why: '二次信号 handler 的 logger.warn（原写 :70，落在 docblock 的空续行上；2026-10-31 取证接线把 gracefulShutdown 的幂等守卫下移一行 ⇒ :122→:123；2026-11-03 入口顶部补 recordStartupAuditTrail 的 require ⇒ :123→:124）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:204',
+    at: 'app.js:206',
     must: /app\.set\('trust proxy'/,
     why: 'trust proxy 有效值分支的落点',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:518',
+    at: 'app.js:520',
     // 谓词必须带上处理器的形参：:515 是 '/api/metrics'（同样以 app.get('/api' 开头），
     // 只写前缀会让锚点漂 5 行照样绿（3b 判据实测抓到），故绑定到根路径处理器本体。
     must: /app\.get\('\/api', \(req, res\)/,
@@ -471,7 +471,7 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:491',
+    at: 'app.js:493',
     must: /res\.status\(503\)\.json/,
     why: '头注里点名"两条失败路径"的具体行段（catch 臂的硬 503；2026-10-25 整改后为 :460）',
   },
@@ -483,15 +483,15 @@ const LIVE = [
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:248-249',
+    at: 'app.js:250-251',
     must: /sentryRequestHandler/,
     why: 'Sentry 三件套前两件',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:586',
+    at: 'app.js:589',
     must: /sentryErrorHandler/,
-    why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见；2026-11-01 由 :581 移至 :586）',
+    why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见；2026-11-02 由 :586 移至 :589）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
@@ -555,15 +555,27 @@ const LIVE = [
   },
   {
     in: 'src/services/websocketService/push.js',
-    at: 'src/index.js:491-510',
+    at: 'src/index.js:474-493',
     must: /process\.on\('unhandledRejection'/,
-    why: 'guardSocketHandler 文档引用的 unhandledRejection 兜底口径（2026-10-18 拆分后站点迁至 push.js；2026-10-31 取证接线后由 :466-484 下移 25 行）',
+    why: 'guardSocketHandler 文档引用的 unhandledRejection 兜底口径（2026-10-18 拆分后站点迁至 push.js；2026-11-01 取证接线后由 :466-484 下移至 :511-531；2026-11-03 入口瘦身抽出 startupAuditTrail 后上移至 :474-493）',
   },
   {
     in: 'src/tests/services/websocketHandlerRejectionGuard.test.js',
-    at: 'src/index.js:491-510',
+    at: 'src/index.js:474-493',
     must: /process\.on\('unhandledRejection'/,
-    why: '同一处口径的第二个引用站点（两条既定事实之一；2026-10-31 下移 25 行）',
+    why: '同一处口径的第二个引用站点（两条既定事实之一；2026-11-01 取证接线后下移至 :511-531，2026-11-03 入口瘦身后上移至 :474-493）',
+  },
+  {
+    in: 'src/utils/transaction.js',
+    at: 'src/index.js:474',
+    must: /process\.on\('unhandledRejection'/,
+    why: '事务清理超时不得变成无人持有的拒绝（原写 :446，实为启动期监听区；2026-11-01 取证接线后处理器移至 :511-531，2026-11-03 入口瘦身后移至 :474-493）',
+  },
+  {
+    in: 'src/tests/utils/transactionTopology.test.js',
+    at: 'src/index.js:474',
+    must: /process\.on\('unhandledRejection'/,
+    why: '同一处处理器口径的第二个引用站点（2026-10-03 审计线登记的 :446 已随取证接线迁至 :511，2026-11-03 入口瘦身后迁至 :474）',
   },
 ];
 
@@ -574,23 +586,12 @@ const LIVE = [
  */
 const STALE = [
   {
-    in: 'src/utils/transaction.js',
-    at: 'src/index.js:446',
-    owner: '他人脏文件（M）',
-    shouldRead: 'src/index.js:493',
-    mustAfterFix: /process\.on\('unhandledRejection'/,
-  },
-  {
-    in: 'src/tests/utils/transactionTopology.test.js',
-    at: 'src/index.js:446',
-    owner: '他人脏文件（M）',
-    shouldRead: 'src/index.js:493',
-    mustAfterFix: /process\.on\('unhandledRejection'/,
-  },
-  {
     in: 'src/tests/observability/loggerFlush.test.js',
+    // 不是活指针：这一行引用的是审计报告的**原文**（「validate.js:259 / database.js:59 / …」），
+    // 改数字会篡改引文。豁免绑定的正是「报告原样还写在文件里」这一事实；
+    // 真正指向当前实现的证据在 shouldRead。
     at: 'database.js:59',
-    owner: '他人脏文件（M）',
+    owner: '历史引文（报告原文，不得改数字）',
     shouldRead: 'src/config/database.js:124',
     mustAfterFix: /exitAfterFlush\(1\)/,
   },
@@ -745,7 +746,7 @@ describe('层 2 · 无内容锚点（空行 / 只剩注释标记；豁免 = STAL
     expect(bare.length).toBe(1);
     expect(qualified.length).toBe(1);
     expect(occurrences('src/utils/loggerFlush.js', 'index.js:70').length).toBe(0);
-    expect(occurrences('src/utils/loggerFlush.js', 'index.js:123').length).toBe(1);
+    expect(occurrences('src/utils/loggerFlush.js', 'index.js:124').length).toBe(1);
   });
 });
 
@@ -791,7 +792,7 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
   });
 
   test('谓词有牙（正向命中 + 反向不命中），不许跟着行号走', () => {
-    const hit = citedRange('src/middleware/sentry.js', 'app.js:586');
+    const hit = citedRange('src/middleware/sentry.js', 'app.js:589');
     expect(/sentryErrorHandler/.test(hit.text)).toBe(true);
     expect(/绝不可能出现在这一行的符号ZZZ/.test(hit.text)).toBe(false);
     // 本轮之前的真实写法：auditController.js:38 是空行，同一条判据必须判它不含符号
@@ -813,14 +814,14 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
       const r = rangeText(cited, from, to, path.join(ROOT, s.in));
       expect(r).not.toBeNull();
       expect(s.mustAfterFix.test(r.text)).toBe(true);
-      // 反证：漂移态锚点真正指进去的那一段（:470-490 = uncaughtException 臂）必须不含
-      // 被声称的 unhandledRejection——这正是"行号在范围内但指错了臂"会让读者产生的误判。
-      if (cited.endsWith('index.js')) {
-        const drifted = rangeText(cited, 470, 490, path.join(ROOT, 'src')).text;
-        expect(/process\.on\('unhandledRejection'/.test(drifted)).toBe(false);
-        expect(/process\.on\('uncaughtException'/.test(drifted)).toBe(true);
-      }
     }
+    // 反证不依赖"台账里恰好还留着一条 index.js 欠账"：漂移态锚点真正指进去的那一段
+    // （:453-472 = uncaughtException 臂）必须不含被声称的 unhandledRejection——
+    // 这正是"行号在范围内但指错了臂"会让读者产生的误判。
+    // （2026-11-03 入口瘦身：uncaughtException 臂由 :490-509 上移至 :453-472。）
+    const drifted = rangeText('src/index.js', 453, 472, path.join(ROOT, 'src')).text;
+    expect(/process\.on\('unhandledRejection'/.test(drifted)).toBe(false);
+    expect(/process\.on\('uncaughtException'/.test(drifted)).toBe(true);
   });
 });
 
@@ -860,7 +861,8 @@ describe('层 4 · 规模与自排除不许静止', () => {
     expect(classify(mk(5)).resolved / 100).toBeGreaterThanOrEqual(RESOLVE_RATIO_FLOOR);
     // 登记数只许涨不许跌（跌 = 有人删了判据）；晋升一条不该把闸弄红
     expect(LIVE.length).toBeGreaterThanOrEqual(42);
-    expect(STALE.length).toBe(3);
+    // 仅剩一条历史引文欠账：审计报告原文里的 database.js:59 不得被"修成"当前行号。
+    expect(STALE.length).toBe(1);
   });
 
   test('本文件自身不在扫描集里（自证与真违规必须可区分）', () => {

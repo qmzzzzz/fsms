@@ -12,7 +12,7 @@
  * 期望值一律在本文件内独立计算（Date 的本地 getter、字面量状态表），不 import 被测工具，
  * 否则实现写错时两边一起错、断言恒真。
  */
-import { describe, test, expect, vi, afterEach } from 'vitest'
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mountComponent, flush, click, waitFor } from '../helpers/componentHarness'
 import { useAuthStore } from '@/store'
 import i18n from '@/i18n'
@@ -24,10 +24,22 @@ const dispatch = vi.fn()
 const arrive = vi.fn()
 const resolveAlarm = vi.fn()
 const markAsFalse = vi.fn()
+const cancelAlarmApi = vi.fn()
 const isCanceledError = vi.fn(() => false)
 const confirm = vi.fn()
 const prompt = vi.fn()
 const alert = vi.fn()
+// 实时推送：视图挂载时 acquire 连接并加入 'alarm' 房间，收到 notification 后刷新
+const wsJoinRoom = vi.fn()
+const wsLeaveRoom = vi.fn()
+const wsOn = vi.fn()
+const wsOff = vi.fn()
+const acquireWs = vi.fn()
+const releaseWs = vi.fn()
+vi.mock('@/utils/websocket', () => ({
+  acquireWebSocket: (...a) => acquireWs(...a),
+  releaseWebSocket: (...a) => releaseWs(...a),
+}))
 vi.mock('@/utils/api', () => ({
   api: {
     alarms: {
@@ -38,6 +50,7 @@ vi.mock('@/utils/api', () => ({
       arrive: (...a) => arrive(...a),
       resolve: (...a) => resolveAlarm(...a),
       markAsFalse: (...a) => markAsFalse(...a),
+      cancel: (...a) => cancelAlarmApi(...a),
     },
   },
   isCanceledError: (...a) => isCanceledError(...a),
@@ -55,6 +68,16 @@ vi.mock('element-plus/es/components/message-box/index.mjs', () => ({
 
 import AlarmView from '@/views/AlarmView.vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
+
+const wsStub = {
+  joinRoom: (...a) => wsJoinRoom(...a),
+  leaveRoom: (...a) => wsLeaveRoom(...a),
+  on: (...a) => wsOn(...a),
+  off: (...a) => wsOff(...a),
+}
+beforeEach(() => {
+  acquireWs.mockReturnValue(wsStub)
+})
 
 let active = null
 
@@ -206,11 +229,18 @@ afterEach(() => {
   arrive.mockReset()
   resolveAlarm.mockReset()
   markAsFalse.mockReset()
+  cancelAlarmApi.mockReset()
   isCanceledError.mockReset()
   isCanceledError.mockReturnValue(false)
   confirm.mockReset()
   prompt.mockReset()
   alert.mockReset()
+  wsJoinRoom.mockClear()
+  wsLeaveRoom.mockClear()
+  wsOn.mockClear()
+  wsOff.mockClear()
+  acquireWs.mockClear()
+  releaseWs.mockClear()
   ElMessage.success.mockReset()
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
@@ -239,7 +269,7 @@ describe('AlarmView 列表渲染口径', () => {
       '烟雾报警',
       '张三',
       '待处理',
-      '指派处理处理完成标记误报详情',
+      '指派处理处理完成标记误报取消报警详情',
     ])
     // 时间不得是 ISO 原串（防退回 prop 直渲染 UTC）
     expect(cells(c)[0][1]).not.toContain('T')
@@ -517,7 +547,7 @@ describe('AlarmView 位置与类型显示口径', () => {
     const row = cells(c)[0]
     expect(row[3]).toBe('Smoke Alarm')
     expect(row[5]).toBe('Processing')
-    expect(row[6]).toBe('DispatchResolveFalse AlarmDetails')
+    expect(row[6]).toBe('DispatchResolveFalse AlarmCancelDetails')
     // 中文不得出现在英文界面（含列头与单元格）
     // 中文不得出现在列头/按钮（数据本身可以是中文姓名，不作断言）
     expect(
@@ -880,7 +910,7 @@ describe('AlarmView 权限门控（与后端 checkPermission 码逐一对应）'
     const labels = Array.from(rowOf(c, 0).querySelectorAll('button')).map((b) =>
       b.textContent.trim()
     )
-    expect(labels).toEqual(['指派处理', '处理完成', '标记误报', '详情'])
+    expect(labels).toEqual(['指派处理', '处理完成', '标记误报', '取消报警', '详情'])
   })
 
   test('回归：pending 行 + 仅 alarm:handle（无 dispatch）→ 不渲染派单入口（点击会发 /dispatch→403）', async () => {
@@ -1256,6 +1286,67 @@ describe('AlarmView 行级动作：标记误报', () => {
     expect(c.errors).toEqual([])
   })
 })
+describe('AlarmView 行级动作：取消报警', () => {
+  test('processing 行点「取消报警」：填原因 → cancel(_id,{reason}) + 成功提示 + 刷新', async () => {
+    const c = await open([mkRow('c1', { status: 'processing' })])
+    prompt.mockResolvedValue({ value: '  重复上报  ' })
+    cancelAlarmApi.mockResolvedValue({ data: { success: true } })
+    const before = getList.mock.calls.length
+    click(rowBtn(c, 0, '取消报警'))
+    await waitFor(() => cancelAlarmApi.mock.calls.length === 1, { message: '取消请求发出' })
+    expect(cancelAlarmApi).toHaveBeenCalledWith('c1', { reason: '重复上报' })
+    expect(prompt.mock.calls[0][1]).toBe(i18n.global.t('alarm.cancel'))
+    const opts = prompt.mock.calls[0][2]
+    expect(opts.inputType).toBe('textarea')
+    expect(opts.inputValidator('')).toBe(true)
+    expect(opts.inputValidator('x'.repeat(1000))).toBe(true)
+    expect(opts.inputValidator('x'.repeat(1001))).toBe(i18n.global.t('alarm.cancelReasonTooLong'))
+    expect(ElMessage.success).toHaveBeenCalledWith(i18n.global.t('alarm.cancelSuccess'))
+    await waitFor(() => getList.mock.calls.length > before, { message: '成功后刷新列表' })
+    expect(c.errors).toEqual([])
+  })
+
+  test('原因选填：不填直接确认 → 载荷为空对象', async () => {
+    const c = await open([mkRow('c2')])
+    prompt.mockResolvedValue({ value: '' })
+    cancelAlarmApi.mockResolvedValue({ data: { success: true } })
+    click(rowBtn(c, 0, '取消报警'))
+    await waitFor(() => cancelAlarmApi.mock.calls.length === 1, { message: '取消请求发出' })
+    expect(cancelAlarmApi).toHaveBeenCalledWith('c2', {})
+    expect(c.errors).toEqual([])
+  })
+
+  test('弹窗取消：不发请求、不提示成功、行锁释放', async () => {
+    const c = await open([mkRow('c3')])
+    prompt.mockRejectedValue('cancel')
+    click(rowBtn(c, 0, '取消报警'))
+    await waitFor(() => prompt.mock.calls.length === 1, { message: '弹窗弹出' })
+    await flush(16)
+    expect(cancelAlarmApi).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(rowBtn(c, 0, '取消报警').disabled).toBe(false)
+    expect(c.errors).toEqual([])
+  })
+
+  test('同权限口径：仅 alarm:dispatch 不渲染「取消报警」', async () => {
+    const c = await open([mkRow('c4')], {
+      perms: ['alarm:read', 'alarm:dispatch'],
+    })
+    expect(rowBtn(c, 0, '取消报警')).toBeUndefined()
+    expect(c.errors).toEqual([])
+  })
+
+  test('终态行不渲染「取消报警」入口', async () => {
+    const c = await open([
+      mkRow('c5', { status: 'resolved' }),
+      mkRow('c6', { status: 'cancelled' }),
+    ])
+    for (let i = 0; i < 2; i++) {
+      expect(rowBtn(c, i, '取消报警')).toBeUndefined()
+    }
+    expect(c.errors).toEqual([])
+  })
+})
 describe('AlarmView 详情弹窗', () => {
   test('「详情」按钮展示五要素文本（类型/位置/处理人/状态/发生时间），位置为拼装后的文本', async () => {
     const iso = '2026-10-01T01:00:00.000Z'
@@ -1500,5 +1591,41 @@ describe('AlarmView 上报对话框（表单校验 + 位置解析 + 提交）', 
     await waitFor(() => getStats.mock.calls.length > beforeStats, { message: '统计刷新' })
     expect(c.findAll('.el-dialog')).toHaveLength(1)
     expect(c.errors).toEqual([])
+  })
+})
+
+describe('AlarmView 实时推送（alarm 房间）', () => {
+  /** 取本页注册的 notification 处理器（on 的参数第二项） */
+  const notificationHandler = () => {
+    const call = wsOn.mock.calls.find(([event]) => event === 'notification')
+    return call?.[1]
+  }
+
+  test('挂载即加入 alarm 房间并订阅 notification（后台推送的报警才能到达本页）', async () => {
+    const c = await open([mkRow('ws1')])
+    expect(acquireWs).toHaveBeenCalledTimes(1)
+    expect(wsJoinRoom.mock.calls.map(([room]) => room)).toEqual(['alarm'])
+    expect(typeof notificationHandler()).toBe('function')
+    expect(c.errors).toEqual([])
+  })
+
+  test('收到 notification 后同时刷新列表与统计（不刷新统计 = 顶部计数停在旧值）', async () => {
+    await open([mkRow('ws2')])
+    const handler = notificationHandler()
+    const beforeList = getList.mock.calls.length
+    const beforeStats = getStats.mock.calls.length
+    handler({ type: 'notification', notificationType: 'alarm_created' })
+    await waitFor(() => getList.mock.calls.length > beforeList, { message: '列表被推送刷新' })
+    await waitFor(() => getStats.mock.calls.length > beforeStats, { message: '统计被推送刷新' })
+  })
+
+  test('卸载时按注册的同一处理器退订、退出房间并释放引用（不漏解绑、不误拆布局层连接）', async () => {
+    const c = await open([mkRow('ws3')])
+    const handler = notificationHandler()
+    c.handle.unmount()
+    active = null
+    expect(wsOff.mock.calls).toEqual([['notification', handler]])
+    expect(wsLeaveRoom.mock.calls).toEqual([['alarm']])
+    expect(releaseWs).toHaveBeenCalledTimes(1)
   })
 })

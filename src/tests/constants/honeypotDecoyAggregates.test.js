@@ -408,6 +408,21 @@ describe('载荷形状与独立复算', () => {
       expect(typeof row.createdBy).toBe('string');
     }
   });
+
+  test('时间窗真分化：宽窄窗的 stats 总数必须不同——数据若全挤在几天内，30d/90d 逐字同值就是「历史凭空出现」指纹（P2-5）', () => {
+    const isoDay = (daysAgo) =>
+      new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const totalOf = (id, daysAgo) =>
+      resolveOf(id, { startDate: isoDay(daysAgo), endDate: isoDay(0) }).data.total;
+    for (const id of ['alarm-stats', 'inspection-stats']) {
+      const totals = [1, 7, 30, 90].map((daysAgo) => totalOf(id, daysAgo));
+      // 总数不钉死具体值：startDate 按 UTC 日期生成而窗口按业务时区展开，跨日执行时近端行
+      // 会整体平移——判据只钉「不全等」与「90d 严格多于 7d」这两个由 12d/31d/40d 闭合行的
+      // 天数级裕量保证的性质（裕量 ≥ 1 天 ≫ 时区/量化偏移 ≤ 16h）
+      expect(new Set(totals).size).toBeGreaterThanOrEqual(2); // 相邻档位不全等
+      expect(totals[3]).toBeGreaterThan(totals[1]); // 90d 窗严格多于 7d 窗：必须有 >30d 的闭合行垫底
+    }
+  });
 });
 
 describe('未命中分支：与真实链的 400/404 不冲突', () => {

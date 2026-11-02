@@ -27,6 +27,7 @@ vi.mock('@/utils/api', () => ({
       getOverview: () => get('/security/overview'),
       getAlerts: () => get('/security/alerts'),
       queryAuditLogs: (params) => get('/security/audit-logs', { params }),
+      getAuditLogDetail: (id) => get(`/security/audit-logs/${id}`),
       createReauthTicket: (...a) => createTicket(...a),
       verifyAuditChain: (params) => get('/security/audit-logs/verify', { params }),
       exportAuditLogs: (params) =>
@@ -172,10 +173,11 @@ const logRow = (over = {}) => ({
   ...over,
 })
 
-const mountView = (perms = PERMS) => {
+const mountView = (perms = PERMS, initialRoute = '/') => {
   // 审计读取的二次验证窗口由服务端按会话维护，客户端不持有任何凭据（审计一-3），
   // 故这里不需要预置"票据"；既有用例验证的是「窗口已开」时的正常行为。
   active = mountComponent(AuditLogView, {
+    initialRoute,
     setupStore: (pinia) => useAuthStore(pinia).setPermissions(perms),
   })
   return active
@@ -215,13 +217,19 @@ const expectLocalTime = (cell, iso) => {
   expect(cell).toBe(expected)
 }
 
-/** 挂载并等待列表与统计请求落地 */
-const openList = async (list, meta, perms = PERMS) => {
+/** 挂载并等待列表与统计请求落地；detail 为详情接口返回的单条完整记录（缺省回列表行本身） */
+const openList = async (list, meta, perms = PERMS, detail = null, initialRoute = '/') => {
   get.mockImplementation((url) => {
     if (url === '/security/audit-logs') {
       return Promise.resolve({
         data: { data: list, meta: meta || { total: list.length } },
       })
+    }
+    // 详情接口：/security/audit-logs/:id（verify/export 是固定子路径，不在本正则内）
+    if (/^\/security\/audit-logs\/[0-9a-zA-Z_-]+$/.test(url)) {
+      const id = url.split('/').pop()
+      const found = detail || list.find((row) => String(row._id) === id) || list[0]
+      return Promise.resolve({ data: { data: found } })
     }
     if (url === '/security/overview') {
       return Promise.resolve({
@@ -237,7 +245,7 @@ const openList = async (list, meta, perms = PERMS) => {
     }
     return Promise.reject(new Error('unexpected url: ' + url))
   })
-  const c = mountView(perms)
+  const c = mountView(perms, initialRoute)
   await waitFor(() => logCalls().length >= 1, { message: '审计日志列表请求已发出' })
   await waitFor(() => trs(c).length === list.length, { message: '日志行渲染完成' })
   await flush(3)
@@ -279,10 +287,10 @@ const clearSelect = async (wrapper) => {
 }
 
 /** 打开某一行的详情对话框（操作列是 fixed 列，渲染时机晚于普通列） */
-const openDetail = async (list) => {
-  const c = await openList(list)
+const openDetail = async (list, detail = null, perms = PERMS) => {
+  const c = await openList(list, undefined, perms, detail)
   await waitFor(() => c.findAll('.el-table__body-wrapper .glass-btn--link').length === 1, {
-    message: '行操作按钮渲染完成',
+    message: '行操作按钮已渲染',
   })
   click(c.findAll('.el-table__body-wrapper .glass-btn--link')[0])
   await waitFor(() => document.body.querySelectorAll('.el-dialog').length === 1, {
@@ -301,6 +309,14 @@ const descPairs = () => {
     e.textContent.trim()
   )
   return labels.map((l, i) => l + '::' + values[i])
+}
+
+/** 按标签取详情对话框的第一个值节点（长文本/JSON 需要看内部结构而不是整段文本） */
+const descContent = (label) => {
+  const labels = Array.from(document.body.querySelectorAll('.el-descriptions__label'))
+  const idx = labels.findIndex((e) => e.textContent.trim() === label)
+  if (idx < 0) return null
+  return document.body.querySelectorAll('.el-descriptions__content')[idx] || null
 }
 
 afterEach(() => {
@@ -579,6 +595,72 @@ describe('AuditLogView 筛选与分页', () => {
     )
     await waitFor(() => lastParams().username === 'bob', { message: '用户名筛选请求' })
     expect(lastParams()).toEqual({ page: 1, limit: 20, username: 'bob' })
+  })
+
+  test('IP 筛选：回车触发查询并携带 ip（画像页「全部审计记录」的落点）', async () => {
+    const c = await openList([logRow()])
+    // 输入框顺序：用户名在前、IP 在后（沿用既有用例的下标口径）
+    const input = c.findAll('.filter-card .el-input input')[1]
+    input.value = ' 203.0.113.10 '
+    input.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(4)
+    input.dispatchEvent(
+      new window.KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true })
+    )
+    await waitFor(() => lastParams().ip === '203.0.113.10', { message: 'IP 筛选请求' })
+    // 前后空白必须在参数层收敛，否则后端 normalizeIP 判定为非法地址
+    expect(lastParams()).toEqual({ page: 1, limit: 20, ip: '203.0.113.10' })
+  })
+
+  test('深链 ?ip=&startDate=&endDate=：预填筛选并按该条件查询（画像页取证入口）', async () => {
+    const c = await openList(
+      [logRow()],
+      undefined,
+      PERMS,
+      null,
+      '/audit-logs?ip=203.0.113.10&startDate=2026-10-01&endDate=2026-10-08'
+    )
+    await waitFor(() => lastParams().ip === '203.0.113.10', { message: '深链筛选请求' })
+    expect(lastParams()).toEqual({
+      page: 1,
+      limit: 20,
+      ip: '203.0.113.10',
+      startDate: '2026-10-01',
+      endDate: '2026-10-08',
+    })
+    expect(c.findAll('.filter-card .el-input input')[1].value).toBe('203.0.113.10')
+    const dates = c.findAll('.filter-card .el-date-editor input').map((i) => i.value)
+    expect(dates).toEqual(['2026-10-01', '2026-10-08'])
+  })
+
+  test('深链 ?logId=：自动打开对应记录的完整取证（证据行钻取落地）', async () => {
+    const row = logRow({ _id: '507f1f77bcf86cd799439011' })
+    const detail = {
+      ...row,
+      method: 'POST',
+      path: '/api/auth/login',
+      requestHeaders: { 'user-agent': 'curl/8' },
+      responseHeaders: { 'content-type': 'application/json' },
+      responseBody: { ok: false, code: 'AUTH_FAILED' },
+      hashVersion: 6,
+      hash: 'record-hash',
+    }
+    await openList([row], { total: 1 }, PERMS, detail, '/audit-logs?logId=507f1f77bcf86cd799439011')
+    await waitFor(
+      () => get.mock.calls.some((x) => x[0] === '/security/audit-logs/507f1f77bcf86cd799439011'),
+      { message: '详情请求已发出' }
+    )
+    await waitFor(() => document.body.querySelectorAll('.el-dialog').length >= 1, {
+      message: '详情对话框打开',
+    })
+    await flush(8)
+    // 钻取落到的必须是「完整取证」，而不只是列表行的重复展示
+    const pairs = descPairs()
+    expect(pairs).toContain('请求头::' + JSON.stringify({ 'user-agent': 'curl/8' }, null, 2))
+    expect(pairs).toContain(
+      '响应体::' + JSON.stringify({ ok: false, code: 'AUTH_FAILED' }, null, 2)
+    )
+    expect(pairs).toContain('本记录哈希::record-hash')
   })
 
   test('重置：清空全部筛选输入并回到第 1 页，请求不再携带任何筛选键', async () => {
@@ -957,15 +1039,75 @@ describe('AuditLogView 导出', () => {
     await waitFor(() => ElMessageBox.alert.mock.calls.length === 1, {
       message: '核验结论弹出',
     })
+    // 默认窗口必须显式透传：不传参时后端只扫最新 2 万条，「从头核验」无从触发
+    expect(get).toHaveBeenCalledWith('/security/audit-logs/verify', {
+      params: { from: 'latest', limit: 20000 },
+    })
     const alertArgs = ElMessageBox.alert.mock.calls[0]
     // 第二参数是 title（或 options.title 兜底）
     const title = alertArgs[1]?.title ?? alertArgs[1]
     expect(title).toContain('完整')
   })
+
+  test('核验范围可切到「自最早向后」并收窄扫描上限 → from/limit 一并透传', async () => {
+    const { ElMessageBox } = await import('element-plus/es/components/message-box/index.mjs')
+    get.mockImplementation((url) => {
+      if (url === '/security/audit-logs') {
+        return Promise.resolve({ data: { data: [], meta: { total: 0 } } })
+      }
+      if (url === '/security/overview') {
+        return Promise.resolve({
+          data: {
+            data: {
+              criticalAlerts: 0,
+              highAlerts: 0,
+              failedLogins: 0,
+              compliance: { retentionDays: 90, appendOnlyEnforced: true },
+            },
+          },
+        })
+      }
+      if (url === '/security/audit-logs/verify') {
+        return Promise.resolve({
+          data: {
+            data: {
+              canAttestIntact: false,
+              verdictCode: 'partial',
+              scanned: 1000,
+              total: 1000,
+              collectionTotal: 5000,
+              breaks: 0,
+            },
+          },
+        })
+      }
+      return Promise.reject(new Error('unexpected url: ' + url))
+    })
+    const c = mountView()
+    await waitFor(() => c.find('.compliance-card') !== null, { message: '合规面板渲染' })
+    const selects = () => c.findAll('.compliance-card .el-select__wrapper')
+    await pickOption(selects()[0], i18n.global.t('auditLog.verifyFromEarliest'))
+    await pickOption(selects()[1], i18n.global.t('auditLog.verifyLimitOption', { n: 1000 }))
+    // 弹窗计数按相对基准取：前一用例也会弹一次，绝对计数会随用例顺序漂移
+    const before = ElMessageBox.alert.mock.calls.length
+    click(c.find('.compliance-card .glass-btn'))
+    await waitFor(() => get.mock.calls.some((x) => x[0] === '/security/audit-logs/verify'), {
+      message: '核验请求已发出',
+    })
+    expect(get).toHaveBeenCalledWith('/security/audit-logs/verify', {
+      params: { from: 'earliest', limit: 1000 },
+    })
+    await waitFor(() => ElMessageBox.alert.mock.calls.length === before + 1, {
+      message: '核验结论弹出',
+    })
+    expect(ElMessageBox.alert.mock.calls[before][0]).toContain(
+      i18n.global.t('auditLog.verifyFromEarliest')
+    )
+  })
 })
 
 describe('AuditLogView 详情对话框', () => {
-  test('条件字段缺失时不渲染；请求方式/路径/请求参数/User-Agent 渲染占位符', async () => {
+  test('条件字段缺失时不渲染；请求方式/路径/请求体/User-Agent 渲染占位符', async () => {
     const c = await openDetail([logRow({ userId: 'u-1' })])
     const pairs = descPairs()
     const labels = pairs.map((p) => p.split('::')[0])
@@ -987,7 +1129,7 @@ describe('AuditLogView 详情对话框', () => {
     expect(pairs).toContain(`${i18n.global.t('auditLog.ipAddress')}::10.0.0.9`)
     expect(pairs).toContain('风险等级::低')
     expect(pairs).toContain('操作结果::成功')
-    expect(pairs).toContain('请求参数::-')
+    expect(pairs).toContain('请求体::-')
     expect(pairs).toContain('User-Agent::-')
     const time = pairs.find((p) => p.startsWith('操作时间::')).split('::')[1]
     expect(time).not.toContain('T')
@@ -1017,9 +1159,113 @@ describe('AuditLogView 详情对话框', () => {
         t.textContent.trim()
       )
     ).toEqual(['geo_anomaly', 'tor_exit'])
-    expect(document.body.querySelector('.json-preview').textContent).toBe(
-      JSON.stringify({ page: 2 }, null, 2)
+    // 路径参数此前被塞进「请求参数」一格；现在按来源分栏，不能再与请求体混为一谈
+    expect(
+      descContent(i18n.global.t('auditLog.reqParams')).querySelector('.json-preview').textContent
+    ).toBe(JSON.stringify({ page: 2 }, null, 2))
+    expect(pairs).toContain('请求体::-')
+  })
+
+  test('打开详情按 _id 单条拉取完整记录：头袋/正文/客户端/链字段覆盖列表投影', async () => {
+    const detail = {
+      ...logRow({ _id: 'r1', method: 'POST', path: '/api/auth/login' }),
+      userId: { _id: 'u-1', username: 'alice', realName: 'Alice Wong' },
+      query: { next: '/dashboard' },
+      params: { id: 'p1' },
+      requestHeaders: { 'content-type': 'application/json', authorization: '***' },
+      responseHeaders: { 'content-type': 'application/json; charset=utf-8' },
+      responseBody: { ok: true, token: '***' },
+      clientInfo: {
+        browser: 'Chrome 140',
+        os: 'Windows 11',
+        device: 'desktop',
+        reportedIp: '10.0.0.9',
+        socketPeer: '127.0.0.1',
+      },
+      fingerprint: 'fp-abc',
+      sessionId: 'sess-1',
+      hashVersion: 6,
+      prevHash: 'prev-hash',
+      hash: 'record-hash',
+    }
+    const c = await openDetail([logRow({ _id: 'r1' })], detail)
+    // 单条读取是详情页唯一的完整记录来源：必须按行 _id 发请求
+    const call = get.mock.calls.find((x) => x[0] === '/security/audit-logs/r1')
+    expect(call).toBeTruthy()
+    const pairs = descPairs()
+    expect(pairs).toContain('用户 ID::Alice Wong (alice)')
+    expect(pairs).toContain('查询参数::' + JSON.stringify({ next: '/dashboard' }, null, 2))
+    expect(pairs).toContain('路径参数::' + JSON.stringify({ id: 'p1' }, null, 2))
+    expect(pairs).toContain(
+      '请求头::' +
+        JSON.stringify({ 'content-type': 'application/json', authorization: '***' }, null, 2)
     )
+    expect(pairs).toContain(
+      '响应头::' + JSON.stringify({ 'content-type': 'application/json; charset=utf-8' }, null, 2)
+    )
+    expect(pairs).toContain('响应体::' + JSON.stringify({ ok: true, token: '***' }, null, 2))
+    expect(pairs).toContain('浏览器::Chrome 140')
+    expect(pairs).toContain('操作系统::Windows 11')
+    expect(pairs).toContain('设备::desktop')
+    expect(pairs).toContain('上报地址::10.0.0.9')
+    expect(pairs).toContain('TCP 对端::127.0.0.1')
+    expect(pairs).toContain('会话指纹::fp-abc')
+    expect(pairs).toContain('会话 ID::sess-1')
+    expect(pairs).toContain('哈希版本::6')
+    expect(pairs).toContain('前序哈希::prev-hash')
+    expect(pairs).toContain('本记录哈希::record-hash')
+    expect(c.errors).toEqual([])
+  })
+
+  test('响应正文边界成文：截断告警 + 未采集原因码（已知码翻译，未知码带出码）', async () => {
+    await openDetail([logRow({ _id: 'r1' })], {
+      ...logRow({ _id: 'r1' }),
+      responseBody: '{"partial":',
+      responseBodyTruncated: true,
+      responseBodySkipped: 'stream',
+    })
+    expect(document.body.querySelector('.detail-inline-alert').textContent).toContain('已截断')
+    const bodyContent = descContent(i18n.global.t('auditLog.respBody'))
+    // 有 skipped 时不再渲染正文块：半截正文与会话事实并列会被读成完整响应
+    expect(bodyContent.querySelector('.json-preview')).toBeNull()
+    expect(bodyContent.textContent).toContain(i18n.global.t('auditLog.respBodySkippedStream'))
+
+    active?.handle.unmount()
+    active = null
+    document.body.innerHTML = ''
+
+    await openDetail([logRow({ _id: 'r1' })], {
+      ...logRow({ _id: 'r1' }),
+      responseBodySkipped: 'future_mode',
+    })
+    expect(descContent(i18n.global.t('auditLog.respBody')).textContent).toContain(
+      i18n.global.t('auditLog.respBodySkippedUnknown', { code: 'future_mode' })
+    )
+  })
+
+  test('详情加载失败：保留列表行字段并就地提示，不弹全局 toast', async () => {
+    const c = await openList([logRow({ _id: 'r1' })])
+    get.mockImplementation((url) => {
+      if (/^\/security\/audit-logs\/[0-9a-zA-Z_-]+$/.test(url)) {
+        return Promise.reject(new Error('detail down'))
+      }
+      return Promise.resolve({ data: { data: [] } })
+    })
+    await waitFor(() => c.findAll('.el-table__body-wrapper .glass-btn--link').length === 1, {
+      message: '行操作按钮已渲染',
+    })
+    click(c.findAll('.el-table__body-wrapper .glass-btn--link')[0])
+    await waitFor(() => document.body.querySelector('.detail-alert'), {
+      message: '详情失败提示出现',
+    })
+    expect(document.body.querySelector('.detail-alert').textContent).toContain(
+      i18n.global.t('auditLog.detailLoadFailed')
+    )
+    // 行字段仍然可用（失败不得把已显示的行数据抹掉）
+    expect(descPairs()).toContain('操作用户::alice')
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(ElMessage.warning).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
   })
 
   test('详情对话框：点「关闭」后遮罩隐藏且无 Vue 错误', async () => {
@@ -1028,7 +1274,7 @@ describe('AuditLogView 详情对话框', () => {
     const overlay = Array.from(document.body.querySelectorAll('.el-overlay')).find(
       (o) =>
         o.querySelector('.el-dialog__title')?.textContent.trim() ===
-        i18n.global.t('security.auditLogs')
+        i18n.global.t('auditLog.detailTitle')
     )
     expect(overlay.style.display).toBe('')
     const closeBtn = Array.from(
@@ -1289,6 +1535,53 @@ describe('AuditLogView 审计读取二次验证（会话窗口，审计一-3）'
     await waitFor(() => logCalls().length === 2, { message: '重新验证后重放列表请求' })
     expect(trs(c)).toHaveLength(1)
     expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+
+  test('详情读取被 401 拦下：验证通过后重放详情请求，不当作加载失败', async () => {
+    createTicket.mockResolvedValue({ data: { data: { ticket: 't3', expiresIn: 300 } } })
+    let detailAttempts = 0
+    const detailDoc = {
+      ...logRow({ _id: 'r1' }),
+      requestHeaders: { 'x-trace-id': 'trace-abc' },
+      responseBody: { ok: true },
+      hashVersion: 6,
+    }
+    get.mockImplementation((url) => {
+      if (url === '/security/audit-logs') {
+        return Promise.resolve({ data: { data: [logRow({ _id: 'r1' })], meta: { total: 1 } } })
+      }
+      if (url === '/security/overview') return Promise.resolve({ data: { data: {} } })
+      if (url === '/security/alerts') {
+        return Promise.resolve({ data: { data: [], meta: { total: 0, limit: 50 } } })
+      }
+      if (url === '/security/audit-logs/r1') {
+        detailAttempts += 1
+        if (detailAttempts === 1) {
+          return Promise.reject({
+            response: { data: { errors: { errorCode: 'REAUTH_TICKET_REQUIRED' } } },
+          })
+        }
+        return Promise.resolve({ data: { data: detailDoc } })
+      }
+      return Promise.reject(new Error('unexpected url: ' + url))
+    })
+    const c = mountComponent(AuditLogView, {
+      setupStore: (pinia) => useAuthStore(pinia).setPermissions(PERMS),
+    })
+    active = c
+    await waitFor(() => c.findAll('.el-table__body-wrapper .glass-btn--link').length === 1, {
+      message: '行操作按钮已渲染',
+    })
+    click(c.findAll('.el-table__body-wrapper .glass-btn--link')[0])
+    await waitFor(() => detailAttempts === 1, { message: '详情请求已发出并被拒' })
+    await fillAndConfirm()
+    await waitFor(() => detailAttempts === 2, { message: '重新验证后重放详情请求' })
+    await flush(8)
+    expect(descPairs()).toContain(
+      '请求头::' + JSON.stringify({ 'x-trace-id': 'trace-abc' }, null, 2)
+    )
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(c.errors).toEqual([])
   })
 })
 

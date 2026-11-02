@@ -254,6 +254,31 @@
           </template>
           <span v-else class="version-empty">{{ $t('about.upgrade.noHistory') }}</span>
         </div>
+
+        <!-- 落位通道（inbox → bundles）：只在有动静时显示。
+             没有这一段时，「包传上去了但下拉里没有」只能 SSH 上目标机查 inbox——
+             那正是单文件传包这个功能要消掉的步骤。 -->
+        <div
+          v-if="intakePending.length || intakeRejected.length"
+          class="version-intake"
+          data-testid="version-intake"
+        >
+          <template v-if="intakePending.length">
+            <span class="version-job-label">{{ $t('about.upgrade.intakeTitle') }}</span>
+            <el-tag size="small" type="info">
+              {{ $t('about.upgrade.intakePending', { count: intakePending.length }) }}
+            </el-tag>
+            <span class="version-job-message version-mono">{{ intakePending.join('、') }}</span>
+          </template>
+          <template v-for="item in intakeRejected" :key="item.archive || item.outcome">
+            <span class="version-job-label">{{ $t('about.upgrade.intakeTitle') }}</span>
+            <el-tag size="small" type="danger">
+              {{ $t('about.upgrade.intakeRejected', { archive: item.archive || '—' }) }}
+            </el-tag>
+            <span class="version-job-message">{{ item.reason }}</span>
+          </template>
+          <p class="version-raw-note">{{ $t('about.upgrade.serverTextNote') }}</p>
+        </div>
       </div>
 
       <el-empty
@@ -457,6 +482,16 @@ const canViewUpgrade = computed(() => hasPerm('security:config'))
 const isSuperAdmin = computed(() => (permissions.value || []).includes('*:*'))
 
 const upgradeSnap = ref(null)
+/** 落位通道：传完未落位 / 落位失败的归档——「传了却没出现在下拉」要在这页能看懂。 */
+const intakePending = computed(() => {
+  const list = upgradeSnap.value?.upgrade?.intake?.pending
+  return Array.isArray(list) ? list.filter((n) => typeof n === 'string' && n) : []
+})
+const intakeRejected = computed(() => {
+  const list = upgradeSnap.value?.upgrade?.intake?.rejected
+  if (!Array.isArray(list)) return []
+  return list.filter((r) => r && (typeof r.archive === 'string' || typeof r.outcome === 'string'))
+})
 const upgradeLoading = ref(false)
 const upgradeFailed = ref(false)
 /** 有快照但最近一次刷新没拿到数据：数据可能已过期（P2-9） */

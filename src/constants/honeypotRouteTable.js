@@ -19,6 +19,7 @@ const TRAP_HANDLING = Object.freeze({
   SELF: 'decoy-self', // 本人自助面：按会话身份回同形合成体
   FILE: 'decoy-file', // 文件/导出类：合成工作簿或按真实口径拒绝
   METRICS: 'decoy-metrics', // 运行时指标快照：与真实 getSnapshot() 同键集的合成体
+  REAUTH: 'reauth401', // 缺票闸：回真实链逐字相同的 401 REAUTH_TICKET_REQUIRED。陷阱既不发票据也不持窗口，所以「缺票」是这些路由上唯一可能的真实答案；声明成合成面就是把「少一道闸」写在响应里
   DENY: 'deny403', // 一律拒绝（与真实 403 同一个响应构造器，错误体逐字相同）
 });
 
@@ -107,7 +108,7 @@ const ROUTE_TABLE = Object.freeze([
   need('PUT', '/api/devices/:id/status', 'device:update', 'deny403'),
   need('POST', '/api/devices/:id/maintenance', 'device:maintain', 'deny403'),
   need('DELETE', '/api/devices/:id', 'device:delete', 'deny403'),
-  need('PUT', '/api/devices/:id/scrap', 'device:update', 'deny403'),
+  need('PUT', '/api/devices/:id/scrap', 'device:scrap', 'deny403'),
   need('GET', '/api/alarms', 'alarm:read', 'decoy-list'),
   need('GET', '/api/alarms/stats', 'alarm:read', 'decoy-aggregate'),
   need('GET', '/api/alarms/:id', 'alarm:read', 'decoy-detail'),
@@ -146,11 +147,13 @@ const ROUTE_TABLE = Object.freeze([
   need('PUT', '/api/security/users/:userId/mfa/reset', 'user:reset_password', 'deny403'),
   need('PUT', '/api/security/users/:userId/password/reset', 'user:reset_password', 'deny403'),
   need('GET', '/api/security/overview', 'security:audit', 'decoy-summary'),
-  need('GET', '/api/security/alerts', 'security:audit', 'decoy-summary'),
-  need('GET', '/api/security/audit-logs/verify', 'security:audit', 'decoy-summary'),
-  need('GET', '/api/security/audit-logs/export', 'security:audit', 'decoy-file'),
-  need('GET', '/api/security/audit-logs', 'security:audit', 'decoy-summary'),
-  need('GET', '/api/security/stuffing-profile', 'security:audit', 'deny403'), // 撞库画像读口（ADR-013 P2 情报）：聚合面不向陷阱会话开口，与真实 403 逐字相同
+  need('GET', '/api/security/alerts', 'security:audit', 'reauth401'),
+  need('GET', '/api/security/audit-logs/verify', 'security:audit', 'reauth401'),
+  need('GET', '/api/security/audit-logs/export', 'security:audit', 'reauth401'),
+  need('GET', '/api/security/audit-logs', 'security:audit', 'reauth401'),
+  need('GET', '/api/security/audit-logs/:id', 'security:audit', 'reauth401'),
+  need('GET', '/api/security/stuffing-profile', 'security:audit', 'reauth401'), // 撞库画像读口（ADR-013 P2 情报）：真实链过权限闸后仍要票，陷阱回同一句 401——旧口径「与真实 403 逐字相同」在呈现身份持有 security:audit 之后不再成立
+  need('GET', '/api/security/attack-profile', 'security:audit', 'reauth401'), // 单 IP 攻击行为画像：与撞库画像同权限面/同缺票闸
   need('GET', '/api/security/config/allowPublicRegistration', 'security:config', 'decoy-summary'),
   need('PUT', '/api/security/config/allowPublicRegistration', 'security:config', 'deny403'),
   need('GET', '/api/security/config/loginCaptchaEnabled', 'security:config', 'decoy-summary'),

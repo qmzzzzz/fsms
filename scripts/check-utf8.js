@@ -96,7 +96,9 @@ const rootFiles = [
 // 三条都在——后者走的是「直接 push」而非 walk，所以编码门禁不受影响，但任何基于
 // walk 的扫描都会静默漏掉它们；F-14 的引用台账正是因此在 `.gitignore:135` 上瞎了一次）。
 // 加 `$` 只放行这三个文件名，`.git` 目录本身仍被跳过。
-const SKIP_DIR_PATTERN = /^(?:node_modules|\.git$|dist(?:$|-)|coverage(?:$|-))/;
+// `.mimosa` 是编辑器钩子的会话状态目录（gitignored），里面存的是 hook 的源文本快照；
+// 它既非源码也不随提交走，本地残留的错编码不应把编码门禁判红。
+const SKIP_DIR_PATTERN = /^(?:node_modules|\.git$|\.mimosa$|dist(?:$|-)|coverage(?:$|-))/;
 
 /** 目录名是否属于生成物/依赖目录（导出以便用例直接驱动，不靠"跑一遍看输出"） */
 const isSkippedDirName = (name) => SKIP_DIR_PATTERN.test(name);

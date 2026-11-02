@@ -255,3 +255,209 @@ describe('auditLogSanitizer — 手机号不得留在审计副本与访问日志
     expect(url).toContain('limit=10');
   });
 });
+
+/**
+ * 审计详情采集：请求/响应头袋与响应正文（2026-11-02）
+ *
+ * 详情页要能回答「这次请求到底发了什么、服务端回了什么」。采集是常态开启的，
+ * 不能照搬 forensic 的 KB 级封顶；同时头袋/正文里同样会带凭据（Authorization、
+ * Cookie、Set-Cookie、响应里的 recoveryCodes/otpauthUri/ticket），必须与 body
+ * 共用同一份敏感名单。本组用例钉住三件事：脱敏、封顶、未采集原因可区分。
+ */
+describe('auditLogSanitizer — 头袋与响应正文采集', () => {
+  const {
+    sanitizeAuditHeaders,
+    sanitizeAuditResponseBody,
+    MAX_AUDIT_HEADER_VALUE_LENGTH,
+    MAX_AUDIT_HEADERS,
+    MAX_AUDIT_HEADER_BYTES,
+    MAX_AUDIT_RESPONSE_BODY_BYTES,
+    RESPONSE_BODY_TRUNCATED_MARK,
+  } = require('../../models/auditLogSanitizer');
+
+  test('凭据头整袋掩码；URL 头里的 query 凭据打码；头名归一为可落库形态', () => {
+    const out = sanitizeAuditHeaders({
+      Authorization: 'Bearer RAW-AUTH',
+      Cookie: 'sid=RAW-SID',
+      'Set-Cookie': ['a=RAW-1', 'b=RAW-2'],
+      'X-Api-Key': 'RAW-KEY',
+      'X-Reauth-Ticket': 'RAW-TICKET',
+      Referer: 'https://app.example/reset?token=RAW-RESET&next=/home',
+      'X-Custom.Field': 'plain-value',
+    });
+    expect(out.authorization).toBe('***');
+    expect(out.cookie).toBe('***');
+    expect(out['set-cookie']).toBe('***');
+    expect(out['x-api-key']).toBe('***');
+    expect(out['x-reauth-ticket']).toBe('***');
+    expect(out.referer).not.toContain('RAW-RESET');
+    expect(out.referer).toContain('next=/home');
+    // `.`/`$` 在 Mongo 键里难查询，统一归一为 `_`
+    expect(out['x-custom_field']).toBe('plain-value');
+    expect(JSON.stringify(out)).not.toContain('RAW-');
+  });
+
+  test('头值封顶且中和控制字符；非对象输入不落空壳', () => {
+    const long = 'a'.repeat(MAX_AUDIT_HEADER_VALUE_LENGTH + 100);
+    const out = sanitizeAuditHeaders({
+      'x-long': long,
+      'x-ctl': 'line1\r\nline2\u0000end',
+    });
+    expect(out['x-long'].length).toBeLessThanOrEqual(MAX_AUDIT_HEADER_VALUE_LENGTH);
+    expect(out['x-long']).not.toContain('\n');
+    expect(out['x-ctl']).not.toContain('\r');
+    expect(out['x-ctl']).not.toContain('\n');
+    expect(out['x-ctl']).not.toContain('\u0000');
+    expect(sanitizeAuditHeaders(undefined)).toBeUndefined();
+    expect(sanitizeAuditHeaders('not-an-object')).toBeUndefined();
+  });
+
+  test('头数量与总字节双封顶：溢出的头明示丢弃计数（不静默截断成「看起来完整」）', () => {
+    const many = {};
+    for (let i = 0; i < MAX_AUDIT_HEADERS + 5; i += 1) many[`x-h${i}`] = 'v';
+    const byCount = sanitizeAuditHeaders(many);
+    expect(Object.keys(byCount)).toHaveLength(MAX_AUDIT_HEADERS + 1);
+    expect(byCount.__truncated).toEqual({
+      dropped: 5,
+      maxHeaders: MAX_AUDIT_HEADERS,
+      maxBytes: MAX_AUDIT_HEADER_BYTES,
+    });
+
+    const big = {};
+    for (let i = 0; i < 30; i += 1) big[`x-big-${i}`] = 'v'.repeat(500);
+    const byBytes = sanitizeAuditHeaders(big);
+    expect(byBytes.__truncated).toBeTruthy();
+    expect(byBytes.__truncated.dropped).toBeGreaterThan(0);
+    const kept = Object.fromEntries(
+      Object.entries(byBytes).filter(([key]) => key !== '__truncated')
+    );
+    expect(Buffer.byteLength(JSON.stringify(kept), 'utf8')).toBeLessThanOrEqual(
+      MAX_AUDIT_HEADER_BYTES
+    );
+  });
+
+  test('响应正文：对象按同一份敏感名单脱敏，业务字段保留', () => {
+    const captured = sanitizeAuditResponseBody({
+      token: 'RAW-TOKEN',
+      recoveryCodes: ['RAW-CODE'],
+      otpauthUri: 'otpauth://totp/RAW-SEED',
+      nested: { ticket: 'RAW-TICKET' },
+      keep: 'trace-me',
+    });
+    expect(captured.truncated).toBe(false);
+    expect(captured.skipped).toBeUndefined();
+    expect(captured.value.keep).toBe('trace-me');
+    expect(captured.value.nested.ticket).toBe('***');
+    expect(JSON.stringify(captured.value)).not.toContain('RAW-');
+  });
+
+  test('响应正文：字符串与对象都按 UTF-8 字节封顶，截断留标记', () => {
+    const asString = sanitizeAuditResponseBody('x'.repeat(MAX_AUDIT_RESPONSE_BODY_BYTES + 1000));
+    expect(asString.truncated).toBe(true);
+    expect(asString.value.endsWith(RESPONSE_BODY_TRUNCATED_MARK)).toBe(true);
+    expect(Buffer.byteLength(asString.value, 'utf8')).toBeLessThanOrEqual(
+      MAX_AUDIT_RESPONSE_BODY_BYTES
+    );
+
+    const asObject = sanitizeAuditResponseBody({
+      payload: 'y'.repeat(MAX_AUDIT_RESPONSE_BODY_BYTES + 1000),
+    });
+    expect(asObject.truncated).toBe(true);
+    expect(typeof asObject.value).toBe('string');
+    expect(asObject.value.endsWith(RESPONSE_BODY_TRUNCATED_MARK)).toBe(true);
+  });
+
+  test('未采集原因可区分：stream / empty / binary / unserializable 各有标记', () => {
+    expect(sanitizeAuditResponseBody(undefined)).toEqual({
+      value: undefined,
+      truncated: false,
+      skipped: 'empty',
+    });
+    expect(sanitizeAuditResponseBody(null)).toEqual({
+      value: null,
+      truncated: false,
+      skipped: undefined,
+    });
+    expect(sanitizeAuditResponseBody('ignored', 'stream')).toEqual({
+      value: undefined,
+      truncated: false,
+      skipped: 'stream',
+    });
+    expect(sanitizeAuditResponseBody(Buffer.from('abc'))).toEqual({
+      value: { __type: 'binary', bytes: 3 },
+      truncated: false,
+      skipped: 'binary',
+    });
+    expect(sanitizeAuditResponseBody({ big: 1n })).toEqual({
+      value: undefined,
+      truncated: false,
+      skipped: 'unserializable',
+    });
+    // Date 保真：不能被摊成 {}（与 body 脱敏同一口径）
+    expect(sanitizeAuditResponseBody({ at: new Date('2026-11-02T00:00:00Z') }).value.at).toBe(
+      '2026-11-02T00:00:00.000Z'
+    );
+  });
+
+  test('中间件真实驱动：请求/响应头与响应正文一并落进审计缓冲', async () => {
+    const express = require('express');
+    const request = require('supertest');
+    const auditBuffer = require('../../services/auditBuffer');
+    const { auditLog } = require('../../middleware/security');
+    const spyPush = jest.spyOn(auditBuffer, 'push');
+
+    const app = express();
+    app.use(express.json());
+    app.use('/api/', auditLog());
+    app.post('/api/probe', (req, res) =>
+      res.json({
+        token: 'RAW-TOKEN',
+        recoveryCodes: ['RAW-CODE'],
+        keep: 'trace-me',
+      })
+    );
+
+    try {
+      const res = await request(app)
+        .post('/api/probe')
+        .set('Authorization', 'Bearer RAW-AUTH')
+        .set('Cookie', 'sid=RAW-SID')
+        .set('X-Reauth-Ticket', 'RAW-TICKET')
+        .send({ password: 'RAW-PASS' });
+      expect(res.status).toBe(200);
+      await new Promise((r) => setImmediate(r));
+
+      const pushed = spyPush.mock.calls
+        .map(([doc]) => doc)
+        .filter((doc) => doc && doc.path === '/api/probe');
+      expect(pushed).toHaveLength(1);
+      const doc = pushed[0];
+
+      // 请求头：凭据整袋掩码，普通头保留
+      expect(doc.requestHeaders.authorization).toBe('***');
+      expect(doc.requestHeaders.cookie).toBe('***');
+      expect(doc.requestHeaders['x-reauth-ticket']).toBe('***');
+      expect(String(doc.requestHeaders['content-type'])).toContain('application/json');
+
+      // 响应头在响应真正发出后才读取，Content-Type 必须已存在
+      expect(String(doc.responseHeaders['content-type'])).toContain('application/json');
+
+      // 响应正文：凭据键打码，业务字段保留；采集成功的对象不标 skipped
+      expect(doc.responseBody).toEqual({
+        token: '***',
+        recoveryCodes: '***',
+        keep: 'trace-me',
+      });
+      expect(doc.responseBodyTruncated).toBeUndefined();
+      expect(doc.responseBodySkipped).toBeUndefined();
+
+      // 全文档不得含任何 HTTP 头里的明文凭据
+      const serialized = JSON.stringify(doc);
+      for (const raw of ['RAW-AUTH', 'RAW-SID', 'RAW-TICKET', 'RAW-PASS', 'RAW-CODE']) {
+        expect(serialized).not.toContain(raw);
+      }
+    } finally {
+      spyPush.mockRestore();
+    }
+  });
+});

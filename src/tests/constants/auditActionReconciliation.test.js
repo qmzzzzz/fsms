@@ -275,47 +275,48 @@ describe('审计 action 白名单对账', () => {
    * 新增一条必须写清它为什么不是审计写入——这正是"排除"本来该有的成本。
    */
   const NOT_AUDIT_ACTION_LITERALS = [
-    // 蜜罐诱饵告警的冻结行数据（DECOY_ALARMS）：processLog/status 是给陷阱会话
-    // 回放的**展示层假历史**，字段名恰好叫 action/status，不是 AuditLog 写入。
-    // 各字面量出处：status 'resolved' :14/:58；processLog 'dispatched' :25/:46、
-    // 'alarm_received' :87、'marked_false_alarm' :111；巡检侧 'started' :182/:228、
-    // 'completed' :185/:231、'review_approved' :189。
+    // 蜜罐诱饵告警的冻结行数据（DECOY_ALARMS / DECOY_INSPECTIONS 两个数据文件）：
+    // processLog/executionLog/status 是给陷阱会话回放的**展示层假历史**，字段名恰好叫
+    // action/status，不是 AuditLog 写入。各字面量出处：告警侧 status 'resolved' :14/:58、
+    // processLog 'dispatched' :25/:46、'resolved' :26/:71、'alarm_received' :92、
+    // 'marked_false_alarm' :118；巡检侧 'started' :34/:69/:115/:181、
+    // 'completed' :72/:118/:184、'review_approved' :76/:188。
     [
-      'src/constants/honeypotDecoyEvents.js',
+      'src/constants/honeypotDecoyAlarms.js',
       'alarm_received',
       'decoy',
-      ':87 诱饵告警 processLog 展示数据',
+      ':92 诱饵告警 processLog 展示数据',
     ],
     [
-      'src/constants/honeypotDecoyEvents.js',
+      'src/constants/honeypotDecoyInspections.js',
       'completed',
       'decoy',
-      ':185/:231 诱饵巡检 processLog 展示数据',
+      ':72/:118/:184 诱饵巡检 executionLog 展示数据',
     ],
     [
-      'src/constants/honeypotDecoyEvents.js',
+      'src/constants/honeypotDecoyAlarms.js',
       'dispatched',
       'decoy',
       ':25/:46 诱饵告警 processLog 展示数据',
     ],
     [
-      'src/constants/honeypotDecoyEvents.js',
+      'src/constants/honeypotDecoyAlarms.js',
       'marked_false_alarm',
       'decoy',
-      ':111 诱饵告警 processLog 展示数据',
+      ':118 诱饵告警 processLog 展示数据',
     ],
-    ['src/constants/honeypotDecoyEvents.js', 'resolved', 'decoy', ':14/:58 诱饵告警 status 字段值'],
+    ['src/constants/honeypotDecoyAlarms.js', 'resolved', 'decoy', ':14/:58 诱饵告警 status 字段值'],
     [
-      'src/constants/honeypotDecoyEvents.js',
+      'src/constants/honeypotDecoyInspections.js',
       'review_approved',
       'decoy',
-      ':189 诱饵巡检 processLog 展示数据',
+      ':76/:188 诱饵巡检 executionLog 展示数据',
     ],
     [
-      'src/constants/honeypotDecoyEvents.js',
+      'src/constants/honeypotDecoyInspections.js',
       'started',
       'decoy',
-      ':182/:228 诱饵巡检 processLog 展示数据',
+      ':34/:69/:115/:181 诱饵巡检 executionLog 展示数据',
     ],
     // /api/metrics 快照面的 MFA 动作分布（MFA_SERIES）：键名叫 action、取值恰好与
     // metrics.incMfaAction 的动作域同名，但这是**合成计数表**——既不写审计集合，也不调用 metrics，

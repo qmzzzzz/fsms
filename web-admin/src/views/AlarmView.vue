@@ -112,12 +112,12 @@
           </template>
         </el-table-column>
         <!--
-          列宽预算：新增「标记误报」后同一行最多四个按钮
-          （pending 行：指派处理+处理完成+标记误报+详情 = 68×3+44 = 248px），
-          加单元格左右 padding 24px 需 272px——240px 会把「详情」挤到第二行。
+          列宽预算：新增「取消报警」后同一行最多四个操作按钮 + 详情
+          （pending 行：指派处理+处理完成+标记误报+取消报警+详情 = 68×4+44 = 316px），
+          加单元格左右 padding 24px 需 340px——340px 为当前下限。
           位置列是 min-width 弹性列，会吸收视口富余，整表总宽不受影响。
         -->
-        <el-table-column :label="$t('common.operation')" width="280" fixed="right">
+        <el-table-column :label="$t('common.operation')" width="340" fixed="right">
           <template #default="{ row }">
             <!--
               handle(row) 按状态走两条不同后端接口：pending→dispatch（需 alarm:dispatch）、
@@ -162,6 +162,17 @@
               @click="markAsFalseAlarm(row)"
             >
               {{ $t('alarm.falseAlarm') }}
+            </button>
+            <button
+              v-if="
+                hasPerm('alarm:handle') && (row.status === 'pending' || row.status === 'processing')
+              "
+              type="button"
+              class="glass-btn glass-btn--danger glass-btn--link"
+              :disabled="rowBusy === row._id"
+              @click="cancelAlarm(row)"
+            >
+              {{ $t('alarm.cancel') }}
             </button>
             <button
               type="button"
@@ -285,6 +296,7 @@ import { createSubmissionKey } from '@/utils/idempotency'
 import { makeAlarmTypeLabels } from '@/utils/labelMaps'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
+import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import GlassSegmented from '@/components/GlassSegmented.vue'
 
 const { hasPerm } = usePermission()
@@ -538,6 +550,15 @@ const refreshAll = async () => {
   await Promise.all([loadData(), loadStats()])
 }
 
+// 后端在报警创建/派单/到场/结单等状态迁移后向 'alarm' 房间推送 notification。
+// 收到就刷新列表与统计：此前本页没有任何订阅，值班员只能手动刷新，
+// 新报警要等下一次操作才出现在台账里。
+useRealtimeRefresh({
+  rooms: ['alarm'],
+  subscriptions: [{ event: 'notification', handler: refreshAll }],
+  label: 'AlarmView',
+})
+
 // 显示新建报警对话框
 const showReportDialog = () => {
   // 每打开一次上报框算一次新的提交意图（上一次的键可能已用它生成过警情）
@@ -751,6 +772,36 @@ const resolve = async (row) => {
   }
 }
 
+// 取消报警（pending/processing → cancelled；可选原因写入处理日志）
+const cancelAlarm = async (row) => {
+  if (row.status !== 'pending' && row.status !== 'processing') return
+  // 同 handle/resolve/markAsFalse：首行同步判定，避免同一 tick 双击弹出两次原因框
+  if (rowBusy.value === row._id) return
+
+  rowBusy.value = row._id
+  try {
+    const { value } = await ElMessageBox.prompt(t('alarm.cancelConfirm'), t('alarm.cancel'), {
+      inputType: 'textarea',
+      inputPlaceholder: t('alarm.cancelReasonPlaceholder'),
+      // 选填：上限与路由 handleReasonValidation 的 1000 同口径
+      inputValidator: (v) => !v || v.trim().length <= 1000 || t('alarm.cancelReasonTooLong'),
+      confirmButtonText: t('common.confirm'),
+      cancelButtonText: t('common.cancel'),
+      type: 'warning',
+    })
+    const reason = (value || '').trim()
+    await api.alarms.cancel(row._id, reason ? { reason } : {})
+    ElMessage.success(t('alarm.cancelSuccess'))
+    await refreshAll()
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') {
+      // 错误已在拦截器处理
+    }
+  } finally {
+    rowBusy.value = null
+  }
+}
+
 // 标记误报（pending/processing → false_alarm；可选原因写入 handleResult 与处理日志）
 const markAsFalseAlarm = async (row) => {
   if (row.status !== 'pending' && row.status !== 'processing') return
@@ -887,10 +938,6 @@ onMounted(() => {
   margin-bottom: var(--xf-spacing-lg);
   font-family: var(--xf-font-body);
   letter-spacing: var(--xf-tracking-wide);
-}
-.glass-card {
-  animation: page-enter 0.4s var(--xf-ease-glass) both;
-  animation-delay: 0.25s;
 }
 
 /* 与 DeviceView / InspectionView 的分页容器保持同一布局口径 */

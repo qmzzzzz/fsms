@@ -103,7 +103,9 @@ describe('A4 接线闸（只登记不接线 = 缺陷）', () => {
       "{type,query,total=null,collation=null,maskPii=false,lang='zh',watermark=null}"
     );
     // A-8：水印四路同号之三/四（表尾可见行 + 响应头），且只在 watermark 非空时落
-    expect(wb).toContain('worksheet.addRow([watermark.text])');
+    // italic 是自研写入器挑水印样式的唯一依据（xlsxWriter 按 font.italic===true 施加
+    // STYLE_WATERMARK）——所以它必须长在这次调用里，不能事后赋值（那会被静默丢掉样式）
+    expect(wb).toContain('worksheet.addRow([watermark.text],{font:{italic:true}})');
     expect(wb).toContain('res.setHeader(TRACE_HEADER,watermark.traceId)');
     expect(wb).toContain('filename=watermark');
     expect(wb).toContain('createSafeTransform(EXPORT_ROW_TRANSFORMS[type],{maskPii,lang})');

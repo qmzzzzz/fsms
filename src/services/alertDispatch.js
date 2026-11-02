@@ -116,7 +116,10 @@ const dispatchNotification = (alertType, level, message, data) =>
     logger.error(`安全告警投递未能执行（${alertType}）：${err.message}`, { alertType })
   );
 
+const __resetAlertRateLimitForTest = () => alertRateLimit.clear(); // 测试钩子：清频控表（生产不得调用；用例侧理由见各 honeypot 套件的前置注释）
+
 module.exports = {
+  __resetAlertRateLimitForTest,
   ALERT_RATE_LIMIT_MS,
   startAlertCleanup,
   stopAlertCleanup,

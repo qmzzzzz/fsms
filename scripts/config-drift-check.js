@@ -123,19 +123,43 @@ function dockerfileItems(rootDir) {
   return items;
 }
 
-/** nginx 模板：逐条指令摘要（值可能含 ssl_ciphers 长串，同样只存摘要） */
+/**
+ * nginx 模板：逐条指令摘要（值可能含 ssl_ciphers 长串，同样只存摘要）。
+ *
+ * 【为什么必须把同一指令的**全部**副本收进同一个摘要】
+ * 同一指令在模板里出现多份是常态而非异常：本仓 `deployment/nginx.conf.example` 里
+ * `server_tokens` / HSTS / `X-Frame-Options` 各出现 3 次——443、80/跳转、另一处 server
+ * 各下一份。原实现是逐行 `items['nginx:' + directive] = digest(本行)`，也就是**覆盖赋值**，
+ * 账面上最终只剩**最后一份**。
+ * 实测后果（第26轮审计探针 work/r26-ngx-copies-probe.js，修前原文见 work/r26-ngx-copies-before.log）：
+ *   改第 197 行（第 1 份 HSTS）⇒ 报「无漂移」
+ *   改第 266 行（第 2 份 HSTS）⇒ 报「无漂移」
+ *   把第 266 行整行注释掉      ⇒ 报「无漂移」
+ *   改第 312 行（第 3 份）     ⇒ 才报 changed
+ * 即 3 份里 2 份没人看着。而「某个 server 块的安全头被摘掉 / 被降级」正是这道闸要拦的事，
+ * 它属于「视野不覆盖」而不是风格问题：闸照样绿，因为绿是从**别的副本**得来的。
+ *
+ * 修法：按指令收集**全部**命中行（保持文件内顺序）、归一化空白后 join 成一份再取摘要。
+ * 于是「改任意一份 / 删任意一份 / 整行注释掉其中一份 / 新增一份」都会改变摘要。
+ *
+ * 【为什么不用行号或「第 n 份」做键】在模板前面插一行（哪怕只是加一句注释）会让后续
+ * 所有键的序号整体错位、一次性造出一片与安全无关的假漂移——那是「会误报的尺子比没有更坏」
+ * 的形状：人被误报训练几轮之后就不再看这条闸的输出。
+ */
 function nginxItems(rootDir) {
   const text = readIfExists(path.join(rootDir, 'deployment/nginx.conf.example'));
   if (text === null) return {};
+  // 先归一化再匹配：指令名与参数之间写成多个空格/制表符的那一行同样是「一份副本」，
+  // 拿未归一化的行去 startsWith 会让它静静落空。本仓模板当前没有这种写法（实测 8 条指令
+  // 的 strict/norm 命中数逐一相同，见 work/r26-ngx-strict-norm.log），但这是同一类「视野不覆盖」，
+  // 顺手并进同一个归一化里不增加任何复杂度。
+  const lines = text.split(/\r?\n/).map((line) => line.trim().replace(/\s+/g, ' '));
   const items = {};
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    for (const directive of NGINX_DIRECTIVES) {
-      if (trimmed.startsWith(directive)) {
-        items['nginx:' + directive] = digestOf(trimmed.replace(/\s+/g, ' '));
-        break;
-      }
-    }
+  for (const directive of NGINX_DIRECTIVES) {
+    const hits = lines.filter((line) => line.startsWith(directive));
+    // 一条都没命中 ⇒ 不入账（保持既有语义：指令被整段删掉时该键消失 ⇒ 报 removed）
+    if (hits.length === 0) continue;
+    items['nginx:' + directive] = digestOf(hits.join('\n'));
   }
   return items;
 }

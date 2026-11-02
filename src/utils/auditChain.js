@@ -13,6 +13,7 @@ const {
   PAYLOAD_FIELDS_V3,
   PAYLOAD_FIELDS_V4,
   PAYLOAD_FIELDS_V5,
+  PAYLOAD_FIELDS_V6,
   CURRENT_PAYLOAD_VERSION,
   canonicalPayload,
   canonicalPayloadV2LegacyBatch,
@@ -304,17 +305,17 @@ async function writeSharedTail(value) {
 /**
  * 取当前链尾：优先指针（内存或共享缓存）；未初始化时从 DB 读一次。
  *
- * Redis 就绪时链尾外置到共享缓存（CHAIN_TAIL_KEY），多实例共享同一链尾；
- * 键不存在表示「未初始化」→ 从 DB 读一次并回写；值为 EMPTY_SENTINEL 表示
- * 链尾已初始化为 null（尚无任何记录）。未配置 Redis 时走进程内内存指针。
+ * Redis 就绪时链尾外置（CHAIN_TAIL_KEY）；键不存在 = 未初始化，EMPTY_SENTINEL = 「写入那一刻
+ * 链尾为 null」——两者都回 DB 读一次并回写：哨兵是历史事实而非当前事实（多实例 set 未落地、
+ * 运维直写库只写 hash 都会让它陈旧），按 null 续链即落成第二条链首。未配置时走进程内指针。
  */
 async function getChainTail(model) {
   if (sharedCache.isRedisEnabled() && !sharedTailUntrusted) {
     const shared = await sharedCache.get(CHAIN_TAIL_KEY);
-    if (shared === EMPTY_SENTINEL) return null;
-    if (shared !== null && shared !== undefined) return shared;
-    // 键不存在（未初始化）：从 DB 读并回写共享缓存，供本实例及他实例复用
+    if (shared !== null && shared !== undefined && shared !== EMPTY_SENTINEL) return shared;
+    // 键不存在（未初始化）与哨兵都回 DB 读一次：哨兵只证明「写入那一刻」链为空（见函数头）
     const latest = await getLatestHash(model);
+    if (shared === EMPTY_SENTINEL && latest === null) return null; // 库真为空：结论与改前逐字相同（代价是多一次 find）
     // F-204：这条"回写"路径必须和 advanceChainTail 一样吃 set() 的落地判据。
     // 写没进 Redis 时，sharedCache.set 会把值落进**本进程内存**并返回 false；此后任何
     // 一次共享读命令失败（Redis 抖动/主从切换）都会让 get() 从内存顶回这份副本，
@@ -407,6 +408,8 @@ async function resyncChainTail() {
   // 删除失败：共享链尾残留属降级，但「链尾失效」本就是尽力而为的自愈入口，
   // 吞错避免 fire-and-forget 路径产生 unhandled rejection
   if (sharedCache.isRedisEnabled()) await sharedCache.del(CHAIN_TAIL_KEY).catch(() => {});
+  else if (sharedCache.isRedisConfigured())
+    logger.warn('链尾自愈未执行：Redis 已配置但未就绪，共享链尾键未清理（本进程内不再尝试）'); // 与 G-01 同形：空转必须留信号；本函数无重试点
 }
 
 /**
@@ -547,6 +550,7 @@ module.exports = {
   PAYLOAD_FIELDS_V3,
   PAYLOAD_FIELDS_V4,
   PAYLOAD_FIELDS_V5,
+  PAYLOAD_FIELDS_V6,
   PAYLOAD_SCHEMA_DEFAULTS,
   CURRENT_PAYLOAD_VERSION,
   canonicalPayload,

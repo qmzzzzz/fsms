@@ -32,7 +32,7 @@ const logger = require('./logger');
  *   - `guardDetection` 的文档承诺"永不 reject"（见其 @returns），处理器抛错
  *     直接违背该契约，而调用方全是 `.catch(() => {})` ⇒ TypeError 又被吞掉，
  *     结果是"检测失效 + 零痕迹"，与不修时同形。
- * 取本仓库既有写法（index.js:441、loggerFlush.js:216 errText）。
+ * 取本仓库既有写法（index.js:105、loggerFlush.js:215 errText）。
  */
 const errText = (err) => (err && err.message ? err.message : err);
 
@@ -94,7 +94,7 @@ const onAuditWriteFailureRethrow = (auditAction, req) => (err) => {
  *
  * 契约与 onAuditWriteFailure 一致：**永不 reject、不改业务语义**。
  * 两条实现细节沿用 shutdownBudget.guardStep 的经验：
- *  1) 超时后原 promise 若再 reject，必须当场接住，否则成为 unhandledRejection；
+ *  1) 超时后原 promise 若再 reject，必须当场接住**并单独记账**——只接住不记账，等于超时日志那句「后续失败仍会单独记账」是空头承诺；接住它的回调自己也不得抛，否则同样成为 unhandledRejection；
  *  2) 闸的定时器要 unref，别让事件循环为一个已放弃的等待多活 timeoutMs。
  *
  * @param {Promise} write 已经在写的审计 promise
@@ -120,6 +120,22 @@ async function awaitAuditWrite(write, auditAction, req, timeoutMs = AUDIT_WRITE_
         auditAction,
         req
       )(new Error(`等待审计写入超时（${timeoutMs}ms），后续失败仍会单独记账`));
+      settled.then(
+        (late) => {
+          if (!late) return;
+          try {
+            onAuditWriteFailure(
+              auditAction,
+              req
+            )(
+              new Error(`等待审计写入超时（${timeoutMs}ms）后仍失败（迟到记账）：${errText(late)}`)
+            );
+          } catch (e) {
+            logger.error(`{审计写入失败}：迟到记账自身抛错：${errText(e)}`, { auditAction });
+          }
+        },
+        () => {} // 迟到值不可读（取 .then 抛错）时 settled 自身也会 reject：不接住这里，派生 promise 无人接管
+      );
     } else if (result) {
       onAuditWriteFailure(auditAction, req)(result);
     }

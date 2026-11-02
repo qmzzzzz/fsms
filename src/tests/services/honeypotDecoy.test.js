@@ -25,6 +25,7 @@ const {
   resolveAggregatePayload,
 } = require('../../constants/honeypotDecoyAggregates');
 const securityAlert = require('../../services/securityAlert');
+const { __resetAlertRateLimitForTest } = require('../../services/alertDispatch');
 const {
   DECOY_ALARMS,
   DECOY_DEVICES,
@@ -104,6 +105,10 @@ describe('蜜罐影子数据面（P1）：改道判定、合成数据与留痕',
   });
 
   beforeEach(() => {
+    // 告警投递按「类别 + 账户 + 业务日」与 5 分钟频控两处节流：都是进程级状态。
+    // 不重置则本文件的「告警仍一条」断言取决于**别的套件**跑过什么（--randomize 下跨套件撞红）。
+    honeypotWatch.__resetForTest();
+    __resetAlertRateLimitForTest();
     dispatchSpy = jest.spyOn(securityAlert, 'dispatchNotification').mockImplementation(() => {});
   });
 
@@ -136,7 +141,9 @@ describe('蜜罐影子数据面（P1）：改道判定、合成数据与留痕',
       DECOY_DEVICES.every(
         (d) =>
           d.lifecycleStage &&
-          d.maintenanceRecordCount === 0 &&
+          // count 是全历史 push 数、数组是封顶后的尾部 ⇒ 恒 count ≥ length；诱饵行没有截断故事，
+          // 钉成相等：「报修中/有留痕」配 count 0（或反过来）都会在这里红
+          d.maintenanceRecordCount === d.maintenanceRecord.length &&
           [d.maintenanceRecord, d.inspectionRecord, d.images].every(Array.isArray)
       )
     ).toBe(true); // M3：真实必现键齐了
@@ -220,6 +227,10 @@ describe('蜜罐影子数据面（P1）：改道判定、合成数据与留痕',
 
   test('诱饵会话只读：接管后返回合成列表并留 high 审计 + 一条 HIGH 告警（重复探测审计逐条、告警仍一条）', async () => {
     honeypotWatch.__resetForTest();
+    // 本文件别的用例、甚至别的套件（共享同一 MongoMemoryServer）可能已给同一诱饵账户
+    // 留过 honeypot_probe 行：全部按**增量**断言，绝对值在随机序/并行套件下必漂
+    const auditBaseline = await probeRows(honeypotName);
+    const highBaseline = await probeRows(honeypotName, 'high');
     const res = makeRes();
     expect(await honeypotDecoy.steer(makeReq('GET', '/api/users'), res)).toBe(true);
     expect(res.statusCode).toBe(200);
@@ -227,7 +238,11 @@ describe('蜜罐影子数据面（P1）：改道判定、合成数据与留痕',
     expect(res.body.data).toHaveLength(DECOY_USERS.length);
     expect(res.body.data.map((u) => u.username)).not.toContain('admin');
     expect(res.body.pagination.total).toBe(DECOY_USERS.length);
-    const rows = await AuditLog.find({ action: 'honeypot_probe', username: honeypotName }).lean();
+    const rows = await AuditLog.find({ action: 'honeypot_probe', username: honeypotName })
+      .sort({ createdAt: -1 })
+      .limit(1)
+      .lean();
+    expect(await probeRows(honeypotName)).toBe(auditBaseline + 1);
     expect(rows).toHaveLength(1);
     expect(rows[0].riskLevel).toBe('high');
     expect(rows[0].category).toBe('security');
@@ -237,18 +252,19 @@ describe('蜜罐影子数据面（P1）：改道判定、合成数据与留痕',
     expect(probeDispatches()[0][1]).toBe(securityAlert.ALERT_LEVELS.HIGH);
 
     await honeypotDecoy.steer(makeReq('GET', '/api/users/hp-u2'), makeRes());
-    expect(await probeRows(honeypotName, 'high')).toBe(2);
+    expect(await probeRows(honeypotName, 'high')).toBe(highBaseline + 2);
     expect(probeDispatches()).toHaveLength(1);
   });
 
   test('写尝试：403 且响应体与真实 403 逐字相同（同一构造器）+ critical 审计 + 独立告警', async () => {
+    const criticalBaseline = await probeRows(honeypotName, 'critical'); // 增量口径（同上：跨用例/跨套件共享库）
     const res = makeRes();
     const expected = makeRes();
     ApiResponse.codeError(expected, 'PERMISSION_DENIED');
     expect(await honeypotDecoy.steer(makeReq('POST', '/api/users'), res)).toBe(true);
     expect(res.statusCode).toBe(403);
     expect(res.body).toEqual(expected.body);
-    expect(await probeRows(honeypotName, 'critical')).toBe(1);
+    expect(await probeRows(honeypotName, 'critical')).toBe(criticalBaseline + 1);
     const writeCall = probeDispatches().find((c) => c[1] === securityAlert.ALERT_LEVELS.CRITICAL);
     expect(writeCall).toBeTruthy();
     expect(writeCall[3].verdict).toBe(HONEYPOT_VERDICT.DENY);

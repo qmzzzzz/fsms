@@ -48,6 +48,21 @@
             style="width: 260px"
           />
         </el-form-item>
+        <el-form-item :label="$t('forensic.rangePresetLabel')" class="preset-item">
+          <div class="range-presets" role="group" :aria-label="$t('forensic.rangePresetLabel')">
+            <button
+              v-for="preset in RANGE_PRESETS"
+              :key="preset.key"
+              type="button"
+              class="glass-btn glass-btn--default glass-btn--sm preset-btn"
+              :class="{ 'is-active': activeRangePreset === preset.key }"
+              :aria-pressed="activeRangePreset === preset.key"
+              @click="applyRangePreset(preset)"
+            >
+              {{ $t(preset.labelKey) }}
+            </button>
+          </div>
+        </el-form-item>
         <el-form-item :label="$t('forensic.limitLabel')">
           <el-input-number v-model="criteria.limit" :min="1" :max="1000" :step="100" />
         </el-form-item>
@@ -60,8 +75,21 @@
           >
             {{ tracing ? $t('forensic.searching') : $t('forensic.search') }}
           </button>
-          <button type="button" class="glass-btn glass-btn--default" @click="resetCriteria">
+          <button
+            type="button"
+            class="glass-btn glass-btn--default"
+            :disabled="tracing"
+            @click="resetCriteria"
+          >
             {{ $t('forensic.reset') }}
+          </button>
+          <button
+            type="button"
+            class="glass-btn glass-btn--default"
+            :disabled="copyingLink"
+            @click="handleCopyLink"
+          >
+            {{ $t('forensic.copyLink') }}
           </button>
           <!-- 导出与查询同权限码（security:audit）；会话期内权限被热回收时按钮随之消失 -->
           <button
@@ -79,11 +107,23 @@
     </div>
 
     <!-- 溯源结果：时间线 + 触发原因分布 + 网段分布 + 「他的 ip 池」 -->
-    <div v-if="hasQueried" class="glass glass-card">
+    <div
+      v-if="hasQueried || tracing"
+      ref="resultCardRef"
+      v-loading="tracing"
+      :element-loading-text="$t('forensic.searching')"
+      class="glass glass-card result-card"
+    >
       <div class="card-header">
         <span>{{ $t('forensic.resultCard') }}</span>
         <span v-if="result" class="card-meta">{{ resultSummary }}</span>
       </div>
+      <!-- 判据按「发起查询时」的快照回显：用户改表单但还没重查时，结果与判据不会对不上 -->
+      <p v-if="result && lastCriteriaText" class="criteria-echo">
+        {{ $t('forensic.criteriaEcho', { criteria: lastCriteriaText }) }}
+      </p>
+
+      <p v-if="tracing && !result" class="empty-tip">{{ $t('forensic.searching') }}</p>
 
       <el-alert
         v-if="traceError"
@@ -116,7 +156,21 @@
 
       <template v-if="result">
         <!-- 时间线：统一走 utils/datetime.formatTime（本地时区 + 定长口径） -->
-        <h3 class="section-title">{{ $t('forensic.timelineTitle') }}</h3>
+        <div class="section-head">
+          <h3 class="section-title">{{ $t('forensic.timelineTitle') }}</h3>
+          <button
+            type="button"
+            class="glass-btn glass-btn--default glass-btn--sm"
+            @click="toggleTimelineOrder"
+          >
+            {{
+              timelineOrder === 'desc'
+                ? $t('forensic.sortNewestFirst')
+                : $t('forensic.sortOldestFirst')
+            }}
+          </button>
+        </div>
+        <p class="card-hint pivot-hint">{{ $t('forensic.pivotHint') }}</p>
         <el-table
           :data="timelineRows"
           border
@@ -135,12 +189,30 @@
           </el-table-column>
           <el-table-column :label="$t('forensic.colIp')" min-width="130">
             <template #default="{ row }">
-              <span class="mono">{{ row.ip || '-' }}</span>
+              <button
+                v-if="row.ip"
+                type="button"
+                class="pivot-link mono"
+                :title="$t('forensic.pivotTitle')"
+                @click="pivotBy('ip', row.ip)"
+              >
+                {{ row.ip }}
+              </button>
+              <span v-else>-</span>
             </template>
           </el-table-column>
           <el-table-column :label="$t('forensic.colSegment')" width="110">
             <template #default="{ row }">
-              <span class="mono">{{ row.ipSegment || '-' }}</span>
+              <button
+                v-if="row.ipSegment"
+                type="button"
+                class="pivot-link mono"
+                :title="$t('forensic.pivotTitle')"
+                @click="pivotBy('ipSegment', row.ipSegment)"
+              >
+                {{ row.ipSegment }}
+              </button>
+              <span v-else>-</span>
             </template>
           </el-table-column>
           <el-table-column :label="$t('forensic.colMethod')" width="90">
@@ -190,7 +262,16 @@
             show-overflow-tooltip
           >
             <template #default="{ row }">
-              <span class="mono">{{ row.fingerprint || '-' }}</span>
+              <button
+                v-if="row.fingerprint"
+                type="button"
+                class="pivot-link mono"
+                :title="$t('forensic.pivotTitle')"
+                @click="pivotBy('fingerprint', row.fingerprint)"
+              >
+                {{ row.fingerprint }}
+              </button>
+              <span v-else>-</span>
             </template>
           </el-table-column>
         </el-table>
@@ -225,7 +306,20 @@
               <template #empty>
                 <div class="empty-tip">{{ $t('forensic.emptySegment') }}</div>
               </template>
-              <el-table-column prop="name" :label="$t('forensic.colSegment')" min-width="140" />
+              <el-table-column :label="$t('forensic.colSegment')" min-width="140">
+                <template #default="{ row }">
+                  <button
+                    v-if="row.name"
+                    type="button"
+                    class="pivot-link mono"
+                    :title="$t('forensic.pivotTitle')"
+                    @click="pivotBy('ipSegment', row.name)"
+                  >
+                    {{ row.name }}
+                  </button>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
               <el-table-column prop="count" :label="$t('forensic.poolHits')" width="100" />
             </el-table>
           </div>
@@ -246,7 +340,16 @@
           </template>
           <el-table-column :label="$t('forensic.poolSegment')" min-width="140">
             <template #default="{ row }">
-              <span class="mono">{{ row.segment || '-' }}</span>
+              <button
+                v-if="row.segment"
+                type="button"
+                class="pivot-link mono"
+                :title="$t('forensic.pivotTitle')"
+                @click="pivotBy('ipSegment', row.segment)"
+              >
+                {{ row.segment }}
+              </button>
+              <span v-else>-</span>
             </template>
           </el-table-column>
           <el-table-column prop="hits" :label="$t('forensic.poolHits')" width="110" />
@@ -353,9 +456,19 @@
             <span v-else class="muted">{{ $t('forensic.noRecommendBan') }}</span>
           </template>
         </el-table-column>
-        <!-- 封段按钮：与路由 meta / 后端同一权限码；无可封 CIDR 时不给入口 -->
-        <el-table-column :label="$t('common.operation')" width="150" fixed="right">
+        <!-- 操作列：先给「查看记录」的核验入口（读溯源只需 security:audit），封段按钮另按 security:config 门控 -->
+        <el-table-column :label="$t('common.operation')" width="230" fixed="right">
           <template #default="{ row }">
+            <button
+              v-if="row.segment"
+              type="button"
+              class="glass-btn glass-btn--default glass-btn--link"
+              :disabled="tracing"
+              :title="$t('forensic.clusterViewTitle')"
+              @click="viewClusterRecords(row)"
+            >
+              {{ $t('forensic.viewRecords') }}
+            </button>
             <button
               v-if="hasPerm('security:config') && row.cidr"
               type="button"
@@ -365,7 +478,9 @@
             >
               {{ $t('forensic.banAction') }}
             </button>
-            <span v-else class="muted">-</span>
+            <span v-if="!row.segment && !(hasPerm('security:config') && row.cidr)" class="muted"
+              >-</span
+            >
           </template>
         </el-table-column>
       </el-table>
@@ -461,6 +576,14 @@
         </button>
         <button
           type="button"
+          class="glass-btn glass-btn--default"
+          :disabled="banSubmitting || tracing"
+          @click="reviewBeforeBan"
+        >
+          {{ $t('forensic.banReviewFirst') }}
+        </button>
+        <button
+          type="button"
           class="glass-btn glass-btn--danger"
           :disabled="banSubmitting"
           @click="handleConfirmBan"
@@ -479,7 +602,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { formatTime } from '@/utils/datetime'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
@@ -489,19 +613,28 @@ import { useLatestRequest } from '@/composables/useLatestRequest'
 
 const { t } = useI18n()
 const { hasPerm } = usePermission()
+const route = useRoute()
+const router = useRouter()
 
 // 默认时间范围：最近 7 天（与后端 DEFAULT_WINDOW_MS 同口径）
-const DAY_MS = 24 * 60 * 60 * 1000
-const defaultDateRange = () => {
-  const until = new Date()
-  const since = new Date(until.getTime() - 7 * DAY_MS)
-  // value-format=YYYY-MM-DD，这里必须给本地日期串（toISOString 在东八区 0-8 点会早一天）
-  const wall = (d) => {
-    const p = (n) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
-  }
-  return [wall(since), wall(until)]
+// value-format=YYYY-MM-DD，这里必须给本地日期串（toISOString 在东八区 0-8 点会早一天）
+const wallDate = (d) => {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
+const dateRangeForHours = (hours) => {
+  const until = new Date()
+  const since = new Date(until.getTime() - hours * 60 * 60 * 1000)
+  return [wallDate(since), wallDate(until)]
+}
+const defaultDateRange = () => dateRangeForHours(7 * 24)
+
+// 快捷预设只改时间范围，不发请求：判据是否齐全仍由「开始溯源」统一校验
+const RANGE_PRESETS = [
+  { key: 'today', hours: 0, labelKey: 'forensic.rangeToday' },
+  { key: 'd7', hours: 7 * 24, labelKey: 'forensic.range7d' },
+  { key: 'd30', hours: 30 * 24, labelKey: 'forensic.range30d' },
+]
 
 const criteria = reactive({
   ip: '',
@@ -511,10 +644,28 @@ const criteria = reactive({
   limit: 200,
 })
 
+const activeRangePreset = computed(() => {
+  const range = criteria.dateRange
+  if (!Array.isArray(range) || range.length !== 2) return ''
+  const hit = RANGE_PRESETS.find((preset) => {
+    const [since, until] = dateRangeForHours(preset.hours)
+    return range[0] === since && range[1] === until
+  })
+  return hit ? hit.key : ''
+})
+
+const applyRangePreset = (preset) => {
+  criteria.dateRange = dateRangeForHours(preset.hours)
+}
+
 const tracing = ref(false)
 const hasQueried = ref(false)
 const result = ref(null)
 const traceError = ref(false)
+const resultCardRef = ref(null)
+// 发起查询时的判据快照：表单改了但没重查时，回显仍对应「眼前这份结果」
+const lastCriteria = ref(null)
+const copyingLink = ref(false)
 
 // 重入锁：与 tracing 分开、**同步**置位。tracing 要等 DOM 重渲染才对按钮生效，
 // 同一 tick 连点会全部进入 handler 并发出多个请求。
@@ -564,9 +715,28 @@ const resultSummary = computed(() => {
   return parts.join(' · ')
 })
 
+const describeCriteria = (snap) => {
+  if (!snap) return ''
+  const parts = []
+  if (snap.ip) parts.push(`${t('forensic.ipLabel')} ${snap.ip}`)
+  if (snap.fingerprint) parts.push(`${t('forensic.fingerprintLabel')} ${snap.fingerprint}`)
+  if (snap.ipSegment) parts.push(`${t('forensic.segmentLabel')} ${snap.ipSegment}`)
+  return parts.join(' · ')
+}
+const lastCriteriaText = computed(() => describeCriteria(lastCriteria.value))
+
 const hasResult = computed(() => Boolean(result.value))
 
-const timelineRows = computed(() => result.value?.timeline || [])
+// 默认最新在前：溯源通常先看「刚刚发生了什么」；切换只影响展示，不重新取数
+const timelineOrder = ref('desc')
+const timelineRows = computed(() => {
+  const rows = [...(result.value?.timeline || [])]
+  const dir = timelineOrder.value === 'desc' ? -1 : 1
+  return rows.sort((a, b) => (new Date(a.createdAt) - new Date(b.createdAt)) * dir)
+})
+const toggleTimelineOrder = () => {
+  timelineOrder.value = timelineOrder.value === 'desc' ? 'asc' : 'desc'
+}
 const poolRows = computed(() => result.value?.pools || [])
 
 /** 分布对象 → 表格行（按次数倒序；Object.entries 顺序不可依赖） */
@@ -585,7 +755,19 @@ const statusTagType = (status) => {
   return 'success'
 }
 
-const handleTrace = async () => {
+/** 结果区在上方：从聚类表/封禁框发起核验后滚过去，减少动效偏好下不做平滑滚动 */
+const scrollToResultCard = () => {
+  const reduceMotion =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  resultCardRef.value?.scrollIntoView?.({
+    behavior: reduceMotion ? 'auto' : 'smooth',
+    block: 'start',
+  })
+}
+
+const handleTrace = async ({ scrollToResult = false } = {}) => {
   if (traceSubmitting) return
   // 无判据：前端直接拦住并提示，**不发请求**（后端也要求至少一个维度）
   if (!hasCriteria()) {
@@ -601,8 +783,9 @@ const handleTrace = async () => {
   traceSubmitting = true
   tracing.value = true
   const isCurrent = traceGuard()
+  const params = buildParams()
   try {
-    const res = await api.security.getForensicTrace(buildParams())
+    const res = await api.security.getForensicTrace(params)
     if (!isCurrent()) return
     // 信封：res.data 是 { success, message, data }，业务负载在内层 data。
     // 200 但内层 data 为空 = 契约漂移：导出路径对同一形态会明确报错（见 exportForensic 注释），
@@ -615,6 +798,11 @@ const handleTrace = async () => {
       return
     }
     result.value = payload
+    lastCriteria.value = {
+      ip: params.ip,
+      fingerprint: params.fingerprint,
+      ipSegment: params.ipSegment,
+    }
     traceError.value = false
     hasQueried.value = true
     // 空结果不是错误：表格走 empty 插槽，不弹提示
@@ -625,9 +813,24 @@ const handleTrace = async () => {
     traceError.value = true
     hasQueried.value = true
   } finally {
-    if (isCurrent()) tracing.value = false
+    if (isCurrent()) {
+      tracing.value = false
+      // 从聚类表/封禁框发起核验时结果区在上方，不滚过去等于点了没反应
+      if (scrollToResult) nextTick(scrollToResultCard)
+    }
     traceSubmitting = false
   }
+}
+
+/** 以单个判据重新溯源：替换其他判据，避免「点了一个 IP 却仍被旧网段/指纹收窄」 */
+const pivotBy = (kind, value) => {
+  // 在途查询落地时会覆盖结果：此时改判据只会造成「表单是新值、结果是旧值」
+  if (traceSubmitting) return
+  if (!value) return
+  criteria.ip = kind === 'ip' ? value : ''
+  criteria.fingerprint = kind === 'fingerprint' ? value : ''
+  criteria.ipSegment = kind === 'ipSegment' ? value : ''
+  handleTrace({ scrollToResult: true })
 }
 
 const resetCriteria = () => {
@@ -637,6 +840,7 @@ const resetCriteria = () => {
   criteria.dateRange = defaultDateRange()
   criteria.limit = 200
   result.value = null
+  lastCriteria.value = null
   traceError.value = false
   hasQueried.value = false
 }
@@ -667,7 +871,14 @@ const loadClusters = async () => {
       limit: 50,
     })
     if (!isCurrent()) return
-    clusters.value = res?.data?.data || null
+    const payload = res?.data?.data
+    // 200 但没有 segments = 契约漂移：不能画成「没有可封的网段」
+    if (!payload || !Array.isArray(payload.segments)) {
+      clusters.value = null
+      clustersError.value = true
+      return
+    }
+    clusters.value = payload
     clustersError.value = false
   } catch (e) {
     if (isCanceledError(e)) return
@@ -679,11 +890,163 @@ const loadClusters = async () => {
   }
 }
 
+/** 聚类窗口 → 日期范围：优先用后端返回的实际聚合窗口，保证「看到的记录」与「聚类依据」同窗 */
+const clusterDateRange = () => {
+  const since = clusters.value?.since
+  const until = clusters.value?.until
+  const sinceDate = since ? new Date(since) : null
+  const untilDate = until ? new Date(until) : null
+  if (
+    sinceDate &&
+    untilDate &&
+    !Number.isNaN(sinceDate.getTime()) &&
+    !Number.isNaN(untilDate.getTime())
+  ) {
+    return [wallDate(sinceDate), wallDate(untilDate)]
+  }
+  return dateRangeForHours(Number(clusterQuery.windowHours) || 24)
+}
+
+/** 封段前先看原始记录：只换判据，不碰封禁流程 */
+const viewClusterRecords = (row) => {
+  if (traceSubmitting) return
+  if (!row?.segment) return
+  criteria.ip = ''
+  criteria.fingerprint = ''
+  criteria.ipSegment = row.segment
+  criteria.dateRange = clusterDateRange()
+  handleTrace({ scrollToResult: true })
+}
+
+const reviewBeforeBan = () => {
+  if (traceSubmitting) return
+  const row = banTarget.value
+  banDialogVisible.value = false
+  if (!row?.segment) return
+  criteria.ip = ''
+  criteria.fingerprint = ''
+  criteria.ipSegment = row.segment
+  criteria.dateRange = clusterDateRange()
+  handleTrace({ scrollToResult: true })
+}
+
+/** 深链：?ip=&fingerprint=&ipSegment=&since=YYYY-MM-DD&until=YYYY-MM-DD&limit=，至少一个判据即自动查询 */
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
+const readQueryString = (raw) => String(Array.isArray(raw) ? raw[0] : (raw ?? '')).trim()
+const readBoundedQuery = (key, max) => {
+  const value = readQueryString(route.query[key])
+  return value && value.length <= max ? value : ''
+}
+
+/** limit 必须整串是十进制整数：parseInt('999abc') 会静默收下 999，等于接受坏链接 */
+const readIntInRange = (key, min, max) => {
+  const value = readQueryString(route.query[key])
+  if (!/^\d+$/.test(value)) return null
+  const n = Number(value)
+  return Number.isSafeInteger(n) && n >= min && n <= max ? n : null
+}
+
+const applyRouteQuery = () => {
+  const ip = readBoundedQuery('ip', 64)
+  const fingerprint = readBoundedQuery('fingerprint', 128)
+  const ipSegment = readBoundedQuery('ipSegment', 64)
+  if (ip) criteria.ip = ip
+  if (fingerprint) criteria.fingerprint = fingerprint
+  if (ipSegment) criteria.ipSegment = ipSegment
+
+  const since = readQueryString(route.query.since)
+  const until = readQueryString(route.query.until)
+  if (DATE_ONLY.test(since) && DATE_ONLY.test(until) && since <= until) {
+    criteria.dateRange = [since, until]
+  }
+
+  const limit = readIntInRange('limit', 1, 1000)
+  if (limit !== null) criteria.limit = limit
+
+  return Boolean(ip || fingerprint || ipSegment)
+}
+
+/** 复制当前判据的深链：换个人打开就是同一次溯源，不用重新手输 */
+const copyText = async (text) => {
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch (_) {
+    // 非安全上下文 / 权限被拒：落到 textarea 兜底
+  }
+  let area = null
+  try {
+    area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    return typeof document.execCommand === 'function' && document.execCommand('copy')
+  } catch (_) {
+    return false
+  } finally {
+    area?.remove()
+  }
+}
+
+const handleCopyLink = async () => {
+  if (copyingLink.value) return
+  if (!hasCriteria()) {
+    ElMessage.warning(t('forensic.noCriteria'))
+    return
+  }
+  // 与查询同一把尺：半截/无效时间范围不许生成一条「打开后按别的窗口查」的链接
+  const win = buildTimeWindow()
+  if (Array.isArray(criteria.dateRange) && criteria.dateRange.length === 2 && !win) {
+    ElMessage.warning(t('forensic.invalidTimeRange'))
+    return
+  }
+  const query = {}
+  if (criteria.ip.trim()) query.ip = criteria.ip.trim()
+  if (criteria.fingerprint.trim()) query.fingerprint = criteria.fingerprint.trim()
+  if (criteria.ipSegment.trim()) query.ipSegment = criteria.ipSegment.trim()
+  if (win) {
+    query.since = criteria.dateRange[0]
+    query.until = criteria.dateRange[1]
+  }
+  const limit = Number(criteria.limit) || 200
+  if (limit !== 200) query.limit = String(limit)
+
+  copyingLink.value = true
+  try {
+    const href = router.resolve({
+      path: '/security-analysis',
+      query: { ...query, tab: 'forensic' },
+    }).href
+    const url = new URL(href, window.location.origin).href
+    const ok = await copyText(url)
+    if (ok) ElMessage.success(t('forensic.copyLinkSuccess'))
+    else ElMessage.error(t('forensic.copyLinkFailed'))
+  } finally {
+    copyingLink.value = false
+  }
+}
+
 // 进页面即拉一次聚类：聚类面板是封段的入口，空着等用户点「重新聚类」
 // 会让人以为「没有可封的网段」。失败由 clustersError 显式可见；无 security:config 时不发。
 onMounted(() => {
   if (canSeeClusters.value) loadClusters()
 })
+
+// 深链：监听 fullPath 而不是只在 onMounted 读一次 —— 路由解析与组件挂载的先后不保证
+// （memory history 下尤甚），watch 既能接住首跳，也能接住本页内换判据的重挂载。
+// 自动查询只看 **URL 里** 的判据：工作台切 tab 会改 query，不能拿表单里的旧判据重查。
+watch(
+  () => route.fullPath,
+  () => {
+    if (applyRouteQuery()) handleTrace()
+  },
+  { immediate: true }
+)
 
 const verdictText = (verdict) => {
   const map = {
@@ -943,6 +1306,62 @@ const handleExport = async () => {
 .criteria-form {
   margin-bottom: 0;
 }
+.range-presets {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.preset-btn.is-active {
+  color: var(--xf-primary);
+  border-color: var(--xf-primary);
+  background: var(--xf-primary-alpha-8);
+}
+.criteria-echo {
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-text-secondary);
+  margin: 6px 0 0;
+  letter-spacing: var(--xf-tracking-wide);
+}
+/* scrollIntoView 的落点：给固定头部留出空隙，卡片标题不被盖住 */
+.result-card {
+  scroll-margin-top: 80px;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: var(--xf-spacing-lg) 0 var(--xf-spacing-sm);
+}
+.section-head .section-title {
+  margin: 0;
+}
+.pivot-hint {
+  margin-top: 0;
+}
+/* 结果里的 IP / 网段 / 指纹：一眼看出可点，点一下就是下一次溯源 */
+.pivot-link {
+  padding: 0;
+  border: 0;
+  border-bottom: 1px dashed var(--xf-primary-alpha-35);
+  background: transparent;
+  font: inherit;
+  line-height: 1.3;
+  color: var(--xf-primary);
+  text-align: left;
+  cursor: pointer;
+}
+.pivot-link:hover {
+  border-bottom-style: solid;
+  color: var(--xf-primary-strong);
+}
+.pivot-link:focus-visible {
+  outline: 2px solid var(--xf-primary-alpha-45);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 .section-title {
   font-family: var(--xf-font-display);
   font-size: var(--xf-font-size-base);
@@ -1028,6 +1447,9 @@ const handleExport = async () => {
   .criteria-form .el-date-editor,
   .criteria-form .el-input-number {
     width: 100% !important;
+  }
+  .result-card {
+    scroll-margin-top: 72px;
   }
   .dist-row {
     flex-direction: column;

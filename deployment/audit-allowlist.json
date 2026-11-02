@@ -1,5 +1,24 @@
 {
   "note": "含 dev 依赖审计的显式允许清单。被 scripts/check-audit-allowlist.js 消费：≥ threshold 的根因公告必须在此登记（id 为 GHSA 编号），否则阻断合并。三条 fail-closed 判据：①未登记⇒红；②reviewBy 早于当天⇒红；③清单项在本次报告里已无 ≥threshold 的对应公告（上游已修或被降级）⇒红，必须删行。id 必须是 GHSA 字符串（audit 报告的 via.source 是数字 advisory id，只在 via.url 末段才有 GHSA 号）。本文件在 git 里，任何改动都留 diff 并受评审。",
   "threshold": "moderate",
-  "entries": []
+  "entries": [
+    {
+      "id": "GHSA-3g3m-2fjr-6pw4",
+      "package": "glob",
+      "reason": "dev 工具链公告（AbortSignal 取消绕过允许超时后文件系统遍历），由 jest@30.5.2 传染 @jest/reporters、jest-config、jest-runtime、rimraf、test-exclude、archiver-utils，全部 dev=true、生产树 0 条。npm 的 fixAvailable 要求把 exceljs 降到 4.1.1（SemVer 大版本回退），属破坏工具链的假选项。",
+      "reachability": "仅 dev 工具链可达：引入边全部位于 devDependencies（jest/rimraf/test-exclude/archiver-utils 等测试与构建链），生产依赖树无任何引入边，npm audit --omit=dev 实测 0 条（RC=0）。",
+      "noPatch": true,
+      "exitPlan": "jest / rimraf / test-exclude 任一上游把 glob 提到 14.0.2+ 后本条自动判陈旧，删行。",
+      "reviewBy": "2027-02-01"
+    },
+    {
+      "id": "GHSA-g3hv-75wg-m249",
+      "package": "minimatch",
+      "reason": "dev 工具链公告（globparts 放大导致潜在拒绝服务），来源 eslint@10.14.0 / jest@30.5.2 / nodemon@3.1.14，三者 latest 全部把 minimatch 钉在 <11，升级无法消除；npm 的 fixAvailable 要求把 eslint 降到 4.0.0，属假选项。全部 dev=true、生产树 0 条（见 docs/security-dependency-watch.md「exceljs 退出生产依赖树」）。",
+      "reachability": "仅 dev 工具链可达：引入边全部位于 devDependencies（eslint/jest/nodemon 的 lint、测试与热重载链），生产依赖树无任何引入边，npm audit --omit=dev 实测 0 条（RC=0）。",
+      "noPatch": true,
+      "exitPlan": "eslint / jest / nodemon 任一上游放开 minimatch≥11.0.1 后本条自动判陈旧，删行。",
+      "reviewBy": "2027-02-01"
+    }
+  ]
 }

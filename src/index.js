@@ -39,7 +39,8 @@ const { startReminderScheduler, stopReminderScheduler } = require('./services/de
 const { startAlertCleanup, stopAlertCleanup } = require('./services/securityAlert');
 const { startCaptchaCleanup, stopCaptchaCleanup } = require('./services/captchaService');
 const auditBuffer = require('./services/auditBuffer');
-const forensicCapture = require('./services/forensicCapture'); // P2 取证捕获：与审计缓冲同款生命周期（见 :203 排空 / :417 启动）
+const { recordStartupAuditTrail } = require('./services/startupAuditTrail');
+const forensicCapture = require('./services/forensicCapture'); // P2 取证捕获：与审计缓冲同款生命周期（见 :204 排空 / :398 启动）
 const auditMonitor = require('./services/auditMonitor');
 // 审计链周期自检（2026-09-30）：补上"链完整性由定时任务守护"这一方，
 // 与 auditMonitor（异常行为检测）分工，见该模块文件头
@@ -297,35 +298,8 @@ const startServer = async () => {
     await require('./utils/transaction').reportTransactionTopology();
     await initializeSystem();
 
-    // WB-1：生产密钥强度审计留痕。弱密钥已在 config/validate.js 以阻断级拦截，
-    // 这里把「本次启动用的密钥通过了强度校验」落审计，供事后证明密钥治理持续有效；
-    // 审计写入失败只告警不阻断（审计不可用不应反过来让服务起不来）
-    // 判据统一走 config/validate 的环境归一：字面量比较会让 NODE_ENV=prod 的部署
-    // 静默少一条"密钥强度审计"留痕，而它正是事后证明密钥治理持续有效的证据。
-    if (require('./config/validate').requiresProductionSemantics()) {
-      try {
-        const AuditLog = require('./models/AuditLog');
-        await AuditLog.record({
-          action: 'security_key_strength_audit',
-          category: 'security',
-          username: 'system',
-          ip: '127.0.0.1',
-          success: true,
-          riskLevel: 'low',
-          reason: '启动配置校验通过：JWT/JWT_REFRESH/AES/HMAC 密钥均满足强度要求',
-        });
-      } catch (auditErr) {
-        logger.warn(`密钥强度审计留痕写入失败：${auditErr.message}`);
-      }
-
-      // P2-3：JWT 签发密钥轮换留痕。基线态只登记不落审计（首次配置不是轮换），
-      // currentKid 变化时写一条 jwt_key_rotated。失败只告警不阻断启动
-      try {
-        await require('./services/jwtKeyRotationAudit').recordJwtKeyRotation();
-      } catch (rotationErr) {
-        logger.warn(`JWT 密钥轮换审计留痕失败：${rotationErr.message}`);
-      }
-    }
+    // WB-1 + P2-3：启动期密钥治理留痕（失败只告警不阻断，判据见 services/startupAuditTrail.js 文件头）
+    await recordStartupAuditTrail();
 
     const app = createApp();
 
@@ -359,22 +333,11 @@ const startServer = async () => {
       server = require('http').createServer(app);
     }
 
-    // ── 上游连接复用的配对不变量（P2-4，2026-11-02）─────────────────────────
-    // deployment/nginx.conf.example 的 upstream fsms_app 启用 keepalive 连接池
-    // （keepalive 64 / keepalive_timeout 75）。该池成立的前提是**后端必须先于
-    // nginx 放弃空闲连接**：若后端等 5s（Node 默认 keepAliveTimeout）就关，而
-    // nginx 75s 内仍视为可用，复用窗口会撞上「后端已 FIN、nginx 仍投递」的
-    // 竞态——表现为不可复现的偶发 502（且与负载无关，排障方向常被带偏）。
-    //
-    // 取值推导（两侧必须是同一个数量级上的**单向不等式** backend > nginx）：
-    //   - nginx 侧保留空闲连接 75s（其 keepalive_timeout 声明的是自身保留上限）；
-    //   - 本侧取 80s：比 nginx 多 5s 余量，让「后端关闭」永远先于「nginx 判定
-    //     其过期」，且余量覆盖两侧时钟推进误差。
-    //   - headersTimeout 必须 > keepAliveTimeout（Node 的硬性要求，否则请求头
-    //     读取会被提前掐断）；取 85s，留 5s 给慢请求头。
-    //   - requestTimeout 不设（默认 300s 由业务层超时中间件与反代 proxy_read_timeout
-    //     各自把关，见 nginx.conf.example 的 connect/send/read 三超时注释）。
-    // 位置：必须在 listen() 之前——listen 之后设置对已接受的连接不生效。
+    // ── 上游连接复用配对不变量（P2-4）：backend 必须先于 nginx 放弃空闲连接 ──
+    // nginx upstream keepalive 保留 75s；用 Node 默认 5s 会撞上「后端已 FIN、nginx 仍投递」
+    // ⇒ 偶发 502（与负载无关，排障常被带偏）。取 80s（+5s 覆盖时钟误差）；
+    // headersTimeout 须 > keepAliveTimeout（Node 硬性要求）取 85s；requestTimeout 不设，
+    // 由业务层与反代 proxy_read_timeout 把关。位置：必须在 listen() 之前才生效。
     server.keepAliveTimeout = 80_000;
     server.headersTimeout = 85_000;
 
@@ -445,14 +408,13 @@ const startServer = async () => {
       canaryWatch.init().catch(() => {});
       reminderScheduler = startReminderScheduler(24 * 60 * 60 * 1000);
 
-      const scheme = process.env.ENABLE_HTTPS === 'true' ? 'https' : 'http';
-      const wsScheme = process.env.ENABLE_HTTPS === 'true' ? 'wss' : 'ws';
+      const secure = process.env.ENABLE_HTTPS === 'true';
       logger.info(`================================`);
       logger.info(`消防管理系统启动成功`);
       logger.info(`环境：${config.nodeEnv}`);
       logger.info(`端口：${PORT}`);
-      logger.info(`API 地址：${scheme}://localhost:${PORT}/api`);
-      logger.info(`WebSocket 地址：${wsScheme}://localhost:${PORT}`);
+      logger.info(`API 地址：${secure ? 'https' : 'http'}://localhost:${PORT}/api`);
+      logger.info(`WebSocket 地址：${secure ? 'wss' : 'ws'}://localhost:${PORT}`);
       logger.info(`================================`);
 
       // F-04（2026-10-17）：用归一判据而不是 `config.nodeEnv === 'production'`。

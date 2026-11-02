@@ -41,9 +41,14 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const scan = require('../../../scripts/auditCountAssertionScan');
+// 行为探针：**只 require 不调用**任何控制动词，故不会让缓冲动起来（也不被 CONTROL_RE 命中）。
+// 它存在的意义见下面「③前提锚点」：文本判据能证明「源码里没写那个串」，
+// 但证明不了「本进程里缓冲确实没被启动」——后者只能问模块自己。
+const auditBufferProbe = require('../../../src/services/auditBuffer');
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 const TESTS_DIR = path.join(ROOT, 'src', 'tests');
@@ -101,7 +106,7 @@ const UNCONTROLLED_LEDGER = [
     reason:
       '断言对象被过滤条件收窄到中间件**不可能**产出的取值：查询用 riskFactors $in 两个字面' +
       '（full_range_cidr_pool_ban_union_prewrite / _rollback），而这两个字面在整个生产代码里' +
-      '只有 src/controllers/forensicController.js:126 产出，其写入链是 tracePoolBanUnionRollback →' +
+      '只有 src/controllers/forensicController.js:137 产出，其写入链是 tracePoolBanUnionRollback →' +
       ' ipListService.recordPrivilegeEscalation → AuditLog.record（直写，不经 auditBuffer.push）。' +
       '中间件行即使被缓冲吞掉也不进该过滤器 ⇒ 计数与缓冲是否启动无关。',
   },
@@ -513,6 +518,53 @@ describe('②其余审计断言必须显式声明', () => {
   });
 });
 
+/**
+ * 本锚点**局部**的「启动形态」判据。
+ * 为什么不直接用 scan.CONTROL_RE：它的形态是 `auditBuffer.start(` 这一个字面写法，
+ * 认不出等价的三类写法（本轮实证：`require('..').start()` / 解构后 `start()` /
+ * `require('..')['start']()` 都会让缓冲动起来，而 CONTROL_RE 全放行）。
+ * 为什么**不去放宽** CONTROL_RE 本身：它在 scan 里同时承担**正向**用途——
+ * 「这个文件控制过缓冲 ⇒ 它的零断言不算空洞」。放宽它 = 让真空洞断言合法化，
+ * 那是比现在更糟的假绿。判据的两个方向安全边不同：正向要严，反向要全。
+ * ⇒ 只在本锚点**反向**这一格上补形态，其余口径一字不动。
+ */
+const CONTROL_VERBS = 'start|flush|flushAndStop|__waitForFlushIdle';
+const AB_MENTION = 'require\\(\\s*[\'"][^\'"]*\\/auditBuffer[\'"]\\s*\\)';
+const BOOT_FORMS = (code) => {
+  const forms = [];
+  if (scan.CONTROL_RE.test(code)) forms.push('auditBuffer.<控制动词>(');
+  // ① 匿名链式：require('.../auditBuffer').start() / require('...')['start']()
+  const chained = new RegExp(
+    AB_MENTION +
+      '\\s*(?:\\.\\s*([A-Za-z_$][\\w$]*)|\\[\\s*[\'"]([A-Za-z_$][\\w$]*)[\'"]\\s*\\])\\s*\\(',
+    'g'
+  );
+  for (let m = chained.exec(code); m; m = chained.exec(code)) {
+    forms.push('require(...).' + (m[1] || m[2]) + '(');
+  }
+  // ② 先绑定整个模块再调控制动词：const ab = require('.../auditBuffer'); ab.start()
+  const bound = new RegExp('(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*' + AB_MENTION, 'g');
+  for (let m = bound.exec(code); m; m = bound.exec(code)) {
+    if (new RegExp('\\b' + m[1] + '\\s*\\.\\s*(?:' + CONTROL_VERBS + ')\\s*\\(').test(code)) {
+      forms.push(m[1] + '.<控制动词>(');
+    }
+  }
+  // ③ 解构后调用：const { start } = require('.../auditBuffer'); start()
+  const destructured = new RegExp('(?:const|let|var)\\s*\\{([^}]*)\\}\\s*=\\s*' + AB_MENTION, 'g');
+  for (let m = destructured.exec(code); m; m = destructured.exec(code)) {
+    for (const raw of m[1].split(',')) {
+      const parts = raw.trim().split(':');
+      const local = (parts[1] || parts[0]).trim();
+      if (!local) continue;
+      // 只认绑定**之后**的调用：防止「解构了但没调」被误判，也防止别的同名局部变量顶包。
+      if (new RegExp('\\b' + local + '\\s*\\(').test(code.slice(m.index + m[0].length))) {
+        forms.push('{ ' + local + ' }(');
+      }
+    }
+  }
+  return forms;
+};
+
 describe('③前提锚点：本闸的存在前提是"缓冲默认不启动"', () => {
   test('全局测试装配（setupFiles / globalSetup）不得自行启动缓冲', () => {
     const cfg = fs.readFileSync(path.join(ROOT, 'jest.config.js'), 'utf8');
@@ -521,7 +573,76 @@ describe('③前提锚点：本闸的存在前提是"缓冲默认不启动"', ()
         cfg.includes(rel) || cfg.includes(rel.replace('src/tests/', '<rootDir>/src/tests/'));
       expect({ rel, wired }).toEqual({ rel, wired: true });
       const code = scan.stripComments(fs.readFileSync(path.join(ROOT, rel), 'utf8'));
+      // 两类证据都要：源码形态（含 globalSetup——它不在测试进程里，行为探针看不到它）
+      // 与进程内活状态（覆盖 setupFiles 的真实执行效果）。
       expect({ rel, controls: scan.CONTROL_RE.test(code) }).toEqual({ rel, controls: false });
+      expect({ rel, bootForms: BOOT_FORMS(code) }).toEqual({ rel, bootForms: [] });
+    }
+    // 行为探针：本套件只 require 未调用任何控制动词，进程内 WAL 必须仍是关的。
+    // 它补的是形态判据补不全的那一格——setupFiles 由**本进程**执行，
+    // 而任何形态枚举都可能再漏一种写法；模块级状态则与写法无关。
+    expect({ walEnabled: auditBufferProbe.isWalEnabled() }).toEqual({ walEnabled: false });
+  });
+
+  test('启动形态判据本身可失败：三类等价写法都必须被认出', () => {
+    // 反向对照。不做的话上面那条可能只是「BOOT_FORMS 恒返回 []」的常量断言。
+    // 三类写法都是本轮实证过的**真让缓冲动起来**的形态，且 CONTROL_RE 全放行。
+    const head = "const ab = require('../../services/auditBuffer');";
+    const variants = [
+      "require('../../services/auditBuffer').start();",
+      head + '\n' + 'ab.start();',
+      "const { start } = require('../../services/auditBuffer');\nstart();",
+      "const { start: boot } = require('../../services/auditBuffer');\nboot();",
+      "require('../../services/auditBuffer')['start']();",
+    ];
+    // 判据在锚点里的输入是 scan.stripComments 之后的正交文本，这里同样先剥注释——
+    // 否则「注释掉的启动」这一条会红在判据的输入口径上，而那正是本来就该被剥掉的东西。
+    for (const src of variants) {
+      expect({ src, forms: BOOT_FORMS(scan.stripComments(src)) }).toEqual({
+        src,
+        forms: [expect.anything()],
+      });
+    }
+    // 反向对照的另一半：只 require / 别的模块的同名方法 / 别的对象上的同名方法都不得被判红，
+    // 否则「有闸」会变成「一有相关字样就红」，那只是把假绿换成假红。
+    const clean = [
+      "require('../../services/auditBuffer');",
+      "// require('../../services/auditBuffer').start();",
+      "const { flush } = require('../../services/auditOutbox');\nflush();",
+      "const db = require('../../config/database');\ndb.start();",
+      "const buf = require('../../services/auditBuffer');\nbuf.getStats();",
+    ];
+    for (const src of clean) {
+      expect({ src, forms: BOOT_FORMS(scan.stripComments(src)) }).toEqual({ src, forms: [] });
+    }
+  });
+
+  test('行为探针本身可证伪：WAL 开关一动，探针就必须跟着动（只动开关，不启定时器）', () => {
+    // 反向对照。不做的话上面那条可能只是「isWalEnabled() 恒返回 false」的常量断言。
+    // 用一个**已有载体文件**的临时目录来证伪：ensureWalDirWritable 会在载体已存在时
+    // 一并检查它可写，于是 startup() 返回 true ⇒ walEnabled 置真 ⇒ 探针必须跟着变成 true。
+    // 选这个形态而不是随便 mkdtemp，是因为本机用户对新建目录天然可写：那样即便
+    // 「目录可写才置真」这条语义被改成恒真/恒假也照样通过——用它做反向对照会失去证伪力。
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wal-probe-'));
+    const carrier = path.join(dir, 'audit-buffer.wal');
+    fs.writeFileSync(carrier, '\n', 'utf8');
+    const wal = require('../../../src/services/auditBufferWal');
+    try {
+      // 本用例**刻意不依赖环境**：先显式归零，再开、再关。
+      // 若改成对比「进来时的值」，变异实验（setup.js 里先 start 过）会把它顶红，
+      // 而那条红说不出「探针瞎了」以外的任何新事实，只会把真正的红埋进噪声里。
+      wal.disable();
+      expect({ zeroed: auditBufferProbe.isWalEnabled() }).toEqual({ zeroed: false });
+      const enabled = wal.startup(carrier);
+      expect({ enabled }).toEqual({ enabled: true });
+      expect({ probe: auditBufferProbe.isWalEnabled() }).toEqual({ probe: true });
+      // 同源复核：isWalEnabled() 与 getStats().walEnabled 必须同动，
+      // 否则合规面板（读 stats）与判据（读 isWalEnabled）会是两把尺子。
+      expect({ stats: auditBufferProbe.getStats().walEnabled }).toEqual({ stats: true });
+    } finally {
+      auditBufferProbe.stop();
+      expect({ restored: auditBufferProbe.isWalEnabled() }).toEqual({ restored: false });
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

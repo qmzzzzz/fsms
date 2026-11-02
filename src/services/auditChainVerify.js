@@ -69,10 +69,10 @@
  * 判据与四种诚实/攻击形态的对照见
  * `src/tests/services/auditChainLegacyPrefixWash.test.js`。
  *
- * 已知检出上限（不得当作已修好）：**插入**一条 prevHash 指向链中已有 hash 的
- * 伪造记录，在本设计下不可检出——滑动窗口只要求 prevHash 命中近期任一 hash。
- * 要堵住它需要给链上每条记录一个参与哈希的序号（chainIndex），使"父子关系"
- * 变成严格线性；那是一次需要全量重签的格式升级，不在本次改动范围。
+ * 已知检出上限（不得当作已修好）：**插入**一条 prevHash 指向链中已有 hash 的伪造
+ * 记录不可检出（滑动窗口只要求 prevHash 命中近期任一 hash；要堵住它得给每条记录一个
+ * 参与哈希的序号，属需全量重签的格式升级）；**两条链首**也只在两条都落进同一次扫描
+ * 窗口时可见——其一被 maxRecords 截断或 TTL 删掉后，剩下的那条就是窗口里唯一的链首。
  *
  * 存量数据的已知限制（必须如实告知，不得当作「已修好」）：
  * - hashVersion=null（legacy，本机 1137 条）：写入时无哈希链，完全无保护。
@@ -168,6 +168,7 @@ const newChainState = () => ({
   // 出现在带哈希记录**之前** = 存量 legacy（写入时尚无哈希链），不属篡改；
   // 出现在**之后** = 完整性无法追认（人为 $unset 灭迹，或算 hash 抛错后仍落库）。
   seenHashed: false,
+  firstHeadId: null, // 第一条链首的 _id；链首只许一条，且不随链接窗口淘汰/清空（见 claimHead）
 });
 
 /** 记一处断裂：计 breaks + byType + 样本（三者的唯一写入点之一） */
@@ -213,8 +214,7 @@ const resetLinkWindow = (state) => {
 };
 
 /** 链尾 = 窗口里最后记住的那个哈希（空窗口为 null） */
-const tailHashOf = (state) =>
-  state.seenOrder.length ? state.seenOrder[state.seenOrder.length - 1] : null;
+const tailHashOf = (state) => state.seenOrder[state.seenOrder.length - 1] ?? null;
 
 /**
  * 无哈希记录的处置（三档）。
@@ -284,9 +284,20 @@ const parentAhead = (docs, index, prevHash) => {
   return stop >= 0 && ahead[stop].hash === prevHash;
 };
 
+const pushFork = (state, doc, index, parentHash, forkedWithId) => {
+  // chain_fork 样本的唯一产出点：同父两子与两条链首共用，样本形状必须逐字一致
+  pushBreak(state, sampleOf(doc, index, 'chain_fork', { parentHash, forkedWithId }));
+};
+
+const claimHead = (state, doc, index) => {
+  // 链首分流：第一条带哈希的 prevHash=null 记下来，第二条 = 另一条链首
+  if (state.firstHeadId) pushFork(state, doc, index, null, state.firstHeadId);
+  else state.firstHeadId = String(doc._id);
+};
+
 /**
- * 链接性层：prevHash=null 是链首（合法）；父不在窗口内 = chain_break（删除检测）；
- * 父已被别的孩子认领 = chain_fork（分叉检测）。
+ * 链接性层：prevHash=null 是链首，但**全链只许一条**——第二条带哈希的 prevHash=null
+ * 是另一条链首 ⇒ chain_fork（见 claimHead）；父不在窗口内 = chain_break（删除检测）；
  *
  * 父在不在由两个窗口共同回答：已扫侧是最近 256 条哈希的滑动窗口，未扫侧是位次 ≤
  * LINK_WINDOW_SIZE 的前瞻（见 parentAhead），**不再**是"扫描顺序里出现过没有"：
@@ -294,22 +305,15 @@ const parentAhead = (docs, index, prevHash) => {
  * 是诚实形态，按出现先后判会产出假阳性断链（p6 实测），反而掩盖真实篡改。
  */
 const checkLinkage = (state, doc, index, docs) => {
-  if (state.isFirst || !doc.prevHash) return;
+  if (!doc.prevHash) return claimHead(state, doc, index); // 链首不属免检档：免检只针对"父在窗口外"
+  if (state.isFirst) return;
   if (!state.seen.has(doc.prevHash) && !parentAhead(docs, index, doc.prevHash)) {
     pushBreak(state, sampleOf(doc, index, 'chain_break', { actualPrevHash: doc.prevHash }));
     return;
   }
   // 同一个父哈希的第二个孩子 ⇒ 分叉。两条记录自身都算得回来，所以只有这里能看见。
-  if (state.firstChildOf.has(doc.prevHash)) {
-    pushBreak(
-      state,
-      sampleOf(doc, index, 'chain_fork', {
-        parentHash: doc.prevHash,
-        forkedWithId: state.firstChildOf.get(doc.prevHash),
-      })
-    );
-    return;
-  }
+  if (state.firstChildOf.has(doc.prevHash))
+    return pushFork(state, doc, index, doc.prevHash, state.firstChildOf.get(doc.prevHash));
   state.firstChildOf.set(doc.prevHash, String(doc._id));
 };
 

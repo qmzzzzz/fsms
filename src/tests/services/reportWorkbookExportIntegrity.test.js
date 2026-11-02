@@ -9,8 +9,8 @@
  *   拿到文件的人看到的是一份"看起来完整"的合规材料。
  *
  * 缺口二：写响应时对**客户端中断完全无感**。
- *   `workbook.xlsx.write(res)` 等的是 zip 自己收工，不是目的端收工。探针实测
- *   （正常与中断两侧都一样）：它 resolve 的那一刻 `res` 上一个流事件都没发。
+ *   `workbook.write(res)` 只是把整包字节交给 `res.end()` 就返回，等的是自己把 buffer
+ *   交出去，不是目的端把字节交给内核。它返回的那一刻 `res` 上一个终局事件都没发。
  *   原实现 await 完就返回 ⇒ 半截文件照样报成功、controller 无 try/catch、
  *   审计里一条 error 都没有。CSV 侧早就为同一情形立了判据
  *   （auditExportService.js:85-101、150-152），这里补齐 xlsx 这半边。
@@ -24,9 +24,9 @@
  *   10-01 00:30 点导出的件，名字写着 09-30。导出的 xlsx 是要归档的取证件。
  *   （CSV 侧 `auditExportService.js:50` 的文件名不带日期，因此不存在这一维。）
  */
-jest.mock('exceljs');
+jest.mock('../../utils/xlsxWriter');
 
-const { Workbook } = require('exceljs');
+const { createWorkbook } = require('../../utils/xlsxWriter');
 const { Writable } = require('stream');
 const { streamExportRows, writeExportWorkbook } = require('../../services/reportWorkbookService');
 const { EXPORT_LIMIT } = require('../../services/reportExportService');
@@ -36,12 +36,7 @@ const FireDevice = require('../../models/FireDevice');
 
 const LIMIT = EXPORT_LIMIT;
 
-const makeWorksheet = () => ({
-  properties: {},
-  columns: undefined,
-  addRow: jest.fn(),
-  getRow: jest.fn(() => ({ eachCell: (callback) => callback({}) })),
-});
+const makeWorksheet = () => ({ addRow: jest.fn() });
 
 /** 目的端由测试亲自摆位的 res 桩：`fire(event, err)` 按 once 语义派发 */
 const makeRes = () => {
@@ -65,21 +60,19 @@ const makeRes = () => {
   return res;
 };
 
-/** workbook 桩：`xlsx.write(res)` 演一遍给定的"目的端剧本"，然后照常 resolve */
+/** workbook 桩：`write(res)` 演一遍给定的"目的端剧本"，然后照常返回 */
 const injectWorkbook = (script) => {
   const worksheet = makeWorksheet();
   const workbook = {
-    addWorksheet: jest.fn(() => worksheet),
-    xlsx: {
-      write: jest.fn(async (res) => {
-        if (script) script(res);
-        // 没有剧本就是"正常收尾"：真实目的流一定会发 finish（write() 之后），
-        // 而实现要等这个表态，桩不回话就只能把用例挂死在这里。
-        else res.fire('finish');
-      }),
-    },
+    sheet: worksheet,
+    write: jest.fn(async (res) => {
+      if (script) script(res);
+      // 没有剧本就是"正常收尾"：真实目的流一定会发 finish（write() 之后），
+      // 而实现要等这个表态，桩不回话就只能把用例挂死在这里。
+      else res.fire('finish');
+    }),
   };
-  Workbook.mockImplementationOnce(() => workbook);
+  createWorkbook.mockImplementationOnce(() => workbook);
   return { workbook, worksheet };
 };
 
@@ -398,13 +391,13 @@ describe('xlsx 写出只对真正送完的响应报成功', () => {
     findSpy.mockRestore();
   });
 
-  test('真实 exceljs + 真实目的流：全部收下时不得报中断，且字节确实进了目的端', async () => {
+  test('真实写入器 + 真实目的流：全部收下时不得报中断，且字节确实进了目的端', async () => {
     const rows = Array.from({ length: 1500 }, (_, i) => ({ deviceCode: `DEV-${i}` }));
     const findSpy = jest
       .spyOn(FireDevice, 'find')
       .mockImplementation(cursorConfig(rows).model.find);
-    const RealExcelJS = jest.requireActual('exceljs');
-    Workbook.mockImplementationOnce(() => new RealExcelJS.Workbook());
+    const realWriter = jest.requireActual('../../utils/xlsxWriter');
+    createWorkbook.mockImplementationOnce(realWriter.createWorkbook);
 
     const res = new Writable({
       write(chunk, enc, cb) {
@@ -423,13 +416,13 @@ describe('xlsx 写出只对真正送完的响应报成功', () => {
     findSpy.mockRestore();
   });
 
-  test('真实 exceljs + 目的流写到一半自毁 ⇒ 必须报失败（不能报成功）', async () => {
+  test('真实写入器 + 目的流写到一半自毁 ⇒ 必须报失败（不能报成功）', async () => {
     const rows = Array.from({ length: 3000 }, (_, i) => ({ deviceCode: `DEV-${i}` }));
     const findSpy = jest
       .spyOn(FireDevice, 'find')
       .mockImplementation(cursorConfig(rows).model.find);
-    const RealExcelJS = jest.requireActual('exceljs');
-    Workbook.mockImplementationOnce(() => new RealExcelJS.Workbook());
+    const realWriter = jest.requireActual('../../utils/xlsxWriter');
+    createWorkbook.mockImplementationOnce(realWriter.createWorkbook);
 
     const res = new Writable({
       write(chunk, enc, cb) {

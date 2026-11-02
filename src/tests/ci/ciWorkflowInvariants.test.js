@@ -146,17 +146,23 @@ describe('ci.yml：最小权限与供应链钉版（安全审计 #9）', () => {
   });
 
   test('每个 checkout 都 persist-credentials: false（GITHUB_TOKEN 不留在 .git/config）', () => {
+    // 判据必须跑在**剥掉注释**的同下标视图上：注释行在 YAML 里不生效。
+    // 按原始行判定时，把 9 处生效行全部前置 `#` 会得到一个仍能匹配
+    // /persist-credentials:\s*false/ 的假绿——属性实际已退回默认值 true，
+    // 即 GITHUB_TOKEN 重新写进 .git/config。本文件其余三条用例早已走
+    // stripComments（:137/:141/:143），这一条原先漏用。
+    const eff = lines.map((line) => stripComments(line));
     const checkouts = [];
-    lines.forEach((line, i) => {
+    eff.forEach((line, i) => {
       if (/^\s*-\s+uses:\s*actions\/checkout@/.test(line)) checkouts.push(i);
     });
-    // 前提自证：确实扫到了 checkout（步骤全被删/改名时这里先红，而不是恒绿）
+    // 前提自证：确实扫到了 checkout（步骤全被删/改名/整段注释时这里先红，而不是恒绿）
     expect(checkouts.length).toBeGreaterThan(0);
     for (const i of checkouts) {
       const dashIndent = lines[i].match(/^\s*/)[0].length;
       const attrs = [];
       for (let j = i + 1; j < lines.length; j += 1) {
-        const l = lines[j];
+        const l = eff[j];
         if (l.trim() === '') continue;
         if (l.match(/^\s*/)[0].length <= dashIndent) break;
         attrs.push(l);

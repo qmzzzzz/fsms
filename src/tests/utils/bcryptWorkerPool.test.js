@@ -68,6 +68,43 @@ describe('bcryptWorkerPool', () => {
     }
   });
 
+  test('池初始化失败：必须留一条告警，且不重试、调用方仍拿到结果（G-01）', async () => {
+    process.env.BCRYPT_WORKER_THREADS = '1';
+    process.env.BCRYPT_WORKERS = '1';
+    const warnMock = jest.fn();
+    jest.doMock('../../utils/logger', () => ({
+      warn: warnMock,
+      error: jest.fn(),
+      info: jest.fn(),
+    }));
+    let workerCtorCalls = 0;
+    jest.doMock('worker_threads', () => ({
+      Worker: class {
+        constructor() {
+          workerCtorCalls += 1;
+          throw new Error('worker 不可用（注入）');
+        }
+      },
+    }));
+
+    try {
+      let first;
+      let second;
+      jest.isolateModules(() => {
+        const pool = require('../../utils/bcryptWorkerPool');
+        first = pool.hash('secret', 4);
+        second = pool.hash('secret-2', 4);
+      });
+      await expect(first).resolves.toMatch(/^\$2[aby]\$04\$/);
+      await expect(second).resolves.toMatch(/^\$2[aby]\$04\$/);
+      expect(workerCtorCalls).toBe(1); // initFailed 不复位：本进程不再重试（有意取舍，故必须有告警）
+      expect(warnMock).toHaveBeenCalledTimes(1);
+      expect(String(warnMock.mock.calls[0][0])).toContain('worker 不可用（注入）');
+    } finally {
+      jest.dontMock('worker_threads');
+      jest.dontMock('../../utils/logger');
+    }
+  });
   test('强制 worker 模式：compare 非字符串入参按 bcryptjs 语义拒绝', async () => {
     process.env.BCRYPT_WORKER_THREADS = '1';
     process.env.BCRYPT_WORKERS = '1';

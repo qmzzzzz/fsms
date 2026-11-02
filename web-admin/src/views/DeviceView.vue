@@ -162,11 +162,11 @@
           </template>
         </el-table-column>
         <!--
-          列宽预算：新增「变更状态/维护」后同一行最多四个按钮
-          （编辑44 + 变更状态68 + 维护44 + 删除44 = 200px），
-          加单元格左右 padding 24px = 224px，原 220px 会把「删除」挤到第二行 → 240px。
+          列宽预算：新增「变更状态/维护/报废」后同一行最多五个按钮
+          （编辑44 + 变更状态68 + 维护44 + 报废44 + 删除44 = 244px），
+          加单元格左右 padding 24px = 268px，240px 会把「删除」挤到第二行 → 290px。
         -->
-        <el-table-column :label="$t('common.operation')" width="240" fixed="right">
+        <el-table-column :label="$t('common.operation')" width="290" fixed="right">
           <template #default="{ row }">
             <button
               v-if="hasPerm('device:update')"
@@ -197,6 +197,20 @@
               @click="handleMaintain(row)"
             >
               {{ $t('device.maintain') }}
+            </button>
+            <!--
+              报废：独立权限码 device:scrap（与后端 PUT /:id/scrap 同码）。
+              此前该接口借道 device:update，持有 device:scrap 的消防主管反而没有入口；
+              服务端状态机会拒绝重复报废，已报废行因此不渲染这个注定 400 的按钮。
+            -->
+            <button
+              v-if="hasPerm('device:scrap') && row.status !== 'scrapped'"
+              type="button"
+              class="glass-btn glass-btn--danger glass-btn--link"
+              :disabled="rowBusy === row._id"
+              @click="handleScrap(row)"
+            >
+              {{ $t('device.scrap') }}
             </button>
             <button
               v-if="hasPerm('device:delete')"
@@ -403,12 +417,15 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { Box, Calendar, Timer, Tools, WarningFilled } from '@element-plus/icons-vue'
 import { ElRadioGroup, ElRadio } from 'element-plus/es/components/radio/index.mjs'
+import { ElInput } from 'element-plus/es/components/input/index.mjs'
+import { ElDatePicker } from 'element-plus/es/components/date-picker/index.mjs'
 import { api, isCanceledError } from '@/utils/api'
 import { useListLoadState } from '@/composables/useListLoadState'
 import { createSubmissionKey } from '@/utils/idempotency'
 import { localDateStr as sharedLocalDateStr } from '@/utils/datetime'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
+import { useRealtimeRefresh } from '@/composables/useRealtimeRefresh'
 import DeviceReminderDialog from '@/components/DeviceReminderDialog.vue'
 import DeviceMaintenanceDialog from '@/components/DeviceMaintenanceDialog.vue'
 
@@ -887,6 +904,73 @@ const handleChangeStatus = async (row) => {
   }
 }
 
+// 报废：权限码是 device:scrap（与后端路由同码），不经 update。确认框内收集两项均可选的
+// 信息——报废原因留空时不发该键，让服务端落默认值「正常报废」，而不是把空串写成
+// 一条「未填原因」的记录（DeviceService.scrapDevice 用 ?? 区分两者）。
+const handleScrap = async (row) => {
+  if (rowBusy.value === row._id) return
+  rowBusy.value = row._id
+  try {
+    const reason = ref('')
+    const scrapDate = ref(null)
+    const labelStyle = 'display:block; margin:12px 0 6px; font-size:13px; color:#475569;'
+    await ElMessageBox.confirm(
+      () =>
+        h('div', [
+          h(
+            'p',
+            { style: 'margin:0; font-size:14px; color:#334155;' },
+            t('device.scrapConfirm', { name: row.deviceName })
+          ),
+          h('label', { style: labelStyle }, t('device.scrapReason')),
+          h(ElInput, {
+            class: 'scrap-reason-input',
+            modelValue: reason.value,
+            'onUpdate:modelValue': (v) => {
+              reason.value = v
+            },
+            type: 'textarea',
+            rows: 2,
+            maxlength: 200,
+            showWordLimit: true,
+            placeholder: t('device.scrapReasonPlaceholder'),
+          }),
+          h('label', { style: labelStyle }, t('device.scrapDate')),
+          h(ElDatePicker, {
+            class: 'scrap-date-picker',
+            modelValue: scrapDate.value,
+            'onUpdate:modelValue': (v) => {
+              scrapDate.value = v
+            },
+            type: 'date',
+            valueFormat: 'YYYY-MM-DD',
+            placeholder: t('device.scrapDatePlaceholder'),
+            style: 'width:100%;',
+          }),
+        ]),
+      t('device.scrap'),
+      {
+        confirmButtonText: t('common.confirm'),
+        cancelButtonText: t('common.cancel'),
+        type: 'warning',
+      }
+    )
+    const payload = {}
+    const trimmedReason = reason.value.trim()
+    if (trimmedReason) payload.scrapReason = trimmedReason
+    if (scrapDate.value) payload.scrapDate = scrapDate.value
+    await api.devices.scrap(row._id, payload)
+    ElMessage.success(t('device.scrapSuccess'))
+    refreshAll()
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') {
+      // 错误已在拦截器统一提示
+    }
+  } finally {
+    rowBusy.value = null
+  }
+}
+
 // 维护登记：弹窗自己提交，成功后回刷新本页三块（列表/概览/提醒）
 const maintenance = reactive({ visible: false, device: null })
 const handleMaintain = (row) => {
@@ -903,6 +987,14 @@ const refreshAll = () => {
   loadStats()
   loadReminders()
 }
+
+// 设备状态迁移（含报废）由后端推送到 'device-alert' 房间；收到即刷新三块。
+// 此前该房间没有任何前端订阅，别人改了设备状态，本页要手动刷新才能看到。
+useRealtimeRefresh({
+  rooms: ['device-alert'],
+  subscriptions: [{ event: 'notification', handler: refreshAll }],
+  label: 'DeviceView',
+})
 
 // 语言切换时重新加载列表，状态/类型等文案随语言同步刷新
 watch(locale, () => {

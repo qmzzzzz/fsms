@@ -10,6 +10,8 @@
  *  - EMPTY_SENTINEL 哨兵与「键不存在（未初始化）」的区分
  *  - F-184b：共享链尾写入未落到 Redis（set 返回 false）后的降级、修复与自愈解除
  *  - F-204：同一判据在 getChainTail「键不存在 ⇒ 回写」那条路径上的同级缺口（陈旧内存尾顶回）
+ *  - 陈旧哨兵 ⇒ 第二条链首（audit-controllers 第 26 轮 §9.4 草案①）：写侧必须回库复核，
+ *    读侧必须把「两条带哈希的链首」报成 chain_fork。两条腿是同一个缺陷，故放在同一文件。
  */
 
 // jest.mock 会被提升到文件顶部，factory 在 require 时执行；这里内联返回 stub，
@@ -17,6 +19,8 @@
 jest.mock('../../services/sharedCache', () => ({
   EMPTY_SENTINEL: '__shared_cache_empty__',
   isRedisEnabled: jest.fn(() => false),
+  // D1：resyncChainTail 的「已配置但未就绪」信号判据（状态模块同源导出）
+  isRedisConfigured: jest.fn(() => false),
   get: jest.fn(),
   set: jest.fn(),
   del: jest.fn(),
@@ -38,6 +42,13 @@ const {
   withChainLock,
   __resetForTest,
 } = require('../../utils/auditChain');
+const { verifyAuditChain } = require('../../services/auditChainVerify');
+const {
+  makeAuditLog,
+  buildValidDoc,
+  buildChain,
+  toNewestFirst,
+} = require('../helpers/auditChainFixtures');
 
 const CHAIN_TAIL_KEY = 'audit:chain-tail';
 const CHAIN_LOCK_KEY = 'audit:chain-lock';
@@ -58,6 +69,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   __resetForTest();
   sharedCache.isRedisEnabled.mockReturnValue(false);
+  sharedCache.isRedisConfigured.mockReturnValue(false);
   // set 的返回值就是 F-184b 的降级开关，默认「已落到 Redis」，用例内按需覆写。
   // 必须在每个用例重设：clearAllMocks 只清调用记录、不清 mockResolvedValue 装上的
   // 实现，上一个用例的 false 会泄漏成下一个用例的默认（顺序耦合）。
@@ -70,12 +82,29 @@ afterEach(() => {
 
 describe('审计链共享链尾（Redis 就绪路径）', () => {
   describe('getChainTail', () => {
-    test('共享缓存存哨兵时返回空链尾 null（不读 DB）', async () => {
+    // 改前这里是「哨兵 ⇒ 直接返回 null，且 findOne.not.toHaveBeenCalled」。那条期望把
+    // 缺陷写成了契约：哨兵只证明「写入那一刻链尾为 null」，证明不了**现在**仍为空。
+    // 多实例下 set 未落地、或运维直接往库里写 hash 记录（只写库、不碰这个键），哨兵就陈旧；
+    // 此时按 null 续链会以 prevHash=null 落库 = 第二条链首，而旧校验器又恰好把两条链首
+    // 都当合法链首放行 ⇒ 分叉既无人报警、也没有人判它错。改这条不是放宽判据，是去掉担保。
+    test('哨兵陈旧（DB 已有带哈希记录）时回库取真尾并回写键，不得返回 null', async () => {
       sharedCache.isRedisEnabled.mockReturnValue(true);
       sharedCache.get.mockResolvedValue(SENTINEL);
-      const model = makeModel('ab'.repeat(32));
+      const tail = 'ab'.repeat(32);
+      const model = makeModel(tail);
+      await expect(getChainTail(model)).resolves.toBe(tail);
+      expect(model.findOne).toHaveBeenCalled();
+      expect(sharedCache.set).toHaveBeenCalledWith(CHAIN_TAIL_KEY, tail);
+    });
+
+    test('哨兵且 DB 真的为空时仍返回 null（结论逐字不变，代价是多一次 DB 读）', async () => {
+      sharedCache.isRedisEnabled.mockReturnValue(true);
+      sharedCache.get.mockResolvedValue(SENTINEL);
+      const model = makeModel(null);
       await expect(getChainTail(model)).resolves.toBeNull();
-      expect(model.findOne).not.toHaveBeenCalled();
+      // 这一次读就是判据本体：不核 DB 无从区分「真的还空」与「哨兵陈旧」
+      expect(model.findOne).toHaveBeenCalled();
+      // 哨兵本来就对 ⇒ 不回写（旧行为的零写保持不变）
       expect(sharedCache.set).not.toHaveBeenCalled();
     });
 
@@ -375,6 +404,28 @@ describe('审计链共享链尾（Redis 就绪路径）', () => {
       await expect(getChainTail(model)).resolves.toBe(dbTail);
       expect(model.findOne).toHaveBeenCalled();
     });
+
+    // D1：del 那一行整条挂在 isRedisEnabled() 上。配了 REDIS_URL 但 Redis 未就绪
+    // （启动期 resyncChainTail 在 server.listen 之前跑，此时连接通常还没 ready）时，
+    // 该行被整条跳过且**零信号**：共享链尾键原样留着，而本函数没有任何重试点 ⇒
+    // 陈旧哨兵活到进程结束——正是上面那条链首分叉的直接成因。
+    // 与 G-01（bcrypt 池初始化失败零日志）同形：空转不留信号本身就是缺陷。
+    test('Redis 已配置但未就绪时打一条 warn（自愈被跳过必须留信号）', async () => {
+      sharedCache.isRedisEnabled.mockReturnValue(false);
+      sharedCache.isRedisConfigured.mockReturnValue(true);
+      const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      await resyncChainTail();
+      expect(sharedCache.del).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('链尾自愈未执行'));
+    });
+
+    test('未配置 Redis 时不告警（单进程语义下没有共享键可清，属正常形态）', async () => {
+      sharedCache.isRedisEnabled.mockReturnValue(false);
+      sharedCache.isRedisConfigured.mockReturnValue(false);
+      const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      await resyncChainTail();
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -423,5 +474,60 @@ describe('审计链分布式锁（withChainLock Redis 就绪路径）', () => {
 
     await expect(withChainLock(fn)).resolves.toBe('ok');
     expect(sharedCache.acquireLockBlocking).not.toHaveBeenCalled();
+  });
+});
+
+// 读侧的同一缺陷：写入侧（上面那条陈旧哨兵）会产出两条带哈希的 prevHash=null 记录，
+// 而 checkLinkage 原先把 prevHash=null 无条件 return——它把「链首合法」塞进了
+// 「窗口起点免检」的同一行，两个完全不同的理由共用一个 early return。于是这种形态的
+// 报告是 intact=true、byType 全 0：一条谁都不会报警、也没人会去查的链分叉路径。
+// 判据复用 chain_fork（不新增断裂类型）：告警侧 auditChainMonitor 早已把它计为硬断裂，
+// 缺的只是产样点。
+describe('链首分叉（两条带哈希的 prevHash=null）', () => {
+  // 直连驱动/mongosh 的 $unset 形态：整组哈希字段消失（与 auditChainLegacyPrefixWash 同形）
+  const hashless = (doc) => {
+    const copy = { ...doc };
+    delete copy.hash;
+    delete copy.prevHash;
+    delete copy.hmac;
+    delete copy.hashVersion;
+    return copy;
+  };
+  const headOf = (action) => buildValidDoc(null, { action });
+
+  test('正控：单链首的诚实链零断裂（新判据不得整片报红）', async () => {
+    const report = await verifyAuditChain(makeAuditLog(toNewestFirst(buildChain(3))));
+    expect(report.breaks).toBe(0);
+    expect(report.byType.chain_fork).toBe(0);
+    expect(report.intact).toBe(true);
+  });
+
+  test('两条带哈希的链首 ⇒ chain_fork 一条，不再当作合法链首放行', async () => {
+    const first = headOf('head-1');
+    const second = headOf('head-2');
+    const report = await verifyAuditChain(makeAuditLog(toNewestFirst([first, second])));
+
+    expect(report.byType.chain_fork).toBe(1);
+    expect(report.breaks).toBe(1);
+    expect(report.intact).toBe(false);
+    // 样本必须指认得出来：第二条链首 + 「第一条链首是谁」（parentHash=null 是它的形态标签）
+    expect(report.samples[0]).toMatchObject({
+      type: 'chain_fork',
+      _id: String(second._id),
+      parentHash: null,
+      forkedWithId: String(first._id),
+    });
+  });
+
+  test('草案②公平面：存量 legacy 前缀 + 链启用第一条 prevHash=null ⇒ 零断裂', async () => {
+    const legacy = [hashless(headOf('legacy-1')), hashless(headOf('legacy-2'))];
+    const genesis = headOf('genesis');
+    const child = buildValidDoc(genesis, { action: 'genesis-child' });
+    const report = await verifyAuditChain(makeAuditLog(toNewestFirst([...legacy, genesis, child])));
+
+    expect(report.legacy).toBe(2);
+    expect(report.byType.chain_fork).toBe(0);
+    expect(report.breaks).toBe(0);
+    expect(report.intact).toBe(true);
   });
 });

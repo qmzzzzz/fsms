@@ -17,10 +17,17 @@ const { ERROR_CODES } = require('../utils/errorCodes');
  * 返回的数据范围可用于 Controller 中的查询过滤
  *
  * 数据范围类型（阈值与下方 LEVEL_* 常量同源，不要只改注释）：
- * - all: 全部数据（角色 level >= 9）
+ * - all: 全部数据（角色 level >= 9；内置访客也归此档，见下）
  * - department: 本部门/本区域数据（角色 level >= 7）
  * - self: 仅自己创建/负责的数据（角色 level >= 4）
- * - none: 无数据权限（level < 4）
+ * - none: 无数据权限（其余 level < 4 的自定义角色）
+ *
+ * 内置 GUEST（level 1）是**全量业务数据只读**：它的「只读」由权限码约束
+ * （rolePermissionMap 只给 device/alarm/inspection/report 的 read），数据范围
+ * 本身没有「只读」这一档。若按 level 归入 none，访客登录后列表/报表/详情一律
+ * 403——与 README 的「访客：设备/报警/巡检/报表只读」直接矛盾（且公开注册默认
+ * 角色就是 GUEST）。因此按角色 code 单独放行到 all，其余 level<4 的自定义角色
+ * 仍是 none（新增低级别角色不得因本例外获得全量可见性）。
  *
  * @param {string} userId - 用户 ID
  * @returns {Promise<Object>} 数据范围配置
@@ -58,6 +65,12 @@ const getDataScope = async (userId) => {
   const LEVEL_ALL = 9; // 超级管理员：全部数据
   const LEVEL_DEPARTMENT = 7; // 安全管理员/部门主管：本部门数据
   const LEVEL_SELF = 4; // 普通消防员：仅自己创建/负责的数据
+
+  // 内置访客：全量业务数据只读（读操作由 GUEST 的权限码收窄，写操作没有任何权限码）。
+  // 必须排在 level 判定之前：访客与更高角色并存时，取并集的最宽档。
+  if (activeRoles.some((r) => r.code === 'GUEST')) {
+    return { type: 'all' };
+  }
 
   // 根据角色层级返回数据范围
   if (maxLevel >= LEVEL_ALL) {

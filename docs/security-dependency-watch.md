@@ -240,6 +240,57 @@ checkout，而 `.gitattributes` 对 `package-lock.json` 无规则。实测
 SLA 的意义是把"要不要现在修"从口头讨论变成一条写下来、且与门禁同源的期限；它不改变
 "未登记一律阻断"这条更严的规则。
 
+## exceljs 退出生产依赖树（2026-11-02）
+
+### 为什么
+
+`exceljs@4.4.0` 是**唯一**把 glob/minimatch 带进运行时的路径：
+
+```
+exceljs → archiver@5.3.2 → archiver-utils@2.1.0 → glob@7.2.3 → minimatch@3.1.5
+        → readdir-glob@1.1.3 → minimatch@5.1.9
+        → unzipper@0.10.14 → fstream@1.0.12 → rimraf@2.7.1 → glob@7.2.3
+```
+
+根因公告 `GHSA-g3hv-75wg-m249`（minimatch `<11.0.1`，moderate）**无解**：升 archiver 也没用
+——`archiver@8` 用的 `readdir-glob@3` 仍依赖 `minimatch@^10.2.2`。于是 `--omit=dev` 长期
+8 条 moderate、RC=1。结论不是"等上游修"，而是把这一格能力收回自研。
+
+### 改了什么
+
+- 新增 `src/utils/zipContainer.js`（ZIP 容器：deflate/store + 中央目录 + EOCD，只用内置 `zlib`）
+  与 `src/utils/xlsxWriter.js`（OOXML：9 个部件，含 `docProps/core.xml` 的工作簿属性）；
+- `reportWorkbookService` / `honeypotDecoyFiles` 改用该写入器，表头样式由列定义驱动；
+- `exceljs` 由 `dependencies` 移入 `devDependencies`——**仅供测试读回**，当独立校验器用
+  （写端与读端不共享实现，否则"自己写的自己读得懂"不构成证据）；
+- `deployment/lockfile-anchor.json` 按流程重拍。
+
+### 实测对比
+
+| 范围              | 变更前                            | 变更后                                         |
+| ----------------- | --------------------------------- | ---------------------------------------------- |
+| 后端 `--omit=dev` | 8 条 moderate（RC=1）             | **0 条（RC=0）**                               |
+| 后端含 dev        | 与 `--omit=dev` 同源 + dev 工具链 | 28 moderate + 1 low，根因 2 条（见下），全 dev |
+
+### 边界（如实声明，勿夸大）
+
+- 自研写入器只覆盖本仓用到的 OOXML 面：单工作表、字符串单元格、表头样式、列宽、
+  水印行、工作簿属性。**不写** ZIP64（>4 GiB 会截断 u32）、多表、合并、公式、图片、
+  数字格式；**不读**归档，故不存在"畸形归档"类缺陷（对照 fflate@0.8.2 的
+  `GHSA-px8p-9vwx-vf98` 就在 `unzipSync` 里）；
+- 含 dev 的完整树仍有 `GHSA-3g3m-2fjr-6pw4`（glob）与 `GHSA-g3hv-75wg-m249`（minimatch）两条
+  moderate，全部 `dev=true`、生产树 0 条。来源是
+  `eslint@10.14.0` / `jest@30.5.2` / `nodemon@3.1.14`——三者 latest 全部把 minimatch 钉在 `<11`，
+  **升级无法消除**；npm 的 fixAvailable 只会给「exceljs 降到 4.1.1 / eslint 降到 4.0.0」这类
+  破坏工具链的假选项。两条已按 moderate=90 天的 SLA 登记进 `deployment/audit-allowlist.json`
+  （`reviewBy=2027-02-01`，到期即红；上游修好会在报告里消失，闸判「陈旧」强制删行）；
+- follow-redirects（`GHSA-mrwp-f3q8-3g9p`，high）已于 2026-11-03 以 `npm update follow-redirects`
+  升到 `1.16.2` 消除（落在 `mongodb-memory-server-core` 的 `^1.16.0` 范围内），含 dev 全树
+  30 → 29 条，生产树保持 0 条；
+- 回退防线：`src/tests/deploy/xlsxWriterDependencyClosure.test.js` 钉住四件事——
+  exceljs 不得回到 `dependencies`、生产依赖不得出现任何 xlsx/zip 写库、锁文件 `dev` 标记、
+  以及写入器内部只许 `require` 内置 `zlib` 或同目录相对路径（防止绕过 package.json 加包）。
+
 ## 通用约定
 
 - 任何依赖更换必须附：变更前后 `npm audit` 对比、全量测试结果、

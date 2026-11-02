@@ -319,6 +319,7 @@ const AUDIT_LOG_ACTIONS = [
   'security_overview', // GET /api/security/overview（2026-09-30 GET 默认审计反转后已真实落库）
   'security_alerts', // GET /api/security/alerts
   'security_stuffing-profile', // GET /api/security/stuffing-profile（撞库画像，ADR-013 P2 情报）
+  'security_attack-profile', // GET /api/security/attack-profile（单 IP 攻击行为画像）
   'security_users_view', // GET 类用户子路径兜底
   'security_users_mfa_reset', // PUT /api/security/users/:userId/mfa/reset
   'security_audit-logs_verify', // GET /api/security/audit-logs/verify

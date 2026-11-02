@@ -588,7 +588,8 @@ describe('H/I/J 投影键集、值域桥与反向对照', () => {
   const MUST_EMIT = ['_id', 'status'];
   /** 条件物化：数据面没有该偏移量时整键不出现（第三刀可评估是否统一补齐）。 */
   const VARYING_KEYS = {
-    users: [],
+    // u1（引导管理员）不带 createdBy：真实链里引导账户的该字段就是 undefined——键缺席是忠实形状
+    users: ['createdBy'],
     roles: [],
     permissions: [],
     devices: ['expiryDate', 'nextCheckDate', 'remark', 'scrapDate', 'scrapReason'],
@@ -805,16 +806,44 @@ describe('H/I/J 投影键集、值域桥与反向对照', () => {
     return [];
   };
 
+  /**
+   * L 的静态模型表：字符串字面量 require（不走 spec.modelRel 动态拼路径）。
+   * 缺键会在 L 开头直接 TypeError——fail-loud，不会静默漏扫。
+   */
+  const L_MODELS = {
+    users: require('../../models/User'),
+    roles: require('../../models/Role'),
+    permissions: require('../../models/Permission'),
+    devices: require('../../models/FireDevice'),
+    alarms: require('../../models/FireAlarm'),
+    inspections: require('../../models/Inspection'),
+  };
+
+  /**
+   * 「扫到≠比过」登记豁免：下列引用路径在装饰行上**没有值可比**（vacuum），按条给理由。
+   * 双向棘轮：路径一旦有值可比、或从 schema 消失，就必须同时出登记表——否则 stale 判红，
+   * 登记表不能变成永久豁免口。
+   */
+  const L_REF_VACUUM_LEDGER = {
+    // FireDevice.js:139-141：inspectionRecord 的写入方法全仓零调用 ⇒ 真实设备也不会有记录，空数组是忠实形状
+    'devices.inspectionRecord.inspector':
+      '写入方法全仓零调用（FireDevice.js:139-141）：空数组是忠实形状',
+  };
+
   test('L. 引用完整性：行里每个引用型 id 都能在对应合成表的 _id 里找到（引用路径从模型 schema 现扫）', () => {
     const keyByModel = {};
-    for (const spec of ENDPOINTS) keyByModel[require(spec.modelRel).modelName] = spec.key;
+    for (const spec of ENDPOINTS) keyByModel[L_MODELS[spec.key].modelName] = spec.key;
     const dangling = [];
+    const checkedBy = {};
+    const discovered = new Set();
     let checked = 0;
     for (const spec of ENDPOINTS) {
       const rows = payloadOf(spec.key).data.concat(
         payloadOf(spec.key, { page: '2', limit: '2' }).data
       );
-      for (const { field, model: refModel } of referencePathsOf(require(spec.modelRel).schema)) {
+      for (const { field, model: refModel } of referencePathsOf(L_MODELS[spec.key].schema)) {
+        const path = spec.key + '.' + field;
+        discovered.add(path);
         const target = keyByModel[refModel];
         if (!target) {
           dangling.push({ key: spec.key, field, id: '无对应合成表:' + refModel });
@@ -826,6 +855,7 @@ describe('H/I/J 投影键集、值域桥与反向对照', () => {
             const id = value && typeof value === 'object' ? value._id : value;
             if (id === undefined || id === null) continue;
             checked += 1;
+            checkedBy[path] = (checkedBy[path] || 0) + 1;
             if (!known.has(String(id))) dangling.push({ key: spec.key, field, id: String(id) });
           }
         }
@@ -833,5 +863,13 @@ describe('H/I/J 投影键集、值域桥与反向对照', () => {
     }
     expect(checked).toBeGreaterThan(0);
     expect(dangling).toEqual([]);
+    // 每条引用路径要么至少比过一次，要么在登记表里；反向（登记了却比过/路径消失）同样红
+    const unverified = [...discovered].filter(
+      (path) => !checkedBy[path] && !Object.prototype.hasOwnProperty.call(L_REF_VACUUM_LEDGER, path)
+    );
+    const staleLedger = Object.keys(L_REF_VACUUM_LEDGER).filter(
+      (path) => checkedBy[path] || !discovered.has(path)
+    );
+    expect({ unverified, staleLedger }).toEqual({ unverified: [], staleLedger: [] });
   });
 });

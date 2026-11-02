@@ -56,10 +56,10 @@ const UNDOCUMENTED = [
   // ---- 运维/发现端点：不是业务 API，OpenAPI 面只覆盖业务接口 ----
   // 注意 GET /health 不在这张表里：它**在**文档中（openapi.json 的 /health.get 200），
   // 台账只收"实现有、文档无"，把已文档化的端点写进来会让 #3 变成永远红的噪声。
-  { key: 'GET /readyz', why: '就绪探针（app.js:446），200/503 按 Mongo+Redis+拓扑判定' },
-  { key: 'GET /metrics', why: 'Prometheus 拉取端点（app.js:507），METRICS_ENABLED=false 时不存在' },
-  { key: 'GET /api/metrics', why: '面板 JSON 快照（app.js:513），认证 + security:audit' },
-  { key: 'GET /api-docs.json', why: '文档自身的 JSON（app.js:553），仅 ENABLE_API_DOCS 时存在' },
+  { key: 'GET /readyz', why: '就绪探针（app.js:448），200/503 按 Mongo+Redis+拓扑判定' },
+  { key: 'GET /metrics', why: 'Prometheus 拉取端点（app.js:509），METRICS_ENABLED=false 时不存在' },
+  { key: 'GET /api/metrics', why: '面板 JSON 快照（app.js:515），认证 + security:audit' },
+  { key: 'GET /api-docs.json', why: '文档自身的 JSON（app.js:557），仅 ENABLE_API_DOCS 时存在' },
   // ---- 匿名发现/上报端点：路径由 RFC 9116、CSP report-uri、浏览器行为固定 ----
   { key: 'GET /.well-known/security.txt', why: 'RFC 9116 发现文件（wellKnownRoutes.js）' },
   { key: 'GET /security.txt', why: '同上，根路径兼容位置' },

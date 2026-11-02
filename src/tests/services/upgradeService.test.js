@@ -566,7 +566,9 @@ describe('upgradeService（应用侧队列）', () => {
 
       writeBeat({
         pending: ['v1.3.0.tar.gz', 'v1.3.1.tar.gz'],
-        rejected: [{ archive: 'bad.tar.gz', outcome: 'aborted_signature_failed', reason: '未签名' }],
+        rejected: [
+          { archive: 'bad.tar.gz', outcome: 'aborted_signature_failed', reason: '未签名' },
+        ],
         landed: 'v1.2.3',
       });
       const overview = upgradeService.getOverview({ buildInfo: { version: '1.0.0' } });

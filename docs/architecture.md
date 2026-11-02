@@ -10,7 +10,7 @@
 ```mermaid
 flowchart TB
   subgraph Client["前端 web-admin（Vue3 + Pinia + Element Plus）"]
-    Views["视图层：仪表盘/设备/告警/巡检/用户/角色/报表/审计/Profile/权限授予/登录/注册/取证溯源 等 15 个 View"]
+    Views["视图层：仪表盘/设备/告警/巡检/用户/角色/报表/审计/Profile/权限授予/登录/注册/安全分析（画像/撞库/取证）等 18 个 View"]
     Store["Pinia store（auth/app）"]
     Api["utils/api.js（axios 封装）"]
     Ws["utils/websocket.js（socket.io-client，引用计数 + 房间）"]
@@ -19,9 +19,9 @@ flowchart TB
 
   subgraph Backend["后端（Express，src/）"]
     MW["中间件链：requestId → metrics → Sentry → IP黑名单 → CORS →\n安全头/限流/查询防护 → morgan → auditLog"]
-    Routes["路由（14）：auth / user / role / permission / device /\nalarm / inspection / report / security / avatar / version / wellKnown /\nforensic / stuffingProfile"]
+    Routes["路由（15）：auth / user / role / permission / device /\nalarm / inspection / report / security / avatar / version / wellKnown /\nforensic / stuffingProfile / attackProfile"]
     Ctrl["控制器（16）：auth / user / security / role / permission /\ndevice / alarm / inspection / report / audit / avatar / mfa /\nipList / privilege / rolePermission / forensic"]
-    Svc["服务层（97）：sessionService / userPermissionService /\ncaptchaService / auditBuffer / auditMonitor / statsCache / securityAlert /\nDevice·Alarm·Inspection Service 等（另有 authService / websocketService /\ninitData / sharedCache 子目录）"]
+    Svc["服务层（103）：sessionService / userPermissionService /\ncaptchaService / auditBuffer / auditMonitor / statsCache / securityAlert /\nDevice·Alarm·Inspection Service 等（另有 authService / websocketService /\ninitData / sharedCache 子目录）"]
     Utils["工具：loginCipher / auditChain / encryption /\nlogger(winston) / response 封装"]
     Models["Mongoose 模型（18）"]
   end

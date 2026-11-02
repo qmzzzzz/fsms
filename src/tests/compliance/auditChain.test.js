@@ -231,7 +231,7 @@ describe('审计日志合规化', () => {
       // 防漂移守卫。原实现只遍历 PAYLOAD_FIELDS_V3——也就是**被它监管的那份清单本身**，
       // 于是给 schema 加了 targetType/targetId/dataType/description 却忘了
       // 加进 payload 时，守卫全绿：方向错了，等于没有守卫。
-      const { PAYLOAD_SCHEMA_DEFAULTS, PAYLOAD_FIELDS_V5 } = require('../../utils/auditChain');
+      const { PAYLOAD_SCHEMA_DEFAULTS, PAYLOAD_FIELDS_V6 } = require('../../utils/auditChain');
       const paths = AuditLog.schema.paths;
 
       const hasImplicitDefault = (path) =>
@@ -239,7 +239,7 @@ describe('审计日志合规化', () => {
 
       // 方向①：payload 里带 default 的字段必须登记默认值表，否则 chainBatch 算 hash
       // 时是 undefined、落库后被 Mongoose 填成默认值 → 整批断链（AUX-02 的根因）
-      const notRegistered = PAYLOAD_FIELDS_V5.filter((field) => {
+      const notRegistered = PAYLOAD_FIELDS_V6.filter((field) => {
         const path = paths[field];
         return (
           path && hasImplicitDefault(path) && !Object.keys(PAYLOAD_SCHEMA_DEFAULTS).includes(field)
@@ -267,12 +267,12 @@ describe('审计日志合规化', () => {
       const uncovered = Object.keys(paths)
         .filter((p) => !p.startsWith('$'))
         .filter((p) => !CHAIN_METADATA.has(p.split('.')[0]))
-        .filter((p) => !PAYLOAD_FIELDS_V5.includes(p.split('.')[0]));
+        .filter((p) => !PAYLOAD_FIELDS_V6.includes(p.split('.')[0]));
       expect(uncovered).toEqual([]);
 
       // 方向②的自检：把守卫的判据反过来必须能抓到真实缺口，
       // 否则「空数组等于全覆盖」这类断言可能是空转
-      const tampered = PAYLOAD_FIELDS_V5.filter((f) => f !== 'description');
+      const tampered = PAYLOAD_FIELDS_V6.filter((f) => f !== 'description');
       expect(
         Object.keys(paths)
           .filter((p) => !CHAIN_METADATA.has(p.split('.')[0]))
@@ -289,8 +289,9 @@ describe('审计日志合规化', () => {
         PAYLOAD_FIELDS_V3,
         PAYLOAD_FIELDS_V4,
         PAYLOAD_FIELDS_V5,
+        PAYLOAD_FIELDS_V6,
       } = require('../../utils/auditChain');
-      expect(CURRENT_PAYLOAD_VERSION).toBe(5);
+      expect(CURRENT_PAYLOAD_VERSION).toBe(6);
 
       // 版本清单必须是**互不相同的快照**：v3 曾写成 `= PAYLOAD_FIELDS_V2`（同一引用），
       // 将来任何人给 v2 追加字段都会静默改写 v3 的语义，存量 v3 记录集体算不回哈希
@@ -308,6 +309,18 @@ describe('审计日志合规化', () => {
       expect(PAYLOAD_FIELDS_V5).not.toBe(PAYLOAD_FIELDS_V4);
       expect([...PAYLOAD_FIELDS_V5].sort()).toEqual([...PAYLOAD_FIELDS_V4, 'refusalReason'].sort());
       expect(PAYLOAD_FIELDS_V4).not.toContain('refusalReason');
+
+      // v6 的增量同样封闭：五个溯源字段，v5 一字未动
+      const V6_INCREMENT = [
+        'requestHeaders',
+        'responseHeaders',
+        'responseBody',
+        'responseBodyTruncated',
+        'responseBodySkipped',
+      ];
+      expect(PAYLOAD_FIELDS_V6).not.toBe(PAYLOAD_FIELDS_V5);
+      expect([...PAYLOAD_FIELDS_V6].sort()).toEqual([...PAYLOAD_FIELDS_V5, ...V6_INCREMENT].sort());
+      for (const field of V6_INCREMENT) expect(PAYLOAD_FIELDS_V5).not.toContain(field);
 
       const doc = {
         timestamp: new Date('2026-08-25T00:00:00.000Z'),
@@ -435,10 +448,10 @@ describe('审计日志合规化', () => {
       expect(report.samples.map((s) => String(s._id))).toContain(String(doc._id));
     });
 
-    // H4：v5 只**增量**纳入 refusalReason。这条用例必须能区分「发了 v5」与「什么都没做」，
-    // 所以两半都要：v4 存量记录（含该字段）照旧验得过（否则发版即假篡改），
-    // 而同一内容在 v5 口径下哈希不同、且驱动层改该字段会被抓到（否则等于没进哈希）。
-    test('v4 存量记录（含 refusalReason）仍验得过，v5 同内容哈希不同且篡改可检出', async () => {
+    // H4 / V6：每一版都只能**增量**纳入新字段。这条用例必须能区分「发了新版本」与
+    // 「什么都没做」，所以两半都要：v4/v5 存量记录（含新字段）照旧验得过（否则发版即假篡改），
+    // 而同一内容在新口径下哈希不同、且驱动层改新字段会被抓到（否则等于没进哈希）。
+    test('v4/v5 存量记录仍验得过，v6 同内容哈希不同且溯源字段篡改可检出', async () => {
       const { verifyAuditChain } = require('../../services/auditChainVerify');
       const username = `chain_h4_${Date.now().toString(36)}`;
       const now = new Date();
@@ -454,9 +467,11 @@ describe('审计日志合规化', () => {
         success: false,
         errorMessage: 'Bad Request',
         refusalReason: 'operator_inside',
+        requestHeaders: { 'user-agent': 'probe' },
+        responseBody: { ok: true },
       };
 
-      // ① 存量 v4 行：直接插驱动层，哈希按当年 V4 口径铸（该口径不含 refusalReason）
+      // ① 存量 v4 行：直接插驱动层，哈希按当年 V4 口径铸（该口径不含后两版的新字段）
       const v4doc = {
         ...base,
         _id: new mongoose.Types.ObjectId(),
@@ -471,22 +486,34 @@ describe('审计日志合规化', () => {
       expect(v4report.total).toBe(1);
       expect(v4report.intact).toBe(true);
 
-      // ② 同一内容换成 v5 口径：哈希必须不同（v5 真的把它算进去了，不是形同虚设）
-      expect(computeHash(null, canonicalPayload(base, 5))).not.toBe(v4doc.hash);
+      // ② 同一内容换成 v5 / v6 口径：哈希必须逐版不同（新字段真的进了 payload）
+      const v5hash = computeHash(null, canonicalPayload(base, 5));
+      expect(v5hash).not.toBe(v4doc.hash);
+      expect(computeHash(null, canonicalPayload(base, 6))).not.toBe(v5hash);
 
-      // ③ v5 记录：驱动层改 refusalReason 必须被抓（v4 行改同一字段则抓不到——这就是 v5 的增量）
-      const v5doc = await AuditLog.create(base);
-      expect(v5doc.hashVersion).toBe(CURRENT_PAYLOAD_VERSION);
-      expect(v5doc.hash).toBe(computeHash(v5doc.prevHash, canonicalPayload(v5doc.toObject(), 5)));
-      const tampered = await verifyAuditChain(AuditLog, { filter: { _id: v5doc._id } });
+      // ③ v6 记录：驱动层改 refusalReason 必须被抓
+      const v6doc = await AuditLog.create(base);
+      expect(v6doc.hashVersion).toBe(CURRENT_PAYLOAD_VERSION);
+      expect(v6doc.hash).toBe(computeHash(v6doc.prevHash, canonicalPayload(v6doc.toObject(), 6)));
+      const tampered = await verifyAuditChain(AuditLog, { filter: { _id: v6doc._id } });
       expect(tampered.intact).toBe(true);
       await AuditLog.collection.updateOne(
-        { _id: v5doc._id },
+        { _id: v6doc._id },
         { $set: { refusalReason: 'typed_confirmation_required' } }
       );
-      const after = await verifyAuditChain(AuditLog, { filter: { _id: v5doc._id } });
+      const after = await verifyAuditChain(AuditLog, { filter: { _id: v6doc._id } });
       expect(after.intact).toBe(false);
       expect(after.byType.hash_mismatch).toBe(1);
+
+      // ④ v6 的增量本身也要有牙：改响应正文（v5 口径完全看不见的字段）必须被抓
+      const v6body = await AuditLog.create({ ...base, responseBody: { ok: true, forged: false } });
+      await AuditLog.collection.updateOne(
+        { _id: v6body._id },
+        { $set: { 'responseBody.forged': true } }
+      );
+      const bodyAfter = await verifyAuditChain(AuditLog, { filter: { _id: v6body._id } });
+      expect(bodyAfter.intact).toBe(false);
+      expect(bodyAfter.byType.hash_mismatch).toBe(1);
     });
   });
 

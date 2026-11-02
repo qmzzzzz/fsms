@@ -86,4 +86,28 @@ function parseFlags(argv, allowed, { usage } = {}) {
   return { flags, errors };
 }
 
-module.exports = { parseFlags, suggestFlag, editDistance, flagShape };
+/**
+ * 未知参数 ⇒ 立刻拒绝（stderr 报错 + 退出码 2）。
+ *
+ * 为什么单独给一个"打印并退出"的入口，而不是让调用方自己判 errors：本仓已三处手写同一段
+ * （`deployPolicy.js`、`lint-ratchet.js:47-55`、`commentDensity.js:68-75`），调用方再抄一遍
+ * 就是又一份会各自漂移的口径。退出码沿用同一约定：
+ *   2 = 用法错误（未知参数）  ← 与 1 = 存在缺失/有债 分开，但两者都非零、CI 一律拦。
+ *
+ * 只在**确认自己作为脚本执行**的分支里调用（`require.main === module` 之后，或该文件唯一的
+ * main 路径）。本仓脚本多数被测试 require：模块顶层校验进程 argv 会让 jest 进程直接 exit 2
+ * ——`lint-ratchet.js:43-46` 与 `commentDensity.js` 都为此把校验收进 main。
+ *
+ * @param {string[]} argv 参数列表（不含 node 与脚本路径）
+ * @param {string[]} allowed 白名单
+ * @param {object} [opts] 同 parseFlags（usage 等）
+ * @returns {Set<string>} 命中的开关
+ */
+function assertKnownArgs(argv, allowed, opts) {
+  const { flags, errors } = parseFlags(argv, allowed, opts);
+  if (errors.length === 0) return flags;
+  process.stderr.write(`${errors.join('\n')}\n`);
+  process.exit(2);
+}
+
+module.exports = { parseFlags, assertKnownArgs, suggestFlag, editDistance, flagShape };

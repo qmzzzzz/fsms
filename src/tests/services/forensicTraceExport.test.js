@@ -109,6 +109,22 @@ describe('时间线：只出摘要字段（体只在被标记过时才有）', (
     expect(r.count).toBe(1);
     expect(trace.getTraceStats().queries).toBe(1);
   });
+
+  test('limit 截断时取最近 N 条：查询按时间倒序取数，返回再翻回正序', async () => {
+    // 库返回的已经是「最近 N 条」的倒序结果
+    const newestFirst = [
+      { createdAt: new Date('2026-10-02T00:00:00Z'), ip: '2.2.2.2' },
+      { createdAt: new Date('2026-10-01T00:00:00Z'), ip: '1.1.1.1' },
+    ];
+    const sort = jest.fn(() => ({
+      limit: jest.fn(() => ({ lean: jest.fn(async () => newestFirst) })),
+    }));
+    const model = { find: jest.fn(() => ({ select: jest.fn(() => ({ sort })) })) };
+    const r = await trace.traceTimeline({ model, ip: '1.2.3.4', limit: 2 });
+    // 页面/导出文案承诺的是「最近 {count} 条」：取数方向反了就会变成「最早 N 条」
+    expect(sort).toHaveBeenCalledWith({ createdAt: -1 });
+    expect(r.records.map((x) => x.ip)).toEqual(['1.1.1.1', '2.2.2.2']);
+  });
 });
 
 describe('traceActor：把「他的 ip 池」直接答出来', () => {

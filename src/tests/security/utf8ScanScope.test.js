@@ -29,6 +29,7 @@ describe('F-05 生成物目录必须跳过', () => {
     ['coverage-zzmfa', '手工跑覆盖率时的带 tag 目录'],
     ['node_modules', '依赖'],
     ['.git', '版本库元数据'],
+    ['.mimosa', '编辑器钩子会话状态（gitignored 工具产物）'],
   ])('%s（%s）跳过', (name) => {
     expect(isSkippedDirName(name)).toBe(true);
   });

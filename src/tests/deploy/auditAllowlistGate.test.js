@@ -297,29 +297,42 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
   });
 
   test('CLI：--allow-missing-details 降级也要非 0 并打印 WARN（降级≠通过）', () => {
+    // 清单必须用空夹具而非现网文件：本条判的是「降级≠通过」，与现网登记了哪些条目无关。
+    // 现网清单非空时，合成报告里没有对应公告 ⇒ 登记项被判「已陈旧」提前返回，
+    // 走不到 WARN 分支，测试就会随登记状态漂移而误红（2026-11-03 实测）。
+    const tmpAllow = path.join(ROOT, '.audit-zzq-empty-allowlist.json');
+    fs.writeFileSync(tmpAllow, JSON.stringify({ threshold: 'moderate', entries: [] }));
     const tmp = path.join(ROOT, '.audit-zzq-missing2.json');
     fs.writeFileSync(tmp, JSON.stringify({ metadata: { vulnerabilities: { high: 3, total: 3 } } }));
     try {
-      const r = spawnSync(process.execPath, [SCRIPT, '--report', tmp, '--allow-missing-details'], {
-        cwd: ROOT,
-        encoding: 'utf8',
-      });
+      const r = spawnSync(
+        process.execPath,
+        [SCRIPT, '--report', tmp, '--allowlist', tmpAllow, '--allow-missing-details'],
+        {
+          cwd: ROOT,
+          encoding: 'utf8',
+        }
+      );
       expect(r.status).not.toBe(0);
       expect(r.stderr).toContain('WARN: --allow-missing-details');
       expect(r.stdout).toContain('计数自洽：否');
     } finally {
       fs.unlinkSync(tmp);
+      fs.unlinkSync(tmpAllow);
     }
   });
 
   test('CLI：自洽且无洞的真实形状仍判绿（防"堵假绿把真绿也堵了"）', () => {
+    // 同上：清单用空夹具——本条判的是「零公告报告必须能绿」，不应随现网登记状态漂移。
+    const tmpAllow = path.join(ROOT, '.audit-zzq-empty-allowlist.json');
+    fs.writeFileSync(tmpAllow, JSON.stringify({ threshold: 'moderate', entries: [] }));
     const tmp = path.join(ROOT, '.audit-zzq-clean.json');
     fs.writeFileSync(
       tmp,
       JSON.stringify({ metadata: { vulnerabilities: { total: 0 } }, vulnerabilities: {} })
     );
     try {
-      const r = spawnSync(process.execPath, [SCRIPT, '--report', tmp], {
+      const r = spawnSync(process.execPath, [SCRIPT, '--report', tmp, '--allowlist', tmpAllow], {
         cwd: ROOT,
         encoding: 'utf8',
       });
@@ -328,6 +341,7 @@ describe('含 dev 审计门禁：判据可证伪且与允许清单一致', () =>
       expect(r.stdout).toContain('计数自洽：是');
     } finally {
       fs.unlinkSync(tmp);
+      fs.unlinkSync(tmpAllow);
     }
   });
 

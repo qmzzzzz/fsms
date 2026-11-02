@@ -350,12 +350,16 @@ const stripControlChars = (value, maxLength = 1024) => {
  * 递归清洗对象中所有字符串值的控制字符（用于审计 params/query 等结构化字段）
  * @param {any} value 待清洗值
  * @param {number} [depth=0] 当前递归深度（内部使用）
+ * @param {number} [maxStringLength=1024] 单字符串截断上限（响应正文采集传字节级上限，
+ *   避免在深层清洗阶段就静默截短——那样的截断不会被外层的 truncated 标记覆盖）
  * @returns {any} 清洗后的同构值
  */
-const stripControlCharsDeep = (value, depth = 0) => {
+const stripControlCharsDeep = (value, depth = 0, maxStringLength = 1024) => {
   if (depth > 6) return value;
-  if (typeof value === 'string') return stripControlChars(value);
-  if (Array.isArray(value)) return value.map((v) => stripControlCharsDeep(v, depth + 1));
+  if (typeof value === 'string') return stripControlChars(value, maxStringLength);
+  if (Array.isArray(value)) {
+    return value.map((v) => stripControlCharsDeep(v, depth + 1, maxStringLength));
+  }
   if (value && typeof value === 'object') {
     const cleaned = {};
     for (const [k, v] of Object.entries(value)) {
@@ -363,7 +367,7 @@ const stripControlCharsDeep = (value, depth = 0) => {
       // 用 defineProperty 落键：直接 `cleaned[ck] = ...` 在 ck === '__proto__' 时触发原型 setter（把值挂成 cleaned 的原型而非自身键），导致审计副本与实际
       // 请求体不一致。defineProperty 把 '__proto__' 存为普通自身可枚举属性。
       Object.defineProperty(cleaned, ck, {
-        value: stripControlCharsDeep(v, depth + 1),
+        value: stripControlCharsDeep(v, depth + 1, maxStringLength),
         enumerable: true,
         writable: true,
         configurable: true,
@@ -435,6 +439,15 @@ const SENSITIVE_KEY_SUBSTRINGS = Object.freeze([
   'apikey',
   'phone',
   'email',
+  // 以下三项随审计响应体采集引入：响应正文会原样带回
+  // MFA 恢复码（`recoveryCodes`）、含 TOTP 种子的 `otpauthUri`，
+  // 以及二次验证/封禁确认票据（`ticket`）。它们与 token/password 同类，
+  // 都是「拿到即等于拿到长期或短期凭证」，不加入名单就会明文进 append-only 审计集合。
+  // 误伤边界：本仓无业务字段以 ticket/recoverycode/otpauth 为名（`banRefusalReason`
+  // 里的 ticket 只是一个布尔分档标记，被掩码不影响任何判定）。
+  'recoverycode',
+  'otpauth',
+  'ticket',
 ]);
 
 /**

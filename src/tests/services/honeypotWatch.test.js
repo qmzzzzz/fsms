@@ -22,12 +22,17 @@ const jwt = require('jsonwebtoken');
 const { DECOY_PERMISSIONS, DECOY_ROLE_CODES } = require('../../constants/honeypotDecoy');
 const { DECOY_SELF_EMAIL_DOMAIN } = require('../../constants/honeypotDecoySelf');
 const { PERSONA_DEPARTMENTS } = require('../../constants/honeypotPersonas');
+const { __resetAlertRateLimitForTest } = require('../../services/alertDispatch');
+const captchaService = require('../../services/captchaService');
 
 describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除', () => {
   const stamp = ('hpt' + Date.now()).replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
   const honeypotName = stamp + 'trap';
   const secondDecoy = stamp + 'trap2';
   const realName = stamp + 'real';
+  // 测试专用假口令（非任何真实凭据；集中定义避免散落字面量）
+  const PLAIN_TEST_PASSWORD = ['Zz9!kLm3', 'Tuv7'].join('#');
+  const LURE_PASSWORD = ['admin', '123456'].join('@'); // 诱饵口令：命中 ⇒ 放行并逐条审计
   const saved = {};
 
   let User;
@@ -58,6 +63,30 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
     AuditLog.countDocuments({ action: 'honeypot_login', username: name });
   const honeypotDispatches = () =>
     dispatchSpy.mock.calls.filter((call) => call[0] === 'honeypot_login');
+  /**
+   * 前置：确保本套件的主诱饵账户已在库里。
+   * 此前「口令命中」「枚举面排除」等用例直接假定前序用例已经 init 过——固定序下成立，
+   * --randomize 打乱后必挂（实测 1~5 红波动）。每个依赖库内诱饵的用例自带前置，顺序无关。
+   */
+  const ensureDecoy = async () => {
+    setEnv('HONEYPOT_USERNAMES', honeypotName);
+    honeypotWatch.__resetForTest();
+    if (!(await User.findByUsername(honeypotName))) await honeypotWatch.init();
+  };
+  /**
+   * 登录成功路径的前置：挑战判据读的是**审计库里该 username 的近期失败行**
+   * （loginChallenge.isChallengeRequired），前序用例（如「非诱饵口令走失败路径」）
+   * 留下的失败行会让本用例撞 CAPTCHA_INVALID。清掉本套件前缀的失败行 + 复位验证码存储，
+   * 让「能不能登录」只取决于本用例的数据，不取决于执行顺序。
+   */
+  const clearChallengeState = async () => {
+    await AuditLog.deleteMany({
+      username: new RegExp('^' + stamp),
+      action: { $in: ['login_failed', 'login_failure', 'captcha_rejected'] },
+    }).catch(() => {});
+    captchaService._resetForTests();
+    __resetAlertRateLimitForTest();
+  };
 
   beforeAll(async () => {
     if (mongoose.connection.readyState === 0) {
@@ -104,6 +133,9 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
   });
 
   beforeEach(() => {
+    // 告警节流表是进程级状态：不重置则「投递几次」取决于用例执行顺序（随机序下会静默吞掉投递）
+    honeypotWatch.__resetForTest();
+    __resetAlertRateLimitForTest();
     dispatchSpy = jest.spyOn(securityAlert, 'dispatchNotification').mockImplementation(() => {});
   });
 
@@ -112,6 +144,10 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
   });
 
   test('init 物化诱饵账户：标志位 true、零角色、active、口令无人知晓', async () => {
+    // 本用例断言「新建」（provisioned）而不是「沿用」：前序用例若已建号会让 init 走 skipped。
+    // 自带干净前置 ⇒ 顺序无关（原实现靠固定序，--randomize 下间歇红）。
+    await User.deleteMany({ username: { $in: [honeypotName, secondDecoy] } });
+    setEnv('HONEYPOT_USERNAMES', honeypotName);
     honeypotWatch.__resetForTest();
     await honeypotWatch.init();
     const doc = await User.findByUsername(honeypotName).select('+password');
@@ -136,6 +172,7 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
   });
 
   test('重复 init 幂等：第二次是「沿用已存在」，不重复建号', async () => {
+    await ensureDecoy(); // 前置：号必须已存在，本用例断言的正是「第二次走 skipped」
     honeypotWatch.__resetForTest();
     await honeypotWatch.init();
     expect(await User.countDocuments({ username: honeypotName, isHoneypot: true })).toBe(1);
@@ -165,10 +202,12 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
   });
 
   test('诱饵名被真实账户占用：拒绝接管并报错，真实账户不得被打标', async () => {
+    // 自带前置：该号可能已被别的用例建过（随机序），先清再建，避免唯一索引冲突
+    await User.deleteMany({ username: realName });
     await User.create({
       username: realName,
       email: realName + '@example.com',
-      password: 'Zz9!kLm3#Tuv7',
+      password: PLAIN_TEST_PASSWORD,
       realName: '真实用户',
       roles: [],
     });
@@ -184,6 +223,10 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
   });
 
   test('诱饵口令命中：按成功路径放行（零角色会话）+ 审计 + 告警一次；重复登录审计逐条、告警仍一次', async () => {
+    await ensureDecoy(); // 不假定前序用例建过号（随机序下前序可能没跑或跑的是别的名字）
+    await clearChallengeState(); // 也不假定「本 username 没有近期失败行」（那会触发人机挑战）
+    // 审计行数按**增量**断言：前序用例可能给同一诱饵账户留过 honeypot_login 行（随机序）
+    const auditBaseline = await honeypotAuditRows(honeypotName);
     const result = await authService.loginUser(
       { username: honeypotName, password: 'admin@123456' },
       ctx('10.30.0.1')
@@ -204,12 +247,18 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
     expect(honeypotDispatches()[0][1]).toBe('critical');
     expect(honeypotDispatches()[0][3].honeypot).toBe(honeypotName);
 
-    await authService.loginUser({ username: honeypotName, password: 'P@ssw0rd' }, ctx('10.30.0.2'));
-    expect(await honeypotAuditRows(honeypotName)).toBe(2);
+    // 第二次仍用**诱饵口令**（命中放行 ⇒ 逐条审计；非诱饵口令走失败路径、不写 honeypot_login）
+    await authService.loginUser(
+      { username: honeypotName, password: LURE_PASSWORD },
+      ctx('10.30.0.2')
+    );
+    expect(await honeypotAuditRows(honeypotName)).toBe(auditBaseline + 2);
     expect(honeypotDispatches()).toHaveLength(1);
   });
 
   test('签署声明：令牌载荷里的 email/roles 是呈现层那份（登录与续期两条签发点同一口径）', async () => {
+    await ensureDecoy(); // 号必须在库
+    await clearChallengeState(); // 该 username 的近期失败行会把人机挑战顶起来
     const login = await authService.loginUser(
       { username: honeypotName, password: 'admin@123456' },
       ctx('10.30.0.5')
@@ -277,6 +326,17 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
   });
 
   test('枚举面排除：用户列表、计数与统计聚合都看不到诱饵账户', async () => {
+    // 自带前置：需要一个真诱饵号 + 一个同前缀真实号（两者都由本用例负责存在，不靠前序残留）
+    await ensureDecoy();
+    if (!(await User.findByUsername(realName))) {
+      await User.create({
+        username: realName,
+        email: realName + '@example.com',
+        password: PLAIN_TEST_PASSWORD,
+        realName: '真实用户',
+        roles: [],
+      });
+    }
     const { roleFound, query } = await userService.buildListQuery(
       { search: stamp },
       { type: 'all' }
@@ -301,6 +361,17 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
   });
 
   test('哨兵对账口径：蜜罐占用哨兵名不算遮蔽，真实账户占用才算', async () => {
+    await ensureDecoy(); // 本用例需要「蜜罐占用哨兵名」这一侧真的存在（不假定前序用例建过号）
+    // 真实账户占位同理：原实现依赖『诱饵名被真实账户占用』先跑且残留了该账户
+    if (!(await User.findByUsername(realName))) {
+      await User.create({
+        username: realName,
+        email: realName + '@example.com',
+        password: PLAIN_TEST_PASSWORD,
+        realName: '真实用户',
+        roles: [],
+      });
+    }
     setEnv('CANARY_USERNAMES', honeypotName);
     canaryWatch.__resetForTest();
     await canaryWatch.init();

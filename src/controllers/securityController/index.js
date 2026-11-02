@@ -39,4 +39,5 @@ module.exports = {
   getUpgradeJob: upgrade.getUpgradeJob,
   triggerUpgrade: upgrade.triggerUpgrade,
   getStuffingProfile: profile.getStuffingProfile,
+  getAttackProfile: profile.getAttackProfile,
 };

@@ -310,6 +310,10 @@ async function main() {
   process.env.TLS_TERMINATED_UPSTREAM = 'true';
   process.env.CORS_ORIGIN = 'https://127.0.0.1:' + PORT;
   process.env.TRUST_PROXY_HOPS = '1';
+  // F-01：启用 hops 后必须显式声明可信代理网段——校验禁止按「对端属私网/回环」回退信任，
+  // 因为那等于把「谁连上来谁就是代理」写死进判据。演练的探测直连本机端口，故声明回环
+  // /32：这是满足判据的最小可信集，不是 0.0.0.0/0 那类全域网段（后者会被判非法）。
+  process.env.TRUSTED_PROXY_CIDRS = '127.0.0.1/32';
   process.env.METRICS_TOKEN = METRICS_TOKEN;
   // 消除 G6 告警噪声：演练声明 Host 白名单（无前置反代场景的本机域名）
   process.env.ALLOWED_HOSTS = '127.0.0.1:' + PORT;

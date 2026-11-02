@@ -284,7 +284,12 @@
       <main id="main-content" ref="mainContentRef" class="main-content" tabindex="-1">
         <router-view v-slot="{ Component }">
           <transition name="fade" mode="out-in">
-            <component :is="Component" :key="route.fullPath" />
+            <!-- 默认同路径不同 query 重挂载；工作台把 tab 放 query 里且需保活，
+                 由 meta.keepOnQuery 显式豁免（否则每次切 tab 都丢三个工具的现场） -->
+            <component
+              :is="Component"
+              :key="route.meta.keepOnQuery ? route.path : route.fullPath"
+            />
           </transition>
         </router-view>
       </main>
@@ -333,6 +338,7 @@ import {
   Monitor,
   Operation,
   Search,
+  Aim,
   Warning,
 } from '@element-plus/icons-vue'
 import { useAuthStore, useAppStore } from '@/store'
@@ -508,10 +514,10 @@ const baseMenu = [
       { path: '/audit-logs', i18nKey: 'nav.auditLogs', icon: Document, perm: 'security:audit' },
       { path: '/ip-list', i18nKey: 'nav.ipList', icon: Lock, perm: 'security:config' },
       {
-        // 取证溯源：只读溯源需要 security:audit，与路由 meta.permission 同一权限码
-        path: '/forensic-trace',
-        i18nKey: 'nav.forensic',
-        icon: Search,
+        // 安全分析工作台：画像 → 撞库 → 取证在同一读权限面下用 tab 切换
+        path: '/security-analysis',
+        i18nKey: 'nav.securityAnalysis',
+        icon: Aim,
         perm: 'security:audit',
       },
       {

@@ -470,6 +470,26 @@ router.get(
 );
 
 /**
+ * @route   GET /api/security/audit-logs/:id
+ * @desc    单条审计详情（含请求/响应头、响应正文等溯源字段）
+ * @access  Private [security:audit]
+ * 必须排在 /audit-logs/verify 与 /audit-logs/export 之后：Express 按注册序匹配，
+ * 若本路由在前，`verify`/`export` 会被当作 :id 吃掉并得到 400/404。
+ * 与列表同权限码、同步进票据与严格限流：详情比列表多出响应正文，
+ * 不设步进票据等于给被盗会话一条批量读取历史响应内容的旁路。
+ */
+router.get(
+  '/audit-logs/:id',
+  authenticate,
+  checkPermission('security:audit'),
+  requireReauthTicket(),
+  param('id').isMongoId().withMessage('审计日志 ID 格式无效'),
+  consumeValidation(),
+  strictLimiter,
+  auditController.getAuditLogDetail
+);
+
+/**
  * @route   GET /api/security/config/allowPublicRegistration
  * @desc    获取注册开关状态
  * @access  Private [security:config]

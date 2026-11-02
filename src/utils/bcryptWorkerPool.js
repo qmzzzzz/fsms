@@ -81,12 +81,16 @@ const ensurePool = () => {
         pump();
       });
 
-      // 线程崩溃：在途任务按失败结算并摘除该 worker；全灭则置 initFailed 永久回退
-      // 进程内实现（比反复重建线程池更可预期，且登录路径绝不能因池问题而 500）。
+      // 线程崩溃：在途任务与排队任务同一出口——都改走进程内兜底（文件头承诺「登录可用性优先于性能」，
+      // 先前在途 reject ⇒ 崩在登录请求上就是 500）。全灭则置 initFailed 永久回退（比反复重建线程池可预期）。
+      const drainInline = (task) => {
+        Promise.resolve()
+          .then(() => runInline(task.op, task.args))
+          .then(task.resolve, task.reject);
+      };
       const kill = (label) => {
-        for (const task of entry.inflight.values()) {
-          task.reject(new Error(`bcrypt worker ${label}`));
-        }
+        const inflight = [...entry.inflight.values()]; // Map 按分发顺序插入 ⇒ 兜底也按先来后到
+        for (const task of inflight) drainInline(task);
         entry.inflight.clear();
         const idx = workers.indexOf(entry);
         if (idx !== -1) workers.splice(idx, 1);
@@ -94,13 +98,12 @@ const ensurePool = () => {
           initFailed = true;
           pool = null;
           // 崩溃时排队的任务直接走进程内兜底，避免悬挂
-          while (queue.length > 0) {
-            const task = queue.shift();
-            Promise.resolve()
-              .then(() => runInline(task.op, task.args))
-              .then(task.resolve, task.reject);
-          }
+          while (queue.length > 0) drainInline(queue.shift());
         }
+        if (inflight.length > 0)
+          require('../utils/logger').warn(
+            `bcrypt worker ${label}：${inflight.length} 个在途任务改走进程内兜底（登录路径不受池故障影响）`
+          );
         pump();
       };
 
@@ -123,7 +126,11 @@ const ensurePool = () => {
     pool = { workers, queue, pump };
     return pool;
   } catch (error) {
-    initFailed = true;
+    initFailed = true; // 回退本身是设计好的，但"永久降级且零信号"不行：下面这条 warn 是该形态唯一的可见点
+    const logger = require('../utils/logger');
+    logger.warn(
+      `bcrypt worker 池初始化失败（回退进程内实现，本进程不再重试）：${error?.message ?? error}`
+    );
     return null;
   }
 };

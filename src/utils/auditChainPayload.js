@@ -59,7 +59,20 @@ const PAYLOAD_FIELDS_V4 = [
 // v5：补进 refusalReason（4xx 拒绝原因码）——归因证据，与 riskLevel 同族。**只能在 V5 加**：往 V4 追加会让存量 v4 记录按新口径复算 ⇒ 集体 hash_mismatch（假篡改告警）。
 const PAYLOAD_FIELDS_V5 = [...PAYLOAD_FIELDS_V4, 'refusalReason'];
 
-const CURRENT_PAYLOAD_VERSION = 5;
+// v6：审计详情的溯源材料（请求/响应头、响应正文与截断/未采集标记）。
+// 这些字段是"这次请求到底发生了什么"的直接证据，不纳入哈希就等于允许落库后被静默改写
+// 而三层校验全绿；尤其 responseBodyTruncated / responseBodySkipped 被翻转后，
+// 详情页会把"只看到前 8KB"误读成"完整响应"，比缺少字段更危险。
+const PAYLOAD_FIELDS_V6 = [
+  ...PAYLOAD_FIELDS_V5,
+  'requestHeaders',
+  'responseHeaders',
+  'responseBody',
+  'responseBodyTruncated',
+  'responseBodySkipped',
+];
+
+const CURRENT_PAYLOAD_VERSION = 6;
 
 // 历史清单一律冻结：清单被改动 ⇒ 历史哈希算不回来 ⇒ 大面积假篡改告警（本文件 v3 那行记的事故）。冻结是可执行判据，注释与 review 防不住第三次。
 Object.freeze(PAYLOAD_FIELDS_V1);
@@ -67,6 +80,7 @@ Object.freeze(PAYLOAD_FIELDS_V2);
 Object.freeze(PAYLOAD_FIELDS_V3);
 Object.freeze(PAYLOAD_FIELDS_V4);
 Object.freeze(PAYLOAD_FIELDS_V5);
+Object.freeze(PAYLOAD_FIELDS_V6);
 
 const stableStringify = (value) => {
   if (value === null || value === undefined) return 'null';
@@ -133,6 +147,7 @@ const canonicalPayloadV2LegacyBatch = (doc) => {
 
 // 按记录自带 hashVersion 选口径；每新增一版都必须保留旧分支——历史哈希只有按当年口径才复算得出来。
 const canonicalPayload = (doc, version = CURRENT_PAYLOAD_VERSION) => {
+  if (version >= 6) return canonicalPayloadV2(doc, PAYLOAD_FIELDS_V6);
   if (version >= 5) return canonicalPayloadV2(doc, PAYLOAD_FIELDS_V5);
   if (version >= 4) return canonicalPayloadV2(doc, PAYLOAD_FIELDS_V4);
   // v3 必须读 V3 那份快照。此前这一行读的是 PAYLOAD_FIELDS_V2，于是上面"必须是独立快照"
@@ -159,6 +174,7 @@ module.exports = {
   PAYLOAD_FIELDS_V3,
   PAYLOAD_FIELDS_V4,
   PAYLOAD_FIELDS_V5,
+  PAYLOAD_FIELDS_V6,
   CURRENT_PAYLOAD_VERSION,
   canonicalPayload,
   canonicalPayloadV2,

@@ -52,6 +52,8 @@ const methods = {
    * 停止 WebSocket 服务并清理资源（供优雅关闭调用）
    */
   dispose() {
+    // 先解绑业务推送入口：关闭期间仍在收尾的业务写入不应再向已销毁的实例投递
+    require('../realtimeNotifier').setWebSocketService(null);
     if (this._cleanupTimer) {
       clearInterval(this._cleanupTimer);
       this._cleanupTimer = null;
