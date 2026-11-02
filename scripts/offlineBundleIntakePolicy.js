@@ -63,19 +63,37 @@ const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const REQUIRED_ENTRIES = ['manifest.json', 'manifest.sig', 'SHA256SUMS'];
 
 /**
- * 把 `tar -tzf` 的输出切成条目名数组。
+ * 归档清单的类型位 → 允许与否。
  *
- * **保留目录条目的形态**（末尾 `/` 留着）：解包时必须区分文件与目录（见 fileEntriesOnly
- * 的注释），而安全判据与条目数统计对两者一视同仁。
+ * 实测（GNU tar 1.35）：**裸 `-tzf` 对软链条目只打印名字**（`evil`），` -> ` 只在
+ * verbose 形态出现。因此判「是不是链接」必须用 `-tvzf` 的**首字符类型位**，
+ * 而不是在裸清单里找 `" -> "`——后者是一道空防线（实测钉住，见 ADR-020 踩过的坑）。
  *
- * 三件事必须在这里做完，不能留给下游：
- *   · 剥掉行尾 `\r`（Windows 上生成的归档可能带）；
- *   · **跳过空行**——`tar` 输出末尾有一个换行，split 会多出一个空串；把它当条目会让
- *     下游拼出包根路径；
- *   · 含 ` -> ` 的行一律拒绝：`tar` 对硬链接/符号链接以 `name link -> target` 形式打印，
- *     而落位只该有普通文件——链接指向的可以是包外任意位置。
+ * 允许：`-` 普通文件、`d` 目录。其余一律拒绝（`l` 软链 / `h` 硬链 / `b`、`c` 设备 /
+ * `p` FIFO / `s` socket 等）——**链接与设备节点在解包之前就被拒掉**，落位只该有
+ * 普通文件与目录。
+ */
+const ALLOWED_TYPE_BITS = new Set(['-', 'd']);
+
+/** verbose 行的形态：`<类型位+权限> owner/group size date time name（可选 -> target）` */
+const VERBOSE_LINE_RE = /^([-dlhbcps])([rwxsStT-]{9})\s+\S+\s+\d+\s+\S+\s+\S+\s+(.*)$/;
+
+/**
+ * 解析 `tar -tvzf` 的输出。
  *
- * @param {string} listing `tar -tzf` 的 stdout
+ * 保留目录条目的形态（末尾 `/` 留着）：解包时必须区分文件与目录（成员名由 manifest
+ * 决定，目录条目随父路径隐式创建；而安全判据与条目数统计对两者一视同仁）。
+ *
+ * 四件事必须在这里做完，不能留给下游：
+ *   · 剥掉行尾 `\r`（Windows 上生成的归档可能带）与跳过空行（split 的末尾产物）；
+ *   · **按类型位拒绝非普通文件**（链接/设备/FIFO/socket 一律拒）——这是清单层唯一
+ *     能提前看到链接的地方（见 ALLOWED_TYPE_BITS 的实测记录）；
+ *   · 行形态不认识时**硬失败**而不是「尽力解析」：一个认不出的行意味着我们对这个归档
+ *     的了解不完整，而落位是「只解点名条目」的前提依赖清单准确；
+ *   · 条目名里的 ` -> ` 直接拒绝（verbose 对链接会打印 `name -> target`；类型位已拦，
+ *     这里再收一道，防某实现把链接印成普通类型的畸形形态）。
+ *
+ * @param {string} listing `tar -tvzf` 的 stdout
  * @returns {string[]} 条目名（目录条目保留末尾 `/`）
  */
 function parseArchiveListing(listing) {
@@ -86,12 +104,27 @@ function parseArchiveListing(listing) {
   for (const line of listing.split('\n')) {
     const raw = line.replace(/\r$/, '');
     if (raw.trim() === '') continue; // 末尾换行与空白行不是条目
-    if (raw.includes(' -> ')) {
+
+    const m = raw.match(VERBOSE_LINE_RE);
+    if (!m) {
       throw new Error(
-        `归档里包含链接条目（${raw}）：落位只接受普通文件——链接指向的可以是包外任意位置`
+        `无法解析归档清单行（拒绝继续，不做「尽力解析」）：${JSON.stringify(raw.slice(0, 160))}\n` +
+          '  落位以「只解点名条目」为前提，而点名依赖清单准确——认不出的行意味着了解不完整。'
       );
     }
-    entries.push(raw);
+    const [, typeBit, , name] = m;
+    if (!ALLOWED_TYPE_BITS.has(typeBit)) {
+      throw new Error(
+        `归档里包含非普通文件条目（类型位 ${typeBit}）：${name}\n` +
+          '  落位只接受普通文件与目录——链接/设备/FIFO 指向的可以是包外任意位置。'
+      );
+    }
+    if (name.includes(' -> ')) {
+      throw new Error(
+        `归档里包含链接条目（${name}）：落位只接受普通文件——链接指向的可以是包外任意位置`
+      );
+    }
+    entries.push(name);
   }
   if (entries.length === 0) {
     throw new Error('归档条目列表为空：这个 .tar.gz 里没有任何文件');
@@ -107,24 +140,6 @@ function normalizeEntry(entry) {
   const text = String(entry ?? '');
   return isDirectoryEntry(text) ? text.replace(/\/+$/, '') : text;
 }
-
-/**
- * 从条目列表里挑出**要解的文件条目**，丢弃目录条目。
- *
- * 为什么必须区分（实测，GNU tar 1.35）：`tar -czf x.tar.gz -C dir payload` 会同时产出
- * `payload/`（目录）与 `payload/fsms-app.tar`（文件）两条。把两者一起交给
- * `-xzf ... -- payload payload/fsms-app.tar` 会以
- * `tar: payload/fsms-app.tar: Not found in archive` 失败——同一路径既声明为目录又声明为
- * 成员时解析冲突。目录会随文件条目的父路径隐式创建，不需要显式解。
- *
- * 目录条目仍参与安全判据与条目数统计（它们也是归档的一部分）。
- */
-function fileEntriesOnly(entries) {
-  if (!Array.isArray(entries)) throw new Error('条目列表不是数组：无法判定要解什么');
-  return entries.filter((entry) => !isDirectoryEntry(entry)).map(normalizeEntry);
-}
-
-/** 解析命令行（与其它脚本同口径：未知参数报错而不是忽略） */
 
 /**
  * 条目数封顶。报错里带上限，便于运维判断该调上限还是分包。
@@ -164,7 +179,8 @@ function assertArchiveSizeWithinCap(bytes, cap = DEFAULT_MAX_ARCHIVE_BYTES) {
  * payload 条目不在 REQUIRED_ENTRIES 里——它的名字由 manifest 声明，parseBundleManifest 后才知道。
  *
  * 比对前先归一（`manifest.json/` 这类带目录标记的形态也能命中）：要求条目必须在，
- * 但「它被标成目录」不该让判据误报缺失——那是另一个问题（解包时会被 fileEntriesOnly 过滤）。
+ * 但「它被标成目录」不该让判据误报缺失——那是另一个问题（目录条目只是路径形态，
+ * 解包时成员名由 manifest 决定，不跟着清单走）。
  */
 function assertRequiredEntriesPresent(entries, required = REQUIRED_ENTRIES) {
   const set = new Set(entries.map(normalizeEntry));
@@ -330,9 +346,9 @@ module.exports = {
   REQUIRED_ENTRIES,
   FLAGS,
   parseArchiveListing,
+  ALLOWED_TYPE_BITS,
   isDirectoryEntry,
   normalizeEntry,
-  fileEntriesOnly,
   assertEntryCountWithinCap,
   assertArchiveSizeWithinCap,
   assertRequiredEntriesPresent,

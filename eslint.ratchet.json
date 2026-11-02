@@ -24,11 +24,11 @@
   "scripts/migrate-pii-encryption.js": {
     "max-lines": 1
   },
-  "scripts/offlineBundlePolicy.js": {
-    "complexity": 1
-  },
   "scripts/offlineBundleIntake.js": {
     "max-lines": 1
+  },
+  "scripts/offlineBundlePolicy.js": {
+    "complexity": 1
   },
   "src/config/validate.js": {
     "max-lines": 1
@@ -91,8 +91,8 @@
     "scripts/hotUpgradeJob.js": 319,
     "scripts/hotUpgrade.js": 407,
     "scripts/hotUpgradeQueue.js": 322,
-    "scripts/offlineBundleIntake.js": 496,
     "scripts/migrate-pii-encryption.js": 308,
+    "scripts/offlineBundleIntake.js": 496,
     "src/config/validate.js": 351,
     "src/controllers/roleController.js": 304,
     "src/docs/generate.js": 1419,

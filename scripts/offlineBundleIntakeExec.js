@@ -49,10 +49,22 @@ function toTarPath(filePath) {
 
 /**
  * 列归档条目（只读头，不解压）。
+ *
+ * **用 `-v`（verbose）而不是裸 `-t`**：实测（GNU tar 1.35）裸 `-tzf` 对软链条目
+ * **只打印名字**（`evil`），` -> ` 只在 verbose 形态出现；靠裸清单判「是不是链接」
+ * 是一道空防线（实测钉住，见 ADR-020 踩过的坑）。verbose 形态每行形如：
+ *
+ *   -rw-r--r-- 0/0  2 1970-01-01 08:00 manifest.json
+ *   lrw-r--r-- 0/0  0 1970-01-01 08:00 evil -> /etc
+ *   drwxr-xr-x 0/0  0 1970-01-01 08:00 payload/
+ *
+ * 首字符即类型位（`-` 普通文件 / `d` 目录 / `l` 符号链接 / `h` 硬链接），
+ * 由判据层的 parseArchiveListing 逐个判定——**链接类型在解包之前就被拒绝**。
+ *
  * @param {string} archive 已过 resolveWithinRoot 的归档绝对路径
  */
 function listArchiveEntries(archive) {
-  return execFileSync('tar', ['-tzf', toTarPath(archive)], {
+  return execFileSync('tar', ['-tvzf', toTarPath(archive)], {
     cwd: ROOT,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],

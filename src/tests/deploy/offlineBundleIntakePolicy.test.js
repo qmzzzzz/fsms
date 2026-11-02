@@ -28,56 +28,96 @@ const messageOf = (fn) => {
   return '';
 };
 
-describe('条目清单解析：空行与链接条目', () => {
+/**
+ * 归档清单夹具：`tar -tvzf` 的 verbose 形态（判据按**类型位**判，见 ADR-020）。
+ * 每行 = `<类型位+权限> owner/group size date time name`。
+ */
+const vline = (name, { type = '-', perms = 'rw-r--r--', size = '2' } = {}) =>
+  `${type}${perms} 0/0 ${size} 1970-01-01 08:00 ${name}`;
+const vlisting = (...lines) => lines.join('\n') + '\n';
+
+describe('条目清单解析：verbose 形态与类型位', () => {
   test('正常清单：逐行成条目，末尾换行不产出空条目', () => {
     expect(
-      policy.parseArchiveListing('manifest.json\nmanifest.sig\nSHA256SUMS\npayload/fsms-app.tar\n')
-    ).toEqual(['manifest.json', 'manifest.sig', 'SHA256SUMS', 'payload/fsms-app.tar']);
+      policy.parseArchiveListing(
+        vlisting(
+          vline('manifest.json'),
+          vline('manifest.sig'),
+          vline('SHA256SUMS'),
+          vline('payload/', { type: 'd', perms: 'rwxr-xr-x', size: '0' }),
+          vline('payload/fsms-app.tar', { size: '1024' })
+        )
+      )
+    ).toEqual(['manifest.json', 'manifest.sig', 'SHA256SUMS', 'payload/', 'payload/fsms-app.tar']);
   });
 
-  test('目录条目保留末尾斜杠（解包时必须区分文件与目录）', () => {
-    const entries = policy.parseArchiveListing('payload/\npayload/fsms-app.tar\n');
-    expect(entries).toEqual(['payload/', 'payload/fsms-app.tar']);
+  test('目录条目保留末尾斜杠（类型位 d；解包时成员名由 manifest 决定，目录随父路径隐式建）', () => {
+    const entries = policy.parseArchiveListing(
+      vlisting(vline('payload/', { type: 'd', perms: 'rwxr-xr-x' }), vline('payload/x.tar'))
+    );
+    expect(entries).toEqual(['payload/', 'payload/x.tar']);
     expect(policy.isDirectoryEntry(entries[0])).toBe(true);
     expect(policy.isDirectoryEntry(entries[1])).toBe(false);
   });
 
   test('CRLF 行尾被剥掉（Windows 上生成的归档可能带）', () => {
-    expect(policy.parseArchiveListing('a\r\nb\r\n')).toEqual(['a', 'b']);
+    expect(policy.parseArchiveListing(`${vline('a')}\r\n${vline('b')}\r\n`)).toEqual(['a', 'b']);
   });
 
-  test('链接条目一律拒绝：落点可以是包外任意文件', () => {
-    expect(messageOf(() => policy.parseArchiveListing('a\nb -> /etc/passwd\n'))).toMatch(
-      /链接条目/
+  test('**符号链接（类型位 l）必拒**——裸 -tzf 只打印名字，类型位是唯一提前可判的形态', () => {
+    expect(
+      messageOf(() =>
+        policy.parseArchiveListing(vlisting(vline('manifest.json'), vline('evil', { type: 'l' })))
+      )
+    ).toMatch(/非普通文件条目/);
+  });
+
+  test.each([
+    ['硬链接 h', 'h'],
+    ['块设备 b', 'b'],
+    ['字符设备 c', 'c'],
+    ['FIFO p', 'p'],
+    ['socket s', 's'],
+  ])('%s 同样必拒（类型位不在允许集合内）', (_label, typeBit) => {
+    expect(
+      messageOf(() => policy.parseArchiveListing(vlisting(vline('x', { type: typeBit }))))
+    ).toMatch(/非普通文件条目/);
+  });
+
+  test('链接行的 ` -> ` 也被拒（类型位已拦，这是第二道）', () => {
+    expect(
+      messageOf(() => policy.parseArchiveListing(vlisting(vline('b -> /etc/passwd'))))
+    ).toMatch(/链接条目/);
+  });
+
+  test('行形态认不出即硬失败——不做「尽力解析」（点名依赖清单准确）', () => {
+    // 裸 -tzf 的输出（只有名字）喂给本函数必须失败：那正是「用了错形态的清单」的信号
+    expect(messageOf(() => policy.parseArchiveListing('manifest.json\n'))).toMatch(
+      /无法解析归档清单行/
+    );
+    expect(messageOf(() => policy.parseArchiveListing('garbage line here\n'))).toMatch(
+      /无法解析归档清单行/
     );
   });
 
-  test('空清单硬失败（不是「照常走空流程」）', () => {
+  test('空清单与非法输入硬失败（不是「照常走空流程」）', () => {
     expect(messageOf(() => policy.parseArchiveListing('\n\n'))).toMatch(/为空/);
     expect(messageOf(() => policy.parseArchiveListing(null))).toMatch(/不是字符串/);
   });
+
+  test('允许的类型位只有普通文件与目录（闭合集合）', () => {
+    expect([...policy.ALLOWED_TYPE_BITS].sort()).toEqual(['-', 'd']);
+  });
 });
 
-describe('要解哪些条目：目录条目必须被剔除', () => {
-  test('fileEntriesOnly 去掉目录条目与末尾斜杠（实测 tar 混传会 Not found）', () => {
-    expect(
-      policy.fileEntriesOnly([
-        'manifest.json',
-        'manifest.sig',
-        'SHA256SUMS',
-        'payload/',
-        'payload/fsms-app.tar',
-      ])
-    ).toEqual(['manifest.json', 'manifest.sig', 'SHA256SUMS', 'payload/fsms-app.tar']);
-  });
-
+describe('条目名归一：目录标记只用于路径判据', () => {
   test('normalizeEntry 只去目录标记，不动普通名', () => {
     expect(policy.normalizeEntry('payload/')).toBe('payload');
     expect(policy.normalizeEntry('payload/x.tar')).toBe('payload/x.tar');
   });
 
-  test('非数组输入硬失败', () => {
-    expect(messageOf(() => policy.fileEntriesOnly('nope'))).toMatch(/不是数组/);
+  test('非数组输入硬失败（条目数判据）', () => {
+    expect(messageOf(() => policy.assertEntryCountWithinCap('nope'))).toMatch(/不是数组/);
   });
 });
 

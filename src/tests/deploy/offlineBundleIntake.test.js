@@ -283,25 +283,72 @@ describe('落位：静默期与条目判据', () => {
     expect(fs.readdirSync(ctx.bundles)).toEqual([]);
   });
 
-  maybe('归档里条目的路径不安全 ⇒ 拒绝（不在碰任何文件之前解包）', () => {
+  maybe('归档里含符号链接条目 ⇒ 拒绝（**类型位层面**拦下，不靠解包后的 lstat）', () => {
+    // 造归档：用 python 的 tarfile 精确设置 SYMTYPE（GNU tar 命令行无法直接造链接条目，
+    // 而 MSYS 的 ln -s 在本机退化成真目录，实测踩过——见 ADR-020）。
     const ctx = makeArchive();
-    // 造一个含 ..\\ 条目的 tar（手工写 tar 头太重，改用 --transform 之类的 tar 选项不可移植；
-    // 这里用 tar 的 -P 允许绝对路径来构造一个"绝对路径条目"）
-    const evilPkg = path.join(ctx.dir, 'evil');
-    fs.mkdirSync(evilPkg, { recursive: true });
-    fs.writeFileSync(path.join(evilPkg, 'manifest.json'), '{}');
-    // 把绝对路径当成条目名打进归档（tar -P 才会接受绝对名）
-    const pack = spawnSync(
-      'tar',
-      ['-czPf', cygpath(ctx.archive), cygpath(path.join(evilPkg, 'manifest.json'))],
-      { encoding: 'utf8', timeout: 60000 }
-    );
-    if (pack.status !== 0) return; // 该 tar 不支持 -P：跳过这条（不是被测代码的问题）
+    const py = [
+      'import tarfile, io, sys',
+      'p = sys.argv[1]',
+      'with tarfile.open(p, "w:gz") as t:',
+      '    def add(name, data):',
+      '        i = tarfile.TarInfo(name); i.size = len(data)',
+      '        t.addfile(i, io.BytesIO(data))',
+      '    add("manifest.json", b"{}")',
+      '    add("SHA256SUMS", b"")',
+      '    add("manifest.sig", b"x")',
+      '    add("payload/fsms-app.tar", b"x")',
+      '    link = tarfile.TarInfo("evil")',
+      '    link.type = tarfile.SYMTYPE',
+      '    link.linkname = "/etc"',
+      '    t.addfile(link)',
+    ].join('\n');
+    const pyProbe = spawnSync('python', ['-c', 'import tarfile; print("ok")'], {
+      encoding: 'utf8',
+      timeout: 20000,
+    });
+    if (pyProbe.status !== 0) {
+      // 无 python 时显式跳过（不静默 return——那会留下一条永远绿、什么都没验证的用例）
+      console.warn('[skip] 本机无 python，跳过「软链条目必拒」的真归档用例');
+      return;
+    }
+    const pack = spawnSync('python', ['-c', py, ctx.archive], {
+      encoding: 'utf8',
+      timeout: 60000,
+    });
+    expect(pack.status).toBe(0);
     const old = new Date(Date.now() - 300000);
     fs.utimesSync(ctx.archive, old, old);
 
     const result = intakeOne({ ...baseArgs(ctx), pubkeyFile: '' });
     expect(result).toMatchObject({ ok: false, outcome: 'aborted_archive_invalid' });
+    // 关键：报错指向**类型位**，且落位目标未建立（拦在解包之前）
+    expect(result.reason).toMatch(/非普通文件条目/);
+    expect(fs.existsSync(path.join(ctx.bundles, 'v1.2.3'))).toBe(false);
+    expect(fs.readdirSync(ctx.bundles).filter((n) => n.startsWith('.staging-'))).toEqual([]);
+  });
+
+  maybe('归档里条目的路径不安全 ⇒ 拒绝（不在碰任何文件之前解包）', () => {
+    const ctx = makeArchive();
+    // 造一个绝对路径条目的 tar（tar -P 才会接受绝对名）
+    const evilPkg = path.join(ctx.dir, 'evil');
+    fs.mkdirSync(evilPkg, { recursive: true });
+    fs.writeFileSync(path.join(evilPkg, 'manifest.json'), '{}');
+    const pack = spawnSync(
+      'tar',
+      ['-czPf', cygpath(ctx.archive), cygpath(path.join(evilPkg, 'manifest.json'))],
+      { encoding: 'utf8', timeout: 60000 }
+    );
+    if (pack.status === 0) {
+      // 该 tar 支持 -P：构造出了绝对路径条目，正常走断言
+      const old = new Date(Date.now() - 300000);
+      fs.utimesSync(ctx.archive, old, old);
+      const result = intakeOne({ ...baseArgs(ctx), pubkeyFile: '' });
+      expect(result).toMatchObject({ ok: false, outcome: 'aborted_archive_invalid' });
+      return;
+    }
+    // -P 不被支持（本机 tar 的实现差异，与被测代码无关）：显式记明，不让用例静默变绿
+    console.warn('[skip] 本机 tar 不支持 -P，跳过「绝对路径条目必拒」分支');
   });
 
   maybe('缺少必需条目（如归档只装了 payload）⇒ 拒绝并点名缺什么', () => {
