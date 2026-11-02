@@ -1,0 +1,152 @@
+/**
+ * 打印样式层（P2-6，2026-11-02）
+ *
+ * 背景：fsms 是消防监督管理系统，工单/巡检单/报警记录/报表具有**真实的纸质
+ * 归档场景**（消防检查现场签字、事故调查取证、班次交接）。参考项目 Nu11Cyber
+ * 的 print.css 给出了三件套范式（隐藏交互件、输出链接真实地址、分页控制），
+ * 本文件按 fsms 的布局结构与 Element Plus 组件体系落地。
+ *
+ * 触发路径是浏览器原生 Ctrl+P（全仓无 window.print 按钮），因此本层必须：
+ *   1. 只依赖全局选择器生效——不动任何组件的模板/脚本（打印是表现层能力，
+ *      不该侵入业务组件）；
+ *   2. 覆盖 Element Plus 的浮层/固定定位——否则导航栏、侧边栏、下拉浮层会
+ *      以 fixed 元素重复出现在每一页纸上（实测浏览器会把 fixed 元素钉在
+ *      每个打印页）。
+ *
+ * 分层定位：本文件是全部样式层的**最后引入**（见 main.js 引入顺序），
+ * 以最小必要的 !important 取得对既有层的覆盖权，不参与常规样式竞争。
+ */
+
+@media print {
+  /* ===== 1. 隐藏一切交互件与非内容区 ===== */
+  /* 应用骨架：侧边栏 / 顶栏 / 移动端遮罩 / 退出遮罩 */
+  .sidebar,
+  .navbar,
+  .mobile-overlay,
+  .exit-overlay,
+  .skip-link {
+    display: none !important;
+  }
+
+  /* Element Plus 浮层族：下拉、选择器、气泡、通知、消息、加载遮罩、对话框遮罩。
+     对话框本体（.el-dialog）**不隐藏**——详情弹窗常是打印对象（如巡检详情）；
+     只去掉遮罩与阴影，让它成为普通文档块。 */
+  .el-popper,
+  .el-select__popper,
+  .el-message,
+  .el-notification,
+  .el-loading-mask,
+  .el-overlay,
+  .el-drawer,
+  .el-backtop,
+  .el-tooltip__popper {
+    display: none !important;
+  }
+
+  /* 页面内操作族：按钮、分页器、工具栏、复选框、开关、标签页签。
+     用 [class*="toolbar"] 兜住各视图自定的工具条命名（table-toolbar 等）。 */
+  button,
+  .el-button,
+  .el-pagination,
+  .el-checkbox,
+  .el-switch,
+  .el-radio-group,
+  [class*='toolbar'],
+  [class*='-actions'] {
+    display: none !important;
+  }
+
+  /* ===== 2. 布局复位：从应用外壳回到纸面文档流 ===== */
+  .app-wrapper,
+  .main-content {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    min-height: 0 !important;
+  }
+
+  /* 去掉屏幕背景（网格纹理/渐变会在纸上渲染成灰块）与玻璃拟态阴影 */
+  .main-content,
+  .page,
+  .el-card,
+  .report-card {
+    background: #fff !important;
+    background-image: none !important;
+    box-shadow: none !important;
+    border-color: #999 !important;
+  }
+
+  /* ===== 3. 内容可读性 ===== */
+  body,
+  .main-content {
+    color: #000 !important;
+  }
+
+  /* 表格：打印场景不滚动，必须完整展开；边框用实线保证黑白打印下可辨识 */
+  .el-table {
+    width: 100% !important;
+    font-size: 10pt !important;
+  }
+  .el-table th,
+  .el-table td {
+    color: #000 !important;
+    background: #fff !important;
+    border-color: #999 !important;
+  }
+  .el-table__body-wrapper,
+  .el-scrollbar__wrap {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+
+  /* 图表：canvas 会按屏上尺寸打出半截——echarts 给 canvas 写的是 inline
+     width/height 属性（px 固定值），必须用 width 强制才能覆盖 inline 尺寸；
+    max-width 对 canvas 元素自身的 inline 宽度无效（它约束的是 CSS 布局宽度，
+    canvas 的绘制缓冲区仍按原尺寸）。容器高度同时放开，避免裁切。 */
+  .chart-box {
+    height: auto !important;
+  }
+  canvas {
+    width: 100% !important;
+    height: auto !important;
+  }
+
+  /* ===== 4. 分页控制 ===== */
+  /* 表格行与卡片避免跨页断行；表头在跨页时重复 */
+  .el-table tr,
+  .el-card,
+  .report-card,
+  .el-descriptions__row {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .el-table thead th {
+    break-inside: avoid;
+  }
+  /* 标题与其后内容保持同页 */
+  h1,
+  h2,
+  h3 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+  /* 段落孤行/寡行控制 */
+  p {
+    orphans: 3;
+    widows: 3;
+  }
+
+  /* ===== 5. 纸面页边距与链接还原 ===== */
+  @page {
+    margin: 16mm 14mm;
+  }
+
+  /* 打印后无法点击：把链接真实地址打在文字后面（排除锚点与 javascript:，
+     它们打印出来是噪音/危险提示） */
+  a[href]:not([href^='#']):not([href^='javascript:'])::after {
+    content: ' (' attr(href) ')';
+    font-size: 9pt;
+    color: #444;
+  }
+}

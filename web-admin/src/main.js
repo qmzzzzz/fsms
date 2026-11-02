@@ -33,6 +33,9 @@ import '@/assets/styles/apple-polish.css'
 import '@/assets/styles/apple-refine.css'
 // Apple Copy 逐视图深度定制层 v5：视图级材质/微交互/排版精修；须在 apple-refine 之后引入
 import '@/assets/styles/view-refine.css'
+// 打印样式层（P2-6）：浏览器 Ctrl+P 路径的纸面归档能力；须最后引入以取得对
+// 上述全部层的覆盖权（详见文件头注释）
+import '@/assets/styles/print.css'
 
 // 开发端口可能与生产 preview 共用。旧的生产 Service Worker 会拦截 Vite 模块和
 // HMR 请求，造成资源读取失败；开发启动时先清理，刷新一次后即恢复干净状态。
