@@ -12,6 +12,10 @@
  *   6. 观察窗口内持续探备色，异常则切回
  *   7. 停旧色（保留容器，不 rm——后续回滚还能 start 回来）
  *
+ * 失败分支自带现场抓取（2026-11-02，参考 a033/LANSEC 的「die 前 dump」）：就绪门控
+ * 与观察窗口判负时，先把目标色容器日志尾巴收进留痕与任务说明，再收尾——省掉运维
+ * 「还得再上一次机器看根因」那一步（边界见 captureTargetLogs 的注释）。
+ *
  * 默认是演练：不加 `--apply` 只打印计划并以 2 退出。
  * 这是刻意的——把「真的改生产」做成一个必须显式输入的动词，
  * 而不是某个参数的默认值。
@@ -52,9 +56,27 @@ const DEFAULT_NGINX_CONF = process.env.HOT_UPGRADE_NGINX_CONF || '/etc/nginx/ngi
  */
 const PROBE_TIMEOUT_MS = 5000;
 
+/**
+ * 失败分支的现场抓取上限（口径见 captureTargetLogs）。
+ *
+ * 参考同族系统 a033/LANSEC install.sh 的做法：每次 die 之前都 dump status + journalctl；
+ * 本脚本的对应物是「目标色容器日志尾巴」——readyz / 观察窗口只给一句判据，
+ * 根因（栈、连接错误、迁移报错）在容器自己的日志里。
+ */
+const LOG_TAIL_LINES = 80;
+const LOG_TAIL_MAX_CHARS = 64 * 1024;
+const LOG_STATUS_SNIPPET_MAX_CHARS = 1500;
+const LOG_CAPTURE_TIMEOUT_MS = 10 * 1000;
+const LOG_CAPTURE_MAX_BUFFER = 1024 * 1024;
+
 /** 颜色 ↔ compose 服务名 / 镜像变量。与 policy 的 PORT_BY_COLOR 必须一致 */
 const SERVICE_BY_COLOR = { blue: 'app', green: 'app-green' };
 const IMAGE_ENV_BY_COLOR = { blue: 'APP_IMAGE', green: 'APP_IMAGE_NEXT' };
+
+/** --tail 的取值先固化为字符串常量：argv 每个元素都必须是字符串，且不让类型转换出现在命令构造里 */
+const LOG_TAIL_ARG = String(LOG_TAIL_LINES);
+/** 允许出现在 logs 命令里的服务名（构建期封闭的两个枚举值；白名单是刻意的，见 captureTargetLogs） */
+const LOG_TARGET_SERVICES = [SERVICE_BY_COLOR.blue, SERVICE_BY_COLOR.green];
 
 const log = (msg) => process.stdout.write(`[hot-upgrade] ${msg}\n`);
 
@@ -254,18 +276,33 @@ async function switchAndVerify({ confPath, active, target, targetPort, opts, sta
   if (observed.ok) return;
 
   step('rollback', `切回 ${active.color}`);
+  // 观察期判负 = 新色「能启动但不稳定」：根因在它的日志里，且必须赶在下面的 stop
+  // 之前抓（回滚失败分支也一样抓——那是最需要现场的一支）。
+  const targetLogs = captureTargetLogs(target);
   try {
     switchTraffic(confPath, active.color);
   } catch (err) {
     // 最坏情况：流量可能还在新色，旧色也还在跑。必须把现场原样说清楚，
     // 而不是含糊地报「回滚失败」——运维要据此决定是手工切回还是直接停新色。
-    recordState({ ...state, outcome: 'rollback_failed', reason: err.message });
+    recordState({
+      ...state,
+      outcome: 'rollback_failed',
+      reason: err.message,
+      targetLogsTail: targetLogs,
+    });
     const msg =
       `回滚切流失败（${err.message}）。当前流量可能仍在新色，` +
       `旧色容器 ${SERVICE_BY_COLOR[active.color]} 仍在运行。请立即人工确认。`;
+    // 这一支的文案必须保持紧急且短（下一步动作是人工上机确认流量），
+    // 日志只进留痕 targetLogsTail，不追加到任务说明里稀释结论。
     fail(msg, 'rollback_failed');
   }
-  recordState({ ...state, outcome: 'rolled_back', reason: observed.reason });
+  recordState({
+    ...state,
+    outcome: 'rolled_back',
+    reason: observed.reason,
+    targetLogsTail: targetLogs,
+  });
   // 回滚成功才停新色：此刻流量已确认在旧色。不停的话，一个有问题的版本会继续占着
   // 3001 端口跑到下一次升级，谁也不知道它还在（也可能自己重启、连同一个库）。
   // 只有回滚**失败**的分支不能停——那时流量可能还在新色，停了就是全站 502。
@@ -274,7 +311,10 @@ async function switchAndVerify({ confPath, active, target, targetPort, opts, sta
   } catch (err) {
     log(`回滚已生效，但停新色容器失败：${err.message}（请人工确认 ${SERVICE_BY_COLOR[target]}）`);
   }
-  fail(`观察期未通过（${observed.reason}），已切回 ${active.color}。`, 'rolled_back');
+  fail(
+    `观察期未通过（${observed.reason}），已切回 ${active.color}。${logAppendix(targetLogs)}`,
+    'rolled_back'
+  );
 }
 
 /**
@@ -289,8 +329,77 @@ function stopQuietly(color, why) {
     log(`${why}：停容器失败（${err.message}），请人工确认 ${SERVICE_BY_COLOR[color]}`);
   }
 }
+
 /**
- * 离线模式专用：确认本地 docker 已有这个 digest 的镜像。
+ * 把抓到的日志裁成可回写 status 的短片段（纯函数，供测试直接断言）。
+ *
+ * 只有**真正发生截断**时才做行边界调整：从截断点之后的第一处换行起步——
+ * 半行开头不完整，留着只会让人误以为日志缺了行。未超上限的输入原样保留
+ * （只 trim 首尾），行结构不动。
+ */
+function buildLogSnippet(rawLogs, maxChars = LOG_STATUS_SNIPPET_MAX_CHARS) {
+  if (typeof rawLogs !== 'string') return '';
+  const trimmed = rawLogs.trim();
+  if (trimmed === '') return '';
+  if (trimmed.length <= maxChars) return trimmed;
+  const clipped = trimmed.slice(-maxChars);
+  const firstNewline = clipped.indexOf('\n');
+  return (firstNewline >= 0 ? clipped.slice(firstNewline + 1) : clipped).trim();
+}
+
+/** 失败文案的日志附录：没抓到日志时一个字节都不加（不留「日志如下：无」这种空话） */
+function logAppendix(rawLogs) {
+  const snippet = buildLogSnippet(rawLogs);
+  if (!snippet) return '';
+  return `\n目标色容器日志末尾（代理抓取原文，未本地化，截断保留）：\n${snippet}`;
+}
+
+/**
+ * 抓目标色容器的日志尾巴（失败分支专用）。
+ *
+ * 与 run() 的 stdio 继承不同：这份输出要进留痕与 status 的任务说明，走管道捕获。
+ * execFileSync 的 timeout 会收掉卡住的 docker（守护进程半死时最像「命令正常」）。
+ * 三条边界：
+ *   · 永不阻断：任何失败（docker 不在、容器未起、输出超限）都吞在内部只记一行——
+ *     抓取是诊断动作，不得改变主判决（readyz / 观察窗口的结论）；
+ *   · 有界：行数与字符数封顶——日志尾巴是诊断样本，不是归档；
+ *   · 出站分离：完整尾巴只进宿主留痕（logs/ 下 0600）；回写 status 的只是
+ *     buildLogSnippet 裁过的短片段（status 有 64KB 读取上限，界面要能读）。
+ */
+function captureTargetLogs(target) {
+  // 服务名经枚举白名单后才能进 argv：它本来就只可能是这两值，写明是为了让
+  // 「argv 里每个动态元素都来自封闭集合」这件事在代码层可被复核。
+  const service = SERVICE_BY_COLOR[target];
+  if (typeof service !== 'string' || !LOG_TARGET_SERVICES.includes(service)) return '';
+  const args = [
+    'compose',
+    '-f',
+    COMPOSE_FILE,
+    '--profile',
+    'green',
+    'logs',
+    '--no-color',
+    '--tail',
+    LOG_TAIL_ARG,
+    service,
+  ];
+  try {
+    const out = execFileSync('docker', args, {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: LOG_CAPTURE_TIMEOUT_MS,
+      maxBuffer: LOG_CAPTURE_MAX_BUFFER,
+    });
+    return typeof out === 'string' ? out.slice(-LOG_TAIL_MAX_CHARS) : '';
+  } catch (err) {
+    // 超时/超量时 err.stdout 里可能已有部分输出：那也是现场，照样收下
+    log(`目标色日志抓取失败（${err.message}）：留痕与任务说明里只有判据本身`);
+    return (typeof err.stdout === 'string' ? err.stdout : '').slice(-LOG_TAIL_MAX_CHARS);
+  }
+}
+
+/** 离线模式专用：确认本地 docker 已有这个 digest 的镜像。
  *
  * 为什么不靠 compose 的默认拉取策略：\`up\` 的默认行为是「本地缺了才 pull」——
  * 本地没有时它**不会失败**，而是去联网。在内网机上表现为长时间卡住后超时，
@@ -429,12 +538,23 @@ async function executePlan({ confPath, active, target, targetPort, parsed, plan,
   step('wait-readyz', `port ${targetPort}, timeout ${opts.readyzTimeoutSec}s`);
   const ready = await waitReadyz(targetPort, opts.readyzTimeoutSec, 3);
   if (!ready.ok) {
-    recordState({ ...state, outcome: 'aborted_not_ready', reason: ready.reason });
+    // 判决已定，先抓现场再收尾：readyz 只给一句判据，根因在容器日志里，而
+    // 抓取必须在 stopQuietly **之前**——停完容器这批输出就只剩 docker 自己记的部分。
+    const targetLogs = captureTargetLogs(target);
+    recordState({
+      ...state,
+      outcome: 'aborted_not_ready',
+      reason: ready.reason,
+      targetLogsTail: targetLogs,
+    });
     // 未切流的分支要顺手停掉备色：它占着 3001、连着同一个库，还会被 Prometheus 抓成
     // 一个永远不健康的目标（BackendDown / MongoUnavailable 从此长鸣）。
     // 用 stop 而不是 rm：容器日志还在，排查按 docker logs 看。
     stopQuietly(target, '备色未就绪');
-    fail(`备色未就绪（${ready.reason}）。旧色仍在服务，未切流。`, 'aborted_not_ready');
+    fail(
+      `备色未就绪（${ready.reason}）。旧色仍在服务，未切流。${logAppendix(targetLogs)}`,
+      'aborted_not_ready'
+    );
   }
 
   // 4. 迁移：用新版本的代码跑（备色容器里就是新镜像）
@@ -511,4 +631,4 @@ if (require.main === module) {
     .catch((err) => fail(err && err.message ? err.message : String(err)));
 }
 
-module.exports = { main, probeReadyz, waitReadyz, observe };
+module.exports = { main, probeReadyz, waitReadyz, observe, buildLogSnippet };

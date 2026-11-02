@@ -8,6 +8,36 @@
 
 ## [未发布]
 
+### 加固：热升级失败分支自动抓取目标色容器日志（学 a033/LANSEC 的 die 前 dump）（2026-11-02）
+
+> 缺口：`becomes not-ready` 与「观察期判负」两条分支原先只回一句判据（`ready.reason` /
+> `observed.reason`），根因（栈、连接错误、迁移报错）留在目标色容器自己的日志里——运维必须
+> 再上一次机器 `docker compose logs`。同族系统 a033/LANSEC 的 `install.sh` 在每次 die 之前都会
+> dump `systemctl status` + `journalctl`，本仓取同一手法但**只取必要的那一截**。
+
+- **抓取点**：`scripts/hotUpgrade.js` 的两条失败分支各抓一次目标色容器日志尾巴
+  （`docker compose logs --no-color --tail 80`，`execFileSync` 捕获、超时 10s、总字节封顶
+  64KB）；`aborted_not_ready` 与 `rolled_back` 分支追加进任务说明，`rollback_failed` 保持
+  短句紧急文案（下一步动作是人工上机确认流量，长日志只会稀释结论）。
+- **两条通道分离**：完整尾巴进宿主留痕 `logs/hot-upgrade-*.json` 的 `targetLogsTail`
+  （0600，事后复盘）；按行边界截断的短片段（≤1500 字）进 `status.message`（应用侧轮询可见，
+  status 有 64KB 读取上限）。前端 `.upgrade-message` 加 `white-space: pre-line` 让多行日志逐行可读。
+- **三条边界**：抓取永不阻断（docker 不可用/容器已停/输出超限都只记一行，主判决始终来自
+  就绪探测与观察窗口本身）；有界（行数与字符数都封顶，日志尾巴是诊断样本不是归档）；
+  抓取先于停容器执行（`stop` 之后再抓只剩 docker 自己记的那截）。
+- **档板与命令注入面**：`captureTargetLogs` 的 argv 逐项构造，服务名先过
+  `LOG_TARGET_SERVICES` 枚举白名单、`--tail` 取值固化为字符串常量（Mimosa 的
+  「不可信命令参数向量」判据要求 argv 每个动态元素都来自封闭集合，此处在代码层可复核）。
+- **登记面**：`deployment/hot-upgrade.md` §7 失败模式表两行改为「容器日志尾巴已进任务说明
+  与留痕」+ 新增「失败现场自动抓取」小段（含三条边界与数值）；`eslint.ratchet.json` 的
+  `scripts/hotUpgrade.js` 行数地板 334 → 394（功能新增 60 行，按脚本自述的唯一合规路径
+  **人工扩基线**并让评审在 diff 里可见）。
+- **门禁**：新增 `src/tests/deploy/hotUpgradeFailureLogs.test.js`（6 用例）——两条真跑
+  脚本的端到端用例（`--require` 以 **argv 形态**注入 stubExec 与就绪档板，不经
+  `NODE_OPTIONS` 字符串拼接）分别钉住「日志进两张表且抓取先于停容器」与「抓取失败不留
+  空话式附录、主判决不变」；四条纯函数用例钉住 `buildLogSnippet` 的行边界截断语义
+  （未超上限原样保留、超上限从换行起步——半行开头会让运维误以为日志缺行）。
+
 ### 新增：离线升级包一键化 + Ed25519 包签名（ADR-019）（2026-11-02）
 
 > 目标：把 air-gap / 内网机器的升级从「两条人工 SSH 命令（导入 + 换装）」变成与在线

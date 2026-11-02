@@ -86,7 +86,7 @@
     "scripts/auditCountAssertionScan.js": 442,
     "scripts/deployPolicy.js": 352,
     "scripts/hotUpgradeJob.js": 319,
-    "scripts/hotUpgrade.js": 334,
+    "scripts/hotUpgrade.js": 394,
     "scripts/hotUpgradeQueue.js": 319,
     "scripts/migrate-pii-encryption.js": 308,
     "src/config/validate.js": 351,

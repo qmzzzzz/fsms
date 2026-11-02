@@ -732,6 +732,8 @@ onUnmounted(() => {
   font-size: var(--xf-font-size-sm);
   line-height: 1.6;
   word-break: break-word;
+  /* 失败文案可能带诊断日志片段（多行、代理原文）：保留换行，逐行可读 */
+  white-space: pre-line;
 }
 
 .upgrade-hint {
