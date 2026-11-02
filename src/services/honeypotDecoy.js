@@ -6,6 +6,7 @@ const honeypotWatch = require('./honeypotWatch');
 const honeypotDecoyFiles = require('./honeypotDecoyFiles');
 const honeypotDecoySelf = require('./honeypotDecoySelf');
 const honeypotDecoyAggregates = require('../constants/honeypotDecoyAggregates'); // 聚合读端点的同形合成体（批次 B）：零真实读，只从合成表与真实白名单派生
+const honeypotDecoyMetrics = require('../constants/honeypotDecoyMetrics');
 const { isHoneypotEnabled } = require('../constants/honeypotAccounts');
 const {
   HONEYPOT_VERDICT,
@@ -44,6 +45,14 @@ const respondDecoy = (res, payload) => {
     return ApiResponse.paginated(res, payload.data, payload.pagination, payload.message); // 信封由列表判定层按真实控制器逐字给出（含 nextCursor 的 null 位）：这里再算一次分页就是第二个口径
   }
   return ApiResponse.success(res, payload.data);
+};
+
+const sendDataFace = (res, { method, path, query, user }) => {
+  const aggregate = honeypotDecoyAggregates.resolveAggregatePayload({ method, path, query }); // 判序同 steer：聚合与指标都判在通用载荷之前——同前缀不同语义，先判的理由见 ADR-013
+  if (aggregate) return sendAggregate(res, aggregate);
+  const metrics = honeypotDecoyMetrics.resolveMetricsPayload({ method, path });
+  if (metrics) return ApiResponse.success(res, metrics.data, metrics.message);
+  return respondDecoy(res, resolveDecoyPayload({ method, path, user, query })); // query 必须进判定层：路由校验链拦下的非法查询在真实链是 400，合成面不读 query 就会回 200 合成列表 —— 一次请求即可分辨
 };
 
 const steer = async (req, res) => {
@@ -109,20 +118,11 @@ const steer = async (req, res) => {
     writeAttempt,
     ip: req.ip,
   });
-  const aggregate = honeypotDecoyAggregates.resolveAggregatePayload({
-    method,
-    path,
-    query: req.query || {},
-  }); // 排在通用载荷之前：聚合读面与列表同前缀、不同语义，交给通用判定只会按尾串猜成「查无此 id」
-  if (aggregate) {
-    sendAggregate(res, aggregate);
-    return true;
-  }
   if (writeAttempt) {
     ApiResponse.codeError(res, 'PERMISSION_DENIED'); // 与真实 403 同一个响应构造器：错误体逐字相同，不给对方任何可指纹的差异
     return true;
   }
-  respondDecoy(res, resolveDecoyPayload({ method, path, user: req.user, query: req.query || {} })); // query 必须进判定层：路由校验链拦下的非法查询在真实链是 400，合成面不读 query 就会回 200 合成列表 —— 一次请求即可分辨
+  sendDataFace(res, { method, path, query: req.query || {}, user: req.user });
   return true;
 };
 

@@ -317,6 +317,12 @@ describe('审计 action 白名单对账', () => {
       'decoy',
       ':182/:228 诱饵巡检 processLog 展示数据',
     ],
+    // /api/metrics 快照面的 MFA 动作分布（MFA_SERIES）：键名叫 action、取值恰好与
+    // metrics.incMfaAction 的动作域同名，但这是**合成计数表**——既不写审计集合，也不调用 metrics，
+    // 只是给陷阱会话一个形状正确的面板。出处 :79/:80/:81。
+    ['src/constants/honeypotDecoyMetrics.js', 'disable', 'decoy', ':80 合成快照 MFA 动作计数行'],
+    ['src/constants/honeypotDecoyMetrics.js', 'enable', 'decoy', ':79 同上'],
+    ['src/constants/honeypotDecoyMetrics.js', 'recovery_regenerate', 'decoy', ':81 同上'],
     ['src/controllers/roleController.js', 'created', 'ws', ':173 WebSocket 权限同步广播载荷'],
     ['src/controllers/roleController.js', 'deleted', 'ws', ':291 同上'],
     [
@@ -356,7 +362,7 @@ describe('审计 action 白名单对账', () => {
       expect(why).toMatch(/:\d{2,}/); // 出处必须落到行号
       tally[family] += 1;
     });
-    expect(tally).toEqual({ ws: 6, helmet: 1, subdoc: 10, decoy: 7 });
+    expect(tally).toEqual({ ws: 6, helmet: 1, subdoc: 10, decoy: 10 });
   });
 
   /**

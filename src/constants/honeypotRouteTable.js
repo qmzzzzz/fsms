@@ -18,6 +18,7 @@ const TRAP_HANDLING = Object.freeze({
   SUMMARY: 'decoy-summary', // P1 的合成汇总（batch C 收口为逐端点同形体）
   SELF: 'decoy-self', // 本人自助面：按会话身份回同形合成体
   FILE: 'decoy-file', // 文件/导出类：合成工作簿或按真实口径拒绝
+  METRICS: 'decoy-metrics', // 运行时指标快照：与真实 getSnapshot() 同键集的合成体
   DENY: 'deny403', // 一律拒绝（与真实 403 同一个响应构造器，错误体逐字相同）
 });
 
@@ -166,7 +167,7 @@ const ROUTE_TABLE = Object.freeze([
   pub('GET', '/health', 'public'),
   pub('GET', '/readyz', 'public'),
   pub('GET', '/metrics', 'public'),
-  need('GET', '/api/metrics', 'security:audit', 'deny403'),
+  need('GET', '/api/metrics', 'security:audit', 'decoy-metrics'),
   pub('GET', '/api', 'public'),
   pub('GET', '/api-docs.json', 'public'),
 ]);
