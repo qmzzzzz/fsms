@@ -8,6 +8,91 @@
 
 ## [未发布]
 
+### 移除：零消费死代码 `rbac.checkRole` 及其两个孤立错误码（审计 C-F5）（2026-11-02）
+
+> 提交 `2ed3067`。这段叙事原先以 3 行"墓碑注释"的形式留在 `src/utils/errorCodes.js` 的
+> 注册表里（"ROLE_NOT_ALLOWED / ROLE_CHECK_FAILED 已随 rbac.checkRole 死代码删除一并摘除"）。
+> 按 ADR-011 §2，"曾经删过什么"属**变更史**，源码只写"现在是什么"，故移入本文件。
+
+`rbac.checkRole` 全仓**零路由消费**：角色口径的唯一实现是 `authenticate` 产出的
+`req.user.roleCodes` 加上 `rbac.checkPermission`。它作为"角色口径的第二份实现载体"正是本仓
+多次审计确认的漂移温床——其回退查库路径（`populate` match 复活风险）自带一套独立防御逻辑，
+**没有任何生产流量经过**，测试却把它当活代码维护。联动摘除（一处不漏，防半删态）：
+
+- `rbac.js` 的函数体与导出；随之不再使用的 `User` require 一并摘除。
+- `middleware/index.js` 的解构与再导出两处。
+- `errorCodes.js` 的 `ROLE_NOT_ALLOWED` / `ROLE_CHECK_FAILED` 两个码。摘码安全：注册表只有
+  `>150` 的**下限**门（`errorCodes.test.js`），没有精确数量钉死。**复活会被拦住**：
+  `emittedErrorCodeCoverage.test.js` 的"注册了却无人发送的死码"是**封闭清单**，谁把这两个码加回
+  注册表而无人发送，`expect(dead.sort()).toEqual([...])` 立刻红。
+- `web-admin` 的 `ERROR_CODE_I18N_MAP` 两行与 zh/en 两个语言键（`roleCodeReserved` 是另一活码，保留）。
+- `rbacWildcardAndDataScopeBounds` 的 `checkRole` describe（4 用例）与文件头覆盖清单行；
+  `authControllerOutcomes` / `authUnknownOutcomeFailClosed` 两个 mock 工厂的 `checkRole` 键。
+- 4 处历史注释里的 `checkRole` 措辞改为现存的 `checkPermission`（`auth.js`、
+  `inactiveRoleAuthorization`、`roleStatusInvalidatesUserCache`、`roleController`）。
+
+验证：rbac / errorCodes / emittedErrorCodeCoverage / authOutcomes / unknownFailClosed /
+securityApply 133 用例 + inactiveRole / roleStatusInvalidate 58 用例全绿；web-admin
+errorCodeI18n + localeKeyParity 19 用例全绿（zh/en 键奇偶不受影响）；eslint 0 error。
+
+> **这句约束没有失去落点**：「角色口径唯一实现是 authenticate 的 roleCodes + checkPermission」
+> 是**当前约束**（不是历史），另有两处落点：`src/tests/middleware/rbacWildcardAndDataScopeBounds.test.js`
+> 的用例注释，以及 `src/middleware/auth.js:79-81`（只有生效角色码才进 `roleCodes`）。
+
+### 新增：离线包单文件传包 + 代理自动落位（ADR-020）（2026-11-02）
+
+> 目标：把搬运面从「四个条目 + 一个子目录」收敛为**两个文件**（归档 + 外层签名），
+> 并让落位全自动——学 a033/LANSEC 的「传一个文件」形态，但不学它「装完即重启服务」
+> 的安装语义（自动升级 + 迁移 = 半夜静默炸库，是 ADR-019 §9 第一条纪律）。
+
+- **传包形态**：`build-offline-bundle.sh --archive <路径>` 另产出
+  `fsms-offline-<版本>.tar.gz` + `.sig`。归档内含 ADR-019 的四个条目；`--archive`
+  **必须**与 `--sign-key` 同给（目录形态允许未签名，单文件形态不允许——它存在的意义
+  正是「让传一个文件这件事可被机器验证」）。拒绝覆盖既有归档；失败时归档与签名一并清理。
+- **外层签名（信任链第三层）**：签的是**归档 sha256 的 hex 文本**（64 字节），不是归档
+  本身——Ed25519 是 one-shot 签名，GB 级归档整包签必 OOM，而 OOM 在现场表现为
+  「构建进程被杀」。三层链：`归档 .sig → 归档 sha256 → manifest.sig → manifest 字节
+  → payload sha256`，覆盖了 ADR-019 覆盖不到的部分（解包前的归档本身）。
+- **落位（inbox → bundles，全自动）**：新增
+  `offlineBundleIntakePolicy.js`（纯判据，44 例测试）、`offlineBundleIntake.js`
+  （编排）、`offlineBundleIntakeExec.js`（子进程收口）。代理每轮最多落位**一个**包，
+  且排在消费请求**之前**——请求瞄的 digest 可能正躺在 inbox 里等着落位。
+- **只解点名条目（ADR-019 §9 的收窄）**：先只解 `manifest.json`（"点名"的唯一来源），
+  再解它声明的 payload 与两个固定条目——归档里任何**未被点名**的条目没有落点。
+  逐条过 `assertSafeRelativePath`（与包内路径**同一条**判据）；落点逐条 `lstat` 复核
+  （普通文件 + 非符号链接，不解析 `tar -tv` 文本）；权限解包后**递归 chmod**
+  （不用 `--no-same-*`：实际落盘的权限要看结果）。**不自写 tar 解析器**仍是纪律，
+  变的是「调系统 tar + 只解点名条目」这条更窄的路径。
+- **落位校验零新增判据**：解包到 `.staging-*` 后跑既有导入器的**演练模式**，通过才
+  原子 rename。为此**修正了导入器的演练语义**（实测踩中）：原先 `--dry-run` 在校验之前
+  返回，「payload 与 manifest 对不上」的包会被演练报成成功——而落位正是拿演练当预检用，
+  那是「预检通过、apply 才发现坏」的假绿。现在演练**跑完全部校验**再返回。
+- **传输完成的判定（静默期 + 双读数）**：`mtime` 距今 ≥
+  `OFFLINE_BUNDLE_SETTLE_SECONDS`（默认 60）且两次读数 size 一致。不能要求运维先写
+  `.part` 再改名——那是改变他的肌肉记忆去配合判据。未就绪的包进心跳 `intake.pending`
+  （应用侧显示「已传完、等待落位」），失败显示归档名与原因——**不再需要 SSH 上去看 inbox**。
+- **fail-soft 第三层（更强）**：落位是这条链上唯一会解包与写盘的动作，异常面最大。三条
+  边界：`intakeOne` 是**库函数，绝不 `process.exit`**（实测踩中：它被代理在 runOnce 里
+  调用，一个 exit 会把整个代理连同心跳带走，应用侧看到「代理离线」而真实原因只是某个包
+  没签名）；失败折进心跳 `intake.rejected`，**ready 不变红**；inbox 不存在 = 未启用落位
+  通道（不是错误）。
+- **应用侧与前端**：`upgradeService` 归一化并透传 `intake`（逐字段截断 + 封顶）；
+  `AboutView.normalizeIntake` 同步白名单归一（**上一轮踩过的坑**：后端加字段前端不同步
+  就静默丢）；弹窗展示「已传完待落位」与落位失败原因；中英文案齐备。
+- **登记面**：`hot-upgrade.env.example` 增 `OFFLINE_BUNDLE_INBOX` 与
+  `OFFLINE_BUNDLE_SETTLE_SECONDS`（含边界说明）；systemd 单元的 `ExecStartPre` 加 inbox
+  目录；`hot-upgrade.md` §3.3 重写为「单文件（推荐）/ 目录（兼容）」双形态 + 第 2 步
+  落位流程、§4.1 队列表加 inbox/bundles 两行、§4.3 一轮做什么加落位步骤、§9「不自做解包」
+  收窄为「不自写 tar 解析器、不整包全解」、§10 增补实测与未实测边界；ADR-020 新建 +
+  README 索引；README ADR 计数 19→20。
+- **门禁（新增测试）**：`offlineBundleIntakePolicy.test.js`（44 例：条目解析/路径判据/
+  上限/必需条目/摘要形态/静默期/CLI 闭合清单/路径收口）、`offlineBundleIntake.test.js`
+  （11 例，**真跑系统 tar** 的端到端：成功/不覆盖/权限收紧/未签名拒绝/签名不符/单字节
+  篡改/payload 被替换/静默期/路径不安全/缺必需条目；Windows 上经 cygpath 转换，无 tar
+  则显式 skip）、`hotUpgradeAgent.test.js`（+5 例：落位顺序先于请求、异常 fail-soft、
+  未就绪进 pending、每轮一个、inbox 空则不动）、`upgradeService.test.js`（intake 归一化）、
+  `aboutViewUpgrade.test.js`（+4 例：待落位提示/失败原因/坏形状不渲染）。
+
 ### 加固：热升级失败分支自动抓取目标色容器日志（学 a033/LANSEC 的 die 前 dump）（2026-11-02）
 
 > 缺口：`becomes not-ready` 与「观察期判负」两条分支原先只回一句判据（`ready.reason` /

@@ -36,9 +36,9 @@
 
 set -euo pipefail
 
-USAGE='用法: bash scripts/build-offline-bundle.sh --image <repo[:tag]|repo@sha256:<64hex>> --version <版本号> --out <输出目录> [--build-id <CI 构建号>] [--sign-key <Ed25519 私钥.pem>]'
-FLAGS_TEXT='--image / --out / --version / --build-id / --sign-key / --help'
-KNOWN_FLAGS=(--image --out --version --build-id --sign-key --help)
+USAGE='用法: bash scripts/build-offline-bundle.sh --image <repo[:tag]|repo@sha256:<64hex>> --version <版本号> --out <输出目录> [--build-id <CI 构建号>] [--sign-key <Ed25519 私钥.pem>] [--archive <输出归档.tar.gz>]'
+FLAGS_TEXT='--image / --out / --version / --build-id / --sign-key / --archive / --help'
+KNOWN_FLAGS=(--image --out --version --build-id --sign-key --archive --help)
 
 ROLE='app'
 PAYLOAD_REL='payload/fsms-app.tar'
@@ -103,6 +103,7 @@ OUT_DIR=''
 VERSION=''
 BUILD_ID=''
 SIGN_KEY=''
+ARCHIVE_OUT=''
 HELP=0
 ERRORS=()
 
@@ -116,7 +117,8 @@ while [ "$#" -gt 0 ]; do
     --version=*) VERSION=${arg#--version=} ;;
     --build-id=*) BUILD_ID=${arg#--build-id=} ;;
     --sign-key=*) SIGN_KEY=${arg#--sign-key=} ;;
-    --image | --out | --version | --build-id | --sign-key)
+    --archive=*) ARCHIVE_OUT=${arg#--archive=} ;;
+    --image | --out | --version | --build-id | --sign-key | --archive)
       # 值槽被开关形态的 token 占掉后，后面的边界已不可信，不再继续解析（同 generate-secrets.js）
       if [ "$#" -lt 1 ] || [ "${1#--}" != "$1" ]; then
         ERRORS+=("「${arg}」需要一个值（后面跟着另一个开关，或已到末尾）")
@@ -130,6 +132,7 @@ while [ "$#" -gt 0 ]; do
         --version) VERSION=$value ;;
         --build-id) BUILD_ID=$value ;;
         --sign-key) SIGN_KEY=$value ;;
+        --archive) ARCHIVE_OUT=$value ;;
       esac
       ;;
     *)
@@ -170,6 +173,24 @@ if [[ ! $BUILD_ID =~ ^[A-Za-z0-9._:+-]*$ ]]; then
 fi
 
 # ================= 前置条件 =================
+# 顺序：先判**参数组合与本地文件**（不需要任何外部命令就能判的），再判外部命令可用性。
+# 反过来的话，本机没装 docker 会让「--archive 缺 --sign-key」这类用法错误被一句
+# 「Docker 守护进程不可用」掩盖——使用者会去查 docker，而真正要改的是命令行。
+
+if [ -n "$ARCHIVE_OUT" ] && [ -z "$SIGN_KEY" ]; then
+  printf '错误：--archive 需要同时给 --sign-key（单文件归档必须带外层签名）。\n' >&2
+  printf '       目录形态允许未签名（可由搬运前后人工比对清单兜底），单文件形态不允许——\n' >&2
+  printf '       它正是为了让"传一个文件"这件事可被机器验证。\n' >&2
+  exit 1
+fi
+if [ -n "$SIGN_KEY" ] && [ ! -r "$SIGN_KEY" ]; then
+  printf '错误：--sign-key 指向的私钥不可读：%s\n' "$SIGN_KEY" >&2
+  exit 1
+fi
+if [ -n "$ARCHIVE_OUT" ] && [ -e "$ARCHIVE_OUT" ]; then
+  printf '错误：--archive 指向的路径已存在，拒绝覆盖（上一份归档再也找不回来）：%s\n' "$ARCHIVE_OUT" >&2
+  exit 1
+fi
 
 command -v docker >/dev/null 2>&1 || {
   printf '错误：未找到 docker 命令（本脚本要在有 registry 拉取权限的构建机上执行）。\n' >&2
@@ -184,17 +205,19 @@ command -v sha256sum >/dev/null 2>&1 || {
   exit 1
 }
 
-# 签名前置：这些都排在任何副作用（mkdir/pull/save）之前——带了 --sign-key 却半路发现
-# 私钥读不了，不该以"已经 save 出一个 8GB tar"为代价才发现。
+# 签名前置：带 --sign-key 却半路发现私钥读不了，不该以"已经 save 出一个 8GB tar"为代价才发现。
 if [ -n "$SIGN_KEY" ]; then
-  if [ ! -r "$SIGN_KEY" ]; then
-    printf '错误：--sign-key 指向的私钥不可读：%s\n' "$SIGN_KEY" >&2
-    exit 1
-  fi
   command -v openssl >/dev/null 2>&1 || {
     printf '错误：未找到 openssl 命令（--sign-key 的 Ed25519 签名依赖它，需 OpenSSL ≥ 3.0）。\n' >&2
     exit 1
   }
+  if [ -n "$ARCHIVE_OUT" ]; then
+    # 归档产出还要一次 tar（打包四个条目）；缺 tar 时同样该在起点报出来
+    command -v tar >/dev/null 2>&1 || {
+      printf '错误：未找到 tar 命令（--archive 的单文件归档依赖它）。\n' >&2
+      exit 1
+    }
+  fi
 elif [ "${FSMS_BUNDLE_REQUIRE_SIGNATURE:-0}" = "1" ]; then
   # 部署把"未签名包"定为事故口径时，让构建在起点就失败，而不是产出一个
   # 到目标机才被（正确地）拒收的包。
@@ -231,14 +254,25 @@ TAR_PATH="$OUT_DIR/$PAYLOAD_REL"
 MANIFEST_PATH="$OUT_DIR/$MANIFEST_REL"
 SIG_PATH="$OUT_DIR/$SIG_REL"
 SUMS_PATH="$OUT_DIR/$SUMS_REL"
+ARCHIVE_SIG_PATH=''
+ARCHIVE_SHA_TMP=''
 
 FINALIZED=0          # 1 = 产物齐备且自校验通过，清理钩子从此不碰任何文件
 ARTIFACTS_STARTED=0  # 1 = 已经开始往 outDir 写东西
 # 失败现场不能留下"看起来像成功"的产物：导入器只看 manifest.json 里有什么，
 # 一个半截的 tar 会被当成完整包拷到目标机。清理必须幂等——INT/TERM 的 trap 先清一次
 # 再退出，退出时 EXIT trap 还会走一遍（第二次因为 ARTIFACTS_STARTED 已归零而不再删）。
+#
+# 归档产物（--archive，落在 --out 之外）由同一把钩子清理：它是**搬运面的成品**，
+# 半截的 .tar.gz 与本脚本在 --out 里要防的"半截 tar"是同一个失效——运维会把它当
+# 完整包拷走。变量在产出段才赋值，空值 rm -f 是 no-op（清理必须幂等）。
 cleanup() {
-  if [ "$FINALIZED" -eq 1 ] || [ "$ARTIFACTS_STARTED" -ne 1 ]; then return 0; fi
+  if [ "$FINALIZED" -eq 1 ]; then return 0; fi
+  if [ -n "$ARCHIVE_SIG_PATH" ] || [ -n "$ARCHIVE_SHA_TMP" ]; then
+    rm -f -- "$ARCHIVE_SIG_PATH" "$ARCHIVE_SHA_TMP" 2>/dev/null || true
+    printf '已清理本次未完成的归档签名产物。\n' >&2
+  fi
+  if [ "$ARTIFACTS_STARTED" -ne 1 ]; then return 0; fi
   ARTIFACTS_STARTED=0
   rm -f -- "$TAR_PATH" "$MANIFEST_PATH" "$SUMS_PATH" "$SIG_PATH" 2>/dev/null || true
   printf '已清理本次未完成的产物：%s\n' "$OUT_DIR" >&2
@@ -465,6 +499,69 @@ if ! ( cd -- "$OUT_DIR" && sha256sum -c -- "$SUMS_REL" ) >/dev/null; then
   exit 1
 fi
 
+# ================= 单文件归档（--archive，可选的搬运形态） =================
+
+# 为什么另产出 .tar.gz：目录形态（四个条目）在 scp/U 盘搬运时最容易漏一个——漏 manifest.sig
+# 的包看起来完全正常，直到目标机 fail-closed 拒绝。单文件搬运消除这个失效面；
+# 目标机由 scripts/offlineBundleIntake.js 落位（只解点名条目，见 ADR-020）。
+#
+# 归档自身的完整性由**外层签名**承接：`<archive>.sig` 签的是归档 sha256 的 hex 文本
+# （64 字节），不是归档本身——Ed25519 是 one-shot 签名，GB 级归档整包签必 OOM。
+# 三层信任链：外层 sig → 归档 sha256 → manifest.sig → manifest 字节 → payload sha256。
+ARCHIVE_SHA=''
+ARCHIVE_BYTES=''
+ARCHIVE_SIG_REL=''
+if [ -n "$ARCHIVE_OUT" ]; then
+  # 前置段已判过「--archive 必带 --sign-key」与「目标不存在」；这里不重复判据，
+  # 只判**只有走到这一步才知道的事**：签名是否真的成功了。
+  if [ "$SIGNED" -ne 1 ]; then
+    printf '错误：--archive 需要 --sign-key：归档一旦离开构建机就没有任何可信来源。\n' >&2
+    printf '       （前置段已拦一次；走到这里说明签名步骤本身失败了，见上面的输出。）\n' >&2
+    exit 1
+  fi
+  printf '==> tar -czf → %s\n' "$ARCHIVE_OUT"
+  # 只打包四个已定条目（不用 . 避免把编辑器临时文件、.DS_Store 之类卷进去）；
+  # 相对路径入档：归档内条目名必须是包内相对名，落位侧按 manifest 声明逐一解包。
+  if ! tar -czf "$ARCHIVE_OUT" -C "$OUT_DIR" "$MANIFEST_REL" "$SIG_REL" "$SUMS_REL" payload; then
+    printf '错误：归档打包失败（tar 的输出上面已给出）。\n' >&2
+    exit 1
+  fi
+  if [ ! -s "$ARCHIVE_OUT" ]; then
+    printf '错误：归档产物为空：%s\n' "$ARCHIVE_OUT" >&2
+    exit 1
+  fi
+  ARCHIVE_BYTES=$(wc -c < "$ARCHIVE_OUT")
+  ARCHIVE_BYTES=${ARCHIVE_BYTES//[[:space:]]/}
+  ARCHIVE_SHA=$(sha256_of "$ARCHIVE_OUT")
+  if [[ ! $ARCHIVE_SHA =~ ^[0-9a-f]{64}$ ]]; then
+    printf '错误：归档的 sha256 不可用（sha256sum 输出无法解析）：%s\n' "$ARCHIVE_SHA" >&2
+    exit 1
+  fi
+  # 外层签名：签摘要的 hex 文本（不是归档字节）。printf 不加换行——落位侧用
+  # policy.digestPayloadOf 收成 Buffer 再验，两侧必须对"文本形态"逐字节一致。
+  ARCHIVE_SIG_PATH="${ARCHIVE_OUT}.sig"
+  if [ -e "$ARCHIVE_SIG_PATH" ]; then
+    printf '错误：归档签名路径已存在，拒绝覆盖：%s\n' "$ARCHIVE_SIG_PATH" >&2
+    exit 1
+  fi
+  ARCHIVE_SHA_TMP="${ARCHIVE_OUT}.sha.tmp"
+  printf '%s' "$ARCHIVE_SHA" > "$ARCHIVE_SHA_TMP"
+  if ! openssl pkeyutl -sign -rawin -inkey "$SIGN_KEY" -in "$ARCHIVE_SHA_TMP" -out "$ARCHIVE_SIG_PATH"; then
+    printf '错误：归档外层签名失败。\n' >&2
+    exit 1
+  fi
+  # 签完立即回验（同 manifest.sig 的纪律：不让「连自己都验不了」的归档出门）。
+  # 摘要临时文件此刻还在，正好既当签名输入又当验签输入——用完再删。
+  if ! openssl pkeyutl -verify -rawin -inkey "$SIGN_KEY" -in "$ARCHIVE_SHA_TMP" -sigfile "$ARCHIVE_SIG_PATH" >/dev/null; then
+    printf '错误：归档外层签名回验失败，拒绝发出一个连自己都验不了的包。\n' >&2
+    exit 1
+  fi
+  rm -f -- "$ARCHIVE_SHA_TMP"
+  ARCHIVE_SHA_TMP=''
+  ARCHIVE_SIG_REL=$(basename "$ARCHIVE_SIG_PATH")
+  printf '==> 归档外层签名完成：%s（签的是归档 sha256 的文本）\n' "$ARCHIVE_SIG_REL"
+fi
+
 FINALIZED=1
 
 # ================= 摘要 =================
@@ -484,6 +581,14 @@ if [ "$SIGNED" -eq 1 ]; then
   printf '  签名：已用 %s 对 manifest 签名（%s）；目标机以 OFFLINE_BUNDLE_VERIFY_PUBKEY 钉对应公钥\n' "$SIGN_KEY" "$SIG_REL"
 else
   printf '  签名：无——目标机配置了验签公钥（OFFLINE_BUNDLE_VERIFY_PUBKEY）时此包将被拒绝\n'
+fi
+if [ -n "$ARCHIVE_OUT" ]; then
+  printf '  归档：%s（%s 字节，sha256 %s）\n' "$ARCHIVE_OUT" "$ARCHIVE_BYTES" "$ARCHIVE_SHA"
+  printf '        外层签名 %s（签的是上面这行 sha256 的文本；三层信任链见 ADR-020）\n' "$ARCHIVE_SIG_REL"
+  printf '\n搬运用单文件形态时，只搬这两个文件（归档 + 外层签名）：\n'
+  printf '  scp %s %s <目标机>:/var/lib/fsms/upgrade/inbox/\n' "$(basename "$ARCHIVE_OUT")" "$ARCHIVE_SIG_REL"
+  printf '  目标机由宿主代理自动落位（每轮最多一个包，静默期后确认传输完成）；\n'
+  printf '  也可人工 CLI 兜底：node scripts/offlineBundleIntake.js --inbox /var/lib/fsms/upgrade/inbox --apply\n'
 fi
 printf '\n目标机（air-gap）下一步：把整个目录原样搬到目标机，然后\n'
 printf '  演练： node scripts/importOfflineBundle.js --bundle <包目录> --allowlist %s\n' "$ALLOWLIST_HINT"

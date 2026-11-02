@@ -349,11 +349,6 @@ function main() {
   log(`  版本：${manifest.version}${manifest.buildId ? `（构建号 ${manifest.buildId}）` : ''}`);
   for (const img of manifest.images) log(`  镜像：${img.role} → ${img.ref}`);
 
-  if (!opts.apply) {
-    log('演练模式：未做任何改动（未 docker load、未 docker tag）。确认无误后加 --apply 执行。');
-    return opts.dryRun ? 0 : 2;
-  }
-
   const state = {
     bundle: bundleDir,
     version: manifest.version,
@@ -371,6 +366,10 @@ function main() {
   // 1. 全部摘要先校验完，再碰 docker。
   //    顺序很重要：先 load 后校验的话，一个损坏的包会在被拒绝之前就把半个镜像写进本地
   //    docker（占盘、并且和「上一版」抢同一个 repo 名），失败现场的清理成本远高于先校验。
+  //
+  //    这一步**先于演练分支**：`--dry-run` 若在校验之前返回，「payload 与 manifest 对不上」
+  //    这类包会被演练模式报成成功——而落位（offlineBundleIntake）正是拿演练当预检用，
+  //    那会变成一个「预检通过、apply 才发现坏」的假绿（实测踩中，见 ADR-020）。
   step('verify', `${manifest.images.length} 个 payload`);
   const payloads = [];
   runPhase(state, 'aborted_verify_failed', '离线包校验失败（尚未改动本机 docker）', () => {
@@ -378,6 +377,14 @@ function main() {
       payloads.push({ img, full: verifyImage(bundleDir, img, opts.maxPayloadBytes) });
     }
   });
+
+  if (!opts.apply) {
+    // 演练：校验已经**全部跑完**（摘要、大小、白名单、验签都在上面），只是不 load。
+    // 措辞据此收紧：不再说「未做任何改动」而要说清「校验已通过、未碰 docker」。
+    recordState({ ...state, outcome: 'dry_run', finishedAt: new Date().toISOString() });
+    log('演练模式：全部校验已通过，未 docker load、未 docker tag。确认无误后加 --apply 执行。');
+    return opts.dryRun ? 0 : 2;
+  }
 
   // 2. load
   runPhase(state, 'aborted_load_failed', 'docker load 失败', () => {

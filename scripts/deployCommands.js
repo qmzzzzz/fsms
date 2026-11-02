@@ -120,11 +120,16 @@ function buildHotUpgradeInvocation({
  * `--bundle-root` 把包钉在代理管理的 bundles 目录之内：请求被伪造时，最坏也只是
  * 「导入一个 root 放进来的合法包」，指向包外的路径在导入器就被拒绝。
  * allowlist 为空时不传该参数：导入器按「空白名单 = 全拒」自己拒绝，与在线路径同口径。
+ *
+ * dryRun：只校验不 load（落位时的预检用；导入器自身语义是「校准通过 exit 0」）。
+ * pubkeyFile：外层验签用的公钥，同时转给导入器做内层验签（两处必须同一把）。
  */
 function buildImportBundleInvocation({
   bundleDir,
   bundleRoot,
   allowlist = [],
+  dryRun = false,
+  pubkeyFile = '',
   scriptFile = DEFAULT_IMPORT_BUNDLE_SCRIPT,
 } = {}) {
   if (!bundleDir) throw new Error('离线包导入必须显式给出 bundleDir');
@@ -133,7 +138,8 @@ function buildImportBundleInvocation({
   if (Array.isArray(allowlist) && allowlist.length > 0) {
     args.push('--allowlist', allowlist.join(','));
   }
-  args.push('--apply');
+  if (pubkeyFile) args.push('--pubkey-file', pubkeyFile);
+  args.push(dryRun ? '--dry-run' : '--apply');
   return { file: process.execPath, args };
 }
 

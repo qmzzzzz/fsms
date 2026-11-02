@@ -188,6 +188,15 @@ function loadConfig(env = process.env) {
     // 离线包目录：默认落在队列目录之内，因此 systemd 单元现有的 ReadWritePaths 已覆盖；
     // 改到别处必须同步改单元那一行，否则代理会在读包处 EACCES（表现像「包坏了」）。
     bundlesDir: String(env.OFFLINE_BUNDLE_DIR || '').trim() || path.join(queueDir, 'bundles'),
+    // 落位 inbox：运维把 .tar.gz 传到这里，代理每轮尝试落位到 bundlesDir（见 offlineBundleIntake）。
+    // 与 bundlesDir 同纪律（root-only）：能写它的账号 = 能决定线上跑什么代码。
+    inboxDir: String(env.OFFLINE_BUNDLE_INBOX || '').trim() || path.join(queueDir, 'inbox'),
+    // 落位/导入共用的验签公钥（PEM 路径）：与导入器同口径，未配置 = 跳过验签并留痕明示。
+    // 只在这里读一次，落位与导入两处都取它——两把钥匙会让「外层验过、内层验不过」难以解释。
+    verifyPubkeyFile: String(env.OFFLINE_BUNDLE_VERIFY_PUBKEY || '').trim(),
+    // 传输静默期（秒）：归档 mtime 距今不足该值即视为「可能还在写」。默认 60——
+    // 调小的代价是「大文件传到一半就被解包」（以解包错误收场，而不是「还没传完」）。
+    settleSec: toInt(env.OFFLINE_BUNDLE_SETTLE_SECONDS, 60, 5, 3600),
     heartbeatFile: path.join(queueDir, 'heartbeat.json'),
     allowlist: String(env.HOT_UPGRADE_REGISTRY_ALLOWLIST || '')
       .split(',')

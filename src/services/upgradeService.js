@@ -159,6 +159,39 @@ function normalizeHeartbeatBundles(raw) {
   };
 }
 
+/**
+ * 心跳 intake 的归一化（代理落位通道：inbox → bundles）。
+ *
+ * pending = 已传完但还没落位的归档名（静默期未到 / 本轮排队）；
+ * rejected = 落位失败的归档与原因；landed = 本轮刚落位的目录名（空串表示本轮没落位）。
+ * 与 bundles 同纪律：逐字段截断、数量封顶——心跳是 0644 全局可读文件，
+ * 一个塞满畸形条目的 inbox 不能把它撑成 DoS 载体。
+ */
+function normalizeHeartbeatIntake(raw) {
+  const empty = { pending: [], rejected: [], landed: '' };
+  if (!raw || typeof raw !== 'object') return empty;
+  const clipName = (v) => asString(v).slice(0, 128);
+  const pending = Array.isArray(raw.pending)
+    ? raw.pending.map(clipName).filter(Boolean).slice(0, BUNDLE_LIST_LIMIT)
+    : [];
+  const rejected = Array.isArray(raw.rejected)
+    ? raw.rejected
+        .map((item) => {
+          if (!item || typeof item !== 'object') return null;
+          const archive = clipName(item.archive);
+          return {
+            // archive 可空（inbox 本身不可读时没有具体归档名），outcome/reason 仍在
+            archive,
+            outcome: asString(item.outcome).slice(0, 64),
+            reason: asString(item.reason).slice(0, 300),
+          };
+        })
+        .filter((item) => item && (item.archive || item.outcome))
+        .slice(0, BUNDLE_LIST_LIMIT)
+    : [];
+  return { pending, rejected, landed: clipName(raw.landed) };
+}
+
 function readHeartbeat() {
   const beat = readJsonFile(upgradeConfig.heartbeatFile);
   if (!beat) return null; // 不存在 = 代理从未上报；字段读得出却不可用（下行 throw）算异常——两类不许同码
@@ -178,6 +211,7 @@ function readHeartbeat() {
     clockSkew: ageMs < 0, // 与「单纯过期」区分开：英文界面按 code 呈现不同措辞；真正的处置是校时而非查代理
     reasons: ageMs < 0 ? [...reasons, '心跳时间晚于当前时间（宿主与应用时钟不同步）'] : reasons,
     bundles: normalizeHeartbeatBundles(beat.bundles),
+    intake: normalizeHeartbeatIntake(beat.intake),
   };
 }
 
@@ -527,6 +561,10 @@ function getOverview({ buildInfo, now = Date.now() }) {
       heartbeat: readiness.heartbeat,
       // 离线包候选（代理心跳携带）：仅用于展示与下拉，不是完整性背书——全量校验在代理执行时做
       bundles: readiness.heartbeat ? readiness.heartbeat.bundles : { available: [], invalid: [] },
+      // 落位通道状态（inbox → bundles）：pending = 传完待落位，rejected = 落位失败及原因
+      intake: readiness.heartbeat
+        ? readiness.heartbeat.intake
+        : { pending: [], rejected: [], landed: '' },
       activeJob: active,
       latestJob: jobs[0] || active,
       history: jobs,

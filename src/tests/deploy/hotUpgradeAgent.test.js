@@ -45,6 +45,10 @@ function makeEnv() {
     dir,
     queueDir,
     nginxConf,
+    // 落位通道（2026-11-02）：代理每轮扫它并尝试落位到 bundlesDir。
+    // 默认**不建** inbox —— 「未启用离线通道」是正常形态（ENOENT 折成空列表）；
+    // 需要它的用例自行 mkdir（见「心跳公布离线包」与「落位」两组）。
+    inboxDir: path.join(queueDir, 'inbox'),
     env: {
       UPGRADE_QUEUE_DIR: queueDir,
       HOT_UPGRADE_REGISTRY_ALLOWLIST: 'ghcr.io/acme/',
@@ -393,6 +397,113 @@ describe('心跳公布离线包（应用侧下拉的数据源）', () => {
     await agent.runOnce({ env, executor: async () => [] });
     const beat = readBeat(queueDir);
     expect(beat.bundles).toEqual({ available: [], invalid: [] });
+  });
+});
+
+describe('落位步骤（inbox → bundles，排在消费请求之前）', () => {
+  test('inbox 里有包 ⇒ 调一次 intakeFn，心跳带 intake.landed；顺序先于请求处理', async () => {
+    const { queueDir, inboxDir, env } = makeEnv();
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(path.join(inboxDir, 'v1.0.0.tar.gz'), 'fake', 'utf8');
+    // 同时放一个请求：用来断言「先落位后消费」
+    writeRequest(queueDir);
+
+    const order = [];
+    const intakeFn = (_args) => {
+      order.push('intake');
+      return { ok: true, outcome: 'success', dirName: 'v1.0.0', archive: 'v1.0.0.tar.gz' };
+    };
+    const executor = async ({ statusFile }) => {
+      order.push('upgrade');
+      const cur = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
+      fs.writeFileSync(
+        statusFile,
+        JSON.stringify({ ...cur, state: 'succeeded', outcome: 'success' })
+      );
+      return { code: 0 };
+    };
+
+    await agent.runOnce({ env, executor, intakeFn });
+    expect(order).toEqual(['intake', 'upgrade']);
+    const beat = readBeat(queueDir);
+    expect(beat.intake).toMatchObject({ landed: 'v1.0.0', rejected: [] });
+    expect(beat.ready).toBe(true); // 落位成功不该改变 ready
+  });
+
+  test('intakeFn 抛异常 ⇒ 折进 intake.rejected，ready 不变红，请求照常处理（fail-soft）', async () => {
+    const { queueDir, inboxDir, env } = makeEnv();
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(path.join(inboxDir, 'broken.tar.gz'), 'fake', 'utf8');
+
+    const intakeFn = () => {
+      throw new Error('模拟落位内部异常');
+    };
+    let upgraded = false;
+    const executor = async ({ statusFile }) => {
+      upgraded = true;
+      const cur = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
+      fs.writeFileSync(
+        statusFile,
+        JSON.stringify({ ...cur, state: 'succeeded', outcome: 'success' })
+      );
+      return { code: 0 };
+    };
+    writeRequest(queueDir);
+
+    const code = await agent.runOnce({ env, executor, intakeFn });
+    expect(code).toBe(0);
+    const beat = readBeat(queueDir);
+    expect(beat.ready).toBe(true); // 离线通道坏了不许拖垮在线
+    expect(beat.intake.rejected[0]).toMatchObject({
+      archive: 'broken.tar.gz',
+      outcome: 'intake_threw',
+    });
+    expect(upgraded).toBe(true); // 落位异常不影响同轮的升级请求
+  });
+
+  test('未就绪（静默期未到）⇒ 进 intake.pending 而不是 rejected', async () => {
+    const { queueDir, inboxDir, env } = makeEnv();
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(path.join(inboxDir, 'inflight.tar.gz'), 'fake', 'utf8');
+
+    const intakeFn = () => ({ ok: false, outcome: 'not_settled', reason: '仍在传', dirName: '' });
+    await agent.runOnce({ env, intakeFn, executor: async () => ({ code: 0 }) });
+    const beat = readBeat(queueDir);
+    expect(beat.intake.pending).toEqual(['inflight.tar.gz']);
+    expect(beat.intake.rejected).toEqual([]);
+  });
+
+  test('多个包 ⇒ 本轮只落第一个，其余进 pending（每轮最多一个）', async () => {
+    const { queueDir, inboxDir, env } = makeEnv();
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(path.join(inboxDir, 'a.tar.gz'), 'x', 'utf8');
+    fs.writeFileSync(path.join(inboxDir, 'b.tar.gz'), 'x', 'utf8');
+
+    let calls = 0;
+    const intakeFn = () => {
+      calls += 1;
+      return { ok: true, outcome: 'success', dirName: 'a', archive: 'a.tar.gz' };
+    };
+    await agent.runOnce({ env, intakeFn, executor: async () => ({ code: 0 }) });
+    expect(calls).toBe(1);
+    expect(readBeat(queueDir).intake.pending).toEqual(['b.tar.gz']);
+  });
+
+  test('inbox 为空或不存在 ⇒ 完全不动 intakeFn，心跳也不带 intake 字段', async () => {
+    const { queueDir, env } = makeEnv();
+    let calls = 0;
+    await agent.runOnce({
+      env,
+      intakeFn: () => {
+        calls += 1;
+        return { ok: true, outcome: 'success' };
+      },
+      executor: async () => ({ code: 0 }),
+    });
+    expect(calls).toBe(0);
+    const beat = readBeat(queueDir);
+    expect(beat.intake).toBeUndefined();
+    expect(beat.ready).toBe(true);
   });
 });
 

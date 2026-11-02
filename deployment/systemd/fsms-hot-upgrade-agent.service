@@ -50,6 +50,9 @@ Restart=no
 #             ReadWritePaths 覆盖）。把 OFFLINE_BUNDLE_DIR 改到别处时，
 #             必须同步往 ReadWritePaths 增加该路径，否则代理会在读包处 EACCES，
 #             而现场表现是「包读不了」，看起来像包坏了。
+#   offline inbox —— 落位收件目录（运维把 .tar.gz 传到这里，代理每轮最多落位一个）。
+#             与 bundles 同纪律：能写它的账号 = 能决定线上跑什么代码，故同样是 0700 root。
+#             默认也在 upgrade queue 之内，改路径时同样要同步 ReadWritePaths。
 NoNewPrivileges=yes
 Umask=0077
 PrivateTmp=yes
@@ -57,7 +60,7 @@ ProtectHome=yes
 ProtectSystem=full
 Environment=GNUPGHOME=/var/lib/fsms/gnupg
 Environment=DOCKER_CONFIG=/var/lib/fsms/docker
-ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/fsms/gnupg /var/lib/fsms/docker /var/lib/fsms/upgrade/bundles
+ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/fsms/gnupg /var/lib/fsms/docker /var/lib/fsms/upgrade/bundles /var/lib/fsms/upgrade/inbox
 ReadWritePaths=-/etc/nginx -/var/lib/fsms/upgrade -/var/lib/fsms/gnupg -/var/lib/fsms/docker
 
 [Install]

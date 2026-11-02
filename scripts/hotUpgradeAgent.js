@@ -33,6 +33,7 @@ const path = require('path');
 const queue = require('./hotUpgradeQueue');
 const { processRequest, runUpgradeByMode } = require('./hotUpgradeJob');
 const { scanBundles } = require('./offlineBundleScan');
+const { intakeOne, listInboxCandidates } = require('./offlineBundleIntake');
 
 const { JOB_ID_RE, readJsonFile, listJsonFiles, writeStatus, statusOf, isTerminal } = queue;
 const { pidAlive, LOCK_STALE_MS } = queue;
@@ -96,7 +97,122 @@ function recoverStale(cfg, { isAlive = pidAlive, now = Date.now() } = {}) {
   return { busy: false };
 }
 
-async function runOnce({ env = process.env, executor = runUpgradeByMode, now = Date.now } = {}) {
+/**
+ * 一轮最多落一个包（inbox → bundles）。
+ *
+ * 为什么排在消费请求之前：升级请求瞄的是某个 digest，而那个 digest 可能正躺在 inbox 里
+ * 等着落位——先落位后消费，请求最迟在**同一轮**就能被满足；反过来则要等下一轮（15s，
+ * 而用户已经在看着弹窗了）。
+ *
+ * 三条边界（与扫描层同一套 fail-soft 纪律）：
+ *   · 永不抛：intakeOne 的结果对象化（见其注释），这里再兜一层 catch——落位失败只该
+ *     表现为「这个包还在 inbox 里」，不该把整轮代理带成异常收尾；
+ *   · 不拖红 ready：intake 失败折进心跳的 intake.rejected，与 bundles.error 同档；
+ *   · 未就绪（静默期未到 / 仍在传）不算失败：进 intake.pending，应用侧能看到「有包在传」，
+ *     而不是「传了但下拉里没有」（那只能 SSH 上去查）。
+ *
+ * @returns {{ pending: string[], rejected: Array<{archive:string,outcome:string,reason:string}>, landed: string }}
+ */
+function intakeOnce(cfg, { intake = intakeOne, now = Date.now } = {}) {
+  const result = { pending: [], rejected: [], landed: '' };
+  let candidates;
+  try {
+    candidates = listInboxCandidates(cfg.inboxDir);
+  } catch (err) {
+    // inbox 不可读（ENOENT 已被 listInboxCandidates 折成空列表）——折进 rejected 让应用侧看见
+    result.rejected.push({ archive: '', outcome: 'inbox_unreadable', reason: err.message });
+    return result;
+  }
+  if (candidates.length === 0) return result;
+
+  const target = candidates[0];
+  const name = path.basename(target);
+  try {
+    const outcome = intake({
+      archivePath: target,
+      bundleRoot: cfg.bundlesDir,
+      pubkeyFile: cfg.verifyPubkeyFile,
+      allowlist: cfg.allowlist.join(','),
+      apply: true,
+      settleSec: cfg.settleSec,
+      now,
+    });
+    if (outcome.ok) {
+      result.landed = outcome.dirName;
+      log(`离线包落位完成：${outcome.dirName}`);
+    } else if (outcome.outcome === 'not_settled') {
+      // 未就绪：不进 rejected（那不是失败），只报「还在传」
+      result.pending.push(name);
+    } else {
+      result.rejected.push({ archive: name, outcome: outcome.outcome, reason: outcome.reason });
+      warn(`离线包落位失败（${name} / ${outcome.outcome}）：${outcome.reason}`);
+    }
+  } catch (err) {
+    result.rejected.push({ archive: name, outcome: 'intake_threw', reason: err.message });
+    warn(`离线包落位异常（${name}）：${err.message}`);
+  }
+  // 除已落位/已拒绝的那个之外，其余仍在排队 —— 一并报给应用侧
+  for (const file of candidates.slice(1)) result.pending.push(path.basename(file));
+  return result;
+}
+
+/**
+ * 组装心跳内容（纯函数：不改盘、不打印）。
+ *
+ * 抽出来的理由与它守的纪律一致：心跳的每个字段都有各自的可信度语义——
+ * `ready` 只由自检决定，离线通道的问题（bundles.error / intake 失败）只进 reasons
+ * 与对应字段，**绝不上浮**。集中在一处，才不会在加字段时把「某个离线问题」
+ * 顺手写成 ready=false（那会让在线升级也一起不可用）。
+ */
+function composeBeat({ readiness, bundles, intake, previous = {} }) {
+  const reasons = [...readiness.reasons];
+  if (bundles.error) reasons.push(bundles.error);
+  const beat = {
+    ready: readiness.ready,
+    reasons,
+    bundles: { available: bundles.available, invalid: bundles.invalid },
+  };
+  if (intake) {
+    beat.intake = { pending: intake.pending, rejected: intake.rejected, landed: intake.landed };
+  }
+  return { ...previous, ...beat };
+}
+
+/**
+ * 落位（inbox → bundles）排在消费请求之前：请求瞄的 digest 可能正躺在 inbox 里等着落位，
+ * 先落位后消费能让它在同一轮被满足。落位结果折进心跳（pending/rejected），
+ * 失败绝不拖红 ready——离线通道坏了不许让在线升级一起不可用。
+ *
+ * 刚落位了一个包时要重扫一次 bundles：否则心跳里的 available 要等下一轮才更新，
+ * 而应用侧此刻正盯着下拉看（「落位完成但列表里没有」会让人以为落位失败）。
+ */
+function runIntakeStep(cfg, { beat, intakeFn, now }) {
+  const intake = intakeOnce(cfg, { intake: intakeFn, now });
+  const touched = intake.landed || intake.pending.length > 0 || intake.rejected.length > 0;
+  if (!touched) return beat;
+  // 只改 intake 与 bundles 两个字段：其余字段（ready/reasons/lastSeenAt）原样保留——
+  // 落位是离线通道的动作，不该改写自检结论。
+  let nextBeat = {
+    ...beat,
+    intake: { pending: intake.pending, rejected: intake.rejected, landed: intake.landed },
+  };
+  if (intake.landed) {
+    const rescanned = scanBundles({ bundlesDir: cfg.bundlesDir, allowlist: cfg.allowlist });
+    nextBeat = {
+      ...nextBeat,
+      bundles: { available: rescanned.available, invalid: rescanned.invalid },
+    };
+  }
+  queue.writeHeartbeat(cfg, nextBeat);
+  return nextBeat;
+}
+
+async function runOnce({
+  env = process.env,
+  executor = runUpgradeByMode,
+  intakeFn = intakeOne,
+  now = Date.now,
+} = {}) {
   const cfg = queue.loadConfig(env);
   queue.ensureDirs(cfg);
 
@@ -125,13 +241,7 @@ async function runOnce({ env = process.env, executor = runUpgradeByMode, now = D
     // 离线包扫描只影响心跳内容，不影响 ready：离线通道坏了（目录不可读、全是坏包）
     // 不许把在线升级一起拖红。目录不可读的原因折进 reasons 让应用侧如实展示。
     const bundles = scanBundles({ bundlesDir: cfg.bundlesDir, allowlist: cfg.allowlist });
-    const reasons = [...readiness.reasons];
-    if (bundles.error) reasons.push(bundles.error);
-    beat = {
-      ready: readiness.ready,
-      reasons,
-      bundles: { available: bundles.available, invalid: bundles.invalid },
-    };
+    beat = composeBeat({ readiness, bundles });
     queue.writeHeartbeat(cfg, beat);
     if (!readiness.ready) {
       log(`代理未就绪：${readiness.reasons.join('；')}`);
@@ -143,6 +253,8 @@ async function runOnce({ env = process.env, executor = runUpgradeByMode, now = D
       log(`上一轮任务 ${recovered.id} 仍在执行，本轮跳过`);
       return 0;
     }
+
+    beat = runIntakeStep(cfg, { beat, intakeFn, now: now() });
 
     // 按 requestedAt 升序认领：readdir 的顺序与「请求何时到达」无关，
     // 不排序时后发的请求有可能先被执行（用户连点两次时表现为「最新那次先生效」）

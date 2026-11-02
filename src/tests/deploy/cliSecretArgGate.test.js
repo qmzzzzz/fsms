@@ -87,7 +87,32 @@ const acceptedByScript = new Map(
  * 因此这里的每一项都是**显式登记**而非派生——登记漂移由下方「反向自证」用例钉住：
  * 脚本必须真的 require 那个 policy 模块，policy 的 FLAGS 闭合清单必须真的含该选项。
  */
-const POLICY_DELEGATED = new Map([['scripts/importOfflineBundle.js', ['--pubkey-file']]]);
+const POLICY_DELEGATED = new Map([
+  ['scripts/importOfflineBundle.js', ['--pubkey-file']],
+  // 落位器（2026-11-02，ADR-020）：`--pubkey-file` 是落位侧**外层归档验签**用的公钥。
+  // 它的取值与转换都在 offlineBundleIntakePolicy.parseArgs（另一份 FLAGS 闭合清单）——
+  // 登记 → policy 的反向自证按同一张表逐项跑，只是 policy 模块由下面按脚本映射。
+  ['scripts/offlineBundleIntake.js', ['--pubkey-file']],
+]);
+
+/**
+ * 各脚本对应的 policy 模块（登记项的反向自证要 require 对的**那一份** FLAGS）。
+ *
+ * 静态 require 而不是按名字拼路径：本仓对「动态构造模块路径」一贯避让（拼串 require
+ * 既是命令注入判据的拦截形态，也让依赖关系无法静态分析——moduleTrackingGate 正是
+ * 靠静态 require 图工作的）。
+ */
+const POLICY_MODULE_BY_SCRIPT = new Map([
+  ['scripts/importOfflineBundle.js', require('../../../scripts/offlineBundlePolicy')],
+  ['scripts/offlineBundleIntake.js', require('../../../scripts/offlineBundleIntakePolicy')],
+]);
+
+/** 脚本源码里应当出现的 require 目标（用于自证「取值确实经那份 policy」） */
+const POLICY_MODULE_NAME_BY_SCRIPT = new Map([
+  ['scripts/importOfflineBundle.js', './offlineBundlePolicy'],
+  ['scripts/offlineBundleIntake.js', './offlineBundleIntakePolicy'],
+]);
+
 for (const [rel, flags] of POLICY_DELEGATED) {
   const merged = new Set(acceptedByScript.get(rel) || []);
   for (const f of flags) merged.add(f);
@@ -167,6 +192,7 @@ describe('密钥类 argv 选项的静态判据', () => {
     expect([...acceptedByScript.keys()].sort()).toEqual(
       [
         'scripts/importOfflineBundle.js', // POLICY_DELEGATED 登记（经 policy 层取值，见上方注释）
+        'scripts/offlineBundleIntake.js', // POLICY_DELEGATED 登记（外层归档验签，ADR-020）
         'scripts/migrate-mfa-secret.js',
         'scripts/resign-audit-hmac.js',
       ].sort()
@@ -175,7 +201,8 @@ describe('密钥类 argv 选项的静态判据', () => {
       '--new-key-file',
       '--new-key-file',
       '--old-key-file',
-      '--pubkey-file', // POLICY_DELEGATED 登记
+      '--pubkey-file',
+      '--pubkey-file',
     ]);
     // 文档侧同样要有料：真存在带密钥选项的手册命令，否则第 3 条用例是空集恒真
     expect(docCommands.length).toBeGreaterThanOrEqual(4);
@@ -231,14 +258,17 @@ describe('密钥类 argv 选项的静态判据', () => {
 
   test('POLICY_DELEGATED 登记的反向自证：脚本真的 require 那个 policy，且 policy 闭合清单真的含该选项', () => {
     for (const [rel, flags] of POLICY_DELEGATED) {
-      // 1) 脚本必须真的经 policy.parseArgs 取值（换了取值实现而忘改登记 ⇒ 登记变空头支票）
+      // 1) 脚本必须真的 require 对应的 policy 模块（换了取值实现而忘改登记 ⇒ 登记变空头支票）
+      const policyModule = POLICY_MODULE_BY_SCRIPT.get(rel);
+      const requireTarget = POLICY_MODULE_NAME_BY_SCRIPT.get(rel);
+      expect(policyModule).toBeTruthy();
+      expect(requireTarget).toBeTruthy();
       const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
-      expect(src).toMatch(/require\([^)]*offlineBundlePolicy["']\)/);
-      // 2) policy 的 FLAGS 闭合清单必须真的含每个登记选项（offlineBundlePolicy.test.js
-      //    的同名用例钉住 FLAGS 本身；这里钉的是「登记 ↔ 清单」两侧不许单方面漂移）
-      const policyFlags = require('../../../scripts/offlineBundlePolicy').FLAGS;
+      expect(src).toContain(requireTarget);
+      // 2) 那份 policy 的 FLAGS 闭合清单必须真的含每个登记选项（各 policy 自己的测试
+      //    钉住 FLAGS 本身；这里钉的是「登记 ↔ 清单」两侧不许单方面漂移）
       for (const f of flags) {
-        expect(policyFlags).toContain(f.slice(2));
+        expect(policyModule.FLAGS).toContain(f.slice(2));
         expect(FILE_FORM.test(f)).toBe(true);
       }
     }

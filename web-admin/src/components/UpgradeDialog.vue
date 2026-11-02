@@ -119,6 +119,20 @@
           <div v-if="offlineBundles.length === 0" class="upgrade-field-hint">
             {{ t('about.upgrade.offlineNone') }}
           </div>
+          <!-- 有归档已传完但还没落位（代理每轮最多落一个）：解释「为什么传了却没出现」 -->
+          <div v-if="intakePending.length" class="upgrade-field-hint" data-testid="upgrade-intake-pending">
+            {{ t('about.upgrade.intakePending', { count: intakePending.length }) }}
+          </div>
+          <!-- 落位失败：把原因摆出来（否则运维只知道「传了但没出现」） -->
+          <div
+            v-for="item in intakeRejected"
+            :key="item.archive || item.outcome"
+            class="upgrade-field-error"
+            data-testid="upgrade-intake-rejected"
+          >
+            {{ t('about.upgrade.intakeRejected', { archive: item.archive || '—' }) }}
+            {{ item.reason }}
+          </div>
         </el-form-item>
         <el-form-item
           :label="
@@ -337,6 +351,18 @@ const offlineBundles = computed(() => {
   const list = props.overview?.upgrade?.bundles?.available
   if (!Array.isArray(list)) return []
   return list.filter((bundle) => bundle && typeof bundle.ref === 'string')
+})
+
+// 落位通道：已传完待落位的归档名，以及落位失败的原因。
+// 没有这两条展示时，「包传了但下拉里没有」只能靠 SSH 上去看 inbox——那正是本功能要消掉的步骤。
+const intakePending = computed(() => {
+  const list = props.overview?.upgrade?.intake?.pending
+  return Array.isArray(list) ? list.filter((n) => typeof n === 'string' && n) : []
+})
+const intakeRejected = computed(() => {
+  const list = props.overview?.upgrade?.intake?.rejected
+  if (!Array.isArray(list)) return []
+  return list.filter((r) => r && (typeof r.archive === 'string' || typeof r.outcome === 'string'))
 })
 
 const bundleOptionLabel = (bundle) =>

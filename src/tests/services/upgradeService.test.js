@@ -550,5 +550,50 @@ describe('upgradeService（应用侧队列）', () => {
       const noBeat = upgradeService.getOverview({ buildInfo: { version: '1.0.0' } });
       expect(noBeat.upgrade.bundles).toEqual({ available: [], invalid: [] });
     });
+
+    test('心跳 intake（落位通道）原样透传；坏形状 / 缺字段折成空结构', () => {
+      const writeBeat = (intake) =>
+        fs.writeFileSync(
+          upgradeConfig.heartbeatFile,
+          JSON.stringify({
+            lastSeenAt: new Date().toISOString(),
+            version: 'test',
+            ready: true,
+            intake,
+          }),
+          { mode: 0o644 }
+        );
+
+      writeBeat({
+        pending: ['v1.3.0.tar.gz', 'v1.3.1.tar.gz'],
+        rejected: [{ archive: 'bad.tar.gz', outcome: 'aborted_signature_failed', reason: '未签名' }],
+        landed: 'v1.2.3',
+      });
+      const overview = upgradeService.getOverview({ buildInfo: { version: '1.0.0' } });
+      expect(overview.upgrade.intake).toEqual({
+        pending: ['v1.3.0.tar.gz', 'v1.3.1.tar.gz'],
+        rejected: [
+          { archive: 'bad.tar.gz', outcome: 'aborted_signature_failed', reason: '未签名' },
+        ],
+        landed: 'v1.2.3',
+      });
+
+      // 坏形状：pending 非数组、rejected 混入非对象、landed 非字符串 —— 一律折成缺省
+      writeBeat({ pending: 'nope', rejected: [null, 42, { archive: 'x.tar.gz' }], landed: 123 });
+      const degraded = upgradeService.getOverview({ buildInfo: { version: '1.0.0' } });
+      expect(degraded.upgrade.intake).toEqual({
+        pending: [],
+        rejected: [{ archive: 'x.tar.gz', outcome: '', reason: '' }],
+        landed: '',
+      });
+
+      // 无 intake 字段（老代理心跳）/ 从未上报：都给空结构而不是 undefined
+      writeHeartbeat();
+      const plain = upgradeService.getOverview({ buildInfo: { version: '1.0.0' } });
+      expect(plain.upgrade.intake).toEqual({ pending: [], rejected: [], landed: '' });
+      fs.rmSync(upgradeConfig.heartbeatFile, { force: true });
+      const noBeat = upgradeService.getOverview({ buildInfo: { version: '1.0.0' } });
+      expect(noBeat.upgrade.intake).toEqual({ pending: [], rejected: [], landed: '' });
+    });
   });
 });

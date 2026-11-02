@@ -991,3 +991,45 @@ describe('升级步骤词表与后端脚本对账（WF-11，2026-11-02）', () =
     expect({ missingZh, missingEn }).toEqual({ missingZh: [], missingEn: [] })
   })
 })
+
+describe('落位通道状态展示（inbox → bundles）', () => {
+  const mountWithIntake = async (intake) => {
+    h.getMetrics.mockResolvedValue({ data: { success: true, data: null } })
+    overviewRes({ upgrade: { bundles: { available: [], invalid: [] }, intake } })
+    const c = await open(['*:*'])
+    await openDialog(c)
+    return c
+  }
+
+  test('有归档已传完待落位：展示「等待代理落位」提示（解释「传了却没出现」）', async () => {
+    await mountWithIntake({ pending: ['v1.3.0.tar.gz'], rejected: [], landed: '' })
+    const hint = document.body.querySelector('[data-testid="upgrade-intake-pending"]')
+    expect(hint).toBeTruthy()
+    expect(hint.textContent).toContain('落位')
+    expect(hint.textContent).toContain('1')
+  })
+
+  test('落位失败：把归档名与原因摆出来（否则运维只知道「传了但没出现」）', async () => {
+    await mountWithIntake({
+      pending: [],
+      rejected: [
+        { archive: 'bad.tar.gz', outcome: 'aborted_signature_failed', reason: '未签名包，拒绝' },
+      ],
+      landed: '',
+    })
+    const el = document.body.querySelector('[data-testid="upgrade-intake-rejected"]')
+    expect(el).toBeTruthy()
+    expect(el.textContent).toContain('bad.tar.gz')
+    expect(el.textContent).toContain('未签名包，拒绝')
+  })
+
+  test('intake 为空/坏形状：不渲染任何提示，也不报错（坏心跳不炸弹窗）', async () => {
+    await mountWithIntake(null)
+    expect(document.body.querySelector('[data-testid="upgrade-intake-pending"]')).toBeFalsy()
+    expect(document.body.querySelector('[data-testid="upgrade-intake-rejected"]')).toBeFalsy()
+
+    await mountWithIntake({ pending: 'not-an-array', rejected: 42, landed: 123 })
+    expect(document.body.querySelector('[data-testid="upgrade-intake-pending"]')).toBeFalsy()
+    expect(document.body.querySelector('[data-testid="upgrade-intake-rejected"]')).toBeFalsy()
+  })
+})
