@@ -21,6 +21,8 @@
  *  9. 页面不可见时不发轮询，恢复可见后继续。
  */
 import { describe, test, expect, vi, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { mountComponent, click, flush } from '../helpers/componentHarness'
 import { useAuthStore } from '@/store'
 
@@ -958,5 +960,34 @@ describe('一键升级的离线来源（mode）', () => {
     // 202 后进入进度态：来源行显示「离线包」（job.mode 透传到任务视图）
     expect(document.body.querySelector('[data-testid="upgrade-progress"]')).toBeTruthy()
     expect(document.body.textContent).toContain('离线包')
+  })
+})
+
+describe('升级步骤词表与后端脚本对账（WF-11，2026-11-02）', () => {
+  test('scripts/hotUpgrade.js 发出的每个 step() 名在两份语言词表里都有登记', () => {
+    // 缺键时 ProgressCard 回退显示英文裸码（stepLabel 的 text===key 判定），
+    // 离线升级链路此前会冒出未翻译的 assert-local-image。漂移必须由用例盯住，
+    // 不能靠人工在新增步骤时记得改两份词表。
+    const repoRoot = resolve(__dirname, '../../../..') // views → tests → src → web-admin → 仓库根
+    const script = readFileSync(resolve(repoRoot, 'scripts/hotUpgrade.js'), 'utf8')
+    const emitted = [
+      ...new Set([...script.matchAll(/\bstep\(\s*'([a-z0-9-]+)'/g)].map((m) => m[1])),
+    ]
+    // 前提自证：确实从脚本里抽到了步骤名（防正则失配导致空集假绿）
+    expect(emitted.length).toBeGreaterThanOrEqual(8)
+    expect(emitted).toContain('assert-local-image')
+
+    const readKeys = (file) => {
+      const src = readFileSync(resolve(repoRoot, 'web-admin/src/i18n/locales', file), 'utf8')
+      const block = src.slice(src.indexOf('stepNames: {'))
+      const body = block.slice(0, block.indexOf('\n      },'))
+      return [...body.matchAll(/^\s*'?([a-z0-9-]+)'?:/gm)].map((m) => m[1])
+    }
+    const zh = readKeys('zh-CN.js')
+    const en = readKeys('en-US.js')
+    // 双向差集都必须为空：脚本里有而词表缺（裸码）、词表有而脚本无（死键，暂容忍旧键）
+    const missingZh = emitted.filter((s) => !zh.includes(s))
+    const missingEn = emitted.filter((s) => !en.includes(s))
+    expect({ missingZh, missingEn }).toEqual({ missingZh: [], missingEn: [] })
   })
 })

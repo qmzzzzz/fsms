@@ -356,8 +356,16 @@ describe('LoginView 验证码一次性消费', () => {
   test('失败触发的人机挑战：CAPTCHA_INVALID ⇒ 补渲染验证码区，且下次提交真的带上验证码', async () => {
     // 场景：静态开关是关的（getCaptchaStatus 返回 false），后端因连续失败要求人机验证。
     // 若不补渲染，用户看到"验证码错误或已过期"却没有任何输入框 —— 无出口。
+    //
+    // 错误形状必须是**真实的 axios 形状**（WF-08，2026-11-02）：后端码在响应体
+    // errors.errorCode 里；axios 对 4xx 只写 error.code='ERR_BAD_REQUEST'，从不搬运
+    // 后端码。旧用例手工构造的 { code: 'CAPTCHA_INVALID' } 是生产永不会出现的形状，
+    // 把「判据读错字段、分支恒不执行」测成了绿。
     encryptPassword.mockResolvedValue('ENC')
-    const challenge = Object.assign(new Error('captcha required'), { code: 'CAPTCHA_INVALID' })
+    const challenge = Object.assign(new Error('captcha required'), {
+      code: 'ERR_BAD_REQUEST',
+      response: { status: 400, data: { success: false, errors: { errorCode: 'CAPTCHA_INVALID' } } },
+    })
     login
       .mockRejectedValueOnce(challenge)
       .mockResolvedValueOnce({ data: { success: false, message: 'x' } })

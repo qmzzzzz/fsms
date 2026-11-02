@@ -105,7 +105,7 @@
         <el-table-column prop="inspectionType" :label="$t('common.type')" width="100">
           <template #default="{ row }">
             <el-tag size="small">
-              {{ typeMap[row.inspectionType] }}
+              {{ typeMap[row.inspectionType] || row.inspectionType || '—' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -127,7 +127,7 @@
         <el-table-column prop="result" :label="$t('inspection.result')" width="100">
           <template #default="{ row }">
             <el-tag v-if="row.result" :type="resultType(row.result)" size="small">
-              {{ resultMap[row.result] }}
+              {{ resultMap[row.result] || row.result }}
             </el-tag>
             <span v-else class="muted">—</span>
           </template>
@@ -135,7 +135,7 @@
         <el-table-column prop="status" :label="$t('common.status')" width="110">
           <template #default="{ row }">
             <el-tag :type="statusType(row.status)" effect="light">
-              {{ statusMap[row.status] }}
+              {{ statusMap[row.status] || row.status || '—' }}
             </el-tag>
           </template>
         </el-table-column>

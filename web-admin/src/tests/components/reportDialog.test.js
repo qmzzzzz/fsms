@@ -258,6 +258,34 @@ describe('ReportDialog 对象候选与提交载荷', () => {
     expect(reportApi).not.toHaveBeenCalled()
   })
 
+  test('候选接口失败：下拉可区分于「真的没有」，且有重试按钮能恢复（WF-04）', async () => {
+    // 举报是 PERMISSION-EXEMPT 的人人可用安全通道：候选接口一次抖动不能让
+    // 整条通道失效。失败必须显式（专用空态文案 + 重试按钮），重试成功后候选恢复。
+    targetsApi.mockRejectedValueOnce(new Error('candidates down'))
+    await openDialog()
+    await pickTarget('用户')
+    await waitReal(() => targetsApi.mock.calls.length >= 1, '首次候选请求')
+    await flush(8)
+
+    // 失败态：重试按钮出现（失败与空集可区分）
+    const retryBtn = await (async () => {
+      await waitReal(() => dlg().querySelector('.report-target-retry'), '重试按钮（失败态显式）')
+      return dlg().querySelector('.report-target-retry')
+    })()
+    expect(retryBtn.textContent.trim().length).toBeGreaterThan(0)
+
+    // 重试成功：候选恢复可选项、重试按钮下线
+    targetsApi.mockResolvedValue({ data: { data: { items: USER_TARGETS } } })
+    click(retryBtn)
+    await waitReal(() => targetsApi.mock.calls.length >= 2, '重试请求')
+    await waitReal(() => !dlg().querySelector('.report-target-retry'), '重试按钮下线')
+    click(recordSelectWrapper())
+    await waitReal(
+      () => dropdownItems().some((el) => el.textContent.trim() === '张三（zhangsan）'),
+      '重试后候选展开'
+    )
+  })
+
   test('候选为空：不发举报请求，错误文案指向「请选择具体对象」', async () => {
     targetsApi.mockResolvedValue({ data: { data: { items: [] } } })
     await openDialog()

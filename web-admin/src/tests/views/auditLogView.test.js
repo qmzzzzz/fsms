@@ -23,6 +23,8 @@ vi.mock('@/utils/api', () => ({
   // api.security 封装与 apiClient 共用同一个 get 漏斗，URL/参数断言沿用既有写法
   api: {
     security: {
+      // WF-07：视图改走该封装（不再 apiClient 直连）——mock 必须提供，否则 loadStats 静默失败
+      getOverview: () => get('/security/overview'),
       getAlerts: () => get('/security/alerts'),
       queryAuditLogs: (params) => get('/security/audit-logs', { params }),
       createReauthTicket: (...a) => createTicket(...a),

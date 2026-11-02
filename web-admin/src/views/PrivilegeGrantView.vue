@@ -1238,7 +1238,10 @@ const loadData = async () => {
     if (!isCurrent()) return
     const payload = res?.data?.data
     rows.value = Array.isArray(payload) ? payload : []
-    page.total = res?.data?.pagination?.total || rows.value.length
+    // WF-06（2026-11-02 核对）：本视图未接三态契约（页头 loadError 承担等价语义），
+    // total 保持数字域；兜底改 ?? —— total=0 是合法值，|| 会让"删空后的 0 条"
+    // 被当前页长度顶替成假总数（与下方 clamp 的 lastPage 计算互相矛盾）。
+    page.total = res?.data?.pagination?.total ?? rows.value.length
     loadError.value = false
     // 撤销/驳回掉末页最后一条后，当前页可能已越过末页：回退到最后一页再拉一次，
     // 否则用户停在一个永远空白的页上，看起来像「数据没了」

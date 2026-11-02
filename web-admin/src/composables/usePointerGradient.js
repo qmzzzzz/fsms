@@ -12,14 +12,8 @@
  * @param {Ref<HTMLElement>} targetRef 需要追踪指针的元素
  */
 import { onMounted, onUnmounted } from 'vue'
-
-const safeMatchMedia = (query) => {
-  try {
-    return window.matchMedia?.(query) ?? { matches: false }
-  } catch (_) {
-    return { matches: false }
-  }
-}
+// matchMedia 安全包装收口 utils/motion（WF-14）
+import { safeMatchMedia } from '@/utils/motion'
 
 export function usePointerGradient(targetRef) {
   let bound = null

@@ -920,7 +920,9 @@ const handleSizeChange = () => {
 // 加载统计数据（统计卡片统一由安全概览接口提供，与列表查询解耦，避免相互覆盖）
 const loadStats = async () => {
   try {
-    const res = await apiClient.get('/security/overview')
+    // WF-07（2026-11-02）：走 api.security.getOverview() 封装而非 apiClient 直连——
+    // 否则封装成死代码，且未来给该路径加 schema/重试策略时只改 api.js 不会生效
+    const res = await api.security.getOverview()
     const data = res.data?.data
     if (data) {
       stats.value = {

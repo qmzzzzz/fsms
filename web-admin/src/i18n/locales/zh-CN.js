@@ -605,6 +605,7 @@ export default {
     reportTargetRecordPlaceholder: '输入名称或编号搜索',
     reportTargetRecordLoading: '正在加载…',
     reportTargetRecordEmpty: '你的数据范围内没有可选对象，可改选「系统问题」并用文字描述',
+    reportTargetLoadFailed: '候选加载失败，请点下方按钮重试',
     reportReason: '举报原因',
     reportReasonPlaceholder: '请简要描述异常行为（1-200 字）',
     reportDescription: '补充说明',
@@ -1473,6 +1474,8 @@ export default {
       offlineHint:
         '离线包由运维放置到宿主 bundles 目录；代理只公布「自称通过校验的候选」，导入与摘要比对在执行时由宿主完成',
       offlineNone: '当前没有可选的离线包：请让运维把离线包放入宿主 bundles 目录并等待代理扫描',
+      intakePending: '有 {count} 个离线包已传完、等待代理落位（每轮最多落一个，静默期后才动）',
+      intakeRejected: '离线包「{archive}」落位失败：',
       currentColor: '当前承接',
       targetColor: '切换目标',
       credential: '身份验证',
@@ -1514,10 +1517,12 @@ export default {
       },
       // 步骤名以宿主代理实际写入的标识为准（scripts/hotUpgrade.js 的 step()），
       // 缺键会退回显示英文标识；旧键（readyz/switch 等）保留兼容历史数据
+      // 键集与 scripts/hotUpgrade.js 的 step('…') 字面量由 aboutViewUpgrade 对账（WF-11）
       stepNames: {
         validate: '校验请求',
         backup: '备份数据',
         pull: '拉取镜像',
+        'assert-local-image': '校验本地镜像',
         start: '启动备色实例',
         'start-target': '启动备色实例',
         'wait-readyz': '备色就绪门控',

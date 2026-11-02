@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { safeStorage, safeLocal } from './storage'
+import { prefersReducedMotion } from '@/utils/motion'
 
 // P2-59 修复（2026-09-17）：initTheme 可能被重复调用（热重载、未来新增的
 // 重新初始化入口），原实现每次都新建 matchMedia 监听器且从不移除——
@@ -91,7 +92,8 @@ export const useAppStore = defineStore('app', {
       safeLocal.set('themeMode', mode)
       // 用户主动切换时走 View Transitions 交叉淡化（不支持的环境/reduced-motion 回退硬切）。
       // initTheme 首帧与系统主题跟随不经过这里，不会误触发动画。
-      const reduced = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      // 减弱动效判定收口 utils/motion（WF-14）
+      const reduced = prefersReducedMotion()
       if (typeof document.startViewTransition === 'function' && !reduced) {
         document.startViewTransition(() => this._applyTheme())
       } else {

@@ -487,7 +487,12 @@ const loadData = async () => {
     if (!isCurrent()) return
     const payload = res?.data?.data || {}
     tableData.value = payload.list || []
-    page.total = payload.pagination?.total || tableData.value.length
+    // WF-06（2026-11-02 核对）：本视图未接 useListLoadState 的三态契约（页头
+    // loadError + el-alert 承担等价语义），故 total 保持数字域供 el-pagination
+    // 直用。后端 ipListController.getIPList 恒定返回 pagination.total；
+    // 兜底只在字段真缺失（undefined/null）时生效，用 ?? 而非 || ——
+    // total=0 是合法值，|| 会让「删空后的 0 条」被当前页长度顶替成假总数。
+    page.total = payload.pagination?.total ?? tableData.value.length
     blackCount.value = payload.counts?.black || 0
     whiteCount.value = payload.counts?.white || 0
     loadError.value = false

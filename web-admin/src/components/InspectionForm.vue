@@ -230,6 +230,7 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api, isHandledApiError } from '@/utils/api'
 import { toLocalWallClock } from '@/utils/datetime'
+import { makeDeviceTypeLabels } from '@/utils/labelMaps'
 import { useLatestRequest } from '@/composables/useLatestRequest'
 
 const { t } = useI18n()
@@ -360,9 +361,13 @@ const searchDevices = async (query) => {
   try {
     const res = await api.devices.getList({ search: query, limit: 20 })
     if (!isCurrent()) return
+    // WF-10（2026-11-02）：设备类型必须走 labelMaps 的单一事实来源（此前直出
+    // 后端稳定码，如 fire_door），与 DeviceView 同口径；未知码回退裸码由
+    // labels 映射的调用方兜底（|| item.deviceType）。
+    const typeLabels = makeDeviceTypeLabels(t)
     deviceOptions.value = res.data.data.map((item) => ({
       value: item._id,
-      label: `${item.deviceCode} - ${item.deviceName} (${item.deviceType})`,
+      label: `${item.deviceCode} - ${item.deviceName} (${typeLabels[item.deviceType] || item.deviceType || '—'})`,
     }))
   } catch (error) {
     if (!isCurrent()) return

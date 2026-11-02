@@ -470,7 +470,13 @@ const onLogin = async () => {
     // 失败触发的人机挑战（后端在连续失败后要求验证码，与静态开关无关）：验证码区
     // 只在开关开启时渲染，这类响应会显示"验证码错误或已过期"却无处可填——收到该错误码
     // 即补渲染验证码区并拉一张新图（一次性消费），用户才有出口。
-    if (error?.code === 'CAPTCHA_INVALID' && !captchaEnabled.value) {
+    //
+    // 判据必须读**响应体**的 errors.errorCode（WF-08，2026-11-02）：axios 对 4xx 一律把
+    // error.code 置为 'ERR_BAD_REQUEST'（node_modules/axios/lib/core/settle.js），从不
+    // 搬运后端码；api.js 拦截器也不做这件事。此前写 error?.code === 'CAPTCHA_INVALID'
+    // 在生产恒为 false —— 分支永不执行，而用例手工构造了该假形状把它测绿。
+    const errorCode = error?.response?.data?.errors?.errorCode
+    if (errorCode === 'CAPTCHA_INVALID' && !captchaEnabled.value) {
       captchaEnabled.value = true
       captchaStatus.value = 'ready'
       ElMessage.warning(t('login.captchaChallengeRequired'))

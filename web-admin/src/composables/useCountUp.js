@@ -1,4 +1,5 @@
 import { ref, watch, onUnmounted } from 'vue'
+import { prefersReducedMotion } from '@/utils/motion'
 
 // 数字滚动（count-up）：数值型统计在数据到达/刷新时，从当前显示值平滑滚动到新值。
 // 设计说明：
@@ -7,12 +8,9 @@ import { ref, watch, onUnmounted } from 'vue'
 //   直接呈现终值：动画是纯表现层，测试断言应读到确定性文本。
 // - 源数组整体重建（语言切换）时同值跳过，不重复滚动。
 
-const REDUCED =
-  typeof window !== 'undefined' &&
-  typeof window.matchMedia === 'function' &&
-  window.matchMedia('(prefers-reduced-motion: reduce)').matches
-
-const SKIP_ANIMATION = import.meta.env.MODE === 'test' || REDUCED
+// reduced-motion 判定收口到 utils/motion（WF-14）：本模块只关心"是否减弱动效"，
+// matchMedia 的安全包装与查询串不该在这里再写一份
+const SKIP_ANIMATION = import.meta.env.MODE === 'test' || prefersReducedMotion()
 
 export function useCountUp(statsRef, { duration = 600 } = {}) {
   const display = ref(statsRef.value.map((item) => item.value))

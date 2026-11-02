@@ -36,7 +36,11 @@
           :remote-method="onSearchInput"
           :loading="targetLoading"
           :placeholder="$t('security.reportTargetRecordPlaceholder')"
-          :no-data-text="$t('security.reportTargetRecordEmpty')"
+          :no-data-text="
+            targetLoadFailed
+              ? $t('security.reportTargetLoadFailed')
+              : $t('security.reportTargetRecordEmpty')
+          "
           :loading-text="$t('security.reportTargetRecordLoading')"
         >
           <el-option
@@ -46,6 +50,19 @@
             :value="item.id"
           />
         </el-select>
+        <!-- WF-04（2026-11-02）：候选接口失败时下拉会永久空且无出口——举报是
+             PERMISSION-EXEMPT 的人人可用安全通道，一次网络抖动不能让整条通道
+             失效。给显式重试按钮，不依赖用户「继续输入」触发 remote-method。
+             提示仍归 api.js 拦截器，此处只负责"可重试"。 -->
+        <button
+          v-if="targetLoadFailed"
+          type="button"
+          class="glass-btn glass-btn--default report-target-retry"
+          :disabled="targetLoading"
+          @click="loadTargets('')"
+        >
+          {{ $t('common.retry') }}
+        </button>
       </el-form-item>
       <el-form-item :label="$t('security.reportReason')" prop="reason">
         <el-input
@@ -134,6 +151,8 @@ const form = reactive({
 /** 候选列表与加载态（记录型才有候选；system 型不发请求） */
 const targetOptions = ref([])
 const targetLoading = ref(false)
+// 候选加载失败态（WF-04）：区分「接口挂了」与「真的没有候选」，前者给重试出口
+const targetLoadFailed = ref(false)
 /**
  * 当前已选中的候选对象。
  *
@@ -188,8 +207,13 @@ const loadTargets = async (keyword = '') => {
         ? [selectedTarget.value]
         : []
     targetOptions.value = [...keep, ...list]
+    targetLoadFailed.value = false // 成功即复位失败态（重试按钮随之下线）
   } catch (_) {
-    if (seq === searchSeq) targetOptions.value = selectedTarget.value ? [selectedTarget.value] : []
+    if (seq === searchSeq) {
+      targetOptions.value = selectedTarget.value ? [selectedTarget.value] : []
+      // WF-04：失败必须可区分于「真的没有候选」，否则用户看到空下拉无从判断
+      targetLoadFailed.value = true
+    }
   } finally {
     if (seq === searchSeq) targetLoading.value = false
   }

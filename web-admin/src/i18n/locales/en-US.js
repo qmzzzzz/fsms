@@ -605,6 +605,7 @@ export default {
     reportTargetRecordLoading: 'Loading…',
     reportTargetRecordEmpty:
       'No selectable record within your data scope. Choose "System issue" and describe it in text.',
+    reportTargetLoadFailed: 'Failed to load candidates. Use the button below to retry.',
     reportReason: 'Reason',
     reportReasonPlaceholder: 'Briefly describe the suspicious activity (1-200 characters)',
     reportDescription: 'Details',
@@ -1529,6 +1530,9 @@ export default {
         'Offline bundles are placed into the host bundles directory by operators; the agent only publishes self-declared candidates — full verification happens on the host at execution time',
       offlineNone:
         'No offline bundle is selectable right now: ask the operator to place a bundle in the host bundles directory and wait for the agent scan',
+      intakePending:
+        '{count} offline bundle(s) uploaded and awaiting agent intake (one per round, after the settle window)',
+      intakeRejected: 'Intake failed for offline bundle "{archive}":',
       currentColor: 'Currently Serving',
       targetColor: 'Switch To',
       credential: 'Identity Verification',
@@ -1574,6 +1578,7 @@ export default {
         validate: 'Validate request',
         backup: 'Back up data',
         pull: 'Pull image',
+        'assert-local-image': 'Verify local image',
         start: 'Start standby instance',
         'start-target': 'Start standby instance',
         'wait-readyz': 'Wait for standby readiness',

@@ -234,7 +234,7 @@ const loading = ref(true)
 // 注册 echarts 组件（按需导入，减少包体积；import 已统一收敛至文件顶部，O-4）
 echarts.use([PieChart, BarChart, TooltipComponent, LegendComponent, GridComponent, CanvasRenderer])
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
-import { api, isCanceledError } from '@/utils/api'
+import { api, isCanceledError, resolveErrorMessage } from '@/utils/api'
 import { encryptPassword } from '@/utils/loginCipher'
 import { enterSubmit } from '@/utils/enterSubmit'
 
@@ -590,12 +590,14 @@ const exportTypeNames = computed(() => ({
 import { localDateStr } from '@/utils/datetime'
 
 // 从 blob 响应中解析后端错误信息：responseType:'blob' 时 JSON 错误也被包成 Blob，
-// 通过 MIME 类型识别后读取文本内容
+// 通过 MIME 类型识别后读取文本内容。
+// 与 AuditLogView 的 extractBlobErrorMessage 同口径（WF-09，2026-11-02）：优先走
+// api.js 的 resolveErrorMessage（错误码 → i18n），英文界面下此前会直出后端中文。
 const extractErrorMessage = async (data, fallback) => {
   if (data instanceof Blob && data.type?.includes('json')) {
     try {
       const parsed = JSON.parse(await data.text())
-      if (parsed?.message) return parsed.message
+      return resolveErrorMessage(parsed) || parsed?.message || fallback
     } catch (_) {
       /* 解析失败走兜底文案 */
     }

@@ -114,7 +114,7 @@
             size="small"
             class="metrics-alert-tag"
           >
-            {{ a.type }}({{ $t('about.metrics.level.' + a.level) }}) × {{ a.count }}
+            {{ a.type }}({{ metricsLevelLabel(a.level) }}) × {{ a.count }}
           </el-tag>
         </div>
       </div>
@@ -364,6 +364,18 @@ const topRoutes = computed(() => (metricsSnap.value?.routes || []).slice(0, TOP_
 const metricsAlerts = computed(() => metricsSnap.value?.alerts || [])
 
 /**
+ * 告警等级标签（WF-12，2026-11-02）：动态拼接键在缺键时会渲染裸键
+ * （`about.metrics.level.info`），与 UpgradeDialog.stepLabel/outcomeLabel 的
+ * 「未知码回退显示原码而非裸键」纪律不一致。回退方向取原码——运维一眼能认出
+ * 是后端新增档位，而不是页面上冒出一串点分键。
+ */
+const metricsLevelLabel = (level) => {
+  const key = `about.metrics.level.${level}`
+  const text = t(key)
+  return text === key ? String(level || '') : text
+}
+
+/**
  * 条形图宽度：按 Top 路由中的最大请求数归一化。
  * 基准取「本批最大值」而非 totalRequests——后者会把所有条都压成细线，
  * 图形失去对比作用。max 为 0（无数据）时固定 0%。
@@ -518,6 +530,33 @@ const normalizeBundles = (raw) => {
   }
 }
 
+/**
+ * 落位通道状态（代理心跳携带）的归一：pending = 已传完待落位的归档名，
+ * rejected = 落位失败及原因。与 bundles 同纪律——坏形状折成空结构，不让坏心跳炸整卡。
+ */
+const normalizeIntake = (raw) => {
+  const empty = { pending: [], rejected: [], landed: '' }
+  if (!raw || typeof raw !== 'object') return empty
+  const clip = (v) => (typeof v === 'string' ? v : '')
+  return {
+    pending: Array.isArray(raw.pending) ? raw.pending.map(clip).filter(Boolean).slice(0, 10) : [],
+    rejected: Array.isArray(raw.rejected)
+      ? raw.rejected
+          .map((r) => {
+            if (!r || typeof r !== 'object') return null
+            return {
+              archive: clip(r.archive),
+              outcome: clip(r.outcome),
+              reason: clip(r.reason),
+            }
+          })
+          .filter((r) => r && (r.archive || r.outcome))
+          .slice(0, 10)
+      : [],
+    landed: clip(raw.landed),
+  }
+}
+
 /** 快照形状归一化：字段漂移时渲染 0/'-'，不让整卡因 undefined 崩掉 */
 const normalizeUpgrade = (d) => {
   const server = d.server && typeof d.server === 'object' ? d.server : {}
@@ -552,6 +591,7 @@ const normalizeUpgrade = (d) => {
         upgrade.heartbeat && typeof upgrade.heartbeat === 'object' ? upgrade.heartbeat : null,
       // 离线包候选：仅用于展示与下拉，不是完整性背书（全量校验在代理执行时做）
       bundles: normalizeBundles(upgrade.bundles),
+      intake: normalizeIntake(upgrade.intake),
       activeJob: normalizeJob(upgrade.activeJob),
       latestJob: normalizeJob(upgrade.latestJob),
     },

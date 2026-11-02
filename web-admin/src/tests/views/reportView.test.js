@@ -29,6 +29,11 @@ vi.mock('@/utils/api', () => ({
     },
   },
   isCanceledError: () => false,
+  // WF-09（2026-11-02）：ReportView 的 blob 错误解包改为优先走码化翻译，
+  // mock 必须提供该导出；替身按「有 errorCode 就有翻译」的最简口径，
+  // 翻译表本身由 errorCodeI18n.test.js 单独钉住
+  resolveErrorMessage: (data) =>
+    data?.errors?.errorCode ? `i18n:${data.errors.errorCode}` : null,
 }))
 // 口令信封需要 WebCrypto 与公钥；本套件只关心"加密后提交、明文不上行"
 const encryptPassword = vi.fn(async (password, purpose) => `envelope:${purpose}:${password}`)
@@ -229,7 +234,28 @@ describe('ReportView 导出参数', () => {
   })
 })
 describe('ReportView 导出错误处理', () => {
-  test('后端以 JSON Blob 报错：提示其中的 message，且**不**下载文件', async () => {
+  test('后端以 JSON Blob 报错（有 errorCode）：走码化翻译，且**不**下载文件（WF-09）', async () => {
+    // 有 errorCode 的错误体优先走 resolveErrorMessage（错误码 → i18n），
+    // 英文界面下不再直出后端中文——此前只取 message 字段（与 AuditLogView 分叉）
+    const jsonBlob = new Blob(
+      [JSON.stringify({ message: '导出范围过大', errors: { errorCode: 'PII_EXPORT_QUOTA_EXCEEDED' } })],
+      { type: 'application/json' }
+    )
+    exportReport.mockResolvedValue({ data: jsonBlob })
+    const c = await open()
+    await openDialog(c)
+    const createUrl = vi.spyOn(window.URL, 'createObjectURL')
+    click(confirmBtn())
+    await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '错误提示' })
+    expect(ElMessage.error.mock.calls[0][0]).toBe('i18n:PII_EXPORT_QUOTA_EXCEEDED')
+    expect(createUrl).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    // 对话框保持打开（用户可改条件重试）
+    expect(document.body.querySelector('.el-dialog')).toBeTruthy()
+    createUrl.mockRestore()
+  })
+
+  test('后端以 JSON Blob 报错（无 errorCode）：回退后端 message，不下载文件', async () => {
     const jsonBlob = new Blob([JSON.stringify({ message: '导出范围过大' })], {
       type: 'application/json',
     })
@@ -241,9 +267,6 @@ describe('ReportView 导出错误处理', () => {
     await waitFor(() => ElMessage.error.mock.calls.length === 1, { message: '错误提示' })
     expect(ElMessage.error.mock.calls[0][0]).toBe('导出范围过大')
     expect(createUrl).not.toHaveBeenCalled()
-    expect(ElMessage.success).not.toHaveBeenCalled()
-    // 对话框保持打开（用户可改条件重试）
-    expect(document.body.querySelector('.el-dialog')).toBeTruthy()
     createUrl.mockRestore()
   })
 

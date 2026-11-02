@@ -6,6 +6,7 @@
 
 <script setup>
 import { ref, computed, watch, onUnmounted } from 'vue'
+import { prefersReducedMotion } from '@/utils/motion'
 
 const props = defineProps({
   text: { type: String, required: true },
@@ -34,16 +35,8 @@ const clear = () => {
   }
 }
 
-const safeMatchMedia = (query) => {
-  try {
-    return window.matchMedia?.(query) ?? { matches: false }
-  } catch (_) {
-    return { matches: false }
-  }
-}
-
 const startScramble = () => {
-  if (safeMatchMedia('(prefers-reduced-motion: reduce)').matches) return
+  if (prefersReducedMotion()) return
   clear()
   iteration.value = 0
   intervalId = setInterval(() => {

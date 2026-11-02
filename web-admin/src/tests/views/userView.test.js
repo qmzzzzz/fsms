@@ -453,6 +453,52 @@ describe('UserView 列表与筛选', () => {
     expect(c.errors).toEqual([])
   })
 
+  test('末页 clamp：越界页回退到 1 并重取，且 loading 收敛为 false（WF-05 实证）', async () => {
+    // 时序（确定性）：首屏 total=11 ⇒ 2 页可翻；点下一页（page=2）后服务端
+    // 响应 total=1（数据在两次请求间被删空）⇒ clamp 把 page.current 回退到 1
+    // 并递归 loadData()。递归取新门票会让**外层** finally 的 isCurrent() 失效，
+    // 本用例实测最终态：page=1 的重取发生、loading 必须收敛（若内外层竞争
+    // 导致永亮或提前熄灭，这里会红）。
+    const listCalls = []
+    usersGetList.mockImplementation(({ page: p }) => {
+      listCalls.push(p)
+      if (p === 2) {
+        // 第 2 页请求返回 total=1：该页已越界（clamp 触发条件）
+        return Promise.resolve({ data: { data: [ROW_OTHER], pagination: { total: 1 } } })
+      }
+      return Promise.resolve({
+        data: {
+          data: [ROW_OTHER],
+          pagination: { total: listCalls.length === 1 ? 11 : 1 },
+        },
+      })
+    })
+    secGetReg.mockResolvedValue({ data: { data: { allowPublicRegistration: true } } })
+    secGetLogin.mockResolvedValue({ data: { data: { loginCaptchaEnabled: false } } })
+    secGetRegister.mockResolvedValue({ data: { data: { registerCaptchaEnabled: true } } })
+    rolesGetAll.mockResolvedValue({ data: { data: [] } })
+    active = mountComponent(UserView, {
+      setupStore: (pinia) => useAuthStore(pinia).setAuth({ userId: 'me' }, P_BASE),
+    })
+    await waitFor(() => active.findAll('.el-table__body-wrapper .el-table__row').length >= 1, {
+      message: '首屏渲染',
+    })
+    await flush(8)
+    expect(listCalls).toEqual([1]) // 首屏只发一次
+
+    click(active.find('.el-pagination button.btn-next'))
+    // 期望序列：page=2（越界响应）→ clamp 递归 page=1（收敛响应）
+    await waitForDom(() => listCalls.length >= 3, 'clamp 后的回退请求')
+    await flush(10)
+
+    expect(listCalls).toEqual([1, 2, 1]) // 越界被 clamp、且真的重取了第 1 页
+    expect(active.find('.el-loading-mask')).toBe(null) // loading 收敛（无内外层竞争残留）
+    expect(active.findAll('.el-table__body-wrapper .el-table__row').length).toBeGreaterThanOrEqual(
+      1
+    )
+    expect(active.errors).toEqual([])
+  })
+
   test('数据未回来时显示骨架、隐藏表格；到达后反转', async () => {
     let release
     usersGetList.mockImplementationOnce(
