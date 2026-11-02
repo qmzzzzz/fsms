@@ -148,6 +148,20 @@ upstream fsms_app {
     # 注意：3001 也是 Grafana 声明的宿主端口，故 Grafana 已移入 observability profile
     # （默认栈不含它）。升级窗口内不要 `--profile observability` 起 Grafana，否则第 2 步
     # 起备色会撞端口：Bind for 127.0.0.1:3001 failed: port is already allocated。
+    #
+    # 【P2-4 上游连接复用（2026-11-02）】到回环后端的长连接池。收益与边界：
+    #   - 为什么值得：SPA 一次页面加载实测 35 个请求，每个都新建一次到 127.0.0.1:3000
+    #     的 TCP 连接。回环建连虽快，但 TIME_WAIT 累积与 accept 队列抖动在高并发
+    #     （导出/巡检批量提交窗口）下会体现为 P99 毛刺。
+    #   - keepalive 64：单实例后端（每色一个进程池），64 条空闲连接足够覆盖突发；
+    #     取 128 以上对本拓扑是浪费（后端 socket 配额有限，连接池过大反而挤占活跃连接）。
+    #   - keepalive_timeout 75：与后端 Node 的 keepAliveTimeout 默认 5s 的关系——
+    #     本值是 **nginx 侧保留空闲连接的上限**，不决定后端何时关闭；要真正复用，
+    #     后端 server.keepAliveTimeout 必须 **大于** nginx 复用的时间窗（见 app.js 的
+    #     keepAliveTimeout 设置，已按此不变量配置），否则会命中「连接被后端关闭而
+    #     nginx 仍视其可用」的竞态（表现为偶发 502）。
+    keepalive 64;
+    keepalive_timeout 75;
 }
 
 # HTTP -> HTTPS 强制跳转
@@ -411,6 +425,10 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
+        # P2-4：清掉 nginx 默认发给上游的 Connection: close，让 upstream
+        # fsms_app 的 keepalive 连接池真正生效（复用前提见 upstream 块注释）
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header X-Tls-Cipher $ssl_cipher;
         # 上游指纹抹除（说明见上方「反向代理头」段）
         proxy_hide_header X-Powered-By;
@@ -429,6 +447,10 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
+        # P2-4：清掉 nginx 默认发给上游的 Connection: close，让 upstream
+        # fsms_app 的 keepalive 连接池真正生效（复用前提见 upstream 块注释）
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header X-Tls-Cipher $ssl_cipher;
         # 上游指纹抹除（说明见上方「反向代理头」段）
         proxy_hide_header X-Powered-By;
@@ -452,6 +474,10 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
+        # P2-4：清掉 nginx 默认发给上游的 Connection: close，让 upstream
+        # fsms_app 的 keepalive 连接池真正生效（复用前提见 upstream 块注释）
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header X-Tls-Cipher $ssl_cipher;
         # 上游指纹抹除（说明见上方「反向代理头」段）
         proxy_hide_header X-Powered-By;
@@ -478,6 +504,10 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
+        # P2-4：清掉 nginx 默认发给上游的 Connection: close，让 upstream
+        # fsms_app 的 keepalive 连接池真正生效（复用前提见 upstream 块注释）
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header X-Tls-Cipher $ssl_cipher;
         # 上游指纹抹除（说明见上方「反向代理头」段）
         proxy_hide_header X-Powered-By;
@@ -509,6 +539,10 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
+        # P2-4：清掉 nginx 默认发给上游的 Connection: close，让 upstream
+        # fsms_app 的 keepalive 连接池真正生效（复用前提见 upstream 块注释）
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header X-Tls-Cipher $ssl_cipher;
         # 上游指纹抹除（说明见上方「反向代理头」段）
         proxy_hide_header X-Powered-By;
@@ -527,6 +561,10 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Tls-Protocol $ssl_protocol;
+        # P2-4：清掉 nginx 默认发给上游的 Connection: close，让 upstream
+        # fsms_app 的 keepalive 连接池真正生效（复用前提见 upstream 块注释）
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header X-Tls-Cipher $ssl_cipher;
         # 上游指纹抹除（说明见上方「反向代理头」段）
         proxy_hide_header X-Powered-By;

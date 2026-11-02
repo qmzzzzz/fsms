@@ -359,6 +359,25 @@ const startServer = async () => {
       server = require('http').createServer(app);
     }
 
+    // ── 上游连接复用的配对不变量（P2-4，2026-11-02）─────────────────────────
+    // deployment/nginx.conf.example 的 upstream fsms_app 启用 keepalive 连接池
+    // （keepalive 64 / keepalive_timeout 75）。该池成立的前提是**后端必须先于
+    // nginx 放弃空闲连接**：若后端等 5s（Node 默认 keepAliveTimeout）就关，而
+    // nginx 75s 内仍视为可用，复用窗口会撞上「后端已 FIN、nginx 仍投递」的
+    // 竞态——表现为不可复现的偶发 502（且与负载无关，排障方向常被带偏）。
+    //
+    // 取值推导（两侧必须是同一个数量级上的**单向不等式** backend > nginx）：
+    //   - nginx 侧保留空闲连接 75s（其 keepalive_timeout 声明的是自身保留上限）；
+    //   - 本侧取 80s：比 nginx 多 5s 余量，让「后端关闭」永远先于「nginx 判定
+    //     其过期」，且余量覆盖两侧时钟推进误差。
+    //   - headersTimeout 必须 > keepAliveTimeout（Node 的硬性要求，否则请求头
+    //     读取会被提前掐断）；取 85s，留 5s 给慢请求头。
+    //   - requestTimeout 不设（默认 300s 由业务层超时中间件与反代 proxy_read_timeout
+    //     各自把关，见 nginx.conf.example 的 connect/send/read 三超时注释）。
+    // 位置：必须在 listen() 之前——listen 之后设置对已接受的连接不生效。
+    server.keepAliveTimeout = 80_000;
+    server.headersTimeout = 85_000;
+
     // 监听错误兜底（如 EADDRINUSE 端口占用）：listen 的错误不会抛异常，
     // 不监听会让进程静默挂死、容器编排误判为健康；记录后以非零码退出
     server.on('error', (err) => {

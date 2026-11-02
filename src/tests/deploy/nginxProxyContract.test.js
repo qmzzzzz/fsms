@@ -625,4 +625,79 @@ describe('静态直出 CSP（finding #6）与边缘资源闸/443 兜底（findin
     expect((code.match(/^[ \t]*listen\s+80;/m) || []).length).toBe(1);
     expect((code.match(/^[ \t]*listen\s+\[::\]:80;/m) || []).length).toBe(1);
   });
+
+  describe('上游连接复用（P2-4）：upstream keepalive 与各块的清 Connection 配对', () => {
+    /**
+     * 复用成立需要**两侧同时成立**（缺一即形同虚设或引入竞态）：
+     *   1. upstream fsms_app 声明 keepalive 池；
+     *   2. 每个非 WS 反代块清掉 nginx 默认的 `Connection: close`（否则池永不命中）；
+     *   3. socket.io 块保持 `Connection: "upgrade"`（清空会破坏协议升级）。
+     * 第 3 条是**反向断言**：本组的常见误修就是把 socket.io 也一并清空。
+     */
+    const upstreamBlock = (t) => {
+      const m = t.match(/upstream\s+fsms_app\s*\{([\s\S]*?)\}/);
+      return m ? m[1] : null;
+    };
+    /** 非 WS 的 proxy 块（用解析器的 proxied 标记 + 无 upgrade 头判定） */
+    const nonWsProxyBlocks = (t) => {
+      const u = upstreamBlock(t) || '';
+      void u;
+      return parseLocations(t).filter((l) => l.proxied && !/Connection\s+"upgrade"/.test(l.body));
+    };
+
+    test('前提自证：解析到 upstream 块与 ≥5 个非 WS 反代块（防空集假绿）', () => {
+      expect(upstreamBlock(code)).toBeTruthy();
+      expect(nonWsProxyBlocks(code).length).toBeGreaterThanOrEqual(5);
+      // socket.io 块确实被识别为 WS（反向断言的分母）
+      expect(parseLocations(code).some((l) => /Connection\s+"upgrade"/.test(l.body))).toBe(true);
+    });
+
+    test('upstream 声明 keepalive 池，且保留时长与后端 keepAliveTimeout 配对', () => {
+      const up = upstreamBlock(code);
+      const keepalive = up.match(/keepalive\s+(\d+);/);
+      expect(keepalive).toBeTruthy();
+      expect(Number(keepalive[1])).toBeGreaterThanOrEqual(16);
+      // upstream 块的 keepalive_timeout 单位由 `keepalive_time` 指令决定，
+      // 缺省单位是**秒**（值不带后缀）；此处只要求声明在场，单位语义由 nginx 文档约定
+      expect(up).toMatch(/keepalive_timeout\s+\d+;/);
+      // 配对不变量：后端 keepAliveTimeout（src/index.js）必须**大于** nginx 保留窗口，
+      // 否则 nginx 会在后端已 FIN 的连接上投递 → 偶发 502。此处以源码真值断言。
+      const indexSrc = read('src/index.js');
+      const backendMs = Number(
+        (indexSrc.match(/server\.keepAliveTimeout\s*=\s*([\d_]+)/) || [])[1]?.replace(/_/g, '')
+      );
+      const nginxSec = Number((up.match(/keepalive_timeout\s+(\d+);/) || [])[1]);
+      expect(backendMs).toBeGreaterThan(0);
+      expect(nginxSec).toBeGreaterThan(0);
+      expect(backendMs).toBeGreaterThan(nginxSec * 1000);
+    });
+
+    test('每个非 WS 反代块都清 Connection（漏一块 = 那条通道永不复用）', () => {
+      const gaps = nonWsProxyBlocks(code)
+        .filter((l) => !/proxy_set_header\s+Connection\s+"";/.test(l.body))
+        .map((l) => l.head);
+      expect(gaps).toEqual([]);
+    });
+
+    test('反向断言：socket.io 块不得被清空 Connection（清空即破坏协议升级）', () => {
+      // head 是模式串本身（'/socket.io/'），不含 `location` 关键字——与既有
+      // 「前提自证」用例（l.pattern === '/socket.io/'）同一口径
+      const ws = parseLocations(code).filter((l) => l.pattern === '/socket.io/');
+      expect(ws).toHaveLength(1);
+      expect(ws[0].body).toMatch(/proxy_set_header\s+Connection\s+"upgrade";/);
+      expect(ws[0].body).not.toMatch(/proxy_set_header\s+Connection\s+"";/);
+    });
+
+    test('可证伪：抹掉 /api/ 块的清 Connection 后，同一断言必须报出该缺口', () => {
+      const broken = text.replace(
+        /(location \/api\/ \{[\s\S]*?)proxy_set_header Connection "";[^\S\n]*\r?\n/,
+        '$1'
+      );
+      expect(broken).not.toBe(text); // 替身若没替换成功，本用例就是空跑
+      const gaps = nonWsProxyBlocks(broken)
+        .filter((l) => !/proxy_set_header\s+Connection\s+"";/.test(l.body))
+        .map((l) => l.head);
+      expect(gaps).toContain('/api/');
+    });
+  });
 });
