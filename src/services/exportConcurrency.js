@@ -27,10 +27,19 @@
  * `reportController` 的行数/复杂度贴着棘轮红线；且这段状态机需要**独立证伪**
  * （槽位转移、超时与释放的先后、幂等释放），塞进控制器只能靠 HTTP 间接测。
  *
+ * ## 分池（2026-11-03：三导出端点同闸）
+ * 审计 CSV（5 万行上限 + 逐行 SHA-256）与取证 JSON 导出此前**不占槽**——它们恰是每请求
+ * 最重的两条导出链。扩进同一闸时若三端点共用一个池，一个 5 万行审计 CSV（长 CPU）能把
+ * 报表导出饿死。所以按端点**分池**：`report-export` / `audit-export` / `forensic-export`
+ * 各持独立 active/waiters，互不排队；上限/队列/超时三参数与既有环境变量共用（每池各自
+ * 独立生效，运维按总量调参即可）。
+ *
  * ## 指标
  * 状态变化即推送 `utils/metricsRuntime`（`export_inflight` / `export_queued` /
  * `export_rejected_total{reason}`）。不在这里自己渲染文本：指标口径只有一处，
  * 否则 `/metrics` 与 JSON 快照会各说各话（本仓反复踩过的那类"同一条判据的第二处实现"）。
+ * 分池后 gauge 取**各池之和**（标签面不变，避免 /metrics 消费方破坏性变更）；
+ * 进程内计数语义不变：多实例部署时全局上限 = 各池上限 × N 实例。
  */
 
 'use strict';
@@ -48,12 +57,41 @@ const BOUNDS = {
 /** 拒绝原因的闭合集合：与 metricsRuntime 的 EXPORT_REJECT_REASONS 同源（高基数纪律） */
 const REJECT_REASONS = ['queue_full', 'timeout'];
 
-// 正在占用槽位的导出数。**包含**已被移交给排队者的槽位：移交时 active 不变，
-// 只有真正空出来的槽位才减一（否则排队者在"拿到槽位"的瞬间会短暂超过上限）。
-let active = 0;
-/** @type {{resolve: (granted: boolean) => void, timer: NodeJS.Timeout}[]} */
-const waiters = [];
-const rejected = { queue_full: 0, timeout: 0 };
+/** 分池登记：闭合集合（fail-loud，拼错池名直接抛而非静默并入默认池） */
+const POOLS = ['report-export', 'audit-export', 'forensic-export'];
+
+/**
+ * 每池独立状态。active **包含**已被移交给排队者的槽位：移交时 active 不变，
+ * 只有真正空出来的槽位才减一（否则排队者在"拿到槽位"的瞬间会短暂超过上限）。
+ * @type {Map<string, {active: number, waiters: {resolve: (granted: boolean) => void, timer: NodeJS.Timeout}[], rejected: {queue_full: number, timeout: number}}>}
+ */
+const pools = new Map();
+for (const name of POOLS) {
+  pools.set(name, { active: 0, waiters: [], rejected: { queue_full: 0, timeout: 0 } });
+}
+
+function poolState(poolName) {
+  const state = pools.get(poolName);
+  if (!state) {
+    throw new Error(`未知导出池：${JSON.stringify(poolName)}（合法池：${POOLS.join('/')}）`);
+  }
+  return state;
+}
+
+/** 各池 gauge 求和（指标标签面不变，见文件头"指标"段） */
+function totals() {
+  let active = 0;
+  let queued = 0;
+  let queueFull = 0;
+  let timeout = 0;
+  for (const s of pools.values()) {
+    active += s.active;
+    queued += s.waiters.length;
+    queueFull += s.rejected.queue_full;
+    timeout += s.rejected.timeout;
+  }
+  return { active, queued, queueFull, timeout };
+}
 
 /**
  * 读取一个正整数环境变量并钳制到 [min, max]。
@@ -103,7 +141,8 @@ function currentLimits() {
 }
 
 function syncGauges() {
-  runtimeMetrics.setExportGauges({ inflight: active, queued: waiters.length });
+  const t = totals();
+  runtimeMetrics.setExportGauges({ inflight: t.active, queued: t.queued });
 }
 
 /**
@@ -134,18 +173,18 @@ class ExportBusyError extends Error {
  * 中断时会抛错——异常路径与正常路径都会走到 finally，将来若有人再包一层 try/finally
  * 就会重复释放。重复释放会让 active 减两次，等于把上限悄悄放大一倍。
  */
-function makeRelease() {
+function makeRelease(pool) {
   let released = false;
   return function release() {
     if (released) return;
     released = true;
-    const next = waiters.shift();
+    const next = pool.waiters.shift();
     if (next) {
       // 槽位**移交**而不是"先减再加"：中间那一瞬会让新请求看到空槽位并插队
       clearTimeout(next.timer);
       next.resolve(true);
     } else {
-      active = Math.max(0, active - 1);
+      pool.active = Math.max(0, pool.active - 1);
     }
     syncGauges();
   };
@@ -154,20 +193,23 @@ function makeRelease() {
 /**
  * 申请一个导出槽位。
  *
+ * @param {string} [poolName='report-export'] 池名（闭合集合，见 POOLS）；
+ *   省略即报表导出池——存量调用方零改动。
  * @returns {Promise<() => void>} 释放函数（必须调用，通常放 finally）
  * @throws {ExportBusyError} 队列已满（立即）或排队超时
  */
-async function acquireExportSlot() {
+async function acquireExportSlot(poolName = 'report-export') {
+  const pool = poolState(poolName);
   const { max, queue, timeoutMs } = currentLimits();
 
-  if (active < max) {
-    active += 1;
+  if (pool.active < max) {
+    pool.active += 1;
     syncGauges();
-    return makeRelease();
+    return makeRelease(pool);
   }
 
-  if (waiters.length >= queue) {
-    rejected.queue_full += 1;
+  if (pool.waiters.length >= queue) {
+    pool.rejected.queue_full += 1;
     runtimeMetrics.incExportRejected('queue_full');
     syncGauges();
     throw new ExportBusyError('queue_full', Math.ceil(timeoutMs / 1000));
@@ -176,54 +218,58 @@ async function acquireExportSlot() {
   const granted = await new Promise((resolve) => {
     const waiter = { resolve, timer: null };
     waiter.timer = setTimeout(() => {
-      const idx = waiters.indexOf(waiter);
+      const idx = pool.waiters.indexOf(waiter);
       // 已被 release 移交（定时器与移交在同一 tick 内竞争）时不能重复 resolve：
       // resolve 本身幂等，但这里若继续走超时分支会把"已授予"记成一次拒绝。
       if (idx < 0) return;
-      waiters.splice(idx, 1);
-      rejected.timeout += 1;
+      pool.waiters.splice(idx, 1);
+      pool.rejected.timeout += 1;
       runtimeMetrics.incExportRejected('timeout');
       syncGauges();
       resolve(false);
     }, timeoutMs);
     // 队列定时器不得钉住进程退出：导出队列不该成为 shutdown 的阻塞源
     if (typeof waiter.timer.unref === 'function') waiter.timer.unref();
-    waiters.push(waiter);
+    pool.waiters.push(waiter);
     syncGauges();
   });
 
   if (!granted) throw new ExportBusyError('timeout', Math.ceil(timeoutMs / 1000));
   // 槽位由 release 移交，active 保持不变（见文件头注释）
-  return makeRelease();
+  return makeRelease(pool);
 }
 
 /** 仅供测试：清空队列与计数（生产不调用） */
 function __resetForTest() {
-  for (const waiter of waiters) {
-    clearTimeout(waiter.timer);
-    waiter.resolve(false);
+  for (const pool of pools.values()) {
+    for (const waiter of pool.waiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(false);
+    }
+    pool.waiters.length = 0;
+    pool.active = 0;
+    pool.rejected.queue_full = 0;
+    pool.rejected.timeout = 0;
   }
-  waiters.length = 0;
-  active = 0;
-  rejected.queue_full = 0;
-  rejected.timeout = 0;
   warned.clear();
   syncGauges();
 }
 
-/** 当前状态快照（供测试与诊断日志；指标文本由 metricsRuntime 渲染） */
+/** 当前状态快照（供测试与诊断日志；指标文本由 metricsRuntime 渲染）。分池后为各池之和 */
 function snapshot() {
+  const t = totals();
   return {
     ...currentLimits(),
-    inflight: active,
-    queued: waiters.length,
-    rejected: { ...rejected },
+    inflight: t.active,
+    queued: t.queued,
+    rejected: { queue_full: t.queueFull, timeout: t.timeout },
   };
 }
 
 module.exports = {
   DEFAULTS,
   BOUNDS,
+  POOLS,
   REJECT_REASONS,
   ExportBusyError,
   acquireExportSlot,
