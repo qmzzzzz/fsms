@@ -27,7 +27,12 @@ jobs:
     # publish_results 只允许在默认分支运行，否则 OpenSSF 接口会拒绝并让 job 变红。
     # 本流程三个触发源（branch_protection_rule / schedule / push main）的 GITHUB_REF
     # 都落在默认分支，此条件是为「默认分支改名」一类漂移兜底。
-    if: github.event.repository.default_branch == github.ref_name
+    # 私有仓必须开通 GitHub Advanced Security 才能跑 scorecard-action（上游 README：
+    # "Private repositories are supported if they have GitHub Advanced Security"）；
+    # 缺 GHAS 时 Maintained 检查的 GraphQL ListCommits 直接报 "Resource not accessible
+    # by integration"（2026-11-03 CI 实证；10-29 / 11-02 两次同样红，非代码引入）。
+    # 与 codeql.yml 同一口径：仅在公开仓运行；仓库转公开或开通 GHAS 后删掉 private 项即可恢复。
+    if: github.event.repository.private == false && github.event.repository.default_branch == github.ref_name
     permissions:
       # 上传 SARIF 到 Code Scanning 面板
       security-events: write

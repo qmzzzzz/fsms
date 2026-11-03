@@ -1,3 +1,7 @@
 7f92537fcaafef9e2bdb11ce41ba6b4c11ba2add:src/tests/constants.js:generic-api-key:28
 7f92537fcaafef9e2bdb11ce41ba6b4c11ba2add:src/tests/constants.js:generic-api-key:29
 7f92537fcaafef9e2bdb11ce41ba6b4c11ba2add:src/tests/utils/totp.test.js:generic-api-key:51
+25d05a1232c8aa0ed1e952f8957275cd93a656d7:src/tests/middleware/forensicCaptureParity.test.js:generic-api-key:55
+25d05a1232c8aa0ed1e952f8957275cd93a656d7:src/tests/services/forensicCapture.test.js:generic-api-key:49
+25d05a1232c8aa0ed1e952f8957275cd93a656d7:src/tests/services/forensicCapture.test.js:generic-api-key:50
+25d05a1232c8aa0ed1e952f8957275cd93a656d7:src/tests/services/forensicCapture.test.js:generic-api-key:184
