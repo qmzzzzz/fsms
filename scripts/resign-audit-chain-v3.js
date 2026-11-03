@@ -52,6 +52,8 @@ const { verifyAuditChain, computeChainVerdict } = require('../src/services/audit
 // 破坏性操作护栏（fail-closed 库名白名单 + 双标志），
 // 与 resign-audit-hmac.js / run-rollback-drill.js 共用同一份声明。
 const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
+// 重签留痕（append-only）：--apply 成功后必登记，越权放行必须带变更单号
+const { appendResignLedger } = require('./resignLedger');
 
 // L-26：确认标志的单一常量。同族脚本必须用同一份字符串，
 // 否则「统一护栏」会在字面上统一、在行为上分叉。
@@ -66,11 +68,25 @@ const MAX_VERIFY_RECORDS = 200000;
 const ALLOW_SUSPECT_FLAG = '--allow-suspect-chain';
 
 function parseArgs(argv) {
-  const out = { apply: false, confirmYes: false, allowSuspect: false };
+  const out = { apply: false, confirmYes: false, allowSuspect: false, suspectTicket: null };
   for (const a of argv.slice(2)) {
     if (a === '--apply') out.apply = true;
     else if (a === CONFIRM_FLAG) out.confirmYes = true;
-    else if (a === ALLOW_SUSPECT_FLAG) out.allowSuspect = true;
+    else if (a === ALLOW_SUSPECT_FLAG || a.indexOf(ALLOW_SUSPECT_FLAG + '=') === 0) {
+      // 越权旗标必须带值：放行凭据无据 = 持钥者单方可灭迹；单号连同预检计数
+      // 写进 append-only 重签留痕（logs/audit-resign-log.jsonl）。裸旗标按
+      // 用法错误拒绝，不再静默放行。
+      const marker = ALLOW_SUSPECT_FLAG + '=';
+      const ticket = a.indexOf(marker) === 0 ? a.slice(marker.length).trim() : null;
+      if (ticket === null) {
+        console.error(
+          '错误：' + ALLOW_SUSPECT_FLAG + ' 必须携带变更单号（形如 ' + ALLOW_SUSPECT_FLAG + '=NW-1234）'
+        );
+        process.exit(2);
+      }
+      out.allowSuspect = true;
+      out.suspectTicket = ticket;
+    }
     else {
       // 未知参数不得静默接受：`--aply` 会被当成"没传"，于是运维以为在改写、
       // 实际只跑了一次演练，还看到一个 exit 0。
@@ -185,10 +201,13 @@ function printVerifyReport(label, { verify, verdict }) {
  * 只在 --apply 时拒绝：演练模式的目的就是把这份报告打印出来，
  * 让它退 0 与 resign-audit-hmac.js 同口径（否则"演练"和"失败"分不开）。
  */
-function decidePrecheck({ verdict, apply, allowSuspect }) {
+function decidePrecheck({ verdict, apply, allowSuspect, suspectTicket }) {
   if (verdict.canAttestIntact) return true;
   if (allowSuspect) {
-    console.log(`\n已按 ${ALLOW_SUSPECT_FLAG} 越权放行改写前核验：${verdict.reasons.join('；')}`);
+    console.log(
+      `\n已按 ${ALLOW_SUSPECT_FLAG}（单号：${suspectTicket || '（无单号）'}）越权放行改写前核验：` +
+        `${verdict.reasons.join('；')}；本次放行已强制写入 append-only 重签留痕。`
+    );
     return true;
   }
   if (!apply) {
@@ -200,12 +219,14 @@ function decidePrecheck({ verdict, apply, allowSuspect }) {
     '本脚本按库内现值重算 hash 并重建 prevHash 链——现在重签，会把"字段被改过"' +
       '与"整条记录被删过"两类唯一留存的证据一并抹掉，事后 verify 只会说链完整。'
   );
-  console.error(`确知原因仍需执行时，显式传 ${ALLOW_SUSPECT_FLAG}（该选择会打印在日志里）。`);
+  console.error(
+    `确知原因仍需执行时，显式传 ${ALLOW_SUSPECT_FLAG}=<变更单号>（放行与计数会写入 append-only 留痕）。`
+  );
   return false;
 }
 
 async function main() {
-  const { apply, confirmYes, allowSuspect } = parseArgs(process.argv);
+  const { apply, confirmYes, allowSuspect, suspectTicket } = parseArgs(process.argv);
   // L-26：改用共享解析器——原实现直读 process.env.MONGODB_URI，
   // 与本族其余脚本的「缺省回退本地库 + 显式告警」口径不一致，
   // 且缺少回退提示，无法判断本次到底连了哪个库。
@@ -248,13 +269,27 @@ async function main() {
   // ---- ④ 预检：必须早于任何改写 ----
   const pre = await runChainVerify();
   printVerifyReport('预检（改写前）', pre);
-  if (!decidePrecheck({ verdict: pre.verdict, apply, allowSuspect })) {
+  if (!decidePrecheck({ verdict: pre.verdict, apply, allowSuspect, suspectTicket })) {
     await mongoose.connection.close();
     process.exit(2);
   }
 
   const report = await rechainAllDocuments(apply);
   console.log(JSON.stringify({ ...report, apply }, null, 2));
+
+  // append-only 留痕：--apply 必登记（含改写后复核仍失败的执行——那是更要留痕的现场）。
+  // 写失败直接抛 ⇒ main 的 catch exit 1：留痕失败的重签不算完成，宁可重跑不可灭迹。
+  if (apply) {
+    appendResignLedger({
+      script: 'resign-audit-chain-v3.js',
+      ticketId: suspectTicket,
+      overridden: !pre.verdict.canAttestIntact,
+      dbName,
+      host,
+      counts: { ...report, preReasons: pre.verdict.reasons },
+    });
+    console.log('留痕：logs/audit-resign-log.jsonl 追加一行（append-only，可审计）。');
+  }
 
   if (!apply) {
     await mongoose.connection.close();

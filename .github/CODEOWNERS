@@ -26,6 +26,19 @@
 /scripts/provision-mongod.js @qmzzzzz
 /scripts/update-ip2region.js @qmzzzzz
 
+# 灭迹能力与破坏性护栏：比"门禁脚本"更高爆炸半径——
+# 改坏 destructiveGuard 的 fail-closed 判据等于同时拆掉所有 --apply 脚本的门
+/scripts/resign-audit-*.js @qmzzzzz
+/scripts/destructiveGuard.js @qmzzzzz
+/scripts/migrate-mfa-secret.js @qmzzzzz
+/migrate-mongo-config.js @qmzzzzz
+
+# 告警判据与漂移基线：一个字符改错告警就瞎（deployment/ 下其余 json 已单列于上）
+/deployment/observability/ @qmzzzzz
+
+# 生产库迁移：新增比修改更危险，整目录都算高爆炸半径
+/migrations/ @qmzzzzz
+
 # 依赖分辨率与镜像构建
 /package-lock.json @qmzzzzz
 /web-admin/package-lock.json @qmzzzzz

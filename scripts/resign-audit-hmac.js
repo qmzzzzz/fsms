@@ -31,9 +31,10 @@
  * 若本脚本像早期版本那样「对不上新钥就一律重签」，运维照 Runbook 跑完 --apply 之后
  * verify 会对一份被改过的库报「完整」：灭迹现场由官方轮换工具签发了合格证。
  * 因此现在写库之前必须先跑一遍**只读预检**：凡"带 hmac、但在当前钥下解不开"的记录
- * 记为 suspect，默认拒绝执行（要越权必须显式 --allow-suspect-hmac）；
- * 预检拿不到当前 HMAC_SECRET 时记为 unverifiable，同样默认拒绝——
- * 那种情形下重签不构成任何完整性背书，不能悄悄给出去。
+ * 记为 suspect，默认拒绝执行（要越权必须显式 --allow-suspect-hmac=<变更单号>——
+ * 旗标必须带值，放行凭据写进 logs/audit-resign-log.jsonl 的 append-only 留痕，
+ * 无单号的越权等于持钥者无据灭迹）；预检拿不到当前 HMAC_SECRET 时记为
+ * unverifiable，同样默认拒绝——那种情形下重签不构成任何完整性背书，不能悄悄给出去。
  * 演练（无 --apply）只把同一份报告打出来并退出 0：它一行未改，拒绝码要留给真要改写的执行，
  * 否则 Runbook 第 2 步的"常规体检"会因为报告本身而失败。
  * 顺序要求：**预检必须早于任何改写**，否则"拒绝"时已经改了一半（原实现边扫边写）。
@@ -59,14 +60,52 @@ const CONFIRM_FLAG = '--yes';
 
 // 密钥来源的统一判据（--*-file 或环境变量；错误信息只点名路径，不回显内容）
 const { resolveSecretSource } = require('./secretFileArg');
+// 重签留痕（append-only）：--apply 成功后必登记，越权放行必须带变更单号
+const { appendResignLedger } = require('./resignLedger');
 
 function parseArgs(argv) {
-  const args = { apply: false, confirmYes: false, newKeyFile: null, allowSuspect: false };
+  const args = {
+    apply: false,
+    confirmYes: false,
+    newKeyFile: null,
+    allowSuspect: false,
+    suspectTicket: null,
+  };
+  // 带值旗标"缺值即错"（同 migrate-mfa-secret.js 的自纠口径）：旗标悬在 argv 末尾时
+  // ++i 取到 undefined，原实现静默落到 env 回退分支。idx 显式传参——for 的 i 是块级
+  // 绑定，闭包定义在循环外看不见它。
+  const takeValue = (flag, idx) => {
+    const value = argv[idx + 1];
+    if (value === undefined) {
+      console.error(`错误：${flag} 缺少参数值`);
+      process.exit(2);
+    }
+    return value;
+  };
   for (let i = 2; i < argv.length; i += 1) {
     if (argv[i] === '--apply') args.apply = true;
     else if (argv[i] === CONFIRM_FLAG) args.confirmYes = true;
-    else if (argv[i] === '--allow-suspect-hmac') args.allowSuspect = true;
-    else if (argv[i] === '--new-key-file') args.newKeyFile = argv[++i];
+    else if (argv[i] === '--allow-suspect-hmac' || argv[i].indexOf('--allow-suspect-hmac=') === 0) {
+      // 越权旗标必须带值（--allow-suspect-hmac=<变更单号> 或空格分隔）：
+      // 放行凭据无据 = 持钥者单方可灭迹。裸旗标按用法错误拒绝，不再静默放行。
+      const inline = /^--allow-suspect-hmac=(.+)$/.exec(argv[i]);
+      if (inline) {
+        args.allowSuspect = true;
+        args.suspectTicket = inline[1].trim();
+      } else {
+        args.allowSuspect = true;
+        args.suspectTicket = takeValue('--allow-suspect-hmac', i);
+        i += 1;
+      }
+      if (!args.suspectTicket) {
+        console.error('错误：--allow-suspect-hmac 必须携带变更单号（--allow-suspect-hmac=<单号>）');
+        process.exit(2);
+      }
+    }
+    else if (argv[i] === '--new-key-file') {
+      args.newKeyFile = takeValue('--new-key-file', i);
+      i += 1;
+    }
     else if (argv[i] === '--new-key') {
       // 具名拒绝而不是落到"未知参数"：默认分支会打印 argv[i]，而循环下一步就是那个密钥本身，
       // 等于把同一次泄漏再抄进 stderr / CI 日志一遍。
@@ -176,7 +215,8 @@ function printPrecheckReport({ counts, samples }) {
  * 退出码只留给"真的要做坏事"的那次执行：演练模式一行未改，让它退出 0，运维才能把
  * Runbook 第 2 步（演练）当常规体检跑；同一份报告在 --apply 下才升级为拒绝。
  */
-function decidePrecheckVerdict({ counts, apply, allowSuspect }) {
+function decidePrecheckVerdict({ counts, apply, allowSuspect, suspectTicket }) {
+  const ticket = suspectTicket || '（无单号）';
   const blocking = counts.suspect + counts.unverifiable;
   if (blocking === 0) return true;
   console.error(
@@ -185,10 +225,13 @@ function decidePrecheckVerdict({ counts, apply, allowSuspect }) {
   );
   console.error(
     '重签这些记录会让 verify-audit-chain 对被改过的库报「完整」——那是灭迹，不是修复。\n' +
-      '请先按上面的样本 _id 排查取证，确认无误才追加 --allow-suspect-hmac。'
+      '请先按上面的样本 _id 排查取证，确认无误才追加 --allow-suspect-hmac=<变更单号>。'
   );
   if (allowSuspect) {
-    console.log(`\n已按 --allow-suspect-hmac 越权放行 ${blocking} 条：其 hmac 失配证据将被覆盖。`);
+    console.log(
+      `\n已按 --allow-suspect-hmac（单号：${ticket}）越权放行 ${blocking} 条：` +
+        '其 hmac 失配证据将被覆盖；本次放行已强制写入 append-only 重签留痕。'
+    );
     return true;
   }
   if (!apply) {
@@ -271,7 +314,14 @@ if (require.main === module) {
 
     const { counts, samples } = await tallyHmacStates(coll, { newKey, currentKey });
     printPrecheckReport({ counts, samples });
-    if (!decidePrecheckVerdict({ counts, apply: args.apply, allowSuspect: args.allowSuspect })) {
+    if (
+      !decidePrecheckVerdict({
+        counts,
+        apply: args.apply,
+        allowSuspect: args.allowSuspect,
+        suspectTicket: args.suspectTicket,
+      })
+    ) {
       await mongoose.disconnect();
       process.exit(2);
     }
@@ -286,10 +336,29 @@ if (require.main === module) {
 
     await mongoose.disconnect();
 
+    // append-only 留痕：--apply 必登记（演练不登——一行未改，登记反而稀释信号）。
+    // 写失败直接抛 ⇒ catch 分支 exit 1：留痕失败的重签不算完成，宁可重跑不可灭迹。
+    if (args.apply) {
+      appendResignLedger({
+        script: 'resign-audit-hmac.js',
+        ticketId: args.suspectTicket,
+        overridden: counts.suspect + counts.unverifiable > 0,
+        dbName: mongoose.connection.name,
+        host: mongoose.connection.host,
+        counts: {
+          ...counts,
+          resigned,
+        },
+      });
+    }
+
     console.log('\n重签报告：');
     console.log(
       `  需重签：${resigned}${args.apply ? `（已改写 ${resigned} 条）` : '，演练未写库'}`
     );
+    if (args.apply) {
+      console.log('  留痕：logs/audit-resign-log.jsonl 追加一行（append-only，可审计）。');
+    }
 
     if (!args.apply) {
       console.log(

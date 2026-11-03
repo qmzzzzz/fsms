@@ -130,8 +130,34 @@ function validateManifest(manifest) {
         '不构成"回滚能力"证明，不应登记为一次数据级回滚演练',
     };
   }
-  if (typeof manifest.restoreVerified !== 'boolean') {
-    return { ok: false, reason: '缺少 restoreVerified（无法证明回灌与快照一致）' };
+  if (manifest.restoreVerified !== true) {
+    return {
+      ok: false,
+      reason:
+        'restoreVerified 不为 true：回灌与快照不一致的演练是"不合格"现场，' +
+        '登记它只会刷新 92 天演练时效而证明不了任何恢复能力（原实现只是文本标' +
+        '不合格却照常占时效）',
+    };
+  }
+  // 零文档空演练不构成回滚能力证明（首次演练/空库场景的正确动作是不登记，
+  // 留档的意义是"能恢复数据"；确需留痕走 note 参数手写说明，不占演练时效）
+  const documentSum = Object.values(manifest.collections).reduce(
+    (sum, c) => sum + (Number.isFinite(c && c.documents) ? c.documents : 0),
+    0
+  );
+  if (manifest.totalSnapshotDocuments !== documentSum) {
+    return {
+      ok: false,
+      reason:
+        `totalSnapshotDocuments(${manifest.totalSnapshotDocuments}) 与逐集合 documents ` +
+        `之和(${documentSum})不一致：计数自洽都保证不了的演练记录不可信`,
+    };
+  }
+  if (documentSum === 0) {
+    return {
+      ok: false,
+      reason: '各集合快照均为 0 条：不构成回滚能力证明，不应登记为一次数据级回滚演练',
+    };
   }
   return { ok: true };
 }

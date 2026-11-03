@@ -49,10 +49,28 @@ const REMOVED_KEY_FLAGS = { '--old-key': '--old-key-file', '--new-key': '--new-k
 
 function parseArgs(argv) {
   const args = { apply: false, oldKeyFile: null, newKeyFile: null };
+  // 带值旗标的"缺值即错"：旗标悬在 argv 末尾时 ++i 取到 undefined，原实现会静默落到
+  // env 回退分支——显式旗标被无声吞掉、按环境变量执行，方向与本脚本"显式旗标必须赢过
+  // env"的设计意图相反（同 check-audit-allowlist.js :291 的自纠口径）。idx 显式传参：
+  // for 的 i 是块级绑定，闭包定义在循环外看不见它。
+  const takeValue = (flag, idx) => {
+    const value = argv[idx + 1];
+    if (value === undefined) {
+      console.error(`错误：${flag} 缺少路径参数（用法：${flag} <路径>）`);
+      process.exit(2);
+    }
+    return value;
+  };
   for (let i = 2; i < argv.length; i += 1) {
     if (argv[i] === '--apply') args.apply = true;
-    else if (argv[i] === '--old-key-file') args.oldKeyFile = argv[++i];
-    else if (argv[i] === '--new-key-file') args.newKeyFile = argv[++i];
+    else if (argv[i] === '--old-key-file') {
+      args.oldKeyFile = takeValue('--old-key-file', i);
+      i += 1;
+    }
+    else if (argv[i] === '--new-key-file') {
+      args.newKeyFile = takeValue('--new-key-file', i);
+      i += 1;
+    }
     else if (REMOVED_KEY_FLAGS[argv[i]]) {
       console.error(
         `已移除 ${argv[i]}：写在命令行上的密钥会出现在 /proc/<pid>/cmdline（同机任意本地用户可读）` +

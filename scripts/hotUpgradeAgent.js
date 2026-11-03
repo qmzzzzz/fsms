@@ -54,6 +54,8 @@ function assessReadiness(cfg) {
   if (cfg.hmacError) reasons.push(cfg.hmacError);
   else if (!cfg.hmacSecret) reasons.push('缺少 HMAC 密钥（HMAC_SECRET / HMAC_SECRET_FILE）');
   else if (cfg.hmacSecret.length < 16) reasons.push('HMAC 密钥短于 16 字符，无法验签');
+  // OFFLINE_BUNDLE_VERIFY_PUBKEY 未配置时导入器按 md 允许的模式跳过内层验签：
+  // 显式传参已让该状态成为一等参数（hotUpgradeJob 的 import 段），不在 ready 拦
   if (!fs.existsSync(cfg.nginxConf)) {
     reasons.push('nginx 主配置不存在（--nginx-conf / HOT_UPGRADE_NGINX_CONF 指定的文件）');
   }
