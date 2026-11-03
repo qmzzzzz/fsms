@@ -244,6 +244,9 @@ const REFRESH_OUTCOME_RESPONSES = new Map([
   ['SESSION_UNAVAILABLE', (res) => ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE')],
   ['REVOKE_UNAVAILABLE', (res) => ApiResponse.codeError(res, 'SECURITY_SERVICE_UNAVAILABLE')],
   ['SESSION_REVOKED', (res) => ApiResponse.codeError(res, 'DEVICE_SESSION_REVOKED')],
+  // 会话行 7 天绝对过期到期（自然硬登出）：与强制吊销分开回报，客户端提示
+  // "会话已失效，请重新登录"而非"该设备的登录已被终止"——排障不再被误导成安全事件
+  ['SESSION_EXPIRED', (res) => ApiResponse.codeError(res, 'SESSION_EXPIRED')],
   ['EXPIRED', (res) => ApiResponse.codeError(res, 'REFRESH_TOKEN_EXPIRED')],
   ['ACCOUNT_LOCKED', (res) => ApiResponse.codeError(res, 'ACCOUNT_LOCKED')],
   // 并发轮换的败者：旧串刚被同一客户端的另一请求消费，仅拒绝本次、不吊销。

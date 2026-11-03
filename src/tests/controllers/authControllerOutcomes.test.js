@@ -266,6 +266,8 @@ describe('refreshToken outcome 矩阵', () => {
     ['PASSWORD_CHANGED', 401, '密码已修改，请重新登录'],
     ['VERSION_MISMATCH', 401, '会话已失效，请重新登录'],
     ['SESSION_REVOKED', 401, '该设备的登录已被终止，请重新登录'],
+    // 会话行 7 天绝对过期到期（自然硬登出）：与强制吊销分开回报，错误码 SESSION_EXPIRED
+    ['SESSION_EXPIRED', 401, '会话已失效，请重新登录'],
     ['EXPIRED', 401, '刷新令牌已过期，请重新登录'],
     ['BLACKLIST_UNAVAILABLE', 503, '安全服务暂不可用，请稍后重试'],
     ['SESSION_UNAVAILABLE', 503, '安全服务暂不可用，请稍后重试'],

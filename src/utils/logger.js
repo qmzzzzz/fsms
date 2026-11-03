@@ -3,7 +3,8 @@ require('winston-daily-rotate-file');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-// helpers.js 无任何顶层 require，方向单一（helpers 不认识 logger），无加载环
+// helpers 顶层仅 require 常量叶子 breachedPasswords（零依赖表，供 isBreachedPassword
+// 使用）；helpers 不 require logger，方向单一，无加载环
 const { stripControlChars } = require('./helpers');
 
 const { LOG_DIR: logsDir } = require('./logPaths');

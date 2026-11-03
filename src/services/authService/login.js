@@ -38,6 +38,7 @@ const { credentialShapeOf } = require('../../constants/credentialShape');
  * 惰性生成 + 缓存：避免在模块加载阶段阻塞（bcrypt.hash 同样是重 CPU 操作）。
  */
 let _dummyPasswordHash = null;
+let _dummyCompareWarnedAt = 0;
 const consumeDummyPasswordTime = async (candidate) => {
   try {
     if (!_dummyPasswordHash) {
@@ -52,8 +53,15 @@ const consumeDummyPasswordTime = async (candidate) => {
       typeof candidate === 'string' ? candidate : String(candidate ?? ''),
       _dummyPasswordHash
     );
-  } catch (_) {
-    // 抹平失败不应影响拒绝逻辑本身（宁可保留侧信道也不能 500）
+  } catch (err) {
+    // 抹平失败不应影响拒绝逻辑本身（宁可保留侧信道也不能 500）；但完全静默等于没有
+    // 可告警信号——worker 池转永久 inline 且 compare 持续抛错时，时序拉平已失效却无线索。
+    // 60s 节流（同 logShipper 的降级日志窗口）：健康路径 compare 从不 reject，只有持续
+    // 降级才反复命中；字段只含 error，不含 candidate/username（口令材料不进日志）。
+    if (Date.now() - _dummyCompareWarnedAt > 60000) {
+      _dummyCompareWarnedAt = Date.now();
+      logger.warn(`哑口令时序拉平失败（worker 池降级信号）：${err?.message ?? String(err)}`);
+    }
   }
 };
 /**

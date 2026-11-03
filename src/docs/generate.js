@@ -340,20 +340,23 @@ spec.paths['/api/auth/mfa/enable'] = {
 };
 
 spec.paths['/api/auth/mfa/disable'] = {
-  post: p('post', ['Auth'], '关闭两步验证（需动态口令或登录密码二次验证）', {
+  post: p('post', ['Auth'], '关闭两步验证（需动态口令或备用恢复码；密码不参与放行判定）', {
     requestBody: body(
       {
         type: 'object',
         properties: {
-          mfaCode: { type: 'string', description: '6 位动态口令（与 currentPassword 二选一）' },
+          mfaCode: {
+            type: 'string',
+            description: '6 位动态口令，或备用恢复码（两条第二因子二选一；密码不参与放行判定）',
+          },
           encCurrentPassword: {
             type: 'string',
-            description: '当前口令密文（与 currentPassword 二选一）',
+            description: '当前口令密文（仅作附加校验字段，不参与放行判定）',
           },
           currentPassword: { type: 'string' },
         },
       },
-      // required=true：控制器在「既无动态码也无登录密码」时一律拒绝，空请求体必然失败，故此处按必填描述（字段级仍全部可选——两条路径二选一）。
+      // required=true：控制器在「既无动态码也无恢复码」时一律拒绝，空请求体必然失败，故此处按必填描述（字段级仍全部可选——两条第二因子二选一）。
       true
     ),
     responses: { ...ok('返回 { enabled: false }'), 403: { description: '验证失败' } },

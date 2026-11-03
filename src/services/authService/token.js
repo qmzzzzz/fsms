@@ -113,11 +113,14 @@ async function resolveRefreshSubject(user, decoded, ctx) {
     }
   }
 
-  const populatedUser = await User.findById(user._id).populate({
+  // refreshSession 已持完整 Document：populate 只补子文档、不重查父文档，
+  // 省一次同 _id 的 findById 往返（唯一调用方见 refreshSession）
+  await user.populate({
     path: 'roles',
     select: 'name code',
     match: { status: 'active' },
   });
+  const populatedUser = user;
   // 安全修复：populate 后可能存在 null（指向已删除角色的 ObjectId），需过滤
   const roles = populatedUser.roles.map((r) => r?.code).filter(Boolean);
 
@@ -224,6 +227,21 @@ async function resolveRotationSession(rotateSid) {
     return 'SESSION_UNAVAILABLE';
   }
   if (!sessionState.usable) {
+    // 吊销与自然过期分开回报：会话行 7 天绝对过期到期时，活跃用户在轮换点被硬登出，
+    // 旧实现把它说成"会话已被吊销"（DEVICE_SESSION_REVOKED——"该设备的登录已被终止"），
+    // 与管理员强制吊销不可区分，运维排障时会被误导成安全事件。validateSession 把文档
+    // 一起带回（{ usable, session }），过期判定与 UserSession.isUsable 同判据：
+    // status!=='active' 且非 expired 态才是真吊销；文档已不存在（TTL 物理删除/伪造 sid）
+    // 按 EXPIRED 归类——两者对客户端都是"重新登录"，安全语义等价，fail-closed 不变。
+    const doc = sessionState.session || null;
+    const expired =
+      !doc ||
+      doc.status === 'expired' ||
+      (doc.expiresAt && new Date(doc.expiresAt) <= new Date());
+    if (expired) {
+      logger.warn(`Refresh 拒绝 - 会话已自然过期：sid=${String(rotateSid).slice(0, 8)}…`);
+      return 'SESSION_EXPIRED';
+    }
     logger.warn(`Refresh 拒绝 - 会话已被吊销：sid=${String(rotateSid).slice(0, 8)}…`);
     return 'SESSION_REVOKED';
   }
@@ -232,7 +250,7 @@ async function resolveRotationSession(rotateSid) {
 
 /**
  * 刷新令牌轮换（业务层）
- * @returns {Promise<{outcome:'MISSING'|'INVALID'|'IP_DENIED'|'PASSWORD_CHANGED'|'VERSION_MISMATCH'|'BLACKLIST_UNAVAILABLE'|'REPLAYED'|'CONCURRENT'|'REVOKE_UNAVAILABLE'|'SESSION_UNAVAILABLE'|'SESSION_REVOKED'|'ACCOUNT_LOCKED'|'EXPIRED'|'OK'}>}
+ * @returns {Promise<{outcome:'MISSING'|'INVALID'|'IP_DENIED'|'PASSWORD_CHANGED'|'VERSION_MISMATCH'|'BLACKLIST_UNAVAILABLE'|'REPLAYED'|'CONCURRENT'|'REVOKE_UNAVAILABLE'|'SESSION_UNAVAILABLE'|'SESSION_REVOKED'|'SESSION_EXPIRED'|'ACCOUNT_LOCKED'|'EXPIRED'|'OK'}>}
  *   OK 时附 { token, refreshToken }
  */
 async function refreshSession(refreshTokenRaw, ctx) {
@@ -326,11 +344,6 @@ async function refreshSession(refreshTokenRaw, ctx) {
   return { outcome: 'OK', token, refreshToken };
 }
 /**
- * 吊销单个 refresh 令牌。
- * @returns {Promise<{handled:boolean, failed:boolean}>}
- *   handled=false 表示签名无效/已过期（本就不可用，不算失败，也不写黑名单）
- */
-/**
  * 判别一枚 refresh 串是否**不属于**当前操作者。
  *
  * 无法判别时按"不属于"处理（fail-closed）：载荷里没有 userId、或压根拿不到操作者
@@ -353,6 +366,11 @@ function isForeignRefreshToken(token, ownerUserId) {
   return String(payload.userId) !== String(ownerUserId);
 }
 
+/**
+ * 吊销单个 refresh 令牌。
+ * @returns {Promise<{handled:boolean, failed:boolean}>}
+ *   handled=false 表示签名无效/已过期（本就不可用，不算失败，也不写黑名单）
+ */
 async function revokeOneRefreshToken(token) {
   let payload = null;
   try {

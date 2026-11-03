@@ -312,7 +312,8 @@ const recordMfaDisableFailure = (req, user, verifyMethod) => {
   const failureRiskFactor = {
     mfa_code: 'mfa_code_invalid',
     mfa_code_replayed: 'mfa_code_replayed',
-    recovery_code_invalid: 'recovery_code_invalid',
+    // recovery_code_invalid 词位已随 mfaDisable 的不可达恢复码消费分支一并退役：
+    // 关闭路径的失败方式只剩 TOTP 族与 second_factor_missing
     second_factor_missing: 'mfa_second_factor_missing',
   }[verifyMethod];
   return recordMfaFailureAudit(req, user, {

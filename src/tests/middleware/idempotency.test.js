@@ -83,6 +83,8 @@ describe('幂等中间件（真实 HTTP + Mongo）', () => {
   let token;
   const stamp = `idem${Date.now()}`.replace(/\d/g, (d) => 'abcdefghij'[Number(d)]);
 
+  const { waitFor } = require('../helpers/waitFor');
+
   const post = (body, key) => {
     const req = request(app).post('/api/permissions').set('Authorization', `Bearer ${token}`);
     if (key !== undefined) req.set('Idempotency-Key', key);
@@ -202,6 +204,15 @@ describe('幂等中间件（真实 HTTP + Mongo）', () => {
     expect(first.status).toBe(201);
 
     // 落库副本：除信封字段外，data 只剩 id/username 两个结论字段
+    // 完成态与响应体是响应后的 fire-and-forget 写（b820c32 同判例：不得赌时延），
+    // 先轮询到 responseBody 落定再断言，把"读得太早"与"真没裁剪"区分开
+    await waitFor(
+      async () => {
+        const rec = await IdempotencyRecord.findOne({ scope: 'user:create' }).lean();
+        return Boolean(rec) && rec.responseBody && Boolean(rec.responseBody.data);
+      },
+      { timeoutMs: 4000, label: 'user:create 回放副本收敛（responseBody 落库）' }
+    );
     const record = await IdempotencyRecord.findOne({ scope: 'user:create' }).lean();
     expect(record).toBeTruthy();
     expect(record.responseBody.data).toEqual({ id: expect.anything(), username });
@@ -1061,7 +1072,17 @@ describe('在途租约：崩溃/被杀/永久挂起不再把键钉满 24h（真�
     expect(countOf('plain')).toBe(before + 1);
     expect(leaseTakeOvers()).toBe(alertsBefore + 1); // 「可能重复写」必须能从计数看见
 
-    const rec = await IdempotencyRecord.findOne({ keyHash: keyHashOf('plain', key) }).lean();
+    // 接管路径的完成态落库是响应后的 fire-and-forget 写（b820c32 同判例：不得赌时延），
+    // 先轮询到 completed 再断言 expiresAt，全量跑高负载下不再偶发读到来早的 in_progress
+    const leaseKeyHash = keyHashOf('plain', key);
+    await waitFor(
+      async () => {
+        const rec = await IdempotencyRecord.findOne({ keyHash: leaseKeyHash }).lean();
+        return Boolean(rec) && rec.state === 'completed';
+      },
+      { timeoutMs: 4000, label: '租约接管后收敛为 completed' }
+    );
+    const rec = await IdempotencyRecord.findOne({ keyHash: leaseKeyHash }).lean();
     expect(rec.state).toBe('completed');
     expect(new Date(rec.expiresAt).getTime()).toBeGreaterThan(Date.now() - 1000); // 接管时写回了新的 expiresAt
 

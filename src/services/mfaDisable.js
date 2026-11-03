@@ -9,25 +9,6 @@ const logger = require('../utils/logger');
 const { hashRecoveryCode, recordMfaFailure, verifyTotpFactor } = require('./mfaService');
 
 /**
- * 原子消费一个备用恢复码（关闭 MFA 的第二因子之一）。
- *
- * 过滤条件同时包含 `_id` 与摘要，`$pull` 未命中即视为无效——与登录侧 verifyRecoveryCodeChallenge 同一形状，消除"先查后删"的并发双花窗口。必须用 findOneAndUpdate 而非 findByIdAndUpdate：后者只取第一参的 _id，其余过滤键会被静默丢弃（登录侧曾因此让任意格式合法恢复码通过）。写库异常按无效处理（fail-closed），并留痕。
- */
-const consumeRecoveryCodeForDisable = async (userId, normalizedCode) => {
-  const codeHash = hashRecoveryCode(normalizedCode);
-  return User.findOneAndUpdate(
-    { _id: userId, mfaRecoveryCodes: codeHash },
-    { $pull: { mfaRecoveryCodes: codeHash } },
-    { new: true }
-  ).catch((err) => {
-    logger.error(`关闭 MFA 时恢复码消费失败（按无效处理）：${err.message}`, {
-      userId: String(userId),
-    });
-    return null;
-  });
-};
-
-/**
  * 用恢复码关闭 MFA：消费恢复码与清空 MFA 状态必须是**同一条文档写**。
  *
  * 原实现先 `$pull` 恢复码、再发一条独立的 `findOneAndUpdate` 清 MFA。第二步失败（并发重新登记导致条件 miss、或写库异常）时恢复码已经没了、MFA 仍在—— 用户手里少一张码，却什么都没关掉；只剩最后一张码时直接锁死在登录第二步。两者作用在同一个 User 文档上，没有理由拆成两步：过滤条件同时要求「码在组里」和「密钥仍是本次验证的那份」，一次 `$set` 同时完成消费与关闭。
@@ -76,22 +57,15 @@ const disableWithRecoveryCode = async (user, normalizedCode) => {
 };
 
 /**
- * 关闭 MFA 的第二因子验证：TOTP 优先，其次恢复码（"二选一"，不是叠加）。
- *
- * 两条路径统一受防爆破约束：不能借恢复码路径绕过 TOTP 的尝试限额。放在 service 而不是 controller——"什么算验证通过"是领域判定， controller 只该决定"通过后写什么、失败时回什么码"。
- * @returns {Promise<{verified: boolean, method: string}>}
- */
-const verifyDisableFactor = async (user, { mfaCode, normalizedCode, codePath }) => {
-  if (codePath) return verifyTotpFactor(user, mfaCode);
-  const consumed = await consumeRecoveryCodeForDisable(user._id, normalizedCode);
-  if (!consumed) await recordMfaFailure(user);
-  return { verified: !!consumed, method: consumed ? 'recovery_code' : 'recovery_code_invalid' };
-};
-
-/**
  * 关闭 MFA 的统一入口：先验第二因子，再用**条件写**清理状态。
  *
  * 两条路径的共同约束：验证是对载入时的 `user.mfaSecret` 做的，落库必须继续锁定那份密钥。否则并发 enroll/enable 换掉密钥后，本次从未证明过控制权的新登记会被一并清掉（审计还记成"用户关闭 MFA"）。恢复码路径额外要求"消费码 + 清状态"同一条写，见 disableWithRecoveryCode。
+ *
+ * 到得了这里的请求必有 codePath：控制器对「动态码与恢复码都没带」先回
+ * MFA_SECOND_FACTOR_REQUIRED，带恢复码的请求在上方 recoveryPath 分流——因此
+ * 这里**只可能是 TOTP 路径**（原 verifyDisableFactor 的恢复码消费分支不可达，
+ * 且它内部编码的正是 disableWithRecoveryCode 已消灭的"码已消费、MFA 仍开"
+ * 两步写死局，直调 TOTP 验证即消除这层假二选一面）。
  *
  * @returns {Promise<{outcome:'OK'|'VERIFY_FAILED'|'STATE_CONFLICT'|'NOT_ENABLED', verifyMethod?: string}>}
  */
@@ -101,11 +75,7 @@ const disableWithSecondFactor = async (
 ) => {
   if (recoveryPath) return disableWithRecoveryCode(user, normalizedCode);
 
-  const { verified, method } = await verifyDisableFactor(user, {
-    mfaCode,
-    normalizedCode,
-    codePath,
-  });
+  const { verified, method } = await verifyTotpFactor(user, mfaCode);
   if (!verified) return { outcome: 'VERIFY_FAILED', verifyMethod: method };
 
   const disabled = await User.findOneAndUpdate(
@@ -133,8 +103,6 @@ const disableWithSecondFactor = async (
 };
 
 module.exports = {
-  consumeRecoveryCodeForDisable,
   disableWithRecoveryCode,
-  verifyDisableFactor,
   disableWithSecondFactor,
 };

@@ -473,7 +473,7 @@ router.post(
 
 /**
  * @route   POST /api/auth/mfa/disable
- * @desc    关闭 MFA（需动态口令或登录密码二次验证）
+ * @desc    关闭 MFA（需动态口令或备用恢复码；密码不参与放行判定）
  * @access  Private
  */
 router.post(
