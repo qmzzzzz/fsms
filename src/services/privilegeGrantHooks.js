@@ -21,11 +21,11 @@ const setPermissionChecker = (fn) => {
   permissionChecker = fn;
 };
 
-const hasPermission = async (userId, code) => {
+const hasPermission = async (userId, code, options) => {
   if (typeof permissionChecker !== 'function') {
     throw new Error('权限判定钩子未注册：无法确认审批人是否持有拟授予的权限');
   }
-  return permissionChecker(String(userId), code);
+  return permissionChecker(String(userId), code, options);
 };
 
 module.exports = {

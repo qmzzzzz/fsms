@@ -8,6 +8,7 @@ const honeypotDecoySelf = require('./honeypotDecoySelf');
 const honeypotDecoyAggregates = require('../constants/honeypotDecoyAggregates'); // 聚合读端点的同形合成体（批次 B）：零真实读，只从合成表与真实白名单派生
 const honeypotDecoyMetrics = require('../constants/honeypotDecoyMetrics');
 const { isHoneypotEnabled } = require('../constants/honeypotAccounts');
+const { resolvePunishableIp } = require('../utils/ipUtils');
 const {
   HONEYPOT_VERDICT,
   WRITE_METHODS,
@@ -19,8 +20,7 @@ const requestPathOf = (req) => String((req && (req.originalUrl || req.url)) || '
 const isHoneypotSession = (req) => !!(req && req.user && req.user.isHoneypot === true); // 判据只看身份上下文（authenticate 从库里读的 isHoneypot），token 载荷与请求头都不可信
 
 const sendRouteNotFound = (req, res) =>
-  // 404 启发式可缓存（RFC 9111）：蜜罐 404 与真实 404 同形，被中间层缓存会污染
-  // 同 URL 的正常响应面（审计 2026-11-02 F-3；no-store 与 app.js 兜底 404 同口径）
+  // 404 启发式可缓存（RFC 9111）：蜜罐 404 与真实 404 同形，被中间层缓存会污染同 URL 的正常响应面（审计 2026-11-02 F-3；no-store 与 app.js 兜底 404 同口径）
   res
     .setHeader('Cache-Control', 'no-store')
     .status(404)
@@ -58,6 +58,8 @@ const sendDataFace = (res, { method, path, query, user }) => {
 const steer = async (req, res) => {
   if (!isHoneypotSession(req)) return false;
   if (!isHoneypotEnabled()) return false; // 开关关闭即不接管：老会话回落到常规 RBAC（零角色 ⇒ 403），但绝不因关开关而放行
+  // F1：惩罚归因必须在入口对**活 req** 算一次（resolvePunishableIp 读 socket 对端与转发头的关系），不能传已解析的地址串——否则「该打谁」的裁定退化成「请求自称是谁」，伪造 XFF的探测会落到受害者 IP 名下。四个分支共用同一份裁定（同一请求不会改道两次）。
+  const attribution = resolvePunishableIp(req);
   const method = String(req.method || 'GET').toUpperCase();
   const path = requestPathOf(req);
   const verdict = resolveDecoyVerdict({ method, path });
@@ -71,6 +73,7 @@ const steer = async (req, res) => {
       verdict,
       writeAttempt,
       ip: req.ip,
+      attribution,
     });
     sendRouteNotFound(req, res); // 本分支必须排在文件/本人面之前：那些是「前缀 + 任意尾串」判定，会把 /api/avatars 这类裸前缀也认成文件端点，回一句形状不同的 body
     return true;
@@ -88,6 +91,7 @@ const steer = async (req, res) => {
       verdict: fileResponse.verdict,
       writeAttempt: fileResponse.write,
       ip: req.ip,
+      attribution,
     });
     await honeypotDecoyFiles.sendFileResponse(res, fileResponse);
     return true;
@@ -106,6 +110,7 @@ const steer = async (req, res) => {
       verdict: selfResponse.verdict,
       writeAttempt: selfResponse.write,
       ip: req.ip,
+      attribution,
     });
     honeypotDecoySelf.sendSelfResponse(res, selfResponse);
     return true;
@@ -117,6 +122,7 @@ const steer = async (req, res) => {
     verdict,
     writeAttempt,
     ip: req.ip,
+    attribution,
   });
   if (writeAttempt) {
     ApiResponse.codeError(res, 'PERMISSION_DENIED'); // 与真实 403 同一个响应构造器：错误体逐字相同，不给对方任何可指纹的差异

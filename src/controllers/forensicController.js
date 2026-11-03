@@ -100,6 +100,8 @@ const requestPoolBan = asyncHandler(async (req, res) => {
     cidr: req.body.cidr,
     reason: req.body.reason,
     operator: (req.user && req.user.userId) || null,
+    // B1：票据同时带 username——确认落库的审计行才不必拿 ObjectId 串冒充操作者名
+    operatorUsername: (req.user && req.user.username) || null,
     operatorIp: normalizeIP(clientIpForSecurityDecision(req)),
   });
   if (!result.ok) {
@@ -146,18 +148,18 @@ const confirmPoolBan = asyncHandler(async (req, res) => {
   const raw = req.body.durationHours;
   const hours = Number.parseFloat(raw);
   const durationMs = Number.isFinite(hours) && hours > 0 ? Math.round(hours * 3600000) : 0;
-  // "永久"只认 **0 / '0' 两种显式字面**（审计 2026-11-02 F-2）。路由校验对 falsy 值整体
-  // 放行（optional({ values: 'falsy' })），''、null、false 都会原样到达这里——旧折算
-  // 「解析不出正数且字段传了 ⇒ 永久」会把空输入折成永久封段（expiresAt=null 且
-  // DEFAULT_BAN_MS 永不生效），恰好复活 ADR-018 ④ 否定过的「漏填即最重」形态。
-  // 非显式永久的一切取值（含漏填、拼错类型）都落 durationMs=0 + permanent=false，
-  // 由 ipPoolBan.applyBan 兜底 DEFAULT_BAN_MS（24h）——退化方向永远是"更短"而非"更重"。
+  // "永久"只认 **0 / '0' 两种显式字面**（审计 2026-11-02 F-2）。路由校验对 falsy 值整体放行
+  // （optional({ values: 'falsy' })），''、null、false 都会原样到达——旧折算「解析不出正数且字段传了
+  // ⇒ 永久」会把空输入折成永久封段（恰好复活 ADR-018 ④ 否定过的「漏填即最重」）。非显式永久的
+  // 一切取值都落 durationMs=0 + permanent=false，由 ipPoolBan.applyBan 兜底 DEFAULT_BAN_MS（24h），// 退化方向永远是「更短」而非「更重」。
   const permanent = raw === 0 || raw === '0';
   const result = await ipPoolBan.applyBan({
     token: req.body.token,
     typedConfirm: req.body.typedConfirm,
     durationMs,
     permanent,
+    // B3：审计归因需要请求上下文（method/path/auditClientAddress/UA/sessionId/fingerprint）
+    req,
     // 落库时刻的操作者位置：由与拦截中间件同一把尺取（不读 req.ip —— 开着 trust proxy 时它由请求头决定）
     operatorIp: normalizeIP(clientIpForSecurityDecision(req)),
   });

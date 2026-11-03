@@ -24,6 +24,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const logger = require('./logger');
 
 /** 向量索引区起始偏移（头部固定 256 字节） */
 const VECTOR_INDEX_BASE = 256;
@@ -83,9 +84,8 @@ const loadFromBuffer = (buffer) => {
       `xdb 段索引指针越界（start=${startIndexPtr}, end=${endIndexPtr}, size=${buffer.length}）`
     );
   }
-  // 向量区全量校验：每桶指针必须落在段索引数组界内且按 14 字节对齐。
-  // 空桶（sPtr=0，生成器对无数据前缀的约定）合法；末桶 ePtr 允许等于
-  // buffer.length（排他末尾约定：二分最大读位 p = ePtr-14，不触 ePtr 本身）。
+  // 向量区全量校验：每桶指针必须落在段索引数组界内且按 14 字节对齐。空桶（sPtr=0）与
+  // 零长桶合法；末桶 ePtr 允许等于 buffer.length——闭区间 [0, N-1] 二分最大读位 ePtr-14。
   for (let i = 0; i < 256 * 256; i += 1) {
     const sPtr = buffer.readUInt32LE(VECTOR_INDEX_BASE + i * 8);
     const ePtr = buffer.readUInt32LE(VECTOR_INDEX_BASE + i * 8 + 4);
@@ -121,11 +121,11 @@ const searchRaw = (handle, ipText) => {
   const bucket = ((ip >>> 24) & 0xff) * 256 + ((ip >>> 16) & 0xff);
   const sPtr = buffer.readUInt32LE(VECTOR_INDEX_BASE + bucket * 8);
   const ePtr = buffer.readUInt32LE(VECTOR_INDEX_BASE + bucket * 8 + 4);
-  // 空桶：该前缀下无任何段（生成器保证指针为 0）
+  // 空桶：该前缀下无任何段（生成器保证指针为 0）；零长桶（ePtr==sPtr）退化成 high=-1，循环不执行直接按未命中返回
   if (sPtr === 0 || ePtr < sPtr) return '';
 
   let low = 0;
-  let high = (ePtr - sPtr) / SEGMENT_INDEX_SIZE;
+  let high = (ePtr - sPtr) / SEGMENT_INDEX_SIZE - 1; // F3：闭区间 [0,N-1]（旧上界 N 读到 ePtr，越文件尾）
   while (low <= high) {
     const mid = (low + high) >> 1;
     const p = sPtr + mid * SEGMENT_INDEX_SIZE;
@@ -150,11 +150,29 @@ const searchRaw = (handle, ipText) => {
   return '';
 };
 
-/** 模块级单例：首次检索才加载 11MB 数据，避免拖慢应用启动 */
-let cachedHandle = null;
+/** 模块级单例，三态（F4）：undefined=未加载 | false=加载失败哨兵 | 句柄；失败置哨兵+告警闩+短路，5 分钟过期重试 */
+let cachedHandle;
+let loadFailedAt = 0;
+let loadFailureLogged = false;
+const LOAD_RETRY_MS = 5 * 60 * 1000;
 const getHandle = () => {
-  if (!cachedHandle) cachedHandle = loadDataFile();
-  return cachedHandle;
+  if (cachedHandle === false && Date.now() - loadFailedAt < LOAD_RETRY_MS) return null; // 哨兵期内短路；过期落到下面的重试
+  try {
+    cachedHandle = loadDataFile();
+    loadFailureLogged = false; // 告警闩复位：每个故障回合只告警一次
+    return cachedHandle;
+  } catch (e) {
+    const firstFailure = cachedHandle !== false;
+    cachedHandle = false;
+    loadFailedAt = Date.now();
+    if (firstFailure || !loadFailureLogged) {
+      loadFailureLogged = true;
+      logger.warn(
+        `ip2region 数据文件加载失败（5 分钟内短路返回 null，稍后自动重试；归属地降级为不展示）：${e.message}`
+      );
+    }
+    return null;
+  }
 };
 
 /**
@@ -163,11 +181,17 @@ const getHandle = () => {
  * @param {string} ipText
  * @returns {string|null}
  */
-const search = (ipText) => searchRaw(getHandle(), ipText);
+const search = (ipText) => {
+  const handle = getHandle();
+  if (!handle) return null; // 加载失败哨兵期内：fail-soft 返回 null，不重读数据文件
+  return searchRaw(handle, ipText);
+};
 
-/** 释放已加载数据句柄（仅测试用：验证懒加载/换数据重建句柄） */
+/** 释放已加载数据句柄（仅测试用：验证懒加载/换数据重建句柄/失败哨兵） */
 const resetForTest = () => {
-  cachedHandle = null;
+  cachedHandle = undefined;
+  loadFailedAt = 0;
+  loadFailureLogged = false;
 };
 
 module.exports = {

@@ -63,6 +63,9 @@ const matchHoneypotName = (username, names = parseHoneypotUsernames().names) => 
   return names.includes(normalized) ? normalized : null;
 };
 
+const honeypotNameOf = (username) =>
+  matchHoneypotName(username) || normalizeHoneypotUsername(username) || String(username ?? '');
+
 const withHoneypotExcluded = (filter = {}) => ({ ...filter, ...HONEYPOT_EXCLUDED_FILTER }); // 调用方过滤器在前、排除判据在后：调用方不得覆盖掉排除项
 
 const isLurePassword = (password) => isBreachedPassword(password) === true; // 诱饵口令判据：命中弱口令词干即视为「攻击者猜对了」，不看账户里那份真随机口令
@@ -78,6 +81,7 @@ module.exports = {
   isHoneypotEnabled,
   isReservedHoneypotName,
   isLurePassword,
+  honeypotNameOf,
   matchHoneypotName,
   normalizeHoneypotUsername,
   parseHoneypotUsernames,

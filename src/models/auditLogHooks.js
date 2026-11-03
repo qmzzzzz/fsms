@@ -13,10 +13,9 @@ const {
   advanceChainTail,
 } = require('../utils/auditChain');
 
-// L-25：append-only 钩子清单提升为模块级导出，供合规门禁（scripts/compliance-check.js）
-// 直接引用——原先是两处手工同步（门禁列 6 项、实际挂 9 项），漏掉的恰好是
-// updateMany / findOneAndReplace / bulkWrite 三个批量篡改路径。收敛为单一事实来源后，
-// 新增钩子只需改这里，门禁自动覆盖。
+// L-25：append-only 钩子清单提升为模块级导出（APPEND_ONLY_HOOKS），合规门禁（scripts/compliance-check.js）
+// 直接引用——原先是两处手工同步，漏掉的恰好是 updateMany / findOneAndReplace / bulkWrite
+// 三个批量篡改路径；收敛后新增钩子只需改这里。
 const APPEND_ONLY_HOOKS = [
   'updateOne',
   'updateMany',
@@ -75,23 +74,34 @@ const applyHooks = (schema, logger) => {
         this.hash = computeHash(prevHash, payload);
         this.hmac = computeHmac(this.hash);
         this.hashVersion = CURRENT_PAYLOAD_VERSION;
-        // 【】链尾推进刻意留在 pre('save')，与哈希计算同处一把 withChainLock
-        // 临界区内。原因：
-        //   ① 若移到 post('save')，锁无法跨 pre/post 两个钩子持有，并发写入会
-        //      读到相同链尾、算出相同 prevHash → **真实分叉**，比幻影链尾严重；
-        //   ② 若强行跨钩子持锁，则 post 钩子未触发时锁泄漏，其后所有审计写入
-        //      无限排队（表现为「服务正常但审计彻底停摆」），是更差的失效模式。
-        // 代价是崩溃时可能留下「幻影链尾」（链尾指向从未入库的 hash）。该风险
-        // 改由**启动期自愈**消除：index.js 在 auditBuffer.start() **之前**调用
-        // resyncChainTail()，从 DB 重建真实链尾。故完整性校验不会产生持续假阳性。
-        // 次序不可颠倒（index.js 的 resyncChainTail() 在 :297、auditBuffer.start()
-        // 在 :315）：自愈必须早于任何审计写入，否则新写入会立刻把链尾推回幻影值。
-        // 修改此处前请先阅读 src/index.js 中的说明。
+        // 【】链尾推进刻意留在 pre('save')，与哈希计算同处一把 withChainLock 临界区内：
+        //  ① 移到 post('save') 则锁无法跨钩子持有，并发写入读到相同链尾、算出相同 prevHash ⇒ 真实分叉；
+        //  ② 强行跨钩子持锁则 post 未触发时锁泄漏，其后所有审计写入无限排队（更差失效模式）。
+        //  代价是崩溃时可能留下「幻影链尾」，由启动期自愈消除：index.js 在 auditBuffer.start() 之前调
+        //  resyncChainTail() 从 DB 重建真实链尾（次序不可颠倒：自愈必须早于任何审计写入，详见 src/index.js）。
         await advanceChainTail(this.hash, generation);
         this.$__chainAdvancedFrom = prevHash;
       });
     } catch (error) {
+      // 镜像批量路径的 handleHashFailure（services/auditBufferDocs.js）：只给**尚未拿到
+      // hash** 的记录盖章（chainBatch 逐条串链时已算出 hash 的前缀段不降级，这里同理——
+      // advanceChainTail 之后才抛错的那部分不属于本臂），prevHash/hashVersion 一并清
+      // null，与批量落库形态逐字段一致；核验器据此归入 hash_compute_failed 缺口而非
+      // hash_stripped 判红。写侧异常是良性且会持续产生的成因，不打标会让每轮核验都报
+      // 断裂、真实篡改告警被常态噪声淹没。
+      if (!this.hash) {
+        this.hash = null;
+        this.prevHash = null;
+        this.hashVersion = null;
+        this.hashFailure = String((error && error.message) || 'unknown').slice(0, 200);
+      }
       logger.warn('审计日志哈希链计算失败', { action: this.action, error: error.message });
+      // 与批量路径同档进告警面：惰性 require + try/catch，指标端不可用不影响主流程。
+      try {
+        require('../utils/metrics').incSecurityAlert('audit_hash_compute_failed', 'high');
+      } catch (_) {
+        /* 指标端不可用：盖章与日志已是留痕 */
+      }
     }
   });
 

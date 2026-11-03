@@ -36,7 +36,11 @@ const { normalizeIP, ipAttributionRiskFactors } = require('../utils/ipUtils');
 // 依赖全部指向叶子模块（枚举 / 频控投递 / 封禁阶梯 / 封禁原语），避开与 securityAlert 的双向依赖。
 const { ALERT_LEVELS, ALERT_TYPES } = require('./alertTypes');
 const { dispatchNotification, shouldSendAlert } = require('./alertDispatch');
-const { ESCALATION_TIERS, IPBanEvents } = require('./securityAlertIpBans');
+const {
+  ESCALATION_TIERS,
+  IPBanEvents,
+  SHARED_EGRESS_MIN_ACCOUNTS,
+} = require('./securityAlertIpBans');
 const ipBlacklistStore = require('../middleware/security/ipBlacklistStore');
 // 调用时取属性（薄包装）：测试据此替换封禁结果，解构会在加载期固化绑定。
 const addToBlacklist = (...args) => ipBlacklistStore.addToBlacklist(...args);
@@ -54,20 +58,50 @@ const addToBlacklist = (...args) => ipBlacklistStore.addToBlacklist(...args);
  *   惩罚目标——PUBLIC_PEER_HEADER 时已是 socket 对端而非请求方可写的 XFF；
  *   attributionKind 为裁定类别，写进审计留痕（ip_attribution_*）
  */
+const readPriorBans = async (hasIp, normalizedIp) => {
+  // B8：失败按第一档并计 ban_ladder_degraded（先于审计读）
+  if (!hasIp) return 0;
+  try {
+    return await IPBanEvents.countPermissionAbusePrior(normalizedIp);
+  } catch (e) {
+    logger.error(`权限滥用阶梯统计失败（按第一档处理）: ${normalizedIp}, 错误: ${e.message}`);
+    try {
+      require('../utils/metrics').incSecurityAlert('ban_ladder_degraded', 'medium');
+    } catch (_) {} // 指标端不可用时仅保留日志
+    return 0;
+  }
+};
+
+// B4：共享出口护栏（复用 securityAlertIpBans 同判据）——首触只告警不封，查询失败不封。
+const resolveSharedEgressGuard = async (hasIp, normalizedIp, priorBans) => {
+  let sharedEgressAccounts = 0;
+  let egressSignalUnavailable = false;
+  if (hasIp) {
+    try {
+      sharedEgressAccounts = await IPBanEvents.countSharedEgressAccounts(normalizedIp);
+    } catch (e) {
+      egressSignalUnavailable = true;
+      logger.error(
+        `权限滥用共享出口信号统计失败（本次不自动封禁）: ${normalizedIp}, 错误: ${e.message}`
+      );
+    }
+  }
+  const skipBan =
+    hasIp &&
+    (egressSignalUnavailable ||
+      (sharedEgressAccounts >= SHARED_EGRESS_MIN_ACCOUNTS && priorBans === 0));
+  return { sharedEgressAccounts, egressSignalUnavailable, skipBan };
+};
+
 const recordAndContain = async ({ userId, username, ip, attributionKind, recentFailures }) => {
   const normalizedIp = normalizeIP(ip) || ip;
   const hasIp = Boolean(ip);
-
-  // 阶梯统计必须在本次审计落库**之前**读（同 checkBruteForce 口径）。
-  // 计数失败按第一档处理（宁可少封不可不封），但必须留痕：阶梯退化是可观测的。
-  let priorBans = 0;
-  if (hasIp) {
-    try {
-      priorBans = await IPBanEvents.countPermissionAbusePrior(normalizedIp);
-    } catch (e) {
-      logger.error(`权限滥用阶梯统计失败（按第一档处理）: ${normalizedIp}, 错误: ${e.message}`);
-    }
-  }
+  const priorBans = await readPriorBans(hasIp, normalizedIp);
+  const { sharedEgressAccounts, egressSignalUnavailable, skipBan } = await resolveSharedEgressGuard(
+    hasIp,
+    normalizedIp,
+    priorBans
+  );
 
   // 同口径（另两个检测器都已挂 try/catch，这里是漏网的第三处）：调用方
   // middleware/rbac.js 是 `void checkPermissionAbuse(...).catch(() => {})`，
@@ -87,32 +121,21 @@ const recordAndContain = async ({ userId, username, ip, attributionKind, recentF
         // 封禁留痕（口径见 ipUtils.ipAttributionRiskFactors）
         ...ipAttributionRiskFactors(attributionKind),
       ],
-      body: { failures: recentFailures },
+      body: { failures: recentFailures, ipBanApplied: hasIp && !skipBan }, // B4：阶梯事件源的准入位（$ne:false 剔除只告警行）
     });
   } catch (e) {
     logger.error(`权限滥用告警审计落库失败（通知流程继续）: ${e.message}`);
   }
 
-  // 遏制：频控只约束通知，不挡封禁（否则封禁失败时的重试被吞、阶梯事件源缺行）
-  if (hasIp) {
-    try {
-      const tier = IPBanEvents.tierFor(priorBans);
-      const result = await addToBlacklist(
-        normalizedIp,
-        ESCALATION_TIERS[tier],
-        `permission_abuse_auto_ban_tier${tier + 1}`,
-        'auto'
-      );
-      // F-160 同口径：addToBlacklist 从不抛错，封禁是否生效只能按返回值分派
-      if (result?.banned) logger.warn(`权限滥用封禁 ${normalizedIp} 第 ${priorBans + 1} 档`);
-      else
-        logger.error(
-          `权限滥用自动封禁未生效 ${normalizedIp}（${result?.reason ?? 'no_result'}）请人工封禁或核对白名单`
-        );
-    } catch (e) {
-      logger.error(`权限滥用自动封禁 IP 失败: ${ip}, 错误: ${e.message}`);
-    }
-  }
+  await containByBan({
+    hasIp,
+    skipBan,
+    egressSignalUnavailable,
+    normalizedIp,
+    ip,
+    priorBans,
+    sharedEgressAccounts,
+  });
 
   // 通知频控只挡"又一条相同告警"：审计与封禁都已执行
   if (shouldSendAlert(`permission_abuse_${userId}`)) {
@@ -123,6 +146,44 @@ const recordAndContain = async ({ userId, username, ip, attributionKind, recentF
       `检测到权限滥用：用户 ${userId}，失败 ${recentFailures} 次`,
       { userId, ip, failures: recentFailures }
     );
+  }
+};
+
+// 遏制执行（B4）：跳过行必须打日志。定义在 recordAndContain 之后——写法门禁从它起截窗找 addToBlacklist（调用在运行期，文件序不影响行为）
+const containByBan = async ({
+  hasIp,
+  skipBan,
+  egressSignalUnavailable,
+  normalizedIp,
+  ip,
+  priorBans,
+  sharedEgressAccounts,
+}) => {
+  if (!hasIp) return;
+  if (skipBan) {
+    logger.warn(
+      `权限滥用自动封禁已跳过（${
+        egressSignalUnavailable ? '共享出口信号不可用' : '共享出口首次触发宽限'
+      }）: ${normalizedIp}，共享出口账号 ${sharedEgressAccounts} 个 / 历史触发 ${priorBans} 次`
+    );
+    return;
+  }
+  try {
+    const tier = IPBanEvents.tierFor(priorBans);
+    const result = await addToBlacklist(
+      normalizedIp,
+      ESCALATION_TIERS[tier],
+      `permission_abuse_auto_ban_tier${tier + 1}`,
+      'auto'
+    );
+    // F-160 同口径：addToBlacklist 从不抛错，封禁是否生效只能按返回值分派
+    if (result?.banned) logger.warn(`权限滥用封禁 ${normalizedIp} 第 ${priorBans + 1} 档`);
+    else
+      logger.error(
+        `权限滥用自动封禁未生效 ${normalizedIp}（${result?.reason ?? 'no_result'}）请人工封禁或核对白名单`
+      );
+  } catch (e) {
+    logger.error(`权限滥用自动封禁 IP 失败: ${ip}, 错误: ${e.message}`);
   }
 };
 

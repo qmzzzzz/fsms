@@ -1,17 +1,14 @@
 /**
- * 审计日志缓冲批量写入模块
- * 仅用于 HTTP 全局审计中间件的高频请求型日志：内存缓冲 + 定时/满额批量 insertMany，
- * 降低高频写操作下"每请求一次 DB 写"的入库压力。
+ * 审计日志缓冲批量写入模块：仅用于 HTTP 全局审计中间件的高频请求型日志（内存缓冲 +
+ * 定时/满额批量 insertMany）。事件型审计（AuditLog.record）不经过本模块，保持直写——暴力
+ * 破解检测依赖 login_failed 的即时可查性。
  *
- * 注意：事件型审计（AuditLog.record：登录成败、暴力破解告警、锁定/解锁等）不经过本模块，
- * 保持直写——暴力破解检测（checkBruteForce）依赖 login_failed 的即时可查性。
- *
- * 【WAL 兜底（G4 不丢失）】的 WAL 文件层已拆至 services/auditBufferWal.js（O-3 体积棘轮，
- * 2026-09-17）：本模块保留内存缓冲、批量落库（flush）与进程生命周期，WAL 的路径派生、
- * 按行追加、前缀裁剪、大小上限、毒批序号与归档、以及串行化它们的 walChain 由 wal 模块负责。
- * 对外行为约定：push 时同步追加 WAL 行，flush 落库成功后按**该批文档的
- * `__walSeq` 精确移除对应行**（F-97：原先按落库条数裁前 N 行，有空洞时会误删未落库行），
- * 崩溃后 start() 重放 WAL 残留（先按毒批归档序号过滤）。
+ * 【WAL 兜底（G4）】WAL 文件层已拆至 services/auditBufferWal.js（O-3 体积棘轮）：本模块保留内存
+ * 缓冲、批量落库与进程生命周期。push 同步追加 WAL 行；flush 成功后按该批 `__walSeq` 精确移除
+ * 对应行（F-97：按落库条数裁前 N 行，有空洞时会误删未落库行）；崩溃后 start() 重放残留。
+ * 【批次上限（A7）】flush 单轮最多 MAX_FLUSH_BATCH 条（默认 1000，env 钳制 [100,5000]）：
+ * 15s 链锁 TTL 内十 MB 级 insertMany 必然超时，超时僵尸批次回退后下一轮只会更大——正反馈
+ * 直撞 isChainFrozen 冻结跳过分支。完整论证见 docs/audit-buffer.md。
  */
 
 const mongoose = require('mongoose');
@@ -46,13 +43,12 @@ const FLUSH_INTERVAL_MS = 2000;
 // AUDIT_BUFFER_HARD_LIMIT=-1 会原样生效，令 enforce 分支 `length <= -1` 恒不成立、
 // `overflow = length + 1`，于是每次 push 都把整个缓冲 splice 掉（实测：push 5 条丢 10 条），
 // 审计记录停止落库却只有 WAL 残留。改为统一判据：只采纳有限正整数，否则回落默认并告警。
-const { readPositiveNumberEnv } = require('../utils/envNumber');
+const { readPositiveNumberEnv, readClampedIntEnv } = require('../utils/envNumber');
 const BUFFER_HARD_LIMIT = readPositiveNumberEnv('AUDIT_BUFFER_HARD_LIMIT', 10000, {
   integer: true,
   onInvalid: (name, raw, d) =>
     logger.error(
-      `${name}=${JSON.stringify(raw)} 非法（须为正整数），已按默认 ${d} 处理；` +
-        '负值会让每次 push 都判定"超限"并丢弃整个缓冲'
+      `${name}=${JSON.stringify(raw)} 非法（须为正整数），已按默认 ${d} 处理；负值会让每次 push 都判定"超限"并丢弃整个缓冲`
     ),
 });
 // 单次回退到缓冲头部的最大条数：`buffer.unshift(...docs)` 在数十万级会触发
@@ -68,8 +64,7 @@ const MAX_BATCH_RETRY = 5;
 const FLUSH_DRAIN_BUDGET_MS = readPositiveNumberEnv('AUDIT_FLUSH_DRAIN_BUDGET_MS', 2000, {
   onInvalid: (name, raw, d) =>
     logger.error(
-      `${name}=${JSON.stringify(raw)} 非法（须为正的毫秒数），已按默认 ${d} 处理；` +
-        '负值会让关停排空循环每次立刻判定"超时"，缓冲里的审计一行都发不出去'
+      `${name}=${JSON.stringify(raw)} 非法（须为正的毫秒数），已按默认 ${d} 处理；负值会让关停排空循环每次立刻判定"超时"，缓冲里的审计一行都发不出去`
     ),
 });
 
@@ -295,6 +290,11 @@ function handleFlushFailure(err, docs) {
  *   会把这条告警误读成噪音，进而掩盖真实篡改——方向恰好写反了。
  * 落库失败则文档回到缓冲重试（at-least-once；WAL 行保留至成功后再裁剪）。
  */
+// flush 单轮批次上限（A7，成因见文件头"批次上限"段）：越界/非法一律回退 1000（不钳到边界，
+// 越界配置本身就是错配）；模块加载时读定，告警天然只发生一次。
+const warnBadEnvValue = (name, raw) => logger.warn(`${name}=${raw} 非法，已回退默认值`);
+const FLUSH_BATCH = readClampedIntEnv('AUDIT_FLUSH_BATCH_SIZE', 1000, [100, 5000], warnBadEnvValue);
+
 async function flush() {
   if (flushing || buffer.length === 0) return;
   // 僵尸冻结窗口内不取批次：否则批次被拿在手里时僵尸恰好落库并撤回，撤回会漏掉它们，
@@ -304,7 +304,7 @@ async function flush() {
     return;
   }
   flushing = true;
-  const batch = buffer.splice(0, buffer.length);
+  const batch = buffer.splice(0, FLUSH_BATCH); // A7：单轮只取上限条，余量留给下一轮
   // 这批文档此刻**既不在缓冲也未落库**：关停排空必须把它们计入 residual，
   // 否则 `buffer.length === 0` 会被误读成"已排空"（F-101）。
   inFlightCount = batch.length;

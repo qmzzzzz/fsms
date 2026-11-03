@@ -3,7 +3,7 @@
  *
  * 本模块只有：导出配置（sheet 名/模型/列定义/行转换/展示名映射）、查询构建
  * （buildExportQuery）、枚举校验（validateAuditExportEnums）。控制器只留参数校验、权限闸与响应编排。
- * 流式写出（streamExportRows）与 workbook 编排（writeExportWorkbook）在 reportWorkbookService.js，
+ * 行级取数（fetchExportRows，E9① 前名 streamExportRows）与 workbook 编排（writeExportWorkbook）在 reportWorkbookService.js，
  * **不在**本文件——按旧文件头来这里找会扑空。
  * 行级日期格式化统一走 utils/dateFormat（显式 hour12:false；与迁移前输出逐项一致）。
  */
@@ -98,7 +98,7 @@ const getExportSheetName = (type, lang) =>
 // 排序必须是**全序**，且与对应列表接口同序——这是仓库既有不变式，不是新约定：
 // FireAlarm.js:242 / Inspection.js:187 / AuditLog.js:343-350 三处都写明"排序键取值可重复
 // ⇒ 必须有同向 `_id` 次级键"，并为此建了 `{key:-1,_id:-1}` 索引；列表侧
-// AlarmService.js:121、InspectionService.js:146、auditQueryService.js:154 用的就是它。
+// AlarmService.js:121、InspectionService.js:146、auditQueryService.js:157 用的就是它。
 // 导出原先只写 `{occurredAt:-1}` / `{planStartTime:-1}` / `{timestamp:-1}`，于是：
 //   1. 同一毫秒内的并列行由查询计划决定先后 ⇒ 撞上限时"前 5000 行"取到哪一批
 //      不确定，同一条筛选重跑两次可以给出两份不同的合规材料；

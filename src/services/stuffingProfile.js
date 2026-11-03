@@ -30,6 +30,8 @@ const {
 
 const TRACKED_ACTIONS = Object.freeze([...SAMPLED_ACTIONS, SUCCESS_ACTION]);
 
+const MAX_STUFFING_ROWS = 5000; // E4，与 attackProfile 的上限同值：聚合是逐行 CPU 工作，无上限的窗口读取会被"单日百万级撞库"直接拖垮查询腿；撞顶的代价由 truncated/total 自述
+
 /**
  * 窗口 = 业务日 ∩ 保留期。保留期之外的行已不存在于集合里（TTL），下界仍然要夹——
  * 否则显式传入一个早于保留期的业务日会得到一份「空窗口」，而空窗口的含义是证据没了，不是没攻击。
@@ -109,18 +111,29 @@ const aggregateRows = (rows, window, options = {}) => {
 // 行集恒为空。这是有意接受的同源收口副作用（出口用 dataScopeType 说明），不是查询写错。
 const buildProfile = async ({ businessDay, now = Date.now(), scopeFilter } = {}) => {
   const window = resolveWindow({ businessDay, now });
-  const rows = await AuditLog.find({
+  const condition = {
     ...(scopeFilter || {}),
     action: { $in: TRACKED_ACTIONS },
     timestamp: { $gte: window.start, $lte: window.end },
-  })
+  };
+  const rows = await AuditLog.find(condition)
     .select('action username ip body')
+    .sort({ timestamp: -1, _id: -1 }) // sort 必须在场：不定 sort 的 limit 是"不确定样本"（两次读取可能给出不同画像）；与审计列表/导出同向
+    .limit(MAX_STUFFING_ROWS)
     .lean();
-  return aggregateRows(rows, window);
+  const total =
+    rows.length < MAX_STUFFING_ROWS ? rows.length : await AuditLog.countDocuments(condition); // 没打满上限时取回数就是命中总数：省一次 count 扫描（attackProfile 同法）
+  return {
+    ...aggregateRows(rows, window),
+    total,
+    sampledRows: rows.length,
+    truncated: total > rows.length,
+  };
 };
 
 module.exports = {
   TRACKED_ACTIONS,
+  MAX_STUFFING_ROWS,
   aggregateRows,
   buildProfile,
   resolveWindow,

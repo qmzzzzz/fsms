@@ -193,6 +193,8 @@ const guardFullRangeCIDR = async (
     username: req.user.username,
     method: req.method,
     path: auditPath(req),
+    // B6：与同文件其余五处同形态——critical 级未遂留痕缺了客户端地址，事后连"从哪来_try"都答不了
+    ...auditClientAddress(req),
     userAgent: req.get('user-agent'),
     body: { ip: normalizedIP, type },
     success: false,
@@ -208,23 +210,30 @@ const guardFullRangeCIDR = async (
 };
 
 /**
- * 段写入护栏：加黑网段与 pool-ban 同一套判据（自伤/活跃流量/打字确认）。加白不走（只放行、
- * 不切业务，拦了没法解误封）；单地址不走（无"封段"语义）。
+ * 段写入护栏：加黑网段与 pool-ban 同一套判据（自伤/活跃流量/打字确认）；单地址不走（无"封段"语义）。
  *
- * **豁免只认「这一条本身是 /0」**，不认「并集铺满」：两者是不同判据。并集铺满说明"这条
- * 写下去会让名单覆盖整个地址族"——那正是更需要看活跃流量的场合，不是豁免理由。两者混用
- * 的实测后果：已有 128.0.0.0/1 时写 0.0.0.0/1（罩住一半 IPv4、含调用者自己）一路 200，
- * 而同样的 0.0.0.0/1 在名单为空时会被拒——**是否被拦取决于名单里已有什么**，判据自相矛盾。
- *
- * 而 /0 本身确实必须豁免：自伤与活跃流量两条对 /0 恒为真（任何请求都在 /0 里），照查等于
- * 永久拒绝，把"仅超管可配全网段"变成死代码。这类条目由 guardFullRangeCIDR 收口
- * （超管判定 + 逐字确认 + critical 审计）。**豁免的只是那两条判据，不是确认**：/0 影响面最大，
- * 恰恰是唯一无条件需要逐字敲的段。
+ * 白名单段（B5 对称收口）：只保留打字确认，不套自伤/活跃流量两条——那两条的排除理由只对加黑成立
+ * （加白只放行、不切业务）；打字确认问的是「影响面多大」，与方向无关：大段白名单（≥256 主机）会把黑名单
+ * 与限流对整栋楼整体失效。**豁免只认「这一条本身是 /0」**，不认「并集铺满」：并集铺满说明这条写下去
+ * 会让名单覆盖整个地址族，正是更该看活跃流量的场合；两者混用的实测后果：已有 128.0.0.0/1 时写
+ * 0.0.0.0/1 一路 200，名单为空时同样的写会被拒——判据自相矛盾。而 /0 本身确实必须豁免那两条（它们对
+ * /0 恒为真，照查等于永久拒绝），由 guardFullRangeCIDR 收口（超管判定 + 逐字确认 + critical 审计）。
+ * **豁免的只是那两条判据，不是确认**：/0 影响面最大，恰恰是唯一无条件需要逐字敲的段。
  * @returns {Promise<boolean>} true 表示已写出拒绝响应
  */
 const guardSegmentWrite = async (req, res, { normalizedIP, type, typedConfirm }) => {
-  if (type !== 'black' || !normalizedIP.includes('/') || isFullRangeCIDR(normalizedIP))
-    return false;
+  if (!normalizedIP.includes('/') || isFullRangeCIDR(normalizedIP)) return false;
+  if (type === 'white') {
+    // 白名单只问影响面（确认），不问自伤/活跃流量（那两条是"封了切业务"的判据，加白不成立）
+    if (!needsTypedConfirmation(normalizedIP) || typedConfirmMatches(typedConfirm, normalizedIP)) {
+      return false;
+    }
+    // expected 与全网段分支同口径：确认串比对的是归一化值，不回带它用户就不知道该敲什么
+    ApiResponse.codeError(res, 'IP_SEGMENT_WRITE_REFUSED', {
+      params: { reason: REFUSAL.typed_confirmation_required, expected: normalizedIP },
+    });
+    return true;
+  }
   const refusal = await segmentWriteRefusal({
     cidr: normalizedIP,
     operatorIp: normalizeIP(clientIpForSecurityDecision(req)),
@@ -241,18 +250,14 @@ const guardSegmentWrite = async (req, res, { normalizedIP, type, typedConfirm })
 /**
  * 并发并集复检（回滚式，round22 B2）：写入前的并集判据在**并发**下会双双放行。
  *
- * 缺陷形态（实测三轮全中）：两次并发 POST 分别写 ::/1 与 8000::/1，各自读快照时对方都还没落库，
- * 于是两条都通过 guardFullRangeCIDR 并都落库，事后并集铺满整个 IPv6 —— 与 /0 等价（全站拒服 +
- * 管理员自锁），而非内置超管本不该有这个能力。顺序提交时第二条会被正确拒绝，所以串行测试看不见它。
- *
- * 这里在**写入之后**再算一次并集：若此刻覆盖整族且操作者不是内置超管，就把**本次写入**回滚掉并回 403。
- * 「本次写入」按 blockIP 的 created 判据（`$locals.created === true`，与 pool-ban 侧 F-25-8 同一口径）：命中
- * 他人既有条目的重复写不是本次写入，删它＝被拒的操作静默解除既有封禁 ⇒ 只留痕 403、不动他人条目。
- *
- * 残留窗口（如实记录）：从本次 blockIP 落库到 removeEntry 落库之间（毫秒级，且要求两个请求恰好落在
- * 同一窗口），期间该族对新请求表现为全覆盖；进程若在两步之间崩溃，条目会残留（需靠人工/对账收敛）。
- * 比纯进程内互斥可靠的地方：判据落在数据库状态上，多实例部署同样成立。
- * 违规时抛 ApiError(403, FULL_RANGE_FORBIDDEN)；无违规时正常返回（调用方一条 await 即可，不需要分支）
+ * 缺陷形态（实测三轮全中）：两次并发 POST 分别写 ::/1 与 8000::/1，各自读快照时对方都还没落库，两条都
+ * 通过 guardFullRangeCIDR 并落库，事后并集铺满整个 IPv6——与 /0 等价（全站拒服 + 管理员自锁）。顺序
+ * 提交时第二条会被正确拒绝，串行测试看不见它。这里在**写入之后**再算一次并集：若此刻覆盖整族且操作者不是
+ * 内置超管，回滚**本次写入**并回 403。「本次写入」按 blockIP 的 created 判据（$locals.created === true，
+ * 与 pool-ban 侧 F-25-8 同口径）——删他人既有条目＝被拒的操作静默解除既有封禁，只留痕、不动他人条目。
+ * 残留窗口（毫秒级，且要求两请求恰好同窗）：期间该族对新请求表现为全覆盖；进程若在两步之间崩溃，条目
+ * 残留（需人工/对账收敛）。比纯进程内互斥可靠：判据落在数据库状态上，多实例部署同样成立。违规时抛
+ * ApiError(403, FULL_RANGE_FORBIDDEN)；无违规时正常返回。
  */
 const enforceConcurrentUnionGuard = async (req, { normalizedIP, type, entry }) => {
   const coveredFamilies = await coveredFamiliesOf(normalizedIP, type);
@@ -298,6 +303,9 @@ const enforceConcurrentUnionGuard = async (req, { normalizedIP, type, entry }) =
 
 module.exports = {
   coveredFamiliesOf,
+  // 纯谓词透传（本体在 services/ipPoolBan）：控制器的大段白名单审计因子（B5）按同一家族
+  // 从本护栏模块取尺，不再另开一条对 ipPoolBan 的直接依赖
+  needsTypedConfirmation,
   guardFullRangeCIDR,
   recordFullRangeGrantIfGranted,
   guardSegmentWrite,

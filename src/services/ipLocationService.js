@@ -1,20 +1,4 @@
-/**
- * IP 归属地服务（会话管理等后台展示场景）
- *
- * 给后台界面把裸 IP 翻译成「国家·省·市·运营商」可读串：会话管理、安全审计
- * 核查时，运营商标级归属地比点分十进制更有辨识度（一眼看出"这台设备在
- * 深圳、走电信"，而不是对着一串数字回忆）。
- *
- * 为什么是本地离线检索而不是在线 API：归属地是纯增强信息，若为它引入
- * 一次外网往返，sessions 接口的耗时会从毫秒级抬到秒级且不可控（第三方限频、
- * 断网、SSRF 面都进来了）。改用仓库内置的 ip2region xdb 数据（见
- * src/utils/ip2regionSearcher.js），全内存二分检索约微秒级，列表页加载
- * 速度不受影响；进程内再做一层结果缓存，同一 IP（同会话反复刷新）直接命中。
- *
- * 失败语义（fail-soft）：归属地查不出 ≠ 会话有问题。任何异常（数据文件缺失、
- * 畸形 IP、格式不符预期）一律返回 null，调用方省略展示即可，绝不影响
- * 会话列表本身；数据文件加载失败只告警一次，避免每请求刷日志。
- */
+// IP 归属地服务：离线检索选型、懒加载三态与 fail-soft 语义见 docs/ip-location-service.md
 const logger = require('../utils/logger');
 const ipaddr = require('ipaddr.js');
 const { normalizeIP } = require('../utils/ipUtils');
@@ -27,9 +11,43 @@ const IPV6_PRIVATE_RANGES = new Set(['loopback', 'linkLocal', 'uniqueLocal']);
 /** 结果缓存上限：会话列表单页条数极小，2048 条足够覆盖多用户多会话的重复查询 */
 const CACHE_LIMIT = 2048;
 
+/** 加载失败哨兵的存续期：期内短路，过后重试一次 */
+const LOAD_RETRY_MS = 5 * 60 * 1000;
+/** 运行期异常 warn 的节流窗口 */
+const RUNTIME_WARN_THROTTLE_MS = 60 * 1000;
+
 const resultCache = new Map();
-/** 数据文件加载失败只告警一次的开关（防每请求刷日志） */
+let handle; // undefined=未加载 | false=加载失败哨兵 | 检索句柄（ip2regionSearcher.loadDataFile 的返回值）
+let loadFailedAt = 0;
 let loadFailureLogged = false;
+let lastRuntimeWarnAt = 0;
+
+/**
+ * 取检索句柄（懒加载独立层）。返回 null = 加载失败哨兵期内（调用方短路返回 null）。
+ * 加载失败置哨兵与告警闩；成功则复位闩。哨兵过期自动重试一次。
+ */
+const acquireHandle = () => {
+  if (handle) return handle; // 已加载：进程内复用，绝不重读数据文件
+  if (handle === false) {
+    if (Date.now() - loadFailedAt < LOAD_RETRY_MS) return null; // 哨兵期内短路：不重做 11MB 同步读
+    // 哨兵已过期：下面的加载即是本回合的一次重试（数据修复 ⇒ 无需重启进程即恢复）
+  }
+  try {
+    handle = searcher.loadDataFile();
+    loadFailureLogged = false; // 成功复位闩：下次失败重新告警一次（每个故障回合一条）
+    return handle;
+  } catch (e) {
+    handle = false;
+    loadFailedAt = Date.now();
+    if (!loadFailureLogged) {
+      loadFailureLogged = true;
+      logger.warn(
+        `IP 归属地数据加载失败（5 分钟内短路返回 null，稍后自动重试；归属地整体降级为不展示）：${e.message}`
+      );
+    }
+    return null;
+  }
+};
 
 /**
  * 把 xdb 原始串「国家|区域|省份|城市|ISP」拼成展示文本。
@@ -52,6 +70,17 @@ const formatRegion = (raw) => {
 };
 
 /**
+ * IPv4 检索单步（拆出是给 locate 的 complexity 棘轮让路）：取句柄 → searchRaw → 拼展示串。
+ * @returns {string|null|undefined} 展示文本；undefined = 加载失败哨兵期内（调用方短路返回 null）
+ */
+const lookupIPv4 = (normalized) => {
+  const acquired = acquireHandle();
+  if (acquired === null) return undefined; // 哨兵期内短路
+  const raw = searcher.searchRaw(acquired, normalized);
+  return typeof raw === 'string' && raw.length > 0 ? formatRegion(raw) : null;
+};
+
+/**
  * 查询 IP 的归属地展示文本。
  *
  * @param {string|null} ipText 客户端 IP 原文（允许带 ::ffff: 前缀、空白；允许任意垃圾输入）
@@ -61,6 +90,7 @@ const locate = (ipText) => {
   if (typeof ipText !== 'string' || !ipText.trim()) return null;
 
   let result = null;
+  let cacheable = false; // 失败路径（哨兵短路/运行期异常）不入缓存：恢复后下一条查询即用上新结果
   try {
     // normalizeIP 复用名单/审计同一套入站判据：::ffff:1.2.3.4 收敛为纯 IPv4，
     // 歧义写法（0177.0.0.1 等）与非法文本直接 null——归属地不做"猜意图"的宽松解释
@@ -72,10 +102,9 @@ const locate = (ipText) => {
     if (resultCache.has(cacheKey)) return resultCache.get(cacheKey);
 
     if (normalized && !normalized.includes(':')) {
-      const raw = searcher.search(normalized);
-      if (typeof raw === 'string' && raw.length > 0) {
-        result = formatRegion(raw);
-      }
+      const shown = lookupIPv4(normalized);
+      if (shown === undefined) return null; // 加载失败哨兵期内：短路，不入缓存
+      result = shown;
     } else if (normalized) {
       // IPv6 当前仅内置 v4 数据（v6 是独立数据文件，未随库分发），公网 v6 查不出
       // 归属；但回环/链路本地/ULA 这类内网形态必须给出稳定码 private——否则本机
@@ -84,6 +113,7 @@ const locate = (ipText) => {
       if (IPV6_PRIVATE_RANGES.has(range)) result = IP_LOCATION_CODES.PRIVATE_NETWORK;
     }
 
+    cacheable = true;
     if (resultCache.size >= CACHE_LIMIT) {
       // Map 迭代序即插入序：删最早一条，代价 O(1)。归属地不随时间变化，
       // FIFO 与 LRU 的命中率差异可忽略
@@ -91,14 +121,16 @@ const locate = (ipText) => {
     }
     resultCache.set(cacheKey, result);
   } catch (err) {
-    // fail-soft：数据文件缺失/损坏时归属地整体降级为不展示，但不打断会话列表；
-    // 本次结果不入缓存，数据恢复后下一条查询即用上新结果（不拿旧 null 长驻）
-    if (!loadFailureLogged) {
-      loadFailureLogged = true;
-      logger.warn(`IP 归属地检索不可用（已降级为不展示）：${err.message}`);
+    // 运行期异常（句柄已加载后的 searchRaw/formatRegion 抛错）：**不置位**加载闩——
+    // 句柄还好好的，一次畸形输入不该杀掉整个归属地面 5 分钟。逐条 warn（60s 节流）
+    // 返回 null；本条结果不入缓存。
+    const now = Date.now();
+    if (now - lastRuntimeWarnAt >= RUNTIME_WARN_THROTTLE_MS) {
+      lastRuntimeWarnAt = now;
+      logger.warn(`IP 归属地检索异常（本条降级为不展示）：${err.message}`);
     }
   }
-  return result;
+  return cacheable ? result : null;
 };
 
 /** 清空结果缓存（仅测试用：验证缓存边界行为） */
@@ -106,8 +138,20 @@ const clearCache = () => {
   resultCache.clear();
 };
 
+/** 重置句柄三态与告警闩（仅测试用：验证加载失败哨兵/重试语义） */
+const resetForTest = () => {
+  resultCache.clear();
+  handle = undefined;
+  loadFailedAt = 0;
+  loadFailureLogged = false;
+  lastRuntimeWarnAt = 0;
+};
+
 module.exports = {
   CACHE_LIMIT,
+  LOAD_RETRY_MS,
+  RUNTIME_WARN_THROTTLE_MS,
   locate,
   clearCache,
+  resetForTest,
 };

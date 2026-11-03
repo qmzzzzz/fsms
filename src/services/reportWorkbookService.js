@@ -7,8 +7,7 @@ const {
   EXPORT_ROW_TRANSFORMS,
   createSafeTransform,
 } = require('./reportExportService');
-// 「按需挂 collation」的判据只有一份（utils/auditQuery）：CSV 导出链早就用它，
-// xlsx 这条链此前从未挂过——username 条件改成前缀形态后，不挂就会**漏**记录
+// 「按需挂 collation」的判据只有一份（utils/auditQuery）：CSV 导出链早就用它，xlsx 这条链此前从未挂过——username 条件改成前缀形态后，不挂就会**漏**记录
 // （默认二进制 collation 下 ADMIN 不落在 [adm, adn) 内），见 auditQuery.js:190-201。
 const { withCollation } = require('../utils/auditQuery');
 const { TRACE_HEADER } = require('./piiExportWatermark');
@@ -16,7 +15,8 @@ const { TRACE_HEADER } = require('./piiExportWatermark');
 // 非工作时间判定都读它，导出文件名没有理由例外。
 const { businessDateParts } = require('../constants/timezone');
 
-const streamExportRows = async (worksheet, config, query, safeTransform, collation = null) => {
+const fetchExportRows = async (worksheet, config, query, safeTransform, collation = null) => {
+  // E9① 命名收口（前名 streamExportRows）：本函数是查询腿（把命中行经 safeTransform 写进 worksheet），不是流式管线——写出腿（writeExportWorkbook）是全量缓冲后一次 toBuffer
   // 封顶必须落到查询上：多取一条当"是否真的还有后续"的探针，
   // 于是"恰好 EXPORT_LIMIT 行"不会被误报成截断（与审计 CSV 导出同一判据）。
   const probeLimit = EXPORT_LIMIT + 1;
@@ -268,7 +268,7 @@ const writeExportWorkbook = async (
 
   // A4（2026-10-16）：脱敏判据随请求透传（默认掩码，持 system:read 者才拿全文）
   const safeTransform = createSafeTransform(EXPORT_ROW_TRANSFORMS[type], { maskPii, lang });
-  const { written, truncated, rowsLost } = await streamExportRows(
+  const { written, truncated, rowsLost } = await fetchExportRows(
     worksheet,
     config,
     query,
@@ -276,7 +276,7 @@ const writeExportWorkbook = async (
     collation
   );
   // 三种不完整共用同一个头（头只表态"不保证完整"），由脚注区分成因。
-  // 对账这一式必须在这里做而不能塞进 streamExportRows：游标分支"少行"的形态
+  // 对账这一式必须在这里做而不能塞进 fetchExportRows：游标分支"少行"的形态
   // 就是流正常结束，任何逐行判据都看不见它，只有计数侧知道本来该有几条。
   const countDrift =
     !truncated && Number.isFinite(total) ? Math.max(total - written - rowsLost, 0) : 0;
@@ -296,4 +296,4 @@ const writeExportWorkbook = async (
   await writeWorkbookToResponse(res, workbook);
 };
 
-module.exports = { streamExportRows, writeExportWorkbook, buildTruncationFooter };
+module.exports = { fetchExportRows, writeExportWorkbook, buildTruncationFooter };

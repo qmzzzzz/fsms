@@ -105,6 +105,7 @@ const IPBanEvents = {
       action: BAN_EVENT_ACTIONS.PERMISSION_ABUSE,
       ip: normalizedIp,
       timestamp: { $gte: windowStart() },
+      'body.ipBanApplied': { $ne: false }, // B4（同上方 countPrior 的 $ne:false 纪律）：宽限/信号跳过行不抬档
     }),
   /**
    * 窗口内该 IP 失败过的不同账号数（大小写不敏感，与 User.findByUsername 同口径）。
@@ -209,6 +210,9 @@ const collectBruteForceSignals = async ({ reportedIp, normalizedIp, windowStart,
     ]);
   } catch (e) {
     logger.error(`自动封禁阶梯统计失败（按第一档处理）: ${fallbackIp}, 错误: ${e.message}`);
+    try {
+      require('../utils/metrics').incSecurityAlert('ban_ladder_degraded', 'medium'); // B8：日志不是告警面
+    } catch (_) {} // 指标端不可用时仅保留日志
   }
 
   const ipBanOutcome = resolveIpBanDecision({

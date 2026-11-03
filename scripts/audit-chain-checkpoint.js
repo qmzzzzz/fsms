@@ -17,8 +17,10 @@
  *                           默认一律拒绝私网目标（云元数据端点是经典 SSRF 目标）
  *
  * 与 verify-audit-chain.js 的分工：后者校验链内自洽性，天然看不见「在已知锚点后
- * 插枝」与「尾部截断」；本脚本把某一时刻的链尾与记录数签成检查点，核验时比对
- * 计数/hash/当前链尾，补上这两类盲区。
+ * 插枝」与「尾部截断」；本脚本把某一时刻的链尾签成检查点（recordCount 仅创建时的
+ * 估算，**不参与判红**：TTL 裁剪与迟到批写都会让它与库对不上，当判据在诚实库上必
+ * 误报——见 src/services/auditChainCheckpoint.js 文件头），核验时比对头部 hash/hmac
+ * 与当前链尾，补上这两类盲区。
  *
  * 与「外锚」的分工（2026-10-24 补）：检查点文件默认与本机 Mongo 同主权，攻击者
  * 改完链可以**删掉检查点文件再重新 create**，为篡改后的链重新签出一套自洽锚点——
@@ -32,10 +34,15 @@
  *   每天    node scripts/audit-chain-checkpoint.js verify --anchors
  *
  * 退出码:
- *   0 = 全部检查点签名有效、链头与计数一致、当前链尾未倒退（且外锚比对通过）
+ *   0 = 全部检查点签名有效、链头一致、当前链尾未倒退、检查点新鲜度达标（且外锚比对
+ *       通过）。recordCount **不是**判据的一部分（仅创建估算，见服务层文件头）。
  *   1 = 任一检查点失配、外发失败、文件不可读、未配置密钥，或运行错误
  *   2 = 判据不可用：配了 AUDIT_ANCHOR_SINK 却既没加 --anchors 也没加 --no-anchors，
  *       或锚点存储读不出来。**不能**把这种情形算成 0（未核验 ≠ 通过）。
+ *   3 = degraded 非空（判红之外的降级信号）：v1 存量检查点、链尾回溯窗口耗尽
+ *       （tail_unverifiable）、最近检查点距 now 超过 CHECKPOINT_FRESHNESS_MS（默认 26h
+ *       = 2×13h cron 间隔上限，create 疑似停摆；置 0 显式关闭，首次部署未排 cron 的豁免口）。
+ *       不再 exit 0：降级信号在安静系统里会无声积累，cron 侧必须看得见。
  */
 
 require('dotenv').config();
@@ -122,8 +129,13 @@ function parseArgs(argv) {
   return out;
 }
 
+// 仓库根（scripts/ 的上一级）：--file 的相对路径一律相对这里解析，而不是进程 cwd——
+// cron 常从任意 cwd 启动，按 cwd 解析会让 create 与 verify 各写各读（同一份"文件"实际
+// 落在两个路径上，锚点链悄悄断成两截）。绝对路径原样通过。
+const REPO_ROOT = path.resolve(__dirname, '..');
+
 function resolveCheckpointFile(raw) {
-  return raw ? path.resolve(process.cwd(), raw) : DEFAULT_CHECKPOINT_FILE;
+  return raw ? path.resolve(REPO_ROOT, raw) : DEFAULT_CHECKPOINT_FILE;
 }
 
 /** 外发并打印结果；返回退出码。create --ship 与 ship 共用。 */
@@ -237,6 +249,15 @@ async function main() {
     if (!result.ok) {
       console.error(`VERDICT: FAIL — 发现 ${result.errors.length} 处失配`);
       return 1;
+    }
+    if (result.degraded && result.degraded.length > 0) {
+      for (const item of result.degraded) {
+        console.error(
+          `degraded[${item.type}]${item.line != null ? ` @L${item.line}` : ''}：${item.message}`
+        );
+      }
+      console.error(`VERDICT: DEGRADED — ${result.degraded.map((d) => d.type).join('、')}`);
+      return 3;
     }
     console.log(
       `VERDICT: PASS（${result.checked} 个检查点签名、链头、计数与链尾均一致` +

@@ -10,7 +10,8 @@ const { cleanAuditUsername } = require('../constants/audit');
 const CHALLENGE_AFTER_FAILURES = 3;
 const CHALLENGE_WINDOW_MS = 15 * 60 * 1000;
 /** 与 securityAlert.checkBruteForce 统计同一批失败动作，避免两处口径分叉；闸门自身拦下的尝试写 login_captcha_rejected，刻意不进本清单——否则「被拦下」会变成新的失败计数，闸门自己把自己焊死 */
-const FAILURE_ACTIONS = ['login_failed', 'auth_failed'];
+// 'ip_range_denied'（2026-11-03，P2-7）：IP 范围拒绝同样是失败尝试，不计数则被拒 IP 可无限探测而不推进挑战闸。行由 assertAccountUsable 写入，字段与 login_failed 同形。
+const FAILURE_ACTIONS = ['login_failed', 'auth_failed', 'ip_range_denied'];
 const CAPTCHA_REJECTED_ACTION = 'login_captcha_rejected'; // 留痕专用动作：与 FAILURE_ACTIONS 分账，写它不推进挑战/爆破任何一方的计数
 const CAPTCHA_TRIGGERS = Object.freeze({
   SWITCH: 'captcha_switch',
@@ -23,8 +24,7 @@ const isChallengeRequired = async (username) => {
   const windowStart = new Date(Date.now() - CHALLENGE_WINDOW_MS);
   try {
     // 查询键与写入侧同一把尺（审计 2026-11-02 B-F-2）：审计行的 username 经
-    // model set 钩子清洗，filter 不应用 setter——请求方在用户名前后附加空白/
-    // 控制字符时原文键恒查 0 行，挑战判据永远不触发（挑战闸恰好是最该对
+    // model set 钩子清洗，filter 不应用 setter——请求方在用户名前后附加空白/控制字符时原文键恒查 0 行，挑战判据永远不触发（挑战闸恰好是最该对
     // 撞库变体生效的一层）。cleanAuditUsername 与 constants/audit.js 的写入
     // 钩子同源，对同一输入产出与落库行相同的键。
     const usernameKey = cleanAuditUsername(username);

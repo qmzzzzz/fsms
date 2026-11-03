@@ -1,6 +1,5 @@
 /**
  * 审计哈希链完整性校验服务
- *
  * 单一实现，供**四个**调用方复用：
  *   1. 运维脚本 scripts/verify-audit-chain.js（人工核查）；
  *   2. 运维脚本 scripts/resign-audit-chain-v3.js（改写前/后核验）；
@@ -297,7 +296,7 @@ const claimHead = (state, doc, index) => {
 
 /**
  * 链接性层：prevHash=null 是链首，但**全链只许一条**——第二条带哈希的 prevHash=null
- * 是另一条链首 ⇒ chain_fork（见 claimHead）；父不在窗口内 = chain_break（删除检测）；
+ * 是另一条链首 ⇒ chain_fork（见 claimHead）；父不在窗口内 = chain_break（删除检测）；免检窗口头只豁免断裂判定、**不豁免同胞登记**（登记后返回，否则同父分叉的较新腿占住免检位时两腿双静默）。
  *
  * 父在不在由两个窗口共同回答：已扫侧是最近 256 条哈希的滑动窗口，未扫侧是位次 ≤
  * LINK_WINDOW_SIZE 的前瞻（见 parentAhead），**不再**是"扫描顺序里出现过没有"：
@@ -306,7 +305,8 @@ const claimHead = (state, doc, index) => {
  */
 const checkLinkage = (state, doc, index, docs) => {
   if (!doc.prevHash) return claimHead(state, doc, index); // 链首不属免检档：免检只针对"父在窗口外"
-  if (state.isFirst) return;
+  // 上一行已挡掉空 prevHash，这里的 set 不需再自带守卫；写成单行只为不超体积基线。
+  if (state.isFirst) return void state.firstChildOf.set(doc.prevHash, String(doc._id));
   if (!state.seen.has(doc.prevHash) && !parentAhead(docs, index, doc.prevHash)) {
     pushBreak(state, sampleOf(doc, index, 'chain_break', { actualPrevHash: doc.prevHash }));
     return;

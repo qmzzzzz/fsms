@@ -1,6 +1,5 @@
-/** IP 池的 CIDR 封禁（T6-2）。**永远人工**：网段封禁不做自动化，`IP_POOL_BAN_ALLOW_AUTO` 已移除（留着「默认关但能开」等于给未来留一个可以误开的开关，而误开的代价是封掉一栋楼的消防上报）。自动封禁的正确形态是单 IP 递进式（见 rateLimitEscalationBan.escalateIp：1h→4h→24h→7d），误伤半径只有一个人且可逆。 */
+// IP 池 CIDR 封禁（T6-2）：永远人工、票据 sharedCache 外置语义、fail-closed 与审计口径见 docs/ip-pool-ban.md
 const crypto = require('crypto');
-const AuditLog = require('../models/AuditLog');
 const logger = require('../utils/logger');
 const { errText } = require('../utils/auditWriteFailure');
 const { isFullRangeCIDR, entryCovers, normalizeCIDR } = require('../utils/ipUtils');
@@ -8,6 +7,9 @@ const { CODES } = require('../constants/banRefusalReason');
 const ipListService = require('./ipListService');
 const { cidrUnionCoversAll } = require('../utils/cidrCoverage');
 const liveTraffic = require('./ipPoolLiveTraffic');
+const sharedCache = require('./sharedCache');
+const { recordDurably } = require('./auditOutbox');
+const { buildAuditEntry } = require('./ipPoolBanAudit');
 
 const DEFAULT_BAN_MS = 24 * 60 * 60 * 1000;
 const MAX_BATCH = 20;
@@ -30,16 +32,40 @@ const needsTypedConfirmation = (cidr) => hostCountOf(cidr) >= HIGH_IMPACT_HOSTS;
 const typedConfirmMatches = (typedConfirm, cidr) =>
   typeof typedConfirm === 'string' && typedConfirm.trim() === cidr;
 
-const state = { requests: 0, applied: 0, refused: 0, failedEntries: 0, lastError: null };
-const pending = new Map();
+const state = { requests: 0, applied: 0, refused: 0, failedEntries: 0, lastErrors: [] };
+const LAST_ERRORS_LIMIT = 5;
+const recordAuditError = (action, err) => {
+  state.lastErrors.push({
+    action,
+    timestamp: new Date().toISOString(),
+    error: String(errText(err)).slice(0, 200),
+  });
+  if (state.lastErrors.length > LAST_ERRORS_LIMIT) {
+    state.lastErrors.splice(0, state.lastErrors.length - LAST_ERRORS_LIMIT);
+  }
+};
 
-/** 拒绝出口只此一处：计数与返回同行（两处分记会让 live_traffic 记 2 次） */
+/** 待确认票据的共享存储键前缀（B2 外置；键语义/TTL/fail-closed 方向登记见 docs/adr/ADR-005 的切换点清单） */
+const TICKET_KEY_PREFIX = 'ip_pool_ban:ticket:';
+const ticketKey = (token) => TICKET_KEY_PREFIX + token;
+
+/** 判据失败后票据**原样写回**（「敲错不消耗」，ADR-018 ③）：剩余 TTL 随票走（存进票对象），写回与下次取删共用同一份时效。 */
+async function writeBackTicket(ticket) {
+  const remainingMs = ticket.expiresAt - Date.now();
+  if (remainingMs <= 0) return; // 已自然过期：不写回（下次尝试按 unknown_token 拒，与过期同结局）
+  ticket.ttlMs = remainingMs;
+  const landed = await sharedCache.set(ticketKey(ticket.token), ticket, remainingMs);
+  if (!landed) {
+    // landed=false ⇒ 共享层没收到：立即抹掉本地副本，否则 getDel 的内存回退会把它当共享层真值读回来（一次性消费被架空）
+    sharedCache.dropLocalCopy(ticketKey(ticket.token));
+  }
+}
+
 const refuse = (reason, extra = {}) => {
   state.refused += 1;
   return { ok: false, reason, ...extra };
 };
 
-/** 拒绝原因必须点名：运维要知道是「被白名单挡住」还是「是全网段」 */
 async function refusalOf(cidr, { operatorIp, reason, now = new Date() }) {
   if (!cidr) return CODES.unparsable_cidr;
   if (isFullRangeCIDR(cidr)) return CODES.full_range_cidr;
@@ -49,35 +75,23 @@ async function refusalOf(cidr, { operatorIp, reason, now = new Date() }) {
   const coverage = cidrUnionCoversAll([...(await ipListService.listActiveEntryIps('black')), cidr]);
   if (coverage.ipv4 || coverage.ipv6) return CODES.union_covers_family;
   if (operatorIp && entryCovers(cidr, operatorIp)) return CODES.operator_inside;
-  // 业务活跃度护栏：封段会切断该网段全部业务流量，只要最近还有人正常用系统就不许封
-  // ——消防系统「报不上来」不可逆（ADR-018 ②）。查不到时保守返回「有活动」。
+  // 业务活跃度护栏：封段切断全部业务流量，消防「报不上来」不可逆（ADR-018 ②）；查不到时保守按「有活动」
   const live = await liveTraffic.segmentHasLiveTraffic({ cidr, now });
   if (live.live) return CODES.live_traffic_inside;
   if (!reason) return CODES.reason_required;
   return null;
 }
 
-/** 惰性清扫：TTL 只约束"能不能用"，不约束"占不占内存"（申请 5 张、11 分钟后确认 1 张，pending 从 5 只掉到 4）。
- *  每次出票前按 TTL 清一次再对总量封顶（超出按最早出票者丢）：被丢的票只让用户重申请。 */
-const PENDING_MAX = 500;
-const sweepPending = (nowMs) => {
-  for (const [key, ticket] of pending) {
-    if (nowMs > ticket.expiresAt) pending.delete(key);
-  }
-};
-/** 上限只在插入之后执行：先削后插会稳定多留一张（削到 500 再插变 501） */
-const trimPending = () => {
-  while (pending.size > PENDING_MAX) {
-    const oldest = pending.keys().next().value;
-    if (oldest === undefined) break;
-    pending.delete(oldest);
-  }
-};
-
 /** 生成待确认请求：只有确认过的那张票能封，票与 cidr 绑死、有时效、只能用一次 */
-async function requestBan({ cidr, reason, operator, operatorIp, now = new Date() } = {}) {
+async function requestBan({
+  cidr,
+  reason,
+  operator,
+  operatorUsername,
+  operatorIp,
+  now = new Date(),
+} = {}) {
   state.requests += 1;
-  sweepPending(now.getTime());
   const normalized = normalizeCIDR(cidr);
   const refused = await refusalOf(normalized, { operatorIp, reason, now });
   if (refused) return refuse(refused, { cidr: normalized || cidr });
@@ -86,10 +100,13 @@ async function requestBan({ cidr, reason, operator, operatorIp, now = new Date()
     cidr: normalized,
     reason,
     operator,
+    // B1：票据同时带 userId 与用户名——确认时刻的审计才不必拿 ObjectId 冒充 username
+    operatorUsername: operatorUsername || null,
     expiresAt: now.getTime() + CONFIRM_TTL_MS,
   };
-  pending.set(ticket.token, ticket);
-  trimPending();
+  // setIfAbsent 原子占位：false 只可能是共享层不可用（按重复处理返回 false），此时拒绝出票（fail-closed，拒绝码借用 unknown_token）
+  const issued = await sharedCache.setIfAbsent(ticketKey(ticket.token), ticket, CONFIRM_TTL_MS);
+  if (!issued) return refuse(CODES.unknown_token, { cidr: normalized });
   return {
     ok: true,
     token: ticket.token,
@@ -100,26 +117,45 @@ async function requestBan({ cidr, reason, operator, operatorIp, now = new Date()
   };
 }
 
+// B3：可靠 outbox 写入（先落 DB、失败转审计 WAL；WAL 未启用时重抛由 asyncHandler 转 500）；条目构造在 ipPoolBanAudit.js
+const writeAuditDurably = async (entry, req) => {
+  try {
+    const persisted = await recordDurably(entry, {
+      auditAction: 'ip_list_change',
+      req,
+    });
+    if (persisted === null) {
+      recordAuditError('ip_blacklist_added', '审计未直写 DB（已转审计 WAL 待重放）');
+    }
+  } catch (e) {
+    recordAuditError('ip_blacklist_added', e);
+    throw e;
+  }
+};
+
 /** 落库并审计。每条如实上报 banned 与否——addToBlacklist 从不抛错，按「没抛异常」记成功会谎报 */
 async function applyBan({
   token,
   typedConfirm,
   operatorIp,
+  req,
   now = new Date(),
   durationMs = DEFAULT_BAN_MS,
   permanent,
-  model,
 } = {}) {
-  const ticket = pending.get(token);
+  // 第一步就是原子取删（getDel）：并发双击确认只有一方拿得到票，取代旧两步形态的双花窗口
+  const ticket = token ? await sharedCache.getDel(ticketKey(String(token))) : null;
   if (!ticket) return refuse(CODES.unknown_token);
   if (now.getTime() > ticket.expiresAt) {
-    pending.delete(token);
+    // 已消费不写回：过期票本就该作废（下次尝试按 unknown_token 拒）
     return refuse(CODES.token_expired, { cidr: ticket.cidr });
   }
   const targets = ticket.cidr.split(',').slice(0, MAX_BATCH);
   const judged = await ticketJudgementRefusal({ ticket, typedConfirm, targets, operatorIp });
-  if (judged) return judged;
-  pending.delete(token);
+  if (judged) {
+    await writeBackTicket(ticket); // 敲错不消耗（ADR-018 ③）：票据原样写回剩余 TTL
+    return judged;
+  }
   // durationMs=0 ⇒ expiresAt=null（永久）。只有显式 permanent 才走永久，缺省走 DEFAULT_BAN_MS：缺省即永久是「漏填即最重」，方向反了（ADR-018 ④）
   const effectiveMs = permanent === true ? 0 : durationMs > 0 ? durationMs : DEFAULT_BAN_MS;
   const results = await Promise.all(
@@ -129,8 +165,7 @@ async function applyBan({
         durationMs: effectiveMs,
         source: 'manual',
       });
-      // blockIP 返回**落库文档**（findOneAndUpdate 结果），不是 {banned:true}；按 r.banned 判
-      // 生效会让 bannedCount 恒 0、审计恒 success:false，而条目其实已落库（ADR-018 踩坑）。
+      // blockIP 返回落库文档（findOneAndUpdate 结果），不是 {banned:true}；按 r.banned 判生效会让计数恒 0
       const banned = Boolean(r && (r.ip || r._id));
       if (!banned) state.failedEntries += 1;
       // created 来自 blockIP 的驱动元数据（$locals，非持久化）：未知/缺省一律按「非本次新建」，回滚侧才敢保守不删
@@ -148,26 +183,14 @@ async function applyBan({
   const rollback = await rollbackIfUnionCoversFamily(results, bannedCount);
   if (rollback) return refuse(CODES.union_covers_family, { cidr: ticket.cidr, ...rollback });
   if (bannedCount) state.applied += 1;
-  const body = {
-    cidr: ticket.cidr,
-    reason: ticket.reason,
-    operator: ticket.operator,
+  const entry = buildAuditEntry({
+    ticket,
+    req,
     results,
     bannedCount,
-  };
-  try {
-    await (model || AuditLog).create({
-      action: 'ip_blacklist_added',
-      category: 'security',
-      username: ticket.operator || 'system',
-      body,
-      success: bannedCount === results.length,
-      riskLevel: 'high',
-    });
-  } catch (e) {
-    state.lastError = errText(e).slice(0, 200);
-    logger.warn(`IP 池封禁审计写入失败（封禁本身已生效，追溯性受损）：${state.lastError}`);
-  }
+    success: bannedCount === results.length,
+  });
+  await writeAuditDurably(entry, req);
   return { ok: true, cidr: ticket.cidr, bannedCount, results };
 }
 
@@ -195,7 +218,14 @@ async function ticketJudgementRefusal({ ticket, typedConfirm, targets, operatorI
   return null;
 }
 
-async function banRecommended({ clusters, operator, operatorIp, reason, now = new Date() } = {}) {
+async function banRecommended({
+  clusters,
+  operator,
+  operatorUsername,
+  operatorIp,
+  reason,
+  now = new Date(),
+} = {}) {
   // 只认 recommendBan + rotate_pool：verdict=shared_egress 的簇照样拿票会误伤整栋楼
   const targets = (clusters || []).filter((c) => c.recommendBan && c.verdict === 'rotate_pool');
   if (!targets.length) return { ok: false, reason: null, empty: true };
@@ -205,6 +235,7 @@ async function banRecommended({ clusters, operator, operatorIp, reason, now = ne
       cidr: c.cidr,
       reason: reason || `ip_pool:${c.verdict}`,
       operator,
+      operatorUsername,
       operatorIp,
       now,
     });
@@ -213,8 +244,7 @@ async function banRecommended({ clusters, operator, operatorIp, reason, now = ne
   return { ok: true, requested };
 }
 
-/** 落库后按数据库现状复检并集：申请与确认是两个时刻，名单在两者之间会变（可能正是另一张票造成的）。
- *  只回滚**本次新建**的条目：命中他人在写前已有的同值条目时那条不是我们写的，删掉等于被拒的操作静默移除一个既有封禁（F-25-8） */
+// 落库后按数据库现状复检并集（申请与确认是两个时刻）；只回滚**本次新建**的条目，删他人既有同值条目等于静默移除既有封禁（F-25-8）
 async function rollbackIfUnionCoversFamily(results, bannedCount) {
   if (!bannedCount) return null;
   const coverage = cidrUnionCoversAll(await ipListService.listActiveEntryIps('black'));
@@ -235,18 +265,20 @@ async function rollbackIfUnionCoversFamily(results, bannedCount) {
   return { rolledBack: rolledBackIds.length, rolledBackIds, skippedExisting: skippedIds.length };
 }
 
-const getPoolBanStats = () => ({ ...state, pending: pending.size });
+const getPoolBanStats = () => ({
+  ...state,
+  // B2：票据外置 sharedCache，进程内无从计数，多实例下本进程数字也代表不了全局——宁可空缺不给假数
+  pending: null,
+});
 const resetPoolBanState = () => {
   state.requests = 0;
   state.applied = 0;
   state.refused = 0;
   state.failedEntries = 0;
-  state.lastError = null;
-  pending.clear();
+  state.lastErrors = [];
 };
 
-/** 封段判据（不含票据/批量语义），供所有同权限位的写入入口共用；全网段/并集不在这里判。
- *  @returns {Promise<string|null>} 拒绝原因，null=可以封 */
+/** 封段判据（不含票据/批量语义），供所有同权限位写入入口共用；全网段/并集不在这里判。@returns {Promise<string|null>} 拒绝原因，null=可以封 */
 async function segmentWriteRefusal({ cidr, operatorIp, typedConfirm, now = new Date() } = {}) {
   if (operatorIp && entryCovers(cidr, operatorIp)) return CODES.operator_inside;
   const live = await liveTraffic.segmentHasLiveTraffic({ cidr, now });
@@ -261,8 +293,8 @@ module.exports = {
   DEFAULT_BAN_MS,
   MAX_BATCH,
   CONFIRM_TTL_MS,
-  PENDING_MAX,
   HIGH_IMPACT_HOSTS,
+  TICKET_KEY_PREFIX,
   hostCountOf,
   needsTypedConfirmation,
   typedConfirmMatches,

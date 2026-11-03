@@ -115,7 +115,13 @@ function expectedRawSize(width, height, depth, colorType) {
   return rowBytes * height;
 }
 
+const readPngIhdrSize = (buffer) => ({
+  width: buffer.readUInt32BE(16),
+  height: buffer.readUInt32BE(20), // IHDR 声明尺寸（offset 16/20 大端 uint32，零分配）：供调用方在结构扫描/解压之前按业务尺寸闸早拒；IHDR 完整语义校验仍在 readPngMeta
+});
+
 function assertIdatDecodable(idat, expected) {
+  expected = Math.min(expected, 16 * 1024 * 1024); // 绝对夹取 16MiB = 1024×1024 RGBA16 ≈8.4MB 的 2 倍余量：合法图无感；对声明巨额宽高的攻击样本，inflateSync 的 maxOutputLength 同步封顶（声明 16384² 不再触发按声明尺寸的解压分配）
   const raw = Buffer.concat(idat);
   let info;
   try {
@@ -148,4 +154,4 @@ function readPngMeta(buffer) {
   return { width, height, hasMetadata: state.hasMetadata, isAnimated: state.isAnimated };
 }
 
-module.exports = { readPngMeta, PNG_SIGNATURE };
+module.exports = { readPngMeta, readPngIhdrSize, PNG_SIGNATURE };

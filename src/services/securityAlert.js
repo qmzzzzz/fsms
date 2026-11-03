@@ -1,6 +1,5 @@
 /**
- * 安全告警服务
- * 监控和响应系统安全事件
+ * 安全告警服务监控和响应系统安全事件
  */
 
 const AuditLog = require('../models/AuditLog');
@@ -52,10 +51,14 @@ const THRESHOLDS = {
 };
 
 /**
- * 自动封禁阶梯（渐进式封禁时长）与其事件计数已迁至 securityAlertIpBans.js：
- * 本文件只消费其导出的 ESCALATION_TIERS / IPBanEvents / resolveIpBanDecision。
+ * 自动封禁阶梯（渐进式封禁时长）与其事件计数已迁至 securityAlertIpBans.js：本文件只消费其导出的 ESCALATION_TIERS / IPBanEvents / resolveIpBanDecision。
  * 迁移理由与「为什么事件源必须是审计」见该模块头注释（行预算：本文件贴 max-lines）。
  */
+
+// 计数动作词表（2026-11-03，P2-7）：'ip_range_denied' 必须计入。此前它既不在本清单，
+// 也不在 loginChallenge.FAILURE_ACTIONS 里 —— 「从被拒 IP 反复探测」整条路径对爆破检测
+// 与挑战闸都隐形，而配了 allowedIPs 的账号正是高价值目标。
+const BRUTE_FORCE_COUNTED_ACTIONS = ['login_failed', 'auth_failed', 'ip_range_denied'];
 
 /**
  * 检测并记录暴力破解攻击
@@ -65,8 +68,7 @@ const checkBruteForce = async (username, ip, attribution = null) => {
 
   // 双维度计数：账户维度 + IP 维度，任一达到阈值即告警
   // 账户维度必须与 User.findByUsername 同口径（大小写不敏感 collation）：
-  // 否则 `Admin` / `admin` / `ADMIN` 各占一个计数桶，攻击者只要轮换大小写，
-  // 同一账户的失败次数就永远到不了阈值，而账户锁定仍按同一个账户生效。
+  // 否则 `Admin` / `admin` / `ADMIN` 各占一个计数桶，攻击者只要轮换大小写，同一账户的失败次数就永远到不了阈值，而账户锁定仍按同一个账户生效。
   // 查询键还要与**写入侧同一把尺**（审计 2026-11-02 B-F-2）：审计行的 username
   // 经 model set 钩子清洗，而 Mongoose 对 filter 不应用 setter——请求方在用户名
   // 前后附加空白/控制字符（如 " admin\u0001"，逐次变化）时原文键恒查 0 行，
@@ -76,12 +78,12 @@ const checkBruteForce = async (username, ip, attribution = null) => {
   const [userFailures, ipFailures] = await Promise.all([
     AuditLog.countDocuments({
       username: usernameKey,
-      action: { $in: ['login_failed', 'auth_failed'] },
+      action: { $in: BRUTE_FORCE_COUNTED_ACTIONS },
       timestamp: { $gte: windowStart },
     }).collation(AuditLog.AUDIT_USERNAME_COLLATION),
     AuditLog.countDocuments({
       ip,
-      action: { $in: ['login_failed', 'auth_failed'] },
+      action: { $in: BRUTE_FORCE_COUNTED_ACTIONS },
       timestamp: { $gte: windowStart },
     }),
   ]);

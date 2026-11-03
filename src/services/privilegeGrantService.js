@@ -1,7 +1,6 @@
 /**
  * 临时权限授予服务（C-08 / C-09）。三条不变量：1. 到期即失效：读侧只取 status=active 且 expiresAt>now，不依赖后台任务；
- * 2. 职责分离：申请人不得自审，高敏授予需两名**不同**审批人（按 by 去重计数，存量同人重复签批一律不采纳），且审批人必须自持拟授予的权限；
- * 3. 变更即失效缓存（否则最长 30 秒旧权限集仍放行）。
+ * 2. 职责分离：申请人不得自审，高敏授予需两名**不同**审批人（按 by 去重计数，存量同人重复签批一律不采纳），且审批人必须自持拟授予的权限；3. 变更即失效缓存（否则最长 30 秒旧权限集仍放行）。
  * A1/A2/A3（2026-10-30）：签批与状态推进改为基于**库内现值**的条件更新；保留通配权限码不得经本通道申请、未登记模块前缀一律判高敏；A4：激活竞态输给驳回/撤销时必须显式 409（旧行为返回 200 + 非 active 文档，被读成「审批成功」）。
  * 到期即失效只由「读侧判定 + 缓存 TTL 收敛到最近到期时刻」这一条腿保证：expireDue 的调用方是独立进程，与在线进程不共享进程内缓存。
  */
@@ -9,6 +8,7 @@
 'use strict';
 
 const PrivilegeGrant = require('../models/PrivilegeGrant');
+const permissionCatalog = require('./permissionCatalog');
 const User = require('../models/User');
 const ApiError = require('../utils/ApiError'); // 业务码只认 utils/errorCodes.js 那份注册表
 const logger = require('../utils/logger');
@@ -41,6 +41,8 @@ async function activeGrantsForUsers(userIds, now = new Date()) {
     if (expiresAt && (!bucket.expiresAt || expiresAt < bucket.expiresAt))
       bucket.expiresAt = expiresAt;
   }
+  // 目录有效性判定收敛在 permissionCatalog（角色路径用的是 populate 的 match，两处同源）
+  await permissionCatalog.dropInactiveGrantCodes(result);
   return result;
 }
 
@@ -110,7 +112,8 @@ async function assertApproverEligible(grant, operator) {
     throw grantError('同一审批人不得重复签批', 409, 'PRIVILEGE_GRANT_NOT_PENDING');
   }
   for (const code of grant.permissionCodes) {
-    const owned = await hasPermission(operator.userId, code);
+    // 只认角色链上的持权（includeGrants:false）：若允许拿自己的临时授权来满足「自持该码」资格，高敏权限就能沿「授予→再授予」链自我扩散——两个各持 168h临时权限的人可以互相凑齐全域双审批。审批资格是职责分离的一部分，不能由被审对象自证。
+    const owned = await hasPermission(operator.userId, code, { includeGrants: false });
     if (!owned) {
       const detail = '审批人须自行持有拟授予的权限：' + code;
       throw grantError(detail, 403, 'PRIVILEGE_APPROVAL_FORBIDDEN');
@@ -138,8 +141,7 @@ const logGrantApproved = (grant) =>
     status: grant.status,
   });
 
-/** 审批：签批与状态推进都是基于**库内现值**的条件更新（filter 里求值 + 文档级串行化），落库成功后才失效权限缓存。
- * 旧实现是读-改-写内存副本：并发下同一审批人可被写进多条签批、两人各签一次后 approvals 有 2 条而 status 仍是 pending——已批准的权限永远不生效，而每个请求都返回成功。 */
+/** 审批：签批与状态推进都是基于**库内现值**的条件更新（filter 里求值 + 文档级串行化），落库成功后才失效权限缓存。旧实现是读-改-写内存副本：并发下同一审批人可被写进多条签批、两人各签一次后 approvals 有 2 条而 status 仍是 pending——已批准的权限永远不生效，而每个请求都返回成功。 */
 async function approveGrant({ grantId, operator }) {
   const operatorId = String(operator.userId);
   const name = operator.username || '';

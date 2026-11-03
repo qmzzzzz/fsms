@@ -2,7 +2,6 @@
 
 /**
  * 最小 xlsx 写入器（零第三方依赖）
- *
  * ## 为什么自己写
  * 报表导出只需要「一张表 + 表头样式 + 列宽 + 工作簿属性」，用不到 exceljs 的读、
  * 公式、图表、合并、数据校验。而 exceljs 的生产依赖链（archiver → archiver-utils →
@@ -178,7 +177,9 @@ const buildCell = (rowNumber, columnIndex, value, style, indexOf) => {
 const buildSheetParts = ({ columns, rows, defaultColWidth }) => {
   const strings = new Map();
   const stringList = [];
+  let refCount = 0; // 实计引用数（E8）：每次把单元格写成 t="s" 时 +1。空单元格走 <c/> 分支、不调用 indexOf，天然不计入——这正是 OOXML 里 count 的本义。
   const indexOf = (value) => {
+    refCount += 1;
     if (!strings.has(value)) {
       strings.set(value, stringList.length);
       stringList.push(value);
@@ -218,21 +219,28 @@ const buildSheetParts = ({ columns, rows, defaultColWidth }) => {
     '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>' +
     '</worksheet>';
 
-  // count 是**引用总数**、uniqueCount 才是去重数：写成两个一样的值，严格的读端会
-  // 按 count 预分配，值偏小虽被容忍，但没有理由留一个不准确的字段。
-  const refs = (rows.length + 1) * columns.length;
+  // count = **实计**的 t="s" 引用数（E8 前按 行数×列数 估算，空值越多偏差越大）；
+  // uniqueCount 是去重数。严格的读端按 count 预分配，两个数现在都是事实值。
   const sharedStringsXml =
     XML_DECL +
-    `<sst xmlns="${NS_MAIN}" count="${refs}" uniqueCount="${stringList.length}">` +
+    `<sst xmlns="${NS_MAIN}" count="${refCount}" uniqueCount="${stringList.length}">` +
     stringList.map((value) => `<si><t xml:space="preserve">${escapeXml(value)}</t></si>`).join('') +
     '</sst>';
 
   return { sheetXml, sharedStringsXml };
 };
 
-/** 行值：对象按 columns 的 key 取序，数组原样（脚注/水印行只给一格） */
+// 行值：对象按 columns 的 key 取序，数组原样（脚注/水印行只给一格）；对象缺列 key 是编程错误——静默写空格会让整列无声变空，fail-fast 且带列名
 const orderValues = (values, columns) => {
   if (Array.isArray(values)) return values;
+  if (!values || typeof values !== 'object') {
+    throw new TypeError(`行值必须是对象或数组，收到 ${values === null ? 'null' : typeof values}`);
+  }
+  for (const column of columns) {
+    if (!Object.prototype.hasOwnProperty.call(values, column.key)) {
+      throw new TypeError(`行值缺少列 key：${column.key}（列「${column.header}」）`);
+    }
+  }
   return columns.map((column) => values[column.key]);
 };
 
@@ -243,7 +251,20 @@ const orderValues = (values, columns) => {
  * @param {number} [options.defaultColWidth]
  * @param {{creator?:string,lastModifiedBy?:string,description?:string,keywords?:string}} [options.props]
  */
+const assertWidthValue = (value, label) => {
+  // 列宽是 OOXML 的数值属性：类型闸在这里做（fail-fast），不靠 XML 层把坏值转义掉
+  if (!Number.isFinite(value) || value <= 0 || value > 255) {
+    throw new TypeError(
+      `${label} 必须是 (0, 255] 内的有限数值，收到 ${JSON.stringify(value) ?? String(value)}`
+    );
+  }
+};
+
 const createWorkbook = ({ sheetName, columns, defaultColWidth = 15, props = {} }) => {
+  assertWidthValue(defaultColWidth, 'defaultColWidth');
+  for (const column of columns || []) {
+    assertWidthValue(column.width, `列「${column.header}」的 width`);
+  }
   const rows = [];
 
   const sheet = {

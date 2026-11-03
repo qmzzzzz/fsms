@@ -32,7 +32,7 @@ const logger = require('./logger');
  *   - `guardDetection` 的文档承诺"永不 reject"（见其 @returns），处理器抛错
  *     直接违背该契约，而调用方全是 `.catch(() => {})` ⇒ TypeError 又被吞掉，
  *     结果是"检测失效 + 零痕迹"，与不修时同形。
- * 取本仓库既有写法（index.js:105、loggerFlush.js:215 errText）。
+ * 取本仓库既有写法（index.js、loggerFlush.js:215 errText）。
  */
 const errText = (err) => (err && err.message ? err.message : err);
 

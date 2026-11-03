@@ -25,8 +25,7 @@ const {
 } = require('./attackProfileClassify');
 const { scoreOf, verdictOf, riskLevelOf, suggestionsOf } = require('./attackProfileVerdict');
 
-// 账号维度只认这两类"输了口令但没进去"的行；MFA 失败/临时锁定是同一攻击的后续阶段，
-// 计失败次数仍用 CREDENTIAL_SET，但"试过哪些账号"只从这两类取，避免系统事件重复计入。
+// 账号维度只认这两类"输了口令但没进去"的行；MFA 失败/临时锁定是同一攻击的后续阶段，// 计失败次数仍用 CREDENTIAL_SET，但"试过哪些账号"只从这两类取，避免系统事件重复计入。
 const ACCOUNT_FAILURE_ACTIONS = new Set(['login_failed', 'auth_failed']);
 
 const increment = (map, key) => {
@@ -235,7 +234,8 @@ const summarizeRows = ({ ip, rows, total, truncated, window, containment, scopeL
     scopeLimited: Boolean(scopeLimited),
     stats: {
       failedRequests: ctx.failedRequests,
-      successfulRequests: rows.length - ctx.failedRequests,
+      // E9②（2026-11-03 改名）：统计口径是「未被拦截的请求」（rows 里 blocked/403 行不占成功），// 旧名 successfulRequests 会让读者把"没被拦"读成"业务成功"；openapi/前端零消费已核实
+      nonBlockedRequests: rows.length - ctx.failedRequests,
       failedLogins: ctx.failedLogins,
       successfulLogins: ctx.successfulLogins,
       distinctAccountsTried: distinctAccounts.size,

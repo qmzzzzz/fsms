@@ -1,8 +1,5 @@
 /**
- * 登录主流程与口令校验
- *
- * 自 authService.js 拆出：取令牌/口令 → 账号可用性判定 → 口令比对与失败计数
- * → MFA 二段（verifyMfaChallenge，见 failureAndMfa.js）→ 签发会话（session.js）。
+ * 登录主流程与口令校验自 authService.js 拆出：取令牌/口令 → 账号可用性判定 → 口令比对与失败计数→ MFA 二段（verifyMfaChallenge，见 failureAndMfa.js）→ 签发会话（session.js）。
  * 哑口令摘要（consumeDummyPasswordTime）也随本文件走：它服务的是「用户不存在」这条登录路径的耗时侧信道，注册路径用不到。
  */
 
@@ -35,8 +32,7 @@ const { credentialShapeOf } = require('../../constants/credentialShape');
 /**
  * 哑口令摘要：用于抹平「用户不存在」与「用户存在但密码错误」的响应耗时差
  *
- * bcryptjs 是纯 JS 实现，12 轮 compare 需数十至上百毫秒。若「用户不存在」路径直接返回、不做任何 compare，攻击者只需比较响应时间即可枚举有效用户名——
- * 统一了文案和错误码，但耗时这条侧信道仍然敞开。
+ * bcryptjs 是纯 JS 实现，12 轮 compare 需数十至上百毫秒。若「用户不存在」路径直接返回、不做任何 compare，攻击者只需比较响应时间即可枚举有效用户名——统一了文案和错误码，但耗时这条侧信道仍然敞开。
  *
  * 摘要在模块加载时一次性生成（随机口令，永不匹配任何真实输入），之后每次「用户不存在」都对它做一次真实 compare，使两条路径的 CPU 开销等价。
  * 惰性生成 + 缓存：避免在模块加载阶段阻塞（bcrypt.hash 同样是重 CPU 操作）。
@@ -300,6 +296,11 @@ async function assertAccountUsable(user, { password, ctx, username, captchaVerif
         riskFactors: ['ip_range_violation'],
         reason: `登录 IP 不在允许范围内（${reason}）`,
       }).catch(() => {});
+      // 同族收口（P2-7）：status 与临时锁定两条分支都调 checkBruteForce，唯独 IP 范围这条漏了——
+      // 从被拒 IP 对配了 allowedIPs 的账号可无限次探测：不触发爆破告警、不累计 IP 封禁、
+      // 不推进 captcha 门。而配了 IP 白名单的恰恰是高价值账号。
+      // 计数口径同步见 securityAlert 的 BRUTE_FORCE_COUNTED_ACTIONS。
+      await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
       // 修复：此前返回 403/AUTH_IP_RANGE_DENIED，构成用户名枚举预言机——
       // 从受限 IP 之外探测即可区分「该账号存在且配了 allowedIPs」。
       // 这与口径（对外一律与「用户名或密码错误」完全一致）自相矛盾：
@@ -330,7 +331,7 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
     await AuditLog.recordLogin(user._id, username, ip, false, userAgent, { fingerprint }).catch(
       onAuditWriteFailure('login_failed_audit', { user: { username } })
     );
-    // B-L1：与上方 214/258 行同口径——checkBruteForce 内的 DB 查询/告警落库若因 DB 瞬断 reject，异常上抛会把统一 401 变成 500（破坏防枚举口径）
+    // B-L1：与上方 210/254 行同口径——checkBruteForce 内的 DB 查询/告警落库若因 DB 瞬断 reject，异常上抛会把统一 401 变成 500（破坏防枚举口径）
     await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
     // 原子递增失败计数（$inc）：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，
     // 丢失更新导致锁定阈值被推迟，利于爆破；$inc 由 DB 保证无丢失更新。

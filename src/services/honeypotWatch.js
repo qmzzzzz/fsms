@@ -11,15 +11,9 @@ const {
   findNameOverlap,
   isHoneypotEnabled,
   isLurePassword,
-  matchHoneypotName,
-  normalizeHoneypotUsername,
+  honeypotNameOf,
   parseHoneypotUsernames,
 } = require('../constants/honeypotAccounts');
-const {
-  DECOY_PERMISSIONS,
-  DECOY_ROLE_CODES,
-  syntheticEmailOf,
-} = require('../constants/honeypotDecoy');
 const { deriveHoneypotPersona } = require('../constants/honeypotPersonas');
 
 const { ALERT_TYPES } = securityAlert; // 审计 action 必须裸 ALERT_TYPES.<KEY>：tests/helpers/auditWriteSites.js 的 resolveActionExpr 只认这一形态
@@ -135,8 +129,7 @@ async function recordHoneypotLogin({
   attribution,
   credentialShape,
 } = {}) {
-  const honeypot =
-    matchHoneypotName(username) || normalizeHoneypotUsername(username) || String(username ?? '');
+  const honeypot = honeypotNameOf(username);
   const punishTarget = resolvePunishTarget(attribution, ip);
   const normalizedIp = normalizeIP(punishTarget) || punishTarget;
   try {
@@ -180,9 +173,13 @@ async function recordHoneypotLogin({
 
 async function recordHoneypotSocketProbe(username, socket) {
   // WS 侧留痕：推送通道的建立企图与 HTTP 探测同表（action 同值、风险等级 critical）
-  const honeypot =
-    matchHoneypotName(username) || normalizeHoneypotUsername(username) || String(username ?? '');
-  const ip = normalizeIP(socket && socket.handshake && socket.handshake.address) || null;
+  const honeypot = honeypotNameOf(username);
+  const {
+    resolveHandshakeIPForSecurityDecision: wsSecIp,
+    resolveTrustProxyHops: wsHops,
+  } = require('./websocketService/handshake'); // 惰性：handshake.js 顶部反向依赖本模块（isHoneypotSocket），加载期互引会成环
+  const hs = socket && socket.handshake;
+  const ip = normalizeIP(hs ? wsSecIp(hs, wsHops()) : null) || null;
   try {
     await AuditLog.create({
       action: ALERT_TYPES.HONEYPOT_PROBE,
@@ -226,24 +223,21 @@ function isHoneypotSocket(freshUser, socket) {
   return true;
 }
 
-function decorateLureSession(result) {
-  // 诱饵会话的呈现层：把「零角色」换成合成角色/权限，只为不让攻击者一眼看穿；授权判定不看它（真实请求全被 honeypotDecoy 接管）
-  if (!result || !result.user) return result;
-  return {
-    ...result,
-    user: {
-      ...result.user,
-      email: syntheticEmailOf(result.user.username), // 呈现层邮箱：库里那份 @honeypot.invalid 只给防守方看（导出/备份里一眼可辨）
-      roles: [...DECOY_ROLE_CODES],
-      permissions: [...DECOY_PERMISSIONS],
-    },
-  };
-}
+const { decorateLureSession } = require('./honeypotLurePresentation');
 
-async function recordHoneypotProbe({ username, method, path, verdict, writeAttempt, ip } = {}) {
-  const honeypot =
-    matchHoneypotName(username) || normalizeHoneypotUsername(username) || String(username ?? '');
-  const normalizedIp = normalizeIP(ip) || ip;
+async function recordHoneypotProbe({
+  username,
+  method,
+  path,
+  verdict,
+  writeAttempt,
+  ip,
+  attribution,
+} = {}) {
+  const honeypot = honeypotNameOf(username);
+  // F1：惩罚/留痕目标按 resolvePunishableIp 的裁定取（punishIp）；PUBLIC_PEER_HEADER 下 punishIp 已是 socket 对端——伪造 XFF 的探测不再落到受害者 IP 名下
+  const punishTarget = resolvePunishTarget(attribution, ip);
+  const normalizedIp = normalizeIP(punishTarget) || punishTarget;
   try {
     await AuditLog.create({
       action: ALERT_TYPES.HONEYPOT_PROBE,
@@ -257,6 +251,7 @@ async function recordHoneypotProbe({ username, method, path, verdict, writeAttem
       riskFactors: [
         writeAttempt ? 'honeypot_account_write_attempt' : 'honeypot_account_probe',
         'deceptive_account_interaction',
+        ...ipAttributionRiskFactors(attribution && attribution.kind),
       ],
       reason: 'honeypot_account_probe',
       body: { honeypot, verdict },
@@ -270,21 +265,25 @@ async function recordHoneypotProbe({ username, method, path, verdict, writeAttem
   if (!securityAlert.shouldSendAlert(throttleKey)) return;
   if (notifiedDayByHoneypot.get(throttleKey) === dayWindow) return;
   notifiedDayByHoneypot.set(throttleKey, dayWindow); // 与登录告警共用同一张当日表（键含类别，互不挤占）
+  const actionText = writeAttempt ? '尝试写入' : '读取';
+  const alertText =
+    "蜜罐账户 '" + username + "' 在陷阱会话中" + actionText + '：' + method + ' ' + path;
+  const alertMeta = { honeypot, method, path, verdict, ip: normalizedIp };
   if (writeAttempt) {
     securityAlert.dispatchNotification(
       securityAlert.ALERT_TYPES.HONEYPOT_PROBE,
       securityAlert.ALERT_LEVELS.CRITICAL,
-      "蜜罐账户 '" + username + "' 在陷阱会话中尝试写入：" + method + ' ' + path,
-      { honeypot, method, path, verdict, ip: normalizedIp }
+      alertText,
+      alertMeta
     );
-    return;
+  } else {
+    securityAlert.dispatchNotification(
+      securityAlert.ALERT_TYPES.HONEYPOT_PROBE,
+      securityAlert.ALERT_LEVELS.HIGH,
+      alertText,
+      alertMeta
+    );
   }
-  securityAlert.dispatchNotification(
-    securityAlert.ALERT_TYPES.HONEYPOT_PROBE,
-    securityAlert.ALERT_LEVELS.HIGH,
-    "蜜罐账户 '" + username + "' 在陷阱会话中读取：" + method + ' ' + path,
-    { honeypot, method, path, verdict, ip: normalizedIp }
-  );
 }
 
 function getStatus() {

@@ -10,7 +10,13 @@ const { resolvePunishableIp } = require('../utils/ipUtils');
 const userPermissionService = require('../services/userPermissionService');
 // 数据范围三件套独立成叶子模块（避免 auditScopeFilter 为了 getDataScope
 // 反向拉入本文件顶部的告警服务，见 dataScope.js 头注释）；本文件原样再导出。
-const { getDataScope, deniedDataScope, isDataScopeDenied } = require('./dataScope');
+// E7：getDataScopeForRequest 是 HTTP 主链的入口（按请求记忆化，见 dataScope.js）。
+const {
+  getDataScope,
+  getDataScopeForRequest,
+  deniedDataScope,
+  isDataScopeDenied,
+} = require('./dataScope');
 
 /**
  * 权限检查中间件工厂
@@ -94,15 +100,12 @@ const checkPermission = (requiredPermissions, logic = 'OR') => {
 };
 
 /**
- * 查看他人敏感信息需 system:read；查看本人敏感信息则免鉴权（#9）
+ * 查看他人敏感信息需 system:read；查看本人敏感信息则免鉴权（#9）。
  *
- * 背景（评价报告 #9）：/api/security/view-sensitive 原实现一律要求
- * system:read，但控制器查询的是调用者本人数据（controllers/securityController/sensitive.js:89
- * `User.findById(req.user.userId)`），普通角色（消防员/访客）查看本人
- * 手机号/邮箱也拿不到该权限 → 403。正确口径是：
- *   - 本人查看 → 放行（数据范围即本人，二次验证已由 requireReAuthentication 兜底）
- *   - 查看他人（请求体带 targetUserId）→ 需要 system:read
- * 注意：超管持有 *:* 恒通过（上方 checkPermission 顶层已处理），不受影响。
+ * 背景（评价报告 #9）：/api/security/view-sensitive 原实现一律要求 system:read，但控制器查询的是
+ * 调用者本人数据（User.findById(req.user.userId)），普通角色查看本人手机号/邮箱也 403。正确口径：
+ * 本人查看放行（数据范围即本人，二次验证已由 requireReAuthentication 兜底）；查看他人（请求体带
+ * targetUserId）需要 system:read。超管 *:* 恒通过（上方 checkPermission 顶层已处理），不受影响。
  */
 const checkViewSensitivePermission = async (req, res, next) => {
   try {
@@ -309,7 +312,8 @@ const buildRecordScopeFilter = (dataScope, { ownerField, departmentField, userId
  * @returns {Promise<{allowed: boolean, dataScope: Object}>}
  */
 const assertRecordInScope = async (req, doc, ownerField, departmentField) => {
-  const dataScope = await getDataScope(req.user.userId);
+  // E7：经 req 可达 ⇒ 走按请求记忆化的入口，与同请求主链共享同一次范围查询
+  const dataScope = await getDataScopeForRequest(req, req.user.userId);
   const allowed = isRecordInScope(dataScope, doc, {
     ownerField,
     departmentField,
@@ -417,6 +421,7 @@ module.exports = {
   checkPermission,
   checkViewSensitivePermission,
   getDataScope,
+  getDataScopeForRequest,
   buildDataScopeFilter,
   applyDataScopeToQuery,
   isDataScopeDenied,

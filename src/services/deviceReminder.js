@@ -1,10 +1,5 @@
 /**
- * 设备到期/维护提醒服务
- * 周期性扫描到期设备与待维护设备，生成提醒记录并写入审计日志，
- * 供前端首页与消息中心展示。
- *
- * 提醒维度：
- *   - expiringSoon 即将到期（默认 30 天内）
+ * 设备到期/维护提醒服务周期性扫描到期设备与待维护设备，生成提醒记录并写入审计日志，供前端首页与消息中心展示。提醒维度：  - expiringSoon 即将到期（默认 30 天内）
  *   - expired     已过期仍在册
  *   - needMaintenance 超过检查周期未维护
  *   - needSchedule 从未录入过检查日、因而根本没有排期的设备
@@ -15,6 +10,7 @@
 
 const FireDevice = require('../models/FireDevice');
 const logger = require('../utils/logger');
+const { withListBudget } = require('../utils/queryBudget');
 const { deviceAlertFilters } = require('../constants/deviceAlerts');
 // 与 reportDashboardService 的「事实逾期」统计共用同一份派生清单（F-151）：两边各写一遍时，看板会
 // 统计出调度器永不改写的超期数（或反过来漏计），而漏计在看板上显示为「没有超期」——静默的负结果。
@@ -45,18 +41,29 @@ let isScanning = false;
  * 而漏掉的那一处不会报错，只会让某一档的计数继续假装是总数。
  */
 const ALERT_BUCKETS = [
-  ['expired', 'expiryDate', 'deviceCode deviceName deviceType location expiryDate status'],
-  ['expiringSoon', 'expiryDate', 'deviceCode deviceName deviceType location expiryDate status'],
+  // E5：expired/expiringSoon 按 {expiryDate:1,_id:1}（复合索引见 models/FireDevice.js，
+  // 迁移 20261103000000）；needMaintenance 按 {nextCheckDate:1,installDate:1,_id:1}
+  //（既有三键索引，零新增写放大）；needSchedule 维持 {installDate:1,_id:1}。
+  [
+    'expired',
+    { expiryDate: 1, _id: 1 },
+    'deviceCode deviceName deviceType location expiryDate status',
+  ],
+  [
+    'expiringSoon',
+    { expiryDate: 1, _id: 1 },
+    'deviceCode deviceName deviceType location expiryDate status',
+  ],
   [
     'needMaintenance',
-    'nextCheckDate',
+    { nextCheckDate: 1, installDate: 1, _id: 1 },
     'deviceCode deviceName deviceType location nextCheckDate status',
   ],
   // 从未做过检查 ⇒ 没有排期 ⇒ $lte 判据永不命中。
   // 这一档存在的理由就是：一台装好多年的设备可以在所有出口里永久隐身。
   [
     'needSchedule',
-    'installDate',
+    { installDate: 1, _id: 1 },
     'deviceCode deviceName deviceType location installDate checkCycle status',
   ],
 ];
@@ -119,14 +126,16 @@ const scanDeviceReminders = async (options = {}) => {
     // 四档串行发出（不是 Promise.all）：同一次响应里的判定时刻已经由上面的 `alert` 唯一确定，
     // 并发只是把「互斥锁命中」时的在途查询数从 1 变成 4，那是另一条线在钉的性质。
     const pages = [];
-    for (const [key, sortKey, projection] of ALERT_BUCKETS) {
+    for (const [key, sortSpec, projection] of ALERT_BUCKETS) {
       // `_id` 次序键不是装饰：四个档的排序键都是**大量同值**的日期（批量采购的到期日相同，
       // 从未检查过的设备 nextCheckDate 整档全为 null），而同值页取前 resultLimit 条时
       // 没有次序键就是"同一次查询两次给出不同成员"。与 AlarmService/InspectionService/
       // auditQueryService 的列表排序同规（全仓 11 处都带，这里原先是唯一漏网的）。
-      const docs = await FireDevice.find({ ...base, ...alert[key] })
+      // E5：withListBudget 与其余列表读同一预算口径——四档串行 full-window 扫描
+      // 不该是仅有的无 maxTimeMS 预算的设备读路径。
+      const docs = await withListBudget(FireDevice.find({ ...base, ...alert[key] }))
         .select(projection)
-        .sort({ [sortKey]: 1, _id: 1 })
+        .sort(sortSpec)
         .limit(resultLimit + 1);
       pages.push({
         key,

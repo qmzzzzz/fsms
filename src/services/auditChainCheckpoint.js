@@ -1,31 +1,23 @@
 /**
- * 审计哈希链签名检查点（2026-10-20，审计 S-8 / P2-7）
+ * 审计哈希链签名检查点（2026-10-20，审计 S-8 / P2-7）。
  *
- * 哈希链能防「改/删」，但不能防「在已知锚点后插枝」：滑动窗口只要求 prevHash
- * 命中近期任一 hash，插入一条 prevHash 指向链中已有 hash 的伪造记录，链重算与
- * 链接检查都会放过（见 auditChainVerify.js「已知检出上限」）。另外，**尾部截断**
- * （删掉最新若干条）在纯链内校验里同样不可见——链仍自洽。
+ * 哈希链能防「改/删」，但不能防「在已知锚点后插枝」：滑动窗口只要求 prevHash 命中近期任一
+ * hash，插入伪造记录后链重算与链接检查都会放过（见 auditChainVerify.js「已知检出上限」）。
+ * **尾部截断**（删掉最新若干条）在纯链内校验里同样不可见——链仍自洽。
  *
- * 本模块把「某个时刻的链尾」固化成**带 HMAC 签名的检查点**。链尾定义是「库里没有
- * 任何记录把它当作 prevHash」，**不是「_id 最大」**：`auditBuffer.push` 在 push 时
- * 预分配 `_id`（F-143），久候批次的 `_id` 小于其后直写的记录 ⇒ `_id` 序 ≠ 追加序。
- * 核验时重算签名、比对头部 hash/hmac，再从当前链尾沿 prevHash 回溯找 headId：
- *   · 替换/改写头部 ⇒ hash 或 hmac 失配；
- *   · 截断到检查点之前（含删掉头部本身）⇒ 回溯到链头仍见不到 ⇒ tail_rolled_back；
- *   · 回溯 TAIL_WALK_LIMIT 步仍未见到 ⇒ tail_unverifiable（不静默绿，也不假红）；
- *   · 改检查点文件本身 ⇒ 没密钥签不出来 ⇒ signature_invalid。
- * `recordCount` 只是**创建时的估算**（哈希记录数），不参与任何判红：TTL 裁剪与迟到
- * 批写都会让它与库对不上，当判据在诚实库上必误报。v1 存量仍按 v1 口径验，标 degraded。
+ * 本模块把「某个时刻的链尾」固化成**带 HMAC 签名的检查点**。链尾定义是「库里没有任何记录把它
+ * 当作 prevHash」，**不是「_id 最大」**：auditBuffer.push 在 push 时预分配 _id（F-143），久候
+ * 批次的 _id 小于其后直写的记录 ⇒ _id 序 ≠ 追加序。核验时重算签名、比对头部 hash/hmac，再从
+ * 当前链尾沿 prevHash 回溯找 headId：替换/改写头部 ⇒ hash 或 hmac 失配；截断到检查点之前 ⇒
+ * tail_rolled_back；回溯 TAIL_WALK_LIMIT 步仍未见到 ⇒ tail_unverifiable（不静默绿，也不假红）；
+ * 改检查点文件本身 ⇒ 没密钥签不出来 ⇒ signature_invalid。`recordCount` 只是创建时的估算，不参与
+ * 任何判红（TTL 裁剪与迟到批写都会让它与库对不上）；v1 存量仍按 v1 口径验，标 degraded。
  *
- * 能力边界（如实记录，不得读成「完整防篡改」）：检查点文件默认落在本机 logs/，
- * **能同时改 Mongo 与该文件的人**可以重写两者；真正的外部锚定要把文件周期性复制到
- * WORM/对象存储/时间戳服务（传输由 `auditAnchorSink`，双向比对由本模块 `compareAnchors`，
- * 2026-10-24 补）——缺任一半，「改链 → 删文件 → 重新 create」仍成立且不需要密钥。
- *   · 两检查点之间插入的分支靠 auditChainVerify 的一父两子与外锚比对判定（旧计数判据
- *     在诚实库上误报）；检查点越频繁，可检出窗口越小。
- *   · 检查点**之后**新增又删掉的记录无法被这一条锚点发现（链尾仍等于锚点）——纯锚点
- *     固有边界，需要更晚的检查点或把计数差与外部留存比对才能收窄。
- *   · 未配置 HMAC_SECRET 时**拒绝创建**（无密钥的检查点等于一张可随意重写的便条）。
+ * 能力边界（不得读成「完整防篡改」）：检查点文件默认落在本机 logs/，**能同时改 Mongo 与该
+ * 文件的人**可以重写两者；真正的外部锚定要把文件周期性复制到 WORM/对象存储/时间戳服务（传输由
+ * auditAnchorSink，双向比对由 compareAnchors）——缺任一半，「改链 → 删文件 → 重新 create」仍
+ * 成立。两检查点之间插入的分支靠 auditChainVerify 的一父两子与外锚比对判定；检查点之后新增又
+ * 删掉的记录无法被这一条锚点发现（纯锚点固有边界）。未配置 HMAC_SECRET 时**拒绝创建**。
  */
 
 'use strict';
@@ -34,6 +26,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { getLatestHash } = require('../utils/auditChainTail');
+// 新鲜度臂的判据与 env 读法独立成叶子模块（体积棘轮：本文件代码行数顶在 300，见其文件头）
+const { freshnessBudgetMs, pushStaleIfAny } = require('./auditCheckpointFreshness');
 
 const DEFAULT_CHECKPOINT_FILE = path.join(
   path.resolve(__dirname, '..', '..'),
@@ -327,11 +321,13 @@ function compareAnchors({ localEntries = [], externalAnchors = [], secret } = {}
  *
  * `externalAnchors` 为 `undefined` 时不比对（向后兼容，输出形状与旧版逐字一致）；
  * 传入数组（含空数组）才比对——空数组会被判 `no_external_anchors` 而非通过。
+ * `now` 可注入当前时间（测试用）；新鲜度臂只在「有可验检查点」时生效——集合为空走
+ * no_checkpoints 判红臂，不因新鲜度重复报红。degraded 不影响 ok，但脚本侧据此退 3。
  *
  * @returns {Promise<{ok: boolean, checked: number, errors: Array<{line:number|null,type:string,message:string}>,
  *   anchors?: {compared:number, pending:number, externalValid:number}}>}
  */
-async function verifyCheckpoints({ model, filePath, secret, externalAnchors } = {}) {
+async function verifyCheckpoints({ model, filePath, secret, externalAnchors, now } = {}) {
   const hmacSecret = hmacSecretOf(secret);
   const AuditLog = model || require('../models/AuditLog');
   const errors = [];
@@ -384,6 +380,10 @@ async function verifyCheckpoints({ model, filePath, secret, externalAnchors } = 
     previous = { line, record };
   }
   await checkTail(AuditLog, previous && previous.record, errors, degraded);
+
+  // 新鲜度臂（degraded 档）：最近一个**签名有效**的检查点距今超预算 ⇒ create 疑似停摆。
+  // 判据、env 读法与"空集合不重复报"的边界见 services/auditCheckpointFreshness.js。
+  pushStaleIfAny(degraded, previous, now, freshnessBudgetMs());
 
   return assemble(errors, entries.length);
 

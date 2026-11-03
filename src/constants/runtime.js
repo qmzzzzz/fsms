@@ -159,8 +159,10 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
   },
   {
     module: 'services/ipPoolBan.js',
-    mechanism: '待确认封禁票据表（pending Map，票与 CIDR 绑死、10 分钟失效、一次性）',
-    impact: '各进程只认自己签发的票，多实例下确认需重走申请；不落库是为保住一次性语义',
+    mechanism:
+      '待确认封禁票据表（T6-2 外置 sharedCache：setIfAbsent/getDel 原子一次性，10 分钟 TTL）',
+    impact: 'Redis 就绪时票据跨实例一致；未就绪时回退进程内实现（各实例只认自己的票）',
+    redisExternalized: true,
   },
   {
     module: 'services/forensicTrigger.js',
@@ -419,12 +421,9 @@ function assertSingleProcessAssumptions() {
   // 懒加载：避免在模块加载期耦合共享缓存（其初始化在启动流程中显式完成）
   const redisReady = sharedCacheReady();
 
-  const stillSingle = SINGLE_PROCESS_DEPENDENCIES.filter(
-    (d) => !(redisReady && d.redisExternalized)
-  );
-  const externalized = redisReady
-    ? SINGLE_PROCESS_DEPENDENCIES.filter((d) => d.redisExternalized)
-    : [];
+  const byExternalized = (d) => d.redisExternalized;
+  const stillSingle = SINGLE_PROCESS_DEPENDENCIES.filter((d) => !(redisReady && byExternalized(d)));
+  const externalized = redisReady ? SINGLE_PROCESS_DEPENDENCIES.filter(byExternalized) : [];
 
   const suspected = result.suspected;
   let message = suspected

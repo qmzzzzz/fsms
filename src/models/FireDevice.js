@@ -163,16 +163,12 @@ const fireDeviceSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-    // 本模型的三条写路径都是"读快照 → 改内存 → save()"，而 save() 的 filter 默认只有
-    // _id ⇒ 后写者无条件覆盖先写者。可观察后果有三个（都实测复现过）：
-    //   · 已报废设备被另一路拿着报废前快照的请求改回在用（status 翻回非 scrapped，
-    //     而提醒/报表的排除集只看 status ⇒ 报废的灭火器重新出现在待更换五档里）；
-    //   · 重复报废覆盖原始 scrapDate/scrapReason（审计上等于篡改报废时间）；
-    //   · maintenanceRecordCount 的"+1"是绝对覆盖 ⇒ 计数与数组长度分叉，
-    //     而"count > length"恰是数组被截断这一事实的唯一载体。
-    // 开版本守卫后 save() 的 filter 带上加载时读到的 __v，冲突方抛 VersionError，
-    // 由 errorHandler 统一映射为 400。这与 InspectionService 的"前态条件写"是同一口径，
-    // 只是判定交给驱动而不是应用层——好处是所有 pre-save 钩子与校验器照旧生效。
+    // 本模型的三条写路径都是"读快照 → 改内存 → save()"，而 save() 的 filter 默认只有 _id
+    // ⇒ 后写者无条件覆盖先写者。可观察后果（都实测复现过）：已报废设备被拿着旧快照的请求改回
+    // 在用；重复报废覆盖原始 scrapDate/scrapReason（审计上等于篡改报废时间）；maintenanceRecordCount
+    // 的"+1"是绝对覆盖 ⇒ 计数与数组长度分叉。开版本守卫后 save() 的 filter 带上加载时读到的 __v，
+    // 冲突方抛 VersionError，由 errorHandler 统一映射为 400（与 InspectionService 的「前态条件写」
+    // 同一口径，只是判定交给驱动——所有 pre-save 钩子与校验器照旧生效）。
     optimisticConcurrency: true,
   }
 );
@@ -183,7 +179,10 @@ fireDeviceSchema.index({ createdBy: 1 });
 fireDeviceSchema.index({ 'maintenanceRecord.operator': 1 });
 fireDeviceSchema.index({ 'location.building': 1, 'location.floor': 1 });
 fireDeviceSchema.index({ lifecycleStage: 1, status: 1 });
-fireDeviceSchema.index({ expiryDate: 1 });
+// 提醒扫描的 expired/expiringSoon 两档按 {expiryDate:1,_id:1} 升序（E5 补平局键）：
+// 到期日是**大量同值**的日期（批量采购同批到期），单键索引的等值块内仍要阻塞排序；
+// _id 平局键同时钉死「同一次查询两次给出不同成员」的漂移。
+fireDeviceSchema.index({ expiryDate: 1, _id: 1 });
 // 设备列表的「状态筛选 + deviceCode 排序」高频组合：仅有 deviceCode 单字段索引时，
 // 带 status 的查询要在索引里回表过滤，数据量上来后退化为扫描大量非命中项。
 fireDeviceSchema.index({ status: 1, deviceCode: 1 });

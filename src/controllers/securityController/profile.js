@@ -1,12 +1,9 @@
 /**
- * 安全管理控制器 · 撞库画像读口（ADR-013「P2 情报」）
- *
- * 读档与 /alerts、/audit-logs 同源：security:audit + 二次验证票据，数据范围同样交
- * applyAuditDataScope 收口，不新增权限码。**已知且有意接受的副作用**：蜜罐审计行不带 userId
- * （陷阱账号不是真实业务主体），而 self / department 两档的谓词正是按 userId 过滤 —— 这两档
- * 拿到的画像恒为空。空表不许冒充「没有攻击」：出口回传 minSamples 与调用者自己的
- * dataScopeType（调用者的范围不是秘密：/api/auth/me 已经在回传它）。
- * 本文件不得直接 require 任何 src/models/ 路径（layeringRatchet 对新控制器文件零容忍）。
+ * 安全管理控制器 · 撞库画像读口（ADR-013「P2 情报」）。读档与 /alerts、/audit-logs 同源：
+ * security:audit + 二次验证票据，数据范围交 applyAuditDataScope 收口，不新增权限码。**已知且有意接受
+ * 的副作用**：蜜罐审计行不带 userId（陷阱账号不是真实业务主体），self/department 两档的谓词按 userId 过滤
+ * ⇒ 这两档画像恒为空；空表不许冒充「没有攻击」，出口回传 minSamples 与调用者自己的 dataScopeType
+ * （/api/auth/me 已在回传它）。本文件不得直接 require 任何 src/models/ 路径（layeringRatchet 零容忍）。
  */
 
 const ApiResponse = require('../../utils/apiResponse');
@@ -57,6 +54,11 @@ const readBusinessDay = (value) => {
         minSamples: MIN_SAMPLES,
         count: profile.entries.length,
         dataScopeType: dataScope.type,
+        // E4：读侧行数上限自述——truncated=true 表示窗口内命中超过采样上限，
+        // 画像只覆盖最近采样到的 sampledRows 行（total 为窗口内命中总数）
+        total: profile.total,
+        sampledRows: profile.sampledRows,
+        truncated: profile.truncated,
       },
       '获取成功'
     );

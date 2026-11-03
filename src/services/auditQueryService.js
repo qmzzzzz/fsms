@@ -1,7 +1,5 @@
 /**
- * 审计日志控制器（D-1 自 securityController 拆出）
- *
- * 审计日志的查询、流式导出（CSV + 签名 manifest）与哈希链完整性校验。
+ * 审计日志控制器（D-1 自 securityController 拆出）审计日志的查询、流式导出（CSV + 签名 manifest）与哈希链完整性校验。
  * action 白名单枚举以 constants/audit.js 为单一事实来源。
  */
 
@@ -9,7 +7,7 @@ const AuditLog = require('../models/AuditLog');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { listCountOptions } = require('../utils/queryBudget');
+const { listCountOptions, listAggregateOptions } = require('../utils/queryBudget');
 const { normalizePagination } = require('../utils/helpers');
 // riskLevel 汇总的 TTL 缓存底座（同一份缓存口径，不再另造一个 Map）
 const statsCache = require('./statsCache');
@@ -133,7 +131,12 @@ const summarizeByRiskLevel = async (query, collation) => {
   // 缓存键无需并入 collation：collation 由 query 自身决定（含 username 前缀条件时才带），
   // 同一个 query 不可能对应两种 collation。
   const agg = await withCollation(
-    AuditLog.aggregate([{ $match: query }, { $group: { _id: '$riskLevel', count: { $sum: 1 } } }]),
+    // 第二参走预算袋（与 listCountOptions 同法）：汇总 $group 与分页 find 扫同样的
+    // 谓词，不该只有取页那条路径带 maxTimeMS 预算
+    AuditLog.aggregate(
+      [{ $match: query }, { $group: { _id: '$riskLevel', count: { $sum: 1 } } }],
+      listAggregateOptions()
+    ),
     collation
   );
   if (key) statsCache.set(key, agg, SUMMARY_CACHE_TTL_SEC);
@@ -148,7 +151,7 @@ const fetchAuditCursorPage = (cursorQuery, query, limitNum, collation) =>
   Promise.all([
     withCollation(
       AuditLog.find(cursorQuery)
-        .populate('userId', 'username realName')
+        .populate('userId', 'username') // 投影只取 username：审计出口不需要 realName 明文（姓名属 PII，带整段用户文档等于再开一条明文出口）
         // `_id` 次级排序键与续翻子句 `{timestamp:v,_id:{$lt:id}}` 同向；缺它则同一毫秒
         // 内的审计记录整块跨页漂移（索引见 models/AuditLog.js）
         .sort({ timestamp: -1, _id: -1 })
@@ -164,7 +167,7 @@ const fetchAuditOffsetPage = (query, skip, limitNum, collation) =>
   Promise.all([
     withCollation(
       AuditLog.find(query)
-        .populate('userId', 'username realName')
+        .populate('userId', 'username') // 与游标分支同口径：不带 realName（理由见游标分支尾注）
         // 与游标分支同向：本页末条要拿去 mint nextCursor
         .sort({ timestamp: -1, _id: -1 })
         .skip(skip)

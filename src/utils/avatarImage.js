@@ -4,7 +4,7 @@
 
 const crypto = require('crypto');
 const { AvatarImageError } = require('./avatarImageError');
-const { readPngMeta, PNG_SIGNATURE } = require('./pngStructure');
+const { readPngMeta, readPngIhdrSize, PNG_SIGNATURE } = require('./pngStructure');
 
 // 原始二进制上限：256 KiB（512×512 JPEG q0.85 的约 3 倍余量）
 const MAX_AVATAR_BYTES = 256 * 1024;
@@ -285,7 +285,14 @@ function parseAvatarImage(image) {
     throw new AvatarImageError('图片实际格式与声明不一致', 'MAGIC_MISMATCH');
   }
 
-  const meta = sniffed === 'image/jpeg' ? readJpegMeta(buffer) : readPngMeta(buffer);
+  let meta;
+  if (sniffed === 'image/jpeg') {
+    meta = readJpegMeta(buffer); // JPEG 分支不动：SOF 尺寸在逐段扫描里读出，无"按声明尺寸预分配"的放大面
+  } else {
+    const declared = readPngIhdrSize(buffer); // PNG 先按 IHDR 声明尺寸（零分配）过业务尺寸闸早拒再进解压——否则要等按声明尺寸的巨额 maxOutputLength 在 inflateSync 上撞满才报错（expected 另有 16MiB 绝对夹取兜底）
+    assertDimensionAllowed(declared.width, declared.height);
+    meta = readPngMeta(buffer);
+  }
   assertFeatureAllowed(meta);
   assertDimensionAllowed(meta.width, meta.height);
 

@@ -189,6 +189,12 @@ const OTHER_ALERT_SIGNALS = Object.freeze([
     why: '审计链哈希计算失败 ⇒ 链完整性受影响',
   },
   {
+    type: 'audit_hash_compute_failed',
+    file: 'models/auditLogHooks.js',
+    level: 'high',
+    why: '同上条同 type、逐条写入侧：单条文档盖章（pre-save 哈希链）失败时进同一告警面（与批量路径同档）。此前是采集盲区——调用点曾是跨行实参形态，按行匹配的采集器看不见它；全文匹配修复后现身，按 type@file 补登记（2026-11-03）。',
+  },
+  {
     type: 'legacy_cbc_decrypt_enabled',
     file: 'config/legacyCbcGuard.js',
     level: 'high',
@@ -259,6 +265,36 @@ const OTHER_ALERT_SIGNALS = Object.freeze([
     file: 'middleware/idempotency.js',
     level: 'medium',
     why: '同键的在途记录超过租约（5 分钟）仍没有结论 ⇒ 按「上一次受理已中断（进程被杀/部署重启/永久挂起）」原子接管并**按首次提交重新执行一次**：键不再钉满 24h（ADR-014 决策 7），代价是「上一次若其实已落库，这一次就是重复写入」而调用方对此无感。归信号段而不进 FAIL_OPEN_SITES：护栏没有失效，只是「没有已交付的结论可回放」这种形状超出了判据的定义域；但重复写入是静默的，必须能从计数看见（同 idempotency_degraded 的纪律）。',
+  },
+  {
+    type: 'admin_initial_password_write_failed',
+    file: 'services/initData/adminAccount.js',
+    level: 'high',
+    why: '启动期：默认管理员初始口令文件写入失败（B7 补登记，2026-11-03）。此前是「隐形 type」——调用点实参跨行，采集器按行匹配看不见它，台账与告警双侧都缺席。事件是 fail-closed 回滚：口令只存在于内存、进程退出即丢失，运维拿不到凭据且启动中止。归信号段而非 FAIL_OPEN_SITES：没有"未恢复即持续放行"的护栏失效语义，是启动期单次事件（一次部署最多 +1）；告警由专条 AdminInitialPasswordGuard 承担（for: 0m，increase>0 即发）——对 SecurityAlertBurst（≥10 条/10min）单次事件永不达标，速率型规则等于没有告警。',
+  },
+  {
+    type: 'admin_initial_password_permission_not_tightened',
+    file: 'services/initData/adminAccount.js',
+    level: 'high',
+    why: '启动期：初始口令文件权限收紧后回读复核未通过（B7 补登记，2026-11-03；同为跨行实参的隐形 type）。后果是明文管理员口令文件对同机其他账户可读，且已按回滚处理（删除文件并中止本次管理员创建；删除也失败时文件仍在盘上）。归信号段而非 FAIL_OPEN_SITES：同上——这是"这一次部署的既成事实"，不是依赖降级；告警同由 AdminInitialPasswordGuard 专条承担，处置动作（确认 ADMIN_INITIAL_PASSWORD 与文件权限、必要时手动删除残留文件）写在该规则的 annotations 里。',
+  },
+  {
+    type: 'ban_ladder_degraded',
+    file: 'services/securityAlertIpBans.js',
+    level: 'medium',
+    why: '自动封禁阶梯统计失败（B8，2026-11-03）：暴力破解链的 countPrior/countPriorOffenses 抛错时按第一档处理（宁少勿滥），但「阶梯事件源查不了」意味着反复触发的 IP 恒被封 1h 而告警面零信号——退化只写 error 日志，日志不是告警面（同 rateLimitStore.js:53 纪律）。归信号段而非 FAIL_OPEN_SITES：护栏（封禁动作）仍在执行且方向是更严不是放行，缺的是档位精度；单次退化只 +1，对速率型规则永不达标，由专条 BanLadderDegraded（for: 0m）承担。',
+  },
+  {
+    type: 'ban_ladder_degraded',
+    file: 'services/securityAlertPermissionAbuse.js',
+    level: 'medium',
+    why: '同上条同 type、不同链：权限滥用链的 countPermissionAbusePrior 抛错时按第一档处理。三链共用一个 type（同一条时间序列、同一条告警），按 type@file 分条登记（与 audit_write_failed 两级分条同形）。',
+  },
+  {
+    type: 'ban_ladder_degraded',
+    file: 'services/rateLimitEscalationBan.js',
+    level: 'medium',
+    why: '同上条同 type、第三条链：限流升级封禁的 30 天窗口计数抛错时按第一档处理。与 brute-force/permission-abuse 分账计数但共用档位与信号名。',
   },
 ]);
 

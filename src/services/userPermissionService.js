@@ -1,44 +1,4 @@
-/**
- * 用户权限服务（I-08 自 User 模型拆出）
- *
- * 职责：用户权限查询 + 进程内 TTL 结果缓存。
- * User 模型回归纯数据 schema（字段定义 + 密码哈希钩子 + 密码比对），
- * 权限聚合与缓存管理集中在此，便于独立演进（如替换 Redis）。
- *
- * ================= 权限结果缓存（性能优化 P-01） =================
- * 背景：每个受保护请求原本都要执行「查用户 → populate roles → populate
- * permissions」三层关联查询，100 QPS 下即产生 300+ 次/秒的数据库聚合负载。
- * 策略：进程内 TTL 缓存（30 秒；该用户有临时授予时按最近一条授予的到期时刻进一步收敛）+ 显式失效：
- *  - 用户级失效：assignRoles 等变更某用户角色时，仅删除该用户条目
- *  - 全局失效：角色权限被修改（assignPermissions）时清空整个缓存（permCache.clear()）
- *
- * L-16 与后续修正：这里的 `permCacheGeneration` 有一段反复。
- *  L-16 时它"只被读取、从未递增"，因此是死变量，被删掉并把注释改成描述真实
- *  机制（全局失效走 `clear()`）——那一步判断本身没错，错在删完没留等价机制：
- *  getPermissions 是"先 await 查库、后 set 写回"，失效若落在这一趟往返中间，
- *  delete/clear 都作用在一个还不存在的条目上，随后 in-flight 的旧结果把条目
- *  种回去，主动失效被静默撤销到 TTL 到期（方向是"收回的权限仍能放行"）。
- *  现在代际被重新引入，且**两侧都接上了**：invalidatePermissionCacheLocal 递增、
- *  getPermissions 写回前比对（见该处注释）。与 middleware/auth.js 用户缓存的
- *  queryStartedAt/invalidatedDuringQuery 是同一条不变量的第二次实现。
- *
- * ================= 跨实例主动失效（L-4） =================
- * 单进程内上述缓存自洽，但多副本部署时各进程各持一份缓存：实例 A 改了某用户
- * 角色/权限后，实例 B 的缓存最长仍会放行旧权限 30 秒。解法是借共享缓存门面的
- * 失效广播（sharedCache.publishInvalidate / onInvalidate，Redis pub/sub）：
- *  - 本地失效（invalidatePermissionCache）发生时同步广播失效键给所有实例；
- *  - 收到广播的实例做**本地**失效（不再二次广播，避免实例间互相触发成环）。
- *
- * ================= 降级期 TTL 策略（P-3） =================
- * 「没配 REDIS_URL」（静态单实例，A-2 的就绪闸会拦住疑似多实例部署）与
- * 「配了 REDIS_URL 但当前不可用」（本应多实例、失效广播此刻断绝）不是一回事：
- *  - 前者本地失效就是全部真相，30 秒 TTL 只影响性能，维持原语义；
- *  - 后者其它实例收不到失效广播，只能等自然过期，30 秒即最长越权窗口。
- * 因此在 `isRedisConfigured() && !isRedisEnabled()` 期间把写回 TTL 压到
- * 2 秒（读路径也按同一口径判定，降级前写下的 30 秒条目会立即过期），
- * 把「收回的权限仍被放行」的跨实例窗口从 30 秒收敛到 ≤2 秒。代价是降级
- * 期间权限查询回表变频繁——安全系统优先选收敛而不是命中率。
- */
+// 用户权限服务（查询 + TTL 缓存 + 跨实例失效广播 + 降级期 TTL 策略）：全文论证见 docs/user-permission-service.md
 
 // **必须**保持惰性 require，不得提到文件顶部。
 //
@@ -56,7 +16,9 @@ function getUserModel() {
 const privilegeGrantService = require('./privilegeGrantService');
 
 privilegeGrantService.setPermissionCacheInvalidator(invalidatePermissionCache);
-privilegeGrantService.setPermissionChecker((userId, code) => hasPermission(userId, code));
+privilegeGrantService.setPermissionChecker((userId, code, options) =>
+  hasPermission(userId, code, options)
+);
 const sharedCache = require('./sharedCache');
 
 /**
@@ -357,13 +319,31 @@ function handleRemoteInvalidation(raw) {
 sharedCache.onInvalidate(handleRemoteInvalidation);
 
 /**
+ * 只取角色链上的持权码（不合并临时授权、不读缓存）
+ *
+ * 供临时授权的审批资格判定使用（见 hasPermission 的 includeGrants）。这里刻意不用缓存：
+ * 缓存的合并结果分不清某个码来自角色还是来自另一张临时授权；审批是低频路径，多查一趟库
+ * 换来「资格判定看的是目录现值」。
+ * @param {string} userId
+ * @returns {Promise<string[]>}
+ */
+async function getBasePermissions(userId) {
+  const User = getUserModel();
+  const user = await User.findById(String(userId)).populate(PERMISSION_POPULATE);
+  return user ? collectPermissionCodes(user) : [];
+}
+
+/**
  * 检查用户是否拥有指定权限编码（无缓存直查，低频路径）
  * @param {string} userId
  * @param {string} permissionCode
  * @returns {Promise<boolean>}
  */
-async function hasPermission(userId, permissionCode) {
-  const perms = await getPermissions(userId);
+async function hasPermission(userId, permissionCode, { includeGrants = true } = {}) {
+  // includeGrants=false：只认角色链持权，不合并临时授权。审批资格必须用这一档——
+  // 否则「自己持有一张临时授权」就能替同码的第二个人签批，高敏权限沿「授予→再授予」
+  // 链自我扩散，两个各持 168h 临时权限的人即可凑齐全域双审批。
+  const perms = includeGrants ? await getPermissions(userId) : await getBasePermissions(userId);
   if (perms.includes(permissionCode)) return true;
   if (perms.includes('*:*')) return true;
   const [mod] = permissionCode.split(':');

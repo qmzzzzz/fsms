@@ -33,6 +33,7 @@ const {
   guardRescueRemoval,
   enforceConcurrentUnionGuard,
   recordFullRangeGrantIfGranted,
+  needsTypedConfirmation,
 } = require('./ipListSegmentGuards');
 // IP 黑白名单变更属于**安全配置**且业务状态已落库 ⇒ 审计必须先持久化（DB 或审计 WAL）才允许回成功；落库失败时转 WAL 待重放，不允许"回成功但可能零留痕"。
 const { recordDurably } = require('../services/auditOutbox');
@@ -97,13 +98,10 @@ const getIPList = asyncHandler(async (req, res) => {
 const queryIPMatch = asyncHandler(async (req, res) => {
   const rawIP = typeof req.query.ip === 'string' ? req.query.ip.trim() : '';
 
-  // 歧义文本必须**明确拒答**，不能给 verdict。背景：早前匹配层（models/IPBlacklist.findMatchingEntries）对
-  // `0177.0.0.1` / `0x7f.0.0.1` / `127.1` 这类形态一律返回空 ⇒ 请求期该客户端既不算命中黑名单也不算命中白名单。本接口若沿用同一判据却继续打印
-  // `normalizedIP: '127.0.0.1'`，管理员读到的是「127.0.0.1 没被拦」——而名单里可能正封着 127.0.0.1，两者互相矛盾，且状态码 200 无任何提示。
-  // 所以这里把"你问的是哪一个地址"问清楚：宽松解析出的规范地址回给对方，让其重查。
-  //
-  // 顺序不可颠倒：ipUtils 收紧后 normalizeIP 对歧义文本已经返回 null，若先跑下面那道 null 判断，"形态有歧义"会被误报成"请输入单地址"，
-  // 管理员拿不到重查指引 ⇒ 本分支必须在 normalizeIP 之前。提示值走 lenientAddressHint（只显示宽松解释的结果，不参与任何判定）。
+  // 歧义文本必须**明确拒答**，不能给 verdict：早前匹配层对 `0177.0.0.1`/`0x7f.0.0.1`/`127.1` 一律
+  // 返回空 ⇒ 请求期既不算黑名单也不算白名单；本接口若沿用却回 normalizedIP:'127.0.0.1'，管理员读到的是
+  // 「127.0.0.1 没被拦」——与名单互相矛盾。这里把宽松解析出的规范地址回给对方让其重查。顺序不可颠倒：本分支
+  // 必须在 normalizeIP 之前（ipUtils 收紧后歧义文本返回 null，先判会被误报成「请输入单地址」）；提示走 lenientAddressHint。
   if (isAmbiguousIpText(rawIP)) {
     const hint = lenientAddressHint(rawIP);
     return ApiResponse.codeError(res, 'IP_FORMAT_INVALID', {
@@ -143,11 +141,9 @@ const queryIPMatch = asyncHandler(async (req, res) => {
 });
 
 /**
- * 名单入参校验与归一化（四道判据按原顺序，一步不增不减）：
- * ip 非空、type 枚举、IP/CIDR 强格式归一化、时长区间。
- *
- * 归一化必须发生在入库之前：以 ipaddr.js 把 IPv4 前导零与 IPv6 等价写法收敛成规范形式（`192.168.001.001 → 192.168.1.1`），入库文本才与请求期判定
- * （isBlocked / isWhitelisted）用的是同一个串——否则条目永远不命中，名单里留下一条"看着在防、其实没防"的死记录。
+ * 名单入参校验与归一化（四道判据按原顺序，一步不增不减）：ip 非空、type 枚举、IP/CIDR 强格式归一化、
+ * 时长区间。归一化必须发生在入库之前：以 ipaddr.js 把 IPv4 前导零与 IPv6 等价写法收敛成规范形式
+ * （isBlocked/isWhitelisted 用的是同一个串——否则条目永不命中，留下「看着在防、其实没防」的死记录）。
  * @returns {{trimmedIP: string, normalizedIP: string, hours: number}|null} null 表示已写出拒绝响应
  */
 const normalizeListEntryRequest = (res, { ip, type, durationHours }) => {
@@ -190,6 +186,21 @@ const guardWhitelistConflict = async (res, normalizedIP, type) => {
   });
   return true;
 };
+
+/**
+ * 名单写入审计的 body（B5）：大段白名单（≥256 主机）落库后必须可辨——它会经 guardSegmentWrite 的
+ * 对称确认，且把黑名单/限流对该段整体豁免；SIEM 按此因子检索「影响面被放大的加白」。抽成纯函数是给
+ * addIPEntry 的 complexity 棘轮让路（控制器本体已贴上限）。
+ */
+const listChangeBody = ({ normalizedIP, type, reason, hours }) => ({
+  ip: normalizedIP,
+  type,
+  reason,
+  durationHours: hours,
+  ...(type === 'white' && needsTypedConfirmation(normalizedIP)
+    ? { riskFactors: ['large_segment_whitelist'] }
+    : {}),
+});
 
 /**
  * 添加 IP 到黑/白名单 POST /api/security/ip-list
@@ -251,7 +262,7 @@ const addIPEntry = asyncHandler(async (req, res) => {
       username: req.user.username,
       method: req.method,
       path: auditPath(req),
-      body: { ip: normalizedIP, type, reason, durationHours: hours },
+      body: listChangeBody({ normalizedIP, type, reason, hours }),
       ...auditClientAddress(req),
       userAgent: req.get('user-agent'),
       success: true,
@@ -290,12 +301,12 @@ const removeIPEntry = asyncHandler(async (req, res) => {
     return ApiResponse.codeError(res, 'IP_LIST_ENTRY_NOT_FOUND');
   }
 
-  // ===== 修复：删除侧的对称约束 =====addIPEntry 对全网段（0.0.0.0/0 等）做了「仅内置超管可添加」的收口，
-  // 删除侧却完全没有对等约束——持 security:config 的低阶管理员可先拆掉超管配置的全网段白名单（该白名单是限流豁免/信任标记的前提），
-  // 再塞入恶意黑名单，等效于绕过整个 IP 管控体系。保护的不变量：谁能添加，才能删除。
-  //
-  // 判据必须是**并集**而不是单条 bits===0：两条互补的 /1 合起来等价于 /0，逐个删除时每一条都只是半张网，单条判据全都放行。这里只拦「删掉之后
-  // 覆盖率下降」的那一步——全覆盖名单里一条冗余 /24 被删掉不会触发，避免误伤。覆盖判定与添加侧共用 cidrCoverage，读的也是同一份生效名单快照。
+  // ===== 修复：删除侧的对称约束 =====
+  // addIPEntry 对全网段（0.0.0.0/0 等）做了「仅内置超管可添加」的收口，删除侧却没有对等约束——持
+  // security:config 的低阶管理员可先拆掉超管配置的全网段白名单（限流豁免/信任标记的前提），再塞入恶意
+  // 黑名单，等效于绕过整个 IP 管控体系。保护的不变量：谁能添加，才能删除。判据必须是**并集**而不是单条
+  // bits===0：两条互补的 /1 合起来等价 /0，逐个删除时每一条都只是半张网。这里只拦「删掉之后覆盖率下降」
+  // 的那一步——冗余 /24 被删不触发，避免误伤。覆盖判定与添加侧共用 cidrCoverage、同一份生效快照。
   // 删除侧的第二道判据：这条永久白是不是全网段黑名单的唯一救援路径（拆掉它 = 谁都解不开）
   if (
     await guardRescueRemoval(req, res, {

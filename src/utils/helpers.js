@@ -448,6 +448,7 @@ const SENSITIVE_KEY_SUBSTRINGS = Object.freeze([
   'recoverycode',
   'otpauth',
   'ticket',
+  'realname', // realName：responseBody 采集会把接口回显用户文档的明文姓名二次固化进 append-only 审计集合（查询/详情 populate 已只投影 username；与 phone/email 同类，`realtime` 不含该子串不误伤）
 ]);
 
 /**

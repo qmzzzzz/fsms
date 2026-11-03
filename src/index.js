@@ -45,6 +45,9 @@ const auditMonitor = require('./services/auditMonitor');
 // 审计链周期自检（2026-09-30）：补上"链完整性由定时任务守护"这一方，
 // 与 auditMonitor（异常行为检测）分工，见该模块文件头
 const auditChainMonitor = require('./services/auditChainMonitor');
+// 取证清单↔库周期对账（F6，2026-11-03）：verifyManifest 只证明清单自身没被动过，
+// 周期对账补"清单说的记录真的还在库里"这一方；窗口/轮转语义见该模块文件头
+const forensicManifestReconcile = require('./services/forensicManifestReconcile');
 // 安全哨兵用户名（canary）检测：启动期做遮蔽对账（幽灵名被真实账户占用 ⇒
 // 对应哨兵静默失效，须告警；状态经安全概览合规块暴露），详见该模块文件头
 const canaryWatch = require('./services/canaryWatch');
@@ -105,6 +108,20 @@ const runStep = async (name, fn, capMs) => {
       `优雅关闭步骤「${name}」失败，继续执行后续清理：${error && error.message ? error.message : error}`
     );
   }
+};
+
+/**
+ * 排空取证捕获缓冲（gracefulShutdown 的具名步骤：抽出来是给该函数的体积棘轮让路，
+ * F-103 预算语义不变——排不完时如实说，不宣称已排空）。
+ */
+const drainForensicCapture = async (allowMs) => {
+  // 预算由调用点在关停链区域内领（shutdownBudgetContract ②⑧ 按区域内的 stepAllowMs( 计数与判步），此处只消费额度
+  const { drained, residual } = await forensicCapture.flushAndStop(allowMs);
+  if (drained) logger.info('取证捕获缓冲已排空');
+  else
+    logger.error(
+      `取证捕获缓冲未排空：仍有 ${residual} 条待落库（预算用尽）。WAL 行仍在盘上，重启后由 start() 重放——不要说成已排空`
+    );
 };
 
 /**
@@ -193,23 +210,15 @@ const gracefulShutdown = async (signal) => {
   await runStep('停止验证码清理定时器', () => stopCaptchaCleanup());
   await runStep('停止统计缓存清理定时器', () => statsCache.stopCleanup());
   await runStep('停止权限缓存清理定时器', () => userPermissionService.stopCleanup());
-  // 3.5 审计日志缓冲清空落库 + 异常监控停止（必须在数据库连接关闭前完成）。顺序关键：
-  // flush（按 __walSeq 精确裁剪 WAL）→ 等 walChain 排空（rename 落盘）→ stop；不等裁剪就退出会截断 rename 并重放。
+  // 3.5 审计缓冲清空落库 + 异常监控停止（必须在 DB 关闭前完成）。顺序关键：flush（按 __walSeq 精确裁剪 WAL）→ 等 walChain 排空（rename 落盘）→ stop；不等裁剪就退出会截断 rename 并重放。
   await runStep('停止审计监控', () => auditMonitor.stop());
-  // 审计链核验与 auditMonitor 同为"只读扫描 + 告警"的后台任务，关停口径一致：
-  // 只清定时器（停掉新一轮），在途那一轮由 runStep 的超时预算兜底，不阻塞关停
+  // 审计链核验/蜜罐巡检/取证对账同为"只读扫描 + 告警"的后台任务：只清定时器（停掉新一轮），
+  // 在途那一轮由 runStep 的超时预算兜底，不阻塞关停
   await runStep('停止审计链核验', () => auditChainMonitor.stop());
   await runStep('停止蜜罐事件链巡检', () => require('./services/honeypotChainWatch').stop());
-  await runStep('排空取证捕获缓冲', async () => {
-    const { drained, residual } = await forensicCapture.flushAndStop(
-      shutdownBudget.stepAllowMs(1500)
-    );
-    if (drained) logger.info('取证捕获缓冲已排空');
-    else
-      logger.error(
-        `取证捕获缓冲未排空：仍有 ${residual} 条待落库（预算用尽）。WAL 行仍在盘上，重启后由 start() 重放——不要说成已排空`
-      );
-  });
+  await runStep('停止取证清单对账', () => forensicManifestReconcile.stop());
+  // F-103：预算必须领在关停链区域内（②⑧ 的计数口径）；领在区域外的 drainForensicCapture 体内等于没领
+  await runStep('排空取证捕获缓冲', () => drainForensicCapture(shutdownBudget.stepAllowMs(1500)));
 
   await runStep('清空审计缓冲', async () => {
     // F-101：这一句以前无条件打「已清空」。flush 在有在途批次时会直接 return，
@@ -403,6 +412,9 @@ const startServer = async () => {
       // 变成自动循环。窗口取最近 N 条（默认 2000），发现新断裂/缺口即告警。
       auditChainMonitor.start();
       require('./services/honeypotChainWatch').start(); // 蜜罐事件链巡检（与 auditMonitor 同款：只读聚合 + 告警，定时器 unref）
+      // 取证清单↔库周期对账（F6）：与 auditChainMonitor 同款生命周期（start 幂等/stop 清定时器，
+      // unref 不阻退出）。每轮轮转核对账窗口内的一个业务日，窗口=min(取证 TTL, manifest 保留期)
+      forensicManifestReconcile.start();
       // 启动期哨兵用户名遮蔽对账（init 永不 reject；失败按"未检查"处理，
       // 不影响名单匹配与登录路径，见 canaryWatch 文件头）
       canaryWatch.init().catch(() => {});

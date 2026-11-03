@@ -1,11 +1,4 @@
-/**
- * 数据范围判定（自 rbac.js 抽出）
- *
- * 抽出的直接原因：`services/auditScopeFilter` 只需要「算范围 + 判范围不可用」三件套，
- * 若留在 rbac.js（其顶部还引用告警服务）就会形成
- * `securityAlert → auditScopeFilter → rbac → securityAlert` 的惰性环。本模块只依赖 User
- * 模型与错误码，是叶子节点；rbac.js 原样再导出这三个名字，既有调用方与测试口径不变。
- */
+// 数据范围判定（自 rbac.js 抽出，避免 securityAlert→auditScopeFilter→rbac 惰性环）；内置 GUEST 的 all 档例外见 docs/data-scope.md
 
 const User = require('../models/User');
 const ApiError = require('../utils/ApiError');
@@ -22,12 +15,6 @@ const { ERROR_CODES } = require('../utils/errorCodes');
  * - self: 仅自己创建/负责的数据（角色 level >= 4）
  * - none: 无数据权限（其余 level < 4 的自定义角色）
  *
- * 内置 GUEST（level 1）是**全量业务数据只读**：它的「只读」由权限码约束
- * （rolePermissionMap 只给 device/alarm/inspection/report 的 read），数据范围
- * 本身没有「只读」这一档。若按 level 归入 none，访客登录后列表/报表/详情一律
- * 403——与 README 的「访客：设备/报警/巡检/报表只读」直接矛盾（且公开注册默认
- * 角色就是 GUEST）。因此按角色 code 单独放行到 all，其余 level<4 的自定义角色
- * 仍是 none（新增低级别角色不得因本例外获得全量可见性）。
  *
  * @param {string} userId - 用户 ID
  * @returns {Promise<Object>} 数据范围配置
@@ -118,4 +105,33 @@ const isDataScopeDenied = (dataScope) =>
   // 这个漏子第一次跑 edgeCases 的「all：原样放行」就炸了——记在这里免得再犯。
   !['all', 'department', 'self'].includes(dataScope.type);
 
-module.exports = { getDataScope, deniedDataScope, isDataScopeDenied };
+/**
+ * 按请求记忆化（E7）：同一 HTTP 请求内的多次范围判定共享一次 User.findById+populate。
+ *
+ * 为什么必须有它：一次请求的主链会多次判范围——控制器入口一次、assertRecordInScope 一次、
+ * 导出/统计腿再来一两次，每次都是同一条 populate 查询。共享的载体是 **req 本身**
+ * （每个请求唯一、随响应丢弃）⇒ 结构上不可能跨请求泄漏；并发调用拿到的是**同一个
+ * promise**（第一次调用发起查询，其余 await 它），不是"各自查一次再比结果"。
+ * 调度器等非 HTTP 调用方不持 req，继续用裸 getDataScope——语义等价，只是没有请求内记忆化。
+ * 失败不留缓存：查询被拒时删掉键，下一个调用点重试而不是共享同一个 rejection。
+ */
+const REQUEST_SCOPE_KEY = Symbol('dataScope');
+
+const getDataScopeForRequest = (req, userId) => {
+  if (!req || typeof req !== 'object') return getDataScope(userId);
+  if (!req[REQUEST_SCOPE_KEY]) {
+    req[REQUEST_SCOPE_KEY] = getDataScope(userId).catch((err) => {
+      delete req[REQUEST_SCOPE_KEY];
+      throw err;
+    });
+  }
+  return req[REQUEST_SCOPE_KEY];
+};
+
+module.exports = {
+  getDataScope,
+  getDataScopeForRequest,
+  REQUEST_SCOPE_KEY,
+  deniedDataScope,
+  isDataScopeDenied,
+};

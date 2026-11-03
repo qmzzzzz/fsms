@@ -21,8 +21,34 @@ const { queryAuditLogs, applyAuditDataScope } = require('../services/auditQueryS
 const { auditPath } = require('../utils/auditMeta');
 const { auditClientAddress } = require('../utils/ipUtils');
 const { onAuditWriteFailure } = require('../utils/auditWriteFailure');
+// E3：审计 CSV 导出与报表 xlsx 导出同占并发闸（独立池 audit-export，不与 report-export 抢额）。
+// 闸的状态机见 services/exportConcurrency.js 头注释；拒绝形态与 reportController.withExportSlot 同款。
+const { acquireExportSlot, ExportBusyError } = require('../services/exportConcurrency');
 
 const exportAuditLogs = asyncHandler(async (req, res) => {
+  // 槽位在**建查询之前**拿：这条链的出口是流式响应，忙时必须先拒在最外面，
+  // 且拒绝发生在任何响应头写出之前（429 才改得了状态码）。
+  let release;
+  try {
+    release = await acquireExportSlot('audit-export');
+  } catch (err) {
+    if (!(err instanceof ExportBusyError)) throw err;
+    logger.warn(
+      `审计导出并发已满，请求被拒：user=${req.user.username || req.user.userId} ` +
+        `reason=${err.reason} retryAfter=${err.retryAfterSeconds}s`
+    );
+    res.setHeader('Retry-After', String(err.retryAfterSeconds));
+    return ApiResponse.codeError(res, 'EXPORT_BUSY');
+  }
+  try {
+    return await exportAuditLogsBody(req, res);
+  } finally {
+    // 客户端中断时流式写会抛错，槽位必须在这一刻归还（泄漏一个槽位 = 永久少一份导出能力）
+    release();
+  }
+});
+
+const exportAuditLogsBody = async (req, res) => {
   try {
     // 复用查询筛选逻辑
     let query;
@@ -83,7 +109,7 @@ const exportAuditLogs = asyncHandler(async (req, res) => {
     markResponseAbortedByError(req, res, error.message);
     if (!res.writableEnded) res.end();
   }
-});
+};
 
 /**
  * 校验审计日志哈希链完整性
@@ -122,17 +148,12 @@ const verifyAuditChainIntegrity = asyncHandler(async (req, res) => {
     fromLatest: from !== 'earliest',
   });
 
-  // 「能否宣称链完整」用服务层的唯一判据（与运维脚本同源）。
-  // report.intact 的字面意思只是"扫过的这些条没断"，它不蕴含三件必须蕴含的事：
-  //   ① 扫全了（total 撞上 maxRecords 上限而库里还有更多 ⇒ 只是窗口结论）；
-  //   ② 有东西可扫（集合为 0 条时 intact 恒真——绕过模型钩子直连 deleteMany({})
-  //      就能造出这个现场，接口若回「审计链完整」等于为灭迹签发合格证明）。
-  //      注意②的新口径是"扫到 0 条"而非只有"集合 0 条"：本接口的 collectionTotal
-  //      在 scan **之后**才取，清空与并发写入交错即可让估算非 0 而扫描为空。
-  //   ③ 扫的是全链而不是某个 filter 的子集（在线侧无 filter 输入，由服务层的
-  //      scanned 回显兜住，判据统一挡）。
-  // 在线接口刻意不给 allowNoHmac/allowEmpty 这两个豁免口子：那是运维脚本在
-  // 知情前提下的一次性动作，不是一个可被反复调用的 HTTP 端点的默认能力。
+  // 「能否宣称链完整」用服务层的唯一判据（与运维脚本同源）。report.intact 的字面意思只是「扫过的这些
+  // 条没断」，不蕴含：① 扫全了（total 撞上限而库里还有 ⇒ 只是窗口结论）；② 有东西可扫（集合 0 条时
+  // intact 恒真——绕过模型钩子直连 deleteMany({}) 就能造出，回「完整」等于为灭迹签发合格证明；②的新口径是
+  // 「扫到 0 条」：collectionTotal 在 scan 之后才取，清空与并发写入交错即可让估算非 0 而扫描为空）；
+  // ③ 扫的是全链而非某 filter 的子集（由服务层 scanned 回显兜住）。在线接口刻意不给 allowNoHmac/
+  // allowEmpty：那是运维脚本知情前提下的一次性动作，不是可反复调用的 HTTP 端点的默认能力。
   const collectionTotal = await AuditLog.estimatedDocumentCount();
   const verdict = computeChainVerdict({
     breaks: report.breaks,
@@ -167,7 +188,6 @@ const verifyAuditChainIntegrity = asyncHandler(async (req, res) => {
     );
   }
 
-  res.locals.skipGlobalAudit = true;
   await AuditLog.create({
     action: 'audit_chain_verify',
     category: 'security',
@@ -185,6 +205,7 @@ const verifyAuditChainIntegrity = asyncHandler(async (req, res) => {
     // 等于让留存里出现一批名为核验、实为无证明的绿记录。
     riskLevel: verdict.canAttestIntact ? 'low' : 'high',
   }).catch(onAuditWriteFailure('audit_chain_verify', req));
+  res.locals.skipGlobalAudit = true; // 置位必须晚于审计（securityController/config.js 同一口径）：这条 create 是本次核验唯一留痕，先置位会让全局审计在留痕写失败时也不再补记
 
   // 宣称给"人"看的结论与机器可读字段分开：intact/report 保持原语义，
   // 但话术必须自承不完整——与运维脚本的 INCOMPLETE 同一口径，两处不再各说各话。
@@ -225,7 +246,7 @@ const getAuditLogDetail = asyncHandler(async (req, res) => {
   let query = { _id: req.params.id };
   ({ query } = await applyAuditDataScope(query, req.user.userId));
   const doc = await AuditLog.findOne(query)
-    .populate('userId', 'username realName')
+    .populate('userId', 'username') // 与列表同口径：详情已是完整原文，realName 明文不再出站（理由见 auditQueryService）
     // hmac 是服务端完整性签名的副产物，对前端溯源没有价值；hash/prevHash 保留供详情页展示。
     .select('-hmac -__v')
     .lean();

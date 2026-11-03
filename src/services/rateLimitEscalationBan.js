@@ -94,6 +94,9 @@ const escalateIp = async (normalizedIp, detail) => {
   } catch (e) {
     // 统计失败按第一档处理（宁可少封不可不封），但必须留痕：阶梯退化是可观测的
     logger.error(`限流升级阶梯统计失败（按第一档处理）: ${normalizedIp}, 错误: ${e.message}`);
+    try {
+      require('../utils/metrics').incSecurityAlert('ban_ladder_degraded', 'medium'); // B8
+    } catch (_) {} // 指标端不可用时仅保留日志
   }
 
   await recordEscalation(normalizedIp, detail);

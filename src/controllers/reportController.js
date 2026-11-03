@@ -19,13 +19,10 @@ const { isValidDateParam, isDateRangeReversed, buildDateRangeFilter } = require(
 const { BUSINESS_TIMEZONE } = require('../constants/timezone');
 
 /**
- * 解析请求的浏览器时区参数（统计看板「今日」范围用）
- *
- * 前端把 `Intl.DateTimeFormat().resolvedOptions().timeZone` 原样传上来；不传 =
- * 业务时区（既有口径不变）。非法时区必须 400 拒绝而不是吞掉：让 Intl 在聚合
- * 路径上抛 RangeError 会把"参数写错了"变成 500，且边界静默回落业务时区会让
- * 两个时区的用户看到同一份数据却各自以为是自己的"今天"。
- *
+ * 解析请求的浏览器时区参数（统计看板「今日」范围用）。
+ * 前端把 `Intl.DateTimeFormat().resolvedOptions().timeZone` 原样传上来；不传 = 业务时区（既有口径不变）。
+ * 非法时区必须 400 拒绝而不是吞掉：让 Intl 在聚合路径上抛 RangeError 会把「参数写错了」变成 500，
+ * 且边界静默回落业务时区会让两个时区的用户看到同一份数据却各自以为是自己的「今天」。
  * @param {import('express').Request} req
  * @param {import('express').Response} res
  * @returns {string|null} 合法时区名；非法时返回 null（响应已写出）
@@ -67,9 +64,11 @@ const {
 // 取 clientIpForSecurityDecision 而不是 req.ip——开着 trust proxy 时后者就是
 // 请求方自己写的 X-Forwarded-For，读 PII 的人可以顺手挑一个写进取证记录。
 const { clientIpForSecurityDecision } = require('../utils/ipUtils');
-const { streamExportRows, writeExportWorkbook } = require('../services/reportWorkbookService');
+const { fetchExportRows, writeExportWorkbook } = require('../services/reportWorkbookService');
 // A-8：未脱敏导出的水印与追溯号（与审计同号）
 const { piiExportWatermarkFor } = require('../services/piiExportWatermark');
+// A-8/E2：配额的消费侧（写出之前 INCR 扣减；Redis 未配置时返回 null 走现状审计计数）
+const { consumePiiExportQuota } = require('../services/piiExportQuota');
 // P-2：导出并发闸。上限 2 + 有界排队，超限回 429（EXPORT_BUSY + Retry-After）。
 // 闸本身的状态机与指标见该模块头部注释——它必须能被独立证伪，所以不塞进本文件。
 const { acquireExportSlot, ExportBusyError } = require('../services/exportConcurrency');
@@ -144,17 +143,11 @@ const getInspectionReport = asyncHandler(async (req, res) => {
 /**
  * A4（2026-10-16）/ L-17（2026-10-21）：解析本次导出的脱敏档位。
  *
- * 默认掩码；只有同时满足「持 pii:export」与「经 POST /reports/export/pii 的二次验证」
- * 才输出全文。GET 导出由路由置 `req.forceMaskPii`，即使调用方持有 pii:export
- * 也只能拿到掩码档——否则拿到口令的会话可以绕过步进验证直接 GET 全量姓名。
- *
- * 只有携带真实姓名的报表类型参与（PII_NAME_EXPORT_TYPES），其余类型一律 false，
- * 不做多余的权限查询。
- *
- * 抽成独立函数是为了**不把 exportReport 的圈复杂度与行数推过棘轮**（该函数已贴基线，
- * 新增分支会顶爆 lint:ratchet）。判据本身不在这里——类型集合在 reportExportService，
- * 掩码实现复用 utils/encryption 的 DataMasking。
- *
+ * 默认掩码；只有同时满足「持 pii:export」与「经 POST /reports/export/pii 的二次验证」才输出全文。
+ * GET 导出由路由置 `req.forceMaskPii`，即使持 pii:export 也只能拿掩码档——否则拿到口令的会话可绕过
+ * 步进验证直接 GET 全量姓名。只有携带真实姓名的报表类型参与（PII_NAME_EXPORT_TYPES），其余一律
+ * false，不做多余的权限查询。抽成独立函数是为了不把 exportReport 的圈复杂度与行数推过棘轮；判据
+ * 类型集合在 reportExportService，掩码实现复用 utils/encryption 的 DataMasking。
  * @returns {Promise<boolean>} true = 掩码
  */
 const resolveExportMasking = async (req, type) => {
@@ -162,6 +155,28 @@ const resolveExportMasking = async (req, type) => {
   if (req.forceMaskPii) return true;
   const canViewFullPii = await hasPermission(req.user.userId, 'pii:export');
   return !canViewFullPii;
+};
+
+/**
+ * A-8/E2：配额写前扣减与越限出口。返回 true = 已写出 429，调用方短路。
+ * 抽成独立函数与 rejectInvalidReportDates 同理：exportReport 的函数行数贴着棘轮上限，
+ * 扣减分支长在正文里就会顶穿；且"扣减→越限即拒"是一段自洽语义，值得有名字。
+ * 未配置 Redis（consume 返回 null）⇒ 不拦，计数由写成功后的留痕承载（现状口径）。
+ */
+const consumeQuotaOrReject = async (req, res, watermark) => {
+  if (!watermark) return false;
+  const verdict = await consumePiiExportQuota({ userId: req.user.userId });
+  if (!verdict || verdict.allowed) return false;
+  logger.warn(
+    `未脱敏导出配额已满（写前扣减）：user=${req.user.username || req.user.userId} ` +
+      `used=${verdict.used}/${verdict.limit}`
+  );
+  res.setHeader('Retry-After', String(verdict.retryAfterSeconds));
+  ApiResponse.codeError(res, 'PII_EXPORT_QUOTA_EXCEEDED', {
+    message: `今日未脱敏导出已达配额（${verdict.used}/${verdict.limit} 次），请稍后再试或联系管理员`,
+    params: { used: verdict.used, limit: verdict.limit },
+  });
+  return true;
 };
 
 /**
@@ -326,7 +341,7 @@ const exportReport = asyncHandler(async (req, res) => {
   // audit 类型必须叠加与「列表 / CSV 导出」同一份数据范围判据（auditScopeFilter）。
   // 此处原先的注释写着"审计无部门/属主字段，语义上只能全局或禁止"，而 AuditLog.userId
   // 正是审计列表用来过滤的字段：self 档只见自己、department 档只见本部门成员
-  // （auditController.js:44 与 auditQueryService.js:314 都调用了 applyAuditDataScope）。
+  // （auditController.js:70 与 auditQueryService.js:317 都调用了 applyAuditDataScope）。
   // 少这一道就是：列表只看得到本部门，xlsx 却导出全库所有人的 IP/路径/操作
   // ——导出集比可见集宽，属本仓反复出现的"同一条判据的第二处实现漏抄"。
   if (type === 'audit') {
@@ -360,6 +375,9 @@ const exportReport = asyncHandler(async (req, res) => {
       : 'zh';
     // A-8：未脱敏导出的水印（掩码档为 null，四路同号见 piiExportWatermark 模块头）
     const watermark = piiExportWatermarkFor(req, { type, maskPii, lang });
+    // A-8/E2 消费即扣减：配额在**写出之前**扣（Redis 模式 INCR；导出失败也不退，方向安全），
+    // 中间件检查与本次写出之间插入的并发越界者在这里收口。见 consumeQuotaOrReject。
+    if (await consumeQuotaOrReject(req, res, watermark)) return undefined;
     await writeExportWorkbook(res, {
       type,
       query,
@@ -382,9 +400,9 @@ module.exports = {
   // 时区参数解析（测试钩子）：非法 tz 的 400 分支经 HTTP 需要 Mongo 之外的
   // 完整路由栈，直接单测该纯函数更便宜且可证伪
   resolveQueryTimezone,
-  // 测试钩子（与 auditBuffer.__resetForTest 同惯例）：O-1 容量上限分支无法经 HTTP 在合理开销内填满 500 键，测试直接驱动缓存与保护函数；streamExportRows 重导出自 service（B-4 两阶段排序的单测入口）
+  // 测试钩子（与 auditBuffer.__resetForTest 同惯例）：O-1 容量上限分支无法经 HTTP 在合理开销内填满 500 键，测试直接驱动缓存与保护函数；fetchExportRows（E9① 前名 streamExportRows）重导出自 service（B-4 两阶段排序的单测入口）
   __test: {
     ...dashboardService.__test,
-    streamExportRows,
+    fetchExportRows,
   },
 };
