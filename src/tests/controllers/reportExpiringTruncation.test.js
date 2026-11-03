@@ -7,7 +7,7 @@
  *
  * 【缺陷本体】
  * `reportStatsService.getDeviceReportData` 用 `.limit(20)` 截清单，却把**裸数组**放进响应，
- * 控制器（reportController.js:100）再以 `'获取设备报表成功'` 作答。于是"被截断"这个事实在
+ * 控制器（reportController.js:99）再以 `'获取设备报表成功'` 作答。于是"被截断"这个事实在
  * 响应里没有任何载体：`data.expiringSoon.length` 恒等于 20，库里 20 台与 2000 台同形。
  * 同一份代码里就有反证：兄弟出口 `GET /api/devices/expiring` 已经带 `pagination.total`
  * （F-174 的落点），`constants/deviceAlerts.js:38-48` 更把约定写成了文字——

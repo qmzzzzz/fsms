@@ -1,17 +1,32 @@
-/** T6-2 CIDR 封禁：默认人工确认；自动模式必须显式开启且只认轮换池。护栏宁可拒，不可误伤。 */
+/** T6-2 CIDR 封禁：默认人工确认；自动模式必须显式开启且只认轮换池。护栏宁可拒，不可误伤。
+ *
+ * B1/B2/B3（2026-11-03）改写说明：
+ *  - 票据外置 sharedCache（键 ip_pool_ban:ticket:*）：出票 setIfAbsent / 消费 getDel，
+ *    并发同 token 只一方生效；Redis 配置但故障时 fail-closed 拒绝。进程内 pending 计数
+ *    不再存在（getPoolBanStats().pending 恒 null），旧"内存边界"用例随之改写为存储语义。
+ *  - 审计走 auditOutbox.recordDurably：本套件按仓内先例（mfaControllerErrorPaths 等）
+ *    mock 该边界——recordDurably 自身的三态（DB 成功/WAL 兜底/重抛）由
+ *    tests/services/auditOutbox.test.js 专责，这里钉的是 applyBan 的接线语义。 */
+jest.mock('../../services/auditOutbox', () => ({
+  recordDurably: jest.fn(),
+}));
+
 const ban = require('../../services/ipPoolBan');
 const ipListService = require('../../services/ipListService');
 const liveTraffic = require('../../services/ipPoolLiveTraffic');
+const sharedCache = require('../../services/sharedCache');
+const mongoose = require('mongoose');
+const { recordDurably } = require('../../services/auditOutbox');
 
 const operatorIp = '10.0.0.5';
 // 生产真实返回形状：IPBlacklist.blockIP ⇒ findOneAndUpdate 的落库文档，**没有** banned 字段
 const BLOCKED_DOC = { _id: 'e1', ip: '203.0.113.0/24', type: 'black', reason: 't' };
-// 注入审计模型：不注入会真的去打库，每个用例白等 10 秒缓冲超时
-const auditStub = () => ({ create: jest.fn(async (doc) => doc) });
 
 beforeEach(() => {
   ban.resetPoolBanState();
   jest.restoreAllMocks();
+  recordDurably.mockReset();
+  recordDurably.mockResolvedValue({}); // 缺省成功：成功落库的形态由归因用例断言实参
   // 并集判据要读当前黑名单快照、活跃度护栏要查审计库：不 mock 都会真的去打库
   jest.spyOn(ipListService, 'listActiveEntryIps').mockResolvedValue([]);
   jest.spyOn(ipListService, 'findCoveringEntries').mockResolvedValue([]);
@@ -175,44 +190,90 @@ describe('拒绝计数：每个拒绝原因恰好记一次（同一事件两处�
   });
 });
 
-describe('票据表的内存边界（TTL 只约束可用性，不约束占用）', () => {
-  test('过期票据在下次出票时被清掉：pending 不随"申请了不确认"无限增长', async () => {
-    const t0 = new Date('2026-01-01T00:00:00Z');
-    for (let i = 0; i < 5; i += 1) {
-      await ban.requestBan({
-        cidr: '198.51.100.0/24',
-        reason: 't',
-        operator: 'a',
-        operatorIp,
-        now: t0,
-      });
-    }
-    expect(ban.getPoolBanStats().pending).toBe(5);
-    // 11 分钟后（> CONFIRM_TTL_MS）再出票：前 5 张已过期，必须被清掉，只剩新的 1 张
-    const later = new Date(t0.getTime() + 11 * 60 * 1000);
-    await ban.requestBan({
-      cidr: '198.51.100.0/24',
+describe('票据外置 sharedCache（B2）：一次性消费、敲错不消耗、fail-closed', () => {
+  test('出票即落共享存储（键形状钉死），确认成功后被原子取删', async () => {
+    jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
+    const req = await ban.requestBan({
+      cidr: '203.0.113.0/24',
       reason: 't',
       operator: 'a',
       operatorIp,
-      now: later,
     });
-    expect(ban.getPoolBanStats().pending).toBe(1);
+    const key = `${ban.TICKET_KEY_PREFIX}${req.token}`;
+    // 键形状是对账面：ADR-005 的切换点清单按这个前缀登记，改前缀必须同步 ADR
+    expect(await sharedCache.get(key)).toMatchObject({ cidr: '203.0.113.0/24' });
+    await ban.applyBan({ token: req.token, typedConfirm: '203.0.113.0/24' });
+    expect(await sharedCache.get(key)).toBeNull();
   });
 
-  test('总量封顶：超过 PENDING_MAX 时丢最早出票的，内存有界', async () => {
-    const t0 = new Date('2026-01-01T00:00:00Z');
-    const total = ban.PENDING_MAX + 3;
-    for (let i = 0; i < total; i += 1) {
-      await ban.requestBan({
-        cidr: '198.51.100.0/24',
+  test('并发同 token 双请求只一次 blockIP（getDel 原子取删，旧 Map 两步形态有双花窗口）', async () => {
+    const blockSpy = jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
+    const req = await ban.requestBan({
+      cidr: '203.0.113.0/24',
+      reason: 't',
+      operator: 'a',
+      operatorIp,
+    });
+    const [r1, r2] = await Promise.all([
+      ban.applyBan({ token: req.token, typedConfirm: '203.0.113.0/24' }),
+      ban.applyBan({ token: req.token, typedConfirm: '203.0.113.0/24' }),
+    ]);
+    expect([r1, r2].filter((r) => r.ok)).toHaveLength(1);
+    expect([r1, r2].find((r) => !r.ok).reason).toBe('unknown_token');
+    expect(blockSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('敲错字后票据原样写回且剩余 TTL 随票走：重试仍可落库，过期后存储侧自然失效', async () => {
+    jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
+    const req = await ban.requestBan({
+      cidr: '203.0.113.0/24',
+      reason: 't',
+      operator: 'a',
+      operatorIp,
+    });
+    const key = `${ban.TICKET_KEY_PREFIX}${req.token}`;
+    const wrong = await ban.applyBan({ token: req.token, typedConfirm: '203.0.114.0/24' });
+    expect(wrong).toMatchObject({ ok: false, reason: 'typed_confirmation_required' });
+    // 写回的票带着剩余 TTL（随票存的 ttlMs 与票的 expiresAt 自洽），且重试仍能落库
+    const writtenBack = await sharedCache.get(key);
+    expect(writtenBack).toBeTruthy();
+    expect(writtenBack.ttlMs).toBeGreaterThan(0);
+    expect(writtenBack.ttlMs).toBeLessThanOrEqual(ban.CONFIRM_TTL_MS);
+    const right = await ban.applyBan({ token: req.token, typedConfirm: '203.0.113.0/24' });
+    expect(right.ok).toBe(true);
+    // TTL 由存储侧记账：推过 expiresAt 后写回的票自然消失（不依赖进程内清扫）
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(req.expiresAt.getTime() + 1000);
+    try {
+      await expect(sharedCache.get(key)).resolves.toBeNull();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test('Redis 配置但故障 ⇒ 出票被拒（fail-closed），绝不落进程内存假票', async () => {
+    const savedUrl = process.env.REDIS_URL;
+    process.env.REDIS_URL = 'redis://127.0.0.1:1'; // 必然连不上，且不 init（同 sharedCacheNonceFailClosed 的替身形态）
+    sharedCache._resetForTests();
+    try {
+      expect(sharedCache.isRedisConfigured()).toBe(true);
+      expect(sharedCache.isRedisEnabled()).toBe(false);
+      const r = await ban.requestBan({
+        cidr: '203.0.113.0/24',
         reason: 't',
         operator: 'a',
         operatorIp,
-        now: t0,
       });
+      // 拒绝原因借用票据族语义（unknown_token：重新发起即可）——枚举是三向对账的闭合集合
+      expect(r).toMatchObject({ ok: false, reason: 'unknown_token' });
+      // 且没有任何内存假票：Redis 恢复前确认侧也取不到
+      await expect(
+        ban.applyBan({ token: 'whatever', typedConfirm: '203.0.113.0/24' })
+      ).resolves.toMatchObject({ ok: false, reason: 'unknown_token' });
+    } finally {
+      if (savedUrl === undefined) delete process.env.REDIS_URL;
+      else process.env.REDIS_URL = savedUrl;
+      sharedCache._resetForTests();
     }
-    expect(ban.getPoolBanStats().pending).toBe(ban.PENDING_MAX);
   });
 });
 
@@ -262,7 +323,7 @@ describe('封禁时长：缺省不等于永久', () => {
   test('未声明 duration ⇒ 落库用 DEFAULT_BAN_MS（24h），不是 expiresAt=null 的永久', async () => {
     const spy = jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
     const req = await issue();
-    await ban.applyBan({ token: req.token, typedConfirm: typed, model: auditStub() });
+    await ban.applyBan({ token: req.token, typedConfirm: typed });
     expect(spy.mock.calls[0][1].durationMs).toBe(24 * 60 * 60 * 1000);
   });
 
@@ -273,7 +334,6 @@ describe('封禁时长：缺省不等于永久', () => {
       token: req.token,
       typedConfirm: typed,
       permanent: true,
-      model: auditStub(),
     });
     expect(spy.mock.calls[0][1].durationMs).toBe(0);
   });
@@ -285,7 +345,6 @@ describe('封禁时长：缺省不等于永久', () => {
       token: req.token,
       typedConfirm: typed,
       durationMs: 7 * 3600 * 1000,
-      model: auditStub(),
     });
     expect(spy.mock.calls[0][1].durationMs).toBe(7 * 3600 * 1000);
   });
@@ -300,13 +359,10 @@ describe('确认票据：不确认就不封', () => {
       operator: 'a',
       operatorIp,
     });
-    expect((await ban.applyBan({ token: 'bogus', model: auditStub() })).reason).toBe(
-      'unknown_token'
-    );
+    expect((await ban.applyBan({ token: 'bogus' })).reason).toBe('unknown_token');
     const expired = await ban.applyBan({
       token: req.token,
       now: new Date(req.expiresAt.getTime() + 1000),
-      model: auditStub(),
     });
     expect(expired.reason).toBe('token_expired');
   });
@@ -320,13 +376,10 @@ describe('确认票据：不确认就不封', () => {
       operator: 'a',
       operatorIp,
     });
-    expect(
-      (await ban.applyBan({ token: req.token, typedConfirm: '203.0.113.0/24', model: auditStub() }))
-        .ok
-    ).toBe(true);
-    expect((await ban.applyBan({ token: req.token, model: auditStub() })).reason).toBe(
-      'unknown_token'
+    expect((await ban.applyBan({ token: req.token, typedConfirm: '203.0.113.0/24' })).ok).toBe(
+      true
     );
+    expect((await ban.applyBan({ token: req.token })).reason).toBe('unknown_token');
   });
 });
 
@@ -363,7 +416,6 @@ describe('落库结果必须如实上报（addToBlacklist 从不抛错）', () =
     const r = await ban.applyBan({
       token: req.token,
       typedConfirm: '203.0.113.0/24',
-      model: auditStub(),
     });
     expect(r.bannedCount).toBe(0);
     expect(r.results[0]).toMatchObject({ banned: false, reason: null });
@@ -371,10 +423,9 @@ describe('落库结果必须如实上报（addToBlacklist 从不抛错）', () =
     expect(ban.getPoolBanStats().failedEntries).toBe(1);
   });
 
-  test('成功落库才计 applied 并写审计', async () => {
+  test('成功落库才计 applied 并写审计（recordDurably 带 ip_list_change 检索标识）', async () => {
     jest.spyOn(ipListService, 'findCoveringEntries').mockResolvedValue([]);
     jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
-    const auditModel = auditStub();
     const req = await ban.requestBan({
       cidr: '203.0.113.0/24',
       reason: 't',
@@ -384,26 +435,22 @@ describe('落库结果必须如实上报（addToBlacklist 从不抛错）', () =
     const r = await ban.applyBan({
       token: req.token,
       typedConfirm: '203.0.113.0/24',
-      model: auditModel,
     });
     expect(r.bannedCount).toBe(1);
     expect(ban.getPoolBanStats().applied).toBe(1);
-    expect(auditModel.create).toHaveBeenCalledTimes(1);
-    expect(auditModel.create.mock.calls[0][0]).toMatchObject({
+    expect(recordDurably).toHaveBeenCalledTimes(1);
+    expect(recordDurably.mock.calls[0][0]).toMatchObject({
       action: 'ip_blacklist_added',
       category: 'security',
       success: true,
     });
+    expect(recordDurably.mock.calls[0][1]).toMatchObject({ auditAction: 'ip_list_change' });
   });
 
-  test('审计写失败不得让封禁回滚或抛（封禁已生效，追溯性受损但要留痕）', async () => {
+  test('审计 DB 失败但 WAL 可用（recordDurably 契约 resolve null）⇒ 响应仍 ok 且不回滚', async () => {
     jest.spyOn(ipListService, 'findCoveringEntries').mockResolvedValue([]);
-    jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
-    const auditModel = {
-      create: jest.fn(async () => {
-        throw new Error('mongo down');
-      }),
-    };
+    const blockSpy = jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
+    recordDurably.mockResolvedValueOnce(null); // auditOutbox 契约：DB 失败、已转 WAL ⇒ resolve null
     const req = await ban.requestBan({
       cidr: '203.0.113.0/24',
       reason: 't',
@@ -413,11 +460,113 @@ describe('落库结果必须如实上报（addToBlacklist 从不抛错）', () =
     const r = await ban.applyBan({
       token: req.token,
       typedConfirm: '203.0.113.0/24',
-      model: auditModel,
     });
     expect(r.ok).toBe(true);
     expect(r.bannedCount).toBe(1);
-    expect(ban.getPoolBanStats().lastError).toContain('mongo down');
+    expect(blockSpy).toHaveBeenCalledTimes(1); // 封禁不回滚
+    // 本地诊断面如实记"未直写 DB"：这是补偿已发生的唯一进程内留痕
+    expect(ban.getPoolBanStats().lastErrors).toHaveLength(1);
+    expect(ban.getPoolBanStats().lastErrors[0]).toMatchObject({ action: 'ip_blacklist_added' });
+  });
+
+  test('审计 WAL 不可用 ⇒ recordDurably 的 rejection 原样重抛（不假装记账成功）', async () => {
+    jest.spyOn(ipListService, 'findCoveringEntries').mockResolvedValue([]);
+    jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
+    recordDurably.mockRejectedValueOnce(new Error('mongo down'));
+    const req = await ban.requestBan({
+      cidr: '203.0.113.0/24',
+      reason: 't',
+      operator: 'a',
+      operatorIp,
+    });
+    await expect(
+      ban.applyBan({ token: req.token, typedConfirm: '203.0.113.0/24' })
+    ).rejects.toThrow('mongo down');
+    expect(ban.getPoolBanStats().lastErrors).toHaveLength(1);
+    expect(ban.getPoolBanStats().lastErrors[0].error).toContain('mongo down');
+  });
+
+  test('lastErrors 是上限 5 的数组：连环失败每条都留（action/timestamp），不再被后写覆盖', async () => {
+    jest.spyOn(ipListService, 'findCoveringEntries').mockResolvedValue([]);
+    jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
+    recordDurably.mockRejectedValue(new Error(`boom-${Date.now()}`));
+    for (let i = 0; i < 7; i += 1) {
+      const cidr = `198.51.100.${i * 4}/26`; // 每次独占网段（/26 恒不需打字确认），互不借夹具
+      const req = await ban.requestBan({
+        cidr,
+        reason: 't',
+        operator: 'a',
+        operatorIp,
+      });
+      expect(req.ok).toBe(true);
+      await expect(ban.applyBan({ token: req.token, typedConfirm: cidr })).rejects.toThrow();
+    }
+    const errors = ban.getPoolBanStats().lastErrors;
+    expect(errors).toHaveLength(5);
+    for (const e of errors) {
+      expect(e.action).toBe('ip_blacklist_added');
+      expect(e.timestamp).toBeTruthy();
+      expect(e.error).toContain('boom-');
+    }
+  });
+});
+
+describe('审计归因（B1/B3）：操作者身份与请求上下文必须落到审计行', () => {
+  const realId = new mongoose.Types.ObjectId();
+  const fixtureReq = (id) => ({
+    method: 'POST',
+    originalUrl: '/api/forensic/pool-ban/confirm',
+    url: '/api/forensic/pool-ban/confirm',
+    headers: { 'user-agent': 'jest-agent' },
+    get: (k) => ({ 'user-agent': 'jest-agent' })[k.toLowerCase()],
+    socket: { remoteAddress: '198.51.100.9' },
+    ip: '198.51.100.9',
+    user: { userId: id, username: '段管-张三', sessionId: 'sess-1' },
+  });
+
+  test('userId=真实 ObjectId、username=票据里的用户名（不再是 24 位 ObjectId 串）、ip/clientInfo 在场', async () => {
+    jest.spyOn(ipListService, 'findCoveringEntries').mockResolvedValue([]);
+    jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
+    const req = await ban.requestBan({
+      cidr: '203.0.113.0/24',
+      reason: 't',
+      operator: realId,
+      operatorUsername: '段管-张三',
+      operatorIp,
+    });
+    await ban.applyBan({
+      token: req.token,
+      typedConfirm: '203.0.113.0/24',
+      req: fixtureReq(realId),
+    });
+    const entry = recordDurably.mock.calls[0][0];
+    expect(entry.userId).toEqual(realId);
+    expect(entry.username).toBe('段管-张三');
+    expect(entry.username).not.toMatch(/^[0-9a-f]{24}$/i);
+    expect(entry).toMatchObject({
+      method: 'POST',
+      path: '/api/forensic/pool-ban/confirm',
+      sessionId: 'sess-1',
+    });
+    expect(entry.ip).toBeTruthy();
+    expect(entry.clientInfo).toBeTruthy();
+    expect(typeof entry.fingerprint).toBe('string');
+    expect(entry.userAgent).toBe('jest-agent');
+  });
+
+  test('旧口径回归：operator 传可读名（非 ObjectId）时不得让审计行 cast 崩溃（userId 缺席、名字落 username）', async () => {
+    jest.spyOn(ipListService, 'findCoveringEntries').mockResolvedValue([]);
+    jest.spyOn(ipListService, 'blockIP').mockResolvedValue(BLOCKED_DOC);
+    const req = await ban.requestBan({
+      cidr: '203.0.113.0/24',
+      reason: 't',
+      operator: 'probe-op', // 服务层直调的历史形态
+      operatorIp,
+    });
+    await ban.applyBan({ token: req.token, typedConfirm: '203.0.113.0/24' });
+    const entry = recordDurably.mock.calls[0][0];
+    expect(entry.userId).toBeUndefined();
+    expect(entry.username).toBe('probe-op');
   });
 });
 

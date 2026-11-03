@@ -316,13 +316,13 @@ const LIVE = [
   },
   {
     in: 'src/controllers/reportController.js',
-    at: 'auditController.js:44',
+    at: 'auditController.js:70',
     must: /applyAuditDataScope/,
     why: '审计列表的数据范围判据',
   },
   {
     in: 'src/controllers/reportController.js',
-    at: 'auditQueryService.js:314',
+    at: 'auditQueryService.js:317',
     must: /applyAuditDataScope/,
     why: '同一条判据的第二处调用（17 轮实测原先写的 :200 是无关注释；2026-10-26 统一信封后迁 :314）',
   },
@@ -354,7 +354,7 @@ const LIVE = [
   },
   {
     in: 'src/services/reportExportService.js',
-    at: 'auditQueryService.js:154',
+    at: 'auditQueryService.js:157',
     must: /\.sort\(\{ timestamp: -1, _id: -1 \}\)/,
     why: '列表侧实际用的全序（审计）',
   },
@@ -378,19 +378,19 @@ const LIVE = [
   },
   {
     in: 'src/tests/auditExportDataScope.test.js',
-    at: 'auditController.js:44',
+    at: 'auditController.js:70',
     must: /applyAuditDataScope/,
     why: 'audit-logs 端点确实过数据范围',
   },
   {
     in: 'src/tests/auditExportDataScope.test.js',
-    at: 'auditQueryService.js:314',
+    at: 'auditQueryService.js:317',
     must: /applyAuditDataScope/,
     why: '审计列表侧同一判据',
   },
   {
     in: 'src/tests/controllers/auditExportManifestBytes.test.js',
-    at: 'auditController.js:44',
+    at: 'auditController.js:70',
     must: /applyAuditDataScope/,
     why: '"删掉这行不会有任何测试变红"指的就是这一行',
   },
@@ -420,13 +420,13 @@ const LIVE = [
   },
   {
     in: 'src/tests/edge/edgeCases.test.js',
-    at: 'auditController.js:26',
+    at: 'auditController.js:32',
     must: /try \{/,
     why: '导出路径的外层 try',
   },
   {
     in: 'src/tests/edge/edgeCases.test.js',
-    at: 'auditController.js:69',
+    at: 'auditController.js:95',
     must: /catch \(error\)/,
     why: '接住拒绝并给 AUDIT_EXPORT_FAILED 的那条 catch',
   },
@@ -445,7 +445,7 @@ const LIVE = [
   // —— 以下 13 条是第 17 轮 G/H 两线实测出的错锚：站点已改对，登记钉住不再漂 ——
   {
     in: 'src/utils/loggerFlush.js',
-    at: 'index.js:124',
+    at: 'index.js:141',
     must: /logger\.warn\(`收到重复/,
     why: '二次信号 handler 的 logger.warn（原写 :70，落在 docblock 的空续行上；2026-10-31 取证接线把 gracefulShutdown 的幂等守卫下移一行 ⇒ :122→:123；2026-11-03 入口顶部补 recordStartupAuditTrail 的 require ⇒ :123→:124）',
   },
@@ -501,8 +501,8 @@ const LIVE = [
   },
   {
     in: 'src/tests/controllers/auditSummaryCache.test.js',
-    at: 'auditQueryService.js:136',
-    must: /\$group/,
+    at: 'auditQueryService.js:137',
+    must: /\$group: \{ _id: '\$riskLevel'/,
     why: '与页码无关的那次全量聚合（原引的是已失效的对外报告行号）',
   },
   {
@@ -567,13 +567,13 @@ const LIVE = [
   },
   {
     in: 'src/utils/transaction.js',
-    at: 'src/index.js:474',
+    at: 'src/index.js:486',
     must: /process\.on\('unhandledRejection'/,
     why: '事务清理超时不得变成无人持有的拒绝（原写 :446，实为启动期监听区；2026-11-01 取证接线后处理器移至 :511-531，2026-11-03 入口瘦身后移至 :474-493）',
   },
   {
     in: 'src/tests/utils/transactionTopology.test.js',
-    at: 'src/index.js:474',
+    at: 'src/index.js:486',
     must: /process\.on\('unhandledRejection'/,
     why: '同一处处理器口径的第二个引用站点（2026-10-03 审计线登记的 :446 已随取证接线迁至 :511，2026-11-03 入口瘦身后迁至 :474）',
   },
@@ -746,7 +746,7 @@ describe('层 2 · 无内容锚点（空行 / 只剩注释标记；豁免 = STAL
     expect(bare.length).toBe(1);
     expect(qualified.length).toBe(1);
     expect(occurrences('src/utils/loggerFlush.js', 'index.js:70').length).toBe(0);
-    expect(occurrences('src/utils/loggerFlush.js', 'index.js:124').length).toBe(1);
+    expect(occurrences('src/utils/loggerFlush.js', 'index.js:141').length).toBe(1);
   });
 });
 
@@ -804,8 +804,8 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
     );
     expect(drifted).not.toBeNull();
     expect(/applyAuditDataScope/.test(drifted.text)).toBe(false);
-    // 反向：修好的 :44 必须含符号（两向都过，才不是只验失败态）
-    expect(/applyAuditDataScope/.test(rangeText('auditController.js', 44, 44).text)).toBe(true);
+    // 反向：修好的 :70 必须含符号（两向都过，才不是只验失败态）
+    expect(/applyAuditDataScope/.test(rangeText('auditController.js', 70, 70).text)).toBe(true);
   });
 
   test('晋升目标预登记有牙：STALE 改对才绿，改成一个仍不对的行号一样红', () => {

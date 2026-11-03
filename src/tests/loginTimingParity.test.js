@@ -3,7 +3,7 @@
  *
  * 缺陷（中危）：`assertAccountUsable`（src/services/authService/login.js:235）的两条拒绝分支
  * （status inactive|locked、lockUntil 未到期）**既没跑 consumeDummyPasswordTime，
- * 也没走 checkBruteForce**；而「用户不存在」（src/services/authService/login.js:91，
+ * 也没走 checkBruteForce**；而「用户不存在」（src/services/authService/login.js:87，
  * 其 checkBruteForce 在 src/services/authService/login.js:96）与「IP 不在允许范围」
  * （src/services/authService/login.js:309，其 checkBruteForce 在
  * src/services/authService/login.js:334）两条都跑了。bcrypt 是纯 JS cost-12（百毫秒级），于是

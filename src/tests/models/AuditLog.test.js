@@ -4,6 +4,12 @@
 
 const mongoose = require('mongoose');
 
+// A5 直写路径哈希失败盖章的桩点：auditLogHooks 在模块加载时解构 getChainTail，
+// spy 必须先于 AuditLog 首次 require（beforeAll）装上；spyOn 默认保留原实现，
+// 只有显式 mockRejectedValueOnce 的那一次调用走异常路径。
+const auditChain = require('../../utils/auditChain');
+jest.spyOn(auditChain, 'getChainTail');
+
 describe('AuditLog 模型静态方法', () => {
   let AuditLog;
 
@@ -66,7 +72,7 @@ describe('AuditLog 模型静态方法', () => {
       expect(doc.body.list[1].safe).toBe('keep');
     });
 
-    test('非敏感字段与原始类型保持不变', async () => {
+    test('非敏感字段与原始类型保持不变（realName 已入脱敏名单，不再属于非敏感档）', async () => {
       const req = makeReq({ body: { realName: '张三', age: 30, active: true, tags: ['a', 'b'] } });
       const doc = await AuditLog.recordSensitiveAction(
         null,
@@ -77,7 +83,9 @@ describe('AuditLog 模型静态方法', () => {
         { statusCode: 200 },
         5
       );
-      expect(doc.body.realName).toBe('张三');
+      // realName 已加入 SENSITIVE_KEY_SUBSTRINGS（明文姓名不得二次固化进 append-only
+      // 审计集合），期望从"原样保留"更新为打码
+      expect(doc.body.realName).toBe('***');
       expect(doc.body.age).toBe(30);
       expect(doc.body.active).toBe(true);
       expect(doc.body.tags).toEqual(['a', 'b']);
@@ -377,6 +385,61 @@ describe('AuditLog 模型静态方法', () => {
       expect(modelSrc.includes(RISK_PRIVATE_LIST)).toBe(false);
       // 同上：文本闸必须能抓到私抄，否则这条是个恒绿的摆设
       expect(`enum: [${RISK_PRIVATE_LIST}]`.includes(RISK_PRIVATE_LIST)).toBe(true);
+    });
+  });
+
+  describe('直写路径哈希失败盖 hashFailure 章（A5）', () => {
+    afterEach(async () => {
+      await AuditLog.deleteMany({ username: /^a5hash/ }, { bypassAppendOnly: true });
+    });
+
+    test('getChainTail 抛错 ⇒ 落库文档带 hashFailure（prevHash/hashVersion 一并清 null），核验归 hash_compute_failed 而非 breaks', async () => {
+      // 先落一条诚实记录：核验器只把「出现在带哈希记录之后」的无哈希记录归入缺口档
+      //（链启用前的存量走 legacy 臂），与批量路径的归类形态一致
+      const good = await AuditLog.create({
+        action: 'a5_hash_ok',
+        category: 'system',
+        username: 'a5hashok',
+        method: 'POST',
+        path: '/api/a5-hash',
+        ip: '::1',
+        statusCode: 200,
+        body: {},
+      });
+      expect(good.hash).toMatch(/^[0-9a-f]{64}$/);
+
+      const metrics = require('../../utils/metrics');
+      const alertSpy = jest.spyOn(metrics, 'incSecurityAlert').mockImplementation(() => {});
+      auditChain.getChainTail.mockRejectedValueOnce(new Error('chain tail read failed'));
+      const failed = await AuditLog.create({
+        action: 'a5_hash_failure',
+        category: 'system',
+        username: 'a5hashfail',
+        method: 'POST',
+        path: '/api/a5-hash',
+        ip: '::1',
+        statusCode: 200,
+        body: {},
+      });
+      // 盖章三件套与批量路径 handleHashFailure 逐字段一致
+      expect(failed.hash).toBeNull();
+      expect(failed.prevHash).toBeNull();
+      expect(failed.hashVersion).toBeNull();
+      expect(failed.hashFailure).toBe('chain tail read failed');
+      // 与批量路径同档进告警面
+      expect(alertSpy).toHaveBeenCalledWith('audit_hash_compute_failed', 'high');
+      alertSpy.mockRestore();
+
+      // 核验归类：缺口计数（不计 breaks），与 auditChainVerify.test.js 的归类断言同形
+      const { verifyAuditChain } = require('../../services/auditChainVerify');
+      const report = await verifyAuditChain(AuditLog, {
+        filter: { username: { $in: ['a5hashok', 'a5hashfail'] } },
+        maxRecords: 100,
+      });
+      expect(report.total).toBe(2);
+      expect(report.byType.hash_compute_failed).toBe(1);
+      expect(report.hashComputeFailed).toBe(1);
+      expect(report.breaks).toBe(0);
     });
   });
 });

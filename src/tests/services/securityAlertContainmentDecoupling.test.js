@@ -402,11 +402,19 @@ describe('写法门禁：shouldSendAlert 必须排在审计与封禁之后', () 
 
     const gate = body.indexOf('shouldSendAlert(');
     const audit = body.indexOf('await AuditLog.create(');
-    const ban = body.indexOf('await addToBlacklist(');
+    // B4（2026-11-03）把封禁执行抽进 containByBan（复杂度棘轮）：文本序随之变为
+    // 「recordAndContain 内：审计 → await containByBan( → shouldSendAlert」，封禁原语
+    // （await addToBlacklist(）在 containByBan 体内、定义于 recordAndContain 之后。
+    // 门禁意图不变——频控不得排在审计与封禁之前——判据改为按调用点对齐新布局；
+    // 最后一条钉住「原语还在本文件抽出的函数体内」，防"抽着抽着把封禁抽没了"。
+    const banCall = body.indexOf('await containByBan(');
+    const banPrimitive = body.indexOf('await addToBlacklist(');
     expect(gate).toBeGreaterThan(-1);
     expect(audit).toBeGreaterThan(-1);
-    expect(ban).toBeGreaterThan(-1);
+    expect(banCall).toBeGreaterThan(-1);
+    expect(banPrimitive).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(audit);
-    expect(gate).toBeGreaterThan(ban);
+    expect(gate).toBeGreaterThan(banCall);
+    expect(banPrimitive).toBeGreaterThan(banCall);
   });
 });

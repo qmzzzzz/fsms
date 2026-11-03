@@ -384,4 +384,41 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
     setEnv('CANARY_USERNAMES', saved.CANARY_USERNAMES);
     canaryWatch.__resetForTest();
   });
+
+  // ==================== F1：WS 探测留痕的安全裁决尺（2026-11-03） ====================
+  // 裸 handshake.address 是"请求方可写的那一侧"：可信代理解析、伪造握手头都能让留痕
+  // 落到任意地址。修复后与 WS 封禁闸同一把 resolveHandshakeIPForSecurityDecision。
+  describe('F1 WS 探测留痕归因（recordHoneypotSocketProbe）', () => {
+    const wsRow = async (username) =>
+      AuditLog.findOne({ action: 'honeypot_probe', method: 'WS', username }).lean();
+
+    test('可信代理：XFF 解析出的真实客户端留痕，而不是代理对端地址', async () => {
+      setEnv('TRUST_PROXY_HOPS', '1');
+      const username = `${stamp}wsxff1`;
+      await honeypotWatch.recordHoneypotSocketProbe(username, {
+        id: 's-f1a',
+        // 对端是私网代理（兼容档判可信），XFF 携带互联网侧真实客户
+        handshake: { address: '10.44.0.9', headers: { 'x-forwarded-for': '198.51.100.7' } },
+      });
+      const row = await wsRow(username);
+      expect(row).toBeTruthy();
+      // 裸 .address 会记 10.44.0.9（代理）；修复后与封禁闸同尺 ⇒ 记真实客户端
+      expect(row.ip).toBe('198.51.100.7');
+    });
+
+    test('伪造 XFF 负向：边界外对端带来的转发头不被采信，留痕落对端而非受害者', async () => {
+      setEnv('TRUST_PROXY_HOPS', '1');
+      const username = `${stamp}wsxff2`;
+      const victim = '203.0.113.50';
+      const attacker = '198.51.100.66'; // 公网对端 ⇒ 兼容档判不可信 ⇒ XFF 整体不可采信
+      await honeypotWatch.recordHoneypotSocketProbe(username, {
+        id: 's-f1b',
+        handshake: { address: attacker, headers: { 'x-forwarded-for': victim } },
+      });
+      const row = await wsRow(username);
+      expect(row).toBeTruthy();
+      expect(row.ip).toBe(attacker);
+      expect(row.ip).not.toBe(victim); // 伪造 XFF 不落到受害者 IP 名下
+    });
+  });
 });

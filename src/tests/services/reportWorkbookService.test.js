@@ -1,6 +1,6 @@
 jest.mock('../../utils/xlsxWriter');
 
-const { streamExportRows, writeExportWorkbook } = require('../../services/reportWorkbookService');
+const { fetchExportRows, writeExportWorkbook } = require('../../services/reportWorkbookService');
 const { createWorkbook } = require('../../utils/xlsxWriter');
 const FireDevice = require('../../models/FireDevice');
 
@@ -50,7 +50,7 @@ describe('report workbook service', () => {
     };
     const worksheet = { addRow: jest.fn() };
 
-    const out = await streamExportRows(worksheet, config, { scope: true }, (doc) => doc);
+    const out = await fetchExportRows(worksheet, config, { scope: true }, (doc) => doc);
 
     // "跳过"不能是静默的：消失的行数必须是返回值的一部分，否则调用方无从声明文件不完整
     expect(out).toEqual({ written: 2, truncated: false, rowsLost: 1 });
@@ -73,7 +73,7 @@ describe('report workbook service', () => {
     }));
     const worksheet = { addRow: jest.fn() };
 
-    await streamExportRows(
+    await fetchExportRows(
       worksheet,
       { model: { find }, sort: { deviceCode: 1 }, populate: [], select: 'name' },
       { type: 'devices' },
@@ -162,7 +162,7 @@ describe('xlsx export truncation must be declared', () => {
     const { find, limit } = cursorModel(docs(LIMIT + 1));
     const worksheet = { addRow: jest.fn() };
 
-    const out = await streamExportRows(
+    const out = await fetchExportRows(
       worksheet,
       { model: { find }, sort: { deviceCode: 1 }, populate: [], select: 'deviceCode' },
       { scope: true },
@@ -181,7 +181,7 @@ describe('xlsx export truncation must be declared', () => {
     const { find } = cursorModel(docs(LIMIT));
     const worksheet = { addRow: jest.fn() };
 
-    const out = await streamExportRows(
+    const out = await fetchExportRows(
       worksheet,
       { model: { find }, sort: { deviceCode: 1 }, populate: [], select: 'deviceCode' },
       {},
@@ -213,7 +213,7 @@ describe('xlsx export truncation must be declared', () => {
     });
     const worksheet = { addRow: jest.fn() };
 
-    const out = await streamExportRows(
+    const out = await fetchExportRows(
       worksheet,
       { model: { find }, sort: { occurredAt: -1 }, populate: [{ path: 'handler' }], select: 'x' },
       { scope: true },
@@ -248,7 +248,7 @@ describe('xlsx export truncation must be declared', () => {
     });
     const worksheet = { addRow: jest.fn() };
 
-    const out = await streamExportRows(
+    const out = await fetchExportRows(
       worksheet,
       { model: { find }, sort: { occurredAt: -1 }, populate: [{ path: 'handler' }], select: 'x' },
       {},

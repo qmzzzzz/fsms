@@ -80,6 +80,7 @@ describe('deviceReminder 分支补齐', () => {
   // 立即完成的链：await 后得到 value
   function immediateChain(value) {
     const chain = {
+      maxTimeMS: () => chain, // E5 起四档查询统一经 withListBudget 挂预算，替身链必须带它
       select: () => chain,
       sort: () => chain,
       limit: () => chain,
@@ -91,6 +92,7 @@ describe('deviceReminder 分支补齐', () => {
   // 立即失败的链（覆盖扫描 .catch 分支用）
   const rejectChain = (err) => {
     const chain = {
+      maxTimeMS: () => chain,
       select: () => chain,
       sort: () => chain,
       limit: () => chain,
@@ -112,6 +114,7 @@ describe('deviceReminder 分支补齐', () => {
       });
       pending.push({ resolve: resolveFn, reject: rejectFn });
       const chain = {
+        maxTimeMS: () => chain,
         select: () => chain,
         sort: () => chain,
         limit: () => chain,

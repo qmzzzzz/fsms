@@ -26,7 +26,7 @@
  *     不触发脚注）⇒ 行为断言看不见它，必须直接看传给它的 options。
  *
  * 变异验证记录（2026-10-01，逐条 exact-anchor 改实现 → 跑本套件 → finally 还原；5/5 KILLED）：
- *   M1 workbook 不再把 collation 转交 streamExportRows ⇒ 3 红：③（X-Export-Truncated 被置真——
+ *   M1 workbook 不再把 collation 转交 fetchExportRows ⇒ 3 红：③（X-Export-Truncated 被置真——
  *      取数腿按二进制 collation 只写 1 行而对账用的计数是 3 ⇒ countDrift=2，正是脚注该说话的
  *      时刻，实测 Received: "true"）、④、⑦。
  *   M2 计数腿丢掉 collationOptions ⇒ 2 红：⑥、⑦。这条**不反映到文件内容**：total 偏小时
@@ -231,7 +231,7 @@ describe('审计 xlsx 导出的 username 前缀 + collation 口径', () => {
         });
       expect(res.status).toBe(200);
       // 对账脚注必须不出现：计数腿与取数腿挂的是同一份 collation，任何一侧漏挂都会让
-      // "命中数"与"写出行数"对不上（变异 M1：删掉转交给 streamExportRows 的第 5 个实参
+      // "命中数"与"写出行数"对不上（变异 M1：删掉转交给 fetchExportRows 的第 5 个实参
       // ⇒ 取数腿按二进制 collation 只写 1 行而计数仍是 3 ⇒ countDrift=2 ⇒ 头被置真）。
       expect(res.headers['x-export-truncated']).toBeUndefined();
       const cols = await columnsFromWorkbook(res.body);
@@ -362,7 +362,7 @@ describe('审计 xlsx 导出的 username 前缀 + collation 口径', () => {
         'writeExportWorkbook(res,{type,query,total:exportTotal,...collationOptions,maskPii,lang,watermark,})'
       );
       const wb = squash('../../services/reportWorkbookService.js');
-      expect(wb).toContain('streamExportRows(worksheet,config,query,safeTransform,collation)');
+      expect(wb).toContain('fetchExportRows(worksheet,config,query,safeTransform,collation)');
       expect(wb).toContain(
         "{type,query,total=null,collation=null,maskPii=false,lang='zh',watermark=null}"
       );

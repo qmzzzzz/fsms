@@ -28,6 +28,9 @@ process.env.AUDIT_WAL_PATH = path.join(tmpDir, 'precast-test.wal');
 process.env.AUDIT_WAL_MAX_BYTES = '100000';
 process.env.AUDIT_WAL_STAT_INTERVAL = '1000';
 
+// flush 单轮批次上限在**模块加载时**读定（与 BUFFER_HARD_LIMIT 同法，错配只告警一次），
+// 因此必须在 require 之前设值；写在用例体内对已加载的模块毫无作用。
+process.env.AUDIT_FLUSH_BATCH_SIZE = '120';
 const auditBuffer = require('../../services/auditBuffer');
 const wal = require('../../services/auditBufferWal');
 const auditDocs = require('../../services/auditBufferDocs');
@@ -186,6 +189,8 @@ describe('批量审计写路径：串链前的预铸造闸', () => {
       /* ignore */
     }
     if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+    // 本文件在 require 前设的上限不能泄给同一 worker 里的后续文件（testMatch 顺序不定）
+    delete process.env.AUDIT_FLUSH_BATCH_SIZE;
   });
 
   test('① 批次中间一条不合 schema：不留链洞、行有归档、丢失量可见', async () => {
@@ -400,6 +405,37 @@ describe('批量审计写路径：串链前的预铸造闸', () => {
       expect(msg).toMatch(/移交归档队列/);
     } finally {
       discardSpy.mockRestore();
+    }
+  });
+});
+
+describe('A7：flush 单轮批次上限（splice 截断，余量留待下一轮）', () => {
+  const pushN = (n) => {
+    for (let i = 0; i < n; i += 1) {
+      auditBuffer.push(doc(`b7cap_${STAMP}`, { path: `/cap/${i}` }));
+    }
+  };
+
+  test('push 250 条、上限 120 ⇒ insertMany 依次收到 100(自动触发,不足上限)/120/30', async () => {
+    const insertSpy = jest.spyOn(AuditLog, 'insertMany').mockImplementation(async (docs) => docs);
+    try {
+      pushN(250);
+      // push 循环是同步的：第 100 条触发的自动 flush 在循环里只跑了同步前缀
+      //（splice 100 条后让出），其余推入不会再次触发。等它收尾后再看余量。
+      await auditBuffer.__waitForFlushIdle();
+      const lengths = () => insertSpy.mock.calls.map((c) => c[0].length);
+      expect(lengths()).toEqual([100]); // 自动轮：缓冲只有 100 条，上限未绑定
+      expect(auditBuffer.getStats().bufferLength).toBe(150);
+
+      await auditBuffer.flush(); // 上限绑定：只取 120
+      expect(lengths()).toEqual([100, 120]);
+      expect(auditBuffer.getStats().bufferLength).toBe(30);
+
+      await auditBuffer.flush(); // 余量取尽
+      expect(lengths()).toEqual([100, 120, 30]);
+      expect(auditBuffer.getStats().bufferLength).toBe(0);
+    } finally {
+      insertSpy.mockRestore();
     }
   });
 });

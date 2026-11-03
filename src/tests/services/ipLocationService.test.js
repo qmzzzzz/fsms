@@ -6,10 +6,16 @@
  * 因此这里的用例重点不在"查得准"（那是检索器测试的职责），而在失败路径
  * 与缓存边界——服务挂掉的典型方式是异常逃逸污染主流程，或缓存把旧的
  * 失败/成功结果串场。
+ *
+ * F4（2026-11-03）追加：懒加载独立层的两类失败必须分开——加载失败置哨兵
+ * （5 分钟内短路、只告警一次、过期重试）；句柄加载成功后的运行期异常**不置位**
+ * 加载闩（逐条降级 + 60s 节流 warn）。混用一个布尔的话，一条畸形输入就能把
+ * 整个归属地面杀 5 分钟（或反之：数据文件没了还每条查询重读 11MB）。
  */
 
 const searcher = require('../../utils/ip2regionSearcher');
 const ipLocation = require('../../services/ipLocationService');
+const logger = require('../../utils/logger');
 // 私网展示值取后端码表单例（constants/ipLocationCodes.js）：断言跟着码表走，
 // 后端改取值时这里跟着改，不会出现「测试还钉着旧中文、实现已是新码」的假绿
 const { IP_LOCATION_CODES } = require('../../constants/ipLocationCodes');
@@ -17,9 +23,9 @@ const PRIVATE = IP_LOCATION_CODES.PRIVATE_NETWORK;
 
 describe('ipLocationService（IP 归属地展示）', () => {
   beforeEach(() => {
-    // 缓存逐例清空：locate 以原文为键缓存（含失败结果 null），
-    // 上一例的结论残留会让下一例测到的是缓存而非分支
-    ipLocation.clearCache();
+    // F4：句柄三态与告警闩是模块级状态，逐例复位（缓存清空含在内）
+    ipLocation.resetForTest();
+    searcher.resetForTest();
   });
 
   describe('输入卫生（非法输入一律 null，不抛错）', () => {
@@ -82,16 +88,16 @@ describe('ipLocationService（IP 归属地展示）', () => {
   });
 
   describe('失败语义与缓存', () => {
-    test('检索器抛错时 fail-soft 返回 null，不向调用方逃逸', async () => {
-      const spy = jest.spyOn(searcher, 'search').mockImplementation(() => {
-        throw new Error('数据文件被外力删除');
+    test('检索器运行期抛错时 fail-soft 返回 null，不向调用方逃逸', async () => {
+      const spy = jest.spyOn(searcher, 'searchRaw').mockImplementation(() => {
+        throw new Error('段索引被外力改写');
       });
       expect(ipLocation.locate('223.5.5.5')).toBeNull();
       spy.mockRestore();
     });
 
     test('同键重复查询命中缓存（结果一致且不再触发底层检索）', () => {
-      const spy = jest.spyOn(searcher, 'search');
+      const spy = jest.spyOn(searcher, 'searchRaw');
       const first = ipLocation.locate('223.5.5.5');
       const calls = spy.mock.calls.length;
       expect(ipLocation.locate('223.5.5.5')).toBe(first);
@@ -100,7 +106,7 @@ describe('ipLocationService（IP 归属地展示）', () => {
     });
 
     test(`缓存容量上限 ${ipLocation.CACHE_LIMIT}：满后淘汰最早一条（FIFO）`, () => {
-      const spy = jest.spyOn(searcher, 'search');
+      const spy = jest.spyOn(searcher, 'searchRaw');
       for (let i = 0; i < ipLocation.CACHE_LIMIT; i++) {
         // 生成必然合法（有真实段覆盖）且互不重复的地址
         ipLocation.locate(`1.${Math.floor(i / 256)}.${i % 256}.1`);
@@ -116,6 +122,97 @@ describe('ipLocationService（IP 归属地展示）', () => {
       ipLocation.locate('1.0.0.1');
       expect(spy.mock.calls.length).toBe(before + 2);
       spy.mockRestore();
+    });
+  });
+
+  describe('F4 懒加载独立层：加载哨兵与运行期异常两态分开', () => {
+    test('加载失败只告警一次且哨兵期内短路：后续查询不再重读 11MB 数据文件', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      const loadSpy = jest.spyOn(searcher, 'loadDataFile').mockImplementation(() => {
+        throw new Error('xdb missing');
+      });
+      try {
+        for (let i = 0; i < 10; i += 1) {
+          expect(ipLocation.locate(`1.2.${i}.1`)).toBeNull();
+        }
+        // 10 条查询只真正加载了 1 次：哨兵把其余 9 次短路掉（旧实现每条都重做同步读）
+        expect(loadSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy.mock.calls[0][0]).toContain('IP 归属地数据加载失败');
+      } finally {
+        loadSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+    });
+
+    test('哨兵 5 分钟过期重试一次：数据修复后无需进程重启', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      let healthy = false;
+      const loadSpy = jest.spyOn(searcher, 'loadDataFile').mockImplementation(() => {
+        if (!healthy) throw new Error('xdb missing');
+        return searcher.loadFromBuffer(require('fs').readFileSync(searcher.DATA_FILE));
+      });
+      try {
+        expect(ipLocation.locate('223.5.5.5')).toBeNull();
+        // 修复数据后把时钟推过哨兵存续期（LOAD_RETRY_MS）⇒ 下一条查询重试并恢复
+        healthy = true;
+        const clock = jest
+          .spyOn(Date, 'now')
+          .mockReturnValue(Date.now() + ipLocation.LOAD_RETRY_MS + 1000);
+        try {
+          expect(ipLocation.locate('223.5.5.5')).toContain('中国');
+        } finally {
+          clock.mockRestore();
+        }
+        // 告警闩在成功后复位：每个故障回合只告警一次，重试成功不算第二回合
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        loadSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+    });
+
+    test('句柄加载成功后的运行期异常不置位加载闩：逐条 warn（节流）返回 null，句柄不失效', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      // loadDataFile 必须成功（真实文件），失败的是逐条检索
+      const loadSpy = jest
+        .spyOn(searcher, 'loadDataFile')
+        .mockImplementation(() =>
+          searcher.loadFromBuffer(require('fs').readFileSync(searcher.DATA_FILE))
+        );
+      const rawSpy = jest.spyOn(searcher, 'searchRaw').mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+      try {
+        for (let i = 0; i < 5; i += 1) {
+          expect(ipLocation.locate(`1.2.3.${i + 1}`)).toBeNull();
+        }
+        // 每条都还在尝试检索（加载闩没有被置位 ⇒ 句柄没有被判死）
+        expect(rawSpy).toHaveBeenCalledTimes(5);
+        // loadDataFile 只在首条时跑过一次：运行期异常不得触发重新加载
+        expect(loadSpy).toHaveBeenCalledTimes(1);
+        // warn 逐条路径但有 60s 节流：5 条只落 1 条
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy.mock.calls[0][0]).toContain('IP 归属地检索异常');
+      } finally {
+        loadSpy.mockRestore();
+        rawSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+    });
+
+    test('成功路径每条查询不重读数据文件：句柄进程内复用', () => {
+      const loadSpy = jest
+        .spyOn(searcher, 'loadDataFile')
+        .mockImplementation(() =>
+          searcher.loadFromBuffer(require('fs').readFileSync(searcher.DATA_FILE))
+        );
+      try {
+        for (let i = 0; i < 8; i += 1) ipLocation.locate(`223.5.${i}.1`);
+        expect(loadSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        loadSpy.mockRestore();
+      }
     });
   });
 });

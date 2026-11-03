@@ -337,7 +337,8 @@ describe('GET /api/security/attack-profile 单 IP 攻击行为画像', () => {
 
     expect(data.stats).toMatchObject({
       failedRequests: 10,
-      successfulRequests: 3,
+      // E9② 改名钉值：口径是「未被拦截的请求」（blocked/403 行不计），不再叫 successfulRequests
+      nonBlockedRequests: 3,
       failedLogins: 3,
       successfulLogins: 0,
       distinctAccountsTried: 3,

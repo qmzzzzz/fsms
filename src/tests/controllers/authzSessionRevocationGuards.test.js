@@ -22,9 +22,20 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const IPBlacklist = require('../../models/IPBlacklist');
+const { invalidateIPBlockCache } = require('../../middleware/security/ipBlacklist');
 const { accessToken } = require('../helpers/authResponse');
 
 describe('授权与会话加固回归', () => {
+  // P2-7 起 `ip_range_denied` 也计入爆破阈值（同函数另两条分支早已计入）。本文件刻意
+  // 制造多次登录失败（含 IP 受限账户那次），于是 127.0.0.1 会在文件内部被自动封禁，
+  // 之后所有请求都是 403/IP_BLOCKED——封禁本身是线上正确行为，测试侧只需清自己的副作用：
+  // 删掉本机回环地址的封禁行，并失效进程内封禁缓存（缓存 TTL 内不失效的话删行也不放行）。
+  afterEach(async () => {
+    const loopbacks = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
+    await IPBlacklist.deleteMany({ ip: { $in: loopbacks } }).catch(() => {});
+    for (const ip of loopbacks) invalidateIPBlockCache(ip);
+  });
   let app;
   let User;
   let Role;

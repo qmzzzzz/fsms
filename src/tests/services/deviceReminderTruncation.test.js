@@ -215,6 +215,8 @@ describe('设备提醒扫描的截断必须可数', () => {
       release = res;
     });
     const chain = {
+      // E5 起四档查询统一经 withListBudget 挂预算，替身链必须带 maxTimeMS
+      maxTimeMS: () => chain,
       select: () => chain,
       sort: () => chain,
       limit: () => chain,
@@ -239,5 +241,61 @@ describe('设备提醒扫描的截断必须可数', () => {
       Object.keys(scanned.limits.truncated).sort()
     );
     expect(Object.keys(skipped.summary).sort()).toEqual(Object.keys(scanned.summary).sort());
+  });
+});
+
+describe('E5：四档查询的预算挂载与 tiebreak 排序（免库，链式桩）', () => {
+  const { LIST_QUERY_BUDGET_MS } = require('../../utils/queryBudget');
+  const FireDeviceModel = require('../../models/FireDevice');
+  const reminderService = require('../../services/deviceReminder');
+
+  test('四档 find 都挂 maxTimeMS 预算；needMaintenance 用既有三键索引的排序；到期两档带 _id 平局键', async () => {
+    const chains = [];
+    const findSpy = jest.spyOn(FireDeviceModel, 'find').mockImplementation(() => {
+      const steps = [];
+      const chain = {
+        maxTimeMS(ms) {
+          steps.push(['maxTimeMS', ms]);
+          return chain;
+        },
+        select(a) {
+          steps.push(['select', a]);
+          return chain;
+        },
+        sort(a) {
+          steps.push(['sort', a]);
+          return chain;
+        },
+        limit(n) {
+          steps.push(['limit', n]);
+          return chain;
+        },
+        then(resolve, reject) {
+          return Promise.resolve([]).then(resolve, reject);
+        },
+        catch(reject) {
+          return Promise.resolve([]).catch(reject);
+        },
+      };
+      chains.push(steps);
+      return chain;
+    });
+    try {
+      await reminderService.scanDeviceReminders({ resultLimit: 5 });
+      expect(chains).toHaveLength(4);
+      const sorts = [];
+      for (const steps of chains) {
+        expect(steps.map(([m]) => m)).toEqual(['maxTimeMS', 'select', 'sort', 'limit']);
+        expect(steps.find(([m]) => m === 'maxTimeMS')[1]).toBe(LIST_QUERY_BUDGET_MS);
+        sorts.push(steps.find(([m]) => m === 'sort')[1]);
+      }
+      expect(sorts[0]).toEqual({ expiryDate: 1, _id: 1 }); // expired：两键复合索引（迁移 20261103000000）
+      expect(sorts[1]).toEqual({ expiryDate: 1, _id: 1 }); // expiringSoon：同上
+      expect(sorts[2]).toEqual({ nextCheckDate: 1, installDate: 1, _id: 1 }); // needMaintenance：既有三键索引
+      expect(sorts[3]).toEqual({ installDate: 1, _id: 1 }); // needSchedule：维持原状
+      expect(findSpy).toHaveBeenCalledTimes(4);
+    } finally {
+      findSpy.mockRestore();
+    }
   });
 });

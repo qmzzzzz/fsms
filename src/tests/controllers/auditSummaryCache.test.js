@@ -2,7 +2,7 @@
  * 审计 riskLevel 汇总的 TTL 缓存（2026-09-26 审计 Top-8 后半：每页全量聚合）
  *
  * 缺陷原文：「username regex 全表扫 + **每页全量聚合**」（原报告的行号早已失效，这里改引
- * **当前**的聚合站点 `auditQueryService.js:136`），修复面「加索引 / 加 TTL 缓存」。
+ * **当前**的聚合站点 `auditQueryService.js:137`），修复面「加索引 / 加 TTL 缓存」。
  *
  * 为什么当初只修后半：汇总 `$group` **与页码无关**（只依赖 query），却被写在两个
  * 取页函数里各一份 ⇒ 翻 N 页就为同一谓词重算 N 次全量聚合。这是纯粹的重复计算，
@@ -103,6 +103,11 @@ describe('Top-8 汇总缓存：同一 query 的多页只算一次', () => {
     const pipeline = aggSpy.mock.calls[0][0];
     expect(JSON.stringify(pipeline)).toContain('$group');
     expect(JSON.stringify(pipeline)).toContain('$riskLevel');
+    // A6：汇总 $group 与分页 find 扫同样的谓词，必须同带 maxTimeMS 预算袋——
+    // 否则它就是审计读路径里唯一不设预算的那条
+    const opts = aggSpy.mock.calls[0][1];
+    expect(opts).toEqual(expect.objectContaining({ maxTimeMS: expect.any(Number) }));
+    expect(opts.maxTimeMS).toBeGreaterThan(0);
   });
 });
 

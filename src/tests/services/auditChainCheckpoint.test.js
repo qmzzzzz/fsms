@@ -141,7 +141,7 @@ describe('auditChainCheckpoint', () => {
     expect(entries[0].record).toEqual(record);
 
     await expect(
-      verifyCheckpoints({ model, filePath: filePath(), secret: SECRET })
+      verifyCheckpoints({ model, filePath: filePath(), secret: SECRET, now })
     ).resolves.toEqual({
       ok: true,
       checked: 1,
@@ -390,7 +390,15 @@ describe('auditChainCheckpoint', () => {
     };
     v1.signature = signCheckpoint(v1, SECRET);
     fs.writeFileSync(file, `${JSON.stringify(v1)}\n`);
-    const result = await verifyCheckpoints({ model, filePath: file, secret: SECRET });
+    // now 固定在锚点后 1h：让 degraded 恰好只含 legacy_version 一条——新鲜度臂
+    // （checkpoint_stale，见 auditChainCheckpointExitCodes.test.js）对这份 2026-10 的
+    // 锚点本也会成立，注入时间把两条信号解耦，本用例只钉 v1 归档这一格。
+    const result = await verifyCheckpoints({
+      model,
+      filePath: file,
+      secret: SECRET,
+      now: new Date('2026-10-20T01:00:00.000Z'),
+    });
     expect(result.ok).toBe(true);
     expect(result.degraded).toEqual([expect.objectContaining({ type: 'legacy_version' })]);
   });
@@ -426,13 +434,19 @@ describe('auditChainCheckpoint', () => {
 describe('audit-chain-checkpoint CLI 参数', () => {
   const { parseArgs, resolveCheckpointFile } = require('../../../scripts/audit-chain-checkpoint');
 
-  test('create / verify 与 --file=路径', () => {
+  test('create / verify 与 --file=路径（相对路径按仓库根解析，不随 cwd 漂移）', () => {
     expect(parseArgs(['create'])).toEqual({ command: 'create', filePath: undefined });
     expect(parseArgs(['verify', '--file=logs/x.jsonl'])).toEqual({
       command: 'verify',
       filePath: 'logs/x.jsonl',
     });
-    expect(resolveCheckpointFile('logs/x.jsonl')).toBe(path.resolve(process.cwd(), 'logs/x.jsonl'));
+    // 相对 --file 锚在仓库根（脚本 __dirname 上溯）：cron 从任意 cwd 启动时 create/verify
+    // 才会读写同一路径；按 cwd 解析会各写各读。绝对路径原样通过。
+    const repoRoot = path.resolve(__dirname, '..', '..', '..');
+    expect(resolveCheckpointFile('logs/x.jsonl')).toBe(path.resolve(repoRoot, 'logs/x.jsonl'));
+    expect(resolveCheckpointFile(path.join(repoRoot, 'abs', 'x.jsonl'))).toBe(
+      path.resolve(repoRoot, 'abs', 'x.jsonl')
+    );
   });
 
   test('缺子命令、未知子命令、未知参数一律报错（含试图用命令行传密钥）', () => {

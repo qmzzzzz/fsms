@@ -24,6 +24,10 @@
  * 新 fail-open 站点不会被本闸抓到——它压根不出现在采集结果里。本闸能做的是：
  * 让已有信号无法悄悄消失、让新增信号必须被归类、让登记过的信号必须真的接上告警。
  * 别把本闸当成「fail-open 全都被管住了」的证据（同 `src/constants/failOpenSites.js` 的声明）。
+ * 另有残留盲区（2026-11-03 实测后如实声明）：采集器对实参不做完整的括号/引号配平——
+ * 实参本身含逗号或圆括号（模板串嵌插值调用、嵌套函数调用作实参等）时，正则可能截断
+ * 或漏收该调用点；跨行实参已在采集器改为全文匹配后收进来（admin_initial_password 两处
+ * 即因此从"隐形 type"现身），但上述嵌套形态仍未覆盖，新增此类写法时须核对采集结果。
  *
  * ## 与仓内既有闸的关系
  * 与 `credentialDoorCheckLedger.test.js` 同形：采集器与台账都导出，真实树与合成反例
@@ -78,8 +82,8 @@ function listProdFiles(dir = SRC_DIR, out = []) {
 const relOf = (full) => path.relative(SRC_DIR, full).split(path.sep).join('/');
 
 const CALL_RE = /incSecurityAlert\(\s*([^,)]+?)\s*,\s*([^,)]+?)\s*\)/g;
-/** 指标定义本体那一行（`function incSecurityAlert(type, level)`）不是调用点 */
-const DEFINITION_RE = /function\s+incSecurityAlert\s*\(/;
+/** 指标定义本体（`function incSecurityAlert(type, level)`）不是调用点：全文匹配后按「匹配点前文以 function 结尾」判 */
+const DEFINITION_RE_END = /function\s*$/;
 
 /** 同文件里把裸标识符实参解析成字面量（如 PII_V1_ALERT → 'pii_v1_rows_unmigrated'） */
 function resolveConst(cleanSrc, ident) {
@@ -94,32 +98,37 @@ function resolveConst(cleanSrc, ident) {
  *   · `type`/`level` 为字面量（或可由同文件常量解析）时 `dynamic: false`；
  *   · 任一为裸标识符且解析不出时 `dynamic: true`，`type` 保留原始实参文本。
  *
+ * 全文本 matchAll（2026-11-03 改）：旧实现按行 matchAll，**实参跨行的调用点整条漏收**
+ * （CALL_RE 的 `\s` 能吃换行，但"按行切"先把它切碎了）——services/initData/adminAccount.js
+ * 的两个安全信号（admin_initial_password_write_failed / permission_not_tightened）因此在
+ * 台账与告警双侧同时隐身。CALL_RE 本就可跨行（\r 属 \s，CRLF 无影响），改全文匹配即可。
+ * 定义本体的排除随之从"按行判"改为"匹配点前文以 function 结尾则跳过"：全文匹配后不再
+ * 有"行"，`function incSecurityAlert(type, level)` 的形参表与调用点形态相同，只能看前缀。
+ * `line` 按匹配位置数换行（跨行实参即首行），仅供诊断输出，不参与闭合判据。
+ *
  * 导出以便合成反例走同一条函数（前提自证）。
  */
 function collectAlertCalls(files) {
   const calls = [];
   for (const { name, text } of files) {
     const clean = jsCodeOnlyKeepingLines(text);
-    clean.split('\n').forEach((line, i) => {
-      if (DEFINITION_RE.test(line)) return;
-      for (const m of line.matchAll(CALL_RE)) {
-        const rawType = m[1].trim();
-        const rawLevel = m[2].trim();
-        const typeLit = rawType.startsWith("'")
-          ? rawType.slice(1, -1)
-          : resolveConst(clean, rawType);
-        const levelLit = rawLevel.startsWith("'")
-          ? rawLevel.slice(1, -1)
-          : resolveConst(clean, rawLevel);
-        calls.push({
-          file: name,
-          line: i + 1,
-          type: typeLit !== null ? typeLit : rawType,
-          level: levelLit !== null ? levelLit : rawLevel,
-          dynamic: typeLit === null || levelLit === null,
-        });
-      }
-    });
+    for (const m of clean.matchAll(CALL_RE)) {
+      // 定义本体（utils/metrics.js 的 `function incSecurityAlert(type, level)`）不是调用点
+      if (DEFINITION_RE_END.test(clean.slice(0, m.index))) continue;
+      const rawType = m[1].trim();
+      const rawLevel = m[2].trim();
+      const typeLit = rawType.startsWith("'") ? rawType.slice(1, -1) : resolveConst(clean, rawType);
+      const levelLit = rawLevel.startsWith("'")
+        ? rawLevel.slice(1, -1)
+        : resolveConst(clean, rawLevel);
+      calls.push({
+        file: name,
+        line: clean.slice(0, m.index).split('\n').length,
+        type: typeLit !== null ? typeLit : rawType,
+        level: levelLit !== null ? levelLit : rawLevel,
+        dynamic: typeLit === null || levelLit === null,
+      });
+    }
   }
   return calls;
 }
@@ -142,10 +151,24 @@ for (const s of [...FAIL_OPEN_SITES, ...OTHER_ALERT_SIGNALS]) {
 
 const ruleText = fs.readFileSync(RULES_PATH, 'utf8');
 
+/** alert-rules.yml **全部规则**点名的 type 集合并集（`type=` 与 `type=~` 两种写法都收，`|` 展开为成员）。
+ *  给 ③ 的「signal 口径必须真的被某条告警规则点名」用：旧形态拿自己拼的串 contains 自己，是恒真断言。 */
+const RULE_TYPE_UNION = (() => {
+  const types = new Set();
+  for (const r of parseAlertRules(ruleText)) {
+    for (const m of r.expr.matchAll(/type=~?"([^"]+)"/g)) {
+      for (const t of m[1].split('|')) types.add(t);
+    }
+  }
+  return [...types].sort();
+})();
+
 describe('fail-open 台账完整性：信号站点必须被登记、登记必须接上告警', () => {
   test('前提自证：采集器在真实树上扫到足量站点，且定义行/注释行都不被收成调用点', () => {
-    // 规模下界：18 个真实调用点（2026-10-09 实测），留余量防"采集器退化后空集恒绿"
-    expect(CALLS.length).toBeGreaterThanOrEqual(12);
+    // 规模下界：35 个真实调用点（2026-11-03 全文匹配采集器实测；旧按行版漏掉跨行实参，
+    // 只看得见 18 个）。下界留余量防"采集器退化后空集恒绿"，不硬编码精确等值——
+    // 多一个少一个由 ① 的双向闭合判据管，这里只防采集器整体退化。
+    expect(CALLS.length).toBeGreaterThanOrEqual(30);
     expect(FAIL_OPEN_SITES.length).toBeGreaterThanOrEqual(4);
     // 定义本体（utils/metrics.js 的 `function incSecurityAlert(type, level)`）**一个调用点都不是**：
     // 它既不是静态站点也不是动态转发点。这条断言钉住 DEFINITION_RE 的排除真的生效
@@ -211,8 +234,10 @@ describe('fail-open 台账完整性：信号站点必须被登记、登记必须
       // why / tightening 必须是能拿去问人的具体句子，不接受空串或占位
       expect(s.why.length).toBeGreaterThan(30);
       expect(s.tightening.length).toBeGreaterThan(20);
-      // signal 口径必须点名自己的 type（防止抄错告警名）
-      expect(`security_alerts_total{type=${s.type}}`).toContain(s.type);
+      // signal 口径必须真的被 alert-rules.yml 的某条规则点名（防"台账写了个 yml 里查无此名"）。
+      // 旧形态 `expect(`security_alerts_total{type=${s.type}}`).toContain(s.type)` 是自拼自验的
+      // 恒真断言——串是自己拼的，contains 自己永远成立，防不了抄错告警名。
+      expect(RULE_TYPE_UNION).toContain(s.type);
     }
     // OTHER_ALERT_SIGNALS 反过来不得声称自己是降级
     for (const s of OTHER_ALERT_SIGNALS) {
@@ -295,6 +320,49 @@ describe('fail-open 台账完整性：信号站点必须被登记、登记必须
     expect(dedicated.forText).toBe('0m');
     expect(dedicated.expr).toContain('increase(');
     expect(dedicated.severity).toBe('warning');
+  });
+
+  test('②d 启动期单次事件与阶梯退化信号必须有专条覆盖：对速率型规则永不达标', () => {
+    /**
+     * 与 ②b/②c 同型、复制其判据：台账真的登记了该 type ⇄ 专条点名了它，双向对账，
+     * 多一个少一个都红。与 ② 的分工：② 管 FAIL_OPEN_SITES（持续型，for:10m）；
+     * 本条管 OTHER_ALERT_SIGNALS 里的**启动期单次事件**（admin_initial_password_*，
+     * 一次部署只 +1，SecurityAlertBurst ≥10/10min 永不达标）与**阶梯退化**
+     * （ban_ladder_degraded，每次统计失败只 +1）。专条形态照
+     * TrustedProxyBoundaryUnset/IdempotencyLeaseTakeOver：increase>0 即发，for: 0m。
+     */
+    const rules = parseAlertRules(ruleText);
+
+    // ── 管理员初始口令：两个 fail-closed 回滚事件，一条专条（ForensicCaptureDegraded 同形）──
+    const adminGuard = rules.find((r) => r.name === 'AdminInitialPasswordGuard');
+    expect(adminGuard).toBeTruthy();
+    const ADMIN_TYPES = [
+      'admin_initial_password_write_failed',
+      'admin_initial_password_permission_not_tightened',
+    ];
+    for (const t of ADMIN_TYPES) {
+      expect(OTHER_ALERT_SIGNALS.some((s) => s.type === t)).toBe(true);
+      expect(adminGuard.expr).toContain(t);
+    }
+    const adminListed = [...adminGuard.expr.matchAll(/type=~?"([^"]+)"/g)].flatMap((m) =>
+      m[1].split('|')
+    );
+    expect(adminListed.sort()).toEqual([...ADMIN_TYPES].sort());
+    expect(adminGuard.forText).toBe('0m');
+    expect(adminGuard.expr).toContain('increase(');
+    expect(adminGuard.severity).toBe('warning');
+
+    // ── 封禁阶梯退化：三条链（brute_force/permission_abuse/rate_limit）共用一个 type ──
+    const ladder = rules.find((r) => r.name === 'BanLadderDegraded');
+    expect(ladder).toBeTruthy();
+    expect(OTHER_ALERT_SIGNALS.filter((s) => s.type === 'ban_ladder_degraded')).toHaveLength(3);
+    const ladderListed = [...ladder.expr.matchAll(/type=~?"([^"]+)"/g)].flatMap((m) =>
+      m[1].split('|')
+    );
+    expect(ladderListed.sort()).toEqual(['ban_ladder_degraded']);
+    expect(ladder.forText).toBe('0m');
+    expect(ladder.expr).toContain('increase(');
+    expect(ladder.severity).toBe('warning');
   });
 
   test('动态转发点必须登记在案（无法枚举 type，但必须说明它是转发点）', () => {

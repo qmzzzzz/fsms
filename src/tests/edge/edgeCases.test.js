@@ -71,7 +71,7 @@ describe('auditScopeFilter 数据范围翻译分支（#22）', () => {
 
   // 旧用例写的是"缺 department 字段 → 退化为本人 userId"，并喂进
   // `{type:'department', userId: HEX_SELF}`。那个形态生产供不出来：
-  // rbac.getDataScope 的 department 档返回 `{type:'department', department}`（rbac.js:209），
+  // rbac.getDataScope 的 department 档返回 `{type:'department', department}`（rbac.js:212），
   // 带 userId 的是 self 档。于是断言 `query.userId === OID(HEX_SELF)` 绿，
   // 而真实输入下 dataScope.userId 是 undefined ⇒ new ObjectId(undefined) 随机 ⇒ 永久空结果。
   // 改成按真实形态断 deny：与本文件其余拒绝分支同 idioms，也与
@@ -187,7 +187,7 @@ describe('auditScopeFilter 数据范围翻译分支（#22）', () => {
       }),
     });
     // 冒泡到调用方后由控制器给 AUDIT_QUERY_FAILED / AUDIT_EXPORT_FAILED
-    // （auditController.js:26 的 try + auditController.js:69 的 catch），而不是发一份看起来"没有数据"的空导出。
+    // （auditController.js:32 的 try + auditController.js:95 的 catch），而不是发一份看起来"没有数据"的空导出。
     await expect(applyAuditDataScope({ userId: OID('5'.repeat(24)) }, 'op1')).rejects.toThrow(
       'db down'
     );

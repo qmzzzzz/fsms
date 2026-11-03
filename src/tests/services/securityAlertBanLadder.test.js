@@ -44,6 +44,10 @@ const {
   THRESHOLDS,
 } = require('../../services/securityAlert');
 const AuditLog = require('../../models/AuditLog');
+// B4：权限滥用封禁臂的共享出口护栏测 recordAndContain 本体（处置侧整块在
+// services/securityAlertPermissionAbuse.js，检测侧 checkPermissionAbuse 只是转发）
+const permissionAbuse = require('../../services/securityAlertPermissionAbuse');
+const { SHARED_EGRESS_MIN_ACCOUNTS } = require('../../services/securityAlertIpBans');
 // A-1：封禁原语直连叶子模块（securityAlertIpBans 不再经 security 门面），
 // 测试替换点随之迁移。
 const ipBlacklistStore = require('../../middleware/security/ipBlacklistStore');
@@ -60,7 +64,7 @@ let captured;
 // F-160：addToBlacklist 的返回值就是"到底封成没有"的唯一事实源，逐条用例改写它
 let banResult;
 const BAN_OK_IPS = ['192.0.2.211', '192.0.2.212', '192.0.2.213', '192.0.2.214'];
-// AuditLog 有 append-only 护栏（models/auditLogHooks.js:135），清理只能走测试专用旁路
+// AuditLog 有 append-only 护栏（models/auditLogHooks.js:145），清理只能走测试专用旁路
 const purge = (filter) => AuditLog.deleteMany(filter, { bypassAppendOnly: true });
 
 /**
@@ -368,5 +372,146 @@ describe('批量导出阈值：含边界的 >= 语义', () => {
     expect(
       await AuditLog.countDocuments({ action: ALERT_TYPES.BULK_EXPORT, username: below })
     ).toBe(0);
+  }, 20000);
+});
+
+describe('B4 权限滥用封禁臂的共享出口护栏（recordAndContain 直调）', () => {
+  // 与文件其余用例互不借夹具：独占网段，阶梯/信号各查各的
+  const ABUSE_IPS = ['192.0.2.221', '192.0.2.222', '192.0.2.223'];
+  const abuserId = new mongoose.Types.ObjectId();
+  const abuseUsername = `zzba_op_${stamp}`;
+  const purgeAbuse = () =>
+    purge({
+      $or: [
+        { ip: { $in: [...ABUSE_IPS, ...ABUSE_IPS.map((i) => `::ffff:${i}`)] } },
+        { username: new RegExp(`^zzba`) },
+      ],
+    });
+
+  /** 共享出口信号：近 7 天该 IP 有 ≥3 个不同账号成功登录（自证计数生效） */
+  const seedSharedEgress = async (ip) => {
+    await AuditLog.insertMany(
+      ['a', 'b', 'c'].map((u) => ({
+        action: 'login_success',
+        category: 'auth',
+        username: `zzba_egress_${u}_${stamp}`,
+        ip,
+        success: true,
+        riskLevel: 'low',
+        timestamp: new Date(),
+      }))
+    );
+    expect(await IPBanEvents.countSharedEgressAccounts(ip)).toBe(SHARED_EGRESS_MIN_ACCOUNTS);
+  };
+
+  const priorCountOf = (ip) => IPBanEvents.countPermissionAbusePrior(ip);
+
+  beforeAll(async () => {
+    if (mongoose.connection.readyState === 0) await mongoose.connect(process.env.MONGODB_URI);
+  });
+
+  afterEach(async () => {
+    await purgeAbuse();
+  });
+
+  test('共享出口首触宽限：≥3 账号共用出口且历史 0 次 ⇒ 只告警不封禁，行体 ipBanApplied=false', async () => {
+    const ip = ABUSE_IPS[0];
+    await seedSharedEgress(ip);
+    expect(await priorCountOf(ip)).toBe(0);
+    await permissionAbuse.recordAndContain({
+      userId: abuserId,
+      username: abuseUsername,
+      ip,
+      attributionKind: 'direct',
+      recentFailures: THRESHOLDS.permissionFailures,
+    });
+    expect(captured).toHaveLength(0); // 首触：一次误伤整栋楼的自动封禁不可逆 ⇒ 宽限
+    const row = await AuditLog.findOne({ action: ALERT_TYPES.PERMISSION_ABUSE, ip }).lean();
+    expect(row).toBeTruthy();
+    expect(row.body.ipBanApplied).toBe(false);
+  }, 20000);
+
+  test('二触封禁：同出口第二次触发（priorBans=1）⇒ 恢复封禁并按第 2 档时长', async () => {
+    const ip = ABUSE_IPS[1];
+    await seedSharedEgress(ip);
+    // 预置一条历史触发行（历史行没有 ipBanApplied 字段 ⇒ $ne:false 照常计数）
+    await AuditLog.create({
+      action: ALERT_TYPES.PERMISSION_ABUSE,
+      category: 'system',
+      username: abuseUsername,
+      ip,
+      riskLevel: 'high',
+      body: { failures: THRESHOLDS.permissionFailures },
+    });
+    expect(await priorCountOf(ip)).toBe(1);
+    await permissionAbuse.recordAndContain({
+      userId: abuserId,
+      username: abuseUsername,
+      ip,
+      attributionKind: 'direct',
+      recentFailures: THRESHOLDS.permissionFailures,
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({
+      ip,
+      source: 'auto',
+      reason: 'permission_abuse_auto_ban_tier2',
+      durationMs: ESCALATION_TIERS[1],
+    });
+    const row = await AuditLog.findOne({
+      action: ALERT_TYPES.PERMISSION_ABUSE,
+      ip: ip,
+      'body.ipBanApplied': true,
+    }).lean();
+    expect(row).toBeTruthy();
+  }, 20000);
+
+  test('跳过行不抬档：宽限行（ipBanApplied=false）不得计入阶梯事件源', async () => {
+    const ip = ABUSE_IPS[2];
+    await seedSharedEgress(ip);
+    await permissionAbuse.recordAndContain({
+      userId: abuserId,
+      username: abuseUsername,
+      ip,
+      attributionKind: 'direct',
+      recentFailures: THRESHOLDS.permissionFailures,
+    });
+    expect(captured).toHaveLength(0);
+    // 告警行已落库（确实是事件），但它是"只告警没封"——与 countPrior 的 :79-83 同条纪律
+    expect(await AuditLog.countDocuments({ action: ALERT_TYPES.PERMISSION_ABUSE, ip })).toBe(1);
+    expect(await priorCountOf(ip)).toBe(0);
+    // 对照：另落一条"已封"形态的行后必须计数（钉住过滤是按字段、不是按 action 一刀切；
+    // append-only 集合不能 update，走旁路清理后正常 insert）
+    await purge({ action: ALERT_TYPES.PERMISSION_ABUSE, ip });
+    await AuditLog.create({
+      action: ALERT_TYPES.PERMISSION_ABUSE,
+      category: 'system',
+      username: abuseUsername,
+      ip,
+      riskLevel: 'high',
+      body: { failures: THRESHOLDS.permissionFailures, ipBanApplied: true },
+    });
+    expect(await priorCountOf(ip)).toBe(1);
+  }, 20000);
+
+  test('共享出口信号查询失败（aggregate 抛错）⇒ 本次不封，审计照写', async () => {
+    const ip = ABUSE_IPS[2];
+    const spy = jest
+      .spyOn(IPBanEvents, 'countSharedEgressAccounts')
+      .mockRejectedValue(new Error('db down'));
+    try {
+      await permissionAbuse.recordAndContain({
+        userId: abuserId,
+        username: abuseUsername,
+        ip,
+        attributionKind: 'direct',
+        recentFailures: THRESHOLDS.permissionFailures,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(captured).toHaveLength(0); // 信号不可用时封禁的误伤面无法估计 ⇒ 宁少勿滥
+    const row = await AuditLog.findOne({ action: ALERT_TYPES.PERMISSION_ABUSE, ip }).lean();
+    expect(row.body.ipBanApplied).toBe(false);
   }, 20000);
 });

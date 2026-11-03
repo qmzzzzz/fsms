@@ -148,7 +148,7 @@ const stronglyConnected = (graph) => {
 };
 
 /**
- * 已登记的惰性环分量：1 个分量 / 23 个模块（2026-10-30 实测）
+ * 已登记的惰性环分量：2 个分量 / 25 个模块（2026-11-03 实测）
  *
  * 2026-10-30 新增成员 `config/jwtRotation.js`（P2-3 密钥轮换）：validate.js 需要按
  * 轮换配置判错，jwtRotation 又要复用 validate 的弱密钥判据，两边都用函数体 require
@@ -174,6 +174,11 @@ const stronglyConnected = (graph) => {
  *      `config/index.js` 顶层引用（config/index.js -> utils/cookie.js 是真实边），而 config/index.js
  *      本身已在分量内（config/index.js -> config/validate.js 惰性）。即：cookie 的入口有两处——
  *      config/index.js（顶层）与 config/validate.js（惰性），前者把它拖进分量，后者提供闭环的那条边。
+ *
+ * 第 2 个分量 {services/honeypotWatch.js, services/websocketService/handshake.js}
+ * （2026-11-03 ，P2-7 WS 侧蜜罐痕迹）：判据在 watch、取址在 handshake——handshake 顶层引用
+ * isHoneypotSocket（蜜罐会话的 WS 判据与拒绝痕迹都在本模块）；WS 探测痕迹又要按握手链同一套取址语义算 IP，
+ * 反向边只能惰性（提回顶层即加载期互引成环，两侧拿到半初始化对象）。
  */
 const LAZY_SCC = [
   [
@@ -202,6 +207,7 @@ const LAZY_SCC = [
     'utils/metricsAuditDrops.js',
     'utils/passwordHistory.js',
   ],
+  ['services/honeypotWatch.js', 'services/websocketService/handshake.js'],
 ];
 
 /**
@@ -363,7 +369,7 @@ describe('依赖图无环断言', () => {
   /**
    * 惰性边清单（分量内部、只以函数体 require 存在的边）。
    *
-   * 23 条 / 1 个分量（2026-10-30 实测）。这张表是**登记表**，不是白名单：
+   * 27 条 / 2 个分量（2026-11-03 实测）。这张表是**登记表**，不是白名单：
    * 新增一条惰性 require、或把某条提到顶层（清单里少一条），都必须先解释清楚再改这里。
    * 与 LAZY_SCC 的分工：那张表守「哪些模块卷进了环」，这张表守「环是靠哪几条边撑住的」。
    */
@@ -379,12 +385,14 @@ describe('依赖图无环断言', () => {
     'config/validate.js -> config/jwtRotation.js',
     'constants/runtime.js -> services/sharedCache/index.js',
     'models/auditLogHooks.js -> utils/auditChain.js',
+    'models/auditLogHooks.js -> utils/metrics.js',
     'models/auditLogWriteStatics.js -> utils/metrics.js',
     'services/auditBuffer.js -> utils/auditChain.js',
     'services/auditBuffer.js -> utils/metrics.js',
     'services/auditBufferDocs.js -> utils/metrics.js',
     'services/auditWalCap.js -> utils/metricsAuditDrops.js',
     'services/auditWalPermissions.js -> utils/metrics.js',
+    'services/honeypotWatch.js -> services/websocketService/handshake.js',
     'services/sharedCache/index.js -> constants/runtime.js',
     'utils/auditChain.js -> config/index.js',
     'utils/auditWriteFailure.js -> utils/metrics.js',

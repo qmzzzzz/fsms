@@ -69,11 +69,15 @@ describe('蜜罐文件/导出类端点（P1c）：合成 xlsx、逐字拒绝与�
     res.bytes = () => Buffer.concat(chunks);
     return res;
   };
+  // 合成 req 必须带 socket 对端：ipUtils.classifyIpAttribution 在取不到对端时按 UNVERIFIABLE
+  // 落地，蜜罐留痕因此会多一条 ip_attribution_unverifiable——那是夹具缺字段的产物，
+  // 真实直连请求是 DIRECT（req.ip 即对端，不刷这条因子）。带对端后本用例的分级因子集合才与线上同形。
   const makeReq = (method, url, query = {}) => ({
     method,
     originalUrl: url,
     query,
     ip: '10.44.0.11',
+    socket: { remoteAddress: '10.44.0.11' },
     user: { userId: 'hp-u1', username: honeypotName, isHoneypot: true },
   });
   const settle = (res) => new Promise((resolve) => res.on('finish', resolve));

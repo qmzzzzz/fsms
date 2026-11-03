@@ -220,3 +220,69 @@ describe('撞库画像：五条判据（ADR-013 P2）', () => {
     expect(new Date(stale.windowStart).getTime()).toBeGreaterThan(bounds.start.getTime());
   });
 });
+
+describe('E4：读侧行数上限（撞顶自述 truncated/sampledRows/total）', () => {
+  const AuditLog = require('../../models/AuditLog');
+  const { buildProfile, MAX_STUFFING_ROWS } = require('../../services/stuffingProfile');
+
+  /** 链式记录器：sort/limit 的实参要在断言里核对（不定 sort 的 limit 是"不确定样本"） */
+  const stubFind = (rows) => {
+    const steps = [];
+    const chain = {
+      __steps: steps,
+      select(a) {
+        steps.push(['select', a]);
+        return chain;
+      },
+      sort(a) {
+        steps.push(['sort', a]);
+        return chain;
+      },
+      limit(n) {
+        steps.push(['limit', n]);
+        return chain;
+      },
+      lean: async () => rows,
+    };
+    return chain;
+  };
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test('撞顶 ⇒ 截到 MAX_STUFFING_ROWS、countDocuments 补 total、truncated=true，且查询带 sort', async () => {
+    const rows = Array.from({ length: MAX_STUFFING_ROWS }, () => row());
+    const chain = stubFind(rows);
+    const findSpy = jest.spyOn(AuditLog, 'find').mockReturnValue(chain);
+    const countSpy = jest
+      .spyOn(AuditLog, 'countDocuments')
+      .mockResolvedValue(MAX_STUFFING_ROWS + 37);
+    const profile = await buildProfile({
+      businessDay: DAY,
+      now: Date.parse(DAY + 'T23:59:00+08:00'),
+    });
+    expect(profile.sampledRows).toBe(MAX_STUFFING_ROWS);
+    expect(profile.total).toBe(MAX_STUFFING_ROWS + 37);
+    expect(profile.truncated).toBe(true);
+    expect(countSpy).toHaveBeenCalledTimes(1);
+    expect(findSpy).toHaveBeenCalledTimes(1);
+    const steps = Object.fromEntries(chain.__steps);
+    expect(steps.sort).toEqual({ timestamp: -1, _id: -1 }); // 必须带 sort（与审计列表同向）
+    expect(steps.limit).toBe(MAX_STUFFING_ROWS);
+  });
+
+  test('未撞顶 ⇒ 不发 count 查询（取回数即命中总数），truncated=false', async () => {
+    const chain = stubFind([row(), row(), row()]);
+    jest.spyOn(AuditLog, 'find').mockReturnValue(chain);
+    const countSpy = jest.spyOn(AuditLog, 'countDocuments');
+    const profile = await buildProfile({
+      businessDay: DAY,
+      now: Date.parse(DAY + 'T23:59:00+08:00'),
+    });
+    expect(profile.sampledRows).toBe(3);
+    expect(profile.total).toBe(3);
+    expect(profile.truncated).toBe(false);
+    expect(countSpy).not.toHaveBeenCalled();
+  });
+});

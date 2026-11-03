@@ -225,6 +225,31 @@ describe('蜜罐影子数据面（P1）：改道判定、合成数据与留痕',
     expect(honeypotDecoy.isHoneypotSession({ user: { isHoneypot: 'true' } })).toBe(false);
   });
 
+  test('F1 归因：伪造 XFF 的探测不落到受害者 IP 名下（PUBLIC_PEER_HEADER 改打 socket 对端）', async () => {
+    // 独立用户名：别的用例按 username 计数，这里的行不得混进它们的断言面
+    const attackerUser = 'xfftrap';
+    const victim = '203.0.113.50'; // 请求方想嫁祸的地址（XFF 声称的"客户端"）
+    const attacker = '198.51.100.66'; // 不可伪造的 socket 对端（公网 ⇒ 兼容档判不可信）
+    const req = {
+      method: 'GET',
+      originalUrl: '/api/users',
+      query: {},
+      ip: victim, // 请求方可写的那一侧
+      headers: { 'x-forwarded-for': victim },
+      get: (k) => ({ 'x-forwarded-for': victim })[String(k).toLowerCase()],
+      socket: { remoteAddress: attacker },
+      user: { userId: 'hp-u1', username: attackerUser, isHoneypot: true },
+    };
+    const res = makeRes();
+    expect(await honeypotDecoy.steer(req, res)).toBe(true);
+    const row = await AuditLog.findOne({ action: 'honeypot_probe', username: attackerUser }).lean();
+    expect(row).toBeTruthy();
+    expect(row.ip).toBe(attacker);
+    expect(row.ip).not.toBe(victim);
+    // 留痕因子点名裁定类别：事后能看出"这次留痕的依据是哪一类来源"
+    expect(row.riskFactors).toContain('ip_attribution_public_peer_header');
+  });
+
   test('诱饵会话只读：接管后返回合成列表并留 high 审计 + 一条 HIGH 告警（重复探测审计逐条、告警仍一条）', async () => {
     honeypotWatch.__resetForTest();
     // 本文件别的用例、甚至别的套件（共享同一 MongoMemoryServer）可能已给同一诱饵账户

@@ -309,11 +309,15 @@ describe('用户管理读路径的手机号口径', () => {
     // 前提自证：确实存在这条审计行，且它就是刚才那次带明文的写
     expect(rows.length).toBeGreaterThanOrEqual(1);
     const { body } = rows[0];
-    expect(body.realName).toBe('审计口径');
+    // realName 已随同一份名单（SENSITIVE_KEY_SUBSTRINGS）收口：姓名与手机号同为
+    // append-only 审计集合里的明文 PII，期望从"原样保留"更新为打码
+    expect(body.realName).toBe('***');
     expect(JSON.stringify(body)).not.toContain(NEW_PHONE);
+    expect(JSON.stringify(body)).not.toContain('审计口径');
     expect(body.phone).toBe('***');
     // 正例对侧：不是"整块抹掉"换来的干净——键还在，只是值被打码
     expect(Object.keys(body)).toContain('phone');
+    expect(Object.keys(body)).toContain('realName');
   });
 
   test('源码文本闸：取明文的投影与脱敏函数必须成对出现', () => {

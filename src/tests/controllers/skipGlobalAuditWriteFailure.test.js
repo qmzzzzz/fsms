@@ -340,6 +340,8 @@ const EXPECTED_DURABLE_REGISTRY = {
   // P1-2：账户救济审计从 admin.js 抽出（admin.js 贴 max-lines 上限）
   'services/adminAccountAudit.js#recordAdminMfaReset': { recordDurably: 1 },
   'services/adminAccountAudit.js#recordAdminPasswordReset': { recordDurably: 1 },
+  // P2-4：IP 池封禁确认落库的可靠留痕（WAL 未启用时重抛 ⇒ 转 500，不假装记账成功）
+  'services/ipPoolBan.js#writeAuditDurably': { recordDurably: 1 },
   'services/mfaService.js#recordMfaDisableSuccess': { recordDurably: 1 },
 };
 

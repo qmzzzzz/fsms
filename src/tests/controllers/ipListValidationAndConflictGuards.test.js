@@ -271,6 +271,11 @@ describe('ipListController 分支补齐', () => {
       path: '/api/security/ip-list',
       body: { ip: '0.0.0.0/0', type: 'black' },
     });
+    // B6（2026-11-03）：critical 未遂留痕必须带客户端地址——与同文件其余五处同形态。
+    // 事后连"这次未遂从哪个地址来"都答不了的话，未遂审计只剩半条证据。
+    expect(audit.ip).toBeTruthy();
+    expect(audit.clientInfo).toBeTruthy();
+    expect(audit.clientInfo.socketPeer).toBeTruthy();
   });
 
   test('POST 分片铺满地址族（两条 /1）→ 与 /0 同等收口，非超管 403', async () => {
@@ -279,7 +284,12 @@ describe('ipListController 分支补齐', () => {
     const first = await request(app)
       .post('/api/security/ip-list')
       .set('Authorization', `Bearer ${superToken}`)
-      .send({ ip: '0.0.0.0/1', type: 'white', reason: '分支补齐-分片前置' });
+      .send({
+        ip: '0.0.0.0/1',
+        type: 'white',
+        reason: '分支补齐-分片前置',
+        typedConfirm: '0.0.0.0/1',
+      });
     expect(first.status).toBe(200);
 
     try {
@@ -376,12 +386,98 @@ describe('ipListController 分支补齐', () => {
     expect(res.body.errors.reason).toBe('typed_confirmation_required');
   });
 
+  // ==================== B5 白名单段级护栏对称收口（2026-11-03） ====================
+  describe('B5 白名单段级护栏对称收口', () => {
+    /** 清理本组用例落库的条目（按 _id），防串场 */
+    const cleanup = async (id) => {
+      if (!id) return;
+      await request(app)
+        .delete(`/api/security/ip-list/${id}`)
+        .set('Authorization', `Bearer ${superToken}`)
+        .send();
+    };
+
+    test('大段白名单（/1）无确认 ⇒ 400 typed_confirmation_required（原来整段豁免）', async () => {
+      // 用 IPv6 /1：不与既有 v4 白名单前置（127.0.0.0/8 回环豁免）发生并集/覆盖关系，
+      // 保证 400 来自段级确认判据而不是 guardFullRangeCIDR 的并集收口
+      const res = await secPost('/api/security/ip-list', {
+        ip: '::/1',
+        type: 'white',
+        reason: '分支补齐-白名单段确认',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.errors.reason).toBe('typed_confirmation_required');
+      expect(res.body.errors.expected).toBe('::/1'); // 与全网段分支同口径：回带归一化确认串
+    });
+
+    test('带确认 ⇒ 200 落库，且审计行 body 带 riskFactors=[large_segment_whitelist]', async () => {
+      const AuditLog = require('../../models/AuditLog');
+      const res = await secPost('/api/security/ip-list', {
+        ip: '::/1',
+        type: 'white',
+        reason: '分支补齐-白名单段确认',
+        typedConfirm: '::/1',
+      });
+      expect(res.status).toBe(200);
+      const id = res.body?.data?._id;
+      try {
+        // recordDurably 在响应前 await：行必然已落库，无需 waitFor
+        const audit = await AuditLog.findOne({
+          action: 'ip_whitelist_added',
+          'body.ip': '::/1',
+        })
+          .sort({ _id: -1 })
+          .lean();
+        expect(audit).not.toBeNull();
+        expect(audit.body.riskFactors).toEqual(['large_segment_whitelist']);
+      } finally {
+        await cleanup(id);
+      }
+    });
+
+    test('/0 回归不受影响：白名单 /0 仍由 guardFullRangeCIDR 收口（非超管 403，而非段级 400）', async () => {
+      const res = await secPost('/api/security/ip-list', {
+        ip: '0.0.0.0/0',
+        type: 'white',
+        reason: '分支补齐-白名单段确认',
+      });
+      // 若 /0 误入新开的白名单确认分支，这里会变成 400 typed_confirmation_required
+      expect(res.status).toBe(403);
+      expect(res.body.errors.errorCode).toBe('FULL_RANGE_FORBIDDEN');
+    });
+
+    test('兼容性：内网网段（192.168.0.0/16）加白带确认可通过，小段（/24 级以下）不带确认也通过', async () => {
+      // 大段内网加白：≥256 主机 ⇒ 需确认，带上即通过（黑名单侧同规模同判据，无方向偏袒）
+      const big = await secPost('/api/security/ip-list', {
+        ip: '192.168.0.0/16',
+        type: 'white',
+        reason: '分支补齐-白名单段确认',
+        typedConfirm: '192.168.0.0/16',
+      });
+      expect(big.status).toBe(200);
+      // 小段白名单（<256 主机）不受确认门槛影响：加白只放行的既有语义不变
+      const small = await secPost('/api/security/ip-list', {
+        ip: '192.168.77.0/25',
+        type: 'white',
+        reason: '分支补齐-白名单段确认',
+      });
+      expect(small.status).toBe(200);
+      await cleanup(big.body?.data?._id);
+      await cleanup(small.body?.data?._id);
+    });
+  });
+
   test('POST 加黑被白名单覆盖 → 400 冲突，信任标记不可被封禁覆盖', async () => {
     // 前置：超管加白 10.0.0.0/8
     const white = await request(app)
       .post('/api/security/ip-list')
       .set('Authorization', `Bearer ${superToken}`)
-      .send({ ip: '10.0.0.0/8', type: 'white', reason: '分支补齐-白名单前置' });
+      .send({
+        ip: '10.0.0.0/8',
+        type: 'white',
+        reason: '分支补齐-白名单前置',
+        typedConfirm: '10.0.0.0/8',
+      });
     // 实测 200（新增名单条目固定 200）；这是后续断言的前置，值必须确定
     expect(white.status).toBe(200);
     if (white.body?.data?._id) createdIds.push(white.body.data._id);

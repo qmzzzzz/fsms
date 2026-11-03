@@ -75,7 +75,7 @@ describe('WebSocket 全流程（批次 D2）', () => {
     const socketRegistry = new Map();
     svc.clients = new Map();
     svc.userConnections = new Map();
-    // #9：来源 IP -> 未认证连接数的准入表，真实构造器在 index.js:66 初始化。
+    // #9：来源 IP -> 未认证连接数的准入表，真实构造器在 index.js 初始化。
     // 假 socket 一旦带上 handshake.address，_acquireUnauthenticatedSlot 就不再走
     // 「没有 IP 直接放行」的早退分支，缺这个 Map 会以 TypeError 崩在 push.js:131。
     svc.unauthConnectionsByIp = new Map();

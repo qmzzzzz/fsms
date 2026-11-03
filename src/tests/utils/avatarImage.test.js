@@ -581,6 +581,59 @@ describe('avatarImage.parseAvatarImage', () => {
     expectReason(() => parseAvatarImage(toDataUri(bomb, 'image/png')), 'PNG_MALFORMED');
   });
 
+  test('E1：恶意声明 16384×16384 的 ≤256KB PNG ⇒ 解压前早拒 DIMENSION_INVALID，解压层零参与', () => {
+    // IHDR 声明巨额宽高、IDAT 只带 32×32 的真实数据。旧路径要等 readPngMeta 里按声明
+    // 尺寸算出 expectedRawSize(≈1.07GB) 才在解压/比对处报 PNG_MALFORMED；新路径在解压
+    // 之前按 IHDR（offset 16/20）过业务尺寸闸。inflateSync 未被调用 = 零解压分配。
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(16384, 0);
+    ihdr.writeUInt32BE(16384, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    const hostile = Buffer.concat([
+      PNG_SIG,
+      pngChunk('IHDR', ihdr),
+      pngChunk('IDAT', zlib.deflateSync(Buffer.alloc((1 + 32 * 4) * 32, 0))),
+      pngChunk('IEND', Buffer.alloc(0)),
+    ]);
+    const inflateSpy = jest.spyOn(zlib, 'inflateSync');
+    try {
+      expectReason(() => parseAvatarImage(toDataUri(hostile, 'image/png')), 'DIMENSION_INVALID');
+      expect(inflateSpy).not.toHaveBeenCalled();
+    } finally {
+      inflateSpy.mockRestore();
+    }
+  });
+
+  test('E1：绕过业务闸直调 readPngMeta 时，解压上限被绝对夹取在 16MiB（对声明宽高不照单全收）', () => {
+    // 夹取值 = 1024×1024 RGBA16（≈8.4MB）的 2 倍余量：合法图无感；直连 pngStructure 的
+    // 调用方（无 assertDimensionAllowed 前置）也不会按声明的 1.07GB 去解压
+    const { readPngMeta } = require('../../utils/pngStructure');
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(16384, 0);
+    ihdr.writeUInt32BE(16384, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    const hostile = Buffer.concat([
+      PNG_SIG,
+      pngChunk('IHDR', ihdr),
+      pngChunk('IDAT', zlib.deflateSync(Buffer.alloc((1 + 32 * 4) * 32, 0))),
+      pngChunk('IEND', Buffer.alloc(0)),
+    ]);
+    const realInflate = zlib.inflateSync;
+    let captured;
+    const spy = jest.spyOn(zlib, 'inflateSync').mockImplementation((raw, opts) => {
+      captured = opts;
+      return realInflate(raw, opts);
+    });
+    try {
+      expectReason(() => readPngMeta(hostile), 'PNG_MALFORMED'); // 解压输出 ≪ 夹取值 ⇒ 尺寸不符
+      expect(captured).toMatchObject({ maxOutputLength: 16 * 1024 * 1024 });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('JPEG 量化表/霍夫曼表/扫描头长度不自洽 → 拒绝（否则段尾就是夹带位）', () => {
     const badDqt = jpegSegment(0xdb, Buffer.alloc(64, 0x10)); // 缺 Pq/Tq 头字节
     const badPq = jpegSegment(0xdb, Buffer.concat([Buffer.from([0x20]), Buffer.alloc(64, 0x10)])); // Pq=2

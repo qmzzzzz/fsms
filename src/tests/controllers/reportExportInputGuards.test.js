@@ -44,7 +44,7 @@
  *  - EXPORT_ROW_TRANSFORMS 行级 fallback：需真实导出行驱动，见 beforeAll 种子注释
  *  - buildExportQuery 的 audit 分支参数：username/action/category/riskLevel/
  *    success/ip（$in 双形态）/userId/level 三档派生
- *  - streamExportRows 的 populate 分批回填（BATCH_SIZE=200）：205 行跨两个批次
+ *  - fetchExportRows 的 populate 分批回填（BATCH_SIZE=200）：205 行跨两个批次
  *  - dashboardCache TTL 定时清理：isolateModules + 假定时器
  *
  * 【断言口径】「窗口/筛选/分批」这类用例必须做内容级断言：
@@ -170,7 +170,7 @@ describe('reportController.exportReport 分支补齐', () => {
 
     // ===== 导出数据行种子 =====
     // EXPORT_ROW_TRANSFORMS 的行级 fallback 分支只在真实行流过
-    // streamExportRows 时执行——此前用例全部导出空数据，transform 一次都没跑。
+    // fetchExportRows 时执行——此前用例全部导出空数据，transform 一次都没跑。
     // 每张表刻意造「全字段 + 缺省字段」两行，让映射命中与 '-' 兜底两侧都走到。
     const FireAlarm = require('../../models/FireAlarm');
     const FireDevice = require('../../models/FireDevice');
@@ -285,7 +285,7 @@ describe('reportController.exportReport 分支补齐', () => {
     ]);
 
     // 205 行报警：populate 分批导出（BATCH_SIZE=200）跨两个批次，
-    // 覆盖 streamExportRows 的批次循环：orderedIds 按 BATCH_SIZE 分批回填，
+    // 覆盖 fetchExportRows 的批次循环：orderedIds 按 BATCH_SIZE 分批回填，
     // 循环必须走到尾批（截断为单批会丢 200..204 这 5 行，见用例内断言）
     await FireAlarm.insertMany(
       Array.from({ length: 205 }, (_, i) => ({
@@ -574,7 +574,7 @@ describe('reportController.exportReport 分支补齐', () => {
     expect(badUserId.body.message).not.toMatch(/CastError|mongoose|ValidatorError/i);
   });
 
-  // ===== streamExportRows populate 两阶段分批（B-4 修复后）=====
+  // ===== fetchExportRows populate 两阶段分批（B-4 修复后）=====
 
   test('populate 分批导出：205 行报警跨两个 $in 回填批次 → 全部 205 行都在文件里', async () => {
     // 本次改动复审强化：原用例只断 200。分批回填若丢批（只回填第一批），同样是 200。
@@ -648,7 +648,7 @@ describe('reportController.exportReport 分支补齐', () => {
   });
 
   test('populate callback retains the first-stage query during batch hydration', async () => {
-    const { streamExportRows } = require('../../controllers/reportController').__test;
+    const { fetchExportRows } = require('../../controllers/reportController').__test;
     const calls = [];
     let phase = 0;
     const model = {
@@ -669,7 +669,7 @@ describe('reportController.exportReport 分支补齐', () => {
     };
     const rows = [];
 
-    await streamExportRows(
+    await fetchExportRows(
       { addRow: (row) => rows.push(row) },
       { model, sort: { occurredAt: -1 }, populate: [{ path: 'handler' }] },
       { scope: 'allowed' },

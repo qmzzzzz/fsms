@@ -757,8 +757,10 @@ describe('临时权限授予流程', () => {
         grantService.approveGrant({ grantId: grant._id, operator: operator(approverA) })
       ).rejects.toThrow(/权限判定钩子未注册/);
     } finally {
-      grantService.setPermissionChecker((userId, code) =>
-        permissionService.hasPermission(userId, code)
+      // 第三个参数不能丢：审批资格走 includeGrants:false（只认角色链持权），
+      // 还原成两参形式会把临时授权重新算作「自持」，于是自授链用例在这条之后静默变绿。
+      grantService.setPermissionChecker((userId, code, options) =>
+        permissionService.hasPermission(userId, code, options)
       );
     }
 
@@ -1365,5 +1367,85 @@ describe('临时权限授予流程', () => {
     expect(afterSecond.decidedByName).toBe(before.decidedByName);
     expect(afterSecond.decisionReason).toBe(before.decisionReason);
     expect(new Date(afterSecond.expiresAt).getTime()).toBe(new Date(before.expiresAt).getTime());
+  });
+  test('P1-3 权限项停用后，既有临时授权立即失效（读侧按权限目录判定，不等 168 小时到期）', async () => {
+    const grant = await grantService.requestGrant({
+      targetUserId: target._id,
+      permissionCodes: [CODE_NORMAL],
+      reason: '停用即失权验证',
+      durationHours: 2,
+      operator: operator(requester),
+    });
+    await grantService.approveGrant({ grantId: grant._id, operator: operator(approverA) });
+    expect(await permissionService.getPermissions(String(target._id))).toContain(CODE_NORMAL);
+
+    // 管理员处置权限滥用的标准动作：停用该权限码。grant 记录本身不动、也仍在有效期内。
+    await Permission.updateOne({ code: CODE_NORMAL }, { $set: { status: 'inactive' } });
+    try {
+      expect((await PrivilegeGrant.findById(grant._id)).status).toBe('active');
+      // 角色路径一直有这条判据（PERMISSION_POPULATE 的 match），grant 路径此前没有
+      expect(
+        (await grantService.activeCodesForUsers([String(target._id)])).get(String(target._id))
+      ).toEqual([]);
+      permissionService.invalidatePermissionCache(String(target._id));
+      expect(await permissionService.getPermissions(String(target._id))).not.toContain(CODE_NORMAL);
+    } finally {
+      await Permission.updateOne({ code: CODE_NORMAL }, { $set: { status: 'active' } });
+      permissionService.invalidatePermissionCache(String(target._id));
+    }
+  });
+
+  test('P1-3 审批人不得凭自己的临时授权满足「自持该码」资格（否则高敏权限沿授予链自我扩散）', async () => {
+    const tempCode = 'report:zzpriv_selfgrant';
+    const permTemp = await Permission.create({
+      name: '自授链验证',
+      code: tempCode,
+      type: 'api',
+      module: 'report',
+    });
+    const holderRole = await Role.create({
+      name: 'ZZPRIV 临时持码',
+      code: 'ZZPRIV_TEMP_HOLDER',
+      permissions: [permTemp._id],
+    });
+    const holder = await User.create({
+      username: 'zzpriv_holder',
+      email: 'zzpriv_holder@zzpriv.test',
+      password: 'Zzpriv#2026Aa1',
+      realName: 'zzpriv_holder',
+      department: 'ZZPRIV',
+      roles: [holderRole._id],
+    });
+    try {
+      // ① 合法路径：角色链持码者为 weakApprover 开一张该码的临时授权
+      const seed = await grantService.requestGrant({
+        targetUserId: weakApprover._id,
+        permissionCodes: [tempCode],
+        reason: '自授链验证：给审批人一张临时授权',
+        durationHours: 2,
+        operator: operator(requester),
+      });
+      await grantService.approveGrant({ grantId: seed._id, operator: operator(holder) });
+
+      // 前提自证：这张授权在权限读路径上确实生效——差的是审批资格判据，不是授权没落库
+      expect(await permissionService.getPermissions(String(weakApprover._id))).toContain(tempCode);
+
+      // ② 被审申请：同一码，交给只持有临时授权的 weakApprover 签批 → 必须 403
+      const pending = await grantService.requestGrant({
+        targetUserId: target._id,
+        permissionCodes: [tempCode],
+        reason: '自授链验证：被审申请',
+        durationHours: 2,
+        operator: operator(requester),
+      });
+      await expect(
+        grantService.approveGrant({ grantId: pending._id, operator: operator(weakApprover) })
+      ).rejects.toMatchObject({ code: 'PRIVILEGE_APPROVAL_FORBIDDEN' });
+    } finally {
+      await PrivilegeGrant.deleteMany({ username: 'zzpriv_holder' });
+      await User.deleteOne({ username: 'zzpriv_holder' });
+      await Role.deleteOne({ code: 'ZZPRIV_TEMP_HOLDER' });
+      await Permission.deleteOne({ code: tempCode });
+    }
   });
 });

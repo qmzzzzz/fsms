@@ -251,7 +251,9 @@ describe('单进程依赖清单完整性（constants/runtime.js）', () => {
     // 于是"扫完全仓没发现任何容器"与"全仓都登记了"长得一模一样。先钉住"确实扫到了东西"。
     expect({ scannedAtLeast: hits.length >= 8 }).toEqual({ scannedAtLeast: true });
     expect({ knownContainer: hits.map((h) => h.module) }).toEqual({
-      knownContainer: expect.arrayContaining(['services/ipPoolBan.js', 'middleware/auth.js']),
+      // 2026-11-03 T6-2 将票据表外置到 sharedCache 后，ipPoolBan.js 不再持模块级 Map；锚针换成同在清单里的
+      // honeypotWatch（两针一个登记、一个豁免，形状不变）。
+      knownContainer: expect.arrayContaining(['services/honeypotWatch.js', 'middleware/auth.js']),
     });
     const unaccounted = hits
       .map((h) => h.module)

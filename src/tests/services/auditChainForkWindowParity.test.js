@@ -134,3 +134,56 @@ describe('F-216 分叉检出与年龄差无关（seen 与 firstChildOf 同生同
     expect(report.intact).toBe(false);
   });
 });
+
+/**
+ * 链尾同父分叉的免检盲区（免检分支改为「登记后返回」）。
+ *
+ * 免检的本义是「窗口头的双亲在窗外、无从对断」，但它原先连**同胞登记**一并跳过。
+ * 由此的静默形态：窗口头恰是同父分叉的一腿，另一腿在窗内经 parentAhead 找到父后，
+ * 会把自己登记成"唯一孩子"——两腿双双沉默，报告 intact:true。父若真在窗外，
+ * 窗内任何记录都不可能在已扫侧/前瞻侧找到它，分叉判定根本不可达 ⇒ 能修的盲区
+ * 正是"父在窗内、但其中一腿占了免检位"的形态，⑦ 钉的就是它。⑧ 钉零假阳：
+ * 诚实链的窗口头（父被 maxRecords 截在窗外）登记认领后不得产出任何断裂。
+ */
+describe('免检分支不豁免同胞登记（窗口头是分叉腿的形态）', () => {
+  test('⑦ 窗口头是分叉腿：较旧真子经 parentAhead 撞出 chain_fork，不得双静默', async () => {
+    // 扫描序（_id 升序）：C2(T0) → C1(T1) → P(T2)。P 是链首（prevHash=null）；
+    // C1 是真子；C2 是改挂到 P.hash 的分叉腿、却持有最小 _id ⇒ 占住窗口头免检位。
+    // C1 找父：P 不在已扫侧（尚未扫到）、在前瞻侧（parentAhead）⇒ 通过断裂判定；
+    // 修复前免检分支不登记 C2 的认领 ⇒ C1 自己登记成唯一孩子 ⇒ chain_fork=0 且 intact:true。
+    const oid = (t) => mongoose.Types.ObjectId.createFromTime(t);
+    const older = buildChain(2, 1699990000); // 更老的存量，被 maxRecords 截在窗外（窗口真切断）
+    const parent = buildValidDoc(null, { action: 'exempt-p', _id: oid(1700000002) });
+    const realChild = buildValidDoc(parent, { action: 'exempt-real', _id: oid(1700000001) });
+    const forkLeg = reParent(
+      buildValidDoc(null, { action: 'exempt-fork', _id: oid(1700000000) }),
+      parent.hash
+    );
+    const docs = [...older, forkLeg, realChild, parent];
+    const report = await verifyAuditChain(makeAuditLog(toNewestFirst(docs)), { maxRecords: 3 });
+    // 前提自证：窗口确实从 C2 切起（老存量不在窗内）
+    expect(report.total).toBe(3);
+    expect(report.byType.chain_fork).toBeGreaterThanOrEqual(1);
+    expect(report.intact).toBe(false);
+    // 认领先登记者为准：先到窗口的免检腿 C2 被指认为被分叉方
+    expect(report.samples[0]).toMatchObject({
+      type: 'chain_fork',
+      parentHash: parent.hash,
+      forkedWithId: String(forkLeg._id),
+    });
+  });
+
+  test('⑧ 零假阳：诚实链的窗口头（父被截在窗外）登记认领后仍判完整', async () => {
+    // 真库常态：maxRecords 截断让窗口头的父落在窗外——免检豁免断裂判定，
+    // 新增的登记只是把它的认领挂进 firstChildOf；诚实链上同一父哈希不会有第二个孩子，
+    // 登记必须完全不可见（intact:true、chain_fork=0、chain_break=0）。
+    const chain = buildChain(LINK_WINDOW_SIZE + 2);
+    const report = await verifyAuditChain(makeAuditLog(toNewestFirst(chain)), {
+      maxRecords: chain.length - 2,
+    });
+    expect(report.total).toBe(chain.length - 2); // 窗口确实截掉了头两条
+    expect(report.intact).toBe(true);
+    expect(report.byType.chain_fork).toBe(0);
+    expect(report.byType.chain_break).toBe(0);
+  });
+});

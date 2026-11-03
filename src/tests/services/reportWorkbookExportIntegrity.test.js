@@ -28,7 +28,7 @@ jest.mock('../../utils/xlsxWriter');
 
 const { createWorkbook } = require('../../utils/xlsxWriter');
 const { Writable } = require('stream');
-const { streamExportRows, writeExportWorkbook } = require('../../services/reportWorkbookService');
+const { fetchExportRows, writeExportWorkbook } = require('../../services/reportWorkbookService');
 const { EXPORT_LIMIT } = require('../../services/reportExportService');
 const { businessDateParts } = require('../../constants/timezone');
 const FireAlarm = require('../../models/FireAlarm');
@@ -122,7 +122,7 @@ describe('回填阶段消失的行必须计入 rowsLost 并说出来', () => {
     const docs = [{ _id: 'a' }, { _id: 'c' }, { _id: 'd' }];
     const worksheet = makeWorksheet();
 
-    const out = await streamExportRows(
+    const out = await fetchExportRows(
       worksheet,
       populateConfig(ids, docs),
       { scope: true },
@@ -137,18 +137,13 @@ describe('回填阶段消失的行必须计入 rowsLost 并说出来', () => {
     const ids = ['a', 'b', 'c', 'd'];
     const docs = ids.map((id) => ({ _id: id }));
 
-    const out = await streamExportRows(
-      makeWorksheet(),
-      populateConfig(ids, docs),
-      {},
-      (doc) => doc
-    );
+    const out = await fetchExportRows(makeWorksheet(), populateConfig(ids, docs), {}, (doc) => doc);
 
     expect(out).toEqual({ written: 4, truncated: false, rowsLost: 0 });
   });
 
   test('负前提：游标分支没有两次查询的窗口，rowsLost 恒为 0', async () => {
-    const out = await streamExportRows(
+    const out = await fetchExportRows(
       makeWorksheet(),
       cursorConfig([{ deviceCode: 'DEV-0' }, { deviceCode: 'DEV-1' }]),
       {},

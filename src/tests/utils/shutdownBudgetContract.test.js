@@ -249,6 +249,9 @@ describe('关停链总预算与部署窗口的契约（F-103）', () => {
     // 2026-10-31 追加：蜜罐事件链巡检（services/honeypotChainWatch.js）同为「只读聚合 + 告警」的
     // 后台定时任务，其 stop() 只 clearInterval、无 await 网络/IO，故属同步步骤。
     '停止蜜罐事件链巡检',
+    // 2026-11-03 追加：取证清单对账（services/forensicManifestReconcile.js）同为「只读对账 + 告警」的
+    // 后台定时任务，其 stop() 只 clearInterval、无 await 网络/IO，故属同步步骤。
+    '停止取证清单对账',
     '停止权限缓存清理定时器',
     '停止统计缓存清理定时器',
     '停止验证码清理定时器',
