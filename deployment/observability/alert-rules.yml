@@ -179,6 +179,48 @@ groups:
             回收；确认 /api/metrics 的 security_alerts_total 明细与 ADR-014 的租约取值是否
             仍远大于该端点 p100。类型集合与台账对账见 failOpenLedgerGate ②c。
 
+      # ── 管理员初始口令文件防线信号（2026-11-03，审计 B7）────────────────────────
+      # 两个 type 都是启动期**单次**事件（一次部署最多 +1）：写文件失败（随机口令只存在于
+      # 内存，进程退出即丢失，运维拿不到初始凭据且本次管理员创建中止）与权限收紧复核未
+      # 通过（明文口令文件对同机其他账户可读，已按回滚处理，删除失败时文件仍在盘上）。
+      # 为什么需要专条：单次事件对 SecurityAlertBurst（≥10 条/10min）永不达标，速率型规则
+      # 等于没有告警（与 TrustedProxyBoundaryUnset 同一取舍）。for: 0m：事件是既成事实，
+      # 等 10 分钟只会让处置更晚。为什么不并进 SecurityFailOpenSustained：那是「依赖不可用、
+      # 护栏失效」的持续叙事，这两条是 fail-closed 回滚事件，没有"未恢复即持续放行"的语义。
+      - alert: AdminInitialPasswordGuard
+        expr: increase(security_alerts_total{type=~"admin_initial_password_write_failed|admin_initial_password_permission_not_tightened"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '管理员初始口令文件写入或权限收紧失败（启动期单次事件）'
+          description: >-
+            本次启动未能安全交付默认管理员的初始口令：write_failed = 明文文件写入失败（口令
+            仅在内存中，重启即丢失）；permission_not_tightened = 文件权限收紧复核未通过（同机
+            其他账户可能读取明文口令）。处置：确认 ADMIN_INITIAL_PASSWORD 环境变量与磁盘
+            可写性，检查工作目录下 .admin-initial-password 的权限与是否残留（必要时手动删除），
+            然后重启让初始化重跑。类型集合与台账对账见 src/constants/failOpenSites.js 与
+            failOpenLedgerGate ②d。
+
+      # ── 封禁阶梯退化信号（2026-11-03，审计 B8）──────────────────────────────
+      # 三条自动封禁链（暴力破解 / 权限滥用 / 限流升级）的"30 天窗口历史计数"查询失败时，
+      # 按**第一档**处理（宁少勿滥、不阻断封禁与告警），代价是档位精度静默丢失：反复触发
+      # 的 IP 恒被封 1h，而日志照打"第 N 档"。单次退化只 +1，对速率型规则永不达标 ⇒ 必须有
+      # 专条。for: 0m：统计失败当下就该看，"持续 10 分钟"的叙事对一条查不了的查询没有意义。
+      - alert: BanLadderDegraded
+        expr: increase(security_alerts_total{type="ban_ladder_degraded"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '自动封禁阶梯统计退化：本次按第一档处理'
+          description: >-
+            自动封禁的阶梯历史（审计 30 天窗口）查询失败，本次封禁降档为 1h 处理；封禁与
+            告警本身未受影响，但"第 N 次触发升档"的精度在退化期间不可信。处置：确认
+            MongoDB 可用性与审计集合查询延迟，核对 /api/metrics 的 security_alerts_total
+            明细中三链（brute_force/permission_abuse/rate_limit）的退化占比。类型集合与
+            台账对账见 failOpenLedgerGate ②d。
+
   # 自监控：可观测性链路自身的失效。这类规则不反映业务异常，反映的是
   # 「我们看到的业务数据不完整」——所以它的严重度是 warning 而非 info：
   # 数据缺失期间的其它告警判读都要打折。

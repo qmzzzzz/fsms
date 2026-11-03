@@ -14,7 +14,7 @@
 
 - **双后端**：配置 `REDIS_URL` 时走 Redis（跨实例一致）；未配置或连接失败时**自动回退**进程内内存实现并告警。两种后端对外同一套异步 API，调用方不感知部署形态。
 - **环境边界**：`NODE_ENV=production` 无条件要求 `REDIS_URL`，缺失时启动即失败；开发与测试仍允许内存回退，保证本地和 CI 不引入外部组件依赖。
-- **切换点**：限流器（`rate-limit-redis` store）、验证码（`incrWithTtl` + KV）、nonce 一次性消费（原子占位）、用户/权限与 IP 封禁缓存、Socket.IO `@socket.io/redis-adapter`、审计链尾的 CAS 读写。
+- **切换点**：限流器（`rate-limit-redis` store）、验证码（`incrWithTtl` + KV）、nonce 一次性消费（原子占位）、用户/权限与 IP 封禁缓存、Socket.IO `@socket.io/redis-adapter`、审计链尾的 CAS 读写、封段确认票据 `ip_pool_ban:ticket:<token>`（2026-11-03 B2 接入，`services/ipPoolBan.js`：语义是「待确认 CIDR 封禁票据」，申请 setIfAbsent 原子占位 / 确认 getDel 原子取删，一次性消费——并发双击确认只一方生效；TTL 10 分钟 `CONFIRM_TTL_MS`，判据失败原样写回剩余 TTL（敲错不消耗）；方向 **fail-closed**：Redis 已配置但不可用时出票被拒、确认按 unknown_token 拒，绝不退回进程内存发「只有本实例认识」的票）。
 - **L-4 失效广播**：写后失效经 pub/sub 通道广播（`publishInvalidate`/`onInvalidate`），各实例订阅后清本地影子缓存；内存模式下为 no-op。
 - **A-1 链锁**：`withChainLock` 在 Redis 模式叠加跨实例分布式锁（`SET NX PX` + token 校验释放，`acquireLockBlocking`），内存模式保留进程内 Promise 锁（见 ADR-004）。
 - **O-15 雪崩/穿透**：`jitterTtl` 为 TTL 附加 ±10% 随机抖动；`EMPTY_SENTINEL` 空值哨兵支持缓存「查无结果」防穿透。

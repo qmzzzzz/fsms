@@ -67,8 +67,9 @@ curl -fsS http://127.0.0.1:3000/health
 | `20261030000000-backfill-password-set-at.js`         | 真实回滚       | 只撤「有 `passwordSetAt` 且无 `mustChangePassword`」的存量文档该字段（射程与本迁移写入范围一致）；新生用户不受影响                                                                                                                                                                         |
 | `20261101000000-filter-tiebreak-compound-indexes.js` | 真实回滚       | 删除六条三键索引，并按旧形态建回 `status_1_occurredAt_-1` / `handler_1_occurredAt_-1` / `reporter.userId_1_occurredAt_-1` / `location.building_1_occurredAt_-1` / `alarmType_1_occurredAt_-1` / `status_1_planStartTime_-1`；**列表排序随之退化为阻塞排序**                                |
 | `20261201000000-audit-list-tiebreak-indexes.js`      | 真实回滚       | 删除七条三键索引，并按旧形态建回 `userId_1_timestamp_-1` / `category_1_timestamp_-1` / `action_1_timestamp_-1` / `riskLevel_1_timestamp_-1` / `success_1_timestamp_-1` / `ip_1_timestamp_-1` / `category_1_action_1_timestamp_-1`；**审计列表的筛选查询随之退回「扫满时间窗 + 阻塞排序」** |
+| `20261103000000-device-reminder-tiebreak-index.js`   | 真实回滚       | 删除 `expiryDate_1__id_1` 两键索引，并按旧形态建回 `expiryDate_1`；**提醒扫描的到期两档排序随之退化为日期块内阻塞排序（且同值页可能漂移成员）**                                                                                                                                            |
 
-⇒ 目录里现有 **9 个迁移**（2026-10-31 实测：`ls migrations/*.js | wc -l` = `9`），其中 **2 个不撤销变更**（`20260830000000` 有意空操作、`20260919000000` 明确不回滚）。规划回退前请先读对应迁移文件的 `down()` 与文件头注释，**不要只看本表**（本表是**手工维护**的导读——`src/tests/migrations/migrationReadmeLedger.test.js` 只核「每行都指向真实文件 + 自报数量 == 实测文件数」，**不判 `down()` 到底撤不撤得动**；新增迁移必须自己补一行并把语义写对，迁移文件才是事实来源）。
+⇒ 目录里现有 **10 个迁移**（2026-11-03 实测：`ls migrations/*.js | wc -l` = `10`），其中 **2 个不撤销变更**（`20260830000000` 有意空操作、`20260919000000` 明确不回滚）。规划回退前请先读对应迁移文件的 `down()` 与文件头注释，**不要只看本表**（本表是**手工维护**的导读——`src/tests/migrations/migrationReadmeLedger.test.js` 只核「每行都指向真实文件 + 自报数量 == 实测文件数」，**不判 `down()` 到底撤不撤得动**；新增迁移必须自己补一行并把语义写对，迁移文件才是事实来源）。
 
 注意事项：
 

@@ -4,6 +4,8 @@
 > 口径：只列**可出示证据**的对照，证据是文件/测试/端点，不是口号。
 > 代码注释里多处按等保 2.0 设计（`constants/retention.js:22`、`utils/superAdmin.js:12`、
 > `services/behaviorBaseline.js:19`）——本表把这些散点收拢成测评可交的材料。
+> 其中 `behaviorBaseline` 为**能力已建成、未接线**：当前无生产调用方，不构成运行时控制，
+> 正文「入侵防范」表下有其如实行，测评引用时按该口径作答。
 > 对照粒度为安全通用要求（GB/T 22239-2019）第三级的常见重点项，非逐条全集。
 
 ## 安全通信网络
@@ -59,12 +61,13 @@
 
 ## 安全计算环境 — 剩余信息保护 / 入侵防范
 
-| 控制项要求           | 本系统证据                                                                                                                                                                                                                                                        |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 入侵防范（输入校验） | Mongo 操作符清洗、query 物化（Express 5）、body 字符串闸门、NoSQL 注入防护（`securitySanitizeAndBlacklistDegrade` 门禁）                                                                                                                                          |
-| 恶意代码/攻击探测    | CC 分桶升级封禁 + 阶梯；早于审计层的拒绝全留痕（`ip_blacklist_blocked`/`csrf_origin_denied`/`malformed_request_blocked`）                                                                                                                                         |
-| 供应链               | lockfile 钉版 + audit 硬门禁 + SBOM + cosign 签名 + provenance + 生产树禁安装脚本（P2-⑩/⑫）                                                                                                                                                                       |
-| 攻击溯源与取证       | 边缘取证日志格式 `fsms_forensic` 与 TLS 取证头（`deployment/nginx.conf.example`，启用与观察见 `deployment/edge-protection.md`）；应用侧取证触发标记表 `services/forensicTrigger.js`（滑动续期 30 分钟、容量 LRU、fail-open 但计数可见）决定「是否升级为全量捕获」 |
+| 控制项要求                 | 本系统证据                                                                                                                                                                                                                                                        |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 入侵防范（输入校验）       | Mongo 操作符清洗、query 物化（Express 5）、body 字符串闸门、NoSQL 注入防护（`securitySanitizeAndBlacklistDegrade` 门禁）                                                                                                                                          |
+| 恶意代码/攻击探测          | CC 分桶升级封禁 + 阶梯；早于审计层的拒绝全留痕（`ip_blacklist_blocked`/`csrf_origin_denied`/`malformed_request_blocked`）                                                                                                                                         |
+| 行为基线分析（**未接线**） | `services/behaviorBaseline.js`（AuditLog 特征提取 + z-score 偏离评估）——**能力已建成、未接线**：当前无生产调用方，不构成运行时控制；等保材料引用本模块时必须按此口径作答，不得表述为已生效的检测控制（F5，2026-11-03 如实登记）                                   |
+| 供应链                     | lockfile 钉版 + audit 硬门禁 + SBOM + cosign 签名 + provenance + 生产树禁安装脚本（P2-⑩/⑫）                                                                                                                                                                       |
+| 攻击溯源与取证             | 边缘取证日志格式 `fsms_forensic` 与 TLS 取证头（`deployment/nginx.conf.example`，启用与观察见 `deployment/edge-protection.md`）；应用侧取证触发标记表 `services/forensicTrigger.js`（滑动续期 30 分钟、容量 LRU、fail-open 但计数可见）决定「是否升级为全量捕获」 |
 
 ## 安全审计（核心项）
 

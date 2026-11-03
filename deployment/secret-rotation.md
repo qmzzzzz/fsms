@@ -138,7 +138,7 @@ mongod 启动前由 entrypoint 复制到 `/tmp/mongo.key` 并收紧到 0400
 | 2   | `src/utils/passwordHistory.js:64`                  | 口令复用历史摘要的 pepper              | 历史长度归零                       | ❌ 无（没有明文就无法重算）                            |
 | 3   | `src/services/mfaService.js:29`                    | **备用恢复码**的 pepper                | **全部恢复码失效**                 | ❌ 无                                                  |
 | 4   | `src/utils/encryption.js:189`                      | `HMACSigner` 数据签名密钥              | 存量签名全部失配                   | ❌ 无                                                  |
-| 5   | `src/services/auditChainCheckpoint.js:44`          | 审计链检查点签名                       | 存量检查点全部验签失败             | ❌ 无（轮换前留档、轮换后另起文件，见第 5 点）         |
+| 5   | `src/services/auditChainCheckpoint.js:62`          | 审计链检查点签名                       | 存量检查点全部验签失败             | ❌ 无（轮换前留档、轮换后另起文件，见第 5 点）         |
 | 6   | `src/services/upgradeService.js`                   | 升级请求签名（应用签发、宿主代理验签） | 在途请求验签失败、被移入 rejected/ | ❌ 无需迁移（请求 30 分钟内过期，重发即可；见第 6 点） |
 
 > **这张表是单一来源**：`src/tests/config/hmacSecretConsumersSingleSource.test.js`

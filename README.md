@@ -76,7 +76,7 @@ fsms/
 │   ├── lockfile-anchor.json    # 锁文件完整性锚点
 │   └── observability/          # 监控栈（prometheus.yml 在本子目录，非 deployment/ 根）
 │       ├── prometheus.yml      # Prometheus 抓取配置（直连后端 app:3000 的 /metrics）
-│       ├── alert-rules.yml     # 告警规则（18 条：宕机 / 5xx 错误率 / P95 延迟 / 安全告警突增等）
+│       ├── alert-rules.yml     # 告警规则（20 条：宕机 / 5xx 错误率 / P95 延迟 / 安全告警突增等）
 │       ├── alertmanager.yml    # Alertmanager 路由（按 severity 分发；通知渠道为占位，按头注释注入）
 │       └── grafana/            # Grafana 数据源与仪表盘（datasources/、dashboards/ 容器启动自动装载）
 ├── start.bat                   # Windows 一键启动脚本
@@ -614,7 +614,7 @@ CSP 由 `src/middleware/security/` 目录（`securityHeaders.js`，经 `index.js
 监控配置集中在 `deployment/observability/`（注意不是 `deployment/` 根目录）；`docker-compose.yml` 里 Prometheus 与 Alertmanager 随编排栈一并启动，**Grafana 不在默认栈内**，要看监控需另行 `docker compose --profile observability up -d`（升级窗口内不要启用：见 `deployment/hot-upgrade.md` §2 第 7 条与 `deployment/nginx.conf.example` 第 92-94 行）：
 
 - `deployment/observability/prometheus.yml`：Prometheus 抓取配置，直连后端 `app:3000` 的 `/metrics`（该端点在 Nginx 层按 allow 列表限流，不对公网暴露）。
-- `deployment/observability/alert-rules.yml`：18 条内置告警，分 5 组——可用性（`BackendDown` 抓取失败、`HighErrorRate` 5xx >5%）、延迟（`HighP95Latency` P95 >1s）、安全（`SecurityAlertBurst` 安全告警突增、`SecurityFailOpenSustained` fail-open 降级持续 10 分钟未恢复、`TrustedProxyBoundaryUnset` 代理信任边界未配置、`ForensicCaptureDegraded` 取证捕获持续降级、`IdempotencyLeaseTakeOver` 幂等在途记录被接管）、自监控（`MetricsSeriesTruncated` 指标序列触顶丢弃、`AuditRecordsDropped` 审计记录落库前丢弃、`AuditWalTrimRefused` WAL 裁剪被拒绝（WAL 无界增长风险）、`AuditDetectionLagOutsideObjective` 审计异常检测延迟未达标）、运行时（`MongoUnavailable`、`ReadinessProbeMissing`、`DiskSpaceLow`、`DiskProbeFailing`、`LogShipperDeliveryFailing`、`LogShipperDroppingLines`）。阈值为保守初值，待压测基线落地后收紧；每条规则的失效语义与处置见规则文件内的注释。
+- `deployment/observability/alert-rules.yml`：20 条内置告警，分 5 组——可用性（`BackendDown` 抓取失败、`HighErrorRate` 5xx >5%）、延迟（`HighP95Latency` P95 >1s）、安全（`SecurityAlertBurst` 安全告警突增、`SecurityFailOpenSustained` fail-open 降级持续 10 分钟未恢复、`TrustedProxyBoundaryUnset` 代理信任边界未配置、`ForensicCaptureDegraded` 取证捕获持续降级、`IdempotencyLeaseTakeOver` 幂等在途记录被接管、`AdminInitialPasswordGuard` 管理员初始口令文件防线、`BanLadderDegraded` 封禁阶梯退化）、自监控（`MetricsSeriesTruncated` 指标序列触顶丢弃、`AuditRecordsDropped` 审计记录落库前丢弃、`AuditWalTrimRefused` WAL 裁剪被拒绝（WAL 无界增长风险）、`AuditDetectionLagOutsideObjective` 审计异常检测延迟未达标）、运行时（`MongoUnavailable`、`ReadinessProbeMissing`、`DiskSpaceLow`、`DiskProbeFailing`、`LogShipperDeliveryFailing`、`LogShipperDroppingLines`）。阈值为保守初值，待压测基线落地后收紧；每条规则的失效语义与处置见规则文件内的注释。
 - `deployment/observability/alertmanager.yml`：告警触达链路的路由中枢，按 `severity` 分发（critical 即时通道 30 分钟重复提醒，warning 低优先级通道 4 小时），并按实例维度抑制同源重复告警。仓库内为**占位配置**，通知渠道（webhook/SMTP）按文件头注释以私有副本或模板渲染注入，敏感值不入库。两道闸门盯住"忘了注入"：部署路径由 `scripts/deploy.js` 的前置校验（占位即拒绝发布，可用 `ALERTMANAGER_CONFIG_PATH` 指向独立挂载的真实配置）；合规检查路径由 `ALERT_WEBHOOK_CHECK=production node scripts/compliance-check.js` 人工/上线前触发（CI 默认不设该变量，因为仓库模板本身必须是占位）。
 - **告警投递探针（F-09）**：上面两道闸门只判"配置里还有没有占位串"，判不出"URL 写对了但 access_token 已失效"。探针补这一环：
 
