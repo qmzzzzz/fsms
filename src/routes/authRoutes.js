@@ -15,6 +15,7 @@ const { requireReAuthentication } = require('../middleware/security');
 const {
   loginLimiter,
   loginUserLimiter,
+  loginPeerLimiter,
   strictLimiter,
   captchaLimiter,
   registerIpLimiter,
@@ -312,12 +313,16 @@ router.get('/login-public-key', captchaLimiter, authController.getLoginPublicKey
  *
  * 限流分层（顺序即优先级，勿再并联"同键空间、阈值更宽"的第三个桶）：
  *   1. `checkIPBlacklist`（app.js 级）：5 次失败/5 分钟的自动封禁在此生效 ⇒ 多数非白名单攻击源第 6 次就拿到 403；
- *   2. `loginLimiter`：单 IP 10 次/15 分钟，管住白名单 IP（凭据型限流刻意不豁免白名单）与"慢速滴灌"；
- *   3. `loginUserLimiter`：单账号 20 次/15 分钟，管住"多 IP 各试几下同一账号"。
- * 不变量由 `src/tests/security/loginIpBucketDominator.test.js` 盯住（含"被挡住后不得复活"）。
+ *   2. `loginPeerLimiter`：socket 对端 300 次/15 分钟（只数失败）——XFF 轮换不重置本桶，
+ *      钉住"伪造转发头换桶"的枚举路径（键取不可伪造的 TCP 对端，推导见该桶注释）；
+ *   3. `loginLimiter`：单 IP 10 次/15 分钟，管住白名单 IP（凭据型限流刻意不豁免白名单）与"慢速滴灌"；
+ *   4. `loginUserLimiter`：单账号 20 次/15 分钟，管住"多 IP 各试几下同一账号"。
+ * 不变量由 `src/tests/security/loginIpBucketDominator.test.js`（同键空间唯一治理者）
+ * 与 `src/tests/security/loginPeerBucketXffRotation.test.js`（XFF 轮换不得重置对端桶）共同盯住。
  */
 router.post(
   '/login',
+  loginPeerLimiter,
   loginLimiter,
   loginUserLimiter,
   loginValidation,

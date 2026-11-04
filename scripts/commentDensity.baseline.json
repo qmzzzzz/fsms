@@ -710,10 +710,10 @@
       "ratio": 0.4866666666666667
     },
     "src/middleware/rateLimit.js": {
-      "comment": 297,
-      "code": 389,
-      "total": 686,
-      "ratio": 0.4329446064139942
+      "comment": 321,
+      "code": 409,
+      "total": 730,
+      "ratio": 0.4397260273972603
     },
     "src/middleware/rateLimitStore.js": {
       "comment": 85,
@@ -986,10 +986,10 @@
       "ratio": 0.2631578947368421
     },
     "src/routes/authRoutes.js": {
-      "comment": 216,
-      "code": 299,
-      "total": 515,
-      "ratio": 0.41941747572815535
+      "comment": 219,
+      "code": 301,
+      "total": 520,
+      "ratio": 0.42115384615384616
     },
     "src/routes/avatarRoutes.js": {
       "comment": 2,
@@ -1556,10 +1556,10 @@
       "ratio": 0.25263157894736843
     },
     "src/services/loginChallenge.js": {
-      "comment": 13,
-      "code": 84,
-      "total": 97,
-      "ratio": 0.13402061855670103
+      "comment": 32,
+      "code": 120,
+      "total": 152,
+      "ratio": 0.21052631578947367
     },
     "src/services/mfaDisable.js": {
       "comment": 37,
@@ -1610,10 +1610,10 @@
       "ratio": 0.022222222222222223
     },
     "src/services/rateLimitEscalation.js": {
-      "comment": 90,
-      "code": 210,
-      "total": 300,
-      "ratio": 0.3
+      "comment": 94,
+      "code": 211,
+      "total": 305,
+      "ratio": 0.3081967213114754
     },
     "src/services/rateLimitEscalationBan.js": {
       "comment": 50,
@@ -2241,8 +2241,8 @@
     }
   },
   "total": {
-    "comment": 22851,
-    "code": 49614,
-    "ratio": 0.3153
+    "comment": 22989,
+    "code": 49719,
+    "ratio": 0.3162
   }
 }

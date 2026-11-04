@@ -54,6 +54,9 @@
   "src/models/User.js": {
     "max-lines": 1
   },
+  "src/routes/authRoutes.js": {
+    "max-lines": 1
+  },
   "src/routes/securityRoutes.js": {
     "max-lines": 1
   },
@@ -99,8 +102,9 @@
     "src/controllers/roleController.js": 304,
     "src/docs/generate.js": 1463,
     "src/middleware/idempotency.js": 322,
-    "src/middleware/rateLimit.js": 389,
+    "src/middleware/rateLimit.js": 409,
     "src/models/User.js": 301,
+    "src/routes/authRoutes.js": 301,
     "src/routes/securityRoutes.js": 382,
     "src/services/AlarmService.js": 306,
     "src/services/auditBuffer.js": 308,

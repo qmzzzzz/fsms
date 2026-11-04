@@ -6,6 +6,7 @@
 
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = rateLimit;
+const loginRateLimitAudit = require('../services/loginRateLimitAudit');
 const config = require('../config');
 const logger = require('../utils/logger');
 const { normalizeIP, clientIpForSecurityDecision } = require('../utils/ipUtils');
@@ -400,6 +401,56 @@ const loginUserLimiter = rateLimit({
 });
 
 /**
+ * 登录限流器（socket 对端维度，2026-11-04 渗透测试后新增）
+ *
+ * 缺陷本体：loginLimiter 的组键取 clientIpForSecurityDecision(req)——trust proxy 开启且对端
+ * 可信时这个值来自 X-Forwarded-For，而 development 默认 TRUST_PROXY_HOPS=1、回环对端走
+ * isPeerTrustedProxy 的回环兼容档 ⇒ 对本机直连（或任何落在可信网段内的直连）而言，
+ * XFF 是请求方随手写自由值：每换一个伪造值就换一个全新桶，「单 IP 10 次/15 分钟」对
+ * 决心明确的枚举者形同虚设（实测轮换 XFF 即可让 per-IP 计数永不累积）。
+ *
+ * 本桶把键钉在**不可伪造的 socket 对端**上（req.socket.remoteAddress，TCP 源地址在 HTTP
+ * 场景下伪造者收不到响应），XFF 轮换不重置它。它不是 loginLimiter 的替代而是并列的第二把尺：
+ *   - 真反代（nginx/Vite）场景：对端 = 代理地址，全体客户端共享一桶，所以阈值取聚合口径
+ *     300 次/15 分钟且 skipSuccessfulRequests（只数失败尝试——正常办公的成功登录不占配额，
+ *     班次集中登录不会误伤；300 失败/15 分钟意味着约 20 次/分钟的持续失败，正常办公远达不到）；
+ *   - 直连伪造场景：对端 = 攻击者自己，300 次封顶后 429，轮换 XFF 不再换桶。
+ *
+ * 已知代价（如实声明）：攻击者经真反代打登录时，全体用户与其共享对端桶——桶触顶后整个
+ * 来源（含正常用户）最多 429 到本窗口结束。这是「把枚举者的请求率钉住」换来的聚合性代价：
+ * 枚举本身另由 loginLimiter（真实客户端 IP）、loginUserLimiter（账号）与挑战闸（loginChallenge
+ * 粘滞判据）分层承担，本桶只在「前两把尺被请求方可控字段绕开」时兜底。凭据型限流照例
+ * **不豁免白名单**（口径同 loginLimiter）。
+ *
+ * 300 不设 env：登录类三桶（10/20/300）同为代码内常量，运维如需调整请连同上面的
+ * 聚合推导一起改，避免只调数字不调依据。
+ */
+const LOGIN_PEER_MAX = 300;
+const loginPeerLimiter = rateLimit({
+  windowMs: config.rateLimit.windowMs,
+  max: LOGIN_PEER_MAX,
+  store: makeSharedStore('login-peer'),
+  skipSuccessfulRequests: true, // 同 loginLimiter：成功登录不计入（本桶只度量失败尝试的来源强度）
+  keyGenerator: (req) => {
+    // 刻意不走 clientIpForSecurityDecision：那个值在可信边界内就是 XFF 本身，本桶要防的正是它
+    const peer = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+    // 对端取不到（替身 req/夹具）时回退安全裁决 IP：与 loginLimiter 同桶，不另开无主键空间
+    return `login-peer:${ipKeyGenerator(normalizeRateLimitIp(peer || clientIpForSecurityDecision(req)))}`;
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res, _next) => {
+    noteRateLimitHit(req, 'login-peer');
+    loginRateLimitAudit.recordLimitedAttempt(req, 'login-peer');
+    logger.warn('登录对端维度限流触发（XFF 轮换不重置本桶）', {
+      peer: req.socket?.remoteAddress || req.connection?.remoteAddress || '-',
+      username: req.body?.username,
+    });
+    respond429(res, { success: false, message: '登录尝试次数过多，请稍后再试' });
+  },
+});
+
+/**
  * IP 限流器
  * 基于 IP 地址的限流（从 config 读取配置）
  * 挂载范围同 generalLimiter：全站（含非 `/api/` 表面），豁免口径也同源
@@ -685,6 +736,7 @@ module.exports = {
   strictLimiter,
   loginLimiter,
   loginUserLimiter,
+  loginPeerLimiter,
   captchaLimiter,
   passwordChangeLimiter,
   passwordChangeUserLimiter,

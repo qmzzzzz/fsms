@@ -76,11 +76,15 @@ const SIGNAL_CLASSES = {
     summary: '体量超限（未认证）',
   },
   [CLASS_AUTH]: {
-    limiters: ['strict', 'user-ip'],
+    // login-peer（2026-11-04）：socket 对端桶是聚合口径——真反代场景下全体客户端共享
+    // 代理地址这一个对端，达阈值就自动封 IP 等于把枚举噪音放大成全站拒绝服务；
+    // 直连攻击者与真实代理在应用内不可区分（ipUtils 的 TRUSTED_PROXY「可用但不可区分」），
+    // 故与已认证类同款处置：只告警，处置走账号侧（挑战闸粘滞 / 账号限流 / 账户锁定）。
+    limiters: ['strict', 'user-ip', 'login-peer'],
     thresholdEnv: 'CC_ESCALATION_THRESHOLD_AUTH',
     threshold: 30,
     ban: false,
-    summary: '已认证敏感操作超限（处置对象为账号）',
+    summary: '越界方为账号或共享对端，处置不在 IP 侧',
   },
 };
 
@@ -290,9 +294,10 @@ const noteRateLimitHit = (req, limiterName) => {
   if (escalated && !spec.ban) {
     incSecurityAlert('rate_limit_auth_abuse', 'high');
     logger.error(
-      `已认证操作越界（不封 IP）：${ipKey} 在窗口内触发 ${spec.summary} ${snapshot.total} 次` +
+      `限流越界（该类不封 IP）：${ipKey} 在窗口内触发 ${spec.summary} ${snapshot.total} 次` +
         `（构成 ${JSON.stringify(snapshot.byLimiter)}，阀值 ${spec.threshold}）。` +
-        '越界的是账号不是 IP：请按 userId 核查，处置走账号侧（账户锁定 / MFA 失败锁定）'
+        '越界方不可在 IP 侧处置：账号维度请按 userId 核查（账户锁定 / MFA 失败锁定 / 挑战闸），' +
+        '聚合对端（login-peer）请核对真实代理拓扑后再动名单'
     );
   }
 };

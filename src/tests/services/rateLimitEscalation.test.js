@@ -172,6 +172,9 @@ describe('rateLimitEscalation：按信号分类（本次重构的核心）', () 
   test('未登记的限流器归入 VOLUME（最保守：不豁免、不轻判）', () => {
     expect(escalation.LIMITER_CLASS.get('captcha')).toBe(CLASS_ANON_ABUSE);
     expect(escalation.LIMITER_CLASS.get('general')).toBe(CLASS_VOLUME);
+    // login-peer 是聚合对端桶：真反代下全体客户端共享一个对端地址，自动封 IP 等于
+    // 把枚举噪音放大成全站拒绝服务 ⇒ 必须落在只告警的 AUTH 类，不许挪进可封 IP 的两类
+    expect(escalation.LIMITER_CLASS.get('login-peer')).toBe(CLASS_AUTH);
     expect(escalation.LIMITER_CLASS.get('根本没注册过的限流器')).toBeUndefined();
     // 实际行为按 VOLUME 落桶（由下一条的行为断言覆盖判据本身）
   });
