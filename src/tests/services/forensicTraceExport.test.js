@@ -1,4 +1,7 @@
-/** T5 溯源查询与签名导出：查询必须拒绝全表扫描；导出必须「没密钥就不签」且篡改能被判红。 */
+/** T5 溯源查询与签名导出：查询必须拒绝全表扫描；导出必须「没密钥就不签」且篡改能被判红。
+ * 另钉三件读侧契约：行摘要把 response.status/trigger.reason 提升为顶层 status/reason、
+ * SUMMARY_FIELDS 不得再有模型不存在的幽灵投影路径、按 IP/网段溯源时「他的 ip 池」由
+ * 库内指纹派生（derivedPools）而非恒空。 */
 const trace = require('../../services/forensicTrace');
 const exp = require('../../services/forensicExport');
 
@@ -127,6 +130,51 @@ describe('时间线：只出摘要字段（体只在被标记过时才有）', (
   });
 });
 
+describe('时间线行摘要：子文档字段提升到行顶层（界面「触发说明/状态码」两列的数据源）', () => {
+  test('response.status / trigger.reason → 顶层 status / reason，response 残壳拆除', async () => {
+    const model = modelOf([
+      {
+        ip: '1.2.3.4',
+        trigger: { reason: 'brute_force', markedAt: new Date('2026-11-01T00:00:00Z') },
+        response: { status: 401 },
+      },
+    ]);
+    const r = await trace.traceTimeline({ model, ip: '1.2.3.4' });
+    expect(r.ok).toBe(true);
+    const row = r.records[0];
+    expect(row.status).toBe(401);
+    expect(row.reason).toBe('brute_force');
+    // 摘要投影只带 response.status；提升完必须拆壳，别把空 response 对象漏给导出
+    expect(row.response).toBeUndefined();
+    expect(row.trigger).toEqual({ reason: 'brute_force', markedAt: expect.any(Date) });
+  });
+
+  test('缺响应/缺原因的旧行：如实落 null，不造 0 或空串冒充', async () => {
+    const model = modelOf([{ ip: '1.2.3.4' }]);
+    const r = await trace.traceTimeline({ model, ip: '1.2.3.4' });
+    expect(r.records[0].status).toBeNull();
+    expect(r.records[0].reason).toBeNull();
+  });
+});
+
+describe('摘要投影：只许写模型真实存在的路径（幽灵投影回归闸）', () => {
+  // 背景：SUMMARY_FIELDS 曾投影顶层 status/reason/markedAt——模型里没有这三个字段
+  // （状态码在 response.status、触发原因在 trigger.reason 子文档），读侧两列永远渲染
+  // '-'；而下面的 modelOf 桩忽略 .select()，查库类测试全部绿灯，漏到运维对着全 '-' 的
+  // 列发问才暴露。此闸逐条对 schema 验存在：再有幽灵路径，CI 直接红。
+  // trigger/device 是裸嵌套对象，mongoose 只登记叶子路径（schema.path('trigger') 为
+  // undefined），所以前缀命中子路径也算存在——但 status/reason/markedAt 这类幽灵
+  // 前缀下没有任何子路径，依旧拦得住。
+  const ForensicCapture = require('../../models/ForensicCapture');
+  const registeredPaths = Object.keys(ForensicCapture.schema.paths);
+  const pathExists = (field) =>
+    Boolean(ForensicCapture.schema.path(field)) ||
+    registeredPaths.some((p) => p.startsWith(field + '.'));
+  test.each(trace.SUMMARY_FIELDS)('投影路径 %s 在 ForensicCapture schema 上存在', (field) => {
+    expect(pathExists(field)).toBe(true);
+  });
+});
+
 describe('traceActor：把「他的 ip 池」直接答出来', () => {
   test('汇总触发原因与网段分布，并带上 pools', async () => {
     const model = modelOf([
@@ -152,11 +200,103 @@ describe('traceActor：把「他的 ip 池」直接答出来', () => {
     expect(r.pools[0].distinctIps).toBe(2);
   });
 
-  test('无指纹就不查 pools（不给不存在的维度发聚合）', async () => {
+  test('按 IP 溯源：库内观测到的指纹自动派生池——「换 IP 不换机器」在最常用入口直接可见', async () => {
+    const model = modelOf([{ ip: '1.2.3.4', fingerprint: 'aa11', ipSegment: '1.2.3' }]);
+    model.aggregate = jest.fn(async () => [
+      {
+        _id: { fingerprint: 'aa11', segment: '1.2.3' },
+        hits: 3,
+        ips: ['1.2.3.4', '1.2.3.9'],
+        firstSeen: new Date(),
+        lastSeen: new Date(),
+      },
+    ]);
+    const r = await trace.traceActor({ model, ip: '1.2.3.4' });
+    expect(r.ok).toBe(true);
+    expect(r.pools[0]).toMatchObject({ fingerprint: 'aa11', segment: '1.2.3', hits: 3 });
+    // 窗口必须与 timeline 已解析的窗口对齐：缺省 since 时 $match 也要带下界，
+    // 不能退化成只挂 $lte 的无上界聚合（全史扫描）。
+    const match = model.aggregate.mock.calls[0][0][0].$match;
+    expect(match.createdAt.$gte).toBeInstanceOf(Date);
+    expect(match.createdAt.$lte).toBeInstanceOf(Date);
+  });
+
+  test('按 IP 溯源：库内无指纹 ⇒ 池为空，但聚合照发（指纹由聚合自己发现，没有可预检的维度）', async () => {
     const model = modelOf([]);
     const r = await trace.traceActor({ model, ip: '1.2.3.4' });
     expect(r.pools).toEqual([]);
+    expect(model.aggregate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('derivedPools：从库内指纹归桶出 top N 指纹的网段池', () => {
+  const groupOf = (fingerprint, segment, hits, ips) => ({
+    _id: { fingerprint, segment },
+    hits,
+    ips,
+    firstSeen: new Date('2026-11-01T00:00:00Z'),
+    lastSeen: new Date('2026-11-02T00:00:00Z'),
+  });
+
+  test('同指纹多段：指纹总命中归桶，桶内按段命中倒序', async () => {
+    const model = modelOf([]);
+    model.aggregate = jest.fn(async () => [
+      groupOf('fp-a', '1.2.3', 2, ['1.2.3.4', '1.2.3.9']),
+      groupOf('fp-a', '10.0.0', 5, ['10.0.0.1']),
+    ]);
+    const r = await trace.derivedPools({
+      model,
+      ip: '1.2.3.4',
+      since: new Date('2026-11-01T00:00:00Z'),
+      until: new Date('2026-11-02T00:00:00Z'),
+    });
+    expect(r.ok).toBe(true);
+    expect(r.pools.map((p) => p.segment)).toEqual(['10.0.0', '1.2.3']);
+    expect(r.pools[0]).toMatchObject({ fingerprint: 'fp-a', hits: 5, distinctIps: 1 });
+  });
+
+  test('指纹封顶：只答 top N（按总命中），多出的指纹不进池', async () => {
+    const model = modelOf([]);
+    const groups = [];
+    for (let i = 0; i < trace.MAX_DERIVED_FINGERPRINTS + 1; i += 1) {
+      groups.push(groupOf(`fp-${i}`, `10.0.${i}`, trace.MAX_DERIVED_FINGERPRINTS + 1 - i, [`10.0.${i}.1`]));
+    }
+    model.aggregate = jest.fn(async () => groups);
+    const r = await trace.derivedPools({ model, ip: '1.2.3.4' });
+    const fps = [...new Set(r.pools.map((p) => p.fingerprint))];
+    expect(fps).toHaveLength(trace.MAX_DERIVED_FINGERPRINTS);
+    expect(fps).not.toContain('fp-5'); // 总命中最低的落选
+  });
+
+  test('无指纹的行归不了池：跳过，不造 unknown 桶冒充证据', async () => {
+    const model = modelOf([]);
+    model.aggregate = jest.fn(async () => [groupOf(null, '1.2.3', 9, ['1.2.3.4'])]);
+    const r = await trace.derivedPools({ model, ip: '1.2.3.4' });
+    expect(r.pools).toEqual([]);
+  });
+
+  test('判据不可用（时间倒序）⇒ ok:false 且不聚合（同 actorPools 口径）', async () => {
+    const model = modelOf([]);
+    const r = await trace.derivedPools({
+      model,
+      ip: '1.2.3.4',
+      since: new Date('2026-11-02T00:00:00Z'),
+      until: new Date('2026-11-01T00:00:00Z'),
+    });
+    expect(r.ok).toBe(false);
     expect(model.aggregate).not.toHaveBeenCalled();
+  });
+
+  test('actorPools 缺省 since ⇒ $match 带下界（API 不传 since 也不许无界聚合）', async () => {
+    const model = modelOf([]);
+    await trace.actorPools({
+      model,
+      fingerprint: 'fp-1',
+      until: new Date('2026-11-02T00:00:00Z'),
+    });
+    const match = model.aggregate.mock.calls[0][0][0].$match;
+    expect(match.createdAt.$gte).toBeInstanceOf(Date);
+    expect(match.createdAt.$lte).toBeInstanceOf(Date);
   });
 });
 

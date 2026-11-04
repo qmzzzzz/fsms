@@ -284,6 +284,40 @@ describe('ForensicTraceView · 溯源结果渲染', () => {
     expect(td(rowsOf(c, 'forensic-timeline')[0], 0).textContent.trim()).toBe(expected)
   })
 
+  test('动作与触发原因走文案：不把 action 码和 trigger 对象原样丢给客户', async () => {
+    trace.mockImplementation(() =>
+      Promise.resolve(
+        traceBody({
+          timeline: [
+            tlRow({
+              action: 'login_failed',
+              trigger: { reason: 'honeypot_chain', markedAt: '2026-10-01T01:00:00.000Z' },
+            }),
+          ],
+          triggers: { honeypot_chain: 2 },
+        })
+      )
+    )
+    const c = mountView()
+    await flush(8)
+    await doTrace(c)
+    await waitFor(() => rowsOf(c, 'forensic-timeline').length === 1, { message: '时间线渲染一行' })
+    const row = rowsOf(c, 'forensic-timeline')[0]
+    expect(td(row, 5).textContent.trim()).toBe(i18n.global.t('audit.action.login_failed'))
+    expect(td(row, 5).textContent).not.toContain('login_failed')
+    expect(td(row, 5).querySelector('[title]').getAttribute('title')).toBe('login_failed')
+    expect(td(row, 7).textContent.trim()).toBe(
+      i18n.global.t('forensic.triggerReason.honeypot_chain')
+    )
+    // 「触发说明/状态码」两列读顶层 reason/status（后端由 trigger.reason/response.status
+    // 提升）——曾因投影幽灵字段恒渲染 '-'，这里钉住值必须真出现在单元格里
+    expect(td(row, 8).textContent.trim()).toBe('5 次失败')
+    expect(td(row, 9).textContent.trim()).toBe('401')
+    expect(c.text()).not.toContain('markedAt')
+    expect(td(rowsOf(c, 'forensic-trigger')[0], 0).textContent.trim()).toBe(
+      i18n.global.t('forensic.triggerReason.honeypot_chain')
+    )
+  })
   test('触发原因分布与网段分布：按次数倒序渲染成行', async () => {
     trace.mockImplementation(() =>
       Promise.resolve(
@@ -312,7 +346,7 @@ describe('ForensicTraceView · 溯源结果渲染', () => {
     expect(td(sRows[0], 1).textContent.trim()).toBe('5')
   })
 
-  test('「他的 ip 池」：传了指纹才展示 pools 行，未传时给出「先填指纹」的说明', async () => {
+  test('「他的 ip 池」：按指纹溯源返回身份池——行不带 fingerprint，指纹列随数据隐藏', async () => {
     trace.mockImplementation(() =>
       Promise.resolve(
         traceBody({
@@ -335,18 +369,50 @@ describe('ForensicTraceView · 溯源结果渲染', () => {
     const poolTable = c.find('.forensic-pool')
     const pRows = Array.from(poolTable.querySelectorAll('.el-table__body-wrapper .el-table__row'))
     expect(pRows).toHaveLength(1)
+    // 无 fingerprint 字段 ⇒ 首列即网段（指纹列隐藏，不给空列占宽度）
     expect(td(pRows[0], 0).textContent.trim()).toBe('1.2.3')
     expect(td(pRows[0], 1).textContent.trim()).toBe('12')
     expect(td(pRows[0], 2).textContent.trim()).toBe('5')
   })
 
-  test('未填指纹：IP 池面板显示「填写设备指纹后才会展示」，而不是空表', async () => {
+  test('按 IP 溯源：派生池行带 fingerprint，「设备指纹」列渲染——换 IP 不换机器的直接证据', async () => {
+    trace.mockImplementation(() =>
+      Promise.resolve(
+        traceBody({
+          pools: [
+            {
+              fingerprint: 'aa11bb22',
+              segment: '10.0.0',
+              hits: 7,
+              distinctIps: 3,
+              firstSeen: '2026-10-01T00:00:00.000Z',
+              lastSeen: '2026-10-01T01:00:00.000Z',
+            },
+          ],
+        })
+      )
+    )
+    const c = mountView()
+    await flush(8)
+    await doTrace(c, { ip: '1.2.3.4', fingerprint: '' })
+    await flush(12)
+    const pRows = Array.from(
+      c.find('.forensic-pool').querySelectorAll('.el-table__body-wrapper .el-table__row')
+    )
+    expect(pRows).toHaveLength(1)
+    expect(td(pRows[0], 0).textContent.trim()).toBe('aa11bb22')
+    expect(td(pRows[0], 1).textContent.trim()).toBe('10.0.0')
+    expect(td(pRows[0], 2).textContent.trim()).toBe('7')
+    expect(td(pRows[0], 3).textContent.trim()).toBe('3')
+  })
+
+  test('池为空：显示统一空态说明（按 IP/网段溯源同样适用），而不是「先填指纹」', async () => {
     trace.mockImplementation(() => Promise.resolve(traceBody({ pools: [] })))
     const c = mountView()
     await flush(8)
     await doTrace(c, { ip: '1.2.3.4', fingerprint: '' })
-    await waitFor(() => c.text().includes(i18n.global.t('forensic.poolOnlyWithFingerprint')), {
-      message: 'IP 池未填指纹说明',
+    await waitFor(() => c.text().includes(i18n.global.t('forensic.poolEmpty')), {
+      message: 'IP 池空态说明',
     })
   })
 

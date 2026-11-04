@@ -803,9 +803,10 @@ export default {
     segmentTitle: 'Subnet breakdown',
     poolTitle: 'Their IP pool',
     poolHint:
-      'Subnets this device fingerprint appeared from, ordered by hit count — direct evidence of one machine rotating IPs',
-    poolEmpty: 'This fingerprint has no subnet records in the selected range',
-    poolOnlyWithFingerprint: 'Enter a device fingerprint to see the IP pool',
+      'Subnets this device fingerprint appeared from, ordered by hit count — direct evidence of one machine rotating IPs; tracing by fingerprint yields the full-window pool, tracing by IP/subnet derives it from fingerprints observed in the store',
+    poolEmpty:
+      'No pool-able forensic record in the selected range. The store only holds IPs marked as forensic targets, sampled; a device on a new subnet gets a new fingerprint',
+    poolFingerprint: 'Device fingerprint',
     poolSegment: 'Subnet',
     poolHits: 'Hits',
     poolDistinctIps: 'Distinct IPs',

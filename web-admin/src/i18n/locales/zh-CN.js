@@ -790,9 +790,11 @@ export default {
     triggerTitle: '触发原因分布',
     segmentTitle: '网段分布',
     poolTitle: '他的 IP 池',
-    poolHint: '同一设备指纹出现过的网段，按命中次数排序 —— 换 IP 不换机器的直接证据',
-    poolEmpty: '该指纹在所选时间范围内没有网段记录',
-    poolOnlyWithFingerprint: '填写设备指纹后才会展示 IP 池',
+    poolHint:
+      '同一设备指纹出现过的网段，按命中次数排序 —— 换 IP 不换机器的直接证据；按指纹溯源给全窗口完整池，按 IP / 网段溯源从库内观测到的指纹自动派生',
+    poolEmpty:
+      '所选时间范围内没有可归池的取证记录。取证库只收录被标记为取证目标的 IP，且经过采样；同一设备换网段会产生新指纹',
+    poolFingerprint: '设备指纹',
     poolSegment: '网段',
     poolHits: '命中次数',
     poolDistinctIps: '不同 IP 数',

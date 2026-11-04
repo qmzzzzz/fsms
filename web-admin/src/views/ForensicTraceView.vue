@@ -227,7 +227,7 @@
           </el-table-column>
           <el-table-column :label="$t('forensic.colAction')" min-width="140">
             <template #default="{ row }">
-              {{ row.action || '-' }}
+              <span :title="row.action || ''">{{ actionLabel($t, row.action) }}</span>
             </template>
           </el-table-column>
           <el-table-column :label="$t('forensic.colUsername')" width="120">
@@ -237,8 +237,8 @@
           </el-table-column>
           <el-table-column :label="$t('forensic.colTrigger')" width="130">
             <template #default="{ row }">
-              <el-tag v-if="row.trigger" type="warning" size="small" effect="plain">
-                {{ row.trigger }}
+              <el-tag v-if="triggerCodeOf(row.trigger)" type="warning" size="small" effect="plain">
+                {{ triggerReasonLabel($t, triggerCodeOf(row.trigger)) }}
               </el-tag>
               <span v-else>-</span>
             </template>
@@ -290,7 +290,9 @@
               <template #empty>
                 <div class="empty-tip">{{ $t('forensic.emptyTrigger') }}</div>
               </template>
-              <el-table-column prop="name" :label="$t('forensic.colTrigger')" min-width="140" />
+              <el-table-column :label="$t('forensic.colTrigger')" min-width="140">
+                <template #default="{ row }">{{ triggerReasonLabel($t, row.name) }}</template>
+              </el-table-column>
               <el-table-column prop="count" :label="$t('forensic.poolHits')" width="100" />
             </el-table>
           </div>
@@ -325,19 +327,35 @@
           </div>
         </div>
 
-        <!-- 「他的 ip 池」：运维最想要的那一屏。只有传了指纹才有内容 -->
+        <!-- 「他的 ip 池」：运维最想要的那一屏。按指纹/设备键溯源给全窗口完整池；
+             按 IP / 网段溯源由后端从库内观测到的指纹派生（行带 fingerprint）——
+             「换 IP 不换机器」的直接证据在最常用的按 IP 入口也要可见 -->
         <h3 class="section-title">{{ $t('forensic.poolTitle') }}</h3>
         <p class="card-hint">{{ $t('forensic.poolHint') }}</p>
         <el-table :data="poolRows" border stripe class="forensic-pool" style="width: 100%">
           <template #empty>
-            <div class="empty-tip">
-              {{
-                criteria.fingerprint
-                  ? $t('forensic.poolEmpty')
-                  : $t('forensic.poolOnlyWithFingerprint')
-              }}
-            </div>
+            <div class="empty-tip">{{ $t('forensic.poolEmpty') }}</div>
           </template>
+          <!-- 派生池行带 fingerprint（哪台机器、从哪些段来）；身份键池行不带（判据即主体），整列随之隐藏 -->
+          <el-table-column
+            v-if="poolRowsHaveFingerprint"
+            :label="$t('forensic.poolFingerprint')"
+            min-width="140"
+            show-overflow-tooltip
+          >
+            <template #default="{ row }">
+              <button
+                v-if="row.fingerprint"
+                type="button"
+                class="pivot-link mono"
+                :title="$t('forensic.pivotTitle')"
+                @click="pivotBy('fingerprint', row.fingerprint)"
+              >
+                {{ row.fingerprint }}
+              </button>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
           <el-table-column :label="$t('forensic.poolSegment')" min-width="140">
             <template #default="{ row }">
               <button
@@ -610,6 +628,8 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import { api, isCanceledError } from '@/utils/api'
 import { usePermission } from '@/composables/usePermission'
 import { useLatestRequest } from '@/composables/useLatestRequest'
+import { actionLabel } from '@/utils/auditLabels'
+import { triggerReasonLabel, triggerCodeOf } from '@/utils/forensicLabels'
 
 const { t } = useI18n()
 const { hasPerm } = usePermission()
@@ -738,6 +758,9 @@ const toggleTimelineOrder = () => {
   timelineOrder.value = timelineOrder.value === 'desc' ? 'asc' : 'desc'
 }
 const poolRows = computed(() => result.value?.pools || [])
+// 派生池行带 fingerprint（按 IP/网段溯源，多指纹各答各的池）；身份键池行不带
+// （判据本身即主体）——「设备指纹」列随数据显隐，不给恒 '-' 的空列占宽度
+const poolRowsHaveFingerprint = computed(() => poolRows.value.some((row) => row.fingerprint))
 
 /** 分布对象 → 表格行（按次数倒序；Object.entries 顺序不可依赖） */
 const distRows = (obj) =>

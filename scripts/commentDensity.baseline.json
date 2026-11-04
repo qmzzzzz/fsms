@@ -1400,10 +1400,10 @@
       "ratio": 0.08823529411764706
     },
     "src/services/forensicTrace.js": {
-      "comment": 11,
-      "code": 148,
-      "total": 159,
-      "ratio": 0.06918238993710692
+      "comment": 40,
+      "code": 211,
+      "total": 251,
+      "ratio": 0.1593625498007968
     },
     "src/services/forensicTrigger.js": {
       "comment": 58,
@@ -2241,8 +2241,8 @@
     }
   },
   "total": {
-    "comment": 22989,
-    "code": 49719,
-    "ratio": 0.3162
+    "comment": 22930,
+    "code": 49736,
+    "ratio": 0.3156
   }
 }

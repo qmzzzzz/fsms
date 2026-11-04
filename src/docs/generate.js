@@ -1511,7 +1511,10 @@ spec.paths['/api/security/forensic/trace'] = {
   get: p('get', ['Security'], '取证溯源查询（按 IP / 设备指纹 / 网段）', {
     description:
       '至少提供一个查询维度，否则 400 FORENSIC_NO_CRITERIA；地址无法解析同样按判据不可用拒绝，不返回空结果。' +
-      '传 fingerprint 时会额外返回 pools —— 该指纹落到过的网段，即「他的 ip 池」。',
+      '时间线行顶层带 status（由 response.status 提升）与 reason（由 trigger.reason 提升），两列在界面即「状态码/触发说明」。' +
+      'pools 双路径：判据带 fingerprint 时返回该指纹落到过的网段（全窗口完整池，行形 segment/hits/distinctIps/firstSeen/lastSeen）；' +
+      '按 IP/网段溯源时从库内观测到的指纹自动派生（行多带 fingerprint 字段，top 5 指纹、桶内按命中倒序）——' +
+      '「同一设备指纹出现过的网段按命中排序」这一换 IP 不换机器的直接证据，在最常用的按 IP 入口同样直接可见。',
     parameters: forensicTraceParams,
     responses: {
       ...ok('返回时间线、触发原因分布、网段分布与候选池'),
