@@ -19,14 +19,31 @@
 
 ## 二、进程内状态与多实例残余差异（扩容前必读）
 
-| 状态点                  | 文件                                                | TTL/节奏              | 多实例下的行为                                                                    | 风险评估                                                                                                      |
-| ----------------------- | --------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| 会话（session）读缓存   | `services/sessionService.js`（`SESSION_CACHE_TTL`） | 15s                   | 吊销/改密后，其他实例最长 15s 内仍可能凭旧缓存放行                                | **已知且有界**：吊销链路本身写库即时生效，窗口仅读缓存延迟；令牌黑名单 fail-closed 兜底（命中黑名单一律拒绝） |
-| IP 黑名单降级快照       | `models/IPBlacklist.js`（`SNAPSHOT_TTL_MS`）        | 10s                   | 仅在 **DB 故障**时作为降级数据源；DB 正常时不参与判定（防解封后仍被陈旧缓存拦截） | 低：正常路径以库为准                                                                                          |
-| 安全告警频控计数        | `services/securityAlert.js`                         | 进程内 Map + 定时清理 | 各实例独立计数 → 同一告警可能最多按实例数重复投递                                 | 中低：重复告警优于丢告警；如需精确去重可外置到 sharedCache                                                    |
-| 审计异常监控定时器      | `services/auditMonitor.js`                          | `monitorTimer`        | 每实例都会跑一轮扫描 → 重复扫描（读多写少，落库键幂等）                           | 低：结果幂等；后续可加 sharedCache 锁选主                                                                     |
-| 审计缓冲 flush 定时器   | `services/auditBuffer.js`                           | `flushTimer`          | 每实例独立 flush 各自缓冲；哈希链串接由 Redis 链尾锁保证（见上）                  | 低：链完整性不受影响                                                                                          |
-| Grafana/Prometheus 抓取 | `deployment/observability/`                         | 15s                   | 任一实例的 `/metrics` 均只含本进程计数                                            | 运维注意：多实例需按实例聚合（Prometheus 多 target）                                                          |
+> 本表与 `src/constants/runtime.js` 的 `SINGLE_PROCESS_DEPENDENCIES` 台账**逐项对齐**
+> （25 项台账中未外置的 16 项全数在此；外置项见 §一，含 statsCache / sessionService /
+> ipPoolBan 票据三项早期版本未列的外置行）。台账与文档的逐项对账由
+> `singleProcessInventoryCompleteness` / `runtimeInventoryClaims` 门禁钉住——新增
+> 进程内状态不登记台账即启动体检红，台账与本文档失同步属评审义务。
+
+| 状态点                     | 文件                                          | TTL/节奏                | 多实例下的行为                                                                       | 风险评估                                                                                    |
+| -------------------------- | --------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| 审计缓冲 flush 定时器      | `services/auditBuffer.js`                     | `flushTimer`            | 每实例独立 flush 各自缓冲 + 本地 WAL；哈希链串接由 Redis 链尾锁保证（见 §一）        | 低：链完整性不受影响；多实例各写各的 WAL，账目互不混                                         |
+| 安全告警频控计数           | `services/alertDispatch.js`                   | 进程内 Map + 定时清理   | 各实例独立计数 → 同一告警可能最多按实例数重复投递                                    | 中低：重复告警优于丢告警；如需精确去重可外置到 sharedCache                                   |
+| 限流升级触发计数           | `services/rateLimitEscalation.js`             | 令牌桶 Map（压力升序）  | 各实例只统计自己分到的 429，实际封禁阈值 = 配置阈值 × 实例数                          | **低（by design，少封不误封）**：429 拦截由限流器共享存储跨实例保证；文件头有既定取舍说明    |
+| IP 归属地结果缓存          | `services/ipLocationService.js`               | FIFO 上限 2048          | 各进程独立缓存派生结果                                                               | 低：纯派生缓存无失效语义，仅性能                                                            |
+| 时区 formatter 缓存        | `constants/timezone.js`                       | 上限 32                 | 各进程独立                                                                           | 低：纯派生缓存                                                                              |
+| readyz 判定计数            | `utils/metricsRuntime.js`                     | `readyzChecks Map`      | 各进程独立计数                                                                       | 低：/metrics 的 readyz 观测值按进程呈现，聚合层按实例看                                     |
+| IP 封禁动作缓存            | `middleware/security/ipBlacklist.js`          | `ipBlockCache Map`      | A 实例刚封禁的 IP 在 B 实例仍放行，直到 B 自己的 TTL 到期                            | **中**：封禁生效存在实例间时间窗；与下行名单快照叠加注意                                     |
+| IP 黑名单名单快照          | `models/IPBlacklist.js`（`SNAPSHOT_TTL_MS`）  | 10s                     | 仅在 **DB 故障**时作为降级数据源；DB 正常时不参与判定（防解封后仍被陈旧缓存拦截）    | 低：正常路径以库为准                                                                        |
+| 部门成员缓存（数据范围）   | `services/auditScopeFilter.js`                | `deptMembersCache Map`  | 改部门成员后其余进程延迟生效                                                         | 中低：数据范围过滤按各进程缓存判定                                                          |
+| 系统配置缓存               | `models/SystemConfig.js`                      | TTL 30s                 | 改配置后各进程最长 30s 仍按旧值判定（如关闭公开注册后仍可注册）                      | 中低：配置面收敛慢，安全开关类改动需知晓 30s 窗口                                           |
+| 会话吊销进程内通知总线     | `services/sessionRevocationEvents.js`         | listeners Set           | A 实例的吊销不会即时通知 B 实例的 WebSocket 连接                                     | 低：由周期清扫按库复查兜底（30s 收敛）                                                      |
+| 仪表盘缓存                 | `services/reportDashboardService.js`          | 30s TTL                 | 各进程独立，滞后一个 TTL                                                             | 低：**刻意不接失效广播**（取舍见该文件头），配 REDIS_URL 也不会跨实例一致                   |
+| 审计异常告警去重表         | `services/auditMonitor.js`                    | `notifiedDayByDimension`| 各进程各自去重，同一事件按实例数重复告警                                             | 中低：重复告警优于丢告警（原描述"重复扫描落库键幂等"是旧语义，机制已是告警去重表）          |
+| 哨兵名当日告警去重         | `services/canaryWatch.js`                     | `notifiedDayByCanary`   | 各进程各自去重、各自对账；同一哨兵命中按实例数重复告警                               | 中低：同上                                                                                  |
+| 诱饵账户当日告警去重       | `services/honeypotWatch.js`                   | `notifiedDayByHoneypot` | 各进程各自去重、各自物化；同一诱饵名命中按实例数重复告警                             | 中低：同上                                                                                  |
+| 取证触发标记表             | `services/forensicTrigger.js`                 | marksByIp Map + LRU     | 各进程各自标记各自淘汰；同一 IP 只在实际命中它的实例上被取证                         | **中**：抽查面随实例数缩小，多实例下取证覆盖完整率下降                                      |
+| Grafana/Prometheus 抓取    | `deployment/observability/`                   | 15s                     | 任一实例的 `/metrics` 均只含本进程计数                                               | 运维注意：多实例需按实例聚合（Prometheus 多 target）                                        |
 
 ## 三、验收口径
 

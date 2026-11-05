@@ -18,6 +18,13 @@
  * 分层：与场景无关的压测原语（客户端/并发引擎/门禁断言）在 ./loadTestEngine.js，
  * 本文件只留四个相的步骤与编排——原先两者平铺在一起，把 main 与整个文件
  * 同时顶到 `max-lines-per-function`(100) / `max-lines`(300) 的阈值。
+ *
+ * 接线声明（审计 I-12 如实化）：本脚本是**手动触发的重型演练工具**，不是 CI 门禁
+ * ——压测会写审计库并消耗真实配额（见 devSecretIsolation 对 test:load 的隔离面），
+ * 不适合每次 push 跑；也没有任何 workflow 引用它（全仓 grep 核实）。它不接入 CI
+ * 是口径选择而非遗漏；`loadTestEngine.assertPhaseHealthy` 的正确性判据仍被单元
+ * 测试消费。若要周期化，按 dr-readiness.yml 的定时形态另立 workflow_dispatch 作业，
+ * 并先确认目标环境是隔离库。
  */
 
 const crypto = require('crypto');
