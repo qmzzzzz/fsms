@@ -10,6 +10,7 @@
 | -------- | ------------------------------------------------------- | --------------------------- |
 | 业务库   | mongo（人员 PII + 设备/报警/巡检记录）                  | 人员名录与运营史外泄        |
 | 审计集合 | append-only 哈希链 + HMAC（`models/auditLogHooks.js`）  | 被改写 = 追责依据失效       |
+| 取证捕获 | ForensicCapture（台账唯一 L4：请求/响应全量）+ 落盘证据文件（WAL / manifest / 审计链检查点） | 取证链与追溯依据失效        |
 | 密钥     | JWT×2 / AES / HMAC / gpg 私钥                           | 冒充任意身份 / 解密全量数据 |
 | 备份     | `.gz.gpg` + 校验和（`deployment/backup-encryption.md`） | 同业务库                    |
 | 凭据     | 用户口令（bcryptjs 12 rounds + 复用历史）               | 账号接管                    |
@@ -34,9 +35,10 @@
 
 ### T 篡改（Tampering）
 
-- 审计链：v4 字段冻结快照 + 哈希链 + HMAC（`auditFieldSetsImmutable` 门禁）；
+- 审计链：哈希链 + HMAC，payload 字段清单版本化冻结（当前版本见
+  `utils/auditChainPayload.js` 的 `CURRENT_PAYLOAD_VERSION`，本文件不复述数值）；
   周期性 HMAC 签名检查点（`services/auditChainCheckpoint.js` + `scripts/audit-chain-checkpoint.js`）
-  补上「锚点后插枝」与「尾部截断」的检出盲区；
+  补上「头部替换」与「尾部截断」的检出盲区；
 - 请求体：Mongo 操作符递归清洗（`sanitizeMongo`）+ `req.query` 物化（Express 5 下
   原地清洗无效，`materializeQuery` 读一次→清洗→defineProperty→回读自证）；
 - PII 列：AES-GCM 认证标签——密文被改即解密失败，不静默降级（`utils/piiCrypto.js`）。
@@ -98,6 +100,17 @@
   来自哪里」，但不比对「与上次是否一致」：一个夹带改 `integrity` 字段的 PR 会被 SBOM
   忠实记录、被 `provenance` 证明「来自这次构建」，**没有任何一环能发现「它变了」**。
 
+### 蜜罐与哨兵（横切面）
+
+- **蜜罐诱饵登录**：默认名单的哨兵名是共享诱饵账户——对它们的每次"成功登录"都放行
+  零权限会话并留痕画像（`services/honeypotWatch.js` / `services/canaryWatch.js`，
+  设计与边界见 `docs/adr/ADR-013`）。诱饵会话内所有写端点按写路径拒绝，
+  probe 留痕的 IP 归因走与封禁侧同一把裁决尺（`resolvePunishTarget`）。
+- **哨兵名告警**：真实凭据命中哨兵名 ⇒ `canary_username_attempt` 等 typed 信号；
+  与告警规则的对账由 `failOpenLedgerGate` / `alertingConfig` 门禁钉住。
+- **封禁阶梯**：暴力破解 / 权限滥用 / 限流升级三臂各自带护栏（共享出口宽限、
+  信号不可得不封、跳过行不抬档），阶梯退化有 `ban_ladder_degraded` 信号。
+
 ## 3. 已知残余风险（如实申报）
 
 1. 同宿主 compose 网络明文（TLS 豁免显式声明）——拓扑拆分时摘旗标；
@@ -127,3 +140,18 @@
    `adminResetPasswordGates.test.js` 里那条「已声明残留」用例钉死（改密后再重置会顶掉上一代摘要）。用户注销（删除权）
    时这份摘要随匿名化一并抹掉，故不构成「注销后仍留凭证材料」；命中退役摘要时前端文案仍说「最近 N 条」
    （实际可能更早），属已声明的下界表述。
+9. **可信代理兼容档的 IP 身份判据（F-01 收窄后残余，i760 #25）**：`TRUSTED_PROXY_CIDRS`
+   未配置时，私网对端携带的 XFF 一律不可信（2026-11-03 渗透测试实测「私网对端被当成
+   可信代理 ⇒ 一条伪造 XFF 绕过 IP 封禁」后，3-b 回退已从"私网/回环"收窄为仅回环）。
+   残余形态：未配 CIDRS 的部署里，`req.ip` 恒为代理地址、全站共享限流桶；配 CIDRS
+   且代理留在内网即闭合（`src/utils/ipUtils.js` 3-b 沿革注释）。
+10. **探针 D（容器内直连仍可伪造一跳）**：`middleware/security/ipBlacklist.js` 的白名单
+    豁免判据在「trust proxy + XFF + 对端内网/回环」组合下可信；容器网络里的直连方
+    （对端 RFC1918）与真实 nginx 同形，仍可同时免黑名单 + 拿豁免。关闭它属 R3——
+    需要 `TRUSTED_PROXY_CIDRS` 与部署拓扑收敛（PROXY protocol 接入后由 front-server
+    还原真实对端，见 ADR-021）。
+11. **惩罚目标可被容器内直连方改写（兼容档）**：封禁/蜜罐的惩罚归属按
+    `resolvePunishableIp` 裁决，已收窄 XFF 伪造面，但未配 CIDRS 的兼容档下，
+    容器内直连方仍可借 XFF 把处置目标指向任意地址（`middleware/security/ipBlacklist.js`
+    的判据注释与 `services/honeypotWatch.js` 的 punish 侧）。缓解同上：配 CIDRS +
+    代理内网化；PROXY protocol 落地后由 front-server 还原层闭合。

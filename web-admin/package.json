@@ -21,7 +21,7 @@
     "admin",
     "vue"
   ],
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

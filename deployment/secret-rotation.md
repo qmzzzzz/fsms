@@ -388,7 +388,7 @@ JSON 无法解析、集合为空或含空 kid/secret、任一密钥弱于 32 字
       那是没喂配置，不是轮换出错。宿主机侧要跑就得逐条点名 `*_FILE=./secrets/<name>`。）
 - [ ] 抽查日志无「MFA 种子解密失败」「hmac 失配」告警
 - [ ] 启动日志中出现过 `password_history_pepper_rotation` 告警（HMAC 轮换的**预期**
-      副作用，见上文「HMAC_SECRET 的五重影响」）——**换完钥的首次启动若没有它，
+      副作用，见上文「HMAC_SECRET 的六重影响」）——**换完钥的首次启动若没有它，
       说明告警链路失效或 `PASSWORD_HISTORY_DEPTH=0`，需人工确认**
 - [ ] **PII 轮换后必须 unset `PII_ROTATION_OLD_AES_KEY`**（见下节），
       且启动日志**不得**再出现 `pii_rotation_old_key_lingering` 告警

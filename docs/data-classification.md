@@ -101,3 +101,20 @@
 | 分类分级只覆盖 schema 字段       | 日志正文、审计 `details` 快照里的自由文本不在台账内；它们按整模型等级继承（AuditLog 为 L3）                           |
 | 台账本身需要人维护               | 门禁能抓「声明与 schema 不一致」，抓不到「新字段登记了错误等级」——后者只能靠评审                                      |
 | 同意版本升级后存量用户不重新征得 | 本次仅注册路径强制；已有账号在告知改版后不会被要求重新同意（未实现项）                                                |
+
+## 6. 取证数据（L4）与落盘证据文件
+
+- **ForensicCapture 是台账唯一以 L4 为基线的模型**（`constants/dataClassification.js`
+  的 MODEL_LEVELS 声明，basis：取证级请求/响应全量）：触发面由 `forensicTrigger`
+  标记（滑动续期），访问走 `security:audit` + 当场二次验证；请求/响应快照按
+  SUMMARY_FIELDS 白名单投影出口（`services/forensicTrace.js`），不做全文档直出。
+  字段级 L4 声明见台账 `constants/dataClassification.js` 的逐字段段。
+- **落盘证据文件不在 mongo 备份覆盖内**，需独立纳入备份/异地副本口径：
+  | 文件 | 内容 | 说明 |
+  | ---- | ---- | ---- |
+  | `logs/forensic-capture` | 取证 WAL（forensicCaptureWal 落盘缓冲） | TTL 清理前的落盘证据 |
+  | `logs/forensic-manifest` | 取证清单 JSONL（带 chainHash） | 保留 60 天（prune 只归档不删） |
+  | `logs/audit-chain-checkpoints.jsonl` | 审计链 HMAC 签名检查点 | 防篡改外锚本体，见 architecture.md §7 |
+  备份/异地副本口径见 `deployment/backup-encryption.md` 与 `deployment/rollback-drill.md`
+  （这两份文档当前只覆盖 mongo `.gz.gpg`——把落盘证据纳入备份属待办，登记于 threat-model
+  资产表）。

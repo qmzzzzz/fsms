@@ -221,8 +221,7 @@ async function runOfflineUpgrade({ cfg, request, statusFile, claimedFile }) {
       bundleDir: path.join(cfg.bundlesDir, bundle.dirName),
       bundleRoot: cfg.bundlesDir,
       allowlist: cfg.allowlist,
-      // 公钥显式传参（与落位侧同口径）：原靠 env 继承，未设时导入器静默跳过内层验签
-      pubkeyFile: cfg.verifyPubkeyFile,
+      pubkeyFile: cfg.verifyPubkeyFile, // 显式传参：原靠 env 继承，未设时导入器静默跳过内层验签
     }),
     cfg,
     claimedFile,
