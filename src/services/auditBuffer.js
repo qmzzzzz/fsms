@@ -614,8 +614,7 @@ function __resetForTest() {
   consecutiveFailures = 0;
   // flushing/inFlightCount 一并复位（2026-11-07 推翻"同生死不重置"旧口径）：前序套件
   // 的 flush 挂起不复位时，同 worker 后续套件的 flush 全部静默 no-op（三 seed 实测）。
-  flushing = false;
-  inFlightCount = 0;
+  flushing = inFlightCount = 0; // 与 flush 的 finally 同口径：两旗标同步归零
   wal.resetCounters();
 }
 
