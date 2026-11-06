@@ -56,7 +56,10 @@ describe('OpenAPI 分组声明闸（spec.tags ⊇ 用到的 tag）', () => {
     const m = /涵盖 (\d+) 个模块共 (\d+) 个接口（(\d+) 个 path \/ (\d+) 个 operation）/.exec(
       readme
     );
-    if (!m) throw new Error('README.md 里找不到「涵盖 N 个模块共 N 个接口（N 个 path / N 个 operation）」的计数句式');
+    if (!m)
+      throw new Error(
+        'README.md 里找不到「涵盖 N 个模块共 N 个接口（N 个 path / N 个 operation）」的计数句式'
+      );
     // 三个数字逐一与产物对账：此前只钉模块数，path/operation 各漂 9 都无人看
     // （审计 H6：README 写 97/118、实测 106/127，"由测试钉住"的措辞只在模块数上成立）
     let pathCount = 0;
