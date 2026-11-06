@@ -517,3 +517,86 @@ describe('LoginView 验证码图键盘可达（第 34 轮 M4）', () => {
     expect(c.errors).toEqual([])
   })
 })
+
+describe('LoginView 回车跳焦链与验证码重试（2026-11-06 收敛批补测）', () => {
+  // 输入框的回车跳焦绑在 @keyup.enter（不是 keydown，与验证码占位区的 keydown 同仓两套并存）
+  const keyEnter = (el) =>
+    el.dispatchEvent(new window.KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
+  const inputsOf = (c) => c.findAll('input.el-input__inner')
+
+  test('用户名框回车：聚焦密码框，不触发提交（流式跳转不整表单提交）', async () => {
+    login.mockResolvedValue({ data: { success: true } })
+    const c = await open({})
+    keyEnter(inputsOf(c)[0])
+    await flush(4)
+    expect(login).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(inputsOf(c)[1])
+  })
+
+  test('密码框回车：未开验证码直接提交', async () => {
+    login.mockResolvedValue({ data: { success: true } })
+    encryptPassword.mockResolvedValue('enc-enter-x')
+    const c = await open({})
+    await fill(c, 'u1', 'Aa1!passw0rd')
+    keyEnter(inputsOf(c)[1])
+    await flush(6)
+    expect(login).toHaveBeenCalledTimes(1)
+  })
+
+  test('密码框回车：开了验证码则聚焦验证码框（延续 username→password→captcha 流）', async () => {
+    const c = await open({ captchaEnabled: true })
+    const inputs = inputsOf(c)
+    await fill(c, 'u1', 'Aa1!passw0rd')
+    keyEnter(inputs[1])
+    await flush(4)
+    expect(login).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(inputs[2])
+  })
+
+  test('验证码框回车：未进入 MFA 二期时直接提交', async () => {
+    login.mockResolvedValue({ data: { success: true } })
+    encryptPassword.mockResolvedValue('enc-enter-y')
+    const c = await open({ captchaEnabled: true })
+    const inputs = inputsOf(c)
+    await fill(c, 'u1', 'Aa1!passw0rd')
+    inputs[2].value = 'AB12'
+    inputs[2].dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(4)
+    keyEnter(inputs[2])
+    await flush(6)
+    expect(login).toHaveBeenCalledTimes(1)
+  })
+
+  test('验证码框回车：MFA 二期中聚焦动态口令框（不再触发整表单提交）', async () => {
+    encryptPassword.mockResolvedValue('ENC')
+    login.mockResolvedValueOnce({ data: { success: true, data: { mfaRequired: true } } })
+    const c = await open({ captchaEnabled: true })
+    const inputs = inputsOf(c)
+    await fill(c, 'alice', 'Str0ng-Pass')
+    inputs[2].value = 'AB12'
+    inputs[2].dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flush(4)
+    keyEnter(inputs[2]) // 提交 #1 → mfaRequired，动态口令框出现
+    await waitFor(() => c.find('#mfaCode') && c.find('#mfaCode').tagName === 'INPUT', {
+      message: 'mfa 输入框出现',
+    })
+    await flush(6)
+    expect(login).toHaveBeenCalledTimes(1)
+    keyEnter(inputsOf(c)[2]) // 验证码框再回车 ⇒ 聚焦 mfa，不二次提交
+    await flush(4)
+    expect(login).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(document.querySelector('#mfaCode'))
+  })
+
+  test('验证码状态接口失败：横幅重试按钮再拉一次状态', async () => {
+    getCaptchaStatus.mockRejectedValueOnce(new Error('net down'))
+    const c = await open({ captchaEnabled: true })
+    await flush(8)
+    const retry = document.body.querySelector('.login-card__captcha-error .glass-btn')
+    expect(retry).toBeTruthy()
+    const before = getCaptchaStatus.mock.calls.length
+    retry.click()
+    await flush(8)
+    expect(getCaptchaStatus.mock.calls.length).toBeGreaterThan(before)
+  })
+})

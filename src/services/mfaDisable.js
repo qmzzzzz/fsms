@@ -69,10 +69,7 @@ const disableWithRecoveryCode = async (user, normalizedCode) => {
  *
  * @returns {Promise<{outcome:'OK'|'VERIFY_FAILED'|'STATE_CONFLICT'|'NOT_ENABLED', verifyMethod?: string}>}
  */
-const disableWithSecondFactor = async (
-  user,
-  { mfaCode, normalizedCode, codePath, recoveryPath }
-) => {
+const disableWithSecondFactor = async (user, { mfaCode, normalizedCode, recoveryPath }) => {
   if (recoveryPath) return disableWithRecoveryCode(user, normalizedCode);
 
   const { verified, method } = await verifyTotpFactor(user, mfaCode);

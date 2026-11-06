@@ -2,10 +2,10 @@
   "note": "注释密度棘轮基线（生产代码：src/** 排除 src/tests/**）。只许收紧；新增文件密度上限见 scripts/commentDensity.js 的 NEW_FILE_MAX。",
   "files": {
     "src/app.js": {
-      "comment": 277,
-      "code": 300,
-      "total": 577,
-      "ratio": 0.4800693240901213
+      "comment": 290,
+      "code": 291,
+      "total": 581,
+      "ratio": 0.4991394148020654
     },
     "src/cluster.js": {
       "comment": 16,
@@ -66,6 +66,18 @@
       "code": 25,
       "total": 65,
       "ratio": 0.6153846153846154
+    },
+    "src/config/loginGuard.js": {
+      "comment": 5,
+      "code": 13,
+      "total": 18,
+      "ratio": 0.2777777777777778
+    },
+    "src/config/proxyProtocol.js": {
+      "comment": 27,
+      "code": 65,
+      "total": 92,
+      "ratio": 0.29347826086956524
     },
     "src/config/secrets.js": {
       "comment": 67,
@@ -146,10 +158,10 @@
       "ratio": 0.3625
     },
     "src/constants/canaryAccounts.js": {
-      "comment": 50,
-      "code": 52,
-      "total": 102,
-      "ratio": 0.49019607843137253
+      "comment": 63,
+      "code": 58,
+      "total": 121,
+      "ratio": 0.5206611570247934
     },
     "src/constants/credentialShape.js": {
       "comment": 6,
@@ -368,10 +380,10 @@
       "ratio": 0.5301204819277109
     },
     "src/constants/runtime.js": {
-      "comment": 167,
-      "code": 300,
-      "total": 467,
-      "ratio": 0.3576017130620985
+      "comment": 170,
+      "code": 320,
+      "total": 490,
+      "ratio": 0.3469387755102041
     },
     "src/constants/securitySuggestions.js": {
       "comment": 29,
@@ -632,10 +644,10 @@
       "ratio": 0.03368560105680317
     },
     "src/index.js": {
-      "comment": 195,
-      "code": 300,
-      "total": 495,
-      "ratio": 0.3939393939393939
+      "comment": 217,
+      "code": 299,
+      "total": 516,
+      "ratio": 0.42054263565891475
     },
     "src/middleware/auth.js": {
       "comment": 154,
@@ -710,16 +722,16 @@
       "ratio": 0.4866666666666667
     },
     "src/middleware/rateLimit.js": {
-      "comment": 321,
-      "code": 409,
-      "total": 730,
-      "ratio": 0.4397260273972603
+      "comment": 354,
+      "code": 433,
+      "total": 787,
+      "ratio": 0.4498094027954257
     },
     "src/middleware/rateLimitStore.js": {
-      "comment": 85,
-      "code": 95,
-      "total": 180,
-      "ratio": 0.4722222222222222
+      "comment": 91,
+      "code": 97,
+      "total": 188,
+      "ratio": 0.48404255319148937
     },
     "src/middleware/rbac.js": {
       "comment": 181,
@@ -782,10 +794,10 @@
       "ratio": 0.13114754098360656
     },
     "src/middleware/security/sanitize.js": {
-      "comment": 80,
-      "code": 85,
-      "total": 165,
-      "ratio": 0.48484848484848486
+      "comment": 81,
+      "code": 98,
+      "total": 179,
+      "ratio": 0.45251396648044695
     },
     "src/middleware/security/securityHeaders.js": {
       "comment": 91,
@@ -800,10 +812,10 @@
       "ratio": 0.5459183673469388
     },
     "src/middleware/staticFrontend.js": {
-      "comment": 91,
-      "code": 93,
-      "total": 184,
-      "ratio": 0.4945652173913043
+      "comment": 95,
+      "code": 96,
+      "total": 191,
+      "ratio": 0.4973821989528796
     },
     "src/middleware/tokenBlacklist.js": {
       "comment": 83,
@@ -854,10 +866,10 @@
       "ratio": 0.3
     },
     "src/models/auditLogWriteStatics.js": {
-      "comment": 45,
-      "code": 104,
-      "total": 149,
-      "ratio": 0.30201342281879195
+      "comment": 64,
+      "code": 116,
+      "total": 180,
+      "ratio": 0.35555555555555557
     },
     "src/models/ConsentRecord.js": {
       "comment": 7,
@@ -1171,6 +1183,12 @@
       "total": 594,
       "ratio": 0.494949494949495
     },
+    "src/services/auditCheckpointFreshness.js": {
+      "comment": 8,
+      "code": 20,
+      "total": 28,
+      "ratio": 0.2857142857142857
+    },
     "src/services/auditExportService.js": {
       "comment": 67,
       "code": 210,
@@ -1238,10 +1256,10 @@
       "ratio": 0.6
     },
     "src/services/authService/login.js": {
-      "comment": 142,
-      "code": 260,
-      "total": 402,
-      "ratio": 0.35323383084577115
+      "comment": 147,
+      "code": 269,
+      "total": 416,
+      "ratio": 0.35336538461538464
     },
     "src/services/authService/password.js": {
       "comment": 83,
@@ -1256,16 +1274,16 @@
       "ratio": 0.3911671924290221
     },
     "src/services/authService/session.js": {
-      "comment": 99,
-      "code": 200,
-      "total": 299,
-      "ratio": 0.3311036789297659
+      "comment": 108,
+      "code": 211,
+      "total": 319,
+      "ratio": 0.3385579937304075
     },
     "src/services/authService/token.js": {
-      "comment": 155,
-      "code": 256,
-      "total": 411,
-      "ratio": 0.3771289537712895
+      "comment": 157,
+      "code": 266,
+      "total": 423,
+      "ratio": 0.37115839243498816
     },
     "src/services/avatarService.js": {
       "comment": 10,
@@ -1400,10 +1418,10 @@
       "ratio": 0.08823529411764706
     },
     "src/services/forensicTrace.js": {
-      "comment": 40,
-      "code": 211,
-      "total": 251,
-      "ratio": 0.1593625498007968
+      "comment": 43,
+      "code": 244,
+      "total": 287,
+      "ratio": 0.14982578397212543
     },
     "src/services/forensicTrigger.js": {
       "comment": 58,
@@ -1446,6 +1464,12 @@
       "code": 181,
       "total": 182,
       "ratio": 0.005494505494505495
+    },
+    "src/services/honeypotLurePresentation.js": {
+      "comment": 6,
+      "code": 18,
+      "total": 24,
+      "ratio": 0.25
     },
     "src/services/honeypotWatch.js": {
       "comment": 3,
@@ -1537,6 +1561,12 @@
       "total": 261,
       "ratio": 0.09961685823754789
     },
+    "src/services/ipPoolBanAudit.js": {
+      "comment": 19,
+      "code": 46,
+      "total": 65,
+      "ratio": 0.2923076923076923
+    },
     "src/services/ipPoolCluster.js": {
       "comment": 3,
       "code": 83,
@@ -1561,6 +1591,12 @@
       "total": 152,
       "ratio": 0.21052631578947367
     },
+    "src/services/loginRateLimitAudit.js": {
+      "comment": 11,
+      "code": 54,
+      "total": 65,
+      "ratio": 0.16923076923076924
+    },
     "src/services/mfaDisable.js": {
       "comment": 37,
       "code": 92,
@@ -1572,6 +1608,12 @@
       "code": 242,
       "total": 384,
       "ratio": 0.3697916666666667
+    },
+    "src/services/permissionCatalog.js": {
+      "comment": 3,
+      "code": 15,
+      "total": 18,
+      "ratio": 0.16666666666666666
     },
     "src/services/permissionService.js": {
       "comment": 90,
@@ -1610,10 +1652,10 @@
       "ratio": 0.022222222222222223
     },
     "src/services/rateLimitEscalation.js": {
-      "comment": 94,
+      "comment": 97,
       "code": 211,
-      "total": 305,
-      "ratio": 0.3081967213114754
+      "total": 308,
+      "ratio": 0.31493506493506496
     },
     "src/services/rateLimitEscalationBan.js": {
       "comment": 50,
@@ -1759,6 +1801,12 @@
       "total": 120,
       "ratio": 0.15833333333333333
     },
+    "src/services/startupAuditTrail.js": {
+      "comment": 10,
+      "code": 25,
+      "total": 35,
+      "ratio": 0.2857142857142857
+    },
     "src/services/tokenService.js": {
       "comment": 48,
       "code": 85,
@@ -1856,10 +1904,10 @@
       "ratio": 0.44680851063829785
     },
     "src/utils/auditChain.js": {
-      "comment": 242,
+      "comment": 246,
       "code": 299,
-      "total": 541,
-      "ratio": 0.44731977818853974
+      "total": 545,
+      "ratio": 0.45137614678899085
     },
     "src/utils/auditChainFence.js": {
       "comment": 27,
@@ -1993,6 +2041,12 @@
       "total": 96,
       "ratio": 0.6041666666666666
     },
+    "src/utils/forensicDeviceKey.js": {
+      "comment": 5,
+      "code": 20,
+      "total": 25,
+      "ratio": 0.2
+    },
     "src/utils/healthChecks.js": {
       "comment": 50,
       "code": 106,
@@ -2030,10 +2084,10 @@
       "ratio": 0.39869281045751637
     },
     "src/utils/ipUtils.js": {
-      "comment": 363,
-      "code": 267,
-      "total": 630,
-      "ratio": 0.5761904761904761
+      "comment": 383,
+      "code": 276,
+      "total": 659,
+      "ratio": 0.5811836115326252
     },
     "src/utils/jwtKeys.js": {
       "comment": 24,
@@ -2161,6 +2215,12 @@
       "total": 141,
       "ratio": 0.0070921985815602835
     },
+    "src/utils/proxyProtocol.js": {
+      "comment": 135,
+      "code": 296,
+      "total": 431,
+      "ratio": 0.31322505800464034
+    },
     "src/utils/queryBudget.js": {
       "comment": 26,
       "code": 25,
@@ -2238,11 +2298,53 @@
       "code": 90,
       "total": 125,
       "ratio": 0.28
+    },
+    "src/constants/attackEvents.js": {
+      "comment": 25,
+      "code": 65,
+      "total": 90,
+      "ratio": 0.2777777777777778
+    },
+    "src/controllers/securityController/attackEvents.js": {
+      "comment": 31,
+      "code": 152,
+      "total": 183,
+      "ratio": 0.16939890710382513
+    },
+    "src/middleware/injectionSignature.js": {
+      "comment": 32,
+      "code": 85,
+      "total": 117,
+      "ratio": 0.27350427350427353
+    },
+    "src/routes/attackEventRoutes.js": {
+      "comment": 6,
+      "code": 22,
+      "total": 28,
+      "ratio": 0.21428571428571427
+    },
+    "src/services/attackEventQueryService.js": {
+      "comment": 81,
+      "code": 208,
+      "total": 289,
+      "ratio": 0.28027681660899656
+    },
+    "src/services/injectionDetector.js": {
+      "comment": 33,
+      "code": 79,
+      "total": 112,
+      "ratio": 0.29464285714285715
+    },
+    "src/services/scanProbeDetector.js": {
+      "comment": 42,
+      "code": 144,
+      "total": 186,
+      "ratio": 0.22580645161290322
     }
   },
   "total": {
-    "comment": 22930,
-    "code": 49736,
-    "ratio": 0.3156
+    "comment": 23569,
+    "code": 51205,
+    "ratio": 0.3152
   }
 }

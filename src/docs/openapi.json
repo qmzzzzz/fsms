@@ -3867,6 +3867,229 @@
         }
       }
     },
+    "/api/security/attack-events": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "攻击告警查询（安全分析 · 专家分析读面：action 钉在攻击注册表上）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Reauth-Ticket",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选的短时票据（5 分钟，绑定账号与会话，**一次性**）。默认不需要：POST /api/security/reauth 成功后服务端会为该会话开 5 分钟窗口，窗口内凭有效访问令牌即可读取。票据路径供无会话上下文的 API 客户端使用，同一张票第二次使用会被拒（REAUTH_TICKET_INVALID）。"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ip",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "username",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attackType",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "severityMin",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["low", "medium", "high", "critical"]
+            }
+          },
+          {
+            "name": "severityMax",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["low", "medium", "high", "critical"]
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回攻击注册表 action 的告警行（RESPONSE_EXCLUDE 投影，不带正文/头袋）与 meta（total/nextCursor/dataScopeType）；每行带 disposal 派生（banned/forensic/observing）。蜜罐行不带 userId，self/department 数据范围下空结果不等于「没有攻击」。"
+          },
+          "400": {
+            "description": "筛选参数非法或组合恒空（原文案透传）"
+          },
+          "401": {
+            "description": "缺少或无效的二次验证票据"
+          },
+          "403": {
+            "description": "无 security:audit 权限或数据范围不可用（DATA_SCOPE_DENIED）"
+          },
+          "500": {
+            "description": "查询失败（AUDIT_QUERY_FAILED）"
+          }
+        }
+      }
+    },
+    "/api/security/attack-events/summary": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "攻击告警分类计数（tab 角标；attackType 入参被剔除）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Reauth-Ticket",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选的短时票据（5 分钟，绑定账号与会话，**一次性**）。默认不需要：POST /api/security/reauth 成功后服务端会为该会话开 5 分钟窗口，窗口内凭有效访问令牌即可读取。票据路径供无会话上下文的 API 客户端使用，同一张票第二次使用会被拒（REAUTH_TICKET_INVALID）。"
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ip",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "username",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "severityMin",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "severityMax",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回 { all, 各分类码计数 }；语义是「给定其它筛选，各类各有多少」，选中某分类时其余角标仍有效。"
+          },
+          "400": {
+            "description": "筛选参数非法或组合恒空（原文案透传）"
+          },
+          "401": {
+            "description": "缺少或无效的二次验证票据"
+          },
+          "403": {
+            "description": "无 security:audit 权限或数据范围不可用（DATA_SCOPE_DENIED）"
+          },
+          "500": {
+            "description": "统计失败（AUDIT_QUERY_FAILED）"
+          }
+        }
+      }
+    },
     "/api/security/config/allowPublicRegistration": {
       "get": {
         "tags": ["Security"],
@@ -4582,7 +4805,7 @@
       "get": {
         "tags": ["Security"],
         "summary": "取证溯源查询（按 IP / 设备指纹 / 网段）",
-        "description": "至少提供一个查询维度，否则 400 FORENSIC_NO_CRITERIA；地址无法解析同样按判据不可用拒绝，不返回空结果。时间线行顶层带 status（由 response.status 提升）与 reason（由 trigger.reason 提升），两列在界面即「状态码/触发说明」。pools 双路径：判据带 fingerprint 时返回该指纹落到过的网段（全窗口完整池，行形 segment/hits/distinctIps/firstSeen/lastSeen）；按 IP/网段溯源时从库内观测到的指纹自动派生（行多带 fingerprint 字段，top 5 指纹、桶内按命中倒序）——「同一设备指纹出现过的网段按命中排序」这一换 IP 不换机器的直接证据，在最常用的按 IP 入口同样直接可见。",
+        "description": "至少提供一个查询维度，否则 400 FORENSIC_NO_CRITERIA；地址无法解析同样按判据不可用拒绝，不返回空结果。时间线行顶层带 status（由 response.status 提升）与 reason（由 trigger.reason 提升），两列在界面即「状态码/触发说明」。pools 双路径：判据带 fingerprint/deviceKey 时返回该身份落到过的网段（全窗口完整池，行形 segment/hits/distinctIps/firstSeen/lastSeen）；按 IP/网段溯源时从库内观测到的指纹自动派生（行多带 fingerprint 字段，top 5 指纹、桶内按命中倒序）——「同一设备指纹出现过的网段按命中排序」这一换 IP 不换机器的直接证据，在最常用的按 IP 入口同样直接可见。",
         "security": [
           {
             "bearerAuth": []
@@ -4598,6 +4821,13 @@
           },
           {
             "name": "fingerprint",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deviceKey",
             "in": "query",
             "schema": {
               "type": "string"
@@ -4803,6 +5033,9 @@
                     "type": "string"
                   },
                   "fingerprint": {
+                    "type": "string"
+                  },
+                  "deviceKey": {
                     "type": "string"
                   },
                   "ipSegment": {

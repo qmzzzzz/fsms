@@ -14,6 +14,7 @@ import {
   createVersionWatcher,
   isComparableBuildId,
   isPageHidden,
+  startVersionWatcher,
   DEFAULT_INTERVAL_MS,
 } from '@/utils/versionWatcher'
 
@@ -355,5 +356,51 @@ describe('createVersionWatcher', () => {
     await vi.waitFor(() => expect(fetchVersion).toHaveBeenCalledTimes(1))
 
     watcher.stop()
+  })
+})
+
+describe('startVersionWatcher 生产装配（2026-11-06 收敛批补测）', () => {
+  test('start ⇒ started；checkNow 走注入 fetch；stop ⇒ 探测静默', async () => {
+    const fetchVersion = vi.fn().mockResolvedValue({ buildId: 'local-build-x' })
+    const w = startVersionWatcher({
+      localBuildId: 'local-build-x',
+      fetchVersion,
+      intervalMs: 60000,
+    })
+    expect(w.isStarted()).toBe(true)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(fetchVersion).toHaveBeenCalledTimes(1) // start 自带一次首查
+    await w.checkNow()
+    expect(fetchVersion).toHaveBeenCalledTimes(2)
+    w.stop()
+    expect(w.isStarted()).toBe(false)
+    await w.checkNow() // stop 后 started=false 直接短路，不外发
+    expect(fetchVersion).toHaveBeenCalledTimes(2)
+  })
+
+  test('远端同版本不误报；不同版本只提示一次（notified 一次性闸）', async () => {
+    const onUpdate = vi.fn()
+    const w = startVersionWatcher({
+      localBuildId: 'local-build-a',
+      fetchVersion: vi
+        .fn()
+        .mockResolvedValueOnce({ buildId: 'local-build-a' })
+        .mockResolvedValueOnce({ buildId: 'local-build-b' }),
+      intervalMs: 60000,
+      onUpdateAvailable: onUpdate,
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(onUpdate).not.toHaveBeenCalled() // 同版本不误报
+    await w.checkNow()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(onUpdate).toHaveBeenCalledTimes(1) // 换版提示一次
+    await w.checkNow()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(onUpdate).toHaveBeenCalledTimes(1) // notified 闸：不重复打扰
+    w.stop()
   })
 })

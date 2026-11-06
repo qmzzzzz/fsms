@@ -23,8 +23,8 @@ let initialized = false;
  *   request.query_string= 'next=/home'
  *   request.url         = 'http://<no host>/api/auth/login?next=/home'  ← 查询串在 url 里也有一份
  *   event.user          = {username:'admin', email:'a@b.co'}
- * app.js:250 把 sentryRequestHandler/sentryTracingHandler 挂在所有路由之前、app.js:589 在通用
- * errorHandler（app.js:592）之前用 sentryErrorHandler() 兜异常 ⇒
+ * app.js:256 把 sentryRequestHandler/sentryTracingHandler 挂在所有路由之前、app.js:592 在通用
+ * errorHandler（app.js:595）之前用 sentryErrorHandler() 兜异常（2026-11-04 攻击告警挂载 +3 行，由 :252/:568/:571 顺移；2026-11-05 攻击检测面接线后为 :255/:576/:579；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :256/:592/:595）⇒
  * 只要配了 SENTRY_DSN，口令/MFA 码/令牌/会话 cookie 就会随任意一次 5xx 发往 DSN。
  *
  * 关于 event.user 的键：默认表是 `DEFAULT_USER_INCLUDES = ['id','username','email']`

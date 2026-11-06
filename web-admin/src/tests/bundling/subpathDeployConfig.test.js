@@ -61,3 +61,22 @@ describe('开发/预览服务器监听面', () => {
     expect(read('index.html')).not.toContain('fonts.googleapis.com')
   })
 })
+
+describe('版本探测接线（G4）', () => {
+  test('startVersionWatcher 必须接 onUpdateAvailable 回调（否则服务端换版无提示）', () => {
+    const src = read('src/main.js')
+    // 防再漂移：版本探测发现 buildId 不一致后必须写入 updateNotice，
+    // UpdateNoticeBar 才有依据出提示条；回调一旦丢失，轮询照跑但界面永远沉默
+    expect(src).toContain(
+      "startVersionWatcher({ onUpdateAvailable: () => markUpdateAvailable('version') })"
+    )
+  })
+})
+
+describe('PWA manifest 防复活（G7）', () => {
+  test('public/manifest.webmanifest 不得回归（内联版按 base 注入，public 版是死文件+漂移源）', () => {
+    // public 版 start_url:'/' 硬编码：/admin/ 部署下安装应用会跳站点根；
+    // dist 内本就被 vite-plugin-pwa 的内联版覆盖，留着只会让两份 manifest 漂移
+    expect(fs.existsSync(path.join(root, 'public/manifest.webmanifest'))).toBe(false)
+  })
+})

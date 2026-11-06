@@ -127,10 +127,12 @@ const submit = async () => {
     )
     return
   }
-  emit(
-    'submit',
-    encrypted ? { encCurrentPassword: encrypted } : { currentPassword: password.value }
-  )
+  // G2 统一口径：dev 非安全上下文返回 null 时阻断提交（明文回退轨已删）
+  if (!encrypted) {
+    ElMessage.error(t('login.insecureContext'))
+    return
+  }
+  emit('submit', { encCurrentPassword: encrypted })
 }
 </script>
 

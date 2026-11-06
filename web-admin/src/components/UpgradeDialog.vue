@@ -251,6 +251,7 @@ import { computed, ref, watch, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSystemLabels } from '@/i18n/systemLabels'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { api, isHandledApiError, isCanceledError } from '@/utils/api'
 import { encryptPassword } from '@/utils/loginCipher'
 import { formatTime } from '@/utils/datetime'
@@ -599,11 +600,32 @@ const submit = async () => {
   // P1-1：置位必须发生在**第一个 await 之前**。原实现把 submitting 放在
   // encryptPassword 之后，而加密本身是 async —— 连点 / 回车能在加密窗口里
   // 并行跑进第二次 submit，于是两次 triggerUpgrade 一起发出去。
+  // G2 的最终确认框本身也是 await，同理必须在置位之后：确认框等待期间
+  // submitting 已置位，任何重复的 submit 调用都会被开头同步挡下
+  // （真实交互另有全屏遮罩挡指针，这里是键盘路径的兜底）。
   submitting.value = true
   const epoch = (stateEpoch += 1)
   const stillCurrent = () => !disposed && epoch === stateEpoch
+  // 取消即中止且不清凭据：confirmed 未置位时 finally 只复位 submitting，
+  // 密码/动态码保留在表单里，用户改主意重试不必重打
+  let confirmed = false
 
   try {
+    // G2 最终确认：一键升级是「起备色→切流」的高影响操作，镜像 digest 手滑的
+    // 代价远大于多按一次确认，故在表单校验之后、任何请求之前加一道人工闸。
+    // 取消即静默中止（不落错误提示）。
+    try {
+      await ElMessageBox.confirm(t('about.upgrade.confirmText'), t('about.upgrade.confirmTitle'), {
+        type: 'warning',
+        confirmButtonText: t('about.upgrade.confirmOk'),
+        cancelButtonText: t('common.cancel'),
+      })
+      confirmed = true
+    } catch (_) {
+      return
+    }
+    if (!stillCurrent()) return
+
     let credential
     if (credentialMode.value === 'mfa') {
       credential = { mfaCode: mfaCode.value.trim() }
@@ -611,7 +633,14 @@ const submit = async () => {
       try {
         const enc = await encryptPassword(password.value, 'PASSWORD_CURRENT')
         if (!stillCurrent()) return
-        credential = enc ? { encCurrentPassword: enc } : { currentPassword: password.value }
+        // G2 fail-closed：encryptPassword 返回 null 仅剩 dev 非安全上下文一种形态
+        // （生产直接抛 INSECURE_CONTEXT 进 catch）。明文回退轨已删——二次验证
+        // 凭据明文上行从来不是可接受的降级，宁可拦下提交也不发明文。
+        if (!enc) {
+          ElMessage.error(t('login.insecureContext'))
+          return
+        }
+        credential = { encCurrentPassword: enc }
       } catch (e) {
         if (!stillCurrent()) return
         ElMessage.error(
@@ -664,8 +693,11 @@ const submit = async () => {
     // 只有「当前这一次提交」有权复位：关窗 / reset 之后，旧请求不得改动新状态
     if (epoch === stateEpoch) {
       submitting.value = false
-      password.value = ''
-      mfaCode.value = ''
+      // 取消最终确认时保留凭据输入（confirmed=false 路径），其余情况照旧清空
+      if (confirmed) {
+        password.value = ''
+        mfaCode.value = ''
+      }
     }
   }
 }

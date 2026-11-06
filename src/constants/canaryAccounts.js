@@ -5,9 +5,12 @@
  * 凭证失败命中名单（且该用户名查无此人）即确定性探测信号；检测与处置见
  * services/canaryWatch.js，本文件只回答「名单是什么」这一件事。
  *
- * 默认名单（10 个）：administrator / root / user / test / guest / system /
- * oracle / postgres / backup / demo——都是攻击者字典里的高频词，而正常
- * 业务系统不会把这些词用作真实账号名（若确有，见下方「遮蔽」提示）。
+ * 默认名单（16 个）：administrator / root / user / test / guest / system /
+ * oracle / postgres / backup / demo，以及 2026-11-03 增补的系统风格命名
+ * fsmsadmin / sysadmin / superadmin / operator / auditor / manager——
+ * 前十个是攻击者字典里的高频词，后六个是渗透测试（i760 #28）实测可被
+ * 冒名注册/探测的系统管理风格命名：fsmsadmin（本系统前缀 + admin）当时
+ * 未在名单内，公开注册接口实测注册成功了一个 GUEST 账号。
  *
  * 【为什么默认名单里没有 admin】
  * admin 是本仓默认超管用户名（utils/superAdmin.getSuperAdminUsername 默认
@@ -16,6 +19,12 @@
  * 在名单里也不会误报；但正因为它**默认一直真实存在**，放进默认名单等于
  * 默认名单里有一个固定失效项，徒增启动期遮蔽对账噪音。超管改名后若想把
  * admin 纳入监控，用 CANARY_USERNAMES 显式加入即可。
+ *
+ * 【为什么不按 admin* 前缀通配（渗透测试建议项的取舍）】
+ * 通配会让名单语义从「枚举」变成「前缀规则」，而 admin 前缀下真实存在
+ * 默认超管 admin——通配等于默认名单自带一个必然被遮蔽的规则项，与上面
+ * 「不放 admin」同理且更糟（遮蔽对账按名单条目逐个核对，规则项没有明确
+ * 的核对对象）。确需按前缀设防时在 CANARY_USERNAMES 里逐个列出。
  *
  * 【CANARY_USERNAMES 语义（env 解析与 config/trustedProxies.js 同一条纪律）】
  *   - 未配置（undefined/空白）→ 用默认名单：安全能力默认开启，不依赖
@@ -41,6 +50,16 @@ const DEFAULT_CANARY_USERNAMES = Object.freeze([
   'postgres',
   'backup',
   'demo',
+  // 2026-11-03 增补（渗透测试 i760 #28）：系统管理风格命名此前可被公开注册
+  // 冒名占用（fsmsadmin 实测注册成功）。这些名字与本系统/常见运维体系强关联，
+  // 合法业务用户不应用作账号名；若某部署确有此类真实账号，启动期遮蔽对账
+  // 会显式告警（移除/改名或调整 CANARY_USERNAMES）。
+  'fsmsadmin',
+  'sysadmin',
+  'superadmin',
+  'operator',
+  'auditor',
+  'manager',
 ]);
 
 /**

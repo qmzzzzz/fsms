@@ -45,19 +45,8 @@ const hashRecoveryCode = (code) => {
   return crypto.createHash('sha256').update(code, 'utf8').digest('hex');
 };
 
-/**
- * 备用恢复码字母表——「什么字符算合法恢复码」这条谓词的**单一来源**。
- * 31 字符：26 个大写字母剔除易混的 I/L/O，10 个数字剔除易混的 0/1。
- *
- * 这条谓词在本仓库有三份手写拷贝：本文件的字母表（生成侧，权威——只有它决定
- * 用户实际拿到什么码），以及两份校验侧的等价正则
- * `[A-HJ-KM-NP-Z2-9]{4}-[A-HJ-KM-NP-Z2-9]{4}`（services/authService.js 登录、
- * routes/authRoutes.js 入参）。三份今天等价却互不引用：任一处改动都会静默分叉成
- * 「发出去的码被校验侧判为格式非法」，且只在被改字符恰好落在某一位时复现——
- * 是极难定位的一类登录故障。故导出 isRecoveryCodeFormat / RECOVERY_CODE_PATTERN
- * 供校验侧收敛，并由 tests/services/recoveryCodeFormatSingleSource.test.js
- * 以「逐字符行为等价 + 绝对值」双门禁盯住两份手写正则是否漂移。
- */
+// 字母表排除易混字符；生成与校验必须同源，否则发出的恢复码可能被判非法。
+// 格式契约由 tests/services/recoveryCodeFormatSingleSource.test.js 核对。
 const RECOVERY_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 /** 格式 XXXX-XXXX：连字符两侧各这么多位 */
 const RECOVERY_CODE_HALF = 4;

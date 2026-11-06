@@ -66,12 +66,10 @@ function parseArgs(argv) {
     else if (argv[i] === '--old-key-file') {
       args.oldKeyFile = takeValue('--old-key-file', i);
       i += 1;
-    }
-    else if (argv[i] === '--new-key-file') {
+    } else if (argv[i] === '--new-key-file') {
       args.newKeyFile = takeValue('--new-key-file', i);
       i += 1;
-    }
-    else if (REMOVED_KEY_FLAGS[argv[i]]) {
+    } else if (REMOVED_KEY_FLAGS[argv[i]]) {
       console.error(
         `已移除 ${argv[i]}：写在命令行上的密钥会出现在 /proc/<pid>/cmdline（同机任意本地用户可读）` +
           `与 shell 历史里。\n` +

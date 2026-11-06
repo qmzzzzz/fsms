@@ -26,6 +26,7 @@ jest.mock('../../models/AuditLog', () => ({
 
 const { checkIPBlacklist } = require('../../middleware/security');
 const IPBlacklist = require('../../models/IPBlacklist');
+const { parseTrustedProxyCidrs, toTrustedProxies } = require('../../config/trustedProxies');
 
 const REAL_PEER = '198.51.100.7'; // 真身：公网直连方，已在黑名单
 const FORGED_WHITELIST = '10.20.30.40'; // 攻击者伪造的"白名单 IP"（办公网段形态）
@@ -49,7 +50,20 @@ const makeReq = (overrides = {}) => {
   };
 };
 
-const appTrustProxy1 = { get: (k) => (k === 'trust proxy' ? 1 : undefined) };
+/**
+ * trust proxy 开 + 显式名单档：容器内网反代 172.18.0.0/16 判可信。
+ * 2026-11-03 裁决尺收窄（私网/回环 → 仅回环 + 名单档）后，E 用例的
+ * ::ffff:172.18.0.2 对端只有落在显式名单里，其写的 req.ip / XFF 才会被采信；
+ * A/B 用例的公网真身对端（198.51.100.7）不在名单内 ⇒ 照旧按可伪造处理。
+ */
+const appTrustProxy1 = {
+  get: (k) =>
+    k === 'trust proxy'
+      ? 1
+      : k === 'trusted proxy cidrs'
+        ? toTrustedProxies(parseTrustedProxyCidrs('172.18.0.0/16'))
+        : undefined,
+};
 
 /** res 替身：codeError → res.status(code).json({..., errors:{ errorCode }}) */
 const makeRes = () => {

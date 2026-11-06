@@ -82,6 +82,7 @@ import { useI18n } from 'vue-i18n'
 import { api } from '@/utils/api'
 import { formatTime } from '@/utils/datetime'
 import { actionLabel as toActionLabel, categoryLabel as toCategoryLabel } from '@/utils/auditLabels'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import GlassSkeleton from '@/components/GlassSkeleton.vue'
 
 const { t } = useI18n()
@@ -94,21 +95,29 @@ const logs = ref([])
 const loading = ref(true)
 const error = ref(false)
 
+// 竞态守卫（G9）：快速切换 7/30/90 天时，慢的旧响应不得覆盖新窗口的日志。
+// 模板里 :disabled="loading" 挡住下拉入口是第一道双保险，这里兜住穿透情形
+// （如键盘/测试路径在 loading 中再次触发 load）。
+const logsGuard = useLatestRequest()
+
 const actionLabel = (action) => toActionLabel(t, action)
 const categoryLabel = (category) => toCategoryLabel(t, category)
 
 const load = async () => {
+  const isCurrent = logsGuard()
   loading.value = true
   error.value = false
   try {
     const { data: resp } = await api.security.getMyLogs({ days: days.value, limit: LOG_LIMIT })
+    if (!isCurrent()) return
     logs.value = Array.isArray(resp.data) ? resp.data : []
   } catch (_) {
+    if (!isCurrent()) return
     // 错误提示已由拦截器统一处理；清空避免展示过期数据
     logs.value = []
     error.value = true
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 

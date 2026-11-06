@@ -323,12 +323,18 @@ const encryptionErrorMessage = (e) => {
 }
 
 /**
- * 构造当前口令凭据：密文轨优先；仅开发模式 WebCrypto 不可用时回落明文轨。
- * 加密失败必须阻断提交（抛给调用方），不得静默明文上行。
+ * 构造当前口令凭据：只走密文轨。加密失败（含 dev 非安全上下文返回 null）一律
+ * 抛给调用方阻断提交，不得静默明文上行——G2 统一口径：明文回退轨已删，
+ * null 按生产同款 INSECURE_CONTEXT 语义抛出，调用方 catch 统一提示。
  */
 const buildPasswordCredential = async (password) => {
   const enc = await encryptPassword(password, 'PASSWORD_CURRENT')
-  return enc ? { encCurrentPassword: enc } : { currentPassword: password }
+  if (!enc) {
+    const err = new Error('WebCrypto 不可用，已拒绝以明文提交口令')
+    err.code = 'INSECURE_CONTEXT'
+    throw err
+  }
+  return { encCurrentPassword: enc }
 }
 
 const enrollMfa = async () => {

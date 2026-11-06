@@ -125,9 +125,18 @@ describe('报表计数与比率的非退化判据（第 17 轮 P0-1 / P0-2）', 
 
   test('P0-1 反向对照：再写一条记录，总数必须跟着变成 202（防硬编码常量）', async () => {
     const device = await FireDevice.findOne({ deviceCode: CODES[0] });
+    // 快照：add 会把最老的一条挤出数组（截断保留最新 200）——单纯 $pop 只剩 199，
+    // 必须整组回写快照才能回到 200/201 的种子态（乱序防护，见文件头说明）
+    const snapshot = device.maintenanceRecord.map((r) =>
+      r && typeof r.toObject === 'function' ? r.toObject() : r
+    );
     await device.addMaintenanceRecord({ type: 'repair', description: '第 202 次' });
     const res = await asUser('/api/reports/devices').expect(200);
     expect(res.body.data.totalMaintenance).toBe(OVER_CAP + 1);
+    await FireDevice.updateOne(
+      { deviceCode: CODES[0] },
+      { $set: { maintenanceRecord: snapshot, maintenanceRecordCount: OVER_CAP } }
+    );
   });
 
   test('P0-2：巡检完成率必须能算出来（total=5 / completed=3 / rate=60）', async () => {
@@ -145,5 +154,7 @@ describe('报表计数与比率的非退化判据（第 17 轮 P0-1 / P0-2）', 
     const res = await asUser('/api/reports/inspections').expect(200);
     expect(res.body.data.completed).toBe(2);
     expect(res.body.data.completionRate).toBe(40);
+    // 自还原（乱序防护：completed=3 的前提被其余用例共享）
+    await Inspection.updateOne({ _id: target._id }, { $set: { status: 'completed' } });
   });
 });

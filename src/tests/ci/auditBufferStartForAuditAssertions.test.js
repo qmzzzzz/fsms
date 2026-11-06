@@ -101,6 +101,17 @@ const UNCONTROLLED_LEDGER = [
       '这条操作根本不写 ⇒ 缓冲状态与该断言无关。',
   },
   {
+    file: 'src/tests/controllers/reportPiiExportStepUp.test.js',
+    kind: 'filtered-scope-excludes-middleware',
+    reason:
+      '断言对象被过滤器收窄到中间件不可能产出的取值：查询用 action=view_sensitive_data 与' +
+      ' dataType=export_realname，这两个字面在整个生产代码里只有直写面产出——' +
+      ' src/services/reportExportService.js:449 auditUnmaskedPiiExport 与' +
+      ' src/controllers/securityController/sensitive.js:132（均为 AuditLog.create 直写、' +
+      '不经 auditBuffer.push）；中间件行即使被缓冲吞掉也进不了该过滤器 ⇒ 计数与缓冲' +
+      '是否启动无关，用例的 waitFor 只兜直写落库可见性。',
+  },
+  {
     file: 'src/tests/routes/forensicRoutesContract.test.js',
     kind: 'filtered-scope-excludes-middleware',
     reason:

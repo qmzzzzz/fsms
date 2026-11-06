@@ -10,10 +10,11 @@
  *
  * 修法不是「不再信任私网」（那会打断所有现存部署），而是**把代理身份变成显式配置**：
  *   - 配了 TRUSTED_PROXY_CIDRS ⇒ 只有落在这些网段内的对端才算代理，私网不再是理由；
- *   - 没配 ⇒ 行为与修复前逐字一致（私网/回环仍可信），由启动期 WARN 说明这条边界
- *     目前判的是位置而非身份。
- * 这个取舍是 2026-10-17 由仓库负责人明确拍板的：默认行为不变、不破坏任何部署，
- * 残余风险如实记录在 ipUtils 的注释里。
+ *   - 没配 ⇒ 兼容档只认回环对端（本机反代/dev Vite）。
+ * 取舍沿革：2026-10-17 曾拍板「未配置时私网/回环仍可信」以不破坏现存部署；2026-11-03
+ * 渗透测试（i760 #25）实测该兼容档被利用——被封禁的客户端请求头加一条伪造
+ * X-Forwarded-For 即绕过 IP_BLOCKED 封禁——故收窄为仅回环，私网对端的 XFF 一律
+ * 不可信，反代不在本机的部署必须显式声明 TRUSTED_PROXY_CIDRS。
  *
  * 判据从 `req.app` 取配置而不是自己读 process.env，理由与 `trust proxy` 同源：
  * ipUtils 的函数保持纯判据（不读环境、不需要缓存与缓存重置），配置在 app.js
@@ -26,7 +27,8 @@
  *      **放宽一处**：裸地址按单主机接受（IPv4 /32、IPv6 /128），见下方用例的理由；
  *   2. 判据层：配了 CIDR 之后，**私网但不在名单内**的对端必须转为不可信
  *      （这正是修复本体；只测「名单内可信」会漏掉它）；
- *   3. 兼容层：未配置时既有四种组合的行为一字不变（防「顺手收紧」打断现网）；
+ *   3. 兼容层：未配置时回环对端仍可信（本机反代不被误伤），私网/公网一律不可信
+ *      （i760 #25 收窄后的兼容档边界）；
  *   4. 接线层：app.js 真的把解析结果注入 app 设置（前三条都过、接线漏了 ⇒ 修复等于没发生）。
  *
  * 变异实测（三处各自只杀死对应那条）：
@@ -249,7 +251,7 @@ describe('判据：配了 CIDR 之后私网不再是理由', () => {
   });
 });
 
-describe('未配置 TRUSTED_PROXY_CIDRS：既有四种组合行为逐字不变', () => {
+describe('未配置 TRUSTED_PROXY_CIDRS：兼容档（回环可信，私网/公网一律不可信）', () => {
   test('未启用 trust proxy ⇒ 可信，取 req.ip', () => {
     const proxies = proxiesFrom(undefined);
     const req = makeReq({
@@ -269,14 +271,30 @@ describe('未配置 TRUSTED_PROXY_CIDRS：既有四种组合行为逐字不变',
     expect(isClientIpIdentityTrustworthy(req)).toBe(true);
   });
 
-  test('trust proxy + XFF + 私网/回环对端 ⇒ 仍可信（默认行为不变，靠启动告警提示收紧）', () => {
+  test('trust proxy + XFF + 回环对端 ⇒ 可信（本机反代/dev Vite 的合法形态）', () => {
     const proxies = proxiesFrom(undefined);
-    for (const peer of ['10.0.0.7', '172.16.3.4', '192.168.1.1', '127.0.0.1', '::1']) {
+    for (const peer of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
       const req = makeReq({ trustProxy: 1, xff: '203.0.113.9', peer, ip: '203.0.113.9', proxies });
       expect({ peer, trusted: isClientIpIdentityTrustworthy(req) }).toMatchObject({
         peer,
         trusted: true,
       });
+    }
+  });
+
+  test('trust proxy + XFF + 私网对端 ⇒ 不可信，退回对端（i760 #25：伪造 XFF 曾实测绕过 IP 黑名单）', () => {
+    // 2026-11-03 收窄：旧兼容档「私网/回环即可信」把"位置"当成了"代理身份"——
+    // 与目标同网段的任意主机自带一条 XFF 即可冒用真实客户端身份。私网对端
+    // 写的 XFF 现在一律不可信，真实反代不在本机的部署必须配置 CIDRS 走名单档。
+    const proxies = proxiesFrom(undefined);
+    for (const peer of ['10.0.0.7', '172.16.3.4', '192.168.1.1']) {
+      const req = makeReq({ trustProxy: 1, xff: '203.0.113.9', peer, ip: '203.0.113.9', proxies });
+      expect({ peer, trusted: isClientIpIdentityTrustworthy(req) }).toMatchObject({
+        peer,
+        trusted: false,
+      });
+      // 安全裁决退回不可伪造的 socket 对端，而不是对端自己写的 XFF 值
+      expect(clientIpForSecurityDecision(req)).toBe(peer);
     }
   });
 
@@ -297,9 +315,20 @@ describe('未配置 TRUSTED_PROXY_CIDRS：既有四种组合行为逐字不变',
     expect(proxiesFrom(undefined)).toMatchObject({ configured: false, cidrs: [] });
   });
 
-  test('app 上没有该设置位时（旧替身 req / 未接线的调用方）也不得改变既有判据', () => {
-    const req = makeReq({ trustProxy: 1, xff: '203.0.113.9', peer: '10.0.0.7', ip: '203.0.113.9' });
+  test('app 上没有该设置位时（旧替身 req / 未接线的调用方）也不得改变判据：回环可信', () => {
+    const req = makeReq({
+      trustProxy: 1,
+      xff: '203.0.113.9',
+      peer: '127.0.0.1',
+      ip: '203.0.113.9',
+    });
     expect(isClientIpIdentityTrustworthy(req)).toBe(true);
+  });
+
+  test('app 上没有该设置位时（旧替身 req / 未接线的调用方）：私网对端同样不可信', () => {
+    const req = makeReq({ trustProxy: 1, xff: '203.0.113.9', peer: '10.0.0.7', ip: '203.0.113.9' });
+    expect(isClientIpIdentityTrustworthy(req)).toBe(false);
+    expect(clientIpForSecurityDecision(req)).toBe('10.0.0.7');
   });
 });
 

@@ -56,6 +56,13 @@ services:
       # 确无反向代理的部署应显式声明 ALLOWED_HOSTS 并接受本项为实际客户端网段，
       # 而不是留空让"任何私网对端"都被信任。
       - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:?TRUSTED_PROXY_CIDRS 必须显式配置为反向代理所在网段（如 172.28.0.0/16）；留空等于信任所有私网对端的 X-Forwarded-For}
+      # PROXY protocol 连接层还原（ADR-021，2026-11-04）：默认 off——本 compose 的
+      # 标准拓扑是宿主 nginx 反代（L7，发 XFF），PROXY 头在 nginx 层由
+      # listen proxy_protocol + real_ip_header 消费，app 侧无需启用。
+      # 仅当 L4 负载均衡（云 NLB / HAProxy）**直连后端**时改 on：
+      # 届时 LB 网段必须同时写进上面的 TRUSTED_PROXY_CIDRS（生产启动闸强制，
+      # 缺名单即拒绝启动）；取值域只有 off/on（判据见 src/config/proxyProtocol.js）。
+      - PROXY_PROTOCOL=${PROXY_PROTOCOL:-off}
       # 2026-10-24 审计（P2，TLS 判据失效）：TLS 终结层必须显式声明。
       # 本 compose 的标准拓扑是宿主 nginx 终结 TLS（deployment/nginx.conf.example），
       # 因此默认沿用上游声明；进程自启 HTTPS 的部署应改为设置 ENABLE_HTTPS=true。
@@ -592,6 +599,11 @@ services:
       - ./deployment/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deployment/observability/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
       - prometheus-data:/prometheus
+    # /metrics 抓取令牌（2026-11-03）：metricsAuth 收窄后私网对端不再零配置放行，
+    # prometheus.yml 以 bearer_token_file 消费同一份 metrics_token secret
+    # （与 app 服务的挂载同源，见本文件 secrets 块）。
+    secrets:
+      - metrics_token
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.retention.time=15d'

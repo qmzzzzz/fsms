@@ -172,7 +172,7 @@ describe('/security/alerts 的数据范围必须与 /security/audit-logs 同源'
     expect(Array.isArray(list)).toBe(true);
     return list.map((r) => String(r.username ?? '')).filter(Boolean);
   };
-  /** 参照实现：/audit-logs 走的就是这一个翻译器（auditQueryService.js:314） */
+  /** 参照实现：/audit-logs 走的就是这一个翻译器（auditQueryService.js:316；2026-11-04 攻击告警读面并入注释行后上移） */
   const scopedProbeNames = async (operatorId) => {
     const { applyAuditDataScope } = require('../../services/auditScopeFilter');
     const { query } = await applyAuditDataScope({ action: 'zz_alert_probe' }, operatorId);

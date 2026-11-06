@@ -329,7 +329,14 @@ describe('auditMeta（审计元数据派生）', () => {
       // 107：撞库画像读口 GET /api/security/stuffing-profile（ADR-013 P2 情报）——路由独立成
       //      stuffingProfileRoutes.js，是为避开 securityRoutes.js 的 max-lines 行数地板。
       // 108：单 IP 攻击行为画像 GET /api/security/attack-profile（security_attack-profile）。
-      expect(collectActions().size).toBe(108);
+      // 110：攻击告警查询读面 GET /api/security/attack-events 与 /summary 两条
+      //      （security_attack-events / security_attack-events_summary），路由独立成
+      //      attackEventRoutes.js，与 stuffingProfileRoutes 同因避开 max-lines 地板。
+      // 110：攻击检测面 2026-11-05 新增的四个事件型 action（nosql_injection_attempt /
+      //      sql_injection_attempt / scan_probe_detected / scan_probe_storm）**不计入本数**——
+      //      本数只钉「路由派生」action；事件型的写入点（检测器叶子模块）由
+      //      auditActionReconciliation/auditActionReachability 两闸对账，不走本闸。
+      expect(collectActions().size).toBe(110);
     });
 
     test('全部路由派生型 action 均在 AUDIT_LOG_ACTIONS 白名单内', () => {

@@ -29,11 +29,13 @@ scrape_configs:
   - job_name: xf-app
     metrics_path: /metrics
     # /metrics 的应用层鉴权（src/middleware/metricsAuth.js）：
-    # 容器内直连 `app:3000` 的 socket 对端是私网地址 ⇒ 零配置放行，本文件无需令牌。
-    # 若 METRICS_TOKEN 已配置且抓取路径穿过反代/跨网段（或将来收窄私网放行），
-    # 在 app 服务挂载同一份 secret 后加：
-    #   bearer_token_file: /run/secrets/metrics_token
+    # 2026-11-03 收窄（渗透测试 i760 #21）——私网对端不再零配置放行（私网只是位置
+    # 不是身份，同网段主机即可匿名读路由表与安全告警计数），抓取方二选一：
+    # 应用同机回环直抓（免令牌），或携带 METRICS_TOKEN。本部署为容器网络直连
+    # `app:3000` ⇒ 走令牌路径：docker-compose 的 prometheus 服务挂载同一份
+    # metrics_token secret，路径固定 /run/secrets/metrics_token。
     # 令牌只从文件读——不要写进本文件（本文件随仓库分发）。
+    bearer_token_file: /run/secrets/metrics_token
     static_configs:
       # compose 服务名即主机名；3000 为容器内端口。
       # 两色都要抓：切流后旧色被停、新色接管，只列 app 会让升级完成的那一刻

@@ -44,11 +44,17 @@ const SECRET_OPT = /key|secret|passw|token|uri|dsn|credential|salt/i;
 const FILE_FORM = /-file$/;
 
 /**
- * 「这个选项从 argv 取了一个值」的判据：`argv[i] === '--x'` 之后紧跟 `argv[++i]`。
- * 60 字符窗口是刻意的：具名拒绝分支后面跟着整段 console.error，窗口内取不到 argv[++i]，
- * 于是"拒绝 --new-key"不会被误判成"还在收密钥"。
+ * 「这个选项从 argv 取了一个值」的判据，两种形态并存：
+ * ① 直接形态：`argv[i] === '--x'` 之后紧跟 `argv[++i]`。60 字符窗口是刻意的：
+ *    具名拒绝分支后面跟着整段 console.error，窗口内取不到 argv[++i]，
+ *    于是"拒绝 --new-key"不会被误判成"还在收密钥"。
+ * ② takeValue 形态（2026-11-04）：带值旗标的取值收敛进脚本内的 takeValue 辅助函数
+ *    （缺值即错），调用点 `takeValue('--x', i)` 自带旗标名——migrate-mfa-secret /
+ *    resign-audit-hmac 重构后，直接形态在这两份脚本里已不存在，判据不认这一形态
+ *    就会自证空气（判据集清空、前提自证恒红、手册对照误报 bad）。
  */
 const VALUE_OPT_RE = /argv\[\s*i\s*\]\s*===\s*'(--[a-z0-9-]+)'[\s\S]{0,60}?argv\[\s*\+\+i\s*\]/g;
+const TAKEVALUE_RE = /takeValue\(\s*'(--[a-z0-9-]+)'\s*,/g;
 
 /** 递归列 scripts 下的 .js/.cjs：audit-probes 用的是 .cjs，只收 .js 会漏掉整个子目录 */
 function listScripts(dir) {
@@ -65,7 +71,11 @@ function listScripts(dir) {
 
 function argvValueOptions(src) {
   VALUE_OPT_RE.lastIndex = 0;
-  return [...src.matchAll(VALUE_OPT_RE)].map((m) => m[1]);
+  TAKEVALUE_RE.lastIndex = 0;
+  return [
+    ...[...src.matchAll(VALUE_OPT_RE)].map((m) => m[1]),
+    ...[...src.matchAll(TAKEVALUE_RE)].map((m) => m[1]),
+  ];
 }
 
 /** 脚本 → 它从 argv 取的密钥类选项（含不合规的，供判据自己筛） */
@@ -240,7 +250,9 @@ describe('密钥类 argv 选项的静态判据', () => {
     const real = fs.readFileSync(path.join(ROOT, 'scripts/resign-audit-hmac.js'), 'utf8');
     const reverted = secretOptionsByScript.get('scripts/resign-audit-hmac.js').map((f) => f);
     expect(reverted).toEqual(['--new-key-file']);
-    const drift = argvValueOptions(real.replace("'--new-key-file'", "'--new-key'")).filter((f) =>
+    // 2026-11-04 起取值收敛进 takeValue：条件分支（argv[i] === …）本身不再捕获，
+    // 减法必须把两处出现（条件与 takeValue 调用点）一起换掉，漂移才算数。
+    const drift = argvValueOptions(real.replaceAll("'--new-key-file'", "'--new-key'")).filter((f) =>
       SECRET_OPT.test(f.slice(2))
     );
     expect(drift).toEqual(['--new-key']);

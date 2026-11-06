@@ -348,15 +348,19 @@ describe('MfaSettingsCard 注册与二维码', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('开发模式加密降级（encryptPassword 返回 null）：回退明文字段，不阻断登记', async () => {
+  test('开发模式加密降级（encryptPassword 返回 null）：fail-closed 阻断登记，不发请求', async () => {
+    // G2 统一口径后明文回退轨已删：null 与加密失败同义，按 INSECURE_CONTEXT 阻断
     encryptPassword.mockResolvedValue(null)
-    mfaEnroll.mockResolvedValue(enrollOk())
     const c = await open(statusOff())
     await setInput(c.find('input'), PASSWORD)
     click(findButton(c, BTN.start))
-    await waitFor(() => mfaEnroll.mock.calls.length === 1, { message: '注册请求发出' })
-    expect(mfaEnroll.mock.calls[0][0]).toEqual({ currentPassword: PASSWORD })
-    await waitFor(() => c.find('.mfa-secret') !== null, { message: '密钥视图渲染' })
+    await flush(10)
+    expect(mfaEnroll).not.toHaveBeenCalled()
+    expect(ElMessage.error.mock.calls.map((a) => a[0])).toEqual([
+      '当前页面不是安全连接（HTTPS），无法加密口令，已阻止提交。请通过 HTTPS 访问系统',
+    ])
+    // busy 必须复位，用户可在修正环境后重试
+    expect(findButton(c, BTN.start).disabled).toBe(false)
     expect(c.errors).toEqual([])
   })
 

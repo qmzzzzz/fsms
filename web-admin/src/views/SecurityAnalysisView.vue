@@ -10,12 +10,18 @@
         data-test="security-analysis-tabs"
         @tab-change="onTabChange"
       >
+        <el-tab-pane :label="$t('nav.attackAlerts')" name="alerts" />
         <el-tab-pane :label="$t('nav.attackProfile')" name="attack" />
         <el-tab-pane :label="$t('nav.stuffingProfile')" name="stuffing" />
         <el-tab-pane :label="$t('nav.forensic')" name="forensic" />
       </el-tabs>
     </div>
 
+    <AttackAlertsView
+      v-if="mountedTabs.has('alerts')"
+      v-show="activeTab === 'alerts'"
+      :show-title="false"
+    />
     <AttackProfileView
       v-if="mountedTabs.has('attack')"
       v-show="activeTab === 'attack'"
@@ -34,13 +40,15 @@
 import { defineAsyncComponent, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-// 三个工具各自成 chunk：工作台首屏只加载当前 tab，访问过再保活（切走不丢查询现场）
+// 四个工具各自成 chunk：工作台首屏只加载当前 tab，访问过再保活（切走不丢查询现场）
+const AttackAlertsView = defineAsyncComponent(() => import('@/views/AttackAlertsView.vue'))
 const AttackProfileView = defineAsyncComponent(() => import('@/views/AttackProfileView.vue'))
 const StuffingProfileView = defineAsyncComponent(() => import('@/views/StuffingProfileView.vue'))
 const ForensicTraceView = defineAsyncComponent(() => import('@/views/ForensicTraceView.vue'))
 
-const VALID_TABS = ['attack', 'stuffing', 'forensic']
-const DEFAULT_TAB = 'attack'
+// 攻击告警是工作台的入口（先看告警，再对可疑 IP 深入画像/取证），置于首位为默认 tab
+const VALID_TABS = ['alerts', 'attack', 'stuffing', 'forensic']
+const DEFAULT_TAB = 'alerts'
 
 const tabOf = (raw) => {
   const value = Array.isArray(raw) ? raw[0] : raw
@@ -85,7 +93,7 @@ const onTabChange = (name) => {
 .workbench-tabs :deep(.el-tabs__header) {
   margin-bottom: 0;
 }
-/* tab 内容区由下方三个视图自身渲染，禁止再套一层空面板 */
+/* tab 内容区由下方四个视图自身渲染，禁止再套一层空面板 */
 .workbench-tabs :deep(.el-tabs__content) {
   display: none;
 }

@@ -52,8 +52,8 @@ const { verifyAuditChain, computeChainVerdict } = require('../src/services/audit
 // 破坏性操作护栏（fail-closed 库名白名单 + 双标志），
 // 与 resign-audit-hmac.js / run-rollback-drill.js 共用同一份声明。
 const { resolveMongoUri, assertApplyAllowed } = require('./destructiveGuard');
-// 重签留痕（append-only）：--apply 成功后必登记，越权放行必须带变更单号
-const { appendResignLedger } = require('./resignLedger');
+// 重签留痕（append-only）：先持久化意图再改写，完成后登记结果。
+const { withResignLedger } = require('./resignLedger');
 
 // L-26：确认标志的单一常量。同族脚本必须用同一份字符串，
 // 否则「统一护栏」会在字面上统一、在行为上分叉。
@@ -78,16 +78,19 @@ function parseArgs(argv) {
       // 用法错误拒绝，不再静默放行。
       const marker = ALLOW_SUSPECT_FLAG + '=';
       const ticket = a.indexOf(marker) === 0 ? a.slice(marker.length).trim() : null;
-      if (ticket === null) {
+      if (!ticket || ticket.startsWith('-')) {
         console.error(
-          '错误：' + ALLOW_SUSPECT_FLAG + ' 必须携带变更单号（形如 ' + ALLOW_SUSPECT_FLAG + '=NW-1234）'
+          '错误：' +
+            ALLOW_SUSPECT_FLAG +
+            ' 必须携带变更单号（形如 ' +
+            ALLOW_SUSPECT_FLAG +
+            '=NW-1234）'
         );
         process.exit(2);
       }
       out.allowSuspect = true;
       out.suspectTicket = ticket;
-    }
-    else {
+    } else {
       // 未知参数不得静默接受：`--aply` 会被当成"没传"，于是运维以为在改写、
       // 实际只跑了一次演练，还看到一个 exit 0。
       console.error(`未知参数：${a}\n可用参数：--apply ${CONFIRM_FLAG} ${ALLOW_SUSPECT_FLAG}`);
@@ -203,15 +206,17 @@ function printVerifyReport(label, { verify, verdict }) {
  */
 function decidePrecheck({ verdict, apply, allowSuspect, suspectTicket }) {
   if (verdict.canAttestIntact) return true;
-  if (allowSuspect) {
+  if (!apply) {
     console.log(
-      `\n已按 ${ALLOW_SUSPECT_FLAG}（单号：${suspectTicket || '（无单号）'}）越权放行改写前核验：` +
-        `${verdict.reasons.join('；')}；本次放行已强制写入 append-only 重签留痕。`
+      '\n演练模式未改写任何记录，不写重签留痕；实际改写需通过预检或携带变更单号越权放行。'
     );
     return true;
   }
-  if (!apply) {
-    console.log('\n演练模式未改写任何记录。加上 --apply 时会因上面的预检被拒绝。');
+  if (allowSuspect) {
+    console.log(
+      `\n已按 ${ALLOW_SUSPECT_FLAG}（单号：${suspectTicket || '（无单号）'}）越权放行改写前核验：` +
+        `${verdict.reasons.join('；')}；必须先持久化 intent 留痕才会改写。`
+    );
     return true;
   }
   console.error(`\n拒绝执行：改写前审计链不具备完整性背书（${verdict.reasons.join('；')}）。`);
@@ -274,36 +279,49 @@ async function main() {
     process.exit(2);
   }
 
-  const report = await rechainAllDocuments(apply);
-  console.log(JSON.stringify({ ...report, apply }, null, 2));
-
-  // append-only 留痕：--apply 必登记（含改写后复核仍失败的执行——那是更要留痕的现场）。
-  // 写失败直接抛 ⇒ main 的 catch exit 1：留痕失败的重签不算完成，宁可重跑不可灭迹。
-  if (apply) {
-    appendResignLedger({
-      script: 'resign-audit-chain-v3.js',
-      ticketId: suspectTicket,
-      overridden: !pre.verdict.canAttestIntact,
-      dbName,
-      host,
-      counts: { ...report, preReasons: pre.verdict.reasons },
-    });
-    console.log('留痕：logs/audit-resign-log.jsonl 追加一行（append-only，可审计）。');
-  }
-
   if (!apply) {
+    const report = await rechainAllDocuments(false);
+    console.log(JSON.stringify({ ...report, apply }, null, 2));
     await mongoose.connection.close();
     console.log('\n演练完成：未改写任何记录。确认无误后追加 --apply --yes 执行。');
     process.exit(0);
   }
 
-  // 复核与运维脚本共用同一判据（services/auditChainVerify 的 computeChainVerdict）。
-  // 原来这里只看 `breaks === 0`：那只说明"扫过的这批没断"。窗口上限 20 万条，
-  // 生产审计集合一旦超过它，重签后**尾部（正是本次新写入区）从未被核验**却退 0，
-  // 等于给未核验的段落签发合格证明——而 verify-audit-chain.js 对同一情形退 2。
+  await withResignLedger(
+    {
+      script: 'resign-audit-chain-v3.js',
+      ticketId: suspectTicket,
+      overridden: !pre.verdict.canAttestIntact,
+      dbName,
+      host,
+      counts: {
+        total: pre.verify.total,
+        breaks: pre.verify.breaks,
+        legacy: pre.verify.legacy,
+        legacyV2BatchTolerated: pre.verify.legacyV2BatchTolerated,
+        hashComputeFailed: pre.verify.hashComputeFailed,
+        byType: pre.verify.byType,
+        hmacChecked: pre.verify.hmacChecked,
+        scanned: pre.verify.scanned,
+        preReasons: pre.verdict.reasons,
+      },
+    },
+    rechainAndVerify
+  );
+  console.log(
+    '留痕：logs/audit-resign-log.jsonl 已追加 intent/started 与 result/completed（append-only）。'
+  );
+  await mongoose.connection.close();
+  process.exit(0);
+}
+
+/** 写库或复核失败只保留 started，不签发 completed。 */
+async function rechainAndVerify() {
+  const report = await rechainAllDocuments(true);
+  console.log(JSON.stringify({ ...report, apply: true }, null, 2));
+  // 复核与运维脚本共用同一判据，保留全量窗口与 v2 默认值漂移护栏。
   const post = await runChainVerify();
   printVerifyReport('复检（改写后）', post);
-  await mongoose.connection.close();
   if (post.verify.legacyV2BatchTolerated > 0) {
     console.error(
       `复核未通过：${post.verify.legacyV2BatchTolerated} 条 v2 批量写入的默认值漂移记录（重签后应归零）`
@@ -312,7 +330,10 @@ async function main() {
   if (!post.verdict.canAttestIntact) {
     console.error(`复核未通过：${post.verdict.reasons.join('；') || '存在断裂'}`);
   }
-  process.exit(post.verdict.code === 0 && post.verify.legacyV2BatchTolerated === 0 ? 0 : 1);
+  if (post.verdict.code !== 0 || post.verify.legacyV2BatchTolerated !== 0) {
+    throw new Error('改写后复核未通过，重签未完成；请核查 started 留痕');
+  }
+  return report;
 }
 
 module.exports = { parseArgs, decidePrecheck, printVerifyReport, MAX_VERIFY_RECORDS };

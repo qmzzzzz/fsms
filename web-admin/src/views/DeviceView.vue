@@ -410,7 +410,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed, watch, h } from 'vue'
+import { ref, reactive, onMounted, computed, h } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
@@ -430,7 +430,7 @@ import DeviceReminderDialog from '@/components/DeviceReminderDialog.vue'
 import DeviceMaintenanceDialog from '@/components/DeviceMaintenanceDialog.vue'
 
 const { hasPerm } = usePermission()
-const { t, locale } = useI18n()
+const { t } = useI18n()
 
 const loading = ref(false)
 const filters = reactive({ name: '', status: '' })
@@ -732,9 +732,13 @@ const rowBusy = ref(null)
 // 概览统计（GET /devices/stats）：只在成功分支赋值——首屏失败整条隐藏（0 卡会被读作
 // 「设备全好」），已有读数后的刷新失败保留上一次已知数字（陈旧但真实）
 const stats = ref(null)
+// 竞态守卫（G9）：refreshAll 与 WS 通知可能并发触发，慢的旧 stats 响应不得覆盖新值
+const statsGuard = useLatestRequest()
 const loadStats = async () => {
+  const isCurrent = statsGuard()
   try {
     const res = await api.devices.getStats()
+    if (!isCurrent()) return
     const payload = res?.data?.data
     if (payload && typeof payload === 'object') stats.value = payload
   } catch (e) {
@@ -791,18 +795,23 @@ const overviewCards = computed(() => {
 // 避免「徽标一个数、弹窗另一个数」；打开时刷新，弹窗内重试走同一函数
 const reminder = reactive({ visible: false, loading: false, failed: false, data: null })
 const reminderSummary = computed(() => reminder.data?.summary || null)
+// 竞态守卫（G9）：与 loadStats 同因——WS 通知连发时旧提醒响应不得覆盖新值
+const reminderGuard = useLatestRequest()
 const loadReminders = async () => {
+  const isCurrent = reminderGuard()
   reminder.loading = true
   try {
     const res = await api.devices.getReminders()
+    if (!isCurrent()) return
     reminder.data = res?.data?.data || null
     reminder.failed = false
   } catch (e) {
     if (isCanceledError(e)) return
+    if (!isCurrent()) return
     // 有历史数据保留旧值（徽标不闪零）；无数据才进失败态（弹窗内展示重试入口）
     reminder.failed = true
   } finally {
-    reminder.loading = false
+    if (isCurrent()) reminder.loading = false
   }
 }
 const openReminders = () => {
@@ -988,18 +997,25 @@ const refreshAll = () => {
   loadReminders()
 }
 
+// WS 通知的刷新走 800ms trailing debounce（G10）：批量导入/状态迁移会在窗口期
+// 连发多条 notification，每条都打满 3 个 GET 纯属风暴；窗口内的多条合并为一轮。
+// 用户主动路径（onMounted、维护保存后的 onMaintenanceSaved）不走 debounce，保持即时。
+let refreshAllTimer = null
+const refreshAllDebounced = () => {
+  clearTimeout(refreshAllTimer)
+  refreshAllTimer = setTimeout(refreshAll, 800)
+}
+
 // 设备状态迁移（含报废）由后端推送到 'device-alert' 房间；收到即刷新三块。
 // 此前该房间没有任何前端订阅，别人改了设备状态，本页要手动刷新才能看到。
 useRealtimeRefresh({
   rooms: ['device-alert'],
-  subscriptions: [{ event: 'notification', handler: refreshAll }],
+  subscriptions: [{ event: 'notification', handler: refreshAllDebounced }],
   label: 'DeviceView',
 })
 
-// 语言切换时重新加载列表，状态/类型等文案随语言同步刷新
-watch(locale, () => {
-  refreshAll()
-})
+// 语言切换不再重新拉数据（G10）：列表/统计/提醒的展示文案均为客户端 i18n 映射，
+// 切语言由 Vue 响应式直接重渲染，重新发 3 个 GET 纯属浪费（原 watch(locale) 已删）。
 
 onMounted(refreshAll)
 </script>

@@ -63,12 +63,30 @@ describe('ForensicCapture 启动对账（自动覆盖，无需编辑 indexes.js�
   });
 
   test('二次对账幂等：已一致的索引不再动（不得反复 collMod）', async () => {
+    // 自含前置（--randomize 打乱文件内用例顺序，「上一条建出的索引」不再可靠）：
+    // 先落好「声明 30 + 空集合 ⇒ 建索引」的前置态，再验幂等。
+    await mongoose.connection
+      .collection(collName())
+      .drop()
+      .catch(() => {});
+    process.env[ENV_KEY] = '30';
+    await reconcileBusinessTtlIndexes();
     const summary = await reconcileBusinessTtlIndexes();
     expect(summary.created.find((c) => c.model === 'ForensicCapture')).toBeUndefined();
     expect(summary.aligned.find((c) => c.model === 'ForensicCapture')).toBeUndefined();
+    expect(await physicalTtl()).toMatchObject({ expireAfterSeconds: THIRTY_DAYS_SECONDS });
   });
 
   test('开关越界（7 天，低于取证下限 30）⇒ 不建不删，标 orphaned 交人工（TTL 删除不可逆）', async () => {
+    // 自含前置：先在声明 30 下把物理索引建出来（orphaned 的分类前提是「物理索引在场
+    // 而声明不可执行」），再切 7 天验「不建不删、标 orphaned」。
+    await mongoose.connection
+      .collection(collName())
+      .drop()
+      .catch(() => {});
+    process.env[ENV_KEY] = '30';
+    await reconcileBusinessTtlIndexes();
+    expect(await physicalTtl()).toBeTruthy();
     process.env[ENV_KEY] = '7';
     const summary = await reconcileBusinessTtlIndexes();
     const orphan = summary.orphaned.find((o) => o.model === 'ForensicCapture');

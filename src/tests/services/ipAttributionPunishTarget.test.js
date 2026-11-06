@@ -96,9 +96,19 @@ describe('resolvePunishableIp 真值表', () => {
   });
 
   test('TRUSTED_PROXY：punishIp = reportedIp（经可信代理按跳数取位的真实客户）', () => {
-    const r = resolvePunishableIp({ ip: TRUSTED_REPORTED, socket: { remoteAddress: '10.0.0.7' } });
+    // 2026-11-03 收窄（i760 #25）后兼容档的可信对端是回环（本机反代）
+    const r = resolvePunishableIp({ ip: TRUSTED_REPORTED, socket: { remoteAddress: '127.0.0.1' } });
     expect(r.kind).toBe(IP_ATTRIBUTION_KINDS.TRUSTED_PROXY);
     expect(r.punishIp).toBe(TRUSTED_REPORTED);
+  });
+
+  test('私网对端自带 XFF（未配名单）：判 PUBLIC_PEER_HEADER，punishIp 改打对端', () => {
+    // 收窄前该形态是 TRUSTED_PROXY + 打 reportedIp（对端自报的值）——
+    // 实测可让被封禁客户端伪造 XFF 换桶/绕过封禁；收窄后与公网对端同口径
+    const r = resolvePunishableIp({ ip: TRUSTED_REPORTED, socket: { remoteAddress: '10.0.0.7' } });
+    expect(r.kind).toBe(IP_ATTRIBUTION_KINDS.PUBLIC_PEER_HEADER);
+    expect(r.punishIp).toBe('10.0.0.7');
+    expect(r.punishIp).not.toBe(TRUSTED_REPORTED);
   });
 
   test('DIRECT：punishIp = reportedIp（对端即身份，TCP 源不可伪造）', () => {

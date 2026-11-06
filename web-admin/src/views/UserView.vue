@@ -220,6 +220,14 @@
             {{ row.lastLoginAt ? formatTime(row.lastLoginAt) : '-' }}
           </template>
         </el-table-column>
+        <!-- 最后登录 IP：只有持有 system:read 的账号能拿到该字段（后端投影按权限切换），
+             其余账号看到占位符；不按权限隐列，避免同一页面两种列结构。 -->
+        <el-table-column :label="$t('user.lastLoginIp')" width="130">
+          <template #default="{ row }">
+            <span v-if="row.lastLoginIp">{{ row.lastLoginIp }}</span>
+            <span v-else :title="$t('user.lastLoginIpRestricted')">-</span>
+          </template>
+        </el-table-column>
         <!-- 备注：锁定/解锁等操作原因写在这里，列表可见才不必逐行点开编辑 -->
         <el-table-column :label="$t('user.remark')" min-width="140" show-overflow-tooltip>
           <template #default="{ row }">
@@ -227,7 +235,7 @@
           </template>
         </el-table-column>
         <!-- 列宽预算：主内容区 1440-220(侧栏)-48(边距)=1172px。
-             新增「最后登录 / 备注」两列后合计超出该预算，1440 视口下表格横向滚动；
+             新增「最后登录 / 最后登录 IP / 备注」三列后合计超出该预算，1440 视口下表格横向滚动；
              操作列 fixed="right" 仍常驻，宽屏下由 user/remark 弹性列吸收余量。 -->
         <el-table-column :label="$t('common.operation')" width="300" fixed="right">
           <template #default="{ row }">
@@ -1076,7 +1084,13 @@ const doReveal = async () => {
     } else {
       try {
         const enc = await encryptPassword(password, 'PASSWORD_CURRENT')
-        credential = enc ? { encCurrentPassword: enc } : { currentPassword: password }
+        // G2 统一口径：dev 非安全上下文返回 null 时阻断揭示（明文回退轨已删）；
+        // return 走既有 finally 复位 submitting
+        if (!enc) {
+          ElMessage.error(t('login.insecureContext'))
+          return
+        }
+        credential = { encCurrentPassword: enc }
       } catch (e) {
         console.warn('[loginCipher] 二次验证口令加密失败，已阻断提交：', e?.message)
         ElMessage.error(

@@ -110,11 +110,12 @@
           <el-tag
             v-for="a in metricsAlerts"
             :key="a.type + a.level"
+            :title="a.type"
             type="warning"
             size="small"
             class="metrics-alert-tag"
           >
-            {{ a.type }}({{ metricsLevelLabel(a.level) }}) × {{ a.count }}
+            {{ metricsAlertLabel(a.type) }}({{ metricsLevelLabel(a.level) }}) × {{ a.count }}
           </el-tag>
         </div>
       </div>
@@ -398,6 +399,17 @@ const metricsLevelLabel = (level) => {
   const key = `about.metrics.level.${level}`
   const text = t(key)
   return text === key ? String(level || '') : text
+}
+/**
+ * 告警类型标签（2026-11-04）：与 metricsLevelLabel 同一纪律——词条缺失时回退原码，
+ * 不在页面上渲染 `about.metrics.alertTypes.xxx` 这种裸键。码表与词条由
+ * tests/i18n/metricsAlertTypesCoverage.test.js 双向钉住（后端新增类型未登记会红）。
+ */
+const metricsAlertLabel = (type) => {
+  const code = String(type || '')
+  const key = `about.metrics.alertTypes.${code}`
+  const text = t(key)
+  return text === key ? code : text
 }
 
 /**

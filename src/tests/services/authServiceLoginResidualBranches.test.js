@@ -140,9 +140,16 @@ describe('登录前置：验证码与口令解析', () => {
     const result = await loginUser({ username: 'alice', encPassword: 'cipher' }, CTX);
 
     expect(result).toEqual({ outcome: 'ENC_INVALID' });
-    expect(AuditLog.recordLogin).toHaveBeenCalledWith(null, 'alice', CTX.ip, false, CTX.userAgent, {
-      reason: 'credential_decrypt_failed:LOGIN_CIPHER_BAD',
-    });
+    // 第六参是 auditRequestContext(req)：2026-11-04 起失败登录也补采请求上下文
+    expect(AuditLog.recordLogin).toHaveBeenCalledWith(
+      null,
+      'alice',
+      CTX.ip,
+      false,
+      CTX.userAgent,
+      { reason: 'credential_decrypt_failed:LOGIN_CIPHER_BAD' },
+      { ip: CTX.ip }
+    );
     expect(User.findByUsername).not.toHaveBeenCalled();
   });
 });

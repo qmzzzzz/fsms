@@ -6,11 +6,7 @@ const HONEYPOT_ENABLED_ENV = 'HONEYPOT_ENABLED'; // 物化与接客总开关：�
 const HONEYPOT_USERNAMES_ENV = 'HONEYPOT_USERNAMES'; // 诱饵名单环境变量：整份覆盖默认值（与 CANARY_USERNAMES 同口径：空项报错、全无效回退默认）
 const ENABLED_VALUES = Object.freeze(['true', '1', 'yes', 'on']); // 真值词表（大小写与首尾空白不敏感）
 
-const DEFAULT_HONEYPOT_USERNAMES = Object.freeze([
-  'sysadmin',
-  ...DEFAULT_CANARY_USERNAMES,
-  'admin',
-]); // 默认诱饵名 = sysadmin + 全部默认哨兵名 + admin：把「猜名字」的幽灵哨兵升级为「猜对口令就进得来」的蜜罐（逐条接管登记与判据见 tests/ci/honeypotNameOverlapLedger）；admin 默认恒被超管名判据剔除，超管改名后自动生效
+const DEFAULT_HONEYPOT_USERNAMES = Object.freeze([...DEFAULT_CANARY_USERNAMES, 'admin']); // admin 仅在超管改名后生效；哨兵名接管须逐项通过 honeypotNameOverlapLedger。
 const HONEYPOT_EXCLUDED_FILTER = Object.freeze({ isHoneypot: { $ne: true } }); // 枚举面排除蜜罐账户的唯一判据：$ne true 同时放行「字段缺失」的历史行（迁移期/裸写进库的行）
 
 const normalizeHoneypotUsername = (value) => normalizeCanaryUsername(value); // 单一实现：诱饵名与哨兵名必须按同一套规则归一，否则同一个名字会算成两笔账

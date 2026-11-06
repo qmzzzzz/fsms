@@ -131,7 +131,13 @@ describe('B-3 写失败重试：批次不得因为一次失败就永久消失', 
 });
 
 describe('B-5 保留与归档：老清单文件必须归档而不是静默删除', () => {
-  beforeEach(() => manifest.resetManifestState());
+  // --randomize 乱序防护：prunedFiles 是 forensicManifestPrune 模块级累计计数，
+  // manifest.resetManifestState 只重置 manifest 侧，不重置 prune 侧——乱序下
+  // 前序 describe 的 prune 会把本用例的「计数=1」推成 2。
+  beforeEach(() => {
+    manifest.resetManifestState();
+    prune.resetPruneState();
+  });
 
   test('超过保留期的日文件被归档到 .discarded 并计数（不是删掉）', () => {
     const dir = tmpdir();

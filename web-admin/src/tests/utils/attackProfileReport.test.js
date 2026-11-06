@@ -244,3 +244,103 @@ describe('attackReportFileName', () => {
     )
   })
 })
+
+describe('buildAttackReport 分支矩阵（2026-11-06 收敛批补测）', () => {
+  /** 去掉分类/建议的骨架：让 containment 与边界旗标成为唯一变量 */
+  const minimal = (over = {}) =>
+    profile({
+      categories: [],
+      suggestions: [],
+      uncategorized: {},
+      ...over,
+    })
+  const run = (over) => buildAttackReport(minimal(over), { t, te, formatTime })
+
+  test('containment 四态：degraded 优先于拉黑；名单状态读不到（null）也按降级保守口径', () => {
+    const degraded = t('attackProfile.containmentDegraded')
+    const blacklisted = t('attackProfile.containmentBlacklisted')
+    const whitelisted = t('attackProfile.containmentWhitelisted')
+    const none = t('attackProfile.containmentNone')
+
+    expect(run({ containment: { degraded: true, blacklisted: true } })).toContain(degraded)
+    expect(run({ containment: { degraded: false, blacklisted: true } })).toContain(blacklisted)
+    expect(run({ containment: { whitelisted: true } })).toContain(whitelisted)
+    expect(run({ containment: {} })).toContain(none)
+    // containment 整体缺失 = 读不到名单状态 ⇒ 保守走「降级」口径，而不是谎称「无遏制」
+    expect(run({ containment: null })).toContain(degraded)
+  })
+
+  test('cell 空值臂 + actionLabel 空码臂：证据行缺字段落 "-"，空动作码落 "-"', () => {
+    const report = buildAttackReport(
+      minimal({
+        categories: [
+          {
+            code: 'credential_stuffing',
+            severity: 'high',
+            count: 1,
+            evidence: [
+              {
+                timestamp: '2026-10-03T00:00:00.000Z',
+                action: '',
+                method: '',
+                path: null,
+                statusCode: undefined,
+                username: undefined,
+                logId: '',
+                refusalReason: '',
+              },
+            ],
+          },
+        ],
+      }),
+      { t, te, formatTime }
+    )
+    const lines = report.split('\n').filter((l) => l.startsWith('| FMT'))
+    expect(lines.length).toBe(1)
+    // 除时间列外的每一个格子都落在 "-" 占位
+    const cells = lines[0].split('|').map((c) => c.trim())
+    expect(cells.filter((c) => c === '-').length).toBeGreaterThanOrEqual(7)
+  })
+
+  test('evidence 空数组臂：分类存在但证据为空 → 显式「无证据行」占位', () => {
+    const report = buildAttackReport(
+      minimal({
+        categories: [{ code: 'credential_stuffing', severity: 'high', count: 0, evidence: [] }],
+      }),
+      { t, te, formatTime }
+    )
+    expect(report).toContain(t('attackProfile.evidenceEmpty'))
+  })
+
+  test('uncategorized count 兜底臂：bucket.count 缺失时用 rows.length', () => {
+    const report = buildAttackReport(
+      minimal({
+        uncategorized: {
+          evidence: [
+            {
+              timestamp: '2026-10-03T00:00:00.000Z',
+              action: 'login_failed',
+              method: 'POST',
+              path: '/api/auth/login',
+              statusCode: 401,
+              username: 'alice',
+              logId: 'x',
+            },
+            {
+              timestamp: '2026-10-04T00:00:00.000Z',
+              action: 'login_failed',
+              method: 'POST',
+              path: '/api/auth/login',
+              statusCode: 401,
+              username: 'bob',
+              logId: 'y',
+            },
+          ],
+        },
+      }),
+      { t, te, formatTime }
+    )
+    // t('attackProfile.uncategorizedTitle', { count: 2 })——真实 i18n 渲染出数字 2
+    expect(report).toContain('2')
+  })
+})

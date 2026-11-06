@@ -373,7 +373,7 @@ userSchema.index({ emailGrams: 1 }, { background: true, name: 'emailGrams_1' });
  * 排除理由：
  * - tokenVersion / lockUntil / failedLoginCount：会话吊销与锁定状态，
  *   暴露等于告知攻击者「该账号还剩几次尝试、是否已被锁定」
- * - passwordChangedAt / lastLoginIp：改密时间与上次登录 IP，属账户活动画像
+ * - passwordChangedAt / lastLoginIp：改密时间与上次登录 IP，属账户活动画像（唯一例外：用户管理列表的「最后登录 IP」列，调用方须持 system:read，见 userService.adminProjection）
  * - __v：Mongoose 内部版本号，无业务含义
  * 保留 allowedIPs：用户管理界面编辑表单需回填该字段（UserView.handleEdit），
  * 且仅 user:read 权限者可见，属功能必需而非泄露。

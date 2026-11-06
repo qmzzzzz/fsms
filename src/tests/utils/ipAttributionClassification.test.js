@@ -109,15 +109,31 @@ describe('客户端 IP 来源分类（classifyIpAttribution）', () => {
   });
 
   test('不变式：TRUSTED_PROXY 与「读侧可信」同时成立——所以读侧判据不能当封禁闸门', () => {
+    // 2026-11-03 收窄（i760 #25）后兼容档的可信对端是回环：本机反代写入的 XFF
+    // 在读侧可信、在写侧是「可用但不可区分」的 TRUSTED_PROXY——两侧同判据。
+    const req = {
+      app: { get: (k) => (k === 'trust proxy' ? 1 : undefined) },
+      get: (h) => (h.toLowerCase() === 'x-forwarded-for' ? '203.0.113.9' : undefined),
+      socket: { remoteAddress: '127.0.0.1' },
+      ip: '203.0.113.9',
+    };
+    expect(classifyIpAttribution(req).kind).toBe(IP_ATTRIBUTION_KINDS.TRUSTED_PROXY);
+    // 这一行就是"直觉修法无效"的证据：拿它当封禁闸门，同网络内伪造 XFF 照样通过
+    expect(isClientIpIdentityTrustworthy(req)).toBe(true);
+  });
+
+  test('私网对端自带 XFF（未配名单）⇒ PUBLIC_PEER_HEADER 且读侧不可信（i760 #25 收窄）', () => {
+    // 旧兼容档把私网对端当可信代理（该形态曾判 TRUSTED_PROXY + 可信）；
+    // 实测被封禁客户端加一条伪造 XFF 即绕过 IP 黑名单，故收窄为仅回环。
+    // 收窄后两侧同变：写侧改打不可伪造的 socket 对端，读侧不再采信 XFF 值。
     const req = {
       app: { get: (k) => (k === 'trust proxy' ? 1 : undefined) },
       get: (h) => (h.toLowerCase() === 'x-forwarded-for' ? '203.0.113.9' : undefined),
       socket: { remoteAddress: '172.18.0.3' },
       ip: '203.0.113.9',
     };
-    expect(classifyIpAttribution(req).kind).toBe(IP_ATTRIBUTION_KINDS.TRUSTED_PROXY);
-    // 这一行就是"直觉修法无效"的证据：拿它当封禁闸门，同网络内伪造 XFF 照样通过
-    expect(isClientIpIdentityTrustworthy(req)).toBe(true);
+    expect(classifyIpAttribution(req).kind).toBe(IP_ATTRIBUTION_KINDS.PUBLIC_PEER_HEADER);
+    expect(isClientIpIdentityTrustworthy(req)).toBe(false);
   });
 });
 
@@ -196,7 +212,9 @@ describe('配了 TRUSTED_PROXY_CIDRS 后：写侧与读侧同侧（F-01 收尾�
     expect(got.punishIp).toBe(FORGED);
   });
 
-  test('未配置 ⇒ 兼容档行为逐字不变（仍按私网判 TRUSTED_PROXY）', async () => {
+  test('未配置 ⇒ 兼容档仍判回环对端 TRUSTED_PROXY（2026-11-03 收窄后仅回环可信）', async () => {
+    // probe 的 socket 对端是 127.0.0.1（进程内 listen）——兼容档收窄后它仍是
+    // 可信代理；私网对端同场景已改为 PUBLIC_PEER_HEADER（见上面新增用例）
     const got = await probeWithCidrs({ hops: 1, xff: FORGED, cidrs: undefined });
     expect(got.trustworthy).toBe(true);
     expect(got.kind).toBe(IP_ATTRIBUTION_KINDS.TRUSTED_PROXY);

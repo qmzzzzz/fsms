@@ -1112,7 +1112,9 @@ describe('AuditLogView 详情对话框', () => {
     const pairs = descPairs()
     const labels = pairs.map((p) => p.split('::')[0])
     expect(labels).toContain('操作时间')
-    expect(labels).not.toContain('风险因素')
+    // 新口径：风险因素行常显（无因素也要说明「未识别出」），不再是「没就不渲染」
+    expect(labels).toContain('风险因素')
+    expect(pairs).toContain(`风险因素::${i18n.global.t('auditLog.riskFactorsNone')}`)
     expect(labels).not.toContain('错误信息')
     expect(labels).not.toContain('目标用户')
     expect(labels).not.toContain('操作原因')
@@ -1129,7 +1131,8 @@ describe('AuditLogView 详情对话框', () => {
     expect(pairs).toContain(`${i18n.global.t('auditLog.ipAddress')}::10.0.0.9`)
     expect(pairs).toContain('风险等级::低')
     expect(pairs).toContain('操作结果::成功')
-    expect(pairs).toContain('请求体::-')
+    // 溯源字段缺值不再是一律裸 "-"：无 hashVersion 的记录按「采集上线前」解释
+    expect(pairs).toContain(`请求体::${i18n.global.t('auditLog.traceLegacyNotCollected')}`)
     expect(pairs).toContain('User-Agent::-')
     const time = pairs.find((p) => p.startsWith('操作时间::')).split('::')[1]
     expect(time).not.toContain('T')
@@ -1163,7 +1166,52 @@ describe('AuditLogView 详情对话框', () => {
     expect(
       descContent(i18n.global.t('auditLog.reqParams')).querySelector('.json-preview').textContent
     ).toBe(JSON.stringify({ page: 2 }, null, 2))
-    expect(pairs).toContain('请求体::-')
+    // 溯源字段缺值不再是一律裸 "-"：无 hashVersion 的记录按「采集上线前」解释
+    expect(pairs).toContain(`请求体::${i18n.global.t('auditLog.traceLegacyNotCollected')}`)
+  })
+
+  test('客户可读：v6 记录缺响应侧字段时说明「事件型、溯源不可得」', async () => {
+    await openDetail([logRow({ hashVersion: 6, method: 'POST', path: '/api/auth/login' })])
+    expect(descPairs()).toContain(`响应头::${i18n.global.t('auditLog.traceEventNoTrace')}`)
+    expect(descPairs()).toContain(`响应体::${i18n.global.t('auditLog.traceEventNoTrace')}`)
+  })
+
+  test('客户可读：query 空对象说「没有查询参数」；GET 的 null 请求体说「不记录」', async () => {
+    await openDetail([logRow({ hashVersion: 6, query: {}, body: null })])
+    expect(descPairs()).toContain(`查询参数::${i18n.global.t('auditLog.traceEmptyQuery')}`)
+    expect(descPairs()).toContain(`请求体::${i18n.global.t('auditLog.traceGetNoBody')}`)
+  })
+
+  test('客户可读：304 显示「未修改」并解释响应体为空属正常', async () => {
+    await openDetail([logRow({ hashVersion: 6, statusCode: 304 })])
+    expect(descPairs()).toContain(`响应状态::304 · ${i18n.global.t('auditLog.httpStatus.304')}`)
+    expect(descContent(i18n.global.t('auditLog.respBody')).textContent).toContain(
+      i18n.global.t('auditLog.respBodyNotModified')
+    )
+  })
+
+  test('客户可读：已登记风险码翻成人话，未知码原样露出', async () => {
+    await openDetail([
+      logRow({ riskFactors: ['ip_blacklisted', 'chain_stage_honeypot_probe', 'geo_anomaly'] }),
+    ])
+    const tags = Array.from(document.body.querySelectorAll('.risk-factor-tag')).map((n) =>
+      n.textContent.trim()
+    )
+    // 期望值硬编码：不 import 被测翻译模块，避免实现写错时两边一起错
+    expect(tags).toEqual(['IP 命中黑名单', '蜜罐链阶段：蜜罐内探测', 'geo_anomaly'])
+  })
+
+  test('客户可读：五个分区标题下各有一句说明', async () => {
+    ;(await openDetail([logRow({ hashVersion: 6 })]),
+      [
+        'auditLog.sectionOverviewDesc',
+        'auditLog.sectionRequestDesc',
+        'auditLog.sectionResponseDesc',
+        'auditLog.sectionClientDesc',
+        'auditLog.sectionIntegrityDesc',
+      ].forEach((key) => {
+        expect(document.body.textContent).toContain(i18n.global.t(key))
+      }))
   })
 
   test('打开详情按 _id 单条拉取完整记录：头袋/正文/客户端/链字段覆盖列表投影', async () => {

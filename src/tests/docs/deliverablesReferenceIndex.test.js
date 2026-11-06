@@ -68,7 +68,12 @@ const TEXT_EXT = new Set([
 // work/ 同属这一类：它被 .gitignore:196 忽略，是各泳道的审计报告/探针/夹具暂存地，
 // clean checkout 里不存在 ⇒ 其中的路径外部读者无法跟读。实测后果：一份 work/ 报告里
 // 提到 deliverables 归档快照，本用例当场报「未登记引用」，而该路径在克隆后根本不在。
-const LOCAL_ONLY_PREFIXES = ['backups/', 'logs/', 'coverage/', '.mimosa/', 'work/'];
+// 2026-11-04 增补 .zcode/：判据与前三类完全同源（.gitignore:27 已忽略）。它是编码
+// 代理的会话工件目录（plans/*.md 是批准计划的落盘副本），计划正文里写到的
+// deliverables 路径属于「会话现场的自述」，不是仓库代码的引用——克隆后不存在，
+// 无法也不应被外部跟读。实测后果：一份计划提到新交付报告的路径，本用例报
+// 「未登记引用」，而该路径在克隆后根本不在。
+const LOCAL_ONLY_PREFIXES = ['backups/', 'logs/', 'coverage/', '.mimosa/', 'work/', '.zcode/'];
 
 function isSkippedPath(rel) {
   const p = rel.replace(/\\/g, '/');

@@ -62,6 +62,12 @@ const ALLOWLIST = new Map([
     'settleWithin 用 Promise.race 给条件等待设上限，定时器是超时判定而非固定睡眠',
   ],
   [
+    'src/tests/utils/proxyProtocolFrontServer.test.js',
+    'probe/分片/IPv6 三处 Promise+setTimeout 都是**超时护栏**（真实 socket 集成探针挂死时销毁连接并判失败，' +
+      'timeoutMs 是上限判定而非等待时长）；全部等待均为数据/事件驱动的条件等待（waitFor + setImmediate 让步），' +
+      'PROXY 头还原的网络层行为只能用真实 TCP 验证，无法换成桩',
+  ],
+  [
     'src/tests/utils/transactionTopology.test.js',
     'endSession 桩延迟到宏任务再拒绝，模拟异步清理超时，用于证明 withTransaction 确实持有 Promise',
   ],

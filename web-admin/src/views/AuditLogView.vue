@@ -551,6 +551,7 @@
         </div>
         <template v-if="detailDialog.data">
           <h4 class="detail-section-title">{{ $t('auditLog.sectionOverview') }}</h4>
+          <div class="detail-hint">{{ $t('auditLog.sectionOverviewDesc') }}</div>
           <el-descriptions :column="1" border>
             <el-descriptions-item :label="$t('auditLog.opTime')">
               {{ formatTime(detailDialog.data.timestamp) }}
@@ -587,20 +588,29 @@
                 {{ riskText(detailDialog.data.riskLevel) }}
               </el-tag>
             </el-descriptions-item>
-            <el-descriptions-item
-              v-if="detailDialog.data.riskFactors && detailDialog.data.riskFactors.length"
-              :label="$t('auditLog.riskFactors')"
-            >
-              <el-tag
-                v-for="factor in detailDialog.data.riskFactors"
-                :key="factor"
-                size="small"
-                type="warning"
-                effect="plain"
-                class="risk-factor-tag"
+            <!-- 风险因素行常显：无因素也要明确告知「未识别出」，不能空着让客户自己猜 -->
+            <el-descriptions-item :label="$t('auditLog.riskFactors')">
+              <template
+                v-if="detailDialog.data.riskFactors && detailDialog.data.riskFactors.length"
               >
-                {{ factor }}
-              </el-tag>
+                <el-tag
+                  v-for="factor in detailDialog.data.riskFactors"
+                  :key="factor"
+                  size="small"
+                  type="warning"
+                  effect="plain"
+                  class="risk-factor-tag"
+                >
+                  <el-tooltip
+                    :content="riskFactorDesc(factor, locale)"
+                    :disabled="!riskFactorDesc(factor, locale)"
+                    placement="top"
+                  >
+                    <span>{{ riskFactorLabel(factor, locale) }}</span>
+                  </el-tooltip>
+                </el-tag>
+              </template>
+              <span v-else class="detail-hint">{{ $t('auditLog.riskFactorsNone') }}</span>
             </el-descriptions-item>
             <el-descriptions-item :label="$t('auditLog.resultLabel')">
               <el-tag :type="detailDialog.data.success ? 'success' : 'danger'">
@@ -635,6 +645,7 @@
           </el-descriptions>
 
           <h4 class="detail-section-title">{{ $t('auditLog.sectionRequest') }}</h4>
+          <div class="detail-hint">{{ $t('auditLog.sectionRequestDesc') }}</div>
           <el-descriptions :column="1" border>
             <el-descriptions-item :label="$t('auditLog.reqMethod')">
               {{ detailDialog.data.method || '-' }}
@@ -643,22 +654,41 @@
               <span class="trace-text">{{ detailDialog.data.path || '-' }}</span>
             </el-descriptions-item>
             <el-descriptions-item :label="$t('auditLog.reqQuery')">
-              <pre class="json-preview">{{ formatTraceValue(detailDialog.data.query) }}</pre>
+              <pre v-if="traceValueText(detailDialog.data.query)" class="json-preview">{{
+                traceValueText(detailDialog.data.query)
+              }}</pre>
+              <div v-else class="detail-hint">
+                {{ $t(traceEmptyHint(detailDialog.data, 'query')) }}
+              </div>
             </el-descriptions-item>
             <el-descriptions-item :label="$t('auditLog.reqParams')">
-              <pre class="json-preview">{{ formatTraceValue(detailDialog.data.params) }}</pre>
+              <pre v-if="traceValueText(detailDialog.data.params)" class="json-preview">{{
+                traceValueText(detailDialog.data.params)
+              }}</pre>
+              <div v-else class="detail-hint">
+                {{ $t(traceEmptyHint(detailDialog.data, 'params')) }}
+              </div>
             </el-descriptions-item>
             <el-descriptions-item :label="$t('auditLog.reqHeaders')">
-              <pre class="json-preview">{{
-                formatTraceValue(detailDialog.data.requestHeaders)
+              <pre v-if="traceValueText(detailDialog.data.requestHeaders)" class="json-preview">{{
+                traceValueText(detailDialog.data.requestHeaders)
               }}</pre>
+              <div v-else class="detail-hint">
+                {{ $t(traceEmptyHint(detailDialog.data, 'requestHeaders')) }}
+              </div>
             </el-descriptions-item>
             <el-descriptions-item :label="$t('auditLog.reqBody')">
-              <pre class="json-preview">{{ formatTraceValue(detailDialog.data.body) }}</pre>
+              <pre v-if="traceValueText(detailDialog.data.body)" class="json-preview">{{
+                traceValueText(detailDialog.data.body)
+              }}</pre>
+              <div v-else class="detail-hint">
+                {{ $t(traceEmptyHint(detailDialog.data, 'body')) }}
+              </div>
             </el-descriptions-item>
           </el-descriptions>
 
           <h4 class="detail-section-title">{{ $t('auditLog.sectionResponse') }}</h4>
+          <div class="detail-hint">{{ $t('auditLog.sectionResponseDesc') }}</div>
           <el-descriptions :column="1" border>
             <el-descriptions-item :label="$t('auditLog.respStatus')">
               <el-tag
@@ -666,14 +696,17 @@
                 :type="detailDialog.data.success ? 'success' : 'danger'"
                 size="small"
               >
-                {{ detailDialog.data.statusCode }}
+                {{ statusText(detailDialog.data.statusCode) }}
               </el-tag>
               <span v-else>-</span>
             </el-descriptions-item>
             <el-descriptions-item :label="$t('auditLog.respHeaders')">
-              <pre class="json-preview">{{
-                formatTraceValue(detailDialog.data.responseHeaders)
+              <pre v-if="traceValueText(detailDialog.data.responseHeaders)" class="json-preview">{{
+                traceValueText(detailDialog.data.responseHeaders)
               }}</pre>
+              <div v-else class="detail-hint">
+                {{ $t(traceEmptyHint(detailDialog.data, 'responseHeaders')) }}
+              </div>
             </el-descriptions-item>
             <el-descriptions-item :label="$t('auditLog.respBody')">
               <el-alert
@@ -687,13 +720,21 @@
               <div v-if="detailDialog.data.responseBodySkipped" class="detail-hint">
                 {{ responseBodySkipText(detailDialog.data.responseBodySkipped) }}
               </div>
-              <pre v-else class="json-preview">{{
-                formatTraceValue(detailDialog.data.responseBody)
-              }}</pre>
+              <pre v-else-if="traceValueText(detailDialog.data.responseBody)" class="json-preview">
+                {{ traceValueText(detailDialog.data.responseBody) }}
+              </pre>
+              <div v-else class="detail-hint">
+                {{ $t(traceEmptyHint(detailDialog.data, 'responseBody')) }}
+              </div>
+              <!-- 304 是缓存协商的正常结果：响应体为空不是漏采，必须说清楚 -->
+              <div v-if="detailDialog.data.statusCode === 304" class="detail-hint">
+                {{ $t('auditLog.respBodyNotModified') }}
+              </div>
             </el-descriptions-item>
           </el-descriptions>
 
           <h4 class="detail-section-title">{{ $t('auditLog.sectionClient') }}</h4>
+          <div class="detail-hint">{{ $t('auditLog.sectionClientDesc') }}</div>
           <el-descriptions :column="1" border>
             <el-descriptions-item :label="$t('auditLog.reportedIp')">
               {{ detailDialog.data.clientInfo?.reportedIp || '-' }}
@@ -737,6 +778,7 @@
           </el-descriptions>
 
           <h4 class="detail-section-title">{{ $t('auditLog.sectionIntegrity') }}</h4>
+          <div class="detail-hint">{{ $t('auditLog.sectionIntegrityDesc') }}</div>
           <el-descriptions :column="1" border>
             <el-descriptions-item :label="$t('auditLog.hashVersionLabel')">
               {{ detailDialog.data.hashVersion ?? '-' }}
@@ -789,6 +831,11 @@ import { actionLabel as toActionLabel, categoryLabel as toCategoryLabel } from '
 import { ipLocationLabel as toIpLocationLabel } from '@/utils/ipLocationLabels'
 // 审计 reason 的展示期翻译（落库原文不动，模板映射见 i18n/auditReasons.js）
 import { translateAuditReason } from '@/i18n/auditReasons'
+// 溯源空值语义（「本来就没有」vs「没采集到」）与状态码人话：纯展示期判定，
+// 不碰落库内容与接口返回面（判据见 utils/auditTrace.js 头注释）
+import { traceValueText, traceEmptyHint, httpStatusKey } from '@/utils/auditTrace'
+// 风险因素的展示期翻译（落库原文不动，登记集见 i18n/auditRiskFactors.js）
+import { riskFactorLabel, riskFactorDesc } from '@/i18n/auditRiskFactors'
 
 const { t, locale } = useI18n()
 const route = useRoute()
@@ -1398,20 +1445,13 @@ const exportForensic = async () => {
 // ① 切换界面语言会让同一列的时间格式突变（月/日顺序与分隔符都变）；
 // ② 非法时间戳渲染成 "Invalid Date"。两者都已由 formatTime 兜住。
 
-// 详情值的统一渲染：字符串原样、对象格式化 JSON、空值占位。
-// 响应正文允许是字符串（非 JSON 响应），不能只按对象走 JSON.stringify。
-const formatTraceValue = (value) => {
-  if (value === null || value === undefined || value === '') return '-'
-  if (typeof value === 'string') return value
-  if (typeof value === 'object') {
-    if (Object.keys(value).length === 0) return '-'
-    try {
-      return JSON.stringify(value, null, 2)
-    } catch (_) {
-      return String(value)
-    }
-  }
-  return String(value)
+// 详情值渲染统一走 utils/auditTrace.js（字符串原样、对象 JSON、空值由
+// traceEmptyHint 解释原因，不再一律渲染成裸 "-"）。这里只保留状态码的「数字 · 人话」拼装。
+// 未登记的状态码只显示数字：缺翻译时 vue-i18n 会把 key 原样返回，不能当文案用。
+const statusText = (code) => {
+  const key = httpStatusKey(code)
+  const text = key ? t(key) : ''
+  return text && text !== key ? `${code} · ${text}` : String(code)
 }
 
 // 响应正文未采集的原因码 → 文案。未知码不得误标成「无法序列化」（原因码可能新增）。

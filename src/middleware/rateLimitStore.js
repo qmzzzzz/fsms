@@ -33,8 +33,16 @@ const logger = require('../utils/logger');
  * MemoryStore，本地开发/测试行为与历史完全一致。
  */
 function makeSharedStore(prefix) {
-  if (!(process.env.REDIS_URL || '').trim()) return undefined;
-  // 同步返回一个符合 Store 接口的包装对象；后台异步初始化 Redis，
+  if (!(process.env.REDIS_URL || '').trim()) {
+    // 未配置 Redis：显式返回自己的 MemoryStore 而不是 undefined。语义与 express-rate-limit
+    // 的内部默认 MemoryStore 完全一致（同一个类、同一个窗口/计数行为），差别只有一处——
+    // 实例暴露在 limiter.store 上，Store 接口（resetAll/resetKey/getKey）从此可触达。
+    // 这不是行为变更，是**可观测性**变更：--randomize 打乱测试用例顺序后，测试需要
+    // afterEach 里 resetAll 复位限流桶，而 v7 不把内部默认 store 挂到中间件上
+    // （实测 limiter.store 为 undefined，返回 undefined 的旧契约让复位永远空转）。
+    return new rateLimit.MemoryStore();
+  }
+  // 配置了 Redis：同步返回一个符合 Store 接口的包装对象；后台异步初始化 Redis，
   // 就绪后自动切到 RedisStore，未就绪或失败时走 MemoryStore。
   // express-rate-limit v7.5.1 在 parseOptions 中同步校验
   // store.increment/decrement/resetKey，不接受 Promise<Store>。

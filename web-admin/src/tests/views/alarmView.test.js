@@ -1614,9 +1614,20 @@ describe('AlarmView 实时推送（alarm 房间）', () => {
     const handler = notificationHandler()
     const beforeList = getList.mock.calls.length
     const beforeStats = getStats.mock.calls.length
-    handler({ type: 'notification', notificationType: 'alarm_created' })
-    await waitFor(() => getList.mock.calls.length > beforeList, { message: '列表被推送刷新' })
-    await waitFor(() => getStats.mock.calls.length > beforeStats, { message: '统计被推送刷新' })
+    // 组件侧是 800ms 防抖（防推送风暴把列表/统计打爆）。用假定时器确定性推进到期，
+    // 不再与真实时钟竞速——此前 50 个 nextTick（微任务、毫秒级）根本等不到 800ms
+    // 墙钟，这条用例是否通过取决于调度相位（实测在整点全量与单跑下各自红过）。
+    // 顺序敏感：先切假定时器再触发 handler，防抖定时器才注册在可推进的假区里。
+    vi.useFakeTimers()
+    try {
+      handler({ type: 'notification', notificationType: 'alarm_created' })
+      await vi.advanceTimersByTimeAsync(800)
+    } finally {
+      vi.useRealTimers()
+    }
+    await flush(3)
+    expect(getList.mock.calls.length).toBeGreaterThan(beforeList)
+    expect(getStats.mock.calls.length).toBeGreaterThan(beforeStats)
   })
 
   test('卸载时按注册的同一处理器退订、退出房间并释放引用（不漏解绑、不误拆布局层连接）', async () => {

@@ -3,7 +3,9 @@
  *
  * 覆盖要点（对应可观测性审计改进项「/metrics 应用层纵深防护」）：
  * - isPrivateOrLoopback：回环/内网/IPv4-mapped IPv6/公网/非法值的段判定
- * - 中间件行为：内网放行（保持容器网络抓取零配置兼容）、公网拒绝（fail-safe）、
+ * - 中间件行为：回环放行（本机抓取零配置兼容）、**私网一律要令牌**
+ *   （2026-11-03 收窄，渗透测试 i760 #21：同网段主机可匿名读路由表与
+ *   安全告警计数，私网只是位置不是身份）、公网拒绝（fail-safe）、
  *   可选 METRICS_TOKEN 的正确/错误/缺失分支、timingSafeEqual 长度不等路径
  *
  * 纯单测：不依赖数据库（globalSetup 的内存 Mongo 与本文件无交互）
@@ -78,7 +80,7 @@ describe('metricsAuth /metrics 应用层鉴权纵深', () => {
     });
   });
 
-  describe('中间件行为（未配置 token，退化为仅内网放行）', () => {
+  describe('中间件行为（未配置 token，退化为仅回环放行）', () => {
     const app = buildApp('');
     const externalApp = buildApp('', '8.8.8.8');
 
@@ -140,8 +142,17 @@ describe('metricsAuth /metrics 应用层鉴权纵深', () => {
       expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
     });
 
-    test('容器网络私网直抓仍无需令牌（shipped prometheus.yml 的 app:3000 路径）', async () => {
+    test('容器网络私网直抓也必须携带令牌（2026-11-03 收窄，i760 #21）', async () => {
+      // 旧版此用例钉「私网直抓零配置放行」；收窄后私网对端（172.18.0.5）
+      // 无令牌必须 401——shipped prometheus.yml 已改为 bearer_token_file 抓取
       const res = await request(proxiedPrivate).get('/metrics');
+      expect(res.status).toBe(401);
+      expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
+    });
+
+    test('容器网络私网直抓 + 正确令牌 → 200（shipped prometheus.yml 的 app:3000 路径）', async () => {
+      const app = buildApp(PROXY_TOKEN, '172.18.0.5', { trustProxyHops: 1 });
+      const res = await request(app).get('/metrics').set('Authorization', `Bearer ${PROXY_TOKEN}`);
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ok: true });
     });
@@ -184,7 +195,8 @@ describe('metricsAuth /metrics 应用层鉴权纵深', () => {
       expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
     });
 
-    test('内网来源无令牌仍放行（保持容器网络抓取零配置兼容）', async () => {
+    test('回环来源无令牌仍放行（本机抓取零配置兼容；私网放行已收窄，i760 #21）', async () => {
+      // buildApp 未覆写对端 ⇒ supertest 默认对端是 ::ffff:127.0.0.1（回环）
       const res = await request(app).get('/metrics');
       expect(res.status).toBe(200);
       // 放行的判据是「走到了业务处理器」，不是「状态码恰好 200」：
@@ -192,6 +204,20 @@ describe('metricsAuth /metrics 应用层鉴权纵深', () => {
       expect(res.body).toEqual({ ok: true });
       // 且确实未走拒绝分支（拒绝路径会记 warn 日志）
       expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    test('私网来源无令牌 → 401（旧版零配置放行的口子已收窄）', async () => {
+      const privateApp = buildApp(TOKEN, '192.168.1.5');
+      const res = await request(privateApp).get('/metrics');
+      expect(res.status).toBe(401);
+      expect(res.body.errors.errorCode).toBe('METRICS_INTERNAL_ONLY');
+    });
+
+    test('私网来源 + 正确令牌 → 200（跨网段/容器网络受控抓取）', async () => {
+      const privateApp = buildApp(TOKEN, '192.168.1.5');
+      const res = await request(privateApp).get('/metrics').set('Authorization', `Bearer ${TOKEN}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true });
     });
   });
 });

@@ -110,11 +110,11 @@
   SUMMARY_FIELDS 白名单投影出口（`services/forensicTrace.js`），不做全文档直出。
   字段级 L4 声明见台账 `constants/dataClassification.js` 的逐字段段。
 - **落盘证据文件不在 mongo 备份覆盖内**，需独立纳入备份/异地副本口径：
-  | 文件 | 内容 | 说明 |
-  | ---- | ---- | ---- |
-  | `logs/forensic-capture` | 取证 WAL（forensicCaptureWal 落盘缓冲） | TTL 清理前的落盘证据 |
-  | `logs/forensic-manifest` | 取证清单 JSONL（带 chainHash） | 保留 60 天（prune 只归档不删） |
-  | `logs/audit-chain-checkpoints.jsonl` | 审计链 HMAC 签名检查点 | 防篡改外锚本体，见 architecture.md §7 |
-  备份/异地副本口径见 `deployment/backup-encryption.md` 与 `deployment/rollback-drill.md`
-  （这两份文档当前只覆盖 mongo `.gz.gpg`——把落盘证据纳入备份属待办，登记于 threat-model
-  资产表）。
+  | 文件                                                                                    | 内容                                    | 说明                                  |
+  | --------------------------------------------------------------------------------------- | --------------------------------------- | ------------------------------------- |
+  | `logs/forensic-capture`                                                                 | 取证 WAL（forensicCaptureWal 落盘缓冲） | TTL 清理前的落盘证据                  |
+  | `logs/forensic-manifest`                                                                | 取证清单 JSONL（带 chainHash）          | 保留 60 天（prune 只归档不删）        |
+  | `logs/audit-chain-checkpoints.jsonl`                                                    | 审计链 HMAC 签名检查点                  | 防篡改外锚本体，见 architecture.md §7 |
+  | 备份/异地副本口径见 `deployment/backup-encryption.md` 与 `deployment/rollback-drill.md` |
+  | （这两份文档当前只覆盖 mongo `.gz.gpg`——把落盘证据纳入备份属待办，登记于 threat-model   |
+  | 资产表）。                                                                              |

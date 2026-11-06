@@ -29,6 +29,20 @@
 - **顺带收紧**：`actorPools`/`derivedPools` 在 API 缺省 `since` 时补默认 7 天窗——原先
   只挂 `$lte` 上界，等于允许一次无下界的全史聚合。
 
+### 功能：系统运行指标告警类型中文化（2026-11-04）
+
+- 面板此前把后端告警类型码直接渲染（`audit_chain_break_detected(严重) × 12`），只有级别中文化；
+  现在 43 个类型码走 `about.metrics.alertTypes` 的双语词条，未登记的新码仍回退原码而不是裸键；
+- 码表 `web-admin/src/constants/metricsAlertTypes.js` 与后端双向钉住：新增告警类型未登记词条时
+  `web-admin/src/tests/i18n/metricsAlertTypesCoverage.test.js` 直接红（后端源扫描 + `ALERT_TYPES` + fail-open 台账）。
+
+### 功能：用户管理列表增加「最后登录 IP」（2026-11-04）
+
+- 列表与详情接口在调用方持 `system:read`（与 `/api/security/view-sensitive` 同一把权限）时返回 `lastLoginIp`；
+  其余账号的响应维持原样（字段仍被投影排除），视图渲染占位符并给出权限提示；
+- 该字段在 `dataClassification` 里是 L3（行为痕迹），默认投影继续排除它；
+  例外只发生在用户管理读路径，由 `userService.attachLastLoginIp` 用一次按 id 的窄查询补；含 phone/email 明文的默认投影不因此扩宽。
+
 ### 安全：登录口令枚举路径收口——对端维度限流桶 + 挑战粘滞（2026-11-04）
 
 > 渗透测试实测：轮换 `X-Forwarded-For` 可重置 per-IP 登录计数（development 默认信任一跳、
@@ -48,6 +62,62 @@
   `loginPeerBucketXffRotation.test.js`（轮换 XFF 不得重置按来源计数）、
   `rateLimitEscalation.test.js`（login-peer 必须留在不封 IP 类别）。决策记录见
   ADR-015 修订节。
+
+### 安全：登录限流命中纳入失败判据（2026-11-04）
+
+> 限流器在中间件层就返回 429，请求进不到登录流程，于是被挡下的尝试既不落审计行、
+> 也不推进挑战判据——把速度调到「刚好不锁账户」就能用限流额度无限试口令。
+
+- 新增审计动作 `login_rate_limited`：IP 与账号两个限流桶命中时留痕（同键 60 秒去重、键数上限 512，避免审计库被打爆）；
+- 该动作计入人机挑战判据，但**不进** `lockUntil` 失败计数——被限流挡下的请求没走到口令比对，计入等于给攻击者一根把账户锁死的摇杆；
+- 挑战/锁定阈值与窗口收进 `config.loginGuard`（`LOGIN_CHALLENGE_AFTER` / `LOGIN_CHALLENGE_WINDOW_MS` / `LOGIN_LOCK_AFTER` / `LOGIN_LOCK_MS`），默认值不变：3 次要求人机校验、窗口 15 分钟、10 次锁定、锁定 10 分钟。
+
+### 改进：审计详情「客户可读」增强（2026-11-04）
+
+> 客户在审计详情里看到整块「-」时，无法分辨「本来就没有」与「没采集到」；风险因素
+> 与状态码也只是机器码 / 裸数字。本次不改落库字段、不升哈希载荷版本（仍为 v6）、
+> 不回填老记录，判定全放在展示层，同时给事件型记录补采请求上下文。
+
+- **后端补采（无新字段）**：新增 `auditRequestContext(req)`，`recordLogin` 增加末位
+  可选 `req`；登录成功/失败、MFA、蜜罐与金丝雀命中五类事件补齐 method/path/params/
+  query/requestHeaders（沿用同一脱敏口径；请求体刻意不采）。缺 `req` 时五项不写入且不抛错。
+- **空值语义分级**：`web-admin/src/utils/auditTrace.js` 按四态给出解释——空值（请求本来
+  没有）、`null`（GET 不记请求体）、v6+ 缺失（事件型、响应溯源不可得）、v6 以下缺失
+  （采集上线前，append-only 不可回填）。
+- **风险因素说人话**：新增 `web-admin/src/i18n/auditRiskFactors.js`，登记 49 个真实风险码
+  的中英标签与悬浮解释（另有 chain_stage_ / ip_attribution_ 两个动态码族按前缀翻译），
+  未知码原样回退；风险因素行常显，无因素时明说「未识别出」。
+  `src/tests/ci/riskFactorVocabularyGate.test.js` 把后端码集与前端登记集钉成一致。
+- **状态码与 304**：走 `auditLog.httpStatus` 映射渲染「304 · 未修改」，并说明响应体为空
+  属缓存协商正常结果；五个分区标题下各加一句分区说明。
+
+### 新增：L4 边界 PROXY protocol 接入（ADR-021）（2026-11-04）
+
+> L4 负载均衡（云 NLB、HAProxy）直连后端时，L4 层写不了 X-Forwarded-For，后端
+> socket 对端恒为 LB 地址——限流全站一个桶、封禁打在 LB 上、审计 IP 全失真。
+> 本次在后端连接层接入 PROXY protocol v1/v2，还原真实客户端 IP。默认 off，
+> 现有部署（宿主 nginx 反代）行为逐字节不变。
+
+- **连接层前置服务器还原**：`PROXY_PROTOCOL=on` 时以 net.Server 前置监听，在任何
+  HTTP/TLS 解析前消费 PROXY 头并重写 socket 对端地址——`req.ip`、归因分类、封禁
+  链、metricsAuth、WS 握手全部零改动地取到真实客户端（判据与三态语义见
+  `src/utils/proxyProtocol.js`）。
+- **一张名单一个语义**：谁有权发 PROXY 头与谁写的 XFF 可信共用同一份
+  `TRUSTED_PROXY_CIDRS` 与同一把判据（`isPeerTrustedProxy`）；`on` 时生产启动闸
+  强制名单已配置，缺失即拒绝启动（`src/config/validate.js`）。
+- **透传与拒绝**：无签名连接原样透传（容器网 Prometheus 直抓 /metrics 与 docker
+  healthcheck 不受影响）；名单外对端发头即刻断开并计入
+  `proxy_protocol_header_rejected` 安全信号（台账登记 + `ProxyProtocolHeaderRejected`
+  告警专条）；头阶段 10s 超时防慢速占用，超时不进安全计数。
+- **刻意不支持的组合**：`PROXY_PROTOCOL=on` 与 `ENABLE_HTTPS=true` 同时启用会在
+  启动面直接拒绝（Node 的 TLSSocket 在句柄层读连接，看不到已消费的 PROXY 头字节，
+  TLS 握手会永久悬挂）；需要 PROXY 头的部署一律由 LB 终结 TLS。
+- **变体拓扑参考**：LB 经宿主 nginx 的部署由 nginx `listen proxy_protocol` +
+  `real_ip_header` 消费（`deployment/nginx.conf.example` 注释段），应用侧保持
+  `PROXY_PROTOCOL=off` 不动。
+- 用例：解析器逐格判据（`src/tests/utils/proxyProtocolParser.test.js`）、真实 socket
+  集成（`src/tests/utils/proxyProtocolFrontServer.test.js`）、配置解析与生产启动闸
+  （`src/tests/config/proxyProtocol.test.js`）。
 
 ### 易用性：安全分析工作台——画像 / 撞库 / 取证三合一（2026-11-02）
 

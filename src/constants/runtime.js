@@ -157,6 +157,30 @@ const SINGLE_PROCESS_DEPENDENCIES = Object.freeze([
     mechanism: '诱饵账户当日告警去重表（notifiedDayByHoneypot Map）与物化状态快照',
     impact: '各进程各自去重、各自物化；同一诱饵名命中按实例数重复告警',
   },
+  // 2026-11-05 攻击检测面四件（recentByFingerprint 族）：「同一指纹窗口内只留痕/告警
+  // 一次」的去重状态，按设计每进程一份——多实例各自去重，同一攻击按实例数重复告警，
+  // 与 canaryWatch/honeypotWatch 同族（重复可容忍，跨进程外置反而引入一致性负担）。
+  {
+    module: 'middleware/injectionSignature.js',
+    mechanism: 'SQL 特征串边缘检测的去重表（recentByFingerprint Map）',
+    impact: '各进程各自去重；同一特征串命中按实例数重复留痕告警',
+  },
+  {
+    module: 'services/injectionDetector.js',
+    mechanism: 'NoSQL 操作符键剥离检测的去重表（recentByFingerprint Map）',
+    impact: '各进程各自去重；同一指纹命中按实例数重复留痕告警',
+  },
+  {
+    module: 'services/loginRateLimitAudit.js',
+    mechanism: '登录对端桶留痕的去重表（recent Map，d13f431 对端限流审计）',
+    impact: '各进程各自去重；同一对端命中按实例数重复留痕',
+  },
+  {
+    module: 'services/scanProbeDetector.js',
+    mechanism:
+      '扫描器路径指纹证据表（recentEvidenceByFingerprint Map）与 404 风暴计数器（stormCounters Map）',
+    impact: '各进程各自计数、各自达标；扫描/风暴告警按实例数可能重复',
+  },
   {
     module: 'services/ipPoolBan.js',
     mechanism:

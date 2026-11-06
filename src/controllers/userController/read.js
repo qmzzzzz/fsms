@@ -11,6 +11,15 @@ const { validateSort, normalizePagination } = require('../../utils/helpers');
 const statsCache = require('../../services/statsCache');
 const { businessMonthStart } = require('../../constants/timezone');
 const userService = require('../../services/userService');
+const { hasPermission } = require('../../utils/permissionHelper');
+const canSeeLastLoginIp = async (userId) => {
+  if (!userId) return false;
+  try {
+    return await hasPermission(userId, 'system:read');
+  } catch (err) {
+    return false;
+  }
+};
 const { USER_OWNER_FIELD, USER_DEPT_FIELD } = require('./shared');
 
 /**
@@ -62,7 +71,10 @@ const getUsers = asyncHandler(async (req, res) => {
   }
 
   // 执行查询
-  const { users, count } = await userService.listUsers(query, safeSort, pageNum, limitNum);
+  const includeLastLoginIp = await canSeeLastLoginIp(req.user && req.user.userId);
+  const { users, count } = await userService.listUsers(query, safeSort, pageNum, limitNum, {
+    includeLastLoginIp,
+  });
 
   return ApiResponse.paginated(
     res,
@@ -82,7 +94,8 @@ const getUsers = asyncHandler(async (req, res) => {
  * GET /api/users/:id
  */
 const getUserById = asyncHandler(async (req, res) => {
-  const user = await userService.getUserDetail(req.params.id);
+  const includeLastLoginIp = await canSeeLastLoginIp(req.user && req.user.userId);
+  const user = await userService.getUserDetail(req.params.id, { includeLastLoginIp });
 
   if (!user) {
     return ApiResponse.codeError(res, 'USER_NOT_FOUND', { statusCode: 404 });

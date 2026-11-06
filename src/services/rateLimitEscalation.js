@@ -62,7 +62,10 @@ const ESCALATION_WINDOW_MS = readPositiveNumberEnv('CC_ESCALATION_WINDOW_MS', 5 
 /** 三类信号的阀值与处置。ban=false 表示只告警——处置对象是账号而非 IP */
 const SIGNAL_CLASSES = {
   [CLASS_ANON_ABUSE]: {
-    limiters: ['captcha', 'login-ip', 'register'],
+    // unmatched（2026-11-05）：未匹配探测桶的 429 = "5 分钟内第 21 次请求一个既没命中任何路由、
+    // 又命中扫描器路径指纹的地址"。人类不产生这种流量，而坏部署产生的 404 洪水不含指纹
+    // （构建产物路径与 /.env|wp-login|actuator… 无交集），故与 captcha 同级：紧预算被打穿即封 IP。
+    limiters: ['captcha', 'login-ip', 'register', 'unmatched'],
     thresholdEnv: 'CC_ESCALATION_THRESHOLD_ANON',
     threshold: 10,
     ban: true,

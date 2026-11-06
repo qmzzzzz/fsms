@@ -31,6 +31,36 @@ const { stripControlChars, stripControlCharsDeep } = require('../utils/helpers')
 const sanitizeAuditDeep = (obj) =>
   sanitizeAuditQuery(stripControlCharsDeep(obj && typeof obj === 'object' ? obj : {}));
 
+/**
+ * 事件型审计的请求上下文补采（recordLogin / 登录族 record 直写点共用）。
+ *
+ * 为什么存在：事件型审计此前只落 ip/UA/指纹，详情页的「请求溯源」整块空缺——客户在
+ * 详情里看到的是一排"未采集"。而 method/path/params/query/requestHeaders 五个字段
+ * 早在哈希载荷 v6 就已登记（payload 缺省面 PAYLOAD_SCHEMA_DEFAULTS 也在），缺的只是
+ * 调用点把 req 带进来。本 helper 统一这五项的取值与脱敏口径：
+ *   - path 用 auditPath（与请求型中间件同一把尺，含 /api 前缀、去查询串）；
+ *   - params/query 先剥控制字符再按键脱敏（sanitizeAuditDeep，理由见其头注释）；
+ *   - 请求头整袋过 sanitizeAuditHeaders（凭据头掩码 + 8KB 预算）。
+ *
+ * 请求体**刻意不采**：登录族事件的 body 只剩 username（已在 username 字段）与掩码后
+ * 的 password/captcha，取证增量为零，反而平添凭据邻接面。
+ *
+ * 容错：调用点存在 req 缺省的形态（registerUser 的 ctx.req 可选、测试替身），此时
+ * 返回空对象——展开后五项字段不写入，schema 缺省面与哈希缺省面照常兜底，不得抛错。
+ * @param {object} [req] Express 请求对象（或带 method/get/headers 的替身）
+ * @returns {object} 可直接展开进审计文档的 { method, path, params, query, requestHeaders }
+ */
+const auditRequestContext = (req) => {
+  if (!req || typeof req.get !== 'function') return {};
+  return {
+    method: req.method,
+    path: auditPath(req),
+    params: sanitizeAuditDeep(req.params),
+    query: sanitizeAuditDeep(req.query),
+    requestHeaders: sanitizeAuditHeaders(req.headers),
+  };
+};
+
 const applyWriteStatics = (schema) => {
   schema.statics.recordLogin = async function (
     userId,
@@ -38,9 +68,11 @@ const applyWriteStatics = (schema) => {
     ip,
     success,
     userAgent,
-    extra = {}
+    extra = {},
+    req
   ) {
     return this.create({
+      ...auditRequestContext(req),
       action: success ? 'login_success' : 'login_failed',
       category: 'auth',
       userId,
@@ -156,4 +188,4 @@ const applyWriteStatics = (schema) => {
   };
 };
 
-module.exports = { applyWriteStatics };
+module.exports = { applyWriteStatics, auditRequestContext };

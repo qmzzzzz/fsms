@@ -142,6 +142,7 @@ const admit = (ip, size) => {
 const buildRecord = ({ req, ip, trigger, response }) => {
   const { auditPath, deriveAuditMeta } = require('../utils/auditMeta');
   const { computeFingerprint, ipSegment } = require('../utils/fingerprint');
+  const { computeDeviceKey } = require('../utils/forensicDeviceKey');
   const meta = deriveAuditMeta(req) || {};
   const u = req.user || {};
   // 主体/会话标识：从 req.user 取（未认证请求一律 null，不落空串）；长度按模型 maxlength 封顶
@@ -160,6 +161,7 @@ const buildRecord = ({ req, ip, trigger, response }) => {
     category: meta.category || null,
     ...identity,
     fingerprint: computeFingerprint(req),
+    deviceKey: computeDeviceKey(req),
     trigger: {
       reason: (trigger && trigger.reason) || null,
       markedAt: (trigger && trigger.markedAt) || null,

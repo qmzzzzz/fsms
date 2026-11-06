@@ -36,16 +36,16 @@ const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const isForbiddenKey = (key) => key.startsWith('$') || key.includes('.') || FORBIDDEN_KEYS.has(key);
 
 /** 数组分支：逐元素递归；超深则整体丢弃该子树 */
-const sanitizeArray = (obj, depth) => {
+const sanitizeArray = (obj, depth, collector) => {
   if (depth >= SANITIZE_MAX_DEPTH) {
     obj.length = 0;
     return;
   }
-  obj.forEach((item) => deepSanitizeKeys(item, depth + 1));
+  obj.forEach((item) => deepSanitizeKeys(item, depth + 1, collector));
 };
 
 /** 普通对象分支：按键删除或递归；超深则整体丢弃该子树 */
-const sanitizePlainObject = (obj, depth) => {
+const sanitizePlainObject = (obj, depth, collector) => {
   if (depth >= SANITIZE_MAX_DEPTH) {
     for (const k of Object.keys(obj)) delete obj[k];
     return;
@@ -53,24 +53,32 @@ const sanitizePlainObject = (obj, depth) => {
   for (const key of Object.keys(obj)) {
     if (isForbiddenKey(key)) {
       logger.warn(`MongoDB 注入尝试被拦截：键 "${key}"`);
+      if (collector) collector.keys.push(key);
       delete obj[key];
     } else {
-      deepSanitizeKeys(obj[key], depth + 1);
+      deepSanitizeKeys(obj[key], depth + 1, collector);
     }
   }
 };
 
-const deepSanitizeKeys = (obj, depth = 0) => {
+const deepSanitizeKeys = (obj, depth = 0, collector) => {
   if (!obj || typeof obj !== 'object') return;
   // 数组需逐元素递归清洗：数组本身不携带 $ 键，但其元素对象可能携带，
   // 直接跳过数组会让数组内对象的 $ 操作符成为漏网之鱼
   if (Array.isArray(obj)) {
-    sanitizeArray(obj, depth);
+    sanitizeArray(obj, depth, collector);
     return;
   }
   // 跳过 Date、Buffer 等特殊对象
   if (obj instanceof Date || Buffer.isBuffer(obj)) return;
-  sanitizePlainObject(obj, depth);
+  sanitizePlainObject(obj, depth, collector);
+};
+
+const makeCollector = (req, surface) => ({ req, surface, keys: [] });
+
+const flushCollector = (collector) => {
+  if (collector.keys.length === 0) return;
+  require('../../services/injectionDetector').recordNosqlStripAttempt(collector);
 };
 
 const sanitizeMongo = (req, res, next) => {
@@ -83,11 +91,17 @@ const sanitizeMongo = (req, res, next) => {
   // query 侧不在此遍历：移交给 materializeQuery（物化成**自有数据属性**，清洗与"物化
   // 真的生效"由运行时自证）。把它写在这里只会让人误以为 query 有两道防线。
   //
-  // 必须显式包一层箭头函数：forEach 的实参是 (元素, 下标, 数组)，直接传函数引用会把
-  // **下标**当成 deepSanitizeKeys 的 depth 入参——body 从 0 起算，params 从 1 起算，
-  // params 的可用嵌套预算凭空少 1 层：第 9 层子树被整体清空，而承诺是「层内不误伤」。
-  // 方向上仍偏保守（超限是删除而非放行），所以不是注入缺口，是数据损失 + 契约不符。
-  [req.body, req.params].forEach((part) => deepSanitizeKeys(part));
+  // 两份入参从同一深度起算。历史缺陷（本轮收口时抓到）：原实现把 forEach 引用直传
+  // `deepSanitizeKeys`，实参 (元素, 下标) 里的**下标**被当成 depth——body 从 0 起算、
+  // params 从 1 起算，params 的可用嵌套预算凭空少 1 层（第 9 层子树被整体清空）；
+  // 改显式调用时 params 又把旧 bug 的 1 照抄进形参。两条路径都显式传 0：同一预算、
+  // 层内不误伤。方向上超限是删除而非放行，所以不是注入缺口，是数据损失 + 契约不符。
+  const bodyCollector = makeCollector(req, 'body');
+  const paramsCollector = makeCollector(req, 'params');
+  deepSanitizeKeys(req.body, 0, bodyCollector);
+  deepSanitizeKeys(req.params, 0, paramsCollector);
+  flushCollector(bodyCollector);
+  flushCollector(paramsCollector);
   next();
 };
 
@@ -140,7 +154,9 @@ const materializeQuery = () => {
 
     // 原地清洗：与 req.body / req.params 复用同一份 deepSanitizeKeys，
     // 保证三处的键判定规则（$ 前缀、含 .、__proto__/constructor/prototype）不会分叉
-    deepSanitizeKeys(parsed);
+    const queryCollector = makeCollector(req, 'query');
+    deepSanitizeKeys(parsed, 0, queryCollector);
+    flushCollector(queryCollector);
 
     try {
       Object.defineProperty(req, 'query', {

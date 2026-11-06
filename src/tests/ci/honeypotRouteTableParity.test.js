@@ -616,6 +616,8 @@ describe('路由声明表（P2-2）：与真实路由、真实判定链双向对
     expect(reduced.map((item) => item.key).sort()).toEqual([
       'GET /api/metrics',
       'GET /api/security/alerts',
+      'GET /api/security/attack-events',
+      'GET /api/security/attack-events/summary',
       'GET /api/security/attack-profile',
       'GET /api/security/audit-logs',
       'GET /api/security/audit-logs/:id',
@@ -641,6 +643,8 @@ describe('路由声明表（P2-2）：与真实路由、真实判定链双向对
         .sort()
     ).toEqual([
       'GET /api/security/alerts',
+      'GET /api/security/attack-events',
+      'GET /api/security/attack-events/summary',
       'GET /api/security/attack-profile',
       'GET /api/security/audit-logs',
       'GET /api/security/audit-logs/:id',
@@ -659,6 +663,8 @@ describe('路由声明表（P2-2）：与真实路由、真实判定链双向对
     );
     expect([...gatedKeys()].sort()).toEqual([
       'GET /api/security/alerts',
+      'GET /api/security/attack-events',
+      'GET /api/security/attack-events/summary',
       'GET /api/security/attack-profile',
       'GET /api/security/audit-logs',
       'GET /api/security/audit-logs/:id',

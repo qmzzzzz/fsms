@@ -158,6 +158,20 @@ describe('AboutView 指标快照渲染', () => {
     expect(alertTexts(c)).toEqual(['errorRate(高) × 3', 'latency(严重) × 12'])
   })
 
+  test('已登记告警类型走中文词条，未登记的仍回退原码（不渲染裸键）', async () => {
+    h.getMetrics.mockResolvedValue(
+      snapshot({
+        ...FULL,
+        alerts: [
+          { type: 'audit_chain_break_detected', level: 'critical', count: 12 },
+          { type: 'some_future_type', level: 'high', count: 1 },
+        ],
+      })
+    )
+    const c = await open()
+    expect(alertTexts(c)).toEqual(['审计链断裂(严重) × 12', 'some_future_type(高) × 1'])
+    expect(c.text()).not.toContain('about.metrics.alertTypes')
+  })
   test('快照字段缺失/类型漂移：渲染 0 值兜底，不出现 NaN/undefined，也不抛错', async () => {
     // 后端形状漂移的真实形态：整段缺失、null、以及本该是数组却给了对象
     h.getMetrics.mockResolvedValue(

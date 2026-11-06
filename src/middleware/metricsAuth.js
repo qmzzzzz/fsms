@@ -1,5 +1,5 @@
 /**
- * /metrics 应用层鉴权纵深（可观测性审计改进项）
+ * /metrics 应用层鉴权（可观测性审计改进项；2026-11-03 收窄私网放行）
  *
  * 背景：/metrics 只暴露 QPS/延迟/错误率/安全告警计数等运行情报。只靠 Nginx 网络层
  * 限源（nginx.conf.example 的 allow/deny）时应用层无任何防线——Nginx 配置漂移、或
@@ -7,18 +7,24 @@
  *
  * 鉴权策略（fail-safe：不确定来源一律拒绝）：
  *  1. 配置了 METRICS_TOKEN 且请求携带正确 Bearer 令牌 → 放行
- *     （供跨网段抓取/经代理收敛出口的场景，与 Nginx 白名单互不依赖）；
- *  2. 来源 IP 属内网/回环（含 IPv4-mapped IPv6）→ 放行，
- *     保持「本机与容器网络 Prometheus 直连」零配置兼容；
+ *     （跨网段/容器网络抓取的统一合法路径，与 Nginx 白名单互不依赖）；
+ *  2. socket 对端是**回环**且未声明反代 → 放行，保持「本机 Prometheus 直连」零配置兼容。
  *     例外：`TRUST_PROXY_HOPS > 0` 时**回环对端必须携带令牌**。该拓扑下回环
  *     对端是反代本身而不是抓取方，任何穿过 Nginx 的请求（含 ACL 漂移后
  *     放行的公网请求）在应用层都长得和抓取完全一样——不要求令牌，这道
- *     第二防线就等于不存在。容器网络直连（非回环私网）仍按零配置放行。
- *  3. 其余（公网来源、无法解析的来源、token 缺失/错误）→ 401 拒绝。
+ *     第二防线就等于不存在。
+ *  3. 其余一律 401 拒绝——**含非回环私网对端**（2026-11-03 渗透测试 i760 #21）。
+ *     旧版对私网对端零配置放行，理由是「容器网络内 Prometheus 直连」；但私网
+ *     只是位置不是身份：与被监控目标同处一个办公网/容器网的任何主机，都能匿名
+ *     读到完整路由表（逐路由请求计数）、延迟分布与 security_alerts_total——
+ *     后者让攻击者实时判断"我的动作有没有触发告警"，属侦察面。收窄后抓取方
+ *     二选一：与应用同机（回环，免令牌），或配置 METRICS_TOKEN（shipped
+ *     compose 已透传该 secret，deployment/observability/prometheus.yml 以
+ *     bearer_token_file 消费同一份文件）。
  *
  * 配置说明：
  *  - METRICS_TOKEN（可选）：openssl rand -hex 32 生成。未配置时退化为
- *    「仅内网放行」，绝不因缺省而 fail-open 到公网可读；声明了反代
+ *    「仅回环放行」，绝不因缺省而 fail-open 到私网/公网可读；声明了反代
  *    （TRUST_PROXY_HOPS>0）时，经反代访问 /metrics 必须配置并携带它；
  *  - 令牌比较用 timingSafeEqual 防时序侧信道；长度不等先短路
  *    （timingSafeEqual 仅接受等长输入；长度差异最多暴露「令牌长度」这一
@@ -26,34 +32,20 @@
  */
 
 // 地址解析统一走 ipUtils（内含严格形态判据），本文件不再直接依赖 ipaddr。
-// isPrivateOrLoopback 的判据本体也已迁入 ipUtils：logShipper
-// 的出站目标门禁需要同一把尺，判据归 utils、本文件保留同名再导出以稳定既有引用。
-const { isPrivateOrLoopback, parseIP } = require('../utils/ipUtils');
+// isPrivateOrLoopback 的判据本体也已迁入 ipUtils：logShipper 的出站目标门禁
+// 需要同一把尺，本文件保留同名再导出以稳定既有引用（测试与豁免判定仍从这里取）。
+const { isPrivateOrLoopback, isLoopbackAddress } = require('../utils/ipUtils');
 const crypto = require('crypto');
 const ApiResponse = require('../utils/apiResponse');
 const logger = require('../utils/logger');
 
 /**
- * 是否回环地址（含 IPv4-mapped IPv6）——只回答"对端是不是本机"。
- * 与 isPrivateOrLoopback 分开：反代场景下回环与私网的可信含义不同（见文件头）。
- */
-function isLoopbackAddress(rawIp) {
-  const ip = parseIP(String(rawIp || ''));
-  if (!ip) return false;
-  if (ip.kind() === 'ipv6' && ip.range() === 'ipv4Mapped') {
-    return ip.toIPv4Address().range() === 'loopback';
-  }
-  return ip.range() === 'loopback';
-}
-
-/**
- * 判断 IP 是否属内网/回环（Prometheus 抓取的合法网段）
+ * 判断 IP 是否属内网/回环（历史口径保留：再导出供既有引用方使用）
  *
- * 判据本体在 `utils/ipUtils.isPrivateOrLoopback`（本文件是它的再导出与使用方）。
- * 使用契约（勿回退）：唯一调用方传的是 `req.socket.remoteAddress`——取自
- * TCP 连接本身、不受任何请求头影响，由 OS 给出规范形态 ⇒ 宽松数值形态
- * （`0177.0.0.1` / `0x7f.0.0.1` / `2130706433` / `127.1`，ipUtils 的严格解析
- * 一律 null ⇒ false）进不到本判定，"XFF 伪造来源伪装环回"在此不成立。
+ * 判据本体在 `utils/ipUtils.isPrivateOrLoopback`。使用契约（勿回退）：调用方必须传
+ * `req.socket.remoteAddress` 这类取自 TCP 连接本身、不受任何请求头影响的地址；
+ * 宽松数值形态（`0177.0.0.1` / `0x7f.0.0.1` / `2130706433` / `127.1`，ipUtils 的
+ * 严格解析一律 null ⇒ false）进不到本判定，"XFF 伪造来源伪装环回"在此不成立。
  */
 
 /** 等长校验 + timingSafeEqual 比较，防逐字节时序侧信道 */
@@ -89,24 +81,17 @@ function createMetricsAuth(options = {}) {
       return next();
     }
 
-    // ② 内网/回环来源放行：容器网络内 Prometheus → app:3000 零配置兼容
-    //
-    // 【修复】判定必须用**不可伪造的 socket 对端地址**，不能用 req.ip。
+    // ② 判定必须用**不可伪造的 socket 对端地址**，不能用 req.ip。
     // req.ip 在启用 trust proxy 时会采纳 X-Forwarded-For：生产环境
     // validate.js 强制 TRUST_PROXY_HOPS，故 req.ip 必然受 XFF 影响。此时
     // 直连 app 端口的攻击者只需发送 `X-Forwarded-For: 127.0.0.1`，req.ip 即
     // 变为回环地址，跳过令牌校验——恰好在本中间件注释声明的防御场景
     //（Nginx 配置漂移、有人从容器网络直连 app:3000）下失效。
-    // 后果：泄露 QPS、延迟直方图、错误计数与**安全告警计数**（可据以判断
-    // 攻击是否被检测到），属侦察面。
-    //
     // req.socket.remoteAddress 取自 TCP 连接本身，不受任何请求头影响。
     const peerIp = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
 
     // ②a 反代声明生效时，回环对端是反代而不是抓取方：此时"来自回环"不提供任何
     // 区分度（公网请求经 Nginx 转发同样以 127.0.0.1 到达），必须靠令牌区分。
-    // 容器网络直连（非回环私网）不在此列，保持 shipped prometheus.yml 的
-    // `app:3000` 直抓无需额外配置。
     if (behindProxy && isLoopbackAddress(peerIp)) {
       logger.warn('metrics 端点拒绝：反代拓扑下的回环请求缺少有效 METRICS_TOKEN', {
         peer: peerIp,
@@ -115,13 +100,17 @@ function createMetricsAuth(options = {}) {
       return ApiResponse.codeError(res, 'METRICS_INTERNAL_ONLY');
     }
 
-    if (isPrivateOrLoopback(peerIp)) {
+    // ②b 未声明反代时的零配置放行**只到回环为止**（本机抓取）。
+    // 2026-11-03 收窄（渗透测试 i760 #21）：旧版这里放行全部私网对端，
+    // 与目标同网段的主机即可匿名读路由表、延迟分布与安全告警计数。
+    // 私网抓取方（如 compose 内 Prometheus → app:3000）改走令牌路径 ①。
+    if (isLoopbackAddress(peerIp)) {
       return next();
     }
 
-    // ③ 其余一律拒绝：公网直连（Nginx 防线已失守的信号）必须在此被拦下
+    // ③ 其余一律拒绝：非回环私网与公网直连都必须在此被拦下。
     // 日志同时记录 socket 对端与 req.ip：二者不一致说明有 XFF 伪造尝试
-    logger.warn('metrics 端点拒绝非内网来源', {
+    logger.warn('metrics 端点拒绝非回环来源（私网抓取须配置 METRICS_TOKEN）', {
       peer: peerIp || 'unknown',
       reqIp: req.ip || 'unknown',
     });

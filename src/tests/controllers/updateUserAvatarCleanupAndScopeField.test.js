@@ -150,6 +150,13 @@ describe('updateUser：头像清空与范围字段闸', () => {
     ]) {
       delete global[k];
     }
+    // --randomize 乱序防护：updateUser 链上的用户维度限流桶（userLimiter 等）按
+    // userId 计数，前序用例的请求会烧掉后续「恢复账户」用例的配额——其 403 断言
+    // 会读到 429（res.body.errors 为 undefined 的形状正是限流响应）。
+    const rl = require('../../middleware/rateLimit');
+    for (const limiter of Object.values(rl)) {
+      if (limiter && typeof limiter.store?.resetAll === 'function') limiter.store.resetAll();
+    }
   });
 
   test('avatar 置空串：同一事务里删 UserAvatar 并清指针', async () => {
@@ -186,13 +193,19 @@ describe('updateUser：头像清空与范围字段闸', () => {
   });
   test('恢复账户时旧会话吊销失败：中止并报 SESSION_REVOKE_SERVICE_UNAVAILABLE，库内状态不动', async () => {
     invalidateUserTokens.mockRejectedValueOnce(new Error('redis down'));
+    // 乱序防护：mock 调用计数跨用例累计——断言相对增量而不是绝对值。
+    const revokeCallsBefore = invalidateUserTokens.mock.calls.length;
+    // 自含前态（--randomize 乱序 + 测试库跨 run 复用的双重防护）：恢复的前提是
+    // 「目标当前非 active」——上一个 run 的同名库可能把 D 留在 active，
+    // 不显式落回 locked，restore 分支根本不会走（success:true 直接返回）。
+    await User.updateOne({ _id: global.__upTargetD._id }, { $set: { status: 'locked' } });
     const res = mockRes();
     await updateUser(
       reqOf(String(global.__upTargetD._id), opOf(global.__upSuper), { status: 'active' }),
       res
     );
     expect(res.body.errors.errorCode).toBe('SESSION_REVOKE_SERVICE_UNAVAILABLE');
-    expect(invalidateUserTokens).toHaveBeenCalledTimes(1);
+    expect(invalidateUserTokens.mock.calls.length).toBe(revokeCallsBefore + 1);
     const after = await User.findById(global.__upTargetD._id).select('status').lean();
     expect(after.status).toBe('locked'); // 半恢复（已激活但旧令牌仍可用）比不恢复更危险
   });

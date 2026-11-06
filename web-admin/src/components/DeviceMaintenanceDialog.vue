@@ -4,6 +4,7 @@
     :model-value="visible"
     :title="$t('device.addMaintenance')"
     width="520px"
+    :close-on-click-modal="false"
     @update:model-value="$emit('update:visible', $event)"
     @close="resetForm"
   >
@@ -114,14 +115,13 @@ const resetForm = () => {
 
 const submit = async () => {
   if (!formRef.value || submitting.value) return
+  // 前置锁（G3）：validate 是 async，若在它之后才置位，确认窗口期里的第二次
+  // 点击会并行跑进第二个 addMaintenance——同一设备同一内容重复登记。
+  // 置位提前到第一个 await 之前，validate 失败由既有 finally 复位。
+  submitting.value = true
   try {
     const valid = await formRef.value.validate()
     if (!valid) return
-  } catch (e) {
-    return
-  }
-  submitting.value = true
-  try {
     await api.devices.addMaintenance(props.device._id, {
       content: form.content.trim(),
       type: form.type,
@@ -130,8 +130,8 @@ const submit = async () => {
     emit('update:visible', false)
     emit('saved')
   } catch (e) {
-    // 错误已在拦截器统一提示（2026-09-26 审计：泛化 toast 会双提示并覆盖具体语义）；
-    // 对话框保持打开，用户不必重填
+    // validate 拒绝（字段非法）与请求失败都落这里：错误已在拦截器统一提示
+    // （2026-09-26 审计：泛化 toast 会双提示并覆盖具体语义）；对话框保持打开
   } finally {
     submitting.value = false
   }

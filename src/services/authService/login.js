@@ -13,6 +13,7 @@ const { checkBruteForce } = require('../securityAlert');
 const canaryWatch = require('../canaryWatch');
 const honeypotWatch = require('../honeypotWatch'); // 蜜罐账户（诱饵）登录判据与留痕；物化/对账/状态见该模块
 const AuditLog = require('../../models/AuditLog');
+const { auditRequestContext } = require('../../models/auditLogWriteStatics');
 // 手写审计写入是这些操作的唯一留痕，静默吞错＝审计库零痕迹（且无可观测信号）
 const { onAuditWriteFailure, awaitAuditWrite } = require('../../utils/auditWriteFailure');
 const captchaService = require('../captchaService');
@@ -94,9 +95,15 @@ async function loginUser(params, ctx) {
     // 此处对固定的哑摘要做一次等价 compare，把两条路径的 CPU 开销拉平。
     await consumeDummyPasswordTime(password);
     // 用户不存在同样计入失败统计，防止借不存在的用户名绕开暴力破解检测
-    await AuditLog.recordLogin(null, username, ip, false, userAgent, { fingerprint }).catch(
-      onAuditWriteFailure('login_failed_audit', { user: { username } })
-    );
+    await AuditLog.recordLogin(
+      null,
+      username,
+      ip,
+      false,
+      userAgent,
+      { fingerprint },
+      ctx.req
+    ).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
     await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
     // 哨兵用户名（canary）：本条分支是名单名唯一可能触发的位置（幽灵语义在
     // canaryWatch 内构造性成立）。审计必写、告警按每哨兵每日一次频控；
@@ -212,9 +219,17 @@ async function resolveLoginPassword(params, ctx, username) {
       // 解密是毫秒级，不补哑 compare 会让该路径显著快于正常失败路径）
       await consumeDummyPasswordTime(params.encPassword);
       // 公钥是公开的，攻击者可自行构造合法密文——解密失败同样计入防爆破与审计
-      await AuditLog.recordLogin(null, username, ip, false, userAgent, {
-        reason: `credential_decrypt_failed:${err.code}`,
-      }).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
+      await AuditLog.recordLogin(
+        null,
+        username,
+        ip,
+        false,
+        userAgent,
+        {
+          reason: `credential_decrypt_failed:${err.code}`,
+        },
+        ctx.req
+      ).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
       await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
       logger.warn('登录拒绝 - 口令密文无效', { username, code: err.code });
       return { outcome: 'ENC_INVALID' };
@@ -247,10 +262,18 @@ async function assertAccountUsable(user, { password, ctx, username, captchaVerif
   // USER_STATUS 加一档、或备份还原/裸写进一个清单外的值时，登录会**完整放行**、refresh 才拒绝。
   if (user.status !== USER_STATUS.ACTIVE) {
     logger.warn('登录拒绝 - 账户状态异常', { username, status: user.status });
-    await AuditLog.recordLogin(user._id, username, ip, false, userAgent, {
-      fingerprint,
-      reason: `account_status_${user.status}`,
-    }).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
+    await AuditLog.recordLogin(
+      user._id,
+      username,
+      ip,
+      false,
+      userAgent,
+      {
+        fingerprint,
+        reason: `account_status_${user.status}`,
+      },
+      ctx.req
+    ).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
     // 同族收口：这两条分支此前直接 return，
     // 一次 bcrypt 都不跑 ⇒ 「存在但被禁的账号」比「用户名不存在」快约一次
     // compare 的时间（纯 JS cost-12 ≈ 百毫秒），构成账号存在性 + 锁定态预言机，
@@ -269,9 +292,15 @@ async function assertAccountUsable(user, { password, ctx, username, captchaVerif
     const remainMinutes = Math.ceil(remainMs / 60000);
     if (!captchaVerified) {
       logger.warn('登录拒绝 - 账户临时锁定中', { username, remainMinutes });
-      await AuditLog.recordLogin(user._id, username, ip, false, userAgent, { fingerprint }).catch(
-        onAuditWriteFailure('login_failed_audit', { user: { username } })
-      );
+      await AuditLog.recordLogin(
+        user._id,
+        username,
+        ip,
+        false,
+        userAgent,
+        { fingerprint },
+        ctx.req
+      ).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
       // 与上面 status 分支同判据：抹平耗时 + 计入暴力破解检测
       await consumeDummyPasswordTime(password);
       await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
@@ -296,6 +325,8 @@ async function assertAccountUsable(user, { password, ctx, username, captchaVerif
         category: 'auth',
         userId: user._id,
         username,
+        // 既有 method/path 仍取 ctx（调用方约定，放展开后以 ctx 为准）；补采只新增 params/query/requestHeaders
+        ...auditRequestContext(ctx.req),
         method: ctx.method,
         path: ctx.path,
         ip,
@@ -336,9 +367,15 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
   const isMatch = await user.comparePassword(password);
   if (!isMatch) {
     logger.warn('登录失败 - 密码错误', { username });
-    await AuditLog.recordLogin(user._id, username, ip, false, userAgent, { fingerprint }).catch(
-      onAuditWriteFailure('login_failed_audit', { user: { username } })
-    );
+    await AuditLog.recordLogin(
+      user._id,
+      username,
+      ip,
+      false,
+      userAgent,
+      { fingerprint },
+      ctx.req
+    ).catch(onAuditWriteFailure('login_failed_audit', { user: { username } }));
     // B-L1：与上方 210/254 行同口径——checkBruteForce 内的 DB 查询/告警落库若因 DB 瞬断 reject，异常上抛会把统一 401 变成 500（破坏防枚举口径）
     await checkBruteForce(username, ip, resolvePunishableIp(ctx.req)).catch(() => {});
     // 原子递增失败计数（$inc）：读-算-写竞态会让并发请求基于陈旧计数互相覆盖，
@@ -408,6 +445,8 @@ async function verifyPasswordOrTrackFailure(user, { password, username, ctx }) {
         category: 'auth',
         userId: user._id,
         username,
+        // 请求上下文补采（见 auditRequestContext）：机器触发的锁定事件也带上发起请求的溯源
+        ...auditRequestContext(ctx.req),
         ip,
         userAgent,
         fingerprint,

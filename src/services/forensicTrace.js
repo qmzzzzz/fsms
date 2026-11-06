@@ -1,4 +1,4 @@
-/** 取证溯源查询（T5-1，只读）：按 IP / 指纹 / 网段把「这个人做了什么、从哪些 IP 来的、触发过什么」拼出来。IP 过滤一律走 ipUtils.ipQueryCondition（查询侧与导出侧同一把尺子），不自己拼 ::ffff: 变体。返回摘要视图（行顶层带 status/reason，由 response.status / trigger.reason 提升）；请求/响应体只在被取证标记过的那几条里才有，这是设计而非缺失。「他的 ip 池」双路径：判据带指纹走 actorPools（全窗口完整池），按 IP/网段溯源走 derivedPools（从库内观测到的指纹派生）——换 IP 不换机器的直接证据在最常用的按 IP 入口上也要可见。 */
+/** 取证溯源查询（T5-1，只读）：按 IP / 指纹 / 网段把「这个人做了什么、从哪些 IP 来的、触发过什么」拼出来。IP 过滤一律走 ipUtils.ipQueryCondition（查询侧与导出侧同一把尺子），不自己拼 ::ffff: 变体。返回摘要视图（行顶层带 status/reason，由 response.status / trigger.reason 提升）；请求/响应体只在被取证标记过的那几条里才有，这是设计而非缺失。「他的 ip 池」双路径：判据带指纹/设备键走 actorPools（全窗口完整池），按 IP/网段溯源走 derivedPools（从库内观测到的指纹派生）——换 IP 不换机器的直接证据在最常用的按 IP 入口上也要可见。 */
 const { ipQueryCondition, normalizeIP } = require('../utils/ipUtils');
 
 const DEFAULT_LIMIT = 200;
@@ -21,6 +21,7 @@ const SUMMARY_FIELDS = [
   'username',
   'sessionId',
   'fingerprint',
+  'deviceKey',
   'trigger',
   'response.status',
   'device',
@@ -41,8 +42,31 @@ const clampLimit = (n) => {
   return Math.min(v, MAX_LIMIT);
 };
 
+/** 指纹完整长度：utils/fingerprint 取 sha256 前 32 位小写十六进制 */
+const FINGERPRINT_FULL_LEN = 32;
+
+/** 完整值等值、更短走锚定前缀正则；统一 trim + toLowerCase（大写粘贴过去原本静默不命中）。 */
+const fingerprintCondition = (input) => {
+  const text = String(input || '')
+    .trim()
+    .toLowerCase()
+    .slice(0, 128);
+  if (!text) return null;
+  if (text.length >= FINGERPRINT_FULL_LEN) return text;
+  return { $regex: '^' + text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') };
+};
 /** 查询条件：三个维度可任意组合；一个都不给直接返回 null（拒绝全表扫描当溯源用） */
-const conditionOf = ({ ip, fingerprint, ipSegment, since, until }) => {
+/** 身份键（指纹 / 设备键）同口径落条件；返回 false 表示判据不可用（空白），调用方必须收手不能退化成全表 */
+const applyIdentityKeys = (cond, keys) => {
+  for (const [field, value] of keys) {
+    if (!value) continue;
+    const keyed = fingerprintCondition(value);
+    if (!keyed) return false;
+    cond[field] = keyed;
+  }
+  return true;
+};
+const conditionOf = ({ ip, fingerprint, deviceKey, ipSegment, since, until }) => {
   const cond = {};
   if (ip) {
     // 解析不出的地址必须**明确拒绝**，不能让它退化成"匹配不到"的空结果： 运维看到"0 条"会以为这个 IP 干净，而真相是地址打错了。宁可报判据不可用。
@@ -51,7 +75,11 @@ const conditionOf = ({ ip, fingerprint, ipSegment, since, until }) => {
     if (!c) return null;
     cond.ip = c;
   }
-  if (fingerprint) cond.fingerprint = String(fingerprint).slice(0, 128);
+  const keysOk = applyIdentityKeys(cond, [
+    ['fingerprint', fingerprint],
+    ['deviceKey', deviceKey],
+  ]);
+  if (!keysOk) return null;
   if (ipSegment) cond.ipSegment = String(ipSegment).slice(0, 64);
   if (!Object.keys(cond).length) return null;
   // 倒序区间（since > until）与"地址打错"同类：Mongo 会老实返回 0 条，而 0 条在运维眼里就是"这段时间没有异常"，所以也算判据不可用。
@@ -101,10 +129,19 @@ async function traceTimeline({
 
 /** 同一指纹落到过哪些网段 —— 这正是「他的 ip 池」的答案（以判据身份为锚，全窗口完整）。
  * since 缺省补 7 天窗：不补的话 conditionOf 只挂 $lte，API 不传 since 就是无界聚合。 */
-async function actorPools({ model, fingerprint, since, until, limit, now = new Date() } = {}) {
-  if (!fingerprint) return { ok: false, reason: 'no_fingerprint', pools: [] };
+async function actorPools({
+  model,
+  fingerprint,
+  deviceKey,
+  since,
+  until,
+  limit,
+  now = new Date(),
+} = {}) {
+  if (!fingerprint && !deviceKey) return { ok: false, reason: 'no_fingerprint', pools: [] };
   const cond = conditionOf({
     fingerprint,
+    deviceKey,
     since: since || new Date(now.getTime() - DEFAULT_WINDOW_MS),
     until: until || now,
   });
@@ -138,7 +175,7 @@ async function actorPools({ model, fingerprint, since, until, limit, now = new D
 }
 
 /**
- * 非 指纹 判据（按 IP / 网段溯源）的「他的 ip 池」。
+ * 非 身份键 判据（按 IP / 网段溯源）的「他的 ip 池」。
  *
  * actorPools 以判据身份为锚；本函数反过来以**库内观测到的指纹**为锚：把判据命中的
  * 记录按 {指纹, 网段} 分一次组，再归桶出 top N 指纹各自的网段池。按 IP 溯源是告警页
@@ -154,7 +191,7 @@ async function derivedPools({ model, since, until, ...keys } = {}) {
   if (!cond) return { ok: false, reason: 'no_criteria', pools: [] };
   // 维度守卫（纵深防御）：conditionOf 认识的判据键一个都没有时（只剩时间窗），
   // 聚合等于拿全窗口当「池」答出去——判据不可用必须在这里收手，与 actorPools 同口径。
-  // 当前 conditionOf 认 ip/ipSegment/指纹，这行在判据面收窄时也兜底。
+  // 当前 conditionOf 认 ip/ipSegment/指纹（/设备键），这行在判据面收窄时也兜底。
   if (!cond.ip && !cond.ipSegment && !cond.fingerprint && !cond.deviceKey) {
     return { ok: false, reason: 'no_criteria', pools: [] };
   }
@@ -222,12 +259,13 @@ async function traceActor(opts = {}) {
     if (key) triggers[key] = (triggers[key] || 0) + 1;
     if (r.ipSegment) segments[r.ipSegment] = (segments[r.ipSegment] || 0) + 1;
   }
-  // 池双路径：判据带指纹 ⇒ actorPools 给全窗口完整池；否则 derivedPools 从库内观测到的
-  // 指纹派生。窗口必须用 timeline 已解析的 since/until，不能拿 opts 原始值重解析——
-  // 缺省 since 时会退化成无上界聚合（与 timeline 的 7 天默认窗不一致）。
-  const extra = opts.fingerprint
-    ? await actorPools(opts)
-    : await derivedPools({ ...opts, since: timeline.since, until: timeline.until });
+  // 池双路径：判据带身份键（指纹/设备键）⇒ actorPools 给全窗口完整池；否则 derivedPools
+  // 从库内观测到的指纹派生。窗口必须用 timeline 已解析的 since/until，不能拿 opts 原始值
+  // 重解析——缺省 since 时会退化成无上界聚合（与 timeline 的 7 天默认窗不一致）。
+  const extra =
+    opts.fingerprint || opts.deviceKey
+      ? await actorPools(opts)
+      : await derivedPools({ ...opts, since: timeline.since, until: timeline.until });
   return {
     ok: true,
     since: timeline.since,

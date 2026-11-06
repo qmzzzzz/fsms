@@ -76,7 +76,8 @@ const EXIT_REGISTRY = [
     file: 'src/middleware/rateLimit.js',
     statuses: [429],
     sites: 1,
-    funnel: { name: 'respond429', callSites: 15 },
+    // 2026-11-05 登录枚举收口（d13f431 对端桶）+ 攻击检测面接线新增两处 respond429 调用点
+    funnel: { name: 'respond429', callSites: 17 },
   },
   { file: 'src/routes/wellKnownRoutes.js', statuses: [429], sites: 3 },
   { file: 'src/config/swagger.js', statuses: [429], sites: 1 },

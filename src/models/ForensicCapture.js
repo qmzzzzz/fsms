@@ -29,6 +29,7 @@ const forensicCaptureSchema = new mongoose.Schema(
     username: { type: String, maxlength: 128 },
     sessionId: { type: String, maxlength: 128 },
     fingerprint: { type: String, maxlength: 128 },
+    deviceKey: { type: String, maxlength: 64 },
 
     trigger: {
       reason: { type: String, maxlength: 128 },
@@ -94,6 +95,7 @@ forensicCaptureSchema.index({ createdAt: -1 });
 forensicCaptureSchema.index({ ip: 1, createdAt: -1 });
 forensicCaptureSchema.index({ ipSegment: 1, createdAt: -1 });
 forensicCaptureSchema.index({ fingerprint: 1, createdAt: -1 });
+forensicCaptureSchema.index({ deviceKey: 1, createdAt: -1 });
 
 // 业务保留期（§1.2）：30 天（用户书面确认），区间 [30,3650]；下限独立于审计链（全局 MIN 仍 90，下调会连 AuditLog 一起降）
 const ttlPlan = resolveTtlIndexPlan('ForensicCapture');

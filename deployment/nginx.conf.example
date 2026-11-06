@@ -189,6 +189,24 @@ server {
     server_name your-domain.example;
     server_tokens off;
 
+    # ===== 变体拓扑：前置 L4 负载均衡以 PROXY protocol 打本层（2026-11-04） =====
+    # 云 NLB / HAProxy 等四层负载均衡直接对宿主 443 转发时，L4 层无从写 XFF，
+    # 真实客户端地址由 PROXY protocol v2 头携带。启用方法（三处联动，缺一即断）：
+    #   1) 本块监听行改为：listen 443 ssl proxy_protocol;（[::]:443 同加）；
+    #   2) 本块内声明：set_real_ip_from <LB 网段>;（如 10.60.0.0/16，逐段列全）
+    #                real_ip_header proxy_protocol;
+    #                real_ip_recursive on;
+    #      —— nginx 把 PROXY 头里的客户端地址还原进 $remote_addr，下游 XFF 链
+    #      与应用层判据（TRUST_PROXY_HOPS / TRUSTED_PROXY_CIDRS）完全不变；
+    #   3) 后端 app 侧保持 PROXY_PROTOCOL=off（默认）：本层已把 PROXY 头消费掉，
+    #      转发给 app 的仍是普通 HTTP + XFF。若未来去掉本层（LB 直连 app:3000），
+    #      才把 app 的 PROXY_PROTOCOL=on 并把 LB 网段写进 TRUSTED_PROXY_CIDRS
+    #      （生产启动闸强制两者同时配置；判据见 src/utils/proxyProtocol.js）。
+    # 端口健康检查注意：proxy_protocol 是**监听器级**开关——LB 健康探测若不发
+    # PROXY 头，本层按普通 TCP 处理即可（nginx 对无头连接按客户端处理）；
+    # 而直连 app:3000 的容器网抓取/健康检查不受 app 侧影响的原因见
+    # utils/proxyProtocol.js 的三态语义（无签名透传）。
+
     # ===== TLS 证书（使用受信任 CA 签发，勿用自签名） =====
     ssl_certificate     /etc/nginx/certs/your-domain.example.fullchain.pem;
     ssl_certificate_key /etc/nginx/certs/your-domain.example.key.pem;

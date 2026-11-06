@@ -403,6 +403,28 @@ function isPrivateOrLoopback(rawIp) {
 }
 
 /**
+ * 是否回环地址（含 IPv4-mapped IPv6 解包）——只回答"对端是不是本机"。
+ *
+ * 与 isPrivateOrLoopback 分开：回环与私网在两类判据上的可信含义不同——
+ *  - /metrics 放行（middleware/metricsAuth）：回环是「本机」的强信号；
+ *  - XFF 信任回退（isPeerTrustedProxy 兼容档）：回环是「本机反代」（dev Vite），
+ *    而私网只是位置不是身份。
+ * 本体最初长在 metricsAuth 里，2026-11-03 判据归 utils 时迁入：isPeerTrustedProxy
+ * 的兼容档收窄（渗透测试 i760 #25）后同样只需要"是不是本机"这一问。
+ *
+ * @param {string} rawIp 待判定地址（可为 IPv4-mapped IPv6 形态）
+ * @returns {boolean} true=回环地址
+ */
+function isLoopbackAddress(rawIp) {
+  const ip = parseIP(String(rawIp || ''));
+  if (!ip) return false;
+  if (ip.kind() === 'ipv6' && ip.range() === 'ipv4Mapped') {
+    return ip.toIPv4Address().range() === 'loopback';
+  }
+  return ip.range() === 'loopback';
+}
+
+/**
  * 「这个 socket 对端是不是可信代理」——F-01 的**判据本体**，三处共用。
  *
  * 抽出来的理由不是整洁，而是同一件事有三个人问：
@@ -412,9 +434,13 @@ function isPrivateOrLoopback(rawIp) {
  * 判据分散在三处，收紧时改两处漏一处，症状是「HTTP 收紧了、WS 还宽」——两侧
  * 各取一种地址，等于收紧只生效一半。故判据只此一份，形态判断留给调用方。
  *
- * 两条分支的顺序是刻意的：**配了名单就以名单为准**，私网不再是理由。
- * 未配置（proxies 为 undefined 或 configured=false）时退回修复前的唯一形态
- * 「对端属私网/回环即可信」，即兼容档——残余风险如实记在上面的「残余风险」段。
+ * 两条分支的顺序是刻意的：**配了名单就以名单为准**，私网/回环都不再是理由。
+ * 未配置（proxies 为 undefined 或 configured=false）时的兼容档为
+ * 「对端属**回环**即可信」——2026-11-03 收窄（渗透测试 i760 #25）：此前回退到
+ * 「对端属私网/回环即可信」，与被监控目标同网段的任意主机自带一条
+ * X-Forwarded-For 即可冒用真实客户端身份，实测击穿了 IP 黑名单（被封禁的
+ * 客户端加一个伪造 XFF 即恢复访问）。私网对端写的 XFF 现在一律不可信，
+ * 真实反代不在本机的部署必须显式声明 TRUSTED_PROXY_CIDRS 走名单档。
  *
  * @param {string} peer socket 对端地址（可为 IPv4-mapped IPv6 形态）
  * @param {{configured: boolean, matches: (peer: string) => boolean}|undefined} proxies
@@ -424,7 +450,7 @@ function isPrivateOrLoopback(rawIp) {
  */
 function isPeerTrustedProxy(peer, proxies) {
   if (proxies && proxies.configured) return proxies.matches(peer);
-  return isPrivateOrLoopback(peer);
+  return isLoopbackAddress(peer);
 }
 
 /**
@@ -439,7 +465,7 @@ function isPeerTrustedProxy(peer, proxies) {
  *  2) 未携带 X-Forwarded-For：即使 trust proxy 开着，req.ip 也只能是 socket 对端；
  *  3) trust proxy 开启且带 XFF：
  *     a. 配了 TRUSTED_PROXY_CIDRS（推荐）⇒ 只有对端落在这些网段内才算可信代理；
- *     b. 未配置 ⇒ 退回「对端属私网/回环即可信」（修复前的唯一形态，见下残余风险）。
+ *     b. 未配置 ⇒ 退回「对端属**回环**即可信」（本机反代/dev Vite）。
  *
  * 代价（如实声明，别让它变成惊喜）：应用直接站在公网 CDN/负载均衡之后（对端是公网
  * IP）又开着 trust proxy 时，真实客户端只有 XFF 一个来源，而本判据会退回 socket 对端
@@ -447,11 +473,13 @@ function isPeerTrustedProxy(peer, proxies) {
  * 也不让一个请求头买到访问控制。正确出路是把代理层留在内网，或按真实跳数配
  * TRUST_PROXY_HOPS。
  *
- * 残余风险（F-01，2026-10-17 由仓库负责人明确接受）：3-b 那条回落路径**没有闭合**。
- * 私网/回环只是位置而非身份，同一容器网络内的任意进程直连应用端口、自己写一条 XFF，
- * 与真实反代在应用视角完全同形，因此可以买到 IP 白名单豁免、限流配额轮换、
- * 自动封禁的打击对象与审计来源地址。保留它是为了不打断现存部署；启动期会打 WARN。
- * **闭合方式只有一个**：配置 TRUSTED_PROXY_CIDRS 走 3-a（配了之后私网不再是理由）。
+ * 3-b 的沿革（F-01）：2026-10-17 曾把回退定为「对端属私网/回环即可信」并作为残余
+ * 风险明确接受；2026-11-03 渗透测试（i760 #25）实测该回退被利用——被封禁的客户端
+ * 请求头加一条伪造 X-Forwarded-For 即绕过 IP_BLOCKED 封禁（同网段私网对端被当成
+ * 可信代理）。故收窄为仅回环：私网只是位置不是身份，私网对端写的 XFF 一律不可信。
+ * 反代不在本机的部署**必须**配置 TRUSTED_PROXY_CIDRS 走 3-a；未配置时的降级表现
+ * （req.ip 恒为代理地址、全站共享限流桶）由启动期 WARN 与 TrustedProxyBoundaryUnset
+ * 告警指路。
  *
  * 3-a/3-b 的判据本体是 `isPeerTrustedProxy`（本文件），HTTP / WS / 封禁分类三处共用；
  * 本函数只负责 1)/2) 两种形态的短路，不再自己实现一遍边界比较。
@@ -514,11 +542,12 @@ const sessionClientIp = (req) => {
  *    TCP 源地址不可伪造（HTTP 场景下伪造者收不到响应），所以这个值**由请求方
  *    自己的行为决定**，作为封禁目标不会误伤无辜。
  *  - TRUSTED_PROXY：带了 XFF，且对端**被判定为可信代理**——配了 TRUSTED_PROXY_CIDRS
- *    时以名单为准，未配置时退回「对端属内网/回环」（兼容档，判据本体是
- *    `isPeerTrustedProxy`）。互联网侧真实客户经此路径是对的（代理追加、按跳数取位，
- *    客户改不了自己那段）；但**同网络内**任意进程直连应用端口、自己写一个 XFF，
- *    长得一模一样——应用内部无法区分这两种。故本类是「可用但不可区分」，调用方应把
- *    它记下来（见 securityAlertPermissionAbuse 的封禁留痕），而不是当成"已验证"。
+ *    时以名单为准，未配置时退回「对端属回环」（兼容档，判据本体是
+ *    `isPeerTrustedProxy`；2026-11-03 由「私网/回环」收窄，见该函数注释）。
+ *    互联网侧真实客户经此路径是对的（代理追加、按跳数取位，客户改不了自己那段）；
+ *    但**同网络内**任意进程直连应用端口、自己写一个 XFF，长得一模一样——应用内部
+ *    无法区分这两种。故本类是「可用但不可区分」，调用方应把它记下来（见
+ *    securityAlertPermissionAbuse 的封禁留痕），而不是当成"已验证"。
  *  - PUBLIC_PEER_HEADER：对端不是可信代理却又带来了 XFF——要么对端是公网地址，
  *    要么配了名单而对端不在名单内。两种情况语义相同：**站在边界外的人告诉我们
  *    "客户端是谁"**，这个值完全由对方决定，不可用于惩罚。
@@ -558,7 +587,7 @@ function classifyIpAttribution(req) {
   // 或换个伪造值换个限流桶，正是 F-01 原文点名的「自动封禁的打击对象」。
   // 现在两边共用 `isPeerTrustedProxy`：配了名单且对端不在名单内 ⇒ PUBLIC_PEER_HEADER
   // ⇒ `resolvePunishableIp` 改打不可伪造的 socket 对端。
-  // 未配置时（兼容档）仍退回私网判定，行为与修复前逐字一致。
+  // 未配置时（兼容档）退回回环判定（2026-11-03 由「私网/回环」收窄，同判据本体）。
   const proxies =
     req.app && typeof req.app.get === 'function' ? req.app.get('trusted proxy cidrs') : undefined;
   return isPeerTrustedProxy(socketPeer, proxies)
@@ -647,6 +676,7 @@ const auditClientAddress = (req) => {
 module.exports = {
   auditClientAddress,
   isPrivateOrLoopback,
+  isLoopbackAddress,
   isPeerTrustedProxy,
   isClientIpIdentityTrustworthy,
   clientIpForSecurityDecision,

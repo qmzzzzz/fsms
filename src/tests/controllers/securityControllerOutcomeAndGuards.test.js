@@ -59,6 +59,7 @@
  */
 
 const { TEST_CLIENT_IP } = require('../fixtures');
+const { parseTrustedProxyCidrs, toTrustedProxies } = require('../../config/trustedProxies');
 
 // 持久化路径由 outbox 直接等 WAL fsync；本套件把 auditBuffer 整个换成替身，
 // 这里把真实 WAL 的落盘入口也桩掉，否则 spool 会因套件没跑 start() 而被判失败。
@@ -723,7 +724,17 @@ describe('viewSensitiveData 分支补齐', () => {
    */
   const xffForgedCtx = (peerAddress) => {
     const ctx = makeCtx({ body: { dataType: 'phone' } });
-    ctx.req.app = { get: (key) => key === 'trust proxy' };
+    // 2026-11-03 裁决尺收窄后，「内网可信反代」的唯一合法形态是显式名单档：
+    // app 注入解析后的 TRUSTED_PROXY_CIDRS（10.0.0.0/24 覆盖反向对照的对端 10.0.0.2），
+    // 公网对端（203.0.113.9）不在名单内 ⇒ XFF 照旧不被采信。
+    ctx.req.app = {
+      get: (key) =>
+        key === 'trust proxy'
+          ? true
+          : key === 'trusted proxy cidrs'
+            ? toTrustedProxies(parseTrustedProxyCidrs('10.0.0.0/24'))
+            : undefined,
+    };
     ctx.req.ip = '198.51.100.7'; // proxy-addr 在 trust proxy 开时把 XFF 首值原样给 req.ip
     ctx.req.get = (header) =>
       String(header).toLowerCase() === 'x-forwarded-for' ? '198.51.100.7' : 'jest-agent';

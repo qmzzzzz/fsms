@@ -33,6 +33,12 @@ const TAKEOVER_LEDGER = Object.freeze({
   postgres: '数据库默认账户残留，字典高频',
   backup: '备份账户默认名，运维误配残留',
   demo: '演示账户默认名，字典高频',
+  fsmsadmin: '系统前缀与管理员别名组合，已列为保留哨兵名，由蜜罐登录信号接管探测',
+  sysadmin: '系统管理员通用名，既有蜜罐名同时进入哨兵名单，检测责任仍由蜜罐承担',
+  superadmin: '超级管理员通用别名，保留用于识别系统权限账户探测',
+  operator: '运维操作员通用名，保留哨兵名接管后通过蜜罐登录识别探测',
+  auditor: '审计员通用名，保留哨兵名接管后通过蜜罐登录识别探测',
+  manager: '管理者通用名，保留哨兵名接管后通过蜜罐登录识别探测',
 });
 
 const registeredTakeovers = (ledger = TAKEOVER_LEDGER) => Object.keys(ledger).sort();

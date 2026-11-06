@@ -16,6 +16,8 @@ const { isProbeRequest } = require('../constants/probePaths');
 // 静态面判据的**唯一事实来源**在 staticFrontend（它才是"谁托管哪一面"的权威）。
 // 此前本文件自带一份，两份独立清单漂移出 8 条判定相反的路径——见下方 skipResourceLimiter 注释。
 const { isStaticSurfaceRequest } = require('./staticFrontend');
+// 扫描器路径指纹：与 services/scanProbeDetector、读侧画像 attackProfileClassify 同一把尺
+const { SCANNER_PATH_RE } = require('../constants/attackProfile');
 
 /**
  * 限流键的 IP 归一化（CC 防护同源收口，见总账 §4.4「限流键直接拼原文 req.ip」条目）
@@ -39,9 +41,8 @@ const normalizeRateLimitIp = (ip) => normalizeIP(ip) || 'unknown';
 /**
  * 限流触发 → 升级服务（CC 防护闭环）的统一挂钩
  *
- * 惰性 require：rateLimit.js 在 app.js 加载链的最前端，而升级服务要拉
- * AuditLog 模型与 securityAlert 一串依赖，提前加载会放大启动链路与循环
- * 依赖风险；首次 429 才加载，代价是一次 require 缓存命中。
+ * 惰性 require：rateLimit.js 在 app.js 加载链最前端，而升级服务要拉 AuditLog 模型与
+ * securityAlert 一串依赖，提前加载会放大启动链路与循环依赖风险；首次 429 才加载。
  *
  * 升级服务的 noteRateLimitHit 自身永不抛错，这里的 catch 只兜"模块加载
  * 本身失败"（如数据模型未注册）——信号丢了可以，429 响应不能挂。
@@ -53,10 +54,8 @@ const normalizeRateLimitIp = (ip) => normalizeIP(ip) || 'unknown';
  * src/tests/services/rateLimitEscalation.test.js「未登记的限流器归入 VOLUME」。
  *
  * 哪些限流器**不**接本挂钩，以及为什么，是这套设计里最容易做错的一半：
- *   - 账号维度桶（login-user / pwd-change-user / reauth-user）：按 username 或
- *     userId 组键，没有可封的 IP（见 rateLimitEscalation.js 文件头）；
- *   - 组合键桶（passwordChange / reauth 的「userId:ip」）：IP 只是键的组成部分，
- *     失败语义属凭据操作而非 IP 洪水；
+ *   - 账号维度桶（login-user / pwd-change-user / reauth-user）：按 username/userId 组键，无可封 IP；
+ *   - 组合键桶（passwordChange / reauth 的「userId:ip」）：IP 只是键的一部分，语义属凭据操作；
  *   - staticSurfaceLimiter：NAT 出口聚合流量，接封禁阶梯会把误封从单个 IP
  *     放大到整个办公室。
  */
@@ -140,6 +139,9 @@ const isAvatarReadRequest = (req) => {
   return path === AVATAR_READ_PREFIX || path.startsWith(AVATAR_READ_PREFIX + '/');
 };
 
+// 静态面豁免不看"是否未匹配路由"：这两个限流器挂在路由之前，那时 req 上不存在任何
+// 未匹配标记（曾写过 `req.unmatchedRequest !== true`，全仓无处赋值 ⇒ 恒真的死条件）。
+// 未匹配请求的计数与封禁由 unmatchedRequestLimiter 在路由之后承担（见下）。
 const skipResourceLimiter = (req) =>
   skipProbesAndWhitelisted(req) || isStaticSurfaceRequest(req) || isAvatarReadRequest(req);
 
@@ -222,8 +224,57 @@ const staticSurfaceLimiter = rateLimit({
   },
 });
 
-const PREFLIGHT_MAX_REQUESTS = 12000;
-/** 预检桶：cors 对 OPTIONS 直接 204，挂在其后的 ip/general/static 三桶一发都计不到。故在 cors 之前单独按 IP
+/**
+ * 未匹配探测桶（2026-11-05 审计整改：扫描探测 → 自动封禁的**闭合点**）
+ *
+ * 缺陷本体：`GET /.env`、`/wp-login.php`、`/actuator/health` 都满足 isStaticSurfaceRequest
+ * （安全方法 + 非保留前缀），于是被 skipResourceLimiter 整体豁免 general/ipLimiter，实际只进
+ * staticSurfaceLimiter——而那一桶刻意不接升级阶梯 ⇒ 扫描流量走不到任何封禁判据。
+ * 交付物里"封禁继续走既有 generalLimiter VOLUME 升级阶梯"（攻击检测面实施报告 定案③）
+ * 在这条路径上从来不存在；同时 middleware/index.js 与本仓注释引用的
+ * `unmatchedRequestLimiter` 也一直没有实体（解构得到 undefined，无任何门禁看得见）。
+ *
+ * 为什么挂在**未匹配点**（app.js 404 兜底 + staticFrontend 的 SPA 吞没分支）而不是全站前置：
+ * 前置挂载只能靠路径正则猜，而 `/api-docs/swagger-ui.css` 这类**合法**资源同样含 `swagger`
+ * 指纹，会被 20 次/5 分钟的紧预算打成 429。放在路由之后 ⇒ 被计数的请求必然没命中任何路由，
+ * 合法面在结构上不可能被误伤（不是"阈值调得够宽所以没事"）。
+ *
+ * 为什么只数 SCANNER_PATH_RE 命中的路径、而不是所有未匹配请求：坏部署会让整个 NAT 出口的
+ * 构建产物集体 404（30 人 × 34 个资源 ≈ 1020 次/15 分钟），按"全部未匹配"计数并接封禁阶梯，
+ * 等于把一次发版事故升级成封掉一间办公室——与 staticSurfaceLimiter 不接阶梯是同一条顾虑。
+ * 构建产物路径（/assets/*、index.html、sw.js、manifest、favicon）不含任何扫描器指纹，
+ * 故本桶对坏部署免疫。代价如实登记：不含指纹的普通未知路径只有 scanProbeDetector 的
+ * 风暴行与取证标记，**不自动封禁**。
+ *
+ * 阈值与检测侧刻意成 1:2（20 次/5 分钟 vs SCAN_404_THRESHOLD 默认 40 次/5 分钟）：
+ * 打满风暴阈值的扫描者必然产生 ≥20 次 429，够 ANON_ABUSE 阀值（10）净消耗一轮 ⇒
+ * "检测到风暴"与"处置落地"由同一批请求触发，不需要各自调参才碰巧对上。
+ */
+const UNMATCHED_PROBE_WINDOW_MS = 5 * 60 * 1000;
+const UNMATCHED_PROBE_MAX = 20;
+/** 本桶的计数判据（路径命中扫描器指纹）。单独导出仅供测试驱动语义，口径同 staticSurfaceSkip。 */
+const isUnmatchedProbePath = (req) => SCANNER_PATH_RE.test(String(req?.path || ''));
+
+const unmatchedRequestLimiter = rateLimit({
+  windowMs: UNMATCHED_PROBE_WINDOW_MS,
+  max: UNMATCHED_PROBE_MAX,
+  store: makeSharedStore('unmatched'),
+  keyGenerator: (req) => ipKeyGenerator(normalizeRateLimitIp(clientIpForSecurityDecision(req))),
+  skip: (req) => !isUnmatchedProbePath(req) || skipProbesAndWhitelisted(req),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    // 接升级阶梯：本桶的 429 是"该 IP 在 5 分钟内第 21 次请求一个既不存在、又长得像
+    // 扫描器目标的路径"，一次拒绝的证据强度与 captcha/register 同级（分类见文件头）
+    noteRateLimitHit(req, 'unmatched');
+    logger.warn(
+      `未匹配探测限流触发：${clientIpForSecurityDecision(req)} - ${req.method} ${req.path}`
+    );
+    respond429(res, { success: false, message: '请求过于频繁，请稍后再试' });
+  },
+});
+
+const PREFLIGHT_MAX_REQUESTS = 12000; /** 预检桶：cors 对 OPTIONS 直接 204，挂在其后的 ip/general/static 三桶一发都计不到。故在 cors 之前单独按 IP
  * 计一个更宽的桶（12000/15min ≈13 次/秒）：塞进 300/15min 的通用配额会按"请求数×2"误伤正常 SPA，本档只挡洪水。
  * 审计侧不写链（无主体、无业务数据，一发一条就是放大面），显式登记为「不审计但必须计数」——计数点即本桶。 */
 const preflightLimiter = rateLimit({
@@ -331,20 +382,15 @@ const loginLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  message: {
-    success: false,
-    message: '登录尝试次数过多，请稍后再试',
-  },
+  message: { success: false, message: '登录尝试次数过多，请稍后再试' },
   handler: (req, res, _next) => {
     noteRateLimitHit(req, 'login-ip');
+    loginRateLimitAudit.recordLimitedAttempt(req, 'login-ip');
     logger.warn('登录限流触发', {
       ip: clientIpForSecurityDecision(req),
       username: req.body?.username,
     });
-    respond429(res, {
-      success: false,
-      message: '登录尝试次数过多，请稍后再试',
-    });
+    respond429(res, { success: false, message: '登录尝试次数过多，请稍后再试' });
   },
 });
 
@@ -390,6 +436,7 @@ const loginUserLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
+    loginRateLimitAudit.recordLimitedAttempt(req, 'login-user');
     logger.warn(
       `登录账号维度限流触发：username=${normalizeLoginRateKey(req.body?.username) || '-'}, ip=${clientIpForSecurityDecision(req)}（可能存在分布式撞单账号攻击）`
     );
@@ -587,7 +634,7 @@ const passwordChangeLimiter = rateLimit({
  * "单账号 5 次/15 分钟"实际变成"单账号 × 每个源 IP 各 5 次"。
  * 两条独立放大路径：
  *   · 代理池/NAT 后面的真·多源 IP（不需要任何伪造）；
- *   · `TRUST_PROXY_HOPS>0` 时（生产 compose 默认 1 跳，`app.js:206`）
+ *   · `TRUST_PROXY_HOPS>0` 时（生产 compose 默认 1 跳，`app.js:211`）
  *     能直连应用端口的主体（同网段容器、宿主进程、SSRF 跳转）用
  *     `X-Forwarded-For` 任意编造 req.ip——实测伪造一跳即可让 req.ip 变成 1.2.3.4，
  *     审计行记录的来源 IP 与 `password_changed` 溯源同被写成假值。
@@ -747,6 +794,7 @@ module.exports = {
   userLimiter,
   registerIpLimiter,
   staticSurfaceLimiter,
+  unmatchedRequestLimiter,
   preflightLimiter,
   avatarReadIpLimiter,
   avatarReadUserLimiter,
@@ -759,6 +807,10 @@ module.exports = {
   // 静态面限流器的计数范围判定（仅供测试驱动语义，见 staticSurfaceSkip 的注释）
   staticSurfaceSkip,
   STATIC_SURFACE_MAX_REQUESTS,
+  // 未匹配探测桶的计数判据与配额（仅供测试驱动语义，口径同 staticSurfaceSkip）
+  isUnmatchedProbePath,
+  UNMATCHED_PROBE_MAX,
+  UNMATCHED_PROBE_WINDOW_MS,
   PREFLIGHT_MAX_REQUESTS,
   isAvatarReadRequest,
   AVATAR_READ_IP_MAX,

@@ -246,7 +246,7 @@ const LEDGER = {
     lockWhere: 'services/authService/login.js#assertAccountUsable',
     why:
       '签发原语，实测只有两个调用点：eervices/authService/session.js:127（registerUser） 与 services/authService/session.js:209（issueLoginSession）。' +
-      '登录链的账户复查在 services/authService/login.js:116（loginUser） 委托的 services/authService/login.js:218（assertAccountUsable，lockUntil 判定在 services/authService/login.js:244）' +
+      '登录链的账户复查在 services/authService/login.js:127（loginUser 内） 委托的 services/authService/login.js:254（assertAccountUsable，lockUntil 判定在 services/authService/login.js:288）' +
       '——注意 loginUser **自己函数体内没有** lockUntil/status（实测），所以委托对象必须写这道关真正落笔的函数；' +
       '注册链的账户是本次 services/authService/session.js:109（User.create） 新建的文档，lockUntil 不存在。' +
       '注意本闸不做跨函数数据流：若将来把注册改成"允许认领既有账号"，没有用例会自动变红，' +

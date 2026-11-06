@@ -6,8 +6,10 @@
  */
 
 const User = require('../../models/User');
+const loginGuard = require('../../config/loginGuard');
 const logger = require('../../utils/logger');
 const AuditLog = require('../../models/AuditLog');
+const { auditRequestContext } = require('../../models/auditLogWriteStatics');
 const { verifyTotpDetailed } = require('../../utils/totp');
 const { decryptMfaSecret } = require('../../utils/mfaSecret');
 const {
@@ -19,8 +21,8 @@ const {
 
 // 登录失败计数阈值与锁定时长（原为 loginUser 内的局部常量，现提到
 // 模块级，供 verifyPasswordOrTrackFailure / incrementFailedLoginCount 共用）
-const MAX_FAILED_LOGINS = 10;
-const LOCK_DURATION_MS = 10 * 60 * 1000;
+const MAX_FAILED_LOGINS = loginGuard.lockAfter;
+const LOCK_DURATION_MS = loginGuard.lockMs;
 
 /**
  * 失败计数的解析规则（口令错误主路径与 MFA/恢复码累计路径共用同一判据）
@@ -52,6 +54,7 @@ async function verifyMfaChallenge(user, { mfaCodeRaw, username, ctx }) {
       ip,
       userAgent,
       fingerprint,
+      ...auditRequestContext(ctx.req), // 请求上下文补采，脱敏口径见 auditRequestContext
       success: true,
       reason: '密码已验证，等待两步验证码',
     }).catch(() => {});
@@ -72,6 +75,7 @@ async function verifyMfaChallenge(user, { mfaCodeRaw, username, ctx }) {
       success: false,
       riskLevel: 'high',
       riskFactors: ['mfa_bruteforce'],
+      ...auditRequestContext(ctx.req),
       reason: 'MFA 验证通道锁定期间尝试登录',
     }).catch(() => {});
     return { outcome: 'MFA_ATTEMPTS_EXCEEDED' };
@@ -146,6 +150,7 @@ async function verifyTotpChallenge(user, { mfaCode, mfaUser, username, ctx }) {
       success: false,
       riskLevel: replayed ? 'high' : 'medium',
       riskFactors: [replayed ? 'mfa_code_replay' : 'mfa_code_invalid'],
+      ...auditRequestContext(ctx.req),
       reason: replayed ? '两步验证码重放' : '两步验证码错误',
     }).catch(() => {});
     return { outcome: 'MFA_CODE_INVALID' };
@@ -170,7 +175,7 @@ async function verifyRecoveryCodeChallenge(user, { mfaCode, username, ctx }) {
   // 恢复码失败统一记录（增量 failedLoginCount + MFA 独立计数 + 审计），
   // 与 6 位 TOTP 错误路径保持口径一致，消除「恢复码爆破不触发账户锁定」的漏洞
   const handleRecoveryFailure = (riskFactors, reason) =>
-    recordRecoveryFailure(user, { username, ip, userAgent, fingerprint }, riskFactors, reason);
+    recordRecoveryFailure(user, { username, ip, userAgent, fingerprint, ctx }, riskFactors, reason);
   if (!/^[A-HJ-KM-NP-Z2-9]{4}-[A-HJ-KM-NP-Z2-9]{4}$/.test(normalized)) {
     await handleRecoveryFailure(['recovery_code_invalid'], '恢复码格式无效');
     return { outcome: 'MFA_CODE_INVALID' };
@@ -210,6 +215,7 @@ async function verifyRecoveryCodeChallenge(user, { mfaCode, username, ctx }) {
     success: true,
     riskLevel: 'medium',
     riskFactors: ['recovery_code_used'],
+    ...auditRequestContext(ctx.req),
     reason: `使用备用恢复码登录（剩余 ${remaining} 个）`,
   }).catch(() => {});
   return { outcome: 'OK' };
@@ -222,7 +228,7 @@ async function verifyRecoveryCodeChallenge(user, { mfaCode, username, ctx }) {
  */
 async function recordRecoveryFailure(
   user,
-  { username, ip, userAgent, fingerprint },
+  { username, ip, userAgent, fingerprint, ctx },
   riskFactors,
   reason
 ) {
@@ -236,6 +242,7 @@ async function recordRecoveryFailure(
     ip,
     userAgent,
     fingerprint,
+    ...auditRequestContext(ctx?.req),
     success: false,
     riskLevel: 'high',
     riskFactors,

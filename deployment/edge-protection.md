@@ -7,12 +7,12 @@
 
 ## 1. 分工：应用层是主闸，边缘是快通道
 
-| 能力     | 应用层（主闸）                                                                                                  | 边缘 nginx（辅）                                               |
-| -------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| IP 封禁  | `src/middleware/security/ipBlacklist.js` 的 `checkIPBlacklist`：库持久化、TTL、分级升级、审计留痕、降级分支可见 | 可选 `deny` 快通道：省一次到 app 的连接与 JSON 解析            |
-| 限速     | `src/middleware/rateLimit.js` 三档（general/strict/login），带白名单与探针豁免、JSON 429 语义、审计             | `limit_req` 三档保守值，只截扫描器/爆破量级洪峰                |
-| 身份判定 | `src/utils/ipUtils.js` 的 `clientIpForSecurityDecision`：可信边界内取 `req.ip`，边界外退回 socket 对端          | 提供 `X-Forwarded-For`（追加式）与 `X-Real-IP`，**不参与判定** |
-| 审计     | 全量写审计链（append-only + 哈希链）                                                                            | 无                                                             |
+| 能力     | 应用层（主闸）                                                                                                  | 边缘 nginx（辅）                                                                                                                                                                                                 |
+| -------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| IP 封禁  | `src/middleware/security/ipBlacklist.js` 的 `checkIPBlacklist`：库持久化、TTL、分级升级、审计留痕、降级分支可见 | 可选 `deny` 快通道：省一次到 app 的连接与 JSON 解析                                                                                                                                                              |
+| 限速     | `src/middleware/rateLimit.js` 三档（general/strict/login），带白名单与探针豁免、JSON 429 语义、审计             | `limit_req` 三档保守值，只截扫描器/爆破量级洪峰                                                                                                                                                                  |
+| 身份判定 | `src/utils/ipUtils.js` 的 `clientIpForSecurityDecision`：可信边界内取 `req.ip`，边界外退回 socket 对端          | 提供 `X-Forwarded-For`（追加式）与 `X-Real-IP`，**不参与判定**。LB 直连 app 且 `PROXY_PROTOCOL=on` 时（ADR-021），LB 以 PROXY v1/v2 头声明真实客户端，由应用连接层还原进 socket 对端——nginx 不在场，XFF 语义不变 |
+| 审计     | 全量写审计链（append-only + 哈希链）                                                                            | 无                                                                                                                                                                                                               |
 
 **为什么边缘 `deny` 只能当快通道**（三条硬理由，不是偏好）：
 

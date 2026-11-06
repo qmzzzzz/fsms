@@ -117,29 +117,8 @@ const makeAuditTextFieldGate = (maxLength) => (value) => {
 // 超出这个长度的"地址"必然来自请求方（X-Forwarded-For 是被 express 原样采纳的文本）。
 const AUDIT_IP_MAX_LENGTH = 64;
 
-/**
- * ip 的落库闸：由 `makeAuditTextFieldGate(AUDIT_IP_MAX_LENGTH)` 生成——清洗、截断、幂等、
- * 非字符串一律降级都住在工厂里，这里只提供上界；空文本降级为「不记 ip」。
- *
- * 与 `auditMethodOrUndefined` 同一个家族，也因此**同样必须在算哈希之前镜像**（见 auditChain.js）。
- * 这里不是"顺手整理字符串"：ip 直接来自 X-Forwarded-For 这类文本，express 不校验其形态，
- * 而在闸出现之前它既没有上界也没有走 `stripControlChars`（`path`/`action` 由 auditMeta
- * 截到 512/96，`method` 由 schema 的 set 降级）。
- *
- * 三条站得住的理由，按实测排序：
- *  1) 无界的请求方可控存储本身就是问题——单条文档能被一条 XFF 撑到数 KB，
- *     审计列表与导出按 ip 列渲染时会带着它一起走。
- *  2) 不可打印字符（LF/CR/NUL/C1/Bidi）会随审计文本进入日志与终端渲染：一条审计记录
- *     能伪造出"下一行"，这是把注入从请求面搬进取证面。
- *  3) 该字段已建索引（`{ip:1,timestamp:-1}`）。实测**非唯一**索引不因超键长拒写，
- *     所以今天不会丢审计；但它一旦改成 unique（或新增 unique 索引），MongoDB 的
- *     1024 字节键上限会立刻把超长记录变成**静默丢一行**——而 record() 吞错只计
- *     audit_write_failed。这正是 method 注释里「宁可少一维，不可丢一行」要防的形态，
- *     补在 schema 单点上，不等它变成事故。
- *
- * 清洗判据（为什么复用 `stripControlChars`、为什么再补一次 `trimEnd`）见上面的 `makeAuditTextFieldGate`：
- * 本族的闸（`ip`、`userAgent`）共用同一段实现，所以这些理由只记一处。
- */
+// 请求方可控的 IP 文本必须有界并中和控制字符，避免撑大审计存储或伪造取证显示。
+// 算哈希前也须应用此幂等闸，防止 schema 清洗后与已哈希形态不一致。
 const auditIpOrUndefined = makeAuditTextFieldGate(AUDIT_IP_MAX_LENGTH);
 
 // userAgent 的上界：与"已经自觉清洗"的那五处写入点同值（auditLogWriteStatics 2 处、
@@ -186,7 +165,7 @@ const AUDIT_USERNAME_MAX_LENGTH = 128;
  *
  * 这一族的**动机本体**（为什么必须在 `chainBatch` 算哈希之前镜像一次）见 `makeAuditTextFieldGate`
  * 的注释，此处不复述。username 独有一条必须补的理由：**它是全仓唯一由未认证请求方直接
- * 决定的被哈希字段**（`controllers/authController/credentials.js:153` 把 `req.body.username` 原样交给登录失败审计；
+ * 决定的被哈希字段**（`controllers/authController/credentials.js:147` 把 `req.body.username` 原样交给登录失败审计；
  * 路由侧只做了 `.trim()`/`notEmpty`/`isLength(128)`，不碰控制字符与代理项）。实测：
  * 请求体 `{"username":"a\ud800b"}` 里 `JSON.parse` 自己就产出孤立代理项，铸造后内存形态是
  * `61 d800 62`、BSON 落盘形态是 `61 fffd 62`，而哈希在序列化之前算 ⇒ 该记录**读回来复算必然
@@ -320,6 +299,8 @@ const AUDIT_LOG_ACTIONS = [
   'security_alerts', // GET /api/security/alerts
   'security_stuffing-profile', // GET /api/security/stuffing-profile（撞库画像，ADR-013 P2 情报）
   'security_attack-profile', // GET /api/security/attack-profile（单 IP 攻击行为画像）
+  'security_attack-events', // GET /api/security/attack-events（攻击告警查询，专家分析读面）
+  'security_attack-events_summary', // GET /api/security/attack-events/summary（分类计数角标）
   'security_users_view', // GET 类用户子路径兜底
   'security_users_mfa_reset', // PUT /api/security/users/:userId/mfa/reset
   'security_audit-logs_verify', // GET /api/security/audit-logs/verify
@@ -367,6 +348,7 @@ const AUDIT_LOG_ACTIONS = [
   'login_failed',
   'login_unusual_time',
   'login_captcha_rejected', // 前置人机层（静态开关或失败触发的挑战）拦下的登录尝试；留痕但不进任何失败计数（services/loginChallenge.recordCaptchaRejected，审计二-3）
+  'login_rate_limited', // 登录限流器拦下的尝试（IP/账号两桶）；留痕并计入挑战判据，但不进 lockUntil 计数（services/loginRateLimitAudit）
   // 刷新的成功与拒绝（含重放/全量吊销）：/api/auth/refresh 被全局审计显式排除，
   // 这些事件由 services/authService/token.js 的 recordRefreshAudit 写入
   'auth_refresh_failed',
@@ -427,6 +409,12 @@ const AUDIT_LOG_ACTIONS = [
   // 不复用 malformed_request_blocked：那一条由协议合规层发出（Content-Type/头部/方法畸形），
   // 这一条是 NoSQL 操作符与资源耗尽探测的指纹，混在一起就分不出"谁在探查询参数"。
   'query_param_rejected',
+  // 攻击检测面（2026-11-05）：操作符剥离留痕 / SQLi 特征串边缘检测 / 扫描探测证据与风暴。
+  // 事件源：services/injectionDetector.js、middleware/injectionSignature.js、services/scanProbeDetector.js
+  'nosql_injection_attempt',
+  'sql_injection_attempt',
+  'scan_probe_detected',
+  'scan_probe_storm',
   // 响应头已发出、流被中途截断时补写的更正事件（errorHandler 的 markResponseAbortedByError）。
   // 不登记就是复发：记录确实落库了，但 validateEnum 对不在白名单的 action 直接 400
   // ⇒ 查询与导出都筛不出它，"这次导出被截断了"这条唯一的线索变成查不到的死角。

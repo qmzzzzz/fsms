@@ -627,7 +627,13 @@ const buildExportCredential = async () => {
   if (mfaCode) return { mfaCode }
   try {
     const enc = await encryptPassword(exportDialog.password, 'PASSWORD_CURRENT')
-    return enc ? { encCurrentPassword: enc } : { currentPassword: exportDialog.password }
+    // G2 统一口径：dev 非安全上下文返回 null 时阻断导出（明文回退轨已删），
+    // 返回 null 与 catch 失败同义 = 已本地提示、调用方中止
+    if (!enc) {
+      ElMessage.error(t('login.insecureContext'))
+      return null
+    }
+    return { encCurrentPassword: enc }
   } catch (e) {
     console.warn('[loginCipher] 导出二次验证口令加密失败，已阻断提交：', e?.message)
     ElMessage.error(

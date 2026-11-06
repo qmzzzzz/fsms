@@ -246,6 +246,14 @@ describe('取证溯源接口契约（T5/T6）', () => {
   test('8d 落库时刻必须复核操作者位置：取票时在段外、确认时在段内 ⇒ operator_inside 且零落库', async () => {
     // 判据位在**写入时刻**（ip-list 侧一直在写入时刻现取 operatorIp，pool-ban 先前只在取票时刻判一次）。
     // 不复核的后果：取票→确认之间换个网（或把票交给同事）就能把自己/对方挡在门外，且不需要 /0、不需要并集铺满。
+    // 乱序防护：live-traffic 护栏回看 15 分钟审计行——本文件其他用例留下的行（192.0.2.x
+    // 落在 128/1 内）会让取票被 live_traffic_inside 拒掉（--randomize 后「8d 先于造行用例」
+    // 不再成立）。清掉回看窗内的行只重置护栏判据；各用例的取证断言都是即时查询自己刚造的行。
+    const AuditLog = require('../../models/AuditLog');
+    await AuditLog.deleteMany(
+      { timestamp: { $gte: new Date(Date.now() - 16 * 60 * 1000) } },
+      { bypassAppendOnly: true } // 测试环境逃生口（模型 append-only 钩子的唯一合法豁免）
+    );
     const IPBlacklist = require('../../models/IPBlacklist');
     const HALF = '128.0.0.0/1';
     const issued = await postFrom(
@@ -253,6 +261,10 @@ describe('取证溯源接口契约（T5/T6）', () => {
       { cidr: HALF, reason: `位置复核 ${stamp}` },
       '10.0.0.5'
     );
+    if (issued.status !== 200) {
+      // 临时诊断（乱序复现期）：打印拒绝原因后即删
+      console.error('8d-issued-debug', JSON.stringify(issued.body));
+    }
     expect(issued.status).toBe(200);
 
     // 确认时换到 192.0.2.7：它落在 128.0.0.0/1 里（该段覆盖 128.0.0.0–255.255.255.255）

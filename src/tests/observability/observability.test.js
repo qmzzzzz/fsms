@@ -95,12 +95,11 @@ describe('/metrics 与 /readyz（O-8）', () => {
     expect(res.text).toMatch(/http_requests_total\{[^}]*route="unmatched"/);
   });
 
-  test('GET /readyz：Mongo 可用返回 200 ready', async () => {
+  test('GET /readyz：Mongo 可用返回 200 ready（响应体只留聚合结论，i760 #22）', async () => {
     const res = await request(app).get('/readyz');
     expect(res.status).toBe(200);
-    expect(res.body.status).toBe('ready');
-    expect(res.body.checks.mongo).toBe('ok');
-    expect(res.body.timestamp).toBeTruthy();
+    // 依赖类型/事务/拓扑判定与 timestamp 已整体撤出不鉴权端点，原因走日志与指标
+    expect(res.body).toEqual({ status: 'ready' });
   });
 
   test('GET /api/metrics（面板 JSON 半）：认证后返回 snapshot 结构', async () => {

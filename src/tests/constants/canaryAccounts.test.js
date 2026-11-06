@@ -17,8 +17,10 @@ const {
 
 describe('canaryAccounts 哨兵用户名名单', () => {
   describe('默认名单', () => {
-    test('10 个幽灵名，全小写 ASCII（与 username_ci 大小写不敏感索引同口径）', () => {
-      expect(DEFAULT_CANARY_USERNAMES).toHaveLength(10);
+    test('16 个幽灵名，全小写 ASCII（与 username_ci 大小写不敏感索引同口径）', () => {
+      // 10 → 16（2026-11-03，渗透测试 i760 #28）：增补 fsmsadmin 等六个系统
+      // 管理风格命名——fsmsadmin 当时未在名单内，公开注册实测被冒名注册成功
+      expect(DEFAULT_CANARY_USERNAMES).toHaveLength(16);
       for (const name of DEFAULT_CANARY_USERNAMES) {
         expect(name).toBe(name.trim().toLowerCase());
         expect(name).toMatch(/^[a-z]+$/);
@@ -27,6 +29,19 @@ describe('canaryAccounts 哨兵用户名名单', () => {
 
     test('不含 admin：默认超管真实存在，放进去等于默认一个固定失效项', () => {
       expect(DEFAULT_CANARY_USERNAMES).not.toContain('admin');
+    });
+
+    test('含渗透测试实测可冒名注册的系统风格命名（i760 #28 回归钉）', () => {
+      for (const name of [
+        'fsmsadmin',
+        'sysadmin',
+        'superadmin',
+        'operator',
+        'auditor',
+        'manager',
+      ]) {
+        expect(DEFAULT_CANARY_USERNAMES).toContain(name);
+      }
     });
 
     test('默认名单被冻结（不可被调用方改写）', () => {

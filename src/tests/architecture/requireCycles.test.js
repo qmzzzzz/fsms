@@ -207,6 +207,10 @@ const LAZY_SCC = [
     'utils/metricsAuditDrops.js',
     'utils/passwordHistory.js',
   ],
+  // 2026-11-05 静态面限流批：rateLimit 顶层引用 staticFrontend 的 isStaticSurfaceRequest
+  // （豁免判据同源），而 staticFrontend 的 unmatchedRequestLimiter 分支要回调 rateLimit 的
+  // respond429/限流出口——反向边只能惰性（提回顶层即加载期互引成环，两侧拿到半初始化对象）。
+  ['middleware/rateLimit.js', 'middleware/staticFrontend.js'],
   ['services/honeypotWatch.js', 'services/websocketService/handshake.js'],
 ];
 
@@ -369,7 +373,7 @@ describe('依赖图无环断言', () => {
   /**
    * 惰性边清单（分量内部、只以函数体 require 存在的边）。
    *
-   * 27 条 / 2 个分量（2026-11-03 实测）。这张表是**登记表**，不是白名单：
+   * 28 条 / 3 个分量（2026-11-03 实测；2026-11-05 攻击检测面收敛时 +1）。这张表是**登记表**，不是白名单：
    * 新增一条惰性 require、或把某条提到顶层（清单里少一条），都必须先解释清楚再改这里。
    * 与 LAZY_SCC 的分工：那张表守「哪些模块卷进了环」，这张表守「环是靠哪几条边撑住的」。
    */
@@ -384,6 +388,7 @@ describe('依赖图无环断言', () => {
     'config/loginEncryptGuard.js -> utils/metrics.js',
     'config/validate.js -> config/jwtRotation.js',
     'constants/runtime.js -> services/sharedCache/index.js',
+    'middleware/staticFrontend.js -> middleware/rateLimit.js',
     'models/auditLogHooks.js -> utils/auditChain.js',
     'models/auditLogHooks.js -> utils/metrics.js',
     'models/auditLogWriteStatics.js -> utils/metrics.js',

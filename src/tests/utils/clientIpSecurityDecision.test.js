@@ -41,11 +41,22 @@ describe('客户端 IP 身份可信边界（ipUtils）', () => {
     expect(clientIpForSecurityDecision(req)).toBe('8.8.8.8');
   });
 
-  test('trust proxy + XFF + 对端为内网/回环（正常经 nginx）⇒ 采信 req.ip', () => {
-    for (const peer of ['10.0.0.7', '172.16.3.4', '192.168.1.1', '127.0.0.1', '::1']) {
+  test('trust proxy + XFF + 对端为回环（本机反代/dev Vite）⇒ 采信 req.ip', () => {
+    for (const peer of ['127.0.0.1', '::1']) {
       const req = makeReq({ trustProxy: 1, xff: '203.0.113.9', peer, ip: '203.0.113.9' });
       expect({ peer, ok: isClientIpIdentityTrustworthy(req) }).toMatchObject({ peer, ok: true });
       expect(clientIpForSecurityDecision(req)).toBe('203.0.113.9');
+    }
+  });
+
+  test('trust proxy + XFF + 对端为私网 ⇒ 不可信，裁决退回 socket 对端（i760 #25）', () => {
+    // 2026-11-03 收窄：旧兼容档把私网对端当可信代理，同网段主机自带一条 XFF
+    // 即可冒用真实客户端身份（实测绕过 IP 黑名单）。私网对端写的 XFF 现在一律
+    // 不可信；真实反代不在本机的部署必须配置 TRUSTED_PROXY_CIDRS。
+    for (const peer of ['10.0.0.7', '172.16.3.4', '192.168.1.1']) {
+      const req = makeReq({ trustProxy: 1, xff: '203.0.113.9', peer, ip: '203.0.113.9' });
+      expect({ peer, ok: isClientIpIdentityTrustworthy(req) }).toMatchObject({ peer, ok: false });
+      expect(clientIpForSecurityDecision(req)).toBe(peer);
     }
   });
 
@@ -96,7 +107,8 @@ describe('客户端 IP 身份可信边界（ipUtils）', () => {
     const { isWhitelistExemptionTrustworthy } = require('../../middleware/security');
     const req = makeReq({ trustProxy: 1, xff: '10.0.0.5', peer: '198.51.100.23', ip: '10.0.0.5' });
     expect(isWhitelistExemptionTrustworthy(req)).toBe(isClientIpIdentityTrustworthy(req));
-    const ok = makeReq({ trustProxy: 1, xff: '10.0.0.5', peer: '10.0.0.1', ip: '10.0.0.5' });
+    // 可信对照用回环对端（i760 #25 收窄后兼容档仅回环可信）
+    const ok = makeReq({ trustProxy: 1, xff: '10.0.0.5', peer: '127.0.0.1', ip: '10.0.0.5' });
     expect(isWhitelistExemptionTrustworthy(ok)).toBe(true);
   });
 });

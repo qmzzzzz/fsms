@@ -11,7 +11,8 @@
  *   /api-docs                  → swagger.docsLimiter（30 次/15 分钟）
  *   /csp-report /client-errors
  *   /.well-known/security.txt  → wellKnownRoutes 三个专属限流器
- *   /metrics                   → metricsAuth（内网/回环免令牌）——**这就是 app.js 自陈的
+ *   /metrics                   → metricsAuth（回环免令牌；私网/公网须 Bearer，
+ *                                2026-11-03 收窄，渗透测试 i760 #21）——**这就是 app.js 自陈的
  *                                威胁模型「有人从容器网络直连 app:3000」那一档**
  *   /socket.io/                → 无。MAX_CONNECTIONS_PER_PROCESS=1000 约束的是**已建立连接数**，
  *                                而 authenticateSocket 在连接**建立之后**才跑；
@@ -155,11 +156,18 @@ describe('静态面不再是零预算（豁免 → 换桶）', () => {
   test('该桶不接入 CC 封禁升级阶梯（NAT 聚合流量误封风险）', () => {
     // 静态面被限流绝大多数是"一个出口后面的人全被限了"，接到封禁阶梯上
     // 会把误封从单个 IP 放大到整个办公室。判据：handler 里不得出现 noteRateLimitHit。
+    // 切片终点是**下一个桶**（未匹配探测桶）：2026-11-05 审计整改在该桶与 strictLimiter
+    // 之间插入了 unmatchedRequestLimiter——那个桶**必须**接阶梯（扫描探测→自动封禁的闭合点），
+    // 若继续切到 strictLimiter 会把它的 noteRateLimitHit 误算进本桶。
     const src = fs.readFileSync(RATE_LIMIT_JS, 'utf8');
     const start = src.indexOf('const staticSurfaceLimiter =');
     expect(start).toBeGreaterThan(-1);
-    const body = src.slice(start, src.indexOf('const strictLimiter ='));
+    const body = src.slice(start, src.indexOf('const unmatchedRequestLimiter ='));
     expect(body).toContain('静态面限流触发');
     expect(body).not.toContain('noteRateLimitHit(');
+    // 反向对照：紧随其后的探测桶必须接阶梯（闭合点不得静默掉线）。
+    const probeStart = src.indexOf('const unmatchedRequestLimiter =');
+    const probeBody = src.slice(probeStart, src.indexOf('const preflightLimiter ='));
+    expect(probeBody).toContain('noteRateLimitHit(');
   });
 });

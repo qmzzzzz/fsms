@@ -81,27 +81,37 @@ function makeRes() {
 const GATED_ROWS = ROUTE_TABLE.filter((row) => isReauthGated(row)); // 声明侧：有没有闸写在表的那一行上
 
 describe('蜜罐缺票闸逐字对拍（P2-2 批次 B）', () => {
-  test('前提：闸的声明恰好 7 条，且每条都真的在源码里挂了 requireReauthTicket', () => {
-    expect(GATED_ROWS.length).toBe(7);
+  test('前提：闸的声明恰好 9 条，且每条都真的在源码里挂了 requireReauthTicket', () => {
+    // 2026-11-04 攻击告警查询面（LANSEC 复原）在 ROUTE_TABLE 登记 GET /api/security/
+    // attack-events 与 /summary 两条 REAUTH 行 ⇒ 7→9；挂闸文件同步加 attackEventRoutes。
+    expect(GATED_ROWS.length).toBe(9);
     for (const row of GATED_ROWS) {
       expect(row.handling).toBe(TRAP_HANDLING.REAUTH);
       expect(row.method).toBe('GET');
     }
-    // 声明不是自己说了算：这 7 条必须都能在真实路由文件里找到 requireReauthTicket()。
-    // 挂闸点分布在三个文件里（安全面 5 条 + 撞库画像面 1 条 + 攻击画像面 1 条），按文件分别点名，
+    // 声明不是自己说了算：这 9 条必须都能在真实路由文件里找到 requireReauthTicket()。
+    // 挂闸点分布在四个文件里（安全面 5 条 + 撞库画像面 1 条 + 攻击画像面 1 条 +
+    // 攻击事件面 2 条），按文件分别点名，
     // 不写「全仓共 N 处」——那种总数在拆分/合并路由文件时会被无声地满足
     const gateSites = (rel) => (read(rel).match(/requireReauthTicket\(\)/g) || []).length;
     expect({
       securityRoutes: gateSites('src/routes/securityRoutes.js'),
       stuffingProfileRoutes: gateSites('src/routes/stuffingProfileRoutes.js'),
       attackProfileRoutes: gateSites('src/routes/attackProfileRoutes.js'),
-    }).toEqual({ securityRoutes: 5, stuffingProfileRoutes: 1, attackProfileRoutes: 1 });
+      attackEventRoutes: gateSites('src/routes/attackEventRoutes.js'),
+    }).toEqual({
+      securityRoutes: 5,
+      stuffingProfileRoutes: 1,
+      attackProfileRoutes: 1,
+      attackEventRoutes: 2,
+    });
     const totalSites = [
       'src/routes/securityRoutes.js',
       'src/routes/stuffingProfileRoutes.js',
       'src/routes/attackProfileRoutes.js',
+      'src/routes/attackEventRoutes.js',
     ].reduce((sum, rel) => sum + gateSites(rel), 0);
-    // 两侧总数必须相等：声明 7 条 ⇔ 源码 7 处挂点。少一处意味着某条声明是凭空写的
+    // 两侧总数必须相等：声明 9 条 ⇔ 源码 9 处挂点。少一处意味着某条声明是凭空写的
     expect(totalSites).toBe(GATED_ROWS.length);
   });
 

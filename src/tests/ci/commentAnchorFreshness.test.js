@@ -298,21 +298,21 @@ function unexplainedExemptions(exemptedKeys, ledgerKeys) {
 const LIVE = [
   {
     in: 'src/middleware/sentry.js',
-    at: 'app.js:250',
+    at: 'app.js:256',
     must: /sentryRequestHandler/,
-    why: 'Sentry 请求处理器挂载点（2026-10-30 预检桶插入 cors 之前：其后全体 +2 行）',
-  },
-  {
-    in: 'src/middleware/sentry.js',
-    at: 'app.js:589',
-    must: /sentryErrorHandler/,
-    why: 'Sentry 错误处理器挂载点（2026-11-02 攻击画像挂载点 +2 后由 :586 移至 :589）',
+    why: 'Sentry 请求处理器挂载点（2026-10-30 预检桶插入 cors 之前：其后全体 +2 行；2026-11-03 i760 #22 app.js 头部告警文案 +1 行后迁 :252；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :253；2026-11-05 攻击检测面接线后迁 :255；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :256）',
   },
   {
     in: 'src/middleware/sentry.js',
     at: 'app.js:592',
+    must: /sentryErrorHandler/,
+    why: 'Sentry 错误处理器挂载点（2026-11-02 攻击画像挂载点 +2 后由 :586 移至 :589；2026-11-03 i760 #22 删 transactionMarker 后迁 :568；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :571；2026-11-05 攻击检测面接线后迁 :576；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :592）',
+  },
+  {
+    in: 'src/middleware/sentry.js',
+    at: 'app.js:595',
     must: /app\.use\(errorHandler/,
-    why: '通用 errorHandler 位置（口径是"在它之前"；2026-11-02 由 :590 移至 :592）',
+    why: '通用 errorHandler 位置（口径是"在它之前"；2026-11-02 由 :590 移至 :592；2026-11-03 i760 #22 后迁 :571；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :574；2026-11-05 攻击检测面接线后迁 :579；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :595）',
   },
   {
     in: 'src/controllers/reportController.js',
@@ -322,9 +322,9 @@ const LIVE = [
   },
   {
     in: 'src/controllers/reportController.js',
-    at: 'auditQueryService.js:317',
+    at: 'auditQueryService.js:316',
     must: /applyAuditDataScope/,
-    why: '同一条判据的第二处调用（17 轮实测原先写的 :200 是无关注释；2026-10-26 统一信封后迁 :314）',
+    why: '同一条判据的第二处调用（17 轮实测原先写的 :200 是无关注释；2026-10-26 统一信封后迁 :314；2026-11-04 攻击告警读面并入注释行（auditQueryService 注释 105→103）上移 :316）',
   },
   {
     in: 'src/services/reportExportService.js',
@@ -354,9 +354,9 @@ const LIVE = [
   },
   {
     in: 'src/services/reportExportService.js',
-    at: 'auditQueryService.js:157',
+    at: 'auditQueryService.js:156',
     must: /\.sort\(\{ timestamp: -1, _id: -1 \}\)/,
-    why: '列表侧实际用的全序（审计）',
+    why: '列表侧实际用的全序（审计；2026-11-04 攻击告警读面并入注释行后上移 :156）',
   },
   {
     in: 'src/config/validate.js',
@@ -384,9 +384,9 @@ const LIVE = [
   },
   {
     in: 'src/tests/auditExportDataScope.test.js',
-    at: 'auditQueryService.js:317',
+    at: 'auditQueryService.js:316',
     must: /applyAuditDataScope/,
-    why: '审计列表侧同一判据',
+    why: '审计列表侧同一判据；2026-11-04 攻击告警读面并入注释行（auditQueryService 注释 105→103）上移 :316）',
   },
   {
     in: 'src/tests/controllers/auditExportManifestBytes.test.js',
@@ -445,59 +445,59 @@ const LIVE = [
   // —— 以下 13 条是第 17 轮 G/H 两线实测出的错锚：站点已改对，登记钉住不再漂 ——
   {
     in: 'src/utils/loggerFlush.js',
-    at: 'index.js:141',
+    at: 'index.js:144',
     must: /logger\.warn\(`收到重复/,
-    why: '二次信号 handler 的 logger.warn（原写 :70，落在 docblock 的空续行上；2026-10-31 取证接线把 gracefulShutdown 的幂等守卫下移一行 ⇒ :122→:123；2026-11-03 入口顶部补 recordStartupAuditTrail 的 require ⇒ :123→:124）',
+    why: '二次信号 handler 的 logger.warn（原写 :70，落在 docblock 的空续行上；2026-10-31 取证接线把 gracefulShutdown 的幂等守卫下移一行 ⇒ :122→:123；2026-11-03 入口顶部补 recordStartupAuditTrail 的 require ⇒ :123→:124；2026-11-04 并行 PROXY_PROTOCOL 接线预估 :147，实接后为 :144）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:206',
+    at: 'app.js:212',
     must: /app\.set\('trust proxy'/,
-    why: 'trust proxy 有效值分支的落点',
+    why: 'trust proxy 有效值分支的落点（2026-11-03 i760 #21/#25 告警文案调整后由 :206 移至 :208；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :209；2026-11-05 攻击检测面接线后迁 :211；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :212）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:520',
-    // 谓词必须带上处理器的形参：:515 是 '/api/metrics'（同样以 app.get('/api' 开头），
+    at: 'app.js:514',
+    // 谓词必须带上处理器的形参：:488 是 '/api/metrics'（同样以 app.get('/api' 开头），
     // 只写前缀会让锚点漂 5 行照样绿（3b 判据实测抓到），故绑定到根路径处理器本体。
     must: /app\.get\('\/api', \(req, res\)/,
-    why: '/api 根路径处理器（原写 :297-298，那是 CSRF 注释；2026-10-25 整改后为 :487；2026-10-26 P-1 整改 /readyz 后迁 :513）',
+    why: '/api 根路径处理器（原写 :297-298，那是 CSRF 注释；2026-10-25 整改后为 :487；2026-10-26 P-1 整改 /readyz 后迁 :513；2026-11-03 i760 #22 响应体最小化删 transactionMarker 后迁 :499；2026-11-04 攻击挂载 :500；2026-11-05 攻击检测面接线后迁 :503；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :514）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:446-497',
+    at: 'app.js:453-493',
     must: /503[\s\S]*\.catch/,
-    why: '/readyz 的 503 双路径：then 里按 mongo.ok 定码 + catch 里硬 503（原写 :258-278 是 body-parser；2026-10-25 整改后为 :435-457）',
+    why: '/readyz 的 503 双路径：then 里按 mongo.ok 定码 + catch 里硬 503（原写 :258-278 是 body-parser；2026-10-25 整改后为 :435-457；2026-11-03 i760 #22 后为 :438-478；2026-11-04 攻击告警挂载后迁 :439-479；2026-11-05 攻击检测面接线后迁 :442-482；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :453-493）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:493',
+    at: 'app.js:491',
     must: /res\.status\(503\)\.json/,
-    why: '头注里点名"两条失败路径"的具体行段（catch 臂的硬 503；2026-10-25 整改后为 :460）',
+    why: '头注里点名"两条失败路径"的具体行段（catch 臂的硬 503；2026-10-25 整改后为 :460；2026-11-03 i760 #22 后为 :476；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :477；2026-11-05 攻击检测面接线后迁 :480；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :491）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:62',
+    at: 'app.js:65',
     must: /checkMongoReady/,
-    why: '加载期解构（原写 :48，那是别的 require）',
+    why: '加载期解构（原写 :48，那是别的 require；2026-11-05 攻击检测面接线（app.js 导入 +1 行）后迁 :65）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:250-251',
+    at: 'app.js:256-257',
     must: /sentryRequestHandler/,
-    why: 'Sentry 三件套前两件',
+    why: 'Sentry 三件套前两件（2026-11-03 i760 #22 后由 :250-251 移至 :252-253；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :253-254；2026-11-05 攻击检测面接线后迁 :255-256；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :256-257）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'app.js:589',
+    at: 'app.js:592',
     must: /sentryErrorHandler/,
-    why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见；2026-11-02 由 :586 移至 :589）',
+    why: '三件套第三件（原写 :348-349，且那种"、:429"续写闸根本看不见；2026-11-02 由 :586 移至 :589；2026-11-03 i760 #22 后迁 :568；2026-11-04 攻击告警挂载（app.js 导入 +1/挂载 +2 行）后迁 :571；2026-11-05 攻击检测面接线后迁 :576；同日审计整改（404 兜底内嵌 unmatchedRequestLimiter + 检测/取证改全站挂载）后为 :592）',
   },
   {
     in: 'src/tests/app/appTrustProxyAndReadyzGuards.test.js',
-    at: 'src/config/validate.js:338',
-    must: /requiresProductionSemantics/,
-    why: 'validateConfig() 首行的非生产早退（原写 :264，那是 MAX_TRUST_PROXY_HOPS 常量；A-1 抽 envSemantics 后迁 :338）',
+    at: 'src/config/validate.js:292',
+    must: /requiresProductionHardening\(\)/,
+    why: 'validateConfig() 首行的非生产早退（原写 :264，那是 MAX_TRUST_PROXY_HOPS 常量；A-1 抽 envSemantics 后迁 :338；2026-11-04 判据更名 requiresProductionHardening 且并行接线预估 :339，实接后为 :338；2026-11-05 工作区收敛批次（validate.js 上方净 −46 行）后早退实为 :292）',
   },
   {
     in: 'src/tests/controllers/auditSummaryCache.test.js',
@@ -555,27 +555,27 @@ const LIVE = [
   },
   {
     in: 'src/services/websocketService/push.js',
-    at: 'src/index.js:474-493',
+    at: 'src/index.js:526-547',
     must: /process\.on\('unhandledRejection'/,
-    why: 'guardSocketHandler 文档引用的 unhandledRejection 兜底口径（2026-10-18 拆分后站点迁至 push.js；2026-11-01 取证接线后由 :466-484 下移至 :511-531；2026-11-03 入口瘦身抽出 startupAuditTrail 后上移至 :474-493）',
+    why: 'guardSocketHandler 文档引用的 unhandledRejection 兜底口径（2026-10-18 拆分后站点迁至 push.js；2026-11-01 取证接线后由 :466-484 下移至 :511-531；2026-11-03 入口瘦身抽出 startupAuditTrail 后上移至 :474-493；2026-11-04 并行 PROXY_PROTOCOL 接线预估 :533-553，实接后为 :541-560；f82418f（票据外置与出口守卫收口）后处理器实为 :526-547）',
   },
   {
     in: 'src/tests/services/websocketHandlerRejectionGuard.test.js',
-    at: 'src/index.js:474-493',
+    at: 'src/index.js:526-547',
     must: /process\.on\('unhandledRejection'/,
-    why: '同一处口径的第二个引用站点（两条既定事实之一；2026-11-01 取证接线后下移至 :511-531，2026-11-03 入口瘦身后上移至 :474-493）',
+    why: '同一处口径的第二个引用站点（两条既定事实之一；2026-11-01 取证接线后下移至 :511-531，2026-11-03 入口瘦身上移至 :474-493，2026-11-04 并行接线预估 :533-553，实接后为 :541-560；f82418f（票据外置与出口守卫收口）后处理器实为 :526-547）',
   },
   {
     in: 'src/utils/transaction.js',
-    at: 'src/index.js:486',
+    at: 'src/index.js:526',
     must: /process\.on\('unhandledRejection'/,
-    why: '事务清理超时不得变成无人持有的拒绝（原写 :446，实为启动期监听区；2026-11-01 取证接线后处理器移至 :511-531，2026-11-03 入口瘦身后移至 :474-493）',
+    why: '事务清理超时不得变成无人持有的拒绝（原写 :446，实为启动期监听区；2026-11-01 取证接线后处理器移至 :511-531，2026-11-03 入口瘦身后移至 :474-493，i760 #22 后为 :487，2026-11-04 并行 PROXY_PROTOCOL 接线预估 :533，实接后为 :541；f82418f（票据外置与出口守卫收口）后处理器实为 :526）',
   },
   {
     in: 'src/tests/utils/transactionTopology.test.js',
-    at: 'src/index.js:486',
+    at: 'src/index.js:526',
     must: /process\.on\('unhandledRejection'/,
-    why: '同一处处理器口径的第二个引用站点（2026-10-03 审计线登记的 :446 已随取证接线迁至 :511，2026-11-03 入口瘦身后迁至 :474）',
+    why: '同一处处理器口径的第二个引用站点（2026-10-03 审计线登记的 :446 已随取证接线迁至 :511，2026-11-03 入口瘦身后迁至 :474，i760 #22 后为 :487，2026-11-04 并行接线预估 :533，实接后为 :541；f82418f（票据外置与出口守卫收口）后处理器实为 :526）',
   },
 ];
 
@@ -594,6 +594,16 @@ const STALE = [
     owner: '历史引文（报告原文，不得改数字）',
     shouldRead: 'src/config/database.js:124',
     mustAfterFix: /exitAfterFlush\(1\)/,
+  },
+  {
+    in: 'src/tests/services/authServiceSideEffectFailureTolerance.test.js',
+    // 2026-09-20 变异实测的**引文**：当时 revokeAllSessionsSafe 在 token.js:181，
+    // 行号是实验记录本身，改数字=篡改历史证据。现处 :178（晋升目标当场可核）。
+    // at 逐字按站点书写形态登记（全限定路径），绑定/采集两侧才对得上。
+    at: 'src/services/authService/token.js:181',
+    owner: '变异实测历史引文（不得改数字）',
+    shouldRead: 'src/services/authService/token.js:178',
+    mustAfterFix: /revokeAllSessionsSafe/,
   },
 ];
 
@@ -746,7 +756,7 @@ describe('层 2 · 无内容锚点（空行 / 只剩注释标记；豁免 = STAL
     expect(bare.length).toBe(1);
     expect(qualified.length).toBe(1);
     expect(occurrences('src/utils/loggerFlush.js', 'index.js:70').length).toBe(0);
-    expect(occurrences('src/utils/loggerFlush.js', 'index.js:141').length).toBe(1);
+    expect(occurrences('src/utils/loggerFlush.js', 'index.js:144').length).toBe(1);
   });
 });
 
@@ -792,7 +802,7 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
   });
 
   test('谓词有牙（正向命中 + 反向不命中），不许跟着行号走', () => {
-    const hit = citedRange('src/middleware/sentry.js', 'app.js:589');
+    const hit = citedRange('src/middleware/sentry.js', 'app.js:592');
     expect(/sentryErrorHandler/.test(hit.text)).toBe(true);
     expect(/绝不可能出现在这一行的符号ZZZ/.test(hit.text)).toBe(false);
     // 本轮之前的真实写法：auditController.js:38 是空行，同一条判据必须判它不含符号
@@ -816,10 +826,12 @@ describe('层 3 · 登记符号谓词（行号在范围内但指错地方：纯�
       expect(s.mustAfterFix.test(r.text)).toBe(true);
     }
     // 反证不依赖"台账里恰好还留着一条 index.js 欠账"：漂移态锚点真正指进去的那一段
-    // （:453-472 = uncaughtException 臂）必须不含被声称的 unhandledRejection——
+    // （:505-524 = uncaughtException 臂）必须不含被声称的 unhandledRejection——
     // 这正是"行号在范围内但指错了臂"会让读者产生的误判。
-    // （2026-11-03 入口瘦身：uncaughtException 臂由 :490-509 上移至 :453-472。）
-    const drifted = rangeText('src/index.js', 453, 472, path.join(ROOT, 'src')).text;
+    // （2026-11-03 入口瘦身：uncaughtException 臂由 :490-509 上移至 :453-472；
+    //   2026-11-04 并行 PROXY_PROTOCOL 接线后移至 :512-531；
+    //   f82418f（票据外置与出口守卫收口）后两臂为 :505-524 / :526-547。）
+    const drifted = rangeText('src/index.js', 505, 524, path.join(ROOT, 'src')).text;
     expect(/process\.on\('unhandledRejection'/.test(drifted)).toBe(false);
     expect(/process\.on\('uncaughtException'/.test(drifted)).toBe(true);
   });
@@ -861,8 +873,9 @@ describe('层 4 · 规模与自排除不许静止', () => {
     expect(classify(mk(5)).resolved / 100).toBeGreaterThanOrEqual(RESOLVE_RATIO_FLOOR);
     // 登记数只许涨不许跌（跌 = 有人删了判据）；晋升一条不该把闸弄红
     expect(LIVE.length).toBeGreaterThanOrEqual(42);
-    // 仅剩一条历史引文欠账：审计报告原文里的 database.js:59 不得被"修成"当前行号。
-    expect(STALE.length).toBe(1);
+    // 两条历史引文欠账：审计报告原文里的 database.js:59 与 2026-09-20 变异实测
+    // 引文里的 token.js:181 都不得被"修成"当前行号——行号是实验记录本身。
+    expect(STALE.length).toBe(2);
   });
 
   test('本文件自身不在扫描集里（自证与真违规必须可区分）', () => {

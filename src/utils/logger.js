@@ -256,22 +256,8 @@ let shippingTransport = null;
 if (shippingUrl) {
   try {
     const { HttpShipperTransport, resolveShippingTarget } = require('./logShipper');
-    // F-215：挂载期先把出站目标解析一遍，再构造 transport。
-    // resolveShippingTarget 原先只在**每个批次发送时**被 _post 调用，于是
-    // `new HttpShipperTransport` 与下面那句「已启用」永远不会因为 URL 无效而失败
-    // ——**这个 catch 抓不到任何跟 URL 有关的错**，它实际只覆盖 require 和构造。
-    // 生产 Node 实测（LOG_SHIPPING_URL 三种取值，捕获 winston 的 console 输出）：
-    //   https://siem.example.test/ingest → saysEnabled=true  saysMountFailed=false（正确）
-    //   htps://siem.example.test/ingest  → saysEnabled=true  saysMountFailed=false（错）
-    //   not-a-url                        → saysEnabled=true  saysMountFailed=false（错）
-    // 也就是说配置写错时：落盘的 combined-*.log 里写着"日志转发已启用"，而且真的挂上了
-    // 一个每批必死的 transport——它会拉起 intervalMs 定时器、把整条日志流堆进
-    // BUFFER_CAP=5000 的缓冲、堆满后裁头留断档标记，而唯一的失败信号是 _flush 里
-    // 每分钟一条、走 console.error 且**不经过 winston** 的告警（容器不采 stderr 就全无声）。
-    // 判据本身早在 logShipperSchemeAllowlist 那轮就修了（非法 scheme 不再
-    // 静默降级成明文出站），该轮注释点名的残留——"运维看到的仍是『日志转发已启用』"
-    // ——就是这里。解析放在数值读取**之前**：一条已经死了的配置不该再刷三条
-    // LOG_SHIPPING_BATCH 之类的告警，操作员只需要看到一句"挂载失败：原因"。
+    // 挂载前验证目标，避免无效 URL 被宣称为「已启用」并持续堆积必定发送失败的缓冲。
+    // 先于数值配置校验，确保无效目标只报告根因，不被批次参数告警淹没。
     const target = resolveShippingTarget(shippingUrl);
     // 这三处原为 `parseInt(env,10) || undefined`，负值会被原样采纳
     // （如 batchSize=-1 → 每批都"超限"）。fallback 传 undefined 保持既有语义：

@@ -244,6 +244,16 @@ describe('reauth ticket HTTP 强制', () => {
     app = createApp();
   });
 
+  afterEach(async () => {
+    // --randomize 会打乱文件内用例顺序：「POST /reauth 成功即开窗」类用例会把
+    // ReauthGrant 窗口行留在库里，而假设「无窗」的用例（无票据 → 401 REQUIRED、
+    // 他人票据 → INVALID、会话窗口三条读取）在窗口存活期内会全部翻红。
+    // 每个用例结束即清窗——与文件后半段「每个用例自带干净起点」的既有口径对齐。
+    await ReauthGrant.deleteMany({
+      userId: { $in: [readerUserId, writerUserId, sessionUserId] },
+    }).catch(() => {});
+  });
+
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0) {
       await User.deleteMany({ username: new RegExp(`^rkt.*${stamp}$`) }).catch(() => {});
@@ -317,8 +327,14 @@ describe('reauth ticket HTTP 强制', () => {
   });
 
   test('会话窗口：一次 step-up 之后，同一会话的三条受保护读取都不再要求票据', async () => {
-    // 上一条用例刚为该会话开过窗口（POST /reauth 成功即开），这里刻意**不带票据**：
-    // 窗口是服务端状态，客户端手里没有任何可重放的凭据。
+    // 自含开窗：不再依赖「上一条用例刚开过窗」——--randomize 会打乱文件内用例顺序，
+    // 上一条不再可靠；文件级 afterEach 也统一清窗。窗口是服务端状态，
+    // 客户端手里没有任何可重放的凭据。
+    const stepUp = await request(app)
+      .post('/api/security/reauth')
+      .set('Authorization', `Bearer ${readerToken}`)
+      .send({ currentPassword: readerPassword });
+    expect(stepUp.status).toBe(200);
     for (const path of [
       '/api/security/alerts',
       '/api/security/audit-logs?limit=1',

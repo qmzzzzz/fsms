@@ -1,10 +1,4 @@
-/**
- * 刷新令牌轮换与登出吊销
- *
- * 自 authService.js 拆出。两者共用「把某个 refresh token 变成已吊销状态」这一
- * 底层能力（revokeOneRefreshToken），放在一起是为了让「轮换失败时的吊销」与
- * 「登出时的吊销」永远走同一段代码，而不是两处各调一次 API 却各自演化。
- */
+// 刷新与登出共用令牌黑名单能力，吊销失败都不得宣称已完成。
 
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
@@ -235,9 +229,7 @@ async function resolveRotationSession(rotateSid) {
     // 按 EXPIRED 归类——两者对客户端都是"重新登录"，安全语义等价，fail-closed 不变。
     const doc = sessionState.session || null;
     const expired =
-      !doc ||
-      doc.status === 'expired' ||
-      (doc.expiresAt && new Date(doc.expiresAt) <= new Date());
+      !doc || doc.status === 'expired' || (doc.expiresAt && new Date(doc.expiresAt) <= new Date());
     if (expired) {
       logger.warn(`Refresh 拒绝 - 会话已自然过期：sid=${String(rotateSid).slice(0, 8)}…`);
       return 'SESSION_EXPIRED';

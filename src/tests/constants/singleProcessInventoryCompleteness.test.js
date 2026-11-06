@@ -51,6 +51,13 @@ const REQUIRED_MODULES = [
   'services/auditMonitor.js',
   'services/canaryWatch.js',
   'services/honeypotWatch.js',
+  // 2026-11-05 攻击检测面四件：recentByFingerprint / stormCounters 是「每指纹窗口内
+  // 只留痕告警一次」的去重状态，按设计每进程一份（多实例各自去重，与上面 watch 家族
+  // 同族——重复告警可容忍，跨进程外置反而引入一致性负担）。
+  'middleware/injectionSignature.js',
+  'services/injectionDetector.js',
+  'services/loginRateLimitAudit.js',
+  'services/scanProbeDetector.js',
   'services/forensicTrigger.js',
   'services/ipPoolBan.js',
   'services/websocketService/index.js',

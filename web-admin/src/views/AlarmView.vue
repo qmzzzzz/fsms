@@ -553,9 +553,17 @@ const refreshAll = async () => {
 // 后端在报警创建/派单/到场/结单等状态迁移后向 'alarm' 房间推送 notification。
 // 收到就刷新列表与统计：此前本页没有任何订阅，值班员只能手动刷新，
 // 新报警要等下一次操作才出现在台账里。
+// WS 通知路径走 800ms trailing debounce（G10）：一次事故往往连发多条通知，
+// 每条都刷 2 个 GET 纯属风暴，窗口内的多条合并为一轮；按钮与各操作后的
+// refreshAll 调用是用户主动路径，不走 debounce。
+let notificationRefreshTimer = null
+const refreshAllDebounced = () => {
+  clearTimeout(notificationRefreshTimer)
+  notificationRefreshTimer = setTimeout(refreshAll, 800)
+}
 useRealtimeRefresh({
   rooms: ['alarm'],
-  subscriptions: [{ event: 'notification', handler: refreshAll }],
+  subscriptions: [{ event: 'notification', handler: refreshAllDebounced }],
   label: 'AlarmView',
 })
 

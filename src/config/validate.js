@@ -2,6 +2,8 @@
 // 本文件只把它的结论接到启动闸上。依赖方向 config → utils（trustedProxies 依赖
 // utils/ipUtils 的 CIDR 原语），与 config/swagger.js 同向，不构成环。
 const trustedProxies = require('./trustedProxies');
+// PROXY_PROTOCOL 开关解析与生产闸收集器（ADR-021）：判据与长论证见 config/proxyProtocol.js
+const proxyProtocol = require('./proxyProtocol');
 // 部署凭据强度 / CORS 来源 / 告警 webhook 配置三组启动闸（2026-10-24 审计），
 // 判据与取值理由见该文件头注释；独立成模块以避开本文件的体积棘轮。
 const deploymentGuards = require('./deploymentCredentialGuards');
@@ -21,16 +23,8 @@ const WEAK_SECRETS = [
   '',
 ];
 
-// 占位符形态：模板示例值必须判弱。仅靠长度不够——
-// 原 `.env.example` 的 JWT 占位符长 33 字符，直接通过旧校验。
-// 【实测校准（2026-09-17）】以下模式全部要求「整串即占位符」或「命中不可随机
-// 生成的形态」，而非子串命中。子串式模式在随机 base64 上会稳定误伤——
-// 50 万次采样实测：/xxx+/i 命中 5 例、/todo|fixme/i 命中 39 例、/dummy/i 命中 2 例
-//（如 'hUe65ONT+Uf+8bhWqDjT94s15137oS+jq+b4+grY78DvL4ehHWlkSDmesntODoAr'，
-// 熵 5.00——高于本函数放行的全部真实密钥）。误伤的后果是标准生成流程起不来。
-// 另：短关键词（todo/fixme/dummy/example）后必须紧跟分隔符或整串结束，
-// 用 [\w-]* 允许纯字母数字尾随会让「恰好以这 4~7 个字母开头」的随机串被误判
-// （200 万次 randomBytes(48).base64 采样实测 1 例，'TOdO80RYDsnEBF...'）。
+// 长模板占位符也必须判弱；只匹配整串或随机生成不会出现的形态，避免误伤 base64 密钥。
+// 短关键词后须紧跟分隔符或结束，不能把恰好以关键词开头的随机串判弱。
 const PLACEHOLDER_PATTERNS = [
   /[<>]/, // '<CHANGE_ME>' / '<替换为 ... 的输出>'：尖括号只出现在模板占位符中
   /^change[-_]?(me|this|in[-_]?production)[-_\w]*$/i, // 整串为 change-me 系短语
@@ -90,47 +84,9 @@ const shannonEntropy = (value) => {
   return bits;
 };
 
-/**
- * 密钥强度判定（加固）
- *
- * 判据（任一命中即判弱）：
- *   1. 空值，或命中 WEAK_SECRETS 黑名单；
- *   2. 长度 < 32 字符；
- *   3. 命中 PLACEHOLDER_PATTERNS（模板占位符形态，整串匹配为主）；
- *   4. 周期 ≤ 16 的重复串——整串熵上界仅 log2(单元空间) 量级；
- *   5. 香农熵 < 2.0 bit/char。
- *
- * 说明：审计报告曾建议「全数字判弱」，实测不可采纳——`openssl rand -hex 32`
- * 的 64 字符产出偶尔全为数字（50 万采样 2 例），会误伤合法密钥。
- * 需要拦的 '1234567890...' 类序列已被低熵与循环拼接覆盖。
- *
- * 【阈值 2.0 与全部模式的实测依据】（2026-09-17，本机 Node v24.15.0）
- *   - scripts/generate-secrets.js 的实际产出（本函数必须放行的正样本）：
- *     jwt=b64(48) 64 字符、aes/hmac=hex(32) 64 字符、admin 口令=b64(24) 32 字符。
- *     三类各 300 万次采样，最低香农熵 4.57 / 3.27 / 3.73。
- *   - .env.example 注释给出的 `openssl rand -hex 16`（32 字符，HMAC 的备选形式）：
- *     300 万次采样最低 2.58。故取 2.0，对最坏观测值仍留 0.58 bit 余量。
- *   - 未采用审计报告举例的「去重字符数 < 10」与「熵 < 3.5」：
- *     实测两者都会误伤合法密钥——hex(16) 的 32 字符串中，去重字符数最小 7、
- *     香农熵有 18.7% 的样本低于 3.5。故改用「占位符形态 + 循环拼接 + 极低熵」组合。
- *
- * 【取舍与残余风险（如实记录）】
- *   形如 'this-is-a-long-pure-lowercase-english-phrase' 的纯小写英文短语，
- *   香农熵 3.76，与既有测试夹具 'strong-random-jwt-secret-that-is-long-enough'
- *   （3.86）数值重叠，无法在不误伤夹具的前提下判弱——夹具断言位于
- *   src/tests/config/validate.test.js（不在本次改动写集内）。因此本函数**不**按
- *   「英文短语」一刀切，只拦占位符形态。
- *   残余风险：运维若真手写一句长英文短语当密钥，本校验会放行。该类值约
- *   3.7 bit/char（44 字符 ≈ 163 bit），弱于随机密钥、但强于一切模板占位符，
- *   属可接受残余。
- *
- * 【校准后无误伤】按上述判据，对 generate-secrets.js 与 .env.example 注释给出的
- * 四种生成形式各采样 100 万次，判弱命中数均为 0（b64_48 / hex_32 / b64_24 /
- * hex_16）。校准过程中发现并修掉的误伤见 PLACEHOLDER_PATTERNS 上方注释。
- *
- * @param {string} value 待判定值
- * @returns {boolean} true=弱（生产环境应拒绝启动）
- */
+// 不把全数字或字符种类少直接判弱：合法随机 hex 密钥也可能命中。
+// 熵阈值 2.0 为随机生成留余量：hex(16) 的 300 万次采样最低 2.58，3.5 会误拒 18.7%。
+// 占位符、短周期和极低熵只拦明显弱值；长英文短语可能通过，不代表已证明密钥随机。
 function isWeakSecret(value) {
   if (!value) return true;
   if (WEAK_SECRETS.includes(value)) return true;
@@ -378,6 +334,8 @@ function validateConfig() {
   // 开发直接调用 createApp；生产入口在这里硬失败，避免安全边界只靠日志提醒。
   const rawTrustedProxyCidrs = process.env[trustedProxies.ENV_KEY];
   errors.push(...trustedProxies.parseTrustedProxyCidrs(rawTrustedProxyCidrs).errors);
+  // PROXY protocol（ADR-021）：值域 + on 必配名单的生产硬闸，判据见 config/proxyProtocol.js
+  proxyProtocol.collectProxyProtocolGateErrors(errors);
   collectTlsErrors(errors);
   collectTimezoneErrors(errors);
   collectJwtDurationErrors(errors);
@@ -693,6 +651,7 @@ const STAGING_SKIPPED_GATES = [
   'ALLOWED_HOSTS',
   '文档凭据',
   'TRUST_PROXY_HOPS 与 TRUSTED_PROXY_CIDRS',
+  'PROXY_PROTOCOL 与 TRUSTED_PROXY_CIDRS',
   'TLS 终结',
   'TZ_BUSINESS',
 ];

@@ -74,8 +74,16 @@ const EXFIL_ACTIONS = Object.freeze([
   'report_export_pii',
   'security_audit-logs_export',
 ]);
-const INJECTION_ACTIONS = Object.freeze(['query_param_rejected']);
-const SCAN_ACTIONS = Object.freeze(['malformed_request_blocked']);
+const INJECTION_ACTIONS = Object.freeze([
+  'query_param_rejected',
+  'nosql_injection_attempt',
+  'sql_injection_attempt',
+]);
+const SCAN_ACTIONS = Object.freeze([
+  'malformed_request_blocked',
+  'scan_probe_detected',
+  'scan_probe_storm',
+]);
 const RATE_LIMIT_ACTIONS = Object.freeze(['rate_limit_abuse']);
 const BLOCKLIST_ACTIONS = Object.freeze(['ip_blacklist_blocked']);
 const SUSPICIOUS_ACTIONS = Object.freeze([

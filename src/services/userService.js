@@ -87,6 +87,18 @@ function toMaskedAdminUser(doc) {
   return obj;
 }
 
+async function attachLastLoginIp(list, enabled) {
+  if (!enabled || !list.length) return list;
+  const rows = await User.find({ _id: { $in: list.map((u) => u._id) } })
+    .select('lastLoginIp')
+    .lean();
+  const byId = new Map(rows.map((r) => [String(r._id), r.lastLoginIp]));
+  list.forEach((u) => {
+    if (byId.get(String(u._id))) u.lastLoginIp = byId.get(String(u._id));
+  });
+  return list;
+}
+
 class UserService {
   async buildListQuery(filters, dataScope) {
     const query = { ...HONEYPOT_EXCLUDED_FILTER }; // 列表与计数同源：蜜罐账户不得出现在任何面向人的用户清单/计数里
@@ -139,7 +151,7 @@ class UserService {
     return { roleFound: true, query };
   }
 
-  async listUsers(query, sort, page, limit) {
+  async listUsers(query, sort, page, limit, opts = {}) {
     const listQuery = withListBudget(User.find(query))
       .populate(SIMPLE_ROLE_POPULATE)
       .select(User.RESPONSE_EXCLUDE_PII_VISIBLE)
@@ -153,17 +165,21 @@ class UserService {
       listQuery.collation(User.USERNAME_COLLATION);
     }
     const [users, count] = await Promise.all([
-      listQuery.then((docs) => docs.map(toMaskedAdminUser)),
+      listQuery.then((docs) =>
+        attachLastLoginIp(docs.map(toMaskedAdminUser), opts.includeLastLoginIp)
+      ),
       User.countDocuments(query, listCountOptions()),
     ]);
     return { users, count };
   }
 
-  async getUserDetail(id) {
+  async getUserDetail(id, opts = {}) {
     const user = await User.findById(id)
       .populate(DETAIL_ROLE_POPULATE)
       .select(User.RESPONSE_EXCLUDE_PII_VISIBLE);
-    return toMaskedAdminUser(user);
+    const masked = toMaskedAdminUser(user);
+    if (masked) await attachLastLoginIp([masked], opts.includeLastLoginIp);
+    return masked;
   }
 
   async getCreatedUser(id) {

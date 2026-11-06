@@ -10,7 +10,7 @@
 ```mermaid
 flowchart TB
   subgraph Client["前端 web-admin（Vue3 + Pinia + Element Plus）"]
-    Views["视图层：仪表盘/设备/告警/巡检/用户/角色/报表/审计/Profile/权限授予/登录/注册/安全分析（画像/撞库/取证）等 18 个 View"]
+    Views["视图层：仪表盘/设备/告警/巡检/用户/角色/报表/审计/Profile/权限授予/登录/注册/安全分析（攻击告警/画像/撞库/取证）等 19 个 View"]
     Store["Pinia store（auth/app）"]
     Api["utils/api.js（axios 封装）"]
     Ws["utils/websocket.js（socket.io-client，引用计数 + 房间）"]
@@ -19,9 +19,9 @@ flowchart TB
 
   subgraph Backend["后端（Express，src/）"]
     MW["中间件链：requestId → metrics → Sentry → IP黑名单 → CORS →\n安全头/限流/查询防护 → morgan → auditLog"]
-    Routes["路由（15）：auth / user / role / permission / device /\nalarm / inspection / report / security / avatar / version / wellKnown /\nforensic / stuffingProfile / attackProfile"]
+    Routes["路由（16）：auth / user / role / permission / device /\nalarm / inspection / report / security / avatar / version / wellKnown /\nforensic / stuffingProfile / attackProfile / attackEvent"]
     Ctrl["控制器（16）：auth / user / security / role / permission /\ndevice / alarm / inspection / report / audit / avatar / mfa /\nipList / privilege / rolePermission / forensic"]
-    Svc["服务层（107）：sessionService / userPermissionService /\ncaptchaService / auditBuffer / auditMonitor / statsCache / securityAlert /\nDevice·Alarm·Inspection Service 等（另有 authService / websocketService /\ninitData / sharedCache 子目录）"]
+    Svc["服务层（111）：sessionService / userPermissionService /\ncaptchaService / auditBuffer / auditMonitor / statsCache / securityAlert /\nDevice·Alarm·Inspection Service 等（另有 authService / websocketService /\ninitData / sharedCache 子目录）"]
     Utils["工具：loginCipher / auditChain / encryption /\nlogger(winston) / response 封装"]
     Models["Mongoose 模型（18）"]
   end
@@ -264,7 +264,7 @@ flowchart TB
 
 ## 7. 审计链签名检查点（2026-10-20，审计 S-8）
 
-链内校验（`services/auditChainVerify.js`）只能证明「已读到的记录彼此链接自洽」，对两类伪造天然失明：在已知锚点后插入 `prevHash` 指向旧 hash 的分支记录，以及尾部截断。`services/auditChainCheckpoint.js` 用**带 HMAC 签名的 JSONL 检查点**补上这两类盲区：
+链内校验（`services/auditChainVerify.js`）只能证明「已读到的记录彼此链接自洽」，对两类伪造天然失明：链头被整段替换（锚点不再指向真实头部），以及链尾被截断回滚到锚点之前。`services/auditChainCheckpoint.js` 用**带 HMAC 签名的 JSONL 检查点**补上这两类盲区；锚点前后的插入/分叉不在此列——由链内校验的 `chain_fork`（一父两子）与外锚比对检出：
 
 ```bash
 # 定期执行（建议 cron 每小时，检查点越频繁可检出窗口越小）
@@ -276,6 +276,6 @@ MONGODB_URI_FILE=./secrets/mongodb_uri HMAC_SECRET_FILE=./secrets/hmac_secret \
 ```
 
 - 检查点记录 `headId/headHash/headHmac/recordCount/createdAt`，默认写 `logs/audit-chain-checkpoints.jsonl`（目录 0700、文件 0600），可用 `--file=` 改路径。
-- 检出面：检查点文件被改（`signature_invalid`）、头部被替换（`head_hash_mismatch`/`head_hmac_mismatch`）、锚点前插入或删除（`count_mismatch`）、链被截断到锚点之前或删空（`tail_rolled_back`）。
+- 检出面：检查点文件被改（`signature_invalid`）、头部被替换（`head_hash_mismatch`/`head_hmac_mismatch`）、链被截断到锚点之前或删空（`tail_rolled_back`）。`recordCount` 只是创建时的估算、不参与判红（TTL 裁剪与迟到批写都会让它对不上，计数判据已在诚实库上误报退役）——插入/分叉由链内 `chain_fork` 与外锚比对收口（`services/auditChainCheckpoint.js` 头注的能力边界段）。
 - 未配置 `HMAC_SECRET` 时 `create` 拒绝执行、`verify` 判失败——无密钥的锚点可被随意重写，不能作为证据。
 - **残余边界**：检查点文件默认与数据库同机。只改 Mongo 不改文件会被检出；能同时改两者的人可以一起伪造。要获得外部可验证性，必须把文件（或每行签名）周期性复制到独立介质（对象存储 WORM、时间戳服务）——本模块只产出与验证锚点，不负责传输。检查点之后新增又删除的记录，本条锚点也看不见；需要更晚的检查点或外部日志留存比对。

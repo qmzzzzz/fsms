@@ -207,9 +207,9 @@ describe('canaryWatch 幽灵名检测', () => {
   });
 
   describe('getStatus 默认口径', () => {
-    test('默认名单：10 个、未对账、无配置错误', () => {
+    test('默认名单：16 个、未对账、无配置错误', () => {
       expect(canaryWatch.getStatus()).toEqual({
-        count: 10,
+        count: 16,
         fromEnv: false,
         checked: false,
         shadowed: null,
@@ -224,6 +224,57 @@ describe('canaryWatch 幽灵名检测', () => {
       expect(status.fromEnv).toBe(true);
       expect(status.configErrors).toHaveLength(2);
       expect(status.configErrors.every((m) => m.includes('空条目'))).toBe(true);
+    });
+  });
+
+  // 渗透测试 i760 #28：fsmsadmin 曾不在名单内，公开注册实测被冒名注册成功；
+  // 名单扩充之外，注册路径还必须与登录路径共用同一条探测留痕通道。
+  describe('注册路径的哨兵闸（authService.registerUser）', () => {
+    test('哨兵名注册：被拒为 DUPLICATE（对外模糊拒绝）且审计留痕落库', async () => {
+      const authService = require('../../services/authService');
+      const captchaService = require('../../services/captchaService');
+      const { SystemConfig } = require('../../models');
+      // 验证码闸走部署侧关停形态（i760 环境即如此）；verify 仍桩掉防误触
+      const verifySpy = jest.spyOn(captchaService, 'verify').mockResolvedValue(true);
+      const switchSpy = jest
+        .spyOn(SystemConfig, 'captchaSwitch')
+        .mockImplementation(async (kind) => kind !== 'register');
+      try {
+        const result = await authService.registerUser(
+          {
+            username: 'fsmsadmin',
+            email: `${stamp}fsms@example.com`,
+            password: randomPassword(),
+            privacyConsent: true,
+          },
+          {
+            req: {
+              method: 'POST',
+              originalUrl: '/api/auth/register',
+              get: () => 'jest-agent',
+              ip: '198.51.100.41',
+              connection: {},
+            },
+          }
+        );
+        // 对外与重名同口径：不新增 outcome、不暴露"这是保留名"
+        expect(result.outcome).toBe('DUPLICATE');
+        // 探测留痕与登录路径同一通道：critical 审计行、method/path 指向注册端点
+        const rows = await canaryRows('fsmsadmin');
+        expect(rows.length).toBeGreaterThanOrEqual(1);
+        const row = rows[rows.length - 1];
+        expect(row.riskLevel).toBe('critical');
+        expect(row.method).toBe('POST');
+        expect(row.path).toBe('/api/auth/register');
+        expect(row.reason).toBe('canary_username_probe');
+      } finally {
+        verifySpy.mockRestore();
+        switchSpy.mockRestore();
+        await AuditLog.deleteMany({
+          action: 'canary_username_attempt',
+          username: 'fsmsadmin',
+        }).catch(() => {});
+      }
     });
   });
 });

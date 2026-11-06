@@ -253,9 +253,199 @@ describe('私有仓 SAST（Semgrep）工作流的不变量', () => {
     }
   });
 
-  test('9 文档与工作流互指：缺口的登记、规则包与工作流的路径都要能被读到', () => {
+  test('9 文档与工作流互指：缺口的登记、规则包与工作流的路径必须能被读到', () => {
     expect(doc).toContain('.github/workflows/sast.yml');
     expect(doc).toContain('.github/semgrep/rules.yml');
     expect(doc).toContain('deployment/dependency-sla.json');
+  });
+});
+
+/**
+ * W3 命令执行守门（攻击检测面 2026-11-05）：src/ 运行时 child_process 的执行面按**调用点**钉死。
+ *
+ * 背景（探明结论）：fsms 应用进程内**没有**可被注入的命令执行面——升级管道是
+ * "文件队列 + 宿主固定脚本"，运行时调用点只有 buildInfo.js 的固定 argv git 调用与
+ * filePermission.js 的 icacls ACL 收紧（目标路径来自内部目录常量而非用户输入）。
+ * 既然没有面，防护的形态就不是运行时检测，而是**结构性守门**。
+ *
+ * 【2026-11-05 审计整改：原闸只是文件白名单，"杜绝执行面静默长大"是声称不是事实】
+ * 原判据只比"哪些文件 require child_process"这个**集合**，于是三件事都能静默发生：
+ *   ① 白名单文件内**新增**一处 exec 调用——文件早在册，集合比对一动不动；
+ *   ② 把 argv 从字面量换成拼接用户输入——集合判据根本不看实参怎么来的；
+ *   ③ 改写成 `require('node:child_process')`——Node ≥16 的等价写法，原正则只认裸名 ⇒ 整道闸静默失效。
+ * 现在的判据在 src/tests/ci/helpers/childProcessGate.js：用 eslint 自己的解析器建 AST（解析失败即红，不退回正则），
+ * 逐文件检查加载入口形态（含 node:、ESM import、动态 import()、别名/计算/遮蔽 require、
+ * module.createRequire、process.getBuiltinModule），并对照 CONTRACTS 钉住每个调用点的
+ * 命令名、调用次数、以及 argv/options 构造函数与来源的**完整 AST 签名**（SHA-256，忽略位置与
+ * 注释、保留语义）。①②③ 三类变形各自撞上 unknown-call / call-count / signature / binding。
+ * 唯一改法是同批更新 CONTRACTS：填新签名前必须人工复核 argvTrust 那段论证——签名是哈希，
+ * 论证是给人看的，闸只保证这一步绕不过去。
+ * shell:true / eval 形态另有 'fsms-child-process-shell' 与 'fsms-dynamic-code-execution'
+ * 两条 Semgrep 规则在 8 号用例里零命中钉着；签名同样会因为多出 `shell: true` 而变红，两处互为纵深。
+ */
+describe('src 运行时 child_process 执行面（W3 命令执行守门）', () => {
+  const { checkChildProcess, CONTRACTS } = require('./helpers/childProcessGate');
+
+  // 白名单：新增站点必须随附 argv 形态论证（固定 argv / 无用户输入 / 无 shell）
+  const ALLOWLIST = [
+    'src/config/buildInfo.js', // execFileSync('git', 固定 argv, 1s 超时, 开发态 buildId 兜底
+    'src/utils/filePermission.js', // execFileSync('icacls', 固定 argv 数组, 密钥文件 ACL 收紧; 目标路径来自内部目录常量而非用户输入
+  ];
+
+  const relOf = (abs) => path.relative(ROOT, abs).split(path.sep).join('/');
+  /** AST 闸只吃 JS（.vue 由 SFC 编译器解析，喂进去只会得到无意义的 parse 红） */
+  const srcJsFiles = () =>
+    scanFiles()
+      .map(relOf)
+      .filter((rel) => rel.startsWith('src/') && /\.(?:js|cjs|mjs)$/.test(rel));
+
+  test('src/ 生产代码逐文件过闸：加载面与白名单逐字相等且零违规', () => {
+    const files = srcJsFiles();
+    expect(files.length).toBeGreaterThan(300); // 扫描面空转 = 判据退化成恒真，必须与"零命中"分开红
+    const violations = [];
+    const loaders = [];
+    for (const rel of files) {
+      const result = checkChildProcess(rel, read(rel));
+      if (result.loads) loaders.push(rel);
+      for (const v of result.violations) {
+        violations.push(`${rel}:${v.line ?? '-'} ${v.code} ${v.message}`);
+      }
+    }
+    expect(violations).toEqual([]);
+    expect(loaders.sort()).toEqual([...ALLOWLIST].sort());
+    expect(Object.keys(CONTRACTS).sort()).toEqual([...ALLOWLIST].sort());
+  });
+
+  test('白名单契约不得被掏空：每个调用点有 argv 论证，每个 pin 是真签名', () => {
+    for (const [rel, contract] of Object.entries(CONTRACTS)) {
+      // calls 空 ⇒ unknown-call / call-count 无处挂靠；pins 空 ⇒ 只剩"命令名 + 次数"，
+      // argv 与 options 可以随意改，正是审计指出的第②类静默变形
+      expect(Object.keys(contract.calls).length).toBeGreaterThan(0);
+      expect(Object.keys(contract.pins).length).toBeGreaterThan(0);
+      for (const [name, spec] of Object.entries(contract.calls)) {
+        expect(`${rel} ${name} command=${spec.command}`).toMatch(/command=[a-z][\w.-]*$/);
+        expect(Number.isInteger(spec.count) && spec.count > 0).toBe(true);
+        // argvTrust 是这道闸唯一的人类可读论证：签名变了要靠它判断新 argv 是否仍可信
+        expect(`${rel} ${name} argvTrust 过短：${spec.argvTrust}`).toMatch(/argvTrust .{20,}$/);
+      }
+      for (const [name, digest] of Object.entries(contract.pins)) {
+        // 'pending' 之类的占位签名为真时恒红，但被人改成空串或注释掉就是恒绿——形态也要钉
+        expect(`${rel} pin ${name}=${digest}`).toMatch(/=[0-9a-f]{64}$/);
+      }
+    }
+  });
+
+  test('判据有牙：合成变形必须变红，注释与领域字段必须不红', () => {
+    const buildInfo = read('src/config/buildInfo.js');
+    const filePermission = read('src/utils/filePermission.js');
+    const codesOf = (rel, text) => checkChildProcess(rel, text).violations.map((v) => v.code);
+    const mutated = (base, from, to) => {
+      const out = base.replace(from, to);
+      expect(out).not.toBe(base); // 替换没命中 = 本条自证空转，先红在这
+      return out;
+    };
+
+    // ① 白名单文件内**新增**一处调用（原闸对这条完全无感）
+    expect(
+      codesOf(
+        'src/config/buildInfo.js',
+        mutated(
+          buildInfo,
+          'module.exports = {',
+          "const readGitTags = () => execFileSync('git', ['tag'], { cwd: ROOT });\nmodule.exports = {"
+        )
+      )
+    ).toContain('unknown-call');
+    // ② 改 argv 字面量
+    expect(
+      codesOf('src/config/buildInfo.js', mutated(buildInfo, '--short=12', '--short=7'))
+    ).toContain('signature');
+    // ③ 给已批准的调用加 shell（argv 交给 shell 解释）
+    expect(
+      codesOf(
+        'src/utils/filePermission.js',
+        mutated(
+          filePermission,
+          "const execOpts = { stdio: 'pipe', windowsHide: true };",
+          "const execOpts = { stdio: 'pipe', windowsHide: true, shell: true };"
+        )
+      )
+    ).toContain('signature');
+    // ④ 换二进制名
+    expect(
+      codesOf(
+        'src/utils/filePermission.js',
+        mutated(filePermission, "'icacls', resetArgv", "'cmd', resetArgv")
+      )
+    ).toContain('unknown-call');
+    // ⑤ 绑定形态：别名 require 后 execFileSync 不再是批准的那个
+    expect(
+      codesOf(
+        'src/config/buildInfo.js',
+        mutated(
+          buildInfo,
+          "const { execFileSync } = require('child_process');",
+          "const cp = require('child_process');\nconst execFileSync = cp.execSync;"
+        )
+      )
+    ).toContain('binding');
+    // ⑥ node: 前缀 / ESM / 动态 import()：原正则的三条旁路，未登记文件一律红
+    expect(
+      codesOf(
+        'src/services/reportExportService.js',
+        "require('node:child_process').execSync('ls');"
+      )
+    ).toContain('unregistered-module');
+    expect(
+      codesOf(
+        'src/services/reportExportService.js',
+        "import { exec } from 'node:child_process';\nexec('ls');"
+      )
+    ).toContain('unregistered-module');
+    expect(
+      codesOf(
+        'src/utils/filePermission.js',
+        `${filePermission}\nconst lazy = () => import('child_process');\n`
+      )
+    ).toContain('load-count');
+    // ⑦ 加载器旁路：module.createRequire / process.getBuiltinModule / 计算访问 / 遮蔽 require
+    expect(
+      codesOf(
+        'src/services/reportExportService.js',
+        "module.createRequire(__filename)('child_process');"
+      )
+    ).toContain('unsupported-loader');
+    expect(
+      codesOf('src/services/reportExportService.js', "process.getBuiltinModule('child_process');")
+    ).toContain('unsupported-loader');
+    expect(
+      codesOf('src/services/reportExportService.js', 'globalThis.require("child_process");')
+    ).toContain('unsupported-loader');
+    expect(
+      codesOf(
+        'src/config/buildInfo.js',
+        mutated(
+          buildInfo,
+          "const fs = require('fs');",
+          "function require(name) { return { name }; }\nconst fs = require('fs');"
+        )
+      )
+    ).toContain('unsupported-loader');
+    // ⑧ 解析失败必须红，不能退回正则"猜"一个结论
+    expect(codesOf('src/config/buildInfo.js', `${buildInfo}\nconst = ;\n`)).toContain('parse');
+
+    // 不红的两件事：注释里的调用不算执行面；`module` 作为领域字段名（本仓权限/蜜罐的常态）不算加载器
+    expect(
+      codesOf(
+        'src/config/buildInfo.js',
+        mutated(buildInfo, '// ', "// execFileSync('rm', ['-rf', ROOT]); ")
+      )
+    ).toEqual([]);
+    expect(
+      codesOf(
+        'src/services/reportExportService.js',
+        'const getPermissions = (req) => {\n  const { page = 1, module, type } = req.query;\n  return listPermissions({ module, type, page });\n};\nmodule.exports = { getPermissions };\n'
+      )
+    ).toEqual([]);
   });
 });

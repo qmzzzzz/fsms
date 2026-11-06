@@ -154,6 +154,8 @@ const ROUTE_TABLE = Object.freeze([
   need('GET', '/api/security/audit-logs/:id', 'security:audit', 'reauth401'),
   need('GET', '/api/security/stuffing-profile', 'security:audit', 'reauth401'), // 撞库画像读口（ADR-013 P2 情报）：真实链过权限闸后仍要票，陷阱回同一句 401——旧口径「与真实 403 逐字相同」在呈现身份持有 security:audit 之后不再成立
   need('GET', '/api/security/attack-profile', 'security:audit', 'reauth401'), // 单 IP 攻击行为画像：与撞库画像同权限面/同缺票闸
+  need('GET', '/api/security/attack-events', 'security:audit', 'reauth401'),
+  need('GET', '/api/security/attack-events/summary', 'security:audit', 'reauth401'),
   need('GET', '/api/security/config/allowPublicRegistration', 'security:config', 'decoy-summary'),
   need('PUT', '/api/security/config/allowPublicRegistration', 'security:config', 'deny403'),
   need('GET', '/api/security/config/loginCaptchaEnabled', 'security:config', 'decoy-summary'),

@@ -28,10 +28,12 @@ const {
   ipLimiter,
   preflightLimiter,
   staticSurfaceLimiter,
+  unmatchedRequestLimiter,
   auditLog,
   forensicCapture,
   queryLengthLimit,
   queryScalarGuard,
+  injectionSignature,
   createOriginCheck,
   checkIPBlacklist,
   authenticate,
@@ -48,6 +50,7 @@ const {
   sentryErrorHandler,
 } = require('./middleware/sentry');
 const requestId = require('./middleware/requestId');
+const { noteUnmatchedRequest } = require('./services/scanProbeDetector');
 const { redactUrlQuery } = require('./utils/helpers');
 const { DEV_CORS_ORIGINS } = require('./utils/constants');
 const {
@@ -61,7 +64,7 @@ const {
 const ApiResponse = require('./utils/apiResponse');
 const { checkMongoReady, checkRedisReady } = require('./utils/healthChecks');
 const { multiInstanceReadinessBlocker } = require('./constants/runtime');
-const { getTransactionTopology, transactionReadinessBlocker } = require('./utils/transaction');
+const { transactionReadinessBlocker } = require('./utils/transaction');
 const swagger = require('./config/swagger');
 const { verifyBuildPin: verifyLoginKeyPin } = require('./utils/loginCipher');
 
@@ -81,6 +84,7 @@ const {
   avatarRoutes,
   stuffingProfileRoutes,
   attackProfileRoutes,
+  attackEventRoutes,
 } = require('./routes');
 
 const sentryInitialized = initSentry();
@@ -132,15 +136,17 @@ function applyTrustedProxyPolicy(app, trustProxyHops) {
     return;
   }
   if (trustProxyHops.hops > 0 && !proxies.configured) {
-    // 残余风险提示位：启用代理头信任却未声明代理网段 ⇒ 判据回落到「对端属私网/回环即可信」，
-    // 同容器网络内任意进程伪造一条 XFF 即可冒用。M-2：生产环境按 `error` 打印、其余 `warn`（不阻断启动）。
+    // 降级提示位：启用代理头信任却未声明代理网段 ⇒ 判据回落到「对端属回环即可信」
+    // （2026-11-03 收窄，渗透测试 i760 #25：私网对端写 XFF 曾实测绕过 IP 黑名单）。
+    // 此后反代不在本机的部署若不配名单，XFF 一律不可信——req.ip 恒为代理地址，
+    // 全站共享一个限流桶、封禁/审计 IP 全失真。M-2：生产环境按 `error` 打印、其余
+    // `warn`（不阻断启动）。
     (require('./config/validate').requiresProductionSemantics() ? logger.error : logger.warn)(
       `已启用 trust proxy（TRUST_PROXY_HOPS=${trustProxyHops.hops}）但未配置 ` +
-        'TRUSTED_PROXY_CIDRS：X-Forwarded-For 的可信判据目前只看「对端是否属私网/回环」，' +
-        '而私网是位置不是代理身份——同一容器网络内的任意服务直连应用端口并自带该头，' +
-        '与真实反向代理在应用视角完全同形，可据此影响 IP 白名单/黑名单、三层限流配额、' +
-        '自动封禁对象与审计来源地址（审计 F-01）。' +
-        '闭合方式：把真实代理所在网段写进 TRUSTED_PROXY_CIDRS（逗号分隔 CIDR）。'
+        'TRUSTED_PROXY_CIDRS：X-Forwarded-For 的可信判据只认「回环对端」（本机反代），' +
+        '反代不在本机时请把其所在网段写进 TRUSTED_PROXY_CIDRS（逗号分隔 CIDR），' +
+        '否则 XFF 一律不可信，req.ip 将退化为代理地址——影响 IP 白名单/黑名单、' +
+        '三层限流配额、自动封禁对象与审计来源地址（审计 F-01）。'
     );
     // 日志不是信号：warn/error 只落到 stdout，谁在看、看没看到都不确定。补一个计数器，
     // 由 deployment/observability/alert-rules.yml 的 `TrustedProxyBoundaryUnset`
@@ -392,6 +398,12 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
   // 而控制器按字符串消费（search.trim() → 500；status 直入 Mongo 过滤 → 操作符注入）。
   // 挂在 applyPostBodySecurity（含 sanitizeMongo）之后，看到的是清洗后的最终形态
   app.use('/api/', queryScalarGuard());
+  // 注入特征检测**全站挂载**（不带 `/api/`）：它自己的文件头写明要补的是"非 /api 早拒绝段
+  // 全部无痕"，而只挂 /api/ 时 `GET /?id=1' or '1'='1`、`GET /assets/../../etc/passwd`
+  // 一条都不检——挂载面与声称面相反。检测只读 originalUrl/path/query，不依赖已认证态与
+  // 路由结果，前移到全站不改变其语义；非 /api 请求的 req.query 未经 materializeQuery 物化，
+  // 这里按标量取值（非标量跳过），实测 Express 5 的 extended 解析器对畸形 query 不抛错。
+  app.use(injectionSignature());
 
   // 全局审计日志中间件：入参省略，直接使用 security.js 中间件内置默认值
   // （写方法白名单与 GET 敏感读取路径——含 /api/reports/export、
@@ -399,28 +411,13 @@ function installSecurityMiddlewareChain(app, corsOrigin) {
   // 此处重复传参会形成两处配置源，日后易漂移不一致）
   app.use('/api/', auditLog());
 
-  app.use('/api/', forensicCapture()); // 取证捕获（P2）：只采标记 IP 的全量请求/响应，挂载理由同 auditLog，细节见 middleware/security/forensicCapture.js
+  // 取证捕获（P2）**全站挂载**：标记表侧的声称是"该 IP 后续请求全量捕获"
+  // （forensicTrigger.js:2、scanProbeDetector 的 markForensicTarget 联动），而只挂 /api/ 时
+  // 被标记者打静态面、/metrics、/socket.io 握手、以及非 /api 探测的请求一条都不采——
+  // 恰恰是扫描型攻击者的主战场。未标记 IP 只付一次表查询（shouldCapture 前置短路），
+  // 标记 IP 的流式响应走 streamed 计数分支（只数字节不存正文），细节见 forensicCapture.js。
+  app.use(forensicCapture());
 }
-
-/**
- * 事务能力的对外标记（固定枚举，不暴露拓扑细节）
- *
- * ~~standalone 只降级不摘流量：读路径与单集合写仍然可用，把 /readyz 判成
- * unready 会让 LB 把整个实例下线，损失远大于「跨集合写非原子」本身。
- * 标记为 degraded 供监控告警，是否升级为摘流量由部署方决定。~~
- *
- * **2026-10-26 更正（P-1）**：上一段的取舍只在「多集合写是少数路径」时成立，
- * 它漏了失败形态——顺序写中途失败会残留跨集合不一致（幽灵告警、悬空巡检引用），
- * 且没有任何自动修复路径。生产语义下 standalone 现在**参与就绪判定**
- * （`transactionReadinessBlocker`，`/readyz` 503）；本标记仍只表达"能力档位"，
- * 两者分工不变：标记说「事务可用性如何」，闸说「这个实例该不该接流量」。
- */
-const transactionMarker = () => {
-  const current = getTransactionTopology();
-  if (current === 'replica-set') return 'enabled';
-  if (current === 'standalone') return 'degraded';
-  return 'unknown';
-};
 
 /**
  * 路由挂载：探针端点 → 公共发现端点 → 业务路由 → API 文档
@@ -442,23 +439,30 @@ function installRoutes(app) {
   // Redis 是生产强制项（限流计数/失效广播/审计链锁都依赖它）：只探 Mongo 会让
   // Redis 挂掉的实例继续接流量，并在多实例下静默退化为进程内语义。
   // checks.redis=not_configured 表示本部署未要求 Redis（本地/单机），不算故障。
-  // 对外只暴露固定枚举（ok/disconnected/timeout/unreachable/not_configured/error），
-  // 驱动原始错误消息仅入服务端日志——本端点不鉴权且被公网探测，
-  // 回显 err.message 会泄露主机/端口/副本集/认证细节
+  //
+  // 响应体最小化（渗透测试 i760 #22）：本端点不鉴权且被探测，此前回显的
+  // checks{mongo,redis,transactions,topology} 能让匿名者确认后端依赖类型
+  // （MongoDB/Redis）与事务/多实例拓扑状态，是绘制内部架构的侦察情报。
+  // 现在对外只保留聚合结论 `status`；未就绪原因以固定枚举分流到两处
+  // 受控消费面——服务端日志（本函数下方三条 warn/error）与 Prometheus
+  // 指标 readyz_checks_total{result=<枚举>}（readyz_verdict 同步落值，
+  // /metrics 有 metricsAuth 把关）。LB/编排器只消费状态码与 status 字段
+  // （scripts/deploy.js 健康门禁、Dockerfile HEALTHCHECK 均只看状态码）。
+  // 历史口径沿革：2026-09-02 先把驱动 err.message 脱敏成固定枚举
+  // （readyzSanitize.test.js），本层再把枚举整体撤出响应体。
   app.get('/readyz', (req, res) => {
     Promise.all([checkMongoReady(), checkRedisReady()])
       .then(([mongo, redis]) => {
         // A-2：多实例且没有分布式审计锁 ⇒ 审计链会分叉，实例不得接流量。
         // P-1：生产语义下 standalone ⇒ 多集合写非原子且失败留残骸，同样不得接流量。
-        // 两者都是「拓扑缺陷」，合并到同一个对外字段；优先级取多实例——
+        // 两者都是「拓扑缺陷」，合并到同一个判定；优先级取多实例——
         // 它同时影响审计链与限流计数，且修法（补 Redis）与事务拓扑无关，
         // 同时命中时先说更严重的那条，避免运维修完副本集才发现还有第二道。
-        // 固定枚举对外，拓扑细节只进日志（本端点不鉴权）。
         const topologyBlocker = multiInstanceReadinessBlocker() ?? transactionReadinessBlocker();
         const ready = mongo.ok && redis.ok && !topologyBlocker;
         // 就绪判定落进指标：/readyz 是「能不能干活」的唯一权威判据，
         // 而它此前只在响应体里出现一次——LB 摘了流量，监控面板却全绿。
-        // 未就绪原因按拓扑阻断 > redis > mongo 取一条（对外仍是固定枚举）。
+        // 未就绪原因按拓扑阻断 > redis > mongo 取一条（固定枚举）。
         // 写成 `?.` + `??` 而不是嵌套三元：后者被 prettier 展开成九行级联，
         // 读起来比判据本身还长，且同一个判据在这里只该有一处表达。
         recordReadyz(
@@ -476,25 +480,15 @@ function installRoutes(app) {
             `就绪探针未通过（topology=${topologyBlocker.reason}）：${topologyBlocker.detail}`
           );
         }
+        // 明细原因（含固定枚举）只进日志与指标，响应体只留聚合结论
         res.status(ready ? 200 : 503).json({
           status: ready ? 'ready' : 'unready',
-          checks: {
-            mongo: mongo.ok ? 'ok' : mongo.reason,
-            redis: redis.reason,
-            transactions: transactionMarker(),
-            topology: topologyBlocker ? topologyBlocker.reason : 'ok',
-          },
-          timestamp: new Date().toISOString(),
         });
       })
       .catch((err) => {
         recordReadyz('error', false);
         logger.warn(`就绪探针检查异常：${err.message}`);
-        res.status(503).json({
-          status: 'unready',
-          checks: { mongo: 'error', redis: 'error', transactions: transactionMarker() },
-          timestamp: new Date().toISOString(),
-        });
+        res.status(503).json({ status: 'unready' });
       });
   });
 
@@ -544,6 +538,8 @@ function installRoutes(app) {
   app.use('/api/security', stuffingProfileRoutes); // 撞库画像：与审计列表同权限面
   // 攻击行为画像：鉴权链先写入 req.user，取数层再按数据范围收窄
   app.use('/api/security', attackProfileRoutes);
+  // 攻击告警查询（专家分析）：审计同源敏感读，security:audit + 二次验证票据
+  app.use('/api/security', attackEventRoutes);
 
   // API 文档（Swagger UI）— 生产环境默认关闭，可通过 ENABLE_API_DOCS=true 开启
   // 开启后可通过 DOCS_USERNAME / DOCS_PASSWORD 设置 Basic Auth 保护
@@ -573,15 +569,22 @@ function installStaticAndErrorHandling(app) {
 
   // 404
   app.use((req, res) => {
-    // 错误响应禁止缓存（与 ApiResponse.error 同一口径，参考研读 2026-11-01 §二 P0-1）：
-    // 静态面 404 兜底先于此命中，若被中间层缓存会把"文件还没部署"的结论钉死在缓存里。
-    res.setHeader('Cache-Control', 'no-store');
-    res.status(404).json({
-      success: false,
-      // L-03：原样回显 originalUrl 会把查询串一并带出（含 ?token= 之类），
-      // 而前端错误上报链路会采集响应体。复用 morgan 同一套 redactUrlQuery
-      // 打码，与 :204 的口径保持一致。
-      message: `接口不存在：${req.method} ${redactUrlQuery(req.originalUrl || req.url)}`,
+    // 扫描探测检测：探测路径指纹→证据行，风暴→storm 行；检测器内部吞错
+    noteUnmatchedRequest(req);
+    // 检测先行、处置随后：unmatchedRequestLimiter 只对"没命中任何路由 + 命中扫描器指纹"的
+    // 请求计数，触顶即 429 并接 ANON_ABUSE 升级阶梯（自动封禁）。放在路由之后是为了让
+    // 合法面在结构上不可能被误伤——判据与阈值推导见 rateLimit.js 的 unmatchedRequestLimiter。
+    unmatchedRequestLimiter(req, res, () => {
+      // 错误响应禁止缓存（与 ApiResponse.error 同一口径，参考研读 2026-11-01 §二 P0-1）：
+      // 静态面 404 兜底先于此命中，若被中间层缓存会把"文件还没部署"的结论钉死在缓存里。
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(404).json({
+        success: false,
+        // L-03：原样回显 originalUrl 会把查询串一并带出（含 ?token= 之类），
+        // 而前端错误上报链路会采集响应体。复用 morgan 同一套 redactUrlQuery
+        // 打码，与 :204 的口径保持一致。
+        message: `接口不存在：${req.method} ${redactUrlQuery(req.originalUrl || req.url)}`,
+      });
     });
   });
 

@@ -1245,6 +1245,18 @@ export const api = {
     // 空数组不许被读成「没有攻击」。同样受 security:audit + 步进票据约束。
     getStuffingProfile: (params, config) =>
       apiClient.get('/security/stuffing-profile', { params, ...config }),
+    // 攻击告警查询（专家分析读面）：行集钉在攻击注册表（src/constants/attackEvents.js）
+    // 的 action 全集上。筛选：startDate/endDate（date-only，业务时区口径同审计页）、ip、
+    // username（前缀）、attackType（分类码）、severityMin/severityMax（档位名）、
+    // action（规则名等值）、path（部分匹配）。meta 自述 total/hasNext/nextCursor 与
+    // dataScopeType——蜜罐行不带 userId，self/department 档空结果不等于「没有攻击」。
+    // 与审计列表同权限（security:audit）且同受步进票据约束。
+    getAttackEvents: (params, config) =>
+      apiClient.get('/security/attack-events', { params, ...config }),
+    // 分类计数（tab 角标）：attackType 入参被服务端剔除（角标语义是「给定其它筛选，
+    // 各类各有多少」），data.byType 按分类码给出计数，meta.all 是全部攻击总数。
+    getAttackEventSummary: (params, config) =>
+      apiClient.get('/security/attack-events/summary', { params, ...config }),
     // IP 池聚类：windowHours(1..720，默认 24) minHits(默认 20) minIps(默认 4) limit(默认 50)。
     // 返回 segments 与 recommended（后者是 recommendBan=true 的子集）。
     getForensicClusters: (params, config) =>

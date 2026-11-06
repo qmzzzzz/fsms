@@ -143,8 +143,7 @@ const summarizeByRiskLevel = async (query, collation) => {
   return agg;
 };
 
-// 评价报告 #22/#13：数据范围过滤（all/self/department 翻译 + 部门成员缓存）
-// 已拆分至 auditScopeFilter.js（体积棘轮），此处 re-export 保持既有调用面不变。
+// 评价报告 #22/#13：数据范围过滤（all/self/department 翻译 + 部门成员缓存）已拆分至 auditScopeFilter.js（体积棘轮），此处 re-export 保持既有调用面不变。
 const applyAuditDataScope = require('./auditScopeFilter').applyAuditDataScope;
 
 const fetchAuditCursorPage = (cursorQuery, query, limitNum, collation) =>
@@ -344,6 +343,8 @@ const queryAuditLogs = asyncHandler(async (req, res) => {
 module.exports = {
   queryAuditLogs,
   applyAuditDataScope,
+  // 攻击告警查询面复用同一份 IP 富化：归属地口径只许有一份（复制即漂移点）
+  withIpLocation,
   // 仅供测试直调：汇总缓存的命中/失效语义无法经 HTTP 断言（外层还叠着
   // 分页、数据范围与响应装配），而"每页重算一次全量聚合"这个缺陷恰恰
   // 只在调用次数上可见。

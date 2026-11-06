@@ -62,6 +62,7 @@ const IPS = {
   retry: `192.0.2.${(Number(stamp) % 100) + 37}`,
   notif2: `192.0.2.${(Number(stamp) % 100) + 38}`,
   mix: `192.0.2.${(Number(stamp) % 100) + 39}`,
+  unmatched: `192.0.2.${(Number(stamp) % 100) + 40}`,
 };
 const ALL_TEST_IPS = Object.values(IPS).flatMap((ip) => [ip, `::ffff:${ip}`]);
 
@@ -175,8 +176,21 @@ describe('rateLimitEscalation：按信号分类（本次重构的核心）', () 
     // login-peer 是聚合对端桶：真反代下全体客户端共享一个对端地址，自动封 IP 等于
     // 把枚举噪音放大成全站拒绝服务 ⇒ 必须落在只告警的 AUTH 类，不许挪进可封 IP 的两类
     expect(escalation.LIMITER_CLASS.get('login-peer')).toBe(CLASS_AUTH);
+    // unmatched（未匹配探测桶）：429 的含义是"5 分钟内第 21 次请求一个既没命中路由、又命中
+    // 扫描器指纹的地址"——证据强度与 captcha 同级，必须落可封 IP 的 ANON_ABUSE。
+    // 若被当成"未登记"落进 VOLUME（阀值 100），扫描者要打满 120 次指纹探测才会被处置，
+    // 而检测侧 40 次就报风暴 ⇒ 检测与处置脱节，正是本轮整改要闭合的那条链。
+    expect(escalation.LIMITER_CLASS.get('unmatched')).toBe(CLASS_ANON_ABUSE);
     expect(escalation.LIMITER_CLASS.get('根本没注册过的限流器')).toBeUndefined();
     // 实际行为按 VOLUME 落桶（由下一条的行为断言覆盖判据本身）
+  });
+
+  test('unmatched 信号真的走到封禁：扫描探测 → 自动封禁链闭合', async () => {
+    flood(IPS.unmatched, 'unmatched', anonThreshold + 1);
+    await waitFor(() => bansFor(IPS.unmatched).length === 1, { label: 'unmatched 封禁落地' });
+    expect(escalation.peekIp(IPS.unmatched)[CLASS_ANON_ABUSE].byLimiter.unmatched).toBe(
+      anonThreshold + 1
+    );
   });
 });
 

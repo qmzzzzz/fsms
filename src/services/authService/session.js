@@ -29,6 +29,7 @@ const statsCache = require('../statsCache');
 const initialPasswordFile = require('../initialPasswordFile');
 const { presentedClaims } = require('../../constants/honeypotDecoy');
 const consentService = require('../consentService');
+const { resolvePunishableIp, clientIpForSecurityDecision } = require('../../utils/ipUtils');
 
 /**
  * 用户注册（业务层）
@@ -70,8 +71,27 @@ async function registerUser(body, ctx = {}) {
   // 遮蔽对账会把这种状态告警，但不该先把库写脏）。对外与重名同口径
   // （模糊拒绝防枚举，且不新增 outcome，credentials 层 switch 不动）；
   // 探测方的尝试会在登录路径被 canaryWatch 记录与告警。
+  //
+  // 注册路径自身的探测留痕（渗透测试 i760 #28 长期加固项）：此前只写一条
+  // logger.warn——注册探测与登录探测不同，它**不需要口令正确**就能零成本
+  // 批量枚举保留名单（201/400 差异即预言机），只留日志等于信号等级与风险
+  // 错配。复用登录路径同一通道 recordGhostAttempt：审计必写（CANARY_
+  // USERNAME_ATTEMPT，critical）、网络告警按每哨兵每日一次频控；函数永不
+  // reject，调用点仍按防御性口径 catch。响应侧维持既有 400 口径不变——
+  // 「对保留名返回虚假 201」在报告建议之列但未采纳：虚假成功无法签发会话
+  // cookie，脚本化枚举以 Set-Cookie 有无即可二次区分，预言机只是换了位置。
   if (canaryWatch.matchCanaryName(username)) {
     logger.warn('注册被拒 - 用户名为安全哨兵保留名', { username });
+    await canaryWatch
+      .recordGhostAttempt({
+        username,
+        ip: ctx.req ? clientIpForSecurityDecision(ctx.req) : undefined,
+        userAgent: ctx.req?.get ? ctx.req.get('user-agent') : undefined,
+        method: ctx.req?.method,
+        path: ctx.req ? ctx.req.originalUrl || ctx.req.url : undefined,
+        attribution: ctx.req ? resolvePunishableIp(ctx.req) : undefined,
+      })
+      .catch(() => {});
     return { outcome: 'DUPLICATE' };
   }
 
@@ -295,7 +315,15 @@ async function issueLoginSession(user, ctx, username) {
   // 操作溯源：记录登录成功。必须在下发令牌前等到落库（有上限）——fire-and-forget
   // 会让响应先于审计发出，进程随即重启时「谁登录成功过」永久缺失，而客户端已拿到令牌
   await awaitAuditWrite(
-    AuditLog.recordLogin(user._id, username, ip, true, userAgent, { sessionId, fingerprint }),
+    AuditLog.recordLogin(
+      user._id,
+      username,
+      ip,
+      true,
+      userAgent,
+      { sessionId, fingerprint },
+      ctx.req
+    ),
     'login_success_audit',
     { user: { username } }
   );

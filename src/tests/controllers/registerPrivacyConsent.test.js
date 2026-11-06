@@ -91,8 +91,13 @@ describe('注册必须明示同意隐私告知（一-7）', () => {
   });
 
   test('privacyConsent 非布尔真值（"true"/1/{} /null/false）一律拒绝，账号一个都不建', async () => {
+    // 乱序防护：账号存在性只对本用例提交的五次请求点名——前缀反查（^${stamp}u）
+    // 在 --randomize 下会把「注册成功」用例的账号也数进来（同一 stamp 共用）。
+    const attempted = [];
     for (const bad of ['true', 1, {}, null, false]) {
-      const res = await register({ privacyConsent: bad });
+      const username = `${stamp}u-consent-reject-${attempted.length}`;
+      attempted.push(username);
+      const res = await register({ username, privacyConsent: bad });
       expect({ bad: JSON.stringify(bad), status: res.status }).toEqual({
         bad: JSON.stringify(bad),
         status: 400,
@@ -100,7 +105,7 @@ describe('注册必须明示同意隐私告知（一-7）', () => {
       expect(consentFieldErrors(res).length).toBeGreaterThan(0);
     }
     // 前提自证：上面五次提交确实一个账号都没留下（不是"恰好用户名重复"才 400）
-    expect(await User.countDocuments({ username: new RegExp(`^${stamp}u`) })).toBe(0);
+    expect(await User.countDocuments({ username: { $in: attempted } })).toBe(0);
   });
 
   /** 服务层 fail-closed：绕过路由校验直接调业务函数时，同样不得创建账号 */

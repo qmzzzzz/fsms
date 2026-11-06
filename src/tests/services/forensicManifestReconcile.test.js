@@ -208,16 +208,20 @@ describe('F6 对账窗口与周期接线', () => {
 
   test('窗口收窄：31 天前日期（窗口 30 天）显式 skip 计数，绝不静默、也不判红', async () => {
     process.env.BUSINESS_RETENTION_DAYS_FORENSIC_CAPTURE = '30';
+    // 清单目录用空 tmp：默认目录是 logs/forensic-manifest（本机真实运行会留下近几日的
+    // 真清单），窗口内的日期一旦撞上真清单，no_manifest 的对照判据就变成环境相关的假红。
+    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'recon-'));
     const old = new Date(Date.now() - 31 * 86400000);
-    const v = await reconcileWithDb({ date: old, model: ForensicCapture });
+    const v = await reconcileWithDb({ date: old, model: ForensicCapture, dir });
     expect(v).toMatchObject({ ok: true, skippedBeyondTtl: 1, checked: 0, declared: 0 });
     expect(v.problems).toEqual([]); // 窗口外不是篡改证据，不能记成红
     // 对照：窗口边界内照常对账（no_manifest 判红——窗口内清单不存在是留痕缺口，不是保留期问题）
     const inside = new Date(Date.now() - 5 * 86400000);
-    const v2 = await reconcileWithDb({ date: inside, model: ForensicCapture });
+    const v2 = await reconcileWithDb({ date: inside, model: ForensicCapture, dir });
     expect(v2.skippedBeyondTtl).toBe(0);
     expect(v2.ok).toBe(false);
     expect(v2.problems.map((p) => p.type)).toContain('no_manifest');
+    require('fs').rmSync(dir, { recursive: true, force: true });
   });
 
   test('周期接线：start 幂等 / stop 清定时器 / 单轮轮转核一个窗口内业务日并推进健康计数', async () => {

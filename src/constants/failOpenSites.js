@@ -1,37 +1,9 @@
-/**
- * fail-open / 降级站点台账（2026-10-09 建立）
- *
- * ## 这份台账要解决什么
- * 本仓有一条成文纪律，在三个地方被重复声明：
- *   · `middleware/security/ipBlacklist.js:215-216`：「fail-open 放行（缓存未命中）**必须有显式可观测信号**——
- *     否则『DB 挂了 + 全站裸奔』只有一条 error 日志可循」
- *   · `middleware/rateLimitStore.js:53-56`：「降级态只写日志等于没有可告警信号——
- *     `grep 日志` 不是运维动作」
- *   · `services/websocketService/handshake.js:519`：「fail-open 必须留 `ip_blacklist_failopen` 计数」
- *
- * 但纪律只在**注释里**，没有任何东西把「站点集合」与「每个站点的信号」钉在一起。
- * 后果实测（2026-10-09）：`services/captchaService.js` 的活跃数上限判定被跳过时，
- * 唯一痕迹是 `services/sharedCache/index.js:322` 的 `logger.debug`，而生产默认 `LOG_LEVEL=info`
- * （`utils/logger.js:95`）⇒ **debug 不落盘**：没有日志、没有指标、没有告警。
- * 这正是「已修的同类漏了一处」——三处注释在讲同一条纪律，第四处漏了。
- *
- * ## 台账的结构（三段，各有各的判据）
- *  1. `FAIL_OPEN_SITES` —— 降级即护栏失效的站点，**必须**有信号，且信号必须被告警规则覆盖；
- *  2. `OTHER_ALERT_SIGNALS` —— 其余 `incSecurityAlert` 站点（安全事件上报，不是降级）。归类判据不是"作者觉得"，而是"它的 why 声称会不会削弱护栏"：会，就属于第 1 类（本轮 `idempotency_degraded` 即因此从第 2 类挪回第 1 类）。
- *  3. `PASS_THROUGH` —— 动态 type 的调用点（投递门面、模板串拼装、局部包装器），无法静态枚举。
- *
- * 完整性由 `src/tests/ci/failOpenLedgerGate.test.js` 双向钉住：
- * 新增一个 `incSecurityAlert` 站点而没进本台账 ⇒ 红；台账里登记了但代码里没有 ⇒ 红。
- * 这条判据的价值在于**逼作者回答一个问题**：「这是降级，还是安全事件上报？」
- * ——降级就必须有信号、有方向声明、有告警覆盖。
- *
- * ## 如实声明：本台账**抓不到**什么
- * 采集器的锚点是 `incSecurityAlert` 的调用点，所以**一个既不发信号、也没被任何人注意到的
- * 新 fail-open 站点不会被本闸抓到**——它压根不出现在采集结果里。
- * 本闸能做到的是：让「已有的信号」无法悄悄消失，并让「新增的信号」必须被归类。
- * 真正的兜底仍是人（见每条的 `why` 与 `tightening`）。把这个盲区写在这里，
- * 是为了避免后人把本闸当成「fail-open 全都被管住了」的证据。
- */
+// 降级台账把站点与可告警信号绑定：只有日志不足以证明防线失效可被发现。
+// FAIL_OPEN_SITES 登记护栏失效的降级，必须声明方向并有告警规则覆盖。
+// OTHER_ALERT_SIGNALS 登记安全事件；按实际 effect/why 分类，不能把护栏降级归成普通事件。
+// PASS_THROUGH 登记无法静态枚举 type 的动态转发点。
+// src/tests/ci/failOpenLedgerGate.test.js 对 incSecurityAlert 调用与台账做双向对账。
+// 盲区：从未发出 incSecurityAlert 的降级不会被采集，仍须人工审查 why 与 tightening。
 
 /**
  * 降级即护栏失效的站点。
@@ -164,6 +136,31 @@ const FAIL_OPEN_SITES = Object.freeze([
  * 这是既有事实而非笔误：两处的严重度语义不同，故按 `type@file` 分条登记。
  */
 const OTHER_ALERT_SIGNALS = Object.freeze([
+  // 以下四条为攻击检测面（2026-11-05）的安全事件上报信号，非降级
+  {
+    type: 'nosql_injection_attempt',
+    file: 'services/injectionDetector.js',
+    level: 'medium',
+    why: 'NoSQL 操作符键被剥离（注入尝试留痕）',
+  },
+  {
+    type: 'sql_injection_attempt',
+    file: 'middleware/injectionSignature.js',
+    level: 'medium',
+    why: '请求路径/query 命中 SQLi 特征串（留痕不阻断）',
+  },
+  {
+    type: 'scan_probe_detected',
+    file: 'services/scanProbeDetector.js',
+    level: 'medium',
+    why: '扫描器路径指纹命中（留痕+取证标记）',
+  },
+  {
+    type: 'scan_probe_storm',
+    file: 'services/scanProbeDetector.js',
+    level: 'high',
+    why: '404 风暴达阈值（每窗口一条+取证标记）',
+  },
   {
     type: 'audit_write_failed',
     file: 'models/auditLogWriteStatics.js',
@@ -246,7 +243,13 @@ const OTHER_ALERT_SIGNALS = Object.freeze([
     type: 'trusted_proxy_cidrs_unset',
     file: 'app.js',
     level: 'medium',
-    why: '启动期：已启用 trust proxy（TRUST_PROXY_HOPS>0）但未配置 TRUSTED_PROXY_CIDRS ⇒ X-Forwarded-For 的可信判据回落到「对端属私网/回环」（F-01 的兼容档，2026-10-17 仓库负责人明确拍板：不收紧默认行为，只告警）。**归在信号段而不是 FAIL_OPEN_SITES，理由是判据语义不同而不是严重度**：那一组描述「依赖不可用导致的运行期降级」，有恢复动作、有速率含义，共用 SecurityFailOpenSustained 的「持续 10 分钟未恢复」叙事；本条描述的是「这一次部署没给这个变量」——进程重启一次就 +1，没有任何恢复动作能让它消失（配了变量就再也不会发），套用那条规则的文案会给出**错误的处置指引**（依赖全都好好的，缺的是运维的一个变量）。告警由专条 `TrustedProxyBoundaryUnset` 承担（for: 0m，increase>0 即发），刻意不靠速率型的 SecurityAlertBurst——单次部署只写 1 条，那条规则永远不达标。另注意与 password_history_pepper_rotation 同型的恒正项问题：每次进程启动都会 +1，会稀释跨类型求和规则；该口径问题同属已登记的待拍板项，本台账只如实记录。',
+    why: '启动期：已启用 trust proxy（TRUST_PROXY_HOPS>0）但未配置 TRUSTED_PROXY_CIDRS ⇒ X-Forwarded-For 的可信判据回落到「对端属私网/回环」（F-01 的兼容档，2026-10-17 仓库负责人明确拍板：不收紧默认行为，只告警）。**归在信号段而不是 FAIL_OPEN_SITES，理由是判据语义不同而不是严重度**：那一组描述「依赖不可用导致的运行期降级」，有恢复动作、有速率含义，共用 SecurityFailOpenSustained 的「持续 10 分钟未恢复」叙事；本条描述的是「这一次部署没给这个变量」——进程重启一次就 +1，没有任何恢复动作能让它消失（配了变量就再也不会发），套用那条规则的文案会给出**错误的处置指引**（依赖全都好好的，缺的是运维的一个变量）。告警由专条 TrustedProxyBoundaryUnset 承担（for: 0m，increase>0 即发），刻意不靠速率型的 SecurityAlertBurst——单次部署只写 1 条，那条规则永远不达标。另注意与 password_history_pepper_rotation 同型的恒正项问题：每次进程启动都会 +1，会稀释跨类型求和规则；该口径问题同属已登记的待拍板项，本台账只如实记录。',
+  },
+  {
+    type: 'proxy_protocol_header_rejected',
+    file: 'index.js',
+    level: 'high',
+    why: '运行期：PROXY protocol 已启用（PROXY_PROTOCOL=on）时，签名可识别的 PROXY v1/v2 头来自 TRUSTED_PROXY_CIDRS 名单之外的对端（untrusted-peer:*），或名单内对端发出了畸形头（malformed-header:*）——连接已被即时断开（fail-closed），未影响任何合法请求的语义。这是「伪造真实客户端 IP」的尝试信号：还原功能等价于重写 socket 地面真相，名单就是重写权的唯一凭据，有人试探这张凭据本身就该被看见。处置：单发多为端口扫描误中签名；高频出现则排查是否有人绕过 LB 直连后端端口（Compose 生产形态后端只绑回环，能直连本身就说明网络面有问题），并核对名单网段是否覆盖了真实 LB。逐条 warn 日志留有 peer 与原因，可与安全审计时间线互证。告警由专条 ProxyProtocolHeaderRejected 承担（for: 0m，increase>0 即发）：伪造尝试天然可以是低频单发，速率型规则会漏掉第一声。',
   },
   {
     type: 'forensic_capture_write_failed',

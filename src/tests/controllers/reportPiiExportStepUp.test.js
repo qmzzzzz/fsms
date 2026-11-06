@@ -196,6 +196,22 @@ describe('未脱敏 PII 导出：pii:export + 二次验证（L-17）', () => {
     app = createApp();
   });
 
+  afterEach(async () => {
+    // --randomize 打乱文件内用例顺序后，本文件有三份跨用例持久状态会互相毒化：
+    //   ① 限流桶（reauth 用户/IP 桶按 userId 计数，错口令尝试烧配额 → 403 断言读到 429）；
+    //   ② 导出并发池（P-2 上限 2 + 排队，槽位未释放 → EXPORT_BUSY 429）；
+    //   ③ 审计行（Redis 未配置时 PII 导出配额回退为「数 24h 窗内的审计行」，
+    //      本文件 6 次导出各行留痕 → 配额 6/5 → 429）。库是本套件独立库，
+    //      各用例的审计断言都是即时查询自己刚造的行 ⇒ 每用例结束整库清空审计行。
+    const rl = require('../../middleware/rateLimit');
+    for (const limiter of Object.values(rl)) {
+      if (limiter && typeof limiter.store?.resetAll === 'function') limiter.store.resetAll();
+    }
+    require('../../services/exportConcurrency').__resetForTest();
+    const AuditLog = require('../../models/AuditLog');
+    await AuditLog.deleteMany({}, { bypassAppendOnly: true }).catch(() => {});
+  });
+
   afterAll(async () => {
     await FireAlarm.deleteMany({ description: alarmDescription }).catch(() => {});
     await AuditLog.deleteMany(
@@ -284,6 +300,8 @@ describe('未脱敏 PII 导出：pii:export + 二次验证（L-17）', () => {
 
   test('② 口令错误 → REAUTH_PASSWORD_INCORRECT，且不产出文件', async () => {
     const res = await exportPost(piiToken, { currentPassword: `${PASSWORD}_wrong` });
+    // 临时诊断（乱序复现期）：打印 429 的来源层后即删
+    if (res.status !== 403) console.error('②-debug', res.status, JSON.stringify(jsonOf(res)));
     expect(res.status).toBe(403);
     expect(res.body?.errors?.errorCode ?? jsonOf(res)?.errors?.errorCode).toBe(
       'REAUTH_PASSWORD_INCORRECT'

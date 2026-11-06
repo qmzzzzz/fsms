@@ -153,6 +153,11 @@ const REGISTERED_NON_MARKER = [
   },
   {
     file: 'src/services/userService.js',
+    anchor: 'User.find({ _id: { $in: list.map((u) => u._id) } })',
+    why: 'attachLastLoginIp 按 _id 回填最近登录 IP（审计详情客户可读批）：入参 list 是上游已定集合，按 id 二次取文档不新增用户名枚举面',
+  },
+  {
+    file: 'src/services/userService.js',
     anchor: "const affected = await User.find(filter, '_id')",
     why: '**有意不排除**：管理员批量删号前置取 id，filter 由控制器收敛；排除即等于「管理员删不掉这个账户」',
   },

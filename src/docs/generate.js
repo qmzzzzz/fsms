@@ -1264,6 +1264,68 @@ spec.paths['/api/security/attack-profile'] = {
   }),
 };
 
+spec.paths['/api/security/attack-events'] = {
+  get: p('get', ['Security'], '攻击告警查询（安全分析 · 专家分析读面：action 钉在攻击注册表上）', {
+    parameters: [
+      reauthTicketHeader,
+      { name: 'page', in: 'query', schema: { type: 'integer', default: 1 } },
+      { name: 'limit', in: 'query', schema: { type: 'integer', default: 50, maximum: 100 } },
+      { name: 'cursor', in: 'query', schema: { type: 'string' } },
+      { name: 'startDate', in: 'query', schema: { type: 'string' } },
+      { name: 'endDate', in: 'query', schema: { type: 'string' } },
+      { name: 'ip', in: 'query', schema: { type: 'string' } },
+      { name: 'username', in: 'query', schema: { type: 'string' } },
+      { name: 'attackType', in: 'query', schema: { type: 'string' } },
+      {
+        name: 'severityMin',
+        in: 'query',
+        schema: { type: 'string', enum: AUDIT_RISK_LEVELS },
+      },
+      {
+        name: 'severityMax',
+        in: 'query',
+        schema: { type: 'string', enum: AUDIT_RISK_LEVELS },
+      },
+      { name: 'action', in: 'query', schema: { type: 'string' } },
+      { name: 'path', in: 'query', schema: { type: 'string' } },
+    ],
+    responses: {
+      ...ok(
+        '返回攻击注册表 action 的告警行（RESPONSE_EXCLUDE 投影，不带正文/头袋）与 meta（total/nextCursor/dataScopeType）；每行带 disposal 派生（banned/forensic/observing）。蜜罐行不带 userId，self/department 数据范围下空结果不等于「没有攻击」。'
+      ),
+      400: { description: '筛选参数非法或组合恒空（原文案透传）' },
+      401: { description: '缺少或无效的二次验证票据' },
+      403: { description: '无 security:audit 权限或数据范围不可用（DATA_SCOPE_DENIED）' },
+      500: { description: '查询失败（AUDIT_QUERY_FAILED）' },
+    },
+  }),
+};
+
+spec.paths['/api/security/attack-events/summary'] = {
+  get: p('get', ['Security'], '攻击告警分类计数（tab 角标；attackType 入参被剔除）', {
+    parameters: [
+      reauthTicketHeader,
+      { name: 'startDate', in: 'query', schema: { type: 'string' } },
+      { name: 'endDate', in: 'query', schema: { type: 'string' } },
+      { name: 'ip', in: 'query', schema: { type: 'string' } },
+      { name: 'username', in: 'query', schema: { type: 'string' } },
+      { name: 'severityMin', in: 'query', schema: { type: 'string' } },
+      { name: 'severityMax', in: 'query', schema: { type: 'string' } },
+      { name: 'action', in: 'query', schema: { type: 'string' } },
+      { name: 'path', in: 'query', schema: { type: 'string' } },
+    ],
+    responses: {
+      ...ok(
+        '返回 { all, 各分类码计数 }；语义是「给定其它筛选，各类各有多少」，选中某分类时其余角标仍有效。'
+      ),
+      400: { description: '筛选参数非法或组合恒空（原文案透传）' },
+      401: { description: '缺少或无效的二次验证票据' },
+      403: { description: '无 security:audit 权限或数据范围不可用（DATA_SCOPE_DENIED）' },
+      500: { description: '统计失败（AUDIT_QUERY_FAILED）' },
+    },
+  }),
+};
+
 spec.paths['/api/security/config/allowPublicRegistration'] = {
   get: p('get', ['Security'], '获取注册开关状态', {
     responses: ok('返回 allowPublicRegistration'),
@@ -1501,6 +1563,7 @@ anonGet('/api/version', '版本元数据（匿名，响应带 no-store）', '构
 const forensicTraceParams = [
   { name: 'ip', in: 'query', schema: { type: 'string' } },
   { name: 'fingerprint', in: 'query', schema: { type: 'string' } },
+  { name: 'deviceKey', in: 'query', schema: { type: 'string' } },
   { name: 'ipSegment', in: 'query', schema: { type: 'string' } },
   { name: 'since', in: 'query', schema: { type: 'string', format: 'date-time' } },
   { name: 'until', in: 'query', schema: { type: 'string', format: 'date-time' } },
@@ -1512,7 +1575,7 @@ spec.paths['/api/security/forensic/trace'] = {
     description:
       '至少提供一个查询维度，否则 400 FORENSIC_NO_CRITERIA；地址无法解析同样按判据不可用拒绝，不返回空结果。' +
       '时间线行顶层带 status（由 response.status 提升）与 reason（由 trigger.reason 提升），两列在界面即「状态码/触发说明」。' +
-      'pools 双路径：判据带 fingerprint 时返回该指纹落到过的网段（全窗口完整池，行形 segment/hits/distinctIps/firstSeen/lastSeen）；' +
+      'pools 双路径：判据带 fingerprint/deviceKey 时返回该身份落到过的网段（全窗口完整池，行形 segment/hits/distinctIps/firstSeen/lastSeen）；' +
       '按 IP/网段溯源时从库内观测到的指纹自动派生（行多带 fingerprint 字段，top 5 指纹、桶内按命中倒序）——' +
       '「同一设备指纹出现过的网段按命中排序」这一换 IP 不换机器的直接证据，在最常用的按 IP 入口同样直接可见。',
     parameters: forensicTraceParams,
@@ -1591,6 +1654,7 @@ spec.paths['/api/security/forensic/export'] = {
       properties: {
         ip: { type: 'string' },
         fingerprint: { type: 'string' },
+        deviceKey: { type: 'string' },
         ipSegment: { type: 'string' },
         since: { type: 'string', format: 'date-time' },
         until: { type: 'string', format: 'date-time' },

@@ -279,7 +279,7 @@ const addExplicitStatuses = (body, codes, dynamicStatus) => {
       if (code >= 200 && code < 400) codes.add(code);
       continue;
     }
-    // 动态表达式（`ready ? 200 : 503`，app.js:479）：抽不出来就记账，
+    // 动态表达式（`ready ? 200 : 503`，app.js:469）：抽不出来就记账，
     // 绝不当成"没有成功码"，也不能默认 200 —— 两种退化都会让判据静默放行。
     // 里面出现的 2xx/3xx 字面量算候选成功码，原文整段进台账供人复核：
     // "可能返回 200 或 503"不能化简成"只返回 200"。

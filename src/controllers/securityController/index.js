@@ -12,6 +12,7 @@ const config = require('./config');
 const reauth = require('./reauth');
 const upgrade = require('./upgrade');
 const profile = require('./profile');
+const attackEvents = require('./attackEvents');
 
 module.exports = {
   getMySecurityInfo: account.getMySecurityInfo,
@@ -40,4 +41,6 @@ module.exports = {
   triggerUpgrade: upgrade.triggerUpgrade,
   getStuffingProfile: profile.getStuffingProfile,
   getAttackProfile: profile.getAttackProfile,
+  getAttackEvents: attackEvents.getAttackEvents,
+  getAttackEventSummary: attackEvents.getAttackEventSummary,
 };

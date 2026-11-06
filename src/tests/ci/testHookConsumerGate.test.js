@@ -266,6 +266,7 @@ const EXPORT_FORM_UNRECOGNISED = [
   'models/UserSession.js',
   // 路由：`module.exports = router`
   'routes/alarmRoutes.js',
+  'routes/attackEventRoutes.js',
   'routes/authRoutes.js',
   // 头像读取路由（2026-10-30）：与上面同形，`module.exports = router`；挂在 /api/avatars，
   // 只有一条 GET /:userId ⇒ 仍是单值不具名导出，没有钩子面。
@@ -411,8 +412,8 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
     expect(modelFiles).toEqual(barreled.map((name) => `models/${name}.js`));
   });
 
-  it('钩子总数钉死：只许减不许增（当前 39 个），且成员可点名', () => {
-    expect(hooks.length).toBe(39);
+  it('钩子总数钉死：只许减不许增（当前 40 个），且成员可点名', () => {
+    expect(hooks.length).toBe(40);
     const keys = hooks.map(keyOf);
     for (const must of [
       // worker 线程池是模块级单例：强制 worker 模式的用例必须能 terminate 并复位池，
@@ -447,6 +448,10 @@ describe('测试钩子导出门禁：`_`/`__` 前缀的生产导出必须有真�
       // 蜜罐告警「同一来源每小时一条」的频控表是模块级 Map：三个蜜罐套件都要断言
       // "重复触发不再发第二条"，不复位则先跑的用例会把后跑的告警吞掉。
       'services/alertDispatch.js::__resetAlertRateLimitForTest',
+      // PROXY protocol 解析器的分步判据（v1 行/v2 段/重写原语）经 `_internal` 出口
+      // 供 proxyProtocolParser.test.js 直接逐格钉判据；公开入口
+      // parseProxyProtocolHeader 已在真实 socket 集成里覆盖，分步出口只服务纯函数层。
+      'utils/proxyProtocol.js::_internal',
     ])
       expect(keys).toContain(must);
   });

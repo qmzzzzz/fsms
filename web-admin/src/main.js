@@ -99,5 +99,8 @@ if (import.meta.env.PROD) {
     },
   })
   setUpdateApplier(() => updateSW(true))
-  startVersionWatcher()
+  // G4：版本探测发现服务端已换版时必须接到 updateNotice，否则轮询白跑、
+  // 界面永远不知道该提示刷新。markUpdateAvailable 幂等（首因保留），与 SW
+  // 来源交替置位不会让文案跳动；UpdateNoticeBar 全树仅一处，不会重复弹。
+  startVersionWatcher({ onUpdateAvailable: () => markUpdateAvailable('version') })
 }

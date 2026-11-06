@@ -135,7 +135,9 @@ describe('运行时健康信号：app.js 的 /readyz 必须真的记录判定', 
   //   ③ 拓扑阻断的 reason 也被带进判定
   const readyVerdict =
     /recordReadyz\(\s*ready\s*\?\s*'ok'\s*:[\s\S]*?mongo\.ok\s*\?\s*redis\.reason\s*:\s*mongo\.reason[\s\S]*?,\s*ready\s*\)/;
-  const topologyVerdict = /topologyBlocker\s*\?\s*topologyBlocker\.reason/;
+  // i760 #22 之前这里钉的是响应体 checks.topology 的投影；响应体最小化后
+  // 拓扑 reason 的唯一落点是 recordReadyz 的取值表达式（可选链取值）
+  const topologyVerdict = /topologyBlocker\s*\?\.reason/;
 
   test('两个分支（成功 / 异常）都必须落指标，且判定覆盖 Mongo + Redis', () => {
     expect(appJs).toMatch(readyVerdict);
@@ -149,8 +151,9 @@ describe('运行时健康信号：app.js 的 /readyz 必须真的记录判定', 
   test('判据可失败：把 recordReadyz 调用去掉，同一正则必须报出来', () => {
     const stripped = appJs
       .replace(readyVerdict, '')
-      // topologyVerdict 在响应体的 checks.topology 里也有一份（那是同一个判据的对外投影），
-      // 反证必须把它一并抹掉，否则「抹掉 recordReadyz 后仍为真」会被误读成判据没牙
+      // topologyVerdict 的取值表达式同时是未就绪原因写入日志的那一处（同一个
+      // 判据的受控投影），反证必须把它一并抹掉，否则「抹掉 recordReadyz 后仍为真」
+      // 会被误读成判据没牙
       .replace(new RegExp(topologyVerdict.source, 'g'), '')
       .replace(/recordReadyz\('error', false\)/g, '');
     expect(readyVerdict.test(stripped)).toBe(false);

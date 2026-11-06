@@ -6,14 +6,14 @@
 
 ## 1. 资产与信任边界
 
-| 资产     | 说明                                                    | 泄露后果                    |
-| -------- | ------------------------------------------------------- | --------------------------- |
-| 业务库   | mongo（人员 PII + 设备/报警/巡检记录）                  | 人员名录与运营史外泄        |
-| 审计集合 | append-only 哈希链 + HMAC（`models/auditLogHooks.js`）  | 被改写 = 追责依据失效       |
+| 资产     | 说明                                                                                         | 泄露后果                    |
+| -------- | -------------------------------------------------------------------------------------------- | --------------------------- |
+| 业务库   | mongo（人员 PII + 设备/报警/巡检记录）                                                       | 人员名录与运营史外泄        |
+| 审计集合 | append-only 哈希链 + HMAC（`models/auditLogHooks.js`）                                       | 被改写 = 追责依据失效       |
 | 取证捕获 | ForensicCapture（台账唯一 L4：请求/响应全量）+ 落盘证据文件（WAL / manifest / 审计链检查点） | 取证链与追溯依据失效        |
-| 密钥     | JWT×2 / AES / HMAC / gpg 私钥                           | 冒充任意身份 / 解密全量数据 |
-| 备份     | `.gz.gpg` + 校验和（`deployment/backup-encryption.md`） | 同业务库                    |
-| 凭据     | 用户口令（bcryptjs 12 rounds + 复用历史）               | 账号接管                    |
+| 密钥     | JWT×2 / AES / HMAC / gpg 私钥                                                                | 冒充任意身份 / 解密全量数据 |
+| 备份     | `.gz.gpg` + 校验和（`deployment/backup-encryption.md`）                                      | 同业务库                    |
+| 凭据     | 用户口令（bcryptjs 12 rounds + 复用历史）                                                    | 账号接管                    |
 
 边界：浏览器 ↔（HTTPS/反代）↔ Express app ↔（同宿主 compose 网络，TLS 豁免显式
 声明 `MONGODB_TLS_EXEMPT`，见 `config/transportSecurity.js`）↔ mongo/redis；

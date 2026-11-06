@@ -5,7 +5,8 @@
  * 两个重签脚本各有一个"越权放行"旗标（--allow-suspect-hmac / --allow-suspect-chain）：
  * 放行后，验签失败的记录会被覆盖成"通过"——审计链的事后不可抵赖性因此取决于
  * "谁、何时、凭什么放行"。此前这个事实只打到 stdout，进程结束即消失，持钥者
- * 作恶不留痕。本模块把每次 --apply 追加一行 JSON 到 logs/audit-resign-log.jsonl。
+ * 作恶不留痕。本模块在每次 --apply 改写前/完成后追加 intent/result JSON 到
+ * logs/audit-resign-log.jsonl，以同一 operationId 关联；只有 started 的操作不得视为完成。
  *
  * ## append-only 纪律
  * 只追加、绝不改写既有行；追加前校验文件**末行**是合法 JSON——末行损坏（手编或
@@ -21,6 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { randomUUID } = require('crypto');
 
 const LEDGER_PATH = path.resolve(__dirname, '..', 'logs', 'audit-resign-log.jsonl');
 
@@ -42,25 +44,37 @@ function gitRev() {
  * @param {boolean} input.overridden 本次是否放行了验签失败记录
  * @param {string} input.dbName 目标库名
  * @param {string} input.host 目标库 host
- * @param {Record<string, number>} input.counts 预检计数（逐脚本自有键，原样入行）
- * @returns {void} 写失败直接抛（调用方 exit 非零）：留痕失败的重签不算完成
+ * @param {object} input.counts 预检计数（逐脚本自有键，原样入行）
+ * @param {string} input.operationId 同次重签的关联 ID
+ * @param {string} input.phase intent / result
+ * @param {string} input.status started / completed
+ * @param {object} [input.result] 改写结果（与预检计数分开）
+ * @param {string} [ledgerPath] 可注入测试文件，不提供 CLI/env 覆盖入口
+ * @returns {void} 写入或同步落盘失败直接抛：意图留痕失败不得改库
  */
-function appendResignLedger({ script, ticketId, overridden, dbName, host, counts }) {
-  if (overridden && !ticketId) {
+function appendResignLedger(
+  { script, ticketId, overridden, dbName, host, counts, operationId, phase, status, result },
+  ledgerPath = LEDGER_PATH
+) {
+  const ticket = typeof ticketId === 'string' ? ticketId.trim() : '';
+  if (overridden && (!ticket || ticket.startsWith('-'))) {
     throw new Error('越权放行必须携带变更单号（--allow-suspect-*=<单号>），拒绝无据留痕');
   }
-  if (fs.existsSync(LEDGER_PATH) && fs.statSync(LEDGER_PATH).size > 0) {
-    const raw = fs.readFileSync(LEDGER_PATH, 'utf8');
+  let separator = '';
+  if (fs.existsSync(ledgerPath) && fs.statSync(ledgerPath).size > 0) {
+    const raw = fs.readFileSync(ledgerPath, 'utf8');
     const lines = raw.split('\n').filter((l) => l.trim() !== '');
     const last = lines[lines.length - 1];
     try {
       JSON.parse(last);
     } catch (_) {
       throw new Error(
-        `重签留痕文件末行不是合法 JSON（${LEDGER_PATH}）：可能被手工编辑或上次写入截断，` +
+        `重签留痕文件末行不是合法 JSON（${ledgerPath}）：可能被手工编辑或上次写入截断，` +
           '先人工核查该文件再操作（append-only 纪律：不得改写既有行）'
       );
     }
+    // 既有末行合法但无换行时只补分隔符，不能把新 JSON 拼进旧行。
+    if (!raw.endsWith('\n')) separator = '\n';
   }
   const line = JSON.stringify({
     ts: new Date().toISOString(),
@@ -70,11 +84,30 @@ function appendResignLedger({ script, ticketId, overridden, dbName, host, counts
     host,
     mode: 'apply',
     overridden: Boolean(overridden),
-    ticketId: ticketId || null,
+    ticketId: ticket || null,
     counts,
+    operationId,
+    phase,
+    status,
+    result,
   });
-  fs.mkdirSync(path.dirname(LEDGER_PATH), { recursive: true });
-  fs.appendFileSync(LEDGER_PATH, line + '\n', { encoding: 'utf8' });
+  fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
+  const fd = fs.openSync(ledgerPath, 'a');
+  try {
+    fs.appendFileSync(fd, separator + line + '\n', { encoding: 'utf8' });
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
-module.exports = { appendResignLedger, LEDGER_PATH };
+/** 意图落盘成功才调用写库；异常不补 completed，保留 started 供人工核查。 */
+async function withResignLedger(input, write, ledgerPath = LEDGER_PATH) {
+  const entry = { ...input, operationId: randomUUID() };
+  appendResignLedger({ ...entry, phase: 'intent', status: 'started' }, ledgerPath);
+  const result = await write();
+  appendResignLedger({ ...entry, phase: 'result', status: 'completed', result }, ledgerPath);
+  return result;
+}
+
+module.exports = { appendResignLedger, withResignLedger, LEDGER_PATH };

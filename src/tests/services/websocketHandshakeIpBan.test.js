@@ -21,6 +21,7 @@
 
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { resetTrustedProxyCache } = require('../../config/trustedProxies');
 
 describe('WebSocket 握手 IP 黑名单闸', () => {
   let WebSocketService;
@@ -240,7 +241,13 @@ describe('WebSocket 握手 IP 黑名单闸', () => {
     // 且 allowedIPs 恰好放行该段——用来证明报错来自封禁闸而不是范围闸。
     test('TRUST_PROXY_HOPS>0 时封禁判定读的是 XFF 可信段（与 req.ip 同值）', async () => {
       const original = process.env.TRUST_PROXY_HOPS;
+      const originalCidrs = process.env.TRUSTED_PROXY_CIDRS;
       process.env.TRUST_PROXY_HOPS = '1';
+      // 2026-11-03 裁决尺收窄后私网对端不再自动可信：对端 PEER_IP 必须走名单档
+      // （显式声明 TRUSTED_PROXY_CIDRS）其写的 XFF 才会被采信——与生产部署的
+      // 唯一合法形态逐字一致。
+      process.env.TRUSTED_PROXY_CIDRS = '10.0.0.1/32';
+      resetTrustedProxyCache();
       try {
         // 前提自证：改环境后判据确实变了，否则这条用例是空跑
         expect(currentHops()).toBe(1);
@@ -256,6 +263,9 @@ describe('WebSocket 握手 IP 黑名单闸', () => {
       } finally {
         if (original === undefined) delete process.env.TRUST_PROXY_HOPS;
         else process.env.TRUST_PROXY_HOPS = original;
+        if (originalCidrs === undefined) delete process.env.TRUSTED_PROXY_CIDRS;
+        else process.env.TRUSTED_PROXY_CIDRS = originalCidrs;
+        resetTrustedProxyCache();
       }
     });
   });
@@ -503,10 +513,14 @@ describe('WebSocket 握手 IP 黑名单闸', () => {
     // 靠 hops 的两个取值让同一条 socket 得出相反结论——分歧只能由"同址"解释。
     test('与握手面同址：hops=0 查直连对端、hops=1 查 XFF 可信段（同一 socket 两种结论）', async () => {
       const original = process.env.TRUST_PROXY_HOPS;
-      // #24 R1 后，XFF 可信段只在**对端为内网/回环**（真实代理 nginx/容器）时才被采信；
-      // 公网对端写的 XFF 已不再被信任（那正是本改要关的洞）。故用 RFC1918 对端复现代理跳数分支。
+      const originalCidrs = process.env.TRUSTED_PROXY_CIDRS;
+      // #24 R1 后，XFF 可信段只在**对端落在显式名单档**（或回环回退档）时才被采信；
+      // 公网/私网对端写的 XFF 已不再被信任（那正是本改要关的洞）。故声明覆盖对端的
+      // TRUSTED_PROXY_CIDRS 复现代理跳数分支——与生产部署的唯一合法形态一致。
       const bannedDirect = '10.9.9.148';
       const cleanXff = '10.9.9.149';
+      process.env.TRUSTED_PROXY_CIDRS = '10.9.9.148/32';
+      resetTrustedProxyCache();
       await putEntry(bannedDirect, 'black');
       try {
         process.env.TRUST_PROXY_HOPS = '0';
@@ -523,6 +537,9 @@ describe('WebSocket 握手 IP 黑名单闸', () => {
       } finally {
         if (original === undefined) delete process.env.TRUST_PROXY_HOPS;
         else process.env.TRUST_PROXY_HOPS = original;
+        if (originalCidrs === undefined) delete process.env.TRUSTED_PROXY_CIDRS;
+        else process.env.TRUSTED_PROXY_CIDRS = originalCidrs;
+        resetTrustedProxyCache();
       }
     });
   });

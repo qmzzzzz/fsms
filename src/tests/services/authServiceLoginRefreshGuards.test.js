@@ -521,11 +521,35 @@ describe('authService gap B', () => {
         getRefreshSecret(),
         { expiresIn: '24h' }
       );
+      // 真吊销：会话行还在、status 非 active
+      const spy = jest
+        .spyOn(sessionService, 'validateSession')
+        .mockResolvedValueOnce({ usable: false, session: { status: 'revoked' } });
+      const result = await authService.refreshSession(token, defaultCtx());
+      expect(result.outcome).toBe('SESSION_REVOKED');
+      spy.mockRestore();
+    });
+
+    test('SESSION_EXPIRED - 会话行已不存在（TTL 物理删除 / 伪造 sid）', async () => {
+      // 文档不在时与自然过期同归类（token.js resolveRotationSession 的注释）：
+      // 对客户端都是重新登录，安全语义等价，但不能再叫“会话已被吊销”误导运维。
+      const user = await makeUser('rfexp');
+      const sid = crypto.randomUUID();
+      const token = jwt.sign(
+        {
+          userId: String(user._id),
+          type: 'refresh',
+          tokenVersion: user.tokenVersion ?? 0,
+          sid,
+        },
+        getRefreshSecret(),
+        { expiresIn: '24h' }
+      );
       const spy = jest
         .spyOn(sessionService, 'validateSession')
         .mockResolvedValueOnce({ usable: false });
       const result = await authService.refreshSession(token, defaultCtx());
-      expect(result.outcome).toBe('SESSION_REVOKED');
+      expect(result.outcome).toBe('SESSION_EXPIRED');
       spy.mockRestore();
     });
 

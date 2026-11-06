@@ -25,6 +25,7 @@ const MAX_WINDOW_HOURS = 720;
 const criteriaOf = (src) => ({
   ip: src.ip,
   fingerprint: src.fingerprint,
+  deviceKey: src.deviceKey,
   ipSegment: src.ipSegment,
   since: src.since ? new Date(src.since) : undefined,
   until: src.until ? new Date(src.until) : undefined,

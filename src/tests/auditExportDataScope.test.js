@@ -3,7 +3,7 @@
  *
  * 修复前只有权限码闸门（security:audit），没有 dataScope：
  * `/api/security/audit-logs`（auditController.js:70）与审计列表
- * （auditQueryService.js:317）都调用 `applyAuditDataScope`，
+ * （auditQueryService.js:316；2026-11-04 攻击告警读面并入注释行后上移）都调用 `applyAuditDataScope`，
  * 而 `/api/reports/export?type=audit` 直接跳过它。⇒ level 7（department 档）的运维
  * 列表里只看得到本部门成员的行为记录，xlsx 却导出**全库所有人**的 IP/路径/操作。
  * 导出集比可见集宽，等于把范围闸从后门拆掉。

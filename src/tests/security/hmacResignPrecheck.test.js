@@ -34,6 +34,9 @@ const NODE = process.execPath;
 const OLD_KEY = '11'.repeat(32);
 const NEW_KEY = '22'.repeat(32);
 const ATTACKER_KEY = '33'.repeat(32);
+// 2026-11-04 起越权旗标必须携带变更单号（=值或空格分隔）：放行凭据无据 = 持钥者单方可灭迹，
+// 单号连同预检计数写进 append-only 重签留痕（logs/audit-resign-log.jsonl，已 gitignore）。
+const ALLOW_SUSPECT_TICKET = 'NW-TEST-1';
 
 // 新密钥经文件给出：`--new-key` 已移除（写在 argv 上的密钥会进 /proc/<pid>/cmdline 与 shell 历史）。
 // 本套件的判据里有"四条文档一字未动"这种逐字比对，argv 形态换了就得连带改夹具，
@@ -104,7 +107,9 @@ function runScript({ apply, allowSuspect, currentKey }) {
   delete env.NEW_HMAC_SECRET;
   const argv = ['--new-key-file', KEY_FILE];
   if (apply) argv.push('--apply', '--yes');
-  if (allowSuspect) argv.push('--allow-suspect-hmac');
+  // true = 带单号的合法越权形态；'bare' = 裸旗标（2026-11-04 起按用法错误拒绝）
+  if (allowSuspect === true) argv.push(`--allow-suspect-hmac=${ALLOW_SUSPECT_TICKET}`);
+  else if (allowSuspect === 'bare') argv.push('--allow-suspect-hmac');
   const r = spawnSync(NODE, [SCRIPT, ...argv], {
     cwd: ROOT,
     encoding: 'utf8',
@@ -245,5 +250,14 @@ describe('hmac 轮换预检的落库行为', () => {
     expect(rows[HASHES.unsigned]).toBe(hmacOf(NEW_KEY, HASHES.unsigned));
     // 已是新钥签名的那条不需要改写，值不变
     expect(rows[HASHES.already]).toBe(hmacOf(NEW_KEY, HASHES.already));
+  });
+
+  test('裸旗标越权（不带单号）按用法错误拒绝——不得静默放行改写', async () => {
+    const { code, out } = runScript({ apply: true, allowSuspect: 'bare', currentKey: OLD_KEY });
+    expect(code).toBe(2);
+    expect(out).toContain('缺少参数值');
+    const rows = await readBack();
+    // 拒绝发生在任何改写之前
+    expect(rows[HASHES.clean]).toBe(hmacOf(OLD_KEY, HASHES.clean));
   });
 });

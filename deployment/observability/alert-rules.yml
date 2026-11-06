@@ -120,12 +120,40 @@ groups:
         annotations:
           summary: 'TRUSTED_PROXY_CIDRS 未配置：XFF 信任边界处于兼容档'
           description: >-
-            本实例启动时 TRUSTED_PROXY_CIDRS 为空，启用 trust proxy 时任意私网/回环对端
-            都被视为可信代理 ⇒ 同网段任一容器可直连应用端口并伪造 X-Forwarded-For，
-            IP 白名单/黑名单/限流/自动封禁/审计来源全部可被影响（F-01 未闭合）。
+            本实例启动时 TRUSTED_PROXY_CIDRS 为空，启用 trust proxy 时仅回环对端
+            （本机反代）被视为可信（2026-11-03 收窄：私网对端写 X-Forwarded-For
+            曾实测绕过 IP 黑名单，渗透测试 i760 #25）。反代不在本机的部署此刻
+            XFF 一律不可信 ⇒ req.ip 恒为代理地址，限流全站共享一个桶、封禁与
+            审计来源地址失真。
             处置：确认反代所在网段并显式声明（通常只有 Nginx 一段，如 172.28.0.0/16）；
             判据本体与兼容档的取舍见 src/utils/ipUtils.js 的 isPeerTrustedProxy 与
             src/config/trustedProxies.js，部署侧口径见 docs/adr/ADR-009。
+
+      # ── PROXY protocol 伪造尝试信号（2026-11-04）────────────────────────────
+      # PROXY_PROTOCOL=on 时，签名可识别的 PROXY v1/v2 头来自 TRUSTED_PROXY_CIDRS
+      # 名单之外的对端（untrusted-peer:*），或名单内对端发出畸形头
+      # （malformed-header:*）——连接已即时断开（fail-closed），未影响合法请求。
+      # 与 TrustedProxyBoundaryUnset 的区别：不是「配置缺失」，而是**运行期有人在
+      # 试探重写凭据**（名单是 socket 地面真相重写权的唯一凭据，试探它本身就该
+      # 被看见）。为什么 for: 0m：伪造尝试天然可以是低频单发，速率型规则会漏掉
+      # 第一声；为什么必须有专条而不是并入 SecurityAlertBurst：同 TrustedProxyBoundaryUnset
+      # 的取舍——扫描器试探和真实攻击都可能是 1 条，10 分钟 ≥10 条的门槛形同虚设。
+      - alert: ProxyProtocolHeaderRejected
+        expr: increase(security_alerts_total{type="proxy_protocol_header_rejected"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'PROXY protocol 头被拒绝（伪造尝试或畸形头）'
+          description: >-
+            近 15 分钟有对端向已启用 PROXY protocol 的端口发送了签名可识别的 PROXY
+            头，但对端不在 TRUSTED_PROXY_CIDRS 名单内，或名单内对端发出了畸形头；
+            连接已被断开，未影响任何合法请求语义。处置：单发多为端口扫描误中签名；
+            高频出现则排查是否有人绕过 LB 直连后端端口（生产形态后端只绑回环/内网，
+            能被直连本身就说明网络面有问题），并核对名单网段是否覆盖真实 LB。逐条
+            warn 日志留有 peer 与原因，可与安全审计时间线互证。判据见
+            src/utils/proxyProtocol.js 与 isPeerTrustedProxy；台账见
+            src/constants/failOpenSites.js（failOpenLedgerGate ① 双向闭合）。
 
       # ── 取证能力降级型信号（2026-10-31，P2）────────────────────────────────
       # 与上面几条的区别：它不是「准入护栏放行」，也不是「批量安全事件」，而是

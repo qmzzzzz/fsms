@@ -126,6 +126,18 @@ const openDialog = async (c) => {
   await flush(10)
 }
 
+/**
+ * G2 最终确认：submit 现在先弹 ElMessageBox 再发请求，点它的确认按钮才放行。
+ * 放在 helper 里让既有提交用例统一过闸；取消路径的行为由 upgradeDialog.test.js 钉。
+ */
+const confirmUpgradeBox = async () => {
+  await flush(4)
+  const ok = document.body.querySelector('.el-message-box__btns .el-button--primary')
+  expect(ok, '最终确认框应出现且有确认按钮').toBeTruthy()
+  click(ok)
+  await flush(4)
+}
+
 /** 覆盖 document.visibilityState（vitest 的 jsdom 默认 visible，隐藏态需手工构造） */
 const setVisibility = (state) => {
   Object.defineProperty(document, 'visibilityState', {
@@ -138,6 +150,8 @@ afterEach(() => {
   while (mounted.length) mounted.pop().handle.unmount()
   // 弹窗 teleport 到 body：组件卸载后残留节点会污染下一条用例的查询
   document.body.querySelectorAll('.el-dialog').forEach((node) => node.remove())
+  // G2 最终确认框同样 teleport 到 body，残留会让下一条用例「确认框应出现」假绿
+  document.body.querySelectorAll('.el-message-box').forEach((node) => node.remove())
   delete document.visibilityState
   vi.useRealTimers()
   h.getMetrics.mockReset()
@@ -235,6 +249,7 @@ describe('一键升级表单与提交', () => {
     setValue(passwordInput(), 'secret')
     await flush(4)
     click(submitBtn())
+    await confirmUpgradeBox()
     await flush(12)
 
     expect(h.encryptPassword).toHaveBeenCalledWith('secret', 'PASSWORD_CURRENT')
@@ -298,6 +313,7 @@ describe('一键升级表单与提交', () => {
     setValue(mfaInput(), '123456')
     await flush(4)
     click(submitBtn())
+    await confirmUpgradeBox()
     await flush(10)
 
     expect(h.triggerUpgrade).toHaveBeenCalledWith({
@@ -323,6 +339,7 @@ describe('一键升级表单与提交', () => {
     h.encryptPassword.mockResolvedValue('ENC')
     await flush(4)
     click(submitBtn())
+    await confirmUpgradeBox()
     await flush(10)
 
     expect(h.getUpgradeJob).toHaveBeenCalledWith(
@@ -351,6 +368,30 @@ describe('一键升级表单与提交', () => {
     setValue(passwordInput(), 'secret')
     await flush(4)
     expect(submitBtn().disabled).toBe(true)
+  })
+
+  test('概况归一化防御臂：畸形 bundles/reasonCodes/allowlist 不炸渲染；无历史任务落 noHistory', async () => {
+    // 2026-11-06 收敛批补测：normalizeBundles 的 invalid 臂、reasonCodes/allowlist 的
+    // 非字符串过滤臂（此前这些 take/filter 分支零覆盖，畸形心跳数据会直接炸渲染）
+    overviewRes({
+      upgrade: {
+        bundles: {
+          available: ['bad-string', null, { version: 'v9.9.9', ref: 'fsms-x.zip' }],
+          invalid: [{ dirName: 'd1', error: '摘要不匹配' }, null, { error: '无目录名' }],
+        },
+        reasonCodes: ['smtp_missing', 42, null],
+        allowlist: ['ghcr.io/fsms/', 7, null],
+        latestJob: null,
+      },
+    })
+    const c = await open(['*:*'])
+    await flush(4)
+
+    // 无历史任务 ⇒ noHistory 占位（latestUpgradeJob 缺失臂）
+    expect(c.text()).toContain('暂无升级记录')
+
+    // 非字符串码被过滤后不炸：原因行照常渲染（视图消费的是归一化结果）
+    expect(document.body.textContent).not.toContain('42')
   })
 })
 
@@ -518,12 +559,16 @@ describe('提交闸门与关窗失效', () => {
     await flush(4)
 
     // 两次点击在同一轮事件循环里：DOM 还没重新渲染（按钮尚未 disabled），
-    // 唯一能挡住第二次的就是 submit 内部的同步置位
+    // 唯一能挡住第二次的就是 submit 内部的同步置位——G2 后确认框也是 await，
+    // 置位若不先行，连点会叠出两个确认框进而两次提交
     const btn = submitBtn()
     fireClick(btn)
     fireClick(btn)
     await flush(4)
 
+    // 可观测判据：只叠出一个确认框 = 第二次点击确实被同步挡下
+    expect(document.body.querySelectorAll('.el-message-box')).toHaveLength(1)
+    await confirmUpgradeBox()
     expect(h.encryptPassword).toHaveBeenCalledTimes(1)
     expect(submitBtn().disabled).toBe(true)
     expect(submitBtn().getAttribute('aria-busy')).toBe('true')
@@ -547,6 +592,7 @@ describe('提交闸门与关窗失效', () => {
     setValue(passwordInput(), 'secret')
     await flush(4)
     click(submitBtn())
+    await confirmUpgradeBox()
     await flush(4)
 
     const footerButtons = Array.from(document.body.querySelectorAll('.el-dialog__footer button'))
@@ -580,6 +626,7 @@ describe('提交闸门与关窗失效', () => {
     setValue(passwordInput(), 'secret')
     await flush(4)
     click(submitBtn())
+    await confirmUpgradeBox()
     await flush(4)
     expect(h.triggerUpgrade).toHaveBeenCalledTimes(1)
 
@@ -626,6 +673,7 @@ describe('轮询错误策略与入队响应校验', () => {
     setValue(passwordInput(), 'secret')
     await flush(4)
     click(submitBtn())
+    await confirmUpgradeBox()
     await flush(10)
 
     expect(bodyEl()).toBeFalsy()
@@ -950,6 +998,7 @@ describe('一键升级的离线来源（mode）', () => {
     expect(submitBtn().disabled).toBe(false)
 
     click(submitBtn())
+    await confirmUpgradeBox()
     await flush(10)
     expect(h.triggerUpgrade).toHaveBeenCalledWith({
       image: IMAGE,

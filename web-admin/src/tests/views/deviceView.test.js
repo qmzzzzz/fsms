@@ -195,6 +195,7 @@ const typeInto = (input, value) => {
 afterEach(() => {
   active?.handle.unmount()
   active = null
+  vi.useRealTimers()
   getList.mockReset()
   create.mockReset()
   update.mockReset()
@@ -1117,18 +1118,19 @@ describe('DeviceView 实时推送（device-alert 房间）', () => {
     expect(c.errors).toEqual([])
   })
 
-  test('收到 notification 后刷新列表、概览与到期提醒（三块必须一起刷新）', async () => {
+  test('收到 notification 后刷新列表、概览与到期提醒（三块必须一起刷新；G10 起走 800ms debounce）', async () => {
     await open()
     const handler = notificationHandler()
     const beforeList = getList.mock.calls.length
     const beforeStats = getStats.mock.calls.length
     const beforeReminders = getReminders.mock.calls.length
+    // G10：handler 已是 800ms trailing debounce，必须推进假时钟才落地
+    vi.useFakeTimers()
     handler({ type: 'notification', notificationType: 'device_status_changed' })
-    await waitFor(() => getList.mock.calls.length > beforeList, { message: '列表被推送刷新' })
-    await waitFor(() => getStats.mock.calls.length > beforeStats, { message: '概览被推送刷新' })
-    await waitFor(() => getReminders.mock.calls.length > beforeReminders, {
-      message: '提醒被推送刷新',
-    })
+    await vi.advanceTimersByTimeAsync(800)
+    expect(getList.mock.calls.length).toBe(beforeList + 1)
+    expect(getStats.mock.calls.length).toBe(beforeStats + 1)
+    expect(getReminders.mock.calls.length).toBe(beforeReminders + 1)
   })
 
   test('卸载时按注册的同一处理器退订、退出房间并释放引用', async () => {
@@ -1139,5 +1141,82 @@ describe('DeviceView 实时推送（device-alert 房间）', () => {
     expect(wsOff.mock.calls).toEqual([['notification', handler]])
     expect(wsLeaveRoom.mock.calls).toEqual([['device-alert']])
     expect(releaseWs).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('DeviceView 竞态守卫与刷新去抖（G9/G10）', () => {
+  /** 取本页注册的 notification 处理器（on 的参数第二项） */
+  const notificationHandler = () => {
+    const call = wsOn.mock.calls.find(([event]) => event === 'notification')
+    return call?.[1]
+  }
+
+  test('慢的旧 stats 响应不覆盖新值（G9：loadStats 竞态守卫）', async () => {
+    // 首屏那轮 loadStats 悬置（模拟慢响应的「旧」请求）
+    let resolveOld
+    getStats.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve
+        })
+    )
+    await open()
+    expect(getStats).toHaveBeenCalledTimes(1)
+
+    // 第二轮刷新走 WS 通知路径（800ms debounce 用假时钟推进），新值立即返回
+    getStats.mockResolvedValueOnce({ data: { data: { ...STATS, total: 99 } } })
+    vi.useFakeTimers()
+    notificationHandler()({ type: 'notification' })
+    await vi.advanceTimersByTimeAsync(800)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getStats).toHaveBeenCalledTimes(2)
+    // 新值已上屏
+    const newCards = active.findAll('.device-overview .mini-stat')
+    expect(newCards[0].textContent).toContain('99')
+
+    // 旧响应这才迟迟回来——不得覆盖已经写入的新值
+    resolveOld({ data: { data: { ...STATS, total: 1 } } })
+    await vi.advanceTimersByTimeAsync(0)
+    const cards = active.findAll('.device-overview .mini-stat')
+    expect(cards[0].textContent).toContain('99')
+    expect(cards[0].textContent).not.toContain('设备总数 1')
+    vi.useRealTimers()
+  })
+
+  test('窗口期两条 notification 只触发一轮 3 GET（G10：800ms trailing debounce）', async () => {
+    await open()
+    const handler = notificationHandler()
+    const beforeList = getList.mock.calls.length
+    const beforeStats = getStats.mock.calls.length
+    const beforeReminders = getReminders.mock.calls.length
+
+    vi.useFakeTimers()
+    handler({ type: 'notification' })
+    await vi.advanceTimersByTimeAsync(100)
+    handler({ type: 'notification' }) // 窗口内第二条：必须重置计时器合并为一轮
+    await vi.advanceTimersByTimeAsync(800)
+    // 若 debounce 未重置计时器，第一条的 800ms 也会在 t=900 落地 → 变成两轮
+    expect(getList.mock.calls.length).toBe(beforeList + 1)
+    expect(getStats.mock.calls.length).toBe(beforeStats + 1)
+    expect(getReminders.mock.calls.length).toBe(beforeReminders + 1)
+    vi.useRealTimers()
+  })
+
+  test('语言切换不发起请求（G10：列表/统计/提醒文案均为客户端 i18n 映射）', async () => {
+    const c = await open()
+    const beforeList = getList.mock.calls.length
+    const beforeStats = getStats.mock.calls.length
+    const beforeReminders = getReminders.mock.calls.length
+
+    i18n.global.locale.value = 'en-US'
+    await flush(6)
+    expect(getList.mock.calls.length).toBe(beforeList)
+    expect(getStats.mock.calls.length).toBe(beforeStats)
+    expect(getReminders.mock.calls.length).toBe(beforeReminders)
+
+    i18n.global.locale.value = 'zh-CN'
+    await flush(4)
+    expect(getList.mock.calls.length).toBe(beforeList)
+    expect(c.errors).toEqual([])
   })
 })

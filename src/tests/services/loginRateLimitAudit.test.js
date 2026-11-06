@@ -33,13 +33,15 @@ const fakeReq = (username, ip = '203.0.113.7') => ({
   get: (name) => (name === 'user-agent' ? 'ua-lrla' : undefined),
 });
 
+const { tick } = require('../helpers/pollTick');
+
 const waitFor = async (fn, timeoutMs = 3000) => {
   const start = Date.now();
   for (;;) {
     const got = await fn();
     if (got) return got;
     if (Date.now() - start > timeoutMs) return null;
-    await new Promise((r) => setTimeout(r, 25));
+    await tick(25);
   }
 };
 
@@ -119,7 +121,9 @@ describe('登录限流命中的记账（429 计入失败尝试）', () => {
     const username = `${TAG}-d`;
     jest.spyOn(AuditLog, 'create').mockRejectedValueOnce(new Error('audit down'));
     expect(() => recordLimitedAttempt(fakeReq(username), 'login-ip')).not.toThrow();
-    await new Promise((r) => setTimeout(r, 80));
+    // 等的是 fire-and-forget 链的拒绝落定（create 已 mock，无真实 I/O）：
+    // setImmediate 让步宏任务即可确定性结算，不需要也不允许固定 80ms 睡眠。
+    await new Promise((resolve) => setImmediate(resolve));
     expect(await AuditLog.countDocuments({ username })).toBe(0);
   });
 

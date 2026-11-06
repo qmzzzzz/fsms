@@ -259,7 +259,9 @@ describe('derivedPools：从库内指纹归桶出 top N 指纹的网段池', () 
     const model = modelOf([]);
     const groups = [];
     for (let i = 0; i < trace.MAX_DERIVED_FINGERPRINTS + 1; i += 1) {
-      groups.push(groupOf(`fp-${i}`, `10.0.${i}`, trace.MAX_DERIVED_FINGERPRINTS + 1 - i, [`10.0.${i}.1`]));
+      groups.push(
+        groupOf(`fp-${i}`, `10.0.${i}`, trace.MAX_DERIVED_FINGERPRINTS + 1 - i, [`10.0.${i}.1`])
+      );
     }
     model.aggregate = jest.fn(async () => groups);
     const r = await trace.derivedPools({ model, ip: '1.2.3.4' });

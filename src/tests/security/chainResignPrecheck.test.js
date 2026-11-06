@@ -36,6 +36,9 @@ const NODE = process.execPath;
 const KEY = 'aa'.repeat(32);
 const ACTIONS = ['zzq_a1', 'zzq_a2', 'zzq_a3'];
 const TS = new Date('2026-03-04T05:06:07.000Z');
+// 2026-11-04 起越权旗标必须携带变更单号（=值形态）：放行凭据无据 = 持钥者单方可灭迹，
+// 单号连同预检计数写进 append-only 重签留痕（logs/audit-resign-log.jsonl，已 gitignore）。
+const ALLOW_SUSPECT_TICKET = 'NW-TEST-1';
 
 const {
   canonicalPayload,
@@ -130,7 +133,9 @@ function runScript({ apply, confirmYes = true, allowSuspect, extraArgs } = {}) {
   const argv = [];
   if (apply) argv.push('--apply');
   if (confirmYes) argv.push('--yes');
-  if (allowSuspect) argv.push('--allow-suspect-chain');
+  // true = 带 =单号 的合法越权形态；'bare' = 裸旗标（2026-11-04 起按用法错误拒绝）
+  if (allowSuspect === true) argv.push(`--allow-suspect-chain=${ALLOW_SUSPECT_TICKET}`);
+  else if (allowSuspect === 'bare') argv.push('--allow-suspect-chain');
   if (extraArgs) argv.push(...extraArgs);
   const r = spawnSync(NODE, [SCRIPT, ...argv], {
     cwd: ROOT,
@@ -272,16 +277,30 @@ describe('resign-audit-chain-v3 的改写前预检', () => {
     expect(await snapshot()).toEqual(before);
   });
 
+  test('裸旗标越权（不带变更单号）按用法错误拒绝——放行凭据无据不得静默成立', async () => {
+    await seedChain({ tamper: 'selfconsistent' });
+    const before = await snapshot();
+    const r = runScript({ apply: true, allowSuspect: 'bare' });
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('必须携带变更单号');
+    // 拒绝发生在任何改写之前
+    expect(await snapshot()).toEqual(before);
+  });
+
   test('parseArgs：三个标志位各自独立生效', () => {
     expect(parseArgs(['node', 'x.js', '--apply'])).toEqual({
       apply: true,
       confirmYes: false,
       allowSuspect: false,
+      suspectTicket: null,
     });
-    expect(parseArgs(['node', 'x.js', '--yes', '--allow-suspect-chain'])).toMatchObject({
+    expect(
+      parseArgs(['node', 'x.js', '--yes', `--allow-suspect-chain=${ALLOW_SUSPECT_TICKET}`])
+    ).toMatchObject({
       apply: false,
       confirmYes: true,
       allowSuspect: true,
+      suspectTicket: ALLOW_SUSPECT_TICKET,
     });
   });
 });

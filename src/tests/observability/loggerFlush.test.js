@@ -1,8 +1,9 @@
 /**
  * 退出前日志落盘验证
  *
- * 报告原文：「validate.js:259 / database.js:59 / index.js:243,304 的 exit 前加
- * flush 等待（≥100ms）」。
+ * 报告原文（2026-09 报告，行号已随多次重构漂移）：「exit 前加 flush 等待（≥100ms）」，
+ * 当时的落点是 validate.js 第 259 行（现为 validate.js:660 的 reportConfigErrors
+ * ——退出前同步落盘的编排所在）；同报告还点了 database.js:59 与 index.js:243,304。
  *
  * 【为什么不是「加个等待」就完事】本机实测（Node v24.15.0 / winston 3.19.0 /
  * winston-daily-rotate-file，探针见 utils/loggerFlush.js 模块注释）：

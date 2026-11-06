@@ -66,6 +66,9 @@ const PORT = config.port || 3000;
 
 // 模块级引用，供优雅关闭使用
 let httpServer = null;
+// PROXY protocol 前置服务器（PROXY_PROTOCOL=on 时在 start() 内创建）：
+// 它握着真实端口的 accept 权，优雅关闭必须先停它（见 gracefulShutdown 步骤 2）
+let frontServer = null;
 let wsServiceInstance = null;
 let reminderScheduler = null;
 // 优雅关闭幂等守卫：防止信号重复触发导致清理流程重入
@@ -161,6 +164,12 @@ const gracefulShutdown = async (signal) => {
 
   // 2. 停止 HTTP 服务器（不再接受新连接，最多等 10 秒让存量请求处理完）
   await runStep('关闭 HTTP 服务器', async () => {
+    // 刻意只停 accept、不 await 它的存量排空回调：frontServer.close(cb) 的 cb 要等
+    // 它登记的全部连接消亡才触发，await 会把「等空闲 keep-alive 消亡」的等待白白
+    // 烧在这里，而内层的 10s 预算语义管不到前置层。存量连接同时登记在前置与内层
+    // 两层连接表里，由下方内层的 closeIdleConnections / close / closeAllConnections
+    // 统一销毁，销毁即同时从两层移除
+    if (frontServer) frontServer.close(() => {}); // 回调仅吞 ERR_SERVER_NOT_RUNNING 等已关闭态
     if (!httpServer) return;
     await new Promise((resolve) => {
       // B-L3：立即关闭空闲 keep-alive 连接——浏览器长连接会让 close() 回调
@@ -303,7 +312,8 @@ const startServer = async () => {
 
     await connectDB();
     // 启动期事务拓扑体检：standalone 部署在启动日志里显式告警（error 级），
-    // 并通过 /readyz 的 checks.transactions 对外可见；不阻断启动。
+    // 生产语义下并使 /readyz 判 unready（对外响应体只回聚合 status，未就绪
+    // 原因走日志与 readyz_* 指标）；不阻断启动。
     await require('./utils/transaction').reportTransactionTopology();
     await initializeSystem();
 
@@ -350,9 +360,36 @@ const startServer = async () => {
     server.keepAliveTimeout = 80_000;
     server.headersTimeout = 85_000;
 
+    // PROXY 头在 HTTP 解析前还原 socket 地址；协议与三态信任约束见 utils/proxyProtocol.js / ADR-021。
+    // listen/error 必须挂到实际持有端口的前置层；内层仍承载 WS、超时及 HTTP 连接清理。
+    // 只信 TRUSTED_PROXY_CIDRS 名单内原始对端，名单非法时全部拒绝；拒绝须同时计数并记录原因。
+    if (require('./config/proxyProtocol').resolveProxyProtocol().enabled) {
+      // 生产闸（config/proxyProtocol.js 的收集器）已拦「on + ENABLE_HTTPS」组合；
+      // 这里再守一道是给非生产环境（本地 dev 直接跑 index.js）兜底：那类环境
+      // validateConfig 提前返回，没人拦组合 —— 而 Node 的 TLSSocket 在句柄层读
+      // 连接、看不到已被消费的 PROXY 头字节，后果是握手永久悬挂（最难排查的
+      // 静默故障形态）。宁可本地直接拒启，见 ADR-021「决定 ⑥」。
+      if (process.env.ENABLE_HTTPS === 'true') {
+        // 长文案常量在 config/proxyProtocol.js（index.js 的 max-lines 棘轮贴边，放不下）
+        logger.error(require('./config/proxyProtocol').HTTPS_COMBO_UNSUPPORTED_MESSAGE);
+        return exitAfterFlush(1);
+      }
+      frontServer = require('./utils/proxyProtocol').createProxyProtocolFrontServer(server, {
+        trustedProxies: require('./config/trustedProxies').resolveTrustedProxies(),
+        onRejection: ({ peer, reason }) => {
+          // 拒绝留痕：台账 proxy_protocol_header_rejected（constants/failOpenSites.js）的
+          // 调用点，failOpenLedgerGate ① 按本文件扫描并与台账双向闭合
+          require('./utils/metrics').incSecurityAlert('proxy_protocol_header_rejected', 'high');
+          logger.warn(`PROXY protocol 头被拒绝并断开连接（peer=${peer}，原因=${reason}）`);
+        },
+      });
+    }
+    const listenServer = frontServer || server;
+
     // 监听错误兜底（如 EADDRINUSE 端口占用）：listen 的错误不会抛异常，
-    // 不监听会让进程静默挂死、容器编排误判为健康；记录后以非零码退出
-    server.on('error', (err) => {
+    // 不监听会让进程静默挂死、容器编排误判为健康；记录后以非零码退出。
+    // 挂到实际 listen 的宿主（启用 PROXY protocol 时是前置层，否则是原 server）
+    listenServer.on('error', (err) => {
       if (err && err.code === 'EADDRINUSE') {
         logger.error(`端口 ${PORT} 已被占用（EADDRINUSE），请更换 PORT 或释放端口后重试`);
       } else {
@@ -377,7 +414,10 @@ const startServer = async () => {
     // 故保持原推进位置，改在启动期做一次自愈：从 DB 重建真实链尾。
     // 位置：必须在 listen 回调**之外**（该回调非 async），且早于任何审计写入。
     await resyncChainTail();
-    httpServer = server.listen(PORT, () => {
+    // httpServer 语义保持「内层 server」：WS 挂载、closeIdleConnections 等
+    // 关闭族 API 都以它为宿主；真正 listen 的是 listenServer（off 时两者同物）
+    httpServer = server;
+    listenServer.listen(PORT, () => {
       // 初始化 WebSocket（挂载到同一 HTTP server）
       wsServiceInstance = new WebSocketService(httpServer);
       app.set('wsService', wsServiceInstance);

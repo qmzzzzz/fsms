@@ -73,9 +73,17 @@ describe('makeSharedStore 共享存储分支', () => {
   const waitForRedisStore = () =>
     waitFor(() => RedisStore.mock.calls.length > 0, { label: 'RedisStore 后台创建' });
 
-  test('REDIS_URL 未配置 → 同步返回 undefined（走 express-rate-limit 默认 MemoryStore）', () => {
+  test('REDIS_URL 未配置 → 返回显式 MemoryStore（v7 不把内部默认 store 挂上中间件，测试复位需要可触达实例）', () => {
     delete process.env.REDIS_URL;
-    expect(makeSharedStore('general')).toBeUndefined();
+    const store = makeSharedStore('general');
+    // 2026-11-06 收敛批改契约：原返回 undefined（express-rate-limit 内部默认 MemoryStore
+    // 完全不可触达）——乱序测试需要 afterEach 里 resetAll 复位限流桶，返回 undefined
+    // 让复位永远空转。显式 MemoryStore 与内部默认是同一个类，行为逐字节一致。
+    expect(store).toBeTruthy();
+    expect(store.constructor.name).toBe('MemoryStore');
+    expect(typeof store.resetAll).toBe('function');
+    expect(typeof store.increment).toBe('function');
+    expect(typeof store.resetKey).toBe('function');
   });
 
   test('Redis 初始化失败 → 同步返回带 Store 接口的代理对象（内部回退 MemoryStore）', async () => {

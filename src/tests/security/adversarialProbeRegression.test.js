@@ -29,7 +29,7 @@ const { randomPassword } = require('../helpers/buildLoginEnvelope');
  *  - WS 认证对「已吊销 sid」「allowedIPs 不匹配」的拒绝（zzz-adversarial-r6 →
  *    services/websocketAuthScope.test.js，修复后由 Rawls 新建）
  *  - XFF 伪造无法绕过 /metrics 内网判定（zzz-adversarial-r2 R2-4 →
- *    middleware/metricsAuth.test.js:97-108 同口径用例）
+ *    middleware/metricsAuth.test.js 的「XFF 不可再绕过」组同口径用例）
  *  - 部门主管访问审计日志被拒（zzz-adversarial-r2 R2-10 →
  *    controllers/auditReportFixes.test.js:261 等 security:audit 权限用例）
  *  - 非法 ObjectId / 恶意 Origin / 无令牌 / alg:none / 错误密钥 / 省略 tokenVersion

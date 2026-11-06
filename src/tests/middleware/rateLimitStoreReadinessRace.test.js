@@ -183,9 +183,14 @@ describe('makeSharedStore：Redis 晚就绪的补切换', () => {
     expect(warns).toHaveLength(1);
   });
 
-  test('前提钉住：未配置 REDIS_URL 时工厂返回 undefined，本文件所有断言都与之无关', () => {
+  test('前提钉住：未配置 REDIS_URL 时工厂不接 Redis（RedisStore 不创建，本文件断言与之无关）', () => {
     delete process.env.REDIS_URL;
-    expect(makeSharedStore('login')).toBeUndefined();
+    // 2026-11-06 收敛批改契约：工厂改返回显式 MemoryStore（v7 不挂内部默认 store，
+    // 乱序测试的 afterEach 复位需要可触达实例）——契约要点从「返回 undefined」
+    // 变为「不创建 RedisStore、不触发后台切换」，本文件其余断言仍与之无关。
+    const store = makeSharedStore('login');
+    expect(store).toBeTruthy();
+    expect(store.constructor.name).toBe('MemoryStore');
     expect(mockRedisStoreCtor).not.toHaveBeenCalled();
   });
 

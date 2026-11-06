@@ -11,6 +11,7 @@ const forensicController = require('../controllers/forensicController');
 const traceValidation = [
   query('ip').optional({ values: 'falsy' }).isString().trim().isLength({ max: 64 }),
   query('fingerprint').optional({ values: 'falsy' }).isString().trim().isLength({ max: 128 }),
+  query('deviceKey').optional({ values: 'falsy' }).isString().trim().isLength({ max: 64 }),
   query('ipSegment').optional({ values: 'falsy' }).isString().trim().isLength({ max: 64 }),
   query('since').optional({ values: 'falsy' }).isISO8601().withMessage('起始时间格式无效'),
   query('until').optional({ values: 'falsy' }).isISO8601().withMessage('结束时间格式无效'),

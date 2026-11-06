@@ -128,6 +128,9 @@ const ROW_OTHER = {
   status: 'inactive',
   mfaEnabled: true,
   lastLoginAt: '2026-10-01T01:02:03.000Z',
+  // 服务端仅在调用方持 system:read 时下发该字段（userController/read.js 的投影切换），
+  // 不持权限的响应里没有这个键，视图渲染占位符。
+  lastLoginIp: '203.0.113.9',
   remark: '年度复训未完成',
 }
 const ROW_NO_MFA = { ...ROW_OTHER, _id: 'u3', username: 'carol', mfaEnabled: false }
@@ -467,6 +470,20 @@ describe('UserView 列表与筛选', () => {
     expect(row.textContent).toContain('年度复训未完成')
   })
 
+  test('列表展示最后登录 IP（只有 system:read 的响应才带这个字段）', async () => {
+    const c = await mountUser(P_BASE)
+    const row = c.findAll('.el-table__body-wrapper .el-table__row')[0]
+    expect(c.text()).toContain('最后登录 IP')
+    expect(row.textContent).toContain('203.0.113.9')
+  })
+
+  test('没有 lastLoginIp 时渲染占位符而不是空列（权限不足的真实响应）', async () => {
+    const c = await mountUser(P_BASE, [{ ...ROW_OTHER, lastLoginIp: undefined }])
+    const row = c.findAll('.el-table__body-wrapper .el-table__row')[0]
+    expect(row.textContent).not.toContain('203.0.113.9')
+    // 占位符带 title 提示（权限原因），而不是与“从未登录”混淆的空白
+    expect(row.querySelector('span[title]')).toBeTruthy()
+  })
   test('末页 clamp：越界页回退到 1 并重取，且 loading 收敛为 false（WF-05 实证）', async () => {
     // 时序（确定性）：首屏 total=11 ⇒ 2 页可翻；点下一页（page=2）后服务端
     // 响应 total=1（数据在两次请求间被删空）⇒ clamp 把 page.current 回退到 1

@@ -27,7 +27,7 @@
  *   FORENSIC_TRIGGER_ENABLED  仅精确 'false' 关闭；其余值（含未配置）都为开；
  *   FORENSIC_TRIGGER_TTL_MS   滑动窗口时长，默认 1800000（30 分钟）；
  *   FORENSIC_TRIGGER_MAX_IPS  容量上限，默认 4096，超限按 LRU 淘汰。
- * v1 未覆盖（登记为 v1b）：限流升级触顶、401/403 风暴、验证码失败风暴、全局限速异常。
+ * v1 未覆盖（登记为 v1b）：限流升级触顶、401/403 风暴、验证码失败风暴、全局限速异常；扫描探测族已于 2026-11-05 由 services/scanProbeDetector 覆盖（路径指纹与 404 风暴均标记取证），其余三族仍待续。
  */
 
 const logger = require('../utils/logger');

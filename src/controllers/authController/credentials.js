@@ -1,9 +1,4 @@
-/**
- * 认证控制器 · 凭证域（2026-10-19 自 `controllers/authController.js` 拆分）
- *
- * 覆盖：注册 / 登录（含 MFA 中间态与 fail-closed 未知 outcome）/ 图形验证码 /
- * 登录公钥下发 / 刷新令牌。函数体与注释自原文件原样迁出，相对 require 路径加深一级。
- */
+// 凭证端点共用未知 outcome 的 fail-closed 处理，MFA 中间态不得视为登录成功。
 
 const { validationResult } = require('express-validator');
 const { safeFieldErrors } = require('../../utils/validationRules');

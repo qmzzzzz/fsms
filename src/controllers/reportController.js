@@ -341,7 +341,7 @@ const exportReport = asyncHandler(async (req, res) => {
   // audit 类型必须叠加与「列表 / CSV 导出」同一份数据范围判据（auditScopeFilter）。
   // 此处原先的注释写着"审计无部门/属主字段，语义上只能全局或禁止"，而 AuditLog.userId
   // 正是审计列表用来过滤的字段：self 档只见自己、department 档只见本部门成员
-  // （auditController.js:70 与 auditQueryService.js:317 都调用了 applyAuditDataScope）。
+  // （auditController.js:70 与 auditQueryService.js:316 都调用了 applyAuditDataScope；317 为 2026-11-04 注释并行后上移）。
   // 少这一道就是：列表只看得到本部门，xlsx 却导出全库所有人的 IP/路径/操作
   // ——导出集比可见集宽，属本仓反复出现的"同一条判据的第二处实现漏抄"。
   if (type === 'audit') {

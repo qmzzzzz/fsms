@@ -23,6 +23,7 @@ const { DECOY_PERMISSIONS, DECOY_ROLE_CODES } = require('../../constants/honeypo
 const { DECOY_SELF_EMAIL_DOMAIN } = require('../../constants/honeypotDecoySelf');
 const { PERSONA_DEPARTMENTS } = require('../../constants/honeypotPersonas');
 const { __resetAlertRateLimitForTest } = require('../../services/alertDispatch');
+const { resetTrustedProxyCache } = require('../../config/trustedProxies');
 const captchaService = require('../../services/captchaService');
 
 describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除', () => {
@@ -394,16 +395,26 @@ describe('蜜罐账户（honeypot）：物化、诱饵登录与枚举面排除',
 
     test('可信代理：XFF 解析出的真实客户端留痕，而不是代理对端地址', async () => {
       setEnv('TRUST_PROXY_HOPS', '1');
-      const username = `${stamp}wsxff1`;
-      await honeypotWatch.recordHoneypotSocketProbe(username, {
-        id: 's-f1a',
-        // 对端是私网代理（兼容档判可信），XFF 携带互联网侧真实客户
-        handshake: { address: '10.44.0.9', headers: { 'x-forwarded-for': '198.51.100.7' } },
-      });
-      const row = await wsRow(username);
-      expect(row).toBeTruthy();
-      // 裸 .address 会记 10.44.0.9（代理）；修复后与封禁闸同尺 ⇒ 记真实客户端
-      expect(row.ip).toBe('198.51.100.7');
+      // 2026-11-03 裁决尺收窄后私网对端不再自动可信：对端 10.44.0.9 必须走名单档
+      // （显式声明 TRUSTED_PROXY_CIDRS）其写的 XFF 才会被采信——这是反代不在本机的
+      // 部署唯一合法形态，夹具与生产语义逐字一致。
+      setEnv('TRUSTED_PROXY_CIDRS', '10.44.0.9/32');
+      resetTrustedProxyCache();
+      try {
+        const username = `${stamp}wsxff1`;
+        await honeypotWatch.recordHoneypotSocketProbe(username, {
+          id: 's-f1a',
+          // 对端在名单档内 ⇒ 可信代理，XFF 携带互联网侧真实客户
+          handshake: { address: '10.44.0.9', headers: { 'x-forwarded-for': '198.51.100.7' } },
+        });
+        const row = await wsRow(username);
+        expect(row).toBeTruthy();
+        // 裸 .address 会记 10.44.0.9（代理）；与封禁闸同尺 ⇒ 记真实客户端
+        expect(row.ip).toBe('198.51.100.7');
+      } finally {
+        setEnv('TRUSTED_PROXY_CIDRS', undefined);
+        resetTrustedProxyCache();
+      }
     });
 
     test('伪造 XFF 负向：边界外对端带来的转发头不被采信，留痕落对端而非受害者', async () => {

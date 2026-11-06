@@ -1,0 +1,821 @@
+﻿2026-11-03T06:46:02.2807852Z Current runner version: '2.338.2'
+2026-11-03T06:46:02.2838840Z ##[group]Runner Image Provisioner
+2026-11-03T06:46:02.2840170Z Hosted Compute Agent
+2026-11-03T06:46:02.2840714Z Version: 20261021.618
+2026-11-03T06:46:02.2841366Z Commit: 21505ad2541d5be6135ed84fc33697146cf75b8e
+2026-11-03T06:46:02.2842037Z Build Date: 2026-10-21T00:45:21Z
+2026-11-03T06:46:02.2842675Z Worker ID: {30267e24-b934-485d-89f0-6f7d69b84910}
+2026-11-03T06:46:02.2843427Z Region: southcentralus
+2026-11-03T06:46:02.2843952Z Cloud: Azure
+2026-11-03T06:46:02.2844493Z ##[endgroup]
+2026-11-03T06:46:02.2845980Z ##[group]Operating System
+2026-11-03T06:46:02.2846649Z Ubuntu
+2026-11-03T06:46:02.2847266Z 24.04.5
+2026-11-03T06:46:02.2847768Z LTS
+2026-11-03T06:46:02.2848292Z ##[endgroup]
+2026-11-03T06:46:02.2848839Z ##[group]Runner Image
+2026-11-03T06:46:02.2849597Z Image: ubuntu-24.04
+2026-11-03T06:46:02.2850381Z Version: 20261025.353.1
+2026-11-03T06:46:02.2851643Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261025.353/images/ubuntu/Ubuntu2404-Readme.md
+2026-11-03T06:46:02.2853312Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261025.353
+2026-11-03T06:46:02.2854262Z ##[endgroup]
+2026-11-03T06:46:02.2855646Z ##[group]GITHUB_TOKEN Permissions
+2026-11-03T06:46:02.2857931Z Actions: read
+2026-11-03T06:46:02.2858593Z Contents: read
+2026-11-03T06:46:02.2859164Z Metadata: read
+2026-11-03T06:46:02.2860132Z SecurityEvents: write
+2026-11-03T06:46:02.2860732Z ##[endgroup]
+2026-11-03T06:46:02.2863558Z Secret source: Actions
+2026-11-03T06:46:02.2864576Z Cache mode: write
+2026-11-03T06:46:02.2865650Z Prepare workflow directory
+2026-11-03T06:46:02.3357904Z Prepare all required actions
+2026-11-03T06:46:02.3413501Z Getting action download info
+2026-11-03T06:46:02.6828192Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+2026-11-03T06:46:02.7841665Z Download action repository 'ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e' (SHA:fa7117db83c52d787ae5a89f350999701505d78e)
+2026-11-03T06:46:03.2285932Z Download action repository 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' (SHA:cf430e030ddbb5b0abf93d22962f4752f3646cd9)
+2026-11-03T06:46:03.3710480Z Download action repository 'github/codeql-action@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee' (SHA:6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee)
+2026-11-03T06:46:04.1427832Z Complete job name: Scorecard analysis
+2026-11-03T06:46:04.1865026Z ##[group]Pull down action image 'ghcr.io/ossf/scorecard-action:v2.5.0'
+2026-11-03T06:46:04.1982704Z ##[command]/usr/bin/docker pull ghcr.io/ossf/scorecard-action:v2.5.0
+2026-11-03T06:46:05.3603024Z v2.5.0: Pulling from ossf/scorecard-action
+2026-11-03T06:46:05.3603881Z b84bc69f1cbd: Pulling fs layer
+2026-11-03T06:46:05.3604132Z 5b3013706a46: Pulling fs layer
+2026-11-03T06:46:05.3604368Z 7e7bfd057be8: Pulling fs layer
+2026-11-03T06:46:05.3604562Z bf8083c5c1ec: Pulling fs layer
+2026-11-03T06:46:05.3604770Z 9d2753d762cc: Pulling fs layer
+2026-11-03T06:46:05.3605085Z 2780920e5dbf: Pulling fs layer
+2026-11-03T06:46:05.3605276Z 7c12895b777b: Pulling fs layer
+2026-11-03T06:46:05.3605448Z 3214acf345c0: Pulling fs layer
+2026-11-03T06:46:05.3606922Z 52630fc75a18: Pulling fs layer
+2026-11-03T06:46:05.3607286Z dd64bf2dd177: Pulling fs layer
+2026-11-03T06:46:05.3607617Z b839dfae01f6: Pulling fs layer
+2026-11-03T06:46:05.3607996Z 411e1c946a02: Pulling fs layer
+2026-11-03T06:46:05.3608401Z 799f0e3f433d: Pulling fs layer
+2026-11-03T06:46:05.3608753Z eca3138d0e67: Pulling fs layer
+2026-11-03T06:46:05.3609085Z 29a3e8b7d0b6: Pulling fs layer
+2026-11-03T06:46:05.3609376Z 6c174cbb5f6c: Pulling fs layer
+2026-11-03T06:46:05.3609707Z b62c759db193: Pulling fs layer
+2026-11-03T06:46:05.3610075Z 2f816cec91dc: Pulling fs layer
+2026-11-03T06:46:05.3610300Z d71965348a4e: Pulling fs layer
+2026-11-03T06:46:05.3610577Z b839dfae01f6: Waiting
+2026-11-03T06:46:05.3610869Z 411e1c946a02: Waiting
+2026-11-03T06:46:05.3611156Z 799f0e3f433d: Waiting
+2026-11-03T06:46:05.3611813Z eca3138d0e67: Waiting
+2026-11-03T06:46:05.3612110Z 29a3e8b7d0b6: Waiting
+2026-11-03T06:46:05.3612369Z 6c174cbb5f6c: Waiting
+2026-11-03T06:46:05.3612688Z b62c759db193: Waiting
+2026-11-03T06:46:05.3613034Z 2f816cec91dc: Waiting
+2026-11-03T06:46:05.3613289Z d71965348a4e: Waiting
+2026-11-03T06:46:05.3613574Z 9d2753d762cc: Waiting
+2026-11-03T06:46:05.3613865Z 2780920e5dbf: Waiting
+2026-11-03T06:46:05.3614113Z 7c12895b777b: Waiting
+2026-11-03T06:46:05.3614407Z 3214acf345c0: Waiting
+2026-11-03T06:46:05.3614753Z 52630fc75a18: Waiting
+2026-11-03T06:46:05.3615000Z dd64bf2dd177: Waiting
+2026-11-03T06:46:05.3615280Z bf8083c5c1ec: Waiting
+2026-11-03T06:46:05.5306556Z 5b3013706a46: Verifying Checksum
+2026-11-03T06:46:05.5310742Z 5b3013706a46: Download complete
+2026-11-03T06:46:05.5526907Z b84bc69f1cbd: Verifying Checksum
+2026-11-03T06:46:05.5527708Z b84bc69f1cbd: Download complete
+2026-11-03T06:46:05.5648708Z 7e7bfd057be8: Verifying Checksum
+2026-11-03T06:46:05.5650828Z 7e7bfd057be8: Download complete
+2026-11-03T06:46:05.5720394Z b84bc69f1cbd: Pull complete
+2026-11-03T06:46:05.7222998Z bf8083c5c1ec: Verifying Checksum
+2026-11-03T06:46:05.7224002Z bf8083c5c1ec: Download complete
+2026-11-03T06:46:05.7224660Z 5b3013706a46: Pull complete
+2026-11-03T06:46:05.7386864Z 9d2753d762cc: Verifying Checksum
+2026-11-03T06:46:05.7388221Z 9d2753d762cc: Download complete
+2026-11-03T06:46:05.7631241Z 2780920e5dbf: Verifying Checksum
+2026-11-03T06:46:05.8949179Z 2780920e5dbf: Download complete
+2026-11-03T06:46:05.8949662Z 7e7bfd057be8: Pull complete
+2026-11-03T06:46:05.9089601Z 7c12895b777b: Verifying Checksum
+2026-11-03T06:46:05.9104808Z 7c12895b777b: Download complete
+2026-11-03T06:46:05.9189188Z 3214acf345c0: Verifying Checksum
+2026-11-03T06:46:05.9210745Z 3214acf345c0: Download complete
+2026-11-03T06:46:05.9332176Z 52630fc75a18: Verifying Checksum
+2026-11-03T06:46:05.9341161Z 52630fc75a18: Download complete
+2026-11-03T06:46:06.0766262Z bf8083c5c1ec: Pull complete
+2026-11-03T06:46:06.0782503Z dd64bf2dd177: Verifying Checksum
+2026-11-03T06:46:06.0784257Z dd64bf2dd177: Download complete
+2026-11-03T06:46:06.0975832Z b839dfae01f6: Verifying Checksum
+2026-11-03T06:46:06.0976186Z b839dfae01f6: Download complete
+2026-11-03T06:46:06.1035520Z 9d2753d762cc: Pull complete
+2026-11-03T06:46:06.1044735Z 411e1c946a02: Verifying Checksum
+2026-11-03T06:46:06.1045368Z 411e1c946a02: Download complete
+2026-11-03T06:46:06.1111598Z 2780920e5dbf: Pull complete
+2026-11-03T06:46:06.1246445Z 7c12895b777b: Pull complete
+2026-11-03T06:46:06.1343848Z 3214acf345c0: Pull complete
+2026-11-03T06:46:06.1536741Z 52630fc75a18: Pull complete
+2026-11-03T06:46:06.1644647Z dd64bf2dd177: Pull complete
+2026-11-03T06:46:06.1735375Z b839dfae01f6: Pull complete
+2026-11-03T06:46:06.1840763Z 411e1c946a02: Pull complete
+2026-11-03T06:46:06.2863686Z 799f0e3f433d: Verifying Checksum
+2026-11-03T06:46:06.2881503Z 799f0e3f433d: Download complete
+2026-11-03T06:46:06.3061878Z 799f0e3f433d: Pull complete
+2026-11-03T06:46:06.3399093Z eca3138d0e67: Verifying Checksum
+2026-11-03T06:46:06.3400105Z eca3138d0e67: Download complete
+2026-11-03T06:46:06.3575296Z 29a3e8b7d0b6: Verifying Checksum
+2026-11-03T06:46:06.3580312Z 29a3e8b7d0b6: Download complete
+2026-11-03T06:46:06.5093768Z 6c174cbb5f6c: Verifying Checksum
+2026-11-03T06:46:06.5094384Z 6c174cbb5f6c: Download complete
+2026-11-03T06:46:06.5665255Z b62c759db193: Verifying Checksum
+2026-11-03T06:46:06.5665619Z b62c759db193: Download complete
+2026-11-03T06:46:06.6569064Z eca3138d0e67: Pull complete
+2026-11-03T06:46:06.6936426Z d71965348a4e: Verifying Checksum
+2026-11-03T06:46:06.6940974Z d71965348a4e: Download complete
+2026-11-03T06:46:06.7745957Z 2f816cec91dc: Verifying Checksum
+2026-11-03T06:46:06.7746635Z 2f816cec91dc: Download complete
+2026-11-03T06:46:07.2421631Z 29a3e8b7d0b6: Pull complete
+2026-11-03T06:46:07.2820571Z 6c174cbb5f6c: Pull complete
+2026-11-03T06:46:07.3016192Z b62c759db193: Pull complete
+2026-11-03T06:46:09.1258889Z 2f816cec91dc: Pull complete
+2026-11-03T06:46:09.1451342Z d71965348a4e: Pull complete
+2026-11-03T06:46:09.1493064Z Digest: sha256:1e1481c65fc2407d3fd6ab18a23c741eb4d1c0d9359ebafc4b3ab13aa61d8627
+2026-11-03T06:46:09.1508052Z Status: Downloaded newer image for ghcr.io/ossf/scorecard-action:v2.5.0
+2026-11-03T06:46:09.1517103Z ghcr.io/ossf/scorecard-action:v2.5.0
+2026-11-03T06:46:09.1541888Z ##[endgroup]
+2026-11-03T06:46:09.1842876Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+2026-11-03T06:46:09.1843210Z with:
+2026-11-03T06:46:09.1843353Z   persist-credentials: false
+2026-11-03T06:46:09.1843501Z   repository: qmzzzzz/fsms
+2026-11-03T06:46:09.1845352Z   token: ***
+2026-11-03T06:46:09.1845470Z   ssh-strict: true
+2026-11-03T06:46:09.1845592Z   ssh-user: git
+2026-11-03T06:46:09.1845711Z   clean: true
+2026-11-03T06:46:09.1845838Z   sparse-checkout-cone-mode: true
+2026-11-03T06:46:09.1845988Z   fetch-depth: 1
+2026-11-03T06:46:09.1846102Z   fetch-tags: false
+2026-11-03T06:46:09.1846221Z   show-progress: true
+2026-11-03T06:46:09.1846341Z   lfs: false
+2026-11-03T06:46:09.1846450Z   submodules: false
+2026-11-03T06:46:09.1846593Z   set-safe-directory: true
+2026-11-03T06:46:09.1846742Z   allow-unsafe-pr-checkout: false
+2026-11-03T06:46:09.1846970Z ##[endgroup]
+2026-11-03T06:46:09.4662693Z Syncing repository: qmzzzzz/fsms
+2026-11-03T06:46:09.4664036Z ##[group]Getting Git version info
+2026-11-03T06:46:09.4664443Z Working directory is '/home/runner/work/fsms/fsms'
+2026-11-03T06:46:09.4664909Z [command]/usr/bin/git version
+2026-11-03T06:46:09.4793570Z git version 2.56.0
+2026-11-03T06:46:09.4815200Z ##[endgroup]
+2026-11-03T06:46:09.4850399Z Temporarily overriding HOME='/home/runner/work/_temp/29254a5f-7188-4324-a3f6-2d7155e4ca27' before making global git config changes
+2026-11-03T06:46:09.4863010Z Adding repository directory to the temporary git global config as a safe directory
+2026-11-03T06:46:09.4876304Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/fsms/fsms
+2026-11-03T06:46:09.4935683Z Deleting the contents of '/home/runner/work/fsms/fsms'
+2026-11-03T06:46:09.4951719Z ##[group]Determining repository object format
+2026-11-03T06:46:09.4952566Z ##[endgroup]
+2026-11-03T06:46:09.4953059Z ##[group]Initializing the repository
+2026-11-03T06:46:09.4953602Z [command]/usr/bin/git init /home/runner/work/fsms/fsms
+2026-11-03T06:46:09.5136785Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-11-03T06:46:09.5141188Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-11-03T06:46:09.5142178Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-11-03T06:46:09.5142731Z hint: call:
+2026-11-03T06:46:09.5143043Z hint:
+2026-11-03T06:46:09.5143524Z hint: 	git config --global init.defaultBranch <name>
+2026-11-03T06:46:09.5144208Z hint:
+2026-11-03T06:46:09.5144616Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-11-03T06:46:09.5145442Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-11-03T06:46:09.5169887Z hint:
+2026-11-03T06:46:09.5201087Z hint: 	git branch -m <name>
+2026-11-03T06:46:09.5210583Z hint:
+2026-11-03T06:46:09.5211097Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-11-03T06:46:09.5230526Z Initialized empty Git repository in /home/runner/work/fsms/fsms/.git/
+2026-11-03T06:46:09.5281196Z [command]/usr/bin/git remote add origin https://github.com/qmzzzzz/fsms
+2026-11-03T06:46:09.5292329Z ##[endgroup]
+2026-11-03T06:46:09.5292848Z ##[group]Disabling automatic garbage collection
+2026-11-03T06:46:09.5293364Z [command]/usr/bin/git config --local gc.auto 0
+2026-11-03T06:46:09.5391314Z ##[endgroup]
+2026-11-03T06:46:09.5400822Z ##[group]Setting up auth
+2026-11-03T06:46:09.5420533Z Removing SSH command configuration
+2026-11-03T06:46:09.5434282Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-11-03T06:46:09.5485576Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-11-03T06:46:09.5871132Z Removing HTTP extra header
+2026-11-03T06:46:09.5877857Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-11-03T06:46:09.5926736Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-11-03T06:46:09.6156644Z Removing includeIf entries pointing to credentials config files
+2026-11-03T06:46:09.6162943Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-11-03T06:46:09.6214377Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-11-03T06:46:09.6457763Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-f9f93ade-5586-49a0-a897-80ae7eb25768.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-11-03T06:46:09.6554137Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/fsms/fsms/.git.path /home/runner/work/_temp/git-credentials-f9f93ade-5586-49a0-a897-80ae7eb25768.config
+2026-11-03T06:46:09.6646187Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/fsms/fsms/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-f9f93ade-5586-49a0-a897-80ae7eb25768.config
+2026-11-03T06:46:09.6704111Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-f9f93ade-5586-49a0-a897-80ae7eb25768.config
+2026-11-03T06:46:09.6791311Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-f9f93ade-5586-49a0-a897-80ae7eb25768.config
+2026-11-03T06:46:09.6890914Z ##[endgroup]
+2026-11-03T06:46:09.6902160Z ##[group]Fetching the repository
+2026-11-03T06:46:09.6921399Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +e6c0bb101be18cd0ac6ab2b9401a32ca6ad7bc28:refs/remotes/origin/main
+2026-11-03T06:46:11.5189684Z From https://github.com/qmzzzzz/fsms
+2026-11-03T06:46:11.5200800Z  * [new ref]         e6c0bb101be18cd0ac6ab2b9401a32ca6ad7bc28 -> origin/main
+2026-11-03T06:46:11.5202573Z [command]/usr/bin/git branch --list --remote origin/main
+2026-11-03T06:46:11.5242824Z   origin/main
+2026-11-03T06:46:11.5250971Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+2026-11-03T06:46:11.5290792Z e6c0bb101be18cd0ac6ab2b9401a32ca6ad7bc28
+2026-11-03T06:46:11.5298220Z ##[endgroup]
+2026-11-03T06:46:11.5298569Z ##[group]Determining the checkout info
+2026-11-03T06:46:11.5298972Z ##[endgroup]
+2026-11-03T06:46:11.5315718Z [command]/usr/bin/git sparse-checkout disable
+2026-11-03T06:46:11.5371234Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-11-03T06:46:11.5417206Z ##[group]Checking out the ref
+2026-11-03T06:46:11.5421175Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-11-03T06:46:11.6997000Z Switched to a new branch 'main'
+2026-11-03T06:46:11.6998468Z branch 'main' set up to track 'origin/main'.
+2026-11-03T06:46:11.7009895Z ##[endgroup]
+2026-11-03T06:46:11.7064957Z [command]/usr/bin/git log -1 --format=%H
+2026-11-03T06:46:11.7107105Z e6c0bb101be18cd0ac6ab2b9401a32ca6ad7bc28
+2026-11-03T06:46:11.7114874Z ##[group]Removing auth
+2026-11-03T06:46:11.7115367Z Removing SSH command configuration
+2026-11-03T06:46:11.7121955Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-11-03T06:46:11.7168463Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-11-03T06:46:11.7463709Z Removing HTTP extra header
+2026-11-03T06:46:11.7464860Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-11-03T06:46:11.7527101Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-11-03T06:46:11.7813367Z Removing includeIf entries pointing to credentials config files
+2026-11-03T06:46:11.7814395Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-11-03T06:46:11.7821158Z includeif.gitdir:/home/runner/work/fsms/fsms/.git.path
+2026-11-03T06:46:11.7825820Z includeif.gitdir:/home/runner/work/fsms/fsms/.git/worktrees/*.path
+2026-11-03T06:46:11.7826422Z includeif.gitdir:/github/workspace/.git.path
+2026-11-03T06:46:11.7827192Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-11-03T06:46:11.7837010Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/fsms/fsms/.git.path
+2026-11-03T06:46:11.7880774Z /home/runner/work/_temp/git-credentials-f9f93ade-5586-49a0-a897-80ae7eb25768.config
+2026-11-03T06:46:11.7927269Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/fsms/fsms/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-f9f93ade\-5586\-49a0\-a897\-80ae7eb25768\.config
+2026-11-03T06:46:11.7980785Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/fsms/fsms/.git/worktrees/*.path
+2026-11-03T06:46:11.8008560Z /home/runner/work/_temp/git-credentials-f9f93ade-5586-49a0-a897-80ae7eb25768.config
+2026-11-03T06:46:11.8033497Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/fsms/fsms/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-f9f93ade\-5586\-49a0\-a897\-80ae7eb25768\.config
+2026-11-03T06:46:11.8120995Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-11-03T06:46:11.8146248Z /github/runner_temp/git-credentials-f9f93ade-5586-49a0-a897-80ae7eb25768.config
+2026-11-03T06:46:11.8155464Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-f9f93ade\-5586\-49a0\-a897\-80ae7eb25768\.config
+2026-11-03T06:46:11.8206698Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-11-03T06:46:11.8245562Z /github/runner_temp/git-credentials-f9f93ade-5586-49a0-a897-80ae7eb25768.config
+2026-11-03T06:46:11.8258574Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-f9f93ade\-5586\-49a0\-a897\-80ae7eb25768\.config
+2026-11-03T06:46:11.8309420Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-11-03T06:46:11.8561652Z Removing credentials config '/home/runner/work/_temp/git-credentials-f9f93ade-5586-49a0-a897-80ae7eb25768.config'
+2026-11-03T06:46:11.8563294Z ##[endgroup]
+2026-11-03T06:46:11.8766786Z ##[group]Run ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e
+2026-11-03T06:46:11.8767039Z with:
+2026-11-03T06:46:11.8767164Z   results_file: results.sarif
+2026-11-03T06:46:11.8767307Z   results_format: sarif
+2026-11-03T06:46:11.8767436Z   publish_results: true
+2026-11-03T06:46:11.8769127Z   repo_token: ***
+2026-11-03T06:46:11.8769244Z   file_mode: archive
+2026-11-03T06:46:11.8769400Z   internal_publish_base_url: https://api.scorecard.dev
+2026-11-03T06:46:11.8771378Z   internal_default_token: ***
+2026-11-03T06:46:11.8771524Z ##[endgroup]
+2026-11-03T06:46:11.8857323Z ##[command]/usr/bin/docker run --name ghcrioossfscorecardactionv250_9e12f2 --label 413488 --workdir /github/workspace --rm -e "INPUT_RESULTS_FILE" -e "INPUT_RESULTS_FORMAT" -e "INPUT_PUBLISH_RESULTS" -e "INPUT_REPO_TOKEN" -e "INPUT_FILE_MODE" -e "INPUT_INTERNAL_PUBLISH_BASE_URL" -e "INPUT_INTERNAL_DEFAULT_TOKEN" -e "HOME" -e "GITHUB_JOB" -e "GITHUB_REF" -e "GITHUB_SHA" -e "GITHUB_REPOSITORY" -e "GITHUB_REPOSITORY_OWNER" -e "GITHUB_REPOSITORY_OWNER_ID" -e "GITHUB_RUN_ID" -e "GITHUB_RUN_NUMBER" -e "GITHUB_RETENTION_DAYS" -e "GITHUB_RUN_ATTEMPT" -e "GITHUB_ACTOR_ID" -e "GITHUB_ACTOR" -e "GITHUB_WORKFLOW" -e "GITHUB_HEAD_REF" -e "GITHUB_BASE_REF" -e "GITHUB_EVENT_NAME" -e "GITHUB_SERVER_URL" -e "GITHUB_API_URL" -e "GITHUB_GRAPHQL_URL" -e "GITHUB_REF_NAME" -e "GITHUB_REF_PROTECTED" -e "GITHUB_REF_TYPE" -e "GITHUB_WORKFLOW_REF" -e "GITHUB_WORKFLOW_SHA" -e "GITHUB_REPOSITORY_ID" -e "GITHUB_TRIGGERING_ACTOR" -e "GITHUB_WORKSPACE" -e "GITHUB_ACTION" -e "GITHUB_EVENT_PATH" -e "GITHUB_ACTION_REPOSITORY" -e "GITHUB_ACTION_REF" -e "GITHUB_PATH" -e "GITHUB_ENV" -e "GITHUB_STEP_SUMMARY" -e "GITHUB_STATE" -e "GITHUB_OUTPUT" -e "GITHUB_ARTIFACTS" -e "GITHUB_ARTIFACTS_LIST" -e "RUNNER_OS" -e "RUNNER_ARCH" -e "RUNNER_NAME" -e "RUNNER_ENVIRONMENT" -e "RUNNER_TOOL_CACHE" -e "RUNNER_TEMP" -e "RUNNER_WORKSPACE" -e "ACTIONS_RUNTIME_URL" -e "ACTIONS_RUNTIME_TOKEN" -e "ACTIONS_CACHE_URL" -e "ACTIONS_ID_TOKEN_REQUEST_URL" -e "ACTIONS_ID_TOKEN_REQUEST_TOKEN" -e "ACTIONS_RESULTS_URL" -e "ACTIONS_CACHE_MODE" -e "ACTIONS_ORCHESTRATION_ID" -e GITHUB_ACTIONS=true -e CI=true -v "/var/run/docker.sock":"/var/run/docker.sock" -v "/home/runner/work/_temp":"/github/runner_temp" -v "/home/runner/work/_temp/_github_home":"/github/home" -v "/home/runner/work/_temp/_github_workflow":"/github/workflow" -v "/home/runner/work/_temp/_runner_file_commands":"/github/file_commands" -v "/home/runner/work/fsms/fsms":"/github/workspace" ghcr.io/ossf/scorecard-action:v2.5.0
+2026-11-03T06:46:12.5468395Z 2026/11/03 06:46:12 getting repo info from file: /github/workflow/event.json
+2026-11-03T06:46:12.5484586Z 2026/11/03 06:46:12 {
+2026-11-03T06:46:12.5485015Z "after": "e6c0bb101be18cd0ac6ab2b9401a32ca6ad7bc28",
+2026-11-03T06:46:12.5485374Z "base_ref": null,
+2026-11-03T06:46:12.5485682Z "before": "9bffda3f8da7ec5bc55b53d4580971e9e636c60a",
+2026-11-03T06:46:12.5486077Z "commits": [
+2026-11-03T06:46:12.5486338Z {
+2026-11-03T06:46:12.5486563Z "author": {
+2026-11-03T06:46:12.5486876Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5487209Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5487485Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5487741Z },
+2026-11-03T06:46:12.5487971Z "committer": {
+2026-11-03T06:46:12.5488260Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5488589Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5488840Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5489090Z },
+2026-11-03T06:46:12.5489318Z "distinct": true,
+2026-11-03T06:46:12.5489592Z "id": "9d2f3e52ebeac556ddf41ab0932edbd52621e9ee",
+2026-11-03T06:46:12.5496461Z "message": "fix(security): 审计波4修复——幂等回放体 filter 抛错降级、compose 闸 fatal 检出、网关错误页头级 noindex 与文档实指修正\n\n审计来源：2026-11-02 波 4 子代理（四个修复提交的对抗性复审 + e2e/docs 抽查）。\n8 个攻击面 6 项核实无恙（__Host- 双名读无原型链污染、logoutAuth 无双重响应、\ninvalidateRevokedBatch 窗口有界、permanent 判定方向安全等）。\n\n- P2 F1-3：idempotency 的 replayBodyFilter 在响应路径上抛错会把已成功的写入\n  卡死 in_progress（settled 已置位，finish 兜底全 no-op）⇒ 5 分钟租约后同键\n  重试二次执行。改为 try/catch 吞错降级 replayOmitted（filter 失败 = 不可回放，\n  不是不可完成），单一 update.exec() 执行路径。新增用例 (o) 全链路断言：\n  首响原样交付、终态 completed+replayOmitted、同键重试零重复执行\n- P3 F1-5：composeEvalScripts 闸只挑 no-undef 会把「解析失败」（fatal 的\n  ruleId 为 null）静默放过 ⇒ 假绿。补 fatal 红线 + 「每个 mongosh flag 必须\n  被提取器吃进」的覆盖计数（注释行除外）\n- P3 F1-6：网关错误页的 noindex 此前只有页面内 meta；错误页 location 补\n  add_header X-Robots-Tag（刻意不加 CSP——内联刷新按钮会被拦）\n- P2 DOC-1：threat-model 的 probeExemptionBoundaryAndHeadAudit 引用悬空\n  （全仓零命中），改指真实判据物 earlyRejection.js / auditLog.js；\n  DOC-2：PII 加密范围同步（email / FireAlarm.reporter.phone 已加密）；\n  DOC-3：ADR-001/005 的单文件时代路径补目录化注记\n- F1-1 建议：新增「密文形态串不可能通过任何加密字段的明文校验」契约门禁——\n  encryptPii 透传判据的安全性依赖「合法样本空间 ∩ 密文形态 = ∅」这一隐式\n  前提，遍历 User.PII_ENCRYPTED_FIELDS 与 FireAlarm.REPORTER_PII_FIELDS\n  （两者新增 spec 导出）把前提变成红绿可见；maskEmail 契约按 P3-4 反转同步\n  两处测试（encryptionRandomAndMasking / pureModules）\n\n验证：piiEncryption 42（含新门禁）、idempotency 44、models 140、\ncomposeEvalScripts 3 全绿；eslint 0 error。全量 jest 两轮均撞并行会话\n资源争抢（mongoose buffering 超时，环境层签名），受影响套件逐一复跑全绿。",
+2026-11-03T06:46:12.5501219Z "timestamp": "2026-11-02T03:33:26+08:00",
+2026-11-03T06:46:12.5501592Z "tree_id": "9af465bdb590c3e719df6f0718226201e3712dd1",
+2026-11-03T06:46:12.5502328Z "url": "https://github.com/qmzzzzz/fsms/commit/9d2f3e52ebeac556ddf41ab0932edbd52621e9ee"
+2026-11-03T06:46:12.5502774Z },
+2026-11-03T06:46:12.5503013Z {
+2026-11-03T06:46:12.5503247Z "author": {
+2026-11-03T06:46:12.5504433Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5504772Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5505025Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5505374Z },
+2026-11-03T06:46:12.5506150Z "committer": {
+2026-11-03T06:46:12.5506440Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5506803Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5510868Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5511291Z },
+2026-11-03T06:46:12.5512084Z "distinct": true,
+2026-11-03T06:46:12.5512359Z "id": "1bd6f2c30f21a431229ed1b57277e1c3855ee3ff",
+2026-11-03T06:46:12.5520550Z "message": "fix(security): 审计波5与收口整合——封段护栏扩展、审计计数断言扫描、迁移回滚补全与 e2e 助手强化\n\n收口说明：lane 在波 1~4（7aa0b84…9d2f3e5）之后冻结，留下已暂存的波 5 批次与\n其上继续演化的未暂存修改；因「暂存版缺未暂存修复」会推出不自洽的中间态，\n两批合并为本提交。HEAD 与 status 签名稳定 15 分钟后才执行整合。\n\n波 5（lane 已暂存部分）：\n- 封段护栏扩展：ipListSegmentGuards +211 行（确认合并复查、白名单豁免\n  信任边界）、ipListController 记账\n- 新增审计脚本 auditCountAssertionScan.js（435 行：审计计数断言扫描）\n- securityController/profile 增补、forensicController 取证链微调\n- 蜜罐诱饵常量修正：honeypotDecoyEvents/Users/ListQuery/ListShape/\n  RouteTable、stuffingProfile、banRefusalReason、credentialShape\n- 闸门脚本：lint-ratchet 基线机制增强、commentDensity、complianceVerdicts\n- 文档：.gitignore work/ 审计工作台不入库规则（含剔除 533 个误暂存文件\n  的收口记录）、ADR-013 蜜罐账户、internal-evidence-index、architecture\n- web-admin：IpListView 封段交互扩展、i18n、api 请求管线、\n  errorReporter lint 修复（no-useless-assignment / no-useless-escape）\n- 新增前端测试：reauthTicket（本地时间戳 3 秒窗口口径，100% 覆盖）、\n  systemLabels（英文侧映射与多级兜底链，14 用例）——补齐 web 覆盖率\n  branches 阈值缺口\n\n未暂存收口（lane 冻结前最后一层）：\n- migrations ×5：回滚（down）路径补全与 README 台账同步\n- 部署面：Dockerfile、docker-compose、app-entrypoint、.env.example、\n  hot-upgrade 文档与 systemd 单元\n- e2e：helpers/auth.js 与三条 journey 规格更新\n- 配置与常量：jest.config、config/index、failOpenSites、audit 常量\n- 测试面：failOpen/openapi/statusParity/requireCycles/authCookies/\n  authLifecycle/userLock/whitelistExemption 等闸门测试更新",
+2026-11-03T06:46:12.5526270Z "timestamp": "2026-11-02T06:10:52+08:00",
+2026-11-03T06:46:12.5526499Z Scorecard options:
+2026-11-03T06:46:12.5526832Z "tree_id": "62a38551c6296981fbfc279f3ed4191e5053186d",
+2026-11-03T06:46:12.5527306Z "url": "https://github.com/qmzzzzz/fsms/commit/1bd6f2c30f21a431229ed1b57277e1c3855ee3ff"
+2026-11-03T06:46:12.5527656Z },
+2026-11-03T06:46:12.5527811Z {
+2026-11-03T06:46:12.5527968Z "author": {
+2026-11-03T06:46:12.5528171Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5528455Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5528638Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5528845Z },
+2026-11-03T06:46:12.5529004Z "committer": {
+2026-11-03T06:46:12.5529215Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5529496Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5529692Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5529976Z },
+2026-11-03T06:46:12.5530142Z "distinct": true,
+2026-11-03T06:46:12.5530592Z "id": "db9fbacfa586aa301b954fe01285e2f587f1e9d9",
+2026-11-03T06:46:12.5530760Z   Ref: HEAD
+2026-11-03T06:46:12.5530876Z   Repository: qmzzzzz/fsms
+2026-11-03T06:46:12.5531003Z   Local: 
+2026-11-03T06:46:12.5531112Z   Format: sarif
+2026-11-03T06:46:12.5531233Z   Policy file: /policy.yml
+2026-11-03T06:46:12.5531318Z 
+2026-11-03T06:46:12.5531376Z Event / repo information:
+2026-11-03T06:46:12.5531527Z   Event file: /github/workflow/event.json
+2026-11-03T06:46:12.5531682Z   Event name: push
+2026-11-03T06:46:12.5531808Z   Fork repository: false
+2026-11-03T06:46:12.5531987Z   Private repository: true
+2026-11-03T06:46:12.5532260Z   Publication enabled: false
+2026-11-03T06:46:12.5532404Z   Default branch: main
+2026-11-03T06:46:12.5534986Z "message": "fix(gates): 验证收口——注释密度基线再生、审计 action 排除清单登记 decoy 家族、errorHandler mock 补 setHeader 契约、lint 棘轮登记波次债与格式规范化\n\njest 全量终验残留 8 套件的处置台账：\n- commentDensityRatchet：lane 波次为修复写了大量注释，按台账登记原则以\n  commentDensity.js 同口径管线再生成基线（361 文件，22515 注释行）；\n  新文件密度上限仍受 NEW_FILE_MAX 闸守\n- auditActionReconciliation：honeypotDecoyEvents 的 7 个字面量是诱饵冻结行\n  的 processLog/status 展示数据（假历史，非 AuditLog 写入），按机制登记\n  NOT_AUDIT_ACTION_LITERALS（新增 decoy 家族并注册进闭集 tally）\n- errorHandlerNoInternalLeak：7aa0b84 给裸错误出口加了 res.setHeader\n  落 no-store，测试手工 res mock 补上该方法并把落头钉进契约\n- lint-ratchet：登记波次新增的 7 项债（hotUpgradeJob/complexity+行数、\n  offlineBundlePolicy/complexity、User.js/行数、idempotency 313→322、\n  upgradeService 452→487、hotUpgradeQueue 318→319，含行数地板）\n- prettier 规范化 24+ 文件（endOfLine=auto，主树 LF 无换行符翻动）\n\n另：disposableSecretIsolation 在独立 worktree 的 CRLF checkout 下为伪红\n（测试对守卫源码做文本手术，正则含 \\n 终结），仓库 blob 与 CI 均为 LF，\n不涉代码修改。",
+2026-11-03T06:46:12.5536891Z "timestamp": "2026-11-02T06:35:00+08:00",
+2026-11-03T06:46:12.5537141Z "tree_id": "c1ca19705eef7cd6da8588afe8a98e634f4521bc",
+2026-11-03T06:46:12.5537475Z "url": "https://github.com/qmzzzzz/fsms/commit/db9fbacfa586aa301b954fe01285e2f587f1e9d9"
+2026-11-03T06:46:12.5537909Z },
+2026-11-03T06:46:12.5538071Z {
+2026-11-03T06:46:12.5538240Z "author": {
+2026-11-03T06:46:12.5538447Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5538675Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5538857Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5539036Z },
+2026-11-03T06:46:12.5539200Z "committer": {
+2026-11-03T06:46:12.5539438Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5539666Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5540074Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5540270Z },
+2026-11-03T06:46:12.5540426Z "distinct": true,
+2026-11-03T06:46:12.5540856Z "id": "b820c32747591141313afeb77304faece2647b5c",
+2026-11-03T06:46:12.5542290Z "message": "fix(test): 全网段痕迹用例改条件轮询——痕迹写入是 fire-and-forget，不得赌时延\n\nipListFullRangeGrantAndRescueSymmetry 的四处审计痕迹断言原本即时 findOne/\ncountDocuments，而 AuditLog.record 只 create().catch()、不随响应返回：\n全量并发下 ② 的救援删除 critical 痕迹单次查询会输给落库时延（两轮全量\n各红一次），单跑又恒绿。按仓规改 helpers/waitFor 条件轮询：\n- ② 轮询到痕迹真落库 instead of 即时 findOne（本轮主要红源）\n- ① granted 痕迹轮询到 before+1 再断言\n- ①-对照（拒绝路径）用 waitForStable 等计数稳定再断言无增量——\n  若拒绝路径晚写了痕迹，等稳反而会红，判据更严不是更松",
+2026-11-03T06:46:12.5543441Z "timestamp": "2026-11-02T06:44:03+08:00",
+2026-11-03T06:46:12.5543780Z "tree_id": "a6e4cf855c835edc869d8b0b8d0fa0c982f9be18",
+2026-11-03T06:46:12.5544257Z "url": "https://github.com/qmzzzzz/fsms/commit/b820c32747591141313afeb77304faece2647b5c"
+2026-11-03T06:46:12.5544585Z },
+2026-11-03T06:46:12.5544748Z {
+2026-11-03T06:46:12.5544943Z "author": {
+2026-11-03T06:46:12.5545126Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5545285Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5545408Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5545527Z },
+2026-11-03T06:46:12.5545635Z "committer": {
+2026-11-03T06:46:12.5545765Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5545921Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5546036Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5546149Z },
+2026-11-03T06:46:12.5546247Z "distinct": true,
+2026-11-03T06:46:12.5546390Z "id": "e8573b83d66436fd88a0ec3037deb7feb8c98cda",
+2026-11-03T06:46:12.5547351Z "message": "fix(gates): 收尾登记——prettier 漏网两文件补规范化、棘轮基线补 IPBlacklist/auditCountAssertionScan\n\n- ipPoolBan.js 与 auditActionReconciliation.test.js 在 db9fbac 的\n  format 批次里漏网（format:check 现已实过全绿）\n- 棘轮基线：prettier 展开行数使 auditCountAssertionScan.js 顶到\n  max-lines（442 行，含行数地板）、IPBlacklist.js 记 max-lines+complexity\n  各 1——与 db9fbac 同一登记原则，待后续拆分",
+2026-11-03T06:46:12.5548101Z "timestamp": "2026-11-02T06:53:47+08:00",
+2026-11-03T06:46:12.5548275Z "tree_id": "81599a8c5882c16441b86263c47692dee31502ff",
+2026-11-03T06:46:12.5548535Z "url": "https://github.com/qmzzzzz/fsms/commit/e8573b83d66436fd88a0ec3037deb7feb8c98cda"
+2026-11-03T06:46:12.5548770Z },
+2026-11-03T06:46:12.5548868Z {
+2026-11-03T06:46:12.5548970Z "author": {
+2026-11-03T06:46:12.5549107Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5549276Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5549399Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5549521Z },
+2026-11-03T06:46:12.5549641Z "committer": {
+2026-11-03T06:46:12.5550001Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5550257Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5550455Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5550644Z },
+2026-11-03T06:46:12.5550815Z "distinct": true,
+2026-11-03T06:46:12.5551095Z "id": "2ed306781d55f3d11d0e14a5e81638e5445d2f2c",
+2026-11-03T06:46:12.5554192Z "message": "refactor(rbac): 删除零消费死代码 checkRole 及其孤立错误码（审计 C-F5 收口）\n\nrbac.checkRole 全仓零路由消费（角色口径唯一实现是 authenticate 的 roleCodes +\ncheckPermission），作为「角色口径第二份实现载体」正是本仓多次审计确认的漂移\n温床——其回退查库路径（populate match 复活风险）自带的独立防御逻辑没有任何\n生产流量经过，测试却把它当活代码维护。\n\n联动摘除（一处不漏，防半删态）：\n- rbac.js 函数体 + 导出；不再使用的 User require 一并摘除\n- middleware/index.js 的解构与再导出两处\n- errorCodes.js 的 ROLE_NOT_ALLOWED / ROLE_CHECK_FAILED 两码（墓碑注释登记）\n- web-admin ERROR_CODE_I18N_MAP 两行 + zh/en 两个语言键（roleCodeReserved\n  是另一活码，保留）\n- rbacWildcardAndDataScopeBounds 的 checkRole describe（4 用例）与文件头\n  覆盖清单行；authControllerOutcomes / authUnknownOutcomeFailClosed 两个\n  mock 工厂的 checkRole 键\n- 4 处历史注释里的 checkRole 措辞改为现存的 checkPermission（auth.js、\n  inactiveRoleAuthorization、roleStatusInvalidatesUserCache、roleController）\n\n验证：rbac/errorCodes/emittedErrorCodeCoverage/authOutcomes/unknownFailClosed/\nsecurityApply 133 用例 + inactiveRole/roleStatusInvalidate 58 用例全绿；\nweb-admin errorCodeI18n + localeKeyParity 19 用例全绿（zh/en 键奇偶不受影响）；\neslint 0 error；errorCodes 注册表仅 >150 下限门、无精确数量钉死，摘码安全。",
+2026-11-03T06:46:12.5556612Z "timestamp": "2026-11-02T07:02:38+08:00",
+2026-11-03T06:46:12.5557011Z "tree_id": "d0769c2b6f484fd83dc2002e9327e5e82014b847",
+2026-11-03T06:46:12.5557390Z "url": "https://github.com/qmzzzzz/fsms/commit/2ed306781d55f3d11d0e14a5e81638e5445d2f2c"
+2026-11-03T06:46:12.5557630Z },
+2026-11-03T06:46:12.5557727Z {
+2026-11-03T06:46:12.5557829Z "author": {
+2026-11-03T06:46:12.5557966Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5558136Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5558251Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5558372Z },
+2026-11-03T06:46:12.5558486Z "committer": {
+2026-11-03T06:46:12.5558619Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5558789Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5558902Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5559018Z },
+2026-11-03T06:46:12.5559119Z "distinct": true,
+2026-11-03T06:46:12.5559264Z "id": "9b040e53eda6011db8a5d04171f0a78b92286bbf",
+2026-11-03T06:46:12.5560273Z "message": "fix(gates): 补 IPBlacklist 行数地板——负向自检抓到 max-lines 债缺地板的不变式违规\n\ngateSelfTest 的「真实基线里删掉 __lineCounts 任意一键必须 exit 1」用例\n同时断言每个 max-lines 债文件都有行数地板；e8573b8 登记 IPBlacklist.js\nmax-lines 债时漏了地板（369 行）。该自检是 CI 闸门测试，不补必红。",
+2026-11-03T06:46:12.5560864Z "timestamp": "2026-11-02T07:13:38+08:00",
+2026-11-03T06:46:12.5561182Z "tree_id": "03977c3e59f8c383a5e871b6d3f61a5af2f7c53c",
+2026-11-03T06:46:12.5561612Z "url": "https://github.com/qmzzzzz/fsms/commit/9b040e53eda6011db8a5d04171f0a78b92286bbf"
+2026-11-03T06:46:12.5561939Z },
+2026-11-03T06:46:12.5562107Z {
+2026-11-03T06:46:12.5562268Z "author": {
+2026-11-03T06:46:12.5562490Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5562775Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5562970Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5563216Z },
+2026-11-03T06:46:12.5563382Z "committer": {
+2026-11-03T06:46:12.5563624Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5563925Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5564117Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5564320Z },
+2026-11-03T06:46:12.5564480Z "distinct": true,
+2026-11-03T06:46:12.5564723Z "id": "cec756041750f2bcc40b3bcad45333c0483edb18",
+2026-11-03T06:46:12.5565180Z "message": "feat(honeypot): /api/metrics 回同键集合成快照，收口第 6 条读侧分歧",
+2026-11-03T06:46:12.5565473Z "timestamp": "2026-11-02T10:44:27+08:00",
+2026-11-03T06:46:12.5565799Z "tree_id": "808addf198a3c131dd60e15637f5c5ea7bdd2cbd",
+2026-11-03T06:46:12.5566236Z "url": "https://github.com/qmzzzzz/fsms/commit/cec756041750f2bcc40b3bcad45333c0483edb18"
+2026-11-03T06:46:12.5566553Z },
+2026-11-03T06:46:12.5566710Z {
+2026-11-03T06:46:12.5566868Z "author": {
+2026-11-03T06:46:12.5567218Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5567445Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5567633Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5567852Z },
+2026-11-03T06:46:12.5568011Z "committer": {
+2026-11-03T06:46:12.5568215Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5568495Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5568677Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5568891Z },
+2026-11-03T06:46:12.5569050Z "distinct": true,
+2026-11-03T06:46:12.5569314Z "id": "1e2442103b70fb92bd2e13ba2810c355ea20658d",
+2026-11-03T06:46:12.5575977Z "message": "feat(upgrade): 失败分支自动抓取目标色容器日志尾巴（现场留痕，学 a033/LANSEC 的 die 前 dump）\n\n缺口：备色未就绪与观察期判负两条分支原先只回一句判据（ready.reason /\nobserved.reason），根因（栈、连接错误、迁移报错）留在目标色容器自己的日志里——\n运维必须再上一次机器看容器日志，而现场此刻正处在升级失败态，每次人工介入都可能\n撞上它被随后的停容器或下一次升级覆盖。对照 a033/LANSEC 的 install.sh（每次 die\n之前 dump 服务状态 + journalctl）取同一手法，但只取必要的那一截。\n\n脚本（scripts/hotUpgrade.js）：\n- 两条失败分支各抓一次目标色容器日志尾巴：compose logs --no-color --tail 80，\n  管道捕获（超时 10s、maxBuffer 1MiB、总字节封顶 64KB）。\n- 两条通道分离：完整尾巴进宿主留痕 logs/hot-upgrade-*.json 的 targetLogsTail\n  （0600，事后复盘）；按行边界截断的短片段（≤1500 字）追加进 status.message\n  （应用侧轮询可见；status 有 64KB 读取上限，不能塞整份日志）。\n- rollback_failed 保持短句紧急文案：那一步的下一步动作是人工上机确认流量，\n  长日志只进留痕、不稀释结论（代码里有注释说明）。\n- 抓取永不阻断：docker 不可用/容器已停/输出超限都只记一行，主判决始终来自\n  readyz/观察窗口本身；抓不到时说明里一个字节都不加（不留「日志如下：无」空话）。\n- 抓取先于停容器执行（stop 之后再抓只剩 docker 自己记的那截）。\n- argv 安全面：captureTargetLogs 逐项构造参数数组；服务名先过\n  LOG_TARGET_SERVICES 枚举白名单、--tail 取值固化为字符串常量（Mimosa 的\n  「不可信命令参数向量」判据要求 argv 每个动态元素都来自封闭集合，代码层可复核）。\n\n前端（web-admin）：\n- .upgrade-message 加 white-space: pre-line：多行日志在「说明」行逐行可读\n  （既有消息无换行，行为不变）。\n\n登记面：\n- deployment/hot-upgrade.md §7 失败模式表两行改为「容器日志尾巴已进任务说明与\n  留痕」，并新增「失败现场自动抓取」小段（三条边界 + 数值）。\n- eslint.ratchet.json 的 scripts/hotUpgrade.js 行数地板 334 → 394：功能新增\n  60 行代码属真实需要，按 lint-ratchet 自述的唯一合规路径人工扩基线（让评审在\n  diff 里可见）；honeypotDecoyEvents.js 那条回退是并行会话未完成的改动，未触碰。\n\n门禁（新增 src/tests/deploy/hotUpgradeFailureLogs.test.js，6 用例全绿）：\n- 真跑脚本端到端（--require 以 argv 形态注入 stubExec + 就绪档板，不经\n  NODE_OPTIONS 字符串拼接）：① 日志进两张表且抓取先于停容器；\n  ② 抓取失败（logs 非零退出）不留空话式附录、主判决不变、停容器照常。\n- buildLogSnippet 纯函数 4 例：空/非字符串、未超上限原样保留、超上限从换行\n  起步（半行开头会让运维误以为日志缺行）、上限恰落行边界。\n- 复跑 hotUpgradePolicy/Agent/OfflineDispatch 64 用例全绿；deploy 全套 962 用例\n  全绿；npm run lint 0 error；prettier 全过。",
+2026-11-03T06:46:12.5579403Z "timestamp": "2026-11-02T10:57:58+08:00",
+2026-11-03T06:46:12.5579895Z "tree_id": "425df562694b6d18b81432fa64f7dd7de1210cd8",
+2026-11-03T06:46:12.5580347Z "url": "https://github.com/qmzzzzz/fsms/commit/1e2442103b70fb92bd2e13ba2810c355ea20658d"
+2026-11-03T06:46:12.5580664Z },
+2026-11-03T06:46:12.5580828Z {
+2026-11-03T06:46:12.5580989Z "author": {
+2026-11-03T06:46:12.5581193Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5581473Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5581658Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5581886Z },
+2026-11-03T06:46:12.5582045Z "committer": {
+2026-11-03T06:46:12.5582252Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5582536Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5582835Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5583019Z },
+2026-11-03T06:46:12.5583180Z "distinct": true,
+2026-11-03T06:46:12.5583573Z "id": "f65f0ae3670cd85e70a42e6a2f4e7a429d278abf",
+2026-11-03T06:46:12.5587517Z "message": "fix(web-admin): 审计波5——登录挑战判据读错字段、举报候选无重试出口、升级步骤词表漂移与动效判据收口\n\n审计来源：2026-11-02 波 5 子代理（web-admin/src 全量逐行，24000 行，报告 WF-01..16）。\n本批修 4 项真实缺陷 + 4 项收口；复核后驳回/维持 4 项（见文末）。\n\n真实缺陷（P1/P2）：\n- WF-08 LoginView 的「失败触发人机挑战」判据读错字段：旧判据 error.code ===\n  'CAPTCHA_INVALID'，而后端码在响应体 errors.errorCode、axios 对 4xx 只写\n  'ERR_BAD_REQUEST'——分支在生产**恒不执行**，用户看到\"验证码错误\"却无输入框。\n  配套用例手工构造了生产不会出现的形状把它测绿，一并改为真实 axios 形状。\n- WF-04 ReportDialog 候选接口失败时下拉永久空且无重试：举报是 PERMISSION-EXEMPT\n  的人人可用安全通道。新增 targetLoadFailed 态 + 专用空态文案 + 重试按钮；\n  用例覆盖失败→重试→候选恢复全链\n- WF-09 ReportView 的 blob 错误解包不走码化翻译：英文界面下导出报错回显后端中文\n  （AuditLogView 同名函数已正确）。改优先 resolveErrorMessage，逐字对齐\n- WF-11 升级步骤词表缺 assert-local-image：词表各补一条 + 新增与\n  scripts/hotUpgrade.js 的 step('…') 对账闸（双向差集 + 前提自证）\n\n收口（P2/P3）：\n- WF-06 IpList/PrivilegeGrant 的 total 兜底 || → ??（total=0 合法值不得被顶替）\n- WF-07 AuditLogView 改走 api.security.getOverview() 封装（此前直连致封装死代码）\n- WF-10 InspectionForm 设备下拉 label 接入 makeDeviceTypeLabels 单源\n- WF-12 AboutView metrics 等级动态键加回退（缺键显示原码而非裸键）\n- WF-13 InspectionView 类型/结果/状态三列补回退（新档位不再静默空白）\n- WF-14 prefers-reduced-motion 收口新 utils/motion.js（3 处判定 + 2 份\n  safeMatchMedia 统一）；CSS 侧 @media 不动\n\n复核后驳回/维持：WF-01（vnode 事件契约经复核正确）、WF-02（前端严于后端是有意\n设计，拒绝文案已列形态）、WF-03（email/phone 差异是能力映射）、WF-05（**实证\n假阳性**：新增用例断言 listCalls=[1,2,1] + loading 收敛，保留为回归护栏）、\nWF-15（tablist 语义，改动收益低风险高）、WF-16（show-icon 已在场，假阳性）。\n\n并行会话隔离：本提交用显式 pathspec，未卷入其暂存中的\nhoneypotTicketGate/commentDensityCliContract 等在途文件。\n验证：前端全量 2281/2281 绿；eslint 0 error；prettier 干净。",
+2026-11-03T06:46:12.5590599Z "timestamp": "2026-11-02T14:13:41+08:00",
+2026-11-03T06:46:12.5590928Z "tree_id": "e5b4ba92fa5dd4d11ff1717d872e988c05ae1c29",
+2026-11-03T06:46:12.5591369Z "url": "https://github.com/qmzzzzz/fsms/commit/f65f0ae3670cd85e70a42e6a2f4e7a429d278abf"
+2026-11-03T06:46:12.5591695Z },
+2026-11-03T06:46:12.5592020Z {
+2026-11-03T06:46:12.5592193Z "author": {
+2026-11-03T06:46:12.5592392Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5592630Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5592815Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5593015Z },
+2026-11-03T06:46:12.5593170Z "committer": {
+2026-11-03T06:46:12.5593321Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5593550Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5593740Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5593939Z },
+2026-11-03T06:46:12.5594099Z "distinct": true,
+2026-11-03T06:46:12.5594341Z "id": "ac0dfa3c1dcf494a1f2442664acff29a3936913f",
+2026-11-03T06:46:12.5603828Z "message": "feat(web-admin): 打印样式层（P2-6）——Ctrl+P 纸面归档能力与浮层族抑制\n\n背景：消防系统的工单/巡检单/报警记录有真实纸质归档场景（现场签字、取证、\n班次交接）。全仓此前零打印样式（无 @media print、无窗口打印按钮），浏览器\nCtrl+P 会把固定定位的侧边栏/顶栏/浮层按页重复打上纸，网格纹理也会渲染成灰块。\n\n新增 src/assets/styles/print.css（仅 @media print，屏幕态零影响），四组规则：\n- 交互件与浮层族抑制：sidebar/navbar/mobile-overlay/skip-link、el-popper\n  全族（下拉/气泡/消息/通知/加载遮罩）、按钮/分页器/复选框/开关/工具条。\n  对话框**本体保留**（详情弹窗是打印对象），只隐藏 el-overlay 遮罩\n- 布局复位：app-wrapper/main-content 回文档流（去 margin/padding/min-height\n  与网格背景）；卡片/表格去阴影、表头表体强制黑字白底、滚动容器 overflow 放开\n- 分页控制：行/卡片/描述列表 break-inside avoid、标题 break-after avoid、\n  p 的 orphans/widows、@page 页边距 16mm×14mm\n- 延续参考项目范式：a[href]::after 输出真实地址（排除锚点与 javascript:）\n\n图表半截图防护：echarts 给 canvas 写的是 inline px 尺寸，max-width 对绘制\n缓冲区无效——必须 width:100% 强制覆盖，并放开 .chart-box 的固定 280px 高度。\n\n引入位置：main.js 全局样式层最后（取得对既有五层的覆盖权，文件头有分层说明）。\n\n测试：新增 src/tests/styles/printStyles.test.js（17 用例）——整层被 @media print\n包裹（剥除后无残留规则，防污染屏幕渲染）、引入顺序晚于全部样式层、各隐藏族与\n分页声明在场、对话框本体不被隐藏（反向对照）、canvas inline 尺寸被覆盖。\n读 CSS 源码断言的原因：jsdom 不实现 @media print 求值，真机效果属人工验收边界。\n\n验证：前端全量 1912 用例通过（128 文件）；构建产物实测含 @media print 与\nbreak-inside/attr(href)（cssnano 未重命名）；eslint 0 error；prettier 干净。",
+2026-11-03T06:46:12.5606367Z "timestamp": "2026-11-02T14:51:51+08:00",
+2026-11-03T06:46:12.5606653Z "tree_id": "ee72ee8a7fc542d03b5149b03d586220b995499e",
+2026-11-03T06:46:12.5607147Z "url": "https://github.com/qmzzzzz/fsms/commit/ac0dfa3c1dcf494a1f2442664acff29a3936913f"
+2026-11-03T06:46:12.5607509Z },
+2026-11-03T06:46:12.5607683Z {
+2026-11-03T06:46:12.5607841Z "author": {
+2026-11-03T06:46:12.5608043Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5608338Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5608525Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5608737Z },
+2026-11-03T06:46:12.5608897Z "committer": {
+2026-11-03T06:46:12.5609118Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5609407Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5609587Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5610030Z },
+2026-11-03T06:46:12.5610189Z "distinct": true,
+2026-11-03T06:46:12.5610512Z "id": "22bd45b68f91fa92df1d059484aa480384c4332b",
+2026-11-03T06:46:12.5620659Z "message": "feat(upgrade): 离线包单文件传包 + 代理自动落位（学 a033/LANSEC 的传包形态，ADR-020）\n\n把搬运面从「四个条目 + 一个子目录」收敛为**两个文件**（归档 + 外层签名），并让落位\n全自动。取 LANSEC 的传包形态（一个 tar.gz），不取它的安装语义（装完即重启服务）——\n后者与 ADR-019 §9 第一条纪律（不做自动升级）直接冲突。\n\n传包形态与信任链第三层：\n- build-offline-bundle.sh 增 --archive <路径>：另产出 fsms-offline-<版本>.tar.gz + .sig。\n  归档内含 ADR-019 的四个条目。--archive **必须**与 --sign-key 同给：目录形态允许未签名\n  （可由搬运前后人工比对清单兜底），单文件形态不允许——它存在的意义正是「让传一个文件\n  这件事可被机器验证」。拒绝覆盖既有归档；前置段先判参数组合再判 docker，避免\n  「--archive 缺 --sign-key」被一句「Docker 守护进程不可用」掩盖。\n- 外层签名签的是**归档 sha256 的 hex 文本**（64 字节），不是归档本身：Ed25519 是\n  one-shot 签名，GB 级归档整包签必 OOM，而 OOM 在现场表现为「构建进程被杀」。\n  三层链：归档 .sig → 归档 sha256 → manifest.sig → manifest 字节 → payload sha256，\n  覆盖了 ADR-019 覆盖不到的部分（解包前的归档本身）。签完立即回验；失败时归档与签名\n  由 cleanup 钩子一并清理（半截的 .tar.gz 与半截 tar 是同一个失效）。\n\n落位（inbox → bundles，全自动）：\n- 新增 offlineBundleIntakePolicy.js（纯判据：条目解析/路径收口/静默期/摘要形态/CLI\n  闭合清单）、offlineBundleIntake.js（编排 + 状态机）、offlineBundleIntakeExec.js\n  （子进程收口：tar 与导入器调用）。\n- 代理每轮最多落位**一个**包，且排在消费请求**之前**——请求瞄的 digest 可能正躺在\n  inbox 里等着落位，先落位后消费能让它在同一轮被满足。落位成功则本轮重扫 bundles，\n  让心跳 available 同轮更新。\n- 落位判据（顺序不可换）：体积上限 → 静默期 + 双读数 → 外层验签 → 列条目逐条过\n  assertSafeRelativePath → **两段解包，只解点名条目** → 落点 lstat 复核 + 递归收紧权限\n  → 复用导入器演练模式校验 → 原子 rename。\n- 「只解点名条目」是 ADR-019 §9 的收窄：先只解 manifest.json（\"点名\"的唯一来源），\n  再解它声明的 payload 与两个固定条目——归档里任何**未被点名**的条目没有落点。\n  仍不自写 tar 解析器；路径穿越面不是「被检查掉了」而是不存在。权限用解包后递归 chmod\n  而非 --no-same-*（实际落盘的权限要看结果，不看 tar 的声明）。\n- 传输完成的判定：mtime 距今 ≥ OFFLINE_BUNDLE_SETTLE_SECONDS（默认 60）且两次读数\n  size 一致。不能要求运维先写 .part 再改名——那是改变他的肌肉记忆去配合判据。\n  未就绪进心跳 intake.pending（应用侧显示「已传完、等待落位」），失败显示归档名与原因，\n  不再需要 SSH 上去看 inbox。\n- fail-soft 第三层（更强）：落位是这条链上唯一会解包与写盘的动作，异常面最大。\n  intakeOne 是**库函数，绝不 process.exit**（实测踩中：它被代理在 runOnce 里调用，\n  一个 exit 会把整个代理连同心跳带走，应用侧看到「代理离线」而真实原因只是某个包\n  没签名）；失败折进心跳 intake.rejected，**ready 不变红**；inbox 不存在 = 未启用。\n\n落位校验零新增判据 + 导入器演练语义修正（实测踩中）：\n- 解包到 .staging-* 后跑既有导入器的**演练模式**，通过才原子 rename——判据只有一份实现。\n- 但原 --dry-run 在 payload 校验**之前**返回：「payload 与 manifest 对不上」的包会被\n  演练报成成功——而落位正是拿演练当预检用，那是「预检通过、apply 才发现坏」的假绿。\n  现在演练**跑完全部校验**（验签/白名单/逐字节比对）再返回，措辞从「未做任何改动」\n  改为「全部校验已通过、未 docker load」，并写 dry_run 留痕。\n\n应用侧与前端：\n- upgradeService 归一化并透传 intake（逐字段截断 + 封顶，与 bundles 同纪律）；\n  AboutView.normalizeIntake 同步白名单归一（上一轮踩过的坑：后端加字段前端不同步就\n  静默丢）；UpgradeDialog 展示「已传完待落位」与落位失败原因；中英文案齐备。\n\n登记面：\n- hot-upgrade.env.example 增 OFFLINE_BUNDLE_INBOX 与 OFFLINE_BUNDLE_SETTLE_SECONDS\n  （含边界说明与调参代价）；systemd 单元 ExecStartPre 加 inbox 目录（0700 root）。\n- hot-upgrade.md：§3.3 改为「单文件（推荐）/ 目录（兼容）」双形态 + 第 2 步落位流程\n  与人工兜底；§4.1 队列表加 inbox/bundles 两行；§4.3「一轮做什么」加落位步骤（并重编号）；\n  §9「不自做解包」收窄为「不自写 tar 解析器、不整包全解」并补「落位也不等于升级」；\n  §10 增补落位测试覆盖情况与未实测边界。\n- ADR-020 新建 + docs/adr/README.md 索引；README ADR 计数 19→20；CHANGELOG 条目。\n- eslint.ratchet.json：offlineBundleIntake.js 新条目 + 三处行数地板（hotUpgrade.js\n  394→407、hotUpgradeQueue.js 319→322、upgradeService.js 487→514）。这些是功能新增的\n  真实行数，按 lint-ratchet 自述的唯一合规路径人工扩基线（评审在 diff 里可见）。\n  同时把 hotUpgradeAgent.js 的复杂度**降**下来（composeBeat / runIntakeStep 抽函数），\n  而不是扩它的复杂度基线。\n\n门禁（新增/更新测试，全部本机全绿）：\n- offlineBundleIntakePolicy.test.js（44 例）：条目清单解析（空行/CRLF/链接条目/空清单）、\n  fileEntriesOnly 剔目录、路径判据（上跳/绝对/盘符/反斜杠/NUL）、条目数与体积上限、\n  必需条目、摘要→签名载荷（大小写/形态）、静默期（双读数/0 字节/尺寸不一致/mtime 缺失）、\n  CLI 闭合清单、resolveWithinRoot 与 assertPlainDirName。\n- offlineBundleIntake.test.js（11 例，**真跑系统 tar**）：成功路径（演练不动盘 + apply 落位 +\n  只解点名条目 + staging 不残留）、不覆盖、权限收紧、未配公钥明示 unchecked、未签名拒绝、\n  签名不符、单字节篡改、payload 被替换（内层判据）、静默期未到、条目路径不安全、\n  缺必需条目。Git Bash 的 tar 只认 POSIX 路径（C:\\ 会被当远程主机），故用 cygpath 转换并\n  把转换逻辑放进生产代码的 toTarPath（Windows 上转 /c/ 形态）；无 tar 时显式 skip。\n- hotUpgradeAgent.test.js（+5 例）：落位先于请求处理、异常折 rejected 且 ready 不变红、\n  未就绪进 pending、每轮只落一个、inbox 空则完全不动。\n- cliSecretArgGate.test.js：POLICY_DELEGATED 增 offlineBundleIntake.js 的 --pubkey-file，\n  并把 policy 模块映射改成**静态 require 表**（动态拼路径既是命令注入判据的拦截形态，\n  也让依赖图无法静态分析）。\n- upgradeService.test.js（intake 归一化 + 坏形状折空）、aboutViewUpgrade.test.js（+4 例：\n  待落位提示 / 落位失败原因 / 坏形状不渲染）。\n\n验证：deploy + service + docs 1077 例全绿；前端 vitest 134 套件 2301 例全绿；\nnpm run lint 0 error；prettier 全过；bash -n 通过。\n\n已知边界（如实声明）：跨工具链路的完整串联（构建机 tar -czf + openssl 签 → 目标机解包\n+ node 验签 → 落位 → 导入 → 换装）仍未在一台真实 air-gap 机器上端到端跑过；\n落位后不自动升级（包只出现在下拉里，升不升仍由唯一超管点按钮）。",
+2026-11-03T06:46:12.5627999Z "timestamp": "2026-11-02T15:03:30+08:00",
+2026-11-03T06:46:12.5628210Z "tree_id": "fd2f2b8f5e301f264a771c1046ddbe15450d5b05",
+2026-11-03T06:46:12.5628617Z "url": "https://github.com/qmzzzzz/fsms/commit/22bd45b68f91fa92df1d059484aa480384c4332b"
+2026-11-03T06:46:12.5628974Z },
+2026-11-03T06:46:12.5629134Z {
+2026-11-03T06:46:12.5629295Z "author": {
+2026-11-03T06:46:12.5629500Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5629876Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5630066Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5654148Z },
+2026-11-03T06:46:12.5660572Z "committer": {
+2026-11-03T06:46:12.5660792Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5660969Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5661095Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5661215Z },
+2026-11-03T06:46:12.5661324Z "distinct": true,
+2026-11-03T06:46:12.5661469Z "id": "3b3670b2fc1d78ef160ad99aa76b8f8a8b03e3c6",
+2026-11-03T06:46:12.5664447Z "message": "test(architecture): 敏感字段出口契约门禁（P2-1 serializer 层收口）\n\n参考项目研读 P2-1（serializer 层）的落地形态：摸底结论是 fsms 的输出收口\n机制**已实质存在且质量高**——User 的字段表驱动 RESPONSE_EXCLUDE 双变体\n（主清单 + PII 可见变体同源派生）、UserSession.toClientJSON 白名单式出口、\nAuditLog.RESPONSE_EXCLUDE、toMaskedAdminUser 脱敏出口、S-1 令牌不进响应体。\n全员普查后确认：真正缺口不是\"少一个 serializer 层\"，而是**这条隐式约定\n没有显式门禁**——新增带敏感字段的模型时无人会问\"它的出口策略是什么\"。\n\n本门禁以既有安全标记（select: false）为判据源逐个应答，三选一：\n  A. 声明投影式收口（statics.RESPONSE_EXCLUDE*），或\n  B. 提供白名单式出口（toClientJSON/serialize 方法），或\n  C. 在 EXEMPTIONS 登记豁免理由（含\"无对外读路径\"这一档）\n三者皆无 ⇒ 红。\n\n配套四条自证/防腐化断言：\n- 前提自证：扫到的模型数 ≥15 且 select:false 判据源有 ≥3 命中（防空集假绿）\n- 豁免表防腐化：登记的必须仍在场、仍带 select:false、且仍**未**自建出口\n  （防豁免成为\"免检永久席位\"）；理由文本非空\n- 反向对照：合成的\"有 hidden 字段但零出口策略\"模型必须被判缺\n- 路径安全：文件名白名单（纯 basename）+ resolve 后边界校验（MODELS_DIR 内）\n\n当前豁免登记两条并写明理由：Role.js（删除恢复标记，内部状态非凭证）、\nUserAvatar.js（密文数据只有二进制回放出口，非文档直出路径）。\n\n验证：architecture 三套件 15 用例全绿；jest 4/4；eslint 0 error；prettier 干净。",
+2026-11-03T06:46:12.5666381Z "timestamp": "2026-11-02T15:07:13+08:00",
+2026-11-03T06:46:12.5666702Z "tree_id": "13368fffb447942f122615051232d3f06ad1302f",
+2026-11-03T06:46:12.5667204Z "url": "https://github.com/qmzzzzz/fsms/commit/3b3670b2fc1d78ef160ad99aa76b8f8a8b03e3c6"
+2026-11-03T06:46:12.5667523Z },
+2026-11-03T06:46:12.5667687Z {
+2026-11-03T06:46:12.5667871Z "author": {
+2026-11-03T06:46:12.5668079Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5668333Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5668528Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5668734Z },
+2026-11-03T06:46:12.5668907Z "committer": {
+2026-11-03T06:46:12.5669178Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5669476Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5669667Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5670097Z },
+2026-11-03T06:46:12.5670269Z "distinct": true,
+2026-11-03T06:46:12.5670515Z "id": "64775b94eeb08dfcce28cc01738cd9898d25459a",
+2026-11-03T06:46:12.5675229Z "message": "fix(upgrade): 归档清单改用 -tvzf 按类型位判——裸 -tzf 对软链只打印名字（安全修复）\n\nMimosa 深度扫描（scan-2026-11-02T07-10-26.566Z-31a8b5d3a5e8，seal sha256:228d03ee…）\n在本次改动面报 10 条 medium/high，全部指向 resolveWithinRoot——复核后定位到一个**真缺口**\n（不是误报）：判据层「清单里找 \" -> \" 判链接」这道防线是空的。\n\n实测（GNU tar 1.35）：\n- `tar -tzf evil.tar.gz` 对软链条目**只打印名字**（`evil`，无 ` -> `）；\n- ` -> ` 只在 `-tvzf`（verbose）出现：`lrw-r--r-- 0/0 0 … evil -> /etc`。\n\n因此原实现「含 \" -> \" 即拒绝」永远不命中真实的链接条目——一个含软链（指向 /etc 这类\n包外路径）的归档能顺利通过清单判据，只剩解包后的 lstat 那道兜底。\n\n修法（两层，且第一层前移到解包之前）：\n- `offlineBundleIntakeExec.listArchiveEntries` 改用 `-tvzf`（带类型位）；\n- `offlineBundleIntakePolicy.parseArchiveListing` 重写为解析 verbose 行：\n  · 按**首字符类型位**判定——只放行普通文件 `-` 与目录 `d`（闭合集合 ALLOWED_TYPE_BITS），\n    `l`/`h`/`b`/`c`/`p`/`s` 一律拒，**链接与设备节点在解包之前就被拦下**；\n  · 行形态认不出即硬失败而不是「尽力解析」（落位以「只解点名条目」为前提，\n    而点名依赖清单准确——认不出的行意味着对这个归档的了解不完整）；\n  · 保留原有的空行/CRLF 处理与 ` -> ` 第二道判据。\n- 第二道防线（解包后逐条 lstat 复核 isSymbolicLink）保持不变——它从「唯一」回归为「兜底」。\n- 同时移除已无调用点的 fileEntriesOnly（成员名改由 manifest 决定后，它成了死代码），\n  并修正 normalizeEntry 被挤在一起的 JSDoc 错位。\n\n测试（净增 8 例，全部真形态夹具）：\n- offlineBundleIntakePolicy.test.js：清单夹具改为 verbose 形态（vline/vlisting）；新增\n  「符号链接（类型位 l）必拒」「硬链/块设备/字符设备/FIFO/socket 同样必拒（test.each 5 例）」\n  「行形态认不出即硬失败（喂裸 -tzf 输出必须失败——那正是用错形态的信号）」\n  「允许的类型位是闭合集合」；原 fileEntriesOnly 组改为 normalizeEntry + 条目数判据组。\n- offlineBundleIntake.test.js：新增**真归档含软链条目**用例（python tarfile 精确设置\n  SYMTYPE 造包；无 python 时显式 warn 跳过而不是静默 return），断言报错指向类型位、\n  且落位目标未建立、staging 无残留。原「绝对路径条目」用例的静默 return 改为显式记明\n  （本机 tar 不支持 -P 时）。\n\n登记面：ADR-020「踩过的坑」置顶记录这条（含实测证据与「空防线」的定性）；\nhot-upgrade.md §9 补「清单层按类型位判，链接在解包之前被拦下」与裸 -tzf 的坑。\n\n验证：offlineBundleIntake/Policy/offlineBundlePolicy/importOfflineBundle/hotUpgradeAgent/\ncliSecretArgGate 六套件 246 例全绿（1 例按平台显式跳过）；npm run lint 0 error；prettier 全过；\nlint:ratchet 我的责任面干净（仅剩并行会话的 honeypotDecoyEvents 条目）。",
+2026-11-03T06:46:12.5678645Z "timestamp": "2026-11-02T15:39:27+08:00",
+2026-11-03T06:46:12.5678981Z "tree_id": "b7e42290006e86f3dfd70652b706397bca59e6d8",
+2026-11-03T06:46:12.5679429Z "url": "https://github.com/qmzzzzz/fsms/commit/64775b94eeb08dfcce28cc01738cd9898d25459a"
+2026-11-03T06:46:12.5679912Z },
+2026-11-03T06:46:12.5680074Z {
+2026-11-03T06:46:12.5680238Z "author": {
+2026-11-03T06:46:12.5680433Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5680676Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5680890Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5681088Z },
+2026-11-03T06:46:12.5681271Z "committer": {
+2026-11-03T06:46:12.5681483Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5681777Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5681969Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5682202Z },
+2026-11-03T06:46:12.5682368Z "distinct": true,
+2026-11-03T06:46:12.5682609Z "id": "1312a555e9251361a92ba713b4268b3ecb9a3788",
+2026-11-03T06:46:12.5686268Z "message": "perf(deploy): 上游连接复用（P2-4）——nginx keepalive 池 + 后端配对不变量\n\n参考项目研读 P2-4 落地。此前 upstream fsms_app 无连接池、各反代块未清\nnginx 默认的 Connection: close —— SPA 一次页面加载 35 个请求各自新建一次到\n127.0.0.1:3000 的 TCP 连接，高并发窗口（导出/批量提交）下 TIME_WAIT 累积与\naccept 队列抖动体现为 P99 毛刺。\n\n两侧配对，缺一即失效或引入故障：\n- nginx 侧（deployment/nginx.conf.example）：\n  · upstream fsms_app 增 keepalive 64 + keepalive_timeout 75（取值推导写在块内：\n    单色单进程池 64 条足够覆盖突发，更大只会挤占活跃连接）\n  · 6 个非 WS 反代块各补 proxy_http_version 1.1 + proxy_set_header Connection \"\"\n    （不清则 nginx 仍发 close，池永不命中）\n  · socket.io 块**刻意不动**（保持 Connection \"upgrade\"，清空会破坏协议升级）\n- 后端侧（src/index.js）：\n  · server.keepAliveTimeout = 80s、headersTimeout = 85s（listen 之前设置）\n  · 这是 P2-4 的**前置缺口**：后端此前用 Node 默认 5s，而 nginx 保留空闲连接 75s\n    → 复用窗口撞上「后端已 FIN、nginx 仍投递」竞态 = 不可复现的偶发 502。\n    取 80s 让「后端关闭」永远先于「nginx 判其过期」，5s 余量覆盖时钟推进误差；\n    headersTimeout > keepAliveTimeout 是 Node 硬性要求。\n\n测试（nginxProxyContract 新增 5 用例，含 1 条可证伪）：\n- 前提自证（upstream 块 + ≥5 非 WS 块 + WS 块确被识别，防空集假绿）\n- **源码真值配对断言**：解析 src/index.js 的 keepAliveTimeout 数值，断言\n  backend > nginx 保留窗口（把两侧不变量钉成红绿可见，而非靠注释约定）\n- 每个非 WS 块都清 Connection（漏一块 = 那条通道永不复用）\n- 反向断言：socket.io 不得被清空（本组最常见的误修就是一并清空）\n- 可证伪：抹掉 /api/ 块的清 Connection 后同断言必须报出该缺口\n\n验证：nginxProxyContract 31/31、app 81/81、deploy 全套 1036/1037（1 skip 既有）\n全绿；eslint 0 error；prettier 干净（nginx 配置文件无 parser，属既有约定）。",
+2026-11-03T06:46:12.5688771Z "timestamp": "2026-11-02T16:01:29+08:00",
+2026-11-03T06:46:12.5689092Z "tree_id": "323be06e21af761a9677835bbeb3129ed33cd831",
+2026-11-03T06:46:12.5689561Z "url": "https://github.com/qmzzzzz/fsms/commit/1312a555e9251361a92ba713b4268b3ecb9a3788"
+2026-11-03T06:46:12.5689973Z },
+2026-11-03T06:46:12.5690294Z {
+2026-11-03T06:46:12.5690458Z "author": {
+2026-11-03T06:46:12.5690674Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5690975Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5691164Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5691381Z },
+2026-11-03T06:46:12.5691595Z "committer": {
+2026-11-03T06:46:12.5691832Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5692126Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5692314Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5692518Z },
+2026-11-03T06:46:12.5692688Z "distinct": true,
+2026-11-03T06:46:12.5692927Z "id": "988170584963714965aeda580655efe530ee520f",
+2026-11-03T06:46:12.5698816Z "message": "feat(security): 安全分析工作台/攻击画像/蜜罐第三刀多批次整合 + 门禁收口\n\n本提交把多批并行在途工作按主题整合落库（全量 jest 798 套件已先行本地验证，\n除已知 Windows 本机环境红 backupUriFile 外全绿；静态门禁六件套全绿）。\n\n一、安全分析工作台（读面三合一，2026-11-02）\n- 新增 /security-analysis：IP 画像 / 撞库画像 / 取证溯源三 tab，共用 security:audit\n  读权限；封段按钮仍由 security:config 单独门控；菜单三项收敛为一项。\n- 旧深链 /forensic-trace、/attack-profile、/stuffing-profile 保留为 redirect（书签与\n  告警链接不失效），query 判据原样带进对应 tab。\n- 取证溯源页一键钻取（点 IP/指纹/网段即以单判据重查）、时间预设、聚类先核实再封禁、\n  判据快照回显；forensicTrace traceTimeline 截断语义修正（原 sort 正序 + limit 返回\n  最旧 N 条，与「最近 N 条」承诺相反，改倒序取数返回前翻正）。\n- StuffingProfileView/AttackProfileView 独立视图与 i18n 词表（双语 parity 测试钉住）。\n\n二、攻击画像后端模块\n- attackProfile 常量/服务/路由族（MAX_PROFILE_ROWS=5000 硬顶 + truncated 如实下发）、\n  realtimeNotifier（实时通知 wiring）、startupAuditTrail（启动期审计留痕）。\n\n三、蜜罐第三刀\n- 常量族拆分：honeypotDecoyEvents 退役，拆为 honeypotDecoyAlarms/Inspections；\n  新增 honeypotTicketGate（封段票据门）与 parity 对账测试；ADR-013 同步扩写。\n\n四、xlsx/zip 手写替代 exceljs（供应链缩面）\n- 新增 utils/xlsxWriter + utils/zipContainer（OOXML 子集手写，ZIP64/目录条目等\n  不支持项如实申报）；exceljs 从 dependencies 移至 devDependencies；两份锁文件\n  重算 integrity 锚；reportWorkbookService/reportExportService 改走手写链。\n\n五、离线包代理落位后续\n- offlineBundleIntakeArchive（外层归档签名链——归档 sha256 的 hex 文本逐字节\n  Ed25519 one-shot）、upgradeService/deviceRoutes 配套。\n\n六、门禁收口\n- commentDensity：未知参数拒绝（exit 2 分码）、--check/--update-baseline 互斥、\n  ENFORCED rationale 更新为「未接线」事实声明；基线全量再生（390 行）。\n- ci.yml：e2e-browser 启动步补 admin mustChangePassword 清理（路由守卫钉 /profile\n  会让 32 条旅程集体超时）。\n- config-drift/cliFlagPolicy/check-utf8/compliance-check/e2e-smoke/production-drill/\n  ops-e2e cross-department journey 与对应 CI 测试同步。\n- eslint.ratchet 补登记波次债；audit-allowlist 正式登记 glob/minimatch 两条\n  noPatch 公告（reviewBy 2027-02-01）。\n\n七、安全散项\n- ipListSegmentGuards F-25-8 并发回滚语义、securityAlertIpBans 封禁臂、\n  auditChainVerify、dataScope guest 只读、rateLimit、sentry、AuditLog 模型层\n  （sanitizer/writeStatics）、authService/password、initData/roles、app/index 装配。\n\n八、本提交自带的门禁修复\n- permissionCatalogRouteParity：登记表对齐工作台路由（FE_PROTECTED 11→10 条，\n  security-analysis 入册、attack-profile/forensic-trace 两条旧页面条目随 redirect\n  化退册）；解析器剥掉 redirect 箭头函数对象字面量里的 path: 误配（23→20）。\n- SecurityAnalysisView/StuffingProfileView 等 7 个未跟踪文件补入库\n  （moduleTrackingGate/testTreePurity 干净克隆闭环）。\n- 全仓 prettier 规范化（10 个在途文件未过 format:check）。",
+2026-11-03T06:46:12.5703364Z "timestamp": "2026-11-03T03:06:21+08:00",
+2026-11-03T06:46:12.5703697Z "tree_id": "b3d6bbfc7d12f297e772ecf8a967ecb3741b492d",
+2026-11-03T06:46:12.5704208Z "url": "https://github.com/qmzzzzz/fsms/commit/988170584963714965aeda580655efe530ee520f"
+2026-11-03T06:46:12.5704534Z },
+2026-11-03T06:46:12.5704694Z {
+2026-11-03T06:46:12.5704855Z "author": {
+2026-11-03T06:46:12.5705060Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5705265Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5705454Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5705641Z },
+2026-11-03T06:46:12.5705798Z "committer": {
+2026-11-03T06:46:12.5706012Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5706290Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5706480Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5706687Z },
+2026-11-03T06:46:12.5706848Z "distinct": true,
+2026-11-03T06:46:12.5707039Z "id": "673524ad67e7e48a13dd9bca9a81bce9ba5402eb",
+2026-11-03T06:46:12.5707573Z "message": "perf(export): 导出并发闸按端点分池（E3 基建）——审计 CSV/取证 JSON 与报表导出互不排队",
+2026-11-03T06:46:12.5711968Z "timestamp": "2026-11-03T03:12:43+08:00",
+2026-11-03T06:46:12.5712512Z "tree_id": "3956c5f831bb777a5c02cb07f5a0cefe7e231c0c",
+2026-11-03T06:46:12.5712961Z "url": "https://github.com/qmzzzzz/fsms/commit/673524ad67e7e48a13dd9bca9a81bce9ba5402eb"
+2026-11-03T06:46:12.5713358Z },
+2026-11-03T06:46:12.5713535Z {
+2026-11-03T06:46:12.5713693Z "author": {
+2026-11-03T06:46:12.5713873Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5714061Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5714178Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5714293Z },
+2026-11-03T06:46:12.5714395Z "committer": {
+2026-11-03T06:46:12.5714529Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5714759Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5714873Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5714988Z },
+2026-11-03T06:46:12.5715088Z "distinct": true,
+2026-11-03T06:46:12.5715313Z "id": "f82418f4878edc995daa4e2377bb4ccdabbc9d8b",
+2026-11-03T06:46:12.5717528Z "message": "fix(security): 审计复审缺陷修复收口：权限目录、票据外置与出口守卫\n\n- P1-3 权限授予走活跃目录过滤：新增 services/permissionCatalog.js，privilegeGrantService 审批改经目录复核，hasPermission 支持 includeGrants:false\n- P2-7 ip_range_denied 计入爆破计数（BRUTE_FORCE_COUNTED_ACTIONS + loginChallenge.FAILURE_ACTIONS）\n- ipPoolBan：封禁票据改 sharedCache setIfAbsent/getDel（原子一次性 + 10 分钟 TTL），审计落库改经 auditOutbox.recordDurably 出口\n- 蜜罐告警档位拆分与 matchHoneypotName 回退链单一实现（honeypotAccounts.honeypotNameOf）\n- 审计导出/报表/取证守卫修复（dataScope、reportController、auditQueryService、forensicManifestReconcile 等）\n- envNumber 新增 readClampedIntEnv；关停链取证排空预算领取移入链内区域\n- 注释密度收敛：24 文件长论证搬 docs/*.md（内容不删只省行），总量回到 22807≤22851 基线",
+2026-11-03T06:46:12.5719036Z "timestamp": "2026-11-03T14:06:54+08:00",
+2026-11-03T06:46:12.5719364Z "tree_id": "a76249790166c487771ed88c9645ff479d919dff",
+2026-11-03T06:46:12.5719904Z "url": "https://github.com/qmzzzzz/fsms/commit/f82418f4878edc995daa4e2377bb4ccdabbc9d8b"
+2026-11-03T06:46:12.5720225Z },
+2026-11-03T06:46:12.5720380Z {
+2026-11-03T06:46:12.5720539Z "author": {
+2026-11-03T06:46:12.5720775Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5721049Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5721402Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5721593Z },
+2026-11-03T06:46:12.5721751Z "committer": {
+2026-11-03T06:46:12.5721967Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5722262Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5722445Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5722651Z },
+2026-11-03T06:46:12.5722811Z "distinct": true,
+2026-11-03T06:46:12.5723030Z "id": "821bc25a8e442fa68c592591951ca0d9e37e8d59",
+2026-11-03T06:46:12.5725153Z "message": "test(gates): 门禁台账与登记项随实重钉——四大红套件收口全绿\n\n- commentAnchorFreshness：层 2/3 共 20+ 处锚按真实行号重钉（git show HEAD 对照定位，不按位移算术猜），$group 谓词按门禁自定格式收紧为具名形态\n- requireCycles：LAZY_SCC 登记第 2 分量（honeypotWatch↔handshake，取址边只能惰性）与 2 条惰性边（含 auditLogHooks→metrics 兜底 require）\n- singleProcessInventoryCompleteness：ipPoolBan 票据外置 sharedCache 后清单条目改真实语义并标 redisExternalized；下限锚针换成 honeypotWatch（票据外置后不再持模块级 Map）\n- shutdownBudgetContract：drainForensicCapture 改收 allowMs 参数、预算领取移入关停链区域调用点；停止取证清单对账登记为同步步骤\n- 蜜罐夹具补 socket.remoteAddress；authzSessionRevocationGuards 清 IPBlacklist 回环残留；skipGlobalAuditWriteFailure 复原判据不放宽（代码改走 recordDurably 出口）\n- outboundAlertContract：honeypotWatch 档位三元实参拆成 CRITICAL/HIGH 两个调用点",
+2026-11-03T06:46:12.5726742Z "timestamp": "2026-11-03T14:07:09+08:00",
+2026-11-03T06:46:12.5727028Z "tree_id": "76843ead7ba785f148694815ee14a53164e4cfbd",
+2026-11-03T06:46:12.5727460Z "url": "https://github.com/qmzzzzz/fsms/commit/821bc25a8e442fa68c592591951ca0d9e37e8d59"
+2026-11-03T06:46:12.5727821Z },
+2026-11-03T06:46:12.5727993Z {
+2026-11-03T06:46:12.5728147Z "author": {
+2026-11-03T06:46:12.5728282Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5728466Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5728626Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5728747Z },
+2026-11-03T06:46:12.5728846Z "committer": {
+2026-11-03T06:46:12.5728977Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5729288Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5729427Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5729541Z },
+2026-11-03T06:46:12.5729646Z "distinct": true,
+2026-11-03T06:46:12.5729991Z "id": "e6c0bb101be18cd0ac6ab2b9401a32ca6ad7bc28",
+2026-11-03T06:46:12.5731154Z "message": "docs: 长论证外移落地与架构、部署文档同步\n\n- 新增 10 篇机制文档（audit-buffer、env-number、ip-pool-ban、honeypot-watch、data-scope、export-concurrency、forensic-manifest-reconcile、ip-location-service、pii-export-quota、user-permission-service），承接 24 文件注释密度收敛搬出的完整论证\n- architecture.md 服务层数 103→107 与模块清单同步；ADR-005、mlps2-controls、deployment/secret-rotation、alert-rules 同步\n- README 与 migrations/README 更新",
+2026-11-03T06:46:12.5732067Z "timestamp": "2026-11-03T14:07:21+08:00",
+2026-11-03T06:46:12.5732246Z "tree_id": "fdcdc108b82d11167d1323431481fd069e88bd8d",
+2026-11-03T06:46:12.5732570Z "url": "https://github.com/qmzzzzz/fsms/commit/e6c0bb101be18cd0ac6ab2b9401a32ca6ad7bc28"
+2026-11-03T06:46:12.5732797Z }
+2026-11-03T06:46:12.5732894Z ],
+2026-11-03T06:46:12.5733134Z "compare": "https://github.com/qmzzzzz/fsms/compare/9bffda3f8da7...e6c0bb101be1",
+2026-11-03T06:46:12.5733367Z "created": false,
+2026-11-03T06:46:12.5733648Z "deleted": false,
+2026-11-03T06:46:12.5733763Z "forced": false,
+2026-11-03T06:46:12.5733939Z "head_commit": {
+2026-11-03T06:46:12.5734056Z "author": {
+2026-11-03T06:46:12.5734294Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5734588Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5734790Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5734991Z },
+2026-11-03T06:46:12.5735150Z "committer": {
+2026-11-03T06:46:12.5735356Z "email": "qmzzzzz@users.noreply.github.com",
+2026-11-03T06:46:12.5735609Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5735724Z "username": "qmzzzzz"
+2026-11-03T06:46:12.5735915Z },
+2026-11-03T06:46:12.5736073Z "distinct": true,
+2026-11-03T06:46:12.5736297Z "id": "e6c0bb101be18cd0ac6ab2b9401a32ca6ad7bc28",
+2026-11-03T06:46:12.5737558Z "message": "docs: 长论证外移落地与架构、部署文档同步\n\n- 新增 10 篇机制文档（audit-buffer、env-number、ip-pool-ban、honeypot-watch、data-scope、export-concurrency、forensic-manifest-reconcile、ip-location-service、pii-export-quota、user-permission-service），承接 24 文件注释密度收敛搬出的完整论证\n- architecture.md 服务层数 103→107 与模块清单同步；ADR-005、mlps2-controls、deployment/secret-rotation、alert-rules 同步\n- README 与 migrations/README 更新",
+2026-11-03T06:46:12.5738549Z "timestamp": "2026-11-03T14:07:21+08:00",
+2026-11-03T06:46:12.5738827Z "tree_id": "fdcdc108b82d11167d1323431481fd069e88bd8d",
+2026-11-03T06:46:12.5739247Z "url": "https://github.com/qmzzzzz/fsms/commit/e6c0bb101be18cd0ac6ab2b9401a32ca6ad7bc28"
+2026-11-03T06:46:12.5739636Z },
+2026-11-03T06:46:12.5739989Z "pusher": {
+2026-11-03T06:46:12.5740179Z "email": "2495322669@qq.com",
+2026-11-03T06:46:12.5740435Z "name": "qmzzzzz"
+2026-11-03T06:46:12.5740614Z },
+2026-11-03T06:46:12.5740785Z "ref": "refs/heads/main",
+2026-11-03T06:46:12.5741041Z "repository": {
+2026-11-03T06:46:12.5741226Z "allow_forking": true,
+2026-11-03T06:46:12.5741564Z "archive_url": "https://api.github.com/repos/qmzzzzz/fsms/{archive_format}{/ref}",
+2026-11-03T06:46:12.5741921Z "archived": false,
+2026-11-03T06:46:12.5742224Z "assignees_url": "https://api.github.com/repos/qmzzzzz/fsms/assignees{/user}",
+2026-11-03T06:46:12.5742668Z "blobs_url": "https://api.github.com/repos/qmzzzzz/fsms/git/blobs{/sha}",
+2026-11-03T06:46:12.5743106Z "branches_url": "https://api.github.com/repos/qmzzzzz/fsms/branches{/branch}",
+2026-11-03T06:46:12.5743501Z "clone_url": "https://github.com/qmzzzzz/fsms.git",
+2026-11-03T06:46:12.5743969Z "collaborators_url": "https://api.github.com/repos/qmzzzzz/fsms/collaborators{/collaborator}",
+2026-11-03T06:46:12.5744442Z "comments_url": "https://api.github.com/repos/qmzzzzz/fsms/comments{/number}",
+2026-11-03T06:46:12.5744922Z "commits_url": "https://api.github.com/repos/qmzzzzz/fsms/commits{/sha}",
+2026-11-03T06:46:12.5745366Z "compare_url": "https://api.github.com/repos/qmzzzzz/fsms/compare/{base}...{head}",
+2026-11-03T06:46:12.5745839Z "contents_url": "https://api.github.com/repos/qmzzzzz/fsms/contents/{+path}",
+2026-11-03T06:46:12.5746428Z "contributors_url": "https://api.github.com/repos/qmzzzzz/fsms/contributors",
+2026-11-03T06:46:12.5746726Z "created_at": 1789113263,
+2026-11-03T06:46:12.5746937Z "default_branch": "main",
+2026-11-03T06:46:12.5747262Z "deployments_url": "https://api.github.com/repos/qmzzzzz/fsms/deployments",
+2026-11-03T06:46:12.5747569Z "description": null,
+2026-11-03T06:46:12.5747779Z "disabled": false,
+2026-11-03T06:46:12.5748045Z "downloads_url": "https://api.github.com/repos/qmzzzzz/fsms/downloads",
+2026-11-03T06:46:12.5748399Z "events_url": "https://api.github.com/repos/qmzzzzz/fsms/events",
+2026-11-03T06:46:12.5748750Z "fork": false,
+2026-11-03T06:46:12.5748926Z "forks": 0,
+2026-11-03T06:46:12.5749093Z "forks_count": 0,
+2026-11-03T06:46:12.5749405Z "forks_url": "https://api.github.com/repos/qmzzzzz/fsms/forks",
+2026-11-03T06:46:12.5749844Z "full_name": "qmzzzzz/fsms",
+2026-11-03T06:46:12.5750181Z "git_commits_url": "https://api.github.com/repos/qmzzzzz/fsms/git/commits{/sha}",
+2026-11-03T06:46:12.5750548Z "git_refs_url": "https://api.github.com/repos/qmzzzzz/fsms/git/refs{/sha}",
+2026-11-03T06:46:12.5750919Z "git_tags_url": "https://api.github.com/repos/qmzzzzz/fsms/git/tags{/sha}",
+2026-11-03T06:46:12.5751349Z "git_url": "git://github.com/qmzzzzz/fsms.git",
+2026-11-03T06:46:12.5751651Z "has_discussions": false,
+2026-11-03T06:46:12.5751871Z "has_downloads": true,
+2026-11-03T06:46:12.5752086Z "has_issues": true,
+2026-11-03T06:46:12.5752273Z "has_pages": false,
+2026-11-03T06:46:12.5752491Z "has_projects": true,
+2026-11-03T06:46:12.5752687Z "has_pull_requests": true,
+2026-11-03T06:46:12.5752939Z "has_wiki": true,
+2026-11-03T06:46:12.5753125Z "homepage": null,
+2026-11-03T06:46:12.5753405Z "hooks_url": "https://api.github.com/repos/qmzzzzz/fsms/hooks",
+2026-11-03T06:46:12.5753743Z "html_url": "https://github.com/qmzzzzz/fsms",
+2026-11-03T06:46:12.5754033Z "id": 1365602766,
+2026-11-03T06:46:12.5754215Z "is_template": false,
+2026-11-03T06:46:12.5754521Z "issue_comment_url": "https://api.github.com/repos/qmzzzzz/fsms/issues/comments{/number}",
+2026-11-03T06:46:12.5754961Z "issue_events_url": "https://api.github.com/repos/qmzzzzz/fsms/issues/events{/number}",
+2026-11-03T06:46:12.5755384Z "issues_url": "https://api.github.com/repos/qmzzzzz/fsms/issues{/number}",
+2026-11-03T06:46:12.5755793Z "keys_url": "https://api.github.com/repos/qmzzzzz/fsms/keys{/key_id}",
+2026-11-03T06:46:12.5756191Z "labels_url": "https://api.github.com/repos/qmzzzzz/fsms/labels{/name}",
+2026-11-03T06:46:12.5756517Z "language": "JavaScript",
+2026-11-03T06:46:12.5756806Z "languages_url": "https://api.github.com/repos/qmzzzzz/fsms/languages",
+2026-11-03T06:46:12.5757103Z "license": {
+2026-11-03T06:46:12.5757275Z "key": "mit",
+2026-11-03T06:46:12.5757456Z "name": "MIT License",
+2026-11-03T06:46:12.5757715Z "node_id": "MDc6TGljZW5zZTEz",
+2026-11-03T06:46:12.5757927Z "spdx_id": "MIT",
+2026-11-03T06:46:12.5758115Z "url": "https://api.github.com/licenses/mit"
+2026-11-03T06:46:12.5758344Z },
+2026-11-03T06:46:12.5758515Z "master_branch": "main",
+2026-11-03T06:46:12.5758832Z "merges_url": "https://api.github.com/repos/qmzzzzz/fsms/merges",
+2026-11-03T06:46:12.5759258Z "milestones_url": "https://api.github.com/repos/qmzzzzz/fsms/milestones{/number}",
+2026-11-03T06:46:12.5759585Z "mirror_url": null,
+2026-11-03T06:46:12.5759856Z "name": "fsms",
+2026-11-03T06:46:12.5760045Z "node_id": "R_kgDOUWVxzg",
+2026-11-03T06:46:12.5760493Z "notifications_url": "https://api.github.com/repos/qmzzzzz/fsms/notifications{?since,all,participating}",
+2026-11-03T06:46:12.5760837Z "open_issues": 14,
+2026-11-03T06:46:12.5761028Z "open_issues_count": 14,
+2026-11-03T06:46:12.5761271Z "owner": {
+2026-11-03T06:46:12.5761543Z "avatar_url": "https://avatars.githubusercontent.com/u/183729493?v=4",
+2026-11-03T06:46:12.5761844Z "email": "2495322669@qq.com",
+2026-11-03T06:46:12.5762137Z "events_url": "https://api.github.com/users/qmzzzzz/events{/privacy}",
+2026-11-03T06:46:12.5762530Z "followers_url": "https://api.github.com/users/qmzzzzz/followers",
+2026-11-03T06:46:12.5763104Z "following_url": "https://api.github.com/users/qmzzzzz/following{/other_user}",
+2026-11-03T06:46:12.5763468Z "gists_url": "https://api.github.com/users/qmzzzzz/gists{/gist_id}",
+2026-11-03T06:46:12.5763784Z "gravatar_id": "",
+2026-11-03T06:46:12.5763999Z "html_url": "https://github.com/qmzzzzz",
+2026-11-03T06:46:12.5764264Z "id": 183729493,
+2026-11-03T06:46:12.5764444Z "login": "qmzzzzz",
+2026-11-03T06:46:12.5764651Z "name": "qmzzzzz",
+2026-11-03T06:46:12.5764847Z "node_id": "U_kgDOCvN9VQ",
+2026-11-03T06:46:12.5765155Z "organizations_url": "https://api.github.com/users/qmzzzzz/orgs",
+2026-11-03T06:46:12.5765568Z "received_events_url": "https://api.github.com/users/qmzzzzz/received_events",
+2026-11-03T06:46:12.5765947Z "repos_url": "https://api.github.com/users/qmzzzzz/repos",
+2026-11-03T06:46:12.5766255Z "site_admin": false,
+2026-11-03T06:46:12.5766544Z "starred_url": "https://api.github.com/users/qmzzzzz/starred{/owner}{/repo}",
+2026-11-03T06:46:12.5766946Z "subscriptions_url": "https://api.github.com/users/qmzzzzz/subscriptions",
+2026-11-03T06:46:12.5767264Z "type": "User",
+2026-11-03T06:46:12.5767472Z "url": "https://api.github.com/users/qmzzzzz",
+2026-11-03T06:46:12.5767832Z "user_view_type": "public"
+2026-11-03T06:46:12.5768045Z },
+2026-11-03T06:46:12.5768210Z "private": true,
+2026-11-03T06:46:12.5768436Z "pull_request_creation_policy": "all",
+2026-11-03T06:46:12.5768800Z "pulls_url": "https://api.github.com/repos/qmzzzzz/fsms/pulls{/number}",
+2026-11-03T06:46:12.5769134Z "pushed_at": 1793688356,
+2026-11-03T06:46:12.5769430Z "releases_url": "https://api.github.com/repos/qmzzzzz/fsms/releases{/id}",
+2026-11-03T06:46:12.5769660Z "size": 15399,
+2026-11-03T06:46:12.5769970Z "ssh_url": "git@github.com:qmzzzzz/fsms.git",
+2026-11-03T06:46:12.5770244Z "stargazers": 0,
+2026-11-03T06:46:12.5770429Z "stargazers_count": 0,
+2026-11-03T06:46:12.5770758Z "stargazers_url": "https://api.github.com/repos/qmzzzzz/fsms/stargazers",
+2026-11-03T06:46:12.5771173Z "statuses_url": "https://api.github.com/repos/qmzzzzz/fsms/statuses/{sha}",
+2026-11-03T06:46:12.5771598Z "subscribers_url": "https://api.github.com/repos/qmzzzzz/fsms/subscribers",
+2026-11-03T06:46:12.5772038Z "subscription_url": "https://api.github.com/repos/qmzzzzz/fsms/subscription",
+2026-11-03T06:46:12.5772391Z "svn_url": "https://github.com/qmzzzzz/fsms",
+2026-11-03T06:46:12.5772745Z "tags_url": "https://api.github.com/repos/qmzzzzz/fsms/tags",
+2026-11-03T06:46:12.5773116Z "teams_url": "https://api.github.com/repos/qmzzzzz/fsms/teams",
+2026-11-03T06:46:12.5773430Z "topics": [],
+2026-11-03T06:46:12.5773695Z "trees_url": "https://api.github.com/repos/qmzzzzz/fsms/git/trees{/sha}",
+2026-11-03T06:46:12.5774013Z "updated_at": "2026-10-29T22:37:41Z",
+2026-11-03T06:46:12.5774322Z "url": "https://api.github.com/repos/qmzzzzz/fsms",
+2026-11-03T06:46:12.5774629Z "visibility": "private",
+2026-11-03T06:46:12.5774830Z "watchers": 0,
+2026-11-03T06:46:12.5775008Z "watchers_count": 0,
+2026-11-03T06:46:12.5775193Z "web_commit_signoff_required": false
+2026-11-03T06:46:12.5775404Z },
+2026-11-03T06:46:12.5775562Z "sender": {
+2026-11-03T06:46:12.5775829Z "avatar_url": "https://avatars.githubusercontent.com/u/183729493?v=4",
+2026-11-03T06:46:12.5776219Z "events_url": "https://api.github.com/users/qmzzzzz/events{/privacy}",
+2026-11-03T06:46:12.5776609Z "followers_url": "https://api.github.com/users/qmzzzzz/followers",
+2026-11-03T06:46:12.5777023Z "following_url": "https://api.github.com/users/qmzzzzz/following{/other_user}",
+2026-11-03T06:46:12.5777423Z "gists_url": "https://api.github.com/users/qmzzzzz/gists{/gist_id}",
+2026-11-03T06:46:12.5777731Z "gravatar_id": "",
+2026-11-03T06:46:12.5777937Z "html_url": "https://github.com/qmzzzzz",
+2026-11-03T06:46:12.5778225Z "id": 183729493,
+2026-11-03T06:46:12.5778405Z "login": "qmzzzzz",
+2026-11-03T06:46:12.5778619Z "node_id": "U_kgDOCvN9VQ",
+2026-11-03T06:46:12.5778924Z "organizations_url": "https://api.github.com/users/qmzzzzz/orgs",
+2026-11-03T06:46:12.5779337Z "received_events_url": "https://api.github.com/users/qmzzzzz/received_events",
+2026-11-03T06:46:12.5779938Z "repos_url": "https://api.github.com/users/qmzzzzz/repos",
+2026-11-03T06:46:12.5780198Z "site_admin": false,
+2026-11-03T06:46:12.5780466Z "starred_url": "https://api.github.com/users/qmzzzzz/starred{/owner}{/repo}",
+2026-11-03T06:46:12.5780742Z "subscriptions_url": "https://api.github.com/users/qmzzzzz/subscriptions",
+2026-11-03T06:46:12.5780953Z "type": "User",
+2026-11-03T06:46:12.5781107Z "url": "https://api.github.com/users/qmzzzzz",
+2026-11-03T06:46:12.5781276Z "user_view_type": "public"
+2026-11-03T06:46:12.5781401Z }
+2026-11-03T06:46:12.5781500Z }
+2026-11-03T06:46:13.2292409Z 2026/11/03 06:46:13 scorecard had an error: internal error: ListCommits:error during graphqlHandler.setup: internal error: githubv4.Query: Resource not accessible by integration
+2026-11-03T06:46:13.3373191Z Post job cleanup.
+2026-11-03T06:46:13.4094897Z [command]/usr/bin/git version
+2026-11-03T06:46:13.4160989Z git version 2.56.0
+2026-11-03T06:46:13.4223456Z Temporarily overriding HOME='/home/runner/work/_temp/d347e22b-eadd-41f8-803e-75b14695b1e6' before making global git config changes
+2026-11-03T06:46:13.4224492Z Adding repository directory to the temporary git global config as a safe directory
+2026-11-03T06:46:13.4225635Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/fsms/fsms
+2026-11-03T06:46:13.4302285Z Removing SSH command configuration
+2026-11-03T06:46:13.4302954Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-11-03T06:46:13.4373385Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-11-03T06:46:13.4788107Z Removing HTTP extra header
+2026-11-03T06:46:13.4792660Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-11-03T06:46:13.4862500Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-11-03T06:46:13.5151522Z Removing includeIf entries pointing to credentials config files
+2026-11-03T06:46:13.5160409Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-11-03T06:46:13.5214804Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-11-03T06:46:13.5766170Z Cleaning up orphan processes

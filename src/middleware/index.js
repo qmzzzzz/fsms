@@ -19,11 +19,13 @@ const {
   ipLimiter,
   userLimiter,
   staticSurfaceLimiter,
+  unmatchedRequestLimiter,
   preflightLimiter,
 } = require('./rateLimit');
 const errorHandler = require('./errorHandler');
 const requestId = require('./requestId');
 const queryLengthLimit = require('./queryLimit');
+const { injectionSignature } = require('./injectionSignature');
 // 同一模块不重复 require：queryLimit.js 是「默认导出即函数 + 挂具名属性」的形状，
 // 两条 require 语句指向同一模块，属 L-21 同类的「同一模块多入口」残留。
 const { queryScalarGuard } = queryLengthLimit;
@@ -77,6 +79,7 @@ module.exports = {
   ipLimiter,
   userLimiter,
   staticSurfaceLimiter,
+  unmatchedRequestLimiter,
   preflightLimiter,
 
   // 错误处理
@@ -90,6 +93,8 @@ module.exports = {
 
   // 查询参数标量收敛（阻断 ?x[$ne]=y 操作符注入与 .trim() 型 500）
   queryScalarGuard,
+
+  injectionSignature,
 
   // CSRF 纵深：写操作 Origin/Referer 白名单校验
   createOriginCheck,

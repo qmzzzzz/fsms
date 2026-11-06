@@ -74,10 +74,10 @@ describe('Top-3 ① 判据本体：isWhitelistExemptionTrustworthy 的四种组�
     expect(isWhitelistExemptionTrustworthy(req)).toBe(true);
   });
 
-  test('启用 trust proxy + 带 XFF + socket 对端是内网/回环 → 可信（经 nginx 的正常流量）', () => {
-    // 生产 nginx 覆写 `X-Forwarded-For $remote_addr`，socket 对端是容器网络地址。
-    // 这一支必须放行，否则"办公网 IP 加白后仍被限流/被 CSRF 拦"的可用性回退就回来了。
-    for (const peer of ['::ffff:172.18.0.2', '172.18.0.2', '127.0.0.1', '::1']) {
+  test('启用 trust proxy + 带 XFF + socket 对端是回环 → 可信（本机反代的正常流量）', () => {
+    // 2026-11-03 收窄（i760 #25）：兼容档只认回环对端——容器网络私网地址不再
+    // 构成"可信代理"的证据，真实反代不在本机的部署必须配置 TRUSTED_PROXY_CIDRS。
+    for (const peer of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
       const req = makeReq({
         app: appWithTrustProxy(1),
         ip: '198.51.100.10',
@@ -85,6 +85,20 @@ describe('Top-3 ① 判据本体：isWhitelistExemptionTrustworthy 的四种组�
         headers: { 'x-forwarded-for': '198.51.100.10' },
       });
       expect({ peer, ok: isWhitelistExemptionTrustworthy(req) }).toMatchObject({ peer, ok: true });
+    }
+  });
+
+  test('启用 trust proxy + 带 XFF + socket 对端是私网 → 不可信（位置不是身份）', () => {
+    // 攻击形态：与目标同网段的主机直连应用端口并自报
+    // `X-Forwarded-For: <白名单 IP>`——旧兼容档在此放行，实测曾绕过 IP 黑名单。
+    for (const peer of ['::ffff:172.18.0.2', '172.18.0.2']) {
+      const req = makeReq({
+        app: appWithTrustProxy(1),
+        ip: '198.51.100.10',
+        socket: { remoteAddress: peer },
+        headers: { 'x-forwarded-for': '198.51.100.10' },
+      });
+      expect({ peer, ok: isWhitelistExemptionTrustworthy(req) }).toMatchObject({ peer, ok: false });
     }
   });
 
@@ -145,14 +159,16 @@ describe('Top-3 ② 发放侧：伪造 XFF 时标记不下发，但请求仍放�
     expect(res.status).not.toHaveBeenCalled();
   });
 
-  test('正对照：经内网代理的同一次白名单命中 → 标记照常下发（功能未被误伤）', async () => {
+  test('正对照：可信边界内的同一次白名单命中 → 标记照常下发（功能未被误伤）', async () => {
     jest.spyOn(IPBlacklist, 'isWhitelisted').mockResolvedValue(true);
     jest.spyOn(IPBlacklist, 'isBlocked').mockResolvedValue(false);
 
     const req = makeReq({
       app: appWithTrustProxy(1),
       ip: '198.51.100.10',
-      socket: { remoteAddress: '::ffff:172.18.0.2' }, // nginx/容器网络
+      // 2026-11-03 收窄后兼容档的可信对端是回环（本机反代）；容器网络私网对端
+      // 要回到这条可信路径，部署上应配置 TRUSTED_PROXY_CIDRS 走名单档
+      socket: { remoteAddress: '::ffff:127.0.0.1' },
       headers: { 'x-forwarded-for': '198.51.100.10' },
     });
 
