@@ -133,10 +133,13 @@ function invalidEnvWarning(name, raw, fallback) {
 // 所有审计记录降级为 legacy（无 hash）落库——防篡改承诺整体失效，
 // 而日志里只会看到一条条"锁持有超时"，看不出根因是配置笔误。
 // 现与 swagger/config/retention 同一口径：只接受有限正数，否则回落默认并告警。
-// 读取时机仍是模块加载期（测试按需在 require 之前设值，语义未变）。
-const CHAIN_LOCK_TIMEOUT_MS = readPositiveNumberEnv('AUDIT_CHAIN_LOCK_TIMEOUT_MS', 15000, {
-  onInvalid: invalidEnvWarning,
-});
+// 读取时机为**每次 withChainLock 现读**（2026-11-07 自模块加载期改来）：模块常量
+// 会让"谁先 require 谁定值"——僵尸套件把预算压到 150ms 后，同 worker 后续所有
+// 套件的链锁都按 150ms 判超时，负载下 flush 中止回缓冲（seed 31337 实测）。
+const chainLockTimeoutMs = () =>
+  readPositiveNumberEnv('AUDIT_CHAIN_LOCK_TIMEOUT_MS', 15000, {
+    onInvalid: invalidEnvWarning,
+  });
 
 /**
  * 互斥执行临界区（fn 内为「读链尾→计算→推进链尾」）：fn 完成前，后续
@@ -194,7 +197,7 @@ function withChainLock(fn) {
         chainGeneration += 1;
         fence.freeze();
         resolve();
-      }, CHAIN_LOCK_TIMEOUT_MS);
+      }, chainLockTimeoutMs());
       if (waitTimer.unref) waitTimer.unref();
     }),
   ]);
@@ -214,8 +217,8 @@ function withChainLock(fn) {
       if (sharedCache.isRedisEnabled()) {
         distLock = await sharedCache.acquireLockBlocking(
           CHAIN_LOCK_KEY,
-          CHAIN_LOCK_TIMEOUT_MS,
-          CHAIN_LOCK_TIMEOUT_MS
+          chainLockTimeoutMs(),
+          chainLockTimeoutMs()
         );
         if (!distLock) {
           // 拿不到跨实例锁：标记链尾失效 + 抛错走降级，绝不无锁推进链尾。
@@ -224,7 +227,7 @@ function withChainLock(fn) {
           chainTailLoaded = false;
           chainTail = null;
           throw new Error(
-            `审计链分布式锁获取超时（${CHAIN_LOCK_TIMEOUT_MS}ms），本批回退，链尾已标记失效待重同步`
+            `审计链分布式锁获取超时（${chainLockTimeoutMs()}ms），本批回退，链尾已标记失效待重同步`
           );
         }
       }
@@ -244,9 +247,9 @@ function withChainLock(fn) {
           if (sharedCache.isRedisEnabled()) {
             resyncChainTail(); // 永不 reject（内部吞错），尽力而为地清除共享链尾
           }
-          const reason = `审计链锁持有超时（${CHAIN_LOCK_TIMEOUT_MS}ms），已冻结后续链写入并等待僵尸任务落定`;
+          const reason = `审计链锁持有超时（${chainLockTimeoutMs()}ms），已冻结后续链写入并等待僵尸任务落定`;
           reject(new Error(reason));
-        }, CHAIN_LOCK_TIMEOUT_MS);
+        }, chainLockTimeoutMs());
         if (timer.unref) timer.unref();
       });
 
@@ -271,7 +274,7 @@ function withChainLock(fn) {
           // 超时的是锁，不是 fn：work 仍在后台跑且随时可能提交。
           // 分布式锁不释放并续租，直到僵尸落定；重同步必须先于解冻。
           fence.waitForZombie(work, distLock, {
-            ttlMs: CHAIN_LOCK_TIMEOUT_MS,
+            ttlMs: chainLockTimeoutMs(),
             resync: async () => {
               if (sharedCache.isRedisEnabled()) sharedTailUntrusted = true;
               await resyncChainTail();

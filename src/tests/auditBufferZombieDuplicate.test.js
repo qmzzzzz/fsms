@@ -86,6 +86,10 @@ describe('链锁超时与僵尸写入的重复落库', () => {
     auditBuffer.stop();
     await cleanup();
     auditBuffer.__resetForTest();
+    // 文件级压低的链锁预算随套件归还（auditChain 已改为每次 withChainLock 现读）：
+    // 不还则同 worker 后续套件的锁预算被钉死在 150ms，负载下 flush 中止回缓冲
+    // （seed 31337 实测：precastGate 的 insertMany 收空、攻击检测审计行 0 条）
+    delete process.env.AUDIT_CHAIN_LOCK_TIMEOUT_MS;
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (_) {
