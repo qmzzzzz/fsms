@@ -110,6 +110,7 @@
     "src/routes/authRoutes.js": 301,
     "src/routes/securityRoutes.js": 382,
     "src/services/AlarmService.js": 306,
+    "src/utils/auditChain.js": 301,
     "src/services/auditBuffer.js": 308,
     "src/services/sessionService.js": 316,
     "src/services/upgradeService.js": 514,
