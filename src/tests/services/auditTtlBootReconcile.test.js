@@ -98,7 +98,13 @@ describe('auditlogs TTL 的启动期对账', () => {
     const base = process.env.MONGODB_URI;
     const [head, query] = base.split('?');
     const uri = `${head.replace(/\/[^/]*$/, `/${DB_NAME}`)}${query ? `?${query}` : ''}`;
-    await mongoose.connect(uri);
+    // 本套件头注释声称"不 require AuditLog 模型"——但 require(initData) 会**传递性**
+    // 注册模型，连接打开时 mongoose autoIndex 就会在本库抢建 timestamp_-1
+    // （background:true、按模型声明值），与 forceIndex 的删重建竞态：
+    // seed 31337 实测 IndexOptionsConflict（autoIndex 的 15552000+background 插在
+    // dropIndex 与 createIndex(STALE) 之间）。套件的物理形态只应由 forceIndex 造，
+    // 连接级关掉 autoIndex 才与"独立库"的前提自洽。
+    await mongoose.connect(uri, { autoIndex: false });
     // 自证 URI 改写真的换了库：否则上面那段"独立库"的前提是空的
     expect(mongoose.connection.name).toBe(DB_NAME);
   });

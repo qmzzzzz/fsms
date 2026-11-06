@@ -291,9 +291,20 @@ function handleFlushFailure(err, docs) {
  * 落库失败则文档回到缓冲重试（at-least-once；WAL 行保留至成功后再裁剪）。
  */
 // flush 单轮批次上限（A7，成因见文件头"批次上限"段）：越界/非法一律回退 1000（不钳到边界，
-// 越界配置本身就是错配）；模块加载时读定，告警天然只发生一次。
-const warnBadEnvValue = (name, raw) => logger.warn(`${name}=${raw} 非法，已回退默认值`);
-const FLUSH_BATCH = readClampedIntEnv('AUDIT_FLUSH_BATCH_SIZE', 1000, [100, 5000], warnBadEnvValue);
+// 越界配置本身就是错配）。**每次 flush 现读**而非模块加载读定——模块级常量会让"谁先
+// require 谁定值"，随机序下先跑的套件设过 env 就钉死后续所有套件的批次上限
+// （seed 31337 实测：A7 用例自己设 120 的 env 被先前套件的模块加载次序吞掉）。
+// 非法值告警按原值去重，仍然天然只发生一次。
+const warnedRawEnv = new Set();
+const warnBadEnvValue = (name, raw) => {
+  const key = `${name}=${raw}`;
+  if (warnedRawEnv.has(key)) return;
+  warnedRawEnv.add(key);
+  logger.warn(`${name}=${raw} 非法，已回退默认值`);
+};
+function flushBatchLimit() {
+  return readClampedIntEnv('AUDIT_FLUSH_BATCH_SIZE', 1000, [100, 5000], warnBadEnvValue);
+}
 
 async function flush() {
   if (flushing || buffer.length === 0) return;
@@ -304,7 +315,7 @@ async function flush() {
     return;
   }
   flushing = true;
-  const batch = buffer.splice(0, FLUSH_BATCH); // A7：单轮只取上限条，余量留给下一轮
+  const batch = buffer.splice(0, flushBatchLimit()); // A7：单轮只取上限条，余量留给下一轮
   // 这批文档此刻**既不在缓冲也未落库**：关停排空必须把它们计入 residual，
   // 否则 `buffer.length === 0` 会被误读成"已排空"（F-101）。
   inFlightCount = batch.length;

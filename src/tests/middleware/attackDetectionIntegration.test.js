@@ -61,6 +61,10 @@ describe('攻击检测面 · 真实链路集成', () => {
       await mongoose.connection.close();
     }
     if (process.env.TRUST_PROXY_HOPS === '1') delete process.env.TRUST_PROXY_HOPS;
+    // 检测阈值改为事件时现读后，文件级的压低值会漏给同 worker 的后续套件
+    // （阈值 5 对生产形态的默认 40 来说形同无闸）——随套件归还
+    delete process.env.SCAN_404_THRESHOLD;
+    delete process.env.SCAN_404_WINDOW_MS;
   });
 
   beforeEach(() => {

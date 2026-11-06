@@ -71,6 +71,11 @@ describe('bcryptWorkerPool', () => {
   test('池初始化失败：必须留一条告警，且不重试、调用方仍拿到结果（G-01）', async () => {
     process.env.BCRYPT_WORKER_THREADS = '1';
     process.env.BCRYPT_WORKERS = '1';
+    // 本用例的回退臂要的是**真实** bcryptjs：同文件先行用例（随机序下可能在前面）
+    // 的 doMock('bcryptjs') 会注册到本文件的 mock 注册表并泄进 isolateModules——
+    // 那个桩的 hash 返回 undefined，本用例就会红成 "Received has value: undefined"。
+    // 双向解除（进入前清注册、finally 归还），与其他用例互不依赖执行顺序。
+    jest.dontMock('bcryptjs');
     const warnMock = jest.fn();
     jest.doMock('../../utils/logger', () => ({
       warn: warnMock,
@@ -103,6 +108,7 @@ describe('bcryptWorkerPool', () => {
     } finally {
       jest.dontMock('worker_threads');
       jest.dontMock('../../utils/logger');
+      jest.dontMock('bcryptjs');
     }
   });
   test('强制 worker 模式：compare 非字符串入参按 bcryptjs 语义拒绝', async () => {

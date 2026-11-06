@@ -410,6 +410,16 @@ describe('批量审计写路径：串链前的预铸造闸', () => {
 });
 
 describe('A7：flush 单轮批次上限（splice 截断，余量留待下一轮）', () => {
+  // 批次上限改为每次 flush 现读（模块加载读定会被随机序下先 require 的套件钉死），
+  // 本 describe 的上限值因此必须**自管**：文件级 :33 的设置在上方 describe 的
+  // afterAll（:193 防泄漏清理）里已被删除，不能依赖。
+  beforeAll(() => {
+    process.env.AUDIT_FLUSH_BATCH_SIZE = '120';
+  });
+  afterAll(() => {
+    delete process.env.AUDIT_FLUSH_BATCH_SIZE;
+  });
+
   const pushN = (n) => {
     for (let i = 0; i < n; i += 1) {
       auditBuffer.push(doc(`b7cap_${STAMP}`, { path: `/cap/${i}` }));

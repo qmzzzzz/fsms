@@ -37,16 +37,23 @@ const { readPositiveNumberEnv } = require('../utils/envNumber');
 const KNOWN_SCANNER_UA_RE =
   /(?:sqlmap|nmap|masscan|nikto|wpscan|hydra|dirb|dirbuster|gobuster|wfuzz|ffuf|acunetix|nessus|openvas|zgrab|whatweb|w3af|arachni|metasploit|burp)/i;
 
-// 风暴阈值：40 次/5 分钟（env 可覆盖，非法值 error 后回落——readPositiveNumberEnv 惯例）
-const SCAN_404_WINDOW_MS = readPositiveNumberEnv('SCAN_404_WINDOW_MS', 5 * 60 * 1000, {
-  onInvalid: (name, raw, fallback) =>
-    logger.error(`扫描探测窗口配置非法（${name}=${raw}），回落 ${fallback}ms`),
-});
-const SCAN_404_THRESHOLD = readPositiveNumberEnv('SCAN_404_THRESHOLD', 40, {
-  integer: true,
-  onInvalid: (name, raw, fallback) =>
-    logger.error(`扫描探测阈值配置非法（${name}=${raw}），回落 ${fallback}`),
-});
+// 风暴阈值：40 次/5 分钟（env 可覆盖，非法值 error 后回落——readPositiveNumberEnv 惯例）。
+// **事件时现读**而非模块加载读定：模块常量会让"谁先 require 谁定值"——随机序下
+// 先被加载（未设 env）就把阈值钉死在默认 40，后跑的集成套件压到 5 也拧不动
+// （seed 31337 实测：⑤ 风暴用例 0 行）。非法值告警按原值去重，不会逐请求刷屏。
+const warnedRawEnv = new Set();
+const readScanEnv = (name, fallback, opts) =>
+  readPositiveNumberEnv(name, fallback, {
+    ...opts,
+    onInvalid: (n, raw, fb) => {
+      const key = `${n}=${raw}`;
+      if (warnedRawEnv.has(key)) return;
+      warnedRawEnv.add(key);
+      logger.error(`扫描探测配置非法（${n}=${raw}），回落 ${fb}`);
+    },
+  });
+const scan404WindowMs = () => readScanEnv('SCAN_404_WINDOW_MS', 5 * 60 * 1000);
+const scan404Threshold = () => readScanEnv('SCAN_404_THRESHOLD', 40, { integer: true });
 // 计数器容量：攻击者轮换 IP 的上限封顶；LRU 按窗口起点淘汰（最久未活跃先出）
 const STORM_TRACKER_MAX_ENTRIES = 10000;
 
@@ -151,19 +158,20 @@ const noteUnmatchedRequest = (req) => {
     let counter = stormCounters.get(ip);
     if (!counter || counter.expiresAt <= now) {
       if (!counter) pruneMap(stormCounters, STORM_TRACKER_MAX_ENTRIES);
-      counter = { count: 0, expiresAt: now + SCAN_404_WINDOW_MS, reported: false };
+      counter = { count: 0, expiresAt: now + scan404WindowMs(), reported: false };
       stormCounters.set(ip, counter);
     }
     if (counter.reported) return;
     counter.count += 1;
-    if (counter.count < SCAN_404_THRESHOLD) return;
+    const threshold = scan404Threshold();
+    if (counter.count < threshold) return;
     counter.reported = true;
     setImmediate(() =>
       recordScanProbeRow({
         req,
         kind: 'scan_probe_storm',
-        sample: `404 风暴：${SCAN_404_THRESHOLD} 次/${Math.round(
-          SCAN_404_WINDOW_MS / 60000
+        sample: `404 风暴：${threshold} 次/${Math.round(
+          scan404WindowMs() / 60000
         )} 分钟（最新 ${stripControlChars(req.path, 200)}）`,
         riskLevel: 'high',
         riskFactors: ['unmatched_path_storm', ...uaFactor],
@@ -171,7 +179,7 @@ const noteUnmatchedRequest = (req) => {
     );
     markForensics(req, {
       reason: 'scan_probe_storm',
-      data: { threshold: SCAN_404_THRESHOLD, windowMs: SCAN_404_WINDOW_MS },
+      data: { threshold: scan404Threshold(), windowMs: scan404WindowMs() },
     });
   } catch (error) {
     // 计数/判定的任何异常都不许影响 404 兜底本身（fail-open，但留下痕迹）
@@ -182,8 +190,8 @@ const noteUnmatchedRequest = (req) => {
 /** 测试与运维自检：计数器规模与生效阈值 */
 const getScanProbeDetectorStats = () => ({
   trackedIps: stormCounters.size,
-  threshold: SCAN_404_THRESHOLD,
-  windowMs: SCAN_404_WINDOW_MS,
+  threshold: scan404Threshold(),
+  windowMs: scan404WindowMs(),
   maxTracked: STORM_TRACKER_MAX_ENTRIES,
 });
 

@@ -880,10 +880,20 @@ describe('第 15 轮补充：出口异常、鉴权前置、键上限（真实 HT
   });
 
   test('(e2) 先 res.write 再 res.json：只能记「已完成、无体」，绝不回放从未发出的 JSON', async () => {
+    const { waitFor } = require('../helpers/waitFor');
     const key = 'sup-mixed-' + stamp16();
     const first = await post('mixed', {}, key);
     expect(first.text).toBe('partial-only');
     const keyHash = keyHashOf('mixed', key);
+    // 完成态落库是响应后的 fire-and-forget 写（b820c32 同判例）：随机序下 load 高，
+    // 立即 findOne 会读到 in_progress——轮询到 completed 再断言
+    await waitFor(
+      async () => {
+        const rec = await IdempotencyRecord.findOne({ keyHash }).lean();
+        return Boolean(rec) && rec.state === 'completed';
+      },
+      { timeoutMs: 4000, label: 'mixed 响应收敛为 completed' }
+    );
     const rec = await IdempotencyRecord.findOne({ keyHash }).lean();
     expect(rec && rec.state).toBe('completed');
     expect(rec && rec.replayOmitted).toBe(true);
