@@ -21,7 +21,7 @@ flowchart TB
     MW["中间件链：requestId → metrics → Sentry → IP黑名单 → CORS →\n安全头/限流/查询防护 → morgan → auditLog"]
     Routes["路由（16）：auth / user / role / permission / device /\nalarm / inspection / report / security / avatar / version / wellKnown /\nforensic / stuffingProfile / attackProfile / attackEvent"]
     Ctrl["控制器（16）：auth / user / security / role / permission /\ndevice / alarm / inspection / report / audit / avatar / mfa /\nipList / privilege / rolePermission / forensic"]
-    Svc["服务层（111）：sessionService / userPermissionService /\ncaptchaService / auditBuffer / auditMonitor / statsCache / securityAlert /\nDevice·Alarm·Inspection Service 等（另有 authService / websocketService /\ninitData / sharedCache 子目录）"]
+    Svc["服务层（112）：sessionService / userPermissionService /\ncaptchaService / auditBuffer / auditMonitor / statsCache / securityAlert /\nDevice·Alarm·Inspection Service 等（另有 authService / websocketService /\ninitData / sharedCache 子目录）"]
     Utils["工具：loginCipher / auditChain / encryption /\nlogger(winston) / response 封装"]
     Models["Mongoose 模型（18）"]
   end
