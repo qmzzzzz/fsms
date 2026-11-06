@@ -188,8 +188,9 @@ describe('批量审计写路径：串链前的预铸造闸', () => {
     } catch (_) {
       /* ignore */
     }
-    if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
-    // 本文件在 require 前设的上限不能泄给同一 worker 里的后续文件（testMatch 顺序不定）
+    // 连接关闭上移到**文件级** afterAll（本文件底部）：A7 describe 在本 describe
+    // 之后运行且其 flush 需要装载链尾（查库），这里关连接会让 A7 的批次静默回缓冲
+    // （insertMany spy 收空）。env 归还同理上移。
     delete process.env.AUDIT_FLUSH_BATCH_SIZE;
   });
 
@@ -413,12 +414,19 @@ describe('A7：flush 单轮批次上限（splice 截断，余量留待下一轮�
   // 批次上限改为每次 flush 现读（模块加载读定会被随机序下先 require 的套件钉死），
   // 本 describe 的上限值因此必须**自管**：文件级 :33 的设置在上方 describe 的
   // afterAll（:193 防泄漏清理）里已被删除，不能依赖。
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.AUDIT_FLUSH_BATCH_SIZE = '120';
-    // 链僵尸冻结是 worker 级跨文件状态（auditBufferZombie 类套件 freeze 后不随套件
-    // 复位）：冻结窗口内本用例的 flush 被 isChainFrozen 整体跳过 ⇒ insertMany spy
-    // 收空数组（seed 31337 实测 [100] 变 []）。A7 量的是 splice 截断，必须解冻。
+    // 链僵尸冻结与链锁挂起队列都是 worker 级跨文件状态（auditBufferZombie 类套件
+    // freeze/持锁后不随套件复位）：冻结窗口内 flush 被整体跳过、挂起队列让本套件的
+    // flush 无限排队 ⇒ insertMany spy 收空数组（seed 31337 实测 [100] 变 []）。
+    // A7 量的是 splice 截断，两者都必须归零。
     require('../../utils/auditChainFence').reset();
+    require('../../utils/auditChain').__resetForTest();
+    // flush 装载链尾要查库：同 worker 前序套件可能已关连接（其 afterAll 的
+    // 文件级收尾），且 -t 过滤下首个 describe 的 beforeAll（重连点）不运行
+    if (mongoose.connection.readyState === 0) {
+      await mongoose.connect(process.env.MONGODB_URI);
+    }
   });
   afterAll(() => {
     delete process.env.AUDIT_FLUSH_BATCH_SIZE;
@@ -452,4 +460,18 @@ describe('A7：flush 单轮批次上限（splice 截断，余量留待下一轮�
       insertSpy.mockRestore();
     }
   });
+});
+
+// ===== 文件级收尾（2026-11-07 自首个 describe 的 afterAll 上移）=====
+// 连接关闭与 env 归还是**文件级**职责：A7 describe 在首个 describe 之后运行，
+// 其 flush 需要查库装载链尾——在 describe 级关连接会让 A7 的批次静默回缓冲。
+afterAll(async () => {
+  try {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  } catch (_) {
+    /* ignore */
+  }
+  if (mongoose.connection.readyState !== 0) await mongoose.connection.close();
+  // 本文件在 require 前设的上限不能泄给同一 worker 里的后续文件（testMatch 顺序不定）
+  delete process.env.AUDIT_FLUSH_BATCH_SIZE;
 });

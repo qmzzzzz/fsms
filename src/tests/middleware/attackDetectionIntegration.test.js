@@ -67,16 +67,20 @@ describe('攻击检测面 · 真实链路集成', () => {
     delete process.env.SCAN_404_WINDOW_MS;
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     require('../../services/scanProbeDetector').resetScanProbeDetector();
     require('../../services/injectionDetector').resetInjectionDetector();
     // 链僵尸冻结是 worker 级跨文件泄漏：随机序下先跑的套件（auditBufferZombie 类）
     // 触发 freeze 后不随套件复位，本套件 waitForRow 里的主动 flush 会被
     // isChainFrozen 整窗跳过 ⇒ storm/注入行永远落不了库（seed 31337/777001 实测 ⑤ 0 行）。
+    // auditChain.__resetForTest 连带复位链锁挂起队列与 flushing 旗标（同类泄漏）。
     require('../../utils/auditChainFence').reset();
-    // flushing 旗标同理跨文件泄漏（前序套件 flush 挂起不复位 ⇒ 后续 flush 全部
-    // no-op，审计行 0 条）：__resetForTest 已扩展为连带复位 flushing/inFlightCount
+    require('../../utils/auditChain').__resetForTest();
     require('../../services/auditBuffer').__resetForTest();
+    // flush 装载链尾要查库：同 worker 前序套件的文件级收尾可能已关连接
+    if (mongoose.connection.readyState === 0) {
+      await mongoose.connect(process.env.MONGODB_URI);
+    }
   });
 
   afterEach(async () => {
