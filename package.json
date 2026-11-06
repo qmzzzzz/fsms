@@ -82,7 +82,7 @@
   "devDependencies": {
     "@eslint/js": "^9.39.5",
     "@playwright/test": "^1.64.1",
-    "eslint": "^10.13.0",
+    "eslint": "^10.14.0",
     "exceljs": "^4.4.0",
     "jest": "^30.5.2",
     "mongodb-memory-server": "^11.3.0",
