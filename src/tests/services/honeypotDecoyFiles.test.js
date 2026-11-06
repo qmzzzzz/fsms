@@ -148,6 +148,14 @@ describe('蜜罐文件/导出类端点（P1c）：合成 xlsx、逐字拒绝与�
   // 本用例要求「本进程里这条蜜罐账户还没有探测记录」：节流表清空已由 beforeEach 负责，
   // 因此不再依赖文件内顺序（原注释「必须排在最前」是在没有重置钩子时的权宜）。
   test('留痕分级：只读探测 high、未脱敏导出 POST critical，路径与判定入 honeypot_probe', async () => {
+    // 每用例自建初始状态（--randomize 纪律）：同 path 的行会被本文件其他用例以不同
+    // 参数写成不同 verdict，而下方 byPath 的 Map 以 method+path 去重取**最后一条**——
+    // 用例顺序一打乱，兄弟用例的旧行就会覆盖本用例的行（seed 777001 实测 decoy 变 deny）。
+    // 先清本账户的探测行，baseline 归零，byPath 只含本用例自己的三行。
+    await AuditLog.deleteMany(
+      { action: 'honeypot_probe', username: honeypotName },
+      { bypassAppendOnly: true } // append-only 集合的测试期清理必须显式越权（仓内先例同款）
+    );
     const baseline = await AuditLog.countDocuments({
       action: 'honeypot_probe',
       username: honeypotName,

@@ -415,6 +415,10 @@ describe('A7：flush 单轮批次上限（splice 截断，余量留待下一轮�
   // afterAll（:193 防泄漏清理）里已被删除，不能依赖。
   beforeAll(() => {
     process.env.AUDIT_FLUSH_BATCH_SIZE = '120';
+    // 链僵尸冻结是 worker 级跨文件状态（auditBufferZombie 类套件 freeze 后不随套件
+    // 复位）：冻结窗口内本用例的 flush 被 isChainFrozen 整体跳过 ⇒ insertMany spy
+    // 收空数组（seed 31337 实测 [100] 变 []）。A7 量的是 splice 截断，必须解冻。
+    require('../../utils/auditChainFence').reset();
   });
   afterAll(() => {
     delete process.env.AUDIT_FLUSH_BATCH_SIZE;
