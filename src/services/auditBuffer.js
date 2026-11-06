@@ -6,9 +6,8 @@
  * 【WAL 兜底（G4）】WAL 文件层已拆至 services/auditBufferWal.js（O-3 体积棘轮）：本模块保留内存
  * 缓冲、批量落库与进程生命周期。push 同步追加 WAL 行；flush 成功后按该批 `__walSeq` 精确移除
  * 对应行（F-97：按落库条数裁前 N 行，有空洞时会误删未落库行）；崩溃后 start() 重放残留。
- * 【批次上限（A7）】flush 单轮最多 MAX_FLUSH_BATCH 条（默认 1000，env 钳制 [100,5000]）：
- * 15s 链锁 TTL 内十 MB 级 insertMany 必然超时，超时僵尸批次回退后下一轮只会更大——正反馈
- * 直撞 isChainFrozen 冻结跳过分支。完整论证见 docs/audit-buffer.md。
+ * 【批次上限（A7）】flush 单轮上限现读 AUDIT_FLUSH_BATCH_SIZE（默认 1000，钳 [100,5000]）：
+ * 15s 链锁 TTL 内十 MB 级 insertMany 必超时→僵尸批次回退后下一轮更大——正反馈直撞冻结。
  */
 
 const mongoose = require('mongoose');
@@ -43,7 +42,7 @@ const FLUSH_INTERVAL_MS = 2000;
 // AUDIT_BUFFER_HARD_LIMIT=-1 会原样生效，令 enforce 分支 `length <= -1` 恒不成立、
 // `overflow = length + 1`，于是每次 push 都把整个缓冲 splice 掉（实测：push 5 条丢 10 条），
 // 审计记录停止落库却只有 WAL 残留。改为统一判据：只采纳有限正整数，否则回落默认并告警。
-const { readPositiveNumberEnv, readClampedIntEnv } = require('../utils/envNumber');
+const { readPositiveNumberEnv } = require('../utils/envNumber');
 const BUFFER_HARD_LIMIT = readPositiveNumberEnv('AUDIT_BUFFER_HARD_LIMIT', 10000, {
   integer: true,
   onInvalid: (name, raw, d) =>
@@ -290,21 +289,9 @@ function handleFlushFailure(err, docs) {
  *   会把这条告警误读成噪音，进而掩盖真实篡改——方向恰好写反了。
  * 落库失败则文档回到缓冲重试（at-least-once；WAL 行保留至成功后再裁剪）。
  */
-// flush 单轮批次上限（A7，成因见文件头"批次上限"段）：越界/非法一律回退 1000（不钳到边界，
-// 越界配置本身就是错配）。**每次 flush 现读**而非模块加载读定——模块级常量会让"谁先
-// require 谁定值"，随机序下先跑的套件设过 env 就钉死后续所有套件的批次上限
-// （seed 31337 实测：A7 用例自己设 120 的 env 被先前套件的模块加载次序吞掉）。
-// 非法值告警按原值去重，仍然天然只发生一次。
-const warnedRawEnv = new Set();
-const warnBadEnvValue = (name, raw) => {
-  const key = `${name}=${raw}`;
-  if (warnedRawEnv.has(key)) return;
-  warnedRawEnv.add(key);
-  logger.warn(`${name}=${raw} 非法，已回退默认值`);
-};
-function flushBatchLimit() {
-  return readClampedIntEnv('AUDIT_FLUSH_BATCH_SIZE', 1000, [100, 5000], warnBadEnvValue);
-}
+// flush 单轮批次上限（A7）：现读实现抽到叶子模块 auditFlushBatchLimit——
+// 模块级常量会让"谁先 require 谁定值"（随机序陷阱），叶子内注释载明成因。
+const { flushBatchLimit } = require('./auditFlushBatchLimit');
 
 async function flush() {
   if (flushing || buffer.length === 0) return;

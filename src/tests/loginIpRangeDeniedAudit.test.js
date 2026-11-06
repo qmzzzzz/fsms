@@ -74,10 +74,7 @@ describe('ip_range_denied 分支的审计落库与降级臂', () => {
     });
     created.push(u._id);
 
-    const out = await authService.loginUser(
-      { username: u.username, password: PASSWORD },
-      ctx()
-    );
+    const out = await authService.loginUser({ username: u.username, password: PASSWORD }, ctx());
     expect(out.outcome).toBe('INVALID_CREDENTIALS');
 
     await waitFor(
@@ -101,9 +98,9 @@ describe('ip_range_denied 分支的审计落库与降级臂', () => {
     });
     created.push(u._id);
 
-    const rejectSpy = jest.spyOn(AuditLog, 'record').mockRejectedValueOnce(
-      new Error('audit db down')
-    );
+    const rejectSpy = jest
+      .spyOn(AuditLog, 'record')
+      .mockRejectedValueOnce(new Error('audit db down'));
     const out = await authService.loginUser(
       { username: u.username, password: PASSWORD },
       ctx({ ip: '203.0.113.78' })

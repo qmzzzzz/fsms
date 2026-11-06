@@ -37,14 +37,12 @@ describe('registerUser 的 create 撞键归一臂（DUPLICATE）', () => {
   });
 
   test('判重通过但 create 撞 username_ci 唯一索引 ⇒ outcome=DUPLICATE（不冒泡 500）', async () => {
-    const createSpy = jest
-      .spyOn(User, 'create')
-      .mockRejectedValueOnce(
-        Object.assign(new Error('E11000 duplicate key error collection users index username_ci_1'), {
-          code: 11000,
-          keyPattern: { username_ci: 1 },
-        })
-      );
+    const createSpy = jest.spyOn(User, 'create').mockRejectedValueOnce(
+      Object.assign(new Error('E11000 duplicate key error collection users index username_ci_1'), {
+        code: 11000,
+        keyPattern: { username_ci: 1 },
+      })
+    );
 
     const out = await registerUser(
       {

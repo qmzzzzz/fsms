@@ -37,10 +37,7 @@ const { readPositiveNumberEnv } = require('../utils/envNumber');
 const KNOWN_SCANNER_UA_RE =
   /(?:sqlmap|nmap|masscan|nikto|wpscan|hydra|dirb|dirbuster|gobuster|wfuzz|ffuf|acunetix|nessus|openvas|zgrab|whatweb|w3af|arachni|metasploit|burp)/i;
 
-// 风暴阈值：40 次/5 分钟（env 可覆盖，非法值 error 后回落——readPositiveNumberEnv 惯例）。
-// **事件时现读**而非模块加载读定：模块常量会让"谁先 require 谁定值"——随机序下
-// 先被加载（未设 env）就把阈值钉死在默认 40，后跑的集成套件压到 5 也拧不动
-// （seed 31337 实测：⑤ 风暴用例 0 行）。非法值告警按原值去重，不会逐请求刷屏。
+// 风暴阈值：事件时现读——模块常量会被先 require 的套件锁死默认值（seed 31337 实测）。
 const warnedRawEnv = new Set();
 const readScanEnv = (name, fallback, opts) =>
   readPositiveNumberEnv(name, fallback, {
