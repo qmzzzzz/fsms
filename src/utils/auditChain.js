@@ -133,8 +133,7 @@ function invalidEnvWarning(name, raw, fallback) {
 // 所有审计记录降级为 legacy（无 hash）落库——防篡改承诺整体失效，
 // 而日志里只会看到一条条"锁持有超时"，看不出根因是配置笔误。
 // 现与 swagger/config/retention 同一口径：只接受有限正数，否则回落默认并告警。
-// 读取为**每次 withChainLock 现读**（2026-11-07）：模块常量会让先 require 者定值，
-// 僵尸套件压到 150ms 就钉死同 worker 后续套件的链锁（seed 31337 实测）。
+// 读取为每次现读（2026-11-07）：模块常量会让先 require 者定值钉死后续套件（31337 实测）。
 const chainLockTimeoutMs = () =>
   readPositiveNumberEnv('AUDIT_CHAIN_LOCK_TIMEOUT_MS', 15000, {
     onInvalid: invalidEnvWarning,
