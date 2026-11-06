@@ -51,6 +51,15 @@ module.exports = {
 
   coverageDirectory: 'coverage',
 
+  // babel/istanbul 插桩（默认 v8）：v8 的 istanbul 重映射在多 worker 合并时会出现
+  // **臂错位与幻影函数条目**——同一文件单独跑覆盖良好、全量跑却报从未被执行的
+  // 分支/函数（2026-11-07 实测：sanitize 的 getter-throw/物化-throw 两臂单独跑
+  // 覆盖、全量跑归零；login.js 出现 decl 落在解构语句上的不可覆盖"函数"）。
+  // 这类假象直接顶翻逐文件阈值（±1pt 余量的文件必红）。babel 插桩确定性归一，
+  // 代价是插桩变慢（全量 coverage 约 +50% 插桩时间，仍在 CI 45 分钟窗内）。
+  // babel-plugin-istanbul 为 jest 既有传递依赖，非新增。
+  coverageProvider: 'babel',
+
   // lcov 供 CI codecov 上传（T-3 硬门禁），缺了它门禁形同虚设
   coverageReporters: ['text-summary', 'text', 'lcov'],
 
