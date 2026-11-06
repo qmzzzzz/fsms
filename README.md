@@ -175,7 +175,7 @@ npm run dev             # 默认监听 127.0.0.1:3001，/api 自动代理到后�
 - 文档页面：`http://localhost:3000/api-docs`
 - 原始规范：`http://localhost:3000/api-docs.json`（OpenAPI 3.0）
 
-涵盖 11 个模块共 118 个接口（97 个 path / 118 个 operation）——模块数 = `src/docs/openapi.json` 的 `spec.tags` 声明条数（现算对齐，由 `src/tests/docs/openapiTagDeclaration.test.js` 钉住），支持在线调试（需先通过 `/api/auth/login` 获取 token 并在页面右上角 Authorize 中填入）。
+涵盖 11 个模块共 129 个接口（108 个 path / 129 个 operation）——三个数字都现读 `src/docs/openapi.json` 对账（模块数 = `spec.tags` 条数，path/operation = 产物实数），由 `src/tests/docs/openapiTagDeclaration.test.js` 钉住（加端点时 README 与产物同红同绿），支持在线调试（需先通过 `/api/auth/login` 获取 token 并在页面右上角 Authorize 中填入）。
 
 **安全说明**：生产环境默认关闭 API 文档，需显式设置 `ENABLE_API_DOCS=true` 才会暴露。开启后**必须**设置 `DOCS_USERNAME` 和 `DOCS_PASSWORD`（缺任一项启动校验即失败，不是运行期可选），并在网络层限制仅内网 / VPN 访问。
 

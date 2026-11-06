@@ -51,10 +51,25 @@ describe('OpenAPI 分组声明闸（spec.tags ⊇ 用到的 tag）', () => {
     expect(declared.filter((t) => !used.has(t)).sort()).toEqual([]);
   });
 
-  test('③ README 的模块数 = spec.tags 条数（数字现读产物，只能一起变）', () => {
+  test('③ README 的三个数字 = spec 现读实数（模块数/path/operation，只能一起变）', () => {
     const readme = fs.readFileSync(README_FILE, 'utf8');
-    const m = /涵盖 (\d+) 个模块共/.exec(readme);
-    if (!m) throw new Error('README.md 里找不到「涵盖 N 个模块共」的计数句式');
+    const m = /涵盖 (\d+) 个模块共 (\d+) 个接口（(\d+) 个 path \/ (\d+) 个 operation）/.exec(
+      readme
+    );
+    if (!m) throw new Error('README.md 里找不到「涵盖 N 个模块共 N 个接口（N 个 path / N 个 operation）」的计数句式');
+    // 三个数字逐一与产物对账：此前只钉模块数，path/operation 各漂 9 都无人看
+    // （审计 H6：README 写 97/118、实测 106/127，"由测试钉住"的措辞只在模块数上成立）
+    let pathCount = 0;
+    let operationCount = 0;
+    for (const pathKey of Object.keys(spec.paths)) {
+      pathCount += 1;
+      for (const method of Object.keys(spec.paths[pathKey])) {
+        operationCount += 1;
+      }
+    }
     expect(Number(m[1])).toBe(declared.length);
+    expect(Number(m[2])).toBe(operationCount);
+    expect(Number(m[3])).toBe(pathCount);
+    expect(Number(m[4])).toBe(operations);
   });
 });
