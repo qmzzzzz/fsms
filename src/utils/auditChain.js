@@ -538,9 +538,8 @@ function chainBatch(docs, startPrevHash) {
 
 /**
  * 仅供测试重置内部状态（生产不调用）——与 auditBuffer.__resetForTest 同惯例。
- * chainLock 一并重置（2026-11-07 推翻旧口径）：promise 与 release 各自绑定，替换
- * 模块变量不会让旧 release 解到新锁；前序套件的挂起队列曾让后续 flush 无限排队
- * （seed 31337 实测），并发由 fence.check() 兜底。
+ * chainLock 一并重置（2026-11-07 推翻旧口径）：promise 与 release 各自绑定，替换模块
+ * 变量不会让旧 release 解到新锁；前序套件的挂起队列曾让后续 flush 无限排队（31337 实测）。
  */
 function __resetForTest() {
   chainLock = Promise.resolve();
