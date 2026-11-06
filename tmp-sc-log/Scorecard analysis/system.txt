@@ -1,9 +1,0 @@
-2026-11-03T06:45:59.5630000Z Evaluating analysis.if
-2026-11-03T06:45:59.5630000Z Evaluating: (success() && ((github.event.repository.default_branch == github.ref_name)))
-2026-11-03T06:45:59.5630000Z Expanded: (true && ('main' == 'main'))
-2026-11-03T06:45:59.5630000Z Result: true
-2026-11-03T06:45:59.5640000Z Requested labels: ubuntu-latest
-2026-11-03T06:45:59.5640000Z Job defined at: qmzzzzz/fsms/.github/workflows/scorecard.yml@refs/heads/main
-2026-11-03T06:45:59.5640000Z Waiting for a runner to pick up this job...
-2026-11-03T06:45:59.8170000Z Job is about to start running on the hosted runner: GitHub Actions 1000003158
-2026-11-03T06:45:59.8160000Z Job is waiting for a hosted runner to come online.
