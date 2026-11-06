@@ -119,6 +119,10 @@ const EXEMPT_MODULES = {
   // 登记进清单会让启动期对运维说「多实例部署时导出并发上限会失效」——那是假警报。
   'services/exportConcurrency.js':
     'warned：warnOnce 的日志去重簿，按设计逐进程各一份，无跨进程语义',
+  // warnedRawEnv：批次上限非法值告警的去重簿（与 exportConcurrency 的 warned 同族）：
+  // 只记「这条越界告警已经打过」，跨实例不一致的后果仅是日志多一条或少一条。
+  'services/auditFlushBatchLimit.js':
+    'warnedRawEnv：非法值告警去重簿，按设计逐进程各一份，无跨进程语义',
   'services/sharedCache/memoryStore.js':
     '共享缓存基础设施自身（memStore 是 Redis 未就绪时的回退实现，2026-10-19 拆分随迁）',
   'services/sharedCache/invalidation.js':
