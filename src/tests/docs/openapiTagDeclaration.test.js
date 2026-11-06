@@ -66,9 +66,7 @@ describe('OpenAPI 分组声明闸（spec.tags ⊇ 用到的 tag）', () => {
     let operationCount = 0;
     for (const pathKey of Object.keys(spec.paths)) {
       pathCount += 1;
-      for (const method of Object.keys(spec.paths[pathKey])) {
-        operationCount += 1;
-      }
+      operationCount += Object.keys(spec.paths[pathKey]).length;
     }
     expect(Number(m[1])).toBe(declared.length);
     expect(Number(m[2])).toBe(operationCount);
