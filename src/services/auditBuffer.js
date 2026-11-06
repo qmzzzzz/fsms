@@ -612,11 +612,8 @@ function __resetForTest() {
   buffer.length = 0;
   droppedCount = 0;
   consecutiveFailures = 0;
-  // flushing/inFlightCount 一并复位（2026-11-07 修订，推翻上面的旧口径）：
-  // 随机序下前序套件的 flush 若永不收敛（挂起/被 mock 截断，finally 不执行），
-  // flushing=true 会让**同 worker 后续所有套件**的 flush 静默 no-op——
-  // precastGate 的 insertMany 收空、攻击检测的审计行不落库（三个 seed 各自复现）。
-  // 两旗标同步清零保持口径一致；测试里"真在途"的轮次由 __waitForFlushIdle 先行等待。
+  // flushing/inFlightCount 一并复位（2026-11-07 推翻"同生死不重置"旧口径）：前序套件
+  // 的 flush 挂起不复位时，同 worker 后续套件的 flush 全部静默 no-op（三 seed 实测）。
   flushing = false;
   inFlightCount = 0;
   wal.resetCounters();
