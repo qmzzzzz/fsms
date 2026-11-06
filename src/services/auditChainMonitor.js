@@ -171,7 +171,7 @@ async function dispatchChainAlert(hasBreaks, message, report, gapCount) {
 /**
  * hash_stripped 的运维面指认（待裁定 #19 选项②：只改告警文案，不动 `intact` 判定）。
  *
- * 为什么值得单独一句：`hash_stripped` 与「链锁降级窗口」**数据形态相同**—— 分布式锁拿不到时该批同样无哈希落库、同样位于带哈希记录之后（utils/auditChain.js:220 抛错走降级 ⇒ auditBuffer 回退重试）。告警原文只报
+ * 为什么值得单独一句：`hash_stripped` 与「链锁降级窗口」**数据形态相同**—— 分布式锁拿不到时该批同样无哈希落库、同样位于带哈希记录之后（utils/auditChain.js:227 抛错走降级 ⇒ auditBuffer 回退重试）。告警原文只报
  * `type=hash_stripped=N`，读者按字面读成"有人抹了哈希"，而这两类的运维动作完全不同。
  *
  * 为什么**不加可判别标记**（选项①）：标记与 `hash` 同层、同一个 DB 写权限可达，能 `$unset` hash 的内部人同样能伪造/抹掉标记，区分度是假的。
