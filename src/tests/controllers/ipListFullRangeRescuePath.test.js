@@ -192,6 +192,21 @@ describe('全网段黑名单必须先有可用的救援路径', () => {
   test('缺救援路径的拒绝要留可检索的痕迹（否则事后只能说「好像有人试过」）', async () => {
     const res = await addFullRangeBlack();
     expect(res.status).toBe(400);
+    // 留痕是 fire-and-forget 审计写（b820c32 同判例）：响应先回、行异步落库，
+    // 随机序高负载下立即 findOne 会读到 null——轮询到真实条件成立再断言细节
+    const { waitFor } = require('../helpers/waitFor');
+    await waitFor(
+      async () => {
+        const audit = await AuditLog.findOne({
+          action: 'privilege_escalation',
+          'body.ip': FULL_RANGE,
+          success: false,
+          riskFactors: 'full_range_cidr_no_rescue_path',
+        }).lean();
+        return Boolean(audit);
+      },
+      { label: 'full_range 拒绝痕迹落库' }
+    );
     const audit = await AuditLog.findOne({
       action: 'privilege_escalation',
       'body.ip': FULL_RANGE,

@@ -70,6 +70,10 @@ describe('攻击检测面 · 真实链路集成', () => {
   beforeEach(() => {
     require('../../services/scanProbeDetector').resetScanProbeDetector();
     require('../../services/injectionDetector').resetInjectionDetector();
+    // 链僵尸冻结是 worker 级跨文件泄漏：随机序下先跑的套件（auditBufferZombie 类）
+    // 触发 freeze 后不随套件复位，本套件 waitForRow 里的主动 flush 会被
+    // isChainFrozen 整窗跳过 ⇒ storm/注入行永远落不了库（seed 31337/777001 实测 ⑤ 0 行）。
+    require('../../utils/auditChainFence').reset();
   });
 
   afterEach(async () => {

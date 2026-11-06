@@ -58,8 +58,14 @@ process.env.RATE_LIMIT_IP_MAX_REQUESTS = '100000';
 process.env.RATE_LIMIT_IP_WINDOW_MS = '900000';
 process.env.TRUST_PROXY_HOPS = '1';
 
-const countViolationsFor = (path) =>
-  require('../../models/AuditLog').countDocuments({ action: VIOLATION_ACTION, path });
+const countViolationsFor = (path, ip) =>
+  require('../../models/AuditLog').countDocuments(
+    // ip 过滤是**跨文件隔离键**：兄弟套件 earlyRejectionRateLimited 的洪水不带 XFF
+    // （其行 ip=socket 对端），与本套件的 10.7x/10.8x/10.9x 段天然不同源——随机序下
+    // 两个 worker 共写同一审计集合时，(action, path) 二元组不再足以圈住本套件自己的行
+    // （seed 20260917 实测：/api-docs 增量 3 变 4）。
+    ip === undefined ? { action: VIOLATION_ACTION, path } : { action: VIOLATION_ACTION, path, ip }
+  );
 
 // 等该 path 的异步落库**静默**后再取数：recordViolation 用 setImmediate 投递，create 还要过全局链锁。
 // 只"等到达到预期值"会单向假绿——先到的 MAX 条就让计数满足，后到的漏判永远看不见。
@@ -69,10 +75,10 @@ const countViolationsFor = (path) =>
 // (action, path) 会被本文件**多条**用例写入（GET 探针用例期望 0 条、TRACE 探针用例期望 MAX 条），
 // 绝对计数等于把前置状态写成一条有序用例——`--randomize` 下三个 seed 各自复现过 1 红
 // （见台账 §91.9 / F-112 / F-185 同一类）。增量不削弱设防：探针真的开始写审计时 before≠after 立刻红。
-const settleCount = (path) =>
-  waitForStable(() => countViolationsFor(path), {
+const settleCount = (path, ip) =>
+  waitForStable(() => countViolationsFor(path, ip), {
     intervalMs: 150,
-    label: `协议违规审计落库条数静默（${path}）`,
+    label: `协议违规审计落库条数静默（${path}${ip ? ` @ ${ip}` : ''}）`,
   });
 
 describe('限流挂载范围覆盖全部对外表面', () => {
@@ -94,7 +100,7 @@ describe('限流挂载范围覆盖全部对外表面', () => {
 
   test.each(SURFACES)('%s：协议违规洪水先撞 429，链上写入被掐到 MAX 条', async (path) => {
     const ip = `10.7${SURFACES.indexOf(path)}.0.1`;
-    const baseline = await settleCount(path);
+    const baseline = await settleCount(path, ip);
     const responses = [];
     for (let i = 0; i < FLOOD; i++) {
       responses.push(await request(app).trace(path).set('X-Forwarded-For', ip));
@@ -109,7 +115,7 @@ describe('限流挂载范围覆盖全部对外表面', () => {
     // ① 拒绝语义没被"限流提前"改掉
     expect(responses[0].body.errors).toMatchObject({ errorCode: 'HTTP_METHOD_UNSUPPORTED' });
     // ③ 只有过闸的 MAX 条产生链上写入，且这条写入通道确实落库过（否则 ③ 是恒真的空集）
-    expect(await settleCount(path)).toBe(baseline + MAX_GENERAL);
+    expect(await settleCount(path, ip)).toBe(baseline + MAX_GENERAL);
   });
 
   // 静态前端面（SPA 文档 + 构建产物）走**安全方法**时必须一条 429 都不吃。
@@ -137,7 +143,7 @@ describe('限流挂载范围覆盖全部对外表面', () => {
 
   test(`${PROBE}：探针不被限流吃掉，也不产生审计写入`, async () => {
     const ip = '10.79.0.1';
-    const baseline = await settleCount(PROBE);
+    const baseline = await settleCount(PROBE, ip);
     const responses = [];
     for (let i = 0; i < FLOOD; i++) {
       responses.push(await request(app).get(PROBE).set('X-Forwarded-For', ip));
@@ -145,7 +151,7 @@ describe('限流挂载范围覆盖全部对外表面', () => {
     // 容器/部署门禁以 127.0.0.1 高频探测：全站挂载后若漏了 skip，这里必红，
     // 且红法恰好是"对完全健康的新版本恒红并自动回滚"
     expect(responses.map((r) => r.status)).toEqual(new Array(FLOOD).fill(200));
-    expect(await settleCount(PROBE)).toBe(baseline);
+    expect(await settleCount(PROBE, ip)).toBe(baseline);
   });
 
   // ④ 的第二个齿：清单里**每一个**探针都要过这两道，且必须钉住"闸门与限流器读同一份
@@ -159,7 +165,7 @@ describe('限流挂载范围覆盖全部对外表面', () => {
   test.each(PROBES.map((probe, i) => [probe, `10.9${i}.0.2`]))(
     '%s：GET 探针仍然整体豁免（部署门禁恒红的反向对照）',
     async (probe, ip) => {
-      const baseline = await settleCount(probe);
+      const baseline = await settleCount(probe, ip);
       const responses = [];
       for (let i = 0; i < FLOOD; i++) {
         responses.push(await request(app).get(probe).set('X-Forwarded-For', ip));
@@ -167,14 +173,14 @@ describe('限流挂载范围覆盖全部对外表面', () => {
       const statuses = responses.map((r) => r.status);
       expect(statuses).toEqual(new Array(FLOOD).fill(200));
       expect(statuses).not.toContain(429);
-      expect(await settleCount(probe)).toBe(baseline);
+      expect(await settleCount(probe, ip)).toBe(baseline);
     }
   );
 
   test.each(PROBES.map((probe, i) => [probe, `10.9${i}.0.3`]))(
     '%s：非探针方法按普通表面对待（豁免不含子树与方法维度）',
     async (probe, ip) => {
-      const baseline = await settleCount(probe);
+      const baseline = await settleCount(probe, ip);
       const responses = [];
       for (let i = 0; i < FLOOD; i++) {
         responses.push(await request(app).trace(probe).set('X-Forwarded-For', ip));
@@ -185,7 +191,7 @@ describe('限流挂载范围覆盖全部对外表面', () => {
       expect(statuses.slice(0, MAX_GENERAL)).toEqual(new Array(MAX_GENERAL).fill(405));
       expect(statuses.slice(MAX_GENERAL)).toEqual(new Array(FLOOD - MAX_GENERAL).fill(429));
       expect(responses[FLOOD - 1].body.message).toBe('请求过于频繁，请稍后再试');
-      expect(await settleCount(probe)).toBe(baseline + MAX_GENERAL);
+      expect(await settleCount(probe, ip)).toBe(baseline + MAX_GENERAL);
     }
   );
 });
