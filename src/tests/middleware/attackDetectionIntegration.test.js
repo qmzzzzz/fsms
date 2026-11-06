@@ -74,6 +74,9 @@ describe('攻击检测面 · 真实链路集成', () => {
     // 触发 freeze 后不随套件复位，本套件 waitForRow 里的主动 flush 会被
     // isChainFrozen 整窗跳过 ⇒ storm/注入行永远落不了库（seed 31337/777001 实测 ⑤ 0 行）。
     require('../../utils/auditChainFence').reset();
+    // flushing 旗标同理跨文件泄漏（前序套件 flush 挂起不复位 ⇒ 后续 flush 全部
+    // no-op，审计行 0 条）：__resetForTest 已扩展为连带复位 flushing/inFlightCount
+    require('../../services/auditBuffer').__resetForTest();
   });
 
   afterEach(async () => {
