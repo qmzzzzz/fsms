@@ -68,7 +68,7 @@
     "migrate-mongo": "^14.0.7",
     "mongoose": "^8.0.3",
     "morgan": "^1.12.1",
-    "rate-limit-redis": "^4.3.1",
+    "rate-limit-redis": "^6.0.2",
     "socket.io": "^4.8.4",
     "svg-captcha": "^1.4.0",
     "swagger-ui-express": "^5.0.1",
