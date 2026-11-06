@@ -538,12 +538,9 @@ function chainBatch(docs, startPrevHash) {
 
 /**
  * 仅供测试重置内部状态（生产不调用）——与 auditBuffer.__resetForTest 同惯例。
- * chainLock 一并重置（2026-11-07 修订，推翻"不重置防串扰"的旧口径）：每次
- * withChainLock 创建的 promise 与 release 闭包**各自绑定**——把模块变量替换为
- * 已解决态不会让旧 release 解到新锁，旧持有者照旧 resolve 自己那支（自然消亡）；
- * 而随机序下前序套件遗留的挂起队列会让后续套件的 flush 无限排队
- * （precastGate insertMany 收空、chainResignPrecheck 超时，seed 31337 实测）。
- * 与在飞持有者的并发由 fence.check() 兜底（调用方先 reset 才进得来）。
+ * chainLock 一并重置（2026-11-07 推翻旧口径）：promise 与 release 各自绑定，替换
+ * 模块变量不会让旧 release 解到新锁；前序套件的挂起队列曾让后续 flush 无限排队
+ * （seed 31337 实测），在飞持有者的并发由 fence.check() 兜底。
  */
 function __resetForTest() {
   chainLock = Promise.resolve();

@@ -66,6 +66,9 @@
   "src/services/auditAnchorSink.js": {
     "complexity": 1
   },
+  "src/utils/auditChain.js": {
+    "max-lines": 1
+  },
   "src/services/auditBuffer.js": {
     "max-lines": 1
   },
