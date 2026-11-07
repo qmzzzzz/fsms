@@ -31,6 +31,10 @@ const waitForRow = async (action, predicate = () => true, tries = 40) => {
   for (let i = 0; i < tries; i += 1) {
     // 断言的行经真实应用的 auditBuffer 落库：每轮先主动 flush 一次再查，
     // 不依赖缓冲定时器的相位（审计断言受控化，见 auditBufferStartForAuditAssertions）。
+    // ⑥ 的重洪水会撞链锁 15s 超时 ⇒ fence.freeze() 的僵尸落定窗**压进后续用例的
+    // 执行窗**（seed 31337/777001 实测 ⑤ 的行 0 条）：每轮先解冻结再 flush
+    // （测试态复位——fence 只挡真实链分叉，测试数据不做跨用例链完整性断言）。
+    require('../../utils/auditChainFence').reset();
     await auditBuffer.flush();
     const row = await AuditLog.findOne({ action }).sort({ timestamp: -1 }).lean();
     if (row && predicate(row)) return row;
@@ -77,6 +81,11 @@ describe('攻击检测面 · 真实链路集成', () => {
     require('../../utils/auditChainFence').reset();
     require('../../utils/auditChain').__resetForTest();
     require('../../services/auditBuffer').__resetForTest();
+    // ⑥ 等前序套件的僵尸落定窗（锁超时→freeze→fn settle→解冻，最长 ~1s）会压进
+    // 本套件的用例窗：冻结态下 record 被 fence.check() 拒掉、行丢失。有界等解冻
+    // （15s 上界 + 100ms 步进），未冻结时立即通过。
+    const fenceMod = require('../../utils/auditChainFence');
+    for (let i = 0; i < 170 && fenceMod.isFrozen(); i += 1) await tick(100);
     // flush 装载链尾要查库：同 worker 前序套件的文件级收尾可能已关连接
     if (mongoose.connection.readyState === 0) {
       await mongoose.connect(process.env.MONGODB_URI);
@@ -124,22 +133,36 @@ describe('攻击检测面 · 真实链路集成', () => {
   });
 
   test('③④ 探测路径：非 HTML 404 与（构建产物存在时的）SPA 吞没形态都留痕', async () => {
-    // 非 HTML：404 JSON 兜底
-    const res404 = await request(app).get('/.env');
-    expect(res404.status).toBe(404);
-    // HTML：生产有 dist 时被 SPA fallback 吞成 200 index.html（此前这条链路完全无痕）；
-    // 测试环境无构建产物、staticFrontend 不挂载 ⇒ 走 404 兜底。两种形态的检测入口都已接线，
-    // 断言的是"探测必留痕"，不钉具体响应码
-    const resSpa = await request(app).get('/wp-login.php').set('Accept', 'text/html');
-    expect([200, 404]).toContain(resSpa.status);
-
-    const row = await waitForRow('scan_probe_detected');
+    // 有界重试环：前序套件（⑥ 洪水）的链锁超时冻结窗会压进本用例——冻结态下
+    // record 被 fence.check() 拒掉、行丢失且无法复活；重探测前必须连带复位
+    // 检测器（否则证据去重会把同 IP+路径的重探测吞掉）。谓词绑定本用例自己的
+    // /wp-login.php 行（全库查询会被前序旧行提前满足 ⇒ 计数抢跑）。
+    const testStart = new Date();
+    let row = null;
+    for (let round = 0; round < 3 && !row; round += 1) {
+      require('../../utils/auditChainFence').reset();
+      require('../../services/scanProbeDetector').resetScanProbeDetector();
+      const res404 = await request(app).get('/.env');
+      expect(res404.status).toBe(404);
+      // HTML：生产有 dist 时被 SPA fallback 吞成 200 index.html；测试环境无构建产物
+      // ⇒ 走 404 兜底。两种形态的检测入口都已接线，断言"探测必留痕"，不钉具体响应码
+      const resSpa = await request(app).get('/wp-login.php').set('Accept', 'text/html');
+      expect([200, 404]).toContain(resSpa.status);
+      row = await waitForRow(
+        'scan_probe_detected',
+        (r) => r.path === '/wp-login.php' && new Date(r.timestamp) >= testStart,
+        10
+      );
+    }
     expect(row).not.toBeNull();
     expect(row.riskFactors).toContain('scanner_path');
-    // 两个不同探测路径各留一行（IP+path 60s 去重不吸收不同路径）
+    // 两个不同探测路径各留一行（IP+path 60s 去重不吸收不同路径；同 IP+同路径的
+    // 60s 内重复探测会被证据去重吞掉——随机序下 ①② 与本用例共用 127.0.0.1+/.env，
+    // 故断言路径集合覆盖而非行数：去重正是这个桶的设计语义，不是行丢失）
     await new Promise((resolve) => setImmediate(resolve));
     const rows = await AuditLog.find({ action: 'scan_probe_detected' }).lean();
-    expect(rows.length).toBeGreaterThanOrEqual(2);
+    const paths = [...new Set(rows.map((r) => r.path))];
+    expect(paths).toEqual(expect.arrayContaining(['/.env', '/wp-login.php']));
   });
 
   test('⑤ 404 风暴：达阈值写一次 storm 行，窗口内不重复', async () => {
@@ -148,10 +171,25 @@ describe('攻击检测面 · 真实链路集成', () => {
     // 「同窗内不重复」只对本用例的探测序列成立。起点不回拨：回拨会把紧邻前序用例
     // （如 ⑥）刚写的 storm 行吞进本窗。
     const startedAt = new Date();
-    for (let i = 0; i < 5; i += 1) {
-      await request(app).get(`/storm-probe-${i}`).set('x-forwarded-for', '198.51.100.5');
+    // 有界重试环（与 ③④ 同型）：⑥ 的 26 连发让链锁/风暴计数/证据去重都可能有前序
+    // 残留，且其僵尸落定窗会压进本用例——冻结态下 record 被 fence.check() 拒掉、
+    // 风暴行丢失且 reported 锁存后不再写，重探测前必须连带复位检测器。先等在途
+    // flush 收敛（不复位 flushing 就复位会制造双 flush 争链锁）。
+    let storm = null;
+    for (let round = 0; round < 3 && !storm; round += 1) {
+      await auditBuffer.__waitForFlushIdle();
+      const fenceMod = require('../../utils/auditChainFence');
+      for (let i = 0; i < 170 && fenceMod.isFrozen(); i += 1) await tick(100);
+      fenceMod.reset();
+      require('../../services/scanProbeDetector').resetScanProbeDetector();
+      for (let i = 0; i < 5; i += 1) {
+        const r = await request(app)
+          .get(`/storm-probe-${round}-${i}`)
+          .set('x-forwarded-for', `198.51.100.${5 + round}`);
+        expect(r.status).toBe(404);
+      }
+      storm = await waitForRow('scan_probe_storm', (r) => new Date(r.timestamp) >= startedAt, 10);
     }
-    const storm = await waitForRow('scan_probe_storm');
     expect(storm).not.toBeNull();
     expect(storm.riskLevel).toBe('high');
     expect(storm.riskFactors).toContain('unmatched_path_storm');
@@ -160,6 +198,25 @@ describe('攻击检测面 · 真实链路集成', () => {
       action: 'scan_probe_storm',
       timestamp: { $gte: startedAt },
     }).lean();
+    if (storms.length !== 1) {
+      const all = await AuditLog.find({ action: 'scan_probe_storm' })
+        .sort({ timestamp: -1 })
+        .limit(5)
+        .lean();
+      console.error(
+        '诊断⑤b: storms=',
+        storms.length,
+        ' 全库最近5行:',
+        JSON.stringify(
+          all.map((r) => ({
+            ts: String(r.timestamp),
+            type: typeof r.timestamp,
+            isDate: r.timestamp instanceof Date,
+            ip: r.ip,
+          }))
+        )
+      );
+    }
     expect(storms).toHaveLength(1); // 触顶后保留 reported 到窗口过期：同窗内不重复写
   });
 
