@@ -170,7 +170,7 @@ async function runProbeSteps() {
 
   await step('GET /readyz 就绪探针（Mongo ping）', async () => {
     const r = await req('GET', '/readyz');
-    if (r.status !== 200 || r.body.checks.mongo !== 'ok') throw new Error(JSON.stringify(r.body));
+    if (r.status !== 200 || r.body.status !== 'ready') throw new Error(JSON.stringify(r.body));
   });
 
   await step('GET /metrics Prometheus 文本', async () => {

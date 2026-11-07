@@ -590,7 +590,7 @@ describe('LoginView 回车跳焦链与验证码重试（2026-11-06 收敛批补�
 
   test('验证码状态接口失败：横幅重试按钮再拉一次状态', async () => {
     getCaptchaStatus.mockRejectedValueOnce(new Error('net down'))
-    const c = await open({ captchaEnabled: true })
+    await open({ captchaEnabled: true })
     await flush(8)
     const retry = document.body.querySelector('.login-card__captcha-error .glass-btn')
     expect(retry).toBeTruthy()
