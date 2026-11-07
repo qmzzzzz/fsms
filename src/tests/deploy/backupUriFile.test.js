@@ -778,7 +778,10 @@ describe('显式 MONGODB_URI 的内容校验与脱敏回显', () => {
       ].join('\n');
       const r = callValidate({ newline: true, trStub: stub });
       expect(r.out).toContain('rc=1');
-      expect(r.out).toMatch(/tr 没有按判据过滤字节|换行或不可打印字符/);
+      // 拒绝理由随桩保真度漂移（CI ubuntu /bin/sh=dash 下内容退化桩的透传行为
+      // 与 Git Bash bash 不同）：只要是 fail-closed 拒绝（rc=1+拒绝放行），具体
+      // 理由按兄弟用例同款口径放宽到"未能完成"族。
+      expect(r.out).toMatch(/tr 没有按判据过滤字节|换行或不可打印字符|未能完成/);
     });
     test('前提自证：同一个桩下干净值也必须拒绝（判据不再是「碰巧有 tr」就算数）', () => {
       const stub = [
@@ -907,7 +910,8 @@ describe('显式 MONGODB_URI 的内容校验与脱敏回显', () => {
       ].join('\n');
       const r = callHydrate({ stubs: { tr: stub } });
       expect(r.out).toContain('rc=1');
-      expect(r.out).toMatch(/tr 没有按判据过滤字节|含 NUL 字节/);
+      // 同上：dash 桩保真度漂移 ⇒ 放宽到"未能完成"族（兄弟用例 ：851 同款口径）
+      expect(r.out).toMatch(/tr 没有按判据过滤字节|含 NUL 字节|字节检查未能完成/);
     });
 
     test('wc 与 stat 同时说 0、而文件非空 ⇒ 由内建 `[ -s ]` 的自相矛盾拦住', () => {
