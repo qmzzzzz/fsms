@@ -523,7 +523,9 @@ describe('UserView 列表与筛选', () => {
     await flush(10)
 
     expect(listCalls).toEqual([1, 2, 1]) // 越界被 clamp、且真的重取了第 1 页
-    expect(active.find('.el-loading-mask')).toBe(null) // loading 收敛（无内外层竞争残留）
+    // loading 收敛：遮罩的离场过渡（leave-*)在 CI 负载下晚于 flush 收尾——轮询到
+    // 真实终态（遮罩从 DOM 移除）而不是断言过渡中态（run 296 实测 leave-* 残留红）
+    await waitForDom(() => !active.find('.el-loading-mask'), 'loading 遮罩离场过渡收敛')
     expect(active.findAll('.el-table__body-wrapper .el-table__row').length).toBeGreaterThanOrEqual(
       1
     )

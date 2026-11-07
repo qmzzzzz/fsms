@@ -432,6 +432,12 @@ jobs:
           cache: npm
           cache-dependency-path: web-admin/package-lock.json
 
+      - name: Install root dependencies (backend modules for parity tests)
+        # 跨域 parity 测试（metricsAlertTypesCoverage / privacyNoticeParity /
+        # ipLocationDictionary）经 createRequire 横读后端常量与服务——这些模块
+        # 传递依赖 mongoose/winston，只在根 node_modules 里。先装根依赖再装前端。
+        run: npm ci --ignore-scripts
+
       - name: Install dependencies
         working-directory: web-admin
         # P2：前端树里唯一的安装脚本是 optional/darwin 的 fsevents（Linux 不安装）。
