@@ -42,4 +42,32 @@ describe('AttackEvidenceTable 渲染', () => {
     expect(vm.text()).not.toContain('undefined')
     vm.unmount()
   })
+
+  test('多行异形证据：缺省可选字段不炸、HEAD 方法与 2xx 状态照实投影', async () => {
+    const vm = mountComponent(AttackEvidenceTable, {
+      props: {
+        evidence: [
+          {
+            action: 'honeypot_probe',
+            method: 'HEAD',
+            path: '/api/avatars/hp-u1',
+            status: 200,
+            createdAt: '2026-11-04T00:20:00.000Z',
+          },
+          {
+            action: 'login_failed',
+            method: 'GET',
+            path: '/api/devices',
+            status: 403,
+            username: 'u2',
+            createdAt: '2026-11-04T00:21:00.000Z',
+          },
+        ],
+      },
+    })
+    await flush()
+    expect(vm.findAll('.el-table__row').length).toBe(2)
+    expect(vm.text()).not.toContain('undefined')
+    vm.unmount()
+  })
 })
