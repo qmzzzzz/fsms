@@ -48,7 +48,9 @@ describe('zzqA 认领实现的选择性判据', () => {
   let uid;
   const username = 'zzqa_f85impl';
 
-  const codeFor = (offset = 0) => hotp(base32Decode(secret), CURRENT_WINDOW() + offset);
+  // 窗口由调用方捕获传入：水位与码各自读钟时，30s 边界落在两次读数之间会把
+  // "重放"变成"新鲜窗口"（2026-11-07 CI seed=31337 实测：重放被 200 放行）
+  const codeFor = (window) => hotp(base32Decode(secret), window);
 
   const call = async (fn, body) => {
     const res = makeRes();
@@ -110,8 +112,9 @@ describe('zzqA 认领实现的选择性判据', () => {
 
   describe('1. 失败计数恰好一次', () => {
     test('regenerateRecoveryCodes 重放：mfaFailCount 必须为 1（不是 2）', async () => {
-      await User.findByIdAndUpdate(uid, { mfaLastCounter: CURRENT_WINDOW() });
-      const res = await call('regenerateRecoveryCodes', { mfaCode: codeFor() });
+      const win = CURRENT_WINDOW();
+      await User.findByIdAndUpdate(uid, { mfaLastCounter: win });
+      const res = await call('regenerateRecoveryCodes', { mfaCode: codeFor(win) });
       expect(res.statusCode).not.toBe(200);
       const after = await readState();
       expect(after.mfaFailCount).toBe(1);
@@ -120,7 +123,7 @@ describe('zzqA 认领实现的选择性判据', () => {
     test('mfaDisable 重放：mfaFailCount 必须为 1，且水位与 mfaEnabled 分毫未动', async () => {
       const watermark = CURRENT_WINDOW();
       await User.findByIdAndUpdate(uid, { mfaLastCounter: watermark });
-      const res = await call('mfaDisable', { mfaCode: codeFor() });
+      const res = await call('mfaDisable', { mfaCode: codeFor(watermark) });
       expect(res.statusCode).not.toBe(200);
       const after = await readState();
       expect(after.mfaFailCount).toBe(1);
@@ -154,8 +157,9 @@ describe('zzqA 认领实现的选择性判据', () => {
     });
 
     test('重放：riskFactors 含 mfa_code_replayed 且 riskLevel=high', async () => {
-      await User.findByIdAndUpdate(uid, { mfaLastCounter: CURRENT_WINDOW() });
-      await call('mfaDisable', { mfaCode: codeFor() });
+      const win = CURRENT_WINDOW();
+      await User.findByIdAndUpdate(uid, { mfaLastCounter: win });
+      await call('mfaDisable', { mfaCode: codeFor(win) });
       const failure = sent.find((p) => p.success === false);
       expect(failure).toBeDefined();
       expect(failure.riskFactors).toEqual(['mfa_code_replayed']);
@@ -183,9 +187,9 @@ describe('zzqA 认领实现的选择性判据', () => {
           return real.call(this, filter, update, options);
         });
       try {
-        const r1 = await call('regenerateRecoveryCodes', { mfaCode: codeFor() });
+        const r1 = await call('regenerateRecoveryCodes', { mfaCode: codeFor(CURRENT_WINDOW()) });
         expect(r1.statusCode).not.toBe(200);
-        const r2 = await call('mfaDisable', { mfaCode: codeFor() });
+        const r2 = await call('mfaDisable', { mfaCode: codeFor(CURRENT_WINDOW()) });
         expect(r2.statusCode).not.toBe(200);
 
         const after = await readState();

@@ -59,11 +59,13 @@ describe('MFA 生命周期端点的口令认领语义', () => {
   let uid;
   const username = 'f85';
 
-  const codeFor = (offset = 0) => hotp(base32Decode(secret), CURRENT_WINDOW() + offset);
+  // 窗口由调用方捕获传入：水位与码各自读钟时，30s 边界落在两次读数之间会把
+  // "重放"变成"新鲜窗口"（同族 mfaTotpClaimImplementation 于 2026-11-07 CI 实测红）
+  const codeFor = (window) => hotp(base32Decode(secret), window);
 
   /** 模拟"登录侧刚刚消费掉窗口 W"：原子认领的产物就是水位被推进到 W */
-  const markWindowConsumed = async (offset) => {
-    await User.findByIdAndUpdate(uid, { mfaLastCounter: CURRENT_WINDOW() + offset });
+  const markWindowConsumed = async (window) => {
+    await User.findByIdAndUpdate(uid, { mfaLastCounter: window });
   };
 
   const call = async (fn, body) => {
@@ -122,14 +124,15 @@ describe('MFA 生命周期端点的口令认领语义', () => {
 
   describe('夹具有效性（这些必须是普通断言，不能挂 .failing）', () => {
     test('新鲜窗口的码可以重新生成恢复码（否则下面的"重放被拒"会因环境而红）', async () => {
-      const res = await call('regenerateRecoveryCodes', { mfaCode: codeFor() });
+      const win = CURRENT_WINDOW();
+      const res = await call('regenerateRecoveryCodes', { mfaCode: codeFor(win) });
       expect(errorCode(res)).toBeUndefined();
       expect(res.statusCode).toBe(200);
       expect(Array.isArray(res.body.data.recoveryCodes)).toBe(true);
       expect(res.body.data.recoveryCodes).toHaveLength(10);
-      // 顺带钉住：成功后水位被推进到该窗口
+      // 顺带钉住：成功后水位被推进到该窗口（对捕获值断言，不再读一次钟）
       const after = await User.findById(uid).select('mfaLastCounter');
-      expect(after.mfaLastCounter).toBe(CURRENT_WINDOW());
+      expect(after.mfaLastCounter).toBe(win);
       // 这条投影在下面的重放用例里也会用一次：若选择器取不到值，那三条
       // 会以"没有变化"的形式假绿，所以先在响亮的路径上证明这个投影取得到值。
       const full = await User.findById(uid).select('+mfaRecoveryCodes mfaFailCount');
@@ -138,7 +141,7 @@ describe('MFA 生命周期端点的口令认领语义', () => {
     });
 
     test('新鲜窗口的码可以关闭 MFA', async () => {
-      const res = await call('mfaDisable', { mfaCode: codeFor() });
+      const res = await call('mfaDisable', { mfaCode: codeFor(CURRENT_WINDOW()) });
       expect(errorCode(res)).toBeUndefined();
       const after = await User.findById(uid).select('mfaEnabled');
       expect(after.mfaEnabled).toBe(false);
@@ -165,8 +168,9 @@ describe('MFA 生命周期端点的口令认领语义', () => {
    */
   describe('期望语义：已被登录消费的窗口不得再次生效（认领语义）', () => {
     test('regenerateRecoveryCodes 必须拒绝"水位所在窗口"的码', async () => {
-      await markWindowConsumed(0);
-      const res = await call('regenerateRecoveryCodes', { mfaCode: codeFor() });
+      const win = CURRENT_WINDOW();
+      await markWindowConsumed(win);
+      const res = await call('regenerateRecoveryCodes', { mfaCode: codeFor(win) });
       expect(res.statusCode).not.toBe(200);
       expect(errorCode(res)).toBeDefined();
       // 且旧恢复码不许被换掉（"拒绝"必须是零副作用，不是先改再报）
@@ -177,23 +181,26 @@ describe('MFA 生命周期端点的口令认领语义', () => {
     });
 
     test('mfaDisable 必须拒绝"水位所在窗口"的码', async () => {
-      await markWindowConsumed(0);
-      const res = await call('mfaDisable', { mfaCode: codeFor() });
+      const win = CURRENT_WINDOW();
+      await markWindowConsumed(win);
+      const res = await call('mfaDisable', { mfaCode: codeFor(win) });
       expect(res.statusCode).not.toBe(200);
       const after = await User.findById(uid).select('mfaEnabled');
       expect(after.mfaEnabled).toBe(true); // 冒关未遂：MFA 必须还在
     });
 
     test('低于水位的窗口（旧码）同样不得生效', async () => {
-      await markWindowConsumed(1);
-      const res = await call('regenerateRecoveryCodes', { mfaCode: codeFor(-1) });
+      const win = CURRENT_WINDOW();
+      await markWindowConsumed(win + 1);
+      const res = await call('regenerateRecoveryCodes', { mfaCode: codeFor(win - 1) });
       expect(res.statusCode).not.toBe(200);
     });
 
     test('反向保护：拒绝重放不许把下一个新窗口一起废掉', async () => {
-      await markWindowConsumed(0);
-      await call('regenerateRecoveryCodes', { mfaCode: codeFor() }); // 重放：应被拒
-      const fresh = await call('regenerateRecoveryCodes', { mfaCode: codeFor(1) });
+      const win = CURRENT_WINDOW();
+      await markWindowConsumed(win);
+      await call('regenerateRecoveryCodes', { mfaCode: codeFor(win) }); // 重放：应被拒
+      const fresh = await call('regenerateRecoveryCodes', { mfaCode: codeFor(win + 1) });
       expect(fresh.statusCode).toBe(200);
     });
   });
