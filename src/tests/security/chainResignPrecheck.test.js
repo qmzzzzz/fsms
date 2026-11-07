@@ -35,7 +35,11 @@ const NODE = process.execPath;
 
 const KEY = 'aa'.repeat(32);
 const ACTIONS = ['zzq_a1', 'zzq_a2', 'zzq_a3'];
-const TS = new Date('2026-03-04T05:06:07.000Z');
+// 时间戳必须落在 TTL 留存期内：auditlogs 的 {timestamp:-1} 索引按
+// AUDIT_RETENTION_DAYS（默认 180 天，下限 90）过期清扫，写死的历史日期会被
+// mongod 约 60s 一轮的 TTL sweep 删光（2026-11-07 CI 实证：snapshot 读到 []）。
+// 本文件断言只比较前后快照相等、哈希由 TS 现算，不依赖具体日期，故取加载时刻。
+const TS = new Date();
 // 2026-11-04 起越权旗标必须携带变更单号（=值形态）：放行凭据无据 = 持钥者单方可灭迹，
 // 单号连同预检计数写进 append-only 重签留痕（logs/audit-resign-log.jsonl，已 gitignore）。
 const ALLOW_SUSPECT_TICKET = 'NW-TEST-1';
