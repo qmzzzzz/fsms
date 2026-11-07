@@ -344,8 +344,12 @@ async function main() {
   // disconnected、整体 unready。把「依赖不可达」报成 200 才是探针失效。
   await step('B2. GET /readyz 在 Redis 不可达时如实报 unready（Mongo ok）', async () => {
     const r = await req('GET', '/readyz');
-    const { mongo, redis } = r.body.checks || {};
-    if (r.status !== 503 || r.body.status !== 'unready' || mongo !== 'ok' || redis === 'ok') {
+    // 响应体契约（app.js readyz）：明细只进日志与指标，体里只有聚合结论 status
+    // ——旧断言读 checks.mongo/redis 是历史形态（响应体 18 字节无 checks 键）。
+    // 内存 Mongo 为 standalone ⇒ topology=transactions_degraded 也计入 unready，
+    // 故本步只钉「Redis 不可达 ⇒ 如实 503/unready」；"Mongo ok"由 B3-B8 全链路
+    // 业务请求全部成功自证。
+    if (r.status !== 503 || r.body.status !== 'unready') {
       throw new Error(JSON.stringify(r.body));
     }
   });
