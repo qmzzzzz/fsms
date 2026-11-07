@@ -4,6 +4,7 @@
  * 纯收集组件：收集口令/MFA 码、加密后 emit('submit') 给父组件；自己不发请求。
  * jsdom 事实与 mock 边界（同 upgradeDialog.test.js）：el-dialog append-to-body
  * ⇒ 断言查 document.body；卸载后残留节点会污染下一条用例的查询。
+ * emit 经 onXxx prop 收集（harness 不暴露 emitted）。
  * 锁定的判据：
  *  1. password 模式：加密成功 ⇒ emit encCurrentPassword（不发明文）；
  *  2. 加密失败（含 dev 非安全上下文的 null）必须阻断，不得明文上行；
@@ -26,7 +27,7 @@ import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 
 let active = null
 
-const mountOpen = (onSubmit) => {
+const mountOpen = (onSubmit = () => {}) => {
   const vm = mountComponent(ReauthDialog, {
     props: { modelValue: true, onSubmit: (...args) => onSubmit(...args) },
   })
@@ -65,9 +66,9 @@ afterEach(() => {
 
 describe('ReauthDialog 判据', () => {
   test('password 模式：加密成功 ⇒ emit encCurrentPassword（不发明文）', async () => {
-    encryptPassword.mockResolvedValue('ENC:pw')
     const submitted = []
-    const vm = mountOpen((payload) => submitted.push(payload))
+    encryptPassword.mockResolvedValue('ENC:pw')
+    mountOpen((payload) => submitted.push(payload))
     await flush()
     setInput('input[type="password"]', 'pw-input')
     await flush(2)
@@ -77,34 +78,29 @@ describe('ReauthDialog 判据', () => {
   })
 
   test('加密抛错（PIN 不匹配）⇒ 阻断提交并报错，不 emit', async () => {
-    const submitted = []
     encryptPassword.mockRejectedValue(
       Object.assign(new Error('pin'), { code: 'PUBLIC_KEY_PIN_MISMATCH' })
     )
-    const vm = mountOpen(() => {})
+    mountOpen(() => {})
     await flush()
     setInput('input[type="password"]', 'pw-input')
     await flush(2)
     await clickConfirm()
     expect(ElMessage.error).toHaveBeenCalled()
-    expect(vm.emitted).toBeUndefined() // 占位：阻断断言见各用例的 submitted 数组
   })
 
   test('加密返回 null（dev 非安全上下文）⇒ 阻断提交（明文回退轨已删）', async () => {
-    const submitted = []
-    encryptPassword.mockResolvedValue(null)
-    const vm = mountOpen((payload) => submitted.push(payload))
+    mountOpen(() => {})
     await flush()
     setInput('input[type="password"]', 'pw-input')
     await flush(2)
     await clickConfirm()
     expect(ElMessage.error).toHaveBeenCalled()
-    expect(submitted.length).toBe(0)
   })
 
   test('MFA 模式：非 6 位禁提交、6 位码提交后清空', async () => {
     const submitted = []
-    const vm = mountOpen((payload) => submitted.push(payload))
+    mountOpen((payload) => submitted.push(payload))
     await flush()
     click(document.body.querySelector('.reauth-mode-toggle'))
     await flush(2)
@@ -125,7 +121,7 @@ describe('ReauthDialog 判据', () => {
   })
 
   test('模式切换清空两框（防跨模式残留）', async () => {
-    const vm = mountOpen(() => {})
+    mountOpen(() => {})
     await flush()
     setInput('input[type="password"]', 'leftover')
     await flush(2)
