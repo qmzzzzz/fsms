@@ -922,10 +922,17 @@ describe('第 15 轮补充：出口异常、鉴权前置、键上限（真实 HT
   });
 
   test('(f2) 处理器自己回 403：键被释放，修正后同键重试能成功', async () => {
+    const { waitFor } = require('../helpers/waitFor');
     const key = 'sup-denied-' + stamp16();
     const first = await post('denied', {}, key);
     expect(first.status).toBe(403);
-    expect(await IdempotencyRecord.countDocuments({ keyHash: keyHashOf('denied', key) })).toBe(0);
+    // 释放键是响应后的 fire-and-forget 删（(e2) 同判例）：立即数会读到残留，
+    // 且第二次 post 可能撞在途记录拿 409——轮询到键真的释放再继续
+    await waitFor(
+      async () =>
+        (await IdempotencyRecord.countDocuments({ keyHash: keyHashOf('denied', key) })) === 0,
+      { timeoutMs: 4000, label: 'denied 的键被释放' }
+    );
     const second = await post('denied', {}, key);
     expect(second.status).toBe(403);
     expect(countOf('denied')).toBe(2); // 非 2xx 释放键：这是"可利用的重试"，不是卡死

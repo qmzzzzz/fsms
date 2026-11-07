@@ -48,6 +48,7 @@ vi.mock('element-plus/es/components/message-box/index.mjs', () => ({
 
 import AuditLogView from '@/views/AuditLogView.vue'
 import { ElMessage } from 'element-plus/es/components/message/index.mjs'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { useAuthStore } from '@/store'
 import { clearReauthTicket } from '@/utils/reauthTicket'
 import i18n from '@/i18n'
@@ -330,6 +331,10 @@ afterEach(() => {
   ElMessage.success.mockReset()
   ElMessage.error.mockReset()
   ElMessage.warning.mockReset()
+  // 与 ElMessage 同口径：alert 计数断言（calls.length === 1）在洗牌序下
+  // 会被先行用例的残留调用顶成永不成立（2026-11-07 CI 实证）
+  ElMessageBox.alert.mockReset()
+  ElMessageBox.confirm.mockReset()
   window.localStorage.clear()
   // P2-5 的用例会切到 en-US 验证标签跟随语言：不复位就会泄漏给后续用例
   // （它们默认按 zh-CN 断言），表现为「单跑绿、连跑红」的次序耦合。

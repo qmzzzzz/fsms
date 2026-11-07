@@ -27,6 +27,9 @@ describe('SystemConfig 布尔口径', () => {
       await mongoose.connect(process.env.MONGODB_URI);
     }
     SystemConfig = require('../models/SystemConfig');
+    // --randomize 下 ③ 的并发 upsert 可能首个执行：autoIndex 是后台建索引，
+    // 不等 {key:1} 唯一索引落成，20 个并发 upsert 会双双插入（CI 2026-11-07 实证）
+    await SystemConfig.init();
     for (const key of KEYS) {
       const doc = await SystemConfig.collection.findOne({ key });
       snapshot.set(key, doc);
