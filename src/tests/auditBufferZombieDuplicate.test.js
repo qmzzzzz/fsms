@@ -287,7 +287,9 @@ describe('链锁超时与僵尸写入的重复落库', () => {
     await auditBuffer.flush();
     // flush 里是真实 DB 写：满载机锁预算被打满时 flush 被中断、由僵尸 fn 落库，
     // 落库时刻是异步的（本文件口径：异步落库一律 waitFor，裸读是机器负载假红）
-    expect(await waitFor(async () => (await countTag('mix')) === 2, { label: 'zzombie_mix 落库' })).toBe(true);
+    expect(
+      await waitFor(async () => (await countTag('mix')) === 2, { label: 'zzombie_mix 落库' })
+    ).toBe(true);
     AuditLog.insertMany = realInsertMany;
 
     const stale = realDocs.find((d) => d.username === 'zzombie_mix_0');
@@ -371,7 +373,9 @@ describe('链锁超时与僵尸写入的重复落库', () => {
     for (const d of makeDocs('again', 2)) auditBuffer.push(d);
     await auditBuffer.flush();
     // 同上：真实 DB 写在 150ms 锁预算内可能被中断，落库由僵尸 fn 异步完成，必须 waitFor
-    expect(await waitFor(async () => (await countTag('again')) === 2, { label: 'zzombie_again 落库' })).toBe(true);
+    expect(
+      await waitFor(async () => (await countTag('again')) === 2, { label: 'zzombie_again 落库' })
+    ).toBe(true);
 
     // 同一批对象再走一次慢 flush：本次改动 150ms 被锁超时打断（整批回缓冲），
     // 600ms 才在 catch 里知道"全部早已在库"。撤回必须发生在这个 catch 里——
@@ -444,21 +448,27 @@ describe('链锁超时与僵尸写入的重复落库', () => {
       })
     ).toBe(true);
     let row0 = null;
-    await waitFor(async () => {
-      row0 = await AuditLog.findOne({ username: 'zzombie_half_0' }).lean();
-      return row0 !== null;
-    }, { label: 'zzombie_half_0 落库' });
+    await waitFor(
+      async () => {
+        row0 = await AuditLog.findOne({ username: 'zzombie_half_0' }).lean();
+        return row0 !== null;
+      },
+      { label: 'zzombie_half_0 落库' }
+    );
 
     spy.mockRestore();
     // 定时器已 stop()：flush#2 若同样被锁超时中断，批次留在缓冲里且没有下一轮自动重试，
     // 必须循环 flush 到 row1 落库为止（被中断的僵尸 fn 自己也会落库，两条路都收敛）；
     // 与本文件「★ 慢 insertMany」「★ 僵尸未落定时」两条用例的既有 waitFor 口径一致。
     let row1 = null;
-    await waitFor(async () => {
-      await auditBuffer.flush();
-      row1 = await AuditLog.findOne({ username: 'zzombie_half_1' }).lean();
-      return row1 !== null;
-    }, { label: 'zzombie_half_1 落库（链尾重同步后）' });
+    await waitFor(
+      async () => {
+        await auditBuffer.flush();
+        row1 = await AuditLog.findOne({ username: 'zzombie_half_1' }).lean();
+        return row1 !== null;
+      },
+      { label: 'zzombie_half_1 落库（链尾重同步后）' }
+    );
     // 承重断言：第 2 条必须接在已落库的第 1 条之后（重同步挑真尾，不与它分叉）
     expect(row1.prevHash).toBe(row0.hash);
     expect(await countTag('half')).toBe(2);
@@ -488,10 +498,13 @@ describe('链锁超时与僵尸写入的重复落库', () => {
     // 1 条真实写 + getChainTail 读在满载机上可能装不进 150ms 锁预算 ⇒ flush 中断、
     // 僵尸 fn 异步落库（本文件 waitFor 口径；CI 满载实测过同类假红）
     let rowA = null;
-    await waitFor(async () => {
-      rowA = await AuditLog.findOne({ username: 'zzombie_order_0' }).lean();
-      return rowA !== null;
-    }, { label: 'zzombie_order_0 落库' });
+    await waitFor(
+      async () => {
+        rowA = await AuditLog.findOne({ username: 'zzombie_order_0' }).lean();
+        return rowA !== null;
+      },
+      { label: 'zzombie_order_0 落库' }
+    );
     expect(rowA.prevHash).toBe(B.hash);
 
     // 强制重同步（模拟链锁超时后的自愈），再落一条：必须接在真尾 A 之后。
@@ -500,11 +513,14 @@ describe('链锁超时与僵尸写入的重复落库', () => {
     auditBuffer.push({ ...docA, _id: undefined, username: 'zzombie_order_1' });
     // 定时器已 stop()：flush 被锁超时中断时批次留缓冲、无自动重试 ⇒ 循环 flush 等落库
     let rowC = null;
-    await waitFor(async () => {
-      await auditBuffer.flush();
-      rowC = await AuditLog.findOne({ username: 'zzombie_order_1' }).lean();
-      return rowC !== null;
-    }, { label: 'zzombie_order_1 落库（resync 后）' });
+    await waitFor(
+      async () => {
+        await auditBuffer.flush();
+        rowC = await AuditLog.findOne({ username: 'zzombie_order_1' }).lean();
+        return rowC !== null;
+      },
+      { label: 'zzombie_order_1 落库（resync 后）' }
+    );
     expect(rowC.prevHash).toBe(rowA.hash);
 
     // 前提复核：本用例的判据成立**依赖** _id 序与串链序反转（A._id 早于 B._id）。
