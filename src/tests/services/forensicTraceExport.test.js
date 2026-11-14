@@ -295,6 +295,12 @@ describe('derivedPools：从库内指纹归桶出 top N 指纹的网段池', () 
       model,
       fingerprint: 'fp-1',
       until: new Date('2026-11-02T00:00:00Z'),
+      // 缺省 since 由 now - 7 天推导，now 缺省走墙钟：夹具 until 写死历史日期后，
+      // 墙钟一过 until + 7 天（2026-11-09）窗口就成了倒序 ⇒ conditionOf 判据不可用
+      // ⇒ 聚合不发 ⇒ mock.calls[0] undefined（2026-11-14 本地 3 seed 全红实测，
+      // 与 9573a21 修过的 chainResignPrecheck 同族：写死日期混墙钟推导必腐坏）。
+      // now 与夹具同源钉死——被测语义（缺省 since 也要带下界）不变，墙钟不再参与。
+      now: new Date('2026-11-02T00:00:00Z'),
     });
     const match = model.aggregate.mock.calls[0][0][0].$match;
     expect(match.createdAt.$gte).toBeInstanceOf(Date);
