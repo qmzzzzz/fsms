@@ -114,7 +114,11 @@ describe('攻击检测面 · 真实链路集成', () => {
       .post('/api/auth/login')
       .send({ username: { $ne: 1 }, password: 'x' });
     expect([400, 401, 403]).toContain(res.status); // 后续校验照常拒绝，检测不改变行为
-    const row = await waitForRow('nosql_injection_attempt');
+    // predicate 必须隔离本用例自己的行：同 action 桶会被其他探测的行抢走
+    // （乱序满载下 waitForRow 默认 predicate 抓到别探针的行，reason 断言对不上，seed 31337 实测红）
+    const row = await waitForRow('nosql_injection_attempt', (r) =>
+      String(r.reason || '').includes('$ne')
+    );
     expect(row).not.toBeNull();
     expect(row.riskFactors).toEqual(['mongo_operator_strip']);
     expect(row.reason).toContain('$ne');
@@ -124,7 +128,9 @@ describe('攻击检测面 · 真实链路集成', () => {
   test('② query SQLi 特征串 → sql_injection_attempt 行 + 取证标记', async () => {
     const res = await request(app).get('/api/devices?keyword=union%20select%20*%20from%20users');
     expect([200, 401, 403]).toContain(res.status); // 检测不改变行为
-    const row = await waitForRow('sql_injection_attempt');
+    const row = await waitForRow('sql_injection_attempt', (r) =>
+      String(r.reason || '').includes('union')
+    );
     expect(row).not.toBeNull();
     expect(row.riskFactors).toEqual(['injection_signature']);
     expect(row.reason).toContain('union');

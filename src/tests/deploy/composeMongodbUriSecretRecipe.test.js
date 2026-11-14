@@ -276,7 +276,8 @@ describe('scripts/generate-secrets.js 真实产物', () => {
       // "转义是承重的"这条结论就没了落脚点（承重由差分用例实测）
       expect(passwordFile).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
     });
-  });
+    // 子进程 spawn + 驱动连接探测在满载机上可远超 30s 默认预算（套件整轮实测 51s）
+  }, 120000);
 
   test('赋值语句对用户名与口令各做一次 encodeURIComponent（去掉转义会被抓到）', () => {
     const assignment = generatorUriAssignment(fs.readFileSync(GENERATOR_FILE, 'utf8'));

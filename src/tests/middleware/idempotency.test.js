@@ -684,6 +684,10 @@ describe('第 15 轮对抗自审：修完之后还能不能骗过判据（真实
     const first = await post('big2', {}, key);
     expect(first.status).toBe(201);
     expect(first.headers.location).toBeUndefined();
+    // 首请求的记录落库是响应后的异步收尾（b820c32 同判例）：满载机上紧跟着的第二发
+    // 可能还看不到记录、被当成新请求执行（回放标记缺失，seed 31337 满载实测红）——
+    // 先等收敛再补发，被测语义（回放不伪造 Location）不变。
+    await completed(keyHashOf('big2', key));
     const second = await post('big2', {}, key);
     expect(second.headers['idempotency-replay-omitted']).toBe('true');
     expect(second.headers.location).toBeUndefined(); // 回放不是"再发一次"：首次没有的指针就不该出现
@@ -866,6 +870,16 @@ describe('第 15 轮补充：出口异常、鉴权前置、键上限（真实 HT
     expect(first.status).toBe(201);
     expect(first.body.data).toEqual({ n: 1 });
     const keyHash = keyHashOf('twice', key);
+    // 完成态落库是响应后的 fire-and-forget 写（b820c32 同判例，(e2) 同款）：随机序下
+    // load 高，立即 findOne 会读到 in_progress——轮询到 completed 再断言（seed 31337 满载实测红）
+    const { waitFor } = require('../helpers/waitFor');
+    await waitFor(
+      async () => {
+        const rec = await IdempotencyRecord.findOne({ keyHash }).lean();
+        return Boolean(rec) && rec.state === 'completed';
+      },
+      { timeoutMs: 4000, label: 'twice 响应收敛为 completed' }
+    );
     const rec = await IdempotencyRecord.findOne({ keyHash }).lean();
     // 承重：后续那次 500 不得把已成功提交的记录改回 in_progress，更不得删掉
     expect(rec && rec.state).toBe('completed');
