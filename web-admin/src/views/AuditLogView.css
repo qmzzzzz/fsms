@@ -1,0 +1,408 @@
+.load-error {
+  margin-bottom: var(--xf-spacing-md);
+}
+.total-unknown {
+  margin-right: var(--xf-spacing-sm);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-text-secondary);
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  letter-spacing: var(--xf-tracking-wide);
+}
+.card-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* 合规与防篡改面板：状态键值 chips，好/坏两档配色 */
+.compliance-card {
+  padding: 14px 16px;
+}
+.compliance-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.compliance-card__title {
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  letter-spacing: var(--xf-tracking-wide);
+}
+.compliance-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.compliance-card__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.compliance-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--xf-border-color);
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-text-secondary);
+  white-space: nowrap;
+}
+.compliance-chip--mono {
+  font-family: var(--xf-font-mono);
+}
+.compliance-chip.is-ok {
+  color: var(--xf-success-strong);
+  border-color: var(--xf-success-alpha-45);
+  background: var(--xf-success-alpha-8);
+}
+.compliance-chip.is-bad {
+  color: var(--xf-danger-strong);
+  border-color: var(--xf-danger-alpha-45);
+  background: var(--xf-danger-alpha-8);
+}
+/* 监控读数：三个定时任务各一行，沿用 chips 的排版习惯（细分割线 + 紧凑行高） */
+.compliance-monitors {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--xf-border-color);
+}
+.compliance-monitors__title {
+  display: block;
+  margin-bottom: 6px;
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-xs);
+  letter-spacing: var(--xf-tracking-wide);
+  color: var(--xf-gray-500);
+}
+.monitor-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+.monitor-row__name {
+  flex: none;
+  min-width: 96px;
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-700);
+  white-space: nowrap;
+}
+.monitor-row .compliance-chip {
+  font-variant-numeric: tabular-nums;
+}
+/* 最近安全告警：紧凑单行列表（风险标签 / 动作 / 用户+IP / 时间 / 详情） */
+.alerts-card {
+  padding: 14px 16px;
+}
+.alerts-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.alerts-card__title {
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  letter-spacing: var(--xf-tracking-wide);
+}
+.alerts-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.alerts-card__meta {
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-500);
+  white-space: nowrap;
+}
+.alerts-card__empty {
+  padding: 6px 0;
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-gray-500);
+}
+.alerts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.alert-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--xf-border-color);
+}
+.alert-row:first-child {
+  border-top: none;
+}
+.alert-row__risk {
+  flex: none;
+}
+.alert-row__action {
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-gray-900);
+  white-space: nowrap;
+}
+.alert-row__user {
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-500);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alert-row__time {
+  margin-left: auto;
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-500);
+  white-space: nowrap;
+}
+.table-toolbar {
+  font-family: var(--xf-font-body);
+  letter-spacing: var(--xf-tracking-wide);
+}
+.stat-card {
+  animation: page-enter 0.4s var(--xf-ease-glass) both;
+}
+.stat-card :deep(.el-card__body) {
+  padding: 16px;
+}
+.stat-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.stat-value {
+  font-family: var(--xf-font-display);
+  font-size: var(--xf-font-size-base);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--xf-tracking-tight);
+  line-height: 1.2;
+  color: var(--xf-gray-900);
+}
+.stat-value.critical {
+  color: var(--xf-danger-strong);
+}
+.stat-value.high {
+  color: var(--xf-warning);
+}
+.stat-value.warning {
+  color: var(--xf-warning);
+}
+.stat-value.info {
+  color: var(--xf-gray-900);
+}
+.stat-label {
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-500);
+  letter-spacing: var(--xf-tracking-wide);
+  text-transform: uppercase;
+}
+.pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+  font-family: var(--xf-font-mono);
+}
+.json-preview {
+  font-family: var(--xf-font-mono);
+  background: var(--xf-gray-100);
+  padding: 8px;
+  border-radius: var(--xf-radius-sm);
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: var(--xf-font-size-xs);
+}
+
+/* ===== 列表双层单元格 ===== */
+.cell-main {
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-gray-900);
+  line-height: 1.5;
+}
+.cell-sub {
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-500);
+  line-height: 1.4;
+  margin-top: 2px;
+}
+.cell-mono {
+  font-family: var(--xf-font-mono);
+  letter-spacing: var(--xf-tracking-tight);
+}
+/* 归属地：与等宽 IP 同行但弱一级（辅助信息，不与主键值抢视觉权重），
+   非 mono 与 ipListView 口径一致 */
+/* 归属地：与等宽 IP 同格但弱一级（辅助信息，不与主键值抢视觉权重）。
+   与 ipListView 的 .ip-location 同口径：非 mono + 小一号。此前只改了颜色，
+   等宽字体仍从父级 .cell-mono 继承 ⇒ 弱化层级实际没生效（P2-6）。 */
+.ip-loc {
+  font-family: var(--xf-font-body);
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-text-secondary);
+}
+.method-tag {
+  margin-right: 6px;
+}
+.path-text {
+  font-family: var(--xf-font-mono);
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-gray-600);
+  display: inline-block;
+  max-width: calc(100% - 52px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+/* ===== 高风险行着色（与斑马纹叠加，色调克制） ===== */
+:deep(.el-table .row-risk-critical td.el-table__cell) {
+  background: rgba(193, 18, 31, 0.06);
+}
+:deep(.el-table .row-risk-high td.el-table__cell) {
+  background: rgba(217, 119, 6, 0.05);
+}
+
+/* ===== 详情对话框 ===== */
+/* 详情是长表：滚动收在本容器内，页脚按钮始终可见 */
+.detail-scroll {
+  max-height: 68vh;
+  overflow-y: auto;
+  padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+.detail-section-title {
+  margin: 18px 0 8px;
+  font-family: var(--xf-font-display);
+  font-weight: 600;
+  font-size: var(--xf-font-size-sm);
+  color: var(--xf-gray-900);
+  letter-spacing: var(--xf-tracking-wide);
+}
+.detail-section-title:first-of-type {
+  margin-top: 0;
+}
+.detail-alert {
+  margin-bottom: 12px;
+}
+.detail-inline-alert {
+  margin-bottom: 8px;
+}
+.detail-loading,
+.detail-hint {
+  padding: 4px 0;
+  font-size: var(--xf-font-size-xs);
+  color: var(--xf-text-secondary);
+}
+.trace-text,
+.trace-hash {
+  font-family: var(--xf-font-mono);
+  font-size: var(--xf-font-size-xs);
+  word-break: break-all;
+}
+.trace-text {
+  color: var(--xf-gray-600);
+}
+.trace-hash {
+  color: var(--xf-gray-600);
+}
+.risk-factor-tag {
+  margin: 2px 6px 2px 0;
+}
+.ua-text {
+  font-family: var(--xf-font-mono);
+  font-size: var(--xf-font-size-xs);
+  word-break: break-all;
+  color: var(--xf-gray-600);
+}
+:deep(.el-col:nth-child(1) .stat-card) {
+  animation-delay: 0.05s;
+}
+:deep(.el-col:nth-child(2) .stat-card) {
+  animation-delay: 0.1s;
+}
+:deep(.el-col:nth-child(3) .stat-card) {
+  animation-delay: 0.15s;
+}
+:deep(.el-col:nth-child(4) .stat-card) {
+  animation-delay: 0.2s;
+}
+
+/* ===== Apple 风格增量（交互手感层：只叠反馈与过渡，不改布局；数据密集页保持克制） ===== */
+
+/* 统计卡 hover：轻浮起（可中断阴影过渡，无弹跳） */
+.stat-card {
+  transition:
+    box-shadow 280ms cubic-bezier(0.32, 0.72, 0, 1),
+    transform 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+}
+
+/* 玻璃卡（筛选区 / 表格区）：顺滑阴影过渡 + 材质化入场（blur+scale，非纯淡入） */
+.filter-card,
+.glass-card {
+  transition: box-shadow 280ms cubic-bezier(0.32, 0.72, 0, 1);
+  animation: glass-material-enter 0.45s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+.filter-card:hover,
+.glass-card:hover {
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+}
+@keyframes glass-material-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+/* 表格行背景（含风险行着色）平滑渐变，避免斑马纹/风险色跳变 */
+:deep(.el-table .el-table__row td.el-table__cell) {
+  transition: background-color 150ms ease;
+}
+
+/* JSON 预览滚动区：细滚动条 + 预留滚动槽，避免滚动条出现时布局抖动 */
+.json-preview {
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+
+/* 无障碍降级：本页新增的动效全部纳入 reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .stat-card,
+  .filter-card,
+  .glass-card {
+    animation: none !important;
+    transition: opacity 150ms ease !important;
+    transform: none !important;
+  }
+  .stat-card:hover {
+    transform: none !important;
+  }
+}

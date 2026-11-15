@@ -353,15 +353,16 @@ describe('LoginView 真实渲染：偏好控件', () => {
 })
 
 describe('静态不变量（jsdom 无法断言的 CSS 规则）', () => {
-  // 以下三项断言的是 <style> 块里的 CSS 规则文本：SFC 样式在 vitest 下
-  // 不注入 document，getComputedStyle 取不到任何声明，故只能读源码文本。
-  const source = readSrc('views/RegisterView.vue')
+  // 以下三项断言的是 CSS 规则文本（样式已按 God component 拆分外置到
+  // views/RegisterView.css）：SFC 样式在 vitest 下不注入 document，
+  // getComputedStyle 取不到任何声明，故只能读源码文本。
+  const styleSource = readSrc('views/RegisterView.css')
   const authPrefsSource = readSrc('components/AuthPrefs.vue')
   const summarySource = readSrc('components/RegisterSummary.vue')
 
   test('不写死背景色值：样式一律走 --xf-* 变量', () => {
     // 只检查 background 属性上的硬编码色值；--xf-* 里的 rgba() 由 global/dark.css 负责翻转
-    const hardcoded = source
+    const hardcoded = styleSource
       .split('\n')
       .filter((line) => /^\s*background(-color)?\s*:/.test(line))
       .filter((line) => /#[0-9a-fA-F]{3,8}\b/.test(line))
@@ -374,7 +375,7 @@ describe('静态不变量（jsdom 无法断言的 CSS 规则）', () => {
     expect(summarySource).toContain('html.dark .summary__row')
     // 光斑元素本轮由 `register__aurora` 改名为 `register__decor`（并补 aria-hidden），
     // 暗色覆盖规则跟着改名 ⇒ 断言取新名。契约不变：深底上必须有一条显式的 html.dark 覆盖。
-    expect(source).toContain('html.dark .register__decor')
+    expect(styleSource).toContain('html.dark .register__decor')
   })
 
   test('偏好控件的小屏降级规则在组件内维护（不在两个页面各写一份）', () => {
